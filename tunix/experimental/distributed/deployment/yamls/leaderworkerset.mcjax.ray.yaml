@@ -16,10 +16,10 @@ apiVersion: leaderworkerset.x-k8s.io/v1
 kind: LeaderWorkerSet
 metadata:
   name: ${JOBSET_NAME}
-  namespace: default
+  namespace: ${NAMESPACE}
   annotations:
     leaderworkerset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool
-spec:
+${QUEUE_LABEL}spec:
   replicas: ${REPLICAS}
   leaderWorkerTemplate:
     size: ${PARALLELISM}
