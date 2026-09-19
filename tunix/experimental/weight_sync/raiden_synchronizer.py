@@ -903,7 +903,10 @@ class RaidenSynchronizer:
         mesh_axes=mesh_axes or None,
         transport_mode="ffi" if self._is_proxy else "tcp",
         use_ffi=self._is_proxy,
-        host_subgrid=self._host_subgrid,
+        # self._host_subgrid is only populated on the FFI/proxy path; on TCP it
+        # stays None and the block above is what derives it. Prefer the FFI value
+        # when present, fall back to the derived one rather than publishing None.
+        host_subgrid=self._host_subgrid or host_subgrid,
     )
 
 
