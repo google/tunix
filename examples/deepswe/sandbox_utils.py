@@ -229,10 +229,24 @@ def init_global_fleet(
     elif not scaffold:
       scaffold = scaffold_env or "r2egym"
 
-    fleet_ns = namespace or os.getenv("NAMESPACE", "rl-tunix-swebench")
+    fleet_ns = (
+        namespace
+        or os.getenv("SANDBOX_NAMESPACE")
+        or os.getenv("NAMESPACE")
+        or os.getenv("K8S_NAMESPACE")
+        or "trellis"
+    )
     if node_selector is None:
-      key = os.environ.get("NODE_SELECTOR_KEY")
-      val = os.environ.get("NODE_SELECTOR_VAL")
+      key = (
+          os.environ.get("SANDBOX_NODE_SELECTOR_KEY")
+          or os.environ.get("NODE_SELECTOR_KEY")
+          or "cloud.google.com/gke-nodepool"
+      )
+      val = (
+          os.environ.get("SANDBOX_NODE_SELECTOR_VAL")
+          or os.environ.get("NODE_SELECTOR_VAL")
+          or "sandbox-cpu-pool"
+      )
       node_sel = {key: val} if (key and val) else None
     else:
       node_sel = node_selector

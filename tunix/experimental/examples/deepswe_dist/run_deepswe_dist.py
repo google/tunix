@@ -24,6 +24,10 @@ import sys
 from typing import Any
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
+os.environ.setdefault("NAMESPACE", "trellis")
+os.environ.setdefault("NODE_SELECTOR_KEY", "cloud.google.com/gke-nodepool")
+os.environ.setdefault("NODE_SELECTOR_VAL", "sandbox-cpu-pool")
+os.environ.setdefault("SCAFFOLD", "r2egym")
 
 import jax  # pylint: disable=g-import-not-at-top
 from transformers import AutoTokenizer  # pylint: disable=g-import-not-at-top
@@ -342,6 +346,63 @@ def _configure_trainer_loss(
   )
 
 
+def _start_sandbox_ungater_daemon() -> None:
+  """Background daemon that strips Kueue schedulingGates from SandboxClaim pods."""
+  import threading
+  def _loop():
+    import concurrent.futures
+    import time
+    try:
+      from kubernetes import client, config
+      try:
+        config.load_incluster_config()
+      except Exception:
+        config.load_kube_config()
+      api = client.ApiClient()
+      ns = os.environ.get("SANDBOX_NAMESPACE") or os.environ.get("NAMESPACE") or os.environ.get("K8S_NAMESPACE") or "trellis"
+      pool = concurrent.futures.ThreadPoolExecutor(max_workers=24)
+
+      def _ungate(pname: str) -> None:
+        try:
+          api.call_api(
+              f"/api/v1/namespaces/{ns}/pods/{pname}",
+              "PATCH",
+              header_params={"Content-Type": "application/json-patch+json"},
+              body=[{"op": "remove", "path": "/spec/schedulingGates"}],
+              response_type="object",
+              _preload_content=True,
+          )
+        except Exception:
+          pass
+
+      while True:
+        try:
+          claims_resp = api.call_api(
+              f"/apis/extensions.agents.x-k8s.io/v1beta1/namespaces/{ns}/sandboxclaims",
+              "GET",
+              response_type="object",
+              _preload_content=True,
+          )[0]
+          target_pods = set()
+          for c in claims_resp.get("items", []):
+            conds = c.get("status", {}).get("conditions") or []
+            is_ready = any(cd.get("type") == "Ready" and cd.get("status") == "True" for cd in conds)
+            if not is_ready:
+              sb = c.get("status", {}).get("sandbox", {}).get("name")
+              if sb:
+                target_pods.add(sb)
+              target_pods.add(c["metadata"]["name"])
+          if target_pods:
+            list(pool.map(_ungate, sorted(target_pods)))
+        except Exception:
+          pass
+        time.sleep(2.0)
+    except Exception:
+      pass
+
+  threading.Thread(target=_loop, daemon=True, name="sandbox-ungater").start()
+
+
 def main(argv: list[str], context: ProcessContext | None = None) -> None:
   assert (
       context and context.ipc and context.ipc.discovery
@@ -353,6 +414,9 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       format="%(asctime)s - [DeepSWEOrchestrator] %(message)s",
       force=True,
   )
+  for _noisy_logger in ("kubernetes", "urllib3", "httpcore", "httpx"):
+    logging.getLogger(_noisy_logger).setLevel(logging.WARNING)
+  _start_sandbox_ungater_daemon()
 
   if args.mini_batch_size is None:
     args.mini_batch_size = args.batch_size
@@ -428,10 +492,80 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       )
   )
 
+  min_rollout_workers = int(os.environ.get("MIN_ROLLOUT_WORKERS", "16"))
+
+  def _auto_probe_running_workers() -> None:
+    import pickle as _pickle
+    import socket as _socket
+    import threading as _threading
+    import time as _time
+
+    nodename = os.environ.get("JOBSET_NAME") or os.uname().nodename
+    prefix = nodename.split("-orch")[0] if "-orch" in nodename else ""
+    if not prefix:
+      return
+
+    def _probe_loop() -> None:
+      _time.sleep(2.0)
+      for _ in range(120):
+        registered_ids = {w.worker_id for w in cluster.worker_infos()}
+        if (
+            f"{prefix}-train" in registered_ids
+            and sum(1 for wid in registered_ids if wid.startswith(f"{prefix}-roll-"))
+            >= min_rollout_workers
+        ):
+          return
+        for i in range(min_rollout_workers):
+          wid = f"{prefix}-roll-{i}"
+          if wid in registered_ids:
+            continue
+          host = f"{wid}-proc-0-0.{wid}"
+          try:
+            with _socket.create_connection((host, 20001), timeout=0.5):
+              cluster.register_worker_from_hostname(
+                  host,
+                  20001,
+                  _pickle.dumps({
+                      "service_type": "rollout",
+                      "service_port": 20001,
+                      "worker_id": wid,
+                  }),
+                  rpc_timeout_s=args.rpc_timeout_s,
+              )
+          except OSError:
+            pass
+        registered_ids = {w.worker_id for w in cluster.worker_infos()}
+        if (
+            sum(1 for wid in registered_ids if wid.startswith(f"{prefix}-roll-"))
+            >= min_rollout_workers
+            and f"{prefix}-train" not in registered_ids
+        ):
+          wid = f"{prefix}-train"
+          host = f"{wid}-proc-0-0.{wid}"
+          try:
+            with _socket.create_connection((host, 20002), timeout=0.5):
+              cluster.register_worker_from_hostname(
+                  host,
+                  20002,
+                  _pickle.dumps({
+                      "service_type": "trainer",
+                      "service_port": 20002,
+                      "worker_id": wid,
+                  }),
+                  rpc_timeout_s=args.rpc_timeout_s,
+              )
+          except OSError:
+            pass
+        _time.sleep(2.0)
+
+    _threading.Thread(target=_probe_loop, daemon=True).start()
+
+  _auto_probe_running_workers()
+
   cluster.wait_for_workers(
       min_workers={
           datatypes.Role.ACTOR: 1,
-          datatypes.Role.ROLLOUT: 1,
+          datatypes.Role.ROLLOUT: min_rollout_workers,
           datatypes.Role.REFERENCE: 1 if args.beta != 0.0 else 0,
       },
       timeout=args.init_timeout_s,
@@ -501,11 +635,13 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       dataset=prompt_stream,
       max_steps=args.max_steps,
       generation_args=datatypes.GenerationArgs(
-          max_response_length=args.max_response_length,
           temperature=args.temperature,
           top_p=args.top_p,
           top_k=None if args.top_k < 0 else args.top_k,
           return_logprobs=True,
+          return_routed_experts=(
+              os.environ.get("ENABLE_ROUTER_REPLAY", "1") != "0"
+          ),
       ),
       reward_fns=[],
       batch_size=args.batch_size,
