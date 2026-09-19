@@ -9,14 +9,16 @@ ARG TPU_INF_DIR=tpu_inference_ref
 
 # 0. Ensure DeepSWE / R2E-Gym / Agent-Sandbox dependencies are installed
 RUN python3 -c "import r2egym, agent_sandbox_rl" 2>/dev/null || ( \
-      uv pip install kubernetes gym swebench==3.0.2 'openhands-sdk>=1.44.1' 'k8s-agent-sandbox>=0.5.1' httpx && \
-      uv pip install --no-deps git+https://github.com/kubernetes-sigs/agent-sandbox.git#subdirectory=clients/python/agentic-sandbox-client && \
-      uv pip install --no-deps git+https://github.com/kubernetes-sigs/agent-sandbox.git#subdirectory=examples/agent-sandbox-rl && \
-      uv pip install --no-deps git+https://github.com/kubernetes-sigs/agent-sandbox.git#subdirectory=clients/integrations/openhands && \
-      uv pip install --no-deps git+https://github.com/r2e-gym/r2e-gym.git@0d94c4eb9431cd195c55a7ea3abd54006c9a1735 && \
+      uv pip install kubernetes gym 'k8s-agent-sandbox>=0.5.1' httpx && \
+      uv pip install --no-deps swebench==3.0.2 'openhands-sdk>=1.44.1' \
+        git+https://github.com/kubernetes-sigs/agent-sandbox.git#subdirectory=clients/python/agentic-sandbox-client \
+        git+https://github.com/kubernetes-sigs/agent-sandbox.git#subdirectory=examples/agent-sandbox-rl \
+        git+https://github.com/kubernetes-sigs/agent-sandbox.git#subdirectory=clients/integrations/openhands \
+        git+https://github.com/r2e-gym/r2e-gym.git@0d94c4eb9431cd195c55a7ea3abd54006c9a1735 && \
       sed -i 's/create_repo, upload_folder, HfFolder/create_repo, upload_folder/' /opt/venv/lib/python3.12/site-packages/r2egym/agenthub/utils/utils.py && \
       sed -i 's/self.commit = ParsedCommit(\*\*json.loads(self.commit_json))/self.commit = ParsedCommit(\*\*(json.loads(self.commit_json) if isinstance(self.commit_json, str) else self.commit_json))/' /opt/venv/lib/python3.12/site-packages/r2egym/agenthub/runtime/docker.py \
     ) && \
+    sed -i 's/pa\.PyExtensionType/getattr(pa, "PyExtensionType", pa.ExtensionType)/g' /opt/venv/lib/python3.12/site-packages/datasets/features.py /opt/venv/lib/python3.12/site-packages/datasets/features/features.py 2>/dev/null || true && \
     sed -i 's/_runtime_version.ValidateProtobufRuntimeVersion/if False: _runtime_version.ValidateProtobufRuntimeVersion/g' /app/tunix/experimental/distributed/runtime/discovery/*_pb2.py /opt/venv/lib/python3.12/site-packages/tunix/experimental/distributed/runtime/discovery/*_pb2.py 2>/dev/null || true
 
 # 1. Overlay MaxText (FP32 router/norm/GDN/LM-head casts, float32_weight_sum HIGHEST, frozen router mask, Router Replay)
