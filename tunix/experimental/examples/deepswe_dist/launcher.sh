@@ -72,7 +72,9 @@ LORA_ALPHA=${LORA_ALPHA:-64.0}
 TEMPERATURE=${TEMPERATURE:-1.0}
 TOP_P=${TOP_P:-1.0}
 TOP_K=${TOP_K:--1}
-EOS_TOKENS=${EOS_TOKENS-}
+# Model-specific EOS token IDs (comma-separated), fetched from HuggingFace
+# `generation_config.json`. Empty string falls back to the tokenizer's default EOS token.
+EOS_TOKENS=${EOS_TOKENS-'151645,151643'}
 MAXTEXT_ATTENTION=${MAXTEXT_ATTENTION:-}
 # DEBUG=1 passes --debug to the runner, which logs full sampler responses.
 DEBUG=${DEBUG:-0}
@@ -284,6 +286,7 @@ echo "  beta:           ${BETA}"
 echo "  epsilon:        ${EPSILON}"
 echo "  sampler:        ${SAMPLER}"
 echo "  weight sync:    ${WEIGHT_SYNC_MODE}"
+echo "  eos tokens:     ${EOS_TOKENS:-<tokenizer default>}"
 echo "  trainer backend:${TRAINER_BACKEND}"
 echo "  maxtext model:  ${MAXTEXT_MODEL_NAME:-<unset>}"
 echo "  maxtext ckpt:   ${MAXTEXT_CKPT:-<unset>}"
