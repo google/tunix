@@ -499,7 +499,7 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
 
   if multihost_backend:
     engine_kwargs["distributed_executor_backend"] = multihost_backend
-  server_mode = True if multihost_backend else None
+  server_mode = True
   rollout_mesh = None if multihost_backend else _create_rollout_mesh(args)
 
   tp_size = _get_tensor_parallel_size(args)
@@ -535,6 +535,7 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
       tokenizer=tokenizer,
       config=vllm_config,
       weight_sync_mode=args.weight_sync_mode,
+      max_concurrency=args.max_concurrency,
   )
   config = rollout_worker.RolloutConfig(
       sampler_type="inprocess_vllm",

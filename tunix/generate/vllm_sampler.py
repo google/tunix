@@ -21,6 +21,7 @@ import dataclasses
 import gc
 from itertools import count
 import os
+import threading
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union, cast
 
 from absl import logging
@@ -182,7 +183,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     self._postprocess_pool: Optional[concurrent.futures.ThreadPoolExecutor] = (
         None
     )
-    self._postprocessed: Optional[Dict[str, list[Any]]] = None
+    self._thread_local = threading.local()
     self._driver: VLLMInProcessDriver | None = None
     self.llm: LLM | None = None
     self._request_counter = count()
@@ -203,6 +204,14 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     # lora.
     if config.lora_config and config.mapping_config.lora_to_hf_mappings:
       self.to_hf_key_mappings |= config.mapping_config.lora_to_hf_mappings
+
+  @property
+  def _postprocessed(self) -> Optional[Dict[str, list[Any]]]:
+    return getattr(self._thread_local, "postprocessed", None)
+
+  @_postprocessed.setter
+  def _postprocessed(self, value: Optional[Dict[str, list[Any]]]) -> None:
+    self._thread_local.postprocessed = value
 
   @property
   def mesh(self) -> jax.sharding.Mesh:
