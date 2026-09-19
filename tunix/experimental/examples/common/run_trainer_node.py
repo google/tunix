@@ -423,6 +423,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="Rollout TP degree to align MaxText MoE MLP dimensions with.",
   )
   parser.add_argument(
+      "--trainable_parameters_mask",
+      type=str,
+      default=None,
+      help="Trainable parameters regex mask for freezing weights.",
+  )
+  parser.add_argument(
       "--max_seq_token_per_tpu",
       type=int,
       default=0,
@@ -663,6 +669,7 @@ def _create_maxtext_trainer_factory(args) -> tuple[Any, Mesh]:
       prefuse_moe_weights=args.prefuse_moe_weights,
       use_weight_converter=args.use_weight_converter,
       max_seq_token_per_tpu=args.max_seq_token_per_tpu,
+      trainable_parameters_mask=args.trainable_parameters_mask,
       adam_b1=args.optimizer_b1,
       adam_b2=args.optimizer_b2,
       adam_eps=args.optimizer_eps,

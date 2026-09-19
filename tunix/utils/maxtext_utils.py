@@ -93,12 +93,6 @@ def build_vllm_maxtext_additional_config(
       "allow_split_physical_axes": True,
       "log_config": False,
       "weight_dtype": "bfloat16",
-      "norm_weight_dtype": "float32",
-      "gate_weight_dtype": "float32",
-      "shared_expert_gate_weight_dtype": "float32",
-      "a_log_weight_dtype": "float32",
-      "dt_bias_weight_dtype": "float32",
-      "conv1d_weight_dtype": "float32",
       "float32_logits": True,
       "float32_gate_logits": True,
       "float32_weight_sum": True,
@@ -139,6 +133,7 @@ def build_maxtext_config(
     prefuse_moe_weights: bool = False,
     use_weight_converter: bool = True,
     max_seq_token_per_tpu: int | None = 0,
+    trainable_parameters_mask: list[str] | str | None = None,
     adam_b1: float = 0.9,
     adam_b2: float = 0.999,
     adam_eps: float = 1e-8,
@@ -395,7 +390,7 @@ def build_maxtext_config(
       f"ici_expert_parallelism={mesh_expert}",
       f"learning_rate={learning_rate}",
       f"warmup_steps_fraction={warmup_steps_fraction}",
-      f"cosine_learning_rate_final_fraction={learning_rate_final_fraction}",
+      f"learning_rate_final_fraction={learning_rate_final_fraction}",
       f"adam_b1={adam_b1}",
       f"adam_b2={adam_b2}",
       f"adam_eps={adam_eps}",
@@ -405,23 +400,12 @@ def build_maxtext_config(
       "dtype=bfloat16",
       "weight_dtype=bfloat16",
       "grad_dtype=float32",
-      "norm_weight_dtype=float32",
-      "gate_weight_dtype=float32",
-      "shared_expert_gate_weight_dtype=float32",
-      "a_log_weight_dtype=float32",
-      "dt_bias_weight_dtype=float32",
-      "conv1d_weight_dtype=float32",
       "float32_logits=True",
       "float32_gate_logits=True",
       "float32_weight_sum=True",
       "float32_qk_product=True",
       "logits_dot_in_fp32=True",
       "cast_logits_to_fp32=True",
-      *(
-          ["enable_router_replay=True"]
-          if os.environ.get("ENABLE_ROUTER_REPLAY", "1") != "0"
-          else []
-      ),
       "enable_tensorboard=False",
       "record_internal_nn_metrics=False",
       "init_weights_seed=42",
@@ -432,6 +416,16 @@ def build_maxtext_config(
               f"rollout_tensor_parallelism={rollout_mesh_tp or kv_tp_size or moe_mlp_tp_size}"
           ]
           if (rollout_mesh_tp or kv_tp_size or moe_mlp_tp_size) > 0
+          else []
+      ),
+      *(
+          [
+              f"trainable_parameters_mask={trainable_parameters_mask or os.environ.get('TRAINABLE_PARAMETERS_MASK', '').strip()}"
+          ]
+          if (
+              trainable_parameters_mask
+              or os.environ.get("TRAINABLE_PARAMETERS_MASK", "").strip()
+          )
           else []
       ),
   ])
