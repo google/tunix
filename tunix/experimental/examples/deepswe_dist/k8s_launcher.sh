@@ -48,14 +48,30 @@ export MAX_SEGMENTS_PER_PACKED_ROW=${MAX_SEGMENTS_PER_PACKED_ROW:-}
 
 # Set to tunix to run Tunix's PeftTrainer, and maxtext to run MaxText's MaxTextTrainingEngine
 export TRAINER_BACKEND=${TRAINER_BACKEND:-tunix}
-export MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-$((BATCH_SIZE * NUM_GENERATIONS))}
+export MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-$BATCH_SIZE}
 export EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-1000000}
+export OPT_CHAIN_TYPE=${OPT_CHAIN_TYPE-clip_by_global_norm}
+export MAX_GRAD_NORM=${MAX_GRAD_NORM:-1.0}
+export ADAM_B1=${ADAM_B1:-0.9}
+export ADAM_B2=${ADAM_B2:-0.999}
+export ADAM_EPS=${ADAM_EPS:-1.0e-8}
+export WEIGHT_DECAY=${WEIGHT_DECAY:-0.01}
 export LEARNING_RATE=${LEARNING_RATE:-1e-6}
+export SCHEDULE_TYPE=${SCHEDULE_TYPE-warmup_cosine_decay_schedule}
+export LR_INIT_VALUE=${LR_INIT_VALUE:-0.0}
+export LR_PEAK_VALUE=${LR_PEAK_VALUE:-$LEARNING_RATE}
+export LR_END_VALUE=${LR_END_VALUE:-0.0}
+export LR_DECAY_STEPS=${LR_DECAY_STEPS:-500}
+export WARMUP_STEPS=${WARMUP_STEPS:-$(((LR_DECAY_STEPS + 9) / 10))}
 export BETA=${BETA:-0.0}
 export EPSILON=${EPSILON:-0.2}
 export LORA_RANK=${LORA_RANK:-64}
 export LORA_ALPHA=${LORA_ALPHA:-64.0}
 export USE_LORA=${USE_LORA:-0}
+# Generation sampling parameters, passed to the runner and the reference scorer.
+export TEMPERATURE=${TEMPERATURE:-1.0}
+export TOP_P=${TOP_P:-1.0}
+export TOP_K=${TOP_K:--1}
 export DEBUG=${DEBUG:-0}
 export USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
 export SAMPLER=${SAMPLER:-inprocess_vllm}
@@ -64,6 +80,18 @@ export CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-5}
 export CHECKPOINT_MAX_TO_KEEP=${CHECKPOINT_MAX_TO_KEEP:-2}
 export REMAT_CONFIG=${REMAT_CONFIG:-decoder}
 export TRAINABLE_PARAMETERS_MASK=${TRAINABLE_PARAMETERS_MASK:-}
+
+# Optional GRPO algorithm options. Empty, or 0 for the boolean, leaves the
+# option at the runner's default, so an unset variable changes nothing.
+export EPSILON_HIGH=${EPSILON_HIGH:-}
+export LOSS_AGG_MODE=${LOSS_AGG_MODE:-}
+export ADVANTAGE_ESTIMATOR=${ADVANTAGE_ESTIMATOR:-}
+export OVERLONG_LOSS_MASKING=${OVERLONG_LOSS_MASKING:-0}
+export SEQ_LOGPROB_ERROR_THRESHOLD=${SEQ_LOGPROB_ERROR_THRESHOLD:-}
+export TIS_TYPE=${TIS_TYPE:-${TRUNCATED_IMPORTANCE_SAMPLING_TYPE:-}}
+export TIS_RATIO_MIN=${TIS_RATIO_MIN:-${TRUNCATED_IMPORTANCE_SAMPLING_RATIO_MIN:-}}
+export TIS_RATIO=${TIS_RATIO:-${TRUNCATED_IMPORTANCE_SAMPLING_RATIO:-}}
+export SAMPLER_IS_LENGTH_BUCKETS=${SAMPLER_IS_LENGTH_BUCKETS:-}
 
 # DeepSWE dataset and environment configuration
 export DATASET_NAME=${DATASET_NAME:-R2E-Gym/R2E-Gym-Subset}
@@ -190,6 +218,14 @@ start_orchestrator() {
     sandbox_env="NAMESPACE=\"${SANDBOX_NAMESPACE}\" ${SANDBOX_NODE_SELECTOR_KEY:+NODE_SELECTOR_KEY=\"${SANDBOX_NODE_SELECTOR_KEY}\"} ${SANDBOX_NODE_SELECTOR_VAL:+NODE_SELECTOR_VAL=\"${SANDBOX_NODE_SELECTOR_VAL}\"}"
     sandbox_arg="--use_agent_sandbox"
   fi
+  local overlong_arg=""
+  if [[ "${OVERLONG_LOSS_MASKING}" == "1" || "${OVERLONG_LOSS_MASKING}" == "true" || "${OVERLONG_LOSS_MASKING}" == "True" ]]; then
+    overlong_arg="--overlong_loss_masking"
+  fi
+  local debug_arg=""
+  if [[ "${DEBUG}" == "1" || "${DEBUG}" == "true" || "${DEBUG}" == "True" ]]; then
+    debug_arg="--debug"
+  fi
 
   "$PYTHON_BIN" "$YAML_GENERATOR" \
     "${YAML_DIR}/jobset.cpu.yaml" \
@@ -217,7 +253,12 @@ start_orchestrator() {
         --model_id=${MODEL_ID} \
         --tokenizer_path=${TOKENIZER_PATH} \
         --batch_size=${BATCH_SIZE} \
+        --mini_batch_size=${MINI_BATCH_SIZE} \
         --num_generations=${NUM_GENERATIONS} \
+        --rollout_replicas=${ROLLOUT_WORKERS:-${ROLLOUT_REPLICAS:-1}} \
+        --temperature=${TEMPERATURE} \
+        --top_p=${TOP_P} \
+        --top_k=${TOP_K} \
         --max_steps=${MAX_STEPS} \
         --max_turns=${MAX_TURNS} \
         --max_prompt_length=${MAX_PROMPT_LENGTH} \
@@ -226,14 +267,14 @@ start_orchestrator() {
         --beta=${BETA} \
         --epsilon=${EPSILON} \
         ${EPSILON_HIGH:+--epsilon_high=${EPSILON_HIGH}} \
-        $([[ "${FORCE_ON_POLICY_RATIO}" == "true" || "${FORCE_ON_POLICY_RATIO}" == "True" || "${FORCE_ON_POLICY_RATIO}" == "1" ]] && echo --force_on_policy_ratio || echo --no-force_on_policy_ratio) \
-        ${ADVANTAGE_ESTIMATOR:+--advantage_estimator=${ADVANTAGE_ESTIMATOR}} \
         ${LOSS_AGG_MODE:+--loss_agg_mode=${LOSS_AGG_MODE}} \
+        ${ADVANTAGE_ESTIMATOR:+--advantage_estimator=${ADVANTAGE_ESTIMATOR}} \
+        ${overlong_arg} \
         ${SEQ_LOGPROB_ERROR_THRESHOLD:+--seq_logprob_error_threshold=${SEQ_LOGPROB_ERROR_THRESHOLD}} \
-        ${TRUNCATED_IMPORTANCE_SAMPLING_TYPE:+--truncated_importance_sampling_type=${TRUNCATED_IMPORTANCE_SAMPLING_TYPE}} \
-        ${TRUNCATED_IMPORTANCE_SAMPLING_RATIO_MIN:+--truncated_importance_sampling_ratio_min=${TRUNCATED_IMPORTANCE_SAMPLING_RATIO_MIN}} \
-        ${TRUNCATED_IMPORTANCE_SAMPLING_RATIO:+--truncated_importance_sampling_ratio=${TRUNCATED_IMPORTANCE_SAMPLING_RATIO}} \
-        $([[ "${OVERLONG_LOSS_MASKING}" == "false" || "${OVERLONG_LOSS_MASKING}" == "False" || "${OVERLONG_LOSS_MASKING}" == "0" ]] && echo --no-overlong_loss_masking || echo --overlong_loss_masking) \
+        ${TIS_TYPE:+--truncated_importance_sampling_type=${TIS_TYPE}} \
+        ${TIS_RATIO_MIN:+--truncated_importance_sampling_ratio_min=${TIS_RATIO_MIN}} \
+        ${TIS_RATIO:+--truncated_importance_sampling_ratio=${TIS_RATIO}} \
+        ${SAMPLER_IS_LENGTH_BUCKETS:+--sampler_is_length_buckets=${SAMPLER_IS_LENGTH_BUCKETS}} \
         --dataset_name=${DATASET_NAME} \
         --dataset_split=${DATASET_SPLIT} \
         ${DATASET_CACHE_DIR:+--dataset_cache_dir=${DATASET_CACHE_DIR}} \
@@ -258,9 +299,8 @@ start_orchestrator() {
         ${MAX_SEQ_TOKEN_PER_TPU:+--max_seq_token_per_tpu=${MAX_SEQ_TOKEN_PER_TPU}} \
         ${MAX_SEGMENTS_PER_PACKED_ROW:+--max_segments_per_packed_row=${MAX_SEGMENTS_PER_PACKED_ROW}} \
         ${TRAINER_MESH_FSDP:+--trainer_fsdp=${TRAINER_MESH_FSDP}} \
-        ${COMPUTE_LOGPS_CHUNK_SIZE:+--compute_logps_chunk_size=${COMPUTE_LOGPS_CHUNK_SIZE}} \
         ${TRAINABLE_PARAMETERS_MASK:+--trainable_parameters_mask=\"${TRAINABLE_PARAMETERS_MASK}\"} \
-        ${DEBUG:+--debug} \
+        ${debug_arg} \
     " \
     | apply_manifest
 }
@@ -282,9 +322,20 @@ start_trainer() {
       ${ROLLOUT_MESH_TP:+--rollout_mesh_tp=${ROLLOUT_MESH_TP}} \
     "
   fi
+  local opt_chain_args=""
+  if [[ -n "${OPT_CHAIN_TYPE}" ]]; then
+    opt_chain_args=" \
+      --optimizer_opt_chain_type=${OPT_CHAIN_TYPE} \
+      --optimizer_chain_kwargs=\"{'max_norm': ${MAX_GRAD_NORM}}\" \
+    "
+  fi
   local lora_args=""
   if [[ "${USE_LORA}" == "1" || "${USE_LORA}" == "true" || "${USE_LORA}" == "True" ]]; then
     lora_args="--use_lora"
+  fi
+  local debug_arg=""
+  if [[ "${DEBUG}" == "1" || "${DEBUG}" == "true" || "${DEBUG}" == "True" ]]; then
+    debug_arg="--debug"
   fi
   "$PYTHON_BIN" "$YAML_GENERATOR" \
     "${YAML_DIR}/${TRAINER_JOBSET_YAML}" \
@@ -330,14 +381,18 @@ start_trainer() {
         --num_generations=${NUM_GENERATIONS} \
         --train_micro_batch_size=${TRAIN_MICRO_BATCH_SIZE} \
         --eval_every_n_steps=${EVAL_EVERY_N_STEPS} \
-        --learning_rate=${LEARNING_RATE} \
-        ${ADAM_B1:+--b1=${ADAM_B1}} \
-        ${ADAM_B2:+--b2=${ADAM_B2}} \
-        ${WEIGHT_DECAY:+--weight_decay=${WEIGHT_DECAY}} \
-        ${MAX_GRAD_NORM:+--max_grad_norm=${MAX_GRAD_NORM}} \
-        ${WARMUP_STEPS_FRACTION:+--warmup_steps_fraction=${WARMUP_STEPS_FRACTION}} \
-        ${LEARNING_RATE_FINAL_FRACTION:+--learning_rate_final_fraction=${LEARNING_RATE_FINAL_FRACTION}} \
-        ${REMAT_POLICY:+--remat_policy=${REMAT_POLICY}} \
+        --optimizer_b1=${ADAM_B1} \
+        --optimizer_b2=${ADAM_B2} \
+        --optimizer_eps=${ADAM_EPS} \
+        --optimizer_weight_decay=${WEIGHT_DECAY} \
+        --optimizer_learning_rate=${LEARNING_RATE} \
+        --optimizer_schedule_type=${SCHEDULE_TYPE} \
+        --optimizer_init_value=${LR_INIT_VALUE} \
+        --optimizer_peak_value=${LR_PEAK_VALUE} \
+        --optimizer_end_value=${LR_END_VALUE} \
+        --optimizer_warmup_steps=${WARMUP_STEPS} \
+        --optimizer_decay_steps=${LR_DECAY_STEPS} \
+        ${WARMUP_STEPS_FRACTION:+--maxtext_warmup_steps_fraction=${WARMUP_STEPS_FRACTION}} \
         --lora_rank=${LORA_RANK} \
         --lora_alpha=${LORA_ALPHA} \
         --sampler_type=${SAMPLER} \
@@ -345,13 +400,13 @@ start_trainer() {
         --checkpoint_max_to_keep=${CHECKPOINT_MAX_TO_KEEP} \
         --prefuse_moe_weights=${TRAINER_PREFUSE_MOE_WEIGHTS:-false} \
         --use_weight_converter=${USE_WEIGHT_CONVERTER} \
-        ${FLOAT32_GATE_LOGITS:+--float32_gate_logits=${FLOAT32_GATE_LOGITS}} \
-        ${TRAINER_MAXTEXT_ATTENTION:+--maxtext_attention=${TRAINER_MAXTEXT_ATTENTION}} \
+        ${MAX_SEQ_TOKEN_PER_TPU:+--max_seq_token_per_tpu=${MAX_SEQ_TOKEN_PER_TPU}} \
         ${COMPUTE_LOGPS_CHUNK_SIZE:+--compute_logps_chunk_size=${COMPUTE_LOGPS_CHUNK_SIZE}} \
+        ${opt_chain_args} \
         ${lora_args} \
         ${maxtext_args} \
         ${TRAINABLE_PARAMETERS_MASK:+--trainable_parameters_mask=\"${TRAINABLE_PARAMETERS_MASK}\"} \
-        ${DEBUG:+--debug} \
+        ${debug_arg} \
     " \
     | apply_manifest
 }
