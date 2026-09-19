@@ -269,6 +269,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   )
   parser.add_argument("--rpc_timeout_s", type=float, default=1800.0)
   parser.add_argument("--init_timeout_s", type=float, default=None)
+  parser.add_argument("--compute_logps_chunk_size", type=int, default=0)
+  parser.add_argument("--trainable_parameters_mask", type=str, default=None)
   parser.add_argument("--stop_workers_on_exit", action="store_true")
   parser.add_argument("--debug", action="store_true")
   return parser.parse_args(argv)
