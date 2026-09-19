@@ -5,12 +5,14 @@ GRPO runs: `maz-q35-10` (100 steps) and `maz-q35-11` (20 steps), both 2026-09-17
 A matched unpacked control, `maz-q35-13` (20 steps, 2026-09-18), supplies a
 prompt-paired measurement of its effect on generation quality.
 
-This document answers four questions:
+This document answers five questions:
 
 1. Is sequence packing actually on in these runs, and how would you check that yourself?
 2. What did it cost or save?
 3. Does it change what the model generates?
-4. Which tests establish that the packed arithmetic equals the unpacked arithmetic?
+4. Do the two assemblers produce the same loss and the same gradient when handed
+   the same trajectories?
+5. Which tests establish that the packed arithmetic equals the unpacked arithmetic?
 
 Everything below is measured, not estimated. Every number was re-derived from
 Cloud Logging while writing this document; the log links reproduce the raw
@@ -45,7 +47,7 @@ Both runs set `TRAJECTORY_LOG_DIR` to a GCS prefix
 gold answer and reward to be written to CSV. Only `maz-q35-11` produced one:
 run 10's logger thread raised an assertion on every flush and wrote nothing.
 The two runs differ in exactly two ways — step count, and the placeholder object
-that makes that assertion hold. See §6 for the assertion and §7 for the
+that makes that assertion hold. See §7 for the assertion and §8 for the
 workaround.
 
 Cluster: `bodaborg-v5p-nap`, `europe-west4`, namespace `trellis`, project
@@ -196,7 +198,7 @@ trajectory-CSV flush, not a retrace.
 rollout to GCS and had a lower median step time than run 10 (96.30 s vs
 97.12 s) — the difference is within run-to-run noise, so the logging cost is
 below the measurement floor. This does not extend beyond 20 steps: `maz-q35-12`
-hung at step 22 inside the logger's GCS read and never recovered. See §6.
+hung at step 22 inside the logger's GCS read and never recovered. See §7.
 
 Weight sync, run 10: 86.90 s for the initial transfer, then 52–53 s per step.
 That is over half the 97 s step time, and is the largest single target for
@@ -373,12 +375,159 @@ sampler's item, so the column is written empty.
 
 ---
 
-## 4. Tests establishing that packed arithmetic equals unpacked arithmetic
+## 4. Direct measurement: one trajectory set through both assemblers
+
+§3 compares two runs that never see the same data. Generation is unseeded, so
+even a defect-free packer produces two different policies there; that comparison
+can bound a packing defect but cannot exclude one. This section removes the
+limit by feeding one identical trajectory set through both assemblers against
+identical weights and comparing what the optimizer receives.
+
+[`qwen35_packing_equivalence.py`](qwen35_packing_equivalence.py) builds a
+trajectory set, runs it through `SequencePackedBatchAssembler` and
+`PaddedBatchAssembler`, and calls `MaxTextTrainingEngine.fwd_bwd` on every
+microbatch of each arm. The arms differ only in layout:
+
+| | packed | unpacked |
+| --- | --- | --- |
+| Assembler | `SequencePackedBatchAssembler` (`pack_size: 4`) | `PaddedBatchAssembler` |
+| Microbatches | 3 | 16 |
+| Row shape | `(4, 4096)`, prompt folded into the packed stream | `(4, 512)` prompt + `(4, 1024)` completion |
+| `segment_ids` | present | `None` |
+| Rows total | 12 (5.3 sequences per row) | 64 (1 per row) |
+| Trajectories | 64 | 64 |
+| Loss / gradient denominator | 64 | 64 |
+
+Both arms are checked to consume the same trajectory **ids**, not merely the
+same count: the harness compares the sorted id list the assembler emitted
+against the sorted list fed in, and raises otherwise. An earlier version
+compared counts, which passes even when `_extract_trajectory_id` returns the
+empty string for every trajectory.
+
+### 4.1 Result
+
+Qwen3-0.6B on a 4-chip v5p, `trainer_fsdp` 4, `MAX_SEQ_TOKEN_PER_TPU` 4096,
+`epsilon` 0.2, `beta` 0, `loss_agg_mode` `sequence-mean-token-mean`. The 64
+completion lengths are sampled from the `maz-q35-12` trajectory CSV (21 steps of
+GSM8K rollouts), converted from characters at 3.6 chars per token because
+`completion_tokens` is empty in that CSV for the reason noted in §3. Median 312
+tokens, max 1024, 40,035 content tokens in total.
+
+| | float32 | bfloat16 |
+| --- | --- | --- |
+| Per-token logp, mean abs diff | **4.986e-04** | 7.420e-01 |
+| Per-token logp, p99 / max abs diff | 9.832e-03 / 5.499e-02 | 2.703e+00 / 4.059e+00 |
+| Logp scale, mean / min | -247.8 / -454.0 | -240.9 / -417.4 |
+| Pooled loss, packed | 0.03965768 | 0.47125390 |
+| Pooled loss, unpacked | 0.03968385 | 0.47723950 |
+| Loss, relative difference | **6.599e-04** | 1.270e-02 |
+| Gradient, whole-tree relative L2 | **1.179e-03** | 5.872e-01 |
+| Gradient, worst per-parameter relative L2 | **1.846e-03** | 7.650e-01 |
+| Gradient, worst per-parameter cosine | **0.999998329** | 0.699888 |
+| Verdict at `rtol` 2e-2 | **PASS** | FAIL |
+
+Worst five of the 13 parameter paths, float32:
+
+| relative L2 | cosine | ‖packed‖ | ‖unpacked‖ | path |
+| --- | --- | --- | --- | --- |
+| 1.846e-03 | 0.999998329 | 24.8591 | 24.8651 | `decoder/decoder_norm/scale` |
+| 1.659e-03 | 0.999998657 | 1601.79 | 1601.73 | `decoder/layers/mlp/wi_0/kernel` |
+| 1.648e-03 | 0.999998531 | 72.3008 | 72.2970 | `decoder/layers/post_self_attention_layer_norm/scale` |
+| 1.593e-03 | 0.999998829 | 2844.75 | 2844.65 | `decoder/layers/mlp/wo/kernel` |
+| 1.590e-03 | 0.999998854 | 1644.45 | 1644.39 | `decoder/layers/mlp/wi_1/kernel` |
+
+Packing changes the loss by 0.066% and rotates the worst gradient tensor by
+0.105 degrees. Both sit at the level of float32 reassociation: the arms sum the
+same terms in a different order and across a different number of microbatches.
+
+### 4.2 Why the bfloat16 column fails
+
+The bfloat16 column is a property of the number format, not of packing. A
+randomly initialized Qwen3-0.6B has per-token logps near -241, and bfloat16
+keeps 8 significand bits, so its ulp at that magnitude is 0.5. Every
+packed-unpacked difference in the float32 column is far below 0.5, so the
+bfloat16 measurement returns rounding noise instead of the quantity of interest.
+Hence the `--float32` flag, which injects `dtype=float32 weight_dtype=float32
+matmul_precision=highest` into the MaxText config on the way through
+`pyconfig.initialize`.
+
+This does not carry over to the production runs. A trained checkpoint has
+per-token logps near -1 to -5, where the bfloat16 ulp is roughly 0.004, and the
+ratio `exp(logp - old_logp)` that GRPO differentiates starts at 1. The
+uninformative bfloat16 result is specific to random initialization.
+
+### 4.3 Three measurement details that produce a false PASS
+
+Each of these was hit while building the harness, and each yields a
+PASS that means nothing. Any reimplementation will hit them too.
+
+**Old logps must come from the policy's own forward pass.** The GRPO per-token
+loss is `max(-A·r, -A·clip(r, 1-ε, 1+ε_high))` with `r = exp(logp - old_logp)`
+([`algo_core.py:489-492`](tunix/rl/algo_core.py#L489-L492)); only the unclipped
+branch carries a gradient. Synthetic old logps drawn from a guessed distribution
+put `r` outside the clip band for every token, so both arms return **exactly
+zero** gradient and agree vacuously. With logps spanning 400 nats no constant
+substitute works either. `measure_old_logps()` runs the policy forward over the
+unpacked microbatches and uses its own logps, reproducing production, where the
+old policy is one optimizer step behind and `r` starts at 1. The harness
+additionally reports an all-zero gradient tree as `INVALID`, never `PASS`.
+
+**The pooled loss is the only comparable scalar.** The arms split the same
+trajectories into 3 and 16 microbatches, so a mean of per-microbatch means
+weights them differently. `MaxTextTrainingEngine` caches one `WeightedMetric`
+per microbatch; the comparison must use `Σ unreduced_sum / Σ denominator`, which
+is also what the optimizer sees.
+
+**Sum-based gradient sketches cancel.** An earlier version compared per-tensor
+sums to avoid holding two gradient trees at once. For
+`post_self_attention_layer_norm/scale` those sums were -0.662 and -0.617 out of
+a total absolute mass of 179.3 — a 6.8e-02 relative difference produced entirely
+by cancellation, not by disagreement. The exact relative L2 for the same tensor
+is 1.6e-03. Both trees are sharded over the same mesh as the weights, so holding
+them together costs one extra parameter-sized buffer; the comparison is now
+exact.
+
+### 4.4 Scope
+
+Covered at exact equality, on real length statistics: the assembler, the
+segment-id plumbing, the attention mask, the loss reduction and the backward
+pass.
+
+Not covered:
+
+- **MoE routing.** Qwen3-0.6B is dense. Expert routing under packing is the one
+  arithmetic path in the 35B configuration this harness does not reach.
+- **Optimizer state and accumulation across steps.** The harness stops at
+  `fwd_bwd`.
+- **A trained checkpoint.** `--maxtext_ckpt_path` accepts one, which would put
+  logps near -1 to -5 and let the bfloat16 column carry information.
+
+Reproducing:
+
+```bash
+# Requires a local TPU; this ran on a 4-chip v5p in about 6 minutes.
+# Do not run from $HOME, which shadows installed packages.
+cd ~/git/tunix
+~/maxtext_venv/bin/python qwen35_packing_equivalence.py \
+  --maxtext_model_name qwen3-0.6b --mesh_fsdp 4 --mesh_tp 1 --float32 \
+  --max_prompt_length 512 --max_response_length 1024 \
+  --max_seq_token_per_tpu 4096 --trainer_fsdp 4 --trainer_dp 1 \
+  --num_generations 4 --rollouts_per_update 64 --train_micro_batch_size 4 \
+  --length_csv /tmp/r12.csv --out /tmp/eq_f32.json
+
+# Drop --float32 to reproduce the bfloat16 column.
+# --length_csv draws completion lengths from a trajectory CSV produced by a real
+# run; omit it to use the built-in lognormal instead.
+```
+
+---
+
+## 5. Tests establishing that packed arithmetic equals unpacked arithmetic
 
 All of these are on `main` in both repositories — no branch needed. Counts below
 are from runs on a CPU box on 2026-09-18; all exit 0.
 
-### 4.1 The core equivalence tests (MaxText)
+### 5.1 The core equivalence tests (MaxText)
 
 `tests/post_training/unit/maxtext_engine_packing_test.py` — **17 tests,
 6 subtests, 126.83 s, exit 0**
@@ -412,7 +561,7 @@ here that does not compare one implementation against another — it compares
 against arithmetic done on paper. Its companion mutation test establishes that
 the comparison is sensitive enough to detect a wrong aggregation mode.
 
-### 4.2 Segment IDs reach the model correctly (MaxText)
+### 5.2 Segment IDs reach the model correctly (MaxText)
 
 `tests/post_training/unit/tunix_adapter_test.py` — **18 tests**, classes
 `TunixAdapterSegmentIdsTest` (9) and `TunixAdapterAttentionMaskTest` (9).
@@ -425,7 +574,7 @@ Notable:
 of the contract), `test_recovery_is_exact_for_every_query_row` (mask →
 segment-ID conversion is exact, not approximate), and `test_mask_survives_jit`.
 
-### 4.3 Packing mechanics (Tunix)
+### 5.3 Packing mechanics (Tunix)
 
 `tests/rl/packing_test.py` — **21 tests**, classes `PackItemInvariantTest` (6),
 `PackCarriedFieldsTest` (2), `PackCoreTest` (13).
@@ -441,14 +590,14 @@ crashing.
 
 `tests/rl/common_test.py` — **66 tests**, including:
 
-- `test_packed_logps_match_unpacked_per_segment` — the Tunix-side mirror of §4.1's first test
+- `test_packed_logps_match_unpacked_per_segment` — the Tunix-side mirror of §5.1's first test
 - `test_aggregate_loss_values` — the aggregation modes against known values
 - `test_reduced_equals_unreduced_compute` — the deferred-all-reduce path agrees with the eager one
 
 `tests/rl/algo_core_test.py::AlgoCoreTest::test_grpo_loss_fn_packed_equals_unpacked`
 — the GRPO loss itself, packed against unpacked, end to end.
 
-### 4.4 The assembler (Tunix)
+### 5.4 The assembler (Tunix)
 
 `tests/experimental/orchestrator/batch_assembly_test.py` — **41 packing tests**
 in `SequencePackedBatchAssemblerTest` (22) and `SequencePackedConversionTest` (19).
@@ -466,7 +615,7 @@ whole-sequence advantages and masks are sliced to the completion
 `test_to_pack_item_whole_sequence_completion_mask_sliced`) and partially
 populated optional fields are rejected rather than silently zero-filled.
 
-### 4.5 Reproducing the suites
+### 5.5 Reproducing the suites
 
 ```bash
 # MaxText (AI-Hypercomputer/maxtext, main)
@@ -498,7 +647,7 @@ A larger end-to-end comparison harness exists at
 
 ---
 
-## 5. What these runs do *not* exercise
+## 6. What these runs do *not* exercise
 
 Three code paths related to packing are inactive here. Stating this explicitly
 matters, because open issues against them do not apply to these results.
@@ -530,7 +679,7 @@ KL-term effect, and `BETA=0` in these runs. Neither run shows it: step 1 loss wa
 
 ---
 
-## 6. Open observations
+## 7. Open observations
 
 ```
 TODO(maz-q35): run 10 shows three isolated single-step loss spikes -- step 23
@@ -569,7 +718,7 @@ authors.
 
 ---
 
-## 7. Reproducing the runs
+## 8. Reproducing the runs
 
 ```bash
 export WANDB_API_KEY=<your key>          # submit.sh asserts this; it is not stored in the file
@@ -655,7 +804,7 @@ comparison.
 
 ---
 
-## 8. Summary
+## 9. Summary
 
 | Claim | Evidence |
 | --- | --- |
@@ -666,7 +815,8 @@ comparison.
 | 2.33× less padding | 16.9M padded token slots against 39.3M |
 | 1.74× faster steps | 98.48 s packed against 171.74 s unpacked, same data, same image |
 | No recompilation after step 1 | 99 warm steps, median 97.12 s, stdev 4.48 s, no sustained step-up |
-| Packed arithmetic equals unpacked | 17 + 28 MaxText tests and 132 Tunix tests, all passing |
+| Packed arithmetic equals unpacked, measured directly | one 64-trajectory set through both assemblers, identical weights: loss agrees to 6.60e-04 relative, whole-tree gradient relative L2 1.18e-03, worst per-parameter cosine 0.999998 (§4) |
+| Packed arithmetic equals unpacked, by unit test | 17 + 28 MaxText tests and 132 Tunix tests, all passing |
 | Generation quality is unchanged | paired on all 320 prompts: generated length −1.22 chars, 95% CI [−12.1, +9.7]; reward +0.0024, 95% CI [−0.0038, +0.0086] |
 | The comparison has power | resolves an effect 12× smaller than training's own 132-char shift over the same 20 steps |
 | The difference does not grow with training | post-step-0 divergence at or below the step-0 sampling-noise floor; all trend slopes p ≥ 0.124 |
