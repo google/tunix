@@ -38,9 +38,13 @@ from tunix.cli import config as cli_config
 from tunix.cli.utils import model as model_utils
 from tunix.experimental.examples.common import models
 from tunix.experimental.train import peft_trainer_v2
+from tunix.experimental.weight_sync import raiden_preload
 from tunix.experimental.worker import remote_execution
 from tunix.experimental.worker import trainer_worker
 from tunix.utils import maxtext_utils
+
+# Import Raiden before any other libraries to ensure correct JAX compilation.
+raiden_preload.import_raiden()
 
 REPO_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")

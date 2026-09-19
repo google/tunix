@@ -300,6 +300,7 @@ jobs:
 
           # Install Tunix with dev and test dependencies without overwriting the vLLM dependencies.
           python3 -m pip install -e .[test]
+          python3 -m pip install --no-deps --no-build-isolation -r requirements/special_requirements.txt
           # tpu-inference/Numba needs NumPy 2.3 or less.
           python3 -m pip install numpy==2.3.5 --force-reinstall
 
@@ -387,11 +388,23 @@ jobs:
           print("TPU runtime preflight check passed successfully.")
           PY
 
-      - name: Run GSM8K Distributed RL Smoke Test (Raiden Sync)
+      - name: Run GSM8K Distributed RL Smoke Test (Tunix Backend + Raiden Sync)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           ./tunix/experimental/examples/recipes/ci_smoke_gsm8k_qwen3_0p6b.sh
+
+      - name: Install MaxText dependencies
+        run: |
+          unset PIP_NO_CACHE_DIR
+          python3 -m pip install -r requirements/maxtext_requirements.txt
+          python3 -m pip install "protobuf>=7.35.1"
+
+      - name: Run GSM8K Distributed RL Smoke Test (MaxText Backend + Raiden Sync)
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          ./tunix/experimental/examples/recipes/ci_smoke_gsm8k_qwen3_0p6b_maxtext.sh
 
       # Fires for any failure in this job, not just the smoke test above; the
       # `|| true` guards make that harmless when the logs do not exist.
