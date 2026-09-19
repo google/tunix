@@ -144,6 +144,98 @@ class AlgoCoreTest(absltest.TestCase):
         np.testing.assert_allclose(lp, lu, rtol=1e-5, atol=1e-5)
         np.testing.assert_allclose(lp, -2.25, rtol=1e-4, atol=1e-4)
 
+  def test_masked_padding_tokens_do_not_propagate_nan_in_loss_or_gradients(
+      self,
+  ):
+    # Regression test for b/563191139 (paired with MaxText PR #5292):
+    # Multiplicative masking (loss * completion_mask) evaluates 0.0 * Inf = NaN
+    # in IEEE-754 when masked/padding positions carry non-finite values or
+    # singular Jacobians. Using jnp.where(completion_mask > 0, ..., 0.0) severs
+    # both forward and reverse-mode autodiff paths on masked positions.
+    from types import SimpleNamespace  # pylint: disable=g-import-not-at-top
+    from flax import nnx  # pylint: disable=g-import-not-at-top
+    from tunix.rl import common  # pylint: disable=g-import-not-at-top
+
+    class _ToyModel(nnx.Module):
+
+      def __init__(self, *, vocab, dim, rngs):
+        self.emb = nnx.Embed(vocab, dim, rngs=rngs)
+        self.head = nnx.Linear(dim, vocab, rngs=rngs)
+
+      def __call__(
+          self,
+          x,
+          segment_ids=None,
+          positions=None,
+          cache=None,
+          attention_mask=None,
+      ):
+        return self.head(self.emb(x)), cache
+
+    model = _ToyModel(vocab=16, dim=8, rngs=nnx.Rngs(42))
+    cfg = SimpleNamespace(
+        beta=0.0,
+        epsilon=0.2,
+        epsilon_high=0.2,
+        epsilon_c=None,
+        loss_algo='grpo',
+        loss_agg_mode='token-mean',
+        temperature=1.0,
+        kl_loss_mode='low_var_kl',
+        kl_clamp_value=None,
+        force_compute_kl=False,
+    )
+
+    clean_old_logps = jnp.array(
+        [[-1.2, -0.8, 0.0, 0.0], [-0.5, 0.0, 0.0, 0.0]], jnp.float32
+    )
+    corrupted_old_logps = jnp.array(
+        [[-1.2, -0.8, jnp.inf, -jnp.inf], [-0.5, jnp.nan, jnp.inf, -jnp.inf]],
+        jnp.float32,
+    )
+    completion_mask = jnp.array(
+        [[1.0, 1.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]], jnp.float32
+    )
+
+    clean_ex = common.TrainExample(
+        prompt_ids=jnp.array([[0, 3], [0, 4]], jnp.int32),
+        prompt_mask=jnp.array([[0, 1], [0, 1]], jnp.int32),
+        completion_ids=jnp.array([[5, 6, 0, 0], [7, 0, 0, 0]], jnp.int32),
+        completion_mask=completion_mask,
+        advantages=jnp.array([1.25, -0.75], jnp.float32),
+        ref_per_token_logps=None,
+        old_per_token_logps=clean_old_logps,
+    )
+    corrupted_ex = common.TrainExample(
+        prompt_ids=jnp.array([[0, 3], [0, 4]], jnp.int32),
+        prompt_mask=jnp.array([[0, 1], [0, 1]], jnp.int32),
+        completion_ids=jnp.array([[5, 6, 0, 0], [7, 0, 0, 0]], jnp.int32),
+        completion_mask=completion_mask,
+        advantages=jnp.array([1.25, -0.75], jnp.float32),
+        ref_per_token_logps=None,
+        old_per_token_logps=corrupted_old_logps,
+    )
+
+    def _loss_scalar(m, ex):
+      return algo_core.grpo_loss_fn(
+          m, ex, cfg, pad_id=0, eos_id=-1
+      ).primary_loss.compute()
+
+    clean_loss, clean_grads = nnx.value_and_grad(_loss_scalar)(model, clean_ex)
+    corrupt_loss, corrupt_grads = nnx.value_and_grad(_loss_scalar)(
+        model, corrupted_ex
+    )
+
+    self.assertTrue(bool(jnp.isfinite(corrupt_loss)))
+    np.testing.assert_allclose(corrupt_loss, clean_loss, rtol=1e-5, atol=1e-5)
+
+    for g_corrupt, g_clean in zip(
+        jax.tree_util.tree_leaves(corrupt_grads),
+        jax.tree_util.tree_leaves(clean_grads),
+    ):
+      self.assertTrue(bool(jnp.all(jnp.isfinite(g_corrupt))))
+      np.testing.assert_allclose(g_corrupt, g_clean, rtol=1e-5, atol=1e-5)
+
 
 class GrpoLooAdvantagesTest(absltest.TestCase):
   """Tests for leave-one-out group-relative advantages."""
