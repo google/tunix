@@ -123,22 +123,6 @@ def _create_mesh(args) -> Mesh:
   return Mesh(devices, axis_names=("fsdp", "tp"))
 
 
-class _MeshBoundReferenceCore:
-  """Runs the shared RL inference core under this worker's mesh."""
-
-  def __init__(self, core: rl_inference_worker.InferenceWorker, mesh: Mesh):
-    self._core = core
-    self._mesh = mesh
-
-  def get_ref_per_token_logps(self, *args, **kwargs) -> Any:
-    with self._mesh:
-      return self._core.get_ref_per_token_logps(*args, **kwargs)
-
-  def get_rewards(self, *args, **kwargs) -> Any:
-    with self._mesh:
-      return self._core.get_rewards(*args, **kwargs)
-
-
 def main(argv: list[str], context: Any = None) -> None:
   if context and context.ipc and context.ipc.discovery:
     pass
@@ -188,7 +172,7 @@ def main(argv: list[str], context: Any = None) -> None:
     core = rl_inference_worker.InferenceWorker({"reference": reference_model})
 
   worker_service = exp_inference_worker.InferenceWorker(
-      _MeshBoundReferenceCore(core, mesh),
+      core,
       worker_id=args.worker_id,
       pad_id=pad_id,
       eos_id=eos_id,
@@ -196,6 +180,7 @@ def main(argv: list[str], context: Any = None) -> None:
       max_prompt_length=args.max_prompt_length,
       max_response_length=args.max_response_length,
       temperature=args.temperature,
+      execution_context=mesh,
   )
 
   async def grpc_server_main() -> None:

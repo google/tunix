@@ -19,6 +19,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 import json
 import logging
+import os
 from typing import Any
 
 import numpy as np
@@ -133,8 +134,14 @@ def build_prompt_item(
     use_agent_sandbox: bool,
     scaffold: str,
     env_verbose: bool,
+    episode_timeout_secs: int | None = None,
 ) -> dict[str, Any]:
   """Builds one StandardRLProgram prompt item for a DeepSWE task."""
+  if episode_timeout_secs is None:
+    try:
+      episode_timeout_secs = int(os.getenv("EPISODE_TIMEOUT_SECS", "5400"))
+    except (ValueError, TypeError):
+      episode_timeout_secs = 5400
   problem = _problem_statement(entry)
   prompt_id = as_text(entry.get("instance_id") or f"deepswe_{prompt_idx}")
   env_config = {
@@ -153,6 +160,7 @@ def build_prompt_item(
       "prompt": problem,
       "prompt_id": prompt_id,
       "max_turns": max_turns,
+      "max_response_length": max_response_length,
       "generation_kwargs": {
           "max_generation_steps": max_response_length,
           "temperature": temperature,
@@ -163,8 +171,11 @@ def build_prompt_item(
       "metadata": {
           "instance_id": prompt_id,
           "problem_statement": problem,
+          "docker_image": entry.get("docker_image"),
+          "prefix_hash": prompt_id,
           "env_config": env_config,
           "agent_config": agent_config,
+          "episode_timeout": episode_timeout_secs,
       },
   }
 
@@ -185,6 +196,7 @@ def iter_prompt_items(
     use_agent_sandbox: bool,
     scaffold: str,
     env_verbose: bool,
+    episode_timeout_secs: int | None = None,
 ) -> Iterator[dict[str, Any]]:
   """Yields exactly the prompt groups needed for the requested training run."""
   dataset_size = len(dataset)
@@ -206,6 +218,7 @@ def iter_prompt_items(
         use_agent_sandbox=use_agent_sandbox,
         scaffold=scaffold,
         env_verbose=env_verbose,
+        episode_timeout_secs=episode_timeout_secs,
     )
 
 
@@ -222,24 +235,31 @@ class DeepSWEEnv(swe_env.SWEEnv):
       policy_version: int = 0,
       group_id: Any = None,
       pair_index: int | None = None,
+      max_warmpool_replicas: int | None = None,
       **kwargs: Any,
   ):
     entry = dict(entry or kwargs.pop("task", {}) or {})
-    if prompt_id and "instance_id" not in entry:
+    if prompt_id and not entry.get("instance_id"):
       entry["instance_id"] = prompt_id
     if group_id is None:
       group_id = prompt_id or None
     if pair_index is None:
       pair_index = group_index
+    if max_warmpool_replicas is None:
+      max_warmpool_replicas = num_generations
     if kwargs.get("use_agent_sandbox") and kwargs.get("fleet") is None:
       logging.info(
           "Initializing DeepSWE SandboxFleet in rollout worker "
-          "(max_concurrency=%s).",
+          "(max_concurrency=%s, max_warmpool_replicas=%s).",
           num_generations,
+          max_warmpool_replicas,
       )
       kwargs["fleet"] = sandbox_utils.init_global_fleet(
           tasks=[entry],
           max_concurrency=num_generations,
+          num_generations=num_generations,
+          max_warmpool_replicas=max_warmpool_replicas,
+          scaffold=str(kwargs.get("scaffold") or os.getenv("SCAFFOLD", "r2egym")),
       )
 
     super().__init__(

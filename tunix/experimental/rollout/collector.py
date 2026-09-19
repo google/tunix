@@ -14,8 +14,9 @@
 
 """Trajectory Collector Engine wrapping TrajectoryCollectEngine with pause/resume/cancel control."""
 
-from typing import Any, List
+from typing import Any, Collection, List, Mapping, Sequence
 import zlib
+from absl import logging
 import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.experimental.rollout import sampler as sampler_lib
@@ -56,6 +57,44 @@ def _build_prompt(chat_parser: Any, chat_completions: Any) -> Any:
   return chat_completions
 
 
+def response_budget_facts(
+    response_tokens: Sequence[int] | np.ndarray,
+    max_response_length: int,
+    eos_ids: Collection[int],
+) -> tuple[int, bool]:
+  """Computes `(raw_length, clipped)` for a generated response token sequence.
+
+  A response is considered truncated (`clipped = True`) when its token length
+  reaches or exceeds `max_response_length` without stopping on a configured EOS
+  token (`int(response_tokens[-1]) in eos_ids`).
+
+  TODO(tunix-dev): Move to a shared module and unify with
+  `GRPOLearner._process_results` in `tunix/rl/agentic/agentic_grpo_learner.py`
+  once agentic GRPO plumbs configured stop sets (`RolloutConfig.eos_tokens`).
+
+  Args:
+    response_tokens: Sequence or 1D array of response token IDs (including
+      environment/tool turns).
+    max_response_length: Maximum allowed response tokens for this rollout.
+    eos_ids: Set of valid stop token IDs configured for the sampler.
+
+  Returns:
+    A tuple `(raw_length, clipped)` where `raw_length` is clamped to
+    `max_response_length`.
+  """
+  if max_response_length <= 0:
+    raise ValueError(
+        f"max_response_length must be positive, got {max_response_length}"
+    )
+  raw_length = len(response_tokens)
+  stopped_on_eos = (
+      0 < raw_length <= max_response_length
+      and int(response_tokens[-1]) in eos_ids
+  )
+  clipped = raw_length >= max_response_length and not stopped_on_eos
+  return min(raw_length, max_response_length), clipped
+
+
 class TrajectoryCollectorEngine:
   """Wrapper around TrajectoryCollectEngine providing lifecycle controls and Trajectory conversion."""
 
@@ -68,6 +107,7 @@ class TrajectoryCollectorEngine:
       agent: Any,
       tokenizer: Any,
       chat_parser: Any,
+      eos_ids: Collection[int] | None = None,
   ):
     if (
         sampler is None
@@ -90,9 +130,12 @@ class TrajectoryCollectorEngine:
     self.is_paused: bool = False
     self.is_cancelled: bool = False
     self.is_done: bool = False
-    self.max_response_length = request.generation_kwargs.get(
-        "max_response_length"
-    )
+    self.max_response_length = request.max_response_length
+    # The stop set the sampler was configured with, which is what decides
+    # whether a rollout ended on its own. Defined at the recipe level via
+    # `RolloutConfig.eos_tokens` (e.g. `<|im_end|>` for Qwen chat models) rather
+    # than forced from the base tokenizer.
+    self.eos_ids = frozenset(int(token_id) for token_id in (eos_ids or ()))
     metadata = request.metadata or {}
     timeout = metadata.get("episode_timeout")
     self.episode_timeout = float(
@@ -119,21 +162,31 @@ class TrajectoryCollectorEngine:
     async def model_call(
         chat_completions, env=None, max_generation_steps=None, **kwargs
     ):
-      del env, kwargs
+      del env
       generation_kwargs = dict(self.request.generation_kwargs)
+      # NB: extra kwargs can be passed in from trajectory_collect_engine.
+      generation_kwargs.update(kwargs)
       request_max_generation_steps = generation_kwargs.pop(
           "max_generation_steps", None
       )
+      req_max_tokens = (
+          request_max_generation_steps
+          if request_max_generation_steps is not None
+          else generation_kwargs.get("max_tokens")
+      )
 
-      if max_generation_steps is not None:
+      if max_generation_steps is not None and req_max_tokens is not None:
+        effective_max_tokens = min(max_generation_steps, req_max_tokens)
+      elif max_generation_steps is not None:
         effective_max_tokens = max_generation_steps
-      elif request_max_generation_steps is not None:
-        effective_max_tokens = request_max_generation_steps
+      elif req_max_tokens is not None:
+        effective_max_tokens = req_max_tokens
       else:
         raise ValueError(
-            "TrajectoryCollectorEngine requires either"
-            " request.generation_kwargs or the model_call callback to specify"
-            " max_generation_steps."
+            "TrajectoryCollectorEngine requires"
+            " request.max_response_length, request.generation_kwargs"
+            " ('max_generation_steps' or 'max_tokens'), or the model_call"
+            " callback to specify max_generation_steps."
         )
 
       generation_kwargs["max_tokens"] = effective_max_tokens
@@ -160,6 +213,12 @@ class TrajectoryCollectorEngine:
           top_k=generation_kwargs.get("top_k", None),
           seed=seed,
           return_logprobs=generation_kwargs.get("return_logprobs", False),
+          return_routed_experts=generation_kwargs.get(
+              "return_routed_experts", False
+          ),
+          routed_experts_prompt_start=generation_kwargs.get(
+              "routed_experts_prompt_start", 0
+          ),
       )
       sampling_req = sampler_lib.SamplingRequest(
           request_id=self.traj_id,
@@ -170,6 +229,7 @@ class TrajectoryCollectorEngine:
       text = res if isinstance(res, str) else getattr(res, "text", str(res))
       tokens = getattr(res, "token_ids", np.array([], dtype=np.int32))
       logprobs = getattr(res, "logprobs", None)
+      routed_experts = getattr(res, "routed_experts", None)
       prompt_tokens = np.asarray(
           getattr(res, "prompt_token_ids", np.array([], dtype=np.int32)),
           dtype=np.int32,
@@ -185,6 +245,7 @@ class TrajectoryCollectorEngine:
           tokens=[tokens],
           left_padded_prompt_tokens=prompt_tokens,
           logprobs=[logprobs] if logprobs is not None else None,
+          routed_experts=[routed_experts] if routed_experts is not None else None,
       )
 
     if not self.agent or not self.env:
@@ -206,6 +267,88 @@ class TrajectoryCollectorEngine:
     self.is_done = True
     return self._convert_to_trajectory(rl_traj)
 
+  def _annotate_response_budget(
+      self, rl_traj: Mapping[str, Any], metadata: dict[str, Any]
+  ) -> None:
+    """Records whether this rollout was truncated by the response budget.
+
+    Written here rather than by the consumer because only the producer knows
+    the budget actually enforced: `max_response_length` is read per request,
+    and `DistributedRLEngine` lets a dataset item override the default.
+
+    Sets two keys in `metadata`, both computed by `response_budget_facts`:
+      * `clipped`: reached the budget without stopping on a configured EOS.
+      * `raw_length`: response tokens including env/tool turns, clamped to the
+        budget (the rLLM/VERL `response_length` convention).
+
+    Both are left unset when no budget was enforced, no EOS id is known, or
+    there is no token stream, so consumers can tell "not truncated" from
+    "unknown". Each of those skips warns once, because an absent metric is
+    otherwise indistinguishable from a zero one on a dashboard. An empty stream
+    is annotated rather than skipped: it is a rollout that produced nothing,
+    and keeps its place in the group denominator.
+
+    TODO(tunix-dev): Prefer `TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED`, which
+    already reaches the consumer via `traj["status"]`, over this last-token
+    heuristic. Deferred because that status is not EOS-aware and is evaluated
+    per turn, so adopting it would shift the reported metric. Note
+    `finish_reason` exists only on the sampler responses here; agentic has
+    never had such a field.
+
+    Args:
+      rl_traj: Token-mode trajectory mapping, read-only.
+      metadata: TrajectoryItem metadata dictionary to annotate in place.
+    """
+    skipped = "Not annotating clipped/raw_length for rollout %s: %s."
+    if self.max_response_length is None:
+      logging.log_first_n(
+          logging.WARNING,
+          skipped,
+          1,
+          self.traj_id,
+          "the request carries no max_response_length, so no budget was"
+          " enforced",
+      )
+      return
+    if self.max_response_length <= 0:
+      # A non-positive budget is a misconfiguration rather than "no budget":
+      # every rollout would score as having reached it.
+      logging.log_first_n(
+          logging.WARNING,
+          skipped,
+          1,
+          self.traj_id,
+          f"max_response_length is {self.max_response_length!r}, which is"
+          " not a usable budget",
+      )
+      return
+    if not self.eos_ids:
+      logging.log_first_n(
+          logging.WARNING,
+          skipped,
+          1,
+          self.traj_id,
+          "no eos_tokens are configured in RolloutConfig, so termination"
+          " cannot be detected",
+      )
+      return
+    tokens = rl_traj.get("conversation_tokens")
+    if tokens is None:
+      logging.log_first_n(
+          logging.WARNING,
+          skipped,
+          1,
+          self.traj_id,
+          "the trajectory carries no conversation_tokens",
+      )
+      return
+
+    raw_length, clipped = response_budget_facts(
+        tokens, self.max_response_length, self.eos_ids
+    )
+    metadata["raw_length"] = raw_length
+    metadata["clipped"] = clipped
+
   def _convert_to_trajectory(
       self, rl_traj: dict[str, Any]
   ) -> agent_types.TrajectoryItem:
@@ -215,13 +358,15 @@ class TrajectoryCollectorEngine:
           f"Expected rl_traj to be a dict, got {type(rl_traj).__name__}"
       )
 
+    # Metadata carries only request-scoped context. Everything about the
+    # episode itself stays on `traj`, which is the single source of truth and
+    # matches how `agentic_grpo_learner` consumes rollouts. Mirroring episode
+    # fields here previously let the copy drift from the original: the mirrored
+    # reward was read instead of the real one, and the mirrored text held the
+    # whole conversation rather than the model's answer.
     metadata = dict(self.request.metadata or {})
     metadata["prompt_id"] = self.request.prompt_id
     metadata["group_index"] = self.request.group_index
-    metadata.setdefault("text", rl_traj.get("conversation_text", ""))
-    metadata["trajectory_reward"] = float(
-        rl_traj.get("trajectory_reward", 0.0) or 0.0
-    )
     metadata["status"] = rl_traj.get("status", "")
     policy_version = getattr(
         self.request,
@@ -229,6 +374,8 @@ class TrajectoryCollectorEngine:
         rl_traj.get("policy_version", 0),
     )
     metadata["policy_version"] = int(policy_version or 0)
+
+    self._annotate_response_budget(rl_traj, metadata)
 
     return agent_types.TrajectoryItem(
         prompt_id=self.request.prompt_id,

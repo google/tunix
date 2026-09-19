@@ -292,6 +292,29 @@ class UtilsTest(absltest.TestCase):
     self.assertIsNone(item['ref_per_token_logps'])
     self.assertIsNone(item['old_per_token_logps'])
 
+  def test_unpad_train_example_with_completion_attention_mask(self):
+    import types  # pylint: disable=g-import-not-at-top
+
+    # Multi-turn TiTO trajectories have trailing env/template tokens where
+    # completion_mask (loss mask) is 0, and may contain valid tokens equal to 0.
+    # completion_attention_mask determines the true valid completion length.
+    example = self._create_mock_train_example(
+        2,
+        2,
+        pad_len=4,
+        completion_ids=jnp.array([[10, 0, 20, 21, 0, 0]], dtype=jnp.int32),
+        completion_mask=jnp.array([[1, 1, 0, 0, 0, 0]], dtype=jnp.int32),
+    )
+    example = types.SimpleNamespace(
+        **example.__dict__,
+        completion_attention_mask=jnp.array(
+            [[1, 1, 1, 1, 0, 0]], dtype=jnp.int32
+        ),
+    )
+    [item] = utils.unpad_train_example(example)
+    np.testing.assert_array_equal(item['completion_ids'], [10, 0, 20, 21])
+    np.testing.assert_array_equal(item['completion_mask'], [1, 1, 0, 0])
+
   def test_pack_sequences_token_only_produces_none_logps(self):
     # pack-first groundwork: packing TrainExamples that carry no logps must
     # still pack tokens/segment_ids and leave the packed logps as None, so logp

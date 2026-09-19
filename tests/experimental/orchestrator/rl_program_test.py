@@ -28,6 +28,7 @@ from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import distributed_rl_engine
 from tunix.experimental.orchestrator import rl_program
+from tunix.experimental.trajectory import in_memory_store
 from tunix.experimental.worker import remote_execution
 from tunix.sft import metrics_logger as metrics_logger_lib
 from tunix.sft import utils as sft_utils
@@ -125,7 +126,7 @@ def _create_rollout_response(
       completion_tokens=np.array([3, 4], dtype=np.int32),
       action_mask=np.array([1, 1], dtype=np.float32),
       policy_version=policy_version,
-      metadata={},
+      metadata={"prompt_id": prompt_id, "group_index": group_index},
   )
   return datatypes.RolloutResponse(
       request_id=request_id,
@@ -257,7 +258,7 @@ class RLProgramTest(absltest.TestCase):
         dataset=dataset,
         max_steps=max_steps,
         algo=self.mock_algo,
-        reward_fns=reward_fns if reward_fns is not None else [lambda x: 1.0],
+        reward_fns=reward_fns if reward_fns is not None else [lambda *_: 1.0],
         assembler=assembler if assembler is not None else self.assembler,
         **kwargs,
     )
@@ -295,7 +296,7 @@ class RLProgramTest(absltest.TestCase):
     program = rl_program.StandardRLProgram(
         dataset=["prompt_1"],
         algo=self.mock_algo,
-        reward_fns=[lambda x: 1.0],
+        reward_fns=[lambda *_: 1.0],
         assembler=self.assembler,
     )
     self.assertEqual(program.step, 0)
@@ -310,7 +311,7 @@ class RLProgramTest(absltest.TestCase):
     program = rl_program.StandardRLProgram(
         dataset=["prompt_1"],
         algo=self.mock_algo,
-        reward_fns=[lambda x: 1.0],
+        reward_fns=[lambda *_: 1.0],
     )
     self.assertIsInstance(
         program.assembler, batch_assembly.SequencePackedBatchAssembler
@@ -404,11 +405,14 @@ class RLProgramTest(absltest.TestCase):
           policy_version=0,
       )
       self.mock_engine.dispatch_rollouts.assert_called_once_with(
-          [{"prompt": "prompt_data_0", "prompt_id": "prompt_0"}],
+          [{
+              "prompt": "prompt_data_0",
+              "prompt_id": "prompt_0",
+              "max_response_length": 1024,
+          }],
           num_generations=2,
           policy_version=0,
           generation_args=datatypes.GenerationArgs(
-              max_response_length=1024,
               return_logprobs=True,
           ),
       )
@@ -672,7 +676,7 @@ class RLProgramTest(absltest.TestCase):
       program = rl_program.StandardRLProgram(
           dataset=["prompt_0", "prompt_1"],
           algo=self.mock_algo,
-          reward_fns=[lambda x: 1.0],
+          reward_fns=[lambda *_: 1.0],
           assembler=self.assembler,
           max_staleness=0,
       )
@@ -686,15 +690,25 @@ class RLProgramTest(absltest.TestCase):
           break
         await asyncio.sleep(0.01)
 
+      expected_p0 = {
+          "prompt": "prompt_0",
+          "prompt_id": "prompt_0",
+          "max_response_length": 1024,
+      }
+      expected_p1 = {
+          "prompt": "prompt_1",
+          "prompt_id": "prompt_1",
+          "max_response_length": 1024,
+      }
       self.assertEqual(
           dispatched,
-          [({"prompt": "prompt_0", "prompt_id": "prompt_0"}, 0)],
+          [(expected_p0, 0)],
       )
 
       await asyncio.sleep(0.1)
       self.assertEqual(
           dispatched,
-          [({"prompt": "prompt_0", "prompt_id": "prompt_0"}, 0)],
+          [(expected_p0, 0)],
       )
 
       program.policy_version = 1
@@ -703,8 +717,8 @@ class RLProgramTest(absltest.TestCase):
       self.assertEqual(
           dispatched,
           [
-              ({"prompt": "prompt_0", "prompt_id": "prompt_0"}, 0),
-              ({"prompt": "prompt_1", "prompt_id": "prompt_1"}, 1),
+              (expected_p0, 0),
+              (expected_p1, 1),
           ],
       )
 
@@ -741,7 +755,7 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo=self.mock_algo,
-          reward_fns=[lambda x: 1.0],
+          reward_fns=[lambda *_: 1.0],
           assembler=TwoMicrobatchAssembler(),
           sync_weights=False,
       )
@@ -789,7 +803,7 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo=self.mock_algo,
-          reward_fns=[lambda x: 1.0],
+          reward_fns=[lambda *_: 1.0],
           assembler=padded_assembler,
           sync_weights=False,
       )
@@ -856,7 +870,7 @@ class RLProgramTest(absltest.TestCase):
           max_steps=1,
           algo=self.mock_algo,
           batch_size=4,
-          reward_fns=[lambda x: 1.0],
+          reward_fns=[lambda *_: 1.0],
           assembler=assembler,
           sync_weights=True,
       )
@@ -928,7 +942,7 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo=self.mock_algo,
-          reward_fns=[lambda x: 1.0],
+          reward_fns=[lambda *_: 1.0],
           assembler=padded_assembler,
           sync_weights=False,
       )
@@ -996,7 +1010,7 @@ class RLProgramTest(absltest.TestCase):
           max_steps=1,
           algo=self.mock_algo,
           batch_size=4,
-          reward_fns=[lambda x: 1.0],
+          reward_fns=[lambda *_: 1.0],
           assembler=padded_assembler,
           sync_weights=False,
       )
@@ -1098,7 +1112,7 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo=self.mock_algo,
-          reward_fns=[lambda x: 1.0],
+          reward_fns=[lambda *_: 1.0],
           assembler=packed_assembler,
           sync_weights=False,
       )
@@ -1159,7 +1173,7 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo=self.mock_algo,
-          reward_fns=[lambda x: 1.0],
+          reward_fns=[lambda *_: 1.0],
           assembler=packed_assembler,
           sync_weights=False,
       )
@@ -1220,7 +1234,7 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo=self.mock_algo,
-          reward_fns=[lambda x: 1.0],
+          reward_fns=[lambda *_: 1.0],
           assembler=packed_assembler,
           sync_weights=False,
       )
@@ -1290,7 +1304,7 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo=self.mock_algo,
-          reward_fns=[lambda x: 1.0],
+          reward_fns=[lambda *_: 1.0],
           assembler=packed_assembler,
           sync_weights=False,
       )
@@ -1380,7 +1394,7 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo=self.mock_algo,
-          reward_fns=[lambda x: 1.0],
+          reward_fns=[lambda *_: 1.0],
           assembler=TwoMicrobatchAssembler(),
           sync_weights=False,
       )
@@ -1433,7 +1447,7 @@ class RLProgramTest(absltest.TestCase):
           dataset=[],
           max_steps=1,
           algo=self.mock_algo,
-          reward_fns=[lambda x: 1.0],
+          reward_fns=[lambda *_: 1.0],
           assembler=padded_assembler,
           sync_weights=False,
       )
@@ -1500,7 +1514,7 @@ class RLProgramTest(absltest.TestCase):
   def test_run_synchronous_entry_point(self):
     _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
     program = self._create_program(
-        reward_fns=[lambda x: 2.0], dataset=["sync_prompt"]
+        reward_fns=[lambda *_: 2.0], dataset=["sync_prompt"]
     )
 
     program.run(self.mock_engine)
@@ -1550,11 +1564,10 @@ class RLProgramTest(absltest.TestCase):
       await program.run_async(self.mock_engine)
 
       self.mock_engine.dispatch_rollouts.assert_called_once_with(
-          [dict_item],
+          [{**dict_item, "max_response_length": 1024}],
           num_generations=2,
           policy_version=0,
           generation_args=datatypes.GenerationArgs(
-              max_response_length=1024,
               return_logprobs=True,
           ),
       )
@@ -1597,10 +1610,12 @@ class RLProgramTest(absltest.TestCase):
       # 2. Track items observed in reward_fn
       observed_in_reward = []
 
-      def tracking_reward_fn(it: datatypes.TrajectoryItem) -> float:
+      def tracking_reward_fn(
+          unused_completion: str, metadata: dict[str, Any]
+      ) -> float:
         observed_in_reward.append({
-            "prompt_id": it.prompt_id,
-            "group_index": it.group_index,
+            "prompt_id": metadata["prompt_id"],
+            "group_index": metadata["group_index"],
         })
         return 1.0
 
@@ -1866,7 +1881,7 @@ class RLProgramTest(absltest.TestCase):
     async def _run():
       _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
 
-      def failing_reward_fn(_):
+      def failing_reward_fn(*_):
         raise ValueError("Reward model computation failed")
 
       program = self._create_program(reward_fns=[failing_reward_fn])
@@ -2845,19 +2860,19 @@ class RLProgramTest(absltest.TestCase):
       )
       await p.run_async(self.mock_engine)
       self.mock_engine.dispatch_rollouts.assert_called_once()
-      _, kwargs = self.mock_engine.dispatch_rollouts.call_args
+      args, kwargs = self.mock_engine.dispatch_rollouts.call_args
       expected_gen_args = datatypes.GenerationArgs(
           max_generation_steps=128,
-          max_response_length=512,
           temperature=0.7,
           top_p=0.9,
           return_logprobs=True,
       )
       self.assertEqual(kwargs.get("generation_args"), expected_gen_args)
+      self.assertEqual(args[0][0].get("max_response_length"), 512)
 
     asyncio.run(_run())
 
-  def test_program_auto_injects_max_response_length_when_gen_args_none(self):
+  def test_program_passes_algo_max_response_length_when_gen_args_none(self):
     async def _run():
       self.mock_algo.max_response_length = 512
       _set_mock_poll_batches(
@@ -2872,12 +2887,12 @@ class RLProgramTest(absltest.TestCase):
       )
       await p.run_async(self.mock_engine)
       self.mock_engine.dispatch_rollouts.assert_called_once()
-      _, kwargs = self.mock_engine.dispatch_rollouts.call_args
+      args, kwargs = self.mock_engine.dispatch_rollouts.call_args
       expected_gen_args = datatypes.GenerationArgs(
-          max_response_length=512,
           return_logprobs=True,
       )
       self.assertEqual(kwargs.get("generation_args"), expected_gen_args)
+      self.assertEqual(args[0][0].get("max_response_length"), 512)
 
     asyncio.run(_run())
 
@@ -3019,7 +3034,7 @@ class RLProgramTest(absltest.TestCase):
         dataset=["prompt_0"],
         max_steps=1,
         algo=self.mock_algo,
-        reward_fns=[lambda x: 1.0],
+        reward_fns=[lambda *_: 1.0],
         assembler=None,
         batch_config=batch_assembly.BatchConfig(
             max_seq_token_per_tpu=1024,
@@ -3036,13 +3051,13 @@ class RLProgramTest(absltest.TestCase):
     self.assertEqual(program.assembler.max_segments_per_packed_row, 4)
 
   def test_program_creates_padded_assembler(self):
+    self.mock_algo.max_response_length = 2048
     program = rl_program.StandardRLProgram(
         dataset=["prompt_0"],
         max_steps=1,
         algo=self.mock_algo,
-        reward_fns=[lambda x: 1.0],
+        reward_fns=[lambda *_: 1.0],
         assembler=None,
-        generation_args=datatypes.GenerationArgs(max_response_length=2048),
         batch_config=batch_assembly.BatchConfig(
             max_prompt_length=128,
             pad_id=5,
@@ -3059,9 +3074,8 @@ class RLProgramTest(absltest.TestCase):
         dataset=["prompt_0"],
         max_steps=1,
         algo=self.mock_algo,
-        reward_fns=[lambda x: 1.0],
+        reward_fns=[lambda *_: 1.0],
         assembler=None,
-        generation_args=datatypes.GenerationArgs(max_response_length=2048),
         batch_config=batch_assembly.BatchConfig(
             max_prompt_length=128,
             max_response_length=512,
@@ -3070,12 +3084,24 @@ class RLProgramTest(absltest.TestCase):
     )
     self.assertEqual(program_override.assembler.max_response_length, 512)
 
+  def test_program_falls_back_to_algo_config_max_response_length(self):
+    self.mock_algo.max_response_length = None
+    self.mock_algo.algo_config.max_response_length = 768
+    program = rl_program.StandardRLProgram(
+        dataset=["prompt_0"],
+        max_steps=1,
+        algo=self.mock_algo,
+        reward_fns=[lambda *_: 1.0],
+    )
+    self.assertEqual(program.max_response_length, 768)
+    self.assertEqual(program.batch_config.max_response_length, 768)
+
   def test_program_creates_default_assembler(self):
     program = rl_program.StandardRLProgram(
         dataset=["prompt_0"],
         max_steps=1,
         algo=self.mock_algo,
-        reward_fns=[lambda x: 1.0],
+        reward_fns=[lambda *_: 1.0],
         assembler=None,
     )
     self.assertIsInstance(
@@ -3318,6 +3344,10 @@ class RLProgramTest(absltest.TestCase):
     traj = {
         "status": datatypes.TrajectoryStatus.SUCCEEDED,
         "trajectory_reward": 1.0,
+        "conversation_text": [
+            {"role": "user", "content": "Q: What is 2+2?\nA:"},
+            {"role": "assistant", "content": "4"},
+        ],
     }
     item = datatypes.TrajectoryItem(
         traj_id="traj_1",
@@ -3329,7 +3359,6 @@ class RLProgramTest(absltest.TestCase):
         metadata={
             "question": "What is 2+2?",
             "prompt": "Q: What is 2+2?\nA:",
-            "text": "4",
             "gold_answer": "4",
         },
         traj=traj,
@@ -3352,6 +3381,7 @@ class RLProgramTest(absltest.TestCase):
     self.assertEqual(row["reward"], 1.0)
     self.assertEqual(row["question"], "What is 2+2?")
     self.assertEqual(row["prompt"], "Q: What is 2+2?\nA:")
+    # Only the assistant turn, never the prompt that precedes it.
     self.assertEqual(row["completion"], "4")
     self.assertEqual(row["gold_answer"], "4")
     self.assertEqual(row["prompt_tokens"], [1, 2])
@@ -3404,6 +3434,328 @@ class RLProgramTest(absltest.TestCase):
     self.assertIsNone(rows[1]["reward"])
     self.assertIsNone(rows[2]["reward"])
 
+    program.close()
+
+  def test_log_consumed_trajectories_multi_turn_includes_env_messages(self):
+    program = rl_program.StandardRLProgram(
+        dataset=["prompt_0"],
+        max_steps=1,
+        algo=self.mock_algo,
+        trajectory_log_dir="/tmp/trajectories",
+    )
+    mock_traj_logger = mock.MagicMock()
+    program.trajectory_logger = mock_traj_logger
+
+    traj = {
+        "status": datatypes.TrajectoryStatus.SUCCEEDED,
+        "trajectory_reward": 1.0,
+        "conversation_text": [
+            {"role": "system", "content": "You are a coding agent."},
+            {"role": "user", "content": "Fix bug in foo.py"},
+            {"role": "assistant", "content": "ls -l"},
+            {"role": "user", "content": "foo.py bar.py"},
+            {"role": "assistant", "content": "done"},
+        ],
+    }
+    item = datatypes.TrajectoryItem(
+        prompt_id="prompt_multi",
+        group_index=0,
+        traj=traj,
+    )
+
+    program._log_consumed_trajectories(
+        [item], log_step=1, consumed_policy_version=1
+    )
+
+    mock_traj_logger.log_item_async.assert_called_once()
+    row = mock_traj_logger.log_item_async.call_args[0][0]
+    expected_completion = (
+        "[assistant]: ls -l\n[environment]: foo.py bar.py\n[assistant]: done"
+    )
+    self.assertEqual(row["completion"], expected_completion)
+    program.close()
+
+  def test_invoke_reward_fn_passes_concatenated_assistant_text_and_metadata(
+      self,
+  ):
+    item = datatypes.TrajectoryItem(
+        prompt_id="p_math",
+        group_index=3,
+        traj={
+            "conversation_text": [
+                {"role": "system", "content": "you are a math tutor"},
+                {
+                    "role": "user",
+                    "content": (
+                        "Put your reasoning inside"
+                        " <reasoning>...</reasoning> tags and your answer"
+                        " inside <answer>\\boxed{}</answer> tags."
+                    ),
+                },
+                {"role": "assistant", "content": "<reasoning>2+2=4.</reasoning>"},
+                {"role": "user", "content": "continue"},
+                {"role": "assistant", "content": "<answer>\\boxed{4}</answer>"},
+            ]
+        },
+        metadata={"gold_answer": "4", "prompt_id": "p_math", "group_index": 3},
+    )
+    captured = {}
+
+    def reward_fn(completion: str, metadata: dict[str, Any]) -> float:
+      captured["completion"] = completion
+      captured["metadata"] = dict(metadata)
+      return 1.0
+
+    score = rl_program._invoke_reward_fn(reward_fn, item)
+    self.assertEqual(score, 1.0)
+    self.assertEqual(
+        captured["completion"],
+        "<reasoning>2+2=4.</reasoning><answer>\\boxed{4}</answer>",
+    )
+    self.assertEqual(
+        captured["metadata"],
+        {"gold_answer": "4", "prompt_id": "p_math", "group_index": 3},
+    )
+
+
+def _traj_item(tokens, clipped=None, raw_length=None):
+  """Builds a TrajectoryItem, optionally with collector annotations."""
+  traj = {"conversation_tokens": np.asarray(tokens, dtype=np.int32)}
+  metadata = {}
+  if clipped is not None:
+    metadata["clipped"] = clipped
+    metadata["raw_length"] = (
+        raw_length if raw_length is not None else len(tokens)
+    )
+  return datatypes.TrajectoryItem(
+      prompt_id="p", group_index=0, traj=traj, metadata=metadata
+  )
+
+
+class GenerationMetricsTest(absltest.TestCase):
+  """Covers `_generation_metrics`, the per-prompt-group accounting."""
+
+  def test_uses_collector_annotations(self):
+    # The collector scored these against the budget actually enforced for the
+    # request, which may differ from this program's default. Whatever it
+    # decided is authoritative here; nothing is recomputed.
+    metrics = rl_program._generation_metrics([[
+        _traj_item([1, 2, 3], clipped=True, raw_length=3),
+        _traj_item([1, 2], clipped=False, raw_length=2),
+    ]])
+
+    self.assertEqual(metrics["generation/completions/clip_ratio"], 0.5)
+    self.assertEqual(metrics["generation/completions/mean_raw_length"], 2.5)
+
+  def test_ignores_annotations_in_traj_dict(self):
+    # Enforces Zero-Redundancy contract: annotations must be read strictly
+    # from item.metadata, not item.traj.
+    item_with_traj_only = datatypes.TrajectoryItem(
+        prompt_id="p",
+        group_index=0,
+        traj={
+            "conversation_tokens": np.array([1, 2, 3], dtype=np.int32),
+            "clipped": True,
+            "raw_length": 3,
+        },
+        metadata={},
+    )
+    self.assertEmpty(rl_program._generation_metrics([[item_with_traj_only]]))
+
+  def test_zero_length_rollout_stays_in_denominator(self):
+    # A rollout that ran and produced nothing is still a rollout: the agentic
+    # learner divides by the whole group, so dropping it would inflate
+    # clip_ratio (1.0 here instead of 0.5).
+    metrics = rl_program._generation_metrics([[
+        _traj_item([1, 2, 3, 4], clipped=True, raw_length=4),
+        _traj_item([], clipped=False, raw_length=0),
+    ]])
+
+    self.assertEqual(metrics["generation/completions/clip_ratio"], 0.5)
+    self.assertEqual(metrics["generation/completions/min_raw_length"], 0.0)
+
+  def test_unannotated_items_do_not_join_the_denominator(self):
+    # Mixed groups are not expected in practice, but an unannotated rollout
+    # must never be counted as "not clipped" by omission.
+    metrics = rl_program._generation_metrics([[
+        _traj_item([1, 2, 3, 4], clipped=True, raw_length=4),
+        _traj_item([1, 2, 3, 4]),
+    ]])
+
+    self.assertEqual(metrics["generation/completions/clip_ratio"], 1.0)
+    self.assertEqual(metrics["generation/completions/mean_raw_length"], 4.0)
+
+  def test_half_annotated_item_is_skipped_not_raised(self):
+    # A producer that wrote one key and not the other is a bug, but it must
+    # not take down the training step: this is only a metric.
+    half = _traj_item([1, 2, 3, 4], clipped=True, raw_length=4)
+    del half.metadata["raw_length"]
+
+    metrics = rl_program._generation_metrics(
+        [[half, _traj_item([1, 2], clipped=False, raw_length=2)]]
+    )
+
+    self.assertEqual(metrics["generation/completions/clip_ratio"], 0.0)
+    self.assertEqual(metrics["generation/completions/mean_raw_length"], 2.0)
+
+  def test_returns_empty_without_annotations(self):
+    payload_only = datatypes.TrajectoryItem(prompt_id="p", traj={})
+    non_dict_traj = datatypes.TrajectoryItem(prompt_id="p", traj=object())
+
+    self.assertEmpty(rl_program._generation_metrics([]))
+    self.assertEmpty(rl_program._generation_metrics([[payload_only]]))
+    self.assertEmpty(rl_program._generation_metrics([[non_dict_traj]]))
+    self.assertEmpty(rl_program._generation_metrics([[_traj_item([1, 2])]]))
+
+  def test_accepts_numpy_scalar_annotations(self):
+    # The collector casts these, but the trajectory may round-trip through
+    # numpy on the way here.
+    metrics = rl_program._generation_metrics(
+        [[_traj_item([1, 2], clipped=np.True_, raw_length=np.int64(2))]]
+    )
+
+    self.assertIsInstance(metrics["generation/completions/clip_ratio"], float)
+    self.assertEqual(metrics["generation/completions/clip_ratio"], 1.0)
+    self.assertEqual(metrics["generation/completions/mean_raw_length"], 2.0)
+
+  def test_each_metric_uses_its_own_reduce_op(self):
+    metrics = rl_program._generation_metrics([
+        [
+            _traj_item([], clipped=True, raw_length=8),
+            _traj_item([], clipped=False, raw_length=12),
+        ],
+        [
+            _traj_item([], clipped=False, raw_length=10),
+            _traj_item([], clipped=False, raw_length=30),
+        ],
+    ])
+
+    self.assertEqual(
+        metrics,
+        {
+            "generation/completions/clip_ratio": 0.25,
+            "generation/completions/mean_raw_length": 15.0,
+            "generation/completions/max_raw_length": 30.0,
+            "generation/completions/min_raw_length": 8.0,
+        },
+    )
+
+  def test_unequal_groups_average_per_group_not_per_rollout(self):
+    # Group A: 1 of 4 clipped. Group B: 2 of 2 clipped. Averaging the group
+    # ratios gives 0.625; pooling rollouts would give 0.5. The agentic learner
+    # averages group ratios, so this pins that behavior.
+    group_a = [
+        _traj_item([], clipped=c, raw_length=10)
+        for c in (True, False, False, False)
+    ]
+    group_b = [_traj_item([], clipped=True, raw_length=10) for _ in range(2)]
+
+    metrics = rl_program._generation_metrics([group_a, group_b])
+
+    self.assertEqual(metrics["generation/completions/clip_ratio"], 0.625)
+
+
+class GenerationMetricsLoggingTest(absltest.TestCase):
+  """Covers how the computed metrics reach the metrics logger."""
+
+  def _log_metrics(self, metrics):
+    algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
+    algo.num_generations = 2
+    algo.mini_batch_size = 1
+    algo.max_turns = 1
+    algo.max_packed_len = 16
+    algo.max_response_length = 1024
+    algo.requires_reference_kl = False
+    algo.algo_config = types.SimpleNamespace(
+        temperature=None,
+        use_rollout_logps=True,
+    )
+    program = rl_program.StandardRLProgram(
+        dataset=["prompt_0"],
+        max_steps=1,
+        algo=algo,
+        reward_fns=[lambda *_: 1.0],
+    )
+    program.metrics_logger = mock.MagicMock()
+    program._collect_and_log_step_metrics(
+        all_step_items=[],
+        step_rewards=[],
+        generation_metrics=metrics,
+        num_rollouts=0,
+        num_microbatches=0,
+        step_time_sec=0.0,
+        consumed_policy_version=0,
+        log_step=0,
+    )
+    return {
+        call.args[1]: call.args[2]
+        for call in program.metrics_logger.log.call_args_list
+    }
+
+  def test_logs_the_names_generation_metrics_produced(self):
+    # The names are the ones `_generation_metrics` returns; this pins that
+    # nothing rewrites or re-prefixes them on the way to the logger.
+    computed = rl_program._generation_metrics(
+        [[_traj_item([1, 2], clipped=True, raw_length=2)]]
+    )
+
+    logged = self._log_metrics(computed)
+
+    self.assertEqual(logged["generation/completions/clip_ratio"], 1.0)
+    self.assertEqual(logged["generation/completions/max_raw_length"], 2.0)
+
+  def test_no_metrics_logs_no_generation_metrics(self):
+    logged = self._log_metrics({})
+
+    self.assertEmpty(
+        [k for k in logged if k.startswith("generation/completions/")]
+    )
+
+
+class StandardRLProgramTrajectoryStoreTest(absltest.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    self.mock_algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
+    self.mock_algo.num_generations = 2
+    self.mock_algo.mini_batch_size = 1
+    self.mock_algo.max_packed_len = 16
+    self.mock_algo.max_response_length = 1024
+    self.assembler = batch_assembly.SequencePackedBatchAssembler(
+        batch_size=1,
+        num_generations=2,
+        mini_batch_size=1,
+        max_packed_len=16,
+    )
+
+  def _create_program(self, **kwargs) -> rl_program.StandardRLProgram:
+    return rl_program.StandardRLProgram(
+        dataset=["prompt_0"],
+        algo=self.mock_algo,
+        reward_fns=[lambda *_: 1.0],
+        assembler=self.assembler,
+        **kwargs,
+    )
+
+  def test_no_trajectory_store_by_default(self):
+    program = self._create_program()
+    self.assertIsNone(program.trajectory_store)
+    program.close()
+
+  def test_holds_the_instance_it_was_given(self):
+    store = in_memory_store.InMemoryTrajectoryStore()
+    program = self._create_program(trajectory_store=store)
+    self.assertIs(program.trajectory_store, store)
+    program.close()
+
+  def test_close_does_not_close_an_injected_store(self):
+    store = mock.MagicMock(spec=in_memory_store.InMemoryTrajectoryStore)
+    program = self._create_program(trajectory_store=store)
+    program.close()
+    store.close.assert_not_called()
+
+  def test_close_without_a_store_does_not_raise(self):
+    program = self._create_program()
     program.close()
 
 

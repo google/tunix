@@ -219,5 +219,100 @@ class TrainerWorkerTest(absltest.TestCase):
     self.assertEmpty(self.fake_trainer.per_token_logps_calls)
 
 
+class TrainerWorkerExecutionContextTest(absltest.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    self.events = []
+
+    class TrackingContext:
+
+      def __init__(self, events):
+        self._events = events
+
+      def __enter__(self):
+        self._events.append("enter_ctx")
+        return self
+
+      def __exit__(self, *args):
+        self._events.append("exit_ctx")
+
+    self.ctx = TrackingContext(self.events)
+    self.fake_trainer = FakeTrainer()
+
+    def _factory():
+      self.events.append("create_trainer")
+      return self.fake_trainer
+
+    self.worker = trainer_worker.TrainerWorker(
+        trainer_factory=_factory,
+        worker_id="trainer_ctx",
+        execution_context=self.ctx,
+    )
+
+  def test_trainer_factory_runs_within_execution_context(self):
+    self.assertEqual(self.events, ["enter_ctx", "create_trainer", "exit_ctx"])
+
+  def test_all_worker_operations_run_within_execution_context(self):
+    self.events.clear()
+    self.worker.initialize()
+    self.assertEqual(self.events, ["enter_ctx", "exit_ctx"])
+
+    # Verify per_token_logps runs inside execution_context.
+    self.events.clear()
+    logps_req = datatypes.LogprobsRequest(
+        prompt_tokens=np.zeros((1, 0), dtype=np.int32),
+        completion_tokens=np.array([[3, 4]], dtype=np.int32),
+        temperature=1.0,
+        pad_id=0,
+        eos_id=1,
+    )
+    self.worker.per_token_logps(items=logps_req)
+    self.assertEqual(self.events, ["enter_ctx", "exit_ctx"])
+
+    # Verify fwd_bwd runs inside execution_context.
+    self.events.clear()
+    train_req = datatypes.TrainRequest(
+        request_id="req-1",
+        payload=datatypes.RLTrainerPayload(
+            prompt_ids=np.array([[1]], dtype=np.int32),
+            prompt_mask=np.ones((1, 1), dtype=np.float32),
+            completion_ids=np.array([[2]], dtype=np.int32),
+            completion_mask=np.array([[1]], dtype=np.float32),
+            advantages=np.array([1.0], dtype=np.float32),
+        ),
+    )
+    self.worker.fwd_bwd(request=train_req)
+    self.assertEqual(self.events, ["enter_ctx", "exit_ctx"])
+
+    # Verify update, checkpoints, weight sync, and stop operations.
+    for op in [
+        self.worker.update,
+        lambda: self.worker.save_checkpoint(metadata={"step": 1}),
+        lambda: self.worker.restore_checkpoint(step=1),
+        self.worker.prepare_weight_sync,
+        self.worker.release_weight_sync,
+        self.worker.stop,
+    ]:
+      self.events.clear()
+      op()
+      self.assertEqual(self.events, ["enter_ctx", "exit_ctx"])
+
+  def test_execution_context_exits_cleanly_on_exception(self):
+    self.worker.initialize()
+    self.events.clear()
+
+    def _failing_save(*args, **kwargs):
+      del args, kwargs
+      self.events.append("save_failed")
+      raise RuntimeError("Disk full")
+
+    self.fake_trainer.save_checkpoint = _failing_save
+    with self.assertRaisesRegex(RuntimeError, "Disk full"):
+      self.worker.save_checkpoint(metadata={"step": 1})
+
+    self.assertEqual(self.events, ["enter_ctx", "save_failed", "exit_ctx"])
+
+
 if __name__ == "__main__":
   absltest.main()

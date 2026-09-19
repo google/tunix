@@ -61,6 +61,11 @@ from tunix.sft import metrics_logger as metrics_logger_lib  # pylint: disable=g-
 ProcessContext = runtime_context.ProcessContext
 
 
+def _int_list(value: str) -> tuple[int, ...]:
+  """Parses "512,2048" into (512, 2048)."""
+  return tuple(int(part) for part in value.split(",") if part)
+
+
 def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser = argparse.ArgumentParser(
       description="Orchestrator V2 Qwen3 GSM8K GRPO demo."
@@ -229,6 +234,55 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " on-policy ratio=1."
       ),
   )
+  # ---- Optional GRPO algorithm options -------------------------------------
+  # All default to off, so omitting them reproduces the previous behaviour.
+  parser.add_argument(
+      "--epsilon_high", type=float, default=None,
+      help="Upper PPO clip bound, for DAPO-style asymmetric clipping.",
+  )
+  parser.add_argument(
+      "--loss_agg_mode", type=str, default="sequence-mean-token-mean",
+      help="Loss aggregation mode, e.g. token-mean or sequence-mean.",
+  )
+  parser.add_argument(
+      "--advantage_estimator", type=str, default="grpo",
+      help="Advantage estimator, e.g. grpo or grpo-loo (leave-one-out).",
+  )
+  parser.add_argument(
+      "--overlong_loss_masking", action=argparse.BooleanOptionalAction,
+      default=False,
+      help=(
+          "Drop sequences truncated by the response budget from the loss AND"
+          " its denominator. Needs the rollout to report a trajectory status."
+      ),
+  )
+  parser.add_argument(
+      "--seq_logprob_error_threshold", type=float, default=None,
+      help=(
+          "Drop sequences whose mean exp|log p_trainer - log q_sampler|"
+          " exceeds this. Requires rollout log-probabilities."
+      ),
+  )
+  parser.add_argument(
+      "--truncated_importance_sampling_type", type=str, default=None,
+      choices=(None, "seq-mask-tis"),
+      help="Set to seq-mask-tis to enable the sequence-mask TIS gate.",
+  )
+  parser.add_argument(
+      "--truncated_importance_sampling_ratio_min", type=float, default=None,
+      help="Lower edge of the TIS keep band.",
+  )
+  parser.add_argument(
+      "--truncated_importance_sampling_ratio", type=float, default=None,
+      help="Upper edge of the TIS keep band.",
+  )
+  parser.add_argument(
+      "--sampler_is_length_buckets", type=_int_list, default=None,
+      help=(
+          "Comma-separated completion-length bucket edges in tokens, e.g."
+          " 512,2048. Reports the sampler/trainer offset per bucket."
+      ),
+  )
   parser.add_argument(
       "--debug",
       action="store_true",
@@ -241,9 +295,24 @@ def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
   algo_config = algorithm_config.GRPOConfig(
       num_generations=args.num_generations,
       epsilon=args.epsilon,
+      epsilon_high=args.epsilon_high,
       beta=args.beta,
       temperature=args.temperature,
       use_rollout_logps=args.use_rollout_logps,
+      loss_agg_mode=args.loss_agg_mode,
+      advantage_estimator=args.advantage_estimator,
+      overlong_loss_masking=args.overlong_loss_masking,
+      seq_logprob_error_threshold=args.seq_logprob_error_threshold,
+      truncated_importance_sampling_type=(
+          args.truncated_importance_sampling_type
+      ),
+      truncated_importance_sampling_ratio_min=(
+          args.truncated_importance_sampling_ratio_min
+      ),
+      truncated_importance_sampling_ratio=(
+          args.truncated_importance_sampling_ratio
+      ),
+      sampler_is_length_buckets=args.sampler_is_length_buckets,
   )
   return algorithm_adapter.GRPOAdapter(
       algo_config=algo_config,
@@ -421,7 +490,6 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       else []
   )
   generation_args = datatypes.GenerationArgs(
-      max_response_length=args.max_response_length,
       temperature=args.temperature,
       top_p=args.top_p,
       top_k=None if args.top_k < 0 else args.top_k,

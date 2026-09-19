@@ -33,6 +33,7 @@ import jax
 from jax import typing
 import jax.numpy as jnp
 import numpy as np
+from tunix.generate import utils as generate_utils
 from tunix.rl import algorithm_config as algo_config_lib
 from tunix.rl import common
 from tunix.perf.experimental import constants as perf_constants
@@ -62,6 +63,9 @@ MetricFn = Callable[..., rl_engine_lib.MetricsT]
 @flax.struct.dataclass(frozen=True)
 class TrainExample(common.TrainExample):
   policy_version: np.ndarray | None = None
+
+  # Includes environment/template tokens; distinct from sampled-token loss mask.
+  completion_attention_mask: jax.Array | None = None
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
@@ -93,6 +97,8 @@ class AgenticRLConfig(algo_config_lib.AlgorithmConfig):
   filter_statuses: Optional[Set] = None
   overlong_filter: bool = False
   use_rollout_logps: bool = True
+  # Defaults to True when the rollout backend supports token input (e.g. vLLM).
+  exact_token_continuity: Optional[bool] = None
 
 
 TConfig = TypeVar("TConfig", bound=AgenticRLConfig)
@@ -160,6 +166,15 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     """
     self.rl_engine = rl_engine
     self.algo_config = algo_config
+    if algo_config.exact_token_continuity is None:
+      algo_config.exact_token_continuity = bool(
+          getattr(rl_engine.rollout, "supports_token_input", False)
+      )
+    elif (
+        algo_config.exact_token_continuity
+        and not rl_engine.rollout.supports_token_input
+    ):
+      raise ValueError("exact_token_continuity requires a token-input backend")
     self._validate_rollout_config()
     reward_manager_fn = function_registry.get_reward_manager(
         algo_config.reward_manager
@@ -263,18 +278,30 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       configs_to_check = rollout_config
 
     for mode, config in configs_to_check.items():
+      if self.algo_config.use_rollout_logps and not config.return_logprobs:
+        raise ValueError(
+            f"RolloutConfig ({mode}) must have return_logprobs=True for "
+            "AgenticRLLearner when use_rollout_logps=True. Please set this "
+            "before initializing RLEngine."
+        )
+      if self.algo_config.exact_token_continuity:
+        if not config.return_logprobs:
+          raise ValueError("exact_token_continuity requires sampled logprobs")
+        if config.return_routed_experts:
+          # While Router Replay conceptually requires TiTO's 1-to-1 token
+          # alignment, multi-turn TrajectoryCollectEngine / AgenticGRPOLearner
+          # does not yet stitch `rollout_output.routed_experts` across turns
+          # (or pad routing for CPU-appended template/env spans) into
+          # TrainExample. Fail fast rather than silently dropping routing.
+          raise ValueError(
+              "exact_token_continuity does not replay expert routing"
+          )
       if config.max_tokens_to_generate != self.algo_config.max_response_length:
         raise ValueError(
             f"RolloutConfig ({mode}) max_tokens_to_generate "
             f"({config.max_tokens_to_generate}) must match AgenticRLConfig "
             f"max_response_length ({self.algo_config.max_response_length}). "
             "Please align these configurations before initializing RLEngine."
-        )
-      if self.algo_config.use_rollout_logps and not config.return_logprobs:
-        raise ValueError(
-            f"RolloutConfig ({mode}) must have return_logprobs=True for "
-            "AgenticRLLearner when use_rollout_logps=True. Please set this "
-            "before initializing RLEngine."
         )
       if (
           self.rl_engine.cluster_config.rollout_engine == "vllm"
@@ -426,20 +453,16 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
   def _model_call(
       self,
-      chat_lists: List[Dict[str, str]],
+      chat_lists: List[Dict[str, str]] | None,
       env: Any = None,
       max_generation_steps: int | None = None,
+      *,
+      prompt_token_ids: np.ndarray | None = None,
   ) -> base_rollout.RolloutOutput:
-    """Calls model generation."""
+    """Calls model generation from chat messages or from recorded token ids."""
     if env:
       env.task["policy_version"] = self.policy_version
 
-    if self.chat_parser:
-      chat_lists = self.chat_parser.parse(
-          messages=chat_lists,
-          add_generation_prompt=True,
-          is_first_msg=True,  # no op if system msg is populated in reset
-      )
     tags = {}
     if env and hasattr(env, "extra_kwargs"):
       if "group_id" in env.extra_kwargs:
@@ -451,16 +474,29 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       if "pair_index" in env.extra_kwargs:
         tags[perf_constants.PAIR_INDEX] = env.extra_kwargs["pair_index"]
 
-    prompts = [chat_lists]
-    result = self.rl_engine.generate(
-        prompts=prompts,  # pytype: disable=wrong-arg-types
-        apply_chat_template=False if self.chat_parser else True,
+    if prompt_token_ids is None:
+      if self.chat_parser:
+        chat_lists = self.chat_parser.parse(
+            messages=chat_lists,
+            add_generation_prompt=True,
+            is_first_msg=True,  # no op if system msg is populated in reset
+        )
+      return self.rl_engine.generate(
+          prompts=[chat_lists],  # pytype: disable=wrong-arg-types
+          apply_chat_template=not self.chat_parser,
+          mode=rl_engine_lib.Mode.TRAIN,
+          trace_tags=tags,
+          max_generation_steps=max_generation_steps,
+      )
+
+    return self.rl_engine.generate(
+        prompts=None,
+        apply_chat_template=False,
         mode=rl_engine_lib.Mode.TRAIN,
         trace_tags=tags,
         max_generation_steps=max_generation_steps,
+        prompt_token_ids=[generate_utils.as_token_ids(prompt_token_ids)],
     )
-
-    return result
 
   def _build_orchestrator(self) -> rollout_orchestrator.RolloutOrchestrator:
     """Builds and configures a RolloutOrchestrator for parallel rollouts."""
@@ -473,6 +509,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         overlong_filter=self.algo_config.overlong_filter,
         filter_statuses=self.algo_config.filter_statuses,
         perf_v2=self.rl_engine.perf_v2,
+        exact_token_continuity=self.algo_config.exact_token_continuity,
     )
     return rollout_orchestrator.RolloutOrchestrator(
         engine_cls=trajectory_collect_engine.TrajectoryCollectEngine,

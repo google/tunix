@@ -462,6 +462,25 @@ def _get_layer_axis_from_sharding_spec(sharding_spec) -> Optional[int]:
   return None
 
 
+@functools.partial(jax.jit, static_argnums=1)
+def _jit_unstack(x: jax.Array, axis: int) -> Tuple[jax.Array, ...]:
+  return tuple(jnp.unstack(x, axis=axis))
+
+
+def _unroll_layer_axis(val: Any, axis: int) -> Tuple[Any, ...]:
+  """Splits `val` along `axis` into one array per layer.
+
+  `jnp.unstack` outside of jit issues one slice op per layer, and each of
+  them is a separate dispatch (a ~15 ms round trip under a Pathways proxy).
+  Running the unstack inside one jitted call returns every layer slice from a
+  single dispatch, so a 28-layer model with ~10 scanned parameters no longer
+  spends ~4 s of every weight sync here. numpy inputs are sliced directly.
+  """
+  if isinstance(val, jax.Array):
+    return _jit_unstack(val, axis)
+  return tuple(np.moveaxis(val, axis, 0))
+
+
 def _unroll_scanned_layers(
     src_state: Any,
     src_to_tgt_map: Dict,
@@ -510,12 +529,9 @@ def _unroll_scanned_layers(
 
     val = src_val.value if hasattr(src_val, 'value') else src_val
     if layer_axis is not None:
-      # Unroll the scanned layer dimension
-      num_layers = val.shape[layer_axis]
-      for i in range(num_layers):
-        idx = [slice(None)] * val.ndim
-        idx[layer_axis] = i
-        layer_val = val[tuple(idx)]
+      # Unroll the scanned layer dimension: one call per scanned parameter
+      # instead of one slice dispatch per layer.
+      for i, layer_val in enumerate(_unroll_layer_axis(val, layer_axis)):
         layer_key = tgt_path[i]
         unscanned_flat[(src_key, layer_key)] = (layer_val, tgt_param[i])
     else:
@@ -2082,3 +2098,20 @@ def detach_incompatible_vllm_cleanup_finalizer(llm_engine: Any) -> None:
       'Detached vLLM cleanup finalizer for non-torch model type %s.',
       type(model).__name__,
   )
+
+
+def as_token_ids(value) -> np.ndarray:
+  """Copies token IDs into an owned 1-D int32 array.
+
+  Raises:
+    ValueError: `value` is not one-dimensional.
+  """
+  array = np.array(value, dtype=np.int32)
+  if array.ndim != 1:
+    raise ValueError(f'token ids must be 1-D, got shape {array.shape}')
+  return array
+
+
+def unpad_prompt(padded_tokens, length: int) -> np.ndarray:
+  """Returns the last `length` tokens of a left-padded prompt row."""
+  return as_token_ids(padded_tokens)[-int(length) :]

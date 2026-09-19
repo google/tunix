@@ -368,9 +368,6 @@ class BasePipeline(abc.ABC, config.HyperParameters):
               max_running_requests,
           ),
           rollout_sglang_jax_page_size=sg.get("page_size", 128),
-          rollout_sglang_jax_use_sort_for_toppk_minp=sg.get(
-              "use_sort_for_toppk_minp", False
-          ),
       )
 
     if engine == "vllm":

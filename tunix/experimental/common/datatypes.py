@@ -45,6 +45,10 @@ Role = common_datatypes.Role
 UNSET_ROUTED_EXPERT = -1
 
 
+# Re-export assistant_text from canonical agent_types module.
+assistant_text = agent_types.assistant_text
+
+
 ##### Common DTOs (Data Transfer Objects) #####
 
 
@@ -203,14 +207,28 @@ class WorkerInfo:
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class GenerationArgs:
-  """Typed generation arguments used by the orchestrator generate API."""
+  """Typed per-turn generation arguments used by the orchestrator generate API.
+
+  This holds per-turn sampling and generation configuration (as opposed to
+  episode-level configuration like `max_turns` or `max_response_length` on
+  `RolloutRequest`).
+
+  Attributes:
+    max_generation_steps: Maximum number of tokens to generate in a single turn.
+    temperature: Sampling temperature for generation.
+    top_p: Nucleus sampling probability threshold.
+    top_k: Top-k sampling cutoff.
+    seed: Random seed for reproducible generation.
+    return_logprobs: Whether to return token log probabilities.
+  """
+
   max_generation_steps: int | None = None
-  max_response_length: int | None = None
   temperature: float | None = None
   top_p: float | None = None
   top_k: int | None = None
   seed: int | None = None
   return_logprobs: bool | None = None
+  return_routed_experts: bool | None = None
 
   def as_kwargs(self) -> dict[str, Any]:
     return {
@@ -230,9 +248,11 @@ class RolloutRequest(Request):
     prompt_id: Unique identifier for this prompt within a task or dataset.
     group_index: Optional index within a group for group-based algorithms (e.g.,
       GRPO). Defaults to 0 for ungrouped.
-    generation_kwargs: Additional keyword arguments for generation (e.g.
-      sampling parameters like max_tokens and temperature).
+    generation_kwargs: Additional per-turn keyword arguments for generation
+      (e.g. sampling parameters like max_generation_steps and temperature).
     max_turns: Maximum number of conversation turns for environment interaction.
+    max_response_length: Optional cumulative response token budget across all
+      turns of the rollout episode.
     target_policy_version: Policy model version identifier to use for rollout
       generation.
   """
@@ -242,6 +262,7 @@ class RolloutRequest(Request):
   group_index: int = 0
   generation_kwargs: dict[str, Any] = dataclasses.field(default_factory=dict)
   max_turns: int = 10
+  max_response_length: int | None = None
   target_policy_version: int = 0
 
   @property
@@ -461,6 +482,16 @@ class RLTrainerPayload(TrainerPayload):
   ref_per_token_logps: ArrayLike | None = None
   old_per_token_logps: ArrayLike | None = None
   sampler_is_weights: ArrayLike | None = None
+  # The rollout engine's own per-token log-probabilities, and the collector's
+  # verdict that a sequence was truncated by the response budget rather than
+  # finished. Both are per-sequence quantities a sequence-gated GRPO loss
+  # needs and that nothing else carries: `seq-mask-tis` and
+  # `seq_logprob_error_threshold` compare the sampler against the trainer, and
+  # `overlong_loss_masking` drops truncated sequences from the loss while
+  # leaving them in the denominator. Without these two fields the loss silently
+  # runs with those features disabled.
+  rollout_per_token_logps: ArrayLike | None = None
+  overlong: ArrayLike | None = None
   routed_experts: ArrayLike | None = None
   returns: ArrayLike | None = None
   old_values: ArrayLike | None = None

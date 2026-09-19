@@ -15,16 +15,19 @@
 """Sampler for vLLM-style autoregressive decoding using JAX and NNX models."""
 
 import atexit
+import concurrent.futures
+import copy
 import dataclasses
 import gc
 from itertools import count
 import os
-from typing import Any, Dict, List, Optional, Tuple, Union, cast
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union, cast
 
 from absl import logging
 import jax
 import jaxtyping
 import numpy as np
+import tqdm
 from tunix.generate import base_sampler
 from tunix.generate import tokenizer_adapter as tok_adapter
 from tunix.generate import utils
@@ -36,6 +39,7 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.inputs import TokensPrompt
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
+from vllm.sampling_params import RequestOutputKind
 from vllm.sampling_params import SamplingParams
 
 # Colocate vllm engine and worker in the main process
@@ -80,6 +84,15 @@ class VllmConfig:
   # model, large pool) set False to skip the two collective RPCs and the
   # re-allocation (~2 s per RL step on Qwen3-0.6B with a 57 GB pool).
   free_kv_cache_during_weight_sync: bool = True
+  # Decode the text and extract the logprobs of each request as soon as it
+  # finishes, in a thread pool, while the engine keeps decoding the rest of
+  # the batch. Otherwise all of that runs serially after the last request
+  # finishes. Outputs are identical either way; False keeps the plain
+  # `LLM.generate` call (offline mode) / post-processing after all driver
+  # futures resolved (server mode).
+  overlap_postprocessing: bool = True
+  # Threads decoding finished requests when `overlap_postprocessing` is on.
+  postprocessing_threads: int = 4
 
   # vLLM engine args that can be directly passed in without additional processing, e.g. max_model_len, async_scheduling, etc.
   engine_kwargs: dataclasses.InitVar[Optional[Dict[str, Any]]] = None
@@ -110,6 +123,11 @@ class VllmConfig:
           f" via engine_kwargs: {sorted(illegal)}"
       )
     self._processed_engine_kwargs = engine_kwargs
+    if self.postprocessing_threads < 1:
+      raise ValueError(
+          "postprocessing_threads must be >= 1, got"
+          f" {self.postprocessing_threads}"
+      )
     if engine_kwargs:
       for key, value in engine_kwargs.items():
         logging.info(
@@ -158,6 +176,10 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       self.tokenizer = tok_adapter.TokenizerAdapter(tokenizer)
     self.config = config
     self.args = self._vllm_config(config)
+    self._postprocess_pool: Optional[concurrent.futures.ThreadPoolExecutor] = (
+        None
+    )
+    self._postprocessed: Optional[Dict[str, list[Any]]] = None
     self._driver: VLLMInProcessDriver | None = None
     self.llm: LLM | None = None
     self._request_counter = count()
@@ -425,6 +447,9 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     if self._driver is not None:
       self._driver.shutdown()
       self._driver = None
+    if self._postprocess_pool is not None:
+      self._postprocess_pool.shutdown(wait=False)
+      self._postprocess_pool = None
 
   @property
   def _model_runner(self):
@@ -466,9 +491,12 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     out_logprobs = [[] for _ in range(generations)]
     out_tokens = [[] for _ in range(generations)]
     out_routed_experts = [[] for _ in range(generations)]
+    precomputed = self._postprocessed or {}
+    self._postprocessed = None
     for input_string, multi_sampling_output in zip(
         input_strings, request_outputs
     ):
+      ready = precomputed.get(multi_sampling_output.request_id)
       for idx, single_output in enumerate(multi_sampling_output.outputs):
         # KEEP the eos token in the returned token_ids — needed so multi-turn
         # consumers (agentic engine) can reconstruct the exact sequence the
@@ -481,12 +509,11 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         out_tokens[idx].append(
             np.array(single_output.token_ids, dtype=np.int32)
         )
-        decoded_outputs[idx].append(
-            self.tokenizer.decode(single_output.token_ids)  # pyrefly: ignore[bad-argument-type]
-        )
-        logprobs = utils.get_logprobs_from_vllm_output(
-            list(single_output.token_ids), single_output.logprobs  # pyrefly: ignore[bad-argument-type]
-        )
+        if ready is not None:
+          text, logprobs = ready[idx]
+        else:
+          text, logprobs = self._decode_single_output(single_output)
+        decoded_outputs[idx].append(text)
         out_logprobs[idx].append(logprobs)
         # `[length, num_layers, top_k]`, or None when capture is disabled.
         out_routed_experts[idx].append(
@@ -499,10 +526,109 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         )
     return decoded_outputs, out_logprobs, out_tokens, out_routed_experts
 
+  def _decode_single_output(
+      self, single_output: Any
+  ) -> Tuple[str, List[float] | None]:
+    """Text and per-token logprobs of one sampled completion."""
+    text = self.tokenizer.decode(single_output.token_ids)  # pyrefly: ignore[bad-argument-type]
+    logprobs = utils.get_logprobs_from_vllm_output(
+        list(single_output.token_ids), single_output.logprobs  # pyrefly: ignore[bad-argument-type]
+    )
+    return text, logprobs
+
+  def _postprocess_request_output(
+      self, request_output: RequestOutput
+  ) -> List[Tuple[str, List[float] | None]]:
+    """Decodes every sample of a finished request (runs in the thread pool)."""
+    return [self._decode_single_output(o) for o in request_output.outputs]
+
+  def _get_postprocess_pool(self) -> concurrent.futures.ThreadPoolExecutor:
+    if self._postprocess_pool is None:
+      self._postprocess_pool = concurrent.futures.ThreadPoolExecutor(
+          max_workers=self.config.postprocessing_threads,
+          thread_name_prefix="vllm-postprocess",
+      )
+    return self._postprocess_pool
+
+  def _postprocess_as_completed(
+      self, futures: List[concurrent.futures.Future[Any]]
+  ) -> None:
+    """Server mode: decodes each request as its driver future resolves."""
+    pool = self._get_postprocess_pool()
+    self._postprocessed = None
+    pending: Dict[str, concurrent.futures.Future[Any]] = {}
+    for future in concurrent.futures.as_completed(futures):
+      result = future.result()
+      if isinstance(result, RequestOutput):
+        pending[result.request_id] = pool.submit(
+            self._postprocess_request_output, result
+        )
+    self._postprocessed = {rid: f.result() for rid, f in pending.items()}
+
+  def _generate_offline(
+      self,
+      prompts: List[TokensPrompt],
+      sampling_params: Union[
+          SamplingParams, BeamSearchParams, List[SamplingParams]
+      ],
+  ) -> List[RequestOutput]:
+    """Offline generation; overlaps post-processing with decode when enabled.
+
+    Beam search keeps the plain `LLM.generate` path: `BeamSearchParams` are
+    expanded by vLLM itself and never reach the engine as one request.
+    """
+    if not self.config.overlap_postprocessing or isinstance(
+        sampling_params, BeamSearchParams
+    ):
+      return self.llm.generate(  # pyrefly: ignore[missing-attribute]
+          prompts=prompts,
+          sampling_params=sampling_params,
+          use_tqdm=True,
+      )
+    # Same loop as vllm's LLM.generate -> _run_engine, except that every
+    # finished request is handed to the thread pool right away, so decoding
+    # its text and extracting its logprobs overlap with the remaining decode
+    # steps instead of running serially after the last one. Request ids come
+    # from the LLM's own counter so they stay unique alongside any
+    # `LLM.generate` call on the same engine.
+    pool = self._get_postprocess_pool()
+    self._postprocessed = None
+    engine = self.llm.llm_engine  # pyrefly: ignore[missing-attribute]
+    counter = self.llm.request_counter  # pyrefly: ignore[missing-attribute]
+    for idx, prompt in enumerate(prompts):
+      params = (
+          sampling_params[idx]
+          if isinstance(sampling_params, list)
+          else sampling_params
+      )
+      params.output_kind = RequestOutputKind.FINAL_ONLY
+      engine.add_request(str(next(counter)), prompt, params)
+    outputs: List[RequestOutput] = []
+    futures: Dict[str, concurrent.futures.Future[Any]] = {}
+    progress = tqdm.tqdm(
+        total=len(prompts), desc="Processed prompts", dynamic_ncols=True
+    )
+    try:
+      while engine.has_unfinished_requests():
+        for output in engine.step():
+          if output.finished:
+            outputs.append(output)
+            futures[output.request_id] = pool.submit(
+                self._postprocess_request_output, output
+            )
+            progress.update(1)
+    finally:
+      progress.close()
+    self._postprocessed = {rid: f.result() for rid, f in futures.items()}
+    # vLLM's LLM.generate returns outputs sorted by request id as well.
+    return sorted(outputs, key=lambda o: int(o.request_id))
+
   def _generate_server_mode(
       self,
       prompts: List[TokensPrompt],
-      sampling_params: Union[SamplingParams, BeamSearchParams],
+      sampling_params: Union[
+          SamplingParams, BeamSearchParams, List[SamplingParams]
+      ],
   ) -> List[RequestOutput]:
     """Generate the response in server mode."""
     if self._driver is None:
@@ -511,9 +637,12 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     requests = []
     for idx, prompt in enumerate(prompts):
       request_id = str(next(self._request_counter))
-      params = sampling_params
-      if idx > 0 and hasattr(sampling_params, "clone"):
-        params = sampling_params.clone()
+      if isinstance(sampling_params, list):
+        params = sampling_params[idx]
+      else:
+        params = sampling_params
+        if idx > 0 and hasattr(sampling_params, "clone"):
+          params = sampling_params.clone()
       requests.append({
           "request_id": request_id,
           "prompt": prompt,
@@ -521,6 +650,8 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       })
 
     futures = self._driver.submit_requests(requests)
+    if self.config.overlap_postprocessing:
+      self._postprocess_as_completed(futures)
 
     outputs: List[RequestOutput] = []
     for future in futures:
@@ -532,10 +663,35 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       outputs.append(result)
     return outputs
 
+  @staticmethod
+  def _check_prompt_echo(prompt_ids, outputs) -> None:
+    """Checks each result belongs to, and echoes, the submitted token row.
+
+    Verifies unpadded prompt token IDs (before left-padding) against
+    output.prompt_token_ids to ensure vLLM did not re-tokenize or alter the
+    submitted token ID sequence.
+
+    Raises:
+      ValueError: result count, request ids or echoed prompts disagree with
+        what was submitted.
+    """
+    if len(outputs) != len(prompt_ids):
+      raise ValueError("vLLM result count differs from submitted token rows")
+    request_ids = [output.request_id for output in outputs]
+    if len(set(request_ids)) != len(request_ids):
+      raise ValueError("vLLM returned duplicate request ids")
+    for expected, output in zip(prompt_ids, outputs):
+      if not np.array_equal(
+          utils.as_token_ids(output.prompt_token_ids), expected
+      ):
+        raise ValueError(
+            "vLLM prompt echo differs from the submitted token row"
+        )
+
   def __call__(
       self,
-      input_strings: str | List[str],
-      max_generation_steps: int,
+      input_strings: str | List[str] | None = None,
+      max_generation_steps: int = 0,
       max_prompt_length: Optional[int] = None,
       temperature: float = 0.0,
       top_p: Optional[float] = None,
@@ -548,11 +704,37 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       return_logits: bool = True,
       echo: bool = False,
       pad_output: bool = False,
+      *,
+      prompt_token_ids: Sequence[Sequence[int] | np.ndarray] | None = None,
       **kwargs,
   ) -> base_sampler.SamplerOutput:
     """The entry point API for vLLM Sampler"""
     if isinstance(input_strings, str):
       input_strings = [input_strings]
+
+    exact_input = prompt_token_ids is not None
+    if exact_input:
+      assert prompt_token_ids is not None
+      if input_strings is not None:
+        raise ValueError(
+            "Provide exactly one of input_strings or prompt_token_ids"
+        )
+      prompt_ids = [utils.as_token_ids(row) for row in prompt_token_ids]
+      if any(
+          len(row) + max_generation_steps > self.args["max_model_len"]
+          for row in prompt_ids
+      ):
+        raise ValueError(
+            "prompt plus max_generation_steps exceeds max_model_len"
+        )
+      # TODO(b/399000000): Clean up detokenize() so dummy input_strings are not needed.
+      input_strings = [""] * len(prompt_ids)
+    else:
+      if input_strings is None:
+        raise ValueError(
+            "Provide exactly one of input_strings or prompt_token_ids"
+        )
+      prompt_ids = [self.tokenize(x) for x in input_strings]
 
     # max_tokens: maximum number of tokens to generate
     if max_generation_steps > self.args["max_model_len"]:
@@ -562,6 +744,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           f"{max_generation_steps} and `max_model_len`="
           f"{self.args['max_model_len']}."
       )
+    raw_prompt_start = None
     if beam_size is not None:
       sampling_params = BeamSearchParams(
           beam_width=beam_size,
@@ -610,6 +793,17 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
 
       sampling_kwargs = self.config.sampling_kwargs.copy()
       sampling_kwargs.update(kwargs)
+      raw_prompt_start = sampling_kwargs.pop(
+          "routed_experts_prompt_start", None
+      )
+      if raw_prompt_start is not None and not isinstance(
+          raw_prompt_start, (list, tuple)
+      ):
+        setattr(
+            sampling_params, "routed_experts_prompt_start", raw_prompt_start
+        )
+        raw_prompt_start = None
+
       if sampling_kwargs:
         try:
           logging.log_first_n(
@@ -633,19 +827,48 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
               f" {sampling_kwargs}. Error: {e}",
           )
 
-    prompt_ids = [self.tokenize(x) for x in input_strings]
+    if exact_input and (
+        isinstance(sampling_params, BeamSearchParams)
+        or getattr(sampling_params, "n", 1) != 1
+        or getattr(sampling_params, "truncate_prompt_tokens", None) is not None
+    ):
+      # One sampled row per submitted row, no truncation: the echo check and
+      # the recorded history assume the engine consumed exactly these ids.
+      raise ValueError("prompt_token_ids requires exactly one output per row")
     prompt_objects = cast(
         List[TokensPrompt],
         [{"prompt_token_ids": list(ids)} for ids in prompt_ids],
     )
-    if self._driver is not None:
-      outputs = self._generate_server_mode(prompt_objects, sampling_params)
-    else:
-      outputs = self.llm.generate(  # pyrefly: ignore[missing-attribute]
-          prompts=prompt_objects,
-          sampling_params=sampling_params,
-          use_tqdm=True,
+    target_sampling_params: Union[
+        SamplingParams, BeamSearchParams, List[SamplingParams]
+    ] = sampling_params
+    if raw_prompt_start is not None and isinstance(
+        raw_prompt_start, (list, tuple)
+    ):
+      assert len(raw_prompt_start) == len(prompt_objects), (
+          f"Length of routed_experts_prompt_start ({len(raw_prompt_start)}) "
+          f"does not match number of prompts ({len(prompt_objects)})."
       )
+      prompt_params_list: List[SamplingParams] = []
+      for offset in raw_prompt_start:
+        p = cast(
+            SamplingParams,
+            sampling_params.clone()
+            if hasattr(sampling_params, "clone")
+            else copy.deepcopy(sampling_params),
+        )
+        setattr(p, "routed_experts_prompt_start", offset)
+        prompt_params_list.append(p)
+      target_sampling_params = prompt_params_list
+
+    if self._driver is not None:
+      outputs = self._generate_server_mode(
+          prompt_objects, target_sampling_params
+      )
+    else:
+      outputs = self._generate_offline(prompt_objects, target_sampling_params)
+    if exact_input:
+      self._check_prompt_echo(prompt_ids, outputs)
     decoded_outputs, out_logprobs, out_tokens, out_routed_experts = (
         self.detokenize(input_strings, outputs)
     )
@@ -678,5 +901,8 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         logprobs=out_logprobs[0] if self.config.return_logprobs else None,  # pyrefly: ignore[bad-argument-type]
         routed_experts=(
             out_routed_experts[0] if self.config.return_routed_experts else None
+        ),
+        prompt_lengths=np.array(
+            [len(row) for row in prompt_ids], dtype=np.int32
         ),
     )

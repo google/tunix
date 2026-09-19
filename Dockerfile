@@ -67,9 +67,10 @@ ARG INSTALL_DEEPSWE_DEPS=false
 
 # Install DeepSWE specific dependencies and apply runtime patches conditionally
 RUN if [ "$INSTALL_DEEPSWE_DEPS" = "true" ]; then \
-      uv pip install kubernetes gym swebench==3.0.2 && \
+      uv pip install kubernetes gym swebench==3.0.2 'openhands-sdk>=1.44.1' 'k8s-agent-sandbox>=0.5.1' httpx && \
       uv pip install --no-deps git+https://github.com/kubernetes-sigs/agent-sandbox.git#subdirectory=clients/python/agentic-sandbox-client && \
       uv pip install --no-deps git+https://github.com/kubernetes-sigs/agent-sandbox.git#subdirectory=examples/agent-sandbox-rl && \
+      uv pip install --no-deps git+https://github.com/kubernetes-sigs/agent-sandbox.git#subdirectory=clients/integrations/openhands && \
       uv pip install --no-deps git+https://github.com/r2e-gym/r2e-gym.git@0d94c4eb9431cd195c55a7ea3abd54006c9a1735 && \
       sed -i 's/create_repo, upload_folder, HfFolder/create_repo, upload_folder/' /opt/venv/lib/python3.12/site-packages/r2egym/agenthub/utils/utils.py && \
       sed -i 's/self.commit = ParsedCommit(\*\*json.loads(self.commit_json))/self.commit = ParsedCommit(\*\*(json.loads(self.commit_json) if isinstance(self.commit_json, str) else self.commit_json))/' /opt/venv/lib/python3.12/site-packages/r2egym/agenthub/runtime/docker.py; \
@@ -87,16 +88,15 @@ fi
 ARG INSTALL_RAIDEN=false
 ARG RAIDEN_WHEEL_DIR=/app/raiden_wheels
 
-# Install Raiden specific dependencies conditionally
+# Install Raiden specific dependencies conditionally. Off by default, so a
+# plain build never needs access to the wheel. The installer prefers a locally
+# built wheel from ${RAIDEN_WHEEL_DIR} (see scripts/build_raiden_wheel.sh) and
+# otherwise fetches the wheel pinned in scripts/install_raiden.sh.
+COPY scripts/install_raiden.sh /app/scripts/
 COPY raiden_wheels/ ${RAIDEN_WHEEL_DIR}/
 RUN if [ "$INSTALL_RAIDEN" = "true" ]; then \
-    if [ -d "$RAIDEN_WHEEL_DIR" ] && ls "$RAIDEN_WHEEL_DIR"/*.whl 1>/dev/null 2>&1; then \
-      pip install --force-reinstall --no-deps "$RAIDEN_WHEEL_DIR"/*.whl; \
-    else \
-      pip install keyrings.google-artifactregistry-auth && \
-      pip install tpu-raiden-jax --extra-index-url https://us-python.pkg.dev/cloud-tpu-inference-test/tpu-raiden/simple/; \
-    fi; \
-fi
+      RAIDEN_WHEEL_DIR="$RAIDEN_WHEEL_DIR" bash /app/scripts/install_raiden.sh; \
+    fi
 
 # Force install numpy version to avoid version conflicts.
 RUN uv pip install numpy==2.3.5

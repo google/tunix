@@ -1678,6 +1678,7 @@ class RoutedExpertsAlignmentTest(absltest.TestCase):
         routed, prompt_len, completion_len, max_prompt, max_response
     )
 
+    self.assertEqual(out.dtype, np.int16)
     self.assertEqual(
         out.shape, (max_prompt + max_response, _ROUTING_LAYERS, _ROUTING_TOP_K)
     )
@@ -1743,6 +1744,7 @@ class PaddedBatchAssemblerRoutingTest(absltest.TestCase):
     self.assertLen(packed, 1)
     routed = packed[0].routed_experts
     self.assertIsNotNone(routed, "assembler dropped the replayed routing")
+    self.assertEqual(routed.dtype, np.int16)
     self.assertEqual(
         routed.shape,
         (

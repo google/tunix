@@ -232,6 +232,7 @@ class InprocessVllmSamplerAdapter(
     seeds = []
     return_logprobs_list = []
     return_routed_experts_list = []
+    routed_experts_prompt_start_list = []
 
     for req in requests:
       prompt = req.prompt if hasattr(req, "prompt") else req
@@ -250,6 +251,9 @@ class InprocessVllmSamplerAdapter(
       seeds.append(sp.seed)
       return_logprobs_list.append(sp.return_logprobs)
       return_routed_experts_list.append(sp.return_routed_experts)
+      routed_experts_prompt_start_list.append(
+          getattr(sp, "routed_experts_prompt_start", 0)
+      )
 
     max_generation_steps = (
         max(max_gen_steps_list) if max_gen_steps_list else 64
@@ -260,6 +264,11 @@ class InprocessVllmSamplerAdapter(
     seed = seeds[0] if seeds else None
     return_logprobs = any(return_logprobs_list) or kwargs.get(
         "return_logprobs", False
+    )
+    routed_experts_prompt_start = (
+        routed_experts_prompt_start_list
+        if routed_experts_prompt_start_list
+        else kwargs.get("routed_experts_prompt_start", 0)
     )
     # Capture is an engine-level vLLM setting, so it cannot be turned on
     # per request. Warn rather than silently handing back None routing, which
@@ -283,6 +292,7 @@ class InprocessVllmSamplerAdapter(
         top_k=top_k,
         seed=seed,
         return_logprobs=return_logprobs,
+        routed_experts_prompt_start=routed_experts_prompt_start,
     )
 
     responses = []

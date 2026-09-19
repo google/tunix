@@ -21,9 +21,10 @@ Provides supervised RL program execution (`run`).
 import collections
 from collections.abc import Sequence
 from concurrent import futures
+import contextlib
 import pickle
 import time
-from typing import Any
+from typing import Any, Mapping
 
 from absl import logging
 from tunix.experimental.common import datatypes
@@ -33,8 +34,10 @@ from tunix.experimental.orchestrator import lifecycle
 from tunix.experimental.orchestrator import rl_program
 from tunix.experimental.orchestrator import startup_validation
 from tunix.experimental.orchestrator import worker_registry
+from tunix.experimental.trajectory import store as trajectory_store_lib
 from tunix.experimental.worker import abstract_worker
 from tunix.experimental.worker import remote_execution
+
 
 _STOP_TIMEOUT_S = 60.0  # Timeout for stopping remote workers. 60 should not be touched for any healthy stop.
 
@@ -49,8 +52,23 @@ class ClusterOrchestrator:
       lifecycle_driver: lifecycle.LifecycleDriver | None = None,
       monitor: health_monitor.HealthMonitor | None = None,
       weight_sync_mode: str | None = None,
+      trajectory_store_config: Mapping[str, Any] | None = None,
   ):
-    """Initializes ClusterOrchestrator."""
+    """Initializes ClusterOrchestrator.
+
+    Args:
+      config: Orchestrator configuration.
+      registry: Worker registry to use; one is created if omitted.
+      lifecycle_driver: Lifecycle driver to use; one is created if omitted.
+      monitor: Health monitor to use; one is created if omitted.
+      weight_sync_mode: Weight sync mode, if any.
+      trajectory_store_config: Trajectory Store configuration for this
+        process, or None to run without a store. See
+        `store.TrajectoryStore.from_config`. Pass the same config to every
+        process in the run: for the file backend it is the shared root_dir
+        and run_id that will make the workers' writes visible to this
+        process's reads once read/write wiring is connected.
+    """
     self.config = config
     self.registry = registry or worker_registry.WorkerRegistry()
     self.lifecycle_driver = lifecycle_driver or lifecycle.LifecycleDriver(
@@ -67,6 +85,25 @@ class ClusterOrchestrator:
     self.engine: distributed_rl_engine.DistributedRLEngine | None = None
     mode = getattr(weight_sync_mode, "value", weight_sync_mode)
     self._weight_sync_mode = str(mode).lower() if mode is not None else None
+    # The sole construction site for this process's Trajectory Store: one
+    # ClusterOrchestrator exists per orchestrator process, so building it
+    # here — once, in __init__ — is the whole guard. Its lifetime is meant
+    # to span the process, not any one run() call, so it is public
+    # (`self.trajectory_store`, not `_trajectory_store`) for a caller to
+    # thread into whatever RLProgram it constructs; see StandardRLProgram's
+    # `trajectory_store` argument.
+    # TODO(sizhi): Wire active trajectory reads/writes between
+    # orchestrator/program and rollout workers in follow-up CLs.
+    self.trajectory_store = trajectory_store_lib.TrajectoryStore.from_config(
+        trajectory_store_config
+    )
+    if self.trajectory_store is not None:
+      # Logged so a config mismatch between this process and its workers is one
+      # grep away.
+      logging.info(
+          "[trajectory-store] orchestrator built %s",
+          self.trajectory_store.to_config(),
+      )
 
   def __enter__(self) -> "ClusterOrchestrator":
     """Interactive context manager bring-up."""
@@ -255,9 +292,14 @@ class ClusterOrchestrator:
   def shutdown(self) -> None:
     """Shuts down all workers and closes health monitoring resources."""
     logging.info("Shutting down all workers...")
-    self.monitor.close()
-    self._shutdown_remote_workers()
-    self.lifecycle_driver.shutdown()
+    with contextlib.ExitStack() as stack:
+      # Registered in reverse order of execution (LIFO) so that every stage
+      # runs even if a preceding stage raises an exception.
+      if self.trajectory_store is not None:
+        stack.callback(self.trajectory_store.close)
+      stack.callback(self.lifecycle_driver.shutdown)
+      stack.callback(self._shutdown_remote_workers)
+      stack.callback(self.monitor.close)
     logging.info("Shutdown complete.")
 
   def validate_startup(self, alg_config: Any, training_config: Any) -> None:

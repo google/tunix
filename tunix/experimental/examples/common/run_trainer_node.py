@@ -19,7 +19,6 @@ from __future__ import annotations
 import argparse
 import ast
 import asyncio
-import contextlib
 import logging
 import math
 import os
@@ -27,7 +26,6 @@ from pathlib import Path
 import pickle
 import signal
 import sys
-import time
 from typing import Any
 
 from flax import nnx
@@ -387,6 +385,20 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="Rollout TP degree to align MaxText MoE MLP dimensions with.",
   )
   parser.add_argument(
+      "--max_seq_token_per_tpu",
+      type=int,
+      default=0,
+      help=(
+          "Token budget per packed row, as configured on the orchestrator's"
+          " SequencePackedBatchAssembler. MaxText backend only: it becomes"
+          " max_target_length, so the trainer's config declares the width of"
+          " the rows it is actually fed rather than the width of one"
+          " trajectory. The Tunix PeftTrainer backend ignores it -- the"
+          " orchestrator owns packing there. 0 keeps max_target_length at"
+          " max_prompt_length + max_response_length."
+      ),
+  )
+  parser.add_argument(
       "--prefuse_moe_weights",
       type=_str2bool,
       default=False,
@@ -406,6 +418,30 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       "--debug",
       action="store_true",
       help="Enable debug logging for the trainer worker.",
+  )
+  parser.add_argument(
+      "--trainable_parameters_mask",
+      type=str,
+      default=None,
+      help="Trainable parameters regex mask for freezing weights.",
+  )
+  parser.add_argument(
+      "--profiler_steps",
+      type=int,
+      default=0,
+      help="Number of steps to profile.",
+  )
+  parser.add_argument(
+      "--skip_first_n_profiler_steps",
+      type=int,
+      default=1,
+      help="Number of steps to skip before starting profiling.",
+  )
+  parser.add_argument(
+      "--profiler_period",
+      type=int,
+      default=-1,
+      help="Profile every N steps. If negative, profile only once.",
   )
   return parser.parse_args(argv)
 
@@ -510,168 +546,6 @@ def _load_actor_model(args, mesh: Mesh, *, lora: bool):
   )
 
 
-class _MeshBoundTrainer:
-  """Binds generic PeftTrainer v2 calls to this worker's JAX mesh."""
-
-  def __init__(
-      self,
-      trainer: Any,
-      mesh: Mesh,
-      save_enabled: bool = True,
-  ):
-    self._trainer = trainer
-    self._mesh = mesh
-    self._save_enabled = save_enabled
-    self._last_saved_train_step = None
-
-  def __getattr__(self, name: str) -> Any:
-    return getattr(self._trainer, name)
-
-  def fwd_bwd(self, *args, **kwargs) -> None:
-    with self._mesh:
-      self._trainer.fwd_bwd(*args, **kwargs)
-
-  def _clear_resumed_mid_step(self) -> None:
-    # MaxText sets _resumed_mid_step = True upon restoring a checkpoint and forces
-    # an immediate save during update(). If saving is disabled, bypass it.
-    if getattr(self._trainer, "_resumed_mid_step", False):
-      logging.info(
-          "checkpoint_save_interval_steps=0; clearing _resumed_mid_step so the"
-          " MaxText engine does not immediately save a checkpoint."
-      )
-      setattr(self._trainer, "_resumed_mid_step", False)
-
-  def update(self, **kwargs) -> int:
-    with self._mesh:
-      if not self._save_enabled:
-        self._clear_resumed_mid_step()
-      return self._trainer.update(**kwargs)
-
-  def eval_step(self, *args, **kwargs) -> None:
-    with self._mesh:
-      self._trainer.eval_step(*args, **kwargs)
-
-  @contextlib.contextmanager
-  def eval_context(self):
-    with self._mesh:
-      with self._trainer.eval_context():
-        yield
-
-  def compile(self, *args, **kwargs) -> None:
-    with self._mesh:
-      self._trainer.compile(*args, **kwargs)
-
-  def _drain_inflight_checkpoint(self) -> None:
-    """Blocks until any in-flight checkpoint write has finished.
-
-    Orbax saves asynchronously, so save_checkpoint() returns while the write is
-    still in progress. Only used on the close() path, where the write has to
-    land before we tear the checkpoint manager down; the weight-sync path
-    deliberately does not drain, so the save and the Raiden transfer overlap.
-    """
-    manager = getattr(self._trainer, "_checkpoint_manager", None) or getattr(
-        self._trainer, "checkpoint_manager", None
-    )
-    wait = getattr(manager, "wait_until_finished", None)
-    if wait is None:
-      return
-    start = time.monotonic()
-    wait()
-    waited = time.monotonic() - start
-    if waited > 1.0:
-      logging.info(
-          "Waited %.1fs for in-flight checkpoint save to finish.",
-          waited,
-      )
-
-  def prepare_weight_sync(self, **kwargs) -> Any:
-    with self._mesh:
-      # Deliberately does not wait on the in-flight Orbax write: the checkpoint
-      # save and the Raiden weight transfer are meant to run back-to-back, and
-      # serialising them here would add latency to every step.
-      return self._trainer.prepare_weight_sync(**kwargs)
-
-  def save_checkpoint(self, metadata: Any = None, **kwargs) -> None:
-    if not self._save_enabled:
-      logging.info(
-          "checkpoint_save_interval_steps=0; skipping save_checkpoint request."
-      )
-      return
-    with self._mesh:
-      self._trainer.save_checkpoint(metadata, **kwargs)
-      self._last_saved_train_step = self._current_train_step()
-
-  def restore_checkpoint(self, **kwargs) -> Any:
-    with self._mesh:
-      return self._trainer.restore_checkpoint(**kwargs)
-
-  def _suppress_final_checkpoint(self, reason: str) -> None:
-    """Stops the backend writing a final checkpoint from close()."""
-    self._drain_inflight_checkpoint()
-    # PeftTrainer invokes _save_last_checkpoint() inside close().
-    if hasattr(self._trainer, "_save_last_checkpoint"):
-      logging.info(
-          "%s disabling _save_last_checkpoint on %s so close() does not write"
-          " final checkpoint.",
-          reason,
-          type(self._trainer).__name__,
-      )
-      setattr(self._trainer, "_save_last_checkpoint", lambda: None)
-      return
-
-    manager = getattr(self._trainer, "_checkpoint_manager", None)
-    if manager is None:
-      logging.info(
-          "%s exposes no _checkpoint_manager; nothing to suppress at close().",
-          type(self._trainer).__name__,
-      )
-      return
-    logging.info(
-        "%s dropping checkpoint manager so %s.close() does not write final"
-        " checkpoint.",
-        reason,
-        type(self._trainer).__name__,
-    )
-    try:
-      manager.close()
-    except Exception:  # pylint: disable=broad-except
-      logging.exception("Ignoring error while closing checkpoint manager.")
-    setattr(self._trainer, "_checkpoint_manager", None)
-
-  def _current_train_step(self) -> int | None:
-    """Resolves the backend's integer step counter.
-
-    `MaxTextTrainingEngine` exposes `train_step` as an int property, while
-    `PeftTrainer` exposes `train_steps` as the int property and uses
-    `train_step` as a *method*. Reading `train_step` blindly therefore yields a
-    bound method on the PeftTrainer path, and a bound method compares equal to
-    itself, which would report every close() as a duplicate and silently drop
-    the final checkpoint. Require an int so neither backend can be misread.
-    """
-    for attr in ("train_steps", "train_step"):
-      value = getattr(self._trainer, attr, None)
-      if isinstance(value, int):
-        return value
-    return None
-
-  def _final_checkpoint_would_duplicate(self) -> bool:
-    """True when close() would rewrite the step already saved."""
-    if self._last_saved_train_step is None:
-      return False
-    current = self._current_train_step()
-    return current is not None and current == self._last_saved_train_step
-
-  def close(self) -> None:
-    with self._mesh:
-      if not self._save_enabled:
-        self._suppress_final_checkpoint("checkpoint_save_interval_steps=0;")
-      elif self._final_checkpoint_would_duplicate():
-        self._suppress_final_checkpoint(
-            f"step {self._last_saved_train_step} is already checkpointed;"
-        )
-      self._trainer.close()
-
-
 def _checkpointing_options(args) -> Any:
   """Builds the Orbax options; `save_interval_steps=0` means "never save".
 
@@ -696,8 +570,23 @@ def _checkpointing_options(args) -> Any:
   )
 
 
-def _create_maxtext_trainer_factory(args) -> Any:
-  """Creates the trainer factory function for MaxText's MaxTextTrainingEngine."""
+def _checkpoint_root_directory(args) -> str | None:
+  """Returns the checkpoint root, or None when saving is disabled.
+
+  `read_only=True` is dropped by Tunix's `CheckpointManager`, so keeping a root
+  with `save_interval_steps=0` makes `save_checkpoint()` hit `step % 0` and
+  `close()` force-save anyway. Without a root there is no checkpointer at all.
+  """
+  if args.checkpoint_save_interval_steps > 0:
+    return args.checkpoint_root_directory
+  logging.info(
+      "checkpoint_save_interval_steps=0; withholding checkpoint_root_directory."
+  )
+  return None
+
+
+def _create_maxtext_trainer_factory(args) -> tuple[Any, Mesh]:
+  """Creates the trainer factory function and mesh for MaxText's MaxTextTrainingEngine."""
   logging.info("Trainer backend: MaxText's MaxTextTrainingEngine.")
   pad_id = maxtext_utils.get_tokenizer_pad_id(
       args.model_id, args.tokenizer_path, args.model_dir
@@ -713,16 +602,14 @@ def _create_maxtext_trainer_factory(args) -> Any:
         " --maxtext_warmup_steps_fraction.",
         args.optimizer_schedule_type,
     )
-  extra_cfg_kwargs = {}
-  import inspect  # pylint: disable=g-import-not-at-top
-  sig = inspect.signature(maxtext_utils.build_maxtext_config)
-  for k, v in [
-      ("rollout_mesh_tp", args.rollout_mesh_tp),
-      ("prefuse_moe_weights", args.prefuse_moe_weights),
-      ("use_weight_converter", args.use_weight_converter),
-  ]:
-    if k in sig.parameters:
-      extra_cfg_kwargs[k] = v
+
+  profiling_options = None
+  if args.profiler_steps > 0:
+    profiling_options = maxtext_utils.ProfilerOptions(
+        skip_first_n_steps=args.skip_first_n_profiler_steps,
+        profiler_steps=args.profiler_steps,
+        profiler_period=args.profiler_period,
+    )
 
   maxtext_config = maxtext_utils.build_maxtext_config(
       model_name=args.maxtext_model_name,
@@ -741,26 +628,26 @@ def _create_maxtext_trainer_factory(args) -> Any:
       base_output_directory=args.maxtext_output_directory,
       gradient_accumulation_steps=grad_accumulation_steps,
       checkpointing_options=checkpointing_options,
-      **extra_cfg_kwargs,
+      profiling_options=profiling_options,
+      rollout_mesh_tp=args.rollout_mesh_tp,
+      prefuse_moe_weights=args.prefuse_moe_weights,
+      use_weight_converter=args.use_weight_converter,
+      max_seq_token_per_tpu=args.max_seq_token_per_tpu,
+      trainable_parameters_mask=args.trainable_parameters_mask,
   )
   logging.info("Creating MaxText device mesh...")
   mesh = maxtext_utils.create_maxtext_mesh(maxtext_config)
   logging.info("Trainer mesh: %s", mesh)
 
   def _factory():
-    engine = maxtext_utils.create_maxtext_engine(
+    return maxtext_utils.create_maxtext_engine(
         maxtext_config,
         mesh=mesh,
         tokenizer_pad_id=pad_id,
         wrap_with_tunix_adapter=True,
     )
-    return _MeshBoundTrainer(
-        engine,
-        mesh,
-        save_enabled=args.checkpoint_save_interval_steps > 0,
-    )
 
-  return _factory
+  return _factory, mesh
 
 
 def _gradient_accumulation_steps(args: argparse.Namespace) -> int:
@@ -782,8 +669,8 @@ def _gradient_accumulation_steps(args: argparse.Namespace) -> int:
   return update_trajectories // args.train_micro_batch_size
 
 
-def _create_tunix_trainer_factory(args) -> Any:
-  """Creates the trainer factory function for Tunix's PeftTrainer."""
+def _create_tunix_trainer_factory(args) -> tuple[Any, Mesh]:
+  """Creates the trainer factory function and mesh for Tunix's PeftTrainer."""
   logging.info("Trainer backend: Tunix's PeftTrainer.")
   grad_accumulation_steps = _gradient_accumulation_steps(args)
   update_trajectories = args.mini_batch_size * args.num_generations
@@ -807,7 +694,13 @@ def _create_tunix_trainer_factory(args) -> Any:
       pbar_description="Actor Training",
       data_sharding_axis=("fsdp",),
       checkpointing_options=checkpointing_options,
-      checkpoint_root_directory=args.checkpoint_root_directory,
+      checkpoint_root_directory=_checkpoint_root_directory(args),
+      # No max_seq_token_per_tpu here. Under the orchestrator the trainer never
+      # packs: the SequencePackedBatchAssembler does, and the weighting that
+      # packing needs rides in on the payload (`_fwd_bwd_step` accumulates with
+      # `denom=aux.primary_loss.denominator`). The only thing the field would
+      # change on this path is `_is_single_microstep()`, and the orchestrator
+      # drives `fwd_bwd` + `update` rather than the fused step it gates.
       # The orchestrator owns resume: it calls restore_checkpoint() explicitly.
       # Orchestrator needs to realign its step/policy_version from the returned
       # metadata.
@@ -825,24 +718,18 @@ def _create_tunix_trainer_factory(args) -> Any:
   )
 
   def _factory():
-    with mesh:
-      trainer = peft_trainer_v2.PeftTrainer(
-          actor_model,
-          _build_optimizer(args),
-          training_config,
-          sampler_type=args.sampler_type,
-      )
-    return _MeshBoundTrainer(
-        trainer,
-        mesh,
-        save_enabled=args.checkpoint_save_interval_steps > 0,
+    return peft_trainer_v2.PeftTrainer(
+        actor_model,
+        _build_optimizer(args),
+        training_config,
+        sampler_type=args.sampler_type,
     )
 
-  return _factory
+  return _factory, mesh
 
 
-def _create_trainer_factory(args) -> Any:
-  """Creates the trainer factory function based on args.trainer_backend."""
+def _create_trainer_factory(args) -> tuple[Any, Mesh]:
+  """Creates the trainer factory function and mesh based on args.trainer_backend."""
   if args.trainer_backend == "maxtext":
     return _create_maxtext_trainer_factory(args)
   return _create_tunix_trainer_factory(args)
@@ -883,10 +770,11 @@ def main(argv: list[str], context: Any = None) -> None:
     )
 
   logging.info("Creating generic TrainerWorker and gRPC server...")
-  trainer_factory = _create_trainer_factory(args)
+  trainer_factory, mesh = _create_trainer_factory(args)
   worker_service = trainer_worker.TrainerWorker(
       trainer_factory=trainer_factory,
       worker_id=args.worker_id,
+      execution_context=mesh,
   )
 
   async def grpc_server_main() -> None:

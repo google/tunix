@@ -20,7 +20,7 @@ pipelines.
 
 import abc
 import asyncio
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 import dataclasses
 import os
 import time
@@ -34,6 +34,7 @@ from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import rl_engine_interface
 from tunix.experimental.queue_manager import trajectory_queue_manager
+from tunix.experimental.trajectory import store as trajectory_store_lib
 from tunix.rl import common as rl_common
 from tunix.sft import metrics_logger as metrics_logger_lib
 from tunix.utils import trajectory_logger
@@ -43,6 +44,70 @@ MetricsLoggerOptions = metrics_logger_lib.MetricsLoggerOptions
 Mode = metrics_logger_lib.Mode
 _extract_scalar = metrics_logger_lib.extract_scalar
 BatchConfig = batch_assembly.BatchConfig
+
+
+def _generation_metrics(
+    groups: Sequence[Sequence[Any]],
+) -> dict[str, float]:
+  """Computes the step's `generation/completions/*` metrics, grouped by prompt.
+
+  Matches `agentic_grpo_learner.GRPOLearner._process_results`: the two means are
+  per group, not per rollout, so a short group still weighs the same as a full
+  one. Max and min are unaffected by grouping.
+
+  `clipped` / `raw_length` come from the collector, which derives them with
+  `collector.response_budget_facts` and records them on
+  `TrajectoryItem.metadata`, because only the producer knows the budget a
+  rollout was held to -- `DistributedRLEngine` lets a dataset item override
+  `max_response_length`. Raw length counts env and tool tokens, per the
+  rLLM/VERL `response_length` convention.
+
+  Args:
+    groups: Trajectory items for the step, grouped by prompt.
+
+  Returns:
+    Fully-qualified metric name to step value; empty when no rollout carried
+    the annotations.
+  """
+  clip_ratios: list[float] = []
+  group_mean_lengths: list[float] = []
+  all_lengths: list[int] = []
+  for group in groups:
+    clipped = 0
+    lengths: list[int] = []
+    for item in group:
+      # Token mode yields a dict; Trajectory mode yields a dataclass, which
+      # never carries these. Both keys are required: a rollout annotated with
+      # only one of them is a producer bug, and dropping it keeps that bug from
+      # taking down the training step over a metric.
+      traj = item.traj
+      if not isinstance(traj, dict):
+        continue
+      meta = getattr(item, "metadata", None)
+      if not isinstance(meta, dict):
+        continue
+      if meta.get("clipped") is None or meta.get("raw_length") is None:
+        continue
+      # A zero-length response is a rollout that ran and produced nothing; it
+      # stays in the denominator, matching the agentic learner.
+      lengths.append(int(meta["raw_length"]))
+      clipped += int(meta["clipped"])
+    if not lengths:
+      continue
+    clip_ratios.append(clipped / len(lengths))
+    group_mean_lengths.append(float(np.mean(lengths)))
+    all_lengths.extend(lengths)
+
+  if not all_lengths:
+    return {}
+  return {
+      "generation/completions/clip_ratio": float(np.mean(clip_ratios)),
+      "generation/completions/mean_raw_length": float(
+          np.mean(group_mean_lengths)
+      ),
+      "generation/completions/max_raw_length": float(np.max(all_lengths)),
+      "generation/completions/min_raw_length": float(np.min(all_lengths)),
+  }
 
 
 def _extract_reward(item: Any) -> float:
@@ -78,6 +143,64 @@ def _extract_reward(item: Any) -> float:
         " stamp the trajectory reward under 'trajectory_reward'."
     )
   return float(traj["trajectory_reward"])
+
+
+def _invoke_reward_fn(
+    fn: Callable[[str, Mapping[str, Any]], float],
+    item: datatypes.TrajectoryItem,
+) -> float:
+  """Scores `item`'s assistant completion string with `fn(completion, metadata)`."""
+  if not isinstance(item.traj, dict):
+    raise TypeError(
+        "Expected a Token-mode trajectory mapping, got"
+        f" {type(item.traj).__name__}."
+    )
+  completion = datatypes.assistant_text(item.traj.get("conversation_text", ""))
+  return float(fn(completion, item.metadata))
+
+
+def _format_rollout_completion(conversation: Any) -> str:
+  """Renders post-prompt interaction (assistant + env) for trajectory logging.
+
+  In single-turn tasks (e.g. GSM8K), this yields the assistant's completion.
+  In multi-turn agentic environments (e.g. ToolAgent, DeepSWE), this preserves
+  both the assistant's turns and subsequent environment/tool feedback while
+  excluding the initial prompt.
+
+  Args:
+    conversation: Either a list of chat messages or an already-rendered string.
+
+  Returns:
+    The rendered completion string for trajectory logging.
+  """
+  if not isinstance(conversation, list):
+    return str(conversation)
+
+  # Find the end of the initial prompt (first user turn).
+  prompt_end_idx = 0
+  for idx, msg in enumerate(conversation):
+    if isinstance(msg, dict) and msg.get("role") == "user":
+      prompt_end_idx = idx + 1
+      break
+
+  post_prompt = conversation[prompt_end_idx:]
+  if not post_prompt:
+    return datatypes.assistant_text(conversation)
+
+  # For a single assistant turn (e.g. single-turn math), return raw content directly.
+  if len(post_prompt) == 1 and isinstance(post_prompt[0], dict):
+    return str(post_prompt[0].get("content", ""))
+
+  # For multi-turn interactions, include role labels so env observations and assistant actions are distinguishable.
+  lines = []
+  for msg in post_prompt:
+    if not isinstance(msg, dict):
+      continue
+    role = msg.get("role", "unknown")
+    content = str(msg.get("content", ""))
+    label = "environment" if role == "user" else role
+    lines.append(f"[{label}]: {content}")
+  return "\n".join(lines)
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -147,6 +270,7 @@ class StandardRLProgram(RLProgram):
       sync_weights: bool = True,
       metrics_logging_options: MetricsLoggerOptions | None = None,
       trajectory_log_dir: str | None = None,
+      trajectory_store: trajectory_store_lib.TrajectoryStore | None = None,
       metrics_prefix: str = "",
       mode: Mode | str = Mode.TRAIN,
       on_step_begin: Callable[[int], None] | None = None,
@@ -159,26 +283,35 @@ class StandardRLProgram(RLProgram):
     self.dataset = dataset
     self.max_steps = max_steps
     self.algo = algo
-    algo_max_response_length = self.algo.max_response_length
-    if generation_args is None:
-      self.generation_args = datatypes.GenerationArgs(
-          max_response_length=algo_max_response_length,
+    algo_config = getattr(self.algo, "algo_config", None)
+    algo_max_response_length = getattr(self.algo, "max_response_length", None)
+    if algo_max_response_length is None and algo_config is not None:
+      algo_max_response_length = getattr(
+          algo_config, "max_response_length", None
       )
-    elif generation_args.max_response_length is None:
-      self.generation_args = dataclasses.replace(
-          generation_args,
-          max_response_length=algo_max_response_length,
-      )
-    else:
-      self.generation_args = generation_args
+    self.max_response_length = algo_max_response_length
+    self.generation_args = generation_args or datatypes.GenerationArgs()
 
     gen_temp = self.generation_args.temperature
     if gen_temp is not None:
       self.algo.algo_config.temperature = gen_temp
 
+    # The sampler's per-token log-probabilities are the PPO ratio's
+    # denominator, and separately the sampler side of every sequence-level gate
+    # and sampler-vs-trainer diagnostic. A recipe may recompute the denominator
+    # on the trainer and still want those, so ask the rollout for the
+    # log-probabilities when any of them does.
     self.generation_args = dataclasses.replace(
         self.generation_args,
-        return_logprobs=self.algo.algo_config.use_rollout_logps,
+        return_logprobs=(
+            getattr(algo_config, "use_rollout_logps", True)
+            or getattr(algo_config, "truncated_importance_sampling_type", None)
+            is not None
+            or getattr(algo_config, "seq_logprob_error_threshold", None)
+            is not None
+            or getattr(algo_config, "sampler_is_length_buckets", None)
+            is not None
+        ),
     )
     self.sampler_is = getattr(self.algo.algo_config, "sampler_is", None)
     self.sampler_is_threshold = getattr(
@@ -203,11 +336,23 @@ class StandardRLProgram(RLProgram):
           f"batch_size={self.full_batch_size}, "
           f"mini_batch_size={self.mini_batch_size}."
       )
+    use_rollout_logps = getattr(
+        algo,
+        "use_rollout_logps",
+        getattr(getattr(algo, "algo_config", None), "use_rollout_logps", True),
+    )
+    if not use_rollout_logps and self.full_batch_size != self.mini_batch_size:
+      raise ValueError(
+          "use_rollout_logps=False requires batch_size == mini_batch_size "
+          "(exactly one optimizer update per rollout batch); got "
+          f"batch_size={self.full_batch_size}, "
+          f"mini_batch_size={self.mini_batch_size}."
+      )
     self.batch_config = batch_config or batch_assembly.BatchConfig()
     if self.batch_config.max_response_length is None:
       self.batch_config = dataclasses.replace(
           self.batch_config,
-          max_response_length=self.generation_args.max_response_length,
+          max_response_length=self.max_response_length,
       )
     if assembler is not None:
       self.assembler = assembler
@@ -239,6 +384,14 @@ class StandardRLProgram(RLProgram):
       )
     else:
       logging.info("Trajectory logging disabled; no trajectory_log_dir set.")
+    # Received, not built: the orchestrator running this program owns the
+    # Trajectory Store's construction and lifecycle (ClusterOrchestrator, one
+    # per process), since a store's lifetime should span the whole
+    # orchestrator process rather than just one program run. This program
+    # only uses it; close() below does not close it.
+    # TODO(sizhi): Wire active trajectory store reads/writes in pipeline stages
+    # in follow-up CLs.
+    self._trajectory_store = trajectory_store
     self.metrics_prefix = metrics_prefix
     self.mode = mode if isinstance(mode, Mode) else Mode(mode)
     self.on_step_begin = on_step_begin
@@ -256,8 +409,17 @@ class StandardRLProgram(RLProgram):
         num_generations=self.num_generations
     )
 
+  @property
+  def trajectory_store(self) -> trajectory_store_lib.TrajectoryStore | None:
+    return self._trajectory_store
+
   def close(self) -> None:
-    """Flushes and closes the metrics logger and associated resources."""
+    """Flushes and closes the metrics logger and associated resources.
+
+    Does not close `self._trajectory_store`: this program does not own it
+    (see `__init__`), and closing a store the orchestrator may still be
+    using — e.g. across a second `run_program()` call — would be wrong.
+    """
     if self.trajectory_logger is not None:
       self.trajectory_logger.stop()
     if self.metrics_logger is not None:
@@ -318,11 +480,17 @@ class StandardRLProgram(RLProgram):
         if isinstance(prompt_item, dict):
           prompt_item = dict(prompt_item)
           prompt_item.setdefault("prompt_id", f"prompt_{prompt_idx}")
+          if self.max_response_length is not None:
+            prompt_item.setdefault(
+                "max_response_length", self.max_response_length
+            )
         elif not hasattr(prompt_item, "prompt_id"):
           prompt_item = {
               "prompt": prompt_item,
               "prompt_id": f"prompt_{prompt_idx}",
           }
+          if self.max_response_length is not None:
+            prompt_item["max_response_length"] = self.max_response_length
 
         self._in_flight_rollouts += self.num_generations
         dispatch_kwargs: dict[str, Any] = {
@@ -375,7 +543,7 @@ class StandardRLProgram(RLProgram):
         rewards = []
         for item in group:
           if self.reward_fns:
-            r = sum(fn(item) for fn in self.reward_fns)
+            r = sum(_invoke_reward_fn(fn, item) for fn in self.reward_fns)
           else:
             r = _extract_reward(item)
           rewards.append(float(r))
@@ -431,6 +599,7 @@ class StandardRLProgram(RLProgram):
               prompt_tokens=getattr(src_item, "prompt_tokens", None),
               completion_tokens=getattr(src_item, "completion_tokens", None),
               action_mask=getattr(src_item, "action_mask", None),
+              routed_experts=getattr(src_item, "routed_experts", None),
               policy_version=getattr(src_item, "policy_version", 0),
               metadata=metadata,
               # TODO: b/552087289 - Stream RLTrainerPayload directly instead of
@@ -447,6 +616,7 @@ class StandardRLProgram(RLProgram):
       all_step_items: Sequence[datatypes.TrajectoryItem],
       step_rewards: Sequence[float],
       step_advantages: Sequence[float] | None = None,
+      generation_metrics: Mapping[str, float] | None = None,
       step_result: Any = None,
       trainer_metrics: Any = None,
       num_rollouts: int,
@@ -601,6 +771,18 @@ class StandardRLProgram(RLProgram):
             self.metrics_prefix, f"rollout/{tag}", val, self.mode, log_step
         )
 
+    # Generation metrics, already named to match the agentic GRPO learner so
+    # the same dashboards work for both.
+    if generation_metrics:
+      for tag, val in generation_metrics.items():
+        self.metrics_logger.log(
+            self.metrics_prefix,
+            tag,
+            val,
+            self.mode,
+            log_step,
+        )
+
     # --- 2. Reward Metrics ---
     reward_mean = float(np.mean(step_rewards)) if step_rewards else 0.0
     reward_std = float(np.std(step_rewards)) if step_rewards else 0.0
@@ -666,6 +848,7 @@ class StandardRLProgram(RLProgram):
     # --- 4. Trainer Metrics ---
     loss_val = None
     perplexity_val = None
+    grad_norm_val = None
     if trainer_metrics is None:
       if isinstance(step_result, dict):
         trainer_metrics = step_result.get("metrics")
@@ -736,6 +919,7 @@ class StandardRLProgram(RLProgram):
           "grad_norm", scalar_metrics.pop("trainer/grad_norm", None)
       )
       gn_val = _extract_scalar(raw_gn)
+      grad_norm_val = gn_val
       if gn_val is not None:
         self.metrics_logger.log(
             self.metrics_prefix,
@@ -788,6 +972,7 @@ class StandardRLProgram(RLProgram):
         "advantage_std": advantage_std,
         "loss_val": loss_val,
         "perplexity_val": perplexity_val,
+        "grad_norm_val": grad_norm_val,
     }
 
   async def _apply_sampler_trainer_agreement(
@@ -880,7 +1065,9 @@ class StandardRLProgram(RLProgram):
           "reward": float(reward) if reward is not None else None,
           "question": metadata.get("question", env_config.get("question", "")),
           "prompt": metadata.get("prompt", env_config.get("prompt", "")),
-          "completion": metadata.get("text", ""),
+          "completion": _format_rollout_completion(
+              traj.get("conversation_text", "")
+          ),
           "gold_answer": metadata.get(
               "gold_answer",
               metadata.get("answer", env_config.get("gold_answer", "")),
@@ -1039,6 +1226,8 @@ class StandardRLProgram(RLProgram):
             new_version if new_version is not None else self.policy_version + 1
         )
 
+      # Before `commit()`, which will eventually take ownership of the groups.
+      generation_metrics = _generation_metrics(uncommitted_groups)
       self.scored_q.commit(current_step, groups=uncommitted_groups)
 
       assert (
@@ -1053,6 +1242,7 @@ class StandardRLProgram(RLProgram):
           all_step_items=all_step_items,
           step_rewards=step_rewards,
           step_advantages=step_advantages,
+          generation_metrics=generation_metrics,
           step_result=step_result,
           trainer_metrics=trainer_metrics,
           num_rollouts=num_rollouts,
@@ -1082,14 +1272,16 @@ class StandardRLProgram(RLProgram):
 
       loss_val = metrics_summary["loss_val"]
       perplexity_val = metrics_summary["perplexity_val"]
+      grad_norm_val = metrics_summary["grad_norm_val"]
       if self.mode == Mode.TRAIN:
         logging.info(
             "Train step %d - loss: %s - reward_mean: %.4f - advantage_mean:"
-            " %.4f - perplexity: %s - step_time: %.2fs",
+            " %.4f - grad_norm: %s - perplexity: %s - step_time: %.2fs",
             current_step,
             f"{loss_val:.4f}" if loss_val is not None else "N/A",
             metrics_summary["reward_mean"],
             metrics_summary["advantage_mean"],
+            f"{grad_norm_val:.4g}" if grad_norm_val is not None else "N/A",
             f"{perplexity_val:.4f}" if perplexity_val is not None else "N/A",
             step_time_sec,
         )

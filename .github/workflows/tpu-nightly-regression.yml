@@ -296,7 +296,7 @@ jobs:
         unset JAX_PLATFORMS
         pip list | egrep 'jax|flax|libtpu'
         cd ..
-        git clone https://github.com/sgl-project/sglang-jax.git && cd sglang-jax/python && pip install -e . && cd ../..
+        git clone https://github.com/sgl-project/sglang-jax.git && cd sglang-jax && git checkout 1bdbc6747939c0e600622fc7f812151d76321080 && cd python && pip install -e . && cd ../..
         pip list | egrep 'jax|flax|libtpu'
         cd tunix
         echo "::endgroup::"

@@ -518,7 +518,6 @@ sglang_jax_rollout_dict = {
     "rollout_sglang_jax_chunked_prefill_size": 2048,
     "rollout_sglang_jax_max_running_requests": MAX_CONCURRENCY,
     "rollout_sglang_jax_page_size": 128,
-    "rollout_sglang_jax_use_sort_for_toppk_minp": False,
 }
 
 vllm_rollout_dict = {

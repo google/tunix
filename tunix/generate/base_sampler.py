@@ -52,9 +52,8 @@ class SamplerOutput:
   # rollout's expert choices during training instead of re-routing.
   routed_experts: Optional[list[np.ndarray | None]] = None
 
-  @property
-  def left_padded_prompt_tokens(self) -> np.ndarray:
-    return self.padded_prompt_tokens
+  # Valid prompt length per row, before left padding (not a pad-ID count).
+  prompt_lengths: np.ndarray | None = None
 
 
 class BaseSampler(ABC):

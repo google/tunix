@@ -358,5 +358,44 @@ class MessagesToTokensTest(unittest.TestCase):
     mock_tokenizer_simple.encode.assert_called_with(expected_text)
 
 
+class TokenContinuityTest(absltest.TestCase):
+  """The later-turn prompt is the owned first prompt plus every recorded turn."""
+
+  @staticmethod
+  def _step(sampled, suffix, env):
+    from tunix.rl.agentic.agents import agent_types  # pylint: disable=g-import-not-at-top
+
+    return agent_types.Step(
+        assistant_tokens=np.array(sampled + suffix, dtype=np.int32),
+        env_tokens=np.array(env, dtype=np.int32),
+    )
+
+  def test_continuation_is_prompt_plus_assistant_suffix_and_environment(self):
+    from types import SimpleNamespace  # pylint: disable=g-import-not-at-top
+
+    trajectory = SimpleNamespace(
+        prompt_tokens=np.array([0, 0, 0, 100, 101]),  # left padded
+        prompt_length=3,
+        steps=[
+            self._step([10, 11], [90], [20, 21]),
+            self._step([12], [90], [22]),
+        ],
+    )
+    expected = [0, 100, 101, 10, 11, 90, 20, 21, 12, 90, 22]
+    result = utils.continuation_prompt_tokens(trajectory)
+    np.testing.assert_array_equal(result, expected)
+    trajectory.steps[0].assistant_tokens[0] += 1  # result must not alias steps
+    np.testing.assert_array_equal(result, expected)
+
+  def test_parser_may_only_append_to_sampled_tokens(self):
+    np.testing.assert_array_equal(
+        utils.assistant_with_suffix([0, 7], [0, 7, 9], 1), [0, 7, 9]
+    )
+    with self.assertRaisesRegex(ValueError, 'only append'):
+      utils.assistant_with_suffix([1], [2, 9], 1)  # prefix changed
+    with self.assertRaisesRegex(ValueError, 'only append'):
+      utils.assistant_with_suffix([1], [1, 9], 0)  # miscounted suffix
+
+
 if __name__ == '__main__':
   absltest.main()

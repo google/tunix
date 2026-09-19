@@ -586,6 +586,7 @@ class RoutedExpertsForItemTest(absltest.TestCase):
   def test_short_capture_is_padded_as_unset(self):
     """Missing tail rows must fall back to the gate, not replay expert 0."""
     out = self._align(_routing(5, 3))
+    self.assertEqual(out.dtype, np.int16)
     self.assertEqual(out.shape, (8, _ROUTING_LAYERS, _ROUTING_TOP_K))
     np.testing.assert_array_equal(out[:5], 3)
     np.testing.assert_array_equal(out[5:], datatypes.UNSET_ROUTED_EXPERT)

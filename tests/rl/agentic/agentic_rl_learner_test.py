@@ -229,5 +229,113 @@ class AgenticRLLearnerTest(parameterized.TestCase):
         learner.train(train_dataset)
 
 
+class ExactTokenContinuityConfigTest(absltest.TestCase):
+
+  def test_default_exact_token_continuity_reaches_the_collector(self):
+    import types  # pylint: disable=g-import-not-at-top
+    from tunix.rl.agentic import agentic_grpo_learner  # pylint: disable=g-import-not-at-top
+
+    for supports_tokens, expected in ((True, True), (False, False)):
+      config = base_rollout.RolloutConfig(
+          max_tokens_to_generate=1024, return_logprobs=True
+      )
+      engine = mock.MagicMock()
+      engine.rollout.supports_token_input = supports_tokens
+      engine.cluster_config.rollout_engine = "generic"
+      engine.cluster_config.rollout_config = config
+      engine.cluster_config.training_config.max_seq_token_per_tpu = None
+      with mock.patch.object(
+          rl_utils, "is_sharing_weights", return_value=False
+      ):
+        learner = DummyLearner(
+            rl_engine=engine,
+            reward_fns=mock.Mock(),
+            algo_config=agentic_grpo_learner.GRPOConfig(),
+            chat_parser=object(),
+        )
+      self.assertIs(learner.algo_config.exact_token_continuity, expected)
+
+    for enabled in (False, True):
+      obj = types.SimpleNamespace(
+          algo_config=agentic_rl_learner.AgenticRLConfig(
+              exact_token_continuity=enabled
+          ),
+          _model_call=mock.Mock(),
+          tokenizer=mock.Mock(),
+          chat_parser=mock.Mock(),
+          rl_engine=types.SimpleNamespace(perf_v2=mock.Mock()),
+          _rollout_sync_lock=mock.Mock(),
+      )
+      with mock.patch.object(
+          agentic_rl_learner.rollout_orchestrator, "RolloutOrchestrator"
+      ) as factory:
+        agentic_rl_learner.AgenticRLLearner._build_orchestrator(obj)
+      self.assertIs(
+          factory.call_args.kwargs["engine_kwargs"]["exact_token_continuity"],
+          enabled,
+      )
+
+  def test_exact_mode_rejects_backends_and_rollout_configs_it_cannot_honor(
+      self,
+  ):
+    import types  # pylint: disable=g-import-not-at-top
+    from tunix.rl.agentic import agentic_grpo_learner  # pylint: disable=g-import-not-at-top
+
+    engine = types.SimpleNamespace(
+        rollout=types.SimpleNamespace(supports_token_input=False)
+    )
+    with self.assertRaisesRegex(ValueError, "token-input backend"):
+      agentic_grpo_learner.GRPOLearner(
+          engine, agentic_grpo_learner.GRPOConfig(exact_token_continuity=True)
+      )
+    for option, value, message in (
+        ("return_logprobs", False, "sampled logprobs"),
+        ("return_routed_experts", True, "expert routing"),
+    ):
+      config = base_rollout.RolloutConfig(
+          max_tokens_to_generate=1024, return_logprobs=True
+      )
+      setattr(config, option, value)
+      engine = types.SimpleNamespace(
+          rollout=types.SimpleNamespace(supports_token_input=True),
+          tokenizer=object(),
+          cluster_config=types.SimpleNamespace(
+              rollout_config=config,
+              training_config=types.SimpleNamespace(max_seq_token_per_tpu=None),
+          ),
+      )
+      with self.assertRaisesRegex(ValueError, message):
+        agentic_grpo_learner.GRPOLearner(
+            engine,
+            agentic_grpo_learner.GRPOConfig(
+                exact_token_continuity=True, use_rollout_logps=False
+            ),
+            chat_parser=object(),
+        )
+
+  def test_model_call_forwards_token_ids_without_parsing(self):
+    import types  # pylint: disable=g-import-not-at-top
+    import numpy as np  # pylint: disable=g-import-not-at-top
+
+    obj = types.SimpleNamespace(
+        algo_config=agentic_rl_learner.AgenticRLConfig(
+            exact_token_continuity=True
+        ),
+        chat_parser=types.SimpleNamespace(
+            parse=mock.Mock(side_effect=AssertionError("history parse"))
+        ),
+        rl_engine=types.SimpleNamespace(generate=mock.Mock()),
+        policy_version=7,
+    )
+    agentic_rl_learner.AgenticRLLearner._model_call(
+        obj, None, prompt_token_ids=np.array([0, 3])
+    )
+    obj.chat_parser.parse.assert_not_called()
+    sent = obj.rl_engine.generate.call_args.kwargs
+    self.assertIsNone(sent["prompts"])
+    self.assertFalse(sent["apply_chat_template"])
+    np.testing.assert_array_equal(sent["prompt_token_ids"], [[0, 3]])
+
+
 if __name__ == "__main__":
   absltest.main()

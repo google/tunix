@@ -3,7 +3,7 @@
 import functools
 import re
 import types
-from typing import Final
+from typing import Any, ClassVar, Final, Mapping
 
 from etils import epath
 from tunix.experimental.trajectory import async_writer
@@ -50,7 +50,9 @@ def _validate_trajectory_id(trajectory_id: str | None) -> str:
   return trajectory_id
 
 
-class FileTrajectoryStore(store.TrajectoryReader, store.TrajectoryWriter):
+class FileTrajectoryStore(
+    store.TrajectoryStore, store.TrajectoryReader, store.TrajectoryWriter
+):
   """File-based implementation satisfying TrajectoryReader and TrajectoryWriter.
 
   Architectural Separation of Responsibilities:
@@ -74,6 +76,8 @@ class FileTrajectoryStore(store.TrajectoryReader, store.TrajectoryWriter):
             └── ...
   """
 
+  BACKEND: ClassVar[str] = "file"
+
   def __init__(
       self, root_dir: epath.PathLike, run_id: str | None = None
   ) -> None:
@@ -86,10 +90,77 @@ class FileTrajectoryStore(store.TrajectoryReader, store.TrajectoryWriter):
         scoped under root_dir / run_id. This ID MUST stay the same when
         recovering from failures or process restarts as long as the same RL
         process is being continued.
+
+    Raises:
+      ValueError: If root_dir is empty, or run_id is given but cannot be used
+        as a directory name.
     """
+    if not root_dir or not str(root_dir).strip():
+      raise ValueError("FileTrajectoryStore requires a non-empty root_dir.")
+    if run_id is not None and not _TRAJECTORY_ID_REGEX.match(run_id):
+      # run_id becomes a path segment under root_dir, so it is held to the
+      # same character rule as the trajectory directories nested beneath it.
+      # A run_id carrying a path separator would nest those directories a
+      # level deeper than `get_trajectories_metadata` looks for them, which
+      # fails silently as an empty store rather than as an error.
+      raise ValueError(
+          f"run_id {run_id!r} contains unsupported characters; only letters,"
+          " digits, underscores, and hyphens are allowed."
+      )
     self._raw_root_dir = epath.Path(root_dir)
     self._run_id = run_id
     self._writer = async_writer.AsyncFileWriter()
+
+  @classmethod
+  def _from_config(cls, config: Mapping[str, Any]) -> "FileTrajectoryStore":
+    """Builds a file-backed store from `config`.
+
+    Args:
+      config: Requires "root_dir" and "run_id".
+
+    Returns:
+      A new FileTrajectoryStore.
+
+    Raises:
+      ValueError: If "root_dir" or "run_id" is missing or empty.
+    """
+    root_dir = config.get("root_dir")
+    if not root_dir or not str(root_dir).strip():
+      raise ValueError(
+          "Trajectory Store backend 'file' requires a non-empty 'root_dir'."
+      )
+    if not config.get("run_id"):
+      # Optional on __init__, required here: a configured run is shared by the
+      # orchestrator and every rollout worker, and every process restart of
+      # them, and run_id is what scopes their common directory. Without it
+      # every run writes straight into root_dir, and since trajectory ids
+      # restart from the first prompt each run, a later run silently
+      # overwrites an earlier one's trajectories.
+      raise ValueError(
+          "Trajectory Store backend 'file' requires a non-empty 'run_id'."
+          " Generate it once, wherever the run is launched, and pass the same"
+          " value to every process; a per-process default would split one run"
+          " across as many directory trees as there are processes."
+      )
+    return cls(root_dir=config["root_dir"], run_id=config["run_id"])
+
+  def to_config(self) -> dict[str, Any]:
+    """Returns the config dict that rebuilds an equivalent store.
+
+    Raises:
+      ValueError: If this store was constructed without a run_id.
+    """
+    if not self._run_id:
+      raise ValueError(
+          "FileTrajectoryStore without a run_id cannot export a valid"
+          " distributed config."
+      )
+    return {
+        "enabled": True,
+        "backend": self.BACKEND,
+        "root_dir": str(self._raw_root_dir),
+        "run_id": self._run_id,
+    }
 
   @functools.cached_property
   def root_dir(self) -> epath.Path:

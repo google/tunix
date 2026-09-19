@@ -39,8 +39,8 @@ class ReferenceScoringCore(Protocol):
 
   def get_ref_per_token_logps(
       self,
-      prompt_tokens: jax.typing.ArrayLike,
-      completion_tokens: jax.typing.ArrayLike,
+      prompt_tokens: jax.Array,
+      completion_tokens: jax.Array,
       pad_id: int,
       eos_id: int,
       temperature: float = 1.0,
@@ -49,8 +49,8 @@ class ReferenceScoringCore(Protocol):
 
   def get_rewards(
       self,
-      prompt_tokens: jax.typing.ArrayLike,
-      completion_tokens: jax.typing.ArrayLike,
+      prompt_tokens: jax.Array,
+      completion_tokens: jax.Array,
       pad_id: int,
       eos_id: int,
   ) -> jax.Array:
@@ -79,6 +79,7 @@ class InferenceWorker(abstract_worker.Worker):
       max_prompt_length: int | None = None,
       max_response_length: int | None = None,
       temperature: float = 1.0,
+      execution_context: Any = None,
   ):
     """Initializes the worker.
 
@@ -95,7 +96,11 @@ class InferenceWorker(abstract_worker.Worker):
       max_response_length: Retained for launcher/config compatibility. Padding
         is owned by the orchestrator BatchAssembler, not this worker.
       temperature: Default sampling temperature used for reference log-probs.
+      execution_context: Optional context manager or zero-arg callable returning
+        a context manager (e.g., a JAX Mesh) to enter during worker method
+        execution.
     """
+    self._execution_context = execution_context
     self._worker_id = worker_id
     self._core = core
     self._pad_id = pad_id

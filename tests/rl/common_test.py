@@ -1047,6 +1047,7 @@ class AlignRoutedExpertsTest(parameterized.TestCase):
         completion_width=completion_width,
     )
 
+    self.assertEqual(out.dtype, np.int16)
     self.assertEqual(
         out.shape,
         (1, prompt_width + completion_width, _ROUTING_LAYERS, _ROUTING_TOP_K),
@@ -1112,6 +1113,40 @@ class AlignRoutedExpertsTest(parameterized.TestCase):
           prompt_width=1,
           completion_width=2,
       )
+
+  def test_upcasts_int16_routed_experts_to_int32_on_trainer_end(self):
+    """Trainer receives int16 routing over IPC and upcasts to int32 on device."""
+    captured = {}
+
+    class DummyModel(nnx.Module):
+
+      def __call__(
+          self,
+          x,
+          positions=None,
+          attention_mask=None,
+          cache=None,
+          forced_routed_experts=None,
+          **kwargs,
+      ):
+        del positions, attention_mask, cache, kwargs
+        captured["forced_routed_experts"] = forced_routed_experts
+        return jnp.zeros((x.shape[0], x.shape[1], 16), dtype=jnp.float32), None
+
+    model = DummyModel()
+    graphdef, state = nnx.split(model)
+    routed_int16 = jnp.ones((1, 4, 2, 2), dtype=jnp.int16)
+    common.compute_per_token_logps(
+        graphdef,
+        state,
+        prompt_tokens=jnp.ones((1, 2), dtype=jnp.int32),
+        completion_tokens=jnp.ones((1, 2), dtype=jnp.int32),
+        pad_id=0,
+        eos_id=1,
+        routed_experts=routed_int16,
+    )
+    self.assertIn("forced_routed_experts", captured)
+    self.assertEqual(captured["forced_routed_experts"].dtype, jnp.int32)
 
 
 class SamplerTrainerAgreementTest(parameterized.TestCase):
@@ -1192,6 +1227,46 @@ class SamplerTrainerAgreementTest(parameterized.TestCase):
     self.assertAlmostEqual(
         metrics["sampler_is/frac_clipped_at_threshold"][0], 2.0 / 3.0, places=5
     )
+
+
+class ProcessIdsTokenMaskTest(absltest.TestCase):
+
+  def test_explicit_token_mask_marks_validity_independent_of_pad_id(self):
+    prompt = jnp.array([[0, 5]])
+    completion = jnp.array([[6, 0, 7, 0]])  # a real token equal to pad id (0)
+    explicit = jnp.array([[1, 1, 1, 1, 1, 0]])
+    _, positions, attention, segments = common.process_ids(
+        prompt, completion, 0, 255, token_mask=explicit
+    )
+    np.testing.assert_array_equal(positions, [[0, 1, 2, 3, 4, 4]])
+    np.testing.assert_array_equal(segments, explicit)
+    expected = np.tril(np.ones((6, 6), dtype=bool))
+    expected[:, 5] = False
+    np.testing.assert_array_equal(attention[0], expected)
+    # Without token_mask the legacy pad-id rule is unchanged.
+    _, old_positions, _, old_segments = common.process_ids(
+        prompt, completion, 0, 255
+    )
+    np.testing.assert_array_equal(old_positions, [[0, 0, 1, 1, 2, 2]])
+    np.testing.assert_array_equal(old_segments, [[0, 1, 1, 0, 1, 0]])
+    with self.assertRaises(ValueError):  # shape must cover prompt+completion
+      common.process_ids(
+          jnp.array([[1, 2]]),
+          jnp.array([[3, 4]]),
+          0,
+          255,
+          token_mask=np.ones((1, 3), bool),
+      )
+    with self.assertRaises(ValueError):  # exclusive with packed segments
+      common.process_ids(
+          jnp.array([[1, 2]]),
+          jnp.array([[3, 4]]),
+          0,
+          255,
+          token_mask=np.ones((1, 4), bool),
+          segment_ids=np.ones((1, 4), np.int32),
+          segment_positions=np.arange(4)[None],
+      )
 
 
 if __name__ == "__main__":

@@ -51,7 +51,6 @@ class SglangJaxRollout(base_rollout.BaseRollout):
             init_with_random_weights=rollout_config.rollout_sglang_jax_init_with_random_weights,
             disable_radix_cache=rollout_config.rollout_sglang_jax_disable_radix_cache,
             enable_deterministic_sampling=rollout_config.rollout_sglang_jax_enable_deterministic_sampling,
-            use_sort_for_toppk_minp=rollout_config.rollout_sglang_jax_use_sort_for_toppk_minp,
             enable_static_lora=rollout_config.rollout_sglang_jax_enable_static_lora,
             enable_single_process=rollout_config.rollout_sglang_jax_enable_single_process,
             lora_target_modules=rollout_config.rollout_sglang_jax_lora_target_modules,

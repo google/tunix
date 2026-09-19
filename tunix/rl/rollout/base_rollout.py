@@ -63,9 +63,15 @@ class RolloutOutput:
   # unless the backend was asked to capture them, or for dense models.
   routed_experts: list[np.ndarray | None] | None = None
 
+  # Valid prompt length per row, before left padding. Optional for old backends.
+  prompt_lengths: np.ndarray | None = None
+
 
 class BaseRollout(ABC):
   """Base RolloutWorker."""
+
+  # Capability, not a user-selectable behavior flag.
+  supports_token_input: bool = False
 
   @abstractmethod
   def __init__(self, **kwargs):

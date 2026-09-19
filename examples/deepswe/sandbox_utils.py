@@ -223,6 +223,12 @@ def init_global_fleet(
           " git+https://github.com/kubernetes-sigs/agent-sandbox.git#subdirectory=examples/agent-sandbox-rl"
       ) from e
 
+    scaffold_env = os.getenv("SCAFFOLD")
+    if scaffold == "r2egym" and scaffold_env:
+      scaffold = scaffold_env
+    elif not scaffold:
+      scaffold = scaffold_env or "r2egym"
+
     fleet_ns = namespace or os.getenv("NAMESPACE", "rl-tunix-swebench")
     if node_selector is None:
       key = os.environ.get("NODE_SELECTOR_KEY")
@@ -308,6 +314,21 @@ def init_global_fleet(
       fleet_inst.preflight()
     if hasattr(fleet_inst, "plan"):
       fleet_inst.plan()
+      entries = (
+          getattr(getattr(fleet_inst, "plan_", None), "entries", None) or []
+      )
+      images = [e.image for e in entries]
+      if images and hasattr(fleet_inst, "warm_images"):
+        target_replicas = fleet_kwargs["max_warmpool_size"]
+        fleet_inst.warm_images(
+            images, replicas_override=target_replicas, wait=False
+        )
+        logging.info(
+            "[SandboxFleet] Started initial warmpools for %d image(s) (%d"
+            " replicas each).",
+            len(images),
+            target_replicas,
+        )
     _GLOBAL_FLEET = fleet_inst
     atexit.register(teardown_global_fleet)
     return _GLOBAL_FLEET

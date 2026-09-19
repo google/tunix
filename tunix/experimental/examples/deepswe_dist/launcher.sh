@@ -82,6 +82,7 @@ WANDB_API_KEY=${WANDB_API_KEY:-}
 LOG_DIR=${LOG_DIR:-}
 TRAJECTORY_LOG_DIR=${TRAJECTORY_LOG_DIR:-}
 FLUSH_EVERY_N_STEPS=${FLUSH_EVERY_N_STEPS:-1}
+TRAINABLE_PARAMETERS_MASK=${TRAINABLE_PARAMETERS_MASK:-}
 
 TRAINER_TPU_CHIPS=${TRAINER_TPU_CHIPS:-0,1}
 TRAINER_FSDP=${TRAINER_FSDP:-1}
@@ -275,6 +276,9 @@ echo "Launching trainer node..."
   if [[ "$DEBUG" == "1" || "$DEBUG" == "true" || "$DEBUG" == "True" ]]; then
     TRAINER_CMD+=(--debug)
   fi
+  if [[ -n "$TRAINABLE_PARAMETERS_MASK" ]]; then
+    TRAINER_CMD+=(--trainable_parameters_mask="$TRAINABLE_PARAMETERS_MASK")
+  fi
   export JAX_PLATFORMS=tpu,cpu
   export TPU_VISIBLE_DEVICES=${TRAINER_TPU_CHIPS}
   export TPU_VISIBLE_CHIPS=${TPU_VISIBLE_DEVICES}
@@ -399,6 +403,9 @@ echo "Launching CPU orchestrator..."
   fi
   if [[ -n "$TRAJECTORY_LOG_DIR" ]]; then
     ORCHESTRATOR_CMD+=(--trajectory_log_dir="$TRAJECTORY_LOG_DIR")
+  fi
+  if [[ -n "$TRAINABLE_PARAMETERS_MASK" ]]; then
+    ORCHESTRATOR_CMD+=(--trainable_parameters_mask="$TRAINABLE_PARAMETERS_MASK")
   fi
   if [[ "$USE_ROLLOUT_LOGPS" == "false" || "$USE_ROLLOUT_LOGPS" == "False" || "$USE_ROLLOUT_LOGPS" == "0" ]]; then
     ORCHESTRATOR_CMD+=(--no-use_rollout_logps)

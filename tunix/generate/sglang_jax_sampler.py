@@ -68,8 +68,6 @@ class SglangJaxConfig:
   init_with_random_weights: bool = True
   disable_radix_cache: bool = True
   enable_deterministic_sampling: bool = False
-  # Note: use_sort_for_toppk_minp may be removed in the future. It depends on SGLang-Jax.
-  use_sort_for_toppk_minp: bool = True
   enable_static_lora: bool = False
   enable_single_process: bool = (
       True  # Note: this is required when you run it in pathways.
@@ -190,7 +188,6 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
       args["load_format"] = "dummy"
     args["disable_radix_cache"] = config.disable_radix_cache
     args["enable_deterministic_sampling"] = config.enable_deterministic_sampling
-    args["use_sort_for_toppk_minp"] = config.use_sort_for_toppk_minp
     args["enable_static_lora"] = config.enable_static_lora
     args["enable_single_process"] = config.enable_single_process
     if config.lora_target_modules == ["all"]:

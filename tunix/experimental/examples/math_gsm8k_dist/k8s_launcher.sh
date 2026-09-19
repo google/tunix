@@ -240,12 +240,23 @@ stop_trainer() {
 start_trainer() {
   local extra_flags=""
   local debug_flag=""
+  local profiler_flags=""
   if [[ "${DEBUG}" == "1" || "${DEBUG}" == "true" || "${DEBUG}" == "True" ]]; then
     debug_flag="--debug"
   fi
 
   if [[ "${TRAINER_JOBSET_YAML}" == "jobset.pathways.yaml" ]]; then
     echo "Trainer Pathways images: server=${PATHWAYS_SERVER_IMAGE} proxy=${PATHWAYS_PROXY_IMAGE}"
+  fi
+
+  if [[ -n "$PROFILER_STEPS" ]]; then
+    profiler_flags+=" --profiler_steps=${PROFILER_STEPS}"
+  fi
+  if [[ -n "$SKIP_FIRST_N_PROFILER_STEPS" ]]; then
+    profiler_flags+=" --skip_first_n_profiler_steps=${SKIP_FIRST_N_PROFILER_STEPS}"
+  fi
+  if [[ -n "$PROFILER_PERIOD" ]]; then
+    profiler_flags+=" --profiler_period=${PROFILER_PERIOD}"
   fi
 
   if [[ "${TRAINER_BACKEND}" == "maxtext" ]]; then
@@ -266,6 +277,7 @@ start_trainer() {
       --mesh_expert=${TRAINER_MESH_EXPERT} \
       ${ROLLOUT_MESH_TP:+--rollout_mesh_tp=${ROLLOUT_MESH_TP}} \
       --use_weight_converter=${USE_WEIGHT_CONVERTER} \
+      ${MAX_SEQ_TOKEN_PER_TPU:+--max_seq_token_per_tpu=${MAX_SEQ_TOKEN_PER_TPU}} \
     "
   fi
 
@@ -338,6 +350,7 @@ start_trainer() {
         --checkpoint_root_directory=${CHECKPOINT_ROOT_DIRECTORY} \
         ${extra_flags} \
         ${debug_flag} \
+        ${profiler_flags} \
     " \
     | apply_manifest
 }

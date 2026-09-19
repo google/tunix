@@ -125,6 +125,19 @@ class TrainExample:
   # to dampen positions where the trainer's recomputed log-probability
   # diverges from the rollout sampler's. ``None`` disables the correction.
   sampler_is_weights: ArrayType | None = None
+  # Per-token log-probabilities the rollout engine reported for the tokens it
+  # generated -- the *behaviour* policy. Distinct from ``old_per_token_logps``,
+  # which is whatever policy the surrogate ratio is taken against: the two
+  # coincide in the common case but diverge when the ratio is taken against a
+  # trainer recompute or pinned to 1.0. Kept separate so a correction can
+  # always reference the policy that actually produced the samples. ``None``
+  # when the rollout engine does not return log-probabilities.
+  rollout_per_token_logps: ArrayType | None = None
+  # `[B]`, 1.0 where the rollout engine exhausted the response budget without
+  # emitting an end-of-sequence token, i.e. the sample is a truncated prefix of
+  # a trajectory rather than a trajectory. ``None`` when the engine reports no
+  # truncation verdict.
+  overlong: ArrayType | None = None
   # `[B, P + C, num_layers, top_k]` MoE experts the rollout routed through,
   # laid out over the same `[prompt | completion]` padding as the token ids.
   # When set, a model that accepts `forced_routed_experts` replays these
@@ -245,6 +258,7 @@ def process_ids(
     eos_id: int,
     segment_ids: jax.Array | None = None,
     segment_positions: jax.Array | None = None,
+    token_mask: jax.Array | None = None,
 ):
   """Processes prompt and completion ids.
 
@@ -261,10 +275,14 @@ def process_ids(
     completion_mask: optional attention weights mapping completion sequences.
     segment_ids: optional 1D sequential document identifiers used for packing.
     segment_positions: optional 1D local position indices used for packing.
+    token_mask: Explicit `[B, prompt_len + completion_len]` valid positions;
+      distinct from a sampled-token loss mask. Cannot accompany packed segments.
   """
   prompt_completion_ids = jnp.concat([prompt_tokens, completion_tokens], axis=1)
 
   if segment_ids is not None:
+    if token_mask is not None:
+      raise ValueError("Use packed segment metadata or token_mask, not both")
     # Positions are either provided or must be computed correctly (assumed
     # provided for packed).
     if segment_positions is None:
@@ -277,12 +295,16 @@ def process_ids(
     # mask here.
     return prompt_completion_ids, segment_positions, attn_mask, None
 
-  prompt_mask = prompt_tokens != pad_id
-  completion_mask = completion_tokens != pad_id
-
-  prompt_completion_mask = jnp.concatenate(
-      [prompt_mask, completion_mask], axis=-1
-  )
+  if token_mask is None:
+    prompt_mask = prompt_tokens != pad_id
+    completion_mask = completion_tokens != pad_id
+    prompt_completion_mask = jnp.concatenate(
+        [prompt_mask, completion_mask], axis=-1
+    )
+  else:
+    if token_mask.shape != prompt_completion_ids.shape:
+      raise ValueError("token_mask must match the full prompt/completion shape")
+    prompt_completion_mask = token_mask.astype(jnp.bool_)
   positions = build_positions_from_mask(prompt_completion_mask)
   attn_mask = make_causal_attn_mask(prompt_completion_mask)
 
@@ -340,7 +362,7 @@ def align_routed_experts(
 
   rows = []
   for routed, completion_len in zip(routed_experts, completion_lengths):
-    routed = np.asarray(routed, dtype=np.int32)
+    routed = np.asarray(routed, dtype=np.int16)
     if routed.ndim != 3:
       raise ValueError(
           "routed_experts must be [length, num_layers, top_k]; got shape"
@@ -356,7 +378,7 @@ def align_routed_experts(
     row = np.full(
         (prompt_width + completion_width,) + routed.shape[1:],
         UNSET_ROUTED_EXPERT,
-        dtype=np.int32,
+        dtype=np.int16,
     )
     row[prompt_width - prompt_part.shape[0] : prompt_width] = prompt_part
     row[prompt_width : prompt_width + completion_part.shape[0]] = (
@@ -413,6 +435,7 @@ def compute_per_token_logps(
     temperature: float = 1.0,
     chunk_size: int = 0,
     routed_experts: jax.Array | None = None,
+    token_mask: jax.Array | None = None,
 ) -> jax.Array | tuple[jax.Array, jax.Array]:
   """Computes the per-token log probabilities.
 
@@ -440,6 +463,7 @@ def compute_per_token_logps(
       during rollout. Forwarded to the model as `forced_routed_experts` -- the
       name MaxText's adapter uses -- so it replays this routing instead of
       re-running its router. Ignored by models that do not accept the kwarg.
+    token_mask: Optional explicit valid positions for prompt plus completion.
 
   Returns:
     per_token_logps: jax.Array token-level logarithmic values.
@@ -461,6 +485,7 @@ def compute_per_token_logps(
       eos_id,
       segment_ids,
       segment_positions,
+      token_mask,
   )
 
   model_kwargs = {
@@ -498,7 +523,9 @@ def compute_per_token_logps(
   if routed_experts is not None and model_call_contains(
       model, "forced_routed_experts"
   ):
-    model_kwargs["forced_routed_experts"] = routed_experts
+    model_kwargs["forced_routed_experts"] = jnp.asarray(
+        routed_experts, dtype=jnp.int32
+    )
 
   outputs, _ = model(input_tokens, **model_kwargs)
 

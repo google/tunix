@@ -40,7 +40,7 @@ BATCH_SIZE=${BATCH_SIZE:-4}
 NUM_GENERATIONS=${NUM_GENERATIONS:-8}
 MAX_STEPS=${MAX_STEPS:-1}
 TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-1}
-MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-2}
+MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-$BATCH_SIZE}
 EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-50}
 OPT_CHAIN_TYPE=${OPT_CHAIN_TYPE-clip_by_global_norm}
 MAX_GRAD_NORM=${MAX_GRAD_NORM:-1.0}
@@ -83,14 +83,26 @@ CHAT_PARSER=${CHAT_PARSER:-raw}
 # tokenizer's default EOS token, so the rollout has to stop on it. Set empty to
 # fall back to the tokenizer's EOS token.
 EOS_TOKENS=${EOS_TOKENS-'<|im_end|>'}
-# Derived from MODEL_NAME (MaxText config names are lowercase) and passed to
-# both the trainer and the rollout, so the two cannot drift. A disagreement is
-# not a clean failure: Raiden pairs tensors by exact name, so a MaxText trainer
-# against a non-MaxText rollout matches zero of them. Set it explicitly to
-# override, or empty to put the rollout back on tpu-inference's own model.
-MAXTEXT_MODEL_NAME=${MAXTEXT_MODEL_NAME-$(printf '%s' "$MODEL_NAME" | tr '[:upper:]' '[:lower:]')}
+# Generation sampling parameters, passed to the runner and the reference scorer.
+TEMPERATURE=${TEMPERATURE:-1.0}
+TOP_P=${TOP_P:-1.0}
+TOP_K=${TOP_K:--1}
 MAXTEXT_ATTENTION=${MAXTEXT_ATTENTION:-}
 PYTHON_BIN=${PYTHON_BIN:-python3}
+# DEBUG=1 passes --debug to the runner, which logs full sampler responses.
+DEBUG=${DEBUG:-0}
+
+# Optional GRPO algorithm options. Empty, or 0 for the boolean, leaves the
+# option at the runner's default, so an unset variable changes nothing.
+EPSILON_HIGH=${EPSILON_HIGH:-}
+LOSS_AGG_MODE=${LOSS_AGG_MODE:-}
+ADVANTAGE_ESTIMATOR=${ADVANTAGE_ESTIMATOR:-}
+OVERLONG_LOSS_MASKING=${OVERLONG_LOSS_MASKING:-0}
+SEQ_LOGPROB_ERROR_THRESHOLD=${SEQ_LOGPROB_ERROR_THRESHOLD:-}
+TIS_TYPE=${TIS_TYPE:-}
+TIS_RATIO_MIN=${TIS_RATIO_MIN:-}
+TIS_RATIO=${TIS_RATIO:-}
+SAMPLER_IS_LENGTH_BUCKETS=${SAMPLER_IS_LENGTH_BUCKETS:-}
 WAIT_TIMEOUT_SECS=${WAIT_TIMEOUT_SECS:-1800}
 WAIT_POLL_SECS=${WAIT_POLL_SECS:-5}
 WAIT_DEBUG_EVERY_POLLS=${WAIT_DEBUG_EVERY_POLLS:-6}
@@ -109,10 +121,13 @@ TRAINER_TPU_CHIPS=${TRAINER_TPU_CHIPS:-0,1}
 TRAINER_FSDP=${TRAINER_FSDP:-1}
 TRAINER_TP=${TRAINER_TP:-2}
 
-# peft runs tunix's PeftTrainer; maxtext runs MaxText's MaxTextTrainingEngine.
+# tunix runs Tunix's PeftTrainer; maxtext runs MaxText's MaxTextTrainingEngine.
 TRAINER_BACKEND=${TRAINER_BACKEND:-tunix}
 MAXTEXT_CKPT=${MAXTEXT_CKPT:-}
 if [[ "$TRAINER_BACKEND" == "maxtext" ]]; then
+  # MaxText config names are lowercase. Passed to both the trainer and the
+  # rollout, so the two cannot drift.
+  MAXTEXT_MODEL_NAME=${MAXTEXT_MODEL_NAME:-$(printf '%s' "$MODEL_NAME" | tr '[:upper:]' '[:lower:]')}
   # MaxText shards the batch dimension of every loss input across the fsdp
   # axis, so the microbatch has to be a multiple of it. The trainer node
   # enforces this too.
@@ -123,6 +138,15 @@ if [[ "$TRAINER_BACKEND" == "maxtext" ]]; then
     echo "Error: TRAINER_BACKEND=maxtext requires MAXTEXT_CKPT (Orbax params-only checkpoint)."
     exit 1
   fi
+elif [[ "$TRAINER_BACKEND" == "tunix" ]]; then
+  # Must stay empty on the tunix backend. A non-empty value puts the rollout on
+  # MaxText's MaxTextForCausalLM while the trainer still emits tunix/vllm_jax
+  # tensor names, and Raiden pairs tensors by exact name, so zero of them match.
+  # Export it explicitly to override.
+  MAXTEXT_MODEL_NAME=${MAXTEXT_MODEL_NAME-}
+else
+  echo "Error: Unsupported TRAINER_BACKEND='$TRAINER_BACKEND' (expected 'tunix' or 'maxtext')." >&2
+  exit 1
 fi
 ROLLOUT_TPU_CHIPS=${ROLLOUT_TPU_CHIPS:-2,3}
 ROLLOUT_FSDP=${ROLLOUT_FSDP:-1}
@@ -368,6 +392,7 @@ echo "  python:         $PYTHON_BIN"
 echo "  trajectories:   $((BATCH_SIZE * NUM_GENERATIONS)) per step"
 echo "  batch size:     $BATCH_SIZE"
 echo "  generations:    $NUM_GENERATIONS"
+echo "  sampling:       temperature=$TEMPERATURE top_p=$TOP_P top_k=$TOP_K"
 echo "  max steps:      $MAX_STEPS"
 echo "  eval interval:  $EVAL_EVERY_N_STEPS"
 echo "  learning rate:  $LEARNING_RATE"
@@ -498,8 +523,21 @@ echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
   if [[ -n "$MAXTEXT_MODEL_NAME" ]]; then
     TRAINER_CMD+=(--maxtext_model_name="$MAXTEXT_MODEL_NAME")
   fi
+  if [[ -n "$MAX_SEQ_TOKEN_PER_TPU" ]]; then
+    TRAINER_CMD+=(--max_seq_token_per_tpu="$MAX_SEQ_TOKEN_PER_TPU")
+  fi
   if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
     TRAINER_CMD+=(--use_lora)
+  fi
+
+  if [[ -n "$PROFILER_STEPS" ]]; then
+    TRAINER_CMD+=(--profiler_steps=$PROFILER_STEPS)
+  fi
+  if [[ -n "$SKIP_FIRST_N_PROFILER_STEPS" ]]; then
+    TRAINER_CMD+=(--skip_first_n_profiler_steps=$SKIP_FIRST_N_PROFILER_STEPS)
+  fi
+  if [[ -n "$PROFILER_PERIOD" ]]; then
+    TRAINER_CMD+=(--profiler_period=$PROFILER_PERIOD)
   fi
 
   if [[ "${TRAINER_PATHWAYS:-0}" == "1" ]]; then
@@ -515,7 +553,7 @@ echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
     export TPU_VISIBLE_CHIPS=${TPU_VISIBLE_DEVICES}
     export TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS}
     export TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS}
-    export LIBTPU_INIT_ARGS=deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS},deepsea_host_bounds=${TPU_HOST_BOUNDS}
+    export LIBTPU_INIT_ARGS="--deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS} --deepsea_host_bounds=${TPU_HOST_BOUNDS}"
   fi
   export PYTHONUNBUFFERED=1
   env | egrep 'JAX|TPU'
@@ -567,7 +605,7 @@ echo "Launching rollout node with sampler=$SAMPLER on TPU chips $ROLLOUT_TPU_CHI
   export TPU_VISIBLE_CHIPS=${TPU_VISIBLE_DEVICES}
   export TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS}
   export TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS}
-  export LIBTPU_INIT_ARGS=deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS},deepsea_host_bounds=${TPU_HOST_BOUNDS}
+  export LIBTPU_INIT_ARGS="--deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS} --deepsea_host_bounds=${TPU_HOST_BOUNDS}"
   export PYTHONUNBUFFERED=1
   env | egrep 'JAX|TPU'
   print_command "Rollout command" "${ROLLOUT_CMD[@]}"
@@ -689,6 +727,9 @@ if [[ "$RUN_INFERENCE_NODE" == "1" || "$RUN_INFERENCE_NODE" == "true" || "$RUN_I
       --compute_logps_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
       --max_prompt_length="$MAX_PROMPT_LENGTH"
       --max_response_length="$MAX_RESPONSE_LENGTH"
+      # Must match the sampling temperature: this node scores the reference
+      # policy for the KL term.
+      --temperature="$TEMPERATURE"
     )
 
     export JAX_PLATFORMS=tpu,cpu
@@ -696,7 +737,7 @@ if [[ "$RUN_INFERENCE_NODE" == "1" || "$RUN_INFERENCE_NODE" == "true" || "$RUN_I
     export TPU_VISIBLE_CHIPS=${TPU_VISIBLE_DEVICES}
     export TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS}
     export TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS}
-    export LIBTPU_INIT_ARGS=deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS},deepsea_host_bounds=${TPU_HOST_BOUNDS}
+    export LIBTPU_INIT_ARGS="--deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS} --deepsea_host_bounds=${TPU_HOST_BOUNDS}"
     export PYTHONUNBUFFERED=1
     env | egrep 'JAX|TPU'
     print_command "Inference command" "${INFERENCE_CMD[@]}"
@@ -729,6 +770,9 @@ echo "Launching CPU orchestrator..."
     --batch_size="$BATCH_SIZE"
     --mini_batch_size="$MINI_BATCH_SIZE"
     --num_generations="$NUM_GENERATIONS"
+    --temperature="$TEMPERATURE"
+    --top_p="$TOP_P"
+    --top_k="$TOP_K"
     --max_steps="$MAX_STEPS"
     --max_prompt_length="$MAX_PROMPT_LENGTH"
     --max_response_length="$MAX_RESPONSE_LENGTH"
@@ -743,6 +787,39 @@ echo "Launching CPU orchestrator..."
     --weight_sync_mode="$WEIGHT_SYNC_MODE"
     --stop_workers_on_exit
   )
+  if [[ "$DEBUG" == "1" || "$DEBUG" == "true" || "$DEBUG" == "True" ]]; then
+    ORCHESTRATOR_CMD+=(--debug)
+  fi
+  # Explicit if-blocks rather than `[[ -n x ]] && cmd`: this script runs under
+  # `set -Ee`, where a false test at the head of an AND-list aborts the
+  # launcher. An option left unset has to be a no-op.
+  if [[ -n "$EPSILON_HIGH" ]]; then
+    ORCHESTRATOR_CMD+=(--epsilon_high="$EPSILON_HIGH")
+  fi
+  if [[ -n "$LOSS_AGG_MODE" ]]; then
+    ORCHESTRATOR_CMD+=(--loss_agg_mode="$LOSS_AGG_MODE")
+  fi
+  if [[ -n "$ADVANTAGE_ESTIMATOR" ]]; then
+    ORCHESTRATOR_CMD+=(--advantage_estimator="$ADVANTAGE_ESTIMATOR")
+  fi
+  if [[ "$OVERLONG_LOSS_MASKING" == "1" || "$OVERLONG_LOSS_MASKING" == "true" ]]; then
+    ORCHESTRATOR_CMD+=(--overlong_loss_masking)
+  fi
+  if [[ -n "$SEQ_LOGPROB_ERROR_THRESHOLD" ]]; then
+    ORCHESTRATOR_CMD+=(--seq_logprob_error_threshold="$SEQ_LOGPROB_ERROR_THRESHOLD")
+  fi
+  if [[ -n "$TIS_TYPE" ]]; then
+    ORCHESTRATOR_CMD+=(--truncated_importance_sampling_type="$TIS_TYPE")
+  fi
+  if [[ -n "$TIS_RATIO_MIN" ]]; then
+    ORCHESTRATOR_CMD+=(--truncated_importance_sampling_ratio_min="$TIS_RATIO_MIN")
+  fi
+  if [[ -n "$TIS_RATIO" ]]; then
+    ORCHESTRATOR_CMD+=(--truncated_importance_sampling_ratio="$TIS_RATIO")
+  fi
+  if [[ -n "$SAMPLER_IS_LENGTH_BUCKETS" ]]; then
+    ORCHESTRATOR_CMD+=(--sampler_is_length_buckets="$SAMPLER_IS_LENGTH_BUCKETS")
+  fi
   if [[ "$SHUFFLE" == "0" || "$SHUFFLE" == "false" || "$SHUFFLE" == "False" ]]; then
     ORCHESTRATOR_CMD+=(--no-shuffle)
   else

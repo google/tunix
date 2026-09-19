@@ -42,6 +42,10 @@ class SamplingParams:
       routed through, so training can replay them instead of re-routing. Only
       meaningful for MoE models on a backend that supports capture; the backend
       must also be configured to capture, since it is an engine-level setting.
+    routed_experts_prompt_start: Token index in prompt from which to start
+      returning routing data. In multi-turn rollouts, set to the cumulative
+      length of previously processed tokens to return only newly prefilled
+      environment tokens and completion.
     beam_size: Beam width for beam search decoding.
   """
 
@@ -53,6 +57,7 @@ class SamplingParams:
   return_logprobs: bool = False
   return_logits: bool = False
   return_routed_experts: bool = False
+  routed_experts_prompt_start: int = 0
   beam_size: int | None = None
 
 
