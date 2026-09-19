@@ -647,8 +647,9 @@ class WeightSyncCoordinator:
     self._req_id_prefix = req_id_prefix
     self._timeouts = timeouts or PhaseTimeouts()
 
-    self._round_index = 0
-    self._next_uuid = first_uuid
+    _ts_base = int(time.time()) % 1000000
+    self._round_index = int(os.environ.get("WEIGHT_SYNC_FIRST_ROUND", str(_ts_base)))
+    self._next_uuid = int(os.environ.get("WEIGHT_SYNC_FIRST_UUID", str(max(first_uuid, _ts_base))))
     self._in_flight = False
     self._poisoned: Optional[str] = None
     self._last_committed_version: Optional[int] = None

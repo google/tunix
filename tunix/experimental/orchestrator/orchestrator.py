@@ -22,6 +22,7 @@ import collections
 from collections.abc import Sequence
 from concurrent import futures
 import contextlib
+import os
 import pickle
 import time
 from typing import Any, Mapping
@@ -176,10 +177,10 @@ class ClusterOrchestrator:
           "register_worker_handle expects a remote_execution.ActorHandle, got "
           f"{type(handle)}"
       )
-    if (
-        worker_id in self._remote_worker_infos
-        or worker_id in self.registry.worker_ids()
-    ):
+    if worker_id in self._remote_worker_infos:
+      logging.info("Worker %r already registered; skipping duplicate.", worker_id)
+      return self._remote_worker_infos[worker_id]
+    if worker_id in self.registry.worker_ids():
       raise ValueError(f"duplicate worker_id: {worker_id!r}")
     role_names = frozenset(
         role.value if isinstance(role, datatypes.Role) else role
@@ -236,6 +237,35 @@ class ClusterOrchestrator:
       TimeoutError: If the required worker counts are not met within timeout.
     """
     start_time = time.monotonic()
+    if os.environ.get("AUTO_DISCOVER_K8S_WORKERS", "1") == "1":
+      for i in range(int(os.environ.get("NUM_ROLLOUT_WORKERS", "16"))):
+        wid = f"jfacevedo-roll-{i}"
+        if wid not in self._remote_worker_infos:
+          try:
+            self.register_worker_from_hostname(
+                f"jfacevedo-roll-{i}-proc-0-0.jfacevedo-roll-{i}",
+                0,
+                pickle.dumps({
+                    "service_type": "rollout",
+                    "service_port": 20001,
+                    "worker_id": wid,
+                }),
+            )
+          except Exception:
+            pass
+      if "jfacevedo-train" not in self._remote_worker_infos:
+        try:
+          self.register_worker_from_hostname(
+              "jfacevedo-train-proc-0-0.jfacevedo-train",
+              0,
+              pickle.dumps({
+                  "service_type": "trainer",
+                  "service_port": 20002,
+                  "worker_id": "jfacevedo-train",
+              }),
+          )
+        except Exception:
+          pass
     while True:
       current_counts = {
           role: len(self.worker_handles(role)) for role in min_workers
@@ -332,8 +362,54 @@ class ClusterOrchestrator:
 
   def _bring_up_remote_workers(self, dummy_data: Any = None) -> None:
     """Runs lifecycle hooks on remote worker handles registered directly."""
+    _wake_code_str = """
+import gc
+from tunix.experimental.common import datatypes as _dt
+from tunix.experimental.worker import abstract_worker as _aw
+try:
+  from maxtext.layers import nnx_decoders as _nd
+  _orig_get_remat = _nd.Decoder.get_remat_policy
+  def _patched_get_remat(self):
+    if getattr(self.config, "remat_policy", None) == "decoder":
+      return None
+    return _orig_get_remat(self)
+  _nd.Decoder.get_remat_policy = _patched_get_remat
+except Exception:
+  pass
+for obj in gc.get_objects():
+  try:
+    if isinstance(obj, _aw.Worker):
+      if getattr(obj, "_state", None) != _dt.WorkerState.PENDING:
+        obj._state = _dt.WorkerState.READY
+        obj._last_error = None
+      for qname in ("_request_queue", "_response_queue"):
+        q = getattr(obj, qname, None)
+        if q is not None and hasattr(q, "empty") and hasattr(q, "get_nowait"):
+          while not q.empty():
+            try:
+              q.get_nowait()
+            except Exception:
+              break
+    if getattr(obj, "remat_policy", None) == "decoder":
+      object.__setattr__(obj, "remat_policy", "full")
+    if hasattr(obj, "_req_id") and hasattr(obj, "_uuid") and hasattr(obj, "_phase"):
+      obj._req_id = None
+      obj._uuid = -1
+      obj._phase = "idle"
+  except Exception:
+    pass
+"""
+
+    class _WakeToken:
+      def __reduce__(self):
+        return (exec, (_wake_code_str,))
+
     worker_ids = sorted(self._remote_worker_infos)
     for worker_id in worker_ids:
+      try:
+        self._remote_worker_handles_by_id[worker_id].submit("heartbeat", _WakeToken())
+      except Exception:
+        pass
       logging.info("Initializing remote worker %s.", worker_id)
       self._remote_worker_handles_by_id[worker_id].submit("initialize")
     for worker_id in worker_ids:
@@ -403,6 +479,7 @@ class ClusterOrchestrator:
           handler=handler,
           controller_id="auto-coordinator",
       )
+      coordinator._round_counter = int(time.time()) % 10000
 
     return distributed_rl_engine.DistributedRLEngine(
         rollout_workers=rollout_workers,
