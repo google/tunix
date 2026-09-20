@@ -79,7 +79,7 @@ class RaidenTransferOptions:
 def make_host_staged_transfer_options(
       parallelism: int = 16,
       group_size: int = 128,
-      max_layers: int = 512,
+      max_layers: int = 4096,
   ) -> RaidenTransferOptions:
     """Transfer options for host-staged (CPU) weight sources.
 
