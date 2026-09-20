@@ -513,10 +513,30 @@ class MaxTextUtilsTest(absltest.TestCase):
           ),
       )
 
+  def test_normalize_trainable_parameters_mask(self):
+    expected = ["^(?!.*routed_experts/gate/kernel).*"]
+    cases = [
+        expected,
+        '["^(?!.*routed_experts/gate/kernel).*"]',
+        '\'["^(?!.*routed_experts/gate/kernel).*"]\'',
+        '"^(?!.*routed_experts/gate/kernel).*"',
+        '^(?!.*routed_experts/gate/kernel).*',
+        "'^(?!.*routed_experts/gate/kernel).*'",
+    ]
+    for case in cases:
+      self.assertEqual(
+          maxtext_utils.normalize_trainable_parameters_mask(case),
+          expected,
+          f"Failed for input: {case!r}",
+      )
+    self.assertIsNone(maxtext_utils.normalize_trainable_parameters_mask(None))
+    self.assertIsNone(maxtext_utils.normalize_trainable_parameters_mask(""))
+
   def test_trainable_parameters_mask_forwarded_to_config(self):
     mask = '["^(?!.*routed_experts/gate/kernel).*"]'
     argv = self._build_config_argv(trainable_parameters_mask=mask)
-    self.assertIn(f"trainable_parameters_mask={mask}", argv)
+    expected = ["^(?!.*routed_experts/gate/kernel).*"]
+    self.assertIn(f"trainable_parameters_mask={expected}", argv)
 
   def test_trainable_parameters_mask_none_not_in_config(self):
     argv = self._build_config_argv(trainable_parameters_mask=None)

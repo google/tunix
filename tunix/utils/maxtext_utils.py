@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import ast
 import dataclasses
 import logging
 import os
@@ -39,6 +40,35 @@ def maxtext_modules():
   from maxtext.training_engine import maxtext_engine  # pylint: disable=g-import-not-at-top
   from maxtext.utils import maxtext_utils  # pylint: disable=g-import-not-at-top
   return pyconfig, maxtext_engine, maxtext_utils
+
+
+def normalize_trainable_parameters_mask(
+    mask: list[str] | str | None,
+) -> list[str] | None:
+  """Normalizes trainable_parameters_mask to a list of regex pattern strings."""
+  if not mask:
+    return None
+  if isinstance(mask, str):
+    s = mask.strip()
+    # Strip any enclosing quotes (e.g. from shell/CLI escaping)
+    while (s.startswith("'") and s.endswith("'")) or (
+        s.startswith('"') and s.endswith('"')
+    ):
+      s = s[1:-1].strip()
+    if (s.startswith("[") and s.endswith("]")) or (
+        s.startswith("(") and s.endswith(")")
+    ):
+      try:
+        parsed = ast.literal_eval(s)
+        if isinstance(parsed, (list, tuple)):
+          return [str(x) for x in parsed if x]
+        return [str(parsed)]
+      except (ValueError, SyntaxError):
+        return [s]
+    return [s] if s else None
+  elif isinstance(mask, (list, tuple)):
+    return [str(x) for x in mask if x]
+  return None
 
 
 def get_tokenizer_pad_id(
@@ -353,6 +383,9 @@ def build_maxtext_config(
       or os.environ.get("TRAINER_MAXTEXT_ATTENTION")
       or "dot_product"
   )
+  normalized_mask = normalize_trainable_parameters_mask(
+      trainable_parameters_mask
+  )
   argv.extend([
       "scan_layers=True",
       "convert_checkpoint_if_possible=False",
@@ -409,8 +442,8 @@ def build_maxtext_config(
           else []
       ),
       *(
-          [f"trainable_parameters_mask={trainable_parameters_mask}"]
-          if trainable_parameters_mask
+          [f"trainable_parameters_mask={normalized_mask}"]
+          if normalized_mask
           else []
       ),
   ])
