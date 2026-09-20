@@ -521,6 +521,7 @@ if isinstance(cfg, dict):
       "VLLM_DATA_PARALLEL_SIZE": ("data_parallel_size", int),
       "VLLM_ENABLE_EXPERT_PARALLEL": ("enable_expert_parallel", lambda v: v.lower() in ("true", "1")),
       "VLLM_PREFIX_CACHE_RETENTION_INTERVAL": ("prefix_cache_retention_interval", int),
+      "VLLM_MAMBA_CACHE_MODE": ("mamba_cache_mode", str),
       "VLLM_KV_CACHE_DTYPE": ("kv_cache_dtype", str),
       "VLLM_BLOCK_SIZE": ("block_size", int),
       "VLLM_ASYNC_SCHEDULING": ("async_scheduling", lambda v: v.lower() in ("true", "1")),

@@ -87,6 +87,7 @@ export VLLM_ADDITIONAL_CONFIG='{"sharding":{"sharding_strategy":{"expert_paralle
 # Prefix Caching Configs
 export ENABLE_PREFIX_CACHING="true"
 export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=256
+export VLLM_MAMBA_CACHE_MODE="align"
 
 # KV Cache Configs
 export VLLM_KV_CACHE_DTYPE="bfloat16"
