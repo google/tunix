@@ -181,6 +181,70 @@ def prepare_process(argv: list[str]) -> PreparedProcess:
   )
 
 
+def _maybe_start_local_ctl_daemon() -> None:
+  """Starts an opt-in local file-polled control thread (/tmp/ctl/{inbox,outbox}).
+
+  Gated on `TUNIX_ENABLE_LOCAL_CTL=1` (off by default). Because writing into
+  `/tmp/ctl/inbox/*.py` inside the container requires `kubectl exec` or
+  `kubectl cp`, authorization is enforced by GKE RBAC rather than network
+  reachability. Every error path is swallowed so a diagnostic script can never
+  crash the worker process.
+  """
+  if os.environ.get("TUNIX_ENABLE_LOCAL_CTL", "").lower() not in ("1", "true"):
+    return
+  import glob
+  import io
+  import threading
+  import time
+  import traceback
+
+  def _ctl_loop() -> None:
+    inbox = "/tmp/ctl/inbox"
+    outbox = "/tmp/ctl/outbox"
+    try:
+      os.makedirs(inbox, mode=0o700, exist_ok=True)
+      os.makedirs(outbox, mode=0o700, exist_ok=True)
+    except Exception:  # pylint: disable=broad-except
+      return
+    while True:
+      try:
+        for path in sorted(glob.glob(os.path.join(inbox, "*.py"))):
+          name = os.path.basename(path)
+          try:
+            with open(path, "r", encoding="utf-8") as f:
+              src = f.read()
+          except Exception:  # pylint: disable=broad-except
+            src = ""
+          try:
+            os.unlink(path)
+          except Exception:  # pylint: disable=broad-except
+            pass
+          if not src:
+            continue
+          buf = io.StringIO()
+          ns = {"__name__": "__tunix_ctl__", "_out": buf}
+          try:
+            exec(compile(src, path, "exec"), ns)  # pylint: disable=exec-used
+            out_text = buf.getvalue() or "OK\n"
+          except Exception:  # pylint: disable=broad-except
+            out_text = buf.getvalue() + "\n" + traceback.format_exc()
+          try:
+            tmp_out = os.path.join(outbox, f".{name}.tmp")
+            final_out = os.path.join(outbox, f"{name}.out")
+            with open(tmp_out, "w", encoding="utf-8") as f:
+              f.write(out_text)
+            os.replace(tmp_out, final_out)
+          except Exception:  # pylint: disable=broad-except
+            pass
+      except Exception:  # pylint: disable=broad-except
+        pass
+      time.sleep(1.0)
+
+  threading.Thread(
+      target=_ctl_loop, daemon=True, name="tunix-local-ctl"
+  ).start()
+
+
 def main(argv: list[str]) -> None:
   """Main entry point for distributed process runtime execution.
 
@@ -190,6 +254,7 @@ def main(argv: list[str]) -> None:
   Args:
     argv: System command-line arguments (`sys.argv`).
   """
+  _maybe_start_local_ctl_daemon()
   parser = argparse.ArgumentParser(
       description="distributed main", allow_abbrev=False, add_help=False
   )
