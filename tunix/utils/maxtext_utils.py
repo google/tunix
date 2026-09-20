@@ -347,6 +347,11 @@ def build_maxtext_config(
         f"skip_first_n_steps_for_profiler={profiling_options.skip_first_n_steps}",
         f"profile_periodically_period={profiling_options.profiler_period}",
     ])
+  else:
+    argv.extend([
+        "profiler_steps=0",
+        "skip_first_n_steps_for_profiler=-1",
+    ])
 
   effective_attention = (
       attention

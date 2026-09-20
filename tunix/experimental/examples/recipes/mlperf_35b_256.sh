@@ -5,7 +5,7 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Fill these before you run.
 export WANDB_API_KEY="${WANDB_API_KEY:-}"
-export MAXTEXT_OUTPUT_DIR="${MAXTEXT_OUTPUT_DIR:-}"
+export MAXTEXT_OUTPUT_DIR="${MAXTEXT_OUTPUT_DIR:-gs://deepswe-wuhao-1784153479/maxtext}"
 export TUNIX_IMAGE="${TUNIX_IMAGE:-gcr.io/cloud-tpu-multipod-dev/${USER:-niting}/trellis-35b:latest}"
 
 export PROJECT="cloud-tpu-shared-capacity"
