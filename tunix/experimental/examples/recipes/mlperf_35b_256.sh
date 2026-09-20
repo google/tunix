@@ -129,7 +129,7 @@ export BATCH_SIZE=16
 export MINI_BATCH_SIZE=${BATCH_SIZE}
 export NUM_GENERATIONS=16
 export TRAIN_MICRO_BATCH_SIZE=64
-export CHECKPOINT_SAVE_INTERVAL_STEPS=2
+export CHECKPOINT_SAVE_INTERVAL_STEPS=0
 export CHECKPOINT_MAX_TO_KEEP=10
 
 # Sampling Parameters (explicitly disable top-k, set top-p 1.0 and temperature 1.0)
@@ -163,7 +163,7 @@ export WARMUP_STEPS_FRACTION=0.0
 export LEARNING_RATE_FINAL_FRACTION=1.0
 
 # Architecture & Rematerialization
-export REMAT_POLICY="decoder"
+export REMAT_POLICY="full"
 export TRAINER_MAXTEXT_ATTENTION="flash"
 export COMPUTE_LOGPS_CHUNK_SIZE=512
 
