@@ -212,6 +212,8 @@ start_orchestrator() {
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ORCHESTRATOR_PORT}" \
     --worker_startup_command=" \
+      export TRAINER_MAX_PROMPT_LENGTH=${TRAINER_MAX_PROMPT_LENGTH:-2048}; \
+      export TRAINER_MAX_RESPONSE_LENGTH=${TRAINER_MAX_RESPONSE_LENGTH:-2048}; \
       ${sandbox_env} \
       ${SCAFFOLD:+SCAFFOLD=\"${SCAFFOLD}\"} \
       ${WANDB_API_KEY:+WANDB_API_KEY=\"${WANDB_API_KEY}\"} \
@@ -224,8 +226,6 @@ start_orchestrator() {
       ${TRAJECTORY_LOG_DIR:+TRAJECTORY_LOG_DIR=\"${TRAJECTORY_LOG_DIR}\"} \
       PYTHONUNBUFFERED=1 \
       TUNIX_IS_INTERNAL_ENV=false \
-      TRAINER_MAX_PROMPT_LENGTH=${TRAINER_MAX_PROMPT_LENGTH:-2048} \
-      TRAINER_MAX_RESPONSE_LENGTH=${TRAINER_MAX_RESPONSE_LENGTH:-2048} \
       ${BOOTSTRAP_CMD} \
       python -m tunix.experimental.distributed.runtime.main \
         --discovery_id=${ORCHESTRATOR_ID} \
