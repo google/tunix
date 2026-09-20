@@ -458,9 +458,12 @@ class RLVllmSampler:
     await self.pause()
     await self._clear_prefix_cache()
 
-    # `AsyncLLMEngine.start_weight_update()` takes no arguments, so it
-    # can't forward `free_kv_cache` to the worker -- go through
-    # collective_rpc directly instead of the engine-level wrapper.
+    # Ensure any stale weight update session from an aborted round is closed
+    # before opening a new weight update session.
+    try:
+      await self._call_worker_method("finish_weight_update")
+    except Exception:
+      pass
     await self._call_worker_method("start_weight_update",
                                        free_kv_cache=free_kv_cache)
 
