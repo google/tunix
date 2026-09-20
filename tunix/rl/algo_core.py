@@ -1564,6 +1564,32 @@ def grpo_loss_fn(
         jnp.maximum((abs_is * completion_mask).sum(), 1e-9)
     )
 
+    # Turn-0 versus later turns, derived from `completion_mask` alone: assistant
+    # spans are scored (1) and environment/tool spans are not (0), so the first
+    # 0-after-a-1 transition marks the end of turn 0. Trailing pad is also 0 but
+    # follows every scored token, so it cannot misclassify one.
+    #
+    # This separates two hypotheses that the forced/unforced split alone cannot.
+    # If replay coverage is the problem, forced tokens are clean in every turn.
+    # If `routed_experts` is positionally misaligned instead — every entry valid
+    # but shifted, which no `-1` check can see — the shift compounds across turn
+    # boundaries, so turn 0 stays clean while later turns degrade.
+    _seen = jnp.cumsum((completion_mask > 0).astype(jnp.int32), axis=-1) > 0
+    _later = (
+        jnp.cumsum(((completion_mask == 0) & _seen).astype(jnp.int32), axis=-1)
+        > 0
+    ).astype(jnp.float32)
+    _f0, _f1 = forced * (1.0 - _later), forced * _later
+    aux["router_replay/turn1plus_frac"] = (
+        completion_mask * _later
+    ).sum() / denom
+    aux["router_replay/absmean_forced_turn0"] = (abs_is * _f0).sum() / (
+        jnp.maximum(_f0.sum(), 1.0)
+    )
+    aux["router_replay/absmean_forced_turn1plus"] = (abs_is * _f1).sum() / (
+        jnp.maximum(_f1.sum(), 1.0)
+    )
+
   # Opt-in diagnostic; empty unless `TUNIX_OUTLIER_DUMP_PATH` is set. Popped
   # host-side in `maxtext_engine.fwd_bwd` before any scalar reducer sees it.
   aux.update(_outlier_dump_arrays(train_example, log_is_raw, completion_mask))
