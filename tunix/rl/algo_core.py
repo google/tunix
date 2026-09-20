@@ -1535,6 +1535,26 @@ def grpo_loss_fn(
   # the observed divergence by exactly that boundary: if the disagreement is
   # concentrated on unforced tokens, replay coverage is the cause rather than
   # numerics. Cheap, always on, and rides the proven scalar path.
+  # Per-sequence agreement histogram. The order statistics we log
+  # (`seq_geomean_mean/min/max`) cannot tell a broad unimodal spread from two
+  # separate populations, and that distinction is the whole question when a
+  # defect corrupts entire trajectories rather than scattered tokens: a vLLM
+  # prefix-cache hit inside the prompt poisons the recurrent state before
+  # completion token 0, so a trajectory comes out wholly clean or wholly wrong.
+  # Bimodal here confirms that; unimodal says the population is not
+  # trajectory-structured and we are looking at the wrong axis.
+  if seq_geomean is not None and seq_valid is not None:
+    _NB, _LO, _HI = 10, 0.7, 1.0
+    _bkt = jnp.clip(
+        ((seq_geomean - _LO) / (_HI - _LO) * _NB).astype(jnp.int32), 0, _NB - 1
+    )
+    _nvalid = jnp.maximum(seq_valid.sum(), 1.0)
+    for _i in range(_NB):
+      aux[f"seq_geomean_hist/{_i}"] = (
+          (_bkt == _i).astype(jnp.float32) * seq_valid
+      ).sum() / _nvalid
+    aux["seq_geomean_hist/n_valid"] = seq_valid.sum()
+
   _re = getattr(train_example, "routed_experts", None)
   if _re is not None and log_is_raw is not None:
     forced = jnp.all(jnp.asarray(_re) >= 0, axis=tuple(range(2, jnp.ndim(_re))))
