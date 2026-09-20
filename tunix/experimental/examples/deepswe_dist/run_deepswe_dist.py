@@ -347,7 +347,7 @@ def _configure_trainer_loss(
 
 
 def _start_sandbox_ungater_daemon() -> None:
-  """Background daemon that strips Kueue schedulingGates from SandboxClaim pods."""
+  """Background daemon that strips Kueue schedulingGates only from our own SandboxClaim/WarmPool pods."""
   import threading
   def _loop():
     import concurrent.futures
@@ -359,7 +359,7 @@ def _start_sandbox_ungater_daemon() -> None:
       except Exception:
         config.load_kube_config()
       api = client.ApiClient()
-      ns = os.environ.get("SANDBOX_NAMESPACE") or os.environ.get("NAMESPACE") or os.environ.get("K8S_NAMESPACE") or "trellis"
+      ns = os.environ.get("SANDBOX_NAMESPACE") or "sandbox"
       pool = concurrent.futures.ThreadPoolExecutor(max_workers=24)
 
       def _ungate(pname: str) -> None:
@@ -377,34 +377,65 @@ def _start_sandbox_ungater_daemon() -> None:
 
       while True:
         try:
+          fleet = getattr(swe_env, "_GLOBAL_FLEET", None) or getattr(
+              getattr(swe_env, "sandbox_utils", None), "_GLOBAL_FLEET", None
+          )
+          my_run_id = getattr(fleet, "run_id", None)
+          if not my_run_id:
+            time.sleep(2.0)
+            continue
+          label_sel = f"agents.x-k8s.io/asrl-run-id={my_run_id}"
           target_pods = set()
+          owned_claims = set()
+          owned_pools = set()
           claims_resp = api.call_api(
               f"/apis/extensions.agents.x-k8s.io/v1beta1/namespaces/{ns}/sandboxclaims",
               "GET",
+              query_params=[("labelSelector", label_sel)],
               response_type="object",
               _preload_content=True,
           )[0]
           for c in claims_resp.get("items", []):
+            labels = c.get("metadata", {}).get("labels") or {}
+            if labels.get("agents.x-k8s.io/asrl-run-id") != my_run_id:
+              continue
+            cname = c["metadata"]["name"]
+            owned_claims.add(cname)
             conds = c.get("status", {}).get("conditions") or []
             is_ready = any(cd.get("type") == "Ready" and cd.get("status") == "True" for cd in conds)
             if not is_ready:
               sb = c.get("status", {}).get("sandbox", {}).get("name")
               if sb:
                 target_pods.add(sb)
-              target_pods.add(c["metadata"]["name"])
-          table_resp = api.call_api(
-              f"/api/v1/namespaces/{ns}/pods",
+              target_pods.add(cname)
+          pools_resp = api.call_api(
+              f"/apis/extensions.agents.x-k8s.io/v1alpha1/namespaces/{ns}/sandboxwarmpools",
               "GET",
-              header_params={"Accept": "application/json;as=Table;g=meta.k8s.io;v=v1"},
+              query_params=[("labelSelector", label_sel)],
               response_type="object",
               _preload_content=True,
           )[0]
-          for row in table_resp.get("rows", []):
-            cells = row.get("cells") or []
-            if len(cells) >= 3 and cells[2] == "SchedulingGated":
-              pname = cells[0]
-              if pname.startswith(("pool-", "sandbox-claim-")):
-                target_pods.add(pname)
+          for p in pools_resp.get("items", []):
+            labels = p.get("metadata", {}).get("labels") or {}
+            if labels.get("agents.x-k8s.io/asrl-run-id") == my_run_id:
+              owned_pools.add(p["metadata"]["name"])
+          owned_pool_prefixes = tuple(f"{p}-" for p in owned_pools)
+          if owned_claims or owned_pool_prefixes:
+            table_resp = api.call_api(
+                f"/api/v1/namespaces/{ns}/pods",
+                "GET",
+                header_params={"Accept": "application/json;as=Table;g=meta.k8s.io;v=v1"},
+                response_type="object",
+                _preload_content=True,
+            )[0]
+            for row in table_resp.get("rows", []):
+              cells = row.get("cells") or []
+              if len(cells) >= 3 and cells[2] == "SchedulingGated":
+                pname = cells[0]
+                if pname in owned_claims or (
+                    owned_pool_prefixes and pname.startswith(owned_pool_prefixes)
+                ):
+                  target_pods.add(pname)
           if target_pods:
             list(pool.map(_ungate, sorted(target_pods)))
         except Exception:
