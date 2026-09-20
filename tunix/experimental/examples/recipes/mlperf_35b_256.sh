@@ -87,12 +87,6 @@ export VLLM_ADDITIONAL_CONFIG='{"sharding":{"sharding_strategy":{"expert_paralle
 # Prefix Caching Configs
 export ENABLE_PREFIX_CACHING="true"
 export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=256
-# vLLM defaults mamba_cache_mode to "align" for hybrid models when prefix
-# caching is on, but only via a hook gated on model_config.is_hybrid. Loading
-# MaxText natively resolves the architecture to MaxTextForCausalLM, which is
-# not registered as IsHybrid, so the hook never runs and the mode stays "none".
-# Without "align", custom_mamba_cache_multiplier above is ignored and the mamba
-# pool is sized at 1 block per request instead of 16.
 export VLLM_MAMBA_CACHE_MODE="align"
 
 # KV Cache Configs
