@@ -92,7 +92,7 @@ export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=256
 export VLLM_MAMBA_CACHE_MODE="align"
 
 # KV Cache Configs
-export ROLLOUT_FREE_KV_CACHE="true"
+export ROLLOUT_FREE_KV_CACHE="false"
 export VLLM_KV_CACHE_DTYPE="bfloat16"
 export VLLM_BLOCK_SIZE=256
 
