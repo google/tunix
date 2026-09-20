@@ -201,9 +201,24 @@ class TrajectoryCollectEngine:
     targets are rolled by -1 and targets_segmentation is 0 at the final token,
     so padding with UNSET_ROUTED_EXPERT has zero effect on training loss.
     """
-    if not self.agent.trajectory.steps:
+    steps = self.agent.trajectory.steps
+    while steps and (
+        steps[-1].assistant_tokens is None
+        or len(steps[-1].assistant_tokens) == 0
+    ):
+      steps.pop()
+    if steps and steps[-1].assistant_routed_experts is None:
+      logging.warning(
+          "Terminal step has %d assistant tokens but no routed_experts; "
+          "leaving it in place rather than discarding generated content.",
+          len(steps[-1].assistant_tokens),
+      )
+    if not steps:
       return
-    final_step = self.agent.trajectory.steps[-1]
+    final_step = steps[-1]
+    final_step.env_tokens = None
+    final_step.env_masks = None
+    final_step.env_routed_experts = None
     if (
         final_step.assistant_routed_experts is not None
         and final_step.assistant_tokens is not None
@@ -668,7 +683,7 @@ class TrajectoryCollectEngine:
             getattr(model_call_fn, "__call__")
         )
     )
-    if self._cumulative_prompt_tokens > 0:
+    if self.exact_token_continuity and self._cumulative_prompt_tokens > 0:
       call_kwargs["routed_experts_prompt_start"] = self._cumulative_prompt_tokens
 
     if is_async:
@@ -779,17 +794,24 @@ class TrajectoryCollectEngine:
             len(prev_step.assistant_tokens)
             - len(prev_step.assistant_routed_experts),
         )
-        if needed_asst > 0:
-          asst_tail = _slice_or_pad_routed(prefix_routed, 0, needed_asst)
-          prev_step.assistant_routed_experts = np.concatenate(
-              [prev_step.assistant_routed_experts, asst_tail],
-              axis=0,
-          )
       num_env = (
           len(prev_step.env_tokens)
           if prev_step.env_tokens is not None
           else 0
       )
+      total_needed = needed_asst + num_env
+      if (
+          not self.exact_token_continuity
+          and total_needed > 0
+          and len(prefix_routed) > total_needed
+      ):
+        prefix_routed = prefix_routed[-total_needed:]
+      if needed_asst > 0:
+        asst_tail = _slice_or_pad_routed(prefix_routed, 0, needed_asst)
+        prev_step.assistant_routed_experts = np.concatenate(
+            [prev_step.assistant_routed_experts, asst_tail],
+            axis=0,
+        )
       if num_env > 0:
         prev_step.env_routed_experts = _slice_or_pad_routed(
             prefix_routed, needed_asst, num_env
