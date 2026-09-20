@@ -953,7 +953,7 @@ class StandardRLProgram(RLProgram):
 
       # Auxiliary weighted metrics
       for k, v in weighted_metrics.items():
-        val = _extract_scalar(v)
+        val = _extract_scalar(v, k)
         if val is not None:
           metric_key = k if k.startswith("trainer/") else f"trainer/{k}"
           self.metrics_logger.log(
@@ -964,7 +964,7 @@ class StandardRLProgram(RLProgram):
       for k, v in scalar_metrics.items():
         if k in ("perplexity", "trainer/perplexity"):
           continue
-        val = _extract_scalar(v)
+        val = _extract_scalar(v, k)
         if val is not None:
           metric_key = k if k.startswith("trainer/") else f"trainer/{k}"
           self.metrics_logger.log(
@@ -972,7 +972,7 @@ class StandardRLProgram(RLProgram):
           )
 
       try:
-        _all_m = {k: _extract_scalar(v) for k, v in {**weighted_metrics, **scalar_metrics}.items()}
+        _all_m = {k: _extract_scalar(v, k) for k, v in {**weighted_metrics, **scalar_metrics}.items()}
         logging.info("[StepMetrics step=%d] trainer_metrics=%s", log_step, _all_m)
       except Exception:
         pass

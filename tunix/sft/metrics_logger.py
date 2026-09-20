@@ -213,7 +213,7 @@ def _calculate_geometric_mean(x: np.ndarray) -> np.ndarray:
   return np.exp(np.mean(np.log(x)))
 
 
-def extract_scalar(val: Any) -> float | None:
+def extract_scalar(val: Any, name: str | None = None) -> float | None:
   """Safely extracts a scalar float from arrays, tensors, or WeightedMetrics."""
   if val is None:
     return None
@@ -233,11 +233,19 @@ def extract_scalar(val: Any) -> float | None:
     except Exception:  # pylint: disable=broad-exception-caught
       return None
   try:
-    arr = np.asarray(val)
+    arr = np.asarray(val, dtype=np.float64)
     if arr.size == 1:
-      return float(arr.item())
+      item = float(arr.item())
+      return item if np.isfinite(item) else 0.0
     elif arr.size > 1:
-      return float(np.mean(arr))
+      finite = arr[np.isfinite(arr)]
+      if finite.size == 0:
+        return 0.0
+      if name is not None and name.endswith(("_max", "/max")):
+        return float(np.max(finite))
+      if name is not None and name.endswith(("_min", "/min")):
+        return float(np.min(finite))
+      return float(np.mean(finite))
   except Exception:  # pylint: disable=broad-exception-caught
     return None
   return None
