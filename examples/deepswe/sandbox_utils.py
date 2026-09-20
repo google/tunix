@@ -95,6 +95,44 @@ def patch_r2egym_for_agent_sandbox() -> None:
         )
 
       docker_mod.DockerRuntime.start_container = _patched_start_container
+
+    orig_stop = getattr(docker_mod.DockerRuntime, "_orig_stop_container", None)
+    if orig_stop is None:
+      docker_mod.DockerRuntime._orig_stop_container = (
+          docker_mod.DockerRuntime.stop_container
+      )
+
+      def _patched_stop_container(self, *args, **kwargs):
+        if (
+            getattr(self, "_actual_backend", None) == "kubernetes-sandbox"
+            or getattr(self, "backend", None) == "kubernetes-sandbox"
+        ):
+          return self._stop_kubernetes_sandbox()
+        return self._orig_stop_container(*args, **kwargs)
+
+      docker_mod.DockerRuntime.stop_container = _patched_stop_container
+
+    orig_run = getattr(docker_mod.DockerRuntime, "_orig_run", None)
+    if orig_run is None:
+      docker_mod.DockerRuntime._orig_run = docker_mod.DockerRuntime.run
+
+      def _patched_run(self, code, *args, **kwargs):
+        if (
+            getattr(self, "_actual_backend", None) == "kubernetes-sandbox"
+            or getattr(self, "backend", None) == "kubernetes-sandbox"
+        ):
+          return self._run_kubernetes(code, *args, **kwargs)
+        return self._orig_run(code, *args, **kwargs)
+
+      docker_mod.DockerRuntime.run = _patched_run
+
+    try:
+      import agent_sandbox_rl.adapters.r2egym as asrl_r2e  # pyrefly: ignore[missing-import]
+
+      asrl_r2e._CLASSES = None
+      asrl_r2e._ensure_classes()
+    except Exception:  # pylint: disable=broad-exception-caught
+      pass
   except Exception as e:  # pylint: disable=broad-exception-caught
     logging.debug("[SandboxFleet] r2egym in-memory patch note: %s", e)
 
@@ -232,9 +270,7 @@ def init_global_fleet(
     fleet_ns = (
         namespace
         or os.getenv("SANDBOX_NAMESPACE")
-        or os.getenv("NAMESPACE")
-        or os.getenv("K8S_NAMESPACE")
-        or "trellis"
+        or "sandbox"
     )
     if node_selector is None:
       key = (
