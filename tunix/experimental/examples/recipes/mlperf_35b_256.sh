@@ -55,10 +55,10 @@ export WEIGHT_SYNC_MODE="raiden"
 
 # Topologies (64 chips Trainer 4x4x4, 16x 4-chip Rollout slices)
 export TRAINER_JOBSET_YAML="jobset.pathways.yaml"
-export TRAINER_TPU_SLICE="tpuv5:4x4x4"
-export TRAINER_MESH_FSDP=8
+export TRAINER_TPU_SLICE="tpuv5:4x4x8"
+export TRAINER_MESH_FSDP=64
 export TRAINER_MESH_TP=2
-export TRAINER_MESH_EXPERT=4
+export TRAINER_MESH_EXPERT=1
 export TRAINER_BASE_NUM_KV_HEADS=2
 
 export ROLLOUT_JOBSET_YAML="jobset.tpu.yaml"
@@ -128,7 +128,7 @@ export MAX_STEPS=${MAX_STEPS:-100}
 export BATCH_SIZE=16
 export MINI_BATCH_SIZE=${BATCH_SIZE}
 export NUM_GENERATIONS=16
-export TRAIN_MICRO_BATCH_SIZE=8
+export TRAIN_MICRO_BATCH_SIZE=64
 export CHECKPOINT_SAVE_INTERVAL_STEPS=2
 export CHECKPOINT_MAX_TO_KEEP=10
 
