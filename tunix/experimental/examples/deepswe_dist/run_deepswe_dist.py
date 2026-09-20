@@ -279,6 +279,15 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       default=128,
       help="Maximum concurrency for SandboxFleet.",
   )
+  parser.add_argument(
+      "--image_rewrite_prefix",
+      type=str,
+      default=os.getenv("IMAGE_REWRITE_PREFIX", ""),
+      help=(
+          "Container registry prefix to rewrite problem docker images for image"
+          " streaming."
+      ),
+  )
   parser.add_argument("--env_verbose", action="store_true")
   parser.add_argument(
       "--flush_every_n_steps",
@@ -403,12 +412,16 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   if args.max_staleness < 0:
     raise ValueError("offpolicy/max_staleness must be non-negative.")
 
+  if args.image_rewrite_prefix:
+    os.environ["IMAGE_REWRITE_PREFIX"] = args.image_rewrite_prefix
+
   logging.info("=== Starting Distributed DeepSWE GRPO Orchestrator ===")
   logging.info(
       "Configuration: model_id=%s, batch_size=%d prompt group(s), "
       "mini_batch_size=%d, num_generations=%d, max_steps=%d, max_turns=%d, "
       "train_micro=%d, beta=%.4f, env_backend=%s, use_agent_sandbox=%s, "
-      "weight_sync_mode=%s, trainable_parameters_mask=%s.",
+      "weight_sync_mode=%s, trainable_parameters_mask=%s, "
+      "image_rewrite_prefix=%s.",
       args.model_id,
       args.batch_size,
       args.mini_batch_size,
@@ -421,6 +434,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       args.use_agent_sandbox,
       args.weight_sync_mode,
       args.trainable_parameters_mask,
+      args.image_rewrite_prefix or "(none)",
   )
   logging.info("Control-plane JAX backend: %s", jax.default_backend())
 
@@ -504,8 +518,11 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
 
   fleet = None
   if args.use_agent_sandbox:
+    # Do not statically register warmpools for all benchmark tasks upfront.
+    # Dynamic sliding-window prewarming with initial barrier is handled by
+    # PrewarmDatasetIterator below.
     fleet = swe_env._init_global_fleet(  # pylint: disable=protected-access
-        tasks=dataset,
+        tasks=None,
         max_concurrency=args.max_concurrency,
         num_generations=args.num_generations,
         batch_size=args.batch_size,
@@ -538,7 +555,9 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         num_generations=args.num_generations,
         batch_size=args.batch_size,
         max_warmpool_replicas=args.max_warmpool_replicas,
+        unwarm_on_exhaustion=True,
         scaffold=args.scaffold,
+        wait_initial=True,
     )
 
   program = rl_program.StandardRLProgram(

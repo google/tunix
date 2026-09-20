@@ -14,6 +14,7 @@
 
 """Unit tests for tunix.oss.examples.deepswe.sandbox_utils."""
 
+import os
 from unittest import mock
 from absl.testing import absltest
 import numpy as np
@@ -66,9 +67,9 @@ class SandboxUtilsTest(absltest.TestCase):
     # current_batch has p0, p1 (img_A: 2).
     # Dict maintains samples of both queues:
     # img_A: 2 (8 reps), img_B: 2 (8 reps).
-    # Fleet warms both with wait=False.
+    # Fleet warms both with wait=True (synchronous initial priming barrier).
     self.assertEqual(
-        fleet.warm_calls, [("img_A", 8, False), ("img_B", 8, False)]
+        fleet.warm_calls, [("img_A", 8, True), ("img_B", 8, True)]
     )
     self.assertEqual(fleet.active_pools, {"img_A": 8, "img_B": 8})
     self.assertLen(iterator.current_batch, 2)
@@ -110,6 +111,18 @@ class SandboxUtilsTest(absltest.TestCase):
 
     iterator.close()
     self.assertEqual(fleet.active_pools, {})
+
+  def test_wait_initial_configurable(self):
+    fleet = FakeFleet()
+    dataset = [{"prompt": "p0", "docker_image": "img_A"}]
+    _ = sandbox_utils.PrewarmDatasetIterator(
+        dataset,
+        fleet=fleet,
+        num_generations=2,
+        batch_size=1,
+        wait_initial=False,
+    )
+    self.assertEqual(fleet.warm_calls, [("img_A", 2, False)])
 
   def test_batched_items_format_preserved(self):
     fleet = FakeFleet()
@@ -278,6 +291,22 @@ class SandboxUtilsTest(absltest.TestCase):
     self.assertEqual(
         rewrite("my-image:latest"), "gcr.io/rewritten/my-image:latest"
     )
+
+    with mock.patch.dict(os.environ, {"IMAGE_REWRITE_PREFIX": "europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/"}):
+      rewrite = sandbox_utils.get_image_rewrite_fn()
+      self.assertIsNotNone(rewrite)
+      self.assertEqual(
+          rewrite("namanjain12/aiohttp_final:v1"),
+          "europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/aiohttp_final:v1",
+      )
+      self.assertEqual(
+          rewrite("gcr.io/other/project/my_image:tag"),
+          "europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/my_image:tag",
+      )
+
+    with mock.patch.dict(os.environ, {}, clear=True):
+      rewrite = sandbox_utils.get_image_rewrite_fn()
+      self.assertIsNone(rewrite)
 
   def test_init_global_fleet_starts_initial_warmpools(self):
     mock_fleet = mock.MagicMock()
