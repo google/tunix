@@ -481,6 +481,36 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     )
 
   @mock.patch.object(
+      run_trainer_node.maxtext_utils, "get_tokenizer_pad_id", return_value=0
+  )
+  @mock.patch.object(run_trainer_node.maxtext_utils, "create_maxtext_mesh")
+  @mock.patch.object(
+      run_trainer_node.maxtext_utils, "build_maxtext_config", autospec=True
+  )
+  def test_create_maxtext_trainer_factory_plumbs_attention_and_remat_and_lr_fraction(
+      self, mock_build_cfg, mock_create_mesh, mock_get_pad_id
+  ):
+    args = run_trainer_node._parse_args([
+        "--maxtext_attention",
+        "flash",
+        "--remat_policy",
+        "full",
+        "--learning_rate_final_fraction",
+        "1.0",
+    ])
+    run_trainer_node._create_maxtext_trainer_factory(args)
+    mock_build_cfg.assert_called_once()
+    self.assertEqual(
+        mock_build_cfg.call_args.kwargs.get("attention"), "flash"
+    )
+    self.assertEqual(
+        mock_build_cfg.call_args.kwargs.get("remat_policy"), "full"
+    )
+    self.assertEqual(
+        mock_build_cfg.call_args.kwargs.get("learning_rate_final_fraction"), 1.0
+    )
+
+  @mock.patch.object(
       run_trainer_node,
       "_ensure_model_dir_for_trainer",
       return_value="/tmp/test",

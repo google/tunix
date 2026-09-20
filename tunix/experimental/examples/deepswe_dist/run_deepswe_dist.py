@@ -171,6 +171,15 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
+      "--overlong_filter",
+      action=argparse.BooleanOptionalAction,
+      default=False,
+      help=(
+          "Filter out overlong trajectories from training. Sets"
+          " metadata['overlong_filter'] on prompt items."
+      ),
+  )
+  parser.add_argument(
       "--seq_logprob_error_threshold",
       type=float,
       default=None,
@@ -520,6 +529,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       scaffold=args.scaffold,
       env_verbose=args.env_verbose,
       episode_timeout_secs=args.episode_timeout_secs,
+      overlong_filter=args.overlong_filter,
   )
   if args.use_agent_sandbox:
     prompt_stream = swe_env.PrewarmDatasetIterator(
