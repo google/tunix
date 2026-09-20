@@ -20,6 +20,7 @@ import collections
 import dataclasses
 import inspect
 import ipaddress
+import math
 import os
 import re
 import socket
@@ -363,6 +364,7 @@ def _tensor_metadata(name: str, arr: Any, layer_idx: int):
 
 def _compute_host_subgrid(
     array_mesh: Optional[Any],
+    devices_per_host: Optional[int] = None,
 ) -> Optional[Tuple[int, ...]]:
   """Extracts host_subgrid from environment or the local JAX mesh devices.
 
@@ -385,7 +387,28 @@ def _compute_host_subgrid(
           and array_mesh.local_mesh is not None
           and hasattr(array_mesh.local_mesh, "devices")
       ):
-        return tuple(array_mesh.local_mesh.devices.shape)
+        subgrid = tuple(array_mesh.local_mesh.devices.shape)
+        # Only trust it if it actually describes ONE host. Under Pathways the
+        # client addresses every device in the slice, so `local_mesh` is the
+        # global mesh and this returns the full mesh shape -- e.g.
+        # (1,1,1,64,1,1,1,1,2,1,2,1), product 256, for a 256-chip trainer with
+        # 4 chips per host. Publishing that tells the controller each host owns
+        # every shard, so correct values are written to the wrong devices. The
+        # per-tensor absolute sums are unchanged by that permutation, so
+        # checksum verification passes and the rollout silently emits garbage.
+        # Returning None here lets the caller fall through to the FFI/controller
+        # derivation, which is what a single-host rollout was already getting.
+        if devices_per_host and math.prod(subgrid) != devices_per_host:
+          logging.warning(
+              "ignoring host_subgrid %s from local_mesh: product %d != "
+              "devices_per_host %d (expected under Pathways, where every "
+              "device is addressable); deriving it instead",
+              subgrid,
+              math.prod(subgrid),
+              devices_per_host,
+          )
+          return None
+        return subgrid
     except (AttributeError, ValueError, TypeError):
       pass
   return None
@@ -641,7 +664,15 @@ class RaidenSynchronizer:
       array_mesh = getattr(getattr(arr, "sharding", None), "mesh", None)
       if array_mesh is not None:
         break
-    self._host_subgrid = _compute_host_subgrid(array_mesh)
+    # devices_per_host lets _compute_host_subgrid reject a subgrid that spans the
+    # whole mesh, which is what local_mesh reports under Pathways.
+    _dph = None
+    try:
+      if array_mesh is not None:
+        _dph = _devices_per_host(list(array_mesh.devices.flat))
+    except Exception:  # pylint: disable=broad-except
+      _dph = None
+    self._host_subgrid = _compute_host_subgrid(array_mesh, _dph)
     logging.info(
         "%s bind prepared %d arrays (proxy_runtime=%s)",
         self.job_name,
