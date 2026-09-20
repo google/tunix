@@ -16,6 +16,8 @@
 
 from collections.abc import Sequence
 import functools
+import os
+import threading
 from typing import NamedTuple
 
 from flax import nnx
@@ -940,6 +942,58 @@ def ppo_value_loss_fn(
   return sft_utils.LossOutput(primary_loss=primary_loss, aux_metrics=aux)
 
 
+_OUTLIER_DUMP_LOCK = threading.Lock()
+_OUTLIER_DUMP_DONE = False
+
+
+def _write_outlier_dump(path, log_is_raw, completion_mask, completion_ids):
+  """Host-side writer for the per-token log-ratio dump. Never raises.
+
+  Invoked through `jax.debug.callback`, so the arrays arrive concrete rather
+  than as tracers. Diagnostics must not be able to fail a training step, so
+  every error here is swallowed: the worst outcome is a missing dump.
+  """
+  global _OUTLIER_DUMP_DONE
+  try:
+    with _OUTLIER_DUMP_LOCK:
+      if _OUTLIER_DUMP_DONE:
+        return
+      _OUTLIER_DUMP_DONE = True
+    np.savez_compressed(
+        path,
+        log_is_raw=np.asarray(log_is_raw),
+        completion_mask=np.asarray(completion_mask),
+        completion_ids=np.asarray(completion_ids),
+    )
+  except Exception:  # pylint: disable=broad-except
+    pass
+
+
+def _maybe_dump_outliers(train_example, log_is_raw, completion_mask):
+  """One-shot dump of per-token trainer-minus-sampler log ratios.
+
+  Opt-in via `TUNIX_OUTLIER_DUMP_PATH`. With the variable unset the guard is
+  evaluated at trace time, so nothing is staged into the jaxpr and the cost is
+  zero. Writes `[B, T]` `log_is_raw` alongside the mask and token ids, which is
+  what locates an outlier token by position and identity.
+  """
+  path = os.environ.get("TUNIX_OUTLIER_DUMP_PATH")
+  if not path or log_is_raw is None or _OUTLIER_DUMP_DONE:
+    return
+  try:
+    completion_ids = getattr(train_example, "completion_ids", None)
+    if completion_ids is None:
+      completion_ids = jnp.zeros_like(completion_mask, dtype=jnp.int32)
+    jax.debug.callback(
+        functools.partial(_write_outlier_dump, path),
+        log_is_raw,
+        completion_mask,
+        completion_ids,
+    )
+  except Exception:  # pylint: disable=broad-except
+    pass
+
+
 @function_registry.register_policy_loss_fn("grpo")
 def grpo_loss_fn(
     model,
@@ -1096,6 +1150,9 @@ def grpo_loss_fn(
         rollout_logps, jnp.float32
     )
     log_is = jnp.nan_to_num(log_is_raw, nan=0.0, posinf=0.0, neginf=0.0)
+
+  # Opt-in diagnostic: no-op unless `TUNIX_OUTLIER_DUMP_PATH` is set.
+  _maybe_dump_outliers(train_example, log_is_raw, completion_mask)
 
   # `loss_mask` is `completion_mask` with dropped sequences removed and is what
   # the loss and its denominator aggregate over. `completion_mask` remains the
