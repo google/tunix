@@ -161,6 +161,16 @@ class TrainerWorker(abstract_worker.Worker):
       self, gen_model_input_fn: Callable[[Any], dict[str, Any]]
   ) -> datatypes.Response:
     """Sets the last-mile adapter mapping a payload to the loss fn's kwargs."""
+    chunk_size = self._logps_chunk_size
+    if chunk_size > 0:
+      orig_fn = gen_model_input_fn
+
+      def _wrapped_gen_model_input_fn(payload: Any) -> dict[str, Any]:
+        out = dict(orig_fn(payload))
+        out.setdefault("compute_logps_chunk_size", chunk_size)
+        return out
+
+      gen_model_input_fn = _wrapped_gen_model_input_fn
     self._trainer.with_gen_model_input_fn(gen_model_input_fn)
     return self._response(gen_model_input_fn_configured=True)
 

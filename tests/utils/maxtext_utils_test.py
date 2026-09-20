@@ -522,6 +522,19 @@ class MaxTextUtilsTest(absltest.TestCase):
     argv = self._build_config_argv(trainable_parameters_mask=None)
     self.assertFalse(any("trainable_parameters_mask=" in arg for arg in argv))
 
+  def test_attention_default_dot_product(self):
+    argv = self._build_config_argv()
+    self.assertIn("attention=dot_product", argv)
+
+  def test_attention_explicit_arg(self):
+    argv = self._build_config_argv(attention="flash")
+    self.assertIn("attention=flash", argv)
+
+  def test_attention_env_var(self):
+    with mock.patch.dict("os.environ", {"TRAINER_MAXTEXT_ATTENTION": "flash"}):
+      argv = self._build_config_argv()
+    self.assertIn("attention=flash", argv)
+
 
 if __name__ == "__main__":
   absltest.main()

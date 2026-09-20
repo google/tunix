@@ -391,8 +391,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument(
       "--maxtext_attention",
       type=str,
-      default="",
-      help="Override MaxText attention kernel (e.g. flash, dot_product).",
+      default=os.environ.get("TRAINER_MAXTEXT_ATTENTION", ""),
+      help="MaxText attention implementation (e.g. flash, dot_product).",
   )
   parser.add_argument(
       "--remat_policy",
@@ -668,7 +668,7 @@ def _create_maxtext_trainer_factory(args) -> tuple[Any, Mesh]:
       max_seq_token_per_tpu=args.max_seq_token_per_tpu,
       trainable_parameters_mask=args.trainable_parameters_mask,
       base_num_kv_heads=args.base_num_kv_heads,
-      attention=args.maxtext_attention,
+      attention=args.maxtext_attention or None,
       remat_policy=args.remat_policy,
       learning_rate_final_fraction=args.learning_rate_final_fraction,
   )
