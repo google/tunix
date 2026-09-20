@@ -456,6 +456,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       default=-1,
       help="Profile every N steps. If negative, profile only once.",
   )
+  parser.add_argument(
+      "--maxtext_attention",
+      type=str,
+      default=os.environ.get("TRAINER_MAXTEXT_ATTENTION", ""),
+      help="MaxText attention implementation (e.g. flash, dot_product).",
+  )
   return parser.parse_args(argv)
 
 
@@ -648,6 +654,7 @@ def _create_maxtext_trainer_factory(args) -> tuple[Any, Mesh]:
       max_seq_token_per_tpu=args.max_seq_token_per_tpu,
       trainable_parameters_mask=args.trainable_parameters_mask,
       base_num_kv_heads=args.base_num_kv_heads,
+      attention=args.maxtext_attention or None,
   )
   logging.info("Creating MaxText device mesh...")
   mesh = maxtext_utils.create_maxtext_mesh(maxtext_config)

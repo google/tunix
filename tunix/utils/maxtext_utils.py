@@ -128,6 +128,7 @@ def build_maxtext_config(
     use_weight_converter: bool = True,
     max_seq_token_per_tpu: int | None = 0,
     trainable_parameters_mask: list[str] | str | None = None,
+    attention: str | None = None,
 ) -> Any:
   """Builds the MaxText HyperParameters the training engine runs on."""
   pyconfig, _, _ = maxtext_modules()
@@ -345,6 +346,11 @@ def build_maxtext_config(
         f"profile_periodically_period={profiling_options.profiler_period}",
     ])
 
+  effective_attention = (
+      attention
+      or os.environ.get("TRAINER_MAXTEXT_ATTENTION")
+      or "dot_product"
+  )
   argv.extend([
       "scan_layers=True",
       "convert_checkpoint_if_possible=False",
@@ -353,7 +359,7 @@ def build_maxtext_config(
       f"per_device_batch_size={per_device_batch_size}",
       f"gradient_accumulation_steps={gradient_accumulation_steps}",
       f"max_target_length={max_target_length}",
-      "attention=dot_product",
+      f"attention={effective_attention}",
       "use_tokamax_gmm=true",
       "use_gmm_v2=true",
       f"ici_fsdp_parallelism={mesh_fsdp}",
