@@ -25,7 +25,7 @@ fi
 YAML_GENERATOR="${YAML_GENERATOR:-${TUNIX_ROOT}/experimental/distributed/deployment/yaml_generator.py}"
 YAML_DIR="${YAML_DIR:-${TUNIX_ROOT}/experimental/distributed/deployment/yamls}"
 
-DEFAULT_DEEPSWE_BOOTSTRAP="python3 -c 'import subprocess, urllib.request, json; token = json.loads(urllib.request.urlopen(urllib.request.Request(\"http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token\", headers={\"Metadata-Flavor\": \"Google\"})).read().decode())[\"access_token\"]; data = urllib.request.urlopen(urllib.request.Request(\"https://storage.googleapis.com/storage/v1/b/jfacevedo-maxdiffusion/o/jfacevedo%2Fdeepswe_35b_parity%2Fcode%2Ftunix_code.tar.gz?alt=media\", headers={\"Authorization\": f\"Bearer {token}\"})).read(); open(\"/tmp/tunix_code.tar.gz\", \"wb\").write(data); subprocess.run([\"tar\", \"-xzf\", \"/tmp/tunix_code.tar.gz\", \"-C\", \"/app\"], check=True)'; sed -i 's/_runtime_version.ValidateProtobufRuntimeVersion/if False: _runtime_version.ValidateProtobufRuntimeVersion/g' /app/tunix/experimental/distributed/runtime/discovery/*_pb2.py /opt/venv/lib/python3.12/site-packages/tunix/experimental/distributed/runtime/discovery/*_pb2.py 2>/dev/null || true; uv pip install 'datasets>=2.21.0' 'pyarrow>=15.0.0' beautifulsoup4 unidiff chardet gitpython python-dotenv tqdm rich fire docker ghapi tenacity 2>/dev/null || true; python3 -c 'from agent_sandbox_rl.adapters import r2egym as r; r._import_r2egym()' 2>/dev/null || (uv pip install kubernetes gym 'k8s-agent-sandbox>=0.5.1' 'datasets>=2.21.0' httpx beautifulsoup4 unidiff chardet gitpython python-dotenv tqdm rich fire docker ghapi tenacity && uv pip install --no-deps swebench==3.0.2 'openhands-sdk>=1.44.1' git+https://github.com/kubernetes-sigs/agent-sandbox.git#subdirectory=clients/python/agentic-sandbox-client git+https://github.com/kubernetes-sigs/agent-sandbox.git#subdirectory=examples/agent-sandbox-rl git+https://github.com/kubernetes-sigs/agent-sandbox.git#subdirectory=clients/integrations/openhands git+https://github.com/r2e-gym/r2e-gym.git@0d94c4eb9431cd195c55a7ea3abd54006c9a1735 && : > /opt/venv/lib/python3.12/site-packages/swebench/__init__.py && sed -i 's/from huggingface_hub import HfFolder/HfFolder = None/' /opt/venv/lib/python3.12/site-packages/r2egym/agenthub/runtime/docker.py && sed -i 's/self.commit = ParsedCommit(\*\*json.loads(commit_json))/self.commit = ParsedCommit(\*\*(commit_json if isinstance(commit_json, dict) else json.loads(commit_json)))/' /opt/venv/lib/python3.12/site-packages/r2egym/agenthub/runtime/docker.py); sed -i 's|if not is_fp8_dtype(config.weight_dtype):|if getattr(config, \"float32_gate_logits\", False) and module_name in (\"norm\", \"gate\", \"shared_expert_gate\", \"A_log\", \"dt_bias\", \"conv1d\", \"logits_dense\"): return \"float32\"\n  if not is_fp8_dtype(config.weight_dtype):|' /app/maxtext/src/maxtext/common/common_types.py 2>/dev/null || true; sed -i 's|if (\"gate\" in path or \"router\" in path)|if (\"gate\" in path or \"router\" in path or getattr(raw_val, \"dtype\", None) == jnp.float32)|g' /app/maxtext/src/maxtext/integration/vllm/weight_converter.py 2>/dev/null || true;"
+DEFAULT_DEEPSWE_BOOTSTRAP="python3 -c 'import subprocess, urllib.request, json; token = json.loads(urllib.request.urlopen(urllib.request.Request(\"http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token\", headers={\"Metadata-Flavor\": \"Google\"})).read().decode())[\"access_token\"]; data = urllib.request.urlopen(urllib.request.Request(\"https://storage.googleapis.com/storage/v1/b/jfacevedo-maxdiffusion/o/jfacevedo%2Fdeepswe_35b_parity%2Fcode%2Ftunix_code.tar.gz?alt=media\", headers={\"Authorization\": f\"Bearer {token}\"})).read(); open(\"/tmp/tunix_code.tar.gz\", \"wb\").write(data); subprocess.run([\"tar\", \"-xzf\", \"/tmp/tunix_code.tar.gz\", \"-C\", \"/app\"], check=True)'; sed -i 's/_runtime_version.ValidateProtobufRuntimeVersion/if False: _runtime_version.ValidateProtobufRuntimeVersion/g' /app/tunix/experimental/distributed/runtime/discovery/*_pb2.py /opt/venv/lib/python3.12/site-packages/tunix/experimental/distributed/runtime/discovery/*_pb2.py 2>/dev/null || true; uv pip install 'datasets>=2.21.0' 'pyarrow>=15.0.0' beautifulsoup4 unidiff chardet gitpython python-dotenv tqdm rich fire docker ghapi tenacity 2>/dev/null || true; python3 -c 'from agent_sandbox_rl.adapters import r2egym as r; r._import_r2egym()' 2>/dev/null || (uv pip install kubernetes gym 'k8s-agent-sandbox>=0.5.1' 'datasets>=2.21.0' httpx beautifulsoup4 unidiff chardet gitpython python-dotenv tqdm rich fire docker ghapi tenacity && uv pip install --no-deps swebench==3.0.2 'openhands-sdk>=1.44.1' git+https://github.com/kubernetes-sigs/agent-sandbox.git#subdirectory=clients/python/agentic-sandbox-client git+https://github.com/kubernetes-sigs/agent-sandbox.git#subdirectory=examples/agent-sandbox-rl git+https://github.com/kubernetes-sigs/agent-sandbox.git#subdirectory=clients/integrations/openhands git+https://github.com/r2e-gym/r2e-gym.git@0d94c4eb9431cd195c55a7ea3abd54006c9a1735 && : > /opt/venv/lib/python3.12/site-packages/swebench/__init__.py && sed -i 's/from huggingface_hub import HfFolder/HfFolder = None/' /opt/venv/lib/python3.12/site-packages/r2egym/agenthub/runtime/docker.py && sed -i 's/self.commit = ParsedCommit(\*\*json.loads(commit_json))/self.commit = ParsedCommit(\*\*(commit_json if isinstance(commit_json, dict) else json.loads(commit_json)))/' /opt/venv/lib/python3.12/site-packages/r2egym/agenthub/runtime/docker.py); sed -i 's|if not is_fp8_dtype(config.weight_dtype):|if getattr(config, \"float32_gate_logits\", False) and module_name in (\"norm\", \"gate\", \"shared_expert_gate\", \"A_log\", \"dt_bias\", \"conv1d\", \"logits_dense\"): return \"float32\"\n  if not is_fp8_dtype(config.weight_dtype):|' /app/maxtext/src/maxtext/common/common_types.py 2>/dev/null || true; sed -i 's|if (\"gate\" in path or \"router\" in path)|if (\"gate\" in path or \"router\" in path or getattr(raw_val, \"dtype\", None) == jnp.float32)|g' /app/maxtext/src/maxtext/integration/vllm/weight_converter.py 2>/dev/null || true; cp -rf /app/tunix/* /opt/venv/lib/python3.12/site-packages/tunix/ 2>/dev/null || true; cp -rf /app/tunix/tunix/* /opt/venv/lib/python3.12/site-packages/tunix/ 2>/dev/null || true; cp -rf /app/maxtext/src/maxtext/* /opt/venv/lib/python3.12/site-packages/maxtext/ 2>/dev/null || true;"
 BOOTSTRAP_CMD="${BOOTSTRAP_CMD:-${DEFAULT_DEEPSWE_BOOTSTRAP}}"
 
 export MODEL_NAME=${MODEL_NAME:-Qwen3-4B}
@@ -224,6 +224,8 @@ start_orchestrator() {
       ${TRAJECTORY_LOG_DIR:+TRAJECTORY_LOG_DIR=\"${TRAJECTORY_LOG_DIR}\"} \
       PYTHONUNBUFFERED=1 \
       TUNIX_IS_INTERNAL_ENV=false \
+      TRAINER_MAX_PROMPT_LENGTH=${TRAINER_MAX_PROMPT_LENGTH:-2048} \
+      TRAINER_MAX_RESPONSE_LENGTH=${TRAINER_MAX_RESPONSE_LENGTH:-2048} \
       ${BOOTSTRAP_CMD} \
       python -m tunix.experimental.distributed.runtime.main \
         --discovery_id=${ORCHESTRATOR_ID} \
@@ -330,6 +332,8 @@ start_trainer() {
       FLOAT32_GATE_LOGITS=${FLOAT32_GATE_LOGITS:-true} \
       FLOAT32_LOGITS=${FLOAT32_LOGITS:-true} \
       MAX_GRAD_NORM=${MAX_GRAD_NORM:-0.125} \
+      TRAINER_MAX_PROMPT_LENGTH=${TRAINER_MAX_PROMPT_LENGTH:-2048} \
+      TRAINER_MAX_RESPONSE_LENGTH=${TRAINER_MAX_RESPONSE_LENGTH:-2048} \
       ${TRAINABLE_PARAMETERS_MASK:+TRAINABLE_PARAMETERS_MASK='${TRAINABLE_PARAMETERS_MASK}'} \
       VERIFY_WEIGHTS=${VERIFY_WEIGHTS} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
@@ -345,8 +349,8 @@ start_trainer() {
         --model_id=${MODEL_ID} \
         --model_dir=${MODEL_DIR} \
         --tokenizer_path=${TOKENIZER_PATH} \
-        --max_prompt_length=${MAX_PROMPT_LENGTH} \
-        --max_response_length=${MAX_RESPONSE_LENGTH} \
+        --max_prompt_length=${TRAINER_MAX_PROMPT_LENGTH:-2048} \
+        --max_response_length=${TRAINER_MAX_RESPONSE_LENGTH:-2048} \
         --mini_batch_size=${MINI_BATCH_SIZE} \
         --num_generations=${NUM_GENERATIONS} \
         --train_micro_batch_size=${TRAIN_MICRO_BATCH_SIZE} \
@@ -643,9 +647,6 @@ if [[ "$COMMAND" == "start" ]]; then
     kubectl create rolebinding xpk-sa-default-pod-exec -n "${SANDBOX_NAMESPACE:-trellis}" --role=pod-exec --serviceaccount="${K8S_NAMESPACE:-trellis}:${SERVICE_ACCOUNT:-xpk-sa}" --dry-run=client -o yaml 2>/dev/null | kubectl apply -f - 2>/dev/null || true
     kubectl create rolebinding xpk-sa-default-power-users -n "${SANDBOX_NAMESPACE:-trellis}" --clusterrole=power-users --serviceaccount="${K8S_NAMESPACE:-trellis}:${SERVICE_ACCOUNT:-xpk-sa}" --dry-run=client -o yaml 2>/dev/null | kubectl apply -f - 2>/dev/null || true
   fi
-  stop_orchestrator
-  stop_trainer
-  stop_rollout
   start_orchestrator
   start_trainer
   start_rollout
