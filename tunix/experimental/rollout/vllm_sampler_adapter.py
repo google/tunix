@@ -197,6 +197,7 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
       worker_index: int = 0,
       parallelism: int = 4,
       weight_sync_mode: weight_sync.WeightSyncMode | str | None = None,
+      free_kv_cache_during_weight_sync: bool = False,
       **kwargs,
   ):
     self.server_id = server_id
@@ -235,7 +236,8 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
     self._tracker = weight_sync_coordinator.WorkerRoundTracker()
     self._sync_lock = asyncio.Lock()
     self._policy_version = 0
-    self._kv_cache_freed = False
+    self._free_kv_cache_during_weight_sync = free_kv_cache_during_weight_sync
+    self._weight_update_open = False
 
     if self.sampler is None and self.engine_args is not None:
       sampler_cls = _get_rl_vllm_sampler_cls()
@@ -407,7 +409,7 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
   async def pre_weight_sync(
       self, sync_request: Any = None, **kwargs: Any
   ) -> Any:
-    """Quiesces intake, drains pending requests, resets prefix cache, and drops KV cache."""
+    """Quiesces intake, drains pending requests, and resets the prefix cache."""
     if not self.enable_raiden:
       return True
     sampler = self._require_sampler()
@@ -418,8 +420,10 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
       logger.info("Executing pre_weight_sync for server_id=%s", self.server_id)
 
       # delegate to RLVllmSampler's native pause + clear + free-kv-cache
-      await sampler.pre_weight_sync(free_kv_cache=True)
-      self._kv_cache_freed = True
+      await sampler.pre_weight_sync(
+          free_kv_cache=self._free_kv_cache_during_weight_sync
+      )
+      self._weight_update_open = True
 
       self._tracker.complete(sync_request, "prepared")
       return True
@@ -465,7 +469,7 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
   async def post_weight_sync(
       self, sync_request: Any = None, **kwargs: Any
   ) -> Any:
-    """Reinitializes KV cache, restores request intake, and bumps active policy version."""
+    """Closes the update session, restores intake, and bumps the policy version."""
     if not self.enable_raiden:
       return True
     sampler = self._require_sampler()
@@ -474,10 +478,11 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
         return True
 
       logger.info("Executing post_weight_sync: restoring serving state...")
-      # delegate to RLVllmSampler's native reinitialize-kv-cache + resume
-      if self._kv_cache_freed:
+      # delegate to RLVllmSampler's native finish-weight-update + resume; it
+      # reinitializes the KV cache only if pre_weight_sync freed it.
+      if self._weight_update_open:
         await sampler.post_weight_sync(sync_request)
-        self._kv_cache_freed = False
+        self._weight_update_open = False
       else:
         await self.resume()
 
@@ -513,10 +518,11 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
           self._policy_version,
       )
       # RLVllmSampler has no dedicated abort path; post_weight_sync does
-      # the same recovery (reinitialize KV cache + resume).
-      if self._kv_cache_freed:
+      # the same recovery (close the session, reinitialize KV cache if it was
+      # freed, resume).
+      if self._weight_update_open:
         await sampler.post_weight_sync(sync_request)
-        self._kv_cache_freed = False
+        self._weight_update_open = False
       else:
         await self.resume()
 
