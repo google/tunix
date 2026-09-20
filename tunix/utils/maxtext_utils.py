@@ -129,6 +129,8 @@ def build_maxtext_config(
     max_seq_token_per_tpu: int | None = 0,
     trainable_parameters_mask: list[str] | str | None = None,
     attention: str | None = None,
+    remat_policy: str = "",
+    learning_rate_final_fraction: float | None = None,
 ) -> Any:
   """Builds the MaxText HyperParameters the training engine runs on."""
   pyconfig, _, _ = maxtext_modules()
@@ -360,6 +362,12 @@ def build_maxtext_config(
       f"gradient_accumulation_steps={gradient_accumulation_steps}",
       f"max_target_length={max_target_length}",
       f"attention={effective_attention}",
+      *([f"remat_policy={remat_policy}"] if remat_policy else []),
+      *(
+          [f"learning_rate_final_fraction={learning_rate_final_fraction}"]
+          if learning_rate_final_fraction is not None
+          else []
+      ),
       "use_tokamax_gmm=true",
       "use_gmm_v2=true",
       f"ici_fsdp_parallelism={mesh_fsdp}",

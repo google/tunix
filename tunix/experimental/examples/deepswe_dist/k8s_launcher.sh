@@ -78,7 +78,9 @@ export SAMPLER=${SAMPLER:-inprocess_vllm}
 export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
 export CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-5}
 export CHECKPOINT_MAX_TO_KEEP=${CHECKPOINT_MAX_TO_KEEP:-2}
-export REMAT_CONFIG=${REMAT_CONFIG:-decoder}
+export REMAT_POLICY=${REMAT_POLICY:-decoder}
+export LEARNING_RATE_FINAL_FRACTION=${LEARNING_RATE_FINAL_FRACTION:-}
+export OVERLONG_FILTER=${OVERLONG_FILTER:-}
 export TRAINABLE_PARAMETERS_MASK=${TRAINABLE_PARAMETERS_MASK:-}
 
 # Optional GRPO algorithm options. Empty, or 0 for the boolean, leaves the
@@ -243,6 +245,12 @@ start_orchestrator() {
   if [[ "${OVERLONG_LOSS_MASKING}" == "1" || "${OVERLONG_LOSS_MASKING}" == "true" || "${OVERLONG_LOSS_MASKING}" == "True" ]]; then
     overlong_arg="--overlong_loss_masking"
   fi
+  local overlong_filter_arg=""
+  if [[ "${OVERLONG_FILTER}" == "1" || "${OVERLONG_FILTER}" == "true" || "${OVERLONG_FILTER}" == "True" ]]; then
+    overlong_filter_arg="--overlong_filter"
+  elif [[ "${OVERLONG_FILTER}" == "0" || "${OVERLONG_FILTER}" == "false" || "${OVERLONG_FILTER}" == "False" ]]; then
+    overlong_filter_arg="--no-overlong_filter"
+  fi
   local debug_arg=""
   if [[ "${DEBUG}" == "1" || "${DEBUG}" == "true" || "${DEBUG}" == "True" ]]; then
     debug_arg="--debug"
@@ -291,6 +299,7 @@ start_orchestrator() {
         ${LOSS_AGG_MODE:+--loss_agg_mode=${LOSS_AGG_MODE}} \
         ${ADVANTAGE_ESTIMATOR:+--advantage_estimator=${ADVANTAGE_ESTIMATOR}} \
         ${overlong_arg} \
+        ${overlong_filter_arg} \
         ${SEQ_LOGPROB_ERROR_THRESHOLD:+--seq_logprob_error_threshold=${SEQ_LOGPROB_ERROR_THRESHOLD}} \
         ${TIS_TYPE:+--truncated_importance_sampling_type=${TIS_TYPE}} \
         ${TIS_RATIO_MIN:+--truncated_importance_sampling_ratio_min=${TIS_RATIO_MIN}} \
@@ -348,6 +357,8 @@ start_trainer() {
       ${ROLLOUT_MESH_TP:+--rollout_mesh_tp=${ROLLOUT_MESH_TP}} \
       ${TRAINER_BASE_NUM_KV_HEADS:+--base_num_kv_heads=${TRAINER_BASE_NUM_KV_HEADS}} \
       ${TRAINER_MAXTEXT_ATTENTION:+--maxtext_attention=${TRAINER_MAXTEXT_ATTENTION}} \
+      ${REMAT_POLICY:+--remat_policy=${REMAT_POLICY}} \
+      ${LEARNING_RATE_FINAL_FRACTION:+--learning_rate_final_fraction=${LEARNING_RATE_FINAL_FRACTION}} \
     "
   fi
   local opt_chain_args=""
@@ -399,7 +410,7 @@ start_trainer() {
       ${TRAINER_EXTRA_ENV:+${TRAINER_EXTRA_ENV}} \
       RAIDEN_DEVICES_PER_HOST=${RAIDEN_DEVICES_PER_HOST} \
       USE_WEIGHT_CONVERTER=${USE_WEIGHT_CONVERTER} \
-      PREFUSE_MOE_WEIGHTS=${ROLLOUT_PREFUSE_MOE_WEIGHTS} \
+      PREFUSE_MOE_WEIGHTS=${TRAINER_PREFUSE_MOE_WEIGHTS:-false} \
       ROLLOUT_PREFUSE_MOE_WEIGHTS=${ROLLOUT_PREFUSE_MOE_WEIGHTS} \
       ${ROLLOUT_MESH_TP:+ROLLOUT_MESH_TP=${ROLLOUT_MESH_TP}} \
       ${ROLLOUT_MESH_TP:+ROLLOUT_TENSOR_PARALLEL_SIZE=${ROLLOUT_MESH_TP}} \
