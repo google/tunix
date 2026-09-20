@@ -1538,6 +1538,16 @@ def grpo_loss_fn(
   _re = getattr(train_example, "routed_experts", None)
   if _re is not None and log_is_raw is not None:
     forced = jnp.all(jnp.asarray(_re) >= 0, axis=tuple(range(2, jnp.ndim(_re))))
+    # `routed_experts` spans the whole `[prompt | completion]` sequence while
+    # `log_is_raw` and `completion_mask` are completion-aligned. `log_is_raw[b, k]`
+    # scores `completion_ids[b, k]`, which is predicted from the hidden state at
+    # absolute position `P + k - 1` (`common.py:581` keeps `[-C - 1 : -1]`), so
+    # that is the position whose routing to attribute. Slicing `[-C - 1 : -1]`
+    # maps `k -> P + k - 1` exactly; verified for k=0 (last prompt token) through
+    # k=C-1.
+    _c_len = completion_mask.shape[1]
+    if forced.shape[1] > _c_len:
+      forced = forced[:, -_c_len - 1 : -1]
     forced = jnp.astype(forced, jnp.float32) * completion_mask
     unforced = (1.0 - forced) * completion_mask
     denom = jnp.maximum(completion_mask.sum(), 1.0)
