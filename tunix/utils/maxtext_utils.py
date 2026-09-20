@@ -349,7 +349,7 @@ def build_maxtext_config(
     ])
   else:
     argv.extend([
-        "profiler=",
+        "profiler=''",
         "profiler_steps=0",
         "skip_first_n_steps_for_profiler=-1",
     ])
