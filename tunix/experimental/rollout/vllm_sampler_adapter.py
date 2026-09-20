@@ -399,9 +399,33 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
       )
     await self._ensure_started()
     meta = await self._require_sampler().get_raiden_metadata()
+    if not meta:
+      return []
+    if len(meta) == 1:
+      return [
+          weight_sync.WorkUnitMetadata.from_dict(
+              _canonicalize_variable_names(meta[0])
+          )
+      ]
+    # Multi-host rollout (e.g. Ray across multiple hosts):
+    # Combine all shards and control-plane listener endpoints into a single WorkUnit.
+    combined = dict(meta[0])
+    combined_shards = []
+    combined_listeners = []
+    for m in meta:
+      combined_shards.extend(m.get("shards") or [])
+      ctrl = m.get("control_plane_rpc_address")
+      if ctrl:
+        for c in ctrl.split(","):
+          c = c.strip()
+          if c and c not in combined_listeners:
+            combined_listeners.append(c)
+    combined["shards"] = combined_shards
+    combined["control_plane_rpc_address"] = ",".join(combined_listeners)
     return [
-        weight_sync.WorkUnitMetadata.from_dict(_canonicalize_variable_names(m))
-        for m in meta or []
+        weight_sync.WorkUnitMetadata.from_dict(
+            _canonicalize_variable_names(combined)
+        )
     ]
 
   async def pre_weight_sync(
