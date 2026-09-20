@@ -15,6 +15,7 @@
 """Tests for VllmSamplerAdapter with tpu-inference RLVllmSampler."""
 
 import asyncio
+import os
 from types import SimpleNamespace
 from unittest import mock
 
@@ -153,7 +154,7 @@ class VllmSamplerAdapterTest(absltest.TestCase):
     res_pre = asyncio.run(self.sampler_adapter.pre_weight_sync(sync_req))
     self.assertTrue(res_pre)
     self.mock_sampler_instance.pre_weight_sync.assert_called_once_with(
-        free_kv_cache=True
+        free_kv_cache=False
     )
 
     res_sync = asyncio.run(self.sampler_adapter.weight_sync(sync_req))
@@ -178,6 +179,55 @@ class VllmSamplerAdapterTest(absltest.TestCase):
     self.assertTrue(res_abort)
     status_2 = asyncio.run(self.sampler_adapter.get_weight_sync_status())
     self.assertEqual(status_2.get("phase"), "aborted")
+
+  def test_weight_sync_keeps_kv_cache_by_default(self):
+    """The KV cache stays allocated, but the session is still closed.
+
+    `finish_weight_update` must run even when nothing was freed, otherwise
+    `start_weight_update` on the next round raises on the still-open session.
+    """
+    sync_req = base_sampler_lib.WeightSyncRequest(
+        policy_version=1, extra_config={"req_id": "r1", "uuid": 1}
+    )
+    asyncio.run(self.sampler_adapter.pre_weight_sync(sync_req))
+    self.mock_sampler_instance.pre_weight_sync.assert_called_once_with(
+        free_kv_cache=False
+    )
+
+    asyncio.run(self.sampler_adapter.post_weight_sync(sync_req))
+    self.mock_sampler_instance.post_weight_sync.assert_called_once_with(
+        sync_req
+    )
+    self.assertFalse(self.sampler_adapter._weight_update_open)
+
+  def test_weight_sync_frees_kv_cache_when_opted_in(self):
+    adapter = vllm_sampler_adapter.VllmSamplerAdapter(
+        server_id="vllm_slice_02",
+        sampler_instance=self.mock_sampler_instance,
+        free_kv_cache_during_weight_sync=True,
+    )
+    sync_req = base_sampler_lib.WeightSyncRequest(
+        policy_version=1, extra_config={"req_id": "r1", "uuid": 1}
+    )
+    asyncio.run(adapter.pre_weight_sync(sync_req))
+    self.mock_sampler_instance.pre_weight_sync.assert_called_once_with(
+        free_kv_cache=True
+    )
+
+  def test_weight_sync_env_var_configuration(self):
+    with mock.patch.dict(os.environ, {"ROLLOUT_FREE_KV_CACHE": "true"}):
+      adapter_true = vllm_sampler_adapter.VllmSamplerAdapter(
+          server_id="vllm_slice_03",
+          sampler_instance=self.mock_sampler_instance,
+      )
+      self.assertTrue(adapter_true._free_kv_cache_during_weight_sync)
+
+    with mock.patch.dict(os.environ, {"ROLLOUT_FREE_KV_CACHE": "false"}):
+      adapter_false = vllm_sampler_adapter.VllmSamplerAdapter(
+          server_id="vllm_slice_04",
+          sampler_instance=self.mock_sampler_instance,
+      )
+      self.assertFalse(adapter_false._free_kv_cache_during_weight_sync)
 
   def test_get_load_info(self):
     self.mock_sampler_instance.get_load_info.return_value = SimpleNamespace(
