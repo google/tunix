@@ -391,7 +391,7 @@ def _compute_host_subgrid(
   return None
 
 
-class RaidenSynchronizer:
+class RaidenSynchronizer(weight_sync.WeightSynchronizer):
   """One host's weights on the raiden transport, plus its registration metadata.
 
   Used by both the trainer and the sampler. Construct with a state to bind
@@ -409,7 +409,9 @@ class RaidenSynchronizer:
       auto_h2d: bool = False,
       parallelism: int = 4,
       bind_ip: Optional[str] = None,
+      **kwargs: Any,
   ):
+    del kwargs
     is_proxy = "proxy" in os.environ.get("JAX_PLATFORMS", "")
     self.job_name = job_name
     self.worker_index = worker_index
@@ -704,7 +706,8 @@ class RaidenSynchronizer:
       )
     return self._sync
 
-  def d2h(self) -> None:
+  def d2h(self, sync_request: Any = None) -> None:
+    del sync_request
     if self._is_proxy:
       try:
         self._init_ffi_transport(is_d2h=True)
@@ -724,7 +727,8 @@ class RaidenSynchronizer:
 
     self._require_sync("d2h()").d2h()
 
-  def h2d(self) -> None:
+  def h2d(self, sync_request: Any = None, **kwargs: Any) -> None:
+    del sync_request, kwargs
     if not self.bound:
       raise RuntimeError(f"{self.job_name}: bind() must run before h2d()")
     if self._is_proxy:
@@ -905,6 +909,9 @@ class RaidenSynchronizer:
         use_ffi=self._is_proxy,
         host_subgrid=self._host_subgrid,
     )
+
+
+RaidenWeightSync = RaidenSynchronizer
 
 
 def patch_raiden_worker_sync() -> None:
