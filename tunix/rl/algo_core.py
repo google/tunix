@@ -1527,6 +1527,33 @@ def grpo_loss_fn(
   )
   aux["entropy"] = entropy_loss
 
+  # Router-replay attribution. `moe.py:976` does
+  #   top_k_indices = where(token_is_forced, forced_routed_experts, auto_indices)
+  # so any token whose `routed_experts` carries UNSET (-1) is routed by the
+  # trainer's own gate instead of the sampler's, and can legitimately land on
+  # different experts and therefore different logits. These four scalars split
+  # the observed divergence by exactly that boundary: if the disagreement is
+  # concentrated on unforced tokens, replay coverage is the cause rather than
+  # numerics. Cheap, always on, and rides the proven scalar path.
+  _re = getattr(train_example, "routed_experts", None)
+  if _re is not None and log_is_raw is not None:
+    forced = jnp.all(jnp.asarray(_re) >= 0, axis=tuple(range(2, jnp.ndim(_re))))
+    forced = jnp.astype(forced, jnp.float32) * completion_mask
+    unforced = (1.0 - forced) * completion_mask
+    denom = jnp.maximum(completion_mask.sum(), 1.0)
+    abs_is = jnp.abs(log_is_raw)
+    aux["router_replay/forced_frac"] = forced.sum() / denom
+    aux["router_replay/absmean_forced"] = (
+        (abs_is * forced).sum() / jnp.maximum(forced.sum(), 1.0)
+    )
+    aux["router_replay/absmean_unforced"] = (
+        (abs_is * unforced).sum() / jnp.maximum(unforced.sum(), 1.0)
+    )
+    # Share of total |log ratio| mass attributable to unforced tokens.
+    aux["router_replay/unforced_mass_share"] = (abs_is * unforced).sum() / (
+        jnp.maximum((abs_is * completion_mask).sum(), 1e-9)
+    )
+
   # Opt-in diagnostic; empty unless `TUNIX_OUTLIER_DUMP_PATH` is set. Popped
   # host-side in `maxtext_engine.fwd_bwd` before any scalar reducer sees it.
   aux.update(_outlier_dump_arrays(train_example, log_is_raw, completion_mask))
