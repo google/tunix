@@ -35,13 +35,19 @@ import pandas as pd
 def _make_serializable(item: Any) -> Any:
   """Makes an object serializable."""
   if isinstance(item, dict):
-    return {key: _make_serializable(value) for key, value in item.items()}
+    return {
+        key: _make_serializable(value)
+        for key, value in item.items()
+        if key != 'routed_experts'
+    }
   elif isinstance(item, list):
     return [_make_serializable(item) for item in item]
   elif isinstance(item, tuple):
     return tuple(_make_serializable(item) for item in item)
   elif dataclasses.is_dataclass(item):
-    return _make_serializable(dataclasses.asdict(item))
+    d = dataclasses.asdict(item)
+    d.pop('routed_experts', None)
+    return _make_serializable(d)
   elif isinstance(item, message.Message):
     return json_format.MessageToDict(item)
   elif isinstance(item, np.ndarray):
