@@ -396,8 +396,6 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   )
   parser.add_argument(
       "--remat_policy",
-      "--remat_config",
-      dest="remat_policy",
       type=str,
       default="",
       help="Rematerialization policy (e.g. full, minimal, decoder).",
