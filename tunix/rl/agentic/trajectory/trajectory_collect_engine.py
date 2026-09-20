@@ -742,6 +742,33 @@ class TrajectoryCollectEngine:
     ):
       delta_routed = np.asarray(rollout_output.routed_experts[0], dtype=np.int16)
       prev_step = self.agent.trajectory.steps[-1]
+      curr_gen_len = (
+          len(rollout_output.tokens[0]) if rollout_output.tokens else 0
+      )
+      curr_gen_routed_len = max(0, curr_gen_len - 1)
+      if len(delta_routed) >= curr_gen_routed_len and curr_gen_routed_len > 0:
+        prefix_len = len(delta_routed) - curr_gen_routed_len
+        prefix_routed = delta_routed[:prefix_len]
+        curr_asst_routed = delta_routed[prefix_len:]
+      else:
+        prefix_routed = delta_routed
+        curr_asst_routed = np.zeros(
+            (0,) + delta_routed.shape[1:], dtype=np.int16
+        )
+
+      def _slice_or_pad_routed(
+          src: np.ndarray, start: int, count: int
+      ) -> np.ndarray:
+        chunk = src[start : start + count]
+        if len(chunk) < count:
+          pad = np.full(
+              (count - len(chunk),) + delta_routed.shape[1:],
+              agent_types.UNSET_ROUTED_EXPERT,
+              dtype=np.int16,
+          )
+          chunk = np.concatenate([chunk, pad], axis=0)
+        return chunk
+
       needed_asst = 0
       if (
           prev_step.assistant_tokens is not None
@@ -753,14 +780,9 @@ class TrajectoryCollectEngine:
             - len(prev_step.assistant_routed_experts),
         )
         if needed_asst > 0:
-          if len(delta_routed) < needed_asst:
-            raise ValueError(
-                f"Insufficient delta_routed length {len(delta_routed)} to stitch "
-                f"{needed_asst} trailing assistant tokens at step "
-                f"{len(self.agent.trajectory.steps) - 1}."
-            )
+          asst_tail = _slice_or_pad_routed(prefix_routed, 0, needed_asst)
           prev_step.assistant_routed_experts = np.concatenate(
-              [prev_step.assistant_routed_experts, delta_routed[:needed_asst]],
+              [prev_step.assistant_routed_experts, asst_tail],
               axis=0,
           )
       num_env = (
@@ -769,18 +791,10 @@ class TrajectoryCollectEngine:
           else 0
       )
       if num_env > 0:
-        prev_step.env_routed_experts = delta_routed[
-            needed_asst : needed_asst + num_env
-        ]
-        if len(prev_step.env_routed_experts) != num_env:
-          raise ValueError(
-              f"Mismatch between captured env_routed_experts length "
-              f"{len(prev_step.env_routed_experts)} and env_tokens length "
-              f"{num_env} at step {len(self.agent.trajectory.steps) - 1}."
-          )
-      self._current_step_initial_routed_experts = delta_routed[
-          needed_asst + num_env :
-      ]
+        prev_step.env_routed_experts = _slice_or_pad_routed(
+            prefix_routed, needed_asst, num_env
+        )
+      self._current_step_initial_routed_experts = curr_asst_routed
       self._cumulative_prompt_tokens += delta_routed.shape[0]
 
     if rollout_output.tokens:
