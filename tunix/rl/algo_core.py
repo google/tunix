@@ -949,9 +949,10 @@ _OUTLIER_DUMP_DONE = False
 def _write_outlier_dump(path, log_is_raw, completion_mask, completion_ids):
   """Host-side writer for the per-token log-ratio dump. Never raises.
 
-  Invoked through `jax.debug.callback`, so the arrays arrive concrete rather
-  than as tracers. Diagnostics must not be able to fail a training step, so
-  every error here is swallowed: the worst outcome is a missing dump.
+  Called on the host from `maxtext_engine.fwd_bwd` once the compiled function
+  has returned, so the arrays arrive concrete rather than as tracers.
+  Diagnostics must not be able to fail a training step, so every error here is
+  swallowed: the worst outcome is a missing dump.
   """
   global _OUTLIER_DUMP_DONE
   try:
@@ -969,29 +970,39 @@ def _write_outlier_dump(path, log_is_raw, completion_mask, completion_ids):
     pass
 
 
-def _maybe_dump_outliers(train_example, log_is_raw, completion_mask):
-  """One-shot dump of per-token trainer-minus-sampler log ratios.
+def _outlier_dump_arrays(train_example, log_is_raw, completion_mask):
+  """Arrays to carry out through `aux_metrics` for one-shot outlier analysis.
 
-  Opt-in via `TUNIX_OUTLIER_DUMP_PATH`. With the variable unset the guard is
-  evaluated at trace time, so nothing is staged into the jaxpr and the cost is
-  zero. Writes `[B, T]` `log_is_raw` alongside the mask and token ids, which is
-  what locates an outlier token by position and identity.
+  Opt-in via `TUNIX_OUTLIER_DUMP_PATH`; returns `{}` when unset, and because the
+  guard is Python-level it resolves at trace time, so nothing is staged into the
+  jaxpr and the steady-state cost is zero.
+
+  Deliberately does NOT use `jax.debug.callback`. Cloud Pathways does not
+  implement `XlaHostCallback` type 7 (the FFI Python host callback that
+  `jax.debug.callback` lowers to); attempting one aborts the launch with
+  UNIMPLEMENTED, and the MegaScale cancellation watchdog then restarts every TPU
+  worker and the IFRT proxy. These instead ride home as ordinary replicated
+  output buffers on the same path `aux_metrics` already uses, and are popped
+  host-side in `maxtext_engine.fwd_bwd` before the scalar reducers see them.
+
+  Note `aux_metrics` is returned per-microbatch and not accumulated
+  (`maxtext_engine.py` returns `loss_out.aux_metrics` directly while only grads
+  and the denominator accumulate), so these arrive unsummed.
   """
-  path = os.environ.get("TUNIX_OUTLIER_DUMP_PATH")
-  if not path or log_is_raw is None or _OUTLIER_DUMP_DONE:
-    return
+  if not os.environ.get("TUNIX_OUTLIER_DUMP_PATH") or log_is_raw is None:
+    return {}
   try:
     completion_ids = getattr(train_example, "completion_ids", None)
     if completion_ids is None:
       completion_ids = jnp.zeros_like(completion_mask, dtype=jnp.int32)
-    jax.debug.callback(
-        functools.partial(_write_outlier_dump, path),
-        log_is_raw,
-        completion_mask,
-        completion_ids,
-    )
+    sg = jax.lax.stop_gradient
+    return {
+        "_outlier_dump/log_is_raw": sg(log_is_raw),
+        "_outlier_dump/completion_mask": sg(completion_mask),
+        "_outlier_dump/completion_ids": sg(completion_ids),
+    }
   except Exception:  # pylint: disable=broad-except
-    pass
+    return {}
 
 
 @function_registry.register_policy_loss_fn("grpo")
@@ -1150,9 +1161,6 @@ def grpo_loss_fn(
         rollout_logps, jnp.float32
     )
     log_is = jnp.nan_to_num(log_is_raw, nan=0.0, posinf=0.0, neginf=0.0)
-
-  # Opt-in diagnostic: no-op unless `TUNIX_OUTLIER_DUMP_PATH` is set.
-  _maybe_dump_outliers(train_example, log_is_raw, completion_mask)
 
   # `loss_mask` is `completion_mask` with dropped sequences removed and is what
   # the loss and its denominator aggregate over. `completion_mask` remains the
@@ -1518,6 +1526,10 @@ def grpo_loss_fn(
       num_segments=num_segments,
   )
   aux["entropy"] = entropy_loss
+
+  # Opt-in diagnostic; empty unless `TUNIX_OUTLIER_DUMP_PATH` is set. Popped
+  # host-side in `maxtext_engine.fwd_bwd` before any scalar reducer sees it.
+  aux.update(_outlier_dump_arrays(train_example, log_is_raw, completion_mask))
 
   return sft_utils.LossOutput(primary_loss=total_loss, aux_metrics=aux)  # pyrefly: ignore[bad-argument-type]
 
