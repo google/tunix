@@ -190,6 +190,56 @@ class ReplayThroughMaxTextTest(absltest.TestCase):
     self.assertEqual(logps.shape[0], 1)
     self.assertFalse(np.isnan(logps).any())
 
+  def test_chunked_logps_matches_unchunked_on_qwen3_5(self):
+    """compute_per_token_logps with chunk_size > 0 matches chunk_size=0 on Qwen3.5."""
+    graphdef, state = nnx.split(self.model)
+    params, rest = nnx.split_state(state, nnx.Param, ...)
+    prompt_jnp = jax.numpy.asarray(self.prompt)
+    completion_jnp = jax.numpy.asarray(self.completion)
+
+    def loss_fn(p, chunk_size):
+      merged_state = nnx.merge_state(p, rest)
+      logps = common.compute_per_token_logps(
+          graphdef,
+          merged_state,
+          prompt_tokens=prompt_jnp,
+          completion_tokens=completion_jnp,
+          pad_id=PAD_ID,
+          eos_id=EOS_ID,
+          chunk_size=chunk_size,
+      )
+      return jax.numpy.sum(logps), logps
+
+    (loss_unchunked, logps_unchunked), grads_unchunked = jax.value_and_grad(
+        lambda p: loss_fn(p, chunk_size=0), has_aux=True
+    )(params)
+    (loss_chunked, logps_chunked), grads_chunked = jax.value_and_grad(
+        lambda p: loss_fn(p, chunk_size=2), has_aux=True
+    )(params)
+
+    np.testing.assert_allclose(
+        np.asarray(logps_chunked),
+        np.asarray(logps_unchunked),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+    np.testing.assert_allclose(
+        np.asarray(loss_chunked),
+        np.asarray(loss_unchunked),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+    for g_chunked, g_unchunked in zip(
+        jax.tree_util.tree_leaves(grads_chunked),
+        jax.tree_util.tree_leaves(grads_unchunked),
+    ):
+      np.testing.assert_allclose(
+          np.asarray(g_chunked),
+          np.asarray(g_unchunked),
+          rtol=1e-4,
+          atol=1e-4,
+      )
+
 
 if __name__ == "__main__":
   absltest.main()
