@@ -197,6 +197,7 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
       worker_index: int = 0,
       parallelism: int = 4,
       weight_sync_mode: weight_sync.WeightSyncMode | str | None = None,
+      free_kv_cache_during_weight_sync: bool | None = None,
       **kwargs,
   ):
     self.server_id = server_id
@@ -235,7 +236,15 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
     self._tracker = weight_sync_coordinator.WorkerRoundTracker()
     self._sync_lock = asyncio.Lock()
     self._policy_version = 0
-    self._kv_cache_freed = False
+    if free_kv_cache_during_weight_sync is None:
+      free_kv_cache_during_weight_sync = (
+          os.environ.get("ROLLOUT_FREE_KV_CACHE", "false").lower()
+          in ("true", "1")
+      )
+    self._free_kv_cache_during_weight_sync = bool(
+        free_kv_cache_during_weight_sync
+    )
+    self._weight_update_open = False
 
     if self.sampler is None and self.engine_args is not None:
       sampler_cls = _get_rl_vllm_sampler_cls()
@@ -418,8 +427,10 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
       logger.info("Executing pre_weight_sync for server_id=%s", self.server_id)
 
       # delegate to RLVllmSampler's native pause + clear + free-kv-cache
-      await sampler.pre_weight_sync(free_kv_cache=True)
-      self._kv_cache_freed = True
+      await sampler.pre_weight_sync(
+          free_kv_cache=self._free_kv_cache_during_weight_sync
+      )
+      self._weight_update_open = True
 
       self._tracker.complete(sync_request, "prepared")
       return True
@@ -474,10 +485,11 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
         return True
 
       logger.info("Executing post_weight_sync: restoring serving state...")
-      # delegate to RLVllmSampler's native reinitialize-kv-cache + resume
-      if self._kv_cache_freed:
+      # delegate to RLVllmSampler's native finish-weight-update + resume; it
+      # reinitializes the KV cache only if pre_weight_sync freed it.
+      if self._weight_update_open:
         await sampler.post_weight_sync(sync_request)
-        self._kv_cache_freed = False
+        self._weight_update_open = False
       else:
         await self.resume()
 
@@ -513,10 +525,10 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
           self._policy_version,
       )
       # RLVllmSampler has no dedicated abort path; post_weight_sync does
-      # the same recovery (reinitialize KV cache + resume).
-      if self._kv_cache_freed:
+      # the same recovery (close the session, reinitialize KV cache if freed, resume).
+      if self._weight_update_open:
         await sampler.post_weight_sync(sync_request)
-        self._kv_cache_freed = False
+        self._weight_update_open = False
       else:
         await self.resume()
 

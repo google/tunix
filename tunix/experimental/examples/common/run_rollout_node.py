@@ -305,6 +305,15 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="Enable KV prefix caching in vLLM sampler.",
   )
   parser.add_argument(
+      "--free_kv_cache_during_weight_sync",
+      type=_str2bool,
+      default=os.getenv("ROLLOUT_FREE_KV_CACHE", "false").lower()
+      in ("true", "1"),
+      nargs="?",
+      const=True,
+      help="Free the KV cache during weight sync.",
+  )
+  parser.add_argument(
       "--tensor_parallel_size",
       type=int,
       default=None,
@@ -665,6 +674,7 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
       additional_config=merged_additional_config or None,
       engine_kwargs=engine_kwargs,
       eos_tokens=_eos_token_ids(args, tokenizer),
+      free_kv_cache_during_weight_sync=args.free_kv_cache_during_weight_sync,
   )
   sampler_adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
       server_id=args.worker_id,
@@ -816,6 +826,7 @@ def _create_vllm_sampler(args, tokenizer):
       engine_args=engine_args,
       model_name=vllm_model,
       weight_sync_mode=args.weight_sync_mode,
+      free_kv_cache_during_weight_sync=args.free_kv_cache_during_weight_sync,
   )
   config = rollout_worker.RolloutConfig(
       sampler_type="vllm",
