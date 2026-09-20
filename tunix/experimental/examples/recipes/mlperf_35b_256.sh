@@ -5,7 +5,9 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Fill these before you run.
 export WANDB_API_KEY="${WANDB_API_KEY:-}"
-export MAXTEXT_OUTPUT_DIR="${MAXTEXT_OUTPUT_DIR:-gs://deepswe-wuhao-1784153479/maxtext}"
+export MAXTEXT_OUTPUT_DIR="${MAXTEXT_OUTPUT_DIR:-gs://atwigg-trellis-europe-west4-dev/maxtext}"
+export PROFILER_STEPS=0
+export SKIP_FIRST_N_PROFILER_STEPS=-1
 export TUNIX_IMAGE="${TUNIX_IMAGE:-gcr.io/cloud-tpu-multipod-dev/${USER:-niting}/trellis-35b:latest}"
 
 export PROJECT="cloud-tpu-shared-capacity"
@@ -46,7 +48,7 @@ export MAXTEXT_MODEL_NAME="qwen3.5-35b-a3b"
 export MAXTEXT_CKPT="gs://hengtaoguo-maxtext-logs/checkpoints/qwen3.5-35b-a3b/scanned/2026-06-11-10-27/0/items"
 export TRAINABLE_PARAMETERS_MASK='^(?!.*routed_experts/gate/kernel).*'
 export EOS_TOKENS="${EOS_TOKENS:-151645,151643}"
-export TRAJECTORY_LOG_DIR="${TRAJECTORY_LOG_DIR:-gs://deepswe-wuhao-1784153479/trajectories}"
+export TRAJECTORY_LOG_DIR="${TRAJECTORY_LOG_DIR:-gs://atwigg-trellis-europe-west4-dev/trajectories}"
 
 # Backend configuration
 export TRAINER_BACKEND="maxtext"
@@ -74,7 +76,7 @@ export ROLLOUT_REPLICAS=16
 export VLLM_LOGGING_LEVEL="INFO"
 export VLLM_MAX_MODEL_LEN=65536
 export VLLM_MAX_NUM_BATCHED_TOKENS=2048
-export VLLM_MAX_NUM_SEQS=8
+export VLLM_MAX_NUM_SEQS=16
 export VLLM_GPU_MEMORY_UTILIZATION="0.9"
 
 # Sharding Configs
@@ -125,13 +127,14 @@ export VLLM_ENABLE_V1_MULTIPROCESSING=0
 # ==============================================================================
 # Hyperparameters & DeepSWE Pipeline Configuration
 # ==============================================================================
-export MAX_STEPS=${MAX_STEPS:-100}
+export MAX_STEPS=${MAX_STEPS:-50}
 export BATCH_SIZE=16
 export MINI_BATCH_SIZE=${BATCH_SIZE}
 export NUM_GENERATIONS=16
 export TRAIN_MICRO_BATCH_SIZE="${TRAIN_MICRO_BATCH_SIZE:-32}"
 export CHECKPOINT_SAVE_INTERVAL_STEPS=0
 export CHECKPOINT_MAX_TO_KEEP=10
+export MAX_STALENESS=1
 
 # Sampling Parameters (explicitly disable top-k, set top-p 1.0 and temperature 1.0)
 export TEMPERATURE="1.0"

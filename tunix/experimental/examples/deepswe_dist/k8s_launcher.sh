@@ -94,6 +94,10 @@ export TIS_TYPE=${TIS_TYPE:-${TRUNCATED_IMPORTANCE_SAMPLING_TYPE:-}}
 export TIS_RATIO_MIN=${TIS_RATIO_MIN:-${TRUNCATED_IMPORTANCE_SAMPLING_RATIO_MIN:-}}
 export TIS_RATIO=${TIS_RATIO:-${TRUNCATED_IMPORTANCE_SAMPLING_RATIO:-}}
 export SAMPLER_IS_LENGTH_BUCKETS=${SAMPLER_IS_LENGTH_BUCKETS:-}
+export MAX_STALENESS=${MAX_STALENESS:-}
+export PROFILER_STEPS=${PROFILER_STEPS:-0}
+export SKIP_FIRST_N_PROFILER_STEPS=${SKIP_FIRST_N_PROFILER_STEPS:-}
+export PROFILER_PERIOD=${PROFILER_PERIOD:-}
 
 # DeepSWE dataset and environment configuration
 export DATASET_NAME=${DATASET_NAME:-R2E-Gym/R2E-Gym-Subset}
@@ -322,6 +326,7 @@ start_orchestrator() {
         --stop_workers_on_exit \
         ${MAX_WARMPOOL_REPLICAS:+--max_warmpool_replicas=${MAX_WARMPOOL_REPLICAS}} \
         ${MAX_CONCURRENCY:+--max_concurrency=${MAX_CONCURRENCY}} \
+        ${MAX_STALENESS:+--max_staleness=${MAX_STALENESS}} \
         $([[ "${USE_ROLLOUT_LOGPS}" == "false" || "${USE_ROLLOUT_LOGPS}" == "False" || "${USE_ROLLOUT_LOGPS}" == "0" ]] && echo --no-use_rollout_logps || echo --use_rollout_logps) \
         ${dataset_args} \
         ${shuffle_arg} \
@@ -375,6 +380,13 @@ start_trainer() {
   local debug_arg=""
   if [[ "${DEBUG}" == "1" || "${DEBUG}" == "true" || "${DEBUG}" == "True" ]]; then
     debug_arg="--debug"
+  fi
+  local profiler_args="--profiler_steps=${PROFILER_STEPS:-0}"
+  if [[ -n "${SKIP_FIRST_N_PROFILER_STEPS:-}" ]]; then
+    profiler_args+=" --skip_first_n_profiler_steps=${SKIP_FIRST_N_PROFILER_STEPS}"
+  fi
+  if [[ -n "${PROFILER_PERIOD:-}" ]]; then
+    profiler_args+=" --profiler_period=${PROFILER_PERIOD}"
   fi
   local raiden_env=""
   if [[ "${WEIGHT_SYNC_MODE}" == "raiden" ]]; then
@@ -461,6 +473,7 @@ start_trainer() {
         ${opt_chain_args} \
         ${lora_args} \
         ${maxtext_args} \
+        ${profiler_args} \
         ${TRAINABLE_PARAMETERS_MASK:+--trainable_parameters_mask='${TRAINABLE_PARAMETERS_MASK}'} \
         ${debug_arg} \
     " \

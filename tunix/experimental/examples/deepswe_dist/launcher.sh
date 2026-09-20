@@ -587,6 +587,9 @@ echo "Launching CPU orchestrator..."
   if [[ -n "$INFERENCE_ADDR" ]]; then
     ORCHESTRATOR_CMD+=(--inference_addr="$INFERENCE_ADDR")
   fi
+  if [[ -n "$MAX_STALENESS" ]]; then
+    ORCHESTRATOR_CMD+=(--max_staleness="$MAX_STALENESS")
+  fi
   if [[ "$USE_AGENT_SANDBOX" == "1" || "$USE_AGENT_SANDBOX" == "true" || "$USE_AGENT_SANDBOX" == "True" ]]; then
     ORCHESTRATOR_CMD+=(--use_agent_sandbox)
   fi
