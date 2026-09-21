@@ -800,11 +800,7 @@ class TrajectoryCollectEngine:
           else 0
       )
       total_needed = needed_asst + num_env
-      if (
-          not self.exact_token_continuity
-          and total_needed > 0
-          and len(prefix_routed) > total_needed
-      ):
+      if total_needed > 0 and len(prefix_routed) > total_needed:
         prefix_routed = prefix_routed[-total_needed:]
       if needed_asst > 0:
         asst_tail = _slice_or_pad_routed(prefix_routed, 0, needed_asst)
