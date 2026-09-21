@@ -435,16 +435,14 @@ checkpoint in bfloat16 — each against its own null. Six runs.
 | Gradient, worst per-param cosine | 0.999998329 | 0.999999618 | 0.975404 |
 | &nbsp;&nbsp;*same, null* | 0.999998411 | 0.999999665 | 0.948764 |
 
-**Every ratio is at or below 1.** A comparison with no packing in it, whose two
-arms produce bitwise identical log-probabilities, reproduces the packed-unpacked
-difference and in bfloat16 exceeds it. Float32 accumulation order therefore
-accounts for the whole of the observed difference on its own, and packing does
-not need to be invoked to explain any part of it.
+**Every whole-tree ratio is below 1.** A comparison with no packing in it, whose
+two arms produce bitwise identical log-probabilities, reproduces the
+packed-unpacked difference and in bfloat16 exceeds it. The two worst-parameter
+ratios above 1 (1.012 and 1.163) are a single tensor out of thirteen, at 1.8e-03
+and 1.3e-03 absolute.
 
-This bounds packing's effect below the measurement floor rather than showing it
-is zero: a perturbation an order of magnitude under the null would be
-indistinguishable from none here. What it excludes is an effect at or above the
-level that accumulation order alone already produces.
+This bounds packing's effect at the measurement floor rather than showing it is
+zero. An effect well under the null would be invisible here.
 
 Per parameter at the checkpoint in float32, ten of the thirteen paths disagree
 *less* under packing than under the null, and the three above 1 are within a
@@ -465,13 +463,19 @@ this whole table sits at.
 
 The null's per-token logp difference is **exactly 0.0** in all three regimes, so
 microbatch partitioning does not perturb the forward pass at all. The packed
-arm's nonzero difference comes from the row — 4096 tokens with `segment_ids`
-rather than 1536 with padding, reducing the same terms over different widths in
-attention and the layer norms. It tracks logit magnitude: it falls 27×
-(4.986e-04 → 1.878e-05) between random init and the trained checkpoint as the
-logp scale falls from -247.8 to -13.57. A segment-isolation defect would instead
-scale with the content of the neighbouring sequences, not with how well trained
-the weights are.
+arm's nonzero difference therefore comes from the row: 4096 tokens with
+`segment_ids` against 1536 with padding changes the length of attention's
+reduction over the key axis and the shapes the matmul kernels are tiled for.
+Masked positions contribute zero either way, but they are summed over a longer
+vector.
+
+The difference falls 27× (4.986e-04 → 1.878e-05) between random init and the
+trained checkpoint, as the logp scale falls from -247.8 to -13.57.
+
+TODO(packing): two regimes is not enough to establish that the logp difference
+scales with logit magnitude rather than with something else that differs between
+a random and a trained model. The null in §4.2, not this trend, is what rules out
+a packing defect.
 
 ### 4.4 bfloat16 cannot answer this question
 
@@ -489,16 +493,18 @@ in bfloat16 never computes the same quantity twice and compares.
 Covered at the floor of float32 arithmetic, on real length statistics, at both
 random initialization and a trained checkpoint: the assembler, the segment-id
 plumbing, the attention mask, the loss reduction and the backward pass. Not
-covered: **MoE routing**, since Qwen3-0.6B is dense and expert routing under
-packing is the one arithmetic path in the 35B configuration this harness does not
-reach; and **cross-step optimizer state**, since the harness stops at `fwd_bwd`.
-§3 covers that second range, with the weaker guarantee described there.
+covered: **MoE expert routing**, since Qwen3-0.6B is dense; **cross-step
+optimizer state**, since the harness stops at `fwd_bwd` (§3 covers that range,
+with the weaker guarantee described there); and the production **scale and mesh**
+— 0.6B against 35B, `pack_size` 4 against 8, `trainer_fsdp` 4 against 8.
 
 Reproducing:
 
 ```bash
-# Requires a local TPU; each run took about 6 minutes on a 4-chip v5p.
+# Requires a local TPU; each run took about 7 minutes on a 4-chip v5p.
 # Do not run from $HOME, which shadows installed packages.
+# /tmp/r12.csv is the maz-q35-12 trajectory CSV, at
+# gs://mazumdera-bucket-cloud-tpu-multipod-dev/maz-q35/maz-q35-12/trajectories
 cd ~/git/tunix
 CKPT=gs://maxtext-model-checkpoints/qwen3-0.6b/2025-10-27/scanned/0/items
 COMMON="--maxtext_model_name qwen3-0.6b --mesh_fsdp 4 --mesh_tp 1
