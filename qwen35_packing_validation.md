@@ -3,8 +3,8 @@
 **Author:** Anisha Mazumder
 **Last Modified:** 2026-09-21
 
-Written 2026-09-18. Packing is confirmed active and correct on two completed
-GRPO runs: `maz-q35-10` (100 steps) and `maz-q35-11` (20 steps), both 2026-09-17.
+Packing is confirmed active and correct on two completed GRPO runs:
+`maz-q35-10` (100 steps) and `maz-q35-11` (20 steps), both 2026-09-17.
 A matched unpacked control, `maz-q35-13` (20 steps, 2026-09-18), supplies a
 prompt-paired measurement of its effect on generation quality.
 
