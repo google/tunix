@@ -28,6 +28,8 @@ PER_TOKEN_FIELDS: tuple[str, ...] = (
     "returns",
     "old_values",
     "sampler_is_weights",
+    "rollout_per_token_logps",
+    "overlong",
 )
 
 
