@@ -124,11 +124,13 @@ def build_prompt_item(
     prompt_idx: int,
     max_turns: int,
     max_response_length: int,
+    episode_timeout_secs: int,
     temperature: float,
     top_p: float | None,
     top_k: int | None,
     step_timeout_secs: int,
     reward_timeout_secs: int,
+    overlong_filter: bool,
     env_backend: str,
     use_agent_sandbox: bool,
     scaffold: str,
@@ -136,7 +138,8 @@ def build_prompt_item(
 ) -> dict[str, Any]:
   """Builds one StandardRLProgram prompt item for a DeepSWE task."""
   problem = _problem_statement(entry)
-  prompt_id = as_text(entry.get("instance_id") or f"deepswe_{prompt_idx}")
+  instance_id = as_text(entry.get("instance_id") or "deepswe")
+  prompt_id = f"{instance_id}__{prompt_idx}"
   env_config = {
       "entry": entry,
       "prompt_id": prompt_id,
@@ -162,8 +165,10 @@ def build_prompt_item(
           "return_logprobs": True,
       },
       "metadata": {
-          "instance_id": prompt_id,
+          "instance_id": instance_id,
           "problem_statement": problem,
+          "episode_timeout": episode_timeout_secs,
+          "overlong_filter": overlong_filter,
           "env_config": env_config,
           "agent_config": agent_config,
       },
@@ -177,11 +182,13 @@ def iter_prompt_items(
     batch_size: int,
     max_turns: int,
     max_response_length: int,
+    episode_timeout_secs: int,
     temperature: float,
     top_p: float | None,
     top_k: int | None,
     step_timeout_secs: int,
     reward_timeout_secs: int,
+    overlong_filter: bool,
     env_backend: str,
     use_agent_sandbox: bool,
     scaffold: str,
@@ -198,11 +205,13 @@ def iter_prompt_items(
         prompt_idx=prompt_idx,
         max_turns=max_turns,
         max_response_length=max_response_length,
+        episode_timeout_secs=episode_timeout_secs,
         temperature=temperature,
         top_p=top_p,
         top_k=top_k,
         step_timeout_secs=step_timeout_secs,
         reward_timeout_secs=reward_timeout_secs,
+        overlong_filter=overlong_filter,
         env_backend=env_backend,
         use_agent_sandbox=use_agent_sandbox,
         scaffold=scaffold,

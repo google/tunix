@@ -26,38 +26,47 @@ ORCHESTRATOR_PORT=${ORCHESTRATOR_PORT:-30000}
 TRAINER_PORT=${TRAINER_PORT:-20000}
 ROLLOUT_PORT=${ROLLOUT_PORT:-20001}
 
-MODEL_NAME=${MODEL_NAME:-Qwen3-1.7B}
-MODEL_ID=${MODEL_ID:-Qwen/Qwen3-1.7B}
+MODEL_NAME=${MODEL_NAME:-Qwen3-32B}
+MODEL_ID=${MODEL_ID:-Qwen/Qwen3-32B}
 ARTIFACT_ROOT=${ARTIFACT_ROOT:-"${REPO_ROOT}/artifacts/qwen3_dist_deepswe"}
 MODEL_DIR=${MODEL_DIR:-"${ARTIFACT_ROOT}/models/${MODEL_NAME}"}
 TOKENIZER_PATH=${TOKENIZER_PATH:-"${MODEL_DIR}"}
 
-MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-1024}
-MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-1024}
-BATCH_SIZE=${BATCH_SIZE:-1}
-NUM_GENERATIONS=${NUM_GENERATIONS:-2}
-MAX_STEPS=${MAX_STEPS:-1}
-MAX_TURNS=${MAX_TURNS:-3}
+MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-4096}
+MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-8192}
+BATCH_SIZE=${BATCH_SIZE:-8}
+NUM_GENERATIONS=${NUM_GENERATIONS:-8}
+MAX_STEPS=${MAX_STEPS:-50}
+MAX_TURNS=${MAX_TURNS:-50}
 TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-1}
 MAX_SEQ_TOKEN_PER_TPU=${MAX_SEQ_TOKEN_PER_TPU:-}
 MAX_SEGMENTS_PER_PACKED_ROW=${MAX_SEGMENTS_PER_PACKED_ROW:-}
 MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-$BATCH_SIZE}
 EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-1000000}
 LEARNING_RATE=${LEARNING_RATE:-1e-6}
+ADAM_B1=${ADAM_B1:-0.9}
+ADAM_B2=${ADAM_B2:-0.99}
+WEIGHT_DECAY=${WEIGHT_DECAY:-0.01}
 OPT_CHAIN_TYPE=${OPT_CHAIN_TYPE-clip_by_global_norm}
 MAX_GRAD_NORM=${MAX_GRAD_NORM:-1.0}
+PARAM_DTYPE=${PARAM_DTYPE:-float32}
+REMAT_POLICY=${REMAT_POLICY:-decoder}
+FLASH_ATTENTION_BLOCK_SIZE=${FLASH_ATTENTION_BLOCK_SIZE:-1024}
 BETA=${BETA:-0.0}
 EPSILON=${EPSILON:-0.2}
+EPSILON_HIGH=${EPSILON_HIGH:-0.28}
+ADVANTAGE_ESTIMATOR=${ADVANTAGE_ESTIMATOR:-rloo}
+LOSS_AGG_MODE=${LOSS_AGG_MODE:-sequence-mean-token-scale}
 SAMPLER=${SAMPLER:-inprocess_vllm}
-WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
+WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-raiden}
 USE_LORA=${USE_LORA:-0}
 LORA_RANK=${LORA_RANK:-64}
 LORA_ALPHA=${LORA_ALPHA:-64.0}
 DEBUG=${DEBUG:-0}
-USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
+USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-false}
 
-CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-1}
-CHECKPOINT_MAX_TO_KEEP=${CHECKPOINT_MAX_TO_KEEP:-10}
+CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-500}
+CHECKPOINT_MAX_TO_KEEP=${CHECKPOINT_MAX_TO_KEEP:-4}
 CHECKPOINT_ROOT_DIRECTORY=${CHECKPOINT_ROOT_DIRECTORY:-"${REPO_ROOT}/checkpoints"}
 
 DATASET_NAME=${DATASET_NAME:-R2E-Gym/R2E-Gym-Subset}
@@ -74,7 +83,13 @@ SANDBOX_NODE_SELECTOR_KEY=${SANDBOX_NODE_SELECTOR_KEY:-}
 SANDBOX_NODE_SELECTOR_VAL=${SANDBOX_NODE_SELECTOR_VAL:-}
 STEP_TIMEOUT_SECS=${STEP_TIMEOUT_SECS:-1800}
 REWARD_TIMEOUT_SECS=${REWARD_TIMEOUT_SECS:-1800}
-ROLLOUT_MAX_CONCURRENCY=${ROLLOUT_MAX_CONCURRENCY:-64}
+EPISODE_TIMEOUT_SECS=${EPISODE_TIMEOUT_SECS:-10800}
+OVERLONG_FILTER=${OVERLONG_FILTER:-true}
+ROLLOUT_MAX_CONCURRENCY=${ROLLOUT_MAX_CONCURRENCY:-200}
+VLLM_HBM_UTILIZATION=${VLLM_HBM_UTILIZATION:-0.4}
+VLLM_MAX_NUM_SEQS=${VLLM_MAX_NUM_SEQS:-8}
+VLLM_MAX_NUM_BATCHED_TOKENS=${VLLM_MAX_NUM_BATCHED_TOKENS:-8192}
+VLLM_MODEL_LEN_MARGIN=${VLLM_MODEL_LEN_MARGIN:-128}
 
 WANDB_PROJECT=${WANDB_PROJECT:-trellis-deepswe}
 WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
@@ -256,6 +271,14 @@ echo "Launching trainer node..."
     --train_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
     --eval_every_n_steps="$EVAL_EVERY_N_STEPS"
     --learning_rate="$LEARNING_RATE"
+    --adam_b1="$ADAM_B1"
+    --adam_b2="$ADAM_B2"
+    --weight_decay="$WEIGHT_DECAY"
+    --param_dtype="$PARAM_DTYPE"
+    --enable_remat
+    --remat_policy="$REMAT_POLICY"
+    --use_flash_attention
+    --flash_attention_block_size="$FLASH_ATTENTION_BLOCK_SIZE"
     --lora_rank="$LORA_RANK"
     --lora_alpha="$LORA_ALPHA"
     --sampler_type="$SAMPLER"
@@ -310,6 +333,13 @@ echo "Launching DeepSWE rollout node..."
     --env_name=deepswe_env
     --agent_name=deepswe_agent
     --max_concurrency="$ROLLOUT_MAX_CONCURRENCY"
+    --vllm_hbm_utilization="$VLLM_HBM_UTILIZATION"
+    --vllm_async_scheduling
+    --vllm_enable_prefix_caching
+    --vllm_max_num_seqs="$VLLM_MAX_NUM_SEQS"
+    --vllm_max_num_batched_tokens="$VLLM_MAX_NUM_BATCHED_TOKENS"
+    --vllm_model_len_margin="$VLLM_MODEL_LEN_MARGIN"
+    --vllm_server_mode
   )
   if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
     ROLLOUT_CMD+=(--use_lora)
@@ -359,6 +389,9 @@ echo "Launching CPU orchestrator..."
     --train_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
     --beta="$BETA"
     --epsilon="$EPSILON"
+    --epsilon_high="$EPSILON_HIGH"
+    --advantage_estimator="$ADVANTAGE_ESTIMATOR"
+    --loss_agg_mode="$LOSS_AGG_MODE"
     --dataset_name="$DATASET_NAME"
     --dataset_split="$DATASET_SPLIT"
     --dataset_cache_dir="$DATASET_CACHE_DIR"
@@ -367,6 +400,7 @@ echo "Launching CPU orchestrator..."
     --scaffold="$SCAFFOLD"
     --step_timeout_secs="$STEP_TIMEOUT_SECS"
     --reward_timeout_secs="$REWARD_TIMEOUT_SECS"
+    --episode_timeout_secs="$EPISODE_TIMEOUT_SECS"
     --flush_every_n_steps="$FLUSH_EVERY_N_STEPS"
     --weight_sync_mode="$WEIGHT_SYNC_MODE"
     --stop_workers_on_exit
@@ -381,6 +415,11 @@ echo "Launching CPU orchestrator..."
   fi
   if [[ "$USE_AGENT_SANDBOX" == "1" || "$USE_AGENT_SANDBOX" == "true" || "$USE_AGENT_SANDBOX" == "True" ]]; then
     ORCHESTRATOR_CMD+=(--use_agent_sandbox)
+  fi
+  if [[ "$OVERLONG_FILTER" == "0" || "$OVERLONG_FILTER" == "false" || "$OVERLONG_FILTER" == "False" ]]; then
+    ORCHESTRATOR_CMD+=(--no-overlong_filter)
+  else
+    ORCHESTRATOR_CMD+=(--overlong_filter)
   fi
   if [[ "$DEBUG" == "1" || "$DEBUG" == "true" || "$DEBUG" == "True" ]]; then
     ORCHESTRATOR_CMD+=(--debug)

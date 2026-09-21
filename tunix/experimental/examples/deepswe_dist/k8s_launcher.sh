@@ -21,8 +21,8 @@ if ! command -v "$PYTHON" &>/dev/null; then
   PYTHON="python"
 fi
 
-export MODEL_NAME=${MODEL_NAME:-Qwen3-1.7B}
-export MODEL_ID=${MODEL_ID:-Qwen/Qwen3-1.7B}
+export MODEL_NAME=${MODEL_NAME:-Qwen3-32B}
+export MODEL_ID=${MODEL_ID:-Qwen/Qwen3-32B}
 # Must be model-specific: vLLM prioritizes non-empty local snapshot directories,
 # which can cause stale config/shape mismatches if shared across models.
 export MODEL_DIR=${MODEL_DIR:-artifacts/qwen3_dist_deepswe/models/${MODEL_NAME}}
@@ -30,12 +30,12 @@ export MODEL_DIR=${MODEL_DIR:-artifacts/qwen3_dist_deepswe/models/${MODEL_NAME}}
 # instead of failing on an initially empty local MODEL_DIR.
 export TOKENIZER_PATH=${TOKENIZER_PATH:-${MODEL_ID}}
 
-export MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-1024}
-export MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-1024}
-export BATCH_SIZE=${BATCH_SIZE:-1}
-export NUM_GENERATIONS=${NUM_GENERATIONS:-2}
-export MAX_STEPS=${MAX_STEPS:-1}
-export MAX_TURNS=${MAX_TURNS:-3}
+export MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-4096}
+export MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-8192}
+export BATCH_SIZE=${BATCH_SIZE:-8}
+export NUM_GENERATIONS=${NUM_GENERATIONS:-8}
+export MAX_STEPS=${MAX_STEPS:-50}
+export MAX_TURNS=${MAX_TURNS:-50}
 export TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-1}
 export MAX_SEQ_TOKEN_PER_TPU=${MAX_SEQ_TOKEN_PER_TPU:-}
 export MAX_SEGMENTS_PER_PACKED_ROW=${MAX_SEGMENTS_PER_PACKED_ROW:-}
@@ -45,17 +45,29 @@ export TRAINER_BACKEND=${TRAINER_BACKEND:-tunix}
 export MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-${BATCH_SIZE}}
 export EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-1000000}
 export LEARNING_RATE=${LEARNING_RATE:-1e-6}
+export ADAM_B1=${ADAM_B1:-0.9}
+export ADAM_B2=${ADAM_B2:-0.99}
+export WEIGHT_DECAY=${WEIGHT_DECAY:-0.01}
 export OPT_CHAIN_TYPE=${OPT_CHAIN_TYPE-clip_by_global_norm}
 export MAX_GRAD_NORM=${MAX_GRAD_NORM:-1.0}
+export PARAM_DTYPE=${PARAM_DTYPE:-float32}
+export REMAT_POLICY=${REMAT_POLICY:-decoder}
+export FLASH_ATTENTION_BLOCK_SIZE=${FLASH_ATTENTION_BLOCK_SIZE:-1024}
 export BETA=${BETA:-0.0}
 export EPSILON=${EPSILON:-0.2}
+export EPSILON_HIGH=${EPSILON_HIGH:-0.28}
+export ADVANTAGE_ESTIMATOR=${ADVANTAGE_ESTIMATOR:-rloo}
+export LOSS_AGG_MODE=${LOSS_AGG_MODE:-sequence-mean-token-scale}
 export LORA_RANK=${LORA_RANK:-64}
 export LORA_ALPHA=${LORA_ALPHA:-64.0}
 export USE_LORA=${USE_LORA:-0}
 export DEBUG=${DEBUG:-0}
-export USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
+export USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-false}
 export SAMPLER=${SAMPLER:-inprocess_vllm}
-export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
+export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-raiden}
+export CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-500}
+export CHECKPOINT_MAX_TO_KEEP=${CHECKPOINT_MAX_TO_KEEP:-4}
+export CHECKPOINT_ROOT_DIRECTORY=${CHECKPOINT_ROOT_DIRECTORY:-checkpoints/deepswe}
 
 # DeepSWE dataset and environment configuration
 export DATASET_NAME=${DATASET_NAME:-R2E-Gym/R2E-Gym-Subset}
@@ -74,7 +86,13 @@ export SANDBOX_NODE_SELECTOR_KEY=${SANDBOX_NODE_SELECTOR_KEY:-}
 export SANDBOX_NODE_SELECTOR_VAL=${SANDBOX_NODE_SELECTOR_VAL:-}
 export STEP_TIMEOUT_SECS=${STEP_TIMEOUT_SECS:-1800}
 export REWARD_TIMEOUT_SECS=${REWARD_TIMEOUT_SECS:-1800}
-export ROLLOUT_MAX_CONCURRENCY=${ROLLOUT_MAX_CONCURRENCY:-64}
+export EPISODE_TIMEOUT_SECS=${EPISODE_TIMEOUT_SECS:-10800}
+export OVERLONG_FILTER=${OVERLONG_FILTER:-true}
+export ROLLOUT_MAX_CONCURRENCY=${ROLLOUT_MAX_CONCURRENCY:-200}
+export VLLM_HBM_UTILIZATION=${VLLM_HBM_UTILIZATION:-0.4}
+export VLLM_MAX_NUM_SEQS=${VLLM_MAX_NUM_SEQS:-8}
+export VLLM_MAX_NUM_BATCHED_TOKENS=${VLLM_MAX_NUM_BATCHED_TOKENS:-8192}
+export VLLM_MODEL_LEN_MARGIN=${VLLM_MODEL_LEN_MARGIN:-128}
 export FLUSH_EVERY_N_STEPS=${FLUSH_EVERY_N_STEPS:-1}
 export ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE:-0}
 export CKPT_D2H_CONCURRENT_GB=${CKPT_D2H_CONCURRENT_GB:-8}
@@ -164,6 +182,10 @@ start_orchestrator() {
   if [[ "${USE_AGENT_SANDBOX}" == "1" || "${USE_AGENT_SANDBOX}" == "true" || "${USE_AGENT_SANDBOX}" == "True" ]]; then
     sandbox_arg="--use_agent_sandbox"
   fi
+  local overlong_arg="--overlong_filter"
+  if [[ "${OVERLONG_FILTER}" == "0" || "${OVERLONG_FILTER}" == "false" || "${OVERLONG_FILTER}" == "False" ]]; then
+    overlong_arg="--no-overlong_filter"
+  fi
 
   "$PYTHON" tunix/experimental/distributed/deployment/yaml_generator.py \
     tunix/experimental/distributed/deployment/yamls/jobset.cpu.yaml \
@@ -195,6 +217,9 @@ start_orchestrator() {
         --train_micro_batch_size=${TRAIN_MICRO_BATCH_SIZE} \
         --beta=${BETA} \
         --epsilon=${EPSILON} \
+        --epsilon_high=${EPSILON_HIGH} \
+        --advantage_estimator=${ADVANTAGE_ESTIMATOR} \
+        --loss_agg_mode=${LOSS_AGG_MODE} \
         --dataset_name=${DATASET_NAME} \
         --dataset_split=${DATASET_SPLIT} \
         ${DATASET_CACHE_DIR:+--dataset_cache_dir=${DATASET_CACHE_DIR}} \
@@ -203,6 +228,7 @@ start_orchestrator() {
         --scaffold=${SCAFFOLD} \
         --step_timeout_secs=${STEP_TIMEOUT_SECS} \
         --reward_timeout_secs=${REWARD_TIMEOUT_SECS} \
+        --episode_timeout_secs=${EPISODE_TIMEOUT_SECS} \
         --flush_every_n_steps=${FLUSH_EVERY_N_STEPS} \
         --wandb_project=\"${WANDB_PROJECT}\" \
         --wandb_run_name=\"${WANDB_RUN_NAME}\" \
@@ -212,6 +238,7 @@ start_orchestrator() {
         ${dataset_args} \
         ${shuffle_arg} \
         ${sandbox_arg} \
+        ${overlong_arg} \
         ${LOG_DIR:+--log_dir=\"${LOG_DIR}\"} \
         ${TRAJECTORY_LOG_DIR:+--trajectory_log_dir=\"${TRAJECTORY_LOG_DIR}\"} \
         ${MAX_SEQ_TOKEN_PER_TPU:+--max_seq_token_per_tpu=${MAX_SEQ_TOKEN_PER_TPU}} \
@@ -298,9 +325,20 @@ start_trainer() {
         --eval_every_n_steps=${EVAL_EVERY_N_STEPS} \
         ${opt_chain_flags} \
         --learning_rate=${LEARNING_RATE} \
+        --adam_b1=${ADAM_B1} \
+        --adam_b2=${ADAM_B2} \
+        --weight_decay=${WEIGHT_DECAY} \
+        --param_dtype=${PARAM_DTYPE} \
+        --enable_remat \
+        --remat_policy=${REMAT_POLICY} \
+        --use_flash_attention \
+        --flash_attention_block_size=${FLASH_ATTENTION_BLOCK_SIZE} \
         --lora_rank=${LORA_RANK} \
         --lora_alpha=${LORA_ALPHA} \
-        --sampler=${SAMPLER} \
+        --sampler_type=${SAMPLER} \
+        --checkpoint_save_interval_steps=${CHECKPOINT_SAVE_INTERVAL_STEPS} \
+        --checkpoint_max_to_keep=${CHECKPOINT_MAX_TO_KEEP} \
+        --checkpoint_root_directory=${CHECKPOINT_ROOT_DIRECTORY} \
         ${lora_args} \
         ${maxtext_args} \
         ${DEBUG:+--debug} \
@@ -371,6 +409,13 @@ start_rollout() {
         --env_name=deepswe_env \
         --agent_name=deepswe_agent \
         --max_concurrency=${ROLLOUT_MAX_CONCURRENCY} \
+        --vllm_hbm_utilization=${VLLM_HBM_UTILIZATION} \
+        --vllm_async_scheduling \
+        --vllm_enable_prefix_caching \
+        --vllm_max_num_seqs=${VLLM_MAX_NUM_SEQS} \
+        --vllm_max_num_batched_tokens=${VLLM_MAX_NUM_BATCHED_TOKENS} \
+        --vllm_model_len_margin=${VLLM_MODEL_LEN_MARGIN} \
+        --vllm_server_mode \
         ${lora_args} \
         ${maxtext_args} \
         ${vllm_args} \

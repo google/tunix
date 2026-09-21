@@ -1,8 +1,8 @@
 # Distributed DeepSWE GRPO Pipeline
 
-This example is the first DeepSWE-specific version of the experimental
-distributed RL pipeline. It follows the same control-plane shape as the
-distributed GSM8K example:
+This example ports the non-experimental `examples/deepswe` recipe to the
+experimental distributed RL control plane. It reuses the recipe's dataset,
+agent, and environment implementations directly:
 
 1. `run_deepswe_dist.py` runs the CPU orchestrator.
 2. `../common/run_rollout_node.py` runs a rollout worker configured with
@@ -10,14 +10,23 @@ distributed GSM8K example:
 3. The trainer worker is reused from `../common/run_trainer_node.py` because it
    is already a generic PeftTrainer V2 worker.
 
-The first milestone is intentionally small: run one trainer+rollout pipeline
-step with `BETA=0.0` and `WEIGHT_SYNC_MODE=none`. The default path uses the
-regular DeepSWE `SWEEnv` backend. Set `USE_AGENT_SANDBOX=1` to construct
-`SWEEnv` with `SandboxFleet` inside the rollout worker process.
+The defaults match `examples/deepswe/train_deepswe_nb.py`: Qwen3-32B, batch
+size 8, 8 generations, 4096 prompt tokens, 8192 response tokens, 50 turns,
+RLOO advantages, asymmetric clipping (`0.2`/`0.28`),
+`sequence-mean-token-scale` loss aggregation, FP32 parameter storage with BF16
+compute, decoder rematerialization, flash attention (block size 1024), and
+actor-side recomputation of start-of-step log probabilities. Weight sync uses
+Raiden by default. Set `WEIGHT_SYNC_MODE=none` only for a one-step smoke test.
+
+For a local four-chip infrastructure smoke test, split two chips each between
+trainer and rollout and override the recipe model and batch sizes:
 
 ```bash
 cd tunix/experimental/examples/deepswe_dist
-BETA=0.0 WEIGHT_SYNC_MODE=none MAX_STEPS=1 BATCH_SIZE=1 NUM_GENERATIONS=2 ./launcher.sh
+MODEL_NAME=Qwen3-1.7B MODEL_ID=Qwen/Qwen3-1.7B \
+BETA=0.0 WEIGHT_SYNC_MODE=none MAX_STEPS=1 \
+BATCH_SIZE=1 MINI_BATCH_SIZE=1 NUM_GENERATIONS=2 \
+MAX_PROMPT_LENGTH=1024 MAX_RESPONSE_LENGTH=1024 ./launcher.sh
 ```
 
 ```bash
@@ -48,4 +57,3 @@ To stop all jobsets:
 ```bash
 ./k8s_launcher.sh --command stop
 ```
-
