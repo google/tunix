@@ -27,9 +27,9 @@ import signal
 import sys
 from typing import Any
 
-from tunix.experimental.examples.common import models
 from tunix.experimental.weight_sync import raiden_preload
 from tunix.experimental.weight_sync import weight_sync as weight_sync_lib
+from tunix.models import automodel
 from tunix.rl.agentic.parser.chat_template_parser import parser as chat_parser_lib
 from tunix.utils import maxtext_utils
 
@@ -133,6 +133,15 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--lora_alpha", type=float, default=64.0)
   parser.add_argument(
       "--model_name", type=str, default=os.getenv("MODEL_NAME", "Qwen3-1.7B")
+  )
+  parser.add_argument(
+      "--model_dtype",
+      choices=("bfloat16", "float32"),
+      default=os.getenv("MODEL_DTYPE", "float32"),
+      help=(
+          "Data type for the vanilla rollout model parameters and computation"
+          " (e.g. 'bfloat16', 'float32')."
+      ),
   )
   parser.add_argument(
       "--sampler",
@@ -384,8 +393,12 @@ def _create_vanilla_worker(args, tokenizer):
   logging.info("Creating native sampler on the rollout mesh...")
   mesh = _create_rollout_mesh(args)
   with mesh:
-    model = models.create_model(
-        args.model_name, args.model_dir or args.model_id, mesh
+    model, _ = automodel.AutoModel.from_pretrained(
+        model_id=args.model_name,
+        mesh=mesh,
+        model_path=args.model_dir or args.model_id,
+        dtype=args.model_dtype,
+        load_dtype=args.model_dtype,
     )
   config = rollout_worker.RolloutConfig(
       sampler_type="vanilla",

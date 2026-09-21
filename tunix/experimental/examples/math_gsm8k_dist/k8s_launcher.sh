@@ -68,6 +68,7 @@ export LR_DECAY_STEPS=${LR_DECAY_STEPS:-500}
 export WARMUP_STEPS=${WARMUP_STEPS:-$(((LR_DECAY_STEPS + 9) / 10))}
 export LORA_RANK=${LORA_RANK:-16}
 export LORA_ALPHA=${LORA_ALPHA:-16.0}
+export MODEL_DTYPE=${MODEL_DTYPE:-float32}
 export USE_LORA=${USE_LORA:-0}
 export REWARD_MODE=${REWARD_MODE:-env}
 export BETA=${BETA:-0}
@@ -330,6 +331,7 @@ start_trainer() {
         --mini_batch_size=${MINI_BATCH_SIZE} \
         --num_generations=${NUM_GENERATIONS} \
         --train_micro_batch_size=${TRAIN_MICRO_BATCH_SIZE} \
+        --model_dtype=${MODEL_DTYPE} \
         --eval_every_n_steps=${EVAL_EVERY_N_STEPS} \
         ${opt_chain_flags} \
         --optimizer_b1=${ADAM_B1} \

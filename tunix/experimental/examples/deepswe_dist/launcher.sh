@@ -53,6 +53,7 @@ WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
 USE_LORA=${USE_LORA:-0}
 LORA_RANK=${LORA_RANK:-64}
 LORA_ALPHA=${LORA_ALPHA:-64.0}
+MODEL_DTYPE=${MODEL_DTYPE:-float32}
 DEBUG=${DEBUG:-0}
 USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
 
@@ -254,6 +255,7 @@ echo "Launching trainer node..."
     --mini_batch_size="$MINI_BATCH_SIZE"
     --num_generations="$NUM_GENERATIONS"
     --train_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
+    --model_dtype="$MODEL_DTYPE"
     --eval_every_n_steps="$EVAL_EVERY_N_STEPS"
     --learning_rate="$LEARNING_RATE"
     --lora_rank="$LORA_RANK"

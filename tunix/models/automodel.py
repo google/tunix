@@ -435,22 +435,25 @@ class AutoModel:
     naming_info = naming.ModelNaming(model_id=model_id)
 
     # Download the model
-    if model_path:
-      model_id_or_path = model_path
+    if model_path and os.path.isdir(model_path):
+      resolved_model_path = model_path
     else:
-      if model_source in (
-          ModelSource.INTERNAL,
-          ModelSource.GCS,
-          ModelSource.KAGGLE,
-      ):
-        raise ValueError(
-            'model_path is required for model_source: '
-            f'{model_source}. Please provide a valid model_path.'
-        )
-      model_id_or_path = model_id
-    resolved_model_path = download_model(
-        model_id_or_path, model_download_path, model_source
-    )
+      if model_path:
+        model_id_or_path = model_path
+      else:
+        if model_source in (
+            ModelSource.INTERNAL,
+            ModelSource.GCS,
+            ModelSource.KAGGLE,
+        ):
+          raise ValueError(
+              'model_path is required for model_source: '
+              f'{model_source}. Please provide a valid model_path.'
+          )
+        model_id_or_path = model_id
+      resolved_model_path = download_model(
+          model_id_or_path, model_download_path, model_source
+      )
 
     if model_source == ModelSource.MAXTEXT:
       import maxtext  # pylint: disable=g-import-not-at-top
@@ -562,10 +565,16 @@ class AutoModel:
         model, model_params = create_gemma_model_from_params(
             params_path=resolved_model_path, model_name=naming_info.model_name  # pyrefly: ignore[bad-argument-type]
         )
+      elif model_source == ModelSource.HUGGINGFACE:
+        logging.info(
+            'Gemma source %s is HUGGINGFACE, falling through to SafeTensors'
+            ' loader.',
+            model_source,
+        )
       else:
         raise NotImplementedError(
-            'Gemma models are only supported from KAGGLE or INTERNAL.'
-            f' Specified model source: {model_source}'
+            'Gemma models are only supported from KAGGLE, INTERNAL, or'
+            f' HUGGINGFACE. Specified model source: {model_source}'
         )
     # TODO(b/467448875): Add support for other models from KAGGLE/GCS.
     elif model_source in (ModelSource.KAGGLE, ModelSource.GCS):
@@ -596,13 +605,23 @@ class AutoModel:
       # use_flash_attention, flash_attention_block_size).
       if dataclasses.is_dataclass(model_params):
         valid_fields = {f.name for f in dataclasses.fields(model_params)}
-        overrides = {k: v for k, v in kwargs.items() if k in valid_fields and v is not None}
-        if 'remat_config' in overrides and isinstance(overrides['remat_config'], str):
-          model_module = get_model_module(naming_info.model_name, ModelModule.MODEL)  # pyrefly: ignore[bad-argument-type]
+        overrides = {
+            k: v
+            for k, v in kwargs.items()
+            if k in valid_fields and v is not None
+        }
+        if 'remat_config' in overrides and isinstance(
+            overrides['remat_config'], str
+        ):
+          model_module = get_model_module(
+              naming_info.model_name, ModelModule.MODEL  # pyrefly: ignore[bad-argument-type]
+          )
           if hasattr(model_module, 'RematConfig'):
             remat_cfg_str = overrides['remat_config']
             try:
-              overrides['remat_config'] = getattr(model_module.RematConfig, remat_cfg_str)
+              overrides['remat_config'] = getattr(
+                  model_module.RematConfig, remat_cfg_str.upper()
+              )
             except AttributeError:
               raise ValueError(
                   f"Invalid remat_config: {remat_cfg_str}. Must be a valid"

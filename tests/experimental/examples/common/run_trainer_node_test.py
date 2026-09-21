@@ -497,7 +497,6 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     self.assertEqual(args.port, 20000)
     self.assertEqual(args.worker_id, "trainer-0")
     self.assertEqual(args.model_name, "Qwen3-1.7B")
-    self.assertEqual(args.model_parameter_dtype, "bfloat16")
     self.assertEqual(args.remat_config, "none")
     self.assertFalse(args.use_flash_attention)
     self.assertIsNone(args.flash_attention_block_size)
@@ -514,6 +513,7 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     self.assertIsNone(args.optimizer_opt_chain_type)
     self.assertEqual(args.optimizer_chain_kwargs, {})
     self.assertFalse(args.use_lora)
+    self.assertEqual(args.model_dtype, "float32")
     self.assertEqual(args.rollout_mesh_tp, 0)
     self.assertFalse(args.prefuse_moe_weights)
     self.assertTrue(args.use_weight_converter)
@@ -526,8 +526,6 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
         "trainer-1",
         "--model_name",
         "Qwen3-32B",
-        "--model_parameter_dtype",
-        "float32",
         "--remat_config",
         "decoder",
         "--use_flash_attention",
@@ -554,6 +552,8 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
         "32",
         "--lora_alpha",
         "64.0",
+        "--model_dtype",
+        "bfloat16",
         "--adam_b2",
         "0.99",
         "--weight_decay",
@@ -575,7 +575,6 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     self.assertEqual(args_custom.port, 20050)
     self.assertEqual(args_custom.worker_id, "trainer-1")
     self.assertEqual(args_custom.model_name, "Qwen3-32B")
-    self.assertEqual(args_custom.model_parameter_dtype, "float32")
     self.assertEqual(args_custom.remat_config, "decoder")
     self.assertTrue(args_custom.use_flash_attention)
     self.assertEqual(args_custom.flash_attention_block_size, 256)
@@ -588,6 +587,7 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     self.assertEqual(args_custom.checkpoint_save_interval_steps, 5)
     self.assertEqual(args_custom.checkpoint_max_to_keep, 3)
     self.assertEqual(args_custom.checkpoint_root_directory, "/checkpoints/test")
+    self.assertEqual(args_custom.model_dtype, "bfloat16")
     self.assertTrue(args_custom.use_lora)
     self.assertEqual(args_custom.lora_rank, 32)
     self.assertEqual(args_custom.lora_alpha, 64.0)
@@ -1047,7 +1047,6 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
         run_trainer_node._ensure_model_dir_for_trainer(
             tmp_file.name, "Qwen/Qwen3-1.7B"
         )
-
 
 if __name__ == "__main__":
   absltest.main()

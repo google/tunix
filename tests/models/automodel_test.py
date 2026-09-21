@@ -420,6 +420,34 @@ class AutoModelTest(parameterized.TestCase):
     self.assertEqual(called_config.flash_attention_block_size, 512)
     self.assertFalse(hasattr(called_config, "invalid_param"))
 
+  @mock.patch.object(automodel, "download_model", autospec=True)
+  @mock.patch.object(automodel, "create_model_from_safe_tensors", autospec=True)
+  def test_from_pretrained_with_local_model_path_and_remat(
+      self,
+      mock_create_model,
+      mock_download_model,
+  ):
+    local_dir = self.create_tempdir().full_path
+    mesh = jax.sharding.Mesh(jax.devices(), ("devices",))
+    automodel.AutoModel.from_pretrained(
+        model_id="Qwen/Qwen3-1.7B",
+        mesh=mesh,
+        model_path=local_dir,
+        load_dtype="float32",
+        remat_config="decoder",
+        use_flash_attention=True,
+        flash_attention_block_size=256,
+    )
+    mock_download_model.assert_not_called()
+    mock_create_model.assert_called_once()
+    args, kwargs = mock_create_model.call_args
+    self.assertEqual(args[0], "qwen3-1.7b")
+    self.assertEqual(args[1], local_dir)
+    self.assertEqual(args[2].remat_config.name, "DECODER")
+    self.assertTrue(args[2].use_flash_attention)
+    self.assertEqual(args[2].flash_attention_block_size, 256)
+    self.assertEqual(kwargs["dtype"], jax.numpy.float32)
+
 
 if __name__ == "__main__":
   absltest.main()

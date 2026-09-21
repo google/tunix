@@ -26,14 +26,12 @@ import sys
 from typing import Any
 
 import jax
-from jax import numpy as jnp
 from jax.experimental import mesh_utils
 from jax.sharding import Mesh
 from transformers import AutoTokenizer
 from tunix.experimental.worker import inference_worker as exp_inference_worker
 from tunix.experimental.worker import remote_execution
-from tunix.models.qwen3 import model as qwen3_model_lib
-from tunix.models.qwen3 import params as qwen3_params_lib
+from tunix.models import automodel
 from tunix.rl.inference import inference_worker as rl_inference_worker
 
 REPO_ROOT = os.path.abspath(
@@ -59,6 +57,15 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument("--tokenizer_path", type=str, default="")
+  parser.add_argument(
+      "--model_dtype",
+      choices=("bfloat16", "float32"),
+      default=os.getenv("MODEL_DTYPE", "float32"),
+      help=(
+          "Data type for the reference model parameters and computation"
+          " (e.g. 'bfloat16', 'float32')."
+      ),
+  )
   parser.add_argument("--mesh_fsdp", type=int, default=2)
   parser.add_argument("--mesh_tp", type=int, default=1)
   parser.add_argument("--compute_logps_micro_batch_size", type=int, default=1)
@@ -96,20 +103,6 @@ def _ensure_model_dir(model_dir: str, model_id: str) -> str:
       "Download completed, but no '*.safetensors' files were found directly "
       f"in --model_dir: {model_path}"
   )
-
-
-def _qwen3_config(model_name: str) -> qwen3_model_lib.ModelConfig:
-  normalized = model_name.lower().replace("_", "-")
-  if "1.7b" in normalized or "1p7b" in normalized:
-    config = qwen3_model_lib.ModelConfig.qwen3_1p7b()
-  elif "32b" in normalized:
-    config = qwen3_model_lib.ModelConfig.qwen3_32b()
-  else:
-    raise ValueError(f"Unsupported demo model_name: {model_name!r}")
-  config.shd_config = qwen3_model_lib.ShardingConfig.get_default_sharding()
-  config.dtype = jnp.bfloat16
-  config.param_dtype = jnp.float32
-  return config
 
 
 def _create_mesh(args) -> Mesh:
@@ -151,7 +144,9 @@ def main(argv: list[str], context: Any = None) -> None:
 
   tokenizer_path = args.tokenizer_path or args.model_dir or args.model_id
   logging.info("Loading tokenizer from %s...", tokenizer_path)
-  tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+  tokenizer: Any = AutoTokenizer.from_pretrained(
+      tokenizer_path, trust_remote_code=True
+  )
   if tokenizer.pad_token_id is None and tokenizer.eos_token is not None:
     tokenizer.pad_token = tokenizer.eos_token
   pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
@@ -163,11 +158,12 @@ def main(argv: list[str], context: Any = None) -> None:
 
   logging.info("Loading frozen reference model...")
   with mesh:
-    reference_model = qwen3_params_lib.create_model_from_safe_tensors(
-        args.model_dir,
-        _qwen3_config(args.model_name),
-        mesh,
-        dtype=jnp.bfloat16,  # pyrefly: ignore[bad-argument-type]
+    reference_model, _ = automodel.AutoModel.from_pretrained(
+        model_id=args.model_name,
+        mesh=mesh,
+        model_path=args.model_dir,
+        dtype=args.model_dtype,
+        load_dtype=args.model_dtype,
     )
     core = rl_inference_worker.InferenceWorker({"reference": reference_model})
 

@@ -38,10 +38,10 @@ from datasets import Dataset
 from examples.frozenlake import agent as frozenlake_agent
 from examples.frozenlake import data as frozenlake_data
 from examples.frozenlake import env as frozenlake_env
-from tunix.experimental.examples.common import models
 from tunix.experimental.examples.frozenlake_dist import frozenlake
 from tunix.experimental.examples.frozenlake_dist import run_frozenlake_dist
 from tunix.experimental.rl.agentic import registry
+from tunix.models import automodel
 # pylint: enable=g-import-not-at-top
 
 
@@ -210,17 +210,9 @@ class FrozenLakeDistTest(absltest.TestCase):
     self.assertEqual(algo.algo_config.sampler_is_threshold, 2.0)
 
   def test_qwen3_8b_supported_by_distributed_workers(self):
-    config = models._qwen3_config(
-        "Qwen3-8B",
-        remat_config="decoder",
-        use_flash_attention=True,
-        flash_attention_block_size=256,
-    )
+    config = automodel.call_model_config("qwen3-8b")
     self.assertEqual(config.embed_dim, 4096)
     self.assertEqual(config.num_layers, 36)
-    self.assertEqual(config.remat_config.name, "DECODER")
-    self.assertTrue(config.use_flash_attention)
-    self.assertEqual(config.flash_attention_block_size, 256)
 
   def test_launcher_uses_frozenlake_registry(self):
     launcher = (Path(frozenlake.__file__).parent / "launcher.sh").read_text(
@@ -235,7 +227,8 @@ class FrozenLakeDistTest(absltest.TestCase):
     self.assertEqual(launcher.count('--mini_batch_size="$MINI_BATCH_SIZE"'), 2)
     self.assertEqual(launcher.count('--num_generations="$NUM_GENERATIONS"'), 2)
     self.assertIn("WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-raiden}", launcher)
-    self.assertIn("--model_parameter_dtype=float32", launcher)
+    self.assertIn("MODEL_DTYPE=${MODEL_DTYPE:-float32}", launcher)
+    self.assertIn('--model_dtype="$MODEL_DTYPE"', launcher)
     self.assertIn(
         '--compute_logps_micro_batch_size="$COMPUTE_LOGPS_MICRO_BATCH_SIZE"',
         launcher,

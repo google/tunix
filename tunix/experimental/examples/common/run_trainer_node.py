@@ -30,17 +30,16 @@ from typing import Any
 
 from flax import nnx
 import jax
-from jax import numpy as jnp
 from jax.experimental import mesh_utils
 from jax.sharding import Mesh
 from orbax import checkpoint as ocp
 from tunix.cli import config as cli_config
 from tunix.cli.utils import model as model_utils
-from tunix.experimental.examples.common import models
 from tunix.experimental.train import peft_trainer_v2
 from tunix.experimental.weight_sync import raiden_preload
 from tunix.experimental.worker import remote_execution
 from tunix.experimental.worker import trainer_worker
+from tunix.models import automodel
 from tunix.utils import maxtext_utils
 
 # Import Raiden before any other libraries to ensure correct JAX compilation.
@@ -169,10 +168,13 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   )
   parser.add_argument("--tokenizer_path", type=str, default="")
   parser.add_argument(
-      "--model_parameter_dtype",
+      "--model_dtype",
       choices=("bfloat16", "float32"),
-      default="bfloat16",
-      help="Storage dtype used when loading Tunix trainer parameters.",
+      default=os.getenv("MODEL_DTYPE", "float32"),
+      help=(
+          "Data type for the trainer model parameters and computation"
+          " (e.g. 'bfloat16', 'float32')."
+      ),
   )
   parser.add_argument(
       "--remat_config",
@@ -554,15 +556,12 @@ def _load_actor_model(args, mesh: Mesh, *, lora: bool):
         "--model_dir is required for JAX trainer weights. Set MODEL_DIR or pass"
         " --model_dir=/path/to/local/safetensors."
     )
-  parameter_dtype = {
-      "bfloat16": jnp.bfloat16,
-      "float32": jnp.float32,
-  }[args.model_parameter_dtype]
-  model = models.create_model(
-      args.model_name,
-      args.model_dir,
-      mesh,
-      parameter_dtype=parameter_dtype,
+  model, _ = automodel.AutoModel.from_pretrained(
+      model_id=args.model_name,
+      mesh=mesh,
+      model_path=args.model_dir,
+      dtype=args.model_dtype,
+      load_dtype=args.model_dtype,
       remat_config=args.remat_config,
       use_flash_attention=args.use_flash_attention,
       flash_attention_block_size=args.flash_attention_block_size,

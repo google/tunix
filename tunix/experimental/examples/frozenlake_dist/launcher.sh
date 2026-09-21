@@ -46,7 +46,6 @@ MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-2048}
 TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-4}
 COMPUTE_LOGPS_MICRO_BATCH_SIZE=${COMPUTE_LOGPS_MICRO_BATCH_SIZE:-4}
 FLASH_ATTENTION_BLOCK_SIZE=${FLASH_ATTENTION_BLOCK_SIZE:-256}
-MODEL_PARAMETER_DTYPE=${MODEL_PARAMETER_DTYPE:-float32}
 LEARNING_RATE=${LEARNING_RATE:-1e-6}
 ADAM_B1=${ADAM_B1:-0.9}
 ADAM_B2=${ADAM_B2:-0.95}
@@ -87,6 +86,7 @@ WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
 WANDB_API_KEY=${WANDB_API_KEY:-}
 LOG_DIR=${LOG_DIR:-}
 TRAJECTORY_LOG_DIR=${TRAJECTORY_LOG_DIR:-}
+MODEL_DTYPE=${MODEL_DTYPE:-float32}
 DEBUG=${DEBUG:-0}
 
 # Qwen3-8B defaults target an 8-chip host split between trainer and rollout.
@@ -232,7 +232,7 @@ echo "Starting distributed FrozenLake with ${MODEL_ID}: full batch ${BATCH_SIZE}
     --num_generations="$NUM_GENERATIONS"
     --train_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
     --compute_logps_micro_batch_size="$COMPUTE_LOGPS_MICRO_BATCH_SIZE"
-    --model_parameter_dtype="$MODEL_PARAMETER_DTYPE"
+    --model_dtype="$MODEL_DTYPE"
     --remat_config=decoder
     --use_flash_attention
     --flash_attention_block_size="$FLASH_ATTENTION_BLOCK_SIZE"
