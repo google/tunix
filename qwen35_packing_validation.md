@@ -520,14 +520,40 @@ optimizer state**, since the harness stops at `fwd_bwd` (§3 covers that range,
 with the weaker guarantee described there); and the production **scale and mesh**
 — 0.6B against 35B, `pack_size` 4 against 8, `trainer_fsdp` 4 against 8.
 
-Reproducing:
+Reproducing. The numbers above were produced on Tunix `maz-q35` at `929737ea`
+and MaxText `packing-compare-harness` at `02cf283fa`. Neither branch is
+required:
+
+| | branch used | also verified on | not verified on |
+| --- | --- | --- | --- |
+| Tunix | `maz-q35` @ `929737ea` | `main` @ `124bc03c` | — |
+| MaxText | `packing-compare-harness` @ `02cf283fa` | — | `main` @ `78aa15557` |
+
+Tunix `main` reproduces the **observed** arm of the trained-checkpoint float32
+column to every digit printed above (whole-tree 3.118e-04, worst per-parameter
+1.286e-03, cosine 0.999999618, pooled loss 8.939e-06); the null runs in that
+column were not repeated against `main`. `max_target_length=4096` and the whole
+29-argument MaxText config are identical, because [PR
+#2239](https://github.com/google/tunix/pull/2239) landed the
+`max_seq_token_per_tpu` plumbing this measurement depends on. Without it
+`max_target_length` pins to 1536 and packing is a silent no-op, so a run against
+a Tunix older than #2239 measures nothing. One edit to the harness is needed on
+`main`: `create_batch_assembler(group_size=...)` was renamed to
+`num_generations=` in `16febb14`.
+
+The MaxText branch carries three commits `main` does not, and all three are
+confined to `tests/end_to_end/tpu/compare_tunix_trainer.py`, which this harness
+never imports — so nothing in it is load-bearing. It is 20 commits *behind*
+`main`, and that direction is untested: of those 20, `9f510ac6d` touches
+`training_engine/maxtext_engine.py` (router replay weighting, no production
+caller here) and three touch `configs/types.py` or `configs/base.yml`.
 
 ```bash
 # Requires a local TPU; each run took about 7 minutes on a 4-chip v5p.
 # Do not run from $HOME, which shadows installed packages.
 # /tmp/r12.csv is the maz-q35-12 trajectory CSV, at
 # gs://mazumdera-bucket-cloud-tpu-multipod-dev/maz-q35/maz-q35-12/trajectories
-cd ~/git/tunix
+git clone -b maz-q35 https://github.com/google/tunix && cd tunix
 CKPT=gs://maxtext-model-checkpoints/qwen3-0.6b/2025-10-27/scanned/0/items
 COMMON="--maxtext_model_name qwen3-0.6b --mesh_fsdp 4 --mesh_tp 1
         --max_prompt_length 512 --max_response_length 1024
@@ -559,8 +585,9 @@ the appendix, for anyone reimplementing it.
 
 ## 5. Tests establishing that packed arithmetic equals unpacked arithmetic
 
-All of these are on `main` in both repositories — no branch needed. Counts below
-are from runs on a CPU box on 2026-09-18; all exit 0.
+The suites in this section are on `main` in both repositories — unlike the §4
+harness, which is a file on `maz-q35`. Counts below are from runs on a CPU box
+on 2026-09-18; all exit 0.
 
 ### 5.1 The core equivalence tests (MaxText)
 
