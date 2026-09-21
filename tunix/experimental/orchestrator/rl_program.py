@@ -1055,11 +1055,24 @@ class StandardRLProgram(RLProgram):
       reward = traj.get("trajectory_reward", None)
       if isinstance(status, datatypes.TrajectoryStatus):
         status = status.name
+      prompt_id = getattr(item, "prompt_id", "")
+      group_index = getattr(item, "group_index", 0)
+      worker_id = (
+          metadata.get("worker_id")
+          or getattr(item, "worker_id", None)
+          or f"worker{group_index}"
+      )
+      traj_id = (
+          getattr(item, "traj_id", None)
+          or f"traj_{prompt_id}_g{group_index}"
+      )
       row = {
           "global_step": log_step,
           "consumed_policy_version": consumed_policy_version,
-          "prompt_id": getattr(item, "prompt_id", ""),
-          "group_index": getattr(item, "group_index", 0),
+          "prompt_id": prompt_id,
+          "group_index": group_index,
+          "worker_id": worker_id,
+          "traj_id": traj_id,
           "rollout_policy_version": getattr(item, "policy_version", 0),
           "status": status or "UNKNOWN",
           "reward": float(reward) if reward is not None else None,

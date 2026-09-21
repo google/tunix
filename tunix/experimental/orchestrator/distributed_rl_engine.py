@@ -343,6 +343,9 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           if isinstance(it, dict):
             it = datatypes.RolloutResponse(**it)
           traj_item = _response_to_trajectory_item(it)
+          worker_handle = self._rollout_workers[idx]
+          worker_id = getattr(worker_handle, "worker_id", f"worker{idx}")
+          traj_item.metadata.setdefault("worker_id", worker_id)
           logging.debug(
               "Received rollout response (prompt_id=%s, group_index=%d).",
               traj_item.prompt_id,

@@ -397,6 +397,7 @@ class RolloutWorker(abstract_worker.Worker):
       req_id = request_id or getattr(item, "traj_id", "")
       if prompt_tokens is not None and getattr(item, "prompt_tokens", None) is None:
         item.metadata["prompt_tokens"] = prompt_tokens
+      item.metadata.setdefault("worker_id", self.worker_id)
       self._stamp_worker_lineage(item.metadata)
       return datatypes.RolloutResponse(
           request_id=req_id,
