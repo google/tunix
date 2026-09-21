@@ -169,6 +169,16 @@ def create_default_handler(
     )
     logging.info("Built RaidenHandler natively; port %d", handler.port)
     return handler
+  elif mode_name in (
+      weight_sync.WeightSyncMode.GCS.value,
+      "file",
+      "filesystem",
+  ):
+    from tunix.experimental.weight_sync import gcs_weight_sync
+
+    handler = gcs_weight_sync.GCSWeightSyncHandler()
+    logging.info("Built GCSWeightSyncHandler for file/GCS weight sync.")
+    return handler
   elif mode_name in (weight_sync.WeightSyncMode.FALLBACK.value, "noop", "no-op"):
     logging.info(
         "Built fallback NullHandler; weight sync running protocol-only."
@@ -724,13 +734,23 @@ class WeightSyncCoordinator:
     The round's identity (req_id, uuid, round_index) rides in `extra_config`:
     workers key their `WorkerRoundTracker` on it.
     """
+    handler_extra: dict[str, Any] = {}
+    if hasattr(self._handler, "build_extra_config"):
+      handler_extra = dict(
+          self._handler.build_extra_config(source_metadata or ()) or {}
+      )
+    merged_extra = {
+        **handler_extra,
+        "req_id": req_id,
+        "uuid": uuid,
+        "round_index": round_index,
+        **extra_config,
+    }
     return datatypes.WeightSyncRequest(
         controller_id=self._controller_id,
         policy_version=policy_version,
         source_metadata=source_metadata,
-        extra_config=dict(
-            req_id=req_id, uuid=uuid, round_index=round_index, **extra_config
-        ),
+        extra_config=merged_extra,
     )
 
   # ------------------------------------------------------------- phase plumbing
@@ -958,11 +978,19 @@ class WeightSyncCoordinator:
     )
     prepared_request: Optional[datatypes.WeightSyncRequest] = None
 
+    t_round_start = time.monotonic()
+    t_prepare_s = 0.0
+    t_transfer_s = 0.0
+    t_h2d_s = 0.0
+    t_post_s = 0.0
+    t_release_s = 0.0
+
     try:
       # Everything up to `pre` runs while the destinations are still serving:
       # bind (a no-op on an already-bound worker), metadata collection, and
       # registration cost no downtime. Failures here need no rollback either.
       try:
+        t_phase = time.monotonic()
         await asyncio.gather(*[
             asyncio.wait_for(d.bind_weight_sync(), self._timeouts.bind)
             for d in destinations
@@ -982,6 +1010,7 @@ class WeightSyncCoordinator:
             )
             for s in sources
         ])
+        t_prepare_s = time.monotonic() - t_phase
       except asyncio.CancelledError:
         raise
       except Exception as e:  # pylint: disable=broad-except
@@ -1152,6 +1181,7 @@ class WeightSyncCoordinator:
 
       # --- downtime starts here ---
       quiesce_attempted = True
+      t_phase = time.monotonic()
       pre_failures = await self._phase_on_all(
           destinations, "pre_weight_sync", prepared_request, self._timeouts.pre
       )
@@ -1180,6 +1210,7 @@ class WeightSyncCoordinator:
             self._timeouts.transfer,
         )
         transfer_in_flight = False
+        t_transfer_s = time.monotonic() - t_phase
       except (
           asyncio.TimeoutError,
           weight_sync.TransferOutcomeUnknownError,
@@ -1227,9 +1258,11 @@ class WeightSyncCoordinator:
         raise fail("transfer failed")
 
       state = RoundState.H2D_IN_PROGRESS
+      t_phase = time.monotonic()
       h2d_failures = await self._phase_on_all(
           destinations, "weight_sync", prepared_request, self._timeouts.h2d
       )
+      t_h2d_s = time.monotonic() - t_phase
       if h2d_failures:
         # Staging-only H2D means the serving copy is untouched everywhere,
         # so rolling all destinations back is safe even though some finished.
@@ -1240,12 +1273,14 @@ class WeightSyncCoordinator:
         raise fail("weight_sync (H2D) failed")
 
       state = RoundState.PENDING_COMMIT
+      t_phase = time.monotonic()
       post_results = await self._phase_results(
           destinations,
           "post_weight_sync",
           prepared_request,
           self._timeouts.post,
       )
+      t_post_s = time.monotonic() - t_phase
       failed_posts = [(d, e) for d, e in post_results if e is not None]
       if failed_posts:
         state = await self._resolve_post_failures(
@@ -1428,6 +1463,7 @@ class WeightSyncCoordinator:
       raise
     finally:
       if release_source:
+        t_rel_start = time.monotonic()
         release_request = prepared_request or request
         # Shielded AND awaited to completion on cancellation. The shield
         # alone only stops the cancel from killing the release; the awaiting
@@ -1466,12 +1502,28 @@ class WeightSyncCoordinator:
                 round_index,
                 error,
             )
+        t_release_s = time.monotonic() - t_rel_start
       else:
         logging.error(
             "round %d: source staging deliberately NOT released; a timed-out"
             " transfer may still be reading it",
             round_index,
         )
+      t_e2e_s = time.monotonic() - t_round_start
+      logging.info(
+          "WEIGHT_SYNC_PROFILE round=%d req_id=%s policy_version=%d "
+          "prepare_write_s=%.3f transfer_s=%.3f h2d_read_s=%.3f "
+          "post_verify_s=%.3f release_s=%.3f e2e_s=%.3f",
+          round_index,
+          req_id,
+          policy_version,
+          t_prepare_s,
+          t_transfer_s,
+          t_h2d_s,
+          t_post_s,
+          t_release_s,
+          t_e2e_s,
+      )
 
   async def _resolve_post_failures(
       self,

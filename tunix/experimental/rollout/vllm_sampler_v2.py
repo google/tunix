@@ -395,9 +395,9 @@ class RLVllmSampler:
             "tpu_worker_ips": worker_ips,
         }
 
-  async def _call_worker_method(self, method_name: str, *args: Any,
+  async def _call_worker_method(self, method_name: Any, *args: Any,
                                   **kwargs: Any) -> list[Any]:
-    """Dispatches a method call across TPU workers via collective_rpc.
+    """Dispatches a method call or callable across TPU workers via collective_rpc.
 
         `AsyncLLMEngine` (an alias of `vllm.v1.engine.async_llm.AsyncLLM`)
         always exposes an async `collective_rpc`.
@@ -430,6 +430,18 @@ class RLVllmSampler:
     await self._call_worker_method("bind_raiden_sync", worker_index,
                                        parallelism, job_name)
 
+  async def bind_gcs_sync(self,
+                          worker_index: int = 0,
+                          job_name: str = "rollout",
+                          staging_dir: str | None = None) -> list[dict]:
+    """Binds GCSWeightSync to each TPU worker's live weights, in-process."""
+    return await self._call_worker_method(
+        "bind_gcs_sync",
+        worker_index,
+        job_name,
+        staging_dir,
+    )
+
   async def refresh_model_state_leaves(self) -> None:
     """Re-points each worker's dispatch view after an h2d weight update."""
     await self._call_worker_method("refresh_model_state_leaves")
@@ -437,6 +449,10 @@ class RLVllmSampler:
   async def get_raiden_metadata(self) -> list[dict]:
     """Wire-safe registration metadata for each worker's current Raiden binding."""
     return await self._call_worker_method("get_raiden_metadata")
+
+  async def get_gcs_metadata(self) -> list[dict]:
+    """Wire-safe registration metadata for each worker's current GCSWeightSync binding."""
+    return await self._call_worker_method("get_gcs_metadata")
 
   async def raiden_h2d(self, uuid: int | None = None) -> list[dict]:
     """Blocks each worker until its just-landed transfer is visible on-device.
@@ -448,8 +464,23 @@ class RLVllmSampler:
     """
     return await self._call_worker_method("raiden_h2d", uuid=uuid)
 
+  async def gcs_h2d(
+      self,
+      checkpoint_path: str,
+      source_checksums: dict[str, Any] | None = None,
+  ) -> list[dict]:
+    """Restores sharded Orbax weights into each TPUWorker and returns checksums."""
+    return await self._call_worker_method(
+        "gcs_h2d",
+        checkpoint_path,
+        source_checksums,
+    )
+
   async def raiden_metrics(self) -> list[dict]:
     return await self._call_worker_method("raiden_metrics")
+
+  async def gcs_metrics(self) -> list[dict]:
+    return await self._call_worker_method("gcs_metrics")
 
   async def pre_weight_sync(
         self,
