@@ -37,6 +37,7 @@ export ZONE="${ZONE:-europe-west4}"
 export PROJECT="${PROJECT:-cloud-tpu-shared-capacity}"
 export K8S_NAMESPACE="${K8S_NAMESPACE:-trellis}"
 export KUEUE_QUEUE="${KUEUE_QUEUE:-multislice-queue}"
+export KUEUE_QUEUE_NAME="${KUEUE_QUEUE_NAME:-${KUEUE_QUEUE}}"
 export PRIORITY_CLASS="${PRIORITY_CLASS:-medium}"
 export SERVICE_ACCOUNT="${SERVICE_ACCOUNT:-xpk-sa}"
 
@@ -79,10 +80,10 @@ export USE_ROLLOUT_LOGPS="false"
 
 # --- Trainer Topology & Memory (2 Hosts, 8 TPU v5p Chips) ---
 export TRAINER_JOBSET_YAML="jobset.pathways.yaml"
-export TRAINER_TPU_SLICE="tpuv5:2x2x2"
-export TRAINER_MESH_FSDP="4"
-export TRAINER_MESH_TP="2"
-export TRAINER_MESH_EXPERT="1"
+export TRAINER_TPU_SLICE="${TRAINER_TPU_SLICE:-tpuv5:2x2x2}"
+export TRAINER_MESH_FSDP="${TRAINER_MESH_FSDP:-4}"
+export TRAINER_MESH_TP="${TRAINER_MESH_TP:-2}"
+export TRAINER_MESH_EXPERT="${TRAINER_MESH_EXPERT:-1}"
 export TRAINER_BASE_NUM_KV_HEADS="2"
 export TRAINABLE_PARAMETERS_MASK='^(?!.*routed_experts/gate/kernel).*'
 export REMAT_POLICY="full"
@@ -98,7 +99,7 @@ export PATHWAYS_WORKER_MEMORY="100G"
 
 # --- Rollout Topology & vLLM Configuration (2x 4-Chip TPU v5p Replicas) ---
 export ROLLOUT_JOBSET_YAML="jobset.tpu.yaml"
-export ROLLOUT_TPU_SLICE="tpuv5:2x2x1"
+export ROLLOUT_TPU_SLICE="${ROLLOUT_TPU_SLICE:-tpuv5:2x2x1}"
 export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-2}"
 export ROLLOUT_MESH_FSDP="4"
 export ROLLOUT_MESH_TP="1"
