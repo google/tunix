@@ -78,7 +78,14 @@ LONG_POLL_TIMEOUT_S = RPC_TIMEOUT_S - 10.0
 # Cap for a single gRPC message. The library default (~4 MiB) is far too small
 # for training-batch payloads; raise it and enable keepalive so idle connections
 # are detected.
-_MAX_MESSAGE_BYTES = 128 * 1024 * 1024
+#
+# 128 MiB was still too small: a 35B fwd_bwd payload at micro_batch_size=32 and
+# prompt+response=8192 measured 170,919,665 bytes and aborted the run with
+# RESOURCE_EXHAUSTED "Sent message larger than max (170919665 vs. 134217728)".
+# The payload scales with batch x sequence length, so 12288 tokens needs ~256 MB.
+# 512 MiB leaves headroom for the full 4096+8192 configuration. This is only a
+# ceiling; actual memory tracks the real payload.
+_MAX_MESSAGE_BYTES = 512 * 1024 * 1024
 
 
 def _grpc_options() -> List[Tuple[str, int]]:
