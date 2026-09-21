@@ -1098,7 +1098,6 @@ class DistributedRLEngineTest(absltest.TestCase):
           request_id="r1",
           prompt="p1",
           prompt_id="prompt_1",
-          metadata={"prefix_hash": 7},
       )
       req2 = datatypes.RolloutRequest(
           request_id="r2",
@@ -1113,11 +1112,19 @@ class DistributedRLEngineTest(absltest.TestCase):
           [
               (
                   None,
-                  {"route_key": 7, "request_id": "r1", "prompt": "p1"},
+                  {
+                      "route_key": req1.traj_id,
+                      "request_id": "r1",
+                      "prompt": "p1",
+                  },
               ),
               (
                   None,
-                  {"route_key": "prompt_2", "request_id": "r2", "prompt": "p2"},
+                  {
+                      "route_key": req2.traj_id,
+                      "request_id": "r2",
+                      "prompt": "p2",
+                  },
               ),
           ],
       )
@@ -1136,7 +1143,6 @@ class DistributedRLEngineTest(absltest.TestCase):
           request_id="r1",
           prompt="p1",
           prompt_id="prompt_1",
-          metadata={"prefix_hash": 3},
       )
       resp = datatypes.RolloutResponse(
           request_id="r1",
@@ -1157,7 +1163,14 @@ class DistributedRLEngineTest(absltest.TestCase):
       self.assertLen(results, 1)
       self.assertEqual(
           router.calls,
-          [(None, {"route_key": 3, "request_id": "r1", "prompt": "p1"})],
+          [(
+              None,
+              {
+                  "route_key": request.traj_id,
+                  "request_id": "r1",
+                  "prompt": "p1",
+              },
+          )],
       )
       self.mock_rollout_1.generate.assert_called_once()
       self.mock_rollout_2.generate.assert_not_called()
@@ -1185,14 +1198,13 @@ class DistributedRLEngineTest(absltest.TestCase):
 
       results = await engine.generate(
           [{"prompt": "p1", "prompt_id": "pid1"}],
-          route_metadata={"prefix_hash": "h1"},
       )
 
       self.assertLen(results, 1)
       self.assertLen(router.calls, 1)
       method_name, hints = router.calls[0]
       self.assertIsNone(method_name)
-      self.assertEqual(hints["route_key"], "h1")
+      self.assertEqual(hints["route_key"], datatypes.format_traj_id("pid1", 0))
       self.assertEqual(hints["prompt"], "p1")
       # request_id is auto-generated for dict items; only require presence.
       self.assertTrue(hints["request_id"])
