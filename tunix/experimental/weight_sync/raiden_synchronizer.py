@@ -332,6 +332,51 @@ def _devices_per_host(devices: List[Any]) -> int:
   return counts.pop()
 
 
+def _compute_global_shard_index(
+    indices: Tuple[slice, ...], shape: Tuple[int, ...]
+) -> int:
+  """Computes a flattened global shard index from slice indices and shape."""
+  shard_idx = 0
+  stride = 1
+  for s, dim in zip(reversed(indices), reversed(shape)):
+    start = s.start or 0
+    step = s.stop - start if s.stop is not None else dim
+    num_shards = dim // step if step > 0 else 1
+    idx = start // step if step > 0 else 0
+    shard_idx += idx * stride
+    stride *= num_shards
+  return shard_idx
+
+
+def _compute_mesh_global_shard_indices(
+    arrays: List[Any], array_mesh: Optional[Any]
+) -> Optional[List[int]]:
+  """Computes explicit global mesh shard indices for the local addressable shards."""
+  if arrays and hasattr(arrays[0], "addressable_shards"):
+    arr = arrays[0]
+    if array_mesh is not None and hasattr(array_mesh, "devices"):
+      flat_devices = list(array_mesh.devices.flat)
+      indices = []
+      for s in arr.addressable_shards:
+        try:
+          indices.append(flat_devices.index(s.device))
+        except (ValueError, AttributeError):
+          pass
+      if indices and len(indices) == len(arr.addressable_shards):
+        return indices
+    try:
+      num_shards = len(arr.addressable_shards)
+      offset = (
+          jax.process_index() * len(jax.local_devices())
+          if jax.process_count() > 1
+          else 0
+      )
+      return [offset + i for i in range(num_shards)]
+    except Exception:  # pylint: disable=broad-exception-caught
+      pass
+  return None
+
+
 def _tensor_metadata(name: str, arr: Any, layer_idx: int):
   sharding: Any = getattr(arr, "sharding", None)
   spec = tuple(getattr(sharding, "spec", ()) or ())
@@ -350,6 +395,44 @@ def _tensor_metadata(name: str, arr: Any, layer_idx: int):
       mesh_shape = (1,) * arr.ndim
   else:
     mesh_shape = (1,) * arr.ndim
+
+  global_shard_indices: Tuple[int, ...] = ()
+  if sharding is not None and hasattr(sharding, "devices_indices_map"):
+    try:
+      shape_tuple = tuple(arr.shape)
+      devices_indices_map = sharding.devices_indices_map(shape_tuple)
+      if devices_indices_map is not None:
+        if (
+            hasattr(arr, "addressable_shards")
+            and arr.addressable_shards
+            and not any(
+                getattr(getattr(s, "device", None), "platform", "") == "proxy"
+                for s in arr.addressable_shards
+            )
+        ):
+          global_shard_indices = tuple(
+              _compute_global_shard_index(
+                  getattr(s, "index", None) or devices_indices_map[s.device],
+                  shape_tuple,
+              )
+              for s in arr.addressable_shards
+          )
+        else:
+          mesh_obj = getattr(sharding, "mesh", None)
+          if mesh_obj is not None and hasattr(mesh_obj, "devices"):
+            global_shard_indices = tuple(
+                _compute_global_shard_index(devices_indices_map[d], shape_tuple)
+                for d in mesh_obj.devices.flat
+                if d in devices_indices_map
+            )
+          else:
+            global_shard_indices = tuple(
+                _compute_global_shard_index(indices, shape_tuple)
+                for _, indices in devices_indices_map.items()
+            )
+    except Exception:  # pylint: disable=broad-exception-caught
+      global_shard_indices = ()
+
   return weight_sync.TensorMetadata(
       name=name,
       shape=tuple(arr.shape),
@@ -358,6 +441,7 @@ def _tensor_metadata(name: str, arr: Any, layer_idx: int):
       item_size=arr.dtype.itemsize,
       layer_idx=layer_idx,
       sharding_spec=tuple(_axis_name(a) for a in spec),
+      global_shard_indices=global_shard_indices,
   )
 
 
@@ -426,6 +510,7 @@ class RaidenSynchronizer:
     self._ffi_mesh: Any = None
     self._ffi_shard_idx: Any = None
     self._host_subgrid: Optional[Tuple[int, ...]] = None
+    self._global_shard_indices: Optional[List[int]] = None
     if state is not None:
       self.bind(state)
 
@@ -642,6 +727,9 @@ class RaidenSynchronizer:
       if array_mesh is not None:
         break
     self._host_subgrid = _compute_host_subgrid(array_mesh)
+    self._global_shard_indices = _compute_mesh_global_shard_indices(
+        self.arrays, array_mesh
+    )
     logging.info(
         "%s bind prepared %d arrays (proxy_runtime=%s)",
         self.job_name,
@@ -679,6 +767,7 @@ class RaidenSynchronizer:
           listener_port=0,
           bind_ip=None,
           auto_h2d=self._auto_h2d,
+          global_shard_indices=self._global_shard_indices,
       )
       logging.info(
           "%s native WeightSynchronizer ready: data_port=%s listener_port=%s"
@@ -879,14 +968,38 @@ class RaidenSynchronizer:
           ",".join(self._unique_listeners) if self._unique_listeners else ""
       )
     else:
-      data_addr = f"{self.ip}:{self._sync.local_port}" if self._sync else ""
+      num_shards = self._sync.num_shards if self._sync else 1
+      shards_list = [""] * num_shards
+      g_to_l = {
+          int(g): idx for idx, g in enumerate(self._global_shard_indices or ())
+      }
+      if self._sync and hasattr(self._sync, "get_local_endpoints"):
+        try:
+          for ep in self._sync.get_local_endpoints():
+            ep_addr = ep.get("endpoint", "")
+            if ep_addr.startswith(":"):
+              ep_addr = f"{self.ip}{ep_addr}"
+            elif ":" in ep_addr:
+              parts = ep_addr.split(":")
+              if parts[0] in ("0.0.0.0", "127.0.0.1", ""):
+                ep_addr = f"{self.ip}:{parts[1]}"
+            ep_shards = ep.get("local_shards", ep.get("shards", []))
+            for s in ep_shards:
+              s_int = int(s)
+              local_s = g_to_l.get(s_int, s_int)
+              if 0 <= local_s < num_shards:
+                shards_list[local_s] = ep_addr
+        except Exception:  # pylint: disable=broad-exception-caught
+          pass
+      if not all(shards_list):
+        data_addr = f"{self.ip}:{self._sync.local_port}" if self._sync else ""
+        shards_list = [s or data_addr for s in shards_list] if data_addr else []
+      shards = tuple(shards_list)
       control_addr = (
           f"{self.ip}:{self._sync.listener_port}"
           if self._sync and self._sync.listener_port
           else ""
       )
-      num_shards = self._sync.num_shards if self._sync else 1
-      shards = (data_addr,) * num_shards if data_addr else ()
     # Index 0 keeps the default replica id "": transfer callers construct
     # WorkUnitId(job_name=...) without a replica, and registration lookups
     # must match it for single-replica units.

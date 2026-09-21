@@ -77,32 +77,32 @@ class RaidenTransferOptions:
 
 
 def make_host_staged_transfer_options(
-      parallelism: int = 16,
-      group_size: int = 128,
-      max_layers: int = 512,
-  ) -> RaidenTransferOptions:
-    """Transfer options for host-staged (CPU) weight sources.
+    parallelism: int = 16,
+    group_size: int = 128,
+    max_layers: int = 2048,
+) -> RaidenTransferOptions:
+  """Transfer options for host-staged (CPU) weight sources.
 
-    The controller derives skip_tiling from slice geometry when none is
-    given, marking aligned tensors as pre-tiled — but a host-staged source
-    can only stage logical bytes, so the derived plan installs permuted
-    data. An explicit all-False map keeps every tensor on the logical path.
+  The controller derives skip_tiling from slice geometry when none is
+  given, marking aligned tensors as pre-tiled -- but a host-staged source
+  can only stage logical bytes, so the derived plan installs permuted
+  data. An explicit all-False map keeps every tensor on the logical path.
 
-    Args:
-     parallelism: Number of concurrent transfer streams.
-     group_size: Number of tensors the controller moves per group.
-     max_layers: Upper bound for the skip_tiling map. The receiver drops
-      indices past its own layer count, so a generous value is safe.
+  Args:
+    parallelism: Number of concurrent transfer streams.
+    group_size: Number of tensors the controller moves per group.
+    max_layers: Upper bound for the skip_tiling map. The receiver drops indices
+      past its own layer count, so a generous value is safe.
 
-    Returns:
-     Options matching the validated e2e run and the pathways benchmark
-     client.
-    """
-    return RaidenTransferOptions(
-        parallelism=parallelism,
-        group_size=group_size,
-        skip_tiling={i: False for i in range(max_layers)},
-    )
+  Returns:
+    Options matching the validated e2e run and the pathways benchmark
+    client.
+  """
+  return RaidenTransferOptions(
+      parallelism=parallelism,
+      group_size=group_size,
+      skip_tiling={i: False for i in range(max_layers)},
+  )
 
 
 class _RaidenTransport:
@@ -197,7 +197,8 @@ class _RaidenTransport:
 
   @staticmethod
   def _to_variable_proto(tensor: weight_sync.TensorMetadata) -> Any:
-    return raiden_service_pb2.VariableMetadataProto(
+    """Converts a TensorMetadata object to a VariableMetadataProto."""
+    var_proto = raiden_service_pb2.VariableMetadataProto(
         name=tensor.name,
         shape=list(tensor.shape),
         mesh_shape=list(tensor.mesh_shape),
@@ -206,8 +207,12 @@ class _RaidenTransport:
         layer_idx=tensor.layer_idx,
         sharding_spec=list(tensor.sharding_spec),
     )
+    if hasattr(tensor, "global_shard_indices") and tensor.global_shard_indices:
+      var_proto.global_shard_indices.extend(tensor.global_shard_indices)
+    return var_proto
 
   def register_work_unit(self, metadata: weight_sync.WorkUnitMetadata) -> None:
+    """Registers a work unit and its shard addresses with the controller."""
     if not metadata.shards:
       raise ValueError(
           f"work unit {metadata.unit} registered without any data-plane"
