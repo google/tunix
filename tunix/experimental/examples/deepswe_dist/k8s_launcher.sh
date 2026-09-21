@@ -69,7 +69,10 @@ export OVERLONG_LOSS_MASKING=${OVERLONG_LOSS_MASKING:-true}
 export LORA_RANK=${LORA_RANK:-64}
 export LORA_ALPHA=${LORA_ALPHA:-64.0}
 export USE_LORA=${USE_LORA:-0}
-export DEBUG=${DEBUG:-0}
+export DEBUG=${DEBUG:-}
+if [[ "${DEBUG}" == "0" || "${DEBUG}" == "false" ]]; then
+  export DEBUG=""
+fi
 export FORCE_ON_POLICY_RATIO=${FORCE_ON_POLICY_RATIO:-true}
 export USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-false}
 export SAMPLER=${SAMPLER:-inprocess_vllm}
