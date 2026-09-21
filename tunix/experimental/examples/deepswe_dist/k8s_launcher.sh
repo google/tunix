@@ -125,6 +125,14 @@ export CKPT_D2H_CONCURRENT_GB=${CKPT_D2H_CONCURRENT_GB:-8}
 
 export TRAINER_MESH_TP=${TRAINER_MESH_TP:-1}
 export TRAINER_MESH_EXPERT=${TRAINER_MESH_EXPERT:-1}
+<<<<<<< HEAD
+=======
+# Context-parallel degree for the trainer; shards the sequence axis.
+export TRAINER_MESH_CONTEXT=${TRAINER_MESH_CONTEXT:-1}
+# Padded MoE MLP intermediate dimension; must match rollout TP padding for MoE models.
+export TRAINER_PADDED_MOE_MLP_DIM=${TRAINER_PADDED_MOE_MLP_DIM:-}
+export TRAINER_BASE_NUM_KV_HEADS=${TRAINER_BASE_NUM_KV_HEADS:-${BASE_NUM_KV_HEADS:-}}
+>>>>>>> f0baa37de ([397b] Add context parallelism, and size the DeepSWE recipe to a verified mesh)
 # Rollout jobset template. Defaults to the single-host TPU jobset, which is what
 # a 4-chip-per-replica rollout wants. A multihost rollout -- e.g. 397B at 16
 # chips / 4 hosts per replica -- needs the Ray-backed template instead.
@@ -379,9 +387,28 @@ stop_trainer() {
 }
 
 start_trainer() {
+<<<<<<< HEAD
   maxtext_require_ckpt
   local maxtext_args
   maxtext_args="$(maxtext_trainer_flags)"
+=======
+  local maxtext_args=""
+  if [[ "${TRAINER_BACKEND}" == "maxtext" ]]; then
+    maxtext_args=" \
+      --maxtext_model_name=${MAXTEXT_MODEL_NAME} \
+      ${TRAINER_PADDED_MOE_MLP_DIM:+--maxtext_padded_moe_mlp_dim=${TRAINER_PADDED_MOE_MLP_DIM}} \
+      --maxtext_ckpt_path=${MAXTEXT_CKPT} \
+      --maxtext_output_directory=${MAXTEXT_OUTPUT_DIR} \
+      --mesh_expert=${TRAINER_MESH_EXPERT} \
+      $( [[ "${TRAINER_MESH_CONTEXT:-1}" -gt 1 ]] && echo "--mesh_context=${TRAINER_MESH_CONTEXT}" ) \
+      ${ROLLOUT_MESH_TP:+--rollout_mesh_tp=${ROLLOUT_MESH_TP}} \
+      ${TRAINER_BASE_NUM_KV_HEADS:+--base_num_kv_heads=${TRAINER_BASE_NUM_KV_HEADS}} \
+      ${TRAINER_MAXTEXT_ATTENTION:+--maxtext_attention=${TRAINER_MAXTEXT_ATTENTION}} \
+      ${REMAT_POLICY:+--remat_policy=${REMAT_POLICY}} \
+      ${LEARNING_RATE_FINAL_FRACTION:+--learning_rate_final_fraction=${LEARNING_RATE_FINAL_FRACTION}} \
+    "
+  fi
+>>>>>>> f0baa37de ([397b] Add context parallelism, and size the DeepSWE recipe to a verified mesh)
   local opt_chain_args=""
   if [[ -n "${OPT_CHAIN_TYPE}" ]]; then
     opt_chain_args=" \
@@ -449,6 +476,7 @@ start_trainer() {
         --mesh_fsdp=${TRAINER_MESH_FSDP} \
         --mesh_tp=${TRAINER_MESH_TP} \
         --mesh_expert=${TRAINER_MESH_EXPERT} \
+      $( [[ "${TRAINER_MESH_CONTEXT:-1}" -gt 1 ]] && echo "--mesh_context=${TRAINER_MESH_CONTEXT}" ) \
         --trainer_backend=${TRAINER_BACKEND} \
         --model_name=${MODEL_NAME} \
         --model_id=${MODEL_ID} \

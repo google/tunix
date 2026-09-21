@@ -77,10 +77,11 @@ export WEIGHT_SYNC_MODE="raiden"
 # tile sizes does not help because T(128) padding rounds s32[592] and s32[552]
 # to the same 640.
 export TRAINER_JOBSET_YAML="jobset.pathways.qwen3.5-397b.yaml"
-export TRAINER_TPU_SLICE="tpuv5p:4x8x8"
-export TRAINER_MESH_FSDP=64
-export TRAINER_MESH_TP=2
+export TRAINER_TPU_SLICE="tpuv5p:4x8x8"          # 256 chips
+export TRAINER_MESH_FSDP=16
+export TRAINER_MESH_TP=1
 export TRAINER_MESH_EXPERT=2
+export TRAINER_MESH_CONTEXT=8                    # 16*1*2*8 = 256
 export TRAINER_BASE_NUM_KV_HEADS=16
 
 # Rollout: 16 chips = 4 hosts per replica. tp * expert must equal the slice.
@@ -140,7 +141,11 @@ export VLLM_ENABLE_V1_MULTIPROCESSING=0
 # Raiden tuning carried over from the 397B GSM8K recipe.
 export ORCHESTRATOR_EXTRA_ENV="${ORCHESTRATOR_EXTRA_ENV:-WEIGHT_SYNC_TIMEOUT_H2D=1800 RAIDEN_PARALLELISM=16}"
 export ROLLOUT_EXTRA_ENV="${ROLLOUT_EXTRA_ENV:-RAY_memory_monitor_refresh_ms=0 RAIDEN_TRANSPORT_COALESCE_WINDOW_BYTES=67108864 RAIDEN_WEIGHT_SYNC_PIPELINE_GROUP_SIZE=16 RAIDEN_PARALLELISM=16}"
-export TRAINER_EXTRA_ENV="${TRAINER_EXTRA_ENV:-RAIDEN_TRANSPORT_COALESCE_WINDOW_BYTES=67108864 RAIDEN_WEIGHT_SYNC_PIPELINE_GROUP_SIZE=16}"
+# Trainer XLA flags. Note LIBTPU_INIT_ARGS above is the ROLLOUT's; the trainer
+# needs its own, with sparsecore collective offloading and a raised scoped
+# vmem limit. The 64k config was AOT-compiled with exactly these set.
+export TRAINER_LIBTPU_INIT_ARGS="${TRAINER_LIBTPU_INIT_ARGS:---DANGEROUS_tpu_runtime_abi_verification_disabled=true --xla_tpu_use_tc_device_shape_on_sc=true --xla_sc_disable_megacore_partitioning=true --xla_tpu_enable_offloading_gather_to_sparsecore=true --xla_tpu_enable_sparse_core_collective_offload_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true --xla_tpu_enable_sparse_core_reduce_scatter_v2=true --xla_tpu_use_single_sparse_core_for_all_gather_offload=true --xla_tpu_enable_concurrent_sparse_core_offloading=true --xla_tpu_aggressive_opt_barrier_removal=true --xla_tpu_scoped_vmem_limit_kib=65536 --xla_tpu_enable_sublane_major_scaling_bitcast_fusion=false}"
+export TRAINER_EXTRA_ENV="${TRAINER_EXTRA_ENV:-RAIDEN_TRANSPORT_COALESCE_WINDOW_BYTES=67108864 RAIDEN_WEIGHT_SYNC_PIPELINE_GROUP_SIZE=16 LIBTPU_INIT_ARGS='${TRAINER_LIBTPU_INIT_ARGS}'}"
 
 # ==============================================================================
 # Hyperparameters & DeepSWE Pipeline Configuration
@@ -149,11 +154,11 @@ export MAX_STEPS=${MAX_STEPS:-50}
 export BATCH_SIZE=16
 export MINI_BATCH_SIZE=${BATCH_SIZE}
 export NUM_GENERATIONS=16
-# Must be a multiple of TRAINER_MESH_FSDP * TRAINER_MESH_EXPERT = 128, because
+# Must be a multiple of TRAINER_MESH_FSDP * TRAINER_MESH_EXPERT = 32, because
 # MaxText binds the activation batch axis to
 # ('data','fsdp','fsdp_transpose','expert') and the MoE shard_map rejects a row
 # count that is not divisible by their product.
-export TRAIN_MICRO_BATCH_SIZE="${TRAIN_MICRO_BATCH_SIZE:-128}"
+export TRAIN_MICRO_BATCH_SIZE="${TRAIN_MICRO_BATCH_SIZE:-32}"
 export CHECKPOINT_SAVE_INTERVAL_STEPS=0
 export CHECKPOINT_MAX_TO_KEEP=10
 export MAX_STALENESS=0

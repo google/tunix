@@ -108,6 +108,7 @@ def build_maxtext_config(
     mesh_fsdp: int = 1,
     mesh_tp: int = 1,
     mesh_expert: int = 1,
+    mesh_context: int = 1,
     num_devices: int = 1,
     max_prompt_length: int = 512,
     max_response_length: int = 128,
@@ -397,6 +398,16 @@ def build_maxtext_config(
       ),
       f"ici_tensor_parallelism={mesh_tp}",
       f"ici_expert_parallelism={mesh_expert}",
+      f"ici_context_parallelism={mesh_context}",
+      # Qwen3.5's GatedDeltaNet layers carry a recurrence, so device order is
+      # sequence order: device i composes the state device i-1 left behind. The
+      # default DUAL_CHUNK_SWAP balancing hands device 0 the first and last
+      # chunks, device 1 the second and second-to-last, which composes the
+      # segments out of order. Softmax attention tolerates that because it
+      # rebuilds the causal mask from positions; a recurrence cannot. MaxText
+      # rejects the combination outright, and warns that the run would otherwise
+      # still train with the loss falling -- i.e. it fails silently.
+      *(["context_parallel_load_balance=False"] if mesh_context > 1 else []),
       f"learning_rate={learning_rate}",
       f"warmup_steps_fraction={warmup_steps_fraction}",
       "dtype=bfloat16",

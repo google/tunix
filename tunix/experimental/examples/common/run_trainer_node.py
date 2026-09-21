@@ -171,6 +171,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--mesh_fsdp", type=int, default=2)
   parser.add_argument("--mesh_tp", type=int, default=1)
   parser.add_argument("--mesh_expert", type=int, default=1)
+  parser.add_argument(
+      "--mesh_context",
+      type=int,
+      default=1,
+      help=(
+          "Context-parallel degree for the trainer. Shards the sequence axis,"
+          " which is the only axis that helps a long-context OOM: FSDP shards"
+          " the batch and parameters, so at 64k the per-device activation"
+          " footprint does not fall as devices are added."
+      ),
+  )
   parser.add_argument("--max_prompt_length", type=int, default=512)
   parser.add_argument("--max_response_length", type=int, default=128)
   parser.add_argument(
@@ -651,6 +662,7 @@ def _create_maxtext_trainer_factory(args) -> tuple[Any, Mesh]:
       mesh_fsdp=args.mesh_fsdp,
       mesh_tp=args.mesh_tp,
       mesh_expert=args.mesh_expert,
+      mesh_context=args.mesh_context,
       num_devices=jax.device_count(),
       max_prompt_length=args.max_prompt_length,
       max_response_length=args.max_response_length,
