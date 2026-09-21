@@ -36,6 +36,7 @@ dependencies = [
   "omegaconf", # CLI config
   "orbax-checkpoint>=0.12.0",
   "pillow",  # Image processing
+  "pydantic",  # tunix.experimental.trajectory models, now imported by the agentic TrajectoryCollectEngine
   "pylatexenc",  # Eval result parsing
   "python-dotenv",  # Huggingface API key
   "perfetto",  # Perfetto trace writer for metrics export
