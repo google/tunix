@@ -195,7 +195,7 @@ export STEP_TIMEOUT_SECS="${STEP_TIMEOUT_SECS:-300}"
 export REWARD_TIMEOUT_SECS="${REWARD_TIMEOUT_SECS:-180}"
 export EPISODE_TIMEOUT_SECS="${EPISODE_TIMEOUT_SECS:-1800}"
 export FLUSH_EVERY_N_STEPS="${FLUSH_EVERY_N_STEPS:-1}"
-export DEBUG="${DEBUG:-1}"
+export DEBUG="${DEBUG:-0}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -f "${SCRIPT_DIR}/tunix/tunix/experimental/examples/deepswe_dist/k8s_launcher.sh" ]]; then
