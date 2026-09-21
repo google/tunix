@@ -107,7 +107,7 @@ def get_image_rewrite_fn(
     return image_rewrite
   prefix = os.getenv("IMAGE_REWRITE_PREFIX")
   if prefix:
-    prefix = prefix.rstrip("/")
+    prefix = prefix.strip('"\'').rstrip("/")
     return lambda img: f"{prefix}/{img.split('/')[-1]}"
   return None
 
@@ -249,6 +249,11 @@ def init_global_fleet(
         max_concurrency, batch_size * num_generations * 2
     )
 
+    orchestrator_id = os.getenv("ORCHESTRATOR_ID") or os.getenv("USER")
+    fleet_labels: dict[str, str] = {"app": "agent-sandbox-rl"}
+    if orchestrator_id:
+      fleet_labels["app.kubernetes.io/created-by"] = orchestrator_id
+
     fleet_kwargs: dict[str, Any] = {
         "clusters": [
             ClusterConfig(
@@ -266,6 +271,8 @@ def init_global_fleet(
             else num_generations
         ),
         "warm_per_task": True,
+        "install_teardown_hooks": True,
+        "labels": fleet_labels,
     }
 
     try:
@@ -344,17 +351,40 @@ def get_global_fleet() -> Any:
 
 
 def teardown_global_fleet() -> None:
-  """Atexit handler to cleanly tear down warm pools on process exit."""
+  """Atexit handler to cleanly tear down warm pools and sandboxes on process exit."""
   global _GLOBAL_FLEET
   if _GLOBAL_FLEET is not None:
     logging.info(
         "[SandboxFleet] Automatically tearing down warm pools on exit..."
     )
+    fleet = _GLOBAL_FLEET
+    _GLOBAL_FLEET = None
     try:
-      _GLOBAL_FLEET.teardown()
+      if hasattr(fleet, "teardown"):
+        fleet.teardown()
     except Exception as e:  # pylint: disable=broad-exception-caught
       logging.warning("[SandboxFleet] Teardown note: %s", e)
-    _GLOBAL_FLEET = None
+    try:
+      from agent_sandbox_rl import reap  # pyrefly: ignore[missing-import]
+
+      run_id = getattr(fleet, "run_id", None)
+      if run_id:
+        for c in getattr(fleet, "registry", []):
+          c_ns = getattr(c, "namespace", None) or os.getenv(
+              "NAMESPACE", "rl-tunix-swebench"
+          )
+          logging.info(
+              "[SandboxFleet] Reaping resources for run_id=%s in namespace=%s",
+              run_id,
+              c_ns,
+          )
+          reap(
+              run_id=run_id,
+              in_cluster=getattr(c, "in_cluster", True),
+              namespace=c_ns,
+          )
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      logging.warning("[SandboxFleet] Reaper note: %s", e)
 
 
 class PrewarmDatasetIterator:
@@ -382,6 +412,7 @@ class PrewarmDatasetIterator:
       unwarm_on_exhaustion: bool = False,
       scaffold: str = "r2egym",
       image_rewrite: Any | None = None,
+      wait_initial: bool = True,
   ):
     del lookahead_steps
     self.scaffold = scaffold
@@ -391,6 +422,7 @@ class PrewarmDatasetIterator:
     self.batch_size = max(1, batch_size)
     self.max_warmpool_replicas = max_warmpool_replicas
     self.unwarm_on_exhaustion = unwarm_on_exhaustion
+    self.wait_initial = wait_initial
     self.image_rewrite = get_image_rewrite_fn(
         image_rewrite or getattr(self.fleet, "_image_rewrite_fn", None)
     )
@@ -421,9 +453,10 @@ class PrewarmDatasetIterator:
     # 4. After the dict updated, we interact the fleet
     if self._image_counts:
       logging.info(
-          "[PrewarmDatasetIterator] Priming initial sandboxes on K8s..."
+          "[PrewarmDatasetIterator] Priming initial sandboxes on K8s (wait=%s)...",
+          self.wait_initial,
       )
-      self._interact_fleet(wait=False)
+      self._interact_fleet(wait=self.wait_initial)
 
   def _extract_item_image_counts(self, item: Any) -> dict[str, int]:
     """Extracts a dict mapping docker_image -> count for a dataset item."""
