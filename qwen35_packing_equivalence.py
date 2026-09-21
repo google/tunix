@@ -10,26 +10,29 @@ same weights. With packing correct the two must agree to numerical tolerance.
 One engine and one set of weights are used for both arms, so weight identity is
 structural rather than something the caller has to arrange.
 
-Gradients are compared through per-parameter sketches rather than by holding two
-full pytrees, which would not fit at 35B:
+Gradients are compared exactly, per parameter, by relative L2 distance and
+cosine similarity. Both trees are sharded over the same mesh as the weights, so
+holding them together costs one extra parameter-sized buffer.
 
-  norm        catches any change in magnitude
-  sum         catches a change in mean
-  alt_sum     sum(g[even]) - sum(g[odd]), catches a change in direction that
-              leaves norm and sum intact
+Neither arm reproduces the other bitwise, because they accumulate over a
+different number of microbatches, so the verdict needs a tolerance.
+`--null_control` measures what that tolerance should be: it replaces the packed
+arm with a second unpacked arm at a different microbatch size, so no packing is
+involved and everything it reports is float32 reassociation.
 
 Usage:
   python3 qwen35_packing_equivalence.py \
       --maxtext_model_name qwen3-0.6b --mesh_fsdp 8 --mesh_tp 1 \
       --maxtext_ckpt_path gs://... \
       --max_seq_token_per_tpu 4096 --trainer_fsdp 8 --trainer_dp 1 \
-      --num_generations 16 --mini_batch_size 256 --train_micro_batch_size 8 \
+      --num_generations 16 --rollouts_per_update 256 --train_micro_batch_size 8 \
       --length_csv /tmp/packed.csv
 """
 
 import argparse
 import json
 import logging
+import math
 import sys
 
 import numpy as np
@@ -91,10 +94,28 @@ def parse_args(argv):
   p.add_argument("--seed", type=int, default=0)
   p.add_argument("--out", default="/tmp/packing_equivalence.json")
   p.add_argument("--rtol", type=float, default=2e-2,
-                 help="Relative tolerance for the verdict. bf16 accumulation "
-                      "over a different microbatch partition does not reproduce "
-                      "bitwise, so this is loose by design.")
-  return p.parse_args(argv)
+                 help="Relative tolerance for the verdict. Neither arm "
+                      "reproduces the other bitwise, because they accumulate "
+                      "over a different microbatch partition, so some slack is "
+                      "required. Set it from --null_control rather than by "
+                      "guessing.")
+  p.add_argument("--null_control", type=int, default=0,
+                 help="Measure the floor instead of testing packing. Replaces "
+                      "the packed arm with a second unpacked arm at this "
+                      "microbatch size, so the two arms differ only in how the "
+                      "same rows are partitioned and no packing is involved. "
+                      "Whatever it reports is the smallest difference this "
+                      "harness can resolve, and --rtol should sit above it. "
+                      "Must be a multiple of --trainer_fsdp x --trainer_dp.")
+  args = p.parse_args(argv)
+  shards = args.trainer_fsdp * args.trainer_dp
+  if args.null_control and args.null_control % shards:
+    # A microbatch with fewer rows than shards leaves shards with no rows. At
+    # --null_control 2 against trainer_fsdp 4 that produced a nan gradient on
+    # token_embedder/embedding while every other parameter stayed finite.
+    p.error(f"--null_control {args.null_control} is not a multiple of "
+            f"trainer_fsdp x trainer_dp = {shards}")
+  return args
 
 
 def completion_lengths(args, n, rng):
@@ -159,7 +180,7 @@ def build_trajectories(args):
   return payloads
 
 
-def assemble(payloads, *, packed, args):
+def assemble(payloads, *, packed, args, micro_batch=None):
   """Runs one trajectory set through one assembler and returns its microbatches."""
   from tunix.experimental.orchestrator import batch_assembly
 
@@ -174,7 +195,7 @@ def assemble(payloads, *, packed, args):
   asm = batch_assembly.create_batch_assembler(
       group_size=args.num_generations,
       mini_batch_size=max(1, args.rollouts_per_update // args.num_generations),
-      train_micro_batch_size=args.train_micro_batch_size,
+      train_micro_batch_size=micro_batch or args.train_micro_batch_size,
       batch_config=cfg,
   )
   log.info("%s arm: %s", "packed" if packed else "unpacked", type(asm).__name__)
@@ -298,7 +319,7 @@ def measure_old_logps(engine, batches, payloads, args, rng):
   return out
 
 
-def compare_logps(packed, unpacked):
+def compare_logps(packed, unpacked, label="packed"):
   """Compares per-token logps between the two layouts, trajectory by trajectory."""
   shared = sorted(set(packed) & set(unpacked))
   diffs, worst = [], (0.0, None)
@@ -312,7 +333,7 @@ def compare_logps(packed, unpacked):
       worst = (float(d.max()), tid)
   flat = np.concatenate(diffs)
   ref = np.concatenate([unpacked[t] for t in shared])
-  print("\nper-token logps, packed vs unpacked, same trajectories")
+  print(f"\nper-token logps, {label} vs unpacked, same trajectories")
   print(f"  {len(shared)} trajectories, {flat.size} tokens")
   print(f"  logp scale        mean {ref.mean():.4f}, min {ref.min():.4f}")
   print(f"  absolute diff     mean {flat.mean():.4e}, p99 "
@@ -374,12 +395,12 @@ def run_arm(engine, batches, label):
   }
 
 
-def compare(a, b, rtol):
+def compare(a, b, rtol, label="packed"):
   """Compares two arms and prints the largest relative disagreements."""
   print("\n" + "=" * 74)
-  print("packed vs unpacked, identical trajectories and identical weights")
+  print(f"{label} vs unpacked, identical trajectories and identical weights")
   print("=" * 74)
-  print(f"  {'':<18}{'packed':>14} {'unpacked':>16}")
+  print(f"  {'':<18}{label:>14} {'unpacked':>16}")
   print(f"  microbatches      {a['microbatches']:>14d} {b['microbatches']:>16d}")
   print(f"  grad denominator  {a['grad_denominator']:>14.6g} {b['grad_denominator']:>16.6g}")
   print(f"  loss denominator  {a['loss_denominator']:>14.6g} {b['loss_denominator']:>16.6g}")
@@ -409,12 +430,16 @@ def compare(a, b, rtol):
     rows.append((d / max(nx, ny, 1e-30), cos, k, nx, ny, x.size))
     num += d ** 2
     den += max(nx, ny) ** 2
+  # A nan sorts unpredictably, because every comparison against it is False, so
+  # it can land anywhere and rows[0] would miss it. Partition first.
+  nonfinite = [r for r in rows if not all(map(math.isfinite, (r[0], r[3], r[4])))]
+  rows = [r for r in rows if r not in nonfinite]
   rows.sort(reverse=True)
   whole = (num ** 0.5) / (den ** 0.5) if den else 0.0
 
   print(f"\n  {len(shared)} parameter paths, exact relative L2 distance")
-  print(f"    whole tree      ||packed - unpacked|| / ||unpacked|| = {whole:.3e}")
-  print(f"    {'rel L2':>10} {'cosine':>12}  {'||packed||':>12} {'||unpacked||':>13}  path")
+  print(f"    whole tree      ||{label} - unpacked|| / ||unpacked|| = {whole:.3e}")
+  print(f"    {'rel L2':>10} {'cosine':>12}  {'||'+label+'||':>12} {'||unpacked||':>13}  path")
   for rel, cos, k, nx, ny, _ in rows[:10]:
     print(f"    {rel:>10.3e} {cos:>12.9f}  {nx:>12.6g} {ny:>13.6g}  {k[:40]}")
 
@@ -429,6 +454,13 @@ def compare(a, b, rtol):
   worst_cos = min((r[1] for r in live), default=float("nan"))
   print(f"\n  worst per-parameter relative L2: {max_rel:.3e}  (tolerance {rtol:.0e})")
   print(f"  worst per-parameter cosine:      {worst_cos:.9f}")
+  if nonfinite:
+    print(f"\n  VERDICT: INVALID -- {len(nonfinite)} parameter paths have a "
+          "non-finite gradient:")
+    for _, _, k, nx, ny, _ in nonfinite:
+      print(f"           {k}  ||{label}||={nx}  ||unpacked||={ny}")
+    return {"pass": False, "invalid": "non-finite gradient",
+            "nonfinite_paths": [r[2] for r in nonfinite]}
   if not live:
     print("  VERDICT: INVALID -- every gradient is zero, so the arms agree")
     print("           trivially. Every token is outside the GRPO clip band;")
@@ -436,9 +468,16 @@ def compare(a, b, rtol):
     return {"pass": False, "invalid": "all gradients zero"}
   ok = max_rel <= rtol and rel_l <= rtol
   if ok:
-    print("  VERDICT: PASS -- packed and unpacked assembly agree")
+    print(f"  VERDICT: PASS -- {label} and unpacked assembly agree")
   else:
     print(f"  VERDICT: FAIL -- disagreement exceeds {rtol:.0e}")
+  # --rtol is a constant; the floor it is being compared against is not. In
+  # bfloat16 at a trained checkpoint the null control reported 2.054e-01
+  # whole-tree, an order of magnitude above the default 2e-2, so a FAIL there
+  # says only that bfloat16 cannot resolve the question. Divide by the null.
+  print("           This verdict is against a fixed tolerance. Re-run with "
+        "--null_control\n           and read observed / null; only a ratio "
+        "above 1 implicates packing.")
   return {
       "pass": ok,
       "loss_rel_diff": rel_l,
@@ -462,15 +501,24 @@ def main(argv):
 
   log.info("jax devices: %d x %s", jax.device_count(), jax.devices()[0].platform)
 
+  # build_maxtext_config takes no dtype or profiler argument and the
+  # HyperParameters it returns are read-only, so the overrides go in on the way
+  # through.
+  #
+  # profiler_steps=0 is the only way to silence MicroStepProfiler:
+  # micro_step_profiler.py:30 gates on process index and profiler_steps alone
+  # and never reads config.profiler, so it traces every fwd_bwd even at
+  # profiler: ProfilerType.NONE. Left on, it writes over a gigabyte of xplane
+  # traces per run and eventually fails the run with RESOURCE_EXHAUSTED.
+  overrides = ["profiler_steps=0"]
   if args.float32:
-    # build_maxtext_config takes no dtype argument and the HyperParameters it
-    # returns are read-only, so the overrides go in on the way through.
-    pyconfig = maxtext_utils.maxtext_modules()[0]
-    base_initialize = pyconfig.initialize
-    pyconfig.initialize = lambda argv, *a, **kw: base_initialize(
-        list(argv) + ["dtype=float32", "weight_dtype=float32",
-                      "matmul_precision=highest"], *a, **kw)
-    log.info("float32 mode: dtype, weight_dtype and matmul_precision overridden")
+    overrides += ["dtype=float32", "weight_dtype=float32",
+                  "matmul_precision=highest"]
+  pyconfig = maxtext_utils.maxtext_modules()[0]
+  base_initialize = pyconfig.initialize
+  pyconfig.initialize = lambda argv, *a, **kw: base_initialize(
+      list(argv) + overrides, *a, **kw)
+  log.info("config overrides: %s", " ".join(overrides))
 
   payloads = build_trajectories(args)
 
@@ -522,7 +570,16 @@ def main(argv):
     payloads = measure_old_logps(
         engine, assemble(payloads, packed=False, args=args), payloads, args,
         np.random.default_rng(args.seed + 1))
-    packed_batches = assemble(payloads, packed=True, args=args)
+    if args.null_control:
+      # Both arms unpacked, differing only in microbatch partition. Every
+      # difference this reports is float32 reassociation, since the rows
+      # themselves are identical.
+      label_a = f"unpacked/mb{args.null_control}"
+      packed_batches = assemble(payloads, packed=False, args=args,
+                                micro_batch=args.null_control)
+    else:
+      label_a = "packed"
+      packed_batches = assemble(payloads, packed=True, args=args)
     unpacked_batches = assemble(payloads, packed=False, args=args)
 
     # The forward pass on its own, before any loss aggregation. If the two
@@ -530,11 +587,11 @@ def main(argv):
     # packed attention mask or position ids rather than the loss reduction.
     logp_stats = compare_logps(
         policy_logps(engine, packed_batches, args),
-        policy_logps(engine, unpacked_batches, args))
+        policy_logps(engine, unpacked_batches, args), label_a)
 
-    packed = run_arm(engine, packed_batches, "packed")
+    packed = run_arm(engine, packed_batches, label_a)
     unpacked = run_arm(engine, unpacked_batches, "unpacked")
-    verdict = compare(packed, unpacked, args.rtol)
+    verdict = compare(packed, unpacked, args.rtol, label_a)
 
   with open(args.out, "w") as f:
     json.dump({
