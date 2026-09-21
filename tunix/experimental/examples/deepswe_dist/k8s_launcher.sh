@@ -125,6 +125,10 @@ export CKPT_D2H_CONCURRENT_GB=${CKPT_D2H_CONCURRENT_GB:-8}
 
 export TRAINER_MESH_TP=${TRAINER_MESH_TP:-1}
 export TRAINER_MESH_EXPERT=${TRAINER_MESH_EXPERT:-1}
+# Rollout jobset template. Defaults to the single-host TPU jobset, which is what
+# a 4-chip-per-replica rollout wants. A multihost rollout -- e.g. 397B at 16
+# chips / 4 hosts per replica -- needs the Ray-backed template instead.
+export ROLLOUT_JOBSET_YAML=${ROLLOUT_JOBSET_YAML:-jobset.tpu.yaml}
 export ROLLOUT_MESH_TP=${ROLLOUT_MESH_TP:-2}
 export ROLLOUT_MESH_FSDP=${ROLLOUT_MESH_FSDP:-1}
 # Optional: enable experimental batched-RPA attention kernel for rollout.
@@ -591,7 +595,7 @@ if cfg:
       worker_id="${ROLLOUT_ID}-${i}"
     fi
     "$PYTHON_BIN" "$YAML_GENERATOR" \
-      "${YAML_DIR}/jobset.tpu.yaml" \
+      "${YAML_DIR}/${ROLLOUT_JOBSET_YAML}" \
       --jobset_name="${replica_id}" \
       --namespace="${K8S_NAMESPACE}" \
       ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \

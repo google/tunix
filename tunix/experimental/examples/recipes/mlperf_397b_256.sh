@@ -97,7 +97,7 @@ export TRAINER_BASE_NUM_KV_HEADS=16
 # Rollout: 16 chips = 4 hosts per replica. tp * expert must equal the slice.
 # tp=2 x expert=8 is NOT an alternative -- it produces incoherent rollouts for
 # reasons still unexplained. Use tp=1 x expert=16.
-export ROLLOUT_JOBSET_YAML="jobset.tpu.yaml"
+export ROLLOUT_JOBSET_YAML="jobset.mcjax.ray.yaml"   # 16 chips = 4 hosts -> Ray multihost
 export ROLLOUT_TPU_SLICE="tpuv5p:2x2x4"
 export ROLLOUT_MESH_FSDP=1
 export ROLLOUT_MESH_TP=1
