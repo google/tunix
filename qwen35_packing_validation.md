@@ -434,8 +434,14 @@ checkpoint in bfloat16 — each against its own null. Six runs.
 
 **Every ratio is at or below 1.** A comparison with no packing in it, whose two
 arms produce bitwise identical log-probabilities, reproduces the packed-unpacked
-difference and in bfloat16 exceeds it. No residual is left for packing to
-account for.
+difference and in bfloat16 exceeds it. Float32 accumulation order therefore
+accounts for the whole of the observed difference on its own, and packing does
+not need to be invoked to explain any part of it.
+
+This bounds packing's effect below the measurement floor rather than showing it
+is zero: a perturbation an order of magnitude under the null would be
+indistinguishable from none here. What it excludes is an effect at or above the
+level that accumulation order alone already produces.
 
 Per parameter at the checkpoint in float32, ten of the thirteen paths disagree
 *less* under packing than under the null, and the three above 1 are within a
