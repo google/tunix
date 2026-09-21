@@ -43,6 +43,7 @@ class FakeTrainer(abstract_trainer.AbstractTrainer):
     self.policy_version = 3
     self.step_count = 10
     self.target_state = None
+    self.gen_model_input_fn = None
 
   def compile(self, dummy_data=None):
     pass
@@ -51,7 +52,7 @@ class FakeTrainer(abstract_trainer.AbstractTrainer):
     pass
 
   def with_gen_model_input_fn(self, gen_model_input_fn):
-    pass
+    self.gen_model_input_fn = gen_model_input_fn
 
   def fwd_bwd(self, payload, **kwargs):
     self.fwd_bwd_calls.append((payload, kwargs))
@@ -272,6 +273,33 @@ class TrainerWorkerTest(absltest.TestCase):
         self._expected_logps(request),
         rtol=1e-4,
         atol=1e-4,
+    )
+
+  def test_with_gen_model_input_fn_injects_logps_chunk_size(self):
+    worker = trainer_worker.TrainerWorker(
+        trainer_factory=lambda: self.fake_trainer,
+        worker_id="trainer_chunked",
+        logps_chunk_size=256,
+    )
+    worker.initialize()
+    worker.with_gen_model_input_fn(lambda payload: {"train_example": payload})
+
+    configured_fn = self.fake_trainer.gen_model_input_fn
+    self.assertIsNotNone(configured_fn)
+    mapped = configured_fn("dummy_payload")
+    self.assertEqual(mapped["train_example"], "dummy_payload")
+    self.assertEqual(mapped["compute_logps_chunk_size"], 256)
+
+    # Explicit caller value should not be overwritten by setdefault.
+    worker.with_gen_model_input_fn(
+        lambda payload: {
+            "train_example": payload,
+            "compute_logps_chunk_size": 64,
+        }
+    )
+    self.assertEqual(
+        self.fake_trainer.gen_model_input_fn("p")["compute_logps_chunk_size"],
+        64,
     )
 
   def test_per_token_logps_packed_request(self):
