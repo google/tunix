@@ -85,9 +85,9 @@ export TRAINER_MESH_FSDP="${TRAINER_MESH_FSDP:-1}"
 export TRAINER_MESH_TP="${TRAINER_MESH_TP:-2}"
 export TRAINER_MESH_EXPERT="${TRAINER_MESH_EXPERT:-32}"
 
-# Rollout: 16x 4-chip slices (tpuv5:2x2x2)
+# Rollout: 16x 4-chip slices (tpuv5:2x2x1)
 export ROLLOUT_JOBSET_YAML="jobset.tpu.yaml"
-export ROLLOUT_TPU_SLICE="${ROLLOUT_TPU_SLICE:-tpuv5:2x2x2}"
+export ROLLOUT_TPU_SLICE="${ROLLOUT_TPU_SLICE:-tpuv5:2x2x1}"
 export ROLLOUT_MESH_FSDP="${ROLLOUT_MESH_FSDP:-1}"
 export ROLLOUT_MESH_TP="${ROLLOUT_MESH_TP:-1}"
 export ROLLOUT_WORKERS="${ROLLOUT_WORKERS:-16}"
