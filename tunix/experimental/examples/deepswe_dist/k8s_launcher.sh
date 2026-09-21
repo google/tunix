@@ -226,9 +226,22 @@ stop_orchestrator() {
   if [[ "$DRY_RUN" == "true" ]]; then
     echo "kubectl delete jobset ${ORCHESTRATOR_ID} -n ${K8S_NAMESPACE}"
     echo "kubectl delete workload -l jobset.sigs.k8s.io/jobset-name=${ORCHESTRATOR_ID} -n ${K8S_NAMESPACE}"
+    if [[ "${USE_AGENT_SANDBOX}" == "1" || "${USE_AGENT_SANDBOX}" == "true" || "${USE_AGENT_SANDBOX}" == "True" ]]; then
+      echo "kubectl delete sandboxwarmpools -n ${SANDBOX_NAMESPACE} -l app.kubernetes.io/created-by=${ORCHESTRATOR_ID} --ignore-not-found=true"
+      echo "kubectl delete sandboxtemplates -n ${SANDBOX_NAMESPACE} -l app.kubernetes.io/created-by=${ORCHESTRATOR_ID} --ignore-not-found=true"
+      echo "kubectl delete sandboxclaims -n ${SANDBOX_NAMESPACE} -l app.kubernetes.io/created-by=${ORCHESTRATOR_ID} --ignore-not-found=true"
+      echo "kubectl delete pods -n ${SANDBOX_NAMESPACE} -l app.kubernetes.io/created-by=${ORCHESTRATOR_ID} --force --grace-period=0 --ignore-not-found=true"
+    fi
   else
     kubectl delete jobset "${ORCHESTRATOR_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found=true
     kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name=${ORCHESTRATOR_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
+    if [[ "${USE_AGENT_SANDBOX}" == "1" || "${USE_AGENT_SANDBOX}" == "true" || "${USE_AGENT_SANDBOX}" == "True" ]]; then
+      echo "Cleaning up sandboxes and warmpools for ${ORCHESTRATOR_ID} in ${SANDBOX_NAMESPACE}..."
+      kubectl delete sandboxwarmpools -n "${SANDBOX_NAMESPACE}" -l "app.kubernetes.io/created-by=${ORCHESTRATOR_ID}" --ignore-not-found=true 2>/dev/null || true
+      kubectl delete sandboxtemplates -n "${SANDBOX_NAMESPACE}" -l "app.kubernetes.io/created-by=${ORCHESTRATOR_ID}" --ignore-not-found=true 2>/dev/null || true
+      kubectl delete sandboxclaims -n "${SANDBOX_NAMESPACE}" -l "app.kubernetes.io/created-by=${ORCHESTRATOR_ID}" --ignore-not-found=true 2>/dev/null || true
+      kubectl delete pods -n "${SANDBOX_NAMESPACE}" -l "app.kubernetes.io/created-by=${ORCHESTRATOR_ID}" --force --grace-period=0 --ignore-not-found=true 2>/dev/null || true
+    fi
   fi
 }
 
@@ -271,6 +284,7 @@ start_orchestrator() {
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ORCHESTRATOR_PORT}" \
     --worker_startup_command=" \
+      ORCHESTRATOR_ID=\"${ORCHESTRATOR_ID}\" \
       ${sandbox_env} \
       ${SCAFFOLD:+SCAFFOLD=\"${SCAFFOLD}\"} \
       ${WANDB_API_KEY:+WANDB_API_KEY=\"${WANDB_API_KEY}\"} \

@@ -20,6 +20,7 @@ import argparse
 import functools
 import logging
 import os
+import signal
 import sys
 from typing import Any
 
@@ -391,6 +392,23 @@ def _configure_trainer_loss(
   )
 
 
+def _register_signal_handlers() -> None:
+  """Registers SIGTERM and SIGINT handlers so Python unwinds cleanly via SystemExit."""
+
+  def _handle_exit_signal(signum, frame):
+    del frame
+    logging.info(
+        "Received signal %d in orchestrator; shutting down cleanly...", signum
+    )
+    sys.exit(128 + signum)
+
+  for sig in (signal.SIGTERM, signal.SIGINT):
+    try:
+      signal.signal(sig, _handle_exit_signal)
+    except (ValueError, OSError):
+      pass
+
+
 def main(argv: list[str], context: ProcessContext | None = None) -> None:
   assert (
       context and context.ipc and context.ipc.discovery
@@ -402,6 +420,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       format="%(asctime)s - [DeepSWEOrchestrator] %(message)s",
       force=True,
   )
+  _register_signal_handlers()
 
   if args.mini_batch_size is None:
     args.mini_batch_size = args.batch_size
@@ -517,88 +536,90 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   )
 
   fleet = None
-  if args.use_agent_sandbox:
-    # Do not statically register warmpools for all benchmark tasks upfront.
-    # Dynamic sliding-window prewarming with initial barrier is handled by
-    # PrewarmDatasetIterator below.
-    fleet = swe_env._init_global_fleet(  # pylint: disable=protected-access
-        tasks=None,
-        max_concurrency=args.max_concurrency,
-        num_generations=args.num_generations,
-        batch_size=args.batch_size,
-        max_warmpool_replicas=args.max_warmpool_replicas,
-        scaffold=args.scaffold,
-    )
-
-  prompt_stream = deepswe.iter_prompt_items(
-      dataset=dataset,
-      max_steps=args.max_steps,
-      batch_size=args.batch_size,
-      max_turns=args.max_turns,
-      max_response_length=args.max_response_length,
-      temperature=args.temperature,
-      top_p=args.top_p,
-      top_k=None if args.top_k < 0 else args.top_k,
-      step_timeout_secs=args.step_timeout_secs,
-      reward_timeout_secs=args.reward_timeout_secs,
-      env_backend=args.env_backend,
-      use_agent_sandbox=args.use_agent_sandbox,
-      scaffold=args.scaffold,
-      env_verbose=args.env_verbose,
-      episode_timeout_secs=args.episode_timeout_secs,
-      overlong_filter=args.overlong_filter,
-  )
-  if args.use_agent_sandbox:
-    prompt_stream = swe_env.PrewarmDatasetIterator(
-        prompt_stream,
-        fleet=fleet,
-        num_generations=args.num_generations,
-        batch_size=args.batch_size,
-        max_warmpool_replicas=args.max_warmpool_replicas,
-        unwarm_on_exhaustion=True,
-        scaffold=args.scaffold,
-        wait_initial=True,
-    )
-
-  program = rl_program.StandardRLProgram(
-      algo=algo,
-      dataset=prompt_stream,
-      max_steps=args.max_steps,
-      generation_args=datatypes.GenerationArgs(
-          max_generation_steps=args.max_response_length,
-          temperature=args.temperature,
-          top_p=args.top_p,
-          top_k=None if args.top_k < 0 else args.top_k,
-          return_logprobs=True,
-      ),
-      reward_fns=[],
-      batch_size=args.batch_size,
-      batch_config=batch_assembly.BatchConfig(
-          pad_id=pad_id,
-          max_prompt_length=args.max_prompt_length,
-          max_response_length=args.max_response_length,
-          max_seq_token_per_tpu=args.max_seq_token_per_tpu,
-          max_segments_per_packed_row=args.max_segments_per_packed_row,
-          trainer_fsdp=args.trainer_fsdp,
-          trainer_dp=args.trainer_dp,
-      ),
-      metrics_logging_options=metrics_logging_options,
-      trajectory_log_dir=args.trajectory_log_dir,
-      max_staleness=args.max_staleness,
-      sync_weights=(args.weight_sync_mode != weight_sync.WeightSyncMode.NONE),
-      on_step_begin=lambda step: logging.info(
-          ">>> DeepSWE step %d starting | policy_version=%d",
-          step,
-          step,
-      ),
-      on_step_end=lambda step, result: logging.info(
-          "<<< DeepSWE step %d finished | train_result=%s",
-          step,
-          result,
-      ),
-  )
-
+  prompt_stream = None
+  program = None
   try:
+    if args.use_agent_sandbox:
+      # Do not statically register warmpools for all benchmark tasks upfront.
+      # Dynamic sliding-window prewarming with initial barrier is handled by
+      # PrewarmDatasetIterator below.
+      fleet = swe_env._init_global_fleet(  # pylint: disable=protected-access
+          tasks=None,
+          max_concurrency=args.max_concurrency,
+          num_generations=args.num_generations,
+          batch_size=args.batch_size,
+          max_warmpool_replicas=args.max_warmpool_replicas,
+          scaffold=args.scaffold,
+      )
+
+    prompt_stream = deepswe.iter_prompt_items(
+        dataset=dataset,
+        max_steps=args.max_steps,
+        batch_size=args.batch_size,
+        max_turns=args.max_turns,
+        max_response_length=args.max_response_length,
+        temperature=args.temperature,
+        top_p=args.top_p,
+        top_k=None if args.top_k < 0 else args.top_k,
+        step_timeout_secs=args.step_timeout_secs,
+        reward_timeout_secs=args.reward_timeout_secs,
+        env_backend=args.env_backend,
+        use_agent_sandbox=args.use_agent_sandbox,
+        scaffold=args.scaffold,
+        env_verbose=args.env_verbose,
+        episode_timeout_secs=args.episode_timeout_secs,
+        overlong_filter=args.overlong_filter,
+    )
+    if args.use_agent_sandbox:
+      prompt_stream = swe_env.PrewarmDatasetIterator(
+          prompt_stream,
+          fleet=fleet,
+          num_generations=args.num_generations,
+          batch_size=args.batch_size,
+          max_warmpool_replicas=args.max_warmpool_replicas,
+          unwarm_on_exhaustion=True,
+          scaffold=args.scaffold,
+          wait_initial=True,
+      )
+
+    program = rl_program.StandardRLProgram(
+        algo=algo,
+        dataset=prompt_stream,
+        max_steps=args.max_steps,
+        generation_args=datatypes.GenerationArgs(
+            max_generation_steps=args.max_response_length,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            top_k=None if args.top_k < 0 else args.top_k,
+            return_logprobs=True,
+        ),
+        reward_fns=[],
+        batch_size=args.batch_size,
+        batch_config=batch_assembly.BatchConfig(
+            pad_id=pad_id,
+            max_prompt_length=args.max_prompt_length,
+            max_response_length=args.max_response_length,
+            max_seq_token_per_tpu=args.max_seq_token_per_tpu,
+            max_segments_per_packed_row=args.max_segments_per_packed_row,
+            trainer_fsdp=args.trainer_fsdp,
+            trainer_dp=args.trainer_dp,
+        ),
+        metrics_logging_options=metrics_logging_options,
+        trajectory_log_dir=args.trajectory_log_dir,
+        max_staleness=args.max_staleness,
+        sync_weights=(args.weight_sync_mode != weight_sync.WeightSyncMode.NONE),
+        on_step_begin=lambda step: logging.info(
+            ">>> DeepSWE step %d starting | policy_version=%d",
+            step,
+            step,
+        ),
+        on_step_end=lambda step, result: logging.info(
+            "<<< DeepSWE step %d finished | train_result=%s",
+            step,
+            result,
+        ),
+    )
+
     logging.info("Bringing up remote workers through ClusterOrchestrator...")
     cluster.bring_up_workers(dummy_data=None)
     logging.info("Starting DeepSWE StandardRLProgram execution...")
@@ -611,13 +632,47 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
     logging.exception("FATAL ERROR in orchestrator execution: %s", e)
     raise
   finally:
-    program.close()
+    if program is not None and hasattr(program, "close"):
+      program.close()
+    if prompt_stream is not None and hasattr(prompt_stream, "close"):
+      logging.info("Closing prompt_stream (unwarming active warmpools)...")
+      try:
+        prompt_stream.close()
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        logging.warning("Prompt stream close note: %s", e)
     if fleet is not None:
       logging.info("Tearing down SandboxFleet on orchestrator...")
       try:
         fleet.teardown()
       except Exception as e:  # pylint: disable=broad-exception-caught
         logging.warning("Fleet teardown note: %s", e)
+      try:
+        from agent_sandbox_rl import reap  # pylint: disable=g-import-not-at-top
+
+        run_id = getattr(fleet, "run_id", None)
+        if run_id:
+          for c in getattr(fleet, "registry", []):
+            c_ns = getattr(c, "namespace", None) or os.getenv(
+                "NAMESPACE", "rl-tunix-swebench"
+            )
+            logging.info(
+                "Reaping agent_sandbox_rl resources for run_id=%s in namespace=%s...",
+                run_id,
+                c_ns,
+            )
+            reap(
+                run_id=run_id,
+                in_cluster=getattr(c, "in_cluster", True),
+                namespace=c_ns,
+            )
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        logging.warning("Reaper note: %s", e)
+    try:
+      from examples.deepswe import sandbox_utils  # pylint: disable=g-import-not-at-top
+
+      sandbox_utils.teardown_global_fleet()
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      logging.warning("Global fleet teardown note: %s", e)
     if args.stop_workers_on_exit:
       logging.info("Shutting down cluster workers...")
       cluster.shutdown()

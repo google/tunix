@@ -44,6 +44,9 @@ class FakeFleet:
     self.unwarm_calls.append(image)
     self.active_pools.pop(image, None)
 
+  def teardown(self) -> None:
+    self.active_pools.clear()
+
 
 class SandboxUtilsTest(absltest.TestCase):
 
@@ -327,6 +330,47 @@ class SandboxUtilsTest(absltest.TestCase):
             ["test-image:v1"],
             replicas_override=4,
             wait=False,
+        )
+
+  def test_init_global_fleet_configures_labels_and_teardown_hooks(self):
+    mock_fleet = mock.MagicMock()
+    mock_as_rl = mock.MagicMock()
+    mock_as_rl.SandboxFleet.return_value = mock_fleet
+    with mock.patch.dict("sys.modules", {"agent_sandbox_rl": mock_as_rl}):
+      with mock.patch.dict(os.environ, {"ORCHESTRATOR_ID": "test-user-orch"}):
+        with mock.patch.object(sandbox_utils, "_GLOBAL_FLEET", None):
+          _ = sandbox_utils.init_global_fleet(
+              tasks=None,
+              num_generations=4,
+          )
+          fleet_cfg_call = mock_as_rl.FleetConfig.call_args[1]
+          self.assertTrue(fleet_cfg_call.get("install_teardown_hooks"))
+          self.assertEqual(
+              fleet_cfg_call.get("labels"),
+              {
+                  "app": "agent-sandbox-rl",
+                  "app.kubernetes.io/created-by": "test-user-orch",
+              },
+          )
+
+  def test_teardown_global_fleet_invokes_teardown_and_reaper(self):
+    mock_fleet = mock.MagicMock()
+    mock_fleet.run_id = "test-run-1234"
+    mock_cluster = mock.MagicMock()
+    mock_cluster.namespace = "test-ns"
+    mock_cluster.in_cluster = True
+    mock_fleet.registry = [mock_cluster]
+
+    mock_as_rl = mock.MagicMock()
+    with mock.patch.dict("sys.modules", {"agent_sandbox_rl": mock_as_rl}):
+      with mock.patch.object(sandbox_utils, "_GLOBAL_FLEET", mock_fleet):
+        sandbox_utils.teardown_global_fleet()
+        self.assertIsNone(sandbox_utils._GLOBAL_FLEET)
+        mock_fleet.teardown.assert_called_once()
+        mock_as_rl.reap.assert_called_once_with(
+            run_id="test-run-1234",
+            in_cluster=True,
+            namespace="test-ns",
         )
 
 
