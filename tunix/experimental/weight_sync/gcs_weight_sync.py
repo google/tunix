@@ -413,8 +413,10 @@ class GCSWeightSync(
             f"{missing[:10]}"
         )
 
+      old_arrays = list(self.arrays)
       self.arrays = [restored[k] for k in key_order]
       jax.block_until_ready(self.arrays)
+      self._stale_arrays = old_arrays
       elapsed = time.monotonic() - t0
       self._artifact_uri = resolved_path
       self._gcs_metrics = {
@@ -429,6 +431,21 @@ class GCSWeightSync(
           resolved_path,
           elapsed,
       )
+
+  def apply_to_runner(self, runner: Any) -> None:
+    """Applies restored GCS arrays to runner and frees replaced HBM buffers."""
+    old_leaves = list(getattr(runner, "state_leaves", ()) or ())
+    super().apply_to_runner(runner)
+    new_ids = {id(a) for a in self.arrays}
+    for old_arr in old_leaves + getattr(self, "_stale_arrays", []):
+      raw = getattr(old_arr, "value", old_arr)
+      if id(raw) not in new_ids and hasattr(raw, "delete"):
+        try:
+          if not getattr(raw, "is_deleted", lambda: False)():
+            raw.delete()
+        except Exception:  # pylint: disable=broad-exception-caught
+          pass
+    self._stale_arrays = []
 
   def work_unit_metadata(self) -> weight_sync.WorkUnitMetadata:
     with self._lock:
