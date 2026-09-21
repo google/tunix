@@ -193,6 +193,62 @@ class QueueManagerTest(absltest.TestCase):
 
     asyncio.run(_run_test())
 
+  def test_get_group_batch(self):
+    """Tests retrieving multiple groups via get_group_batch."""
+
+    async def _run_test():
+      manager = trajectory_queue_manager.TrajectoryQueueManager(
+          num_generations=2
+      )
+      g1_items = [
+          _create_item("g1", group_index=0),
+          _create_item("g1", group_index=1),
+      ]
+      g2_items = [
+          _create_item("g2", group_index=0),
+          _create_item("g2", group_index=1),
+      ]
+      g3_items = [
+          _create_item("g3", group_index=0),
+          _create_item("g3", group_index=1),
+      ]
+
+      for item in g1_items + g2_items + g3_items:
+        await manager.put(item)
+
+      self.assertEqual(manager.ready_groups_count, 3)
+
+      batch = await manager.get_group_batch(2)
+      self.assertEqual(batch, g1_items + g2_items)
+      self.assertEqual(manager.ready_groups_count, 1)
+
+      remaining = await manager.get_group_batch(1)
+      self.assertEqual(remaining, g3_items)
+      self.assertEqual(manager.ready_groups_count, 0)
+
+    asyncio.run(_run_test())
+
+  def test_get_group_batch_early_exit_on_close(self):
+    """Tests get_group_batch stops early when queue closes."""
+
+    async def _run_test():
+      manager = trajectory_queue_manager.TrajectoryQueueManager(
+          num_generations=2
+      )
+      g1_items = [
+          _create_item("g1", group_index=0),
+          _create_item("g1", group_index=1),
+      ]
+      for item in g1_items:
+        await manager.put(item)
+      await manager.close()
+
+      batch = await manager.get_group_batch(3)
+      self.assertEqual(batch, g1_items)
+      self.assertEqual(manager.ready_groups_count, 0)
+
+    asyncio.run(_run_test())
+
 
 if __name__ == "__main__":
   absltest.main()
