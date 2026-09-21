@@ -40,6 +40,7 @@ export KUEUE_QUEUE="${KUEUE_QUEUE:-multislice-queue}"
 export KUEUE_QUEUE_NAME="${KUEUE_QUEUE_NAME:-${KUEUE_QUEUE}}"
 export PRIORITY_CLASS="${PRIORITY_CLASS:-medium}"
 export SERVICE_ACCOUNT="${SERVICE_ACCOUNT:-xpk-sa}"
+export CPU_MACHINE="${CPU_MACHINE:-n2d-standard-64}"
 
 export TUNIX_IMAGE="${TUNIX_IMAGE:-europe-west4-docker.pkg.dev/cloud-tpu-shared-capacity/tpu-sync/tunix-k8s:35b-wsync-v4}"
 export PATHWAYS_SERVER_IMAGE="${PATHWAYS_SERVER_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_server:raiden_20260920_v2}"
