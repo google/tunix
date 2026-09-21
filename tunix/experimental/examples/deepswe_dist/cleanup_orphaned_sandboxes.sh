@@ -91,30 +91,26 @@ echo "Total SandboxClaims: ${TOTAL_CLAIMS}"
 # ------------------------------------------------------------------------------
 # 2. Strip Finalizers from Stuck 'Terminating' Sandbox Pods
 # ------------------------------------------------------------------------------
-echo "==> 2. Inspecting stuck 'Terminating' sandbox pods..."
+echo "==> 2. Inspecting sandbox pods stuck in deletion (with deletionTimestamp)..."
 
-TERMINATING_PODS=$(kubectl get pods -n "${NAMESPACE}" --no-headers 2>/dev/null | \
-  awk '$3 == "Terminating" && $1 ~ /^pool-r2e-|^sandbox-claim-/ {print $1}' || true)
+TERMINATING_PODS=$(kubectl get pods -n "${NAMESPACE}" -o jsonpath='{range .items[?(@.metadata.deletionTimestamp)]}{.metadata.name}{"\n"}{end}' 2>/dev/null | \
+  grep -E '^pool-r2e-|^sandbox-claim-' || true)
 
 NUM_TERMINATING=$(echo "${TERMINATING_PODS}" | grep -v '^$' | wc -l || true)
-echo "Found ${NUM_TERMINATING} stuck Terminating sandbox pods."
+echo "Found ${NUM_TERMINATING} sandbox pods stuck in deletion."
 
 if [[ "${NUM_TERMINATING}" -gt 0 ]]; then
   if [[ "${DRY_RUN}" == "true" ]]; then
-    echo "[DRY-RUN] Would strip finalizers and force delete ${NUM_TERMINATING} terminating pods."
+    echo "[DRY-RUN] Would strip finalizers from ${NUM_TERMINATING} pods stuck in deletion."
   else
-    echo "Stripping finalizers from ${NUM_TERMINATING} terminating pods in parallel..."
+    echo "Stripping finalizers from ${NUM_TERMINATING} pods in parallel to purge from etcd..."
     echo "${TERMINATING_PODS}" | xargs -r -n 1 -P "${PARALLELISM}" -I {} \
       kubectl patch pod {} -n "${NAMESPACE}" -p '{"metadata":{"finalizers":[]}}' --type=merge 2>/dev/null || true
-
-    echo "Force deleting terminating pods..."
-    echo "${TERMINATING_PODS}" | xargs -r -n 50 -P "${PARALLELISM}" \
-      kubectl delete pod -n "${NAMESPACE}" --grace-period=0 --force --wait=false 2>/dev/null || true
   fi
 fi
 
 # ------------------------------------------------------------------------------
-# 3. Force Delete Dead (Error, Failed, Unknown) Sandbox Pods
+# 3. Force Delete Remaining Dead (Error, Failed, Unknown) Sandbox Pods
 # ------------------------------------------------------------------------------
 echo "==> 3. Inspecting dead/inactive sandbox pods (Error, Failed, Unknown)..."
 
@@ -126,11 +122,15 @@ echo "Found ${NUM_DEAD} dead/inactive sandbox pods."
 
 if [[ "${NUM_DEAD}" -gt 0 ]]; then
   if [[ "${DRY_RUN}" == "true" ]]; then
-    echo "[DRY-RUN] Would force delete ${NUM_DEAD} dead sandbox pods."
+    echo "[DRY-RUN] Would force delete and strip finalizers for ${NUM_DEAD} dead sandbox pods."
   else
     echo "Force deleting ${NUM_DEAD} dead pods in non-blocking batches..."
     echo "${DEAD_PODS}" | xargs -r -n 50 -P "${PARALLELISM}" \
       kubectl delete pod -n "${NAMESPACE}" --grace-period=0 --force --wait=false 2>/dev/null || true
+
+    echo "Stripping finalizers from dead pods to complete deletion..."
+    echo "${DEAD_PODS}" | xargs -r -n 1 -P "${PARALLELISM}" -I {} \
+      kubectl patch pod {} -n "${NAMESPACE}" -p '{"metadata":{"finalizers":[]}}' --type=merge 2>/dev/null || true
   fi
 fi
 
