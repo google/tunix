@@ -163,8 +163,15 @@ def _extract_old_logps(
     item: datatypes.TrajectoryItem, completion_len: int
 ) -> np.ndarray | None:
   """Extracts old_per_token_logps from TrajectoryItem."""
-  old_lp = item.traj.get("old_logprobs")
+  traj = item.traj if isinstance(item.traj, dict) else {}
+  old_lp = traj.get("old_logprobs")
   if old_lp is None:
+    old_lp = getattr(
+        item, "old_logprobs", getattr(item, "metadata", {}).get("old_logprobs")
+    )
+  if old_lp is None:
+    if completion_len == 0:
+      return np.zeros(0, dtype=np.float32)
     return None
   old_lp = np.asarray(old_lp, dtype=np.float32).reshape(-1)
   if len(old_lp) != completion_len:

@@ -64,6 +64,7 @@ def _response_to_trajectory_item(resp: Any) -> datatypes.TrajectoryItem:
             "prompt_tokens": np.zeros(0, dtype=np.int32),
             "conversation_tokens": np.zeros(0, dtype=np.int32),
             "conversation_masks": np.zeros(0, dtype=np.float32),
+            "old_logprobs": np.zeros(0, dtype=np.float32),
         },
         metadata=metadata,
     )
