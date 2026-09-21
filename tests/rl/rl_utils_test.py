@@ -334,6 +334,29 @@ class UtilsTest(absltest.TestCase):
     self.assertIsNone(pack.ref_per_token_logps)
     self.assertIsNone(pack.old_per_token_logps)
 
+  def test_pack_sequences_does_not_request_zero_copy_device_arrays(self):
+    # A host -> accelerator transfer always copies, so `jnp.asarray(host_array,
+    # copy=False)` raises on TPU/GPU while the CPU backend accepts it. Emulate
+    # the accelerator rule so this is caught without one.
+    real_asarray = jnp.asarray
+
+    def accelerator_asarray(a, *args, **kwargs):
+      if isinstance(a, np.ndarray) and kwargs.get('copy') is False:
+        raise ValueError(
+            'jnp.asarray: cannot convert object of type numpy.ndarray to JAX'
+            ' Array on platform=tpu with copy=False.'
+        )
+      return real_asarray(a, *args, **kwargs)
+
+    example = self._create_mock_train_example(2, 3)
+    with mock.patch.object(utils.jnp, 'asarray', accelerator_asarray):
+      [[pack]] = list(
+          utils.pack_sequences(
+              iter([[example]]), max_token_budget=8, sequences_per_update=1
+          )
+      )
+    self.assertEqual(pack.completion_mask.shape, (1, 8))
+
   def test_pack_sequences_raises_on_oversized_sequence(self):
     # A single sequence longer than the budget cannot be packed; it must raise
     # (rather than silently drop training data).

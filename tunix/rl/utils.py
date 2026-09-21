@@ -495,8 +495,7 @@ def pack_rows_to_train_examples(
       prompt_mask=jnp.zeros((n, 0), dtype=mask_dtype),
       completion_ids=stack("ids"),
       completion_mask=jnp.asarray(
-          np.stack([r.completion_mask for r in rows]).astype(mask_dtype),
-          copy=False,
+          np.stack([r.completion_mask for r in rows]).astype(mask_dtype)
       ),
       advantages=stack("advantages"),
       segment_ids=stack("segment_ids"),
