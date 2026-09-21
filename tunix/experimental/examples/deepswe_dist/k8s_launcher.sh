@@ -78,8 +78,7 @@ export SAMPLER=${SAMPLER:-inprocess_vllm}
 export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
 export CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-5}
 export CHECKPOINT_MAX_TO_KEEP=${CHECKPOINT_MAX_TO_KEEP:-2}
-export REMAT_POLICY=${REMAT_POLICY:-decoder}
-export LEARNING_RATE_FINAL_FRACTION=${LEARNING_RATE_FINAL_FRACTION:-}
+export CHECKPOINT_ROOT_DIRECTORY=${CHECKPOINT_ROOT_DIRECTORY:-checkpoints}
 export OVERLONG_FILTER=${OVERLONG_FILTER:-}
 export TRAINABLE_PARAMETERS_MASK=${TRAINABLE_PARAMETERS_MASK:-}
 
@@ -123,26 +122,16 @@ export MAX_WARMPOOL_REPLICAS=${MAX_WARMPOOL_REPLICAS:-4}
 export ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE:-0}
 export CKPT_D2H_CONCURRENT_GB=${CKPT_D2H_CONCURRENT_GB:-8}
 
-# MaxText trainer configuration: only consulted when TRAINER_BACKEND=maxtext
-export MAXTEXT_MODEL_NAME=${MAXTEXT_MODEL_NAME:-qwen3-4b}
-export MAXTEXT_CKPT=${MAXTEXT_CKPT:-}
-# If TRAINER_BACKEND=maxtext, MAXTEXT_CKPT must be set to the path of an Orbax params-only checkpoint.
-if [[ "$TRAINER_BACKEND" == "maxtext" && -z "$MAXTEXT_CKPT" ]]; then
-  echo "Error: TRAINER_BACKEND=maxtext requires MAXTEXT_CKPT (Orbax params-only checkpoint)."
-  exit 1
-fi
-export MAXTEXT_OUTPUT_DIR=${MAXTEXT_OUTPUT_DIR:-artifacts/deepswe_dist/maxtext}
 export TRAINER_MESH_TP=${TRAINER_MESH_TP:-1}
 export TRAINER_MESH_EXPERT=${TRAINER_MESH_EXPERT:-1}
-# Padded MoE MLP intermediate dimension; must match rollout TP padding for MoE models.
-export TRAINER_PADDED_MOE_MLP_DIM=${TRAINER_PADDED_MOE_MLP_DIM:-}
-export TRAINER_BASE_NUM_KV_HEADS=${TRAINER_BASE_NUM_KV_HEADS:-${BASE_NUM_KV_HEADS:-}}
 export ROLLOUT_MESH_TP=${ROLLOUT_MESH_TP:-2}
 export ROLLOUT_MESH_FSDP=${ROLLOUT_MESH_FSDP:-1}
 # Optional: enable experimental batched-RPA attention kernel for rollout.
 export ROLLOUT_USE_BATCHED_RPA=${ROLLOUT_USE_BATCHED_RPA:-}
-export ROLLOUT_MAXTEXT_ATTENTION=${ROLLOUT_MAXTEXT_ATTENTION:-}
-export TRAINER_MAXTEXT_ATTENTION=${TRAINER_MAXTEXT_ATTENTION:-}
+
+# MaxText configuration: only consulted when TRAINER_BACKEND=maxtext.
+export REMAT_POLICY=${REMAT_POLICY:-decoder}
+source "${DIR}/../common/maxtext_config.sh"
 
 # Logs source/destination Raiden tensor checksums on both the trainer and
 # rollout sides during weight sync, for cross-verification of a real run.
@@ -152,6 +141,7 @@ export WANDB_PROJECT=${WANDB_PROJECT:-trellis-deepswe}
 export WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
 export WANDB_API_KEY=${WANDB_API_KEY:-}
 export WANDB_ENTITY=${WANDB_ENTITY:-}
+export LOG_DIR=${LOG_DIR:-}
 export TRAJECTORY_LOG_DIR=${TRAJECTORY_LOG_DIR:-}
 export EOS_TOKENS=${EOS_TOKENS:-}
 
@@ -197,6 +187,8 @@ export ROLLOUT_TPU_SLICE=${ROLLOUT_TPU_SLICE:-tpuv5:2x2x1}
 export ROLLOUT_REPLICAS=${ROLLOUT_REPLICAS:-1}
 export KUEUE_QUEUE=${KUEUE_QUEUE:-}
 export K8S_NAMESPACE=${K8S_NAMESPACE:-default}
+export KUEUE_QUEUE_NAME=${KUEUE_QUEUE_NAME:-${KUEUE_QUEUE:-${QUEUE_NAME:-}}}
+export PRIORITY_CLASS=${PRIORITY_CLASS:-medium}
 
 export TRAINER_EXTRA_ENV=${TRAINER_EXTRA_ENV:-}
 export DRY_RUN=${DRY_RUN:-false}
@@ -282,6 +274,8 @@ start_orchestrator() {
   "$PYTHON_BIN" "$YAML_GENERATOR" \
     "${YAML_DIR}/jobset.cpu.yaml" \
     --jobset_name="${ORCHESTRATOR_ID}" \
+    --namespace="${K8S_NAMESPACE}" \
+    ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
     --cpu_machine=${CPU_MACHINE} \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ORCHESTRATOR_PORT}" \
@@ -289,12 +283,14 @@ start_orchestrator() {
       ORCHESTRATOR_ID=\"${ORCHESTRATOR_ID}\" \
       ${sandbox_env} \
       ${SCAFFOLD:+SCAFFOLD=\"${SCAFFOLD}\"} \
+      ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} \
       ${WANDB_API_KEY:+WANDB_API_KEY=\"${WANDB_API_KEY}\"} \
       ${WANDB_ENTITY:+WANDB_ENTITY=\"${WANDB_ENTITY}\"} \
       WANDB_PROJECT=\"${WANDB_PROJECT}\" \
       WANDB_RUN_NAME=\"${WANDB_RUN_NAME}\" \
       ROLLOUT_WORKERS=\"${ROLLOUT_WORKERS:-${ROLLOUT_REPLICAS:-1}}\" \
       EPISODE_TIMEOUT_SECS=\"${EPISODE_TIMEOUT_SECS:-5400}\" \
+      ${LOG_DIR:+LOG_DIR=\"${LOG_DIR}\"} \
       ${TRAJECTORY_LOG_DIR:+TRAJECTORY_LOG_DIR=\"${TRAJECTORY_LOG_DIR}\"} \
       PYTHONUNBUFFERED=1 \
       TUNIX_IS_INTERNAL_ENV=false \
@@ -338,6 +334,7 @@ start_orchestrator() {
         --step_timeout_secs=${STEP_TIMEOUT_SECS} \
         --reward_timeout_secs=${REWARD_TIMEOUT_SECS} \
         ${EPISODE_TIMEOUT_SECS:+--episode_timeout_secs=${EPISODE_TIMEOUT_SECS}} \
+        ${LOG_DIR:+--log_dir=\"${LOG_DIR}\"} \
         ${TRAJECTORY_LOG_DIR:+--trajectory_log_dir=\"${TRAJECTORY_LOG_DIR}\"} \
         --flush_every_n_steps=${FLUSH_EVERY_N_STEPS} \
         --wandb_project=\"${WANDB_PROJECT}\" \
@@ -372,21 +369,9 @@ stop_trainer() {
 }
 
 start_trainer() {
-  local maxtext_args=""
-  if [[ "${TRAINER_BACKEND}" == "maxtext" ]]; then
-    maxtext_args=" \
-      --maxtext_model_name=${MAXTEXT_MODEL_NAME} \
-      ${TRAINER_PADDED_MOE_MLP_DIM:+--maxtext_padded_moe_mlp_dim=${TRAINER_PADDED_MOE_MLP_DIM}} \
-      --maxtext_ckpt_path=${MAXTEXT_CKPT} \
-      --maxtext_output_directory=${MAXTEXT_OUTPUT_DIR} \
-      --mesh_expert=${TRAINER_MESH_EXPERT} \
-      ${ROLLOUT_MESH_TP:+--rollout_mesh_tp=${ROLLOUT_MESH_TP}} \
-      ${TRAINER_BASE_NUM_KV_HEADS:+--base_num_kv_heads=${TRAINER_BASE_NUM_KV_HEADS}} \
-      ${TRAINER_MAXTEXT_ATTENTION:+--maxtext_attention=${TRAINER_MAXTEXT_ATTENTION}} \
-      ${REMAT_POLICY:+--remat_policy=${REMAT_POLICY}} \
-      ${LEARNING_RATE_FINAL_FRACTION:+--learning_rate_final_fraction=${LEARNING_RATE_FINAL_FRACTION}} \
-    "
-  fi
+  maxtext_require_ckpt
+  local maxtext_args
+  maxtext_args="$(maxtext_trainer_flags)"
   local opt_chain_args=""
   if [[ -n "${OPT_CHAIN_TYPE}" ]]; then
     opt_chain_args=" \
@@ -402,13 +387,6 @@ start_trainer() {
   if [[ "${DEBUG}" == "1" || "${DEBUG}" == "true" || "${DEBUG}" == "True" ]]; then
     debug_arg="--debug"
   fi
-  local profiler_args="--profiler_steps=${PROFILER_STEPS:-0}"
-  if [[ -n "${SKIP_FIRST_N_PROFILER_STEPS:-}" ]]; then
-    profiler_args+=" --skip_first_n_profiler_steps=${SKIP_FIRST_N_PROFILER_STEPS}"
-  fi
-  if [[ -n "${PROFILER_PERIOD:-}" ]]; then
-    profiler_args+=" --profiler_period=${PROFILER_PERIOD}"
-  fi
   local raiden_env=""
   if [[ "${WEIGHT_SYNC_MODE}" == "raiden" ]]; then
     if [[ "${TRAINER_JOBSET_YAML}" == "jobset.pathways.yaml" ]]; then
@@ -418,6 +396,8 @@ start_trainer() {
   "$PYTHON_BIN" "$YAML_GENERATOR" \
     "${YAML_DIR}/${TRAINER_JOBSET_YAML}" \
     --jobset_name="${TRAINER_ID}" \
+    --namespace="${K8S_NAMESPACE}" \
+    ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
     --tpu_slice=${TRAINER_TPU_SLICE} \
     --cpu_machine=${CPU_MACHINE} \
     ${PATHWAYS_SERVER_IMAGE:+--pathways_server_image="${PATHWAYS_SERVER_IMAGE}"} \
@@ -481,20 +461,16 @@ start_trainer() {
         --optimizer_end_value=${LR_END_VALUE} \
         --optimizer_warmup_steps=${WARMUP_STEPS} \
         --optimizer_decay_steps=${LR_DECAY_STEPS} \
-        ${WARMUP_STEPS_FRACTION:+--maxtext_warmup_steps_fraction=${WARMUP_STEPS_FRACTION}} \
         --lora_rank=${LORA_RANK} \
         --lora_alpha=${LORA_ALPHA} \
         --sampler_type=${SAMPLER} \
         --checkpoint_save_interval_steps=${CHECKPOINT_SAVE_INTERVAL_STEPS} \
         --checkpoint_max_to_keep=${CHECKPOINT_MAX_TO_KEEP} \
+        --checkpoint_root_directory=${CHECKPOINT_ROOT_DIRECTORY} \
         --prefuse_moe_weights=${TRAINER_PREFUSE_MOE_WEIGHTS:-false} \
-        --use_weight_converter=${USE_WEIGHT_CONVERTER} \
-        ${MAX_SEQ_TOKEN_PER_TPU:+--max_seq_token_per_tpu=${MAX_SEQ_TOKEN_PER_TPU}} \
-        ${COMPUTE_LOGPS_CHUNK_SIZE:+--compute_logps_chunk_size=${COMPUTE_LOGPS_CHUNK_SIZE}} \
         ${opt_chain_args} \
         ${lora_args} \
         ${maxtext_args} \
-        ${profiler_args} \
         ${TRAINABLE_PARAMETERS_MASK:+--trainable_parameters_mask='${TRAINABLE_PARAMETERS_MASK}'} \
         ${debug_arg} \
     " \
@@ -524,13 +500,8 @@ stop_rollout() {
 }
 
 start_rollout() {
-  local maxtext_args=""
-  if [[ "${TRAINER_BACKEND}" == "maxtext" ]]; then
-    maxtext_args=" \
-      --maxtext_model_name=${MAXTEXT_MODEL_NAME} \
-      ${ROLLOUT_MAXTEXT_ATTENTION:+--maxtext_attention=${ROLLOUT_MAXTEXT_ATTENTION}} \
-    "
-  fi
+  local maxtext_args
+  maxtext_args="$(maxtext_rollout_flags)"
   local vllm_args=""
   if [[ "$SAMPLER" == "vllm" || "$SAMPLER" == "inprocess_vllm" ]]; then
     local vllm_json=""
@@ -616,6 +587,8 @@ if cfg:
     "$PYTHON_BIN" "$YAML_GENERATOR" \
       "${YAML_DIR}/jobset.tpu.yaml" \
       --jobset_name="${replica_id}" \
+      --namespace="${K8S_NAMESPACE}" \
+      ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
       --tpu_slice=${ROLLOUT_TPU_SLICE} \
       --worker_container_image="${TUNIX_IMAGE}" \
       --worker_container_port="${ROLLOUT_PORT}" \
@@ -647,6 +620,7 @@ if cfg:
         ${VLLM_ENABLE_V1_MULTIPROCESSING:+VLLM_ENABLE_V1_MULTIPROCESSING=${VLLM_ENABLE_V1_MULTIPROCESSING}} \
         ${VLLM_LOGGING_LEVEL:+VLLM_LOGGING_LEVEL=${VLLM_LOGGING_LEVEL}} \
         ${ROLLOUT_ENV_FLAGS} \
+        ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} \
         SKIP_JAX_PRECOMPILE=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ${sandbox_env} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} python -m tunix.experimental.distributed.runtime.main \
           --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
           --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
@@ -687,6 +661,8 @@ start_mock_trainer() {
   "$PYTHON_BIN" "$YAML_GENERATOR" \
     "${YAML_DIR}/jobset.cpu.yaml" \
     --jobset_name="${TRAINER_ID}" \
+    --namespace="${K8S_NAMESPACE}" \
+    ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
     --cpu_machine="${CPU_MACHINE}" \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${TRAINER_PORT}" \
@@ -706,6 +682,8 @@ start_mock_rollout() {
   "$PYTHON_BIN" "$YAML_GENERATOR" \
     "${YAML_DIR}/jobset.cpu.yaml" \
     --jobset_name="${ROLLOUT_ID}" \
+    --namespace="${K8S_NAMESPACE}" \
+    ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
     --cpu_machine="${CPU_MACHINE}" \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ROLLOUT_PORT}" \
@@ -758,6 +736,52 @@ while [[ $# -gt 0 ]]; do
     --image_rewrite_prefix=*)
       IMAGE_REWRITE_PREFIX="${1#*=}"
       shift
+      ;;
+    --namespace)
+      K8S_NAMESPACE="$2"
+      shift 2
+      ;;
+    --namespace=*)
+      K8S_NAMESPACE="${1#*=}"
+      shift
+      ;;
+    --queue)
+      KUEUE_QUEUE_NAME="$2"
+      shift 2
+      ;;
+    --queue=*)
+      KUEUE_QUEUE_NAME="${1#*=}"
+      shift
+      ;;
+    --scratch|--gcs-scratch)
+      GCS_SCRATCH_LOCATION="$2"
+      shift 2
+      ;;
+    --scratch=*|--gcs-scratch=*)
+      GCS_SCRATCH_LOCATION="${1#*=}"
+      shift
+      ;;
+    --debug)
+      DEBUG=1
+      shift
+      ;;
+    --no-debug)
+      DEBUG=0
+      shift
+      ;;
+    -h|--help)
+      echo "Usage: $0 [start|stop|orchestrator|trainer|rollout|test_orchestrator|mock_trainer|mock_rollout|start_rollout_only] [options]"
+      echo "Options:"
+      echo "  --command <cmd>          Command to run"
+      echo "  --namespace <ns>         Kubernetes namespace (default: default)"
+      echo "  --queue <name>           Kueue local queue name (optional)"
+      echo "  --image <image>          Container image to use"
+      echo "  --dry-run, --render      Print generated YAMLs without applying"
+      echo "  --scratch, --gcs-scratch GCS scratch location"
+      echo "  --debug, --no-debug      Toggle debug logging (default: disabled)"
+      echo "  --vllm_config_json <js>  vLLM engine config overrides"
+      echo "  --image_rewrite_prefix   Registry prefix for sandbox images"
+      exit 0
       ;;
     start|stop|orchestrator|trainer|rollout|test_orchestrator|mock_trainer|mock_rollout|start_rollout_only)
       COMMAND="$1"
