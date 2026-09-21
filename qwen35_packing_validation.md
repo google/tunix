@@ -423,59 +423,74 @@ checkpoint in bfloat16 — each against its own null. Six runs.
 | --- | --- | --- | --- |
 | Logp scale, mean | -247.82 | -13.57 | -13.57 |
 | Per-token logp, mean abs diff | 4.986e-04 | 1.878e-05 | 3.120e-02 |
-| &nbsp;&nbsp;*same, null* | **0.0 exactly** | **0.0 exactly** | **0.0 exactly** |
+| &nbsp;&nbsp;*same, null mb8* | **0.0 exactly** | **0.0 exactly** | **0.0 exactly** |
 | Pooled loss, rel diff | 6.599e-04 | 8.939e-06 | 1.164e-02 |
-| &nbsp;&nbsp;*same, null* | 2.027e-04 | 1.068e-05 | 3.572e-02 |
+| &nbsp;&nbsp;*same, null mb8* | 2.027e-04 | 1.068e-05 | 3.572e-02 |
 | Gradient, whole-tree rel L2 | 1.179e-03 | 3.118e-04 | 1.287e-01 |
-| &nbsp;&nbsp;*same, null* | 1.207e-03 | 3.221e-04 | 2.054e-01 |
-| &nbsp;&nbsp;**ratio observed ÷ null** | **0.977** | **0.968** | **0.626** |
+| &nbsp;&nbsp;*same, null mb8* | 1.207e-03 | 3.221e-04 | 2.054e-01 |
+| &nbsp;&nbsp;**ratio observed ÷ null mb8** | **0.977** | **0.968** | **0.626** |
 | Gradient, worst per-param rel L2 | 1.846e-03 | 1.286e-03 | 2.211e-01 |
-| &nbsp;&nbsp;*same, null* | 1.825e-03 | 1.106e-03 | 3.168e-01 |
-| &nbsp;&nbsp;**ratio observed ÷ null** | **1.012** | **1.163** | **0.698** |
+| &nbsp;&nbsp;*same, null mb8* | 1.825e-03 | 1.106e-03 | 3.168e-01 |
+| &nbsp;&nbsp;**ratio observed ÷ null mb8** | **1.012** | **1.163** | **0.698** |
 | Gradient, worst per-param cosine | 0.999998329 | 0.999999618 | 0.975404 |
-| &nbsp;&nbsp;*same, null* | 0.999998411 | 0.999999665 | 0.948764 |
+| &nbsp;&nbsp;*same, null mb8* | 0.999998411 | 0.999999665 | 0.948764 |
 
-**Every whole-tree ratio is below 1.** A comparison with no packing in it, whose
-two arms produce bitwise identical log-probabilities, reproduces the
-packed-unpacked difference and in bfloat16 exceeds it. The two worst-parameter
-ratios above 1 (1.012 and 1.163) are a single tensor out of thirteen, at 1.8e-03
-and 1.3e-03 absolute.
+A comparison with no packing in it reproduces the packed-unpacked difference in
+every regime, and in bfloat16 exceeds it.
 
-This bounds packing's effect at the measurement floor rather than showing it is
-zero. An effect well under the null would be invisible here.
+The floor is not a single number, so read the observation as sitting inside it
+rather than below it. At the trained checkpoint in float32, against two different
+unpacked partitions:
+
+| null partition | whole-tree rel L2 | observed ÷ null |
+| --- | --- | --- |
+| 8 microbatches against 16 | 3.221e-04 | 0.968 |
+| 4 microbatches against 16 | 3.004e-04 | 1.038 |
+
+The observed 3.118e-04 falls between them. Which side of 1 the ratio lands on is
+set by the partition chosen for the null, which is a property of the yardstick
+and not of packing. This bounds packing's effect at the floor; it does not show
+the effect is zero.
 
 Per parameter at the checkpoint in float32, ten of the thirteen paths disagree
-*less* under packing than under the null, and the three above 1 are within a
-factor of 1.6. Worst four by observed relative L2:
+less under packing than under both nulls. Three do not:
 
-| observed | null | ratio | cosine | path |
-| --- | --- | --- | --- | --- |
-| 1.286e-03 | 1.106e-03 | 1.163 | 0.999999618 | `token_embedder/embedding` |
-| 2.158e-04 | 2.660e-04 | 0.811 | 1.000000033 | `decoder/layers/mlp/wi_0/kernel` |
-| 2.140e-04 | 2.769e-04 | 0.773 | 1.000000074 | `decoder/layers/pre_self_attention_layer_norm/scale` |
-| 1.425e-04 | 8.955e-05 | 1.591 | 1.000000134 | `decoder/decoder_norm/scale` |
+| observed | null mb8 | null mb16 | path |
+| --- | --- | --- | --- |
+| 1.286e-03 | 1.163 | 1.094 | `token_embedder/embedding` |
+| 1.834e-04 | 1.113 | 1.074 | `decoder/layers/self_attention/query_norm/scale` |
+| 1.425e-04 | 1.591 | 1.591 | `decoder/decoder_norm/scale` |
 
-The largest ratio belongs to `decoder_norm/scale`, a single 1024-element vector.
-Cosines above 1 by 1e-7 are float32 error in the dot product, which is the scale
-this whole table sits at.
+All three are at or under 1.3e-03 absolute, with cosine above 0.9999996.
+
+TODO(packing): no unpacked null reaches the packed arm's 4096-token row, so none
+of them accumulates `token_embedder/embedding` over as many positions. Padding an
+unpacked arm to 4096 would isolate row length from packing and settle whether
+these three are a row-length effect. Untested.
 
 ### 4.3 Where the logp difference comes from
 
-The null's per-token logp difference is **exactly 0.0** in all three regimes, so
-microbatch partitioning does not perturb the forward pass at all. The packed
-arm's nonzero difference therefore comes from the row: 4096 tokens with
-`segment_ids` against 1536 with padding changes the length of attention's
-reduction over the key axis and the shapes the matmul kernels are tiled for.
-Masked positions contribute zero either way, but they are summed over a longer
-vector.
+At `--null_control 8` the per-token logp difference is **exactly 0.0** in all
+three regimes. At `--null_control 16` it is not: mean 1.654e-05 and max
+4.7588e-03, against the packed arm's 1.878e-05 and 4.7588e-03, the two maxima
+agreeing to the bit. The variable is rows per shard — 2 at microbatch 8 against 1
+at microbatch 4 leaves the forward pass bitwise unchanged, 4 at microbatch 16
+does not. A comparison containing no packing therefore reproduces 88% of the
+packed arm's mean logp difference and matches its maximum exactly.
+
+Within the packed comparison itself both arms hold 1 row per shard, so what
+differs there is the row: 4096 tokens with `segment_ids` against 1536 with
+padding changes the length of attention's reduction over the key axis and the
+shapes the matmul kernels are tiled for. Masked positions contribute zero either
+way, but they are summed over a longer vector.
 
 The difference falls 27× (4.986e-04 → 1.878e-05) between random init and the
 trained checkpoint, as the logp scale falls from -247.8 to -13.57.
 
 TODO(packing): two regimes is not enough to establish that the logp difference
 scales with logit magnitude rather than with something else that differs between
-a random and a trained model. The null in §4.2, not this trend, is what rules out
-a packing defect.
+a random and a trained model. The nulls in §4.2, not this trend, are what rule
+out a packing defect.
 
 ### 4.4 bfloat16 cannot answer this question
 
@@ -523,9 +538,12 @@ COMMON="--maxtext_model_name qwen3-0.6b --mesh_fsdp 4 --mesh_tp 1
 ```
 
 Drop `--maxtext_ckpt_path` for the random-init regime and `--float32` for the
-bfloat16 one; run each with and without `--null_control 8`. `--length_csv` draws
-completion lengths from a trajectory CSV produced by a real run; omit it for the
-built-in lognormal. Always read the pair, never the observed run alone.
+bfloat16 one. `--length_csv` draws completion lengths from a trajectory CSV
+produced by a real run; omit it for the built-in lognormal.
+
+Never read an observed run alone, and prefer more than one null: `--null_control`
+accepts 8 and 16 here, giving 8-against-16 and 4-against-16 microbatches, and the
+two disagree by 7%. `--null_control 32` and `64` extend the range further.
 
 Five ways this comparison returns a verdict that carries no information are in
 the appendix, for anyone reimplementing it.
@@ -825,7 +843,7 @@ comparison.
 | 2.33× less padding | 16.9M padded token slots against 39.3M |
 | 1.74× faster steps | 98.48 s packed against 171.74 s unpacked, same data, same image |
 | No recompilation after step 1 | 99 warm steps, median 97.12 s, stdev 4.48 s, no sustained step-up |
-| Packed arithmetic equals unpacked, measured directly | one 64-trajectory set through both assemblers, identical weights: whole-tree gradient relative L2 3.12e-04 at a trained checkpoint, against 3.22e-04 for a null control with no packing in it — ratio 0.97, and at or below 1 in all three regimes tested (§4) |
+| Packed arithmetic equals unpacked, measured directly | one 64-trajectory set through both assemblers, identical weights: whole-tree gradient relative L2 3.12e-04 at a trained checkpoint, bracketed by two null controls containing no packing at 3.00e-04 and 3.22e-04 (§4) |
 | Packed arithmetic equals unpacked, by unit test | 17 + 28 MaxText tests and 132 Tunix tests, all passing |
 | Generation quality is unchanged | paired on all 320 prompts: generated length −1.22 chars, 95% CI [−12.1, +9.7]; reward +0.0024, 95% CI [−0.0038, +0.0086] |
 | The comparison has power | resolves an effect 12× smaller than training's own 132-char shift over the same 20 steps |
