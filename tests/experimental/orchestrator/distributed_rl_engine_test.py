@@ -70,6 +70,7 @@ class MockActorHandle(mock.MagicMock):
     self.set_target_state = mock.AsyncMock()
     self.with_loss_fn = mock.MagicMock()
     self.with_gen_model_input_fn = mock.MagicMock()
+    self.dispatched_request_ids: list[str | None] = []
 
   def submit(self, method_name: str, *args, **kwargs):
     method = getattr(self, method_name)
@@ -86,6 +87,7 @@ class MockActorHandle(mock.MagicMock):
       *args,
       **kwargs,
   ):
+    self.dispatched_request_ids.append(request_id)
     if (
         method_name is None
         and request_id is not None
@@ -1771,6 +1773,29 @@ class DistributedRLEngineTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_dispatch_rollout_requests_propagates_request_id_to_dispatch_task(
+      self,
+  ):
+    async def _run():
+      req_ids = await self.engine.dispatch_rollouts(
+          [{"prompt": "Hello", "prompt_id": "p_idempotent"}],
+          num_generations=2,
+          policy_version=3,
+      )
+      self.assertEqual(
+          req_ids,
+          ["req_p_idempotent_g0_v3", "req_p_idempotent_g1_v3"],
+      )
+      all_dispatched = (
+          self.mock_rollout_1.dispatched_request_ids
+          + self.mock_rollout_2.dispatched_request_ids
+      )
+      self.assertCountEqual(
+          all_dispatched,
+          ["req_p_idempotent_g0_v3", "req_p_idempotent_g1_v3"],
+      )
+
+    asyncio.run(_run())
 
 if __name__ == "__main__":
   absltest.main()

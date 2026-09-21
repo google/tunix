@@ -38,6 +38,7 @@ import asyncio
 import contextlib
 import hashlib
 import inspect
+import json
 import pickle
 import threading
 import traceback as traceback_lib
@@ -55,6 +56,7 @@ from typing import (
     Tuple,
     Union,
 )
+import uuid
 
 from absl import logging
 import cloudpickle
@@ -88,10 +90,42 @@ _MAX_MESSAGE_BYTES = 128 * 1024 * 1024
 # strictly smaller than _MAX_MESSAGE_BYTES.
 _STREAM_CHUNK_BYTES = 8 * 1024 * 1024
 
+# Bounded server/client deduplication and retry parameters.
+_MAX_DISPATCHED_REQUEST_IDS = 10000
+_MAX_COMPLETED_EXECUTIONS = 16
+_MAX_SEEN_RESPONSE_IDS = 10000
+_DEFAULT_RETRY_MAX_ATTEMPTS = 4
+_DEFAULT_RETRY_INITIAL_BACKOFF_S = 0.1
+_DEFAULT_RETRY_MAX_BACKOFF_S = 1.0
+_DEFAULT_RETRY_BACKOFF_MULTIPLIER = 2.0
+
+_SERVICE_CONFIG = json.dumps({
+    "methodConfig": [
+        {
+            "name": [{"service": "tunix.ExecutionService"}],
+            "waitForReady": True,
+        },
+        {
+            "name": [{
+                "service": "tunix.ExecutionService",
+                "method": "DispatchTask",
+            }],
+            "waitForReady": True,
+            "retryPolicy": {
+                "maxAttempts": _DEFAULT_RETRY_MAX_ATTEMPTS,
+                "initialBackoff": f"{_DEFAULT_RETRY_INITIAL_BACKOFF_S}s",
+                "maxBackoff": f"{_DEFAULT_RETRY_MAX_BACKOFF_S}s",
+                "backoffMultiplier": _DEFAULT_RETRY_BACKOFF_MULTIPLIER,
+                "retryableStatusCodes": ["UNAVAILABLE"],
+            },
+        },
+    ]
+})
+
 
 def _grpc_options(
     max_message_bytes: int = _MAX_MESSAGE_BYTES,
-) -> List[Tuple[str, int]]:
+) -> List[Tuple[str, Any]]:
   """Channel/server options lifting the message-size cap and enabling keepalive."""
   return [
       ("grpc.max_send_message_length", max_message_bytes),
@@ -103,6 +137,8 @@ def _grpc_options(
       ("grpc.http2.max_ping_strikes", 0),
       ("grpc.http2.min_ping_interval_without_data_ms", 5000),
       ("grpc.http2.min_recv_ping_interval_without_data_ms", 5000),
+      ("grpc.enable_retries", 1),
+      ("grpc.service_config", _SERVICE_CONFIG),
   ]
 
 
@@ -322,11 +358,13 @@ class ExecutionRequest:
       method_name: Optional[str] = None,
       args: Optional[Sequence[Any]] = None,
       kwargs: Optional[Dict[str, Any]] = None,
+      ack_execute_ids: Sequence[str] = (),
   ):
     self.request_id = request_id
     self.method_name = method_name or "__call__"
     self.args: Tuple[Any, ...] = tuple(args or ())
     self.kwargs: Dict[str, Any] = dict(kwargs or {})
+    self.ack_execute_ids: Tuple[str, ...] = tuple(ack_execute_ids or ())
     if "request_id" in self.kwargs:
       raise ValueError(
           "'request_id' is a reserved framework parameter for remote execution "
@@ -337,10 +375,17 @@ class ExecutionRequest:
       self, chunk_size: int = _STREAM_CHUNK_BYTES
   ) -> Iterator[bytes]:
     """Serializes request into Pickle Protocol 5 out-of-band buffer chunks."""
-    return _iter_serialized_chunks(
-        (self.request_id, self.method_name, self.args, self.kwargs),
-        chunk_size=chunk_size,
-    )
+    if self.ack_execute_ids:
+      payload: Tuple[Any, ...] = (
+          self.request_id,
+          self.method_name,
+          self.args,
+          self.kwargs,
+          self.ack_execute_ids,
+      )
+    else:
+      payload = (self.request_id, self.method_name, self.args, self.kwargs)
+    return _iter_serialized_chunks(payload, chunk_size=chunk_size)
 
   @classmethod
   def deserialize_chunks(cls, chunks: Iterable[bytes]) -> "ExecutionRequest":
@@ -450,23 +495,63 @@ class RemoteExecutionServer(abc.ABC):
   def __init__(self, instance: Optional[Any] = None):
     self._instance: Optional[Any] = instance
     self._response_queue: Optional[asyncio.Queue[ExecutionResponse]] = None
+    self._state_lock: Optional[asyncio.Lock] = None
     self._request_counter: int = 0
     self._background_tasks: set[asyncio.Task[Any]] = set()
+    self._dispatched_request_ids: Dict[str, None] = {}
+    self._unacked_responses: Dict[str, ExecutionResponse] = {}
+    self._active_poll_waiter: Optional[asyncio.Task[ExecutionResponse]] = None
+    self._inflight_executions: Dict[str, asyncio.Task[ExecutionResponse]] = {}
+    self._completed_executions: Dict[str, ExecutionResponse] = {}
 
   def _get_response_queue(self) -> asyncio.Queue[ExecutionResponse]:
     if self._response_queue is None:
       self._response_queue = asyncio.Queue()
     return self._response_queue
 
+  def _get_state_lock(self) -> asyncio.Lock:
+    if self._state_lock is None:
+      self._state_lock = asyncio.Lock()
+    return self._state_lock
+
   async def dispatch_task(self, request: ExecutionRequest) -> str:
     """Dispatches task execution asynchronously on server and returns task ACK ID."""
-    if not request.request_id:
-      self._request_counter += 1
-      request.request_id = f"task_{self._request_counter}"
-    task = asyncio.create_task(self._run_and_enqueue(request))
-    self._background_tasks.add(task)
-    task.add_done_callback(self._background_tasks.discard)
-    return request.request_id
+    async with self._get_state_lock():
+      if not request.request_id:
+        self._request_counter += 1
+        request.request_id = f"task_{self._request_counter}"
+      req_id = request.request_id
+      if req_id in self._dispatched_request_ids:
+        logging.debug(
+            "[RemoteExecutionServer] Deduplicating already-dispatched task %s",
+            req_id,
+        )
+        return req_id
+      self._dispatched_request_ids[req_id] = None
+      while len(self._dispatched_request_ids) > _MAX_DISPATCHED_REQUEST_IDS:
+        oldest_id = next(iter(self._dispatched_request_ids))
+        self._dispatched_request_ids.pop(oldest_id, None)
+      task = asyncio.create_task(self._run_and_enqueue(request))
+      self._background_tasks.add(task)
+      task.add_done_callback(self._background_tasks.discard)
+      return req_id
+
+  @staticmethod
+  def _is_failed_task_response(response: ExecutionResponse) -> bool:
+    """Returns True if the task execution response represents a failure."""
+    if response.error_message is not None:
+      return True
+    res = response.result
+    items = res if isinstance(res, list) else [res]
+    for item in items:
+      status = (
+          item.get("status")
+          if isinstance(item, dict)
+          else getattr(item, "status", None)
+      )
+      if status in ("ERROR", "FAILED"):
+        return True
+    return False
 
   async def _run_and_enqueue(self, request: ExecutionRequest) -> None:
     logging.debug(
@@ -475,13 +560,17 @@ class RemoteExecutionServer(abc.ABC):
         request.method_name,
     )
     response = await self.execute_request(request)
-    if response.error_message:
-      logging.debug(
-          "[RemoteExecutionServer] Task %s failed: %s\n%s",
-          request.request_id,
-          response.error_message,
-          response.traceback,
-      )
+    if self._is_failed_task_response(response):
+      if request.request_id:
+        async with self._get_state_lock():
+          self._dispatched_request_ids.pop(request.request_id, None)
+      if response.error_message:
+        logging.debug(
+            "[RemoteExecutionServer] Task %s failed: %s\n%s",
+            request.request_id,
+            response.error_message,
+            response.traceback,
+        )
     else:
       logging.debug(
           "[RemoteExecutionServer] Task %s finished successfully",
@@ -490,16 +579,59 @@ class RemoteExecutionServer(abc.ABC):
     await self._get_response_queue().put(response)
 
   async def poll_response(
-      self, timeout_s: float = LONG_POLL_TIMEOUT_S
+      self,
+      timeout_s: float = LONG_POLL_TIMEOUT_S,
+      ack_request_id: Optional[str] = None,
   ) -> Optional[ExecutionResponse]:
     """Long-polls server-side response queue for completed task results."""
-    try:
+    queue = self._get_response_queue()
+    track_unacked = ack_request_id is not None
+
+    async def _pop_and_stage() -> ExecutionResponse:
+      resp = await queue.get()
+      if track_unacked:
+        if resp.request_id is None:
+          resp.request_id = uuid.uuid4().hex
+        self._unacked_responses[resp.request_id] = resp
+      return resp
+
+    async with self._get_state_lock():
+      if track_unacked:
+        if ack_request_id:
+          self._unacked_responses.pop(ack_request_id, None)
+        if self._unacked_responses:
+          oldest_id = next(iter(self._unacked_responses))
+          resp = self._unacked_responses.pop(oldest_id)
+          self._unacked_responses[oldest_id] = resp
+          return resp
+      else:
+        self._unacked_responses.clear()
+
+      if (
+          self._active_poll_waiter is not None
+          and not self._active_poll_waiter.done()
+      ):
+        self._active_poll_waiter.cancel()
+
       if timeout_s == 0.0:
-        return self._get_response_queue().get_nowait()
-      return await asyncio.wait_for(
-          self._get_response_queue().get(), timeout=timeout_s
-      )
-    except (asyncio.TimeoutError, asyncio.QueueEmpty):
+        try:
+          resp = queue.get_nowait()
+        except asyncio.QueueEmpty:
+          return None
+        if track_unacked:
+          if resp.request_id is None:
+            resp.request_id = uuid.uuid4().hex
+          self._unacked_responses[resp.request_id] = resp
+        return resp
+
+      waiter = asyncio.create_task(_pop_and_stage())
+      self._active_poll_waiter = waiter
+
+    try:
+      return await asyncio.wait_for(waiter, timeout=timeout_s)
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+      if not waiter.done():
+        waiter.cancel()
       return None
 
   def register_instance(self, instance: Any) -> None:
@@ -590,6 +722,42 @@ class RemoteExecutionServer(abc.ABC):
           request_id=request.request_id,
       )
 
+  async def execute_idempotent_request(
+      self, request: ExecutionRequest
+  ) -> ExecutionResponse:
+    """Executes unary request with in-flight task coalescing and completion caching."""
+    req_id = request.request_id
+
+    async with self._get_state_lock():
+      for ack_id in request.ack_execute_ids:
+        self._completed_executions.pop(ack_id, None)
+
+      if req_id is not None and req_id in self._completed_executions:
+        return self._completed_executions[req_id]
+
+      if req_id is not None and req_id in self._inflight_executions:
+        task = self._inflight_executions[req_id]
+      else:
+        task = asyncio.create_task(self.execute_request(request))
+        if req_id is not None:
+          self._inflight_executions[req_id] = task
+
+          def _on_done(t: asyncio.Task[ExecutionResponse]) -> None:
+            self._inflight_executions.pop(req_id, None)
+            if not t.cancelled() and t.exception() is None:
+              res = t.result()
+              if res.error_message is None:
+                self._completed_executions[req_id] = res
+                while (
+                    len(self._completed_executions) > _MAX_COMPLETED_EXECUTIONS
+                ):
+                  oldest = next(iter(self._completed_executions))
+                  self._completed_executions.pop(oldest, None)
+
+          task.add_done_callback(_on_done)
+
+    return await asyncio.shield(task)
+
 
 class InProcessRemoteExecutionServer(RemoteExecutionServer):
   """In-process execution engine for single-process testing and v0 dev."""
@@ -624,7 +792,7 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
       request = await ExecutionRequest.deserialize_async_chunks(
           request_iterator
       )
-      response = await self.execute_request(request)
+      response = await self.execute_idempotent_request(request)
     except Exception as e:  # pylint: disable=broad-exception-caught
       response = ExecutionResponse(
           error_message=str(e),
@@ -649,24 +817,24 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
   ) -> AsyncIterator[bytes]:
     """Handles server-streaming long-polling for completed task responses."""
     del context
-    timeout_s = (
+    payload = (
         cloudpickle.loads(request_bytes)  # pylint: disable=g-unsafe-pickle-load
         if request_bytes
-        else LONG_POLL_TIMEOUT_S
+        else (LONG_POLL_TIMEOUT_S, "")
     )
-    response = await self.poll_response(timeout_s=timeout_s)
+    if isinstance(payload, tuple):
+      timeout_s, ack_request_id = payload
+    else:
+      timeout_s, ack_request_id = float(payload), ""
+    response = await self.poll_response(
+        timeout_s=timeout_s, ack_request_id=ack_request_id
+    )
     if response is None:
       return
-    completed = False
-    try:
-      for chunk in response.serialize_chunks(
-          chunk_size=self._stream_chunk_bytes
-      ):
-        yield chunk
-      completed = True
-    finally:
-      if not completed:
-        self._get_response_queue().put_nowait(response)
+    for chunk in response.serialize_chunks(
+        chunk_size=self._stream_chunk_bytes
+    ):
+      yield chunk
 
   async def start_serving_async(self, port: int = 50051) -> Any:
     """Starts an asynchronous gRPC server listening on [::]:port."""
@@ -856,6 +1024,11 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     self._rpc_timeout_s = rpc_timeout_s
     self._stream_chunk_bytes = stream_chunk_bytes
     self._max_message_bytes = max_message_bytes
+    self._last_polled_request_id: str = ""
+    self._seen_response_ids: Dict[str, None] = {}
+    self._client_poll_lock: Optional[asyncio.Lock] = None
+    self._pending_execute_acks: set[str] = set()
+    self._ack_lock = threading.Lock()
     # Blocking submit() runs on a persistent background event loop so repeated
     # calls reuse one channel. gRPC aio channels are bound to the loop that
     # created them, so they cannot be shared with the caller's async loop nor
@@ -865,6 +1038,38 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     self._sync_channel: Optional[Any] = None
     self._sync_rpc: Optional[Any] = None
     self._sync_lock = threading.Lock()
+
+  def _get_client_poll_lock(self) -> asyncio.Lock:
+    if self._client_poll_lock is None:
+      self._client_poll_lock = asyncio.Lock()
+    return self._client_poll_lock
+
+  @staticmethod
+  def _is_retryable_rpc_error(exc: BaseException) -> bool:
+    if _grpc_lib is None or not isinstance(exc, _grpc_lib.RpcError):
+      return False
+    code_fn = getattr(exc, "code", None)
+    return (
+        callable(code_fn) and code_fn() == _grpc_lib.StatusCode.UNAVAILABLE
+    )
+
+  async def _call_with_retry(self, rpc_call: Callable[[], Any]) -> Any:
+    """Executes `rpc_call` with exponential backoff on retryable gRPC errors."""
+    backoff_s = _DEFAULT_RETRY_INITIAL_BACKOFF_S
+    for attempt in range(1, _DEFAULT_RETRY_MAX_ATTEMPTS + 1):
+      try:
+        return await rpc_call()
+      except BaseException as e:  # pylint: disable=broad-exception-caught
+        if (
+            attempt >= _DEFAULT_RETRY_MAX_ATTEMPTS
+            or not self._is_retryable_rpc_error(e)
+        ):
+          raise
+        await asyncio.sleep(backoff_s)
+        backoff_s = min(
+            backoff_s * _DEFAULT_RETRY_BACKOFF_MULTIPLIER,
+            _DEFAULT_RETRY_MAX_BACKOFF_S,
+        )
 
   def _make_rpc(self, channel: Any) -> Any:
     return channel.stream_stream(
@@ -886,6 +1091,7 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
           self._host_port, options=_grpc_options(self._max_message_bytes)
       )
       self._channel_loop = current_loop
+      self._client_poll_lock = None
       self._rpc = self._make_rpc(self._channel)
       self._dispatch_rpc = self._channel.stream_unary(
           "/tunix.ExecutionService/DispatchTask",
@@ -907,13 +1113,29 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
       kwargs: Dict[str, Any],
   ) -> Any:
     """Streams an ExecutionRequest over `rpc` and unwraps the ExecutionResponse."""
+    with self._ack_lock:
+      ack_ids = tuple(self._pending_execute_acks)
+    req_id = uuid.uuid4().hex
     request = ExecutionRequest(
-        method_name=method_name, args=args, kwargs=kwargs
+        request_id=req_id,
+        method_name=method_name,
+        args=args,
+        kwargs=kwargs,
+        ack_execute_ids=ack_ids,
     )
-    chunks = request.serialize_chunks(chunk_size=self._stream_chunk_bytes)
-    call = rpc(chunks, timeout=self._rpc_timeout_s)
-    response = await ExecutionResponse.deserialize_async_chunks(call)
-    assert response is not None
+
+    async def _attempt() -> ExecutionResponse:
+      chunks = request.serialize_chunks(chunk_size=self._stream_chunk_bytes)
+      call = rpc(chunks, timeout=self._rpc_timeout_s, wait_for_ready=True)
+      response = await ExecutionResponse.deserialize_async_chunks(call)
+      assert response is not None
+      return response
+
+    response = await self._call_with_retry(_attempt)
+    if response.error_message is None:
+      with self._ack_lock:
+        self._pending_execute_acks.difference_update(ack_ids)
+        self._pending_execute_acks.add(req_id)
     return response.unwrap()
 
   def submit(self, method_name: Optional[str] = None, *args, **kwargs) -> Any:
@@ -978,11 +1200,19 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     """Asynchronously dispatches task request on remote server, returning task ACK ID."""
     self._ensure_async_channel()
     assert self._dispatch_rpc is not None
+    rpc = self._dispatch_rpc
+    req_id = request_id or f"task_{uuid.uuid4().hex}"
     request = ExecutionRequest(
-        request_id=request_id, method_name=method_name, args=args, kwargs=kwargs
+        request_id=req_id, method_name=method_name, args=args, kwargs=kwargs
     )
-    chunks = request.serialize_chunks(chunk_size=self._stream_chunk_bytes)
-    return await self._dispatch_rpc(chunks, timeout=self._rpc_timeout_s)
+
+    async def _attempt() -> str:
+      chunks = request.serialize_chunks(chunk_size=self._stream_chunk_bytes)
+      return await rpc(
+          chunks, timeout=self._rpc_timeout_s, wait_for_ready=True
+      )
+
+    return await self._call_with_retry(_attempt)
 
   async def poll_responses(
       self, timeout_s: float = LONG_POLL_TIMEOUT_S
@@ -990,10 +1220,32 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     """Long-polls remote server response queue for completed task results."""
     self._ensure_async_channel()
     assert self._poll_rpc is not None
-    call = self._poll_rpc(timeout_s, timeout=self._rpc_timeout_s)
-    return await ExecutionResponse.deserialize_async_chunks(
-        call, allow_empty=True
-    )
+    rpc = self._poll_rpc
+
+    async with self._get_client_poll_lock():
+      while True:
+        payload = (timeout_s, self._last_polled_request_id)
+
+        async def _attempt() -> Optional[ExecutionResponse]:
+          call = rpc(
+              payload, timeout=self._rpc_timeout_s, wait_for_ready=True
+          )
+          return await ExecutionResponse.deserialize_async_chunks(
+              call, allow_empty=True
+          )
+
+        resp = await self._call_with_retry(_attempt)
+        if resp is None:
+          return None
+        if resp.request_id:
+          self._last_polled_request_id = resp.request_id
+          if resp.request_id in self._seen_response_ids:
+            continue
+          self._seen_response_ids[resp.request_id] = None
+          while len(self._seen_response_ids) > _MAX_SEEN_RESPONSE_IDS:
+            oldest_id = next(iter(self._seen_response_ids))
+            self._seen_response_ids.pop(oldest_id, None)
+        return resp
 
   async def close(self) -> None:
     if self._channel is not None:
