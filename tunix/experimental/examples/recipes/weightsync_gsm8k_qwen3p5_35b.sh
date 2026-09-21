@@ -42,7 +42,7 @@ export PRIORITY_CLASS="${PRIORITY_CLASS:-medium}"
 export SERVICE_ACCOUNT="${SERVICE_ACCOUNT:-xpk-sa}"
 export CPU_MACHINE="${CPU_MACHINE:-n2d-standard-64}"
 
-export TUNIX_IMAGE="${TUNIX_IMAGE:-europe-west4-docker.pkg.dev/cloud-tpu-shared-capacity/tpu-sync/tunix-k8s:35b-wsync-v4}"
+export TUNIX_IMAGE="${TUNIX_IMAGE:-gcr.io/cloud-tpu-multipod-dev/atwigg/trellis-35b:latest}"
 export PATHWAYS_SERVER_IMAGE="${PATHWAYS_SERVER_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_server:raiden_20260920_v2}"
 export PATHWAYS_PROXY_IMAGE="${PATHWAYS_PROXY_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_proxy_server:raiden_20260920_v2}"
 
