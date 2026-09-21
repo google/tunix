@@ -393,6 +393,13 @@ prompt plus `(4, 1024)` completion, one sequence per row. Both reach a
 denominator of 64, and both are checked to consume the same trajectory **ids**,
 not merely the same count.
 
+**Result:** packing changes the gradient by 3.118e-04 (whole-tree relative L2,
+trained checkpoint, float32). Two control comparisons containing no packing at
+all give 3.004e-04 and 3.221e-04. Packing's difference falls between them, so it
+is indistinguishable from the float32 accumulation noise present with packing
+switched off.
+
+
 ### 4.1 The null control
 
 Neither arm reproduces the other bitwise, and not because of packing: packed
