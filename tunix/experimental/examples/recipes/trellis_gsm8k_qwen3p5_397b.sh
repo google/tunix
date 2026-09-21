@@ -23,9 +23,6 @@
 #   tp=1 x expert=16, single replica.
 # - Weight sync: Raiden, MoE prefusion and the weight converter.
 #
-# Verified end to end: 10 steps, 0 JobSet restarts, 1280 trajectories, reward
-# mean 0.33-0.52 on every step, ~88/92 completions reaching the gold answer.
-#
 # Usage:
 #   export TUNIX_IMAGE=gcr.io/.../runner@sha256:<digest>
 #   export MAXTEXT_CKPT=gs://.../qwen35_397b/scanned_reshard_fsdp32_tp2/0/items

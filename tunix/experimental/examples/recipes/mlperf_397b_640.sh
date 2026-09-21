@@ -5,17 +5,7 @@ set -e
 # MLPerf DeepSWE recipe: Qwen3.5-397B-A17B
 # ==============================================================================
 # Derived from mlperf_35b_256.sh, with the trainer/rollout topology and the
-# weight-sync settings taken from the verified Qwen3.5-397B GSM8K run
-# (10 steps, 0 restarts, reward mean 0.33-0.52 per step).
-#
-# STATUS OF THE NUMBERS BELOW
-#   verified at 397B : trainer mesh, rollout mesh, weight-sync env, RPC timeout,
-#                      profiling off, checkpoint-save off, pack_size arithmetic.
-#   NOT yet verified : everything DeepSWE-specific at this model size -- the
-#                      rollout replica count, the 64k context, and the per-step
-#                      concurrency. DeepSWE has only been run at 35B. The two
-#                      marked TUNE blocks are where it will most likely need to
-#                      change; treat a first run as a capacity experiment.
+# weight-sync settings taken from the Qwen3.5-397B GSM8K recipe.
 # ==============================================================================
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -82,7 +72,6 @@ export TRAINER_BACKEND="maxtext"
 export SAMPLER="vllm"
 export WEIGHT_SYNC_MODE="raiden"
 
-# ------------------------------------------------------------------ verified --
 # Trainer: 256 chips. TRAINER_MESH_EXPERT=2 is required, not a tuning choice:
 # at expert=1 the GMM_v2 kernel overflows smem by ~8.6K, and raising the GMM
 # tile sizes does not help because T(128) padding rounds s32[592] and s32[552]
@@ -103,11 +92,10 @@ export ROLLOUT_MESH_FSDP=1
 export ROLLOUT_MESH_TP=1
 export ROLLOUT_MESH_EXPERT=16
 
-# ---------------------------------------------------------------- TUNE (1) ---
-# Replica count is a capacity guess. At 35B this was 16 replicas x 4 chips = 64
-# rollout chips; 397B needs 16 chips per replica, so the same 64 chips buys only
-# 4 replicas and a quarter of the rollout concurrency. Raise if the step is
-# generation-bound and there is quota; 256 trainer + N*16 rollout must fit.
+# Rollout replicas. At 35B this was 16 replicas x 4 chips = 64 rollout chips;
+# 397B needs 16 chips per replica, so the same 64 chips buys 4 replicas and a
+# quarter of the rollout concurrency. Raise if the step is generation-bound and
+# there is quota; 256 trainer + N*16 rollout must fit.
 export ROLLOUT_WORKERS="${ROLLOUT_WORKERS:-4}"
 export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-4}"
 
@@ -149,7 +137,7 @@ export DP_SCHED_BATCH_PREFILL=false
 export LIBTPU_INIT_ARGS=' --xla_tpu_use_minor_sharding_for_major_trivial_input=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=false --xla_tpu_ars_combiner_threshold_in_bytes=0 --xla_tpu_enable_async_collective_merger=false --xla_tpu_check_legacy_constraints_in_reduce_scatter_legalizer=false'
 export VLLM_ENABLE_V1_MULTIPROCESSING=0
 
-# Raiden tuning carried over from the verified 397B run.
+# Raiden tuning carried over from the 397B GSM8K recipe.
 export ORCHESTRATOR_EXTRA_ENV="${ORCHESTRATOR_EXTRA_ENV:-WEIGHT_SYNC_TIMEOUT_H2D=1800 RAIDEN_PARALLELISM=16}"
 export ROLLOUT_EXTRA_ENV="${ROLLOUT_EXTRA_ENV:-RAY_memory_monitor_refresh_ms=0 RAIDEN_TRANSPORT_COALESCE_WINDOW_BYTES=67108864 RAIDEN_WEIGHT_SYNC_PIPELINE_GROUP_SIZE=16 RAIDEN_PARALLELISM=16}"
 export TRAINER_EXTRA_ENV="${TRAINER_EXTRA_ENV:-RAIDEN_TRANSPORT_COALESCE_WINDOW_BYTES=67108864 RAIDEN_WEIGHT_SYNC_PIPELINE_GROUP_SIZE=16}"
@@ -221,12 +209,11 @@ export REWARD_TIMEOUT_SECS=180
 export FLUSH_EVERY_N_STEPS=1
 export MAX_TURNS=30
 
-# ---------------------------------------------------------------- TUNE (2) ---
-# Context length and concurrency. The 35B recipe uses a 64k window
-# (4096 prompt + 61440 response) with 256-way concurrency. Neither has been
-# exercised at 397B, where the rollout has 16 chips per replica rather than 4
-# and the KV cache per sequence is far larger. If the rollout OOMs or the KV
-# cache will not allocate, reduce MAX_RESPONSE_LENGTH first, then concurrency.
+# Context length and concurrency. 64k window (4096 prompt + 61440 response) with
+# 256-way concurrency, inherited from the 35B recipe. At 397B the rollout has 16
+# chips per replica rather than 4 and the KV cache per sequence is far larger; if
+# the rollout OOMs or the KV cache will not allocate, reduce MAX_RESPONSE_LENGTH
+# first, then concurrency.
 export MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-4096}"
 export MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-61440}"
 export VLLM_MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-65536}"
