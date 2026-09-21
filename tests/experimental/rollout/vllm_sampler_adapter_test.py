@@ -153,7 +153,7 @@ class VllmSamplerAdapterTest(absltest.TestCase):
     res_pre = asyncio.run(self.sampler_adapter.pre_weight_sync(sync_req))
     self.assertTrue(res_pre)
     self.mock_sampler_instance.pre_weight_sync.assert_called_once_with(
-        free_kv_cache=True
+        free_kv_cache=False
     )
 
     res_sync = asyncio.run(self.sampler_adapter.weight_sync(sync_req))

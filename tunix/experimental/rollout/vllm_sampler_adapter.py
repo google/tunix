@@ -197,6 +197,7 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
       worker_index: int = 0,
       parallelism: int = 4,
       weight_sync_mode: weight_sync.WeightSyncMode | str | None = None,
+      free_kv_cache: bool = False,
       **kwargs,
   ):
     self.server_id = server_id
@@ -211,6 +212,11 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
     # host index *within* one replica.
     self.raiden_job_name = f"replica_{self.server_id}"
     self._parallelism = parallelism
+    # Default to False: Raiden updates weights in-place on device without
+    # allocating a second weight copy in HBM, and pre_weight_sync already
+    # invalidates the prefix cache (`reset_prefix_cache`), so deallocating and
+    # reallocating the KV cache pool on every sync step is unnecessary.
+    self.free_kv_cache = free_kv_cache
 
     # Defaults to RAIDEN when unspecified: RLVllmSampler drives weight sync
     # through its own native Raiden hooks, so callers that construct the
@@ -417,8 +423,8 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
 
       logger.info("Executing pre_weight_sync for server_id=%s", self.server_id)
 
-      # delegate to RLVllmSampler's native pause + clear + free-kv-cache
-      await sampler.pre_weight_sync(free_kv_cache=True)
+      # delegate to RLVllmSampler's native pause + clear prefix cache (+ optional free-kv-cache)
+      await sampler.pre_weight_sync(free_kv_cache=self.free_kv_cache)
       self._kv_cache_freed = True
 
       self._tracker.complete(sync_request, "prepared")

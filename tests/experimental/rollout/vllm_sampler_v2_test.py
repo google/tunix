@@ -222,7 +222,7 @@ class TestRLVllmSamplerWeightSync(unittest.TestCase):
             await sampler.pre_weight_sync(req_pre)
             mock_engine.pause_background_loop.assert_called_once()
             mock_call_worker_method.assert_called_once_with(
-                "start_weight_update", free_kv_cache=True)
+                "start_weight_update", free_kv_cache=False)
             self.assertEqual(await sampler.get_transfer_status("transfer_99"),
                              "IN_PROGRESS")
 
@@ -241,6 +241,11 @@ class TestRLVllmSamplerWeightSync(unittest.TestCase):
             mock_engine.resume_background_loop.assert_called_once()
             self.assertEqual(await sampler.get_transfer_status("transfer_99"),
                              "SUCCESS")
+
+            mock_call_worker_method.reset_mock()
+            await sampler.pre_weight_sync(req_pre, free_kv_cache=True)
+            mock_call_worker_method.assert_called_once_with(
+                "start_weight_update", free_kv_cache=True)
 
         asyncio.run(run_sync_test())
 

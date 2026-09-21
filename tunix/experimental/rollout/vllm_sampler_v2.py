@@ -422,10 +422,19 @@ class RLVllmSampler:
   async def pre_weight_sync(
         self,
         sync_request: Any = None,
-        free_kv_cache: bool = True,
+        free_kv_cache: bool = False,
         **kwargs: Any,
     ) -> None:
-    """Phase 1: Pauses intake, clears prefix cache, and drops KV cache via delete_kv_cache()."""
+    """Phase 1: Pauses intake, invalidates prefix cache, and optionally drops KV cache.
+
+    `free_kv_cache` defaults to False because Raiden weight sync streams updates
+    directly into the existing live TPU weight buffers in-place without
+    materializing a second copy of the weights in HBM. Invalidating the
+    scheduler's prefix cache (`_clear_prefix_cache`) is sufficient to prevent
+    serving stale KV activations computed under old weights while avoiding the
+    per-step latency overhead of deallocating (`delete_kv_cache`) and
+    reallocating (`reinitialize_kv_cache`) the HBM KV buffer pool.
+    """
     self._policy_version = _get_val(sync_request, "policy_version",
                                         self._policy_version)
     logger.info(
@@ -462,7 +471,7 @@ class RLVllmSampler:
         sync_request: Any = None,
         **kwargs: Any,
     ) -> None:
-    """Phase 3: Restores KV cache via reinitialize_kv_cache() and resumes serving."""
+    """Phase 3: Closes weight update session (and restores KV cache if freed) and resumes serving."""
     rid = None
     if sync_request is not None:
       rid = _get_val(sync_request, "req_id")
