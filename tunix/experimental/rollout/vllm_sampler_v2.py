@@ -323,8 +323,12 @@ class RLVllmSampler:
       req_id = _get_val(req,
                               "request_id") or f"req_{time.time_ns()}_{idx}"
       prompt_val = _get_val(req, "prompt")
-      prompt_text = prompt_val if isinstance(prompt_val,
-                                                   str) else str(prompt_val)
+      if isinstance(prompt_val, dict) and "prompt_token_ids" in prompt_val:
+        prompt_text = prompt_val
+      else:
+        prompt_text = (
+            prompt_val if isinstance(prompt_val, str) else str(prompt_val)
+        )
 
       task_gen = self._engine.generate(prompt_text,
                                              vllm_params,

@@ -49,8 +49,16 @@ def generate_vanilla_rollout_seed(
   return (prompt_hash + group_index) & 0x7FFFFFFF
 
 
-def _build_prompt(chat_parser: Any, chat_completions: Any) -> Any:
-  """Vanilla samplers take a string; parse chat messages when needed."""
+def _build_prompt(
+    chat_parser: Any, chat_completions: Any, prompt_token_ids: Any = None
+) -> Any:
+  """Vanilla samplers take a string; parse chat messages or pass recorded token IDs."""
+  if prompt_token_ids is not None:
+    return {
+        "prompt_token_ids": [
+            int(x) for x in np.asarray(prompt_token_ids).reshape(-1)
+        ]
+    }
   if chat_parser and not isinstance(chat_completions, str):
     return chat_parser.parse(
         chat_completions, add_generation_prompt=True, is_first_msg=True
@@ -224,7 +232,11 @@ class TrajectoryCollectorEngine:
       )
       sampling_req = sampler_lib.SamplingRequest(
           request_id=self.traj_id,
-          prompt=_build_prompt(self.chat_parser, chat_completions),
+          prompt=_build_prompt(
+              self.chat_parser,
+              chat_completions,
+              generation_kwargs.get("prompt_token_ids"),
+          ),
           sampling_params=sampling_params,
       )
       res = await self.sampler.sample(sampling_req, **generation_kwargs)
@@ -246,6 +258,7 @@ class TrajectoryCollectorEngine:
           logits=None,
           tokens=[tokens],
           left_padded_prompt_tokens=prompt_tokens,
+          prompt_lengths=np.array([prompt_tokens.shape[1]], dtype=np.int32),
           logprobs=[logprobs] if logprobs is not None else None,
           routed_experts=[routed_experts] if routed_experts is not None else None,
       )
@@ -264,6 +277,7 @@ class TrajectoryCollectorEngine:
         max_response_length=self.max_response_length,
         timeout=self.episode_timeout,
         overlong_filter=self.overlong_filter,
+        exact_token_continuity=True,
     )
     rl_traj = await inner_engine.collect(mode="Token")
     self.is_done = True
