@@ -254,6 +254,16 @@ class GSM8KTest(absltest.TestCase):
     self.assertIn("export CHAT_PARSER=${CHAT_PARSER:-raw}", k8s_launcher)
     self.assertIn("--chat_parser=${CHAT_PARSER}", k8s_launcher)
 
+  def test_launchers_export_trajectory_store_flags(self):
+    base_dir = pathlib.Path(gsm8k.__file__).parent
+    for script_name in ("launcher.sh", "k8s_launcher.sh"):
+      content = (base_dir / script_name).read_text(encoding="utf-8")
+      self.assertIn("RUN_ID=", content)
+      self.assertIn("--enable_trajectory_store=", content)
+      self.assertIn("--trajectory_store_backend=", content)
+      self.assertIn("--trajectory_store_dir=", content)
+      self.assertIn("--run_id=", content)
+
 
 if __name__ == "__main__":
   absltest.main()

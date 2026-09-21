@@ -501,6 +501,102 @@ class ClusterOrchestratorTrajectoryStoreTest(absltest.TestCase):
     orch = _trajectory_store_orchestrator()
     orch.shutdown()
 
+  def test_bring_up_workers_verifies_matching_remote_rollout_store_config(self):
+    tmp_dir = epath.Path(self.enter_context(tempfile.TemporaryDirectory()))
+    cfg = {
+        "enabled": True,
+        "backend": "file",
+        "root_dir": str(tmp_dir),
+        "run_id": "shared_run",
+    }
+    orch = orchestrator.ClusterOrchestrator(
+        registry=worker_registry.WorkerRegistry(),
+        lifecycle_driver=mock.MagicMock(),
+        monitor=mock.MagicMock(),
+        trajectory_store_config=cfg,
+    )
+    mock_rollout = mock.MagicMock(spec=remote_execution.ActorHandle)
+    mock_rollout.submit.side_effect = [
+        datatypes.Response(metadata={"trajectory_store_config": cfg}),
+        datatypes.Response(),
+        datatypes.Response(),
+    ]
+    orch.register_worker_handle(
+        "rollout-0", [datatypes.Role.ROLLOUT], mock_rollout
+    )
+    orch.bring_up_workers()
+    orch.shutdown()
+
+  def test_bring_up_workers_raises_on_remote_rollout_store_config_mismatch(
+      self,
+  ):
+    tmp_dir = epath.Path(self.enter_context(tempfile.TemporaryDirectory()))
+    orch_cfg = {
+        "enabled": True,
+        "backend": "file",
+        "root_dir": str(tmp_dir),
+        "run_id": "orch_run",
+    }
+    worker_cfg = {
+        "enabled": True,
+        "backend": "file",
+        "root_dir": str(tmp_dir),
+        "run_id": "worker_run",
+    }
+    orch = orchestrator.ClusterOrchestrator(
+        registry=worker_registry.WorkerRegistry(),
+        lifecycle_driver=mock.MagicMock(),
+        monitor=mock.MagicMock(),
+        trajectory_store_config=orch_cfg,
+    )
+    mock_rollout = mock.MagicMock(spec=remote_execution.ActorHandle)
+    mock_rollout.submit.side_effect = [
+        datatypes.Response(metadata={"trajectory_store_config": worker_cfg}),
+        datatypes.Response(),
+        datatypes.Response(),
+    ]
+    orch.register_worker_handle(
+        "rollout-0", [datatypes.Role.ROLLOUT], mock_rollout
+    )
+    with self.assertRaisesRegex(
+        ValueError,
+        "Rollout worker 'rollout-0' trajectory_store_config .* does not match",
+    ):
+      orch.bring_up_workers()
+    orch.shutdown()
+
+  def test_bring_up_workers_raises_when_rollout_enables_store_but_orchestrator_disables(
+      self,
+  ):
+    tmp_dir = epath.Path(self.enter_context(tempfile.TemporaryDirectory()))
+    worker_cfg = {
+        "enabled": True,
+        "backend": "file",
+        "root_dir": str(tmp_dir),
+        "run_id": "worker_run",
+    }
+    orch = orchestrator.ClusterOrchestrator(
+        registry=worker_registry.WorkerRegistry(),
+        lifecycle_driver=mock.MagicMock(),
+        monitor=mock.MagicMock(),
+        trajectory_store_config=None,
+    )
+    mock_rollout = mock.MagicMock(spec=remote_execution.ActorHandle)
+    mock_rollout.submit.side_effect = [
+        datatypes.Response(metadata={"trajectory_store_config": worker_cfg}),
+        datatypes.Response(),
+        datatypes.Response(),
+    ]
+    orch.register_worker_handle(
+        "rollout-0", [datatypes.Role.ROLLOUT], mock_rollout
+    )
+    with self.assertRaisesRegex(
+        ValueError,
+        "Rollout worker 'rollout-0' trajectory_store_config .* does not match",
+    ):
+      orch.bring_up_workers()
+    orch.shutdown()
+
 
 if __name__ == "__main__":
   absltest.main()

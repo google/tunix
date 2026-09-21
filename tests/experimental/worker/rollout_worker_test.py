@@ -310,6 +310,38 @@ class RolloutWorkerTrajectoryStoreTest(absltest.TestCase):
     worker = _worker()
     worker.stop()
 
+  def test_info_and_initialize_report_trajectory_store_config(self):
+    worker_disabled = _worker()
+    self.assertIsNone(
+        worker_disabled.info().resources["trajectory_store_config"]
+    )
+    self.assertIsNone(
+        worker_disabled.initialize().metadata["trajectory_store_config"]
+    )
+    worker_disabled.stop()
+
+    tmp_dir = epath.Path(self.enter_context(tempfile.TemporaryDirectory()))
+    expected_cfg = {
+        "enabled": True,
+        "backend": "file",
+        "root_dir": str(tmp_dir),
+        "run_id": "handshake_run",
+    }
+    worker_enabled = _worker(
+        config=rollout_worker.RolloutConfig(
+            trajectory_store_config=expected_cfg
+        )
+    )
+    self.assertEqual(
+        worker_enabled.info().resources["trajectory_store_config"],
+        expected_cfg,
+    )
+    self.assertEqual(
+        worker_enabled.initialize().metadata["trajectory_store_config"],
+        expected_cfg,
+    )
+    worker_enabled.stop()
+
 
 if __name__ == "__main__":
   absltest.main()

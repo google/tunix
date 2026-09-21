@@ -21,6 +21,7 @@ import functools
 import logging
 import os
 import sys
+from typing import Any
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
@@ -164,10 +165,66 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--init_timeout_s", type=float, default=None)
   parser.add_argument("--stop_workers_on_exit", action="store_true")
   parser.add_argument("--debug", action="store_true")
+  parser.add_argument(
+      "--run_id",
+      type=str,
+      default=os.getenv("RUN_ID", ""),
+      help="Run identifier shared between orchestrator and rollout workers.",
+  )
+  parser.add_argument(
+      "--enable_trajectory_store",
+      type=_str2bool,
+      default=False,
+      nargs="?",
+      const=True,
+      help="Whether to enable TrajectoryStore.",
+  )
+  parser.add_argument(
+      "--trajectory_store_backend",
+      type=str,
+      default="file",
+      help="TrajectoryStore backend name (e.g. 'file').",
+  )
+  parser.add_argument(
+      "--trajectory_store_dir",
+      type=str,
+      default="",
+      help="Root directory for the file-backed TrajectoryStore.",
+  )
   args = parser.parse_args(argv)
   if args.max_steps is None:
     args.max_steps = args.num_batches * args.num_iterations * args.num_epochs
   return args
+
+
+def _str2bool(v: str | bool) -> bool:
+  """Converts string representations of booleans to bool."""
+  if isinstance(v, bool):
+    return v
+  if v.lower() in ("yes", "true", "t", "y", "1"):
+    return True
+  if v.lower() in ("no", "false", "f", "n", "0"):
+    return False
+  raise argparse.ArgumentTypeError(f"Boolean value expected, got {v}")
+
+
+def _trajectory_store_config(
+    args: argparse.Namespace,
+) -> dict[str, Any] | None:
+  """Builds TrajectoryStore config dict from parsed CLI flags."""
+  if not getattr(args, "enable_trajectory_store", False):
+    return None
+  config: dict[str, Any] = {
+      "enabled": True,
+      "backend": getattr(args, "trajectory_store_backend", "file") or "file",
+  }
+  root_dir = getattr(args, "trajectory_store_dir", "")
+  if root_dir:
+    config["root_dir"] = root_dir
+  run_id = getattr(args, "run_id", "")
+  if run_id:
+    config["run_id"] = run_id
+  return config
 
 
 def _validate_args(args: argparse.Namespace) -> None:
@@ -311,8 +368,10 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       args.num_epochs,
   )
 
+  trajectory_store_config = _trajectory_store_config(args)
   cluster = orchestrator.ClusterOrchestrator(
-      weight_sync_mode=args.weight_sync_mode
+      weight_sync_mode=args.weight_sync_mode,
+      trajectory_store_config=trajectory_store_config,
   )
   context.ipc.discovery.on_register(
       functools.partial(
@@ -374,6 +433,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       ),
       metrics_logging_options=metrics_options,
       trajectory_log_dir=args.trajectory_log_dir,
+      trajectory_store=cluster.trajectory_store,
       max_staleness=args.max_staleness,
       sync_weights=(args.weight_sync_mode != weight_sync.WeightSyncMode.NONE),
       on_step_begin=lambda step: logging.info(
@@ -393,6 +453,8 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       cluster.shutdown()
     else:
       cluster.monitor.close()
+      if cluster.trajectory_store is not None:
+        cluster.trajectory_store.close()
 
   result = program.last_step_result
   if result is not None:
