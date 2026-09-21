@@ -145,20 +145,16 @@ export REWARD_MODE="env"
 VLLM_JSON=$("${PYTHON:-python3}" -c '
 import json, os
 cfg = {
-    "max_model_len": int(os.environ["VLLM_MAX_MODEL_LEN"]),
-    "max_num_batched_tokens": int(os.environ["VLLM_MAX_NUM_BATCHED_TOKENS"]),
-    "max_num_seqs": int(os.environ["VLLM_MAX_NUM_SEQS"]),
-    "gpu_memory_utilization": float(os.environ["VLLM_GPU_MEMORY_UTILIZATION"]),
-    "data_parallel_size": int(os.environ["VLLM_DATA_PARALLEL_SIZE"]),
-    "enable_expert_parallel": os.environ["VLLM_ENABLE_EXPERT_PARALLEL"].lower() in ("true", "1"),
-    "kv_cache_dtype": os.environ["VLLM_KV_CACHE_DTYPE"],
-    "async_scheduling": os.environ["VLLM_ASYNC_SCHEDULING"].lower() in ("true", "1"),
-    "language_model_only": os.environ["VLLM_LANGUAGE_MODEL_ONLY"].lower() in ("true", "1"),
-    "enable_auto_tool_choice": os.environ["VLLM_ENABLE_AUTO_TOOL_CHOICE"].lower() in ("true", "1"),
-    "tool_call_parser": os.environ["VLLM_TOOL_CALL_PARSER"],
-    "reasoning_parser": os.environ["VLLM_REASONING_PARSER"],
+    "max_model_len": int(os.environ.get("VLLM_MAX_MODEL_LEN", 65536)),
+    "max_num_batched_tokens": int(os.environ.get("VLLM_MAX_NUM_BATCHED_TOKENS", 2048)),
+    "max_num_seqs": int(os.environ.get("VLLM_MAX_NUM_SEQS", 8)),
+    "gpu_memory_utilization": float(os.environ.get("VLLM_GPU_MEMORY_UTILIZATION", 0.5)),
+    "data_parallel_size": int(os.environ.get("VLLM_DATA_PARALLEL_SIZE", 1)),
+    "enable_expert_parallel": os.environ.get("VLLM_ENABLE_EXPERT_PARALLEL", "true").lower() in ("true", "1"),
+    "kv_cache_dtype": os.environ.get("VLLM_KV_CACHE_DTYPE", "fp8"),
+    "async_scheduling": os.environ.get("VLLM_ASYNC_SCHEDULING", "true").lower() in ("true", "1"),
+    "language_model_only": os.environ.get("VLLM_LANGUAGE_MODEL_ONLY", "true").lower() in ("true", "1"),
     "additional_config": json.loads(os.environ["VLLM_ADDITIONAL_CONFIG"]),
-    "default_chat_template_kwargs": json.loads(os.environ["VLLM_DEFAULT_CHAT_TEMPLATE_KWARGS"]),
     "limit_mm_per_prompt": json.loads(os.environ["VLLM_LIMIT_MM_PER_PROMPT"]),
 }
 print(json.dumps(cfg, separators=(",", ":")))
