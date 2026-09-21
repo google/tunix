@@ -377,66 +377,44 @@ sampler's item, so the column is written empty.
 
 ## 4. Direct measurement: one trajectory set through both assemblers
 
-§3 compares two runs that never see the same data. Generation is unseeded, so
-even a defect-free packer produces two different policies there; that comparison
-can bound a packing defect but cannot exclude one. This section removes the
-limit by feeding one identical trajectory set through both assemblers against
-identical weights and comparing what the optimizer receives.
-
-[`qwen35_packing_equivalence.py`](qwen35_packing_equivalence.py) builds a
-trajectory set, runs it through `SequencePackedBatchAssembler` and
-`PaddedBatchAssembler`, and calls `MaxTextTrainingEngine.fwd_bwd` on every
-microbatch of each arm. The arms differ only in layout:
-
-| | packed | unpacked |
-| --- | --- | --- |
-| Assembler | `SequencePackedBatchAssembler` (`pack_size: 4`) | `PaddedBatchAssembler` |
-| Microbatches | 3 | 16 |
-| Row shape | `(4, 4096)`, prompt folded into the packed stream | `(4, 512)` prompt + `(4, 1024)` completion |
-| `segment_ids` | present | `None` |
-| Rows total | 12 (5.3 sequences per row) | 64 (1 per row) |
-| Trajectories | 64 | 64 |
-| Loss / gradient denominator | 64 | 64 |
-
-Both arms are checked to consume the same trajectory **ids**, not merely the
-same count: the harness compares the sorted id list the assembler emitted
-against the sorted list fed in, and raises otherwise. An earlier version
-compared counts, which passes even when `_extract_trajectory_id` returns the
-empty string for every trajectory.
+§3 compares two runs that never see the same data — generation is unseeded, so
+even a defect-free packer produces two different policies there. That bounds a
+packing defect but cannot exclude one.
+[`qwen35_packing_equivalence.py`](qwen35_packing_equivalence.py) removes the
+limit: one identical 64-trajectory set through `SequencePackedBatchAssembler` and
+`PaddedBatchAssembler` against identical weights, with
+`MaxTextTrainingEngine.fwd_bwd` called on every microbatch of each arm. The arms
+differ only in layout — packed is 3 microbatches of `(4, 4096)` rows carrying
+`segment_ids`, 5.3 sequences per row; unpacked is 16 microbatches of `(4, 512)`
+prompt plus `(4, 1024)` completion, one sequence per row. Both reach a
+denominator of 64, and both are checked to consume the same trajectory **ids**,
+not merely the same count.
 
 ### 4.1 The null control
 
-Neither arm reproduces the other bitwise, and not because of packing. The packed
-arm accumulates the 64 trajectories over 3 microbatches (19, 26 and 19 segments);
-the unpacked arm accumulates the same 64 over 16 microbatches of 4. Float32
-addition is not associative, so the two totals differ even where every
-intermediate value is identical. A verdict therefore needs a tolerance, and a
-tolerance picked by eye establishes nothing.
+Neither arm reproduces the other bitwise, and not because of packing: packed
+accumulates the 64 trajectories over 3 microbatches (19, 26 and 19 segments),
+unpacked over 16 of 4, and float32 addition is not associative. A verdict
+therefore needs a tolerance, and one picked by eye establishes nothing.
 
-`--null_control N` measures that tolerance rather than guessing it. It replaces
-the packed arm with a second **unpacked** arm at microbatch size `N`. Both arms
-then see byte-identical rows and no packing is involved anywhere, so every
-difference it reports is reassociation alone. The runs below use
-`--null_control 8` against the unpacked microbatch size of 4.
-
-The quantity to read is **observed ÷ null**. A ratio at or below 1 means packing
-disagrees with unpacked no more than repartitioning the same unpacked rows does,
-which is the floor the hardware imposes on any comparison of this kind. This
-self-calibrates across dtype and checkpoint, where a fixed `--rtol` does not.
+`--null_control N` measures it. It replaces the packed arm with a second
+**unpacked** arm at microbatch size `N`, so both arms see byte-identical rows, no
+packing is involved anywhere, and every difference it reports is reassociation
+alone. Read **observed ÷ null**: a ratio at or below 1 means packing disagrees no
+more than repartitioning the same unpacked rows does. This self-calibrates across
+dtype and checkpoint, where a fixed `--rtol` does not. The runs below use
+`--null_control 8` against an unpacked microbatch size of 4.
 
 ### 4.2 Result
 
 Qwen3-0.6B on a 4-chip v5p, `trainer_fsdp` 4, `MAX_SEQ_TOKEN_PER_TPU` 4096,
 `epsilon` 0.2, `beta` 0, `loss_agg_mode` `sequence-mean-token-mean`. The 64
-completion lengths are sampled from the `maz-q35-12` trajectory CSV (21 steps of
-GSM8K rollouts), converted from characters at 3.6 chars per token because
-`completion_tokens` is empty in that CSV for the reason noted in §3. Median 312
-tokens, max 1024.
-
-Run in three regimes: a randomly initialized model, the trained checkpoint
+completion lengths are sampled from the `maz-q35-12` trajectory CSV (median 312
+tokens, max 1024), converted from characters at 3.6 chars per token because
+`completion_tokens` is empty there for the reason in §3. Three regimes — random
+init, the trained checkpoint
 `gs://maxtext-model-checkpoints/qwen3-0.6b/2025-10-27/scanned/0/items`, and that
-same checkpoint in bfloat16. Six runs in total, each regime measured against its
-own null.
+checkpoint in bfloat16 — each against its own null. Six runs.
 
 | | random init, fp32 | checkpoint, fp32 | checkpoint, bf16 |
 | --- | --- | --- | --- |
@@ -454,123 +432,70 @@ own null.
 | Gradient, worst per-param cosine | 0.999998329 | 0.999999618 | 0.975404 |
 | &nbsp;&nbsp;*same, null* | 0.999998411 | 0.999999665 | 0.948764 |
 
-**Every ratio is at or below 1, in every regime.** A comparison that involves no
-packing at all, and whose two arms produce bitwise identical log-probabilities,
-reproduces the packed-unpacked difference — and in bfloat16 exceeds it. There is
-no residual for packing to account for.
+**Every ratio is at or below 1.** A comparison with no packing in it, whose two
+arms produce bitwise identical log-probabilities, reproduces the packed-unpacked
+difference and in bfloat16 exceeds it. No residual is left for packing to
+account for.
 
-Per parameter at the trained checkpoint in float32, sorted by observed
-relative L2:
+Per parameter at the checkpoint in float32, ten of the thirteen paths disagree
+*less* under packing than under the null, and the three above 1 are within a
+factor of 1.6. Worst four by observed relative L2:
 
 | observed | null | ratio | cosine | path |
 | --- | --- | --- | --- | --- |
 | 1.286e-03 | 1.106e-03 | 1.163 | 0.999999618 | `token_embedder/embedding` |
 | 2.158e-04 | 2.660e-04 | 0.811 | 1.000000033 | `decoder/layers/mlp/wi_0/kernel` |
 | 2.140e-04 | 2.769e-04 | 0.773 | 1.000000074 | `decoder/layers/pre_self_attention_layer_norm/scale` |
-| 2.085e-04 | 2.581e-04 | 0.808 | 0.999999982 | `decoder/layers/post_self_attention_layer_norm/scale` |
-| 2.048e-04 | 2.467e-04 | 0.830 | 0.999999948 | `decoder/layers/self_attention/out/kernel` |
-| 1.973e-04 | 2.574e-04 | 0.767 | 1.000000191 | `decoder/layers/mlp/wo/kernel` |
-| 1.834e-04 | 1.647e-04 | 1.113 | 1.000000012 | `decoder/layers/self_attention/query_norm/scale` |
 | 1.425e-04 | 8.955e-05 | 1.591 | 1.000000134 | `decoder/decoder_norm/scale` |
 
-Ten of the thirteen parameter paths disagree *less* under packing than under the
-null. The three above 1 are within a factor of 1.6, and the largest ratio belongs
-to `decoder_norm/scale`, a single 1024-element vector. Cosines above 1 by 1e-7
-are themselves float32 error in the dot product, which is the scale everything in
-this table sits at.
+The largest ratio belongs to `decoder_norm/scale`, a single 1024-element vector.
+Cosines above 1 by 1e-7 are float32 error in the dot product, which is the scale
+this whole table sits at.
 
 ### 4.3 Where the logp difference comes from
 
-The null's per-token logp difference is **exactly 0.0** in all three regimes, to
-every bit. Microbatch partitioning does not perturb the forward pass at all; its
-effect is confined to the order in which gradient contributions are summed. So
-the packed arm's nonzero logp difference is not accumulation — it comes from the
-row, which is 4096 tokens carrying `segment_ids` rather than 1536 tokens carrying
-padding. The same terms are reduced over different widths inside attention and
-the layer norms.
-
-That difference tracks logit magnitude rather than anything structural. It falls
-27× between the randomly initialized model and the trained checkpoint
-(4.986e-04 → 1.878e-05 mean absolute) while the logp scale falls from -247.8 to
--13.57. A defect in segment isolation would not behave that way: masking the
-wrong tokens produces an error set by the content of the neighbouring sequences,
-not by how well trained the weights are.
+The null's per-token logp difference is **exactly 0.0** in all three regimes, so
+microbatch partitioning does not perturb the forward pass at all. The packed
+arm's nonzero difference comes from the row — 4096 tokens with `segment_ids`
+rather than 1536 with padding, reducing the same terms over different widths in
+attention and the layer norms. It tracks logit magnitude: it falls 27×
+(4.986e-04 → 1.878e-05) between random init and the trained checkpoint as the
+logp scale falls from -247.8 to -13.57. A segment-isolation defect would instead
+scale with the content of the neighbouring sequences, not with how well trained
+the weights are.
 
 ### 4.4 bfloat16 cannot answer this question
 
-The bfloat16 column FAILs at `--rtol 2e-2`, and the FAIL carries no information.
-Its null is *larger* than its observation — 2.054e-01 against 1.287e-01
-whole-tree, worst cosine 0.948764 against 0.975404. Repartitioning identical
-unpacked rows perturbs the bfloat16 gradient more than packing does. With 8
-significand bits the reassociation floor sits above whatever either comparison is
-trying to resolve, so neither a PASS nor a FAIL in this column means anything.
-
-Use `--float32` for any run intended to produce a verdict. It injects
-`dtype=float32 weight_dtype=float32 matmul_precision=highest` into the MaxText
-config through `pyconfig.initialize`.
-
-This is a statement about the measurement, not about the production runs.
-Training in bfloat16 is unaffected, because it never computes the same quantity
-by two routes and compares them.
+The bfloat16 column FAILs at `--rtol 2e-2`, and the FAIL carries no information:
+its null is *larger* than its observation — 2.054e-01 against 1.287e-01
+whole-tree, worst cosine 0.948764 against 0.975404. With 8 significand bits the
+reassociation floor sits above whatever either comparison is trying to resolve,
+so neither a PASS nor a FAIL there means anything. Use `--float32`, which injects
+`dtype=float32 weight_dtype=float32 matmul_precision=highest` through
+`pyconfig.initialize`. This constrains the measurement only; production training
+in bfloat16 never computes the same quantity twice and compares.
 
 ### 4.5 Five ways to get a meaningless PASS
 
-Each of these was hit while building the harness, and each yields a PASS or a
-FAIL that means nothing. Any reimplementation will hit them too.
+Each was hit while building the harness. Any reimplementation will hit them too.
 
-**Old logps must come from the policy's own forward pass.** The GRPO per-token
-loss is `max(-A·r, -A·clip(r, 1-ε, 1+ε_high))` with `r = exp(logp - old_logp)`
-([`algo_core.py:489-492`](tunix/rl/algo_core.py#L489-L492)); only the unclipped
-branch carries a gradient. Synthetic old logps drawn from a guessed distribution
-put `r` outside the clip band for every token, so both arms return **exactly
-zero** gradient and agree vacuously. With logps spanning 400 nats no constant
-substitute works either. `measure_old_logps()` runs the policy forward over the
-unpacked microbatches and uses its own logps, reproducing production, where the
-old policy is one optimizer step behind and `r` starts at 1. The harness
-additionally reports an all-zero gradient tree as `INVALID`, never `PASS`.
-
-**The pooled loss is the only comparable scalar.** The arms split the same
-trajectories into 3 and 16 microbatches, so a mean of per-microbatch means
-weights them differently. `MaxTextTrainingEngine` caches one `WeightedMetric`
-per microbatch; the comparison must use `Σ unreduced_sum / Σ denominator`, which
-is also what the optimizer sees.
-
-**Sum-based gradient sketches cancel.** An earlier version compared per-tensor
-sums to avoid holding two gradient trees at once. For
-`post_self_attention_layer_norm/scale` those sums were -0.662 and -0.617 out of
-a total absolute mass of 179.3 — a 6.8e-02 relative difference produced entirely
-by cancellation, not by disagreement. The exact relative L2 for the same tensor
-is 1.6e-03. Both trees are sharded over the same mesh as the weights, so holding
-them together costs one extra parameter-sized buffer; the comparison is now
-exact, per parameter.
-
-**A nan sorts past the worst row.** Every comparison against nan is False, so
-`sort` places it arbitrarily and reading `rows[0]` can miss it entirely. One
-`--null_control 2` run produced `nan` on `token_embedder/embedding` while the
-other twelve parameters stayed finite, and still printed PASS off a worst-case of
-4.766e-07. `compare()` now partitions non-finite rows out before sorting and
-returns `INVALID` naming the paths.
-
-**A null control smaller than the shard count is not a null control.** A
-microbatch with fewer rows than `trainer_fsdp × trainer_dp` leaves shards with no
-rows, which is what produced the nan above. `parse_args` now rejects a
-`--null_control` that is not a multiple of the shard count. The whole exercise
-turns on the null being trustworthy; a null that is quietly broken is worse than
-none, because it supplies a number that looks like calibration.
+| Trap | Why the verdict is empty | Guard |
+| --- | --- | --- |
+| Old logps from a guessed distribution | `r = exp(logp - old_logp)` lands outside the GRPO clip band for every token, and only the unclipped branch of `max(-A·r, -A·clip(r, 1-ε, 1+ε_high))` carries a gradient ([`algo_core.py:489-492`](tunix/rl/algo_core.py#L489-L492)), so both arms return exactly zero and agree vacuously. No constant works either, with logps spanning 400 nats. | `measure_old_logps()` runs the policy forward and uses its own logps; an all-zero tree returns `INVALID` |
+| Mean of per-microbatch means | 3 microbatches against 16 weights the same trajectories differently | pool as `Σ unreduced_sum / Σ denominator`, which is what the optimizer sees |
+| Per-tensor gradient sums | Cancellation, not disagreement: `post_self_attention_layer_norm/scale` summed to -0.662 against -0.617 on 179.3 of absolute mass, reading as 6.8e-02 where the exact figure is 1.6e-03 | exact per-parameter relative L2 and cosine, at the cost of one extra parameter-sized buffer |
+| A `nan` in the tree | Every comparison against `nan` is False, so `sort` places it anywhere and `rows[0]` misses it; one run printed PASS off a worst case of 4.766e-07 | non-finite rows partition out before the sort and return `INVALID` naming the paths |
+| `--null_control` below the shard count | A microbatch narrower than `trainer_fsdp × trainer_dp` leaves shards with no rows, which produced the `nan` above; a broken null is worse than none, since it supplies a number that looks like calibration | `parse_args` rejects a value that is not a multiple of the shard count |
 
 ### 4.6 Scope
 
 Covered at the floor of float32 arithmetic, on real length statistics, at both
 random initialization and a trained checkpoint: the assembler, the segment-id
-plumbing, the attention mask, the loss reduction and the backward pass.
-
-Not covered:
-
-- **MoE routing.** Qwen3-0.6B is dense. Expert routing under packing is the one
-  arithmetic path in the 35B configuration this harness does not reach.
-- **Optimizer state and accumulation across steps.** The harness stops at
-  `fwd_bwd`, so it cannot see error that compounds over an optimizer trajectory.
-  §3 covers that range, with the weaker guarantee described there.
+plumbing, the attention mask, the loss reduction and the backward pass. Not
+covered: **MoE routing**, since Qwen3-0.6B is dense and expert routing under
+packing is the one arithmetic path in the 35B configuration this harness does not
+reach; and **cross-step optimizer state**, since the harness stops at `fwd_bwd`.
+§3 covers that second range, with the weaker guarantee described there.
 
 Reproducing:
 
