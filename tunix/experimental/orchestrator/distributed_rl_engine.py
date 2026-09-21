@@ -384,7 +384,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     for req in requests:
       worker = self._rollout_pool._get_next_actor(
             kwargs={
-                "route_key": route_key,
+                "route_key": req.traj_id,
                 "request_id": req.request_id,
                 "prompt": req.prompt,
             },
