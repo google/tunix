@@ -14,7 +14,6 @@ from typing import Annotated, Any, Final, Literal, get_args
 import numpy as np
 import pydantic
 
-
 # ==============================================================================
 # --- Pure ATIF Base Classes ---
 # ==============================================================================
@@ -52,6 +51,47 @@ def _serialize_dict(value: dict[str, Any] | None) -> dict[str, Any] | None:
     return v
 
   return _convert(value)
+
+
+ATIF_EXT_KEY: Final[str] = "_atif_ext"
+
+
+def _pack_subclass_values_into_extra(
+    source_model: pydantic.BaseModel,
+    target_field_names: set[str] | frozenset[str],
+    exclude_field_names: set[str] | frozenset[str] = frozenset(),
+) -> dict[str, Any] | None:
+  """Packs non-target fields from `source_model` into `extra[ATIF_EXT_KEY]`."""
+  source_field_names = set(type(source_model).model_fields)
+  if source_field_names == target_field_names:
+    return None
+
+  extra_field_names = (
+      source_field_names - target_field_names - exclude_field_names
+  )
+
+  # Dump all non-excluded fields, then pop subclass extra fields
+  # so only target fields remain in source_values_by_key.
+  source_values_by_key = source_model.model_dump(
+      exclude=set(exclude_field_names),
+      exclude_none=True,
+  )
+  extra_values_by_key = {
+      field: source_values_by_key.pop(field)
+      for field in extra_field_names
+      if field in source_values_by_key
+  }
+
+  # Nest extra fields under extra[ATIF_EXT_KEY] to avoid colliding.
+  extra_by_key = source_values_by_key.get("extra") or {}
+  if extra_values_by_key:
+    atif_ext_by_key = extra_by_key.get(ATIF_EXT_KEY) or {}
+    extra_by_key = extra_by_key | {
+        ATIF_EXT_KEY: atif_ext_by_key | extra_values_by_key
+    }
+
+  source_values_by_key["extra"] = extra_by_key or None
+  return source_values_by_key
 
 
 IntArray = Annotated[
@@ -330,6 +370,19 @@ class Step(pydantic.BaseModel):
         )
     return self
 
+  def to_atif_step(self, step_id_offset: int = 0) -> Step:
+    """Converts this step to a base ATIF Step, storing subclass fields in extra."""
+    packed_values_by_key = _pack_subclass_values_into_extra(
+        self, _STEP_FIELD_NAMES
+    )
+    if packed_values_by_key is None:
+      return self
+    packed_values_by_key["step_id"] = self.step_id + step_id_offset
+    return Step(**packed_values_by_key)
+
+
+_STEP_FIELD_NAMES: Final[frozenset[str]] = frozenset(Step.model_fields)
+
 
 class Agent(pydantic.BaseModel):
   """Basic agent metadata."""
@@ -390,6 +443,24 @@ class TrajectoryMetadata(pydantic.BaseModel):
       default=None,
       description="Custom root-level metadata.",
   )
+
+  def to_atif_metadata(self) -> TrajectoryMetadata:
+    """Converts this metadata to base ATIF TrajectoryMetadata, storing subclass fields in extra."""
+    packed_values_by_key = _pack_subclass_values_into_extra(
+        self,
+        _TRAJECTORY_METADATA_FIELD_NAMES,
+        exclude_field_names={"steps", "subagent_trajectories"},
+    )
+    return (
+        TrajectoryMetadata(**packed_values_by_key)
+        if packed_values_by_key is not None
+        else self
+    )
+
+
+_TRAJECTORY_METADATA_FIELD_NAMES: Final[frozenset[str]] = frozenset(
+    TrajectoryMetadata.model_fields
+)
 
 
 class Trajectory(TrajectoryMetadata):
@@ -545,6 +616,10 @@ class TunixAgentStep(Step):
       )
     return self
 
+  def to_atif_step(self, step_id_offset: int = 1) -> Step:
+    """Converts this 0-indexed Tunix step to a 1-indexed base ATIF Step."""
+    return super().to_atif_step(step_id_offset=step_id_offset)
+
 
 class TunixEnvStep(Step):
   """A single turn/interaction environment step with Tunix RL extensions."""
@@ -580,6 +655,10 @@ class TunixEnvStep(Step):
           f" but source is '{self.source}'"
       )
     return self
+
+  def to_atif_step(self, step_id_offset: int = 1) -> Step:
+    """Converts this 0-indexed Tunix step to a 1-indexed base ATIF Step."""
+    return super().to_atif_step(step_id_offset=step_id_offset)
 
 
 class TunixTrajectoryMetadata(TrajectoryMetadata):

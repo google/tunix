@@ -860,77 +860,147 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
             }
         ),
     )
-    self.assertEqual(
-        converted_traj.steps[1].observation, "Observation 2 result"
-    )
-    self.assertEqual(converted_traj.steps[1].reward, 1.0)
-    self.assertFalse(converted_traj.steps[1].done)
-    self.assertEqual(converted_traj.steps[1].mc_return, 2.0)
-    np.testing.assert_array_equal(
-        converted_traj.steps[1].assistant_tokens, np.array([103, 104])
-    )
-    np.testing.assert_array_equal(
-        converted_traj.steps[1].assistant_masks, np.array([1, 1])
-    )
-    np.testing.assert_array_equal(
-        converted_traj.steps[1].logprobs, np.array([-0.3, -0.4])
-    )
-    np.testing.assert_array_equal(
-        converted_traj.steps[1].env_tokens, np.array([202])
-    )
-    np.testing.assert_array_equal(
-        converted_traj.steps[1].env_masks, np.array([1])
-    )
-    self.assertEqual(
-        converted_traj.steps[1].info,
-        {"trace_2": "def", "env_meta_2": "val2"},
+
+  def test_to_atif_step_on_tunix_agent_step_packs_subclass_fields_into_extra(
+      self,
+  ):
+    agent_step = trajectory_testing.TUNIX_AGENT_STEP_1.model_copy(
+        update={
+            "extra": {
+                "user_key": "val",
+                trajectory.ATIF_EXT_KEY: {"existing_key": 99},
+            }
+        }
     )
 
-    # d) Step #3 (the third converted step, index 2) contains (7) and (8)
-    expected_step_2 = converter.to_tunix_step(
-        agent_step=step_5, env_step=step_6
-    )
-    self.assertStepEqual(converted_traj.steps[2], expected_step_2)
+    atif_agent_step = agent_step.to_atif_step()
+
+    self.assertIs(type(atif_agent_step), trajectory.Step)
+    self.assertEqual(atif_agent_step.step_id, agent_step.step_id + 1)
     self.assertEqual(
-        converted_traj.steps[2].model_response, "Action 3 response"
-    )
-    self.assertEqual(converted_traj.steps[2].thought, "Thought 3")
-    self.assertIsNone(converted_traj.steps[2].action)
-    self.assertEqual(
-        converted_traj.steps[2].observation, "Observation 3 result"
-    )
-    self.assertEqual(converted_traj.steps[2].reward, 3.0)
-    self.assertTrue(converted_traj.steps[2].done)
-    self.assertEqual(converted_traj.steps[2].mc_return, 3.0)
-    np.testing.assert_array_equal(
-        converted_traj.steps[2].assistant_tokens, np.array([105, 106])
-    )
-    np.testing.assert_array_equal(
-        converted_traj.steps[2].assistant_masks, np.array([1, 1])
-    )
-    np.testing.assert_array_equal(
-        converted_traj.steps[2].logprobs, np.array([-0.5, -0.6])
-    )
-    np.testing.assert_array_equal(
-        converted_traj.steps[2].env_tokens, np.array([203])
-    )
-    np.testing.assert_array_equal(
-        converted_traj.steps[2].env_masks, np.array([1])
-    )
-    self.assertEqual(
-        converted_traj.steps[2].info,
-        {"trace_3": "ghi", "env_meta_3": "val3"},
+        atif_agent_step.extra,
+        {
+            "user_key": "val",
+            trajectory.ATIF_EXT_KEY: {
+                "existing_key": 99,
+                "mc_return": 2.5,
+                "assistant_tokens": [10, 20],
+                "assistant_masks": [1, 1],
+                "logprobs": [-0.5, -0.2],
+                "policy_version": 3,
+            },
+        },
     )
 
-    # e) Status is correct
+  def test_to_atif_step_on_tunix_env_step_packs_subclass_fields_into_extra(
+      self,
+  ):
+    atif_env_step = trajectory_testing.TUNIX_ENV_STEP_0.to_atif_step()
+
+    self.assertIs(type(atif_env_step), trajectory.Step)
     self.assertEqual(
-        converted_traj.status, agent_types.TrajectoryStatus.SUCCEEDED
+        atif_env_step.step_id, trajectory_testing.TUNIX_ENV_STEP_0.step_id + 1
+    )
+    self.assertEqual(
+        atif_env_step.extra,
+        {
+            "env_extra_key": "env_extra_val",
+            trajectory.ATIF_EXT_KEY: {
+                "reward": 1.0,
+                "done": False,
+                "env_tokens": [1, 2],
+                "env_masks": [1, 1],
+            },
+        },
     )
 
-    # f) Rest of the fields of the converted trajectory are correct
-    self.assertEqual(converted_traj.reward, 4.5)
-    self.assertEqual(converted_traj.env_time, {"init": 0.1, "step": 0.6})
-    self.assertEqual(converted_traj.reward_time, {"eval": 0.25})
+  def test_to_atif_metadata_on_tunix_metadata_packs_subclass_fields_into_extra(
+      self,
+  ):
+    atif_meta = trajectory_testing.TUNIX_METADATA_1.to_atif_metadata()
+
+    self.assertIs(type(atif_meta), trajectory.TrajectoryMetadata)
+    self.assertEqual(atif_meta.trajectory_id, "t_atif")
+    self.assertEqual(atif_meta.session_id, "sess_01")
+    self.assertEqual(atif_meta.notes, "Metadata projection test")
+    self.assertEqual(
+        atif_meta.extra,
+        {
+            "user_meta": "val",
+            trajectory.ATIF_EXT_KEY: {
+                "prompt_id": "p_1",
+                "group_index": 2,
+                "target_policy_versions": [2, 3],
+                "status": "COMPLETED",
+                "total_reward": 3.5,
+                "hyperparams": {"temperature": 0.7},
+                "env_time": {"step_0": 0.05},
+                "reward_time": {"step_1": 0.02},
+            },
+        },
+    )
+
+  def test_to_atif_step_on_base_step_returns_self(self):
+    self.assertIs(
+        trajectory_testing.STEP_1_1.to_atif_step(),
+        trajectory_testing.STEP_1_1,
+    )
+
+  def test_to_atif_metadata_on_base_metadata_returns_self(self):
+    self.assertIs(
+        trajectory_testing.METADATA_1.to_atif_metadata(),
+        trajectory_testing.METADATA_1,
+    )
+
+  def test_to_atif_metadata_on_tunix_trajectory_strips_steps_and_packs_extra(
+      self,
+  ):
+    atif_meta = trajectory_testing.TUNIX_TRAJECTORY_1.to_atif_metadata()
+
+    self.assertIs(type(atif_meta), trajectory.TrajectoryMetadata)
+    self.assertEqual(atif_meta.trajectory_id, "t_atif")
+    self.assertEqual(
+        atif_meta.extra,
+        {
+            "user_meta": "val",
+            trajectory.ATIF_EXT_KEY: {
+                "prompt_id": "p_1",
+                "group_index": 2,
+                "target_policy_versions": [2, 3],
+                "status": "COMPLETED",
+                "total_reward": 3.5,
+                "hyperparams": {"temperature": 0.7},
+                "env_time": {"step_0": 0.05},
+                "reward_time": {"step_1": 0.02},
+            },
+        },
+    )
+    self.assertNotIn("steps", atif_meta.extra)
+    self.assertNotIn("steps", atif_meta.extra[trajectory.ATIF_EXT_KEY])
+    self.assertNotIn("subagent_trajectories", atif_meta.extra)
+    self.assertNotIn(
+        "subagent_trajectories", atif_meta.extra[trajectory.ATIF_EXT_KEY]
+    )
+
+  def test_to_atif_metadata_on_base_trajectory_strips_steps(self):
+    base_atif_meta = trajectory_testing.TRAJECTORY_1.to_atif_metadata()
+
+    self.assertIs(type(base_atif_meta), trajectory.TrajectoryMetadata)
+    self.assertEqual(base_atif_meta, trajectory_testing.METADATA_1)
+
+  def test_to_atif_projection_on_tunix_trajectory_constructs_valid_trajectory(
+      self,
+  ):
+    tunix_traj = trajectory_testing.TUNIX_TRAJECTORY_1
+    atif_meta = tunix_traj.to_atif_metadata()
+    atif_steps = [step.to_atif_step() for step in tunix_traj.steps]
+
+    atif_traj = trajectory.Trajectory(
+        **atif_meta.model_dump(),
+        steps=atif_steps,
+    )
+
+    self.assertEqual([s.step_id for s in atif_traj.steps], [1, 2])
 
 
 if __name__ == "__main__":
