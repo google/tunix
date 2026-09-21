@@ -125,6 +125,16 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " computation."
       ),
   )
+  parser.add_argument(
+      "--trainer_expert",
+      type=int,
+      default=None,
+      help=(
+          "Trainer expert-parallel mesh dimension. Included in the sequence"
+          " packing row count because MaxText's MoE shards the batch axis over"
+          " ('fsdp','expert') jointly."
+      ),
+  )
   parser.add_argument("--model_id", type=str, default="Qwen/Qwen3-1.7B")
   parser.add_argument("--tokenizer_path", type=str, default="")
   parser.add_argument("--temperature", type=float, default=1.0)
@@ -510,6 +520,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           max_segments_per_packed_row=args.max_segments_per_packed_row,
           trainer_fsdp=args.trainer_fsdp,
           trainer_dp=args.trainer_dp,
+          trainer_expert=args.trainer_expert,
       ),
       metrics_logging_options=metrics_logging_options,
       trajectory_log_dir=args.trajectory_log_dir,
