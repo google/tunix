@@ -16,8 +16,8 @@ apiVersion: jobset.x-k8s.io/v1alpha2
 kind: JobSet
 metadata:
   name: ${JOBSET_NAME}
-  namespace: default
-spec:
+  namespace: ${NAMESPACE}
+${QUEUE_LABEL}spec:
   coordinator:
     replicatedJob: proc
   failurePolicy:
@@ -40,11 +40,11 @@ spec:
           spec:
             dnsPolicy: ClusterFirstWithHostNet
             hostNetwork: true
-            restartPolicy: Never
+            restartPolicy: Never${PRIORITY_CLASS_LINE}
             terminationGracePeriodSeconds: 10
             nodeSelector:
               cloud.google.com/gke-tpu-accelerator: ${TPU_TYPE}
-              cloud.google.com/gke-tpu-topology: ${TPU_TOPOLOGY}
+              cloud.google.com/gke-tpu-topology: ${TPU_TOPOLOGY}${RESERVATION_SELECTOR}
             affinity:
               podAffinity:
                 requiredDuringSchedulingIgnoredDuringExecution:
@@ -220,11 +220,11 @@ spec:
           spec:
             dnsPolicy: ClusterFirstWithHostNet
             hostNetwork: true
-            restartPolicy: OnFailure
+            restartPolicy: OnFailure${PRIORITY_CLASS_LINE}
             terminationGracePeriodSeconds: 10
             nodeSelector:
               cloud.google.com/gke-tpu-accelerator: ${TPU_TYPE}
-              cloud.google.com/gke-tpu-topology: ${TPU_TOPOLOGY}
+              cloud.google.com/gke-tpu-topology: ${TPU_TOPOLOGY}${RESERVATION_SELECTOR}
             affinity:
               # place on nodes in the same nodepool
               podAffinity:
