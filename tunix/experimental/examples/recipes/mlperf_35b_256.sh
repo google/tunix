@@ -93,9 +93,9 @@ export VLLM_ENABLE_EXPERT_PARALLEL="true"
 export VLLM_ADDITIONAL_CONFIG='{"sharding":{"sharding_strategy":{"expert_parallelism":4,"tensor_parallelism":1,"enable_dp_attention":true}},"custom_mamba_cache_multiplier":16,"maxtext_config":{"scan_layers":false,"attention":"vllm_rpa","allow_split_physical_axes":true,"use_multimodal":false,"prefuse_moe_weights":true}}'
 
 # Prefix Caching Configs
-export ENABLE_PREFIX_CACHING="false"
-export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=256
-export VLLM_MAMBA_CACHE_MODE="none"
+export ENABLE_PREFIX_CACHING="${ENABLE_PREFIX_CACHING:-false}"
+export VLLM_PREFIX_CACHE_RETENTION_INTERVAL="${VLLM_PREFIX_CACHE_RETENTION_INTERVAL:-256}"
+export VLLM_MAMBA_CACHE_MODE="${VLLM_MAMBA_CACHE_MODE:-${MAMBA_CACHE_MODE:-none}}"
 
 # KV Cache Configs
 export ROLLOUT_FREE_KV_CACHE="false"
