@@ -484,19 +484,7 @@ so neither a PASS nor a FAIL there means anything. Use `--float32`, which inject
 `pyconfig.initialize`. This constrains the measurement only; production training
 in bfloat16 never computes the same quantity twice and compares.
 
-### 4.5 Five ways to get a meaningless PASS
-
-Each was hit while building the harness. Any reimplementation will hit them too.
-
-| Trap | Why the verdict is empty | Guard |
-| --- | --- | --- |
-| Old logps from a guessed distribution | `r = exp(logp - old_logp)` lands outside the GRPO clip band for every token, and only the unclipped branch of `max(-A·r, -A·clip(r, 1-ε, 1+ε_high))` carries a gradient ([`algo_core.py:489-492`](tunix/rl/algo_core.py#L489-L492)), so both arms return exactly zero and agree vacuously. No constant works either, with logps spanning 400 nats. | `measure_old_logps()` runs the policy forward and uses its own logps; an all-zero tree returns `INVALID` |
-| Mean of per-microbatch means | 3 microbatches against 16 weights the same trajectories differently | pool as `Σ unreduced_sum / Σ denominator`, which is what the optimizer sees |
-| Per-tensor gradient sums | Cancellation, not disagreement: `post_self_attention_layer_norm/scale` summed to -0.662 against -0.617 on 179.3 of absolute mass, reading as 6.8e-02 where the exact figure is 1.6e-03 | exact per-parameter relative L2 and cosine, at the cost of one extra parameter-sized buffer |
-| A `nan` in the tree | Every comparison against `nan` is False, so `sort` places it anywhere and `rows[0]` misses it; one run printed PASS off a worst case of 4.766e-07 | non-finite rows partition out before the sort and return `INVALID` naming the paths |
-| `--null_control` below the shard count | A microbatch narrower than `trainer_fsdp × trainer_dp` leaves shards with no rows, which produced the `nan` above; a broken null is worse than none, since it supplies a number that looks like calibration | `parse_args` rejects a value that is not a multiple of the shard count |
-
-### 4.6 Scope
+### 4.5 Scope
 
 Covered at the floor of float32 arithmetic, on real length statistics, at both
 random initialization and a trained checkpoint: the assembler, the segment-id
@@ -532,6 +520,9 @@ Drop `--maxtext_ckpt_path` for the random-init regime and `--float32` for the
 bfloat16 one; run each with and without `--null_control 8`. `--length_csv` draws
 completion lengths from a trajectory CSV produced by a real run; omit it for the
 built-in lognormal. Always read the pair, never the observed run alone.
+
+Five ways this comparison returns a verdict that carries no information are in
+the appendix, for anyone reimplementing it.
 
 ---
 
@@ -835,3 +826,18 @@ comparison.
 | The difference does not grow with training | post-step-0 divergence at or below the step-0 sampling-noise floor; all trend slopes p ≥ 0.124 |
 | The generated text is indistinguishable | cross-arm 5-gram Jaccard 0.1291 against a within-arm same-policy baseline of 0.1242 and 0.1264 |
 | Rewards are the ones the trainer used | CSV per-step means match orchestrator `reward_mean` exactly |
+
+---
+
+## Appendix. Five ways to get a meaningless PASS
+
+Recorded for anyone reimplementing the §4 harness. Each was hit while building
+it, and each yields a verdict that carries no information.
+
+| Trap | Why the verdict is empty | Guard |
+| --- | --- | --- |
+| Old logps from a guessed distribution | `r = exp(logp - old_logp)` lands outside the GRPO clip band for every token, and only the unclipped branch of `max(-A·r, -A·clip(r, 1-ε, 1+ε_high))` carries a gradient ([`algo_core.py:489-492`](tunix/rl/algo_core.py#L489-L492)), so both arms return exactly zero and agree vacuously. No constant works either, with logps spanning 400 nats. | `measure_old_logps()` runs the policy forward and uses its own logps; an all-zero tree returns `INVALID` |
+| Mean of per-microbatch means | 3 microbatches against 16 weights the same trajectories differently | pool as `Σ unreduced_sum / Σ denominator`, which is what the optimizer sees |
+| Per-tensor gradient sums | Cancellation, not disagreement: `post_self_attention_layer_norm/scale` summed to -0.662 against -0.617 on 179.3 of absolute mass, reading as 6.8e-02 where the exact figure is 1.6e-03 | exact per-parameter relative L2 and cosine, at the cost of one extra parameter-sized buffer |
+| A `nan` in the tree | Every comparison against `nan` is False, so `sort` places it anywhere and `rows[0]` misses it; one run printed PASS off a worst case of 4.766e-07 | non-finite rows partition out before the sort and return `INVALID` naming the paths |
+| `--null_control` below the shard count | A microbatch narrower than `trainer_fsdp × trainer_dp` leaves shards with no rows, which produced the `nan` above; a broken null is worse than none, since it supplies a number that looks like calibration | `parse_args` rejects a value that is not a multiple of the shard count |
