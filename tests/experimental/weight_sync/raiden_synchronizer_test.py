@@ -606,6 +606,37 @@ class RaidenSynchronizerTest(absltest.TestCase):
     ):
       sync.apply_to_runner(runner)
 
+  def test_explicit_global_shard_indices_and_multi_numa_endpoints(self):
+    mesh = jax.sharding.Mesh(np.array(jax.devices()[:1]), ("data",))
+    sharding = jax.sharding.NamedSharding(
+        mesh, jax.sharding.PartitionSpec("data")
+    )
+    arr = jax.device_put(jnp.ones((2, 4), jnp.float32), sharding)
+    sync = raiden_synchronizer.RaidenSynchronizer("rollout", {"w": arr})
+    ws = self.ws_lib.instances[0]
+    self.assertEqual(ws.kwargs["global_shard_indices"], [0])
+    md = sync.work_unit_metadata()
+    self.assertEqual(md.variables[0].global_shard_indices, (0,))
+
+    # Simulate Host 1 with 4 local shards (global indices [4, 5, 6, 7])
+    # and 2 NUMA NICs.
+    sync._global_shard_indices = [4, 5, 6, 7]
+    ws.num_shards = 4
+    ws.get_local_endpoints = lambda: [
+        {"endpoint": "10.0.1.1:40001", "shards": [4, 5]},
+        {"endpoint": "10.0.1.2:40002", "shards": [6, 7]},
+    ]
+    md_host1 = sync.work_unit_metadata()
+    self.assertEqual(
+        md_host1.shards,
+        (
+            "10.0.1.1:40001",
+            "10.0.1.1:40001",
+            "10.0.1.2:40002",
+            "10.0.1.2:40002",
+        ),
+    )
+
 
 if __name__ == "__main__":
   absltest.main()
