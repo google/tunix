@@ -321,21 +321,12 @@ def init_global_fleet(
       fleet_inst.preflight()
     if hasattr(fleet_inst, "plan"):
       fleet_inst.plan()
-      entries = (
-          getattr(getattr(fleet_inst, "plan_", None), "entries", None) or []
+      logging.info(
+          "[SandboxFleet] Task plan initialized with %d image entry(ies). Eager"
+          " full-dataset warmpool allocation is skipped in favor of dynamic"
+          " batch prewarming.",
+          len(getattr(getattr(fleet_inst, "plan_", None), "entries", None) or []),
       )
-      images = [e.image for e in entries]
-      if images and hasattr(fleet_inst, "warm_images"):
-        target_replicas = fleet_kwargs["max_warmpool_size"]
-        fleet_inst.warm_images(
-            images, replicas_override=target_replicas, wait=False
-        )
-        logging.info(
-            "[SandboxFleet] Started initial warmpools for %d image(s) (%d"
-            " replicas each).",
-            len(images),
-            target_replicas,
-        )
     _GLOBAL_FLEET = fleet_inst
     atexit.register(teardown_global_fleet)
     return _GLOBAL_FLEET
@@ -382,6 +373,7 @@ def teardown_global_fleet() -> None:
               run_id=run_id,
               in_cluster=getattr(c, "in_cluster", True),
               namespace=c_ns,
+              delete_pods=False,
           )
     except Exception as e:  # pylint: disable=broad-exception-caught
       logging.warning("[SandboxFleet] Reaper note: %s", e)

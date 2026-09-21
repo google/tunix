@@ -540,11 +540,11 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   program = None
   try:
     if args.use_agent_sandbox:
-      # Do not statically register warmpools for all benchmark tasks upfront.
-      # Dynamic sliding-window prewarming with initial barrier is handled by
+      # Initialize fleet plan from dataset. Eager warmpools are skipped;
+      # dynamic sliding-window prewarming with initial barrier is handled by
       # PrewarmDatasetIterator below.
       fleet = swe_env._init_global_fleet(  # pylint: disable=protected-access
-          tasks=None,
+          tasks=dataset,
           max_concurrency=args.max_concurrency,
           num_generations=args.num_generations,
           batch_size=args.batch_size,
@@ -664,6 +664,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
                 run_id=run_id,
                 in_cluster=getattr(c, "in_cluster", True),
                 namespace=c_ns,
+                delete_pods=False,
             )
       except Exception as e:  # pylint: disable=broad-exception-caught
         logging.warning("Reaper note: %s", e)

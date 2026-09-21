@@ -324,7 +324,7 @@ class SandboxUtilsTest(absltest.TestCase):
       rewrite = sandbox_utils.get_image_rewrite_fn()
       self.assertIsNone(rewrite)
 
-  def test_init_global_fleet_starts_initial_warmpools(self):
+  def test_init_global_fleet_plans_without_eager_warming(self):
     mock_fleet = mock.MagicMock()
     mock_entry = mock.MagicMock()
     mock_entry.image = "test-image:v1"
@@ -339,11 +339,8 @@ class SandboxUtilsTest(absltest.TestCase):
             num_generations=4,
         )
         self.assertEqual(fleet, mock_fleet)
-        mock_fleet.warm_images.assert_called_once_with(
-            ["test-image:v1"],
-            replicas_override=4,
-            wait=False,
-        )
+        mock_fleet.plan.assert_called_once()
+        mock_fleet.warm_images.assert_not_called()
 
   def test_init_global_fleet_configures_labels_and_teardown_hooks(self):
     mock_fleet = mock.MagicMock()
@@ -384,6 +381,7 @@ class SandboxUtilsTest(absltest.TestCase):
             run_id="test-run-1234",
             in_cluster=True,
             namespace="test-ns",
+            delete_pods=False,
         )
 
 
