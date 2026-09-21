@@ -456,6 +456,26 @@ def build_maxtext_config(
   if os.environ.get("OVERRIDE_MODEL_CONFIG", "").lower() in ("1", "true") and "override_model_config=true" not in argv:
     argv.append("override_model_config=true")
 
+  # Generic passthrough, applied last so it wins over anything derived above.
+  # MaxText exposes far more knobs than this helper has named parameters for --
+  # MoE kernel selection, splash-attention block sizes, GDN tuning, custom mesh
+  # rules -- and a run that needs one of them otherwise has nowhere to put it.
+  # Space-separated key=value pairs, e.g.
+  #   MAXTEXT_EXTRA_FLAGS="use_ring_of_experts=true sa_block_q=512"
+  # MaxText rejects unknown keys outright (ValueError listing every valid
+  # field), so a typo fails at startup rather than being silently dropped.
+  _extra = os.environ.get("MAXTEXT_EXTRA_FLAGS", "").strip()
+  if _extra:
+    _pairs = [tok for tok in _extra.split() if tok]
+    _bad = [tok for tok in _pairs if "=" not in tok]
+    if _bad:
+      raise ValueError(
+          "MAXTEXT_EXTRA_FLAGS entries must be key=value, got: "
+          f"{' '.join(_bad)}"
+      )
+    logging.info("MAXTEXT_EXTRA_FLAGS adding %d flag(s): %s", len(_pairs), _pairs)
+    argv.extend(_pairs)
+
   logging.info("MaxText config argv: %s", argv)
   return pyconfig.initialize(argv)
 
