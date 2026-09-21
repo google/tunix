@@ -158,11 +158,16 @@ export ROLLOUT_MESH_FSDP=${ROLLOUT_MESH_FSDP:-1}
 export ROLLOUT_MESH_TP=${ROLLOUT_MESH_TP:-16}
 # Expert parallelism for the rollout. Required, not optional, for fully-MoE
 # models whose per-expert intermediate dim cannot absorb the tensor-parallel
-# degree -- see --mesh_expert in run_rollout_node.py. ROLLOUT_MESH_TP *
-# ROLLOUT_MESH_EXPERT must divide the model's head counts, because tpu-inference
-# derives the attention/GDN head divisor from the product of the
-# ('model', 'expert', 'dcp') axes.
+# degree. ROLLOUT_MESH_TP * ROLLOUT_MESH_EXPERT must divide the model's head
+# counts, because tpu-inference derives the attention/GDN head divisor from the
+# product of the ('model', 'expert', 'dcp') axes.
+#
+# run_rollout_node.py has no --mesh_expert; it reads expert_parallel_size out of
+# --vllm_config_json (see `ep_size = vllm_overrides.pop("expert_parallel_size")`).
+# Pass it that way, as deepswe_dist already does, rather than inventing a flag.
+# ROLLOUT_VLLM_CONFIG_JSON, when set, wins -- the degree is merged into it.
 export ROLLOUT_MESH_EXPERT=${ROLLOUT_MESH_EXPERT:-1}
+export ROLLOUT_VLLM_CONFIG_JSON=${ROLLOUT_VLLM_CONFIG_JSON:-}
 
 # Kubernetes Cluster & Scheduling Options
 export K8S_NAMESPACE=${K8S_NAMESPACE:-${NAMESPACE:-default}}
@@ -239,7 +244,7 @@ start_orchestrator() {
         ${MAX_SEQ_TOKEN_PER_TPU:+--max_seq_token_per_tpu=${MAX_SEQ_TOKEN_PER_TPU}} \
         ${MAX_SEGMENTS_PER_PACKED_ROW:+--max_segments_per_packed_row=${MAX_SEGMENTS_PER_PACKED_ROW}} \
         ${TRAINER_MESH_FSDP:+--trainer_fsdp=${TRAINER_MESH_FSDP}} \
-        ${TRAINER_MESH_EXPERT:+--trainer_expert=${TRAINER_MESH_EXPERT}} \
+        $( [[ "${TRAINER_MESH_EXPERT:-1}" -gt 1 ]] && echo "--trainer_expert=${TRAINER_MESH_EXPERT}" ) \
         ${debug_flag} \
     " \
     | apply_manifest
@@ -403,6 +408,21 @@ start_rollout_instance() {
     raiden_env+=" RAIDEN_USE_FFI=0"
   fi
 
+  # Rollout expert parallelism travels in the vLLM config JSON, which
+  # run_rollout_node.py already understands; it has no --mesh_expert flag.
+  # An explicit ROLLOUT_VLLM_CONFIG_JSON wins, and the degree is merged into it
+  # so the two knobs cannot silently disagree.
+  local rollout_vllm_json="${ROLLOUT_VLLM_CONFIG_JSON}"
+  if [[ "${ROLLOUT_MESH_EXPERT:-1}" -gt 1 ]]; then
+    if [[ -z "${rollout_vllm_json}" ]]; then
+      rollout_vllm_json="{\"expert_parallel_size\": ${ROLLOUT_MESH_EXPERT}}"
+    else
+      rollout_vllm_json=$(ROLLOUT_MESH_EXPERT="${ROLLOUT_MESH_EXPERT}" \
+        "$PYTHON" -c 'import json,os,sys; c=json.loads(sys.argv[1]); c.setdefault("expert_parallel_size", int(os.environ["ROLLOUT_MESH_EXPERT"])); print(json.dumps(c))' \
+        "${rollout_vllm_json}")
+    fi
+  fi
+
   "$PYTHON" "$YAML_GEN" \
     "$YAML_DIR/${ROLLOUT_JOBSET_YAML}" \
     --jobset_name="${target_id}" \
@@ -423,7 +443,7 @@ start_rollout_instance() {
         --port=${ROLLOUT_PORT} \
         --mesh_fsdp=${ROLLOUT_MESH_FSDP} \
         --mesh_tp=${ROLLOUT_MESH_TP} \
-        --mesh_expert=${ROLLOUT_MESH_EXPERT} \
+        ${rollout_vllm_json:+--vllm_config_json='${rollout_vllm_json}'} \
         --model_name=${MODEL_NAME} \
         --model_id=${MODEL_ID} \
         --model_dir=${MODEL_DIR} \
