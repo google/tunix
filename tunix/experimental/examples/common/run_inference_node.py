@@ -167,7 +167,7 @@ def main(argv: list[str], context: Any = None) -> None:
         args.model_dir,
         _qwen3_config(args.model_name),
         mesh,
-        dtype=jnp.bfloat16,
+        dtype=jnp.bfloat16,  # pyrefly: ignore[bad-argument-type]
     )
     core = rl_inference_worker.InferenceWorker({"reference": reference_model})
 
