@@ -184,6 +184,7 @@ export DEBUG=1
 # DeepSWE Environment & Agent Sandbox
 export DATASET_PATH="gs://mlperf_dataset/r2e-gym-easy"
 export USE_AGENT_SANDBOX=1
+export SCAFFOLD="openhands"
 export SANDBOX_NAMESPACE="trellis"
 export SANDBOX_NODE_SELECTOR_KEY="cloud.google.com/gke-nodepool"
 export SANDBOX_NODE_SELECTOR_VAL="sandbox-cpu-pool"
