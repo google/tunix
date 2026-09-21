@@ -307,6 +307,19 @@ class SandboxUtilsTest(absltest.TestCase):
           "europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/my_image:tag",
       )
 
+    # Verify both without trailing slash and with wrapping quotes are normalized
+    for test_prefix in (
+        "europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/tunix",
+        '"europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/"',
+    ):
+      with mock.patch.dict(os.environ, {"IMAGE_REWRITE_PREFIX": test_prefix}):
+        rewrite = sandbox_utils.get_image_rewrite_fn()
+        self.assertIsNotNone(rewrite)
+        self.assertEqual(
+            rewrite("my_image:v1"),
+            "europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/my_image:v1",
+        )
+
     with mock.patch.dict(os.environ, {}, clear=True):
       rewrite = sandbox_utils.get_image_rewrite_fn()
       self.assertIsNone(rewrite)

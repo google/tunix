@@ -349,7 +349,7 @@ start_orchestrator() {
         ${dataset_args} \
         ${shuffle_arg} \
         ${sandbox_arg} \
-        ${IMAGE_REWRITE_PREFIX:+--image_rewrite_prefix=\"${IMAGE_REWRITE_PREFIX}\"} \
+        ${IMAGE_REWRITE_PREFIX:+--image_rewrite_prefix=${IMAGE_REWRITE_PREFIX}} \
         ${MAX_SEQ_TOKEN_PER_TPU:+--max_seq_token_per_tpu=${MAX_SEQ_TOKEN_PER_TPU}} \
         ${MAX_SEGMENTS_PER_PACKED_ROW:+--max_segments_per_packed_row=${MAX_SEGMENTS_PER_PACKED_ROW}} \
         ${TRAINER_MESH_FSDP:+--trainer_fsdp=${TRAINER_MESH_FSDP}} \

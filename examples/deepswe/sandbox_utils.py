@@ -107,7 +107,7 @@ def get_image_rewrite_fn(
     return image_rewrite
   prefix = os.getenv("IMAGE_REWRITE_PREFIX")
   if prefix:
-    prefix = prefix.rstrip("/")
+    prefix = prefix.strip('"\'').rstrip("/")
     return lambda img: f"{prefix}/{img.split('/')[-1]}"
   return None
 

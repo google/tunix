@@ -432,7 +432,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
     raise ValueError("offpolicy/max_staleness must be non-negative.")
 
   if args.image_rewrite_prefix:
-    os.environ["IMAGE_REWRITE_PREFIX"] = args.image_rewrite_prefix
+    os.environ["IMAGE_REWRITE_PREFIX"] = args.image_rewrite_prefix.strip('"\'')
 
   logging.info("=== Starting Distributed DeepSWE GRPO Orchestrator ===")
   logging.info(
