@@ -212,8 +212,8 @@ start_orchestrator() {
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ORCHESTRATOR_PORT}" \
     --worker_startup_command=" \
-      export TRAINER_MAX_PROMPT_LENGTH=${TRAINER_MAX_PROMPT_LENGTH:-2048}; \
-      export TRAINER_MAX_RESPONSE_LENGTH=${TRAINER_MAX_RESPONSE_LENGTH:-2048}; \
+      export TRAINER_MAX_PROMPT_LENGTH=${TRAINER_MAX_PROMPT_LENGTH:-4096}; \
+      export TRAINER_MAX_RESPONSE_LENGTH=${TRAINER_MAX_RESPONSE_LENGTH:-8192}; \
       ${sandbox_env} \
       ${SCAFFOLD:+SCAFFOLD=\"${SCAFFOLD}\"} \
       ${WANDB_API_KEY:+WANDB_API_KEY=\"${WANDB_API_KEY}\"} \
@@ -332,8 +332,8 @@ start_trainer() {
       FLOAT32_GATE_LOGITS=${FLOAT32_GATE_LOGITS:-true} \
       FLOAT32_LOGITS=${FLOAT32_LOGITS:-true} \
       MAX_GRAD_NORM=${MAX_GRAD_NORM:-0.125} \
-      TRAINER_MAX_PROMPT_LENGTH=${TRAINER_MAX_PROMPT_LENGTH:-2048} \
-      TRAINER_MAX_RESPONSE_LENGTH=${TRAINER_MAX_RESPONSE_LENGTH:-2048} \
+      TRAINER_MAX_PROMPT_LENGTH=${TRAINER_MAX_PROMPT_LENGTH:-4096} \
+      TRAINER_MAX_RESPONSE_LENGTH=${TRAINER_MAX_RESPONSE_LENGTH:-8192} \
       TUNIX_OUTLIER_DUMP_PATH=${TUNIX_OUTLIER_DUMP_PATH:-/tmp/outlier_dump} \
       ${TRAINABLE_PARAMETERS_MASK:+TRAINABLE_PARAMETERS_MASK='${TRAINABLE_PARAMETERS_MASK}'} \
       VERIFY_WEIGHTS=${VERIFY_WEIGHTS} python -m tunix.experimental.distributed.runtime.main \
@@ -350,8 +350,8 @@ start_trainer() {
         --model_id=${MODEL_ID} \
         --model_dir=${MODEL_DIR} \
         --tokenizer_path=${TOKENIZER_PATH} \
-        --max_prompt_length=${TRAINER_MAX_PROMPT_LENGTH:-2048} \
-        --max_response_length=${TRAINER_MAX_RESPONSE_LENGTH:-2048} \
+        --max_prompt_length=${TRAINER_MAX_PROMPT_LENGTH:-4096} \
+        --max_response_length=${TRAINER_MAX_RESPONSE_LENGTH:-8192} \
         --mini_batch_size=${MINI_BATCH_SIZE} \
         --num_generations=${NUM_GENERATIONS} \
         --train_micro_batch_size=${TRAIN_MICRO_BATCH_SIZE} \
