@@ -613,7 +613,7 @@ if cfg:
       worker_id="${ROLLOUT_ID}-${i}"
     fi
     "$PYTHON_BIN" "$YAML_GENERATOR" \
-      "${YAML_DIR}/jobset.tpu.yaml" \
+      "${YAML_DIR}/${ROLLOUT_JOBSET_YAML:-jobset.tpu.yaml}" \
       --jobset_name="${replica_id}" \
       --tpu_slice=${ROLLOUT_TPU_SLICE} \
       --worker_container_image="${TUNIX_IMAGE}" \
