@@ -393,6 +393,15 @@ class GRPOLearnerTest(parameterized.TestCase):
     )
     self.assertIsNone(train_example.sampler_is_weights)
 
+  def test_seq_logprob_error_threshold_below_one_raises(self):
+    with self.assertRaisesRegex(
+        ValueError, 'seq_logprob_error_threshold must be >= 1.0'
+    ):
+      grpo_lib.GRPOConfig(
+          num_generations=2,
+          seq_logprob_error_threshold=0.2,
+      )
+
   def test_sampler_is_token_uses_trainer_logps_and_sets_weights(self):
     rl_engine, _, _ = setup(
         {'return_logprobs': True, 'rollout_micro_batch_size': 1}

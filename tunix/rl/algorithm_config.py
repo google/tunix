@@ -178,6 +178,9 @@ class GRPOConfig(AlgorithmConfig):
       strictly increasing. Reports the sampler/trainer offset per length
       bucket, which separates offsets that shrink as sequences get longer from
       offsets that do not. `None` disables the diagnostic.
+    seq_logprob_error_threshold: Optional sequence-level multiplicative
+      log-probability error threshold. Sequences exceeding this threshold are
+      masked out of the loss.
 
   References:
     - GRPO: https://arxiv.org/abs/2402.03300
@@ -205,12 +208,23 @@ class GRPOConfig(AlgorithmConfig):
   truncated_importance_sampling_ratio_min: float | None = None
   truncated_importance_sampling_ratio: float | None = None
   sampler_is_length_buckets: Sequence[int] | None = None
+  seq_logprob_error_threshold: float | None = None
 
   def __post_init__(self):
     if self.epsilon_high is None:
       self.epsilon_high = self.epsilon
 
     super().__post_init__()
+
+    if (
+        self.seq_logprob_error_threshold is not None
+        and self.seq_logprob_error_threshold < 1.0
+    ):
+      raise ValueError(
+          "seq_logprob_error_threshold must be >= 1.0 when set (since "
+          "exp(|logp_diff|) >= 1.0). Received: "
+          f"{self.seq_logprob_error_threshold}"
+      )
 
     if self.num_generations <= 1:
       raise ValueError(

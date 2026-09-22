@@ -1154,12 +1154,16 @@ class SamplerTrainerAgreementTest(parameterized.TestCase):
   def test_returns_empty_when_logps_missing(self):
     mask = jnp.ones((2, 3), dtype=jnp.int32)
     logps = jnp.zeros((2, 3), dtype=jnp.float32)
-    self.assertEqual(
-        common.sampler_trainer_agreement(None, logps, mask), ({}, None)
+    metrics, weights, filtered_mask = common.sampler_trainer_agreement(
+        None, logps, mask
     )
-    self.assertEqual(
-        common.sampler_trainer_agreement(logps, None, mask), ({}, None)
+    self.assertEqual((metrics, weights), ({}, None))
+    np.testing.assert_array_equal(filtered_mask, mask)
+    metrics, weights, filtered_mask = common.sampler_trainer_agreement(
+        logps, None, mask
     )
+    self.assertEqual((metrics, weights), ({}, None))
+    np.testing.assert_array_equal(filtered_mask, mask)
 
   @parameterized.named_parameters(
       ("trainer_shape_mismatch", (2, 3), (2, 4), (2, 3)),
@@ -1186,8 +1190,11 @@ class SamplerTrainerAgreementTest(parameterized.TestCase):
         [[-0.1, -0.5, -2.0], [-0.3, -1.0, -0.2]], dtype=jnp.float32
     )
     mask = jnp.ones((2, 3), dtype=jnp.int32)
-    metrics, weights = common.sampler_trainer_agreement(logps, logps, mask)
+    metrics, weights, filtered_mask = common.sampler_trainer_agreement(
+        logps, logps, mask
+    )
     self.assertIsNone(weights)
+    np.testing.assert_array_equal(filtered_mask, mask)
     self.assertAlmostEqual(metrics["sampler_trainer/logp_diff_mean"][0], 0.0)
     self.assertAlmostEqual(metrics["sampler_trainer/logp_diff_max"][0], 0.0)
     self.assertAlmostEqual(metrics["sampler_trainer/prob_diff_mean"][0], 0.0)
@@ -1202,7 +1209,7 @@ class SamplerTrainerAgreementTest(parameterized.TestCase):
     trainer = jnp.array([[-0.1, -0.5, -5.0]], dtype=jnp.float32)
     # Mask out the divergent third token; the metric must ignore it.
     mask = jnp.array([[1, 1, 0]], dtype=jnp.int32)
-    metrics, _ = common.sampler_trainer_agreement(rollout, trainer, mask)
+    metrics, _, _ = common.sampler_trainer_agreement(rollout, trainer, mask)
     self.assertAlmostEqual(metrics["sampler_trainer/logp_diff_mean"][0], 0.0)
     self.assertAlmostEqual(metrics["sampler_trainer/logp_diff_max"][0], 0.0)
 
@@ -1213,9 +1220,10 @@ class SamplerTrainerAgreementTest(parameterized.TestCase):
         jnp.array([[1.0, 3.0, 10.0]], dtype=jnp.float32)
     )
     mask = jnp.ones((1, 3), dtype=jnp.int32)
-    metrics, weights = common.sampler_trainer_agreement(
+    metrics, weights, filtered_mask = common.sampler_trainer_agreement(
         rollout, trainer, mask, sampler_is="token", sampler_is_threshold=2.0
     )
+    np.testing.assert_array_equal(filtered_mask, mask)
     self.assertIsNotNone(weights)
     # Clamped at threshold 2.0: [1, 2, 2].
     np.testing.assert_allclose(
@@ -1226,6 +1234,79 @@ class SamplerTrainerAgreementTest(parameterized.TestCase):
     # Two of three positions (3x, 10x) exceed the threshold.
     self.assertAlmostEqual(
         metrics["sampler_is/frac_clipped_at_threshold"][0], 2.0 / 3.0, places=5
+    )
+
+  def test_seq_logprob_error_threshold_unpacked_masks_divergent_sequence(self):
+    # Seq 0: |diff| = 0.1 -> exp(0.1) = 1.105 <= 2.0 (kept)
+    # Seq 1: |diff| = 1.0 -> exp(1.0) = 2.718 > 2.0 (masked out)
+    rollout = jnp.array([[-1.0, -1.0, -1.0], [-1.0, -1.0, -1.0]], dtype=jnp.float32)
+    trainer = jnp.array([[-0.9, -1.1, -1.0], [-2.0, -2.0, -2.0]], dtype=jnp.float32)
+    mask = jnp.ones((2, 3), dtype=jnp.int32)
+    metrics, weights, filtered_mask = common.sampler_trainer_agreement(
+        rollout,
+        trainer,
+        mask,
+        sampler_is="token",
+        sampler_is_threshold=2.0,
+        seq_logprob_error_threshold=2.0,
+    )
+    self.assertIsNotNone(filtered_mask)
+    np.testing.assert_array_equal(
+        np.asarray(filtered_mask),
+        np.array([[1, 1, 1], [0, 0, 0]], dtype=np.int32),
+    )
+    # TIS weights on the rejected sequence must also be zeroed out.
+    np.testing.assert_array_equal(np.asarray(weights)[1], np.zeros(3))
+    self.assertAlmostEqual(
+        metrics["sampler_trainer/seq_error_masked_frac"][0], 0.5, places=5
+    )
+    self.assertAlmostEqual(
+        metrics["sampler_trainer/seq_error_masked_count"][0], 1.0, places=5
+    )
+
+  def test_seq_logprob_error_threshold_packed_masks_only_divergent_segment(self):
+    # Single packed row with 2 segments (seg 1: tokens 0..1, seg 2: tokens 2..3, pad: token 4)
+    # Seg 1 has |diff| = 0.0 -> mult_err = 1.0 <= 2.0 (kept)
+    # Seg 2 has |diff| = 1.2 -> mult_err = exp(1.2) = 3.32 > 2.0 (masked out)
+    rollout = jnp.array([[-1.0, -1.0, -1.0, -1.0, 0.0]], dtype=jnp.float32)
+    trainer = jnp.array([[-1.0, -1.0, -2.2, -2.2, 0.0]], dtype=jnp.float32)
+    mask = jnp.array([[1, 1, 1, 1, 0]], dtype=jnp.int32)
+    segment_ids = jnp.array([[1, 1, 2, 2, 0]], dtype=jnp.int32)
+    metrics, _, filtered_mask = common.sampler_trainer_agreement(
+        rollout,
+        trainer,
+        mask,
+        seq_logprob_error_threshold=2.0,
+        segment_ids=segment_ids,
+    )
+    np.testing.assert_array_equal(
+        np.asarray(filtered_mask),
+        np.array([[1, 1, 0, 0, 0]], dtype=np.int32),
+    )
+    self.assertAlmostEqual(
+        metrics["sampler_trainer/seq_error_masked_frac"][0], 0.5, places=5
+    )
+
+  def test_seq_logprob_error_threshold_packed_all_padding_and_negative_ids(self):
+    # Degenerate all-padding row (with 0 and -1 pad segment IDs) should not
+    # fail or wrap negative indices in take_along_axis.
+    rollout = jnp.array([[-1.0, -1.0, -1.0]], dtype=jnp.float32)
+    trainer = jnp.array([[-1.0, -1.0, -1.0]], dtype=jnp.float32)
+    mask = jnp.array([[0, 0, 0]], dtype=jnp.int32)
+    segment_ids = jnp.array([[-1, 0, -1]], dtype=jnp.int32)
+    metrics, _, filtered_mask = common.sampler_trainer_agreement(
+        rollout,
+        trainer,
+        mask,
+        seq_logprob_error_threshold=2.0,
+        segment_ids=segment_ids,
+    )
+    np.testing.assert_array_equal(
+        np.asarray(filtered_mask),
+        np.array([[0, 0, 0]], dtype=np.int32),
+    )
+    self.assertAlmostEqual(
+        metrics["sampler_trainer/seq_error_masked_frac"][0], 0.0, places=5
     )
 
 

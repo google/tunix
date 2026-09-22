@@ -408,6 +408,14 @@ class StandardRLProgram(RLProgram):
     self.sampler_is_threshold = getattr(
         self.algo.algo_config, "sampler_is_threshold", 2.0
     )
+    raw_seq_err_thresh = getattr(
+        self.algo.algo_config, "seq_logprob_error_threshold", None
+    )
+    self.seq_logprob_error_threshold = (
+        float(raw_seq_err_thresh)
+        if isinstance(raw_seq_err_thresh, (int, float))
+        else None
+    )
 
     self.reward_fns = list(reward_fns) if reward_fns else []
     self.num_generations = algo.num_generations
@@ -1243,20 +1251,29 @@ class StandardRLProgram(RLProgram):
         datatypes.Role.ACTOR, items=logps_req
     )
     trainer_logps = np.asarray(trainer_logps.per_token_logps, dtype=np.float32)
-    sa_metrics, sampler_is_weights = rl_common.sampler_trainer_agreement(
-        batch.old_per_token_logps,
-        trainer_logps,
-        batch.completion_mask,
-        sampler_is=self.sampler_is,
-        sampler_is_threshold=self.sampler_is_threshold,
+    sa_metrics, sampler_is_weights, filtered_completion_mask = (
+        rl_common.sampler_trainer_agreement(
+            batch.old_per_token_logps,
+            trainer_logps,
+            batch.completion_mask,
+            sampler_is=self.sampler_is,
+            sampler_is_threshold=self.sampler_is_threshold,
+            seq_logprob_error_threshold=self.seq_logprob_error_threshold,
+            segment_ids=batch.segment_ids,
+        )
     )
     for name, (value, agg_fn) in sa_metrics.items():
       accumulator.setdefault(name, (agg_fn, []))[1].append(float(value))
 
     updates: dict[str, Any] = {}
+    if self.seq_logprob_error_threshold is not None:
+      updates["completion_mask"] = filtered_completion_mask
     if sampler_is_weights is not None:
       updates["sampler_is_weights"] = sampler_is_weights
-    if self.sampler_is == "token":
+    if (
+        self.sampler_is == "token"
+        or self.seq_logprob_error_threshold is not None
+    ):
       updates["old_per_token_logps"] = trainer_logps
     if updates:
       batch = dataclasses.replace(batch, **updates)

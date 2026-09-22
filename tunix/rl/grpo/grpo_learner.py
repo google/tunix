@@ -247,9 +247,12 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
           for logprobs in rollout_output.logprobs
       ])
       old_per_token_logps = rollout_per_token_logps
-    needs_trainer_logps = (
-        not self.algo_config.use_rollout_logps
-        or self.algo_config.sampler_is == "token"
+    needs_trainer_logps = not self.algo_config.use_rollout_logps or (
+        rollout_per_token_logps is not None
+        and (
+            self.algo_config.sampler_is == "token"
+            or self.algo_config.seq_logprob_error_threshold is not None
+        )
     )
     if needs_trainer_logps:
       devices = self.rl_engine.r2m[rl_engine_lib.Role.ACTOR].devices
@@ -270,7 +273,11 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
     if not self.algo_config.use_rollout_logps:
       old_per_token_logps = trainer_per_token_logps
     elif (
-        self.algo_config.sampler_is == "token"
+        (
+            self.algo_config.sampler_is == "token"
+            or self.algo_config.seq_logprob_error_threshold is not None
+        )
+        and rollout_per_token_logps is not None
         and trainer_per_token_logps is not None
     ):
       old_per_token_logps = trainer_per_token_logps
@@ -329,80 +336,18 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         mode=mode,
     )
 
-    if (
-        rollout_per_token_logps is not None
-        and trainer_per_token_logps is not None
-    ):
-      mask = jax_completion_mask.astype(jnp.bool_)
-      mask_f = mask.astype(jnp.float32)
-      mask_sum = jnp.maximum(mask_f.sum(), 1.0)
-      diff = jnp.abs(rollout_per_token_logps - trainer_per_token_logps)
-      diff_mean = float((diff * mask_f).sum() / mask_sum)
-      diff_max = float(jnp.where(mask, diff, 0.0).max())
-      rp = jnp.exp(rollout_per_token_logps)
-      tp = jnp.exp(trainer_per_token_logps)
-      prob_diff = jnp.abs(rp - tp)
-      prob_diff_mean = float((prob_diff * mask_f).sum() / mask_sum)
-      prob_diff_max = float(jnp.where(mask, prob_diff, 0.0).max())
-      rp_flat = rp.reshape(-1)
-      tp_flat = tp.reshape(-1)
-      mf = mask_f.reshape(-1)
-      rp_mean = (rp_flat * mf).sum() / mask_sum
-      tp_mean = (tp_flat * mf).sum() / mask_sum
-      rp_d = (rp_flat - rp_mean) * mf
-      tp_d = (tp_flat - tp_mean) * mf
-      cov = (rp_d * tp_d).sum() / mask_sum
-      rp_var = (rp_d * rp_d).sum() / mask_sum
-      tp_var = (tp_d * tp_d).sum() / mask_sum
-      pearson = float(cov / jnp.sqrt(jnp.maximum(rp_var * tp_var, 1e-12)))
-      self.rl_engine.buffer_metrics(
-          {
-              "sampler_trainer/logp_diff_mean": (diff_mean, np.mean),
-              "sampler_trainer/logp_diff_max": (diff_max, np.max),
-              "sampler_trainer/prob_diff_mean": (prob_diff_mean, np.mean),
-              "sampler_trainer/prob_diff_max": (prob_diff_max, np.max),
-              "sampler_trainer/probs_pearson_corr": (pearson, np.mean),
-          },
-          mode=mode,
-      )
-    if (
-        self.algo_config.sampler_is == "token"
-        and rollout_per_token_logps is not None
-        and trainer_per_token_logps is not None
-    ):
-      asst_mask_f = jax_completion_mask.astype(jnp.float32)
-      log_ratio = trainer_per_token_logps - rollout_per_token_logps
-      log_ratio = jnp.clip(log_ratio, min=-20.0, max=20.0)
-      sampler_is_weights = jax.lax.stop_gradient(
-          jnp.minimum(
-              jnp.exp(log_ratio),
-              self.algo_config.sampler_is_threshold,
-          )
-          * asst_mask_f
-      )
-      mask_sum = jnp.maximum(asst_mask_f.sum(), 1.0)
-      is_mean = float((sampler_is_weights * asst_mask_f).sum() / mask_sum)
-      is_max = float(jnp.where(asst_mask_f > 0, sampler_is_weights, 0.0).max())
-      frac_clipped = float(
-          (
-              (
-                  (jnp.exp(log_ratio) > self.algo_config.sampler_is_threshold)
-                  & (asst_mask_f > 0)
-              ).astype(jnp.float32)
-          ).sum()
-          / mask_sum
-      )
-      self.rl_engine.buffer_metrics(
-          {
-              "sampler_is/weight_mean": (is_mean, np.mean),
-              "sampler_is/weight_max": (is_max, np.max),
-              "sampler_is/frac_clipped_at_threshold": (
-                  frac_clipped,
-                  np.mean,
-              ),
-          },
-          mode=mode,
-      )
+    agreement_metrics, sampler_is_weights, jax_completion_mask = (
+        common.sampler_trainer_agreement(
+            rollout_per_token_logps,
+            trainer_per_token_logps,
+            jax_completion_mask,
+            sampler_is=self.algo_config.sampler_is,
+            sampler_is_threshold=self.algo_config.sampler_is_threshold,
+            seq_logprob_error_threshold=self.algo_config.seq_logprob_error_threshold,
+        )
+    )
+    if agreement_metrics:
+      self.rl_engine.buffer_metrics(agreement_metrics, mode=mode)
 
     # log user defined metrics
     for m_fn in self.metric_fns:
