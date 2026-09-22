@@ -195,19 +195,27 @@ class SglangJaxSamplerTokenInputTest(absltest.TestCase):
         encode=lambda text: [ord(ch) for ch in text],
         dedup_bos_ids=lambda ids: ids,
     )
-    params = types.SimpleNamespace(
-        max_new_tokens=0,
-        n=1,
-        temperature=0.0,
-        stop_token_ids=[],
-        skip_special_tokens=True,
-        top_p=None,
-        top_k=None,
-        truncate_prompt_tokens=None,
-    )
-    params.convert_to_dict = lambda: dict(params.__dict__)
+
+    def make_default_sampling_params():
+      # `Engine.get_default_sampling_params` constructs a fresh SamplingParams
+      # per call, and `__call__` writes this call's kwargs onto whatever it
+      # hands back. Returning a shared object here would leak kwargs (e.g.
+      # `truncate_prompt_tokens`) into the next call.
+      params = types.SimpleNamespace(
+          max_new_tokens=0,
+          n=1,
+          temperature=0.0,
+          stop_token_ids=[],
+          skip_special_tokens=True,
+          top_p=None,
+          top_k=None,
+          truncate_prompt_tokens=None,
+      )
+      params.convert_to_dict = lambda: dict(params.__dict__)
+      return params
+
     sampler.engine = types.SimpleNamespace(
-        get_default_sampling_params=lambda: params
+        get_default_sampling_params=make_default_sampling_params
     )
     sampler.tokenize = mock.Mock(
         side_effect=AssertionError("tokenize must not be called")
