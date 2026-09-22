@@ -289,6 +289,11 @@ def init_global_fleet(
     fleet_cfg = FleetConfig(**fleet_kwargs)
     fleet_inst = SandboxFleet(fleet_cfg)
 
+    # Workaround for agent-sandbox-rl teardown bug: scope teardown to this run's
+    # run-id selector so teardown does not delete other concurrent tenants' warm pools/templates.
+    for c in getattr(fleet_inst, "registry", []):
+      c.resources.managed_selector = fleet_inst.run_selector
+
     image_rewrite_fn = get_image_rewrite_fn(image_rewrite)
     fleet_inst._image_rewrite_fn = image_rewrite_fn
 

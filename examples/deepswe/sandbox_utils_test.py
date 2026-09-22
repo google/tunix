@@ -363,6 +363,21 @@ class SandboxUtilsTest(absltest.TestCase):
               },
           )
 
+  def test_init_global_fleet_scopes_teardown_to_run_selector(self):
+    mock_fleet = mock.MagicMock()
+    mock_cluster = mock.MagicMock()
+    mock_fleet.registry = [mock_cluster]
+    mock_fleet.run_selector.return_value = "agents.x-k8s.io/asrl-run-id=test-run"
+
+    mock_as_rl = mock.MagicMock()
+    mock_as_rl.SandboxFleet.return_value = mock_fleet
+    with mock.patch.dict("sys.modules", {"agent_sandbox_rl": mock_as_rl}):
+      with mock.patch.object(sandbox_utils, "_GLOBAL_FLEET", None):
+        _ = sandbox_utils.init_global_fleet(tasks=None, num_generations=4)
+        self.assertEqual(
+            mock_cluster.resources.managed_selector, mock_fleet.run_selector
+        )
+
   def test_teardown_global_fleet_invokes_teardown_and_reaper(self):
     mock_fleet = mock.MagicMock()
     mock_fleet.run_id = "test-run-1234"
