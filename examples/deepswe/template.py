@@ -525,6 +525,20 @@ def get_openhands_pod_template(
       }],
   }
 
+  tolerations_raw = os.getenv("SANDBOX_TOLERATIONS")
+  if tolerations_raw:
+    try:
+      extra_pod_spec["tolerations"] = json.loads(tolerations_raw)
+    except Exception as e:
+      logging.warning("Failed to parse SANDBOX_TOLERATIONS as JSON: %s", e)
+  elif node_selector and node_selector.get("cloud.google.com/gke-nodepool") == "sandbox-np":
+    extra_pod_spec["tolerations"] = [{
+        "key": "workload",
+        "operator": "Equal",
+        "value": "sandbox",
+        "effect": "NoSchedule",
+    }]
+
   return TemplateSpec(
       keepalive_command=keepalive_cmd,
       resources=ResourceSpec(
