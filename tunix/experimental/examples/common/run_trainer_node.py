@@ -20,7 +20,6 @@ import argparse
 import ast
 import asyncio
 import logging
-import math
 import os
 from pathlib import Path
 import pickle
@@ -625,9 +624,7 @@ def _create_maxtext_trainer_factory(args) -> tuple[Any, Mesh]:
       args.model_id, args.tokenizer_path, args.model_dir
   )
   checkpointing_options = _checkpointing_options(args)
-  grad_accumulation_steps = max(
-      1, math.ceil(args.mini_batch_size / args.train_micro_batch_size)
-  )
+  grad_accumulation_steps = _gradient_accumulation_steps(args)
   if args.optimizer_schedule_type:
     logging.warning(
         "--optimizer_schedule_type=%s is ignored by the maxtext backend, which"
