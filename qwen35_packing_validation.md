@@ -524,29 +524,17 @@ Reproducing. The numbers above were produced on Tunix `maz-q35` at `929737ea`
 and MaxText `packing-compare-harness` at `02cf283fa`. Neither branch is
 required:
 
-| | branch used | also verified on | not verified on |
-| --- | --- | --- | --- |
-| Tunix | `maz-q35` @ `929737ea` | `main` @ `124bc03c` | — |
-| MaxText | `packing-compare-harness` @ `02cf283fa` | — | `main` @ `78aa15557` |
+| | branch used | also verified on |
+| --- | --- | --- |
+| Tunix | `maz-q35` @ `929737ea` | `main` @ `124bc03c` |
+| MaxText | `packing-compare-harness` @ `02cf283fa` | `main` @ `78aa15557` |
 
-Tunix `main` reproduces the **observed** arm of the trained-checkpoint float32
-column to every digit printed above (whole-tree 3.118e-04, worst per-parameter
-1.286e-03, cosine 0.999999618, pooled loss 8.939e-06); the null runs in that
-column were not repeated against `main`. `max_target_length=4096` and the whole
-29-argument MaxText config are identical, because [PR
-#2239](https://github.com/google/tunix/pull/2239) landed the
-`max_seq_token_per_tpu` plumbing this measurement depends on. Without it
-`max_target_length` pins to 1536 and packing is a silent no-op, so a run against
-a Tunix older than #2239 measures nothing. One edit to the harness is needed on
-`main`: `create_batch_assembler(group_size=...)` was renamed to
+With both repositories on `main` the observed arm reproduces bit for bit; the
+null runs were not repeated there. Tunix must be at or after [PR
+#2239](https://github.com/google/tunix/pull/2239), without which
+`max_target_length` pins to 1536 and packing is a silent no-op. On `main` the
+harness needs one edit: `create_batch_assembler(group_size=...)` became
 `num_generations=` in `16febb14`.
-
-The MaxText branch carries three commits `main` does not, and all three are
-confined to `tests/end_to_end/tpu/compare_tunix_trainer.py`, which this harness
-never imports — so nothing in it is load-bearing. It is 20 commits *behind*
-`main`, and that direction is untested: of those 20, `9f510ac6d` touches
-`training_engine/maxtext_engine.py` (router replay weighting, no production
-caller here) and three touch `configs/types.py` or `configs/base.yml`.
 
 ```bash
 # Requires a local TPU; each run took about 7 minutes on a 4-chip v5p.
