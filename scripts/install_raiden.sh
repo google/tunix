@@ -37,8 +37,8 @@
 
 set -euo pipefail
 
-RAIDEN_WHEEL_URL=${RAIDEN_WHEEL_URL:-"https://storage.googleapis.com/tunix-ci-artifacts/raiden/tpu_sync_jax-0.0.1.dev20260914193202-cp312-cp312-manylinux_2_31_x86_64.whl"}
-RAIDEN_WHEEL_SHA256=${RAIDEN_WHEEL_SHA256:-"a442ac543f54d8ff11d22dbd009671890f2fcf42446572ddb59a6eaabdee8f94"}
+RAIDEN_WHEEL_URL=${RAIDEN_WHEEL_URL:-"https://storage.googleapis.com/tunix-ci-artifacts/raiden/tpu_sync_jax-0.0.1.dev20260921080007-cp312-cp312-manylinux_2_31_x86_64.whl"}
+RAIDEN_WHEEL_SHA256=${RAIDEN_WHEEL_SHA256:-"b5c72511ce6659652605ca0a1ffd0d4c31183db983c8adab63eeb5d3067aaaf0"}
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 RAIDEN_WHEEL_DIR=${RAIDEN_WHEEL_DIR:-"${ROOT_DIR}/raiden_wheels"}
@@ -53,13 +53,18 @@ verify_install() {
 }
 
 compile_protos() {
-  echo "Compiling distributed runtime gRPC protobuf definitions..."
-  python3 -m pip install grpcio-tools
-
   local proto_dir="${ROOT_DIR}/tunix/experimental/distributed"
   if [[ ! -d "${proto_dir}" ]]; then
     proto_dir="${ROOT_DIR}/../tunix/experimental/distributed"
   fi
+  if [[ ! -d "${proto_dir}" ]]; then
+    echo "Proto directory not found, skipping proto compilation (handled in full build)."
+    return 0
+  fi
+
+  echo "Compiling distributed runtime gRPC protobuf definitions..."
+  python3 -m pip install grpcio-tools
+
   local base_dir
   base_dir=$(cd "${proto_dir}/../../.." && pwd)
 

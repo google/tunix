@@ -65,6 +65,35 @@ class MaxTextUtilsTest(absltest.TestCase):
       self.assertIn("prefuse_moe_weights=True", argv)
       self.assertIn("use_weight_converter=False", argv)
       self.assertIn("rollout_tensor_parallelism=4", argv)
+      self.assertIn("attention=dot_product", argv)
+      self.assertEqual(cfg, mock_cfg)
+
+  def test_build_maxtext_config_attention_and_remat_and_lr(self):
+    mock_pyconfig = mock.MagicMock()
+    mock_engine = mock.MagicMock()
+    mock_mutils = mock.MagicMock()
+
+    mock_cfg = mock.MagicMock()
+    mock_cfg.raw_data_dict = {}
+    mock_pyconfig.initialize.return_value = mock_cfg
+    mock_pyconfig.__file__ = "/fake/maxtext/configs/pyconfig.py"
+
+    with mock.patch.object(
+        maxtext_utils,
+        "maxtext_modules",
+        return_value=(mock_pyconfig, mock_engine, mock_mutils),
+    ), mock.patch("os.path.exists", return_value=True):
+      cfg = maxtext_utils.build_maxtext_config(
+          model_name="gemma2-9b",
+          attention="flash",
+          remat_policy="full",
+          learning_rate_final_fraction=1.0,
+      )
+      mock_pyconfig.initialize.assert_called_once()
+      argv = mock_pyconfig.initialize.call_args[0][0]
+      self.assertIn("attention=flash", argv)
+      self.assertIn("remat_policy=full", argv)
+      self.assertIn("learning_rate_final_fraction=1.0", argv)
       self.assertEqual(cfg, mock_cfg)
 
   def test_build_maxtext_config_auto_padded_moe_mlp_dim(self):
@@ -492,6 +521,19 @@ class MaxTextUtilsTest(absltest.TestCase):
   def test_trainable_parameters_mask_none_not_in_config(self):
     argv = self._build_config_argv(trainable_parameters_mask=None)
     self.assertFalse(any("trainable_parameters_mask=" in arg for arg in argv))
+
+  def test_attention_default_dot_product(self):
+    argv = self._build_config_argv()
+    self.assertIn("attention=dot_product", argv)
+
+  def test_attention_explicit_arg(self):
+    argv = self._build_config_argv(attention="flash")
+    self.assertIn("attention=flash", argv)
+
+  def test_attention_env_var(self):
+    with mock.patch.dict("os.environ", {"TRAINER_MAXTEXT_ATTENTION": "flash"}):
+      argv = self._build_config_argv()
+    self.assertIn("attention=flash", argv)
 
 
 if __name__ == "__main__":

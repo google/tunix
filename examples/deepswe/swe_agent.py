@@ -12,6 +12,7 @@ try:
 except ImportError:
   import template  # pytype: disable=import-error
 
+OPENHANDS_SCAFFOLDS = template.OPENHANDS_SCAFFOLDS
 OPENHANDS_SYSTEM_PROMPT = template.OPENHANDS_SYSTEM_PROMPT
 SWE_SYSTEM_PROMPT = template.SWE_SYSTEM_PROMPT
 SWE_SYSTEM_PROMPT_FN_CALL = template.SWE_SYSTEM_PROMPT_FN_CALL
@@ -21,6 +22,7 @@ SWEAGENT_SYSTEM_PROMPT = template.SWEAGENT_SYSTEM_PROMPT
 SWEAGENT_USER_PROMPT = template.SWEAGENT_USER_PROMPT
 get_system_prompt = template.get_system_prompt
 get_user_prompt_template = template.get_user_prompt_template
+
 
 
 from tunix.rl.agentic.agents.agent_types import Action
@@ -84,6 +86,145 @@ def parse_xml_response(response_text: str) -> tuple[str, Any]:
   return thought, action
 
 
+def parse_codeact_response(response_text: str) -> tuple[str, Any]:
+  """Parses a model response in CodeAct / OpenHands format.
+
+  Supports:
+  1. XML function blocks: <function=...></function>
+  2. Tool calls: <tool_call>...</tool_call> or ```json ... ``` with tool call schema
+  3. Markdown code blocks: ```(bash|sh|shell|python|py|ipython) ... ```
+  4. Task completion indicators: COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+
+  Returns:
+    (thought, action): Tuple of reasoning string and SWEAction instance.
+  """
+  xml_pattern = re.compile(
+      r"(?s)(<function\s*=\s*([^>]+)>.*?(?:</function>|$))"
+  )
+  tc_pattern = re.compile(
+      r"(?s)<tool_call>\s*(.*?)\s*(?:</tool_call>|$)"
+  )
+  cb_pattern = re.compile(
+      r"(?s)```(bash|sh|shell|python|py|ipython)\s*\n(.*?)(?:```|$)"
+  )
+  json_cb_pattern = re.compile(
+      r"(?s)```json\s*\n(.*?)(?:```|$)"
+  )
+
+  def _collect_candidates(text_slice: str, offset: int):
+    found = []
+    xml_match = xml_pattern.search(text_slice)
+    if xml_match:
+      found.append((0, offset + xml_match.start(), "xml", xml_match))
+
+    tc_match = tc_pattern.search(text_slice)
+    if tc_match:
+      found.append((0, offset + tc_match.start(), "tool_call", tc_match))
+
+    json_match = json_cb_pattern.search(text_slice)
+    if json_match:
+      try:
+        parsed_json = json.loads(json_match.group(1).strip())
+        if isinstance(parsed_json, dict) and (
+            "name" in parsed_json or "function" in parsed_json
+        ):
+          found.append((
+              0,
+              offset + json_match.start(),
+              "json_block",
+              (json_match, parsed_json),
+          ))
+      except Exception:
+        pass
+
+    cb_match = cb_pattern.search(text_slice)
+    if cb_match:
+      found.append((1, offset + cb_match.start(), "code_block", cb_match))
+    return found
+
+  # Prefer tool calls emitted after </think> so illustrative code fences or
+  # snippets inside reasoning blocks do not shadow the actual tool invocation.
+  think_end = response_text.rfind("</think>")
+  if think_end != -1:
+    post_think_offset = think_end + len("</think>")
+    candidates = _collect_candidates(
+        response_text[post_think_offset:], post_think_offset
+    )
+    if not candidates:
+      candidates = _collect_candidates(response_text, 0)
+  else:
+    candidates = _collect_candidates(response_text, 0)
+
+  if candidates:
+    # Prefer structured tool invocations (priority 0) over generic markdown
+    # code fences (priority 1), then earliest position in the response.
+    candidates.sort(key=lambda x: (x[0], x[1]))
+    _, match_start, match_type, payload = candidates[0]
+
+    if match_type == "xml":
+      thought = response_text[:match_start].strip()
+      xml_str = payload.group(1).strip()
+      if not xml_str.endswith("</function>"):
+        xml_str += "\n</function>"
+      action = SWEAction.from_string(xml_str)
+      return thought, action
+
+    elif match_type in ("tool_call", "json_block"):
+      thought = response_text[:match_start].strip()
+      if match_type == "tool_call":
+        raw_payload = payload.group(1).strip()
+        try:
+          data = json.loads(raw_payload)
+        except Exception:
+          data = {}
+      else:
+        _, data = payload
+
+      if isinstance(data, list) and data:
+        data = data[0]
+      if isinstance(data, dict):
+        if "function" in data and isinstance(data["function"], dict):
+          fn_name = data["function"].get("name", "")
+          args = data["function"].get("arguments", {})
+        else:
+          fn_name = data.get("name", "")
+          args = data.get("arguments", data.get("parameters", {}))
+        if isinstance(args, str):
+          try:
+            args = json.loads(args)
+          except Exception:
+            args = {"command": args}
+        if not isinstance(args, dict):
+          args = {"command": str(args)}
+        action = SWEAction(fn_name, {str(k): str(v) for k, v in args.items()})
+        return thought, action
+
+    elif match_type == "code_block":
+      thought = response_text[:match_start].strip()
+      lang = payload.group(1).lower()
+      code = payload.group(2).strip()
+      if lang in ("bash", "sh", "shell"):
+        if "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" in code:
+          action = SWEAction("submit", {})
+        else:
+          action = SWEAction("execute_bash", {"command": code})
+      else:  # python, py, ipython
+        action = SWEAction("execute_ipython_cell", {"code": code})
+      return thought, action
+
+  # Fallback: check for completion trigger in plain text
+  if "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" in response_text:
+    thought = response_text.replace(
+        "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT", ""
+    ).strip()
+    action = SWEAction("submit", {})
+    return thought, action
+
+  thought = response_text.strip()
+  action = SWEAction(function_name="", parameters={})
+  return thought, action
+
+
 class SWEAgent(ConversationAgentBase):
 
   def __init__(
@@ -103,6 +244,7 @@ class SWEAgent(ConversationAgentBase):
         f"Invalid scaffold: {scaffold}, must be one of ['r2egym', 'sweagent',"
         " 'openhands']"
     )
+    self.scaffold = scaffold
     if system_prompt is None:
       system_prompt = get_system_prompt(
           scaffold=scaffold, use_fn_calling=use_fn_calling
@@ -142,21 +284,31 @@ class SWEAgent(ConversationAgentBase):
         )
     cur_tokens = info.get("cur_tokens", None)
     if cur_tokens is not None and cur_tokens >= TOKEN_WARNING_THRESHOLD:
-      observation += (
-          "\nYou are running out of tokens. Stop exploring now. Do not call"
-          " file_editor, str_replace_editor, search, execute_bash, or any"
-          " view command again. You must immediately submit using the final"
-          " tool. Output exactly this XML and nothing else:\n"
-          "<function=finish>\n"
-          "<parameter=command>submit</parameter>\n"
-          "<parameter=result>FINAL_RESULT</parameter>\n"
-          "</function>\n"
-          "Do not include reasoning text. Do not include a result parameter."
-          " Do not summarize the fix. If the submit tool is available instead"
-          " of finish, output exactly this XML and nothing else:\n"
-          "<function=submit>\n"
-          "</function>\n"
-      )
+      if self.scaffold in OPENHANDS_SCAFFOLDS:
+        observation += (
+            "\nYou are running out of tokens. Stop exploring now. Do not call"
+            " file_editor, str_replace_editor, or execute_bash again. You must"
+            " immediately submit using the submit tool. Output exactly this XML"
+            " and nothing else:\n"
+            "<function=submit>\n"
+            "</function>\n"
+        )
+      else:
+        observation += (
+            "\nYou are running out of tokens. Stop exploring now. Do not call"
+            " file_editor, str_replace_editor, search, execute_bash, or any"
+            " view command again. You must immediately submit using the final"
+            " tool. Output exactly this XML and nothing else:\n"
+            "<function=finish>\n"
+            "<parameter=command>submit</parameter>\n"
+            "<parameter=result>FINAL_RESULT</parameter>\n"
+            "</function>\n"
+            "Do not include reasoning text. Do not include a result parameter."
+            " Do not summarize the fix. If the submit tool is available instead"
+            " of finish, output exactly this XML and nothing else:\n"
+            "<function=submit>\n"
+            "</function>\n"
+        )
 
     super().update_from_env(observation, reward, done, info)
     self.cur_step = Step(observation=observation)
@@ -171,21 +323,22 @@ class SWEAgent(ConversationAgentBase):
     """Updates the agent's internal state after an environment step.
 
     This function is called during environment interaction to incorporate the
-    latest action's
-    outcome into the agent's learning process.
+    latest action's outcome into the agent's learning process.
 
     Args:
         response (str): The response from the model.
 
     Returns:
-        None
+        Action: The action produced by the agent.
     """
     self._trajectory.steps.append(self.cur_step)
     if self.use_fn_calling:
       thought, action = parse_oai_response(response)
+    elif self.scaffold in OPENHANDS_SCAFFOLDS:
+      thought, action = parse_codeact_response(response)
     else:
       thought, action = parse_xml_response(response)
-    action_str = action.to_xml_string()
+    action_str = action.to_xml_string() if action.function_name else ""
 
     # Update Trajectory
     cur_step = self._trajectory.steps[-1]
@@ -202,3 +355,35 @@ class SWEAgent(ConversationAgentBase):
       self._messages.append({"role": "assistant", "content": response})
     self.step += 1
     return Action(action=cur_step.action)
+
+
+class CodeActAgent(SWEAgent):
+  """CodeActAgent for OpenHands.
+
+  Executes code (Bash and Python/IPython) directly as its primary action space,
+  supporting markdown code blocks, JSON tool calls, and XML function calls.
+  """
+
+  def __init__(
+      self,
+      system_prompt: Optional[str] = None,
+      use_fn_calling: bool = False,
+      format_model_response: bool = False,
+      scaffold: str = "openhands",
+  ):
+    super().__init__(
+        system_prompt=system_prompt,
+        use_fn_calling=use_fn_calling,
+        format_model_response=format_model_response,
+        scaffold=scaffold,
+    )
+
+
+__all__ = [
+    "CodeActAgent",
+    "SWEAgent",
+    "parse_codeact_response",
+    "parse_oai_response",
+    "parse_xml_response",
+]
+

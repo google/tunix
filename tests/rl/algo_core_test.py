@@ -144,6 +144,98 @@ class AlgoCoreTest(absltest.TestCase):
         np.testing.assert_allclose(lp, lu, rtol=1e-5, atol=1e-5)
         np.testing.assert_allclose(lp, -2.25, rtol=1e-4, atol=1e-4)
 
+  def test_masked_padding_tokens_do_not_propagate_nan_in_loss_or_gradients(
+      self,
+  ):
+    # Regression test for b/563191139 (paired with MaxText PR #5292):
+    # Multiplicative masking (loss * completion_mask) evaluates 0.0 * Inf = NaN
+    # in IEEE-754 when masked/padding positions carry non-finite values or
+    # singular Jacobians. Using jnp.where(completion_mask > 0, ..., 0.0) severs
+    # both forward and reverse-mode autodiff paths on masked positions.
+    from types import SimpleNamespace  # pylint: disable=g-import-not-at-top
+    from flax import nnx  # pylint: disable=g-import-not-at-top
+    from tunix.rl import common  # pylint: disable=g-import-not-at-top
+
+    class _ToyModel(nnx.Module):
+
+      def __init__(self, *, vocab, dim, rngs):
+        self.emb = nnx.Embed(vocab, dim, rngs=rngs)
+        self.head = nnx.Linear(dim, vocab, rngs=rngs)
+
+      def __call__(
+          self,
+          x,
+          segment_ids=None,
+          positions=None,
+          cache=None,
+          attention_mask=None,
+      ):
+        return self.head(self.emb(x)), cache
+
+    model = _ToyModel(vocab=16, dim=8, rngs=nnx.Rngs(42))
+    cfg = SimpleNamespace(
+        beta=0.0,
+        epsilon=0.2,
+        epsilon_high=0.2,
+        epsilon_c=None,
+        loss_algo='grpo',
+        loss_agg_mode='token-mean',
+        temperature=1.0,
+        kl_loss_mode='low_var_kl',
+        kl_clamp_value=None,
+        force_compute_kl=False,
+    )
+
+    clean_old_logps = jnp.array(
+        [[-1.2, -0.8, 0.0, 0.0], [-0.5, 0.0, 0.0, 0.0]], jnp.float32
+    )
+    corrupted_old_logps = jnp.array(
+        [[-1.2, -0.8, jnp.inf, -jnp.inf], [-0.5, jnp.nan, jnp.inf, -jnp.inf]],
+        jnp.float32,
+    )
+    completion_mask = jnp.array(
+        [[1.0, 1.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]], jnp.float32
+    )
+
+    clean_ex = common.TrainExample(
+        prompt_ids=jnp.array([[0, 3], [0, 4]], jnp.int32),
+        prompt_mask=jnp.array([[0, 1], [0, 1]], jnp.int32),
+        completion_ids=jnp.array([[5, 6, 0, 0], [7, 0, 0, 0]], jnp.int32),
+        completion_mask=completion_mask,
+        advantages=jnp.array([1.25, -0.75], jnp.float32),
+        ref_per_token_logps=None,
+        old_per_token_logps=clean_old_logps,
+    )
+    corrupted_ex = common.TrainExample(
+        prompt_ids=jnp.array([[0, 3], [0, 4]], jnp.int32),
+        prompt_mask=jnp.array([[0, 1], [0, 1]], jnp.int32),
+        completion_ids=jnp.array([[5, 6, 0, 0], [7, 0, 0, 0]], jnp.int32),
+        completion_mask=completion_mask,
+        advantages=jnp.array([1.25, -0.75], jnp.float32),
+        ref_per_token_logps=None,
+        old_per_token_logps=corrupted_old_logps,
+    )
+
+    def _loss_scalar(m, ex):
+      return algo_core.grpo_loss_fn(
+          m, ex, cfg, pad_id=0, eos_id=-1
+      ).primary_loss.compute()
+
+    clean_loss, clean_grads = nnx.value_and_grad(_loss_scalar)(model, clean_ex)
+    corrupt_loss, corrupt_grads = nnx.value_and_grad(_loss_scalar)(
+        model, corrupted_ex
+    )
+
+    self.assertTrue(bool(jnp.isfinite(corrupt_loss)))
+    np.testing.assert_allclose(corrupt_loss, clean_loss, rtol=1e-5, atol=1e-5)
+
+    for g_corrupt, g_clean in zip(
+        jax.tree_util.tree_leaves(corrupt_grads),
+        jax.tree_util.tree_leaves(clean_grads),
+    ):
+      self.assertTrue(bool(jnp.all(jnp.isfinite(g_corrupt))))
+      np.testing.assert_allclose(g_corrupt, g_clean, rtol=1e-5, atol=1e-5)
+
 
 class GrpoLooAdvantagesTest(absltest.TestCase):
   """Tests for leave-one-out group-relative advantages."""
@@ -533,6 +625,51 @@ class SequenceMultProbErrorTest(absltest.TestCase):
     self.assertEqual(float(result.mult_prob_error[0]), 0.0)
     np.testing.assert_array_equal(result.sample_mask, [0.0, 0.0])
 
+  def test_mult_prob_error_with_segment_ids(self):
+    # Segment 1 (tokens 0-2): exp(0)=1.0
+    # Segment 2 (tokens 3-4): exp(0.5)=1.6487
+    # Segment 0 (token 5): pad, mask=0
+    mask = jnp.array([[1.0, 1.0, 1.0, 1.0, 1.0, 0.0]])
+    log_is_raw = jnp.array([[0.0, 0.0, 0.0, 0.5, 0.5, 0.0]])
+    segment_ids = jnp.array([[1, 1, 1, 2, 2, 0]])
+    errors = algo_core.sequence_mult_prob_error(
+        log_is_raw, mask, segment_ids=segment_ids, num_segments=3
+    )
+    self.assertEqual(errors.shape, (1, 3))
+    np.testing.assert_allclose(errors[0, 0], 0.0)
+    np.testing.assert_allclose(errors[0, 1], 1.0, rtol=1e-5)
+    np.testing.assert_allclose(errors[0, 2], np.exp(0.5), rtol=1e-5)
+
+  def test_overlong_drops_packed_segment(self):
+    # Segment 1 (tokens 0-1): not overlong
+    # Segment 2 (tokens 2-3): overlong
+    mask = jnp.array([[1.0, 1.0, 1.0, 1.0]])
+    segment_ids = jnp.array([[1, 1, 2, 2]])
+    overlong = jnp.array([[0.0, 0.0, 1.0, 1.0]])
+    result = algo_core.sequence_loss_mask(
+        mask,
+        overlong=overlong,
+        mask_overlong=True,
+        segment_ids=segment_ids,
+        num_segments=3,
+    )
+    np.testing.assert_array_equal(result.sample_mask[0], [1.0, 1.0, 0.0])
+    np.testing.assert_array_equal(result.loss_mask[0], [1.0, 1.0, 0.0, 0.0])
+
+  def test_gate_drops_packed_segment_over_threshold(self):
+    mask = jnp.array([[1.0, 1.0, 1.0, 1.0]])
+    segment_ids = jnp.array([[1, 1, 2, 2]])
+    log_is_raw = jnp.array([[0.0, 0.0, 1.5, 1.5]])
+    result = algo_core.sequence_loss_mask(
+        mask,
+        log_is_raw=log_is_raw,
+        mult_prob_error_threshold=2.0,
+        segment_ids=segment_ids,
+        num_segments=3,
+    )
+    np.testing.assert_array_equal(result.sample_mask[0], [1.0, 1.0, 0.0])
+    np.testing.assert_array_equal(result.loss_mask[0], [1.0, 1.0, 0.0, 0.0])
+
 
 class TruncatedImportanceWeightsTest(absltest.TestCase):
   """Tests for the seq-mask-tis importance weights."""
@@ -628,6 +765,34 @@ class TruncatedImportanceWeightsTest(absltest.TestCase):
     self.assertAlmostEqual(
         float(corrected.denominator), float(full.denominator), places=5
     )
+
+  def test_truncated_importance_weights_with_segment_ids(self):
+    # 2 segments packed in row 0:
+    # Segment 1 (tokens 0, 1): log_is = 0.0005 -> inside band
+    # Segment 2 (tokens 2, 3): log_is = 0.01 -> outside band
+    # Segment 0 (token 4): pad
+    log_is_raw = jnp.array([[0.0005, 0.0005, 0.01, 0.01, 0.0]])
+    completion_mask = jnp.array([[1.0, 1.0, 1.0, 1.0, 0.0]])
+    segment_ids = jnp.array([[1, 1, 2, 2, 0]])
+    num_segments = 3
+    sample_mask = jnp.ones((1, num_segments))
+    log_is = jnp.nan_to_num(log_is_raw, nan=0.0, posinf=0.0, neginf=0.0)
+    geomean, valid = algo_core.sequence_geomean_ratio(
+        log_is, completion_mask, segment_ids=segment_ids, num_segments=num_segments
+    )
+    weights, oob = algo_core.truncated_importance_weights(
+        log_is_raw,
+        geomean,
+        valid,
+        sample_mask,
+        segment_ids=segment_ids,
+        **self._BAND,
+    )
+    self.assertAlmostEqual(float(oob), 0.5)
+    self.assertGreater(float(weights[0, 0]), 0.0)
+    self.assertGreater(float(weights[0, 1]), 0.0)
+    np.testing.assert_array_equal(weights[0, 2:4], [0.0, 0.0])
+    np.testing.assert_array_equal(weights[0, 4], 0.0)
 
 
 class SamplerIsLengthScalingTest(absltest.TestCase):
@@ -1045,6 +1210,145 @@ class GrpoLossSequenceMaskingTest(absltest.TestCase):
     )
     self.assertAlmostEqual(
         float(base.aux_metrics['sample_mask/kept_frac'].compute()), 1.0
+    )
+
+  def test_packed_supports_all_mlperf_flags(self):
+    example = self._example(
+        prompt_ids=jnp.zeros((1, 0), jnp.int32),
+        prompt_mask=jnp.zeros((1, 0), jnp.int32),
+        completion_ids=jnp.array([[7, 3, 4, 5, 7, 6, 7, 8]], jnp.int32),
+        completion_mask=jnp.array([[0, 1, 1, 1, 0, 1, 1, 1]], jnp.float32),
+        advantages=jnp.array([[0.0, 1.5, 1.5, 1.5, 0.0, -1.5, -1.5, -1.5]], jnp.float32),
+        rollout_per_token_logps=jnp.array([[0.0, -1.0, -1.0, -1.0, 0.0, -1.0, -1.0, -1.0]], jnp.float32),
+        overlong=jnp.zeros((1, 8), jnp.float32),
+        segment_ids=jnp.array([[1, 1, 1, 1, 2, 2, 2, 2]], jnp.int32),
+        segment_positions=jnp.array([[0, 1, 2, 3, 0, 1, 2, 3]], jnp.int32),
+        num_segments=3,
+    )
+    # With generous threshold and band, both segments pass
+    config = self._config(
+        overlong_loss_masking=True,
+        seq_logprob_error_threshold=20.0,
+        truncated_importance_sampling_type='seq-mask-tis',
+        truncated_importance_sampling_ratio_min=0.01,
+        truncated_importance_sampling_ratio=100.0,
+    )
+    out = self._loss(example, config)
+    self.assertTrue(np.isfinite(float(out.primary_loss.compute())))
+    self.assertAlmostEqual(
+        float(out.aux_metrics['sample_mask/kept_frac'].compute()), 1.0
+    )
+
+    # With strict threshold, both segments are dropped by the gate
+    strict_config = self._config(
+        overlong_loss_masking=True,
+        seq_logprob_error_threshold=1.0,
+    )
+    strict_out = self._loss(example, strict_config)
+    self.assertAlmostEqual(
+        float(strict_out.aux_metrics['sample_mask/kept_frac'].compute()), 0.0
+    )
+
+  def test_packed_equals_unpacked_with_all_flags(self):
+    unpacked = self._example(
+        prompt_ids=jnp.array([[7], [7]], jnp.int32),
+        prompt_mask=jnp.array([[1], [1]], jnp.int32),
+        completion_ids=jnp.array([[3, 4, 5], [6, 7, 8]], jnp.int32),
+        completion_mask=jnp.ones((2, 3), jnp.float32),
+        advantages=jnp.array([1.5, -1.5], jnp.float32),
+        rollout_per_token_logps=jnp.full((2, 3), -1.0, jnp.float32),
+        overlong=jnp.array([0.0, 0.0], jnp.float32),
+        segment_ids=None,
+        segment_positions=None,
+        num_segments=None,
+    )
+    packed = self._example(
+        prompt_ids=jnp.zeros((1, 0), jnp.int32),
+        prompt_mask=jnp.zeros((1, 0), jnp.int32),
+        completion_ids=jnp.array([[7, 3, 4, 5, 7, 6, 7, 8]], jnp.int32),
+        completion_mask=jnp.array([[0, 1, 1, 1, 0, 1, 1, 1]], jnp.float32),
+        advantages=jnp.array([[0.0, 1.5, 1.5, 1.5, 0.0, -1.5, -1.5, -1.5]], jnp.float32),
+        rollout_per_token_logps=jnp.array([[0.0, -1.0, -1.0, -1.0, 0.0, -1.0, -1.0, -1.0]], jnp.float32),
+        overlong=jnp.zeros((1, 8), jnp.float32),
+        segment_ids=jnp.array([[1, 1, 1, 1, 2, 2, 2, 2]], jnp.int32),
+        segment_positions=jnp.array([[0, 1, 2, 3, 0, 1, 2, 3]], jnp.int32),
+        num_segments=3,
+    )
+    config = self._config(
+        loss_agg_mode='token-mean',
+        overlong_loss_masking=True,
+        seq_logprob_error_threshold=20.0,
+        truncated_importance_sampling_type='seq-mask-tis',
+        truncated_importance_sampling_ratio_min=0.01,
+        truncated_importance_sampling_ratio=100.0,
+    )
+    unpacked_loss = float(self._loss(unpacked, config).primary_loss.compute())
+    packed_loss = float(self._loss(packed, config).primary_loss.compute())
+    np.testing.assert_allclose(packed_loss, unpacked_loss, rtol=1e-5, atol=1e-5)
+
+  def test_packed_equals_unpacked_with_overlong_drop(self):
+    unpacked = self._example(
+        prompt_ids=jnp.array([[7], [7]], jnp.int32),
+        prompt_mask=jnp.array([[1], [1]], jnp.int32),
+        completion_ids=jnp.array([[3, 4, 5], [6, 7, 8]], jnp.int32),
+        completion_mask=jnp.ones((2, 3), jnp.float32),
+        advantages=jnp.array([1.5, -1.5], jnp.float32),
+        rollout_per_token_logps=jnp.full((2, 3), -1.0, jnp.float32),
+        overlong=jnp.array([0.0, 1.0], jnp.float32),
+        segment_ids=None,
+        segment_positions=None,
+        num_segments=None,
+    )
+    packed = self._example(
+        prompt_ids=jnp.zeros((1, 0), jnp.int32),
+        prompt_mask=jnp.zeros((1, 0), jnp.int32),
+        completion_ids=jnp.array([[7, 3, 4, 5, 7, 6, 7, 8]], jnp.int32),
+        completion_mask=jnp.array([[0, 1, 1, 1, 0, 1, 1, 1]], jnp.float32),
+        advantages=jnp.array([[0.0, 1.5, 1.5, 1.5, 0.0, -1.5, -1.5, -1.5]], jnp.float32),
+        rollout_per_token_logps=jnp.array([[0.0, -1.0, -1.0, -1.0, 0.0, -1.0, -1.0, -1.0]], jnp.float32),
+        overlong=jnp.array([[0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0]], jnp.float32),
+        segment_ids=jnp.array([[1, 1, 1, 1, 2, 2, 2, 2]], jnp.int32),
+        segment_positions=jnp.array([[0, 1, 2, 3, 0, 1, 2, 3]], jnp.int32),
+        num_segments=3,
+    )
+    config = self._config(
+        loss_agg_mode='token-mean',
+        overlong_loss_masking=True,
+    )
+    unpacked_out = self._loss(unpacked, config)
+    packed_out = self._loss(packed, config)
+    np.testing.assert_allclose(
+        float(packed_out.primary_loss.compute()),
+        float(unpacked_out.primary_loss.compute()),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+    self.assertAlmostEqual(
+        float(packed_out.aux_metrics['sample_mask/kept_frac'].compute()),
+        float(unpacked_out.aux_metrics['sample_mask/kept_frac'].compute()),
+    )
+    self.assertAlmostEqual(
+        float(packed_out.aux_metrics['sample_mask/kept_frac'].compute()), 0.5
+    )
+
+  def test_packed_kept_frac_ignores_padding_segments(self):
+    # Segment 1 has 2 tokens, segment 0 has 2 pad tokens.
+    example = self._example(
+        prompt_ids=jnp.zeros((1, 0), jnp.int32),
+        prompt_mask=jnp.zeros((1, 0), jnp.int32),
+        completion_ids=jnp.array([[3, 4, 0, 0]], jnp.int32),
+        completion_mask=jnp.array([[1.0, 1.0, 0.0, 0.0]], jnp.float32),
+        advantages=jnp.array([[1.5, 1.5, 0.0, 0.0]], jnp.float32),
+        overlong=jnp.zeros((1, 4), jnp.float32),
+        segment_ids=jnp.array([[1, 1, 0, 0]], jnp.int32),
+        segment_positions=jnp.array([[0, 1, 0, 0]], jnp.int32),
+        num_segments=3,
+    )
+    aux = self._loss(
+        example, self._config(overlong_loss_masking=True)
+    ).aux_metrics
+    self.assertAlmostEqual(
+        float(aux['sample_mask/kept_frac'].compute()), 1.0, places=5
     )
 
 

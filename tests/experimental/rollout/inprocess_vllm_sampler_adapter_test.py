@@ -406,6 +406,97 @@ class RoutedExpertsTest(absltest.TestCase):
     call_kwargs = adapter.vllm_sampler.call_args.kwargs
     self.assertEqual(call_kwargs.get("routed_experts_prompt_start"), [8, 14])
 
+  def test_concurrent_sample_calls_do_not_block_event_loop(self):
+    """Concurrent sample() calls must run in parallel on the adapter's executor."""
+    import threading  # pylint: disable=g-import-not-at-top
+
+    num_concurrent = 4
+    barrier = threading.Barrier(num_concurrent, timeout=5.0)
+
+    def _blocking_vllm_call(**kwargs):
+      del kwargs
+      # All 4 calls must enter _blocking_vllm_call concurrently; if sample()
+      # blocked the asyncio event loop, this barrier would time out at party 1.
+      barrier.wait()
+      return base_sampler.SamplerOutput(
+          text=["parallel completion"],
+          logits=None,
+          tokens=[np.array([10, 20], dtype=np.int32)],
+          padded_prompt_tokens=np.array([[1, 2]], dtype=np.int32),
+          logprobs=None,
+      )
+
+    adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
+        server_id="vllm_concurrent_slice",
+        tokenizer=None,
+        config=None,
+        max_concurrency=num_concurrent,
+    )
+    adapter.vllm_sampler = mock.MagicMock(side_effect=_blocking_vllm_call)
+
+    async def _run_concurrent():
+      reqs = [
+          base_sampler_lib.SamplingRequest(
+              request_id=f"req-{i}",
+              prompt=f"prompt {i}",
+          )
+          for i in range(num_concurrent)
+      ]
+      return await asyncio.gather(*(adapter.sample(r) for r in reqs))
+
+    responses = asyncio.run(_run_concurrent())
+    self.assertLen(responses, num_concurrent)
+    for i, resp in enumerate(responses):
+      self.assertEqual(resp.request_id, f"req-{i}")
+      self.assertEqual(resp.text, "parallel completion")
+    asyncio.run(adapter.stop())
+
+
+  def test_concurrent_sample_calls_do_not_block_event_loop(self):
+    """Concurrent sample() calls must run in parallel on the adapter's executor."""
+    import threading  # pylint: disable=g-import-not-at-top
+
+    num_concurrent = 4
+    barrier = threading.Barrier(num_concurrent, timeout=5.0)
+
+    def _blocking_vllm_call(**kwargs):
+      del kwargs
+      # All 4 calls must enter _blocking_vllm_call concurrently; if sample()
+      # blocked the asyncio event loop, this barrier would time out at party 1.
+      barrier.wait()
+      return base_sampler.SamplerOutput(
+          text=["parallel completion"],
+          logits=None,
+          tokens=[np.array([10, 20], dtype=np.int32)],
+          padded_prompt_tokens=np.array([[1, 2]], dtype=np.int32),
+          logprobs=None,
+      )
+
+    adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
+        server_id="vllm_concurrent_slice",
+        tokenizer=None,
+        config=None,
+        max_concurrency=num_concurrent,
+    )
+    adapter.vllm_sampler = mock.MagicMock(side_effect=_blocking_vllm_call)
+
+    async def _run_concurrent():
+      reqs = [
+          base_sampler_lib.SamplingRequest(
+              request_id=f"req-{i}",
+              prompt=f"prompt {i}",
+          )
+          for i in range(num_concurrent)
+      ]
+      return await asyncio.gather(*(adapter.sample(r) for r in reqs))
+
+    responses = asyncio.run(_run_concurrent())
+    self.assertLen(responses, num_concurrent)
+    for i, resp in enumerate(responses):
+      self.assertEqual(resp.request_id, f"req-{i}")
+      self.assertEqual(resp.text, "parallel completion")
+    asyncio.run(adapter.stop())
+
 
 if __name__ == "__main__":
   absltest.main()

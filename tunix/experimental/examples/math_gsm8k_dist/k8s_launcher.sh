@@ -37,10 +37,9 @@ export TOKENIZER_PATH=${TOKENIZER_PATH:-${MODEL_ID}}
 
 export MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-512}
 export MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-128}
-# Qwen3 chat models close each turn with `<|im_end|>` rather than the
-# tokenizer's default EOS token, so the rollout has to stop on it. Set empty to
-# fall back to the tokenizer's EOS token.
-export EOS_TOKENS=${EOS_TOKENS-'<|im_end|>'}
+# Model-specific EOS token IDs (comma-separated), fetched from HuggingFace
+# `generation_config.json`. Empty string falls back to the tokenizer's default EOS token.
+export EOS_TOKENS=${EOS_TOKENS-'151645,151643'}
 export BATCH_SIZE=${BATCH_SIZE:-2}
 export NUM_GENERATIONS=${NUM_GENERATIONS:-2}
 export MAX_STEPS=${MAX_STEPS:-1}
@@ -51,6 +50,7 @@ export MAX_SEGMENTS_PER_PACKED_ROW=${MAX_SEGMENTS_PER_PACKED_ROW:-}
 # Set to tunix to run Tunix's PeftTrainer, and maxtext to run MaxText's MaxTextTrainingEngine
 export TRAINER_BACKEND=${TRAINER_BACKEND:-tunix}
 export MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-${BATCH_SIZE}}
+export COMPUTE_LOGPS_CHUNK_SIZE=${COMPUTE_LOGPS_CHUNK_SIZE:-0}
 export EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-1000000}
 export OPT_CHAIN_TYPE=${OPT_CHAIN_TYPE-clip_by_global_norm}
 export MAX_GRAD_NORM=${MAX_GRAD_NORM:-1.0}
@@ -82,6 +82,7 @@ export CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-1}
 export CHECKPOINT_MAX_TO_KEEP=${CHECKPOINT_MAX_TO_KEEP:-10}
 export CHECKPOINT_ROOT_DIRECTORY=${CHECKPOINT_ROOT_DIRECTORY:-checkpoints}
 export ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE:-0}
+export CKPT_D2H_CONCURRENT_GB=${CKPT_D2H_CONCURRENT_GB:-8}
 
 # MaxText trainer configuration: only consulted when TRAINER_BACKEND=maxtext
 export MAXTEXT_MODEL_NAME=${MAXTEXT_MODEL_NAME:-qwen3-1.7b}
@@ -196,7 +197,7 @@ start_orchestrator() {
       ${TRAJECTORY_LOG_DIR:+TRAJECTORY_LOG_DIR=\"${TRAJECTORY_LOG_DIR}\"} \
       WANDB_PROJECT=\"${WANDB_PROJECT}\" \
       WANDB_RUN_NAME=\"${WANDB_RUN_NAME}\" \
-      python -m tunix.experimental.distributed.runtime.main \
+      ${ORCHESTRATOR_EXTRA_ENV:+${ORCHESTRATOR_EXTRA_ENV} }python -m tunix.experimental.distributed.runtime.main \
         --discovery_id=${ORCHESTRATOR_ID} \
         --discovery_port=${ORCHESTRATOR_PORT} \
         --process_main=tunix.experimental.examples.math_gsm8k_dist.run_gsm8k_dist_grpo.main \
@@ -312,7 +313,7 @@ start_trainer() {
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${TRAINER_PORT}" \
     --worker_startup_command=" \
-      ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE}${raiden_env}${TRAINER_EXTRA_ENV:+ ${TRAINER_EXTRA_ENV}} python -m tunix.experimental.distributed.runtime.main \
+      ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE}${CKPT_D2H_CONCURRENT_GB:+ CKPT_D2H_CONCURRENT_GB=${CKPT_D2H_CONCURRENT_GB}}${raiden_env}${TRAINER_EXTRA_ENV:+ ${TRAINER_EXTRA_ENV}} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
         --process_main=tunix.experimental.examples.common.run_trainer_node.main \
@@ -330,6 +331,7 @@ start_trainer() {
         --mini_batch_size=${MINI_BATCH_SIZE} \
         --num_generations=${NUM_GENERATIONS} \
         --train_micro_batch_size=${TRAIN_MICRO_BATCH_SIZE} \
+        --compute_logps_chunk_size=${COMPUTE_LOGPS_CHUNK_SIZE} \
         --eval_every_n_steps=${EVAL_EVERY_N_STEPS} \
         ${opt_chain_flags} \
         --optimizer_b1=${ADAM_B1} \
@@ -349,7 +351,7 @@ start_trainer() {
         --checkpoint_max_to_keep=${CHECKPOINT_MAX_TO_KEEP} \
         --checkpoint_root_directory=${CHECKPOINT_ROOT_DIRECTORY} \
         ${extra_flags} \
-        ${debug_flag} \
+        ${TRAINER_EXTRA_ARGS:+${TRAINER_EXTRA_ARGS} }${debug_flag} \
         ${profiler_flags} \
     " \
     | apply_manifest
@@ -425,7 +427,7 @@ start_rollout_instance() {
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ROLLOUT_PORT}" \
     --worker_startup_command=" \
-      ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} SKIP_JAX_PRECOMPILE=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS}${raiden_env} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} python -m tunix.experimental.distributed.runtime.main \
+      ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} SKIP_JAX_PRECOMPILE=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS}${raiden_env}${ROLLOUT_EXTRA_ENV:+ ${ROLLOUT_EXTRA_ENV}} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
         --process_main=tunix.experimental.examples.common.run_rollout_node.main \
@@ -448,7 +450,7 @@ start_rollout_instance() {
         --prefuse_moe_weights=${PREFUSE_MOE_WEIGHTS} \
         --enable_prefix_caching=${ENABLE_PREFIX_CACHING} \
         ${extra_flags} \
-        ${debug_flag} \
+        ${ROLLOUT_EXTRA_ARGS:+${ROLLOUT_EXTRA_ARGS} }${debug_flag} \
     " \
     | apply_manifest
 }

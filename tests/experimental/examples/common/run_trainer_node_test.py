@@ -242,7 +242,16 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
 
     with self._patch_signal_handlers(mock_add_signal_handler):
       run_trainer_node.main(
-          ["--port", "20000", "--worker_id", "trainer-0"],
+          [
+              "--port",
+              "20000",
+              "--worker_id",
+              "trainer-0",
+              "--compute_logps_chunk_size",
+              "128",
+              "--compute_logps_micro_batch_size",
+              "2",
+          ],
           context=self.mock_context,
       )
 
@@ -252,6 +261,8 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     mock_trainer_worker_cls.assert_called_once_with(
         trainer_factory=mock.ANY,
         worker_id="trainer-0",
+        logps_chunk_size=128,
+        logps_micro_batch_size=2,
         execution_context=mock_create_mesh.return_value,
     )
     self.mock_server.start_serving_async.assert_called_once_with(20000)
@@ -450,6 +461,56 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     )
 
   @mock.patch.object(
+      run_trainer_node.maxtext_utils, "get_tokenizer_pad_id", return_value=0
+  )
+  @mock.patch.object(run_trainer_node.maxtext_utils, "create_maxtext_mesh")
+  @mock.patch.object(
+      run_trainer_node.maxtext_utils, "build_maxtext_config", autospec=True
+  )
+  def test_create_maxtext_trainer_factory_plumbs_base_num_kv_heads(
+      self, mock_build_cfg, mock_create_mesh, mock_get_pad_id
+  ):
+    args = run_trainer_node._parse_args([
+        "--base_num_kv_heads",
+        "4",
+    ])
+    run_trainer_node._create_maxtext_trainer_factory(args)
+    mock_build_cfg.assert_called_once()
+    self.assertEqual(
+        mock_build_cfg.call_args.kwargs.get("base_num_kv_heads"), 4
+    )
+
+  @mock.patch.object(
+      run_trainer_node.maxtext_utils, "get_tokenizer_pad_id", return_value=0
+  )
+  @mock.patch.object(run_trainer_node.maxtext_utils, "create_maxtext_mesh")
+  @mock.patch.object(
+      run_trainer_node.maxtext_utils, "build_maxtext_config", autospec=True
+  )
+  def test_create_maxtext_trainer_factory_plumbs_attention_and_remat_and_lr_fraction(
+      self, mock_build_cfg, mock_create_mesh, mock_get_pad_id
+  ):
+    args = run_trainer_node._parse_args([
+        "--maxtext_attention",
+        "flash",
+        "--remat_policy",
+        "full",
+        "--learning_rate_final_fraction",
+        "1.0",
+    ])
+    run_trainer_node._create_maxtext_trainer_factory(args)
+    mock_build_cfg.assert_called_once()
+    self.assertEqual(
+        mock_build_cfg.call_args.kwargs.get("attention"), "flash"
+    )
+    self.assertEqual(
+        mock_build_cfg.call_args.kwargs.get("remat_policy"), "full"
+    )
+    self.assertEqual(
+        mock_build_cfg.call_args.kwargs.get("learning_rate_final_fraction"), 1.0
+    )
+
+  @mock.patch.object(
       run_trainer_node,
       "_ensure_model_dir_for_trainer",
       return_value="/tmp/test",
@@ -521,6 +582,7 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     self.assertEqual(args.optimizer_chain_kwargs, {})
     self.assertFalse(args.use_lora)
     self.assertEqual(args.rollout_mesh_tp, 0)
+    self.assertEqual(args.base_num_kv_heads, 0)
     self.assertFalse(args.prefuse_moe_weights)
     self.assertTrue(args.use_weight_converter)
     self.assertEqual(args.max_seq_token_per_tpu, 0)
@@ -538,6 +600,8 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
         "2",
         "--rollout_mesh_tp",
         "8",
+        "--base_num_kv_heads",
+        "4",
         "--max_seq_token_per_tpu",
         "4096",
         "--prefuse_moe_weights=false",
@@ -577,6 +641,7 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     self.assertEqual(args_custom.mesh_fsdp, 4)
     self.assertEqual(args_custom.mesh_tp, 2)
     self.assertEqual(args_custom.rollout_mesh_tp, 8)
+    self.assertEqual(args_custom.base_num_kv_heads, 4)
     self.assertEqual(args_custom.max_seq_token_per_tpu, 4096)
     self.assertFalse(args_custom.prefuse_moe_weights)
     self.assertFalse(args_custom.use_weight_converter)

@@ -197,6 +197,26 @@ def main() -> None:
       else ""
   )
 
+  # Optional reservation pin. NAP will not create a large TPU slice without being
+  # told which reservation to draw from -- it fails the scale-up with
+  # "Invalid Reservation: ." and backs off -- so this has to be emitted when set.
+  # Rendered as a whole nodeSelector line, because string.Template cannot express
+  # "omit this key when the value is empty".
+  # Kueue orders its queue by priority. On a busy ClusterQueue an unprioritised
+  # workload (priority 0) can sit behind tens of thousands of pending ones and never
+  # be evaluated, while everything with a class jumps ahead.
+  priority_class = os.environ.get("KUEUE_PRIORITY_CLASS", "").strip()
+  priority_class_line = (
+      f"\n            priorityClassName: {priority_class}" if priority_class else ""
+  )
+
+  reservation_name = os.environ.get("TPU_RESERVATION", "").strip()
+  reservation_selector = (
+      f"\n              cloud.google.com/reservation-name: {reservation_name}"
+      if reservation_name
+      else ""
+  )
+
   with open(args.template_file, "r") as f:
     template = string.Template(f.read())
     content = template.substitute(
@@ -220,6 +240,8 @@ def main() -> None:
         TPU_MACHINE=tpu_machine,
         TPU_TYPE=tpu_type,
         TPU_TOPOLOGY=tpu_topology,
+        RESERVATION_SELECTOR=reservation_selector,
+        PRIORITY_CLASS_LINE=priority_class_line,
         PW_INSTANCE_TYPE=pw_instance_type,
         REPLICAS=1,
         COMPLETIONS=num_chips // 4 if num_chips else None,

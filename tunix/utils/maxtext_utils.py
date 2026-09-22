@@ -128,6 +128,9 @@ def build_maxtext_config(
     use_weight_converter: bool = True,
     max_seq_token_per_tpu: int | None = 0,
     trainable_parameters_mask: list[str] | str | None = None,
+    attention: str | None = None,
+    remat_policy: str = "",
+    learning_rate_final_fraction: float | None = None,
 ) -> Any:
   """Builds the MaxText HyperParameters the training engine runs on."""
   pyconfig, _, _ = maxtext_modules()
@@ -344,15 +347,33 @@ def build_maxtext_config(
         f"skip_first_n_steps_for_profiler={profiling_options.skip_first_n_steps}",
         f"profile_periodically_period={profiling_options.profiler_period}",
     ])
+  else:
+    argv.extend([
+        "profiler=''",
+        "profiler_steps=0",
+        "skip_first_n_steps_for_profiler=-1",
+    ])
 
+  effective_attention = (
+      attention
+      or os.environ.get("TRAINER_MAXTEXT_ATTENTION")
+      or "dot_product"
+  )
   argv.extend([
       "scan_layers=True",
       "convert_checkpoint_if_possible=False",
       "skip_jax_distributed_system=True",
+      "allow_split_physical_axes=True",
       f"per_device_batch_size={per_device_batch_size}",
       f"gradient_accumulation_steps={gradient_accumulation_steps}",
       f"max_target_length={max_target_length}",
-      "attention=dot_product",
+      f"attention={effective_attention}",
+      *([f"remat_policy={remat_policy}"] if remat_policy else []),
+      *(
+          [f"learning_rate_final_fraction={learning_rate_final_fraction}"]
+          if learning_rate_final_fraction is not None
+          else []
+      ),
       "use_tokamax_gmm=true",
       "use_gmm_v2=true",
       f"ici_fsdp_parallelism={mesh_fsdp}",
@@ -367,7 +388,10 @@ def build_maxtext_config(
       # rollout instead, which avoids the replication entirely; this is the
       # fallback when that is not available.
       *(
-          [f"base_num_kv_heads={effective_kv_heads}"]
+          [
+              f"base_num_kv_heads={effective_kv_heads}",
+              "override_model_config=true",
+          ]
           if effective_kv_heads
           else []
       ),
@@ -417,6 +441,9 @@ def build_maxtext_config(
         _d2h_gb,
     )
     argv.append(f"checkpoint_storage_device_host_concurrent_gb={_d2h_gb}")
+
+  if os.environ.get("OVERRIDE_MODEL_CONFIG", "").lower() in ("1", "true") and "override_model_config=true" not in argv:
+    argv.append("override_model_config=true")
 
   logging.info("MaxText config argv: %s", argv)
   return pyconfig.initialize(argv)

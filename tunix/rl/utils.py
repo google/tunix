@@ -38,6 +38,9 @@ _OPTIONAL_PER_TOKEN_KEYS = (
     "old_per_token_logps",
     "returns",
     "old_values",
+    "sampler_is_weights",
+    "rollout_per_token_logps",
+    "overlong",
 )
 
 
@@ -366,6 +369,21 @@ def unpad_train_example(example: common.TrainExample) -> list[dict[str, Any]]:
   if has_old_values:
     old_values_np = np.asarray(old_values_val)
 
+  sampler_is_weights_val = getattr(example, "sampler_is_weights", None)
+  has_sampler_is_weights = sampler_is_weights_val is not None
+  if has_sampler_is_weights:
+    sampler_is_weights_np = np.asarray(sampler_is_weights_val)
+
+  rollout_logps_val = getattr(example, "rollout_per_token_logps", None)
+  has_rollout_logps = rollout_logps_val is not None
+  if has_rollout_logps:
+    rollout_logps_np = np.asarray(rollout_logps_val)
+
+  overlong_val = getattr(example, "overlong", None)
+  has_overlong = overlong_val is not None
+  if has_overlong:
+    overlong_np = np.asarray(overlong_val)
+
   policy_version_val = getattr(example, "policy_version", None)
   has_policy_version = policy_version_val is not None
   if has_policy_version:
@@ -389,6 +407,29 @@ def unpad_train_example(example: common.TrainExample) -> list[dict[str, Any]]:
         "adv_is_per_token": adv_is_per_token,
         "ref_per_token_logps": ref_logps[i, :c_len] if has_ref else None,  # pyrefly: ignore[unbound-name]
         "old_per_token_logps": old_logps[i, :c_len] if has_old else None,  # pyrefly: ignore[unbound-name]
+        "sampler_is_weights": (
+            sampler_is_weights_np[i, :c_len] if has_sampler_is_weights else None  # pyrefly: ignore[unbound-name]
+        ),
+        "rollout_per_token_logps": (
+            rollout_logps_np[i, :c_len] if has_rollout_logps else None  # pyrefly: ignore[unbound-name]
+        ),
+        "overlong": (
+            (
+                overlong_np[i, :c_len].astype(np.float32)
+                if overlong_np.ndim >= 2  # pyrefly: ignore[unbound-name]
+                else np.full(
+                    c_len,
+                    float(
+                        overlong_np[i]  # pyrefly: ignore[unbound-name]
+                        if overlong_np.ndim == 1  # pyrefly: ignore[unbound-name]
+                        else overlong_np  # pyrefly: ignore[unbound-name]
+                    ),
+                    dtype=np.float32,
+                )
+            )
+            if has_overlong
+            else None
+        ),
         "returns": returns_np[i, :c_len] if has_returns else None,  # pyrefly: ignore[unbound-name]
         "old_values": old_values_np[i, :c_len] if has_old_values else None,  # pyrefly: ignore[unbound-name]
         "policy_version": (

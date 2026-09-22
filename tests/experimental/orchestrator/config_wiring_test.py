@@ -22,17 +22,20 @@ import tunix
 from tunix.experimental.orchestrator import rl_program
 
 
-def _launcher_text() -> str:
+def _launcher_text(example_dir: str = "math_gsm8k_dist") -> str:
   path = os.path.join(
       os.path.dirname(os.path.abspath(tunix.__file__)),
-      "experimental", "examples", "math_gsm8k_dist", "launcher.sh",
+      "experimental",
+      "examples",
+      example_dir,
+      "launcher.sh",
   )
   with open(path) as f:
     return f.read()
 
 
-def _cmd_block(name: str) -> str:
-  text = _launcher_text()
+def _cmd_block(name: str, example_dir: str = "math_gsm8k_dist") -> str:
+  text = _launcher_text(example_dir)
   start = text.index(f"{name}=(")
   return text[start : text.index("\n    )", start)]
 
@@ -61,16 +64,25 @@ class SamplingParamsTest(absltest.TestCase):
   """Tests for generation sampling parameters in the launcher."""
 
   def test_sampling_params_are_bound_to_their_variables(self):
-    text = _launcher_text()
-    for flag, var in (
-        ("--temperature", "TEMPERATURE"),
-        ("--top_p", "TOP_P"),
-        ("--top_k", "TOP_K"),
-    ):
-      self.assertIn(f'{flag}="${var}"', text, f"{flag} is not bound to ${var}")
+    for example_dir in ("math_gsm8k_dist", "deepswe_dist"):
+      text = _launcher_text(example_dir)
+      for flag, var in (
+          ("--temperature", "TEMPERATURE"),
+          ("--top_p", "TOP_P"),
+          ("--top_k", "TOP_K"),
+      ):
+        self.assertIn(
+            f'{flag}="${var}"',
+            text,
+            f"{example_dir}: {flag} is not bound to ${var}",
+        )
 
   def test_inference_node_receives_the_sampling_temperature(self):
-    self.assertIn('--temperature="$TEMPERATURE"', _cmd_block("INFERENCE_CMD"))
+    for example_dir in ("math_gsm8k_dist", "deepswe_dist"):
+      self.assertIn(
+          '--temperature="$TEMPERATURE"',
+          _cmd_block("INFERENCE_CMD", example_dir),
+      )
 
 
 class GradNormMetricTest(absltest.TestCase):

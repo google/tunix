@@ -21,6 +21,7 @@ import dataclasses
 import gc
 from itertools import count
 import os
+import threading
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union, cast
 
 from absl import logging
@@ -61,6 +62,9 @@ class VllmConfig:
   # Capture the MoE expert ids the rollout actually routed through, so training
   # can replay them. Sets vLLM's `enable_return_routed_experts` engine arg.
   return_routed_experts: bool = False
+  # Token ids that terminate a generation. Defaults to the tokenizer's single
+  # `eos_id()`, which for a chat model is only the chat-turn terminator.
+  eos_tokens: Optional[List[int]] = None
 
   # vLLM Env vars
   init_with_random_weights: bool = True
@@ -179,7 +183,8 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     self._postprocess_pool: Optional[concurrent.futures.ThreadPoolExecutor] = (
         None
     )
-    self._postprocessed: Optional[Dict[str, list[Any]]] = None
+    self._postprocess_pool_lock = threading.Lock()
+    self._thread_local = threading.local()
     self._driver: VLLMInProcessDriver | None = None
     self.llm: LLM | None = None
     self._request_counter = count()
@@ -200,6 +205,14 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     # lora.
     if config.lora_config and config.mapping_config.lora_to_hf_mappings:
       self.to_hf_key_mappings |= config.mapping_config.lora_to_hf_mappings
+
+  @property
+  def _postprocessed(self) -> Optional[Dict[str, list[Any]]]:
+    return getattr(self._thread_local, "postprocessed", None)
+
+  @_postprocessed.setter
+  def _postprocessed(self, value: Optional[Dict[str, list[Any]]]) -> None:
+    self._thread_local.postprocessed = value
 
   @property
   def mesh(self) -> jax.sharding.Mesh:
@@ -447,9 +460,10 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     if self._driver is not None:
       self._driver.shutdown()
       self._driver = None
-    if self._postprocess_pool is not None:
-      self._postprocess_pool.shutdown(wait=False)
-      self._postprocess_pool = None
+    with self._postprocess_pool_lock:
+      if self._postprocess_pool is not None:
+        self._postprocess_pool.shutdown(wait=False)
+        self._postprocess_pool = None
 
   @property
   def _model_runner(self):
@@ -544,10 +558,12 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
 
   def _get_postprocess_pool(self) -> concurrent.futures.ThreadPoolExecutor:
     if self._postprocess_pool is None:
-      self._postprocess_pool = concurrent.futures.ThreadPoolExecutor(
-          max_workers=self.config.postprocessing_threads,
-          thread_name_prefix="vllm-postprocess",
-      )
+      with self._postprocess_pool_lock:
+        if self._postprocess_pool is None:
+          self._postprocess_pool = concurrent.futures.ThreadPoolExecutor(
+              max_workers=self.config.postprocessing_threads,
+              thread_name_prefix="vllm-postprocess",
+          )
     return self._postprocess_pool
 
   def _postprocess_as_completed(
@@ -688,6 +704,25 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
             "vLLM prompt echo differs from the submitted token row"
         )
 
+  def _eos_token_ids(self) -> List[int]:
+    """Returns the token ids that terminate a generation.
+
+    A tokenizer exposes a single `eos_id()`, but a model may declare several
+    terminators and use a different one depending on how it was prompted. Qwen3,
+    for instance, lists both `<|im_end|>` and `<|endoftext|>` in its generation
+    config: a chat-formatted turn ends with the former, a raw completion with
+    the latter, and the tokenizer only reports the former. Stopping solely on
+    `eos_id()` therefore leaves completion-mode rollouts running until they hit
+    `max_tokens`.
+
+    Returns:
+      The union of `VllmConfig.eos_tokens` and the tokenizer's single
+      end-of-sequence id.
+    """
+    eos_ids = set(self.config.eos_tokens or [])
+    if self.tokenizer is not None and self.tokenizer.eos_id() is not None:
+      eos_ids.add(self.tokenizer.eos_id())
+    return list(eos_ids)
   def __call__(
       self,
       input_strings: str | List[str] | None = None,
@@ -773,7 +808,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       else:
         sampling_params.logprobs = 0
         sampling_params.prompt_logprobs = None
-      sampling_params.stop_token_ids = [self.tokenizer.eos_id()]
+      sampling_params.stop_token_ids = self._eos_token_ids()
       sampling_params.skip_special_tokens = True
       # Keep the stop token in the returned ``token_ids`` so multi-turn
       # consumers can reconstruct the exact sequence the model was sampled

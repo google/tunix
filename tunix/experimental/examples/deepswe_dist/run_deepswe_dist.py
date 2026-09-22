@@ -20,6 +20,7 @@ import argparse
 import functools
 import logging
 import os
+import signal
 import sys
 from typing import Any
 
@@ -37,14 +38,12 @@ if REPO_ROOT not in sys.path:
 # pylint: disable=g-import-not-at-top
 from tunix.experimental.common import datatypes
 from tunix.experimental.distributed.runtime import context as runtime_context
-from tunix.experimental.examples.deepswe_dist import deepswe
 from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import orchestrator
 from tunix.experimental.orchestrator import rl_program
 from tunix.experimental.weight_sync import weight_sync
 from tunix.experimental.worker import remote_execution
-from examples.deepswe import swe_env
 from tunix.rl import algorithm_config
 from tunix.sft import metrics_logger as metrics_logger_lib
 
@@ -52,6 +51,12 @@ from tunix.sft import metrics_logger as metrics_logger_lib
 
 
 ProcessContext = runtime_context.ProcessContext
+DEFAULT_DATASET_NAME = "R2E-Gym/R2E-Gym-Subset"
+
+
+def _int_list(value: str) -> tuple[int, ...]:
+  """Parses "512,2048" into (512, 2048)."""
+  return tuple(int(part) for part in value.split(",") if part)
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -69,6 +74,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument("--num_generations", type=int, default=2)
+  parser.add_argument(
+      "--rollout_replicas",
+      type=int,
+      default=int(
+          os.getenv("ROLLOUT_REPLICAS", os.getenv("ROLLOUT_WORKERS", "1"))
+      ),
+      help=(
+          "Minimum number of rollout worker replicas to wait for before"
+          " starting training."
+      ),
+  )
   parser.add_argument("--max_steps", type=int, default=1)
   parser.add_argument("--max_prompt_length", type=int, default=1024)
   parser.add_argument("--max_response_length", type=int, default=1024)
@@ -126,6 +142,81 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " on-policy ratio=1."
       ),
   )
+  # ---- Optional GRPO algorithm options -------------------------------------
+  # All default to off, so omitting them reproduces the previous behaviour.
+  parser.add_argument(
+      "--epsilon_high",
+      type=float,
+      default=None,
+      help="Upper PPO clip bound, for DAPO-style asymmetric clipping.",
+  )
+  parser.add_argument(
+      "--loss_agg_mode",
+      type=str,
+      default="sequence-mean-token-mean",
+      help="Loss aggregation mode, e.g. token-mean or sequence-mean.",
+  )
+  parser.add_argument(
+      "--advantage_estimator",
+      type=str,
+      default="grpo",
+      help="Advantage estimator, e.g. grpo or grpo-loo (leave-one-out).",
+  )
+  parser.add_argument(
+      "--overlong_loss_masking",
+      action=argparse.BooleanOptionalAction,
+      default=False,
+      help=(
+          "Drop sequences truncated by the response budget from the loss AND"
+          " its denominator. Needs the rollout to report a trajectory status."
+      ),
+  )
+  parser.add_argument(
+      "--overlong_filter",
+      action=argparse.BooleanOptionalAction,
+      default=False,
+      help=(
+          "Filter out overlong trajectories from training. Sets"
+          " metadata['overlong_filter'] on prompt items."
+      ),
+  )
+  parser.add_argument(
+      "--seq_logprob_error_threshold",
+      type=float,
+      default=None,
+      help=(
+          "Drop sequences whose mean exp|log p_trainer - log q_sampler|"
+          " exceeds this. Requires rollout log-probabilities."
+      ),
+  )
+  parser.add_argument(
+      "--truncated_importance_sampling_type",
+      type=str,
+      default=None,
+      choices=(None, "seq-mask-tis"),
+      help="Set to seq-mask-tis to enable the sequence-mask TIS gate.",
+  )
+  parser.add_argument(
+      "--truncated_importance_sampling_ratio_min",
+      type=float,
+      default=None,
+      help="Lower edge of the TIS keep band.",
+  )
+  parser.add_argument(
+      "--truncated_importance_sampling_ratio",
+      type=float,
+      default=None,
+      help="Upper edge of the TIS keep band.",
+  )
+  parser.add_argument(
+      "--sampler_is_length_buckets",
+      type=_int_list,
+      default=None,
+      help=(
+          "Comma-separated completion-length bucket edges in tokens, e.g."
+          " 512,2048. Reports the sampler/trainer offset per bucket."
+      ),
+  )
   parser.add_argument(
       "--offpolicy",
       "--max_staleness",
@@ -147,7 +238,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   )
   parser.add_argument("--dataset_path", type=str, default="")
   parser.add_argument(
-      "--dataset_name", type=str, default=deepswe.DEFAULT_DATASET_NAME
+      "--dataset_name", type=str, default=DEFAULT_DATASET_NAME
   )
   parser.add_argument("--dataset_split", type=str, default="train")
   parser.add_argument(
@@ -189,6 +280,15 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       default=128,
       help="Maximum concurrency for SandboxFleet.",
   )
+  parser.add_argument(
+      "--image_rewrite_prefix",
+      type=str,
+      default=os.getenv("IMAGE_REWRITE_PREFIX", ""),
+      help=(
+          "Container registry prefix to rewrite problem docker images for image"
+          " streaming."
+      ),
+  )
   parser.add_argument("--env_verbose", action="store_true")
   parser.add_argument(
       "--flush_every_n_steps",
@@ -225,8 +325,13 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   )
   parser.add_argument("--rpc_timeout_s", type=float, default=1800.0)
   parser.add_argument("--init_timeout_s", type=float, default=None)
+  parser.add_argument("--inference_addr", type=str, default="")
   parser.add_argument("--stop_workers_on_exit", action="store_true")
-  parser.add_argument("--debug", action="store_true")
+  parser.add_argument(
+      "--debug",
+      action="store_true",
+      help="Enable debug logging and print full sampler responses.",
+  )
   return parser.parse_args(argv)
 
 
@@ -234,9 +339,24 @@ def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
   algo_config = algorithm_config.GRPOConfig(
       num_generations=args.num_generations,
       epsilon=args.epsilon,
+      epsilon_high=args.epsilon_high,
       beta=args.beta,
       temperature=args.temperature,
       use_rollout_logps=args.use_rollout_logps,
+      loss_agg_mode=args.loss_agg_mode,
+      advantage_estimator=args.advantage_estimator,
+      overlong_loss_masking=args.overlong_loss_masking,
+      seq_logprob_error_threshold=args.seq_logprob_error_threshold,
+      truncated_importance_sampling_type=(
+          args.truncated_importance_sampling_type
+      ),
+      truncated_importance_sampling_ratio_min=(
+          args.truncated_importance_sampling_ratio_min
+      ),
+      truncated_importance_sampling_ratio=(
+          args.truncated_importance_sampling_ratio
+      ),
+      sampler_is_length_buckets=args.sampler_is_length_buckets,
   )
   return algorithm_adapter.GRPOAdapter(
       algo_config=algo_config,
@@ -272,6 +392,23 @@ def _configure_trainer_loss(
   )
 
 
+def _register_signal_handlers() -> None:
+  """Registers SIGTERM and SIGINT handlers so Python unwinds cleanly via SystemExit."""
+
+  def _handle_exit_signal(signum, frame):
+    del frame
+    logging.info(
+        "Received signal %d in orchestrator; shutting down cleanly...", signum
+    )
+    sys.exit(128 + signum)
+
+  for sig in (signal.SIGTERM, signal.SIGINT):
+    try:
+      signal.signal(sig, _handle_exit_signal)
+    except (ValueError, OSError):
+      pass
+
+
 def main(argv: list[str], context: ProcessContext | None = None) -> None:
   assert (
       context and context.ipc and context.ipc.discovery
@@ -283,6 +420,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       format="%(asctime)s - [DeepSWEOrchestrator] %(message)s",
       force=True,
   )
+  _register_signal_handlers()
 
   if args.mini_batch_size is None:
     args.mini_batch_size = args.batch_size
@@ -293,12 +431,16 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   if args.max_staleness < 0:
     raise ValueError("offpolicy/max_staleness must be non-negative.")
 
+  if args.image_rewrite_prefix:
+    os.environ["IMAGE_REWRITE_PREFIX"] = args.image_rewrite_prefix.strip('"\'')
+
   logging.info("=== Starting Distributed DeepSWE GRPO Orchestrator ===")
   logging.info(
       "Configuration: model_id=%s, batch_size=%d prompt group(s), "
       "mini_batch_size=%d, num_generations=%d, max_steps=%d, max_turns=%d, "
       "train_micro=%d, beta=%.4f, env_backend=%s, use_agent_sandbox=%s, "
-      "weight_sync_mode=%s, trainable_parameters_mask=%s.",
+      "weight_sync_mode=%s, trainable_parameters_mask=%s, "
+      "image_rewrite_prefix=%s.",
       args.model_id,
       args.batch_size,
       args.mini_batch_size,
@@ -311,6 +453,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       args.use_agent_sandbox,
       args.weight_sync_mode,
       args.trainable_parameters_mask,
+      args.image_rewrite_prefix or "(none)",
   )
   logging.info("Control-plane JAX backend: %s", jax.default_backend())
 
@@ -333,6 +476,9 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       pad_id,
       eos_id,
   )
+
+  from examples.deepswe import swe_env  # pylint: disable=g-import-not-at-top
+  from tunix.experimental.examples.deepswe_dist import deepswe  # pylint: disable=g-import-not-at-top
 
   dataset = deepswe.load_deepswe_dataset(
       dataset_name=args.dataset_name,
@@ -362,7 +508,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   cluster.wait_for_workers(
       min_workers={
           datatypes.Role.ACTOR: 1,
-          datatypes.Role.ROLLOUT: 1,
+          datatypes.Role.ROLLOUT: args.rollout_replicas,
           datatypes.Role.REFERENCE: 1 if args.beta != 0.0 else 0,
       },
       timeout=args.init_timeout_s,
@@ -390,82 +536,90 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   )
 
   fleet = None
-  if args.use_agent_sandbox:
-    fleet = swe_env._init_global_fleet(  # pylint: disable=protected-access
-        tasks=dataset,
-        max_concurrency=args.max_concurrency,
-        num_generations=args.num_generations,
-        batch_size=args.batch_size,
-        max_warmpool_replicas=args.max_warmpool_replicas,
-        scaffold=args.scaffold,
-    )
-
-  prompt_stream = deepswe.iter_prompt_items(
-      dataset=dataset,
-      max_steps=args.max_steps,
-      batch_size=args.batch_size,
-      max_turns=args.max_turns,
-      max_response_length=args.max_response_length,
-      temperature=args.temperature,
-      top_p=args.top_p,
-      top_k=None if args.top_k < 0 else args.top_k,
-      step_timeout_secs=args.step_timeout_secs,
-      reward_timeout_secs=args.reward_timeout_secs,
-      env_backend=args.env_backend,
-      use_agent_sandbox=args.use_agent_sandbox,
-      scaffold=args.scaffold,
-      env_verbose=args.env_verbose,
-      episode_timeout_secs=args.episode_timeout_secs,
-  )
-  if args.use_agent_sandbox:
-    prompt_stream = swe_env.PrewarmDatasetIterator(
-        prompt_stream,
-        fleet=fleet,
-        num_generations=args.num_generations,
-        batch_size=args.batch_size,
-        max_warmpool_replicas=args.max_warmpool_replicas,
-        scaffold=args.scaffold,
-    )
-
-  program = rl_program.StandardRLProgram(
-      algo=algo,
-      dataset=prompt_stream,
-      max_steps=args.max_steps,
-      generation_args=datatypes.GenerationArgs(
-          max_response_length=args.max_response_length,
-          temperature=args.temperature,
-          top_p=args.top_p,
-          top_k=None if args.top_k < 0 else args.top_k,
-          return_logprobs=True,
-      ),
-      reward_fns=[],
-      batch_size=args.batch_size,
-      batch_config=batch_assembly.BatchConfig(
-          pad_id=pad_id,
-          max_prompt_length=args.max_prompt_length,
-          max_response_length=args.max_response_length,
-          max_seq_token_per_tpu=args.max_seq_token_per_tpu,
-          max_segments_per_packed_row=args.max_segments_per_packed_row,
-          trainer_fsdp=args.trainer_fsdp,
-          trainer_dp=args.trainer_dp,
-      ),
-      metrics_logging_options=metrics_logging_options,
-      trajectory_log_dir=args.trajectory_log_dir,
-      max_staleness=args.max_staleness,
-      sync_weights=(args.weight_sync_mode != weight_sync.WeightSyncMode.NONE),
-      on_step_begin=lambda step: logging.info(
-          ">>> DeepSWE step %d starting | policy_version=%d",
-          step,
-          step,
-      ),
-      on_step_end=lambda step, result: logging.info(
-          "<<< DeepSWE step %d finished | train_result=%s",
-          step,
-          result,
-      ),
-  )
-
+  prompt_stream = None
+  program = None
   try:
+    if args.use_agent_sandbox:
+      # Initialize fleet plan from dataset. Eager warmpools are skipped;
+      # dynamic sliding-window prewarming with initial barrier is handled by
+      # PrewarmDatasetIterator below.
+      fleet = swe_env._init_global_fleet(  # pylint: disable=protected-access
+          tasks=dataset,
+          max_concurrency=args.max_concurrency,
+          num_generations=args.num_generations,
+          batch_size=args.batch_size,
+          max_warmpool_replicas=args.max_warmpool_replicas,
+          scaffold=args.scaffold,
+      )
+
+    prompt_stream = deepswe.iter_prompt_items(
+        dataset=dataset,
+        max_steps=args.max_steps,
+        batch_size=args.batch_size,
+        max_turns=args.max_turns,
+        max_response_length=args.max_response_length,
+        temperature=args.temperature,
+        top_p=args.top_p,
+        top_k=None if args.top_k < 0 else args.top_k,
+        step_timeout_secs=args.step_timeout_secs,
+        reward_timeout_secs=args.reward_timeout_secs,
+        env_backend=args.env_backend,
+        use_agent_sandbox=args.use_agent_sandbox,
+        scaffold=args.scaffold,
+        env_verbose=args.env_verbose,
+        episode_timeout_secs=args.episode_timeout_secs,
+        overlong_filter=args.overlong_filter,
+    )
+    if args.use_agent_sandbox:
+      prompt_stream = swe_env.PrewarmDatasetIterator(
+          prompt_stream,
+          fleet=fleet,
+          num_generations=args.num_generations,
+          batch_size=args.batch_size,
+          max_warmpool_replicas=args.max_warmpool_replicas,
+          unwarm_on_exhaustion=True,
+          scaffold=args.scaffold,
+          wait_initial=True,
+      )
+
+    program = rl_program.StandardRLProgram(
+        algo=algo,
+        dataset=prompt_stream,
+        max_steps=args.max_steps,
+        generation_args=datatypes.GenerationArgs(
+            max_generation_steps=args.max_response_length,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            top_k=None if args.top_k < 0 else args.top_k,
+            return_logprobs=True,
+        ),
+        reward_fns=[],
+        batch_size=args.batch_size,
+        batch_config=batch_assembly.BatchConfig(
+            pad_id=pad_id,
+            max_prompt_length=args.max_prompt_length,
+            max_response_length=args.max_response_length,
+            max_seq_token_per_tpu=args.max_seq_token_per_tpu,
+            max_segments_per_packed_row=args.max_segments_per_packed_row,
+            trainer_fsdp=args.trainer_fsdp,
+            trainer_dp=args.trainer_dp,
+        ),
+        metrics_logging_options=metrics_logging_options,
+        trajectory_log_dir=args.trajectory_log_dir,
+        max_staleness=args.max_staleness,
+        sync_weights=(args.weight_sync_mode != weight_sync.WeightSyncMode.NONE),
+        on_step_begin=lambda step: logging.info(
+            ">>> DeepSWE step %d starting | policy_version=%d",
+            step,
+            step,
+        ),
+        on_step_end=lambda step, result: logging.info(
+            "<<< DeepSWE step %d finished | train_result=%s",
+            step,
+            result,
+        ),
+    )
+
     logging.info("Bringing up remote workers through ClusterOrchestrator...")
     cluster.bring_up_workers(dummy_data=None)
     logging.info("Starting DeepSWE StandardRLProgram execution...")
@@ -478,13 +632,48 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
     logging.exception("FATAL ERROR in orchestrator execution: %s", e)
     raise
   finally:
-    program.close()
+    if program is not None and hasattr(program, "close"):
+      program.close()
+    if prompt_stream is not None and hasattr(prompt_stream, "close"):
+      logging.info("Closing prompt_stream (unwarming active warmpools)...")
+      try:
+        prompt_stream.close()
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        logging.warning("Prompt stream close note: %s", e)
     if fleet is not None:
       logging.info("Tearing down SandboxFleet on orchestrator...")
       try:
         fleet.teardown()
       except Exception as e:  # pylint: disable=broad-exception-caught
         logging.warning("Fleet teardown note: %s", e)
+      try:
+        from agent_sandbox_rl import reap  # pylint: disable=g-import-not-at-top
+
+        run_id = getattr(fleet, "run_id", None)
+        if run_id:
+          for c in getattr(fleet, "registry", []):
+            c_ns = getattr(c, "namespace", None) or os.getenv(
+                "NAMESPACE", "rl-tunix-swebench"
+            )
+            logging.info(
+                "Reaping agent_sandbox_rl resources for run_id=%s in namespace=%s...",
+                run_id,
+                c_ns,
+            )
+            reap(
+                run_id=run_id,
+                in_cluster=getattr(c, "in_cluster", True),
+                namespace=c_ns,
+                delete_pods=False,
+            )
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        logging.warning("Reaper note: %s", e)
+    try:
+      from examples.deepswe import sandbox_utils  # pylint: disable=g-import-not-at-top
+
+      sandbox_utils.teardown_global_fleet()
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      logging.warning("Global fleet teardown note: %s", e)
     if args.stop_workers_on_exit:
       logging.info("Shutting down cluster workers...")
       cluster.shutdown()

@@ -25,6 +25,9 @@ ORCHESTRATOR_ID=${ORCHESTRATOR_ID:-orchestrator}
 ORCHESTRATOR_PORT=${ORCHESTRATOR_PORT:-30000}
 TRAINER_PORT=${TRAINER_PORT:-20000}
 ROLLOUT_PORT=${ROLLOUT_PORT:-20001}
+INFERENCE_PORT=${INFERENCE_PORT:-20002}
+RUN_INFERENCE_NODE=${RUN_INFERENCE_NODE:-0}
+INFERENCE_ADDR=${INFERENCE_ADDR:-}
 
 MODEL_NAME=${MODEL_NAME:-Qwen3-1.7B}
 MODEL_ID=${MODEL_ID:-Qwen/Qwen3-1.7B}
@@ -43,9 +46,21 @@ MAX_SEQ_TOKEN_PER_TPU=${MAX_SEQ_TOKEN_PER_TPU:-}
 MAX_SEGMENTS_PER_PACKED_ROW=${MAX_SEGMENTS_PER_PACKED_ROW:-}
 MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-$BATCH_SIZE}
 EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-1000000}
-LEARNING_RATE=${LEARNING_RATE:-1e-6}
 OPT_CHAIN_TYPE=${OPT_CHAIN_TYPE-clip_by_global_norm}
 MAX_GRAD_NORM=${MAX_GRAD_NORM:-1.0}
+ADAM_B1=${ADAM_B1:-0.9}
+ADAM_B2=${ADAM_B2:-0.999}
+ADAM_EPS=${ADAM_EPS:-1.0e-8}
+WEIGHT_DECAY=${WEIGHT_DECAY:-0.01}
+LEARNING_RATE=${LEARNING_RATE:-1e-6}
+# The default is applied with `-` rather than `:-` so that an explicitly empty
+# SCHEDULE_TYPE selects the constant learning rate instead of the default.
+SCHEDULE_TYPE=${SCHEDULE_TYPE-warmup_cosine_decay_schedule}
+LR_INIT_VALUE=${LR_INIT_VALUE:-0.0}
+LR_PEAK_VALUE=${LR_PEAK_VALUE:-$LEARNING_RATE}
+LR_END_VALUE=${LR_END_VALUE:-0.0}
+LR_DECAY_STEPS=${LR_DECAY_STEPS:-500}
+WARMUP_STEPS=${WARMUP_STEPS:-$(((LR_DECAY_STEPS + 9) / 10))}
 BETA=${BETA:-0.0}
 EPSILON=${EPSILON:-0.2}
 SAMPLER=${SAMPLER:-inprocess_vllm}
@@ -53,8 +68,27 @@ WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
 USE_LORA=${USE_LORA:-0}
 LORA_RANK=${LORA_RANK:-64}
 LORA_ALPHA=${LORA_ALPHA:-64.0}
+# Generation sampling parameters, passed to the runner and the reference scorer.
+TEMPERATURE=${TEMPERATURE:-1.0}
+TOP_P=${TOP_P:-1.0}
+TOP_K=${TOP_K:--1}
+EOS_TOKENS=${EOS_TOKENS-}
+MAXTEXT_ATTENTION=${MAXTEXT_ATTENTION:-}
+# DEBUG=1 passes --debug to the runner, which logs full sampler responses.
 DEBUG=${DEBUG:-0}
 USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
+
+# Optional GRPO algorithm options. Empty, or 0 for the boolean, leaves the
+# option at the runner's default, so an unset variable changes nothing.
+EPSILON_HIGH=${EPSILON_HIGH:-}
+LOSS_AGG_MODE=${LOSS_AGG_MODE:-}
+ADVANTAGE_ESTIMATOR=${ADVANTAGE_ESTIMATOR:-}
+OVERLONG_LOSS_MASKING=${OVERLONG_LOSS_MASKING:-0}
+SEQ_LOGPROB_ERROR_THRESHOLD=${SEQ_LOGPROB_ERROR_THRESHOLD:-}
+TIS_TYPE=${TIS_TYPE:-${TRUNCATED_IMPORTANCE_SAMPLING_TYPE:-}}
+TIS_RATIO_MIN=${TIS_RATIO_MIN:-${TRUNCATED_IMPORTANCE_SAMPLING_RATIO_MIN:-}}
+TIS_RATIO=${TIS_RATIO:-${TRUNCATED_IMPORTANCE_SAMPLING_RATIO:-}}
+SAMPLER_IS_LENGTH_BUCKETS=${SAMPLER_IS_LENGTH_BUCKETS:-}
 
 CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-1}
 CHECKPOINT_MAX_TO_KEEP=${CHECKPOINT_MAX_TO_KEEP:-10}
@@ -87,9 +121,39 @@ TRAINABLE_PARAMETERS_MASK=${TRAINABLE_PARAMETERS_MASK:-}
 TRAINER_TPU_CHIPS=${TRAINER_TPU_CHIPS:-0,1}
 TRAINER_FSDP=${TRAINER_FSDP:-1}
 TRAINER_TP=${TRAINER_TP:-2}
+
+# tunix runs Tunix's PeftTrainer; maxtext runs MaxText's MaxTextTrainingEngine.
+TRAINER_BACKEND=${TRAINER_BACKEND:-tunix}
+MAXTEXT_CKPT=${MAXTEXT_CKPT:-}
+if [[ "$TRAINER_BACKEND" == "maxtext" ]]; then
+  # MaxText config names are lowercase. Passed to both the trainer and the
+  # rollout, so the two cannot drift.
+  MAXTEXT_MODEL_NAME=${MAXTEXT_MODEL_NAME:-$(printf '%s' "$MODEL_NAME" | tr '[:upper:]' '[:lower:]')}
+  # MaxText shards the batch dimension of every loss input across the fsdp
+  # axis, so the microbatch has to be a multiple of it. The trainer node
+  # enforces this too.
+  if (( TRAIN_MICRO_BATCH_SIZE % TRAINER_FSDP != 0 )); then
+    TRAIN_MICRO_BATCH_SIZE=$TRAINER_FSDP
+  fi
+  if [[ -z "$MAXTEXT_CKPT" ]]; then
+    echo "Error: TRAINER_BACKEND=maxtext requires MAXTEXT_CKPT (Orbax params-only checkpoint)."
+    exit 1
+  fi
+elif [[ "$TRAINER_BACKEND" == "tunix" ]]; then
+  # Must stay empty on the tunix backend. A non-empty value puts the rollout on
+  # MaxText's MaxTextForCausalLM while the trainer still emits tunix/vllm_jax
+  # tensor names, and Raiden pairs tensors by exact name, so zero of them match.
+  # Export it explicitly to override.
+  MAXTEXT_MODEL_NAME=${MAXTEXT_MODEL_NAME-}
+else
+  echo "Error: Unsupported TRAINER_BACKEND='$TRAINER_BACKEND' (expected 'tunix' or 'maxtext')." >&2
+  exit 1
+fi
+
 ROLLOUT_TPU_CHIPS=${ROLLOUT_TPU_CHIPS:-2,3}
 ROLLOUT_FSDP=${ROLLOUT_FSDP:-1}
 ROLLOUT_TP=${ROLLOUT_TP:-2}
+INFERENCE_TPU_CHIPS=${INFERENCE_TPU_CHIPS:-}
 TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS:-1,2,1}
 TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS:-1,1,1}
 
@@ -99,6 +163,7 @@ SHUTDOWN_GRACE_SECS=${SHUTDOWN_GRACE_SECS:-60}
 
 TRAINER_LOG="${LOG_ROOT}/trainer.log"
 ROLLOUT_LOG="${LOG_ROOT}/rollout.log"
+INFERENCE_LOG="${LOG_ROOT}/inference.log"
 ORCHESTRATOR_LOG="${LOG_ROOT}/orchestrator.log"
 
 print_command() {
@@ -180,7 +245,7 @@ PY
 cleanup() {
   trap - EXIT ERR
   local pids=()
-  for pid in "${TRAINER_PID:-}" "${ROLLOUT_PID:-}"; do
+  for pid in "${TRAINER_PID:-}" "${ROLLOUT_PID:-}" "${INFERENCE_PID:-}"; do
     if [[ -n "$pid" ]]; then
       pids+=("$pid")
     fi
@@ -206,6 +271,7 @@ echo "  dataset:        ${DATASET_PATH:-${DATASET_NAME}:${DATASET_SPLIT}}"
 echo "  trajectories:   $((BATCH_SIZE * NUM_GENERATIONS)) per step"
 echo "  batch size:     ${BATCH_SIZE}"
 echo "  generations:    ${NUM_GENERATIONS}"
+echo "  sampling:       temperature=$TEMPERATURE top_p=$TOP_P top_k=$TOP_K"
 echo "  max steps:      ${MAX_STEPS}"
 echo "  max turns:      ${MAX_TURNS}"
 echo "  prompt length:  ${MAX_PROMPT_LENGTH}"
@@ -213,11 +279,19 @@ echo "  response len:   ${MAX_RESPONSE_LENGTH}"
 echo "  max seq token:  ${MAX_SEQ_TOKEN_PER_TPU:-<unset>}"
 echo "  max segments:   ${MAX_SEGMENTS_PER_PACKED_ROW:-<unset>}"
 echo "  learning rate:  ${LEARNING_RATE}"
+echo "  lr schedule:    ${SCHEDULE_TYPE:-<constant>} (warmup $WARMUP_STEPS, decay $LR_DECAY_STEPS)"
 echo "  beta:           ${BETA}"
+echo "  epsilon:        ${EPSILON}"
 echo "  sampler:        ${SAMPLER}"
 echo "  weight sync:    ${WEIGHT_SYNC_MODE}"
+echo "  trainer backend:${TRAINER_BACKEND}"
+echo "  maxtext model:  ${MAXTEXT_MODEL_NAME:-<unset>}"
+echo "  maxtext ckpt:   ${MAXTEXT_CKPT:-<unset>}"
 echo "  trainer chips:  ${TRAINER_TPU_CHIPS}"
 echo "  rollout chips:  ${ROLLOUT_TPU_CHIPS}"
+echo "  inference:      ${RUN_INFERENCE_NODE}"
+echo "  inference addr: ${INFERENCE_ADDR:-<none>}"
+echo "  inference chips:${INFERENCE_TPU_CHIPS:-<unset>}"
 echo "  wandb project:  ${WANDB_PROJECT:-<none>}"
 echo "  wandb run name: ${WANDB_RUN_NAME:-<auto>}"
 echo "  ckpt interval:  ${CHECKPOINT_SAVE_INTERVAL_STEPS}"
@@ -225,16 +299,22 @@ echo "  ckpt max keep:  ${CHECKPOINT_MAX_TO_KEEP}"
 echo "  ckpt root dir:  ${CHECKPOINT_ROOT_DIRECTORY}"
 echo "=================================================="
 
-if [[ "$BETA" != "0" && "$BETA" != "0.0" ]]; then
-  echo "Error: this first DeepSWE distributed launcher only wires trainer+rollout."
-  echo "Use BETA=0.0 until the reference inference worker is added."
-  exit 1
+if [[ "$BETA" != "0" && "$BETA" != "0.0" && -z "$INFERENCE_ADDR" ]]; then
+  if [[ "$RUN_INFERENCE_NODE" != "1" &&
+        "$RUN_INFERENCE_NODE" != "true" &&
+        "$RUN_INFERENCE_NODE" != "True" ]]; then
+    echo "Error: BETA=$BETA requires a reference inference worker."
+    echo "Set RUN_INFERENCE_NODE=1 with INFERENCE_TPU_CHIPS, pass INFERENCE_ADDR,"
+    echo "or use BETA=0 for a trainer+rollout smoke run."
+    exit 1
+  fi
 fi
 
 ensure_model_dir
 mkdir -p "$LOG_ROOT" "$ARTIFACT_ROOT"
 : > "$TRAINER_LOG"
 : > "$ROLLOUT_LOG"
+: > "$INFERENCE_LOG"
 : > "$ORCHESTRATOR_LOG"
 
 echo "Launching trainer node..."
@@ -249,6 +329,7 @@ echo "Launching trainer node..."
     --model_id="$MODEL_ID"
     --model_dir="$MODEL_DIR"
     --model_name="$MODEL_NAME"
+    --sampler_type="$SAMPLER"
     --tokenizer_path="$TOKENIZER_PATH"
     --max_prompt_length="$MAX_PROMPT_LENGTH"
     --max_response_length="$MAX_RESPONSE_LENGTH"
@@ -256,10 +337,20 @@ echo "Launching trainer node..."
     --num_generations="$NUM_GENERATIONS"
     --train_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
     --eval_every_n_steps="$EVAL_EVERY_N_STEPS"
-    --learning_rate="$LEARNING_RATE"
+    --optimizer_b1="$ADAM_B1"
+    --optimizer_b2="$ADAM_B2"
+    --optimizer_eps="$ADAM_EPS"
+    --optimizer_weight_decay="$WEIGHT_DECAY"
+    --optimizer_learning_rate="$LEARNING_RATE"
+    --optimizer_schedule_type="$SCHEDULE_TYPE"
+    --optimizer_init_value="$LR_INIT_VALUE"
+    --optimizer_peak_value="$LR_PEAK_VALUE"
+    --optimizer_end_value="$LR_END_VALUE"
+    --optimizer_warmup_steps="$WARMUP_STEPS"
+    --optimizer_decay_steps="$LR_DECAY_STEPS"
     --lora_rank="$LORA_RANK"
     --lora_alpha="$LORA_ALPHA"
-    --sampler_type="$SAMPLER"
+    --trainer_backend="$TRAINER_BACKEND"
     --checkpoint_save_interval_steps="$CHECKPOINT_SAVE_INTERVAL_STEPS"
     --checkpoint_max_to_keep="$CHECKPOINT_MAX_TO_KEEP"
     --checkpoint_root_directory="$CHECKPOINT_ROOT_DIRECTORY"
@@ -270,8 +361,26 @@ echo "Launching trainer node..."
       --optimizer_chain_kwargs="{'max_norm': $MAX_GRAD_NORM}"
     )
   fi
+  if [[ -n "$MAXTEXT_CKPT" ]]; then
+    TRAINER_CMD+=(--maxtext_ckpt_path="$MAXTEXT_CKPT")
+  fi
+  if [[ -n "$MAXTEXT_MODEL_NAME" ]]; then
+    TRAINER_CMD+=(--maxtext_model_name="$MAXTEXT_MODEL_NAME")
+  fi
+  if [[ -n "$MAX_SEQ_TOKEN_PER_TPU" ]]; then
+    TRAINER_CMD+=(--max_seq_token_per_tpu="$MAX_SEQ_TOKEN_PER_TPU")
+  fi
   if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
     TRAINER_CMD+=(--use_lora)
+  fi
+  if [[ -n "$PROFILER_STEPS" ]]; then
+    TRAINER_CMD+=(--profiler_steps="$PROFILER_STEPS")
+  fi
+  if [[ -n "$SKIP_FIRST_N_PROFILER_STEPS" ]]; then
+    TRAINER_CMD+=(--skip_first_n_profiler_steps="$SKIP_FIRST_N_PROFILER_STEPS")
+  fi
+  if [[ -n "$PROFILER_PERIOD" ]]; then
+    TRAINER_CMD+=(--profiler_period="$PROFILER_PERIOD")
   fi
   if [[ "$DEBUG" == "1" || "$DEBUG" == "true" || "$DEBUG" == "True" ]]; then
     TRAINER_CMD+=(--debug)
@@ -279,12 +388,19 @@ echo "Launching trainer node..."
   if [[ -n "$TRAINABLE_PARAMETERS_MASK" ]]; then
     TRAINER_CMD+=(--trainable_parameters_mask="$TRAINABLE_PARAMETERS_MASK")
   fi
-  export JAX_PLATFORMS=tpu,cpu
-  export TPU_VISIBLE_DEVICES=${TRAINER_TPU_CHIPS}
-  export TPU_VISIBLE_CHIPS=${TPU_VISIBLE_DEVICES}
-  export TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS}
-  export TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS}
-  export LIBTPU_INIT_ARGS="--deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS} --deepsea_host_bounds=${TPU_HOST_BOUNDS}"
+  if [[ "${TRAINER_PATHWAYS:-0}" == "1" ]]; then
+    export JAX_PLATFORMS=proxy,cpu
+    export JAX_BACKEND_TARGET=${JAX_BACKEND_TARGET:-grpc://127.0.0.1:29000}
+    export TRAINER_PATHWAYS_LOCAL_INIT=1
+    unset TPU_VISIBLE_DEVICES TPU_VISIBLE_CHIPS LIBTPU_INIT_ARGS
+  else
+    export JAX_PLATFORMS=tpu,cpu
+    export TPU_VISIBLE_DEVICES=${TRAINER_TPU_CHIPS}
+    export TPU_VISIBLE_CHIPS=${TPU_VISIBLE_DEVICES}
+    export TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS}
+    export TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS}
+    export LIBTPU_INIT_ARGS="--deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS} --deepsea_host_bounds=${TPU_HOST_BOUNDS}"
+  fi
   export PYTHONUNBUFFERED=1
   print_command "Trainer command" "${TRAINER_CMD[@]}"
   exec "${TRAINER_CMD[@]}" > "$TRAINER_LOG" 2>&1
@@ -315,6 +431,15 @@ echo "Launching DeepSWE rollout node..."
     --agent_name=deepswe_agent
     --max_concurrency="$ROLLOUT_MAX_CONCURRENCY"
   )
+  if [[ -n "$MAXTEXT_MODEL_NAME" ]]; then
+    ROLLOUT_CMD+=(--maxtext_model_name="$MAXTEXT_MODEL_NAME")
+  fi
+  if [[ -n "$MAXTEXT_ATTENTION" ]]; then
+    ROLLOUT_CMD+=(--maxtext_attention="$MAXTEXT_ATTENTION")
+  fi
+  if [[ -n "$EOS_TOKENS" ]]; then
+    ROLLOUT_CMD+=(--eos_tokens="$EOS_TOKENS")
+  fi
   if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
     ROLLOUT_CMD+=(--use_lora)
   fi
@@ -341,8 +466,48 @@ echo "Launching DeepSWE rollout node..."
 ) &
 ROLLOUT_PID=$!
 
+if [[ "$RUN_INFERENCE_NODE" == "1" || "$RUN_INFERENCE_NODE" == "true" || "$RUN_INFERENCE_NODE" == "True" ]]; then
+  if [[ -z "$INFERENCE_TPU_CHIPS" ]]; then
+    echo "Error: RUN_INFERENCE_NODE requires INFERENCE_TPU_CHIPS to avoid TPU contention."
+    exit 1
+  fi
+  echo "Launching reference inference node on TPU chips $INFERENCE_TPU_CHIPS..."
+  (
+    INFERENCE_CMD=(
+      "$PYTHON_BIN" -m tunix.experimental.distributed.runtime.main
+      --discovery_addrs="${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT}"
+      --process_main=tunix.experimental.examples.common.run_inference_node.main
+      --port="$INFERENCE_PORT"
+      --model_name="$MODEL_NAME"
+      --model_id="$MODEL_ID"
+      --model_dir="$MODEL_DIR"
+      --tokenizer_path="$TOKENIZER_PATH"
+      --compute_logps_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
+      --max_prompt_length="$MAX_PROMPT_LENGTH"
+      --max_response_length="$MAX_RESPONSE_LENGTH"
+      # Must match the sampling temperature: this node scores the reference
+      # policy for the KL term.
+      --temperature="$TEMPERATURE"
+    )
+    export JAX_PLATFORMS=tpu,cpu
+    export TPU_VISIBLE_DEVICES=${INFERENCE_TPU_CHIPS}
+    export TPU_VISIBLE_CHIPS=${TPU_VISIBLE_DEVICES}
+    export TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS}
+    export TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS}
+    export LIBTPU_INIT_ARGS="--deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS} --deepsea_host_bounds=${TPU_HOST_BOUNDS}"
+    export PYTHONUNBUFFERED=1
+    print_command "Inference command" "${INFERENCE_CMD[@]}"
+    exec "${INFERENCE_CMD[@]}" > "$INFERENCE_LOG" 2>&1
+  ) &
+  INFERENCE_PID=$!
+  INFERENCE_ADDR="localhost:$INFERENCE_PORT"
+fi
+
 wait_for_port "trainer" "$TRAINER_PORT" "$TRAINER_PID" "$TRAINER_LOG"
 wait_for_port "rollout" "$ROLLOUT_PORT" "$ROLLOUT_PID" "$ROLLOUT_LOG"
+if [[ -n "${INFERENCE_PID:-}" ]]; then
+  wait_for_port "inference" "$INFERENCE_PORT" "$INFERENCE_PID" "$INFERENCE_LOG"
+fi
 
 echo "Launching CPU orchestrator..."
 (
@@ -356,6 +521,9 @@ echo "Launching CPU orchestrator..."
     --batch_size="$BATCH_SIZE"
     --mini_batch_size="$MINI_BATCH_SIZE"
     --num_generations="$NUM_GENERATIONS"
+    --temperature="$TEMPERATURE"
+    --top_p="$TOP_P"
+    --top_k="$TOP_K"
     --max_steps="$MAX_STEPS"
     --max_turns="$MAX_TURNS"
     --max_prompt_length="$MAX_PROMPT_LENGTH"
@@ -375,6 +543,39 @@ echo "Launching CPU orchestrator..."
     --weight_sync_mode="$WEIGHT_SYNC_MODE"
     --stop_workers_on_exit
   )
+  if [[ "$DEBUG" == "1" || "$DEBUG" == "true" || "$DEBUG" == "True" ]]; then
+    ORCHESTRATOR_CMD+=(--debug)
+  fi
+  # Explicit if-blocks rather than `[[ -n x ]] && cmd`: this script runs under
+  # `set -Ee`, where a false test at the head of an AND-list aborts the
+  # launcher. An option left unset has to be a no-op.
+  if [[ -n "$EPSILON_HIGH" ]]; then
+    ORCHESTRATOR_CMD+=(--epsilon_high="$EPSILON_HIGH")
+  fi
+  if [[ -n "$LOSS_AGG_MODE" ]]; then
+    ORCHESTRATOR_CMD+=(--loss_agg_mode="$LOSS_AGG_MODE")
+  fi
+  if [[ -n "$ADVANTAGE_ESTIMATOR" ]]; then
+    ORCHESTRATOR_CMD+=(--advantage_estimator="$ADVANTAGE_ESTIMATOR")
+  fi
+  if [[ "$OVERLONG_LOSS_MASKING" == "1" || "$OVERLONG_LOSS_MASKING" == "true" || "$OVERLONG_LOSS_MASKING" == "True" ]]; then
+    ORCHESTRATOR_CMD+=(--overlong_loss_masking)
+  fi
+  if [[ -n "$SEQ_LOGPROB_ERROR_THRESHOLD" ]]; then
+    ORCHESTRATOR_CMD+=(--seq_logprob_error_threshold="$SEQ_LOGPROB_ERROR_THRESHOLD")
+  fi
+  if [[ -n "$TIS_TYPE" ]]; then
+    ORCHESTRATOR_CMD+=(--truncated_importance_sampling_type="$TIS_TYPE")
+  fi
+  if [[ -n "$TIS_RATIO_MIN" ]]; then
+    ORCHESTRATOR_CMD+=(--truncated_importance_sampling_ratio_min="$TIS_RATIO_MIN")
+  fi
+  if [[ -n "$TIS_RATIO" ]]; then
+    ORCHESTRATOR_CMD+=(--truncated_importance_sampling_ratio="$TIS_RATIO")
+  fi
+  if [[ -n "$SAMPLER_IS_LENGTH_BUCKETS" ]]; then
+    ORCHESTRATOR_CMD+=(--sampler_is_length_buckets="$SAMPLER_IS_LENGTH_BUCKETS")
+  fi
   if [[ -n "$DATASET_PATH" ]]; then
     ORCHESTRATOR_CMD+=(--dataset_path="$DATASET_PATH")
   fi
@@ -383,11 +584,14 @@ echo "Launching CPU orchestrator..."
   else
     ORCHESTRATOR_CMD+=(--shuffle)
   fi
+  if [[ -n "$INFERENCE_ADDR" ]]; then
+    ORCHESTRATOR_CMD+=(--inference_addr="$INFERENCE_ADDR")
+  fi
+  if [[ -n "$MAX_STALENESS" ]]; then
+    ORCHESTRATOR_CMD+=(--max_staleness="$MAX_STALENESS")
+  fi
   if [[ "$USE_AGENT_SANDBOX" == "1" || "$USE_AGENT_SANDBOX" == "true" || "$USE_AGENT_SANDBOX" == "True" ]]; then
     ORCHESTRATOR_CMD+=(--use_agent_sandbox)
-  fi
-  if [[ "$DEBUG" == "1" || "$DEBUG" == "true" || "$DEBUG" == "True" ]]; then
-    ORCHESTRATOR_CMD+=(--debug)
   fi
   if [[ -n "$MAX_SEQ_TOKEN_PER_TPU" ]]; then
     ORCHESTRATOR_CMD+=(--max_seq_token_per_tpu="$MAX_SEQ_TOKEN_PER_TPU")

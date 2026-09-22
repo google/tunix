@@ -1039,7 +1039,11 @@ def aggregate_loss(
       Aggregated loss.
   """
 
-  per_token_loss = per_token_loss.astype(jnp.float32)
+  # Sever forward and reverse-mode autodiff paths on masked tokens before any
+  # multiplicative reduction so 0.0 * Inf = NaN cannot propagate from padding.
+  per_token_loss = jnp.where(
+      completion_mask > 0, per_token_loss.astype(jnp.float32), 0.0
+  )
 
   if segment_ids is not None:
     return _aggregate_loss_segmented(

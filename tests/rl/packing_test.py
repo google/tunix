@@ -253,5 +253,36 @@ class PackCoreTest(absltest.TestCase):
     np.testing.assert_array_equal(row.policy_version, np.array([42]))
 
 
+  def test_rollout_logps_and_overlong_carried_in_packed_row(self):
+    items = [
+        _item(
+            [1],
+            [2, 3],
+            per_token={
+                "rollout_per_token_logps": np.array([-0.5, -1.0], dtype=np.float32),
+                "overlong": np.array([0.0, 0.0], dtype=np.float32),
+            },
+        ),
+        _item(
+            [4],
+            [5],
+            per_token={
+                "rollout_per_token_logps": np.array([-2.0], dtype=np.float32),
+                "overlong": np.array([1.0], dtype=np.float32),
+            },
+        ),
+    ]
+    [[row]] = packing.pack_core(items, budget=6, pack_size=1)
+    # Item 1: prompt [0:1], completion [1:3]. Item 2: prompt [3:4], completion [4:5].
+    np.testing.assert_allclose(
+        row.per_token["rollout_per_token_logps"],
+        [0.0, -0.5, -1.0, 0.0, -2.0, 0.0],
+    )
+    np.testing.assert_allclose(
+        row.per_token["overlong"],
+        [0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+    )
+
+
 if __name__ == "__main__":
   absltest.main()

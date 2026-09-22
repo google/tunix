@@ -1110,7 +1110,7 @@ class CreateTrajectoryMetadataTest(parameterized.TestCase):
     self.assertEqual(meta.trajectory_id, "traj_100")
     self.assertEqual(meta.agent.name, "agent")
     self.assertEqual(meta.agent.version, "1.0")
-    self.assertEqual(meta.status, "RUNNING")
+    self.assertIsNone(meta.status)
     self.assertIsNone(meta.prompt_id)
     self.assertEqual(meta.group_index, 0)
     self.assertIsNone(meta.target_policy_versions)
@@ -1158,6 +1158,19 @@ class CreateTrajectoryMetadataTest(parameterized.TestCase):
     self.assertEqual(
         meta.extra, {"experiment": "exp_v1", "custom_tag": "run_1"}
     )
+
+  def test_create_trajectory_metadata_reads_agent_trajectory_status(self):
+    class MockAgentTrajectory:
+      status = agent_types.TrajectoryStatus.MAX_STEPS_REACHED
+
+    class MockAgent:
+      trajectory = MockAgentTrajectory()
+
+    meta = converter.create_trajectory_metadata(
+        traj_id="traj_201",
+        agent=MockAgent(),
+    )
+    self.assertEqual(meta.status, "MAX_STEPS_REACHED")
 
 
 class UpdateTrajectoryMetadataTest(parameterized.TestCase):

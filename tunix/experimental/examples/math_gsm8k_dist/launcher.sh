@@ -79,15 +79,17 @@ SAMPLER=${SAMPLER:-inprocess_vllm}
 WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
 USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
 CHAT_PARSER=${CHAT_PARSER:-raw}
-# Qwen3 chat models close each turn with `<|im_end|>` rather than the
-# tokenizer's default EOS token, so the rollout has to stop on it. Set empty to
-# fall back to the tokenizer's EOS token.
-EOS_TOKENS=${EOS_TOKENS-'<|im_end|>'}
+# Model-specific EOS token IDs (comma-separated), fetched from HuggingFace
+# `generation_config.json`. Empty string falls back to the tokenizer's default EOS token.
+EOS_TOKENS=${EOS_TOKENS-'151645,151643'}
 # Generation sampling parameters, passed to the runner and the reference scorer.
 TEMPERATURE=${TEMPERATURE:-1.0}
 TOP_P=${TOP_P:-1.0}
 TOP_K=${TOP_K:--1}
 MAXTEXT_ATTENTION=${MAXTEXT_ATTENTION:-}
+USE_WEIGHT_CONVERTER=${USE_WEIGHT_CONVERTER:-true}
+VERIFY_WEIGHTS=${VERIFY_WEIGHTS:-false}
+MAXTEXT_OUTPUT_DIR=${MAXTEXT_OUTPUT_DIR:-"${ARTIFACT_ROOT}/maxtext_out"}
 PYTHON_BIN=${PYTHON_BIN:-python3}
 # DEBUG=1 passes --debug to the runner, which logs full sampler responses.
 DEBUG=${DEBUG:-0}
@@ -318,6 +320,37 @@ ensure_model_dir() {
   fi
 }
 
+convert_maxtext_ckpt() {
+  if [[ "$TRAINER_BACKEND" != "maxtext" ]]; then
+    return
+  fi
+  if [[ "$MAXTEXT_CKPT" =~ ^gs:// ]]; then
+    echo "Using GCS MAXTEXT_CKPT: $MAXTEXT_CKPT"
+    return
+  fi
+  if [[ -d "$MAXTEXT_CKPT" ]]; then
+    echo "Found existing local MAXTEXT_CKPT: $MAXTEXT_CKPT"
+    return
+  fi
+  local ckpt_base
+  ckpt_base="$(dirname "$(dirname "$MAXTEXT_CKPT")")"
+  echo "Converting HF checkpoint $MODEL_DIR to MaxText Orbax checkpoint at $ckpt_base..."
+  mkdir -p "$ckpt_base"
+  JAX_PLATFORMS=cpu PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" "$PYTHON_BIN" \
+    -m maxtext.checkpoint_conversion.to_maxtext \
+    model_name="${MAXTEXT_MODEL_NAME}" \
+    --hf_model_path="${MODEL_DIR}" \
+    base_output_directory="${ckpt_base}" \
+    scan_layers=True \
+    skip_jax_distributed_system=True \
+    checkpoint_storage_use_zarr3=false \
+    checkpoint_storage_use_ocdbt=false
+  if [[ ! -d "$MAXTEXT_CKPT" ]]; then
+    echo "Error: MaxText checkpoint conversion did not produce expected directory: $MAXTEXT_CKPT"
+    exit 1
+  fi
+}
+
 dump_logs() {
   print_section "trainer.log tail"
   tail -n 200 "$TRAINER_LOG" 2>/dev/null || true
@@ -451,6 +484,7 @@ if [[ "$BETA" != "0" && "$BETA" != "0.0" && -z "$INFERENCE_ADDR" ]]; then
 fi
 
 ensure_model_dir
+convert_maxtext_ckpt
 mkdir -p "${LOG_ROOT}"
 
 : > "$TRAINER_LOG"
@@ -492,6 +526,7 @@ echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
     --mini_batch_size="$MINI_BATCH_SIZE"
     --num_generations="$NUM_GENERATIONS"
     --train_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
+    --compute_logps_chunk_size="${COMPUTE_LOGPS_CHUNK_SIZE:-0}"
     --eval_every_n_steps="$EVAL_EVERY_N_STEPS"
     --optimizer_b1="$ADAM_B1"
     --optimizer_b2="$ADAM_B2"
@@ -522,6 +557,15 @@ echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
   fi
   if [[ -n "$MAXTEXT_MODEL_NAME" ]]; then
     TRAINER_CMD+=(--maxtext_model_name="$MAXTEXT_MODEL_NAME")
+  fi
+  if [[ -n "$MAXTEXT_OUTPUT_DIR" ]]; then
+    TRAINER_CMD+=(--maxtext_output_directory="$MAXTEXT_OUTPUT_DIR")
+  fi
+  if [[ -n "$ROLLOUT_TP" ]]; then
+    TRAINER_CMD+=(--rollout_mesh_tp="$ROLLOUT_TP")
+  fi
+  if [[ -n "$USE_WEIGHT_CONVERTER" ]]; then
+    TRAINER_CMD+=(--use_weight_converter="$USE_WEIGHT_CONVERTER")
   fi
   if [[ -n "$MAX_SEQ_TOKEN_PER_TPU" ]]; then
     TRAINER_CMD+=(--max_seq_token_per_tpu="$MAX_SEQ_TOKEN_PER_TPU")
@@ -555,6 +599,7 @@ echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
     export TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS}
     export LIBTPU_INIT_ARGS="--deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS} --deepsea_host_bounds=${TPU_HOST_BOUNDS}"
   fi
+  export VERIFY_WEIGHTS=${VERIFY_WEIGHTS}
   export PYTHONUNBUFFERED=1
   env | egrep 'JAX|TPU'
   print_command "Trainer command" "${TRAINER_CMD[@]}"
@@ -606,6 +651,7 @@ echo "Launching rollout node with sampler=$SAMPLER on TPU chips $ROLLOUT_TPU_CHI
   export TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS}
   export TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS}
   export LIBTPU_INIT_ARGS="--deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS} --deepsea_host_bounds=${TPU_HOST_BOUNDS}"
+  export VERIFY_WEIGHTS=${VERIFY_WEIGHTS}
   export PYTHONUNBUFFERED=1
   env | egrep 'JAX|TPU'
   print_command "Rollout command" "${ROLLOUT_CMD[@]}"

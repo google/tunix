@@ -14,7 +14,7 @@
 
 """PEFT trainer."""
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 import contextlib
 import dataclasses
 import functools
@@ -41,7 +41,6 @@ from tunix.perf import metrics as perf_metrics
 from tunix.perf import trace as perf_trace
 from tunix.perf.experimental import constants as perf_constants
 from tunix.perf.experimental import tracer as perf_tracer_lib
-from tunix.rl import common as rl_common
 from tunix.sft import checkpoint_manager
 from tunix.sft import hooks
 from tunix.sft import inflight_throttler
@@ -105,12 +104,6 @@ class TrainingConfig:
   # needs no tuning. Set a smaller value only to shrink the loss buckets at very
   # large budgets; ``pack_sequences`` raises if a pack exceeds it.
   max_segments_per_packed_row: int | None = None
-
-  # Controls for `per_token_logps` (live-weight scoring used by RL agreement
-  # metrics). ``compute_logps_chunk_size`` is forwarded to
-  # ``tunix.rl.common.compute_per_token_logps`` to optionally chunk the vocab
-  # (final-logits) computation; ``0`` disables chunking.
-  compute_logps_chunk_size: int = 0
 
   def get_with_default(self, key: str, default: Any) -> Any:
     val = getattr(self, key)
@@ -1221,95 +1214,49 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
           self._buffered_eval_metrics = None
 
   @override
-  def per_token_logps(
-      self,
-      *,
-      prompt_tokens: ArrayLike,
-      completion_tokens: ArrayLike,
-      pad_id: int,
-      eos_id: int,
-      temperature: float | None = None,
-      segment_ids: ArrayLike | None = None,
-      segment_positions: ArrayLike | None = None,
-      micro_batch_size: int | None = None,
-  ) -> np.ndarray:
-    """Scores completion log-probs under the trainer's live (actor) weights.
+  @contextlib.contextmanager
+  def model_scope(
+      self, *args: Any, **kwargs: Any
+  ) -> Iterator[tuple[nnx.Module, tuple[Any, ...], dict[str, Any]]]:
+    """Yields the live model and placed inputs for a read-only forward pass.
 
-    Mirrors the frozen reference scorer
-    (:func:`tunix.rl.common.compute_per_token_logps`) but reads this trainer's
-    current parameters instead of a frozen copy, and does not mutate any trainer
-    state (no gradient accumulation, no optimizer update). Runs eagerly on the
-    ambient device mesh -- the same execution model as
-    ``InferenceWorker.get_ref_per_token_logps`` -- scoring at most
-    ``micro_batch_size`` rows per forward to bound peak memory.
+    Shards the inputs on the trainer's data axis and hands them back alongside
+    `self.model`. The caller owns the computation -- including any `jax.jit` --
+    and must not mutate the model.
+
+    The block is where tracing has to happen: `jax.jit` is lazy, so a call
+    built inside the block but traced after it leaves the placement above
+    unapplied.
+
+    Usage:
+
+        with trainer.model_scope(tokens, pad_id=0) as (model, args, kwargs):
+            out = my_jitted_fn(model, *args, **kwargs)
 
     Args:
-      prompt_tokens: [B, P] token ids, LEFT-padded (or [B, 0] in packed mode).
-      completion_tokens: [B, C] token ids, RIGHT-padded; results align to these.
-      pad_id: Pad token id.
-      eos_id: End-of-sequence token id.
-      temperature: Softmax temperature to score under; defaults to 1.0 when None.
-      segment_ids: Optional packing segment ids (sequence packing).
-      segment_positions: Optional packing local position indices.
-      micro_batch_size: Optional row chunk size; falls back to the size of
-        ``prompt_tokens``.
+      *args: Positional inputs to shard before yielding.
+      **kwargs: Keyword inputs to shard before yielding.
 
-    Returns:
-      [B, C] (or [B, FullSeqLen] when packed) per-token log-probabilities.
+    Yields:
+      A `(model, args, kwargs)` tuple whose array inputs are sharded on the
+      trainer's data axis.
     """
-    prompt = jnp.asarray(prompt_tokens, dtype=jnp.int32)
-    completion = jnp.asarray(completion_tokens, dtype=jnp.int32)
-    batch_size = prompt.shape[0]
-    if batch_size == 0:
-      raise ValueError("per_token_logps requires a non-empty batch.")
-    temperature = 1.0 if temperature is None else float(temperature)
-    micro = micro_batch_size or batch_size
     axis = self.config.data_sharding_axis
 
-    def _shard(x: jax.Array) -> jax.Array:
+    def _shard(x: Any) -> Any:
+      if not isinstance(x, (jax.Array, np.ndarray)):
+        return x
+      x = jnp.asarray(x)
       # Skip zero-column arrays (e.g. the empty prompt in packed mode) to avoid
       # constructing degenerate global arrays.
       if x.ndim >= 2 and x.shape[1] == 0:
         return x
       return sharding_utils.shard_input(x, axis)
 
-    def _shard_opt(x: jax.Array | None) -> jax.Array | None:
-      return None if x is None else _shard(x)
-
-    prompt = _shard(prompt)
-    completion = _shard(completion)
-    seg_ids = _shard_opt(
-        None
-        if segment_ids is None
-        else jnp.asarray(segment_ids, dtype=jnp.int32)
-    )
-    seg_pos = _shard_opt(
-        None
-        if segment_positions is None
-        else jnp.asarray(segment_positions, dtype=jnp.int32)
-    )
-
-    # Split once; scoring must not touch the optimizer or accumulate gradients.
-    graphdef, state = nnx.split(self.model)
-    outs = []
-    for start in range(0, batch_size, micro):
-      sl = slice(start, start + micro)
-      outs.append(
-          rl_common.compute_per_token_logps(
-              graphdef,
-              state,
-              prompt_tokens=prompt[sl],
-              completion_tokens=completion[sl],
-              pad_id=pad_id,
-              eos_id=eos_id,
-              stop_gradient=True,
-              temperature=temperature,
-              chunk_size=self.config.compute_logps_chunk_size,
-              segment_ids=None if seg_ids is None else seg_ids[sl],
-              segment_positions=None if seg_pos is None else seg_pos[sl],
-          )
-      )
-    return np.asarray(jnp.concatenate(outs, axis=0), dtype=np.float32)
+    args, kwargs = jax.tree.map(_shard, (args, kwargs))
+    # Read `self.model` at yield time, not at call time: it is the trainer's
+    # answer to "which weights are live", and a subclass may rebind it.
+    yield self.model, args, kwargs
 
   @override
   def save_checkpoint(self, metadata: Any = None, **kwargs) -> None:

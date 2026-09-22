@@ -129,8 +129,13 @@ class SglangJaxSamplerTest(absltest.TestCase):
     sgl_sampler = sglang_jax_sampler.SglangJaxSampler(
         tokenizer=model_tokenizer,
         config=sglang_jax_config,
-        # Test kwargs forwarding
+        # Test kwargs forwarding while precompiling only the single extend
+        # (512 tokens) and decode (bs=4) bucket needed by the 3 test prompts.
         disable_precompile=False,
+        chunked_prefill_size=512,
+        precompile_token_paddings=[512],
+        max_running_requests=4,
+        precompile_bs_paddings=[4],
     )
     self.assertNotEqual(sgl_sampler.mesh, self.mesh)
     state = nnx.state(tunix_model)

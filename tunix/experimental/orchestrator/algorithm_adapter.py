@@ -54,10 +54,36 @@ def _extract_tokens_and_masks(
     item: datatypes.TrajectoryItem,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
   """Extracts prompt_tokens, conversation_tokens, and conversation_masks from TrajectoryItem."""
+  traj = item.traj if isinstance(item.traj, dict) else {}
+  p = (
+      traj.get("prompt_tokens")
+      if traj.get("prompt_tokens") is not None
+      else getattr(
+          item, "prompt_tokens", getattr(item, "metadata", {}).get("prompt_tokens")
+      )
+  )
+  c = (
+      traj.get("conversation_tokens")
+      if traj.get("conversation_tokens") is not None
+      else getattr(
+          item,
+          "conversation_tokens",
+          getattr(item, "metadata", {}).get("conversation_tokens"),
+      )
+  )
+  m = (
+      traj.get("conversation_masks")
+      if traj.get("conversation_masks") is not None
+      else getattr(
+          item,
+          "conversation_masks",
+          getattr(item, "metadata", {}).get("conversation_masks"),
+      )
+  )
   return (
-      np.asarray(item.traj["prompt_tokens"], dtype=np.int32).reshape(-1),
-      np.asarray(item.traj["conversation_tokens"], dtype=np.int32).reshape(-1),
-      np.asarray(item.traj["conversation_masks"], dtype=np.float32).reshape(-1),
+      np.asarray([] if p is None else p, dtype=np.int32).reshape(-1),
+      np.asarray([] if c is None else c, dtype=np.int32).reshape(-1),
+      np.asarray([] if m is None else m, dtype=np.float32).reshape(-1),
   )
 
 
@@ -137,8 +163,15 @@ def _extract_old_logps(
     item: datatypes.TrajectoryItem, completion_len: int
 ) -> np.ndarray | None:
   """Extracts old_per_token_logps from TrajectoryItem."""
-  old_lp = item.traj.get("old_logprobs")
+  traj = item.traj if isinstance(item.traj, dict) else {}
+  old_lp = traj.get("old_logprobs")
   if old_lp is None:
+    old_lp = getattr(
+        item, "old_logprobs", getattr(item, "metadata", {}).get("old_logprobs")
+    )
+  if old_lp is None:
+    if completion_len == 0:
+      return np.zeros(0, dtype=np.float32)
     return None
   old_lp = np.asarray(old_lp, dtype=np.float32).reshape(-1)
   if len(old_lp) != completion_len:

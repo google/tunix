@@ -28,6 +28,9 @@ from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Set, Tup
 
 from absl import logging
 import numpy as np
+from tunix.experimental.trajectory import converter as converter_lib
+from tunix.experimental.trajectory import store as store_lib
+from tunix.experimental.trajectory import trajectory as trajectory_lib
 from tunix.generate import utils as generate_utils
 from tunix.perf.experimental import constants as perf_constants
 from tunix.perf.experimental import tracer as perf_tracer_v2
@@ -71,6 +74,15 @@ class TrajectoryCollectEngine:
       overlong_filter: bool = False,
       perf_v2: Optional[perf_tracer_v2.Tracer] = None,
       exact_token_continuity: bool = False,
+      on_model_step_callback: Optional[Callable[[Any], None]] = None,
+      on_env_step_callback: Optional[Callable[[Any], None]] = None,
+      on_rollout_output_callback: Optional[
+          Callable[[base_rollout.RolloutOutput], None]
+      ] = None,
+      on_final_reward_callback: Optional[Callable[[Any], None]] = None,
+      policy_version: Optional[int] = None,
+      trajectory_store: Optional[store_lib.TrajectoryWriter] = None,
+      metadata: Optional[trajectory_lib.TrajectoryMetadata] = None,
   ):
     """Initialize the trajectory collection engine.
 
@@ -99,10 +111,29 @@ class TrajectoryCollectEngine:
           to use for performance measurements. Defaults to a no-op tracer.
         exact_token_continuity: Preserve recorded token history on later turns.
           Requires a token-aware model_call, tokenizer, and parser.
+        on_model_step_callback: Optional callback invoked when model step
+          completes.
+        on_env_step_callback: Optional callback invoked when env step completes.
+        on_rollout_output_callback: Optional callback invoked when model_call
+          returns rollout_output.
+        on_final_reward_callback: Optional callback invoked when final reward is
+          computed and added to last step.
+        policy_version: Optional policy version integer to pass down for
+          trajectory and performance tracing.
+        trajectory_store: Optional TrajectoryWriter to write trajectory steps
+          to.
+        metadata: Optional TrajectoryMetadata for the current episode.
     """
     self.agent = agent
     self.env = env
     self.model_call = model_call
+    self.on_model_step_callback = on_model_step_callback
+    self.on_env_step_callback = on_env_step_callback
+    self.on_rollout_output_callback = on_rollout_output_callback
+    self.on_final_reward_callback = on_final_reward_callback
+    self.policy_version = policy_version
+    self.trajectory_store = trajectory_store
+    self.metadata = metadata
     self.final_reward_fn = None
     self.model_call_kwargs = model_call_kwargs or {}
     if exact_token_continuity and (tokenizer is None or chat_parser is None):
@@ -201,9 +232,24 @@ class TrajectoryCollectEngine:
     targets are rolled by -1 and targets_segmentation is 0 at the final token,
     so padding with UNSET_ROUTED_EXPERT has zero effect on training loss.
     """
-    if not self.agent.trajectory.steps:
+    steps = self.agent.trajectory.steps
+    while steps and (
+        steps[-1].assistant_tokens is None
+        or len(steps[-1].assistant_tokens) == 0
+    ):
+      steps.pop()
+    if steps and steps[-1].assistant_routed_experts is None:
+      logging.warning(
+          "Terminal step has %d assistant tokens but no routed_experts; "
+          "leaving it in place rather than discarding generated content.",
+          len(steps[-1].assistant_tokens),
+      )
+    if not steps:
       return
-    final_step = self.agent.trajectory.steps[-1]
+    final_step = steps[-1]
+    final_step.env_tokens = None
+    final_step.env_masks = None
+    final_step.env_routed_experts = None
     if (
         final_step.assistant_routed_experts is not None
         and final_step.assistant_tokens is not None
@@ -220,6 +266,25 @@ class TrajectoryCollectEngine:
       )
       final_step.assistant_routed_experts = np.concatenate(
           [final_step.assistant_routed_experts, pad], axis=0
+      )
+
+  def sync_trajectory_metadata(
+      self,
+      status: Optional[str | agent_types.TrajectoryStatus] = None,
+      policy_version: Optional[int] = None,
+  ) -> None:
+    """Syncs metadata status and agent trajectory timing/reward in place."""
+    if self.metadata is not None:
+      effective_policy_version = (
+          policy_version if policy_version is not None else self.policy_version
+      )
+      converter_lib.update_trajectory_metadata(
+          metadata=self.metadata,
+          agent=self.agent,
+          policy_version=effective_policy_version,
+          status=status,
+          env_time=self.env_time,
+          reward_time=self.reward_time,
       )
 
   async def collect(self, mode: str = "Conversation") -> Any:
@@ -239,39 +304,71 @@ class TrajectoryCollectEngine:
     Returns:
         Trajectory | dict | list: Depending on mode.
     """  # fmt: skip
-    await self._reset()
-
-    self.agent.trajectory.status = agent_types.TrajectoryStatus.RUNNING
-    self._logged_clip_reasons.clear()
-
-    while True:
-      if len(self.agent.trajectory.steps) >= self.max_steps:
-        self.agent.trajectory.status = (
-            agent_types.TrajectoryStatus.MAX_STEPS_REACHED
-        )
-        self._log_trajectory_clip("MAX_STEPS_REACHED")
-        break
-
-      done = await self._one_step()
-
-      if done:
-        if self.agent.trajectory.status == agent_types.TrajectoryStatus.RUNNING:
-          self.agent.trajectory.status = agent_types.TrajectoryStatus.SUCCEEDED
-        break
-
-    self._finalize_terminal_step_routing()
-
-    masked_out = (
-        self.overlong_filter
-        and self.agent.trajectory.status in self.filter_statuses
-    )
     try:
-      if not masked_out:
-        await self._append_final_reward()
-      self.compute_mc_reward()
-      self.compute_trajectory_reward()
+      await self._reset()
+
+      self.agent.trajectory.status = agent_types.TrajectoryStatus.RUNNING
+      self._logged_clip_reasons.clear()
+
+      if self.trajectory_store is not None and self.metadata is not None:
+        self.sync_trajectory_metadata(policy_version=self.policy_version)
+        task = self.agent.trajectory.task or getattr(self.env, "task", None)
+        task_step = converter_lib.create_task_step(task)
+        if task_step is not None:
+          self.trajectory_store.add_step(task_step, self.metadata)
+
+      while True:
+        if len(self.agent.trajectory.steps) >= self.max_steps:
+          self.agent.trajectory.status = (
+              agent_types.TrajectoryStatus.MAX_STEPS_REACHED
+          )
+          self._log_trajectory_clip("MAX_STEPS_REACHED")
+          break
+
+        done = await self._one_step()
+
+        if done:
+          if (
+              self.agent.trajectory.status
+              == agent_types.TrajectoryStatus.RUNNING
+          ):
+            self.agent.trajectory.status = (
+                agent_types.TrajectoryStatus.SUCCEEDED
+            )
+          break
+
+      self._finalize_terminal_step_routing()
+
+      masked_out = (
+          self.overlong_filter
+          and self.agent.trajectory.status in self.filter_statuses
+      )
+      try:
+        if not masked_out:
+          await self._append_final_reward()
+        self.compute_mc_reward()
+        self.compute_trajectory_reward()
+      finally:
+        await self._close()
+        if self.trajectory_store is not None and self.metadata is not None:
+          for i, step in enumerate(self.agent.trajectory.steps):
+            agent_step = converter_lib.create_agent_step(
+                step,
+                tunix_step_id=i,
+                policy_version=self.policy_version,
+            )
+            if agent_step is not None:
+              self.trajectory_store.add_step(agent_step, self.metadata)
+    except asyncio.TimeoutError:
+      self.agent.trajectory.status = agent_types.TrajectoryStatus.TIMEOUT
+      raise
+    except (asyncio.CancelledError, Exception):
+      self.agent.trajectory.status = agent_types.TrajectoryStatus.FAILED
+      raise
     finally:
-      await self._close()
+      if self.trajectory_store is not None and self.metadata is not None:
+        self.sync_trajectory_metadata(policy_version=self.policy_version)
+        self.trajectory_store.update_metadata(self.metadata)
 
     if mode not in ["Trajectory", "Steps", "Token", "Conversation"]:
       raise ValueError(
@@ -435,6 +532,14 @@ class TrajectoryCollectEngine:
             [prompt_routed_arr, conv_routed], axis=0
         )
 
+      policy_version = self.policy_version
+      if (
+          policy_version is None
+          and hasattr(self.env, "task")
+          and isinstance(self.env.task, dict)
+      ):
+        policy_version = self.env.task.get("policy_version")
+
       result = {
           "conversation_text": self.agent.chat_completions,
           "prompt_tokens": prompt_tokens,
@@ -448,7 +553,7 @@ class TrajectoryCollectEngine:
               np.concatenate(logprobs, axis=0) if logprobs else None
           ),
           "routed_experts": final_routed_experts,
-          "policy_version": self.env.task.get("policy_version"),
+          "policy_version": policy_version,
           "original_input": self.agent.trajectory.task,
           "group_id": self.env.extra_kwargs.get("group_id"),
       }
@@ -587,13 +692,19 @@ class TrajectoryCollectEngine:
   @property
   def _debug_prefix(self) -> str:
     """Returns a consistent log prefix with step_idx, pair_index, and group_id."""
-    extra = getattr(self.env, "extra_kwargs", {}) or {}
+    extra = getattr(self.env, "extra_kwargs", {})
     step_idx = len(self.agent.trajectory.steps)
     pair_index = extra.get("pair_index")
     group_id = extra.get("group_id")
-    return (
-        f"[step_idx={step_idx}, pair_index={pair_index}, group_id={group_id}]"
-    )
+    if pair_index is not None and group_id is not None:
+      return (
+          f"[step_idx={step_idx}, pair_index={pair_index}, group_id={group_id}]"
+      )
+    if group_id is not None:
+      return f"[step_idx={step_idx}, group_id={group_id}]"
+    if pair_index is not None:
+      return f"[step_idx={step_idx}, pair_index={pair_index}]"
+    return f"[step_idx={step_idx}]"
 
   def _rollout_state_info(
       self, info: Optional[Dict[str, Any]] = None
@@ -614,7 +725,9 @@ class TrajectoryCollectEngine:
       pair_index = self.env.extra_kwargs.get("pair_index")
       if pair_index is not None:
         tags[perf_constants.PAIR_INDEX] = pair_index
-    if hasattr(self.env, "task"):
+    if self.policy_version is not None:
+      tags[perf_constants.STEP] = self.policy_version
+    elif hasattr(self.env, "task") and isinstance(self.env.task, dict):
       policy_version = self.env.task.get("policy_version")
       if policy_version is not None:
         tags[perf_constants.STEP] = policy_version
@@ -668,7 +781,7 @@ class TrajectoryCollectEngine:
             getattr(model_call_fn, "__call__")
         )
     )
-    if self._cumulative_prompt_tokens > 0:
+    if self.exact_token_continuity and self._cumulative_prompt_tokens > 0:
       call_kwargs["routed_experts_prompt_start"] = self._cumulative_prompt_tokens
 
     if is_async:
@@ -700,6 +813,8 @@ class TrajectoryCollectEngine:
           _safe_model_call,
       )
     logging.debug("%s model_call done", self._debug_prefix)
+    if self.on_rollout_output_callback:
+      self.on_rollout_output_callback(rollout_output)
 
     if self.exact_token_continuity:
       if not self.agent.trajectory.steps:
@@ -742,6 +857,33 @@ class TrajectoryCollectEngine:
     ):
       delta_routed = np.asarray(rollout_output.routed_experts[0], dtype=np.int16)
       prev_step = self.agent.trajectory.steps[-1]
+      curr_gen_len = (
+          len(rollout_output.tokens[0]) if rollout_output.tokens else 0
+      )
+      curr_gen_routed_len = max(0, curr_gen_len - 1)
+      if len(delta_routed) >= curr_gen_routed_len and curr_gen_routed_len > 0:
+        prefix_len = len(delta_routed) - curr_gen_routed_len
+        prefix_routed = delta_routed[:prefix_len]
+        curr_asst_routed = delta_routed[prefix_len:]
+      else:
+        prefix_routed = delta_routed
+        curr_asst_routed = np.zeros(
+            (0,) + delta_routed.shape[1:], dtype=np.int16
+        )
+
+      def _slice_or_pad_routed(
+          src: np.ndarray, start: int, count: int
+      ) -> np.ndarray:
+        chunk = src[start : start + count]
+        if len(chunk) < count:
+          pad = np.full(
+              (count - len(chunk),) + delta_routed.shape[1:],
+              agent_types.UNSET_ROUTED_EXPERT,
+              dtype=np.int16,
+          )
+          chunk = np.concatenate([chunk, pad], axis=0)
+        return chunk
+
       needed_asst = 0
       if (
           prev_step.assistant_tokens is not None
@@ -752,41 +894,88 @@ class TrajectoryCollectEngine:
             len(prev_step.assistant_tokens)
             - len(prev_step.assistant_routed_experts),
         )
-        if needed_asst > 0:
-          if len(delta_routed) < needed_asst:
-            raise ValueError(
-                f"Insufficient delta_routed length {len(delta_routed)} to stitch "
-                f"{needed_asst} trailing assistant tokens at step "
-                f"{len(self.agent.trajectory.steps) - 1}."
-            )
-          prev_step.assistant_routed_experts = np.concatenate(
-              [prev_step.assistant_routed_experts, delta_routed[:needed_asst]],
-              axis=0,
-          )
       num_env = (
           len(prev_step.env_tokens)
           if prev_step.env_tokens is not None
           else 0
       )
+      total_needed = needed_asst + num_env
+      if (
+          not self.exact_token_continuity
+          and total_needed > 0
+          and len(prefix_routed) > total_needed
+      ):
+        prefix_routed = prefix_routed[-total_needed:]
+      if needed_asst > 0:
+        asst_tail = _slice_or_pad_routed(prefix_routed, 0, needed_asst)
+        prev_step.assistant_routed_experts = np.concatenate(
+            [prev_step.assistant_routed_experts, asst_tail],
+            axis=0,
+        )
       if num_env > 0:
-        prev_step.env_routed_experts = delta_routed[
-            needed_asst : needed_asst + num_env
-        ]
-        if len(prev_step.env_routed_experts) != num_env:
-          raise ValueError(
-              f"Mismatch between captured env_routed_experts length "
-              f"{len(prev_step.env_routed_experts)} and env_tokens length "
-              f"{num_env} at step {len(self.agent.trajectory.steps) - 1}."
-          )
-      self._current_step_initial_routed_experts = delta_routed[
-          needed_asst + num_env :
-      ]
+        prev_step.env_routed_experts = _slice_or_pad_routed(
+            prefix_routed, needed_asst, num_env
+        )
+      self._current_step_initial_routed_experts = curr_asst_routed
       self._cumulative_prompt_tokens += delta_routed.shape[0]
 
     if rollout_output.tokens:
       self._response_token_count += len(rollout_output.tokens[0])
 
     action = self.agent.update_from_model(rollout_output.text[0]).action
+    cur_step = self.agent.get_current_step()
+    if cur_step is not None:
+      if rollout_output.tokens:
+        if self.tokenizer and self.chat_parser:
+          cur_step.assistant_tokens, n_append = (
+              self.chat_parser.update_assistant_end_tokens(
+                  rollout_output.tokens[0]
+              )
+          )
+          if self.exact_token_continuity:
+            cur_step.assistant_tokens = utils.assistant_with_suffix(
+                rollout_output.tokens[0], cur_step.assistant_tokens, n_append
+            )
+          cur_step.assistant_masks = np.concatenate(
+              [
+                  np.ones(len(rollout_output.tokens[0]), dtype=np.int32),
+                  np.zeros(n_append, dtype=np.int32),
+              ],
+              axis=0,
+          )
+          if rollout_output.logprobs is not None:
+            cur_step.logprobs = np.concatenate(
+                [
+                    rollout_output.logprobs[0],
+                    np.zeros(n_append, dtype=np.float32),
+                ],
+                axis=0,
+            )
+        else:
+          cur_step.assistant_tokens = rollout_output.tokens[0]
+          if rollout_output.logprobs is not None:
+            cur_step.logprobs = rollout_output.logprobs[0]
+      elif rollout_output.logprobs is not None:
+        cur_step.logprobs = rollout_output.logprobs[0]
+
+    if self.on_model_step_callback:
+      self.on_model_step_callback(cur_step)
+
+    if (
+        self.trajectory_store is not None
+        and self.metadata is not None
+        and cur_step is not None
+    ):
+      tunix_step_id = max(0, len(self.agent.trajectory.steps) - 1)
+      agent_step = converter_lib.create_agent_step(
+          cur_step,
+          tunix_step_id=tunix_step_id,
+          policy_version=self.policy_version,
+      )
+      if agent_step is not None:
+        self.sync_trajectory_metadata(policy_version=self.policy_version)
+        self.trajectory_store.add_step(agent_step, self.metadata)
+
     logging.debug(
         "%s Agent Action:\n%s",
         self._debug_prefix,
@@ -854,13 +1043,10 @@ class TrajectoryCollectEngine:
       self.agent.update_from_env(
           obs, rew, done, self._rollout_state_info(info)
       )
+      env_step_executed = True
     else:
+      env_step_executed = False
       done = True
-
-    cur_step = self.agent.get_current_step()
-
-    if cur_step is not None and rollout_output.logprobs is not None:
-      cur_step.logprobs = rollout_output.logprobs[0]
 
     if (
         cur_step is not None
@@ -872,32 +1058,9 @@ class TrajectoryCollectEngine:
 
     step_timed_out = time.perf_counter() - self._start_ts > self.timeout
     if cur_step is not None and self.tokenizer and self.chat_parser:
-      assistant_message, env_messages = (
-          utils.get_recent_assistant_user_messages(self.agent.chat_completions)
+      _, env_messages = utils.get_recent_assistant_user_messages(
+          self.agent.chat_completions
       )
-
-      # Assistant tokens/masks
-      if assistant_message:
-        cur_step.assistant_tokens, n_append = (
-            self.chat_parser.update_assistant_end_tokens(
-                rollout_output.tokens[0]
-            )
-        )
-        if self.exact_token_continuity:
-          cur_step.assistant_tokens = utils.assistant_with_suffix(
-              rollout_output.tokens[0], cur_step.assistant_tokens, n_append
-          )
-        cur_step.assistant_masks = np.concatenate(
-            [
-                np.ones(len(rollout_output.tokens[0]), dtype=np.int32),
-                np.zeros(n_append, dtype=np.int32),
-            ],
-            axis=0,
-        )
-        if cur_step.logprobs is not None:
-          cur_step.logprobs = np.concatenate(
-              [cur_step.logprobs, np.zeros(n_append, dtype=np.float32)], axis=0
-          )
 
       # Environment tokens/masks
       # Terminal-step environment messages are not appended to the response
@@ -916,6 +1079,22 @@ class TrajectoryCollectEngine:
 
     if self.exact_token_continuity:
       self._record_exact_turn(cur_step, terminal=done or step_timed_out)
+
+    if env_step_executed and self.on_env_step_callback:
+      self.on_env_step_callback(cur_step)
+
+    if (
+        self.trajectory_store is not None
+        and self.metadata is not None
+        and cur_step is not None
+    ):
+      tunix_step_id = max(0, len(self.agent.trajectory.steps) - 1)
+      env_step = converter_lib.create_env_step(
+          cur_step, tunix_step_id=tunix_step_id
+      )
+      if env_step is not None:
+        self.sync_trajectory_metadata()
+        self.trajectory_store.add_step(env_step, self.metadata)
 
     if step_timed_out:
       self.agent.trajectory.status = agent_types.TrajectoryStatus.TIMEOUT
@@ -949,6 +1128,20 @@ class TrajectoryCollectEngine:
 
     self.reward_time["reward_latency"] += wall_time
     last_step.reward += final_reward
+    if self.on_final_reward_callback:
+      self.on_final_reward_callback(last_step)
+    if (
+        self.trajectory_store is not None
+        and self.metadata is not None
+        and last_step is not None
+    ):
+      tunix_step_id = max(0, len(self.agent.trajectory.steps) - 1)
+      env_step = converter_lib.create_env_step(
+          last_step, tunix_step_id=tunix_step_id
+      )
+      if env_step is not None:
+        self.sync_trajectory_metadata()
+        self.trajectory_store.add_step(env_step, self.metadata)
     logging.debug(
         "%s Final reward computed: %s", self._debug_prefix, final_reward
     )

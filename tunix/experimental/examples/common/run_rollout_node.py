@@ -269,7 +269,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument(
       "--max_concurrency",
       type=int,
-      default=int(os.getenv("ROLLOUT_MAX_CONCURRENCY", "64")),
+      default=int(os.getenv("ROLLOUT_MAX_CONCURRENCY", "256")),
       help="Maximum concurrent trajectory collections inside this worker.",
   )
   parser.add_argument(
@@ -303,6 +303,23 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       nargs="?",
       const=True,
       help="Enable KV prefix caching in vLLM sampler.",
+  )
+  parser.add_argument(
+      "--return_routed_experts",
+      type=_str2bool,
+      default=_str2bool(os.getenv("RETURN_ROUTED_EXPERTS", "false")),
+      nargs="?",
+      const=True,
+      help="Return MoE routed expert IDs from vLLM sampler for router replay.",
+  )
+  parser.add_argument(
+      "--free_kv_cache_during_weight_sync",
+      type=_str2bool,
+      default=os.getenv("ROLLOUT_FREE_KV_CACHE", "false").lower()
+      in ("true", "1"),
+      nargs="?",
+      const=True,
+      help="Free the KV cache during weight sync.",
   )
   parser.add_argument(
       "--tensor_parallel_size",
@@ -398,6 +415,7 @@ def _rollout_config_kwargs(
       "temperature": 1.0,
       "top_p": 1.0,
       "return_logprobs": True,
+      "return_routed_experts": args.return_routed_experts,
       "eos_tokens": _eos_token_ids(args, tokenizer),
       "env_name": args.env_name,
       "agent_name": args.agent_name,
@@ -601,7 +619,11 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
 
   if multihost_backend:
     engine_kwargs["distributed_executor_backend"] = multihost_backend
-  server_mode = True if multihost_backend else None
+  # Enable VLLMInProcessDriver (`server_mode=True`) on both single-host and
+  # multi-host TPUs so concurrent `InprocessVllmSamplerAdapter.sample()` worker
+  # threads submit into a single engine loop for continuous batching without
+  # racing on donated JAX KV-cache buffers.
+  server_mode = True
   rollout_mesh = None if multihost_backend else _create_rollout_mesh(args)
 
   tp_size = (
@@ -656,16 +678,20 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
       expert_parallel_size=ep_size,
       hbm_utilization=hbm_utilization,
       return_logprobs=True,
+      return_routed_experts=args.return_routed_experts,
       lora_config=lora_config,
       mapping_config=mapping_config,
       additional_config=merged_additional_config or None,
       engine_kwargs=engine_kwargs,
+      eos_tokens=_eos_token_ids(args, tokenizer),
+      free_kv_cache_during_weight_sync=args.free_kv_cache_during_weight_sync,
   )
   sampler_adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
       server_id=args.worker_id,
       tokenizer=tokenizer,
       config=vllm_config,
       weight_sync_mode=args.weight_sync_mode,
+      max_concurrency=args.max_concurrency,
   )
   config = rollout_worker.RolloutConfig(
       sampler_type="inprocess_vllm",
@@ -753,6 +779,7 @@ def _create_vllm_sampler(args, tokenizer):
       max_lora_rank=args.lora_rank if args.use_lora else None,
       max_loras=1 if args.use_lora else None,
       enable_prefix_caching=enable_prefix_caching,
+      enable_return_routed_experts=args.return_routed_experts,
   )
   if gpu_mem_util is not None:
     engine_kwargs["gpu_memory_utilization"] = gpu_mem_util
@@ -810,6 +837,7 @@ def _create_vllm_sampler(args, tokenizer):
       engine_args=engine_args,
       model_name=vllm_model,
       weight_sync_mode=args.weight_sync_mode,
+      free_kv_cache_during_weight_sync=args.free_kv_cache_during_weight_sync,
   )
   config = rollout_worker.RolloutConfig(
       sampler_type="vllm",

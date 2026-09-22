@@ -294,10 +294,14 @@ jobs:
         # SGLang Tests
         echo "::group::📦 Setting up SGLang"
         unset JAX_PLATFORMS
-        pip list | egrep 'jax|flax|libtpu'
+        unset PIP_NO_CACHE_DIR
+        export PIP_NO_BUILD_ISOLATION=1
+        python3 -m pip list | egrep 'jax|flax|libtpu'
+        printf "jax<0.11.0\njaxlib<0.11.0\n" > /tmp/sglang_constraints.txt
+        export PIP_CONSTRAINT=/tmp/sglang_constraints.txt
         cd ..
-        git clone https://github.com/sgl-project/sglang-jax.git && cd sglang-jax && git checkout 1bdbc6747939c0e600622fc7f812151d76321080 && cd python && pip install -e . && cd ../..
-        pip list | egrep 'jax|flax|libtpu'
+        git clone https://github.com/sgl-project/sglang-jax.git && cd sglang-jax && git checkout 1bdbc6747939c0e600622fc7f812151d76321080 && cd python && python3 -m pip install -e . && cd ../..
+        python3 -m pip list | egrep 'jax|flax|libtpu'
         cd tunix
         echo "::endgroup::"
 

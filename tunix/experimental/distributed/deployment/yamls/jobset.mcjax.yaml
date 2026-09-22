@@ -16,8 +16,8 @@ apiVersion: jobset.x-k8s.io/v1alpha2
 kind: JobSet
 metadata:
   name: ${JOBSET_NAME}
-  namespace: default
-spec:
+  namespace: ${NAMESPACE}
+${QUEUE_LABEL}spec:
   failurePolicy:
     restartStrategy: Recreate
   network:
@@ -34,6 +34,7 @@ spec:
         template:
           metadata:
             annotations:
+              cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
               # # place on nodes in the same block
               # kueue.k8s.io/podset-required-topology: cloud.google.com/gce-topology-block
               # # place on nodes in the same slice

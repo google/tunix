@@ -302,6 +302,24 @@ class RaidenHandlerTest(absltest.TestCase):
     kwargs = self.controller.register_work_unit.call_args.kwargs
     self.assertEqual(kwargs["host_subgrid"], [1, 4])
 
+  def test_register_forwards_global_shard_indices(self):
+    tensor = weight_sync.TensorMetadata(
+        name="layer0",
+        shape=(1024, 1024),
+        mesh_shape=(4, 1),
+        layout=(1, 0),
+        item_size=4,
+        sharding_spec=("x", ""),
+        global_shard_indices=(0, 2),
+    )
+    self.handler.register_work_unit(make_metadata(SRC, variables=(tensor,)))
+
+    self.controller.register_work_unit.assert_called_once()
+    kwargs = self.controller.register_work_unit.call_args.kwargs
+    vars_passed = kwargs["variables"]
+    self.assertLen(vars_passed, 1)
+    self.assertEqual(list(vars_passed[0].global_shard_indices), [0, 2])
+
   def test_register_rejects_a_unit_without_a_data_address(self):
     # The synchronizer assigns ports on construction; registering beforehand
     # would publish an address that does not exist yet.

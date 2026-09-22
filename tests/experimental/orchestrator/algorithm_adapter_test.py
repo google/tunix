@@ -173,6 +173,52 @@ class AlgorithmAdapterTest(absltest.TestCase):
     self.assertLen(payloads, 2)
     self.assertIsNone(payloads[0].old_per_token_logps)
     self.assertIsNone(payloads[1].old_per_token_logps)
+    np.testing.assert_allclose(
+        payloads[0].rollout_per_token_logps,
+        np.array([-0.5, -0.2], dtype=np.float32),
+    )
+    np.testing.assert_allclose(
+        payloads[1].rollout_per_token_logps,
+        np.array([-0.1, -0.4], dtype=np.float32),
+    )
+
+  def test_grpo_create_trainer_payloads_with_empty_failed_trajectory(self):
+    adapter = algorithm_adapter.GRPOAdapter(
+        algo_config=algorithm_config.GRPOConfig(num_generations=2)
+    )
+    failed_item = datatypes.TrajectoryItem(
+        group_index=0,
+        prompt_id="g1",
+        start_step=0,
+        traj={
+            "status": datatypes.TrajectoryStatus.FAILED,
+            "trajectory_reward": 0.0,
+            "prompt_tokens": np.zeros(0, dtype=np.int32),
+            "conversation_tokens": np.zeros(0, dtype=np.int32),
+            "conversation_masks": np.zeros(0, dtype=np.float32),
+        },
+    )
+    normal_item = datatypes.TrajectoryItem(
+        group_index=1,
+        prompt_id="g1",
+        start_step=0,
+        traj={
+            "prompt_tokens": np.array([1, 2], dtype=np.int32),
+            "conversation_tokens": np.array([5, 6], dtype=np.int32),
+            "conversation_masks": np.array([1, 1], dtype=np.float32),
+            "old_logprobs": np.array([-0.1, -0.4], dtype=np.float32),
+        },
+    )
+    payloads = adapter.create_trainer_payloads(
+        [failed_item, normal_item], rewards=[0.0, 1.0]
+    )
+    self.assertLen(payloads, 2)
+    self.assertIsNotNone(payloads[0].rollout_per_token_logps)
+    self.assertEqual(len(payloads[0].rollout_per_token_logps), 0)
+    np.testing.assert_allclose(
+        payloads[1].rollout_per_token_logps,
+        np.array([-0.1, -0.4], dtype=np.float32),
+    )
 
   def test_grpo_create_trainer_payloads_with_mismatched_logps_length(self):
     adapter = algorithm_adapter.GRPOAdapter(

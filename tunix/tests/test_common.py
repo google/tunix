@@ -507,9 +507,25 @@ def safe_list_files(repo_id):
     reraise=True,
 )
 def safe_download(repo_id, filename, local_dir):
-  return huggingface_hub.hf_hub_download(
-      repo_id=repo_id, filename=filename, local_dir=local_dir
+  """Downloads a file from Hugging Face Hub via cache and links to local_dir."""
+  dst = os.path.join(local_dir, filename)
+  if os.path.exists(dst) and os.path.getsize(dst) > 0:
+    return dst
+  cached_path = huggingface_hub.hf_hub_download(
+      repo_id=repo_id, filename=filename
   )
+  os.makedirs(os.path.dirname(dst), exist_ok=True)
+  try:
+    os.remove(dst)
+  except FileNotFoundError:
+    pass
+  try:
+    os.link(os.path.realpath(cached_path), dst)
+  except FileExistsError:
+    pass  # Another process already linked it successfully
+  except OSError:
+    shutil.copy2(cached_path, dst)
+  return dst
 
 
 def download_from_huggingface(repo_id: str, model_path: str):

@@ -32,6 +32,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
+from vllm import envs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.sampling_params import SamplingParams as VllmSamplingParams
@@ -70,6 +71,8 @@ class RLVllmSampler:
     - Native `TPUWorker` 3-phase weight synchronization (`pre_weight_sync`, `weight_sync`, `post_weight_sync`).
   """
 
+  supports_token_input: bool = True
+
   def __init__(self, engine_args: AsyncEngineArgs):
     self.engine_args = engine_args
     self._engine: Any | None = None
@@ -79,6 +82,7 @@ class RLVllmSampler:
     self._mesh: Any | None = None
     self._transfer_statuses: dict[str, str] = {}
     self._policy_version = 0
+    self._log_stats_task: asyncio.Task | None = None
 
   def _get_tpu_workers(self) -> list[Any]:
     """Retrieves active TPUWorker instances from underlying model executor."""
@@ -106,8 +110,31 @@ class RLVllmSampler:
 
     self._engine = AsyncLLMEngine.from_engine_args(self.engine_args)
     self._is_running = True
+    self._log_stats_task = asyncio.create_task(self._log_stats_loop())
 
     logger.info("RLVllmSampler started successfully.")
+
+  async def _log_stats_loop(self) -> None:
+    """Periodically flushes vLLM's engine stats to the log.
+
+    `AsyncLLM` records stats but never emits them on its own: `do_log_stats()`
+    has no internal caller, and vLLM drives it from the API server's lifespan
+    task (`vllm/entrypoints/launchers/utils/server_utils.py`). Binding the
+    engine directly skips that server, so without this loop the throughput /
+    running-requests / KV-cache-usage line never prints.
+    """
+    interval = envs.VLLM_LOG_STATS_INTERVAL
+    while True:
+      await asyncio.sleep(interval)
+      engine = self._engine
+      if engine is None:
+        continue
+      try:
+        await engine.do_log_stats()
+      except asyncio.CancelledError:
+        raise
+      except Exception:  # pylint: disable=broad-exception-caught
+        logger.exception("do_log_stats failed")
 
   async def stop(self, **kwargs: Any) -> None:
     """Stops the sampler and releases resources."""
@@ -115,6 +142,13 @@ class RLVllmSampler:
       return
     logger.info("Stopping RLVllmSampler...")
     self._is_paused = True
+    if self._log_stats_task is not None:
+      self._log_stats_task.cancel()
+      try:
+        await self._log_stats_task
+      except asyncio.CancelledError:
+        pass
+      self._log_stats_task = None
     self._engine = None
     self._is_running = False
     logger.info("RLVllmSampler stopped.")
@@ -305,8 +339,16 @@ class RLVllmSampler:
       req_id = _get_val(req,
                               "request_id") or f"req_{time.time_ns()}_{idx}"
       prompt_val = _get_val(req, "prompt")
-      prompt_text = prompt_val if isinstance(prompt_val,
-                                                   str) else str(prompt_val)
+      # A `{"prompt_token_ids": [...]}` prompt is already a vLLM `TokensPrompt`
+      # and is forwarded as-is. `str()` would hand the engine the repr of a
+      # dict to tokenize, which is how a token-ids prompt silently becomes
+      # nonsense text.
+      if isinstance(prompt_val, dict) and "prompt_token_ids" in prompt_val:
+        prompt_text = prompt_val
+      else:
+        prompt_text = (
+            prompt_val if isinstance(prompt_val, str) else str(prompt_val)
+        )
 
       task_gen = self._engine.generate(prompt_text,
                                              vllm_params,
@@ -363,9 +405,9 @@ class RLVllmSampler:
             "tpu_worker_ips": worker_ips,
         }
 
-  async def _call_worker_method(self, method_name: str, *args: Any,
+  async def _call_worker_method(self, method_name: Any, *args: Any,
                                   **kwargs: Any) -> list[Any]:
-    """Dispatches a method call across TPU workers via collective_rpc.
+    """Dispatches a method call or callable across TPU workers via collective_rpc.
 
         `AsyncLLMEngine` (an alias of `vllm.v1.engine.async_llm.AsyncLLM`)
         always exposes an async `collective_rpc`.
@@ -398,6 +440,18 @@ class RLVllmSampler:
     await self._call_worker_method("bind_raiden_sync", worker_index,
                                        parallelism, job_name)
 
+  async def bind_gcs_sync(self,
+                          worker_index: int = 0,
+                          job_name: str = "rollout",
+                          staging_dir: str | None = None) -> list[dict]:
+    """Binds GCSWeightSync to each TPU worker's live weights, in-process."""
+    return await self._call_worker_method(
+        "bind_gcs_sync",
+        worker_index,
+        job_name,
+        staging_dir,
+    )
+
   async def refresh_model_state_leaves(self) -> None:
     """Re-points each worker's dispatch view after an h2d weight update."""
     await self._call_worker_method("refresh_model_state_leaves")
@@ -405,6 +459,10 @@ class RLVllmSampler:
   async def get_raiden_metadata(self) -> list[dict]:
     """Wire-safe registration metadata for each worker's current Raiden binding."""
     return await self._call_worker_method("get_raiden_metadata")
+
+  async def get_gcs_metadata(self) -> list[dict]:
+    """Wire-safe registration metadata for each worker's current GCSWeightSync binding."""
+    return await self._call_worker_method("get_gcs_metadata")
 
   async def raiden_h2d(self, uuid: int | None = None) -> list[dict]:
     """Blocks each worker until its just-landed transfer is visible on-device.
@@ -416,8 +474,23 @@ class RLVllmSampler:
     """
     return await self._call_worker_method("raiden_h2d", uuid=uuid)
 
+  async def gcs_h2d(
+      self,
+      checkpoint_path: str,
+      source_checksums: dict[str, Any] | None = None,
+  ) -> list[dict]:
+    """Restores sharded Orbax weights into each TPUWorker and returns checksums."""
+    return await self._call_worker_method(
+        "gcs_h2d",
+        checkpoint_path,
+        source_checksums,
+    )
+
   async def raiden_metrics(self) -> list[dict]:
     return await self._call_worker_method("raiden_metrics")
+
+  async def gcs_metrics(self) -> list[dict]:
+    return await self._call_worker_method("gcs_metrics")
 
   async def pre_weight_sync(
         self,
@@ -440,9 +513,12 @@ class RLVllmSampler:
     await self.pause()
     await self._clear_prefix_cache()
 
-    # `AsyncLLMEngine.start_weight_update()` takes no arguments, so it
-    # can't forward `free_kv_cache` to the worker -- go through
-    # collective_rpc directly instead of the engine-level wrapper.
+    # Ensure any stale weight update session from an aborted round is closed
+    # before opening a new weight update session.
+    try:
+      await self._call_worker_method("finish_weight_update")
+    except Exception:
+      pass
     await self._call_worker_method("start_weight_update",
                                        free_kv_cache=free_kv_cache)
 
