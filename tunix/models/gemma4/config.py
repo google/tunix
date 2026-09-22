@@ -16,6 +16,7 @@
 
 import dataclasses
 import enum
+import itertools
 from typing import Any, Tuple
 import jax
 from jax import numpy as jnp
@@ -113,6 +114,19 @@ class ShardingConfig:
   # Critic score sharding
   score_weight_d1: Tuple[str | None, ...] | P | None = None
 
+  @property
+  def act_td(self) -> P:
+    """Ragged 2D activation spec (total_tokens, embed_dim)."""
+    act_btd_tuple = tuple(self.act_btd)
+    embed_shd = act_btd_tuple[2] if len(act_btd_tuple) > 2 else None
+    return P(None, embed_shd)
+
+  @property
+  def act_tnh(self) -> P:
+    """Ragged 3D QKV projection spec (total_tokens, num_heads, head_dim)."""
+    tp_axis = tuple(self.act_btnh)[2]
+    return P(None, tp_axis, None)
+
   @staticmethod
   def get_default_sharding(is_sampling: bool = False):
     fsdp = 'fsdp' if not is_sampling else None
@@ -175,8 +189,8 @@ class ModelConfig:
 
   shd_config: ShardingConfig = ShardingConfig.get_default_sharding()
   remat_config: RematConfig = RematConfig.NONE
-  param_dtype: jnp.dtype = jnp.float32  # pyrefly: ignore[bad-assignment]
-  dtype: jnp.dtype = jnp.float32  # pyrefly: ignore[bad-assignment]
+  param_dtype: jnp.dtype = jnp.float32
+  dtype: jnp.dtype = jnp.float32
   use_flash_attention: bool = False
   flash_attention_block_size: int = 1024
   # Backend implementation for splash (flash) attention when
@@ -184,7 +198,7 @@ class ModelConfig:
   splash_attention_impl: SplashAttentionImpl = SplashAttentionImpl.JAX
   flash_attention_compute_block_size: int = 256
   # Backward needs more VMEM/tile than forward; prod uses 256 (SPLASH_BLOCK_SIZES in
-  # //depot/GOOGLE_INTERNAL_PACKAGE_PATH/learning/gemini/prod/serving/jet_engine/gemma4/config_utils.py).
+  # //depot/google3/learning/gemini/prod/serving/jet_engine/gemma4/config_utils.py).
   flash_attention_bwd_block_size: int = 256
   use_sliding_window_kv_cache: bool = False
 
@@ -230,6 +244,12 @@ class ModelConfig:
           'prefix_bucket_boundaries must be non-negative and sorted strictly '
           f'ascending with no duplicates; got {boundaries}'
       )
+
+  @property
+  def attention_types(self) -> tuple['AttentionType', ...]:
+    """Per-layer attention types, expanded from the cyclic pattern."""
+    pattern = self.attention_pattern or GEMMA4_ATTENTION_PATTERN
+    return tuple(itertools.islice(itertools.cycle(pattern), self.num_layers))
 
   @classmethod
   def gemma4_e2b(
@@ -462,3 +482,4 @@ def create_kv_cache_sharing_patterns(
       else:
         kv_cache_sharing_patterns.append(i)
   return kv_cache_sharing_patterns
+

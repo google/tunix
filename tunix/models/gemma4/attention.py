@@ -17,6 +17,7 @@
 import functools
 from functools import partial
 import typing
+from typing import Any
 from flax import nnx
 import jax
 from jax import numpy as jnp
@@ -29,6 +30,7 @@ from jax.sharding import PartitionSpec as P
 import jaxtyping
 import numpy as np
 from tunix.models import cache_utils
+from tunix.models.gemma4 import paged_attention
 from tunix.models.gemma4.config import AttentionType
 from tunix.models.gemma4.config import K_MASK
 from tunix.models.gemma4.config import LayerCache
@@ -252,8 +254,13 @@ class Attention(nnx.Module):
       else:
         key_proj, value_proj = self.kv_einsum(x)
 
-      key_proj = shard(key_proj, self.config.shd_config.act_btnh)
-      value_proj = shard(value_proj, self.config.shd_config.act_btnh)
+      spec = (
+          self.config.shd_config.act_tnh
+          if key_proj.ndim == 3
+          else self.config.shd_config.act_btnh
+      )
+      key_proj = shard(key_proj, spec)
+      value_proj = shard(value_proj, spec)
 
       # Apply norms to computed KV
       value_var = jnp.mean(jnp.square(value_proj), axis=-1, keepdims=True)
@@ -405,13 +412,17 @@ class Attention(nnx.Module):
       x: jaxtyping.Array,
       segment_pos: jaxtyping.Array,
       cache: LayerCache | None,
-      attn_mask: jaxtyping.Array,
+      attn_mask: jaxtyping.Array | None = None,
       kv_shared_cache: LayerCache | None = None,
       segment_ids: jaxtyping.Array | None = None,
       is_chunked_prefill: bool = False,
       prefix_length: int = 0,
       input_mask: jaxtyping.Array | None = None,
       force_eager: bool = False,
+      metadata: Any = None,
+      mesh: MeshType | None = None,
+      cache_name: str | None = None,
+      is_shared: bool = False,
   ) -> tuple[
       LayerCache | None,
       jaxtyping.Array,
@@ -423,9 +434,13 @@ class Attention(nnx.Module):
       ],
   ]:
     x = x.astype(self.config.dtype)
-    seq_len = x.shape[1]
     query_proj = self.q_einsum(x)
-    query_proj = shard(query_proj, self.config.shd_config.act_btnh)
+    spec = (
+        self.config.shd_config.act_tnh
+        if query_proj.ndim == 3
+        else self.config.shd_config.act_btnh
+    )
+    query_proj = shard(query_proj, spec)
     query_proj = self._query_norm(query_proj)
     query_proj = apply_rope(
         query_proj,
@@ -435,6 +450,123 @@ class Attention(nnx.Module):
         rope_proportion=self.rope_proportion,
     )
 
+    if metadata is not None:
+      assert cache is not None and cache_name is not None
+      q = query_proj.reshape(-1, self.config.num_heads, self.head_dim)
+      if is_shared:
+        k = jnp.zeros(
+            (q.shape[0], self.num_kv_heads, self.head_dim), dtype=q.dtype
+        )
+        v = jnp.zeros(
+            (q.shape[0], self.num_kv_heads, self.head_dim), dtype=q.dtype
+        )
+      else:
+        key_proj, value_proj, _ = self._compute_kv_projections(
+            x, segment_pos, kv_shared_cache=None
+        )
+        k = key_proj.reshape(-1, self.num_kv_heads, self.head_dim)
+        v = value_proj.reshape(-1, self.num_kv_heads, self.head_dim)
+
+      tp_axis = tuple(self.config.shd_config.act_btnh)[2]
+      in_specs = (
+          shd.PartitionSpec(None, tp_axis, None),
+          shd.PartitionSpec(None, tp_axis, None),
+          shd.PartitionSpec(None, tp_axis, None),
+          shd.PartitionSpec(None, None, tp_axis, None, None),
+          shd.PartitionSpec(),
+          shd.PartitionSpec(),
+          shd.PartitionSpec(),
+          shd.PartitionSpec(),
+      )
+      out_specs = (
+          shd.PartitionSpec(None, tp_axis, None),
+          shd.PartitionSpec(None, None, tp_axis, None, None),
+      )
+
+      def _call_rpa(
+          q_in,
+          k_in,
+          v_in,
+          pages_in,
+          kv_lens_in,
+          page_idxs_in,
+          q_lens_in,
+          distribution_in,
+      ):
+        cu_q_lens_in = jnp.pad(jnp.cumsum(q_lens_in), (1, 0))
+        chunk_prefill_size = (
+            getattr(metadata, 'chunk_prefill_size', None)
+            if metadata is not None
+            else None
+        )
+        rpa_kwargs = {}
+        if chunk_prefill_size is not None:
+          rpa_kwargs['chunk_prefill_size'] = chunk_prefill_size
+        return paged_attention.ragged_paged_attention(
+            q_in,
+            k_in,
+            v_in,
+            pages_in,
+            kv_lens_in,
+            page_idxs_in,
+            cu_q_lens_in,
+            distribution_in,
+            sliding_window=(
+                self.config.sliding_window_size
+                if self.attn_type == AttentionType.LOCAL_SLIDING
+                else None
+            ),
+            update_kv_cache=not is_shared,
+            **rpa_kwargs,
+        )
+
+      if mesh is not None and not mesh.empty:
+        sharded_rpa = shard_map(
+            _call_rpa,
+            mesh=mesh,
+            in_specs=in_specs,
+            out_specs=out_specs,
+            check_rep=False,
+        )
+        attn_output, updated_layer_pages = sharded_rpa(
+            q,
+            k,
+            v,
+            cache[cache_name],
+            metadata.kv_lens,
+            metadata.page_indices[cache_name].reshape(-1),
+            metadata.query_lens,
+            metadata.distribution,
+        )
+      else:
+        attn_output, updated_layer_pages = _call_rpa(
+            q,
+            k,
+            v,
+            cache[cache_name],
+            metadata.kv_lens,
+            metadata.page_indices[cache_name].reshape(-1),
+            metadata.query_lens,
+            metadata.distribution,
+        )
+
+      attn_output = self.attn_vec_einsum(attn_output)
+      spec = (
+          self.config.shd_config.act_td
+          if attn_output.ndim == 2
+          else self.config.shd_config.act_btd
+      )
+      attn_output = shard(attn_output, spec)
+
+      if not is_shared:
+        new_pages = {**cache, cache_name: updated_layer_pages}
+      else:
+        new_pages = cache
+
+      return new_pages, attn_output, (k, v, None, None)
+
+    assert attn_mask is not None
+    seq_len = x.shape[1]
     key_proj, value_proj, kv_valid_mask = self._compute_kv_projections(
         x,
         segment_pos,
@@ -831,13 +963,17 @@ class Attention(nnx.Module):
       x: jaxtyping.Array,
       segment_pos: jaxtyping.Array,
       cache: LayerCache | None,
-      attn_mask: jaxtyping.Array,
+      attn_mask: jaxtyping.Array | None = None,
       kv_shared_cache: LayerCache | None = None,
       segment_ids: jaxtyping.Array | None = None,
       is_chunked_prefill: bool = False,
       prefix_length: int = 0,
       input_mask: jaxtyping.Array | None = None,
       force_eager: bool = False,
+      metadata: Any = None,
+      mesh: MeshType | None = None,
+      cache_name: str | None = None,
+      is_shared: bool = False,
   ) -> tuple[
       LayerCache | None,
       jaxtyping.Array,
@@ -848,6 +984,20 @@ class Attention(nnx.Module):
           jaxtyping.Array | None,
       ],
   ]:
+    if metadata is not None:
+      return self.block(
+          x,
+          segment_pos,
+          cache,
+          attn_mask,
+          kv_shared_cache=kv_shared_cache,
+          segment_ids=segment_ids,
+          metadata=metadata,
+          mesh=mesh,
+          cache_name=cache_name,
+          is_shared=is_shared,
+      )
+
     remat_config = getattr(self.config, 'remat_config', RematConfig.NONE)
     if (
         remat_config == RematConfig.BLOCK
@@ -932,3 +1082,4 @@ class Attention(nnx.Module):
       end_index = jnp.zeros((batch_size,), jnp.int32)
 
     return {'k': k, 'v': v, 'end_index': end_index}
+

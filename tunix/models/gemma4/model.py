@@ -16,11 +16,12 @@
 
 import dataclasses
 from functools import partial
-import itertools
+from typing import Any
 from flax import nnx
 import jax
 from jax import numpy as jnp
 import jaxtyping
+from tunix.experimental.generate import kv_cache_manager
 from tunix.generate.mappings import BackendMappingMixin
 from tunix.utils import compat
 
@@ -246,7 +247,7 @@ class DecoderLayer(nnx.Module):
       x: jaxtyping.Array,
       segment_pos: jaxtyping.Array,
       cache: LayerCache | None,
-      attn_mask: jaxtyping.Array,
+      attn_mask: jaxtyping.Array | None = None,
       per_layer_input: jaxtyping.Array | None = None,
       kv_shared_cache: LayerCache | None = None,
       segment_ids: jaxtyping.Array | None = None,
@@ -254,6 +255,10 @@ class DecoderLayer(nnx.Module):
       prefix_length: int = 0,
       input_mask: jaxtyping.Array | None = None,
       force_eager: bool = False,
+      metadata: Any = None,
+      mesh: jax.sharding.Mesh | None = None,
+      cache_name: str | None = None,
+      is_shared: bool = False,
   ) -> tuple[
       LayerCache | None,
       jaxtyping.Array,
@@ -276,6 +281,10 @@ class DecoderLayer(nnx.Module):
         prefix_length=prefix_length,
         input_mask=input_mask,
         force_eager=force_eager,
+        metadata=metadata,
+        mesh=mesh,
+        cache_name=cache_name,
+        is_shared=is_shared,
     )
     attn = self.post_attention_norm(attn)
     attn += x
@@ -308,13 +317,17 @@ class DecoderLayer(nnx.Module):
       x: jaxtyping.Array,
       segment_pos: jaxtyping.Array,
       cache: LayerCache | None,
-      attn_mask: jaxtyping.Array,
+      attn_mask: jaxtyping.Array | None = None,
       per_layer_input: jaxtyping.Array | None = None,
       kv_shared_cache: LayerCache | None = None,
       segment_ids: jaxtyping.Array | None = None,
       is_chunked_prefill: bool = False,
       prefix_length: int = 0,
       input_mask: jaxtyping.Array | None = None,
+      metadata: Any = None,
+      mesh: jax.sharding.Mesh | None = None,
+      cache_name: str | None = None,
+      is_shared: bool = False,
   ) -> tuple[
       LayerCache | None,
       jaxtyping.Array,
@@ -325,6 +338,20 @@ class DecoderLayer(nnx.Module):
           jaxtyping.Array | None,
       ],
   ]:
+    if metadata is not None:
+      return self.block(
+          x,
+          segment_pos,
+          cache,
+          attn_mask,
+          per_layer_input=per_layer_input,
+          kv_shared_cache=kv_shared_cache,
+          segment_ids=segment_ids,
+          metadata=metadata,
+          mesh=mesh,
+          cache_name=cache_name,
+          is_shared=is_shared,
+      )
     force_eager = (
         is_chunked_prefill
         and self.attn.attn_type == AttentionType.LOCAL_SLIDING
@@ -352,7 +379,7 @@ class DecoderLayer(nnx.Module):
       policy = getattr(jax.checkpoint_policies, self.config.remat_policy)
       graphdef, state = nnx.split(self)
 
-      def _checkpointed_block(state, *args):
+      def _checkpointed_block(state, *args, **kwargs):
         module = nnx.merge(graphdef, state)
         return module.block(
             *args,
@@ -361,6 +388,7 @@ class DecoderLayer(nnx.Module):
             prefix_length=bucketed_prefix,
             input_mask=input_mask,
             force_eager=force_eager,
+            **kwargs,
         )
 
       return jax.checkpoint(_checkpointed_block, policy=policy)(
@@ -371,6 +399,8 @@ class DecoderLayer(nnx.Module):
           attn_mask,
           per_layer_input,
           kv_shared_cache,
+          metadata=metadata,
+          mesh=mesh,
       )
     else:
       return self.block(
@@ -385,6 +415,8 @@ class DecoderLayer(nnx.Module):
           prefix_length=bucketed_prefix,
           input_mask=input_mask,
           force_eager=force_eager,
+          metadata=metadata,
+          mesh=mesh,
       )
 
   def init_cache(self, batch_size, max_seq_len, dtype):
@@ -423,28 +455,29 @@ class Gemma4(BackendMappingMixin, nnx.Module):
           config=config.audio_encoder,
       )
 
-    pattern = (
-        config.attention_pattern
-        if config.attention_pattern
-        else GEMMA4_ATTENTION_PATTERN
-    )
-    attention_types = [
-        attn_type
-        for _, attn_type in zip(
-            range(config.num_layers), itertools.cycle(pattern)
-        )
-    ]
+    attention_types = config.attention_types
     self.kv_cache_sharing_patterns = create_kv_cache_sharing_patterns(
         num_layers=config.num_layers,
         frac_shared_layers=config.frac_shared_layers,
         share_global=True,
         share_local=True,
-        attention_types=tuple(attention_types),
+        attention_types=attention_types,
     )
     # Layers that shared layers depend on.
     self.shared_layer_origins = {
         j for i, j in enumerate(self.kv_cache_sharing_patterns) if i != j
     }
+
+    self.layer_to_cache = {}
+    for i, origin_idx in enumerate(self.kv_cache_sharing_patterns):
+      if origin_idx != i:
+        self.layer_to_cache[f'layer_{i}'] = self.layer_to_cache[
+            f'layer_{origin_idx}'
+        ]
+      else:
+        self.layer_to_cache[f'layer_{i}'] = (
+            f'cache_{len(set(self.layer_to_cache.values()))}'
+        )
 
     self.layers = compat.ModuleList()
     for i in range(config.num_layers):
@@ -483,7 +516,48 @@ class Gemma4(BackendMappingMixin, nnx.Module):
       is_chunked_prefill: bool = False,
       prefix_length: int = 0,
       input_mask: jaxtyping.Array | None = None,
+      metadata: Any = None,
+      mesh: jax.sharding.Mesh | None = None,
   ) -> tuple[jaxtyping.Array, Cache | None]:
+    if metadata is not None:
+      assert cache is not None, 'Cache is required for RPA'
+      if positions is None:
+        raise ValueError('positions must be provided when metadata is not None')
+
+      x = self.embedder.encode(tokens)
+      per_layer_inputs = None
+      if self.config.per_layer_input_dim > 0:
+        per_layer_inputs = self.embedder.encode_per_layer_input(x, tokens)
+
+      for i, layer in enumerate(self.layers):
+        cache_name = self.layer_to_cache[f'layer_{i}']
+        is_shared = self.kv_cache_sharing_patterns[i] != i
+        layer_input = (
+            per_layer_inputs[:, i, :] if per_layer_inputs is not None else None
+        )
+        cache, x, _ = layer(
+            x,
+            positions,
+            cache,
+            attn_mask=None,
+            per_layer_input=layer_input,
+            metadata=metadata,
+            cache_name=cache_name,
+            is_shared=is_shared,
+            mesh=mesh,
+        )
+
+      x = self.final_norm(x)
+      if skip_lm_head:
+        return x, cache
+
+      if decode_only_last_token:
+        last_token_idxs = jnp.maximum(0, jnp.cumsum(metadata.query_lens) - 1)
+        x = x[last_token_idxs]
+
+      logits = self.compute_final_logits(x)
+      return logits, cache
+
     if prefix_length < 0:
       raise ValueError(
           f'`prefix_length` must be non-negative, got {prefix_length}.'
@@ -747,6 +821,47 @@ class Gemma4(BackendMappingMixin, nnx.Module):
       cache[f'layer_{i}'] = layer.init_cache(batch_size, max_seq_len, dtype)
     return cache
 
+  def init_kv_cache(
+      self, cache_config: kv_cache_manager.CacheConfig
+  ) -> kv_cache_manager.KVCacheManager:
+    """Builds the paged KV cache for this model's layer geometry.
+
+    Gemma 4's global layers project a different number of KV heads at a
+    different head dim than its local ones, so caches differ in geometry.
+    Layers that reuse another layer's KV cache get no cache of their own;
+    they point at the lender's.
+
+    Args:
+      cache_config: Capacity, page geometry and sharding, owned by the caller.
+
+    Returns:
+      A manager holding one cache per unshared layer.
+    """
+    cache_geometries = {}
+    for i, origin_idx in enumerate(self.kv_cache_sharing_patterns):
+      if origin_idx != i:
+        continue
+
+      cache_name = self.layer_to_cache[f'layer_{i}']
+      attn = self.layers[i].attn
+      # `attn.num_kv_heads` / `attn.head_dim` are already resolved per
+      # attention type; the raw config values are the local-layer ones.
+      cache_geometries[cache_name] = kv_cache_manager.CacheGeometry(
+          num_kv_heads=attn.num_kv_heads,
+          head_dim=attn.head_dim,
+          window_size=(
+              self.config.sliding_window_size
+              if attn.attn_type == AttentionType.LOCAL_SLIDING
+              else None
+          ),
+      )
+
+    return kv_cache_manager.KVCacheManager(
+        config=cache_config,
+        cache_geometries=cache_geometries,
+        layer_to_cache=dict(self.layer_to_cache),
+    )
+
   def get_model_input(self):
     """Returns a dummy model input for the transformer.
 
@@ -769,3 +884,4 @@ class Gemma4(BackendMappingMixin, nnx.Module):
   @property
   def num_embed(self) -> int:
     return self.config.num_embed
+

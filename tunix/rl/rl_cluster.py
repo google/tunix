@@ -24,7 +24,7 @@ import gc
 import itertools
 import operator
 import os
-from typing import Any, Callable, Mapping, Sequence, cast
+from typing import Any, Callable, Mapping
 
 from absl import logging
 import flax
@@ -40,9 +40,8 @@ import numpy as np
 import optax
 from tunix.common import configs
 from tunix.common import datatypes
+from tunix.experimental.rollout import vanilla_rollout as vanilla_rollout_v2
 from tunix.generate import tokenizer_adapter
-from tunix.generate import utils as generate_utils
-# Internal placeholder for sglang_jax rollout worker stub, don't change this line.
 from tunix.perf import metrics as perf_metrics
 from tunix.perf import trace as perf_trace
 from tunix.perf.experimental import constants as perf_constants
@@ -258,12 +257,13 @@ class RLEngine:
         self.cluster_config.rollout_engine, str
     ) and self.cluster_config.rollout_engine not in [
         "vanilla",
+        "vanillav2",
         "vllm",
         "sglang_jax",
     ]:
       raise ValueError(
           "`cluster_config.rollout_engine` should be one of `'vanilla'`, "
-          "`'vllm'`, or `'sglang_jax'`. Received:"
+          "`'vanillav2'`, `'vllm'`, or `'sglang_jax'`. Received:"
           f" '{self.cluster_config.rollout_engine}'."
       )
 
@@ -295,6 +295,26 @@ class RLEngine:
           ),
       )
       self._maybe_offload_model_to_cpu(self._rollout.model(), Role.ROLLOUT)
+    elif self.cluster_config.rollout_engine == "vanillav2":
+      if not hasattr(self.rollout_actor, "config"):
+        raise ValueError("`self.rollout_actor` must have a config attribute.")
+      # We must load the model from CPU before initializing the rollout,
+      # otherwise the prefill and decode programs might be initialized on CPU.
+      self._maybe_load_model_from_cpu(self.rollout_actor, Role.ROLLOUT)
+      # The engine sizes its KV cache in bytes rather than tokens, so it reads
+      # the rollout config directly instead of taking a cache config. The train
+      # config builds the engine once; any config passed at generation time is
+      # strictly used for per-request parameters.
+      self._rollout = vanilla_rollout_v2.VanillaRollout(
+          self.rollout_actor,
+          self.tokenizer,
+          rollout_config=(
+              self.cluster_config.rollout_config[Mode.TRAIN]
+              if isinstance(self.cluster_config.rollout_config, dict)
+              else self.cluster_config.rollout_config
+          ),
+      )
+      self._maybe_offload_model_to_cpu(self._rollout.model(), Role.ROLLOUT)
     elif self.cluster_config.rollout_engine == "vllm":
       # OSS Placeholder for vllm rollout worker, don't change this line.
 
@@ -323,7 +343,7 @@ class RLEngine:
             rollout_config=loaded_vllm_config,
         )
     elif self.cluster_config.rollout_engine == "sglang_jax":
-      from tunix.rl.rollout import sglang_jax_rollout
+      # OSS Placeholder for sglang_jax rollout worker, don't change this line.
 
       if isinstance(self.cluster_config.rollout_config, dict):
         loaded_sglang_jax_config = self.cluster_config.rollout_config[
@@ -793,14 +813,12 @@ class RLEngine:
 
   def generate(
       self,
-      prompts: list[str] | list[list[dict[str, str]]] | None = None,
+      prompts: list[str] | list[list[dict[str, str]]],
       apply_chat_template: bool = False,
       mode: Mode = Mode.TRAIN,
       micro_batch_size: int | None = None,
       trace_tags: Mapping[str, Any] | None = None,
       max_generation_steps: int | None = None,
-      *,
-      prompt_token_ids: Sequence[Sequence[int] | np.ndarray] | None = None,
   ) -> base_rollout.RolloutOutput:
     """Generates text from the given prompts.
 
@@ -814,43 +832,28 @@ class RLEngine:
       micro_batch_size: The micro-batch size for generation. If None, no
         micro-batching is performed.
       trace_tags: Optional tags to add to the performance tracer.
-      prompt_token_ids: Explicit unpadded token rows. Mutually exclusive with
-        text prompts and chat templating; requires backend token-input support.
 
     Returns:
       A `RolloutOutput` object containing the generated text and other info.
     """
-    exact_input = prompt_token_ids is not None
-    if exact_input:
-      if prompts is not None:
-        raise ValueError("Provide exactly one of prompts or prompt_token_ids.")
-      prompt_rows: list[Any] = [
-          generate_utils.as_token_ids(row)
-          for row in prompt_token_ids  # pytype: disable=attribute-error
+    if apply_chat_template:
+      if self.tokenizer is None:
+        raise ValueError("Tokenizer must be initialized to use chat templates.")
+      string_prompts = [
+          self.tokenizer.apply_chat_template(
+              prompt,  # pytype: disable=wrong-arg-types
+              add_generation_prompt=True,
+              tokenize=False,
+              enable_thinking=False,
+          )
+          for prompt in prompts
       ]
     else:
-      if prompts is None:
-        raise ValueError("Cannot generate from an empty list of prompts.")
-      if apply_chat_template:
-        if self.tokenizer is None:
-          raise ValueError(
-              "Tokenizer must be initialized to use chat templates."
-          )
-        prompt_rows = [
-            self.tokenizer.apply_chat_template(
-                prompt,  # pytype: disable=wrong-arg-types
-                add_generation_prompt=True,
-                tokenize=False,
-                enable_thinking=False,
-            )
-            for prompt in prompts
-        ]
-      else:
-        prompt_rows = list(prompts)
+      string_prompts = prompts  # pytype: disable=annotation-type-mismatch
 
-    if len(prompt_rows) == 0:
+    if len(string_prompts) == 0:
       raise ValueError("Cannot generate from an empty list of prompts.")
-    micro_batch_size = micro_batch_size or len(prompt_rows)
+    micro_batch_size = micro_batch_size or len(string_prompts)
 
     with self._get_mesh_and_logical_axis_rules_cm(Role.ROLLOUT) as (mesh, _):
       model = self.rollout.model()
@@ -882,16 +885,10 @@ class RLEngine:
       ) as span_v2:
         outputs = [
             self.rollout.generate(
-                cast(Any, None),
-                rollout_config,
-                prompt_token_ids=prompt_rows[s],
-            )
-            if exact_input
-            else self.rollout.generate(
-                cast(list[str], prompt_rows[s]), rollout_config
+                string_prompts[s], rollout_config=rollout_config
             )
             for s in rl_utils.chunk_slices_by_size(
-                stop=len(prompt_rows), step=micro_batch_size
+                stop=len(string_prompts), step=micro_batch_size
             )
         ]
         span.device_end([o.tokens for o in outputs])
@@ -915,12 +912,6 @@ class RLEngine:
           itertools.chain.from_iterable(out.logits for out in outputs)  # pyrefly: ignore[bad-argument-type]
       )
 
-    prompt_lengths = None
-    if all(out.prompt_lengths is not None for out in outputs):
-      prompt_lengths = np.concatenate(
-          [cast(np.ndarray, out.prompt_lengths) for out in outputs]
-      )
-
     return base_rollout.RolloutOutput(
         text=texts,
         logits=logits,
@@ -931,7 +922,6 @@ class RLEngine:
             [out.left_padded_prompt_tokens for out in outputs], axis=0
         ),
         logprobs=logprobs,
-        prompt_lengths=prompt_lengths,
     )
 
   def per_token_logps(
@@ -978,7 +968,6 @@ class RLEngine:
       micro_batch_size: int | None = None,
       segment_ids: jax.Array | None = None,
       segment_positions: jax.Array | None = None,
-      token_mask: jax.Array | None = None,
   ) -> jax.Array:
     """Gets the per-token logps of the reference model."""
     batch_size = prompt_tokens.shape[0]
@@ -1015,13 +1004,6 @@ class RLEngine:
               self.cluster_config.training_config.data_sharding_axis,
           )
       )
-      dest_token_mask = (
-          None
-          if token_mask is None
-          else sharding_utils.shard_input(
-              token_mask, self.cluster_config.training_config.data_sharding_axis
-          )
-      )
       self._maybe_load_model_from_cpu(
           self.inference_worker.get_model("reference"), Role.REFERENCE
       )
@@ -1046,11 +1028,6 @@ class RLEngine:
                     None
                     if dest_segment_positions is None
                     else dest_segment_positions[batch_slice]
-                ),
-                token_mask=(
-                    None
-                    if dest_token_mask is None
-                    else dest_token_mask[batch_slice]
                 ),
             )
         )
@@ -1105,7 +1082,6 @@ class RLEngine:
       temperature: float | None = None,
       segment_ids: jax.Array | None = None,
       segment_positions: jax.Array | None = None,
-      token_mask: jax.Array | None = None,
   ) -> jax.Array:
     """Gets per-token logps from the actor model on the trainer side.
 
@@ -1154,14 +1130,6 @@ class RLEngine:
           )
       )
 
-      dest_token_mask = (
-          None
-          if token_mask is None
-          else sharding_utils.shard_input(
-              token_mask, self.cluster_config.training_config.data_sharding_axis
-          )
-      )
-
       # Use the anchor (start-of-global-step) actor weights so old_per_token_logps
       # reference the same policy vllm sampled with even when mini_batch_size <
       # full_batch_size or num_iterations > 1. Only offload the live actor when
@@ -1205,11 +1173,6 @@ class RLEngine:
                     None
                     if dest_segment_positions is None
                     else dest_segment_positions[batch_slice]
-                ),
-                token_mask=(
-                    None
-                    if dest_token_mask is None
-                    else dest_token_mask[batch_slice]
                 ),
             )
         )
@@ -1314,3 +1277,4 @@ class RLEngine:
 
 # Alias for backward compatibility.
 RLCluster = RLEngine
+

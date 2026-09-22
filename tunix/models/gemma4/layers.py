@@ -115,8 +115,12 @@ class Embedder(nnx.Module):
     x = self.input_embedding[(x,)]
     x *= jnp.sqrt(x.shape[-1]).astype(x.dtype)
     x = jnp.astype(x, self.config.dtype)
-    x = shard(x, self.config.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
-    return x
+    spec = (
+        self.config.shd_config.act_td
+        if x.ndim == 2
+        else self.config.shd_config.act_btd
+    )
+    return shard(x, spec)
 
   def encode_vision(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
     x = self.mm_pre_projection_norm(x)  # pyrefly: ignore[bad-argument-type]
@@ -265,7 +269,12 @@ class Einsum(nnx.Module):
       w = w * self.w_scale
     x = jnp.astype(x, self.dtype)
     w = jnp.astype(w, self.dtype)
-    return jnp.einsum(self.einsum_str, x, w)
+    einsum_str = self.einsum_str
+    in_sub, _ = einsum_str.split('->')
+    op0_sub = in_sub.split(',')[0]
+    if jnp.ndim(x) < len(op0_sub):
+      einsum_str = einsum_str.replace('B', '')
+    return jnp.einsum(einsum_str, x, w)
 
 
 class RMSNorm(nnx.Module):
@@ -336,9 +345,7 @@ def apply_rope(
       constant_values=(0, jnp.inf),
   )
 
-  sinusoid_inp = (
-      positions[..., jnp.newaxis] / timescale[jnp.newaxis, jnp.newaxis, :]
-  )
+  sinusoid_inp = positions[..., jnp.newaxis] / timescale
   sinusoid_inp = sinusoid_inp[..., jnp.newaxis, :]
   if scale_factor < 1.0:
     raise ValueError(f'scale_factor must be >= 1.0, got {scale_factor}')
@@ -352,3 +359,4 @@ def apply_rope(
   second_part = second_half * cos + first_half * sin
   out = jnp.concatenate([first_part, second_part], axis=-1)
   return out.astype(inputs.dtype)
+
