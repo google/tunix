@@ -33,6 +33,9 @@ ${QUEUE_LABEL}spec:
         completions: ${COMPLETIONS}
         parallelism: ${PARALLELISM}
         template:
+          metadata:
+            annotations:
+              cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
           spec:
             priorityClassName: ${PRIORITY_CLASS}
             serviceAccountName: ${SERVICE_ACCOUNT}
