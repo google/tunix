@@ -142,6 +142,93 @@ class AlgoCoreTest(absltest.TestCase):
         np.testing.assert_allclose(lp, lu, rtol=1e-5, atol=1e-5)
         np.testing.assert_allclose(lp, -2.25, rtol=1e-4, atol=1e-4)
 
+  def test_ppo_policy_loss_fn_survives_an_extreme_importance_ratio(self):
+    # ppo_policy_loss_fn formed the ratio as exp(new - old) with no bound. On a
+    # large log-ratio that overflows to inf; the clipped branch does not save it,
+    # because jnp.maximum(-inf * adv, finite) keeps the inf whenever the
+    # advantage is negative, and inf * 0 at a padded position then turns the
+    # whole batch's loss and gradient into nan. grpo_loss_fn clamps the
+    # log-ratio to [-20, 20] before the exp for exactly this reason, as does
+    # agentic_grpo_learner since #1296.
+    from types import SimpleNamespace  # pylint: disable=g-import-not-at-top
+    from flax import nnx  # pylint: disable=g-import-not-at-top
+    from tunix.rl import common  # pylint: disable=g-import-not-at-top
+
+    class _Toy(nnx.Module):
+      """Smallest model compute_per_token_logps will accept."""
+
+      def __init__(self, *, vocab, dim, rngs):
+        self.emb = nnx.Embed(vocab, dim, rngs=rngs)
+        self.head = nnx.Linear(dim, vocab, rngs=rngs)
+
+      def __call__(
+          self,
+          x,
+          segment_ids=None,
+          positions=None,
+          cache=None,
+          attention_mask=None,
+      ):
+        return self.head(self.emb(x)), cache
+
+    model = _Toy(vocab=16, dim=8, rngs=nnx.Rngs(0))
+    cfg = SimpleNamespace(
+        epsilon_low=0.2,
+        epsilon_high=0.2,
+        entropy_coef=None,
+        epsilon_c=None,
+        loss_agg_mode='token-mean',
+        temperature=1.0,
+    )
+
+    def loss_for(old_per_token_logps, advantage):
+      example = common.TrainExample(
+          prompt_ids=jnp.array([[7]], jnp.int32),
+          prompt_mask=jnp.array([[1]], jnp.int32),
+          completion_ids=jnp.array([[3, 4, 5]], jnp.int32),
+          # The last position is padding, so it must not reach the loss at all.
+          completion_mask=jnp.array([[1, 1, 0]], jnp.float32),
+          advantages=jnp.array([advantage], jnp.float32),
+          ref_per_token_logps=None,
+          old_per_token_logps=old_per_token_logps,
+          segment_ids=None,
+          segment_positions=None,
+          num_segments=None,
+      )
+      return float(
+          algo_core.ppo_policy_loss_fn(
+              model, example, cfg, pad_id=0, eos_id=-1
+          ).primary_loss.compute()
+      )
+
+    ordinary = jnp.array([[-1.0, -1.0, -1.0]], jnp.float32)
+    # An old logp far from the new one at the padded slot, which is what a
+    # recomputed or lower-precision rollout logp looks like there.
+    spiked = jnp.array([[-1.0, -1.0, -900.0]], jnp.float32)
+
+    for advantage in (1.0, -1.0):
+      with self.subTest(advantage=advantage):
+        expected = loss_for(ordinary, advantage)
+        self.assertTrue(np.isfinite(expected))
+        # The padded slot carries no signal, so it must not move the loss.
+        np.testing.assert_allclose(
+            loss_for(spiked, advantage), expected, rtol=1e-6, atol=1e-6
+        )
+
+  def test_ppo_and_grpo_clamp_the_log_ratio_the_same_way(self):
+    # The two losses in this file must not disagree about the bound: a change to
+    # one that is not mirrored in the other is what left PPO unbounded.
+    import inspect  # pylint: disable=g-import-not-at-top
+
+    ppo_src = inspect.getsource(algo_core.ppo_policy_loss_fn)
+    grpo_src = inspect.getsource(algo_core.grpo_loss_fn)
+    for src, name in (
+        (ppo_src, 'ppo_policy_loss_fn'),
+        (grpo_src, 'grpo_loss_fn'),
+    ):
+      with self.subTest(fn=name):
+        self.assertIn('max=20.0, min=-20.0', src)
+
 
 if __name__ == '__main__':
   absltest.main()
