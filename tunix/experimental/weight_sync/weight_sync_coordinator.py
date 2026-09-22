@@ -133,6 +133,7 @@ from typing import Any, Optional, Sequence
 from absl import logging
 from tunix.experimental.common import datatypes
 from tunix.experimental.orchestrator import worker_registry
+from tunix.experimental.rollout import collector as collector_lib
 from tunix.experimental.weight_sync import weight_sync
 
 
@@ -536,6 +537,19 @@ _POISONING_STATES = frozenset({
 })
 
 
+def _env_float(name: str, default: float) -> float:
+  val = os.getenv(name)
+  if val is None or not val.strip():
+    return default
+  try:
+    return float(val)
+  except ValueError:
+    logging.warning(
+        "Invalid float for %s=%r; using default %f", name, val, default
+    )
+    return default
+
+
 @dataclasses.dataclass(frozen=True)
 class PhaseTimeouts:
   """Per-phase deadlines, in seconds.
@@ -547,16 +561,45 @@ class PhaseTimeouts:
   at least this large.
   """
 
-  bind: float = 60.0
-  metadata: float = 60.0
-  source_prepare: float = 900.0
-  pre: float = 180.0
-  transfer: float = 1800.0
-  h2d: float = 1800.0
-  post: float = 300.0
-  abort: float = 180.0
-  status: float = 30.0
-  release: float = 120.0
+  bind: float = dataclasses.field(
+      default_factory=lambda: _env_float("WEIGHT_SYNC_BIND_TIMEOUT_S", 300.0)
+  )
+  metadata: float = dataclasses.field(
+      default_factory=lambda: _env_float("WEIGHT_SYNC_METADATA_TIMEOUT_S", 60.0)
+  )
+  source_prepare: float = dataclasses.field(
+      default_factory=lambda: _env_float(
+          "WEIGHT_SYNC_SOURCE_PREPARE_TIMEOUT_S", 900.0
+      )
+  )
+  pre: float = dataclasses.field(
+      default_factory=lambda: _env_float(
+          "WEIGHT_SYNC_PRE_TIMEOUT_S",
+          _env_float(
+              "EPISODE_TIMEOUT_SECS",
+              collector_lib.DEFAULT_EPISODE_TIMEOUT_SECS,
+          )
+          + 300.0,
+      )
+  )
+  transfer: float = dataclasses.field(
+      default_factory=lambda: _env_float("WEIGHT_SYNC_TRANSFER_TIMEOUT_S", 1800.0)
+  )
+  h2d: float = dataclasses.field(
+      default_factory=lambda: _env_float("WEIGHT_SYNC_H2D_TIMEOUT_S", 1800.0)
+  )
+  post: float = dataclasses.field(
+      default_factory=lambda: _env_float("WEIGHT_SYNC_POST_TIMEOUT_S", 300.0)
+  )
+  abort: float = dataclasses.field(
+      default_factory=lambda: _env_float("WEIGHT_SYNC_ABORT_TIMEOUT_S", 180.0)
+  )
+  status: float = dataclasses.field(
+      default_factory=lambda: _env_float("WEIGHT_SYNC_STATUS_TIMEOUT_S", 30.0)
+  )
+  release: float = dataclasses.field(
+      default_factory=lambda: _env_float("WEIGHT_SYNC_RELEASE_TIMEOUT_S", 120.0)
+  )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -656,6 +699,9 @@ class WeightSyncCoordinator:
     self._controller_id = controller_id
     self._req_id_prefix = req_id_prefix
     self._timeouts = timeouts or PhaseTimeouts()
+    logging.info(
+        "WeightSyncCoordinator initialized with timeouts: %s", self._timeouts
+    )
 
     self._round_index = 0
     self._next_uuid = first_uuid
@@ -744,6 +790,7 @@ class WeightSyncCoordinator:
         "req_id": req_id,
         "uuid": uuid,
         "round_index": round_index,
+        "pre_timeout_s": self._timeouts.pre,
         **extra_config,
     }
     return datatypes.WeightSyncRequest(

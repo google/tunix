@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import asyncio
+import os
 import types
 import unittest
 from unittest import mock
@@ -101,8 +102,9 @@ class _NoopCollector:
       tokenizer,
       chat_parser,
       eos_ids=None,
+      **kwargs,
   ):
-    del request, sampler, agent, tokenizer, chat_parser, eos_ids
+    del request, sampler, agent, tokenizer, chat_parser, eos_ids, kwargs
     self.traj_id = traj_id
     self.env = env_client
 
@@ -234,13 +236,64 @@ class AdmissionGateTest(unittest.IsolatedAsyncioTestCase):
     await pre
 
   async def test_drain_timeout_returns(self):
-    manager = self._manager(drain_timeout_s=0.05)
-    task = asyncio.create_task(asyncio.Event().wait())
-    manager._active_tasks["t0"] = task
-    manager._traffic.track(task)
-    await manager.pre_weight_sync()
-    task.cancel()
-    manager._active_tasks.pop("t0", None)
+    with mock.patch.dict(
+        os.environ, {"EPISODE_TIMEOUT_SECS": "0.01"}, clear=False
+    ):
+      manager = self._manager(drain_timeout_s=0.05)
+      task = asyncio.create_task(asyncio.Event().wait())
+      manager._active_tasks["t0"] = task
+      manager._traffic.track(task)
+      await manager.pre_weight_sync()
+      task.cancel()
+      manager._active_tasks.pop("t0", None)
+
+  def test_drain_timeout_must_exceed_episode_timeout(self):
+    with mock.patch.dict(
+        os.environ, {"EPISODE_TIMEOUT_SECS": "100"}, clear=False
+    ):
+      with self.assertRaisesRegex(
+          ValueError, "must be strictly greater than episode_timeout"
+      ):
+        self._manager(drain_timeout_s=100.0)
+
+  async def test_pre_weight_sync_validates_drain_less_than_pre_timeout(self):
+    with mock.patch.dict(
+        os.environ, {"EPISODE_TIMEOUT_SECS": "50"}, clear=False
+    ):
+      manager = self._manager(drain_timeout_s=100.0)
+      sync_req = datatypes.WeightSyncRequest(
+          extra_config={"pre_timeout_s": 80.0}
+      )
+      with self.assertRaisesRegex(
+          ValueError, "cannot be greater than or equal to"
+      ):
+        await manager.pre_weight_sync(sync_req)
+
+  async def test_pre_weight_sync_passes_when_drain_less_than_pre_timeout(self):
+    with mock.patch.dict(
+        os.environ, {"EPISODE_TIMEOUT_SECS": "5"}, clear=False
+    ):
+      manager = self._manager(drain_timeout_s=10.0)
+      sync_req = datatypes.WeightSyncRequest(
+          extra_config={"pre_timeout_s": 50.0}
+      )
+      await manager.pre_weight_sync(sync_req)
+
+  def test_drain_timeout_defaults_from_episode_timeout_env(self):
+    with mock.patch.dict(
+        os.environ, {"EPISODE_TIMEOUT_SECS": "150"}, clear=False
+    ):
+      manager = self._manager(drain_timeout_s=None)
+      self.assertEqual(manager._drain_timeout_s, 210.0)
+
+  def test_drain_timeout_falls_back_on_invalid_episode_timeout_env(self):
+    for bad_val in ("", "  ", "not_a_float"):
+      with mock.patch.dict(
+          os.environ, {"EPISODE_TIMEOUT_SECS": bad_val}, clear=False
+      ):
+        manager = self._manager(drain_timeout_s=None)
+        self.assertEqual(manager._episode_timeout_s, 600.0)
+        self.assertEqual(manager._drain_timeout_s, 660.0)
 
 
 class AgentConfigTest(unittest.IsolatedAsyncioTestCase):
