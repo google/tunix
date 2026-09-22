@@ -108,6 +108,7 @@ def build_maxtext_config(
     mesh_fsdp: int = 1,
     mesh_tp: int = 1,
     mesh_expert: int = 1,
+    mesh_context: int = 1,
     num_devices: int = 1,
     max_prompt_length: int = 512,
     max_response_length: int = 128,
@@ -397,6 +398,16 @@ def build_maxtext_config(
       ),
       f"ici_tensor_parallelism={mesh_tp}",
       f"ici_expert_parallelism={mesh_expert}",
+      f"ici_context_parallelism={mesh_context}",
+      # Qwen3.5's GatedDeltaNet layers carry a recurrence, so device order is
+      # sequence order: device i composes the state device i-1 left behind. The
+      # default DUAL_CHUNK_SWAP balancing hands device 0 the first and last
+      # chunks, device 1 the second and second-to-last, which composes the
+      # segments out of order. Softmax attention tolerates that because it
+      # rebuilds the causal mask from positions; a recurrence cannot. MaxText
+      # rejects the combination outright, and warns that the run would otherwise
+      # still train with the loss falling -- i.e. it fails silently.
+      *(["context_parallel_load_balance=False"] if mesh_context > 1 else []),
       f"learning_rate={learning_rate}",
       f"warmup_steps_fraction={warmup_steps_fraction}",
       "dtype=bfloat16",
@@ -444,6 +455,26 @@ def build_maxtext_config(
 
   if os.environ.get("OVERRIDE_MODEL_CONFIG", "").lower() in ("1", "true") and "override_model_config=true" not in argv:
     argv.append("override_model_config=true")
+
+  # Generic passthrough, applied last so it wins over anything derived above.
+  # MaxText exposes far more knobs than this helper has named parameters for --
+  # MoE kernel selection, splash-attention block sizes, GDN tuning, custom mesh
+  # rules -- and a run that needs one of them otherwise has nowhere to put it.
+  # Space-separated key=value pairs, e.g.
+  #   MAXTEXT_EXTRA_FLAGS="use_ring_of_experts=true sa_block_q=512"
+  # MaxText rejects unknown keys outright (ValueError listing every valid
+  # field), so a typo fails at startup rather than being silently dropped.
+  _extra = os.environ.get("MAXTEXT_EXTRA_FLAGS", "").strip()
+  if _extra:
+    _pairs = [tok for tok in _extra.split() if tok]
+    _bad = [tok for tok in _pairs if "=" not in tok]
+    if _bad:
+      raise ValueError(
+          "MAXTEXT_EXTRA_FLAGS entries must be key=value, got: "
+          f"{' '.join(_bad)}"
+      )
+    logging.info("MAXTEXT_EXTRA_FLAGS adding %d flag(s): %s", len(_pairs), _pairs)
+    argv.extend(_pairs)
 
   logging.info("MaxText config argv: %s", argv)
   return pyconfig.initialize(argv)

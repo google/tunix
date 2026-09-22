@@ -125,6 +125,12 @@ export CKPT_D2H_CONCURRENT_GB=${CKPT_D2H_CONCURRENT_GB:-8}
 
 export TRAINER_MESH_TP=${TRAINER_MESH_TP:-1}
 export TRAINER_MESH_EXPERT=${TRAINER_MESH_EXPERT:-1}
+# Context-parallel degree for the trainer; shards the sequence axis.
+export TRAINER_MESH_CONTEXT=${TRAINER_MESH_CONTEXT:-1}
+# Rollout jobset template. Defaults to the single-host TPU jobset, which is what
+# a 4-chip-per-replica rollout wants. A multihost rollout -- e.g. 397B at 16
+# chips / 4 hosts per replica -- needs the Ray-backed template instead.
+export ROLLOUT_JOBSET_YAML=${ROLLOUT_JOBSET_YAML:-jobset.tpu.yaml}
 export ROLLOUT_MESH_TP=${ROLLOUT_MESH_TP:-2}
 export ROLLOUT_MESH_FSDP=${ROLLOUT_MESH_FSDP:-1}
 # Optional: enable experimental batched-RPA attention kernel for rollout.
@@ -356,6 +362,8 @@ start_orchestrator() {
         ${MAX_SEQ_TOKEN_PER_TPU:+--max_seq_token_per_tpu=${MAX_SEQ_TOKEN_PER_TPU}} \
         ${MAX_SEGMENTS_PER_PACKED_ROW:+--max_segments_per_packed_row=${MAX_SEGMENTS_PER_PACKED_ROW}} \
         ${TRAINER_MESH_FSDP:+--trainer_fsdp=${TRAINER_MESH_FSDP}} \
+        $( [[ "${TRAINER_MESH_EXPERT:-1}" -gt 1 ]] && echo "--trainer_expert=${TRAINER_MESH_EXPERT}" ) \
+        ${RPC_TIMEOUT_S:+--rpc_timeout_s=${RPC_TIMEOUT_S}} \
         ${TRAINABLE_PARAMETERS_MASK:+--trainable_parameters_mask='${TRAINABLE_PARAMETERS_MASK}'} \
         ${debug_arg} \
     " \
@@ -424,6 +432,7 @@ start_trainer() {
       ${CKPT_D2H_CONCURRENT_GB:+CKPT_D2H_CONCURRENT_GB=${CKPT_D2H_CONCURRENT_GB}} \
       ${TRAINER_MAXTEXT_ATTENTION:+TRAINER_MAXTEXT_ATTENTION=\"${TRAINER_MAXTEXT_ATTENTION}\"} \
       ${raiden_env} \
+      ${MAXTEXT_EXTRA_FLAGS:+MAXTEXT_EXTRA_FLAGS=\"${MAXTEXT_EXTRA_FLAGS}\"} \
       ${TRAINER_EXTRA_ENV:+${TRAINER_EXTRA_ENV}} \
       RAIDEN_DEVICES_PER_HOST=${RAIDEN_DEVICES_PER_HOST} \
       USE_WEIGHT_CONVERTER=${USE_WEIGHT_CONVERTER} \
@@ -443,6 +452,7 @@ start_trainer() {
         --mesh_fsdp=${TRAINER_MESH_FSDP} \
         --mesh_tp=${TRAINER_MESH_TP} \
         --mesh_expert=${TRAINER_MESH_EXPERT} \
+      $( [[ "${TRAINER_MESH_CONTEXT:-1}" -gt 1 ]] && echo "--mesh_context=${TRAINER_MESH_CONTEXT}" ) \
         --trainer_backend=${TRAINER_BACKEND} \
         --model_name=${MODEL_NAME} \
         --model_id=${MODEL_ID} \
@@ -589,7 +599,7 @@ if cfg:
       worker_id="${ROLLOUT_ID}-${i}"
     fi
     "$PYTHON_BIN" "$YAML_GENERATOR" \
-      "${YAML_DIR}/jobset.tpu.yaml" \
+      "${YAML_DIR}/${ROLLOUT_JOBSET_YAML}" \
       --jobset_name="${replica_id}" \
       --namespace="${K8S_NAMESPACE}" \
       ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \

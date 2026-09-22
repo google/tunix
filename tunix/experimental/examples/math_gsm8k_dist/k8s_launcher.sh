@@ -129,6 +129,8 @@ export TRAINER_TPU_SLICE=${TRAINER_TPU_SLICE:-tpuv5e:4x4}
 export TRAINER_MESH_FSDP=${TRAINER_MESH_FSDP:-16}
 export TRAINER_MESH_TP=${TRAINER_MESH_TP:-1}
 export TRAINER_MESH_EXPERT=${TRAINER_MESH_EXPERT:-1}
+# Context-parallel degree for the trainer; shards the sequence axis.
+export TRAINER_MESH_CONTEXT=${TRAINER_MESH_CONTEXT:-1}
 
 export PATHWAYS_SERVER_IMAGE=${PATHWAYS_SERVER_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest}
 export PATHWAYS_PROXY_IMAGE=${PATHWAYS_PROXY_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:latest}
@@ -144,11 +146,30 @@ export USER_CONTAINER_MEMORY=${USER_CONTAINER_MEMORY:-48G}
 export USER_CONTAINER_MEMORY_LIMIT=${USER_CONTAINER_MEMORY_LIMIT:-70G}
 export PATHWAYS_WORKER_MEMORY=${PATHWAYS_WORKER_MEMORY:-100G}
 export TRAINER_EXTRA_ENV=${TRAINER_EXTRA_ENV:-}
+# Extra `KEY=VALUE` pairs prefixed to the rollout worker command, mirroring
+# TRAINER_EXTRA_ENV. Space separated.
+export ROLLOUT_EXTRA_ENV=${ROLLOUT_EXTRA_ENV:-}
+# Extra env for the orchestrator container, space separated. The H2D weight-sync
+# timeout lives here: the orchestrator drives the transfer, and its default
+# (300-600 s) is too short for a 739 GiB 397B model.
+export ORCHESTRATOR_EXTRA_ENV=${ORCHESTRATOR_EXTRA_ENV:-}
 
 export ROLLOUT_JOBSET_YAML=${ROLLOUT_JOBSET_YAML:-leaderworkerset.mcjax.ray.yaml}
 export ROLLOUT_TPU_SLICE=${ROLLOUT_TPU_SLICE:-tpuv5e:4x4}
 export ROLLOUT_MESH_FSDP=${ROLLOUT_MESH_FSDP:-1}
 export ROLLOUT_MESH_TP=${ROLLOUT_MESH_TP:-16}
+# Expert parallelism for the rollout. Required, not optional, for fully-MoE
+# models whose per-expert intermediate dim cannot absorb the tensor-parallel
+# degree. ROLLOUT_MESH_TP * ROLLOUT_MESH_EXPERT must divide the model's head
+# counts, because tpu-inference derives the attention/GDN head divisor from the
+# product of the ('model', 'expert', 'dcp') axes.
+#
+# run_rollout_node.py has no --mesh_expert; it reads expert_parallel_size out of
+# --vllm_config_json (see `ep_size = vllm_overrides.pop("expert_parallel_size")`).
+# Pass it that way, as deepswe_dist already does, rather than inventing a flag.
+# ROLLOUT_VLLM_CONFIG_JSON, when set, wins -- the degree is merged into it.
+export ROLLOUT_MESH_EXPERT=${ROLLOUT_MESH_EXPERT:-1}
+export ROLLOUT_VLLM_CONFIG_JSON=${ROLLOUT_VLLM_CONFIG_JSON:-}
 
 # Kubernetes Cluster & Scheduling Options
 export K8S_NAMESPACE=${K8S_NAMESPACE:-${NAMESPACE:-default}}
@@ -206,6 +227,7 @@ start_orchestrator() {
         --mini_batch_size=${MINI_BATCH_SIZE} \
         --num_generations=${NUM_GENERATIONS} \
         --max_steps=${MAX_STEPS} \
+        ${RPC_TIMEOUT_S:+--rpc_timeout_s=${RPC_TIMEOUT_S}} \
         --max_prompt_length=${MAX_PROMPT_LENGTH} \
         --max_response_length=${MAX_RESPONSE_LENGTH} \
         --max_staleness=${MAX_STALENESS} \
@@ -224,6 +246,7 @@ start_orchestrator() {
         ${MAX_SEQ_TOKEN_PER_TPU:+--max_seq_token_per_tpu=${MAX_SEQ_TOKEN_PER_TPU}} \
         ${MAX_SEGMENTS_PER_PACKED_ROW:+--max_segments_per_packed_row=${MAX_SEGMENTS_PER_PACKED_ROW}} \
         ${TRAINER_MESH_FSDP:+--trainer_fsdp=${TRAINER_MESH_FSDP}} \
+        $( [[ "${TRAINER_MESH_EXPERT:-1}" -gt 1 ]] && echo "--trainer_expert=${TRAINER_MESH_EXPERT}" ) \
         ${debug_flag} \
     " \
     | apply_manifest
@@ -256,7 +279,11 @@ start_trainer() {
 
   local raiden_env=""
   if [[ "${WEIGHT_SYNC_MODE}" == "raiden" ]]; then
-    if [[ "${TRAINER_JOBSET_YAML}" == "jobset.pathways.yaml" ]]; then
+    # Any Pathways trainer template, not just the default one: model-specific
+    # variants such as jobset.pathways.qwen3.5-397b.yaml are equally on
+    # Pathways, and an exact-name test silently drops them to the TCP
+    # transport.
+    if [[ "${TRAINER_JOBSET_YAML}" == jobset.pathways*.yaml ]]; then
       raiden_env+=" RAIDEN_USE_FFI=1"
     fi
   fi
@@ -285,7 +312,7 @@ start_trainer() {
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${TRAINER_PORT}" \
     --worker_startup_command=" \
-      ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE}${CKPT_D2H_CONCURRENT_GB:+ CKPT_D2H_CONCURRENT_GB=${CKPT_D2H_CONCURRENT_GB}}${raiden_env}${TRAINER_EXTRA_ENV:+ ${TRAINER_EXTRA_ENV}} python -m tunix.experimental.distributed.runtime.main \
+      ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE}${CKPT_D2H_CONCURRENT_GB:+ CKPT_D2H_CONCURRENT_GB=${CKPT_D2H_CONCURRENT_GB}}${raiden_env}${MAXTEXT_EXTRA_FLAGS:+ MAXTEXT_EXTRA_FLAGS=\"${MAXTEXT_EXTRA_FLAGS}\"}${TRAINER_EXTRA_ENV:+ ${TRAINER_EXTRA_ENV}} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
         --process_main=tunix.experimental.examples.common.run_trainer_node.main \
@@ -383,6 +410,21 @@ start_rollout_instance() {
     raiden_env+=" RAIDEN_USE_FFI=0"
   fi
 
+  # Rollout expert parallelism travels in the vLLM config JSON, which
+  # run_rollout_node.py already understands; it has no --mesh_expert flag.
+  # An explicit ROLLOUT_VLLM_CONFIG_JSON wins, and the degree is merged into it
+  # so the two knobs cannot silently disagree.
+  local rollout_vllm_json="${ROLLOUT_VLLM_CONFIG_JSON}"
+  if [[ "${ROLLOUT_MESH_EXPERT:-1}" -gt 1 ]]; then
+    if [[ -z "${rollout_vllm_json}" ]]; then
+      rollout_vllm_json="{\"expert_parallel_size\": ${ROLLOUT_MESH_EXPERT}}"
+    else
+      rollout_vllm_json=$(ROLLOUT_MESH_EXPERT="${ROLLOUT_MESH_EXPERT}" \
+        "$PYTHON" -c 'import json,os,sys; c=json.loads(sys.argv[1]); c.setdefault("expert_parallel_size", int(os.environ["ROLLOUT_MESH_EXPERT"])); print(json.dumps(c))' \
+        "${rollout_vllm_json}")
+    fi
+  fi
+
   "$PYTHON" "$YAML_GEN" \
     "$YAML_DIR/${ROLLOUT_JOBSET_YAML}" \
     --jobset_name="${target_id}" \
@@ -403,6 +445,7 @@ start_rollout_instance() {
         --port=${ROLLOUT_PORT} \
         --mesh_fsdp=${ROLLOUT_MESH_FSDP} \
         --mesh_tp=${ROLLOUT_MESH_TP} \
+        ${rollout_vllm_json:+--vllm_config_json='${rollout_vllm_json}'} \
         --model_name=${MODEL_NAME} \
         --model_id=${MODEL_ID} \
         --model_dir=${MODEL_DIR} \
