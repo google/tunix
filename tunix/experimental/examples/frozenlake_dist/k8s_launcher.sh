@@ -311,11 +311,14 @@ start_trainer() {
         exit 1
       fi
     fi
-    extra_flags+="\
+    extra_flags+=" \
       --maxtext_model_name=${MAXTEXT_MODEL_NAME} \
-      --maxtext_load_parameters_path=${MAXTEXT_CKPT} \
-      --maxtext_checkpoint_dir=${MAXTEXT_OUTPUT_DIR} \
-      ${TRAINER_PADDED_MOE_MLP_DIM:+--intermediate_dim=${TRAINER_PADDED_MOE_MLP_DIM}} \
+      ${TRAINER_PADDED_MOE_MLP_DIM:+--maxtext_padded_moe_mlp_dim=${TRAINER_PADDED_MOE_MLP_DIM}} \
+      ${MAXTEXT_CKPT:+--maxtext_ckpt_path=${MAXTEXT_CKPT}} \
+      --maxtext_output_directory=${MAXTEXT_OUTPUT_DIR} \
+      --mesh_tp=${TRAINER_MESH_TP} \
+      --mesh_expert=${TRAINER_MESH_EXPERT} \
+      ${ROLLOUT_MESH_TP:+--rollout_mesh_tp=${ROLLOUT_MESH_TP}} \
       --use_weight_converter=${USE_WEIGHT_CONVERTER} \
       ${MAX_SEQ_TOKEN_PER_TPU:+--max_seq_token_per_tpu=${MAX_SEQ_TOKEN_PER_TPU}} \
     "
@@ -344,10 +347,17 @@ start_trainer() {
 
   local raiden_env=""
   if [[ "${WEIGHT_SYNC_MODE}" == "raiden" ]]; then
-    raiden_env+=" RAIDEN_USE_FFI=1"
+    if [[ "${TRAINER_JOBSET_YAML}" == "jobset.pathways.yaml" ]]; then
+      raiden_env+=" RAIDEN_USE_FFI=1"
+    fi
     if [[ -n "${RAIDEN_DEVICES_PER_HOST:-}" ]]; then
       raiden_env+=" RAIDEN_DEVICES_PER_HOST=${RAIDEN_DEVICES_PER_HOST}"
     fi
+  fi
+
+  local opt_chain_flags=""
+  if [[ -n "${OPT_CHAIN_TYPE}" ]]; then
+    opt_chain_flags="--optimizer_opt_chain_type=\"${OPT_CHAIN_TYPE}\" --optimizer_chain_kwargs=\"{'max_norm': ${MAX_GRAD_NORM}}\""
   fi
 
   "$PYTHON" "$YAML_GEN" \
@@ -369,44 +379,47 @@ start_trainer() {
     --worker_container_port="${TRAINER_PORT}" \
     --worker_startup_command=" \
       ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} \
-      VERIFY_WEIGHTS=${VERIFY_WEIGHTS}${raiden_env} \
+      VERIFY_WEIGHTS=${VERIFY_WEIGHTS} \
+      ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE} \
+      ${CKPT_D2H_CONCURRENT_GB:+CKPT_D2H_CONCURRENT_GB=${CKPT_D2H_CONCURRENT_GB} }\
+      ${raiden_env} \
       ${TRAINER_EXTRA_ENV:+${TRAINER_EXTRA_ENV} }python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
         --process_main=tunix.experimental.examples.common.run_trainer_node.main \
         --worker_id=${TRAINER_ID} \
         --port=${TRAINER_PORT} \
-        --trainer_backend=${TRAINER_BACKEND} \
         --mesh_fsdp=${TRAINER_MESH_FSDP} \
-        --mesh_tp=${TRAINER_MESH_TP} \
-        --mesh_expert=${TRAINER_MESH_EXPERT} \
+        --trainer_backend=${TRAINER_BACKEND} \
         --model_name=${MODEL_NAME} \
         --model_id=${MODEL_ID} \
+        --model_dir=${MODEL_DIR} \
+        --sampler_type=${SAMPLER} \
         --tokenizer_path=${TOKENIZER_PATH} \
         --max_prompt_length=${MAX_PROMPT_LENGTH} \
         --max_response_length=${MAX_RESPONSE_LENGTH} \
+        --mini_batch_size=${MINI_BATCH_SIZE} \
+        --num_generations=${NUM_GENERATIONS} \
+        --train_micro_batch_size=${TRAIN_MICRO_BATCH_SIZE} \
+        --compute_logps_chunk_size=${COMPUTE_LOGPS_CHUNK_SIZE} \
+        --eval_every_n_steps=${EVAL_EVERY_N_STEPS} \
+        ${opt_chain_flags} \
+        --optimizer_b1=${ADAM_B1} \
+        --optimizer_b2=${ADAM_B2} \
+        --optimizer_eps=${ADAM_EPS} \
+        --optimizer_weight_decay=${WEIGHT_DECAY} \
+        --optimizer_learning_rate=${LEARNING_RATE} \
+        --optimizer_schedule_type=\"${SCHEDULE_TYPE}\" \
+        --optimizer_init_value=${LR_INIT_VALUE} \
+        --optimizer_peak_value=${LR_PEAK_VALUE} \
+        --optimizer_end_value=${LR_END_VALUE} \
+        --optimizer_warmup_steps=${WARMUP_STEPS} \
+        --optimizer_decay_steps=${LR_DECAY_STEPS} \
         --lora_rank=${LORA_RANK} \
         --lora_alpha=${LORA_ALPHA} \
-        --opt_chain_type=${OPT_CHAIN_TYPE} \
-        --max_grad_norm=${MAX_GRAD_NORM} \
-        --adam_b1=${ADAM_B1} \
-        --adam_b2=${ADAM_B2} \
-        --adam_eps=${ADAM_EPS} \
-        --weight_decay=${WEIGHT_DECAY} \
-        --learning_rate=${LEARNING_RATE} \
-        --schedule_type=${SCHEDULE_TYPE} \
-        --lr_init_value=${LR_INIT_VALUE} \
-        --lr_peak_value=${LR_PEAK_VALUE} \
-        --lr_end_value=${LR_END_VALUE} \
-        --lr_decay_steps=${LR_DECAY_STEPS} \
-        --warmup_steps=${WARMUP_STEPS} \
-        --compute_logps_chunk_size=${COMPUTE_LOGPS_CHUNK_SIZE} \
-        --weight_sync_mode=${WEIGHT_SYNC_MODE} \
         --checkpoint_save_interval_steps=${CHECKPOINT_SAVE_INTERVAL_STEPS} \
         --checkpoint_max_to_keep=${CHECKPOINT_MAX_TO_KEEP} \
         --checkpoint_root_directory=${CHECKPOINT_ROOT_DIRECTORY} \
-        --enable_pathways_persistence=${ENABLE_PATHWAYS_PERSISTENCE} \
-        --ckpt_d2h_concurrent_gb=${CKPT_D2H_CONCURRENT_GB} \
         ${extra_flags} \
         ${profiler_flags} \
         ${TRAINER_EXTRA_ARGS:+${TRAINER_EXTRA_ARGS} }${debug_flag} \
