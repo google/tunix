@@ -145,8 +145,25 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
   sampler_is: str | None = None  # None | "token"
   sampler_is_threshold: float = 2.0
   seq_logprob_error_threshold: float | None = None
+  # Score Centering (arXiv:2609.20807) off-policy gradient stabilization.
+  # Subtracting the expected score under the reconstructed rollout distribution
+  # (using top-k logprobs from the rollout sampler plus a scaled trainer tail)
+  # eliminates first-order policy drift under sampler-trainer mismatch.
+  score_centering: bool = False
+  score_centering_top_k: int = 128
+  score_centering_eps: float = 1e-6
 
   def __post_init__(self):
+    if self.score_centering_top_k < 1:
+      raise ValueError(
+          "score_centering_top_k must be >= 1. Received: "
+          f"{self.score_centering_top_k}"
+      )
+    if self.score_centering_eps <= 0.0:
+      raise ValueError(
+          "score_centering_eps must be > 0. Received: "
+          f"{self.score_centering_eps}"
+      )
     if (
         self.seq_logprob_error_threshold is not None
         and self.seq_logprob_error_threshold < 1.0
@@ -278,11 +295,18 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     else:
       logging.warning("Metrics log dir is None, skipping trajectory logging.")
 
-    self.algo_config.temperature = (  # pyrefly: ignore[missing-attribute]
-        self.rl_engine.get_rollout_config(
-            mode=rl_engine_lib.Mode.TRAIN
-        ).temperature
+    train_rollout_config = self.rl_engine.get_rollout_config(
+        mode=rl_engine_lib.Mode.TRAIN
     )
+    self.algo_config.temperature = (  # pyrefly: ignore[missing-attribute]
+        train_rollout_config.temperature
+    )
+    if self.algo_config.score_centering:
+      train_rollout_config.return_logprobs = True
+      train_rollout_config.num_logprobs = max(
+          int(getattr(train_rollout_config, "num_logprobs", 1)),
+          int(self.algo_config.score_centering_top_k),
+      )
 
     # Workaround to pass loss fn with algorithm flag
     policy_loss_fn = function_registry.get_policy_loss_fn(
@@ -307,7 +331,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             "algo_config": self.algo_config,  # pyrefly: ignore[bad-assignment]
         }
     )
-    self.rl_engine.actor_trainer.with_rl_metrics_to_log({  # pyrefly: ignore[bad-argument-type]
+    rl_metrics_to_log = {
         "kl": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
         "entropy": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
         "reduced_pg_loss": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
@@ -327,7 +351,15 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         "advantage/nonzero_frac": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
         "sampler_is/weight_mean": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
         "sampler_is/weight_min": np.min,
-    })
+    }
+    if self.algo_config.score_centering:
+      rl_metrics_to_log.update({
+          "score_centering/head_mass_q_mean": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
+          "score_centering/head_mass_p_mean": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
+          "score_centering/tail_ratio_rho_mean": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
+          "score_centering/abs_coeff_sum_mean": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
+      })
+    self.rl_engine.actor_trainer.with_rl_metrics_to_log(rl_metrics_to_log)  # pyrefly: ignore[bad-argument-type]
     self.rl_engine.actor_trainer.with_tqdm_metrics_to_display([  # pyrefly: ignore[bad-argument-type]
         lambda: "kl"
         if self.algo_config.force_compute_kl or self.algo_config.beta != 0.0
@@ -426,6 +458,10 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         and (
             self._have_actor_mesh()
             or self.algo_config.sampler_is == "token"
+            or (
+                self.algo_config.score_centering
+                and self.algo_config.num_iterations > 1
+            )
             or self.algo_config.seq_logprob_error_threshold is not None
         )
     )
@@ -460,6 +496,10 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         updates["sampler_is_weights"] = sampler_is_weights
       if (
           self.algo_config.sampler_is == "token"
+          or (
+              self.algo_config.score_centering
+              and self.algo_config.num_iterations > 1
+          )
           or self.algo_config.seq_logprob_error_threshold is not None
       ) and not self.algo_config.force_on_policy_ratio:
         updates["old_per_token_logps"] = trainer_logps
@@ -520,6 +560,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     completion_tokens_list: List[np.ndarray] = []
     completion_masks_list: List[np.ndarray] = []
     old_logprobs_list: List[np.ndarray | None] = []
+    old_topk_ids_list: List[np.ndarray | None] = []
+    old_topk_logprobs_list: List[np.ndarray | None] = []
     policy_versions_list: List[int] = []
     trajectory_rewards_list: List[float] = []
     raw_completion_lengths: List[int] = []
@@ -550,6 +592,18 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       old_logprobs_list.append(
           np.asarray(old_logprobs) if old_logprobs is not None else None
       )
+      old_topk_ids = item.traj.get("old_topk_token_ids")
+      old_topk_ids_list.append(
+          np.asarray(old_topk_ids, dtype=np.int32)
+          if old_topk_ids is not None
+          else None
+      )
+      old_topk_lps = item.traj.get("old_topk_logprobs")
+      old_topk_logprobs_list.append(
+          np.asarray(old_topk_lps, dtype=np.float32)
+          if old_topk_lps is not None
+          else None
+      )
       policy_version = item.traj.get("policy_version")
       if policy_version is None:
         raise ValueError("policy_version is missing from trajectory task.")
@@ -570,8 +624,21 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     padded_completion_ids = []
     padded_completion_masks = []
     padded_old_logprobs = []
+    padded_old_topk_ids = []
+    padded_old_topk_logprobs = []
     padded_prompt_masks = []
     padded_completion_attention_masks = []
+
+    has_topk_data = self.algo_config.score_centering and any(
+        tk_ids is not None and tk_lps is not None
+        for tk_ids, tk_lps in zip(old_topk_ids_list, old_topk_logprobs_list)
+    )
+    topk_dim = int(self.algo_config.score_centering_top_k)
+    if has_topk_data:
+      for tk_ids in old_topk_ids_list:
+        if tk_ids is not None and tk_ids.ndim == 2:
+          topk_dim = int(tk_ids.shape[-1])
+          break
 
     max_response_length = self.algo_config.max_response_length
     clipped_completion_count = 0
@@ -581,12 +648,16 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         completion_tokens,
         completion_mask,
         old_logprobs,
+        old_topk_ids,
+        old_topk_lps,
     ) in zip(
         prompt_tokens_list,
         prompt_lengths_list,
         completion_tokens_list,
         completion_masks_list,
         old_logprobs_list,
+        old_topk_ids_list,
+        old_topk_logprobs_list,
     ):
       prompt_len = (
           int(prompt_len_raw)
@@ -647,11 +718,33 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           padded_old_logprobs.append(
               np.zeros(max_response_length, dtype=np.float32)
           )
+      if has_topk_data:
+        tk_ids_buf = np.zeros((max_response_length, topk_dim), dtype=np.int32)
+        tk_lps_buf = np.full(
+            (max_response_length, topk_dim), -np.inf, dtype=np.float32
+        )
+        if old_topk_ids is not None and old_topk_lps is not None:
+          n_copy = min(len(old_topk_ids), max_response_length)
+          if n_copy > 0:
+            tk_ids_buf[:n_copy] = old_topk_ids[:n_copy, :topk_dim]
+            tk_lps_buf[:n_copy] = old_topk_lps[:n_copy, :topk_dim]
+        padded_old_topk_ids.append(tk_ids_buf)
+        padded_old_topk_logprobs.append(tk_lps_buf)
 
     prompt_ids = jnp.asarray(padded_prompt_ids)
     prompt_mask = prompt_ids != pad_value
     completion_ids = jnp.asarray(padded_completion_ids)
     completion_mask = jnp.asarray(padded_completion_masks)
+    old_topk_token_ids = (
+        jnp.asarray(padded_old_topk_ids, dtype=jnp.int32)
+        if has_topk_data
+        else None
+    )
+    old_topk_logps = (
+        jnp.asarray(padded_old_topk_logprobs, dtype=jnp.float32)
+        if has_topk_data
+        else None
+    )
     completion_attention_mask = None
     token_mask = None
     if self.algo_config.exact_token_continuity:
@@ -731,6 +824,10 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       need_trainer_logps = (
           have_actor_mesh
           or self.algo_config.sampler_is == "token"
+          or (
+              self.algo_config.score_centering
+              and self.algo_config.num_iterations > 1
+          )
           or self.algo_config.seq_logprob_error_threshold is not None
       )
       # Deferred to _compute_packed_logps under packing: here it would run on
@@ -744,13 +841,16 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             micro_batch_size=compute_logps_micro_batch_size,
             token_mask=token_mask,
         )
-      # When sampler-IS correction is enabled, use the trainer's recomputed
-      # logp as ``old_per_token_logps`` so the PPO ratio is
+      # When sampler-IS or multi-epoch Score Centering is enabled, use the
+      # trainer's recomputed logp as ``old_per_token_logps`` so the PPO ratio is
       # ``exp(current_logp - trainer_logp)`` rather than against the rollout
-      # sampler's logp directly. The IS weight computed below corrects for
-      # the trainer-vs-sampler divergence.
+      # sampler's logp directly.
       if (
           self.algo_config.sampler_is == "token"
+          or (
+              self.algo_config.score_centering
+              and self.algo_config.num_iterations > 1
+          )
           or self.algo_config.seq_logprob_error_threshold is not None
       ) and trainer_per_token_logps is not None:
         old_per_token_logps = trainer_per_token_logps
@@ -936,7 +1036,9 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           step=expected_step,  # pyrefly: ignore[bad-argument-type]
       )
 
-    for metric_fn in self.metric_fns:
+    for metric_fn in (
+        self.metric_fn if hasattr(self, "metric_fn") else self.metric_fns
+    ):
       user_defined_metric = metric_fn(
           prompts=original_inputs["prompts"],
           completions=completion_texts,
@@ -964,6 +1066,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         old_per_token_logps=old_per_token_logps,
         policy_version=policy_versions,
         sampler_is_weights=sampler_is_weights,
+        old_topk_token_ids=old_topk_token_ids,
+        old_topk_logps=old_topk_logps,
         completion_attention_mask=completion_attention_mask,
     )
     return [combined_batch]

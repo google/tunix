@@ -371,6 +371,16 @@ def unpad_train_example(example: common.TrainExample) -> list[dict[str, Any]]:
   if has_policy_version:
     policy_version_np = np.asarray(policy_version_val)
 
+  topk_ids_val = getattr(example, "old_topk_token_ids", None)
+  has_topk_ids = topk_ids_val is not None
+  if has_topk_ids:
+    topk_ids_np = np.asarray(topk_ids_val, dtype=np.int32)
+
+  topk_logps_val = getattr(example, "old_topk_logps", None)
+  has_topk_logps = topk_logps_val is not None
+  if has_topk_logps:
+    topk_logps_np = np.asarray(topk_logps_val, dtype=np.float32)
+
   for i in range(batch_size):
     p_len = int(np.sum(p_mask[i]))
     c_len = int(
@@ -391,6 +401,12 @@ def unpad_train_example(example: common.TrainExample) -> list[dict[str, Any]]:
         "old_per_token_logps": old_logps[i, :c_len] if has_old else None,  # pyrefly: ignore[unbound-name]
         "returns": returns_np[i, :c_len] if has_returns else None,  # pyrefly: ignore[unbound-name]
         "old_values": old_values_np[i, :c_len] if has_old_values else None,  # pyrefly: ignore[unbound-name]
+        "old_topk_token_ids": (
+            topk_ids_np[i, :c_len] if has_topk_ids else None  # pyrefly: ignore[unbound-name]
+        ),
+        "old_topk_logps": (
+            topk_logps_np[i, :c_len] if has_topk_logps else None  # pyrefly: ignore[unbound-name]
+        ),
         "policy_version": (
             policy_version_np[i : i + 1] if has_policy_version else None  # pyrefly: ignore[unbound-name]
         ),
@@ -464,7 +480,10 @@ def train_example_to_pack_items(
               )
           ),
           per_token={
-              k: np.asarray(item[k], dtype=np.float32)
+              k: np.asarray(
+                  item[k],
+                  dtype=np.int32 if k == "old_topk_token_ids" else np.float32,
+              )
               for k in packing.PER_TOKEN_FIELDS
               if item.get(k) is not None
           },
@@ -580,7 +599,11 @@ def pack_sequences(
       real = real + [first_item_for_dummy]
     carried = packing.carried_per_token_fields(real)
     rows = packing.pack_chunk(
-        bins, budget=max_token_budget, pad_id=pad_id, carried=carried
+        bins,
+        budget=max_token_budget,
+        pad_id=pad_id,
+        carried=carried,
+        template_item=real[0] if real else None,
     )
     return [
         pack_rows_to_train_examples(

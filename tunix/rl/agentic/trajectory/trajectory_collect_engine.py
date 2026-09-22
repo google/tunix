@@ -307,6 +307,7 @@ class TrajectoryCollectEngine:
     elif mode == "Token":
       # flatten all steps into single batch dict
       conversation_tokens, conversation_masks, logprobs = [], [], []
+      topk_token_ids_list, topk_logprobs_list = [], []
       routed_experts = []
       prompt_tokens = getattr(self.agent.trajectory, "prompt_tokens", [])
       has_routed_experts = (
@@ -318,12 +319,26 @@ class TrajectoryCollectEngine:
               for step in self.agent.trajectory.steps
           )
       )
+      has_topk = any(
+          getattr(step, "topk_token_ids", None) is not None
+          and getattr(step, "topk_logprobs", None) is not None
+          for step in self.agent.trajectory.steps
+      )
+      top_k_dim = 0
+      if has_topk:
+        for step in self.agent.trajectory.steps:
+          step_tk = getattr(step, "topk_token_ids", None)
+          if step_tk is not None:
+            top_k_dim = int(np.asarray(step_tk).shape[-1])
+            break
 
       for idx, step in enumerate(self.agent.trajectory.steps):
         # Keep tokens/masks/logprobs/routed_experts appended in lockstep.
         assistant_tokens = getattr(step, "assistant_tokens", None)
         env_tokens = getattr(step, "env_tokens", None)
         step_logprobs = getattr(step, "logprobs", None)
+        step_topk_ids = getattr(step, "topk_token_ids", None)
+        step_topk_lps = getattr(step, "topk_logprobs", None)
         step_routed = getattr(step, "assistant_routed_experts", None)
         step_env_routed = getattr(step, "env_routed_experts", None)
         if assistant_tokens is not None:
@@ -337,6 +352,25 @@ class TrajectoryCollectEngine:
             logprobs.append(step_logprobs)
           else:
             logprobs.append(np.zeros(len(assistant_tokens)))
+          if has_topk and len(assistant_tokens) > 0:
+            if step_topk_ids is not None and step_topk_lps is not None:
+              topk_token_ids_list.append(
+                  np.asarray(step_topk_ids, dtype=np.int32)
+              )
+              topk_logprobs_list.append(
+                  np.asarray(step_topk_lps, dtype=np.float32)
+              )
+            else:
+              topk_token_ids_list.append(
+                  np.zeros((len(assistant_tokens), top_k_dim), dtype=np.int32)
+              )
+              topk_logprobs_list.append(
+                  np.full(
+                      (len(assistant_tokens), top_k_dim),
+                      -np.inf,
+                      dtype=np.float32,
+                  )
+              )
           if has_routed_experts:
             if step_routed is None:
               raise ValueError(
@@ -355,6 +389,13 @@ class TrajectoryCollectEngine:
           conversation_tokens.append(env_tokens)
           conversation_masks.append(step.env_masks)
           logprobs.append(np.zeros(len(env_tokens)))
+          if has_topk and len(env_tokens) > 0:
+            topk_token_ids_list.append(
+                np.zeros((len(env_tokens), top_k_dim), dtype=np.int32)
+            )
+            topk_logprobs_list.append(
+                np.full((len(env_tokens), top_k_dim), -np.inf, dtype=np.float32)
+            )
           if has_routed_experts:
             if step_env_routed is None:
               raise ValueError(
@@ -446,6 +487,16 @@ class TrajectoryCollectEngine:
           "reward_time": self.reward_time,
           "old_logprobs": (
               np.concatenate(logprobs, axis=0) if logprobs else None
+          ),
+          "old_topk_token_ids": (
+              np.concatenate(topk_token_ids_list, axis=0)
+              if has_topk and topk_token_ids_list
+              else None
+          ),
+          "old_topk_logprobs": (
+              np.concatenate(topk_logprobs_list, axis=0)
+              if has_topk and topk_logprobs_list
+              else None
           ),
           "routed_experts": final_routed_experts,
           "policy_version": self.env.task.get("policy_version"),
@@ -861,6 +912,17 @@ class TrajectoryCollectEngine:
 
     if cur_step is not None and rollout_output.logprobs is not None:
       cur_step.logprobs = rollout_output.logprobs[0]
+    if (
+        cur_step is not None
+        and getattr(rollout_output, "topk_token_ids", None) is not None
+        and getattr(rollout_output, "topk_logprobs", None) is not None
+    ):
+      cur_step.topk_token_ids = np.asarray(
+          rollout_output.topk_token_ids[0], dtype=np.int32
+      )
+      cur_step.topk_logprobs = np.asarray(
+          rollout_output.topk_logprobs[0], dtype=np.float32
+      )
 
     if (
         cur_step is not None
@@ -897,6 +959,26 @@ class TrajectoryCollectEngine:
         if cur_step.logprobs is not None:
           cur_step.logprobs = np.concatenate(
               [cur_step.logprobs, np.zeros(n_append, dtype=np.float32)], axis=0
+          )
+        if (
+            cur_step.topk_token_ids is not None
+            and cur_step.topk_logprobs is not None
+            and n_append > 0
+        ):
+          k_dim = cur_step.topk_token_ids.shape[-1]
+          cur_step.topk_token_ids = np.concatenate(
+              [
+                  cur_step.topk_token_ids,
+                  np.zeros((n_append, k_dim), dtype=np.int32),
+              ],
+              axis=0,
+          )
+          cur_step.topk_logprobs = np.concatenate(
+              [
+                  cur_step.topk_logprobs,
+                  np.full((n_append, k_dim), -np.inf, dtype=np.float32),
+              ],
+              axis=0,
           )
 
       # Environment tokens/masks
