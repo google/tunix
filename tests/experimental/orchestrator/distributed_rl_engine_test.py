@@ -456,8 +456,25 @@ class DistributedRLEngineTest(absltest.TestCase):
       engine = self._engine_with_coordinator(coordinator)
       result = await engine.resume_from_checkpoint()
       self.assertEqual(result, 3)
+      self.assertEqual(engine.restored_next_batch_idx, 3)
       self.assertEqual(engine._policy_version, 3)
       self.assertEqual(coordinator.calls, [3])
+
+    asyncio.run(_run())
+
+  def test_resume_restores_next_batch_idx_when_present(self):
+    async def _run():
+      self.mock_actor.restore_checkpoint.return_value = {
+          "step": 6,
+          "global_step": 3,
+          "next_batch_idx": 5,
+          "policy_version": 3,
+      }
+      coordinator = _FakeWeightSyncCoordinator(forced_version=3)
+      engine = self._engine_with_coordinator(coordinator)
+      result = await engine.resume_from_checkpoint()
+      self.assertEqual(result, 3)
+      self.assertEqual(engine.restored_next_batch_idx, 5)
 
     asyncio.run(_run())
 

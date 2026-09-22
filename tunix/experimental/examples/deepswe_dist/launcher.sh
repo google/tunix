@@ -41,6 +41,8 @@ BATCH_SIZE=${BATCH_SIZE:-1}
 NUM_GENERATIONS=${NUM_GENERATIONS:-2}
 MAX_STEPS=${MAX_STEPS:-1}
 MAX_TURNS=${MAX_TURNS:-3}
+MAX_STALENESS=${MAX_STALENESS:-0}
+TRAJECTORY_GROUP_ORDER=${TRAJECTORY_GROUP_ORDER:-arrival}
 TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-1}
 MAX_SEQ_TOKEN_PER_TPU=${MAX_SEQ_TOKEN_PER_TPU:-}
 MAX_SEGMENTS_PER_PACKED_ROW=${MAX_SEGMENTS_PER_PACKED_ROW:-}
@@ -73,7 +75,6 @@ TEMPERATURE=${TEMPERATURE:-1.0}
 TOP_P=${TOP_P:-1.0}
 TOP_K=${TOP_K:--1}
 EOS_TOKENS=${EOS_TOKENS-}
-MAXTEXT_ATTENTION=${MAXTEXT_ATTENTION:-}
 # DEBUG=1 passes --debug to the runner, which logs full sampler responses.
 DEBUG=${DEBUG:-0}
 USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
@@ -115,6 +116,7 @@ WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
 WANDB_API_KEY=${WANDB_API_KEY:-}
 LOG_DIR=${LOG_DIR:-}
 TRAJECTORY_LOG_DIR=${TRAJECTORY_LOG_DIR:-}
+TRAJECTORY_STORE_ROOT_DIR=${TRAJECTORY_STORE_ROOT_DIR:-${TRAJECTORY_STORE_ROOT:-}}
 FLUSH_EVERY_N_STEPS=${FLUSH_EVERY_N_STEPS:-1}
 TRAINABLE_PARAMETERS_MASK=${TRAINABLE_PARAMETERS_MASK:-}
 
@@ -124,20 +126,13 @@ TRAINER_TP=${TRAINER_TP:-2}
 
 # tunix runs Tunix's PeftTrainer; maxtext runs MaxText's MaxTextTrainingEngine.
 TRAINER_BACKEND=${TRAINER_BACKEND:-tunix}
-MAXTEXT_CKPT=${MAXTEXT_CKPT:-}
+
+# MaxText configuration: only consulted when TRAINER_BACKEND=maxtext.
+source "${DIR}/../common/maxtext_config.sh"
+
 if [[ "$TRAINER_BACKEND" == "maxtext" ]]; then
-  # MaxText config names are lowercase. Passed to both the trainer and the
-  # rollout, so the two cannot drift.
-  MAXTEXT_MODEL_NAME=${MAXTEXT_MODEL_NAME:-$(printf '%s' "$MODEL_NAME" | tr '[:upper:]' '[:lower:]')}
-  # MaxText shards the batch dimension of every loss input across the fsdp
-  # axis, so the microbatch has to be a multiple of it. The trainer node
-  # enforces this too.
   if (( TRAIN_MICRO_BATCH_SIZE % TRAINER_FSDP != 0 )); then
     TRAIN_MICRO_BATCH_SIZE=$TRAINER_FSDP
-  fi
-  if [[ -z "$MAXTEXT_CKPT" ]]; then
-    echo "Error: TRAINER_BACKEND=maxtext requires MAXTEXT_CKPT (Orbax params-only checkpoint)."
-    exit 1
   fi
 elif [[ "$TRAINER_BACKEND" == "tunix" ]]; then
   # Must stay empty on the tunix backend. A non-empty value puts the rollout on
@@ -282,11 +277,11 @@ echo "  learning rate:  ${LEARNING_RATE}"
 echo "  lr schedule:    ${SCHEDULE_TYPE:-<constant>} (warmup $WARMUP_STEPS, decay $LR_DECAY_STEPS)"
 echo "  beta:           ${BETA}"
 echo "  epsilon:        ${EPSILON}"
+echo "  max staleness:  ${MAX_STALENESS}"
+echo "  traj order:     ${TRAJECTORY_GROUP_ORDER}"
 echo "  sampler:        ${SAMPLER}"
 echo "  weight sync:    ${WEIGHT_SYNC_MODE}"
 echo "  trainer backend:${TRAINER_BACKEND}"
-echo "  maxtext model:  ${MAXTEXT_MODEL_NAME:-<unset>}"
-echo "  maxtext ckpt:   ${MAXTEXT_CKPT:-<unset>}"
 echo "  trainer chips:  ${TRAINER_TPU_CHIPS}"
 echo "  rollout chips:  ${ROLLOUT_TPU_CHIPS}"
 echo "  inference:      ${RUN_INFERENCE_NODE}"
@@ -361,27 +356,16 @@ echo "Launching trainer node..."
       --optimizer_chain_kwargs="{'max_norm': $MAX_GRAD_NORM}"
     )
   fi
-  if [[ -n "$MAXTEXT_CKPT" ]]; then
-    TRAINER_CMD+=(--maxtext_ckpt_path="$MAXTEXT_CKPT")
-  fi
-  if [[ -n "$MAXTEXT_MODEL_NAME" ]]; then
-    TRAINER_CMD+=(--maxtext_model_name="$MAXTEXT_MODEL_NAME")
-  fi
+
+  TRAINER_CMD+=+="$(maxtext_trainer_flags)"
+  
   if [[ -n "$MAX_SEQ_TOKEN_PER_TPU" ]]; then
     TRAINER_CMD+=(--max_seq_token_per_tpu="$MAX_SEQ_TOKEN_PER_TPU")
   fi
   if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
     TRAINER_CMD+=(--use_lora)
   fi
-  if [[ -n "$PROFILER_STEPS" ]]; then
-    TRAINER_CMD+=(--profiler_steps="$PROFILER_STEPS")
-  fi
-  if [[ -n "$SKIP_FIRST_N_PROFILER_STEPS" ]]; then
-    TRAINER_CMD+=(--skip_first_n_profiler_steps="$SKIP_FIRST_N_PROFILER_STEPS")
-  fi
-  if [[ -n "$PROFILER_PERIOD" ]]; then
-    TRAINER_CMD+=(--profiler_period="$PROFILER_PERIOD")
-  fi
+  
   if [[ "$DEBUG" == "1" || "$DEBUG" == "true" || "$DEBUG" == "True" ]]; then
     TRAINER_CMD+=(--debug)
   fi
@@ -431,12 +415,9 @@ echo "Launching DeepSWE rollout node..."
     --agent_name=deepswe_agent
     --max_concurrency="$ROLLOUT_MAX_CONCURRENCY"
   )
-  if [[ -n "$MAXTEXT_MODEL_NAME" ]]; then
-    ROLLOUT_CMD+=(--maxtext_model_name="$MAXTEXT_MODEL_NAME")
-  fi
-  if [[ -n "$MAXTEXT_ATTENTION" ]]; then
-    ROLLOUT_CMD+=(--maxtext_attention="$MAXTEXT_ATTENTION")
-  fi
+  
+  ROLLOUT_CMD+="$(maxtext_rollout_flags)"
+
   if [[ -n "$EOS_TOKENS" ]]; then
     ROLLOUT_CMD+=(--eos_tokens="$EOS_TOKENS")
   fi
@@ -528,6 +509,8 @@ echo "Launching CPU orchestrator..."
     --max_turns="$MAX_TURNS"
     --max_prompt_length="$MAX_PROMPT_LENGTH"
     --max_response_length="$MAX_RESPONSE_LENGTH"
+    --max_staleness="$MAX_STALENESS"
+    --trajectory_group_order="$TRAJECTORY_GROUP_ORDER"
     --train_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
     --beta="$BETA"
     --epsilon="$EPSILON"
@@ -587,9 +570,6 @@ echo "Launching CPU orchestrator..."
   if [[ -n "$INFERENCE_ADDR" ]]; then
     ORCHESTRATOR_CMD+=(--inference_addr="$INFERENCE_ADDR")
   fi
-  if [[ -n "$MAX_STALENESS" ]]; then
-    ORCHESTRATOR_CMD+=(--max_staleness="$MAX_STALENESS")
-  fi
   if [[ "$USE_AGENT_SANDBOX" == "1" || "$USE_AGENT_SANDBOX" == "true" || "$USE_AGENT_SANDBOX" == "True" ]]; then
     ORCHESTRATOR_CMD+=(--use_agent_sandbox)
   fi
@@ -607,6 +587,9 @@ echo "Launching CPU orchestrator..."
   fi
   if [[ -n "$TRAJECTORY_LOG_DIR" ]]; then
     ORCHESTRATOR_CMD+=(--trajectory_log_dir="$TRAJECTORY_LOG_DIR")
+  fi
+  if [[ -n "$TRAJECTORY_STORE_ROOT_DIR" ]]; then
+    ORCHESTRATOR_CMD+=(--trajectory_store_root_dir="$TRAJECTORY_STORE_ROOT_DIR")
   fi
   if [[ -n "$TRAINABLE_PARAMETERS_MASK" ]]; then
     ORCHESTRATOR_CMD+=(--trainable_parameters_mask="$TRAINABLE_PARAMETERS_MASK")

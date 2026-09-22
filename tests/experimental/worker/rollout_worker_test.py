@@ -310,6 +310,27 @@ class RolloutWorkerTrajectoryStoreTest(absltest.TestCase):
     worker = _worker()
     worker.stop()
 
+  def test_with_trajectory_store_config_sets_store_on_worker_and_manager(self):
+    tmp_dir = epath.Path(self.enter_context(tempfile.TemporaryDirectory()))
+    worker = _worker()
+    self.assertIsNone(worker.trajectory_store)
+    self.assertIsNone(worker.manager.trajectory_store)
+
+    config = {
+        "enabled": True,
+        "backend": "file",
+        "root_dir": str(tmp_dir),
+        "run_id": "orchestrator_pushed_run",
+    }
+    resp = worker.with_trajectory_store_config(config)
+    self.assertTrue(resp.metadata.get("trajectory_store_configured"))
+    self.assertIsInstance(
+        worker.trajectory_store, file_store.FileTrajectoryStore
+    )
+    self.assertIs(worker.manager.trajectory_store, worker.trajectory_store)
+    worker.stop()
+
 
 if __name__ == "__main__":
   absltest.main()
+

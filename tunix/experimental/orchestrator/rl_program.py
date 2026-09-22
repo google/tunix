@@ -21,6 +21,7 @@ pipelines.
 import abc
 import asyncio
 from collections.abc import Callable, Iterable, Mapping, Sequence
+import copy
 import dataclasses
 import os
 import time
@@ -73,6 +74,64 @@ def _extract_scalar(val: Any, name: str | None = None) -> float | None:
     pass
   return metrics_logger_lib.extract_scalar(val)
 
+def _prompt_coordinates(prompt_idx: int, full_batch_size: int) -> dict[str, int]:
+  """Returns the dataset coordinates of the prompt at `prompt_idx`.
+
+  The coordinates are derived purely from dataset position, so they are stable
+  across restarts and identical on retry. `batch_idx` is the prompt batch a
+  trajectory belongs to, which is what a batch-ordered queue manager routes and
+  orders on; `intra_batch_idx` identifies the prompt inside that batch.
+
+  Args:
+    prompt_idx: Position of the prompt in the dataset.
+    full_batch_size: Prompts per prompt batch (groups per trainer iteration).
+  """
+  return {
+      "prompt_idx": prompt_idx,
+      "batch_idx": prompt_idx // full_batch_size,
+      "intra_batch_idx": prompt_idx % full_batch_size,
+  }
+
+
+def _tag_prompt(prompt_item: Any, coordinates: Mapping[str, int]) -> Any:
+  """Stamps `coordinates` onto a copy of `prompt_item`'s metadata.
+
+  The dataset item itself is never mutated: dicts are copied, and other items
+  are shallow-copied before their `metadata` is replaced. Coordinates win over
+  any same-named key already present, because dataset position is the only
+  authority on them.
+
+  Args:
+    prompt_item: A prompt dict, or any object the engine accepts.
+    coordinates: The tags to stamp, from `_prompt_coordinates`.
+
+  Returns:
+    The tagged item, or `prompt_item` unchanged when its metadata cannot be
+    replaced (logged, since a batch-ordered queue will later reject it).
+  """
+  if isinstance(prompt_item, Mapping):
+    tagged = dict(prompt_item)
+    tagged["metadata"] = {**(tagged.get("metadata") or {}), **coordinates}
+    return tagged
+
+  metadata = {**(getattr(prompt_item, "metadata", None) or {}), **coordinates}
+  if dataclasses.is_dataclass(prompt_item) and any(
+      field.name == "metadata" for field in dataclasses.fields(prompt_item)
+  ):
+    # Covers frozen dataclasses, whose attributes cannot be assigned.
+    return dataclasses.replace(prompt_item, metadata=metadata)  # pytype: disable=wrong-arg-types
+
+  tagged = copy.copy(prompt_item)
+  try:
+    tagged.metadata = metadata
+  except (AttributeError, TypeError):
+    logging.warning(
+        "Cannot tag prompt coordinates onto a %s; batch-ordered consumption"
+        " requires a `metadata` mapping on every prompt item.",
+        type(prompt_item).__name__,
+    )
+    return prompt_item
+  return tagged
 
 
 def _generation_metrics(
@@ -302,6 +361,9 @@ class StandardRLProgram(RLProgram):
       trajectory_store: trajectory_store_lib.TrajectoryStore | None = None,
       metrics_prefix: str = "",
       mode: Mode | str = Mode.TRAIN,
+      group_order: (
+          trajectory_queue_manager.GroupOrder | str
+      ) = trajectory_queue_manager.GroupOrder.ARRIVAL,
       on_step_begin: Callable[[int], None] | None = None,
       on_step_end: Callable[[int, Any], None] | None = None,
   ):
@@ -423,19 +485,43 @@ class StandardRLProgram(RLProgram):
     self._trajectory_store = trajectory_store
     self.metrics_prefix = metrics_prefix
     self.mode = mode if isinstance(mode, Mode) else Mode(mode)
+    self.group_order = (
+        group_order
+        if isinstance(group_order, trajectory_queue_manager.GroupOrder)
+        else trajectory_queue_manager.GroupOrder(group_order)
+    )
     self.on_step_begin = on_step_begin
     self.on_step_end = on_step_end
     self._in_flight_rollouts = 0
-    self._dispatch_capacity: asyncio.Semaphore | None = None
+    self._window_release = asyncio.Event()
     self._dispatch_done = asyncio.Event()
 
+    self.scored_q: (
+        trajectory_queue_manager.TrajectoryQueueManager
+        | trajectory_queue_manager.BatchOrderedQueueManager
+    )
+    on_drop: Callable[[int, int], None] | None = None
+    if self.group_order == trajectory_queue_manager.GroupOrder.PROMPT_BATCH:
+      ordered_q = trajectory_queue_manager.BatchOrderedQueueManager.create(
+          num_generations=self.num_generations,
+          full_batch_size=self.full_batch_size,
+          max_staleness=max_staleness,
+          current_policy_version=lambda: self.policy_version,
+          on_cursor_advance=lambda _: self._release_window(),
+      )
+      self.scored_q = ordered_q
+      on_drop = ordered_q.dropped
+    else:
+      self.scored_q = trajectory_queue_manager.TrajectoryQueueManager.create(
+          num_generations=self.num_generations,
+          max_staleness=max_staleness,
+          current_policy_version=lambda: self.policy_version,
+      )
     self.raw_q = trajectory_queue_manager.TrajectoryQueueManager.create(
         num_generations=self.num_generations,
         max_staleness=max_staleness,
         current_policy_version=lambda: self.policy_version,
-    )
-    self.scored_q = trajectory_queue_manager.TrajectoryQueueManager.create(
-        num_generations=self.num_generations
+        on_drop=on_drop,
     )
 
   @property
@@ -454,12 +540,40 @@ class StandardRLProgram(RLProgram):
     if self.metrics_logger is not None:
       self.metrics_logger.close()
 
-  async def _wait_for_dispatch_window(self) -> None:
-    """Applies policy-staleness backpressure utilizing token buckets."""
-    assert (
-        self._dispatch_capacity is not None
-    ), "run_async must initialize capacity."
-    await self._dispatch_capacity.acquire()
+  @property
+  def _next_batch(self) -> int:
+    """Index of the next prompt batch the trainer will consume.
+
+    The window's lower edge. Under `ARRIVAL` ordering, batches are cut by
+    arrival order so the count of batches trained (`_step`) is also the index
+    of the next one. Under `PROMPT_BATCH` ordering, `scored_q.next_batch_idx`
+    is the cursor, which runs ahead of `_step` by the number of empty batches
+    skipped.
+    """
+    if isinstance(
+        self.scored_q, trajectory_queue_manager.BatchOrderedQueueManager
+    ):
+      return self.scored_q.next_batch_idx
+    return self._step
+
+  def _release_window(self) -> None:
+    """Wakes the dispatcher after `_next_batch` advances."""
+    self._window_release.set()
+
+  async def _wait_for_dispatch_window(self, batch_idx: int) -> None:
+    """Blocks until `batch_idx` is inside the policy-staleness window.
+
+    The dispatcher may run `max_staleness` prompt batches past the batch the
+    trainer is about to consume, and no further (R1).
+
+    Args:
+      batch_idx: The prompt batch the dispatcher is about to emit into.
+    """
+    while batch_idx > self._next_batch + self.max_staleness:
+      # Wait first, clear second. The reverse loses a release that lands
+      # between the test above and the clear, and nothing would set it again.
+      await self._window_release.wait()
+      self._window_release.clear()
 
   async def _resume_from_checkpoint(self) -> None:
     """Realigns program orchestration state with the engine's restored checkpoint.
@@ -471,20 +585,36 @@ class StandardRLProgram(RLProgram):
     to skip (resumed `_step` if any).
     """
     assert self.engine is not None
-    restored_step = await self.engine.resume_from_checkpoint(
+    restored = await self.engine.resume_from_checkpoint(
         role=datatypes.Role.ACTOR,
         resync_rollout_weights=self.sync_weights,
     )
+    if isinstance(restored, tuple):
+      restored_step, restored_next_batch_idx = restored
+    else:
+      restored_step = restored
+      engine_next_batch = getattr(self.engine, "restored_next_batch_idx", None)
+      restored_next_batch_idx = (
+          engine_next_batch
+          if isinstance(engine_next_batch, int)
+          and not isinstance(engine_next_batch, bool)
+          else restored_step
+      )
     if restored_step <= 0:
       return
+    restored_next_batch_idx = max(restored_step, restored_next_batch_idx)
     self._step = restored_step
     self.policy_version = restored_step
+    if isinstance(
+        self.scored_q, trajectory_queue_manager.BatchOrderedQueueManager
+    ):
+      self.scored_q.skip(0, restored_next_batch_idx)
     logging.info(
         "Resuming from checkpoint: step=%d policy_version=%d (skipping %d"
         " already-trained dataset items).",
         restored_step,
         self.policy_version,
-        self._step * self.full_batch_size,
+        self._next_batch * self.full_batch_size,
     )
 
   async def rollout_dispatch_stage(self) -> None:
@@ -493,19 +623,27 @@ class StandardRLProgram(RLProgram):
     Ensures that all dataset items carry unique, collision-free `prompt_id`s
     (e.g., `f"prompt_{prompt_idx}"`) before dispatching to the engine layer,
     satisfying the engine's strict `prompt_id` contract.
+
+    Also stamps each prompt's dataset coordinates (`prompt_idx`, `batch_idx`,
+    `intra_batch_idx`) into its metadata, where they ride along untouched to the
+    queue managers. Consumers that order or account per prompt batch read them;
+    nothing upstream of the dispatcher knows dataset position.
     """
     assert self.engine is not None
     if self.dataset is None:
       raise ValueError(
           "StandardRLProgram requires a dataset either at init or in run()."
       )
-    already_consumed = self._step * self.full_batch_size
+    already_consumed = self._next_batch * self.full_batch_size
+    last_coordinates: dict[str, int] | None = None
 
     try:
       for prompt_idx, prompt_item in enumerate(self.dataset):
         if prompt_idx < already_consumed:
           continue
-        await self._wait_for_dispatch_window()
+        coordinates = _prompt_coordinates(prompt_idx, self.full_batch_size)
+        await self._wait_for_dispatch_window(coordinates["batch_idx"])
+        last_coordinates = coordinates
         if isinstance(prompt_item, dict):
           prompt_item = dict(prompt_item)
           prompt_item.setdefault("prompt_id", f"prompt_{prompt_idx}")
@@ -521,6 +659,19 @@ class StandardRLProgram(RLProgram):
           if self.max_response_length is not None:
             prompt_item["max_response_length"] = self.max_response_length
 
+        prompt_item = _tag_prompt(prompt_item, coordinates)
+        logging.info(
+            "[pipeline] DISPATCH prompt_id=%s prompt_idx=%d batch_idx=%d"
+            " intra_batch_idx=%d policy_version=%d next_batch=%d",
+            prompt_item.get("prompt_id")
+            if isinstance(prompt_item, dict)
+            else getattr(prompt_item, "prompt_id", ""),
+            coordinates["prompt_idx"],
+            coordinates["batch_idx"],
+            coordinates["intra_batch_idx"],
+            self.policy_version,
+            self._next_batch,
+        )
         self._in_flight_rollouts += self.num_generations
         dispatch_kwargs: dict[str, Any] = {
             "num_generations": self.num_generations,
@@ -531,6 +682,13 @@ class StandardRLProgram(RLProgram):
         await self.engine.dispatch_rollouts(
             [prompt_item],
             **dispatch_kwargs,
+        )
+      if last_coordinates is not None and isinstance(
+          self.scored_q, trajectory_queue_manager.BatchOrderedQueueManager
+      ):
+        self.scored_q.expect(
+            last_coordinates["batch_idx"],
+            last_coordinates["intra_batch_idx"] + 1,
         )
     finally:
       self._dispatch_done.set()
@@ -636,6 +794,17 @@ class StandardRLProgram(RLProgram):
           )
           item.payload = payload  # pyrefly: ignore[missing-attribute]
           await self.scored_q.put(item)
+        if group:
+          first_meta = getattr(group[0], "metadata", None) or {}
+          logging.info(
+              "[pipeline] ARRIVE prompt_id=%s prompt_idx=%s batch_idx=%s"
+              " intra_batch_idx=%s policy_version=%d",
+              getattr(group[0], "prompt_id", ""),
+              first_meta.get("prompt_idx"),
+              first_meta.get("batch_idx"),
+              first_meta.get("intra_batch_idx"),
+              getattr(group[0], "policy_version", 0),
+          )
     finally:
       await self.scored_q.close()
 
@@ -1209,6 +1378,8 @@ class StandardRLProgram(RLProgram):
       exposed_generation_time = 0.0
       weight_sync_time = 0.0
 
+      current_batch_idx: int | None = None
+
       async def _maybe_save_checkpoint() -> None:
         nonlocal checkpoint_saved
         optimizer_step = self.step + 1
@@ -1217,11 +1388,21 @@ class StandardRLProgram(RLProgram):
             and step_result.get("train_step") is not None
         ):
           optimizer_step = int(step_result["train_step"])
+        next_batch_idx = (
+            self.scored_q.next_batch_after(current_batch_idx)
+            if isinstance(
+                self.scored_q,
+                trajectory_queue_manager.BatchOrderedQueueManager,
+            )
+            and current_batch_idx is not None
+            else self.step + 1
+        )
         await self.engine.save_checkpoint(
             role=datatypes.Role.ACTOR,
             metadata={
                 "step": optimizer_step,
                 "global_step": self.step + 1,
+                "next_batch_idx": next_batch_idx,
                 "policy_version": self.policy_version + 1,
                 "num_rollouts": num_rollouts,
                 "num_microbatches": num_microbatches,
@@ -1232,7 +1413,18 @@ class StandardRLProgram(RLProgram):
       step_batches = []
       _t_gen = time.monotonic()
       while groups_consumed < self.full_batch_size:
-        scored_items = await self.scored_q.get_batch(num_groups=1)
+        if isinstance(
+            self.scored_q, trajectory_queue_manager.BatchOrderedQueueManager
+        ):
+          ordered = await self.scored_q.get_ordered_group(
+              batch_idx=current_batch_idx
+          )
+          if ordered is None:
+            scored_items = []
+          else:
+            current_batch_idx, scored_items = ordered
+        else:
+          scored_items = await self.scored_q.get_group_batch(num_groups=1)
         if not scored_items:
           step_batches.extend(self.assembler.flush())
           break
@@ -1340,13 +1532,29 @@ class StandardRLProgram(RLProgram):
 
       # Before `commit()`, which will eventually take ownership of the groups.
       generation_metrics = _generation_metrics(uncommitted_groups)
-      self.scored_q.commit(current_step, groups=uncommitted_groups)
-
-      assert (
-          self._dispatch_capacity is not None
-      ), "run_async must initialize capacity."
-      for _ in range(groups_consumed):
-        self._dispatch_capacity.release()
+      logging.info(
+          "[pipeline] COMMIT step=%d batch_idx=%s consumed_version=%d"
+          " rollout_versions=%s groups=%s",
+          current_step,
+          current_batch_idx,
+          consumed_policy_version,
+          [getattr(g[0], "policy_version", 0) for g in uncommitted_groups if g],
+          [
+              (
+                  getattr(g[0], "prompt_id", ""),
+                  (getattr(g[0], "metadata", None) or {}).get("batch_idx"),
+              )
+              for g in uncommitted_groups
+              if g
+          ],
+      )
+      if isinstance(
+          self.scored_q, trajectory_queue_manager.BatchOrderedQueueManager
+      ):
+        assert current_batch_idx is not None
+        self.scored_q.commit_batch(current_batch_idx)
+      else:
+        self.scored_q.commit(current_step, groups=uncommitted_groups)
 
       step_time_sec = time.monotonic() - step_start_time
 
@@ -1404,6 +1612,10 @@ class StandardRLProgram(RLProgram):
       if self.on_step_end:
         self.on_step_end(current_step, step_result)
       self._step += 1
+      # Strictly after the increment: the dispatcher re-reads `_next_batch` on
+      # waking, and waking it on the old value would park it again with no one
+      # left to set the event.
+      self._release_window()
 
   async def run_async(
       self,
@@ -1431,9 +1643,6 @@ class StandardRLProgram(RLProgram):
           sync_weights=True,
           policy_version=self.policy_version,
       )
-
-    max_groups_ahead = self.full_batch_size * (self.max_staleness + 1)
-    self._dispatch_capacity = asyncio.Semaphore(max_groups_ahead)
 
     train_task = asyncio.create_task(self.train_stage())
     tasks = [

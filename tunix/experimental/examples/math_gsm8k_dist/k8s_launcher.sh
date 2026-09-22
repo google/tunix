@@ -73,6 +73,8 @@ export USE_LORA=${USE_LORA:-0}
 export REWARD_MODE=${REWARD_MODE:-env}
 export BETA=${BETA:-0}
 export EPSILON=${EPSILON:-0.2}
+export MAX_STALENESS=${MAX_STALENESS:-0}
+export TRAJECTORY_GROUP_ORDER=${TRAJECTORY_GROUP_ORDER:-arrival}
 export DEBUG=${DEBUG:-0}
 export SAMPLER=${SAMPLER:-inprocess_vllm}
 export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
@@ -84,15 +86,11 @@ export CHECKPOINT_ROOT_DIRECTORY=${CHECKPOINT_ROOT_DIRECTORY:-checkpoints}
 export ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE:-0}
 export CKPT_D2H_CONCURRENT_GB=${CKPT_D2H_CONCURRENT_GB:-8}
 
-# MaxText trainer configuration: only consulted when TRAINER_BACKEND=maxtext
-export MAXTEXT_MODEL_NAME=${MAXTEXT_MODEL_NAME:-qwen3-1.7b}
-export MAXTEXT_CKPT=${MAXTEXT_CKPT:-}
-export MAXTEXT_OUTPUT_DIR=${MAXTEXT_OUTPUT_DIR:-artifacts/math_gsm8k_dist/maxtext}
-# Padded MoE MLP intermediate dimension; must match rollout TP padding for MoE models.
-export TRAINER_PADDED_MOE_MLP_DIM=${TRAINER_PADDED_MOE_MLP_DIM:-}
 # Optional: enable experimental batched-RPA attention kernel for rollout.
 export ROLLOUT_USE_BATCHED_RPA=${ROLLOUT_USE_BATCHED_RPA:-}
-export ROLLOUT_MAXTEXT_ATTENTION=${ROLLOUT_MAXTEXT_ATTENTION:-}
+
+# MaxText configuration: only consulted when TRAINER_BACKEND=maxtext.
+source "${LAUNCHER_DIR}/../common/maxtext_config.sh"
 
 # MoE & Weight Sync Flags
 export PREFUSE_MOE_WEIGHTS=${PREFUSE_MOE_WEIGHTS:-true}
@@ -108,6 +106,7 @@ export WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
 export WANDB_API_KEY=${WANDB_API_KEY:-}
 export LOG_DIR=${LOG_DIR:-}
 export TRAJECTORY_LOG_DIR=${TRAJECTORY_LOG_DIR:-}
+export TRAJECTORY_STORE_ROOT_DIR=${TRAJECTORY_STORE_ROOT_DIR:-${TRAJECTORY_STORE_ROOT:-}}
 export TFDS_DATA_DIR=${TFDS_DATA_DIR:-"artifacts/data"}
 export TFDS_SPLIT=${TFDS_SPLIT:-train}
 export FLUSH_METRICS_EVERY_N_STEPS=${FLUSH_METRICS_EVERY_N_STEPS:-1}
@@ -209,6 +208,8 @@ start_orchestrator() {
         --max_steps=${MAX_STEPS} \
         --max_prompt_length=${MAX_PROMPT_LENGTH} \
         --max_response_length=${MAX_RESPONSE_LENGTH} \
+        --max_staleness=${MAX_STALENESS} \
+        --trajectory_group_order=${TRAJECTORY_GROUP_ORDER} \
         --train_micro_batch_size=${TRAIN_MICRO_BATCH_SIZE} \
         --rollout_replicas=${ROLLOUT_REPLICAS} \
         --wandb_project=\"${WANDB_PROJECT}\" \
@@ -219,6 +220,7 @@ start_orchestrator() {
         $([[ "${USE_ROLLOUT_LOGPS}" == "false" || "${USE_ROLLOUT_LOGPS}" == "False" || "${USE_ROLLOUT_LOGPS}" == "0" ]] && echo --no-use_rollout_logps || echo --use_rollout_logps) \
         ${LOG_DIR:+--log_dir=\"${LOG_DIR}\"} \
         ${TRAJECTORY_LOG_DIR:+--trajectory_log_dir=\"${TRAJECTORY_LOG_DIR}\"} \
+        ${TRAJECTORY_STORE_ROOT_DIR:+--trajectory_store_root_dir=\"${TRAJECTORY_STORE_ROOT_DIR}\"} \
         ${MAX_SEQ_TOKEN_PER_TPU:+--max_seq_token_per_tpu=${MAX_SEQ_TOKEN_PER_TPU}} \
         ${MAX_SEGMENTS_PER_PACKED_ROW:+--max_segments_per_packed_row=${MAX_SEGMENTS_PER_PACKED_ROW}} \
         ${TRAINER_MESH_FSDP:+--trainer_fsdp=${TRAINER_MESH_FSDP}} \
@@ -239,9 +241,7 @@ stop_trainer() {
 }
 
 start_trainer() {
-  local extra_flags=""
   local debug_flag=""
-  local profiler_flags=""
   if [[ "${DEBUG}" == "1" || "${DEBUG}" == "true" || "${DEBUG}" == "True" ]]; then
     debug_flag="--debug"
   fi
@@ -250,37 +250,9 @@ start_trainer() {
     echo "Trainer Pathways images: server=${PATHWAYS_SERVER_IMAGE} proxy=${PATHWAYS_PROXY_IMAGE}"
   fi
 
-  if [[ -n "$PROFILER_STEPS" ]]; then
-    profiler_flags+=" --profiler_steps=${PROFILER_STEPS}"
-  fi
-  if [[ -n "$SKIP_FIRST_N_PROFILER_STEPS" ]]; then
-    profiler_flags+=" --skip_first_n_profiler_steps=${SKIP_FIRST_N_PROFILER_STEPS}"
-  fi
-  if [[ -n "$PROFILER_PERIOD" ]]; then
-    profiler_flags+=" --profiler_period=${PROFILER_PERIOD}"
-  fi
-
-  if [[ "${TRAINER_BACKEND}" == "maxtext" ]]; then
-    if [[ -z "${MAXTEXT_CKPT}" ]]; then
-      if [[ "${DRY_RUN}" == "true" ]]; then
-        echo "Warning: TRAINER_BACKEND=maxtext without MAXTEXT_CKPT (Orbax params-only checkpoint)." >&2
-      else
-        echo "Error: TRAINER_BACKEND=maxtext requires MAXTEXT_CKPT (Orbax params-only checkpoint)." >&2
-        exit 1
-      fi
-    fi
-    extra_flags+=" \
-      --maxtext_model_name=${MAXTEXT_MODEL_NAME} \
-      ${TRAINER_PADDED_MOE_MLP_DIM:+--maxtext_padded_moe_mlp_dim=${TRAINER_PADDED_MOE_MLP_DIM}} \
-      ${MAXTEXT_CKPT:+--maxtext_ckpt_path=${MAXTEXT_CKPT}} \
-      --maxtext_output_directory=${MAXTEXT_OUTPUT_DIR} \
-      --mesh_tp=${TRAINER_MESH_TP} \
-      --mesh_expert=${TRAINER_MESH_EXPERT} \
-      ${ROLLOUT_MESH_TP:+--rollout_mesh_tp=${ROLLOUT_MESH_TP}} \
-      --use_weight_converter=${USE_WEIGHT_CONVERTER} \
-      ${MAX_SEQ_TOKEN_PER_TPU:+--max_seq_token_per_tpu=${MAX_SEQ_TOKEN_PER_TPU}} \
-    "
-  fi
+  maxtext_require_ckpt
+  local maxtext_args
+  maxtext_args="$(maxtext_trainer_flags)"
 
   local raiden_env=""
   if [[ "${WEIGHT_SYNC_MODE}" == "raiden" ]]; then
@@ -320,6 +292,8 @@ start_trainer() {
         --worker_id=${TRAINER_ID} \
         --port=${TRAINER_PORT} \
         --mesh_fsdp=${TRAINER_MESH_FSDP} \
+        --mesh_tp=${TRAINER_MESH_TP} \
+        --mesh_expert=${TRAINER_MESH_EXPERT} \
         --trainer_backend=${TRAINER_BACKEND} \
         --model_name=${MODEL_NAME} \
         --model_id=${MODEL_ID} \
@@ -350,9 +324,8 @@ start_trainer() {
         --checkpoint_save_interval_steps=${CHECKPOINT_SAVE_INTERVAL_STEPS} \
         --checkpoint_max_to_keep=${CHECKPOINT_MAX_TO_KEEP} \
         --checkpoint_root_directory=${CHECKPOINT_ROOT_DIRECTORY} \
-        ${extra_flags} \
+        ${maxtext_args} \
         ${TRAINER_EXTRA_ARGS:+${TRAINER_EXTRA_ARGS} }${debug_flag} \
-        ${profiler_flags} \
     " \
     | apply_manifest
 }
@@ -392,7 +365,6 @@ stop_rollout() {
 
 start_rollout_instance() {
   local target_id="$1"
-  local extra_flags=""
   local debug_flag=""
   if [[ "${DEBUG}" == "1" || "${DEBUG}" == "true" || "${DEBUG}" == "True" ]]; then
     debug_flag="--debug"
@@ -402,12 +374,8 @@ start_rollout_instance() {
     echo "Rollout Pathways images: server=${PATHWAYS_SERVER_IMAGE} proxy=${PATHWAYS_PROXY_IMAGE}"
   fi
 
-  if [[ "${TRAINER_BACKEND}" == "maxtext" ]]; then
-    extra_flags+="\
-      --maxtext_model_name=${MAXTEXT_MODEL_NAME} \
-      ${ROLLOUT_MAXTEXT_ATTENTION:+--maxtext_attention=${ROLLOUT_MAXTEXT_ATTENTION}} \
-    "
-  fi
+  local maxtext_args
+  maxtext_args="$(maxtext_rollout_flags)"
 
   local raiden_env=""
   if [[ "${WEIGHT_SYNC_MODE}" == "raiden" ]]; then
@@ -449,7 +417,7 @@ start_rollout_instance() {
         --chat_parser=${CHAT_PARSER} \
         --prefuse_moe_weights=${PREFUSE_MOE_WEIGHTS} \
         --enable_prefix_caching=${ENABLE_PREFIX_CACHING} \
-        ${extra_flags} \
+        ${maxtext_args} \
         ${ROLLOUT_EXTRA_ARGS:+${ROLLOUT_EXTRA_ARGS} }${debug_flag} \
     " \
     | apply_manifest

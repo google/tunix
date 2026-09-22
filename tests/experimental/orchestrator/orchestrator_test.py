@@ -501,6 +501,85 @@ class ClusterOrchestratorTrajectoryStoreTest(absltest.TestCase):
     orch = _trajectory_store_orchestrator()
     orch.shutdown()
 
+  def test_bring_up_propagates_trajectory_store_config_to_rollout_workers(self):
+    tmp_dir = epath.Path(self.enter_context(tempfile.TemporaryDirectory()))
+    cfg = {
+        "enabled": True,
+        "backend": "file",
+        "root_dir": str(tmp_dir),
+        "run_id": "cluster_run",
+    }
+    registry = worker_registry.WorkerRegistry()
+    local_rollout = mock.MagicMock()
+    local_rollout.info.return_value = datatypes.WorkerInfo(
+        worker_id="rollout-local-0",
+        roles=frozenset({datatypes.Role.ROLLOUT}),
+    )
+    registry.register(local_rollout)
+
+    mock_rollout_remote = mock.MagicMock(spec=remote_execution.ActorHandle)
+    mock_actor_remote = mock.MagicMock(spec=remote_execution.ActorHandle)
+
+    orch = orchestrator.ClusterOrchestrator(
+        registry=registry,
+        lifecycle_driver=mock.MagicMock(),
+        monitor=mock.MagicMock(),
+        trajectory_store_config=cfg,
+    )
+    orch.register_worker_handle(
+        "rollout-remote-0", [datatypes.Role.ROLLOUT], mock_rollout_remote
+    )
+    orch.register_worker_handle(
+        "actor-remote-0", [datatypes.Role.ACTOR], mock_actor_remote
+    )
+
+    orch.bring_up_workers()
+    local_rollout.with_trajectory_store_config.assert_called_once_with(cfg)
+    mock_rollout_remote.submit.assert_any_call(
+        "with_trajectory_store_config", cfg
+    )
+    for call in mock_actor_remote.submit.call_args_list:
+      self.assertNotEqual(call.args[0], "with_trajectory_store_config")
+    orch.shutdown()
+
+  def test_orchestrator_populates_run_id_when_omitted_from_trajectory_store_config(
+      self,
+  ):
+    tmp_dir = epath.Path(self.enter_context(tempfile.TemporaryDirectory()))
+    cfg = {
+        "enabled": True,
+        "backend": "file",
+        "root_dir": str(tmp_dir),
+    }
+    registry = worker_registry.WorkerRegistry()
+    mock_rollout_remote = mock.MagicMock(spec=remote_execution.ActorHandle)
+
+    orch = orchestrator.ClusterOrchestrator(
+        registry=registry,
+        lifecycle_driver=mock.MagicMock(),
+        monitor=mock.MagicMock(),
+        trajectory_store_config=cfg,
+    )
+    orch.register_worker_handle(
+        "rollout-remote-0", [datatypes.Role.ROLLOUT], mock_rollout_remote
+    )
+
+    self.assertTrue(orch.run_id.startswith("run_"))
+    expected_cfg = {
+        "enabled": True,
+        "backend": "file",
+        "root_dir": str(tmp_dir),
+        "run_id": orch.run_id,
+    }
+    self.assertEqual(orch.trajectory_store_config, expected_cfg)
+
+    orch.bring_up_workers()
+    mock_rollout_remote.submit.assert_any_call(
+        "with_trajectory_store_config", expected_cfg
+    )
+    orch.shutdown()
+
 
 if __name__ == "__main__":
   absltest.main()
+

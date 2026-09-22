@@ -9,7 +9,8 @@ export JOB_PREFIX="${JOB_PREFIX:-${USER}}"
 export WANDB_API_KEY="${WANDB_API_KEY:-}"
 export WANDB_RUN_NAME="${WANDB_RUN_NAME:-${JOB_PREFIX}-mlperf-35b}"
 export MAXTEXT_OUTPUT_DIR="${MAXTEXT_OUTPUT_DIR:-gs://atwigg-trellis-europe-west4-dev/maxtext/${JOB_PREFIX}}"
-export TRAJECTORY_LOG_DIR="${TRAJECTORY_LOG_DIR:-gs://atwigg-trellis-europe-west4-dev/trajectories/${JOB_PREFIX}}"
+export TRAJECTORY_LOG_DIR="${TRAJECTORY_LOG_DIR:-gs://atwigg-trellis-europe-west4-dev/trajectories/${JOB_PREFIX}/logger}"
+export TRAJECTORY_STORE_ROOT_DIR="${TRAJECTORY_STORE_ROOT_DIR:-${TRAJECTORY_STORE_ROOT:-gs://atwigg-trellis-europe-west4-dev/trajectories/${JOB_PREFIX}/store}}"
 export ORCHESTRATOR_PORT="${ORCHESTRATOR_PORT:-20000}"
 export ROLLOUT_PORT="${ROLLOUT_PORT:-20001}"
 export TRAINER_PORT="${TRAINER_PORT:-20002}"
@@ -55,7 +56,6 @@ export MAXTEXT_MODEL_NAME="qwen3.5-35b-a3b"
 export MAXTEXT_CKPT="gs://hengtaoguo-maxtext-logs/checkpoints/qwen3.5-35b-a3b/scanned/2026-06-11-10-27/0/items"
 export TRAINABLE_PARAMETERS_MASK='^(?!.*routed_experts/gate/kernel).*'
 export EOS_TOKENS="${EOS_TOKENS:-151645,151643}"
-export TRAJECTORY_LOG_DIR="${TRAJECTORY_LOG_DIR:-gs://atwigg-trellis-europe-west4-dev/trajectories}"
 
 # Backend configuration
 export TRAINER_BACKEND="maxtext"
@@ -75,7 +75,6 @@ export ROLLOUT_TPU_SLICE="tpuv5:2x2x1"
 export ROLLOUT_MESH_FSDP=1
 export ROLLOUT_MESH_TP=1
 export ROLLOUT_MESH_EXPERT="${ROLLOUT_MESH_EXPERT:-4}"
-export ROLLOUT_WORKERS="${ROLLOUT_WORKERS:-16}"
 export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-16}"
 
 # MLPerf RCP Logging
@@ -101,7 +100,7 @@ export VLLM_ADDITIONAL_CONFIG='{"sharding":{"sharding_strategy":{"expert_paralle
 
 # Prefix Caching Configs
 export ENABLE_PREFIX_CACHING="${ENABLE_PREFIX_CACHING:-false}"
-export VLLM_PREFIX_CACHE_RETENTION_INTERVAL="${VLLM_PREFIX_CACHE_RETENTION_INTERVAL:-256}"
+export VLLM_PREFIX_CACHE_RETENTION_INTERVAL="${VLLM_PREFIX_CACHE_RETENTION_INTERVAL:-0}"
 export VLLM_MAMBA_CACHE_MODE="${VLLM_MAMBA_CACHE_MODE:-${MAMBA_CACHE_MODE:-none}}"
 
 # Router replay

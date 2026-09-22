@@ -145,10 +145,18 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       "--max_staleness",
       dest="max_staleness",
       type=int,
-      default=0,
+      default=os.getenv("MAX_STALENESS", 0),
       help=(
           "Maximum policy-version lag accepted by the async rollout queue. "
           "0 means queue-level on-policy training."
+      ),
+  )
+  parser.add_argument(
+      "--trajectory_group_order",
+      choices=("arrival", "prompt_batch"),
+      default=os.getenv("TRAJECTORY_GROUP_ORDER", "arrival"),
+      help=(
+          "Trajectory group order."
       ),
   )
   parser.add_argument(
@@ -288,7 +296,29 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       action="store_true",
       help="Enable debug logging and print full sampler responses.",
   )
+  parser.add_argument(
+      "--trajectory_store_root_dir",
+      "--trajectory_store_root",
+      dest="trajectory_store_root_dir",
+      type=str,
+      default="",
+      help="Root directory for the file-backed TrajectoryStore.",
+  )
   return parser.parse_args(argv)
+
+
+def _build_trajectory_store_config(
+    args: argparse.Namespace,
+) -> dict[str, Any] | None:
+  """Builds the TrajectoryStore configuration dict from orchestrator CLI flags."""
+  root_dir = (args.trajectory_store_root_dir or "").strip()
+  if not root_dir:
+    return None
+  return {
+      "enabled": True,
+      "backend": "file",
+      "root_dir": root_dir,
+  }
 
 
 def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
@@ -450,6 +480,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
 
   cluster = orchestrator.ClusterOrchestrator(
       weight_sync_mode=args.weight_sync_mode,
+      trajectory_store_config=_build_trajectory_store_config(args),
   )
   context.ipc.discovery.on_register(
       functools.partial(
@@ -513,7 +544,9 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       ),
       metrics_logging_options=metrics_logging_options,
       trajectory_log_dir=args.trajectory_log_dir,
+      trajectory_store=cluster.trajectory_store,
       max_staleness=args.max_staleness,
+      group_order=args.trajectory_group_order,
       sync_weights=(args.weight_sync_mode != "none"),
       on_step_begin=lambda step: logging.info(
           ">>> Step %d starting | Policy Version: %d",
