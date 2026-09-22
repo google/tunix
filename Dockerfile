@@ -46,7 +46,7 @@ RUN uv pip install .
 # Install SFT/MaxText dependencies (unconditional)
 RUN uv pip install 'jax==0.11.0' 'flax==0.12.7' && \
     uv pip install torchax aqtp tokamax math_verify drjax && \
-    uv pip install --no-deps git+https://github.com/google/maxtext.git@8db3416b4aeea33f4d2ca943a60ee4a84d16d769
+    uv pip install --no-deps git+https://github.com/google/maxtext.git@atwigg/mlperf
 
 # Build argument to conditionally install Kubernetes tools
 ARG INSTALL_K8S_TOOLS=false
@@ -73,7 +73,8 @@ RUN if [ "$INSTALL_DEEPSWE_DEPS" = "true" ]; then \
       uv pip install --no-deps git+https://github.com/kubernetes-sigs/agent-sandbox.git#subdirectory=clients/integrations/openhands && \
       uv pip install --no-deps git+https://github.com/r2e-gym/r2e-gym.git@0d94c4eb9431cd195c55a7ea3abd54006c9a1735 && \
       sed -i 's/create_repo, upload_folder, HfFolder/create_repo, upload_folder/' /opt/venv/lib/python3.12/site-packages/r2egym/agenthub/utils/utils.py && \
-      sed -i 's/self.commit = ParsedCommit(\*\*json.loads(self.commit_json))/self.commit = ParsedCommit(\*\*(json.loads(self.commit_json) if isinstance(self.commit_json, str) else self.commit_json))/' /opt/venv/lib/python3.12/site-packages/r2egym/agenthub/runtime/docker.py; \
+      sed -i 's/self.commit = ParsedCommit(\*\*json.loads(self.commit_json))/self.commit = ParsedCommit(\*\*(json.loads(self.commit_json) if isinstance(self.commit_json, str) else self.commit_json))/' /opt/venv/lib/python3.12/site-packages/r2egym/agenthub/runtime/docker.py && \
+      sed -i 's/sel = c.resources.managed_selector()/sel = self.run_selector()/' /opt/venv/lib/python3.12/site-packages/agent_sandbox_rl/fleet.py; \
     fi
 
 # Build argument to conditionally install MaxText dependencies
