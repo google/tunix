@@ -15,6 +15,7 @@
 """Unit tests for tunix.oss.examples.deepswe.sandbox_utils."""
 
 import os
+import threading
 from unittest import mock
 from absl.testing import absltest
 import numpy as np
@@ -46,6 +47,34 @@ class FakeFleet:
 
   def teardown(self) -> None:
     self.active_pools.clear()
+
+
+class BarrierFleet(FakeFleet):
+  """FakeFleet whose warm_image blocks until `parties` warms are in flight.
+
+  Proves warms overlap: a serial caller would never release the barrier, and
+  the timeout turns that into a BrokenBarrierError instead of a hung test.
+  """
+
+  def __init__(
+      self,
+      parties: int,
+      fail: frozenset[str] = frozenset(),
+      timeout: float = 5.0,
+  ):
+    super().__init__()
+    self._barrier = threading.Barrier(parties, timeout=timeout)
+    self._fail = fail
+    self.daemon_workers: list[bool] = []
+
+  def warm_image(
+      self, image: str, replicas_override: int | None = None, wait: bool = False
+  ) -> None:
+    self.daemon_workers.append(threading.current_thread().daemon)
+    self._barrier.wait()
+    if image in self._fail:
+      raise RuntimeError(f"warm failed for {image}")
+    super().warm_image(image, replicas_override, wait)
 
 
 class SandboxUtilsTest(absltest.TestCase):
@@ -451,6 +480,62 @@ class SandboxUtilsTest(absltest.TestCase):
             namespace="test-ns",
             delete_pods=False,
         )
+
+  def test_warm_concurrency_defaults_to_one_at_a_time(self):
+    with mock.patch.dict(os.environ, {}, clear=False):
+      os.environ.pop("PREWARM_WARM_CONCURRENCY", None)
+      fleet = BarrierFleet(parties=2, timeout=0.2)
+      # A serial caller cannot release a 2-party barrier: every warm fails.
+      iterator = sandbox_utils.PrewarmDatasetIterator(
+          [{"docker_image": "img_A"}, {"docker_image": "img_B"}],
+          fleet=fleet,
+          num_generations=1,
+          batch_size=1,
+      )
+    self.assertEqual(iterator.warm_concurrency, 1)
+    self.assertEqual(iterator._active_replicas, {})
+
+  def test_warm_concurrency_warms_new_pools_at_once(self):
+    images = ["img_A", "img_B", "img_C", "img_D"]
+    fleet = BarrierFleet(parties=len(images))
+    iterator = sandbox_utils.PrewarmDatasetIterator(
+        [{"docker_image": img} for img in images],
+        fleet=fleet,
+        num_generations=2,
+        batch_size=2,
+        warm_concurrency=len(images),
+    )
+    self.assertCountEqual(fleet.warm_calls, [(img, 2, True) for img in images])
+    # Recorded in plan order, not completion order.
+    self.assertEqual(list(iterator._active_replicas), images)
+    # Daemon workers: interpreter exit (SIGTERM -> SDK atexit teardown) must not
+    # wait for warms still blocked on pool readiness.
+    self.assertEqual(fleet.daemon_workers, [True] * len(images))
+
+  def test_warm_concurrency_isolates_a_failed_warm(self):
+    images = ["img_A", "img_B", "img_C"]
+    fleet = BarrierFleet(parties=len(images), fail=frozenset({"img_B"}))
+    iterator = sandbox_utils.PrewarmDatasetIterator(
+        [{"docker_image": img} for img in images] + [{"docker_image": "img_A"}],
+        fleet=fleet,
+        num_generations=1,
+        batch_size=2,
+        warm_concurrency=8,
+    )
+    # img_A is in both batches (2 samples); img_B failed and stays unrecorded,
+    # so the next reconcile retries it, as on the serial path.
+    self.assertEqual(iterator._active_replicas, {"img_A": 2, "img_C": 1})
+    self.assertNotIn("img_B", fleet.active_pools)
+
+  def test_warm_concurrency_resolution(self):
+    resolve = sandbox_utils._resolve_warm_concurrency
+    with mock.patch.dict(os.environ, {"PREWARM_WARM_CONCURRENCY": "16"}):
+      self.assertEqual(resolve(None), 16)
+      self.assertEqual(resolve(4), 4)  # explicit argument wins
+    for raw, want in (("", 1), ("0", 1), ("-3", 1), ("abc", 1)):
+      with mock.patch.dict(os.environ, {"PREWARM_WARM_CONCURRENCY": raw}):
+        self.assertEqual(resolve(None), want, raw)
+    self.assertEqual(resolve(0), 1)
 
 
 if __name__ == "__main__":
