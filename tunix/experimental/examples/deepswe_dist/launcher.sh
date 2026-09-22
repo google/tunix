@@ -41,6 +41,8 @@ BATCH_SIZE=${BATCH_SIZE:-1}
 NUM_GENERATIONS=${NUM_GENERATIONS:-2}
 MAX_STEPS=${MAX_STEPS:-1}
 MAX_TURNS=${MAX_TURNS:-3}
+MAX_STALENESS=${MAX_STALENESS:-0}
+TRAJECTORY_GROUP_ORDER=${TRAJECTORY_GROUP_ORDER:-arrival}
 TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-1}
 MAX_SEQ_TOKEN_PER_TPU=${MAX_SEQ_TOKEN_PER_TPU:-}
 MAX_SEGMENTS_PER_PACKED_ROW=${MAX_SEGMENTS_PER_PACKED_ROW:-}
@@ -282,6 +284,8 @@ echo "  learning rate:  ${LEARNING_RATE}"
 echo "  lr schedule:    ${SCHEDULE_TYPE:-<constant>} (warmup $WARMUP_STEPS, decay $LR_DECAY_STEPS)"
 echo "  beta:           ${BETA}"
 echo "  epsilon:        ${EPSILON}"
+echo "  max staleness:  ${MAX_STALENESS}"
+echo "  traj order:     ${TRAJECTORY_GROUP_ORDER}"
 echo "  sampler:        ${SAMPLER}"
 echo "  weight sync:    ${WEIGHT_SYNC_MODE}"
 echo "  trainer backend:${TRAINER_BACKEND}"
@@ -528,6 +532,8 @@ echo "Launching CPU orchestrator..."
     --max_turns="$MAX_TURNS"
     --max_prompt_length="$MAX_PROMPT_LENGTH"
     --max_response_length="$MAX_RESPONSE_LENGTH"
+    --max_staleness="$MAX_STALENESS"
+    --trajectory_group_order="$TRAJECTORY_GROUP_ORDER"
     --train_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
     --beta="$BETA"
     --epsilon="$EPSILON"
@@ -586,9 +592,6 @@ echo "Launching CPU orchestrator..."
   fi
   if [[ -n "$INFERENCE_ADDR" ]]; then
     ORCHESTRATOR_CMD+=(--inference_addr="$INFERENCE_ADDR")
-  fi
-  if [[ -n "$MAX_STALENESS" ]]; then
-    ORCHESTRATOR_CMD+=(--max_staleness="$MAX_STALENESS")
   fi
   if [[ "$USE_AGENT_SANDBOX" == "1" || "$USE_AGENT_SANDBOX" == "true" || "$USE_AGENT_SANDBOX" == "True" ]]; then
     ORCHESTRATOR_CMD+=(--use_agent_sandbox)

@@ -73,6 +73,8 @@ export USE_LORA=${USE_LORA:-0}
 export REWARD_MODE=${REWARD_MODE:-env}
 export BETA=${BETA:-0}
 export EPSILON=${EPSILON:-0.2}
+export MAX_STALENESS=${MAX_STALENESS:-0}
+export TRAJECTORY_GROUP_ORDER=${TRAJECTORY_GROUP_ORDER:-arrival}
 export DEBUG=${DEBUG:-0}
 export SAMPLER=${SAMPLER:-inprocess_vllm}
 export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
@@ -209,6 +211,8 @@ start_orchestrator() {
         --max_steps=${MAX_STEPS} \
         --max_prompt_length=${MAX_PROMPT_LENGTH} \
         --max_response_length=${MAX_RESPONSE_LENGTH} \
+        --max_staleness=${MAX_STALENESS} \
+        --trajectory_group_order=${TRAJECTORY_GROUP_ORDER} \
         --train_micro_batch_size=${TRAIN_MICRO_BATCH_SIZE} \
         --rollout_replicas=${ROLLOUT_REPLICAS} \
         --wandb_project=\"${WANDB_PROJECT}\" \

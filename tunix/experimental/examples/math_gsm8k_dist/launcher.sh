@@ -70,6 +70,8 @@ SEED=${SEED:-42}
 SHUFFLE=${SHUFFLE:-true}
 BETA=${BETA:-0.04}
 EPSILON=${EPSILON:-0.2}
+MAX_STALENESS=${MAX_STALENESS:-0}
+TRAJECTORY_GROUP_ORDER=${TRAJECTORY_GROUP_ORDER:-arrival}
 FLUSH_METRICS_EVERY_N_STEPS=${FLUSH_METRICS_EVERY_N_STEPS:-1}
 WANDB_PROJECT=${WANDB_PROJECT:-trellis-gsm8k}
 WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
@@ -439,6 +441,8 @@ echo "  mini batch:     $MINI_BATCH_SIZE"
 echo "  beta:           $BETA"
 echo "  epsilon:        $EPSILON"
 echo "  reward mode:    $REWARD_MODE"
+echo "  max staleness:  $MAX_STALENESS"
+echo "  traj order:     $TRAJECTORY_GROUP_ORDER"
 echo "  tfds split:     $TFDS_SPLIT"
 echo "  tfds data dir:  $TFDS_DATA_DIR"
 echo "  shuffle:        $SHUFFLE"
@@ -663,21 +667,22 @@ print_process_debug "rollout" "$ROLLOUT_PID"
 
 
 on_shutdown_signal() {
-  SHUTDOWN_SIGNAL_COUNT=$((SHUTDOWN_SIGNAL_COUNT + 1))
-  if (( SHUTDOWN_SIGNAL_COUNT == 1 )); then
-    DRAIN_START_SECONDS=$seconds
-    print_setion "graceful shutdown"
-    echo "Received $1. Draining workers so the trainer can finalize its"
-    echo "checkpoint. Press Ctrl+C again (after ${FORCE_ARM_SECS}s) to ABADON"
-    echo "the in-flight checkpoint and kill workers immediately."
-    exit 130
-  elif (( SECONDS - DRAIN_START_SECONDS < FORCE_ARM_SECS )); then
-    echo "Ignoring rapid $1 (within the ${FORCE_ARM_SECS}s grace period)."
-    echo "Press Ctrl+C again if you really want to abandon the checkpoint."
-  else
-    echo "Received $1. Killing workers immediately."
-    FORCE_KILL=1
-  fi
+  FORCE_KILL=1
+  # SHUTDOWN_SIGNAL_COUNT=$((SHUTDOWN_SIGNAL_COUNT + 1))
+  # if (( SHUTDOWN_SIGNAL_COUNT == 1 )); then
+  #   DRAIN_START_SECONDS=$seconds
+  #   print_setion "graceful shutdown"
+  #   echo "Received $1. Draining workers so the trainer can finalize its"
+  #   echo "checkpoint. Press Ctrl+C again (after ${FORCE_ARM_SECS}s) to ABADON"
+  #   echo "the in-flight checkpoint and kill workers immediately."
+  #   exit 130
+  # elif (( SECONDS - DRAIN_START_SECONDS < FORCE_ARM_SECS )); then
+  #   echo "Ignoring rapid $1 (within the ${FORCE_ARM_SECS}s grace period)."
+  #   echo "Press Ctrl+C again if you really want to abandon the checkpoint."
+  # else
+  #   echo "Received $1. Killing workers immediately."
+  #   FORCE_KILL=1
+  # fi
 }
 
 cleanup() {
@@ -826,6 +831,8 @@ echo "Launching CPU orchestrator..."
     --beta="$BETA"
     --epsilon="$EPSILON"
     --reward_mode="$REWARD_MODE"
+    --max_staleness="$MAX_STALENESS"
+    --trajectory_group_order="$TRAJECTORY_GROUP_ORDER"
     --flush_metrics_every_n_steps="$FLUSH_METRICS_EVERY_N_STEPS"
     --tfds_data_dir="$TFDS_DATA_DIR"
     --tfds_split="$TFDS_SPLIT"
@@ -907,4 +914,4 @@ echo "Launching CPU orchestrator..."
   exit "$exit_code"
 }
 
-echo "Distributed GSM8K GRPO chain demo (vLLM) finished successfully."
+echo "Distributed GSM8K GRPO chain demo finished successfully."
