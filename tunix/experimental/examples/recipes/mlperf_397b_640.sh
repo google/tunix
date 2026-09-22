@@ -88,7 +88,15 @@ export TRAINER_MESH_FSDP=16
 export TRAINER_MESH_TP=1
 export TRAINER_MESH_EXPERT=2
 export TRAINER_MESH_CONTEXT=8                    # 16*1*2*8 = 256
-export TRAINER_BASE_NUM_KV_HEADS=16
+# The model's TRUE kv-head count, not the padded one. maxtext_utils takes this
+# as the base and pads *up* to kv_tp_size itself, then passes it to the trainer
+# with override_model_config=true. Setting 16 here (the padded value) forced the
+# trainer to 16 kv heads while the rollout built the real 2, and Raiden refused
+# the first weight sync with 30 shape mismatches:
+#   'decoder.layers.11.attention.attention.key.kernel' global shape differs:
+#     source (4096, 16, 256), destination (4096, 2, 256)
+# That killed q397b-dsw-0922c at round 0. qwen3.5-397b-a17b.yml says 2.
+export TRAINER_BASE_NUM_KV_HEADS=2
 
 # Rollout: 16 chips = 4 hosts per replica. tp * expert must equal the slice.
 # tp=2 x expert=8 is NOT an alternative -- it produces incoherent rollouts for
