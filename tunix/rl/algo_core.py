@@ -553,10 +553,13 @@ def grpo_loss_fn(
   )
   total_loss = unreduced_pg_loss  # KL added below when beta != 0; feeds gradient
   # Per-token diagnostics — log only over assistant tokens (completion_mask).
+  has_valid = jnp.any(completion_mask > 0)
   is_ratio_mean = masked_mean(is_ratio, completion_mask)
   is_ratio_max = jnp.max(jnp.where(completion_mask > 0, is_ratio, 0.0))
-  is_ratio_min = jnp.min(
-      jnp.where(completion_mask > 0, is_ratio, jnp.inf)
+  is_ratio_min = jnp.where(
+      has_valid,
+      jnp.min(jnp.where(completion_mask > 0, is_ratio, jnp.inf)),
+      0.0,
   )
   log_ratio_abs_mean = masked_mean(
       jnp.abs(seq_importance_ratio), completion_mask
@@ -565,8 +568,16 @@ def grpo_loss_fn(
   pg_loss_2_mean = masked_mean(pg_loss_2, completion_mask)
   adv_broadcast = jnp.broadcast_to(adv, completion_mask.shape)
   adv_abs_mean = masked_mean(jnp.abs(adv_broadcast), completion_mask)
-  adv_max = jnp.max(jnp.where(completion_mask > 0, adv_broadcast, -jnp.inf))
-  adv_min = jnp.min(jnp.where(completion_mask > 0, adv_broadcast, jnp.inf))
+  adv_max = jnp.where(
+      has_valid,
+      jnp.max(jnp.where(completion_mask > 0, adv_broadcast, -jnp.inf)),
+      0.0,
+  )
+  adv_min = jnp.where(
+      has_valid,
+      jnp.min(jnp.where(completion_mask > 0, adv_broadcast, jnp.inf)),
+      0.0,
+  )
   nonzero_adv_frac = masked_mean(
       (jnp.abs(adv_broadcast) > 1e-8).astype(jnp.float32), completion_mask
   )
@@ -598,8 +609,10 @@ def grpo_loss_fn(
   if sampler_is_weights is not None:
     sis = sampler_is_weights.astype(jnp.float32)
     aux["sampler_is/weight_mean"] = masked_mean(sis, completion_mask)
-    aux["sampler_is/weight_min"] = jnp.min(
-        jnp.where(completion_mask > 0, sis, jnp.inf)
+    aux["sampler_is/weight_min"] = jnp.where(
+        has_valid,
+        jnp.min(jnp.where(completion_mask > 0, sis, jnp.inf)),
+        0.0,
     )
   else:
     aux["sampler_is/weight_mean"] = jnp.float32(1.0)

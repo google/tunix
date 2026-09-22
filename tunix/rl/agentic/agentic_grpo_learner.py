@@ -144,8 +144,18 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
   # tokens, producing large-variance gradient updates.
   sampler_is: str | None = None  # None | "token"
   sampler_is_threshold: float = 2.0
+  seq_logprob_error_threshold: float | None = None
 
   def __post_init__(self):
+    if (
+        self.seq_logprob_error_threshold is not None
+        and self.seq_logprob_error_threshold < 1.0
+    ):
+      raise ValueError(
+          "seq_logprob_error_threshold must be >= 1.0 when set (since "
+          "exp(|logp_diff|) >= 1.0). Received: "
+          f"{self.seq_logprob_error_threshold}"
+      )
     if self.num_generations <= 1:
       raise ValueError(
           "num_generations must be greater than 1. Received: "
@@ -334,6 +344,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       rollout_per_token_logps,
       trainer_per_token_logps,
       completion_mask,
+      segment_ids=None,
   ):
     """Sampler-vs-trainer agreement metrics and the TIS weights built from them.
 
@@ -348,6 +359,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         completion_mask,
         sampler_is=self.algo_config.sampler_is,
         sampler_is_threshold=self.algo_config.sampler_is_threshold,
+        seq_logprob_error_threshold=self.algo_config.seq_logprob_error_threshold,
+        segment_ids=segment_ids,
     )
 
   def _compute_packed_logps(self, example: TrainExample) -> TrainExample:
@@ -400,15 +413,21 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           segment_positions=segment_positions,
       )
     # The rollout-logps path defers its trainer recompute here too. Not just
-    # diagnostics: sampler_is="token" consumes it as old_per_token_logps.
+    # diagnostics: sampler_is="token" consumes it as old_per_token_logps, and
+    # seq_logprob_error_threshold masks divergent segments.
     need_trainer_logps = (
         (
             not self.algo_config.force_on_policy_ratio
             or self.algo_config.log_sampler_trainer_agreement
+            or self.algo_config.seq_logprob_error_threshold is not None
         )
         and self.algo_config.use_rollout_logps
         and example.old_per_token_logps is not None
-        and (self._have_actor_mesh() or self.algo_config.sampler_is == "token")
+        and (
+            self._have_actor_mesh()
+            or self.algo_config.sampler_is == "token"
+            or self.algo_config.seq_logprob_error_threshold is not None
+        )
     )
     if need_trainer_logps:
       rollout_logps = example.old_per_token_logps
@@ -421,8 +440,13 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           segment_ids=segment_ids,
           segment_positions=segment_positions,
       )
-      metrics, sampler_is_weights = self._sampler_trainer_agreement(
-          rollout_logps, trainer_logps, example.completion_mask
+      metrics, sampler_is_weights, filtered_mask = (
+          self._sampler_trainer_agreement(
+              rollout_logps,
+              trainer_logps,
+              example.completion_mask,
+              segment_ids=segment_ids,
+          )
       )
       if metrics:
         self.rl_engine.buffer_metrics_async(
@@ -430,13 +454,21 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             mode=rl_engine_lib.Mode.TRAIN,
             step=self.rl_engine.global_steps,
         )
+      if self.algo_config.seq_logprob_error_threshold is not None:
+        updates["completion_mask"] = filtered_mask
       if sampler_is_weights is not None:
         updates["sampler_is_weights"] = sampler_is_weights
       if (
           self.algo_config.sampler_is == "token"
-          and not self.algo_config.force_on_policy_ratio
-      ):
+          or self.algo_config.seq_logprob_error_threshold is not None
+      ) and not self.algo_config.force_on_policy_ratio:
         updates["old_per_token_logps"] = trainer_logps
+
+    if (
+        self.algo_config.force_on_policy_ratio
+        and example.old_per_token_logps is not None
+    ):
+      updates["old_per_token_logps"] = None
 
     if updates:
       example = example.replace(**updates)  # pyrefly: ignore[missing-attribute]
@@ -670,10 +702,17 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       old_per_token_logps = None
       if padded_old_logprobs:
         rollout_per_token_logps = jnp.asarray(padded_old_logprobs)
-        if (
+        want_agreement = (
             self.algo_config.log_sampler_trainer_agreement
-            and have_actor_mesh
-            and not is_packed
+            or self.algo_config.seq_logprob_error_threshold is not None
+        )
+        if want_agreement and is_packed:
+          # Preserve rollout logps across packing so _compute_packed_logps can
+          # score agreement/error masking before clearing old_per_token_logps.
+          old_per_token_logps = rollout_per_token_logps
+        elif want_agreement and (
+            have_actor_mesh
+            or self.algo_config.seq_logprob_error_threshold is not None
         ):
           trainer_per_token_logps = self.rl_engine.get_actor_per_token_logps(
               prompt_tokens=prompt_ids,
@@ -690,7 +729,9 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       # trainer's recomputed logp as ``old_per_token_logps``) requires a real
       # actor mesh; skip when not available.
       need_trainer_logps = (
-          have_actor_mesh or self.algo_config.sampler_is == "token"
+          have_actor_mesh
+          or self.algo_config.sampler_is == "token"
+          or self.algo_config.seq_logprob_error_threshold is not None
       )
       # Deferred to _compute_packed_logps under packing: here it would run on
       # the unpacked sequences. Consumers below all guard on `is not None`.
@@ -710,8 +751,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       # the trainer-vs-sampler divergence.
       if (
           self.algo_config.sampler_is == "token"
-          and trainer_per_token_logps is not None
-      ):
+          or self.algo_config.seq_logprob_error_threshold is not None
+      ) and trainer_per_token_logps is not None:
         old_per_token_logps = trainer_per_token_logps
     elif self.algo_config.use_rollout_logps:
       old_per_token_logps = None
@@ -859,8 +900,12 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
 
     # None-safe: under packing the trainer logps stay None here and this same
     # call runs in _compute_packed_logps instead.
-    agreement_metrics, sampler_is_weights = self._sampler_trainer_agreement(
-        rollout_per_token_logps, trainer_per_token_logps, completion_mask
+    agreement_metrics, sampler_is_weights, completion_mask = (
+        self._sampler_trainer_agreement(
+            rollout_per_token_logps,
+            trainer_per_token_logps,
+            completion_mask,
+        )
     )
     metrics_to_log.update(agreement_metrics)
 

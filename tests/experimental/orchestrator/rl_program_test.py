@@ -3262,6 +3262,50 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_apply_sampler_trainer_agreement_seq_logprob_error_threshold(self):
+    """Sequences exceeding seq_logprob_error_threshold have completion_mask zeroed."""
+
+    async def _run():
+      self.mock_algo.algo_config.sampler_is = None
+      self.mock_algo.algo_config.seq_logprob_error_threshold = 2.0
+      program = self._create_program()
+      self.assertEqual(program.seq_logprob_error_threshold, 2.0)
+      trainer_logps = np.array(
+          [[-0.5, -0.5, -0.5], [-2.0, -2.0, -2.0]], dtype=np.float32
+      )
+      program.engine = mock.MagicMock()
+      program.engine.per_token_logps = mock.AsyncMock(
+          return_value=datatypes.LogprobsResponse(
+              per_token_logps=trainer_logps, model_version=1
+          )
+      )
+      batch = datatypes.RLTrainerPayload(
+          prompt_ids=np.array([[1, 2], [1, 2]], dtype=np.int32),
+          prompt_mask=np.array([[1, 1], [1, 1]], dtype=np.float32),
+          completion_ids=np.array([[3, 4, 5], [3, 4, 5]], dtype=np.int32),
+          completion_mask=np.array([[1, 1, 1], [1, 1, 1]], dtype=np.float32),
+          advantages=np.array([[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]], dtype=np.float32),
+          old_per_token_logps=np.array(
+              [[-0.5, -0.5, -0.5], [-0.5, -0.5, -0.5]], dtype=np.float32
+          ),
+      )
+      acc: dict[str, Any] = {}
+      out = await program._apply_sampler_trainer_agreement(batch, acc)
+
+      np.testing.assert_array_equal(
+          np.asarray(out.completion_mask),
+          np.array([[1.0, 1.0, 1.0], [0.0, 0.0, 0.0]], dtype=np.float32),
+      )
+      np.testing.assert_allclose(
+          np.asarray(out.old_per_token_logps), trainer_logps
+      )
+      self.assertIn("sampler_trainer/seq_error_masked_frac", acc)
+      self.assertAlmostEqual(
+          acc["sampler_trainer/seq_error_masked_frac"][1][0], 0.5, places=5
+      )
+
+    asyncio.run(_run())
+
   def test_collect_and_log_step_metrics_logs_sampler_agreement(self):
     """Accumulated agreement metrics are reduced by their agg fn and logged."""
     program = self._create_program()
