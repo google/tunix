@@ -222,7 +222,15 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       "--max_staleness",
       dest="max_staleness",
       type=int,
-      default=0,
+      default=os.getenv("MAX_STALENESS", 0),
+  )
+  parser.add_argument(
+      "--trajectory_group_order",
+      choices=("arrival", "prompt_batch"),
+      default=os.getenv("TRAJECTORY_GROUP_ORDER", "arrival"),
+      help=(
+          "Trajectory group order."
+      ),
   )
   parser.add_argument(
       "--weight_sync_mode",
