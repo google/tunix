@@ -74,8 +74,8 @@ export ROLLOUT_JOBSET_YAML="jobset.tpu.yaml"
 export ROLLOUT_TPU_SLICE="tpuv5:2x2x1"
 export ROLLOUT_MESH_FSDP=1
 export ROLLOUT_MESH_TP=1
-export ROLLOUT_WORKERS=16
-export ROLLOUT_REPLICAS=16
+export ROLLOUT_WORKERS="${ROLLOUT_WORKERS:-16}"
+export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-16}"
 
 # ==============================================================================
 # vLLM Rollout Configuration (from paste.googleplex.com/5903655694368768)
@@ -99,7 +99,7 @@ export VLLM_PREFIX_CACHE_RETENTION_INTERVAL="${VLLM_PREFIX_CACHE_RETENTION_INTER
 export VLLM_MAMBA_CACHE_MODE="${VLLM_MAMBA_CACHE_MODE:-${MAMBA_CACHE_MODE:-none}}"
 
 # Router replay
-export RETURN_ROUTED_EXPERTS="true"
+export RETURN_ROUTED_EXPERTS="${RETURN_ROUTED_EXPERTS:-false}"
 
 # KV Cache Configs
 export ROLLOUT_FREE_KV_CACHE="false"
