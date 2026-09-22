@@ -22,6 +22,7 @@ import atexit
 import collections
 import logging
 import os
+import re
 import threading
 from typing import Any, Callable
 import numpy as np
@@ -254,6 +255,27 @@ def init_global_fleet(
     if orchestrator_id:
       fleet_labels["app.kubernetes.io/created-by"] = orchestrator_id
 
+    # Derive sanitized DNS-1123 job name for template and warmpool naming
+    job_prefix = os.getenv("JOB_PREFIX")
+    if not job_prefix and orchestrator_id:
+      job_prefix = orchestrator_id.removesuffix("-orch")
+    clean_job = (
+        re.sub(r"[^a-z0-9-]+", "-", job_prefix.lower()).strip("-")[:24].rstrip("-")
+        if job_prefix
+        else ""
+    )
+
+    scaffold_prefix = "oh" if scaffold == "openhands" else "r2e"
+    custom_tmpl_prefix = os.getenv("TEMPLATE_NAME_PREFIX")
+    if custom_tmpl_prefix:
+      template_name_prefix = custom_tmpl_prefix
+    elif clean_job:
+      template_name_prefix = f"{scaffold_prefix}-{clean_job}-"
+    else:
+      template_name_prefix = f"{scaffold_prefix}-img-"
+
+    pool_name_fmt = os.getenv("POOL_NAME_FORMAT")
+
     fleet_kwargs: dict[str, Any] = {
         "clusters": [
             ClusterConfig(
@@ -273,7 +295,10 @@ def init_global_fleet(
         "warm_per_task": True,
         "install_teardown_hooks": True,
         "labels": fleet_labels,
+        "template_name_prefix": template_name_prefix,
     }
+    if pool_name_fmt:
+      fleet_kwargs["pool_name_format"] = pool_name_fmt
 
     try:
       from examples.deepswe import template as template_mod  # pyrefly: ignore[missing-import]
@@ -281,8 +306,6 @@ def init_global_fleet(
       template = template_mod.get_template(scaffold, node_sel)
       if template is not None:
         fleet_kwargs["template"] = template
-      if scaffold == "openhands":
-        fleet_kwargs["template_name_prefix"] = "oh-img-"
     except (ImportError, AttributeError):
       pass
 

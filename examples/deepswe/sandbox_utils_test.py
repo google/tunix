@@ -378,6 +378,59 @@ class SandboxUtilsTest(absltest.TestCase):
             mock_cluster.resources.managed_selector, mock_fleet.run_selector
         )
 
+  def test_init_global_fleet_derives_template_name_prefix_from_job_prefix(self):
+    mock_fleet = mock.MagicMock()
+    mock_as_rl = mock.MagicMock()
+    mock_as_rl.SandboxFleet.return_value = mock_fleet
+    with mock.patch.dict("sys.modules", {"agent_sandbox_rl": mock_as_rl}):
+      with mock.patch.dict(os.environ, {"JOB_PREFIX": "atwigg-openhands-rr"}):
+        with mock.patch.object(sandbox_utils, "_GLOBAL_FLEET", None):
+          _ = sandbox_utils.init_global_fleet(tasks=None, num_generations=4, scaffold="openhands")
+          fleet_cfg_call = mock_as_rl.FleetConfig.call_args[1]
+          self.assertEqual(
+              fleet_cfg_call.get("template_name_prefix"),
+              "oh-atwigg-openhands-rr-",
+          )
+
+  def test_init_global_fleet_derives_template_name_prefix_from_orchestrator_id(self):
+    mock_fleet = mock.MagicMock()
+    mock_as_rl = mock.MagicMock()
+    mock_as_rl.SandboxFleet.return_value = mock_fleet
+    with mock.patch.dict("sys.modules", {"agent_sandbox_rl": mock_as_rl}):
+      with mock.patch.dict(os.environ, {"ORCHESTRATOR_ID": "atwigg-mamba-orch"}, clear=True):
+        with mock.patch.object(sandbox_utils, "_GLOBAL_FLEET", None):
+          _ = sandbox_utils.init_global_fleet(tasks=None, num_generations=4, scaffold="r2egym")
+          fleet_cfg_call = mock_as_rl.FleetConfig.call_args[1]
+          self.assertEqual(
+              fleet_cfg_call.get("template_name_prefix"),
+              "r2e-atwigg-mamba-",
+          )
+
+  def test_init_global_fleet_respects_custom_prefixes_and_formats(self):
+    mock_fleet = mock.MagicMock()
+    mock_as_rl = mock.MagicMock()
+    mock_as_rl.SandboxFleet.return_value = mock_fleet
+    with mock.patch.dict("sys.modules", {"agent_sandbox_rl": mock_as_rl}):
+      with mock.patch.dict(
+          os.environ,
+          {
+              "JOB_PREFIX": "my-job",
+              "TEMPLATE_NAME_PREFIX": "custom-tmpl-",
+              "POOL_NAME_FORMAT": "custom-pool-{image_hash}",
+          },
+      ):
+        with mock.patch.object(sandbox_utils, "_GLOBAL_FLEET", None):
+          _ = sandbox_utils.init_global_fleet(tasks=None, num_generations=4)
+          fleet_cfg_call = mock_as_rl.FleetConfig.call_args[1]
+          self.assertEqual(
+              fleet_cfg_call.get("template_name_prefix"),
+              "custom-tmpl-",
+          )
+          self.assertEqual(
+              fleet_cfg_call.get("pool_name_format"),
+              "custom-pool-{image_hash}",
+          )
+
   def test_teardown_global_fleet_invokes_teardown_and_reaper(self):
     mock_fleet = mock.MagicMock()
     mock_fleet.run_id = "test-run-1234"
