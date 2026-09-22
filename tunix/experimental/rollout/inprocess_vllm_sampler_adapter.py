@@ -18,7 +18,6 @@ import abc
 import asyncio
 from concurrent import futures
 import functools
-import numbers
 from typing import Any, List, Sequence
 from absl import logging
 from flax import nnx
@@ -29,6 +28,7 @@ from tunix.experimental.rollout.raiden_weight_sync_mixin import (
     RaidenDestinationWeightSyncMixin,
 )
 from tunix.experimental.weight_sync import weight_sync
+from tunix.generate import utils as generate_utils
 
 Sampler = base_sampler_lib.Sampler
 
@@ -36,6 +36,7 @@ Sampler = base_sampler_lib.Sampler
 def _get_vllm_sampler_cls():
   """Lazy import of tunix.generate.vllm_sampler to avoid top-level vLLM import side-effects."""
   from tunix.generate import vllm_sampler as generate_vllm_lib  # pylint: disable=g-import-not-at-top
+
   return generate_vllm_lib
 
 
@@ -140,29 +141,21 @@ class InprocessVllmSamplerAdapter(
           tokenizer=self.tokenizer, config=self.config
       )
 
-  def _unpadded_prompt_tokens(self, padded_tokens: Any) -> np.ndarray:
-    """Returns sampler-tokenized prompt ids without backend left padding."""
-    arr = np.asarray(padded_tokens, dtype=np.int32).reshape(-1)
-    pad_id = getattr(self.tokenizer, "pad_token_id", None)
-    if pad_id is None:
-      pad_id = getattr(self.tokenizer, "eos_token_id", None)
-    if not isinstance(pad_id, numbers.Integral):
-      return arr
-    non_pad = np.flatnonzero(arr != pad_id)
-    if non_pad.size == 0:
-      return np.zeros(0, dtype=np.int32)
-    return arr[non_pad[0] :]
-
   def _prompt_tokens_from_request(
-      self, req: Any, fallback_padded_tokens: Any
+      self,
+      req: Any,
+      fallback_padded_tokens: Any,
+      prompt_length: int | None = None,
   ) -> np.ndarray:
     """Returns request token ids directly when available, else sampler output."""
     prompt = req.prompt if hasattr(req, "prompt") else req
-    try:
+    if generate_utils.is_token_id_sequence(prompt):
       return np.asarray(prompt, dtype=np.int32).reshape(-1)
-    except (TypeError, ValueError):
-      pass
-    return self._unpadded_prompt_tokens(fallback_padded_tokens)
+    return generate_utils.unpad_prompt_tokens(
+        fallback_padded_tokens,
+        pad_id=self.tokenizer.pad_id() if self.tokenizer is not None else None,
+        prompt_length=prompt_length,
+    )
 
   def _prompt_to_input_string(self, prompt: Any) -> Any:
     """Renders chat-message prompts to strings for Tunix VllmSampler."""
@@ -175,9 +168,7 @@ class InprocessVllmSamplerAdapter(
         return self.tokenizer.apply_chat_template(
             list(prompt), tokenize=False, add_generation_prompt=True
         )
-      return "\n".join(
-          str(message.get("content", "")) for message in prompt
-      )
+      return "\n".join(str(message.get("content", "")) for message in prompt)
     return prompt
 
   # --- Lifecycle & Topology ---
@@ -248,6 +239,8 @@ class InprocessVllmSamplerAdapter(
       is_sequence = False
 
     prompts = []
+    prompt_token_ids_batch = []
+    has_token_prompts = False
     max_gen_steps_list = []
     temps = []
     top_ps = []
@@ -259,7 +252,13 @@ class InprocessVllmSamplerAdapter(
 
     for req in requests:
       prompt = req.prompt if hasattr(req, "prompt") else req
-      prompts.append(self._prompt_to_input_string(prompt))
+      if generate_utils.is_token_id_sequence(prompt):
+        has_token_prompts = True
+        prompt_token_ids_batch.append(
+            np.asarray(prompt, dtype=np.int32).reshape(-1)
+        )
+      else:
+        prompts.append(self._prompt_to_input_string(prompt))
       sp = (
           req.sampling_params
           if hasattr(req, "sampling_params") and req.sampling_params is not None
@@ -278,9 +277,7 @@ class InprocessVllmSamplerAdapter(
           getattr(sp, "routed_experts_prompt_start", 0)
       )
 
-    max_generation_steps = (
-        max(max_gen_steps_list) if max_gen_steps_list else 64
-    )
+    max_generation_steps = max(max_gen_steps_list) if max_gen_steps_list else 64
     temperature = temps[0] if temps else 0.0
     top_p = top_ps[0] if top_ps else None
     top_k = top_ks[0] if top_ks else None
@@ -308,21 +305,27 @@ class InprocessVllmSamplerAdapter(
       )
 
     loop = asyncio.get_running_loop()
+    sampler_call_kwargs = dict(
+        max_generation_steps=max_generation_steps,
+        temperature=temperature,
+        top_p=top_p,
+        top_k=top_k,
+        seed=seed,
+        return_logprobs=return_logprobs,
+        routed_experts_prompt_start=routed_experts_prompt_start,
+    )
+    if has_token_prompts:
+      sampler_call_kwargs["input_strings"] = None
+      sampler_call_kwargs["prompt_token_ids"] = prompt_token_ids_batch
+    else:
+      sampler_call_kwargs["input_strings"] = prompts
+
     sampler_output = await loop.run_in_executor(
         self._executor,
-        functools.partial(
-            self.vllm_sampler,
-            input_strings=prompts,
-            max_generation_steps=max_generation_steps,
-            temperature=temperature,
-            top_p=top_p,
-            top_k=top_k,
-            seed=seed,
-            return_logprobs=return_logprobs,
-            routed_experts_prompt_start=routed_experts_prompt_start,
-        ),
+        functools.partial(self.vllm_sampler, **sampler_call_kwargs),
     )
 
+    prompt_lengths = getattr(sampler_output, "prompt_lengths", None)
     responses = []
     for i, req in enumerate(requests):
       req_id = getattr(req, "request_id", "")
@@ -349,8 +352,13 @@ class InprocessVllmSamplerAdapter(
           if toks is not None
           else np.zeros(0, dtype=np.int32)
       )
+      prompt_len = (
+          int(prompt_lengths[i])
+          if prompt_lengths is not None and i < len(prompt_lengths)
+          else None
+      )
       prompt_token_ids = self._prompt_tokens_from_request(
-          req, sampler_output.padded_prompt_tokens[i]
+          req, sampler_output.padded_prompt_tokens[i], prompt_length=prompt_len
       )
       log_ps = np.array(lps, dtype=np.float32) if lps is not None else None
 

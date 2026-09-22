@@ -221,8 +221,7 @@ def _extract_reward(item: Any) -> float:
   traj = getattr(item, "traj", item)
   if not isinstance(traj, dict):
     raise TypeError(
-        "Expected a Token-mode trajectory mapping, got"
-        f" {type(traj).__name__}."
+        f"Expected a Token-mode trajectory mapping, got {type(traj).__name__}."
     )
   if "trajectory_reward" not in traj:
     raise KeyError(
@@ -684,6 +683,9 @@ class StandardRLProgram(RLProgram):
         dispatch_kwargs: dict[str, Any] = {
             "num_generations": self.num_generations,
             "policy_version": self.policy_version,
+            "exact_token_continuity": getattr(
+                self.algo.algo_config, "exact_token_continuity", True
+            ),
         }
         if self.generation_args is not None:
           dispatch_kwargs["generation_args"] = self.generation_args

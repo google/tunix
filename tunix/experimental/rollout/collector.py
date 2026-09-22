@@ -161,11 +161,12 @@ class TrajectoryCollectorEngine:
         None
     )
     self.max_response_length = request.max_response_length
+    self.exact_token_continuity = request.exact_token_continuity
     # The stop set the sampler was configured with, which is what decides
     # whether a rollout ended on its own. Defined at the recipe level via
     # `RolloutConfig.eos_tokens` (e.g. `<|im_end|>` for Qwen chat models) rather
     # than forced from the base tokenizer.
-    self.eos_ids = frozenset(int(token_id) for token_id in (eos_ids or ()))
+    self.eos_ids = frozenset(int(token_id) for token_id in eos_ids or ())
     metadata = request.metadata or {}
     timeout = metadata.get("episode_timeout")
     self.episode_timeout = float(
@@ -220,6 +221,7 @@ class TrajectoryCollectorEngine:
 
   async def run_episode(self) -> agent_types.TrajectoryItem:
     """Executes multi-turn agentic rollout episode and returns TrajectoryItem."""
+
     # Note: model_call is an async coroutine callback invoked directly by
     # TrajectoryCollectEngine on the asyncio event loop without blocking
     # threads.
@@ -230,6 +232,7 @@ class TrajectoryCollectorEngine:
       generation_kwargs = dict(self.request.generation_kwargs)
       # NB: extra kwargs can be passed in from trajectory_collect_engine.
       generation_kwargs.update(kwargs)
+      prompt_token_ids = generation_kwargs.pop("prompt_token_ids", None)
       request_max_generation_steps = generation_kwargs.pop(
           "max_generation_steps", None
       )
@@ -284,13 +287,14 @@ class TrajectoryCollectorEngine:
               "routed_experts_prompt_start", 0
           ),
       )
+      prompt_payload = (
+          np.asarray(prompt_token_ids, dtype=np.int32)
+          if prompt_token_ids is not None
+          else _build_prompt(self.chat_parser, chat_completions)
+      )
       sampling_req = sampler_lib.SamplingRequest(
           request_id=self.traj_id,
-          prompt=_build_prompt(
-              self.chat_parser,
-              chat_completions,
-              generation_kwargs.get("prompt_token_ids"),
-          ),
+          prompt=prompt_payload,
           sampling_params=sampling_params,
       )
       res = await self.sampler.sample(sampling_req, **generation_kwargs)
@@ -305,13 +309,11 @@ class TrajectoryCollectorEngine:
         tokens = np.zeros(0, dtype=np.int32)
       logprobs = getattr(res, "logprobs", None)
       routed_experts = getattr(res, "routed_experts", None)
-      raw_prompt_tokens = getattr(res, "prompt_token_ids", None)
-      if raw_prompt_tokens is None:
-        prompt_tokens = np.zeros(0, dtype=np.int32)
-      else:
-        prompt_tokens = np.asarray(
-            raw_prompt_tokens, dtype=np.int32
-        ).reshape(-1)
+      prompt_tokens = np.asarray(
+          getattr(res, "prompt_token_ids", np.array([], dtype=np.int32)),
+          dtype=np.int32,
+      ).reshape(-1)
+      prompt_len = int(prompt_tokens.size)
       if prompt_tokens.size:
         prompt_tokens = prompt_tokens.reshape(1, -1)
         prompt_lengths = np.array([prompt_tokens.shape[1]], dtype=np.int32)
@@ -329,12 +331,11 @@ class TrajectoryCollectorEngine:
           logits=None,
           tokens=[tokens],
           left_padded_prompt_tokens=prompt_tokens,
-          # Required by `exact_token_continuity`: it unpads the echoed prompt
-          # with this to check a later turn against the recorded history.
-          # Nothing pads `prompt_tokens` here, so the length is the full row.
-          prompt_lengths=prompt_lengths,
+          prompt_lengths=np.asarray([prompt_len], dtype=np.int32),
           logprobs=[logprobs] if logprobs is not None else None,
-          routed_experts=[routed_experts] if routed_experts is not None else None,
+          routed_experts=[routed_experts]
+          if routed_experts is not None
+          else None,
       )
 
     if not self.agent or not self.env:

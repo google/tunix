@@ -213,7 +213,11 @@ def tokenize_and_generate_masks(
     all_tokens.extend(tokens)
     all_masks.extend(masks)
 
-  all_tokens = tokenizer.dedup_bos_ids(all_tokens)
+  deduped_tokens = tokenizer.dedup_bos_ids(all_tokens)
+  n_removed = len(all_tokens) - len(deduped_tokens)
+  if n_removed > 0:
+    all_masks = all_masks[n_removed:]
+  all_tokens = deduped_tokens
   return all_tokens, all_masks
 
 
@@ -312,5 +316,6 @@ def continuation_prompt_tokens(trajectory) -> np.ndarray:
   ]
   for step in trajectory.steps:
     segments.append(generate_utils.as_token_ids(step.assistant_tokens))
-    segments.append(generate_utils.as_token_ids(step.env_tokens))
+    if step.env_tokens is not None:
+      segments.append(generate_utils.as_token_ids(step.env_tokens))
   return np.concatenate(segments)

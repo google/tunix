@@ -72,7 +72,6 @@ def _response_to_trajectory_item(resp: Any) -> datatypes.TrajectoryItem:
   raise ValueError("RolloutResponse payload is None.")
 
 
-
 class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
   """Worker-backed compute router dispatching RPCs across role pools."""
 
@@ -252,6 +251,9 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
                 generation_kwargs=generation_kwargs,
                 max_turns=max_turns,
                 max_response_length=max_response_length,
+                exact_token_continuity=kwargs.get(
+                    "exact_token_continuity", True
+                ),
                 metadata=request_metadata,
             )
         )

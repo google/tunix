@@ -15,7 +15,6 @@
 """Vanilla Sampler adapter using Tunix JAX Sampler."""
 
 import abc
-import numbers
 from typing import Any, List, Sequence
 from absl import logging
 from flax import nnx
@@ -27,6 +26,7 @@ from tunix.experimental.rollout.raiden_weight_sync_mixin import (
 )
 from tunix.experimental.weight_sync import weight_sync
 from tunix.generate import sampler as generate_sampler_lib
+from tunix.generate import utils as generate_utils
 
 Sampler = base_sampler_lib.Sampler
 
@@ -145,19 +145,6 @@ class VanillaSamplerAdapter(RaidenDestinationWeightSyncMixin, Sampler, abc.ABC):
     ):
       self.sampler = self._build_generate_sampler(None)
 
-  def _unpadded_prompt_tokens(self, padded_tokens: Any) -> np.ndarray:
-    """Returns sampler-tokenized prompt ids without backend left padding."""
-    arr = np.asarray(padded_tokens, dtype=np.int32).reshape(-1)
-    pad_id = getattr(self.tokenizer, "pad_token_id", None)
-    if pad_id is None:
-      pad_id = getattr(self.tokenizer, "eos_token_id", None)
-    if not isinstance(pad_id, numbers.Integral):
-      return arr
-    non_pad = np.flatnonzero(arr != pad_id)
-    if non_pad.size == 0:
-      return np.zeros(0, dtype=np.int32)
-    return arr[non_pad[0] :]
-
   # --- Lifecycle & Topology ---
   async def start(self, **kwargs) -> str | None | Any:
     """Starts the sampling engine or local loop."""
@@ -221,6 +208,8 @@ class VanillaSamplerAdapter(RaidenDestinationWeightSyncMixin, Sampler, abc.ABC):
       is_sequence = False
 
     prompts = []
+    prompt_token_ids_batch = []
+    has_token_prompts = False
     max_gen_steps_list = []
     temps = []
     top_ps = []
@@ -232,7 +221,13 @@ class VanillaSamplerAdapter(RaidenDestinationWeightSyncMixin, Sampler, abc.ABC):
 
     for req in requests:
       prompt = req.prompt if hasattr(req, "prompt") else req
-      prompts.append(prompt)
+      if generate_utils.is_token_id_sequence(prompt):
+        has_token_prompts = True
+        prompt_token_ids_batch.append(
+            np.asarray(prompt, dtype=np.int32).reshape(-1)
+        )
+      else:
+        prompts.append(prompt)
       sp = (
           req.sampling_params
           if hasattr(req, "sampling_params") and req.sampling_params is not None
@@ -251,9 +246,7 @@ class VanillaSamplerAdapter(RaidenDestinationWeightSyncMixin, Sampler, abc.ABC):
       if sp.beam_size is not None:
         beam_sizes.append(sp.beam_size)
 
-    max_generation_steps = (
-        max(max_gen_steps_list) if max_gen_steps_list else 64
-    )
+    max_generation_steps = max(max_gen_steps_list) if max_gen_steps_list else 64
     temperature = temps[0] if temps else 0.0
     top_p = top_ps[0] if top_ps else None
     top_k = top_ks[0] if top_ks else None
@@ -266,8 +259,7 @@ class VanillaSamplerAdapter(RaidenDestinationWeightSyncMixin, Sampler, abc.ABC):
     )
     beam_size = beam_sizes[0] if beam_sizes else None
 
-    sampler_output = self.sampler(
-        input_strings=prompts,
+    sampler_call_kwargs: dict[str, Any] = dict(
         max_generation_steps=max_generation_steps,
         temperature=temperature,
         top_p=top_p,
@@ -277,7 +269,15 @@ class VanillaSamplerAdapter(RaidenDestinationWeightSyncMixin, Sampler, abc.ABC):
         return_logits=return_logits,
         return_logprobs=return_logprobs,
     )
+    if has_token_prompts:
+      sampler_call_kwargs["input_strings"] = None
+      sampler_call_kwargs["prompt_token_ids"] = prompt_token_ids_batch
+    else:
+      sampler_call_kwargs["input_strings"] = prompts
 
+    sampler_output = self.sampler(**sampler_call_kwargs)
+
+    prompt_lengths = getattr(sampler_output, "prompt_lengths", None)
     responses = []
     for i, req in enumerate(requests):
       req_id = getattr(req, "request_id", "")
@@ -301,8 +301,15 @@ class VanillaSamplerAdapter(RaidenDestinationWeightSyncMixin, Sampler, abc.ABC):
           if toks is not None
           else np.zeros(0, dtype=np.int32)
       )
-      prompt_token_ids = self._unpadded_prompt_tokens(
-          sampler_output.padded_prompt_tokens[i]
+      prompt_len = (
+          int(prompt_lengths[i])
+          if prompt_lengths is not None and i < len(prompt_lengths)
+          else None
+      )
+      prompt_token_ids = generate_utils.unpad_prompt_tokens(
+          sampler_output.padded_prompt_tokens[i],
+          pad_id=self.tokenizer.pad_id() if self.tokenizer is not None else None,
+          prompt_length=prompt_len,
       )
       log_ps = np.array(lps, dtype=np.float32) if lps is not None else None
 
