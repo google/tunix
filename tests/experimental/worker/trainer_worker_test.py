@@ -16,10 +16,9 @@
 
 Verifies TrainerWorker RPC request unpacking (TrainRequest), delegation to
 AbstractTrainer (fwd_bwd, eval_step, update), response metadata stamping, and
-per-token log-prob scorer run through AbstractTrainer.model_scope.
+per-token log-prob scorer run through AbstractTrainer.fwd_only.
 """
 
-import contextlib
 from typing import Any
 
 from absl.testing import absltest
@@ -38,7 +37,7 @@ class FakeTrainer(abstract_trainer.AbstractTrainer):
   def __init__(self):
     self.fwd_bwd_calls = []
     self.eval_step_calls = []
-    self.model_scope_calls = []
+    self.fwd_only_calls = []
     self.model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
     self.policy_version = 3
     self.step_count = 10
@@ -63,10 +62,9 @@ class FakeTrainer(abstract_trainer.AbstractTrainer):
   def eval_step(self, payload, **kwargs):
     self.eval_step_calls.append((payload, kwargs))
 
-  @contextlib.contextmanager
-  def model_scope(self, *args, **kwargs):
-    self.model_scope_calls.append((args, kwargs))
-    yield self.model, args, kwargs
+  def fwd_only(self, fn, *args, **kwargs):
+    self.fwd_only_calls.append((args, kwargs))
+    return fn(self.model, *args, **kwargs)
 
   def save_checkpoint(self, metadata, **kwargs):
     pass
@@ -216,7 +214,7 @@ class TrainerWorkerTest(absltest.TestCase):
     self.assertEqual(result.per_token_logps.dtype, np.float32)
     self.assertEqual(result.per_token_logps.shape, (3, 4))
     # Whole request in one forward by default.
-    self.assertLen(self.fake_trainer.model_scope_calls, 1)
+    self.assertLen(self.fake_trainer.fwd_only_calls, 1)
     np.testing.assert_allclose(
         result.per_token_logps,
         self._expected_logps(request),
@@ -235,9 +233,9 @@ class TrainerWorkerTest(absltest.TestCase):
 
     result = worker.per_token_logps(items=request)
 
-    self.assertLen(self.fake_trainer.model_scope_calls, 2)
-    first_args, _ = self.fake_trainer.model_scope_calls[0]
-    second_args, _ = self.fake_trainer.model_scope_calls[1]
+    self.assertLen(self.fake_trainer.fwd_only_calls, 2)
+    first_args, _ = self.fake_trainer.fwd_only_calls[0]
+    second_args, _ = self.fake_trainer.fwd_only_calls[1]
     np.testing.assert_array_equal(first_args[1], request.completion_tokens[:2])
     np.testing.assert_array_equal(second_args[1], request.completion_tokens[2:])
     np.testing.assert_allclose(
@@ -258,7 +256,7 @@ class TrainerWorkerTest(absltest.TestCase):
 
     result = worker.per_token_logps(items=request)
 
-    _, kwargs = self.fake_trainer.model_scope_calls[0]
+    _, kwargs = self.fake_trainer.fwd_only_calls[0]
     self.assertEqual(kwargs["temperature"], 0.7)
     self.assertEqual(kwargs["chunk_size"], 3)
     np.testing.assert_allclose(
@@ -305,7 +303,7 @@ class TrainerWorkerTest(absltest.TestCase):
     )
     with self.assertRaises(ValueError):
       self.worker.per_token_logps(items=request)
-    self.assertEmpty(self.fake_trainer.model_scope_calls)
+    self.assertEmpty(self.fake_trainer.fwd_only_calls)
     self.assertEqual(self.worker.state, datatypes.WorkerState.ERROR)
 
   def test_per_token_logps_requires_pad_and_eos(self):
@@ -316,7 +314,7 @@ class TrainerWorkerTest(absltest.TestCase):
     )
     with self.assertRaises(ValueError):
       self.worker.per_token_logps(items=request)
-    self.assertEmpty(self.fake_trainer.model_scope_calls)
+    self.assertEmpty(self.fake_trainer.fwd_only_calls)
 
 
 class TrainerWorkerExecutionContextTest(absltest.TestCase):

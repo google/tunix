@@ -18,6 +18,7 @@ import contextlib
 from typing import Any, Callable, ContextManager, cast
 
 from flax import nnx
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -27,6 +28,27 @@ from tunix.experimental.worker import abstract_worker
 from tunix.rl import common as rl_common
 
 WorkerState = datatypes.WorkerState
+
+
+def _compute_per_token_logps(
+    model: nnx.Module, *args: Any, **kwargs: Any
+) -> jax.Array:
+  """Computes per-token log-probabilities under live model weights.
+
+  Args:
+    model: The NNX Module instance to score with.
+    *args: Positional arguments forwarded to
+      `rl_common.compute_per_token_logps`.
+    **kwargs: Keyword arguments forwarded to
+      `rl_common.compute_per_token_logps`.
+
+  Returns:
+    A JAX Array containing the computed per-token log-probabilities.
+  """
+  graphdef, state = nnx.split(model)
+  return rl_common.compute_per_token_logps(
+      graphdef, state, *args, stop_gradient=True, **kwargs
+  )
 
 
 class TrainerWorker(abstract_worker.Worker):
@@ -303,28 +325,19 @@ class TrainerWorker(abstract_worker.Worker):
       outs = []
       for start in range(0, batch_size, micro_batch_size):
         sl = slice(start, start + micro_batch_size)
-        with self._trainer.model_scope(
-            prompt[sl],
-            completion[sl],
-            pad_id=items.pad_id,
-            eos_id=items.eos_id,
-            temperature=temperature,
-            chunk_size=self._logps_chunk_size,
-            segment_ids=None if seg_ids is None else seg_ids[sl],
-            segment_positions=None if seg_pos is None else seg_pos[sl],
-        ) as (model, scoped_args, scoped_kwargs):
-          # Split per call, never once in __init__: the optimizer writes new
-          # arrays every step, and a cached State would pin the old ones.
-          graphdef, state = nnx.split(model)
-          outs.append(
-              rl_common.compute_per_token_logps(
-                  graphdef,
-                  state,
-                  *scoped_args,
-                  stop_gradient=True,
-                  **scoped_kwargs,
-              )
-          )
+        outs.append(
+            self._trainer.fwd_only(
+                _compute_per_token_logps,
+                prompt[sl],
+                completion[sl],
+                pad_id=items.pad_id,
+                eos_id=items.eos_id,
+                temperature=temperature,
+                chunk_size=self._logps_chunk_size,
+                segment_ids=None if seg_ids is None else seg_ids[sl],
+                segment_positions=None if seg_pos is None else seg_pos[sl],
+            )
+        )
       result = np.asarray(jnp.concatenate(outs, axis=0), dtype=np.float32)
       self._last_error = None
       return datatypes.LogprobsResponse(

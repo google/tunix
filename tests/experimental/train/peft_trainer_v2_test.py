@@ -175,36 +175,36 @@ class PeftTrainerTest(parameterized.TestCase):
 
     trainer.train(self.train_ds)  # No eval dataset.
 
-  def test_model_scope_yields_live_model_and_shards_arrays(self):
+  def test_fwd_only_hands_live_model_and_shards_arrays(self):
     config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=100)
     model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
     trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
     tokens = np.arange(8, dtype=np.int32).reshape(2, 4)
     empty = np.zeros((2, 0), dtype=np.int32)
 
-    with self.mesh:
-      with trainer.model_scope(tokens, y=empty, pad_id=0, opt=None) as (
-          scoped_model,
-          scoped_args,
-          scoped_kwargs,
-      ):
-        (scoped_x,) = scoped_args
+    def fn(m, x, *, y, pad_id, opt=None):
+      return m, x, y, pad_id, opt
 
-    # The trainer model itself is yielded (no copy, no split).
-    self.assertIs(scoped_model, model)
+    with self.mesh:
+      fn_model, fn_x, fn_y, fn_pad, fn_opt = trainer.fwd_only(
+          fn, tokens, y=empty, pad_id=0
+      )
+
+    # The trainer model itself is passed (no copy, no split).
+    self.assertIs(fn_model, model)
     # Array leaves become sharded device arrays; scalars / None pass through.
-    self.assertIsInstance(scoped_x, jax.Array)
-    np.testing.assert_array_equal(np.asarray(scoped_x), tokens)
-    self.assertIsInstance(scoped_x.sharding, shd.NamedSharding)
+    self.assertIsInstance(fn_x, jax.Array)
+    np.testing.assert_array_equal(np.asarray(fn_x), tokens)
+    self.assertIsInstance(fn_x.sharding, shd.NamedSharding)
     self.assertEqual(
-        scoped_x.sharding.spec,  # pyrefly: ignore[missing-attribute]
+        fn_x.sharding.spec,  # pyrefly: ignore[missing-attribute]
         shd.PartitionSpec(config.data_sharding_axis),
     )
-    self.assertEqual(scoped_kwargs['y'].shape, (2, 0))
-    self.assertEqual(scoped_kwargs['pad_id'], 0)
-    self.assertIsNone(scoped_kwargs['opt'])
+    self.assertEqual(fn_y.shape, (2, 0))
+    self.assertEqual(fn_pad, 0)
+    self.assertIsNone(fn_opt)
 
-  def test_model_scope_runs_jitted_scorer_read_only(self):
+  def test_fwd_only_runs_jitted_scorer_read_only(self):
     config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=100)
     model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
     trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
@@ -220,40 +220,11 @@ class PeftTrainerTest(parameterized.TestCase):
       )
       return logits.sum()
 
-    with trainer.model_scope(np.arange(1, 5, dtype=np.int32)[None]) as (
-        scoped_model,
-        scoped_args,
-        _,
-    ):
-      out = logits_sum(scoped_model, *scoped_args)
+    out = trainer.fwd_only(logits_sum, np.arange(1, 5, dtype=np.int32)[None])
 
     self.assertTrue(np.isfinite(float(out)))
     after = jax.tree.map(np.asarray, nnx.state(model, nnx.Param))
     jax.tree.map(np.testing.assert_array_equal, before, after)
-
-  def test_model_scope_propagates_exceptions_from_body(self):
-    config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=100)
-    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
-    trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
-
-    with self.assertRaisesRegex(ValueError, 'boom'):
-      with trainer.model_scope(np.zeros((1, 4), dtype=np.int32)):
-        raise ValueError('boom')
-
-    # The scope is reusable afterwards: the failure left nothing half-entered.
-    with trainer.model_scope(np.zeros((1, 4), dtype=np.int32)) as (m, _, _):
-      self.assertIs(m, model)
-
-  def test_model_scope_reads_model_at_yield_time(self):
-    config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=100)
-    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
-    trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
-    replacement = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(1))
-
-    trainer.model = replacement
-
-    with trainer.model_scope(np.zeros((1, 4), dtype=np.int32)) as (m, _, _):
-      self.assertIs(m, replacement)
 
   @parameterized.named_parameters(
       ('lora_disabled_distributed', False, True),

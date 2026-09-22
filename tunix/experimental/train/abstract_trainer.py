@@ -18,7 +18,7 @@ Defines the pure ML algorithmic core of a trainer.
 """
 
 import abc
-from typing import Any, Callable, ContextManager
+from typing import Any, Callable
 
 from tunix.experimental.common import datatypes
 from tunix.experimental.metrics import metrics
@@ -139,29 +139,23 @@ class AbstractTrainer(abc.ABC):
     )
 
   @abc.abstractmethod
-  def model_scope(
-      self, *args: Any, **kwargs: Any
-  ) -> ContextManager[tuple[Any, tuple[Any, ...], dict[str, Any]]]:
-    """Read-only, scoped access to the live model under the trainer's placement.
+  def fwd_only(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Read-only.
 
-    Yields `(model, args, kwargs)`, where the inputs have been committed to the
-    shardings this trainer would use for a step. The caller owns the
-    computation -- including any `jax.jit` -- and must not mutate the model.
+    Runs a forward pass with the trainer model and caller-supplied function.
 
-    Everything the caller traces must happen inside the `with` block.
-    Implementations may hold a mesh or logical-axis-rule context open for its
-    duration, and `jax.jit` is lazy: a call traced after the block exits sees
-    an empty rule set and gets partitioned by guesswork.
-
+    The trainer owns model access and shards `args`/`kwargs` on its data axis;
+    `fn` owns the computation and must not mutate the model.
     Args:
-      *args: Positional inputs to place before yielding.
-      **kwargs: Keyword inputs to place before yielding.
+      fn: Called as `fn(model, *args, **kwargs)`.
+      *args: Positional arguments forwarded to `fn` after sharding.
+      **kwargs: Keyword arguments forwarded to `fn` after sharding.
 
     Returns:
-      A context manager yielding `(model, placed_args, placed_kwargs)`.
+      Whatever `fn` returns.
     """
     raise NotImplementedError(
-        f"{type(self).__name__} does not implement model_scope."
+        f"{type(self).__name__} does not implement fwd_only."
     )
 
   @abc.abstractmethod

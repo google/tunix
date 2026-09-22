@@ -14,7 +14,7 @@
 
 """PEFT trainer."""
 
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterable, Mapping
 import contextlib
 import dataclasses
 import functools
@@ -1153,32 +1153,11 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
           self._buffered_eval_metrics = None
 
   @override
-  @contextlib.contextmanager
-  def model_scope(
-      self, *args: Any, **kwargs: Any
-  ) -> Iterator[tuple[nnx.Module, tuple[Any, ...], dict[str, Any]]]:
-    """Yields the live model and placed inputs for a read-only forward pass.
+  def fwd_only(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Runs `fn(model, *args, **kwargs)` on `self.model'.
 
-    Shards the inputs on the trainer's data axis and hands them back alongside
-    `self.model`. The caller owns the computation -- including any `jax.jit` --
-    and must not mutate the model.
-
-    The block is where tracing has to happen: `jax.jit` is lazy, so a call
-    built inside the block but traced after it leaves the placement above
-    unapplied.
-
-    Usage:
-
-        with trainer.model_scope(tokens, pad_id=0) as (model, args, kwargs):
-            out = my_jitted_fn(model, *args, **kwargs)
-
-    Args:
-      *args: Positional inputs to shard before yielding.
-      **kwargs: Keyword inputs to shard before yielding.
-
-    Yields:
-      A `(model, args, kwargs)` tuple whose array inputs are sharded on the
-      trainer's data axis.
+    Shards the inputs and passes them to the function along with the live
+    model.
     """
     axis = self.config.data_sharding_axis
 
@@ -1193,9 +1172,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       return sharding_utils.shard_input(x, axis)
 
     args, kwargs = jax.tree.map(_shard, (args, kwargs))
-    # Read `self.model` at yield time, not at call time: it is the trainer's
-    # answer to "which weights are live", and a subclass may rebind it.
-    yield self.model, args, kwargs
+    return fn(self.model, *args, **kwargs)
 
   @override
   def save_checkpoint(self, metadata: Any = None, **kwargs) -> None:
