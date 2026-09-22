@@ -211,7 +211,10 @@ def sequence_geomean_ratio(
 
 
 def sequence_mult_prob_error(
-    log_is_raw: jax.Array, mask: jax.Array
+    log_is_raw: jax.Array,
+    mask: jax.Array,
+    segment_ids: jax.Array | None = None,
+    num_segments: int | None = None,
 ) -> jax.Array:
   """Per-sequence multiplicative probability error, `mean_t exp(|log_is_t|)`.
 
@@ -236,17 +239,27 @@ def sequence_mult_prob_error(
     log_is_raw: Per-token trainer-minus-sampler log ratio, `[B, T]`, before
       sanitising.
     mask: Tokens to include, `[B, T]`.
+    segment_ids: Optional `[B, T]` packing segment IDs.
+    num_segments: Optional static segment count; required when `segment_ids` is
+      provided.
 
   Returns:
-    `[B]`, and 0.0 for fully masked sequences so they can neither drag a
+    `[B]` when `segment_ids` is None, or `[B, num_segments]` when `segment_ids`
+    is provided, and 0.0 for fully masked sequences so they can neither drag a
     minimum statistic down nor trip a threshold spuriously.
   """
-  denom = mask.sum(axis=-1)
   # `where` rather than multiplying by the mask: an unmasked position may hold
   # an infinity, and `inf * 0` is NaN, which would spread a single padded slot
   # across the whole sequence's error.
   abs_log_is = jnp.where(mask > 0, jnp.abs(log_is_raw), 0.0)
-  num = (jnp.exp(abs_log_is) * mask).sum(axis=-1)
+  if segment_ids is None:
+    denom = mask.sum(axis=-1)
+    num = (jnp.exp(abs_log_is) * mask).sum(axis=-1)
+  else:
+    denom = common.segmented_sum(mask, segment_ids, num_segments)
+    num = common.segmented_sum(
+        jnp.exp(abs_log_is) * mask, segment_ids, num_segments
+    )
   return jnp.where(denom > 0, num / jnp.clip(denom, 1.0, None), 0.0)
 
 
@@ -254,13 +267,15 @@ class SequenceMask(NamedTuple):
   """Result of `sequence_loss_mask`.
 
   Attributes:
-    sample_mask: Per-sequence loss multiplier `[B]`; 1.0 to keep.
-    loss_mask: `completion_mask` restricted by `sample_mask`, `[B, T]`. What
-      the loss and its denominator should aggregate over.
-    mult_prob_error: Per-sequence multiplicative probability error `[B]`, or
-      None when no threshold was supplied. Reported for every sequence the
-      gate saw, kept or dropped, so the distribution is visible before anyone
-      tightens the threshold.
+    sample_mask: Per-sequence loss multiplier `[B]` (or `[B, num_segments]` when
+      `segment_ids` is provided); 1.0 to keep.
+    loss_mask: `completion_mask` restricted by `sample_mask`, `[B, T]`. What the
+      loss and its denominator should aggregate over.
+    mult_prob_error: Per-sequence multiplicative probability error `[B]` (or
+      `[B, num_segments]` when `segment_ids` is provided), or None when no
+      threshold was supplied. Reported for every sequence the gate saw, kept or
+      dropped, so the distribution is visible before anyone tightens the
+      threshold.
   """
 
   sample_mask: jax.Array
@@ -274,6 +289,8 @@ def sequence_loss_mask(
     mask_overlong: bool = False,
     log_is_raw: jax.Array | None = None,
     mult_prob_error_threshold: float | None = None,
+    segment_ids: jax.Array | None = None,
+    num_segments: int | None = None,
 ) -> SequenceMask:
   """Per-sequence loss multiplier, and the token mask it induces.
 
@@ -296,8 +313,9 @@ def sequence_loss_mask(
 
   Args:
     completion_mask: Per-token mask over scored tokens, `[B, T]`.
-    overlong: 1.0 for sequences the rollout engine truncated, `[B]`, or None
-      when the engine reports no truncation verdict.
+    overlong: 1.0 for sequences the rollout engine truncated, `[B]` (or `[B, T]`
+      under sequence packing), or None when the engine reports no truncation
+      verdict.
     mask_overlong: Whether to drop truncated sequences from the update.
     log_is_raw: Per-token trainer-minus-sampler log ratio `[B, T]` before
       sanitising, or None when the rollout engine returned no
@@ -305,34 +323,83 @@ def sequence_loss_mask(
       `sequence_mult_prob_error`.
     mult_prob_error_threshold: Drop sequences whose multiplicative probability
       error exceeds this. None disables the gate.
+    segment_ids: Optional `[B, T]` packing segment IDs.
+    num_segments: Optional static segment count; required when `segment_ids` is
+      provided.
 
   Returns:
     A `SequenceMask`. Every field takes its unrestricted value when no source
     is active, so callers can use them unconditionally.
   """
   batch = completion_mask.shape[0]
-  sample_mask = jnp.ones((batch,), dtype=jnp.float32)
-  if mask_overlong and overlong is not None:
-    sample_mask = sample_mask * (1.0 - jnp.astype(overlong, jnp.float32))
+  if segment_ids is None:
+    sample_mask = jnp.ones((batch,), dtype=jnp.float32)
+    if mask_overlong and overlong is not None:
+      sample_mask = sample_mask * (1.0 - jnp.astype(overlong, jnp.float32))
 
-  mult_prob_error = None
-  if mult_prob_error_threshold is not None and log_is_raw is not None:
-    # Measured over the already-truncation-restricted mask. A sequence dropped
-    # above contributes no tokens here, scores 0.0 and passes the threshold,
-    # and stays dropped either way -- so ordering does not change the outcome,
-    # but it keeps the reported error free of tokens nobody is training on.
-    mult_prob_error = sequence_mult_prob_error(
-        log_is_raw, completion_mask * sample_mask[:, None]
+    mult_prob_error = None
+    if mult_prob_error_threshold is not None and log_is_raw is not None:
+      # Measured over the already-truncation-restricted mask. A sequence dropped
+      # above contributes no tokens here, scores 0.0 and passes the threshold,
+      # and stays dropped either way -- so ordering does not change the outcome,
+      # but it keeps the reported error free of tokens nobody is training on.
+      mult_prob_error = sequence_mult_prob_error(
+          log_is_raw, completion_mask * sample_mask[:, None]
+      )
+      sample_mask = sample_mask * jnp.astype(
+          mult_prob_error <= mult_prob_error_threshold, jnp.float32
+      )
+
+    return SequenceMask(
+        sample_mask=sample_mask,
+        loss_mask=completion_mask * sample_mask[:, None],
+        mult_prob_error=mult_prob_error,
     )
-    sample_mask = sample_mask * jnp.astype(
-        mult_prob_error <= mult_prob_error_threshold, jnp.float32
+  else:
+    sample_mask = jnp.ones((batch, num_segments), dtype=jnp.float32)
+    if mask_overlong and overlong is not None:
+      overlong_arr = jnp.asarray(overlong, dtype=jnp.float32)
+      if overlong_arr.shape == completion_mask.shape:
+        seg_overlong = (
+            common.segmented_sum(
+                overlong_arr * (segment_ids > 0),
+                segment_ids,
+                num_segments,
+            )
+            > 0
+        ).astype(jnp.float32)
+      elif overlong_arr.ndim == 2 and overlong_arr.shape == (batch, num_segments):
+        seg_overlong = overlong_arr
+      else:
+        seg_overlong = jnp.broadcast_to(
+            overlong_arr.reshape((batch, 1)), (batch, num_segments)
+        )
+      sample_mask = sample_mask * (1.0 - seg_overlong)
+
+    token_sample_mask = jnp.take_along_axis(
+        sample_mask, segment_ids.astype(jnp.int32), axis=1
     )
 
-  return SequenceMask(
-      sample_mask=sample_mask,
-      loss_mask=completion_mask * sample_mask[:, None],
-      mult_prob_error=mult_prob_error,
-  )
+    mult_prob_error = None
+    if mult_prob_error_threshold is not None and log_is_raw is not None:
+      mult_prob_error = sequence_mult_prob_error(
+          log_is_raw,
+          completion_mask * token_sample_mask,
+          segment_ids=segment_ids,
+          num_segments=num_segments,
+      )
+      sample_mask = sample_mask * jnp.astype(
+          mult_prob_error <= mult_prob_error_threshold, jnp.float32
+      )
+      token_sample_mask = jnp.take_along_axis(
+          sample_mask, segment_ids.astype(jnp.int32), axis=1
+      )
+
+    return SequenceMask(
+        sample_mask=sample_mask,
+        loss_mask=completion_mask * token_sample_mask,
+        mult_prob_error=mult_prob_error,
+    )
 
 
 def token_outlier_stats(
@@ -535,6 +602,7 @@ def truncated_importance_weights(
     sample_mask: jax.Array,
     band_min: float,
     band_max: float,
+    segment_ids: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array]:
   """Sequence-masked truncated importance sampling (`seq-mask-tis`) weights.
 
@@ -561,13 +629,16 @@ def truncated_importance_weights(
   Args:
     log_is_raw: Per-token trainer-minus-sampler log ratio **before** any
       `nan_to_num`, `[B, T]`.
-    seq_geomean: Per-sequence geometric-mean ratio `[B]`, from
-      `sequence_geomean_ratio`.
-    seq_valid: 1.0 for entries backed by at least one scored token, `[B]`.
-    sample_mask: Per-sequence validity `[B]`, used only to normalise the
-      reported out-of-band ratio over sequences that are actually training.
+    seq_geomean: Per-sequence geometric-mean ratio `[B]` (or `[B,
+      num_segments]`), from `sequence_geomean_ratio`.
+    seq_valid: 1.0 for entries backed by at least one scored token, `[B]` (or
+      `[B, num_segments]`).
+    sample_mask: Per-sequence validity `[B]` (or `[B, num_segments]`), used
+      only to normalise the reported out-of-band ratio over sequences that are
+      actually training.
     band_min: Lower end of the keep-band, on the geometric-mean ratio.
     band_max: Upper end of the keep-band.
+    segment_ids: Optional `[B, T]` packing segment IDs.
 
   Returns:
     `(weights, oob_ratio)` -- per-token weights `[B, T]` to multiply into the
@@ -579,7 +650,7 @@ def truncated_importance_weights(
   )
   keep = jnp.astype(
       (seq_geomean >= band_min) & (seq_geomean <= band_max), jnp.float32
-  )
+  ) * (seq_valid > 0).astype(jnp.float32)
   counted = sample_mask * seq_valid
   # 0.0 rather than 1.0 when nothing is counted: the band rejected nothing, and
   # a 1.0 here would pool across micro-batches as if it had rejected everything.
@@ -588,7 +659,13 @@ def truncated_importance_weights(
       1.0 - (keep * counted).sum() / jnp.maximum(counted.sum(), 1.0),
       0.0,
   )
-  return weights * keep[:, None], oob_ratio
+  if segment_ids is None:
+    token_keep = keep[:, None]
+  else:
+    token_keep = jnp.take_along_axis(
+        keep, segment_ids.astype(jnp.int32), axis=1
+    )
+  return weights * token_keep, oob_ratio
 
 
 # |log p_trainer - log q_sampler| above which a token counts as an outlier in
@@ -1006,21 +1083,9 @@ def grpo_loss_fn(
   tis_band_max = getattr(
       algo_config, "truncated_importance_sampling_ratio", None
   )
-  # The two checks below are on the batch, which `GRPOConfig` cannot see when it
+  # The checks below are on the batch, which `GRPOConfig` cannot see when it
   # validates the options themselves. Both refuse rather than let an option
   # silently disable itself.
-  #
-  # `pack_sequences` carries only the fields it knows about, so under packing
-  # neither the rollout log-probs nor the truncation verdict reach the loss.
-  if segment_ids is not None and (
-      mask_overlong or mult_prob_error_threshold is not None or tis_type
-  ):
-    raise ValueError(
-        "overlong_loss_masking, seq_logprob_error_threshold and"
-        " truncated_importance_sampling_type are not supported with sequence"
-        " packing: they act per sequence, and the inputs they need are not"
-        " carried through packing. Disable packing or these options."
-    )
   # Both gates compare the sampler against the trainer, so both need the
   # rollout engine's log-probabilities.
   if (
@@ -1111,6 +1176,8 @@ def grpo_loss_fn(
       mask_overlong=mask_overlong,
       log_is_raw=log_is_raw,
       mult_prob_error_threshold=mult_prob_error_threshold,
+      segment_ids=segment_ids,
+      num_segments=num_segments,
   )
 
   # TODO(tsbao): We should handle token level advantages.
@@ -1231,6 +1298,7 @@ def grpo_loss_fn(
         sample_mask,
         band_min=tis_band_min,
         band_max=tis_band_max,
+        segment_ids=segment_ids,
     )
   if sampler_is_weights is not None:
     per_token_loss = jnp.where(
@@ -1268,9 +1336,15 @@ def grpo_loss_fn(
   # a step's micro-batches with the matching max/min: an empty micro-batch then
   # contributes nothing, where any finite sentinel would win the reduction and
   # replace the step's real value.
-  # 1.0 for rows that hold a sequence at all, as opposed to the assembler's
-  # trailing padding rows, which carry no scored tokens.
-  row_is_sequence = (completion_mask.sum(axis=-1) > 0).astype(jnp.float32)
+  # 1.0 for rows (or segments under packing) that hold a sequence at all, as
+  # opposed to the assembler's trailing padding, which carries no scored tokens.
+  if segment_ids is None:
+    valid_seq_mask = (completion_mask.sum(axis=-1) > 0).astype(jnp.float32)
+  else:
+    valid_seq_mask = (
+        common.segmented_count(segment_ids, num_segments, mask=completion_mask)
+        > 0
+    ).astype(jnp.float32)
   is_ratio_mean = masked_mean(is_ratio, loss_mask)
   is_ratio_max = jnp.max(jnp.where(loss_mask > 0, is_ratio, 0.0))
   is_ratio_min = jnp.min(jnp.where(loss_mask > 0, is_ratio, jnp.inf))
@@ -1319,8 +1393,8 @@ def grpo_loss_fn(
       # that hold a sequence, so the assembler's trailing padding rows neither
       # inflate nor deflate it.
       "sample_mask/kept_frac": sft_utils.WeightedMetric(
-          jnp.sum(sample_mask * row_is_sequence),
-          jnp.sum(row_is_sequence),
+          jnp.sum(sample_mask * valid_seq_mask),
+          jnp.sum(valid_seq_mask),
           min_denom=1.0,
       ),
   }
