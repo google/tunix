@@ -739,7 +739,7 @@ while [[ $# -gt 0 ]]; do
       TUNIX_IMAGE="${1#*=}"
       shift
       ;;
-    --dry-run|--render)
+    --dry-run|--dry_run|--render)
       DRY_RUN=true
       shift
       ;;
@@ -759,7 +759,7 @@ while [[ $# -gt 0 ]]; do
       IMAGE_REWRITE_PREFIX="${1#*=}"
       shift
       ;;
-    start|stop|orchestrator|trainer|rollout|test_orchestrator|mock_trainer|mock_rollout|start_rollout_only)
+    start|stop|orchestrator|trainer|rollout|test_orchestrator|mock_trainer|mock_rollout|start_rollout_only|eval|stop_eval)
       COMMAND="$1"
       shift
       ;;
@@ -768,6 +768,26 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+start_eval() {
+  local eval_yaml
+  eval_yaml="$(dirname "${BASH_SOURCE[0]}")/eval_qwen35_gke.yaml"
+  if [[ "$DRY_RUN" == "true" ]]; then
+    cat "$eval_yaml"
+  else
+    kubectl apply -f "$eval_yaml"
+  fi
+}
+
+stop_eval() {
+  local eval_name="${EVAL_JOBSET_NAME:-haoyu-deepswe-qwen35-dist-eval}"
+  local eval_ns="${EVAL_NAMESPACE:-trellis}"
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo "[DRY RUN] Would delete jobset ${eval_name} in namespace ${eval_ns}"
+  else
+    kubectl delete jobset "${eval_name}" -n "${eval_ns}" --ignore-not-found=true || true
+  fi
+}
 
 if [[ "$DRY_RUN" != "true" ]]; then
   if [[ -z "${KUBECONFIG:-}" ]]; then
@@ -786,7 +806,7 @@ if [[ "$DRY_RUN" != "true" ]]; then
   fi
 fi
 
-if [[ -z "$TUNIX_IMAGE" ]]; then
+if [[ "$COMMAND" != "eval" && "$COMMAND" != "stop_eval" && -z "$TUNIX_IMAGE" ]]; then
   echo "Error: no image set. Build one with tunix, maxtext, and" \
        "tpu-inference installed, then pass it via TUNIX_IMAGE=... or" \
        "--image=..."
@@ -828,7 +848,12 @@ elif [[ "$COMMAND" == "mock_rollout" ]]; then
   stop_rollout; start_mock_rollout
 elif [[ "$COMMAND" == "start_rollout_only" ]]; then
   start_rollout
+elif [[ "$COMMAND" == "eval" ]]; then
+  stop_eval
+  start_eval
+elif [[ "$COMMAND" == "stop_eval" ]]; then
+  stop_eval
 else
-  echo "Error: Invalid command '$COMMAND'. Available commands: 'start', 'test_orchestrator', 'stop', 'orchestrator', 'trainer', 'mock_trainer', 'rollout', 'mock_rollout'."
+  echo "Error: Invalid command '$COMMAND'. Available commands: 'start', 'test_orchestrator', 'stop', 'orchestrator', 'trainer', 'mock_trainer', 'rollout', 'mock_rollout', 'eval', 'stop_eval'."
   exit 1
 fi
