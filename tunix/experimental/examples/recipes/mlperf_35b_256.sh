@@ -8,7 +8,8 @@ export JOB_PREFIX="${JOB_PREFIX:-${USER}-$(date +%Y%m%d-%H%M%S)}"
 export WANDB_API_KEY="${WANDB_API_KEY:-}"
 export WANDB_RUN_NAME="${WANDB_RUN_NAME:-${JOB_PREFIX}-mlperf-35b}"
 export MAXTEXT_OUTPUT_DIR="${MAXTEXT_OUTPUT_DIR:-gs://atwigg-trellis-europe-west4-dev/maxtext/${JOB_PREFIX}}"
-export TRAJECTORY_LOG_DIR="${TRAJECTORY_LOG_DIR:-gs://atwigg-trellis-europe-west4-dev/trajectories/${JOB_PREFIX}}"
+export TRAJECTORY_LOG_DIR="${TRAJECTORY_LOG_DIR:-gs://atwigg-trellis-europe-west4-dev/trajectories/${JOB_PREFIX}/logger}"
+export TRAJECTORY_STORE_ROOT_DIR="${TRAJECTORY_STORE_ROOT_DIR:-${TRAJECTORY_STORE_ROOT:-gs://atwigg-trellis-europe-west4-dev/trajectories/${JOB_PREFIX}/store}}"
 export ORCHESTRATOR_PORT="${ORCHESTRATOR_PORT:-20000}"
 export ROLLOUT_PORT="${ROLLOUT_PORT:-20001}"
 export TRAINER_PORT="${TRAINER_PORT:-20002}"
@@ -54,7 +55,6 @@ export MAXTEXT_MODEL_NAME="qwen3.5-35b-a3b"
 export MAXTEXT_CKPT="gs://hengtaoguo-maxtext-logs/checkpoints/qwen3.5-35b-a3b/scanned/2026-06-11-10-27/0/items"
 export TRAINABLE_PARAMETERS_MASK='^(?!.*routed_experts/gate/kernel).*'
 export EOS_TOKENS="${EOS_TOKENS:-151645,151643}"
-export TRAJECTORY_LOG_DIR="${TRAJECTORY_LOG_DIR:-gs://atwigg-trellis-europe-west4-dev/trajectories}"
 
 # Backend configuration
 export TRAINER_BACKEND="maxtext"

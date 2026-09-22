@@ -25,6 +25,7 @@ import contextlib
 import pickle
 import time
 from typing import Any, Mapping
+import uuid
 
 from absl import logging
 from tunix.experimental.common import datatypes
@@ -53,6 +54,7 @@ class ClusterOrchestrator:
       monitor: health_monitor.HealthMonitor | None = None,
       weight_sync_mode: str | None = None,
       trajectory_store_config: Mapping[str, Any] | None = None,
+      run_id: str | None = None,
   ):
     """Initializes ClusterOrchestrator.
 
@@ -68,6 +70,8 @@ class ClusterOrchestrator:
         process in the run: for the file backend it is the shared root_dir
         and run_id that will make the workers' writes visible to this
         process's reads once read/write wiring is connected.
+      run_id: Optional unique identifier for this orchestrator run. Generated
+        automatically if omitted.
     """
     self.config = config
     self.registry = registry or worker_registry.WorkerRegistry()
@@ -85,6 +89,16 @@ class ClusterOrchestrator:
     self.engine: distributed_rl_engine.DistributedRLEngine | None = None
     mode = getattr(weight_sync_mode, "value", weight_sync_mode)
     self._weight_sync_mode = str(mode).lower() if mode is not None else None
+    cfg_run_id = (
+        trajectory_store_config.get("run_id")
+        if trajectory_store_config is not None
+        else None
+    )
+    self.run_id: str = (
+        run_id
+        or (str(cfg_run_id).strip() if cfg_run_id else "")
+        or f"run_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+    )
     # The sole construction site for this process's Trajectory Store: one
     # ClusterOrchestrator exists per orchestrator process, so building it
     # here — once, in __init__ — is the whole guard. Its lifetime is meant
@@ -94,15 +108,25 @@ class ClusterOrchestrator:
     # `trajectory_store` argument.
     # TODO(sizhi): Wire active trajectory reads/writes between
     # orchestrator/program and rollout workers in follow-up CLs.
+    self.trajectory_store_config: dict[str, Any] | None = None
+    if trajectory_store_config is not None:
+      self.trajectory_store_config = dict(trajectory_store_config)
+      if (
+          self.trajectory_store_config.get("enabled", False)
+          and self.trajectory_store_config.get("backend") == "file"
+          and not self.trajectory_store_config.get("run_id")
+      ):
+        self.trajectory_store_config["run_id"] = self.run_id
     self.trajectory_store = trajectory_store_lib.TrajectoryStore.from_config(
-        trajectory_store_config
+        self.trajectory_store_config
     )
     if self.trajectory_store is not None:
+      self.trajectory_store_config = self.trajectory_store.to_config()
       # Logged so a config mismatch between this process and its workers is one
       # grep away.
       logging.info(
           "[trajectory-store] orchestrator built %s",
-          self.trajectory_store.to_config(),
+          self.trajectory_store_config,
       )
 
   def __enter__(self) -> "ClusterOrchestrator":
@@ -284,6 +308,10 @@ class ClusterOrchestrator:
         "Bringing up %d registered worker(s)...",
         len(self.worker_infos()),
     )
+    if self.trajectory_store_config is not None:
+      for worker in self._get_role_members(datatypes.Role.ROLLOUT):
+        if hasattr(worker, "with_trajectory_store_config"):
+          worker.with_trajectory_store_config(self.trajectory_store_config)
     self.lifecycle_driver.bring_up(dummy_data)
     self._bring_up_remote_workers(dummy_data)
     self.engine = self._create_engine()
@@ -333,6 +361,19 @@ class ClusterOrchestrator:
   def _bring_up_remote_workers(self, dummy_data: Any = None) -> None:
     """Runs lifecycle hooks on remote worker handles registered directly."""
     worker_ids = sorted(self._remote_worker_infos)
+    if self.trajectory_store_config is not None:
+      for worker_id in worker_ids:
+        if (
+            datatypes.Role.ROLLOUT.value
+            in self._remote_worker_infos[worker_id].roles
+        ):
+          logging.info(
+              "Configuring TrajectoryStore on remote rollout worker %s.",
+              worker_id,
+          )
+          self._remote_worker_handles_by_id[worker_id].submit(
+              "with_trajectory_store_config", self.trajectory_store_config
+          )
     for worker_id in worker_ids:
       logging.info("Initializing remote worker %s.", worker_id)
       self._remote_worker_handles_by_id[worker_id].submit("initialize")
