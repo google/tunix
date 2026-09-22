@@ -30,24 +30,93 @@ except ImportError:
   mllogger = None
 
 
+_gcs_target_path: Optional[str] = None
+_local_log_path: Optional[str] = None
+
+
+def _parse_topology_devices(
+    topology: Optional[str], rollout_replicas: int = 1
+) -> Optional[int]:
+  """Parses TPU slice strings like 'tpuv5p:2x2x2+tpuv5p:2x2x1' into total chip count."""
+  if not topology:
+    return None
+  parts = str(topology).split("+")
+  total = 0
+  for idx, part in enumerate(parts):
+    dims_str = part.split(":")[-1]
+    dims = [int(x) for x in dims_str.split("x") if x.isdigit()]
+    if not dims:
+      continue
+    chips = 1
+    for d in dims:
+      chips *= d
+    if idx > 0:
+      chips *= max(1, int(rollout_replicas))
+    total += chips
+  return total if total > 0 else None
+
+
+def _flush_to_gcs_if_needed() -> None:
+  """Copies the local mllog file to GCS if metric_logger_dir was a gs:// URI."""
+  if not (_is_master_process() and _gcs_target_path and _local_log_path):
+    return
+  if not os.path.exists(_local_log_path):
+    return
+  try:
+    for h in getattr(mllogger.logger, "handlers", []):
+      if isinstance(h, logging.FileHandler):
+        h.flush()
+    try:
+      import fsspec  # pylint: disable=g-import-not-at-top
+
+      fs = fsspec.filesystem("gs")
+      fs.put(_local_log_path, _gcs_target_path)
+    except Exception:  # pylint: disable=broad-exception-caught
+      import tensorflow as tf  # pylint: disable=g-import-not-at-top
+
+      tf.io.gfile.makedirs(os.path.dirname(_gcs_target_path))
+      tf.io.gfile.copy(_local_log_path, _gcs_target_path, overwrite=True)
+  except Exception as exc:  # pylint: disable=broad-exception-caught
+    logging.warning(
+        "Failed to copy mllog file %s to %s: %s",
+        _local_log_path,
+        _gcs_target_path,
+        exc,
+    )
+
+
 def configure_logger(
     metric_logger_dir: Optional[str] = None,
     seed: Optional[int] = None,
     filename: Optional[str] = None,
 ):
   """Configures mllog output file if metric_logger_dir or filename is provided."""
+  global _gcs_target_path, _local_log_path
   if not (_is_master_process() and mllog is not None and mllogger is not None):
     return
 
+  seed_val = seed if seed is not None else 1
   if filename is None and metric_logger_dir is not None:
-    if metric_logger_dir.endswith(".out") or metric_logger_dir.endswith(".log"):
+    if metric_logger_dir.startswith("gs://"):
+      if metric_logger_dir.endswith(".out") or metric_logger_dir.endswith(
+          ".log"
+      ):
+        _gcs_target_path = metric_logger_dir
+      else:
+        _gcs_target_path = os.path.join(
+            metric_logger_dir.rstrip("/"), f"seed_{seed_val}.out"
+        )
+      filename = os.path.join("/tmp/rcp_logs", f"seed_{seed_val}.out")
+    elif metric_logger_dir.endswith(".out") or metric_logger_dir.endswith(
+        ".log"
+    ):
       filename = metric_logger_dir
     else:
-      seed_val = seed if seed is not None else 1
       filename = os.path.join(metric_logger_dir, f"seed_{seed_val}.out")
 
   if filename is not None:
     abs_filename = os.path.abspath(filename)
+    _local_log_path = abs_filename
     os.makedirs(os.path.dirname(abs_filename), exist_ok=True)
     existing_files = [
         os.path.abspath(getattr(h, "baseFilename", ""))
@@ -132,8 +201,11 @@ def block_start(args=None, step: int = 0, samples_count: Optional[int] = None):
   if _is_master_process() and mllogger is not None:
     if samples_count is None and args is not None:
       global_batch_size = getattr(args, "batch_size", 1) * getattr(args, "num_generations", 1)
-      eval_interval = getattr(args, "eval_every_n_steps", getattr(args, "max_steps", 1))
-      samples_count = eval_interval * global_batch_size
+      max_steps = getattr(args, "max_steps", None)
+      eval_interval = getattr(args, "eval_every_n_steps", max_steps if max_steps is not None else 1)
+      if max_steps is not None:
+        eval_interval = min(int(eval_interval), max(0, int(max_steps) - int(step)))
+      samples_count = int(eval_interval) * global_batch_size
 
     metadata = {"step": int(step)}
     if samples_count is not None:
@@ -150,6 +222,7 @@ def train_start(args=None, step: int = 0, samples_count: Optional[int] = None):
   init_stop()
   run_start()
   block_start(args=args, step=step, samples_count=samples_count)
+  _flush_to_gcs_if_needed()
 
 
 def block_stop(step: int = 0, samples_count: Optional[int] = None):
@@ -474,7 +547,115 @@ def _extract_kv_from_metrics_buffer(metrics_buffer: Any) -> dict[str, Any]:
       if val is not None:
         kv_stats[k] = val
 
+  # Case 4: tunix.sft.metrics_logger.MetricsLogger or StandardRLProgram
+  raw_metrics = getattr(metrics_buffer, "_metrics", None)
+  if raw_metrics is None and hasattr(metrics_buffer, "metrics_logger"):
+    raw_metrics = getattr(metrics_buffer.metrics_logger, "_metrics", None)
+  if isinstance(raw_metrics, dict):
+    for prefix_dict in raw_metrics.values():
+      if not isinstance(prefix_dict, dict):
+        continue
+      for mode_key, mode_dict in prefix_dict.items():
+        if str(mode_key) != "train" or not isinstance(mode_dict, dict):
+          continue
+        for k, vals in mode_dict.items():
+          if vals and k not in kv_stats:
+            val = _clean_metric_val(vals[-1])
+            if val is not None:
+              kv_stats[k] = val
+              if k.startswith("trainer/"):
+                short_k = k[len("trainer/") :]
+                if short_k not in kv_stats:
+                  kv_stats[short_k] = val
+
   return kv_stats
+
+
+def log_rcp_step_stats(
+    metrics_source: Any,
+    args: Any = None,
+    step: int = 1,
+    samples_count: Optional[int] = None,
+    total_devices: Optional[int] = None,
+) -> None:
+  """Emits the two MLPerf RCP tracked_stats events (train + timing) matching MLCommons seed_1.out."""
+  if not (_is_master_process() and mllog is not None and mllogger is not None):
+    return
+
+  stats = _extract_kv_from_metrics_buffer(metrics_source)
+  if not stats:
+    return
+
+  step_num = int(step)
+  gbs = None
+  if args is not None:
+    gbs = getattr(args, "batch_size", 1) * getattr(args, "num_generations", 1)
+  if samples_count is None and gbs is not None:
+    samples_count = step_num * gbs
+
+  # 1. Train stats event: reduced_train_loss, reward, grad_norm, global_valid_toks, global_valid_seqs
+  loss_val = stats.get("reduced_train_loss", stats.get("loss", stats.get("trainer/loss")))
+  reward_val = stats.get(
+      "reward",
+      stats.get("rewards/mean", stats.get("trajectory_rewards/mean", stats.get("train_reward"))),
+  )
+  grad_norm_val = stats.get("grad_norm", stats.get("trainer/grad_norm"))
+  valid_seqs = stats.get(
+      "global_valid_seqs",
+      stats.get("rollout/global_valid_seqs", stats.get("orchestrator/num_rollouts", float(gbs) if gbs else None)),
+  )
+  valid_toks = stats.get("global_valid_toks", stats.get("rollout/global_valid_toks"))
+  if valid_toks is None and valid_seqs is not None:
+    mean_toks = stats.get(
+        "rollout/total_tokens_mean",
+        stats.get("rollout/completion_length_mean", stats.get("generation/completions/mean_raw_length")),
+    )
+    if mean_toks is not None:
+      valid_toks = float(mean_toks) * float(valid_seqs)
+
+  train_tracked = {
+      "reduced_train_loss": loss_val,
+      "reward": reward_val,
+      "grad_norm": grad_norm_val,
+      "global_valid_toks": float(valid_toks) if valid_toks is not None else None,
+      "global_valid_seqs": float(valid_seqs) if valid_seqs is not None else None,
+  }
+  log_tracked_stats(train_tracked, step=step_num, samples_count=samples_count)
+
+  # 2. Timing stats event: train_step_time, policy_training_time, exposed_generation_time, weight_sync_time, valid_tokens_per_sec_per_gpu
+  step_time = stats.get(
+      "train_step_time",
+      stats.get("orchestrator/step_time_sec", stats.get("perf/global_step_time", stats.get("step_time"))),
+  )
+  policy_time = stats.get("policy_training_time", stats.get("orchestrator/policy_training_time"))
+  exposed_gen_time = stats.get("exposed_generation_time", stats.get("orchestrator/exposed_generation_time"))
+  weight_sync_time = stats.get("weight_sync_time", stats.get("orchestrator/weight_sync_time"))
+
+  if total_devices is None and args is not None:
+    total_devices = _parse_topology_devices(
+        getattr(args, "tpu_topology", None),
+        getattr(args, "rollout_replicas", 1),
+    )
+
+  toks_per_sec_per_gpu = stats.get("valid_tokens_per_sec_per_gpu")
+  if (
+      toks_per_sec_per_gpu is None
+      and valid_toks is not None
+      and step_time is not None
+      and float(step_time) > 0
+      and total_devices
+  ):
+    toks_per_sec_per_gpu = float(valid_toks) / (float(step_time) * float(total_devices))
+
+  timing_tracked = {
+      "train_step_time": step_time,
+      "policy_training_time": policy_time,
+      "exposed_generation_time": exposed_gen_time,
+      "weight_sync_time": weight_sync_time,
+      "valid_tokens_per_sec_per_gpu": toks_per_sec_per_gpu,
+  }
+  log_tracked_stats(timing_tracked, step=step_num, samples_count=samples_count)
+  _flush_to_gcs_if_needed()
 
 
 MLPERF_TRACKED_KEYS = frozenset({
@@ -650,6 +831,7 @@ def run_stop(status: str = "success", samples_count: Optional[int] = None):
         key=getattr(constants, "RUN_STOP", "run_stop"),
         metadata=metadata,
     )
+    _flush_to_gcs_if_needed()
 
 
 def init_print(
@@ -671,14 +853,14 @@ def init_print(
     )
 
   # Extract batch & step configs
-  batch_size = getattr(args, "batch_size", 8)
-  num_generations = getattr(args, "num_generations", 8)
+  batch_size = getattr(args, "batch_size", None) or 8
+  num_generations = getattr(args, "num_generations", None) or 8
   global_batch_size = batch_size * num_generations
-  mini_batch_size = getattr(args, "mini_batch_size", batch_size)
-  train_micro_batch_size = getattr(args, "train_micro_batch_size", 1)
-  max_steps = getattr(args, "max_steps", 50)
-  max_prompt_length = getattr(args, "max_prompt_length", 4096)
-  max_response_length = getattr(args, "max_response_length", 8192)
+  mini_batch_size = getattr(args, "mini_batch_size", None) or batch_size
+  train_micro_batch_size = getattr(args, "train_micro_batch_size", None) or 1
+  max_steps = getattr(args, "max_steps", None) or 50
+  max_prompt_length = getattr(args, "max_prompt_length", None) or 4096
+  max_response_length = getattr(args, "max_response_length", None) or 8192
   max_seq_len = max_prompt_length + max_response_length
 
   # Train / Eval sample counts
@@ -725,7 +907,11 @@ def init_print(
       platform = "TPU-Ironwood"
 
   # Gradient accumulation steps
-  grad_accum_steps = max(1, batch_size // mini_batch_size)
+  grad_accum_steps = max(
+      1,
+      batch_size // mini_batch_size,
+      (mini_batch_size * num_generations) // max(1, train_micro_batch_size),
+  )
 
   # 1. Submission Metadata
   mllogger.event(
@@ -767,17 +953,17 @@ def init_print(
       getattr(constants, "OPT_ADAMW_EPSILON", "opt_adamw_epsilon"): 1e-8,
       getattr(constants, "OPT_ADAMW_WEIGHT_DECAY", "opt_adamw_weight_decay"): getattr(args, "weight_decay", 0.01),
       getattr(constants, "OPT_GRADIENT_CLIP_NORM", "opt_gradient_clip_norm"): getattr(args, "max_grad_norm", 1.0),
-      getattr(constants, "OPT_LR_WARMUP_STEPS", "opt_learning_rate_warmup_steps"): 0,
-      getattr(constants, "OPT_LR_DECAY_STEPS", "opt_learning_rate_decay_steps"): max_steps,
-      getattr(constants, "OPT_LR_DECAY_SCHEDULE", "opt_learning_rate_decay_schedule"): "constant",
+      getattr(constants, "OPT_LR_WARMUP_STEPS", "opt_learning_rate_warmup_steps"): getattr(args, "warmup_steps", 0),
+      getattr(constants, "OPT_LR_DECAY_STEPS", "opt_learning_rate_decay_steps"): getattr(args, "lr_decay_steps", max_steps),
+      getattr(constants, "OPT_LR_DECAY_SCHEDULE", "opt_learning_rate_decay_schedule"): getattr(args, "schedule_type", "constant") or "constant",
       getattr(constants, "TENSOR_PARALLELISM", "tensor_parallelism"): train_tp,
       getattr(constants, "PIPELINE_PARALLELISM", "pipeline_parallelism"): 1,
       getattr(constants, "CONTEXT_PARALLELISM", "context_parallelism"): train_sp,
-      getattr(constants, "EXPERT_PARALLELISM", "expert_parallelism"): 1,
+      getattr(constants, "EXPERT_PARALLELISM", "expert_parallelism"): getattr(args, "train_mesh_expert", 1),
       "generation_backend": getattr(args, "rollout_engine", "vllm"),
       "generation_tensor_parallelism": rollout_tp,
       "generation_pipeline_parallelism": 1,
-      "generation_expert_parallelism": 1,
+      "generation_expert_parallelism": getattr(args, "rollout_mesh_expert", 1),
       getattr(
           constants,
           "GENERATION_TRAINING_ROLLOUT_TEMPERATURE",
@@ -810,3 +996,4 @@ def init_print(
   for key, value in logging_configs.items():
     if value is not None:
       mllogger.event(key=key, value=value)
+  _flush_to_gcs_if_needed()

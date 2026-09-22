@@ -625,6 +625,9 @@ class StandardRLProgram(RLProgram):
       consumed_policy_version: int,
       log_step: int,
       sampler_agreement: dict[str, tuple[Any, list[float]]] | None = None,
+      policy_training_time: float = 0.0,
+      exposed_generation_time: float = 0.0,
+      weight_sync_time: float = 0.0,
   ) -> dict[str, Any]:
     """Logs rollout, reward, trainer, and orchestrator metrics.
 
@@ -744,6 +747,29 @@ class StandardRLProgram(RLProgram):
           self.mode,
           log_step,
       )
+      self.metrics_logger.log(
+          self.metrics_prefix,
+          "rollout/global_valid_toks",
+          float(np.sum(total_lengths)),
+          self.mode,
+          log_step,
+      )
+    elif completion_lengths:
+      self.metrics_logger.log(
+          self.metrics_prefix,
+          "rollout/global_valid_toks",
+          float(np.sum(completion_lengths)),
+          self.mode,
+          log_step,
+      )
+    if all_step_items:
+      self.metrics_logger.log(
+          self.metrics_prefix,
+          "rollout/global_valid_seqs",
+          float(len(all_step_items)),
+          self.mode,
+          log_step,
+      )
     if turns_list:
       self.metrics_logger.log(
           self.metrics_prefix,
@@ -839,6 +865,9 @@ class StandardRLProgram(RLProgram):
         "num_rollouts": float(num_rollouts),
         "num_microbatches": float(num_microbatches),
         "step_time_sec": float(step_time_sec),
+        "policy_training_time": float(policy_training_time),
+        "exposed_generation_time": float(exposed_generation_time),
+        "weight_sync_time": float(weight_sync_time),
     }
     for tag, val in orchestrator_stats.items():
       self.metrics_logger.log(
@@ -1086,6 +1115,8 @@ class StandardRLProgram(RLProgram):
     while self.max_steps is None or self._step < self.max_steps:
       current_step = self._step
       step_start_time = time.monotonic()
+      if self.on_step_begin:
+        self.on_step_begin(current_step)
       consumed_policy_version = self.policy_version
 
       uncommitted_groups = []
@@ -1101,6 +1132,9 @@ class StandardRLProgram(RLProgram):
       groups_consumed = 0
       checkpoint_saved = False
       final_minibatch_completed = False
+      policy_training_time = 0.0
+      exposed_generation_time = 0.0
+      weight_sync_time = 0.0
 
       async def _maybe_save_checkpoint() -> None:
         nonlocal checkpoint_saved
@@ -1122,97 +1156,38 @@ class StandardRLProgram(RLProgram):
         )
         checkpoint_saved = True
 
+      step_batches = []
+      _t_gen = time.monotonic()
       while groups_consumed < self.full_batch_size:
         scored_items = await self.scored_q.get_batch(num_groups=1)
         if not scored_items:
-          assembled_batches = self.assembler.flush()
-        else:
-          if groups_consumed == 0 and self.on_step_begin:
-            self.on_step_begin(current_step)
-
-          groups_consumed += 1
-          uncommitted_groups.append(scored_items)
-          all_step_items.extend(scored_items)
-          num_rollouts += len(scored_items)
-          for item in scored_items:
-            step_rewards.append(_extract_reward(item))
-            payload = getattr(item, "payload", None)
-            if payload is not None and payload.advantages is not None:
-              step_advantages.append(float(np.mean(payload.advantages)))
-
-          payloads = []
-          for item in scored_items:
-            payload = getattr(item, "payload", None)
-            if isinstance(payload, datatypes.RLTrainerPayload):
-              payload = dataclasses.replace(
-                  payload,
-                  metadata={
-                      **payload.metadata,
-                      "traj_id": item.traj_id,
-                  },
-              )
-            payloads.append(payload)
-          assembled_batches = self.assembler.feed(payloads)  # pyrefly: ignore[bad-argument-type]
-
-        for mb in assembled_batches:
-          batch = mb.payload
-          if getattr(self.algo, "requires_reference_kl", False):
-            if not isinstance(batch, datatypes.RLTrainerPayload):
-              raise TypeError(
-                  "Reference KL requires an assembler that returns "
-                  "datatypes.RLTrainerPayload microbatches; got "
-                  f"{type(batch).__name__}."
-              )
-            ref_logps = await self.engine.per_token_logps(
-                datatypes.Role.REFERENCE, items=batch
-            )
-            batch = batch_assembly.with_ref_per_token_logps(batch, ref_logps)
-          algo_config = getattr(self.algo, "algo_config", None)
-          if (
-              isinstance(batch, datatypes.RLTrainerPayload)
-              and batch.old_per_token_logps is not None
-              and algo_config is not None
-              and algo_config.use_rollout_logps
-          ):
-            batch = await self._apply_sampler_trainer_agreement(
-                batch, step_sampler_agreement
-            )
-
-          num_microbatches += 1
-          logging.info(
-              "Packed %d trajectories into microbatch: %s",
-              len(mb.trajectory_ids),
-              logging_utils.summarize_list(list(mb.trajectory_ids)),
-          )
-          step_result = await self.engine.train_step(
-              batch,
-              role=datatypes.Role.ACTOR,
-              accumulate_gradients=True,
-              apply_optimizer=mb.is_final_batch,
-          )
-          if mb.is_final_batch:
-            trainer_metrics = await self.engine.get_metrics(
-                role=datatypes.Role.ACTOR
-            )
-            final_minibatch_completed = True
-            # TODO(tunix-dev): Configurable checkpointing frequency. Today we
-            # checkpoint at the same frequency as the weight update.
-            # Save only at a resumable full-batch boundary. An optimizer step
-            # can occur earlier when a full batch contains multiple mini
-            # batches, but the dataset resume cursor advances in full batches.
-            # TODO(tunix-dev): For now any failures in save_checkpoint will
-            # abort the entire program. Make it configurable on whether to fail
-            # or continue.
-            full_batch_complete = (
-                groups_consumed >= self.full_batch_size or not scored_items
-            )
-            if full_batch_complete:
-              await _maybe_save_checkpoint()
-
-        if not scored_items:
-          if not checkpoint_saved and final_minibatch_completed:
-            await _maybe_save_checkpoint()
+          step_batches.extend(self.assembler.flush())
           break
+
+        groups_consumed += 1
+        uncommitted_groups.append(scored_items)
+        all_step_items.extend(scored_items)
+        num_rollouts += len(scored_items)
+        for item in scored_items:
+          step_rewards.append(_extract_reward(item))
+          payload = getattr(item, "payload", None)
+          if payload is not None and payload.advantages is not None:
+            step_advantages.append(float(np.mean(payload.advantages)))
+
+        payloads = []
+        for item in scored_items:
+          payload = getattr(item, "payload", None)
+          if isinstance(payload, datatypes.RLTrainerPayload):
+            payload = dataclasses.replace(
+                payload,
+                metadata={
+                    **payload.metadata,
+                    "traj_id": item.traj_id,
+                },
+            )
+          payloads.append(payload)
+        step_batches.extend(self.assembler.feed(payloads))  # pyrefly: ignore[bad-argument-type]
+      exposed_generation_time = time.monotonic() - _t_gen
 
       if not all_step_items:
         logging.info(
@@ -1220,8 +1195,72 @@ class StandardRLProgram(RLProgram):
         )
         break
 
+      for mb in step_batches:
+        _t_train = time.monotonic()
+        batch = mb.payload
+        if getattr(self.algo, "requires_reference_kl", False):
+          if not isinstance(batch, datatypes.RLTrainerPayload):
+            raise TypeError(
+                "Reference KL requires an assembler that returns "
+                "datatypes.RLTrainerPayload microbatches; got "
+                f"{type(batch).__name__}."
+            )
+          ref_logps = await self.engine.per_token_logps(
+              datatypes.Role.REFERENCE, items=batch
+          )
+          batch = batch_assembly.with_ref_per_token_logps(batch, ref_logps)
+        algo_config = getattr(self.algo, "algo_config", None)
+        if (
+            isinstance(batch, datatypes.RLTrainerPayload)
+            and batch.old_per_token_logps is not None
+            and algo_config is not None
+            and algo_config.use_rollout_logps
+        ):
+          batch = await self._apply_sampler_trainer_agreement(
+              batch, step_sampler_agreement
+          )
+
+        num_microbatches += 1
+        logging.info(
+            "Packed %d trajectories into microbatch: %s",
+            len(mb.trajectory_ids),
+            logging_utils.summarize_list(list(mb.trajectory_ids)),
+        )
+        step_result = await self.engine.train_step(
+            batch,
+            role=datatypes.Role.ACTOR,
+            accumulate_gradients=True,
+            apply_optimizer=mb.is_final_batch,
+        )
+        if mb.is_final_batch:
+          trainer_metrics = await self.engine.get_metrics(
+              role=datatypes.Role.ACTOR
+          )
+          final_minibatch_completed = True
+        policy_training_time += time.monotonic() - _t_train
+
+        if mb.is_final_batch:
+          # TODO(tunix-dev): Configurable checkpointing frequency. Today we
+          # checkpoint at the same frequency as the weight update.
+          # Save only at a resumable full-batch boundary. An optimizer step
+          # can occur earlier when a full batch contains multiple mini
+          # batches, but the dataset resume cursor advances in full batches.
+          # TODO(tunix-dev): For now any failures in save_checkpoint will
+          # abort the entire program. Make it configurable on whether to fail
+          # or continue.
+          full_batch_complete = (
+              groups_consumed >= self.full_batch_size or not scored_items
+          )
+          if full_batch_complete:
+            await _maybe_save_checkpoint()
+
+      if not scored_items and not checkpoint_saved and final_minibatch_completed:
+        await _maybe_save_checkpoint()
+
       if self.sync_weights:
+        _t_sync = time.monotonic()
         new_version = await self.engine.sync_weights(role=datatypes.Role.ACTOR)
+        weight_sync_time = time.monotonic() - _t_sync
         self.policy_version = (
             new_version if new_version is not None else self.policy_version + 1
         )
@@ -1251,6 +1290,9 @@ class StandardRLProgram(RLProgram):
           consumed_policy_version=consumed_policy_version,
           log_step=current_step,
           sampler_agreement=step_sampler_agreement,
+          policy_training_time=policy_training_time,
+          exposed_generation_time=exposed_generation_time,
+          weight_sync_time=weight_sync_time,
       )
       self._log_consumed_trajectories(
           all_step_items,
