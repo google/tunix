@@ -94,8 +94,13 @@ class ClusterOrchestrator:
     # `trajectory_store` argument.
     # TODO(sizhi): Wire active trajectory reads/writes between
     # orchestrator/program and rollout workers in follow-up CLs.
-    self.trajectory_store = trajectory_store_lib.TrajectoryStore.from_config(
-        trajectory_store_config
+    self.trajectory_store = (
+        trajectory_store_lib.TrajectoryStore.from_config(
+            trajectory_store_config
+        )
+        if trajectory_store_config
+        and trajectory_store_config.get("enabled", True)
+        else None
     )
     if self.trajectory_store is not None:
       # Logged so a config mismatch between this process and its workers is one

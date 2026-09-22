@@ -32,7 +32,6 @@ class FromConfigTest(absltest.TestCase):
 
   def _file_config(self, **overrides):
     config = {
-        "enabled": True,
         "backend": "file",
         "root_dir": str(self.tmp_dir),
         "run_id": "run_1",
@@ -40,20 +39,9 @@ class FromConfigTest(absltest.TestCase):
     config.update(overrides)
     return config
 
-  def test_none_config_disables_the_store(self):
-    self.assertIsNone(store_lib.TrajectoryStore.from_config(None))
-
-  def test_missing_enabled_key_disables_the_store(self):
-    self.assertIsNone(
-        store_lib.TrajectoryStore.from_config({"backend": "memory"})
-    )
-
-  def test_enabled_false_disables_the_store(self):
-    # The rest of the config stays valid and unused, so a run can be turned
-    # off without unsetting its root_dir and run_id.
-    self.assertIsNone(
-        store_lib.TrajectoryStore.from_config(self._file_config(enabled=False))
-    )
+  def test_empty_config_raises(self):
+    with self.assertRaisesRegex(ValueError, "non-empty mapping"):
+      store_lib.TrajectoryStore.from_config({})
 
   def test_file_backend_is_scoped_by_run_id(self):
     store = store_lib.TrajectoryStore.from_config(self._file_config())
@@ -62,20 +50,16 @@ class FromConfigTest(absltest.TestCase):
     store.close()
 
   def test_memory_backend_needs_no_other_keys(self):
-    store = store_lib.TrajectoryStore.from_config(
-        {"enabled": True, "backend": "memory"}
-    )
+    store = store_lib.TrajectoryStore.from_config({"backend": "memory"})
     self.assertIsInstance(store, in_memory_store.InMemoryTrajectoryStore)
 
   def test_unknown_backend_raises(self):
     with self.assertRaisesRegex(ValueError, "Unknown Trajectory Store"):
-      store_lib.TrajectoryStore.from_config(
-          {"enabled": True, "backend": "sqlite"}
-      )
+      store_lib.TrajectoryStore.from_config({"backend": "sqlite"})
 
   def test_missing_backend_raises(self):
     with self.assertRaisesRegex(ValueError, "Unknown Trajectory Store"):
-      store_lib.TrajectoryStore.from_config({"enabled": True})
+      store_lib.TrajectoryStore.from_config({"root_dir": "/tmp"})
 
   def test_file_backend_without_root_dir_raises(self):
     with self.assertRaisesRegex(ValueError, "'root_dir'"):
@@ -113,7 +97,7 @@ class FromConfigTest(absltest.TestCase):
         return cls()
 
       def to_config(self):
-        return {"enabled": True, "backend": self.BACKEND}
+        return {"backend": self.BACKEND}
 
       def get_trajectories_metadata(self, trajectory_ids=None):
         return []
@@ -135,7 +119,7 @@ class FromConfigTest(absltest.TestCase):
 
     try:
       store = store_lib.TrajectoryStore.from_config(
-          {"enabled": True, "backend": "custom_test_backend"}
+          {"backend": "custom_test_backend"}
       )
       self.assertIsInstance(store, CustomStore)
     finally:

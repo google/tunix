@@ -143,10 +143,8 @@ class TrajectoryStore(TrajectoryReader, TrajectoryWriter, abc.ABC):
   one place, instead of growing a shared config object that has to know about
   every backend's fields.
 
-  `TrajectoryStore.from_config` is the single construction entry point for the
-  processes that make up a run. It doubles as the on/off gate: a config of
-  None, or one whose "enabled" is false, yields None, and every store-guarded
-  call site is then a no-op.
+  `TrajectoryStore.from_config` is the single construction entry point for
+  building a store from a dictionary configuration.
   """
 
   # The value of the config's "backend" key that selects this class.
@@ -186,14 +184,12 @@ class TrajectoryStore(TrajectoryReader, TrajectoryWriter, abc.ABC):
     reading and writing different data.
 
     Returns:
-      A dict accepted by `from_config`, including "backend" and "enabled".
+      A dict accepted by `from_config`, including "backend".
     """
 
   @classmethod
-  def from_config(
-      cls, config: Mapping[str, Any] | None
-  ) -> "TrajectoryStore | None":
-    """Builds the store described by `config`, or None when it is disabled.
+  def from_config(cls, config: Mapping[str, Any]) -> "TrajectoryStore":
+    """Builds the store described by `config`.
 
     Call once per process and hold onto the result: the process that built a
     store owns closing it. Calling this twice in one process builds two
@@ -202,19 +198,19 @@ class TrajectoryStore(TrajectoryReader, TrajectoryWriter, abc.ABC):
     construct once.
 
     Args:
-      config: Configuration mapping, or None. The "backend" key selects the
-        implementation; "enabled" turns the store off without removing the
-        rest of the config.
+      config: Configuration mapping. The "backend" key selects the
+        implementation.
 
     Returns:
-      A store instance, or None if `config` is None or not enabled.
+      A constructed store instance.
 
     Raises:
-      ValueError: If "backend" names no known implementation, or the selected
-        backend rejects the rest of the config.
+      ValueError: If `config` is empty, if "backend" names no known
+        implementation, or if the selected backend rejects the rest of the
+        config.
     """
-    if config is None or not config.get("enabled", False):
-      return None
+    if not config:
+      raise ValueError("TrajectoryStore config must be a non-empty mapping.")
 
     # Ensure built-in backends are imported so their __init_subclass__ hooks
     # have registered them in _REGISTRY before lookup. Imported here rather

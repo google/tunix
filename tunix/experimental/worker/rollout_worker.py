@@ -111,8 +111,15 @@ class RolloutWorker(abstract_worker.Worker):
     # constructing the store twice. See store.TrajectoryStore.from_config.
     # TODO(sizhi): Pass self._trajectory_store into RolloutManager / collector
     # to log rollout steps in follow-up CLs.
-    self._trajectory_store = trajectory_store_lib.TrajectoryStore.from_config(
-        config.trajectory_store_config if config is not None else None
+    store_cfg = (
+        getattr(config, "trajectory_store_config", None)
+        if config is not None
+        else None
+    )
+    self._trajectory_store = (
+        trajectory_store_lib.TrajectoryStore.from_config(store_cfg)
+        if store_cfg and store_cfg.get("enabled", True)
+        else None
     )
     if self._trajectory_store is not None:
       # Several workers can share one log stream, and absl log lines carry no
