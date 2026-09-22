@@ -413,8 +413,16 @@ def _resolve_warm_concurrency(warm_concurrency: int | None) -> int:
 
   An explicit argument wins; otherwise PREWARM_WARM_CONCURRENCY is read.
   Anything missing, unparsable, or below 1 means 1, the historical
-  one-at-a-time behavior.
+  one-at-a-time behavior. An explicit argument that is not an int raises
+  TypeError here, at construction, rather than later inside the warm path.
   """
+  if warm_concurrency is not None and (
+      isinstance(warm_concurrency, bool)
+      or not isinstance(warm_concurrency, int)
+  ):
+    raise TypeError(
+        f"warm_concurrency must be an int, got {warm_concurrency!r}"
+    )
   if warm_concurrency is None:
     raw = os.getenv("PREWARM_WARM_CONCURRENCY")
     if not raw:
@@ -704,7 +712,11 @@ class PrewarmDatasetIterator:
     todo: queue.SimpleQueue[tuple[str, int]] = queue.SimpleQueue()
     for item in new_keys.items():
       todo.put(item)
-    errors: dict[str, BaseException | None] = {}
+    # Pre-filled with a failure so an image no worker finished (a worker that
+    # died on a BaseException) is logged and retried, never recorded as warm.
+    errors: dict[str, BaseException | None] = {
+        img: RuntimeError("warm did not complete") for img in new_keys
+    }
 
     def _worker() -> None:
       while True:

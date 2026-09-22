@@ -536,6 +536,29 @@ class SandboxUtilsTest(absltest.TestCase):
       with mock.patch.dict(os.environ, {"PREWARM_WARM_CONCURRENCY": raw}):
         self.assertEqual(resolve(None), want, raw)
     self.assertEqual(resolve(0), 1)
+    for bad in (16.0, "16", True):
+      with self.assertRaises(TypeError):
+        resolve(bad)
+
+  def test_warm_concurrency_never_records_a_warm_no_worker_finished(self):
+    class DyingFleet(BarrierFleet):
+
+      def warm_image(self, image, replicas_override=None, wait=False):
+        if image == "img_B":
+          raise SystemExit  # a BaseException: escapes the worker's handler
+        super().warm_image(image, replicas_override, wait)
+
+    fleet = DyingFleet(parties=1)
+    # The dying worker is the point; keep its traceback out of the test output.
+    with mock.patch.object(threading, "excepthook", lambda args: None):
+      iterator = sandbox_utils.PrewarmDatasetIterator(
+          [{"docker_image": "img_A"}, {"docker_image": "img_B"}],
+          fleet=fleet,
+          num_generations=1,
+          batch_size=1,
+          warm_concurrency=2,
+      )
+    self.assertEqual(iterator._active_replicas, {"img_A": 1})
 
 
 if __name__ == "__main__":
