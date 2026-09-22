@@ -184,6 +184,11 @@ class TrajectoryCollectorEngine:
       )
     supports_token_input = bool(
         getattr(self.sampler, "supports_token_input", False)
+        or getattr(
+            getattr(self.sampler, "sampler", None),
+            "supports_token_input",
+            False,
+        )
     )
     exact_token_continuity = metadata.get("exact_token_continuity")
     if exact_token_continuity is None:
@@ -288,17 +293,24 @@ class TrajectoryCollectorEngine:
           sampling_params=sampling_params,
       )
       res = await self.sampler.sample(sampling_req, **generation_kwargs)
+      if isinstance(res, (list, tuple)) and len(res) == 1:
+        res = res[0]
       err = getattr(res, "error", None) if not isinstance(res, str) else None
       if err is not None:
         raise RuntimeError(f"Sampler generation failed: {err}")
       text = res if isinstance(res, str) else getattr(res, "text", str(res))
       tokens = getattr(res, "token_ids", np.array([], dtype=np.int32))
+      if tokens is None:
+        tokens = np.zeros(0, dtype=np.int32)
       logprobs = getattr(res, "logprobs", None)
       routed_experts = getattr(res, "routed_experts", None)
-      prompt_tokens = np.asarray(
-          getattr(res, "prompt_token_ids", np.array([], dtype=np.int32)),
-          dtype=np.int32,
-      ).reshape(-1)
+      raw_prompt_tokens = getattr(res, "prompt_token_ids", None)
+      if raw_prompt_tokens is None:
+        prompt_tokens = np.zeros(0, dtype=np.int32)
+      else:
+        prompt_tokens = np.asarray(
+            raw_prompt_tokens, dtype=np.int32
+        ).reshape(-1)
       if prompt_tokens.size:
         prompt_tokens = prompt_tokens.reshape(1, -1)
         prompt_lengths = np.array([prompt_tokens.shape[1]], dtype=np.int32)

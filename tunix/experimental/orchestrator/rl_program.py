@@ -49,10 +49,17 @@ def _extract_scalar(val: Any, name: str | None = None) -> float | None:
   """Extracts a step scalar from a metric value, reducing multi-microbatch arrays by suffix."""
   if val is None:
     return None
+  if hasattr(val, "compute") and callable(val.compute):
+    try:
+      val = val.compute()
+    except Exception:  # pylint: disable=broad-exception-caught
+      return None
   if hasattr(val, "unreduced_sum") and hasattr(val, "denominator"):
     return metrics_logger_lib.extract_scalar(val)
   try:
     arr = np.asarray(val, dtype=np.float64)
+    if arr.size == 1:
+      return float(arr.item())
     if arr.size > 1:
       finite = arr[np.isfinite(arr)]
       if finite.size == 0:
@@ -986,13 +993,20 @@ class StandardRLProgram(RLProgram):
       # configured backends, so without this the gate is invisible to anyone
       # reading the run's log -- which is where it is read when a run is being
       # triaged and the dashboards are not to hand.
+      step_trainer_metrics = {
+          k: _extract_scalar(v, k)
+          for k, v in {**weighted_metrics, **scalar_metrics}.items()
+      }
+      if (
+          grad_norm_val is not None
+          and "grad_norm" not in step_trainer_metrics
+          and "trainer/grad_norm" not in step_trainer_metrics
+      ):
+        step_trainer_metrics["grad_norm"] = grad_norm_val
       logging.info(
           "[StepMetrics step=%d] trainer_metrics=%s",
           log_step,
-          {
-              k: _extract_scalar(v, k)
-              for k, v in {**weighted_metrics, **scalar_metrics}.items()
-          },
+          step_trainer_metrics,
       )
 
     # --- 5. Sampler/Trainer Agreement Metrics ---

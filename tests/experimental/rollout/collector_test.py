@@ -26,6 +26,7 @@ from tunix.experimental.common import test_utils as mocks
 from tunix.experimental.rollout import collector
 from tunix.experimental.rollout import sampler as sampler_lib
 from tunix.experimental.rollout import vanilla_sampler_adapter
+from tunix.experimental.rollout import vllm_sampler_adapter
 from tunix.rl.agentic.agents import model_agent
 from tunix.rl.agentic.environments import base_environment
 
@@ -461,6 +462,70 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
         chat_parser=_RecordingParser(),
     )
     self.assertTrue(engine_routed_auto.exact_token_continuity)
+
+    # VllmSamplerAdapter class-level capability and wrapped sampler lookup
+    self.assertTrue(vllm_sampler_adapter.VllmSamplerAdapter.supports_token_input)
+
+    wrapped_inner = mock.MagicMock(spec=sampler_lib.Sampler)
+    wrapped_inner.supports_token_input = True
+    wrapper_sampler = mock.MagicMock(spec=sampler_lib.Sampler)
+    wrapper_sampler.sampler = wrapped_inner
+    del wrapper_sampler.supports_token_input
+    engine_wrapped = collector.TrajectoryCollectorEngine(
+        traj_id="t_wrapped",
+        request=req_routed,
+        sampler=wrapper_sampler,
+        env_client=mock.MagicMock(),
+        agent=model_agent.ModelAgent("test_agent"),
+        tokenizer=_MockTokenizer(),
+        chat_parser=_RecordingParser(),
+    )
+    self.assertTrue(engine_wrapped.exact_token_continuity)
+
+  def test_model_call_unboxes_single_element_response_and_handles_none_tokens(self):
+    async def _run():
+      mock_sampler = mock.MagicMock(spec=sampler_lib.Sampler)
+      response = sampler_lib.SamplingResponse(
+          request_id="r1",
+          text="action_output",
+          token_ids=None,
+          prompt_token_ids=None,
+      )
+      mock_sampler.sample = mock.AsyncMock(return_value=[response])
+
+      req = datatypes.RolloutRequest(
+          prompt_id="p1",
+          prompt="What is 2+2?",
+          max_response_length=50,
+          metadata={"exact_token_continuity": False},
+      )
+      engine = collector.TrajectoryCollectorEngine(
+          traj_id="t_unboxed",
+          request=req,
+          sampler=mock_sampler,
+          env_client=mock.MagicMock(),
+          agent=model_agent.ModelAgent("test_agent"),
+          tokenizer=_MockTokenizer(),
+          chat_parser=_RecordingParser(),
+      )
+
+      with mock.patch(
+          "tunix.rl.agentic.trajectory.trajectory_collect_engine.TrajectoryCollectEngine"
+      ) as mock_engine_cls:
+        mock_instance = mock.AsyncMock()
+        mock_instance.collect.return_value = {}
+        mock_engine_cls.return_value = mock_instance
+
+        await engine.run_episode()
+        model_call = mock_engine_cls.call_args.kwargs["model_call"]
+        out = await model_call("test input")
+
+      self.assertEqual(out.text, ["action_output"])
+      self.assertEqual(len(out.tokens), 1)
+      self.assertEqual(out.tokens[0].size, 0)
+      self.assertEqual(out.left_padded_prompt_tokens.shape, (1, 1))
+
+    asyncio.run(_run())
 
   def test_exact_token_continuity_empty_prompt_tokens_closes_env(self):
     async def _run():
