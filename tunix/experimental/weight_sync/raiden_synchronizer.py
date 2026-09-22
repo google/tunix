@@ -945,6 +945,20 @@ class RaidenSynchronizer(weight_sync.WeightSynchronizer):
     head["__element_count__"] = int(sum(a.size for a in self.arrays))
     return head
 
+  def release_buffers(self) -> int:
+    """Drops Python references to staged `self.arrays` and `self.names`.
+
+    Invariant: Preserves `self._sync`, `self._ips`, `self._ffi_mesh`, and
+    `self._ffi_shard_idx` so a subsequent `bind()` (including after an aborted
+    coordinator round) reuses the initialized transport without re-init.
+    Note: Must be called AFTER `metrics()`/`checksums()` (after D2H/transfer),
+    because `unsafe_skip_buffer_lock=True` relies on Python references during D2H.
+    """
+    released = len(self.arrays)
+    self.arrays.clear()
+    self.names.clear()
+    return released
+
   def work_unit_metadata(self) -> weight_sync.WorkUnitMetadata:
     mesh = None
     for arr in self.arrays:

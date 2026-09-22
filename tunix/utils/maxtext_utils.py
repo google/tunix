@@ -435,6 +435,13 @@ def build_maxtext_config(
   # The persistence handler rejects the OCDBT/zarr3 layout MaxText writes by
   # default (see maxtext/common/checkpoint_context.py), so both must be off
   if os.environ.get("ENABLE_PATHWAYS_PERSISTENCE", "") == "1":
+    if save_interval_steps > 0 and not output_dir.startswith("gs://"):
+      raise ValueError(
+          "ENABLE_PATHWAYS_PERSISTENCE=1 with save_interval_steps > 0 "
+          "requires a gs:// base_output_directory so all pathways-worker pods "
+          f"write to shared GCS storage; got {output_dir!r}. "
+          "Set MAXTEXT_OUTPUT_DIR=gs://..."
+      )
     logging.info(
         "ENABLE_PATHWAYS_PERSISTENCE=1; disabling OCDBT/zarr3 so the Pathways "
         "persistence handler can save directly from the TPU workers."
@@ -443,6 +450,10 @@ def build_maxtext_config(
         "checkpoint_storage_use_ocdbt=false",
         "checkpoint_storage_use_zarr3=false",
     ])
+
+  _ckpt_async = os.environ.get("CHECKPOINT_ASYNC", "").strip()
+  if _ckpt_async:
+    argv.append(f"async_checkpointing={_ckpt_async}")
 
   _d2h_gb = os.environ.get("CKPT_D2H_CONCURRENT_GB", "").strip()
   if _d2h_gb:
