@@ -37,6 +37,12 @@ kubectl config set-context --current --namespace=trellis || true
 export K8S_NAMESPACE="trellis"
 export KUEUE_QUEUE="${KUEUE_QUEUE:-multislice-queue}"
 export PRIORITY_CLASS="${PRIORITY_CLASS:-medium}"
+# yaml_generator reads KUEUE_PRIORITY_CLASS (not PRIORITY_CLASS) to render
+# ${PRIORITY_CLASS_LINE}, which is the only priority hook the trainer and Ray
+# rollout templates have. Without it both admit at priority 0 and any
+# prioritised workload evicts them mid-run -- q397b-dsw-0922b lost its 256-chip
+# trainer to a priority-500 job after 74 min of queueing.
+export KUEUE_PRIORITY_CLASS="${KUEUE_PRIORITY_CLASS:-${PRIORITY_CLASS}}"
 export SERVICE_ACCOUNT="xpk-sa"
 export CPU_MACHINE="n2d-standard-64"
 
