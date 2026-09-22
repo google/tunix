@@ -188,6 +188,7 @@ export PREFUSE_MOE_WEIGHTS=${PREFUSE_MOE_WEIGHTS:-true}
 export TRAINER_PREFUSE_MOE_WEIGHTS=${TRAINER_PREFUSE_MOE_WEIGHTS:-false}
 export ROLLOUT_PREFUSE_MOE_WEIGHTS=${ROLLOUT_PREFUSE_MOE_WEIGHTS:-true}
 export ENABLE_PREFIX_CACHING=${ENABLE_PREFIX_CACHING:-false}
+export RETURN_ROUTED_EXPERTS=${RETURN_ROUTED_EXPERTS:-false}
 
 export TRAINER_JOBSET_YAML=${TRAINER_JOBSET_YAML:-jobset.pathways.yaml}
 export TRAINER_TPU_SLICE=${TRAINER_TPU_SLICE:-tpuv5:2x2x2}
@@ -668,6 +669,7 @@ if cfg:
           --prefuse_moe_weights=${ROLLOUT_PREFUSE_MOE_WEIGHTS} \
           --enable_prefix_caching=${ENABLE_PREFIX_CACHING} \
           --free_kv_cache_during_weight_sync=${ROLLOUT_FREE_KV_CACHE} \
+          --return_routed_experts=${RETURN_ROUTED_EXPERTS} \
           --registry_module=tunix.experimental.examples.deepswe_dist.deepswe \
           --env_name=deepswe_env \
           --agent_name=deepswe_agent \
@@ -830,4 +832,3 @@ else
   echo "Error: Invalid command '$COMMAND'. Available commands: 'start', 'test_orchestrator', 'stop', 'orchestrator', 'trainer', 'mock_trainer', 'rollout', 'mock_rollout'."
   exit 1
 fi
-
