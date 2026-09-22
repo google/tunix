@@ -679,31 +679,6 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       outputs.append(result)
     return outputs
 
-  @staticmethod
-  def _check_prompt_echo(prompt_ids, outputs) -> None:
-    """Checks each result belongs to, and echoes, the submitted token row.
-
-    Verifies unpadded prompt token IDs (before left-padding) against
-    output.prompt_token_ids to ensure vLLM did not re-tokenize or alter the
-    submitted token ID sequence.
-
-    Raises:
-      ValueError: result count, request ids or echoed prompts disagree with
-        what was submitted.
-    """
-    if len(outputs) != len(prompt_ids):
-      raise ValueError("vLLM result count differs from submitted token rows")
-    request_ids = [output.request_id for output in outputs]
-    if len(set(request_ids)) != len(request_ids):
-      raise ValueError("vLLM returned duplicate request ids")
-    for expected, output in zip(prompt_ids, outputs):
-      if not np.array_equal(
-          utils.as_token_ids(output.prompt_token_ids), expected
-      ):
-        raise ValueError(
-            "vLLM prompt echo differs from the submitted token row"
-        )
-
   def _eos_token_ids(self) -> List[int]:
     """Returns the token ids that terminate a generation.
 
@@ -744,32 +719,22 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       **kwargs,
   ) -> base_sampler.SamplerOutput:
     """The entry point API for vLLM Sampler"""
-    if isinstance(input_strings, str):
-      input_strings = [input_strings]
-
     exact_input = prompt_token_ids is not None
+    prompt_ids = utils.resolve_prompt_tokens(
+        input_strings,
+        prompt_token_ids,
+        self.tokenize,
+        max_generation_steps=max_generation_steps,
+        max_total_length=self.args["max_model_len"],
+        max_length_name="max_model_len",
+    )
     if exact_input:
-      assert prompt_token_ids is not None
-      if input_strings is not None:
-        raise ValueError(
-            "Provide exactly one of input_strings or prompt_token_ids"
-        )
-      prompt_ids = [utils.as_token_ids(row) for row in prompt_token_ids]
-      if any(
-          len(row) + max_generation_steps > self.args["max_model_len"]
-          for row in prompt_ids
-      ):
-        raise ValueError(
-            "prompt plus max_generation_steps exceeds max_model_len"
-        )
       # TODO(b/399000000): Clean up detokenize() so dummy input_strings are not needed.
       input_strings = [""] * len(prompt_ids)
     else:
-      if input_strings is None:
-        raise ValueError(
-            "Provide exactly one of input_strings or prompt_token_ids"
-        )
-      prompt_ids = [self.tokenize(x) for x in input_strings]
+      assert input_strings is not None
+      if isinstance(input_strings, str):
+        input_strings = [input_strings]
 
     # max_tokens: maximum number of tokens to generate
     if max_generation_steps > self.args["max_model_len"]:
@@ -903,7 +868,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     else:
       outputs = self._generate_offline(prompt_objects, target_sampling_params)
     if exact_input:
-      self._check_prompt_echo(prompt_ids, outputs)
+      utils.check_prompt_echo(prompt_ids, outputs, backend_name="vLLM")
     decoded_outputs, out_logprobs, out_tokens, out_routed_experts = (
         self.detokenize(input_strings, outputs)
     )
@@ -912,20 +877,13 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     ):
       raise ValueError("Logprobs are not returned from the vLLM.")
 
-    max_tokens_length = max(len(x) for x in prompt_ids)
-
-    if max_prompt_length is None or max_prompt_length < max_tokens_length:
-      max_prompt_length = utils.next_power_of_2(max_tokens_length)
-    all_input_ids = [
-        utils.pad_to_length(
-            np.array(x, dtype=np.int32),
-            target_length=max_prompt_length,
-            pad_value=self.tokenizer.pad_id(),
-            left=True,
+    all_input_ids, prompt_lengths, max_prompt_length = (
+        utils.left_pad_prompt_tokens(
+            prompt_ids,
+            max_prompt_length,
+            self.tokenizer.pad_id(),
         )
-        for x in prompt_ids
-    ]
-    all_input_ids = np.array(all_input_ids, dtype=np.int32)
+    )
 
     # To support multisampling, just return the whole list of SamplerOutput
     return base_sampler.SamplerOutput(
@@ -937,7 +895,5 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         routed_experts=(
             out_routed_experts[0] if self.config.return_routed_experts else None
         ),
-        prompt_lengths=np.array(
-            [len(row) for row in prompt_ids], dtype=np.int32
-        ),
+        prompt_lengths=prompt_lengths,
     )

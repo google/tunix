@@ -28,6 +28,8 @@ from tunix.rl.rollout import base_rollout
 class SglangJaxRollout(base_rollout.BaseRollout):
   """sglang jax rollout worker."""
 
+  supports_token_input = True
+
   def __init__(
       self,
       model: Any,
@@ -71,11 +73,15 @@ class SglangJaxRollout(base_rollout.BaseRollout):
 
   def generate(
       self,
-      prompts: list[str],
+      prompts: list[str] | None,
       rollout_config: base_rollout.RolloutConfig,
+      *,
+      prompt_token_ids=None,
       **kwargs,
   ) -> base_rollout.RolloutOutput:
     """Generates samples from the model."""
+    if prompt_token_ids is not None:
+      kwargs["prompt_token_ids"] = prompt_token_ids
     self.output = self._sampler(
         input_strings=prompts,
         max_generation_steps=rollout_config.max_tokens_to_generate,
@@ -95,6 +101,7 @@ class SglangJaxRollout(base_rollout.BaseRollout):
         tokens=self.output.tokens,
         left_padded_prompt_tokens=self.output.padded_prompt_tokens,
         logprobs=self.output.logprobs,
+        prompt_lengths=self.output.prompt_lengths,
     )
 
   def get_per_token_logps(

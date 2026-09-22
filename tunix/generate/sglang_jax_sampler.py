@@ -18,7 +18,7 @@ import asyncio
 import concurrent
 import dataclasses
 import math
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 from absl import logging
 from flax import nnx
@@ -270,8 +270,8 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
 
   def __call__(
       self,
-      input_strings: str | List[str],
-      max_generation_steps: int,
+      input_strings: str | List[str] | None = None,
+      max_generation_steps: int = 0,
       max_prompt_length: int | None = None,
       temperature: float = 0.0,
       top_p: float | None = None,
@@ -282,6 +282,8 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
       return_logits: bool = True,
       echo: bool = False,
       pad_output: bool = False,
+      *,
+      prompt_token_ids: Sequence[Sequence[int] | np.ndarray] | None = None,
       **kwargs,
   ) -> base_sampler.SamplerOutput:
     # max_generation_steps: maximum number of tokens to generate
@@ -295,9 +297,6 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
           f"{max_generation_steps} and `max_model_len`="
           f"{self.args['context_length']}."
       )
-
-    if isinstance(input_strings, str):
-      input_strings = [input_strings]
 
     self.sampling_params = self.engine.get_default_sampling_params()
     self.sampling_params.max_new_tokens = max_generation_steps
@@ -313,7 +312,11 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
 
     if kwargs:
       try:
-        self.sampling_params.update(**kwargs)
+        if hasattr(self.sampling_params, "update"):
+          self.sampling_params.update(**kwargs)
+        else:
+          for k, v in kwargs.items():
+            setattr(self.sampling_params, k, v)
         logging.log_first_n(
             logging.INFO,
             "Received additional kwargs that are not explicitly defined in the"
@@ -329,40 +332,55 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
             1,
         )
 
+    if prompt_token_ids is not None and (
+        getattr(self.sampling_params, "truncate_prompt_tokens", None)
+        is not None
+        or kwargs.get("truncate_prompt_tokens") is not None
+    ):
+      raise ValueError(
+          "truncate_prompt_tokens is unsupported with prompt_token_ids"
+      )
+
+    single_output_per_row = (
+        beam_size is None
+        and multi_sampling == 1
+        and getattr(self.sampling_params, "n", 1) == 1
+        and kwargs.get("n", 1) == 1
+    )
+    prompt_ids = utils.resolve_prompt_tokens(
+        input_strings,
+        prompt_token_ids,
+        self.tokenize,
+        max_generation_steps=max_generation_steps,
+        max_total_length=self.args.get("context_length"),
+        max_length_name="max_model_len",
+        single_output_per_row=single_output_per_row,
+    )
+
     sampling_params = [
-        self.sampling_params.convert_to_dict() for _ in input_strings
+        self.sampling_params.convert_to_dict() for _ in prompt_ids
     ]
     if seed is not None:
-      if type(seed) is List:
+      if isinstance(seed, list):
         assert len(seed) == len(
-            input_strings
-        ), "seed and input_strings must have same length"
+            prompt_ids
+        ), "seed and inputs must have same length"
         for i, seed_i in enumerate(seed):
           sampling_params[i]["sampling_seed"] = seed_i
       else:
-        for i, _ in enumerate(input_strings):
+        for i, _ in enumerate(prompt_ids):
           sampling_params[i]["sampling_seed"] = seed
 
-    prompt_ids = [self.tokenize(x) for x in input_strings]
     outputs = self._generate_with_loop_guard(
-        input_ids=[ids for ids in prompt_ids],
+        input_ids=[list(ids) for ids in prompt_ids],
         sampling_params=sampling_params,
     )
+    if prompt_token_ids is not None:
+      utils.check_prompt_echo(prompt_ids, outputs, backend_name="SGLang")
 
-    max_tokens_length = max(len(x) for x in prompt_ids)
-
-    if max_prompt_length is None or max_prompt_length < max_tokens_length:
-      max_prompt_length = utils.next_power_of_2(max_tokens_length)
-    all_input_ids = [
-        utils.pad_to_length(
-            np.array(x, dtype=np.int32),
-            target_length=max_prompt_length,
-            pad_value=self.tokenizer.pad_id(),
-            left=True,
-        )
-        for x in prompt_ids
-    ]
-    all_input_ids = np.array(all_input_ids, dtype=np.int32)
+    all_input_ids, prompt_lengths, _ = utils.left_pad_prompt_tokens(
+        prompt_ids, max_prompt_length, self.tokenizer.pad_id()
+    )
 
     all_output_ids = [
         np.array(x["output_ids"], dtype=np.int32) for x in outputs
@@ -375,6 +393,7 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
         tokens=all_output_ids,
         padded_prompt_tokens=all_input_ids,
         logprobs=None,
+        prompt_lengths=prompt_lengths,
     )
 
   def _generate_with_loop_guard(

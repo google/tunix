@@ -28,6 +28,8 @@ from tunix.rl.rollout import base_rollout
 class VanillaRollout(base_rollout.BaseRollout):
   """Vanilla rollout worker."""
 
+  supports_token_input = True
+
   def __init__(
       self,
       model: nnx.Module,
@@ -42,8 +44,10 @@ class VanillaRollout(base_rollout.BaseRollout):
 
   def generate(
       self,
-      prompts: list[str],
+      prompts: list[str] | None,
       rollout_config: base_rollout.RolloutConfig,
+      *,
+      prompt_token_ids=None,
       **kwargs,
   ) -> base_rollout.RolloutOutput:
     """Generates samples from the model."""
@@ -59,6 +63,7 @@ class VanillaRollout(base_rollout.BaseRollout):
         pad_output=False,
         eos_tokens=rollout_config.eos_tokens,
         return_logprobs=rollout_config.return_logprobs,
+        prompt_token_ids=prompt_token_ids,
     )
     return base_rollout.RolloutOutput(
         text=output.text,
@@ -66,6 +71,7 @@ class VanillaRollout(base_rollout.BaseRollout):
         tokens=output.tokens,  # pyrefly: ignore[bad-argument-type]
         left_padded_prompt_tokens=output.padded_prompt_tokens,
         logprobs=output.logprobs,  # pyrefly: ignore[bad-argument-type]
+        prompt_lengths=output.prompt_lengths,
     )
 
   def get_per_token_logps(

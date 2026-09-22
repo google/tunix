@@ -15,6 +15,7 @@
 """Tests for agentic_grpo_learner."""
 
 import asyncio
+from collections.abc import Sequence
 import functools
 import os
 import queue
@@ -85,29 +86,42 @@ _MOCK_RESPONSES = [
 
 
 def _mock_generate(
-    prompts: list[str] | list[list[dict[str, str]]],
+    prompts: list[str] | list[list[dict[str, str]]] | None = None,
     apply_chat_template: bool = False,
     mode: rl_engine_lib.Mode = rl_engine_lib.Mode.TRAIN,
     micro_batch_size: int | None = None,
     trace_tags: dict[str, Any] | None = None,
     output_logprobs: bool = True,
     tokenizer: Any | None = None,
+    max_generation_steps: int | None = None,
+    prompt_token_ids: Sequence[Sequence[int] | np.ndarray] | None = None,
     **kwargs,
 ) -> base_rollout.RolloutOutput:
-  del apply_chat_template, mode, micro_batch_size, trace_tags
+  del apply_chat_template, mode, micro_batch_size, trace_tags, kwargs
   assert tokenizer is not None
-  if isinstance(prompts, str):
-    prompts = [prompts]
-  batch_size = len(prompts)
+  if prompt_token_ids is not None:
+    prompt_tokens = [
+        np.asarray(pt, dtype=np.int32).tolist() for pt in prompt_token_ids
+    ]
+  else:
+    assert prompts is not None
+    if isinstance(prompts, str):
+      prompts = [prompts]
+    prompt_tokens = []
+    for p in prompts:
+      if isinstance(p, str):
+        prompt_tokens.append(tokenizer.encode(p))
+      else:
+        prompt_tokens.append(
+            tokenizer.encode(" ".join(m["content"] for m in p))
+        )
+  batch_size = len(prompt_tokens)
   text = [random.choice(_MOCK_RESPONSES) for _ in range(batch_size)]
   tokens = [tokenizer.encode(text_i) for text_i in text]
+  if max_generation_steps is not None:
+    tokens = [t[:max_generation_steps] for t in tokens]
   logprobs = [-np.random.rand(len(tokens[i])) for i in range(batch_size)]
-  prompt_tokens = []
-  for p in prompts:
-    if isinstance(p, str):
-      prompt_tokens.append(tokenizer.encode(p))
-    else:
-      prompt_tokens.append(tokenizer.encode(" ".join(m["content"] for m in p)))
+  prompt_lengths = np.array([len(pt) for pt in prompt_tokens], dtype=np.int32)
   max_p_len = max(len(pt) for pt in prompt_tokens)
   padded_prompts = np.array(
       [
@@ -120,6 +134,7 @@ def _mock_generate(
       text=text,
       tokens=tokens,
       left_padded_prompt_tokens=padded_prompts,
+      prompt_lengths=prompt_lengths,
       logits=None,
       logprobs=logprobs if output_logprobs else None,
   )
@@ -1603,6 +1618,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         num_generations=2,
         num_iterations=1,
         use_rollout_logps=use_rollout_logps,
+        exact_token_continuity=False,
     )
     learner = agentic_grpo_learner.GRPOLearner(
         rl_engine=rl_engine,

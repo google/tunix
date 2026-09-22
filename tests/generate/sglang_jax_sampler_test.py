@@ -15,6 +15,8 @@
 import os
 import re
 import tempfile
+import types
+from unittest import mock
 
 from absl.testing import absltest
 from flax import nnx
@@ -24,8 +26,9 @@ import jax.numpy as jnp
 import numpy as np
 import qwix
 import transformers
+from tunix.generate import mappings
 from tunix.generate import sampler as vanilla_sampler
-from tunix.generate import sglang_jax_sampler, mappings
+from tunix.generate import sglang_jax_sampler
 from tunix.models.llama3 import model as llama_lib
 from tunix.models.llama3 import params as llama_params
 from tunix.sft import utils as base_utils
@@ -178,6 +181,194 @@ class SglangJaxSamplerTest(absltest.TestCase):
             sglangjax_state["model"]["embed_tokens"]["embedding"].value,
         )
     )
+
+
+class SglangJaxSamplerTokenInputTest(absltest.TestCase):
+
+  def _make_sampler(self, max_model_len: int | None = 8):
+    sampler = object.__new__(sglang_jax_sampler.SglangJaxSampler)
+    sampler.args = {"context_length": max_model_len}
+    sampler.tokenizer = types.SimpleNamespace(
+        pad_id=lambda: 0,
+        eos_id=lambda: 2,
+        bos_id=lambda: 1,
+        encode=lambda text: [ord(ch) for ch in text],
+        dedup_bos_ids=lambda ids: ids,
+    )
+    params = types.SimpleNamespace(
+        max_new_tokens=0,
+        n=1,
+        temperature=0.0,
+        stop_token_ids=[],
+        skip_special_tokens=True,
+        top_p=None,
+        top_k=None,
+        truncate_prompt_tokens=None,
+    )
+    params.convert_to_dict = lambda: dict(params.__dict__)
+    sampler.engine = types.SimpleNamespace(
+        get_default_sampling_params=lambda: params
+    )
+    sampler.tokenize = mock.Mock(
+        side_effect=AssertionError("tokenize must not be called")
+    )
+    return sampler
+
+  def test_prompt_token_ids_bypasses_tokenize_and_returns_exact_padded_ids(
+      self,
+  ):
+    sampler = self._make_sampler(max_model_len=8)
+    captured = {}
+
+    def fake_generate(*, input_ids, sampling_params):
+      captured["input_ids"] = input_ids
+      captured["sampling_params"] = sampling_params
+      return [
+          {
+              "text": "a",
+              "output_ids": [9, 2],
+              "meta_info": {"id": "0", "prompt_tokens": len(input_ids[0])},
+          },
+          {
+              "text": "b",
+              "output_ids": [8],
+              "meta_info": {"id": "1", "prompt_tokens": len(input_ids[1])},
+          },
+      ]
+
+    sampler._generate_with_loop_guard = fake_generate
+    out = sampler(
+        prompt_token_ids=[[0, 3], [4, 0, 5]],
+        max_generation_steps=2,
+        max_prompt_length=4,
+    )
+
+    self.assertEqual(captured["input_ids"], [[0, 3], [4, 0, 5]])
+    np.testing.assert_array_equal(
+        out.padded_prompt_tokens,
+        np.array([[0, 0, 0, 3], [0, 4, 0, 5]], dtype=np.int32),
+    )
+    np.testing.assert_array_equal(
+        out.prompt_lengths, np.array([2, 3], dtype=np.int32)
+    )
+    self.assertEqual(out.text, ["a", "b"])
+    np.testing.assert_array_equal(
+        out.tokens[0], np.array([9, 2], dtype=np.int32)
+    )
+    np.testing.assert_array_equal(out.tokens[1], np.array([8], dtype=np.int32))
+
+  def test_input_strings_populates_prompt_lengths(self):
+    sampler = self._make_sampler(max_model_len=8)
+    sampler.tokenize = lambda text: [1] + [ord(ch) for ch in text]
+    sampler._generate_with_loop_guard = lambda *, input_ids, sampling_params: [
+        {
+            "text": "x",
+            "output_ids": [7],
+            "meta_info": {"id": str(i), "prompt_tokens": len(ids)},
+        }
+        for i, ids in enumerate(input_ids)
+    ]
+
+    out = sampler(
+        input_strings=["a", "bc"],
+        max_generation_steps=2,
+        max_prompt_length=4,
+    )
+
+    np.testing.assert_array_equal(
+        out.prompt_lengths, np.array([2, 3], dtype=np.int32)
+    )
+
+  def test_rejects_invalid_inputs_before_calling_engine(self):
+    sampler = self._make_sampler(max_model_len=5)
+    sampler._generate_with_loop_guard = lambda **_: (_ for _ in ()).throw(
+        AssertionError("engine must not be called")
+    )
+
+    with self.assertRaisesRegex(ValueError, "exactly one"):
+      sampler(
+          input_strings=["hi"], prompt_token_ids=[[1]], max_generation_steps=1
+      )
+    with self.assertRaisesRegex(ValueError, "exactly one"):
+      sampler(max_generation_steps=1)
+    with self.assertRaisesRegex(ValueError, "one output per row"):
+      sampler(prompt_token_ids=[[1]], max_generation_steps=1, multi_sampling=2)
+    with self.assertRaisesRegex(ValueError, "one output per row"):
+      sampler(prompt_token_ids=[[1]], max_generation_steps=1, beam_size=2)
+    with self.assertRaisesRegex(ValueError, "one output per row"):
+      sampler(prompt_token_ids=[[1]], max_generation_steps=1, n=2)
+    with self.assertRaisesRegex(ValueError, "truncate_prompt_tokens"):
+      sampler(
+          prompt_token_ids=[[1]],
+          max_generation_steps=1,
+          truncate_prompt_tokens=1,
+      )
+    with self.assertRaisesRegex(ValueError, "exceeds max_model_len"):
+      sampler(prompt_token_ids=[[1, 2, 3, 4]], max_generation_steps=2)
+    with self.assertRaisesRegex(ValueError, "must not be empty"):
+      sampler(input_strings=[], max_generation_steps=1)
+    with self.assertRaisesRegex(ValueError, "must not be empty"):
+      sampler(prompt_token_ids=[], max_generation_steps=1)
+    with self.assertRaisesRegex(ValueError, "1-D"):
+      sampler(
+          prompt_token_ids=[np.zeros((1, 2), dtype=np.int32)],
+          max_generation_steps=1,
+      )
+
+  def test_rejects_mismatched_or_duplicate_engine_outputs(self):
+    sampler = self._make_sampler(max_model_len=8)
+
+    sampler._generate_with_loop_guard = lambda **_: [{
+        "text": "a",
+        "output_ids": [9],
+        "prompt_token_ids": [1, 999],
+        "meta_info": {"id": "0", "prompt_tokens": 2},
+    }]
+    with self.assertRaisesRegex(
+        ValueError, "prompt_token_ids differed from input"
+    ):
+      sampler(prompt_token_ids=[[1, 2]], max_generation_steps=1)
+
+    sampler._generate_with_loop_guard = lambda **_: [{
+        "text": "a",
+        "output_ids": [9],
+        "meta_info": {"id": "0", "prompt_tokens": 3},
+    }]
+    with self.assertRaisesRegex(
+        ValueError, "prompt_token_ids differed from input"
+    ):
+      sampler(prompt_token_ids=[[1, 2]], max_generation_steps=1)
+
+    sampler._generate_with_loop_guard = lambda **_: [
+        {
+            "text": "a",
+            "output_ids": [9],
+            "meta_info": {"id": "dup", "prompt_tokens": 1},
+        },
+        {
+            "text": "b",
+            "output_ids": [8],
+            "meta_info": {"id": "dup", "prompt_tokens": 1},
+        },
+    ]
+    with self.assertRaisesRegex(ValueError, "Duplicate request_id"):
+      sampler(prompt_token_ids=[[1], [2]], max_generation_steps=1)
+
+    sampler._generate_with_loop_guard = lambda **_: [
+        {"text": "a", "output_ids": [9], "prompt_token_ids": [1]},
+    ]
+    with self.assertRaisesRegex(ValueError, "missing request_id"):
+      sampler(prompt_token_ids=[[1]], max_generation_steps=1)
+
+    sampler._generate_with_loop_guard = lambda **_: [
+        {"text": "a", "output_ids": [9], "meta_info": {"id": "0"}},
+    ]
+    with self.assertRaisesRegex(ValueError, "missing prompt echo"):
+      sampler(prompt_token_ids=[[1]], max_generation_steps=1)
+
+    sampler._generate_with_loop_guard = lambda **_: []
+    with self.assertRaisesRegex(ValueError, "Expected 1 outputs, got 0"):
+      sampler(prompt_token_ids=[[1]], max_generation_steps=1)
 
 
 if __name__ == "__main__":
