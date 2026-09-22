@@ -28,6 +28,8 @@ from __future__ import annotations
 import abc
 import dataclasses
 import enum
+import logging
+import os
 from typing import Any, Mapping, Optional, Protocol, Sequence, runtime_checkable
 
 
@@ -37,6 +39,15 @@ class WeightSyncMode(str, enum.Enum):
   NONE = "none"
   FALLBACK = "fallback"
   RAIDEN = "raiden"
+  GCS = "gcs"
+
+  @classmethod
+  def _missing_(cls, value: object) -> Optional[WeightSyncMode]:
+    if isinstance(value, str):
+      norm = value.strip().lower()
+      if norm in ("file", "filesystem", "gcs"):
+        return cls.GCS
+    return None
 
 
 DEFAULT_WEIGHT_SYNC_MODE = WeightSyncMode.FALLBACK
@@ -92,6 +103,8 @@ class TensorMetadata:
       e.g. `((), ("tp",), ("attention_dp", "tp"))`. The string form makes every
       consumer re-parse it and reserves the comma. Needs the Raiden handler and
       the MaxText adapter migrated together.
+    global_shard_indices: Explicit global shard indices owned by the local
+      shards of this variable.
   """
 
   name: str
@@ -101,6 +114,7 @@ class TensorMetadata:
   item_size: int
   layer_idx: int = 0
   sharding_spec: tuple[str, ...] = ()
+  global_shard_indices: tuple[int, ...] = ()
 
   def __post_init__(self) -> None:
     rank = len(self.shape)
@@ -207,6 +221,8 @@ class WorkUnitMetadata:
   transport_mode: Optional[str] = None
   use_ffi: Optional[bool] = None
   host_subgrid: Optional[tuple[int, ...]] = None
+  artifact_uri: Optional[str] = None
+  checksums: Optional[dict[str, float]] = None
 
   @classmethod
   def from_dict(cls, d: Any) -> WorkUnitMetadata:
@@ -239,6 +255,7 @@ class WorkUnitMetadata:
                 item_size=int(v["item_size"]),
                 layer_idx=int(v.get("layer_idx", 0)),
                 sharding_spec=tuple(v.get("sharding_spec", ())),
+                global_shard_indices=tuple(v.get("global_shard_indices", ())),
             )
         )
       elif hasattr(v, "name"):
@@ -251,6 +268,9 @@ class WorkUnitMetadata:
                 item_size=int(v.item_size),
                 layer_idx=int(getattr(v, "layer_idx", 0)),
                 sharding_spec=tuple(getattr(v, "sharding_spec", ())),
+                global_shard_indices=tuple(
+                    getattr(v, "global_shard_indices", ()) or ()
+                ),
             )
         )
 
@@ -279,6 +299,14 @@ class WorkUnitMetadata:
         host_subgrid=(
             tuple(d["host_subgrid"])
             if d.get("host_subgrid") is not None
+            else None
+        ),
+        artifact_uri=(
+            str(d["artifact_uri"]) if d.get("artifact_uri") is not None else None
+        ),
+        checksums=(
+            {str(k): float(v) for k, v in d["checksums"].items()}
+            if isinstance(d.get("checksums"), Mapping)
             else None
         ),
     )
@@ -343,6 +371,13 @@ class WeightSyncHandler(abc.ABC):
     This is a blocking call and returns once a terminal outcome is known.
     Callers running an event loop wrap it in an executor.
     """
+
+  def build_extra_config(
+      self, src_metadata: Sequence[WorkUnitMetadata]
+  ) -> dict[str, Any]:
+    """Builds transport-specific extra_config entries from source metadata."""
+    del src_metadata
+    return {}
 
   def close(self) -> None:
     """Releases any transport resources. Optional for implementations."""
@@ -521,3 +556,228 @@ class WeightSyncDestination(Protocol):
     lost reply from unfinished work.
     """
     ...
+
+
+class WeightSynchronizer(abc.ABC):
+  """Unified worker-side data-plane interface for weight synchronization.
+
+  Implementations (`RaidenWeightSync`, `GCSWeightSync`) share the same
+  trainer (`bind`, `d2h`, `work_unit_metadata`, `release`) and rollout
+  (`bind`, `work_unit_metadata`, `h2d`, `apply_to_runner`, `checksums`)
+  lifecycle contracts.
+  """
+
+  job_name: str
+  worker_index: int
+  names: list[str]
+  arrays: list[Any]
+
+  @property
+  def bound(self) -> bool:
+    return bool(self.names)
+
+  @property
+  def active(self) -> bool:
+    return self.bound
+
+  @abc.abstractmethod
+  def bind(self, state: Any) -> None:
+    """Binds or rebinds a model state PyTree for weight synchronization."""
+
+  @abc.abstractmethod
+  def d2h(self, sync_request: Any = None) -> None:
+    """Exports bound device arrays to the transport staging layer."""
+
+  @abc.abstractmethod
+  def h2d(self, sync_request: Any = None, **kwargs: Any) -> None:
+    """Imports weights from the transport staging layer into device arrays."""
+
+  @abc.abstractmethod
+  def work_unit_metadata(self) -> WorkUnitMetadata:
+    """Returns wire-safe WorkUnitMetadata for coordinator registration."""
+
+  def work_unit_metadata_all(self) -> list[WorkUnitMetadata]:
+    """Returns work unit metadata list for registration."""
+    return [self.work_unit_metadata()]
+
+  @abc.abstractmethod
+  def apply_to_runner(self, runner: Any) -> None:
+    """Applies updated arrays after H2D to the inference runner's state."""
+
+  @abc.abstractmethod
+  def checksums(self, sample: Optional[int] = 3) -> dict[str, Any]:
+    """Computes per-tensor float32 L1 abs-sum checksums and grand total."""
+
+  def metrics(self) -> dict[str, Any]:
+    """Returns transport metrics dictionary."""
+    return {}
+
+  def release(self, sync_request: Any = None) -> None:
+    """Releases or cleans up per-round transport staging resources."""
+    del sync_request
+
+  def close(self) -> None:
+    """Closes the synchronizer and releases persistent resources."""
+
+
+def is_verify_weights_enabled() -> bool:
+  """Returns True if weight checksum verification is enabled via VERIFY_WEIGHTS."""
+  return os.environ.get("VERIFY_WEIGHTS", "").strip().lower() in (
+      "1",
+      "true",
+      "yes",
+      "y",
+      "t",
+  )
+
+
+def verify_weight_checksums(
+    src_checksums: Mapping[str, Any],
+    dst_checksums: Mapping[str, Any],
+    *,
+    rtol: float = 1e-5,
+    atol: float = 1e-5,
+) -> dict[str, Any]:
+  """Verifies that destination weight checksums match source weight checksums.
+
+  Guarded by the `VERIFY_WEIGHTS` environment variable. When enabled, checks
+  tensor count, element count, grand total L1 norm, and every shared per-tensor
+  L1 norm within relative tolerance `rtol` and absolute tolerance `atol`.
+  Raises `RuntimeError` if any mismatch is found.
+
+  Args:
+    src_checksums: Checksum mapping from the trainer source.
+    dst_checksums: Checksum mapping from the rollout destination.
+    rtol: Relative tolerance for float32 L1 reduction comparison.
+    atol: Absolute tolerance for float32 L1 reduction comparison.
+
+  Returns:
+    A summary dictionary of verification metrics.
+  """
+  if not is_verify_weights_enabled():
+    return {"verified": False, "skipped": True}
+
+  if not src_checksums or not dst_checksums:
+    raise RuntimeError(
+        "Cannot verify weight checksums: empty checksum mapping "
+        f"(src keys={len(src_checksums or {})}, dst keys={len(dst_checksums or {})})."
+    )
+
+  for count_key in ("__tensor_count__", "__element_count__"):
+    if count_key in src_checksums and count_key in dst_checksums:
+      src_c = int(src_checksums[count_key])
+      dst_c = int(dst_checksums[count_key])
+      if src_c != dst_c:
+        raise RuntimeError(
+            f"Weight checksum verification failed on {count_key}: "
+            f"source={src_c} != destination={dst_c}"
+        )
+
+  mismatches: list[str] = []
+  max_rel_err = 0.0
+  matched_tensors = 0
+
+  from tunix.experimental.weight_sync import raiden_synchronizer  # pylint: disable=g-import-not-at-top
+
+  def _norm(mapping: Mapping[str, Any]) -> dict[str, float]:
+    out: dict[str, float] = {}
+    for k, v in mapping.items():
+      if k.startswith("__"):
+        out[k] = float(v)
+      else:
+        canon = raiden_synchronizer._param_key(k) or k  # pylint: disable=protected-access
+        out[canon] = float(v)
+    return out
+
+  norm_src = _norm(src_checksums)
+  norm_dst = _norm(dst_checksums)
+
+  # Compare __grand_total__ and all shared canonical tensor keys
+  src_keys = {k for k in norm_src if not k.startswith("__")}
+  dst_keys = {k for k in norm_dst if not k.startswith("__")}
+  shared_keys = sorted(src_keys & dst_keys)
+
+  keys_to_check = ["__grand_total__"] + shared_keys
+  for key in keys_to_check:
+    if key not in norm_src or key not in norm_dst:
+      continue
+    s_val = float(norm_src[key])
+    d_val = float(norm_dst[key])
+    abs_err = abs(s_val - d_val)
+    denom = max(abs(s_val), abs(d_val), 1e-8)
+    rel_err = abs_err / denom
+    if key != "__grand_total__":
+      matched_tensors += 1
+      max_rel_err = max(max_rel_err, rel_err)
+    if abs_err > atol and rel_err > rtol:
+      mismatches.append(
+          f"{key}: src={s_val:.6f}, dst={d_val:.6f}, "
+          f"abs_err={abs_err:.3e}, rel_err={rel_err:.3e}"
+      )
+
+  if mismatches:
+    raise RuntimeError(
+        f"WEIGHT VERIFICATION FAILED: {len(mismatches)} checksum mismatch(es) "
+        f"(rtol={rtol}, atol={atol}): {mismatches[:10]}"
+    )
+
+  summary = {
+      "verified": True,
+      "tensor_count": int(dst_checksums.get("__tensor_count__", matched_tensors)),
+      "element_count": int(dst_checksums.get("__element_count__", 0)),
+      "matched_tensors": matched_tensors,
+      "src_grand_total": float(src_checksums.get("__grand_total__", 0.0)),
+      "dst_grand_total": float(dst_checksums.get("__grand_total__", 0.0)),
+      "max_rel_err": max_rel_err,
+  }
+  logging.info(
+      "WEIGHT VERIFICATION PASSED: tensor_count=%d, matched_tensors=%d, "
+      "element_count=%d, grand_total=(src=%.6f, dst=%.6f), max_rel_err=%.3e",
+      summary["tensor_count"],
+      summary["matched_tensors"],
+      summary["element_count"],
+      summary["src_grand_total"],
+      summary["dst_grand_total"],
+      summary["max_rel_err"],
+  )
+  return summary
+
+
+def create_weight_synchronizer(
+    mode: WeightSyncMode | str,
+    job_name: str,
+    state: Any = None,
+    *,
+    worker_index: int = 0,
+    staging_dir: Optional[str] = None,
+    **kwargs: Any,
+) -> WeightSynchronizer:
+  """Factory creating a WeightSynchronizer (`RaidenWeightSync` or `GCSWeightSync`)."""
+  resolved_mode = (
+      mode if isinstance(mode, WeightSyncMode) else WeightSyncMode(str(mode))
+  )
+  if resolved_mode == WeightSyncMode.RAIDEN:
+    from tunix.experimental.weight_sync import raiden_synchronizer  # pylint: disable=g-import-not-at-top
+
+    WeightSynchronizer.register(raiden_synchronizer.RaidenSynchronizer)
+    if state is not None:
+      kwargs["state"] = state
+    return raiden_synchronizer.RaidenSynchronizer(
+        job_name=job_name,
+        worker_index=worker_index,
+        **kwargs,
+    )
+  if resolved_mode == WeightSyncMode.GCS:
+    from tunix.experimental.weight_sync import gcs_weight_sync  # pylint: disable=g-import-not-at-top
+
+    return gcs_weight_sync.GCSWeightSync(
+        job_name=job_name,
+        state=state,
+        worker_index=worker_index,
+        staging_dir=staging_dir,
+        **kwargs,
+    )
+  raise ValueError(
+      f"Unsupported WeightSyncMode {resolved_mode!r} for WeightSynchronizer."
+  )
+

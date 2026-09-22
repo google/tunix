@@ -3759,5 +3759,48 @@ class StandardRLProgramTrajectoryStoreTest(absltest.TestCase):
     program.close()
 
 
+class ExtractScalarTest(absltest.TestCase):
+
+  def test_extract_scalar_with_compute(self):
+    class _MockMetric:
+
+      def __init__(self, val):
+        self.val = val
+
+      def compute(self):
+        return self.val
+
+    m = _MockMetric(np.array([1.0, 5.0, 3.0]))
+    self.assertEqual(
+        rl_program._extract_scalar(m, "mult_prob_error_max"), 5.0
+    )
+    self.assertEqual(
+        rl_program._extract_scalar(m, "mult_prob_error_min"), 1.0
+    )
+    self.assertAlmostEqual(
+        rl_program._extract_scalar(m, "mult_prob_error_mean"), 3.0
+    )
+    self.assertAlmostEqual(
+        rl_program._extract_scalar(m, "sample_mask/mult_prob_error/max"), 5.0
+    )
+    self.assertAlmostEqual(
+        rl_program._extract_scalar(m, "sample_mask/mult_prob_error/min"), 1.0
+    )
+
+  def test_extract_scalar_single_element(self):
+    class _MockScalarMetric:
+
+      def compute(self):
+        return np.array([4.2])
+
+    self.assertAlmostEqual(
+        rl_program._extract_scalar(_MockScalarMetric()), 4.2
+    )
+    self.assertAlmostEqual(
+        rl_program._extract_scalar(3.14), 3.14
+    )
+
+
 if __name__ == "__main__":
   absltest.main()
+

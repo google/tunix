@@ -26,6 +26,7 @@ from tunix.experimental.common import test_utils as mocks
 from tunix.experimental.rollout import collector
 from tunix.experimental.rollout import sampler as sampler_lib
 from tunix.experimental.rollout import vanilla_sampler_adapter
+from tunix.experimental.rollout import vllm_sampler_adapter
 from tunix.rl.agentic.agents import model_agent
 from tunix.rl.agentic.environments import base_environment
 
@@ -33,11 +34,11 @@ from tunix.rl.agentic.environments import base_environment
 class _MultiStepEnv(base_environment.BaseTaskEnv):
 
   def _initial_observation(self):
-    return {"observation": "start"}
+    return "start"
 
   def _step_impl(self, action):
     return base_environment.EnvStepResult(
-        observation={"observation": "step"},
+        observation="step",
         reward=1.0,
         done=False,
         info={},
@@ -76,6 +77,8 @@ class _MockTokenizer:
 
 class _MockSampler(sampler_lib.Sampler):
 
+  supports_token_input = True
+
   def __init__(self, token_lengths=None, routed_experts=None):
     self.sampled_params = []
     self.token_lengths = token_lengths or [30, 20]
@@ -92,13 +95,22 @@ class _MockSampler(sampler_lib.Sampler):
     )
     self._call_count += 1
     tokens = np.arange(tok_len, dtype=np.int32)
+    # Echo a token-ids prompt back verbatim, as a real engine does: under
+    # `exact_token_continuity` the collect engine checks a later turn's echoed
+    # prompt against the history it sent, and a canned answer never matches.
+    prompt = getattr(req, "prompt", None)
+    if isinstance(prompt, dict) and "prompt_token_ids" in prompt:
+      prompt_token_ids = np.array(prompt["prompt_token_ids"], dtype=np.int32)
+    else:
+      prompt_token_ids = np.array([1, 2], dtype=np.int32)
     return sampler_lib.SamplingResponse(
         request_id=getattr(req, "request_id", ""),
         text=f"action_{self._call_count}",
         token_ids=tokens,
-        prompt_token_ids=np.array([1, 2], dtype=np.int32),
+        prompt_token_ids=prompt_token_ids,
         routed_experts=self.routed_experts,
     )
+
 
 
 class _MockVanillaSampler(vanilla_sampler_adapter.VanillaSamplerAdapter):
@@ -384,8 +396,168 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
       self.assertGreaterEqual(len(sampler.sampled_params), 2)
       # Turn 1: remaining budget is 50.
       self.assertEqual(sampler.sampled_params[0].max_tokens, 50)
-      # Turn 1 generated 30 tokens, so Turn 2 remaining budget is 50 - 30 = 20.
-      self.assertEqual(sampler.sampled_params[1].max_tokens, 20)
+      # Turn 1 generated 30 assistant tokens plus 6 env tokens ("PARSED"),
+      # so Turn 2 remaining budget is 50 - 30 - 6 = 14.
+      self.assertEqual(
+          sampler.sampled_params[1].max_tokens,
+          20 - len(tokenizer.encode("PARSED")),
+      )
+
+    asyncio.run(_run())
+
+  def test_exact_token_continuity_capability_gating(self):
+    vanilla_sampler = _MockVanillaSampler()
+    req_default = datatypes.RolloutRequest(
+        prompt_id="p1",
+        prompt="What is 2+2?",
+        max_response_length=50,
+    )
+    engine_vanilla = collector.TrajectoryCollectorEngine(
+        traj_id="t_vanilla",
+        request=req_default,
+        sampler=vanilla_sampler,
+        env_client=mock.MagicMock(),
+        # A real agent, not a MagicMock: ``__init__`` now builds trajectory
+        # metadata, and ``trajectory.Agent`` validates ``name``/``version`` as
+        # strings, which a MagicMock's auto-attributes are not.
+        agent=model_agent.ModelAgent("test_agent"),
+        tokenizer=_MockTokenizer(),
+        chat_parser=_RecordingParser(),
+    )
+    self.assertFalse(engine_vanilla.exact_token_continuity)
+
+    req_vanilla_forced = datatypes.RolloutRequest(
+        prompt_id="p1",
+        prompt="What is 2+2?",
+        max_response_length=50,
+        metadata={"exact_token_continuity": True},
+    )
+    with self.assertRaisesRegex(
+        ValueError, "exact_token_continuity requires a token-input backend"
+    ):
+      collector.TrajectoryCollectorEngine(
+          traj_id="t_vanilla_forced",
+          request=req_vanilla_forced,
+          sampler=vanilla_sampler,
+          env_client=mock.MagicMock(),
+          agent=model_agent.ModelAgent("test_agent"),
+          tokenizer=_MockTokenizer(),
+          chat_parser=_RecordingParser(),
+      )
+
+    token_sampler = _MockSampler()
+    req_routed = datatypes.RolloutRequest(
+        prompt_id="p1",
+        prompt="What is 2+2?",
+        max_response_length=50,
+        generation_kwargs={"return_routed_experts": True},
+    )
+    engine_routed_auto = collector.TrajectoryCollectorEngine(
+        traj_id="t_routed_auto",
+        request=req_routed,
+        sampler=token_sampler,
+        env_client=mock.MagicMock(),
+        agent=model_agent.ModelAgent("test_agent"),
+        tokenizer=_MockTokenizer(),
+        chat_parser=_RecordingParser(),
+    )
+    self.assertTrue(engine_routed_auto.exact_token_continuity)
+
+    # VllmSamplerAdapter class-level capability and wrapped sampler lookup
+    self.assertTrue(vllm_sampler_adapter.VllmSamplerAdapter.supports_token_input)
+
+    wrapped_inner = mock.MagicMock(spec=sampler_lib.Sampler)
+    wrapped_inner.supports_token_input = True
+    wrapper_sampler = mock.MagicMock(spec=sampler_lib.Sampler)
+    wrapper_sampler.sampler = wrapped_inner
+    del wrapper_sampler.supports_token_input
+    engine_wrapped = collector.TrajectoryCollectorEngine(
+        traj_id="t_wrapped",
+        request=req_routed,
+        sampler=wrapper_sampler,
+        env_client=mock.MagicMock(),
+        agent=model_agent.ModelAgent("test_agent"),
+        tokenizer=_MockTokenizer(),
+        chat_parser=_RecordingParser(),
+    )
+    self.assertTrue(engine_wrapped.exact_token_continuity)
+
+  def test_model_call_unboxes_single_element_response_and_handles_none_tokens(self):
+    async def _run():
+      mock_sampler = mock.MagicMock(spec=sampler_lib.Sampler)
+      response = sampler_lib.SamplingResponse(
+          request_id="r1",
+          text="action_output",
+          token_ids=None,
+          prompt_token_ids=None,
+      )
+      mock_sampler.sample = mock.AsyncMock(return_value=[response])
+
+      req = datatypes.RolloutRequest(
+          prompt_id="p1",
+          prompt="What is 2+2?",
+          max_response_length=50,
+          metadata={"exact_token_continuity": False},
+      )
+      engine = collector.TrajectoryCollectorEngine(
+          traj_id="t_unboxed",
+          request=req,
+          sampler=mock_sampler,
+          env_client=mock.MagicMock(),
+          agent=model_agent.ModelAgent("test_agent"),
+          tokenizer=_MockTokenizer(),
+          chat_parser=_RecordingParser(),
+      )
+
+      with mock.patch(
+          "tunix.rl.agentic.trajectory.trajectory_collect_engine.TrajectoryCollectEngine"
+      ) as mock_engine_cls:
+        mock_instance = mock.AsyncMock()
+        mock_instance.collect.return_value = {}
+        mock_engine_cls.return_value = mock_instance
+
+        await engine.run_episode()
+        model_call = mock_engine_cls.call_args.kwargs["model_call"]
+        out = await model_call("test input")
+
+      self.assertEqual(out.text, ["action_output"])
+      self.assertEqual(len(out.tokens), 1)
+      self.assertEqual(out.tokens[0].size, 0)
+      self.assertEqual(out.left_padded_prompt_tokens.shape, (1, 1))
+
+    asyncio.run(_run())
+
+  def test_exact_token_continuity_empty_prompt_tokens_closes_env(self):
+    async def _run():
+      class _EmptyPromptSampler(_MockSampler):
+        async def sample(self, req, **kwargs):
+          return sampler_lib.SamplingResponse(
+              request_id="r1",
+              text="action_1",
+              token_ids=np.array([1, 2], dtype=np.int32),
+              prompt_token_ids=np.zeros(0, dtype=np.int32),
+          )
+
+      env = _MultiStepEnv(task={"question": "2+2", "answer": "4"}, max_steps=2)
+      env.close = mock.MagicMock()
+      engine = collector.TrajectoryCollectorEngine(
+          traj_id="t_empty",
+          request=datatypes.RolloutRequest(
+              prompt_id="p1",
+              prompt="What is 2+2?",
+              max_response_length=50,
+          ),
+          sampler=_EmptyPromptSampler(),
+          env_client=env,
+          agent=model_agent.ModelAgent("test_agent"),
+          tokenizer=_MockTokenizer(),
+          chat_parser=_RecordingParser(),
+      )
+      with self.assertRaisesRegex(
+          ValueError, "requires non-empty prompt_token_ids"
+      ):
+        await engine.run_episode()
+      env.close.assert_called_once()
 
     asyncio.run(_run())
 

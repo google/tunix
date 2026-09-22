@@ -99,6 +99,10 @@ class TensorMetadataTest(absltest.TestCase):
     self.assertEqual(tensor.layout, (-1, 0))
     self.assertEqual(tensor.sharding_spec, ("", "tp"))
 
+  def test_accepts_global_shard_indices(self):
+    tensor = _tensor(global_shard_indices=(0, 2))
+    self.assertEqual(tensor.global_shard_indices, (0, 2))
+
   def test_rejects_an_empty_name_or_invalid_shape(self):
     with self.assertRaisesRegex(ValueError, "name"):
       _tensor(name="")
@@ -141,6 +145,25 @@ class NeutralContractTest(absltest.TestCase):
 
     self.assertEqual(metadata.variables, tensors)
     self.assertEqual(metadata.mesh_axes, ("fsdp", "tp"))
+
+  def test_from_dict_preserves_global_shard_indices(self):
+    d = {
+        "unit": {"job_name": "rollout", "job_replica_id": "0"},
+        "shards": ["10.0.0.1:8000"],
+        "variables": [{
+            "name": "layer0",
+            "shape": [1024, 1024],
+            "mesh_shape": [4, 1],
+            "layout": [1, 0],
+            "item_size": 4,
+            "layer_idx": 0,
+            "sharding_spec": ["x", ""],
+            "global_shard_indices": [0, 2],
+        }],
+    }
+    meta = weight_sync.dict_to_metadata(d)
+    self.assertLen(meta.variables, 1)
+    self.assertEqual(meta.variables[0].global_shard_indices, (0, 2))
 
   def test_handler_boundary_exposes_no_raiden_types(self):
     with self.assertRaises(TypeError):

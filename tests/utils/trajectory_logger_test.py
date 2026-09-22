@@ -1,3 +1,4 @@
+import json
 import locale
 import os
 import pathlib
@@ -66,6 +67,13 @@ class _FakeGcsPath:
   def replace(self, target: '_FakeGcsPath') -> None:
     target.local_path.parent.mkdir(parents=True, exist_ok=True)
     self._local.replace(target.local_path)
+
+  def write_text(self, data: str, encoding: str = 'utf-8') -> int:
+    self._local.parent.mkdir(parents=True, exist_ok=True)
+    return self._local.write_text(data, encoding=encoding)
+
+  def read_text(self, encoding: str = 'utf-8') -> str:
+    return self._local.read_text(encoding=encoding)
 
   def unlink(self) -> None:
     self._local.unlink()
@@ -169,13 +177,55 @@ class TrajectoryLoggerTest(absltest.TestCase):
     self.assertEqual(df['reward'].tolist(), [0.0, 1.0])
 
   def test_async_trajectory_logger_logs_and_stops(self):
-    """Tests that AsyncTrajectoryLogger writes items asynchronously and stops cleanly."""
+    """Tests that AsyncTrajectoryLogger writes JSON files asynchronously and stops cleanly."""
     try:
       temp_dir = self.create_tempdir().full_path
     except Exception:
       temp_dir = tempfile.TemporaryDirectory().name
 
     logger = trajectory_logger.AsyncTrajectoryLogger(temp_dir)
+    for i in range(5):
+      logger.log_item_async({
+          'global_step': i,
+          'prompt_id': f'prompt_{i}',
+          'reward': float(i),
+          'worker_id': 'worker0',
+      })
+    logger.stop()
+
+    # CSV files must be disabled by default
+    csv_files = [f for f in os.listdir(temp_dir) if f.endswith('.csv')]
+    self.assertEmpty(csv_files)
+
+    # Verify JSON directory hierarchy: step{i}/worker0/traj_prompt_{i}_g0/
+    for i in range(5):
+      traj_dir = os.path.join(
+          temp_dir, f'step{i}', 'worker0', f'traj_prompt_{i}_g0'
+      )
+      self.assertTrue(
+          os.path.isdir(traj_dir), f'Expected directory {traj_dir} to exist.'
+      )
+      meta_file = os.path.join(traj_dir, 'metadata.json')
+      step_file = os.path.join(traj_dir, 'step0.json')
+      self.assertTrue(os.path.exists(meta_file))
+      self.assertTrue(os.path.exists(step_file))
+
+      with open(meta_file, 'r', encoding='utf-8') as f:
+        meta = json.load(f)
+      self.assertEqual(meta['global_step'], i)
+      self.assertEqual(meta['prompt_id'], f'prompt_{i}')
+      self.assertEqual(meta['reward'], float(i))
+
+  def test_async_trajectory_logger_csv_fallback(self):
+    """Tests that AsyncTrajectoryLogger writes CSV when log_format='csv' is explicitly set."""
+    try:
+      temp_dir = self.create_tempdir().full_path
+    except Exception:
+      temp_dir = tempfile.TemporaryDirectory().name
+
+    logger = trajectory_logger.AsyncTrajectoryLogger(
+        temp_dir, log_format='csv'
+    )
     for i in range(5):
       logger.log_item_async({
           'global_step': i,
@@ -201,16 +251,24 @@ class TrajectoryLoggerTest(absltest.TestCase):
     logger = trajectory_logger.AsyncTrajectoryLogger(temp_dir)
     # Rapidly enqueue multiple items and immediately call stop to stress the queue batch-drain path
     for i in range(20):
-      logger.log_item_async({'step': i, 'value': i * 2})
+      logger.log_item_async({
+          'global_step': 0,
+          'prompt_id': f'p_{i}',
+          'worker_id': 'worker0',
+          'value': i * 2,
+      })
     logger.stop()
 
     self.assertTrue(logger._stopped)
     self.assertFalse(logger._logging_thread.is_alive())
 
-    csv_files = [f for f in os.listdir(temp_dir) if f.endswith('.csv')]
-    self.assertLen(csv_files, 1)
-    df = pd.read_csv(os.path.join(temp_dir, csv_files[0]))
-    self.assertLen(df, 20)
+    # Verify all 20 trajectory folders exist with metadata.json and step0.json
+    for i in range(20):
+      traj_dir = os.path.join(
+          temp_dir, 'step0', 'worker0', f'traj_p_{i}_g0'
+      )
+      self.assertTrue(os.path.exists(os.path.join(traj_dir, 'metadata.json')))
+      self.assertTrue(os.path.exists(os.path.join(traj_dir, 'step0.json')))
 
   def test_async_trajectory_logger_stop_idempotent(self):
     """Tests that calling stop() multiple times is safe and idempotent."""
@@ -295,7 +353,7 @@ class TrajectoryLoggerTest(absltest.TestCase):
         trajectory_logger, 'log_item', side_effect=_blocked_log_item
     ):
       logger = trajectory_logger.AsyncTrajectoryLogger(
-          temp_dir, stop_timeout_sec=0.3, gcs_timeout_sec=0.3
+          temp_dir, log_format='csv', stop_timeout_sec=0.3, gcs_timeout_sec=0.3
       )
       logger.log_item_async({'step': 0})
       self.assertTrue(worker_entered.wait(timeout=2.0))
@@ -323,7 +381,7 @@ class TrajectoryLoggerTest(absltest.TestCase):
         trajectory_logger, 'log_item', side_effect=_blocked_log_item
     ):
       logger = trajectory_logger.AsyncTrajectoryLogger(
-          temp_dir, max_queue_size=3, stop_timeout_sec=0.2
+          temp_dir, log_format='csv', max_queue_size=3, stop_timeout_sec=0.2
       )
       logger.log_item_async({'step': 0})
       self.assertTrue(worker_entered.wait(timeout=2.0))
@@ -358,7 +416,9 @@ class TrajectoryLoggerTest(absltest.TestCase):
           '_read_gcs_csv',
           wraps=trajectory_logger._read_gcs_csv,
       ) as spy_read_gcs_csv:
-        logger = trajectory_logger.AsyncTrajectoryLogger(gcs_dir)
+        logger = trajectory_logger.AsyncTrajectoryLogger(
+            gcs_dir, log_format='csv'
+        )
         for step in range(5):
           # Alternate key insertion order to verify column alignment on append.
           item = (
@@ -468,6 +528,172 @@ class TrajectoryLoggerTest(absltest.TestCase):
       )
       self.assertTrue(writer_entered.wait(timeout=2.0))
       self.assertEmpty(unlinked)
+
+  def test_make_serializable_and_sanitize_path_segment(self):
+    """Tests that _make_serializable and _sanitize_path_segment handle edge cases."""
+    self.assertEqual(
+        trajectory_logger._sanitize_path_segment('worker/0:test..'),
+        'worker_0_test__',
+    )
+    self.assertEqual(
+        trajectory_logger._sanitize_path_segment('   '), 'unknown'
+    )
+    self.assertEqual(
+        trajectory_logger._sanitize_path_segment(None, default='fallback'),
+        'fallback',
+    )
+
+    sample = {
+        123: np.int64(42),
+        'arr': np.array([1.0, 2.5]),
+        'b': np.bool_(True),
+        's': np.str_('hello'),
+        'nested': {'key': None},
+    }
+    serialized = trajectory_logger._make_serializable(sample)
+    self.assertEqual(
+        serialized,
+        {
+            '123': 42,
+            'arr': [1.0, 2.5],
+            'b': True,
+            's': 'hello',
+            'nested': {'key': None},
+        },
+    )
+
+  def test_log_trajectory_json_multiturn_conversation(self):
+    """Tests that log_trajectory_json correctly extracts multi-turn conversation steps."""
+    temp_dir = self.create_tempdir().full_path
+    item = {
+        'global_step': 1,
+        'prompt_id': 'issue_42',
+        'group_index': 0,
+        'worker_id': 'worker_a',
+        'traj_id': 'traj_custom_1',
+        'status': 'RESOLVED',
+        'reward': 1.0,
+        'trajectory': {
+            'status': 'RESOLVED',
+            'conversation_text': [
+                {'role': 'system', 'content': 'You are an agent.'},
+                {'role': 'user', 'content': 'Solve issue #42.'},
+                {'role': 'assistant', 'content': 'I will run git status.'},
+                {'role': 'user', 'content': 'On branch main.'},
+                {'role': 'assistant', 'content': 'I will edit the code.'},
+                {'role': 'tool', 'content': 'File updated.'},
+            ],
+            'env_time': {
+                'step_latency': [2.5, 4.1],
+            },
+        },
+    }
+
+    out_dir = trajectory_logger.log_trajectory_json(temp_dir, item)
+    self.assertIsNotNone(out_dir)
+
+    expected_dir = os.path.join(
+        temp_dir, 'step1', 'worker_a', 'traj_custom_1'
+    )
+    self.assertEqual(out_dir, expected_dir)
+    self.assertTrue(os.path.isdir(expected_dir))
+
+    # Check metadata.json
+    with open(os.path.join(expected_dir, 'metadata.json'), 'r') as f:
+      metadata = json.load(f)
+    self.assertEqual(metadata['global_step'], 1)
+    self.assertEqual(metadata['worker_id'], 'worker_a')
+    self.assertEqual(metadata['traj_id'], 'traj_custom_1')
+    self.assertEqual(metadata['status'], 'RESOLVED')
+    self.assertEqual(metadata['reward'], 1.0)
+    self.assertEqual(metadata['num_steps'], 2)
+
+    # Check step0.json
+    with open(os.path.join(expected_dir, 'step0.json'), 'r') as f:
+      step0 = json.load(f)
+    self.assertEqual(step0['step_index'], 0)
+    self.assertEqual(step0['thought_and_action'], 'I will run git status.')
+    self.assertEqual(step0['observation'], 'On branch main.')
+    self.assertEqual(step0['latency_sec'], 2.5)
+
+    # Check step1.json
+    with open(os.path.join(expected_dir, 'step1.json'), 'r') as f:
+      step1 = json.load(f)
+    self.assertEqual(step1['step_index'], 1)
+    self.assertEqual(step1['thought_and_action'], 'I will edit the code.')
+    self.assertEqual(step1['observation'], 'File updated.')
+    self.assertEqual(step1['latency_sec'], 4.1)
+
+  def test_log_trajectory_json_with_explicit_steps(self):
+    """Tests log_trajectory_json when explicit steps list is provided."""
+    temp_dir = self.create_tempdir().full_path
+    item = {
+        'global_step': 2,
+        'prompt_id': 'test_p',
+        'worker_id': 'worker1',
+        'trajectory': {
+            'steps': [
+                {'action': 'click', 'obs': 'clicked'},
+                {'action': 'type', 'obs': 'typed text'},
+            ],
+            'trajectory_reward': 0.8,
+        },
+    }
+
+    out_dir = trajectory_logger.log_trajectory_json(temp_dir, item)
+    self.assertIsNotNone(out_dir)
+
+    expected_dir = os.path.join(
+        temp_dir, 'step2', 'worker1', 'traj_test_p_g0'
+    )
+    self.assertTrue(os.path.isdir(expected_dir))
+
+    with open(os.path.join(expected_dir, 'metadata.json'), 'r') as f:
+      meta = json.load(f)
+    self.assertEqual(meta['num_steps'], 2)
+    self.assertEqual(meta['reward'], 0.8)
+
+    with open(os.path.join(expected_dir, 'step0.json'), 'r') as f:
+      s0 = json.load(f)
+    self.assertEqual(s0['step_index'], 0)
+    self.assertEqual(s0['action'], 'click')
+    self.assertEqual(s0['obs'], 'clicked')
+
+    with open(os.path.join(expected_dir, 'step1.json'), 'r') as f:
+      s1 = json.load(f)
+    self.assertEqual(s1['step_index'], 1)
+    self.assertEqual(s1['action'], 'type')
+    self.assertEqual(s1['obs'], 'typed text')
+
+  def test_log_trajectory_json_gcs_path(self):
+    """Tests logging JSON trajectory hierarchy to a simulated gs:// URI."""
+    temp_dir = self.create_tempdir().full_path
+    gcs_dir = f'{_FAKE_GCS_ROOT}/trajectories/run_gcs'
+
+    item = {
+        'global_step': 3,
+        'prompt_id': 'p3',
+        'worker_id': 'worker2',
+        'trajectory': {
+            'steps': [{'action': 'run_tool', 'output': 'ok'}],
+        },
+    }
+
+    with mock.patch.object(
+        trajectory_logger.epath,
+        'Path',
+        lambda path: _FakeGcsPath(path, temp_dir),
+    ):
+      out_dir = trajectory_logger.log_trajectory_json(gcs_dir, item)
+      self.assertEqual(
+          out_dir, f'{gcs_dir}/step3/worker2/traj_p3_g0'
+      )
+
+    local_traj_dir = os.path.join(
+        temp_dir, 'trajectories/run_gcs/step3/worker2/traj_p3_g0'
+    )
+    self.assertTrue(os.path.exists(os.path.join(local_traj_dir, 'metadata.json')))
+    self.assertTrue(os.path.exists(os.path.join(local_traj_dir, 'step0.json')))
 
 
 if __name__ == '__main__':

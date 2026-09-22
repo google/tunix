@@ -14,6 +14,7 @@
 
 """Utility functions for OpenHands workspace and environment setup."""
 
+import base64
 import logging
 import os
 from typing import Any, Optional
@@ -32,6 +33,60 @@ def get_image_rewrite_fn(image_rewrite: Any | None = None) -> Any | None:
 
 
 _get_image_rewrite_fn = get_image_rewrite_fn
+
+
+_HIDE_R2E_TESTS_CMD = (
+    "mkdir -p /var/tmp/.r2e_grading_stash && ("
+    "for p in /root/run_tests.sh /testbed/run_tests.sh /run_tests.sh; do "
+    '[ -f "$p" ] && [ ! -L "$p" ] && cp -a "$p"'
+    " /var/tmp/.r2e_grading_stash/run_tests.sh && break; done; "
+    "for d in /root/r2e_tests /r2e_tests /testbed/r2e_tests; do "
+    '[ -d "$d" ] && [ ! -L "$d" ] && rm -rf'
+    ' /var/tmp/.r2e_grading_stash/r2e_tests && cp -a "$d"'
+    " /var/tmp/.r2e_grading_stash/r2e_tests && break; done; "
+    "rm -rf /r2e_tests /root/r2e_tests /testbed/r2e_tests "
+    "/run_tests.sh /root/run_tests.sh /testbed/run_tests.sh"
+    ") 2>/dev/null || true"
+)
+
+_RESTORE_R2E_TESTS_CMD = (
+    "if [ -d /var/tmp/.r2e_grading_stash ]; then "
+    "if [ -f /var/tmp/.r2e_grading_stash/run_tests.sh ]; then "
+    "cp -a /var/tmp/.r2e_grading_stash/run_tests.sh /root/run_tests.sh && "
+    "ln -sf /root/run_tests.sh /run_tests.sh || true; "
+    "fi; "
+    "if [ -d /var/tmp/.r2e_grading_stash/r2e_tests ]; then "
+    "rm -rf /r2e_tests /root/r2e_tests /testbed/r2e_tests && "
+    "cp -a /var/tmp/.r2e_grading_stash/r2e_tests /root/r2e_tests && "
+    "ln -s /root/r2e_tests /testbed/r2e_tests && "
+    "ln -s /root/r2e_tests /r2e_tests || true; "
+    "fi; fi"
+)
+
+
+def _exec_in_sandbox(target: Any, cmd: str, timeout: float = 60.0) -> Any:
+  """Execute a shell command on either an OpenHands workspace or RepoEnv runtime."""
+  if target is None:
+    return None
+  ws = getattr(target, "workspace", None)
+  if ws is not None and not hasattr(target, "execute_command"):
+    target = ws
+  if hasattr(target, "execute_command"):
+    return target.execute_command(cmd, timeout=timeout)
+  runtime = getattr(target, "runtime", None)
+  if runtime is None and getattr(target, "env", None) is not None:
+    runtime = getattr(target.env, "runtime", None)
+  if runtime is not None and hasattr(runtime, "run"):
+    return runtime.run(cmd, timeout=int(timeout))
+  return None
+
+
+def hide_r2e_tests_for_rollout(target: Any) -> None:
+  """Stash and remove /r2e_tests and /run_tests.sh during agent rollout."""
+  try:
+    _exec_in_sandbox(target, _HIDE_R2E_TESTS_CMD, timeout=60.0)
+  except Exception as e:
+    logging.warning("[SWEEnv] Failed to hide R2E tests for rollout: %s", e)
 
 
 def setup_openhands_workspace(
@@ -74,6 +129,7 @@ def setup_openhands_workspace(
           "([ -d /workspace ] && [ ! -e /testbed ] && ln -s /workspace /testbed"
           " 2>/dev/null || true)"
       ),
+      _HIDE_R2E_TESTS_CMD,
   ]
 
   full_setup_cmd = " && ".join(setup_cmds)
@@ -92,6 +148,14 @@ def setup_openhands_workspace(
     logging.warning("[SWEEnv] Failed to set up repository in workspace: %s", e)
 
 
+def restore_r2e_tests_for_reward(target: Any) -> None:
+  """Restore stashed /root/run_tests.sh and /root/r2e_tests before grading."""
+  try:
+    _exec_in_sandbox(target, _RESTORE_R2E_TESTS_CMD, timeout=60.0)
+  except Exception as e:
+    logging.warning("[SWEEnv] Failed to restore R2E tests for reward: %s", e)
+
+
 def step_openhands(
     env: Any,
     action_obj: Any,
@@ -99,8 +163,9 @@ def step_openhands(
   """Execute an action in an OpenHands-backed environment.
 
   Handles OpenHands-specific tool dispatch ('finish'/'submit',
-  'str_replace_editor', and 'execute_bash') using the environment's workspace
-  and bound grading environment.
+  'str_replace_editor'/'file_editor', 'execute_ipython_cell', and
+  'execute_bash') using the environment's workspace and bound grading
+  environment.
 
   Args:
     env: The SWEEnv (or compatible) instance containing `workspace`, `env`,
@@ -120,63 +185,154 @@ def step_openhands(
         info={"max_steps": max_steps},
     )
 
-  if action_obj.function_name == "str_replace_editor" and env.env is not None:
+  if action_obj.function_name in ("str_replace_editor", "file_editor") and env.env is not None:
     # R2E registers this editor as `file_editor` and `RepoEnv.run_action`
     # asserts the tool name is in its registered command list, so translate
     # before delegating. The parameter schemas are identical.
     action_obj.function_name = "file_editor"
-    obs, reward, done, info = env.env.step(action_obj)
+    try:
+      obs, _, done, _ = env.env.step(action_obj)
+      obs_str = str(obs)
+    except Exception as e:
+      obs_str = f"Command execution failed: {e}"
+      done = False
     if hasattr(env, "total_steps"):
       env.total_steps += 1
     return EnvStepResult(
-        observation=str(obs),
+        observation=obs_str,
         reward=0,
         done=done,
         info={"max_steps": max_steps},
     )
 
-  if action_obj.function_name != "execute_bash":
-    return EnvStepResult(
-        observation=(
-            f"ERROR: Tool '{action_obj.function_name}' is not recognized. "
-            "Only 'execute_bash', 'str_replace_editor', and 'submit' are"
-            " available."
-        ),
-        reward=0,
-        done=False,
-        info={"max_steps": max_steps},
+  if action_obj.function_name in ("execute_ipython_cell", "python", "ipython"):
+    code = (
+        action_obj.parameters.get("code")
+        or action_obj.parameters.get("command")
+        or action_obj.parameters.get("cell")
+        if getattr(action_obj, "parameters", None)
+        else None
+    )
+    if not code:
+      return EnvStepResult(
+          observation="ERROR: No code specified for execute_ipython_cell.",
+          reward=0,
+          done=False,
+          info={"max_steps": max_steps},
+      )
+
+    step_timeout = getattr(env, "step_timeout", 30.0)
+    b64_code = base64.b64encode(code.encode("utf-8")).decode("ascii")
+    wrapped_cmd = (
+        "(cd /testbed 2>/dev/null || cd /workspace) && "
+        f"python3 -c \"import base64; exec(base64.b64decode('{b64_code}').decode('utf-8'))\""
     )
 
-  cmd = (
-      action_obj.parameters.get("command") or action_obj.parameters.get("cmd")
-      if getattr(action_obj, "parameters", None)
-      else None
-  )
-  if not cmd:
-    return EnvStepResult(
-        observation="ERROR: No command specified for execute_bash.",
-        reward=0,
-        done=False,
-        info={"max_steps": max_steps},
-    )
+    if getattr(env, "workspace", None) is not None:
+      try:
+        result = env.workspace.execute_command(
+            wrapped_cmd, timeout=float(step_timeout)
+        )
+        if getattr(result, "stdout", None) is not None:
+          obs = (
+              str(result.stdout)
+              if getattr(result, "exit_code", 0) == 0
+              else f"{result.stdout}\n{getattr(result, 'stderr', '')}"
+          )
+        elif getattr(result, "output", None) is not None:
+          obs = str(result.output)
+        else:
+          obs = str(result)
+      except Exception as e:
+        obs = f"Python execution failed: {e}"
+      if hasattr(env, "total_steps"):
+        env.total_steps += 1
+      return EnvStepResult(
+          observation=obs,
+          reward=0,
+          done=False,
+          info={"max_steps": max_steps},
+      )
+    elif getattr(env, "env", None) is not None:
+      from r2egym.agenthub.action.action import Action as SWEAction  # pytype: disable=import-error
+      bash_action = SWEAction("execute_bash", {"command": wrapped_cmd})
+      try:
+        obs, reward, done, info = env.env.step(bash_action)
+        obs_str = str(obs)
+      except Exception as e:
+        obs_str = f"Python execution failed: {e}"
+        reward, done, info = 0, False, {"max_steps": max_steps}
+      if hasattr(env, "total_steps"):
+        env.total_steps += 1
+      return EnvStepResult(
+          observation=obs_str, reward=reward, done=done, info=info
+      )
+    else:
+      raise ValueError("Environment and workspace are not initialized")
 
-  try:
+  if action_obj.function_name in ("execute_bash", "bash"):
+    cmd = (
+        action_obj.parameters.get("command") or action_obj.parameters.get("cmd")
+        if getattr(action_obj, "parameters", None)
+        else None
+    )
+    if not cmd:
+      return EnvStepResult(
+          observation="ERROR: No command specified for execute_bash.",
+          reward=0,
+          done=False,
+          info={"max_steps": max_steps},
+      )
+
     step_timeout = getattr(env, "step_timeout", 30.0)
     wrapped_cmd = f"(cd /testbed 2>/dev/null || cd /workspace) && {cmd}"
-    result = env.workspace.execute_command(
-        wrapped_cmd, timeout=float(step_timeout)
-    )
-    obs = (
-        result.stdout
-        if result.exit_code == 0
-        else f"{result.stdout}\n{result.stderr}"
-    )
-  except Exception as e:
-    obs = f"Command execution failed: {e}"
-  if hasattr(env, "total_steps"):
-    env.total_steps += 1
+
+    if getattr(env, "workspace", None) is not None:
+      try:
+        result = env.workspace.execute_command(
+            wrapped_cmd, timeout=float(step_timeout)
+        )
+        if getattr(result, "stdout", None) is not None:
+          obs = (
+              str(result.stdout)
+              if getattr(result, "exit_code", 0) == 0
+              else f"{result.stdout}\n{getattr(result, 'stderr', '')}"
+          )
+        elif getattr(result, "output", None) is not None:
+          obs = str(result.output)
+        else:
+          obs = str(result)
+      except Exception as e:
+        obs = f"Command execution failed: {e}"
+      if hasattr(env, "total_steps"):
+        env.total_steps += 1
+      return EnvStepResult(
+          observation=obs,
+          reward=0,
+          done=False,
+          info={"max_steps": max_steps},
+      )
+    elif getattr(env, "env", None) is not None:
+      try:
+        obs, reward, done, info = env.env.step(action_obj)
+        obs_str = str(obs)
+      except Exception as e:
+        obs_str = f"Command execution failed: {e}"
+        reward, done, info = 0, False, {"max_steps": max_steps}
+      if hasattr(env, "total_steps"):
+        env.total_steps += 1
+      return EnvStepResult(
+          observation=obs_str, reward=reward, done=done, info=info
+      )
+    else:
+      raise ValueError("Environment and workspace are not initialized")
+
   return EnvStepResult(
-      observation=obs,
+      observation=(
+          f"ERROR: Tool '{action_obj.function_name}' is not recognized. "
+          "Only 'execute_bash', 'execute_ipython_cell', 'str_replace_editor', "
+          "and 'submit' are available."
+      ),
       reward=0,
       done=False,
       info={"max_steps": max_steps},

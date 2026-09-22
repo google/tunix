@@ -75,10 +75,9 @@ RPC_TIMEOUT_S = 60.0
 # be sent before the connection is torn down.
 LONG_POLL_TIMEOUT_S = RPC_TIMEOUT_S - 10.0
 
-# Cap for a single gRPC message. The library default (~4 MiB) is far too small
-# for training-batch payloads; raise it and enable keepalive so idle connections
-# are detected.
-_MAX_MESSAGE_BYTES = 128 * 1024 * 1024
+# Cap for a single gRPC message. Set to -1 (unlimited) so large training-batch
+# payloads (which can exceed 1 GB for long sequence lengths) are not truncated.
+_MAX_MESSAGE_BYTES = -1
 
 
 def _grpc_options() -> List[Tuple[str, int]]:

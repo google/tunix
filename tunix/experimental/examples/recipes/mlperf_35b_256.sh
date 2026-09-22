@@ -4,7 +4,8 @@ set -e
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Fill these before you run.
-export JOB_PREFIX="${JOB_PREFIX:-$USER}"
+# k8s has a 63 char limit on total label name, so keep job_prefix unique to your job and short
+export JOB_PREFIX="${JOB_PREFIX:-${USER}}"
 export WANDB_API_KEY="${WANDB_API_KEY:-}"
 export WANDB_RUN_NAME="${WANDB_RUN_NAME:-${JOB_PREFIX}-mlperf-35b}"
 export MAXTEXT_OUTPUT_DIR="${MAXTEXT_OUTPUT_DIR:-gs://atwigg-trellis-europe-west4-dev/maxtext/${JOB_PREFIX}}"
@@ -14,7 +15,7 @@ export ROLLOUT_PORT="${ROLLOUT_PORT:-20001}"
 export TRAINER_PORT="${TRAINER_PORT:-20002}"
 export PROFILER_STEPS=0
 export SKIP_FIRST_N_PROFILER_STEPS=-1
-export TUNIX_IMAGE="${TUNIX_IMAGE:-gcr.io/cloud-tpu-multipod-dev/${USER:-atwigg}/trellis-35b:latest}"
+export TUNIX_IMAGE="${TUNIX_IMAGE:-gcr.io/cloud-tpu-multipod-dev/atwigg/trellis-35b:latest}"
 
 export PROJECT="cloud-tpu-shared-capacity"
 export REGION="europe-west4"
@@ -74,8 +75,8 @@ export ROLLOUT_TPU_SLICE="tpuv5:2x2x1"
 export ROLLOUT_MESH_FSDP=1
 export ROLLOUT_MESH_TP=1
 export ROLLOUT_MESH_EXPERT="${ROLLOUT_MESH_EXPERT:-4}"
-export ROLLOUT_WORKERS=16
-export ROLLOUT_REPLICAS=16
+export ROLLOUT_WORKERS="${ROLLOUT_WORKERS:-16}"
+export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-16}"
 
 # MLPerf RCP Logging
 export RCP_LOGGING="${RCP_LOGGING:-false}"
@@ -102,6 +103,9 @@ export VLLM_ADDITIONAL_CONFIG='{"sharding":{"sharding_strategy":{"expert_paralle
 export ENABLE_PREFIX_CACHING="${ENABLE_PREFIX_CACHING:-false}"
 export VLLM_PREFIX_CACHE_RETENTION_INTERVAL="${VLLM_PREFIX_CACHE_RETENTION_INTERVAL:-256}"
 export VLLM_MAMBA_CACHE_MODE="${VLLM_MAMBA_CACHE_MODE:-${MAMBA_CACHE_MODE:-none}}"
+
+# Router replay
+export RETURN_ROUTED_EXPERTS="${RETURN_ROUTED_EXPERTS:-false}"
 
 # KV Cache Configs
 export ROLLOUT_FREE_KV_CACHE="false"
@@ -190,7 +194,10 @@ export DEBUG=1
 # DeepSWE Environment & Agent Sandbox
 export DATASET_PATH="gs://mlperf_dataset/r2e-gym-easy"
 export USE_AGENT_SANDBOX=1
-export SANDBOX_NAMESPACE="trellis"
+export SCAFFOLD="openhands"
+export SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-trellis}"
+export POOL_NAME_FORMAT="${POOL_NAME_FORMAT:-}"
+export TEMPLATE_NAME_PREFIX="${TEMPLATE_NAME_PREFIX:-}"
 export SANDBOX_NODE_SELECTOR_KEY="cloud.google.com/gke-nodepool"
 export SANDBOX_NODE_SELECTOR_VAL="sandbox-cpu-pool"
 export IMAGE_REWRITE_PREFIX="${IMAGE_REWRITE_PREFIX:-europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/}"
