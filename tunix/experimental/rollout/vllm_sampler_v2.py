@@ -71,6 +71,8 @@ class RLVllmSampler:
     - Native `TPUWorker` 3-phase weight synchronization (`pre_weight_sync`, `weight_sync`, `post_weight_sync`).
   """
 
+  supports_token_input: bool = True
+
   def __init__(self, engine_args: AsyncEngineArgs):
     self.engine_args = engine_args
     self._engine: Any | None = None
@@ -337,8 +339,16 @@ class RLVllmSampler:
       req_id = _get_val(req,
                               "request_id") or f"req_{time.time_ns()}_{idx}"
       prompt_val = _get_val(req, "prompt")
-      prompt_text = prompt_val if isinstance(prompt_val,
-                                                   str) else str(prompt_val)
+      # A `{"prompt_token_ids": [...]}` prompt is already a vLLM `TokensPrompt`
+      # and is forwarded as-is. `str()` would hand the engine the repr of a
+      # dict to tokenize, which is how a token-ids prompt silently becomes
+      # nonsense text.
+      if isinstance(prompt_val, dict) and "prompt_token_ids" in prompt_val:
+        prompt_text = prompt_val
+      else:
+        prompt_text = (
+            prompt_val if isinstance(prompt_val, str) else str(prompt_val)
+        )
 
       task_gen = self._engine.generate(prompt_text,
                                              vllm_params,

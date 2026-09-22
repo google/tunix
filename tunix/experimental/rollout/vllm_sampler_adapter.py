@@ -188,6 +188,8 @@ def _canonicalize_variable_names(entry: Any) -> Any:
 class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
   """Sampler adapter wrapping tpu-inference RLVllmSampler with full Raiden weight sync."""
 
+  supports_token_input: bool = True
+
   def __init__(
       self,
       server_id: str = "vllm-rollout-0",

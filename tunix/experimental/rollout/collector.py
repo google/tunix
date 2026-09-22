@@ -50,8 +50,30 @@ def generate_vanilla_rollout_seed(
   return (prompt_hash + group_index) & 0x7FFFFFFF
 
 
-def _build_prompt(chat_parser: Any, chat_completions: Any) -> Any:
-  """Vanilla samplers take a string; parse chat messages when needed."""
+def _build_prompt(
+    chat_parser: Any, chat_completions: Any, prompt_token_ids: Any = None
+) -> Any:
+  """Vanilla samplers take a string; parse chat messages when needed.
+
+  Under `exact_token_continuity` a later turn arrives with the recorded ids of
+  everything said so far and no chat messages at all, and those ids are the
+  point: re-rendering the turn as text and letting the sampler re-tokenize it
+  is what loses `</tool_call>` on the way back.
+
+  Args:
+    chat_parser: Parser used to render chat messages, when there are any.
+    chat_completions: The turn's chat messages, or a plain string.
+    prompt_token_ids: Recorded prompt ids to replay verbatim, when supplied.
+
+  Returns:
+    A token-ids prompt when `prompt_token_ids` is given, else a string prompt.
+  """
+  if prompt_token_ids is not None:
+    return {
+        "prompt_token_ids": [
+            int(x) for x in np.asarray(prompt_token_ids).reshape(-1)
+        ]
+    }
   if chat_parser and not isinstance(chat_completions, str):
     return chat_parser.parse(
         chat_completions, add_generation_prompt=True, is_first_msg=True
@@ -160,6 +182,29 @@ class TrajectoryCollectorEngine:
           "overlong_filter must be a boolean, got"
           f" {type(overlong_filter).__name__}: {overlong_filter!r}."
       )
+    supports_token_input = bool(
+        getattr(self.sampler, "supports_token_input", False)
+        or getattr(
+            getattr(self.sampler, "sampler", None),
+            "supports_token_input",
+            False,
+        )
+    )
+    exact_token_continuity = metadata.get("exact_token_continuity")
+    if exact_token_continuity is None:
+      self.exact_token_continuity = supports_token_input
+    elif isinstance(exact_token_continuity, bool):
+      if exact_token_continuity and not supports_token_input:
+        raise ValueError(
+            "exact_token_continuity requires a token-input backend"
+        )
+      self.exact_token_continuity = exact_token_continuity
+    else:
+      raise TypeError(
+          "exact_token_continuity must be a boolean, got"
+          f" {type(exact_token_continuity).__name__}:"
+          f" {exact_token_continuity!r}."
+      )
     target_policy_versions = None
     target_policy_version = getattr(self.request, "target_policy_version", None)
     if target_policy_version is not None:
@@ -240,28 +285,53 @@ class TrajectoryCollectorEngine:
       )
       sampling_req = sampler_lib.SamplingRequest(
           request_id=self.traj_id,
-          prompt=_build_prompt(self.chat_parser, chat_completions),
+          prompt=_build_prompt(
+              self.chat_parser,
+              chat_completions,
+              generation_kwargs.get("prompt_token_ids"),
+          ),
           sampling_params=sampling_params,
       )
       res = await self.sampler.sample(sampling_req, **generation_kwargs)
+      if isinstance(res, (list, tuple)) and len(res) == 1:
+        res = res[0]
+      err = getattr(res, "error", None) if not isinstance(res, str) else None
+      if err is not None:
+        raise RuntimeError(f"Sampler generation failed: {err}")
       text = res if isinstance(res, str) else getattr(res, "text", str(res))
       tokens = getattr(res, "token_ids", np.array([], dtype=np.int32))
+      if tokens is None:
+        tokens = np.zeros(0, dtype=np.int32)
       logprobs = getattr(res, "logprobs", None)
       routed_experts = getattr(res, "routed_experts", None)
-      prompt_tokens = np.asarray(
-          getattr(res, "prompt_token_ids", np.array([], dtype=np.int32)),
-          dtype=np.int32,
-      ).reshape(-1)
+      raw_prompt_tokens = getattr(res, "prompt_token_ids", None)
+      if raw_prompt_tokens is None:
+        prompt_tokens = np.zeros(0, dtype=np.int32)
+      else:
+        prompt_tokens = np.asarray(
+            raw_prompt_tokens, dtype=np.int32
+        ).reshape(-1)
       if prompt_tokens.size:
         prompt_tokens = prompt_tokens.reshape(1, -1)
+        prompt_lengths = np.array([prompt_tokens.shape[1]], dtype=np.int32)
+      elif self.exact_token_continuity:
+        raise ValueError(
+            "exact_token_continuity requires non-empty prompt_token_ids from"
+            " the sampler."
+        )
       else:
         prompt_tokens = np.array([[0]], dtype=np.int32)
+        prompt_lengths = None
 
       return base_rollout.RolloutOutput(
           text=[text],
           logits=None,
           tokens=[tokens],
           left_padded_prompt_tokens=prompt_tokens,
+          # Required by `exact_token_continuity`: it unpads the echoed prompt
+          # with this to check a later turn against the recorded history.
+          # Nothing pads `prompt_tokens` here, so the length is the full row.
+          prompt_lengths=prompt_lengths,
           logprobs=[logprobs] if logprobs is not None else None,
           routed_experts=[routed_experts] if routed_experts is not None else None,
       )
@@ -281,12 +351,21 @@ class TrajectoryCollectorEngine:
         max_response_length=self.max_response_length,
         timeout=self.episode_timeout,
         overlong_filter=self.overlong_filter,
+        exact_token_continuity=self.exact_token_continuity,
         policy_version=getattr(self.request, "target_policy_version", None),
         trajectory_store=self.trajectory_store,
         metadata=self.metadata,
     )
     self._inner_engine = inner_engine
-    rl_traj = await inner_engine.collect(mode="Token")
+    try:
+      rl_traj = await inner_engine.collect(mode="Token")
+    except Exception:
+      # ``collect`` only reaches its own ``finally: await self._close()`` once
+      # the turn loop has finished; anything raised inside the loop -- the
+      # ``exact_token_continuity`` consistency checks included -- propagates
+      # past it, so the environment is closed here or not at all.
+      await inner_engine._close()
+      raise
     self.is_done = True
     return self._convert_to_trajectory(rl_traj)
 

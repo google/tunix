@@ -42,8 +42,37 @@ from tunix.utils import trajectory_logger
 MetricsLogger = metrics_logger_lib.MetricsLogger
 MetricsLoggerOptions = metrics_logger_lib.MetricsLoggerOptions
 Mode = metrics_logger_lib.Mode
-_extract_scalar = metrics_logger_lib.extract_scalar
 BatchConfig = batch_assembly.BatchConfig
+
+
+def _extract_scalar(val: Any, name: str | None = None) -> float | None:
+  """Extracts a step scalar from a metric value, reducing multi-microbatch arrays by suffix."""
+  if val is None:
+    return None
+  if hasattr(val, "compute") and callable(val.compute):
+    try:
+      val = val.compute()
+    except Exception:  # pylint: disable=broad-exception-caught
+      return None
+  if hasattr(val, "unreduced_sum") and hasattr(val, "denominator"):
+    return metrics_logger_lib.extract_scalar(val)
+  try:
+    arr = np.asarray(val, dtype=np.float64)
+    if arr.size == 1:
+      return float(arr.item())
+    if arr.size > 1:
+      finite = arr[np.isfinite(arr)]
+      if finite.size == 0:
+        return float(arr.flat[0])
+      if name is not None and name.endswith(("_max", "/max")):
+        return float(np.max(finite))
+      if name is not None and name.endswith(("_min", "/min")):
+        return float(np.min(finite))
+      return float(np.mean(finite))
+  except Exception:  # pylint: disable=broad-exception-caught
+    pass
+  return metrics_logger_lib.extract_scalar(val)
+
 
 
 def _generation_metrics(
@@ -915,9 +944,18 @@ class StandardRLProgram(RLProgram):
         )
 
       # Grad Norm
-      raw_gn = scalar_metrics.pop(
-          "grad_norm", scalar_metrics.pop("trainer/grad_norm", None)
-      )
+      # ``gradient_norm`` is the MaxText training engine's name for it
+      # (``MaxTextTrainingEngine.update`` records it under that key). Read the
+      # MaxText key via ``.get`` rather than ``.pop`` so ``trainer/gradient_norm``
+      # continues to be published by the auxiliary scalar loop below while also
+      # populating ``trainer/grad_norm`` and the console step summary.
+      raw_gn = scalar_metrics.pop("grad_norm", None)
+      if raw_gn is None:
+        raw_gn = scalar_metrics.pop("trainer/grad_norm", None)
+      if raw_gn is None:
+        raw_gn = scalar_metrics.get("gradient_norm")
+      if raw_gn is None:
+        raw_gn = scalar_metrics.get("trainer/gradient_norm")
       gn_val = _extract_scalar(raw_gn)
       grad_norm_val = gn_val
       if gn_val is not None:
@@ -931,7 +969,7 @@ class StandardRLProgram(RLProgram):
 
       # Auxiliary weighted metrics
       for k, v in weighted_metrics.items():
-        val = _extract_scalar(v)
+        val = _extract_scalar(v, k)
         if val is not None:
           metric_key = k if k.startswith("trainer/") else f"trainer/{k}"
           self.metrics_logger.log(
@@ -942,12 +980,34 @@ class StandardRLProgram(RLProgram):
       for k, v in scalar_metrics.items():
         if k in ("perplexity", "trainer/perplexity"):
           continue
-        val = _extract_scalar(v)
+        val = _extract_scalar(v, k)
         if val is not None:
           metric_key = k if k.startswith("trainer/") else f"trainer/{k}"
           self.metrics_logger.log(
               self.metrics_prefix, metric_key, val, self.mode, log_step
           )
+
+      # Every trainer-side metric for the step on one line, the sequence gate's
+      # included (``sample_mask/kept_frac``, ``sample_mask/mult_prob_error_*``,
+      # ``tis/is_oob_ratio``). The `metrics_logger` calls above only reach the
+      # configured backends, so without this the gate is invisible to anyone
+      # reading the run's log -- which is where it is read when a run is being
+      # triaged and the dashboards are not to hand.
+      step_trainer_metrics = {
+          k: _extract_scalar(v, k)
+          for k, v in {**weighted_metrics, **scalar_metrics}.items()
+      }
+      if (
+          grad_norm_val is not None
+          and "grad_norm" not in step_trainer_metrics
+          and "trainer/grad_norm" not in step_trainer_metrics
+      ):
+        step_trainer_metrics["grad_norm"] = grad_norm_val
+      logging.info(
+          "[StepMetrics step=%d] trainer_metrics=%s",
+          log_step,
+          step_trainer_metrics,
+      )
 
     # --- 5. Sampler/Trainer Agreement Metrics ---
     # Names are already namespaced (``sampler_trainer/*``, ``sampler_is/*``) by
