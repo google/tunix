@@ -27,7 +27,8 @@ from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.trajectory import trajectory_collect_engine as rl_collect_engine
 from tunix.rl.rollout import base_rollout
 
-_DEFAULT_EPISODE_TIMEOUT_SECS: float = 600.0
+DEFAULT_EPISODE_TIMEOUT_SECS: float = 600.0
+_DEFAULT_EPISODE_TIMEOUT_SECS: float = DEFAULT_EPISODE_TIMEOUT_SECS
 
 
 def generate_vanilla_rollout_seed(

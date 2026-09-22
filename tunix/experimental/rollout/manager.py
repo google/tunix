@@ -15,7 +15,9 @@
 """Rollout Manager concurrency controller and Raiden KV migration orchestrator."""
 
 import asyncio
+import os
 from typing import Any, AsyncIterator, Callable, Dict, Optional, Sequence, Union
+from absl import logging
 from tunix.experimental.common import datatypes
 from tunix.experimental.rl.agentic import registry
 from tunix.experimental.rollout import collector as collector_lib
@@ -49,7 +51,7 @@ class RolloutManager:
       max_concurrency: int = 64,
       tokenizer: Any = None,
       chat_parser: Any = None,
-      drain_timeout_s: float = 300.0,
+      drain_timeout_s: float | None = None,
       trajectory_store: Optional[store.TrajectoryWriter] = None,
   ):
     """Initializes the RolloutManager.
@@ -151,7 +153,25 @@ class RolloutManager:
     self._active_tasks: Dict[str, asyncio.Task[Any]] = {}
     self._completed_queue: asyncio.Queue[TrajectoryOrError] = asyncio.Queue()
     self._traffic_inst = None
-    self._drain_timeout_s = drain_timeout_s
+    self._episode_timeout_s = float(
+        os.getenv(
+            "EPISODE_TIMEOUT_SECS",
+            collector_lib.DEFAULT_EPISODE_TIMEOUT_SECS,
+        )
+    )
+    if drain_timeout_s is None:
+      drain_timeout_s = self._episode_timeout_s + 60.0
+    self._drain_timeout_s = float(drain_timeout_s)
+    if self._drain_timeout_s <= self._episode_timeout_s:
+      raise ValueError(
+          f"RolloutManager drain_timeout_s ({self._drain_timeout_s:.1f}s) must be strictly "
+          f"greater than episode_timeout ({self._episode_timeout_s:.1f}s)."
+      )
+    logging.info(
+        "RolloutManager initialized with episode_timeout_s=%.1fs, drain_timeout_s=%.1fs",
+        self._episode_timeout_s,
+        self._drain_timeout_s,
+    )
 
   @property
   def _traffic(self) -> traffic_controller_lib.TrafficController:
@@ -336,6 +356,15 @@ class RolloutManager:
       self, sync_request: sampler_lib.WeightSyncRequest | Any = None, **kwargs
   ) -> Any:
     """Phase 3 Barrier 1: Closes admission and drains in-flight work."""
+    extra = getattr(sync_request, "extra_config", None)
+    pre_timeout_s = extra.get("pre_timeout_s") if isinstance(extra, dict) else None
+    if pre_timeout_s is not None and self._drain_timeout_s >= pre_timeout_s:
+      raise ValueError(
+          f"RolloutManager drain_timeout_s ({self._drain_timeout_s:.1f}s) cannot be greater than "
+          f"or equal to pre_weight_sync timeout ({pre_timeout_s:.1f}s). Rollout draining must "
+          f"complete with sufficient margin before the coordinator's pre_weight_sync deadline expires."
+      )
+
     self._traffic.transition_to_syncing()
     await self._traffic.drain(self._drain_timeout_s)
     self.pause_all()

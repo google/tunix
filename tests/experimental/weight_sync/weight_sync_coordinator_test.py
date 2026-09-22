@@ -30,9 +30,11 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import os
 import threading
 import time
 import unittest
+from unittest import mock
 from typing import Any, Mapping, Optional, Sequence
 
 from absl.testing import absltest
@@ -1845,5 +1847,35 @@ class SourcePrepareTimeoutTest(CoordinatorTestBase):
     self.assertEqual(slow_source.release_calls, 1)
 
 
+class PhaseTimeoutsEnvTest(absltest.TestCase):
+
+  def test_phase_timeouts_defaults(self):
+    with mock.patch.dict(os.environ, {}, clear=True):
+      timeouts = PhaseTimeouts()
+      self.assertEqual(timeouts.bind, 300.0)
+      self.assertEqual(timeouts.metadata, 60.0)
+      self.assertEqual(timeouts.pre, 900.0)
+
+  def test_phase_timeouts_derived_from_episode_timeout_env(self):
+    with mock.patch.dict(
+        os.environ, {"EPISODE_TIMEOUT_SECS": "100"}, clear=True
+    ):
+      timeouts = PhaseTimeouts()
+      self.assertEqual(timeouts.pre, 400.0)
+
+  def test_phase_timeouts_explicit_env(self):
+    with mock.patch.dict(
+        os.environ,
+        {
+            "WEIGHT_SYNC_PRE_TIMEOUT_S": "750",
+            "EPISODE_TIMEOUT_SECS": "100",
+        },
+        clear=True,
+    ):
+      timeouts = PhaseTimeouts()
+      self.assertEqual(timeouts.pre, 750.0)
+
+
 if __name__ == "__main__":
   absltest.main()
+
