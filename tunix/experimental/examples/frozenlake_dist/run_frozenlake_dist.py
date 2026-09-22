@@ -54,7 +54,7 @@ ProcessContext = runtime_context.ProcessContext
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser = argparse.ArgumentParser(
-      description="Orchestrator V2 Qwen3 FrozenLake distributed GRPO demo."
+      description="Orchestrator V2 FrozenLake distributed GRPO demo."
   )
   parser.add_argument("--batch_size", type=int, default=64)
   parser.add_argument(
@@ -152,7 +152,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument(
       "--wandb_project",
       type=str,
-      default=os.getenv("WANDB_PROJECT", "trellis-frozenlake"),
+      default=os.getenv("WANDB_PROJECT", "tunix-frozenlake"),
   )
   parser.add_argument(
       "--wandb_run_name",

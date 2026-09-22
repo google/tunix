@@ -24,6 +24,7 @@ import jax.numpy as jnp
 
 from tunix.experimental.train import peft_trainer_v2
 from tunix.experimental.weight_sync import raiden_synchronizer
+from tunix.generate import mappings as mappings_lib
 
 
 class _FakeSynchronizer:
@@ -68,6 +69,7 @@ class WeightSyncStagingTest(absltest.TestCase):
         config=types.SimpleNamespace(),
         _target_state=None,
         _sampler_type="inprocess_vllm",
+        _rollout_tp_size=1,
         _weight_sync_worker=None,
     )
 
@@ -94,6 +96,44 @@ class WeightSyncStagingTest(absltest.TestCase):
       with mock.patch.dict(os.environ, {"JAX_PLATFORMS": "proxy,cpu"}):
         peft_trainer_v2.PeftTrainer.prepare_weight_sync(fake)
     self.assertTrue(fake._weight_sync_worker.is_proxy)
+
+  def test_prepare_preprocesses_and_passes_rollout_tp_to_mapping(self):
+    fake = self._fake_trainer()
+    fake._target_state = mock.sentinel.target_state
+    fake._rollout_tp_size = 4
+    fake.config = types.SimpleNamespace(
+        mapping_config=mappings_lib.MappingConfig(
+            to_hf_mappings={"w": ("weight", (None, None))},
+            to_hf_hook_fns={"w": mock.sentinel.hook},
+            to_hf_transpose_keys={"w": (1, 0)},
+            preprocess_src_state=mock.Mock(
+                return_value=mock.sentinel.preprocessed_state
+            ),
+        ),
+    )
+
+    with mock.patch.object(
+        raiden_synchronizer, "RaidenSynchronizer", _FakeSynchronizer
+    ), mock.patch(
+        "tunix.generate.utils.transfer_state_with_mappings",
+        return_value=mock.sentinel.converted_state,
+    ) as transfer:
+      peft_trainer_v2.PeftTrainer.prepare_weight_sync(fake)
+
+    fake.config.mapping_config.preprocess_src_state.assert_called_once()
+    transfer.assert_called_once_with(
+        src_state=mock.sentinel.preprocessed_state,
+        dst_state=mock.sentinel.target_state,
+        key_mappings={"w": ("weight", (None, None))},
+        key_mapping_hook_fns={"w": mock.sentinel.hook},
+        transpose_keys={"w": (1, 0)},
+        reshard_fn=None,
+        rollout_engine="vllm_jax",
+        tp_size=4,
+    )
+    self.assertIs(
+        fake._weight_sync_worker.bound_state, mock.sentinel.converted_state
+    )
 
   def test_release_without_prepare_is_a_no_op(self):
     fake = self._fake_trainer()

@@ -467,6 +467,38 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
         "max_seq_token_per_tpu", mock_training_config.call_args.kwargs
     )
 
+  @mock.patch.object(
+      run_trainer_node,
+      "_ensure_model_dir_for_trainer",
+      return_value="/tmp/test",
+  )
+  @mock.patch.object(run_trainer_node, "_create_mesh")
+  @mock.patch.object(run_trainer_node, "_load_actor_model")
+  @mock.patch.object(run_trainer_node.peft_trainer_v2, "TrainingConfig")
+  @mock.patch.object(run_trainer_node.peft_trainer_v2, "PeftTrainer")
+  def test_create_tunix_trainer_factory_keeps_rollout_tp_off_training_config(
+      self,
+      mock_peft_trainer,
+      mock_training_config,
+      mock_load_model,
+      mock_create_mesh,
+      mock_ensure_dir,
+  ):
+    # The rollout TP degree describes the weight-sync destination, not the
+    # training recipe, so it rides on the trainer's weight-sync surface next to
+    # sampler_type instead of on TrainingConfig.
+    args = run_trainer_node._parse_args([
+        "--rollout_mesh_tp",
+        "4",
+    ])
+    factory, _ = run_trainer_node._create_tunix_trainer_factory(args)
+    self.assertNotIn("rollout_tp_size", mock_training_config.call_args.kwargs)
+
+    factory()
+    self.assertEqual(
+        mock_peft_trainer.call_args.kwargs["rollout_tp_size"], 4
+    )
+
   def test_main_raises_without_discovery_context(self):
     with self.assertRaisesRegex(RuntimeError, "Require discovery API"):
       run_trainer_node.main([], context=None)

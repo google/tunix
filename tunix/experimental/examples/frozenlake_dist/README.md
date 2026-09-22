@@ -1,8 +1,9 @@
 # Distributed FrozenLake GRPO Recipe
 
-This directory ports `examples/frozenlake/train_frozenlake_qwen3.py` to the
-experimental distributed RL stack. The control plane runs on CPU, while the
-generic distributed trainer and rollout workers own model execution.
+This directory ports the Qwen3 and Gemma4 E2B FrozenLake recipes under
+`examples/frozenlake/` to the experimental distributed RL stack. The control
+plane runs on CPU, while the generic distributed trainer and rollout workers
+own model execution.
 
 The distributed module keeps only its in-memory dataset and request wiring. It
 directly registers and reuses `examples/frozenlake/agent.py` and
@@ -49,6 +50,26 @@ zero. A nonzero KL coefficient requires adding a reference inference worker.
 FrozenLake is deterministic by default, matching the reference recipe's
 environment construction; set `IS_SLIPPERY=1` to enable Gymnasium's slippery
 transitions.
+
+## Gemma4 E2B
+
+The Gemma4 launcher uses the same model, chat parser, trainer settings, and
+text-only vLLM overrides as `examples/frozenlake/train_frozenlake.py`. On the
+default 4-chip topology it assigns chips 0-1 to a two-way FSDP trainer and
+chips 2-3 to a two-way TP rollout worker:
+
+```bash
+cd tunix/experimental/examples/frozenlake_dist
+WEIGHT_SYNC_MODE=raiden ./run_gemma4_e2b.sh
+```
+
+The wrapper selects `google/gemma-4-E2B-it`, fp32 actor parameter storage,
+decoder rematerialization, flash attention with block size 256, the Gemma4
+non-thinking chat template, two-trajectory trainer/logp micro-batches, and the
+reference logp chunk size and rollout limits (`compute_logps_chunk_size=2048`,
+`max_concurrency=512`, `max_num_seqs=32`,
+`max_num_batched_tokens=8192`). All variables remain overridable through the
+environment before invoking the wrapper.
 
 One reference-only feature is not modeled separately: the original recipe's
 `sampler_is` threshold is folded into the distributed path's rollout-logprob

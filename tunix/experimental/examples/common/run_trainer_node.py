@@ -414,7 +414,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       "--rollout_mesh_tp",
       type=int,
       default=0,
-      help="Rollout TP degree to align MaxText MoE MLP dimensions with.",
+      help=(
+          "Tensor-parallel degree of the rollout destination. MaxText uses it"
+          " to align MoE MLP dimensions; the Tunix backend hands it to the"
+          " weight-sync mapping hooks so they materialize the destination's"
+          " sharded layout."
+      ),
   )
   parser.add_argument(
       "--max_seq_token_per_tpu",
@@ -752,11 +757,15 @@ def _create_tunix_trainer_factory(args) -> tuple[Any, Mesh]:
   )
 
   def _factory():
+    # `sampler_type` and `rollout_tp_size` describe the weight-sync
+    # destination, not the training recipe, so they ride on the trainer's
+    # weight-sync surface rather than on TrainingConfig.
     return peft_trainer_v2.PeftTrainer(
         actor_model,
         _build_optimizer(args),
         training_config,
         sampler_type=args.sampler_type,
+        rollout_tp_size=args.rollout_mesh_tp or 1,
     )
 
   return _factory, mesh

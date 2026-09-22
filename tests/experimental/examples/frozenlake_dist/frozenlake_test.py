@@ -214,6 +214,14 @@ class FrozenLakeDistTest(absltest.TestCase):
     self.assertEqual(config.embed_dim, 4096)
     self.assertEqual(config.num_layers, 36)
 
+  def test_gemma4_e2b_supported_by_distributed_workers(self):
+    config = automodel.call_model_config("gemma-4-e2b")
+    self.assertEqual(config.embed_dim, 1536)
+    self.assertEqual(config.num_layers, 35)
+    # The distributed workers drive prefill/decode themselves, so the ring
+    # buffer KV cache stays off; assert the default the nodes rely on.
+    self.assertFalse(config.use_sliding_window_kv_cache)
+
   def test_launcher_uses_frozenlake_registry(self):
     launcher = (Path(frozenlake.__file__).parent / "launcher.sh").read_text(
         encoding="utf-8"
@@ -234,6 +242,25 @@ class FrozenLakeDistTest(absltest.TestCase):
         launcher,
     )
     self.assertIn('--sampler_is="$SAMPLER_IS"', launcher)
+    self.assertIn('--rollout_mesh_tp="$ROLLOUT_TP"', launcher)
+
+  def test_gemma4_launcher_matches_reference_runtime_limits(self):
+    launcher = (
+        Path(frozenlake.__file__).parent / "run_gemma4_e2b.sh"
+    ).read_text(encoding="utf-8")
+    self.assertIn("MODEL_NAME=${MODEL_NAME:-gemma-4-e2b}", launcher)
+    self.assertIn("MODEL_ID=${MODEL_ID:-google/gemma-4-E2B-it}", launcher)
+    self.assertIn("TRAINER_TPU_CHIPS:-0,1", launcher)
+    self.assertIn("TRAINER_FSDP:-2", launcher)
+    self.assertIn("TRAINER_TP:-1", launcher)
+    self.assertIn("ROLLOUT_TPU_CHIPS:-2,3", launcher)
+    self.assertIn("ROLLOUT_TP:-2", launcher)
+    self.assertIn("TRAIN_MICRO_BATCH_SIZE:-2", launcher)
+    self.assertIn("COMPUTE_LOGPS_MICRO_BATCH_SIZE:-2", launcher)
+    self.assertIn("COMPUTE_LOGPS_CHUNK_SIZE:-2048", launcher)
+    self.assertIn("ROLLOUT_MAX_CONCURRENCY:-512", launcher)
+    self.assertIn("VLLM_MAX_NUM_SEQS:-32", launcher)
+    self.assertIn("VLLM_MAX_NUM_BATCHED_TOKENS:-8192", launcher)
 
 
 if __name__ == "__main__":

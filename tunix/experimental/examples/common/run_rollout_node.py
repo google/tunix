@@ -46,6 +46,8 @@ REPO_ROOT = os.path.abspath(
 os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
 CHAT_PARSERS = {
+    "gemma-4": chat_parser_lib.Gemma4ChatTemplateParser,
+    "gemma4": chat_parser_lib.Gemma4ChatTemplateParser,
     "qwen": chat_parser_lib.QwenChatTemplateParser,
     "llama": chat_parser_lib.LlamaChatTemplateParser,
     "gemma": chat_parser_lib.GemmaChatTemplateParser,
@@ -62,6 +64,23 @@ def _import_vllm_sampler():
   vllm_sampler = importlib.import_module("tunix.generate.vllm_sampler")
   logging.info("Finished importing tunix.generate.vllm_sampler.")
   return vllm_sampler
+
+
+def _is_gemma4_model(model_name: str) -> bool:
+  """Returns whether `model_name` names a Gemma4 variant.
+
+  Model construction goes through `automodel`, but the rollout node still needs
+  the family up front to pick the vLLM weight mapping and `hf_overrides`, before
+  any model or tokenizer exists.
+
+  Args:
+    model_name: Model id or demo selector, e.g. "gemma-4-e2b" or "gemma4-e2b".
+
+  Returns:
+    True when the name refers to a Gemma4 model.
+  """
+  normalized = model_name.lower().replace("_", "-")
+  return "gemma-4" in normalized or "gemma4" in normalized
 
 
 def _chat_parser_for(
@@ -91,6 +110,52 @@ def _chat_parser_for(
   return chat_parser_lib.DefaultChatTemplateParser(
       tokenizer, enable_thinking=enable_thinking
   )
+
+
+def _mapping_config_for(model_name: str):
+  """Returns the Tunix-to-vLLM JAX mapping for a supported model family."""
+  from tunix.generate import (  # pylint: disable=g-import-not-at-top
+      mappings as mappings_lib,
+  )
+
+  if _is_gemma4_model(model_name):
+    from tunix.models.gemma4 import (  # pylint: disable=g-import-not-at-top
+        mapping_vllm_jax,
+    )
+  elif "qwen3" in model_name.lower().replace("_", "-"):
+    from tunix.models.qwen3 import (  # pylint: disable=g-import-not-at-top
+        mapping_vllm_jax,
+    )
+  else:
+    raise ValueError(
+        "The in-process distributed rollout supports Qwen3 and Gemma4 "
+        f"mappings; got model {model_name!r}."
+    )
+
+  return mappings_lib.MappingConfig(**mapping_vllm_jax.VLLM_JAX_MAPPING)
+
+
+def _vllm_hf_overrides(args: argparse.Namespace) -> dict[str, Any]:
+  """Returns the vLLM `hf_overrides` to apply for the rollout model.
+
+  Args:
+    args: Parsed rollout worker arguments.
+
+  Returns:
+    The overrides dict, empty when the model needs no override.
+  """
+  if args.maxtext_model_name:
+    # MaxText serves the model natively, so its architecture override takes the
+    # place of any per-model-family one.
+    return dict(maxtext_utils.VLLM_MAXTEXT_HF_OVERRIDES)
+  if _is_gemma4_model(args.model_id or args.model_name):
+    # Matches the text-only Gemma4 rollout configuration in FrozenLake.
+    return {
+        "final_logit_softcapping": 30.0,
+        "text_config": {"final_logit_softcapping": 30.0},
+        "architectures": ["Gemma4ForCausalLM"],
+    }
+  return {}
 
 
 def _str2bool(v: str | bool) -> bool:
@@ -474,19 +539,11 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
       rollout_worker,
   )
   from tunix.generate import (  # pylint: disable=g-import-not-at-top
-      mappings as mappings_lib,
-  )
-  from tunix.generate import (  # pylint: disable=g-import-not-at-top
       tokenizer_adapter as tokenizer_adapter_lib,
-  )
-  from tunix.models.qwen3 import (  # pylint: disable=g-import-not-at-top
-      mapping_vllm_jax,
   )
 
   logging.info("Creating vLLM mapping config...")
-  mapping_config = mappings_lib.MappingConfig(
-      **mapping_vllm_jax.VLLM_JAX_MAPPING
-  )
+  mapping_config = _mapping_config_for(args.model_id or args.model_name)
   vllm_model = (
       args.model_dir
       if (
@@ -513,11 +570,19 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
       "async_scheduling": args.vllm_async_scheduling,
       "dtype": args.vllm_dtype,
   }
+  hf_overrides = _vllm_hf_overrides(args)
+  if hf_overrides:
+    engine_kwargs["hf_overrides"] = hf_overrides
+  is_gemma4 = _is_gemma4_model(args.model_id or args.model_name)
+  if is_gemma4:
+    engine_kwargs["kv_cache_metrics"] = True
+    engine_kwargs["disable_log_stats"] = False
   if args.vllm_max_num_seqs is not None:
     engine_kwargs["max_num_seqs"] = args.vllm_max_num_seqs
   if args.vllm_max_num_batched_tokens is not None:
     engine_kwargs["max_num_batched_tokens"] = args.vllm_max_num_batched_tokens
-  # Select MaxText's `MaxTextForCausalLM` as rollout model.
+  # Select MaxText's `MaxTextForCausalLM` as rollout model (the architectures
+  # override is applied by `_vllm_hf_overrides`).
   # `additional_config` must be set on VllmConfig (not engine_kwargs): the
   # sampler overwrites args["additional_config"] from the VllmConfig field.
   maxtext_additional_config = None
@@ -526,9 +591,6 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
         "Loading MaxText model %r natively via maxtext_vllm_adapter's"
         " MaxTextForCausalLM (architectures override).",
         args.maxtext_model_name,
-    )
-    engine_kwargs["hf_overrides"] = dict(
-        maxtext_utils.VLLM_MAXTEXT_HF_OVERRIDES
     )
     maxtext_additional_config = (
         maxtext_utils.build_vllm_maxtext_additional_config(
@@ -576,6 +638,7 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
       lora_config=lora_config,
       mapping_config=mapping_config,
       additional_config=maxtext_additional_config,
+      sampling_kwargs={"skip_special_tokens": False} if is_gemma4 else {},
       engine_kwargs=engine_kwargs,
       eos_tokens=_eos_token_ids(args, tokenizer),
   )
@@ -649,18 +712,19 @@ def _create_vllm_sampler(args, tokenizer):
       enable_prefix_caching=args.enable_prefix_caching,
       async_scheduling=args.vllm_async_scheduling,
   )
+  hf_overrides = _vllm_hf_overrides(args)
+  if hf_overrides:
+    engine_kwargs["hf_overrides"] = hf_overrides
   if args.vllm_max_num_seqs is not None:
     engine_kwargs["max_num_seqs"] = args.vllm_max_num_seqs
   if args.vllm_max_num_batched_tokens is not None:
     engine_kwargs["max_num_batched_tokens"] = args.vllm_max_num_batched_tokens
   if args.maxtext_model_name:
+    # The architectures override is applied by `_vllm_hf_overrides`.
     logging.info(
         "Loading MaxText model %r natively via maxtext_vllm_adapter's"
         " MaxTextForCausalLM (architectures override).",
         args.maxtext_model_name,
-    )
-    engine_kwargs["hf_overrides"] = dict(
-        maxtext_utils.VLLM_MAXTEXT_HF_OVERRIDES
     )
     engine_kwargs["additional_config"] = (
         maxtext_utils.build_vllm_maxtext_additional_config(

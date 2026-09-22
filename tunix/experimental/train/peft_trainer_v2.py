@@ -432,6 +432,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       perf_tracer_v2: perf_tracer_lib.Tracer | None = None,
       weight_sync_worker_factory: Callable[[], Any] | None = None,
       sampler_type: str = "inprocess_vllm",
+      rollout_tp_size: int = 1,
   ):
     # TODO(noghabi): Implement sequence packing for SFT and remove this check.
     if (
@@ -512,8 +513,16 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self.data_hooks = None
     self._jit_cache = set()
     self._mini_batch_size = None
+    # Weight-sync destination descriptors. They describe the rollout the
+    # trainer stages weights for, not how the model is trained, so they stay
+    # off `TrainingConfig` and are only read by `prepare_weight_sync`.
+    # TODO(haoyugao): source these from the rollout handshake
+    # (`set_target_state` / the destination's weight-sync metadata, which
+    # already reports `sharding.tensor_parallel_size`) instead of having each
+    # launcher re-declare the rollout topology on the trainer side.
     self._target_state = None
     self._sampler_type = sampler_type
+    self._rollout_tp_size = rollout_tp_size
     self._weight_sync_worker: Any = None
 
   def _sync_step_derived_state(self) -> None:
@@ -1257,14 +1266,18 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     ):
       from tunix.generate import utils as gen_utils  # pylint: disable=g-import-not-at-top
 
+      src_state = nnx.state(self.model)
+      if mapping_config.preprocess_src_state is not None:
+        src_state = mapping_config.preprocess_src_state(src_state)
       converted_state = gen_utils.transfer_state_with_mappings(
-          src_state=nnx.state(self.model),
+          src_state=src_state,
           dst_state=self._target_state,
           key_mappings=mapping_config.to_hf_mappings,
           key_mapping_hook_fns=mapping_config.to_hf_hook_fns,
           transpose_keys=mapping_config.to_hf_transpose_keys,
           reshard_fn=None,
           rollout_engine=backend,
+          tp_size=self._rollout_tp_size,
       )
       worker.bind(converted_state)
     else:
