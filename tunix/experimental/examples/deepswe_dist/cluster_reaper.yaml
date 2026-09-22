@@ -1,0 +1,67 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cluster-reaper-script
+  namespace: trellis
+  labels:
+    app: cluster-reaper
+data:
+  # The cluster reaper script is mounted directly into the job pod.
+  # Update this ConfigMap or re-apply this manifest when changing cluster_reaper.py.
+  cluster_reaper.py: |
+    # See cluster_reaper.py for the full implementation.
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cluster-reaper
+  namespace: trellis
+  labels:
+    app: cluster-reaper
+spec:
+  backoffLimit: 100
+  completions: 1
+  parallelism: 1
+  podReplacementPolicy: TerminatingOrFailed
+  template:
+    metadata:
+      labels:
+        app: cluster-reaper
+    spec:
+      serviceAccountName: xpk-sa
+      nodeSelector:
+        cloud.google.com/gke-nodepool: cpu-np
+      tolerations:
+      - key: cloud.google.com/gke-nodepool
+        operator: Equal
+        value: cpu-np
+        effect: NoSchedule
+      restartPolicy: OnFailure
+      containers:
+      - name: reaper
+        image: gcr.io/cloud-tpu-multipod-dev/atwigg/trellis-35b:latest
+        imagePullPolicy: IfNotPresent
+        command:
+        - python3
+        - /app/cluster_reaper.py
+        env:
+        - name: NAMESPACE
+          value: trellis
+        - name: INTERVAL_SECONDS
+          value: "30"
+        resources:
+          requests:
+            cpu: 500m
+            memory: 1Gi
+          limits:
+            cpu: "2"
+            memory: 4Gi
+        volumeMounts:
+        - name: script-vol
+          mountPath: /app/cluster_reaper.py
+          subPath: cluster_reaper.py
+      volumes:
+      - name: script-vol
+        configMap:
+          name: cluster-reaper-script
+          defaultMode: 0755
