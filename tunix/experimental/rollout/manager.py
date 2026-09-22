@@ -35,6 +35,19 @@ TrajectoryOrError = Union[
 ]
 
 
+def _env_float(name: str, default: float) -> float:
+  val = os.getenv(name)
+  if val is None or not val.strip():
+    return default
+  try:
+    return float(val)
+  except ValueError:
+    logging.warning(
+        "Invalid float for %s=%r; using default %f", name, val, default
+    )
+    return default
+
+
 class RolloutManager:
   """Internal trajectory and concurrency control core of RolloutWorker.
 
@@ -153,11 +166,9 @@ class RolloutManager:
     self._active_tasks: Dict[str, asyncio.Task[Any]] = {}
     self._completed_queue: asyncio.Queue[TrajectoryOrError] = asyncio.Queue()
     self._traffic_inst = None
-    self._episode_timeout_s = float(
-        os.getenv(
-            "EPISODE_TIMEOUT_SECS",
-            collector_lib.DEFAULT_EPISODE_TIMEOUT_SECS,
-        )
+    self._episode_timeout_s = _env_float(
+        "EPISODE_TIMEOUT_SECS",
+        collector_lib.DEFAULT_EPISODE_TIMEOUT_SECS,
     )
     if drain_timeout_s is None:
       drain_timeout_s = self._episode_timeout_s + 60.0

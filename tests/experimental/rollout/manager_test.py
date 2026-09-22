@@ -286,6 +286,15 @@ class AdmissionGateTest(unittest.IsolatedAsyncioTestCase):
       manager = self._manager(drain_timeout_s=None)
       self.assertEqual(manager._drain_timeout_s, 210.0)
 
+  def test_drain_timeout_falls_back_on_invalid_episode_timeout_env(self):
+    for bad_val in ("", "  ", "not_a_float"):
+      with mock.patch.dict(
+          os.environ, {"EPISODE_TIMEOUT_SECS": bad_val}, clear=False
+      ):
+        manager = self._manager(drain_timeout_s=None)
+        self.assertEqual(manager._episode_timeout_s, 600.0)
+        self.assertEqual(manager._drain_timeout_s, 660.0)
+
 
 class AgentConfigTest(unittest.IsolatedAsyncioTestCase):
 
