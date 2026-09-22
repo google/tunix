@@ -153,7 +153,7 @@ export ROLLOUT_MESH_TP=${ROLLOUT_MESH_TP:-16}
 
 # Kubernetes Cluster & Scheduling Options
 export K8S_NAMESPACE=${K8S_NAMESPACE:-${NAMESPACE:-default}}
-export KUEUE_QUEUE_NAME=${KUEUE_QUEUE_NAME:-${QUEUE_NAME:-}}
+export KUEUE_QUEUE_NAME=${KUEUE_QUEUE_NAME:-${KUEUE_QUEUE:-${QUEUE_NAME:-}}}
 export DRY_RUN=${DRY_RUN:-false}
 
 apply_manifest() {
@@ -168,8 +168,10 @@ apply_manifest() {
 stop_orchestrator() {
   if [[ "$DRY_RUN" == "true" ]]; then
     echo "kubectl delete jobset ${ORCHESTRATOR_ID} -n ${K8S_NAMESPACE}"
+    echo "kubectl delete workload -l jobset.sigs.k8s.io/jobset-name=${ORCHESTRATOR_ID} -n ${K8S_NAMESPACE}"
   else
     kubectl delete jobset "${ORCHESTRATOR_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found --wait=true
+    kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name=${ORCHESTRATOR_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
     while kubectl get jobset "${ORCHESTRATOR_ID}" -n "${K8S_NAMESPACE}" &>/dev/null; do
       sleep 2
     done
@@ -180,6 +182,20 @@ start_orchestrator() {
   local debug_flag=""
   if [[ "${DEBUG}" == "1" || "${DEBUG}" == "true" || "${DEBUG}" == "True" ]]; then
     debug_flag="--debug"
+  fi
+
+  local overlong_loss_masking_arg=""
+  if [[ "${OVERLONG_LOSS_MASKING}" == "1" || "${OVERLONG_LOSS_MASKING}" == "true" || "${OVERLONG_LOSS_MASKING}" == "True" ]]; then
+    overlong_loss_masking_arg="--overlong_loss_masking"
+  fi
+  local tis_type="${TIS_TYPE:-${TRUNCATED_IMPORTANCE_SAMPLING_TYPE:-}}"
+  local tis_ratio_min="${TIS_RATIO_MIN:-${TRUNCATED_IMPORTANCE_SAMPLING_RATIO_MIN:-}}"
+  local tis_ratio="${TIS_RATIO:-${TRUNCATED_IMPORTANCE_SAMPLING_RATIO:-}}"
+  local shuffle_arg=""
+  if [[ "${SHUFFLE}" == "0" || "${SHUFFLE}" == "false" || "${SHUFFLE}" == "False" ]]; then
+    shuffle_arg="--no-shuffle"
+  elif [[ "${SHUFFLE}" == "1" || "${SHUFFLE}" == "true" || "${SHUFFLE}" == "True" ]]; then
+    shuffle_arg="--shuffle"
   fi
 
   "$PYTHON" "$YAML_GEN" \
@@ -193,6 +209,7 @@ start_orchestrator() {
     --worker_startup_command=" \
       ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} \
       ${WANDB_API_KEY:+WANDB_API_KEY=\"${WANDB_API_KEY}\"} \
+      ${WANDB_ENTITY:+WANDB_ENTITY=\"${WANDB_ENTITY}\"} \
       ${LOG_DIR:+LOG_DIR=\"${LOG_DIR}\"} \
       ${TRAJECTORY_LOG_DIR:+TRAJECTORY_LOG_DIR=\"${TRAJECTORY_LOG_DIR}\"} \
       WANDB_PROJECT=\"${WANDB_PROJECT}\" \
@@ -211,6 +228,26 @@ start_orchestrator() {
         --max_response_length=${MAX_RESPONSE_LENGTH} \
         --train_micro_batch_size=${TRAIN_MICRO_BATCH_SIZE} \
         --rollout_replicas=${ROLLOUT_REPLICAS} \
+        ${TEMPERATURE:+--temperature=${TEMPERATURE}} \
+        ${TOP_P:+--top_p=${TOP_P}} \
+        ${TOP_K:+--top_k=${TOP_K}} \
+        --beta=${BETA} \
+        --epsilon=${EPSILON} \
+        ${EPSILON_HIGH:+--epsilon_high=${EPSILON_HIGH}} \
+        ${LOSS_AGG_MODE:+--loss_agg_mode=${LOSS_AGG_MODE}} \
+        ${ADVANTAGE_ESTIMATOR:+--advantage_estimator=${ADVANTAGE_ESTIMATOR}} \
+        ${overlong_loss_masking_arg} \
+        ${SEQ_LOGPROB_ERROR_THRESHOLD:+--seq_logprob_error_threshold=${SEQ_LOGPROB_ERROR_THRESHOLD}} \
+        ${tis_type:+--truncated_importance_sampling_type=${tis_type}} \
+        ${tis_ratio_min:+--truncated_importance_sampling_ratio_min=${tis_ratio_min}} \
+        ${tis_ratio:+--truncated_importance_sampling_ratio=${tis_ratio}} \
+        ${SAMPLER_IS_LENGTH_BUCKETS:+--sampler_is_length_buckets=${SAMPLER_IS_LENGTH_BUCKETS}} \
+        ${MAX_STALENESS:+--max_staleness=${MAX_STALENESS}} \
+        ${REWARD_MODE:+--reward_mode=${REWARD_MODE}} \
+        ${TFDS_DATA_DIR:+--tfds_data_dir=\"${TFDS_DATA_DIR}\"} \
+        ${TFDS_SPLIT:+--tfds_split=${TFDS_SPLIT}} \
+        ${SEED:+--seed=${SEED}} \
+        ${shuffle_arg} \
         --wandb_project=\"${WANDB_PROJECT}\" \
         --wandb_run_name=\"${WANDB_RUN_NAME}\" \
         --flush_metrics_every_n_steps=${FLUSH_METRICS_EVERY_N_STEPS} \
@@ -222,7 +259,7 @@ start_orchestrator() {
         ${MAX_SEQ_TOKEN_PER_TPU:+--max_seq_token_per_tpu=${MAX_SEQ_TOKEN_PER_TPU}} \
         ${MAX_SEGMENTS_PER_PACKED_ROW:+--max_segments_per_packed_row=${MAX_SEGMENTS_PER_PACKED_ROW}} \
         ${TRAINER_MESH_FSDP:+--trainer_fsdp=${TRAINER_MESH_FSDP}} \
-        ${debug_flag} \
+        ${ORCHESTRATOR_EXTRA_ARGS:+${ORCHESTRATOR_EXTRA_ARGS} }${debug_flag} \
     " \
     | apply_manifest
 }
@@ -230,8 +267,10 @@ start_orchestrator() {
 stop_trainer() {
   if [[ "$DRY_RUN" == "true" ]]; then
     echo "kubectl delete jobset ${TRAINER_ID} -n ${K8S_NAMESPACE}"
+    echo "kubectl delete workload -l jobset.sigs.k8s.io/jobset-name=${TRAINER_ID} -n ${K8S_NAMESPACE}"
   else
     kubectl delete jobset "${TRAINER_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found --wait=true
+    kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name=${TRAINER_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
     while kubectl get jobset "${TRAINER_ID}" -n "${K8S_NAMESPACE}" &>/dev/null; do
       sleep 2
     done
@@ -280,6 +319,27 @@ start_trainer() {
       --use_weight_converter=${USE_WEIGHT_CONVERTER} \
       ${MAX_SEQ_TOKEN_PER_TPU:+--max_seq_token_per_tpu=${MAX_SEQ_TOKEN_PER_TPU}} \
     "
+    if [[ "${TRAINER_EXTRA_ARGS:-}" != *"--base_num_kv_heads"* && -n "${TRAINER_BASE_NUM_KV_HEADS:-}" ]]; then
+      extra_flags+=" --base_num_kv_heads=${TRAINER_BASE_NUM_KV_HEADS}"
+    fi
+    if [[ "${TRAINER_EXTRA_ARGS:-}" != *"--maxtext_attention"* && -n "${TRAINER_MAXTEXT_ATTENTION:-}" ]]; then
+      extra_flags+=" --maxtext_attention=${TRAINER_MAXTEXT_ATTENTION}"
+    fi
+    if [[ "${TRAINER_EXTRA_ARGS:-}" != *"--remat_policy"* && -n "${REMAT_POLICY:-}" ]]; then
+      extra_flags+=" --remat_policy=${REMAT_POLICY}"
+    fi
+    if [[ "${TRAINER_EXTRA_ARGS:-}" != *"--learning_rate_final_fraction"* && -n "${LEARNING_RATE_FINAL_FRACTION:-}" ]]; then
+      extra_flags+=" --learning_rate_final_fraction=${LEARNING_RATE_FINAL_FRACTION}"
+    fi
+    if [[ "${TRAINER_EXTRA_ARGS:-}" != *"--maxtext_warmup_steps_fraction"* && -n "${WARMUP_STEPS_FRACTION:-}" ]]; then
+      extra_flags+=" --maxtext_warmup_steps_fraction=${WARMUP_STEPS_FRACTION}"
+    fi
+    if [[ "${TRAINER_EXTRA_ARGS:-}" != *"--trainable_parameters_mask"* && -n "${TRAINABLE_PARAMETERS_MASK:-}" ]]; then
+      extra_flags+=" --trainable_parameters_mask='${TRAINABLE_PARAMETERS_MASK}'"
+    fi
+    if [[ "${TRAINER_EXTRA_ARGS:-}" != *"--prefuse_moe_weights"* && -n "${TRAINER_PREFUSE_MOE_WEIGHTS:-}" ]]; then
+      extra_flags+=" --prefuse_moe_weights=${TRAINER_PREFUSE_MOE_WEIGHTS}"
+    fi
   fi
 
   local raiden_env=""
@@ -371,8 +431,10 @@ stop_rollout_instance() {
   else
     if [[ "$DRY_RUN" == "true" ]]; then
       echo "kubectl delete jobset ${target_id} -n ${K8S_NAMESPACE}"
+      echo "kubectl delete workload -l jobset.sigs.k8s.io/jobset-name=${target_id} -n ${K8S_NAMESPACE}"
     else
       kubectl delete jobset "${target_id}" -n "${K8S_NAMESPACE}" --ignore-not-found --wait=true
+      kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name=${target_id}" -n "${K8S_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
       while kubectl get jobset "${target_id}" -n "${K8S_NAMESPACE}" &>/dev/null; do
         sleep 2
       done
@@ -407,6 +469,83 @@ start_rollout_instance() {
       --maxtext_model_name=${MAXTEXT_MODEL_NAME} \
       ${ROLLOUT_MAXTEXT_ATTENTION:+--maxtext_attention=${ROLLOUT_MAXTEXT_ATTENTION}} \
     "
+  fi
+
+  local vllm_args=""
+  if [[ "$SAMPLER" == "vllm" || "$SAMPLER" == "inprocess_vllm" ]]; then
+    local vllm_json=""
+    if [[ -n "${VLLM_CONFIG_JSON:-}" || -n "${ROLLOUT_VLLM_CONFIG_JSON:-}" || -n "${VLLM_MAX_NUM_BATCHED_TOKENS:-}" || -n "${VLLM_MAX_NUM_SEQS:-}" || -n "${VLLM_GPU_MEMORY_UTILIZATION:-}" || -n "${VLLM_ADDITIONAL_CONFIG:-}" || -n "${VLLM_MAX_MODEL_LEN:-}" || -n "${VLLM_BLOCK_SIZE:-}" ]]; then
+      vllm_json=$("${PYTHON:-python3}" -c '
+import json, os
+
+cfg = {}
+raw = os.getenv("VLLM_CONFIG_JSON") or os.getenv("ROLLOUT_VLLM_CONFIG_JSON")
+if raw:
+  try:
+    cfg = json.loads(raw)
+  except Exception:
+    cfg = raw
+
+if isinstance(cfg, dict):
+  mapping = {
+      "VLLM_MAX_MODEL_LEN": ("max_model_len", int),
+      "VLLM_MAX_NUM_BATCHED_TOKENS": ("max_num_batched_tokens", int),
+      "VLLM_MAX_NUM_SEQS": ("max_num_seqs", int),
+      "VLLM_GPU_MEMORY_UTILIZATION": ("gpu_memory_utilization", float),
+      "VLLM_DATA_PARALLEL_SIZE": ("data_parallel_size", int),
+      "VLLM_ENABLE_EXPERT_PARALLEL": ("enable_expert_parallel", lambda v: v.lower() in ("true", "1")),
+      "VLLM_PREFIX_CACHE_RETENTION_INTERVAL": ("prefix_cache_retention_interval", int),
+      "VLLM_MAMBA_CACHE_MODE": ("mamba_cache_mode", str),
+      "VLLM_KV_CACHE_DTYPE": ("kv_cache_dtype", str),
+      "VLLM_BLOCK_SIZE": ("block_size", int),
+      "VLLM_ASYNC_SCHEDULING": ("async_scheduling", lambda v: v.lower() in ("true", "1")),
+      "VLLM_ENABLE_CHUNKED_PREFILL": ("enable_chunked_prefill", lambda v: v.lower() in ("true", "1")),
+      "VLLM_LANGUAGE_MODEL_ONLY": ("language_model_only", lambda v: v.lower() in ("true", "1")),
+      "VLLM_ENABLE_AUTO_TOOL_CHOICE": ("enable_auto_tool_choice", lambda v: v.lower() in ("true", "1")),
+      "VLLM_TOOL_CALL_PARSER": ("tool_call_parser", str),
+      "VLLM_REASONING_PARSER": ("reasoning_parser", str),
+  }
+  for env_k, (cfg_k, parse_fn) in mapping.items():
+    val = os.getenv(env_k)
+    if val is not None and val != "" and cfg_k not in cfg:
+      try:
+        cfg[cfg_k] = parse_fn(val)
+      except Exception:
+        cfg[cfg_k] = val
+
+  for env_k, cfg_k in [
+      ("VLLM_ADDITIONAL_CONFIG", "additional_config"),
+      ("VLLM_DEFAULT_CHAT_TEMPLATE_KWARGS", "default_chat_template_kwargs"),
+      ("VLLM_LIMIT_MM_PER_PROMPT", "limit_mm_per_prompt"),
+  ]:
+    val = os.getenv(env_k)
+    if val and cfg_k not in cfg:
+      try:
+        cfg[cfg_k] = json.loads(val)
+      except Exception:
+        cfg[cfg_k] = val
+
+if cfg:
+  print(json.dumps(cfg) if isinstance(cfg, dict) else cfg)
+' 2>/dev/null || true)
+    fi
+
+    if [[ -n "${vllm_json}" && "${ROLLOUT_EXTRA_ARGS:-}" != *"--vllm_config_json"* ]]; then
+      vllm_args+=" --vllm_config_json='${vllm_json}'"
+    fi
+    if [[ "${ROLLOUT_EXTRA_ARGS:-}" != *"--tensor_parallel_size"* && -n "${ROLLOUT_MESH_TP:-}" ]]; then
+      vllm_args+=" --tensor_parallel_size=${ROLLOUT_MESH_TP}"
+    fi
+  fi
+
+  if [[ "${ROLLOUT_EXTRA_ARGS:-}" != *"--return_routed_experts"* && -n "${RETURN_ROUTED_EXPERTS:-}" ]]; then
+    extra_flags+=" --return_routed_experts=${RETURN_ROUTED_EXPERTS}"
+  fi
+  if [[ "${ROLLOUT_EXTRA_ARGS:-}" != *"--free_kv_cache_during_weight_sync"* && -n "${ROLLOUT_FREE_KV_CACHE:-}" ]]; then
+    extra_flags+=" --free_kv_cache_during_weight_sync=${ROLLOUT_FREE_KV_CACHE}"
+  fi
+  if [[ "${ROLLOUT_EXTRA_ARGS:-}" != *"--max_concurrency"* && -n "${ROLLOUT_MAX_CONCURRENCY:-}" ]]; then
+    extra_flags+=" --max_concurrency=${ROLLOUT_MAX_CONCURRENCY}"
   fi
 
   local raiden_env=""
@@ -450,6 +589,7 @@ start_rollout_instance() {
         --prefuse_moe_weights=${PREFUSE_MOE_WEIGHTS} \
         --enable_prefix_caching=${ENABLE_PREFIX_CACHING} \
         ${extra_flags} \
+        ${vllm_args} \
         ${ROLLOUT_EXTRA_ARGS:+${ROLLOUT_EXTRA_ARGS} }${debug_flag} \
     " \
     | apply_manifest
