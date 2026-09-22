@@ -76,6 +76,10 @@ WANDB_PROJECT=${WANDB_PROJECT:-trellis-gsm8k}
 WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
 WANDB_API_KEY=${WANDB_API_KEY:-}
 TRAJECTORY_LOG_DIR=${TRAJECTORY_LOG_DIR:-}
+RUN_ID=${RUN_ID:-run_$(date -u +%Y%m%d_%H%M%S)_$$}
+TRAJECTORY_STORE_ENABLED=${TRAJECTORY_STORE_ENABLED:-false}
+TRAJECTORY_STORE_BACKEND=${TRAJECTORY_STORE_BACKEND:-file}
+TRAJECTORY_STORE_DIR=${TRAJECTORY_STORE_DIR:-"${LOG_DIR:-${LOG_ROOT}}/trajectory_store"}
 SAMPLER=${SAMPLER:-inprocess_vllm}
 WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
 USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
@@ -625,6 +629,12 @@ echo "Launching rollout node with sampler=$SAMPLER on TPU chips $ROLLOUT_TPU_CHI
   if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
     ROLLOUT_CMD+=(--use_lora)
   fi
+  ROLLOUT_CMD+=(
+    --enable_trajectory_store="$TRAJECTORY_STORE_ENABLED"
+    --trajectory_store_backend="$TRAJECTORY_STORE_BACKEND"
+    --trajectory_store_dir="$TRAJECTORY_STORE_DIR"
+    --run_id="$RUN_ID"
+  )
 
   export JAX_PLATFORMS=tpu,cpu
   export SKIP_JAX_PRECOMPILE=1
@@ -834,6 +844,12 @@ echo "Launching CPU orchestrator..."
   if [[ -n "$TRAJECTORY_LOG_DIR" ]]; then
     ORCHESTRATOR_CMD+=(--trajectory_log_dir="$TRAJECTORY_LOG_DIR")
   fi
+  ORCHESTRATOR_CMD+=(
+    --enable_trajectory_store="$TRAJECTORY_STORE_ENABLED"
+    --trajectory_store_backend="$TRAJECTORY_STORE_BACKEND"
+    --trajectory_store_dir="$TRAJECTORY_STORE_DIR"
+    --run_id="$RUN_ID"
+  )
 
   export JAX_PLATFORMS=cpu
   export PYTHONUNBUFFERED=1

@@ -88,6 +88,10 @@ WANDB_API_KEY=${WANDB_API_KEY:-}
 LOG_DIR=${LOG_DIR:-}
 TRAJECTORY_LOG_DIR=${TRAJECTORY_LOG_DIR:-}
 MODEL_DTYPE=${MODEL_DTYPE:-float32}
+RUN_ID=${RUN_ID:-run_$(date -u +%Y%m%d_%H%M%S)_$$}
+TRAJECTORY_STORE_ENABLED=${TRAJECTORY_STORE_ENABLED:-false}
+TRAJECTORY_STORE_BACKEND=${TRAJECTORY_STORE_BACKEND:-file}
+TRAJECTORY_STORE_DIR=${TRAJECTORY_STORE_DIR:-"${LOG_DIR:-${LOG_ROOT}}/trajectory_store"}
 DEBUG=${DEBUG:-0}
 
 # Qwen3-8B defaults target an 8-chip host split between trainer and rollout.
@@ -301,6 +305,12 @@ TRAINER_PID=$!
     cmd+=(--vllm_init_with_random_weights)
   fi
   is_true "$DEBUG" && cmd+=(--debug)
+  cmd+=(
+    --enable_trajectory_store="$TRAJECTORY_STORE_ENABLED"
+    --trajectory_store_backend="$TRAJECTORY_STORE_BACKEND"
+    --trajectory_store_dir="$TRAJECTORY_STORE_DIR"
+    --run_id="$RUN_ID"
+  )
   export JAX_PLATFORMS=tpu,cpu
   export SKIP_JAX_PRECOMPILE=1
   export TPU_VISIBLE_DEVICES="$ROLLOUT_TPU_CHIPS"
@@ -353,6 +363,10 @@ cmd=(
   --weight_sync_mode="$WEIGHT_SYNC_MODE"
   --trainer_fsdp="$TRAINER_FSDP"
   --stop_workers_on_exit
+  --enable_trajectory_store="$TRAJECTORY_STORE_ENABLED"
+  --trajectory_store_backend="$TRAJECTORY_STORE_BACKEND"
+  --trajectory_store_dir="$TRAJECTORY_STORE_DIR"
+  --run_id="$RUN_ID"
 )
 is_true "$SHUFFLE" && cmd+=(--shuffle) || cmd+=(--no-shuffle)
 is_true "$IS_SLIPPERY" && cmd+=(--is_slippery) || cmd+=(--no-is_slippery)

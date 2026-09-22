@@ -145,6 +145,9 @@ class ClusterOrchestrator:
       case _:
         raise RuntimeError(f"unknown service type {service_type}")
 
+    resources = {"address": service_address}
+    if "trajectory_store_config" in md:
+      resources["trajectory_store_config"] = md["trajectory_store_config"]
     self.register_worker_handle(
         worker_id=worker_id,
         roles=[role],
@@ -152,7 +155,7 @@ class ClusterOrchestrator:
             f"grpc://{service_address}",
             rpc_timeout_s=rpc_timeout_s,
         ),
-        resources={"address": service_address},
+        resources=resources,
     )
 
   def register_worker(
@@ -286,8 +289,47 @@ class ClusterOrchestrator:
     )
     self.lifecycle_driver.bring_up(dummy_data)
     self._bring_up_remote_workers(dummy_data)
+    self._verify_rollout_trajectory_store_configs()
     self.engine = self._create_engine()
     logging.info("All workers brought up successfully.")
+
+  def _verify_rollout_trajectory_store_configs(self) -> None:
+    """Verifies that all registered rollout workers match the orchestrator's TrajectoryStore config."""
+    expected_config = (
+        self.trajectory_store.to_config()
+        if self.trajectory_store is not None
+        else None
+    )
+    for worker in self._get_role_members(datatypes.Role.ROLLOUT):
+      info = worker.info()
+      resources = getattr(info, "resources", None) or {}
+      if "trajectory_store_config" in resources:
+        worker_config = resources["trajectory_store_config"]
+      elif hasattr(worker, "trajectory_store"):
+        store = getattr(worker, "trajectory_store")
+        worker_config = store.to_config() if store is not None else None
+      else:
+        worker_config = None
+      if worker_config != expected_config:
+        raise ValueError(
+            f"Rollout worker {info.worker_id!r} trajectory_store_config "
+            f"{worker_config!r} does not match orchestrator "
+            f"trajectory_store_config {expected_config!r}."
+        )
+    for worker_id in sorted(self._remote_worker_infos):
+      info = self._remote_worker_infos[worker_id]
+      if (
+          datatypes.Role.ROLLOUT.value not in info.roles
+          and datatypes.Role.ROLLOUT not in info.roles
+      ):
+        continue
+      worker_config = info.resources.get("trajectory_store_config")
+      if worker_config != expected_config:
+        raise ValueError(
+            f"Rollout worker {worker_id!r} trajectory_store_config "
+            f"{worker_config!r} does not match orchestrator "
+            f"trajectory_store_config {expected_config!r}."
+        )
 
   def shutdown(self) -> None:
     """Shuts down all workers and closes health monitoring resources."""
@@ -335,7 +377,17 @@ class ClusterOrchestrator:
     worker_ids = sorted(self._remote_worker_infos)
     for worker_id in worker_ids:
       logging.info("Initializing remote worker %s.", worker_id)
-      self._remote_worker_handles_by_id[worker_id].submit("initialize")
+      init_resp = self._remote_worker_handles_by_id[worker_id].submit(
+          "initialize"
+      )
+      init_metadata = getattr(init_resp, "metadata", None)
+      if (
+          isinstance(init_metadata, Mapping)
+          and "trajectory_store_config" in init_metadata
+      ):
+        self._remote_worker_infos[worker_id].resources[
+            "trajectory_store_config"
+        ] = init_metadata["trajectory_store_config"]
     for worker_id in worker_ids:
       logging.info("Compiling remote worker %s.", worker_id)
       self._remote_worker_handles_by_id[worker_id].submit("compile", dummy_data)

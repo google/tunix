@@ -108,6 +108,10 @@ export WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
 export WANDB_API_KEY=${WANDB_API_KEY:-}
 export LOG_DIR=${LOG_DIR:-}
 export TRAJECTORY_LOG_DIR=${TRAJECTORY_LOG_DIR:-}
+export RUN_ID=${RUN_ID:-run_$(date -u +%Y%m%d_%H%M%S)_$$}
+export TRAJECTORY_STORE_ENABLED=${TRAJECTORY_STORE_ENABLED:-false}
+export TRAJECTORY_STORE_BACKEND=${TRAJECTORY_STORE_BACKEND:-file}
+export TRAJECTORY_STORE_DIR=${TRAJECTORY_STORE_DIR:-"${LOG_DIR:-artifacts/math_gsm8k_dist}/trajectory_store"}
 export TFDS_DATA_DIR=${TFDS_DATA_DIR:-"artifacts/data"}
 export TFDS_SPLIT=${TFDS_SPLIT:-train}
 export FLUSH_METRICS_EVERY_N_STEPS=${FLUSH_METRICS_EVERY_N_STEPS:-1}
@@ -216,6 +220,10 @@ start_orchestrator() {
         --flush_metrics_every_n_steps=${FLUSH_METRICS_EVERY_N_STEPS} \
         --weight_sync_mode=${WEIGHT_SYNC_MODE} \
         --stop_workers_on_exit \
+        --enable_trajectory_store=${TRAJECTORY_STORE_ENABLED} \
+        --trajectory_store_backend=${TRAJECTORY_STORE_BACKEND} \
+        --trajectory_store_dir=\"${TRAJECTORY_STORE_DIR}\" \
+        --run_id=\"${RUN_ID}\" \
         $([[ "${USE_ROLLOUT_LOGPS}" == "false" || "${USE_ROLLOUT_LOGPS}" == "False" || "${USE_ROLLOUT_LOGPS}" == "0" ]] && echo --no-use_rollout_logps || echo --use_rollout_logps) \
         ${LOG_DIR:+--log_dir=\"${LOG_DIR}\"} \
         ${TRAJECTORY_LOG_DIR:+--trajectory_log_dir=\"${TRAJECTORY_LOG_DIR}\"} \
@@ -449,6 +457,10 @@ start_rollout_instance() {
         --chat_parser=${CHAT_PARSER} \
         --prefuse_moe_weights=${PREFUSE_MOE_WEIGHTS} \
         --enable_prefix_caching=${ENABLE_PREFIX_CACHING} \
+        --enable_trajectory_store=${TRAJECTORY_STORE_ENABLED} \
+        --trajectory_store_backend=${TRAJECTORY_STORE_BACKEND} \
+        --trajectory_store_dir=\"${TRAJECTORY_STORE_DIR}\" \
+        --run_id=\"${RUN_ID}\" \
         ${extra_flags} \
         ${debug_flag} \
     " \

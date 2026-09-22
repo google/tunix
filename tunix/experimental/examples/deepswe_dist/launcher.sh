@@ -82,6 +82,10 @@ WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
 WANDB_API_KEY=${WANDB_API_KEY:-}
 LOG_DIR=${LOG_DIR:-}
 TRAJECTORY_LOG_DIR=${TRAJECTORY_LOG_DIR:-}
+RUN_ID=${RUN_ID:-run_$(date -u +%Y%m%d_%H%M%S)_$$}
+TRAJECTORY_STORE_ENABLED=${TRAJECTORY_STORE_ENABLED:-false}
+TRAJECTORY_STORE_BACKEND=${TRAJECTORY_STORE_BACKEND:-file}
+TRAJECTORY_STORE_DIR=${TRAJECTORY_STORE_DIR:-"${LOG_DIR:-${LOG_ROOT}}/trajectory_store"}
 FLUSH_EVERY_N_STEPS=${FLUSH_EVERY_N_STEPS:-1}
 
 TRAINER_TPU_CHIPS=${TRAINER_TPU_CHIPS:-0,1}
@@ -319,6 +323,12 @@ echo "Launching DeepSWE rollout node..."
   if [[ "$DEBUG" == "1" || "$DEBUG" == "true" || "$DEBUG" == "True" ]]; then
     ROLLOUT_CMD+=(--debug)
   fi
+  ROLLOUT_CMD+=(
+    --enable_trajectory_store="$TRAJECTORY_STORE_ENABLED"
+    --trajectory_store_backend="$TRAJECTORY_STORE_BACKEND"
+    --trajectory_store_dir="$TRAJECTORY_STORE_DIR"
+    --run_id="$RUN_ID"
+  )
   export JAX_PLATFORMS=tpu,cpu
   export SKIP_JAX_PRECOMPILE=1
   export TPU_VISIBLE_DEVICES=${ROLLOUT_TPU_CHIPS}
@@ -372,6 +382,10 @@ echo "Launching CPU orchestrator..."
     --flush_every_n_steps="$FLUSH_EVERY_N_STEPS"
     --weight_sync_mode="$WEIGHT_SYNC_MODE"
     --stop_workers_on_exit
+    --enable_trajectory_store="$TRAJECTORY_STORE_ENABLED"
+    --trajectory_store_backend="$TRAJECTORY_STORE_BACKEND"
+    --trajectory_store_dir="$TRAJECTORY_STORE_DIR"
+    --run_id="$RUN_ID"
   )
   if [[ -n "$DATASET_PATH" ]]; then
     ORCHESTRATOR_CMD+=(--dataset_path="$DATASET_PATH")

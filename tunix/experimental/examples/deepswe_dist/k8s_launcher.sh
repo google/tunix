@@ -108,6 +108,10 @@ export WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
 export WANDB_API_KEY=${WANDB_API_KEY:-}
 export LOG_DIR=${LOG_DIR:-}
 export TRAJECTORY_LOG_DIR=${TRAJECTORY_LOG_DIR:-}
+export RUN_ID=${RUN_ID:-run_$(date -u +%Y%m%d_%H%M%S)_$$}
+export TRAJECTORY_STORE_ENABLED=${TRAJECTORY_STORE_ENABLED:-false}
+export TRAJECTORY_STORE_BACKEND=${TRAJECTORY_STORE_BACKEND:-file}
+export TRAJECTORY_STORE_DIR=${TRAJECTORY_STORE_DIR:-"${LOG_DIR:-artifacts/deepswe_dist}/trajectory_store"}
 
 export ORCHESTRATOR_ID=$USER-orch
 export ORCHESTRATOR_PORT=20000
@@ -209,6 +213,10 @@ start_orchestrator() {
         --wandb_run_name=\"${WANDB_RUN_NAME}\" \
         --weight_sync_mode=${WEIGHT_SYNC_MODE} \
         --stop_workers_on_exit \
+        --enable_trajectory_store=${TRAJECTORY_STORE_ENABLED} \
+        --trajectory_store_backend=${TRAJECTORY_STORE_BACKEND} \
+        --trajectory_store_dir=\"${TRAJECTORY_STORE_DIR}\" \
+        --run_id=\"${RUN_ID}\" \
         $([[ "${USE_ROLLOUT_LOGPS}" == "false" || "${USE_ROLLOUT_LOGPS}" == "False" || "${USE_ROLLOUT_LOGPS}" == "0" ]] && echo --no-use_rollout_logps || echo --use_rollout_logps) \
         ${dataset_args} \
         ${shuffle_arg} \
@@ -373,6 +381,10 @@ start_rollout() {
         --env_name=deepswe_env \
         --agent_name=deepswe_agent \
         --max_concurrency=${ROLLOUT_MAX_CONCURRENCY} \
+        --enable_trajectory_store=${TRAJECTORY_STORE_ENABLED} \
+        --trajectory_store_backend=${TRAJECTORY_STORE_BACKEND} \
+        --trajectory_store_dir=\"${TRAJECTORY_STORE_DIR}\" \
+        --run_id=\"${RUN_ID}\" \
         ${lora_args} \
         ${maxtext_args} \
         ${vllm_args} \

@@ -14,13 +14,15 @@
 
 """Trajectory Collector Engine wrapping TrajectoryCollectEngine with pause/resume/cancel control."""
 
-from typing import Any, Collection, List, Mapping, Sequence
+from typing import Any, Collection, List, Mapping, Optional, Sequence
 import zlib
 from absl import logging
 import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.experimental.rollout import sampler as sampler_lib
 from tunix.experimental.rollout import vanilla_sampler_adapter
+from tunix.experimental.trajectory import converter as converter_lib
+from tunix.experimental.trajectory import store
 from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.trajectory import trajectory_collect_engine as rl_collect_engine
 from tunix.rl.rollout import base_rollout
@@ -108,6 +110,7 @@ class TrajectoryCollectorEngine:
       tokenizer: Any,
       chat_parser: Any,
       eos_ids: Collection[int] | None = None,
+      trajectory_store: Optional[store.TrajectoryWriter] = None,
   ):
     if (
         sampler is None
@@ -127,9 +130,13 @@ class TrajectoryCollectorEngine:
     self.agent = agent
     self.tokenizer = tokenizer
     self.chat_parser = chat_parser
+    self.trajectory_store = trajectory_store
     self.is_paused: bool = False
     self.is_cancelled: bool = False
     self.is_done: bool = False
+    self._inner_engine: Optional[rl_collect_engine.TrajectoryCollectEngine] = (
+        None
+    )
     self.max_response_length = request.max_response_length
     # The stop set the sampler was configured with, which is what decides
     # whether a rollout ended on its own. Defined at the recipe level via
@@ -153,6 +160,17 @@ class TrajectoryCollectorEngine:
           "overlong_filter must be a boolean, got"
           f" {type(overlong_filter).__name__}: {overlong_filter!r}."
       )
+    target_policy_versions = None
+    target_policy_version = getattr(self.request, "target_policy_version", None)
+    if target_policy_version is not None:
+      target_policy_versions = [target_policy_version]
+
+    self.metadata = converter_lib.create_trajectory_metadata(
+        self.traj_id,
+        self.request,
+        self.agent,
+        target_policy_versions=target_policy_versions,
+    )
 
   async def run_episode(self) -> agent_types.TrajectoryItem:
     """Executes multi-turn agentic rollout episode and returns TrajectoryItem."""
@@ -253,6 +271,7 @@ class TrajectoryCollectorEngine:
           "RolloutCollector requires valid registered agent and env instances"
           " to run an episode."
       )
+
     inner_engine = rl_collect_engine.TrajectoryCollectEngine(
         agent=self.agent,
         env=self.env,
@@ -262,7 +281,11 @@ class TrajectoryCollectorEngine:
         max_response_length=self.max_response_length,
         timeout=self.episode_timeout,
         overlong_filter=self.overlong_filter,
+        policy_version=getattr(self.request, "target_policy_version", None),
+        trajectory_store=self.trajectory_store,
+        metadata=self.metadata,
     )
+    self._inner_engine = inner_engine
     rl_traj = await inner_engine.collect(mode="Token")
     self.is_done = True
     return self._convert_to_trajectory(rl_traj)
@@ -392,8 +415,24 @@ class TrajectoryCollectorEngine:
     self.is_paused = False
 
   def cancel(self) -> None:
-    self.is_cancelled = True
-    self.is_done = True
+    if not self.is_done:
+      self.is_cancelled = True
+      self.is_done = True
+      if self._inner_engine is not None:
+        self._inner_engine.sync_trajectory_metadata(
+            status=agent_types.TrajectoryStatus.FAILED
+        )
+        self._inner_engine.trajectory_store = None
+      elif self.metadata is not None:
+        converter_lib.update_trajectory_metadata(
+            metadata=self.metadata,
+            agent=self.agent,
+            policy_version=getattr(self.request, "target_policy_version", None),
+            status=agent_types.TrajectoryStatus.FAILED,
+        )
+      if self.trajectory_store is not None and self.metadata is not None:
+        self.trajectory_store.update_metadata(self.metadata)
+        self.trajectory_store = None
 
   def get_accumulated_token_ids(self) -> List[int]:
     """Returns token IDs of historical turns for Raiden KV-cache transfer."""
