@@ -10,6 +10,7 @@ from absl import logging
 from absl.testing import absltest
 from absl.testing import parameterized
 from tunix.experimental.trajectory import async_writer
+from tunix.experimental.trajectory import trajectory as trajectory_lib
 from tunix.experimental.trajectory import trajectory_testing
 
 # Bounds for barriers that must never be hit on a healthy run; generous enough
@@ -69,7 +70,7 @@ class _TestAsyncWriter(async_writer.AsyncWriter[_TestWriteTask]):
     self.processed_tasks.append(task)
 
 
-class AsyncWriterTest(parameterized.TestCase):
+class AsyncWriterTest(trajectory_testing.TrajectoryTestCase):
   """Unit tests for AsyncWriter lifecycle and queue mechanics."""
 
   def _create_writer(
@@ -209,6 +210,55 @@ class AsyncWriterTest(parameterized.TestCase):
     )
 
     self.assertEqual(task.trajectory_id, "traj_derived")
+
+  def test_write_task_deep_copies_on_init_and_projects_on_worker(self) -> None:
+    writer = self._create_writer()
+    meta = trajectory_testing.TUNIX_METADATA_1.model_copy(deep=True)
+    step = trajectory_testing.TUNIX_AGENT_STEP_1.model_copy(deep=True)
+    task = _TestWriteTask(metadata=meta, step=step)
+
+    # Mutate base ATIF containers.
+    meta.agent.tool_definitions[0]["name"] = "mutated_tool"
+    meta.agent.tool_definitions.append({"name": "extra_tool"})
+    meta.final_metrics.extra["final_key"] = "mutated_final"
+    meta.extra["user_meta"] = "mutated_meta"
+    step.tool_calls[0].arguments["query"] = "mutated_query"
+    step.observation.results[0].extra["obs_res_key"] = "mutated_obs"
+    step.metrics.prompt_token_ids.extend([101, 202, 303])
+    step.extra["user_key"] = "mutated_step"
+
+    # Mutate Tunix subclass containers (packed into TUNIX_EXTENSIONS_KEY).
+    meta.target_policy_versions.extend([4, 5, 6])
+    meta.hyperparams["temperature"] = 1.5
+    meta.env_time["step_0"] = 12.3
+    meta.reward_time["step_1"] = 45.6
+    step.assistant_tokens[0] = 777
+    step.assistant_masks[0] = 0
+    step.logprobs[0] = -9.9
+
+    # Caller thread only deep-copies; Tunix subclass types remain unprojected.
+    self.assertIs(type(task.metadata), trajectory_lib.TunixTrajectoryMetadata)
+    self.assertEqual(task.metadata, trajectory_testing.TUNIX_METADATA_1)
+    self.assertStepEqual(task.step, trajectory_testing.TUNIX_AGENT_STEP_1)
+
+    # Worker thread projects to base ATIF when draining the queue.
+    writer._enqueue(task)
+    writer.flush()
+
+    self.assertLen(writer.processed_tasks, 1)
+    processed_task = writer.processed_tasks[0]
+    self.assertIs(
+        type(processed_task.metadata), trajectory_lib.TrajectoryMetadata
+    )
+    self.assertEqual(
+        processed_task.metadata,
+        trajectory_testing.TUNIX_METADATA_1.to_atif_metadata(),
+    )
+    self.assertIs(type(processed_task.step), trajectory_lib.Step)
+    self.assertEqual(
+        processed_task.step,
+        trajectory_testing.TUNIX_AGENT_STEP_1.to_atif_step(),
+    )
 
   # ============================================================================
   # 3. Barrier Synchronization (flush)

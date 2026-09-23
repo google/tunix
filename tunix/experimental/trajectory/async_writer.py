@@ -31,6 +31,16 @@ class WriteTask:
     if self.step is not None:
       object.__setattr__(self, "step", self.step.model_copy(deep=True))
 
+  def to_atif(self) -> None:
+    """Projects `metadata` and `step` to base ATIF models in-place.
+
+    Called by the background worker thread before processing the task. Mutates
+    the frozen instance in-place to avoid a second deep copy.
+    """
+    object.__setattr__(self, "metadata", self.metadata.to_atif_metadata())
+    if self.step is not None:
+      object.__setattr__(self, "step", self.step.to_atif_step())
+
   @property
   def trajectory_id(self) -> str:
     """Returns the trajectory this task writes, derived from `metadata`.
@@ -183,6 +193,7 @@ class AsyncWriter(abc.ABC, Generic[_TaskT]):
           break
 
         try:
+          task.to_atif()
           self._process_task(task)
         except Exception:  # pylint: disable=broad-exception-caught
           # Best-effort error suppression: log full traceback but never crash
