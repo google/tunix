@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from unittest import mock
 
 try:
@@ -535,6 +536,131 @@ class MaxTextUtilsTest(absltest.TestCase):
       argv = self._build_config_argv()
     self.assertIn("attention=flash", argv)
 
+  def test_pathways_persistence_requires_gs_output_dir_when_saving_enabled(self):
+    with mock.patch.dict("os.environ", {"ENABLE_PATHWAYS_PERSISTENCE": "1"}):
+      with self.assertRaisesRegex(
+          ValueError, "requires a gs:// base_output_directory"
+      ):
+        self._build_config_argv(
+            base_output_directory="artifacts/math_gsm8k_dist/maxtext",
+            checkpointing_options=mock.MagicMock(
+                save_interval_steps=1, max_to_keep=2
+            ),
+        )
+
+  def test_pathways_persistence_with_gs_output_dir_sets_ocdbt_and_zarr3_false(
+      self,
+  ):
+    with mock.patch.dict(
+        "os.environ",
+        {
+            "ENABLE_PATHWAYS_PERSISTENCE": "1",
+        },
+    ):
+      argv = self._build_config_argv(
+          base_output_directory="gs://yixuannwang-maxtext-dataset/trellis/0921",
+          checkpointing_options=mock.MagicMock(
+              save_interval_steps=1, max_to_keep=2
+          ),
+      )
+    self.assertIn(
+        "base_output_directory=gs://yixuannwang-maxtext-dataset/trellis/0921",
+        argv,
+    )
+    self.assertIn("checkpoint_storage_use_ocdbt=false", argv)
+    self.assertIn("checkpoint_storage_use_zarr3=false", argv)
+
+  def test_pathways_persistence_allows_local_output_dir_when_save_interval_zero(
+      self,
+  ):
+    with mock.patch.dict(
+        "os.environ",
+        {"ENABLE_PATHWAYS_PERSISTENCE": "1", "CHECKPOINT_ASYNC": "false"},
+    ):
+      argv = self._build_config_argv(
+          base_output_directory="artifacts/math_gsm8k_dist/maxtext",
+          load_parameters_path="gs://bucket/ckpt",
+          checkpointing_options=None,
+      )
+    self.assertIn("checkpoint_storage_use_ocdbt=false", argv)
+    self.assertIn("checkpoint_storage_use_zarr3=false", argv)
+    self.assertIn("async_checkpointing=false", argv)
+
+  def test_pathways_checkpointing_impl_defaults_to_persistence(self):
+    with mock.patch.dict("os.environ", {"ENABLE_PATHWAYS_PERSISTENCE": "1"}, clear=False):
+      os.environ.pop("PATHWAYS_CHECKPOINTING_IMPL", None)
+      argv = self._build_config_argv(
+          base_output_directory="gs://bucket/out",
+          checkpointing_options=mock.MagicMock(save_interval_steps=1, max_to_keep=2),
+      )
+    self.assertIn("pathways_checkpointing_impl=persistence", argv)
+
+  def test_colocated_python_requires_sidecar_image(self):
+    """Requesting colocated with no sidecar is exactly the silent NO_DISPATCHER OOM."""
+    with mock.patch.dict(
+        "os.environ",
+        {
+            "ENABLE_PATHWAYS_PERSISTENCE": "1",
+            "PATHWAYS_CHECKPOINTING_IMPL": "colocated_python",
+        },
+        clear=False,
+    ):
+      os.environ.pop("COLOCATED_PYTHON_SIDECAR_IMAGE", None)
+      with self.assertRaisesRegex(ValueError, r"requires COLOCATED_PYTHON_SIDECAR_IMAGE"):
+        self._build_config_argv(
+            base_output_directory="gs://bucket/out",
+            checkpointing_options=mock.MagicMock(save_interval_steps=1, max_to_keep=2),
+        )
+
+  def test_colocated_python_emits_impl_and_keeps_layout_identical(self):
+    with mock.patch.dict(
+        "os.environ",
+        {
+            "ENABLE_PATHWAYS_PERSISTENCE": "1",
+            "PATHWAYS_CHECKPOINTING_IMPL": "colocated_python",
+            "COLOCATED_PYTHON_SIDECAR_IMAGE": "us-docker.pkg.dev/proj/repo/sidecar:tag",
+        },
+        clear=False,
+    ):
+      argv = self._build_config_argv(
+          base_output_directory="gs://bucket/out",
+          checkpointing_options=mock.MagicMock(save_interval_steps=1, max_to_keep=2),
+      )
+    self.assertIn("pathways_checkpointing_impl=colocated_python", argv)
+    # D3: identical on-disk layout in both modes keeps cross-mode restore safe.
+    self.assertIn("checkpoint_storage_use_ocdbt=false", argv)
+    self.assertIn("checkpoint_storage_use_zarr3=false", argv)
+
+  def test_unknown_pathways_checkpointing_impl_raises(self):
+    with mock.patch.dict(
+        "os.environ",
+        {
+            "ENABLE_PATHWAYS_PERSISTENCE": "1",
+            "PATHWAYS_CHECKPOINTING_IMPL": "remote_python",
+        },
+        clear=False,
+    ):
+      with self.assertRaisesRegex(ValueError, r"PATHWAYS_CHECKPOINTING_IMPL='remote_python'"):
+        self._build_config_argv(
+            base_output_directory="gs://bucket/out",
+            checkpointing_options=mock.MagicMock(save_interval_steps=1, max_to_keep=2),
+        )
+
+  def test_impl_not_emitted_without_pathways_persistence(self):
+    """The selector is meaningless unless Pathways checkpointing is on."""
+    with mock.patch.dict(
+        "os.environ",
+        {"PATHWAYS_CHECKPOINTING_IMPL": "colocated_python"},
+        clear=False,
+    ):
+      os.environ.pop("ENABLE_PATHWAYS_PERSISTENCE", None)
+      argv = self._build_config_argv(
+          base_output_directory="gs://bucket/out",
+          checkpointing_options=mock.MagicMock(save_interval_steps=1, max_to_keep=2),
+      )
+    self.assertNotIn("pathways_checkpointing_impl=colocated_python", argv)
+
 
 if __name__ == "__main__":
   absltest.main()
+

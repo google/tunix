@@ -343,6 +343,42 @@ def main() -> None:
         f"                      - {jobset_name}\n"
     )
     tpu_affinity = ""
+  # Colocated-python checkpointing sidecar. Emitted as a whole block for the same reason
+  # as reservation_selector above: string.Template cannot omit a key when unset, and an
+  # initContainer with an empty image would wedge every pathways-worker pod.
+  #
+  # `restartPolicy: Always` on an initContainer is the k8s native-sidecar pattern: it starts
+  # before, and stays running alongside, the worker container.
+  #
+  # The image MUST match the head image's jax/jaxlib exactly and must contain orbax, since
+  # Orbax ships its serialization callables here by reference via cloudpickle.
+  sidecar_image = os.environ.get("COLOCATED_PYTHON_SIDECAR_IMAGE", "").strip()
+  sidecar_memory = os.environ.get("COLOCATED_PYTHON_SIDECAR_MEMORY", "16Gi").strip()
+  colocated_python_sidecar_block = (
+      f"""
+            initContainers:
+            - name: colocated-python-sidecar
+              image: {sidecar_image}
+              imagePullPolicy: Always
+              env:
+              - name: GRPC_SERVER_ADDRESS
+                value: "0.0.0.0:50051"
+              ports:
+              - containerPort: 50051
+                protocol: TCP
+              resources:
+                requests:
+                  cpu: "4"
+                  memory: {sidecar_memory}
+                limits:
+                  memory: {sidecar_memory}
+              restartPolicy: Always
+              volumeMounts:
+              - mountPath: /tmp
+                name: shared-tmp"""
+      if sidecar_image
+      else ""
+  )
 
   with open(args.template_file, "r") as f:
     template = string.Template(f.read())
@@ -376,6 +412,7 @@ def main() -> None:
         HEAD_TOLERATIONS=head_tolerations,
         RESERVATION_SELECTOR=reservation_selector,
         PRIORITY_CLASS_LINE=priority_class_line,
+        COLOCATED_PYTHON_SIDECAR_BLOCK=colocated_python_sidecar_block,
         PW_INSTANCE_TYPE=pw_instance_type,
         REPLICAS=1,
         COMPLETIONS=num_chips // 4 if num_chips else None,

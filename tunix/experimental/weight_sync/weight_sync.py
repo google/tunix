@@ -759,7 +759,8 @@ def create_weight_synchronizer(
   if resolved_mode == WeightSyncMode.RAIDEN:
     from tunix.experimental.weight_sync import raiden_synchronizer  # pylint: disable=g-import-not-at-top
 
-    WeightSynchronizer.register(raiden_synchronizer.RaidenSynchronizer)
+    if isinstance(raiden_synchronizer.RaidenSynchronizer, type):
+      WeightSynchronizer.register(raiden_synchronizer.RaidenSynchronizer)
     if state is not None:
       kwargs["state"] = state
     return raiden_synchronizer.RaidenSynchronizer(

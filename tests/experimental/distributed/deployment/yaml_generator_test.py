@@ -278,6 +278,78 @@ class YamlGeneratorTest(parameterized.TestCase):
         self.assertIn("memory: 160G", rendered)
         self.assertIn("memory: 120G", rendered)
 
+  def test_397b_sidecar_absent_unless_image_is_set(self):
+    """An unset image must render no initContainer at all, not an empty one."""
+    template_file = _get_template_path("jobset.pathways.qwen3.5-397b.yaml")
+    argv = [
+        "yaml_generator.py",
+        template_file,
+        "--jobset_name=test-397b",
+        "--tpu_slice=tpuv5p:8x16x16",
+    ]
+    with mock.patch.dict(os.environ, {}, clear=False):
+      os.environ.pop("COLOCATED_PYTHON_SIDECAR_IMAGE", None)
+      with mock.patch.object(sys, "argv", argv):
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+          yaml_generator.main()
+          rendered = mock_stdout.getvalue()
+    self.assertNotIn("initContainers", rendered)
+    self.assertNotIn("colocated-python-sidecar", rendered)
+    # The worker volumeMount the sidecar block is appended to must survive intact.
+    self.assertIn("name: shared-tmp", rendered)
+
+  def test_397b_sidecar_rendered_when_image_is_set(self):
+    template_file = _get_template_path("jobset.pathways.qwen3.5-397b.yaml")
+    image = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways-colocated-python/sidecar:tag"
+    argv = [
+        "yaml_generator.py",
+        template_file,
+        "--jobset_name=test-397b",
+        "--tpu_slice=tpuv5p:8x16x16",
+    ]
+    with mock.patch.dict(
+        os.environ,
+        {
+            "COLOCATED_PYTHON_SIDECAR_IMAGE": image,
+            "COLOCATED_PYTHON_SIDECAR_MEMORY": "24Gi",
+        },
+        clear=False,
+    ):
+      with mock.patch.object(sys, "argv", argv):
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+          yaml_generator.main()
+          rendered = mock_stdout.getvalue()
+
+    self.assertIn("initContainers:", rendered)
+    self.assertIn("name: colocated-python-sidecar", rendered)
+    self.assertIn(f"image: {image}", rendered)
+    # Native-sidecar pattern: without this the worker never starts.
+    self.assertIn("restartPolicy: Always", rendered)
+    self.assertIn("containerPort: 50051", rendered)
+    # The scaffold shipped `resources: {}`; on a node budgeted this tightly the
+    # sidecar must declare memory, and request == limit pins it to Guaranteed.
+    self.assertEqual(rendered.count("memory: 24Gi"), 2)
+    self.assertNotIn("resources: {}", rendered)
+    # Must be valid YAML with the sidecar attached to the worker pod spec.
+    import yaml  # pylint: disable=g-import-not-at-top
+
+    docs = [d for d in yaml.safe_load_all(rendered) if d]
+    self.assertLen(docs, 1)
+    jobs = docs[0]["spec"]["replicatedJobs"]
+    specs = [
+        j["template"]["spec"]["template"]["spec"]
+        for j in jobs
+    ]
+    with_sidecar = [
+        s for s in specs
+        if any(c["name"] == "colocated-python-sidecar" for c in s.get("initContainers", []))
+    ]
+    self.assertLen(with_sidecar, 1)
+    self.assertTrue(
+        any(c["name"] == "pathways-worker" for c in with_sidecar[0]["containers"]),
+        "sidecar must be attached to the pathways-worker pod, not another job",
+    )
+
 
 if __name__ == "__main__":
   absltest.main()
