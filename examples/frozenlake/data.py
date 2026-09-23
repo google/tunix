@@ -50,7 +50,7 @@ def generate_dataset_parameters(
 
   This function creates diverse environment configurations by sampling:
   - Random seeds for environment generation
-  - Grid sizes ranging from 2x2 to 9x9
+  - Grid sizes ranging from 2x2 to 12x12
   - Slip probabilities between 0.15-0.4 (p values 0.6-0.85)
 
   Args:
@@ -62,7 +62,7 @@ def generate_dataset_parameters(
   """
   np.random.seed(random_seed)
   seeds = np.random.randint(0, 100000, size=size)
-  sizes = np.random.randint(2, 10, size=size)  # Grid sizes from 2x2 to 9x9
+  sizes = np.random.randint(2, 13, size=size)  # Grid sizes from 2x2 to 12x12
   p_values = np.random.uniform(
       0.6, 0.85, size=size
   )  # Slip probability between 0.15-0.4
