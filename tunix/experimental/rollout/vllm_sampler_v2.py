@@ -32,6 +32,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
+from vllm import envs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.sampling_params import SamplingParams as VllmSamplingParams
@@ -79,6 +80,7 @@ class RLVllmSampler:
     self._mesh: Any | None = None
     self._transfer_statuses: dict[str, str] = {}
     self._policy_version = 0
+    self._log_stats_task: asyncio.Task | None = None
 
   def _get_tpu_workers(self) -> list[Any]:
     """Retrieves active TPUWorker instances from underlying model executor."""
@@ -106,8 +108,31 @@ class RLVllmSampler:
 
     self._engine = AsyncLLMEngine.from_engine_args(self.engine_args)
     self._is_running = True
+    self._log_stats_task = asyncio.create_task(self._log_stats_loop())
 
     logger.info("RLVllmSampler started successfully.")
+
+  async def _log_stats_loop(self) -> None:
+    """Periodically flushes vLLM's engine stats to the log.
+
+    `AsyncLLM` records stats but never emits them on its own: `do_log_stats()`
+    has no internal caller, and vLLM drives it from the API server's lifespan
+    task (`vllm/entrypoints/launchers/utils/server_utils.py`). Binding the
+    engine directly skips that server, so without this loop the throughput /
+    running-requests / KV-cache-usage line never prints.
+    """
+    interval = envs.VLLM_LOG_STATS_INTERVAL
+    while True:
+      await asyncio.sleep(interval)
+      engine = self._engine
+      if engine is None:
+        continue
+      try:
+        await engine.do_log_stats()
+      except asyncio.CancelledError:
+        raise
+      except Exception:  # pylint: disable=broad-exception-caught
+        logger.exception("do_log_stats failed")
 
   async def stop(self, **kwargs: Any) -> None:
     """Stops the sampler and releases resources."""
@@ -115,6 +140,13 @@ class RLVllmSampler:
       return
     logger.info("Stopping RLVllmSampler...")
     self._is_paused = True
+    if self._log_stats_task is not None:
+      self._log_stats_task.cancel()
+      try:
+        await self._log_stats_task
+      except asyncio.CancelledError:
+        pass
+      self._log_stats_task = None
     self._engine = None
     self._is_running = False
     logger.info("RLVllmSampler stopped.")
