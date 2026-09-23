@@ -35,13 +35,15 @@ TO_HF_MAPPINGS = {
         'language_model.layers.*.self_attn.q_proj.weight',
         (None, 'model', None),
     ),
+    # `k_einsum` exists natively on k_eq_v (GLOBAL) layers; for the other
+    # layers it is split out of `kv_einsum` by `preprocess_src_state`.
     'layers.*.attn.k_einsum.w': (
         'language_model.layers.*.self_attn.k_proj.weight',
         (None, 'model', None),
     ),
-    'layers.*.attn.qkv_einsum.w': (
-        'language_model.layers.*.self_attn.qkv_proj.weight',
-        (None, 'model'),
+    'layers.*.attn.v_einsum.w': (
+        'language_model.layers.*.self_attn.v_proj.weight',
+        (None, 'model', None),
     ),
     'layers.*.attn._query_norm.scale': (
         'language_model.layers.*.self_attn.q_norm.weight',
@@ -143,112 +145,78 @@ LORA_TO_HF_MAPPINGS: Dict[str, MappingEntry] = {}
 TO_HF_TRANSPOSE_KEYS = {
     'layers.*.attn.q_einsum.w': (1, 0, 2),
     'layers.*.attn.k_einsum.w': (1, 0, 2),
+    'layers.*.attn.v_einsum.w': (1, 0, 2),
 }
 
 
-def preprocess_src_state(src_state: Any) -> Any:
-  """Fuses Q/K/V and MLP gate/up projections in the source state."""
-  if hasattr(src_state, 'flat_state'):
-    flat_state = list(src_state.flat_state())
-    new_flat_state = []
+def preprocess_src_state(src_state: Any, tp_size: int = 1) -> Any:
+  """Reshapes the Tunix state to match the vLLM (tpu-inference) pytree.
 
-    layers_q = {}
-    layers_k = {}
-    layers_kv = {}
-    layers_gate = {}
-    layers_up = {}
+  * `attn.kv_einsum.w` (2, K, D, H) is split into `attn.k_einsum.w` and
+    `attn.v_einsum.w` (K, D, H) each. tpu-inference >= 0.28 keeps separate
+    `q_proj` / `k_proj` / `v_proj` params (the fused `qkv_proj` was removed in
+    vllm-project/tpu-inference#3376). k_eq_v layers only carry `k_einsum` in
+    Tunix and only `k_proj` in vLLM, so they pass through untouched.
+  * `mlp.gate_proj.kernel` and `mlp.up_proj.kernel` are concatenated into
+    `mlp.gate_up_proj.kernel` in vLLM's TP-interleaved `[gate_0, up_0, ...]`
+    layout (matching `tpu_inference`'s `JaxMergedColumnParallelLinear`).
+  """
+  if not hasattr(src_state, 'flat_state'):
+    return src_state
 
-    for keys, param in flat_state:
-      src_key = '.'.join(str(k) for k in keys)
-      if 'attn.q_einsum.w' in src_key:
-        layer_idx = keys[1]
-        layers_q[layer_idx] = (keys, param)
-      elif 'attn.k_einsum.w' in src_key:
-        layer_idx = keys[1]
-        layers_k[layer_idx] = (keys, param)
-      elif 'attn.kv_einsum.w' in src_key:
-        layer_idx = keys[1]
-        layers_kv[layer_idx] = (keys, param)
-      elif 'mlp.gate_proj.kernel' in src_key:
-        layer_idx = keys[1]
-        layers_gate[layer_idx] = (keys, param)
-      elif 'mlp.up_proj.kernel' in src_key:
-        layer_idx = keys[1]
-        layers_up[layer_idx] = (keys, param)
-      else:
-        new_flat_state.append((keys, param))
+  new_flat_state = []
+  layers_gate = {}
+  layers_up = {}
 
-    sample_kv_val = None
-    if layers_kv:
-      sample_kv_val = next(iter(layers_kv.values()))[1]
-      if hasattr(sample_kv_val, 'value'):
-        sample_kv_val = sample_kv_val.value
-
-    for layer_idx in layers_q:
-      q_keys, q_param = layers_q[layer_idx]
-      q_val = q_param.value if hasattr(q_param, 'value') else q_param
-      hidden_size = q_val.shape[1]
-      q_val_t = jnp.reshape(jnp.transpose(q_val, (1, 0, 2)), (hidden_size, -1))
-
-      if layer_idx in layers_kv:
-        _, kv_param = layers_kv[layer_idx]
-        kv_val = kv_param.value if hasattr(kv_param, 'value') else kv_param
-        k_val = kv_val[0]
-        v_val = kv_val[1]
-
-        k_val_t = jnp.reshape(
-            jnp.transpose(k_val, (1, 0, 2)), (hidden_size, -1)
-        )
-        v_val_t = jnp.reshape(
-            jnp.transpose(v_val, (1, 0, 2)), (hidden_size, -1)
-        )
-
-        qkv_val = jnp.concatenate([q_val_t, k_val_t, v_val_t], axis=-1)
-        qkv_keys = q_keys[:-2] + ('qkv_einsum', 'w')
-        if hasattr(q_param, 'value'):
-          new_flat_state.append((qkv_keys, nnx.Param(qkv_val)))
-        else:
-          new_flat_state.append((qkv_keys, qkv_val))
-      elif layer_idx in layers_k:
-        k_keys, k_param = layers_k[layer_idx]
-        new_flat_state.append((q_keys, q_param))
-        new_flat_state.append((k_keys, k_param))
-      else:
-        # KV-shared layer
-        k_val = jnp.zeros_like(sample_kv_val[0])  # pyrefly: ignore[unsupported-operation]
-        v_val = jnp.zeros_like(sample_kv_val[1])  # pyrefly: ignore[unsupported-operation]
-        k_val_t = jnp.reshape(
-            jnp.transpose(k_val, (1, 0, 2)), (hidden_size, -1)
-        )
-        v_val_t = jnp.reshape(
-            jnp.transpose(v_val, (1, 0, 2)), (hidden_size, -1)
-        )
-
-        qkv_val = jnp.concatenate([q_val_t, k_val_t, v_val_t], axis=-1)
-        qkv_keys = q_keys[:-2] + ('qkv_einsum', 'w')
-        if hasattr(q_param, 'value'):
-          new_flat_state.append((qkv_keys, nnx.Param(qkv_val)))
-        else:
-          new_flat_state.append((qkv_keys, qkv_val))
-
-    for layer_idx in layers_gate:
-      gate_keys, gate_param = layers_gate[layer_idx]
-      _, up_param = layers_up[layer_idx]
-
-      gate_val = (
-          gate_param.value if hasattr(gate_param, 'value') else gate_param
+  for keys, param in src_state.flat_state():
+    src_key = '.'.join(str(k) for k in keys)
+    if 'attn.kv_einsum.w' in src_key:
+      val = param.value if hasattr(param, 'value') else param
+      new_flat_state.append(
+          (keys[:-2] + ('k_einsum', 'w'), _wrap_like(param, val[0]))
       )
-      up_val = up_param.value if hasattr(up_param, 'value') else up_param
+      new_flat_state.append(
+          (keys[:-2] + ('v_einsum', 'w'), _wrap_like(param, val[1]))
+      )
+    elif 'mlp.gate_proj.kernel' in src_key:
+      layers_gate[keys[1]] = (keys, param)
+    elif 'mlp.up_proj.kernel' in src_key:
+      layers_up[keys[1]] = (keys, param)
+    else:
+      new_flat_state.append((keys, param))
 
+  for layer_idx, (gate_keys, gate_param) in layers_gate.items():
+    if layer_idx not in layers_up:
+      new_flat_state.append((gate_keys, gate_param))
+      continue
+    _, up_param = layers_up[layer_idx]
+    gate_val = gate_param.value if hasattr(gate_param, 'value') else gate_param
+    up_val = up_param.value if hasattr(up_param, 'value') else up_param
+    if tp_size > 1:
+      d, f = gate_val.shape
+      if f % tp_size:
+        raise ValueError(
+            f'gate/up width {f} is not divisible by tensor_parallel_size'
+            f' {tp_size}; cannot build the TP-interleaved gate_up_proj layout.'
+        )
+      gate_val = gate_val.reshape(d, tp_size, f // tp_size)
+      up_val = up_val.reshape(d, tp_size, f // tp_size)
+      gate_up_val = jnp.concatenate([gate_val, up_val], axis=-1).reshape(
+          d, 2 * f
+      )
+    else:
       gate_up_val = jnp.concatenate([gate_val, up_val], axis=-1)
+    new_flat_state.append((
+        gate_keys[:-2] + ('gate_up_proj', 'kernel'),
+        _wrap_like(gate_param, gate_up_val),
+    ))
 
-      gate_up_keys = gate_keys[:-2] + ('gate_up_proj', 'kernel')
-      if hasattr(gate_param, 'value'):
-        new_flat_state.append((gate_up_keys, nnx.Param(gate_up_val)))
-      else:
-        new_flat_state.append((gate_up_keys, gate_up_val))
-    src_state = src_state.from_flat_path(new_flat_state)
-  return src_state
+  return src_state.from_flat_path(new_flat_state)
+
+
+def _wrap_like(param: Any, val: Any) -> Any:
+  """Wraps `val` in `nnx.Param` iff `param` is a variable-like object."""
+  return nnx.Param(val) if hasattr(param, 'value') else val
 
 
 VLLM_JAX_MAPPING: Dict[str, Any] = {

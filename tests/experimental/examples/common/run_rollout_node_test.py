@@ -45,10 +45,13 @@ class RunRolloutNodeTest(absltest.TestCase):
   def test_gemma4_mapping_includes_preprocessing_and_fused_projections(self):
     config = run_rollout_node._mapping_config_for("google/gemma-4-E2B-it")
 
-    # Gemma4 fuses q/k/v and gate/up on the source state before transfer.
+    # Gemma4 fuses gate/up on the source state before transfer and maps
+    # separate q/k/v projections.
     self.assertIsNotNone(config.preprocess_src_state)
     self.assertIn("layers.*.mlp.gate_up_proj.kernel", config.to_hf_mappings)
-    self.assertIn("layers.*.attn.qkv_einsum.w", config.to_hf_mappings)
+    self.assertIn("layers.*.attn.q_einsum.w", config.to_hf_mappings)
+    self.assertIn("layers.*.attn.k_einsum.w", config.to_hf_mappings)
+    self.assertIn("layers.*.attn.v_einsum.w", config.to_hf_mappings)
 
   def test_qwen3_mapping_is_selected_for_qwen3(self):
     config = run_rollout_node._mapping_config_for("Qwen/Qwen3-8B")
