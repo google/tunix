@@ -282,7 +282,10 @@ class ExactTokenContinuityConfigTest(absltest.TestCase):
     from tunix.rl.agentic import agentic_grpo_learner  # pylint: disable=g-import-not-at-top
 
     engine = types.SimpleNamespace(
-        rollout=types.SimpleNamespace(supports_token_input=False)
+        rollout=types.SimpleNamespace(supports_token_input=False),
+        get_rollout_config=lambda **_: base_rollout.RolloutConfig(
+            max_tokens_to_generate=1024
+        ),
     )
     with self.assertRaisesRegex(ValueError, "token-input backend"):
       agentic_grpo_learner.GRPOLearner(
@@ -298,6 +301,7 @@ class ExactTokenContinuityConfigTest(absltest.TestCase):
       setattr(config, option, value)
       engine = types.SimpleNamespace(
           rollout=types.SimpleNamespace(supports_token_input=True),
+          get_rollout_config=lambda **_: config,
           tokenizer=object(),
           cluster_config=types.SimpleNamespace(
               rollout_config=config,
