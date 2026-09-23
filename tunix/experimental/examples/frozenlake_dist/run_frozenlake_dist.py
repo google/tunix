@@ -34,6 +34,7 @@ if REPO_ROOT not in sys.path:
   sys.path.insert(0, REPO_ROOT)
 
 # pylint: disable=g-import-not-at-top
+from tunix.common import configs as common_configs
 from tunix.experimental.common import datatypes
 from tunix.experimental.distributed.runtime import context as runtime_context
 from tunix.experimental.examples.frozenlake_dist import frozenlake
@@ -163,7 +164,26 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--rpc_timeout_s", type=float, default=1800.0)
   parser.add_argument("--init_timeout_s", type=float, default=None)
   parser.add_argument("--stop_workers_on_exit", action="store_true")
+  parser.add_argument(
+      "--checkpoint_restore_step",
+      type=int,
+      default=None,
+      help=(
+          "Checkpoint step to restore from --checkpoint_restore_directory,"
+          " which must also be set. If None, restores the latest checkpoint."
+      ),
+  )
+  parser.add_argument(
+      "--checkpoint_restore_directory",
+      type=str,
+      default=None,
+      help=(
+          "Optional checkpoint directory to restore from instead of the"
+          " trainer's configured save directory."
+      ),
+  )
   parser.add_argument("--debug", action="store_true")
+  parser.add_argument("--grid_size_range", nargs=2, type=int, default=(2, 9))
   args = parser.parse_args(argv)
   if args.max_steps is None:
     args.max_steps = args.num_batches * args.num_iterations * args.num_epochs
@@ -182,7 +202,10 @@ def _validate_args(args: argparse.Namespace) -> None:
   if args.train_micro_batch_size <= 0:
     raise ValueError("train_micro_batch_size must be positive.")
   update_size = args.mini_batch_size * args.num_generations
-  if update_size % args.train_micro_batch_size != 0:
+  if (
+      not common_configs.is_sequence_packing_enabled(args)
+      and update_size % args.train_micro_batch_size != 0
+  ):
     raise ValueError(
         "mini_batch_size * num_generations must be divisible by "
         "train_micro_batch_size."
@@ -200,6 +223,13 @@ def _validate_args(args: argparse.Namespace) -> None:
     raise ValueError("dataset_size must be positive.")
   if args.max_staleness < 0:
     raise ValueError("offpolicy/max_staleness must be non-negative.")
+  if (
+      args.checkpoint_restore_step is not None
+      and not args.checkpoint_restore_directory
+  ):
+    raise ValueError(
+        "checkpoint_restore_step requires checkpoint_restore_directory."
+    )
   if args.epsilon_high < args.epsilon:
     raise ValueError("epsilon_high must be greater than or equal to epsilon.")
   if args.loss_algo not in ("grpo", "gspo-token"):
@@ -303,6 +333,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       seed=args.seed,
       shuffle_seed=args.seed if args.shuffle else None,
       limit=args.num_batches * args.batch_size,
+      grid_size_range=tuple(args.grid_size_range),
   )
   logging.info(
       "Prepared %d FrozenLake configurations; the prompt iterator repeats "
@@ -362,6 +393,12 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       ),
       max_steps=args.max_steps,
       reward_fns=[],
+      generation_args=datatypes.GenerationArgs(
+          temperature=args.temperature,
+          top_p=args.top_p,
+          top_k=args.top_k,
+          return_logprobs=args.use_rollout_logps,
+      ),
       batch_size=args.batch_size,
       batch_config=batch_assembly.BatchConfig(
           pad_id=pad_id,
@@ -376,6 +413,8 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       trajectory_log_dir=args.trajectory_log_dir,
       max_staleness=args.max_staleness,
       sync_weights=(args.weight_sync_mode != weight_sync.WeightSyncMode.NONE),
+      checkpoint_restore_step=args.checkpoint_restore_step,
+      checkpoint_restore_directory=args.checkpoint_restore_directory,
       on_step_begin=lambda step: logging.info(
           ">>> FrozenLake step %d starting", step
       ),

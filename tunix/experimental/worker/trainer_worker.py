@@ -15,6 +15,7 @@
 """TrainerWorker implementation for role-based isolation."""
 
 import contextlib
+import functools
 from typing import Any, Callable, ContextManager, cast
 
 from flax import nnx
@@ -175,7 +176,26 @@ class TrainerWorker(abstract_worker.Worker):
   def with_loss_fn(
       self, loss_fn: Callable[..., Any], has_aux: bool = False
   ) -> datatypes.Response:
-    """Sets the loss function used by `fwd_bwd` (and evaluation)."""
+    """Sets the loss function used by `fwd_bwd` (and evaluation).
+
+    When the worker was built with a positive `logps_chunk_size`, it is bound
+    into the loss as `compute_logps_chunk_size` (as the agentic GRPO learner
+    does), so the training loss chunks the final-logits computation the same
+    way `per_token_logps` does. A value supplied per call by
+    `gen_model_input_fn` still takes precedence.
+
+    Args:
+      loss_fn: The loss function; must accept `compute_logps_chunk_size` as a
+        keyword argument (or `**kwargs`) when chunking is enabled.
+      has_aux: Whether `loss_fn` returns auxiliary outputs.
+
+    Returns:
+      A response confirming the loss function was configured.
+    """
+    if self._logps_chunk_size and self._logps_chunk_size > 0:
+      loss_fn = functools.partial(
+          loss_fn, compute_logps_chunk_size=self._logps_chunk_size
+      )
     self._trainer.with_loss_fn(loss_fn, has_aux)
     return self._response(loss_fn_configured=True)
 
@@ -362,9 +382,16 @@ class TrainerWorker(abstract_worker.Worker):
       self.state = WorkerState.ERROR
       raise
 
-  def restore_checkpoint(self, **kwargs) -> Any:
-    """Restore state from latest checkpoint and return the metadata pytree."""
-    return self._trainer.restore_checkpoint(**kwargs)
+  def restore_checkpoint(
+      self,
+      step: int | None = None,
+      directory: str | None = None,
+      **kwargs: Any,
+  ) -> Any:
+    """Restore state from checkpoint and return the metadata pytree."""
+    if directory is not None:
+      kwargs["directory"] = directory
+    return self._trainer.restore_checkpoint(step=step, **kwargs)
 
   def prepare_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
     """Stages weights for transfer and returns their metadata."""

@@ -267,6 +267,8 @@ class StandardRLProgram(RLProgram):
       batch_size: int | None = None,
       max_staleness: int = 0,
       sync_weights: bool = True,
+      checkpoint_restore_step: int | None = None,
+      checkpoint_restore_directory: str | None = None,
       metrics_logging_options: MetricsLoggerOptions | None = None,
       trajectory_log_dir: str | None = None,
       trajectory_store: trajectory_store_lib.TrajectoryStore | None = None,
@@ -279,6 +281,20 @@ class StandardRLProgram(RLProgram):
     self.engine: rl_engine_interface.AbstractRLEngine | None = None
     if max_staleness < 0:
       raise ValueError("max_staleness must be non-negative.")
+    self.checkpoint_restore_step = checkpoint_restore_step
+    self.checkpoint_restore_directory = checkpoint_restore_directory or None
+    # Without a restore directory, the step would be restored from the trainer's
+    # checkpoint root directory, where checkpoints saved after restoring an
+    # older step would be mixed with the newer ones already there.
+    if (
+        self.checkpoint_restore_step is not None
+        and self.checkpoint_restore_directory is None
+    ):
+      raise ValueError(
+          "checkpoint_restore_step requires checkpoint_restore_directory. Set"
+          " it to the directory that holds the step to restore, or leave"
+          " checkpoint_restore_step unset to resume from the latest checkpoint."
+      )
     self.dataset = dataset
     self.max_steps = max_steps
     self.algo = algo
@@ -424,10 +440,14 @@ class StandardRLProgram(RLProgram):
     to skip (resumed `_step` if any).
     """
     assert self.engine is not None
-    restored_step = await self.engine.resume_from_checkpoint(
-        role=datatypes.Role.ACTOR,
-        resync_rollout_weights=self.sync_weights,
-    )
+    resume_kwargs: dict[str, Any] = {
+        "role": datatypes.Role.ACTOR,
+        "resync_rollout_weights": self.sync_weights,
+        "step": self.checkpoint_restore_step,
+    }
+    if self.checkpoint_restore_directory is not None:
+      resume_kwargs["directory"] = self.checkpoint_restore_directory
+    restored_step = await self.engine.resume_from_checkpoint(**resume_kwargs)
     if restored_step <= 0:
       return
     self._step = restored_step
@@ -527,7 +547,14 @@ class StandardRLProgram(RLProgram):
 
         rewards = []
         for item in group:
-          if self.reward_fns:
+          # Skip reward evaluation or extraction for failed, timed-out, or
+          # masked-out trajectories (`not item.is_valid`): although the payload
+          # still goes through trainer fwd/bwd to keep static batch shapes, its
+          # advantage and completion_mask are zeroed out, so scoring it is
+          # wasted work (and an aborted trajectory may lack trajectory_reward).
+          if not item.is_valid:
+            r = 0.0
+          elif self.reward_fns:
             r = sum(_invoke_reward_fn(fn, item) for fn in self.reward_fns)
           else:
             r = _extract_reward(item)
@@ -576,11 +603,13 @@ class StandardRLProgram(RLProgram):
           traj_dict["trajectory_reward"] = reward_val
           traj_dict["status"] = status
           traj_dict["steps"] = steps
+          traj_dict["conversation_masks"] = payload.completion_mask
           item = datatypes.TrajectoryItem(
               prompt_id=getattr(src_item, "prompt_id", ""),
               group_index=getattr(src_item, "group_index", 0),
               start_step=0,
               traj=traj_dict,
+              is_valid=getattr(src_item, "is_valid", True),
               prompt_tokens=getattr(src_item, "prompt_tokens", None),
               completion_tokens=getattr(src_item, "completion_tokens", None),
               action_mask=getattr(src_item, "action_mask", None),
@@ -631,7 +660,7 @@ class StandardRLProgram(RLProgram):
       step_time_sec: float,
       consumed_policy_version: int,
       log_step: int,
-      sampler_agreement: dict[str, tuple[Any, list[float]]] | None = None,
+      sampler_agreement: dict[str, tuple[Any, list[Any]]] | None = None,
   ) -> dict[str, Any]:
     """Logs rollout, reward, trainer, and orchestrator metrics.
 
@@ -794,12 +823,26 @@ class StandardRLProgram(RLProgram):
         self._log_metric(tag, val, log_step)
 
     # --- 2. Reward Metrics ---
-    reward_mean = float(np.mean(step_rewards)) if step_rewards else 0.0
-    reward_std = float(np.std(step_rewards)) if step_rewards else 0.0
-    reward_min = float(np.min(step_rewards)) if step_rewards else 0.0
-    reward_max = float(np.max(step_rewards)) if step_rewards else 0.0
-    reward_sum = float(np.sum(step_rewards)) if step_rewards else 0.0
-    if step_rewards:
+    rewards_to_log = step_rewards
+    if all_step_items:
+      valid_flags = [item.is_valid for item in all_step_items]
+      self._log_metric(
+          "rollout/invalid_trajectory_frac",
+          1.0 - float(np.mean(valid_flags)),
+          log_step,
+      )
+      rewards_to_log = [
+          reward
+          for reward, is_valid in zip(step_rewards, valid_flags)
+          if is_valid
+      ]
+
+    reward_mean = float(np.mean(rewards_to_log)) if rewards_to_log else 0.0
+    reward_std = float(np.std(rewards_to_log)) if rewards_to_log else 0.0
+    reward_min = float(np.min(rewards_to_log)) if rewards_to_log else 0.0
+    reward_max = float(np.max(rewards_to_log)) if rewards_to_log else 0.0
+    reward_sum = float(np.sum(rewards_to_log)) if rewards_to_log else 0.0
+    if rewards_to_log:
       reward_stats = {
           "mean": reward_mean,
           "std": reward_std,
@@ -940,7 +983,10 @@ class StandardRLProgram(RLProgram):
           clean_key = (
               k.removeprefix("trainer/").removeprefix("actor/")
           )
-          self._log_metric(clean_key, val, log_step, prefix="actor")
+          if clean_key.startswith(("sampler_trainer/", "sampler_is/")):
+            self._log_metric(clean_key, val, log_step)
+          else:
+            self._log_metric(clean_key, val, log_step, prefix="actor")
 
     # --- 5. Sampler/Trainer Agreement Metrics ---
     # Names are already namespaced (``sampler_trainer/*``, ``sampler_is/*``) by
@@ -964,7 +1010,7 @@ class StandardRLProgram(RLProgram):
   async def _apply_sampler_trainer_agreement(
       self,
       batch: datatypes.RLTrainerPayload,
-      accumulator: dict[str, tuple[Any, list[float]]],
+      accumulator: dict[str, tuple[Any, list[Any]]],
   ) -> datatypes.RLTrainerPayload:
     """Records sampler-vs-trainer agreement and feeds TIS weights into a batch.
 
@@ -1012,7 +1058,7 @@ class StandardRLProgram(RLProgram):
         )
     )
     for name, (value, agg_fn) in sa_metrics.items():
-      accumulator.setdefault(name, (agg_fn, []))[1].append(float(value))
+      accumulator.setdefault(name, (agg_fn, []))[1].append(value)
 
     updates: dict[str, Any] = {}
     if self.seq_logprob_error_threshold is not None:
@@ -1025,6 +1071,7 @@ class StandardRLProgram(RLProgram):
     ):
       updates["old_per_token_logps"] = trainer_logps
     if updates:
+      updates["sampler_agreement_applied"] = True
       batch = dataclasses.replace(batch, **updates)
     return batch
 
@@ -1086,7 +1133,7 @@ class StandardRLProgram(RLProgram):
       uncommitted_groups = []
       step_result = None
       trainer_metrics = None
-      step_sampler_agreement: dict[str, tuple[Any, list[float]]] = {}
+      step_sampler_agreement: dict[str, tuple[Any, list[Any]]] = {}
       step_rewards = []
       step_advantages = []
       num_microbatches = 0
@@ -1163,11 +1210,21 @@ class StandardRLProgram(RLProgram):
             )
             batch = batch_assembly.with_ref_per_token_logps(batch, ref_logps)
           algo_config = getattr(self.algo, "algo_config", None)
+          can_fuse_agreement_in_loss = (
+              algo_config is not None
+              and getattr(algo_config, "policy_loss_fn", "grpo") == "grpo"
+              and not getattr(
+                  algo_config, "log_sampler_trainer_agreement", False
+              )
+              and getattr(algo_config, "num_iterations", 1) == 1
+              and self.mini_batch_size >= self.full_batch_size
+          )
           if (
               isinstance(batch, datatypes.RLTrainerPayload)
               and batch.old_per_token_logps is not None
               and algo_config is not None
               and algo_config.use_rollout_logps
+              and not can_fuse_agreement_in_loss
           ):
             batch = await self._apply_sampler_trainer_agreement(
                 batch, step_sampler_agreement

@@ -21,6 +21,7 @@ import time
 from typing import Any
 
 from absl import logging
+from etils import epath
 from flax import nnx
 import jax
 import numpy as np
@@ -266,12 +267,79 @@ class CheckpointManager:
         step, checkpointables, force, custom_metadata
     )
 
+  def _resolve_restore_source(
+      self, directory: str, step: int | None
+  ) -> tuple[str | None, int | None]:
+    """Resolves the directory and step that `maybe_restore` reads from.
+
+    Args:
+      directory: The requested checkpoint restore directory.
+      step: The requested step, or None for the latest step.
+
+    Returns:
+      A tuple (directory, step). `directory` is None when the restore should
+      read from `root_directory`.
+
+    Raises:
+      ValueError: If `directory` is `root_directory` and `step` is not its
+        latest step.
+    """
+    root_directory = (
+        self._checkpointer.directory if self._checkpointer is not None else None
+    )
+    root_latest_step = self.latest_step()
+    if root_directory is not None and epath.Path(directory) == epath.Path(
+        root_directory
+    ):
+      if step is not None and step != root_latest_step:
+        raise ValueError(
+            f'Cannot restore step {step} from {directory}: it is also the'
+            ' checkpoint root directory, whose latest step is'
+            f' {root_latest_step}. Checkpoints saved after restoring an older'
+            ' step would be mixed with the newer ones already there. Use a'
+            ' different root directory, or leave the step unset to resume'
+            ' from the latest step.'
+        )
+      logging.info(
+          'Checkpoint restore directory %s is the same as the root directory;'
+          ' resuming from its latest step (%s).',
+          directory,
+          root_latest_step,
+      )
+      return None, root_latest_step
+    if root_latest_step is not None:
+      logging.info(
+          'Root directory already has checkpoint at step %d; resuming from'
+          ' root directory instead of restore directory %s.',
+          root_latest_step,
+          directory,
+      )
+      return None, root_latest_step
+    source = 'the latest checkpoint' if step is None else f'step {step}'
+    if root_directory is None:
+      logging.info(
+          'Restoring %s from restore directory %s; no root directory is'
+          ' configured, so checkpoint saving is disabled.',
+          source,
+          directory,
+      )
+    else:
+      logging.info(
+          'Restoring %s from restore directory %s; future checkpoints will be'
+          ' written to root directory %s.',
+          source,
+          directory,
+          root_directory,
+      )
+    return directory, step
+
   def maybe_restore(
       self,
       model: nnx.Module,
       optimizer: nnx.Optimizer | None = None,
       step: int | None = None,
       restore_only_lora_params: bool = False,
+      directory: str | None = None,
   ) -> tuple[int, Any]:
     """Restores the params from the latest checkpoint if available and updates the model provided.
 
@@ -283,73 +351,106 @@ class CheckpointManager:
       step: The step to restore the params from. If None, the latest step will
         be used.
       restore_only_lora_params: Whether to restore only the LoRA params.
+      directory: Optional checkpoint directory to restore from instead of the
+        manager's configured `root_directory`. If it is `root_directory`
+        itself, `step` must be None or the latest step, and the latest
+        checkpoint is restored. Otherwise, if `root_directory` already
+        contains checkpoints (e.g., after a preemption restart), the latest
+        checkpoint in `root_directory` takes precedence over `directory` and
+        `step`.
 
     Returns:
       A tuple (step, custom_metadata), where step is the step of the restored
       checkpoint or 0 if no checkpoint is available, and the custom_metadata.
 
     Raises:
+      ValueError: If `directory` is `root_directory` and `step` is not its
+        latest step.
       RuntimeError: If the checkpoint cannot be restored.
     """
     restore_start = time.time()
-    if self._checkpointer is None:
-      return 0, {}
-    if step is None:
-      step = self.latest_step()
-      # If no checkpoint is available, return 0.
-      if step is None:
-        return 0, {}
-
-    metadata = self._checkpointer.checkpointables_metadata(step)
-
-    if restore_only_lora_params:
-      model_params_state = nnx.state(model, nnx.LoRAParam)
-      # Partial (LoRA) restore is the one path that overrides the persistent
-      # context to enable partial loading.
-      load_ctx = ocp.Context(self._context)
-      load_ctx.pytree.loading.partial_load = True
-    else:
-      model_params_state = nnx.state(model)
-      load_ctx = self._context
-    abstract_checkpointables = {'model_params': model_params_state}
-
-    if (
-        optimizer is not None
-        and metadata is not None
-        and 'optimizer_state' in metadata.metadata
-    ):
-      optimizer_state = nnx.state(optimizer, nnx.optimizer.OptState)
-      abstract_checkpointables['optimizer_state'] = _fix_sharding(
-          optimizer_state
-      )
-
-    try:
-      with load_ctx:
-        restored_checkpointables = self._checkpointer.load_checkpointables(
-            step,
-            abstract_checkpointables,
+    if directory:
+      directory, step = self._resolve_restore_source(directory, step)
+    checkpointer = (
+        ocp.training.Checkpointer(
+            directory,
+            context=self._context,
+            save_decision_policy=self._options.save_decision_policy,  # pyrefly: ignore[bad-argument-type]
+            preservation_policy=self._options.preservation_policy,  # pyrefly: ignore[bad-argument-type]
+            step_name_format=self._options.step_name_format,
         )
-    except KeyError as e:
-      if not restore_only_lora_params:
-        raise ValueError(
-            f'Failed to restore from step {step}. If this checkpoint only'
-            ' contains LoRA parameters, please set'
-            ' `restore_only_lora_params=True`.'
-        ) from e
-      raise e
-
-    if optimizer is not None and 'optimizer_state' in restored_checkpointables:  # pyrefly: ignore[not-iterable]
-      nnx.update(optimizer, restored_checkpointables['optimizer_state'])  # pyrefly: ignore[missing-attribute]
-
-    # Update the model state with params from the restored checkpoint.
-    nnx.update(model, restored_checkpointables['model_params'])  # pyrefly: ignore[missing-attribute]
-    logging.info(
-        'Restored params from step: %d in %.3f seconds',
-        step,
-        time.time() - restore_start,
+        if directory
+        else self._checkpointer
     )
-    custom_metadata = metadata.custom_metadata if metadata else {}
-    return step, custom_metadata
+    if checkpointer is None:
+      return 0, {}
+    try:
+      if step is None:
+        if directory:
+          step = (
+              checkpointer.latest.step
+              if checkpointer.latest is not None
+              else None
+          )
+        else:
+          step = self.latest_step()
+        # If no checkpoint is available, return 0.
+        if step is None:
+          return 0, {}
+
+      metadata = checkpointer.checkpointables_metadata(step)
+
+      if restore_only_lora_params:
+        model_params_state = nnx.state(model, nnx.LoRAParam)
+        # Partial (LoRA) restore is the one path that overrides the persistent
+        # context to enable partial loading.
+        load_ctx = ocp.Context(self._context)
+        load_ctx.pytree.loading.partial_load = True
+      else:
+        model_params_state = nnx.state(model)
+        load_ctx = self._context
+      abstract_checkpointables = {'model_params': model_params_state}
+
+      if (
+          optimizer is not None
+          and metadata is not None
+          and 'optimizer_state' in metadata.metadata
+      ):
+        optimizer_state = nnx.state(optimizer, nnx.optimizer.OptState)
+        abstract_checkpointables['optimizer_state'] = _fix_sharding(
+            optimizer_state
+        )
+
+      try:
+        with load_ctx:
+          restored_checkpointables = checkpointer.load_checkpointables(
+              step,
+              abstract_checkpointables,
+          )
+      except KeyError as e:
+        if not restore_only_lora_params:
+          raise ValueError(
+              f'Failed to restore from step {step}. If this checkpoint only'
+              ' contains LoRA parameters, please set'
+              ' `restore_only_lora_params=True`.'
+          ) from e
+        raise e
+
+      if optimizer is not None and 'optimizer_state' in restored_checkpointables:  # pyrefly: ignore[not-iterable]
+        nnx.update(optimizer, restored_checkpointables['optimizer_state'])  # pyrefly: ignore[missing-attribute]
+
+      # Update the model state with params from the restored checkpoint.
+      nnx.update(model, restored_checkpointables['model_params'])  # pyrefly: ignore[missing-attribute]
+      logging.info(
+          'Restored params from step: %d in %.3f seconds',
+          step,
+          time.time() - restore_start,
+      )
+      custom_metadata = metadata.custom_metadata if metadata else {}
+      return step, custom_metadata
+    finally:
+      if directory:
+        checkpointer.close()
 
   def close(self) -> None:
     """Closes the checkpoint manager."""

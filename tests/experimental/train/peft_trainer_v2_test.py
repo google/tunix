@@ -761,6 +761,41 @@ class PeftTrainerTest(parameterized.TestCase):
         force=True,
     )
 
+  @mock.patch.object(checkpoint_manager, 'CheckpointManager')
+  def test_restore_checkpoint_forwards_directory(
+      self, mock_checkpoint_manager_init
+  ):
+    mock_cm = mock.MagicMock()
+    mock_checkpoint_manager_init.return_value = mock_cm
+    mock_cm.maybe_restore.side_effect = [(0, {}), (4, {'global_step': 8})]
+
+    config = peft_trainer_v2.TrainingConfig(
+        eval_every_n_steps=2,
+        max_steps=100,
+        checkpoint_root_directory='/tmp/checkpoint_save',
+        checkpointing_options=ocp.CheckpointManagerOptions(),
+    )
+    rngs = nnx.Rngs(0)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
+    trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
+    mock_cm.maybe_restore.reset_mock()
+    mock_cm.maybe_restore.side_effect = None
+    mock_cm.maybe_restore.return_value = (4, {'global_step': 8})
+
+    metadata = trainer.restore_checkpoint(
+        step=4,
+        directory='/tmp/checkpoint_restore',
+    )
+
+    self.assertEqual(metadata, {'global_step': 8, 'step': 4})
+    mock_cm.maybe_restore.assert_called_once_with(
+        trainer.model,
+        trainer.optimizer,
+        step=4,
+        restore_only_lora_params=False,
+        directory='/tmp/checkpoint_restore',
+    )
+
   def _external_resume_trainer(
       self, root, *, implicit_resume, gradient_accumulation_steps=None
   ):

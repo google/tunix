@@ -33,7 +33,7 @@ from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 from jax.typing import DTypeLike  # pylint: disable=g-importing-member
 import numpy as np
 import optax
-import orbax.checkpoint as ocp
+from tunix.common import configs
 from tunix.experimental.common import datatypes
 from tunix.experimental.metrics import metrics as exp_metrics
 from tunix.experimental.train import abstract_trainer
@@ -57,59 +57,7 @@ MetricsLogger = sft_metrics_logger.MetricsLogger
 MetricsLoggerOptions = sft_metrics_logger.MetricsLoggerOptions
 
 
-@dataclasses.dataclass(slots=True, kw_only=True)
-class TrainingConfig:
-  """Configuration for the trainer."""
-
-  eval_every_n_steps: int
-  max_steps: int | None = None
-  gradient_accumulation_steps: int | None = None
-
-  # If set, the checkpoints will be saved to this path. Checkpoints
-  # contains the model params and the train data iterator state.
-  checkpoint_root_directory: str | None = None
-  # Checkpoint configurations. If None, the default options will be used.
-  checkpointing_options: ocp.CheckpointManagerOptions | None = None
-  # Whether the `__init__` restores from the latest checkpoint on its own.
-  # True to preserves the historical behavior.
-  resume_from_checkpoint_on_init: bool = True
-
-  # Configs for the metrics logger.
-  metrics_logging_options: MetricsLoggerOptions | None = None
-
-  # Configs for the profiler.
-  profiler_options: profiler.ProfilerOptions | None = None
-
-  # Configs for performance metrics.
-  perf_metrics_options: perf_metrics.PerfMetricsOptions | None = None
-
-  data_sharding_axis: Tuple[str, ...] = ("fsdp",)
-
-  # Controls how many train_steps can be scheduled ahead of time.
-  max_inflight_computations: int = 2
-
-  # Prefix for metric names for logging. Not sticking it in
-  # `metrics_logging_options` because the latter is optional.
-  metrics_prefix: str = ""
-
-  # Progress bar description.
-  pbar_description: str | None = "Training"
-
-  # Sequence packing configuration.
-  max_seq_token_per_tpu: int | None = None
-  # Static upper bound on real segments (sequences) per packed row, used to size
-  # the segment-aware loss buckets (num_segments = this + 1 for the padding
-  # bucket). ``None`` defaults to ``max_seq_token_per_tpu`` -- provably safe (a
-  # pack of ``budget`` tokens holds at most ``budget`` unit-length segments) and
-  # needs no tuning. Set a smaller value only to shrink the loss buckets at very
-  # large budgets; ``pack_sequences`` raises if a pack exceeds it.
-  max_segments_per_packed_row: int | None = None
-
-  def get_with_default(self, key: str, default: Any) -> Any:
-    val = getattr(self, key)
-    if val is None:
-      return default
-    return val
+TrainingConfig = configs.TrainingConfig
 
 
 @flax.struct.dataclass(frozen=True)
@@ -886,11 +834,41 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
 
   def _post_process_train_step(self, aux: Any) -> None:
     """Override this function for post processing aux data from train step."""
-    pass
+    if not isinstance(aux, Mapping) or self._buffered_train_metrics is None:
+      return
+    metrics = self._buffered_train_metrics.additional_metrics
+    for k, v in aux.items():
+      if k not in metrics:
+        if k.endswith(("_max", "/max")):
+          op = np.max
+        elif k.endswith(("_min", "/min")):
+          op = np.min
+        elif k.endswith(("_count", "/count")):
+          op = np.sum
+        else:
+          op = utils.metric_reducer(v)
+        metrics[k] = ([v], op)
+      else:
+        metrics[k][0].append(v)
 
   def _post_process_eval_step(self, aux: Any) -> None:
     """Override this function for post processing aux data from eval step."""
-    pass
+    if not isinstance(aux, Mapping) or self._buffered_eval_metrics is None:
+      return
+    metrics = self._buffered_eval_metrics.additional_metrics
+    for k, v in aux.items():
+      if k not in metrics:
+        if k.endswith(("_max", "/max")):
+          op = np.max
+        elif k.endswith(("_min", "/min")):
+          op = np.min
+        elif k.endswith(("_count", "/count")):
+          op = np.sum
+        else:
+          op = utils.metric_reducer(v)
+        metrics[k] = ([v], op)
+      else:
+        metrics[k][0].append(v)
 
   def _try_get_learning_rate(self) -> float | jax.Array | None:
     """Returns the learning rate from the optimizer state if available."""
@@ -926,7 +904,11 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
           perplexity,
       )
     for k, v in (additional_metrics or {}).items():
-      self.metrics_logger.log(self.metrics_prefix, k, v, self._mode, step)  # pyrefly: ignore[missing-attribute]
+      if k.startswith(("sampler_trainer/", "sampler_is/")):
+        prefix, metric_name = k.split("/", maxsplit=1)
+        self.metrics_logger.log(prefix, metric_name, v, self._mode, step)  # pyrefly: ignore[missing-attribute]
+      else:
+        self.metrics_logger.log(self.metrics_prefix, k, v, self._mode, step)  # pyrefly: ignore[missing-attribute]
 
   def _buffer_metrics(
       self,
@@ -1213,24 +1195,36 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     )
 
   @override
-  def restore_checkpoint(self, step: int | None = None, **kwargs) -> Any:
+  def restore_checkpoint(
+      self,
+      step: int | None = None,
+      directory: str | None = None,
+      **kwargs,
+  ) -> Any:
     """Restores model, optimizer and step count from a checkpoint."""
     del kwargs
+    restore_kwargs: dict[str, Any] = {
+        "step": step,
+        "restore_only_lora_params": self._lora_enabled,
+    }
+    if directory is not None:
+      restore_kwargs["directory"] = directory
     self._train_steps, self._restored_custom_metadata = (
         self.checkpoint_manager.maybe_restore(
             self.model,
             self.optimizer,
-            step=step,
-            restore_only_lora_params=self._lora_enabled,
+            **restore_kwargs,
         )
     )
     self._sync_step_derived_state()
     metadata = dict(self._restored_custom_metadata or {})
     metadata["step"] = self._train_steps
     logging.info(
-        "restore_checkpoint restored step=%d (requested step=%s).",
+        "restore_checkpoint restored step=%d (requested step=%s,"
+        " directory=%s).",
         self._train_steps,
         "latest" if step is None else step,
+        directory or "default",
     )
     return metadata
 
@@ -1299,6 +1293,11 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
 
   @override
   def get_metrics(self) -> exp_metrics.MetricsBuffer:
+    if (
+        self._written_metrics is None
+        and self._prev_buffered_train_metrics is not None
+    ):
+      self._write_train_metrics()
     if self._written_metrics is None:
       return exp_metrics.MetricsBuffer(id=-1)
     ret = self._written_metrics

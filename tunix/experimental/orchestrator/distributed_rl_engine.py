@@ -59,6 +59,9 @@ def _response_to_trajectory_item(resp: Any) -> datatypes.TrajectoryItem:
         prompt_id=prompt_id,
         group_index=group_index,
         traj={
+            "prompt_tokens": np.zeros(0, dtype=np.int32),
+            "conversation_tokens": np.zeros(0, dtype=np.int32),
+            "conversation_masks": np.zeros(0, dtype=np.float32),
             "status": datatypes.TrajectoryStatus.FAILED,
             "trajectory_reward": 0.0,
         },
@@ -185,6 +188,8 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
               " 'prompt_id'. Every request must provide a non-empty"
               " 'prompt_id'."
           )
+        for k, v in base_generation_kwargs.items():
+          p.generation_kwargs.setdefault(k, v)
         rollout_reqs.append(p)
         continue
 
@@ -363,9 +368,6 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         len(prompts),
         len(self._rollout_workers),
     )
-    generation_kwargs = (
-        generation_args.as_kwargs() if generation_args is not None else {}
-    )
     requests = self._build_rollout_requests(
         prompts,
         policy_version=self._policy_version,
@@ -382,9 +384,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       worker_to_requests[worker].append(req)
 
     tasks = [
-        self._invoke_worker(
-            worker, "generate", requests=w_requests, **generation_kwargs
-        )
+        self._invoke_worker(worker, "generate", requests=w_requests)
         for worker, w_requests in worker_to_requests.items()
         if w_requests
     ]
@@ -667,24 +667,34 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
   async def _restore_checkpoint(
       self,
       role: datatypes.Role = datatypes.Role.ACTOR,
+      step: int | None = None,
+      directory: str | None = None,
       **kwargs: Any,
   ) -> Any:
     role_name = role.name
     worker = self._trainer_workers.get(role)
     if worker is None:
       raise ValueError(f"No trainer worker registered for role {role_name}")
-    return await self._invoke_worker(worker, "restore_checkpoint", **kwargs)
+    if directory is not None:
+      kwargs["directory"] = directory
+    return await self._invoke_worker(
+        worker, "restore_checkpoint", step=step, **kwargs
+    )
 
   async def resume_from_checkpoint(
       self,
       role: datatypes.Role = datatypes.Role.ACTOR,
       resync_rollout_weights: bool = True,
+      step: int | None = None,
+      directory: str | None = None,
   ) -> int:
     """Restores a checkpoint and realigns the mesh to the restored state.
 
     See `rl_engine_interface.AbstractRLEngine.resume_from_checkpoint`.
     """
-    metadata = await self._restore_checkpoint(role=role)
+    metadata = await self._restore_checkpoint(
+        role=role, step=step, directory=directory
+    )
     if not isinstance(metadata, Mapping):
       if metadata is not None:
         logging.warning(

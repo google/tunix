@@ -194,9 +194,37 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       default=os.getenv("WANDB_RUN_NAME", ""),
       help="W&B run name. Defaults to timestamp-based name if unset.",
   )
+  parser.add_argument(
+      "--overlong_filter",
+      action=argparse.BooleanOptionalAction,
+      default=False,
+      help=(
+          "Zero out the policy loss mask, final reward, and advantage inclusion"
+          " of overlong (max-steps or max-context-limit) trajectories, rather"
+          " than training on them."
+      ),
+  )
   parser.add_argument("--rpc_timeout_s", type=float, default=1800.0)
   parser.add_argument("--init_timeout_s", type=float, default=None)
   parser.add_argument("--stop_workers_on_exit", action="store_true")
+  parser.add_argument(
+      "--checkpoint_restore_step",
+      type=int,
+      default=None,
+      help=(
+          "Checkpoint step to restore from --checkpoint_restore_directory,"
+          " which must also be set. If None, restores the latest checkpoint."
+      ),
+  )
+  parser.add_argument(
+      "--checkpoint_restore_directory",
+      type=str,
+      default=None,
+      help=(
+          "Optional checkpoint directory to restore from instead of the"
+          " trainer's configured save directory."
+      ),
+  )
   parser.add_argument("--debug", action="store_true")
   return parser.parse_args(argv)
 
@@ -263,6 +291,13 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
     raise ValueError("batch_size must be positive.")
   if args.max_staleness < 0:
     raise ValueError("offpolicy/max_staleness must be non-negative.")
+  if (
+      args.checkpoint_restore_step is not None
+      and not args.checkpoint_restore_directory
+  ):
+    raise ValueError(
+        "checkpoint_restore_step requires checkpoint_restore_directory."
+    )
 
   logging.info("=== Starting Distributed DeepSWE GRPO Orchestrator ===")
   logging.info(
@@ -369,16 +404,23 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           max_response_length=args.max_response_length,
           temperature=args.temperature,
           top_p=args.top_p,
-          top_k=None if args.top_k < 0 else args.top_k,
+          top_k=0 if args.top_k < 0 else args.top_k,
           step_timeout_secs=args.step_timeout_secs,
           reward_timeout_secs=args.reward_timeout_secs,
           env_backend=args.env_backend,
           use_agent_sandbox=args.use_agent_sandbox,
           scaffold=args.scaffold,
           env_verbose=args.env_verbose,
+          overlong_filter=args.overlong_filter,
       ),
       max_steps=args.max_steps,
       reward_fns=[],
+      generation_args=datatypes.GenerationArgs(
+          temperature=args.temperature,
+          top_p=args.top_p,
+          top_k=0 if args.top_k < 0 else args.top_k,
+          return_logprobs=args.use_rollout_logps,
+      ),
       batch_size=args.batch_size,
       batch_config=batch_assembly.BatchConfig(
           pad_id=pad_id,
@@ -393,6 +435,8 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       trajectory_log_dir=args.trajectory_log_dir,
       max_staleness=args.max_staleness,
       sync_weights=(args.weight_sync_mode != weight_sync.WeightSyncMode.NONE),
+      checkpoint_restore_step=args.checkpoint_restore_step,
+      checkpoint_restore_directory=args.checkpoint_restore_directory,
       on_step_begin=lambda step: logging.info(
           ">>> DeepSWE step %d starting | policy_version=%d",
           step,

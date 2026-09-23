@@ -81,6 +81,8 @@ VLLM_MAX_NUM_BATCHED_TOKENS=${VLLM_MAX_NUM_BATCHED_TOKENS:-32768}
 VLLM_MAX_MODEL_LEN=${VLLM_MAX_MODEL_LEN:-$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH + 256))}
 CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-1000000000}
 CHECKPOINT_MAX_TO_KEEP=${CHECKPOINT_MAX_TO_KEEP:-1}
+CHECKPOINT_RESTORE_STEP=${CHECKPOINT_RESTORE_STEP:-}
+CHECKPOINT_RESTORE_DIRECTORY=${CHECKPOINT_RESTORE_DIRECTORY:-}
 CHECKPOINT_ROOT_DIRECTORY=${CHECKPOINT_ROOT_DIRECTORY:-"${REPO_ROOT}/checkpoints/frozenlake"}
 WANDB_PROJECT=${WANDB_PROJECT:-tunix-frozenlake}
 WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
@@ -90,6 +92,7 @@ TRAJECTORY_LOG_DIR=${TRAJECTORY_LOG_DIR:-}
 MODEL_DTYPE=${MODEL_DTYPE:-float32}
 MODEL_LOAD_DTYPE=${MODEL_LOAD_DTYPE:-$MODEL_DTYPE}
 DEBUG=${DEBUG:-0}
+GRID_SIZE_RANGE=${GRID_SIZE_RANGE:-2 9}
 
 # Qwen3-8B defaults target an 8-chip host split between trainer and rollout.
 TRAINER_TPU_CHIPS=${TRAINER_TPU_CHIPS:-0,1,2,3}
@@ -354,6 +357,7 @@ cmd=(
   --seed="$SEED"
   --weight_sync_mode="$WEIGHT_SYNC_MODE"
   --trainer_fsdp="$TRAINER_FSDP"
+  --grid_size_range $GRID_SIZE_RANGE
   --stop_workers_on_exit
 )
 is_true "$SHUFFLE" && cmd+=(--shuffle) || cmd+=(--no-shuffle)
@@ -362,6 +366,8 @@ is_true "$USE_MULTISTEP_PROMPT" && cmd+=(--use_multistep_prompt) || cmd+=(--no-u
 is_true "$USE_ROLLOUT_LOGPS" && cmd+=(--use_rollout_logps) || cmd+=(--no-use_rollout_logps)
 [[ -n "$LOG_DIR" ]] && cmd+=(--log_dir="$LOG_DIR")
 [[ -n "$TRAJECTORY_LOG_DIR" ]] && cmd+=(--trajectory_log_dir="$TRAJECTORY_LOG_DIR")
+[[ -n "$CHECKPOINT_RESTORE_STEP" ]] && cmd+=(--checkpoint_restore_step="$CHECKPOINT_RESTORE_STEP")
+[[ -n "$CHECKPOINT_RESTORE_DIRECTORY" ]] && cmd+=(--checkpoint_restore_directory="$CHECKPOINT_RESTORE_DIRECTORY")
 is_true "$DEBUG" && cmd+=(--debug)
 
 export JAX_PLATFORMS=cpu

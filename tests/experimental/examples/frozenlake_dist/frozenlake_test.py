@@ -76,9 +76,15 @@ class FrozenLakeDistTest(absltest.TestCase):
     self.assertLen(first, 5)
     for entry in first:
       self.assertBetween(entry["seed"], 0, 99999)
-      self.assertBetween(entry["size"], 2, 9)
+      self.assertBetween(entry["size"], 2, 8)
       self.assertGreaterEqual(entry["p"], 0.6)
       self.assertLess(entry["p"], 0.85)
+
+    custom_range = frozenlake.create_dataset(
+        size=10, seed=123, grid_size_range=(3, 5)
+    )
+    for entry in custom_range:
+      self.assertBetween(entry["size"], 3, 4)
 
   def test_dataset_generation_and_shuffle_match_reference(self):
     seeds, sizes, probabilities = frozenlake_data.generate_dataset_parameters(
@@ -203,7 +209,18 @@ class FrozenLakeDistTest(absltest.TestCase):
     self.assertEqual(args.advantage_estimator, "rloo")
     self.assertEqual(args.sampler_is, "token")
     self.assertEqual(args.sampler_is_threshold, 2.0)
+    self.assertEqual(args.grid_size_range, (2, 9))
     self.assertEqual(args.wandb_project, "tunix-frozenlake")
+    self.assertIsNone(args.checkpoint_restore_step)
+    self.assertIsNone(args.checkpoint_restore_directory)
+    custom_args = run_frozenlake_dist._parse_args([
+        "--checkpoint_restore_step=3",
+        "--checkpoint_restore_directory=/tmp/restore_dir",
+    ])
+    self.assertEqual(custom_args.checkpoint_restore_step, 3)
+    self.assertEqual(
+        custom_args.checkpoint_restore_directory, "/tmp/restore_dir"
+    )
 
     algo = run_frozenlake_dist._build_algo(args)
     self.assertEqual(algo.algo_config.sampler_is, "token")
@@ -243,6 +260,22 @@ class FrozenLakeDistTest(absltest.TestCase):
     )
     self.assertIn('--sampler_is="$SAMPLER_IS"', launcher)
     self.assertIn('--rollout_mesh_tp="$ROLLOUT_TP"', launcher)
+    self.assertIn("GRID_SIZE_RANGE=${GRID_SIZE_RANGE:-2 9}", launcher)
+    self.assertIn("--grid_size_range $GRID_SIZE_RANGE", launcher)
+    self.assertIn(
+        "CHECKPOINT_RESTORE_STEP=${CHECKPOINT_RESTORE_STEP:-}", launcher
+    )
+    self.assertIn(
+        '--checkpoint_restore_step="$CHECKPOINT_RESTORE_STEP"', launcher
+    )
+    self.assertIn(
+        "CHECKPOINT_RESTORE_DIRECTORY=${CHECKPOINT_RESTORE_DIRECTORY:-}",
+        launcher,
+    )
+    self.assertIn(
+        '--checkpoint_restore_directory="$CHECKPOINT_RESTORE_DIRECTORY"',
+        launcher,
+    )
 
   def test_gemma4_launcher_matches_reference_runtime_limits(self):
     launcher = (

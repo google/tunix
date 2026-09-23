@@ -230,6 +230,24 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
+      "--checkpoint_restore_step",
+      type=int,
+      default=None,
+      help=(
+          "Checkpoint step to restore from --checkpoint_restore_directory,"
+          " which must also be set. If None, restores the latest checkpoint."
+      ),
+  )
+  parser.add_argument(
+      "--checkpoint_restore_directory",
+      type=str,
+      default=None,
+      help=(
+          "Optional checkpoint directory to restore from instead of the"
+          " trainer's configured save directory."
+      ),
+  )
+  parser.add_argument(
       "--debug",
       action="store_true",
       help="Enable debug logging and print full sampler responses.",
@@ -331,6 +349,13 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
     raise ValueError("batch_size must be positive.")
   if args.max_staleness < 0:
     raise ValueError("offpolicy/max_staleness must be non-negative.")
+  if (
+      args.checkpoint_restore_step is not None
+      and not args.checkpoint_restore_directory
+  ):
+    raise ValueError(
+        "checkpoint_restore_step requires checkpoint_restore_directory."
+    )
 
   logging.info("=== Starting Distributed GSM8K GRPO Orchestrator ===")
   logging.info(
@@ -423,7 +448,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   generation_args = datatypes.GenerationArgs(
       temperature=args.temperature,
       top_p=args.top_p,
-      top_k=None if args.top_k < 0 else args.top_k,
+      top_k=0 if args.top_k < 0 else args.top_k,
       return_logprobs=True,
   )
   program = rl_program.StandardRLProgram(
@@ -446,6 +471,8 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       trajectory_log_dir=args.trajectory_log_dir,
       max_staleness=args.max_staleness,
       sync_weights=(args.weight_sync_mode != "none"),
+      checkpoint_restore_step=args.checkpoint_restore_step,
+      checkpoint_restore_directory=args.checkpoint_restore_directory,
       on_step_begin=lambda step: logging.info(
           ">>> Step %d starting | Policy Version: %d",
           step,

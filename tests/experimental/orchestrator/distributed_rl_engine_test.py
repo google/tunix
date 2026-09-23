@@ -469,10 +469,54 @@ class DistributedRLEngineTest(absltest.TestCase):
       # Engine aligns its own policy version and resyncs rollout weights.
       self.assertEqual(engine._policy_version, 3)
       self.assertEqual(coordinator.calls, [3])
-      self.mock_actor.restore_checkpoint.assert_called_once_with()
+      self.mock_actor.restore_checkpoint.assert_called_once_with(step=None)
       self.mock_rollout_1.get_target_state.assert_called_once_with()
       self.mock_actor.set_target_state.assert_called_once_with(
           target_state={"params": 1}
+      )
+
+    asyncio.run(_run())
+
+  def test_resume_from_checkpoint_forwards_explicit_step(self):
+    async def _run():
+      self.mock_actor.restore_checkpoint.return_value = {
+          "step": 5,
+          "policy_version": 5,
+      }
+      coordinator = _FakeWeightSyncCoordinator(forced_version=5)
+      engine = self._engine_with_coordinator(coordinator)
+
+      result = await engine.resume_from_checkpoint(
+          role=datatypes.Role.ACTOR, step=5
+      )
+
+      self.assertEqual(result, 5)
+      self.assertEqual(engine._policy_version, 5)
+      self.assertEqual(coordinator.calls, [5])
+      self.mock_actor.restore_checkpoint.assert_called_once_with(step=5)
+
+    asyncio.run(_run())
+
+  def test_resume_from_checkpoint_forwards_explicit_directory(self):
+    async def _run():
+      self.mock_actor.restore_checkpoint.return_value = {
+          "step": 4,
+          "policy_version": 4,
+      }
+      coordinator = _FakeWeightSyncCoordinator(forced_version=4)
+      engine = self._engine_with_coordinator(coordinator)
+
+      result = await engine.resume_from_checkpoint(
+          role=datatypes.Role.ACTOR,
+          step=4,
+          directory="/tmp/restore_checkpoints",
+      )
+
+      self.assertEqual(result, 4)
+      self.assertEqual(engine._policy_version, 4)
+      self.assertEqual(coordinator.calls, [4])
+      self.mock_actor.restore_checkpoint.assert_called_once_with(
+          step=4, directory="/tmp/restore_checkpoints"
       )
 
     asyncio.run(_run())
@@ -774,7 +818,6 @@ class DistributedRLEngineTest(absltest.TestCase):
         )
 
     asyncio.run(_run())
-
 
   def test_sync_weights_requires_a_coordinator(self):
     async def _run():
@@ -1520,6 +1563,31 @@ class DistributedRLEngineTest(absltest.TestCase):
     mock_algo.build_gen_model_input_fn.assert_called_once_with(
         pad_id=10, eos_id=20
     )
+
+  def test_preformed_rollout_requests_inherit_generation_args(self):
+    async def _run():
+      preformed = datatypes.RolloutRequest(
+          request_id="req_pre_0",
+          prompt="p2",
+          prompt_id="p2",
+          generation_kwargs={"top_p": 0.9},
+      )
+      await self.engine.dispatch_rollouts(
+          [preformed],
+          num_generations=1,
+          generation_args=datatypes.GenerationArgs(temperature=0.85),
+      )
+      mock_call = (
+          self.mock_rollout_1.generate.call_args
+          or self.mock_rollout_2.generate.call_args
+      )
+      dispatched = mock_call.kwargs["requests"][0]
+      self.assertEqual(
+          dispatched.generation_kwargs,
+          {"top_p": 0.9, "temperature": 0.85},
+      )
+
+    asyncio.run(_run())
 
   def test_configure_worker_actor_raises_when_algo_none(self):
     with self.assertRaisesRegex(ValueError, "algo is required"):

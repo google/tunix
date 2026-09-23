@@ -167,6 +167,278 @@ class CheckpointManagerTest(parameterized.TestCase):
     # Verify the model params are saved.
     self.assertTrue(model_param_path.exists())
 
+  def test_restore_from_separate_directory_and_save_to_new_directory(self):
+    restore_dir = f'{self.temp_path}/{self.id()}_restore'
+    save_dir = f'{self.temp_path}/{self.id()}_save'
+    options = checkpoint_options.checkpointing_options_from_dict({
+        'save_interval_steps': 2,
+        'max_to_keep': 5,
+        'enable_async_checkpointing': False,
+    })
+    source_manager = checkpoint_manager.CheckpointManager(
+        restore_dir, options=options
+    )
+    model, _ = create_sharded_model(TestModel, nnx.Rngs(0), self.mesh)
+    step2_state = jax.tree.map(lambda x: x + 2, nnx.state(model))
+    nnx.update(model, step2_state)
+    self.assertTrue(
+        source_manager.save(2, model, force=True, custom_metadata={'s': 2})
+    )
+    step4_state = jax.tree.map(lambda x: x + 4, nnx.state(model))
+    nnx.update(model, step4_state)
+    self.assertTrue(
+        source_manager.save(4, model, force=True, custom_metadata={'s': 4})
+    )
+    source_manager.close()
+
+    # Create a new CheckpointManager writing to `save_dir`, but restore step 2
+    # from `restore_dir`. Subsequent saves at steps 2 and 4 go to `save_dir`
+    # without colliding with or mutating `restore_dir`.
+    target_manager = checkpoint_manager.CheckpointManager(
+        save_dir, options=options
+    )
+    restored_model, _ = create_sharded_model(TestModel, nnx.Rngs(1), self.mesh)
+    with self.assertLogs(level='INFO') as logs:
+      self.assertEqual(
+          target_manager.maybe_restore(
+              restored_model, step=2, directory=restore_dir
+          ),
+          (2, {'s': 2}),
+      )
+    self.assertTrue(
+        any(
+            f'Restoring step 2 from restore directory {restore_dir}; future'
+            f' checkpoints will be written to root directory {save_dir}.'
+            in line
+            for line in logs.output
+        ),
+        logs.output,
+    )
+    jax.tree.map_with_path(
+        assert_close,
+        step2_state,
+        nnx.state(restored_model),
+    )
+
+    new_step4_state = jax.tree.map(lambda x: x + 10, nnx.state(restored_model))
+    nnx.update(restored_model, new_step4_state)
+    self.assertTrue(
+        target_manager.save(
+            4, restored_model, force=False, custom_metadata={'s': 4, 'new': 1}
+        )
+    )
+    self.assertEqual(target_manager.latest_step(), 4)
+    target_manager.close()
+
+    # Verify original checkpoint in `restore_dir` was untouched.
+    verify_source = checkpoint_manager.CheckpointManager(
+        restore_dir, options=options
+    )
+    check_model, _ = create_sharded_model(TestModel, nnx.Rngs(2), self.mesh)
+    self.assertEqual(
+        verify_source.maybe_restore(check_model, step=4),
+        (4, {'s': 4}),
+    )
+    jax.tree.map_with_path(
+        assert_close,
+        step4_state,
+        nnx.state(check_model),
+    )
+    verify_source.close()
+
+  def test_restore_prefers_root_directory_after_preemption_restart(self):
+    restore_dir = f'{self.temp_path}/{self.id()}_restore'
+    save_dir = f'{self.temp_path}/{self.id()}_save'
+    options = checkpoint_options.checkpointing_options_from_dict({
+        'save_interval_steps': 2,
+        'max_to_keep': 5,
+        'enable_async_checkpointing': False,
+    })
+    source_manager = checkpoint_manager.CheckpointManager(
+        restore_dir, options=options
+    )
+    model, _ = create_sharded_model(TestModel, nnx.Rngs(0), self.mesh)
+    step2_state = jax.tree.map(lambda x: x + 2, nnx.state(model))
+    nnx.update(model, step2_state)
+    self.assertTrue(
+        source_manager.save(2, model, force=True, custom_metadata={'s': 2})
+    )
+    source_manager.close()
+
+    # Initial run restores step 2 from `restore_dir` and saves step 6 to
+    # `save_dir` before being preempted.
+    target_manager = checkpoint_manager.CheckpointManager(
+        save_dir, options=options
+    )
+    run_model, _ = create_sharded_model(TestModel, nnx.Rngs(1), self.mesh)
+    self.assertEqual(
+        target_manager.maybe_restore(run_model, step=2, directory=restore_dir),
+        (2, {'s': 2}),
+    )
+    step6_state = jax.tree.map(lambda x: x + 6, nnx.state(run_model))
+    nnx.update(run_model, step6_state)
+    self.assertTrue(
+        target_manager.save(
+            6, run_model, force=True, custom_metadata={'s': 6, 'resumed': 1}
+        )
+    )
+    target_manager.close()
+
+    # Simulate preemption restart with the same CLI arguments (`step=2`,
+    # `directory=restore_dir`): because `save_dir` now has step 6, it must
+    # resume from `save_dir` at step 6 rather than re-reading `restore_dir`
+    # at step 2.
+    restarted_manager = checkpoint_manager.CheckpointManager(
+        save_dir, options=options
+    )
+    restarted_model, _ = create_sharded_model(TestModel, nnx.Rngs(2), self.mesh)
+    self.assertEqual(
+        restarted_manager.maybe_restore(
+            restarted_model, step=2, directory=restore_dir
+        ),
+        (6, {'s': 6, 'resumed': 1}),
+    )
+    jax.tree.map_with_path(
+        assert_close,
+        step6_state,
+        nnx.state(restarted_model),
+    )
+    restarted_manager.close()
+
+  def test_restore_latest_from_directory_into_empty_root_directory(self):
+    restore_dir = f'{self.temp_path}/{self.id()}_restore'
+    save_dir = f'{self.temp_path}/{self.id()}_save'
+    source_manager = checkpoint_manager.CheckpointManager(restore_dir)
+    model, _ = create_sharded_model(TestModel, nnx.Rngs(0), self.mesh)
+    expected_state = nnx.state(model)
+    self.assertTrue(
+        source_manager.save(3, model, force=True, custom_metadata={'s': 3})
+    )
+    assert source_manager._checkpointer is not None
+    source_manager._checkpointer.wait()
+    source_manager.close()
+
+    target_manager = checkpoint_manager.CheckpointManager(save_dir)
+    restored_model, _ = create_sharded_model(TestModel, nnx.Rngs(1), self.mesh)
+    with self.assertLogs(level='INFO') as logs:
+      self.assertEqual(
+          target_manager.maybe_restore(restored_model, directory=restore_dir),
+          (3, {'s': 3}),
+      )
+    self.assertTrue(
+        any(
+            'Restoring the latest checkpoint from restore directory'
+            f' {restore_dir}; future checkpoints will be written to root'
+            f' directory {save_dir}.' in line
+            for line in logs.output
+        ),
+        logs.output,
+    )
+    jax.tree.map_with_path(
+        assert_close,
+        expected_state,
+        nnx.state(restored_model),
+    )
+    self.assertIsNone(target_manager.latest_step())
+    target_manager.close()
+
+  def test_restore_directory_same_as_root_rejects_non_latest_step(self):
+    cp_path = f'{self.temp_path}/{self.id()}'
+    options = checkpoint_options.checkpointing_options_from_dict({
+        'save_interval_steps': 2,
+        'max_to_keep': 5,
+        'enable_async_checkpointing': False,
+    })
+    cp_manager = checkpoint_manager.CheckpointManager(cp_path, options=options)
+    model, _ = create_sharded_model(TestModel, nnx.Rngs(0), self.mesh)
+    self.assertTrue(cp_manager.save(2, model, force=True))
+    self.assertTrue(cp_manager.save(4, model, force=True))
+
+    # Checkpoints saved after restoring step 2 would be mixed with step 4.
+    with self.assertRaisesRegex(ValueError, 'whose latest step is 4'):
+      cp_manager.maybe_restore(model, step=2, directory=cp_path)
+    cp_manager.close()
+
+  @parameterized.named_parameters(
+      dict(testcase_name='unset_step', step=None),
+      dict(testcase_name='latest_step', step=4),
+  )
+  def test_restore_directory_same_as_root_resumes_from_latest_step(self, step):
+    cp_path = f'{self.temp_path}/{self.id()}'
+    options = checkpoint_options.checkpointing_options_from_dict({
+        'save_interval_steps': 2,
+        'max_to_keep': 5,
+        'enable_async_checkpointing': False,
+    })
+    cp_manager = checkpoint_manager.CheckpointManager(cp_path, options=options)
+    model, _ = create_sharded_model(TestModel, nnx.Rngs(0), self.mesh)
+    self.assertTrue(
+        cp_manager.save(2, model, force=True, custom_metadata={'s': 2})
+    )
+    step4_state = jax.tree.map(lambda x: x + 4, nnx.state(model))
+    nnx.update(model, step4_state)
+    self.assertTrue(
+        cp_manager.save(4, model, force=True, custom_metadata={'s': 4})
+    )
+
+    restored_model, _ = create_sharded_model(TestModel, nnx.Rngs(1), self.mesh)
+    with self.assertLogs(level='INFO') as logs:
+      # A trailing slash still refers to the root directory.
+      self.assertEqual(
+          cp_manager.maybe_restore(
+              restored_model, step=step, directory=f'{cp_path}/'
+          ),
+          (4, {'s': 4}),
+      )
+    self.assertTrue(
+        any(
+            'is the same as the root directory; resuming from its latest step'
+            ' (4).' in line
+            for line in logs.output
+        ),
+        logs.output,
+    )
+    jax.tree.map_with_path(
+        assert_close,
+        step4_state,
+        nnx.state(restored_model),
+    )
+    cp_manager.close()
+
+  def test_restore_from_directory_when_root_directory_is_none(self):
+    restore_dir = f'{self.temp_path}/{self.id()}_restore'
+    source_manager = checkpoint_manager.CheckpointManager(restore_dir)
+    model, _ = create_sharded_model(TestModel, nnx.Rngs(0), self.mesh)
+    expected_state = nnx.state(model)
+    self.assertTrue(
+        source_manager.save(3, model, force=True, custom_metadata={'s': 3})
+    )
+    assert source_manager._checkpointer is not None
+    source_manager._checkpointer.wait()
+    source_manager.close()
+
+    cp_manager = checkpoint_manager.CheckpointManager(root_directory=None)
+    restored_model, _ = create_sharded_model(TestModel, nnx.Rngs(1), self.mesh)
+    with self.assertLogs(level='INFO') as logs:
+      self.assertEqual(
+          cp_manager.maybe_restore(restored_model, directory=restore_dir),
+          (3, {'s': 3}),
+      )
+    self.assertTrue(
+        any(
+            'Restoring the latest checkpoint from restore directory'
+            f' {restore_dir}; no root directory is configured, so checkpoint'
+            ' saving is disabled.' in line
+            for line in logs.output
+        ),
+        logs.output,
+    )
+    jax.tree.map_with_path(
+        assert_close,
+        expected_state,
+        nnx.state(restored_model),
+    )
+
   def test_restore(self):
     cp_path = f'{self.temp_path}/{self.id()}'
     cp_manager = checkpoint_manager.CheckpointManager(cp_path)

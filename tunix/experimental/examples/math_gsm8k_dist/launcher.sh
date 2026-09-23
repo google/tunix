@@ -63,6 +63,8 @@ MODEL_DTYPE=${MODEL_DTYPE:-float32}
 USE_LORA=${USE_LORA:-0}
 CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-1}
 CHECKPOINT_MAX_TO_KEEP=${CHECKPOINT_MAX_TO_KEEP:-10}
+CHECKPOINT_RESTORE_STEP=${CHECKPOINT_RESTORE_STEP:-}
+CHECKPOINT_RESTORE_DIRECTORY=${CHECKPOINT_RESTORE_DIRECTORY:-}
 CHECKPOINT_ROOT_DIRECTORY=${CHECKPOINT_ROOT_DIRECTORY:-"${REPO_ROOT}/checkpoints"}
 REWARD_MODE=${REWARD_MODE:-env}
 TFDS_DATA_DIR=${TFDS_DATA_DIR:-"${ARTIFACT_ROOT}/data"}
@@ -116,7 +118,7 @@ if [[ "$TRAINER_BACKEND" == "maxtext" ]]; then
   # MaxText shards the batch dimension of every loss input across the fsdp
   # axis, so the microbatch has to be a multiple of it. The trainer node
   # enforces this too.
-  if (( TRAIN_MICRO_BATCH_SIZE % TRAINER_FSDP != 0 )); then
+  if [[ -z "${MAX_SEQ_TOKEN_PER_TPU:-}" ]] && (( TRAIN_MICRO_BATCH_SIZE % TRAINER_FSDP != 0 )); then
     TRAIN_MICRO_BATCH_SIZE=$TRAINER_FSDP
   fi
   if [[ -z "$MAXTEXT_CKPT" ]]; then
@@ -833,6 +835,12 @@ echo "Launching CPU orchestrator..."
   fi
   if [[ -n "$TRAJECTORY_LOG_DIR" ]]; then
     ORCHESTRATOR_CMD+=(--trajectory_log_dir="$TRAJECTORY_LOG_DIR")
+  fi
+  if [[ -n "$CHECKPOINT_RESTORE_STEP" ]]; then
+    ORCHESTRATOR_CMD+=(--checkpoint_restore_step="$CHECKPOINT_RESTORE_STEP")
+  fi
+  if [[ -n "$CHECKPOINT_RESTORE_DIRECTORY" ]]; then
+    ORCHESTRATOR_CMD+=(--checkpoint_restore_directory="$CHECKPOINT_RESTORE_DIRECTORY")
   fi
 
   export JAX_PLATFORMS=cpu
