@@ -162,6 +162,29 @@ class TrainerWorkerMeshExecutionContextTest(absltest.TestCase):
 
 class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
 
+  def test_model_loading_separates_compute_and_parameter_dtypes(self):
+    for load_dtype in (None, "float32"):
+      with self.subTest(load_dtype=load_dtype):
+        argv = ["--model_dir=/tmp/model", "--model_dtype=bfloat16"]
+        if load_dtype:
+          argv.append(f"--model_load_dtype={load_dtype}")
+        args = run_trainer_node._parse_args(argv)
+        # Avoid depending on the caller's MODEL_LOAD_DTYPE environment.
+        args.model_load_dtype = load_dtype
+        with mock.patch.object(
+            run_trainer_node.automodel.AutoModel,
+            "from_pretrained",
+            return_value=(mock.sentinel.model, "/tmp/model"),
+        ) as load:
+          model = run_trainer_node._load_actor_model(
+              args, mock.sentinel.mesh, lora=False
+          )
+        self.assertIs(model, mock.sentinel.model)
+        self.assertEqual(load.call_args.kwargs["dtype"], "bfloat16")
+        self.assertEqual(
+            load.call_args.kwargs["load_dtype"], load_dtype or "bfloat16"
+        )
+
   def setUp(self):
     super().setUp()
     self.mock_context = mock.MagicMock()

@@ -88,6 +88,7 @@ WANDB_API_KEY=${WANDB_API_KEY:-}
 LOG_DIR=${LOG_DIR:-}
 TRAJECTORY_LOG_DIR=${TRAJECTORY_LOG_DIR:-}
 MODEL_DTYPE=${MODEL_DTYPE:-float32}
+MODEL_LOAD_DTYPE=${MODEL_LOAD_DTYPE:-$MODEL_DTYPE}
 DEBUG=${DEBUG:-0}
 
 # Qwen3-8B defaults target an 8-chip host split between trainer and rollout.
@@ -236,6 +237,7 @@ echo "Starting distributed FrozenLake with ${MODEL_ID}: full batch ${BATCH_SIZE}
     --compute_logps_micro_batch_size="$COMPUTE_LOGPS_MICRO_BATCH_SIZE"
     --compute_logps_chunk_size="$COMPUTE_LOGPS_CHUNK_SIZE"
     --model_dtype="$MODEL_DTYPE"
+    --model_load_dtype="$MODEL_LOAD_DTYPE"
     --remat_config=decoder
     --use_flash_attention
     --flash_attention_block_size="$FLASH_ATTENTION_BLOCK_SIZE"
