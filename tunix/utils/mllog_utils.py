@@ -106,7 +106,9 @@ def configure_logger(
         _gcs_target_path = os.path.join(
             metric_logger_dir.rstrip("/"), f"seed_{seed_val}.out"
         )
-      filename = os.path.join("/tmp/rcp_logs", f"seed_{seed_val}.out")
+      filename = os.path.join(
+          "/tmp/rcp_logs", f"seed_{seed_val}_{os.getpid()}.out"
+      )
     elif metric_logger_dir.endswith(".out") or metric_logger_dir.endswith(
         ".log"
     ):
