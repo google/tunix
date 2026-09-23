@@ -432,6 +432,33 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
       asyncio.run(self._run_collect(engine, mode='Token'))
 
   @mock.patch.object(utils, 'tokenize_and_generate_masks')
+  def test_missing_step_logprobs_empty_tokens_does_not_raise(
+      self, mock_tokenize
+  ):
+    mock_tokenize.side_effect = [
+        ([101], [1]),  # prompt tokens
+    ]
+    self.mock_model_call.side_effect = [
+        RolloutOutput(
+            text=[''],
+            logits=None,
+            tokens=[np.array([], dtype=np.int32)],
+            left_padded_prompt_tokens=np.array([[101]]),
+            logprobs=None,
+        )
+    ]
+    self.mock_env.step.side_effect = [('obs1', 1.0, True, {})]
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+        tokenizer=self.mock_tokenizer,
+        chat_parser=self.mock_chat_parser,
+    )
+    token_data = asyncio.run(self._run_collect(engine, mode='Token'))
+    self.assertIsNotNone(token_data['old_logprobs'])
+
+  @mock.patch.object(utils, 'tokenize_and_generate_masks')
   def test_collect_with_incomplete_tokenizer_config_skips_tokenization(
       self, mock_tokenize
   ):
