@@ -21,6 +21,12 @@ import logging
 import os
 from typing import Any
 
+# Mirrors maxtext `pathways_checkpointing_impl`. Duplicated as literals rather than
+# imported: this module must stay importable without maxtext installed.
+_PERSISTENCE_IMPL = "persistence"
+_COLOCATED_PYTHON_IMPL = "colocated_python"
+_PATHWAYS_CHECKPOINTING_IMPLS = (_PERSISTENCE_IMPL, _COLOCATED_PYTHON_IMPL)
+
 
 @dataclasses.dataclass(frozen=True)
 class ProfilerOptions:
@@ -442,9 +448,28 @@ def build_maxtext_config(
           f"write to shared GCS storage; got {output_dir!r}. "
           "Set MAXTEXT_OUTPUT_DIR=gs://..."
       )
+
+    impl = os.environ.get("PATHWAYS_CHECKPOINTING_IMPL", "").strip() or _PERSISTENCE_IMPL
+    if impl not in _PATHWAYS_CHECKPOINTING_IMPLS:
+      raise ValueError(
+          f"PATHWAYS_CHECKPOINTING_IMPL={impl!r} is not recognised; "
+          f"expected one of {_PATHWAYS_CHECKPOINTING_IMPLS}."
+      )
+    if impl == _COLOCATED_PYTHON_IMPL and not os.environ.get("COLOCATED_PYTHON_SIDECAR_IMAGE", "").strip():
+      raise ValueError(
+          "PATHWAYS_CHECKPOINTING_IMPL=colocated_python requires "
+          "COLOCATED_PYTHON_SIDECAR_IMAGE to be set so the sidecar container is added to "
+          "the pathways-worker pods. Without it Orbax silently falls back to "
+          "controller-side host staging, which OOMs the proxy pod at 397B scale."
+      )
+    argv.append(f"pathways_checkpointing_impl={impl}")
+
+    # Keep OCDBT/zarr3 off in BOTH modes: colocated_python supports them, but matching
+    # the persistence layout keeps checkpoints restorable across a mode switch.
     logging.info(
-        "ENABLE_PATHWAYS_PERSISTENCE=1; disabling OCDBT/zarr3 so the Pathways "
-        "persistence handler can save directly from the TPU workers."
+        "ENABLE_PATHWAYS_PERSISTENCE=1 (impl=%s); disabling OCDBT/zarr3 so the Pathways "
+        "handler can save directly from the TPU workers and both modes share one layout.",
+        impl,
     )
     argv.extend([
         "checkpoint_storage_use_ocdbt=false",

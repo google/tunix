@@ -316,7 +316,7 @@ ${QUEUE_LABEL}spec:
                   google.com/tpu: "4"
               volumeMounts:
               - mountPath: /tmp
-                name: shared-tmp
+                name: shared-tmp${COLOCATED_PYTHON_SIDECAR_BLOCK}
             volumes:
             - name: shared-tmp
               hostPath:
