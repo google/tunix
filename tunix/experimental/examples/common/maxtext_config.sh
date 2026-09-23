@@ -125,6 +125,10 @@ maxtext_trainer_flags() {
     ${ROLLOUT_MESH_TP:+--rollout_mesh_tp=${ROLLOUT_MESH_TP}} \
     ${USE_WEIGHT_CONVERTER:+--use_weight_converter=${USE_WEIGHT_CONVERTER}} \
     ${MAX_SEQ_TOKEN_PER_TPU:+--max_seq_token_per_tpu=${MAX_SEQ_TOKEN_PER_TPU}} \
+    ${SKIP_STEP_ON_SPIKES:+--maxtext_skip_step_on_spikes=${SKIP_STEP_ON_SPIKES}} \
+    ${SKIP_STEP_ON_NAN:+--maxtext_skip_step_on_nan=${SKIP_STEP_ON_NAN}} \
+    ${SKIP_STEP_INTERVAL:+--maxtext_skip_step_interval=${SKIP_STEP_INTERVAL}} \
+    ${SKIP_STEP_SCALING_FACTOR:+--maxtext_skip_step_scaling_factor=${SKIP_STEP_SCALING_FACTOR}} \
     ${profiler_flags} \
   "
 }

@@ -1081,6 +1081,19 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     self.assertTrue(args.prefuse_moe_weights)
     self.assertTrue(args.use_weight_converter)
 
+  def test_parse_args_maxtext_skip_step_flags(self):
+    argv = [
+        "--skip_step_on_spikes",
+        "--skip_step_on_nan=false",
+        "--skip_step_interval=64",
+        "--skip_step_scaling_factor=4.5",
+    ]
+    args = run_trainer_node._parse_args(argv)
+    self.assertTrue(args.maxtext_skip_step_on_spikes)
+    self.assertFalse(args.maxtext_skip_step_on_nan)
+    self.assertEqual(args.maxtext_skip_step_interval, 64)
+    self.assertEqual(args.maxtext_skip_step_scaling_factor, 4.5)
+
   def test_create_mesh_validates_device_count(self):
     args = mock.MagicMock(mesh_fsdp=2, mesh_tp=2)
     with mock.patch.object(jax, "device_count", return_value=2):
