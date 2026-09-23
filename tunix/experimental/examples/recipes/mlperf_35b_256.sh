@@ -151,6 +151,10 @@ export CHECKPOINT_MAX_TO_KEEP=10
 export MAX_STALENESS=${MAX_STALENESS:-0}
 export TRAJECTORY_GROUP_ORDER=${TRAJECTORY_GROUP_ORDER:-arrival}
 
+# sequence packing
+export MAX_SEQ_TOKEN_PER_TPU=${MAX_SEQ_TOKEN_PER_TPU:-65536}
+export MAX_SEGMENTS_PER_PACKED_ROW=${MAX_SEGMENTS_PER_PACKED_ROW:-16}
+    
 # Sampling Parameters (explicitly disable top-k, set top-p 1.0 and temperature 1.0)
 export TEMPERATURE="1.0"
 export TOP_P="1.0"
