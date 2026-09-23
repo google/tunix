@@ -162,6 +162,39 @@ arg_parser.add_argument(
     "--advantage_estimator", type=str, default="rloo",
     help="'grpo' (z-score) or 'rloo' (leave-one-out baseline).",
 )
+# ====== Score Centering (arXiv:2609.20807) ======
+# Off-policy gradient stabilization: subtracts the expected score under the
+# reconstructed rollout distribution (sampler top-k head + scaled trainer
+# tail), which cancels the first-order drift caused by sampler-vs-trainer
+# mismatch (bf16 kernel differences, stale rollout weights). Requires the
+# vLLM rollout engine -- it is the only backend that returns per-token top-k
+# logprobs.
+arg_parser.add_argument(
+    "--score_centering", action="store_true",
+    help="Enable Score Centering in the GRPO loss.",
+)
+arg_parser.add_argument(
+    "--score_centering_top_k", type=int, default=128,
+    help="Top-k head size k. Rollout payload and the trainer's "
+         "[B, L, k] logp gather both scale linearly in k.",
+)
+arg_parser.add_argument(
+    "--score_centering_eps", type=float, default=1e-6,
+    help="Floor on the tail probability mass when forming rho.",
+)
+arg_parser.add_argument(
+    "--no_exact_token_continuity", action="store_true",
+    help="Force exact_token_continuity=False. Escape hatch for the "
+         "'Exact trajectory exceeds training padding budget' abort, where the "
+         "collect engine returns a few tokens past max_response_length.",
+)
+arg_parser.add_argument(
+    "--disable_eval", action="store_true",
+    help="Skip held-out eval rollouts. Useful for short smoke runs: the eval "
+         "pool contains longer episodes that can exceed the exact-token "
+         "padding budget.",
+)
+
 args, _ = arg_parser.parse_known_args()
 
 TRAIN_FRACTION = 1.0
@@ -195,6 +228,9 @@ VLLM_MAX_NUM_SEQS = 32
 VLLM_MAX_BATCHED_TOKENS = VLLM_MAX_NUM_SEQS * 2 * 1024 // 8
 
 NUM_ITERATIONS = 1
+SCORE_CENTERING = args.score_centering
+SCORE_CENTERING_TOP_K = args.score_centering_top_k
+SCORE_CENTERING_EPS = args.score_centering_eps
 BETA = args.beta
 EPSILON = args.epsilon
 EPSILON_HIGH = args.epsilon_high
@@ -255,6 +291,13 @@ MAX_TO_KEEP = 50
 
 # ====== Rollout ======
 ROLLOUT_ENGINE = os.getenv("ROLLOUT_ENGINE", "vllm")  # "vanilla" | "vllm"
+if SCORE_CENTERING and ROLLOUT_ENGINE != "vllm":
+  # The vanilla rollout never populates topk_logprobs, so the loss would fall
+  # back to plain GRPO with no warning. Fail loudly instead.
+  raise ValueError(
+      "--score_centering requires ROLLOUT_ENGINE=vllm; got "
+      f"{ROLLOUT_ENGINE!r}."
+  )
 
 # ====== Paths (env-driven so the same image runs anywhere) ======
 MODEL_VERSION = "google/gemma-4-E2B-it"
@@ -441,6 +484,11 @@ base_rollout_dict = {
     "top_p": TOP_P,
     "top_k": TOP_K,
     "return_logprobs": True,
+    # Score Centering needs the sampler's top-k logprobs per generated token.
+    # GRPOLearner also raises this, but only after RLEngine.__init__ has
+    # already frozen it into the vLLM engine's `max_logprobs`, so it has to be
+    # set here to take effect.
+    "num_logprobs": SCORE_CENTERING_TOP_K if SCORE_CENTERING else 1,
     "max_tokens_to_generate": MAX_RESPONSE_LENGTH,
 }
 
@@ -557,6 +605,12 @@ grpo_config = GRPOConfig(
     # importance ratios.
     sampler_is="token",
     sampler_is_threshold=2.0,
+    score_centering=SCORE_CENTERING,
+    score_centering_top_k=SCORE_CENTERING_TOP_K,
+    score_centering_eps=SCORE_CENTERING_EPS,
+    exact_token_continuity=(
+        False if args.no_exact_token_continuity else None
+    ),
     advantage_estimator=args.advantage_estimator,
 )
 
@@ -611,4 +665,7 @@ show_hbm_usage("after GRPOLearner creation")
 # Pass test_dataset as the eval set so the learner runs held-out rollouts
 # every EVAL_EVERY_N_STEPS and logs `eval/...` metrics (including
 # trajectory_reward → solve rate) separately from train metrics.
-grpo_trainer.train(train_dataset, eval_dataset=test_dataset)
+grpo_trainer.train(
+    train_dataset,
+    eval_dataset=None if args.disable_eval else test_dataset,
+)
