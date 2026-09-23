@@ -29,6 +29,7 @@ export PRIORITY_CLASS="${PRIORITY_CLASS:-medium}"
 export SERVICE_ACCOUNT="xpk-sa"
 export CPU_MACHINE="n2d-standard-64"
 export USE_DYNAMIC_SLICING="true"
+export TPU_RESERVATION="${TPU_RESERVATION:-ghostfish-pogoag4tylwed}"
 export ENABLE_PATHWAYS_PERSISTENCE=1
 
 # Pathways & Raiden Images and settings (from Google doc)
