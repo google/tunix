@@ -101,7 +101,7 @@ def parse_args(argv=None):
       default=42,
       help="Engine RNG seed; concurrent request ordering can affect samples.",
   )
-  p.add_argument("--enable_thinking", type=boolean, default=True)
+  p.add_argument("--enable_thinking", type=boolean, default=False)
   p.add_argument("--enable_prefix_caching", type=boolean, default=False)
   p.add_argument("--checkpoint_storage_use_ocdbt", type=boolean, default=True)
   p.add_argument("--checkpoint_storage_use_zarr3", type=boolean, default=False)

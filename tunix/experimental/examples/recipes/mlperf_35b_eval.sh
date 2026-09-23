@@ -105,11 +105,11 @@ export VLLM_ENABLE_V1_MULTIPROCESSING=0
 export BATCH_SIZE="${BATCH_SIZE:-16}"
 export NUM_GENERATIONS="${NUM_GENERATIONS:-4}"
 export DATASET_SPLIT="${DATASET_SPLIT:-validation}"
-export TASKS_LIMIT="${TASKS_LIMIT:-64}"
+export TASKS_LIMIT="${TASKS_LIMIT:-0}"
 
 # Sampling Parameters
-export TEMPERATURE="1.0"
-export TOP_P="1.0"
+export TEMPERATURE="0.1"
+export TOP_P="0.95"
 export TOP_K="-1"
 
 export EPISODE_TIMEOUT_SECS=1800
@@ -128,13 +128,14 @@ export IMAGE_REWRITE_PREFIX="${IMAGE_REWRITE_PREFIX:-europe-west4-docker.pkg.dev
 export MAX_WARMPOOL_REPLICAS=2
 export ROLLOUT_MAX_CONCURRENCY=256
 export MAX_CONCURRENCY=256
-export STEP_TIMEOUT_SECS=300
-export REWARD_TIMEOUT_SECS=180
+export ENABLE_THINKING="${ENABLE_THINKING:-false}"
+export STEP_TIMEOUT_SECS=60
+export REWARD_TIMEOUT_SECS=60
 export FLUSH_EVERY_N_STEPS=1
 export MAX_TURNS=30
 export MAX_PROMPT_LENGTH=4096
 export MAX_CONTEXT_LIMIT=61440
-export MAX_RESPONSE_LENGTH=12288
+export MAX_RESPONSE_LENGTH=61440
 
 # ==============================================================================
 # Execution Dispatch

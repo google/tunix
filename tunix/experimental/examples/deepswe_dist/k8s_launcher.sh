@@ -930,6 +930,7 @@ start_eval() {
           --top_p=${TOP_P} \
           --top_k=${TOP_K} \
           --seed=${SEED} \
+          --enable_thinking=${ENABLE_THINKING:-false} \
           --enable_prefix_caching=${ENABLE_PREFIX_CACHING} \
           --checkpoint_storage_use_ocdbt=${CHECKPOINT_STORAGE_USE_OCDBT:-true} \
           --checkpoint_storage_use_zarr3=${CHECKPOINT_STORAGE_USE_ZARR3:-false} \
