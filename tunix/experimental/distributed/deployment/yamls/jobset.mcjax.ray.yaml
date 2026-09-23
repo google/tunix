@@ -34,7 +34,7 @@ ${QUEUE_LABEL}spec:
         template:
           metadata:
             annotations:
-              cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+              cluster-autoscaler.kubernetes.io/safe-to-evict: "false"${TPU_ANNOTATIONS}
               # # place on nodes in the same block
               # kueue.k8s.io/podset-required-topology: cloud.google.com/gce-topology-block
               # # place on nodes in the same slice

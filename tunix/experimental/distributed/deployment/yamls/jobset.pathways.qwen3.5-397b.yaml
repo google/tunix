@@ -221,7 +221,7 @@ ${QUEUE_LABEL}spec:
         template:
           metadata:
             annotations:
-              cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+              cluster-autoscaler.kubernetes.io/safe-to-evict: "false"${TPU_ANNOTATIONS}
               # # place on nodes in the same block
               # kueue.k8s.io/podset-required-topology: cloud.google.com/gce-topology-block
               # # place on nodes in the same slice
@@ -267,7 +267,7 @@ ${QUEUE_LABEL}spec:
               - --server_port=29005
               - --resource_manager_address=$$(PATHWAYS_HEAD):29001
               - --gcs_scratch_location=${GCS_SCRATCH_LOCATION}
-              env:
+              env:${PATHWAYS_WORKER_EXTRA_ENV}
               - name: TPU_MIN_LOG_LEVEL
                 value: "0"
               - name: TF_CPP_MIN_LOG_LEVEL
