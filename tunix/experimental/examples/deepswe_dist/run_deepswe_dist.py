@@ -721,15 +721,10 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         trajectory_store=cluster.trajectory_store,
         max_staleness=args.max_staleness,
         sync_weights=(args.weight_sync_mode != weight_sync.WeightSyncMode.NONE),
-        on_step_begin=lambda step: (
-            mllog_utils.train_start(args, step=0)
-            if args.rcp_logging and step == 0
-            else None,
-            logging.info(
-                ">>> DeepSWE step %d starting | policy_version=%d",
-                step,
-                step,
-            ),
+        on_step_begin=lambda step: logging.info(
+            ">>> DeepSWE step %d starting | policy_version=%d",
+            step,
+            step,
         ),
         on_step_end=lambda step, result: (
             logging.info(
@@ -755,6 +750,8 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
 
     logging.info("Bringing up remote workers through ClusterOrchestrator...")
     cluster.bring_up_workers(dummy_data=None)
+    if args.rcp_logging:
+      mllog_utils.train_start(args, step=0)
     logging.info("Starting DeepSWE StandardRLProgram execution...")
     cluster.run(
         program=program,
