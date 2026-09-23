@@ -527,7 +527,21 @@ def build_maxtext_config(
     argv.extend(_pairs)
 
   logging.info("MaxText config argv: %s", argv)
-  return pyconfig.initialize(argv)
+  try:
+    return pyconfig.initialize(argv)
+  except ValueError as e:
+    if "pathways_checkpointing_impl" in str(e):
+      argv = [
+          arg
+          for arg in argv
+          if not arg.startswith("pathways_checkpointing_impl=")
+      ]
+      logging.warning(
+          "Installed MaxText does not recognize 'pathways_checkpointing_impl'. "
+          "Retrying initialization without it."
+      )
+      return pyconfig.initialize(argv)
+    raise
 
 
 def create_maxtext_mesh(maxtext_config: Any) -> Any:

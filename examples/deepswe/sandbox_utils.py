@@ -230,7 +230,11 @@ def init_global_fleet(
     elif not scaffold:
       scaffold = scaffold_env or "r2egym"
 
-    fleet_ns = namespace or os.getenv("NAMESPACE", "rl-tunix-swebench")
+    fleet_ns = (
+        namespace
+        or os.getenv("SANDBOX_NAMESPACE")
+        or os.getenv("NAMESPACE", "priority-dev")
+    )
     if node_selector is None:
       key = os.environ.get("NODE_SELECTOR_KEY")
       val = os.environ.get("NODE_SELECTOR_VAL")
@@ -346,7 +350,10 @@ def init_global_fleet(
       fleet_inst._install_teardown_hooks()
     fleet_inst._torndown = False
     if hasattr(fleet_inst, "preflight"):
-      fleet_inst.preflight()
+      try:
+        fleet_inst.preflight()
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        logging.warning("Preflight CRD check skipped (non-fatal): %s", e)
     if hasattr(fleet_inst, "plan"):
       fleet_inst.plan()
       logging.info(

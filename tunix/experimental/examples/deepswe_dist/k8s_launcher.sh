@@ -518,22 +518,23 @@ start_trainer() {
 }
 
 stop_rollout() {
+  local replicas=${ROLLOUT_WORKERS:-${ROLLOUT_REPLICAS:-1}}
   if [[ "$DRY_RUN" == "true" ]]; then
     echo "kubectl delete jobset ${ROLLOUT_ID} -n ${K8S_NAMESPACE}"
-    echo "kubectl delete workload -l jobset.sigs.k8s.io/jobset-name=${ROLLOUT_ID} -n ${K8S_NAMESPACE}"
-    if [[ ${ROLLOUT_REPLICAS} -gt 1 ]]; then
-      echo "kubectl delete jobset $(seq -f "${ROLLOUT_ID}-%g" 0 $((ROLLOUT_REPLICAS - 1))) -n ${K8S_NAMESPACE}"
-      for ((i=0; i<ROLLOUT_REPLICAS; i++)); do
-        echo "kubectl delete workload -l jobset.sigs.k8s.io/jobset-name=${ROLLOUT_ID}-${i} -n ${K8S_NAMESPACE}"
+    kubectl get workload -n "${K8S_NAMESPACE}" -o name 2>/dev/null | grep -E "jobset-${ROLLOUT_ID}-[a-f0-9]+" | xargs -r echo kubectl delete -n "${K8S_NAMESPACE}"
+    if [[ ${replicas} -gt 1 ]]; then
+      echo "kubectl delete jobset $(seq -f "${ROLLOUT_ID}-%g" 0 $((replicas - 1))) -n ${K8S_NAMESPACE}"
+      for ((i=0; i<replicas; i++)); do
+        kubectl get workload -n "${K8S_NAMESPACE}" -o name 2>/dev/null | grep -E "jobset-${ROLLOUT_ID}-${i}-[a-f0-9]+" | xargs -r echo kubectl delete -n "${K8S_NAMESPACE}"
       done
     fi
   else
     kubectl delete jobset "${ROLLOUT_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found=true
-    kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name=${ROLLOUT_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
-    if [[ ${ROLLOUT_REPLICAS} -gt 1 ]]; then
-      kubectl delete jobset $(seq -f "${ROLLOUT_ID}-%g" 0 $((ROLLOUT_REPLICAS - 1))) -n "${K8S_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
-      for ((i=0; i<ROLLOUT_REPLICAS; i++)); do
-        kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name=${ROLLOUT_ID}-${i}" -n "${K8S_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
+    kubectl get workload -n "${K8S_NAMESPACE}" -o name 2>/dev/null | grep -E "jobset-${ROLLOUT_ID}-[a-f0-9]+" | xargs -r kubectl delete -n "${K8S_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
+    if [[ ${replicas} -gt 1 ]]; then
+      kubectl delete jobset $(seq -f "${ROLLOUT_ID}-%g" 0 $((replicas - 1))) -n "${K8S_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
+      for ((i=0; i<replicas; i++)); do
+        kubectl get workload -n "${K8S_NAMESPACE}" -o name 2>/dev/null | grep -E "jobset-${ROLLOUT_ID}-${i}-[a-f0-9]+" | xargs -r kubectl delete -n "${K8S_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
       done
     fi
   fi
@@ -617,6 +618,13 @@ if cfg:
   elif [[ -n "${IMAGE_REWRITE_PREFIX}" ]]; then
     sandbox_env="IMAGE_REWRITE_PREFIX=\"${IMAGE_REWRITE_PREFIX}\""
   fi
+  local dynamic_slicing_single_host=false
+  if [[ "${ROLLOUT_TPU_SLICE}" =~ ^(tpu7x|tpu-v7x-slice):2x2x1 ]]; then
+    if [[ "${USE_DYNAMIC_SLICING}" == "true" || "${USE_DYNAMIC_SLICING}" == "1" || -z "${USE_DYNAMIC_SLICING}" ]]; then
+      dynamic_slicing_single_host=true
+    fi
+  fi
+
   for i in $(seq ${ROLLOUT_START_INDEX:-0} $((ROLLOUT_REPLICAS - 1))); do
     local replica_id="${ROLLOUT_ID}"
     local worker_id="${ROLLOUT_ID}"
@@ -624,6 +632,12 @@ if cfg:
       replica_id="${ROLLOUT_ID}-${i}"
       worker_id="${ROLLOUT_ID}-${i}"
     fi
+
+    local extra_generator_flags=()
+    if [[ "$dynamic_slicing_single_host" == "true" ]]; then
+      extra_generator_flags+=(--omit_slice_topology)
+    fi
+
     "$PYTHON_BIN" "$YAML_GENERATOR" \
       "${YAML_DIR}/${ROLLOUT_JOBSET_YAML}" \
       --jobset_name="${replica_id}" \
@@ -632,6 +646,7 @@ if cfg:
       --tpu_slice=${ROLLOUT_TPU_SLICE} \
       --worker_container_image="${TUNIX_IMAGE}" \
       --worker_container_port="${ROLLOUT_PORT}" \
+      "${extra_generator_flags[@]}" \
       --worker_startup_command=" \
         PYTHONUNBUFFERED=1 \
         TUNIX_IS_INTERNAL_ENV=false \
@@ -694,7 +709,36 @@ if cfg:
           ${DEBUG:+--debug} \
       " \
       | apply_manifest
+
+    if [[ "$dynamic_slicing_single_host" == "true" && "$DRY_RUN" != "true" ]]; then
+      local slice_topo="${ROLLOUT_TPU_SLICE#*:}"
+      echo "Applying single-host dynamic slicing patch for ${replica_id} (${slice_topo})..."
+      kubectl patch jobset "${replica_id}" -n "${K8S_NAMESPACE}" --type='json' \
+        -p="[{\"op\": \"add\", \"path\": \"/spec/replicatedJobs/0/template/spec/template/metadata/annotations/cloud.google.com~1gke-tpu-slice-topology\", \"value\": \"${slice_topo}\"}]"
+    fi
   done
+
+  if [[ "$dynamic_slicing_single_host" == "true" && "$DRY_RUN" != "true" ]]; then
+    local replicas=${ROLLOUT_WORKERS:-${ROLLOUT_REPLICAS:-1}}
+    echo "Waiting for Kueue to create initial workloads before recycling..."
+    sleep 3
+    for ((i=0; i<replicas; i++)); do
+      local replica_id="${ROLLOUT_ID}"
+      if [[ ${replicas} -gt 1 ]]; then
+        replica_id="${ROLLOUT_ID}-${i}"
+      fi
+      local wl_name
+      wl_name=$(kubectl get workload -n "${K8S_NAMESPACE}" -o name 2>/dev/null | grep -E "jobset-${replica_id}-[a-f0-9]+" | head -n 1 | sed 's|^workload.*/||' || true)
+      if [[ -n "${wl_name}" ]]; then
+        local has_topo
+        has_topo=$(kubectl get workload "${wl_name}" -n "${K8S_NAMESPACE}" -o jsonpath='{.spec.podSets[0].template.metadata.annotations.cloud\.google\.com/gke-tpu-slice-topology}' 2>/dev/null || true)
+        if [[ -z "${has_topo}" ]]; then
+          echo "Recycling workload ${wl_name} for ${replica_id} to apply dynamic slicing..."
+          kubectl delete workload "${wl_name}" -n "${K8S_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
+        fi
+      fi
+    done
+  fi
 }
 
 start_mock_trainer() {

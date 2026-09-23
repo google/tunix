@@ -71,6 +71,15 @@ def main() -> None:
       help="Enable GKE dynamic slicing annotations and topology selectors.",
   )
   parser.add_argument(
+      "--omit_slice_topology",
+      action="store_true",
+      default=False,
+      help=(
+          "Omit cloud.google.com/gke-tpu-slice-topology annotation from initial"
+          " JobSet manifest (used for single-host dynamic slice admission flow)."
+      ),
+  )
+  parser.add_argument(
       "--head_nodepool",
       default=None,
       help="Kubernetes nodepool for Pathways head pod (e.g. cpu-np).",
@@ -286,16 +295,21 @@ def main() -> None:
     )
 
   if use_dynamic_slicing and slice_topology:
-    anno_lines = [
-        f'cloud.google.com/gke-tpu-slice-topology: "{slice_topology}"',
-        'cloud.google.com/skip-tpu-webhook-check: "true"',
-    ]
     if slice_size and slice_size > 1:
-      anno_lines.extend([
+      anno_lines = [
+          f'cloud.google.com/gke-tpu-slice-topology: "{slice_topology}"',
+          'cloud.google.com/skip-tpu-webhook-check: "true"',
           "kueue.x-k8s.io/podset-required-topology: cloud.google.com/gce-topology-block",
           f"kueue.x-k8s.io/podset-slice-required-topology: cloud.google.com/gke-tpu-partition-{slice_topology}-id",
           f'kueue.x-k8s.io/podset-slice-size: "{slice_size}"',
-      ])
+      ]
+    else:
+      anno_lines = [
+          'cloud.google.com/skip-tpu-webhook-check: "true"',
+          'kueue.x-k8s.io/podset-required-topology: cloud.google.com/gke-tpu-partition-4x4x4-id',
+      ]
+      if not args.omit_slice_topology:
+        anno_lines.insert(0, f'cloud.google.com/gke-tpu-slice-topology: "{slice_topology}"')
     tpu_annotations = "\n" + "\n".join(f"              {line}" for line in anno_lines)
   else:
     tpu_annotations = ""
