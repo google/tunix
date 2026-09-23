@@ -129,13 +129,31 @@ class HealthMonitorTest(absltest.TestCase):
     ):
       monitor._executor.submit(lambda: None)
 
+  def test_poll_isolates_errors_by_default(self):
+    worker0 = mock_worker.MockWorker("w0", roles={"rollout"})
+    worker1 = mock_worker.MockWorker("w1", roles={"rollout"})
+    worker1._state = WorkerState.READY
+    registry = worker_registry.WorkerRegistry()
+    registry.register(worker0)
+    registry.register(worker1)
+    monitor = health_monitor.HealthMonitor(registry)
+    with mock.patch.object(
+        worker0, "heartbeat", side_effect=RuntimeError("heartbeat failed")
+    ):
+      reports = monitor.poll()
+    self.assertEqual(reports["w0"].state, WorkerState.ERROR)
+    self.assertIn("heartbeat failed", reports["w0"].last_error or "")
+    self.assertEqual(reports["w1"].state, WorkerState.READY)
+
   def test_poll_cancels_remaining_futures_on_exception(self):
     worker0 = mock_worker.MockWorker("w0", roles={"trainer"})
     worker1 = mock_worker.MockWorker("w1", roles={"trainer"})
     registry = worker_registry.WorkerRegistry()
     registry.register(worker0)
     registry.register(worker1)
-    monitor = health_monitor.HealthMonitor(registry, max_workers=1)
+    monitor = health_monitor.HealthMonitor(
+        registry, max_workers=1, isolate_errors=False
+    )
     with mock.patch.object(
         worker0, "heartbeat", side_effect=RuntimeError("heartbeat failed")
     ):

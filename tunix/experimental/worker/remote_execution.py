@@ -889,8 +889,19 @@ def stable_route_hash(route_key: Any) -> int:
   return int.from_bytes(digest.digest(), "big")
 
 
+def hrw_route_score(actor_id: str, route_key: Any) -> int:
+  """Computes a deterministic 64-bit Rendezvous (HRW) hash score for (actor_id, route_key)."""
+  payload = (
+      f"{actor_id}\x00{type(route_key).__qualname__}:{route_key}".encode(
+          "utf-8"
+      )
+  )
+  digest = hashlib.blake2b(payload, digest_size=8, person=b"tnx_hrw_47")
+  return int.from_bytes(digest.digest(), "big")
+
+
 class RoutingActorPool(ActorPool):
-  """ActorPool with smart task routing (`route_key affinity, round-robin fallback`).
+  """ActorPool with smart task routing (`route_key` HRW affinity, load-aware selection, and dynamic membership).
 
   Args:
     actors: Initial sequence of worker actor handles or string URI targets.
@@ -906,19 +917,223 @@ class RoutingActorPool(ActorPool):
       *,
       router: Optional[Union[Callable[..., ActorHandle], Any]] = None,
   ):
+    self._lock = threading.RLock()
     self._actors: List[ActorHandle] = []
+    self._next_actor_seq: int = 0
+    self._available_event: Optional[asyncio.Event] = None
+    self._available_event_loop: Optional[asyncio.AbstractEventLoop] = None
     for a in actors or []:
       self.add_actor(a)
     self._idx = 0
     self.router = router
 
-  def add_actor(self, actor: Union[str, ActorHandle]) -> None:
+  @property
+  def actors(self) -> List[ActorHandle]:
+    """Returns a thread-safe snapshot list of active ActorHandles in the pool."""
+    with self._lock:
+      return list(self._actors)
+
+  def __len__(self) -> int:
+    with self._lock:
+      return len(self._actors)
+
+  def __bool__(self) -> bool:
+    with self._lock:
+      return bool(self._actors)
+
+  def __contains__(self, actor_or_id: Any) -> bool:
+    with self._lock:
+      if isinstance(actor_or_id, str):
+        return any(self._resolve_actor_id(a) == actor_or_id for a in self._actors)
+      return actor_or_id in self._actors
+
+  def _resolve_actor_id(
+      self,
+      actor: ActorHandle,
+      explicit_worker_id: Optional[str] = None,
+  ) -> str:
+    """Resolves and caches a stable `worker_id` on `actor`."""
+    with self._lock:
+      resolved = (
+          explicit_worker_id
+          or getattr(actor, "worker_id", None)
+          or getattr(actor, "target_address", None)
+      )
+      if not resolved:
+        resolved = f"actor_{self._next_actor_seq}"
+        self._next_actor_seq += 1
+      setattr(actor, "worker_id", resolved)
+      return resolved
+
+  def _signal_availability(self) -> None:
+    """Notifies coroutines awaiting `wait_for_available_actor()` when pool membership changes.
+
+    Used during the zero-healthy-worker grace window (`no_worker_timeout_s`): when
+    all rollout workers fail (`len(pool) == 0`), the orchestrator awaits
+    `wait_for_available_actor()` instead of crashing immediately, and wakes up as
+    soon as a replacement worker registers via `upsert_actor()`.
+    """
+    with self._lock:
+      event = self._available_event
+      loop = self._available_event_loop
+      has_actors = bool(self._actors)
+      if event is None:
+        return
+      action = event.set if has_actors else event.clear
+      if loop is not None and loop.is_running():
+        loop.call_soon_threadsafe(action)
+      else:
+        action()
+
+  def add_actor(
+      self,
+      actor: Union[str, ActorHandle],
+      *,
+      worker_id: Optional[str] = None,
+  ) -> None:
+    """Appends an actor to the pool (or use `upsert_actor` for idempotent rejoin)."""
+    self.upsert_actor(actor, worker_id=worker_id)
+
+  def upsert_actor(
+      self,
+      actor: Union[str, ActorHandle],
+      *,
+      worker_id: Optional[str] = None,
+  ) -> ActorHandle:
+    """Adds a new actor or replaces an existing actor with the same `worker_id`."""
     if isinstance(actor, str):
-      self._actors.append(ActorHandle.from_address(actor))
+      handle = ActorHandle.from_address(actor)
     elif isinstance(actor, ActorHandle):
-      self._actors.append(actor)
+      handle = actor
     else:
       raise TypeError(f"Expected str or ActorHandle, got {type(actor)}")
+
+    with self._lock:
+      resolved_id = self._resolve_actor_id(handle, explicit_worker_id=worker_id)
+      for idx, existing in enumerate(self._actors):
+        if existing is handle or self._resolve_actor_id(existing) == resolved_id:
+          self._actors[idx] = handle
+          self._signal_availability()
+          return handle
+
+      self._actors.append(handle)
+      self._signal_availability()
+      return handle
+
+  def remove_actor(
+      self, actor_or_id: Union[str, ActorHandle]
+  ) -> Optional[ActorHandle]:
+    """Removes an actor by handle, `worker_id`, or `target_address` from the pool."""
+    with self._lock:
+      for idx, existing in enumerate(self._actors):
+        existing_id = self._resolve_actor_id(existing)
+        existing_addr = getattr(existing, "target_address", None)
+        if existing is actor_or_id or (
+            isinstance(actor_or_id, str)
+            and actor_or_id in (existing_id, existing_addr)
+        ):
+          removed = self._actors.pop(idx)
+          self._signal_availability()
+          return removed
+      return None
+
+  def get_actor(self, worker_id: str) -> Optional[ActorHandle]:
+    """Looks up an actor in the pool by `worker_id` or `target_address`."""
+    with self._lock:
+      for existing in self._actors:
+        if worker_id in (
+            self._resolve_actor_id(existing),
+            getattr(existing, "target_address", None),
+        ):
+          return existing
+      return None
+
+  def hrw_score(
+      self, actor_or_id: Union[str, ActorHandle], route_key: Any
+  ) -> int:
+    """Returns the 64-bit Rendezvous (HRW) score for `(actor, route_key)`."""
+    actor_id = (
+        actor_or_id
+        if isinstance(actor_or_id, str)
+        else self._resolve_actor_id(actor_or_id)
+    )
+    return hrw_route_score(actor_id, route_key)
+
+  async def wait_for_available_actor(
+      self, timeout_s: Optional[float] = None
+  ) -> bool:
+    """Blocks until at least one healthy actor is in the pool, or returns False on timeout.
+
+    Synchronizes `_available_event` initialization under `self._lock` so a worker
+    joining concurrently on the gRPC discovery thread cannot race with event setup.
+    """
+    loop = asyncio.get_running_loop()
+    with self._lock:
+      if self._actors:
+        return True
+      if self._available_event is None or self._available_event_loop is not loop:
+        self._available_event = asyncio.Event()
+        self._available_event_loop = loop
+      self._available_event.clear()
+      event = self._available_event
+
+    try:
+      await asyncio.wait_for(event.wait(), timeout=timeout_s)
+      return bool(self)
+    except asyncio.TimeoutError:
+      return bool(self)
+
+  def select_actor(
+      self,
+      *,
+      route_key: Optional[Any] = None,
+      load_fn: Optional[Callable[[ActorHandle], int]] = None,
+      max_load: Optional[int] = None,
+  ) -> Optional[ActorHandle]:
+    """Selects an eligible actor using capacity gating, least-inflight load, and HRW tie-breaking.
+
+    Args:
+      route_key: Optional routing key for HRW tie-breaking or sticky affinity.
+      load_fn: Optional callable returning the current in-flight count for an
+        actor. When provided, selects the eligible actor with minimum load.
+      max_load: Optional per-worker maximum in-flight cap
+        (`max_inflight_per_worker`). Actors with `load_fn(actor) >= max_load`
+        are excluded; returns `None` if all actors are at capacity.
+
+    Returns:
+      The selected `ActorHandle`, or `None` if no actor has available capacity.
+    """
+    with self._lock:
+      if not self._actors:
+        return None
+
+      if load_fn is None:
+        kwargs = {"route_key": route_key} if route_key is not None else {}
+        return self._get_next_actor(kwargs=kwargs)
+
+      eligible = (
+          [a for a in self._actors if load_fn(a) < max_load]
+          if max_load is not None
+          else list(self._actors)
+      )
+      if not eligible:
+        return None
+
+      if route_key is not None:
+        return min(
+            eligible,
+            key=lambda a: (load_fn(a), -self.hrw_score(a, route_key)),
+        )
+
+      # Without a route_key, break load ties via round-robin offset.
+      start_idx = self._idx
+      self._idx += 1
+      n = len(eligible)
+      best_offset = min(
+          range(n),
+          key=lambda i: (load_fn(eligible[(start_idx + i) % n]), i),
+      )
+      return eligible[(start_idx + best_offset) % n]
 
   def _get_next_actor(
       self,
@@ -926,15 +1141,15 @@ class RoutingActorPool(ActorPool):
       args: Sequence[Any] = (),
       kwargs: Optional[Dict[str, Any]] = None,
   ) -> ActorHandle:
-    """Selects target actor via custom router, route_key affinity, or round-robin.
+    """Selects target actor via custom router, HRW route_key affinity, or round-robin.
 
     Args:
       method_name: Target remote method being invoked.
       args: Positional arguments passed to the method call.
       kwargs: Keyword arguments passed to the method call. If this dictionary
-        contains `route_key`, process-stable hash routing
-        (`stable_route_hash(route_key) % N`) is used for sticky endpoint
-        affinity (popped prior to remote dispatch).
+        contains `route_key`, Rendezvous (HRW) hashing is used for sticky
+        endpoint affinity (or explicit modulo indexing when `route_key` is a
+        non-negative `int`).
 
     Returns:
       The selected `ActorHandle` target worker.
@@ -942,44 +1157,46 @@ class RoutingActorPool(ActorPool):
     Raises:
       RuntimeError: If the pool contains no registered ActorHandles.
     """
-
-    if not self._actors:
-
-      raise RuntimeError(
-          "RoutingActorPool contains no registered ActorHandles."
-      )
-
-    kwargs = kwargs or {}
-    if self.router is not None:
-      if (
-          method_name
-          and hasattr(self.router, method_name)
-          and callable(getattr(self.router, method_name))
-      ):
-        return getattr(self.router, method_name)(self._actors, args, kwargs)
-      elif callable(self.router):
-        return self.router(self._actors, method_name, args, kwargs)  # pyrefly: ignore[bad-return]
-      else:
-        raise TypeError(
-            f"Router object {type(self.router)} must provide a method matching "
-            f"'{method_name}' or be callable."
+    with self._lock:
+      if not self._actors:
+        raise RuntimeError(
+            "RoutingActorPool contains no registered ActorHandles."
         )
 
-    # Check for sticky routing key (e.g. route_key for KV-cache locality)
-    route_key = kwargs.get("route_key")
+      kwargs = kwargs or {}
+      if self.router is not None:
+        if (
+            method_name
+            and hasattr(self.router, method_name)
+            and callable(getattr(self.router, method_name))
+        ):
+          return getattr(self.router, method_name)(self._actors, args, kwargs)
+        elif callable(self.router):
+          return self.router(self._actors, method_name, args, kwargs)  # pyrefly: ignore[bad-return]
+        else:
+          raise TypeError(
+              f"Router object {type(self.router)} must provide a method matching "
+              f"'{method_name}' or be callable."
+          )
 
-    if route_key is not None:
-      # Not builtin `hash()`: it salts `str` per process, so placement would
-      # not survive a restart.
-      # TODO(tunix-dev): `% len(self._actors)` remaps every key when pool
-      # membership changes, not just the keys on the affected actor. Switch to
-      # rendezvous (HRW) hashing before adding actor eviction.
-      return self._actors[stable_route_hash(route_key) % len(self._actors)]
+      # Check for sticky routing key (e.g. route_key for KV-cache locality)
+      route_key = kwargs.get("route_key")
 
-    # Default fallback: round-robin load balancing across all endpoints
-    actor = self._actors[self._idx % len(self._actors)]
-    self._idx += 1
-    return actor
+      if route_key is not None:
+        if isinstance(route_key, int):
+          shard_idx = stable_route_hash(route_key)
+          return self._actors[shard_idx % len(self._actors)]
+        # Rendezvous (Highest Random Weight) hashing: removing or adding an actor
+        # only remaps keys belonging to that actor, keeping all other keys pinned.
+        return max(
+            self._actors,
+            key=lambda actor: self.hrw_score(actor, route_key),
+        )
+
+      # Default fallback: round-robin load balancing across all endpoints
+      actor = self._actors[self._idx % len(self._actors)]
+      self._idx += 1
+      return actor
 
   def submit(self, method_name: Optional[str] = None, *args, **kwargs) -> Any:
     actor = self._get_next_actor(method_name, args, kwargs)

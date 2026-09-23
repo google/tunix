@@ -71,9 +71,11 @@ class HealthMonitor:
       clock: Callable[[], float] = time.monotonic,
       max_workers: int = 32,
       executor: concurrent.futures.ThreadPoolExecutor | None = None,
+      isolate_errors: bool = True,
   ):
     self._registry = registry
     self._max_workers = max_workers
+    self._isolate_errors = isolate_errors
     self._deadlines = (
         dict(DEFAULT_STATE_DEADLINES_S)
         if state_deadlines_s is None
@@ -103,12 +105,26 @@ class HealthMonitor:
     self.close()
     return False
 
-  def poll(self) -> dict[str, datatypes.HealthReport]:
+  def poll(
+      self,
+      *,
+      isolate_errors: bool | None = None,
+  ) -> dict[str, datatypes.HealthReport]:
     """Polls every worker once, updating state-entry timestamps.
+
+    Args:
+      isolate_errors: When True (or when the monitor was constructed with
+        `isolate_errors=True`), exceptions raised by individual
+        `worker.heartbeat()` calls are caught and recorded as
+        `HealthReport(state=WorkerState.ERROR, last_error=...)` instead of
+        aborting the poll across all remaining workers.
 
     Returns:
       A mapping of worker_id -> the HealthReport captured this poll.
     """
+    effective_isolate = (
+        self._isolate_errors if isolate_errors is None else isolate_errors
+    )
     reports: dict[str, datatypes.HealthReport] = {}
     worker_ids = self._registry.worker_ids()
     live_ids = set(worker_ids)
@@ -126,6 +142,20 @@ class HealthMonitor:
         return wid, None
       try:
         return wid, worker.heartbeat()
+      except Exception as exc:  # pylint: disable=broad-exception-caught
+        if effective_isolate:
+          logging.warning(
+              "Heartbeat failed for worker %r (isolated): %s: %s",
+              wid,
+              type(exc).__name__,
+              exc,
+          )
+          return wid, datatypes.HealthReport(
+              state=WorkerState.ERROR,
+              last_error=f"{type(exc).__name__}: {exc}",
+          )
+        abort_event.set()
+        raise
       except BaseException:
         abort_event.set()
         raise

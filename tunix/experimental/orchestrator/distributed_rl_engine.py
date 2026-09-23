@@ -131,6 +131,29 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       return await res
     return res
 
+  def _select_rollout_worker(
+      self,
+      req: datatypes.RolloutRequest,
+      *,
+      routed_by_key: dict[str, remote_execution.ActorHandle],
+      active_actors: set[remote_execution.ActorHandle],
+      load_fn: Any,
+  ) -> remote_execution.ActorHandle:
+    """Selects a rollout worker for `req` using sticky `traj_id` affinity and load balancing."""
+    worker = routed_by_key.get(req.traj_id)
+    if worker is None or worker not in active_actors:
+      worker = self._rollout_pool.select_actor(
+          route_key=req.traj_id,
+          load_fn=load_fn,
+      )
+      if worker is None:
+        raise RuntimeError(
+            "Failed to select an available rollout worker for trajectory"
+            f" {req.traj_id!r}."
+        )
+      routed_by_key[req.traj_id] = worker
+    return worker
+
   async def dispatch_rollout_requests(
       self,
       requests: Sequence[datatypes.RolloutRequest],
@@ -142,6 +165,9 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         len(requests),
         len(self._rollout_workers),
     )
+    batch_loads: collections.Counter[Any] = collections.Counter()
+    routed_by_key: dict[str, remote_execution.ActorHandle] = {}
+    active_actors = set(self._rollout_pool.actors)
     for req in requests:
       prompt_id = getattr(req, "prompt_id", "")
       group_index = getattr(req, "group_index", 0)
@@ -152,9 +178,13 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           group_index,
           req.request_id,
       )
-      worker = self._rollout_pool._get_next_actor(
-          kwargs={"route_key": req.traj_id}
+      worker = self._select_rollout_worker(
+          req,
+          routed_by_key=routed_by_key,
+          active_actors=active_actors,
+          load_fn=lambda a: batch_loads[a],
       )
+      batch_loads[worker] += 1
       res = worker.dispatch_task(method_name="generate", requests=[req])
       if inspect.isawaitable(res):
         await res
@@ -396,9 +426,14 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     worker_to_requests: dict[Any, list[datatypes.RolloutRequest]] = (
         collections.defaultdict(list)
     )
+    routed_by_key: dict[str, remote_execution.ActorHandle] = {}
+    active_actors = set(self._rollout_pool.actors)
     for req in requests:
-      worker = self._rollout_pool._get_next_actor(
-          kwargs={"route_key": req.traj_id}
+      worker = self._select_rollout_worker(
+          req,
+          routed_by_key=routed_by_key,
+          active_actors=active_actors,
+          load_fn=lambda a: len(worker_to_requests[a]),
       )
       worker_to_requests[worker].append(req)
 
