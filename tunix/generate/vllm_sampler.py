@@ -59,6 +59,7 @@ class VllmConfig:
       default_factory=MappingConfig
   )
   return_logprobs: bool = False
+  num_logprobs: int = 1
   # Capture the MoE expert ids the rollout actually routed through, so training
   # can replay them. Sets vLLM's `enable_return_routed_experts` engine arg.
   return_routed_experts: bool = False
@@ -776,7 +777,9 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       sampling_params.n = multi_sampling
       sampling_params.temperature = temperature
       if self.config.return_logprobs:
-        sampling_params.logprobs = 1  # b/428730696
+        sampling_params.logprobs = max(
+            1, int(self.config.num_logprobs)
+        )  # b/428730696
         sampling_params.prompt_logprobs = None  # b/428730696
       else:
         sampling_params.logprobs = 0
@@ -885,6 +888,21 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     ):
       raise ValueError("Logprobs are not returned from the vLLM.")
 
+    out_topk_ids = None
+    out_topk_logprobs = None
+    if self.config.return_logprobs and self.config.num_logprobs > 1:
+      out_topk_ids = []
+      out_topk_logprobs = []
+      for multi_sampling_output in outputs:
+        single_output = multi_sampling_output.outputs[0]
+        tk_ids, tk_lps = utils.get_topk_logprobs_from_vllm_output(
+            list(single_output.token_ids),
+            single_output.logprobs,  # pyrefly: ignore[bad-argument-type]
+            self.config.num_logprobs,
+        )
+        out_topk_ids.append(tk_ids)
+        out_topk_logprobs.append(tk_lps)
+
     all_input_ids, prompt_lengths, max_prompt_length = (
         utils.left_pad_prompt_tokens(
             prompt_ids,
@@ -900,6 +918,8 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         tokens=out_tokens[0],
         padded_prompt_tokens=all_input_ids,
         logprobs=out_logprobs[0] if self.config.return_logprobs else None,  # pyrefly: ignore[bad-argument-type]
+        topk_token_ids=out_topk_ids,
+        topk_logprobs=out_topk_logprobs,
         routed_experts=(
             out_routed_experts[0] if self.config.return_routed_experts else None
         ),

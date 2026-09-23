@@ -121,6 +121,24 @@ def _mock_generate(
   if max_generation_steps is not None:
     tokens = [t[:max_generation_steps] for t in tokens]
   logprobs = [-np.random.rand(len(tokens[i])) for i in range(batch_size)]
+  top_k = 4
+  topk_token_ids = []
+  topk_logprobs = []
+  for i in range(batch_size):
+    seq_len = len(tokens[i])
+    ids_i = np.zeros((seq_len, top_k), dtype=np.int32)
+    lps_i = np.zeros((seq_len, top_k), dtype=np.float32)
+    for t in range(seq_len):
+      sampled_tok = int(tokens[i][t])
+      ids_i[t, 0] = sampled_tok
+      for k_idx in range(1, top_k):
+        ids_i[t, k_idx] = (sampled_tok + k_idx) % 16 + 1
+      raw_logits = np.array([0.0, -0.5, -1.0, -1.5], dtype=np.float32)
+      norm_lps = raw_logits - np.log(np.sum(np.exp(raw_logits)) + 0.2)
+      lps_i[t] = norm_lps
+      logprobs[i][t] = float(norm_lps[0])
+    topk_token_ids.append(ids_i)
+    topk_logprobs.append(lps_i)
   prompt_lengths = np.array([len(pt) for pt in prompt_tokens], dtype=np.int32)
   max_p_len = max(len(pt) for pt in prompt_tokens)
   padded_prompts = np.array(
@@ -137,6 +155,8 @@ def _mock_generate(
       prompt_lengths=prompt_lengths,
       logits=None,
       logprobs=logprobs if output_logprobs else None,
+      topk_token_ids=topk_token_ids if output_logprobs else None,
+      topk_logprobs=topk_logprobs if output_logprobs else None,
   )
 
 
@@ -2693,6 +2713,307 @@ class ExactTokenContinuityBatchTest(absltest.TestCase):
     self.assertFalse(
         np.array_equal(np.asarray(with_mask), np.asarray(without_mask))
     )
+
+
+class ScoreCenteringTest(parameterized.TestCase):
+  """Unit and integration tests for Score Centering (arXiv:2609.20807)."""
+
+  def test_score_centering_zero_when_trainer_equals_sampler(self):
+    topk_logps = jnp.array(
+        [[[-0.5, -1.2, -2.0, -3.5], [-0.3, -1.5, -2.5, -4.0]]],
+        dtype=jnp.float32,
+    )
+    sc_corr, stats = rl_common.compute_score_centering_correction(
+        trainer_topk_logps=topk_logps,
+        sampler_topk_logps=topk_logps,
+        sampler_is=None,
+    )
+    np.testing.assert_allclose(sc_corr, 0.0, atol=1e-6)
+    np.testing.assert_allclose(stats["abs_coeff_sum"], 0.0, atol=1e-6)
+    np.testing.assert_allclose(stats["tail_ratio_rho"], 1.0, atol=1e-5)
+
+  @parameterized.parameters(
+      dict(sampler_is=None, threshold=2.0),
+      dict(sampler_is="token", threshold=2.0),
+      dict(sampler_is="token", threshold=0.5),
+  )
+  def test_score_centering_exact_expected_score_across_full_vocabulary(
+      self, sampler_is, threshold
+  ):
+    """Verifies O(k) selective_topk_log_softmax + SC matches full-vocab O(V) gradient."""
+    vocab_size = 16
+    top_k = 4
+    rng = np.random.default_rng(42)
+    z_q = jnp.asarray(rng.normal(size=(1, 2, vocab_size)), dtype=jnp.float32)
+    z_p = jnp.asarray(rng.normal(size=(1, 2, vocab_size)), dtype=jnp.float32)
+
+    q_logps_full = jax.nn.log_softmax(z_q, axis=-1)
+    # Extract top-k under sampler q
+    topk_vals, topk_ids = jax.lax.top_k(q_logps_full, top_k)
+    sampled_ids = topk_ids[..., 0]
+
+    # 1. Fast O(k) implementation via selective_topk_log_softmax
+    def fast_loss_fn(logits):
+      _, trainer_topk_logps = rl_common.selective_topk_log_softmax(
+          logits, sampled_ids, topk_ids
+      )
+      sc_corr, _ = rl_common.compute_score_centering_correction(
+          trainer_topk_logps=trainer_topk_logps,
+          sampler_topk_logps=topk_vals,
+          sampler_is=sampler_is,
+          sampler_is_threshold=threshold,
+          eps=1e-12,
+      )
+      return jnp.sum(sc_corr)
+
+    g_fast = jax.grad(fast_loss_fn)(z_p)
+
+    # 2. Explicit O(V) full-vocabulary expected score under the tail approx q_hat
+    def exact_full_vocab_loss_fn(logits):
+      p_logps = jax.nn.log_softmax(logits, axis=-1)
+      p_probs = jax.lax.stop_gradient(jnp.exp(p_logps))
+      q_probs = jnp.exp(q_logps_full)
+      head_mask = jnp.zeros_like(q_probs, dtype=jnp.bool_)
+      for k_i in range(top_k):
+        idx = topk_ids[..., k_i : k_i + 1]
+        head_mask = head_mask | (jnp.arange(vocab_size)[None, None, :] == idx)
+      q_head_mass = jnp.sum(
+          jnp.where(head_mask, q_probs, 0.0), axis=-1, keepdims=True
+      )
+      p_head_mass = jnp.sum(
+          jnp.where(head_mask, p_probs, 0.0), axis=-1, keepdims=True
+      )
+      rho = (1.0 - q_head_mass) / (1.0 - p_head_mass)
+      q_hat = jnp.where(head_mask, q_probs, rho * p_probs)
+      r_hat = jnp.where(head_mask, p_probs / q_probs, 1.0 / rho)
+      if sampler_is == "token":
+        w_hat = jnp.minimum(r_hat, threshold)
+      else:
+        w_hat = jnp.ones_like(r_hat)
+      weights = jax.lax.stop_gradient(q_hat * w_hat)
+      return jnp.sum(weights * p_logps)
+
+    g_exact = jax.grad(exact_full_vocab_loss_fn)(z_p)
+    np.testing.assert_allclose(g_fast, g_exact, rtol=1e-5, atol=1e-6)
+
+  def test_score_centering_handles_padded_neg_inf_slots_without_nan(self):
+    logits = jnp.ones((1, 2, 16), dtype=jnp.float32)
+    input_ids = jnp.array([[1, 2]], dtype=jnp.int32)
+    topk_ids = jnp.array([[[1, 2, 0, 0], [0, 0, 0, 0]]], dtype=jnp.int32)
+    # Token 0 has 2 valid top-k entries and 2 -inf slots; Token 1 is all -inf (padded prompt)
+    sampler_topk_logps = jnp.array(
+        [[
+            [-0.6, -1.2, -jnp.inf, -jnp.inf],
+            [-jnp.inf, -jnp.inf, -jnp.inf, -jnp.inf],
+        ]],
+        dtype=jnp.float32,
+    )
+
+    def loss_fn(z):
+      _, trainer_topk_logps = rl_common.selective_topk_log_softmax(
+          z, input_ids, topk_ids
+      )
+      sc_corr, _ = rl_common.compute_score_centering_correction(
+          trainer_topk_logps=trainer_topk_logps,
+          sampler_topk_logps=sampler_topk_logps,
+          sampler_is="token",
+          sampler_is_threshold=2.0,
+      )
+      return jnp.sum(sc_corr)
+
+    loss_val, grads = jax.value_and_grad(loss_fn)(logits)
+    self.assertTrue(bool(jnp.isfinite(loss_val)))
+    self.assertTrue(bool(jnp.all(jnp.isfinite(grads))))
+
+  @parameterized.parameters(
+      dict(sampler_is=None, chunk_size=0),
+      dict(sampler_is="token", chunk_size=0),
+      dict(sampler_is="token", chunk_size=2),
+  )
+  def test_grpo_loss_fn_with_score_centering(self, sampler_is, chunk_size):
+    batch_size, seq_len, vocab_size, top_k = 2, 4, 16, 4
+    prompt_ids = jnp.ones((batch_size, 3), dtype=jnp.int32)
+    completion_ids = jnp.array([[1, 2, 3, 4], [2, 3, 4, 5]], dtype=jnp.int32)
+    completion_mask = jnp.ones((batch_size, seq_len), dtype=jnp.bool_)
+    advantages = jnp.array([1.0, -0.5], dtype=jnp.float32)
+    old_topk_token_ids = jnp.broadcast_to(
+        jnp.arange(1, top_k + 1, dtype=jnp.int32),
+        (batch_size, seq_len, top_k),
+    )
+    old_topk_logps = jnp.broadcast_to(
+        jnp.array([-0.5, -1.2, -2.0, -3.0], dtype=jnp.float32),
+        (batch_size, seq_len, top_k),
+    )
+    old_per_token_logps = old_topk_logps[..., 0]
+    sampler_is_weights = (
+        jnp.full((batch_size, seq_len), 0.9, dtype=jnp.float32)
+        if sampler_is == "token"
+        else None
+    )
+
+    train_example = agentic_grpo_learner.TrainExample(
+        prompt_ids=prompt_ids,
+        prompt_mask=jnp.ones_like(prompt_ids),
+        completion_ids=completion_ids,
+        completion_mask=completion_mask,
+        ref_per_token_logps=None,
+        advantages=advantages,
+        old_per_token_logps=old_per_token_logps,
+        sampler_is_weights=sampler_is_weights,
+        old_topk_token_ids=old_topk_token_ids,
+        old_topk_logps=old_topk_logps,
+    )
+
+    class LinearLogitModel(nnx.Module):
+
+      def __init__(self):
+        self.bias = nnx.Param(
+            jnp.linspace(-0.5, 0.5, vocab_size, dtype=jnp.float32)
+        )
+
+      def compute_final_logits(self, h):
+        return h
+
+      def __call__(
+          self,
+          inputs,
+          positions,
+          cache,
+          attention_mask,
+          skip_lm_head: bool = False,
+          **kwargs,
+      ):
+        del positions, cache, attention_mask, skip_lm_head, kwargs
+        logits = jnp.broadcast_to(self.bias[...], (*inputs.shape, vocab_size))
+        return logits, None
+
+    model = LinearLogitModel()
+    cfg_sc = agentic_grpo_learner.GRPOConfig(
+        beta=0.0,
+        epsilon=0.2,
+        loss_algo="grpo",
+        use_rollout_logps=True,
+        sampler_is=sampler_is,
+        score_centering=True,
+        score_centering_top_k=top_k,
+    )
+    cfg_sc.temperature = 1.0
+    cfg_no_sc = agentic_grpo_learner.GRPOConfig(
+        beta=0.0,
+        epsilon=0.2,
+        loss_algo="grpo",
+        use_rollout_logps=True,
+        sampler_is=sampler_is,
+        score_centering=False,
+    )
+    cfg_no_sc.temperature = 1.0
+    policy_loss_fn = function_registry.get_policy_loss_fn(cfg_sc.policy_loss_fn)
+
+    out_sc = policy_loss_fn(
+        model=model,
+        train_example=train_example,
+        algo_config=cfg_sc,
+        pad_id=0,
+        eos_id=2,
+        compute_logps_chunk_size=chunk_size,
+    )
+    self.assertIn("score_centering/head_mass_q_mean", out_sc.aux_metrics)
+    self.assertIn("score_centering/head_mass_p_mean", out_sc.aux_metrics)
+    self.assertIn("score_centering/tail_ratio_rho_mean", out_sc.aux_metrics)
+    self.assertIn("score_centering/abs_coeff_sum_mean", out_sc.aux_metrics)
+    self.assertGreater(
+        float(out_sc.aux_metrics["score_centering/abs_coeff_sum_mean"]),
+        0.0,
+    )
+
+    def grad_fn(cfg):
+      def _loss(m):
+        return policy_loss_fn(
+            model=m,
+            train_example=train_example,
+            algo_config=cfg,
+            pad_id=0,
+            eos_id=2,
+            compute_logps_chunk_size=chunk_size,
+        ).primary_loss.compute()
+
+      return nnx.grad(_loss)(model).bias[...]
+
+    g_sc = grad_fn(cfg_sc)
+    g_no_sc = grad_fn(cfg_no_sc)
+    self.assertFalse(np.allclose(np.asarray(g_sc), np.asarray(g_no_sc)))
+
+  def test_grpo_learner_end_to_end_score_centering(self):
+    vocab = _mock_vocab()
+    tokenizer = tokenizer_adapter.TokenizerAdapter(vocab)
+    model = test_common.ToyTransformer(
+        config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
+    )
+    mesh = pxla.thread_resources.env.physical_mesh
+    cluster_config = rl_engine_lib.ClusterConfig(
+        role_to_mesh={
+            rl_engine_lib.Role.ACTOR: mesh,
+            rl_engine_lib.Role.REFERENCE: mesh,
+            rl_engine_lib.Role.ROLLOUT: mesh,
+        },
+        rollout_engine="vanilla",
+        offload_to_cpu=False,
+        training_config=rl_engine_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=10,
+            max_steps=1,
+            mini_batch_size=2,
+            train_micro_batch_size=2,
+            compute_logps_micro_batch_size=2,
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_prompt_length=32,
+            max_tokens_to_generate=8,
+            return_logprobs=True,
+            kv_cache_size=256,
+        ),
+    )
+    rl_engine = rl_engine_lib.RLEngine(
+        actor=model,
+        reference=None,
+        tokenizer=tokenizer,
+        cluster_config=cluster_config,
+    )
+    grpo_config = agentic_grpo_learner.GRPOConfig(
+        beta=0.0,
+        num_generations=2,
+        num_iterations=1,
+        loss_algo="grpo",
+        max_response_length=8,
+        use_rollout_logps=True,
+        sampler_is="token",
+        score_centering=True,
+        score_centering_top_k=4,
+    )
+    learner = agentic_grpo_learner.GRPOLearner(
+        rl_engine=rl_engine,
+        reward_fns=reward_fn_1,
+        algo_config=grpo_config,
+        chat_parser=MockChatParser(),
+    )
+    self.assertEqual(cluster_config.rollout_config.num_logprobs, 4)
+
+    train_ds = _dummy_dataset(MySource(data=["1", "2"], repeat=1), batch_size=2)
+    with (
+        mock.patch.object(
+            learner,
+            "_batch_to_train_example",
+            wraps=learner._batch_to_train_example,
+        ) as mock_b2te,
+        mock.patch.object(
+            rl_engine,
+            "generate",
+            side_effect=functools.partial(_mock_generate, tokenizer=tokenizer),
+        ),
+    ):
+      learner.train(train_ds)
+      self.assertGreater(mock_b2te.call_count, 0)
 
 
 if __name__ == "__main__":

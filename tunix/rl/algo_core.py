@@ -420,7 +420,15 @@ def grpo_loss_fn(
     token_mask = jnp.concatenate(
         [train_example.prompt_mask, completion_attention_mask], axis=1
     )
-  per_token_logps, token_entropy = common.compute_per_token_logps(
+  score_centering = getattr(algo_config, "score_centering", False)
+  old_topk_token_ids = getattr(train_example, "old_topk_token_ids", None)
+  old_topk_logps = getattr(train_example, "old_topk_logps", None)
+  use_score_centering = (
+      score_centering
+      and old_topk_token_ids is not None
+      and old_topk_logps is not None
+  )
+  logp_outputs = common.compute_per_token_logps(
       graphdef,
       state,
       prompt_tokens=train_example.prompt_ids,
@@ -435,12 +443,20 @@ def grpo_loss_fn(
       chunk_size=kwargs.get("compute_logps_chunk_size", 0),
       routed_experts=getattr(train_example, "routed_experts", None),
       token_mask=token_mask,
+      topk_token_ids=old_topk_token_ids if use_score_centering else None,
   )
+  if use_score_centering:
+    per_token_logps, token_entropy, trainer_topk_logps = logp_outputs
+  else:
+    per_token_logps, token_entropy = logp_outputs
+    trainer_topk_logps = None
   per_token_logps = jnp.astype(per_token_logps, jnp.float32)
   # TODO(tsbao): We should handle token level advantages.
   advantages = jnp.astype(train_example.advantages, jnp.float32)
 
-  if train_example.old_per_token_logps is None:
+  if train_example.old_per_token_logps is None or (
+      use_score_centering and getattr(algo_config, "num_iterations", 1) == 1
+  ):
     old_per_token_logps = jax.lax.stop_gradient(per_token_logps)
   else:
     old_per_token_logps = jnp.astype(
@@ -534,6 +550,22 @@ def grpo_loss_fn(
   if sampler_is_weights is not None:
     per_token_loss = per_token_loss * sampler_is_weights.astype(jnp.float32)
 
+  sc_stats = None
+  if use_score_centering:
+    sampler_is_mode = getattr(algo_config, "sampler_is", None)
+    if sampler_is_mode is None and sampler_is_weights is not None:
+      sampler_is_mode = "token"
+    sampler_is_threshold = getattr(algo_config, "sampler_is_threshold", 2.0)
+    sc_eps = getattr(algo_config, "score_centering_eps", 1e-6)
+    sc_logp_correction, sc_stats = common.compute_score_centering_correction(
+        trainer_topk_logps=trainer_topk_logps,  # pyrefly: ignore[bad-argument-type]
+        sampler_topk_logps=old_topk_logps,  # pyrefly: ignore[bad-argument-type]
+        sampler_is=sampler_is_mode,
+        sampler_is_threshold=sampler_is_threshold,
+        eps=sc_eps,
+    )
+    per_token_loss = per_token_loss + adv * sc_logp_correction
+
   # Two independent aggregations of the same policy loss (equal today):
   #   unreduced (sum/denom, deferred) — feeds the gradient
   #   reduced   (eager per-sequence mean, pre-CL form) — metric only
@@ -617,6 +649,19 @@ def grpo_loss_fn(
   else:
     aux["sampler_is/weight_mean"] = jnp.float32(1.0)
     aux["sampler_is/weight_min"] = jnp.float32(1.0)
+  if sc_stats is not None:
+    aux["score_centering/head_mass_q_mean"] = masked_mean(
+        sc_stats["head_mass_q"], completion_mask
+    )
+    aux["score_centering/head_mass_p_mean"] = masked_mean(
+        sc_stats["head_mass_p"], completion_mask
+    )
+    aux["score_centering/tail_ratio_rho_mean"] = masked_mean(
+        sc_stats["tail_ratio_rho"], completion_mask
+    )
+    aux["score_centering/abs_coeff_sum_mean"] = masked_mean(
+        sc_stats["abs_coeff_sum"], completion_mask
+    )
   # We do not always compute KL divergence (e.g. when beta is 0.0 unless
   # force_compute_kl is True).
   if train_example.ref_per_token_logps is not None:

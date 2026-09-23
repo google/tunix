@@ -28,6 +28,12 @@ PER_TOKEN_FIELDS: tuple[str, ...] = (
     "returns",
     "old_values",
     "sampler_is_weights",
+    "old_topk_token_ids",
+    "old_topk_logps",
+)
+PER_TOKEN_2D_FIELDS: tuple[str, ...] = (
+    "old_topk_token_ids",
+    "old_topk_logps",
 )
 
 
@@ -70,10 +76,21 @@ class PackItem:
             f"Unknown per-token field {key!r}; expected one of"
             f" {PER_TOKEN_FIELDS}."
         )
-      if not isinstance(arr, np.ndarray) or arr.ndim != 1 or arr.shape[0] != c:
+      if key in PER_TOKEN_2D_FIELDS:
+        if (
+            not isinstance(arr, np.ndarray)
+            or arr.ndim != 2
+            or arr.shape[0] != c
+        ):
+          raise ValueError(
+              f"PackItem.per_token[{key!r}] must be a 2D numpy array with"
+              f" first dim {c}, got {type(arr).__name__} with shape"
+              f" {getattr(arr, 'shape', None)}."
+          )
+      elif not isinstance(arr, np.ndarray) or arr.shape != (c,):
         raise ValueError(
             f"PackItem.per_token[{key!r}] must be a 1D numpy array or shape"
-            f" (c,), got {type(arr).__name__} with shape"
+            f" ({c},), got {type(arr).__name__} with shape"
             f" {getattr(arr, 'shape', None)}."
         )
 
@@ -160,16 +177,33 @@ def fill_one_chunk(
   return bins, leftover
 
 
+def _alloc_per_token_buffer(
+    name: str, budget: int, ref_item: PackItem | None
+) -> np.ndarray:
+  """Allocates a per-token buffer of length `budget` matching `ref_item`."""
+  if ref_item is not None and name in ref_item.per_token:
+    arr = ref_item.per_token[name]
+    shape = (budget,) + arr.shape[1:]
+    dtype = arr.dtype
+  else:
+    shape = (budget,)
+    dtype = np.int32 if name == "old_topk_token_ids" else np.float32
+  fill_val = -np.inf if name == "old_topk_logps" else 0
+  return np.full(shape, fill_val, dtype=dtype)
+
+
 def pack_bin(
     bin_items: Sequence[PackItem],
     *,
     budget: int,
     pad_id: int,
     carried: Sequence[str],
+    template_item: PackItem | None = None,
 ) -> PackedRow:
   """Packs a single bin of items into a single `[budget]` PackedRow."""
   zeros_i = lambda: np.zeros(budget, dtype=np.int32)
   zeros_f = lambda: np.zeros(budget, dtype=np.float32)
+  ref_item = bin_items[0] if bin_items else template_item
 
   if not bin_items:
     return PackedRow(
@@ -179,7 +213,10 @@ def pack_bin(
         advantages=zeros_f(),
         segment_ids=zeros_i(),
         segment_positions=zeros_i(),
-        per_token={name: zeros_f() for name in carried},
+        per_token={
+            name: _alloc_per_token_buffer(name, budget, ref_item)
+            for name in carried
+        },
         policy_version=None,
         num_real_segments=0,
     )
@@ -194,7 +231,9 @@ def pack_bin(
   advantages = zeros_f()
   segment_ids = zeros_i()
   segment_positions = zeros_i()
-  per_token = {name: zeros_f() for name in carried}
+  per_token = {
+      name: _alloc_per_token_buffer(name, budget, ref_item) for name in carried
+  }
 
   cursor = 0
   for seg, item in enumerate(bin_items, start=1):
@@ -234,10 +273,17 @@ def pack_chunk(
     budget: int,
     pad_id: int,
     carried: Sequence[str],
+    template_item: PackItem | None = None,
 ) -> list[PackedRow]:
   """Packs a sequence of bins of one chunk into a row."""
   return [
-      pack_bin(bin_items, budget=budget, pad_id=pad_id, carried=carried)
+      pack_bin(
+          bin_items,
+          budget=budget,
+          pad_id=pad_id,
+          carried=carried,
+          template_item=template_item,
+      )
       for bin_items in bins
   ]
 

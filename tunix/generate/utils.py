@@ -352,6 +352,50 @@ def get_logprobs_from_vllm_output(
   return extracted
 
 
+def get_topk_logprobs_from_vllm_output(
+    token_ids: List[int],
+    logprobs: List[Optional[Dict[int, Any]]],
+    top_k: int,
+) -> Tuple[np.ndarray, np.ndarray]:
+  """Extracts top-k token IDs and log probs per position from vLLM output.
+
+  Args:
+    token_ids: Sampled token IDs of length L.
+    logprobs: Per-step vLLM logprob dicts mapping token_id -> Logprob object.
+    top_k: Number of top candidates to extract per token step.
+
+  Returns:
+    A tuple `(topk_ids, topk_logps)` of shapes `(L, top_k)` with dtypes
+    `int32` and `float32`. Missing slots are padded with `0` and `-np.inf`.
+  """
+  seq_len = len(token_ids)
+  topk_ids = np.zeros((seq_len, top_k), dtype=np.int32)
+  topk_logps = np.full((seq_len, top_k), -np.inf, dtype=np.float32)
+  if not logprobs or logprobs[0] is None:
+    return topk_ids, topk_logps
+
+  assert (
+      len(logprobs) == seq_len
+  ), f'log probs has {len(logprobs)} number of items != {seq_len} token ids'
+
+  for t, tok_logprobs in enumerate(logprobs):
+    if not tok_logprobs:
+      continue
+    items = sorted(
+        tok_logprobs.items(),
+        key=lambda kv: kv[1].logprob
+        if hasattr(kv[1], 'logprob')
+        else float(kv[1]),
+        reverse=True,
+    )[:top_k]
+    for i, (tid, lp_obj) in enumerate(items):
+      topk_ids[t, i] = int(tid)
+      topk_logps[t, i] = float(
+          lp_obj.logprob if hasattr(lp_obj, 'logprob') else lp_obj
+      )
+  return topk_ids, topk_logps
+
+
 def build_flat_dict(
     flat_state: Iterator[tuple[tuple[str, ...], nnx.State]],
     mappings: Dict[str, tuple[str, tuple[int, ...]]],

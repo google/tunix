@@ -119,6 +119,11 @@ class RolloutConfig:
   # Whether to return logprobs from the sampler.
   return_logprobs: bool = False
 
+  # Number of top logprobs per generated token to return when return_logprobs
+  # is True. Defaults to 1 (only the sampled token's logprob). Set to k (e.g.,
+  # 32 or 128) for top-k score centering.
+  num_logprobs: int = 1
+
   # Whether to capture the MoE experts each token was routed through, so the
   # trainer can replay them instead of re-running its own router. MoE models on
   # a backend that supports capture only; a no-op otherwise.
