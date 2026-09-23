@@ -173,8 +173,15 @@ def create_worker(a):
   class EvaluationWorker(rollout_worker.RolloutWorker):
     """Compact eval RPC over the same manager and collector as training."""
 
+    _stop_event = None
+
     def evaluation_info(self):
       return eval_deepswe.model_profile(a)
+
+    def shutdown(self):
+      if self._stop_event is not None:
+        self._stop_event.set()
+      return True
 
     async def evaluate(self, fields):
       request = datatypes.RolloutRequest(**fields)
@@ -228,13 +235,14 @@ async def serve(a):
   try:
     await worker.sampler.start()
     worker.initialize()
+    stop = asyncio.Event()
+    worker._stop_event = stop
     await server.start_serving_async(a.port)
     logging.info(
         "DeepSWE eval worker ready on port %d: %s",
         a.port,
         eval_deepswe.model_profile(a),
     )
-    stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
       loop.add_signal_handler(sig, stop.set)

@@ -551,6 +551,19 @@ async def run_controller(a):
       writer.write("summary.json", summary)
     finally:
       await asyncio.gather(
+          *(
+              h.asubmit("shutdown")
+              for addr, h in zip(a.worker_addresses, handles)
+              if not addr.startswith((
+                  "localhost:",
+                  "127.0.0.1:",
+                  "grpc://localhost:",
+                  "grpc://127.0.0.1:",
+              ))
+          ),
+          return_exceptions=True,
+      )
+      await asyncio.gather(
           *(h.close() for h in handles), return_exceptions=True
       )
     logging.info("Evaluation summary: %s", json.dumps(summary))

@@ -76,10 +76,11 @@ def terminate(process):
 def main(argv=None):
   argv = list(sys.argv[1:] if argv is None else argv)
   args = eval_deepswe.parse_args(argv)
-  if args.worker_addresses != ["localhost:20001"] or args.port != 20001:
+  local_addr = f"localhost:{args.port}"
+  if local_addr not in args.worker_addresses:
     raise ValueError(
-        "Bundled launcher uses localhost:20001; run roles separately for remote"
-        " workers"
+        f"Bundled launcher requires {local_addr} in --worker_addresses; run"
+        " roles separately for remote-only workers"
     )
   logging.basicConfig(level=logging.INFO)
   worker = controller = None

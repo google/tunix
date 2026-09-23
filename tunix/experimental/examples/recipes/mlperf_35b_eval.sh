@@ -44,13 +44,14 @@ export CHECKPOINT_STORAGE_USE_OCDBT="${CHECKPOINT_STORAGE_USE_OCDBT:-true}"
 export CHECKPOINT_STORAGE_USE_ZARR3="${CHECKPOINT_STORAGE_USE_ZARR3:-true}"
 export EOS_TOKENS="${EOS_TOKENS:-151645,151643}"
 
-# Backend & Rollout Topology (Pathways 4-chip 2x2x1 slice, mesh_fsdp=2, mesh_tp=2; no Trainer)
+# Backend & Rollout Topology (Pathways 4-chip 2x2x1 slices, mesh_fsdp=2, mesh_tp=2; no Trainer)
 export SAMPLER="vllm"
 export WEIGHT_SYNC_MODE="none"
 export ROLLOUT_JOBSET_YAML="jobset.pathways.yaml"
 export ROLLOUT_TPU_SLICE="tpuv5:2x2x1"
 export ROLLOUT_MESH_FSDP=2
 export ROLLOUT_MESH_TP=2
+export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-16}"
 
 # ==============================================================================
 # vLLM Rollout Configuration
@@ -104,6 +105,7 @@ export VLLM_ENABLE_V1_MULTIPROCESSING=0
 export BATCH_SIZE="${BATCH_SIZE:-16}"
 export NUM_GENERATIONS="${NUM_GENERATIONS:-4}"
 export DATASET_SPLIT="${DATASET_SPLIT:-validation}"
+export TASKS_LIMIT="${TASKS_LIMIT:-64}"
 
 # Sampling Parameters
 export TEMPERATURE="1.0"
@@ -114,7 +116,7 @@ export EPISODE_TIMEOUT_SECS=1800
 export DEBUG=1
 
 # DeepSWE Environment & Agent Sandbox
-export DATASET_PATH="gs://mlperf_dataset/benchmark-r2e-gym-easy"
+export DATASET_PATH="${DATASET_PATH:-gs://mlperf_dataset/benchmark-r2e-gym-easy}"
 export USE_AGENT_SANDBOX=1
 export SCAFFOLD="openhands"
 export SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-trellis}"
