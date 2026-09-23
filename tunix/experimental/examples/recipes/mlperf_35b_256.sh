@@ -180,6 +180,8 @@ export WEIGHT_DECAY=0.0
 export MAX_GRAD_NORM="0.125"
 export WARMUP_STEPS_FRACTION=0.0
 export LEARNING_RATE_FINAL_FRACTION=1.0
+export SKIP_STEP_ON_SPIKES="false"
+export SKIP_STEP_ON_NAN="true"
 
 # Architecture & Rematerialization
 export REMAT_POLICY="full"

@@ -138,6 +138,10 @@ def build_maxtext_config(
     attention: str | None = None,
     remat_policy: str = "",
     learning_rate_final_fraction: float | None = None,
+    skip_step_on_spikes: bool = False,
+    skip_step_on_nan: bool = True,
+    skip_step_interval: int = 128,
+    skip_step_scaling_factor: float = 6.0,
 ) -> Any:
   """Builds the MaxText HyperParameters the training engine runs on."""
   pyconfig, _, _ = maxtext_modules()
@@ -434,6 +438,16 @@ def build_maxtext_config(
       *(
           [f"trainable_parameters_mask={trainable_parameters_mask}"]
           if trainable_parameters_mask
+          else []
+      ),
+      *(["skip_step_on_spikes=True"] if skip_step_on_spikes else []),
+      *(["skip_step_on_nan=True"] if skip_step_on_nan else ["skip_step_on_nan=False"]),
+      *(
+          [
+              f"skip_step_interval={skip_step_interval}",
+              f"skip_step_scaling_factor={skip_step_scaling_factor}",
+          ]
+          if skip_step_on_spikes
           else []
       ),
   ])

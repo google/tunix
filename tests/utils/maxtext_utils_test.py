@@ -97,6 +97,36 @@ class MaxTextUtilsTest(absltest.TestCase):
       self.assertIn("learning_rate_final_fraction=1.0", argv)
       self.assertEqual(cfg, mock_cfg)
 
+  def test_build_maxtext_config_skip_step_on_spikes_and_nan(self):
+    mock_pyconfig = mock.MagicMock()
+    mock_engine = mock.MagicMock()
+    mock_mutils = mock.MagicMock()
+
+    mock_cfg = mock.MagicMock()
+    mock_cfg.raw_data_dict = {}
+    mock_pyconfig.initialize.return_value = mock_cfg
+    mock_pyconfig.__file__ = "/fake/maxtext/configs/pyconfig.py"
+
+    with mock.patch.object(
+        maxtext_utils,
+        "maxtext_modules",
+        return_value=(mock_pyconfig, mock_engine, mock_mutils),
+    ), mock.patch("os.path.exists", return_value=True):
+      cfg = maxtext_utils.build_maxtext_config(
+          model_name="gemma2-9b",
+          skip_step_on_spikes=True,
+          skip_step_on_nan=True,
+          skip_step_interval=64,
+          skip_step_scaling_factor=4.5,
+      )
+      mock_pyconfig.initialize.assert_called_once()
+      argv = mock_pyconfig.initialize.call_args[0][0]
+      self.assertIn("skip_step_on_spikes=True", argv)
+      self.assertIn("skip_step_on_nan=True", argv)
+      self.assertIn("skip_step_interval=64", argv)
+      self.assertIn("skip_step_scaling_factor=4.5", argv)
+      self.assertEqual(cfg, mock_cfg)
+
   def test_build_maxtext_config_auto_padded_moe_mlp_dim(self):
     mock_pyconfig = mock.MagicMock()
     mock_cfg = mock.MagicMock()
