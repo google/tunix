@@ -149,6 +149,7 @@ export TRAIN_MICRO_BATCH_SIZE="${TRAIN_MICRO_BATCH_SIZE:-32}"
 export CHECKPOINT_SAVE_INTERVAL_STEPS=0
 export CHECKPOINT_MAX_TO_KEEP=10
 export MAX_STALENESS=${MAX_STALENESS:-0}
+export TRAJECTORY_GROUP_ORDER=${TRAJECTORY_GROUP_ORDER:-arrival}
 
 # Sampling Parameters (explicitly disable top-k, set top-p 1.0 and temperature 1.0)
 export TEMPERATURE="1.0"
