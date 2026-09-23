@@ -27,6 +27,7 @@ message GenerateRequest {
 
 message GenerateResponse {
   string completion = 1;
+  map<string, double> metrics = 2;
 }
 
 service RolloutService {
@@ -40,6 +41,7 @@ message TrainRequest {
 
 message TrainResponse {
   string weights = 1;
+  map<string, double> metrics = 2;
 }
 
 service TrainerService {
