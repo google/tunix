@@ -268,6 +268,11 @@ class RolloutManager:
           prompt_id=request.prompt_id,
           error_message=str(e),
           error_type=type(e).__name__,
+          metadata={
+              **(request.metadata or {}),
+              "prompt_id": request.prompt_id,
+              "group_index": request.group_index,
+          },
       )
     finally:
       self._active_collectors.pop(collector.traj_id, None)

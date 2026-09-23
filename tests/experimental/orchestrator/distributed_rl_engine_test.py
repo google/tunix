@@ -733,6 +733,9 @@ class DistributedRLEngineTest(absltest.TestCase):
       self.mock_rollout_1.get_target_state.side_effect = RuntimeError(
           "Worker connection timed out"
       )
+      self.mock_rollout_2.get_target_state.side_effect = RuntimeError(
+          "Worker connection timed out"
+      )
       with self.assertRaisesRegex(
           RuntimeError, "Worker connection timed out"
       ):
