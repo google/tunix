@@ -435,6 +435,9 @@ stop_rollout_instance() {
 }
 
 stop_rollout() {
+  if [[ $ROLLOUT_REPLICAS -gt 1 ]]; then
+    stop_rollout_instance "${ROLLOUT_ID}"
+  fi
   for ((i = 0; i < ROLLOUT_REPLICAS; i++)); do
     local target_id="${ROLLOUT_ID}"
     if [[ $ROLLOUT_REPLICAS -gt 1 ]]; then
