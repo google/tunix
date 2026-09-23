@@ -64,6 +64,17 @@ def main() -> None:
       default=os.environ.get("PRIORITY_CLASS", "medium"),
       help="Kubernetes priority class for pods.",
   )
+  parser.add_argument(
+      "--use_dynamic_slicing",
+      action=argparse.BooleanOptionalAction,
+      default=None,
+      help="Enable GKE dynamic slicing annotations and topology selectors.",
+  )
+  parser.add_argument(
+      "--head_nodepool",
+      default=None,
+      help="Kubernetes nodepool for Pathways head pod (e.g. cpu-np).",
+  )
 
   parser.add_argument(
       "--pathways_server_image",
@@ -217,6 +228,158 @@ def main() -> None:
       else ""
   )
 
+  if args.use_dynamic_slicing is not None:
+    use_dynamic_slicing = args.use_dynamic_slicing
+  else:
+    use_dynamic_slicing = os.environ.get("USE_DYNAMIC_SLICING", "").lower() in (
+        "true",
+        "1",
+    ) or (tpu_type in ("tpu7x", "tpu-v7x-slice"))
+
+  head_nodepool = args.head_nodepool or os.environ.get("HEAD_NODEPOOL", "")
+  if not head_nodepool and use_dynamic_slicing:
+    head_nodepool = "cpu-np"
+
+  if use_dynamic_slicing:
+    head_node_selector = (
+        f"              cloud.google.com/gke-nodepool: {head_nodepool}"
+        if head_nodepool
+        else f"              node.kubernetes.io/instance-type: {args.cpu_machine or 'n2d-standard-64'}"
+    )
+    head_affinity = ""
+    head_tolerations = (
+        "\n            tolerations:\n"
+        "            - key: \"cloud.google.com/gke-nodepool\"\n"
+        f"              operator: \"{'Equal' if head_nodepool else 'Exists'}\"\n"
+        + (f"              value: \"{head_nodepool}\"\n" if head_nodepool else "")
+        + "              effect: \"NoSchedule\""
+    )
+    tpu_topology_selector = ""
+  else:
+    head_node_selector = (
+        f"              cloud.google.com/gke-tpu-accelerator: {tpu_type}\n"
+        f"              cloud.google.com/gke-tpu-topology: {tpu_topology}"
+        f"{reservation_selector}"
+    )
+    head_affinity = (
+        "            affinity:\n"
+        "              podAffinity:\n"
+        "                requiredDuringSchedulingIgnoredDuringExecution:\n"
+        "                # place on one of the pathways-worker nodes\n"
+        "                - topologyKey: kubernetes.io/hostname\n"
+        "                  labelSelector:\n"
+        "                    matchExpressions:\n"
+        "                    - key: jobset.sigs.k8s.io/jobset-name\n"
+        "                      operator: In\n"
+        "                      values:\n"
+        f"                      - {jobset_name}\n"
+        "                    - key: jobset.sigs.k8s.io/replicatedjob-name\n"
+        "                      operator: In\n"
+        "                      values:\n"
+        "                      - pw-node\n"
+    )
+    head_tolerations = ""
+    tpu_topology_selector = (
+        f"\n              cloud.google.com/gke-tpu-topology: {tpu_topology}"
+        if tpu_topology
+        else ""
+    )
+
+  if use_dynamic_slicing and slice_topology:
+    anno_lines = [
+        f'cloud.google.com/gke-tpu-slice-topology: "{slice_topology}"',
+        'cloud.google.com/skip-tpu-webhook-check: "true"',
+    ]
+    if slice_size and slice_size > 1:
+      anno_lines.extend([
+          "kueue.x-k8s.io/podset-required-topology: cloud.google.com/gce-topology-block",
+          f"kueue.x-k8s.io/podset-slice-required-topology: cloud.google.com/gke-tpu-partition-{slice_topology}-id",
+          f'kueue.x-k8s.io/podset-slice-size: "{slice_size}"',
+      ])
+    tpu_annotations = "\n" + "\n".join(f"              {line}" for line in anno_lines)
+  else:
+    tpu_annotations = ""
+
+  if use_dynamic_slicing:
+    if slice_size and slice_size > 1:
+      pw_node_affinity = (
+          "            affinity:\n"
+          "              nodeAffinity:\n"
+          "                requiredDuringSchedulingIgnoredDuringExecution:\n"
+          "                  nodeSelectorTerms:\n"
+          "                  - matchExpressions:\n"
+          f"                    - key: cloud.google.com/gke-tpu-partition-{slice_topology}-state\n"
+          "                      operator: In\n"
+          "                      values: [\"HEALTHY\", \"DEGRADED\"]\n"
+      )
+      tpu_affinity = pw_node_affinity
+    else:
+      pw_node_affinity = ""
+      tpu_affinity = ""
+  else:
+    pw_node_affinity = (
+        "            affinity:\n"
+        "              # place on nodes in the same nodepool\n"
+        "              podAffinity:\n"
+        "                requiredDuringSchedulingIgnoredDuringExecution:\n"
+        "                - topologyKey: cloud.google.com/gke-nodepool\n"
+        "                  labelSelector:\n"
+        "                    matchExpressions:\n"
+        f"                    - key: jobset.sigs.k8s.io/jobset-name\n"
+        "                      operator: In\n"
+        "                      values:\n"
+        f"                      - {jobset_name}\n"
+        "              # ensure exclusive access to the nodepool (among all jobsets created with this yaml)\n"
+        "              podAntiAffinity:\n"
+        "                requiredDuringSchedulingIgnoredDuringExecution:\n"
+        "                - topologyKey: cloud.google.com/gke-nodepool\n"
+        "                  labelSelector:\n"
+        "                    matchExpressions:\n"
+        f"                    - key: jobset.sigs.k8s.io/jobset-name\n"
+        "                      operator: Exists\n"
+        "                    - key: jobset.sigs.k8s.io/jobset-name\n"
+        "                      operator: NotIn\n"
+        "                      values:\n"
+        f"                      - {jobset_name}\n"
+    )
+    tpu_affinity = ""
+  # Colocated-python checkpointing sidecar. Emitted as a whole block for the same reason
+  # as reservation_selector above: string.Template cannot omit a key when unset, and an
+  # initContainer with an empty image would wedge every pathways-worker pod.
+  #
+  # `restartPolicy: Always` on an initContainer is the k8s native-sidecar pattern: it starts
+  # before, and stays running alongside, the worker container.
+  #
+  # The image MUST match the head image's jax/jaxlib exactly and must contain orbax, since
+  # Orbax ships its serialization callables here by reference via cloudpickle.
+  sidecar_image = os.environ.get("COLOCATED_PYTHON_SIDECAR_IMAGE", "").strip()
+  sidecar_memory = os.environ.get("COLOCATED_PYTHON_SIDECAR_MEMORY", "16Gi").strip()
+  colocated_python_sidecar_block = (
+      f"""
+            initContainers:
+            - name: colocated-python-sidecar
+              image: {sidecar_image}
+              imagePullPolicy: Always
+              env:
+              - name: GRPC_SERVER_ADDRESS
+                value: "0.0.0.0:50051"
+              ports:
+              - containerPort: 50051
+                protocol: TCP
+              resources:
+                requests:
+                  cpu: "4"
+                  memory: {sidecar_memory}
+                limits:
+                  memory: {sidecar_memory}
+              restartPolicy: Always
+              volumeMounts:
+              - mountPath: /tmp
+                name: shared-tmp"""
+      if sidecar_image
+      else ""
+  )
+
   with open(args.template_file, "r") as f:
     template = string.Template(f.read())
     content = template.substitute(
@@ -240,8 +403,16 @@ def main() -> None:
         TPU_MACHINE=tpu_machine,
         TPU_TYPE=tpu_type,
         TPU_TOPOLOGY=tpu_topology,
+        TPU_TOPOLOGY_SELECTOR=tpu_topology_selector,
+        TPU_ANNOTATIONS=tpu_annotations,
+        TPU_AFFINITY=tpu_affinity,
+        PW_NODE_AFFINITY=pw_node_affinity,
+        HEAD_NODE_SELECTOR=head_node_selector,
+        HEAD_AFFINITY=head_affinity,
+        HEAD_TOLERATIONS=head_tolerations,
         RESERVATION_SELECTOR=reservation_selector,
         PRIORITY_CLASS_LINE=priority_class_line,
+        COLOCATED_PYTHON_SIDECAR_BLOCK=colocated_python_sidecar_block,
         PW_INSTANCE_TYPE=pw_instance_type,
         REPLICAS=1,
         COMPLETIONS=num_chips // 4 if num_chips else None,

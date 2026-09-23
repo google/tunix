@@ -20,6 +20,7 @@ from collections.abc import Iterator
 import json
 import logging
 import os
+import re
 from typing import Any
 
 import numpy as np
@@ -144,7 +145,10 @@ def build_prompt_item(
     except (ValueError, TypeError):
       episode_timeout_secs = 5400
   problem = _problem_statement(entry)
-  prompt_id = as_text(entry.get("instance_id") or f"deepswe_{prompt_idx}")
+  raw_prompt_id = as_text(entry.get("instance_id") or f"deepswe_{prompt_idx}")
+  prompt_id = (
+      re.sub(r"[^a-zA-Z0-9_\-]", "_", raw_prompt_id) or f"deepswe_{prompt_idx}"
+  )
   env_config = {
       "entry": entry,
       "prompt_id": prompt_id,

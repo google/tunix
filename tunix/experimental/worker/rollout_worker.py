@@ -128,6 +128,31 @@ class RolloutWorker(abstract_worker.Worker):
   def trajectory_store(self) -> trajectory_store_lib.TrajectoryStore | None:
     return self._trajectory_store
 
+  def with_trajectory_store_config(
+      self, trajectory_store_config: Mapping[str, Any] | None
+  ) -> datatypes.Response:
+    """Configures the worker's TrajectoryStore from the orchestrator."""
+    if self._trajectory_store is not None:
+      self._trajectory_store.close()
+    if self.config is not None:
+      self.config.trajectory_store_config = trajectory_store_config
+    self._trajectory_store = trajectory_store_lib.TrajectoryStore.from_config(
+        trajectory_store_config
+    )
+    self.manager.trajectory_store = self._trajectory_store
+    if self._trajectory_store is not None:
+      logging.info(
+          "[trajectory-store] worker %s built %s",
+          self.worker_id,
+          self._trajectory_store.to_config(),
+      )
+    return datatypes.Response(
+        metadata={
+            "worker_id": self.worker_id,
+            "trajectory_store_configured": self._trajectory_store is not None,
+        }
+    )
+
   @property
   def sampler(self) -> sampler_lib.Sampler:
     return self.manager.sampler

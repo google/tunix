@@ -86,6 +86,8 @@ export MODEL_ID="${MODEL_ID:-Qwen/Qwen3.5-35B-A3B}"
 export TOKENIZER_PATH="${TOKENIZER_PATH:-Qwen/Qwen3.5-35B-A3B}"
 export MAXTEXT_MODEL_NAME="${MAXTEXT_MODEL_NAME:-qwen3.5-35b-a3b}"
 
+export RETURN_ROUTED_EXPERTS="${RETURN_ROUTED_EXPERTS:-false}"
+
 if [[ "${MAXTEXT_MODEL_NAME}" == "qwen3-0.6b" || "${MODEL_NAME}" == "Qwen3-0.6B" ]]; then
   export MAXTEXT_CKPT="${MAXTEXT_CKPT:-gs://maxtext-model-checkpoints/qwen3-0.6b/2025-10-27/scanned/0/items}"
   export TRAINER_BASE_NUM_KV_HEADS="${TRAINER_BASE_NUM_KV_HEADS:-8}"
@@ -104,7 +106,7 @@ else
   export TRAINER_BASE_NUM_KV_HEADS="${TRAINER_BASE_NUM_KV_HEADS:-2}"
   export TRAINABLE_PARAMETERS_MASK="${TRAINABLE_PARAMETERS_MASK:-^(?!.*routed_experts/gate/kernel).*}"
   export VLLM_ENABLE_EXPERT_PARALLEL="${VLLM_ENABLE_EXPERT_PARALLEL:-true}"
-  export VLLM_PREFIX_CACHE_RETENTION_INTERVAL="${VLLM_PREFIX_CACHE_RETENTION_INTERVAL:-256}"
+  export VLLM_PREFIX_CACHE_RETENTION_INTERVAL="${VLLM_PREFIX_CACHE_RETENTION_INTERVAL:-0}"
   if [[ -z "${VLLM_ADDITIONAL_CONFIG:-}" ]]; then
     export VLLM_ADDITIONAL_CONFIG='{"sharding":{"sharding_strategy":{"expert_parallelism":4,"tensor_parallelism":1,"enable_dp_attention":true}},"custom_mamba_cache_multiplier":16,"maxtext_config":{"scan_layers":false,"attention":"vllm_rpa","allow_split_physical_axes":true,"use_multimodal":false,"prefuse_moe_weights":true}}'
   fi

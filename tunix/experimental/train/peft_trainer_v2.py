@@ -105,6 +105,12 @@ class TrainingConfig:
   # large budgets; ``pack_sequences`` raises if a pack exceeds it.
   max_segments_per_packed_row: int | None = None
 
+  # Guard against NaN/Inf gradients or severe gradient spikes poisoning model
+  # weights and optimizer state. When True, updates are skipped if the gradient
+  # norm is non-finite (NaN or Inf), or if it exceeds max_grad_norm_spike.
+  skip_step_on_nan: bool = True
+  max_grad_norm_spike: float | None = None
+
   def get_with_default(self, key: str, default: Any) -> Any:
     val = getattr(self, key)
     if val is None:
@@ -730,9 +736,32 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     norm = optax.global_norm(
         jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), acc_grads)
     )
-    opt_state_dtypes = _opt_state_dtypes(optimizer)
-    optimizer.update(model, acc_grads)
-    _restore_opt_state_float_dtypes(optimizer, opt_state_dtypes)
+    is_finite = jnp.isfinite(norm)
+    if self.config.max_grad_norm_spike is not None:
+      is_ok = jnp.logical_and(is_finite, norm <= self.config.max_grad_norm_spike)
+    else:
+      is_ok = is_finite
+
+    if self.config.skip_step_on_nan:
+      old_m = jax.tree.map(lambda x: x, nnx.state(model))
+      old_o = jax.tree.map(lambda x: x, nnx.state(optimizer))
+      safe_grads = jax.tree.map(
+          lambda g: jnp.where(is_ok, g, jnp.zeros_like(g)), acc_grads
+      )
+      opt_state_dtypes = _opt_state_dtypes(optimizer)
+      optimizer.update(model, safe_grads)
+      _restore_opt_state_float_dtypes(optimizer, opt_state_dtypes)
+      new_m = nnx.state(model)
+      new_o = nnx.state(optimizer)
+      merged_m = jax.tree.map(lambda n, o: jnp.where(is_ok, n, o), new_m, old_m)
+      merged_o = jax.tree.map(lambda n, o: jnp.where(is_ok, n, o), new_o, old_o)
+      nnx.update(model, merged_m)
+      nnx.update(optimizer, merged_o)
+    else:
+      opt_state_dtypes = _opt_state_dtypes(optimizer)
+      optimizer.update(model, acc_grads)
+      _restore_opt_state_float_dtypes(optimizer, opt_state_dtypes)
+
     grad_accumulator.reset()
     return norm
 

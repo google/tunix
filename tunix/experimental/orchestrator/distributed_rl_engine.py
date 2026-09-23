@@ -92,7 +92,13 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     self._trainer_workers = dict(trainer_workers)
     self._inference_workers = dict(inference_workers or {})
     self._policy_version = 0
+    self._restored_next_batch_idx = 0
     self._weight_sync_coordinator = weight_sync_coordinator
+
+  @property
+  def restored_next_batch_idx(self) -> int:
+    """First untrained prompt-batch index from the last restored checkpoint."""
+    return self._restored_next_batch_idx
 
   async def _maybe_configure_trainer_target_state(
       self,
@@ -699,6 +705,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
 
     See `rl_engine_interface.AbstractRLEngine.resume_from_checkpoint`.
     """
+    self._restored_next_batch_idx = 0
     metadata = await self._restore_checkpoint(role=role)
     if not isinstance(metadata, Mapping):
       if metadata is not None:
@@ -724,6 +731,23 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     if restored_step <= 0:
       logging.info("No checkpoint to resume from; starting from step 0.")
       return 0
+
+    try:
+      raw_next_batch = metadata.get("next_batch_idx")
+      restored_next_batch_idx = (
+          int(raw_next_batch)
+          if raw_next_batch is not None
+          else restored_step
+      )
+    except (TypeError, ValueError):
+      logging.warning(
+          "restore_checkpoint returned a non-integer next_batch_idx %r;"
+          " falling back to global_step %d.",
+          metadata.get("next_batch_idx"),
+          restored_step,
+      )
+      restored_next_batch_idx = restored_step
+    self._restored_next_batch_idx = max(restored_step, restored_next_batch_idx)
 
     # Resume at the step boundary; the policy version tracks the restored step.
     # New checkpoints record optimizer and global steps separately. Legacy

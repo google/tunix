@@ -70,11 +70,14 @@ SEED=${SEED:-42}
 SHUFFLE=${SHUFFLE:-true}
 BETA=${BETA:-0.04}
 EPSILON=${EPSILON:-0.2}
+MAX_STALENESS=${MAX_STALENESS:-0}
+TRAJECTORY_GROUP_ORDER=${TRAJECTORY_GROUP_ORDER:-arrival}
 FLUSH_METRICS_EVERY_N_STEPS=${FLUSH_METRICS_EVERY_N_STEPS:-1}
 WANDB_PROJECT=${WANDB_PROJECT:-trellis-gsm8k}
 WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
 WANDB_API_KEY=${WANDB_API_KEY:-}
 TRAJECTORY_LOG_DIR=${TRAJECTORY_LOG_DIR:-}
+TRAJECTORY_STORE_ROOT_DIR=${TRAJECTORY_STORE_ROOT_DIR:-${TRAJECTORY_STORE_ROOT:-}}
 SAMPLER=${SAMPLER:-inprocess_vllm}
 WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
 USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
@@ -86,10 +89,8 @@ EOS_TOKENS=${EOS_TOKENS-'151645,151643'}
 TEMPERATURE=${TEMPERATURE:-1.0}
 TOP_P=${TOP_P:-1.0}
 TOP_K=${TOP_K:--1}
-MAXTEXT_ATTENTION=${MAXTEXT_ATTENTION:-}
-USE_WEIGHT_CONVERTER=${USE_WEIGHT_CONVERTER:-true}
 VERIFY_WEIGHTS=${VERIFY_WEIGHTS:-false}
-MAXTEXT_OUTPUT_DIR=${MAXTEXT_OUTPUT_DIR:-"${ARTIFACT_ROOT}/maxtext_out"}
+
 PYTHON_BIN=${PYTHON_BIN:-python3}
 # DEBUG=1 passes --debug to the runner, which logs full sampler responses.
 DEBUG=${DEBUG:-0}
@@ -125,20 +126,13 @@ TRAINER_TP=${TRAINER_TP:-2}
 
 # tunix runs Tunix's PeftTrainer; maxtext runs MaxText's MaxTextTrainingEngine.
 TRAINER_BACKEND=${TRAINER_BACKEND:-tunix}
-MAXTEXT_CKPT=${MAXTEXT_CKPT:-}
+
+# MaxText configuration: only consulted when TRAINER_BACKEND=maxtext.
+source "${DIR}/../common/maxtext_config.sh"
+
 if [[ "$TRAINER_BACKEND" == "maxtext" ]]; then
-  # MaxText config names are lowercase. Passed to both the trainer and the
-  # rollout, so the two cannot drift.
-  MAXTEXT_MODEL_NAME=${MAXTEXT_MODEL_NAME:-$(printf '%s' "$MODEL_NAME" | tr '[:upper:]' '[:lower:]')}
-  # MaxText shards the batch dimension of every loss input across the fsdp
-  # axis, so the microbatch has to be a multiple of it. The trainer node
-  # enforces this too.
   if (( TRAIN_MICRO_BATCH_SIZE % TRAINER_FSDP != 0 )); then
     TRAIN_MICRO_BATCH_SIZE=$TRAINER_FSDP
-  fi
-  if [[ -z "$MAXTEXT_CKPT" ]]; then
-    echo "Error: TRAINER_BACKEND=maxtext requires MAXTEXT_CKPT (Orbax params-only checkpoint)."
-    exit 1
   fi
 elif [[ "$TRAINER_BACKEND" == "tunix" ]]; then
   # Must stay empty on the tunix backend. A non-empty value puts the rollout on
@@ -150,6 +144,7 @@ else
   echo "Error: Unsupported TRAINER_BACKEND='$TRAINER_BACKEND' (expected 'tunix' or 'maxtext')." >&2
   exit 1
 fi
+
 ROLLOUT_TPU_CHIPS=${ROLLOUT_TPU_CHIPS:-2,3}
 ROLLOUT_FSDP=${ROLLOUT_FSDP:-1}
 ROLLOUT_TP=${ROLLOUT_TP:-2}
@@ -320,37 +315,6 @@ ensure_model_dir() {
   fi
 }
 
-convert_maxtext_ckpt() {
-  if [[ "$TRAINER_BACKEND" != "maxtext" ]]; then
-    return
-  fi
-  if [[ "$MAXTEXT_CKPT" =~ ^gs:// ]]; then
-    echo "Using GCS MAXTEXT_CKPT: $MAXTEXT_CKPT"
-    return
-  fi
-  if [[ -d "$MAXTEXT_CKPT" ]]; then
-    echo "Found existing local MAXTEXT_CKPT: $MAXTEXT_CKPT"
-    return
-  fi
-  local ckpt_base
-  ckpt_base="$(dirname "$(dirname "$MAXTEXT_CKPT")")"
-  echo "Converting HF checkpoint $MODEL_DIR to MaxText Orbax checkpoint at $ckpt_base..."
-  mkdir -p "$ckpt_base"
-  JAX_PLATFORMS=cpu PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" "$PYTHON_BIN" \
-    -m maxtext.checkpoint_conversion.to_maxtext \
-    model_name="${MAXTEXT_MODEL_NAME}" \
-    --hf_model_path="${MODEL_DIR}" \
-    base_output_directory="${ckpt_base}" \
-    scan_layers=True \
-    skip_jax_distributed_system=True \
-    checkpoint_storage_use_zarr3=false \
-    checkpoint_storage_use_ocdbt=false
-  if [[ ! -d "$MAXTEXT_CKPT" ]]; then
-    echo "Error: MaxText checkpoint conversion did not produce expected directory: $MAXTEXT_CKPT"
-    exit 1
-  fi
-}
-
 dump_logs() {
   print_section "trainer.log tail"
   tail -n 200 "$TRAINER_LOG" 2>/dev/null || true
@@ -439,6 +403,8 @@ echo "  mini batch:     $MINI_BATCH_SIZE"
 echo "  beta:           $BETA"
 echo "  epsilon:        $EPSILON"
 echo "  reward mode:    $REWARD_MODE"
+echo "  max staleness:  $MAX_STALENESS"
+echo "  traj order:     $TRAJECTORY_GROUP_ORDER"
 echo "  tfds split:     $TFDS_SPLIT"
 echo "  tfds data dir:  $TFDS_DATA_DIR"
 echo "  shuffle:        $SHUFFLE"
@@ -451,8 +417,6 @@ echo "  weight sync:    $WEIGHT_SYNC_MODE"
 echo "  chat parser:    $CHAT_PARSER"
 echo "  eos tokens:     ${EOS_TOKENS:-<tokenizer default>}"
 echo "  trainer backend:$TRAINER_BACKEND"
-echo "  maxtext model:  ${MAXTEXT_MODEL_NAME:-<unset>}"
-echo "  maxtext ckpt:   ${MAXTEXT_CKPT:-<unset>}"
 echo "  trainer chips:  $TRAINER_TPU_CHIPS"
 echo "  trainer mesh:   fsdp=$TRAINER_FSDP tp=$TRAINER_TP"
 echo "  rollout chips:  $ROLLOUT_TPU_CHIPS"
@@ -552,36 +516,14 @@ echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
       --optimizer_chain_kwargs="{'max_norm': $MAX_GRAD_NORM}"
     )
   fi
-  if [[ -n "$MAXTEXT_CKPT" ]]; then
-    TRAINER_CMD+=(--maxtext_ckpt_path="$MAXTEXT_CKPT")
-  fi
-  if [[ -n "$MAXTEXT_MODEL_NAME" ]]; then
-    TRAINER_CMD+=(--maxtext_model_name="$MAXTEXT_MODEL_NAME")
-  fi
-  if [[ -n "$MAXTEXT_OUTPUT_DIR" ]]; then
-    TRAINER_CMD+=(--maxtext_output_directory="$MAXTEXT_OUTPUT_DIR")
-  fi
-  if [[ -n "$ROLLOUT_TP" ]]; then
-    TRAINER_CMD+=(--rollout_mesh_tp="$ROLLOUT_TP")
-  fi
-  if [[ -n "$USE_WEIGHT_CONVERTER" ]]; then
-    TRAINER_CMD+=(--use_weight_converter="$USE_WEIGHT_CONVERTER")
-  fi
+
+  TRAINER_CMD+=+="$(maxtext_trainer_flags)"
+
   if [[ -n "$MAX_SEQ_TOKEN_PER_TPU" ]]; then
     TRAINER_CMD+=(--max_seq_token_per_tpu="$MAX_SEQ_TOKEN_PER_TPU")
   fi
   if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
     TRAINER_CMD+=(--use_lora)
-  fi
-
-  if [[ -n "$PROFILER_STEPS" ]]; then
-    TRAINER_CMD+=(--profiler_steps=$PROFILER_STEPS)
-  fi
-  if [[ -n "$SKIP_FIRST_N_PROFILER_STEPS" ]]; then
-    TRAINER_CMD+=(--skip_first_n_profiler_steps=$SKIP_FIRST_N_PROFILER_STEPS)
-  fi
-  if [[ -n "$PROFILER_PERIOD" ]]; then
-    TRAINER_CMD+=(--profiler_period=$PROFILER_PERIOD)
   fi
 
   if [[ "${TRAINER_PATHWAYS:-0}" == "1" ]]; then
@@ -631,12 +573,9 @@ echo "Launching rollout node with sampler=$SAMPLER on TPU chips $ROLLOUT_TPU_CHI
     --weight_sync_mode="$WEIGHT_SYNC_MODE"
     --chat_parser="$CHAT_PARSER"
   )
-  if [[ -n "$MAXTEXT_MODEL_NAME" ]]; then
-    ROLLOUT_CMD+=( --maxtext_model_name="$MAXTEXT_MODEL_NAME" )
-  fi
-  if [[ -n "$MAXTEXT_ATTENTION" ]]; then
-    ROLLOUT_CMD+=( --maxtext_attention="$MAXTEXT_ATTENTION" )
-  fi
+
+  ROLLOUT_CMD+="$(maxtext_rollout_flags)"
+
   if [[ -n "$EOS_TOKENS" ]]; then
     ROLLOUT_CMD+=( --eos_tokens="$EOS_TOKENS" )
   fi
@@ -663,21 +602,22 @@ print_process_debug "rollout" "$ROLLOUT_PID"
 
 
 on_shutdown_signal() {
-  SHUTDOWN_SIGNAL_COUNT=$((SHUTDOWN_SIGNAL_COUNT + 1))
-  if (( SHUTDOWN_SIGNAL_COUNT == 1 )); then
-    DRAIN_START_SECONDS=$seconds
-    print_setion "graceful shutdown"
-    echo "Received $1. Draining workers so the trainer can finalize its"
-    echo "checkpoint. Press Ctrl+C again (after ${FORCE_ARM_SECS}s) to ABADON"
-    echo "the in-flight checkpoint and kill workers immediately."
-    exit 130
-  elif (( SECONDS - DRAIN_START_SECONDS < FORCE_ARM_SECS )); then
-    echo "Ignoring rapid $1 (within the ${FORCE_ARM_SECS}s grace period)."
-    echo "Press Ctrl+C again if you really want to abandon the checkpoint."
-  else
-    echo "Received $1. Killing workers immediately."
-    FORCE_KILL=1
-  fi
+  FORCE_KILL=1
+  # SHUTDOWN_SIGNAL_COUNT=$((SHUTDOWN_SIGNAL_COUNT + 1))
+  # if (( SHUTDOWN_SIGNAL_COUNT == 1 )); then
+  #   DRAIN_START_SECONDS=$seconds
+  #   print_setion "graceful shutdown"
+  #   echo "Received $1. Draining workers so the trainer can finalize its"
+  #   echo "checkpoint. Press Ctrl+C again (after ${FORCE_ARM_SECS}s) to ABADON"
+  #   echo "the in-flight checkpoint and kill workers immediately."
+  #   exit 130
+  # elif (( SECONDS - DRAIN_START_SECONDS < FORCE_ARM_SECS )); then
+  #   echo "Ignoring rapid $1 (within the ${FORCE_ARM_SECS}s grace period)."
+  #   echo "Press Ctrl+C again if you really want to abandon the checkpoint."
+  # else
+  #   echo "Received $1. Killing workers immediately."
+  #   FORCE_KILL=1
+  # fi
 }
 
 cleanup() {
@@ -826,6 +766,8 @@ echo "Launching CPU orchestrator..."
     --beta="$BETA"
     --epsilon="$EPSILON"
     --reward_mode="$REWARD_MODE"
+    --max_staleness="$MAX_STALENESS"
+    --trajectory_group_order="$TRAJECTORY_GROUP_ORDER"
     --flush_metrics_every_n_steps="$FLUSH_METRICS_EVERY_N_STEPS"
     --tfds_data_dir="$TFDS_DATA_DIR"
     --tfds_split="$TFDS_SPLIT"
@@ -891,6 +833,9 @@ echo "Launching CPU orchestrator..."
   if [[ -n "$TRAJECTORY_LOG_DIR" ]]; then
     ORCHESTRATOR_CMD+=(--trajectory_log_dir="$TRAJECTORY_LOG_DIR")
   fi
+  if [[ -n "$TRAJECTORY_STORE_ROOT_DIR" ]]; then
+    ORCHESTRATOR_CMD+=(--trajectory_store_root_dir="$TRAJECTORY_STORE_ROOT_DIR")
+  fi
 
   export JAX_PLATFORMS=cpu
   export PYTHONUNBUFFERED=1
@@ -907,4 +852,4 @@ echo "Launching CPU orchestrator..."
   exit "$exit_code"
 }
 
-echo "Distributed GSM8K GRPO chain demo (vLLM) finished successfully."
+echo "Distributed GSM8K GRPO chain demo finished successfully."

@@ -33,6 +33,9 @@ ${QUEUE_LABEL}spec:
         completions: ${COMPLETIONS}
         parallelism: ${PARALLELISM}
         template:
+          metadata:
+            annotations:
+              cluster-autoscaler.kubernetes.io/safe-to-evict: "false"${TPU_ANNOTATIONS}
           spec:
             priorityClassName: ${PRIORITY_CLASS}
             serviceAccountName: ${SERVICE_ACCOUNT}
@@ -41,9 +44,8 @@ ${QUEUE_LABEL}spec:
             restartPolicy: OnFailure
             terminationGracePeriodSeconds: 10
             nodeSelector:
-              cloud.google.com/gke-tpu-accelerator: ${TPU_TYPE}
-              cloud.google.com/gke-tpu-topology: ${TPU_TOPOLOGY}
-            # tolerations:
+              cloud.google.com/gke-tpu-accelerator: ${TPU_TYPE}${TPU_TOPOLOGY_SELECTOR}${RESERVATION_SELECTOR}
+${TPU_AFFINITY}            # tolerations:
             # - key: "google.com/tpu"
             #   operator: "Equal"
             #   value: "present"

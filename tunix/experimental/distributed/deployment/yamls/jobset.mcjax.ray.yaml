@@ -34,12 +34,14 @@ ${QUEUE_LABEL}spec:
         template:
           metadata:
             annotations:
+              cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
               # # place on nodes in the same block
               # kueue.k8s.io/podset-required-topology: cloud.google.com/gce-topology-block
               # # place on nodes in the same slice
               # kueue.x-k8s.io/podset-slice-required-topology: cloud.google.com/gke-tpu-slice-${PODSET_SLICE_TOPOLOGY}-id
               # kueue.x-k8s.io/podset-slice-size: "${PODSET_SLICE_SIZE}"
           spec:
+            serviceAccountName: ${SERVICE_ACCOUNT}
             dnsPolicy: ClusterFirstWithHostNet
             hostNetwork: true
             restartPolicy: OnFailure${PRIORITY_CLASS_LINE}
@@ -103,6 +105,7 @@ ${QUEUE_LABEL}spec:
                   # JobSet's headless service makes pod 0 resolvable at a stable
                   # name, which is the only thing the LeaderWorkerSet variant
                   # (leaderworkerset.mcjax.ray.yaml) gets from LWS_LEADER_ADDRESS.
+                  export RAY_memory_monitor_refresh_ms=0
                   RAY_HEAD="$${JOBSET_NAME}-$${REPLICATED_JOB_NAME}-$${JOB_INDEX}-0.$${JOBSET_NAME}"
                   echo "Ray head: $${RAY_HEAD}, this pod index: $${POD_INDEX}"
 
@@ -166,6 +169,8 @@ ${QUEUE_LABEL}spec:
                   fieldRef:
                     fieldPath: metadata.labels['batch.kubernetes.io/job-completion-index']
               - name: VLLM_ENABLE_V1_MULTIPROCESSING
+                value: "0"
+              - name: RAY_memory_monitor_refresh_ms
                 value: "0"
               ports:
               - containerPort: ${USER_CONTAINER_PORT}

@@ -23,7 +23,6 @@ from typing import Any, Tuple
 from unittest import mock
 from absl.testing import absltest
 from absl.testing import parameterized
-import chex
 from flax import nnx
 import jax
 import jax.numpy as jnp
@@ -1463,6 +1462,69 @@ class V1ParityTest(parameterized.TestCase):
       trainer.train(dummy_datasets(batch_size=4))
     self.assertGreater(fused.call_count, 0)
     split.assert_not_called()
+
+  def test_nan_gradient_skipped_and_params_preserved(self):
+    model, _ = self._two_identical_models()
+    config = peft_trainer_v2.TrainingConfig(
+        eval_every_n_steps=1,
+        max_steps=1,
+        gradient_accumulation_steps=2,
+        skip_step_on_nan=True,
+    )
+    trainer = peft_trainer_v2.PeftTrainer(
+        model, optax.sgd(TEST_LEARNING_RATE), config
+    ).with_gen_model_input_fn(dummy_gen_model_input_fn)
+
+    initial_weights = jax.tree.map(jnp.copy, nnx.state(model, nnx.Param))
+    initial_step = int(trainer.optimizer.step[...])
+
+    # Inject NaN into gradient accumulator
+    nan_grads = jax.tree.map(
+        lambda p: jnp.full_like(p, jnp.nan), nnx.state(model, nnx.Param)
+    )
+    trainer.grad_accumulator.add(nan_grads)
+    trainer.update(cache_nnx_graph=False)
+
+    self.assertTrue(np.isnan(trainer._last_update_grad_norm))
+    self.assertEqual(int(trainer.optimizer.step[...]), initial_step)
+    initial_leaves = jax.tree_util.tree_leaves(jax.device_get(initial_weights))
+    current_leaves = jax.tree_util.tree_leaves(
+        jax.device_get(nnx.state(model, nnx.Param))
+    )
+    for i, c in zip(initial_leaves, current_leaves):
+      np.testing.assert_allclose(np.asarray(i), np.asarray(c))
+
+  def test_grad_norm_spike_skipped(self):
+    model, _ = self._two_identical_models()
+    config = peft_trainer_v2.TrainingConfig(
+        eval_every_n_steps=1,
+        max_steps=1,
+        gradient_accumulation_steps=2,
+        skip_step_on_nan=True,
+        max_grad_norm_spike=10.0,
+    )
+    trainer = peft_trainer_v2.PeftTrainer(
+        model, optax.sgd(TEST_LEARNING_RATE), config
+    ).with_gen_model_input_fn(dummy_gen_model_input_fn)
+
+    initial_weights = jax.tree.map(jnp.copy, nnx.state(model, nnx.Param))
+    initial_step = int(trainer.optimizer.step[...])
+
+    # Inject large gradient into gradient accumulator
+    spike_grads = jax.tree.map(
+        lambda p: jnp.full_like(p, 1000.0), nnx.state(model, nnx.Param)
+    )
+    trainer.grad_accumulator.add(spike_grads)
+    trainer.update(cache_nnx_graph=False)
+
+    self.assertGreater(trainer._last_update_grad_norm, 10.0)
+    self.assertEqual(int(trainer.optimizer.step[...]), initial_step)
+    initial_leaves = jax.tree_util.tree_leaves(jax.device_get(initial_weights))
+    current_leaves = jax.tree_util.tree_leaves(
+        jax.device_get(nnx.state(model, nnx.Param))
+    )
+    for i, c in zip(initial_leaves, current_leaves):
+      np.testing.assert_allclose(np.asarray(i), np.asarray(c))
 
 
 class GradientAccumulatorTest(parameterized.TestCase):

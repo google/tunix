@@ -602,12 +602,14 @@ def sampler_trainer_agreement(
     completion_mask: ArrayLike | None,
     sampler_is: str | None = None,
     sampler_is_threshold: float = 2.0,
+    seq_logprob_error_threshold: float | None = None,
+    segment_ids: ArrayLike | None = None,
 ):
-  """Sampler-vs-trainer agreement metrics and the TIS weights built from them.
+  """Sampler-vs-trainer agreement metrics, sequence error masking, and TIS weights.
 
-  Shared by the RL orchestrator (``rl_program``) and the agentic GRPO learner.
-  The unpacked and packed paths differ only in which representation the two logp
-  tensors come from.
+  Shared by the RL orchestrator (``rl_program``), the agentic GRPO learner, and
+  the standard GRPO learner. The unpacked and packed paths differ only in
+  whether ``segment_ids`` is supplied.
 
   Args:
     rollout_per_token_logps: per-token logps recorded by the sampler at rollout
@@ -619,23 +621,32 @@ def sampler_trainer_agreement(
     sampler_is: if ``"token"``, also builds truncated per-token
       importance-sampling weights; otherwise no weights are returned.
     sampler_is_threshold: clamp applied to the importance-sampling weights.
+    seq_logprob_error_threshold: if set, sequences (or packed segments) whose
+      mean multiplicative probability error ``exp(|trainer_logp - rollout_logp|)``
+      exceeds this threshold are masked out in ``filtered_completion_mask`` (and
+      in ``sampler_is_weights``).
+    segment_ids: optional ``[B, L]`` packing segment IDs (``1..K`` for packed
+      trajectories, ``0`` for padding). When provided, sequence-level error
+      gating operates per segment rather than per row.
 
   Returns:
-    A tuple ``(metrics, sampler_is_weights)`` where ``metrics`` maps a metric
-    name to ``(value, aggregation_fn)`` and ``sampler_is_weights`` is the
-    detached TIS weight array (or None when ``sampler_is != "token"`` or either
-    logp tensor is missing).
+    ``(metrics, sampler_is_weights, filtered_completion_mask)``, where
+    ``filtered_completion_mask`` is ``completion_mask`` with any sequences
+    exceeding ``seq_logprob_error_threshold`` masked to 0 (or the unchanged
+    ``completion_mask`` when ``seq_logprob_error_threshold`` is None).
   """
   metrics = {}
   sampler_is_weights = None
+  filtered_completion_mask = completion_mask
   if rollout_per_token_logps is None or trainer_per_token_logps is None:
-    return metrics, sampler_is_weights
+    return metrics, sampler_is_weights, filtered_completion_mask
 
   if completion_mask is None:
     raise ValueError(
         "Completion mask is required for sampler-trainer agreement metrics."
     )
 
+  orig_mask_dtype = jnp.asarray(completion_mask).dtype
   rollout_per_token_logps = np.asarray(rollout_per_token_logps)
   trainer_per_token_logps = np.asarray(trainer_per_token_logps)
   completion_mask = np.asarray(completion_mask)
@@ -657,12 +668,16 @@ def sampler_trainer_agreement(
   # equals exactly 0.0 -- that value can legitimately occur for near-certain
   # tokens and excluding them removes the most consistent positions from the
   # statistic, inflating the per-position mean.
-  mask = completion_mask.astype(jnp.bool_)
+  mask = jnp.asarray(completion_mask, dtype=jnp.bool_)
   mask_f = mask.astype(jnp.float32)
   mask_sum = jnp.maximum(mask_f.sum(), 1.0)
   diff = jnp.abs(rollout_per_token_logps - trainer_per_token_logps)
   diff_mean = float((diff * mask_f).sum() / mask_sum)
   diff_max = float(jnp.where(mask, diff, 0.0).max())
+  # Multiplicative probability error: exp(min(|trainer_logp - rollout_logp|, 20))
+  token_mult_err = jnp.exp(jnp.minimum(diff, 20.0))
+  mult_err_mean = float((token_mult_err * mask_f).sum() / mask_sum)
+  mult_err_max = float(jnp.where(mask, token_mult_err, 0.0).max())
   # Probability-space diff is more representative than logp_diff for
   # confidence agreement: logp can diverge arbitrarily for very
   # low-probability tokens whose contribution to the ratio is negligible.
@@ -683,25 +698,82 @@ def sampler_trainer_agreement(
   metrics.update({
       "sampler_trainer/logp_diff_mean": (diff_mean, np.mean),
       "sampler_trainer/logp_diff_max": (diff_max, np.max),
+      "sampler_trainer/mult_prob_error_mean": (mult_err_mean, np.mean),
+      "sampler_trainer/mult_prob_error_max": (mult_err_max, np.max),
       "sampler_trainer/prob_diff_mean": (prob_diff_mean, np.mean),
       "sampler_trainer/prob_diff_max": (prob_diff_max, np.max),
       "sampler_trainer/probs_pearson_corr": (pearson, np.mean),
   })
   logging.info(
-      "sampler-trainer: logp_diff=(%.5f,%.5f) prob_diff=(%.5f,%.5f)"
-      " pearson=%.5f",
+      "sampler-trainer: logp_diff=(%.5f,%.5f) mult_err=(%.5f,%.5f)"
+      " prob_diff=(%.5f,%.5f) pearson=%.5f",
       diff_mean,
       diff_max,
+      mult_err_mean,
+      mult_err_max,
       prob_diff_mean,
       prob_diff_max,
       pearson,
   )
 
+  if seq_logprob_error_threshold is not None:
+    if segment_ids is None:
+      seq_tok_cnt = jnp.sum(mask_f, axis=-1, keepdims=True)
+      seq_mult_err = jnp.sum(
+          token_mult_err * mask_f, axis=-1, keepdims=True
+      ) / jnp.maximum(seq_tok_cnt, 1.0)
+      active_seq = seq_tok_cnt > 0
+      keep_seq = (seq_mult_err <= seq_logprob_error_threshold) & active_seq
+      num_active = jnp.maximum(jnp.sum(active_seq.astype(jnp.float32)), 1.0)
+      num_masked = jnp.sum((~keep_seq & active_seq).astype(jnp.float32))
+      keep_token_mask = keep_seq
+    else:
+      seg_ids_jnp = jnp.maximum(
+          jnp.asarray(segment_ids, dtype=jnp.int32), 0
+      )
+      if seg_ids_jnp.shape != completion_mask.shape:
+        raise ValueError(
+            f"Shape mismatch: `segment_ids` ({seg_ids_jnp.shape}) must match "
+            f"`completion_mask` ({completion_mask.shape})."
+        )
+      num_segments = int(jnp.max(seg_ids_jnp)) + 1
+      seg_err_sum = segmented_sum(
+          token_mult_err * mask_f,
+          seg_ids_jnp,
+          num_segments,
+      )
+      seg_tok_cnt = segmented_count(seg_ids_jnp, num_segments, mask=mask_f)
+      seg_mult_err = seg_err_sum / jnp.maximum(seg_tok_cnt, 1.0)
+      active_seg = (seg_tok_cnt > 0).at[:, 0].set(False)
+      keep_seg = (seg_mult_err <= seq_logprob_error_threshold) & active_seg
+      num_active = jnp.maximum(jnp.sum(active_seg.astype(jnp.float32)), 1.0)
+      num_masked = jnp.sum((~keep_seg & active_seg).astype(jnp.float32))
+      keep_token_mask = jnp.take_along_axis(keep_seg, seg_ids_jnp, axis=1)
+
+    filtered_completion_mask = jnp.where(
+        keep_token_mask, jnp.asarray(completion_mask), 0
+    ).astype(orig_mask_dtype)
+    completion_mask = filtered_completion_mask
+    masked_frac = float(num_masked / num_active)
+    masked_count = float(num_masked)
+    metrics.update({
+        "sampler_trainer/seq_error_masked_frac": (masked_frac, np.mean),
+        "sampler_trainer/seq_error_masked_count": (masked_count, np.sum),
+    })
+    logging.info(
+        "sampler_trainer/seq_error_masking: masked=%.0f/%.0f (%.4f) at"
+        " threshold=%.2f",
+        masked_count,
+        float(num_active),
+        masked_frac,
+        seq_logprob_error_threshold,
+    )
+
   # Truncated importance-sampling weights: per-token trainer-vs-sampler log
   # ratio, masked to assistant tokens, clamped at the threshold, detached.
   # The policy loss picks these up via ``train_example.sampler_is_weights``.
   if sampler_is == "token":
-    asst_mask_f = completion_mask.astype(jnp.float32)
+    asst_mask_f = jnp.asarray(completion_mask, dtype=jnp.float32)
     log_ratio = trainer_per_token_logps - rollout_per_token_logps
     log_ratio = jnp.clip(log_ratio, min=-20.0, max=20.0)
     sampler_is_weights = jax.lax.stop_gradient(
@@ -732,7 +804,7 @@ def sampler_trainer_agreement(
         frac_clipped,
         sampler_is_threshold,
     )
-  return metrics, sampler_is_weights
+  return metrics, sampler_is_weights, filtered_completion_mask
 
 
 def compute_chunked_logps(

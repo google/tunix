@@ -73,6 +73,8 @@ export USE_LORA=${USE_LORA:-0}
 export REWARD_MODE=${REWARD_MODE:-env}
 export BETA=${BETA:-0}
 export EPSILON=${EPSILON:-0.2}
+export MAX_STALENESS=${MAX_STALENESS:-0}
+export TRAJECTORY_GROUP_ORDER=${TRAJECTORY_GROUP_ORDER:-arrival}
 export DEBUG=${DEBUG:-0}
 export SAMPLER=${SAMPLER:-inprocess_vllm}
 export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
@@ -81,18 +83,21 @@ export CHAT_PARSER=${CHAT_PARSER:-raw}
 export CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-1}
 export CHECKPOINT_MAX_TO_KEEP=${CHECKPOINT_MAX_TO_KEEP:-10}
 export CHECKPOINT_ROOT_DIRECTORY=${CHECKPOINT_ROOT_DIRECTORY:-checkpoints}
+export CHECKPOINT_ASYNC=${CHECKPOINT_ASYNC:-true}
 export ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE:-0}
 export CKPT_D2H_CONCURRENT_GB=${CKPT_D2H_CONCURRENT_GB:-8}
+# Orbax Pathways impl: "persistence" (default) or "colocated_python". Selecting
+# colocated_python requires COLOCATED_PYTHON_SIDECAR_IMAGE, whose jax/jaxlib must match
+# the trainer image exactly and which must contain orbax.
+export PATHWAYS_CHECKPOINTING_IMPL=${PATHWAYS_CHECKPOINTING_IMPL:-persistence}
+export COLOCATED_PYTHON_SIDECAR_IMAGE=${COLOCATED_PYTHON_SIDECAR_IMAGE:-}
+export COLOCATED_PYTHON_SIDECAR_MEMORY=${COLOCATED_PYTHON_SIDECAR_MEMORY:-16Gi}
 
-# MaxText trainer configuration: only consulted when TRAINER_BACKEND=maxtext
-export MAXTEXT_MODEL_NAME=${MAXTEXT_MODEL_NAME:-qwen3-1.7b}
-export MAXTEXT_CKPT=${MAXTEXT_CKPT:-}
-export MAXTEXT_OUTPUT_DIR=${MAXTEXT_OUTPUT_DIR:-artifacts/math_gsm8k_dist/maxtext}
-# Padded MoE MLP intermediate dimension; must match rollout TP padding for MoE models.
-export TRAINER_PADDED_MOE_MLP_DIM=${TRAINER_PADDED_MOE_MLP_DIM:-}
 # Optional: enable experimental batched-RPA attention kernel for rollout.
 export ROLLOUT_USE_BATCHED_RPA=${ROLLOUT_USE_BATCHED_RPA:-}
-export ROLLOUT_MAXTEXT_ATTENTION=${ROLLOUT_MAXTEXT_ATTENTION:-}
+
+# MaxText configuration: only consulted when TRAINER_BACKEND=maxtext.
+source "${LAUNCHER_DIR}/../common/maxtext_config.sh"
 
 # MoE & Weight Sync Flags
 export PREFUSE_MOE_WEIGHTS=${PREFUSE_MOE_WEIGHTS:-true}
@@ -108,6 +113,7 @@ export WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
 export WANDB_API_KEY=${WANDB_API_KEY:-}
 export LOG_DIR=${LOG_DIR:-}
 export TRAJECTORY_LOG_DIR=${TRAJECTORY_LOG_DIR:-}
+export TRAJECTORY_STORE_ROOT_DIR=${TRAJECTORY_STORE_ROOT_DIR:-${TRAJECTORY_STORE_ROOT:-}}
 export TFDS_DATA_DIR=${TFDS_DATA_DIR:-"artifacts/data"}
 export TFDS_SPLIT=${TFDS_SPLIT:-train}
 export FLUSH_METRICS_EVERY_N_STEPS=${FLUSH_METRICS_EVERY_N_STEPS:-1}
@@ -130,6 +136,8 @@ export TRAINER_TPU_SLICE=${TRAINER_TPU_SLICE:-tpuv5e:4x4}
 export TRAINER_MESH_FSDP=${TRAINER_MESH_FSDP:-16}
 export TRAINER_MESH_TP=${TRAINER_MESH_TP:-1}
 export TRAINER_MESH_EXPERT=${TRAINER_MESH_EXPERT:-1}
+# Context-parallel degree for the trainer; shards the sequence axis.
+export TRAINER_MESH_CONTEXT=${TRAINER_MESH_CONTEXT:-1}
 
 export PATHWAYS_SERVER_IMAGE=${PATHWAYS_SERVER_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest}
 export PATHWAYS_PROXY_IMAGE=${PATHWAYS_PROXY_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:latest}
@@ -145,11 +153,30 @@ export USER_CONTAINER_MEMORY=${USER_CONTAINER_MEMORY:-48G}
 export USER_CONTAINER_MEMORY_LIMIT=${USER_CONTAINER_MEMORY_LIMIT:-70G}
 export PATHWAYS_WORKER_MEMORY=${PATHWAYS_WORKER_MEMORY:-100G}
 export TRAINER_EXTRA_ENV=${TRAINER_EXTRA_ENV:-}
+# Extra `KEY=VALUE` pairs prefixed to the rollout worker command, mirroring
+# TRAINER_EXTRA_ENV. Space separated.
+export ROLLOUT_EXTRA_ENV=${ROLLOUT_EXTRA_ENV:-}
+# Extra env for the orchestrator container, space separated. The H2D weight-sync
+# timeout lives here: the orchestrator drives the transfer, and its default
+# (300-600 s) is too short for a 739 GiB 397B model.
+export ORCHESTRATOR_EXTRA_ENV=${ORCHESTRATOR_EXTRA_ENV:-}
 
 export ROLLOUT_JOBSET_YAML=${ROLLOUT_JOBSET_YAML:-leaderworkerset.mcjax.ray.yaml}
 export ROLLOUT_TPU_SLICE=${ROLLOUT_TPU_SLICE:-tpuv5e:4x4}
 export ROLLOUT_MESH_FSDP=${ROLLOUT_MESH_FSDP:-1}
 export ROLLOUT_MESH_TP=${ROLLOUT_MESH_TP:-16}
+# Expert parallelism for the rollout. Required, not optional, for fully-MoE
+# models whose per-expert intermediate dim cannot absorb the tensor-parallel
+# degree. ROLLOUT_MESH_TP * ROLLOUT_MESH_EXPERT must divide the model's head
+# counts, because tpu-inference derives the attention/GDN head divisor from the
+# product of the ('model', 'expert', 'dcp') axes.
+#
+# run_rollout_node.py has no --mesh_expert; it reads expert_parallel_size out of
+# --vllm_config_json (see `ep_size = vllm_overrides.pop("expert_parallel_size")`).
+# Pass it that way, as deepswe_dist already does, rather than inventing a flag.
+# ROLLOUT_VLLM_CONFIG_JSON, when set, wins -- the degree is merged into it.
+export ROLLOUT_MESH_EXPERT=${ROLLOUT_MESH_EXPERT:-1}
+export ROLLOUT_VLLM_CONFIG_JSON=${ROLLOUT_VLLM_CONFIG_JSON:-}
 
 # Kubernetes Cluster & Scheduling Options
 export K8S_NAMESPACE=${K8S_NAMESPACE:-${NAMESPACE:-default}}
@@ -224,8 +251,11 @@ start_orchestrator() {
         --mini_batch_size=${MINI_BATCH_SIZE} \
         --num_generations=${NUM_GENERATIONS} \
         --max_steps=${MAX_STEPS} \
+        ${RPC_TIMEOUT_S:+--rpc_timeout_s=${RPC_TIMEOUT_S}} \
         --max_prompt_length=${MAX_PROMPT_LENGTH} \
         --max_response_length=${MAX_RESPONSE_LENGTH} \
+        --max_staleness=${MAX_STALENESS} \
+        --trajectory_group_order=${TRAJECTORY_GROUP_ORDER} \
         --train_micro_batch_size=${TRAIN_MICRO_BATCH_SIZE} \
         --rollout_replicas=${ROLLOUT_REPLICAS} \
         ${TEMPERATURE:+--temperature=${TEMPERATURE}} \
@@ -256,9 +286,11 @@ start_orchestrator() {
         $([[ "${USE_ROLLOUT_LOGPS}" == "false" || "${USE_ROLLOUT_LOGPS}" == "False" || "${USE_ROLLOUT_LOGPS}" == "0" ]] && echo --no-use_rollout_logps || echo --use_rollout_logps) \
         ${LOG_DIR:+--log_dir=\"${LOG_DIR}\"} \
         ${TRAJECTORY_LOG_DIR:+--trajectory_log_dir=\"${TRAJECTORY_LOG_DIR}\"} \
+        ${TRAJECTORY_STORE_ROOT_DIR:+--trajectory_store_root_dir=\"${TRAJECTORY_STORE_ROOT_DIR}\"} \
         ${MAX_SEQ_TOKEN_PER_TPU:+--max_seq_token_per_tpu=${MAX_SEQ_TOKEN_PER_TPU}} \
         ${MAX_SEGMENTS_PER_PACKED_ROW:+--max_segments_per_packed_row=${MAX_SEGMENTS_PER_PACKED_ROW}} \
         ${TRAINER_MESH_FSDP:+--trainer_fsdp=${TRAINER_MESH_FSDP}} \
+        $( [[ "${TRAINER_MESH_EXPERT:-1}" -gt 1 ]] && echo "--trainer_expert=${TRAINER_MESH_EXPERT}" ) \
         ${ORCHESTRATOR_EXTRA_ARGS:+${ORCHESTRATOR_EXTRA_ARGS} }${debug_flag} \
     " \
     | apply_manifest
@@ -278,9 +310,7 @@ stop_trainer() {
 }
 
 start_trainer() {
-  local extra_flags=""
   local debug_flag=""
-  local profiler_flags=""
   if [[ "${DEBUG}" == "1" || "${DEBUG}" == "true" || "${DEBUG}" == "True" ]]; then
     debug_flag="--debug"
   fi
@@ -289,62 +319,23 @@ start_trainer() {
     echo "Trainer Pathways images: server=${PATHWAYS_SERVER_IMAGE} proxy=${PATHWAYS_PROXY_IMAGE}"
   fi
 
-  if [[ -n "$PROFILER_STEPS" ]]; then
-    profiler_flags+=" --profiler_steps=${PROFILER_STEPS}"
+  maxtext_require_ckpt
+  local maxtext_args
+  maxtext_args="$(maxtext_trainer_flags)"
+  if [[ "${TRAINER_EXTRA_ARGS:-}" != *"--trainable_parameters_mask"* && -n "${TRAINABLE_PARAMETERS_MASK:-}" ]]; then
+    maxtext_args+=" --trainable_parameters_mask='${TRAINABLE_PARAMETERS_MASK}'"
   fi
-  if [[ -n "$SKIP_FIRST_N_PROFILER_STEPS" ]]; then
-    profiler_flags+=" --skip_first_n_profiler_steps=${SKIP_FIRST_N_PROFILER_STEPS}"
-  fi
-  if [[ -n "$PROFILER_PERIOD" ]]; then
-    profiler_flags+=" --profiler_period=${PROFILER_PERIOD}"
-  fi
-
-  if [[ "${TRAINER_BACKEND}" == "maxtext" ]]; then
-    if [[ -z "${MAXTEXT_CKPT}" ]]; then
-      if [[ "${DRY_RUN}" == "true" ]]; then
-        echo "Warning: TRAINER_BACKEND=maxtext without MAXTEXT_CKPT (Orbax params-only checkpoint)." >&2
-      else
-        echo "Error: TRAINER_BACKEND=maxtext requires MAXTEXT_CKPT (Orbax params-only checkpoint)." >&2
-        exit 1
-      fi
-    fi
-    extra_flags+=" \
-      --maxtext_model_name=${MAXTEXT_MODEL_NAME} \
-      ${TRAINER_PADDED_MOE_MLP_DIM:+--maxtext_padded_moe_mlp_dim=${TRAINER_PADDED_MOE_MLP_DIM}} \
-      ${MAXTEXT_CKPT:+--maxtext_ckpt_path=${MAXTEXT_CKPT}} \
-      --maxtext_output_directory=${MAXTEXT_OUTPUT_DIR} \
-      --mesh_tp=${TRAINER_MESH_TP} \
-      --mesh_expert=${TRAINER_MESH_EXPERT} \
-      ${ROLLOUT_MESH_TP:+--rollout_mesh_tp=${ROLLOUT_MESH_TP}} \
-      --use_weight_converter=${USE_WEIGHT_CONVERTER} \
-      ${MAX_SEQ_TOKEN_PER_TPU:+--max_seq_token_per_tpu=${MAX_SEQ_TOKEN_PER_TPU}} \
-    "
-    if [[ "${TRAINER_EXTRA_ARGS:-}" != *"--base_num_kv_heads"* && -n "${TRAINER_BASE_NUM_KV_HEADS:-}" ]]; then
-      extra_flags+=" --base_num_kv_heads=${TRAINER_BASE_NUM_KV_HEADS}"
-    fi
-    if [[ "${TRAINER_EXTRA_ARGS:-}" != *"--maxtext_attention"* && -n "${TRAINER_MAXTEXT_ATTENTION:-}" ]]; then
-      extra_flags+=" --maxtext_attention=${TRAINER_MAXTEXT_ATTENTION}"
-    fi
-    if [[ "${TRAINER_EXTRA_ARGS:-}" != *"--remat_policy"* && -n "${REMAT_POLICY:-}" ]]; then
-      extra_flags+=" --remat_policy=${REMAT_POLICY}"
-    fi
-    if [[ "${TRAINER_EXTRA_ARGS:-}" != *"--learning_rate_final_fraction"* && -n "${LEARNING_RATE_FINAL_FRACTION:-}" ]]; then
-      extra_flags+=" --learning_rate_final_fraction=${LEARNING_RATE_FINAL_FRACTION}"
-    fi
-    if [[ "${TRAINER_EXTRA_ARGS:-}" != *"--maxtext_warmup_steps_fraction"* && -n "${WARMUP_STEPS_FRACTION:-}" ]]; then
-      extra_flags+=" --maxtext_warmup_steps_fraction=${WARMUP_STEPS_FRACTION}"
-    fi
-    if [[ "${TRAINER_EXTRA_ARGS:-}" != *"--trainable_parameters_mask"* && -n "${TRAINABLE_PARAMETERS_MASK:-}" ]]; then
-      extra_flags+=" --trainable_parameters_mask='${TRAINABLE_PARAMETERS_MASK}'"
-    fi
-    if [[ "${TRAINER_EXTRA_ARGS:-}" != *"--prefuse_moe_weights"* && -n "${TRAINER_PREFUSE_MOE_WEIGHTS:-}" ]]; then
-      extra_flags+=" --prefuse_moe_weights=${TRAINER_PREFUSE_MOE_WEIGHTS}"
-    fi
+  if [[ "${TRAINER_EXTRA_ARGS:-}" != *"--prefuse_moe_weights"* && -n "${TRAINER_PREFUSE_MOE_WEIGHTS:-}" ]]; then
+    maxtext_args+=" --prefuse_moe_weights=${TRAINER_PREFUSE_MOE_WEIGHTS}"
   fi
 
   local raiden_env=""
   if [[ "${WEIGHT_SYNC_MODE}" == "raiden" ]]; then
-    if [[ "${TRAINER_JOBSET_YAML}" == "jobset.pathways.yaml" ]]; then
+    # Any Pathways trainer template, not just the default one: model-specific
+    # variants such as jobset.pathways.qwen3.5-397b.yaml are equally on
+    # Pathways, and an exact-name test silently drops them to the TCP
+    # transport.
+    if [[ "${TRAINER_JOBSET_YAML}" == jobset.pathways*.yaml ]]; then
       raiden_env+=" RAIDEN_USE_FFI=1"
     fi
   fi
@@ -373,13 +364,15 @@ start_trainer() {
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${TRAINER_PORT}" \
     --worker_startup_command=" \
-      ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE}${CKPT_D2H_CONCURRENT_GB:+ CKPT_D2H_CONCURRENT_GB=${CKPT_D2H_CONCURRENT_GB}}${raiden_env}${TRAINER_EXTRA_ENV:+ ${TRAINER_EXTRA_ENV}} python -m tunix.experimental.distributed.runtime.main \
+      ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE}${CHECKPOINT_ASYNC:+ CHECKPOINT_ASYNC=${CHECKPOINT_ASYNC}}${CKPT_D2H_CONCURRENT_GB:+ CKPT_D2H_CONCURRENT_GB=${CKPT_D2H_CONCURRENT_GB}}${PATHWAYS_CHECKPOINTING_IMPL:+ PATHWAYS_CHECKPOINTING_IMPL=${PATHWAYS_CHECKPOINTING_IMPL}}${COLOCATED_PYTHON_SIDECAR_IMAGE:+ COLOCATED_PYTHON_SIDECAR_IMAGE=${COLOCATED_PYTHON_SIDECAR_IMAGE}}${raiden_env}${MAXTEXT_EXTRA_FLAGS:+ MAXTEXT_EXTRA_FLAGS=\"${MAXTEXT_EXTRA_FLAGS}\"}${TRAINER_EXTRA_ENV:+ ${TRAINER_EXTRA_ENV}} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
         --process_main=tunix.experimental.examples.common.run_trainer_node.main \
         --worker_id=${TRAINER_ID} \
         --port=${TRAINER_PORT} \
         --mesh_fsdp=${TRAINER_MESH_FSDP} \
+        --mesh_tp=${TRAINER_MESH_TP} \
+        --mesh_expert=${TRAINER_MESH_EXPERT} \
         --trainer_backend=${TRAINER_BACKEND} \
         --model_name=${MODEL_NAME} \
         --model_id=${MODEL_ID} \
@@ -410,9 +403,8 @@ start_trainer() {
         --checkpoint_save_interval_steps=${CHECKPOINT_SAVE_INTERVAL_STEPS} \
         --checkpoint_max_to_keep=${CHECKPOINT_MAX_TO_KEEP} \
         --checkpoint_root_directory=${CHECKPOINT_ROOT_DIRECTORY} \
-        ${extra_flags} \
+        ${maxtext_args} \
         ${TRAINER_EXTRA_ARGS:+${TRAINER_EXTRA_ARGS} }${debug_flag} \
-        ${profiler_flags} \
     " \
     | apply_manifest
 }
@@ -454,7 +446,6 @@ stop_rollout() {
 
 start_rollout_instance() {
   local target_id="$1"
-  local extra_flags=""
   local debug_flag=""
   if [[ "${DEBUG}" == "1" || "${DEBUG}" == "true" || "${DEBUG}" == "True" ]]; then
     debug_flag="--debug"
@@ -464,17 +455,13 @@ start_rollout_instance() {
     echo "Rollout Pathways images: server=${PATHWAYS_SERVER_IMAGE} proxy=${PATHWAYS_PROXY_IMAGE}"
   fi
 
-  if [[ "${TRAINER_BACKEND}" == "maxtext" ]]; then
-    extra_flags+="\
-      --maxtext_model_name=${MAXTEXT_MODEL_NAME} \
-      ${ROLLOUT_MAXTEXT_ATTENTION:+--maxtext_attention=${ROLLOUT_MAXTEXT_ATTENTION}} \
-    "
-  fi
+  local maxtext_args
+  maxtext_args="$(maxtext_rollout_flags)"
 
   local vllm_args=""
   if [[ "$SAMPLER" == "vllm" || "$SAMPLER" == "inprocess_vllm" ]]; then
     local vllm_json=""
-    if [[ -n "${VLLM_CONFIG_JSON:-}" || -n "${ROLLOUT_VLLM_CONFIG_JSON:-}" || -n "${VLLM_MAX_NUM_BATCHED_TOKENS:-}" || -n "${VLLM_MAX_NUM_SEQS:-}" || -n "${VLLM_GPU_MEMORY_UTILIZATION:-}" || -n "${VLLM_ADDITIONAL_CONFIG:-}" || -n "${VLLM_MAX_MODEL_LEN:-}" || -n "${VLLM_BLOCK_SIZE:-}" ]]; then
+    if [[ -n "${VLLM_CONFIG_JSON:-}" || -n "${ROLLOUT_VLLM_CONFIG_JSON:-}" || -n "${VLLM_MAX_NUM_BATCHED_TOKENS:-}" || -n "${VLLM_MAX_NUM_SEQS:-}" || -n "${VLLM_GPU_MEMORY_UTILIZATION:-}" || -n "${VLLM_ADDITIONAL_CONFIG:-}" || -n "${VLLM_MAX_MODEL_LEN:-}" || -n "${VLLM_BLOCK_SIZE:-}" || "${ROLLOUT_MESH_EXPERT:-1}" -gt 1 ]]; then
       vllm_json=$("${PYTHON:-python3}" -c '
 import json, os
 
@@ -524,6 +511,13 @@ if isinstance(cfg, dict):
         cfg[cfg_k] = json.loads(val)
       except Exception:
         cfg[cfg_k] = val
+
+  try:
+    ep_val = int(os.getenv("ROLLOUT_MESH_EXPERT", "1"))
+    if ep_val > 1 and "expert_parallel_size" not in cfg:
+      cfg["expert_parallel_size"] = ep_val
+  except Exception:
+    pass
 
 if cfg:
   print(json.dumps(cfg) if isinstance(cfg, dict) else cfg)
@@ -589,6 +583,7 @@ if cfg:
         --prefuse_moe_weights=${PREFUSE_MOE_WEIGHTS} \
         --enable_prefix_caching=${ENABLE_PREFIX_CACHING} \
         ${extra_flags} \
+        ${maxtext_args} \
         ${vllm_args} \
         ${ROLLOUT_EXTRA_ARGS:+${ROLLOUT_EXTRA_ARGS} }${debug_flag} \
     " \

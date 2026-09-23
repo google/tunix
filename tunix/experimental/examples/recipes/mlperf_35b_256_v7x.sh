@@ -7,10 +7,9 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # k8s has a 63 char limit on total label name, so keep job_prefix unique to your job and short
 export JOB_PREFIX="${JOB_PREFIX:-${USER}}"
 export WANDB_API_KEY="${WANDB_API_KEY:-}"
-export WANDB_RUN_NAME="${WANDB_RUN_NAME:-${JOB_PREFIX}-mlperf-35b}"
-export MAXTEXT_OUTPUT_DIR="${MAXTEXT_OUTPUT_DIR:-gs://atwigg-trellis-europe-west4-dev/maxtext/${JOB_PREFIX}}"
-export TRAJECTORY_LOG_DIR="${TRAJECTORY_LOG_DIR:-gs://atwigg-trellis-europe-west4-dev/trajectories/${JOB_PREFIX}/logger}"
-export TRAJECTORY_STORE_ROOT_DIR="${TRAJECTORY_STORE_ROOT_DIR:-${TRAJECTORY_STORE_ROOT:-gs://atwigg-trellis-europe-west4-dev/trajectories/${JOB_PREFIX}/store}}"
+export WANDB_RUN_NAME="${WANDB_RUN_NAME:-${JOB_PREFIX}-mlperf-35b-v7x}"
+export MAXTEXT_OUTPUT_DIR="${MAXTEXT_OUTPUT_DIR:-gs://niting-maxtext-storage/maxtext/${JOB_PREFIX}}"
+export TRAJECTORY_LOG_DIR="${TRAJECTORY_LOG_DIR:-gs://niting-maxtext-storage/trajectories/${JOB_PREFIX}}"
 export ORCHESTRATOR_PORT="${ORCHESTRATOR_PORT:-20000}"
 export ROLLOUT_PORT="${ROLLOUT_PORT:-20001}"
 export TRAINER_PORT="${TRAINER_PORT:-20002}"
@@ -19,20 +18,19 @@ export SKIP_FIRST_N_PROFILER_STEPS=-1
 export TUNIX_IMAGE="${TUNIX_IMAGE:-gcr.io/cloud-tpu-multipod-dev/atwigg/trellis-35b:latest}"
 
 export PROJECT="cloud-tpu-shared-capacity"
-export REGION="europe-west4"
-export CLUSTER="bodaborg-v5p-nap"
+export REGION="us-central1"
+export CLUSTER="bodaborg-tpu7x-gsc"
 kubectl config use-context "gke_${PROJECT}_${REGION}_${CLUSTER}" || true
-kubectl config set-context --current --namespace=trellis || true
+kubectl config set-context --current --namespace=priority-dev || true
 
-export K8S_NAMESPACE="trellis"
+export K8S_NAMESPACE="priority-dev"
 export KUEUE_QUEUE="${KUEUE_QUEUE:-multislice-queue}"
 export PRIORITY_CLASS="${PRIORITY_CLASS:-medium}"
-# yaml_generator reads KUEUE_PRIORITY_CLASS (not PRIORITY_CLASS) to render
-# ${PRIORITY_CLASS_LINE}; without it the trainer admits at priority 0 and is
-# evictable by any prioritised workload.
-export KUEUE_PRIORITY_CLASS="${KUEUE_PRIORITY_CLASS:-${PRIORITY_CLASS}}"
 export SERVICE_ACCOUNT="xpk-sa"
 export CPU_MACHINE="n2d-standard-64"
+export USE_DYNAMIC_SLICING="true"
+export TPU_RESERVATION="${TPU_RESERVATION:-ghostfish-pogoag4tylwed}"
+export ENABLE_PATHWAYS_PERSISTENCE=1
 
 # Pathways & Raiden Images and settings (from Google doc)
 export PATHWAYS_SERVER_IMAGE="${PATHWAYS_SERVER_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_server:raiden_20260920_v2}"
@@ -57,27 +55,29 @@ export MODEL_NAME="Qwen3.5-35B-A3B"
 export MODEL_ID="Qwen/Qwen3.5-35B-A3B"
 export TOKENIZER_PATH="Qwen/Qwen3.5-35B-A3B"
 export MAXTEXT_MODEL_NAME="qwen3.5-35b-a3b"
-export MAXTEXT_CKPT="gs://hengtaoguo-maxtext-logs/checkpoints/qwen3.5-35b-a3b/scanned/2026-06-11-10-27/0/items"
+export MAXTEXT_CKPT="${MAXTEXT_CKPT:-gs://hengtaoguo-maxtext-logs/checkpoints/qwen3.5-35b-a3b/scanned/2026-06-11-10-27/0/items}"
 export TRAINABLE_PARAMETERS_MASK='^(?!.*routed_experts/gate/kernel).*'
 export EOS_TOKENS="${EOS_TOKENS:-151645,151643}"
+export TRAJECTORY_LOG_DIR="${TRAJECTORY_LOG_DIR:-gs://niting-maxtext-storage/trajectories/${JOB_PREFIX}}"
 
 # Backend configuration
 export TRAINER_BACKEND="maxtext"
 export SAMPLER="vllm"
 export WEIGHT_SYNC_MODE="raiden"
 
-# Topologies (64 chips Trainer 4x4x4, 16x 4-chip Rollout slices)
+# Topologies (64 chips Trainer 4x4x4, 16x 4-chip Rollout slices on TPU7x dynamic slicing)
 export TRAINER_JOBSET_YAML="jobset.pathways.yaml"
-export TRAINER_TPU_SLICE="tpuv5:4x4x4"
+export TRAINER_TPU_SLICE="tpu7x:4x4x4"
 export TRAINER_MESH_FSDP=32
 export TRAINER_MESH_TP=2
 export TRAINER_MESH_EXPERT=1
 export TRAINER_BASE_NUM_KV_HEADS=2
 
 export ROLLOUT_JOBSET_YAML="jobset.tpu.yaml"
-export ROLLOUT_TPU_SLICE="tpuv5:2x2x1"
+export ROLLOUT_TPU_SLICE="tpu7x:2x2x1"
 export ROLLOUT_MESH_FSDP=1
 export ROLLOUT_MESH_TP=1
+export ROLLOUT_WORKERS="${ROLLOUT_WORKERS:-16}"
 export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-16}"
 
 # ==============================================================================
@@ -98,7 +98,7 @@ export VLLM_ADDITIONAL_CONFIG='{"sharding":{"sharding_strategy":{"expert_paralle
 
 # Prefix Caching Configs
 export ENABLE_PREFIX_CACHING="${ENABLE_PREFIX_CACHING:-false}"
-export VLLM_PREFIX_CACHE_RETENTION_INTERVAL="${VLLM_PREFIX_CACHE_RETENTION_INTERVAL:-0}"
+export VLLM_PREFIX_CACHE_RETENTION_INTERVAL="${VLLM_PREFIX_CACHE_RETENTION_INTERVAL:-256}"
 export VLLM_MAMBA_CACHE_MODE="${VLLM_MAMBA_CACHE_MODE:-${MAMBA_CACHE_MODE:-none}}"
 
 # Router replay
@@ -148,13 +148,8 @@ export NUM_GENERATIONS=16
 export TRAIN_MICRO_BATCH_SIZE="${TRAIN_MICRO_BATCH_SIZE:-32}"
 export CHECKPOINT_SAVE_INTERVAL_STEPS=0
 export CHECKPOINT_MAX_TO_KEEP=10
-export MAX_STALENESS=${MAX_STALENESS:-0}
-export TRAJECTORY_GROUP_ORDER=${TRAJECTORY_GROUP_ORDER:-arrival}
+export MAX_STALENESS=0
 
-# sequence packing
-export MAX_SEQ_TOKEN_PER_TPU=${MAX_SEQ_TOKEN_PER_TPU:-65536}
-export MAX_SEGMENTS_PER_PACKED_ROW=${MAX_SEGMENTS_PER_PACKED_ROW:-16}
-    
 # Sampling Parameters (explicitly disable top-k, set top-p 1.0 and temperature 1.0)
 export TEMPERATURE="1.0"
 export TOP_P="1.0"
@@ -184,8 +179,6 @@ export WEIGHT_DECAY=0.0
 export MAX_GRAD_NORM="0.125"
 export WARMUP_STEPS_FRACTION=0.0
 export LEARNING_RATE_FINAL_FRACTION=1.0
-export SKIP_STEP_ON_SPIKES="false"
-export SKIP_STEP_ON_NAN="true"
 
 # Architecture & Rematerialization
 export REMAT_POLICY="full"
@@ -199,12 +192,13 @@ export DEBUG=1
 export DATASET_PATH="gs://mlperf_dataset/benchmark-r2e-gym-easy"
 export USE_AGENT_SANDBOX=1
 export SCAFFOLD="openhands"
-export SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-trellis}"
+export SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-${K8S_NAMESPACE}}"
 export POOL_NAME_FORMAT="${POOL_NAME_FORMAT:-}"
 export TEMPLATE_NAME_PREFIX="${TEMPLATE_NAME_PREFIX:-}"
 export SANDBOX_NODE_SELECTOR_KEY="cloud.google.com/gke-nodepool"
-export SANDBOX_NODE_SELECTOR_VAL="sandbox-cpu-pool"
-export IMAGE_REWRITE_PREFIX="${IMAGE_REWRITE_PREFIX:-europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/}"
+export SANDBOX_NODE_SELECTOR_VAL="sandbox-np"
+export SANDBOX_TOLERATIONS='[{"key":"workload","operator":"Equal","value":"sandbox","effect":"NoSchedule"}]'
+export IMAGE_REWRITE_PREFIX="${IMAGE_REWRITE_PREFIX:-us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/}"
 export MAX_WARMPOOL_REPLICAS=2
 export ROLLOUT_MAX_CONCURRENCY=256
 export MAX_CONCURRENCY=256

@@ -21,6 +21,12 @@ import logging
 import os
 from typing import Any
 
+# Mirrors maxtext `pathways_checkpointing_impl`. Duplicated as literals rather than
+# imported: this module must stay importable without maxtext installed.
+_PERSISTENCE_IMPL = "persistence"
+_COLOCATED_PYTHON_IMPL = "colocated_python"
+_PATHWAYS_CHECKPOINTING_IMPLS = (_PERSISTENCE_IMPL, _COLOCATED_PYTHON_IMPL)
+
 
 @dataclasses.dataclass(frozen=True)
 class ProfilerOptions:
@@ -108,6 +114,7 @@ def build_maxtext_config(
     mesh_fsdp: int = 1,
     mesh_tp: int = 1,
     mesh_expert: int = 1,
+    mesh_context: int = 1,
     num_devices: int = 1,
     max_prompt_length: int = 512,
     max_response_length: int = 128,
@@ -131,6 +138,10 @@ def build_maxtext_config(
     attention: str | None = None,
     remat_policy: str = "",
     learning_rate_final_fraction: float | None = None,
+    skip_step_on_spikes: bool = False,
+    skip_step_on_nan: bool = True,
+    skip_step_interval: int = 128,
+    skip_step_scaling_factor: float = 6.0,
 ) -> Any:
   """Builds the MaxText HyperParameters the training engine runs on."""
   pyconfig, _, _ = maxtext_modules()
@@ -397,6 +408,16 @@ def build_maxtext_config(
       ),
       f"ici_tensor_parallelism={mesh_tp}",
       f"ici_expert_parallelism={mesh_expert}",
+      f"ici_context_parallelism={mesh_context}",
+      # Qwen3.5's GatedDeltaNet layers carry a recurrence, so device order is
+      # sequence order: device i composes the state device i-1 left behind. The
+      # default DUAL_CHUNK_SWAP balancing hands device 0 the first and last
+      # chunks, device 1 the second and second-to-last, which composes the
+      # segments out of order. Softmax attention tolerates that because it
+      # rebuilds the causal mask from positions; a recurrence cannot. MaxText
+      # rejects the combination outright, and warns that the run would otherwise
+      # still train with the loss falling -- i.e. it fails silently.
+      *(["context_parallel_load_balance=False"] if mesh_context > 1 else []),
       f"learning_rate={learning_rate}",
       f"warmup_steps_fraction={warmup_steps_fraction}",
       "dtype=bfloat16",
@@ -419,19 +440,59 @@ def build_maxtext_config(
           if trainable_parameters_mask
           else []
       ),
+      *(["skip_step_on_spikes=True"] if skip_step_on_spikes else []),
+      *(["skip_step_on_nan=True"] if skip_step_on_nan else ["skip_step_on_nan=False"]),
+      *(
+          [
+              f"skip_step_interval={skip_step_interval}",
+              f"skip_step_scaling_factor={skip_step_scaling_factor}",
+          ]
+          if skip_step_on_spikes
+          else []
+      ),
   ])
   # Pathways persistence: let the TPU workers write the checkpoint themselves
   # The persistence handler rejects the OCDBT/zarr3 layout MaxText writes by
   # default (see maxtext/common/checkpoint_context.py), so both must be off
   if os.environ.get("ENABLE_PATHWAYS_PERSISTENCE", "") == "1":
+    if save_interval_steps > 0 and not output_dir.startswith("gs://"):
+      raise ValueError(
+          "ENABLE_PATHWAYS_PERSISTENCE=1 with save_interval_steps > 0 "
+          "requires a gs:// base_output_directory so all pathways-worker pods "
+          f"write to shared GCS storage; got {output_dir!r}. "
+          "Set MAXTEXT_OUTPUT_DIR=gs://..."
+      )
+
+    impl = os.environ.get("PATHWAYS_CHECKPOINTING_IMPL", "").strip() or _PERSISTENCE_IMPL
+    if impl not in _PATHWAYS_CHECKPOINTING_IMPLS:
+      raise ValueError(
+          f"PATHWAYS_CHECKPOINTING_IMPL={impl!r} is not recognised; "
+          f"expected one of {_PATHWAYS_CHECKPOINTING_IMPLS}."
+      )
+    if impl == _COLOCATED_PYTHON_IMPL and not os.environ.get("COLOCATED_PYTHON_SIDECAR_IMAGE", "").strip():
+      raise ValueError(
+          "PATHWAYS_CHECKPOINTING_IMPL=colocated_python requires "
+          "COLOCATED_PYTHON_SIDECAR_IMAGE to be set so the sidecar container is added to "
+          "the pathways-worker pods. Without it Orbax silently falls back to "
+          "controller-side host staging, which OOMs the proxy pod at 397B scale."
+      )
+    argv.append(f"pathways_checkpointing_impl={impl}")
+
+    # Keep OCDBT/zarr3 off in BOTH modes: colocated_python supports them, but matching
+    # the persistence layout keeps checkpoints restorable across a mode switch.
     logging.info(
-        "ENABLE_PATHWAYS_PERSISTENCE=1; disabling OCDBT/zarr3 so the Pathways "
-        "persistence handler can save directly from the TPU workers."
+        "ENABLE_PATHWAYS_PERSISTENCE=1 (impl=%s); disabling OCDBT/zarr3 so the Pathways "
+        "handler can save directly from the TPU workers and both modes share one layout.",
+        impl,
     )
     argv.extend([
         "checkpoint_storage_use_ocdbt=false",
         "checkpoint_storage_use_zarr3=false",
     ])
+
+  _ckpt_async = os.environ.get("CHECKPOINT_ASYNC", "").strip()
+  if _ckpt_async:
+    argv.append(f"async_checkpointing={_ckpt_async}")
 
   _d2h_gb = os.environ.get("CKPT_D2H_CONCURRENT_GB", "").strip()
   if _d2h_gb:
@@ -444,6 +505,26 @@ def build_maxtext_config(
 
   if os.environ.get("OVERRIDE_MODEL_CONFIG", "").lower() in ("1", "true") and "override_model_config=true" not in argv:
     argv.append("override_model_config=true")
+
+  # Generic passthrough, applied last so it wins over anything derived above.
+  # MaxText exposes far more knobs than this helper has named parameters for --
+  # MoE kernel selection, splash-attention block sizes, GDN tuning, custom mesh
+  # rules -- and a run that needs one of them otherwise has nowhere to put it.
+  # Space-separated key=value pairs, e.g.
+  #   MAXTEXT_EXTRA_FLAGS="use_ring_of_experts=true sa_block_q=512"
+  # MaxText rejects unknown keys outright (ValueError listing every valid
+  # field), so a typo fails at startup rather than being silently dropped.
+  _extra = os.environ.get("MAXTEXT_EXTRA_FLAGS", "").strip()
+  if _extra:
+    _pairs = [tok for tok in _extra.split() if tok]
+    _bad = [tok for tok in _pairs if "=" not in tok]
+    if _bad:
+      raise ValueError(
+          "MAXTEXT_EXTRA_FLAGS entries must be key=value, got: "
+          f"{' '.join(_bad)}"
+      )
+    logging.info("MAXTEXT_EXTRA_FLAGS adding %d flag(s): %s", len(_pairs), _pairs)
+    argv.extend(_pairs)
 
   logging.info("MaxText config argv: %s", argv)
   return pyconfig.initialize(argv)
