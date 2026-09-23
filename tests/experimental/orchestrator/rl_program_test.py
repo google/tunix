@@ -438,6 +438,7 @@ class RLProgramTest(absltest.TestCase):
               "num_rollouts": 2,
               "num_microbatches": 1,
           },
+          overwrite=False,
       )
       self.mock_engine.sync_weights.assert_called_once_with(
           role=datatypes.Role.ACTOR
@@ -559,7 +560,7 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
     self.mock_engine.resume_from_checkpoint.assert_called_once_with(
-        role=datatypes.Role.ACTOR, resync_rollout_weights=True
+        role=datatypes.Role.ACTOR, resync_rollout_weights=True, step=None
     )
 
   def test_resume_forwards_resync_disabled_when_sync_weights_false(self):
@@ -574,9 +575,51 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
     self.mock_engine.resume_from_checkpoint.assert_called_once_with(
-        role=datatypes.Role.ACTOR, resync_rollout_weights=False
+        role=datatypes.Role.ACTOR, resync_rollout_weights=False, step=None
     )
     self.assertEqual(program.step, 2)
+
+  def test_resume_forwards_configured_checkpoint_restore_step(self):
+    self.mock_engine.resume_from_checkpoint = mock.AsyncMock(return_value=2)
+    program = self._create_program(
+        dataset=["p0"],
+        max_steps=5,
+        sync_weights=True,
+        checkpoint_restore_step=2,
+    )
+
+    async def _run():
+      program.engine = self.mock_engine
+      await program._resume_from_checkpoint()
+
+    asyncio.run(_run())
+    self.mock_engine.resume_from_checkpoint.assert_called_once_with(
+        role=datatypes.Role.ACTOR, resync_rollout_weights=True, step=2
+    )
+    self.assertEqual(program.step, 2)
+
+  def test_save_checkpoint_forwards_checkpoint_overwrite(self):
+    async def _run():
+      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group(), [])
+      program = self._create_program(
+          dataset=["prompt_0"],
+          max_steps=1,
+          checkpoint_overwrite=True,
+      )
+      await program.run_async(self.mock_engine)
+      self.mock_engine.save_checkpoint.assert_called_once_with(
+          role=datatypes.Role.ACTOR,
+          metadata={
+              "step": 1,
+              "global_step": 1,
+              "policy_version": 1,
+              "num_rollouts": 2,
+              "num_microbatches": 1,
+          },
+          overwrite=True,
+      )
+
+    asyncio.run(_run())
 
   def test_resume_skips_already_consumed_dataset_prefix(self):
     self.mock_engine.resume_from_checkpoint = mock.AsyncMock(return_value=3)

@@ -789,6 +789,40 @@ class PeftTrainerTest(parameterized.TestCase):
         force=True,
     )
 
+  @mock.patch.object(checkpoint_manager, 'CheckpointManager')
+  def test_save_checkpoint_forwards_overwrite(
+      self, mock_checkpoint_manager_init
+  ):
+    mock_cm = mock.MagicMock()
+    mock_checkpoint_manager_init.return_value = mock_cm
+    mock_cm.save.return_value = True
+    mock_cm.maybe_restore.return_value = (0, {})
+
+    config = peft_trainer_v2.TrainingConfig(
+        eval_every_n_steps=2,
+        max_steps=100,
+        checkpoint_root_directory='/tmp/checkpoint',
+        checkpointing_options=ocp.CheckpointManagerOptions(),
+    )
+    rngs = nnx.Rngs(0)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
+    trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
+
+    custom_metadata = {'step': 5}
+    trainer.save_checkpoint(
+        metadata=custom_metadata,
+        overwrite=True,
+    )
+
+    mock_cm.save.assert_called_once_with(
+        5,
+        trainer.model,
+        trainer.optimizer,
+        save_only_lora_params=False,
+        custom_metadata=custom_metadata,
+        overwrite=True,
+    )
+
   def _external_resume_trainer(
       self, root, *, implicit_resume, gradient_accumulation_steps=None
   ):
