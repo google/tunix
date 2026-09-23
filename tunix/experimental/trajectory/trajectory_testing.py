@@ -10,6 +10,17 @@ import pydantic
 from tunix.experimental.trajectory import trajectory as trajectory_lib
 from tunix.rl.agentic.agents import agent_types
 
+
+def to_atif_trajectory(
+    tunix_trajectory: trajectory_lib.TunixTrajectory,
+) -> trajectory_lib.Trajectory:
+  """Projects a TunixTrajectory to the base ATIF Trajectory a store returns."""
+  return trajectory_lib.Trajectory(
+      **tunix_trajectory.to_atif_metadata().model_dump(),
+      steps=[step.to_atif_step() for step in tunix_trajectory.steps],
+  )
+
+
 TEST_TIMESTAMP: Final[datetime.datetime] = datetime.datetime(
     2026, 1, 1, 12, 0, 0, tzinfo=datetime.timezone.utc
 )
@@ -162,6 +173,12 @@ TUNIX_AGENT_STEP_1: Final[trajectory_lib.TunixAgentStep] = (
     )
 )
 
+TUNIX_ENV_STEP_2: Final[trajectory_lib.TunixEnvStep] = (
+    TUNIX_ENV_STEP_0.model_copy(
+        update={"step_id": 2, "reward": 1.0, "done": True}
+    )
+)
+
 TUNIX_METADATA_1: Final[trajectory_lib.TunixTrajectoryMetadata] = (
     trajectory_lib.TunixTrajectoryMetadata(
         schema_version="ATIF-v1.7",
@@ -211,6 +228,19 @@ TUNIX_TRAJECTORY_1: Final[trajectory_lib.TunixTrajectory] = (
         steps=[TUNIX_ENV_STEP_0, TUNIX_AGENT_STEP_1],
         subagent_trajectories=[TUNIX_SUBAGENT_TRAJECTORY_1],
     )
+)
+
+PAIRED_TUNIX_TRAJECTORY: Final[trajectory_lib.TunixTrajectory] = (
+    trajectory_lib.TunixTrajectory(
+        **TUNIX_METADATA_1.model_dump(exclude={"status"}),
+        status="SUCCEEDED",
+        steps=[TUNIX_ENV_STEP_0, TUNIX_AGENT_STEP_1, TUNIX_ENV_STEP_2],
+    )
+)
+
+
+PAIRED_ATIF_TRAJECTORY: Final[trajectory_lib.Trajectory] = to_atif_trajectory(
+    PAIRED_TUNIX_TRAJECTORY
 )
 
 
