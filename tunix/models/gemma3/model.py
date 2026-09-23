@@ -1002,6 +1002,7 @@ class Gemma3(BackendMappingMixin, nnx.Module):
       attention_mask: jaxtyping.Array | None = None,  # [B, L, L']
       output_hidden_states: bool = False,
       skip_lm_head: bool = False,
+      decode_only_last_token: bool = False,
       *,
       images: jaxtyping.Array | None = None,  # [B, H, W, C] or [B, N, H, W, C]
   ) -> tuple[jaxtyping.Array, Cache | None]:
@@ -1017,6 +1018,10 @@ class Gemma3(BackendMappingMixin, nnx.Module):
       attention_mask: transformer input mask.
       output_hidden_states: whether to output the hidden states.
       skip_lm_head: whether to skip the final lm head.
+      decode_only_last_token: whether to only compute the logits for the last
+        token of the sequence. This saves a large amount of memory and compute
+        during prefill, where only the last token's logits are used to sample
+        the next token.
       images: Input images. If None, the model will not process images.
 
     Returns:
@@ -1050,6 +1055,12 @@ class Gemma3(BackendMappingMixin, nnx.Module):
 
     if skip_lm_head:
       return x, new_cache
+
+    if decode_only_last_token:
+      # Only compute logits for the last token. This can significantly reduce
+      # memory requirements during prefill (when sampling), since we only need
+      # the logits for the last token to sample from.
+      x = x[:, -1:, :]
 
     logits = self.compute_final_logits(x)
     return logits, new_cache  # pytype: disable=bad-return-type
