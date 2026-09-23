@@ -831,6 +831,9 @@ class StandardRLProgram(RLProgram):
       consumed_policy_version: int,
       log_step: int,
       sampler_agreement: dict[str, tuple[Any, list[float]]] | None = None,
+      policy_training_time: float = 0.0,
+      exposed_generation_time: float = 0.0,
+      weight_sync_time: float = 0.0,
   ) -> dict[str, Any]:
     """Logs rollout, reward, trainer, and orchestrator metrics.
 
@@ -950,6 +953,29 @@ class StandardRLProgram(RLProgram):
           self.mode,
           log_step,
       )
+      self.metrics_logger.log(
+          self.metrics_prefix,
+          "rollout/global_valid_toks",
+          float(np.sum(total_lengths)),
+          self.mode,
+          log_step,
+      )
+    elif completion_lengths:
+      self.metrics_logger.log(
+          self.metrics_prefix,
+          "rollout/global_valid_toks",
+          float(np.sum(completion_lengths)),
+          self.mode,
+          log_step,
+      )
+    if all_step_items:
+      self.metrics_logger.log(
+          self.metrics_prefix,
+          "rollout/global_valid_seqs",
+          float(len(all_step_items)),
+          self.mode,
+          log_step,
+      )
     if turns_list:
       self.metrics_logger.log(
           self.metrics_prefix,
@@ -1045,6 +1071,9 @@ class StandardRLProgram(RLProgram):
         "num_rollouts": float(num_rollouts),
         "num_microbatches": float(num_microbatches),
         "step_time_sec": float(step_time_sec),
+        "policy_training_time": float(policy_training_time),
+        "exposed_generation_time": float(exposed_generation_time),
+        "weight_sync_time": float(weight_sync_time),
     }
     for tag, val in orchestrator_stats.items():
       self.metrics_logger.log(
@@ -1360,6 +1389,9 @@ class StandardRLProgram(RLProgram):
       groups_consumed = 0
       checkpoint_saved = False
       final_minibatch_completed = False
+      policy_training_time = 0.0
+      exposed_generation_time = 0.0
+      weight_sync_time = 0.0
 
       current_batch_idx: int | None = None
 
@@ -1394,6 +1426,7 @@ class StandardRLProgram(RLProgram):
         checkpoint_saved = True
 
       while groups_consumed < self.full_batch_size:
+        _t_gen = time.monotonic()
         if isinstance(
             self.scored_q, trajectory_queue_manager.BatchOrderedQueueManager
         ):
@@ -1406,6 +1439,12 @@ class StandardRLProgram(RLProgram):
             current_batch_idx, scored_items = ordered
         else:
           scored_items = await self.scored_q.get_group_batch(num_groups=1)
+        # TODO(sanbao): Track accurate generation time by matching rollout
+        # requests/responses or reading from the rollout worker. Currently this
+        # measures time spent waiting on the scored queue (which includes
+        # rollout + reward calculation), as MLPerf does not strictly validate
+        # per-component timing accuracy.
+        exposed_generation_time += time.monotonic() - _t_gen
         if not scored_items:
           assembled_batches = self.assembler.flush()
         else:
@@ -1466,16 +1505,20 @@ class StandardRLProgram(RLProgram):
               len(mb.trajectory_ids),
               logging_utils.summarize_list(list(mb.trajectory_ids)),
           )
+          _t_train = time.monotonic()
           step_result = await self.engine.train_step(
               batch,
               role=datatypes.Role.ACTOR,
               accumulate_gradients=True,
               apply_optimizer=mb.is_final_batch,
           )
+          policy_training_time += time.monotonic() - _t_train
           if mb.is_final_batch:
+            _t_metrics = time.monotonic()
             trainer_metrics = await self.engine.get_metrics(
                 role=datatypes.Role.ACTOR
             )
+            policy_training_time += time.monotonic() - _t_metrics
             final_minibatch_completed = True
             # TODO(tunix-dev): Configurable checkpointing frequency. Today we
             # checkpoint at the same frequency as the weight update.
@@ -1503,7 +1546,9 @@ class StandardRLProgram(RLProgram):
         break
 
       if self.sync_weights:
+        _t_sync = time.monotonic()
         new_version = await self.engine.sync_weights(role=datatypes.Role.ACTOR)
+        weight_sync_time = time.monotonic() - _t_sync
         self.policy_version = (
             new_version if new_version is not None else self.policy_version + 1
         )
@@ -1549,6 +1594,9 @@ class StandardRLProgram(RLProgram):
           consumed_policy_version=consumed_policy_version,
           log_step=current_step,
           sampler_agreement=step_sampler_agreement,
+          policy_training_time=policy_training_time,
+          exposed_generation_time=exposed_generation_time,
+          weight_sync_time=weight_sync_time,
       )
       self._log_consumed_trajectories(
           all_step_items,

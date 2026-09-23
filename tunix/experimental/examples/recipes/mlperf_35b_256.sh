@@ -75,7 +75,13 @@ export ROLLOUT_JOBSET_YAML="jobset.tpu.yaml"
 export ROLLOUT_TPU_SLICE="tpuv5:2x2x1"
 export ROLLOUT_MESH_FSDP=1
 export ROLLOUT_MESH_TP=1
+export ROLLOUT_MESH_EXPERT="${ROLLOUT_MESH_EXPERT:-4}"
 export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-16}"
+
+# MLPerf RCP Logging
+export RCP_LOGGING="${RCP_LOGGING:-false}"
+export METRIC_LOGGER_DIR="${METRIC_LOGGER_DIR:-${MAXTEXT_OUTPUT_DIR}/mllog}"
+export TARGET_ACCURACY="${TARGET_ACCURACY:-0.69}"
 
 # ==============================================================================
 # vLLM Rollout Configuration (from paste.googleplex.com/5903655694368768)

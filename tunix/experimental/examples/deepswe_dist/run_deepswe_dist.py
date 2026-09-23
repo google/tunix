@@ -46,6 +46,7 @@ from tunix.experimental.weight_sync import weight_sync
 from tunix.experimental.worker import remote_execution
 from tunix.rl import algorithm_config
 from tunix.sft import metrics_logger as metrics_logger_lib
+from tunix.utils import mllog_utils
 
 # pylint: enable=g-import-not-at-top
 
@@ -351,6 +352,84 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="Enable debug logging and print full sampler responses.",
   )
   parser.add_argument(
+      "--rcp_logging",
+      action="store_true",
+      default=False,
+      help="Enable MLPerf RCP (mllog) compliance logging.",
+  )
+  parser.add_argument(
+      "--metric_logger_dir",
+      type=str,
+      default=os.getenv("METRIC_LOGGER_DIR", None),
+      help="Directory or GCS URI for MLPerf RCP output (seed_<seed>.out).",
+  )
+  parser.add_argument(
+      "--target_accuracy",
+      type=float,
+      default=float(os.getenv("TARGET_ACCURACY", "0.69")),
+      help="Target evaluation accuracy for MLPerf RCP compliance logging.",
+  )
+  parser.add_argument(
+      "--eval_every_n_steps",
+      type=int,
+      default=int(os.getenv("EVAL_EVERY_N_STEPS", "1000000")),
+  )
+  parser.add_argument(
+      "--learning_rate",
+      type=float,
+      default=float(os.getenv("LEARNING_RATE", "1.0e-6")),
+  )
+  parser.add_argument(
+      "--b1",
+      type=float,
+      default=float(os.getenv("ADAM_B1", "0.9")),
+  )
+  parser.add_argument(
+      "--b2",
+      type=float,
+      default=float(os.getenv("ADAM_B2", "0.999")),
+  )
+  parser.add_argument(
+      "--weight_decay",
+      type=float,
+      default=float(os.getenv("WEIGHT_DECAY", "0.01")),
+  )
+  parser.add_argument(
+      "--max_grad_norm",
+      type=float,
+      default=float(os.getenv("MAX_GRAD_NORM", "1.0")),
+  )
+  parser.add_argument(
+      "--train_mesh_tp",
+      type=int,
+      default=int(os.getenv("TRAINER_MESH_TP", "1")),
+  )
+  parser.add_argument(
+      "--train_mesh_expert",
+      type=int,
+      default=int(os.getenv("TRAINER_MESH_EXPERT", "1")),
+  )
+  parser.add_argument(
+      "--rollout_mesh_tp",
+      type=int,
+      default=int(os.getenv("ROLLOUT_MESH_TP", "1")),
+  )
+  parser.add_argument(
+      "--rollout_mesh_expert",
+      type=int,
+      default=int(os.getenv("ROLLOUT_MESH_EXPERT", "1")),
+  )
+  parser.add_argument(
+      "--rollout_engine",
+      type=str,
+      default=os.getenv("SAMPLER", "vllm"),
+  )
+  parser.add_argument(
+      "--tpu_topology",
+      type=str,
+      default=os.getenv("TPU_TOPOLOGY", None),
+  )
+  parser.add_argument(
       "--trajectory_store_root_dir",
       "--trajectory_store_root",
       dest="trajectory_store_root_dir",
@@ -455,6 +534,8 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   ), "Require discovery API, but process context doesn't support."
 
   args = _parse_args(argv)
+  if args.rcp_logging:
+    mllog_utils.init_start(args)
   logging.basicConfig(
       level=logging.DEBUG if args.debug else logging.INFO,
       format="%(asctime)s - [DeepSWEOrchestrator] %(message)s",
@@ -657,22 +738,53 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
             step,
             step,
         ),
-        on_step_end=lambda step, result: logging.info(
-            "<<< DeepSWE step %d finished | train_result=%s",
-            step,
-            result,
+        on_step_end=lambda step, result: (
+            logging.info(
+                "<<< DeepSWE step %d finished | train_result=%s",
+                step,
+                result,
+            ),
+            mllog_utils.log_rcp_step_stats(
+                program.metrics_logger,
+                args=args,
+                step=step + 1,
+            )
+            if args.rcp_logging
+            else None,
         ),
     )
 
+    if args.rcp_logging:
+      mllog_utils.init_print(
+          args,
+          train_dataset=dataset,
+      )
+
     logging.info("Bringing up remote workers through ClusterOrchestrator...")
     cluster.bring_up_workers(dummy_data=None)
+    if args.rcp_logging:
+      mllog_utils.train_start(args, step=0)
     logging.info("Starting DeepSWE StandardRLProgram execution...")
     cluster.run(
         program=program,
         num_steps=args.max_steps,
         bring_up=False,
     )
-  except Exception as e:
+    if args.rcp_logging:
+      completed_steps = (
+          program.last_step_result.step + 1
+          if program.last_step_result is not None
+          else args.max_steps
+      )
+      mllog_utils.train_stop(args, step=completed_steps, status="success")
+  except BaseException as e:
+    if args.rcp_logging:
+      completed_steps = (
+          program.last_step_result.step + 1
+          if program is not None and program.last_step_result is not None
+          else 0
+      )
+      mllog_utils.train_stop(args, step=completed_steps, status="aborted")
     logging.exception("FATAL ERROR in orchestrator execution: %s", e)
     raise
   finally:

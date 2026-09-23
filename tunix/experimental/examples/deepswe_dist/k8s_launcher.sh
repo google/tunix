@@ -135,6 +135,7 @@ export TRAINER_MESH_CONTEXT=${TRAINER_MESH_CONTEXT:-1}
 export ROLLOUT_JOBSET_YAML=${ROLLOUT_JOBSET_YAML:-jobset.tpu.yaml}
 export ROLLOUT_MESH_TP=${ROLLOUT_MESH_TP:-2}
 export ROLLOUT_MESH_FSDP=${ROLLOUT_MESH_FSDP:-1}
+export ROLLOUT_MESH_EXPERT=${ROLLOUT_MESH_EXPERT:-1}
 # Optional: enable experimental batched-RPA attention kernel for rollout.
 export ROLLOUT_USE_BATCHED_RPA=${ROLLOUT_USE_BATCHED_RPA:-}
 
@@ -152,6 +153,9 @@ export WANDB_API_KEY=${WANDB_API_KEY:-}
 export WANDB_ENTITY=${WANDB_ENTITY:-}
 export LOG_DIR=${LOG_DIR:-}
 export TRAJECTORY_LOG_DIR=${TRAJECTORY_LOG_DIR:-}
+export RCP_LOGGING=${RCP_LOGGING:-false}
+export METRIC_LOGGER_DIR=${METRIC_LOGGER_DIR:-}
+export TARGET_ACCURACY=${TARGET_ACCURACY:-0.69}
 export TRAJECTORY_STORE_ROOT_DIR=${TRAJECTORY_STORE_ROOT_DIR:-${TRAJECTORY_STORE_ROOT:-}}
 export EOS_TOKENS=${EOS_TOKENS:-}
 
@@ -280,6 +284,10 @@ start_orchestrator() {
   if [[ "${DEBUG}" == "1" || "${DEBUG}" == "true" || "${DEBUG}" == "True" ]]; then
     debug_arg="--debug"
   fi
+  local rcp_arg=""
+  if [[ "${RCP_LOGGING}" == "1" || "${RCP_LOGGING}" == "true" || "${RCP_LOGGING}" == "True" ]]; then
+    rcp_arg="--rcp_logging"
+  fi
 
   "$PYTHON_BIN" "$YAML_GENERATOR" \
     "${YAML_DIR}/jobset.cpu.yaml" \
@@ -367,6 +375,21 @@ start_orchestrator() {
         $( [[ "${TRAINER_MESH_EXPERT:-1}" -gt 1 ]] && echo "--trainer_expert=${TRAINER_MESH_EXPERT}" ) \
         ${RPC_TIMEOUT_S:+--rpc_timeout_s=${RPC_TIMEOUT_S}} \
         ${TRAINABLE_PARAMETERS_MASK:+--trainable_parameters_mask='${TRAINABLE_PARAMETERS_MASK}'} \
+        --eval_every_n_steps=${EVAL_EVERY_N_STEPS} \
+        --learning_rate=${LEARNING_RATE} \
+        --b1=${ADAM_B1} \
+        --b2=${ADAM_B2} \
+        --weight_decay=${WEIGHT_DECAY} \
+        --max_grad_norm=${MAX_GRAD_NORM} \
+        --train_mesh_tp=${TRAINER_MESH_TP} \
+        --train_mesh_expert=${TRAINER_MESH_EXPERT} \
+        --rollout_mesh_tp=${ROLLOUT_MESH_TP} \
+        --rollout_mesh_expert=${ROLLOUT_MESH_EXPERT:-1} \
+        --rollout_engine=${SAMPLER} \
+        --tpu_topology="${TRAINER_TPU_SLICE}+${ROLLOUT_TPU_SLICE}" \
+        --target_accuracy=${TARGET_ACCURACY} \
+        ${METRIC_LOGGER_DIR:+--metric_logger_dir="${METRIC_LOGGER_DIR}"} \
+        ${rcp_arg} \
         ${debug_arg} \
     " \
     | apply_manifest
