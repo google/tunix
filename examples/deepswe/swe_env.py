@@ -187,6 +187,7 @@ class SWEEnv(BaseTaskEnv):
         image=task_img_str,
         metadata={"ds": self.entry},
     )
+    sandbox_utils.ensure_task_pool_in_fleet(fleet, task_img_str)
     max_acquire_retries = 5
     for attempt in range(max_acquire_retries):
       try:
@@ -202,6 +203,7 @@ class SWEEnv(BaseTaskEnv):
               e,
               5 * (attempt + 1),
           )
+          sandbox_utils.ensure_task_pool_in_fleet(fleet, task_img_str)
           time.sleep(5 * (attempt + 1))
         else:
           raise
@@ -341,10 +343,38 @@ class SWEEnv(BaseTaskEnv):
         and self.handle is not None
         and fleet is not None
     ):
+      pod_name = getattr(self.handle, "pod_name", None)
+      namespace = (
+          getattr(self.handle, "namespace", None)
+          or getattr(fleet, "namespace", None)
+          or os.getenv("SANDBOX_NAMESPACE")
+          or os.getenv("NAMESPACE", "rl-tunix-swebench")
+      )
       msg = "[SWEEnv] Releasing SandboxHandle back to SandboxFleet."
       logging.info(msg)
-      fleet.release(self.handle)
-      self.handle = None
+      try:
+        fleet.release(self.handle)
+      finally:
+        self.handle = None
+        if pod_name:
+          try:
+            from kubernetes import client as k8s_client, config as k8s_config  # pylint: disable=g-import-not-at-top
+            try:
+              k8s_config.load_incluster_config()
+            except Exception:  # pylint: disable=broad-exception-caught
+              k8s_config.load_kube_config()
+            v1 = k8s_client.CoreV1Api()
+            pod = v1.read_namespaced_pod(name=pod_name, namespace=namespace)
+            if pod.metadata.finalizers and (
+                "kueue.x-k8s.io/managed" in pod.metadata.finalizers
+            ):
+              v1.patch_namespaced_pod(
+                  name=pod_name,
+                  namespace=namespace,
+                  body=[{"op": "remove", "path": "/metadata/finalizers"}],
+              )
+          except Exception:  # pylint: disable=broad-exception-caught
+            pass
 
     if (
         self.delete_image

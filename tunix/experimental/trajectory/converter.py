@@ -443,9 +443,11 @@ def create_trajectory_metadata(
   if isinstance(agent, trajectory_lib.Agent):
     agent_obj = agent
   else:
+    raw_name = getattr(agent, "name", "agent")
+    raw_version = getattr(agent, "version", "1.0")
     agent_obj = trajectory_lib.Agent(
-        name=getattr(agent, "name", "agent"),
-        version=getattr(agent, "version", "1.0"),
+        name=raw_name if isinstance(raw_name, str) else "agent",
+        version=raw_version if isinstance(raw_version, str) else "1.0",
     )
   traj_obj = getattr(agent, "trajectory", None)
 
@@ -455,10 +457,23 @@ def create_trajectory_metadata(
 
   if effective_status is None:
     status_str = None
-  elif hasattr(effective_status, "name"):
+  elif hasattr(effective_status, "name") and isinstance(
+      effective_status.name, str
+  ):
     status_str = effective_status.name
+  elif isinstance(effective_status, str):
+    status_str = effective_status
   else:
-    status_str = str(effective_status)
+    status_str = None
+
+  raw_reward = getattr(traj_obj, "reward", None)
+  total_reward = (
+      float(raw_reward) if isinstance(raw_reward, (int, float)) else None
+  )
+  raw_env_time = getattr(traj_obj, "env_time", None)
+  env_time = raw_env_time if isinstance(raw_env_time, dict) else None
+  raw_reward_time = getattr(traj_obj, "reward_time", None)
+  reward_time = raw_reward_time if isinstance(raw_reward_time, dict) else None
 
   return trajectory_lib.TunixTrajectoryMetadata(
       trajectory_id=traj_id,
@@ -467,10 +482,10 @@ def create_trajectory_metadata(
       group_index=getattr(request, "group_index", 0),
       target_policy_versions=target_policy_versions,
       status=status_str,
-      total_reward=getattr(traj_obj, "reward", None),
+      total_reward=total_reward,
       hyperparams=getattr(request, "generation_kwargs", None),
-      env_time=getattr(traj_obj, "env_time", None),
-      reward_time=getattr(traj_obj, "reward_time", None),
+      env_time=env_time,
+      reward_time=reward_time,
       extra=meta_extra or None,
   )
 

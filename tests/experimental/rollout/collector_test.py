@@ -1442,6 +1442,46 @@ class ResponseBudgetAnnotationTest(absltest.TestCase):
     np.testing.assert_array_equal(item.traj["routed_experts"], mock_routed)
     np.testing.assert_array_equal(item.routed_experts, mock_routed)
 
+  def test_runtime_episode_exception_returns_masked_fallback_trajectory(self):
+    async def _run():
+      req = datatypes.RolloutRequest(
+          prompt_id="prompt_err",
+          prompt="fix issue",
+          group_index=2,
+          target_policy_version=5,
+      )
+      mock_agent = mock.MagicMock()
+      mock_agent.name = "test_agent"
+      engine = collector.TrajectoryCollectorEngine(
+          traj_id="traj_err",
+          request=req,
+          sampler=_MockVanillaSampler(),
+          env_client=mock.MagicMock(),
+          agent=mock_agent,
+          tokenizer=mock.MagicMock(),
+          chat_parser=mock.MagicMock(),
+      )
+      with mock.patch(
+          "tunix.rl.agentic.trajectory.trajectory_collect_engine.TrajectoryCollectEngine"
+      ) as mock_engine_cls:
+        mock_instance = mock.AsyncMock()
+        mock_instance.collect.side_effect = RuntimeError(
+            "Sandbox acquire timed out"
+        )
+        mock_engine_cls.return_value = mock_instance
+
+        item = await engine.run_episode()
+
+      mock_instance._close.assert_awaited_once()
+      self.assertEqual(item.metadata["status"], "ENV_SETUP_FAILED")
+      self.assertEqual(item.traj["reward"], 0.0)
+      np.testing.assert_array_equal(
+          item.traj["conversation_masks"], np.array([0], dtype=np.int32)
+      )
+
+    asyncio.run(_run())
+
 
 if __name__ == "__main__":
   absltest.main()
+

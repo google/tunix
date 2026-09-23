@@ -244,6 +244,8 @@ class TrajectoryCollectorEngine:
         effective_max_tokens = max_generation_steps
       elif req_max_tokens is not None:
         effective_max_tokens = req_max_tokens
+      elif self.max_response_length is not None:
+        effective_max_tokens = self.max_response_length
       else:
         raise ValueError(
             "TrajectoryCollectorEngine requires"
@@ -359,13 +361,47 @@ class TrajectoryCollectorEngine:
     self._inner_engine = inner_engine
     try:
       rl_traj = await inner_engine.collect(mode="Token")
-    except Exception:
-      # ``collect`` only reaches its own ``finally: await self._close()`` once
-      # the turn loop has finished; anything raised inside the loop -- the
-      # ``exact_token_continuity`` consistency checks included -- propagates
-      # past it, so the environment is closed here or not at all.
+    except (ValueError, TypeError):
+      # Contract / configuration validation errors (such as
+      # ``exact_token_continuity`` consistency checks) must fail fast after
+      # closing the environment.
       await inner_engine._close()
       raise
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      # Runtime environment or sandbox pod failures (e.g., TimeoutError,
+      # RuntimeError during fleet.acquire or pod exec) must not abort the
+      # entire GRPO group barrier. Close the environment and return a masked
+      # zero-reward trajectory so the remaining group members can still train.
+      logging.warning(
+          "[RolloutCollector] Episode failed for traj_id=%s (%s: %s); returning"
+          " masked zero-reward trajectory so GRPO group barrier does not"
+          " deadlock.",
+          self.traj_id,
+          type(e).__name__,
+          e,
+      )
+      try:
+        await inner_engine._close()
+      except Exception:  # pylint: disable=broad-exception-caught
+        pass
+      prompt_tokens = getattr(self.request, "prompt_token_ids", None) or [1]
+      rl_traj = {
+          "traj_id": self.traj_id,
+          "prompt_tokens": np.asarray(prompt_tokens, dtype=np.int32),
+          "conversation_tokens": np.zeros((1,), dtype=np.int32),
+          "conversation_masks": np.zeros((1,), dtype=np.int32),
+          "old_logprobs": np.zeros((1,), dtype=np.float32),
+          "routed_experts": None,
+          "trajectory_reward": 0.0,
+          "reward": 0.0,
+          "turns": 0,
+          "is_done": False,
+          "status": "ENV_SETUP_FAILED",
+          "error": f"{type(e).__name__}: {e}",
+          "policy_version": int(
+              getattr(self.request, "target_policy_version", 0) or 0
+          ),
+      }
     self.is_done = True
     return self._convert_to_trajectory(rl_traj)
 
