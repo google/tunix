@@ -136,11 +136,16 @@ def create_worker(a):
   if os.environ.get("VLLM_MAMBA_CACHE_MODE"):
     engine_kwargs["mamba_cache_mode"] = os.environ["VLLM_MAMBA_CACHE_MODE"]
   if os.environ.get("VLLM_LIMIT_MM_PER_PROMPT"):
+    raw_mm = os.environ["VLLM_LIMIT_MM_PER_PROMPT"].strip()
     mm_limits = {}
-    for item in os.environ["VLLM_LIMIT_MM_PER_PROMPT"].split(","):
-      if "=" in item:
-        k, v = item.split("=", 1)
-        mm_limits[k.strip()] = int(v.strip())
+    if raw_mm.startswith("{"):
+      import json  # pylint: disable=import-outside-toplevel
+      mm_limits = {k: int(v) for k, v in json.loads(raw_mm).items()}
+    else:
+      for item in raw_mm.split(","):
+        if "=" in item:
+          k, v = item.split("=", 1)
+          mm_limits[k.strip()] = int(v.strip())
     if mm_limits:
       engine_kwargs["limit_mm_per_prompt"] = mm_limits
   engine_kwargs["hf_overrides"] = {
