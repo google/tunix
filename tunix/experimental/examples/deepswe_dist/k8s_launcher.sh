@@ -734,7 +734,7 @@ while [[ $# -gt 0 ]]; do
       TUNIX_IMAGE="${1#*=}"
       shift
       ;;
-    --dry-run|--render)
+    --dry-run|--dry_run|--render)
       DRY_RUN=true
       shift
       ;;
@@ -787,7 +787,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     -h|--help)
-      echo "Usage: $0 [start|stop|orchestrator|trainer|rollout|test_orchestrator|mock_trainer|mock_rollout|start_rollout_only] [options]"
+      echo "Usage: $0 [start|stop|orchestrator|trainer|rollout|test_orchestrator|mock_trainer|mock_rollout|start_rollout_only|eval|stop_eval] [options]"
       echo "Options:"
       echo "  --command <cmd>          Command to run"
       echo "  --namespace <ns>         Kubernetes namespace (default: default)"
@@ -800,7 +800,7 @@ while [[ $# -gt 0 ]]; do
       echo "  --image_rewrite_prefix   Registry prefix for sandbox images"
       exit 0
       ;;
-    start|stop|orchestrator|trainer|rollout|test_orchestrator|mock_trainer|mock_rollout|start_rollout_only)
+    start|stop|orchestrator|trainer|rollout|test_orchestrator|mock_trainer|mock_rollout|start_rollout_only|eval|stop_eval)
       COMMAND="$1"
       shift
       ;;
@@ -809,6 +809,182 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+start_eval() {
+  if [[ -z "${MAXTEXT_CKPT:-}" ]]; then
+    local eval_yaml
+    eval_yaml="$(dirname "${BASH_SOURCE[0]}")/eval_qwen35_gke.yaml"
+    if [[ "$DRY_RUN" == "true" ]]; then
+      cat "$eval_yaml"
+    else
+      kubectl apply -f "$eval_yaml"
+    fi
+    return
+  fi
+
+  local eval_name="${EVAL_JOBSET_NAME:-${JOB_PREFIX}-eval}"
+  local eval_port="${ROLLOUT_PORT:-20001}"
+  local max_model_len="${VLLM_MAX_MODEL_LEN:-65536}"
+  local max_context_limit="${MAX_CONTEXT_LIMIT:-$((max_model_len - ${MAX_PROMPT_LENGTH:-4096}))}"
+  local output_dir="${EVAL_OUTPUT_DIR:-${TRAJECTORY_LOG_DIR:-eval_results}}"
+  local sandbox_env=""
+  if [[ "${USE_AGENT_SANDBOX}" == "1" || "${USE_AGENT_SANDBOX}" == "true" || "${USE_AGENT_SANDBOX}" == "True" ]]; then
+    sandbox_env="NAMESPACE=\"${SANDBOX_NAMESPACE}\" ${SANDBOX_NODE_SELECTOR_KEY:+NODE_SELECTOR_KEY=\"${SANDBOX_NODE_SELECTOR_KEY}\"} ${SANDBOX_NODE_SELECTOR_VAL:+NODE_SELECTOR_VAL=\"${SANDBOX_NODE_SELECTOR_VAL}\"} ${SANDBOX_TOLERATIONS:+SANDBOX_TOLERATIONS=\"${SANDBOX_TOLERATIONS}\"} ${IMAGE_REWRITE_PREFIX:+IMAGE_REWRITE_PREFIX=\"${IMAGE_REWRITE_PREFIX}\"} ORCHESTRATOR_ID=\"${JOB_PREFIX}\" ${JOB_PREFIX:+JOB_PREFIX=\"${JOB_PREFIX}\"} ${POOL_NAME_FORMAT:+POOL_NAME_FORMAT=\"${POOL_NAME_FORMAT}\"} ${TEMPLATE_NAME_PREFIX:+TEMPLATE_NAME_PREFIX=\"${TEMPLATE_NAME_PREFIX}\"}"
+  elif [[ -n "${IMAGE_REWRITE_PREFIX}" ]]; then
+    sandbox_env="IMAGE_REWRITE_PREFIX=\"${IMAGE_REWRITE_PREFIX}\""
+  fi
+
+  local worker_addrs="localhost:${eval_port}"
+  if [[ ${ROLLOUT_REPLICAS} -gt 1 ]]; then
+    for ((j=1; j<ROLLOUT_REPLICAS; j++)); do
+      worker_addrs="${worker_addrs} ${eval_name}-${j}-proc-0-0.${eval_name}-${j}:${eval_port}"
+    done
+  fi
+
+  for i in $(seq ${ROLLOUT_START_INDEX:-0} $((ROLLOUT_REPLICAS - 1))); do
+    local replica_id="${eval_name}"
+    if [[ ${ROLLOUT_REPLICAS} -gt 1 ]]; then
+      replica_id="${eval_name}-${i}"
+    fi
+    local eval_cmd="tunix/experimental/examples/deepswe_dist/eval_launcher.py"
+    local role_arg=""
+    if [[ ${i} -gt 0 ]]; then
+      eval_cmd="tunix/experimental/examples/deepswe_dist/eval_deepswe.py"
+      role_arg="--role=worker"
+    fi
+
+    "$PYTHON_BIN" "$YAML_GENERATOR" \
+      "${YAML_DIR}/${ROLLOUT_JOBSET_YAML:-jobset.pathways.yaml}" \
+      --jobset_name="${replica_id}" \
+      --namespace="${K8S_NAMESPACE}" \
+      ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
+      --tpu_slice="${ROLLOUT_TPU_SLICE:-tpuv5:2x2x1}" \
+      --cpu_machine="${CPU_MACHINE}" \
+      ${PATHWAYS_SERVER_IMAGE:+--pathways_server_image="${PATHWAYS_SERVER_IMAGE}"} \
+      ${PATHWAYS_PROXY_IMAGE:+--pathways_proxy_server_image="${PATHWAYS_PROXY_IMAGE}"} \
+      ${PATHWAYS_PROXY_MEMORY_LIMIT:+--pathways_proxy_memory_limit="${PATHWAYS_PROXY_MEMORY_LIMIT}"} \
+      ${PATHWAYS_PROXY_MEMORY:+--pathways_proxy_memory="${PATHWAYS_PROXY_MEMORY}"} \
+      ${PATHWAYS_RM_MEMORY:+--pathways_rm_memory="${PATHWAYS_RM_MEMORY}"} \
+      ${USER_CONTAINER_MEMORY:+--user_container_memory="${USER_CONTAINER_MEMORY}"} \
+      ${USER_CONTAINER_MEMORY_LIMIT:+--user_container_memory_limit="${USER_CONTAINER_MEMORY_LIMIT}"} \
+      ${PATHWAYS_WORKER_MEMORY:+--pathways_worker_memory="${PATHWAYS_WORKER_MEMORY}"} \
+      --pathways_gcs_scratch_location="${GCS_SCRATCH_LOCATION}" \
+      --worker_container_image="${TUNIX_IMAGE}" \
+      --worker_container_port="${eval_port}" \
+      --worker_startup_command=" \
+        PYTHONUNBUFFERED=1 \
+        TUNIX_IS_INTERNAL_ENV=false \
+        VLLM_TPU_USING_PATHWAYS=1 \
+        ${sandbox_env} \
+        ${SCAFFOLD:+SCAFFOLD=\"${SCAFFOLD}\"} \
+        ${BOOTSTRAP_CMD} \
+        ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} \
+        ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE} \
+        PREFUSE_MOE_WEIGHTS=${ROLLOUT_PREFUSE_MOE_WEIGHTS} \
+        ROLLOUT_PREFUSE_MOE_WEIGHTS=${ROLLOUT_PREFUSE_MOE_WEIGHTS} \
+        ENABLE_PREFIX_CACHING=${ENABLE_PREFIX_CACHING} \
+        ROLLOUT_FREE_KV_CACHE=${ROLLOUT_FREE_KV_CACHE} \
+        VLLM_MAX_NUM_SEQS=${VLLM_MAX_NUM_SEQS:-16} \
+        VLLM_GPU_MEMORY_UTILIZATION=${VLLM_GPU_MEMORY_UTILIZATION:-0.9} \
+        ${VLLM_ASYNC_SCHEDULING:+VLLM_ASYNC_SCHEDULING=${VLLM_ASYNC_SCHEDULING}} \
+        ${VLLM_ENABLE_EXPERT_PARALLEL:+VLLM_ENABLE_EXPERT_PARALLEL=${VLLM_ENABLE_EXPERT_PARALLEL}} \
+        ${VLLM_LANGUAGE_MODEL_ONLY:+VLLM_LANGUAGE_MODEL_ONLY=${VLLM_LANGUAGE_MODEL_ONLY}} \
+        ${VLLM_ENABLE_CHUNKED_PREFILL:+VLLM_ENABLE_CHUNKED_PREFILL=${VLLM_ENABLE_CHUNKED_PREFILL}} \
+        ${VLLM_KV_CACHE_DTYPE:+VLLM_KV_CACHE_DTYPE=${VLLM_KV_CACHE_DTYPE}} \
+        ${VLLM_BLOCK_SIZE:+VLLM_BLOCK_SIZE=${VLLM_BLOCK_SIZE}} \
+        ${VLLM_MAMBA_CACHE_MODE:+VLLM_MAMBA_CACHE_MODE=${VLLM_MAMBA_CACHE_MODE}} \
+        ${VLLM_LIMIT_MM_PER_PROMPT:+VLLM_LIMIT_MM_PER_PROMPT='${VLLM_LIMIT_MM_PER_PROMPT}'} \
+        ${NUM_PRECOMPILE_WORKERS:+NUM_PRECOMPILE_WORKERS=${NUM_PRECOMPILE_WORKERS}} \
+        ${NEW_MODEL_DESIGN:+NEW_MODEL_DESIGN=${NEW_MODEL_DESIGN}} \
+        ${ATTN_BUCKETIZED_NUM_REQS:+ATTN_BUCKETIZED_NUM_REQS=${ATTN_BUCKETIZED_NUM_REQS}} \
+        ${ATTN_CUSTOM_NUM_REQS_BUCKETS:+ATTN_CUSTOM_NUM_REQS_BUCKETS=${ATTN_CUSTOM_NUM_REQS_BUCKETS}} \
+        ${ONEHOT_MOE_PERMUTE_THRESHOLD:+ONEHOT_MOE_PERMUTE_THRESHOLD=${ONEHOT_MOE_PERMUTE_THRESHOLD}} \
+        ${VLLM_MOE_CHUNK_SIZE:+VLLM_MOE_CHUNK_SIZE=${VLLM_MOE_CHUNK_SIZE}} \
+        ${SLICE_ROPE_CACHE:+SLICE_ROPE_CACHE=${SLICE_ROPE_CACHE}} \
+        ${DP_SCHED_BATCH_PREFILL:+DP_SCHED_BATCH_PREFILL=${DP_SCHED_BATCH_PREFILL}} \
+        ${LIBTPU_INIT_ARGS:+LIBTPU_INIT_ARGS=\"${LIBTPU_INIT_ARGS}\"} \
+        ${VLLM_ENABLE_V1_MULTIPROCESSING:+VLLM_ENABLE_V1_MULTIPROCESSING=${VLLM_ENABLE_V1_MULTIPROCESSING}} \
+        ${VLLM_LOGGING_LEVEL:+VLLM_LOGGING_LEVEL=${VLLM_LOGGING_LEVEL}} \
+        ${ROLLOUT_ENV_FLAGS} \
+        SKIP_JAX_PRECOMPILE=1 python3 -u ${eval_cmd} \
+          ${role_arg} \
+          --worker_addresses ${worker_addrs} \
+          --port=${eval_port} \
+          --model_id=${MODEL_ID} \
+          --tokenizer_path=${TOKENIZER_PATH} \
+          --model_absolute_path=${MAXTEXT_CKPT} \
+          --maxtext_model_name=${MAXTEXT_MODEL_NAME} \
+          --mesh_fsdp=${ROLLOUT_MESH_FSDP:-2} \
+          --mesh_tp=${ROLLOUT_MESH_TP:-2} \
+          --vllm_utilization=${VLLM_GPU_MEMORY_UTILIZATION:-0.9} \
+          --max_model_len=${max_model_len} \
+          --max_context_limit=${max_context_limit} \
+          --max_response_length=${MAX_RESPONSE_LENGTH} \
+          --max_steps=${MAX_TURNS} \
+          --max_concurrent=${MAX_CONCURRENCY} \
+          --batch_size=${BATCH_SIZE:-16} \
+          --vllm_max_num_seqs=${VLLM_MAX_NUM_SEQS:-16} \
+          --vllm_max_num_batched_tokens=${VLLM_MAX_NUM_BATCHED_TOKENS:-2048} \
+          --timeout=${EPISODE_TIMEOUT_SECS:-1800} \
+          --reward_timeout=${REWARD_TIMEOUT_SECS} \
+          --step_timeout=${STEP_TIMEOUT_SECS} \
+          --temperature=${TEMPERATURE} \
+          --top_p=${TOP_P} \
+          --top_k=${TOP_K} \
+          --seed=${SEED} \
+          --enable_thinking=${ENABLE_THINKING:-false} \
+          --enable_prefix_caching=${ENABLE_PREFIX_CACHING} \
+          --checkpoint_storage_use_ocdbt=${CHECKPOINT_STORAGE_USE_OCDBT:-true} \
+          --checkpoint_storage_use_zarr3=${CHECKPOINT_STORAGE_USE_ZARR3:-false} \
+          --dataset_name=${DATASET_NAME} \
+          --dataset_split=${DATASET_SPLIT} \
+          ${DATASET_PATH:+--dataset_path=${DATASET_PATH}} \
+          ${TASKS_LIMIT:+--tasks_limit=${TASKS_LIMIT}} \
+          --num_rollouts_per_instance=${NUM_GENERATIONS} \
+          --scaffold=${SCAFFOLD} \
+          --use_agent_sandbox=${USE_AGENT_SANDBOX} \
+          --max_warmpool_size=${MAX_WARMPOOL_REPLICAS} \
+          --output_dir=${output_dir} \
+      " \
+      | apply_manifest
+  done
+}
+
+stop_eval() {
+  local eval_name="${EVAL_JOBSET_NAME:-${JOB_PREFIX}-eval}"
+  local eval_ns="${EVAL_NAMESPACE:-${K8S_NAMESPACE:-trellis}}"
+  if [[ "$DRY_RUN" == "true" ]]; then
+    echo "[DRY RUN] Would delete jobset ${eval_name} in namespace ${eval_ns}"
+    if [[ ${ROLLOUT_REPLICAS} -gt 1 ]]; then
+      echo "kubectl delete jobset $(seq -f "${eval_name}-%g" 0 $((ROLLOUT_REPLICAS - 1))) -n ${eval_ns}"
+      for ((i=0; i<ROLLOUT_REPLICAS; i++)); do
+        echo "kubectl delete workload -l jobset.sigs.k8s.io/jobset-name=${eval_name}-${i} -n ${eval_ns}"
+      done
+    fi
+    if [[ "${USE_AGENT_SANDBOX}" == "1" || "${USE_AGENT_SANDBOX}" == "true" || "${USE_AGENT_SANDBOX}" == "True" ]]; then
+      echo "kubectl delete sandboxwarmpools -n ${SANDBOX_NAMESPACE} -l app.kubernetes.io/created-by=${JOB_PREFIX} --ignore-not-found=true"
+      echo "kubectl delete sandboxtemplates -n ${SANDBOX_NAMESPACE} -l app.kubernetes.io/created-by=${JOB_PREFIX} --ignore-not-found=true"
+      echo "kubectl delete sandboxclaims -n ${SANDBOX_NAMESPACE} -l app.kubernetes.io/created-by=${JOB_PREFIX} --ignore-not-found=true"
+      echo "kubectl delete pods -n ${SANDBOX_NAMESPACE} -l app.kubernetes.io/created-by=${JOB_PREFIX} --force --grace-period=0 --ignore-not-found=true"
+    fi
+  else
+    kubectl delete jobset "${eval_name}" -n "${eval_ns}" --ignore-not-found=true || true
+    kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name=${eval_name}" -n "${eval_ns}" --ignore-not-found=true 2>/dev/null || true
+    if [[ ${ROLLOUT_REPLICAS} -gt 1 ]]; then
+      kubectl delete jobset $(seq -f "${eval_name}-%g" 0 $((ROLLOUT_REPLICAS - 1))) -n "${eval_ns}" --ignore-not-found=true 2>/dev/null || true
+      for ((i=0; i<ROLLOUT_REPLICAS; i++)); do
+        kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name=${eval_name}-${i}" -n "${eval_ns}" --ignore-not-found=true 2>/dev/null || true
+      done
+    fi
+    if [[ "${USE_AGENT_SANDBOX}" == "1" || "${USE_AGENT_SANDBOX}" == "true" || "${USE_AGENT_SANDBOX}" == "True" ]]; then
+      echo "Cleaning up sandboxes and warmpools for ${JOB_PREFIX} in ${SANDBOX_NAMESPACE}..."
+      kubectl delete sandboxwarmpools -n "${SANDBOX_NAMESPACE}" -l "app.kubernetes.io/created-by=${JOB_PREFIX}" --ignore-not-found=true 2>/dev/null || true
+      kubectl delete sandboxtemplates -n "${SANDBOX_NAMESPACE}" -l "app.kubernetes.io/created-by=${JOB_PREFIX}" --ignore-not-found=true 2>/dev/null || true
+      kubectl delete sandboxclaims -n "${SANDBOX_NAMESPACE}" -l "app.kubernetes.io/created-by=${JOB_PREFIX}" --ignore-not-found=true 2>/dev/null || true
+      kubectl delete pods -n "${SANDBOX_NAMESPACE}" -l "app.kubernetes.io/created-by=${JOB_PREFIX}" --force --grace-period=0 --ignore-not-found=true 2>/dev/null || true
+    fi
+  fi
+}
 
 if [[ "$DRY_RUN" != "true" ]]; then
   if [[ -z "${KUBECONFIG:-}" ]]; then
@@ -827,7 +1003,7 @@ if [[ "$DRY_RUN" != "true" ]]; then
   fi
 fi
 
-if [[ -z "$TUNIX_IMAGE" ]]; then
+if [[ "$COMMAND" != "eval" && "$COMMAND" != "stop_eval" && -z "$TUNIX_IMAGE" ]]; then
   echo "Error: no image set. Build one with tunix, maxtext, and" \
        "tpu-inference installed, then pass it via TUNIX_IMAGE=... or" \
        "--image=..."
@@ -869,7 +1045,12 @@ elif [[ "$COMMAND" == "mock_rollout" ]]; then
   stop_rollout; start_mock_rollout
 elif [[ "$COMMAND" == "start_rollout_only" ]]; then
   start_rollout
+elif [[ "$COMMAND" == "eval" ]]; then
+  stop_eval
+  start_eval
+elif [[ "$COMMAND" == "stop_eval" ]]; then
+  stop_eval
 else
-  echo "Error: Invalid command '$COMMAND'. Available commands: 'start', 'test_orchestrator', 'stop', 'orchestrator', 'trainer', 'mock_trainer', 'rollout', 'mock_rollout'."
+  echo "Error: Invalid command '$COMMAND'. Available commands: 'start', 'test_orchestrator', 'stop', 'orchestrator', 'trainer', 'mock_trainer', 'rollout', 'mock_rollout', 'eval', 'stop_eval'."
   exit 1
 fi
