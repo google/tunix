@@ -189,7 +189,7 @@ export EPISODE_TIMEOUT_SECS=1800
 export DEBUG=1
 
 # DeepSWE Environment & Agent Sandbox
-export DATASET_PATH="gs://mlperf_dataset/r2e-gym-easy"
+export DATASET_PATH="gs://mlperf_dataset/benchmark-r2e-gym-easy"
 export USE_AGENT_SANDBOX=1
 export SCAFFOLD="openhands"
 export SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-trellis}"
