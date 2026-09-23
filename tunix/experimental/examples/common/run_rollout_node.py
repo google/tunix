@@ -885,12 +885,24 @@ def main(argv: list[str], context: Any = None) -> None:
   if args.maxtext_model_name:
     os.environ.setdefault("NEW_MODEL_DESIGN", "1")
 
+  local_model_dir = os.path.abspath(os.path.join(REPO_ROOT, args.model_id))
+  if os.path.isdir(local_model_dir):
+    logging.info(
+        "Found local HF metadata/tokenizer directory at %s; enabling offline load.",
+        local_model_dir,
+    )
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    os.environ["TRANSFORMERS_OFFLINE"] = "1"
+    args.model_id = local_model_dir
+    args.tokenizer_path = local_model_dir
+    args.model_dir = local_model_dir
+
   from transformers import AutoTokenizer  # pylint: disable=g-import-not-at-top
 
   tokenizer_path = args.tokenizer_path or args.model_dir or args.model_id
   logging.info("Loading tokenizer from %s...", tokenizer_path)
   tokenizer: Any = AutoTokenizer.from_pretrained(
-      tokenizer_path, trust_remote_code=True
+      tokenizer_path, trust_remote_code=True, local_files_only=os.path.isdir(tokenizer_path)
   )
   if tokenizer.pad_token_id is None and tokenizer.eos_token is not None:
     tokenizer.pad_token = tokenizer.eos_token

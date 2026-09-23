@@ -32,12 +32,15 @@ export USE_DYNAMIC_SLICING="true"
 export TPU_RESERVATION="${TPU_RESERVATION:-ghostfish-pogoag4tylwed}"
 export ENABLE_PATHWAYS_PERSISTENCE=1
 
+# Optional bootstrap overlay (e.g. for offline environments or testing)
+export BOOTSTRAP_CMD="${BOOTSTRAP_CMD:-}"
+
 # Pathways & Raiden Images and settings (from Google doc)
 export PATHWAYS_SERVER_IMAGE="${PATHWAYS_SERVER_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_server:raiden_20260920_v2}"
 export PATHWAYS_PROXY_IMAGE="${PATHWAYS_PROXY_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_proxy_server:raiden_20260920_v2}"
-export PATHWAYS_PROXY_MEMORY_LIMIT="160G"
-export USER_CONTAINER_MEMORY="260G"
-export USER_CONTAINER_MEMORY_LIMIT="${USER_CONTAINER_MEMORY_LIMIT:-260G}"
+export PATHWAYS_PROXY_MEMORY_LIMIT="100G"
+export USER_CONTAINER_MEMORY="48G"
+export USER_CONTAINER_MEMORY_LIMIT="${USER_CONTAINER_MEMORY_LIMIT:-70G}"
 export RAIDEN_DEVICES_PER_HOST=4
 export USE_WEIGHT_CONVERTER="true"
 export PREFUSE_MOE_WEIGHTS="true"
@@ -70,7 +73,7 @@ export TRAINER_JOBSET_YAML="jobset.pathways.yaml"
 export TRAINER_TPU_SLICE="tpu7x:4x4x4"
 export TRAINER_MESH_FSDP=32
 export TRAINER_MESH_TP=2
-export TRAINER_MESH_EXPERT=1
+export TRAINER_MESH_EXPERT=2
 export TRAINER_BASE_NUM_KV_HEADS=2
 
 export ROLLOUT_JOBSET_YAML="jobset.tpu.yaml"
