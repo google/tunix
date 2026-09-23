@@ -32,8 +32,16 @@ export USE_DYNAMIC_SLICING="true"
 export TPU_RESERVATION="${TPU_RESERVATION:-ghostfish-pogoag4tylwed}"
 export ENABLE_PATHWAYS_PERSISTENCE=1
 
-# Pathways & Raiden shared configuration
+# Pathways shared configuration
 source "${DIR}/mlperf_pathways_config.sh"
+
+export RAIDEN_DEVICES_PER_HOST=4
+export USE_WEIGHT_CONVERTER="true"
+export PREFUSE_MOE_WEIGHTS="true"
+export TRAINER_PREFUSE_MOE_WEIGHTS="true"
+export ROLLOUT_PREFUSE_MOE_WEIGHTS="true"
+export VERIFY_WEIGHTS="true"
+export TRAINER_PADDED_MOE_MLP_DIM=""
 
 # WandB configuration
 export WANDB_ENTITY="google-trellis"

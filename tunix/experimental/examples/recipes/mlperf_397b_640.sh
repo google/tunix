@@ -46,8 +46,16 @@ export KUEUE_PRIORITY_CLASS="${KUEUE_PRIORITY_CLASS:-${PRIORITY_CLASS}}"
 export SERVICE_ACCOUNT="xpk-sa"
 export CPU_MACHINE="n2d-standard-64"
 
-# Pathways & Raiden shared configuration
+# Pathways shared configuration
 source "${DIR}/mlperf_pathways_config.sh"
+
+export RAIDEN_DEVICES_PER_HOST=4
+export USE_WEIGHT_CONVERTER="true"
+export PREFUSE_MOE_WEIGHTS="true"
+export TRAINER_PREFUSE_MOE_WEIGHTS="true"
+export ROLLOUT_PREFUSE_MOE_WEIGHTS="true"
+export VERIFY_WEIGHTS="true"
+export TRAINER_PADDED_MOE_MLP_DIM=""
 
 # WandB configuration
 export WANDB_ENTITY="google-trellis"
