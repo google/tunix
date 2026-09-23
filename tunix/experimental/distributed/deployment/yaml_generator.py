@@ -394,6 +394,17 @@ def main() -> None:
       else ""
   )
 
+  tpu_raiden_data_nics = os.environ.get("TPU_RAIDEN_DATA_NICS", "").strip()
+  if not tpu_raiden_data_nics and tpu_type in ("tpu7x", "tpu-v7x-slice"):
+    tpu_raiden_data_nics = "eth0"
+
+  if tpu_raiden_data_nics:
+    pathways_worker_extra_env = (
+        f"\n              - name: TPU_RAIDEN_DATA_NICS\n                value: \"{tpu_raiden_data_nics}\""
+    )
+  else:
+    pathways_worker_extra_env = ""
+
   with open(args.template_file, "r") as f:
     template = string.Template(f.read())
     content = template.substitute(
@@ -437,6 +448,7 @@ def main() -> None:
         USER_CONTAINER_IMAGE=args.worker_container_image,
         USER_CONTAINER_PORT=args.worker_container_port,
         STARTUP_COMMAND=args.worker_startup_command,
+        PATHWAYS_WORKER_EXTRA_ENV=pathways_worker_extra_env,
     )
     print(content)
 

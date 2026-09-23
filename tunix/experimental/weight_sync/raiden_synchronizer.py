@@ -302,10 +302,6 @@ def _devices_per_host(devices: List[Any]) -> int:
   -1 -- the transfer then completes green while delivering only the shards one
   host happened to own.
   """
-  env_override = os.environ.get("RAIDEN_DEVICES_PER_HOST", "").strip()
-  if env_override.isdigit() and int(env_override) > 0:
-    return int(env_override)
-
   host_keys = [mesh.device_host_key(d) for d in devices]
   per_host = collections.Counter(k for k in host_keys if k is not None)
   per_task = collections.Counter(getattr(d, "task_id", None) for d in devices)
