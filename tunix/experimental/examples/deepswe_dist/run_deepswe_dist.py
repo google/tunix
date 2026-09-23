@@ -650,6 +650,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         trajectory_log_dir=args.trajectory_log_dir,
         trajectory_store=cluster.trajectory_store,
         max_staleness=args.max_staleness,
+        group_order=args.trajectory_group_order,
         sync_weights=(args.weight_sync_mode != weight_sync.WeightSyncMode.NONE),
         on_step_begin=lambda step: logging.info(
             ">>> DeepSWE step %d starting | policy_version=%d",
