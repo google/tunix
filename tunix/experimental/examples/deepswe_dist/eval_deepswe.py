@@ -65,6 +65,12 @@ def parse_args(argv=None):
   p.add_argument("--vllm_utilization", type=float, default=0.70)
   p.add_argument("--max_model_len", type=int, default=16384)
   p.add_argument(
+      "--max_context_limit",
+      type=int,
+      default=0,
+      help="Cumulative response token budget across turns (0 disables).",
+  )
+  p.add_argument(
       "--max_response_length",
       type=int,
       default=12288,
@@ -74,6 +80,12 @@ def parse_args(argv=None):
       "--max_steps", type=int, default=30, help="Agent turns per attempt."
   )
   p.add_argument("--max_concurrent", type=int, default=128)
+  p.add_argument(
+      "--batch_size",
+      type=int,
+      default=16,
+      help="Number of tasks in the active warmpool prewarming window.",
+  )
   p.add_argument("--vllm_max_num_seqs", type=int, default=128)
   p.add_argument("--vllm_max_num_batched_tokens", type=int, default=32768)
   p.add_argument("--timeout", type=float, default=3600)
@@ -114,6 +126,11 @@ def parse_args(argv=None):
       "--use_agent_sandbox", type=boolean, nargs="?", const=True, default=True
   )
   p.add_argument("--max_warmpool_size", type=int, default=1)
+  p.add_argument(
+      "--docker_image_prefix",
+      default="",
+      help="Optional registry prefix to rewrite task Docker images.",
+  )
   p.add_argument("--output_dir", default="eval_results")
   a = p.parse_args(argv)
   for name in (
@@ -123,6 +140,7 @@ def parse_args(argv=None):
       "max_response_length",
       "max_steps",
       "max_concurrent",
+      "batch_size",
       "vllm_max_num_seqs",
       "vllm_max_num_batched_tokens",
       "timeout",
@@ -141,14 +159,16 @@ def parse_args(argv=None):
       or a.temperature < 0
   ):
     p.error("Invalid HBM utilization or sampling probabilities")
-  if a.tasks_limit < 0 or a.seed < 0:
-    p.error("--tasks_limit and --seed must be nonnegative")
+  if a.tasks_limit < 0 or a.seed < 0 or a.max_context_limit < 0:
+    p.error("--tasks_limit, --seed, and --max_context_limit must be nonnegative")
   if not a.model_absolute_path:
     p.error("MaxText eval requires --model_absolute_path (Orbax .../items)")
   if len(set(a.worker_addresses)) != len(a.worker_addresses):
     p.error("Duplicate worker addresses")
   if a.max_concurrent < len(a.worker_addresses):
     p.error("--max_concurrent must be at least the number of workers")
+  if a.docker_image_prefix:
+    os.environ["IMAGE_REWRITE_PREFIX"] = a.docker_image_prefix
   return a
 
 
@@ -189,6 +209,7 @@ def maxtext_config(a):
       "remat_policy": "none",
       "weight_dtype": "bfloat16",
       "prefuse_moe_weights": True,
+      "use_multimodal": False,
       "skip_jax_distributed_system": True,
       "log_config": False,
       "checkpoint_storage_use_ocdbt": a.checkpoint_storage_use_ocdbt,
@@ -201,20 +222,19 @@ def request_fields(a, entry, index, attempt):
   """Construct a wire request without importing JAX on the controller."""
   instance_id = str(entry["instance_id"])
   prompt_id = f"eval_{index}"
+  max_context_limit = getattr(a, "max_context_limit", 0)
   return {
       "request_id": f"{prompt_id}_{attempt}",
       "prompt_id": prompt_id,
       "group_index": attempt,
       "prompt": str(entry["problem_statement"]),
       "max_turns": a.max_steps,
-      # Evaluation caps generation per turn and the number of turns;
-      # a training-style cumulative response budget is not used.
-      "max_response_length": None,
+      "max_response_length": max_context_limit if max_context_limit > 0 else None,
       "generation_kwargs": {
           "max_generation_steps": a.max_response_length,
           "temperature": a.temperature,
           "top_p": a.top_p,
-          "top_k": a.top_k,
+          "top_k": None if a.top_k < 0 else a.top_k,
           # TPU inference uses the engine RNG, not per-request seeds.
           "return_logprobs": False,
       },
@@ -440,6 +460,8 @@ async def run_controller(a):
   all_rows = []
   tasks = []
   failure = None
+  fleet = None
+  entry_stream = entries
 
   def record(row):
     writer.record(row)
@@ -461,15 +483,44 @@ async def run_controller(a):
         raise ValueError(f"Worker/controller model settings differ: {profile}")
 
     await asyncio.gather(*(ready(h) for h in handles))
+    if a.use_agent_sandbox:
+      from examples.deepswe import sandbox_utils  # pylint: disable=import-outside-toplevel
+
+      if a.docker_image_prefix:
+        os.environ["IMAGE_REWRITE_PREFIX"] = a.docker_image_prefix
+      fleet = sandbox_utils.init_global_fleet(
+          tasks=entries,
+          max_concurrency=a.max_concurrent,
+          num_generations=a.num_rollouts_per_instance,
+          batch_size=a.batch_size,
+          max_warmpool_replicas=a.max_warmpool_size,
+          scaffold=a.scaffold,
+      )
+      entry_stream = sandbox_utils.PrewarmDatasetIterator(
+          entries,
+          fleet=fleet,
+          num_generations=a.num_rollouts_per_instance,
+          batch_size=a.batch_size,
+          max_warmpool_replicas=a.max_warmpool_size,
+          unwarm_on_exhaustion=True,
+          scaffold=a.scaffold,
+          wait_initial=True,
+      )
     jobs = iter(
         request_fields(a, entry, index, attempt)
-        for index, entry in enumerate(entries)
+        for index, entry in enumerate(entry_stream)
         for attempt in range(a.num_rollouts_per_instance)
     )
+    effective_concurrency = a.max_concurrent
+    if a.use_agent_sandbox:
+      effective_concurrency = max(
+          len(handles),
+          min(a.max_concurrent, a.batch_size * a.num_rollouts_per_instance),
+      )
     deadline = a.timeout + a.reward_timeout + 360
     for index, handle in enumerate(handles):
-      limit = a.max_concurrent // len(handles) + (
-          index < a.max_concurrent % len(handles)
+      limit = effective_concurrency // len(handles) + (
+          index < effective_concurrency % len(handles)
       )
       tasks.append(
           asyncio.create_task(
@@ -484,6 +535,12 @@ async def run_controller(a):
     for task in tasks:
       task.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
+    if hasattr(entry_stream, "close"):
+      entry_stream.close()
+    if fleet is not None:
+      from examples.deepswe import sandbox_utils  # pylint: disable=import-outside-toplevel
+
+      await asyncio.to_thread(sandbox_utils.teardown_global_fleet)
     summary = summarize(
         all_rows,
         [str(e["instance_id"]) for e in entries],

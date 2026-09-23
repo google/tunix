@@ -48,18 +48,37 @@ def create_worker(a):
   from etils import epath
 
   path = epath.Path(a.model_absolute_path)
+  if not path.exists() and a.model_absolute_path.rstrip("/").endswith("/item"):
+    alt_path = epath.Path(a.model_absolute_path.rstrip("/") + "s")
+    if alt_path.exists():
+      logging.info(
+          "Resolved checkpoint path %s -> %s", a.model_absolute_path, alt_path
+      )
+      path = alt_path
   if not path.exists():
     raise FileNotFoundError(f"MaxText checkpoint not found: {path}")
-  if (path / "manifest.ocdbt").exists() and a.use_ocdbt_with_pathways:
+  metadata_file = path / "_METADATA"
+  if metadata_file.exists():
+    try:
+      import json  # pylint: disable=import-outside-toplevel
+
+      meta = json.loads(metadata_file.read_text())
+      if "use_zarr3" in meta:
+        a.checkpoint_storage_use_zarr3 = bool(meta["use_zarr3"])
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+      logging.warning("Could not read Orbax _METADATA from %s: %s", path, exc)
+  if a.use_ocdbt_with_pathways:
     from orbax.checkpoint._src.serialization import jax_array_handlers
     from orbax.checkpoint._src.serialization import type_handler_registry
 
     type_handler_registry.register_type_handler(
         jax.Array, jax_array_handlers.ArrayHandler(), override=True
     )
+  mt_cfg = eval_deepswe.maxtext_config(a)
+  mt_cfg["load_parameters_path"] = str(path)
   additional_config = {
       "enable_continue_decode": False,
-      "maxtext_config": eval_deepswe.maxtext_config(a),
+      "maxtext_config": mt_cfg,
   }
 
   if jax.device_count() != a.mesh_fsdp * a.mesh_tp:
@@ -91,14 +110,39 @@ def create_worker(a):
       "max_num_seqs": a.vllm_max_num_seqs,
       "max_num_batched_tokens": a.vllm_max_num_batched_tokens,
       "enable_prefix_caching": a.enable_prefix_caching,
-      "async_scheduling": False,
+      "async_scheduling": os.environ.get(
+          "VLLM_ASYNC_SCHEDULING", "0"
+      ).lower() in ("1", "true"),
       "dtype": "bfloat16",
-      "enable_expert_parallel": False,
+      "enable_expert_parallel": os.environ.get(
+          "VLLM_ENABLE_EXPERT_PARALLEL", "0"
+      ).lower() in ("1", "true"),
       "disable_log_stats": False,
       # Use the explicit sampling settings, not repository generation_config.
       "generation_config": "vllm",
       "seed": a.seed,
   }
+  if os.environ.get("VLLM_LANGUAGE_MODEL_ONLY", "0").lower() in ("1", "true"):
+    engine_kwargs["language_model_only"] = True
+  if os.environ.get("VLLM_ENABLE_CHUNKED_PREFILL", "0").lower() in (
+      "1",
+      "true",
+  ):
+    engine_kwargs["enable_chunked_prefill"] = True
+  if os.environ.get("VLLM_KV_CACHE_DTYPE"):
+    engine_kwargs["kv_cache_dtype"] = os.environ["VLLM_KV_CACHE_DTYPE"]
+  if os.environ.get("VLLM_BLOCK_SIZE"):
+    engine_kwargs["block_size"] = int(os.environ["VLLM_BLOCK_SIZE"])
+  if os.environ.get("VLLM_MAMBA_CACHE_MODE"):
+    engine_kwargs["mamba_cache_mode"] = os.environ["VLLM_MAMBA_CACHE_MODE"]
+  if os.environ.get("VLLM_LIMIT_MM_PER_PROMPT"):
+    mm_limits = {}
+    for item in os.environ["VLLM_LIMIT_MM_PER_PROMPT"].split(","):
+      if "=" in item:
+        k, v = item.split("=", 1)
+        mm_limits[k.strip()] = int(v.strip())
+    if mm_limits:
+      engine_kwargs["limit_mm_per_prompt"] = mm_limits
   engine_kwargs["hf_overrides"] = {
       "architectures": ["MaxTextForCausalLM"]
   }
@@ -141,13 +185,16 @@ def create_worker(a):
       return eval_deepswe.compact_result(response)
 
   if a.use_agent_sandbox:
-    # Initialize the correct scaffold before DeepSWEEnv's lazy fallback.
-    # No full-dataset prewarm: fleet.acquire creates task pools on demand.
+    if a.docker_image_prefix:
+      os.environ["IMAGE_REWRITE_PREFIX"] = a.docker_image_prefix
+    entries = eval_deepswe.load_entries(a)
+    # Populate the fleet plan with all dataset tasks so fleet.acquire claims
+    # from the planned warmpools created by the controller's PrewarmDatasetIterator.
     sandbox_utils.init_global_fleet(
-        tasks=None,
+        tasks=entries,
         max_concurrency=a.max_concurrent,
         num_generations=a.num_rollouts_per_instance,
-        batch_size=1,
+        batch_size=a.batch_size,
         max_warmpool_replicas=a.max_warmpool_size,
         scaffold=a.scaffold,
     )

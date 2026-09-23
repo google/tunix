@@ -779,6 +779,12 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           f"{max_generation_steps} and `max_model_len`="
           f"{self.args['max_model_len']}."
       )
+    if not exact_input and prompt_ids:
+      max_prompt_len = max(len(row) for row in prompt_ids)
+      if max_prompt_len < self.args["max_model_len"]:
+        max_generation_steps = min(
+            max_generation_steps, self.args["max_model_len"] - max_prompt_len
+        )
     raw_prompt_start = None
     if beam_size is not None:
       sampling_params = BeamSearchParams(

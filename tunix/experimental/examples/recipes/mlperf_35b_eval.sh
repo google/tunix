@@ -21,6 +21,7 @@ kubectl config set-context --current --namespace=trellis || true
 export K8S_NAMESPACE="trellis"
 export KUEUE_QUEUE="${KUEUE_QUEUE:-multislice-queue}"
 export PRIORITY_CLASS="${PRIORITY_CLASS:-medium}"
+export KUEUE_PRIORITY_CLASS="${KUEUE_PRIORITY_CLASS:-${PRIORITY_CLASS}}"
 export SERVICE_ACCOUNT="xpk-sa"
 export CPU_MACHINE="n2d-standard-64"
 
@@ -38,7 +39,9 @@ export MODEL_NAME="Qwen3.5-35B-A3B"
 export MODEL_ID="Qwen/Qwen3.5-35B-A3B"
 export TOKENIZER_PATH="Qwen/Qwen3.5-35B-A3B"
 export MAXTEXT_MODEL_NAME="qwen3.5-35b-a3b"
-export MAXTEXT_CKPT="${MAXTEXT_CKPT:-gs://hengtaoguo-maxtext-logs/checkpoints/qwen3.5-35b-a3b/scanned/2026-06-11-10-27/0/items}"
+export MAXTEXT_CKPT="${MAXTEXT_CKPT:-gs://maxtext-model-checkpoints/qwen3.5-35b-a3b/unscanned/0/items}"
+export CHECKPOINT_STORAGE_USE_OCDBT="${CHECKPOINT_STORAGE_USE_OCDBT:-true}"
+export CHECKPOINT_STORAGE_USE_ZARR3="${CHECKPOINT_STORAGE_USE_ZARR3:-true}"
 export EOS_TOKENS="${EOS_TOKENS:-151645,151643}"
 
 # Backend & Rollout Topology (Pathways 4-chip 2x2x1 slice, mesh_fsdp=2, mesh_tp=2; no Trainer)
@@ -98,6 +101,7 @@ export VLLM_ENABLE_V1_MULTIPROCESSING=0
 # ==============================================================================
 # Evaluation & DeepSWE Pipeline Configuration
 # ==============================================================================
+export BATCH_SIZE="${BATCH_SIZE:-16}"
 export NUM_GENERATIONS="${NUM_GENERATIONS:-4}"
 export DATASET_SPLIT="${DATASET_SPLIT:-validation}"
 
@@ -127,7 +131,8 @@ export REWARD_TIMEOUT_SECS=180
 export FLUSH_EVERY_N_STEPS=1
 export MAX_TURNS=30
 export MAX_PROMPT_LENGTH=4096
-export MAX_RESPONSE_LENGTH=61440
+export MAX_CONTEXT_LIMIT=61440
+export MAX_RESPONSE_LENGTH=12288
 
 # ==============================================================================
 # Execution Dispatch

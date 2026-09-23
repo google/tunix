@@ -827,7 +827,7 @@ start_eval() {
   local output_dir="${EVAL_OUTPUT_DIR:-${TRAJECTORY_LOG_DIR:-eval_results}}"
   local sandbox_env=""
   if [[ "${USE_AGENT_SANDBOX}" == "1" || "${USE_AGENT_SANDBOX}" == "true" || "${USE_AGENT_SANDBOX}" == "True" ]]; then
-    sandbox_env="NAMESPACE=\"${SANDBOX_NAMESPACE}\" ${SANDBOX_NODE_SELECTOR_KEY:+NODE_SELECTOR_KEY=\"${SANDBOX_NODE_SELECTOR_KEY}\"} ${SANDBOX_NODE_SELECTOR_VAL:+NODE_SELECTOR_VAL=\"${SANDBOX_NODE_SELECTOR_VAL}\"} ${IMAGE_REWRITE_PREFIX:+IMAGE_REWRITE_PREFIX=\"${IMAGE_REWRITE_PREFIX}\"} ${JOB_PREFIX:+JOB_PREFIX=\"${JOB_PREFIX}\"} ${POOL_NAME_FORMAT:+POOL_NAME_FORMAT=\"${POOL_NAME_FORMAT}\"} ${TEMPLATE_NAME_PREFIX:+TEMPLATE_NAME_PREFIX=\"${TEMPLATE_NAME_PREFIX}\"}"
+    sandbox_env="NAMESPACE=\"${SANDBOX_NAMESPACE}\" ${SANDBOX_NODE_SELECTOR_KEY:+NODE_SELECTOR_KEY=\"${SANDBOX_NODE_SELECTOR_KEY}\"} ${SANDBOX_NODE_SELECTOR_VAL:+NODE_SELECTOR_VAL=\"${SANDBOX_NODE_SELECTOR_VAL}\"} ${SANDBOX_TOLERATIONS:+SANDBOX_TOLERATIONS=\"${SANDBOX_TOLERATIONS}\"} ${IMAGE_REWRITE_PREFIX:+IMAGE_REWRITE_PREFIX=\"${IMAGE_REWRITE_PREFIX}\"} ORCHESTRATOR_ID=\"${JOB_PREFIX}\" ${JOB_PREFIX:+JOB_PREFIX=\"${JOB_PREFIX}\"} ${POOL_NAME_FORMAT:+POOL_NAME_FORMAT=\"${POOL_NAME_FORMAT}\"} ${TEMPLATE_NAME_PREFIX:+TEMPLATE_NAME_PREFIX=\"${TEMPLATE_NAME_PREFIX}\"}"
   elif [[ -n "${IMAGE_REWRITE_PREFIX}" ]]; then
     sandbox_env="IMAGE_REWRITE_PREFIX=\"${IMAGE_REWRITE_PREFIX}\""
   fi
@@ -835,6 +835,8 @@ start_eval() {
   "$PYTHON_BIN" "$YAML_GENERATOR" \
     "${YAML_DIR}/${ROLLOUT_JOBSET_YAML:-jobset.pathways.yaml}" \
     --jobset_name="${eval_name}" \
+    --namespace="${K8S_NAMESPACE}" \
+    ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
     --tpu_slice="${ROLLOUT_TPU_SLICE:-tpuv5:2x2x1}" \
     --cpu_machine="${CPU_MACHINE}" \
     ${PATHWAYS_SERVER_IMAGE:+--pathways_server_image="${PATHWAYS_SERVER_IMAGE}"} \
@@ -889,6 +891,7 @@ start_eval() {
         --max_response_length=${MAX_RESPONSE_LENGTH} \
         --max_steps=${MAX_TURNS} \
         --max_concurrent=${MAX_CONCURRENCY} \
+        --batch_size=${BATCH_SIZE:-16} \
         --vllm_max_num_seqs=${VLLM_MAX_NUM_SEQS:-16} \
         --vllm_max_num_batched_tokens=${VLLM_MAX_NUM_BATCHED_TOKENS:-2048} \
         --timeout=${EPISODE_TIMEOUT_SECS:-1800} \
@@ -899,6 +902,8 @@ start_eval() {
         --top_k=${TOP_K} \
         --seed=${SEED} \
         --enable_prefix_caching=${ENABLE_PREFIX_CACHING} \
+        --checkpoint_storage_use_ocdbt=${CHECKPOINT_STORAGE_USE_OCDBT:-true} \
+        --checkpoint_storage_use_zarr3=${CHECKPOINT_STORAGE_USE_ZARR3:-false} \
         --dataset_name=${DATASET_NAME} \
         --dataset_split=${DATASET_SPLIT} \
         ${DATASET_PATH:+--dataset_path=${DATASET_PATH}} \
