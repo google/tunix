@@ -99,3 +99,22 @@ bash tunix/experimental/examples/recipes/mlperf_35b_256.sh stop
 - **Rollout Slices**: 16 replicas with `ROLLOUT_TPU_SLICE=tpuv5:2x2x2` (8 chips per slice), utilizing vLLM prefix caching and RPA attention.
 - **Micro-Batching**: `TRAIN_MICRO_BATCH_SIZE=32`, matching the 32 expert parallelism dimension to ensure JAX sharding divisibility.
 - **Agent Sandboxes**: `USE_AGENT_SANDBOX=1` deploying OpenHands environments into the `trellis` namespace on `sandbox-cpu-pool` nodes.
+
+---
+
+## Pathways Images & Rebuild Guide
+
+For recipes using Pathways (`pathways-worker` and `pathways-proxy`) with Raiden weight synchronization:
+
+```bash
+export PATHWAYS_SERVER_IMAGE="us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_server:raiden_20260923"
+export PATHWAYS_PROXY_IMAGE="us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_proxy_server:raiden_20260923"
+```
+
+### When to Rebuild: Pathways Images vs. Python Wheels
+
+| Change Type | Rebuild Pathways Image? | Rebuild Python Wheel? | Notes |
+| :--- | :---: | :---: | :--- |
+| **C++ Code (`.cc`, `.h`, protos)** in `tpu_sync/` | **YES** | **YES** | Pathways workers run C++ inside `cloud_pathways_server`; McJAX rollout workers run C++ from `.so` files inside the Python wheel. Both must be updated. |
+| **Pure Python** in `tunix/` or `tpu_sync/` (e.g. `broadcast_engine.py`, `raiden_controller.py`) | **NO** | **YES** | Pathways workers do not run Python. Only the controller/runner containers need the updated wheel. |
+| **Pathways Infrastructure** (`cloud/tpu/multipod/pathways/`) | **YES** | **NO** | Only affects the Pathways server/proxy binaries. |
