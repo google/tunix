@@ -1,4 +1,4 @@
-"""Agentic FrozenLake GRPO recipe for Qwen3-8B on a single TPU host.
+"""Agentic FrozenLake GRPO recipe for Qwen3 on a single TPU host.
 
 Targets v5p-8 / v6e-4 -class hosts where actor, reference, and rollout share
 a single mesh. Hyperparameters are exposed via argparse; the rollout backend
@@ -16,6 +16,7 @@ from typing import List
 from absl import logging as absl_logging
 from flax import nnx
 import grain
+import huggingface_hub
 import jax
 from jax import numpy as jnp
 import numpy as np
@@ -40,7 +41,6 @@ print("Logging configured at INFO level.")
 
 from tunix.models.qwen3 import params as params_lib
 from tunix.models.qwen3 import model as model_lib
-from tunix.google.stubs import utils_stub as oss_utils
 from tunix.sft import metrics_logger
 from tunix.rl.agentic.agentic_grpo_learner import GRPOConfig, GRPOLearner
 from tunix.rl.agentic.parser.chat_template_parser import parser
@@ -74,7 +74,11 @@ print("jax devices: ", jax.devices())
 import argparse
 
 arg_parser = argparse.ArgumentParser(
-    description="Train FrozenLake on Qwen3-8B (single-host TPU)."
+    description="Train FrozenLake on Qwen3 (single-host TPU)."
+)
+arg_parser.add_argument(
+    "--model_version", type=str, default="Qwen/Qwen3-8B",
+    help="HF model id. Supported: Qwen/Qwen3-8B, Qwen/Qwen3-1.7B.",
 )
 # Effective on-policy batch is `batch_size * num_generations` per global step.
 # Tuned together with `num_generations=8` to keep per-step rollout latency
@@ -136,17 +140,46 @@ arg_parser.add_argument(
     "--advantage_estimator", type=str, default="rloo",
     help="'grpo' (z-score) or 'rloo' (leave-one-out baseline).",
 )
+# ====== Score Centering (arXiv:2609.20807) ======
+# Requires the vLLM rollout engine -- it is the only backend that returns
+# per-token top-k logprobs.
+arg_parser.add_argument(
+    "--score_centering", action="store_true",
+    help="Enable Score Centering in the GRPO loss.",
+)
+arg_parser.add_argument(
+    "--score_centering_top_k", type=int, default=128,
+    help="Top-k head size k. Rollout payload and the trainer's "
+         "[B, L, k] logp gather both scale linearly in k.",
+)
+arg_parser.add_argument(
+    "--score_centering_eps", type=float, default=1e-6,
+    help="Floor on the tail probability mass when forming rho.",
+)
+arg_parser.add_argument(
+    "--no_exact_token_continuity", action="store_true",
+    help="Force exact_token_continuity=False. Escape hatch for the "
+         "'Exact trajectory exceeds training padding budget' abort.",
+)
+arg_parser.add_argument(
+    "--disable_eval", action="store_true",
+    help="Skip held-out eval rollouts.",
+)
 args, _ = arg_parser.parse_known_args()
 
 TRAIN_FRACTION = 1.0
 SEED = args.seed
 
 # ====== Sharding ======
-# Single shared mesh across actor / reference / rollout. Pure tensor-parallel
-# (fsdp=1) so the rollout sampler's batch=1 prefill is not split across an
-# fsdp axis.
+# Actor and reference share a pure tensor-parallel mesh (fsdp=1).
 SHARED_MESH_SHAPE = (1, jax.device_count())
 SHARED_MESH_AXIS_NAMES = ("fsdp", "tp")
+# vLLM rollout runs DP=2 x TP=(n/2) over the same devices. With DP=1,
+# tpu-inference builds its mesh via `jax.make_mesh` without `axis_types`, which
+# defaults to Explicit axes; its sampler's `with_sharding_constraint` on the
+# vocab-sharded logits then fails as an assertion at engine init. The DP>1
+# path does not hit this.
+ROLLOUT_MESH_SHAPE = (2, jax.device_count() // 2)
 
 # ====== GRPO ======
 MAX_PROMPT_LENGTH = args.max_prompt_length
@@ -165,6 +198,9 @@ VLLM_MAX_NUM_SEQS = 64
 VLLM_MAX_BATCHED_TOKENS = VLLM_MAX_NUM_SEQS * 4 * 1024 // 8
 
 NUM_ITERATIONS = 1
+SCORE_CENTERING = args.score_centering
+SCORE_CENTERING_TOP_K = args.score_centering_top_k
+SCORE_CENTERING_EPS = args.score_centering_eps
 BETA = args.beta
 EPSILON = args.epsilon
 EPSILON_HIGH = args.epsilon_high
@@ -224,15 +260,30 @@ MAX_TO_KEEP = 1
 
 # ====== Rollout ======
 ROLLOUT_ENGINE = os.getenv("ROLLOUT_ENGINE", "vllm")  # "vanilla" | "vllm"
+if SCORE_CENTERING and ROLLOUT_ENGINE != "vllm":
+  # The vanilla rollout never populates topk_logprobs, so the loss would fall
+  # back to plain GRPO with no warning. Fail loudly instead.
+  raise ValueError(
+      "--score_centering requires ROLLOUT_ENGINE=vllm; got "
+      f"{ROLLOUT_ENGINE!r}."
+  )
 
 # ====== Paths ======
-MODEL_VERSION = "Qwen/Qwen3-8B"
-MODEL_DOWNLOAD_DIR = "/tmp/models/Qwen3-8B"
-DATA_DIR = "/tmp/data/frozenlake"
+MODEL_VERSION = args.model_version
+_MODEL_CONFIGS = {
+    "Qwen/Qwen3-8B": model_lib.ModelConfig.qwen3_8b,
+    "Qwen/Qwen3-1.7B": model_lib.ModelConfig.qwen3_1p7b,
+}
+if MODEL_VERSION not in _MODEL_CONFIGS:
+  raise ValueError(
+      f"Unsupported --model_version {MODEL_VERSION!r}; expected one of"
+      f" {sorted(_MODEL_CONFIGS)}."
+  )
+DATA_DIR = os.getenv("DATA_DIR", "/tmp/data/frozenlake")
 
 # Checkpointing is opt-in: set CKPT_DIR to a writable path to enable.
 CKPT_DIR = None
-TB_LOG_DIR = "/tmp/tunix-tb/frozenlake"
+TB_LOG_DIR = os.getenv("TB_LOG_DIR", "/tmp/tunix-tb/frozenlake")
 
 
 # ====== Build the single shared mesh ======
@@ -251,6 +302,16 @@ shared_mesh = jax.sharding.Mesh(
     axis_types=(jax.sharding.AxisType.Auto,) * len(SHARED_MESH_SHAPE),
 )
 print(f"shared_mesh.devices.shape={shared_mesh.devices.shape}")
+
+rollout_device_list = jax._src.mesh_utils.create_device_mesh(
+    ROLLOUT_MESH_SHAPE, jax.devices()[: math.prod(ROLLOUT_MESH_SHAPE)]
+)
+rollout_mesh = jax.sharding.Mesh(
+    rollout_device_list,
+    axis_names=SHARED_MESH_AXIS_NAMES,
+    axis_types=(jax.sharding.AxisType.Auto,) * len(ROLLOUT_MESH_SHAPE),
+)
+print(f"rollout_mesh.devices.shape={rollout_mesh.devices.shape}")
 
 # ====== Data ======
 import pandas as pd
@@ -324,14 +385,11 @@ show_hbm_usage = sft_utils.show_hbm_usage
 show_hbm_usage("Done with loading datasets")
 
 # ====== Download + load model ======
-# Download safetensors from HF if not present locally.
-if not os.path.isdir(MODEL_DOWNLOAD_DIR) or not any(
-    f.endswith(".safetensors") for f in os.listdir(MODEL_DOWNLOAD_DIR)
-):
-  os.makedirs(MODEL_DOWNLOAD_DIR, exist_ok=True)
-  oss_utils.hf_pipeline(MODEL_VERSION, MODEL_DOWNLOAD_DIR)
+MODEL_DOWNLOAD_DIR = huggingface_hub.snapshot_download(
+    repo_id=MODEL_VERSION, max_workers=16
+)
 
-config = model_lib.ModelConfig.qwen3_8b()
+config = _MODEL_CONFIGS[MODEL_VERSION]()
 if ENABLE_REMAT:
   config.remat_config = model_lib.RematConfig.DECODER
 if ENABLE_FLASH_ATTENTION:
@@ -373,7 +431,8 @@ wandb_config.update({
 })
 metrics_logging_options = metrics_logger.MetricsLoggerOptions(
     log_dir=TB_LOG_DIR,
-    project_name="tunix-frozenlake",
+    project_name=os.getenv("WANDB_PROJECT", "tunix-frozenlake"),
+    run_name=os.getenv("WANDB_RUN_NAME", ""),
     flush_every_n_steps=1,
     backend_kwargs={"wandb": {"config": wandb_config}},
 )
@@ -392,6 +451,7 @@ if MAX_GRAD_NORM is not None:
 
 # ====== Rollout + RL cluster ======
 print("Shared mesh:", shared_mesh)
+print("Rollout mesh:", rollout_mesh)
 
 base_rollout_dict = {
     "max_prompt_length": MAX_PROMPT_LENGTH,
@@ -400,6 +460,11 @@ base_rollout_dict = {
     "top_p": TOP_P,
     "top_k": TOP_K,
     "return_logprobs": True,
+    # Score Centering needs the sampler's top-k logprobs per generated token.
+    # This must be set before RLEngine is built: RLEngine.__init__ freezes it
+    # into the vLLM engine's `max_logprobs`, so GRPOLearner's own auto-config
+    # arrives too late.
+    "num_logprobs": SCORE_CENTERING_TOP_K if SCORE_CENTERING else 1,
     "max_tokens_to_generate": MAX_RESPONSE_LENGTH,
 }
 
@@ -420,8 +485,8 @@ vllm_rollout_dict = {
     # train step starts.
     "rollout_vllm_async_scheduling": False,
     "rollout_vllm_init_with_random_weights": True,
-    "tensor_parallel_size": SHARED_MESH_SHAPE[1],
-    "data_parallel_size": SHARED_MESH_SHAPE[0],
+    "tensor_parallel_size": ROLLOUT_MESH_SHAPE[1],
+    "data_parallel_size": ROLLOUT_MESH_SHAPE[0],
     "rollout_vllm_max_num_seqs": VLLM_MAX_NUM_SEQS,
     "rollout_vllm_max_num_batched_tokens": VLLM_MAX_BATCHED_TOKENS,
     "rollout_vllm_kwargs": {
@@ -445,7 +510,7 @@ cluster_config = rl_engine_lib.ClusterConfig(
     role_to_mesh={
         rl_engine_lib.Role.ACTOR: shared_mesh,
         rl_engine_lib.Role.REFERENCE: shared_mesh,
-        rl_engine_lib.Role.ROLLOUT: shared_mesh,
+        rl_engine_lib.Role.ROLLOUT: rollout_mesh,
     },
     rollout_engine=ROLLOUT_ENGINE,
     # Keep actor weights resident on device. With ``delete_dst_buffers=True``
@@ -470,6 +535,10 @@ cluster_config = rl_engine_lib.ClusterConfig(
         # effective optimizer batch size or training dynamics.
         train_micro_batch_size=4,
         compute_logps_micro_batch_size=4,
+        # Project hidden states to the vocabulary in sequence chunks so the
+        # full `[micro_batch, seq_len, vocab/TP]` fp32 logits tensor is never
+        # materialized at once.
+        compute_logps_chunk_size=2048,
         metrics_logging_options=metrics_logging_options,
         checkpoint_root_directory=CKPT_DIR,
         checkpointing_options=checkpointing_options,
@@ -499,6 +568,12 @@ grpo_config = GRPOConfig(
     # importance ratios.
     sampler_is="token",
     sampler_is_threshold=2.0,
+    score_centering=SCORE_CENTERING,
+    score_centering_top_k=SCORE_CENTERING_TOP_K,
+    score_centering_eps=SCORE_CENTERING_EPS,
+    exact_token_continuity=(
+        False if args.no_exact_token_continuity else None
+    ),
     advantage_estimator=args.advantage_estimator,
 )
 
@@ -553,4 +628,7 @@ show_hbm_usage("after GRPOLearner creation")
 # Pass test_dataset as the eval set so the learner runs held-out rollouts
 # every EVAL_EVERY_N_STEPS and logs `eval/...` metrics (including
 # trajectory_reward → solve rate) separately from train metrics.
-grpo_trainer.train(train_dataset, eval_dataset=test_dataset)
+grpo_trainer.train(
+    train_dataset,
+    eval_dataset=None if args.disable_eval else test_dataset,
+)

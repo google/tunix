@@ -302,14 +302,14 @@ if SCORE_CENTERING and ROLLOUT_ENGINE != "vllm":
 # ====== Paths (env-driven so the same image runs anywhere) ======
 MODEL_VERSION = "google/gemma-4-E2B-it"
 MODEL_DOWNLOAD_DIR = huggingface_hub.snapshot_download(repo_id=MODEL_VERSION, max_workers=16)
-DATA_DIR = "gs://tunix/data/Frozenlake"
+DATA_DIR = os.getenv("DATA_DIR", "gs://tunix/data/Frozenlake")
 
 now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 # Checkpointing is opt-in: set CKPT_DIR to enable, otherwise nothing is written.
 # Orbax's CheckpointManager force-saves the first step regardless of the
 # configured save_interval_steps, so a large interval alone does not disable it.
 CKPT_DIR = os.getenv("CKPT_DIR") or None
-TB_LOG_DIR = "gs://linchai-bucket-dev/tensorboard/grpo"
+TB_LOG_DIR = os.getenv("TB_LOG_DIR", "gs://linchai-bucket-dev/tensorboard/grpo")
 
 
 # ====== Build the single shared mesh ======
