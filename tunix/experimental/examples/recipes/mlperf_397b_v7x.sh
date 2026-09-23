@@ -162,8 +162,12 @@ export MINI_BATCH_SIZE=${BATCH_SIZE}
 export NUM_GENERATIONS=16
 # Must be a multiple of FSDP*EXPERT (=128); per_device_batch = 128/512 devices = 0.25
 export TRAIN_MICRO_BATCH_SIZE="${TRAIN_MICRO_BATCH_SIZE:-128}"
-export CHECKPOINT_SAVE_INTERVAL_STEPS=0
+export CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-0}
 export CHECKPOINT_MAX_TO_KEEP=10
+# When saving is enabled, default to Pathways persistence; the fallback OOMs the proxy at 397B.
+if [[ "${CHECKPOINT_SAVE_INTERVAL_STEPS}" -gt 0 ]]; then
+  export ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE:-1}
+fi
 export MAX_STALENESS=0
 
 # Step 0 is a cold single-threaded Pallas lowering of the MoE and GDN kernels
