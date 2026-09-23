@@ -213,7 +213,7 @@ export EPISODE_TIMEOUT_SECS=1800
 export DEBUG=${DEBUG:-0}
 
 # DeepSWE Environment & Agent Sandbox
-export DATASET_PATH="gs://mlperf_dataset/r2e-gym-easy"
+export DATASET_PATH="gs://mlperf_dataset/benchmark-r2e-gym-easy"
 export USE_AGENT_SANDBOX=1
 export SANDBOX_NAMESPACE="trellis"
 export SANDBOX_NODE_SELECTOR_KEY="cloud.google.com/gke-nodepool"
