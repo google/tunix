@@ -126,11 +126,6 @@ def parse_args(argv=None):
       "--use_agent_sandbox", type=boolean, nargs="?", const=True, default=True
   )
   p.add_argument("--max_warmpool_size", type=int, default=1)
-  p.add_argument(
-      "--docker_image_prefix",
-      default="",
-      help="Optional registry prefix to rewrite task Docker images.",
-  )
   p.add_argument("--output_dir", default="eval_results")
   a = p.parse_args(argv)
   for name in (
@@ -167,8 +162,6 @@ def parse_args(argv=None):
     p.error("Duplicate worker addresses")
   if a.max_concurrent < len(a.worker_addresses):
     p.error("--max_concurrent must be at least the number of workers")
-  if a.docker_image_prefix:
-    os.environ["IMAGE_REWRITE_PREFIX"] = a.docker_image_prefix
   return a
 
 
@@ -486,8 +479,6 @@ async def run_controller(a):
     if a.use_agent_sandbox:
       from examples.deepswe import sandbox_utils  # pylint: disable=import-outside-toplevel
 
-      if a.docker_image_prefix:
-        os.environ["IMAGE_REWRITE_PREFIX"] = a.docker_image_prefix
       fleet = sandbox_utils.init_global_fleet(
           tasks=entries,
           max_concurrency=a.max_concurrent,

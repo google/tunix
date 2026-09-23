@@ -941,7 +941,6 @@ start_eval() {
           --scaffold=${SCAFFOLD} \
           --use_agent_sandbox=${USE_AGENT_SANDBOX} \
           --max_warmpool_size=${MAX_WARMPOOL_REPLICAS} \
-          ${IMAGE_REWRITE_PREFIX:+--docker_image_prefix=${IMAGE_REWRITE_PREFIX}} \
           --output_dir=${output_dir} \
       " \
       | apply_manifest

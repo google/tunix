@@ -84,17 +84,11 @@ class EvalTest(unittest.TestCase):
         "-1",
         "--batch_size",
         "16",
-        "--docker_image_prefix",
-        "us-central1-docker.pkg.dev/proj/repo",
     )
     req = eval_lib.request_fields(with_limits, self.entry(), 0, 0)
     self.assertEqual(req["max_response_length"], 61440)
     self.assertIsNone(req["generation_kwargs"]["top_k"])
     self.assertEqual(with_limits.batch_size, 16)
-    self.assertEqual(
-        with_limits.docker_image_prefix,
-        "us-central1-docker.pkg.dev/proj/repo",
-    )
 
   def test_limited_remote_dataset_streams_and_uses_image_identity(self):
     entry = self.entry()

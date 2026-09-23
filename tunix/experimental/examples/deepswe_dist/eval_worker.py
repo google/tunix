@@ -197,8 +197,6 @@ def create_worker(a):
       return eval_deepswe.compact_result(response)
 
   if a.use_agent_sandbox:
-    if a.docker_image_prefix:
-      os.environ["IMAGE_REWRITE_PREFIX"] = a.docker_image_prefix
     entries = eval_deepswe.load_entries(a)
     # Populate the fleet plan with all dataset tasks so fleet.acquire claims
     # from the planned warmpools created by the controller's PrewarmDatasetIterator.
