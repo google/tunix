@@ -1422,6 +1422,11 @@ class StandardRLProgram(RLProgram):
             current_batch_idx, scored_items = ordered
         else:
           scored_items = await self.scored_q.get_group_batch(num_groups=1)
+        # TODO(sanbao): Track accurate generation time by matching rollout
+        # requests/responses or reading from the rollout worker. Currently this
+        # measures time spent waiting on the scored queue (which includes
+        # rollout + reward calculation), as MLPerf does not strictly validate
+        # per-component timing accuracy.
         exposed_generation_time += time.monotonic() - _t_gen
         if not scored_items:
           assembled_batches = self.assembler.flush()
