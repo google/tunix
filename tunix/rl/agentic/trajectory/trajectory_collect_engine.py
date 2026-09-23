@@ -433,7 +433,12 @@ class TrajectoryCollectEngine:
             )
             logprobs.append(step_logprobs)
           else:
-            logprobs.append(np.zeros(len(assistant_tokens)))
+            raise ValueError(
+                f"Step {idx} has assistant_tokens (len"
+                f" {len(assistant_tokens)}) but missing step logprobs. The"
+                " rollout sampler must return logprobs for all assistant"
+                " tokens, or logprob tracking should be disabled."
+            )
           if has_routed_experts:
             if step_routed is None:
               raise ValueError(
