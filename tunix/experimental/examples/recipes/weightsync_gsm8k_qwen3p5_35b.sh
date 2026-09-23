@@ -43,8 +43,8 @@ export SERVICE_ACCOUNT="${SERVICE_ACCOUNT:-xpk-sa}"
 export CPU_MACHINE="${CPU_MACHINE:-n2d-standard-64}"
 
 export TUNIX_IMAGE="${TUNIX_IMAGE:-gcr.io/cloud-tpu-multipod-dev/atwigg/trellis-35b:latest}"
-export PATHWAYS_SERVER_IMAGE="${PATHWAYS_SERVER_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_server:raiden_20260920_v2}"
-export PATHWAYS_PROXY_IMAGE="${PATHWAYS_PROXY_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_proxy_server:raiden_20260920_v2}"
+export PATHWAYS_SERVER_IMAGE="${PATHWAYS_SERVER_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_server:raiden_20260923}"
+export PATHWAYS_PROXY_IMAGE="${PATHWAYS_PROXY_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_proxy_server:raiden_20260923}"
 
 export WANDB_PROJECT="${WANDB_PROJECT:-trellis-gsm8k-qwen35-35b}"
 export WANDB_RUN_NAME="${WANDB_RUN_NAME:-${USER:-user}-qwen35-35b-$(date +%m%d-%H%M)}"
