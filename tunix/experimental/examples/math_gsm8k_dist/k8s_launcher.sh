@@ -80,6 +80,8 @@ export USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
 export CHAT_PARSER=${CHAT_PARSER:-raw}
 export CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-1}
 export CHECKPOINT_MAX_TO_KEEP=${CHECKPOINT_MAX_TO_KEEP:-10}
+export CHECKPOINT_RESTORE_STEP=${CHECKPOINT_RESTORE_STEP:-}
+export CHECKPOINT_OVERWRITE=${CHECKPOINT_OVERWRITE:-true}
 export CHECKPOINT_ROOT_DIRECTORY=${CHECKPOINT_ROOT_DIRECTORY:-checkpoints}
 export ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE:-0}
 export CKPT_D2H_CONCURRENT_GB=${CKPT_D2H_CONCURRENT_GB:-8}
@@ -222,6 +224,8 @@ start_orchestrator() {
         ${MAX_SEQ_TOKEN_PER_TPU:+--max_seq_token_per_tpu=${MAX_SEQ_TOKEN_PER_TPU}} \
         ${MAX_SEGMENTS_PER_PACKED_ROW:+--max_segments_per_packed_row=${MAX_SEGMENTS_PER_PACKED_ROW}} \
         ${TRAINER_MESH_FSDP:+--trainer_fsdp=${TRAINER_MESH_FSDP}} \
+        ${CHECKPOINT_RESTORE_STEP:+--checkpoint_restore_step=${CHECKPOINT_RESTORE_STEP}} \
+        $([[ "${CHECKPOINT_OVERWRITE}" == "false" || "${CHECKPOINT_OVERWRITE}" == "False" || "${CHECKPOINT_OVERWRITE}" == "0" ]] && echo --no-checkpoint_overwrite || echo --checkpoint_overwrite) \
         ${debug_flag} \
     " \
     | apply_manifest
