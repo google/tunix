@@ -452,6 +452,41 @@ class SandboxUtilsTest(absltest.TestCase):
             delete_pods=False,
         )
 
+  def test_sandbox_namespace_and_node_selector_env_precedence(self):
+    mock_fleet = mock.MagicMock()
+    mock_as_rl = mock.MagicMock()
+    mock_as_rl.SandboxFleet.return_value = mock_fleet
+    with mock.patch.dict("sys.modules", {"agent_sandbox_rl": mock_as_rl}):
+      with mock.patch.dict(
+          os.environ,
+          {
+              "SANDBOX_NAMESPACE": "custom-sandbox-ns",
+              "SANDBOX_NODE_SELECTOR_KEY": "cloud.google.com/gke-nodepool",
+              "SANDBOX_NODE_SELECTOR_VAL": "cpu-node-pool",
+          },
+          clear=False,
+      ):
+        with mock.patch.object(sandbox_utils, "_GLOBAL_FLEET", None):
+          _ = sandbox_utils.init_global_fleet(tasks=None, num_generations=2)
+          cluster_cfg_call = mock_as_rl.ClusterConfig.call_args[1]
+          self.assertEqual(
+              cluster_cfg_call.get("namespace"), "custom-sandbox-ns"
+          )
+          self.assertEqual(
+              cluster_cfg_call.get("node_selector"),
+              {"cloud.google.com/gke-nodepool": "cpu-node-pool"},
+          )
+
+  def test_ensure_task_pool_in_fleet_registers_missing_image(self):
+    fleet = FakeFleet()
+    sandbox_utils.ensure_task_pool_in_fleet(fleet, "swebench/new_task:v1", replicas=2)
+    self.assertEqual(fleet.active_pools.get("swebench/new_task:v1"), 2)
+    # Second call for an already-registered image should not re-warm
+    warm_count_before = len(fleet.warm_calls)
+    sandbox_utils.ensure_task_pool_in_fleet(fleet, "swebench/new_task:v1", replicas=2)
+    self.assertEqual(len(fleet.warm_calls), warm_count_before)
+
 
 if __name__ == "__main__":
   absltest.main()
+

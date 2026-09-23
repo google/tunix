@@ -71,9 +71,9 @@ except ImportError:
 RPC_TIMEOUT_S = 60.0
 
 # Server side timeout for handling a poll_responses() call.
-# It should be shorter than the RPC_TIMEOUT_S to allow time for a response to
-# be sent before the connection is torn down.
-LONG_POLL_TIMEOUT_S = RPC_TIMEOUT_S - 10.0
+# Keep this short (0.5s) so sequential/multi-worker response polling does not
+# incur 50-second head-of-line blocking when an earlier worker queue is idle.
+LONG_POLL_TIMEOUT_S = 0.5
 
 # Cap for a single gRPC message. Set to -1 (unlimited) so large training-batch
 # payloads (which can exceed 1 GB for long sequence lengths) are not truncated.

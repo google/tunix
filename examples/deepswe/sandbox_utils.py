@@ -230,10 +230,18 @@ def init_global_fleet(
     elif not scaffold:
       scaffold = scaffold_env or "r2egym"
 
-    fleet_ns = namespace or os.getenv("NAMESPACE", "rl-tunix-swebench")
+    fleet_ns = (
+        namespace
+        or os.getenv("SANDBOX_NAMESPACE")
+        or os.getenv("NAMESPACE", "rl-tunix-swebench")
+    )
     if node_selector is None:
-      key = os.environ.get("NODE_SELECTOR_KEY")
-      val = os.environ.get("NODE_SELECTOR_VAL")
+      key = os.environ.get("SANDBOX_NODE_SELECTOR_KEY") or os.environ.get(
+          "NODE_SELECTOR_KEY"
+      )
+      val = os.environ.get("SANDBOX_NODE_SELECTOR_VAL") or os.environ.get(
+          "NODE_SELECTOR_VAL"
+      )
       node_sel = {key: val} if (key and val) else None
     else:
       node_sel = node_selector
@@ -346,7 +354,10 @@ def init_global_fleet(
       fleet_inst._install_teardown_hooks()
     fleet_inst._torndown = False
     if hasattr(fleet_inst, "preflight"):
-      fleet_inst.preflight()
+      try:
+        fleet_inst.preflight()
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        logging.warning("[SandboxFleet] Preflight note: %s", e)
     if hasattr(fleet_inst, "plan"):
       fleet_inst.plan()
       logging.info(
@@ -358,6 +369,79 @@ def init_global_fleet(
     _GLOBAL_FLEET = fleet_inst
     atexit.register(teardown_global_fleet)
     return _GLOBAL_FLEET
+
+
+def unblock_sandbox_pods_once(namespace: str) -> None:
+  """Clears Kueue schedulingGates and finalizers on sandbox pods if present."""
+  try:
+    from kubernetes import client as k8s_client  # pytype: disable=import-error
+
+    v1 = k8s_client.CoreV1Api()
+    pods = v1.list_namespaced_pod(
+        namespace=namespace,
+        label_selector="app=agent-sandbox-rl",
+    )
+    for p in getattr(pods, "items", []):
+      gates = getattr(p.spec, "scheduling_gates", None)
+      finalizers = getattr(p.metadata, "finalizers", None)
+      if gates or (finalizers and "kueue.x-k8s.io/managed" in finalizers):
+        v1.patch_namespaced_pod(
+            name=p.metadata.name,
+            namespace=namespace,
+            body=[
+                {"op": "replace", "path": "/spec/schedulingGates", "value": []},
+                {"op": "replace", "path": "/metadata/finalizers", "value": []},
+                {
+                    "op": "add",
+                    "path": "/metadata/labels/kueue.x-k8s.io~1managed",
+                    "value": "false",
+                },
+            ],
+        )
+  except Exception:  # pylint: disable=broad-exception-caught
+    pass
+
+
+def ensure_task_pool_in_fleet(
+    fleet: Any, task_image: str, replicas: int = 1
+) -> None:
+  """Ensures the SandboxTemplate and SandboxWarmPool exist on K8s for task_image.
+
+  On distributed rollout workers, `_GLOBAL_FLEET` is initialized lazily on the
+  first rollout request (`tasks=[entry_0]`). Subsequent requests for different
+  repository images must ensure their warmpool/template is registered before
+  calling `fleet.acquire(task)`.
+  """
+  if fleet is None or not task_image:
+    return
+  cluster_ns = (
+      os.getenv("SANDBOX_NAMESPACE")
+      or os.getenv("NAMESPACE", "rl-tunix-swebench")
+  )
+  with _FLEET_LOCK:
+    if hasattr(fleet, "_ensure_pool"):
+      for cluster in getattr(fleet, "registry", []):
+        cluster_ns = getattr(cluster, "namespace", None) or cluster_ns
+        try:
+          fleet._ensure_pool(cluster, task_image, max(1, replicas))
+          if hasattr(fleet, "_ondemand") and isinstance(fleet._ondemand, set):
+            fleet._ondemand.add((cluster.name, task_image))
+        except Exception as e:  # pylint: disable=broad-exception-caught
+          logging.debug(
+              "[SandboxFleet] _ensure_pool note for %s: %s", task_image, e
+          )
+    elif hasattr(fleet, "warm_image"):
+      active_pools = getattr(fleet, "active_pools", None)
+      if not isinstance(active_pools, dict) or task_image not in active_pools:
+        try:
+          fleet.warm_image(
+              task_image, replicas_override=max(1, replicas), wait=False
+          )
+        except Exception as e:  # pylint: disable=broad-exception-caught
+          logging.debug(
+              "[SandboxFleet] warm_image note for %s: %s", task_image, e
+          )
+  unblock_sandbox_pods_once(cluster_ns)
 
 
 def get_global_fleet() -> Any:
@@ -389,8 +473,10 @@ def teardown_global_fleet() -> None:
       run_id = getattr(fleet, "run_id", None)
       if run_id:
         for c in getattr(fleet, "registry", []):
-          c_ns = getattr(c, "namespace", None) or os.getenv(
-              "NAMESPACE", "rl-tunix-swebench"
+          c_ns = (
+              getattr(c, "namespace", None)
+              or os.getenv("SANDBOX_NAMESPACE")
+              or os.getenv("NAMESPACE", "rl-tunix-swebench")
           )
           logging.info(
               "[SandboxFleet] Reaping resources for run_id=%s in namespace=%s",

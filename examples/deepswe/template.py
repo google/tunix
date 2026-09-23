@@ -550,12 +550,33 @@ def get_openhands_pod_template(
   )
 
 
+def get_r2egym_pod_template(
+    node_selector: Optional[dict[str, str]] = None,
+) -> Any:
+  """Builds a TemplateSpec for non-OpenHands SWE-bench sandboxes (r2egym/sweagent).
+
+  Defaults to 4 vCPU and 16Gi memory (overridable via SANDBOX_CPU / SANDBOX_MEM)
+  to prevent Kubernetes from bin-packing 30+ SWE containers onto a single CPU
+  node with the 250m/512Mi default and OOM-killing pytest during evaluation.
+  """
+  from agent_sandbox_rl import ResourceSpec, TemplateSpec  # pytype: disable=import-error
+
+  return TemplateSpec(
+      resources=ResourceSpec(
+          cpu=os.getenv("SANDBOX_CPU", "4"),
+          memory=os.getenv("SANDBOX_MEM", "16Gi"),
+      ),
+      node_selector=node_selector,
+  )
+
+
 def get_template(
     scaffold: str,
     node_selector: Optional[dict[str, str]] = None,
 ) -> Any:
-  """Returns the fleet TemplateSpec for the given scaffold, or None."""
+  """Returns the fleet TemplateSpec for the given scaffold."""
   if scaffold in OPENHANDS_SCAFFOLDS:
     return get_openhands_pod_template(node_selector=node_selector)
-  return None
+  return get_r2egym_pod_template(node_selector=node_selector)
+
 
