@@ -247,5 +247,92 @@ class TryGetLearningRateTest(absltest.TestCase):
     self.assertAlmostEqual(self._get_lr(optimizer.opt_state), 4e-4)
 
 
+class WeightedMetricMeanTest(absltest.TestCase):
+
+  def test_handles_empty_and_rejects_mixed_values(self):
+    self.assertEqual(utils.weighted_metric_mean([]), 0.0)
+
+    weighted = utils.WeightedMetric(jnp.array(1.0), jnp.array(1.0))
+    with self.assertRaisesRegex(TypeError, "must not include scalar values"):
+      utils.weighted_metric_mean([weighted, jnp.array(1.0)])
+
+  def test_preserves_denominator_bounds(self):
+    metrics = [
+        utils.WeightedMetric(
+            jnp.array(3.0), jnp.array(0.0), eps=1.0, min_denom=2.0
+        ),
+        utils.WeightedMetric(
+            jnp.array(1.0), jnp.array(0.0), eps=1.0, min_denom=2.0
+        ),
+    ]
+    self.assertEqual(utils.weighted_metric_mean(metrics), 2.0)
+
+    eps_dominant = [
+        utils.WeightedMetric(
+            jnp.array(3.0), jnp.array(0.0), eps=1.0, min_denom=0.5
+        ),
+        utils.WeightedMetric(
+            jnp.array(1.0), jnp.array(0.0), eps=1.0, min_denom=0.5
+        ),
+    ]
+    self.assertEqual(utils.weighted_metric_mean(eps_dominant), 4.0)
+
+    inconsistent = [
+        metrics[0],
+        utils.WeightedMetric(
+            jnp.array(1.0), jnp.array(0.0), eps=1.0, min_denom=3.0
+        ),
+    ]
+    with self.assertRaisesRegex(ValueError, "consistent denominator bounds"):
+      utils.weighted_metric_mean(inconsistent)
+
+  def test_sums_before_dividing(self):
+    # Unequal denominators: global (6+10)/(2+8)=1.6 differs from the
+    # mean of per-microbatch means, (3+1.25)/2.
+    metrics = [
+        utils.WeightedMetric(jnp.array(6.0), jnp.array(2.0)),
+        utils.WeightedMetric(jnp.array(10.0), jnp.array(8.0)),
+    ]
+    self.assertAlmostEqual(utils.weighted_metric_mean(metrics), 1.6, places=6)
+
+
+class MetricReducerTest(absltest.TestCase):
+
+  def test_routes_weighted_metrics_and_scalars(self):
+    weighted = utils.WeightedMetric(jnp.array(1.0), jnp.array(1.0))
+    self.assertIs(utils.metric_reducer(weighted), utils.weighted_metric_mean)
+    self.assertIs(utils.metric_reducer(jnp.array(1.0)), np.mean)
+
+  def test_identifies_a_field_compatible_metric_from_another_module(self):
+    # `tunix.experimental.metrics.WeightedMetric` mirrors `WeightedMetric`
+    # without inheriting from it, so the check has to be structural. Stand in
+    # for it here rather than importing `experimental` from an `sft` test.
+    class ForeignWeightedMetric:
+
+      def __init__(self):
+        self.unreduced_sum = jnp.array(6.0)
+        self.denominator = jnp.array(2.0)
+        self.eps = None
+        self.min_denom = None
+
+    self.assertTrue(utils.is_weighted_metric(ForeignWeightedMetric()))
+    self.assertIs(
+        utils.metric_reducer(ForeignWeightedMetric()),
+        utils.weighted_metric_mean,
+    )
+
+  def test_rejects_an_object_missing_the_denominator_bounds(self):
+    # Partially shaped objects route to np.mean rather than reaching
+    # `weighted_metric_mean` and failing on a missing attribute there.
+    class HalfMetric:
+
+      def __init__(self):
+        self.unreduced_sum = jnp.array(6.0)
+        self.denominator = jnp.array(2.0)
+
+    self.assertFalse(utils.is_weighted_metric(HalfMetric()))
+    self.assertIs(utils.metric_reducer(HalfMetric()), np.mean)
+
+
 if __name__ == "__main__":
   absltest.main()

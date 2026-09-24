@@ -431,7 +431,7 @@ def _extract_kv_from_metrics_buffer(metrics_buffer: Any) -> dict[str, Any]:
         ]
         if any(is_weighted):
           if op is not None and getattr(op, "__name__", "") in (
-              "_weighted_metric_mean",
+              "weighted_metric_mean",
               "global_weighted_mean",
               "mean_of_means",
           ):
