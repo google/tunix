@@ -18,7 +18,8 @@ export CLUSTER="bodaborg-tpu7x-gsc"
 export K8S_NAMESPACE="priority-dev"
 export USE_DYNAMIC_SLICING="true"
 export TPU_RESERVATION="${TPU_RESERVATION:-ghostfish-pogoag4tylwed}"
-export ENABLE_PATHWAYS_PERSISTENCE=1
+export ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE:-1}
+export CHECKPOINT_ASYNC=${CHECKPOINT_ASYNC:-true}
 
 # Container memory overrides for v7x
 export PATHWAYS_PROXY_MEMORY_LIMIT="100G"

@@ -17,6 +17,8 @@ export PROJECT="cloud-tpu-shared-capacity"
 export REGION="europe-west4"
 export CLUSTER="bodaborg-v5p-nap"
 export K8S_NAMESPACE="trellis"
+export ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE:-1}
+export CHECKPOINT_ASYNC=${CHECKPOINT_ASYNC:-true}
 
 export RAIDEN_DEVICES_PER_HOST=4
 
