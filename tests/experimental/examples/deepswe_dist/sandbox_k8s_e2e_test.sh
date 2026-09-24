@@ -159,14 +159,24 @@ RANDOM_SUFFIX=$(head /dev/urandom | tr -dc a-z0-9 | head -c 6 ; echo '')
 JOB_NAME="deepswe-e2e-${USER:-wuhao}-${RANDOM_SUFFIX}"
 CONFIGMAP_NAME="code-${JOB_NAME}"
 
+DEEPSWE_SRC_DIR="${REPO_ROOT}/examples/deepswe"
+if [[ ! -f "${DEEPSWE_SRC_DIR}/sandbox_utils.py" ]]; then
+  DEEPSWE_SRC_DIR="${SCRIPT_DIR}/../../../oss/examples/deepswe"
+fi
+
+DEEPSWE_DIST_DIR="${REPO_ROOT}/tunix/experimental/examples/deepswe_dist"
+if [[ ! -f "${DEEPSWE_DIST_DIR}/deepswe.py" ]]; then
+  DEEPSWE_DIST_DIR="${SCRIPT_DIR}"
+fi
+
 echo "=== Creating ConfigMap ${CONFIGMAP_NAME} with local patched files in namespace ${NAMESPACE} ==="
 kubectl create configmap "${CONFIGMAP_NAME}" \
   --namespace="${NAMESPACE}" \
-  --from-file=sandbox_utils.py="${SCRIPT_DIR}/../../../oss/examples/deepswe/sandbox_utils.py" \
-  --from-file=swe_env.py="${SCRIPT_DIR}/../../../oss/examples/deepswe/swe_env.py" \
-  --from-file=openhands_utils.py="${SCRIPT_DIR}/../../../oss/examples/deepswe/openhands_utils.py" \
-  --from-file=template.py="${SCRIPT_DIR}/../../../oss/examples/deepswe/template.py" \
-  --from-file=deepswe.py="${SCRIPT_DIR}/deepswe.py" \
+  --from-file=sandbox_utils.py="${DEEPSWE_SRC_DIR}/sandbox_utils.py" \
+  --from-file=swe_env.py="${DEEPSWE_SRC_DIR}/swe_env.py" \
+  --from-file=openhands_utils.py="${DEEPSWE_SRC_DIR}/openhands_utils.py" \
+  --from-file=template.py="${DEEPSWE_SRC_DIR}/template.py" \
+  --from-file=deepswe.py="${DEEPSWE_DIST_DIR}/deepswe.py" \
   --from-file=sandbox_k8s_e2e_test.py="${SCRIPT_DIR}/sandbox_k8s_e2e_test.py"
 
 echo "=== Submitting Dedicated Kubernetes Job: ${JOB_NAME} in namespace ${NAMESPACE} ==="
@@ -215,6 +225,8 @@ spec:
           value: "${NODE_SELECTOR_VAL}"
         - name: IMAGE_REWRITE_PREFIX
           value: "${IMAGE_REWRITE_PREFIX}"
+        - name: SANDBOX_TOLERATIONS
+          value: '${SANDBOX_TOLERATIONS:-[{"key":"workload","operator":"Equal","value":"sandbox","effect":"NoSchedule"}]}'
         - name: OPENHANDS_SUPPRESS_BANNER
           value: "1"
         command:
