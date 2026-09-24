@@ -224,7 +224,9 @@ class TrajectoryLoggerTest(absltest.TestCase):
     except Exception:
       temp_dir = tempfile.TemporaryDirectory().name
 
-    logger = trajectory_logger.AsyncTrajectoryLogger(temp_dir, log_format='csv')
+    logger = trajectory_logger.AsyncTrajectoryLogger(
+        temp_dir, log_format='csv'
+    )
     for i in range(5):
       logger.log_item_async({
           'global_step': i,
@@ -263,7 +265,9 @@ class TrajectoryLoggerTest(absltest.TestCase):
 
     # Verify all 20 trajectory folders exist with metadata.json and step0.json
     for i in range(20):
-      traj_dir = os.path.join(temp_dir, 'step0', 'worker0', f'traj_p_{i}_g0')
+      traj_dir = os.path.join(
+          temp_dir, 'step0', 'worker0', f'traj_p_{i}_g0'
+      )
       self.assertTrue(os.path.exists(os.path.join(traj_dir, 'metadata.json')))
       self.assertTrue(os.path.exists(os.path.join(traj_dir, 'step0.json')))
 
@@ -532,7 +536,9 @@ class TrajectoryLoggerTest(absltest.TestCase):
         trajectory_logger._sanitize_path_segment('worker/0:test..'),
         'worker_0_test__',
     )
-    self.assertEqual(trajectory_logger._sanitize_path_segment('   '), 'unknown')
+    self.assertEqual(
+        trajectory_logger._sanitize_path_segment('   '), 'unknown'
+    )
     self.assertEqual(
         trajectory_logger._sanitize_path_segment(None, default='fallback'),
         'fallback',
@@ -587,7 +593,9 @@ class TrajectoryLoggerTest(absltest.TestCase):
     out_dir = trajectory_logger.log_trajectory_json(temp_dir, item)
     self.assertIsNotNone(out_dir)
 
-    expected_dir = os.path.join(temp_dir, 'step1', 'worker_a', 'traj_custom_1')
+    expected_dir = os.path.join(
+        temp_dir, 'step1', 'worker_a', 'traj_custom_1'
+    )
     self.assertEqual(out_dir, expected_dir)
     self.assertTrue(os.path.isdir(expected_dir))
 
@@ -636,7 +644,9 @@ class TrajectoryLoggerTest(absltest.TestCase):
     out_dir = trajectory_logger.log_trajectory_json(temp_dir, item)
     self.assertIsNotNone(out_dir)
 
-    expected_dir = os.path.join(temp_dir, 'step2', 'worker1', 'traj_test_p_g0')
+    expected_dir = os.path.join(
+        temp_dir, 'step2', 'worker1', 'traj_test_p_g0'
+    )
     self.assertTrue(os.path.isdir(expected_dir))
 
     with open(os.path.join(expected_dir, 'metadata.json'), 'r') as f:
@@ -676,14 +686,14 @@ class TrajectoryLoggerTest(absltest.TestCase):
         lambda path: _FakeGcsPath(path, temp_dir),
     ):
       out_dir = trajectory_logger.log_trajectory_json(gcs_dir, item)
-      self.assertEqual(out_dir, f'{gcs_dir}/step3/worker2/traj_p3_g0')
+      self.assertEqual(
+          out_dir, f'{gcs_dir}/step3/worker2/traj_p3_g0'
+      )
 
     local_traj_dir = os.path.join(
         temp_dir, 'trajectories/run_gcs/step3/worker2/traj_p3_g0'
     )
-    self.assertTrue(
-        os.path.exists(os.path.join(local_traj_dir, 'metadata.json'))
-    )
+    self.assertTrue(os.path.exists(os.path.join(local_traj_dir, 'metadata.json')))
     self.assertTrue(os.path.exists(os.path.join(local_traj_dir, 'step0.json')))
 
   def test_log_trajectory_json_inference_metrics(self):

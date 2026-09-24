@@ -23,6 +23,7 @@ import flax
 import jax
 import jax.numpy as jnp
 import numpy as np
+
 from tunix.generate import utils
 from tunix.perf.experimental import constants as perf_constants
 from tunix.rl import algo_core  # pylint: disable=unused-import
@@ -97,11 +98,9 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         data_shuffle_seed=data_shuffle_seed,
     )
 
-    self.algo_config.temperature = (
-        self.rl_engine.get_rollout_config(  # pyrefly: ignore[missing-attribute]
-            mode=rl_engine_lib.Mode.TRAIN
-        ).temperature
-    )
+    self.algo_config.temperature = self.rl_engine.get_rollout_config(  # pyrefly: ignore[missing-attribute]
+        mode=rl_engine_lib.Mode.TRAIN
+    ).temperature
 
     policy_loss_fn = function_registry.get_policy_loss_fn(
         self.algo_config.policy_loss_fn
@@ -162,9 +161,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
     if isinstance(rollout_config, dict):
       rollout_config = rollout_config[mode]
 
-    training_input["prompts"] = list(
-        training_input["prompts"]
-    )  # pyrefly: ignore[bad-argument-type]
+    training_input["prompts"] = list(training_input["prompts"])  # pyrefly: ignore[bad-argument-type]
     pad_value = self.rl_engine.rollout.pad_id()
     eos_value = self.rl_engine.rollout.eos_id()
 
@@ -178,8 +175,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         prompts=training_input["prompts"],
         mode=mode,
         micro_batch_size=(
-            self._rollout_micro_batch_size
-            * self.algo_config.num_generations  # pyrefly: ignore[unsupported-operation]
+            self._rollout_micro_batch_size * self.algo_config.num_generations  # pyrefly: ignore[unsupported-operation]
         ),
         trace_tags=perf_tags,
     )
@@ -304,9 +300,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
           prompts=training_input["prompts"],
           completions=rollout_output.text,
           mode=mode,
-          **{
-              k: v for k, v in training_input.items() if k != "prompts"
-          },  # pyrefly: ignore[bad-argument-type]
+          **{k: v for k, v in training_input.items() if k != "prompts"},  # pyrefly: ignore[bad-argument-type]
       )
       advantage_estimator = function_registry.get_advantage_estimator(
           self.algo_config.advantage_estimator
@@ -435,9 +429,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
     Returns:
       A list of trajectory IDs, one for each prompt in the batch.
     """
-    batch_size = (
-        len(example["prompts"]) // self.algo_config.num_generations
-    )  # pyrefly: ignore[bad-argument-type]
+    batch_size = len(example["prompts"]) // self.algo_config.num_generations  # pyrefly: ignore[bad-argument-type]
     row_offset = steps * batch_size
     row_offsets = np.repeat(
         np.arange(row_offset, row_offset + batch_size),

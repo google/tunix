@@ -9,10 +9,11 @@ from __future__ import annotations
 import dataclasses
 import datetime
 import enum
-from typing import Annotated, Any, Final, get_args, Literal
+from typing import Annotated, Any, Final, Literal, get_args
 
 import numpy as np
 import pydantic
+
 
 # ==============================================================================
 # --- Pure ATIF Base Classes ---

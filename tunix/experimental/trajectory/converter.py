@@ -154,14 +154,18 @@ def create_agent_step(
       step_id=converted_step_id,
       source=trajectory_lib.Source.AGENT,
       message=step.model_response,
-      reasoning_content=(step.thought if step.thought is not None else None),
+      reasoning_content=(
+          step.thought if step.thought is not None else None
+      ),
       tool_calls=action_converter.extract_tool_calls(step.action),
       metrics=_extract_metrics(step.assistant_tokens, step.logprobs),
       assistant_tokens=step.assistant_tokens,
       assistant_masks=step.assistant_masks,
       logprobs=step.logprobs,
       policy_version=effective_policy_version,
-      mc_return=(float(step.mc_return) if step.mc_return is not None else None),
+      mc_return=(
+          float(step.mc_return) if step.mc_return is not None else None
+      ),
       extra=extra or None,
   )
 
@@ -353,7 +357,9 @@ def to_tunix_trajectory(
         or "total_reward" in traj
         or traj.get("schema_version", "").startswith("Tunix")
         or any(
-            step.get("step_id") == 0 or "mc_return" in step or "reward" in step
+            step.get("step_id") == 0
+            or "mc_return" in step
+            or "reward" in step
             for step in traj.get("steps", [])
             if isinstance(step, dict)
         )
@@ -426,7 +432,9 @@ def create_trajectory_metadata(
     request: Any = None,
     agent: Any = None,
     target_policy_versions: list[int] | None = None,
-    status: str | agent_types.TrajectoryStatus | None = None,
+    status: (
+        str | agent_types.TrajectoryStatus | None
+    ) = None,
     extra: dict[str, Any] | None = None,
 ) -> trajectory_lib.TunixTrajectoryMetadata:
   """Constructs TunixTrajectoryMetadata from rollout request and agent state."""

@@ -405,9 +405,7 @@ class TrajectoryCollectEngine:
       )
 
     if mode == "Trajectory":
-      self.agent.trajectory.env_time = (
-          self.env_time
-      )  # pyrefly: ignore[bad-assignment]
+      self.agent.trajectory.env_time = self.env_time  # pyrefly: ignore[bad-assignment]
       self.agent.trajectory.reward_time = self.reward_time
       self.agent.trajectory.model_time = self.model_time
       return self.agent.trajectory
@@ -707,9 +705,7 @@ class TrajectoryCollectEngine:
           contains_first_msg=True,
           contains_generation_msg=True,
       )
-      self.agent.trajectory.prompt_tokens = (
-          prompt_tokens  # pyrefly: ignore[missing-attribute]
-      )
+      self.agent.trajectory.prompt_tokens = prompt_tokens  # pyrefly: ignore[missing-attribute]
     if self.exact_token_continuity:
       self._exact_chat_history = copy.deepcopy(self.agent.chat_completions)
 
@@ -887,26 +883,16 @@ class TrajectoryCollectEngine:
     if self.exact_token_continuity:
       if not self.agent.trajectory.steps:
         # The owned first-turn prompt; later turns replay exactly these ids.
-        self.agent.trajectory.prompt_tokens = rollout_output.left_padded_prompt_tokens[  # pyrefly: ignore[missing-attribute]
-            0
-        ]
-        prompt_len = (
-            int(rollout_output.prompt_lengths[0])
-            if rollout_output.prompt_lengths is not None
-            and len(rollout_output.prompt_lengths) > 0
-            else len(rollout_output.left_padded_prompt_tokens[0])
+        self.agent.trajectory.prompt_tokens = (  # pyrefly: ignore[missing-attribute]
+            rollout_output.left_padded_prompt_tokens[0]
         )
-        self.agent.trajectory.prompt_length = prompt_len
-      else:
-        p_len = (
+        self.agent.trajectory.prompt_length = int(
             rollout_output.prompt_lengths[0]
-            if rollout_output.prompt_lengths is not None
-            and len(rollout_output.prompt_lengths) > 0
-            else len(rollout_output.left_padded_prompt_tokens[0])
         )
+      else:
         echoed = generate_utils.unpad_prompt(
             rollout_output.left_padded_prompt_tokens[0],
-            p_len,
+            rollout_output.prompt_lengths[0],
         )
         if not np.array_equal(echoed, call_kwargs["prompt_token_ids"]):
           raise ValueError("later-turn prompt differs from recorded history")
@@ -928,9 +914,8 @@ class TrajectoryCollectEngine:
               else 0
           )
       )
-      routed_slice = init_routed[:prompt_len]
       self.agent.trajectory.prompt_routed_experts = (  # pyrefly: ignore[missing-attribute]
-          routed_slice
+          init_routed[:prompt_len]
       )
       self._cumulative_prompt_tokens = init_routed.shape[0]
       self._current_step_initial_routed_experts = init_routed[prompt_len:]
@@ -1002,10 +987,9 @@ class TrajectoryCollectEngine:
       if num_env > 0:
         if len(delta_routed) < total_needed:
           raise ValueError(
-              "Mismatch between captured env_routed_experts length"
-              f" {max(0, len(delta_routed) - needed_asst)} and env_tokens"
-              f" length {num_env} at step"
-              f" {len(self.agent.trajectory.steps) - 1}."
+              "Mismatch between captured env_routed_experts length "
+              f"{max(0, len(delta_routed) - needed_asst)} and env_tokens length "
+              f"{num_env} at step {len(self.agent.trajectory.steps) - 1}."
           )
         prev_step.env_routed_experts = _slice_or_pad_routed(
             prefix_routed, needed_asst, num_env
@@ -1193,9 +1177,7 @@ class TrajectoryCollectEngine:
       self.agent.trajectory.status = agent_types.TrajectoryStatus.TIMEOUT
       logging.warning("Episode timed out after %d seconds.", self.timeout)
       self._log_trajectory_clip("TIMEOUT")
-      self.agent.get_current_step().done = (
-          True  # pyrefly: ignore[missing-attribute]
-      )
+      self.agent.get_current_step().done = True  # pyrefly: ignore[missing-attribute]
       return True
 
     return done

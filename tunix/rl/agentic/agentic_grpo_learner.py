@@ -310,40 +310,22 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     self.rl_engine.actor_trainer.with_rl_metrics_to_log({  # pyrefly: ignore[bad-argument-type]
         "kl": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
         "entropy": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
-        "reduced_pg_loss": (
-            common.mean_of_means
-        ),  # pyrefly: ignore[bad-assignment]
-        "unreduced_pg_loss": (
-            common.global_weighted_mean
-        ),  # pyrefly: ignore[bad-assignment]
+        "reduced_pg_loss": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
+        "unreduced_pg_loss": common.global_weighted_mean,  # pyrefly: ignore[bad-assignment]
         "pg_clipfrac": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
         "ppo_kl": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
         "kl_loss": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
-        "is_ratio/mean": (
-            common.mean_of_means
-        ),  # pyrefly: ignore[bad-assignment]
+        "is_ratio/mean": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
         "is_ratio/max": np.max,
         "is_ratio/min": np.min,
-        "log_ratio/abs_mean": (
-            common.mean_of_means
-        ),  # pyrefly: ignore[bad-assignment]
-        "pg_loss/unclipped_mean": (
-            common.mean_of_means
-        ),  # pyrefly: ignore[bad-assignment]
-        "pg_loss/clipped_mean": (
-            common.mean_of_means
-        ),  # pyrefly: ignore[bad-assignment]
-        "advantage/abs_mean": (
-            common.mean_of_means
-        ),  # pyrefly: ignore[bad-assignment]
+        "log_ratio/abs_mean": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
+        "pg_loss/unclipped_mean": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
+        "pg_loss/clipped_mean": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
+        "advantage/abs_mean": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
         "advantage/max": np.max,
         "advantage/min": np.min,
-        "advantage/nonzero_frac": (
-            common.mean_of_means
-        ),  # pyrefly: ignore[bad-assignment]
-        "sampler_is/weight_mean": (
-            common.mean_of_means
-        ),  # pyrefly: ignore[bad-assignment]
+        "advantage/nonzero_frac": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
+        "sampler_is/weight_mean": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
         "sampler_is/weight_min": np.min,
     })
     self.rl_engine.actor_trainer.with_tqdm_metrics_to_display([  # pyrefly: ignore[bad-argument-type]
@@ -1005,7 +987,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       prefix = f"trajectory/{time_key}"
       time_dicts = [item.traj.get(time_key, {}) for item in trajectories]
 
-      # Safely gather all unique sub-keys across all trajectories
+      # Safely gather all unique sub-keys (e.g., 'reset_latency') across all trajectories
       for sub_key in {k for d in time_dicts for k in d.keys()}:
         vals = [d.get(sub_key, 0.0) for d in time_dicts]
         flat_vals = []

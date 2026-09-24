@@ -214,16 +214,13 @@ def log_item(
     raise ValueError(f'Item {item} is not a dataclass, dictionary or list.')
 
   log_path = epath.Path(log_path)  # pyrefly: ignore[bad-assignment]
-  log_path.mkdir(
-      parents=True, exist_ok=True
-  )  # pyrefly: ignore[missing-attribute]
+  log_path.mkdir(parents=True, exist_ok=True)  # pyrefly: ignore[missing-attribute]
 
   # GCS has no real directories: `mkdir()` is a no-op and `is_dir()` stays
   # False until an object exists under the prefix, so only enforce the
   # directory check on filesystems that model directories.
   assert (
-      _is_gcs_path(log_path)
-      or log_path.is_dir()  # pyrefly: ignore[missing-attribute]
+      _is_gcs_path(log_path) or log_path.is_dir()  # pyrefly: ignore[missing-attribute]
   ), f'log_path `{log_path}` must be a directory.'
 
   if isinstance(item, list):
@@ -969,15 +966,9 @@ class AsyncTrajectoryLogger:
     # Register signal handlers for robust termination
     if threading.current_thread() is threading.main_thread():
       try:
-        signal.signal(
-            signal.SIGINT, self._handle_signal
-        )  # pyrefly: ignore[bad-argument-type]
-        signal.signal(
-            signal.SIGTERM, self._handle_signal
-        )  # pyrefly: ignore[bad-argument-type]
-        signal.signal(
-            signal.SIGHUP, self._handle_signal
-        )  # pyrefly: ignore[bad-argument-type]
+        signal.signal(signal.SIGINT, self._handle_signal)  # pyrefly: ignore[bad-argument-type]
+        signal.signal(signal.SIGTERM, self._handle_signal)  # pyrefly: ignore[bad-argument-type]
+        signal.signal(signal.SIGHUP, self._handle_signal)  # pyrefly: ignore[bad-argument-type]
       except ValueError:
         logging.warning('Failed to register signal handlers.')
 
