@@ -28,6 +28,7 @@ from tunix.experimental.rollout.raiden_weight_sync_mixin import (
     RaidenDestinationWeightSyncMixin,
 )
 from tunix.experimental.weight_sync import weight_sync
+from tunix.generate import tokenizer_adapter as tok_adapter
 from tunix.generate import utils as generate_utils
 
 Sampler = base_sampler_lib.Sampler
@@ -57,6 +58,13 @@ class InprocessVllmSamplerAdapter(
       **kwargs,
   ):
     self.server_id = server_id
+    if tokenizer is not None and not isinstance(
+        tokenizer, tok_adapter.TokenizerAdapter
+    ):
+      try:
+        tokenizer = tok_adapter.TokenizerAdapter(tokenizer)
+      except ValueError:
+        pass
     self.tokenizer = tokenizer
     self.config = config
     self.model_name = model_name or kwargs.get("model", "")

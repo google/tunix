@@ -79,6 +79,7 @@ EOS_TOKENS=${EOS_TOKENS-}
 # DEBUG=1 passes --debug to the runner, which logs full sampler responses.
 DEBUG=${DEBUG:-0}
 USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
+EXACT_TOKEN_CONTINUITY=${EXACT_TOKEN_CONTINUITY:-true}
 
 # Optional GRPO algorithm options. Empty, or 0 for the boolean, leaves the
 # option at the runner's default, so an unset variable changes nothing.
@@ -600,6 +601,11 @@ echo "Launching CPU orchestrator..."
     ORCHESTRATOR_CMD+=(--no-use_rollout_logps)
   else
     ORCHESTRATOR_CMD+=(--use_rollout_logps)
+  fi
+  if [[ "$EXACT_TOKEN_CONTINUITY" == "false" || "$EXACT_TOKEN_CONTINUITY" == "False" || "$EXACT_TOKEN_CONTINUITY" == "0" ]]; then
+    ORCHESTRATOR_CMD+=(--no-exact_token_continuity)
+  else
+    ORCHESTRATOR_CMD+=(--exact_token_continuity)
   fi
   export JAX_PLATFORMS=cpu
   export PYTHONUNBUFFERED=1

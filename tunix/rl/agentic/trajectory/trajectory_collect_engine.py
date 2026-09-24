@@ -907,24 +907,14 @@ class TrajectoryCollectEngine:
             len(prev_step.assistant_tokens)
             - len(prev_step.assistant_routed_experts),
         )
-
-        if needed_asst > 0:
-          if len(delta_routed) < needed_asst:
-            raise ValueError(
-                f"Insufficient delta_routed length {len(delta_routed)} to"
-                f" stitch {needed_asst} trailing assistant tokens at step"
-                f" {len(self.agent.trajectory.steps) - 1}."
-            )
-          prev_step.assistant_routed_experts = np.concatenate(
-              [prev_step.assistant_routed_experts, delta_routed[:needed_asst]],
-              axis=0,
-          )
-
       num_env = (
           len(prev_step.env_tokens) if prev_step.env_tokens is not None else 0
       )
       total_needed = needed_asst + num_env
-      if (
+      if len(delta_routed) == total_needed + curr_gen_len:
+        prefix_routed = delta_routed[:total_needed]
+        curr_asst_routed = delta_routed[total_needed:]
+      elif (
           not self.exact_token_continuity
           and total_needed > 0
           and len(prefix_routed) > total_needed
@@ -937,18 +927,16 @@ class TrajectoryCollectEngine:
             axis=0,
         )
       if num_env > 0:
-        prev_step.env_routed_experts = delta_routed[
-            needed_asst : needed_asst + num_env
-        ]
-        if len(prev_step.env_routed_experts) != num_env:
+        if len(delta_routed) < total_needed:
           raise ValueError(
               "Mismatch between captured env_routed_experts length "
-              f"{len(prev_step.env_routed_experts)} and env_tokens length "
+              f"{max(0, len(delta_routed) - needed_asst)} and env_tokens length "
               f"{num_env} at step {len(self.agent.trajectory.steps) - 1}."
           )
-      self._current_step_initial_routed_experts = delta_routed[
-          needed_asst + num_env :
-      ]
+        prev_step.env_routed_experts = _slice_or_pad_routed(
+            prefix_routed, needed_asst, num_env
+        )
+      self._current_step_initial_routed_experts = curr_asst_routed
       self._cumulative_prompt_tokens += delta_routed.shape[0]
 
     if rollout_output.tokens:
@@ -1071,6 +1059,7 @@ class TrajectoryCollectEngine:
           json.dumps(info, default=str, indent=2),
       )
       self.agent.update_from_env(obs, rew, done, self._rollout_state_info(info))
+      env_step_executed = True
     else:
       env_step_executed = False
       done = True

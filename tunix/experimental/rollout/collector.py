@@ -184,29 +184,6 @@ class TrajectoryCollectorEngine:
           "overlong_filter must be a boolean, got"
           f" {type(overlong_filter).__name__}: {overlong_filter!r}."
       )
-    supports_token_input = bool(
-        getattr(self.sampler, "supports_token_input", False)
-        or getattr(
-            getattr(self.sampler, "sampler", None),
-            "supports_token_input",
-            False,
-        )
-    )
-    exact_token_continuity = metadata.get("exact_token_continuity")
-    if exact_token_continuity is None:
-      self.exact_token_continuity = supports_token_input
-    elif isinstance(exact_token_continuity, bool):
-      if exact_token_continuity and not supports_token_input:
-        raise ValueError(
-            "exact_token_continuity requires a token-input backend"
-        )
-      self.exact_token_continuity = exact_token_continuity
-    else:
-      raise TypeError(
-          "exact_token_continuity must be a boolean, got"
-          f" {type(exact_token_continuity).__name__}:"
-          f" {exact_token_continuity!r}."
-      )
     target_policy_versions = None
     target_policy_version = getattr(self.request, "target_policy_version", None)
     if target_policy_version is not None:
@@ -309,8 +286,9 @@ class TrajectoryCollectorEngine:
         tokens = np.zeros(0, dtype=np.int32)
       logprobs = getattr(res, "logprobs", None)
       routed_experts = getattr(res, "routed_experts", None)
+      raw_prompt_tokens = getattr(res, "prompt_token_ids", None)
       prompt_tokens = np.asarray(
-          getattr(res, "prompt_token_ids", np.array([], dtype=np.int32)),
+          raw_prompt_tokens if raw_prompt_tokens is not None else [],
           dtype=np.int32,
       ).reshape(-1)
       prompt_len = int(prompt_tokens.size)

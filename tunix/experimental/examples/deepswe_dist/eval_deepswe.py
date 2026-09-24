@@ -103,6 +103,7 @@ def parse_args(argv=None):
   )
   p.add_argument("--enable_thinking", type=boolean, default=False)
   p.add_argument("--enable_prefix_caching", type=boolean, default=False)
+  p.add_argument("--exact_token_continuity", type=boolean, default=True)
   p.add_argument("--checkpoint_storage_use_ocdbt", type=boolean, default=True)
   p.add_argument("--checkpoint_storage_use_zarr3", type=boolean, default=False)
   p.add_argument("--checkpoint_storage_concurrent_gb", type=int, default=96)
@@ -223,6 +224,7 @@ def request_fields(a, entry, index, attempt):
       "prompt": str(entry["problem_statement"]),
       "max_turns": a.max_steps,
       "max_response_length": max_context_limit if max_context_limit > 0 else None,
+      "exact_token_continuity": getattr(a, "exact_token_continuity", True),
       "generation_kwargs": {
           "max_generation_steps": a.max_response_length,
           "temperature": a.temperature,
@@ -235,6 +237,7 @@ def request_fields(a, entry, index, attempt):
           "instance_id": instance_id,
           "episode_timeout": a.timeout,
           "overlong_filter": False,
+          "exact_token_continuity": getattr(a, "exact_token_continuity", True),
           "env_config": {
               "entry": entry,
               "prompt_id": prompt_id,

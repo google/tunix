@@ -15,6 +15,7 @@
 
 """Utility functions for sampler."""
 
+from typing import Any, Collection, List, Mapping, Sequence
 from collections import abc
 import functools
 import gc

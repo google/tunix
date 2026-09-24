@@ -26,6 +26,7 @@ from tunix.experimental.rollout.raiden_weight_sync_mixin import (
 )
 from tunix.experimental.weight_sync import weight_sync
 from tunix.generate import sampler as generate_sampler_lib
+from tunix.generate import tokenizer_adapter as tok_adapter
 from tunix.generate import utils as generate_utils
 
 Sampler = base_sampler_lib.Sampler
@@ -63,6 +64,13 @@ class VanillaSamplerAdapter(RaidenDestinationWeightSyncMixin, Sampler, abc.ABC):
   ):
     self.server_id = server_id
     self.transformer = transformer if transformer is not None else model
+    if tokenizer is not None and not isinstance(
+        tokenizer, tok_adapter.TokenizerAdapter
+    ):
+      try:
+        tokenizer = tok_adapter.TokenizerAdapter(tokenizer)
+      except ValueError:
+        pass
     self.tokenizer = tokenizer
     self.image_processor = image_processor
     self.config = config
