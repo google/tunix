@@ -61,9 +61,13 @@ from tunix.sft.dpo.dpo_trainer import DpoTrainingConfig
 from tunix.sft.dpo.dpo_trainer import ORPOTrainer
 from tunix.sft.dpo.dpo_trainer import OrpoTrainer
 from tunix.sft.dpo.dpo_trainer import ORPOTrainingConfig
-from tunix.sft.dpo.dpo_trainer import OrpoTrainingConfig
 from tunix.sft.metrics_logger import MetricsLogger
 from tunix.sft.metrics_logger import MetricsLoggerOptions
+from tunix.sft.peft.beft import apply_beft_to_model
+from tunix.sft.peft.beft import BEFTConfig
+from tunix.sft.peft.beft import BEFTLinear
+from tunix.sft.peft.beft import BEFTParam
+from tunix.sft.peft.beft import unwrap_beft_from_model
 from tunix.sft.peft_trainer import PeftTrainer
 
 # pylint: enable=g-multiple-import, g-importing-member
