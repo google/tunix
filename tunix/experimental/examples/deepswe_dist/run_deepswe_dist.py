@@ -808,8 +808,10 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         run_id = getattr(fleet, "run_id", None)
         if run_id:
           for c in getattr(fleet, "registry", []):
-            c_ns = getattr(c, "namespace", None) or os.getenv(
-                "NAMESPACE", "rl-tunix-swebench"
+            c_ns = (
+                getattr(c, "namespace", None)
+                or os.getenv("SANDBOX_NAMESPACE")
+                or os.getenv("NAMESPACE", "priority-dev")
             )
             logging.info(
                 "Reaping agent_sandbox_rl resources for run_id=%s in namespace=%s...",

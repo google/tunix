@@ -301,9 +301,6 @@ def _devices_per_host(devices: List[Any]) -> int:
   fills only its own share, leaving the rest of its SetGlobalShardIndices at
   -1 -- the transfer then completes green while delivering only the shards one
   host happened to own.
-
-  Groups by host key (resolving Pathways `logical_task` or `process_index` via
-  mesh topology).
   """
   host_keys = [mesh.device_host_key(d) for d in devices]
   per_host = collections.Counter(k for k in host_keys if k is not None)

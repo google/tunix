@@ -15,6 +15,7 @@
 """Templates and specifications for DeepSWE agents and environments."""
 
 import json
+import logging
 import os
 from typing import Any, Optional
 
@@ -529,9 +530,14 @@ def get_openhands_pod_template(
   if tolerations_raw:
     try:
       extra_pod_spec["tolerations"] = json.loads(tolerations_raw)
-    except Exception as e:
-      logging.warning("Failed to parse SANDBOX_TOLERATIONS as JSON: %s", e)
-  elif node_selector and node_selector.get("cloud.google.com/gke-nodepool") == "sandbox-np":
+    except Exception:
+      try:
+        import ast  # pylint: disable=g-import-not-at-top
+        extra_pod_spec["tolerations"] = ast.literal_eval(tolerations_raw)
+      except Exception as e:
+        logging.warning("Failed to parse SANDBOX_TOLERATIONS: %s", e)
+
+  if "tolerations" not in extra_pod_spec and node_selector and node_selector.get("cloud.google.com/gke-nodepool") == "sandbox-np":
     extra_pod_spec["tolerations"] = [{
         "key": "workload",
         "operator": "Equal",

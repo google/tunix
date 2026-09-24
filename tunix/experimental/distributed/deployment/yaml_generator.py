@@ -71,6 +71,15 @@ def main() -> None:
       help="Enable GKE dynamic slicing annotations and topology selectors.",
   )
   parser.add_argument(
+      "--omit_slice_topology",
+      action="store_true",
+      default=False,
+      help=(
+          "Omit cloud.google.com/gke-tpu-slice-topology annotation from initial"
+          " JobSet manifest (used for single-host dynamic slice admission flow)."
+      ),
+  )
+  parser.add_argument(
       "--head_nodepool",
       default=None,
       help="Kubernetes nodepool for Pathways head pod (e.g. cpu-np).",
@@ -286,16 +295,21 @@ def main() -> None:
     )
 
   if use_dynamic_slicing and slice_topology:
-    anno_lines = [
-        f'cloud.google.com/gke-tpu-slice-topology: "{slice_topology}"',
-        'cloud.google.com/skip-tpu-webhook-check: "true"',
-    ]
     if slice_size and slice_size > 1:
-      anno_lines.extend([
+      anno_lines = [
+          f'cloud.google.com/gke-tpu-slice-topology: "{slice_topology}"',
+          'cloud.google.com/skip-tpu-webhook-check: "true"',
           "kueue.x-k8s.io/podset-required-topology: cloud.google.com/gce-topology-block",
           f"kueue.x-k8s.io/podset-slice-required-topology: cloud.google.com/gke-tpu-partition-{slice_topology}-id",
           f'kueue.x-k8s.io/podset-slice-size: "{slice_size}"',
-      ])
+      ]
+    else:
+      anno_lines = [
+          'cloud.google.com/skip-tpu-webhook-check: "true"',
+          'kueue.x-k8s.io/podset-required-topology: cloud.google.com/gke-tpu-partition-4x4x4-id',
+      ]
+      if not args.omit_slice_topology:
+        anno_lines.insert(0, f'cloud.google.com/gke-tpu-slice-topology: "{slice_topology}"')
     tpu_annotations = "\n" + "\n".join(f"              {line}" for line in anno_lines)
   else:
     tpu_annotations = ""
@@ -380,6 +394,17 @@ def main() -> None:
       else ""
   )
 
+  tpu_raiden_data_nics = os.environ.get("TPU_RAIDEN_DATA_NICS", "").strip()
+  if not tpu_raiden_data_nics and tpu_type in ("tpu7x", "tpu-v7x-slice"):
+    tpu_raiden_data_nics = "eth0"
+
+  if tpu_raiden_data_nics:
+    pathways_worker_extra_env = (
+        f"\n              - name: TPU_RAIDEN_DATA_NICS\n                value: \"{tpu_raiden_data_nics}\""
+    )
+  else:
+    pathways_worker_extra_env = ""
+
   with open(args.template_file, "r") as f:
     template = string.Template(f.read())
     content = template.substitute(
@@ -423,6 +448,7 @@ def main() -> None:
         USER_CONTAINER_IMAGE=args.worker_container_image,
         USER_CONTAINER_PORT=args.worker_container_port,
         STARTUP_COMMAND=args.worker_startup_command,
+        PATHWAYS_WORKER_EXTRA_ENV=pathways_worker_extra_env,
     )
     print(content)
 

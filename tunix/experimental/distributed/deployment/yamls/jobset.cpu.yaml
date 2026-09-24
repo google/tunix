@@ -19,7 +19,7 @@ metadata:
   namespace: ${NAMESPACE}
 ${QUEUE_LABEL}spec:
   failurePolicy:
-    maxRestarts: 3
+    maxRestarts: 0
     restartStrategy: Recreate
   network:
     enableDNSHostnames: true

@@ -15,7 +15,7 @@ export ROLLOUT_PORT="${ROLLOUT_PORT:-20001}"
 export TRAINER_PORT="${TRAINER_PORT:-20002}"
 export PROFILER_STEPS=0
 export SKIP_FIRST_N_PROFILER_STEPS=-1
-export TUNIX_IMAGE="${TUNIX_IMAGE:-gcr.io/cloud-tpu-multipod-dev/atwigg/trellis-35b:latest}"
+export TUNIX_IMAGE="${TUNIX_IMAGE:-gcr.io/cloud-tpu-multipod-dev/niting/trellis-35b:latest}"
 
 export PROJECT="cloud-tpu-shared-capacity"
 export REGION="us-central1"
@@ -34,8 +34,10 @@ export ENABLE_PATHWAYS_PERSISTENCE=1
 
 # Pathways shared configuration
 source "${DIR}/mlperf_pathways_config.sh"
-
-export RAIDEN_DEVICES_PER_HOST=4
+export PATHWAYS_PROXY_MEMORY_LIMIT="100G"
+export USER_CONTAINER_MEMORY="48G"
+export USER_CONTAINER_MEMORY_LIMIT="${USER_CONTAINER_MEMORY_LIMIT:-70G}"
+export TPU_RAIDEN_DATA_NICS="eth0"
 export USE_WEIGHT_CONVERTER="true"
 export PREFUSE_MOE_WEIGHTS="true"
 export TRAINER_PREFUSE_MOE_WEIGHTS="true"
@@ -68,6 +70,7 @@ export TRAINER_TPU_SLICE="tpu7x:4x4x4"
 export TRAINER_MESH_FSDP=32
 export TRAINER_MESH_TP=2
 export TRAINER_MESH_EXPERT=1
+export TRAINER_MESH_CONTEXT=2
 export TRAINER_BASE_NUM_KV_HEADS=2
 
 export ROLLOUT_JOBSET_YAML="jobset.tpu.yaml"
@@ -191,10 +194,8 @@ export USE_AGENT_SANDBOX=1
 export SCAFFOLD="openhands"
 export SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-${K8S_NAMESPACE}}"
 export POOL_NAME_FORMAT="${POOL_NAME_FORMAT:-}"
-export TEMPLATE_NAME_PREFIX="${TEMPLATE_NAME_PREFIX:-}"
 export SANDBOX_NODE_SELECTOR_KEY="cloud.google.com/gke-nodepool"
 export SANDBOX_NODE_SELECTOR_VAL="sandbox-np"
-export SANDBOX_TOLERATIONS='[{"key":"workload","operator":"Equal","value":"sandbox","effect":"NoSchedule"}]'
 export IMAGE_REWRITE_PREFIX="${IMAGE_REWRITE_PREFIX:-us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/}"
 export MAX_WARMPOOL_REPLICAS=2
 export ROLLOUT_MAX_CONCURRENCY=256
