@@ -1287,6 +1287,11 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     # answer to "which weights are live", and a subclass may rebind it.
     yield self.model, args, kwargs
 
+  @property
+  @override
+  def checkpoint_dir(self) -> str | None:
+    return self.config.checkpoint_root_directory
+
   @override
   def save_checkpoint(self, metadata: Any = None, **kwargs) -> None:
     """Saves a checkpoint of the trainer state (model + optimizer).

@@ -806,6 +806,7 @@ def create_maxtext_engine(
         wrap_with_tunix_adapter=wrap_with_tunix_adapter,
         tokenizer_pad_id=tokenizer_pad_id,
     )
+  engine.checkpoint_dir = maxtext_config.checkpoint_dir
 
   # When `float32_gate_logits=True` and `weight_dtype=bfloat16`, both the
   # trainer and vLLM rollout models store gate/router/norm/GDN/logits_dense

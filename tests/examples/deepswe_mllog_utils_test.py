@@ -22,12 +22,22 @@ import os
 import shutil
 import tempfile
 import types
+from typing import Any
 from unittest import mock
 
 import numpy as np
 from absl.testing import absltest
 from tunix.perf.metrics import MetricsBuffer
 from tunix.utils import mllog_utils
+
+
+def _read_mllog_events(path: str) -> list[dict[str, Any]]:
+  with open(path, "r", encoding="utf-8") as f:
+    return [
+        json.loads(line.split(":::MLLOG ", 1)[1])
+        for line in f
+        if ":::MLLOG " in line
+    ]
 
 
 @absltest.skipIf(mllog_utils.mllogger is None, "mlperf_logging is not installed")
@@ -64,6 +74,7 @@ class MllogUtilsTest(absltest.TestCase):
         tpu_topology="v5p-64",
         rollout_engine="vllm",
         target_accuracy=0.69,
+        model_id="",
     )
 
     mllog_utils.init_start(args)
@@ -221,6 +232,7 @@ class MllogUtilsTest(absltest.TestCase):
         seed=1,
         learning_rate=1e-6,
         eval_every_n_steps=5,
+        model_id="",
     )
 
     mock_train_dataset = [None] * 5480
@@ -602,7 +614,151 @@ class MllogUtilsTest(absltest.TestCase):
       content = f.read()
 
     self.assertIn('"key": "block_stop"', content)
-    self.assertIn('"key": "run_stop"', content)
+    # run_stop is emitted by the offline evaluator, not by train_stop.
+    self.assertNotIn('"key": "run_stop"', content)
+
+  def test_compute_val_start_step(self):
+    self.assertEqual(mllog_utils.compute_val_start_step(256), 18)
+    self.assertEqual(mllog_utils.compute_val_start_step(512), 10)
+    self.assertEqual(mllog_utils.compute_val_start_step(1024), 7)
+    self.assertEqual(mllog_utils.compute_val_start_step(256, 1), 1)
+    self.assertEqual(mllog_utils.compute_val_start_step(256, 0), 18)
+    with self.assertRaises(ValueError):
+      mllog_utils.compute_val_start_step(0)
+
+  def test_append_checkpoint_manifest_upserts_sorted_records(self):
+    manifest_path = os.path.join(
+        self.test_dir, "mllog", "eval_checkpoints.jsonl"
+    )
+    for step, ts_ms in ((19, 2000), (18, 1000), (18, 1500)):
+      mllog_utils.append_checkpoint_manifest(
+          manifest_path,
+          {
+              "step": step,
+              "checkpoint_path": f"gs://ckpt/{step}/model_params",
+              "timestamp_ms": ts_ms,
+              "samples_count": step * 256,
+              "val_start_at": 18,
+          },
+      )
+    with open(manifest_path, "r", encoding="utf-8") as f:
+      records = [json.loads(line) for line in f]
+    self.assertEqual([r["step"] for r in records], [18, 19])
+    self.assertEqual([r["timestamp_ms"] for r in records], [1500, 2000])
+
+  def test_configure_logger_downloads_existing_gcs_log_before_config(self):
+    calls = mock.MagicMock()
+    fake_mllogger = mock.MagicMock()
+    fake_mllogger.logger.handlers = []
+    with (
+        mock.patch.object(mllog_utils, "mllog", calls.mllog),
+        mock.patch.object(mllog_utils, "mllogger", fake_mllogger),
+        mock.patch.object(mllog_utils, "_is_master_process", return_value=True),
+        mock.patch.object(mllog_utils, "_gcs_target_path", None),
+        mock.patch.object(mllog_utils, "_local_log_path", None),
+        mock.patch.object(
+            mllog_utils, "_download_from_gcs_if_exists", calls.download
+        ),
+    ):
+      mllog_utils.configure_logger(metric_logger_dir="gs://b/mllog", seed=42)
+      local_path = mllog_utils._local_log_path  # pylint: disable=protected-access
+
+    self.assertEqual(
+        [c[0] for c in calls.mock_calls], ["download", "mllog.config"]
+    )
+    calls.download.assert_called_once_with("gs://b/mllog/seed_42.out", local_path)
+    self.assertEqual(
+        os.path.abspath(calls.mllog.config.call_args.kwargs["filename"]),
+        local_path,
+    )
+
+  def test_offline_eval_rcp_sequence_converged(self):
+    log_dir = self.test_dir
+    args = types.SimpleNamespace(batch_size=16, num_generations=16)
+    mllog_utils.configure_logger(metric_logger_dir=log_dir, seed=42)
+    mllog_utils.train_stop(args, step=19, time_ms=2000)
+    self.assertFalse(
+        mllog_utils.log_offline_eval_step(
+            step=18,
+            samples_count=4608,
+            eval_accuracy=0.65,
+            checkpoint_timestamp_ms=1000,
+        )
+    )
+    self.assertTrue(
+        mllog_utils.log_offline_eval_step(
+            step=19,
+            samples_count=4864,
+            eval_accuracy=0.70,
+            checkpoint_timestamp_ms=2000,
+            is_last_checkpoint=True,
+        )
+    )
+
+    events = _read_mllog_events(os.path.join(log_dir, "seed_42.out"))
+    self.assertEqual(
+        [e["key"] for e in events],
+        ["block_stop"] + ["eval_start", "eval_accuracy", "eval_stop"] * 2
+        + ["run_stop"],
+    )
+    self.assertEqual(events[0]["time_ms"], 2000)
+    self.assertEqual(events[0]["metadata"]["step"], 19)
+    self.assertEqual([events[2]["value"], events[5]["value"]], [0.65, 0.70])
+    run_stop = events[-1]
+    self.assertEqual(run_stop["time_ms"], 2000)
+    self.assertEqual(run_stop["metadata"]["status"], "success")
+    self.assertEqual(run_stop["metadata"]["samples_count"], 4864)
+
+  def test_offline_eval_rcp_sequence_not_converged(self):
+    log_dir = self.test_dir
+    mllog_utils.configure_logger(metric_logger_dir=log_dir, seed=42)
+    for step, ts_ms in ((18, 1000), (19, 2000), (20, 3000)):
+      self.assertFalse(
+          mllog_utils.log_offline_eval_step(
+              step=step,
+              samples_count=step * 256,
+              eval_accuracy=0.5,
+              checkpoint_timestamp_ms=ts_ms,
+              is_last_checkpoint=step == 20,
+          )
+      )
+
+    events = _read_mllog_events(os.path.join(log_dir, "seed_42.out"))
+    run_stops = [e for e in events if e["key"] == "run_stop"]
+    self.assertLen(run_stops, 1)
+    self.assertEqual(events[-1]["key"], "run_stop")
+    self.assertEqual(run_stops[0]["time_ms"], 3000)
+    self.assertEqual(run_stops[0]["metadata"]["status"], "aborted")
+    self.assertEqual(run_stops[0]["metadata"]["samples_count"], 5120)
+
+  def test_mlperf_6_1_0_init_print_disclosures(self):
+    fake_mllogger = mock.MagicMock()
+    with (
+        mock.patch.object(mllog_utils, "mllogger", fake_mllogger),
+        mock.patch.object(mllog_utils, "_is_master_process", return_value=True),
+        mock.patch.object(mllog_utils, "_flush_to_gcs_if_needed"),
+    ):
+      args = types.SimpleNamespace(
+          batch_size=16,
+          num_generations=16,
+          max_prompt_length=4096,
+          max_response_length=61440,
+          model_id="",
+      )
+      mllog_utils.init_print(args)
+    emitted = {
+        c.kwargs["key"]: c.kwargs["value"]
+        for c in fake_mllogger.event.call_args_list
+    }
+    self.assertEqual(emitted["eval_samples"], 251)
+    self.assertEqual(emitted["max_sequence_length"], 65536)
+    for key in (
+        "lowest_numerical_precision_in_linear",
+        "lowest_numerical_precision_in_attn",
+        "lowest_numerical_precision_in_comm",
+    ):
+      self.assertEqual(emitted[key], "bfloat16")
+    self.assertEqual(emitted["config_filename"], "qwen35_397b_grpo")
 
 
 if __name__ == "__main__":
