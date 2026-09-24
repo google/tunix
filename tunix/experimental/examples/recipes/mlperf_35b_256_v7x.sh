@@ -77,8 +77,13 @@ export ROLLOUT_JOBSET_YAML="jobset.tpu.yaml"
 export ROLLOUT_TPU_SLICE="tpu7x:2x2x1"
 export ROLLOUT_MESH_FSDP=1
 export ROLLOUT_MESH_TP=1
-export ROLLOUT_WORKERS="${ROLLOUT_WORKERS:-16}"
+export ROLLOUT_MESH_EXPERT="${ROLLOUT_MESH_EXPERT:-4}"
 export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-16}"
+
+# MLPerf RCP Logging
+export RCP_LOGGING="${RCP_LOGGING:-false}"
+export METRIC_LOGGER_DIR="${METRIC_LOGGER_DIR:-${MAXTEXT_OUTPUT_DIR}/mllog}"
+export TARGET_ACCURACY="${TARGET_ACCURACY:-0.69}"
 
 # ==============================================================================
 # vLLM Rollout Configuration (from paste.googleplex.com/5903655694368768)
@@ -98,7 +103,7 @@ export VLLM_ADDITIONAL_CONFIG='{"sharding":{"sharding_strategy":{"expert_paralle
 
 # Prefix Caching Configs
 export ENABLE_PREFIX_CACHING="${ENABLE_PREFIX_CACHING:-false}"
-export VLLM_PREFIX_CACHE_RETENTION_INTERVAL="${VLLM_PREFIX_CACHE_RETENTION_INTERVAL:-256}"
+export VLLM_PREFIX_CACHE_RETENTION_INTERVAL="${VLLM_PREFIX_CACHE_RETENTION_INTERVAL:-0}"
 export VLLM_MAMBA_CACHE_MODE="${VLLM_MAMBA_CACHE_MODE:-${MAMBA_CACHE_MODE:-none}}"
 
 # Router replay
@@ -145,10 +150,17 @@ export MAX_STEPS=${MAX_STEPS:-50}
 export BATCH_SIZE=16
 export MINI_BATCH_SIZE=${BATCH_SIZE}
 export NUM_GENERATIONS=16
-export TRAIN_MICRO_BATCH_SIZE="${TRAIN_MICRO_BATCH_SIZE:-32}"
-export CHECKPOINT_SAVE_INTERVAL_STEPS=0
+export TRAIN_MICRO_BATCH_SIZE="${TRAIN_MICRO_BATCH_SIZE:-1}"
+export CHECKPOINT_SAVE_INTERVAL_STEPS=1
 export CHECKPOINT_MAX_TO_KEEP=10
+
+# offpolicyness
 export MAX_STALENESS=0
+export TRAJECTORY_GROUP_ORDER=${TRAJECTORY_GROUP_ORDER:-arrival}
+
+# sequence packing
+export MAX_SEQ_TOKEN_PER_TPU=${MAX_SEQ_TOKEN_PER_TPU:-65536}
+export MAX_SEGMENTS_PER_PACKED_ROW=${MAX_SEGMENTS_PER_PACKED_ROW:-16}
 
 # Sampling Parameters (explicitly disable top-k, set top-p 1.0 and temperature 1.0)
 export TEMPERATURE="1.0"
@@ -179,6 +191,8 @@ export WEIGHT_DECAY=0.0
 export MAX_GRAD_NORM="0.125"
 export WARMUP_STEPS_FRACTION=0.0
 export LEARNING_RATE_FINAL_FRACTION=1.0
+export SKIP_STEP_ON_SPIKES="false"
+export SKIP_STEP_ON_NAN="true"
 
 # Architecture & Rematerialization
 export REMAT_POLICY="full"
