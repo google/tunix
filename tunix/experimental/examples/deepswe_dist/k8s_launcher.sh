@@ -697,7 +697,6 @@ if cfg:
           --weight_sync_mode=${WEIGHT_SYNC_MODE} \
           --prefuse_moe_weights=${ROLLOUT_PREFUSE_MOE_WEIGHTS} \
           --enable_prefix_caching=${ENABLE_PREFIX_CACHING} \
-          --exact_token_continuity=${EXACT_TOKEN_CONTINUITY} \
           --free_kv_cache_during_weight_sync=${ROLLOUT_FREE_KV_CACHE} \
           --return_routed_experts=${RETURN_ROUTED_EXPERTS} \
           --registry_module=tunix.experimental.examples.deepswe_dist.deepswe \
