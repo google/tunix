@@ -80,14 +80,14 @@ export WEIGHT_SYNC_MODE="raiden"
 # Topologies (128 chips / 256 devices Trainer 4x4x8, 8x 8-chip Rollout slices on TPU7x dynamic slicing)
 # Mesh product is DEVICES, and v7x has 2 devices/chip at ~95 GB each.
 # 4x4x8 = 128 chips = 256 devices.
-# Sharding: TP=1, FSDP=32, CP=4, EP=2, cp-as-ep.
-# Mesh product: 32 * 1 * 2 * 4 = 256 devices.
+# Sharding: TP=1, FSDP=16, CP=8, EP=2, cp-as-ep.
+# Mesh product: 16 * 1 * 2 * 8 = 256 devices.
 export TRAINER_JOBSET_YAML="jobset.pathways.qwen3.5-397b.yaml"
 export TRAINER_TPU_SLICE="tpu7x:4x4x8"           # 128 chips = 256 devices
-export TRAINER_MESH_FSDP=32
+export TRAINER_MESH_FSDP=16
 export TRAINER_MESH_TP=1
 export TRAINER_MESH_EXPERT=2
-export TRAINER_MESH_CONTEXT=4
+export TRAINER_MESH_CONTEXT=8
 export TRAINER_BASE_NUM_KV_HEADS=2
 
 # Rollout: 8 chips = 16 devices = 2 hosts per replica. tp * expert must equal the
@@ -169,7 +169,7 @@ export MAX_STEPS=${MAX_STEPS:-50}
 export BATCH_SIZE=${BATCH_SIZE:-16}
 export MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-${BATCH_SIZE}}
 export NUM_GENERATIONS=16
-export TRAIN_MICRO_BATCH_SIZE="${TRAIN_MICRO_BATCH_SIZE:-32}"
+export TRAIN_MICRO_BATCH_SIZE="${TRAIN_MICRO_BATCH_SIZE:-16}"
 export CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-0}
 export CHECKPOINT_MAX_TO_KEEP=10
 # When saving is enabled, default to Pathways persistence; the fallback OOMs the proxy at 397B.
@@ -220,7 +220,7 @@ export EPISODE_TIMEOUT_SECS=1800
 export DEBUG=${DEBUG:-0}
 
 # DeepSWE Environment & Agent Sandbox
-export DATASET_PATH="gs://mlperf_dataset/r2e-gym-easy"
+export DATASET_PATH="gs://mlperf_dataset/benchmark-r2e-gym-easy"
 export USE_AGENT_SANDBOX=1
 export SCAFFOLD="openhands"
 export SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-${K8S_NAMESPACE}}"
@@ -228,7 +228,7 @@ export POOL_NAME_FORMAT="${POOL_NAME_FORMAT:-}"
 export TEMPLATE_NAME_PREFIX="${TEMPLATE_NAME_PREFIX:-}"
 export SANDBOX_NODE_SELECTOR_KEY="cloud.google.com/gke-nodepool"
 export SANDBOX_NODE_SELECTOR_VAL="sandbox-np"
-export SANDBOX_TOLERATIONS=""
+export SANDBOX_TOLERATIONS='[{"key":"workload","operator":"Equal","value":"sandbox","effect":"NoSchedule"}]'
 export IMAGE_REWRITE_PREFIX="${IMAGE_REWRITE_PREFIX:-us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/}"
 export MAX_WARMPOOL_REPLICAS=2
 export STEP_TIMEOUT_SECS=300
