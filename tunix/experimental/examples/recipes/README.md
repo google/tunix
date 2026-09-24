@@ -8,7 +8,10 @@ Currently available DeepSWE MLPerf recipes:
 
 | Recipe Script | Description | Hardware Setup |
 | :--- | :--- | :--- |
-| [`mlperf_35b_256.sh`](mlperf_35b_256.sh) | Qwen3.5-35B-A3B distributed GRPO recipe with 256 trajectories per step on Trellis GKE TPU v5p cluster. | **Trainer**: 1x TPU v5p-64 (`tpuv5:4x4x4`)<br>**Rollouts**: 16x TPU v5p-8 (`tpuv5:2x2x2`)<br>**Sandboxes**: GKE CPU pool (`sandbox-cpu-pool`) |
+| [`mlperf_35b_256_v5p.sh`](mlperf_35b_256_v5p.sh) | Qwen3.5-35B-A3B distributed GRPO recipe with 256 trajectories per step on Trellis GKE TPU v5p cluster (`europe-west4`). | **Trainer**: 1x TPU v5p-64 (`tpuv5:4x4x4`)<br>**Rollouts**: 16x TPU v5p-8 (`tpuv5:2x2x1`)<br>**Sandboxes**: GKE CPU pool (`sandbox-cpu-pool`) |
+| [`mlperf_35b_256_v7x.sh`](mlperf_35b_256_v7x.sh) | Qwen3.5-35B-A3B distributed GRPO recipe with 256 trajectories per step on Trellis GKE TPU v7x cluster (`us-central1`). | **Trainer**: 1x TPU v7x-64 (`tpu7x:4x4x4`)<br>**Rollouts**: 16x TPU v7x-4 (`tpu7x:2x2x1`)<br>**Sandboxes**: GKE CPU pool (`sandbox-np`) |
+| [`mlperf_397b_256_v5p.sh`](mlperf_397b_256_v5p.sh) | Qwen3.5-397B-A17B distributed GRPO recipe on Trellis GKE TPU v5p cluster (`europe-west4`). | **Trainer**: 1x TPU v5p-256 (`tpuv5p:4x8x8`)<br>**Rollouts**: 4x TPU v5p-16 (`tpuv5p:2x2x4`)<br>**Sandboxes**: GKE CPU pool (`sandbox-cpu-pool`) |
+| [`mlperf_397b_256_v7x.sh`](mlperf_397b_256_v7x.sh) | Qwen3.5-397B-A17B distributed GRPO recipe on Trellis GKE TPU v7x cluster (`us-central1`). | **Trainer**: 1x TPU v7x-128 (`tpu7x:4x4x8`)<br>**Rollouts**: 16x TPU v7x-8 (`tpu7x:2x2x2`)<br>**Sandboxes**: GKE CPU pool (`sandbox-np`) |
 
 ---
 
@@ -69,7 +72,7 @@ export MAXTEXT_OUTPUT_DIR="gs://<your-bucket>/trellis/maxtext"
 export TUNIX_IMAGE="gcr.io/cloud-tpu-multipod-dev/${USER}/trellis-35b:latest"
 
 # Launch the run
-bash tunix/experimental/examples/recipes/mlperf_35b_256.sh start
+bash tunix/experimental/examples/recipes/mlperf_35b_256_v5p.sh start
 ```
 
 ### 3. Monitoring and Managing the Run
@@ -88,12 +91,12 @@ kubectl logs -f -n trellis -l jobset.sigs.k8s.io/jobset-name=${USER}-orch
 kubectl logs -f -n trellis -l jobset.sigs.k8s.io/jobset-name=${USER}-train -c main
 
 # Tear down the run
-bash tunix/experimental/examples/recipes/mlperf_35b_256.sh stop
+bash tunix/experimental/examples/recipes/mlperf_35b_256_v5p.sh stop
 ```
 
 ---
 
-## Key Configuration Reference (`mlperf_35b_256.sh`)
+## Key Configuration Reference (`mlperf_35b_256_v5p.sh`)
 
 - **Trainer Mesh**: `TRAINER_MESH_FSDP=1`, `TRAINER_MESH_TP=2`, `TRAINER_MESH_EXPERT=32` across 64 chips.
 - **Rollout Slices**: 16 replicas with `ROLLOUT_TPU_SLICE=tpuv5:2x2x2` (8 chips per slice), utilizing vLLM prefix caching and RPA attention.
