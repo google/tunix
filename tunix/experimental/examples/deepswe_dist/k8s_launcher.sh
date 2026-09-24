@@ -205,6 +205,11 @@ export KUEUE_QUEUE_NAME=${KUEUE_QUEUE_NAME:-${KUEUE_QUEUE:-${QUEUE_NAME:-}}}
 export PRIORITY_CLASS=${PRIORITY_CLASS:-medium}
 
 export TRAINER_EXTRA_ENV=${TRAINER_EXTRA_ENV:-}
+# Same as TRAINER_EXTRA_ENV, for the orchestrator (e.g. WEIGHT_SYNC_*_TIMEOUT_S,
+# read by the weight-sync coordinator) and the rollout workers (Raiden
+# transport tuning). Space separated, mirroring math_gsm8k_dist/k8s_launcher.sh.
+export ORCHESTRATOR_EXTRA_ENV=${ORCHESTRATOR_EXTRA_ENV:-}
+export ROLLOUT_EXTRA_ENV=${ROLLOUT_EXTRA_ENV:-}
 export DRY_RUN=${DRY_RUN:-false}
 
 apply_manifest() {
@@ -312,6 +317,7 @@ start_orchestrator() {
       ${TRAJECTORY_LOG_DIR:+TRAJECTORY_LOG_DIR=\"${TRAJECTORY_LOG_DIR}\"} \
       PYTHONUNBUFFERED=1 \
       TUNIX_IS_INTERNAL_ENV=false \
+      ${ORCHESTRATOR_EXTRA_ENV} \
       ${BOOTSTRAP_CMD} \
       python -m tunix.experimental.distributed.runtime.main \
         --discovery_id=${ORCHESTRATOR_ID} \
@@ -671,6 +677,7 @@ if cfg:
         ${VLLM_ENABLE_V1_MULTIPROCESSING:+VLLM_ENABLE_V1_MULTIPROCESSING=${VLLM_ENABLE_V1_MULTIPROCESSING}} \
         ${VLLM_LOGGING_LEVEL:+VLLM_LOGGING_LEVEL=${VLLM_LOGGING_LEVEL}} \
         ${ROLLOUT_ENV_FLAGS} \
+        ${ROLLOUT_EXTRA_ENV} \
         ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} \
         SKIP_JAX_PRECOMPILE=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ${sandbox_env} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} python -m tunix.experimental.distributed.runtime.main \
           --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \

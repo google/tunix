@@ -459,6 +459,27 @@ DEFAULT_OPENHANDS_KEEPALIVE_CMD = [
 ]
 
 
+def _sandbox_tolerations(
+    node_selector: Optional[dict[str, str]],
+) -> Optional[list[dict[str, str]]]:
+  """Tolerations for sandbox pods: SANDBOX_TOLERATIONS, else sandbox-np's taint."""
+  tolerations_raw = os.getenv("SANDBOX_TOLERATIONS")
+  if tolerations_raw:
+    try:
+      return json.loads(tolerations_raw)
+    except Exception as e:
+      logging.warning("Failed to parse SANDBOX_TOLERATIONS as JSON: %s", e)
+      return None
+  if node_selector and node_selector.get("cloud.google.com/gke-nodepool") == "sandbox-np":
+    return [{
+        "key": "workload",
+        "operator": "Equal",
+        "value": "sandbox",
+        "effect": "NoSchedule",
+    }]
+  return None
+
+
 def get_openhands_pod_template(
     node_selector: Optional[dict[str, str]] = None,
 ) -> Any:
@@ -563,5 +584,16 @@ def get_template(
   """Returns the fleet TemplateSpec for the given scaffold, or None."""
   if scaffold in OPENHANDS_SCAFFOLDS:
     return get_openhands_pod_template(node_selector=node_selector)
-  return None
+  # Other scaffolds use the fleet's stock template, which has no tolerations, so
+  # their pods could never land on a tainted pool such as sandbox-np. Hand back
+  # the stock template plus tolerations when any apply.
+  tolerations = _sandbox_tolerations(node_selector)
+  if not tolerations:
+    return None
+  from agent_sandbox_rl import TemplateSpec  # pytype: disable=import-error
+
+  return TemplateSpec(
+      node_selector=node_selector,
+      extra_pod_spec={"tolerations": tolerations},
+  )
 

@@ -19,6 +19,7 @@ metadata:
   namespace: ${NAMESPACE}
 ${QUEUE_LABEL}spec:
   failurePolicy:
+    maxRestarts: 0
     restartStrategy: Recreate
   network:
     enableDNSHostnames: true
@@ -27,14 +28,14 @@ ${QUEUE_LABEL}spec:
   - name: proc
     template:
       spec:
-        backoffLimit: 2048000
+        backoffLimit: 0
         completionMode: Indexed
         completions: ${COMPLETIONS}
         parallelism: ${PARALLELISM}
         template:
           metadata:
             annotations:
-              cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+              cluster-autoscaler.kubernetes.io/safe-to-evict: "false"${TPU_ANNOTATIONS}
               # # place on nodes in the same block
               # kueue.k8s.io/podset-required-topology: cloud.google.com/gce-topology-block
               # # place on nodes in the same slice
@@ -44,35 +45,16 @@ ${QUEUE_LABEL}spec:
             serviceAccountName: ${SERVICE_ACCOUNT}
             dnsPolicy: ClusterFirstWithHostNet
             hostNetwork: true
-            restartPolicy: OnFailure${PRIORITY_CLASS_LINE}
+            restartPolicy: Never${PRIORITY_CLASS_LINE}
             terminationGracePeriodSeconds: 10
             nodeSelector:
-              cloud.google.com/gke-tpu-accelerator: ${TPU_TYPE}
-              cloud.google.com/gke-tpu-topology: ${TPU_TOPOLOGY}${RESERVATION_SELECTOR}
-            affinity:
-              # place on nodes in the same nodepool
-              podAffinity:
-                requiredDuringSchedulingIgnoredDuringExecution:
-                - topologyKey: cloud.google.com/gke-nodepool
-                  labelSelector:
-                    matchExpressions:
-                    - key: jobset.sigs.k8s.io/jobset-name
-                      operator: In
-                      values:
-                      - ${JOBSET_NAME}
-              # ensure exclusive access to the nodepool (among all jobsets created with this yaml)
-              podAntiAffinity:
-                requiredDuringSchedulingIgnoredDuringExecution:
-                - topologyKey: cloud.google.com/gke-nodepool
-                  labelSelector:
-                    matchExpressions:
-                    - key: jobset.sigs.k8s.io/jobset-name
-                      operator: Exists
-                    - key: jobset.sigs.k8s.io/jobset-name
-                      operator: NotIn
-                      values:
-                      - ${JOBSET_NAME}
-            # tolerations:
+              # No gke-tpu-topology here under dynamic slicing (the generator leaves
+              # TPU_TOPOLOGY_SELECTOR empty). Free v7x nodes are uncarved and carry
+              # no topology label, so a selector on the shape rules out every node
+              # not already carved to it and Kueue reports "excluded: nodeSelector".
+              # dynamic-slicing-ac adds the selector at admission instead.
+              cloud.google.com/gke-tpu-accelerator: ${TPU_TYPE}${TPU_TOPOLOGY_SELECTOR}${RESERVATION_SELECTOR}
+${PW_NODE_AFFINITY}            # tolerations:
             # - key: "google.com/tpu"
             #   operator: "Equal"
             #   value: "present"

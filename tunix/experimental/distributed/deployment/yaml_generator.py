@@ -15,6 +15,7 @@
 """Generates Kubernetes deployment YAML manifests from templates."""
 
 import argparse
+import json
 import math
 import os
 import string
@@ -230,6 +231,23 @@ def main() -> None:
       f"\n            priorityClassName: {priority_class}" if priority_class else ""
   )
 
+  # Under Pathways the TPU program runs in the worker, not the user container, so
+  # LIBTPU_INIT_ARGS has to be set there. The server rejects the xpk-level
+  # --extra_env_vars/--extra_flags with "Unknown command line flag"; xpk turns
+  # those into container env, which is what this reproduces. One KEY=VALUE per
+  # line, because a value may contain spaces.
+  _worker_env_entries = []
+  for _line in os.environ.get("PATHWAYS_WORKER_EXTRA_ENV", "").strip().splitlines():
+    _line = _line.strip()
+    if not _line or "=" not in _line:
+      continue
+    _k, _v = _line.split("=", 1)
+    _worker_env_entries.append(
+        f"\n              - name: {_k.strip()}"
+        f"\n                value: {json.dumps(_v)}"
+    )
+  pathways_worker_extra_env = "".join(_worker_env_entries)
+
   reservation_name = os.environ.get("TPU_RESERVATION", "").strip()
   reservation_selector = (
       f"\n              cloud.google.com/reservation-name: {reservation_name}"
@@ -297,10 +315,10 @@ def main() -> None:
   if use_dynamic_slicing and slice_topology:
     if slice_size and slice_size > 1:
       anno_lines = [
-          f'cloud.google.com/gke-tpu-slice-topology: "{slice_topology}"',
+          f'cloud.google.com/gke-tpu-slice-topology: "{tpu_topology}"',
           'cloud.google.com/skip-tpu-webhook-check: "true"',
           "kueue.x-k8s.io/podset-required-topology: cloud.google.com/gce-topology-block",
-          f"kueue.x-k8s.io/podset-slice-required-topology: cloud.google.com/gke-tpu-partition-{slice_topology}-id",
+          "kueue.x-k8s.io/podset-slice-required-topology: cloud.google.com/gke-tpu-partition-4x4x4-id",
           f'kueue.x-k8s.io/podset-slice-size: "{slice_size}"',
       ]
     else:
@@ -322,7 +340,8 @@ def main() -> None:
           "                requiredDuringSchedulingIgnoredDuringExecution:\n"
           "                  nodeSelectorTerms:\n"
           "                  - matchExpressions:\n"
-          f"                    - key: cloud.google.com/gke-tpu-partition-{slice_topology}-state\n"
+          "                    - key:"
+          " cloud.google.com/gke-tpu-partition-4x4x4-state\n"
           "                      operator: In\n"
           "                      values: [\"HEALTHY\", \"DEGRADED\"]\n"
       )
@@ -398,12 +417,10 @@ def main() -> None:
   if not tpu_raiden_data_nics and tpu_type in ("tpu7x", "tpu-v7x-slice"):
     tpu_raiden_data_nics = "eth0"
 
-  if tpu_raiden_data_nics:
-    pathways_worker_extra_env = (
+  if tpu_raiden_data_nics and "- name: TPU_RAIDEN_DATA_NICS\n" not in pathways_worker_extra_env:
+    pathways_worker_extra_env += (
         f"\n              - name: TPU_RAIDEN_DATA_NICS\n                value: \"{tpu_raiden_data_nics}\""
     )
-  else:
-    pathways_worker_extra_env = ""
 
   with open(args.template_file, "r") as f:
     template = string.Template(f.read())
@@ -439,6 +456,7 @@ def main() -> None:
         PRIORITY_CLASS_LINE=priority_class_line,
         COLOCATED_PYTHON_SIDECAR_BLOCK=colocated_python_sidecar_block,
         PW_INSTANCE_TYPE=pw_instance_type,
+        PATHWAYS_WORKER_EXTRA_ENV=pathways_worker_extra_env,
         REPLICAS=1,
         COMPLETIONS=num_chips // 4 if num_chips else None,
         PARALLELISM=num_chips // 4 if num_chips else None,
@@ -448,7 +466,6 @@ def main() -> None:
         USER_CONTAINER_IMAGE=args.worker_container_image,
         USER_CONTAINER_PORT=args.worker_container_port,
         STARTUP_COMMAND=args.worker_startup_command,
-        PATHWAYS_WORKER_EXTRA_ENV=pathways_worker_extra_env,
     )
     print(content)
 
