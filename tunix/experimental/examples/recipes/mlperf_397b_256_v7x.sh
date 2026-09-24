@@ -26,7 +26,7 @@ export CLUSTER="bodaborg-tpu7x-gsc"
 export K8S_NAMESPACE="priority-dev"
 export USE_DYNAMIC_SLICING="true"
 export TPU_RESERVATION="${TPU_RESERVATION:-ghostfish-pogoag4tylwed}"
-export ENABLE_MULTI_NUMA="${ENABLE_MULTI_NUMA:-1}"
+export ENABLE_MULTI_NUMA=1
 
 export RAIDEN_DEVICES_PER_HOST=8
 export TPU_RAIDEN_DATA_NICS="eth0"
@@ -100,7 +100,7 @@ sa_block_q_dkv=1024 sa_block_kv_dkv=2048 sa_block_kv_dkv_compute=1024 \
 sa_fuse_reciprocal=false sa_use_base2_exp=true dq_reduction_steps=3 \
 context_parallel_load_balance=False allow_split_physical_axes=False \
 num_vocab_tiling=16 mu_dtype=bfloat16 \
-checkpoint_storage_concurrent_gb=48 \
+checkpoint_storage_concurrent_gb=96 \
 checkpoint_storage_use_ocdbt=false checkpoint_storage_use_zarr3=false}"
 export DEBUG=${DEBUG:-0}
 
