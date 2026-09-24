@@ -835,6 +835,11 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
               f" {sampling_kwargs}. Error: {e}",
           )
 
+      # vLLM must decode incrementally to recognize string stops (for example
+      # DeepSWE's </function>); token-only decoding cannot enforce them.
+      if sampling_params.stop:
+        sampling_params.detokenize = True
+
     if exact_input and (
         isinstance(sampling_params, BeamSearchParams)
         or getattr(sampling_params, "n", 1) != 1
