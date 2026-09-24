@@ -10,7 +10,7 @@ export WANDB_API_KEY="${WANDB_API_KEY:-}"
 export WANDB_RUN_NAME="${WANDB_RUN_NAME:-${JOB_PREFIX}-mlperf-35b-v7x}"
 export MAXTEXT_OUTPUT_DIR="${MAXTEXT_OUTPUT_DIR:-gs://niting-maxtext-storage/maxtext/${JOB_PREFIX}}"
 export TRAJECTORY_LOG_DIR="${TRAJECTORY_LOG_DIR:-gs://niting-maxtext-storage/trajectories/${JOB_PREFIX}}"
-export TUNIX_IMAGE="${TUNIX_IMAGE:-gcr.io/cloud-tpu-multipod-dev/niting/trellis-35b:latest}"
+export TUNIX_IMAGE="${TUNIX_IMAGE:-gcr.io/cloud-tpu-multipod-dev/atwigg/trellis-35b:latest}"
 
 export PROJECT="cloud-tpu-shared-capacity"
 export REGION="us-central1"
