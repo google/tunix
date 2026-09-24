@@ -49,3 +49,30 @@ To stop all jobsets:
 ./k8s_launcher.sh --command stop
 ```
 
+## Evaluate without a trainer
+
+`eval_deepswe.py` uses the same SWE-Bench Verified task split, Qwen3-32B
+chat template, one greedy trajectory per task, 30-turn limit, and Pass@1
+calculation as `examples/deepswe/eval_deepswe.py`. It loads a Hugging Face
+checkpoint directly into the rollout worker; it does not start a trainer or
+perform weight synchronization. The defaults use eight TPU chips in a pure
+tensor-parallel mesh. From the repository root, run:
+
+```bash
+python tunix/experimental/examples/deepswe_dist/eval_deepswe.py \
+  --model_dir /path/to/Qwen3-32B \
+  --output_dir /path/to/eval_results
+```
+
+For a short correctness run, add `--tasks_limit 2`. A full run omits that flag.
+Results are written as one JSONL record per task and a neighboring
+`*.summary.json` with Pass@1, average reward, average steps, statuses, and
+guard counts. Failed tasks remain in the Pass@1 denominator and cause a
+nonzero exit. `--enable_guard` enables the same optional action guard as the
+agentic evaluation.
+
+To use rollout workers on separate TPU hosts, start the script with
+`--role worker --port 20001` on each host. Then start one CPU controller with
+`--role controller --worker_addresses host1:20001 host2:20001` and the same
+model and evaluation flags. Set `--mesh_fsdp` and `--mesh_tp` to the visible
+chip layout on each worker.

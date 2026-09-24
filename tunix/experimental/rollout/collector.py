@@ -388,6 +388,21 @@ class TrajectoryCollectorEngine:
     )
     metadata["policy_version"] = int(policy_version or 0)
 
+    if metadata.pop("record_episode_summary", False):
+      steps = self.agent.trajectory.steps
+      blocked = [
+          step.info or {}
+          for step in steps
+          if (step.info or {}).get("guard_blocked")
+      ]
+      rl_traj["episode_summary"] = {
+          "num_steps": len(steps),
+          "guard_blocked_steps": len(blocked),
+          "guard_reasons": sorted(
+              {str(info.get("guard_reason") or "unknown") for info in blocked}
+          ),
+      }
+
     self._annotate_response_budget(rl_traj, metadata)
 
     return agent_types.TrajectoryItem(
