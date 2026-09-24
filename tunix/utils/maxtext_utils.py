@@ -354,6 +354,7 @@ def build_maxtext_config(
 
   if profiling_options is not None:
     argv.extend([
+        "profiler=xplane",
         f"profiler_steps={profiling_options.profiler_steps}",
         f"skip_first_n_steps_for_profiler={profiling_options.skip_first_n_steps}",
         f"profile_periodically_period={profiling_options.profiler_period}",

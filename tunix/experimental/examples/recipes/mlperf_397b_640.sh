@@ -21,12 +21,8 @@ export ROLLOUT_PORT="${ROLLOUT_PORT:-20001}"
 export TRAINER_PORT="${TRAINER_PORT:-20002}"
 export TUNIX_IMAGE="${TUNIX_IMAGE:-gcr.io/cloud-tpu-multipod-dev/${USER:-atwigg}/trellis-397b:latest}"
 
-# Profiling off. MaxText decided whether to profile from profiler_steps alone
-# (default 5), so profiler=ProfilerType.NONE still opened a trace at step 1;
-# under Pathways that raises "No profile started" inside fwd_bwd and takes the
-# trainer down mid-run.
-export PROFILER_STEPS=0
-export SKIP_FIRST_N_PROFILER_STEPS=-1
+export PROFILER_STEPS=${PROFILER_STEPS:-0}
+export SKIP_FIRST_N_PROFILER_STEPS=${SKIP_FIRST_N_PROFILER_STEPS:--1}
 
 export PROJECT="cloud-tpu-shared-capacity"
 export REGION="europe-west4"
