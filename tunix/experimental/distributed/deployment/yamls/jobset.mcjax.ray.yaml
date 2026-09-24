@@ -34,12 +34,7 @@ ${QUEUE_LABEL}spec:
         template:
           metadata:
             annotations:
-              cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
-              # # place on nodes in the same block
-              # kueue.k8s.io/podset-required-topology: cloud.google.com/gce-topology-block
-              # # place on nodes in the same slice
-              # kueue.x-k8s.io/podset-slice-required-topology: cloud.google.com/gke-tpu-slice-${PODSET_SLICE_TOPOLOGY}-id
-              # kueue.x-k8s.io/podset-slice-size: "${PODSET_SLICE_SIZE}"
+              cluster-autoscaler.kubernetes.io/safe-to-evict: "false"${TPU_ANNOTATIONS}
           spec:
             serviceAccountName: ${SERVICE_ACCOUNT}
             dnsPolicy: ClusterFirstWithHostNet
@@ -47,31 +42,8 @@ ${QUEUE_LABEL}spec:
             restartPolicy: OnFailure${PRIORITY_CLASS_LINE}
             terminationGracePeriodSeconds: 10
             nodeSelector:
-              cloud.google.com/gke-tpu-accelerator: ${TPU_TYPE}
-              cloud.google.com/gke-tpu-topology: ${TPU_TOPOLOGY}${RESERVATION_SELECTOR}
-            affinity:
-              # place on nodes in the same nodepool
-              podAffinity:
-                requiredDuringSchedulingIgnoredDuringExecution:
-                - topologyKey: cloud.google.com/gke-nodepool
-                  labelSelector:
-                    matchExpressions:
-                    - key: jobset.sigs.k8s.io/jobset-name
-                      operator: In
-                      values:
-                      - ${JOBSET_NAME}
-              # ensure exclusive access to the nodepool (among all jobsets created with this yaml)
-              podAntiAffinity:
-                requiredDuringSchedulingIgnoredDuringExecution:
-                - topologyKey: cloud.google.com/gke-nodepool
-                  labelSelector:
-                    matchExpressions:
-                    - key: jobset.sigs.k8s.io/jobset-name
-                      operator: Exists
-                    - key: jobset.sigs.k8s.io/jobset-name
-                      operator: NotIn
-                      values:
-                      - ${JOBSET_NAME}
+              cloud.google.com/gke-tpu-accelerator: ${TPU_TYPE}${TPU_TOPOLOGY_SELECTOR}${RESERVATION_SELECTOR}
+${TPU_AFFINITY}
             # tolerations:
             # - key: "google.com/tpu"
             #   operator: "Equal"
@@ -106,14 +78,24 @@ ${QUEUE_LABEL}spec:
                   # name, which is the only thing the LeaderWorkerSet variant
                   # (leaderworkerset.mcjax.ray.yaml) gets from LWS_LEADER_ADDRESS.
                   export RAY_memory_monitor_refresh_ms=0
+                  export ENABLE_MULTI_NUMA=1
                   RAY_HEAD="$${JOBSET_NAME}-$${REPLICATED_JOB_NAME}-$${JOB_INDEX}-0.$${JOBSET_NAME}"
                   echo "Ray head: $${RAY_HEAD}, this pod index: $${POD_INDEX}"
+                  python3 -c "import site; p = site.getsitepackages()[0] + '/sitecustomize.py'; open(p, 'w').write('try:\n    from tunix.experimental.weight_sync import raiden_preload\n    raiden_preload.import_raiden()\nexcept Exception:\n    pass\n')" || true
+                  if [ ! -d /app/Qwen/Qwen3.5-397B-A17B ]; then python3 -c "import gcsfs, os; fs = gcsfs.GCSFileSystem(); os.makedirs('/app/Qwen/Qwen3.5-397B-A17B', exist_ok=True); fs.get('bodaborg-tpu7x-nap-us-central1/wuhao/tokenizer/', '/app/Qwen/Qwen3.5-397B-A17B/', recursive=True)" || true; fi
 
                   (
                     if [ "$${POD_INDEX}" = "0" ]; then
                       echo "Starting Ray head..."
                       ray start --head --port=6379
                       sleep 5; until ray status; do sleep 5; done
+                      if [ -n "${COMPLETIONS}" ] && [ "${COMPLETIONS}" -gt 1 ]; then
+                        echo "Waiting for all ${COMPLETIONS} Ray nodes to join..."
+                        until python3 -c "import ray; ray.init(address='auto', logging_level='error'); alive=len([n for n in ray.nodes() if n.get('Alive')]); print(f'Ray alive nodes: {alive}/${COMPLETIONS}'); exit(0 if alive >= ${COMPLETIONS} else 1)"; do
+                          sleep 5
+                        done
+                        echo "All ${COMPLETIONS} Ray nodes joined successfully!"
+                      fi
 
                       ${STARTUP_COMMAND}
                     else

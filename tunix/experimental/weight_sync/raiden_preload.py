@@ -23,6 +23,7 @@ lazily -- so this only has to run before the first call that touches a device.
 
 import importlib
 import logging
+import os
 
 # The .so files, not the Python wrappers beside them, so a wrapper going lazy
 # cannot silently turn the preload into a no-op.
@@ -44,6 +45,13 @@ def import_raiden() -> tuple[str, ...]:
   Returns:
     The modules that were imported, in load order. Empty without Raiden.
   """
+  telemetry_dir = os.environ.get("TPU_RAIDEN_TELEMETRY_MULTIPROC_DIR")
+  if telemetry_dir:
+    try:
+      os.makedirs(telemetry_dir, exist_ok=True)
+    except Exception:
+      pass
+
   loaded = []
   for name in RAIDEN_MODULES:
     try:

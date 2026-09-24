@@ -7,7 +7,7 @@ set -e
 # Derived from mlperf_35b_256_v7x.sh and mlperf_397b_v7x.sh, configured with:
 # - TPU7x dynamic slicing on bodaborg-tpu7x-gsc (priority-dev namespace)
 # - Trainer on 256 chips (4x8x8 = 512 devices, FSDP=64, TP=1, EXPERT=2, CP=4)
-# - Rollout on 64 chips (8 replicas x 8 chips 2x2x2, EP=16, TP=1)
+# - Rollout on 256 chips (32 replicas x 8 chips 2x2x2, EP=16, TP=1)
 # - Sandbox configured for sandbox-np nodepool with workload tolerations
 # ==============================================================================
 
@@ -48,14 +48,16 @@ export ENABLE_PATHWAYS_PERSISTENCE=1
 
 # Pathways shared configuration
 source "${DIR}/mlperf_pathways_config.sh"
+export ENABLE_MULTI_NUMA="${ENABLE_MULTI_NUMA:-0}"
 
-export RAIDEN_DEVICES_PER_HOST=4
+export RAIDEN_DEVICES_PER_HOST=8
 export USE_WEIGHT_CONVERTER="true"
 export PREFUSE_MOE_WEIGHTS="true"
 export TRAINER_PREFUSE_MOE_WEIGHTS="true"
 export ROLLOUT_PREFUSE_MOE_WEIGHTS="true"
 export VERIFY_WEIGHTS="true"
 export TRAINER_PADDED_MOE_MLP_DIM=""
+export TPU_RAIDEN_DATA_NICS="eth0"
 
 # WandB configuration
 export WANDB_ENTITY="google-trellis"
@@ -64,7 +66,7 @@ export WANDB_PROJECT="trellis-deepswe"
 # Model configuration
 export MODEL_NAME="Qwen3.5-397B-A17B"
 export MODEL_ID="Qwen/Qwen3.5-397B-A17B"
-export TOKENIZER_PATH="Qwen/Qwen3.5-397B-A17B"
+export TOKENIZER_PATH="${TOKENIZER_PATH:-/app/Qwen/Qwen3.5-397B-A17B}"
 export MAXTEXT_MODEL_NAME="qwen3.5-397b-a17b"
 export MAXTEXT_CKPT="${MAXTEXT_CKPT:-gs://mlperf-6-1-submission/ckpt/qwen35_397b/scanned_reshard_fsdp32_tp2/0/items}"
 export TRAINABLE_PARAMETERS_MASK='^(?!.*routed_experts/gate/kernel).*'
@@ -100,10 +102,10 @@ export ROLLOUT_MESH_FSDP=1
 export ROLLOUT_MESH_TP=1
 export ROLLOUT_MESH_EXPERT=16
 
-# 8 replicas x 8 chips = 64 rollout chips. ROLLOUT_WORKERS wins where both are
+# 16 replicas x 8 chips = 128 rollout chips. ROLLOUT_WORKERS wins where both are
 # read (k8s_launcher.sh:320), so keep them equal.
-export ROLLOUT_WORKERS="${ROLLOUT_WORKERS:-8}"
-export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-8}"
+export ROLLOUT_WORKERS="${ROLLOUT_WORKERS:-16}"
+export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-16}"
 
 # ==============================================================================
 # vLLM Rollout Configuration
@@ -114,9 +116,9 @@ export VLLM_MAX_NUM_SEQS=16
 export VLLM_GPU_MEMORY_UTILIZATION="0.9"
 export VLLM_DATA_PARALLEL_SIZE=1
 export VLLM_ENABLE_EXPERT_PARALLEL="true"
-export VLLM_ADDITIONAL_CONFIG='{"sharding":{"sharding_strategy":{"expert_parallelism":16,"tensor_parallelism":1,"enable_dp_attention":true}},"custom_mamba_cache_multiplier":16,"maxtext_config":{"scan_layers":false,"attention":"vllm_rpa","allow_split_physical_axes":true,"use_multimodal":false,"prefuse_moe_weights":true}}'
+export VLLM_ADDITIONAL_CONFIG='{"sharding":{"sharding_strategy":{"expert_parallelism":16,"tensor_parallelism":1,"enable_dp_attention":true}},"custom_mamba_cache_multiplier":16,"maxtext_config":{"scan_layers":false,"attention":"vllm_rpa","allow_split_physical_axes":true,"use_multimodal":false,"prefuse_moe_weights":true,"per_device_batch_size":0.0}}'
 
-export ENABLE_PREFIX_CACHING="${ENABLE_PREFIX_CACHING:-true}"
+export ENABLE_PREFIX_CACHING="false"
 export VLLM_PREFIX_CACHE_RETENTION_INTERVAL="${VLLM_PREFIX_CACHE_RETENTION_INTERVAL:-0}"
 export MAMBA_CACHE_MODE="${MAMBA_CACHE_MODE:-align}"
 export VLLM_MAMBA_CACHE_MODE="${VLLM_MAMBA_CACHE_MODE:-${MAMBA_CACHE_MODE}}"
@@ -146,13 +148,15 @@ export VLLM_ENABLE_V1_MULTIPROCESSING=0
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800
 
 # Raiden tuning carried over from the 397B GSM8K recipe.
-export ORCHESTRATOR_EXTRA_ENV="${ORCHESTRATOR_EXTRA_ENV:-WEIGHT_SYNC_H2D_TIMEOUT_S=3600 WEIGHT_SYNC_TRANSFER_TIMEOUT_S=3600}"
-export ROLLOUT_EXTRA_ENV="${ROLLOUT_EXTRA_ENV:-ONEHOT_MOE_PERMUTE_THRESHOLD=131072 RAY_memory_monitor_refresh_ms=0 RAIDEN_TRANSPORT_COALESCE_WINDOW_BYTES=67108864 RAIDEN_WEIGHT_SYNC_PIPELINE_GROUP_SIZE=16 RAIDEN_PARALLELISM=16 VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800}"
+export VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY="RAIDEN_,TPU_"
+export VLLM_RAY_EXTRA_ENV_VARS_TO_COPY="ONEHOT_MOE_PERMUTE_THRESHOLD,LIBTPU_INIT_ARGS,RAY_memory_monitor_refresh_ms,VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,ENABLE_MULTI_NUMA,TPU_RAIDEN_DATA_NICS"
+export ORCHESTRATOR_EXTRA_ENV="${ORCHESTRATOR_EXTRA_ENV:-WEIGHT_SYNC_H2D_TIMEOUT_S=3600 WEIGHT_SYNC_TRANSFER_TIMEOUT_S=7200 TPU_RAIDEN_DATA_NICS=eth0}"
+export ROLLOUT_EXTRA_ENV="${ROLLOUT_EXTRA_ENV:-ONEHOT_MOE_PERMUTE_THRESHOLD=131072 RAY_memory_monitor_refresh_ms=0 RAIDEN_TRANSPORT_COALESCE_WINDOW_BYTES=67108864 RAIDEN_WEIGHT_SYNC_PIPELINE_GROUP_SIZE=16 RAIDEN_PARALLELISM=16 VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800 TPU_RAIDEN_DATA_NICS=eth0}"
 # Trainer XLA flags. Note LIBTPU_INIT_ARGS above is the ROLLOUT's; the trainer
 # needs its own, with sparsecore collective offloading and a raised scoped
 # vmem limit. The 64k config was AOT-compiled with exactly these set.
 export TRAINER_LIBTPU_INIT_ARGS="${TRAINER_LIBTPU_INIT_ARGS:---DANGEROUS_tpu_runtime_abi_verification_disabled=true --xla_tpu_use_tc_device_shape_on_sc=true --xla_sc_disable_megacore_partitioning=true --xla_tpu_enable_offloading_gather_to_sparsecore=true --xla_tpu_enable_sparse_core_collective_offload_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true --xla_tpu_enable_sparse_core_reduce_scatter_v2=true --xla_tpu_use_single_sparse_core_for_all_gather_offload=true --xla_tpu_enable_concurrent_sparse_core_offloading=true --xla_tpu_aggressive_opt_barrier_removal=true --xla_tpu_scoped_vmem_limit_kib=65536 --xla_tpu_enable_sublane_major_scaling_bitcast_fusion=false}"
-export TRAINER_EXTRA_ENV="${TRAINER_EXTRA_ENV:-ONEHOT_MOE_PERMUTE_THRESHOLD=131072 RAIDEN_TRANSPORT_COALESCE_WINDOW_BYTES=67108864 RAIDEN_WEIGHT_SYNC_PIPELINE_GROUP_SIZE=16 LIBTPU_INIT_ARGS='${TRAINER_LIBTPU_INIT_ARGS}'}"
+export TRAINER_EXTRA_ENV="${TRAINER_EXTRA_ENV:-ONEHOT_MOE_PERMUTE_THRESHOLD=131072 RAIDEN_TRANSPORT_COALESCE_WINDOW_BYTES=67108864 RAIDEN_WEIGHT_SYNC_PIPELINE_GROUP_SIZE=16 TPU_RAIDEN_DATA_NICS=eth0 LIBTPU_INIT_ARGS='${TRAINER_LIBTPU_INIT_ARGS}'}"
 
 # ==============================================================================
 # Hyperparameters & DeepSWE Pipeline Configuration
@@ -162,10 +166,10 @@ export TRAINER_EXTRA_ENV="${TRAINER_EXTRA_ENV:-ONEHOT_MOE_PERMUTE_THRESHOLD=1310
 # GradientAccumulationSteps = (MINI_BATCH_SIZE * NUM_GENERATIONS) / TRAIN_MICRO_BATCH_SIZE = (64 * 16) / 64 = 16
 # Divisibility: MicroBatchSize (64) is a multiple of FSDP * EXPERT (32 * 2 = 64)
 export MAX_STEPS=${MAX_STEPS:-50}
-export BATCH_SIZE=64
-export MINI_BATCH_SIZE=${BATCH_SIZE}
+export BATCH_SIZE=${BATCH_SIZE:-16}
+export MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-${BATCH_SIZE}}
 export NUM_GENERATIONS=16
-export TRAIN_MICRO_BATCH_SIZE="${TRAIN_MICRO_BATCH_SIZE:-64}"
+export TRAIN_MICRO_BATCH_SIZE="${TRAIN_MICRO_BATCH_SIZE:-32}"
 export CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-0}
 export CHECKPOINT_MAX_TO_KEEP=10
 # When saving is enabled, default to Pathways persistence; the fallback OOMs the proxy at 397B.
@@ -205,19 +209,18 @@ export MAX_GRAD_NORM="0.125"
 export WARMUP_STEPS_FRACTION=0.0
 export LEARNING_RATE_FINAL_FRACTION=1.0
 
-export REMAT_POLICY="custom"
+export REMAT_POLICY="full"
 export TRAINER_MAXTEXT_ATTENTION="flash"
 
-# The key is out_proj, not output_proj. cp-as-ep drops the tensor axis (fine at
-# TP=1) and has no activation_vocab rule -- drop it first if HBM blows up.
-export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS:-custom_mesh_and_rule=cp-as-ep decoder_layer_input=device out_proj=device}"
+# custom_mesh_and_rule=cp-as-ep shards experts across both context and expert axes (8 experts/device).
+export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS:-custom_mesh_and_rule=cp-as-ep}"
 export COMPUTE_LOGPS_CHUNK_SIZE=512
 
 export EPISODE_TIMEOUT_SECS=1800
 export DEBUG=${DEBUG:-0}
 
 # DeepSWE Environment & Agent Sandbox
-export DATASET_PATH="gs://mlperf_dataset/benchmark-r2e-gym-easy"
+export DATASET_PATH="gs://mlperf_dataset/r2e-gym-easy"
 export USE_AGENT_SANDBOX=1
 export SCAFFOLD="openhands"
 export SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-${K8S_NAMESPACE}}"
@@ -225,7 +228,7 @@ export POOL_NAME_FORMAT="${POOL_NAME_FORMAT:-}"
 export TEMPLATE_NAME_PREFIX="${TEMPLATE_NAME_PREFIX:-}"
 export SANDBOX_NODE_SELECTOR_KEY="cloud.google.com/gke-nodepool"
 export SANDBOX_NODE_SELECTOR_VAL="sandbox-np"
-export SANDBOX_TOLERATIONS='[{"key":"workload","operator":"Equal","value":"sandbox","effect":"NoSchedule"}]'
+export SANDBOX_TOLERATIONS=""
 export IMAGE_REWRITE_PREFIX="${IMAGE_REWRITE_PREFIX:-us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/}"
 export MAX_WARMPOOL_REPLICAS=2
 export STEP_TIMEOUT_SECS=300
@@ -260,4 +263,5 @@ else
 fi
 
 COMMAND="${1:-start}"
-exec "${LAUNCHER}" --command "${COMMAND}" --image "${TUNIX_IMAGE}"
+shift || true
+exec "${LAUNCHER}" --command "${COMMAND}" --image "${TUNIX_IMAGE}" "$@"

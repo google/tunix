@@ -690,6 +690,14 @@ class MaxTextUtilsTest(absltest.TestCase):
       )
     self.assertNotIn("pathways_checkpointing_impl=colocated_python", argv)
 
+  def test_build_vllm_maxtext_additional_config_disables_static_cache(self):
+    cfg = maxtext_utils.build_vllm_maxtext_additional_config("qwen3.5-397b-a17b")
+    self.assertIn("maxtext_config", cfg)
+    mt_cfg = cfg["maxtext_config"]
+    self.assertEqual(mt_cfg["model_name"], "qwen3.5-397b-a17b")
+    self.assertEqual(mt_cfg["per_device_batch_size"], 0.0)
+    self.assertFalse(mt_cfg["enable_dp_attention"])
+
 
 if __name__ == "__main__":
   absltest.main()

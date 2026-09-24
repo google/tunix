@@ -122,9 +122,10 @@ export VLLM_DATA_PARALLEL_SIZE=1
 export VLLM_ENABLE_EXPERT_PARALLEL="true"
 export VLLM_ADDITIONAL_CONFIG='{"sharding":{"sharding_strategy":{"expert_parallelism":16,"tensor_parallelism":1,"enable_dp_attention":true}},"custom_mamba_cache_multiplier":16,"maxtext_config":{"scan_layers":false,"attention":"vllm_rpa","allow_split_physical_axes":true,"use_multimodal":false,"prefuse_moe_weights":true}}'
 
-export ENABLE_PREFIX_CACHING="${ENABLE_PREFIX_CACHING:-false}"
-export VLLM_PREFIX_CACHE_RETENTION_INTERVAL="${VLLM_PREFIX_CACHE_RETENTION_INTERVAL:-256}"
-export VLLM_MAMBA_CACHE_MODE="${VLLM_MAMBA_CACHE_MODE:-${MAMBA_CACHE_MODE:-none}}"
+export ENABLE_PREFIX_CACHING="${ENABLE_PREFIX_CACHING:-true}"
+export MAMBA_CACHE_MODE="${MAMBA_CACHE_MODE:-align}"
+export VLLM_MAMBA_CACHE_MODE="${VLLM_MAMBA_CACHE_MODE:-${MAMBA_CACHE_MODE}}"
+export VLLM_PREFIX_CACHE_RETENTION_INTERVAL="${VLLM_PREFIX_CACHE_RETENTION_INTERVAL:-0}"
 
 export ROLLOUT_FREE_KV_CACHE="false"
 export VLLM_KV_CACHE_DTYPE="bfloat16"
@@ -150,7 +151,7 @@ export LIBTPU_INIT_ARGS=' --xla_tpu_use_minor_sharding_for_major_trivial_input=t
 export VLLM_ENABLE_V1_MULTIPROCESSING=0
 
 # Raiden tuning carried over from the 397B GSM8K recipe.
-export ORCHESTRATOR_EXTRA_ENV="${ORCHESTRATOR_EXTRA_ENV:-WEIGHT_SYNC_TIMEOUT_H2D=1800 RAIDEN_PARALLELISM=16}"
+export ORCHESTRATOR_EXTRA_ENV="${ORCHESTRATOR_EXTRA_ENV:-WEIGHT_SYNC_H2D_TIMEOUT_S=1800}"
 export ROLLOUT_EXTRA_ENV="${ROLLOUT_EXTRA_ENV:-RAY_memory_monitor_refresh_ms=0 RAIDEN_TRANSPORT_COALESCE_WINDOW_BYTES=67108864 RAIDEN_WEIGHT_SYNC_PIPELINE_GROUP_SIZE=16 RAIDEN_PARALLELISM=16}"
 # Trainer XLA flags. Note LIBTPU_INIT_ARGS above is the ROLLOUT's; the trainer
 # needs its own, with sparsecore collective offloading and a raised scoped

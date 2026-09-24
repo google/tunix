@@ -113,7 +113,8 @@ RUN cd /app && find tunix/experimental/distributed -name "*.proto" -exec python 
 # Install Tunix in editable mode
 RUN uv pip install --no-deps -e .
 
-
+ENV ENABLE_MULTI_NUMA=1
+RUN python -c "import site; p = site.getsitepackages()[0] + '/sitecustomize.py'; open(p, 'w').write('try:\n    from tunix.experimental.weight_sync import raiden_preload\n    raiden_preload.import_raiden()\nexcept Exception:\n    pass\n')"
 
 # Set the default command to bash
 CMD ["bash"]

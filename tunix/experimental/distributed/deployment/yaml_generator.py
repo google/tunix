@@ -159,6 +159,21 @@ def main() -> None:
       default="sleep infinity",
       help="Command to run on startup",
   )
+  parser.add_argument(
+      "--enable_pathways_persistence",
+      default=os.environ.get("ENABLE_PATHWAYS_PERSISTENCE", "1"),
+      help="Enable Pathways persistence (1 or 0)",
+  )
+  parser.add_argument(
+      "--enable_multi_numa",
+      default=os.environ.get("ENABLE_MULTI_NUMA", "0"),
+      help="Enable Multi-NUMA multi-NIC transfer (1 or 0)",
+  )
+  parser.add_argument(
+      "--tpu_raiden_data_nics",
+      default=os.environ.get("TPU_RAIDEN_DATA_NICS", ""),
+      help="TPU Raiden data NICs override (e.g. eth0)",
+  )
 
   args = parser.parse_args()
 
@@ -168,6 +183,8 @@ def main() -> None:
   tpu_machine = None
   slice_topology = None
   slice_size = None
+  partition_topology = None
+  partition_slice_size = None
   pw_instance_type = None
   if args.tpu_slice and args.tpu_slice != ":":
     tpu_type, tpu_topology = args.tpu_slice.split(":")
@@ -175,32 +192,42 @@ def main() -> None:
     assert num_chips >= 4 and num_chips % 4 == 0
 
     if tpu_type in ("tpu7x", "tpu-v7x-slice"):
-      slice_topology = tpu_topology if num_chips <= 64 else "4x4x4"
-      slice_size = num_chips // 4 if num_chips <= 64 else 16
+      slice_topology = tpu_topology
+      slice_size = num_chips // 4
+      partition_topology = "4x4x4" if num_chips >= 64 else tpu_topology
+      partition_slice_size = 16 if num_chips >= 64 else num_chips // 4
       tpu_machine = "tpu7x-standard-4t"
       tpu_type = "tpu7x"
       pw_instance_type = "tpu7x"
     elif tpu_type in ("tpuv5", "tpuv5p", "tpu-v5p-slice"):
       slice_topology = tpu_topology
       slice_size = num_chips // 4
+      partition_topology = slice_topology
+      partition_slice_size = slice_size
       tpu_machine = "ct5p-hightpu-4t"
       tpu_type = "tpu-v5p-slice"
       pw_instance_type = "tpuv5"
     elif tpu_type in ("tpuv5e", "tpu-v5-lite-podslice"):
       slice_topology = tpu_topology
       slice_size = num_chips // 4
+      partition_topology = slice_topology
+      partition_slice_size = slice_size
       tpu_machine = "ct5lp-hightpu-4t"
       tpu_type = "tpu-v5-lite-podslice"
       pw_instance_type = "tpuv5e"
     elif tpu_type in ("tpuv6e", "tpu-v6e-slice"):
       slice_topology = tpu_topology
       slice_size = num_chips // 4
+      partition_topology = slice_topology
+      partition_slice_size = slice_size
       tpu_machine = "ct6e-standard-4t"
       tpu_type = "tpu-v6e-slice"
       pw_instance_type = "tpuv6e"
     elif tpu_type in ("tpuv6ea", "tpu-v6ea-slice"):
       slice_topology = tpu_topology
       slice_size = num_chips // 4
+      partition_topology = slice_topology
+      partition_slice_size = slice_size
       tpu_machine = "ct6ea-standard-4t"
       tpu_type = "tpu-v6ea-slice"
       pw_instance_type = "tpuv6ea"
@@ -300,8 +327,8 @@ def main() -> None:
           f'cloud.google.com/gke-tpu-slice-topology: "{slice_topology}"',
           'cloud.google.com/skip-tpu-webhook-check: "true"',
           "kueue.x-k8s.io/podset-required-topology: cloud.google.com/gce-topology-block",
-          f"kueue.x-k8s.io/podset-slice-required-topology: cloud.google.com/gke-tpu-partition-{slice_topology}-id",
-          f'kueue.x-k8s.io/podset-slice-size: "{slice_size}"',
+          f"kueue.x-k8s.io/podset-slice-required-topology: cloud.google.com/gke-tpu-partition-{partition_topology}-id",
+          f'kueue.x-k8s.io/podset-slice-size: "{partition_slice_size}"',
       ]
     else:
       anno_lines = [
@@ -315,14 +342,14 @@ def main() -> None:
     tpu_annotations = ""
 
   if use_dynamic_slicing:
-    if slice_size and slice_size > 1:
+    if num_chips and num_chips > 64:
       pw_node_affinity = (
           "            affinity:\n"
           "              nodeAffinity:\n"
           "                requiredDuringSchedulingIgnoredDuringExecution:\n"
           "                  nodeSelectorTerms:\n"
           "                  - matchExpressions:\n"
-          f"                    - key: cloud.google.com/gke-tpu-partition-{slice_topology}-state\n"
+          "                    - key: cloud.google.com/gke-tpu-partition-4x4x4-state\n"
           "                      operator: In\n"
           "                      values: [\"HEALTHY\", \"DEGRADED\"]\n"
       )
@@ -356,7 +383,7 @@ def main() -> None:
         "                      values:\n"
         f"                      - {jobset_name}\n"
     )
-    tpu_affinity = ""
+    tpu_affinity = pw_node_affinity
   # Colocated-python checkpointing sidecar. Emitted as a whole block for the same reason
   # as reservation_selector above: string.Template cannot omit a key when unset, and an
   # initContainer with an empty image would wedge every pathways-worker pod.
@@ -394,7 +421,10 @@ def main() -> None:
       else ""
   )
 
-  tpu_raiden_data_nics = os.environ.get("TPU_RAIDEN_DATA_NICS", "").strip()
+  tpu_raiden_data_nics = (
+      args.tpu_raiden_data_nics
+      or os.environ.get("TPU_RAIDEN_DATA_NICS", "")
+  ).strip()
   if not tpu_raiden_data_nics and tpu_type in ("tpu7x", "tpu-v7x-slice"):
     tpu_raiden_data_nics = "eth0"
 
@@ -442,12 +472,15 @@ def main() -> None:
         REPLICAS=1,
         COMPLETIONS=num_chips // 4 if num_chips else None,
         PARALLELISM=num_chips // 4 if num_chips else None,
-        PODSET_SLICE_TOPOLOGY=slice_topology,
-        PODSET_SLICE_SIZE=slice_size,
+        PODSET_SLICE_TOPOLOGY=partition_topology,
+        PODSET_SLICE_SIZE=partition_slice_size,
         USER_CONTAINER=args.worker_container_name,
         USER_CONTAINER_IMAGE=args.worker_container_image,
         USER_CONTAINER_PORT=args.worker_container_port,
         STARTUP_COMMAND=args.worker_startup_command,
+        ENABLE_PATHWAYS_PERSISTENCE=args.enable_pathways_persistence,
+        ENABLE_MULTI_NUMA=args.enable_multi_numa,
+        TPU_RAIDEN_DATA_NICS=tpu_raiden_data_nics,
         PATHWAYS_WORKER_EXTRA_ENV=pathways_worker_extra_env,
     )
     print(content)

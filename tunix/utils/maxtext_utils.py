@@ -99,6 +99,7 @@ def build_vllm_maxtext_additional_config(
       "allow_split_physical_axes": True,
       "log_config": False,
       "weight_dtype": "bfloat16",
+      "per_device_batch_size": 0.0,
   }
   if prefuse_moe_weights is not None:
     overrides["prefuse_moe_weights"] = prefuse_moe_weights
