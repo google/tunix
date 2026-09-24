@@ -89,7 +89,6 @@ export DEBUG=${DEBUG:-0}
 
 export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS:-\
 custom_mesh_and_rule=cp-as-ep \
-context_parallel_strategy=ring \
 allow_split_physical_axes=False \
 decoder_layer_input=device \
 gdn=device \
@@ -98,8 +97,7 @@ num_moe_token_chunks=4 \
 moe_chunk_barrier=false \
 use_ring_of_experts=true \
 use_ragged_sort=true \
-use_gdn_kernel=true \
-use_tokamax_splash=true}"
+use_gdn_kernel=true}"
 
 # DeepSWE Environment & Agent Sandbox
 export SANDBOX_NODE_SELECTOR_VAL="sandbox-np"
