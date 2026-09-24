@@ -230,6 +230,27 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
+      "--checkpoint_restore_step",
+      type=int,
+      default=None,
+      help=(
+          "Checkpoint step to restore from. If None, restores from the latest"
+          " checkpoint."
+      ),
+  )
+  parser.add_argument(
+      "--checkpoint_overwrite",
+      action=argparse.BooleanOptionalAction,
+      default=True,
+      help=(
+          "Whether to overwrite existing checkpoints at the same step when"
+          " saving. If False (--no-checkpoint_overwrite), resuming from an"
+          " earlier step and attempting to save a checkpoint at a step that"
+          " already exists on disk will raise StepAlreadyExistsError and abort"
+          " the training run."
+      ),
+  )
+  parser.add_argument(
       "--debug",
       action="store_true",
       help="Enable debug logging and print full sampler responses.",
@@ -446,6 +467,8 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       trajectory_log_dir=args.trajectory_log_dir,
       max_staleness=args.max_staleness,
       sync_weights=(args.weight_sync_mode != "none"),
+      checkpoint_restore_step=args.checkpoint_restore_step,
+      checkpoint_overwrite=args.checkpoint_overwrite,
       on_step_begin=lambda step: logging.info(
           ">>> Step %d starting | Policy Version: %d",
           step,

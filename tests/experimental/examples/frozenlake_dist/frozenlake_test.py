@@ -204,6 +204,13 @@ class FrozenLakeDistTest(absltest.TestCase):
     self.assertEqual(args.sampler_is, "token")
     self.assertEqual(args.sampler_is_threshold, 2.0)
     self.assertEqual(args.wandb_project, "tunix-frozenlake")
+    self.assertIsNone(args.checkpoint_restore_step)
+    self.assertTrue(args.checkpoint_overwrite)
+    custom_args = run_frozenlake_dist._parse_args(
+        ["--checkpoint_restore_step=3", "--no-checkpoint_overwrite"]
+    )
+    self.assertEqual(custom_args.checkpoint_restore_step, 3)
+    self.assertFalse(custom_args.checkpoint_overwrite)
 
     algo = run_frozenlake_dist._build_algo(args)
     self.assertEqual(algo.algo_config.sampler_is, "token")
@@ -243,6 +250,14 @@ class FrozenLakeDistTest(absltest.TestCase):
     )
     self.assertIn('--sampler_is="$SAMPLER_IS"', launcher)
     self.assertIn('--rollout_mesh_tp="$ROLLOUT_TP"', launcher)
+    self.assertIn(
+        "CHECKPOINT_RESTORE_STEP=${CHECKPOINT_RESTORE_STEP:-}", launcher
+    )
+    self.assertIn(
+        '--checkpoint_restore_step="$CHECKPOINT_RESTORE_STEP"', launcher
+    )
+    self.assertIn("CHECKPOINT_OVERWRITE=${CHECKPOINT_OVERWRITE:-1}", launcher)
+    self.assertIn("--checkpoint_overwrite", launcher)
 
   def test_gemma4_launcher_matches_reference_runtime_limits(self):
     launcher = (

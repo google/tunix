@@ -267,6 +267,8 @@ class StandardRLProgram(RLProgram):
       batch_size: int | None = None,
       max_staleness: int = 0,
       sync_weights: bool = True,
+      checkpoint_restore_step: int | None = None,
+      checkpoint_overwrite: bool = False,
       metrics_logging_options: MetricsLoggerOptions | None = None,
       trajectory_log_dir: str | None = None,
       trajectory_store: trajectory_store_lib.TrajectoryStore | None = None,
@@ -279,6 +281,8 @@ class StandardRLProgram(RLProgram):
     self.engine: rl_engine_interface.AbstractRLEngine | None = None
     if max_staleness < 0:
       raise ValueError("max_staleness must be non-negative.")
+    self.checkpoint_restore_step = checkpoint_restore_step
+    self.checkpoint_overwrite = bool(checkpoint_overwrite)
     self.dataset = dataset
     self.max_steps = max_steps
     self.algo = algo
@@ -427,6 +431,7 @@ class StandardRLProgram(RLProgram):
     restored_step = await self.engine.resume_from_checkpoint(
         role=datatypes.Role.ACTOR,
         resync_rollout_weights=self.sync_weights,
+        step=self.checkpoint_restore_step,
     )
     if restored_step <= 0:
       return
@@ -1114,6 +1119,7 @@ class StandardRLProgram(RLProgram):
                 "num_rollouts": num_rollouts,
                 "num_microbatches": num_microbatches,
             },
+            overwrite=self.checkpoint_overwrite,
         )
         checkpoint_saved = True
 

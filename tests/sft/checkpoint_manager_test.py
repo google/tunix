@@ -14,6 +14,7 @@
 
 """Peft Checkpoint manager unittest."""
 
+import dataclasses
 import os
 import tempfile
 from unittest import mock
@@ -36,6 +37,19 @@ os.environ['XLA_FLAGS'] = '--xla_force_host_platform_device_count=4'
 
 if hasattr(flax_config, 'flax_always_shard_variable'):
   flax_config.update('flax_always_shard_variable', False)
+
+
+class _RecordingSavePolicy:
+  """Save decision policy that records the steps it was evaluated against."""
+
+  def __init__(self, decision: bool = True):
+    self.decision = decision
+    self.calls: list[tuple[int, list[int]]] = []
+
+  def should_save(self, step, previous_steps, *, context):
+    del context
+    self.calls.append((step.step, [p.step for p in previous_steps]))
+    return self.decision
 
 
 def assert_close(path, x, y, atol=1e-5, rtol=1e-5):
@@ -166,6 +180,319 @@ class CheckpointManagerTest(parameterized.TestCase):
     model_param_path = epath.Path(cp_path) / '1' / 'model_params'
     # Verify the model params are saved.
     self.assertTrue(model_param_path.exists())
+
+  def test_save_overwrite_existing_step(self):
+    cp_path = f'{self.temp_path}/{self.id()}'
+    cp_manager = checkpoint_manager.CheckpointManager(cp_path)
+    model, _ = create_sharded_model(TestModel, nnx.Rngs(0), self.mesh)
+
+    self.assertTrue(cp_manager.save(1, model, force=True))
+    assert cp_manager._checkpointer is not None
+    cp_manager._checkpointer.wait()
+
+    # Without overwrite=True, saving at existing step 1 raises StepAlreadyExistsError.
+    with self.assertRaises(Exception):
+      cp_manager.save(1, model, force=True, overwrite=False)
+
+    # Mutate model state and overwrite step 1 with overwrite=True.
+    updated_state = jax.tree.map(lambda x: x + 2, nnx.state(model))
+    nnx.update(model, updated_state)
+    self.assertTrue(cp_manager.save(1, model, force=True, overwrite=True))
+    cp_manager._checkpointer.wait()
+
+    restored_model, _ = create_sharded_model(TestModel, nnx.Rngs(1), self.mesh)
+    self.assertEqual(cp_manager.maybe_restore(restored_model, step=1), (1, {}))
+    jax.tree.map_with_path(
+        assert_close,
+        updated_state,
+        nnx.state(restored_model),
+    )
+    cp_manager.close()
+
+  def test_save_overwrite_respects_save_interval_and_future_checkpoints(self):
+    cp_path = f'{self.temp_path}/{self.id()}'
+    options = checkpoint_options.checkpointing_options_from_dict({
+        'save_interval_steps': 2,
+        'max_to_keep': 5,
+        'enable_async_checkpointing': False,
+    })
+    cp_manager = checkpoint_manager.CheckpointManager(cp_path, options=options)
+    model, _ = create_sharded_model(TestModel, nnx.Rngs(0), self.mesh)
+
+    for s in (2, 3, 4, 5):
+      self.assertTrue(
+          cp_manager.save(
+              s, model, force=True, custom_metadata={'version': 'old', 's': s}
+          )
+      )
+    assert cp_manager._checkpointer is not None
+    self.assertEqual(
+        [c.step for c in cp_manager._checkpointer.checkpoints], [2, 3, 4, 5]
+    )
+
+    # Off-interval step 3 with force=False and overwrite=True should NOT save
+    # and should NOT delete existing step 3.
+    updated_state = jax.tree.map(lambda x: x + 5, nnx.state(model))
+    nnx.update(model, updated_state)
+    self.assertFalse(
+        cp_manager.save(
+            3,
+            model,
+            force=False,
+            overwrite=True,
+            custom_metadata={'version': 'new'},
+        )
+    )
+    self.assertEqual(
+        [c.step for c in cp_manager._checkpointer.checkpoints], [2, 3, 4, 5]
+    )
+    restored_model, _ = create_sharded_model(TestModel, nnx.Rngs(1), self.mesh)
+    self.assertEqual(
+        cp_manager.maybe_restore(restored_model, step=3),
+        (3, {'version': 'old', 's': 3}),
+    )
+
+    # On-interval step 4 with force=False and overwrite=True should overwrite
+    # step 4 even though future step 5 exists on disk.
+    self.assertTrue(
+        cp_manager.save(
+            4,
+            model,
+            force=False,
+            overwrite=True,
+            custom_metadata={'version': 'new', 's': 4},
+        )
+    )
+    self.assertEqual(
+        [c.step for c in cp_manager._checkpointer.checkpoints], [2, 3, 4, 5]
+    )
+    self.assertEqual(
+        cp_manager.maybe_restore(restored_model, step=4),
+        (4, {'version': 'new', 's': 4}),
+    )
+    jax.tree.map_with_path(
+        assert_close,
+        updated_state,
+        nnx.state(restored_model),
+    )
+    cp_manager.close()
+
+  def test_save_overwrite_policy_sees_only_preceding_steps(self):
+    cp_path = f'{self.temp_path}/{self.id()}'
+    policy = _RecordingSavePolicy()
+    options = dataclasses.replace(
+        checkpoint_options.checkpointing_options_from_dict(
+            {'max_to_keep': 5, 'enable_async_checkpointing': False}
+        ),
+        save_decision_policy=policy,
+    )
+    cp_manager = checkpoint_manager.CheckpointManager(cp_path, options=options)
+    model, _ = create_sharded_model(TestModel, nnx.Rngs(0), self.mesh)
+    for s in (2, 3, 4, 5):
+      self.assertTrue(cp_manager.save(s, model, force=True))
+    policy.calls.clear()
+
+    self.assertTrue(cp_manager.save(4, model, force=False, overwrite=True))
+    # The policy must only see checkpoints strictly before the overwritten step.
+    self.assertIn((4, [2, 3]), policy.calls)
+    cp_manager.close()
+
+  def test_save_overwrite_with_no_save_decision_policy(self):
+    cp_path = f'{self.temp_path}/{self.id()}'
+    policy = _RecordingSavePolicy(decision=False)
+    options = dataclasses.replace(
+        checkpoint_options.checkpointing_options_from_dict(
+            {'max_to_keep': 5, 'enable_async_checkpointing': False}
+        ),
+        save_decision_policy=policy,
+    )
+    cp_manager = checkpoint_manager.CheckpointManager(cp_path, options=options)
+    model, _ = create_sharded_model(TestModel, nnx.Rngs(0), self.mesh)
+    for s in (2, 3, 4):
+      self.assertTrue(cp_manager.save(s, model, force=True))
+    # `resolve_checkpointing_defaults` never yields a None policy, so clear it
+    # directly to exercise the no-policy branch of the overwrite path.
+    cp_manager._options = dataclasses.replace(
+        cp_manager._options, save_decision_policy=None
+    )
+    policy.calls.clear()
+
+    self.assertTrue(cp_manager.save(3, model, force=False, overwrite=True))
+    self.assertEmpty(policy.calls)
+    cp_manager.close()
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='no_checkpoints_overwrite',
+          existing_steps=(),
+          step=2,
+          overwrite=True,
+      ),
+      dict(
+          testcase_name='no_checkpoints_no_overwrite',
+          existing_steps=(),
+          step=2,
+          overwrite=False,
+      ),
+      dict(
+          testcase_name='new_step_before_latest_no_overwrite',
+          existing_steps=(2, 6),
+          step=4,
+          overwrite=False,
+      ),
+      dict(
+          testcase_name='existing_step_no_overwrite',
+          existing_steps=(2, 4),
+          step=2,
+          overwrite=False,
+      ),
+      dict(
+          testcase_name='new_step_after_latest_no_overwrite',
+          existing_steps=(2, 4),
+          step=6,
+          overwrite=False,
+      ),
+      dict(
+          testcase_name='new_step_after_latest_overwrite',
+          existing_steps=(2, 4),
+          step=6,
+          overwrite=True,
+      ),
+  )
+  def test_save_checkpointables_defers_to_orbax(
+      self, existing_steps, step, overwrite
+  ):
+    cp_path = f'{self.temp_path}/{self.id()}'
+    options = checkpoint_options.checkpointing_options_from_dict({
+        'save_interval_steps': 2,
+        'max_to_keep': 5,
+        'enable_async_checkpointing': False,
+    })
+    cp_manager = checkpoint_manager.CheckpointManager(cp_path, options=options)
+    model, _ = create_sharded_model(TestModel, nnx.Rngs(0), self.mesh)
+    for s in existing_steps:
+      self.assertTrue(cp_manager.save(s, model, force=True))
+    assert cp_manager._checkpointer is not None
+    self.assertEqual(
+        [c.step for c in cp_manager._checkpointer.checkpoints],
+        list(existing_steps),
+    )
+
+    sentinel = object()
+    checkpointables = {'model_params': nnx.state(model)}
+    with (
+        mock.patch.object(
+            cp_manager, '_should_save_for_overwrite'
+        ) as mock_should_save_for_overwrite,
+        mock.patch.object(
+            cp_manager._checkpointer,
+            'save_checkpointables',
+            return_value=sentinel,
+        ) as mock_save,
+    ):
+      result = cp_manager._save_checkpointables(
+          step, checkpointables, False, None, overwrite=overwrite
+      )
+    mock_should_save_for_overwrite.assert_not_called()
+    mock_save.assert_called_once_with(
+        step,
+        checkpointables,
+        force=False,
+        overwrite=overwrite,
+        custom_metadata=None,
+    )
+    self.assertIs(result, sentinel)
+    cp_manager.close()
+
+  def test_save_no_overwrite_existing_off_interval_step_raises(self):
+    cp_path = f'{self.temp_path}/{self.id()}'
+    options = checkpoint_options.checkpointing_options_from_dict({
+        'save_interval_steps': 2,
+        'max_to_keep': 5,
+        'enable_async_checkpointing': False,
+    })
+    cp_manager = checkpoint_manager.CheckpointManager(cp_path, options=options)
+    model, _ = create_sharded_model(TestModel, nnx.Rngs(0), self.mesh)
+    for s in (2, 3, 4):
+      self.assertTrue(cp_manager.save(s, model, force=True))
+
+    # Off-interval existing step 3 with overwrite=False must still raise
+    # StepAlreadyExistsError rather than being silently skipped by the policy.
+    with self.assertRaises(
+        checkpoint_manager.ocp.training.errors.StepAlreadyExistsError
+    ):
+      cp_manager.save(3, model, force=False, overwrite=False)
+    cp_manager.close()
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='existing_latest_step',
+          step=4,
+          expected=True,
+      ),
+      dict(
+          testcase_name='existing_earlier_step',
+          step=2,
+          expected=True,
+      ),
+      dict(
+          testcase_name='off_interval_step_before_latest',
+          step=3,
+          expected=False,
+      ),
+  )
+  def test_should_save_for_overwrite_uses_policy_for_past_steps(
+      self, step, expected
+  ):
+    cp_path = f'{self.temp_path}/{self.id()}'
+    options = checkpoint_options.checkpointing_options_from_dict({
+        'save_interval_steps': 2,
+        'max_to_keep': 5,
+        'enable_async_checkpointing': False,
+    })
+    cp_manager = checkpoint_manager.CheckpointManager(cp_path, options=options)
+    model, _ = create_sharded_model(TestModel, nnx.Rngs(0), self.mesh)
+    for s in (2, 4):
+      self.assertTrue(cp_manager.save(s, model, force=True))
+    assert cp_manager._checkpointer is not None
+
+    with mock.patch.object(
+        cp_manager._checkpointer, 'should_save'
+    ) as mock_should_save:
+      result = cp_manager._should_save_for_overwrite(step)
+    mock_should_save.assert_not_called()
+    self.assertEqual(result, expected)
+    cp_manager.close()
+
+  def test_should_save_for_overwrite_passes_only_earlier_steps_to_policy(self):
+    cp_path = f'{self.temp_path}/{self.id()}'
+    policy = (
+        checkpoint_manager.ocp.training.save_decision_policies.FixedIntervalPolicy(
+            2
+        )
+    )
+    options = checkpoint_options.TunixCheckpointingOptions(
+        save_decision_policy=policy,
+        enable_async_checkpointing=False,
+    )
+    cp_manager = checkpoint_manager.CheckpointManager(cp_path, options=options)
+    model, _ = create_sharded_model(TestModel, nnx.Rngs(0), self.mesh)
+    for s in (2, 4, 6):
+      self.assertTrue(cp_manager.save(s, model, force=True))
+    assert cp_manager._checkpointer is not None
+
+    with mock.patch.object(
+        type(policy), 'should_save', autospec=True, return_value=True
+    ) as mock_policy_should_save:
+      result = cp_manager._should_save_for_overwrite(4)
+    self.assertTrue(result)
+    mock_policy_should_save.assert_called_once()
+    _, step_info, previous_steps = mock_policy_should_save.call_args.args
+    self.assertEqual(step_info.step, 4)
+    # Only checkpoints strictly before the overwritten step are passed; the
+    # step itself (4) and future steps (6) must be excluded.
+    self.assertEqual([p.step for p in previous_steps], [2])
+    cp_manager.close()
 
   def test_restore(self):
     cp_path = f'{self.temp_path}/{self.id()}'

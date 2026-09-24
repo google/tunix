@@ -667,24 +667,28 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
   async def _restore_checkpoint(
       self,
       role: datatypes.Role = datatypes.Role.ACTOR,
+      step: int | None = None,
       **kwargs: Any,
   ) -> Any:
     role_name = role.name
     worker = self._trainer_workers.get(role)
     if worker is None:
       raise ValueError(f"No trainer worker registered for role {role_name}")
-    return await self._invoke_worker(worker, "restore_checkpoint", **kwargs)
+    return await self._invoke_worker(
+        worker, "restore_checkpoint", step=step, **kwargs
+    )
 
   async def resume_from_checkpoint(
       self,
       role: datatypes.Role = datatypes.Role.ACTOR,
       resync_rollout_weights: bool = True,
+      step: int | None = None,
   ) -> int:
     """Restores a checkpoint and realigns the mesh to the restored state.
 
     See `rl_engine_interface.AbstractRLEngine.resume_from_checkpoint`.
     """
-    metadata = await self._restore_checkpoint(role=role)
+    metadata = await self._restore_checkpoint(role=role, step=step)
     if not isinstance(metadata, Mapping):
       if metadata is not None:
         logging.warning(
