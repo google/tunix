@@ -34,6 +34,7 @@ class Status(enum.StrEnum):
     del start, count, last_values
     return name
 
+  UNKNOWN = enum.auto()
   PENDING = enum.auto()
   RUNNING = enum.auto()
   COMPLETED = enum.auto()
@@ -58,8 +59,8 @@ RUNS_TABLE = sa.Table(
         "status",
         sa.String(32),
         nullable=False,
-        default=Status.PENDING,
-        server_default=sa.text(f"'{Status.PENDING}'"),
+        default=Status.UNKNOWN,
+        server_default=sa.text(f"'{Status.UNKNOWN}'"),
     ),
     sa.Column(
         "created_at",
@@ -89,8 +90,8 @@ TRAJECTORIES_TABLE = sa.Table(
         "status",
         sa.String(32),
         nullable=False,
-        default=Status.PENDING,
-        server_default=sa.text(f"'{Status.PENDING}'"),
+        default=Status.UNKNOWN,
+        server_default=sa.text(f"'{Status.UNKNOWN}'"),
     ),
     sa.Column(
         "created_at",
