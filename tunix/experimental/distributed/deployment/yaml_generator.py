@@ -15,6 +15,7 @@
 """Generates Kubernetes deployment YAML manifests from templates."""
 
 import argparse
+import json
 import math
 import os
 import string
@@ -398,12 +399,26 @@ def main() -> None:
   if not tpu_raiden_data_nics and tpu_type in ("tpu7x", "tpu-v7x-slice"):
     tpu_raiden_data_nics = "eth0"
 
+  worker_env = {}
   if tpu_raiden_data_nics:
-    pathways_worker_extra_env = (
-        f"\n              - name: TPU_RAIDEN_DATA_NICS\n                value: \"{tpu_raiden_data_nics}\""
-    )
-  else:
-    pathways_worker_extra_env = ""
+    worker_env["TPU_RAIDEN_DATA_NICS"] = tpu_raiden_data_nics
+
+  # Under Pathways the TPU program runs in the worker, not the user container, so
+  # LIBTPU_INIT_ARGS has to be set there. The server rejects the xpk-level
+  # --extra_env_vars/--extra_flags with "Unknown command line flag"; xpk turns
+  # those into container env, which is what this reproduces. One KEY=VALUE per
+  # line, because a value may contain spaces.
+  for line in os.environ.get("PATHWAYS_WORKER_EXTRA_ENV", "").strip().splitlines():
+    line = line.strip()
+    if not line or "=" not in line:
+      continue
+    key, value = line.split("=", 1)
+    worker_env[key.strip()] = value
+
+  pathways_worker_extra_env = "".join(
+      f"\n              - name: {key}\n                value: {json.dumps(value)}"
+      for key, value in worker_env.items()
+  )
 
   with open(args.template_file, "r") as f:
     template = string.Template(f.read())
