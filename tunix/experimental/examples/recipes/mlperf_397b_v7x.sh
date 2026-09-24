@@ -34,13 +34,25 @@ export PROJECT="cloud-tpu-shared-capacity"
 export REGION="us-central1"
 export CLUSTER="bodaborg-tpu7x-gsc"
 kubectl config use-context "gke_${PROJECT}_${REGION}_${CLUSTER}" || true
-kubectl config set-context --current --namespace=default || true
+kubectl config set-context --current --namespace=priority-dev || true
 
-export K8S_NAMESPACE="default"
-export KUEUE_QUEUE="${KUEUE_QUEUE:-priority-dev}"
+# priority-dev owns the nominal quota and may use high/medium/low; the default
+# namespace holds nominalQuota 0 and Kyverno caps it at "low".
+export K8S_NAMESPACE="priority-dev"
+# LocalQueue name (label kueue.x-k8s.io/queue-name), NOT the ClusterQueue.
+# priority-dev ns has LocalQueues: default, multislice-queue.
+export KUEUE_QUEUE="${KUEUE_QUEUE:-multislice-queue}"
 export PRIORITY_CLASS="${PRIORITY_CLASS:-medium}"
 # yaml_generator reads KUEUE_PRIORITY_CLASS, not PRIORITY_CLASS.
 export KUEUE_PRIORITY_CLASS="${KUEUE_PRIORITY_CLASS:-${PRIORITY_CLASS}}"
+# Do NOT set TAS annotations here. The cluster runs a Kyverno mutating policy
+# (tpu-tas-topology) that injects podset-required-topology /
+# podset-slice-required-topology / podset-slice-size itself, hardcoded to
+# gke-tpu-partition-4x4x4-id, based on each podset's TPU count. Setting them
+# by hand fights the policy and produces partition levels the Topology does
+# not expose. We emit only gke-tpu-slice-topology, which the slicing controller
+# needs from us; the policy supplies the rest.
+export PODSET_TAS_TOPOLOGY="${PODSET_TAS_TOPOLOGY:-1}"
 export SERVICE_ACCOUNT="xpk-sa"
 export CPU_MACHINE="n2d-standard-64"
 
@@ -64,7 +76,10 @@ export MODEL_NAME="Qwen3.5-397B-A17B"
 export MODEL_ID="Qwen/Qwen3.5-397B-A17B"
 export TOKENIZER_PATH="Qwen/Qwen3.5-397B-A17B"
 export MAXTEXT_MODEL_NAME="qwen3.5-397b-a17b"
-export MAXTEXT_CKPT="${MAXTEXT_CKPT:-gs://sanbao-europe/qwen35_397b/scanned_reshard_fsdp32_tp2/0/items}"
+# us-central1 copy of gs://sanbao-europe/qwen35_397b/scanned_reshard_fsdp32_tp2 (same
+# name/size/crc32c for all 4554 objects under 0/items). Reading the europe-west4
+# original from this cluster took ~29 min per restore.
+export MAXTEXT_CKPT="${MAXTEXT_CKPT:-gs://bodaborg-tpu7x-nap-us-central1/jfacevedo-397b/base_ckpt/scanned_reshard_fsdp32_tp2/0/items}"
 export TRAINABLE_PARAMETERS_MASK='^(?!.*routed_experts/gate/kernel).*'
 export EOS_TOKENS="${EOS_TOKENS:-151645,151643}"
 
@@ -74,11 +89,12 @@ export SAMPLER="vllm"
 export WEIGHT_SYNC_MODE="raiden"
 
 # Mesh product is DEVICES, and v7x has 2 devices/chip at ~95 GB each (same per-device
-# HBM as a v5p chip). 4x8x8 = 256 chips = 512 devices = compile_topology tpu7x-512.
+# HBM as a v5p chip). 4x4x8 = 128 chips = 256 devices = compile_topology tpu7x-256.
 # EXPERT=2 is required: at expert=1 the GMM_v2 kernel overflows smem by ~8.6K.
+# fsdp 32 x tp 1 x expert 2 x context 4 = 256 devices.
 export TRAINER_JOBSET_YAML="jobset.pathways.qwen3.5-397b.yaml"
-export TRAINER_TPU_SLICE="tpu7x:4x8x8"           # 256 chips = 512 devices
-export TRAINER_MESH_FSDP=64
+export TRAINER_TPU_SLICE="tpu7x:4x4x8"           # 128 chips = 256 devices
+export TRAINER_MESH_FSDP=32
 export TRAINER_MESH_TP=1
 export TRAINER_MESH_EXPERT=2
 export TRAINER_MESH_CONTEXT=4
@@ -96,10 +112,10 @@ export ROLLOUT_MESH_FSDP=1
 export ROLLOUT_MESH_TP=1
 export ROLLOUT_MESH_EXPERT=16
 
-# 8 replicas x 8 chips = 64 rollout chips. ROLLOUT_WORKERS wins where both are
+# 32 replicas x 8 chips = 256 rollout chips. ROLLOUT_WORKERS wins where both are
 # read (k8s_launcher.sh:320), so keep them equal.
-export ROLLOUT_WORKERS="${ROLLOUT_WORKERS:-8}"
-export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-8}"
+export ROLLOUT_WORKERS="${ROLLOUT_WORKERS:-32}"
+export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-32}"
 
 # ==============================================================================
 # vLLM Rollout Configuration
@@ -140,31 +156,53 @@ export DP_SCHED_BATCH_PREFILL=false
 export LIBTPU_INIT_ARGS=' --xla_tpu_use_minor_sharding_for_major_trivial_input=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=false --xla_tpu_ars_combiner_threshold_in_bytes=0 --xla_tpu_enable_async_collective_merger=false --xla_tpu_check_legacy_constraints_in_reduce_scatter_legalizer=false'
 export VLLM_ENABLE_V1_MULTIPROCESSING=0
 
-# Raiden tuning carried over from the 397B GSM8K recipe.
-export ORCHESTRATOR_EXTRA_ENV="${ORCHESTRATOR_EXTRA_ENV:-WEIGHT_SYNC_TIMEOUT_H2D=1800 RAIDEN_PARALLELISM=16}"
-export ROLLOUT_EXTRA_ENV="${ROLLOUT_EXTRA_ENV:-RAY_memory_monitor_refresh_ms=0 RAIDEN_TRANSPORT_COALESCE_WINDOW_BYTES=67108864 RAIDEN_WEIGHT_SYNC_PIPELINE_GROUP_SIZE=16 RAIDEN_PARALLELISM=16}"
+# TPU_RAIDEN_DATA_NICS=eth0 pins Raiden to the primary NIC on every component
+# (hosts expose eth0/eth1/eth2 on 10.11/10.13/10.12) to rule out multi-rail.
+# RAIDEN_BROADCAST_K=3: tree fan-out for the weight broadcast (RaidenController,
+# default 64 = trainer sends to every replica directly). The planner runs in the
+# orchestrator, so it is set there as well as on the trainer and samplers.
+# Raiden tuning carried over from the 397B GSM8K recipe. The coordinator reads
+# WEIGHT_SYNC_<PHASE>_TIMEOUT_S (weight_sync_coordinator.PhaseTimeouts); the old
+# WEIGHT_SYNC_TIMEOUT_H2D name was silently ignored. The transfer phase includes
+# RaidenController._compute_transfer_schedule, which on round 0 plans 948 vars x
+# 256 source shards x 64 replicas in pure Python before any byte moves and ran
+# past 1800s in mk-7x-0923k/n. Later rounds hit the plan cache. Planning alone took
+# ~5400s in mk-7x-0923q and 5831s in jfacevedo-397b, followed by ~13 min of schedule
+# dispatch, so 7200s leaves almost nothing for the bytes.
+export ORCHESTRATOR_EXTRA_ENV="${ORCHESTRATOR_EXTRA_ENV:-WEIGHT_SYNC_TRANSFER_TIMEOUT_S=10800 WEIGHT_SYNC_H2D_TIMEOUT_S=1800 RAIDEN_PARALLELISM=16 TPU_RAIDEN_DATA_NICS=eth0 RAIDEN_BROADCAST_K=3}"
+export ROLLOUT_EXTRA_ENV="${ROLLOUT_EXTRA_ENV:-RAY_memory_monitor_refresh_ms=0 RAIDEN_TRANSPORT_COALESCE_WINDOW_BYTES=67108864 RAIDEN_WEIGHT_SYNC_PIPELINE_GROUP_SIZE=16 RAIDEN_PARALLELISM=16 ENABLE_MULTI_NUMA=1 TPU_RAIDEN_DATA_NICS=eth0 RAIDEN_BROADCAST_K=3}"
 # Trainer XLA flags. Note LIBTPU_INIT_ARGS above is the ROLLOUT's; the trainer
 # needs its own, with sparsecore collective offloading and a raised scoped
 # vmem limit. The 64k config was AOT-compiled with exactly these set.
-export TRAINER_LIBTPU_INIT_ARGS="${TRAINER_LIBTPU_INIT_ARGS:---DANGEROUS_tpu_runtime_abi_verification_disabled=true --xla_tpu_use_tc_device_shape_on_sc=true --xla_sc_disable_megacore_partitioning=true --xla_tpu_enable_offloading_gather_to_sparsecore=true --xla_tpu_enable_sparse_core_collective_offload_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true --xla_tpu_enable_sparse_core_reduce_scatter_v2=true --xla_tpu_use_single_sparse_core_for_all_gather_offload=true --xla_tpu_enable_concurrent_sparse_core_offloading=true --xla_tpu_aggressive_opt_barrier_removal=true --xla_tpu_scoped_vmem_limit_kib=65536 --xla_tpu_enable_sublane_major_scaling_bitcast_fusion=false}"
-export TRAINER_EXTRA_ENV="${TRAINER_EXTRA_ENV:-RAIDEN_TRANSPORT_COALESCE_WINDOW_BYTES=67108864 RAIDEN_WEIGHT_SYNC_PIPELINE_GROUP_SIZE=16 LIBTPU_INIT_ARGS='${TRAINER_LIBTPU_INIT_ARGS}'}"
+export TRAINER_LIBTPU_INIT_ARGS="${TRAINER_LIBTPU_INIT_ARGS:---DANGEROUS_tpu_runtime_abi_verification_disabled=true --xla_tpu_use_tc_device_shape_on_sc=true --xla_sc_disable_megacore_partitioning=true --xla_tpu_enable_offloading_gather_to_sparsecore=true --xla_tpu_enable_sparse_core_collective_offload_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true --xla_tpu_enable_sparse_core_reduce_scatter_v2=true --xla_tpu_use_single_sparse_core_for_all_gather_offload=false --xla_tpu_enable_concurrent_sparse_core_offloading=true --xla_tpu_aggressive_opt_barrier_removal=true --xla_tpu_scoped_vmem_limit_kib=65536 --xla_tpu_enable_sublane_major_scaling_bitcast_fusion=false}"
+export TRAINER_EXTRA_ENV="${TRAINER_EXTRA_ENV:-RAIDEN_TRANSPORT_COALESCE_WINDOW_BYTES=67108864 RAIDEN_WEIGHT_SYNC_PIPELINE_GROUP_SIZE=16 ENABLE_MULTI_NUMA=1 TPU_RAIDEN_DATA_NICS=eth0 RAIDEN_BROADCAST_K=3 LIBTPU_INIT_ARGS='${TRAINER_LIBTPU_INIT_ARGS}'}"
+
+# Under Pathways the TPU program runs in the pathways-worker, not the user
+# container, so LIBTPU_INIT_ARGS has to be handed to the server as well. One arg
+# per line: the LIBTPU value itself contains spaces.
+# Under Pathways the TPU program runs in the pathways-worker, not the user
+# container, so XLA flags have to be set there too. The server rejects
+# --extra_env_vars/--extra_flags ("Unknown command line flag"): those are xpk
+# flags that xpk turns into container env, which is what this does directly.
+# One KEY=VALUE per line.
+export PATHWAYS_WORKER_EXTRA_ENV="${PATHWAYS_WORKER_EXTRA_ENV:-LIBTPU_INIT_ARGS=${TRAINER_LIBTPU_INIT_ARGS} --megascale_port=-1 --xprof_compress_jftrace=true
+SKIP_MEGASCALE_PJRT_CLIENT=true
+TPU_RAIDEN_DATA_NICS=eth0
+RAIDEN_BROADCAST_K=3}"
 
 # ==============================================================================
 # Hyperparameters & DeepSWE Pipeline Configuration
 # ==============================================================================
 export MAX_STEPS=${MAX_STEPS:-50}
-# grad_accum is derived: (MINI_BATCH * NUM_GENERATIONS) / MICRO_BATCH = 1024/128 = 8
+# grad_accum is derived: (MINI_BATCH * NUM_GENERATIONS) / MICRO_BATCH = 1024/64 = 16
+# 64 is the floor: the batch is sharded over fsdp(32) x expert(2) rows.
 export BATCH_SIZE=64
 export MINI_BATCH_SIZE=${BATCH_SIZE}
 export NUM_GENERATIONS=16
 # Must be a multiple of FSDP*EXPERT (=128); per_device_batch = 128/512 devices = 0.25
-export TRAIN_MICRO_BATCH_SIZE="${TRAIN_MICRO_BATCH_SIZE:-128}"
-export CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-0}
+export TRAIN_MICRO_BATCH_SIZE="${TRAIN_MICRO_BATCH_SIZE:-64}"
+export CHECKPOINT_SAVE_INTERVAL_STEPS=0
 export CHECKPOINT_MAX_TO_KEEP=10
-# When saving is enabled, default to Pathways persistence; the fallback OOMs the proxy at 397B.
-if [[ "${CHECKPOINT_SAVE_INTERVAL_STEPS}" -gt 0 ]]; then
-  export ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE:-1}
-fi
 export MAX_STALENESS=0
 
 # Step 0 is a cold single-threaded Pallas lowering of the MoE and GDN kernels
@@ -203,7 +241,32 @@ export TRAINER_MAXTEXT_ATTENTION="flash"
 
 # The key is out_proj, not output_proj. cp-as-ep drops the tensor axis (fine at
 # TP=1) and has no activation_vocab rule -- drop it first if HBM blows up.
-export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS:-custom_mesh_and_rule=cp-as-ep decoder_layer_input=device out_proj=device}"
+# context_parallel_strategy=ring is deliberately absent: Tokamax ring attention
+# wants Q sharded on the context axis and cp-as-ep folds context into expert, so
+# model init dies with "requires Q sequence sharding to be exactly ('context',),
+# got ()". Confirmed twice on v7x, including with gdn_cp_mode=head set.
+# Trainer MaxText flags. Every one of these is a real flag at maxtext 0baf0ac83
+# (PR #5344); use_gdn_kernel / gdn_cp_mode / gdn_states only exist from that
+# commit on, so an older image pin rejects them.
+export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS:-custom_mesh_and_rule=cp-as-ep \
+use_gdn_kernel=true gdn_cp_mode=head \
+decoder_layer_input=device context=remat gdn=remat gdn_conv=remat gdn_states=remat \
+megablox=true sparse_matmul=true use_tokamax_gmm=true use_gmm_v2=true \
+use_gmm_v2_heuristic_tiling=true merge_gating_gmm=false \
+use_ring_of_experts=true num_moe_token_chunks=4 \
+use_ragged_sort=true use_custom_sort_vjp=false ragged_buffer_factor=2.0 \
+use_tokamax_splash=true use_splash_scheduler=true \
+sa_block_q=512 sa_block_kv=1024 sa_block_kv_compute=512 \
+sa_block_q_dkv=1024 sa_block_kv_dkv=2048 sa_block_kv_dkv_compute=1024 \
+sa_fuse_reciprocal=false sa_use_base2_exp=true dq_reduction_steps=3 \
+context_parallel_load_balance=False allow_split_physical_axes=False \
+num_vocab_tiling=16 mu_dtype=bfloat16 \
+checkpoint_storage_concurrent_gb=48}"
+# checkpoint_storage_concurrent_gb caps restore bytes in flight (default 96).
+# At 96, reading the us-central1 checkpoint piled host buffers into main
+# (~130 GiB) and pathways-proxy (~90 GiB) until the kubelet evicted the trainer
+# head for node memory pressure (mk-7x-0923p). At 16 the head stayed near 15 GiB
+# but raw reads were capped at 436 MiB/s and the load took 2127 s (mk-7x-0923q).
 export COMPUTE_LOGPS_CHUNK_SIZE=512
 
 export EPISODE_TIMEOUT_SECS=1800
@@ -212,9 +275,16 @@ export DEBUG=${DEBUG:-0}
 # DeepSWE Environment & Agent Sandbox
 export DATASET_PATH="gs://mlperf_dataset/benchmark-r2e-gym-easy"
 export USE_AGENT_SANDBOX=1
-export SANDBOX_NAMESPACE="trellis"
+# priority-dev, not the v5p "trellis": that namespace does not exist on this
+# cluster, so every agent-sandbox call 403s and the orchestrator exits with
+# "sandboxclaims.extensions.agents.x-k8s.io is forbidden" about 30 minutes in,
+# taking the trainer and rollout registrations with it.
+export SANDBOX_NAMESPACE="priority-dev"
 export SANDBOX_NODE_SELECTOR_KEY="cloud.google.com/gke-nodepool"
-export SANDBOX_NODE_SELECTOR_VAL="sandbox-cpu-pool"
+# sandbox-np is tainted workload=sandbox:NoSchedule. examples/deepswe/template.py
+# adds the matching toleration for every scaffold when the selector names
+# sandbox-np (r2egym included), so no SANDBOX_TOLERATIONS is needed here.
+export SANDBOX_NODE_SELECTOR_VAL="sandbox-np"
 export IMAGE_REWRITE_PREFIX="${IMAGE_REWRITE_PREFIX:-europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/}"
 export MAX_WARMPOOL_REPLICAS=2
 export STEP_TIMEOUT_SECS=300
