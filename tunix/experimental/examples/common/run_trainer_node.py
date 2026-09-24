@@ -737,6 +737,16 @@ def _create_maxtext_trainer_factory(args) -> tuple[Any, Mesh]:
 
 
 def _gradient_accumulation_steps(args: argparse.Namespace) -> int:
+  if (getattr(args, "max_seq_token_per_tpu", None) or 0) > 0:
+    # With sequence packing, the number of micro-batches per optimizer step is
+    # dynamic (determined by First-Fit Decreasing packing into [pack_size,
+    # max_seq_token_per_tpu] bins), and the orchestrator explicitly drives
+    # accumulate_gradients=True, apply_optimizer=mb.is_final_batch. Both
+    # MaxTextTrainingEngine and PeftTrainer v2 normalize accumulated gradients
+    # and metrics by the summed token denominator rather than this config value.
+    # Returning 1 avoids inflating MaxText's static per-step TFLOPs config and
+    # avoids distorting PeftTrainer v2's _iter_steps on checkpoint restore.
+    return 1
   if args.mini_batch_size <= 0:
     raise ValueError("--mini_batch_size must be positive.")
   if args.num_generations <= 0:
@@ -792,16 +802,28 @@ def _create_tunix_trainer_factory(args) -> tuple[Any, Mesh]:
       # metadata.
       resume_from_checkpoint_on_init=False,
   )
-  logging.info(
-      "PeftTrainer v2 gradient_accumulation_steps=%d "
-      "(mini_batch_size=%d prompt groups, num_generations=%d, "
-      "update_trajectories=%d, train_micro_batch_size=%d).",
-      grad_accumulation_steps,
-      args.mini_batch_size,
-      args.num_generations,
-      update_trajectories,
-      args.train_micro_batch_size,
-  )
+  max_seq_token_per_tpu = getattr(args, "max_seq_token_per_tpu", None) or 0
+  if max_seq_token_per_tpu > 0:
+    logging.info(
+        "PeftTrainer v2 gradient accumulation is dynamic via sequence packing "
+        "(max_seq_token_per_tpu=%d, mini_batch_size=%d prompt groups, "
+        "num_generations=%d, update_trajectories=%d).",
+        max_seq_token_per_tpu,
+        args.mini_batch_size,
+        args.num_generations,
+        update_trajectories,
+    )
+  else:
+    logging.info(
+        "PeftTrainer v2 gradient_accumulation_steps=%d "
+        "(mini_batch_size=%d prompt groups, num_generations=%d, "
+        "update_trajectories=%d, train_micro_batch_size=%d).",
+        grad_accumulation_steps,
+        args.mini_batch_size,
+        args.num_generations,
+        update_trajectories,
+        args.train_micro_batch_size,
+    )
 
   def _factory():
     return peft_trainer_v2.PeftTrainer(

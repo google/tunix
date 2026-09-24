@@ -373,15 +373,16 @@ class RLTrainingConfig(TrainingConfig):
             "For RL training, `mini_batch_size` must be set when"
             " `train_micro_batch_size` is set."
         )
-      _check_divisibility(
-          self.train_micro_batch_size,
-          self.mini_batch_size,
-          f"{self.train_micro_batch_size=}",
-          f"{self.mini_batch_size=}",
-      )
-      self.gradient_accumulation_steps = (
-          self.mini_batch_size // self.train_micro_batch_size
-      )
+      if self.max_seq_token_per_tpu is None:
+        _check_divisibility(
+            self.train_micro_batch_size,
+            self.mini_batch_size,
+            f"{self.train_micro_batch_size=}",
+            f"{self.mini_batch_size=}",
+        )
+        self.gradient_accumulation_steps = (
+            self.mini_batch_size // self.train_micro_batch_size
+        )
 
 
 @dataclasses.dataclass(kw_only=True, frozen=True)

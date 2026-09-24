@@ -439,6 +439,25 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
         mock_build_cfg.call_args.kwargs.get("max_seq_token_per_tpu"), 4096
     )
 
+  def test_gradient_accumulation_steps_ignores_train_micro_batch_size_when_packed(
+      self,
+  ):
+    args = run_trainer_node._parse_args([
+        "--mini_batch_size",
+        "10",
+        "--num_generations",
+        "4",
+        "--train_micro_batch_size",
+        "3",  # 40 is not divisible by 3, which would raise without packing
+        "--mesh_fsdp",
+        "8",
+        "--mesh_expert",
+        "1",
+        "--max_seq_token_per_tpu",
+        "4096",
+    ])
+    self.assertEqual(run_trainer_node._gradient_accumulation_steps(args), 1)
+
   @mock.patch.object(
       run_trainer_node.maxtext_utils, "get_tokenizer_pad_id", return_value=0
   )

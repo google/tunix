@@ -441,14 +441,21 @@ def unpad_train_example(example: common.TrainExample) -> list[dict[str, Any]]:
 
 
 def compute_pack_size(mesh: jax.sharding.Mesh) -> int:
-  """Packed rows per batch = product of the "fsdp"/"dp" mesh axes (1 if neither)."""
-  if "fsdp" not in mesh.shape and "dp" not in mesh.shape:
+  """Packed rows per batch = product of batch-sharding mesh axes (1 if none)."""
+  batch_axes = ("fsdp", "dp", "data", "fsdp_transpose", "expert")
+  if not any(ax in mesh.shape for ax in batch_axes):
     logging.warning(
-        "Sequence packing: mesh has no 'fsdp'/'dp' axis; pack_size=1."
+        "Sequence packing: mesh has no batch-sharding axis (%s); pack_size=1."
         " Axes: %s.",
+        "/".join(batch_axes),
         dict(mesh.shape),
     )
-  return mesh.shape.get("fsdp", 1) * mesh.shape.get("dp", 1)
+  return (
+      mesh.shape.get("fsdp", 1)
+      * mesh.shape.get("dp", mesh.shape.get("data", 1))
+      * mesh.shape.get("fsdp_transpose", 1)
+      * mesh.shape.get("expert", 1)
+  )
 
 
 def validate_packing_budget(

@@ -184,12 +184,26 @@ def build_maxtext_config(
         f" {max_seq_token_per_tpu}"
     )
 
-  if train_micro_batch_size % mesh_fsdp:
-    raise ValueError(
-        f"train_micro_batch_size={train_micro_batch_size} must be a multiple of "
-        f"mesh_fsdp={mesh_fsdp}; MaxText shards the batch dimension across it."
+  if max_seq_token_per_tpu is not None and max_seq_token_per_tpu > 0:
+    # When sequence packing is enabled, the trainer is fed packed chunks of row
+    # count pack_size = dp * fsdp * fsdp_transpose * expert (1 packed row of
+    # width max_seq_token_per_tpu per batch-sharded shard), independent of
+    # train_micro_batch_size.
+    mesh_dp = max(
+        1,
+        num_devices
+        // max(1, mesh_fsdp * mesh_tp * mesh_expert * mesh_context),
     )
-  per_device_batch_size = train_micro_batch_size / num_devices
+    pack_size = max(1, mesh_fsdp) * max(1, mesh_expert) * mesh_dp
+    per_device_batch_size = pack_size / num_devices
+  else:
+    if train_micro_batch_size % mesh_fsdp:
+      raise ValueError(
+          f"train_micro_batch_size={train_micro_batch_size} must be a multiple"
+          f" of mesh_fsdp={mesh_fsdp}; MaxText shards the batch dimension"
+          " across it."
+      )
+    per_device_batch_size = train_micro_batch_size / num_devices
 
   base_yml = os.path.join(
       os.path.dirname(os.path.abspath(pyconfig.__file__)), "base.yml"
