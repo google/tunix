@@ -308,6 +308,29 @@ class AlgorithmAdapterTest(absltest.TestCase):
     self.assertEqual(algo_config.loss_algo, "gspo-token")
     self.assertEqual(algo_config.kl_loss_mode, "mse_kl")
 
+  def test_extract_tokens_and_masks_with_failed_item(self):
+    # `DistributedRLEngine._response_to_trajectory_item` synthesizes this shape
+    # for a dropped rollout RPC: empty token/mask arrays and FAILED status.
+    failed_item = datatypes.TrajectoryItem(
+        prompt_id="g1",
+        group_index=0,
+        traj={
+            "prompt_tokens": np.zeros(0, dtype=np.int32),
+            "conversation_tokens": np.zeros(0, dtype=np.int32),
+            "conversation_masks": np.zeros(0, dtype=np.float32),
+            "status": datatypes.TrajectoryStatus.FAILED.name,
+            "trajectory_reward": 0.0,
+        },
+    )
+
+    p_arr, c_arr, act_arr = algorithm_adapter._extract_tokens_and_masks(
+        failed_item
+    )
+
+    self.assertEmpty(p_arr)
+    self.assertEmpty(c_arr)
+    self.assertEmpty(act_arr)
+
   def test_ppo_build_gen_model_input_fn(self):
     adapter = algorithm_adapter.PPOAdapter(
         clip_epsilon=0.3,
@@ -631,5 +654,227 @@ class RoutedExpertsForItemTest(absltest.TestCase):
     np.testing.assert_array_equal(payloads[1].prompt_ids, [0, 10, 20])
 
 
+class ExcludeMaskedFromAdvantageTest(absltest.TestCase):
+  """Option 3: masked / unhealthy rollouts must not shape the group baseline."""
+
+  def _item(self, group_index, *, masked=False, failed=False):
+    """Builds a group member; `masked` mimics the collector's overlong filter."""
+    if failed:
+      # Exactly what the engine synthesizes when a rollout RPC is dropped.
+      return datatypes.TrajectoryItem(
+          prompt_id="g1",
+          group_index=group_index,
+          traj={
+              "status": datatypes.TrajectoryStatus.FAILED,
+              "trajectory_reward": 0.0,
+              "prompt_tokens": np.array([], dtype=np.int32),
+              "conversation_tokens": np.array([], dtype=np.int32),
+              "conversation_masks": np.array([], dtype=np.float32),
+          },
+      )
+    return datatypes.TrajectoryItem(
+        prompt_id="g1",
+        group_index=group_index,
+        start_step=0,
+        traj={
+            "status": datatypes.TrajectoryStatus.SUCCEEDED,
+            "prompt_tokens": np.array([1, 2], dtype=np.int32),
+            "conversation_tokens": np.array([3, 4], dtype=np.int32),
+            "conversation_masks": (
+                np.zeros(2, dtype=np.float32)
+                if masked
+                else np.ones(2, dtype=np.float32)
+            ),
+        },
+    )
+
+  def _adapter(self):
+    return algorithm_adapter.GRPOAdapter(
+        algo_config=algorithm_config.GRPOConfig(num_generations=4)
+    )
+
+  def test_masked_item_is_excluded_and_zeroed(self):
+    adapter = self._adapter()
+    group = [self._item(i) for i in range(3)] + [self._item(3, masked=True)]
+
+    payloads = adapter.create_trainer_payloads(
+        group, rewards=[1.0, 2.0, 3.0, 0.0]
+    )
+
+    # Baseline is mean([1, 2, 3]) = 2.0, std(ddof=1) = 1.0.
+    np.testing.assert_allclose(
+        [float(p.advantages[0]) for p in payloads],
+        [-1.0, 0.0, 1.0, 0.0],
+        rtol=1e-4,
+        atol=1e-4,
+    )
+    # The masked trajectory contributes no gradient, but keeps its shape so the
+    # BatchAssembler still sees a static [G] group.
+    np.testing.assert_array_equal(payloads[3].completion_mask, [0.0, 0.0])
+    np.testing.assert_array_equal(payloads[3].advantages, [0.0, 0.0])
+    self.assertLen(payloads[3].completion_ids, 2)
+    # Healthy peers are untouched.
+    np.testing.assert_array_equal(payloads[0].completion_mask, [1.0, 1.0])
+
+  def test_unmasked_overlong_item_is_included_when_overlong_filter_false(self):
+    adapter = self._adapter()
+    overlong_item = datatypes.TrajectoryItem(
+        prompt_id="p0",
+        group_index=3,
+        traj={
+            "status": datatypes.TrajectoryStatus.MAX_STEPS_REACHED,
+            "prompt_tokens": np.array([1, 2], dtype=np.int32),
+            "conversation_tokens": np.array([3, 4], dtype=np.int32),
+            "conversation_masks": np.ones(2, dtype=np.float32),
+        },
+    )
+    group = [self._item(i) for i in range(3)] + [overlong_item]
+    rewards = [1.0, 2.0, 3.0, 0.0]
+
+    payloads = adapter.create_trainer_payloads(group, rewards=rewards)
+
+    np.testing.assert_allclose(
+        [float(p.advantages[0]) for p in payloads],
+        algo_core.compute_advantages(
+            np.array(rewards, dtype=np.float32), num_generations=4
+        ),
+        rtol=1e-5,
+    )
+    np.testing.assert_array_equal(payloads[3].completion_mask, [1.0, 1.0])
+
+  def test_failed_item_is_excluded_without_raising(self):
+    adapter = self._adapter()
+    group = [self._item(i) for i in range(3)] + [self._item(3, failed=True)]
+
+    payloads = adapter.create_trainer_payloads(
+        group, rewards=[1.0, 2.0, 3.0, 0.0]
+    )
+
+    np.testing.assert_allclose(
+        [
+            float(np.mean(p.advantages)) if p.advantages.size else 0.0
+            for p in payloads
+        ],
+        [-1.0, 0.0, 1.0, 0.0],
+        rtol=1e-4,
+        atol=1e-4,
+    )
+    self.assertEmpty(payloads[3].completion_ids)
+    self.assertEmpty(payloads[3].advantages)
+
+  def test_degenerate_group_zeroes_every_member(self):
+    # Only one valid trajectory survives, so there is no peer to normalize
+    # against: the whole group must become a zero-gradient no-op rather than
+    # leaking an unnormalized update from the lone survivor.
+    adapter = self._adapter()
+    group = [self._item(0)] + [
+        self._item(i, masked=True) for i in range(1, 4)
+    ]
+
+    payloads = adapter.create_trainer_payloads(
+        group, rewards=[5.0, 0.0, 0.0, 0.0]
+    )
+
+    for i, payload in enumerate(payloads):
+      with self.subTest(group_index=i):
+        np.testing.assert_array_equal(payload.completion_mask, [0.0, 0.0])
+        np.testing.assert_array_equal(payload.advantages, [0.0, 0.0])
+
+  def test_all_valid_group_matches_legacy(self):
+    group = [self._item(i) for i in range(4)]
+    rewards = [1.0, 2.0, 3.0, 4.0]
+
+    payloads = self._adapter().create_trainer_payloads(group, rewards=rewards)
+
+    np.testing.assert_allclose(
+        [float(p.advantages[0]) for p in payloads],
+        algo_core.compute_advantages(
+            np.array(rewards, dtype=np.float32), num_generations=4
+        ),
+        rtol=1e-5,
+    )
+
+  def test_compute_advantages_forwards_valid_mask_to_estimator(self):
+    adapter = self._adapter()
+    rewards = [1.0, 2.0, 3.0, 0.0]
+    valid_mask = np.array([True, True, True, False])
+
+    np.testing.assert_allclose(
+        adapter.compute_advantages(
+            rewards, num_generations=4, valid_mask=valid_mask
+        ),
+        algo_core.compute_advantages(
+            np.array(rewards, dtype=np.float32),
+            num_generations=4,
+            valid_mask=valid_mask,
+        ),
+        rtol=1e-5,
+    )
+
+
+class IsValidTrajectoryTest(absltest.TestCase):
+  """`TrajectoryItem.is_valid` decides which rollouts carry trainable signal."""
+
+  def _item(self, traj):
+    return datatypes.TrajectoryItem(prompt_id="p", group_index=0, traj=traj)
+
+  def test_healthy_item_is_valid(self):
+    item = self._item({
+        "status": datatypes.TrajectoryStatus.SUCCEEDED,
+        "conversation_masks": np.ones(3, dtype=np.float32),
+    })
+    self.assertTrue(item.is_valid)
+
+  def test_collector_masked_item_is_invalid(self):
+    item = self._item({
+        "status": datatypes.TrajectoryStatus.SUCCEEDED,
+        "conversation_masks": np.zeros(3, dtype=np.float32),
+    })
+    self.assertFalse(item.is_valid)
+
+  def test_invalid_status_is_invalid(self):
+    for status in (
+        datatypes.TrajectoryStatus.FAILED,
+        datatypes.TrajectoryStatus.TIMEOUT,
+        datatypes.TrajectoryStatus.ENV_TIMEOUT,
+        "FAILED",
+        "failed",
+    ):
+      with self.subTest(status=status):
+        item = self._item({
+            "status": status,
+            "conversation_masks": np.ones(3, dtype=np.float32),
+        })
+        self.assertFalse(item.is_valid)
+
+  def test_overlong_statuses_follow_conversation_masks(self):
+    for status in (
+        datatypes.TrajectoryStatus.MAX_STEPS_REACHED,
+        datatypes.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED,
+    ):
+      with self.subTest(status=status):
+        # When overlong_filter=False, conversation_masks stays non-zero (valid).
+        unmasked = self._item({
+            "status": status,
+            "conversation_masks": np.ones(3, dtype=np.float32),
+        })
+        self.assertTrue(unmasked.is_valid)
+        # When overlong_filter=True, TrajectoryCollectEngine zeroes masks.
+        masked = self._item({
+            "status": status,
+            "conversation_masks": np.zeros(3, dtype=np.float32),
+        })
+        self.assertFalse(masked.is_valid)
+
+  def test_missing_mask_is_valid(self):
+    item = self._item({"status": datatypes.TrajectoryStatus.SUCCEEDED})
+    self.assertTrue(item.is_valid)
+
+  def test_non_dict_traj_is_invalid(self):
+    item = datatypes.TrajectoryItem(prompt_id="p", group_index=0, traj=None)
+    self.assertFalse(item.is_valid)
+
+
 if __name__ == "__main__":
   absltest.main()
+

@@ -59,6 +59,9 @@ def _response_to_trajectory_item(resp: Any) -> datatypes.TrajectoryItem:
         prompt_id=prompt_id,
         group_index=group_index,
         traj={
+            "prompt_tokens": np.zeros(0, dtype=np.int32),
+            "conversation_tokens": np.zeros(0, dtype=np.int32),
+            "conversation_masks": np.zeros(0, dtype=np.float32),
             "status": datatypes.TrajectoryStatus.FAILED,
             "trajectory_reward": 0.0,
         },

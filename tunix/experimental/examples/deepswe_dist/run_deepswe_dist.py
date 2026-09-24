@@ -194,6 +194,16 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       default=os.getenv("WANDB_RUN_NAME", ""),
       help="W&B run name. Defaults to timestamp-based name if unset.",
   )
+  parser.add_argument(
+      "--overlong_filter",
+      action=argparse.BooleanOptionalAction,
+      default=False,
+      help=(
+          "Zero out the policy loss mask, final reward, and advantage inclusion"
+          " of overlong (max-steps or max-context-limit) trajectories, rather"
+          " than training on them."
+      ),
+  )
   parser.add_argument("--rpc_timeout_s", type=float, default=1800.0)
   parser.add_argument("--init_timeout_s", type=float, default=None)
   parser.add_argument("--stop_workers_on_exit", action="store_true")
@@ -376,6 +386,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           use_agent_sandbox=args.use_agent_sandbox,
           scaffold=args.scaffold,
           env_verbose=args.env_verbose,
+          overlong_filter=args.overlong_filter,
       ),
       max_steps=args.max_steps,
       reward_fns=[],

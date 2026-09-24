@@ -528,7 +528,14 @@ class StandardRLProgram(RLProgram):
         rewards = []
         for item in group:
           if self.reward_fns:
-            r = sum(_invoke_reward_fn(fn, item) for fn in self.reward_fns)
+            # Skip `reward_fn` for failed, timed-out, or masked-out trajectories
+            # (`not item.is_valid`): although the payload still goes through
+            # trainer fwd/bwd to keep static batch shapes, its advantage and
+            # completion_mask are zeroed out, so scoring it is wasted work.
+            if not item.is_valid:
+              r = 0.0
+            else:
+              r = sum(_invoke_reward_fn(fn, item) for fn in self.reward_fns)
           else:
             r = _extract_reward(item)
           rewards.append(float(r))
@@ -576,11 +583,13 @@ class StandardRLProgram(RLProgram):
           traj_dict["trajectory_reward"] = reward_val
           traj_dict["status"] = status
           traj_dict["steps"] = steps
+          traj_dict["conversation_masks"] = payload.completion_mask
           item = datatypes.TrajectoryItem(
               prompt_id=getattr(src_item, "prompt_id", ""),
               group_index=getattr(src_item, "group_index", 0),
               start_step=0,
               traj=traj_dict,
+              is_valid=getattr(src_item, "is_valid", True),
               prompt_tokens=getattr(src_item, "prompt_tokens", None),
               completion_tokens=getattr(src_item, "completion_tokens", None),
               action_mask=getattr(src_item, "action_mask", None),
@@ -794,12 +803,26 @@ class StandardRLProgram(RLProgram):
         self._log_metric(tag, val, log_step)
 
     # --- 2. Reward Metrics ---
-    reward_mean = float(np.mean(step_rewards)) if step_rewards else 0.0
-    reward_std = float(np.std(step_rewards)) if step_rewards else 0.0
-    reward_min = float(np.min(step_rewards)) if step_rewards else 0.0
-    reward_max = float(np.max(step_rewards)) if step_rewards else 0.0
-    reward_sum = float(np.sum(step_rewards)) if step_rewards else 0.0
-    if step_rewards:
+    rewards_to_log = step_rewards
+    if all_step_items:
+      valid_flags = [item.is_valid for item in all_step_items]
+      self._log_metric(
+          "rollout/invalid_trajectory_frac",
+          1.0 - float(np.mean(valid_flags)),
+          log_step,
+      )
+      rewards_to_log = [
+          reward
+          for reward, is_valid in zip(step_rewards, valid_flags)
+          if is_valid
+      ]
+
+    reward_mean = float(np.mean(rewards_to_log)) if rewards_to_log else 0.0
+    reward_std = float(np.std(rewards_to_log)) if rewards_to_log else 0.0
+    reward_min = float(np.min(rewards_to_log)) if rewards_to_log else 0.0
+    reward_max = float(np.max(rewards_to_log)) if rewards_to_log else 0.0
+    reward_sum = float(np.sum(rewards_to_log)) if rewards_to_log else 0.0
+    if rewards_to_log:
       reward_stats = {
           "mean": reward_mean,
           "std": reward_std,
