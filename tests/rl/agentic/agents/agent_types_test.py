@@ -173,6 +173,33 @@ class TrajectoryItemTest(absltest.TestCase):
     self.assertEqual(restored.metadata, {"extra": "data"})
     np.testing.assert_array_equal(restored.prompt_tokens, [1, 2])
 
+  def test_is_valid_reflects_in_place_mutation_and_honors_override(self):
+    item = agent_types.TrajectoryItem(
+        prompt_id="p_mut",
+        group_index=0,
+        traj={
+            "status": agent_types.TrajectoryStatus.SUCCEEDED,
+            "conversation_masks": np.ones(2, dtype=np.float32),
+        },
+    )
+    self.assertTrue(item.is_valid)
+
+    # In-place mutation of `traj` is dynamically reflected when not overridden.
+    item.traj["status"] = agent_types.TrajectoryStatus.FAILED
+    self.assertFalse(item.is_valid)
+
+    # Explicit override preserves the specified boolean even after mask zeroing.
+    overridden = agent_types.TrajectoryItem(
+        prompt_id="p_override",
+        group_index=0,
+        traj={
+            "status": agent_types.TrajectoryStatus.SUCCEEDED,
+            "conversation_masks": np.zeros(2, dtype=np.float32),
+        },
+        is_valid=True,
+    )
+    self.assertTrue(overridden.is_valid)
+
 
 class AssistantTextTest(absltest.TestCase):
 
