@@ -79,10 +79,11 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           Mapping[datatypes.Role, remote_execution.ActorHandle] | None
       ) = None,
       weight_sync_coordinator: Any = None,
+      router: Any | None = None,
   ):
     self._rollout_workers = list(rollout_workers)
     self._rollout_pool = remote_execution.RoutingActorPool(
-        self._rollout_workers
+        self._rollout_workers, router=router
     )
     self._trainer_workers = dict(trainer_workers)
     self._inference_workers = dict(inference_workers or {})
@@ -141,8 +142,16 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           group_index,
           req.request_id,
       )
+      # Local routing hints only: this kwargs dict is consumed by the pool's
+      # router hook and never forwarded to the remote call. Routing on
+      # traj_id (prompt_id + group_index) spreads a generation group across
+      # workers while keeping redispatches of one trajectory sticky.
       worker = self._rollout_pool._get_next_actor(
-          kwargs={"route_key": req.traj_id}
+          kwargs={
+              "route_key": req.traj_id,
+              "request_id": req.request_id,
+              "prompt": req.prompt,
+          },
       )
       res = worker.dispatch_task(method_name="generate", requests=[req])
       if inspect.isawaitable(res):
@@ -387,7 +396,11 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     )
     for req in requests:
       worker = self._rollout_pool._get_next_actor(
-          kwargs={"route_key": req.traj_id}
+            kwargs={
+                "route_key": req.traj_id,
+                "request_id": req.request_id,
+                "prompt": req.prompt,
+            },
       )
       worker_to_requests[worker].append(req)
 
@@ -653,6 +666,11 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         "Weight synchronization complete (policy_version=%d).",
         self._policy_version,
     )
+    notify = getattr(self._rollout_pool.router, "notify_weights_synced", None)
+    if callable(notify):
+      # External schedulers may cache prefix affinity that a weight sync
+      # invalidates; best-effort notification, only after a successful round.
+      notify()
     return result.policy_version
 
   async def save_checkpoint(
