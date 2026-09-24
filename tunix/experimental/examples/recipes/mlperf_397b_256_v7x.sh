@@ -170,8 +170,8 @@ export MAX_STALENESS=0
 export TRAJECTORY_GROUP_ORDER=${TRAJECTORY_GROUP_ORDER:-arrival}
 
 # sequence packing
-export MAX_SEQ_TOKEN_PER_TPU=${MAX_SEQ_TOKEN_PER_TPU:-65536}
-export MAX_SEGMENTS_PER_PACKED_ROW=${MAX_SEGMENTS_PER_PACKED_ROW:-16}
+export MAX_SEQ_TOKEN_PER_TPU=""
+export MAX_SEGMENTS_PER_PACKED_ROW=""
 
 # Sampling Parameters (explicitly disable top-k, set top-p 1.0 and temperature 1.0)
 export TEMPERATURE="1.0"
@@ -206,7 +206,7 @@ export SKIP_STEP_ON_SPIKES="false"
 export SKIP_STEP_ON_NAN="true"
 
 # Architecture & Rematerialization
-export REMAT_POLICY="full"
+export REMAT_POLICY="custom"
 export TRAINER_MAXTEXT_ATTENTION="flash"
 export MAXTEXT_EXTRA_FLAGS="custom_mesh_and_rule=cp-as-ep \
 use_gdn_kernel=true gdn_cp_mode=head \
