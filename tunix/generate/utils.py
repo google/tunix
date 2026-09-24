@@ -15,11 +15,13 @@
 
 """Utility functions for sampler."""
 
+from typing import Any, Collection, List, Mapping, Sequence
 from collections import abc
 import functools
 import gc
 from absl import logging
 import math
+import numbers
 import re
 from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Tuple, Union
 
@@ -2100,6 +2102,17 @@ def detach_incompatible_vllm_cleanup_finalizer(llm_engine: Any) -> None:
   )
 
 
+def is_token_id_sequence(prompt: Any) -> bool:
+  """Returns True if prompt is a 1D integer array or sequence of token IDs."""
+  if isinstance(prompt, np.ndarray):
+    return prompt.ndim == 1 and np.issubdtype(prompt.dtype, np.integer)
+  return (
+      isinstance(prompt, (list, tuple))
+      and bool(prompt)
+      and isinstance(prompt[0], (int, np.integer))
+  )
+
+
 def as_token_ids(value) -> np.ndarray:
   """Copies token IDs into an owned 1-D int32 array.
 
@@ -2115,3 +2128,135 @@ def as_token_ids(value) -> np.ndarray:
 def unpad_prompt(padded_tokens, length: int) -> np.ndarray:
   """Returns the last `length` tokens of a left-padded prompt row."""
   return as_token_ids(padded_tokens)[-int(length) :]
+
+
+def unpad_prompt_tokens(
+    padded_tokens: Any,
+    pad_id: int | None = None,
+    prompt_length: int | None = None,
+) -> np.ndarray:
+  """Returns sampler-tokenized prompt ids without backend left padding."""
+  if prompt_length is not None:
+    return unpad_prompt(padded_tokens, int(prompt_length))
+  arr = np.asarray(padded_tokens, dtype=np.int32).reshape(-1)
+  if not isinstance(pad_id, numbers.Integral):
+    return arr
+  non_pad = np.flatnonzero(arr != pad_id)
+  if non_pad.size == 0:
+    return np.zeros(0, dtype=np.int32)
+  return arr[non_pad[0] :]
+
+
+def resolve_prompt_tokens(
+    input_strings: str | Sequence[str] | None,
+    prompt_token_ids: Sequence[Sequence[int] | np.ndarray] | None,
+    tokenize_fn: Callable[[str], Any],
+    *,
+    max_generation_steps: int = 0,
+    max_total_length: int | None = None,
+    max_length_name: str = 'max_model_len',
+    single_output_per_row: bool = True,
+) -> list[np.ndarray]:
+  """Validates and converts either `input_strings` or `prompt_token_ids` into token ID rows."""
+  if (input_strings is None) == (prompt_token_ids is None):
+    raise ValueError('Provide exactly one of input_strings or prompt_token_ids')
+  if prompt_token_ids is not None:
+    if not prompt_token_ids:
+      raise ValueError('prompt_token_ids must not be empty')
+    if not single_output_per_row:
+      raise ValueError('prompt_token_ids requires exactly one output per row')
+    prompt_ids = [as_token_ids(row) for row in prompt_token_ids]
+    if max_total_length is not None and any(
+        len(row) + max_generation_steps > max_total_length for row in prompt_ids
+    ):
+      raise ValueError(
+          f'prompt plus max_generation_steps exceeds {max_length_name}'
+      )
+    return prompt_ids
+  assert input_strings is not None
+  if isinstance(input_strings, str):
+    input_strings = [input_strings]
+  if not input_strings:
+    raise ValueError('input_strings must not be empty')
+  return [np.asarray(tokenize_fn(x), dtype=np.int32) for x in input_strings]
+
+
+def left_pad_prompt_tokens(
+    prompt_ids: Sequence[Sequence[int] | np.ndarray],
+    max_prompt_length: int | None,
+    pad_value: int,
+    *,
+    max_allowed_length: int | None = None,
+) -> tuple[np.ndarray, np.ndarray, int]:
+  """Computes `prompt_lengths`, target `max_prompt_length`, and left-padded `all_input_ids`."""
+  prompt_lengths = np.array([len(x) for x in prompt_ids], dtype=np.int32)
+  max_tokens_length = int(prompt_lengths.max())
+  if max_prompt_length is None or max_prompt_length < max_tokens_length:
+    max_prompt_length = next_power_of_2(max_tokens_length)
+    if (
+        max_allowed_length is not None
+        and max_tokens_length <= max_allowed_length
+    ):
+      max_prompt_length = min(max_prompt_length, max_allowed_length)
+  all_input_ids = np.array(
+      [
+          pad_to_length(
+              np.asarray(x, dtype=np.int32),
+              target_length=max_prompt_length,
+              pad_value=pad_value,
+              left=True,
+          )
+          for x in prompt_ids
+      ],
+      dtype=np.int32,
+  )
+  return all_input_ids, prompt_lengths, max_prompt_length
+
+
+def _get_field(obj: Any, key: str, default: Any = None) -> Any:
+  return (
+      obj.get(key, default)
+      if isinstance(obj, dict)
+      else getattr(obj, key, default)
+  )
+
+
+def check_prompt_echo(
+    expected_ids: Sequence[np.ndarray],
+    outputs: Sequence[Any],
+    *,
+    backend_name: str = 'Engine',
+) -> None:
+  """Validates that engine outputs match expected prompt count, request IDs, and prompt tokens."""
+  if len(outputs) != len(expected_ids):
+    raise ValueError(
+        f'{backend_name} result count differs from submitted token rows:'
+        f' Expected {len(expected_ids)} outputs, got {len(outputs)}'
+    )
+  seen_ids = set()
+  for expected, output in zip(expected_ids, outputs):
+    meta_info = _get_field(output, 'meta_info') or {}
+    request_id = _get_field(output, 'request_id', _get_field(meta_info, 'id'))
+    if request_id is None:
+      raise ValueError(f'{backend_name} output is missing request_id')
+    if request_id in seen_ids:
+      raise ValueError(
+          f'{backend_name} returned duplicate request ids'
+          f' (Duplicate request_id: {request_id})'
+      )
+    seen_ids.add(request_id)
+    echoed = _get_field(
+        output, 'prompt_token_ids', _get_field(meta_info, 'prompt_tokens')
+    )
+    if echoed is None:
+      raise ValueError(
+          f'{backend_name} output is missing prompt echo / prompt_token_ids'
+      )
+    if isinstance(echoed, (int, np.integer)):
+      matches = int(echoed) == len(expected)
+    else:
+      matches = np.array_equal(as_token_ids(echoed), expected)
+    if not matches:
+      raise ValueError(
+          f'{backend_name} prompt echo / prompt_token_ids differed from input'
+      )

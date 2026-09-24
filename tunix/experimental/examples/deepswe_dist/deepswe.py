@@ -137,6 +137,7 @@ def build_prompt_item(
     env_verbose: bool,
     episode_timeout_secs: int | None = None,
     overlong_filter: bool = False,
+    exact_token_continuity: bool = True,
 ) -> dict[str, Any]:
   """Builds one StandardRLProgram prompt item for a DeepSWE task."""
   if episode_timeout_secs is None:
@@ -182,6 +183,7 @@ def build_prompt_item(
           "agent_config": agent_config,
           "episode_timeout": episode_timeout_secs,
           "overlong_filter": overlong_filter,
+          "exact_token_continuity": exact_token_continuity,
       },
   }
 
@@ -204,6 +206,7 @@ def iter_prompt_items(
     env_verbose: bool,
     episode_timeout_secs: int | None = None,
     overlong_filter: bool = False,
+    exact_token_continuity: bool = True,
 ) -> Iterator[dict[str, Any]]:
   """Yields exactly the prompt groups needed for the requested training run."""
   dataset_size = len(dataset)
@@ -227,6 +230,7 @@ def iter_prompt_items(
         env_verbose=env_verbose,
         episode_timeout_secs=episode_timeout_secs,
         overlong_filter=overlong_filter,
+        exact_token_continuity=exact_token_continuity,
     )
 
 

@@ -75,6 +75,7 @@ export TOP_P=${TOP_P:-1.0}
 export TOP_K=${TOP_K:--1}
 export DEBUG=${DEBUG:-0}
 export USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
+export EXACT_TOKEN_CONTINUITY=${EXACT_TOKEN_CONTINUITY:-true}
 export SAMPLER=${SAMPLER:-inprocess_vllm}
 export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
 export CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-5}
@@ -365,6 +366,7 @@ start_orchestrator() {
         ${MAX_STALENESS:+--max_staleness=${MAX_STALENESS}} \
         ${TRAJECTORY_GROUP_ORDER:+--trajectory_group_order=${TRAJECTORY_GROUP_ORDER}} \
         $([[ "${USE_ROLLOUT_LOGPS}" == "false" || "${USE_ROLLOUT_LOGPS}" == "False" || "${USE_ROLLOUT_LOGPS}" == "0" ]] && echo --no-use_rollout_logps || echo --use_rollout_logps) \
+        $([[ "${EXACT_TOKEN_CONTINUITY}" == "false" || "${EXACT_TOKEN_CONTINUITY}" == "False" || "${EXACT_TOKEN_CONTINUITY}" == "0" ]] && echo --no-exact_token_continuity || echo --exact_token_continuity) \
         ${dataset_args} \
         ${shuffle_arg} \
         ${sandbox_arg} \
@@ -693,6 +695,7 @@ if cfg:
           --weight_sync_mode=${WEIGHT_SYNC_MODE} \
           --prefuse_moe_weights=${ROLLOUT_PREFUSE_MOE_WEIGHTS} \
           --enable_prefix_caching=${ENABLE_PREFIX_CACHING} \
+          --exact_token_continuity=${EXACT_TOKEN_CONTINUITY} \
           --free_kv_cache_during_weight_sync=${ROLLOUT_FREE_KV_CACHE} \
           --return_routed_experts=${RETURN_ROUTED_EXPERTS} \
           --registry_module=tunix.experimental.examples.deepswe_dist.deepswe \

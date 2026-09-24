@@ -29,6 +29,7 @@ import jax.numpy as jnp
 import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.rl.agentic.agents import agent_types
+from tunix.generate import utils as generate_utils
 from tunix.rl import algo_core as _  # Registers policy loss functions.
 from tunix.rl import algorithm_config
 from tunix.rl import function_registry
@@ -54,36 +55,14 @@ def _extract_tokens_and_masks(
     item: datatypes.TrajectoryItem,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
   """Extracts prompt_tokens, conversation_tokens, and conversation_masks from TrajectoryItem."""
-  traj = item.traj if isinstance(item.traj, dict) else {}
-  p = (
-      traj.get("prompt_tokens")
-      if traj.get("prompt_tokens") is not None
-      else getattr(
-          item, "prompt_tokens", getattr(item, "metadata", {}).get("prompt_tokens")
-      )
-  )
-  c = (
-      traj.get("conversation_tokens")
-      if traj.get("conversation_tokens") is not None
-      else getattr(
-          item,
-          "conversation_tokens",
-          getattr(item, "metadata", {}).get("conversation_tokens"),
-      )
-  )
-  m = (
-      traj.get("conversation_masks")
-      if traj.get("conversation_masks") is not None
-      else getattr(
-          item,
-          "conversation_masks",
-          getattr(item, "metadata", {}).get("conversation_masks"),
-      )
-  )
+  p_arr = np.asarray(item.traj["prompt_tokens"], dtype=np.int32).reshape(-1)
+  prompt_len = item.traj.get("prompt_length")
+  if prompt_len is not None:
+    p_arr = generate_utils.unpad_prompt(p_arr, int(prompt_len))
   return (
-      np.asarray([] if p is None else p, dtype=np.int32).reshape(-1),
-      np.asarray([] if c is None else c, dtype=np.int32).reshape(-1),
-      np.asarray([] if m is None else m, dtype=np.float32).reshape(-1),
+      p_arr,
+      np.asarray(item.traj["conversation_tokens"], dtype=np.int32).reshape(-1),
+      np.asarray(item.traj["conversation_masks"], dtype=np.float32).reshape(-1),
   )
 
 
@@ -280,11 +259,12 @@ class GRPOAdapter(AlgorithmAdapter):
         max_packed_len=max_packed_len,
         max_response_length=max_response_length,
     )
-    self.requires_reference_kl = (
-        getattr(self.algo_config, "beta", 0.0) != 0.0
-        or getattr(self.algo_config, "force_compute_kl", False)
+    self.requires_reference_kl = getattr(
+        self.algo_config, "beta", 0.0
+    ) != 0.0 or getattr(self.algo_config, "force_compute_kl", False)
+    self.use_rollout_logps = getattr(
+        self.algo_config, "use_rollout_logps", True
     )
-    self.use_rollout_logps = getattr(self.algo_config, "use_rollout_logps", True)
 
   def compute_advantages(
       self,
@@ -310,7 +290,9 @@ class GRPOAdapter(AlgorithmAdapter):
   ) -> list[datatypes.RLTrainerPayload]:
     """Packages group trajectories, advantages, and tool observation masks into unbatched RLTrainerPayloads."""
     del kwargs
-    advs = self.compute_advantages(rewards, num_generations=self.num_generations)
+    advs = self.compute_advantages(
+        rewards, num_generations=self.num_generations
+    )
     payloads = []
 
     for i, item in enumerate(group):
@@ -354,9 +336,7 @@ class GRPOAdapter(AlgorithmAdapter):
 
   def loss_fn(self) -> Callable[..., Any]:
     """Policy loss resolved by name via the function registry."""
-    return function_registry.get_policy_loss_fn(
-        self.algo_config.policy_loss_fn
-    )
+    return function_registry.get_policy_loss_fn(self.algo_config.policy_loss_fn)
 
   def build_gen_model_input_fn(
       self, pad_id: int, eos_id: int

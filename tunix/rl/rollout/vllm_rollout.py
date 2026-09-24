@@ -27,8 +27,6 @@ from tunix.rl.rollout import base_rollout
 class VllmRollout(base_rollout.BaseRollout):
   """vLLM rollout worker."""
 
-  supports_token_input = True
-
   def __init__(
       self,
       model: Any,

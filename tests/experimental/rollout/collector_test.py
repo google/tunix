@@ -95,14 +95,13 @@ class _MockSampler(sampler_lib.Sampler):
     )
     self._call_count += 1
     tokens = np.arange(tok_len, dtype=np.int32)
-    # Echo a token-ids prompt back verbatim, as a real engine does: under
-    # `exact_token_continuity` the collect engine checks a later turn's echoed
-    # prompt against the history it sent, and a canned answer never matches.
-    prompt = getattr(req, "prompt", None)
-    if isinstance(prompt, dict) and "prompt_token_ids" in prompt:
-      prompt_token_ids = np.array(prompt["prompt_token_ids"], dtype=np.int32)
-    else:
-      prompt_token_ids = np.array([1, 2], dtype=np.int32)
+
+    req_prompt = getattr(req, "prompt", None)
+    prompt_token_ids = (
+        np.asarray(req_prompt, dtype=np.int32)
+        if isinstance(req_prompt, np.ndarray)
+        else np.array([1, 2], dtype=np.int32)
+    )
     return sampler_lib.SamplingResponse(
         request_id=getattr(req, "request_id", ""),
         text=f"action_{self._call_count}",
@@ -255,9 +254,7 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
     with mock.patch.object(
         collector.rl_collect_engine, "TrajectoryCollectEngine"
     ) as inner_engine_cls:
-      inner_engine_cls.return_value.collect = mock.AsyncMock(
-          return_value={}
-      )
+      inner_engine_cls.return_value.collect = mock.AsyncMock(return_value={})
       asyncio.run(engine.run_episode())
 
     self.assertEqual(inner_engine_cls.call_args.kwargs["timeout"], 10800)
@@ -1065,16 +1062,24 @@ class ConvertTrajectoryItemTest(absltest.TestCase):
         "conversation_text": "assistant action final response",
         "prompt_tokens": np.array([1, 2], dtype=np.int32),
         "conversation_tokens": np.array([10, 11, 20, 21, 12], dtype=np.int32),
-        "conversation_masks": np.array([1.0, 1.0, 0.0, 0.0, 1.0], dtype=np.float32),
-        "old_logprobs": np.array([-0.1, -0.2, 0.0, 0.0, -0.3], dtype=np.float32),
+        "conversation_masks": np.array(
+            [1.0, 1.0, 0.0, 0.0, 1.0], dtype=np.float32
+        ),
+        "old_logprobs": np.array(
+            [-0.1, -0.2, 0.0, 0.0, -0.3], dtype=np.float32
+        ),
         "trajectory_reward": 1.0,
         "status": "COMPLETED",
         "policy_version": 1,
     }
 
     item = engine._convert_to_trajectory(rl_traj)
-    np.testing.assert_array_equal(item.conversation_tokens, [10, 11, 20, 21, 12])
-    np.testing.assert_array_equal(item.conversation_masks, [1.0, 1.0, 0.0, 0.0, 1.0])
+    np.testing.assert_array_equal(
+        item.conversation_tokens, [10, 11, 20, 21, 12]
+    )
+    np.testing.assert_array_equal(
+        item.conversation_masks, [1.0, 1.0, 0.0, 0.0, 1.0]
+    )
     np.testing.assert_allclose(item.old_logprobs, [-0.1, -0.2, 0.0, 0.0, -0.3])
 
   def test_convert_to_trajectory_rejects_non_dict(self):
@@ -1102,8 +1107,9 @@ class ConvertTrajectoryItemTest(absltest.TestCase):
     with self.assertRaisesRegex(TypeError, "Expected rl_traj to be a dict"):
       engine._convert_to_trajectory(mock_traj)
 
-
-  def test_model_call_respects_min_of_remaining_budget_and_request_max_tokens(self):
+  def test_model_call_respects_min_of_remaining_budget_and_request_max_tokens(
+      self,
+  ):
     sampler = _MockVllmSampler()
     request = datatypes.RolloutRequest(
         prompt="test",
@@ -1130,7 +1136,9 @@ class ConvertTrajectoryItemTest(absltest.TestCase):
       return mock_inner
 
     with mock.patch.object(
-        collector.rl_collect_engine, "TrajectoryCollectEngine", side_effect=_capture_engine
+        collector.rl_collect_engine,
+        "TrajectoryCollectEngine",
+        side_effect=_capture_engine,
     ):
       asyncio.run(engine.run_episode())
 
@@ -1408,7 +1416,6 @@ class ResponseBudgetAnnotationTest(absltest.TestCase):
     with self.assertRaises(ValueError):
       collector.response_budget_facts([1, 2], -1, {99})
 
-
   def test_convert_to_trajectory_preserves_routed_experts(self):
     request = datatypes.RolloutRequest(
         request_id="req_routed",
@@ -1441,6 +1448,84 @@ class ResponseBudgetAnnotationTest(absltest.TestCase):
     self.assertNotIn("routed_experts", item.metadata)
     np.testing.assert_array_equal(item.traj["routed_experts"], mock_routed)
     np.testing.assert_array_equal(item.routed_experts, mock_routed)
+
+  def test_multi_turn_exact_token_continuity_passes_prompt_token_ids(self):
+    class _TwoTurnEnv(base_environment.BaseTaskEnv):
+
+      def __init__(self):
+        super().__init__(task={"question": "q0"}, max_steps=2)
+        self._step_idx = 0
+
+      def _initial_observation(self):
+        return "obs0"
+
+      def _step_impl(self, action):
+        self._step_idx += 1
+        return base_environment.EnvStepResult(
+            observation="obs1",
+            reward=1.0,
+            done=self._step_idx >= 2,
+            info={},
+        )
+
+    class _TokenAwareSampler(sampler_lib.Sampler):
+
+      def __init__(self):
+        self.requests = []
+
+      async def sample(self, req, **kwargs):
+        del kwargs
+        self.requests.append(req)
+        turn = len(self.requests)
+        prompt_toks = (
+            np.asarray(req.prompt, dtype=np.int32)
+            if isinstance(req.prompt, np.ndarray)
+            else np.array([10, 11], dtype=np.int32)
+        )
+        return sampler_lib.SamplingResponse(
+            request_id=req.request_id,
+            text=f"ans_{turn}",
+            token_ids=np.array([20 + turn, 21 + turn], dtype=np.int32),
+            prompt_token_ids=prompt_toks,
+            logprobs=np.array([-0.1, -0.2], dtype=np.float32),
+        )
+
+    sampler = _TokenAwareSampler()
+    parser = _RecordingParser()
+    tokenizer = _MockTokenizer()
+    agent = model_agent.ModelAgent("sys")
+    env = _TwoTurnEnv()
+    req = datatypes.RolloutRequest(
+        prompt_id="p_tito",
+        prompt="q0",
+        max_response_length=64,
+    )
+    self.assertTrue(req.exact_token_continuity)
+    engine = collector.TrajectoryCollectorEngine(
+        traj_id="traj_tito",
+        request=req,
+        sampler=sampler,
+        env_client=env,
+        agent=agent,
+        tokenizer=tokenizer,
+        chat_parser=parser,
+    )
+    item = asyncio.run(engine.run_episode())
+    self.assertLen(sampler.requests, 2)
+    # Turn 0 uses formatted string prompt from _build_prompt.
+    self.assertIsInstance(sampler.requests[0].prompt, str)
+    # Turn 1 bypasses _build_prompt and passes continuation token IDs directly.
+    self.assertIsInstance(sampler.requests[1].prompt, np.ndarray)
+    expected_env_tokens = np.asarray(tokenizer.encode("PARSED"), dtype=np.int32)
+    expected_turn1_prompt = np.concatenate([
+        np.array([10, 11], dtype=np.int32),
+        np.array([21, 22], dtype=np.int32),
+        expected_env_tokens,
+    ])
+    np.testing.assert_array_equal(
+        sampler.requests[1].prompt, expected_turn1_prompt
+    )
+    np.testing.assert_array_equal(item.traj["prompt_tokens"], [10, 11])
 
 
 if __name__ == "__main__":

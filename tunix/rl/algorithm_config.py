@@ -66,6 +66,9 @@ class AlgorithmConfig:
   # probabilities. If False, recompute old-policy log probabilities on the
   # trainer actor.
   use_rollout_logps: bool = True
+  # Whether to preserve exact token IDs across multi-turn rollout steps
+  # without detokenizing and re-tokenizing intermediate turns (TITO).
+  exact_token_continuity: bool = True
 
   def __post_init__(self):
     valid_algo_variants = [

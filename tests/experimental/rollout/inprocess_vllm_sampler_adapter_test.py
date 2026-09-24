@@ -497,6 +497,31 @@ class RoutedExpertsTest(absltest.TestCase):
       self.assertEqual(resp.text, "parallel completion")
     asyncio.run(adapter.stop())
 
+  def test_sample_with_token_id_prompt_and_prompt_lengths(self):
+    # Left-padded prompt tokens where valid prompt starts with 0 (pad_id)
+    # and true prompt_lengths=[3] should preserve [0, 10, 20].
+    adapter = self._adapter(None)
+    adapter.vllm_sampler.return_value = base_sampler.SamplerOutput(
+        text=["completion"],
+        logits=None,
+        tokens=[np.array([30, 40], dtype=np.int32)],
+        padded_prompt_tokens=np.array([[0, 0, 0, 10, 20]], dtype=np.int32),
+        prompt_lengths=np.array([3], dtype=np.int32),
+        logprobs=None,
+    )
+    req = base_sampler_lib.SamplingRequest(
+        request_id="req_tok",
+        prompt=np.array([0, 10, 20], dtype=np.int32),
+    )
+    resp = asyncio.run(adapter.sample(req))
+    call_kwargs = adapter.vllm_sampler.call_args.kwargs
+    self.assertIsNone(call_kwargs["input_strings"])
+    self.assertLen(call_kwargs["prompt_token_ids"], 1)
+    np.testing.assert_array_equal(
+        call_kwargs["prompt_token_ids"][0], [0, 10, 20]
+    )
+    np.testing.assert_array_equal(resp.prompt_token_ids, [0, 10, 20])
+
 
 if __name__ == "__main__":
   absltest.main()

@@ -23,8 +23,8 @@ import dataclasses
 import enum
 import time
 from typing import Any, Dict
-import flax
 import uuid
+import flax
 from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import numpy as np
 from tunix.common import datatypes as common_datatypes
@@ -255,6 +255,8 @@ class RolloutRequest(Request):
       turns of the rollout episode.
     target_policy_version: Policy model version identifier to use for rollout
       generation.
+    exact_token_continuity: Whether to preserve exact token IDs across
+      multi-turn rollout steps (Token-In-Token-Out). Defaults to True.
   """
 
   prompt: Any = ""
@@ -264,6 +266,7 @@ class RolloutRequest(Request):
   max_turns: int = 10
   max_response_length: int | None = None
   target_policy_version: int = 0
+  exact_token_continuity: bool = True
 
   @property
   def traj_id(self) -> str:
@@ -326,7 +329,8 @@ class RolloutResponse(Response):
   """Serializable result of a rollout generation request carrying a TrajectoryItem payload.
 
   Attributes:
-    status: Terminal status name (e.g. "COMPLETED", "ERROR", "TIMEOUT", "CANCELLED").
+    status: Terminal status name (e.g. "COMPLETED", "ERROR", "TIMEOUT",
+      "CANCELLED").
     payload: TrajectoryItem carrying episode trajectory, token arrays, masks,
       and metadata.
   """
@@ -417,7 +421,7 @@ class WeightSyncMetadata:
 
 @flax.struct.dataclass(frozen=True, kw_only=True)
 class TrainerPayload:
-  """Base abstract class for generic trainer payloads. """
+  """Base abstract class for generic trainer payloads."""
 
 
 @flax.struct.dataclass(frozen=True, kw_only=True)

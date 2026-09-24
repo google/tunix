@@ -153,6 +153,15 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " on-policy ratio=1."
       ),
   )
+  parser.add_argument(
+      "--exact_token_continuity",
+      action=argparse.BooleanOptionalAction,
+      default=True,
+      help=(
+          "Preserve exact token IDs across multi-turn rollout steps without"
+          " detokenizing and re-tokenizing intermediate turns (TITO)."
+      ),
+  )
   # ---- Optional GRPO algorithm options -------------------------------------
   # All default to off, so omitting them reproduces the previous behaviour.
   parser.add_argument(
@@ -462,6 +471,7 @@ def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
       beta=args.beta,
       temperature=args.temperature,
       use_rollout_logps=args.use_rollout_logps,
+      exact_token_continuity=args.exact_token_continuity,
       loss_agg_mode=args.loss_agg_mode,
       advantage_estimator=args.advantage_estimator,
       overlong_loss_masking=args.overlong_loss_masking,
@@ -691,6 +701,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         env_verbose=args.env_verbose,
         episode_timeout_secs=args.episode_timeout_secs,
         overlong_filter=args.overlong_filter,
+        exact_token_continuity=args.exact_token_continuity,
     )
     if args.use_agent_sandbox:
       prompt_stream = swe_env.PrewarmDatasetIterator(

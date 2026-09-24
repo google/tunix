@@ -641,6 +641,41 @@ class RoutedExpertsForItemTest(absltest.TestCase):
     with self.assertRaisesRegex(ValueError, "length, num_layers, top_k"):
       self._align(np.zeros((8, _ROUTING_TOP_K), dtype=np.int32))
 
+  def test_create_trainer_payloads_unpads_prompt_tokens_using_prompt_length(
+      self,
+  ):
+    adapter = algorithm_adapter.GRPOAdapter(
+        algo_config=algorithm_config.GRPOConfig(num_generations=2)
+    )
+    item1 = datatypes.TrajectoryItem(
+        group_index=0,
+        prompt_id="g1",
+        start_step=0,
+        traj={
+            "prompt_tokens": np.array([0, 0, 0, 10, 20], dtype=np.int32),
+            "prompt_length": 3,
+            "conversation_tokens": np.array([30, 40], dtype=np.int32),
+            "conversation_masks": np.array([1, 1], dtype=np.float32),
+        },
+    )
+    item2 = datatypes.TrajectoryItem(
+        group_index=1,
+        prompt_id="g1",
+        start_step=0,
+        traj={
+            "prompt_tokens": np.array([0, 0, 0, 10, 20], dtype=np.int32),
+            "prompt_length": 3,
+            "conversation_tokens": np.array([50, 60], dtype=np.int32),
+            "conversation_masks": np.array([1, 1], dtype=np.float32),
+        },
+    )
+    payloads = adapter.create_trainer_payloads(
+        [item1, item2], rewards=[1.0, 2.0]
+    )
+    np.testing.assert_array_equal(payloads[0].prompt_ids, [0, 10, 20])
+    np.testing.assert_array_equal(payloads[0].prompt_mask, [1.0, 1.0, 1.0])
+    np.testing.assert_array_equal(payloads[1].prompt_ids, [0, 10, 20])
+
 
 if __name__ == "__main__":
   absltest.main()
