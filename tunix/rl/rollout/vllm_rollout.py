@@ -133,6 +133,7 @@ class VllmRollout(base_rollout.BaseRollout):
         logprobs=output.logprobs,  # pyrefly: ignore[bad-argument-type]
         routed_experts=output.routed_experts,
         prompt_lengths=output.prompt_lengths,
+        num_preemptions=getattr(output, "num_preemptions", None),
     )
 
   def get_per_token_logps(

@@ -710,6 +710,12 @@ class TrajectoryLoggerTest(absltest.TestCase):
                 'step_latency': [1.2, 0.8],
                 'prompt_tokens': [100, 150],
                 'completion_tokens': [24, 16],
+                'num_preemptions': [1, 0],
+            },
+            'env_time': {
+                'reset_latency': 0.5,
+                'step_latency': [2.0, 3.0],
+                'close_latency': 0.5,
             },
         },
     }
@@ -742,6 +748,11 @@ class TrajectoryLoggerTest(absltest.TestCase):
     self.assertEqual(inf_summary['type'], 'summary')
     self.assertEqual(inf_summary['traj_id'], 'traj_issue_99_g1')
     self.assertAlmostEqual(inf_summary['total_model_time_sec'], 2.0)
+    self.assertAlmostEqual(inf_summary['total_env_time_sec'], 6.0)
+    self.assertAlmostEqual(inf_summary['total_time_sec'], 8.0)
+    self.assertAlmostEqual(inf_summary['total_time'], 8.0)
+    self.assertEqual(inf_summary['total_preemptions'], 1)
+    self.assertEqual(inf_summary['preemptions'], 1)
     self.assertEqual(inf_summary['total_completion_tokens'], 40)
     self.assertAlmostEqual(inf_summary['tokens_per_second'], 20.0)
     self.assertAlmostEqual(inf_summary['tpot_ms'], 50.0)
@@ -756,6 +767,11 @@ class TrajectoryLoggerTest(absltest.TestCase):
     self.assertEqual(lines[0]['prompt_tokens'], 100)
     self.assertEqual(lines[0]['completion_tokens'], 24)
     self.assertAlmostEqual(lines[0]['latency_sec'], 1.2)
+    self.assertAlmostEqual(lines[0]['model_time_sec'], 1.2)
+    self.assertAlmostEqual(lines[0]['env_time_sec'], 2.0)
+    self.assertAlmostEqual(lines[0]['total_time_sec'], 3.2)
+    self.assertAlmostEqual(lines[0]['total_time'], 3.2)
+    self.assertEqual(lines[0]['preemptions'], 1)
     self.assertAlmostEqual(lines[0]['tokens_per_second'], 20.0)
     self.assertAlmostEqual(lines[0]['tpot_ms'], 50.0)
     # Line 1: step 1
@@ -763,11 +779,19 @@ class TrajectoryLoggerTest(absltest.TestCase):
     self.assertEqual(lines[1]['prompt_tokens'], 150)
     self.assertEqual(lines[1]['completion_tokens'], 16)
     self.assertAlmostEqual(lines[1]['latency_sec'], 0.8)
+    self.assertAlmostEqual(lines[1]['model_time_sec'], 0.8)
+    self.assertAlmostEqual(lines[1]['env_time_sec'], 3.0)
+    self.assertAlmostEqual(lines[1]['total_time_sec'], 3.8)
+    self.assertAlmostEqual(lines[1]['total_time'], 3.8)
+    self.assertEqual(lines[1]['preemptions'], 0)
     self.assertAlmostEqual(lines[1]['tokens_per_second'], 20.0)
     self.assertAlmostEqual(lines[1]['tpot_ms'], 50.0)
     # Line 2: summary
     self.assertEqual(lines[2]['type'], 'summary')
     self.assertAlmostEqual(lines[2]['total_model_time_sec'], 2.0)
+    self.assertAlmostEqual(lines[2]['total_time_sec'], 8.0)
+    self.assertAlmostEqual(lines[2]['total_time'], 8.0)
+    self.assertEqual(lines[2]['total_preemptions'], 1)
     self.assertEqual(lines[2]['total_completion_tokens'], 40)
 
 

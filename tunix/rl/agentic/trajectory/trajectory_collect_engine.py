@@ -174,6 +174,7 @@ class TrajectoryCollectEngine:
         "step_latency": [],  # List of per-step model inference times in seconds
         "prompt_tokens": [],
         "completion_tokens": [],
+        "num_preemptions": [],
     }
     self.reward_time = {
         "reward_latency": (
@@ -381,6 +382,21 @@ class TrajectoryCollectEngine:
     self.model_time["total_completion_tokens"] = int(
         sum(self.model_time["completion_tokens"])
     )
+    self.model_time["total_preemptions"] = int(
+        sum(self.model_time.get("num_preemptions", []))
+    )
+    total_env_time = float(
+        self.env_time.get("reset_latency", 0.0)
+        + sum(self.env_time.get("step_latency", []))
+        + self.env_time.get("close_latency", 0.0)
+    )
+    total_reward_time = float(
+        self.reward_time.get("reward_latency", 0.0)
+    )
+    total_time = (
+        self.model_time["total_latency"] + total_env_time + total_reward_time
+    )
+    self.agent.trajectory.total_time = total_time
 
     if mode not in ["Trajectory", "Steps", "Token", "Conversation"]:
       raise ValueError(
@@ -569,6 +585,7 @@ class TrajectoryCollectEngine:
           "env_time": self.env_time,
           "reward_time": self.reward_time,
           "model_time": self.model_time,
+          "total_time": total_time,
           "old_logprobs": (
               np.concatenate(logprobs, axis=0) if logprobs else None
           ),
@@ -858,6 +875,11 @@ class TrajectoryCollectEngine:
     )
     self.model_time["prompt_tokens"].append(prompt_len)
     self.model_time["completion_tokens"].append(comp_len)
+    preempt = 0
+    if getattr(rollout_output, "num_preemptions", None) is not None:
+      p = rollout_output.num_preemptions
+      preempt = int(p[0] if isinstance(p, (list, tuple)) else p)
+    self.model_time["num_preemptions"].append(preempt)
     logging.debug("%s model_call done", self._debug_prefix)
     if self.on_rollout_output_callback:
       self.on_rollout_output_callback(rollout_output)

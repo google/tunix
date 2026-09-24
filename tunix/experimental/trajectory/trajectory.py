@@ -620,6 +620,10 @@ class TunixTrajectoryMetadata(TrajectoryMetadata):
       default=None,
       description="Timing information for model inference operations.",
   )
+  total_time: float | None = pydantic.Field(
+      default=None,
+      description="Total wall-clock duration of the trajectory in seconds.",
+  )
 
 
 class TunixTrajectory(TunixTrajectoryMetadata):

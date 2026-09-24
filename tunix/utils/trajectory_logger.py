@@ -639,6 +639,22 @@ def log_trajectory_json(
       _write_single_file(step_file, step_json)
 
     # Generate and write inference_metrics.json and inference_metrics.jsonl
+    raw_env_time = (
+        traj.get('env_time')
+        if isinstance(traj, dict)
+        else getattr(traj, 'env_time', {})
+    )
+    if not isinstance(raw_env_time, dict):
+      raw_env_time = {}
+
+    raw_reward_time = (
+        traj.get('reward_time')
+        if isinstance(traj, dict)
+        else getattr(traj, 'reward_time', {})
+    )
+    if not isinstance(raw_reward_time, dict):
+      raw_reward_time = {}
+
     raw_model_time = (
         traj.get('model_time')
         if isinstance(traj, dict)
@@ -650,6 +666,8 @@ def log_trajectory_json(
     m_step_latencies = raw_model_time.get('step_latency', [])
     m_prompt_tokens = raw_model_time.get('prompt_tokens', [])
     m_comp_tokens = raw_model_time.get('completion_tokens', [])
+    m_preemptions = raw_model_time.get('num_preemptions', [])
+    env_step_latencies = raw_env_time.get('step_latency', [])
 
     inference_step_records = []
     total_comp_tokens = 0
@@ -686,12 +704,37 @@ def log_trajectory_json(
       if c_tokens is not None:
         total_comp_tokens += int(c_tokens)
 
+      env_lat = (
+          env_step_latencies[idx]
+          if (isinstance(env_step_latencies, list) and idx < len(env_step_latencies))
+          else None
+      )
+      if env_lat is None and isinstance(s_data, dict):
+        env_lat = s_data.get('env_latency_sec') or s_data.get('env_time_sec')
+
+      preempt = (
+          m_preemptions[idx]
+          if (isinstance(m_preemptions, list) and idx < len(m_preemptions))
+          else None
+      )
+      if preempt is None and isinstance(s_data, dict):
+        preempt = s_data.get('num_preemptions') or s_data.get('preemptions')
+
+      step_total_time = None
+      if lat is not None or env_lat is not None:
+        step_total_time = float(lat or 0.0) + float(env_lat or 0.0)
+
       rec = {
           'traj_id': traj_id_raw,
           'step_index': idx,
+          'total_time': float(step_total_time) if step_total_time is not None else None,
+          'total_time_sec': float(step_total_time) if step_total_time is not None else None,
+          'model_time_sec': float(lat) if lat is not None else None,
+          'env_time_sec': float(env_lat) if env_lat is not None else None,
           'latency_sec': float(lat) if lat is not None else None,
           'prompt_tokens': int(p_tokens) if p_tokens is not None else None,
           'completion_tokens': int(c_tokens) if c_tokens is not None else None,
+          'preemptions': int(preempt) if preempt is not None else 0,
           'tokens_per_second': (
               (float(c_tokens) / float(lat))
               if (lat is not None and c_tokens is not None and float(lat) > 0)
@@ -738,6 +781,34 @@ def log_trajectory_json(
         else 0.0
     )
 
+    total_env_time = float(
+        raw_env_time.get('reset_latency', 0.0)
+        + sum(env_step_latencies if isinstance(env_step_latencies, list) else [])
+        + raw_env_time.get('close_latency', 0.0)
+    )
+    total_reward_time = float(raw_reward_time.get('reward_latency', 0.0))
+    if isinstance(raw_reward_time.get('step_latency'), list):
+      total_reward_time += float(sum(raw_reward_time['step_latency']))
+
+    traj_total_time = (
+        traj.get('total_time')
+        if isinstance(traj, dict)
+        else getattr(traj, 'total_time', None)
+    )
+    if traj_total_time is not None and float(traj_total_time) > 0:
+      total_time = float(traj_total_time)
+    else:
+      total_time = float(total_m_time + total_env_time + total_reward_time)
+
+    total_preemptions = raw_model_time.get('total_preemptions')
+    if total_preemptions is None:
+      all_preempts = [
+          r.get('preemptions', 0) for r in inference_step_records
+      ]
+      total_preemptions = int(sum(all_preempts)) if all_preempts else 0
+    else:
+      total_preemptions = int(total_preemptions)
+
     inference_summary = {
         'type': 'summary',
         'traj_id': traj_id_raw,
@@ -748,9 +819,14 @@ def log_trajectory_json(
         'status': str(status),
         'reward': float(reward) if reward is not None else None,
         'num_steps': len(steps_list),
+        'total_time': total_time,
+        'total_time_sec': total_time,
         'total_model_time_sec': total_m_time,
+        'total_env_time_sec': total_env_time,
         'mean_step_latency_sec': mean_step_lat,
         'total_completion_tokens': total_comp_tokens,
+        'total_preemptions': total_preemptions,
+        'preemptions': total_preemptions,
         'tokens_per_second': traj_tps,
         'tpot_ms': traj_tpot_ms,
     }

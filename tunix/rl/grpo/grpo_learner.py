@@ -361,13 +361,20 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         if total_completion_tokens > 0
         else 0.0
     )
+    total_preemptions = 0
+    if hasattr(rollout_output, "num_preemptions") and rollout_output.num_preemptions is not None:
+      p = rollout_output.num_preemptions
+      total_preemptions = sum(p) if isinstance(p, (list, tuple, np.ndarray)) else int(p)
+
     self.rl_engine.buffer_metrics(
         {
             "inference/rollout_duration_sec": (rollout_duration, np.mean),
+            "inference/total_time_sec": (rollout_duration, np.mean),
             "inference/total_completion_tokens": (
                 float(total_completion_tokens),
                 np.mean,
             ),
+            "inference/total_preemptions": (float(total_preemptions), np.mean),
             "inference/tokens_per_second": (tps, np.mean),
             "inference/tpot_ms": (tpot_ms, np.mean),
         },

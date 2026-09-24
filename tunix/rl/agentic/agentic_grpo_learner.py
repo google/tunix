@@ -929,11 +929,35 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
 
     # High-level inference metrics across all trajectories in the batch
     all_model_latencies = []
+    all_traj_preemptions = []
+    all_traj_total_times = []
     for item in trajectories:
-      m_time = item.traj.get("model_time", {})
+      traj_dict = item.traj if isinstance(item.traj, dict) else {}
+      m_time = traj_dict.get("model_time", {})
+      e_time = traj_dict.get("env_time", {})
+      r_time = traj_dict.get("reward_time", {})
       step_lats = m_time.get("step_latency", [])
       if isinstance(step_lats, (list, tuple, np.ndarray)):
         all_model_latencies.extend(step_lats)
+
+      p = m_time.get("total_preemptions")
+      if p is None:
+        p_list = m_time.get("num_preemptions", [])
+        p = sum(p_list) if isinstance(p_list, (list, tuple, np.ndarray)) else 0
+      all_traj_preemptions.append(int(p))
+
+      t_time = traj_dict.get("total_time")
+      if t_time is None:
+        m_lat = sum(step_lats) if isinstance(step_lats, (list, tuple, np.ndarray)) else 0.0
+        e_step = e_time.get("step_latency", [])
+        e_lat = (
+            e_time.get("reset_latency", 0.0)
+            + (sum(e_step) if isinstance(e_step, (list, tuple, np.ndarray)) else 0.0)
+            + e_time.get("close_latency", 0.0)
+        )
+        r_lat = r_time.get("reward_latency", 0.0)
+        t_time = m_lat + e_lat + r_lat
+      all_traj_total_times.append(float(t_time))
 
     if all_model_latencies:
       total_model_time = float(np.sum(all_model_latencies))
@@ -946,6 +970,9 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           if total_comp_tokens > 0
           else 0.0
       )
+      total_preemptions = int(sum(all_traj_preemptions))
+      total_time = float(sum(all_traj_total_times))
+
       metrics_to_log.update({
           "inference/step_latency_sec/mean": (
               np.mean(all_model_latencies),
@@ -961,8 +988,16 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           ),
           "inference/total_completion_tokens": (total_comp_tokens, np.mean),
           "inference/total_model_time_sec": (total_model_time, np.mean),
+          "inference/total_time_sec": (total_time, np.mean),
+          "inference/total_preemptions": (float(total_preemptions), np.mean),
           "inference/tokens_per_second": (tokens_per_sec, np.mean),
           "inference/tpot_ms": (tpot_ms, np.mean),
+          "trajectory/total_time_sec/mean": (np.mean(all_traj_total_times), np.mean),
+          "trajectory/total_time_sec/max": (np.max(all_traj_total_times), np.max),
+          "trajectory/total_time_sec/min": (np.min(all_traj_total_times), np.min),
+          "trajectory/preemptions/mean": (np.mean(all_traj_preemptions), np.mean),
+          "trajectory/preemptions/max": (np.max(all_traj_preemptions), np.max),
+          "trajectory/preemptions/sum": (float(total_preemptions), np.mean),
       })
 
     # Extract time metrics (env_time, reward_time, and model_time)
