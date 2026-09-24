@@ -65,6 +65,9 @@ class AlgorithmConfig:
   # probabilities. If False, recompute old-policy log probabilities on the
   # trainer actor.
   use_rollout_logps: bool = True
+  # Whether to preserve exact token IDs across multi-turn rollout steps
+  # without detokenizing and re-tokenizing intermediate turns (TITO).
+  exact_token_continuity: bool = True
 
   def __post_init__(self):
     valid_algo_variants = [
@@ -160,6 +163,7 @@ class GRPOConfig(AlgorithmConfig):
     seq_logprob_error_threshold: Optional sequence-level multiplicative
       log-probability error threshold. Sequences exceeding this threshold are
       masked out of the loss.
+
   References:
     - GRPO: https://arxiv.org/abs/2402.03300
     - GSPO: https://arxiv.org/abs/2507.18071

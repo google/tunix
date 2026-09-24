@@ -70,9 +70,6 @@ class RolloutOutput:
 class BaseRollout(ABC):
   """Base RolloutWorker."""
 
-  # Capability, not a user-selectable behavior flag.
-  supports_token_input: bool = False
-
   @abstractmethod
   def __init__(self, **kwargs):
     """Initializes the rollout worker."""

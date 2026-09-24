@@ -1036,7 +1036,6 @@ class RlEngineTokenInputTest(parameterized.TestCase):
 
     return SimpleNamespace(
         rollout=SimpleNamespace(
-            supports_token_input=True,
             generate=mock.Mock(side_effect=generate),
             model=lambda: None,
             pad_id=lambda: 0,

@@ -396,6 +396,49 @@ class TokenContinuityTest(absltest.TestCase):
     with self.assertRaisesRegex(ValueError, 'only append'):
       utils.assistant_with_suffix([1], [1, 9], 0)  # miscounted suffix
 
+  def test_continuation_prompt_tokens_handles_none_env_tokens(self):
+    from types import SimpleNamespace  # pylint: disable=g-import-not-at-top
+    from tunix.rl.agentic.agents import agent_types  # pylint: disable=g-import-not-at-top
+
+    trajectory = SimpleNamespace(
+        prompt_tokens=np.array([0, 0, 100, 101]),
+        prompt_length=2,
+        steps=[
+            agent_types.Step(
+                assistant_tokens=np.array([10, 11, 90], dtype=np.int32),
+                env_tokens=None,
+            )
+        ],
+    )
+    result = utils.continuation_prompt_tokens(trajectory)
+    np.testing.assert_array_equal(result, [100, 101, 10, 11, 90])
+
+  def test_tokenize_and_generate_masks_dedup_bos_slices_masks(self):
+    mock_tokenizer = mock.MagicMock()
+    mock_tokenizer.encode.side_effect = [
+        [2, 2, 10, 11],  # two leading BOS tokens (id=2)
+        [20, 21],
+    ]
+    mock_tokenizer.dedup_bos_ids.side_effect = lambda toks: toks[1:]
+    mock_parser = mock.MagicMock()
+    mock_parser.preprocess_messages.side_effect = lambda m: m
+    mock_parser.assistant_token = '<assistant>'
+    mock_parser.parse.return_value = 'parsed'
+
+    messages = [
+        {'role': 'user', 'content': 'hello'},
+        {'role': 'assistant', 'content': 'world'},
+    ]
+    tokens, masks = utils.tokenize_and_generate_masks(
+        messages,
+        tokenizer=mock_tokenizer,
+        parser=mock_parser,
+        contains_first_msg=True,
+        contains_generation_msg=False,
+    )
+    self.assertEqual(tokens, [2, 10, 11, 20, 21])
+    self.assertEqual(masks, [0, 0, 0, 1, 1])
+
 
 if __name__ == '__main__':
   absltest.main()

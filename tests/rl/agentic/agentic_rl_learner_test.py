@@ -235,25 +235,21 @@ class ExactTokenContinuityConfigTest(absltest.TestCase):
     import types  # pylint: disable=g-import-not-at-top
     from tunix.rl.agentic import agentic_grpo_learner  # pylint: disable=g-import-not-at-top
 
-    for supports_tokens, expected in ((True, True), (False, False)):
-      config = base_rollout.RolloutConfig(
-          max_tokens_to_generate=1024, return_logprobs=True
+    config = base_rollout.RolloutConfig(
+        max_tokens_to_generate=1024, return_logprobs=True
+    )
+    engine = mock.MagicMock()
+    engine.cluster_config.rollout_engine = "generic"
+    engine.cluster_config.rollout_config = config
+    engine.cluster_config.training_config.max_seq_token_per_tpu = None
+    with mock.patch.object(rl_utils, "is_sharing_weights", return_value=False):
+      learner = DummyLearner(
+          rl_engine=engine,
+          reward_fns=mock.Mock(),
+          algo_config=agentic_grpo_learner.GRPOConfig(),
+          chat_parser=object(),
       )
-      engine = mock.MagicMock()
-      engine.rollout.supports_token_input = supports_tokens
-      engine.cluster_config.rollout_engine = "generic"
-      engine.cluster_config.rollout_config = config
-      engine.cluster_config.training_config.max_seq_token_per_tpu = None
-      with mock.patch.object(
-          rl_utils, "is_sharing_weights", return_value=False
-      ):
-        learner = DummyLearner(
-            rl_engine=engine,
-            reward_fns=mock.Mock(),
-            algo_config=agentic_grpo_learner.GRPOConfig(),
-            chat_parser=object(),
-        )
-      self.assertIs(learner.algo_config.exact_token_continuity, expected)
+    self.assertIs(learner.algo_config.exact_token_continuity, True)
 
     for enabled in (False, True):
       obj = types.SimpleNamespace(
@@ -275,33 +271,28 @@ class ExactTokenContinuityConfigTest(absltest.TestCase):
           enabled,
       )
 
-  def test_exact_mode_rejects_backends_and_rollout_configs_it_cannot_honor(
+  def test_exact_mode_rejects_rollout_configs_it_cannot_honor(
       self,
   ):
     import types  # pylint: disable=g-import-not-at-top
     from tunix.rl.agentic import agentic_grpo_learner  # pylint: disable=g-import-not-at-top
 
-    engine = types.SimpleNamespace(
-        rollout=types.SimpleNamespace(supports_token_input=False)
-    )
-    with self.assertRaisesRegex(ValueError, "token-input backend"):
-      agentic_grpo_learner.GRPOLearner(
-          engine, agentic_grpo_learner.GRPOConfig(exact_token_continuity=True)
-      )
-    for option, value, message in (
-        ("return_logprobs", False, "sampled logprobs"),
-        ("return_routed_experts", True, "expert routing"),
+    for option, value, max_seq_token, message in (
+        ("return_logprobs", False, None, "sampled logprobs"),
+        ("return_routed_experts", True, 1024, "expert routing"),
     ):
       config = base_rollout.RolloutConfig(
           max_tokens_to_generate=1024, return_logprobs=True
       )
       setattr(config, option, value)
       engine = types.SimpleNamespace(
-          rollout=types.SimpleNamespace(supports_token_input=True),
+          rollout=types.SimpleNamespace(),
           tokenizer=object(),
           cluster_config=types.SimpleNamespace(
               rollout_config=config,
-              training_config=types.SimpleNamespace(max_seq_token_per_tpu=None),
+              training_config=types.SimpleNamespace(
+                  max_seq_token_per_tpu=max_seq_token
+              ),
           ),
       )
       with self.assertRaisesRegex(ValueError, message):

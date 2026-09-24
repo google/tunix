@@ -28,8 +28,6 @@ from tunix.rl.rollout import base_rollout
 class SglangJaxRollout(base_rollout.BaseRollout):
   """sglang jax rollout worker."""
 
-  supports_token_input = True
-
   def __init__(
       self,
       model: Any,

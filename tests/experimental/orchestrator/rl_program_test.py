@@ -412,6 +412,7 @@ class RLProgramTest(absltest.TestCase):
           }],
           num_generations=2,
           policy_version=0,
+          exact_token_continuity=True,
           generation_args=datatypes.GenerationArgs(
               return_logprobs=True,
           ),
@@ -1567,6 +1568,7 @@ class RLProgramTest(absltest.TestCase):
           [{**dict_item, "max_response_length": 1024}],
           num_generations=2,
           policy_version=0,
+          exact_token_continuity=True,
           generation_args=datatypes.GenerationArgs(
               return_logprobs=True,
           ),

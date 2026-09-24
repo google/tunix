@@ -19,6 +19,7 @@ asynchronous collection of rollouts by managing the interaction loop between
 an LLM-based agent and an environment. It supports single and concurrent
 multi-pair trajectory collection.
 """
+
 import asyncio
 import copy
 import inspect
@@ -36,7 +37,6 @@ from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.agents import base_agent
 from tunix.rl.agentic.environments import base_environment
 from tunix.rl.rollout import base_rollout
-
 
 BaseTaskEnv = base_environment.BaseTaskEnv
 ConversationAgentBase = base_agent.ConversationAgentBase
@@ -309,14 +309,12 @@ class TrajectoryCollectEngine:
       conversation_tokens, conversation_masks, logprobs = [], [], []
       routed_experts = []
       prompt_tokens = getattr(self.agent.trajectory, "prompt_tokens", [])
-      has_routed_experts = (
-          getattr(self.agent.trajectory, "prompt_routed_experts", None)
-          is not None
-          or any(
-              getattr(step, "assistant_routed_experts", None) is not None
-              or getattr(step, "env_routed_experts", None) is not None
-              for step in self.agent.trajectory.steps
-          )
+      has_routed_experts = getattr(
+          self.agent.trajectory, "prompt_routed_experts", None
+      ) is not None or any(
+          getattr(step, "assistant_routed_experts", None) is not None
+          or getattr(step, "env_routed_experts", None) is not None
+          for step in self.agent.trajectory.steps
       )
 
       for idx, step in enumerate(self.agent.trajectory.steps):
@@ -415,7 +413,11 @@ class TrajectoryCollectEngine:
             if routed_experts
             else np.zeros((0,) + sample_shape, dtype=np.int16)
         )
-        prompt_len = len(prompt_tokens) if prompt_tokens is not None else 0
+        prompt_len = (
+            (self.agent.trajectory.prompt_length or 0)
+            if self.exact_token_continuity
+            else (len(prompt_tokens) if prompt_tokens is not None else 0)
+        )
         if prompt_len > 0:
           if prompt_routed is None:
             raise ValueError(
@@ -424,8 +426,9 @@ class TrajectoryCollectEngine:
             )
           if getattr(prompt_routed, "shape", (0,))[0] != prompt_len:
             raise ValueError(
-                f"prompt_routed_experts shape {getattr(prompt_routed, 'shape', None)}"
-                f" does not match prompt_tokens length {prompt_len}."
+                "prompt_routed_experts shape"
+                f" {getattr(prompt_routed, 'shape', None)} does not match"
+                f" prompt_tokens length {prompt_len}."
             )
           prompt_routed_arr = np.asarray(prompt_routed, dtype=np.int16)
         else:
@@ -669,7 +672,9 @@ class TrajectoryCollectEngine:
         )
     )
     if self._cumulative_prompt_tokens > 0:
-      call_kwargs["routed_experts_prompt_start"] = self._cumulative_prompt_tokens
+      call_kwargs["routed_experts_prompt_start"] = (
+          self._cumulative_prompt_tokens
+      )
 
     if is_async:
       try:
@@ -683,6 +688,7 @@ class TrajectoryCollectEngine:
         logging.exception("Caught exception inside async model_call: %s", e)
         raise
     else:
+
       def _safe_model_call():
         try:
           return model_call_fn(
@@ -726,9 +732,14 @@ class TrajectoryCollectEngine:
     ):
       init_routed = np.asarray(rollout_output.routed_experts[0], dtype=np.int16)
       prompt_len = (
-          len(self.agent.trajectory.prompt_tokens)
-          if getattr(self.agent.trajectory, "prompt_tokens", None) is not None
-          else 0
+          (self.agent.trajectory.prompt_length or 0)
+          if self.exact_token_continuity
+          else (
+              len(self.agent.trajectory.prompt_tokens)
+              if getattr(self.agent.trajectory, "prompt_tokens", None)
+              is not None
+              else 0
+          )
       )
       self.agent.trajectory.prompt_routed_experts = (  # pyrefly: ignore[missing-attribute]
           init_routed[:prompt_len]
@@ -740,7 +751,9 @@ class TrajectoryCollectEngine:
         and rollout_output.routed_experts
         and rollout_output.routed_experts[0] is not None
     ):
-      delta_routed = np.asarray(rollout_output.routed_experts[0], dtype=np.int16)
+      delta_routed = np.asarray(
+          rollout_output.routed_experts[0], dtype=np.int16
+      )
       prev_step = self.agent.trajectory.steps[-1]
       needed_asst = 0
       if (
@@ -755,18 +768,16 @@ class TrajectoryCollectEngine:
         if needed_asst > 0:
           if len(delta_routed) < needed_asst:
             raise ValueError(
-                f"Insufficient delta_routed length {len(delta_routed)} to stitch "
-                f"{needed_asst} trailing assistant tokens at step "
-                f"{len(self.agent.trajectory.steps) - 1}."
+                f"Insufficient delta_routed length {len(delta_routed)} to"
+                f" stitch {needed_asst} trailing assistant tokens at step"
+                f" {len(self.agent.trajectory.steps) - 1}."
             )
           prev_step.assistant_routed_experts = np.concatenate(
               [prev_step.assistant_routed_experts, delta_routed[:needed_asst]],
               axis=0,
           )
       num_env = (
-          len(prev_step.env_tokens)
-          if prev_step.env_tokens is not None
-          else 0
+          len(prev_step.env_tokens) if prev_step.env_tokens is not None else 0
       )
       if num_env > 0:
         prev_step.env_routed_experts = delta_routed[
@@ -774,7 +785,7 @@ class TrajectoryCollectEngine:
         ]
         if len(prev_step.env_routed_experts) != num_env:
           raise ValueError(
-              f"Mismatch between captured env_routed_experts length "
+              "Mismatch between captured env_routed_experts length "
               f"{len(prev_step.env_routed_experts)} and env_tokens length "
               f"{num_env} at step {len(self.agent.trajectory.steps) - 1}."
           )
@@ -808,10 +819,8 @@ class TrajectoryCollectEngine:
             perf_constants.ENVIRONMENT,
             tags=tags,
         ):
-          (obs, rew, done, info), wall_time = (
-              await self._run_with_timing(
-                  self.env.step, action, timeout=remaining_time
-              )
+          (obs, rew, done, info), wall_time = await self._run_with_timing(
+              self.env.step, action, timeout=remaining_time
           )
       except asyncio.TimeoutError:
         self.agent.trajectory.status = agent_types.TrajectoryStatus.ENV_TIMEOUT
@@ -851,9 +860,7 @@ class TrajectoryCollectEngine:
           self._debug_prefix,
           json.dumps(info, default=str, indent=2),
       )
-      self.agent.update_from_env(
-          obs, rew, done, self._rollout_state_info(info)
-      )
+      self.agent.update_from_env(obs, rew, done, self._rollout_state_info(info))
     else:
       done = True
 
@@ -943,9 +950,7 @@ class TrajectoryCollectEngine:
       # is provided or no step is taken.
       logging.debug("%s Final reward function is skipped", self._debug_prefix)
       return
-    final_reward, wall_time = await self._run_with_timing(
-        self.final_reward_fn
-    )
+    final_reward, wall_time = await self._run_with_timing(self.final_reward_fn)
 
     self.reward_time["reward_latency"] += wall_time
     last_step.reward += final_reward
@@ -992,9 +997,7 @@ class TrajectoryCollectEngine:
     """
     logging.debug("%s Closing environment.", self._debug_prefix)
     try:
-      _, wall_time = await self._run_with_timing(
-          self.env.close, timeout=150.0
-      )
+      _, wall_time = await self._run_with_timing(self.env.close, timeout=150.0)
       self.env_time["close_latency"] += wall_time
     except asyncio.TimeoutError:
       logging.error(

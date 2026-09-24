@@ -28,8 +28,6 @@ from tunix.rl.rollout import base_rollout
 class VanillaRollout(base_rollout.BaseRollout):
   """Vanilla rollout worker."""
 
-  supports_token_input = True
-
   def __init__(
       self,
       model: nnx.Module,

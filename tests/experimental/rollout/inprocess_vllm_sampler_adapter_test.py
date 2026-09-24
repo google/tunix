@@ -406,7 +406,6 @@ class RoutedExpertsTest(absltest.TestCase):
     call_kwargs = adapter.vllm_sampler.call_args.kwargs
     self.assertEqual(call_kwargs.get("routed_experts_prompt_start"), [8, 14])
 
-
   def test_concurrent_sample_calls_do_not_block_event_loop(self):
     """Concurrent sample() calls must run in parallel on the adapter's executor."""
     import threading  # pylint: disable=g-import-not-at-top
@@ -451,6 +450,68 @@ class RoutedExpertsTest(absltest.TestCase):
       self.assertEqual(resp.request_id, f"req-{i}")
       self.assertEqual(resp.text, "parallel completion")
     asyncio.run(adapter.stop())
+
+  def test_sample_with_token_id_prompt_and_prompt_lengths(self):
+    # Left-padded prompt tokens where valid prompt starts with 0 (pad_id)
+    # and true prompt_lengths=[3] should preserve [0, 10, 20].
+    adapter = self._adapter(None)
+    adapter.vllm_sampler.return_value = base_sampler.SamplerOutput(
+        text=["completion"],
+        logits=None,
+        tokens=[np.array([30, 40], dtype=np.int32)],
+        padded_prompt_tokens=np.array([[0, 0, 0, 10, 20]], dtype=np.int32),
+        prompt_lengths=np.array([3], dtype=np.int32),
+        logprobs=None,
+    )
+    req = base_sampler_lib.SamplingRequest(
+        request_id="req_tok",
+        prompt=np.array([0, 10, 20], dtype=np.int32),
+    )
+    resp = asyncio.run(adapter.sample(req))
+    call_kwargs = adapter.vllm_sampler.call_args.kwargs
+    self.assertIsNone(call_kwargs["input_strings"])
+    self.assertLen(call_kwargs["prompt_token_ids"], 1)
+    np.testing.assert_array_equal(
+        call_kwargs["prompt_token_ids"][0], [0, 10, 20]
+    )
+    np.testing.assert_array_equal(resp.prompt_token_ids, [0, 10, 20])
+
+  def test_hf_tokenizer_wrapped_with_tokenizer_adapter(self):
+    from transformers import tokenization_utils_base  # pylint: disable=g-import-not-at-top
+    from tunix.generate import tokenizer_adapter  # pylint: disable=g-import-not-at-top
+
+    class _DummyHFTokenizer(tokenization_utils_base.PreTrainedTokenizerBase):
+      pad_token_id = 0
+      eos_token_id = 2
+
+      def __init__(self):  # pylint: disable=super-init-not-called
+        pass
+
+    hf_tok = _DummyHFTokenizer()
+
+    adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
+        server_id="vllm_hf_tok_slice",
+        tokenizer=hf_tok,
+    )
+    self.assertIsInstance(
+        adapter.tokenizer, tokenizer_adapter.TokenizerAdapter
+    )
+    sampler = mock.MagicMock()
+    sampler.return_value = base_sampler.SamplerOutput(
+        text=["completion"],
+        logits=None,
+        tokens=[np.array([30, 40], dtype=np.int32)],
+        padded_prompt_tokens=np.array([[0, 0, 10, 20]], dtype=np.int32),
+        prompt_lengths=np.array([2], dtype=np.int32),
+        logprobs=None,
+    )
+    adapter.vllm_sampler = sampler
+    req = base_sampler_lib.SamplingRequest(
+        request_id="req_hf",
+        prompt="hello world",
+    )
+    resp = asyncio.run(adapter.sample(req))
+    np.testing.assert_array_equal(resp.prompt_token_ids, [10, 20])
 
 
 if __name__ == "__main__":
