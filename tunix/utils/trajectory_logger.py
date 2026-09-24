@@ -214,13 +214,16 @@ def log_item(
     raise ValueError(f'Item {item} is not a dataclass, dictionary or list.')
 
   log_path = epath.Path(log_path)  # pyrefly: ignore[bad-assignment]
-  log_path.mkdir(parents=True, exist_ok=True)  # pyrefly: ignore[missing-attribute]
+  log_path.mkdir(
+      parents=True, exist_ok=True
+  )  # pyrefly: ignore[missing-attribute]
 
   # GCS has no real directories: `mkdir()` is a no-op and `is_dir()` stays
   # False until an object exists under the prefix, so only enforce the
   # directory check on filesystems that model directories.
   assert (
-      _is_gcs_path(log_path) or log_path.is_dir()  # pyrefly: ignore[missing-attribute]
+      _is_gcs_path(log_path)
+      or log_path.is_dir()  # pyrefly: ignore[missing-attribute]
   ), f'log_path `{log_path}` must be a directory.'
 
   if isinstance(item, list):
@@ -237,9 +240,7 @@ def log_item(
       serialized_item if isinstance(item, list) else [serialized_item]
   )
   if _is_gcs_path(file_path):
-    tmp_file_path = (
-        file_path.parent / f'{file_path.name}.{time.time_ns()}.tmp'
-    )
+    tmp_file_path = file_path.parent / f'{file_path.name}.{time.time_ns()}.tmp'
     if local_staging_dir is not None:
       staging_file = pathlib.Path(local_staging_dir) / filename
       staging_file.parent.mkdir(parents=True, exist_ok=True)
@@ -447,6 +448,14 @@ def _extract_trajectory_steps(
     step_latency = (
         env_time.get('step_latency') if isinstance(env_time, dict) else None
     )
+    model_time = (
+        traj.get('model_time')
+        if isinstance(traj, dict)
+        else getattr(traj, 'model_time', None)
+    )
+    model_step_latency = (
+        model_time.get('step_latency') if isinstance(model_time, dict) else None
+    )
 
     while i < len(conv_text):
       msg = conv_text[i]
@@ -466,6 +475,10 @@ def _extract_trajectory_steps(
 
         if isinstance(step_latency, list) and turn_idx < len(step_latency):
           step_dict['latency_sec'] = step_latency[turn_idx]
+        if isinstance(model_step_latency, list) and turn_idx < len(
+            model_step_latency
+        ):
+          step_dict['model_latency_sec'] = model_step_latency[turn_idx]
 
         steps_list.append(step_dict)
         turn_idx += 1
@@ -599,6 +612,7 @@ def log_trajectory_json(
       ),
       'env_time': _make_serializable(traj.get('env_time')),
       'reward_time': _make_serializable(traj.get('reward_time')),
+      'model_time': _make_serializable(traj.get('model_time')),
       'metadata': _make_serializable(metadata),
   }
   meta_summary = {k: v for k, v in meta_summary.items() if v is not None}
@@ -623,6 +637,135 @@ def log_trajectory_json(
       step_file = step_dir / f'step{idx}.json'
       step_json = json.dumps(_make_serializable(s_data), indent=2)
       _write_single_file(step_file, step_json)
+
+    # Generate and write inference_metrics.json and inference_metrics.jsonl
+    raw_model_time = (
+        traj.get('model_time')
+        if isinstance(traj, dict)
+        else getattr(traj, 'model_time', {})
+    )
+    if not isinstance(raw_model_time, dict):
+      raw_model_time = {}
+
+    m_step_latencies = raw_model_time.get('step_latency', [])
+    m_prompt_tokens = raw_model_time.get('prompt_tokens', [])
+    m_comp_tokens = raw_model_time.get('completion_tokens', [])
+
+    inference_step_records = []
+    total_comp_tokens = 0
+    for idx, s_data in enumerate(steps_list):
+      lat = (
+          m_step_latencies[idx]
+          if (
+              isinstance(m_step_latencies, list) and idx < len(m_step_latencies)
+          )
+          else None
+      )
+      if lat is None and isinstance(s_data, dict):
+        lat = s_data.get('model_latency_sec') or s_data.get('latency_sec')
+
+      p_tokens = (
+          m_prompt_tokens[idx]
+          if (isinstance(m_prompt_tokens, list) and idx < len(m_prompt_tokens))
+          else None
+      )
+      if p_tokens is None and isinstance(s_data, dict):
+        p_tokens = s_data.get('prompt_tokens')
+
+      c_tokens = (
+          m_comp_tokens[idx]
+          if (isinstance(m_comp_tokens, list) and idx < len(m_comp_tokens))
+          else None
+      )
+      if c_tokens is None and isinstance(s_data, dict):
+        c_tokens = s_data.get('completion_tokens')
+        if c_tokens is None and 'assistant_tokens' in s_data:
+          asst = s_data['assistant_tokens']
+          c_tokens = len(asst) if isinstance(asst, (list, np.ndarray)) else None
+
+      if c_tokens is not None:
+        total_comp_tokens += int(c_tokens)
+
+      rec = {
+          'traj_id': traj_id_raw,
+          'step_index': idx,
+          'latency_sec': float(lat) if lat is not None else None,
+          'prompt_tokens': int(p_tokens) if p_tokens is not None else None,
+          'completion_tokens': int(c_tokens) if c_tokens is not None else None,
+          'tokens_per_second': (
+              (float(c_tokens) / float(lat))
+              if (lat is not None and c_tokens is not None and float(lat) > 0)
+              else None
+          ),
+          'tpot_ms': (
+              ((float(lat) / float(c_tokens)) * 1000.0)
+              if (
+                  lat is not None
+                  and c_tokens is not None
+                  and float(c_tokens) > 0
+              )
+              else None
+          ),
+      }
+      inference_step_records.append(
+          {k: v for k, v in rec.items() if v is not None}
+      )
+
+    total_m_time = float(sum(m_step_latencies)) if m_step_latencies else 0.0
+    if total_m_time == 0.0:
+      all_lats = [
+          r['latency_sec'] for r in inference_step_records if 'latency_sec' in r
+      ]
+      total_m_time = float(sum(all_lats)) if all_lats else 0.0
+
+    if total_comp_tokens == 0:
+      all_comps = [
+          r['completion_tokens']
+          for r in inference_step_records
+          if 'completion_tokens' in r
+      ]
+      total_comp_tokens = int(sum(all_comps)) if all_comps else 0
+
+    traj_tps = (total_comp_tokens / total_m_time) if total_m_time > 0 else 0.0
+    traj_tpot_ms = (
+        ((total_m_time / total_comp_tokens) * 1000.0)
+        if total_comp_tokens > 0
+        else 0.0
+    )
+    mean_step_lat = (
+        (total_m_time / len(inference_step_records))
+        if inference_step_records
+        else 0.0
+    )
+
+    inference_summary = {
+        'type': 'summary',
+        'traj_id': traj_id_raw,
+        'global_step': int(global_step),
+        'worker_id': worker_id_raw,
+        'prompt_id': prompt_id,
+        'group_index': int(group_index) if group_index is not None else 0,
+        'status': str(status),
+        'reward': float(reward) if reward is not None else None,
+        'num_steps': len(steps_list),
+        'total_model_time_sec': total_m_time,
+        'mean_step_latency_sec': mean_step_lat,
+        'total_completion_tokens': total_comp_tokens,
+        'tokens_per_second': traj_tps,
+        'tpot_ms': traj_tpot_ms,
+    }
+
+    inf_json = json.dumps(_make_serializable(inference_summary), indent=2)
+    _write_single_file(step_dir / 'inference_metrics.json', inf_json)
+
+    jsonl_lines = [
+        json.dumps(_make_serializable(r)) for r in inference_step_records
+    ]
+    jsonl_lines.append(json.dumps(_make_serializable(inference_summary)))
+    _write_single_file(
+        step_dir / 'inference_metrics.jsonl',
+        '\n'.join(jsonl_lines) + '\n',
+    )
 
     logging.log_first_n(
         logging.INFO,
@@ -749,9 +892,15 @@ class AsyncTrajectoryLogger:
     # Register signal handlers for robust termination
     if threading.current_thread() is threading.main_thread():
       try:
-        signal.signal(signal.SIGINT, self._handle_signal)  # pyrefly: ignore[bad-argument-type]
-        signal.signal(signal.SIGTERM, self._handle_signal)  # pyrefly: ignore[bad-argument-type]
-        signal.signal(signal.SIGHUP, self._handle_signal)  # pyrefly: ignore[bad-argument-type]
+        signal.signal(
+            signal.SIGINT, self._handle_signal
+        )  # pyrefly: ignore[bad-argument-type]
+        signal.signal(
+            signal.SIGTERM, self._handle_signal
+        )  # pyrefly: ignore[bad-argument-type]
+        signal.signal(
+            signal.SIGHUP, self._handle_signal
+        )  # pyrefly: ignore[bad-argument-type]
       except ValueError:
         logging.warning('Failed to register signal handlers.')
 

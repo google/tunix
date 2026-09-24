@@ -9,11 +9,10 @@ from __future__ import annotations
 import dataclasses
 import datetime
 import enum
-from typing import Annotated, Any, Final, Literal, get_args
+from typing import Annotated, Any, Final, get_args, Literal
 
 import numpy as np
 import pydantic
-
 
 # ==============================================================================
 # --- Pure ATIF Base Classes ---
@@ -616,6 +615,10 @@ class TunixTrajectoryMetadata(TrajectoryMetadata):
   reward_time: MetadataDict = pydantic.Field(
       default=None,
       description="Timing information for reward operations.",
+  )
+  model_time: MetadataDict = pydantic.Field(
+      default=None,
+      description="Timing information for model inference operations.",
   )
 
 

@@ -21,7 +21,8 @@ and complete episode trajectories.
 
 from collections.abc import Hashable
 import dataclasses
-from enum import Enum, auto
+from enum import auto
+from enum import Enum
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -132,6 +133,7 @@ class Trajectory:
   status: TrajectoryStatus = TrajectoryStatus.RUNNING
   env_time: dict[str, float] = dataclasses.field(default_factory=dict)
   reward_time: dict[str, float] = dataclasses.field(default_factory=dict)
+  model_time: dict[str, Any] = dataclasses.field(default_factory=dict)
   prompt_tokens: list[int] | np.ndarray = dataclasses.field(
       default_factory=list
   )
@@ -153,6 +155,7 @@ class Trajectory:
         "status": self.status.name,
         "env_time": self.env_time,
         "reward_time": self.reward_time,
+        "model_time": self.model_time,
     }
     if self.prompt_length is not None:
       result["prompt_tokens"] = np.array(self.prompt_tokens, copy=True)
@@ -222,14 +225,18 @@ class TrajectoryItem:
 
   def __getattr__(self, name: str) -> Any:
     if name.startswith("__") and name.endswith("__"):
-      raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+      raise AttributeError(
+          f"'{type(self).__name__}' object has no attribute '{name}'"
+      )
     traj = self.__dict__.get("traj")
     if isinstance(traj, dict) and name in traj:
       return traj[name]
     metadata = self.__dict__.get("metadata")
     if isinstance(metadata, dict) and name in metadata:
       return metadata[name]
-    raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+    raise AttributeError(
+        f"'{type(self).__name__}' object has no attribute '{name}'"
+    )
 
   def __getstate__(self) -> dict[str, Any]:
     return self.__dict__
@@ -277,6 +284,8 @@ class TrajectoryItem:
         traj=data.get("traj"),
         metadata=metadata,
     )
+
+
 def assistant_text(conversation_text: Any) -> str:
   """Renders the assistant's share of a rollout conversation as plain text.
 

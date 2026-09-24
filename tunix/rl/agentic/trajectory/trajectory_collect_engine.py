@@ -170,6 +170,11 @@ class TrajectoryCollectEngine:
         "step_latency": [],  # List of per-step wall-clock times, ordered by step index
         "close_latency": 0.0,  # Wall-clock time (Total real-world time elapsed)
     }
+    self.model_time = {
+        "step_latency": [],  # List of per-step model inference times in seconds
+        "prompt_tokens": [],
+        "completion_tokens": [],
+    }
     self.reward_time = {
         "reward_latency": (
             0.0
@@ -370,6 +375,13 @@ class TrajectoryCollectEngine:
         self.sync_trajectory_metadata(policy_version=self.policy_version)
         self.trajectory_store.update_metadata(self.metadata)
 
+    self.model_time["total_latency"] = float(
+        sum(self.model_time["step_latency"])
+    )
+    self.model_time["total_completion_tokens"] = int(
+        sum(self.model_time["completion_tokens"])
+    )
+
     if mode not in ["Trajectory", "Steps", "Token", "Conversation"]:
       raise ValueError(
           f"Unsupported mode: {mode}, currently supported modes: "
@@ -377,8 +389,11 @@ class TrajectoryCollectEngine:
       )
 
     if mode == "Trajectory":
-      self.agent.trajectory.env_time = self.env_time  # pyrefly: ignore[bad-assignment]
+      self.agent.trajectory.env_time = (
+          self.env_time
+      )  # pyrefly: ignore[bad-assignment]
       self.agent.trajectory.reward_time = self.reward_time
+      self.agent.trajectory.model_time = self.model_time
       return self.agent.trajectory
     elif mode == "Steps":
       return [
@@ -398,6 +413,7 @@ class TrajectoryCollectEngine:
               "mc_return": step.mc_return,
               "env_time": self.env_time,
               "reward_time": self.reward_time,
+              "model_time": self.model_time,
           }
           for step in self.agent.trajectory.steps
       ]
@@ -552,6 +568,7 @@ class TrajectoryCollectEngine:
           "trajectory_reward": self.agent.trajectory.reward,
           "env_time": self.env_time,
           "reward_time": self.reward_time,
+          "model_time": self.model_time,
           "old_logprobs": (
               np.concatenate(logprobs, axis=0) if logprobs else None
           ),
@@ -673,7 +690,9 @@ class TrajectoryCollectEngine:
           contains_first_msg=True,
           contains_generation_msg=True,
       )
-      self.agent.trajectory.prompt_tokens = prompt_tokens  # pyrefly: ignore[missing-attribute]
+      self.agent.trajectory.prompt_tokens = (
+          prompt_tokens  # pyrefly: ignore[missing-attribute]
+      )
     if self.exact_token_continuity:
       self._exact_chat_history = copy.deepcopy(self.agent.chat_completions)
 
@@ -789,6 +808,7 @@ class TrajectoryCollectEngine:
           self._cumulative_prompt_tokens
       )
 
+    model_start = time.perf_counter()
     if is_async:
       try:
         rollout_output = await model_call_fn(  # pytype: disable=bad-return-type
@@ -818,6 +838,26 @@ class TrajectoryCollectEngine:
           None,
           _safe_model_call,
       )
+    step_latency = time.perf_counter() - model_start
+    self.model_time["step_latency"].append(step_latency)
+    prompt_len = (
+        int(rollout_output.prompt_lengths[0])
+        if rollout_output.prompt_lengths is not None
+        and len(rollout_output.prompt_lengths) > 0
+        else (
+            len(rollout_output.left_padded_prompt_tokens[0])
+            if rollout_output.left_padded_prompt_tokens is not None
+            and len(rollout_output.left_padded_prompt_tokens) > 0
+            else 0
+        )
+    )
+    comp_len = (
+        len(rollout_output.tokens[0])
+        if rollout_output.tokens and len(rollout_output.tokens) > 0
+        else 0
+    )
+    self.model_time["prompt_tokens"].append(prompt_len)
+    self.model_time["completion_tokens"].append(comp_len)
     logging.debug("%s model_call done", self._debug_prefix)
     if self.on_rollout_output_callback:
       self.on_rollout_output_callback(rollout_output)
@@ -825,16 +865,26 @@ class TrajectoryCollectEngine:
     if self.exact_token_continuity:
       if not self.agent.trajectory.steps:
         # The owned first-turn prompt; later turns replay exactly these ids.
-        self.agent.trajectory.prompt_tokens = (  # pyrefly: ignore[missing-attribute]
-            rollout_output.left_padded_prompt_tokens[0]
+        self.agent.trajectory.prompt_tokens = rollout_output.left_padded_prompt_tokens[  # pyrefly: ignore[missing-attribute]
+            0
+        ]
+        prompt_len = (
+            int(rollout_output.prompt_lengths[0])
+            if rollout_output.prompt_lengths is not None
+            and len(rollout_output.prompt_lengths) > 0
+            else len(rollout_output.left_padded_prompt_tokens[0])
         )
-        self.agent.trajectory.prompt_length = int(
-            rollout_output.prompt_lengths[0]
-        )
+        self.agent.trajectory.prompt_length = prompt_len
       else:
+        p_len = (
+            rollout_output.prompt_lengths[0]
+            if rollout_output.prompt_lengths is not None
+            and len(rollout_output.prompt_lengths) > 0
+            else len(rollout_output.left_padded_prompt_tokens[0])
+        )
         echoed = generate_utils.unpad_prompt(
             rollout_output.left_padded_prompt_tokens[0],
-            rollout_output.prompt_lengths[0],
+            p_len,
         )
         if not np.array_equal(echoed, call_kwargs["prompt_token_ids"]):
           raise ValueError("later-turn prompt differs from recorded history")
@@ -856,8 +906,9 @@ class TrajectoryCollectEngine:
               else 0
           )
       )
+      routed_slice = init_routed[:prompt_len]
       self.agent.trajectory.prompt_routed_experts = (  # pyrefly: ignore[missing-attribute]
-          init_routed[:prompt_len]
+          routed_slice
       )
       self._cumulative_prompt_tokens = init_routed.shape[0]
       self._current_step_initial_routed_experts = init_routed[prompt_len:]
@@ -929,9 +980,10 @@ class TrajectoryCollectEngine:
       if num_env > 0:
         if len(delta_routed) < total_needed:
           raise ValueError(
-              "Mismatch between captured env_routed_experts length "
-              f"{max(0, len(delta_routed) - needed_asst)} and env_tokens length "
-              f"{num_env} at step {len(self.agent.trajectory.steps) - 1}."
+              "Mismatch between captured env_routed_experts length"
+              f" {max(0, len(delta_routed) - needed_asst)} and env_tokens"
+              f" length {num_env} at step"
+              f" {len(self.agent.trajectory.steps) - 1}."
           )
         prev_step.env_routed_experts = _slice_or_pad_routed(
             prefix_routed, needed_asst, num_env
@@ -945,6 +997,9 @@ class TrajectoryCollectEngine:
     action = self.agent.update_from_model(rollout_output.text[0]).action
     cur_step = self.agent.get_current_step()
     if cur_step is not None:
+      cur_step.info["model_latency_sec"] = step_latency
+      cur_step.info["prompt_tokens"] = prompt_len
+      cur_step.info["completion_tokens"] = comp_len
       if rollout_output.tokens:
         if self.tokenizer and self.chat_parser:
           cur_step.assistant_tokens, n_append = (
@@ -1116,7 +1171,9 @@ class TrajectoryCollectEngine:
       self.agent.trajectory.status = agent_types.TrajectoryStatus.TIMEOUT
       logging.warning("Episode timed out after %d seconds.", self.timeout)
       self._log_trajectory_clip("TIMEOUT")
-      self.agent.get_current_step().done = True  # pyrefly: ignore[missing-attribute]
+      self.agent.get_current_step().done = (
+          True  # pyrefly: ignore[missing-attribute]
+      )
       return True
 
     return done

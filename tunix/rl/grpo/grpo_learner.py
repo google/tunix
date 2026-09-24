@@ -16,13 +16,13 @@
 
 from __future__ import annotations
 
+import time
 from typing import Iterable, List, Sequence, TypeVar
 
 import flax
 import jax
 import jax.numpy as jnp
 import numpy as np
-
 from tunix.generate import utils
 from tunix.perf.experimental import constants as perf_constants
 from tunix.rl import algo_core  # pylint: disable=unused-import
@@ -97,9 +97,11 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         data_shuffle_seed=data_shuffle_seed,
     )
 
-    self.algo_config.temperature = self.rl_engine.get_rollout_config(  # pyrefly: ignore[missing-attribute]
-        mode=rl_engine_lib.Mode.TRAIN
-    ).temperature
+    self.algo_config.temperature = (
+        self.rl_engine.get_rollout_config(  # pyrefly: ignore[missing-attribute]
+            mode=rl_engine_lib.Mode.TRAIN
+        ).temperature
+    )
 
     policy_loss_fn = function_registry.get_policy_loss_fn(
         self.algo_config.policy_loss_fn
@@ -160,7 +162,9 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
     if isinstance(rollout_config, dict):
       rollout_config = rollout_config[mode]
 
-    training_input["prompts"] = list(training_input["prompts"])  # pyrefly: ignore[bad-argument-type]
+    training_input["prompts"] = list(
+        training_input["prompts"]
+    )  # pyrefly: ignore[bad-argument-type]
     pad_value = self.rl_engine.rollout.pad_id()
     eos_value = self.rl_engine.rollout.eos_id()
 
@@ -169,14 +173,17 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         perf_constants.STEP: self.rl_engine.global_steps,
     }
 
+    rollout_start_time = time.perf_counter()
     rollout_output = self.rl_engine.generate(
         prompts=training_input["prompts"],
         mode=mode,
         micro_batch_size=(
-            self._rollout_micro_batch_size * self.algo_config.num_generations  # pyrefly: ignore[unsupported-operation]
+            self._rollout_micro_batch_size
+            * self.algo_config.num_generations  # pyrefly: ignore[unsupported-operation]
         ),
         trace_tags=perf_tags,
     )
+    rollout_duration = time.perf_counter() - rollout_start_time
     padded_completion_ids = np.array([
         utils.pad_to_length(
             completion_ids,
@@ -297,7 +304,9 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
           prompts=training_input["prompts"],
           completions=rollout_output.text,
           mode=mode,
-          **{k: v for k, v in training_input.items() if k != "prompts"},  # pyrefly: ignore[bad-argument-type]
+          **{
+              k: v for k, v in training_input.items() if k != "prompts"
+          },  # pyrefly: ignore[bad-argument-type]
       )
       advantage_estimator = function_registry.get_advantage_estimator(
           self.algo_config.advantage_estimator
@@ -332,6 +341,35 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
                 np.min(agg_completion_mask),
                 np.min,
             ),
+        },
+        mode=mode,
+    )
+
+    # Log inference metrics.
+    total_completion_tokens = (
+        sum(len(t) for t in rollout_output.tokens)
+        if rollout_output.tokens
+        else 0
+    )
+    tps = (
+        total_completion_tokens / rollout_duration
+        if rollout_duration > 0
+        else 0.0
+    )
+    tpot_ms = (
+        (rollout_duration / total_completion_tokens) * 1000.0
+        if total_completion_tokens > 0
+        else 0.0
+    )
+    self.rl_engine.buffer_metrics(
+        {
+            "inference/rollout_duration_sec": (rollout_duration, np.mean),
+            "inference/total_completion_tokens": (
+                float(total_completion_tokens),
+                np.mean,
+            ),
+            "inference/tokens_per_second": (tps, np.mean),
+            "inference/tpot_ms": (tpot_ms, np.mean),
         },
         mode=mode,
     )
@@ -390,7 +428,9 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
     Returns:
       A list of trajectory IDs, one for each prompt in the batch.
     """
-    batch_size = len(example["prompts"]) // self.algo_config.num_generations  # pyrefly: ignore[bad-argument-type]
+    batch_size = (
+        len(example["prompts"]) // self.algo_config.num_generations
+    )  # pyrefly: ignore[bad-argument-type]
     row_offset = steps * batch_size
     row_offsets = np.repeat(
         np.arange(row_offset, row_offset + batch_size),

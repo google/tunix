@@ -310,22 +310,40 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     self.rl_engine.actor_trainer.with_rl_metrics_to_log({  # pyrefly: ignore[bad-argument-type]
         "kl": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
         "entropy": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
-        "reduced_pg_loss": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
-        "unreduced_pg_loss": common.global_weighted_mean,  # pyrefly: ignore[bad-assignment]
+        "reduced_pg_loss": (
+            common.mean_of_means
+        ),  # pyrefly: ignore[bad-assignment]
+        "unreduced_pg_loss": (
+            common.global_weighted_mean
+        ),  # pyrefly: ignore[bad-assignment]
         "pg_clipfrac": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
         "ppo_kl": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
         "kl_loss": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
-        "is_ratio/mean": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
+        "is_ratio/mean": (
+            common.mean_of_means
+        ),  # pyrefly: ignore[bad-assignment]
         "is_ratio/max": np.max,
         "is_ratio/min": np.min,
-        "log_ratio/abs_mean": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
-        "pg_loss/unclipped_mean": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
-        "pg_loss/clipped_mean": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
-        "advantage/abs_mean": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
+        "log_ratio/abs_mean": (
+            common.mean_of_means
+        ),  # pyrefly: ignore[bad-assignment]
+        "pg_loss/unclipped_mean": (
+            common.mean_of_means
+        ),  # pyrefly: ignore[bad-assignment]
+        "pg_loss/clipped_mean": (
+            common.mean_of_means
+        ),  # pyrefly: ignore[bad-assignment]
+        "advantage/abs_mean": (
+            common.mean_of_means
+        ),  # pyrefly: ignore[bad-assignment]
         "advantage/max": np.max,
         "advantage/min": np.min,
-        "advantage/nonzero_frac": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
-        "sampler_is/weight_mean": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
+        "advantage/nonzero_frac": (
+            common.mean_of_means
+        ),  # pyrefly: ignore[bad-assignment]
+        "sampler_is/weight_mean": (
+            common.mean_of_means
+        ),  # pyrefly: ignore[bad-assignment]
         "sampler_is/weight_min": np.min,
     })
     self.rl_engine.actor_trainer.with_tqdm_metrics_to_display([  # pyrefly: ignore[bad-argument-type]
@@ -909,12 +927,50 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     )
     metrics_to_log.update(agreement_metrics)
 
-    # Extract time metrics (env_time and reward_time)
-    for time_key in ["env_time", "reward_time"]:
+    # High-level inference metrics across all trajectories in the batch
+    all_model_latencies = []
+    for item in trajectories:
+      m_time = item.traj.get("model_time", {})
+      step_lats = m_time.get("step_latency", [])
+      if isinstance(step_lats, (list, tuple, np.ndarray)):
+        all_model_latencies.extend(step_lats)
+
+    if all_model_latencies:
+      total_model_time = float(np.sum(all_model_latencies))
+      total_comp_tokens = float(np.sum(agg_completion_mask))
+      tokens_per_sec = (
+          total_comp_tokens / total_model_time if total_model_time > 0 else 0.0
+      )
+      tpot_ms = (
+          (total_model_time / total_comp_tokens) * 1000.0
+          if total_comp_tokens > 0
+          else 0.0
+      )
+      metrics_to_log.update({
+          "inference/step_latency_sec/mean": (
+              np.mean(all_model_latencies),
+              np.mean,
+          ),
+          "inference/step_latency_sec/max": (
+              np.max(all_model_latencies),
+              np.max,
+          ),
+          "inference/step_latency_sec/min": (
+              np.min(all_model_latencies),
+              np.min,
+          ),
+          "inference/total_completion_tokens": (total_comp_tokens, np.mean),
+          "inference/total_model_time_sec": (total_model_time, np.mean),
+          "inference/tokens_per_second": (tokens_per_sec, np.mean),
+          "inference/tpot_ms": (tpot_ms, np.mean),
+      })
+
+    # Extract time metrics (env_time, reward_time, and model_time)
+    for time_key in ["env_time", "reward_time", "model_time"]:
       prefix = f"trajectory/{time_key}"
       time_dicts = [item.traj.get(time_key, {}) for item in trajectories]
 
-      # Safely gather all unique sub-keys (e.g., 'reset_latency') across all trajectories
+      # Safely gather all unique sub-keys across all trajectories
       for sub_key in {k for d in time_dicts for k in d.keys()}:
         vals = [d.get(sub_key, 0.0) for d in time_dicts]
         flat_vals = []
@@ -930,11 +986,12 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             f"{prefix}/{sub_key}/max": (np.max(flat_vals), np.max),
             f"{prefix}/{sub_key}/min": (np.min(flat_vals), np.min),
         })
-      self.rl_engine.buffer_metrics_async(
-          metrics_to_log,  # pyrefly: ignore[bad-argument-type]
-          mode=mode,
-          step=expected_step,  # pyrefly: ignore[bad-argument-type]
-      )
+
+    self.rl_engine.buffer_metrics_async(
+        metrics_to_log,  # pyrefly: ignore[bad-argument-type]
+        mode=mode,
+        step=expected_step,  # pyrefly: ignore[bad-argument-type]
+    )
 
     for metric_fn in self.metric_fns:
       user_defined_metric = metric_fn(
