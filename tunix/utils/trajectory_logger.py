@@ -726,6 +726,7 @@ def log_trajectory_json(
 
       rec = {
           'traj_id': traj_id_raw,
+          'global_step': int(global_step),
           'step_index': idx,
           'total_time': float(step_total_time) if step_total_time is not None else None,
           'total_time_sec': float(step_total_time) if step_total_time is not None else None,

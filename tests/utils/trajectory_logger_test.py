@@ -763,6 +763,7 @@ class TrajectoryLoggerTest(absltest.TestCase):
       lines = [json.loads(line) for line in f if line.strip()]
     self.assertLen(lines, 3)
     # Line 0: step 0
+    self.assertEqual(lines[0]['global_step'], 5)
     self.assertEqual(lines[0]['step_index'], 0)
     self.assertEqual(lines[0]['prompt_tokens'], 100)
     self.assertEqual(lines[0]['completion_tokens'], 24)
