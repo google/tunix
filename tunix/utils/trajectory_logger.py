@@ -558,7 +558,7 @@ def log_trajectory_json(
     global_step = item_dict.get('policy_version', 0)
 
   metadata = dict(item_dict.get('metadata') or {})
-  traj = item_dict.get('trajectory') or item_dict.get('traj') or {}
+  traj = item_dict.get('trajectory') or item_dict.get('traj') or item_dict
   if not isinstance(traj, dict):
     traj = dataclasses.asdict(traj) if dataclasses.is_dataclass(traj) else {}
 
