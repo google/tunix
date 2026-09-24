@@ -1088,7 +1088,6 @@ class PoolExecutionSession:
     self._response_queue: asyncio.Queue[Any] = asyncio.Queue()
     self._active_workers: set[ActorHandle] = set()
     self._dispatched_tasks: Dict[ActorHandle, set[str]] = {}
-    self._work_events: Dict[ActorHandle, asyncio.Event] = {}
     self._poll_tasks: set[asyncio.Task[Any]] = set()
     self._in_flight = 0
     self._closed = False
@@ -1109,25 +1108,30 @@ class PoolExecutionSession:
     if self._closed:
       raise RuntimeError("PoolExecutionSession is closed.")
     actor = self._pool._get_next_actor(method_name, args, kwargs)
+    kwargs.pop("route_key", None)  # remove route_key from worker method args
 
-    # Increment in_flight BEFORE dispatch to prevent race conditions with as_completed()
+    # Increment in_flight and register request_id BEFORE awaiting dispatch_task
+    # so a fast worker completing before dispatch_task's coroutine resumes
+    # always finds request_id in _dispatched_tasks[actor].
     self._in_flight += 1
+    dispatched_set = self._dispatched_tasks.setdefault(actor, set())
+    dispatched_set.add(request_id)
     self._ensure_worker_polling(actor)
 
     try:
-      req_id = await actor.dispatch_task(
+      await actor.dispatch_task(
           request_id, method_name, *args, **kwargs
       )
-      self._dispatched_tasks.setdefault(actor, set()).add(req_id)
       # Re-ensure worker polling is active in case the previous polling loop
-      # died due to a transport error while dispatch_task was awaiting.
+      # exited or died while dispatch_task was awaiting.
       self._ensure_worker_polling(actor)
-      if actor in self._work_events:
-        self._work_events[actor].set()
-      return req_id
+      return request_id
     except Exception:
-      self._in_flight -= 1
-      self._notify_if_zero_flight()
+      # Only decrement _in_flight if _poll_worker_loop hasn't already failed and cleared it.
+      if request_id in dispatched_set:
+        dispatched_set.remove(request_id)
+        self._in_flight = max(0, self._in_flight - 1)
+        self._notify_if_zero_flight()
       raise
 
   def _ensure_worker_polling(self, actor: ActorHandle) -> None:
@@ -1139,14 +1143,11 @@ class PoolExecutionSession:
     task.add_done_callback(self._poll_tasks.discard)
 
   async def _poll_worker_loop(self, actor: ActorHandle) -> None:
-    event = self._work_events.setdefault(actor, asyncio.Event())
     try:
       while not self._closed:
         dispatched_set = self._dispatched_tasks.setdefault(actor, set())
         if not dispatched_set:
-          event.clear()
-          await event.wait()
-          continue
+          break
         try:
           response = await actor.poll_responses(timeout_s=LONG_POLL_TIMEOUT_S)
           if isinstance(response, ExecutionResponse):
@@ -1155,26 +1156,65 @@ class PoolExecutionSession:
               self._response_queue.put_nowait((res, None))
             except Exception as exc:  # pylint: disable=broad-exception-caught
               self._response_queue.put_nowait((None, exc))
-            self._in_flight -= 1
             if response.request_id and response.request_id in dispatched_set:
               dispatched_set.remove(response.request_id)
+              self._in_flight = max(0, self._in_flight - 1)
             elif dispatched_set:
               dispatched_set.pop()
+              self._in_flight = max(0, self._in_flight - 1)
             self._notify_if_zero_flight()
         except asyncio.CancelledError:
           break
         except Exception as exc:  # pylint: disable=broad-exception-caught
           # Transport or polling failure on this worker; fail all dispatched tasks on this worker.
-          failed_task_ids = self._dispatched_tasks.pop(actor, set())
-          failed_count = len(failed_task_ids)
+          failed_count = len(dispatched_set)
+          dispatched_set.clear()
           if failed_count > 0:
             for _ in range(failed_count):
               self._response_queue.put_nowait((None, exc))
-            self._in_flight -= failed_count
+            self._in_flight = max(0, self._in_flight - failed_count)
             self._notify_if_zero_flight()
           break
     finally:
       self._active_workers.discard(actor)
+
+  async def poll_completed(
+      self, timeout_s: float = LONG_POLL_TIMEOUT_S
+  ) -> List[Tuple[Any, Optional[Exception]]]:
+    """Waits up to `timeout_s` for the first completion, then drains ready items."""
+    if self._closed:
+      return []
+
+    batch: List[Tuple[Any, Optional[Exception]]] = []
+    # When idle (_in_flight == 0), yield briefly (<= 50ms) so concurrent dispatch
+    # coroutines can run without stalling for the full 50s long-poll timeout.
+    wait_s = (
+        min(timeout_s, 0.05)
+        if (self._in_flight == 0 and self._response_queue.empty())
+        else timeout_s
+    )
+    try:
+      # Block until the first real (result, exc) completion arrives.
+      while not batch:
+        item = await asyncio.wait_for(
+            self._response_queue.get(), timeout=wait_s
+        )
+        if item is self._sentinel:
+          # Sentinel marks _in_flight reaching 0 or session close; return early if drained,
+          # otherwise skip stale sentinels when new tasks are in flight or queued behind it.
+          if self._in_flight == 0 and self._response_queue.empty():
+            return []
+          continue
+        batch.append(item)
+    except asyncio.TimeoutError:
+      return []
+
+    # Greedily drain any additional completions already queued by background worker loops.
+    while not self._response_queue.empty():
+      item = self._response_queue.get_nowait()
+      if item is not self._sentinel:
+        batch.append(item)
+    return batch
 
   async def as_completed(
       self,
@@ -1193,8 +1233,6 @@ class PoolExecutionSession:
     """Closes the session and cancels all background polling tasks."""
     self._closed = True
     self._response_queue.put_nowait(self._sentinel)
-    for event in self._work_events.values():
-      event.set()
     for t in list(self._poll_tasks):
       if not t.done():
         t.cancel()

@@ -238,8 +238,9 @@ class TrajectoryCollectorEngine:
       tokens = getattr(res, "token_ids", np.array([], dtype=np.int32))
       logprobs = getattr(res, "logprobs", None)
       routed_experts = getattr(res, "routed_experts", None)
+      raw_prompt_tokens = getattr(res, "prompt_token_ids", None)
       prompt_tokens = np.asarray(
-          getattr(res, "prompt_token_ids", np.array([], dtype=np.int32)),
+          raw_prompt_tokens if raw_prompt_tokens is not None else [],
           dtype=np.int32,
       ).reshape(-1)
       prompt_len = int(prompt_tokens.size)
