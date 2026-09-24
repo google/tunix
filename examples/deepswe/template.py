@@ -14,6 +14,7 @@
 
 """Templates and specifications for DeepSWE agents and environments."""
 
+import dataclasses
 import json
 import os
 from typing import Any, Optional
@@ -442,21 +443,67 @@ DEFAULT_OPENHANDS_KEEPALIVE_CMD = [
 ]
 
 
+try:
+  from agent_sandbox_rl import (  # pytype: disable=import-error
+      ResourceSpec,
+      TemplateSpec,
+  )
+except ImportError:
+  @dataclasses.dataclass
+  class ResourceSpec:
+    cpu: Optional[str] = None
+    memory: Optional[str] = None
+
+  @dataclasses.dataclass
+  class TemplateSpec:
+    resources: Optional[Any] = None
+    extra_pod_spec: Optional[dict[str, Any]] = None
+    node_selector: Optional[dict[str, str]] = None
+    keepalive_command: Optional[list[str]] = None
+
+
+def parse_cpu_to_millicores(val: str | int | float) -> int:
+  """Parses a CPU quantity string (e.g., '500m', '2', '2.5') to millicores."""
+  try:
+    s = str(val).strip()
+    if s.endswith("m"):
+      return int(float(s[:-1]))
+    return int(float(s) * 1000)
+  except (ValueError, TypeError):
+    return 0
+
+
+def parse_memory_to_bytes(val: str | int | float) -> int:
+  """Parses a memory quantity string (e.g., '512Mi', '1Gi', '4G') to bytes."""
+  try:
+    s = str(val).strip()
+    units = {
+        "k": 1000,
+        "m": 1000**2,
+        "g": 1000**3,
+        "t": 1000**4,
+        "p": 1000**5,
+        "e": 1000**6,
+        "ki": 1024,
+        "mi": 1024**2,
+        "gi": 1024**3,
+        "ti": 1024**4,
+        "pi": 1024**5,
+        "ei": 1024**6,
+    }
+    for unit, mult in sorted(units.items(), key=lambda x: -len(x[0])):
+      if s.lower().endswith(unit):
+        num = float(s[: -len(unit)])
+        return int(num * mult)
+    return int(float(s))
+  except (ValueError, TypeError):
+    return 0
+
+
 def get_openhands_pod_template(
     node_selector: Optional[dict[str, str]] = None,
 ) -> Any:
   """Builds and returns the TemplateSpec for OpenHands agent sandbox."""
-  try:
-    from agent_sandbox_rl import (  # pytype: disable=import-error
-        ResourceSpec,
-        TemplateSpec,
-    )
-  except ImportError as e:
-    raise ImportError(
-        "use_agent_sandbox=True strictly requires the 'agent_sandbox_rl'"
-        " package. Install via: pip install"
-        " git+https://github.com/kubernetes-sigs/agent-sandbox.git#subdirectory=examples/agent-sandbox-rl"
-    ) from e
 
   session_key = os.getenv("SANDBOX_SESSION_KEY", "")
   if os.getenv("AGENT_SERVER_COMMAND"):
@@ -471,6 +518,24 @@ def get_openhands_pod_template(
       "OPENHANDS_SERVER_IMAGE",
       "gcr.io/cloud-tpu-multipod-dev/sanbao/openhands-agent-server:1.44.1",
   )
+
+  cpu_req = os.getenv("SANDBOX_CPU", "500m")
+  cpu_lim = os.getenv("SANDBOX_CPU_LIMIT", "2")
+  mem_req = os.getenv("SANDBOX_MEM") or os.getenv("SANDBOX_MEMORY", "1Gi")
+  mem_lim = os.getenv("SANDBOX_MEM_LIMIT") or os.getenv("SANDBOX_MEMORY_LIMIT", "4Gi")
+
+  # Validate and ensure requests <= limits to prevent Kubernetes ReconcilerError
+  try:
+    if parse_cpu_to_millicores(cpu_req) > parse_cpu_to_millicores(cpu_lim):
+      cpu_lim = cpu_req
+  except Exception:
+    pass
+
+  try:
+    if parse_memory_to_bytes(mem_req) > parse_memory_to_bytes(mem_lim):
+      mem_lim = mem_req
+  except Exception:
+    pass
 
   extra_pod_spec = {
       "initContainers": [{
@@ -497,8 +562,8 @@ def get_openhands_pod_template(
           },
           "resources": {
               "limits": {
-                  "cpu": os.getenv("SANDBOX_CPU_LIMIT", "2"),
-                  "memory": os.getenv("SANDBOX_MEM_LIMIT", "4Gi"),
+                  "cpu": cpu_lim,
+                  "memory": mem_lim,
               }
           },
           "env": (
@@ -508,12 +573,60 @@ def get_openhands_pod_template(
           ),
       }],
   }
+  deadline_secs = os.getenv("SANDBOX_ACTIVE_DEADLINE_SECONDS", "7200")
+  if deadline_secs and deadline_secs.isdigit() and int(deadline_secs) > 0:
+    extra_pod_spec["activeDeadlineSeconds"] = int(deadline_secs)
 
   return TemplateSpec(
       keepalive_command=keepalive_cmd,
       resources=ResourceSpec(
-          cpu=os.getenv("SANDBOX_CPU", "500m"),
-          memory=os.getenv("SANDBOX_MEM", "1Gi"),
+          cpu=cpu_req,
+          memory=mem_req,
+      ),
+      extra_pod_spec=extra_pod_spec,
+      node_selector=node_selector,
+  )
+
+
+def get_r2egym_pod_template(
+    node_selector: Optional[dict[str, str]] = None,
+) -> Any:
+  """Builds and returns the TemplateSpec for R2E-Gym agent sandbox."""
+  cpu_req = os.getenv("SANDBOX_CPU", "250m")
+  cpu_lim = os.getenv("SANDBOX_CPU_LIMIT", "2")
+  mem_req = os.getenv("SANDBOX_MEM") or os.getenv("SANDBOX_MEMORY", "512Mi")
+  mem_lim = os.getenv("SANDBOX_MEM_LIMIT") or os.getenv("SANDBOX_MEMORY_LIMIT", "4Gi")
+
+  try:
+    if parse_cpu_to_millicores(cpu_req) > parse_cpu_to_millicores(cpu_lim):
+      cpu_lim = cpu_req
+  except Exception:
+    pass
+
+  try:
+    if parse_memory_to_bytes(mem_req) > parse_memory_to_bytes(mem_lim):
+      mem_lim = mem_req
+  except Exception:
+    pass
+
+  extra_pod_spec: dict[str, Any] = {
+      "containers": [{
+          "resources": {
+              "limits": {
+                  "cpu": cpu_lim,
+                  "memory": mem_lim,
+              }
+          }
+      }]
+  }
+  deadline_secs = os.getenv("SANDBOX_ACTIVE_DEADLINE_SECONDS", "7200")
+  if deadline_secs and deadline_secs.isdigit() and int(deadline_secs) > 0:
+    extra_pod_spec["activeDeadlineSeconds"] = int(deadline_secs)
+
+  return TemplateSpec(
+      resources=ResourceSpec(
+          cpu=cpu_req,
+          memory=mem_req,
       ),
       extra_pod_spec=extra_pod_spec,
       node_selector=node_selector,
@@ -527,4 +640,6 @@ def get_template(
   """Returns the fleet TemplateSpec for the given scaffold, or None."""
   if scaffold == "openhands":
     return get_openhands_pod_template(node_selector=node_selector)
+  elif scaffold in ("r2egym", "sweagent"):
+    return get_r2egym_pod_template(node_selector=node_selector)
   return None

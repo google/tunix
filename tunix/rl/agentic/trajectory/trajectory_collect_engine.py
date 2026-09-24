@@ -239,33 +239,33 @@ class TrajectoryCollectEngine:
     Returns:
         Trajectory | dict | list: Depending on mode.
     """  # fmt: skip
-    await self._reset()
-
-    self.agent.trajectory.status = agent_types.TrajectoryStatus.RUNNING
-    self._logged_clip_reasons.clear()
-
-    while True:
-      if len(self.agent.trajectory.steps) >= self.max_steps:
-        self.agent.trajectory.status = (
-            agent_types.TrajectoryStatus.MAX_STEPS_REACHED
-        )
-        self._log_trajectory_clip("MAX_STEPS_REACHED")
-        break
-
-      done = await self._one_step()
-
-      if done:
-        if self.agent.trajectory.status == agent_types.TrajectoryStatus.RUNNING:
-          self.agent.trajectory.status = agent_types.TrajectoryStatus.SUCCEEDED
-        break
-
-    self._finalize_terminal_step_routing()
-
-    masked_out = (
-        self.overlong_filter
-        and self.agent.trajectory.status in self.filter_statuses
-    )
     try:
+      await self._reset()
+
+      self.agent.trajectory.status = agent_types.TrajectoryStatus.RUNNING
+      self._logged_clip_reasons.clear()
+
+      while True:
+        if len(self.agent.trajectory.steps) >= self.max_steps:
+          self.agent.trajectory.status = (
+              agent_types.TrajectoryStatus.MAX_STEPS_REACHED
+          )
+          self._log_trajectory_clip("MAX_STEPS_REACHED")
+          break
+
+        done = await self._one_step()
+
+        if done:
+          if self.agent.trajectory.status == agent_types.TrajectoryStatus.RUNNING:
+            self.agent.trajectory.status = agent_types.TrajectoryStatus.SUCCEEDED
+          break
+
+      self._finalize_terminal_step_routing()
+
+      masked_out = (
+          self.overlong_filter
+          and self.agent.trajectory.status in self.filter_statuses
+      )
       if not masked_out:
         await self._append_final_reward()
       self.compute_mc_reward()
@@ -995,6 +995,9 @@ class TrajectoryCollectEngine:
     Ensures proper cleanup of environment resources such as network
     connections, file handles, or external processes.
     """
+    if self.env is None or not hasattr(self.env, "close"):
+      return
+
     logging.debug("%s Closing environment.", self._debug_prefix)
     try:
       _, wall_time = await self._run_with_timing(self.env.close, timeout=150.0)
@@ -1004,6 +1007,12 @@ class TrajectoryCollectEngine:
           "%s env.close() timed out after 150s — executor thread may be"
           " leaked. This will starve the thread pool over time.",
           self._debug_prefix,
+      )
+    except Exception as e:
+      logging.error(
+          "%s Error during env.close(): %s",
+          self._debug_prefix,
+          e,
       )
     finally:
       for k, v in self.env_time.items():

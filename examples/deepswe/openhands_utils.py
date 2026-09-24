@@ -14,11 +14,20 @@
 
 """Utility functions for OpenHands workspace and environment setup."""
 
+import dataclasses
 import logging
 import os
 from typing import Any, Optional
 
-from tunix.rl.agentic.environments.base_environment import EnvStepResult
+try:
+  from tunix.rl.agentic.environments.base_environment import EnvStepResult
+except ImportError:
+  @dataclasses.dataclass
+  class EnvStepResult:
+    observation: Any
+    reward: float
+    done: bool
+    info: dict[str, Any]
 
 
 def get_image_rewrite_fn(image_rewrite: Any | None = None) -> Any | None:

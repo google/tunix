@@ -1122,6 +1122,24 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     self.assertEqual(routed.shape, (1, num_layers, top_k))
     np.testing.assert_array_equal(routed[0], 3)
 
+  def test_collect_closes_env_on_reset_exception(self):
+    self.mock_env.reset.side_effect = RuntimeError("reset failed!")
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        self.mock_agent, self.mock_env, model_call=self.mock_model_call
+    )
+    with self.assertRaises(RuntimeError):
+      asyncio.run(self._run_collect(engine))
+    self.mock_env.close.assert_called_once()
+
+  def test_collect_closes_env_on_step_exception(self):
+    self.mock_env.step.side_effect = RuntimeError("step failed!")
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        self.mock_agent, self.mock_env, model_call=self.mock_model_call
+    )
+    with self.assertRaises(RuntimeError):
+      asyncio.run(self._run_collect(engine))
+    self.mock_env.close.assert_called_once()
+
 
 class _FreshTextTokenizer:
   """Only freshly formatted observations are allowed into this encoder."""
@@ -1531,5 +1549,5 @@ class ExactTokenContinuityCollectTest(absltest.TestCase):
     np.testing.assert_array_equal(result['routed_experts'][:3], init_routed[:3])
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
   absltest.main()
