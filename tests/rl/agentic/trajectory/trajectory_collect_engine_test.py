@@ -558,6 +558,148 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     # 100 step = 100 > 150. Should stop after 1 step.
     self.assertLen(result_traj.steps, 1)
 
+  def _recorded_completion_len(self, traj):
+    return sum(
+        len(s.assistant_tokens if s.assistant_tokens is not None else [])
+        + len(s.env_tokens if s.env_tokens is not None else [])
+        for s in traj.steps
+    )
+
+  @mock.patch.object(utils, 'tokenize_and_generate_masks')
+  def test_parser_suffix_counts_toward_response_budget(self, mock_convert):
+    # The parser appends one token per assistant turn (like Gemma4's "\n"
+    # after the `<turn|>` stop token). The budget must reserve room for it, or
+    # a turn that fills the remaining budget overshoots by the suffix length.
+    mock_convert.side_effect = [
+        ([7, 7], [0, 0]),  # prompt tokens
+        ([20, 21], [0, 0]),  # env tokens after turn 1
+    ]
+    self.mock_chat_parser.update_assistant_end_tokens.side_effect = (
+        lambda tokens: (
+            np.concatenate([tokens, np.array([90], np.int32)]),
+            1,
+        )
+    )
+    requested = []
+
+    def _model_call(chat, env, *, max_generation_steps=None, **kwargs):
+      del chat, env, kwargs
+      requested.append(max_generation_steps)
+      n = 4 if len(requested) == 1 else max_generation_steps
+      return RolloutOutput(
+          text=[f'response{len(requested)}'],
+          logits=[np.zeros((n,))],
+          tokens=[np.arange(1, n + 1, dtype=np.int32)],
+          left_padded_prompt_tokens=np.array([1]),
+          logprobs=[np.ones((n,))],
+      )
+
+    self.mock_model_call.side_effect = _model_call
+    self.mock_env.max_steps = 5
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+        tokenizer=self.mock_tokenizer,
+        chat_parser=self.mock_chat_parser,
+        max_response_length=10,
+    )
+
+    result_traj = asyncio.run(self._run_collect(engine, mode='Trajectory'))
+
+    # Turn 1: 10 - 0 - 1 reserved. Turn 2: 10 - (4 + 1 + 2) - 1 reserved.
+    self.assertEqual(requested, [9, 2])
+    self.assertEqual(self._recorded_completion_len(result_traj), 10)
+    self.assertEqual(
+        result_traj.status,
+        agent_types.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED,
+    )
+
+  @mock.patch.object(utils, 'tokenize_and_generate_masks')
+  def test_env_tokens_overflowing_budget_are_not_recorded(self, mock_convert):
+    # 100 assistant tokens fit in 150, but the 100-token observation would
+    # not. It is dropped and the trajectory ends within budget.
+    mock_convert.side_effect = [
+        ([1] * 100, [1] * 100),  # prompt tokens
+        ([1] * 100, [0] * 100),  # env tokens 1
+    ]
+    self.mock_model_call.side_effect = [
+        RolloutOutput(
+            text=['response1'],
+            logits=[np.zeros((100,))],
+            tokens=[np.array([1] * 100)],
+            left_padded_prompt_tokens=np.array([1]),
+            logprobs=[np.ones((100,))],
+        )
+    ]
+    self.mock_env.max_steps = 5
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+        tokenizer=self.mock_tokenizer,
+        chat_parser=self.mock_chat_parser,
+        max_response_length=150,
+    )
+
+    result_traj = asyncio.run(self._run_collect(engine, mode='Trajectory'))
+
+    self.assertLen(result_traj.steps, 1)
+    self.assertIsNone(result_traj.steps[0].env_tokens)
+    self.assertLessEqual(self._recorded_completion_len(result_traj), 150)
+    self.assertEqual(
+        result_traj.status,
+        agent_types.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED,
+    )
+
+  @mock.patch.object(utils, 'tokenize_and_generate_masks')
+  def test_env_tokens_leaving_no_room_for_next_turn_suffix_are_not_recorded(
+      self, mock_convert
+  ):
+    # Turn 1 uses 4 sampled + 1 suffix = 5 tokens out of 10. A 4-token
+    # observation would bring the total to 9 <= 10, but with 1 token needed
+    # for Turn 2's suffix, 0 tokens remain for Turn 2 generation. The
+    # observation must be dropped and the trajectory ended immediately.
+    mock_convert.side_effect = [
+        ([7, 7], [0, 0]),  # prompt tokens
+        ([20, 21, 22, 23], [0, 0, 0, 0]),  # 4 env tokens after turn 1
+    ]
+    self.mock_chat_parser.update_assistant_end_tokens.side_effect = (
+        lambda tokens: (
+            np.concatenate([tokens, np.array([90], np.int32)]),
+            1,
+        )
+    )
+    self.mock_model_call.side_effect = [
+        RolloutOutput(
+            text=['response1'],
+            logits=[np.zeros((4,))],
+            tokens=[np.array([1, 2, 3, 4], dtype=np.int32)],
+            left_padded_prompt_tokens=np.array([1]),
+            logprobs=[np.ones((4,))],
+        )
+    ]
+    self.mock_env.max_steps = 5
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+        tokenizer=self.mock_tokenizer,
+        chat_parser=self.mock_chat_parser,
+        max_response_length=10,
+    )
+
+    result_traj = asyncio.run(self._run_collect(engine, mode='Trajectory'))
+
+    self.assertEqual(self.mock_model_call.call_count, 1)
+    self.assertLen(result_traj.steps, 1)
+    self.assertIsNone(result_traj.steps[0].env_tokens)
+    self.assertEqual(self._recorded_completion_len(result_traj), 5)
+    self.assertEqual(
+        result_traj.status,
+        agent_types.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED,
+    )
+
   def test_collect_max_steps_reached(self):
     self.mock_env.max_steps = 1
     self.mock_env.step.side_effect = [
@@ -1372,8 +1514,8 @@ class ExactTokenContinuityCollectTest(absltest.TestCase):
           [-0.5, -0.5, 0, 0, 0, -0.5, 0, 0, -0.5, -0.5, 0],
       )
       self.assertEqual(
-          engine._response_token_count, 8
-      )  # suffixes are not samples
+          engine._response_token_count, len(result['conversation_tokens'])
+      )
       env.close.assert_called_once()
       self._assert_training_consumer(result)
 
