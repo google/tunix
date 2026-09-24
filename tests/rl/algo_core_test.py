@@ -149,6 +149,110 @@ class AlgoCoreTest(absltest.TestCase):
         self.assertTrue(bool(jnp.all(jnp.isfinite(jnp.asarray(advantages)))))
         np.testing.assert_array_equal(advantages, np.zeros(4, dtype=np.float32))
 
+  def test_valid_mask_matches_subslice_unmasked_computation(self):
+    # Fundamental invariant: for any subset of k >= 2 valid trajectories in a
+    # group of G, estimator(rewards, G, valid_mask=mask)[mask] must exactly
+    # equal calling the unmasked estimator(rewards[mask], k, valid_mask=None),
+    # regardless of extreme values in the masked-out slots.
+    rewards = np.array([1.25, -1e6, 3.5, 1e6, -0.75, 2.0], dtype=np.float32)
+    masks = [
+        np.array([True, False, True, False, False, False]),  # k = 2
+        np.array([True, False, True, False, True, False]),   # k = 3
+        np.array([True, False, True, False, True, True]),    # k = 4
+        np.array([True, True, True, False, True, True]),     # k = 5
+    ]
+    for estimator in (
+        algo_core.compute_advantages,
+        algo_core.compute_rloo_advantages,
+        algo_core.compute_drgrpo_advantages,
+    ):
+      for mask in masks:
+        k = int(np.sum(mask))
+        with self.subTest(estimator=estimator.__name__, k=k):
+          masked_adv = np.asarray(
+              estimator(
+                  jnp.asarray(rewards), num_generations=6, valid_mask=mask
+              )
+          )
+          subslice_adv = np.asarray(
+              estimator(
+                  jnp.asarray(rewards[mask]), num_generations=k, valid_mask=None
+              )
+          )
+          np.testing.assert_allclose(
+              masked_adv[mask], subslice_adv, rtol=1e-5, atol=1e-5
+          )
+          np.testing.assert_array_equal(
+              masked_adv[~mask], np.zeros(6 - k, dtype=np.float32)
+          )
+
+  def test_valid_mask_multi_group_heterogeneous_batch(self):
+    # 4 groups of G=4 in one batch:
+    # - Group 0: 4/4 valid
+    # - Group 1: 2/4 valid (with extreme garbage in invalid slots)
+    # - Group 2: 1/4 valid (degenerate -> all 0.0)
+    # - Group 3: 0/4 valid (empty -> all 0.0)
+    rewards = np.array(
+        [
+            1.0, 2.0, 3.0, 4.0,
+            10.0, -999.0, 20.0, 999.0,
+            5.0, 1.0, 2.0, 3.0,
+            1.0, 2.0, 3.0, 4.0,
+        ],
+        dtype=np.float32,
+    )
+    valid_mask = np.array([
+        True, True, True, True,
+        True, False, True, False,
+        True, False, False, False,
+        False, False, False, False,
+    ])
+    for estimator in (
+        algo_core.compute_advantages,
+        algo_core.compute_rloo_advantages,
+        algo_core.compute_drgrpo_advantages,
+    ):
+      with self.subTest(estimator=estimator.__name__):
+        batch_adv = np.asarray(
+            estimator(
+                jnp.asarray(rewards), num_generations=4, valid_mask=valid_mask
+            )
+        )
+        for g in range(4):
+          sl = slice(g * 4, (g + 1) * 4)
+          single_adv = np.asarray(
+              estimator(
+                  jnp.asarray(rewards[sl]),
+                  num_generations=4,
+                  valid_mask=valid_mask[sl],
+              )
+          )
+          np.testing.assert_allclose(
+              batch_adv[sl], single_adv, rtol=1e-5, atol=1e-5
+          )
+        np.testing.assert_array_equal(batch_adv[8:16], np.zeros(8))
+
+  def test_valid_mask_constant_valid_rewards_ignores_invalid_variance(self):
+    # All 3 valid peers scored 1.0, while 1 invalid peer got 0.0.
+    # Without valid_mask, the 0.0 creates fake variance and positive advantages
+    # for the 1.0 trajectories. With valid_mask, valid variance is 0 -> all 0.0.
+    rewards = np.array([1.0, 1.0, 1.0, 0.0], dtype=np.float32)
+    valid_mask = np.array([True, True, True, False])
+    for estimator in (
+        algo_core.compute_advantages,
+        algo_core.compute_rloo_advantages,
+        algo_core.compute_drgrpo_advantages,
+    ):
+      with self.subTest(estimator=estimator.__name__):
+        adv = np.asarray(
+            estimator(
+                jnp.asarray(rewards), num_generations=4, valid_mask=valid_mask
+            )
+        )
+        np.testing.assert_allclose(
+            adv, np.zeros(4, dtype=np.float32), atol=1e-6
+        )
+
   def test_grpo_loss_fn_packed_equals_unpacked(self):
     # P3.4 gate: grpo_loss_fn gives the SAME primary loss whether two sequences
     # are packed into one row (segment_ids set) or one-per-row (segment_ids
