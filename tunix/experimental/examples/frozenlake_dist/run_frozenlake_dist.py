@@ -171,6 +171,27 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--rpc_timeout_s", type=float, default=1800.0)
   parser.add_argument("--init_timeout_s", type=float, default=None)
   parser.add_argument("--stop_workers_on_exit", action="store_true")
+  parser.add_argument(
+      "--checkpoint_restore_step",
+      type=int,
+      default=None,
+      help=(
+          "Checkpoint step to restore from. If None, restores from the latest"
+          " checkpoint."
+      ),
+  )
+  parser.add_argument(
+      "--checkpoint_overwrite",
+      action=argparse.BooleanOptionalAction,
+      default=True,
+      help=(
+          "Whether to overwrite existing checkpoints at the same step when"
+          " saving. If False (--no-checkpoint_overwrite), resuming from an"
+          " earlier step and attempting to save a checkpoint at a step that"
+          " already exists on disk will raise StepAlreadyExistsError and abort"
+          " the training run."
+      ),
+  )
   parser.add_argument("--debug", action="store_true")
   args = parser.parse_args(argv)
   if args.max_steps is None:
@@ -385,6 +406,8 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       max_staleness=args.max_staleness,
       group_order=args.trajectory_group_order,
       sync_weights=(args.weight_sync_mode != weight_sync.WeightSyncMode.NONE),
+      checkpoint_restore_step=args.checkpoint_restore_step,
+      checkpoint_overwrite=args.checkpoint_overwrite,
       on_step_begin=lambda step: logging.info(
           ">>> FrozenLake step %d starting", step
       ),

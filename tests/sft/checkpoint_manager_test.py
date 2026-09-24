@@ -167,6 +167,102 @@ class CheckpointManagerTest(parameterized.TestCase):
     # Verify the model params are saved.
     self.assertTrue(model_param_path.exists())
 
+  def test_save_overwrite_existing_step(self):
+    cp_path = f'{self.temp_path}/{self.id()}'
+    cp_manager = checkpoint_manager.CheckpointManager(cp_path)
+    model, _ = create_sharded_model(TestModel, nnx.Rngs(0), self.mesh)
+
+    self.assertTrue(cp_manager.save(1, model, force=True))
+    assert cp_manager._checkpointer is not None
+    cp_manager._checkpointer.wait()
+
+    # Without overwrite=True, saving at existing step 1 raises StepAlreadyExistsError.
+    with self.assertRaises(Exception):
+      cp_manager.save(1, model, force=True, overwrite=False)
+
+    # Mutate model state and overwrite step 1 with overwrite=True.
+    updated_state = jax.tree.map(lambda x: x + 2, nnx.state(model))
+    nnx.update(model, updated_state)
+    self.assertTrue(cp_manager.save(1, model, force=True, overwrite=True))
+    cp_manager._checkpointer.wait()
+
+    restored_model, _ = create_sharded_model(TestModel, nnx.Rngs(1), self.mesh)
+    self.assertEqual(cp_manager.maybe_restore(restored_model, step=1), (1, {}))
+    jax.tree.map_with_path(
+        assert_close,
+        updated_state,
+        nnx.state(restored_model),
+    )
+    cp_manager.close()
+
+  def test_save_overwrite_respects_save_interval_and_future_checkpoints(self):
+    cp_path = f'{self.temp_path}/{self.id()}'
+    options = checkpoint_options.checkpointing_options_from_dict({
+        'save_interval_steps': 2,
+        'max_to_keep': 5,
+        'enable_async_checkpointing': False,
+    })
+    cp_manager = checkpoint_manager.CheckpointManager(cp_path, options=options)
+    model, _ = create_sharded_model(TestModel, nnx.Rngs(0), self.mesh)
+
+    for s in (2, 3, 4, 5):
+      self.assertTrue(
+          cp_manager.save(
+              s, model, force=True, custom_metadata={'version': 'old', 's': s}
+          )
+      )
+    assert cp_manager._checkpointer is not None
+    self.assertEqual(
+        [c.step for c in cp_manager._checkpointer.checkpoints], [2, 3, 4, 5]
+    )
+
+    # Off-interval step 3 with force=False and overwrite=True should NOT save
+    # and should NOT delete existing step 3.
+    updated_state = jax.tree.map(lambda x: x + 5, nnx.state(model))
+    nnx.update(model, updated_state)
+    self.assertFalse(
+        cp_manager.save(
+            3,
+            model,
+            force=False,
+            overwrite=True,
+            custom_metadata={'version': 'new'},
+        )
+    )
+    self.assertEqual(
+        [c.step for c in cp_manager._checkpointer.checkpoints], [2, 3, 4, 5]
+    )
+    restored_model, _ = create_sharded_model(TestModel, nnx.Rngs(1), self.mesh)
+    self.assertEqual(
+        cp_manager.maybe_restore(restored_model, step=3),
+        (3, {'version': 'old', 's': 3}),
+    )
+
+    # On-interval step 4 with force=False and overwrite=True should overwrite
+    # step 4 even though future step 5 exists on disk.
+    self.assertTrue(
+        cp_manager.save(
+            4,
+            model,
+            force=False,
+            overwrite=True,
+            custom_metadata={'version': 'new', 's': 4},
+        )
+    )
+    self.assertEqual(
+        [c.step for c in cp_manager._checkpointer.checkpoints], [2, 3, 4, 5]
+    )
+    self.assertEqual(
+        cp_manager.maybe_restore(restored_model, step=4),
+        (4, {'version': 'new', 's': 4}),
+    )
+    jax.tree.map_with_path(
+        assert_close,
+        updated_state,
+        nnx.state(restored_model),
+    )
+    cp_manager.close()
+
   def test_restore(self):
     cp_path = f'{self.temp_path}/{self.id()}'
     cp_manager = checkpoint_manager.CheckpointManager(cp_path)

@@ -469,11 +469,31 @@ class DistributedRLEngineTest(absltest.TestCase):
       # Engine aligns its own policy version and resyncs rollout weights.
       self.assertEqual(engine._policy_version, 3)
       self.assertEqual(coordinator.calls, [3])
-      self.mock_actor.restore_checkpoint.assert_called_once_with()
+      self.mock_actor.restore_checkpoint.assert_called_once_with(step=None)
       self.mock_rollout_1.get_target_state.assert_called_once_with()
       self.mock_actor.set_target_state.assert_called_once_with(
           target_state={"params": 1}
       )
+
+    asyncio.run(_run())
+
+  def test_resume_from_checkpoint_forwards_explicit_step(self):
+    async def _run():
+      self.mock_actor.restore_checkpoint.return_value = {
+          "step": 5,
+          "policy_version": 5,
+      }
+      coordinator = _FakeWeightSyncCoordinator(forced_version=5)
+      engine = self._engine_with_coordinator(coordinator)
+
+      result = await engine.resume_from_checkpoint(
+          role=datatypes.Role.ACTOR, step=5
+      )
+
+      self.assertEqual(result, 5)
+      self.assertEqual(engine._policy_version, 5)
+      self.assertEqual(coordinator.calls, [5])
+      self.mock_actor.restore_checkpoint.assert_called_once_with(step=5)
 
     asyncio.run(_run())
 
@@ -791,7 +811,6 @@ class DistributedRLEngineTest(absltest.TestCase):
         )
 
     asyncio.run(_run())
-
 
   def test_sync_weights_requires_a_coordinator(self):
     async def _run():
