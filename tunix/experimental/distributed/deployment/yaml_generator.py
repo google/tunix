@@ -356,7 +356,7 @@ def main() -> None:
         "                      values:\n"
         f"                      - {jobset_name}\n"
     )
-    tpu_affinity = ""
+    tpu_affinity = pw_node_affinity if (slice_size and slice_size > 1) else ""
   # Colocated-python checkpointing sidecar. Emitted as a whole block for the same reason
   # as reservation_selector above: string.Template cannot omit a key when unset, and an
   # initContainer with an empty image would wedge every pathways-worker pod.

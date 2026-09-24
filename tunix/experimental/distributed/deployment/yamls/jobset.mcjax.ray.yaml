@@ -34,44 +34,17 @@ ${QUEUE_LABEL}spec:
         template:
           metadata:
             annotations:
-              cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
-              # # place on nodes in the same block
-              # kueue.k8s.io/podset-required-topology: cloud.google.com/gce-topology-block
-              # # place on nodes in the same slice
-              # kueue.x-k8s.io/podset-slice-required-topology: cloud.google.com/gke-tpu-slice-${PODSET_SLICE_TOPOLOGY}-id
-              # kueue.x-k8s.io/podset-slice-size: "${PODSET_SLICE_SIZE}"
+              cluster-autoscaler.kubernetes.io/safe-to-evict: "false"${TPU_ANNOTATIONS}
           spec:
+            priorityClassName: ${PRIORITY_CLASS}
             serviceAccountName: ${SERVICE_ACCOUNT}
             dnsPolicy: ClusterFirstWithHostNet
             hostNetwork: true
             restartPolicy: OnFailure${PRIORITY_CLASS_LINE}
             terminationGracePeriodSeconds: 10
             nodeSelector:
-              cloud.google.com/gke-tpu-accelerator: ${TPU_TYPE}
-              cloud.google.com/gke-tpu-topology: ${TPU_TOPOLOGY}${RESERVATION_SELECTOR}
-            affinity:
-              # place on nodes in the same nodepool
-              podAffinity:
-                requiredDuringSchedulingIgnoredDuringExecution:
-                - topologyKey: cloud.google.com/gke-nodepool
-                  labelSelector:
-                    matchExpressions:
-                    - key: jobset.sigs.k8s.io/jobset-name
-                      operator: In
-                      values:
-                      - ${JOBSET_NAME}
-              # ensure exclusive access to the nodepool (among all jobsets created with this yaml)
-              podAntiAffinity:
-                requiredDuringSchedulingIgnoredDuringExecution:
-                - topologyKey: cloud.google.com/gke-nodepool
-                  labelSelector:
-                    matchExpressions:
-                    - key: jobset.sigs.k8s.io/jobset-name
-                      operator: Exists
-                    - key: jobset.sigs.k8s.io/jobset-name
-                      operator: NotIn
-                      values:
-                      - ${JOBSET_NAME}
+              cloud.google.com/gke-tpu-accelerator: ${TPU_TYPE}${TPU_TOPOLOGY_SELECTOR}${RESERVATION_SELECTOR}
+${TPU_AFFINITY}
             # tolerations:
             # - key: "google.com/tpu"
             #   operator: "Equal"
