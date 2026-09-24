@@ -16,9 +16,10 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export JOB_PREFIX="${JOB_PREFIX:-$USER}"
 export WANDB_API_KEY="${WANDB_API_KEY:-}"
 export WANDB_RUN_NAME="${WANDB_RUN_NAME:-${JOB_PREFIX}-mlperf-397b-v7x}"
-# us-central1 buckets, co-located with the cluster.
-export MAXTEXT_OUTPUT_DIR="${MAXTEXT_OUTPUT_DIR:-gs://bodaborg-tpu7x-nap-us-central1/maxtext/${JOB_PREFIX}}"
-export TRAJECTORY_LOG_DIR="${TRAJECTORY_LOG_DIR:-gs://bodaborg-tpu7x-nap-us-central1/trajectories/${JOB_PREFIX}}"
+# us-central1 regional bucket, co-located with the cluster.
+export MAXTEXT_OUTPUT_DIR="${MAXTEXT_OUTPUT_DIR:-gs://atwigg-trellis-v7x/maxtext/${JOB_PREFIX}}"
+export TRAJECTORY_LOG_DIR="${TRAJECTORY_LOG_DIR:-gs://atwigg-trellis-v7x/trajectories/${JOB_PREFIX}/logger}"
+export TRAJECTORY_STORE_ROOT_DIR="${TRAJECTORY_STORE_ROOT_DIR:-${TRAJECTORY_STORE_ROOT:-gs://atwigg-trellis-v7x/trajectories/${JOB_PREFIX}/store}}"
 export TUNIX_IMAGE="${TUNIX_IMAGE:-gcr.io/cloud-tpu-multipod-dev/${USER:-atwigg}/trellis-397b:latest}"
 
 # Regional cluster: us-central1 bodaborg-tpu7x-gsc.
