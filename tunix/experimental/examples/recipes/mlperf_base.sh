@@ -57,7 +57,7 @@ export TRAINER_PREFUSE_MOE_WEIGHTS="true"
 export ROLLOUT_PREFUSE_MOE_WEIGHTS="true"
 export VERIFY_WEIGHTS="true"
 export TRAINER_PADDED_MOE_MLP_DIM=""
-export WEIGHT_SYNC_MODE="raiden"
+export WEIGHT_SYNC_MODE="${WEIGHT_SYNC_MODE:-raiden}"
 
 # ==============================================================================
 # WandB Configuration
@@ -76,15 +76,19 @@ export TRAINABLE_PARAMETERS_MASK='^(?!.*routed_experts/gate/kernel).*'
 # Qwen3.5 vocab.
 export EOS_TOKENS="${EOS_TOKENS:-248046,248044}"
 export TRAINER_BASE_NUM_KV_HEADS=2
-export ROLLOUT_MESH_FSDP=1
-export ROLLOUT_MESH_TP=1
+export ROLLOUT_MESH_FSDP="${ROLLOUT_MESH_FSDP:-1}"
+export ROLLOUT_MESH_TP="${ROLLOUT_MESH_TP:-1}"
 
 # ==============================================================================
-# MLPerf RCP Logging
+# MLPerf RCP Logging & Deferred Offline Evaluation
 # ==============================================================================
-export RCP_LOGGING="${RCP_LOGGING:-false}"
+export RCP_LOGGING="${RCP_LOGGING:-true}"
+export DEFERRED_OFFLINE_EVAL="${DEFERRED_OFFLINE_EVAL:-1}"
+export UNSCAN_CHECKPOINT_FOR_EVAL="${UNSCAN_CHECKPOINT_FOR_EVAL:-1}"
+export VAL_START_AT="${VAL_START_AT:-}"
 if [[ -n "${MAXTEXT_OUTPUT_DIR:-}" ]]; then
   export METRIC_LOGGER_DIR="${METRIC_LOGGER_DIR:-${MAXTEXT_OUTPUT_DIR}/mllog}"
+  export CHECKPOINT_MANIFEST_FILE="${CHECKPOINT_MANIFEST_FILE-${METRIC_LOGGER_DIR}/eval_checkpoints.jsonl}"
 fi
 export TARGET_ACCURACY="${TARGET_ACCURACY:-0.69}"
 
@@ -98,7 +102,7 @@ export VLLM_MAX_NUM_SEQS=16
 export VLLM_GPU_MEMORY_UTILIZATION="0.9"
 
 # Sharding Configs
-export VLLM_DATA_PARALLEL_SIZE=1
+export VLLM_DATA_PARALLEL_SIZE="${VLLM_DATA_PARALLEL_SIZE:-1}"
 export VLLM_ENABLE_EXPERT_PARALLEL="true"
 
 # Prefix Caching Configs
@@ -144,10 +148,14 @@ export VLLM_ENABLE_V1_MULTIPROCESSING=0
 export MAX_STEPS=${MAX_STEPS:-50}
 export BATCH_SIZE=${BATCH_SIZE:-16}
 export MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-${BATCH_SIZE}}
-export NUM_GENERATIONS=16
+export NUM_GENERATIONS="${NUM_GENERATIONS:-16}"
 export TRAIN_MICRO_BATCH_SIZE="${TRAIN_MICRO_BATCH_SIZE:-32}"
-export CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-0}
-export CHECKPOINT_MAX_TO_KEEP=10
+if [[ "${RCP_LOGGING:-false}" == "true" || "${RCP_LOGGING:-0}" == "1" ]]; then
+  export CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-1}
+else
+  export CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-0}
+fi
+export CHECKPOINT_MAX_TO_KEEP="${CHECKPOINT_MAX_TO_KEEP:-35}"
 export CHECKPOINT_ASYNC=${CHECKPOINT_ASYNC:-true}
 export ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE:-1}
 export MAX_STALENESS=${MAX_STALENESS:-0}
@@ -158,9 +166,9 @@ export MAX_SEQ_TOKEN_PER_TPU=${MAX_SEQ_TOKEN_PER_TPU:-65536}
 export MAX_SEGMENTS_PER_PACKED_ROW=${MAX_SEGMENTS_PER_PACKED_ROW:-16}
 
 # Sampling Parameters (explicitly disable top-k, set top-p 1.0 and temperature 1.0)
-export TEMPERATURE="1.0"
-export TOP_P="1.0"
-export TOP_K="-1"
+export TEMPERATURE="${TEMPERATURE:-1.0}"
+export TOP_P="${TOP_P:-1.0}"
+export TOP_K="${TOP_K:--1}"
 
 # Algorithmic & Loss Hyperparameters
 export BETA=0.0
@@ -201,7 +209,7 @@ export DEBUG=${DEBUG:-1}
 # ==============================================================================
 # DeepSWE Environment & Agent Sandbox
 # ==============================================================================
-export DATASET_PATH="gs://mlperf_dataset/benchmark-r2e-gym-easy"
+export DATASET_PATH="${DATASET_PATH:-gs://mlperf_dataset/benchmark-r2e-gym-easy}"
 export USE_AGENT_SANDBOX=1
 export SCAFFOLD="openhands"
 export SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-${K8S_NAMESPACE:-trellis}}"
@@ -209,11 +217,11 @@ export POOL_NAME_FORMAT="${POOL_NAME_FORMAT:-}"
 export TEMPLATE_NAME_PREFIX="${TEMPLATE_NAME_PREFIX:-}"
 export SANDBOX_NODE_SELECTOR_KEY="cloud.google.com/gke-nodepool"
 export SANDBOX_NODE_SELECTOR_VAL="${SANDBOX_NODE_SELECTOR_VAL:-sandbox-np}"
-export MAX_WARMPOOL_REPLICAS=2
+export MAX_WARMPOOL_REPLICAS="${MAX_WARMPOOL_REPLICAS:-2}"
 export ROLLOUT_MAX_CONCURRENCY="${ROLLOUT_MAX_CONCURRENCY:-256}"
 export MAX_CONCURRENCY="${MAX_CONCURRENCY:-256}"
-export STEP_TIMEOUT_SECS=300
-export REWARD_TIMEOUT_SECS=180
+export STEP_TIMEOUT_SECS="${STEP_TIMEOUT_SECS:-300}"
+export REWARD_TIMEOUT_SECS="${REWARD_TIMEOUT_SECS:-180}"
 export FLUSH_EVERY_N_STEPS=1
 export MAX_TURNS=30
 export MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-4096}"
@@ -240,5 +248,100 @@ fi
 if [[ "${MLPERF_NO_LAUNCH:-0}" != "1" ]]; then
   COMMAND="${1:-start}"
   shift || true
+  if [[ "${COMMAND}" == "eval" && -n "${CHECKPOINT_MANIFEST_FILE:-}" && "${RUN_MANIFEST_LOOP:-1}" == "1" ]]; then
+    echo "Running sequential offline evaluation from manifest: ${CHECKPOINT_MANIFEST_FILE}"
+    # Stdlib-only (the launcher host has no JAX/tunix install). Prints one
+    # "step, samples_count, timestamp_ms, checkpoint_path, is_last" TSV row per
+    # checkpoint; a missing, empty or non-contiguous manifest aborts (set -e).
+    MANIFEST_ROWS_TSV="$(python3 -c '
+import json, subprocess, sys
+path = sys.argv[1]
+if path.startswith("gs://"):
+    text = subprocess.check_output(["gsutil", "cat", path], text=True)
+else:
+    with open(path, encoding="utf-8") as f:
+        text = f.read()
+records = sorted(
+    (json.loads(line) for line in text.splitlines() if line.strip()),
+    key=lambda r: int(r["step"]),
+)
+if not records:
+    sys.exit(f"Checkpoint manifest is empty: {path}")
+steps = [int(r["step"]) for r in records]
+first = int(records[0].get("val_start_at", steps[0]))
+if steps != list(range(first, first + len(steps))):
+    sys.exit(f"Manifest steps must be contiguous from val_start_at={first}: {steps}")
+for i, r in enumerate(records):
+    print("\t".join([
+        str(int(r["step"])),
+        str(int(r["samples_count"])),
+        str(int(r["timestamp_ms"])),
+        str(r["checkpoint_path"]),
+        "true" if i == len(records) - 1 else "false",
+    ]))
+' "${CHECKPOINT_MANIFEST_FILE}")"
+    mapfile -t MANIFEST_ROWS <<< "${MANIFEST_ROWS_TSV}"
+    BASE_EVAL_OUTPUT_DIR="${EVAL_OUTPUT_DIR:-${MAXTEXT_OUTPUT_DIR}/eval_results}"
+    EVAL_JOBSET_NAME="${EVAL_JOBSET_NAME:-${JOB_PREFIX}-eval}"
+    for row in "${MANIFEST_ROWS[@]}"; do
+      IFS=$'\t' read -r STEP SAMPLES TS_MS CKPT_PATH IS_LAST <<< "${row}"
+
+      echo "=== Evaluating checkpoint step=${STEP} samples=${SAMPLES} is_last=${IS_LAST} path=${CKPT_PATH} ==="
+      export MAXTEXT_CKPT="${CKPT_PATH}"
+      export CHECKPOINT_STEP="${STEP}"
+      export SAMPLES_COUNT="${SAMPLES}"
+      export CHECKPOINT_TIMESTAMP_MS="${TS_MS}"
+      export IS_LAST_CHECKPOINT="${IS_LAST}"
+      export EVAL_OUTPUT_DIR="${BASE_EVAL_OUTPUT_DIR%/}/step_${STEP}"
+      "${LAUNCHER}" --command eval --image "${TUNIX_IMAGE}" "$@"
+
+      if [[ "${DRY_RUN:-false}" != "true" ]]; then
+        HEAD_JOBSET="${EVAL_JOBSET_NAME}"
+        if [[ "${ROLLOUT_REPLICAS:-1}" -gt 1 ]]; then
+          HEAD_JOBSET="${EVAL_JOBSET_NAME}-0"
+        fi
+        echo "Waiting for evaluation JobSet ${HEAD_JOBSET} (main container) in namespace ${K8S_NAMESPACE}..."
+        while true; do
+          if ! kubectl get jobset "${HEAD_JOBSET}" -n "${K8S_NAMESPACE}" &>/dev/null; then
+            echo "JobSet ${HEAD_JOBSET} no longer exists."
+            break
+          fi
+          MAIN_EXIT="$(kubectl get pods -n "${K8S_NAMESPACE}" -l "jobset.sigs.k8s.io/jobset-name=${HEAD_JOBSET},jobset.sigs.k8s.io/replicatedjob-name=proc" -o jsonpath='{.items[0].status.containerStatuses[?(@.name=="main")].state.terminated.exitCode}' 2>/dev/null || true)"
+          if [[ -n "${MAIN_EXIT}" ]]; then
+            echo "Main evaluation container finished with exit code ${MAIN_EXIT}."
+            break
+          fi
+          sleep 10
+        done
+        "${LAUNCHER}" --command stop_eval --image "${TUNIX_IMAGE}" || true
+
+        TARGET_REACHED="$(
+          python3 -c '
+import glob, json, os, subprocess, sys
+out_dir = os.environ["EVAL_OUTPUT_DIR"].rstrip("/")
+if out_dir.startswith("gs://"):
+    res = subprocess.run(["gsutil", "cat", f"{out_dir}/*/summary.json"], capture_output=True, text=True, check=False)
+    if res.returncode == 0 and res.stdout.strip():
+        data = json.loads(res.stdout)
+        print("true" if data.get("target_reached") else "false")
+        sys.exit(0)
+else:
+    matches = sorted(glob.glob(f"{out_dir}/*/summary.json"))
+    if matches:
+        with open(matches[-1], "r", encoding="utf-8") as f:
+            data = json.load(f)
+        print("true" if data.get("target_reached") else "false")
+        sys.exit(0)
+print("false")
+'
+        )"
+        if [[ "${TARGET_REACHED}" == "true" ]]; then
+          echo "Target accuracy ${TARGET_ACCURACY} reached at step ${STEP}. Stopping offline evaluation loop."
+          break
+        fi
+      fi
+    done
+    exit 0
+  fi
   exec "${LAUNCHER}" --command "${COMMAND}" --image "${TUNIX_IMAGE}" "$@"
 fi

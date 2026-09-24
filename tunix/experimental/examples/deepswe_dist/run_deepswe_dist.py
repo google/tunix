@@ -367,6 +367,19 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="Enable MLPerf RCP (mllog) compliance logging.",
   )
   parser.add_argument(
+      "--val_start_at",
+      type=int,
+      default=(
+          int(os.getenv("VAL_START_AT"))
+          if os.getenv("VAL_START_AT", "").strip()
+          else None
+      ),
+      help=(
+          "First optimizer step to save/evaluate checkpoints from "
+          "(defaults to CEIL(2.5 + 3840 / global_batch_size))."
+      ),
+  )
+  parser.add_argument(
       "--metric_logger_dir",
       type=str,
       default=os.getenv("METRIC_LOGGER_DIR", None),
@@ -715,6 +728,57 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           wait_initial=True,
       )
 
+    global_batch_size = int(args.batch_size) * int(args.num_generations)
+    val_start_step = (
+        mllog_utils.compute_val_start_step(global_batch_size, args.val_start_at)
+        if args.rcp_logging or args.val_start_at is not None
+        else None
+    )
+    manifest_file = (
+        os.path.join(
+            args.metric_logger_dir.rstrip("/"), "eval_checkpoints.jsonl"
+        )
+        if args.rcp_logging and args.metric_logger_dir
+        else ""
+    )
+
+    def _on_checkpoint_saved(ckpt_info: dict[str, Any]) -> None:
+      if not manifest_file:
+        return
+      step_num = int(ckpt_info["step"])
+      samples_count = step_num * global_batch_size
+      ts_ms = int(ckpt_info.get("timestamp_ms", 0))
+      ckpt_path = str(
+          ckpt_info.get(
+              "checkpoint_path", f"checkpoints/{step_num}/model_params"
+          )
+      )
+      record = {
+          "step": step_num,
+          "checkpoint_path": ckpt_path,
+          "timestamp_ms": ts_ms,
+          "samples_count": samples_count,
+          "global_batch_size": global_batch_size,
+          "batch_size": int(args.batch_size),
+          "num_generations": int(args.num_generations),
+          "val_start_at": int(val_start_step or 1),
+          "max_steps": int(args.max_steps),
+          "target_accuracy": float(args.target_accuracy),
+          "seed": int(args.seed),
+          "mllog_file": (
+              mllog_utils.get_mllog_file_path(
+                  metric_logger_dir=args.metric_logger_dir, seed=args.seed
+              )
+              or ""
+          ),
+      }
+      mllog_utils.append_checkpoint_manifest(manifest_file, record)
+      logging.info(
+          "Appended checkpoint manifest entry for step=%d to %s",
+          step_num,
+          manifest_file,
+      )
+
     program = rl_program.StandardRLProgram(
         algo=algo,
         dataset=prompt_stream,
@@ -763,6 +827,8 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
             if args.rcp_logging
             else None,
         ),
+        val_start_step=val_start_step,
+        on_checkpoint_saved=_on_checkpoint_saved if manifest_file else None,
     )
 
     if args.rcp_logging:
@@ -787,7 +853,12 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           if program.last_step_result is not None
           else args.max_steps
       )
-      mllog_utils.train_stop(args, step=completed_steps, status="success")
+      mllog_utils.train_stop(
+          args,
+          step=completed_steps,
+          status="success",
+          time_ms=program.last_step_timestamp_ms,
+      )
   except BaseException as e:
     if args.rcp_logging:
       completed_steps = (

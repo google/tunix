@@ -347,13 +347,52 @@ class TrainerWorker(abstract_worker.Worker):
       self.state = WorkerState.ERROR
       raise
 
+  def _resolve_checkpoint_path(self, metadata: Any) -> str:
+    """Resolves the saved Orbax model_params directory from the underlying trainer."""
+    step = None
+    if isinstance(metadata, Mapping):
+      step = metadata.get("step")
+    if step is None:
+      step = getattr(
+          self._trainer,
+          "train_steps",
+          getattr(self._trainer, "_train_steps", None),
+      )
+    ckpt_dir = getattr(
+        getattr(self._trainer, "config", None), "checkpoint_dir", None
+    )
+    if not ckpt_dir:
+      ckpt_dir = getattr(
+          getattr(
+              getattr(self._trainer, "_checkpoint_manager", None),
+              "_checkpoint_manager",
+              None,
+          ),
+          "directory",
+          None,
+      )
+    if not ckpt_dir:
+      ckpt_dir = getattr(
+          getattr(
+              getattr(self._trainer, "checkpoint_manager", None),
+              "_checkpointer",
+              None,
+          ),
+          "directory",
+          None,
+      )
+    if ckpt_dir and step is not None:
+      return f"{str(ckpt_dir).rstrip('/')}/{int(step)}/model_params"
+    return ""
+
   def save_checkpoint(self, metadata: Any, **kwargs) -> datatypes.Response:
     """Force the trainer to serialize its state (model + optimizer)."""
     self._ensure_ready()
     try:
       self._trainer.save_checkpoint(metadata, **kwargs)
+      ckpt_path = self._resolve_checkpoint_path(metadata)
       self._last_error = None
-      return self._response(checkpoint_saved=True)
+      return self._response(checkpoint_saved=True, checkpoint_path=ckpt_path)
     except Exception as exc:
       self._last_error = str(exc)
       self.state = WorkerState.ERROR

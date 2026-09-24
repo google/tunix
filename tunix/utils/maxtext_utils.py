@@ -574,6 +574,87 @@ def log_param_shapes(model: Any) -> None:
   logging.info("MaxText model has %d parameter arrays.", len(shapes))
 
 
+def install_eval_checkpoint_unscan_hook(
+    engine: Any,
+    maxtext_config: Any,
+) -> None:
+  """Wraps engine._checkpoint_manager.save_checkpoint to save unscanned bfloat16 weights-only checkpoints for vLLM eval."""
+  ckpt_mgr = getattr(engine, "_checkpoint_manager", None)
+  inner_mgr = getattr(ckpt_mgr, "_checkpoint_manager", None)
+  if ckpt_mgr is None or inner_mgr is None:
+    return
+
+  def _save_unscanned_eval_checkpoint(
+      step: int,
+      checkpoint_state: Any,
+      custom_metadata: Any = None,
+      **kwargs: Any,
+  ) -> bool:
+    from flax import nnx  # pylint: disable=g-import-not-at-top
+    import jax  # pylint: disable=g-import-not-at-top
+    import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
+    from maxtext.integration.tunix.weight_mapping import raiden_unscan  # pylint: disable=g-import-not-at-top
+    import orbax.checkpoint as ocp  # pylint: disable=g-import-not-at-top
+
+    custom_metadata = dict(custom_metadata) if custom_metadata else {}
+    custom_metadata["micro_step_count"] = getattr(
+        checkpoint_state, "micro_step_count", 0
+    )
+
+    if ckpt_mgr.get_latest_step() == step:
+      if not ckpt_mgr._supersedes_saved_checkpoint(  # pylint: disable=protected-access
+          step, custom_metadata["micro_step_count"]
+      ):
+        logging.info(
+            "Checkpoint already saved at step %d, skipping save.", step
+        )
+        return False
+      ckpt_mgr._delete_saved_step(step)  # pylint: disable=protected-access
+      kwargs["force"] = True
+
+    params_state = nnx.state(checkpoint_state.model, nnx.Param)
+    params_state = jax.tree_util.tree_map(
+        lambda x: (
+            x.astype(jnp.bfloat16)
+            if hasattr(x, "dtype") and jnp.issubdtype(x.dtype, jnp.floating)
+            else x
+        ),
+        params_state,
+    )
+    if getattr(maxtext_config, "scan_layers", False):
+      unscanned_params = raiden_unscan.unscan_layers(
+          params_state,
+          num_layers=int(maxtext_config.num_decoder_layers),
+          scan_axis=int(getattr(maxtext_config, "param_scan_axis", 1)),
+          cycle_interval=int(
+              getattr(maxtext_config, "inhomogeneous_layer_cycle_interval", 1)
+          ),
+      )
+    else:
+      unscanned_params = params_state
+    del params_state
+
+    jax.block_until_ready(unscanned_params)
+    model_cp_args = ocp.args.PyTreeSave(
+        item=unscanned_params,
+        save_args=jax.tree.map(lambda _: ocp.SaveArgs(), unscanned_params),
+    )
+    saved = inner_mgr.save(
+        step=step,
+        args=ocp.args.Composite(model_params=model_cp_args),
+        custom_metadata=custom_metadata,
+        **kwargs,
+    )
+    if saved and hasattr(inner_mgr, "wait_until_finished"):
+      inner_mgr.wait_until_finished()
+    return saved
+
+  ckpt_mgr.save_checkpoint = _save_unscanned_eval_checkpoint
+  logging.info(
+      "Installed unscanned bfloat16 weights-only checkpoint hook on MaxTextTrainingEngine."
+  )
+
+
 def create_maxtext_engine(
     maxtext_config: Any,
     mesh: Any,
@@ -602,5 +683,11 @@ def create_maxtext_engine(
     )
   if log_shapes:
     log_param_shapes(engine.model)
+
+  if os.environ.get("UNSCAN_CHECKPOINT_FOR_EVAL", "").lower() in (
+      "1",
+      "true",
+  ) or os.environ.get("DEFERRED_OFFLINE_EVAL", "").lower() in ("1", "true"):
+    install_eval_checkpoint_unscan_hook(engine, maxtext_config)
 
   return engine

@@ -14,24 +14,156 @@
 
 """MLPerf RCP Logging Utilities for Post-Training (GRPO)."""
 
+import collections
+import inspect
+import json
 import logging
+import math
 import os
+import subprocess
+import sys
+import time
 from typing import Any, Callable, Iterable, Mapping, Optional
 import jax
 import numpy as np
+
+
+class _FallbackMLLogger:
+  """Pure-Python MLPerf MLLogger fallback when mlperf_logging is not installed."""
+
+  def __init__(self):
+    self.logger = logging.getLogger("mllog_default")
+    self.logger.propagate = False
+    self.logger.setLevel(logging.INFO)
+    if not self.logger.handlers:
+      handler = logging.StreamHandler(stream=sys.stdout)
+      handler.setLevel(logging.INFO)
+      self.logger.addHandler(handler)
+    self.default_namespace = ""
+    self.default_stack_offset = 1
+    self.root_dir: Optional[str] = None
+
+  def _log_helper(
+      self,
+      event_type: str,
+      key: str,
+      value: Any = None,
+      metadata: Optional[dict[str, Any]] = None,
+      namespace: Optional[str] = None,
+      time_ms: Optional[int] = None,
+      stack_offset: Optional[int] = None,
+  ) -> None:
+    ns = self.default_namespace if namespace is None else namespace
+    ts = int(time.time() * 1000) if time_ms is None else int(time_ms)
+    offset = self.default_stack_offset if stack_offset is None else stack_offset
+    frame = inspect.currentframe()
+    for _ in range(2 + offset):
+      if frame is not None and frame.f_back is not None:
+        frame = frame.f_back
+    caller_file = frame.f_code.co_filename if frame is not None else __file__
+    caller_line = frame.f_lineno if frame is not None else 0
+    log_meta: dict[str, Any] = {"file": caller_file, "lineno": caller_line}
+    if isinstance(metadata, dict):
+      log_meta.update(metadata)
+    payload = collections.OrderedDict([
+        ("namespace", ns),
+        ("time_ms", ts),
+        ("event_type", event_type),
+        ("key", key),
+        ("value", value),
+        ("metadata", log_meta),
+    ])
+    self.logger.info(":::MLLOG %s", json.dumps(payload))
+
+  def start(self, key: str, value: Any = None, metadata: Optional[dict[str, Any]] = None, **kwargs: Any) -> None:
+    self._log_helper("INTERVAL_START", key, value=value, metadata=metadata, **kwargs)
+
+  def end(self, key: str, value: Any = None, metadata: Optional[dict[str, Any]] = None, **kwargs: Any) -> None:
+    self._log_helper("INTERVAL_END", key, value=value, metadata=metadata, **kwargs)
+
+  def event(self, key: str, value: Any = None, metadata: Optional[dict[str, Any]] = None, **kwargs: Any) -> None:
+    self._log_helper("POINT_IN_TIME", key, value=value, metadata=metadata, **kwargs)
+
+
+class _FallbackMLLogModule:
+  """Pure-Python fallback for mlperf_logging.mllog."""
+
+  def __init__(self, logger_instance: _FallbackMLLogger):
+    self._logger_instance = logger_instance
+
+  def get_mllogger(self) -> _FallbackMLLogger:
+    return self._logger_instance
+
+  def config(self, **kwargs: Any) -> None:
+    filename = kwargs.get("filename")
+    if filename:
+      fh = logging.FileHandler(filename)
+      fh.setLevel(logging.INFO)
+      self._logger_instance.logger.addHandler(fh)
+    if "root_dir" in kwargs:
+      self._logger_instance.root_dir = kwargs["root_dir"]
+
 
 try:
   from mlperf_logging import mllog
   from mlperf_logging.mllog import constants
   mllogger = mllog.get_mllogger()
 except ImportError:
-  mllog = None
   constants = None
-  mllogger = None
+  mllogger = _FallbackMLLogger()
+  mllog = _FallbackMLLogModule(mllogger)
 
 
 _gcs_target_path: Optional[str] = None
 _local_log_path: Optional[str] = None
+
+
+def _download_from_gcs_if_exists(gcs_path: str, local_path: str) -> bool:
+  """Downloads an existing GCS mllog file to local_path so events append cleanly."""
+  try:
+    import fsspec  # pylint: disable=g-import-not-at-top
+
+    fs = fsspec.filesystem("gs")
+    if fs.exists(gcs_path):
+      os.makedirs(os.path.dirname(os.path.abspath(local_path)), exist_ok=True)
+      fs.get(gcs_path, local_path)
+      return True
+    return False
+  except Exception:  # pylint: disable=broad-exception-caught
+    try:
+      import tensorflow as tf  # pylint: disable=g-import-not-at-top
+
+      if tf.io.gfile.exists(gcs_path):
+        os.makedirs(os.path.dirname(os.path.abspath(local_path)), exist_ok=True)
+        tf.io.gfile.copy(gcs_path, local_path, overwrite=True)
+        return True
+    except Exception:  # pylint: disable=broad-exception-caught
+      os.makedirs(os.path.dirname(os.path.abspath(local_path)), exist_ok=True)
+      res = subprocess.run(
+          ["gsutil", "cp", gcs_path, local_path],
+          capture_output=True,
+          text=True,
+          check=False,
+      )
+      if res.returncode == 0 and os.path.exists(local_path):
+        return True
+  return False
+
+
+def get_mllog_file_path(
+    metric_logger_dir: Optional[str] = None,
+    seed: Optional[int] = None,
+    filename: Optional[str] = None,
+) -> Optional[str]:
+  """Returns the target MLLOG file path (GCS URI or local path)."""
+  if filename is not None:
+    return filename
+  if metric_logger_dir is not None:
+    if metric_logger_dir.endswith(".out") or metric_logger_dir.endswith(".log"):
+      return metric_logger_dir
+    seed_val = seed if seed is not None else 1
+    return os.path.join(metric_logger_dir.rstrip("/"), f"seed_{seed_val}.out")
+  return _gcs_target_path or _local_log_path
 
 
 def _parse_topology_devices(
@@ -72,10 +204,18 @@ def _flush_to_gcs_if_needed() -> None:
       fs = fsspec.filesystem("gs")
       fs.put(_local_log_path, _gcs_target_path)
     except Exception:  # pylint: disable=broad-exception-caught
-      import tensorflow as tf  # pylint: disable=g-import-not-at-top
+      try:
+        import tensorflow as tf  # pylint: disable=g-import-not-at-top
 
-      tf.io.gfile.makedirs(os.path.dirname(_gcs_target_path))
-      tf.io.gfile.copy(_local_log_path, _gcs_target_path, overwrite=True)
+        tf.io.gfile.makedirs(os.path.dirname(_gcs_target_path))
+        tf.io.gfile.copy(_local_log_path, _gcs_target_path, overwrite=True)
+      except Exception:  # pylint: disable=broad-exception-caught
+        subprocess.run(
+            ["gsutil", "cp", _local_log_path, _gcs_target_path],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
   except Exception as exc:  # pylint: disable=broad-exception-caught
     logging.warning(
         "Failed to copy mllog file %s to %s: %s",
@@ -96,7 +236,12 @@ def configure_logger(
     return
 
   seed_val = seed if seed is not None else 1
-  if filename is None and metric_logger_dir is not None:
+  if filename is not None and filename.startswith("gs://"):
+    _gcs_target_path = filename
+    filename = os.path.join(
+        "/tmp/rcp_logs", f"seed_{seed_val}_{os.getpid()}.out"
+    )
+  elif filename is None and metric_logger_dir is not None:
     if metric_logger_dir.startswith("gs://"):
       if metric_logger_dir.endswith(".out") or metric_logger_dir.endswith(
           ".log"
@@ -112,20 +257,30 @@ def configure_logger(
     elif metric_logger_dir.endswith(".out") or metric_logger_dir.endswith(
         ".log"
     ):
+      _gcs_target_path = None
       filename = metric_logger_dir
     else:
+      _gcs_target_path = None
       filename = os.path.join(metric_logger_dir, f"seed_{seed_val}.out")
+  elif filename is not None:
+    _gcs_target_path = None
 
   if filename is not None:
     abs_filename = os.path.abspath(filename)
     _local_log_path = abs_filename
     os.makedirs(os.path.dirname(abs_filename), exist_ok=True)
+    if _gcs_target_path and not os.path.exists(abs_filename):
+      _download_from_gcs_if_exists(_gcs_target_path, abs_filename)
     existing_files = [
         os.path.abspath(getattr(h, "baseFilename", ""))
         for h in getattr(mllogger.logger, "handlers", [])
         if isinstance(h, logging.FileHandler)
     ]
     if abs_filename not in existing_files:
+      for h in list(getattr(mllogger.logger, "handlers", [])):
+        if isinstance(h, logging.FileHandler):
+          mllogger.logger.removeHandler(h)
+          h.close()
       try:
         mllog.config(filename=filename)
       except TypeError:
@@ -227,17 +382,24 @@ def train_start(args=None, step: int = 0, samples_count: Optional[int] = None):
   _flush_to_gcs_if_needed()
 
 
-def block_stop(step: int = 0, samples_count: Optional[int] = None):
+def block_stop(
+    step: int = 0,
+    samples_count: Optional[int] = None,
+    time_ms: Optional[int] = None,
+):
   """Marks the end of a training block."""
   if _is_master_process() and mllogger is not None:
     metadata = {"step": int(step)}
     if samples_count is not None:
       metadata[getattr(constants, "SAMPLES_COUNT", "samples_count")] = int(samples_count)
 
-    mllogger.end(
-        key=getattr(constants, "BLOCK_STOP", "block_stop"),
-        metadata=metadata,
-    )
+    kwargs: dict[str, Any] = {
+        "key": getattr(constants, "BLOCK_STOP", "block_stop"),
+        "metadata": metadata,
+    }
+    if time_ms is not None:
+      kwargs["time_ms"] = int(time_ms)
+    mllogger.end(**kwargs)
 
 
 def train_stop(
@@ -245,8 +407,10 @@ def train_stop(
     step: Optional[int] = None,
     samples_count: Optional[int] = None,
     status: str = "success",
+    time_ms: Optional[int] = None,
 ):
-  """Marks the end of a training block and the training run."""
+  """Marks the end of a training block (run_stop is emitted by evaluation)."""
+  del status
   if args is not None:
     if step is None:
       step = getattr(args, "max_steps", 0)
@@ -257,21 +421,28 @@ def train_stop(
       samples_count = int(step) * global_batch_size
 
   step_val = 0 if step is None else int(step)
-  block_stop(step=step_val, samples_count=samples_count)
-  run_stop(status=status, samples_count=samples_count)
+  block_stop(step=step_val, samples_count=samples_count, time_ms=time_ms)
+  _flush_to_gcs_if_needed()
 
 
-def start_eval(step: int = 0, samples_count: Optional[int] = None):
+def start_eval(
+    step: int = 0,
+    samples_count: Optional[int] = None,
+    time_ms: Optional[int] = None,
+):
   """Marks the start of an evaluation interval."""
   if _is_master_process() and mllogger is not None:
     metadata = {"step": int(step)}
     if samples_count is not None:
       metadata[getattr(constants, "SAMPLES_COUNT", "samples_count")] = int(samples_count)
 
-    mllogger.start(
-        key=getattr(constants, "EVAL_START", "eval_start"),
-        metadata=metadata,
-    )
+    kwargs: dict[str, Any] = {
+        "key": getattr(constants, "EVAL_START", "eval_start"),
+        "metadata": metadata,
+    }
+    if time_ms is not None:
+      kwargs["time_ms"] = int(time_ms)
+    mllogger.start(**kwargs)
 
 
 def end_eval(
@@ -279,6 +450,7 @@ def end_eval(
     accuracy: float = 0.0,
     samples_count: Optional[int] = None,
     validation_time: Optional[float] = None,
+    time_ms: Optional[int] = None,
 ):
   """Marks the end of an evaluation interval and records eval accuracy."""
   if _is_master_process() and mllogger is not None:
@@ -286,11 +458,16 @@ def end_eval(
     if samples_count is not None:
       metadata[getattr(constants, "SAMPLES_COUNT", "samples_count")] = int(samples_count)
 
+    extra_kwargs: dict[str, Any] = {}
+    if time_ms is not None:
+      extra_kwargs["time_ms"] = int(time_ms)
+
     if validation_time is not None:
       mllogger.event(
           key="tracked_stats",
           value={"validation_time": float(validation_time)},
           metadata={"step": int(step)},
+          **extra_kwargs,
       )
 
     eval_accuracy_metadata = {}
@@ -301,11 +478,160 @@ def end_eval(
         key=getattr(constants, "EVAL_ACCURACY", "eval_accuracy"),
         value=float(accuracy),
         metadata=eval_accuracy_metadata,
+        **extra_kwargs,
     )
     mllogger.end(
         key=getattr(constants, "EVAL_STOP", "eval_stop"),
         metadata=metadata,
+        **extra_kwargs,
     )
+
+
+def log_offline_eval_step(
+    step: int,
+    samples_count: int,
+    eval_accuracy: float,
+    target_accuracy: float = 0.69,
+    checkpoint_timestamp_ms: Optional[int] = None,
+    is_last_checkpoint: bool = False,
+    validation_time: Optional[float] = None,
+    emit_start_eval: bool = True,
+) -> bool:
+  """Logs offline evaluation events for a single checkpoint and emits backdated run_stop if converged or final."""
+  passed = float(eval_accuracy) >= float(target_accuracy)
+  if not (_is_master_process() and mllogger is not None):
+    return passed
+
+  if emit_start_eval:
+    start_eval(step=int(step), samples_count=int(samples_count))
+  end_eval(
+      step=int(step),
+      accuracy=float(eval_accuracy),
+      samples_count=int(samples_count),
+      validation_time=validation_time,
+  )
+  if passed:
+    run_stop(
+        status="success",
+        samples_count=int(samples_count),
+        time_ms=checkpoint_timestamp_ms,
+    )
+    _flush_to_gcs_if_needed()
+    return True
+  if is_last_checkpoint:
+    run_stop(
+        status="aborted",
+        samples_count=int(samples_count),
+        time_ms=checkpoint_timestamp_ms,
+    )
+    _flush_to_gcs_if_needed()
+    return False
+
+  _flush_to_gcs_if_needed()
+  return False
+
+
+def compute_val_start_step(
+    global_batch_size: int,
+    val_start_at_override: Optional[int] = None,
+) -> int:
+  """Computes MLPerf policy validation start step: CEIL(2.5 + 3840 / global_batch_size)."""
+  if val_start_at_override is not None and int(val_start_at_override) > 0:
+    return int(val_start_at_override)
+  if int(global_batch_size) <= 0:
+    raise ValueError(
+        f"global_batch_size must be positive, got {global_batch_size}"
+    )
+  return int(math.ceil(2.5 + 3840.0 / float(global_batch_size)))
+
+
+def _read_manifest_text(manifest_path: str) -> str:
+  """Reads text content of manifest_path from GCS or local filesystem if it exists."""
+  if manifest_path.startswith("gs://"):
+    try:
+      import fsspec  # pylint: disable=g-import-not-at-top
+
+      fs = fsspec.filesystem("gs")
+      if not fs.exists(manifest_path):
+        return ""
+      with fs.open(manifest_path, "r", encoding="utf-8") as f:
+        return f.read()
+    except Exception:  # pylint: disable=broad-exception-caught
+      try:
+        import tensorflow as tf  # pylint: disable=g-import-not-at-top
+
+        if not tf.io.gfile.exists(manifest_path):
+          return ""
+        with tf.io.gfile.GFile(manifest_path, "r") as f:
+          return f.read()
+      except Exception:  # pylint: disable=broad-exception-caught
+        import subprocess  # pylint: disable=g-import-not-at-top
+
+        res = subprocess.run(
+            ["gsutil", "cat", manifest_path],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return res.stdout if res.returncode == 0 else ""
+  if not os.path.exists(manifest_path):
+    return ""
+  with open(manifest_path, "r", encoding="utf-8") as f:
+    return f.read()
+
+
+def _write_manifest_text(manifest_path: str, content: str) -> None:
+  """Writes text content to manifest_path on GCS or local filesystem."""
+  if manifest_path.startswith("gs://"):
+    try:
+      import fsspec  # pylint: disable=g-import-not-at-top
+
+      fs = fsspec.filesystem("gs")
+      parent = os.path.dirname(manifest_path.rstrip("/"))
+      if parent and parent != "gs:":
+        fs.makedirs(parent, exist_ok=True)
+      with fs.open(manifest_path, "w", encoding="utf-8") as f:
+        f.write(content)
+      return
+    except Exception:  # pylint: disable=broad-exception-caught
+      import tensorflow as tf  # pylint: disable=g-import-not-at-top
+
+      tf.io.gfile.makedirs(os.path.dirname(manifest_path))
+      with tf.io.gfile.GFile(manifest_path, "w") as f:
+        f.write(content)
+      return
+  parent = os.path.dirname(os.path.abspath(manifest_path))
+  if parent:
+    os.makedirs(parent, exist_ok=True)
+  with open(manifest_path, "w", encoding="utf-8") as f:
+    f.write(content)
+
+
+def append_checkpoint_manifest(
+    manifest_path: str,
+    record: Mapping[str, Any],
+) -> None:
+  """Appends or updates a checkpoint manifest JSONL record (local or gs://)."""
+  if not manifest_path:
+    return
+  existing_text = _read_manifest_text(manifest_path)
+  records_by_step: dict[int, dict[str, Any]] = {}
+  for line in existing_text.splitlines():
+    stripped = line.strip()
+    if not stripped:
+      continue
+    parsed = json.loads(stripped)
+    records_by_step[int(parsed["step"])] = dict(parsed)
+
+  clean_record = dict(record)
+  records_by_step[int(clean_record["step"])] = clean_record
+  sorted_records = [
+      records_by_step[s] for s in sorted(records_by_step.keys())
+  ]
+  content = "\n".join(
+      json.dumps(r, ensure_ascii=False) for r in sorted_records
+  ) + "\n"
+  _write_manifest_text(manifest_path, content)
 
 
 def check_eval(
@@ -370,10 +696,6 @@ def check_eval(
             "status": "success",
             getattr(constants, "SAMPLES_COUNT", "samples_count"): current_samples,
         },
-    )
-    mllogger.event(
-        key=getattr(constants, "TRAIN_SAMPLES", "train_samples"),
-        value=current_samples,
     )
   else:
     mllogger.start(
@@ -822,17 +1144,24 @@ def create_rcp_metrics_logger(
 rcp_metrics_logger = create_rcp_metrics_logger
 
 
-def run_stop(status: str = "success", samples_count: Optional[int] = None):
+def run_stop(
+    status: str = "success",
+    samples_count: Optional[int] = None,
+    time_ms: Optional[int] = None,
+):
   """Marks the end of the training run."""
   if _is_master_process() and mllogger is not None:
     metadata = {"status": status}
     if samples_count is not None:
       metadata[getattr(constants, "SAMPLES_COUNT", "samples_count")] = int(samples_count)
 
-    mllogger.end(
-        key=getattr(constants, "RUN_STOP", "run_stop"),
-        metadata=metadata,
-    )
+    kwargs: dict[str, Any] = {
+        "key": getattr(constants, "RUN_STOP", "run_stop"),
+        "metadata": metadata,
+    }
+    if time_ms is not None:
+      kwargs["time_ms"] = int(time_ms)
+    mllogger.end(**kwargs)
     _flush_to_gcs_if_needed()
 
 
@@ -855,15 +1184,23 @@ def init_print(
     )
 
   # Extract batch & step configs
-  batch_size = getattr(args, "batch_size", None) or 8
-  num_generations = getattr(args, "num_generations", None) or 8
+  batch_size = getattr(args, "batch_size", None) or int(os.getenv("BATCH_SIZE", "16"))
+  num_generations = getattr(args, "num_generations", None) or int(os.getenv("NUM_GENERATIONS", "16"))
   global_batch_size = batch_size * num_generations
   mini_batch_size = getattr(args, "mini_batch_size", None) or batch_size
   train_micro_batch_size = getattr(args, "train_micro_batch_size", None) or 1
   max_steps = getattr(args, "max_steps", None) or 50
   max_prompt_length = getattr(args, "max_prompt_length", None) or 4096
-  max_response_length = getattr(args, "max_response_length", None) or 8192
-  max_seq_len = max_prompt_length + max_response_length
+  max_response_length = getattr(args, "max_response_length", None) or 61440
+  max_seq_len = (
+      getattr(args, "max_sequence_length", None)
+      or getattr(args, "max_seq_token_per_tpu", None)
+      or (
+          max_prompt_length + max_response_length
+          if (max_prompt_length + max_response_length) >= 65536
+          else 65536
+      )
+  )
 
   # Train / Eval sample counts
   train_samples = None
@@ -882,7 +1219,7 @@ def init_print(
     except (TypeError, AttributeError):
       pass
   if eval_samples is None:
-    eval_samples = 256
+    eval_samples = getattr(args, "eval_samples", None) or 251
 
   # Parallelism dimensions from meshes
   train_tp = 1
@@ -912,6 +1249,34 @@ def init_print(
   grad_accum_steps = max(
       1,
       (mini_batch_size * num_generations) // max(1, train_micro_batch_size),
+  )
+
+  scaled_lr = 1.0e-6 * ((float(global_batch_size) / 256.0) ** 0.5)
+  base_lr = (
+      float(getattr(args, "learning_rate"))
+      if getattr(args, "learning_rate", None) is not None
+      else scaled_lr
+  )
+  scaled_clip_norm = 0.125 * ((256.0 / float(global_batch_size)) ** 0.5)
+  grad_clip_norm = (
+      float(getattr(args, "max_grad_norm"))
+      if getattr(args, "max_grad_norm", None) is not None
+      else scaled_clip_norm
+  )
+  adam_b1 = (
+      float(getattr(args, "b1"))
+      if getattr(args, "b1", None) is not None
+      else float(os.getenv("ADAM_B1", "0.9"))
+  )
+  adam_b2 = (
+      float(getattr(args, "b2"))
+      if getattr(args, "b2", None) is not None
+      else float(os.getenv("ADAM_B2", "0.999"))
+  )
+  weight_decay = (
+      float(getattr(args, "weight_decay"))
+      if getattr(args, "weight_decay", None) is not None
+      else float(os.getenv("WEIGHT_DECAY", "0.0"))
   )
 
   # 1. Submission Metadata
@@ -947,24 +1312,28 @@ def init_print(
       getattr(constants, "EVAL_SAMPLES", "eval_samples"): eval_samples,
       getattr(constants, "INIT_CHECKPOINT_STEP", "init_checkpoint_step"): 0,
       getattr(constants, "OPT_NAME", "opt_name"): getattr(constants, "ADAMW", "adamw"),
-      getattr(constants, "OPT_BASE_LR", "opt_base_learning_rate"): getattr(args, "learning_rate", 1e-6),
-      getattr(constants, "OPT_END_LR", "opt_end_learning_rate"): getattr(args, "learning_rate", 1e-6),
-      getattr(constants, "OPT_ADAMW_BETA_1", "opt_adamw_beta_1"): getattr(args, "b1", 0.9),
-      getattr(constants, "OPT_ADAMW_BETA_2", "opt_adamw_beta_2"): getattr(args, "b2", 0.99),
+      getattr(constants, "OPT_BASE_LR", "opt_base_learning_rate"): base_lr,
+      getattr(constants, "OPT_END_LR", "opt_end_learning_rate"): base_lr,
+      getattr(constants, "OPT_ADAMW_BETA_1", "opt_adamw_beta_1"): adam_b1,
+      getattr(constants, "OPT_ADAMW_BETA_2", "opt_adamw_beta_2"): adam_b2,
       getattr(constants, "OPT_ADAMW_EPSILON", "opt_adamw_epsilon"): 1e-8,
-      getattr(constants, "OPT_ADAMW_WEIGHT_DECAY", "opt_adamw_weight_decay"): getattr(args, "weight_decay", 0.01),
-      getattr(constants, "OPT_GRADIENT_CLIP_NORM", "opt_gradient_clip_norm"): getattr(args, "max_grad_norm", 1.0),
+      getattr(constants, "OPT_ADAMW_WEIGHT_DECAY", "opt_adamw_weight_decay"): weight_decay,
+      getattr(constants, "OPT_GRADIENT_CLIP_NORM", "opt_gradient_clip_norm"): grad_clip_norm,
       getattr(constants, "OPT_LR_WARMUP_STEPS", "opt_learning_rate_warmup_steps"): getattr(args, "warmup_steps", 0),
       getattr(constants, "OPT_LR_DECAY_STEPS", "opt_learning_rate_decay_steps"): getattr(args, "lr_decay_steps", max_steps),
       getattr(constants, "OPT_LR_DECAY_SCHEDULE", "opt_learning_rate_decay_schedule"): getattr(args, "schedule_type", "constant") or "constant",
       getattr(constants, "TENSOR_PARALLELISM", "tensor_parallelism"): train_tp,
       getattr(constants, "PIPELINE_PARALLELISM", "pipeline_parallelism"): 1,
       getattr(constants, "CONTEXT_PARALLELISM", "context_parallelism"): train_sp,
-      getattr(constants, "EXPERT_PARALLELISM", "expert_parallelism"): getattr(args, "train_mesh_expert", 1),
+      getattr(constants, "EXPERT_PARALLELISM", "expert_parallelism"): getattr(args, "train_mesh_expert", 1) or 1,
+      "lowest_numerical_precision_in_linear": getattr(args, "lowest_numerical_precision_in_linear", "bfloat16"),
+      "lowest_numerical_precision_in_attn": getattr(args, "lowest_numerical_precision_in_attn", "bfloat16"),
+      "lowest_numerical_precision_in_comm": getattr(args, "lowest_numerical_precision_in_comm", "bfloat16"),
+      "config_filename": getattr(args, "config_filename", None) or getattr(args, "model_id", None) or "qwen35_397b_grpo",
       "generation_backend": getattr(args, "rollout_engine", "vllm"),
       "generation_tensor_parallelism": rollout_tp,
       "generation_pipeline_parallelism": 1,
-      "generation_expert_parallelism": getattr(args, "rollout_mesh_expert", 1),
+      "generation_expert_parallelism": getattr(args, "rollout_mesh_expert", 1) or 1,
       getattr(
           constants,
           "GENERATION_TRAINING_ROLLOUT_TEMPERATURE",
