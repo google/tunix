@@ -140,7 +140,7 @@ export ONEHOT_MOE_PERMUTE_THRESHOLD=32768
 export VLLM_MOE_CHUNK_SIZE=256
 export SLICE_ROPE_CACHE=1
 export DP_SCHED_BATCH_PREFILL=false
-export LIBTPU_INIT_ARGS=' --xla_tpu_use_minor_sharding_for_major_trivial_input=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=false --xla_tpu_ars_combiner_threshold_in_bytes=0 --xla_tpu_enable_async_collective_merger=false --xla_tpu_check_legacy_constraints_in_reduce_scatter_legalizer=false'
+export LIBTPU_INIT_ARGS=' --xla_tpu_use_minor_sharding_for_major_trivial_input=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=false --xla_tpu_ars_combiner_threshold_in_bytes=0 --xla_tpu_enable_async_collective_merger=false --xla_tpu_check_legacy_constraints_in_reduce_scatter_legalizer=false --xla_tpu_dvfs_p_state=7'
 export VLLM_ENABLE_V1_MULTIPROCESSING=0
 
 # ==============================================================================
