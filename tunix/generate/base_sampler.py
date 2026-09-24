@@ -55,6 +55,9 @@ class SamplerOutput:
   # Valid prompt length per row, before left padding (not a pad-ID count).
   prompt_lengths: np.ndarray | None = None
 
+  # Number of preemptions per request.
+  num_preemptions: Optional[list[int] | int] = None
+
 
 class BaseSampler(ABC):
   """Base class for samplers."""

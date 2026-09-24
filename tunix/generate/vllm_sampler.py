@@ -932,6 +932,12 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     ]
     all_input_ids = np.array(all_input_ids, dtype=np.int32)
 
+    num_preemptions = [
+        getattr(ro.metrics, "num_preemptions", 0)
+        if getattr(ro, "metrics", None) is not None
+        else 0
+        for ro in outputs
+    ]
     # To support multisampling, just return the whole list of SamplerOutput
     return base_sampler.SamplerOutput(
         text=decoded_outputs[0],
@@ -945,4 +951,5 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         prompt_lengths=np.array(
             [len(row) for row in prompt_ids], dtype=np.int32
         ),
+        num_preemptions=num_preemptions,
     )

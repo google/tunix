@@ -414,6 +414,7 @@ def to_tunix_trajectory(
 
   env_time = getattr(traj_obj, "env_time", None) or {}
   reward_time = getattr(traj_obj, "reward_time", None) or {}
+  model_time = getattr(traj_obj, "model_time", None) or {}
 
   return agent_types.Trajectory(
       task=task_val,
@@ -422,6 +423,7 @@ def to_tunix_trajectory(
       status=status_enum,
       env_time=env_time,
       reward_time=reward_time,
+      model_time=model_time,
   )
 
 
@@ -471,6 +473,7 @@ def create_trajectory_metadata(
       hyperparams=getattr(request, "generation_kwargs", None),
       env_time=getattr(traj_obj, "env_time", None),
       reward_time=getattr(traj_obj, "reward_time", None),
+      model_time=getattr(traj_obj, "model_time", None),
       extra=meta_extra or None,
   )
 
@@ -486,6 +489,7 @@ def update_trajectory_metadata(
     status: str | agent_types.TrajectoryStatus | None = None,
     env_time: dict[str, Any] | None = None,
     reward_time: dict[str, Any] | None = None,
+    model_time: dict[str, Any] | None = None,
     extra: dict[str, Any] | None = None,
 ) -> trajectory_lib.TrajectoryMetadata:
   """Updates an existing TrajectoryMetadata with latest agent/trajectory state.
@@ -498,6 +502,7 @@ def update_trajectory_metadata(
     status: Optional explicit status override.
     env_time: Optional explicit environment timing dictionary.
     reward_time: Optional explicit reward timing dictionary.
+    model_time: Optional explicit model timing dictionary.
     extra: Optional dictionary of extra metadata fields to merge.
 
   Returns:
@@ -554,11 +559,20 @@ def update_trajectory_metadata(
     )
     if hasattr(metadata, "reward_time") and effective_reward_time is not None:
       setattr(metadata, "reward_time", effective_reward_time)
+    effective_model_time = (
+        model_time
+        if model_time is not None
+        else getattr(traj_obj, "model_time", None)
+    )
+    if hasattr(metadata, "model_time") and effective_model_time is not None:
+      setattr(metadata, "model_time", effective_model_time)
   else:
     if hasattr(metadata, "env_time") and env_time is not None:
       setattr(metadata, "env_time", env_time)
     if hasattr(metadata, "reward_time") and reward_time is not None:
       setattr(metadata, "reward_time", reward_time)
+    if hasattr(metadata, "model_time") and model_time is not None:
+      setattr(metadata, "model_time", model_time)
 
   if extra:
     if metadata.extra is None:

@@ -66,6 +66,9 @@ class RolloutOutput:
   # Valid prompt length per row, before left padding. Optional for old backends.
   prompt_lengths: np.ndarray | None = None
 
+  # Number of preemptions per sequence, or total preemptions.
+  num_preemptions: list[int] | int | None = None
+
 
 class BaseRollout(ABC):
   """Base RolloutWorker."""

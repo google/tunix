@@ -170,6 +170,12 @@ class TrajectoryCollectEngine:
         "step_latency": [],  # List of per-step wall-clock times, ordered by step index
         "close_latency": 0.0,  # Wall-clock time (Total real-world time elapsed)
     }
+    self.model_time = {
+        "step_latency": [],  # List of per-step model inference times in seconds
+        "prompt_tokens": [],
+        "completion_tokens": [],
+        "num_preemptions": [],
+    }
     self.reward_time = {
         "reward_latency": (
             0.0
@@ -370,6 +376,28 @@ class TrajectoryCollectEngine:
         self.sync_trajectory_metadata(policy_version=self.policy_version)
         self.trajectory_store.update_metadata(self.metadata)
 
+    self.model_time["total_latency"] = float(
+        sum(self.model_time["step_latency"])
+    )
+    self.model_time["total_completion_tokens"] = int(
+        sum(self.model_time["completion_tokens"])
+    )
+    self.model_time["total_preemptions"] = int(
+        sum(self.model_time.get("num_preemptions", []))
+    )
+    total_env_time = float(
+        self.env_time.get("reset_latency", 0.0)
+        + sum(self.env_time.get("step_latency", []))
+        + self.env_time.get("close_latency", 0.0)
+    )
+    total_reward_time = float(
+        self.reward_time.get("reward_latency", 0.0)
+    )
+    total_time = (
+        self.model_time["total_latency"] + total_env_time + total_reward_time
+    )
+    self.agent.trajectory.total_time = total_time
+
     if mode not in ["Trajectory", "Steps", "Token", "Conversation"]:
       raise ValueError(
           f"Unsupported mode: {mode}, currently supported modes: "
@@ -379,6 +407,7 @@ class TrajectoryCollectEngine:
     if mode == "Trajectory":
       self.agent.trajectory.env_time = self.env_time  # pyrefly: ignore[bad-assignment]
       self.agent.trajectory.reward_time = self.reward_time
+      self.agent.trajectory.model_time = self.model_time
       return self.agent.trajectory
     elif mode == "Steps":
       return [
@@ -398,6 +427,7 @@ class TrajectoryCollectEngine:
               "mc_return": step.mc_return,
               "env_time": self.env_time,
               "reward_time": self.reward_time,
+              "model_time": self.model_time,
           }
           for step in self.agent.trajectory.steps
       ]
@@ -552,6 +582,8 @@ class TrajectoryCollectEngine:
           "trajectory_reward": self.agent.trajectory.reward,
           "env_time": self.env_time,
           "reward_time": self.reward_time,
+          "model_time": self.model_time,
+          "total_time": total_time,
           "old_logprobs": (
               np.concatenate(logprobs, axis=0) if logprobs else None
           ),
@@ -789,6 +821,7 @@ class TrajectoryCollectEngine:
           self._cumulative_prompt_tokens
       )
 
+    model_start = time.perf_counter()
     if is_async:
       try:
         rollout_output = await model_call_fn(  # pytype: disable=bad-return-type
@@ -818,6 +851,31 @@ class TrajectoryCollectEngine:
           None,
           _safe_model_call,
       )
+    step_latency = time.perf_counter() - model_start
+    self.model_time["step_latency"].append(step_latency)
+    prompt_len = (
+        int(rollout_output.prompt_lengths[0])
+        if rollout_output.prompt_lengths is not None
+        and len(rollout_output.prompt_lengths) > 0
+        else (
+            len(rollout_output.left_padded_prompt_tokens[0])
+            if rollout_output.left_padded_prompt_tokens is not None
+            and len(rollout_output.left_padded_prompt_tokens) > 0
+            else 0
+        )
+    )
+    comp_len = (
+        len(rollout_output.tokens[0])
+        if rollout_output.tokens and len(rollout_output.tokens) > 0
+        else 0
+    )
+    self.model_time["prompt_tokens"].append(prompt_len)
+    self.model_time["completion_tokens"].append(comp_len)
+    preempt = 0
+    if getattr(rollout_output, "num_preemptions", None) is not None:
+      p = rollout_output.num_preemptions
+      preempt = int(p[0] if isinstance(p, (list, tuple)) else p)
+    self.model_time["num_preemptions"].append(preempt)
     logging.debug("%s model_call done", self._debug_prefix)
     if self.on_rollout_output_callback:
       self.on_rollout_output_callback(rollout_output)
@@ -945,6 +1003,9 @@ class TrajectoryCollectEngine:
     action = self.agent.update_from_model(rollout_output.text[0]).action
     cur_step = self.agent.get_current_step()
     if cur_step is not None:
+      cur_step.info["model_latency_sec"] = step_latency
+      cur_step.info["prompt_tokens"] = prompt_len
+      cur_step.info["completion_tokens"] = comp_len
       if rollout_output.tokens:
         if self.tokenizer and self.chat_parser:
           cur_step.assistant_tokens, n_append = (

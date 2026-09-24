@@ -617,6 +617,14 @@ class TunixTrajectoryMetadata(TrajectoryMetadata):
       default=None,
       description="Timing information for reward operations.",
   )
+  model_time: MetadataDict = pydantic.Field(
+      default=None,
+      description="Timing information for model inference operations.",
+  )
+  total_time: float | None = pydantic.Field(
+      default=None,
+      description="Total wall-clock duration of the trajectory in seconds.",
+  )
 
 
 class TunixTrajectory(TunixTrajectoryMetadata):

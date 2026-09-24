@@ -80,6 +80,7 @@ class _FakeGcsPath:
 
 
 class TrajectoryLoggerTest(absltest.TestCase):
+
   def setUp(self):
     super().setUp()
 
@@ -694,6 +695,115 @@ class TrajectoryLoggerTest(absltest.TestCase):
     )
     self.assertTrue(os.path.exists(os.path.join(local_traj_dir, 'metadata.json')))
     self.assertTrue(os.path.exists(os.path.join(local_traj_dir, 'step0.json')))
+
+  def test_log_trajectory_json_inference_metrics(self):
+    """Tests that log_trajectory_json writes inference_metrics.json and inference_metrics.jsonl."""
+    temp_dir = self.create_tempdir().full_path
+    item = {
+        'global_step': 5,
+        'prompt_id': 'issue_99',
+        'group_index': 1,
+        'worker_id': 'rollout_worker_0',
+        'traj_id': 'traj_issue_99_g1',
+        'status': 'RESOLVED',
+        'reward': 1.0,
+        'trajectory': {
+            'status': 'RESOLVED',
+            'conversation_text': [
+                {'role': 'system', 'content': 'System prompt.'},
+                {'role': 'user', 'content': 'User prompt.'},
+                {'role': 'assistant', 'content': 'Step 0 action.'},
+                {'role': 'tool', 'content': 'Step 0 obs.'},
+                {'role': 'assistant', 'content': 'Step 1 action.'},
+            ],
+            'model_time': {
+                'step_latency': [1.2, 0.8],
+                'prompt_tokens': [100, 150],
+                'completion_tokens': [24, 16],
+                'num_preemptions': [1, 0],
+            },
+            'env_time': {
+                'reset_latency': 0.5,
+                'step_latency': [2.0, 3.0],
+                'close_latency': 0.5,
+            },
+        },
+    }
+
+    out_dir = trajectory_logger.log_trajectory_json(temp_dir, item)
+    self.assertIsNotNone(out_dir)
+
+    expected_dir = os.path.join(
+        temp_dir, 'step5', 'rollout_worker_0', 'traj_issue_99_g1'
+    )
+    self.assertEqual(out_dir, expected_dir)
+
+    # 1. Verify metadata.json has model_time
+    with open(os.path.join(expected_dir, 'metadata.json'), 'r') as f:
+      metadata = json.load(f)
+    self.assertIn('model_time', metadata)
+    self.assertEqual(metadata['model_time']['step_latency'], [1.2, 0.8])
+
+    # 2. Verify step files have model_latency_sec
+    with open(os.path.join(expected_dir, 'step0.json'), 'r') as f:
+      step0 = json.load(f)
+    self.assertEqual(step0['model_latency_sec'], 1.2)
+    with open(os.path.join(expected_dir, 'step1.json'), 'r') as f:
+      step1 = json.load(f)
+    self.assertEqual(step1['model_latency_sec'], 0.8)
+
+    # 3. Verify inference_metrics.json (summary)
+    with open(os.path.join(expected_dir, 'inference_metrics.json'), 'r') as f:
+      inf_summary = json.load(f)
+    self.assertEqual(inf_summary['type'], 'summary')
+    self.assertEqual(inf_summary['traj_id'], 'traj_issue_99_g1')
+    self.assertAlmostEqual(inf_summary['total_model_time_sec'], 2.0)
+    self.assertAlmostEqual(inf_summary['total_env_time_sec'], 6.0)
+    self.assertAlmostEqual(inf_summary['total_time_sec'], 8.0)
+    self.assertAlmostEqual(inf_summary['total_time'], 8.0)
+    self.assertEqual(inf_summary['total_preemptions'], 1)
+    self.assertEqual(inf_summary['preemptions'], 1)
+    self.assertEqual(inf_summary['total_completion_tokens'], 40)
+    self.assertAlmostEqual(inf_summary['tokens_per_second'], 20.0)
+    self.assertAlmostEqual(inf_summary['tpot_ms'], 50.0)
+    self.assertAlmostEqual(inf_summary['mean_step_latency_sec'], 1.0)
+
+    # 4. Verify inference_metrics.jsonl (per-step records + summary record)
+    with open(os.path.join(expected_dir, 'inference_metrics.jsonl'), 'r') as f:
+      lines = [json.loads(line) for line in f if line.strip()]
+    self.assertLen(lines, 3)
+    # Line 0: step 0
+    self.assertEqual(lines[0]['global_step'], 5)
+    self.assertEqual(lines[0]['step_index'], 0)
+    self.assertEqual(lines[0]['prompt_tokens'], 100)
+    self.assertEqual(lines[0]['completion_tokens'], 24)
+    self.assertAlmostEqual(lines[0]['latency_sec'], 1.2)
+    self.assertAlmostEqual(lines[0]['model_time_sec'], 1.2)
+    self.assertAlmostEqual(lines[0]['env_time_sec'], 2.0)
+    self.assertAlmostEqual(lines[0]['total_time_sec'], 3.2)
+    self.assertAlmostEqual(lines[0]['total_time'], 3.2)
+    self.assertEqual(lines[0]['preemptions'], 1)
+    self.assertAlmostEqual(lines[0]['tokens_per_second'], 20.0)
+    self.assertAlmostEqual(lines[0]['tpot_ms'], 50.0)
+    # Line 1: step 1
+    self.assertEqual(lines[1]['step_index'], 1)
+    self.assertEqual(lines[1]['prompt_tokens'], 150)
+    self.assertEqual(lines[1]['completion_tokens'], 16)
+    self.assertAlmostEqual(lines[1]['latency_sec'], 0.8)
+    self.assertAlmostEqual(lines[1]['model_time_sec'], 0.8)
+    self.assertAlmostEqual(lines[1]['env_time_sec'], 3.0)
+    self.assertAlmostEqual(lines[1]['total_time_sec'], 3.8)
+    self.assertAlmostEqual(lines[1]['total_time'], 3.8)
+    self.assertEqual(lines[1]['preemptions'], 0)
+    self.assertAlmostEqual(lines[1]['tokens_per_second'], 20.0)
+    self.assertAlmostEqual(lines[1]['tpot_ms'], 50.0)
+    # Line 2: summary
+    self.assertEqual(lines[2]['type'], 'summary')
+    self.assertAlmostEqual(lines[2]['total_model_time_sec'], 2.0)
+    self.assertAlmostEqual(lines[2]['total_time_sec'], 8.0)
+    self.assertAlmostEqual(lines[2]['total_time'], 8.0)
+    self.assertEqual(lines[2]['total_preemptions'], 1)
+    self.assertEqual(lines[2]['total_completion_tokens'], 40)
 
 
 if __name__ == '__main__':

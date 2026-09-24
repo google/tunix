@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Iterable, List, Sequence, TypeVar
 
 import flax
@@ -169,6 +170,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         perf_constants.STEP: self.rl_engine.global_steps,
     }
 
+    rollout_start_time = time.perf_counter()
     rollout_output = self.rl_engine.generate(
         prompts=training_input["prompts"],
         mode=mode,
@@ -177,6 +179,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         ),
         trace_tags=perf_tags,
     )
+    rollout_duration = time.perf_counter() - rollout_start_time
     padded_completion_ids = np.array([
         utils.pad_to_length(
             completion_ids,
@@ -332,6 +335,42 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
                 np.min(agg_completion_mask),
                 np.min,
             ),
+        },
+        mode=mode,
+    )
+
+    # Log inference metrics.
+    total_completion_tokens = (
+        sum(len(t) for t in rollout_output.tokens)
+        if rollout_output.tokens
+        else 0
+    )
+    tps = (
+        total_completion_tokens / rollout_duration
+        if rollout_duration > 0
+        else 0.0
+    )
+    tpot_ms = (
+        (rollout_duration / total_completion_tokens) * 1000.0
+        if total_completion_tokens > 0
+        else 0.0
+    )
+    total_preemptions = 0
+    if hasattr(rollout_output, "num_preemptions") and rollout_output.num_preemptions is not None:
+      p = rollout_output.num_preemptions
+      total_preemptions = sum(p) if isinstance(p, (list, tuple, np.ndarray)) else int(p)
+
+    self.rl_engine.buffer_metrics(
+        {
+            "inference/rollout_duration_sec": (rollout_duration, np.mean),
+            "inference/total_time_sec": (rollout_duration, np.mean),
+            "inference/total_completion_tokens": (
+                float(total_completion_tokens),
+                np.mean,
+            ),
+            "inference/total_preemptions": (float(total_preemptions), np.mean),
+            "inference/tokens_per_second": (tps, np.mean),
+            "inference/tpot_ms": (tpot_ms, np.mean),
         },
         mode=mode,
     )

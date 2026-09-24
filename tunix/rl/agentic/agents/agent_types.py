@@ -132,6 +132,8 @@ class Trajectory:
   status: TrajectoryStatus = TrajectoryStatus.RUNNING
   env_time: dict[str, float] = dataclasses.field(default_factory=dict)
   reward_time: dict[str, float] = dataclasses.field(default_factory=dict)
+  model_time: dict[str, Any] = dataclasses.field(default_factory=dict)
+  total_time: float | None = None
   prompt_tokens: list[int] | np.ndarray = dataclasses.field(
       default_factory=list
   )
@@ -153,6 +155,8 @@ class Trajectory:
         "status": self.status.name,
         "env_time": self.env_time,
         "reward_time": self.reward_time,
+        "model_time": self.model_time,
+        "total_time": self.total_time,
     }
     if self.prompt_length is not None:
       result["prompt_tokens"] = np.array(self.prompt_tokens, copy=True)
