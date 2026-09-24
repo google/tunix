@@ -10,17 +10,20 @@
 set -e
 
 INSTALL_MAXTEXT=false
-INSTALL_RAIDEN=false
+MAXTEXT_REF=""
+INSTALL_RAIDEN=true
 RAIDEN_WHEEL_DIR=/app/raiden_wheels
 INSTALL_DEEPSWE_DEPS=false
 
 usage() {
     cat <<'MSG'
-Usage: bash build_docker.sh [--maxtext] [--raiden] [--raiden-wheel-dir PATH] [--deepswe]
+Usage: bash build_docker.sh [--maxtext] [--maxtext-ref REF] [--raiden] [--no-raiden] [--raiden-wheel-dir PATH] [--deepswe]
 
 Options:
   --maxtext               Install MaxText-specific dependencies.
-  --raiden                Install Raiden-specific dependencies.
+  --maxtext-ref REF       Override the MaxText git branch or commit SHA (implies --maxtext).
+  --raiden                Install Raiden-specific dependencies (enabled by default).
+  --no-raiden             Skip installing Raiden-specific dependencies.
   --raiden-wheel-dir PATH Use prebuilt Raiden wheels from PATH inside the Docker build context.
   --deepswe               Install DeepSWE evaluation dependencies.
 MSG
@@ -29,7 +32,18 @@ MSG
 while [[ "$#" -gt 0 ]]; do
     case $1 in
         --maxtext) INSTALL_MAXTEXT=true; shift ;;
+        --maxtext-ref)
+            if [[ -z "$2" ]]; then
+                echo "Error: --maxtext-ref requires a git branch or commit SHA"
+                usage
+                exit 1
+            fi
+            INSTALL_MAXTEXT=true
+            MAXTEXT_REF="$2"
+            shift 2
+            ;;
         --raiden) INSTALL_RAIDEN=true; shift ;;
+        --no-raiden) INSTALL_RAIDEN=false; shift ;;
         --raiden-wheel-dir)
             if [[ -z "$2" ]]; then
                 echo "Error: --raiden-wheel-dir requires a path"
@@ -69,6 +83,16 @@ build_ai_image() {
     COMMIT_HASH=$(git rev-parse --short HEAD)
     echo "Building Tunix Image at commit hash ${COMMIT_HASH}..."
 
+    if [ "${INSTALL_RAIDEN}" = "true" ] && [ "${RAIDEN_WHEEL_DIR}" = "/app/raiden_wheels" ]; then
+        if ! compgen -G "raiden_wheels/*.whl" >/dev/null; then
+            if [ -f "./scripts/install_raiden.sh" ]; then
+                RAIDEN_WHEEL_DIR="./raiden_wheels" bash ./scripts/install_raiden.sh --download-only
+            elif [ -f "./oss/scripts/install_raiden.sh" ]; then
+                RAIDEN_WHEEL_DIR="./raiden_wheels" bash ./oss/scripts/install_raiden.sh --download-only
+            fi
+        fi
+    fi
+
     DOCKER_COMMAND="docker"
     if docker info >/dev/null 2>&1; then
         DOCKER_COMMAND="docker"
@@ -93,6 +117,7 @@ MSG
     $DOCKER_COMMAND build \
         --network=host \
         --build-arg INSTALL_MAXTEXT=${INSTALL_MAXTEXT} \
+        --build-arg MAXTEXT_REF=${MAXTEXT_REF} \
         --build-arg INSTALL_RAIDEN=${INSTALL_RAIDEN} \
         --build-arg RAIDEN_WHEEL_DIR=${RAIDEN_WHEEL_DIR} \
         --build-arg INSTALL_DEEPSWE_DEPS=${INSTALL_DEEPSWE_DEPS} \
@@ -107,4 +132,4 @@ echo "*************************
 "
 
 echo "Built your docker image and named it ${LOCAL_IMAGE_NAME}.
-It now installs Tunix and the pinned vLLM and tpu-inference dependencies from requirements/requirements.txt. "
+It now installs Tunix and the pinned vLLM and tpu-inference dependencies from pyproject.toml."

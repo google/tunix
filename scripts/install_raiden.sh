@@ -20,10 +20,10 @@
 #   1. A locally built wheel in $RAIDEN_WHEEL_DIR (see build_raiden_wheel.sh).
 #   2. The wheel pinned below.
 #
-# The pin lives here rather than in requirements/ because pip cannot install it:
-# the bucket enforces public access prevention, so the fetch needs Google Cloud
-# credentials that pip has no way to present. A requirements file would look
-# installable and fail with a bare 403.
+# The pin lives here rather than in pyproject.toml because pip cannot install
+# it directly: the bucket enforces public access prevention, so the fetch needs
+# Google Cloud credentials that pip has no way to present. Declaring it in
+# pyproject.toml would look installable and fail with a bare 403.
 #
 # Pinning a URL rather than a package name is also deliberate. A package named
 # `tpu-raiden-jax` exists on public PyPI and is malicious: a dependency
@@ -42,7 +42,17 @@ RAIDEN_WHEEL_SHA256=${RAIDEN_WHEEL_SHA256:-"a442ac543f54d8ff11d22dbd009671890f2f
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 RAIDEN_WHEEL_DIR=${RAIDEN_WHEEL_DIR:-"${ROOT_DIR}/raiden_wheels"}
-PIP_INSTALL=(python3 -m pip install --force-reinstall --no-deps)
+DOWNLOAD_ONLY=false
+if [[ "${1:-}" == "--download-only" ]]; then
+  DOWNLOAD_ONLY=true
+  shift
+fi
+
+if command -v uv >/dev/null 2>&1 && [[ -n "${VIRTUAL_ENV:-}" || -f /opt/venv/pyvenv.cfg ]]; then
+  PIP_INSTALL=(uv pip install --reinstall --no-deps)
+else
+  PIP_INSTALL=(python3 -m pip install --force-reinstall --no-deps)
+fi
 
 # Raiden is imported at module scope by the trainer, the rollout, and the
 # orchestrator. If it is missing, weight sync silently no-ops and only surfaces
@@ -53,15 +63,27 @@ verify_install() {
 }
 
 compile_protos() {
-  echo "Compiling distributed runtime gRPC protobuf definitions..."
-  python3 -m pip install grpcio-tools
-
   local proto_dir="${ROOT_DIR}/tunix/experimental/distributed"
   if [[ ! -d "${proto_dir}" ]]; then
     proto_dir="${ROOT_DIR}/../tunix/experimental/distributed"
   fi
+  if [[ ! -d "${proto_dir}" ]]; then
+    echo "Skipping distributed protobuf compilation (${proto_dir} not present in this build layer)."
+    return 0
+  fi
   local base_dir
   base_dir=$(cd "${proto_dir}/../../.." && pwd)
+  local discovery_proto="${base_dir}/tunix/experimental/distributed/runtime/discovery/discovery_service.proto"
+  local discovery_pb2="${base_dir}/tunix/experimental/distributed/runtime/discovery/discovery_service_pb2.py"
+  local discovery_pb2_grpc="${base_dir}/tunix/experimental/distributed/runtime/discovery/discovery_service_pb2_grpc.py"
+
+  if [[ -f "${discovery_pb2}" && -f "${discovery_pb2_grpc}" && "${discovery_pb2}" -nt "${discovery_proto}" ]]; then
+    echo "Distributed protobuf definitions already up to date."
+    return 0
+  fi
+
+  echo "Compiling distributed runtime gRPC protobuf definitions..."
+  python3 -c "import grpc_tools.protoc" 2>/dev/null || "${PIP_INSTALL[@]}" grpcio-tools
 
   (
     cd "${base_dir}"
@@ -75,6 +97,11 @@ compile_protos() {
 # A locally built wheel wins, so the developer workflow never touches the
 # network. build_raiden_wheel.sh produces these.
 if compgen -G "${RAIDEN_WHEEL_DIR}/*.whl" >/dev/null; then
+  if [[ "${DOWNLOAD_ONLY}" == "true" ]]; then
+    echo "Using existing Raiden wheel(s) in ${RAIDEN_WHEEL_DIR}:"
+    ls -1 "${RAIDEN_WHEEL_DIR}"/*.whl
+    exit 0
+  fi
   echo "Installing locally built Raiden wheel(s) from ${RAIDEN_WHEEL_DIR}:"
   ls -1 "${RAIDEN_WHEEL_DIR}"/*.whl
   "${PIP_INSTALL[@]}" "${RAIDEN_WHEEL_DIR}"/*.whl
@@ -88,7 +115,7 @@ DEST_DIR=$(mktemp -d)
 trap 'rm -rf "${DEST_DIR}"' EXIT
 DEST="${DEST_DIR}/${WHEEL_NAME}"
 
-echo "Installing pinned Raiden wheel:"
+echo "Fetching pinned Raiden wheel:"
 echo "  wheel:  ${WHEEL_NAME}"
 echo "  sha256: ${RAIDEN_WHEEL_SHA256}"
 
@@ -142,6 +169,13 @@ EOF
 fi
 
 echo "${RAIDEN_WHEEL_SHA256}  ${DEST}" | sha256sum -c -
+
+if [[ "${DOWNLOAD_ONLY}" == "true" ]]; then
+  mkdir -p "${RAIDEN_WHEEL_DIR}"
+  cp -f "${DEST}" "${RAIDEN_WHEEL_DIR}/${WHEEL_NAME}"
+  echo "Downloaded and verified Raiden wheel at ${RAIDEN_WHEEL_DIR}/${WHEEL_NAME}"
+  exit 0
+fi
 
 "${PIP_INSTALL[@]}" "${DEST}"
 verify_install
