@@ -15,9 +15,11 @@ set -e
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ==============================================================================
-# Job Prefix & Default Ports
+# Container Image, User Identity & WandB
 # ==============================================================================
+export TUNIX_IMAGE="${TUNIX_IMAGE:-gcr.io/cloud-tpu-multipod-dev/atwigg/trellis:latest}"
 export JOB_PREFIX="${JOB_PREFIX:-${USER}}"
+export WANDB_API_KEY="${WANDB_API_KEY:-}"
 export ORCHESTRATOR_PORT="${ORCHESTRATOR_PORT:-20000}"
 export ROLLOUT_PORT="${ROLLOUT_PORT:-20001}"
 export TRAINER_PORT="${TRAINER_PORT:-20002}"
@@ -60,7 +62,6 @@ export WEIGHT_SYNC_MODE="raiden"
 # ==============================================================================
 # WandB Configuration
 # ==============================================================================
-export WANDB_API_KEY="${WANDB_API_KEY:-}"
 export WANDB_ENTITY="${WANDB_ENTITY:-google-trellis}"
 export WANDB_PROJECT="${WANDB_PROJECT:-trellis-deepswe}"
 
@@ -147,9 +148,7 @@ export CHECKPOINT_MAX_TO_KEEP=10
 export CHECKPOINT_ASYNC=${CHECKPOINT_ASYNC:-true}
 export ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE:-1}
 export MAX_STALENESS=${MAX_STALENESS:-0}
-if [[ -n "${TRAJECTORY_GROUP_ORDER+x}" ]] || [[ "${MODEL_NAME:-}" == *"35B"* ]]; then
-  export TRAJECTORY_GROUP_ORDER=${TRAJECTORY_GROUP_ORDER:-arrival}
-fi
+export TRAJECTORY_GROUP_ORDER=${TRAJECTORY_GROUP_ORDER:-arrival}
 
 # Sequence packing
 export MAX_SEQ_TOKEN_PER_TPU=${MAX_SEQ_TOKEN_PER_TPU:-65536}
