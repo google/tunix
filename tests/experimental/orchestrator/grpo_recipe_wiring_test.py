@@ -15,6 +15,7 @@
 """Unit tests for wiring the sequence-level GRPO options to the loss."""
 
 import os
+import re
 
 from absl.testing import absltest
 import numpy as np
@@ -56,6 +57,21 @@ def _deepswe_k8s_orchestrator_block() -> str:
     text = f.read()
   start = text.index("start_orchestrator() {")
   return text[start : text.index("\n}\n", start)]
+
+
+def _deepswe_k8s_rollout_cmd() -> str:
+  path = os.path.join(
+      os.path.dirname(os.path.abspath(tunix.__file__)),
+      "experimental",
+      "examples",
+      "deepswe_dist",
+      "k8s_launcher.sh",
+  )
+  with open(path) as f:
+    text = f.read()
+  anchor = text.index("run_rollout_node.main")
+  start = text.rindex("python -m ", 0, anchor)
+  return text[start : text.index('\n      " \\\n', anchor)]
 
 
 def _recipe_config(**overrides) -> algorithm_config.GRPOConfig:
@@ -506,6 +522,29 @@ class DeepSWEExampleCommandLineTest(absltest.TestCase):
         "--sampler_is_length_buckets=",
     ):
       self.assertIn(flag, block, f"deepswe k8s_launcher does not pass {flag}")
+
+  def test_k8s_rollout_command_passes_only_flags_the_worker_defines(self):
+    # The rollout worker parses strictly, so an unknown flag exits every
+    # rollout pod with "unrecognized arguments".
+    root = os.path.join(
+        os.path.dirname(os.path.abspath(tunix.__file__)), "experimental"
+    )
+    defined = ""
+    for rel in (
+        ("examples", "common", "run_rollout_node.py"),
+        ("distributed", "runtime", "main.py"),
+    ):
+      with open(os.path.join(root, *rel)) as f:
+        defined += f.read()
+    cmd = _deepswe_k8s_rollout_cmd()
+    flags = set(re.findall(r"(?<![\w-])--(?:no-)?([a-z][a-z0-9_]*)", cmd))
+    self.assertIn("return_routed_experts", flags)
+    missing = [flag for flag in sorted(flags) if f'"--{flag}"' not in defined]
+    self.assertEqual(
+        missing,
+        [],
+        "deepswe k8s_launcher passes flags the rollout worker does not define",
+    )
 
 
 class AuxMetricForwardingTest(absltest.TestCase):
