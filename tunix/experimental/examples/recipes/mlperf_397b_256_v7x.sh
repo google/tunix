@@ -64,6 +64,7 @@ export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-16}"
 export VLLM_ADDITIONAL_CONFIG='{"sharding":{"sharding_strategy":{"expert_parallelism":16,"tensor_parallelism":1,"enable_dp_attention":true}},"custom_mamba_cache_multiplier":16,"maxtext_config":{"scan_layers":false,"attention":"vllm_rpa","allow_split_physical_axes":true,"use_multimodal":false,"prefuse_moe_weights":true,"per_device_batch_size":0.0}}'
 export MAMBA_CACHE_MODE="${MAMBA_CACHE_MODE:-align}"
 export VLLM_MAMBA_CACHE_MODE="${VLLM_MAMBA_CACHE_MODE:-${MAMBA_CACHE_MODE}}"
+export ENABLE_PREFIX_CACHING="${ENABLE_PREFIX_CACHING:-false}"
 
 # Rollout Worker Flags & Raiden tuning
 export ONEHOT_MOE_PERMUTE_THRESHOLD=131072
@@ -81,10 +82,20 @@ export CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-0}
 if [[ "${CHECKPOINT_SAVE_INTERVAL_STEPS}" -gt 0 ]]; then
   export ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE:-1}
 fi
-
 export RPC_TIMEOUT_S="${RPC_TIMEOUT_S:-10800}"
-export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS:-custom_mesh_and_rule=cp-as-ep}"
 export DEBUG=${DEBUG:-0}
+
+export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS:-\
+custom_mesh_and_rule=cp-as-ep \
+allow_split_physical_axes=False \
+decoder_layer_input=device \
+gdn=device \
+gdn_conv=device \
+num_moe_token_chunks=4 \
+moe_chunk_barrier=false \
+use_ring_of_experts=true \
+use_ragged_sort=true \
+use_gdn_kernel=true}"
 
 # DeepSWE Environment & Agent Sandbox
 export SANDBOX_NODE_SELECTOR_VAL="sandbox-np"
