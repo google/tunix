@@ -167,6 +167,7 @@ def main() -> None:
   num_chips = None
   tpu_machine = None
   slice_topology = None
+  partition_topology = None
   slice_size = None
   pw_instance_type = None
   if args.tpu_slice and args.tpu_slice != ":":
@@ -175,31 +176,36 @@ def main() -> None:
     assert num_chips >= 4 and num_chips % 4 == 0
 
     if tpu_type in ("tpu7x", "tpu-v7x-slice"):
-      slice_topology = tpu_topology if num_chips <= 64 else "4x4x4"
+      slice_topology = tpu_topology
+      partition_topology = tpu_topology if num_chips <= 64 else "4x4x4"
       slice_size = num_chips // 4 if num_chips <= 64 else 16
       tpu_machine = "tpu7x-standard-4t"
       tpu_type = "tpu7x"
       pw_instance_type = "tpu7x"
     elif tpu_type in ("tpuv5", "tpuv5p", "tpu-v5p-slice"):
       slice_topology = tpu_topology
+      partition_topology = tpu_topology
       slice_size = num_chips // 4
       tpu_machine = "ct5p-hightpu-4t"
       tpu_type = "tpu-v5p-slice"
       pw_instance_type = "tpuv5"
     elif tpu_type in ("tpuv5e", "tpu-v5-lite-podslice"):
       slice_topology = tpu_topology
+      partition_topology = tpu_topology
       slice_size = num_chips // 4
       tpu_machine = "ct5lp-hightpu-4t"
       tpu_type = "tpu-v5-lite-podslice"
       pw_instance_type = "tpuv5e"
     elif tpu_type in ("tpuv6e", "tpu-v6e-slice"):
       slice_topology = tpu_topology
+      partition_topology = tpu_topology
       slice_size = num_chips // 4
       tpu_machine = "ct6e-standard-4t"
       tpu_type = "tpu-v6e-slice"
       pw_instance_type = "tpuv6e"
     elif tpu_type in ("tpuv6ea", "tpu-v6ea-slice"):
       slice_topology = tpu_topology
+      partition_topology = tpu_topology
       slice_size = num_chips // 4
       tpu_machine = "ct6ea-standard-4t"
       tpu_type = "tpu-v6ea-slice"
@@ -300,7 +306,7 @@ def main() -> None:
           f'cloud.google.com/gke-tpu-slice-topology: "{slice_topology}"',
           'cloud.google.com/skip-tpu-webhook-check: "true"',
           "kueue.x-k8s.io/podset-required-topology: cloud.google.com/gce-topology-block",
-          f"kueue.x-k8s.io/podset-slice-required-topology: cloud.google.com/gke-tpu-partition-{slice_topology}-id",
+          f"kueue.x-k8s.io/podset-slice-required-topology: cloud.google.com/gke-tpu-partition-{partition_topology}-id",
           f'kueue.x-k8s.io/podset-slice-size: "{slice_size}"',
       ]
     else:
@@ -322,7 +328,7 @@ def main() -> None:
           "                requiredDuringSchedulingIgnoredDuringExecution:\n"
           "                  nodeSelectorTerms:\n"
           "                  - matchExpressions:\n"
-          f"                    - key: cloud.google.com/gke-tpu-partition-{slice_topology}-state\n"
+          f"                    - key: cloud.google.com/gke-tpu-partition-{partition_topology}-state\n"
           "                      operator: In\n"
           "                      values: [\"HEALTHY\", \"DEGRADED\"]\n"
       )
