@@ -936,7 +936,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         getattr(ro.metrics, "num_preemptions", 0)
         if getattr(ro, "metrics", None) is not None
         else 0
-        for ro in request_outputs
+        for ro in outputs
     ]
     # To support multisampling, just return the whole list of SamplerOutput
     return base_sampler.SamplerOutput(
