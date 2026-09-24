@@ -205,6 +205,8 @@ export KUEUE_QUEUE_NAME=${KUEUE_QUEUE_NAME:-${KUEUE_QUEUE:-${QUEUE_NAME:-}}}
 export PRIORITY_CLASS=${PRIORITY_CLASS:-medium}
 
 export TRAINER_EXTRA_ENV=${TRAINER_EXTRA_ENV:-}
+export ROLLOUT_EXTRA_ENV=${ROLLOUT_EXTRA_ENV:-}
+export ORCHESTRATOR_EXTRA_ENV=${ORCHESTRATOR_EXTRA_ENV:-}
 export DRY_RUN=${DRY_RUN:-false}
 
 apply_manifest() {
@@ -313,6 +315,7 @@ start_orchestrator() {
       PYTHONUNBUFFERED=1 \
       TUNIX_IS_INTERNAL_ENV=false \
       ${BOOTSTRAP_CMD} \
+      ${ORCHESTRATOR_EXTRA_ENV:+${ORCHESTRATOR_EXTRA_ENV} }\
       python -m tunix.experimental.distributed.runtime.main \
         --discovery_id=${ORCHESTRATOR_ID} \
         --discovery_port=${ORCHESTRATOR_PORT} \
@@ -671,6 +674,7 @@ if cfg:
         ${VLLM_ENABLE_V1_MULTIPROCESSING:+VLLM_ENABLE_V1_MULTIPROCESSING=${VLLM_ENABLE_V1_MULTIPROCESSING}} \
         ${VLLM_LOGGING_LEVEL:+VLLM_LOGGING_LEVEL=${VLLM_LOGGING_LEVEL}} \
         ${ROLLOUT_ENV_FLAGS} \
+        ${ROLLOUT_EXTRA_ENV:+${ROLLOUT_EXTRA_ENV} }\
         ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} \
         SKIP_JAX_PRECOMPILE=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ${sandbox_env} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} python -m tunix.experimental.distributed.runtime.main \
           --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
@@ -969,6 +973,7 @@ start_eval() {
         ${VLLM_ENABLE_V1_MULTIPROCESSING:+VLLM_ENABLE_V1_MULTIPROCESSING=${VLLM_ENABLE_V1_MULTIPROCESSING}} \
         ${VLLM_LOGGING_LEVEL:+VLLM_LOGGING_LEVEL=${VLLM_LOGGING_LEVEL}} \
         ${ROLLOUT_ENV_FLAGS} \
+        ${ROLLOUT_EXTRA_ENV:+${ROLLOUT_EXTRA_ENV} }\
         SKIP_JAX_PRECOMPILE=1 python3 -u ${eval_cmd} \
           ${role_arg} \
           --worker_addresses ${worker_addrs} \
