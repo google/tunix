@@ -1,0 +1,152 @@
+{
+  "training_mode": "agentic_grpo",
+  "model_config": {
+    "model_name": "gemma-4-e2b",
+    "model_id": "google/gemma-4-E2B-it",
+    "model_source": "huggingface",
+    "model_path": "/mnt/disks/persist/models/google/gemma-4-e2b-it",
+    "model_download_path": "/mnt/disks/persist/models/google/gemma-4-e2b-it",
+    "mesh": {
+      "shape": "(2,1)",
+      "axis_names": "('fsdp','tp')"
+    },
+    "remat_config": "DECODER",
+    "dtype": "bfloat16",
+    "rng_seed": 42,
+    "use_flash_attention": true,
+    "flash_attention_block_size": 256,
+    "use_sliding_window_kv_cache": false
+  },
+  "actor_model_config": {
+    "load_dtype": "float32",
+    "mesh": {
+      "shape": "(2,1)",
+      "axis_names": "('fsdp','tp')"
+    }
+  },
+  "reference_model_config": {
+    "mesh": null,
+    "same_mesh_as": "actor"
+  },
+  "rollout_model_config": {
+    "mesh": {
+      "shape": "(1,2)",
+      "axis_names": "('fsdp','tp')"
+    },
+    "same_mesh_as": null
+  },
+  "tokenizer_config": {
+    "tokenizer_type": "huggingface",
+    "tokenizer_path": "/mnt/disks/persist/models/google/gemma-4-e2b-it",
+    "add_bos": false,
+    "add_eos": false
+  },
+  "agent_class_path": "examples.frozenlake.agent.FrozenLakeAgent",
+  "agent_kwargs": {
+    "use_multistep_prompt": true
+  },
+  "env_class_path": "examples.frozenlake.env.FrozenLakeEnv",
+  "env_kwargs": {
+    "max_steps": 8,
+    "is_slippery": false
+  },
+  "data_module": "tunix.experimental.examples.rl_efficiency_benchmark.frozenlake_agentic",
+  "data_config": {
+    "size": 10000,
+    "seed": 42,
+    "limit": 1344
+  },
+  "apply_chat_template_to_dataset": false,
+  "chat_parser_config": {
+    "type": "gemma4",
+    "enable_thinking": false
+  },
+  "batch_size": 64,
+  "num_batches": 21,
+  "num_train_epochs": 1,
+  "train_fraction": 1.0,
+  "rl_training_config": {
+    "mini_batch_size": 64,
+    "train_micro_batch_size": 1,
+    "compute_logps_micro_batch_size": 1,
+    "compute_logps_chunk_size": 2048,
+    "max_steps": 21,
+    "eval_every_n_steps": 22,
+    "checkpoint_root_directory": null,
+    "checkpointing_options": null,
+    "profiler_options": null,
+    "metrics_logging_options": null,
+    "actor_optimizer_config": {
+      "opt_type": "adamw",
+      "learning_rate": 1e-06,
+      "schedule_type": null,
+      "b1": 0.9,
+      "b2": 0.95,
+      "weight_decay": 0.0,
+      "opt_chain_type": "clip_by_global_norm",
+      "chain_kwargs": {
+        "max_norm": 100.0
+      }
+    }
+  },
+  "rollout_engine": "vllm",
+  "offload_to_cpu": false,
+  "rollout_config": {
+    "total_generation_steps": 2048,
+    "max_prompt_length": 2048,
+    "kv_cache_size": 4352,
+    "temperature": 0.7,
+    "top_p": 1.0,
+    "top_k": 0,
+    "return_logprobs": true,
+    "rollout_vllm_init_with_random_weights": true,
+    "rollout_vllm_sampling_kwargs": {
+      "skip_special_tokens": false
+    }
+  },
+  "vllm_config": {
+    "model_version": "/mnt/disks/persist/models/google/gemma-4-e2b-it",
+    "hbm_utilization": 0.2,
+    "tpu_backend_type": "jax",
+    "server_mode": true,
+    "async_scheduling": false,
+    "max_num_seqs": 32,
+    "max_num_batched_tokens": 8192,
+    "data_parallel_size": 1,
+    "tensor_parallel_size": 2,
+    "kwargs": {
+      "kv_cache_metrics": true,
+      "disable_log_stats": false,
+      "enable_prefix_caching": false,
+      "dtype": "bfloat16",
+      "hf_overrides": {
+        "final_logit_softcapping": 30.0,
+        "text_config": {
+          "final_logit_softcapping": 30.0
+        },
+        "architectures": [
+          "Gemma4ForCausalLM"
+        ]
+      }
+    }
+  },
+  "reward_functions": [],
+  "agentic_grpo_config": {
+    "exact_token_continuity": true,
+    "num_generations": 8,
+    "num_iterations": 1,
+    "beta": 0.0,
+    "epsilon": 0.003,
+    "epsilon_high": 0.005,
+    "loss_algo": "gspo-token",
+    "loss_agg_mode": "sequence-mean-token-mean",
+    "kl_loss_mode": "low_var_kl",
+    "advantage_estimator": "rloo",
+    "sampler_is": "token",
+    "sampler_is_threshold": 2.0,
+    "max_concurrency": 512,
+    "off_policy_steps": 0,
+    "episode_timeout": 600,
+    "overlong_filter": false
+  }
+}

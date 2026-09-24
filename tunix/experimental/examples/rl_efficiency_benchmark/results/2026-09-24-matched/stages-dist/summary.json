@@ -1,0 +1,242 @@
+{
+  "mode": "dist",
+  "timing_mode": "stages",
+  "training_contract": {
+    "compute_dtype": "bfloat16",
+    "load_dtype": "float32",
+    "exact_token_continuity": true
+  },
+  "end_to_end": {
+    "steady_state_step_time_seconds": {
+      "mean": 293.1803372654016,
+      "median": 289.4749884509947,
+      "per_step": [
+        297.5657672681846,
+        323.0599761658814,
+        282.9335705919657,
+        289.9172456730157,
+        283.5553490871098,
+        305.50399592495523,
+        294.0380541710183,
+        301.52045062789693,
+        307.38005658518523,
+        289.0327312289737,
+        301.41005577589385,
+        282.2318598020356,
+        286.5223928310443,
+        272.1521944189444,
+        283.776009012945,
+        321.5087493690662,
+        280.4380691109691,
+        287.48953632311895,
+        276.3771204308141,
+        297.1935609090142
+      ]
+    },
+    "warmup_step_time_seconds": {
+      "mean": 337.74852033890784,
+      "median": 337.74852033890784,
+      "per_step": [
+        337.74852033890784
+      ]
+    }
+  },
+  "rollout": {
+    "collection_time_seconds": {
+      "mean": 241.1301915968419,
+      "median": 239.88843126501888,
+      "per_step": [
+        249.26815364602953,
+        264.31905619008467,
+        230.9078236790374,
+        239.79269286198542,
+        234.90742203686386,
+        253.0493259348441,
+        242.74072140897624,
+        246.75678780209273,
+        251.54653118294664,
+        233.55418705404736,
+        246.6362579499837,
+        232.72692263685167,
+        239.4326826930046,
+        226.0253569551278,
+        230.53566170693375,
+        264.3682091089431,
+        228.95828625699505,
+        239.98416966805235,
+        223.41873611183837,
+        243.67484705219977
+      ]
+    },
+    "trajectory_latency_seconds": {
+      "mean": 173.13576182215397,
+      "p90": 235.63572655157185
+    },
+    "average_output_tokens_per_trajectory": 969.35400390625,
+    "average_prompt_tokens_per_model_call": 1598.4947929768073,
+    "average_turns_per_trajectory": 1.94111328125,
+    "average_reward_per_trajectory": 0.47939453125,
+    "average_time_per_trajectory_seconds": {
+      "model_generation_api": 173.12874133785374,
+      "environment": 0.0044896945522623355
+    },
+    "trajectory_outcome_percent": {
+      "MAX_CONTEXT_LIMIT_REACHED": 51.25,
+      "SUCCEEDED": 48.75
+    }
+  },
+  "pipeline": {
+    "rollout_start_delay_seconds": {
+      "mean": 0.022552151000127196,
+      "median": 0.021673760027624667,
+      "per_step": [
+        0.024975207168608904,
+        0.0205559388268739,
+        0.02276922599412501,
+        0.02000750508159399,
+        0.027682158164680004,
+        0.02133394801057875,
+        0.02039353409782052,
+        0.026920707896351814,
+        0.021749990060925484,
+        0.022163669811561704,
+        0.02697218698449433,
+        0.020896118134260178,
+        0.022338954964652658,
+        0.019880429841578007,
+        0.026256561977788806,
+        0.020278711104765534,
+        0.02026579389348626,
+        0.022848841035738587,
+        0.021156006958335638,
+        0.02159752999432385
+      ]
+    },
+    "post_rollout_tail_seconds": {
+      "mean": 52.02759351755958,
+      "median": 52.21815686451737,
+      "per_step": [
+        48.27263841498643,
+        58.72036403696984,
+        52.00297768693417,
+        50.104545305948704,
+        48.620244892081246,
+        52.433336042100564,
+        51.27693922794424,
+        54.73674211790785,
+        55.81177541217767,
+        55.456380505114794,
+        54.74682563892566,
+        49.484041047049686,
+        47.06737118307501,
+        46.10695703397505,
+        53.214090744033456,
+        57.12026154901832,
+        51.45951706008054,
+        47.48251781403087,
+        52.937228312017396,
+        53.497116326820105
+      ]
+    }
+  },
+  "api_calls": {
+    "actor_log_probs": {
+      "calls_per_step": 64.0,
+      "host_time_per_step_seconds": 20.807134982582646
+    },
+    "checkpoint_save": {
+      "calls_per_step": 1.0,
+      "host_time_per_step_seconds": 0.000939670589286834
+    },
+    "metrics_fetch": {
+      "calls_per_step": 1.0,
+      "host_time_per_step_seconds": 0.0009841417078860105
+    },
+    "rollout_dispatch": {
+      "calls_per_step": 64.0,
+      "host_time_per_step_seconds": 2.483179505111184
+    },
+    "rollout_poll": {
+      "calls_per_step": 512.95,
+      "host_time_per_step_seconds": 290.4717892813031
+    },
+    "sampler_trainer_agreement": {
+      "calls_per_step": 64.0,
+      "host_time_per_step_seconds": 0.20441093026893215
+    },
+    "trainer_worker_fwd_bwd": {
+      "calls_per_step": 64.0,
+      "host_time_per_step_seconds": 75.67813967793481
+    },
+    "trainer_worker_per_token_logps": {
+      "calls_per_step": 64.0,
+      "host_time_per_step_seconds": 20.674556320521514
+    },
+    "trainer_worker_update": {
+      "calls_per_step": 1.0,
+      "host_time_per_step_seconds": 0.1328201921307482
+    },
+    "training": {
+      "calls_per_step": 64.0,
+      "host_time_per_step_seconds": 76.20454857710283
+    },
+    "weight_sync": {
+      "calls_per_step": 1.0,
+      "host_time_per_step_seconds": 19.017989480064717
+    },
+    "worker_rpc_fwd_bwd": {
+      "calls_per_step": 64.0,
+      "host_time_per_step_seconds": 76.06017335683573
+    },
+    "worker_rpc_get_metrics": {
+      "calls_per_step": 1.0,
+      "host_time_per_step_seconds": 0.0009381730109453201
+    },
+    "worker_rpc_per_token_logps": {
+      "calls_per_step": 64.0,
+      "host_time_per_step_seconds": 20.791884381894487
+    },
+    "worker_rpc_save_checkpoint": {
+      "calls_per_step": 1.0,
+      "host_time_per_step_seconds": 0.0006120709818787873
+    },
+    "worker_rpc_update": {
+      "calls_per_step": 1.0,
+      "host_time_per_step_seconds": 0.1347589902114123
+    }
+  },
+  "training_input": {
+    "trajectories_per_call": 8.0,
+    "trajectories_per_step": 512.0,
+    "padded_token_slots_per_step": 2097152.0,
+    "unique_tensor_shapes": [
+      {
+        "completion": [
+          8,
+          2048
+        ],
+        "prompt": [
+          8,
+          2048
+        ]
+      }
+    ]
+  },
+  "actor_log_probs_input": {
+    "trajectories_per_call": 8.0,
+    "trajectories_per_step": 512.0,
+    "padded_token_slots_per_step": 2097152.0,
+    "unique_tensor_shapes": [
+      {
+        "completion": [
+          8,
+          2048
+        ],
+        "prompt": [
+          8,
+          2048
+        ]
+      }
+    ]
+  }
+}

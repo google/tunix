@@ -1,0 +1,2385 @@
+{
+  "agentic": {
+    "mode": "agentic",
+    "timing_mode": "stages",
+    "steady_steps": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20
+    ],
+    "per_step": [
+      {
+        "step": 1,
+        "end_to_end_seconds": 329.0337834728416,
+        "post_rollout": {
+          "tail_seconds": 21.748235154896975,
+          "pre_sync_seconds": 5.179046060889959,
+          "sync_seconds": 16.569189094007015,
+          "late_logprob_calls": 2,
+          "pre_sync_span_seconds": {
+            "actor_log_probs": 3.2904946899507195,
+            "sampler_trainer_agreement": 0.02423837804235518,
+            "training": 4.171438389224932
+          }
+        },
+        "actor_log_probs": {
+          "calls": 64,
+          "seconds": 73.91103623993695
+        },
+        "sampler_trainer_agreement": {
+          "calls": 64,
+          "seconds": 1.0167519317474216
+        },
+        "training": {
+          "calls": 64,
+          "seconds": 83.52614963171072
+        },
+        "weight_sync": {
+          "calls": 1,
+          "seconds": 16.569189094007015
+        },
+        "worker_rpc_per_token_logps": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "worker_rpc_fwd_bwd": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "worker_rpc_update": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_per_token_logps": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_fwd_bwd": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_update": {
+          "calls": 0,
+          "seconds": 0
+        }
+      },
+      {
+        "step": 2,
+        "end_to_end_seconds": 344.1505925760139,
+        "post_rollout": {
+          "tail_seconds": 21.612915351986885,
+          "pre_sync_seconds": 3.307804384967312,
+          "sync_seconds": 18.305110967019573,
+          "late_logprob_calls": 1,
+          "pre_sync_span_seconds": {
+            "actor_log_probs": 1.4483557648491114,
+            "sampler_trainer_agreement": 0.01596555789001286,
+            "training": 2.5629715570248663
+          }
+        },
+        "actor_log_probs": {
+          "calls": 64,
+          "seconds": 76.16500913421623
+        },
+        "sampler_trainer_agreement": {
+          "calls": 64,
+          "seconds": 1.1918755823280662
+        },
+        "training": {
+          "calls": 64,
+          "seconds": 86.51995616103522
+        },
+        "weight_sync": {
+          "calls": 1,
+          "seconds": 18.305110967019573
+        },
+        "worker_rpc_per_token_logps": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "worker_rpc_fwd_bwd": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "worker_rpc_update": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_per_token_logps": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_fwd_bwd": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_update": {
+          "calls": 0,
+          "seconds": 0
+        }
+      },
+      {
+        "step": 3,
+        "end_to_end_seconds": 302.6792069140356,
+        "post_rollout": {
+          "tail_seconds": 22.432401600992307,
+          "pre_sync_seconds": 3.310051840962842,
+          "sync_seconds": 19.122349760029465,
+          "late_logprob_calls": 1,
+          "pre_sync_span_seconds": {
+            "actor_log_probs": 1.4589178150054067,
+            "sampler_trainer_agreement": 0.015325209125876427,
+            "training": 2.555182965938002
+          }
+        },
+        "actor_log_probs": {
+          "calls": 64,
+          "seconds": 72.73935250216164
+        },
+        "sampler_trainer_agreement": {
+          "calls": 64,
+          "seconds": 1.1697816664818674
+        },
+        "training": {
+          "calls": 64,
+          "seconds": 84.32253790600225
+        },
+        "weight_sync": {
+          "calls": 1,
+          "seconds": 19.122349760029465
+        },
+        "worker_rpc_per_token_logps": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "worker_rpc_fwd_bwd": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "worker_rpc_update": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_per_token_logps": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_fwd_bwd": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_update": {
+          "calls": 0,
+          "seconds": 0
+        }
+      },
+      {
+        "step": 4,
+        "end_to_end_seconds": 299.0501151850913,
+        "post_rollout": {
+          "tail_seconds": 27.22303667012602,
+          "pre_sync_seconds": 9.19612612714991,
+          "sync_seconds": 18.02691054297611,
+          "late_logprob_calls": 5,
+          "pre_sync_span_seconds": {
+            "actor_log_probs": 7.2262415727600455,
+            "sampler_trainer_agreement": 0.0657368153333664,
+            "training": 7.594986868323758
+          }
+        },
+        "actor_log_probs": {
+          "calls": 64,
+          "seconds": 72.57022944674827
+        },
+        "sampler_trainer_agreement": {
+          "calls": 64,
+          "seconds": 1.0045017015654594
+        },
+        "training": {
+          "calls": 64,
+          "seconds": 86.1518876098562
+        },
+        "weight_sync": {
+          "calls": 1,
+          "seconds": 18.02691054297611
+        },
+        "worker_rpc_per_token_logps": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "worker_rpc_fwd_bwd": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "worker_rpc_update": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_per_token_logps": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_fwd_bwd": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_update": {
+          "calls": 0,
+          "seconds": 0
+        }
+      },
+      {
+        "step": 5,
+        "end_to_end_seconds": 294.9753391868435,
+        "post_rollout": {
+          "tail_seconds": 21.82510102284141,
+          "pre_sync_seconds": 3.370972004951909,
+          "sync_seconds": 18.4541290178895,
+          "late_logprob_calls": 1,
+          "pre_sync_span_seconds": {
+            "actor_log_probs": 1.486281889025122,
+            "sampler_trainer_agreement": 0.011710956925526261,
+            "training": 2.5939725609496236
+          }
+        },
+        "actor_log_probs": {
+          "calls": 64,
+          "seconds": 74.56885939720087
+        },
+        "sampler_trainer_agreement": {
+          "calls": 64,
+          "seconds": 0.9959299643523991
+        },
+        "training": {
+          "calls": 64,
+          "seconds": 84.68521111714654
+        },
+        "weight_sync": {
+          "calls": 1,
+          "seconds": 18.4541290178895
+        },
+        "worker_rpc_per_token_logps": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "worker_rpc_fwd_bwd": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "worker_rpc_update": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_per_token_logps": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_fwd_bwd": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_update": {
+          "calls": 0,
+          "seconds": 0
+        }
+      },
+      {
+        "step": 6,
+        "end_to_end_seconds": 331.15627729916014,
+        "post_rollout": {
+          "tail_seconds": 22.04374607698992,
+          "pre_sync_seconds": 3.3220179288182408,
+          "sync_seconds": 18.721728148171678,
+          "late_logprob_calls": 1,
+          "pre_sync_span_seconds": {
+            "actor_log_probs": 1.4461857920978218,
+            "sampler_trainer_agreement": 0.012861661147326231,
+            "training": 2.5513498748186976
+          }
+        },
+        "actor_log_probs": {
+          "calls": 64,
+          "seconds": 79.88714644312859
+        },
+        "sampler_trainer_agreement": {
+          "calls": 64,
+          "seconds": 4.5163655711803585
+        },
+        "training": {
+          "calls": 64,
+          "seconds": 86.60018884832971
+        },
+        "weight_sync": {
+          "calls": 1,
+          "seconds": 18.721728148171678
+        },
+        "worker_rpc_per_token_logps": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "worker_rpc_fwd_bwd": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "worker_rpc_update": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_per_token_logps": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_fwd_bwd": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_update": {
+          "calls": 0,
+          "seconds": 0
+        }
+      },
+      {
+        "step": 7,
+        "end_to_end_seconds": 330.5114327520132,
+        "post_rollout": {
+          "tail_seconds": 21.75074994005263,
+          "pre_sync_seconds": 3.312406118027866,
+          "sync_seconds": 18.438343822024763,
+          "late_logprob_calls": 1,
+          "pre_sync_span_seconds": {
+            "actor_log_probs": 1.4477261640131474,
+            "sampler_trainer_agreement": 0.01537588401697576,
+            "training": 2.5631477320566773
+          }
+        },
+        "actor_log_probs": {
+          "calls": 64,
+          "seconds": 77.70980238448828
+        },
+        "sampler_trainer_agreement": {
+          "calls": 64,
+          "seconds": 1.1211545609403402
+        },
+        "training": {
+          "calls": 64,
+          "seconds": 83.86502353171818
+        },
+        "weight_sync": {
+          "calls": 1,
+          "seconds": 18.438343822024763
+        },
+        "worker_rpc_per_token_logps": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "worker_rpc_fwd_bwd": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "worker_rpc_update": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_per_token_logps": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_fwd_bwd": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_update": {
+          "calls": 0,
+          "seconds": 0
+        }
+      },
+      {
+        "step": 8,
+        "end_to_end_seconds": 315.4606032699812,
+        "post_rollout": {
+          "tail_seconds": 20.81232175603509,
+          "pre_sync_seconds": 3.304081140086055,
+          "sync_seconds": 17.508240615949035,
+          "late_logprob_calls": 1,
+          "pre_sync_span_seconds": {
+            "actor_log_probs": 1.453420365927741,
+            "sampler_trainer_agreement": 0.015391598921269178,
+            "training": 2.5591484850738198
+          }
+        },
+        "actor_log_probs": {
+          "calls": 64,
+          "seconds": 77.66102438117377
+        },
+        "sampler_trainer_agreement": {
+          "calls": 64,
+          "seconds": 1.1866119550541043
+        },
+        "training": {
+          "calls": 64,
+          "seconds": 84.69096107385121
+        },
+        "weight_sync": {
+          "calls": 1,
+          "seconds": 17.508240615949035
+        },
+        "worker_rpc_per_token_logps": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "worker_rpc_fwd_bwd": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "worker_rpc_update": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_per_token_logps": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_fwd_bwd": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_update": {
+          "calls": 0,
+          "seconds": 0
+        }
+      },
+      {
+        "step": 9,
+        "end_to_end_seconds": 324.7688030509744,
+        "post_rollout": {
+          "tail_seconds": 21.079976835055277,
+          "pre_sync_seconds": 3.2907867811154574,
+          "sync_seconds": 17.78919005393982,
+          "late_logprob_calls": 1,
+          "pre_sync_span_seconds": {
+            "actor_log_probs": 1.4367905519902706,
+            "sampler_trainer_agreement": 0.01526310108602047,
+            "training": 2.542096148012206
+          }
+        },
+        "actor_log_probs": {
+          "calls": 64,
+          "seconds": 81.10116919036955
+        },
+        "sampler_trainer_agreement": {
+          "calls": 64,
+          "seconds": 1.177684417925775
+        },
+        "training": {
+          "calls": 64,
+          "seconds": 82.66418176377192
+        },
+        "weight_sync": {
+          "calls": 1,
+          "seconds": 17.78919005393982
+        },
+        "worker_rpc_per_token_logps": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "worker_rpc_fwd_bwd": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "worker_rpc_update": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_per_token_logps": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_fwd_bwd": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_update": {
+          "calls": 0,
+          "seconds": 0
+        }
+      },
+      {
+        "step": 10,
+        "end_to_end_seconds": 306.51199332787655,
+        "post_rollout": {
+          "tail_seconds": 20.975128227844834,
+          "pre_sync_seconds": 3.2854335508309305,
+          "sync_seconds": 17.689694677013904,
+          "late_logprob_calls": 1,
+          "pre_sync_span_seconds": {
+            "actor_log_probs": 1.4358579078689218,
+            "sampler_trainer_agreement": 0.015660553006455302,
+            "training": 2.5431153101380914
+          }
+        },
+        "actor_log_probs": {
+          "calls": 64,
+          "seconds": 73.49365532025695
+        },
+        "sampler_trainer_agreement": {
+          "calls": 64,
+          "seconds": 1.2217859961092472
+        },
+        "training": {
+          "calls": 64,
+          "seconds": 87.54985171416774
+        },
+        "weight_sync": {
+          "calls": 1,
+          "seconds": 17.689694677013904
+        },
+        "worker_rpc_per_token_logps": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "worker_rpc_fwd_bwd": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "worker_rpc_update": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_per_token_logps": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_fwd_bwd": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_update": {
+          "calls": 0,
+          "seconds": 0
+        }
+      },
+      {
+        "step": 11,
+        "end_to_end_seconds": 312.5835233130492,
+        "post_rollout": {
+          "tail_seconds": 26.59395029093139,
+          "pre_sync_seconds": 8.516607652883977,
+          "sync_seconds": 18.077342638047412,
+          "late_logprob_calls": 4,
+          "pre_sync_span_seconds": {
+            "actor_log_probs": 6.577538460725918,
+            "sampler_trainer_agreement": 0.06235684617422521,
+            "training": 7.3174260021187365
+          }
+        },
+        "actor_log_probs": {
+          "calls": 64,
+          "seconds": 75.14863975532353
+        },
+        "sampler_trainer_agreement": {
+          "calls": 64,
+          "seconds": 1.1432397791650146
+        },
+        "training": {
+          "calls": 64,
+          "seconds": 84.06041304790415
+        },
+        "weight_sync": {
+          "calls": 1,
+          "seconds": 18.077342638047412
+        },
+        "worker_rpc_per_token_logps": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "worker_rpc_fwd_bwd": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "worker_rpc_update": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_per_token_logps": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_fwd_bwd": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_update": {
+          "calls": 0,
+          "seconds": 0
+        }
+      },
+      {
+        "step": 12,
+        "end_to_end_seconds": 294.8458494229708,
+        "post_rollout": {
+          "tail_seconds": 21.613450354896486,
+          "pre_sync_seconds": 3.3104959910269827,
+          "sync_seconds": 18.302954363869503,
+          "late_logprob_calls": 1,
+          "pre_sync_span_seconds": {
+            "actor_log_probs": 1.4463512138463557,
+            "sampler_trainer_agreement": 0.015034464886412024,
+            "training": 2.5504235138650984
+          }
+        },
+        "actor_log_probs": {
+          "calls": 64,
+          "seconds": 78.30497753503732
+        },
+        "sampler_trainer_agreement": {
+          "calls": 64,
+          "seconds": 1.190161447506398
+        },
+        "training": {
+          "calls": 64,
+          "seconds": 86.01230621477589
+        },
+        "weight_sync": {
+          "calls": 1,
+          "seconds": 18.302954363869503
+        },
+        "worker_rpc_per_token_logps": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "worker_rpc_fwd_bwd": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "worker_rpc_update": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_per_token_logps": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_fwd_bwd": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_update": {
+          "calls": 0,
+          "seconds": 0
+        }
+      },
+      {
+        "step": 13,
+        "end_to_end_seconds": 292.9564975381363,
+        "post_rollout": {
+          "tail_seconds": 20.80433571501635,
+          "pre_sync_seconds": 3.3116776610258967,
+          "sync_seconds": 17.492658053990453,
+          "late_logprob_calls": 1,
+          "pre_sync_span_seconds": {
+            "actor_log_probs": 1.4452598069328815,
+            "sampler_trainer_agreement": 0.016048691933974624,
+            "training": 2.561603033915162
+          }
+        },
+        "actor_log_probs": {
+          "calls": 64,
+          "seconds": 75.33824332617223
+        },
+        "sampler_trainer_agreement": {
+          "calls": 64,
+          "seconds": 1.187719599576667
+        },
+        "training": {
+          "calls": 64,
+          "seconds": 84.78124506748281
+        },
+        "weight_sync": {
+          "calls": 1,
+          "seconds": 17.492658053990453
+        },
+        "worker_rpc_per_token_logps": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "worker_rpc_fwd_bwd": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "worker_rpc_update": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_per_token_logps": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_fwd_bwd": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_update": {
+          "calls": 0,
+          "seconds": 0
+        }
+      },
+      {
+        "step": 14,
+        "end_to_end_seconds": 271.3682814759668,
+        "post_rollout": {
+          "tail_seconds": 21.318197089014575,
+          "pre_sync_seconds": 3.308057100046426,
+          "sync_seconds": 18.01013998896815,
+          "late_logprob_calls": 1,
+          "pre_sync_span_seconds": {
+            "actor_log_probs": 1.4464272139593959,
+            "sampler_trainer_agreement": 0.015437693102285266,
+            "training": 2.5637159741017967
+          }
+        },
+        "actor_log_probs": {
+          "calls": 64,
+          "seconds": 76.11526719201356
+        },
+        "sampler_trainer_agreement": {
+          "calls": 64,
+          "seconds": 1.1635769561398774
+        },
+        "training": {
+          "calls": 64,
+          "seconds": 84.56089317169972
+        },
+        "weight_sync": {
+          "calls": 1,
+          "seconds": 18.01013998896815
+        },
+        "worker_rpc_per_token_logps": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "worker_rpc_fwd_bwd": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "worker_rpc_update": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_per_token_logps": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_fwd_bwd": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_update": {
+          "calls": 0,
+          "seconds": 0
+        }
+      },
+      {
+        "step": 15,
+        "end_to_end_seconds": 279.6333938438911,
+        "post_rollout": {
+          "tail_seconds": 23.026110043982044,
+          "pre_sync_seconds": 4.787156778154895,
+          "sync_seconds": 18.23895326582715,
+          "late_logprob_calls": 2,
+          "pre_sync_span_seconds": {
+            "actor_log_probs": 2.8975576469674706,
+            "sampler_trainer_agreement": 0.031937237130478024,
+            "training": 3.829505154164508
+          }
+        },
+        "actor_log_probs": {
+          "calls": 64,
+          "seconds": 71.10513485688716
+        },
+        "sampler_trainer_agreement": {
+          "calls": 64,
+          "seconds": 1.1532648263964802
+        },
+        "training": {
+          "calls": 64,
+          "seconds": 81.30305676092394
+        },
+        "weight_sync": {
+          "calls": 1,
+          "seconds": 18.23895326582715
+        },
+        "worker_rpc_per_token_logps": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "worker_rpc_fwd_bwd": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "worker_rpc_update": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_per_token_logps": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_fwd_bwd": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_update": {
+          "calls": 0,
+          "seconds": 0
+        }
+      },
+      {
+        "step": 16,
+        "end_to_end_seconds": 307.1024133921601,
+        "post_rollout": {
+          "tail_seconds": 22.91138435108587,
+          "pre_sync_seconds": 4.802554218098521,
+          "sync_seconds": 18.10883013298735,
+          "late_logprob_calls": 2,
+          "pre_sync_span_seconds": {
+            "actor_log_probs": 2.9011235542129725,
+            "sampler_trainer_agreement": 0.024555635871365666,
+            "training": 3.814093519002199
+          }
+        },
+        "actor_log_probs": {
+          "calls": 64,
+          "seconds": 73.27544203703292
+        },
+        "sampler_trainer_agreement": {
+          "calls": 64,
+          "seconds": 1.068831465439871
+        },
+        "training": {
+          "calls": 64,
+          "seconds": 83.86536414339207
+        },
+        "weight_sync": {
+          "calls": 1,
+          "seconds": 18.10883013298735
+        },
+        "worker_rpc_per_token_logps": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "worker_rpc_fwd_bwd": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "worker_rpc_update": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_per_token_logps": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_fwd_bwd": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_update": {
+          "calls": 0,
+          "seconds": 0
+        }
+      },
+      {
+        "step": 17,
+        "end_to_end_seconds": 285.45548886898905,
+        "post_rollout": {
+          "tail_seconds": 23.269100222969428,
+          "pre_sync_seconds": 2.6200861339457333,
+          "sync_seconds": 20.649014089023694,
+          "late_logprob_calls": 1,
+          "pre_sync_span_seconds": {
+            "actor_log_probs": 0.6929263710044324,
+            "sampler_trainer_agreement": 0.01266229897737503,
+            "training": 1.314727172954008
+          }
+        },
+        "actor_log_probs": {
+          "calls": 64,
+          "seconds": 76.34979452332482
+        },
+        "sampler_trainer_agreement": {
+          "calls": 64,
+          "seconds": 1.0373561636079103
+        },
+        "training": {
+          "calls": 64,
+          "seconds": 88.96696185669862
+        },
+        "weight_sync": {
+          "calls": 1,
+          "seconds": 20.649014089023694
+        },
+        "worker_rpc_per_token_logps": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "worker_rpc_fwd_bwd": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "worker_rpc_update": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_per_token_logps": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_fwd_bwd": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_update": {
+          "calls": 0,
+          "seconds": 0
+        }
+      },
+      {
+        "step": 18,
+        "end_to_end_seconds": 269.2885061770212,
+        "post_rollout": {
+          "tail_seconds": 23.182012224104255,
+          "pre_sync_seconds": 3.314352043904364,
+          "sync_seconds": 19.86766018019989,
+          "late_logprob_calls": 1,
+          "pre_sync_span_seconds": {
+            "actor_log_probs": 1.4356900670100003,
+            "sampler_trainer_agreement": 0.016247684136033058,
+            "training": 2.5553249351214617
+          }
+        },
+        "actor_log_probs": {
+          "calls": 64,
+          "seconds": 74.80648141214624
+        },
+        "sampler_trainer_agreement": {
+          "calls": 64,
+          "seconds": 1.1187705064658076
+        },
+        "training": {
+          "calls": 64,
+          "seconds": 83.49500741297379
+        },
+        "weight_sync": {
+          "calls": 1,
+          "seconds": 19.86766018019989
+        },
+        "worker_rpc_per_token_logps": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "worker_rpc_fwd_bwd": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "worker_rpc_update": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_per_token_logps": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_fwd_bwd": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_update": {
+          "calls": 0,
+          "seconds": 0
+        }
+      },
+      {
+        "step": 19,
+        "end_to_end_seconds": 270.8301520529203,
+        "post_rollout": {
+          "tail_seconds": 23.51989862904884,
+          "pre_sync_seconds": 4.004387960070744,
+          "sync_seconds": 19.515510668978095,
+          "late_logprob_calls": 1,
+          "pre_sync_span_seconds": {
+            "actor_log_probs": 2.0574872998986393,
+            "sampler_trainer_agreement": 0.041071880143135786,
+            "training": 3.4305779691785574
+          }
+        },
+        "actor_log_probs": {
+          "calls": 64,
+          "seconds": 72.92145507223904
+        },
+        "sampler_trainer_agreement": {
+          "calls": 64,
+          "seconds": 1.1993344421498477
+        },
+        "training": {
+          "calls": 64,
+          "seconds": 84.65737478388473
+        },
+        "weight_sync": {
+          "calls": 1,
+          "seconds": 19.515510668978095
+        },
+        "worker_rpc_per_token_logps": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "worker_rpc_fwd_bwd": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "worker_rpc_update": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_per_token_logps": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_fwd_bwd": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_update": {
+          "calls": 0,
+          "seconds": 0
+        }
+      },
+      {
+        "step": 20,
+        "end_to_end_seconds": 304.141122875968,
+        "post_rollout": {
+          "tail_seconds": 23.120273500913754,
+          "pre_sync_seconds": 3.317009737016633,
+          "sync_seconds": 19.80326376389712,
+          "late_logprob_calls": 1,
+          "pre_sync_span_seconds": {
+            "actor_log_probs": 1.4423902209382504,
+            "sampler_trainer_agreement": 0.01616597711108625,
+            "training": 2.5428273170255125
+          }
+        },
+        "actor_log_probs": {
+          "calls": 64,
+          "seconds": 74.98350715148263
+        },
+        "sampler_trainer_agreement": {
+          "calls": 64,
+          "seconds": 1.1848159451037645
+        },
+        "training": {
+          "calls": 64,
+          "seconds": 85.96447338559665
+        },
+        "weight_sync": {
+          "calls": 1,
+          "seconds": 19.80326376389712
+        },
+        "worker_rpc_per_token_logps": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "worker_rpc_fwd_bwd": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "worker_rpc_update": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_per_token_logps": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_fwd_bwd": {
+          "calls": 0,
+          "seconds": 0
+        },
+        "trainer_worker_update": {
+          "calls": 0,
+          "seconds": 0
+        }
+      }
+    ],
+    "mean_per_step": {
+      "actor_log_probs": {
+        "calls": 64,
+        "seconds": 75.40781136506703
+      },
+      "sampler_trainer_agreement": {
+        "calls": 64,
+        "seconds": 1.3024757239618339
+      },
+      "training": {
+        "calls": 64,
+        "seconds": 84.9121522601461
+      },
+      "weight_sync": {
+        "calls": 1,
+        "seconds": 18.434560692240485
+      },
+      "worker_rpc_per_token_logps": {
+        "calls": 0,
+        "seconds": 0
+      },
+      "worker_rpc_fwd_bwd": {
+        "calls": 0,
+        "seconds": 0
+      },
+      "worker_rpc_update": {
+        "calls": 0,
+        "seconds": 0
+      },
+      "trainer_worker_per_token_logps": {
+        "calls": 0,
+        "seconds": 0
+      },
+      "trainer_worker_fwd_bwd": {
+        "calls": 0,
+        "seconds": 0
+      },
+      "trainer_worker_update": {
+        "calls": 0,
+        "seconds": 0
+      }
+    },
+    "mean_post_rollout": {
+      "tail_seconds": 22.543116252939218,
+      "pre_sync_seconds": 4.108555560698733,
+      "sync_seconds": 18.434560692240485,
+      "late_logprob_calls": 1.5,
+      "pre_sync_span_seconds": {
+        "actor_log_probs": 2.2236512184492314,
+        "sampler_trainer_agreement": 0.02295240624807775,
+        "training": 3.235881724150386
+      }
+    },
+    "rpc_worker_pairs": {}
+  },
+  "dist": {
+    "mode": "dist",
+    "timing_mode": "stages",
+    "steady_steps": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20
+    ],
+    "per_step": [
+      {
+        "step": 1,
+        "end_to_end_seconds": 297.5657672681846,
+        "post_rollout": {
+          "tail_seconds": 48.27263841498643,
+          "pre_sync_seconds": 28.742882335791364,
+          "sync_seconds": 19.529756079195067,
+          "late_logprob_calls": 18,
+          "pre_sync_span_seconds": {
+            "actor_log_probs": 5.672274795593694,
+            "sampler_trainer_agreement": 0.05900539364665747,
+            "training": 22.98741663247347
+          }
+        },
+        "actor_log_probs": {
+          "calls": 64,
+          "seconds": 20.391304563265294
+        },
+        "sampler_trainer_agreement": {
+          "calls": 64,
+          "seconds": 0.2021907507441938
+        },
+        "training": {
+          "calls": 64,
+          "seconds": 76.92958543635905
+        },
+        "weight_sync": {
+          "calls": 1,
+          "seconds": 19.529756079195067
+        },
+        "worker_rpc_per_token_logps": {
+          "calls": 64,
+          "seconds": 20.37610531342216
+        },
+        "worker_rpc_fwd_bwd": {
+          "calls": 64,
+          "seconds": 76.6676522155758
+        },
+        "worker_rpc_update": {
+          "calls": 1,
+          "seconds": 0.25222104601562023
+        },
+        "trainer_worker_per_token_logps": {
+          "calls": 64,
+          "seconds": 20.273922191932797
+        },
+        "trainer_worker_fwd_bwd": {
+          "calls": 64,
+          "seconds": 76.24536578985862
+        },
+        "trainer_worker_update": {
+          "calls": 1,
+          "seconds": 0.2503457819111645
+        }
+      },
+      {
+        "step": 2,
+        "end_to_end_seconds": 323.0599761658814,
+        "post_rollout": {
+          "tail_seconds": 58.72036403696984,
+          "pre_sync_seconds": 39.645537853008136,
+          "sync_seconds": 19.074826183961704,
+          "late_logprob_calls": 25,
+          "pre_sync_span_seconds": {
+            "actor_log_probs": 8.511166537413374,
+            "sampler_trainer_agreement": 0.08313597668893635,
+            "training": 31.02100230427459
+          }
+        },
+        "actor_log_probs": {
+          "calls": 64,
+          "seconds": 20.797439123736694
+        },
+        "sampler_trainer_agreement": {
+          "calls": 64,
+          "seconds": 0.20171069400385022
+        },
+        "training": {
+          "calls": 64,
+          "seconds": 76.21925739571452
+        },
+        "weight_sync": {
+          "calls": 1,
+          "seconds": 19.074826183961704
+        },
+        "worker_rpc_per_token_logps": {
+          "calls": 64,
+          "seconds": 20.78148667421192
+        },
+        "worker_rpc_fwd_bwd": {
+          "calls": 64,
+          "seconds": 76.08019652124494
+        },
+        "worker_rpc_update": {
+          "calls": 1,
+          "seconds": 0.12957532005384564
+        },
+        "trainer_worker_per_token_logps": {
+          "calls": 64,
+          "seconds": 20.685198845574632
+        },
+        "trainer_worker_fwd_bwd": {
+          "calls": 64,
+          "seconds": 75.68924887967296
+        },
+        "trainer_worker_update": {
+          "calls": 1,
+          "seconds": 0.1275760589633137
+        }
+      },
+      {
+        "step": 3,
+        "end_to_end_seconds": 282.9335705919657,
+        "post_rollout": {
+          "tail_seconds": 52.00297768693417,
+          "pre_sync_seconds": 33.05532316910103,
+          "sync_seconds": 18.947654517833143,
+          "late_logprob_calls": 21,
+          "pre_sync_span_seconds": {
+            "actor_log_probs": 7.017490896862,
+            "sampler_trainer_agreement": 0.06684153340756893,
+            "training": 25.94432616769336
+          }
+        },
+        "actor_log_probs": {
+          "calls": 64,
+          "seconds": 20.834565447177738
+        },
+        "sampler_trainer_agreement": {
+          "calls": 64,
+          "seconds": 0.2074198890477419
+        },
+        "training": {
+          "calls": 64,
+          "seconds": 76.47463239962235
+        },
+        "weight_sync": {
+          "calls": 1,
+          "seconds": 18.947654517833143
+        },
+        "worker_rpc_per_token_logps": {
+          "calls": 64,
+          "seconds": 20.82009831466712
+        },
+        "worker_rpc_fwd_bwd": {
+          "calls": 64,
+          "seconds": 76.32661567023024
+        },
+        "worker_rpc_update": {
+          "calls": 1,
+          "seconds": 0.13808790501207113
+        },
+        "trainer_worker_per_token_logps": {
+          "calls": 64,
+          "seconds": 20.72050843271427
+        },
+        "trainer_worker_fwd_bwd": {
+          "calls": 64,
+          "seconds": 75.86941809719428
+        },
+        "trainer_worker_update": {
+          "calls": 1,
+          "seconds": 0.13606154592707753
+        }
+      },
+      {
+        "step": 4,
+        "end_to_end_seconds": 289.9172456730157,
+        "post_rollout": {
+          "tail_seconds": 50.104545305948704,
+          "pre_sync_seconds": 31.03717022505589,
+          "sync_seconds": 19.067375080892816,
+          "late_logprob_calls": 20,
+          "pre_sync_span_seconds": {
+            "actor_log_probs": 6.663062619976699,
+            "sampler_trainer_agreement": 0.06352321989834309,
+            "training": 24.285426625749096
+          }
+        },
+        "actor_log_probs": {
+          "calls": 64,
+          "seconds": 20.870004448108375
+        },
+        "sampler_trainer_agreement": {
+          "calls": 64,
+          "seconds": 0.2060094540938735
+        },
+        "training": {
+          "calls": 64,
+          "seconds": 76.14170491951518
+        },
+        "weight_sync": {
+          "calls": 1,
+          "seconds": 19.067375080892816
+        },
+        "worker_rpc_per_token_logps": {
+          "calls": 64,
+          "seconds": 20.854751216247678
+        },
+        "worker_rpc_fwd_bwd": {
+          "calls": 64,
+          "seconds": 76.00556311151013
+        },
+        "worker_rpc_update": {
+          "calls": 1,
+          "seconds": 0.12619306216947734
+        },
+        "trainer_worker_per_token_logps": {
+          "calls": 64,
+          "seconds": 20.755948247155175
+        },
+        "trainer_worker_fwd_bwd": {
+          "calls": 64,
+          "seconds": 75.63752261688933
+        },
+        "trainer_worker_update": {
+          "calls": 1,
+          "seconds": 0.12435288191772997
+        }
+      },
+      {
+        "step": 5,
+        "end_to_end_seconds": 283.5553490871098,
+        "post_rollout": {
+          "tail_seconds": 48.620244892081246,
+          "pre_sync_seconds": 29.57137063704431,
+          "sync_seconds": 19.048874255036935,
+          "late_logprob_calls": 19,
+          "pre_sync_span_seconds": {
+            "actor_log_probs": 6.37352372915484,
+            "sampler_trainer_agreement": 0.060259867226704955,
+            "training": 23.11501842807047
+          }
+        },
+        "actor_log_probs": {
+          "calls": 64,
+          "seconds": 20.83883090922609
+        },
+        "sampler_trainer_agreement": {
+          "calls": 64,
+          "seconds": 0.20442833006381989
+        },
+        "training": {
+          "calls": 64,
+          "seconds": 76.08840917120688
+        },
+        "weight_sync": {
+          "calls": 1,
+          "seconds": 19.048874255036935
+        },
+        "worker_rpc_per_token_logps": {
+          "calls": 64,
+          "seconds": 20.823839131044224
+        },
+        "worker_rpc_fwd_bwd": {
+          "calls": 64,
+          "seconds": 75.95129686198197
+        },
+        "worker_rpc_update": {
+          "calls": 1,
+          "seconds": 0.1273439519573003
+        },
+        "trainer_worker_per_token_logps": {
+          "calls": 64,
+          "seconds": 20.72559851803817
+        },
+        "trainer_worker_fwd_bwd": {
+          "calls": 64,
+          "seconds": 75.5841586261522
+        },
+        "trainer_worker_update": {
+          "calls": 1,
+          "seconds": 0.12545016687363386
+        }
+      },
+      {
+        "step": 6,
+        "end_to_end_seconds": 305.50399592495523,
+        "post_rollout": {
+          "tail_seconds": 52.433336042100564,
+          "pre_sync_seconds": 33.454339599004015,
+          "sync_seconds": 18.97899644309655,
+          "late_logprob_calls": 21,
+          "pre_sync_span_seconds": {
+            "actor_log_probs": 7.077982462244108,
+            "sampler_trainer_agreement": 0.06941734347492456,
+            "training": 26.281798305222765
+          }
+        },
+        "actor_log_probs": {
+          "calls": 64,
+          "seconds": 20.80733233015053
+        },
+        "sampler_trainer_agreement": {
+          "calls": 64,
+          "seconds": 0.20144848292693496
+        },
+        "training": {
+          "calls": 64,
+          "seconds": 76.14458842645399
+        },
+        "weight_sync": {
+          "calls": 1,
+          "seconds": 18.97899644309655
+        },
+        "worker_rpc_per_token_logps": {
+          "calls": 64,
+          "seconds": 20.792784871300682
+        },
+        "worker_rpc_fwd_bwd": {
+          "calls": 64,
+          "seconds": 76.00508908648044
+        },
+        "worker_rpc_update": {
+          "calls": 1,
+          "seconds": 0.12996203103102744
+        },
+        "trainer_worker_per_token_logps": {
+          "calls": 64,
+          "seconds": 20.697358860168606
+        },
+        "trainer_worker_fwd_bwd": {
+          "calls": 64,
+          "seconds": 75.64250318473205
+        },
+        "trainer_worker_update": {
+          "calls": 1,
+          "seconds": 0.12788632698357105
+        }
+      },
+      {
+        "step": 7,
+        "end_to_end_seconds": 294.0380541710183,
+        "post_rollout": {
+          "tail_seconds": 51.27693922794424,
+          "pre_sync_seconds": 32.14915627287701,
+          "sync_seconds": 19.127782955067232,
+          "late_logprob_calls": 20,
+          "pre_sync_span_seconds": {
+            "actor_log_probs": 6.900566446594894,
+            "sampler_trainer_agreement": 0.06634534150362015,
+            "training": 25.157291127135977
+          }
+        },
+        "actor_log_probs": {
+          "calls": 64,
+          "seconds": 20.868831508560106
+        },
+        "sampler_trainer_agreement": {
+          "calls": 64,
+          "seconds": 0.20230392692610621
+        },
+        "training": {
+          "calls": 64,
+          "seconds": 76.39967483724467
+        },
+        "weight_sync": {
+          "calls": 1,
+          "seconds": 19.127782955067232
+        },
+        "worker_rpc_per_token_logps": {
+          "calls": 64,
+          "seconds": 20.85350985545665
+        },
+        "worker_rpc_fwd_bwd": {
+          "calls": 64,
+          "seconds": 76.26108504785225
+        },
+        "worker_rpc_update": {
+          "calls": 1,
+          "seconds": 0.129193555098027
+        },
+        "trainer_worker_per_token_logps": {
+          "calls": 64,
+          "seconds": 20.75761243980378
+        },
+        "trainer_worker_fwd_bwd": {
+          "calls": 64,
+          "seconds": 75.84108427492902
+        },
+        "trainer_worker_update": {
+          "calls": 1,
+          "seconds": 0.127142139011994
+        }
+      },
+      {
+        "step": 8,
+        "end_to_end_seconds": 301.52045062789693,
+        "post_rollout": {
+          "tail_seconds": 54.73674211790785,
+          "pre_sync_seconds": 35.668764360947534,
+          "sync_seconds": 19.067977756960317,
+          "late_logprob_calls": 23,
+          "pre_sync_span_seconds": {
+            "actor_log_probs": 7.586044505937025,
+            "sampler_trainer_agreement": 0.07280651642940938,
+            "training": 27.982471299357712
+          }
+        },
+        "actor_log_probs": {
+          "calls": 64,
+          "seconds": 20.7798135089688
+        },
+        "sampler_trainer_agreement": {
+          "calls": 64,
+          "seconds": 0.20723716891370714
+        },
+        "training": {
+          "calls": 64,
+          "seconds": 76.11782312672585
+        },
+        "weight_sync": {
+          "calls": 1,
+          "seconds": 19.067977756960317
+        },
+        "worker_rpc_per_token_logps": {
+          "calls": 64,
+          "seconds": 20.765053286682814
+        },
+        "worker_rpc_fwd_bwd": {
+          "calls": 64,
+          "seconds": 75.97983247670345
+        },
+        "worker_rpc_update": {
+          "calls": 1,
+          "seconds": 0.1283395269419998
+        },
+        "trainer_worker_per_token_logps": {
+          "calls": 64,
+          "seconds": 20.66567822918296
+        },
+        "trainer_worker_fwd_bwd": {
+          "calls": 64,
+          "seconds": 75.6158225289546
+        },
+        "trainer_worker_update": {
+          "calls": 1,
+          "seconds": 0.12640808708965778
+        }
+      },
+      {
+        "step": 9,
+        "end_to_end_seconds": 307.38005658518523,
+        "post_rollout": {
+          "tail_seconds": 55.81177541217767,
+          "pre_sync_seconds": 36.85993032902479,
+          "sync_seconds": 18.951845083152875,
+          "late_logprob_calls": 24,
+          "pre_sync_span_seconds": {
+            "actor_log_probs": 7.897558005061001,
+            "sampler_trainer_agreement": 0.07636597589589655,
+            "training": 28.857694879174232
+          }
+        },
+        "actor_log_probs": {
+          "calls": 64,
+          "seconds": 20.795264432905242
+        },
+        "sampler_trainer_agreement": {
+          "calls": 64,
+          "seconds": 0.20501312986016273
+        },
+        "training": {
+          "calls": 64,
+          "seconds": 76.1796822110191
+        },
+        "weight_sync": {
+          "calls": 1,
+          "seconds": 18.951845083152875
+        },
+        "worker_rpc_per_token_logps": {
+          "calls": 64,
+          "seconds": 20.778593338793144
+        },
+        "worker_rpc_fwd_bwd": {
+          "calls": 64,
+          "seconds": 76.04170194757171
+        },
+        "worker_rpc_update": {
+          "calls": 1,
+          "seconds": 0.12824424798600376
+        },
+        "trainer_worker_per_token_logps": {
+          "calls": 64,
+          "seconds": 20.677800096338615
+        },
+        "trainer_worker_fwd_bwd": {
+          "calls": 64,
+          "seconds": 75.66349454992451
+        },
+        "trainer_worker_update": {
+          "calls": 1,
+          "seconds": 0.1262377561070025
+        }
+      },
+      {
+        "step": 10,
+        "end_to_end_seconds": 289.0327312289737,
+        "post_rollout": {
+          "tail_seconds": 55.456380505114794,
+          "pre_sync_seconds": 36.43992166011594,
+          "sync_seconds": 19.01645884499885,
+          "late_logprob_calls": 23,
+          "pre_sync_span_seconds": {
+            "actor_log_probs": 7.693569509545341,
+            "sampler_trainer_agreement": 0.07544326316565275,
+            "training": 28.642322219908237
+          }
+        },
+        "actor_log_probs": {
+          "calls": 64,
+          "seconds": 20.848761212080717
+        },
+        "sampler_trainer_agreement": {
+          "calls": 64,
+          "seconds": 0.20739661646075547
+        },
+        "training": {
+          "calls": 64,
+          "seconds": 76.1866741492413
+        },
+        "weight_sync": {
+          "calls": 1,
+          "seconds": 19.01645884499885
+        },
+        "worker_rpc_per_token_logps": {
+          "calls": 64,
+          "seconds": 20.83403973095119
+        },
+        "worker_rpc_fwd_bwd": {
+          "calls": 64,
+          "seconds": 76.04267683182843
+        },
+        "worker_rpc_update": {
+          "calls": 1,
+          "seconds": 0.13419218105264008
+        },
+        "trainer_worker_per_token_logps": {
+          "calls": 64,
+          "seconds": 20.732518414966762
+        },
+        "trainer_worker_fwd_bwd": {
+          "calls": 64,
+          "seconds": 75.65826342185028
+        },
+        "trainer_worker_update": {
+          "calls": 1,
+          "seconds": 0.13224048796109855
+        }
+      },
+      {
+        "step": 11,
+        "end_to_end_seconds": 301.41005577589385,
+        "post_rollout": {
+          "tail_seconds": 54.74682563892566,
+          "pre_sync_seconds": 35.735513981897384,
+          "sync_seconds": 19.011311657028273,
+          "late_logprob_calls": 23,
+          "pre_sync_span_seconds": {
+            "actor_log_probs": 7.600275754462928,
+            "sampler_trainer_agreement": 0.07309040147811174,
+            "training": 28.035156992496923
+          }
+        },
+        "actor_log_probs": {
+          "calls": 64,
+          "seconds": 20.844344961922616
+        },
+        "sampler_trainer_agreement": {
+          "calls": 64,
+          "seconds": 0.20559075567871332
+        },
+        "training": {
+          "calls": 64,
+          "seconds": 76.44014061777852
+        },
+        "weight_sync": {
+          "calls": 1,
+          "seconds": 19.011311657028273
+        },
+        "worker_rpc_per_token_logps": {
+          "calls": 64,
+          "seconds": 20.829378561349586
+        },
+        "worker_rpc_fwd_bwd": {
+          "calls": 64,
+          "seconds": 76.30145845678635
+        },
+        "worker_rpc_update": {
+          "calls": 1,
+          "seconds": 0.1293271689210087
+        },
+        "trainer_worker_per_token_logps": {
+          "calls": 64,
+          "seconds": 20.73240663926117
+        },
+        "trainer_worker_fwd_bwd": {
+          "calls": 64,
+          "seconds": 75.8713051986415
+        },
+        "trainer_worker_update": {
+          "calls": 1,
+          "seconds": 0.12740884884260595
+        }
+      },
+      {
+        "step": 12,
+        "end_to_end_seconds": 282.2318598020356,
+        "post_rollout": {
+          "tail_seconds": 49.484041047049686,
+          "pre_sync_seconds": 30.62536483607255,
+          "sync_seconds": 18.858676210977137,
+          "late_logprob_calls": 19,
+          "pre_sync_span_seconds": {
+            "actor_log_probs": 6.721094801556319,
+            "sampler_trainer_agreement": 0.06451737810857594,
+            "training": 23.815643917769194
+          }
+        },
+        "actor_log_probs": {
+          "calls": 64,
+          "seconds": 21.200711153447628
+        },
+        "sampler_trainer_agreement": {
+          "calls": 64,
+          "seconds": 0.20485826255753636
+        },
+        "training": {
+          "calls": 64,
+          "seconds": 76.13045543571934
+        },
+        "weight_sync": {
+          "calls": 1,
+          "seconds": 18.858676210977137
+        },
+        "worker_rpc_per_token_logps": {
+          "calls": 64,
+          "seconds": 21.185856461059302
+        },
+        "worker_rpc_fwd_bwd": {
+          "calls": 64,
+          "seconds": 75.99470066442154
+        },
+        "worker_rpc_update": {
+          "calls": 1,
+          "seconds": 0.12620890606194735
+        },
+        "trainer_worker_per_token_logps": {
+          "calls": 64,
+          "seconds": 20.698681660927832
+        },
+        "trainer_worker_fwd_bwd": {
+          "calls": 64,
+          "seconds": 75.62143414607272
+        },
+        "trainer_worker_update": {
+          "calls": 1,
+          "seconds": 0.12423700909130275
+        }
+      },
+      {
+        "step": 13,
+        "end_to_end_seconds": 286.5223928310443,
+        "post_rollout": {
+          "tail_seconds": 47.06737118307501,
+          "pre_sync_seconds": 28.139602604089305,
+          "sync_seconds": 18.927768578985706,
+          "late_logprob_calls": 18,
+          "pre_sync_span_seconds": {
+            "actor_log_probs": 6.0033191193360835,
+            "sampler_trainer_agreement": 0.056658356450498104,
+            "training": 22.05787206091918
+          }
+        },
+        "actor_log_probs": {
+          "calls": 64,
+          "seconds": 20.766943029360846
+        },
+        "sampler_trainer_agreement": {
+          "calls": 64,
+          "seconds": 0.2029050923883915
+        },
+        "training": {
+          "calls": 64,
+          "seconds": 76.05823846464045
+        },
+        "weight_sync": {
+          "calls": 1,
+          "seconds": 18.927768578985706
+        },
+        "worker_rpc_per_token_logps": {
+          "calls": 64,
+          "seconds": 20.751548176864162
+        },
+        "worker_rpc_fwd_bwd": {
+          "calls": 64,
+          "seconds": 75.91829563491046
+        },
+        "worker_rpc_update": {
+          "calls": 1,
+          "seconds": 0.13040027092210948
+        },
+        "trainer_worker_per_token_logps": {
+          "calls": 64,
+          "seconds": 20.65190455270931
+        },
+        "trainer_worker_fwd_bwd": {
+          "calls": 64,
+          "seconds": 75.55567464255728
+        },
+        "trainer_worker_update": {
+          "calls": 1,
+          "seconds": 0.12833186006173491
+        }
+      },
+      {
+        "step": 14,
+        "end_to_end_seconds": 272.1521944189444,
+        "post_rollout": {
+          "tail_seconds": 46.10695703397505,
+          "pre_sync_seconds": 27.35309906792827,
+          "sync_seconds": 18.75385796604678,
+          "late_logprob_calls": 17,
+          "pre_sync_span_seconds": {
+            "actor_log_probs": 5.7619656645692885,
+            "sampler_trainer_agreement": 0.05691579380072653,
+            "training": 21.51349827181548
+          }
+        },
+        "actor_log_probs": {
+          "calls": 64,
+          "seconds": 20.73819509590976
+        },
+        "sampler_trainer_agreement": {
+          "calls": 64,
+          "seconds": 0.2018812969326973
+        },
+        "training": {
+          "calls": 64,
+          "seconds": 76.05439432384446
+        },
+        "weight_sync": {
+          "calls": 1,
+          "seconds": 18.75385796604678
+        },
+        "worker_rpc_per_token_logps": {
+          "calls": 64,
+          "seconds": 20.72380135161802
+        },
+        "worker_rpc_fwd_bwd": {
+          "calls": 64,
+          "seconds": 75.91953794611618
+        },
+        "worker_rpc_update": {
+          "calls": 1,
+          "seconds": 0.1253766198642552
+        },
+        "trainer_worker_per_token_logps": {
+          "calls": 64,
+          "seconds": 20.629113320959732
+        },
+        "trainer_worker_fwd_bwd": {
+          "calls": 64,
+          "seconds": 75.56065917876549
+        },
+        "trainer_worker_update": {
+          "calls": 1,
+          "seconds": 0.12351443595252931
+        }
+      },
+      {
+        "step": 15,
+        "end_to_end_seconds": 283.776009012945,
+        "post_rollout": {
+          "tail_seconds": 53.214090744033456,
+          "pre_sync_seconds": 34.31832298520021,
+          "sync_seconds": 18.895767758833244,
+          "late_logprob_calls": 22,
+          "pre_sync_span_seconds": {
+            "actor_log_probs": 7.28044096683152,
+            "sampler_trainer_agreement": 0.06893381592817605,
+            "training": 26.94282072642818
+          }
+        },
+        "actor_log_probs": {
+          "calls": 64,
+          "seconds": 20.785662267822772
+        },
+        "sampler_trainer_agreement": {
+          "calls": 64,
+          "seconds": 0.20114451018162072
+        },
+        "training": {
+          "calls": 64,
+          "seconds": 76.19136013183743
+        },
+        "weight_sync": {
+          "calls": 1,
+          "seconds": 18.895767758833244
+        },
+        "worker_rpc_per_token_logps": {
+          "calls": 64,
+          "seconds": 20.76965890591964
+        },
+        "worker_rpc_fwd_bwd": {
+          "calls": 64,
+          "seconds": 76.05248986696824
+        },
+        "worker_rpc_update": {
+          "calls": 1,
+          "seconds": 0.12908397405408323
+        },
+        "trainer_worker_per_token_logps": {
+          "calls": 64,
+          "seconds": 20.671771438559517
+        },
+        "trainer_worker_fwd_bwd": {
+          "calls": 64,
+          "seconds": 75.66549736703746
+        },
+        "trainer_worker_update": {
+          "calls": 1,
+          "seconds": 0.12715213582850993
+        }
+      },
+      {
+        "step": 16,
+        "end_to_end_seconds": 321.5087493690662,
+        "post_rollout": {
+          "tail_seconds": 57.12026154901832,
+          "pre_sync_seconds": 38.185674340929836,
+          "sync_seconds": 18.934587208088487,
+          "late_logprob_calls": 25,
+          "pre_sync_span_seconds": {
+            "actor_log_probs": 8.235667655710131,
+            "sampler_trainer_agreement": 0.08378491830080748,
+            "training": 29.836580323288217
+          }
+        },
+        "actor_log_probs": {
+          "calls": 64,
+          "seconds": 20.8536578330677
+        },
+        "sampler_trainer_agreement": {
+          "calls": 64,
+          "seconds": 0.20812251442112029
+        },
+        "training": {
+          "calls": 64,
+          "seconds": 76.07286823587492
+        },
+        "weight_sync": {
+          "calls": 1,
+          "seconds": 18.934587208088487
+        },
+        "worker_rpc_per_token_logps": {
+          "calls": 64,
+          "seconds": 20.83705016807653
+        },
+        "worker_rpc_fwd_bwd": {
+          "calls": 64,
+          "seconds": 75.93693680455908
+        },
+        "worker_rpc_update": {
+          "calls": 1,
+          "seconds": 0.12638127501122653
+        },
+        "trainer_worker_per_token_logps": {
+          "calls": 64,
+          "seconds": 20.741402331041172
+        },
+        "trainer_worker_fwd_bwd": {
+          "calls": 64,
+          "seconds": 75.5770191673655
+        },
+        "trainer_worker_update": {
+          "calls": 1,
+          "seconds": 0.12450695806182921
+        }
+      },
+      {
+        "step": 17,
+        "end_to_end_seconds": 280.4380691109691,
+        "post_rollout": {
+          "tail_seconds": 51.45951706008054,
+          "pre_sync_seconds": 32.4068131709937,
+          "sync_seconds": 19.052703889086843,
+          "late_logprob_calls": 21,
+          "pre_sync_span_seconds": {
+            "actor_log_probs": 6.958151470171288,
+            "sampler_trainer_agreement": 0.06791364517994225,
+            "training": 25.355809631524608
+          }
+        },
+        "actor_log_probs": {
+          "calls": 64,
+          "seconds": 20.773573000682518
+        },
+        "sampler_trainer_agreement": {
+          "calls": 64,
+          "seconds": 0.21048849145881832
+        },
+        "training": {
+          "calls": 64,
+          "seconds": 76.08837684895843
+        },
+        "weight_sync": {
+          "calls": 1,
+          "seconds": 19.052703889086843
+        },
+        "worker_rpc_per_token_logps": {
+          "calls": 64,
+          "seconds": 20.758160336641595
+        },
+        "worker_rpc_fwd_bwd": {
+          "calls": 64,
+          "seconds": 75.95141553296708
+        },
+        "worker_rpc_update": {
+          "calls": 1,
+          "seconds": 0.12717541796155274
+        },
+        "trainer_worker_per_token_logps": {
+          "calls": 64,
+          "seconds": 20.66143233794719
+        },
+        "trainer_worker_fwd_bwd": {
+          "calls": 64,
+          "seconds": 75.59186977846548
+        },
+        "trainer_worker_update": {
+          "calls": 1,
+          "seconds": 0.1252670488320291
+        }
+      },
+      {
+        "step": 18,
+        "end_to_end_seconds": 287.48953632311895,
+        "post_rollout": {
+          "tail_seconds": 47.48251781403087,
+          "pre_sync_seconds": 28.59880675491877,
+          "sync_seconds": 18.883711059112102,
+          "late_logprob_calls": 18,
+          "pre_sync_span_seconds": {
+            "actor_log_probs": 6.009185885544866,
+            "sampler_trainer_agreement": 0.05693630990572274,
+            "training": 22.51098753255792
+          }
+        },
+        "actor_log_probs": {
+          "calls": 64,
+          "seconds": 20.724176472984254
+        },
+        "sampler_trainer_agreement": {
+          "calls": 64,
+          "seconds": 0.203588190022856
+        },
+        "training": {
+          "calls": 64,
+          "seconds": 75.98259981535375
+        },
+        "weight_sync": {
+          "calls": 1,
+          "seconds": 18.883711059112102
+        },
+        "worker_rpc_per_token_logps": {
+          "calls": 64,
+          "seconds": 20.709129855269566
+        },
+        "worker_rpc_fwd_bwd": {
+          "calls": 64,
+          "seconds": 75.84717905754223
+        },
+        "worker_rpc_update": {
+          "calls": 1,
+          "seconds": 0.1257344780024141
+        },
+        "trainer_worker_per_token_logps": {
+          "calls": 64,
+          "seconds": 20.61407296685502
+        },
+        "trainer_worker_fwd_bwd": {
+          "calls": 64,
+          "seconds": 75.4867835054174
+        },
+        "trainer_worker_update": {
+          "calls": 1,
+          "seconds": 0.12390426616184413
+        }
+      },
+      {
+        "step": 19,
+        "end_to_end_seconds": 276.3771204308141,
+        "post_rollout": {
+          "tail_seconds": 52.937228312017396,
+          "pre_sync_seconds": 33.78958479198627,
+          "sync_seconds": 19.147643520031124,
+          "late_logprob_calls": 22,
+          "pre_sync_span_seconds": {
+            "actor_log_probs": 7.285564529709518,
+            "sampler_trainer_agreement": 0.06862227176316082,
+            "training": 26.40934624383226
+          }
+        },
+        "actor_log_probs": {
+          "calls": 64,
+          "seconds": 20.79482166445814
+        },
+        "sampler_trainer_agreement": {
+          "calls": 64,
+          "seconds": 0.202462567249313
+        },
+        "training": {
+          "calls": 64,
+          "seconds": 76.09229165897705
+        },
+        "weight_sync": {
+          "calls": 1,
+          "seconds": 19.147643520031124
+        },
+        "worker_rpc_per_token_logps": {
+          "calls": 64,
+          "seconds": 20.780281557468697
+        },
+        "worker_rpc_fwd_bwd": {
+          "calls": 64,
+          "seconds": 75.95723509090021
+        },
+        "worker_rpc_update": {
+          "calls": 1,
+          "seconds": 0.12579251895658672
+        },
+        "trainer_worker_per_token_logps": {
+          "calls": 64,
+          "seconds": 20.683876152615994
+        },
+        "trainer_worker_fwd_bwd": {
+          "calls": 64,
+          "seconds": 75.59254670422524
+        },
+        "trainer_worker_update": {
+          "calls": 1,
+          "seconds": 0.12392251892015338
+        }
+      },
+      {
+        "step": 20,
+        "end_to_end_seconds": 297.1935609090142,
+        "post_rollout": {
+          "tail_seconds": 53.497116326820105,
+          "pre_sync_seconds": 34.41490177391097,
+          "sync_seconds": 19.082214552909136,
+          "late_logprob_calls": 22,
+          "pre_sync_span_seconds": {
+            "actor_log_probs": 7.281649380689487,
+            "sampler_trainer_agreement": 0.06931311800144613,
+            "training": 27.037839794531465
+          }
+        },
+        "actor_log_probs": {
+          "calls": 64,
+          "seconds": 20.828466687817127
+        },
+        "sampler_trainer_agreement": {
+          "calls": 64,
+          "seconds": 0.2020184814464301
+        },
+        "training": {
+          "calls": 64,
+          "seconds": 76.0982139359694
+        },
+        "weight_sync": {
+          "calls": 1,
+          "seconds": 19.082214552909136
+        },
+        "worker_rpc_per_token_logps": {
+          "calls": 64,
+          "seconds": 20.812560530845076
+        },
+        "worker_rpc_fwd_bwd": {
+          "calls": 64,
+          "seconds": 75.96250831056386
+        },
+        "worker_rpc_update": {
+          "calls": 1,
+          "seconds": 0.12634634715504944
+        },
+        "trainer_worker_per_token_logps": {
+          "calls": 64,
+          "seconds": 20.714320733677596
+        },
+        "trainer_worker_fwd_bwd": {
+          "calls": 64,
+          "seconds": 75.59312189999036
+        },
+        "trainer_worker_update": {
+          "calls": 1,
+          "seconds": 0.12445752811618149
+        }
+      }
+    ],
+    "mean_per_step": {
+      "actor_log_probs": {
+        "calls": 64,
+        "seconds": 20.807134982582646
+      },
+      "sampler_trainer_agreement": {
+        "calls": 64,
+        "seconds": 0.20441093026893215
+      },
+      "training": {
+        "calls": 64,
+        "seconds": 76.20454857710283
+      },
+      "weight_sync": {
+        "calls": 1,
+        "seconds": 19.017989480064717
+      },
+      "worker_rpc_per_token_logps": {
+        "calls": 64,
+        "seconds": 20.791884381894487
+      },
+      "worker_rpc_fwd_bwd": {
+        "calls": 64,
+        "seconds": 76.06017335683573
+      },
+      "worker_rpc_update": {
+        "calls": 1,
+        "seconds": 0.1347589902114123
+      },
+      "trainer_worker_per_token_logps": {
+        "calls": 64,
+        "seconds": 20.674556320521514
+      },
+      "trainer_worker_fwd_bwd": {
+        "calls": 64,
+        "seconds": 75.67813967793481
+      },
+      "trainer_worker_update": {
+        "calls": 1,
+        "seconds": 0.1328201921307482
+      }
+    },
+    "mean_post_rollout": {
+      "tail_seconds": 52.02759351755958,
+      "pre_sync_seconds": 33.00960403749487,
+      "sync_seconds": 19.017989480064717,
+      "late_logprob_calls": 21.05,
+      "pre_sync_span_seconds": {
+        "actor_log_probs": 7.02652773684822,
+        "sampler_trainer_agreement": 0.0679915220127441,
+        "training": 25.889516174211167
+      }
+    },
+    "rpc_worker_pairs": {
+      "worker_rpc_per_token_logps": {
+        "calls": 1280,
+        "rpc_seconds_per_step": 20.791884381894487,
+        "worker_seconds_per_step": 20.674556320521514,
+        "outside_worker_seconds_per_step": 0.11732806137297302
+      },
+      "worker_rpc_fwd_bwd": {
+        "calls": 1280,
+        "rpc_seconds_per_step": 76.06017335683573,
+        "worker_seconds_per_step": 75.67813967793481,
+        "outside_worker_seconds_per_step": 0.3820336789009161
+      },
+      "worker_rpc_update": {
+        "calls": 20,
+        "rpc_seconds_per_step": 0.1347589902114123,
+        "worker_seconds_per_step": 0.1328201921307482,
+        "outside_worker_seconds_per_step": 0.001938798080664128
+      }
+    }
+  }
+}

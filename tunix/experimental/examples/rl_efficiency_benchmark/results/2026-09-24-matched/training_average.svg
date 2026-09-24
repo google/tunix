@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1460" height="740" viewBox="0 0 1460 740" role="img" aria-label="Training pipeline · 20-step mean">
+<rect width="100%" height="100%" fill="#FFFFFF"/>
+<style>text{font-family:Arial,Helvetica,sans-serif}</style>
+<text x="42" y="41" font-size="26" fill="#263647" font-weight="bold">Training pipeline · 20-step mean</text>
+<text x="42" y="68" font-size="15" fill="#657487" font-weight="normal">Matched 2+2 TPU · 8 trajectories per microbatch · warmup excluded</text>
+<rect x="1080" y="10" width="338" height="82" rx="12" fill="#EAF6F1" stroke="#B9DDCE"/>
+<text x="1097" y="33" font-size="13" fill="#476858" font-weight="bold">Distributed vs Agentic</text>
+<text x="1097" y="58" font-size="18" fill="#176B50" font-weight="bold">3.34% less E2E time</text>
+<text x="1097" y="80" font-size="14" fill="#176B50" font-weight="normal">+3.46% higher step throughput</text>
+<circle cx="49" cy="102" r="7" fill="#3977B9"/>
+<text x="64" y="107" font-size="14" fill="#263647" font-weight="normal">Rollout collection</text>
+<circle cx="314" cy="102" r="7" fill="#CE7625"/>
+<text x="329" y="107" font-size="14" fill="#263647" font-weight="normal">Training calls</text>
+<circle cx="572" cy="102" r="7" fill="#8D59A7"/>
+<text x="587" y="107" font-size="14" fill="#263647" font-weight="normal">Actor log-prob</text>
+<circle cx="837" cy="102" r="7" fill="#259475"/>
+<text x="852" y="107" font-size="14" fill="#263647" font-weight="normal">Weight sync</text>
+<line x1="42" y1="376" x2="1408" y2="376" stroke="#E2E8EF"/>
+<text x="42" y="165" font-size="20" fill="#263647" font-weight="bold">Agentic</text>
+<text x="947.9663035463808" y="165" font-size="14" fill="#61738A" font-weight="normal" text-anchor="end">Last trajectory 280.78 s</text>
+<text x="42" y="197" font-size="15" fill="#263647" font-weight="normal">Rollout collection</text>
+<line x1="250" y1="192" x2="1130" y2="192" stroke="#E8EEF4" stroke-width="18"/>
+<text x="42" y="245" font-size="15" fill="#263647" font-weight="normal">Training calls</text>
+<line x1="250" y1="240" x2="1130" y2="240" stroke="#E8EEF4" stroke-width="18"/>
+<text x="42" y="293" font-size="15" fill="#263647" font-weight="normal">Actor log-prob</text>
+<line x1="250" y1="288" x2="1130" y2="288" stroke="#E8EEF4" stroke-width="18"/>
+<text x="42" y="341" font-size="15" fill="#263647" font-weight="normal">Weight sync</text>
+<line x1="250" y1="336" x2="1130" y2="336" stroke="#E8EEF4" stroke-width="18"/>
+<rect x="250.00" y="183" width="705.97" height="18" rx="3" fill="#3977B9"/>
+<rect x="750.61" y="231" width="205.36" height="18" rx="3" fill="#CE7625"/>
+<rect x="955.97" y="231" width="8.14" height="18" rx="3" fill="#F1B95C"/>
+<rect x="771.96" y="279" width="184.01" height="18" rx="3" fill="#8D59A7"/>
+<rect x="955.97" y="279" width="5.59" height="18" rx="3" fill="#C5A3D5"/>
+<rect x="966.30" y="327" width="46.35" height="18" rx="3" fill="#259475"/>
+<text x="1200" y="197" font-size="16" fill="#263647" font-weight="bold">280.77 s</text>
+<text x="1200" y="242" font-size="16" fill="#263647" font-weight="bold">84.91 s</text>
+<text x="1200" y="257" font-size="11" fill="#748397" font-weight="normal">81.68 + 3.24</text>
+<text x="1200" y="290" font-size="16" fill="#263647" font-weight="bold">75.41 s</text>
+<text x="1200" y="305" font-size="11" fill="#748397" font-weight="normal">73.18 + 2.22</text>
+<text x="1200" y="341" font-size="16" fill="#263647" font-weight="bold">18.43 s</text>
+<line x1="955.97" y1="176" x2="955.97" y2="352" stroke="#54718E" stroke-width="1.5" stroke-dasharray="4,5"/>
+<circle cx="1012.65" cy="336" r="4.5" fill="#1B765F" stroke="#FFFFFF" stroke-width="1.5"/>
+<text x="1022.646138696628" y="341" font-size="14" fill="#1B765F" font-weight="bold">E2E 303.33 s</text>
+<text x="42" y="415" font-size="20" fill="#263647" font-weight="bold">Distributed</text>
+<text x="848.3268985660028" y="415" font-size="14" fill="#61738A" font-weight="normal" text-anchor="end">Last trajectory 241.15 s</text>
+<text x="42" y="447" font-size="15" fill="#263647" font-weight="normal">Rollout collection</text>
+<line x1="250" y1="442" x2="1130" y2="442" stroke="#E8EEF4" stroke-width="18"/>
+<text x="42" y="495" font-size="15" fill="#263647" font-weight="normal">Training calls</text>
+<line x1="250" y1="490" x2="1130" y2="490" stroke="#E8EEF4" stroke-width="18"/>
+<text x="42" y="543" font-size="15" fill="#263647" font-weight="normal">Actor log-prob</text>
+<line x1="250" y1="538" x2="1130" y2="538" stroke="#E8EEF4" stroke-width="18"/>
+<text x="42" y="591" font-size="15" fill="#263647" font-weight="normal">Weight sync</text>
+<line x1="250" y1="586" x2="1130" y2="586" stroke="#E8EEF4" stroke-width="18"/>
+<rect x="250.00" y="433" width="606.33" height="18" rx="3" fill="#3977B9"/>
+<rect x="729.82" y="481" width="126.51" height="18" rx="3" fill="#CE7625"/>
+<rect x="856.33" y="481" width="65.09" height="18" rx="3" fill="#F1B95C"/>
+<rect x="821.68" y="529" width="34.65" height="18" rx="3" fill="#8D59A7"/>
+<rect x="856.33" y="529" width="17.67" height="18" rx="3" fill="#C5A3D5"/>
+<rect x="939.32" y="577" width="47.82" height="18" rx="3" fill="#259475"/>
+<text x="1200" y="447" font-size="16" fill="#263647" font-weight="bold">241.13 s</text>
+<text x="1200" y="492" font-size="16" fill="#263647" font-weight="bold">76.20 s</text>
+<text x="1200" y="507" font-size="11" fill="#748397" font-weight="normal">50.32 + 25.89</text>
+<text x="1200" y="540" font-size="16" fill="#263647" font-weight="bold">20.81 s</text>
+<text x="1200" y="555" font-size="11" fill="#748397" font-weight="normal">13.78 + 7.03</text>
+<text x="1200" y="591" font-size="16" fill="#263647" font-weight="bold">19.02 s</text>
+<line x1="856.33" y1="426" x2="856.33" y2="602" stroke="#54718E" stroke-width="1.5" stroke-dasharray="4,5"/>
+<circle cx="987.14" cy="586" r="4.5" fill="#1B765F" stroke="#FFFFFF" stroke-width="1.5"/>
+<text x="997.1391336958668" y="591" font-size="14" fill="#1B765F" font-weight="bold">E2E 293.18 s</text>
+<line x1="250.00" y1="637" x2="250.00" y2="643" stroke="#AFC0D0"/>
+<text x="250.0" y="664" font-size="13" fill="#6E7F91" font-weight="normal" text-anchor="middle">0</text>
+<line x1="375.71" y1="637" x2="375.71" y2="643" stroke="#AFC0D0"/>
+<text x="375.7142857142857" y="664" font-size="13" fill="#6E7F91" font-weight="normal" text-anchor="middle">50</text>
+<line x1="501.43" y1="637" x2="501.43" y2="643" stroke="#AFC0D0"/>
+<text x="501.42857142857144" y="664" font-size="13" fill="#6E7F91" font-weight="normal" text-anchor="middle">100</text>
+<line x1="627.14" y1="637" x2="627.14" y2="643" stroke="#AFC0D0"/>
+<text x="627.1428571428571" y="664" font-size="13" fill="#6E7F91" font-weight="normal" text-anchor="middle">150</text>
+<line x1="752.86" y1="637" x2="752.86" y2="643" stroke="#AFC0D0"/>
+<text x="752.8571428571429" y="664" font-size="13" fill="#6E7F91" font-weight="normal" text-anchor="middle">200</text>
+<line x1="878.57" y1="637" x2="878.57" y2="643" stroke="#AFC0D0"/>
+<text x="878.5714285714286" y="664" font-size="13" fill="#6E7F91" font-weight="normal" text-anchor="middle">250</text>
+<line x1="1004.29" y1="637" x2="1004.29" y2="643" stroke="#AFC0D0"/>
+<text x="1004.2857142857143" y="664" font-size="13" fill="#6E7F91" font-weight="normal" text-anchor="middle">300</text>
+<line x1="1130.00" y1="637" x2="1130.00" y2="643" stroke="#AFC0D0"/>
+<text x="1130.0" y="664" font-size="13" fill="#6E7F91" font-weight="normal" text-anchor="middle">350</text>
+<line x1="250" y1="637" x2="1130" y2="637" stroke="#B8C7D5"/>
+<text x="250" y="696" font-size="15" fill="#51647A" font-weight="bold">Seconds from step start</text>
+<text x="250" y="723" font-size="13" fill="#6C7E90" font-weight="normal">Darker call bars run during rollout; lighter bars follow it. Their placement is schematic; see the detailed timeline.</text>
+</svg>

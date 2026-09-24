@@ -1,0 +1,30 @@
+{
+  "agentic": {
+    "measured_steps": 20,
+    "full_step_seconds": 303.3251687997952,
+    "through_last_trajectory_seconds": 280.782052546856,
+    "rollout_collection_seconds": 280.76678999859143,
+    "before_sync_seconds": 4.108555560698743,
+    "weight_sync_seconds": 18.434560692240485,
+    "training_during_rollout_seconds": 81.67627053599571,
+    "training_after_rollout_seconds": 3.235881724150386,
+    "training_total_seconds": 84.9121522601461,
+    "logprob_during_rollout_seconds": 73.1841601466178,
+    "logprob_after_rollout_seconds": 2.223651218449234,
+    "logprob_total_seconds": 75.40781136506703
+  },
+  "dist": {
+    "measured_steps": 20,
+    "full_step_seconds": 293.1803372654016,
+    "through_last_trajectory_seconds": 241.15274374784204,
+    "rollout_collection_seconds": 241.1301915968419,
+    "before_sync_seconds": 33.00960403749484,
+    "weight_sync_seconds": 19.017989480064717,
+    "training_during_rollout_seconds": 50.31503240289167,
+    "training_after_rollout_seconds": 25.889516174211167,
+    "training_total_seconds": 76.20454857710283,
+    "logprob_during_rollout_seconds": 13.780607245734426,
+    "logprob_after_rollout_seconds": 7.0265277368482195,
+    "logprob_total_seconds": 20.807134982582646
+  }
+}

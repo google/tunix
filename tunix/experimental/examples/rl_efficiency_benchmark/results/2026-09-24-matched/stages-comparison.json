@@ -1,0 +1,480 @@
+{
+  "timing_mode": "stages",
+  "run_count": {
+    "agentic": 1,
+    "dist": 1
+  },
+  "parity_checks": {
+    "training_sequence_lengths_match": true,
+    "actor_log_probs_sequence_lengths_match": true,
+    "training_trajectories_per_step_match": true,
+    "training_padded_token_slots_per_step_match": true,
+    "actor_log_probs_trajectories_per_step_match": true,
+    "actor_log_probs_padded_token_slots_per_step_match": true,
+    "training_input_trajectories_per_call_match": true,
+    "actor_log_probs_input_trajectories_per_call_match": true,
+    "training_input_full_tensor_shapes_match": true,
+    "actor_log_probs_input_full_tensor_shapes_match": true,
+    "training_calls_per_step_match": true,
+    "actor_log_probs_calls_per_step_match": true
+  },
+  "step_time_per_run_seconds": {
+    "agentic": [
+      303.3251687997952
+    ],
+    "dist": [
+      293.1803372654016
+    ]
+  },
+  "measurement_notes": [
+    "Trajectory latency ends after the episode, reward computation and environment cleanup complete. Collection spans the first trajectory start through the last trajectory completion; it excludes dispatch before that and result delivery afterward.",
+    "Primary step time is the median across run means, including weight sync.",
+    "Online rollouts are sampled independently; compare token counts, turns and rewards alongside speed.",
+    "API spans are host wall times, include remote compute/waits and may overlap or nest; do not add them.",
+    "Stage mode waits for training state, log-prob results and rollout weights to be ready. Module times include dispatch and RPC; training includes forward/backward and optimizer updates. Only the four large modules are compared; preprocessing and other gaps mean their times need not sum to the full step.",
+    "Stage-mode fences alter overlap: its full-step time describes synchronized execution. Use pipeline mode for end-to-end performance; its unfenced training API times cannot rank device-complete module performance. Do not mix the two modes.",
+    "Repeat both modes in alternating order with warmed caches; a single run does not establish variability."
+  ],
+  "metrics": {
+    "end_to_end_step_time_seconds": {
+      "agentic": 303.3251687997952,
+      "dist": 293.1803372654016,
+      "dist_minus_agentic": -10.144831534393632,
+      "dist_relative_to_agentic_percent": -3.344539978180827,
+      "lower_is_better": true,
+      "interpretation": "dist_faster"
+    },
+    "rollout_collection_time_seconds": {
+      "agentic": 280.76678999859143,
+      "dist": 241.1301915968419,
+      "dist_minus_agentic": -39.636598401749524,
+      "dist_relative_to_agentic_percent": -14.1172673598428,
+      "lower_is_better": true,
+      "interpretation": "dist_faster"
+    },
+    "trajectory_latency_mean_seconds": {
+      "agentic": 181.91994622504336,
+      "dist": 173.13576182215397,
+      "dist_minus_agentic": -8.784184402889395,
+      "dist_relative_to_agentic_percent": -4.828598834359232,
+      "lower_is_better": true,
+      "interpretation": "dist_faster"
+    },
+    "trajectory_latency_p90_seconds": {
+      "agentic": 260.4388761679875,
+      "dist": 235.63572655157185,
+      "dist_minus_agentic": -24.803149616415624,
+      "dist_relative_to_agentic_percent": -9.523597237617153,
+      "lower_is_better": true,
+      "interpretation": "dist_faster"
+    },
+    "rollout_start_delay_seconds": {
+      "agentic": 0.01526254826458171,
+      "dist": 0.022552151000127196,
+      "dist_minus_agentic": 0.0072896027355454866,
+      "dist_relative_to_agentic_percent": 47.76137384909536,
+      "lower_is_better": true,
+      "interpretation": "dist_slower"
+    },
+    "post_rollout_tail_seconds": {
+      "agentic": 22.543116252939218,
+      "dist": 52.02759351755958,
+      "dist_minus_agentic": 29.484477264620363,
+      "dist_relative_to_agentic_percent": 130.79148833638348,
+      "lower_is_better": true,
+      "interpretation": "dist_slower"
+    },
+    "average_output_tokens_per_trajectory": {
+      "agentic": 842.0078125,
+      "dist": 969.35400390625,
+      "dist_minus_agentic": 127.34619140625,
+      "dist_relative_to_agentic_percent": 15.12411043172477,
+      "lower_is_better": null,
+      "interpretation": "different_not_ranked"
+    },
+    "average_prompt_tokens_per_model_call": {
+      "agentic": 1627.7368214860924,
+      "dist": 1598.4947929768073,
+      "dist_minus_agentic": -29.242028509285092,
+      "dist_relative_to_agentic_percent": -1.7964838125728244,
+      "lower_is_better": null,
+      "interpretation": "different_not_ranked"
+    },
+    "average_turns_per_trajectory": {
+      "agentic": 2.24345703125,
+      "dist": 1.94111328125,
+      "dist_minus_agentic": -0.30234375000000013,
+      "dist_relative_to_agentic_percent": -13.4766900274235,
+      "lower_is_better": null,
+      "interpretation": "different_not_ranked"
+    },
+    "average_reward_per_trajectory": {
+      "agentic": 0.54658203125,
+      "dist": 0.47939453125,
+      "dist_minus_agentic": -0.06718750000000007,
+      "dist_relative_to_agentic_percent": -12.29229944613187,
+      "lower_is_better": null,
+      "interpretation": "different_not_ranked"
+    },
+    "model_generation_time_per_trajectory_seconds": {
+      "agentic": 180.0577877484763,
+      "dist": 173.12874133785374,
+      "dist_minus_agentic": -6.929046410622561,
+      "dist_relative_to_agentic_percent": -3.8482347791042426,
+      "lower_is_better": true,
+      "interpretation": "dist_faster"
+    },
+    "environment_time_per_trajectory_seconds": {
+      "agentic": 0.9993456556781666,
+      "dist": 0.0044896945522623355,
+      "dist_minus_agentic": -0.9948559611259042,
+      "dist_relative_to_agentic_percent": -99.55073657180051,
+      "lower_is_better": true,
+      "interpretation": "dist_faster"
+    }
+  },
+  "pipeline_stages_seconds_per_step": {
+    "rollout_collection": {
+      "agentic": 280.76678999859143,
+      "dist": 241.1301915968419,
+      "dist_minus_agentic": -39.636598401749524,
+      "dist_relative_to_agentic_percent": -14.1172673598428,
+      "lower_is_better": true,
+      "interpretation": "dist_faster"
+    },
+    "actor_log_probs": {
+      "agentic": 75.40781136506703,
+      "dist": 20.807134982582646,
+      "dist_minus_agentic": -54.60067638248439,
+      "dist_relative_to_agentic_percent": -72.40718884964001,
+      "lower_is_better": true,
+      "interpretation": "dist_faster"
+    },
+    "training": {
+      "agentic": 84.9121522601461,
+      "dist": 76.20454857710283,
+      "dist_minus_agentic": -8.707603683043274,
+      "dist_relative_to_agentic_percent": -10.254838031152136,
+      "lower_is_better": true,
+      "interpretation": "dist_faster"
+    },
+    "weight_sync": {
+      "agentic": 18.434560692240485,
+      "dist": 19.017989480064717,
+      "dist_minus_agentic": 0.5834287878242321,
+      "dist_relative_to_agentic_percent": 3.164864070071438,
+      "lower_is_better": true,
+      "interpretation": "dist_slower"
+    }
+  },
+  "api_calls": {
+    "actor_log_probs": {
+      "calls_per_step": {
+        "agentic": 64.0,
+        "dist": 64.0,
+        "dist_minus_agentic": 0.0,
+        "dist_relative_to_agentic_percent": 0.0,
+        "lower_is_better": null,
+        "interpretation": "same"
+      },
+      "host_time_per_step_seconds": {
+        "agentic": 75.40781136506703,
+        "dist": 20.807134982582646,
+        "dist_minus_agentic": -54.60067638248439,
+        "dist_relative_to_agentic_percent": -72.40718884964001,
+        "lower_is_better": null,
+        "interpretation": "different_not_ranked"
+      }
+    },
+    "checkpoint_save": {
+      "calls_per_step": {
+        "agentic": null,
+        "dist": 1.0,
+        "dist_minus_agentic": null,
+        "dist_relative_to_agentic_percent": null,
+        "lower_is_better": null,
+        "interpretation": "one_stack_only"
+      },
+      "host_time_per_step_seconds": {
+        "agentic": null,
+        "dist": 0.000939670589286834,
+        "dist_minus_agentic": null,
+        "dist_relative_to_agentic_percent": null,
+        "lower_is_better": null,
+        "interpretation": "one_stack_only"
+      }
+    },
+    "metrics_fetch": {
+      "calls_per_step": {
+        "agentic": null,
+        "dist": 1.0,
+        "dist_minus_agentic": null,
+        "dist_relative_to_agentic_percent": null,
+        "lower_is_better": null,
+        "interpretation": "one_stack_only"
+      },
+      "host_time_per_step_seconds": {
+        "agentic": null,
+        "dist": 0.0009841417078860105,
+        "dist_minus_agentic": null,
+        "dist_relative_to_agentic_percent": null,
+        "lower_is_better": null,
+        "interpretation": "one_stack_only"
+      }
+    },
+    "rollout_dispatch": {
+      "calls_per_step": {
+        "agentic": null,
+        "dist": 64.0,
+        "dist_minus_agentic": null,
+        "dist_relative_to_agentic_percent": null,
+        "lower_is_better": null,
+        "interpretation": "one_stack_only"
+      },
+      "host_time_per_step_seconds": {
+        "agentic": null,
+        "dist": 2.483179505111184,
+        "dist_minus_agentic": null,
+        "dist_relative_to_agentic_percent": null,
+        "lower_is_better": null,
+        "interpretation": "one_stack_only"
+      }
+    },
+    "rollout_poll": {
+      "calls_per_step": {
+        "agentic": null,
+        "dist": 512.95,
+        "dist_minus_agentic": null,
+        "dist_relative_to_agentic_percent": null,
+        "lower_is_better": null,
+        "interpretation": "one_stack_only"
+      },
+      "host_time_per_step_seconds": {
+        "agentic": null,
+        "dist": 290.4717892813031,
+        "dist_minus_agentic": null,
+        "dist_relative_to_agentic_percent": null,
+        "lower_is_better": null,
+        "interpretation": "one_stack_only"
+      }
+    },
+    "sampler_trainer_agreement": {
+      "calls_per_step": {
+        "agentic": 64.0,
+        "dist": 64.0,
+        "dist_minus_agentic": 0.0,
+        "dist_relative_to_agentic_percent": 0.0,
+        "lower_is_better": null,
+        "interpretation": "same"
+      },
+      "host_time_per_step_seconds": {
+        "agentic": 1.3024757239618339,
+        "dist": 0.20441093026893215,
+        "dist_minus_agentic": -1.0980647936929018,
+        "dist_relative_to_agentic_percent": -84.30597004547917,
+        "lower_is_better": null,
+        "interpretation": "different_not_ranked"
+      }
+    },
+    "trainer_worker_fwd_bwd": {
+      "calls_per_step": {
+        "agentic": null,
+        "dist": 64.0,
+        "dist_minus_agentic": null,
+        "dist_relative_to_agentic_percent": null,
+        "lower_is_better": null,
+        "interpretation": "one_stack_only"
+      },
+      "host_time_per_step_seconds": {
+        "agentic": null,
+        "dist": 75.67813967793481,
+        "dist_minus_agentic": null,
+        "dist_relative_to_agentic_percent": null,
+        "lower_is_better": null,
+        "interpretation": "one_stack_only"
+      }
+    },
+    "trainer_worker_per_token_logps": {
+      "calls_per_step": {
+        "agentic": null,
+        "dist": 64.0,
+        "dist_minus_agentic": null,
+        "dist_relative_to_agentic_percent": null,
+        "lower_is_better": null,
+        "interpretation": "one_stack_only"
+      },
+      "host_time_per_step_seconds": {
+        "agentic": null,
+        "dist": 20.674556320521514,
+        "dist_minus_agentic": null,
+        "dist_relative_to_agentic_percent": null,
+        "lower_is_better": null,
+        "interpretation": "one_stack_only"
+      }
+    },
+    "trainer_worker_update": {
+      "calls_per_step": {
+        "agentic": null,
+        "dist": 1.0,
+        "dist_minus_agentic": null,
+        "dist_relative_to_agentic_percent": null,
+        "lower_is_better": null,
+        "interpretation": "one_stack_only"
+      },
+      "host_time_per_step_seconds": {
+        "agentic": null,
+        "dist": 0.1328201921307482,
+        "dist_minus_agentic": null,
+        "dist_relative_to_agentic_percent": null,
+        "lower_is_better": null,
+        "interpretation": "one_stack_only"
+      }
+    },
+    "training": {
+      "calls_per_step": {
+        "agentic": 64.0,
+        "dist": 64.0,
+        "dist_minus_agentic": 0.0,
+        "dist_relative_to_agentic_percent": 0.0,
+        "lower_is_better": null,
+        "interpretation": "same"
+      },
+      "host_time_per_step_seconds": {
+        "agentic": 84.9121522601461,
+        "dist": 76.20454857710283,
+        "dist_minus_agentic": -8.707603683043274,
+        "dist_relative_to_agentic_percent": -10.254838031152136,
+        "lower_is_better": null,
+        "interpretation": "different_not_ranked"
+      }
+    },
+    "weight_sync": {
+      "calls_per_step": {
+        "agentic": 1.0,
+        "dist": 1.0,
+        "dist_minus_agentic": 0.0,
+        "dist_relative_to_agentic_percent": 0.0,
+        "lower_is_better": null,
+        "interpretation": "same"
+      },
+      "host_time_per_step_seconds": {
+        "agentic": 18.434560692240485,
+        "dist": 19.017989480064717,
+        "dist_minus_agentic": 0.5834287878242321,
+        "dist_relative_to_agentic_percent": 3.164864070071438,
+        "lower_is_better": null,
+        "interpretation": "different_not_ranked"
+      }
+    },
+    "worker_rpc_fwd_bwd": {
+      "calls_per_step": {
+        "agentic": null,
+        "dist": 64.0,
+        "dist_minus_agentic": null,
+        "dist_relative_to_agentic_percent": null,
+        "lower_is_better": null,
+        "interpretation": "one_stack_only"
+      },
+      "host_time_per_step_seconds": {
+        "agentic": null,
+        "dist": 76.06017335683573,
+        "dist_minus_agentic": null,
+        "dist_relative_to_agentic_percent": null,
+        "lower_is_better": null,
+        "interpretation": "one_stack_only"
+      }
+    },
+    "worker_rpc_get_metrics": {
+      "calls_per_step": {
+        "agentic": null,
+        "dist": 1.0,
+        "dist_minus_agentic": null,
+        "dist_relative_to_agentic_percent": null,
+        "lower_is_better": null,
+        "interpretation": "one_stack_only"
+      },
+      "host_time_per_step_seconds": {
+        "agentic": null,
+        "dist": 0.0009381730109453201,
+        "dist_minus_agentic": null,
+        "dist_relative_to_agentic_percent": null,
+        "lower_is_better": null,
+        "interpretation": "one_stack_only"
+      }
+    },
+    "worker_rpc_per_token_logps": {
+      "calls_per_step": {
+        "agentic": null,
+        "dist": 64.0,
+        "dist_minus_agentic": null,
+        "dist_relative_to_agentic_percent": null,
+        "lower_is_better": null,
+        "interpretation": "one_stack_only"
+      },
+      "host_time_per_step_seconds": {
+        "agentic": null,
+        "dist": 20.791884381894487,
+        "dist_minus_agentic": null,
+        "dist_relative_to_agentic_percent": null,
+        "lower_is_better": null,
+        "interpretation": "one_stack_only"
+      }
+    },
+    "worker_rpc_save_checkpoint": {
+      "calls_per_step": {
+        "agentic": null,
+        "dist": 1.0,
+        "dist_minus_agentic": null,
+        "dist_relative_to_agentic_percent": null,
+        "lower_is_better": null,
+        "interpretation": "one_stack_only"
+      },
+      "host_time_per_step_seconds": {
+        "agentic": null,
+        "dist": 0.0006120709818787873,
+        "dist_minus_agentic": null,
+        "dist_relative_to_agentic_percent": null,
+        "lower_is_better": null,
+        "interpretation": "one_stack_only"
+      }
+    },
+    "worker_rpc_update": {
+      "calls_per_step": {
+        "agentic": null,
+        "dist": 1.0,
+        "dist_minus_agentic": null,
+        "dist_relative_to_agentic_percent": null,
+        "lower_is_better": null,
+        "interpretation": "one_stack_only"
+      },
+      "host_time_per_step_seconds": {
+        "agentic": null,
+        "dist": 0.1347589902114123,
+        "dist_minus_agentic": null,
+        "dist_relative_to_agentic_percent": null,
+        "lower_is_better": null,
+        "interpretation": "one_stack_only"
+      }
+    }
+  },
+  "trajectory_outcome_percent": {
+    "MAX_CONTEXT_LIMIT_REACHED": {
+      "agentic": 43.4375,
+      "dist": 51.25,
+      "dist_minus_agentic": 7.8125,
+      "dist_relative_to_agentic_percent": 17.985611510791365,
+      "lower_is_better": null,
+      "interpretation": "different_not_ranked"
+    },
+    "SUCCEEDED": {
+      "agentic": 56.5625,
+      "dist": 48.75,
+      "dist_minus_agentic": -7.8125,
+      "dist_relative_to_agentic_percent": -13.812154696132595,
+      "lower_is_better": null,
+      "interpretation": "different_not_ranked"
+    }
+  },
+  "agentic_chip_layout": "split2x2",
+  "match_training_microbatch": true
+}

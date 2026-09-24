@@ -4,6 +4,18 @@ Compare the distributed and ordinary agentic stacks on the same FrozenLake
 training recipe with `google/gemma-4-E2B-it`. The benchmark generates matched
 configurations for both stacks.
 
+## Recorded matched run
+
+The [24 September 2026 benchmark report](results/2026-09-24-matched/report.md)
+contains the English analysis, stage diagrams, and all 20 measured steps. The
+result snapshot includes the aggregate JSON, manifests, and scripts needed to
+regenerate and validate the report. Raw event logs remain in the original run
+directory and are not included in the repository.
+From the result directory, run `python write_report.py` and
+`python validate_results.py` to check the committed snapshot.
+The average chart can be regenerated with `python render_average_chart.py`
+when CairoSVG is installed.
+
 ## Prerequisites
 
 - Run from the repository root in Bash, using the Python environment that can
