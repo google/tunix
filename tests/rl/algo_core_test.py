@@ -1351,6 +1351,58 @@ class GrpoLossSequenceMaskingTest(absltest.TestCase):
         float(aux['sample_mask/kept_frac'].compute()), 1.0, places=5
     )
 
+  def test_truncated_importance_weights_bounds_and_nan_safety(self):
+    log_is_raw = jnp.array([[0.0, 60.0, -jnp.inf, jnp.nan]], dtype=jnp.float32)
+    seq_geomean = jnp.array([1.0], dtype=jnp.float32)
+    seq_valid = jnp.array([1.0], dtype=jnp.float32)
+    sample_mask = jnp.array([1.0], dtype=jnp.float32)
+    weights, oob = algo_core.truncated_importance_weights(
+        log_is_raw,
+        seq_geomean,
+        seq_valid,
+        sample_mask,
+        band_min=0.5,
+        band_max=2.0,
+    )
+    self.assertEqual(float(oob), 0.0)
+    self.assertTrue(bool(jnp.all(jnp.isfinite(weights))))
+    # Squared weight must remain finite in float32 (no overflow at log_is=60).
+    self.assertTrue(bool(jnp.all(jnp.isfinite(jnp.square(weights)))))
+    self.assertAlmostEqual(float(weights[0, 0]), 1.0, places=5)
+    self.assertAlmostEqual(float(weights[0, 1]), float(jnp.exp(20.0)), places=1)
+    self.assertEqual(float(weights[0, 2]), 0.0)
+    self.assertEqual(float(weights[0, 3]), 0.0)
+
+  def test_dropped_sequence_severs_backward_gradient_under_extreme_drift(self):
+    from flax import nnx  # pylint: disable=g-import-not-at-top
+
+    example = self._example(
+        rollout_per_token_logps=jnp.array(
+            [[-1.0, -1.0, -1.0], [-1e9, -1e9, -1e9]], jnp.float32
+        ),
+        old_per_token_logps=jnp.array(
+            [[-1.0, -1.0, -1.0], [-1e9, -1e9, -1e9]], jnp.float32
+        ),
+        ref_per_token_logps=jnp.array(
+            [[-1.0, -1.0, -1.0], [1e9, 1e9, 1e9]], jnp.float32
+        ),
+    )
+    for loss_algo in ('grpo', 'gspo-token'):
+      with self.subTest(loss_algo=loss_algo):
+        config = self._config(
+            loss_algo=loss_algo,
+            beta=0.01,
+            seq_logprob_error_threshold=2.0,
+        )
+        loss_scalar_fn = lambda model, cfg=config: algo_core.grpo_loss_fn(
+            model, example, cfg, pad_id=0, eos_id=-1
+        ).primary_loss.compute()
+        loss_val, grads = nnx.value_and_grad(loss_scalar_fn)(self.model)
+        self.assertTrue(bool(jnp.isfinite(loss_val)))
+        grad_leaves = jax.tree_util.tree_leaves(grads)
+        for g in grad_leaves:
+          self.assertTrue(bool(jnp.all(jnp.isfinite(g))))
+
 
 if __name__ == '__main__':
   absltest.main()

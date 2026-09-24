@@ -185,13 +185,16 @@ def compute_kl_divergence(
   per_token_logps = per_token_logps.astype(jnp.float32)
   if ref_per_token_logps is not None:
     ref_per_token_logps = ref_per_token_logps.astype(jnp.float32)
+    valid = jnp.isfinite(per_token_logps) & jnp.isfinite(ref_per_token_logps)
+    per_token_logps = jnp.where(valid, per_token_logps, 0.0)
+    ref_per_token_logps = jnp.where(valid, ref_per_token_logps, 0.0)
 
   if method == "kl":
     kl = per_token_logps - ref_per_token_logps
   elif method == "mse_kl":
     kl = 0.5 * jnp.square(per_token_logps - ref_per_token_logps)
   elif method == "low_var_kl":
-    diff = ref_per_token_logps - per_token_logps
+    diff = jnp.clip(ref_per_token_logps - per_token_logps, -20.0, 20.0)
     kl = jnp.exp(diff) - diff - 1
   else:
     raise ValueError(
@@ -1313,7 +1316,9 @@ def reduced_loss_agg(
   Returns:
     A scalar reduced loss.
   """
-  per_token_loss = per_token_loss.astype(jnp.float32)
+  per_token_loss = jnp.where(
+      completion_mask > 0, per_token_loss.astype(jnp.float32), 0.0
+  )
 
   if segment_ids is not None:
     return _reduced_loss_agg_segmented(

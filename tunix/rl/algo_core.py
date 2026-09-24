@@ -615,10 +615,11 @@ def truncated_importance_weights(
 
   Two details carry the semantics:
 
-  `nan_to_num` runs on the weight, after the exp, rather than on the log ratio
-  before it. An infinite log ratio becomes a weight of 0 and the token is
-  discarded, where sanitising the log first would make it a weight of 1 and
-  record a catastrophic disagreement as perfect agreement.
+  Non-finite log ratios (`±inf`, `NaN`) are gated to a weight of `0.0` via
+  `jnp.isfinite(log_is_raw)` while finite log ratios are clamped to
+  `[-20.0, 20.0]` before `jnp.exp()` and detached with `stop_gradient`,
+  discarding zero-probability sampler tokens and keeping squared gradients
+  within `float32` range.
 
   The keep-mask multiplies the weights and never the loss mask, so a rejected
   sequence stays in the loss denominator and the loss scales down with the
@@ -645,9 +646,6 @@ def truncated_importance_weights(
     per-token loss before aggregation, and the fraction of valid sequences the
     band rejected.
   """
-  weights = jnp.nan_to_num(
-      jnp.exp(log_is_raw), nan=0.0, posinf=0.0, neginf=0.0
-  )
   keep = jnp.astype(
       (seq_geomean >= band_min) & (seq_geomean <= band_max), jnp.float32
   ) * (seq_valid > 0).astype(jnp.float32)
@@ -665,7 +663,13 @@ def truncated_importance_weights(
     token_keep = jnp.take_along_axis(
         keep, segment_ids.astype(jnp.int32), axis=1
     )
-  return weights * token_keep, oob_ratio
+  safe_log_is = jnp.where(jnp.isfinite(log_is_raw), log_is_raw, 0.0)
+  weights = jnp.where(
+      jnp.isfinite(log_is_raw),
+      jnp.exp(jnp.clip(safe_log_is, -20.0, 20.0)),
+      0.0,
+  )
+  return jax.lax.stop_gradient(weights * token_keep), oob_ratio
 
 
 # |log p_trainer - log q_sampler| above which a token counts as an outlier in
@@ -1190,12 +1194,18 @@ def grpo_loss_fn(
         train_example.old_per_token_logps, jnp.float32
     )
 
-  seq_importance_ratio = jnp.where(
-      completion_mask > 0, per_token_logps - old_per_token_logps, 0.0
+  valid_loss_mask = (
+      (loss_mask > 0)
+      & jnp.isfinite(per_token_logps)
+      & jnp.isfinite(old_per_token_logps)
   )
+  loss_mask = jnp.where(valid_loss_mask, loss_mask, 0.0)
+  masked_logps = jnp.where(valid_loss_mask, per_token_logps, 0.0)
+  masked_old_logps = jnp.where(valid_loss_mask, old_per_token_logps, 0.0)
+  seq_importance_ratio = masked_logps - masked_old_logps
   # Record KL divergence before clipping.
   token_denom = jnp.sum(loss_mask)
-  unreduced_ppo_kl = jnp.sum(-seq_importance_ratio * loss_mask)
+  unreduced_ppo_kl = jnp.sum(-seq_importance_ratio)
 
   seq_importance_ratio = jnp.clip(seq_importance_ratio, max=20.0, min=-20.0)
 
@@ -1203,9 +1213,9 @@ def grpo_loss_fn(
   if loss_algo == "gspo-token":
     if segment_ids is None:
       # Per-row mean log-ratio: each row is exactly one sequence.
-      seq_mean_ratio = (seq_importance_ratio * completion_mask).sum(
-          axis=-1
-      ) / jnp.clip(completion_mask.sum(-1), min=1)
+      seq_mean_ratio = seq_importance_ratio.sum(axis=-1) / jnp.clip(
+          loss_mask.sum(-1), min=1
+      )
       seq_mean_ratio = jnp.expand_dims(seq_mean_ratio, axis=-1)
     else:
       # Per-SEGMENT mean log-ratio: a packed row holds K sequences, so pooling
@@ -1213,10 +1223,12 @@ def grpo_loss_fn(
       # scatter each token its own segment's mean via take_along_axis. Padding
       # (segment 0, mask 0) yields 0 and is masked out downstream.
       per_seg_sum = common.segmented_sum(
-          seq_importance_ratio * completion_mask, segment_ids, num_segments  # pyrefly: ignore[bad-argument-type]
+          seq_importance_ratio,
+          segment_ids,
+          num_segments,  # pyrefly: ignore[bad-argument-type]
       )
       per_seg_count = common.segmented_count(
-          segment_ids, num_segments, mask=completion_mask  # pyrefly: ignore[bad-argument-type]
+          segment_ids, num_segments, mask=loss_mask  # pyrefly: ignore[bad-argument-type]
       )
       per_seg_mean = per_seg_sum / jnp.clip(per_seg_count, min=1.0)
       seq_mean_ratio = jnp.take_along_axis(
@@ -1225,11 +1237,15 @@ def grpo_loss_fn(
     # Sequence-level VALUE, per-token GRADIENT (stop-gradient trick): the
     # `x - stop_grad(x)` term is 0 in value but carries d/dtheta per token.
     seq_importance_ratio = (
-        per_token_logps
-        - jax.lax.stop_gradient(per_token_logps)
+        masked_logps
+        - jax.lax.stop_gradient(masked_logps)
         + jax.lax.stop_gradient(seq_mean_ratio)
     )
-    seq_importance_ratio = jnp.clip(seq_importance_ratio, max=10.0)
+    seq_importance_ratio = jnp.where(
+        loss_mask > 0,
+        jnp.clip(seq_importance_ratio, min=-20.0, max=10.0),
+        0.0,
+    )
 
   is_ratio = jnp.exp(seq_importance_ratio)
 
@@ -1536,7 +1552,8 @@ def grpo_loss_fn(
     # unreduced sums and divides by the policy loss's denominator, so a KL taken
     # over a wider mask would both scale beta up and give a dropped sequence a
     # reference-KL gradient.
-    unreduced_kl = jnp.astype(jnp.sum(kl * loss_mask), jnp.float32)
+    kl = jnp.where(loss_mask > 0, kl, 0.0)
+    unreduced_kl = jnp.astype(jnp.sum(kl), jnp.float32)
     aux["kl"] = sft_utils.WeightedMetric(
         unreduced_kl, token_denom, min_denom=1.0
     )

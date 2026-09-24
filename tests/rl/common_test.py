@@ -1349,6 +1349,37 @@ class ProcessIdsTokenMaskTest(absltest.TestCase):
           segment_positions=np.arange(4)[None],
       )
 
+  def test_compute_kl_divergence_low_var_kl_extreme_diff_grad(self):
+    per_token_logps = jnp.array(
+        [-100.0, -50.0, -1.0, 50.0, -jnp.inf], dtype=jnp.float32
+    )
+    ref_per_token_logps = jnp.array(
+        [0.0, 0.0, -1.0, 0.0, -jnp.inf], dtype=jnp.float32
+    )
+    loss_fn = lambda lp: jnp.sum(
+        common.compute_kl_divergence(lp, ref_per_token_logps, method="low_var_kl")
+    )
+    val, grad = jax.value_and_grad(loss_fn)(per_token_logps)
+    self.assertTrue(bool(jnp.isfinite(val)))
+    self.assertTrue(bool(jnp.all(jnp.isfinite(grad))))
+    self.assertTrue(bool(jnp.all(jnp.isfinite(jnp.square(grad)))))
+    # Outside [-20, 20], clipped_diff saturates and gradient goes to 0 (never +1).
+    self.assertEqual(float(grad[0]), 0.0)
+    self.assertEqual(float(grad[1]), 0.0)
+    self.assertEqual(float(grad[3]), 0.0)
+    self.assertEqual(float(grad[4]), 0.0)
+
+    for method in ("kl", "mse_kl"):
+      with self.subTest(method=method):
+        m_val, m_grad = jax.value_and_grad(
+            lambda lp, m=method: jnp.sum(
+                common.compute_kl_divergence(lp, ref_per_token_logps, method=m)
+            )
+        )(per_token_logps)
+        self.assertTrue(bool(jnp.isfinite(m_val)))
+        self.assertTrue(bool(jnp.all(jnp.isfinite(m_grad))))
+        self.assertEqual(float(m_grad[4]), 0.0)
+
 
 if __name__ == "__main__":
   absltest.main()
