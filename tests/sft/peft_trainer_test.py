@@ -828,16 +828,9 @@ class PeftTrainerTest(parameterized.TestCase):
           loss=jnp.array(1.0),
           step=0,
           additional_metrics={
-              'metric': (weighted, peft_trainer._weighted_metric_mean),
+              'metric': (weighted, utils.weighted_metric_mean),
           },
       )
-
-  def test_weighted_metric_mean_handles_empty_and_rejects_mixed_values(self):
-    self.assertEqual(peft_trainer._weighted_metric_mean([]), 0.0)
-
-    weighted = utils.WeightedMetric(jnp.array(1.0), jnp.array(1.0))
-    with self.assertRaisesRegex(TypeError, 'must not include scalar values'):
-      peft_trainer._weighted_metric_mean([weighted, jnp.array(1.0)])
 
   def test_write_metrics_handles_reducer_edge_cases(self):
     model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
@@ -861,40 +854,35 @@ class PeftTrainerTest(parameterized.TestCase):
     def count_values(values):
       return len(values)
 
+    class ForeignWeightedMetric:
+
+      def __init__(self, unreduced_sum: float, denominator: float):
+        self.unreduced_sum = jnp.array(unreduced_sum)
+        self.denominator = jnp.array(denominator)
+        self.eps = None
+        self.min_denom = None
+
+      def compute(self):
+        return self.unreduced_sum / self.denominator
+
+    foreign = ForeignWeightedMetric(6.0, 2.0)
     edge_buffer = peft_trainer.MetricsBuffer(
         step=0,
-        losses=[jnp.array(1.0)],
+        losses=[weighted, foreign],
         additional_metrics={
             'empty': ([], count_values),
-            'fallback': ([weighted, weighted], np.mean),
+            'fallback': ([weighted, foreign], np.mean),
+            'weighted': ([weighted, foreign], utils.weighted_metric_mean),
         },
     )
     with mock.patch.object(trainer, '_log_metrics') as log_metrics:
       trainer._write_metrics(edge_buffer)
 
+    self.assertEqual(log_metrics.call_args.kwargs['loss'], 2.0)
     additional_metrics = log_metrics.call_args.kwargs['additional_metrics']
     self.assertEqual(additional_metrics['empty'], 0)
-    self.assertEqual(additional_metrics['fallback'], 1.0)
-
-  def test_weighted_metric_mean_preserves_denominator_bounds(self):
-    metrics = [
-        utils.WeightedMetric(
-            jnp.array(3.0), jnp.array(0.0), eps=1.0, min_denom=2.0
-        ),
-        utils.WeightedMetric(
-            jnp.array(1.0), jnp.array(0.0), eps=1.0, min_denom=2.0
-        ),
-    ]
-    self.assertEqual(peft_trainer._weighted_metric_mean(metrics), 2.0)
-
-    inconsistent = [
-        metrics[0],
-        utils.WeightedMetric(
-            jnp.array(1.0), jnp.array(0.0), eps=1.0, min_denom=3.0
-        ),
-    ]
-    with self.assertRaisesRegex(ValueError, 'consistent denominator bounds'):
-      peft_trainer._weighted_metric_mean(inconsistent)
+    self.assertEqual(additional_metrics['fallback'], 2.0)
+    self.assertEqual(additional_metrics['weighted'], 2.0)
 
   def test_loss_output_gradient_scaling(self):
     # _train_step accumulates grad(unreduced_sum) with the metric's denominator
