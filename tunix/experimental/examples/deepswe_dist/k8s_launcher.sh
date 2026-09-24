@@ -524,18 +524,14 @@ stop_rollout() {
     kubectl get workload -n "${K8S_NAMESPACE}" -o name 2>/dev/null | grep -E "jobset-${ROLLOUT_ID}-[a-f0-9]+" | xargs -r echo kubectl delete -n "${K8S_NAMESPACE}"
     if [[ ${replicas} -gt 1 ]]; then
       echo "kubectl delete jobset $(seq -f "${ROLLOUT_ID}-%g" 0 $((replicas - 1))) -n ${K8S_NAMESPACE}"
-      for ((i=0; i<replicas; i++)); do
-        kubectl get workload -n "${K8S_NAMESPACE}" -o name 2>/dev/null | grep -E "jobset-${ROLLOUT_ID}-${i}-[a-f0-9]+" | xargs -r echo kubectl delete -n "${K8S_NAMESPACE}"
-      done
+      kubectl get workload -n "${K8S_NAMESPACE}" -o name 2>/dev/null | grep -E "jobset-${ROLLOUT_ID}-[0-9]+-[a-f0-9]+" | xargs -r echo kubectl delete -n "${K8S_NAMESPACE}"
     fi
   else
     kubectl delete jobset "${ROLLOUT_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found=true
-    kubectl get workload -n "${K8S_NAMESPACE}" -o name 2>/dev/null | grep -E "jobset-${ROLLOUT_ID}-[a-f0-9]+" | xargs -r kubectl delete -n "${K8S_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
+    kubectl get workload -n "${K8S_NAMESPACE}" -o name 2>/dev/null | grep -E "jobset-${ROLLOUT_ID}-[a-f0-9]+" | xargs -r kubectl delete -n "${K8S_NAMESPACE}" --ignore-not-found=true --wait=false 2>/dev/null || true
     if [[ ${replicas} -gt 1 ]]; then
       kubectl delete jobset $(seq -f "${ROLLOUT_ID}-%g" 0 $((replicas - 1))) -n "${K8S_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
-      for ((i=0; i<replicas; i++)); do
-        kubectl get workload -n "${K8S_NAMESPACE}" -o name 2>/dev/null | grep -E "jobset-${ROLLOUT_ID}-${i}-[a-f0-9]+" | xargs -r kubectl delete -n "${K8S_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
-      done
+      kubectl get workload -n "${K8S_NAMESPACE}" -o name 2>/dev/null | grep -E "jobset-${ROLLOUT_ID}-[0-9]+-[a-f0-9]+" | xargs -r kubectl delete -n "${K8S_NAMESPACE}" --ignore-not-found=true --wait=false 2>/dev/null || true
     fi
   fi
 }
@@ -734,7 +730,7 @@ if cfg:
         has_topo=$(kubectl get workload "${wl_name}" -n "${K8S_NAMESPACE}" -o jsonpath='{.spec.podSets[0].template.metadata.annotations.cloud\.google\.com/gke-tpu-slice-topology}' 2>/dev/null || true)
         if [[ -z "${has_topo}" ]]; then
           echo "Recycling workload ${wl_name} for ${replica_id} to apply dynamic slicing..."
-          kubectl delete workload "${wl_name}" -n "${K8S_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
+          kubectl delete workload "${wl_name}" -n "${K8S_NAMESPACE}" --ignore-not-found=true --wait=false 2>/dev/null || true
         fi
       fi
     done
