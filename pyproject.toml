@@ -18,7 +18,7 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-  "datasets",
+  "datasets>=3.0.0",
   "flax>=0.12.5",
   "fsspec",  # notebook dependency
   "google-metrax>=0.2.3",
@@ -65,10 +65,57 @@ docs = [
 prod = [
 ]
 dev = [
-  # Manully install vLLM & tpu-inferece, which depends on jax[tpu]==0.7.2
+  # Install pinned vLLM & tpu-inference via `bash scripts/install_tunix_vllm_requirement.sh`.
+]
+tpu = [
+  "aqtp",
+  "array-record",
+  "drjax>=0.2.1",
+  "gcsfs",
+  "kagglesdk",
+  "math_verify",
+  "tensorflow",
+  "tokamax>=0.0.4",
+  "torchax",
+]
+maxtext = [
+  # Install pinned MaxText & maxtext-vllm-adapter git packages via
+  # `uv pip install --no-deps --group maxtext-git`.
+  "aqtp",
+  "cheroot",
+  "cloud-accelerator-diagnostics",
+  "cloud-tpu-diagnostics",
+  "drjax>=0.2.1",
+  "einshape",
+  "google-cloud-mldiagnostics>=0.5.10",
+  "google-cloud-monitoring",
+  "jsonlines",
+  "ml-collections",
+  "ml-goodput-measurement",
+  "optax",
+  "pathwaysutils",
+  "tensorboard-plugin-profile",
+  "tensorboardx",
+  "tiktoken",
+  "tokamax>=0.0.4",
+  "typeguard",
+  "xprof",
+]
+deepswe = [
+  # Install pinned R2E-Gym & Agent Sandbox git packages via
+  # `bash examples/deepswe/install_deepswe.sh`.
+  "gym",
+  "k8s-agent-sandbox>=0.5.1",
+  "kubernetes",
+  "openhands-agent-server>=1.44.1",
+  "openhands-sdk>=1.44.1",
+  "openhands-tools>=1.44.1",
+  "openhands-workspace>=1.44.1",
+  "swebench==3.0.2",
 ]
 test = [
   "pytest",
+  "pytest-asyncio",
   "pytest-xdist",
   "gcsfs",
   "chex",
@@ -91,8 +138,37 @@ experimental = [
   "cloudpickle",  # serialization envelope for the remote-execution actor protocol
   "grpcio",  # transport for cross-process worker execution
   "grpcio-tools",
+  "protobuf>=7.35.1",  # required for gRPC discovery_service_pb2 runtime discovery
   "pydantic",  # data modeling and serialization for agent trajectories
   "simple_parsing",  # Argument parsing for CLI
+]
+
+# Non-PyPI git-pinned integration groups (PEP 735, installed via `uv pip install --group <name>`).
+# Declared in `[dependency-groups]` rather than `[project.optional-dependencies]` so PyPI wheel
+# builds (`python -m build`) remain compliant with PEP 440 / PyPI direct-URL restrictions.
+# Note: `vllm` and `tpu-inference` commits are pinned in a single place
+# (`scripts/install_tunix_vllm_requirement.sh`) so Layer 1 of `Dockerfile` stays cached
+# across routine edits to `pyproject.toml`.
+[dependency-groups]
+maxtext-git = [
+  "maxtext @ git+https://github.com/AI-Hypercomputer/maxtext.git@63d5db085447274e9cd8769334866fe5268459a9",
+  "maxtext-vllm-adapter @ git+https://github.com/AI-Hypercomputer/maxtext.git@63d5db085447274e9cd8769334866fe5268459a9#subdirectory=src/maxtext/integration/vllm",
+]
+deepswe-git = [
+  "agentic-sandbox-client @ git+https://github.com/kubernetes-sigs/agent-sandbox.git#subdirectory=clients/python/agentic-sandbox-client",
+  "agent-sandbox-rl @ git+https://github.com/kubernetes-sigs/agent-sandbox.git#subdirectory=examples/agent-sandbox-rl",
+  "r2e-gym @ git+https://github.com/r2e-gym/r2e-gym.git@0d94c4eb9431cd195c55a7ea3abd54006c9a1735",
+]
+
+[tool.uv]
+# Resolver overrides applied automatically by `uv` when resolving inside this repository:
+# Prevents transitive dependencies (e.g., `tensorflow`, `google-cloud-aiplatform`,
+# `tpu-inference`) from downgrading `flax` or `protobuf`, or upgrading `numpy` past
+# the `==2.3.5` bound required by Numba.
+override-dependencies = [
+  "flax>=0.12.5",
+  "numpy==2.3.5",
+  "protobuf>=7.35.1",
 ]
 
 [project.urls]

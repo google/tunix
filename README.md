@@ -88,20 +88,39 @@ tuning workflows on top of the XLA and JAX infrastructure. See [Design Overview]
 **Installation:** Jump to [Installation](https://tunix.readthedocs.io/en/latest/quickstart.html#installation) to install Tunix and run your first training
 job.
 
-For TPU users integrating `vllm` and `tpu-inference`, there are two supported
-setup paths:
-
-- Docker image builds use [Dockerfile](https://github.com/google/tunix/blob/main/Dockerfile) and install
-    the pinned dependencies directly from `requirements/requirements.txt` and
-    `requirements/special_requirements.txt`.
-- Local TPU VM or developer-machine installs can use
-    [scripts/install_tunix_vllm_requirement.sh](https://github.com/google/tunix/blob/main/scripts/install_tunix_vllm_requirement.sh),
-    which installs the same requirement files outside Docker.
-
-These are separate entry points. If you are building the Docker image, you do
-not need to run the install script inside the container build.
-
 **Examples:** To get started, we have a number of detailed examples and tutorials. You can see [Quick Start](https://tunix.readthedocs.io/en/latest/quickstart.html) for a great set of starting examples and [Examples and Guides](https://tunix.readthedocs.io/en/latest/examples.html) for a comprehensive list of all the notebooks and examples we have.
+
+## Dependency Management
+
+Tunix manages all Python dependencies declaratively in
+[pyproject.toml](https://github.com/google/tunix/blob/main/pyproject.toml)
+using standard Python packaging specifications (PEP 621 and PEP 735) and `uv`:
+
+-   **Core Dependencies (`[project.dependencies]`)**: Foundational JAX, Flax,
+    Orbax, Qwix, and Hugging Face packages installed with `google-tunix`.
+-   **Optional PyPI Extras (`[project.optional-dependencies]`, PEP 621)**:
+    Workload-scoped PyPI extras including `tpu`, `maxtext`, `test`, `cli`,
+    `experimental`, `frozenlake`, `deepswe`, and `docs`. Keeping extras limited
+    to PyPI specifiers ensures `python -m build` produces standard
+    PyPI-compliant wheels.
+-   **Git-Pinned Integration Groups (`[dependency-groups]`, PEP 735)**:
+    External git-pinned repositories and monorepo subdirectories (`maxtext-git`
+    and `deepswe-git`) installed via `uv pip install --group <name>` without
+    polluting PyPI wheel metadata.
+-   **Resolver Overrides (`[tool.uv] override-dependencies`)**: Enforces
+    cross-stack version constraints (`flax>=0.12.5`, `numpy==2.3.5`, and
+    `protobuf>=7.35.1`) automatically whenever `uv` resolves dependencies in the
+    repository.
+
+For TPU environments integrating `vllm` and `tpu-inference`, both
+[Dockerfile](https://github.com/google/tunix/blob/main/Dockerfile) and local
+TPU VM setups use
+[scripts/install_tunix_vllm_requirement.sh](https://github.com/google/tunix/blob/main/scripts/install_tunix_vllm_requirement.sh)
+as the single source of truth for `VLLM_COMMIT` and `TPU_INFERENCE_COMMIT` (so
+routine edits to `pyproject.toml` never invalidate the compiled vLLM Docker
+base layer). See
+[scripts/README.md](https://github.com/google/tunix/blob/main/scripts/README.md)
+for details on Docker layer caching and CI workflow orchestration.
 
 
 ## Supported Models

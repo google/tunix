@@ -19,6 +19,12 @@ name: TPU Tests
 
 on:
   workflow_call:
+    inputs:
+      dev_image:
+        description: 'Docker image URI for run_dev (defaults to us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/mlperf:latest)'
+        required: false
+        type: string
+        default: 'us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/mlperf:latest'
     secrets:
       HF_TOKEN:
         description: 'HuggingFace token for model downloads'
@@ -32,11 +38,16 @@ concurrency:
   group: ${{ github.event_name == 'pull_request' && format('{0}-pr-{1}', github.workflow, github.event.pull_request.number) || github.event_name == 'schedule' && format('{0}-schedule', github.workflow) || github.run_id }}
   cancel-in-progress: true
 
+# Pin cache roots inside the container (`/root/.cache/...`) so `actions/cache`
+# restores and persists data at the exact paths read by `huggingface_hub`,
+# `kagglehub`, `tensorflow_datasets`, `jax`, and `pip` without baking any
+# weights or datasets into the production `tunix/mlperf` Docker image.
 env:
-  # TODO(timsemenov): Cache or mirror Hugging Face model downloads across runs
-  # (e.g., via a GCS bucket or runner-local persistent cache) to avoid cross-run
-  # HF Hub CDN throughput variance without exceeding GitHub's 10 GB cache quota.
+  # TODO(tunix-dev): Mirror large (>7B) Hugging Face models via a regional GCS
+  # bucket or runner-local persistent disk to avoid cross-run CDN variance
+  # without exceeding GitHub's 10 GB repository cache quota.
   HF_HOME: /root/.cache/huggingface
+  KAGGLEHUB_CACHE: /root/.cache/kagglehub
   HF_HUB_ENABLE_HF_TRANSFER: "1"
   HF_XET_HIGH_PERFORMANCE: "1"
   JAX_COMPILATION_CACHE_DIR: /root/.cache/jax_compilation_cache
@@ -104,7 +115,7 @@ jobs:
         uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: /root/.cache/pip
-          key: pip-core-v5-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements*.txt', 'constraints*.txt') }}
+          key: pip-core-v5-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'scripts/install_*.sh') }}
           restore-keys: |
             pip-core-v5-${{ runner.os }}-
 
@@ -112,10 +123,25 @@ jobs:
         uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: /root/.cache/jax_compilation_cache
-          key: jax-cache-core-v4-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements*.txt') }}
+          key: jax-cache-core-v4-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'scripts/install_*.sh') }}
           restore-keys: |
             jax-cache-core-v4-${{ runner.os }}-
             jax-cache-core-v3-${{ runner.os }}-
+
+      # Restore Hugging Face weights from the shared `hf-maxtext-dev-v3` cache so
+      # `sglang_jax_sampler_test.py` and `sglang_jax_lora_test.py` do not
+      # re-download `Llama-3.2-1B-Instruct` and `Qwen2.5-0.5B-Instruct` on every run.
+      - name: Cache Hugging Face models
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: |
+            /root/.cache/huggingface
+            !/root/.cache/huggingface/xet
+            !/root/.cache/huggingface/hub/models--Qwen--Qwen2.5-7B*
+          key: hf-core-v3-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}
+          restore-keys: |
+            hf-core-v3-${{ runner.os }}-
+            hf-maxtext-dev-v3-${{ runner.os }}-
 
       - name: Install tunix dependencies
         run: |
@@ -207,28 +233,28 @@ jobs:
           python3 -m pip list | egrep 'jax|flax|libtpu'
 
           cd tunix
-          python3 tests/generate/sglang_jax_sampler_test.py
-          python3 tests/generate/sglang_jax_lora_test.py
+          python3 -m pytest tests/generate/sglang_jax_sampler_test.py tests/generate/sglang_jax_lora_test.py -v --tb=short
           GITHUB_JOB=run_sglang python3 -m pytest tests/rl/rl_cluster_test.py -v --tb=short -k "sglang_jax"
+          rm -rf /root/.cache/huggingface/xet || true
 
   # ---------------------------------------------------------------------------
   # Job: run_dev
   # Purpose: TPU training/PEFT integration, live vLLM sampler tests, and the
   #          distributed RL smoke test.
   # Hardware: Live TPU v6e-8 accelerator (1 slice).
-  # Image:    vLLM TPU nightly.
+  # Image:    `us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/mlperf:<sha>`
+  #           (resolved/built by `build_tunix_docker` from `Dockerfile` with Tunix,
+  #           vLLM, TPU-Inference, TFDS, and MaxText pre-installed in `/opt/venv`).
   # Secrets:  Requires HF_TOKEN and KAGGLE_* secrets (skipped on external fork PRs).
   # Scope:    End-to-end GRPO RL demo training, vLLM Sampler generation / LoRA
   #           mapping / checkpoint loading, SFT PEFT 2x2 mesh integration, then
   #           the Qwen3-0.6B GSM8K distributed RL smoke test with Raiden sync.
   #
   # ORDERING CONSTRAINTS (within run_dev):
-  #   1. `GRPO Integration Test` & `Run vllm tests` MUST run BEFORE `Run tunix SFT integration tests`.
-  #      They require the container's pinned `numpy==2.3.5` (for Numba / tpu-inference).
-  #   2. `Run tunix SFT integration tests` MUST run AFTER `Run vllm tests` and BEFORE
-  #      the Distributed RL smoke stage. It executes `pip install tensorflow` (needed
-  #      for TFDS dataset loading), which upgrades NumPy past 2.3.5 and would break
-  #      vLLM/Numba if run earlier.
+  #   1. `GRPO Integration Test` & `Run vllm tests` run first against `/opt/venv`
+  #      where `numpy==2.3.5` is locked after `tensorflow` and `maxtext`.
+  #   2. `Run tunix SFT integration tests` runs before the Distributed RL smoke
+  #      stage using the pre-installed `tensorflow` and `kagglehub` stack.
   #   3. Distributed RL Smoke Test (`run_dist_smoke` steps) MUST run LAST in this job.
   #      It installs the native Raiden weight-sync wheel (`tpu_sync`) and spawns
   #      multi-process trainer/rollout servers across all 8 TPU chips; running it last
@@ -243,7 +269,7 @@ jobs:
     # is ~20.9m, so 60m provides ~3x headroom while catching hung processes.
     timeout-minutes: 60
     container:
-      image: vllm/vllm-tpu:nightly-20260911-4b80060-51da0ca # zizmor: ignore[unpinned-images]
+      image: ${{ inputs.dev_image || 'us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/mlperf:latest' }} # zizmor: ignore[unpinned-images]
       options: --privileged
       env:
         CLOUD_TPU_ACCELERATOR: v6e-8
@@ -255,28 +281,11 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Install zstd for fast cache compression
-        run: |
-          which zstd || (apt-get update -qq && apt-get install -y -qq --no-install-recommends zstd)
-          rm -f /etc/pip.conf /root/.config/pip/pip.conf /opt/venv/pip.conf ~/.pip/pip.conf || true
-          mkdir -p /root/.cache/pip
-          python3 -m pip config --global set global.cache-dir /root/.cache/pip
-
-      # Cache pip wheels. Without this the job re-downloads its whole dependency
-      # tree while holding a v6e-8 host.
-      - name: Cache pip
-        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
-        with:
-          path: /root/.cache/pip
-          key: pip-dev-v5-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements*.txt', 'constraints*.txt') }}
-          restore-keys: |
-            pip-dev-v5-${{ runner.os }}-
-
       - name: Cache TFDS datasets
         uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: /root/.cache/tensorflow_datasets
-          key: tfds-dev-v4-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements*.txt') }}
+          key: tfds-dev-v4-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'scripts/install_*.sh') }}
           restore-keys: |
             tfds-dev-v4-${{ runner.os }}-
             tfds-dev-v3-${{ runner.os }}-
@@ -285,24 +294,45 @@ jobs:
         uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: /root/.cache/jax_compilation_cache
-          key: jax-cache-dev-v4-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements*.txt') }}
+          key: jax-cache-dev-v4-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'scripts/install_*.sh') }}
           restore-keys: |
             jax-cache-dev-v4-${{ runner.os }}-
             jax-cache-dev-v3-${{ runner.os }}-
 
-      # Shared by every stage below; previously paid once per job.
+      # Cache model weights (`Qwen2.5-0.5B` for GRPO, `gemma2-2b-it` in Kagglehub
+      # for SFT, `Qwen3-0.6B` in `ARTIFACT_ROOT/models`) and the pre-converted
+      # MaxText Orbax checkpoint (`ARTIFACT_ROOT/maxtext_models`, which skips
+      # `convert_hf_to_maxtext` on warm runs) without baking any data into the
+      # `tunix/mlperf` Docker image.
+      #
+      # Why `xet/` and `models--Qwen--Qwen2.5-7B*` are excluded:
+      #   - `HF_XET_HIGH_PERFORMANCE=1` streams `Qwen2.5-7B` from the Hugging Face
+      #     Xet CDN in ~7s, whereas archiving and restoring its 15 GB of uncompressible
+      #     bfloat16 safetensors via `actions/cache` adds ~50s of tar/zstd restore
+      #     overhead and consumes ~6.2 GB of GitHub's 10 GB repository cache limit.
+      #   - `xet/` holds temporary staging chunks written alongside `hub/`.
+      - name: Cache Hugging Face models and MaxText checkpoints
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: |
+            /root/.cache/huggingface
+            !/root/.cache/huggingface/xet
+            !/root/.cache/huggingface/hub/models--Qwen--Qwen2.5-7B*
+            /root/.cache/kagglehub
+            /root/.cache/tunix_artifacts/qwen3_dist_gsm8k/models
+            /root/.cache/tunix_artifacts/qwen3_dist_gsm8k/maxtext_models
+          key: hf-maxtext-dev-v3-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}
+          restore-keys: |
+            hf-maxtext-dev-v3-${{ runner.os }}-
+
+      # `tunix/mlperf` already has all runtime, vLLM, TPU-Inference, and MaxText
+      # dependencies pre-installed and verified in `/opt/venv`. Running
+      # `uv pip install -e ".[tpu,cli,test,experimental]"` links the current
+      # checkout in ~1s when all dependencies are already satisfied, while
+      # automatically installing any new dependency if run against an older image.
       - name: Setup Tunix , tpu-inference and dependencies
         run: |
-          unset PIP_NO_CACHE_DIR
-          export PIP_NO_BUILD_ISOLATION=1
-          echo "Current directory:"
-          pwd
-
-          # Install Tunix with dev and test dependencies without overwriting the vLLM dependencies.
-          python3 -m pip install -e .[test]
-          python3 -m pip install --no-deps --no-build-isolation -r requirements/special_requirements.txt
-          # tpu-inference/Numba needs NumPy 2.3 or less.
-          python3 -m pip install numpy==2.3.5 --force-reinstall
+          uv pip install -e ".[tpu,cli,test,experimental]"
 
       - name: GRPO Integration Test (Llama3 / Qwen2 multi-device RL training demo)
         env:
@@ -318,36 +348,24 @@ jobs:
             --train-micro-batch-size=2 \
             --rollout-engine=vanilla
 
-      # --- vLLM stage (formerly the standalone `run_vllm` job) ----------------
-      # [ORDERING CONSTRAINT]: Must run BEFORE `Run tunix SFT integration tests`.
-      # SFT installs tensorflow, which pulls NumPy past the ==2.3.5 pin that
-      # tpu-inference/Numba requires. Keeping vLLM above SFT preserves the freshly
-      # pinned environment it had as a standalone job.
+      # Combine `VllmSamplerConfigTest` and `vllm_sampler_qwen_test.py` into a
+      # single `pytest` invocation to avoid paying Python/JAX/vLLM interpreter
+      # startup and PJRT TPU initialization overhead twice.
       - name: Run vllm tests
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           unset JAX_PLATFORMS
-          python3 -m pytest tests/generate/vllm_sampler_qwen_test.py -v --tb=short
-          python3 -m pytest tests/generate/vllm_sampler_test.py::VllmSamplerConfigTest -v --tb=short
+          python3 -m pytest tests/generate/vllm_sampler_test.py::VllmSamplerConfigTest tests/generate/vllm_sampler_qwen_test.py -v --tb=short
           python3 -m pytest tests/generate/vllm_sampler_test.py::VllmSamplerTest -k "batch_mode and not data_parallel or sampling_kwargs" -v --tb=short
           python3 -m pytest tests/generate/vllm_sampler_test.py::VllmSamplerTest -k "server_mode or concurrency" -v --tb=short
           python3 -m pytest tests/generate/vllm_sampler_test.py::VllmSamplerTest -k "data_parallel" -v --tb=short
+          rm -rf /root/.cache/huggingface/xet /root/.cache/huggingface/hub/models--Qwen--Qwen2.5-7B* || true
 
-      # [ORDERING CONSTRAINT]: Must run AFTER `Run vllm tests` (installing tensorflow
-      # upgrades NumPy past ==2.3.5) and BEFORE the Distributed RL smoke stage
-      # (which reuses this tensorflow install for TFDS dataset loading).
       - name: Run tunix SFT integration tests (PEFT with 2x2 mesh on TPU)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          unset PIP_NO_CACHE_DIR
-          # Update dependencies
-          python3 -m pip install --upgrade kagglehub kagglesdk
-
-          # Loading tfds requires tensorflow.
-          python3 -m pip install tensorflow
-
           export JAX_PLATFORMS=tpu,cpu
           ./tests/sft/sft_tpu_smoke_test.sh
 
@@ -358,19 +376,6 @@ jobs:
       # below spawns multi-process trainer / rollout servers across all 8 TPU chips.
       # Running it last ensures no background processes or chip locks affect
       # earlier single-process tests.
-      #
-      # To lift it back out into its own job, move these five steps verbatim
-      # into a new job using the same image; nothing else depends on them.
-      # Keeps the name it had as a standalone job. The pip upgrade, editable
-      # install and NumPy pin it used to carry are now done once, by the shared
-      # setup step at the top of this job.
-      - name: Setup Tunix and dependencies
-        run: |
-          unset PIP_NO_CACHE_DIR
-          # GSM8K dataset loading via tfds. `tensorflow` itself is already
-          # installed by the SFT stage above; this adds the rest.
-          python3 -m pip install tensorflow tensorflow_datasets array_record
-
       - name: Install Raiden weight sync library
         run: bash scripts/install_raiden.sh
 
@@ -378,33 +383,35 @@ jobs:
         run: |
           # Dump the vfio-ID -> PCI-address map the chip split relies on.
           python3 scripts/get_sorted_tpu_ids.py --human
-          python3 - <<'PY'
-          import jax
-          print(f"JAX version: {jax.__version__}")
-          devices = jax.devices()
-          print(f"Discovered {len(devices)} device(s): {devices}")
-          assert len(devices) == 8, f"Expected 8 TPU devices on v6e-8 host, got {len(devices)}"
-          assert all(d.platform == "tpu" for d in devices), f"Non-TPU device found: {devices}"
-          print("TPU runtime preflight check passed successfully.")
-          PY
 
+      # Point `ARTIFACT_ROOT` to the cached `/root/.cache/tunix_artifacts/...`
+      # directory so `Qwen/Qwen3-0.6B` (`models/`) and its converted MaxText
+      # Orbax checkpoint (`maxtext_models/`) persist across CI runs while
+      # keeping ephemeral training outputs (`CHECKPOINT_ROOT_DIRECTORY` and
+      # `MAXTEXT_OUTPUT_DIR`) in `/tmp`. `WAIT_POLL_SECS=1` and
+      # `WORKER_SHUTDOWN_GRACE_SECS=2` tighten local process polling/teardown.
       - name: Run GSM8K Distributed RL Smoke Test (Tunix Backend + Raiden Sync)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          ARTIFACT_ROOT: /root/.cache/tunix_artifacts/qwen3_dist_gsm8k
+          CHECKPOINT_ROOT_DIRECTORY: /tmp/qwen3_dist_gsm8k/checkpoints
+          MAXTEXT_OUTPUT_DIR: /tmp/qwen3_dist_gsm8k/maxtext_out
+          WAIT_POLL_SECS: "1"
+          WORKER_SHUTDOWN_GRACE_SECS: "2"
         run: |
           ./tunix/experimental/examples/recipes/ci_smoke_gsm8k_qwen3_0p6b.sh
-
-      - name: Install MaxText dependencies
-        run: |
-          unset PIP_NO_CACHE_DIR
-          python3 -m pip install -r requirements/maxtext_requirements.txt
-          python3 -m pip install "protobuf>=7.35.1"
 
       - name: Run GSM8K Distributed RL Smoke Test (MaxText Backend + Raiden Sync)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          ARTIFACT_ROOT: /root/.cache/tunix_artifacts/qwen3_dist_gsm8k
+          CHECKPOINT_ROOT_DIRECTORY: /tmp/qwen3_dist_gsm8k/checkpoints_maxtext
+          MAXTEXT_OUTPUT_DIR: /tmp/qwen3_dist_gsm8k/maxtext_out
+          WAIT_POLL_SECS: "1"
+          WORKER_SHUTDOWN_GRACE_SECS: "2"
         run: |
           ./tunix/experimental/examples/recipes/ci_smoke_gsm8k_qwen3_0p6b_maxtext.sh
+          rm -rf /root/.cache/huggingface/xet || true
 
       # Fires for any failure in this job, not just the smoke test above; the
       # `|| true` guards make that harmless when the logs do not exist.

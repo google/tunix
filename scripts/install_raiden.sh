@@ -20,10 +20,9 @@
 #   1. A locally built wheel in $RAIDEN_WHEEL_DIR (see build_raiden_wheel.sh).
 #   2. The wheel pinned below.
 #
-# The pin lives here rather than in requirements/ because pip cannot install it:
-# the bucket enforces public access prevention, so the fetch needs Google Cloud
-# credentials that pip has no way to present. A requirements file would look
-# installable and fail with a bare 403.
+# The pin lives here rather than in pyproject.toml because pip cannot install
+# it directly: the bucket enforces public access prevention, so the fetch needs
+# Google Cloud credentials that pip has no way to present.
 #
 # Pinning a URL rather than a package name is also deliberate. A package named
 # `tpu-raiden-jax` exists on public PyPI and is malicious: a dependency
@@ -42,7 +41,11 @@ RAIDEN_WHEEL_SHA256=${RAIDEN_WHEEL_SHA256:-"a442ac543f54d8ff11d22dbd009671890f2f
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 RAIDEN_WHEEL_DIR=${RAIDEN_WHEEL_DIR:-"${ROOT_DIR}/raiden_wheels"}
-PIP_INSTALL=(python3 -m pip install --force-reinstall --no-deps)
+if command -v uv >/dev/null 2>&1; then
+  PIP_INSTALL=(uv pip install --reinstall --no-deps)
+else
+  PIP_INSTALL=(python3 -m pip install --force-reinstall --no-deps)
+fi
 
 # Raiden is imported at module scope by the trainer, the rollout, and the
 # orchestrator. If it is missing, weight sync silently no-ops and only surfaces
@@ -53,21 +56,33 @@ verify_install() {
 }
 
 compile_protos() {
-  echo "Compiling distributed runtime gRPC protobuf definitions..."
-  python3 -m pip install grpcio-tools
-
   local proto_dir="${ROOT_DIR}/tunix/experimental/distributed"
   if [[ ! -d "${proto_dir}" ]]; then
     proto_dir="${ROOT_DIR}/../tunix/experimental/distributed"
   fi
   local base_dir
   base_dir=$(cd "${proto_dir}/../../.." && pwd)
+  local discovery_proto="${base_dir}/tunix/experimental/distributed/runtime/discovery/discovery_service.proto"
+  local discovery_pb2="${base_dir}/tunix/experimental/distributed/runtime/discovery/discovery_service_pb2.py"
+  local discovery_pb2_grpc="${base_dir}/tunix/experimental/distributed/runtime/discovery/discovery_service_pb2_grpc.py"
+  if [[ ! -f "${discovery_proto}" ]]; then
+    echo "ERROR: Expected distributed orchestrator proto not found at ${discovery_proto}" >&2
+    exit 1
+  fi
 
-  (
-    cd "${base_dir}"
-    find tunix/experimental/distributed -name "*.proto" -exec \
-      python3 -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. {} +
-  )
+  if [[ -f "${discovery_pb2}" && -f "${discovery_pb2_grpc}" && "${discovery_pb2}" -nt "${discovery_proto}" ]]; then
+    echo "Distributed protobuf definitions already up to date."
+    return 0
+  fi
+
+  echo "Compiling distributed runtime gRPC protobuf definitions..."
+  python3 -c "import grpc_tools.protoc" 2>/dev/null || python3 -m pip install grpcio-tools
+
+  python3 -m grpc_tools.protoc \
+    -I"${base_dir}" \
+    --python_out="${base_dir}" \
+    --grpc_python_out="${base_dir}" \
+    "${discovery_proto}"
   python3 -c "import tunix.experimental.distributed.runtime.discovery.discovery_service_pb2"
   echo "Distributed protobuf definitions compiled and verified."
 }
