@@ -83,10 +83,20 @@ export CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-0}
 if [[ "${CHECKPOINT_SAVE_INTERVAL_STEPS}" -gt 0 ]]; then
   export ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE:-1}
 fi
-
 export RPC_TIMEOUT_S="${RPC_TIMEOUT_S:-10800}"
-export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS:-custom_mesh_and_rule=cp-as-ep}"
 export DEBUG=${DEBUG:-0}
+
+export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS:-\
+custom_mesh_and_rule=cp-as-ep \
+context_parallel_strategy=ring \
+allow_split_physical_axes=False \
+decoder_layer_input=device \
+gdn=device \
+gdn_conv=device \
+num_moe_token_chunks=4 \
+moe_chunk_barrier=false \
+use_ring_of_experts=true \
+use_ragged_sort=true}"
 
 # DeepSWE Environment & Agent Sandbox
 export SANDBOX_NODE_SELECTOR_VAL="sandbox-np"
