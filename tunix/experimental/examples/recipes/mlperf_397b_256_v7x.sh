@@ -5,7 +5,7 @@ set -e
 # MLPerf DeepSWE recipe: Qwen3.5-397B-A17B on TPU v7x (bodaborg-tpu7x-gsc)
 # ==============================================================================
 # - TPU7x dynamic slicing on bodaborg-tpu7x-gsc (priority-dev namespace)
-# - Trainer on 128 chips (4x4x8 = 256 devices, FSDP=16, TP=1, EXPERT=2, CP=8)
+# - Trainer on 128 chips (4x4x8 = 256 devices, FSDP=32, TP=1, EXPERT=2, CP=4)
 # - Rollout on 128 chips (16 replicas x 8 chips 2x2x2, EP=16, TP=1)
 # - Sandbox configured for sandbox-np nodepool with workload tolerations
 # ==============================================================================
@@ -26,7 +26,11 @@ export CLUSTER="bodaborg-tpu7x-gsc"
 export K8S_NAMESPACE="priority-dev"
 export USE_DYNAMIC_SLICING="true"
 export TPU_RESERVATION="${TPU_RESERVATION:-ghostfish-pogoag4tylwed}"
-export ENABLE_MULTI_NUMA=1
+# Raiden weight sync: working 397B runs use ENABLE_MULTI_NUMA=0 and the default
+# RAIDEN_BROADCAST_K (64 -> every slice pushed direct from the trainer). K=3 routes
+# slices through the receiver relay tree, which fails with "Incoming push size
+# mismatch" on the first sync; MULTI_NUMA=1 doubles the listeners per rollout worker.
+export ENABLE_MULTI_NUMA="${ENABLE_MULTI_NUMA:-0}"
 
 # Head pod lands on cpu-np (~257G allocatable). mlperf_pathways_config.sh's
 # 260G user-container request plus proxy/rm requests (~280G) never schedules
@@ -35,6 +39,7 @@ export USER_CONTAINER_MEMORY="${USER_CONTAINER_MEMORY:-48G}"
 
 export RAIDEN_DEVICES_PER_HOST=8
 export TPU_RAIDEN_DATA_NICS="eth0"
+export RAIDEN_BROADCAST_K=64
 
 # Model configuration
 export MODEL_NAME="Qwen3.5-397B-A17B"
@@ -46,8 +51,8 @@ export MAXTEXT_CKPT="${MAXTEXT_CKPT:-gs://mlperf-6-1-submission/ckpt/qwen35_397b
 # Topologies (128 chips / 256 devices Trainer 4x4x8, 16x 8-chip Rollout slices on TPU7x dynamic slicing)
 # Mesh product is DEVICES, and v7x has 2 devices/chip at ~95 GB each.
 # 4x4x8 = 128 chips = 256 devices.
-# Sharding: TP=1, FSDP=16, CP=8, EP=2, cp-as-ep.
-# Mesh product: 16 * 1 * 2 * 8 = 256 devices.
+# Sharding: TP=1, FSDP=32, CP=4, EP=2, cp-as-ep.
+# Mesh product: 32 * 1 * 2 * 4 = 256 devices.
 export TRAINER_JOBSET_YAML="jobset.pathways.yaml"
 export TRAINER_TPU_SLICE="tpu7x:4x4x8"
 export TRAINER_MESH_FSDP=32
@@ -71,21 +76,32 @@ export ONEHOT_MOE_PERMUTE_THRESHOLD=131072
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800
 export VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY="RAIDEN_,TPU_"
 export VLLM_RAY_EXTRA_ENV_VARS_TO_COPY="ONEHOT_MOE_PERMUTE_THRESHOLD,LIBTPU_INIT_ARGS,RAY_memory_monitor_refresh_ms,VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,ENABLE_MULTI_NUMA,TPU_RAIDEN_DATA_NICS"
-export ORCHESTRATOR_EXTRA_ENV="${ORCHESTRATOR_EXTRA_ENV:-WEIGHT_SYNC_H2D_TIMEOUT_S=3600 WEIGHT_SYNC_TRANSFER_TIMEOUT_S=7200 RAIDEN_PARALLELISM=16 TPU_RAIDEN_DATA_NICS=eth0 RAIDEN_BROADCAST_K=3}"
-export ROLLOUT_EXTRA_ENV="${ROLLOUT_EXTRA_ENV:-ONEHOT_MOE_PERMUTE_THRESHOLD=131072 RAY_memory_monitor_refresh_ms=0 RAIDEN_TRANSPORT_COALESCE_WINDOW_BYTES=67108864 RAIDEN_WEIGHT_SYNC_PIPELINE_GROUP_SIZE=16 RAIDEN_PARALLELISM=16 VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800 ENABLE_MULTI_NUMA=${ENABLE_MULTI_NUMA} TPU_RAIDEN_DATA_NICS=eth0 RAIDEN_BROADCAST_K=3}"
+export ORCHESTRATOR_EXTRA_ENV="${ORCHESTRATOR_EXTRA_ENV:-WEIGHT_SYNC_H2D_TIMEOUT_S=3600 WEIGHT_SYNC_TRANSFER_TIMEOUT_S=7200 RAIDEN_PARALLELISM=16 TPU_RAIDEN_DATA_NICS=eth0 RAIDEN_BROADCAST_K=64}"
+export ROLLOUT_EXTRA_ENV="${ROLLOUT_EXTRA_ENV:-ONEHOT_MOE_PERMUTE_THRESHOLD=131072 RAY_memory_monitor_refresh_ms=0 RAIDEN_TRANSPORT_COALESCE_WINDOW_BYTES=67108864 RAIDEN_WEIGHT_SYNC_PIPELINE_GROUP_SIZE=16 RAIDEN_PARALLELISM=16 VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800 ENABLE_MULTI_NUMA=${ENABLE_MULTI_NUMA} TPU_RAIDEN_DATA_NICS=eth0 RAIDEN_BROADCAST_K=64}"
 # Rollout (vLLM) libtpu flags; mlperf_base.sh only applies its default when unset.
 export LIBTPU_INIT_ARGS="${LIBTPU_INIT_ARGS:- --xla_tpu_use_minor_sharding_for_major_trivial_input=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=false --xla_tpu_ars_combiner_threshold_in_bytes=0 --xla_tpu_enable_async_collective_merger=false --xla_tpu_check_legacy_constraints_in_reduce_scatter_legalizer=false --xla_tpu_dvfs_p_state=7}"
-export TRAINER_LIBTPU_INIT_ARGS="${TRAINER_LIBTPU_INIT_ARGS:---DANGEROUS_tpu_runtime_abi_verification_disabled=true --xla_tpu_use_tc_device_shape_on_sc=true --xla_sc_disable_megacore_partitioning=true --xla_tpu_enable_offloading_gather_to_sparsecore=true --xla_tpu_enable_sparse_core_collective_offload_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true --xla_tpu_enable_sparse_core_reduce_scatter_v2=true --xla_tpu_use_single_sparse_core_for_all_gather_offload=false --xla_tpu_enable_concurrent_sparse_core_offloading=true --xla_tpu_aggressive_opt_barrier_removal=true --xla_tpu_scoped_vmem_limit_kib=65536 --xla_tpu_enable_sublane_major_scaling_bitcast_fusion=false}"
-export TRAINER_EXTRA_ENV="${TRAINER_EXTRA_ENV:-ONEHOT_MOE_PERMUTE_THRESHOLD=131072 RAIDEN_TRANSPORT_COALESCE_WINDOW_BYTES=67108864 RAIDEN_WEIGHT_SYNC_PIPELINE_GROUP_SIZE=16 ENABLE_MULTI_NUMA=${ENABLE_MULTI_NUMA} TPU_RAIDEN_DATA_NICS=eth0 RAIDEN_BROADCAST_K=3 LIBTPU_INIT_ARGS='${TRAINER_LIBTPU_INIT_ARGS}'}"
+# v7x caps scoped VMEM at 67043328 bytes (65472 KiB); 65536 is rejected per compile
+# (INVALID_ARGUMENT in pathways-rm) and the compiler falls back to its default.
+export TRAINER_LIBTPU_INIT_ARGS="${TRAINER_LIBTPU_INIT_ARGS:---DANGEROUS_tpu_runtime_abi_verification_disabled=true --xla_tpu_use_tc_device_shape_on_sc=true --xla_sc_disable_megacore_partitioning=true --xla_tpu_enable_offloading_gather_to_sparsecore=true --xla_tpu_enable_sparse_core_collective_offload_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true --xla_tpu_enable_sparse_core_reduce_scatter_v2=true --xla_tpu_use_single_sparse_core_for_all_gather_offload=false --xla_tpu_enable_concurrent_sparse_core_offloading=true --xla_tpu_aggressive_opt_barrier_removal=true --xla_tpu_scoped_vmem_limit_kib=65472 --xla_tpu_enable_sublane_major_scaling_bitcast_fusion=false}"
+export TRAINER_EXTRA_ENV="${TRAINER_EXTRA_ENV:-ONEHOT_MOE_PERMUTE_THRESHOLD=131072 RAIDEN_TRANSPORT_COALESCE_WINDOW_BYTES=67108864 RAIDEN_WEIGHT_SYNC_PIPELINE_GROUP_SIZE=16 ENABLE_MULTI_NUMA=${ENABLE_MULTI_NUMA} TPU_RAIDEN_DATA_NICS=eth0 RAIDEN_BROADCAST_K=64 LIBTPU_INIT_ARGS='${TRAINER_LIBTPU_INIT_ARGS}'}"
 # Under Pathways the trainer's TPU program runs in the pathways-worker container,
 # so the trainer libtpu flags must be set there (yaml_generator.py renders one
 # KEY=VALUE per line into the worker env).
 export PATHWAYS_WORKER_EXTRA_ENV="${PATHWAYS_WORKER_EXTRA_ENV:-LIBTPU_INIT_ARGS=${TRAINER_LIBTPU_INIT_ARGS} --megascale_port=-1 --xprof_compress_jftrace=true
 SKIP_MEGASCALE_PJRT_CLIENT=true
 TPU_RAIDEN_DATA_NICS=eth0
-RAIDEN_BROADCAST_K=3}"
+RAIDEN_BROADCAST_K=64}"
+
+# XLA compiler flags must also reach the pathways-proxy: it is what compiles the
+# trainer program, and without them it uses the 32 MiB default scoped VMEM limit
+# (splash-attention dkv needs ~37 MiB at these block sizes -> CompileTimeScopedVmemOom).
+_trainer_xla_flags=""
+for _f in ${TRAINER_LIBTPU_INIT_ARGS}; do [[ "${_f}" == --xla_* ]] && _trainer_xla_flags+="${_f} "; done
+export PATHWAYS_PROXY_EXTRA_ARGS="${PATHWAYS_PROXY_EXTRA_ARGS:-${_trainer_xla_flags% }}"
 
 # Hyperparameters & DeepSWE Pipeline Configuration
+# Must be a multiple of TRAINER_MESH_FSDP=32. Only the padded batch assembler reads it;
+# sequence packing (MAX_SEQ_TOKEN_PER_TPU set) sizes micro steps from the trainer mesh.
 export TRAIN_MICRO_BATCH_SIZE="${TRAIN_MICRO_BATCH_SIZE:-64}"
 
 export RPC_TIMEOUT_S="${RPC_TIMEOUT_S:-10800}"

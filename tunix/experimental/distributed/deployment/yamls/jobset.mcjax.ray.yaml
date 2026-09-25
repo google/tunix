@@ -109,6 +109,10 @@ ${PW_NODE_AFFINITY}            # tolerations:
                   echo "EXIT_CODE=$$EXIT_CODE"
                   exit $$EXIT_CODE
               env:
+              - name: RAIDEN_BROADCAST_K
+                value: "64"
+              - name: TPU_RAIDEN_DATA_NICS
+                value: "eth0"
               # Injects the JobSet Name
               - name: JOBSET_NAME
                 valueFrom:

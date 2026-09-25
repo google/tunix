@@ -399,13 +399,10 @@ def main() -> None:
       else ""
   )
 
-  tpu_raiden_data_nics = os.environ.get("TPU_RAIDEN_DATA_NICS", "").strip()
-  if not tpu_raiden_data_nics and tpu_type in ("tpu7x", "tpu-v7x-slice"):
-    tpu_raiden_data_nics = "eth0"
-
+  # RAIDEN_BROADCAST_K and TPU_RAIDEN_DATA_NICS are set in every container env of
+  # the jobset templates; rendering them again here would duplicate the entry.
+  template_env = ("RAIDEN_BROADCAST_K", "TPU_RAIDEN_DATA_NICS")
   worker_env = {}
-  if tpu_raiden_data_nics:
-    worker_env["TPU_RAIDEN_DATA_NICS"] = tpu_raiden_data_nics
 
   # Under Pathways the TPU program runs in the worker, not the user container, so
   # LIBTPU_INIT_ARGS has to be set there. The server rejects the xpk-level
@@ -417,11 +414,25 @@ def main() -> None:
     if not line or "=" not in line:
       continue
     key, value = line.split("=", 1)
+    if key.strip() in template_env:
+      continue
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+      value = value[1:-1]
     worker_env[key.strip()] = value
 
   pathways_worker_extra_env = "".join(
       f"\n              - name: {key}\n                value: {json.dumps(value)}"
       for key, value in worker_env.items()
+  )
+
+  # The proxy, not the worker, compiles the TPU program under Pathways, so XLA
+  # compiler flags (e.g. --xla_tpu_scoped_vmem_limit_kib) only take effect as
+  # proxy args; in the worker's LIBTPU_INIT_ARGS they are ignored at compile
+  # time. Whitespace-separated, like xpk's --custom-pathways-proxy-server-args.
+  pathways_proxy_extra_args = "".join(
+      f"\n              - {json.dumps(flag)}"
+      for flag in os.environ.get("PATHWAYS_PROXY_EXTRA_ARGS", "").split()
   )
 
   with open(args.template_file, "r") as f:
@@ -468,6 +479,7 @@ def main() -> None:
         USER_CONTAINER_PORT=args.worker_container_port,
         STARTUP_COMMAND=args.worker_startup_command,
         PATHWAYS_WORKER_EXTRA_ENV=pathways_worker_extra_env,
+        PATHWAYS_PROXY_EXTRA_ARGS=pathways_proxy_extra_args,
     )
     print(content)
 
