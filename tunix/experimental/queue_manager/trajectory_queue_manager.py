@@ -115,26 +115,17 @@ class TrajectoryQueueManager(group_queue_manager.GroupQueueManager):
     """Retrieves a single ready group of TrajectoryItems."""
     return await self._get_one_ready_group()
 
-  async def get_batch(
-      self,
-      batch_size: int | None = None,
-      num_groups: int | None = None,
+  async def get_group_batch(
+      self, num_groups: int
   ) -> list[datatypes.TrajectoryItem]:
-    """Retrieves items by either batch_size or num_groups."""
-    # TODO: why do we need both batch_size and num_groups?
-    # TODO: should this be in parent class?
-    if num_groups is not None:
-      out: list[datatypes.TrajectoryItem] = []
-      for _ in range(num_groups):
-        g = await self._get_one_ready_group()
-        if not g:
-          break
-        out.extend(g)
-      return out
-    actual_batch_size = (
-        batch_size if batch_size is not None else self.num_generations
-    )
-    return await super().get_batch(batch_size=actual_batch_size)  # pyrefly: ignore[bad-argument-type]
+    """Retrieves a batch of TrajectoryItem groups."""
+    out: list[datatypes.TrajectoryItem] = []
+    for _ in range(num_groups):
+      g = await self._get_one_ready_group()
+      if not g:
+        break
+      out.extend(g)
+    return out
 
   def commit(self, step: int, groups: Sequence[Any] | None = None) -> None:
     """Commits in-flight groups after a successful global step boundary."""
