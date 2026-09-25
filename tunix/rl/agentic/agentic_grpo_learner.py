@@ -152,6 +152,11 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
   score_centering: bool = False
   score_centering_top_k: int = 128
   score_centering_eps: float = 1e-6
+  # Diagnostics-only Score Centering: request the sampler's top-k logprobs and
+  # log the ``score_centering/*`` statistics, but do NOT add the correction
+  # term or pin the PPO ratio. With ``score_centering=False`` the loss and
+  # gradient are unchanged, which makes this the control arm of an SC A/B.
+  score_centering_diagnostics: bool = False
 
   def __post_init__(self):
     if self.score_centering_top_k < 1:
@@ -301,7 +306,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     self.algo_config.temperature = (  # pyrefly: ignore[missing-attribute]
         train_rollout_config.temperature
     )
-    if self.algo_config.score_centering:
+    if self._wants_sampler_topk():
       train_rollout_config.return_logprobs = True
       train_rollout_config.num_logprobs = max(
           int(getattr(train_rollout_config, "num_logprobs", 1)),
@@ -352,7 +357,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         "sampler_is/weight_mean": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
         "sampler_is/weight_min": np.min,
     }
-    if self.algo_config.score_centering:
+    if self._wants_sampler_topk():
       rl_metrics_to_log.update({
           "score_centering/head_mass_q_mean": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
           "score_centering/head_mass_p_mean": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
@@ -365,6 +370,18 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         if self.algo_config.force_compute_kl or self.algo_config.beta != 0.0
         else None,
     ])
+
+  def _wants_sampler_topk(self) -> bool:
+    """Whether the loss consumes the sampler's top-k logprobs.
+
+    True for Score Centering and for its diagnostics-only mode; both need the
+    rollout to return per-token top-k logprobs and both emit the
+    ``score_centering/*`` metrics.
+    """
+    return bool(
+        self.algo_config.score_centering
+        or getattr(self.algo_config, "score_centering_diagnostics", False)
+    )
 
   def _have_actor_mesh(self) -> bool:
     """Whether a real actor mesh exists (the recompute needs one)."""
@@ -629,10 +646,40 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     padded_prompt_masks = []
     padded_completion_attention_masks = []
 
-    has_topk_data = self.algo_config.score_centering and any(
+    wants_topk = self._wants_sampler_topk()
+    any_topk = any(
         tk_ids is not None and tk_lps is not None
         for tk_ids, tk_lps in zip(old_topk_ids_list, old_topk_logprobs_list)
     )
+    if wants_topk and not any_topk:
+      num_assistant_tokens = sum(
+          int(np.sum(mask)) for mask in completion_masks_list
+      )
+      if num_assistant_tokens > 0:
+        missing_topk_msg = (
+            "score_centering/score_centering_diagnostics is enabled, but none"
+            f" of the {len(trajectories)} trajectories in this group carries"
+            " the sampler's top-k logprobs (old_topk_token_ids /"
+            f" old_topk_logprobs) despite {num_assistant_tokens} assistant"
+            " tokens. The rollout must return top-k logprobs: use the vLLM"
+            " engine and set RolloutConfig.num_logprobs >="
+            " score_centering_top_k before RLEngine is built."
+        )
+        if mode == rl_engine_lib.Mode.TRAIN:
+          # Fail at the cause: otherwise the loss silently skips the SC term
+          # and the run only dies later on the missing `score_centering/*`
+          # metrics.
+          raise ValueError(missing_topk_msg)
+        logging.warning(
+            "%s (mode=%s; using masked top-k rows, so this group's"
+            " score_centering/* values are not meaningful.)",
+            missing_topk_msg,
+            mode,
+        )
+    # Materialize the (padded) buffers whenever they are wanted: the trainer
+    # looks up the registered `score_centering/*` metrics on both train and
+    # eval steps, so every example must carry top-k inputs.
+    has_topk_data = wants_topk
     topk_dim = int(self.algo_config.score_centering_top_k)
     if has_topk_data:
       for tk_ids in old_topk_ids_list:

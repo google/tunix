@@ -421,13 +421,18 @@ def grpo_loss_fn(
         [train_example.prompt_mask, completion_attention_mask], axis=1
     )
   score_centering = getattr(algo_config, "score_centering", False)
+  # Diagnostics-only mode: compute and log the Score Centering statistics but
+  # leave the loss untouched (no correction term, no ratio pinning).
+  score_centering_diagnostics = getattr(
+      algo_config, "score_centering_diagnostics", False
+  )
   old_topk_token_ids = getattr(train_example, "old_topk_token_ids", None)
   old_topk_logps = getattr(train_example, "old_topk_logps", None)
-  use_score_centering = (
-      score_centering
-      and old_topk_token_ids is not None
-      and old_topk_logps is not None
-  )
+  has_sampler_topk = old_topk_token_ids is not None and old_topk_logps is not None
+  use_score_centering = score_centering and has_sampler_topk
+  compute_sc_stats = (
+      score_centering or score_centering_diagnostics
+  ) and has_sampler_topk
   logp_outputs = common.compute_per_token_logps(
       graphdef,
       state,
@@ -443,9 +448,9 @@ def grpo_loss_fn(
       chunk_size=kwargs.get("compute_logps_chunk_size", 0),
       routed_experts=getattr(train_example, "routed_experts", None),
       token_mask=token_mask,
-      topk_token_ids=old_topk_token_ids if use_score_centering else None,
+      topk_token_ids=old_topk_token_ids if compute_sc_stats else None,
   )
-  if use_score_centering:
+  if compute_sc_stats:
     per_token_logps, token_entropy, trainer_topk_logps = logp_outputs
   else:
     per_token_logps, token_entropy = logp_outputs
@@ -551,20 +556,25 @@ def grpo_loss_fn(
     per_token_loss = per_token_loss * sampler_is_weights.astype(jnp.float32)
 
   sc_stats = None
-  if use_score_centering:
+  if compute_sc_stats:
     sampler_is_mode = getattr(algo_config, "sampler_is", None)
     if sampler_is_mode is None and sampler_is_weights is not None:
       sampler_is_mode = "token"
     sampler_is_threshold = getattr(algo_config, "sampler_is_threshold", 2.0)
     sc_eps = getattr(algo_config, "score_centering_eps", 1e-6)
     sc_logp_correction, sc_stats = common.compute_score_centering_correction(
-        trainer_topk_logps=trainer_topk_logps,  # pyrefly: ignore[bad-argument-type]
+        trainer_topk_logps=(  # pyrefly: ignore[bad-argument-type]
+            trainer_topk_logps
+            if use_score_centering
+            else jax.lax.stop_gradient(trainer_topk_logps)
+        ),
         sampler_topk_logps=old_topk_logps,  # pyrefly: ignore[bad-argument-type]
         sampler_is=sampler_is_mode,
         sampler_is_threshold=sampler_is_threshold,
         eps=sc_eps,
     )
-    per_token_loss = per_token_loss + adv * sc_logp_correction
+    if use_score_centering:
+      per_token_loss = per_token_loss + adv * sc_logp_correction
 
   # Two independent aggregations of the same policy loss (equal today):
   #   unreduced (sum/denom, deferred) — feeds the gradient

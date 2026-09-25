@@ -3015,6 +3015,261 @@ class ScoreCenteringTest(parameterized.TestCase):
       learner.train(train_ds)
       self.assertGreater(mock_b2te.call_count, 0)
 
+  @parameterized.parameters(
+      dict(sampler_is=None, chunk_size=0),
+      dict(sampler_is="token", chunk_size=0),
+      dict(sampler_is="token", chunk_size=2),
+  )
+  def test_score_centering_diagnostics_logs_stats_without_changing_loss(
+      self, sampler_is, chunk_size
+  ):
+    batch_size, seq_len, vocab_size, top_k = 2, 4, 16, 4
+    prompt_ids = jnp.ones((batch_size, 3), dtype=jnp.int32)
+    completion_ids = jnp.array([[1, 2, 3, 4], [2, 3, 4, 5]], dtype=jnp.int32)
+    completion_mask = jnp.ones((batch_size, seq_len), dtype=jnp.bool_)
+    advantages = jnp.array([1.0, -0.5], dtype=jnp.float32)
+    old_topk_token_ids = jnp.broadcast_to(
+        jnp.arange(1, top_k + 1, dtype=jnp.int32),
+        (batch_size, seq_len, top_k),
+    )
+    old_topk_logps = jnp.broadcast_to(
+        jnp.array([-0.5, -1.2, -2.0, -3.0], dtype=jnp.float32),
+        (batch_size, seq_len, top_k),
+    )
+    # Stale old logps keep the PPO ratio away from 1: Score Centering pins the
+    # ratio (ppo_kl == 0), the diagnostics mode must not.
+    old_per_token_logps = jnp.full((batch_size, seq_len), -3.5, jnp.float32)
+    sampler_is_weights = (
+        jnp.full((batch_size, seq_len), 0.9, dtype=jnp.float32)
+        if sampler_is == "token"
+        else None
+    )
+    train_example = agentic_grpo_learner.TrainExample(
+        prompt_ids=prompt_ids,
+        prompt_mask=jnp.ones_like(prompt_ids),
+        completion_ids=completion_ids,
+        completion_mask=completion_mask,
+        ref_per_token_logps=None,
+        advantages=advantages,
+        old_per_token_logps=old_per_token_logps,
+        sampler_is_weights=sampler_is_weights,
+        old_topk_token_ids=old_topk_token_ids,
+        old_topk_logps=old_topk_logps,
+    )
+
+    class LinearLogitModel(nnx.Module):
+
+      def __init__(self):
+        self.bias = nnx.Param(
+            jnp.linspace(-0.5, 0.5, vocab_size, dtype=jnp.float32)
+        )
+
+      def compute_final_logits(self, h):
+        return h
+
+      def __call__(
+          self,
+          inputs,
+          positions,
+          cache,
+          attention_mask,
+          skip_lm_head: bool = False,
+          **kwargs,
+      ):
+        del positions, cache, attention_mask, skip_lm_head, kwargs
+        logits = jnp.broadcast_to(self.bias[...], (*inputs.shape, vocab_size))
+        return logits, None
+
+    model = LinearLogitModel()
+
+    def make_cfg(**kwargs):
+      cfg = agentic_grpo_learner.GRPOConfig(
+          beta=0.0,
+          epsilon=0.2,
+          loss_algo="grpo",
+          use_rollout_logps=True,
+          sampler_is=sampler_is,
+          score_centering_top_k=top_k,
+          **kwargs,
+      )
+      cfg.temperature = 1.0
+      return cfg
+
+    cfg_plain = make_cfg()
+    cfg_diag = make_cfg(score_centering_diagnostics=True)
+    cfg_sc = make_cfg(score_centering=True)
+    policy_loss_fn = function_registry.get_policy_loss_fn(
+        cfg_plain.policy_loss_fn
+    )
+
+    def run(cfg, m=model):
+      return policy_loss_fn(
+          model=m,
+          train_example=train_example,
+          algo_config=cfg,
+          pad_id=0,
+          eos_id=2,
+          compute_logps_chunk_size=chunk_size,
+      )
+
+    def value(x):
+      return np.asarray(x.compute() if hasattr(x, "compute") else x)
+
+    out_plain, out_diag, out_sc = run(cfg_plain), run(cfg_diag), run(cfg_sc)
+    for name in (
+        "head_mass_q_mean",
+        "head_mass_p_mean",
+        "tail_ratio_rho_mean",
+        "abs_coeff_sum_mean",
+    ):
+      key = f"score_centering/{name}"
+      self.assertNotIn(key, out_plain.aux_metrics)
+      self.assertIn(key, out_diag.aux_metrics)
+      # The statistics do not depend on whether the correction is applied.
+      np.testing.assert_allclose(
+          value(out_diag.aux_metrics[key]),
+          value(out_sc.aux_metrics[key]),
+          rtol=1e-6,
+      )
+    self.assertGreater(
+        float(value(out_diag.aux_metrics["score_centering/abs_coeff_sum_mean"])),
+        0.0,
+    )
+
+    # Diagnostics leave the objective untouched: same loss, same ratio/clip
+    # statistics and the same gradient as plain GRPO.
+    np.testing.assert_array_equal(
+        value(out_diag.primary_loss), value(out_plain.primary_loss)
+    )
+    for key in ("ppo_kl", "pg_clipfrac", "is_ratio/mean"):
+      np.testing.assert_array_equal(
+          value(out_diag.aux_metrics[key]), value(out_plain.aux_metrics[key])
+      )
+    self.assertGreater(abs(float(value(out_diag.aux_metrics["ppo_kl"]))), 0.0)
+    np.testing.assert_allclose(value(out_sc.aux_metrics["ppo_kl"]), 0.0)
+
+    def grad_fn(cfg):
+      def _loss(m):
+        return run(cfg, m).primary_loss.compute()
+
+      return np.asarray(nnx.grad(_loss)(model).bias[...])
+
+    g_plain = grad_fn(cfg_plain)
+    np.testing.assert_array_equal(grad_fn(cfg_diag), g_plain)
+    self.assertFalse(np.allclose(grad_fn(cfg_sc), g_plain))
+
+  def _build_toy_learner(self, **grpo_kwargs):
+    vocab = _mock_vocab()
+    tokenizer = tokenizer_adapter.TokenizerAdapter(vocab)
+    model = test_common.ToyTransformer(
+        config=test_common.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
+    )
+    mesh = pxla.thread_resources.env.physical_mesh
+    cluster_config = rl_engine_lib.ClusterConfig(
+        role_to_mesh={
+            rl_engine_lib.Role.ACTOR: mesh,
+            rl_engine_lib.Role.REFERENCE: mesh,
+            rl_engine_lib.Role.ROLLOUT: mesh,
+        },
+        rollout_engine="vanilla",
+        offload_to_cpu=False,
+        training_config=rl_engine_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=10,
+            max_steps=1,
+            mini_batch_size=2,
+            train_micro_batch_size=2,
+            compute_logps_micro_batch_size=2,
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_prompt_length=32,
+            max_tokens_to_generate=8,
+            return_logprobs=True,
+            kv_cache_size=256,
+        ),
+    )
+    rl_engine = rl_engine_lib.RLEngine(
+        actor=model,
+        reference=None,
+        tokenizer=tokenizer,
+        cluster_config=cluster_config,
+    )
+    grpo_config = agentic_grpo_learner.GRPOConfig(
+        beta=0.0,
+        num_generations=2,
+        num_iterations=1,
+        loss_algo="grpo",
+        max_response_length=8,
+        use_rollout_logps=True,
+        sampler_is="token",
+        score_centering_top_k=4,
+        **grpo_kwargs,
+    )
+    learner = agentic_grpo_learner.GRPOLearner(
+        rl_engine=rl_engine,
+        reward_fns=reward_fn_1,
+        algo_config=grpo_config,
+        chat_parser=MockChatParser(),
+    )
+    return learner, rl_engine, tokenizer, cluster_config
+
+  def test_grpo_learner_end_to_end_score_centering_diagnostics(self):
+    learner, rl_engine, tokenizer, cluster_config = self._build_toy_learner(
+        score_centering_diagnostics=True
+    )
+    # Diagnostics need the sampler's top-k as much as Score Centering does.
+    self.assertEqual(cluster_config.rollout_config.num_logprobs, 4)
+    self.assertIn(
+        "score_centering/abs_coeff_sum_mean",
+        rl_engine.actor_trainer.rl_metrics_to_log,
+    )
+
+    train_ds = _dummy_dataset(MySource(data=["1", "2"], repeat=1), batch_size=2)
+    with (
+        mock.patch.object(
+            learner,
+            "_batch_to_train_example",
+            wraps=learner._batch_to_train_example,
+        ) as mock_b2te,
+        mock.patch.object(
+            rl_engine,
+            "generate",
+            side_effect=functools.partial(_mock_generate, tokenizer=tokenizer),
+        ),
+    ):
+      # The trainer looks up every registered metric in the loss aux, so a
+      # completed step means the diagnostics were emitted.
+      learner.train(train_ds)
+      self.assertGreater(mock_b2te.call_count, 0)
+
+  @parameterized.parameters(
+      dict(score_centering=True, score_centering_diagnostics=False),
+      dict(score_centering=False, score_centering_diagnostics=True),
+  )
+  def test_process_results_raises_when_sampler_topk_missing(
+      self, score_centering, score_centering_diagnostics
+  ):
+    learner, _, _, _ = self._build_toy_learner(
+        score_centering=score_centering,
+        score_centering_diagnostics=score_centering_diagnostics,
+    )
+    traj = {
+        "conversation_text": [{"role": "assistant", "content": "hi"}],
+        "prompt_tokens": np.array([1, 2], dtype=np.int32),
+        "prompt_length": 2,
+        "conversation_tokens": np.array([3, 4], dtype=np.int32),
+        "conversation_masks": np.array([1, 1], dtype=np.int32),
+        "old_logprobs": np.array([-0.1, -0.2], dtype=np.float32),
+        "old_topk_token_ids": None,
+        "old_topk_logprobs": None,
+        "policy_version": 0,
+        "trajectory_reward": 1.0,
+    }
+    items = [types.SimpleNamespace(traj=dict(traj)) for _ in range(2)]
+    with self.assertRaisesRegex(ValueError, "top-k logprobs"):
+      learner._process_results(items, mode=rl_engine_lib.Mode.TRAIN)
+
 
 if __name__ == "__main__":
   absltest.main()
