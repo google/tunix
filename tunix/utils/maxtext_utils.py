@@ -609,11 +609,11 @@ def create_maxtext_engine(
   if hasattr(engine, "save_checkpoint"):
     orig_save_checkpoint = engine.save_checkpoint
 
-    def _safe_save_checkpoint(metadata: Any = None, **kwargs: Any) -> None:
+    def _safe_save_checkpoint(*args: Any, **kwargs: Any) -> None:
       overwrite = kwargs.pop("overwrite", False)
       if overwrite:
         kwargs.setdefault("force", True)
-      return orig_save_checkpoint(metadata, **kwargs)
+      return orig_save_checkpoint(*args, **kwargs)
 
     engine.save_checkpoint = _safe_save_checkpoint
 
