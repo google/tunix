@@ -94,6 +94,7 @@ arg_parser.add_argument("--b1", type=float, default=0.9)
 arg_parser.add_argument("--b2", type=float, default=0.95)
 arg_parser.add_argument("--weight_decay", type=float, default=0.0)
 arg_parser.add_argument("--num_batches", type=int, default=150)
+arg_parser.add_argument("--num_epochs", type=int, default=3)
 arg_parser.add_argument("--num_generations", type=int, default=8)
 arg_parser.add_argument("--beta", type=float, default=0.0)
 # GSPO-token defaults: tight clip ratios because the importance ratio is
@@ -229,7 +230,7 @@ NUM_BATCHES = args.num_batches
 NUM_TEST_BATCHES = 2
 
 EVAL_EVERY_N_STEPS = 10
-NUM_EPOCHS = 3
+NUM_EPOCHS = args.num_epochs
 MAX_STEPS = int(NUM_BATCHES * NUM_ITERATIONS * TRAIN_FRACTION * NUM_EPOCHS)
 
 MAX_CONCURRENCY = args.max_concurrency
@@ -624,6 +625,15 @@ grpo_trainer = GRPOLearner(
     metric_fns=[metric_fn],
 )
 show_hbm_usage("after GRPOLearner creation")
+
+# The learner always attaches a per-trajectory CSV logger to the metrics log
+# dir. On GCS each flush re-reads and rewrites the whole (multi-GB) CSV, the
+# writes time out, and abandoned upload threads pile up and stall rollouts.
+# Set DISABLE_TRAJECTORY_LOG=1 to turn it off for long runs.
+if os.getenv("DISABLE_TRAJECTORY_LOG") and grpo_trainer._trajectory_logger:
+  grpo_trainer._trajectory_logger.stop()
+  grpo_trainer._trajectory_logger = None
+  print("Trajectory logging disabled via DISABLE_TRAJECTORY_LOG.")
 
 # Pass test_dataset as the eval set so the learner runs held-out rollouts
 # every EVAL_EVERY_N_STEPS and logs `eval/...` metrics (including

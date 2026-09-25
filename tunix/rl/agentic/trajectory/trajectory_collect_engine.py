@@ -116,6 +116,9 @@ class TrajectoryCollectEngine:
     self.gamma = gamma
     self.max_response_length = max_response_length
     self._response_token_count = 0
+    # Tokens the chat parser appends after each sampled assistant turn; probed
+    # lazily from the parser (see `_assistant_suffix_len`).
+    self._assistant_suffix_len_cache: Optional[int] = None
     self.timeout = timeout
 
     # Tokenizer utilities for stepwise tokenization
@@ -671,11 +674,33 @@ class TrajectoryCollectEngine:
         tags[perf_constants.STEP] = policy_version
     return tags
 
+  def _assistant_suffix_len(self) -> int:
+    """Returns how many tokens the parser appends to each assistant turn.
+
+    Some chat templates end a turn with tokens the model does not sample (e.g.
+    Gemma4 stops at `<turn|>` and the parser appends the template's "\\n").
+    Those tokens are part of the recorded completion, so the response budget
+    must reserve room for them.
+    """
+    if self.tokenizer is None or self.chat_parser is None:
+      return 0
+    if self._assistant_suffix_len_cache is None:
+      _, n_append = self.chat_parser.update_assistant_end_tokens(
+          np.zeros((0,), dtype=np.int32)
+      )
+      self._assistant_suffix_len_cache = int(n_append)
+    return self._assistant_suffix_len_cache
+
   def _check_and_set_context_limit_reached(self) -> bool:
-    """Returns True and updates trajectory status if response budget is exhausted."""
+    """Returns True and updates trajectory status if response budget is exhausted.
+
+    Called before the current turn's parser suffix is counted, so room for it
+    is reserved here.
+    """
     if (
         self.max_response_length is not None
-        and self._response_token_count >= self.max_response_length
+        and self._response_token_count + self._assistant_suffix_len()
+        >= self.max_response_length
     ):
       self.agent.trajectory.status = (
           agent_types.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED
@@ -698,7 +723,9 @@ class TrajectoryCollectEngine:
     if self._check_and_set_context_limit_reached():
       return True
     max_generation_steps = (
-        self.max_response_length - self._response_token_count
+        self.max_response_length
+        - self._response_token_count
+        - self._assistant_suffix_len()
         if self.max_response_length is not None
         else None
     )
@@ -949,6 +976,8 @@ class TrajectoryCollectEngine:
           cur_step.assistant_tokens = utils.assistant_with_suffix(
               rollout_output.tokens[0], cur_step.assistant_tokens, n_append
           )
+        # Sampled tokens were counted after the model call; count the suffix.
+        self._response_token_count += n_append
         cur_step.assistant_masks = np.concatenate(
             [
                 np.ones(len(rollout_output.tokens[0]), dtype=np.int32),
@@ -992,9 +1021,24 @@ class TrajectoryCollectEngine:
             contains_first_msg=False,
             contains_generation_msg=True,
         )
-        cur_step.env_tokens = np.array(e_tokens)
-        cur_step.env_masks = np.array(e_masks)
-        self._response_token_count += len(e_tokens)
+        if (
+            self.max_response_length is not None
+            and self._response_token_count + len(e_tokens)
+            > self.max_response_length
+        ):
+          # The observation would overflow the response budget, and no
+          # assistant turn could follow it. End here without recording it
+          # (env tokens are loss-masked anyway) so the completion stays within
+          # the training padding budget.
+          self.agent.trajectory.status = (
+              agent_types.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED
+          )
+          self._log_trajectory_clip("MAX_CONTEXT_LIMIT_REACHED")
+          done = True
+        else:
+          cur_step.env_tokens = np.array(e_tokens)
+          cur_step.env_masks = np.array(e_masks)
+          self._response_token_count += len(e_tokens)
 
     if self.exact_token_continuity:
       self._record_exact_turn(cur_step, terminal=done or step_timed_out)
