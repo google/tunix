@@ -21,8 +21,8 @@ if ! command -v "$PYTHON" &>/dev/null; then
   PYTHON="python"
 fi
 
-export MODEL_NAME=${MODEL_NAME:-Qwen3-1.7B}
-export MODEL_ID=${MODEL_ID:-Qwen/Qwen3-1.7B}
+export MODEL_NAME=${MODEL_NAME:-Qwen3-4B-Instruct-2507}
+export MODEL_ID=${MODEL_ID:-Qwen/Qwen3-4B-Instruct-2507}
 # Must be model-specific: vLLM prioritizes non-empty local snapshot directories,
 # which can cause stale config/shape mismatches if shared across models.
 export MODEL_DIR=${MODEL_DIR:-artifacts/qwen3_dist_deepswe/models/${MODEL_NAME}}
@@ -30,7 +30,7 @@ export MODEL_DIR=${MODEL_DIR:-artifacts/qwen3_dist_deepswe/models/${MODEL_NAME}}
 # instead of failing on an initially empty local MODEL_DIR.
 export TOKENIZER_PATH=${TOKENIZER_PATH:-${MODEL_ID}}
 
-export MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-1024}
+export MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-4096}
 export MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-1024}
 export BATCH_SIZE=${BATCH_SIZE:-1}
 export NUM_GENERATIONS=${NUM_GENERATIONS:-2}
@@ -51,7 +51,7 @@ export BETA=${BETA:-0.0}
 export EPSILON=${EPSILON:-0.2}
 export LORA_RANK=${LORA_RANK:-64}
 export LORA_ALPHA=${LORA_ALPHA:-64.0}
-export MODEL_DTYPE=${MODEL_DTYPE:-float32}
+export MODEL_DTYPE=${MODEL_DTYPE:-bfloat16}
 export USE_LORA=${USE_LORA:-0}
 export DEBUG=${DEBUG:-0}
 export USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
@@ -60,8 +60,10 @@ export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
 
 # DeepSWE dataset and environment configuration
 export DATASET_NAME=${DATASET_NAME:-R2E-Gym/R2E-Gym-Subset}
+export DATASET_REVISION=${DATASET_REVISION:-2e8108ff942f24fcb5686badfaf7f9a8808566d5}
 export DATASET_PATH=${DATASET_PATH:-}
 export DATASET_SPLIT=${DATASET_SPLIT:-train}
+export GOLD_WHITELIST=${GOLD_WHITELIST:-}
 export DATASET_CACHE_DIR=${DATASET_CACHE_DIR:-artifacts/qwen3_dist_deepswe/dataset_cache}
 export SHUFFLE=${SHUFFLE:-true}
 export SEED=${SEED:-42}
@@ -197,7 +199,9 @@ start_orchestrator() {
         --beta=${BETA} \
         --epsilon=${EPSILON} \
         --dataset_name=${DATASET_NAME} \
+        --dataset_revision=${DATASET_REVISION} \
         --dataset_split=${DATASET_SPLIT} \
+        ${GOLD_WHITELIST:+--gold_whitelist=${GOLD_WHITELIST}} \
         ${DATASET_CACHE_DIR:+--dataset_cache_dir=${DATASET_CACHE_DIR}} \
         --seed=${SEED} \
         --env_backend=${ENV_BACKEND} \
@@ -319,6 +323,10 @@ stop_rollout() {
 }
 
 start_rollout() {
+  local vllm_init_args=""
+  if [[ "$WEIGHT_SYNC_MODE" == "none" && "$SAMPLER" == "inprocess_vllm" ]]; then
+    vllm_init_args="--no-vllm_init_with_random_weights"
+  fi
   local maxtext_args=""
   if [[ "${TRAINER_BACKEND}" == "maxtext" ]]; then
     maxtext_args=" \
@@ -373,6 +381,7 @@ start_rollout() {
         --env_name=deepswe_env \
         --agent_name=deepswe_agent \
         --max_concurrency=${ROLLOUT_MAX_CONCURRENCY} \
+        ${vllm_init_args} \
         ${lora_args} \
         ${maxtext_args} \
         ${vllm_args} \

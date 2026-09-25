@@ -17,13 +17,14 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+import hashlib
 import json
 import logging
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 from tunix.experimental.rl.agentic import registry
-from examples.deepswe import deepswe_data
 from examples.deepswe import sandbox_utils
 from examples.deepswe import swe_agent
 from examples.deepswe import swe_env
@@ -32,6 +33,55 @@ from examples.deepswe import swe_env
 DEEPSWE_ENV_NAME = "deepswe_env"
 DEEPSWE_AGENT_NAME = "deepswe_agent"
 DEFAULT_DATASET_NAME = "R2E-Gym/R2E-Gym-Subset"
+DEFAULT_DATASET_REVISION = "2e8108ff942f24fcb5686badfaf7f9a8808566d5"
+DEFAULT_GOLD_WHITELIST = str(
+    Path(__file__).resolve().parents[4]
+    / "canon-zero-tim/clean_data/p46_q4_learnable/"
+    "p46q4census02_qwen3_4b_instruct_2507_n16_learnable_tasks.jsonl"
+)
+DEFAULT_GOLD_WHITELIST_SHA256 = (
+    "ec297c9cbc39cd67db15b0b9db6a229b15671b848df5ec3101de9ef8df7c9973"
+)
+DEFAULT_GOLD_ROWS = 1012
+
+
+def _gold_images(whitelist_path: str) -> set[str]:
+  """Reads the clean task selector and rejects malformed or duplicate images."""
+  path = Path(whitelist_path)
+  if not path.is_file():
+    raise FileNotFoundError(f"DeepSWE clean task selector not found: {path}")
+  if path.resolve() == Path(DEFAULT_GOLD_WHITELIST).resolve():
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    if digest != DEFAULT_GOLD_WHITELIST_SHA256:
+      raise ValueError(
+          "DeepSWE canonical task selector SHA-256 changed: "
+          f"expected {DEFAULT_GOLD_WHITELIST_SHA256}, got {digest}"
+      )
+  images = set()
+  with path.open(encoding="utf-8") as file:
+    for line_number, line in enumerate(file, 1):
+      if not line.strip():
+        continue
+      image = json.loads(line).get("docker_image")
+      if not isinstance(image, str) or not image:
+        raise ValueError(
+            f"Clean task selector row {line_number} lacks docker_image"
+        )
+      if image in images:
+        raise ValueError(
+            f"Duplicate docker_image in clean task selector: {image}"
+        )
+      images.add(image)
+  if not images:
+    raise ValueError("DeepSWE clean task selector is empty")
+  if (
+      path.resolve() == Path(DEFAULT_GOLD_WHITELIST).resolve()
+      and len(images) != DEFAULT_GOLD_ROWS
+  ):
+    raise ValueError(
+        f"Expected {DEFAULT_GOLD_ROWS} canonical tasks, got {len(images)}"
+    )
+  return images
 
 
 def normalize_example_value(value: Any) -> Any:
@@ -67,41 +117,58 @@ def _jsonify_lists(entry: dict[str, Any]) -> dict[str, Any]:
 def load_deepswe_dataset(
     *,
     dataset_name: str = DEFAULT_DATASET_NAME,
+    dataset_revision: str = DEFAULT_DATASET_REVISION,
     dataset_split: str = "train",
     dataset_path: str = "",
+    gold_whitelist: str = DEFAULT_GOLD_WHITELIST,
     cache_dir: str | None = None,
     shuffle: bool = True,
     seed: int = 42,
 ) -> Any:
-  """Loads the R2E-Gym dataset used by the DeepSWE recipe."""
-  if dataset_path:
-    from datasets import DatasetDict  # pylint: disable=g-import-not-at-top
-    from datasets import load_from_disk  # pylint: disable=g-import-not-at-top
+  """Loads full R2E-Gym tasks and joins the canonical clean task selector."""
+  from datasets import DatasetDict  # pylint: disable=g-import-not-at-top
+  from datasets import load_dataset  # pylint: disable=g-import-not-at-top
+  from datasets import load_from_disk  # pylint: disable=g-import-not-at-top
 
+  if dataset_path:
     logging.info("Loading DeepSWE dataset from disk: %s", dataset_path)
     dataset = load_from_disk(dataset_path)
     if isinstance(dataset, DatasetDict):
       dataset = dataset[dataset_split]
-    dataset = dataset.map(_jsonify_lists, keep_in_memory=True)
-    if shuffle:
-      dataset = dataset.shuffle(seed=seed)
-    return dataset
+  else:
+    logging.info(
+        "Loading DeepSWE dataset %s revision=%s split=%s cache_dir=%s.",
+        dataset_name, dataset_revision, dataset_split, cache_dir,
+    )
+    dataset = load_dataset(
+        dataset_name,
+        revision=dataset_revision or None,
+        split=dataset_split,
+        cache_dir=cache_dir,
+    )
 
-  logging.info(
-      "Loading DeepSWE dataset %s split=%s cache_dir=%s shuffle=%s seed=%d.",
-      dataset_name,
-      dataset_split,
-      cache_dir,
-      shuffle,
-      seed,
-  )
-  return deepswe_data.create_dataset(
-      dataset_name=dataset_name,
-      dataset_split=dataset_split,
-      cache_dir=cache_dir,
-      shuffle=shuffle,
-      seed=seed,
-  )
+  source_rows = len(dataset)
+  if gold_whitelist:
+    images = _gold_images(gold_whitelist)
+    dataset = dataset.filter(
+        lambda entry: entry.get("docker_image") in images,
+        keep_in_memory=True,
+    )
+    matched_images = dataset["docker_image"]
+    if len(dataset) != len(images) or set(matched_images) != images:
+      raise ValueError(
+          "DeepSWE clean selector must match exactly one source row per image: "
+          f"selector={len(images)}, matched={len(dataset)}, "
+          f"unique_matched={len(set(matched_images))}"
+      )
+    logging.info(
+        "DeepSWE clean task filter: %d source rows -> %d matched tasks.",
+        source_rows, len(dataset),
+    )
+  dataset = dataset.map(_jsonify_lists, keep_in_memory=True)
+  if shuffle:
+    dataset = dataset.shuffle(seed=seed)
+  return dataset
 
 
 def _entry_at(dataset: Any, index: int) -> dict[str, Any]:

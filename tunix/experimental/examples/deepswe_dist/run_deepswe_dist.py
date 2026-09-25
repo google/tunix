@@ -69,7 +69,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   )
   parser.add_argument("--num_generations", type=int, default=2)
   parser.add_argument("--max_steps", type=int, default=1)
-  parser.add_argument("--max_prompt_length", type=int, default=1024)
+  parser.add_argument("--max_prompt_length", type=int, default=4096)
   parser.add_argument("--max_response_length", type=int, default=1024)
   parser.add_argument("--train_micro_batch_size", type=int, default=1)
   parser.add_argument(
@@ -107,7 +107,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " computation."
       ),
   )
-  parser.add_argument("--model_id", type=str, default="Qwen/Qwen3-1.7B")
+  parser.add_argument("--model_id", type=str, default="Qwen/Qwen3-4B-Instruct-2507")
   parser.add_argument("--tokenizer_path", type=str, default="")
   parser.add_argument("--temperature", type=float, default=1.0)
   parser.add_argument("--top_p", type=float, default=1.0)
@@ -142,7 +142,13 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument(
       "--dataset_name", type=str, default=deepswe.DEFAULT_DATASET_NAME
   )
+  parser.add_argument(
+      "--dataset_revision", type=str, default=deepswe.DEFAULT_DATASET_REVISION
+  )
   parser.add_argument("--dataset_split", type=str, default="train")
+  parser.add_argument(
+      "--gold_whitelist", type=str, default=deepswe.DEFAULT_GOLD_WHITELIST
+  )
   parser.add_argument(
       "--dataset_cache_dir",
       type=str,
@@ -306,8 +312,10 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
 
   dataset = deepswe.load_deepswe_dataset(
       dataset_name=args.dataset_name,
+      dataset_revision=args.dataset_revision,
       dataset_split=args.dataset_split,
       dataset_path=args.dataset_path,
+      gold_whitelist=args.gold_whitelist,
       cache_dir=args.dataset_cache_dir or None,
       shuffle=args.shuffle,
       seed=args.seed,

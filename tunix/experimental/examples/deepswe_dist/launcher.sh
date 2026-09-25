@@ -26,13 +26,13 @@ ORCHESTRATOR_PORT=${ORCHESTRATOR_PORT:-30000}
 TRAINER_PORT=${TRAINER_PORT:-20000}
 ROLLOUT_PORT=${ROLLOUT_PORT:-20001}
 
-MODEL_NAME=${MODEL_NAME:-Qwen3-1.7B}
-MODEL_ID=${MODEL_ID:-Qwen/Qwen3-1.7B}
+MODEL_NAME=${MODEL_NAME:-Qwen3-4B-Instruct-2507}
+MODEL_ID=${MODEL_ID:-Qwen/Qwen3-4B-Instruct-2507}
 ARTIFACT_ROOT=${ARTIFACT_ROOT:-"${REPO_ROOT}/artifacts/qwen3_dist_deepswe"}
 MODEL_DIR=${MODEL_DIR:-"${ARTIFACT_ROOT}/models/${MODEL_NAME}"}
 TOKENIZER_PATH=${TOKENIZER_PATH:-"${MODEL_DIR}"}
 
-MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-1024}
+MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-4096}
 MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-1024}
 BATCH_SIZE=${BATCH_SIZE:-1}
 NUM_GENERATIONS=${NUM_GENERATIONS:-2}
@@ -53,7 +53,7 @@ WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
 USE_LORA=${USE_LORA:-0}
 LORA_RANK=${LORA_RANK:-64}
 LORA_ALPHA=${LORA_ALPHA:-64.0}
-MODEL_DTYPE=${MODEL_DTYPE:-float32}
+MODEL_DTYPE=${MODEL_DTYPE:-bfloat16}
 DEBUG=${DEBUG:-0}
 USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
 
@@ -62,8 +62,10 @@ CHECKPOINT_MAX_TO_KEEP=${CHECKPOINT_MAX_TO_KEEP:-10}
 CHECKPOINT_ROOT_DIRECTORY=${CHECKPOINT_ROOT_DIRECTORY:-"${REPO_ROOT}/checkpoints"}
 
 DATASET_NAME=${DATASET_NAME:-R2E-Gym/R2E-Gym-Subset}
+DATASET_REVISION=${DATASET_REVISION:-2e8108ff942f24fcb5686badfaf7f9a8808566d5}
 DATASET_PATH=${DATASET_PATH:-}
 DATASET_SPLIT=${DATASET_SPLIT:-train}
+GOLD_WHITELIST=${GOLD_WHITELIST:-"${REPO_ROOT}/canon-zero-tim/clean_data/p46_q4_learnable/p46q4census02_qwen3_4b_instruct_2507_n16_learnable_tasks.jsonl"}
 DATASET_CACHE_DIR=${DATASET_CACHE_DIR:-"${ARTIFACT_ROOT}/dataset_cache"}
 SHUFFLE=${SHUFFLE:-true}
 SEED=${SEED:-42}
@@ -203,6 +205,7 @@ echo "  model:          ${MODEL_ID}"
 echo "  model dir:      ${MODEL_DIR}"
 echo "  tokenizer path: ${TOKENIZER_PATH}"
 echo "  dataset:        ${DATASET_PATH:-${DATASET_NAME}:${DATASET_SPLIT}}"
+echo "  clean tasks:    ${GOLD_WHITELIST}"
 echo "  trajectories:   $((BATCH_SIZE * NUM_GENERATIONS)) per step"
 echo "  batch size:     ${BATCH_SIZE}"
 echo "  generations:    ${NUM_GENERATIONS}"
@@ -316,6 +319,9 @@ echo "Launching DeepSWE rollout node..."
   if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
     ROLLOUT_CMD+=(--use_lora)
   fi
+  if [[ "$WEIGHT_SYNC_MODE" == "none" && "$SAMPLER" == "inprocess_vllm" ]]; then
+    ROLLOUT_CMD+=(--no-vllm_init_with_random_weights)
+  fi
   if [[ "$DEBUG" == "1" || "$DEBUG" == "true" || "$DEBUG" == "True" ]]; then
     ROLLOUT_CMD+=(--debug)
   fi
@@ -362,7 +368,9 @@ echo "Launching CPU orchestrator..."
     --beta="$BETA"
     --epsilon="$EPSILON"
     --dataset_name="$DATASET_NAME"
+    --dataset_revision="$DATASET_REVISION"
     --dataset_split="$DATASET_SPLIT"
+    --gold_whitelist="$GOLD_WHITELIST"
     --dataset_cache_dir="$DATASET_CACHE_DIR"
     --seed="$SEED"
     --env_backend="$ENV_BACKEND"
