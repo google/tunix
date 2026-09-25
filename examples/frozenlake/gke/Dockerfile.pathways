@@ -1,0 +1,25 @@
+# Thin layer on top of the image built from the repo Dockerfile:
+#  * re-pins jax / jaxlib / flax to the versions tpu-inference is pinned to.
+#    The repo Dockerfile's `uv pip install --upgrade flax` step pulls in a
+#    newer flax together with a newer jax (0.11.2), which neither tunix
+#    (jax<0.11.1) nor tpu-inference (jax==0.11.0) nor the Pathways server
+#    images (jax_0.11.0 tags) are built for.
+#  * adds pathwaysutils so the recipe can run as a Pathways client
+#    (JAX_PLATFORMS=proxy) on GKE, and gymnasium (the repo's `frozenlake`
+#    extra, which the FrozenLake env imports).
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+ARG JAX_VERSION=0.11.0
+ARG FLAX_VERSION=0.12.8
+ARG PATHWAYSUTILS_VERSION=0.1.11
+ARG GYMNASIUM_VERSION=1.3.0
+RUN uv pip install --python /opt/venv/bin/python \
+        "jax==${JAX_VERSION}" "jaxlib==${JAX_VERSION}" "flax==${FLAX_VERSION}" \
+        "pathwaysutils==${PATHWAYSUTILS_VERSION}" \
+        "gymnasium==${GYMNASIUM_VERSION}" && \
+    python -c "import jax, flax, pathwaysutils, gymnasium; \
+assert jax.__version__ == '${JAX_VERSION}', jax.__version__; \
+assert flax.__version__ == '${FLAX_VERSION}', flax.__version__; \
+print('jax', jax.__version__, 'flax', flax.__version__)" && \
+    (uv pip check --python /opt/venv/bin/python || true)

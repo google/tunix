@@ -1,0 +1,56 @@
+# Cloud Build config for the FrozenLake Score Centering A/B image.
+#
+# 1. Builds the repo Dockerfile (vLLM + tpu-inference + tunix).
+# 2. Adds pathwaysutils (Dockerfile.pathways).
+# 3. Runs the Score Centering unit tests inside the image on CPU. The image is
+#    only pushed if they pass.
+#
+# The build context must contain a raiden_wheels/ directory (the repo
+# Dockerfile COPYs it); `launch_sc_ab.sh build` stages a snapshot with one.
+substitutions:
+  _IMAGE: europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/linchai-repo/tunix_base_image
+  _TAG: sc-ab-dev
+  _PATHWAYSUTILS_VERSION: 0.1.11
+
+options:
+  machineType: E2_HIGHCPU_32
+  diskSizeGb: 200
+
+timeout: 7200s
+
+steps:
+- id: base
+  name: gcr.io/cloud-builders/docker
+  args: [build, -f, Dockerfile, -t, tunix-base:local, .]
+
+- id: pathways
+  name: gcr.io/cloud-builders/docker
+  args:
+  - build
+  - -f
+  - examples/frozenlake/gke/Dockerfile.pathways
+  - --build-arg
+  - BASE_IMAGE=tunix-base:local
+  - --build-arg
+  - PATHWAYSUTILS_VERSION=${_PATHWAYSUTILS_VERSION}
+  - -t
+  - ${_IMAGE}:${_TAG}
+  - .
+
+- id: sc-unit-tests
+  name: gcr.io/cloud-builders/docker
+  entrypoint: bash
+  args:
+  - -c
+  - |
+    set -e
+    docker run --rm -e JAX_PLATFORMS=cpu ${_IMAGE}:${_TAG} bash -c '
+      set -e
+      python examples/frozenlake/gke/image_check.py
+      uv pip install --python /opt/venv/bin/python -q pytest chex
+      python -m pytest -q -p no:cacheprovider \
+        tests/rl/agentic/agentic_grpo_learner_test.py -k ScoreCentering
+    '
+
+images:
+- ${_IMAGE}:${_TAG}

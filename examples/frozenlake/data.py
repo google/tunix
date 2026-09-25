@@ -11,6 +11,9 @@ reinforcement learning agents on various FrozenLake configurations.
 Usage:
     python recipes/frozenlake/data.py --train_size 10000 --test_size 100
 
+    # Harder split restricted to 5x5 .. 12x12 grids (bounds are inclusive).
+    python examples/frozenlake/data.py --min_grid_size 5 --max_grid_size 12
+
 The script generates:
 - Training dataset: Random FrozenLake configurations for agent training
 - Test dataset: Separate set of configurations for evaluation
@@ -44,25 +47,37 @@ def get_frozenlake_dict(seed: int, size: int, p: float) -> dict:
 
 
 def generate_dataset_parameters(
-    size: int, random_seed: int = 42
+    size: int,
+    random_seed: int = 42,
+    min_grid_size: int = 2,
+    max_grid_size: int = 12,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
   """Generate random parameters for FrozenLake environments.
 
   This function creates diverse environment configurations by sampling:
   - Random seeds for environment generation
-  - Grid sizes ranging from 2x2 to 12x12
+  - Grid sizes ranging from min_grid_size to max_grid_size (default 2x2 to
+    12x12)
   - Slip probabilities between 0.15-0.4 (p values 0.6-0.85)
 
   Args:
       size: Number of environment configurations to generate
       random_seed: Random seed for reproducible parameter generation
+      min_grid_size: Smallest grid side length (inclusive).
+      max_grid_size: Largest grid side length (inclusive).
 
   Returns:
       Tuple of (seeds, sizes, p_values) numpy arrays
   """
+  if not 2 <= min_grid_size <= max_grid_size:
+    raise ValueError(
+        "Expected 2 <= min_grid_size <= max_grid_size, got"
+        f" min_grid_size={min_grid_size}, max_grid_size={max_grid_size}."
+    )
   np.random.seed(random_seed)
   seeds = np.random.randint(0, 100000, size=size)
-  sizes = np.random.randint(2, 13, size=size)  # Grid sizes from 2x2 to 12x12
+  # Grid side lengths in [min_grid_size, max_grid_size] (inclusive).
+  sizes = np.random.randint(min_grid_size, max_grid_size + 1, size=size)
   p_values = np.random.uniform(
       0.6, 0.85, size=size
   )  # Slip probability between 0.15-0.4
@@ -92,6 +107,8 @@ def create_dataset(
     seed: int = 42,
     train_size: int = 10000,
     test_size: int = 100,
+    min_grid_size: int = 2,
+    max_grid_size: int = 12,
     **kwargs
 ) -> grain.MapDataset:
   """Lively generates the dataset, saves it to a local directory, and returns a MapDataset.
@@ -104,7 +121,12 @@ def create_dataset(
   if not os.path.exists(filepath):
     size = train_size if split == "train" else test_size
     print(f"Dynamically generating {size} instances for '{split}' split...")
-    seeds, sizes, ps = generate_dataset_parameters(size, random_seed=seed)
+    seeds, sizes, ps = generate_dataset_parameters(
+        size,
+        random_seed=seed,
+        min_grid_size=min_grid_size,
+        max_grid_size=max_grid_size,
+    )
     data = [
         get_frozenlake_dict(s, sizes[idx], ps[idx])
         for idx, s in enumerate(seeds)
@@ -162,6 +184,18 @@ def main():
           "Number of test environment configurations to generate (default: 100)"
       ),
   )
+  parser.add_argument(
+      "--min_grid_size",
+      type=int,
+      default=2,
+      help="Smallest grid side length, inclusive (default: 2)",
+  )
+  parser.add_argument(
+      "--max_grid_size",
+      type=int,
+      default=12,
+      help="Largest grid side length, inclusive (default: 12)",
+  )
 
   args = parser.parse_args()
 
@@ -173,7 +207,10 @@ def main():
 
   # Generate training dataset parameters
   train_seeds, train_sizes, train_ps = generate_dataset_parameters(
-      args.train_size, random_seed=42
+      args.train_size,
+      random_seed=42,
+      min_grid_size=args.min_grid_size,
+      max_grid_size=args.max_grid_size,
   )
   train_data = [
       get_frozenlake_dict(seed, train_sizes[idx], train_ps[idx])
@@ -182,7 +219,10 @@ def main():
 
   # Generate test dataset parameters (different random seed for diversity)
   test_seeds, test_sizes, test_ps = generate_dataset_parameters(
-      args.test_size, random_seed=123
+      args.test_size,
+      random_seed=123,
+      min_grid_size=args.min_grid_size,
+      max_grid_size=args.max_grid_size,
   )
   test_data = [
       get_frozenlake_dict(seed, test_sizes[idx], test_ps[idx])

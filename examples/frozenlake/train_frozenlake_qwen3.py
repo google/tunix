@@ -4,6 +4,11 @@ Targets v5p-8 / v6e-4 -class hosts where actor, reference, and rollout share
 a single mesh. Hyperparameters are exposed via argparse; the rollout backend
 is selected via the ``ROLLOUT_ENGINE`` environment variable ("vllm" or
 "vanilla", default "vllm").
+
+``--rollout_devices N`` switches to a disaggregated layout for multi-host
+slices (e.g. v5p-32 on GKE with Pathways, ``JAX_PLATFORMS=proxy``): the first
+N devices serve vLLM rollout and the remaining devices hold actor + reference.
+See ``examples/frozenlake/gke/`` for the launcher.
 """
 
 import contextlib
@@ -39,6 +44,17 @@ absl_logging.set_verbosity(absl_logging.INFO)
 absl_logging.set_stderrthreshold("info")
 print("Logging configured at INFO level.")
 
+# ====== Pathways ======
+# On GKE the client reaches the TPU slice through the Pathways proxy
+# (JAX_PLATFORMS=proxy). Carving disjoint rollout / trainer meshes out of one
+# slice requires disabling Pathways' sub-slice check, and the flag has to be in
+# place before the backend initializes (same setup as the Pathways Gemma4
+# FrozenLake recipe). Single-host runs are unaffected.
+ON_PATHWAYS = "proxy" in os.getenv("JAX_PLATFORMS", "")
+if ON_PATHWAYS:
+  os.environ["FLAGS_pathways_enforce_subset_devices_form_subslice"] = "false"
+  sys.argv.append("--FLAGS_pathways_enforce_subset_devices_form_subslice=false")
+
 from tunix.models.qwen3 import params as params_lib
 from tunix.models.qwen3 import model as model_lib
 from tunix.sft import metrics_logger
@@ -50,6 +66,14 @@ from tunix.sft import utils as sft_utils
 from tunix.cli.utils import data as data_lib
 from examples.frozenlake.agent import FrozenLakeAgent
 from examples.frozenlake.env import FrozenLakeEnv
+
+if ON_PATHWAYS:
+  try:
+    from absl import flags
+
+    flags.FLAGS.pathways_enforce_subset_devices_form_subslice = False
+  except Exception:  # pylint: disable=broad-except
+    pass
 
 _DISTRIBUTED_INITIALIZED = False
 try:
@@ -166,6 +190,52 @@ arg_parser.add_argument(
     "--disable_eval", action="store_true",
     help="Skip held-out eval rollouts.",
 )
+arg_parser.add_argument(
+    "--score_centering_diagnostics", action="store_true",
+    help="Request sampler top-k logprobs and log the score_centering/* "
+         "metrics without changing the loss (control arm of an SC A/B).",
+)
+arg_parser.add_argument(
+    "--env_max_steps", type=int, default=15,
+    help="Maximum number of agent/env turns per FrozenLake episode.",
+)
+arg_parser.add_argument(
+    "--eval_every_n_steps", type=int, default=10,
+    help="Run held-out eval rollouts every N train steps.",
+)
+arg_parser.add_argument(
+    "--num_test_batches", type=int, default=2,
+    help="Eval pool size in batches of --batch_size prompts (fixed set).",
+)
+# ====== Disaggregated layout (multi-host slices) ======
+arg_parser.add_argument(
+    "--rollout_devices", type=int, default=0,
+    help="0 (default): actor, reference and rollout share every device. N>0: "
+         "the first N devices run vLLM rollout, the remaining devices form "
+         "the trainer mesh shared by actor and reference.",
+)
+arg_parser.add_argument(
+    "--rollout_dp", type=int, default=2,
+    help="vLLM data-parallel degree; TP = rollout devices / rollout_dp.",
+)
+arg_parser.add_argument(
+    "--vllm_hbm_utilization", type=float, default=None,
+    help="vLLM HBM fraction. Default: 0.20 on a shared mesh, 0.70 when the "
+         "rollout owns its devices (--rollout_devices > 0).",
+)
+arg_parser.add_argument(
+    "--vllm_max_num_seqs", type=int, default=64,
+    help="Concurrent sequences per vLLM engine (per DP rank).",
+)
+arg_parser.add_argument(
+    "--save_interval_steps", type=int, default=None,
+    help="Checkpoint interval; only used when CKPT_DIR is set. Default: "
+         "$SAVE_INTERVAL_STEPS or effectively never.",
+)
+arg_parser.add_argument(
+    "--max_to_keep", type=int, default=1,
+    help="Checkpoints to keep when CKPT_DIR is set.",
+)
 args, _ = arg_parser.parse_known_args()
 
 TRAIN_FRACTION = 1.0
@@ -173,14 +243,33 @@ SEED = args.seed
 
 # ====== Sharding ======
 # Actor and reference share a pure tensor-parallel mesh (fsdp=1).
-SHARED_MESH_SHAPE = (1, jax.device_count())
 SHARED_MESH_AXIS_NAMES = ("fsdp", "tp")
-# vLLM rollout runs DP=2 x TP=(n/2) over the same devices. With DP=1,
-# tpu-inference builds its mesh via `jax.make_mesh` without `axis_types`, which
-# defaults to Explicit axes; its sampler's `with_sharding_constraint` on the
-# vocab-sharded logits then fails as an assertion at engine init. The DP>1
-# path does not hit this.
-ROLLOUT_MESH_SHAPE = (2, jax.device_count() // 2)
+# vLLM rollout runs DP=2 x TP=(n/2). With DP=1, tpu-inference builds its mesh
+# via `jax.make_mesh` without `axis_types`, which defaults to Explicit axes;
+# its sampler's `with_sharding_constraint` on the vocab-sharded logits then
+# fails as an assertion at engine init. The DP>1 path does not hit this.
+ROLLOUT_DP = args.rollout_dp
+ROLLOUT_DEVICES = args.rollout_devices
+DISAGGREGATED = ROLLOUT_DEVICES > 0
+if DISAGGREGATED:
+  # Rollout owns devices[:ROLLOUT_DEVICES]; actor + reference (the "trainer
+  # mesh") own the rest, so vLLM never competes with the trainer for HBM.
+  if not 0 < ROLLOUT_DEVICES < jax.device_count():
+    raise ValueError(
+        f"--rollout_devices must be in (0, {jax.device_count()}); got"
+        f" {ROLLOUT_DEVICES}."
+    )
+  TRAINER_DEVICES = jax.device_count() - ROLLOUT_DEVICES
+else:
+  # Everything shares every device.
+  ROLLOUT_DEVICES = TRAINER_DEVICES = jax.device_count()
+if ROLLOUT_DEVICES % ROLLOUT_DP:
+  raise ValueError(
+      f"--rollout_dp={ROLLOUT_DP} must divide the {ROLLOUT_DEVICES} rollout"
+      " devices."
+  )
+SHARED_MESH_SHAPE = (1, TRAINER_DEVICES)
+ROLLOUT_MESH_SHAPE = (ROLLOUT_DP, ROLLOUT_DEVICES // ROLLOUT_DP)
 
 # ====== GRPO ======
 MAX_PROMPT_LENGTH = args.max_prompt_length
@@ -195,13 +284,24 @@ NUM_GENERATIONS = args.num_generations
 # some headroom without provisioning a huge unused KV-cache pool — on a
 # shared trainer+rollout mesh that KV-cache pool consumes HBM that the
 # trainer needs at peak (logits + activations + optimizer state).
-VLLM_MAX_NUM_SEQS = 64
+# Per engine, i.e. per rollout DP rank.
+VLLM_MAX_NUM_SEQS = args.vllm_max_num_seqs
 VLLM_MAX_BATCHED_TOKENS = VLLM_MAX_NUM_SEQS * 4 * 1024 // 8
+# The rollout's own devices can take most of the HBM once it no longer shares
+# them with the trainer.
+VLLM_HBM_UTILIZATION = (
+    args.vllm_hbm_utilization
+    if args.vllm_hbm_utilization is not None
+    else (0.70 if DISAGGREGATED else 0.20)
+)
 
 NUM_ITERATIONS = 1
 SCORE_CENTERING = args.score_centering
+SCORE_CENTERING_DIAGNOSTICS = args.score_centering_diagnostics
 SCORE_CENTERING_TOP_K = args.score_centering_top_k
 SCORE_CENTERING_EPS = args.score_centering_eps
+# Both modes consume the sampler's per-token top-k logprobs.
+WANTS_SAMPLER_TOPK = SCORE_CENTERING or SCORE_CENTERING_DIAGNOSTICS
 BETA = args.beta
 EPSILON = args.epsilon
 EPSILON_HIGH = args.epsilon_high
@@ -226,10 +326,11 @@ NUM_BATCHES = args.num_batches
 # prompts; NUM_TEST_BATCHES * BATCH_SIZE should be >= 100 to cover one full
 # pass per eval. With the default BATCH_SIZE=64, NUM_TEST_BATCHES=2 is
 # sufficient. Eval wall-time scales linearly with NUM_TEST_BATCHES *
-# BATCH_SIZE * num_generations.
-NUM_TEST_BATCHES = 2
+# BATCH_SIZE * num_generations. The pool is built once, so every eval sees the
+# same prompts.
+NUM_TEST_BATCHES = args.num_test_batches
 
-EVAL_EVERY_N_STEPS = 10
+EVAL_EVERY_N_STEPS = args.eval_every_n_steps
 NUM_EPOCHS = args.num_epochs
 MAX_STEPS = int(NUM_BATCHES * NUM_ITERATIONS * TRAIN_FRACTION * NUM_EPOCHS)
 
@@ -256,17 +357,23 @@ WARMUP_STEPS = 0
 MAX_GRAD_NORM = 100.0
 
 # ====== Checkpoint saving ======
-SAVE_INTERVAL_STEPS = 10**9  # effectively disabled; set CKPT_DIR + lower this to enable
-MAX_TO_KEEP = 1
+# Only used when CKPT_DIR is set; the default interval effectively disables
+# periodic saves. The learner restores the step and fast-forwards the data
+# iterator when it finds a checkpoint in CKPT_DIR.
+if args.save_interval_steps is not None:
+  SAVE_INTERVAL_STEPS = args.save_interval_steps
+else:
+  SAVE_INTERVAL_STEPS = int(os.getenv("SAVE_INTERVAL_STEPS", str(10**9)))
+MAX_TO_KEEP = args.max_to_keep
 
 # ====== Rollout ======
 ROLLOUT_ENGINE = os.getenv("ROLLOUT_ENGINE", "vllm")  # "vanilla" | "vllm"
-if SCORE_CENTERING and ROLLOUT_ENGINE != "vllm":
+if WANTS_SAMPLER_TOPK and ROLLOUT_ENGINE != "vllm":
   # The vanilla rollout never populates topk_logprobs, so the loss would fall
   # back to plain GRPO with no warning. Fail loudly instead.
   raise ValueError(
-      "--score_centering requires ROLLOUT_ENGINE=vllm; got "
-      f"{ROLLOUT_ENGINE!r}."
+      "--score_centering / --score_centering_diagnostics require"
+      f" ROLLOUT_ENGINE=vllm; got {ROLLOUT_ENGINE!r}."
   )
 
 # ====== Paths ======
@@ -283,35 +390,50 @@ if MODEL_VERSION not in _MODEL_CONFIGS:
 DATA_DIR = os.getenv("DATA_DIR", "/tmp/data/frozenlake")
 
 # Checkpointing is opt-in: set CKPT_DIR to a writable path to enable.
-CKPT_DIR = None
+CKPT_DIR = os.getenv("CKPT_DIR") or None
 TB_LOG_DIR = os.getenv("TB_LOG_DIR", "/tmp/tunix-tb/frozenlake")
 
 
-# ====== Build the single shared mesh ======
-if jax.device_count() < math.prod(SHARED_MESH_SHAPE):
-  raise ValueError(
-      f"Expected at least {math.prod(SHARED_MESH_SHAPE)} devices for mesh "
-      f"{SHARED_MESH_SHAPE}, got {jax.device_count()}."
+# ====== Build the meshes ======
+def _make_mesh(shape, devices, **mesh_utils_kwargs):
+  device_array = jax._src.mesh_utils.create_device_mesh(
+      shape, devices, **mesh_utils_kwargs
+  )
+  return jax.sharding.Mesh(
+      device_array,
+      axis_names=SHARED_MESH_AXIS_NAMES,
+      axis_types=(jax.sharding.AxisType.Auto,) * len(shape),
   )
 
-shared_device_list = jax._src.mesh_utils.create_device_mesh(
-    SHARED_MESH_SHAPE, jax.devices()[: math.prod(SHARED_MESH_SHAPE)]
-)
-shared_mesh = jax.sharding.Mesh(
-    shared_device_list,
-    axis_names=SHARED_MESH_AXIS_NAMES,
-    axis_types=(jax.sharding.AxisType.Auto,) * len(SHARED_MESH_SHAPE),
-)
-print(f"shared_mesh.devices.shape={shared_mesh.devices.shape}")
 
-rollout_device_list = jax._src.mesh_utils.create_device_mesh(
-    ROLLOUT_MESH_SHAPE, jax.devices()[: math.prod(ROLLOUT_MESH_SHAPE)]
-)
-rollout_mesh = jax.sharding.Mesh(
-    rollout_device_list,
-    axis_names=SHARED_MESH_AXIS_NAMES,
-    axis_types=(jax.sharding.AxisType.Auto,) * len(ROLLOUT_MESH_SHAPE),
-)
+if DISAGGREGATED:
+  # Disjoint sub-slices: rollout on the first devices, actor + reference on the
+  # rest. The sub-meshes need not align with physical axes.
+  rollout_mesh = _make_mesh(
+      ROLLOUT_MESH_SHAPE,
+      jax.devices()[:ROLLOUT_DEVICES],
+      allow_split_physical_axes=True,
+  )
+  shared_mesh = _make_mesh(
+      SHARED_MESH_SHAPE,
+      jax.devices()[ROLLOUT_DEVICES:],
+      allow_split_physical_axes=True,
+  )
+  if set(rollout_mesh.devices.flat) & set(shared_mesh.devices.flat):
+    raise ValueError("Rollout and trainer meshes must not share devices.")
+else:
+  if jax.device_count() < math.prod(SHARED_MESH_SHAPE):
+    raise ValueError(
+        f"Expected at least {math.prod(SHARED_MESH_SHAPE)} devices for mesh "
+        f"{SHARED_MESH_SHAPE}, got {jax.device_count()}."
+    )
+  shared_mesh = _make_mesh(
+      SHARED_MESH_SHAPE, jax.devices()[: math.prod(SHARED_MESH_SHAPE)]
+  )
+  rollout_mesh = _make_mesh(
+      ROLLOUT_MESH_SHAPE, jax.devices()[: math.prod(ROLLOUT_MESH_SHAPE)]
+  )
+print(f"shared_mesh.devices.shape={shared_mesh.devices.shape}")
 print(f"rollout_mesh.devices.shape={rollout_mesh.devices.shape}")
 
 # ====== Data ======
@@ -415,7 +537,42 @@ qwen_actor = params_lib.create_model_from_safe_tensors(
 show_hbm_usage("after loading qwen_actor")
 
 # ====== Checkpoint + metrics + optimizer ======
+def _tolerate_missing_bucket_metadata_access():
+  """Lets orbax checkpoint to a bucket with object-level access only.
+
+  orbax reads the bucket metadata (storage.buckets.get) to detect hierarchical
+  namespace whenever it lists checkpoint steps (restore, e.g. after a JobSet
+  restart) or deletes one (max_to_keep). A service account that only holds
+  object roles on the bucket (the GKE node SA on gs://linchai-bucket-dev) gets
+  a 403 there and the job dies. Treat that as "no hierarchical namespace",
+  the GCS default; saves themselves never need the lookup.
+  """
+  from google.api_core import exceptions as google_exceptions  # pylint: disable=g-import-not-at-top
+  from orbax.checkpoint._src.path import gcs_utils  # pylint: disable=g-import-not-at-top
+
+  is_hns = gcs_utils.is_hierarchical_namespace_enabled
+  warned = []
+
+  def is_hns_or_flat(path):
+    try:
+      return is_hns(path)
+    except google_exceptions.Forbidden as e:
+      if not warned:
+        warned.append(True)
+        logging.warning(
+            "No bucket metadata access for %s (%s); assuming a flat-namespace"
+            " bucket for checkpointing.",
+            path,
+            e.message,
+        )
+      return False
+
+  gcs_utils.is_hierarchical_namespace_enabled = is_hns_or_flat
+
+
 if CKPT_DIR:
+  if CKPT_DIR.startswith("gs://"):
+    _tolerate_missing_bucket_metadata_access()
   checkpointing_options = ocp.CheckpointManagerOptions(
       save_interval_steps=SAVE_INTERVAL_STEPS, max_to_keep=MAX_TO_KEEP
   )
@@ -429,13 +586,28 @@ wandb_config.update({
     "rollout_engine": ROLLOUT_ENGINE,
     "model_id": MODEL_VERSION,
     "mesh_shape": SHARED_MESH_SHAPE,
+    "rollout_mesh_shape": ROLLOUT_MESH_SHAPE,
+    "disaggregated": DISAGGREGATED,
+    "vllm_hbm_utilization_effective": VLLM_HBM_UTILIZATION,
+    "on_pathways": ON_PATHWAYS,
 })
+wandb_kwargs = {"config": wandb_config}
+if ON_PATHWAYS:
+  try:
+    import wandb
+
+    # Don't mirror the (multi-GB) process log into W&B; kubectl logs has it.
+    wandb_kwargs["settings"] = wandb.Settings(console="off")
+  except ImportError:
+    pass
+# Run grouping / resume come from the standard WANDB_RUN_GROUP, WANDB_TAGS,
+# WANDB_RUN_ID and WANDB_RESUME environment variables.
 metrics_logging_options = metrics_logger.MetricsLoggerOptions(
     log_dir=TB_LOG_DIR,
     project_name=os.getenv("WANDB_PROJECT", "tunix-frozenlake"),
     run_name=os.getenv("WANDB_RUN_NAME", ""),
     flush_every_n_steps=1,
-    backend_kwargs={"wandb": {"config": wandb_config}},
+    backend_kwargs={"wandb": wandb_kwargs},
 )
 
 optimizer = optax.adamw(
@@ -461,11 +633,11 @@ base_rollout_dict = {
     "top_p": TOP_P,
     "top_k": TOP_K,
     "return_logprobs": True,
-    # Score Centering needs the sampler's top-k logprobs per generated token.
-    # This must be set before RLEngine is built: RLEngine.__init__ freezes it
-    # into the vLLM engine's `max_logprobs`, so GRPOLearner's own auto-config
-    # arrives too late.
-    "num_logprobs": SCORE_CENTERING_TOP_K if SCORE_CENTERING else 1,
+    # Score Centering (and its diagnostics-only mode) needs the sampler's top-k
+    # logprobs per generated token. This must be set before RLEngine is built:
+    # RLEngine.__init__ freezes it into the vLLM engine's `max_logprobs`, so
+    # GRPOLearner's own auto-config arrives too late.
+    "num_logprobs": SCORE_CENTERING_TOP_K if WANTS_SAMPLER_TOPK else 1,
     "max_tokens_to_generate": MAX_RESPONSE_LENGTH,
 }
 
@@ -478,7 +650,7 @@ vllm_rollout_dict = {
     # max_seq_len rather than the vLLM default. Once vLLM-TPU gains support
     # for sleep/wake_up, this can be relaxed since the KV pool can be
     # offloaded to host RAM during train_step.
-    "rollout_vllm_hbm_utilization": 0.20,
+    "rollout_vllm_hbm_utilization": VLLM_HBM_UTILIZATION,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
     # Async scheduling adds an extra in-flight step that can race weight sync;
@@ -508,6 +680,8 @@ else:
   raise ValueError(f"Unsupported rollout engine: {ROLLOUT_ENGINE}")
 
 cluster_config = rl_engine_lib.ClusterConfig(
+    # The reference model reuses the trainer mesh (with --rollout_devices this
+    # is the non-rollout sub-slice).
     role_to_mesh={
         rl_engine_lib.Role.ACTOR: shared_mesh,
         rl_engine_lib.Role.REFERENCE: shared_mesh,
@@ -570,6 +744,7 @@ grpo_config = GRPOConfig(
     sampler_is="token",
     sampler_is_threshold=2.0,
     score_centering=SCORE_CENTERING,
+    score_centering_diagnostics=SCORE_CENTERING_DIAGNOSTICS,
     score_centering_top_k=SCORE_CENTERING_TOP_K,
     score_centering_eps=SCORE_CENTERING_EPS,
     exact_token_continuity=(
@@ -619,7 +794,7 @@ grpo_trainer = GRPOLearner(
     agent_class=FrozenLakeAgent,
     agent_kwargs={"use_multistep_prompt": True},
     env_class=FrozenLakeEnv,
-    env_kwargs={"max_steps": 15},
+    env_kwargs={"max_steps": args.env_max_steps},
     algo_config=grpo_config,
     chat_parser=chat_parser,
     metric_fns=[metric_fn],
@@ -642,3 +817,12 @@ grpo_trainer.train(
     train_dataset,
     eval_dataset=None if args.disable_eval else test_dataset,
 )
+
+# train() ends with rl_engine.close(), which flushes the buffered metrics,
+# finishes the W&B run and closes the checkpointer. Rollout-engine threads can
+# still keep the interpreter alive afterwards, so batch jobs (the GKE launcher
+# sets EXIT_AFTER_TRAIN=1) exit hard here to release their TPUs.
+if os.getenv("EXIT_AFTER_TRAIN"):
+  print("Training finished; exiting (EXIT_AFTER_TRAIN).", flush=True)
+  sys.stderr.flush()
+  os._exit(0)
