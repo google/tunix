@@ -72,7 +72,7 @@ jobs:
   #      the Python environment.
   # ---------------------------------------------------------------------------
   run_core:
-    runs-on: [linux-x86-ct6e-180-8tpu]
+    runs-on: [linux-x86-ct5lp-224-8tpu]
     environment: testing
     # Note: GitHub Actions `timeout-minutes` only counts active execution time after
     # a runner picks up the job (queue wait time is excluded). Measured execution
@@ -82,7 +82,7 @@ jobs:
       image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/tpu:latest # zizmor: ignore[unpinned-images]
       options: --privileged
       env:
-        CLOUD_TPU_ACCELERATOR: v6e-8
+        CLOUD_TPU_ACCELERATOR: v5e-8
         JAX_PLATFORMS: tpu
     steps:
       - name: Checkout code
@@ -236,7 +236,7 @@ jobs:
   # ---------------------------------------------------------------------------
   run_dev:
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-    runs-on: [linux-x86-ct6e-180-8tpu]
+    runs-on: [linux-x86-ct5lp-224-8tpu]
     environment: testing
     # Note: GitHub Actions `timeout-minutes` only counts active execution time after
     # a runner picks up the job (queue wait time is excluded). Measured execution
@@ -246,7 +246,7 @@ jobs:
       image: vllm/vllm-tpu:nightly-20260911-4b80060-51da0ca # zizmor: ignore[unpinned-images]
       options: --privileged
       env:
-        CLOUD_TPU_ACCELERATOR: v6e-8
+        CLOUD_TPU_ACCELERATOR: v5e-8
         JAX_PLATFORMS: tpu,cpu
     steps:
       - name: Checkout code
