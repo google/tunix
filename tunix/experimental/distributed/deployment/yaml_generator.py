@@ -297,8 +297,12 @@ def main() -> None:
 
   if use_dynamic_slicing and slice_topology:
     if slice_size and slice_size > 1:
+      # The slice-topology annotation must be the job's FULL shape: the
+      # mjobset webhook checks the requested TPU count against it, so a
+      # 4x4x8 job annotated 4x4x4 is refused ("128 TPUs requested, but must
+      # be exactly 64"). The partition levels below stay at the 4x4x4 unit.
       anno_lines = [
-          f'cloud.google.com/gke-tpu-slice-topology: "{slice_topology}"',
+          f'cloud.google.com/gke-tpu-slice-topology: "{tpu_topology}"',
           'cloud.google.com/skip-tpu-webhook-check: "true"',
           "kueue.x-k8s.io/podset-required-topology: cloud.google.com/gce-topology-block",
           f"kueue.x-k8s.io/podset-slice-required-topology: cloud.google.com/gke-tpu-partition-{slice_topology}-id",

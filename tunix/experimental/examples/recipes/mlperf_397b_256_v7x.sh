@@ -28,6 +28,11 @@ export USE_DYNAMIC_SLICING="true"
 export TPU_RESERVATION="${TPU_RESERVATION:-ghostfish-pogoag4tylwed}"
 export ENABLE_MULTI_NUMA=1
 
+# Head pod lands on cpu-np (~257G allocatable). mlperf_pathways_config.sh's
+# 260G user-container request plus proxy/rm requests (~280G) never schedules
+# there. Only the request matters for placement; the limits stay as configured.
+export USER_CONTAINER_MEMORY="${USER_CONTAINER_MEMORY:-48G}"
+
 export RAIDEN_DEVICES_PER_HOST=8
 export TPU_RAIDEN_DATA_NICS="eth0"
 
