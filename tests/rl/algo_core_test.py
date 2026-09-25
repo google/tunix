@@ -245,6 +245,143 @@ class AlgoCoreTest(absltest.TestCase):
         np.testing.assert_allclose(lp, lu, rtol=1e-5, atol=1e-5)
         np.testing.assert_allclose(lp, -2.25, rtol=1e-4, atol=1e-4)
 
+  def test_fused_sampler_trainer_agreement_matches_two_pass_reference(self):
+    """Fused in-loss agreement/TIS/masking produces identical loss, grads, and metrics to 2-pass."""
+    from types import SimpleNamespace  # pylint: disable=g-import-not-at-top
+    from flax import nnx  # pylint: disable=g-import-not-at-top
+    from tunix.rl import common  # pylint: disable=g-import-not-at-top
+
+    class _ToyModel(nnx.Module):
+
+      def __init__(self, *, vocab_size, rngs):
+        self.emb = nnx.Embed(vocab_size, 8, rngs=rngs)
+        self.head = nnx.Linear(8, vocab_size, rngs=rngs)
+
+      def __call__(
+          self,
+          x,
+          segment_ids=None,
+          positions=None,
+          cache=None,
+          attention_mask=None,
+      ):
+        del segment_ids, positions, attention_mask
+        return self.head(self.emb(x)), cache
+
+    model = _ToyModel(vocab_size=16, rngs=nnx.Rngs(42))
+    prompt_ids = jnp.array([[1, 2], [3, 4]], jnp.int32)
+    prompt_mask = jnp.ones_like(prompt_ids, jnp.int32)
+    completion_ids = jnp.array([[5, 6, 7], [8, 9, 10]], jnp.int32)
+    completion_mask = jnp.array([[1.0, 1.0, 1.0], [1.0, 1.0, 0.0]], jnp.float32)
+    advantages = jnp.array([1.2, -0.8], jnp.float32)
+    rollout_logps = jnp.array(
+        [[-1.5, -2.0, -1.8], [-5.0, -4.5, 0.0]], jnp.float32
+    )
+
+    graphdef, state = nnx.split(model)
+    trainer_logps = common.compute_per_token_logps(
+        graphdef,
+        state,
+        prompt_tokens=prompt_ids,
+        completion_tokens=completion_ids,
+        pad_id=0,
+        eos_id=-1,
+        stop_gradient=True,
+        return_entropy=False,
+    )
+
+    for sampler_is, seq_err_thresh in [
+        (None, None),
+        ('token', None),
+        (None, 2.0),
+        ('token', 2.0),
+    ]:
+      with self.subTest(sampler_is=sampler_is, seq_err_thresh=seq_err_thresh):
+        cfg = SimpleNamespace(
+            beta=0.0,
+            epsilon=0.2,
+            epsilon_high=0.2,
+            epsilon_c=None,
+            loss_algo='grpo',
+            loss_agg_mode='token-mean',
+            temperature=1.0,
+            kl_loss_mode='low_var_kl',
+            kl_clamp_value=None,
+            force_compute_kl=False,
+            use_rollout_logps=True,
+            sampler_is=sampler_is,
+            sampler_is_threshold=2.0,
+            seq_logprob_error_threshold=seq_err_thresh,
+        )
+        # 1. Fused single-pass example (raw rollout_logps)
+        ex_fused = common.TrainExample(
+            prompt_ids=prompt_ids,
+            prompt_mask=prompt_mask,
+            completion_ids=completion_ids,
+            completion_mask=completion_mask,
+            advantages=advantages,
+            ref_per_token_logps=None,
+            old_per_token_logps=rollout_logps,
+        )
+        # 2. Two-pass precomputed reference example
+        ref_metrics, ref_is_weights, ref_filtered_mask = (
+            common.sampler_trainer_agreement(
+                rollout_logps,
+                trainer_logps,
+                completion_mask,
+                sampler_is=sampler_is,
+                sampler_is_threshold=2.0,
+                seq_logprob_error_threshold=seq_err_thresh,
+            )
+        )
+        ref_old_logps = (
+            trainer_logps
+            if (sampler_is == 'token' or seq_err_thresh is not None)
+            else rollout_logps
+        )
+        ex_ref = common.TrainExample(
+            prompt_ids=prompt_ids,
+            prompt_mask=prompt_mask,
+            completion_ids=completion_ids,
+            completion_mask=ref_filtered_mask,
+            advantages=advantages,
+            ref_per_token_logps=None,
+            old_per_token_logps=ref_old_logps,
+            sampler_is_weights=ref_is_weights,
+            sampler_agreement_applied=True,
+        )
+
+        def _loss_and_aux(m, ex):
+          out = algo_core.grpo_loss_fn(m, ex, cfg, pad_id=0, eos_id=-1)
+          return out.primary_loss.compute(), out.aux_metrics
+
+        (loss_fused, aux_fused), grads_fused = nnx.value_and_grad(
+            _loss_and_aux, has_aux=True
+        )(model, ex_fused)
+        (loss_ref, aux_ref), grads_ref = nnx.value_and_grad(
+            _loss_and_aux, has_aux=True
+        )(model, ex_ref)
+
+        np.testing.assert_allclose(loss_fused, loss_ref, rtol=1e-6, atol=1e-6)
+        for g_f, g_r in zip(
+            jax.tree_util.tree_leaves(grads_fused),
+            jax.tree_util.tree_leaves(grads_ref),
+        ):
+          np.testing.assert_allclose(g_f, g_r, rtol=1e-6, atol=1e-6)
+        for k, (val, _) in ref_metrics.items():
+          self.assertIn(k, aux_fused)
+          fused_val = getattr(aux_fused[k], 'compute', lambda: aux_fused[k])()
+          np.testing.assert_allclose(
+              float(np.asarray(fused_val)), val, rtol=1e-5, atol=1e-5
+          )
+        for k in ('reduced_pg_loss', 'is_ratio/mean', 'ppo_kl'):
+          np.testing.assert_allclose(
+              float(np.asarray(getattr(aux_fused[k], 'compute', lambda: aux_fused[k])())),
+              float(np.asarray(getattr(aux_ref[k], 'compute', lambda: aux_ref[k])())),
+              rtol=1e-6,
+              atol=1e-6,
+          )
+
 
 if __name__ == '__main__':
   absltest.main()
