@@ -865,7 +865,6 @@ def ppo_policy_loss_fn(
   else:
     per_token_logps = outputs
 
-
   advantages = train_example.advantages
   old_per_token_logps = train_example.old_per_token_logps
 
@@ -1585,25 +1584,83 @@ def grpo_loss_fn(
   return sft_utils.LossOutput(primary_loss=total_loss, aux_metrics=aux)  # pyrefly: ignore[bad-argument-type]
 
 
+MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE: int = 2
+
+
+def _grouped_valid_stats(
+    rewards: np.ndarray | jax.Array,
+    valid_mask: np.ndarray | jax.Array,
+    num_generations: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+  """Reshapes rewards into groups and computes valid-only group statistics.
+
+  Args:
+    rewards: Flat `[num_groups * num_generations]` rewards.
+    valid_mask: Flat `[num_groups * num_generations]` boolean mask; `True` marks
+      a trajectory that should contribute to (and receive) an advantage.
+    num_generations: Group size `G`.
+
+  Returns:
+    Tuple `(grouped_rewards, grouped_mask, valid_counts, masked_sum)` where the
+    grouped arrays are `[num_groups, num_generations]` and `valid_counts` /
+    `masked_sum` are `[num_groups, 1]`. Rewards of invalid trajectories are
+    zeroed in `grouped_rewards` and excluded from `masked_sum`.
+  """
+  grouped_rewards = np.asarray(rewards, dtype=np.float32).reshape(
+      -1, num_generations
+  )
+  grouped_mask = (
+      np.asarray(valid_mask).astype(bool).reshape(-1, num_generations)
+  )
+  grouped_rewards = np.where(grouped_mask, grouped_rewards, 0.0)
+  valid_counts = grouped_mask.sum(axis=-1, keepdims=True)
+  masked_sum = grouped_rewards.sum(axis=-1, keepdims=True)
+  return grouped_rewards, grouped_mask, valid_counts, masked_sum
+
+
 @function_registry.register_advantage_estimator("grpo")
-def compute_advantages(rewards: np.ndarray, num_generations: int) -> np.ndarray:
+def compute_advantages(
+    rewards: np.ndarray,
+    num_generations: int,
+    valid_mask: np.ndarray | jax.Array | None = None,
+) -> np.ndarray:
   """Compute group relative advantages.
 
   Args:
     rewards: reward functions output.
     num_generations: Number of generations.
+    valid_mask: Optional boolean mask, same shape as `rewards`, marking the
+      trajectories that are healthy enough to be trained on. When provided, the
+      group mean and (sample, `ddof=1`) std are computed over valid trajectories
+      only, invalid trajectories get a `0.0` advantage, and groups with fewer
+      than `MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE` valid trajectories are zeroed
+      out entirely (a sample std is undefined there).
 
   Returns:
     Group relative advantages.
   """
-  mean_grouped_rewards = rewards.reshape(-1, num_generations).mean(axis=-1)
-  std_grouped_rewards = rewards.reshape(-1, num_generations).std(
-      axis=-1, ddof=1
-  )
+  if valid_mask is None:
+    valid_mask = np.ones_like(rewards, dtype=bool)
 
-  mean_grouped_rewards = mean_grouped_rewards.repeat(num_generations)
-  std_grouped_rewards = std_grouped_rewards.repeat(num_generations)
-  return (rewards - mean_grouped_rewards) / (std_grouped_rewards + 1e-6)
+  grouped_rewards, grouped_mask, valid_counts, masked_sum = (
+      _grouped_valid_stats(rewards, valid_mask, num_generations)
+  )
+  mean_grouped_rewards = masked_sum / np.maximum(valid_counts, 1)
+  squared_deviations = np.where(
+      grouped_mask, (grouped_rewards - mean_grouped_rewards) ** 2, 0.0
+  ).sum(axis=-1, keepdims=True)
+  std_grouped_rewards = np.sqrt(
+      squared_deviations / np.maximum(valid_counts - 1, 1)
+  )
+  advantages = (grouped_rewards - mean_grouped_rewards) / (
+      std_grouped_rewards + 1e-6
+  )
+  advantages = np.where(
+      grouped_mask & (valid_counts >= MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE),
+      advantages,
+      0.0,
+  )
+  return advantages.reshape(np.shape(rewards)).astype(np.float32)
 
 
 # Fraction of a group's total squared deviation below which a leave-one-out
@@ -1615,7 +1672,9 @@ _LOO_VAR_NOISE_FLOOR = 1e-5
 
 @function_registry.register_advantage_estimator("grpo-loo")
 def compute_grpo_loo_advantages(
-    rewards: jax.Array, num_generations: int
+    rewards: jax.Array,
+    num_generations: int,
+    valid_mask: np.ndarray | jax.Array | None = None,
 ) -> jax.Array:
   """Group-relative advantages with a leave-one-out baseline and scale.
 
@@ -1637,52 +1696,51 @@ def compute_grpo_loo_advantages(
   Args:
     rewards: Per-sequence rewards, `[num_prompts * num_generations]`.
     num_generations: Generations per prompt.
+    valid_mask: Optional boolean mask marking valid trajectories.
 
   Returns:
     Advantages with the same shape as `rewards`.
   """
-  if num_generations < 2:
+  if num_generations < MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE:
     # No other sample to form a baseline from.
     return jnp.zeros_like(rewards)
 
-  grouped = rewards.reshape(-1, num_generations)
-  n_others = num_generations - 1
-  # Everything below works on deviations from the group mean. The identities
-  # are the same as on the raw rewards, but subtracting the mean once up front
-  # keeps the variance from cancelling catastrophically in float32 when the
-  # rewards are large relative to their spread.
-  centered = grouped - grouped.mean(axis=-1, keepdims=True)
-  # x_i - mean(x_{j != i}) reduces to the deviation scaled by (n + 1) / n.
-  advantages = centered * ((n_others + 1) / n_others)
+  if valid_mask is None:
+    valid_mask = np.ones_like(rewards, dtype=bool)
 
-  # The leave-one-out set holds `n_others` samples, so an unbiased variance
-  # needs at least two of them. At num_generations == 2 the variance is
-  # undefined and no scaling is applied.
-  if n_others >= 2:
-    # sum_{j != i} (x_j - mean(x_{j != i}))^2, expanded around the group mean.
-    sum_sq = jnp.square(centered).sum(axis=-1, keepdims=True)
-    loo_var = (
-        sum_sq - jnp.square(centered) * ((n_others + 1) / n_others)
-    ) / (n_others - 1)
-    # A sample whose leave-one-out set has no spread keeps its raw advantage
-    # rather than being divided by a near-zero scale, which would manufacture a
-    # large advantage out of rounding. The comparison is against the group's own
-    # scale, not against zero: the expression above is a difference of two
-    # similar positive numbers, so a genuinely zero variance comes out as float
-    # noise. Decided per sample rather than per group, so a group can mix
-    # normalised and raw advantages.
-    loo_var = jnp.where(loo_var > _LOO_VAR_NOISE_FLOOR * sum_sq, loo_var, 0.0)
-    loo_std = jnp.sqrt(loo_var)
-    advantages = jnp.where(
-        loo_std > 0, advantages / (loo_std + 1e-6), advantages
-    )
+  grouped, grouped_mask, valid_counts, masked_sum = _grouped_valid_stats(
+      rewards, valid_mask, num_generations
+  )
+  n_others = np.maximum(valid_counts - 1, 1)
+  group_mean = masked_sum / np.maximum(valid_counts, 1)
+  centered = np.where(grouped_mask, grouped - group_mean, 0.0)
+  scale = (n_others + 1) / n_others
+  advantages = centered * scale
 
-  return advantages.flatten()
+  sum_sq = np.square(centered).sum(axis=-1, keepdims=True)
+  loo_var = np.where(
+      n_others >= 2,
+      (sum_sq - np.square(centered) * scale) / np.maximum(n_others - 1, 1),
+      0.0,
+  )
+  loo_var = np.where(loo_var > _LOO_VAR_NOISE_FLOOR * sum_sq, loo_var, 0.0)
+  loo_std = np.sqrt(loo_var)
+  advantages = np.where(
+      loo_std > 0, advantages / (loo_std + 1e-6), advantages
+  )
+  advantages = np.where(
+      grouped_mask & (valid_counts >= MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE),
+      advantages,
+      0.0,
+  )
+  return jnp.asarray(advantages.reshape(np.shape(rewards)), dtype=jnp.float32)
 
 
 @function_registry.register_advantage_estimator("rloo")
 def compute_rloo_advantages(
-    rewards: jax.Array, num_generations: int
+    rewards: jax.Array,
+    num_generations: int,
+    valid_mask: np.ndarray | jax.Array | None = None,
 ) -> jax.Array:
   """Compute RLOO (REINFORCE Leave-One-Out) advantages.
 
@@ -1692,21 +1750,36 @@ def compute_rloo_advantages(
   Args:
     rewards: reward functions output.
     num_generations: Number of generations.
+    valid_mask: Optional boolean mask, same shape as `rewards`, marking the
+      trajectories that are healthy enough to be trained on. When provided, the
+      leave-one-out baseline averages valid peers only, invalid trajectories get
+      a `0.0` advantage, and groups with fewer than
+      `MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE` valid trajectories are zeroed out
+      entirely (no peer is left to form a baseline).
 
   Returns:
     RLOO advantages.
   """
-  if num_generations < 2:
+  if num_generations < MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE:
     # RLOO requires at least 2 samples to calculate a baseline.
     return jnp.zeros_like(rewards)
 
-  reshaped_rewards = rewards.reshape(-1, num_generations)
-  loo_mean = (
-      reshaped_rewards.sum(axis=-1, keepdims=True) - reshaped_rewards
-  ) / (num_generations - 1)
-  rloo_advantages = reshaped_rewards - loo_mean
+  if valid_mask is None:
+    valid_mask = np.ones_like(rewards, dtype=bool)
 
-  return rloo_advantages.flatten()
+  grouped_rewards, grouped_mask, valid_counts, masked_sum = (
+      _grouped_valid_stats(rewards, valid_mask, num_generations)
+  )
+  loo_mean = (masked_sum - grouped_rewards) / np.maximum(valid_counts - 1, 1)
+  rloo_advantages = grouped_rewards - loo_mean
+  rloo_advantages = np.where(
+      grouped_mask & (valid_counts >= MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE),
+      rloo_advantages,
+      0.0,
+  )
+  return jnp.asarray(
+      rloo_advantages.reshape(np.shape(rewards)), dtype=jnp.float32
+  )
 
 
 # ==============================================================================
@@ -1716,16 +1789,36 @@ def compute_rloo_advantages(
 
 @function_registry.register_advantage_estimator("drgrpo")
 def compute_drgrpo_advantages(
-    rewards: jax.Array, num_generations: int
+    rewards: jax.Array,
+    num_generations: int,
+    valid_mask: np.ndarray | jax.Array | None = None,
 ) -> jax.Array:
   """Group relative advantages -- done right.
 
   Args:
     rewards: reward functions output.
     num_generations: Number of generations.
+    valid_mask: Optional boolean mask, same shape as `rewards`, marking the
+      trajectories that are healthy enough to be trained on. When provided, the
+      group mean is computed over valid trajectories only, invalid trajectories
+      get a `0.0` advantage, and groups with fewer than
+      `MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE` valid trajectories are zeroed out
+      entirely (a single valid trajectory has zero deviation from its own mean).
 
   Returns:
     Group relative advantages.
   """
-  mean_grouped_rewards = rewards.reshape(-1, num_generations).mean(axis=1)
-  return rewards - mean_grouped_rewards.repeat(num_generations)
+  if valid_mask is None:
+    valid_mask = np.ones_like(rewards, dtype=bool)
+
+  grouped_rewards, grouped_mask, valid_counts, masked_sum = (
+      _grouped_valid_stats(rewards, valid_mask, num_generations)
+  )
+  mean_grouped_rewards = masked_sum / np.maximum(valid_counts, 1)
+  advantages = grouped_rewards - mean_grouped_rewards
+  advantages = np.where(
+      grouped_mask & (valid_counts >= MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE),
+      advantages,
+      0.0,
+  )
+  return jnp.asarray(advantages.reshape(np.shape(rewards)), dtype=jnp.float32)
