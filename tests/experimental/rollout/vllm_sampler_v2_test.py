@@ -156,6 +156,33 @@ class TestRLVllmSamplerInference(unittest.TestCase):
 
         asyncio.run(run_raw_test())
 
+    def test_build_vllm_params_detokenizes_by_default(self):
+        """Tunix SamplingParams carry no detokenize field; text must still be returned."""
+        args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B")
+        sampler = RLVllmSampler(engine_args=args)
+        req = SimpleNamespace(
+            prompt="p",
+            sampling_params=SimpleNamespace(max_tokens=8, temperature=1.0),
+        )
+        self.assertTrue(sampler._build_vllm_params(req, {}).detokenize)
+
+    def test_build_vllm_params_detokenize_opt_out(self):
+        """An explicit detokenize=False from the request or kwargs is honored."""
+        args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B")
+        sampler = RLVllmSampler(engine_args=args)
+        req = SimpleNamespace(
+            prompt="p",
+            sampling_params=SimpleNamespace(max_tokens=8, detokenize=False),
+        )
+        self.assertFalse(sampler._build_vllm_params(req, {}).detokenize)
+        req_no_field = SimpleNamespace(
+            prompt="p", sampling_params=SimpleNamespace(max_tokens=8)
+        )
+        self.assertFalse(
+            sampler._build_vllm_params(req_no_field, {"detokenize": False})
+            .detokenize
+        )
+
     def test_sample_error_resilience(self):
         """Verifies error isolation when an individual generator stream raises an exception."""
         args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B")

@@ -225,11 +225,17 @@ class RLVllmSampler:
                 _get_val(kwargs, "include_stop_str_in_output", True),
             )
         ),
+        # Detokenize unless the caller opts out. The agentic path reads the
+        # action from `text` (trajectory_collect_engine passes it to
+        # `agent.update_from_model`), and neither tunix `SamplingParams` nor
+        # `RolloutWorker` sets this field, so a False default hands every
+        # agent an empty string. vLLM also needs detokenization to match stop
+        # strings.
         detokenize=bool(
             _get_val(
                 sparams,
                 "detokenize",
-                _get_val(kwargs, "detokenize", False),
+                _get_val(kwargs, "detokenize", True),
             )
         ),
         logprobs=1
