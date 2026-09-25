@@ -207,6 +207,14 @@ export KUEUE_QUEUE_NAME=${KUEUE_QUEUE_NAME:-${KUEUE_QUEUE:-${QUEUE_NAME:-}}}
 export PRIORITY_CLASS=${PRIORITY_CLASS:-medium}
 
 export TRAINER_EXTRA_ENV=${TRAINER_EXTRA_ENV:-}
+# Extra KEY=VALUE env for the orchestrator and rollout processes (the recipes set
+# Raiden tuning and weight-sync timeouts here). The VLLM_RAY_* lists tell vLLM
+# which of the rollout driver's env vars to forward to its Ray workers on the
+# other hosts of a multi-host rollout.
+export ORCHESTRATOR_EXTRA_ENV=${ORCHESTRATOR_EXTRA_ENV:-}
+export ROLLOUT_EXTRA_ENV=${ROLLOUT_EXTRA_ENV:-}
+export VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY=${VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY:-}
+export VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY:-}
 export DRY_RUN=${DRY_RUN:-false}
 
 apply_manifest() {
@@ -315,7 +323,7 @@ start_orchestrator() {
       PYTHONUNBUFFERED=1 \
       TUNIX_IS_INTERNAL_ENV=false \
       ${BOOTSTRAP_CMD} \
-      python -m tunix.experimental.distributed.runtime.main \
+      ${ORCHESTRATOR_EXTRA_ENV:+${ORCHESTRATOR_EXTRA_ENV} }python -m tunix.experimental.distributed.runtime.main \
         --discovery_id=${ORCHESTRATOR_ID} \
         --discovery_port=${ORCHESTRATOR_PORT} \
         --process_main=tunix.experimental.examples.deepswe_dist.run_deepswe_dist.main \
@@ -676,6 +684,9 @@ if cfg:
         ${VLLM_LOGGING_LEVEL:+VLLM_LOGGING_LEVEL=${VLLM_LOGGING_LEVEL}} \
         ${ROLLOUT_ENV_FLAGS} \
         ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} \
+        ${VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY:+VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY=\"${VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY}\"} \
+        ${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY:+VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=\"${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY}\"} \
+        ${ROLLOUT_EXTRA_ENV} \
         SKIP_JAX_PRECOMPILE=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ${sandbox_env} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} python -m tunix.experimental.distributed.runtime.main \
           --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
           --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
