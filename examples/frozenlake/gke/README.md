@@ -67,6 +67,10 @@ environment variables (see the top of `launch_sc_ab.sh`).
   (`PeftTrainer._save_last_checkpoint` passes no custom metadata), so
   relaunching a finished run with the same `--run-tag` starts another
   `--num_batches` steps from the final weights; use a new `--run-tag` instead.
+- `up --no-ckpt` launches without checkpoints (empty `CKPT_DIR`). A restarted
+  JobSet then retrains from step 0 and logs to a new W&B run
+  `<run id>-a<restart attempt>`, because W&B drops steps below a run's last
+  logged step.
 - `EXIT_AFTER_TRAIN=1` makes the controller exit right after training, so the
   JobSet completes and releases the TPUs even if rollout threads linger.
 - Hotfix without rebuilding: `launch_sc_ab.sh code-tarball` uploads `tunix/`

@@ -22,8 +22,9 @@ spec:
   coordinator:
     replicatedJob: pathways-head
   failurePolicy:
-    # Crash / preemption: recreate the whole JobSet; the recipe resumes from the
-    # latest checkpoint in CKPT_DIR and the W&B run (fixed WANDB_RUN_ID).
+    # Crash / preemption: recreate the whole JobSet. With CKPT_DIR set the recipe
+    # resumes from the latest checkpoint and the W&B run (fixed WANDB_RUN_ID);
+    # with an empty CKPT_DIR it retrains from step 0 as W&B run <id>-a<attempt>.
     restartStrategy: Recreate
     maxRestarts: {{MAX_RESTARTS}}
   network:
@@ -132,6 +133,13 @@ spec:
               - |
                 set -euo pipefail
                 echo "[sc-ab] start $(date -u +%FT%TZ) jobset=${JOBSET_NAME} restart_attempt=${JOBSET_RESTART_ATTEMPT}"
+                if [[ -z "${CKPT_DIR}" && "${JOBSET_RESTART_ATTEMPT:-0}" != "0" ]]; then
+                  # No checkpoints: this attempt retrains from step 0, so it logs
+                  # to its own W&B run (W&B drops steps below a run's last step).
+                  export WANDB_RUN_ID="${WANDB_RUN_ID}-a${JOBSET_RESTART_ATTEMPT}"
+                  export WANDB_RUN_NAME="${WANDB_RUN_NAME}-a${JOBSET_RESTART_ATTEMPT}"
+                  echo "[sc-ab] no CKPT_DIR: retraining from step 0 as W&B run ${WANDB_RUN_ID}"
+                fi
                 if [[ -n "${CODE_TARBALL}" ]]; then
                   # Hotfix path: overlay a source tarball on /app (tunix is
                   # installed in editable mode) instead of rebuilding the image.

@@ -4,8 +4,11 @@
 #   launch_sc_ab.sh build                    Snapshot the working tree and start
 #                                            an async Cloud Build (cloudbuild.yaml).
 #   launch_sc_ab.sh up --image IMAGE [--arm both|sc-on|sc-off] [--smoke]
-#                      [--run-tag TAG] [--code-tarball gs://...] [--dry-run]
+#                      [--run-tag TAG] [--code-tarball gs://...] [--no-ckpt]
+#                      [--dry-run]
 #                                            Render the JobSet(s) and create them.
+#                                            --no-ckpt: no checkpoints; a crash
+#                                            restart retrains from step 0.
 #   launch_sc_ab.sh down [--arm ...] [--smoke]
 #                                            Delete the JobSet(s).
 #   launch_sc_ab.sh status                   JobSets / workloads / pods.
@@ -134,7 +137,7 @@ cmd_code_tarball() {
 }
 
 cmd_up() {
-  local image="" arm=both smoke=0 dry_run=0 run_tag code_tarball=""
+  local image="" arm=both smoke=0 dry_run=0 run_tag code_tarball="" no_ckpt=0
   run_tag="$(date -u +%Y%m%d-%H%M)"
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -143,6 +146,7 @@ cmd_up() {
       --smoke) smoke=1; shift ;;
       --run-tag) run_tag="$2"; shift 2 ;;
       --code-tarball) code_tarball="$2"; shift 2 ;;
+      --no-ckpt) no_ckpt=1; shift ;;
       --dry-run) dry_run=1; shift ;;
       *) die "unknown flag: $1" ;;
     esac
@@ -152,7 +156,7 @@ cmd_up() {
     || die "missing Secret $WANDB_SECRET (see README.md)"
   mkdir -p "$RENDER_DIR"
 
-  local a name group kind files=()
+  local a name group kind ckpt_dir files=()
   for a in $(arms_of "$arm"); do
     name="$(jobset_name "$a" "$smoke")"
     if [[ "$smoke" == 1 ]]; then
@@ -162,11 +166,15 @@ cmd_up() {
       kind=full; group="$WANDB_GROUP"
       set -- "${COMMON_ARGS[@]}" "${FULL_ARGS[@]}" "$(arm_flag "$a")"
     fi
+    # An empty CKPT_DIR disables checkpointing in the recipe; a JobSet restart
+    # then retrains from step 0 as a new W&B run (see the JobSet template).
+    ckpt_dir="$BUCKET/ckpt/frozenlake-sc-ab/$name-$run_tag"
+    [[ "$no_ckpt" == 1 ]] && ckpt_dir=""
     R_JOBSET_NAME="$name" R_EXPERIMENT="$EXPERIMENT" R_ARM="$a" \
     R_IMAGE="$image" R_PATHWAYS_TAG="$PATHWAYS_TAG" \
     R_RESERVATION="$RESERVATION" R_PRIORITY_CLASS="$PRIORITY_CLASS" \
     R_MAX_RESTARTS="$MAX_RESTARTS" R_DATA_DIR="$DATA_DIR" \
-    R_CKPT_DIR="$BUCKET/ckpt/frozenlake-sc-ab/$name-$run_tag" \
+    R_CKPT_DIR="$ckpt_dir" \
     R_TB_LOG_DIR="$BUCKET/tensorboard/grpo/$name-$run_tag" \
     R_CODE_TARBALL="$code_tarball" \
     R_WANDB_SECRET="$WANDB_SECRET" R_WANDB_PROJECT="$WANDB_PROJECT" \
@@ -177,6 +185,7 @@ cmd_up() {
       render "$HERE/frozenlake_sc_ab_v5p32.yaml" "$RENDER_DIR/$name.yaml"
     echo "rendered: $RENDER_DIR/$name.yaml"
     echo "  args:   $*"
+    echo "  ckpt:   ${ckpt_dir:-(disabled)}"
     files+=(-f "$RENDER_DIR/$name.yaml")
   done
   if [[ "$dry_run" == 1 ]]; then
@@ -211,5 +220,5 @@ case "${1:-}" in
   up) shift; cmd_up "$@" ;;
   down) shift; cmd_down "$@" ;;
   status) shift; cmd_status "$@" ;;
-  *) sed -n '2,24p' "$0"; exit 1 ;;
+  *) sed -n '2,25p' "$0"; exit 1 ;;
 esac
