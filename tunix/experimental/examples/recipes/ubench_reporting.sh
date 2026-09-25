@@ -67,15 +67,24 @@ if [[ "${_ubench_command}" == "start" && "${MLPERF_NO_LAUNCH:-0}" != "1" ]]; the
     _ubench_fail "Set JOB_PREFIX to a new name for each run. The default" \
       "(\$USER) is the same for all of your runs."
   fi
-  if [[ "${TRAINER_TPU_SLICE}" != tpu7x:* || "${ROLLOUT_TPU_SLICE}" != tpu7x:* ]]; then
-    _ubench_fail "Only tpu7x recipes are supported. Got" \
-      "TRAINER_TPU_SLICE=${TRAINER_TPU_SLICE}," \
+  # The topologies and ROLLOUT_REPLICAS are used in arithmetic below, so check
+  # their format first. Leading zeros are rejected because bash reads them as
+  # octal numbers.
+  _ubench_slice_re='^tpu7x:[1-9][0-9]*(x[1-9][0-9]*)*$'
+  if [[ ! "${TRAINER_TPU_SLICE}" =~ ${_ubench_slice_re} ||
+        ! "${ROLLOUT_TPU_SLICE}" =~ ${_ubench_slice_re} ]]; then
+    _ubench_fail "Only tpu7x slices with a topology such as tpu7x:4x4x4 are" \
+      "supported. Got TRAINER_TPU_SLICE=${TRAINER_TPU_SLICE}," \
       "ROLLOUT_TPU_SLICE=${ROLLOUT_TPU_SLICE}."
+  fi
+  _ubench_rollout_replicas="${ROLLOUT_REPLICAS:-1}"
+  if [[ ! "${_ubench_rollout_replicas}" =~ ^[1-9][0-9]*$ ]]; then
+    _ubench_fail "ROLLOUT_REPLICAS must be a positive integer. Got" \
+      "'${_ubench_rollout_replicas}'."
   fi
 
   _ubench_trainer_topology="${TRAINER_TPU_SLICE#tpu7x:}"
   _ubench_rollout_topology="${ROLLOUT_TPU_SLICE#tpu7x:}"
-  _ubench_rollout_replicas="${ROLLOUT_REPLICAS:-1}"
   _ubench_trainer_chips="$(_ubench_num_chips "${_ubench_trainer_topology}")"
   _ubench_rollout_chips="$(( $(_ubench_num_chips "${_ubench_rollout_topology}") * _ubench_rollout_replicas ))"
 
@@ -87,7 +96,10 @@ if [[ "${_ubench_command}" == "start" && "${MLPERF_NO_LAUNCH:-0}" != "1" ]]; the
         "or delete the old run first: gcloud storage rm -r ${UBENCH_RUN_DIR}"
     fi
 
-    _ubench_tmp="$(mktemp -d)"
+    # Each file is streamed to GCS ("-" reads stdin), so no temporary files are
+    # left behind if an upload fails. With `set -e`, a failed upload stops the
+    # launch. This file is sourced, so it doesn't set an EXIT trap, which would
+    # replace a trap of the caller.
     {
       echo "# Written by tunix/experimental/examples/recipes/ubench_reporting.sh."
       echo "benchmark_type: DISTRIBUTED"
@@ -111,10 +123,10 @@ if [[ "${_ubench_command}" == "start" && "${MLPERF_NO_LAUNCH:-0}" != "1" ]]; the
       # Same as the uBench default: skip the first (warmup) step.
       echo "    metrics_config:"
       echo "      start_step: 1"
-    } > "${_ubench_tmp}/resolved_config.yaml"
+    } | gcloud storage cp - "${UBENCH_RUN_DIR}/logs/resolved_config.yaml"
     # uBench copies this into the metrics_other BigQuery field. `chips` is
     # the total for the role: chips per replica times replicas.
-    cat > "${_ubench_tmp}/rl_topology.yaml" <<EOF
+    gcloud storage cp - "${UBENCH_RUN_DIR}/logs/rl_topology.yaml" <<EOF
 trainer:
   accelerator: tpu7x
   topology: "${_ubench_trainer_topology}"
@@ -127,12 +139,8 @@ rollout:
   chips: ${_ubench_rollout_chips}
 total_chips: $((_ubench_trainer_chips + _ubench_rollout_chips))
 EOF
-    echo "job_start_time: '$(date -u +%Y-%m-%dT%H:%M:%SZ)'" > "${_ubench_tmp}/workload_timestamps.yaml"
-
-    gcloud storage cp "${_ubench_tmp}/resolved_config.yaml" "${UBENCH_RUN_DIR}/logs/resolved_config.yaml"
-    gcloud storage cp "${_ubench_tmp}/rl_topology.yaml" "${UBENCH_RUN_DIR}/logs/rl_topology.yaml"
-    gcloud storage cp "${_ubench_tmp}/workload_timestamps.yaml" "${UBENCH_RUN_DIR}/workload_timestamps.yaml"
-    rm -rf "${_ubench_tmp}"
+    echo "job_start_time: '$(date -u +%Y-%m-%dT%H:%M:%SZ)'" |
+      gcloud storage cp - "${UBENCH_RUN_DIR}/workload_timestamps.yaml"
 
     echo "UBENCH_REPORTING: After the run finishes, report it with:" >&2
     echo "  ubench benchmark report --run-name ${JOB_PREFIX} --gcs-root-path ${UBENCH_GCS_ROOT_PATH}" >&2
