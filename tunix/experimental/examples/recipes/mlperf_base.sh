@@ -155,7 +155,10 @@ export TRAJECTORY_GROUP_ORDER=${TRAJECTORY_GROUP_ORDER:-arrival}
 
 # Sequence packing
 export MAX_SEQ_TOKEN_PER_TPU=${MAX_SEQ_TOKEN_PER_TPU:-65536}
-export MAX_SEGMENTS_PER_PACKED_ROW=${MAX_SEGMENTS_PER_PACKED_ROW:-16}
+# Stopgap: one trajectory per packed row. With maxtext >= 6c2adb7be (#5351), rows holding
+# several trajectories give NaN grad_norm (GDN segment-reset backward); 16 was NaN 8/8, 1 is
+# finite. Restore 16 once the maxtext fix (#5364 or later) is verified on packed rows.
+export MAX_SEGMENTS_PER_PACKED_ROW=${MAX_SEGMENTS_PER_PACKED_ROW:-1}
 
 # Sampling Parameters (explicitly disable top-k, set top-p 1.0 and temperature 1.0)
 export TEMPERATURE="1.0"
