@@ -1252,6 +1252,37 @@ class RLEngine:
     # sync weights marks the end of a full batch, so increment the global steps.
     self.global_steps += 1
 
+  def pin_behavior_policy(self, params: jaxtyping.PyTree) -> None:
+    """Pins `params` as the anchor policy and pushes it to the rollout.
+
+    For a sub-batch mid-step resume (agentic_rl_learner): the trainer
+    restored the step's mid-step weights, but the step's behavior policy is
+    its step-start checkpoint, which the learner loads into a fresh host
+    tree and hands over here. Same filter and transfer-guard path as
+    sync_weights, WITHOUT the global_steps increment (the step is still in
+    progress). `params` must not alias the live actor's variables.
+    """
+    if jax.devices() and jax.default_backend() not in ["tpu", "gpu"]:
+      cm = contextlib.ExitStack()
+      cm.enter_context(jax.transfer_guard_device_to_host("disallow_explicit"))
+      cm.enter_context(jax.transfer_guard_host_to_device("disallow_explicit"))
+    else:
+      cm = contextlib.nullcontext()
+    with cm:
+      filter_types = (
+          nnx.LoRAParam
+          if sft_utils.is_lora_enabled(self.actor_trainer.model)
+          else nnx.Param,
+      )
+      self.rollout.update_params(
+          statelib.filter_state(params, filter_types), filter_types
+      )
+      if self.cluster_config.gc_collect_after_weight_sync:
+        gc.collect()
+      self._anchor_policy_state = rl_utils.put_params_on_memory_kind(
+          params, "pinned_host"
+      )
+
   def get_values(
       self,
       prompt_tokens: jax.Array,
