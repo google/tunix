@@ -15,6 +15,8 @@ unchanged on any spot VM:
   CKPT_DIR              Output checkpoint dir. Checkpointing is opt-in; if
                         unset, no checkpoints are written.
   TB_LOG_DIR            TensorBoard log dir (default /tmp/tunix-tb/frozenlake).
+  DISABLE_TRAJECTORY_LOG  If set, turn off the per-trajectory CSV logger
+                        (recommended for long runs with a gs:// log dir).
   SHARED_MESH_SHAPE     Override the (fsdp, tp) mesh shape. Defaults to
                         (1, jax.device_count()) (pure tensor parallel).
   ROLLOUT_ENGINE        "vanilla" | "vllm"  (default "vllm" — the disaggregated
@@ -67,7 +69,10 @@ print("Logging configured at INFO level.")
 from tunix.models.gemma4 import params_safetensors as params_lib
 from tunix.models.gemma4 import model as model_lib
 from tunix.oss import utils as oss_utils
+from tunix.perf import export as perf_export
+from tunix.perf import metrics as perf_metrics
 from tunix.sft import metrics_logger
+from tunix.sft import profiler as profiler_lib
 from tunix.rl.agentic.agentic_grpo_learner import GRPOConfig, GRPOLearner
 from tunix.rl.agentic.parser.chat_template_parser import parser
 from tunix.rl import rl_cluster as rl_engine_lib
@@ -162,6 +167,25 @@ arg_parser.add_argument(
     "--advantage_estimator", type=str, default="rloo",
     help="'grpo' (z-score) or 'rloo' (leave-one-out baseline).",
 )
+# Sequence packing: per-row token budget for the trainer. None disables
+# packing. Must be >= max_prompt_length + max_response_length.
+arg_parser.add_argument("--max_seq_token_per_tpu", type=int, default=None)
+# Overrides the NUM_BATCHES * NUM_EPOCHS default when set.
+arg_parser.add_argument("--max_steps", type=int, default=None)
+# Prompt groups (x num_generations sequences) per trainer forward+backward.
+arg_parser.add_argument("--train_micro_batch_size", type=int, default=2)
+arg_parser.add_argument(
+    "--splash_impl", type=str, default="jax", choices=["jax", "tokamax"],
+    help="Splash (flash) attention backend for the trainer forward.",
+)
+# Tunix perf-metrics Perfetto trace (rollout/trainer spans). Local path only;
+# the v1 trace writer does not support gs://.
+arg_parser.add_argument("--perf_trace_dir", type=str, default=None)
+# JAX profiler (XLA/TPU trace). Step counts are trainer train_step
+# iterations, not global steps.
+arg_parser.add_argument("--profile_dir", type=str, default=None)
+arg_parser.add_argument("--profile_skip_steps", type=int, default=0)
+arg_parser.add_argument("--profile_steps", type=int, default=0)
 args, _ = arg_parser.parse_known_args()
 
 TRAIN_FRACTION = 1.0
@@ -225,7 +249,9 @@ NUM_TEST_BATCHES = 2
 
 EVAL_EVERY_N_STEPS = 10
 NUM_EPOCHS = 3
-MAX_STEPS = int(NUM_BATCHES * NUM_ITERATIONS * TRAIN_FRACTION * NUM_EPOCHS)
+MAX_STEPS = args.max_steps or int(
+    NUM_BATCHES * NUM_ITERATIONS * TRAIN_FRACTION * NUM_EPOCHS
+)
 
 MAX_CONCURRENCY = args.max_concurrency
 OFF_POLICY_STEPS = 0
@@ -374,6 +400,7 @@ if ENABLE_FLASH_ATTENTION:
   config.use_flash_attention = True
   config.flash_attention_block_size = 256
   config.use_sliding_window_kv_cache = False
+  config.splash_attention_impl = model_lib.SplashAttentionImpl(args.splash_impl)
 if ENABLE_MIX_PRECISION:
   config.dtype = jnp.bfloat16
 
@@ -417,6 +444,22 @@ metrics_logging_options = metrics_logger.MetricsLoggerOptions(
     flush_every_n_steps=1,
     backend_kwargs={"wandb": {"config": wandb_config,}},
 )
+
+if args.profile_dir and args.profile_steps > 0:
+  profiler_options = profiler_lib.ProfilerOptions(
+      log_dir=args.profile_dir,
+      skip_first_n_steps=args.profile_skip_steps,
+      profiler_steps=args.profile_steps,
+  )
+else:
+  profiler_options = None
+
+if args.perf_trace_dir:
+  perf_metrics_options = perf_metrics.PerfMetricsOptions(
+      enable_trace_writer=True, trace_dir=args.perf_trace_dir
+  )
+else:
+  perf_metrics_options = None
 
 optimizer = optax.adamw(
     learning_rate=LEARNING_RATE,
@@ -525,12 +568,15 @@ cluster_config = rl_engine_lib.ClusterConfig(
         # invokes the trainer ``mini_batch_size // train_micro_batch_size``
         # times, so the optimizer still sees a ``mini_batch_size`` gradient
         # per update.
-        train_micro_batch_size=2,
+        train_micro_batch_size=args.train_micro_batch_size,
         compute_logps_micro_batch_size=2,
         metrics_logging_options=metrics_logging_options,
         checkpoint_root_directory=CKPT_DIR,
         checkpointing_options=checkpointing_options,
         compute_logps_chunk_size=2048,
+        max_seq_token_per_tpu=args.max_seq_token_per_tpu,
+        profiler_options=profiler_options,
+        perf_metrics_options=perf_metrics_options,
     ),
     rollout_config=rollout_engine_config,
 )
@@ -558,13 +604,28 @@ grpo_config = GRPOConfig(
     sampler_is="token",
     sampler_is_threshold=2.0,
     advantage_estimator=args.advantage_estimator,
+    # Off: with it on, the Gemma4 parser's appended "\n" per assistant turn is
+    # not counted against max_response_length, so a trajectory that fills the
+    # budget ends at max_response_length + 1 and _process_results raises.
+    exact_token_continuity=False,
 )
+
+# PerfMetricsOptions alone is inert; the RLEngine only traces when handed a
+# PerfMetricsConfig with an export fn (mirrors tunix/cli/base_rl_pipeline.py).
+if perf_metrics_options is not None:
+  perf_config = perf_metrics.PerfMetricsConfig()
+  perf_config.custom_export_fn = (
+      perf_export.PerfMetricsExport.from_cluster_config(cluster_config)
+  )
+else:
+  perf_config = None
 
 rl_engine = rl_engine_lib.RLEngine(
     actor=gemma4_actor,
     reference=gemma4_ref,
     tokenizer=tokenizer,
     cluster_config=cluster_config,
+    perf_config=perf_config,
 )
 show_hbm_usage("after RLEngine creation")
 
@@ -607,6 +668,14 @@ grpo_trainer = GRPOLearner(
     metric_fns=[metric_fn],
 )
 show_hbm_usage("after GRPOLearner creation")
+
+# The learner always attaches a per-trajectory CSV logger to the metrics log
+# dir. On GCS each flush re-reads and rewrites the whole (multi-GB) CSV, the
+# writes time out, and abandoned upload threads pile up and stall rollouts.
+if os.getenv("DISABLE_TRAJECTORY_LOG") and grpo_trainer._trajectory_logger:
+  grpo_trainer._trajectory_logger.stop()
+  grpo_trainer._trajectory_logger = None
+  print("Trajectory logging disabled via DISABLE_TRAJECTORY_LOG.")
 
 # Pass test_dataset as the eval set so the learner runs held-out rollouts
 # every EVAL_EVERY_N_STEPS and logs `eval/...` metrics (including
