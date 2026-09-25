@@ -346,7 +346,7 @@ class RLProgramTest(absltest.TestCase):
 
   def test_program_use_rollout_logps_matching(self):
     self.mock_algo.algo_config = types.SimpleNamespace(
-        temperature=0.7,
+        temperature=None,
         use_rollout_logps=True,
     )
     program = rl_program.StandardRLProgram(
@@ -364,7 +364,7 @@ class RLProgramTest(absltest.TestCase):
       self,
   ):
     self.mock_algo.algo_config = types.SimpleNamespace(
-        temperature=0.7,
+        temperature=None,
         use_rollout_logps=True,
     )
     program = rl_program.StandardRLProgram(
@@ -1782,6 +1782,46 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_reference_kl_logprobs_forwards_temperature_in_train_stage(self):
+    async def _run():
+      self.mock_algo.requires_reference_kl = True
+      mock_payload = datatypes.RLTrainerPayload(
+          prompt_ids=np.array([[1, 2]], dtype=np.int32),
+          prompt_mask=np.ones((1, 2), dtype=np.float32),
+          completion_ids=np.array([[3, 4]], dtype=np.int32),
+          completion_mask=np.ones((1, 2), dtype=np.float32),
+          advantages=np.ones((1, 2), dtype=np.float32),
+          ref_per_token_logps=None,
+          old_per_token_logps=None,
+      )
+      self.assembler.feed = mock.MagicMock(
+          return_value=[
+              batch_assembly.AssembledBatch(
+                  payload=mock_payload,
+                  is_final_batch=True,
+                  trajectory_ids=(),
+              )
+          ]
+      )
+      self.mock_engine.per_token_logps = mock.AsyncMock(
+          return_value=np.array([[-0.1, -0.2]], dtype=np.float32)
+      )
+
+      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
+      program = self._create_program(
+          dataset=["prompt_0"],
+          generation_args=datatypes.GenerationArgs(temperature=0.6),
+      )
+
+      await program.run_async(self.mock_engine)
+
+      self.mock_engine.per_token_logps.assert_called_once_with(
+          datatypes.Role.REFERENCE, items=mock_payload, temperature=0.6
+      )
+      self.assertEqual(program.step, 1)
+
+    asyncio.run(_run())
+
   def test_reference_kl_raises_type_error_for_invalid_microbatch(self):
     async def _run():
       self.mock_algo.requires_reference_kl = True
@@ -2939,7 +2979,7 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
-  def test_program_temperature_matching_sets_algo_config(self):
+  def test_program_raises_if_algo_config_temperature_is_set(self):
     mock_algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
     mock_algo.num_generations = 2
     mock_algo.mini_batch_size = 1
@@ -2952,12 +2992,16 @@ class RLProgramTest(absltest.TestCase):
     )
 
     gen_args = datatypes.GenerationArgs(temperature=0.8)
-    rl_program.StandardRLProgram(
-        dataset=("p0",),
-        algo=mock_algo,
-        generation_args=gen_args,
-    )
-    self.assertEqual(mock_algo.algo_config.temperature, 0.8)
+    with self.assertRaisesRegex(
+        ValueError,
+        "Do not set temperature on AlgorithmConfig; configure it via"
+        " generation_args on StandardRLProgram.",
+    ):
+      rl_program.StandardRLProgram(
+          dataset=("p0",),
+          algo=mock_algo,
+          generation_args=gen_args,
+      )
 
   def test_program_temperature_missing_in_generation_args_leaves_none(
       self,
@@ -2970,7 +3014,7 @@ class RLProgramTest(absltest.TestCase):
     mock_algo.max_response_length = 1024
     mock_algo.requires_reference_kl = False
     mock_algo.algo_config = mock.MagicMock(
-        temperature=0.8, use_rollout_logps=None
+        temperature=None, use_rollout_logps=None
     )
 
     program = rl_program.StandardRLProgram(

@@ -254,7 +254,10 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
       if self.engine_args is None and self.model_name:
         from vllm.engine.arg_utils import AsyncEngineArgs  # pylint: disable=g-import-not-at-top
 
-        self.engine_args = AsyncEngineArgs(model=self.model_name)
+        self.engine_args = AsyncEngineArgs(
+            model=self.model_name,
+            logprobs_mode="processed_logprobs",
+        )
       if self.engine_args is not None:
         sampler_cls = _get_rl_vllm_sampler_cls()
         self.sampler = sampler_cls(engine_args=self.engine_args)

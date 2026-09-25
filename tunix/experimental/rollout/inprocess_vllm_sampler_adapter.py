@@ -135,7 +135,10 @@ class InprocessVllmSamplerAdapter(
       )
       self.config = tunix_vllm_sampler.VllmConfig(
           server_mode=True,
-          engine_kwargs={"model": self.model_name},
+          engine_kwargs={
+              "model": self.model_name,
+              "logprobs_mode": "processed_logprobs",
+          },
       )
 
     if (
