@@ -114,6 +114,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--top_k", type=int, default=-1)
   parser.add_argument("--beta", type=float, default=0.0)
   parser.add_argument("--epsilon", type=float, default=0.2)
+  parser.add_argument("--epsilon_high", type=float, default=0.28)
+  parser.add_argument("--advantage_estimator", type=str, default="rloo")
+  parser.add_argument(
+      "--loss_agg_mode", type=str, default="sequence-mean-token-scale"
+  )
   parser.add_argument(
       "--use_rollout_logps",
       action=argparse.BooleanOptionalAction,
@@ -211,7 +216,10 @@ def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
   algo_config = algorithm_config.GRPOConfig(
       num_generations=args.num_generations,
       epsilon=args.epsilon,
+      epsilon_high=args.epsilon_high,
       beta=args.beta,
+      advantage_estimator=args.advantage_estimator,
+      loss_agg_mode=args.loss_agg_mode,
       temperature=args.temperature,
       use_rollout_logps=args.use_rollout_logps,
   )

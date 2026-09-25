@@ -44,16 +44,23 @@ MAX_SEGMENTS_PER_PACKED_ROW=${MAX_SEGMENTS_PER_PACKED_ROW:-}
 MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-$BATCH_SIZE}
 EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-1000000}
 LEARNING_RATE=${LEARNING_RATE:-1e-6}
+ADAM_B2=${ADAM_B2:-0.99}
+WEIGHT_DECAY=${WEIGHT_DECAY:-0.01}
 OPT_CHAIN_TYPE=${OPT_CHAIN_TYPE-clip_by_global_norm}
 MAX_GRAD_NORM=${MAX_GRAD_NORM:-1.0}
 BETA=${BETA:-0.0}
 EPSILON=${EPSILON:-0.2}
+EPSILON_HIGH=${EPSILON_HIGH:-0.28}
+ADVANTAGE_ESTIMATOR=${ADVANTAGE_ESTIMATOR:-rloo}
+LOSS_AGG_MODE=${LOSS_AGG_MODE:-sequence-mean-token-scale}
 SAMPLER=${SAMPLER:-inprocess_vllm}
 WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
 USE_LORA=${USE_LORA:-0}
 LORA_RANK=${LORA_RANK:-64}
 LORA_ALPHA=${LORA_ALPHA:-64.0}
 MODEL_DTYPE=${MODEL_DTYPE:-bfloat16}
+REMAT_CONFIG=${REMAT_CONFIG:-decoder}
+USE_FLASH_ATTENTION=${USE_FLASH_ATTENTION:-true}
 DEBUG=${DEBUG:-0}
 USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
 
@@ -259,8 +266,11 @@ echo "Launching trainer node..."
     --num_generations="$NUM_GENERATIONS"
     --train_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
     --model_dtype="$MODEL_DTYPE"
+    --remat_config="$REMAT_CONFIG"
     --eval_every_n_steps="$EVAL_EVERY_N_STEPS"
     --learning_rate="$LEARNING_RATE"
+    --adam_b2="$ADAM_B2"
+    --weight_decay="$WEIGHT_DECAY"
     --lora_rank="$LORA_RANK"
     --lora_alpha="$LORA_ALPHA"
     --sampler_type="$SAMPLER"
@@ -276,6 +286,9 @@ echo "Launching trainer node..."
   fi
   if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
     TRAINER_CMD+=(--use_lora)
+  fi
+  if [[ "$USE_FLASH_ATTENTION" == "1" || "$USE_FLASH_ATTENTION" == "true" || "$USE_FLASH_ATTENTION" == "True" ]]; then
+    TRAINER_CMD+=(--use_flash_attention)
   fi
   if [[ "$DEBUG" == "1" || "$DEBUG" == "true" || "$DEBUG" == "True" ]]; then
     TRAINER_CMD+=(--debug)
@@ -367,6 +380,9 @@ echo "Launching CPU orchestrator..."
     --train_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
     --beta="$BETA"
     --epsilon="$EPSILON"
+    --epsilon_high="$EPSILON_HIGH"
+    --advantage_estimator="$ADVANTAGE_ESTIMATOR"
+    --loss_agg_mode="$LOSS_AGG_MODE"
     --dataset_name="$DATASET_NAME"
     --dataset_revision="$DATASET_REVISION"
     --dataset_split="$DATASET_SPLIT"
