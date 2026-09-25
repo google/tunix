@@ -5,8 +5,8 @@ set -e
 # MLPerf DeepSWE recipe: Qwen3.5-397B-A17B on TPU v7x (bodaborg-tpu7x-gsc)
 # ==============================================================================
 # - TPU7x dynamic slicing on bodaborg-tpu7x-gsc (priority-dev namespace)
-# - Trainer on 256 chips (4x8x8 = 512 devices, FSDP=16, TP=1, EXPERT=2, CP=8)
-# - Rollout on 256 chips (16 replicas x 8 chips 2x2x2, EP=16, TP=1)
+# - Trainer on 128 chips (4x4x8 = 256 devices, FSDP=16, TP=1, EXPERT=2, CP=8)
+# - Rollout on 128 chips (16 replicas x 8 chips 2x2x2, EP=16, TP=1)
 # - Sandbox configured for sandbox-np nodepool with workload tolerations
 # ==============================================================================
 
@@ -16,18 +16,16 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export JOB_PREFIX="${JOB_PREFIX:-$USER}"
 export WANDB_RUN_NAME="${WANDB_RUN_NAME:-${JOB_PREFIX}-mlperf-397b-v7x}"
 # us-central1 regional bucket, co-located with the cluster.
-export MAXTEXT_OUTPUT_DIR="${MAXTEXT_OUTPUT_DIR:-gs://atwigg-trellis-v7x/maxtext/${JOB_PREFIX}}"
-export TRAJECTORY_LOG_DIR="${TRAJECTORY_LOG_DIR:-gs://atwigg-trellis-v7x/trajectories/${JOB_PREFIX}/logger}"
-export TRAJECTORY_STORE_ROOT_DIR="${TRAJECTORY_STORE_ROOT_DIR:-${TRAJECTORY_STORE_ROOT:-gs://atwigg-trellis-v7x/trajectories/${JOB_PREFIX}/store}}"
+export MAXTEXT_OUTPUT_DIR="${MAXTEXT_OUTPUT_DIR:-gs://atwigg-trellis-us-central1/maxtext/${JOB_PREFIX}}"
+export TRAJECTORY_LOG_DIR="${TRAJECTORY_LOG_DIR:-gs://atwigg-trellis-us-central1/trajectories/${JOB_PREFIX}/logger}"
+export TRAJECTORY_STORE_ROOT_DIR="${TRAJECTORY_STORE_ROOT_DIR:-${TRAJECTORY_STORE_ROOT:-gs://atwigg-trellis-us-central1/trajectories/${JOB_PREFIX}/store}}"
 
 # Regional cluster: us-central1 bodaborg-tpu7x-gsc.
-export PROJECT="cloud-tpu-shared-capacity"
 export REGION="us-central1"
 export CLUSTER="bodaborg-tpu7x-gsc"
 export K8S_NAMESPACE="priority-dev"
 export USE_DYNAMIC_SLICING="true"
 export TPU_RESERVATION="${TPU_RESERVATION:-ghostfish-pogoag4tylwed}"
-export ENABLE_PATHWAYS_PERSISTENCE=1
 export ENABLE_MULTI_NUMA="${ENABLE_MULTI_NUMA:-0}"
 
 export RAIDEN_DEVICES_PER_HOST=8
@@ -62,8 +60,6 @@ export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-16}"
 
 # vLLM Rollout Configuration
 export VLLM_ADDITIONAL_CONFIG='{"sharding":{"sharding_strategy":{"expert_parallelism":16,"tensor_parallelism":1,"enable_dp_attention":true}},"custom_mamba_cache_multiplier":16,"maxtext_config":{"scan_layers":false,"attention":"vllm_rpa","allow_split_physical_axes":true,"use_multimodal":false,"prefuse_moe_weights":true,"per_device_batch_size":0.0}}'
-export MAMBA_CACHE_MODE="${MAMBA_CACHE_MODE:-align}"
-export VLLM_MAMBA_CACHE_MODE="${VLLM_MAMBA_CACHE_MODE:-${MAMBA_CACHE_MODE}}"
 
 # Rollout Worker Flags & Raiden tuning
 export ONEHOT_MOE_PERMUTE_THRESHOLD=131072
@@ -77,17 +73,12 @@ export TRAINER_EXTRA_ENV="${TRAINER_EXTRA_ENV:-ONEHOT_MOE_PERMUTE_THRESHOLD=1310
 
 # Hyperparameters & DeepSWE Pipeline Configuration
 export TRAIN_MICRO_BATCH_SIZE="${TRAIN_MICRO_BATCH_SIZE:-16}"
-export CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-0}
-if [[ "${CHECKPOINT_SAVE_INTERVAL_STEPS}" -gt 0 ]]; then
-  export ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE:-1}
-fi
 
 export RPC_TIMEOUT_S="${RPC_TIMEOUT_S:-10800}"
 export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS:-custom_mesh_and_rule=cp-as-ep}"
 export DEBUG=${DEBUG:-0}
 
 # DeepSWE Environment & Agent Sandbox
-export SANDBOX_NODE_SELECTOR_VAL="sandbox-np"
 export SANDBOX_TOLERATIONS='[{"key":"workload","operator":"Equal","value":"sandbox","effect":"NoSchedule"}]'
 export IMAGE_REWRITE_PREFIX="${IMAGE_REWRITE_PREFIX:-us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/}"
 
