@@ -39,7 +39,6 @@ class FakeTrainer(abstract_trainer.AbstractTrainer):
     self.fwd_bwd_calls = []
     self.eval_step_calls = []
     self.model_scope_calls = []
-    self.restore_checkpoint_calls = []
     self.model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
     self.policy_version = 3
     self.step_count = 10
@@ -73,9 +72,8 @@ class FakeTrainer(abstract_trainer.AbstractTrainer):
   def save_checkpoint(self, metadata, **kwargs):
     pass
 
-  def restore_checkpoint(self, step=None, **kwargs):
-    self.restore_checkpoint_calls.append((step, kwargs))
-    return {"step": 0 if step is None else step}
+  def restore_checkpoint(self, **kwargs):
+    return {}
 
   def get_metrics(self):
     return {"loss": 0.25}
@@ -153,17 +151,6 @@ class TrainerWorkerTest(absltest.TestCase):
   def test_update_returns_step_count(self):
     step = self.worker.update()
     self.assertEqual(step, 11)
-
-  def test_restore_checkpoint_forwards_step_and_kwargs(self):
-    default_meta = self.worker.restore_checkpoint()
-    explicit_meta = self.worker.restore_checkpoint(step=4, custom_flag=True)
-
-    self.assertEqual(default_meta, {"step": 0})
-    self.assertEqual(explicit_meta, {"step": 4})
-    self.assertEqual(
-        self.fake_trainer.restore_checkpoint_calls,
-        [(None, {}), (4, {"custom_flag": True})],
-    )
 
   def test_set_target_state_configures_trainer(self):
     target_state = {"params": np.zeros((4, 4))}
