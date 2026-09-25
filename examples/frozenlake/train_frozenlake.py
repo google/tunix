@@ -569,7 +569,8 @@ cluster_config = rl_engine_lib.ClusterConfig(
         # times, so the optimizer still sees a ``mini_batch_size`` gradient
         # per update.
         train_micro_batch_size=args.train_micro_batch_size,
-        compute_logps_micro_batch_size=2,
+        # Must equal train_micro_batch_size when packing is off.
+        compute_logps_micro_batch_size=args.train_micro_batch_size,
         metrics_logging_options=metrics_logging_options,
         checkpoint_root_directory=CKPT_DIR,
         checkpointing_options=checkpointing_options,
