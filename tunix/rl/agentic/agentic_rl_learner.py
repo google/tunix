@@ -82,6 +82,12 @@ class AgenticRLConfig(algo_config_lib.AlgorithmConfig):
     num_generations: Number of samples per prompt.
     num_iterations: Number of iterations per batch.
     episode_timeout: Timeout for each episode in seconds.
+    logps_in_consumer: Compute old/ref logps in the training consumer
+      (serialized with train_step) even when compute_logps_micro_batch_size is
+      1. By default, micro-batch size 1 computes them in the rollout producer,
+      concurrently with train_step, which can exhaust HBM on a shared mesh.
+      Ignored when sequence packing is on (logps are always computed on the
+      packed buffer in the consumer).
   """
 
   system_prompt: str = ""
@@ -97,6 +103,7 @@ class AgenticRLConfig(algo_config_lib.AlgorithmConfig):
   filter_statuses: Optional[Set] = None
   overlong_filter: bool = False
   use_rollout_logps: bool = True
+  logps_in_consumer: bool = False
 
 
 TConfig = TypeVar("TConfig", bound=AgenticRLConfig)
@@ -772,7 +779,10 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     # conversion to the consumer (which would enqueue raw lists pack_sequences
     # cannot consume).
     packing_enabled = self._training_config.max_seq_token_per_tpu is not None
-    if self._compute_logps_micro_batch_size > 1 and not packing_enabled:
+    if not packing_enabled and (
+        self._compute_logps_micro_batch_size > 1
+        or self.algo_config.logps_in_consumer
+    ):
       if self._compute_logps_micro_batch_size != train_micro_batch_size:
         raise ValueError(
             "compute_logps_micro_batch_size"

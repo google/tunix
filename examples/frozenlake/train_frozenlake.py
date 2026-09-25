@@ -611,6 +611,10 @@ grpo_config = GRPOConfig(
     # not counted against max_response_length, so a trajectory that fills the
     # budget ends at max_response_length + 1 and _process_results raises.
     exact_token_continuity=False,
+    # Serialize old-logp computation with train_step (as packing always does)
+    # so both arms of the packing A/B share one schedule and the producer does
+    # not hold trainer HBM concurrently with train_step at micro batch 1.
+    logps_in_consumer=True,
 )
 
 # PerfMetricsOptions alone is inert; the RLEngine only traces when handed a
