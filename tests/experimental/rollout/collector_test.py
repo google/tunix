@@ -794,6 +794,45 @@ class RunEpisodeSamplingParamsTest(absltest.TestCase):
 
 class ConvertTrajectoryItemTest(absltest.TestCase):
 
+  def test_opt_in_episode_summary_preserves_step_and_guard_counts(self):
+    request = datatypes.RolloutRequest(
+        request_id="eval-1",
+        prompt="task",
+        prompt_id="task-1",
+        generation_kwargs={"max_generation_steps": 8},
+        metadata={"record_episode_summary": True},
+    )
+    agent = mocks.MockAgent()
+    agent.trajectory.steps = [
+        types.SimpleNamespace(info={"guard_blocked": True,
+                                    "guard_reason": "invalid_action"}),
+        types.SimpleNamespace(info={"guard_blocked": True,
+                                    "guard_reason": "invalid_action"}),
+        types.SimpleNamespace(info={"guard_blocked": False}),
+    ]
+    engine = collector.TrajectoryCollectorEngine(
+        traj_id=request.traj_id,
+        request=request,
+        sampler=_RecordingSampler(),
+        env_client=object(),
+        agent=agent,
+        tokenizer=mocks.MockTokenizer(),
+        chat_parser=mocks.MockChatParser(),
+    )
+
+    item = engine._convert_to_trajectory({"status": "SUCCEEDED"})
+
+    self.assertEqual(
+        item.traj["episode_summary"],
+        {
+            "num_steps": 3,
+            "guard_blocked_steps": 2,
+            "guard_reasons": ["invalid_action"],
+        },
+    )
+    self.assertNotIn("record_episode_summary", item.metadata)
+    self.assertNotIn("episode_summary", item.metadata)
+
   def test_convert_to_trajectory_returns_trajectory_item(self):
     request = datatypes.RolloutRequest(
         request_id="req_test",
