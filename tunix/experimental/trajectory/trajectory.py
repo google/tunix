@@ -10,7 +10,7 @@ import dataclasses
 import datetime
 import enum
 import functools
-from typing import Annotated, Any, Final, Literal, TypeVar, get_args
+from typing import Annotated, Any, ClassVar, Final, Generic, Literal, Self, Sequence, TypeVar, get_args
 
 import numpy as np
 import pydantic
@@ -469,8 +469,32 @@ class Agent(pydantic.BaseModel):
   )
 
 
+def _unpaired_trajectory_error(
+    metadata: TrajectoryMetadata, trajectory_cls: type[Any]
+) -> TypeError:
+  """Returns the error for metadata with no paired Trajectory subclass."""
+  metadata_cls_name = type(metadata).__name__
+  return TypeError(
+      f"{metadata_cls_name} has no paired Trajectory subclass:"
+      f" create_trajectory tried to build a {trajectory_cls.__name__}, which"
+      f" is not a subclass of {metadata_cls_name} and so cannot carry its"
+      f" fields. Declare a Trajectory subclass of {metadata_cls_name} and"
+      " return it from a create_trajectory override, as"
+      " TunixTrajectoryMetadata does for TunixTrajectory."
+  )
+
+
 class TrajectoryMetadata(pydantic.BaseModel):
   """Metadata for a trajectory (excluding steps and subagents)."""
+
+  METADATA_TYPE: ClassVar[str] = "base"
+  _REGISTRY: ClassVar[dict[str, type[TrajectoryMetadata]]] = {}
+
+  def __init_subclass__(cls, **kwargs: Any) -> None:
+    super().__init_subclass__(**kwargs)
+    meta_type = cls.__dict__.get("METADATA_TYPE")
+    if meta_type:
+      cls._REGISTRY[meta_type] = cls
 
   model_config = pydantic.ConfigDict(extra="forbid")
 
@@ -523,37 +547,124 @@ class TrajectoryMetadata(pydantic.BaseModel):
       return {}
     return self.extra.get(TUNIX_EXTENSIONS_KEY) or {}
 
+  @classmethod
+  def from_atif_metadata(
+      cls: type[Self], metadata: TrajectoryMetadata
+  ) -> Self:
+    """Rehydrates base ATIF TrajectoryMetadata into this metadata subclass."""
+    if isinstance(metadata, cls):
+      if cls is TrajectoryMetadata and metadata.get_extensions():
+        target_values = _unpack_subclass_values_from_extra(metadata, cls)
+        target_values.update(metadata.get_extensions())
+        return cls.model_validate(target_values)
+      return metadata
+    target_values_by_field = _unpack_subclass_values_from_extra(metadata, cls)
+    return cls.model_validate(target_values_by_field)
 
-class Trajectory(TrajectoryMetadata):
+  def _create_paired_trajectory(
+      self,
+      trajectory_cls: type[TrajectoryT],
+      steps: Sequence[Any] | None,
+      subagent_trajectories: Sequence[Any] | None,
+  ) -> TrajectoryT:
+    """Builds `trajectory_cls` from this metadata, checking the two are paired.
+
+    Each metadata class is completed by the one `Trajectory` subclass that
+    inherits from it. Nothing records that pairing, so the `create_trajectory`
+    override names it and this checks the claim — a subclass that adds no
+    fields and forgets to override would otherwise get a plain `Trajectory`
+    silently. Checking classes before construction leaves a genuine
+    `pydantic.ValidationError` from bad field data surfacing as itself.
+
+    Args:
+      trajectory_cls: Concrete Trajectory class to build.
+      steps: Sequence of step instances, or None.
+      subagent_trajectories: Sequence of subagent trajectory instances, or None.
+
+    Returns:
+      The constructed paired trajectory instance.
+
+    Raises:
+      TypeError: If `trajectory_cls` is not a subclass of `type(self)`.
+    """
+    # Completing a Trajectory is degenerate, and pydantic's parametrized
+    # classes would fail this spuriously; exclude both.
+    if not isinstance(self, Trajectory) and not issubclass(
+        trajectory_cls, type(self)
+    ):
+      raise _unpaired_trajectory_error(self, trajectory_cls)
+    data = self.model_dump()
+    data["steps"] = list(steps) if steps is not None else []
+    if subagent_trajectories is not None:
+      data["subagent_trajectories"] = list(subagent_trajectories)
+    return trajectory_cls(**data)
+
+  def create_trajectory(
+      self,
+      steps: Sequence[Any] | None = None,
+      subagent_trajectories: Sequence[Any] | None = None,
+  ) -> Trajectory[Any]:
+    """Creates a full Trajectory from this metadata and given steps.
+
+    A subclass is completed by its own `Trajectory` subclass, not by this one,
+    and must override this method to name it. See `_create_paired_trajectory`.
+
+    Args:
+      steps: Sequence of step instances, or None.
+      subagent_trajectories: Sequence of subagent trajectory instances, or None.
+
+    Returns:
+      The constructed trajectory instance.
+    """
+    return self._create_paired_trajectory(
+        Trajectory, steps, subagent_trajectories
+    )
+
+
+# TrajectoryMetadata is the root base class, so __init_subclass__ does not run on it.
+TrajectoryMetadata._REGISTRY[TrajectoryMetadata.METADATA_TYPE] = TrajectoryMetadata
+
+
+_TRAJECTORY_METADATA_FIELD_NAMES: Final[frozenset[str]] = frozenset(
+    TrajectoryMetadata.model_fields
+)
+StepT = TypeVar("StepT", bound=Step)
+
+
+class Trajectory(TrajectoryMetadata, Generic[StepT]):
   """Root trajectory object containing the interaction history."""
 
-  steps: list[Step] = pydantic.Field(
+  # First step_id in a well-formed trajectory; step_ids must be sequential
+  # from here.
+  _STEP_ID_START: ClassVar[int] = 1
+
+  steps: list[StepT] = pydantic.Field(
       default_factory=list,
       description="Sequential step history.",
   )
-  subagent_trajectories: list[Trajectory] | None = pydantic.Field(
+  subagent_trajectories: list[Trajectory[StepT]] | None = pydantic.Field(
       default=None,
       description="Array of embedded subagent trajectories.",
   )
 
   @pydantic.field_validator("steps")
   @classmethod
-  def validate_step_ids(cls, steps: list[Step]) -> list[Step]:
-    """Validate that step_ids are sequential starting from 1."""
+  def validate_step_ids(cls, steps: list[StepT]) -> list[StepT]:
+    """Validate that step_ids are sequential from `_STEP_ID_START`."""
     steps.sort(key=lambda step: step.step_id)
-    for expected_step_id, step in enumerate(steps, start=1):
+    for expected_step_id, step in enumerate(steps, start=cls._STEP_ID_START):
       if step.step_id != expected_step_id:
         raise ValueError(
-            f"Expected step_id {expected_step_id} (sequential from 1), got"
-            f" {step.step_id}"
+            f"Expected step_id {expected_step_id} (sequential from"
+            f" {cls._STEP_ID_START}), got {step.step_id}"
         )
     return steps
 
   @pydantic.field_validator("subagent_trajectories")
   @classmethod
   def validate_embedded_subagent_trajectory_ids(
-      cls, subagent_trajectories: list[Trajectory] | None
-  ) -> list[Trajectory] | None:
+      cls, subagent_trajectories: list[Trajectory[StepT]] | None
+  ) -> list[Trajectory[StepT]] | None:
     """Every embedded subagent must carry a unique, non-null trajectory_id."""
     if not subagent_trajectories:
       return subagent_trajectories
@@ -573,9 +684,10 @@ class Trajectory(TrajectoryMetadata):
     return subagent_trajectories
 
   def add_step(
-      self,
+      self: "Trajectory[Step]",
       source: Source,
       message: str,
+      *,
       timestamp: datetime.datetime | None = None,
       reasoning_content: str | None = None,
       tool_calls: list[ToolCall] | None = None,
@@ -587,8 +699,31 @@ class Trajectory(TrajectoryMetadata):
       llm_call_count: int | None = None,
       extra: dict[str, Any] | None = None,
   ) -> Step:
-    """Helper to create and append a step, automatically assigning step_id."""
-    step_id = len(self.steps) + 1
+    """Helper to create and append a step, automatically assigning step_id.
+
+    Only builds a plain `Step`, so `self` is bound to `Trajectory[Step]`: a
+    subclass that narrows `StepT` must override this method to build its own
+    step type, as `TunixTrajectory` does, and gets a type error at the call
+    site if it does not.
+
+    Args:
+      source: Originator of the step (system, user, or agent).
+      message: Dialogue message content.
+      timestamp: When the step occurred; defaults to now, in UTC.
+      reasoning_content: Agent's explicit internal reasoning or thoughts.
+      tool_calls: Structured actions or tools invoked by the agent.
+      observation: Environment feedback resulting from the step's actions.
+      metrics: LLM operational and confidence metrics for this step.
+      model_name: The specific LLM model used for this turn.
+      reasoning_effort: Qualitative or quantitative measure of effort.
+      is_copied_context: True if step was copied from a previous run.
+      llm_call_count: Number of LLM inferences this step represents.
+      extra: Custom step-level metadata.
+
+    Returns:
+      The newly created and appended step.
+    """
+    step_id = len(self.steps) + self._STEP_ID_START
     new_step = Step(
         step_id=step_id,
         timestamp=timestamp or datetime.datetime.now(datetime.timezone.utc),
@@ -617,9 +752,12 @@ class Trajectory(TrajectoryMetadata):
     return self.model_dump(exclude_none=True, mode="json")
 
   @classmethod
-  def from_json_dict(cls, data: dict[str, Any]) -> Trajectory:
+  def from_json_dict(cls, data: dict[str, Any]) -> Self:
     """Deserializes a dictionary into a Trajectory object."""
     return cls.model_validate(data)
+
+
+TrajectoryT = TypeVar("TrajectoryT", bound=Trajectory[Any])
 
 
 @dataclasses.dataclass
@@ -737,6 +875,8 @@ class TunixEnvStep(Step):
 class TunixTrajectoryMetadata(TrajectoryMetadata):
   """Tunix-specific trajectory metadata extending base ATIF TrajectoryMetadata."""
 
+  METADATA_TYPE: ClassVar[str] = "tunix"
+
   prompt_id: str | None = pydantic.Field(
       default=None,
       description="Identifier for the initial prompt/task.",
@@ -770,6 +910,38 @@ class TunixTrajectoryMetadata(TrajectoryMetadata):
       description="Timing information for reward operations.",
   )
 
+  def create_trajectory(
+      self,
+      steps: Sequence[Any] | None = None,
+      subagent_trajectories: Sequence[Any] | None = None,
+  ) -> TunixTrajectory:
+    """Creates a full TunixTrajectory from this metadata and given steps."""
+    if steps is not None:
+      rehydrated_steps = []
+      for s in steps:
+        if isinstance(s, (TunixAgentStep, TunixEnvStep)):
+          rehydrated_steps.append(s)
+        elif isinstance(s, Step):
+          if s.source == Source.AGENT:
+            rehydrated_steps.append(TunixAgentStep.from_atif_step(s))
+          else:
+            rehydrated_steps.append(TunixEnvStep.from_atif_step(s))
+        elif isinstance(s, dict):
+          try:
+            step_obj = Step.model_validate(s)
+            if step_obj.source == Source.AGENT:
+              rehydrated_steps.append(TunixAgentStep.from_atif_step(step_obj))
+            else:
+              rehydrated_steps.append(TunixEnvStep.from_atif_step(step_obj))
+          except Exception:  # pylint: disable=broad-exception-caught
+            rehydrated_steps.append(s)
+        else:
+          rehydrated_steps.append(s)
+      steps = rehydrated_steps
+    return self._create_paired_trajectory(
+        TunixTrajectory, steps, subagent_trajectories
+    )
+
   @classmethod
   def from_atif_metadata(
       cls, metadata: TrajectoryMetadata
@@ -781,60 +953,24 @@ class TunixTrajectoryMetadata(TrajectoryMetadata):
     return cls.model_validate(target_values_by_field)
 
 
-class TunixTrajectory(TunixTrajectoryMetadata):
+class TunixTrajectory(
+    TunixTrajectoryMetadata,
+    Trajectory[TunixAgentStep | TunixEnvStep],
+):
   """Tunix-specific trajectory object containing the interaction history."""
 
-  steps: list[TunixAgentStep | TunixEnvStep] = pydantic.Field(
-      default_factory=list,
-      description="Sequential step history.",
-  )
+  _STEP_ID_START: ClassVar[int] = 0
+
   subagent_trajectories: list[TunixTrajectory] | None = pydantic.Field(
       default=None,
       description="Array of embedded subagent trajectories.",
   )
 
-  @pydantic.field_validator("steps")
-  @classmethod
-  def validate_step_ids(
-      cls, steps: list[TunixAgentStep | TunixEnvStep]
-  ) -> list[TunixAgentStep | TunixEnvStep]:
-    """Validate that step_ids are sequential starting from 0."""
-    steps.sort(key=lambda step: step.step_id)
-    for expected_step_id, step in enumerate(steps, start=0):
-      if step.step_id != expected_step_id:
-        raise ValueError(
-            f"Expected step_id {expected_step_id} (sequential from 0), got"
-            f" {step.step_id}"
-        )
-    return steps
-
-  @pydantic.field_validator("subagent_trajectories")
-  @classmethod
-  def validate_embedded_subagent_trajectory_ids(
-      cls, subagent_trajectories: list[TunixTrajectory] | None
-  ) -> list[TunixTrajectory] | None:
-    """Every embedded subagent must carry a unique, non-null trajectory_id."""
-    if not subagent_trajectories:
-      return subagent_trajectories
-    seen: set[str] = set()
-    for i, traj in enumerate(subagent_trajectories):
-      if traj.trajectory_id is None:
-        raise ValueError(
-            f"subagent_trajectories[{i}].trajectory_id is required "
-            "for embedded subagents."
-        )
-      if traj.trajectory_id in seen:
-        raise ValueError(
-            f"subagent_trajectories[{i}].trajectory_id: duplicate ID "
-            f"'{traj.trajectory_id}'"
-        )
-      seen.add(traj.trajectory_id)
-    return subagent_trajectories
-
   def add_step(
       self,
       source: Source,
       message: str,
+      *,
       timestamp: datetime.datetime | None = None,
       reasoning_content: str | None = None,
       tool_calls: list[ToolCall] | None = None,
@@ -856,7 +992,7 @@ class TunixTrajectory(TunixTrajectoryMetadata):
       extra: dict[str, Any] | None = None,
   ) -> TunixAgentStep | TunixEnvStep:
     """Helper to create and append a step, automatically assigning step_id."""
-    step_id = len(self.steps)
+    step_id = len(self.steps) + self._STEP_ID_START
     ts = timestamp or datetime.datetime.now(datetime.timezone.utc)
     if source == Source.AGENT:
       new_step = TunixAgentStep(
