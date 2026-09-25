@@ -1141,7 +1141,7 @@ class StandardRLProgram(RLProgram):
         checkpoint_saved = True
 
       while groups_consumed < self.full_batch_size:
-        scored_items = await self.scored_q.get_batch(num_groups=1)
+        scored_items = await self.scored_q.get_group_batch(num_groups=1)
         if not scored_items:
           assembled_batches = self.assembler.flush()
         else:
