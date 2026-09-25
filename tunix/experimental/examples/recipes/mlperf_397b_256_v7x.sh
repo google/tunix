@@ -103,7 +103,7 @@ use_tokamax_splash=true use_splash_scheduler=true \
 sa_block_q=512 sa_block_kv=1024 sa_block_kv_compute=512 \
 sa_block_q_dkv=1024 sa_block_kv_dkv=2048 sa_block_kv_dkv_compute=1024 \
 sa_fuse_reciprocal=false sa_use_base2_exp=true dq_reduction_steps=3 \
-context_parallel_load_balance=False allow_split_physical_axes=False \
+context_parallel_load_balance=false allow_split_physical_axes=false \
 num_vocab_tiling=16 mu_dtype=bfloat16 \
 checkpoint_storage_concurrent_gb=96 \
 checkpoint_storage_use_ocdbt=false checkpoint_storage_use_zarr3=false}"
