@@ -69,7 +69,7 @@ print("Logging configured at INFO level.")
 from tunix.models.gemma4 import params_safetensors as params_lib
 from tunix.models.gemma4 import model as model_lib
 from tunix.oss import utils as oss_utils
-from tunix.perf import export as perf_export
+from tunix.perf.experimental import export as perf_export_v2
 from tunix.perf import metrics as perf_metrics
 from tunix.sft import metrics_logger
 from tunix.sft import profiler as profiler_lib
@@ -180,8 +180,8 @@ arg_parser.add_argument(
     "--splash_impl", type=str, default="jax", choices=["jax", "tokamax"],
     help="Splash (flash) attention backend for the trainer forward.",
 )
-# Tunix perf-metrics Perfetto trace (rollout/trainer spans). Local path only;
-# the v1 trace writer does not support gs://.
+# Tunix perf-metrics v2 Perfetto trace (rollout/env/trainer spans); local or
+# gs:// path. The agentic learner only emits spans to the v2 tracer.
 arg_parser.add_argument("--perf_trace_dir", type=str, default=None)
 # JAX profiler (XLA/TPU trace). Step counts are trainer train_step
 # iterations, not global steps.
@@ -458,7 +458,10 @@ else:
 
 if args.perf_trace_dir:
   perf_metrics_options = perf_metrics.PerfMetricsOptions(
-      enable_trace_writer=True, trace_dir=args.perf_trace_dir
+      enable_perf_v1=False,
+      enable_perf_v2=True,
+      enable_trace_writer=True,
+      trace_dir=args.perf_trace_dir,
   )
 else:
   perf_metrics_options = None
@@ -621,8 +624,12 @@ grpo_config = GRPOConfig(
 # PerfMetricsConfig with an export fn (mirrors tunix/cli/base_rl_pipeline.py).
 if perf_metrics_options is not None:
   perf_config = perf_metrics.PerfMetricsConfig()
-  perf_config.custom_export_fn = (
-      perf_export.PerfMetricsExport.from_cluster_config(cluster_config)
+  perf_config.custom_export_fn_v2 = (
+      perf_export_v2.PerfMetricsExport.from_cluster_config(
+          cluster_config=cluster_config,
+          enable_trace_writer=perf_metrics_options.enable_trace_writer,
+          trace_dir=perf_metrics_options.trace_dir,
+      ).export_metrics
   )
 else:
   perf_config = None
