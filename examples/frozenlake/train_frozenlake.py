@@ -174,6 +174,8 @@ arg_parser.add_argument("--max_seq_token_per_tpu", type=int, default=None)
 arg_parser.add_argument("--max_steps", type=int, default=None)
 # Prompt groups (x num_generations sequences) per trainer forward+backward.
 arg_parser.add_argument("--train_micro_batch_size", type=int, default=2)
+# Sequence chunk for the lm_head + logp computation; smaller lowers peak HBM.
+arg_parser.add_argument("--compute_logps_chunk_size", type=int, default=2048)
 arg_parser.add_argument(
     "--splash_impl", type=str, default="jax", choices=["jax", "tokamax"],
     help="Splash (flash) attention backend for the trainer forward.",
@@ -574,7 +576,7 @@ cluster_config = rl_engine_lib.ClusterConfig(
         metrics_logging_options=metrics_logging_options,
         checkpoint_root_directory=CKPT_DIR,
         checkpointing_options=checkpointing_options,
-        compute_logps_chunk_size=2048,
+        compute_logps_chunk_size=args.compute_logps_chunk_size,
         max_seq_token_per_tpu=args.max_seq_token_per_tpu,
         profiler_options=profiler_options,
         perf_metrics_options=perf_metrics_options,
