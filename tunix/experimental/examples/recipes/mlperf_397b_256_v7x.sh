@@ -12,20 +12,30 @@ set -e
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+export REGION="${REGION:-us-central1}"
+
 # Fill these before you run.
 export JOB_PREFIX="${JOB_PREFIX:-$USER}"
 export WANDB_RUN_NAME="${WANDB_RUN_NAME:-${JOB_PREFIX}-mlperf-397b-v7x}"
-# us-central1 regional bucket, co-located with the cluster.
-export MAXTEXT_OUTPUT_DIR="${MAXTEXT_OUTPUT_DIR:-gs://atwigg-trellis-us-central1/maxtext/${JOB_PREFIX}}"
-export TRAJECTORY_LOG_DIR="${TRAJECTORY_LOG_DIR:-gs://atwigg-trellis-us-central1/trajectories/${JOB_PREFIX}/logger}"
-export TRAJECTORY_STORE_ROOT_DIR="${TRAJECTORY_STORE_ROOT_DIR:-${TRAJECTORY_STORE_ROOT:-gs://atwigg-trellis-us-central1/trajectories/${JOB_PREFIX}/store}}"
 
-# Regional cluster: us-central1 bodaborg-tpu7x-gsc.
-export REGION="us-central1"
-export CLUSTER="bodaborg-tpu7x-gsc"
+if [[ "${REGION}" == us-east1* ]]; then
+  export BUCKET="${BUCKET:-gs://atwigg-trellis-us-east1}"
+  export CLUSTER="${CLUSTER:-bodaborg-tpu7x-gsc-elm}"
+  export TPU_RESERVATION="${TPU_RESERVATION:-ghostfish-ev7rs12wndvw5}"
+  export MAXTEXT_CKPT="${MAXTEXT_CKPT:-gs://mlperf-6-submission-us-east1/ckpt/qwen35_397b/scanned_reshard_fsdp32_tp2/0/items}"
+else
+  export BUCKET="${BUCKET:-gs://atwigg-trellis-us-central1}"
+  export CLUSTER="${CLUSTER:-bodaborg-tpu7x-gsc}"
+  export TPU_RESERVATION="${TPU_RESERVATION:-ghostfish-pogoag4tylwed}"
+  export MAXTEXT_CKPT="${MAXTEXT_CKPT:-gs://mlperf-6-1-submission/ckpt/qwen35_397b/scanned_reshard_fsdp32_tp2/0/items}"
+fi
+
+export MAXTEXT_OUTPUT_DIR="${MAXTEXT_OUTPUT_DIR:-${BUCKET}/maxtext/${JOB_PREFIX}}"
+export TRAJECTORY_LOG_DIR="${TRAJECTORY_LOG_DIR:-${BUCKET}/trajectories/${JOB_PREFIX}/logger}"
+export TRAJECTORY_STORE_ROOT_DIR="${TRAJECTORY_STORE_ROOT_DIR:-${TRAJECTORY_STORE_ROOT:-${BUCKET}/trajectories/${JOB_PREFIX}/store}}"
+
 export K8S_NAMESPACE="priority-dev"
 export USE_DYNAMIC_SLICING="true"
-export TPU_RESERVATION="${TPU_RESERVATION:-ghostfish-pogoag4tylwed}"
 # Raiden weight sync: working 397B runs use ENABLE_MULTI_NUMA=0 and the default
 # RAIDEN_BROADCAST_K (64 -> every slice pushed direct from the trainer). K=3 routes
 # slices through the receiver relay tree, which fails with "Incoming push size
@@ -46,7 +56,6 @@ export MODEL_NAME="Qwen3.5-397B-A17B"
 export MODEL_ID="Qwen/Qwen3.5-397B-A17B"
 export TOKENIZER_PATH="${TOKENIZER_PATH:-/app/Qwen/Qwen3.5-397B-A17B}"
 export MAXTEXT_MODEL_NAME="qwen3.5-397b-a17b"
-export MAXTEXT_CKPT="${MAXTEXT_CKPT:-gs://mlperf-6-1-submission/ckpt/qwen35_397b/scanned_reshard_fsdp32_tp2/0/items}"
 
 # Topologies (128 chips / 256 devices Trainer 4x4x8, 16x 8-chip Rollout slices on TPU7x dynamic slicing)
 # Mesh product is DEVICES, and v7x has 2 devices/chip at ~95 GB each.
@@ -108,7 +117,7 @@ export RPC_TIMEOUT_S="${RPC_TIMEOUT_S:-10800}"
 # (mlperf_base.sh defaults REMAT_POLICY to full).
 export REMAT_POLICY="${REMAT_POLICY:-custom}"
 export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS:-custom_mesh_and_rule=cp-as-ep \
-use_gdn_kernel=false gdn_cp_mode=head \
+use_gdn_kernel=true gdn_cp_mode=head \
 decoder_layer_input=device context=remat gdn=remat gdn_conv=remat gdn_states=remat \
 megablox=true sparse_matmul=true use_tokamax_gmm=true use_gmm_v2=true \
 use_gmm_v2_heuristic_tiling=true merge_gating_gmm=false \
