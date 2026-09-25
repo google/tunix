@@ -7,18 +7,15 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # k8s has a 63 char limit on total label name, so keep job_prefix unique to your job and short
 export JOB_PREFIX="${JOB_PREFIX:-${USER}}"
 export WANDB_RUN_NAME="${WANDB_RUN_NAME:-${JOB_PREFIX}-mlperf-35b-v7x}"
-export MAXTEXT_OUTPUT_DIR="${MAXTEXT_OUTPUT_DIR:-gs://atwigg-trellis-v7x/maxtext/${JOB_PREFIX}}"
-export TRAJECTORY_LOG_DIR="${TRAJECTORY_LOG_DIR:-gs://atwigg-trellis-v7x/trajectories/${JOB_PREFIX}/logger}"
-export TRAJECTORY_STORE_ROOT_DIR="${TRAJECTORY_STORE_ROOT_DIR:-${TRAJECTORY_STORE_ROOT:-gs://atwigg-trellis-v7x/trajectories/${JOB_PREFIX}/store}}"
+export MAXTEXT_OUTPUT_DIR="${MAXTEXT_OUTPUT_DIR:-gs://atwigg-trellis-us-central1/maxtext/${JOB_PREFIX}}"
+export TRAJECTORY_LOG_DIR="${TRAJECTORY_LOG_DIR:-gs://atwigg-trellis-us-central1/trajectories/${JOB_PREFIX}/logger}"
+export TRAJECTORY_STORE_ROOT_DIR="${TRAJECTORY_STORE_ROOT_DIR:-${TRAJECTORY_STORE_ROOT:-gs://atwigg-trellis-us-central1/trajectories/${JOB_PREFIX}/store}}"
 
-export PROJECT="cloud-tpu-shared-capacity"
 export REGION="us-central1"
 export CLUSTER="bodaborg-tpu7x-gsc"
 export K8S_NAMESPACE="priority-dev"
 export USE_DYNAMIC_SLICING="true"
 export TPU_RESERVATION="${TPU_RESERVATION:-ghostfish-pogoag4tylwed}"
-export ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE:-1}
-export CHECKPOINT_ASYNC=${CHECKPOINT_ASYNC:-true}
 
 # Container memory overrides for v7x
 export PATHWAYS_PROXY_MEMORY_LIMIT="100G"
@@ -53,7 +50,6 @@ export VLLM_ADDITIONAL_CONFIG='{"sharding":{"sharding_strategy":{"expert_paralle
 export LIBTPU_INIT_ARGS=' --xla_tpu_use_minor_sharding_for_major_trivial_input=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=false --xla_tpu_ars_combiner_threshold_in_bytes=0 --xla_tpu_enable_async_collective_merger=false --xla_tpu_check_legacy_constraints_in_reduce_scatter_legalizer=false --xla_tpu_dvfs_p_state=7'
 
 # Sandbox
-export SANDBOX_NODE_SELECTOR_VAL="sandbox-np"
 export IMAGE_REWRITE_PREFIX="${IMAGE_REWRITE_PREFIX:-us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/}"
 
 source "${DIR}/mlperf_base.sh" "$@"

@@ -11,14 +11,9 @@ export MAXTEXT_OUTPUT_DIR="${MAXTEXT_OUTPUT_DIR:-gs://atwigg-trellis-europe-west
 export TRAJECTORY_LOG_DIR="${TRAJECTORY_LOG_DIR:-gs://atwigg-trellis-europe-west4-dev/trajectories/${JOB_PREFIX}/logger}"
 export TRAJECTORY_STORE_ROOT_DIR="${TRAJECTORY_STORE_ROOT_DIR:-${TRAJECTORY_STORE_ROOT:-gs://atwigg-trellis-europe-west4-dev/trajectories/${JOB_PREFIX}/store}}"
 
-export PROJECT="cloud-tpu-shared-capacity"
 export REGION="europe-west4"
 export CLUSTER="bodaborg-v5p-nap"
 export K8S_NAMESPACE="trellis"
-export ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE:-1}
-export CHECKPOINT_ASYNC=${CHECKPOINT_ASYNC:-true}
-
-export RAIDEN_DEVICES_PER_HOST=4
 
 # Model configuration
 export MODEL_NAME="Qwen3.5-35B-A3B"
