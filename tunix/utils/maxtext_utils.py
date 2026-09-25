@@ -603,4 +603,19 @@ def create_maxtext_engine(
   if log_shapes:
     log_param_shapes(engine.model)
 
+  # Wrap save_checkpoint so that Tunix/RL orchestrator kwargs like 'overwrite'
+  # (which Orbax CheckpointManager.save does not accept) are mapped cleanly to
+  # force=True and removed from kwargs before delegating to MaxText.
+  if hasattr(engine, "save_checkpoint"):
+    orig_save_checkpoint = engine.save_checkpoint
+
+    def _safe_save_checkpoint(metadata: Any = None, **kwargs: Any) -> None:
+      overwrite = kwargs.pop("overwrite", False)
+      if overwrite:
+        kwargs.setdefault("force", True)
+      return orig_save_checkpoint(metadata, **kwargs)
+
+    engine.save_checkpoint = _safe_save_checkpoint
+
   return engine
+

@@ -690,6 +690,40 @@ class MaxTextUtilsTest(absltest.TestCase):
       )
     self.assertNotIn("pathways_checkpointing_impl=colocated_python", argv)
 
+  def test_create_maxtext_engine_wraps_save_checkpoint_handles_overwrite(self):
+    mock_pyconfig = mock.MagicMock()
+    mock_engine_cls = mock.MagicMock()
+    mock_engine = mock.MagicMock()
+    mock_engine.model = mock.MagicMock()
+    type(mock_engine.model).__name__ = "TunixMaxTextAdapter"
+    captured_kwargs = {}
+
+    def _save_checkpoint(metadata=None, **kwargs):
+      captured_kwargs.update(kwargs)
+
+    mock_engine.save_checkpoint = _save_checkpoint
+    mock_engine_cls.MaxTextTrainingEngine.return_value = mock_engine
+
+    with mock.patch.object(
+        maxtext_utils,
+        "maxtext_modules",
+        return_value=(mock_pyconfig, mock_engine_cls, mock.MagicMock()),
+    ):
+      engine = maxtext_utils.create_maxtext_engine(
+          mock.MagicMock(),
+          mesh=mock.MagicMock(),
+          wrap_with_tunix_adapter=True,
+          log_shapes=False,
+      )
+      engine.save_checkpoint(metadata={"step": 1}, overwrite=True)
+      self.assertNotIn("overwrite", captured_kwargs)
+      self.assertTrue(captured_kwargs.get("force"))
+
+      captured_kwargs.clear()
+      engine.save_checkpoint(metadata={"step": 2}, overwrite=False)
+      self.assertNotIn("overwrite", captured_kwargs)
+      self.assertFalse(captured_kwargs.get("force", False))
+
 
 if __name__ == "__main__":
   absltest.main()
