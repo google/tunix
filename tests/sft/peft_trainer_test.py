@@ -683,6 +683,20 @@ class PeftTrainerTest(parameterized.TestCase):
     self.assertEqual(train_invoke, {'foo': 2, 'bar': 4})
     self.assertEqual(eval_invoke, {'foo': 1, 'bar': 16})
 
+  def test_resume_from_checkpoint_on_init_false_raises_value_error(self):
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=2,
+        max_steps=100,
+        resume_from_checkpoint_on_init=False,
+    )
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    with self.assertRaisesRegex(
+        ValueError,
+        "resume_from_checkpoint_on_init=False is not supported in SFT"
+        " PeftTrainer",
+    ):
+      peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+
   def test_loss_output_format(self):
     def custom_loss_fn(
         model: nnx.Module,

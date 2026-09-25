@@ -325,6 +325,16 @@ class PeftTrainer:
           "Sequence packing is not supported in SFT PeftTrainer yet."
       )
 
+    if not training_config.get_with_default(
+        "resume_from_checkpoint_on_init", True
+    ):
+      raise ValueError(
+          "resume_from_checkpoint_on_init=False is not supported in SFT"
+          " PeftTrainer (v1). Checkpoint restoration control is only supported"
+          " in experimental PeftTrainer v2"
+          " (tunix.experimental.train.peft_trainer_v2)."
+      )
+
     self.model = model
     self.config = training_config
     self._lora_enabled = utils.is_lora_enabled(self.model)
