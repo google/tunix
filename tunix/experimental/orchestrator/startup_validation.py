@@ -96,8 +96,10 @@ class RunGeometryValidator:
 
     # 3. Batch/micro-batch divisibility.
     if isinstance(mini_batch_size, int) and mini_batch_size > 0:
-      for mbs_name, mbs_val in [
-          ("train_micro_batch_size", training_config.train_micro_batch_size),
+      packing_enabled = (
+          getattr(training_config, "max_seq_token_per_tpu", None) is not None
+      )
+      mbs_checks = [
           (
               "rollout_micro_batch_size",
               training_config.rollout_micro_batch_size,
@@ -106,7 +108,13 @@ class RunGeometryValidator:
               "compute_logps_micro_batch_size",
               training_config.compute_logps_micro_batch_size,
           ),
-      ]:
+      ]
+      if not packing_enabled:
+        mbs_checks.insert(
+            0,
+            ("train_micro_batch_size", training_config.train_micro_batch_size),
+        )
+      for mbs_name, mbs_val in mbs_checks:
         if mbs_val is not None:
           try:
             rl_utils.is_positive_integer(mbs_val, mbs_name)

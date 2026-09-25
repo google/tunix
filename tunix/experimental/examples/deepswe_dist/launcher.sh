@@ -135,7 +135,7 @@ TRAINER_BACKEND=${TRAINER_BACKEND:-tunix}
 source "${DIR}/../common/maxtext_config.sh"
 
 if [[ "$TRAINER_BACKEND" == "maxtext" ]]; then
-  if (( TRAIN_MICRO_BATCH_SIZE % TRAINER_FSDP != 0 )); then
+  if [[ -z "${MAX_SEQ_TOKEN_PER_TPU:-}" ]] && (( TRAIN_MICRO_BATCH_SIZE % TRAINER_FSDP != 0 )); then
     TRAIN_MICRO_BATCH_SIZE=$TRAINER_FSDP
   fi
 elif [[ "$TRAINER_BACKEND" == "tunix" ]]; then
@@ -362,7 +362,8 @@ echo "Launching trainer node..."
     )
   fi
 
-  TRAINER_CMD+=+="$(maxtext_trainer_flags)"
+  # shellcheck disable=SC2206
+  TRAINER_CMD+=($(maxtext_trainer_flags))
   
   if [[ -n "$MAX_SEQ_TOKEN_PER_TPU" ]]; then
     TRAINER_CMD+=(--max_seq_token_per_tpu="$MAX_SEQ_TOKEN_PER_TPU")
@@ -421,7 +422,8 @@ echo "Launching DeepSWE rollout node..."
     --max_concurrency="$ROLLOUT_MAX_CONCURRENCY"
   )
   
-  ROLLOUT_CMD+="$(maxtext_rollout_flags)"
+  # shellcheck disable=SC2206
+  ROLLOUT_CMD+=($(maxtext_rollout_flags))
 
   if [[ -n "$EOS_TOKENS" ]]; then
     ROLLOUT_CMD+=(--eos_tokens="$EOS_TOKENS")

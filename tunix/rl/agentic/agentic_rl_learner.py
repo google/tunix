@@ -759,9 +759,13 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     self._full_batch_size = full_batch_size
     # Initialize batch sizes.
     mini_batch_size = self._training_config.mini_batch_size or full_batch_size
-    train_micro_batch_size = (
-        self._training_config.train_micro_batch_size or mini_batch_size
-    )
+    packing_enabled = self._training_config.max_seq_token_per_tpu is not None
+    if packing_enabled:
+      train_micro_batch_size = 1
+    else:
+      train_micro_batch_size = (
+          self._training_config.train_micro_batch_size or mini_batch_size
+      )
     # Rollout micro batch size has to be 1 since we only process individual
     # prompts.
     self._rollout_micro_batch_size = 1
@@ -771,7 +775,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     # computed on the packed buffer after pack_sequences; do not defer
     # conversion to the consumer (which would enqueue raw lists pack_sequences
     # cannot consume).
-    packing_enabled = self._training_config.max_seq_token_per_tpu is not None
     if self._compute_logps_micro_batch_size > 1 and not packing_enabled:
       if self._compute_logps_micro_batch_size != train_micro_batch_size:
         raise ValueError(
@@ -790,8 +793,12 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         (mini_batch_size, f"{mini_batch_size=}"),
     ]:
       rl_utils.check_divisibility(v, full_batch_size, n, f"{full_batch_size=}")
-    grad_acc_steps = self._training_config.get_with_default(
-        "gradient_accumulation_steps", 1
+    grad_acc_steps = (
+        1
+        if packing_enabled
+        else self._training_config.get_with_default(
+            "gradient_accumulation_steps", 1
+        )
     )
 
     logging.info(  # pylint: disable=logging-fstring-interpolation

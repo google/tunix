@@ -859,7 +859,11 @@ def init_print(
   num_generations = getattr(args, "num_generations", None) or 8
   global_batch_size = batch_size * num_generations
   mini_batch_size = getattr(args, "mini_batch_size", None) or batch_size
-  train_micro_batch_size = getattr(args, "train_micro_batch_size", None) or 1
+  packing_enabled = (getattr(args, "max_seq_token_per_tpu", None) or 0) > 0
+  if packing_enabled:
+    train_micro_batch_size = 1
+  else:
+    train_micro_batch_size = getattr(args, "train_micro_batch_size", None) or 1
   max_steps = getattr(args, "max_steps", None) or 50
   max_prompt_length = getattr(args, "max_prompt_length", None) or 4096
   max_response_length = getattr(args, "max_response_length", None) or 8192
@@ -908,11 +912,14 @@ def init_print(
     else:
       platform = "TPU-Ironwood"
 
-  # Gradient accumulation steps
-  grad_accum_steps = max(
-      1,
-      (mini_batch_size * num_generations) // max(1, train_micro_batch_size),
-  )
+  # Gradient accumulation steps (dynamic per step when sequence packing is enabled)
+  if packing_enabled:
+    grad_accum_steps = None
+  else:
+    grad_accum_steps = max(
+        1,
+        (mini_batch_size * num_generations) // max(1, train_micro_batch_size),
+    )
 
   # 1. Submission Metadata
   mllogger.event(

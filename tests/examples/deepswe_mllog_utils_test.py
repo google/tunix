@@ -604,6 +604,59 @@ class MllogUtilsTest(absltest.TestCase):
     self.assertIn('"key": "block_stop"', content)
     self.assertIn('"key": "run_stop"', content)
 
+  def test_init_print_sequence_packing_sets_micro_batch_size_to_one_and_omits_static_grad_accum(
+      self,
+  ):
+    args = types.SimpleNamespace(
+        seed=1,
+        metric_logger_dir=self.test_dir,
+        batch_size=64,
+        num_generations=2,
+        max_steps=5,
+        train_micro_batch_size=8,
+        max_seq_token_per_tpu=4096,
+    )
+    mllog_utils.init_start(args)
+    mllog_utils.init_print(args, total_devices=64)
+
+    expected_log_file = os.path.join(self.test_dir, "seed_1.out")
+    with open(expected_log_file, "r") as f:
+      events = [
+          json.loads(line[len(":::MLLOG ") :])
+          for line in f
+          if line.strip().startswith(":::MLLOG ")
+      ]
+    event_map = {e["key"]: e for e in events}
+    self.assertEqual(event_map["micro_batch_size"]["value"], 1)
+    # Static gradient_accumulation_steps is omitted when sequence packing is enabled
+    self.assertNotIn("gradient_accumulation_steps", event_map)
+
+
+class MllogUtilsSequencePackingMockTest(absltest.TestCase):
+
+  def test_init_print_sequence_packing_mocked_mllogger(self):
+    args = types.SimpleNamespace(
+        seed=1,
+        batch_size=64,
+        num_generations=2,
+        max_steps=5,
+        train_micro_batch_size=8,
+        max_seq_token_per_tpu=4096,
+    )
+    mock_logger = mock.MagicMock()
+    with (
+        mock.patch.object(mllog_utils, "mllogger", mock_logger),
+        mock.patch.object(mllog_utils, "_is_master_process", return_value=True),
+    ):
+      mllog_utils.init_print(args, total_devices=64)
+
+    logged_events = {
+        call.kwargs["key"]: call.kwargs["value"]
+        for call in mock_logger.event.call_args_list
+    }
+    self.assertEqual(logged_events["micro_batch_size"], 1)
+    self.assertNotIn("gradient_accumulation_steps", logged_events)
+
 
 if __name__ == "__main__":
   absltest.main()

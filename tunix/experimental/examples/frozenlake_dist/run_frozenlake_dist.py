@@ -208,14 +208,15 @@ def _validate_args(args: argparse.Namespace) -> None:
     raise ValueError("mini_batch_size must be positive.")
   if args.batch_size % args.mini_batch_size != 0:
     raise ValueError("batch_size must be divisible by mini_batch_size.")
-  if args.train_micro_batch_size <= 0:
-    raise ValueError("train_micro_batch_size must be positive.")
-  update_size = args.mini_batch_size * args.num_generations
-  if update_size % args.train_micro_batch_size != 0:
-    raise ValueError(
-        "mini_batch_size * num_generations must be divisible by "
-        "train_micro_batch_size."
-    )
+  if getattr(args, "max_seq_token_per_tpu", None) is None:
+    if args.train_micro_batch_size <= 0:
+      raise ValueError("train_micro_batch_size must be positive.")
+    update_size = args.mini_batch_size * args.num_generations
+    if update_size % args.train_micro_batch_size != 0:
+      raise ValueError(
+          "mini_batch_size * num_generations must be divisible by "
+          "train_micro_batch_size."
+      )
   if args.max_steps <= 0 or args.max_turns <= 0:
     raise ValueError("max_steps and max_turns must be positive.")
   if args.num_batches <= 0 or args.num_epochs <= 0:
