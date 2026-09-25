@@ -91,6 +91,16 @@ def next_power_of_2(x: int) -> int:
   return int(2 ** int(jnp.ceil(jnp.log2(x))))
 
 
+def cdiv(a: int, b: int) -> int:
+  """Returns the ceiling of `a / b` for integers."""
+  return -(-a // b)
+
+
+def get_dtype_packing(dtype: jax.typing.DTypeLike) -> int:
+  """Returns the number of elements of `dtype` packed into 32 bits."""
+  return max(1, 32 // (jnp.dtype(dtype).itemsize * 8))
+
+
 def pad_to_length(
     x: np.ndarray,
     target_length: int,
