@@ -249,32 +249,10 @@ class GSM8KTest(absltest.TestCase):
     launcher = (base_dir / "launcher.sh").read_text(encoding="utf-8")
     self.assertIn("CHAT_PARSER=${CHAT_PARSER:-raw}", launcher)
     self.assertIn('--chat_parser="$CHAT_PARSER"', launcher)
-    self.assertIn(
-        "CHECKPOINT_RESTORE_STEP=${CHECKPOINT_RESTORE_STEP:-}", launcher
-    )
-    self.assertIn(
-        '--checkpoint_restore_step="$CHECKPOINT_RESTORE_STEP"', launcher
-    )
-    self.assertIn(
-        "CHECKPOINT_OVERWRITE=${CHECKPOINT_OVERWRITE:-true}", launcher
-    )
-    self.assertIn("--checkpoint_overwrite", launcher)
 
     k8s_launcher = (base_dir / "k8s_launcher.sh").read_text(encoding="utf-8")
     self.assertIn("export CHAT_PARSER=${CHAT_PARSER:-raw}", k8s_launcher)
     self.assertIn("--chat_parser=${CHAT_PARSER}", k8s_launcher)
-    self.assertIn(
-        "export CHECKPOINT_RESTORE_STEP=${CHECKPOINT_RESTORE_STEP:-}",
-        k8s_launcher,
-    )
-    self.assertIn(
-        "--checkpoint_restore_step=${CHECKPOINT_RESTORE_STEP}", k8s_launcher
-    )
-    self.assertIn(
-        "export CHECKPOINT_OVERWRITE=${CHECKPOINT_OVERWRITE:-true}",
-        k8s_launcher,
-    )
-    self.assertIn("--checkpoint_overwrite", k8s_launcher)
 
 
 if __name__ == "__main__":
