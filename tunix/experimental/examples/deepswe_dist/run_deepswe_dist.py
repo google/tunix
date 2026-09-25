@@ -467,7 +467,6 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " the training run."
       ),
   )
-  parser.add_argument("--debug", action="store_true")
   return parser.parse_args(argv)
 
 
