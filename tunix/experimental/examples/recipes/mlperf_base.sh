@@ -220,6 +220,13 @@ export MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-4096}"
 export MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-61440}"
 
 # ==============================================================================
+# Optional uBench Reporting (see ubench_reporting.sh)
+# ==============================================================================
+if [[ "${UBENCH_REPORTING:-false}" == "true" ]]; then
+  source "${DIR}/ubench_reporting.sh" "$@"
+fi
+
+# ==============================================================================
 # Execution Dispatch
 # ==============================================================================
 if [[ -z "${LAUNCHER:-}" ]]; then
