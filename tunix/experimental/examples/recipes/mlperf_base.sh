@@ -191,7 +191,7 @@ export SKIP_STEP_ON_SPIKES="${SKIP_STEP_ON_SPIKES:-false}"
 export SKIP_STEP_ON_NAN="${SKIP_STEP_ON_NAN:-true}"
 
 # Architecture & Rematerialization
-export REMAT_POLICY="full"
+export REMAT_POLICY="${REMAT_POLICY:-full}"
 export TRAINER_MAXTEXT_ATTENTION="flash"
 export COMPUTE_LOGPS_CHUNK_SIZE=512
 
