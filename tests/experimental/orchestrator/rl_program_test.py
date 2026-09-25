@@ -613,6 +613,7 @@ class RLProgramTest(absltest.TestCase):
           metadata={
               "step": 1,
               "global_step": 1,
+              "next_batch_idx": 1,
               "policy_version": 1,
               "num_rollouts": 2,
               "num_microbatches": 1,
