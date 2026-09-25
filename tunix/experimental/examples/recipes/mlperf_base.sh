@@ -71,7 +71,10 @@ export WANDB_PROJECT="${WANDB_PROJECT:-trellis-deepswe}"
 export TRAINER_BACKEND="maxtext"
 export SAMPLER="vllm"
 export TRAINABLE_PARAMETERS_MASK='^(?!.*routed_experts/gate/kernel).*'
-export EOS_TOKENS="${EOS_TOKENS:-151645,151643}"
+# Qwen3.5 <|im_end|>, <|endoftext|> (generation_config.json eos_token_id).
+# 151645/151643 are the Qwen2.5/Qwen3 ids and are ordinary tokens in the
+# Qwen3.5 vocab.
+export EOS_TOKENS="${EOS_TOKENS:-248046,248044}"
 export TRAINER_BASE_NUM_KV_HEADS=2
 export ROLLOUT_MESH_FSDP=1
 export ROLLOUT_MESH_TP=1

@@ -112,7 +112,10 @@ else
   fi
 fi
 
-export EOS_TOKENS="${EOS_TOKENS:-151645,151643}"
+# Qwen3.5 <|im_end|>, <|endoftext|> (generation_config.json eos_token_id).
+# 151645/151643 are the Qwen2.5/Qwen3 ids and are ordinary tokens in the
+# Qwen3.5 vocab.
+export EOS_TOKENS="${EOS_TOKENS:-248046,248044}"
 
 # --- Backend Configuration ---
 export TRAINER_BACKEND="${TRAINER_BACKEND:-maxtext}"
