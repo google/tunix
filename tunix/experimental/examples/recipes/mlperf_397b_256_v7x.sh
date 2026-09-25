@@ -65,7 +65,6 @@ export TRAINER_MESH_CONTEXT=4
 export ROLLOUT_JOBSET_YAML="jobset.mcjax.ray.yaml"
 export ROLLOUT_TPU_SLICE="tpu7x:2x2x2"
 export ROLLOUT_MESH_EXPERT=16
-export ROLLOUT_WORKERS="${ROLLOUT_WORKERS:-16}"
 export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-16}"
 
 # vLLM Rollout Configuration
