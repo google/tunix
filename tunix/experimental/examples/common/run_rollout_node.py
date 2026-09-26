@@ -332,6 +332,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--vllm_max_num_seqs", type=int, default=None)
   parser.add_argument("--vllm_max_num_batched_tokens", type=int, default=None)
   parser.add_argument("--vllm_max_model_len", type=int, default=None)
+  parser.add_argument("--vllm_seed", type=int, default=None)
   parser.add_argument("--vllm_dtype", type=str, default="bfloat16")
   parser.add_argument(
       "--tensor_parallel_size",
@@ -570,6 +571,8 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
       "async_scheduling": args.vllm_async_scheduling,
       "dtype": args.vllm_dtype,
   }
+  if args.vllm_seed is not None:
+    engine_kwargs["seed"] = args.vllm_seed
   hf_overrides = _vllm_hf_overrides(args)
   if hf_overrides:
     engine_kwargs["hf_overrides"] = hf_overrides

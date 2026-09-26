@@ -35,6 +35,8 @@ TOKENIZER_PATH=${TOKENIZER_PATH:-"${MODEL_DIR}"}
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-4096}
 MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-1024}
 TOP_K=${TOP_K:-0}
+VLLM_SEED=${VLLM_SEED:-42}
+VLLM_HBM_UTILIZATION=${VLLM_HBM_UTILIZATION:-0.6}
 BATCH_SIZE=${BATCH_SIZE:-1}
 NUM_GENERATIONS=${NUM_GENERATIONS:-2}
 MAX_STEPS=${MAX_STEPS:-1}
@@ -326,6 +328,10 @@ echo "Launching DeepSWE rollout node..."
     --max_response_length="$MAX_RESPONSE_LENGTH"
     --lora_rank="$LORA_RANK"
     --lora_alpha="$LORA_ALPHA"
+    --vllm_seed="$VLLM_SEED"
+    --vllm_hbm_utilization="$VLLM_HBM_UTILIZATION"
+    --vllm_max_num_batched_tokens="$MAX_RESPONSE_LENGTH"
+    --no-enable_prefix_caching
     --weight_sync_mode="$WEIGHT_SYNC_MODE"
     --registry_module=tunix.experimental.examples.deepswe_dist.deepswe
     --env_name=deepswe_env
