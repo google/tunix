@@ -34,27 +34,30 @@ PATHWAYS_TAG="${PATHWAYS_TAG:-20260911-jax_0.11.0}"
 RESERVATION="${RESERVATION:-cloudtpu-20260902214500-1810493672}"
 PRIORITY_CLASS="${PRIORITY_CLASS:-medium}"
 BUCKET="${BUCKET:-gs://linchai-bucket-dev}"
-DATA_DIR="${DATA_DIR:-$BUCKET/data/frozenlake/grid5to12}"
+# 20k-prompt 5x5-12x12 train set (same generator as grid5to12, same test set),
+# so 200 steps x 64 prompts never repeat a prompt.
+DATA_DIR="${DATA_DIR:-$BUCKET/data/frozenlake/grid5to12_train20k}"
 WANDB_SECRET="${WANDB_SECRET:-linchai-wandb-api-key}"
 WANDB_PROJECT="${WANDB_PROJECT:-tunix-frozenlake}"
-WANDB_GROUP="${WANDB_GROUP:-sc-ab-v5p32-g5to12-8k}"
+WANDB_GROUP="${WANDB_GROUP:-sc-ab-v5p32-g5to12-8k-bs64}"
 EXPERIMENT="${EXPERIMENT:-sc-ab-v5p32}"
 SEED="${SEED:-42}"
 MAX_RESTARTS="${MAX_RESTARTS:-1}"
 RENDER_DIR="${RENDER_DIR:-$HERE/rendered}"
 
-# Shared by both arms. Full runs: 200 steps, eval every 20 steps on a fixed
-# pool of 2 x 16 test prompts, checkpoint every 20 steps.
+# Shared by both arms. Full runs: 200 steps of 64 prompts x 8 generations
+# (200 distinct batches, one epoch), eval every 20 steps on the full 100-prompt
+# test set (2 batches of 64), checkpoint every 20 steps.
 COMMON_ARGS=(
   --model_version Qwen/Qwen3-1.7B
-  --batch_size 16 --mini_batch_size 16 --num_generations 8
+  --batch_size 64 --mini_batch_size 64 --num_generations 8
   --num_epochs 1 --seed "$SEED"
   --learning_rate 1e-6
   --max_prompt_length 2048 --max_response_length 8192
   --env_max_steps 15
   --score_centering_top_k 32
   --rollout_devices 8 --rollout_dp 2
-  --vllm_hbm_utilization 0.7 --vllm_max_num_seqs 64
+  --vllm_hbm_utilization 0.7 --vllm_max_num_seqs 128
   # Keep every checkpoint (~16 GiB each, one per 20 steps): the runs then never
   # delete from GCS, and the intermediate policies stay available for later
   # evaluation. (The GKE node SA has object-only access on $BUCKET; the recipe
@@ -180,7 +183,7 @@ cmd_up() {
     R_WANDB_SECRET="$WANDB_SECRET" R_WANDB_PROJECT="$WANDB_PROJECT" \
     R_WANDB_GROUP="$group" R_WANDB_RUN_NAME="$name-$run_tag" \
     R_WANDB_RUN_ID="$name-$run_tag" \
-    R_WANDB_TAGS="$EXPERIMENT,$a,$kind,grid5to12,resp8k,envsteps15,qwen3-1.7b" \
+    R_WANDB_TAGS="$EXPERIMENT,$a,$kind,grid5to12,train20k,bs64,resp8k,envsteps15,qwen3-1.7b" \
     R_TRAIN_ARGS="$*" \
       render "$HERE/frozenlake_sc_ab_v5p32.yaml" "$RENDER_DIR/$name.yaml"
     echo "rendered: $RENDER_DIR/$name.yaml"

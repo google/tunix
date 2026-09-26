@@ -51,9 +51,11 @@ environment variables (see the top of `launch_sc_ab.sh`).
 
 ## Notes
 
-- Data: `gs://linchai-bucket-dev/data/frozenlake/grid5to12/` is a copy of
-  `gs://tunix/data/Frozenlake/grid5to12/` (5x5 to 12x12 grids), because the
-  cluster's node service account cannot read `gs://tunix`.
+- Data: `gs://linchai-bucket-dev/data/frozenlake/grid5to12_train20k/` is a copy
+  of `gs://tunix/data/Frozenlake/grid5to12_train20k/` (5x5 to 12x12 grids,
+  20,000 train prompts so that 200 steps x 64 prompts never repeat; the test set
+  is identical to `grid5to12/test.parquet`), because the cluster's node service
+  account cannot read `gs://tunix`.
 - Checkpoints: every 20 steps to `CKPT_DIR`, ~16 GiB each (fp32 params + Adam
   state); all are kept (`--max_to_keep 100`). The node service account only has
   object access on the bucket, so orbax's bucket-metadata lookup
