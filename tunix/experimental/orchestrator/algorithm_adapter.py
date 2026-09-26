@@ -368,12 +368,14 @@ class PPOAdapter(AlgorithmAdapter):
       entropy_coef: float = 0.0,
       policy_loss_fn: str = "ppo",
       use_rollout_logps: bool = True,
+      temperature: float | None = None,
   ):
     algo_config = algorithm_config.AlgorithmConfig(
         algo_variant="ppo",
         advantage_estimator="gae",
         policy_loss_fn=policy_loss_fn,
         use_rollout_logps=use_rollout_logps,
+        temperature=temperature,
     )
     super().__init__(
         algo_config=algo_config,
@@ -482,6 +484,7 @@ class PPOAdapter(AlgorithmAdapter):
         entropy_coef=self.entropy_coef,
         gamma=self.gamma,
         lam=self.lam,
+        temperature=getattr(self.algo_config, "temperature", None),
     )
     return functools.partial(
         _algo_model_input,

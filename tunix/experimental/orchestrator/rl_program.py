@@ -292,11 +292,21 @@ class StandardRLProgram(RLProgram):
     self.generation_args = generation_args or datatypes.GenerationArgs()
 
     gen_temp = self.generation_args.temperature
+    raw_algo_temp = getattr(algo_config, "temperature", None)
+    algo_temp = (
+        raw_algo_temp
+        if isinstance(raw_algo_temp, (int, float))
+        and not isinstance(raw_algo_temp, bool)
+        else None
+    )
     if gen_temp is not None:
       self.algo.algo_config.temperature = gen_temp
+    elif algo_temp is not None:
+      gen_temp = algo_temp
 
     self.generation_args = dataclasses.replace(
         self.generation_args,
+        temperature=gen_temp,
         return_logprobs=self.algo.algo_config.use_rollout_logps,
     )
     self.sampler_is = getattr(self.algo.algo_config, "sampler_is", None)
@@ -1009,6 +1019,8 @@ class StandardRLProgram(RLProgram):
     """
     assert self.engine is not None
     gen_temp = getattr(self.generation_args, "temperature", None)
+    if gen_temp is None:
+      gen_temp = getattr(self.algo.algo_config, "temperature", None)
     logps_req = datatypes.LogprobsRequest(
         prompt_tokens=batch.prompt_ids,
         completion_tokens=batch.completion_ids,
