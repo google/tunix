@@ -52,6 +52,10 @@ from tunix.sft import metrics_logger as metrics_logger_lib
 ProcessContext = runtime_context.ProcessContext
 
 
+def _int_list(value: str) -> list[int]:
+  return [int(x.strip()) for x in value.split(",") if x.strip()]
+
+
 def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser = argparse.ArgumentParser(
       description="Orchestrator V2 Qwen3 FrozenLake distributed GRPO demo."
@@ -88,7 +92,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--kl_loss_mode", type=str, default="low_var_kl")
   parser.add_argument(
       "--advantage_estimator",
-      choices=("grpo", "rloo", "drgrpo"),
+      choices=("grpo", "grpo-loo", "rloo", "drgrpo", "gae"),
       default="rloo",
   )
   parser.add_argument(
@@ -135,6 +139,55 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   )
   parser.add_argument("--sampler_is_threshold", type=float, default=2.0)
   parser.add_argument(
+      "--rollout_replicas",
+      type=int,
+      default=1,
+      help="Number of rollout worker replicas to wait for.",
+  )
+  parser.add_argument(
+      "--overlong_loss_masking",
+      action=argparse.BooleanOptionalAction,
+      default=False,
+      help=(
+          "Drop sequences truncated by the response budget from the loss AND"
+          " its denominator. Needs the rollout to report a trajectory status."
+      ),
+  )
+  parser.add_argument(
+      "--seq_logprob_error_threshold",
+      type=float,
+      default=None,
+      help=(
+          "Drop sequences whose mean exp|log p_trainer - log q_sampler|"
+          " exceeds this. Requires rollout log-probabilities."
+      ),
+  )
+  parser.add_argument(
+      "--truncated_importance_sampling_type",
+      type=str,
+      default=None,
+      choices=(None, "seq-mask-tis"),
+      help="Set to seq-mask-tis to enable the sequence-mask TIS gate.",
+  )
+  parser.add_argument(
+      "--truncated_importance_sampling_ratio_min",
+      type=float,
+      default=None,
+      help="Lower edge of the TIS keep band.",
+  )
+  parser.add_argument(
+      "--truncated_importance_sampling_ratio",
+      type=float,
+      default=None,
+      help="Upper edge of the TIS keep band.",
+  )
+  parser.add_argument(
+      "--sampler_is_length_buckets",
+      type=_int_list,
+      default=None,
+      help="Comma-separated completion-length bucket edges in tokens.",
+  )
+  parser.add_argument(
       "--max_seq_token_per_tpu",
       type=int,
       default=None,
@@ -168,6 +221,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       default=os.getenv("WANDB_RUN_NAME", ""),
   )
   parser.add_argument("--flush_every_n_steps", type=int, default=1)
+  parser.add_argument(
+      "--flush_metrics_every_n_steps",
+      dest="flush_every_n_steps",
+      type=int,
+      help="Frequency in steps to flush metrics logger.",
+  )
   parser.add_argument("--rpc_timeout_s", type=float, default=1800.0)
   parser.add_argument("--init_timeout_s", type=float, default=None)
   parser.add_argument("--stop_workers_on_exit", action="store_true")
@@ -239,6 +298,18 @@ def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
       use_rollout_logps=args.use_rollout_logps,
       sampler_is=None if args.sampler_is == "none" else args.sampler_is,
       sampler_is_threshold=args.sampler_is_threshold,
+      overlong_loss_masking=args.overlong_loss_masking,
+      seq_logprob_error_threshold=args.seq_logprob_error_threshold,
+      truncated_importance_sampling_type=(
+          args.truncated_importance_sampling_type
+      ),
+      truncated_importance_sampling_ratio_min=(
+          args.truncated_importance_sampling_ratio_min
+      ),
+      truncated_importance_sampling_ratio=(
+          args.truncated_importance_sampling_ratio
+      ),
+      sampler_is_length_buckets=args.sampler_is_length_buckets,
   )
   return algorithm_adapter.GRPOAdapter(
       algo_config=algo_config,
@@ -331,7 +402,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   cluster.wait_for_workers(
       min_workers={
           datatypes.Role.ACTOR: 1,
-          datatypes.Role.ROLLOUT: 1,
+          datatypes.Role.ROLLOUT: args.rollout_replicas,
           datatypes.Role.REFERENCE: 1 if args.beta != 0.0 else 0,
       },
       timeout=args.init_timeout_s,
