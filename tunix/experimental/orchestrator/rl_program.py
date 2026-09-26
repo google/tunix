@@ -865,7 +865,7 @@ class StandardRLProgram(RLProgram):
       step_time_sec: float,
       consumed_policy_version: int,
       log_step: int,
-      sampler_agreement: dict[str, tuple[Any, list[float]]] | None = None,
+      sampler_agreement: dict[str, tuple[Any, list[Any]]] | None = None,
       policy_training_time: float = 0.0,
       exposed_generation_time: float = 0.0,
       weight_sync_time: float = 0.0,
@@ -1295,7 +1295,7 @@ class StandardRLProgram(RLProgram):
   async def _apply_sampler_trainer_agreement(
       self,
       batch: datatypes.RLTrainerPayload,
-      accumulator: dict[str, tuple[Any, list[float]]],
+      accumulator: dict[str, tuple[Any, list[Any]]],
   ) -> datatypes.RLTrainerPayload:
     """Records sampler-vs-trainer agreement and feeds TIS weights into a batch.
 
@@ -1344,7 +1344,7 @@ class StandardRLProgram(RLProgram):
         )
     )
     for name, (value, agg_fn) in sa_metrics.items():
-      accumulator.setdefault(name, (agg_fn, []))[1].append(float(value))
+      accumulator.setdefault(name, (agg_fn, []))[1].append(value)
 
     updates: dict[str, Any] = {}
     if self.seq_logprob_error_threshold is not None:
@@ -1431,7 +1431,7 @@ class StandardRLProgram(RLProgram):
       uncommitted_groups = []
       step_result = None
       trainer_metrics = None
-      step_sampler_agreement: dict[str, tuple[Any, list[float]]] = {}
+      step_sampler_agreement: dict[str, tuple[Any, list[Any]]] = {}
       step_rewards = []
       step_advantages = []
       num_microbatches = 0
