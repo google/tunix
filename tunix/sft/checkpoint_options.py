@@ -27,6 +27,7 @@ from orbax.checkpoint import v1 as ocp
 CONFIG_OPTIONS = frozenset([
     "save_interval_steps",
     "max_to_keep",
+    "keep_every_nth_step",
     "enable_async_checkpointing",
     "timeout_secs",
 ])
@@ -249,10 +250,23 @@ def checkpointing_options_from_dict(
   else:
     save_decision_policy = None
 
+  keep_every_nth_step = options.get("keep_every_nth_step")
+
+  policies = []
   if max_to_keep is not None:
-    preservation_policy = ocp.training.preservation_policies.LatestN(
-        max_to_keep
+    policies.append(ocp.training.preservation_policies.LatestN(max_to_keep))
+  if keep_every_nth_step is not None:
+    policies.append(
+        ocp.training.preservation_policies.EveryNSteps(keep_every_nth_step)
     )
+
+  if policies:
+    if len(policies) == 1:
+      preservation_policy = policies[0]
+    else:
+      preservation_policy = (
+          ocp.training.preservation_policies.AnyPreservationPolicy(policies)
+      )
   else:
     preservation_policy = None
 
