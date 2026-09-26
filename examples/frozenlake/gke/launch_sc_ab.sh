@@ -44,6 +44,13 @@ EXPERIMENT="${EXPERIMENT:-sc-ab-v5p32}"
 SEED="${SEED:-42}"
 MAX_RESTARTS="${MAX_RESTARTS:-1}"
 RENDER_DIR="${RENDER_DIR:-$HERE/rendered}"
+# Prompts per forward+backward chunk (x 8 generations); memory only, the
+# optimizer still sees the full 64-prompt mini-batch. Old/reference logps use
+# the same micro batch (the agentic learner requires it).
+TRAIN_MICRO_BATCH="${TRAIN_MICRO_BATCH:-4}"
+# Appended after every other flag (argparse: last one wins), e.g. for short
+# memory probes: EXTRA_TRAIN_ARGS="--num_batches 2 --disable_eval".
+EXTRA_TRAIN_ARGS="${EXTRA_TRAIN_ARGS:-}"
 
 # Shared by both arms. Full runs: 200 steps of 64 prompts x 8 generations
 # (200 distinct batches, one epoch), eval every 20 steps on the full 100-prompt
@@ -51,6 +58,7 @@ RENDER_DIR="${RENDER_DIR:-$HERE/rendered}"
 COMMON_ARGS=(
   --model_version Qwen/Qwen3-1.7B
   --batch_size 64 --mini_batch_size 64 --num_generations 8
+  --train_micro_batch_size "$TRAIN_MICRO_BATCH"
   --num_epochs 1 --seed "$SEED"
   --learning_rate 1e-6
   --max_prompt_length 2048 --max_response_length 8192
@@ -169,6 +177,8 @@ cmd_up() {
       kind=full; group="$WANDB_GROUP"
       set -- "${COMMON_ARGS[@]}" "${FULL_ARGS[@]}" "$(arm_flag "$a")"
     fi
+    # shellcheck disable=SC2086  # intentional word splitting
+    set -- "$@" $EXTRA_TRAIN_ARGS
     # An empty CKPT_DIR disables checkpointing in the recipe; a JobSet restart
     # then retrains from step 0 as a new W&B run (see the JobSet template).
     ckpt_dir="$BUCKET/ckpt/frozenlake-sc-ab/$name-$run_tag"
@@ -183,7 +193,7 @@ cmd_up() {
     R_WANDB_SECRET="$WANDB_SECRET" R_WANDB_PROJECT="$WANDB_PROJECT" \
     R_WANDB_GROUP="$group" R_WANDB_RUN_NAME="$name-$run_tag" \
     R_WANDB_RUN_ID="$name-$run_tag" \
-    R_WANDB_TAGS="$EXPERIMENT,$a,$kind,grid5to12,train20k,bs64,resp8k,envsteps15,qwen3-1.7b" \
+    R_WANDB_TAGS="$EXPERIMENT,$a,$kind,grid5to12,train20k,bs64,mb$TRAIN_MICRO_BATCH,resp8k,envsteps15,qwen3-1.7b" \
     R_TRAIN_ARGS="$*" \
       render "$HERE/frozenlake_sc_ab_v5p32.yaml" "$RENDER_DIR/$name.yaml"
     echo "rendered: $RENDER_DIR/$name.yaml"

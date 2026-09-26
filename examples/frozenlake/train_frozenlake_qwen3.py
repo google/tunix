@@ -236,6 +236,20 @@ arg_parser.add_argument(
     "--max_to_keep", type=int, default=1,
     help="Checkpoints to keep when CKPT_DIR is set.",
 )
+# Memory-shaping only (see RLTrainingConfig below): neither changes the
+# optimizer batch (mini_batch_size) or the training dynamics.
+arg_parser.add_argument(
+    "--train_micro_batch_size", type=int, default=4,
+    help="Prompts (x num_generations sequences) per forward+backward chunk; "
+         "gradients accumulate over mini_batch_size // this. Must divide "
+         "--mini_batch_size.",
+)
+arg_parser.add_argument(
+    "--compute_logps_micro_batch_size", type=int, default=None,
+    help="Prompts per old/reference logp forward chunk. Default: "
+         "--train_micro_batch_size (the agentic learner requires the two to "
+         "match unless this is 1).",
+)
 args, _ = arg_parser.parse_known_args()
 
 TRAIN_FRACTION = 1.0
@@ -708,8 +722,12 @@ cluster_config = rl_engine_lib.ClusterConfig(
         # dominant allocation on small TPU slices) at the cost of more
         # micro-step launches per optimizer update. It does NOT change the
         # effective optimizer batch size or training dynamics.
-        train_micro_batch_size=4,
-        compute_logps_micro_batch_size=4,
+        train_micro_batch_size=args.train_micro_batch_size,
+        compute_logps_micro_batch_size=(
+            args.compute_logps_micro_batch_size
+            if args.compute_logps_micro_batch_size is not None
+            else args.train_micro_batch_size
+        ),
         # Project hidden states to the vocabulary in sequence chunks so the
         # full `[micro_batch, seq_len, vocab/TP]` fp32 logits tensor is never
         # materialized at once.
