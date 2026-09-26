@@ -342,12 +342,40 @@ def to_pack_item(item: datatypes.RLTrainerPayload) -> packing.PackItem:
       if getattr(item, name) is not None
   }
 
+  routed = None
+  if item.routed_experts is not None:
+    routed = np.asarray(item.routed_experts, dtype=np.int16)
+    if routed.ndim != 3:
+      raise ValueError(
+          "RLTrainerPayload.routed_experts must be [p + c, num_layers, top_k]"
+          f" for sequence packing; got shape {routed.shape}."
+      )
+    # Sequence-aligned over `[prompt | completion]`, like the ids `pack_bin`
+    # writes. Rows the rollout never reported stay unset so the trainer's own
+    # gate routes them rather than replaying a wrong expert.
+    n = p_len + c_len
+    if routed.shape[0] >= n:
+      routed = routed[:n]
+    else:
+      routed = np.concatenate(
+          [
+              routed,
+              np.full(
+                  (n - routed.shape[0],) + routed.shape[1:],
+                  datatypes.UNSET_ROUTED_EXPERT,
+                  dtype=np.int16,
+              ),
+          ],
+          axis=0,
+      )
+
   return packing.PackItem(
       prompt_ids=prompt,
       completion_ids=completion,
       completion_mask=completion_mask,
       advantages=resolve(item.advantages, fill=0.0, name="advantages"),
       per_token=per_token,
+      routed_experts=routed,
   )
 
 
@@ -367,6 +395,11 @@ def to_rl_trainer_payload(
   metadata: dict[str, Any] = {"trajectory_ids": trajectory_ids}
   if lineage_context is not None:
     metadata["lineage"] = lineage_context
+  routed_experts = (
+      np.stack([r.routed_experts for r in rows])
+      if all(r.routed_experts is not None for r in rows)
+      else None
+  )
   return datatypes.RLTrainerPayload(
       prompt_ids=np.zeros((len(rows), 0), dtype=np.int32),
       prompt_mask=np.zeros((len(rows), 0), dtype=np.float32),
@@ -376,6 +409,7 @@ def to_rl_trainer_payload(
       segment_ids=stack("segment_ids"),
       segment_positions=stack("segment_positions"),
       num_segments=max_segments + 1,
+      routed_experts=routed_experts,
       metadata=metadata,
       **per_token_kwargs,  # pyrefly: ignore[bad-argument-type]
   )
@@ -498,11 +532,21 @@ class SequencePackedBatchAssembler:
       placed.extend(bin_items)
     traj_ids = tuple(id_to_entry[id(item)][1] for item in placed)
     placed_items = [id_to_entry[id(item)][2] for item in placed]
+    routed_shape = packing.routed_experts_shape(placed)
+    num_unrouted = sum(item.routed_experts is None for item in placed)
+    if routed_shape is not None and num_unrouted:
+      logging.warning(
+          "Router replay: %d of %d packed trajectories carry no"
+          " routed_experts; their tokens use the trainer's own gate.",
+          num_unrouted,
+          len(placed),
+      )
     rows = packing.pack_chunk(
         bins,
         budget=self.max_packed_len,
         pad_id=self.pad_id,
         carried=carried,
+        routed_shape=routed_shape,
     )
     batch_tracking_id = f"{_BATCH_ID_PREFIX}_{self._batch_counter}"
     merged_lineage = _merge_batch_lineage(
@@ -521,6 +565,25 @@ class SequencePackedBatchAssembler:
         trajectory_ids=traj_ids,
         lineage_context=merged_lineage,
     )
+    if payload.routed_experts is not None:
+      # Real tokens the trainer will actually replay, judged on layer 0 only so
+      # it stays cheap on [B, 65536, L, K] rows. The MoE layer forces a token
+      # only if all top_k slots are >= 0 and distinct and re-gates it otherwise
+      # (e.g. a zero-filled row). Each trajectory's last token has no routing,
+      # so correct alignment gives forced == real - segments.
+      real = np.asarray(payload.segment_ids) > 0
+      layer0 = np.sort(np.asarray(payload.routed_experts)[..., 0, :], axis=-1)
+      forced = np.all(layer0 >= 0, axis=-1) & ~np.any(
+          layer0[..., 1:] == layer0[..., :-1], axis=-1
+      )
+      logging.info(
+          "Router replay: %d/%d real tokens forced in %s (%d segments; aligned"
+          " routing forces real - segments).",
+          int(np.count_nonzero(forced & real)),
+          int(np.count_nonzero(real)),
+          batch_tracking_id,
+          len(placed),
+      )
     self._buffer = [id_to_entry[id(item)] for item in leftover]
     return AssembledBatch(
         payload=payload,
