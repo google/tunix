@@ -2,9 +2,9 @@
 set -e
 
 # ==============================================================================
-# MLPerf DeepSWE recipe: Qwen3.5-397B-A17B on TPU v7x (bodaborg-tpu7x-gsc)
+# MLPerf DeepSWE recipe: Qwen3.5-397B-A17B on TPU v7x
 # ==============================================================================
-# - TPU7x dynamic slicing on bodaborg-tpu7x-gsc (priority-dev namespace)
+# - TPU7x dynamic slicing on pod1 (bodaborg-tpu7x-gsc) or pod2 (bodaborg-tpu7x-gsc-elm)
 # - Trainer on 128 chips (4x4x8 = 256 devices, FSDP=32, TP=1, EXPERT=2, CP=4)
 # - Rollout on 128 chips (16 replicas x 8 chips 2x2x2, EP=16, TP=1)
 # - Sandbox configured for sandbox-np nodepool with workload tolerations
@@ -12,20 +12,26 @@ set -e
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-export REGION="${REGION:-us-central1}"
-
 # Fill these before you run.
 export JOB_PREFIX="${JOB_PREFIX:-$USER}"
 export WANDB_RUN_NAME="${WANDB_RUN_NAME:-${JOB_PREFIX}-mlperf-397b-v7x}"
 
-if [[ "${REGION}" == us-east1* ]]; then
-  export BUCKET="${BUCKET:-gs://atwigg-trellis-us-east1}"
+# Select pod: pod1 (bodaborg-tpu7x-gsc, us-central1) or pod2 (bodaborg-tpu7x-gsc-elm, us-east1).
+export POD="${POD:-pod1}"
+if [[ "${REGION:-}" == us-east1* && "${POD}" == "pod1" ]]; then
+  export POD="pod2"
+fi
+
+if [[ "${POD}" == "pod2" || "${POD}" == "2" || "${POD}" == "elm" ]]; then
+  export REGION="${REGION:-us-east1}"
   export CLUSTER="${CLUSTER:-bodaborg-tpu7x-gsc-elm}"
+  export BUCKET="${BUCKET:-gs://atwigg-trellis-us-east1}"
   export TPU_RESERVATION="${TPU_RESERVATION:-ghostfish-ev7rs12wndvw5}"
   export MAXTEXT_CKPT="${MAXTEXT_CKPT:-gs://mlperf-6-submission-us-east1/ckpt/qwen35_397b/scanned_reshard_fsdp32_tp2/0/items}"
 else
-  export BUCKET="${BUCKET:-gs://atwigg-trellis-us-central1}"
+  export REGION="${REGION:-us-central1}"
   export CLUSTER="${CLUSTER:-bodaborg-tpu7x-gsc}"
+  export BUCKET="${BUCKET:-gs://atwigg-trellis-us-central1}"
   export TPU_RESERVATION="${TPU_RESERVATION:-ghostfish-pogoag4tylwed}"
   export MAXTEXT_CKPT="${MAXTEXT_CKPT:-gs://mlperf-6-1-submission/ckpt/qwen35_397b/scanned_reshard_fsdp32_tp2/0/items}"
 fi
@@ -136,5 +142,8 @@ export DEBUG=${DEBUG:-0}
 # DeepSWE Environment & Agent Sandbox
 export SANDBOX_TOLERATIONS='[{"key":"workload","operator":"Equal","value":"sandbox","effect":"NoSchedule"}]'
 export IMAGE_REWRITE_PREFIX="${IMAGE_REWRITE_PREFIX:-us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/}"
+
+# Prefix caching disabled for hybrid Mamba model stability
+export ENABLE_PREFIX_CACHING="${ENABLE_PREFIX_CACHING:-false}"
 
 source "${DIR}/mlperf_base.sh" "$@"
