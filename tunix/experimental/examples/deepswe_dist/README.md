@@ -41,6 +41,18 @@ MAX_TURNS=50 MAX_STEPS=200 WEIGHT_SYNC_MODE=raiden \
 ENV_BACKEND=docker ./tunix/experimental/examples/deepswe_dist/launcher.sh
 ```
 
+The clean-data evaluation used temperature 1, top-p 1, top-k 0, vLLM seed 42,
+prefix caching off, and the `q4_r2egym_xml_v2` action adapter. The launcher
+uses those settings by default. It also passes a 4800-second episode budget;
+set `STEP_TIMEOUT_SECS=1800` and `REWARD_TIMEOUT_SECS=1800` for the evaluated
+environment limits. The agent's R2E-Gym system prompt matches the evaluation
+prompt. On Docker, `SWEEnv` installs a pinned `chardet` wheel offline so the
+`file_editor` tool works when task containers cannot reach PyPI.
+
+The local run uses two rollout TPU chips and Docker, while the clean-data
+evaluation used a larger Kubernetes TPU mesh. Keep rollout concurrency within
+the capacity of the local worker; it does not change the 8-by-16 update batch.
+
 The canonical Zero-TIM arm also requires its serving/training alignment
 overlay. This distributed example uses the native rollout log probabilities;
 check `sampler-trainer` agreement metrics in the run logs when interpreting
