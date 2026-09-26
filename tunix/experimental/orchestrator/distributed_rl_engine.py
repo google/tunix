@@ -94,6 +94,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     self._inference_workers = dict(inference_workers or {})
     self._policy_version = 0
     self._weight_sync_coordinator = weight_sync_coordinator
+    self._algo_config: Any | None = None
 
   async def _maybe_configure_trainer_target_state(
       self,
@@ -177,6 +178,13 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     base_generation_kwargs = (
         generation_args.as_kwargs() if generation_args else {}
     )
+    raw_algo_temp = getattr(self._algo_config, "temperature", None)
+    if (
+        "temperature" not in base_generation_kwargs
+        and isinstance(raw_algo_temp, (int, float))
+        and not isinstance(raw_algo_temp, bool)
+    ):
+      base_generation_kwargs["temperature"] = raw_algo_temp
     version = kwargs.get("policy_version", policy_version)
 
     rollout_reqs: list[datatypes.RolloutRequest] = []
@@ -188,6 +196,8 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
               " 'prompt_id'. Every request must provide a non-empty"
               " 'prompt_id'."
           )
+        for k, v in base_generation_kwargs.items():
+          p.generation_kwargs.setdefault(k, v)
         rollout_reqs.append(p)
         continue
 
@@ -546,6 +556,9 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       raise ValueError(
           f"assembler is required to configure worker for role {role_name}"
       )
+    algo_config = getattr(algo, "algo_config", None)
+    if algo_config is not None:
+      self._algo_config = algo_config
     match role:
       case datatypes.Role.ACTOR | datatypes.Role.CRITIC:
         worker = self._trainer_workers.get(role)

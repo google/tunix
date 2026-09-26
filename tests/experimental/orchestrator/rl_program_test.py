@@ -2959,7 +2959,7 @@ class RLProgramTest(absltest.TestCase):
     )
     self.assertEqual(mock_algo.algo_config.temperature, 0.8)
 
-  def test_program_temperature_missing_in_generation_args_leaves_none(
+  def test_program_temperature_missing_in_generation_args_inherits_from_algo_config(
       self,
   ):
     mock_algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
@@ -2977,7 +2977,7 @@ class RLProgramTest(absltest.TestCase):
         dataset=("p0",),
         algo=mock_algo,
     )
-    self.assertIsNone(program.generation_args.temperature)
+    self.assertEqual(program.generation_args.temperature, 0.8)
 
   def test_program_temperature_missing_in_algo_config_propagates_from_generation_args(
       self,
