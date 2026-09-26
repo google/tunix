@@ -185,6 +185,9 @@ export ADAM_B1=0.9
 export ADAM_B2=0.999
 export WEIGHT_DECAY=0.0
 export MAX_GRAD_NORM="0.125"
+# The maxtext trainer clips only via clip_by_global_norm; an empty chain type
+# would leave it at base.yml's 1.0.
+export OPT_CHAIN_TYPE="clip_by_global_norm"
 export WARMUP_STEPS_FRACTION=0.0
 export LEARNING_RATE_FINAL_FRACTION=1.0
 export SKIP_STEP_ON_SPIKES="${SKIP_STEP_ON_SPIKES:-false}"

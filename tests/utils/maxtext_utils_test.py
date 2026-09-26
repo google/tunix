@@ -553,6 +553,44 @@ class MaxTextUtilsTest(absltest.TestCase):
     argv = self._build_config_argv(trainable_parameters_mask=None)
     self.assertFalse(any("trainable_parameters_mask=" in arg for arg in argv))
 
+  def test_optimizer_overrides_forwarded_to_config(self):
+    argv = self._build_config_argv(
+        adam_b1=0.9,
+        adam_b2=0.999,
+        adam_eps=1e-8,
+        adam_weight_decay=0.0,
+        gradient_clipping_threshold=0.125,
+    )
+    self.assertIn("adam_b1=0.9", argv)
+    self.assertIn("adam_b2=0.999", argv)
+    self.assertIn("adam_eps=1e-08", argv)
+    # 0.0 is a value, not "unset": it must still override base.yml's 0.1.
+    self.assertIn("adam_weight_decay=0.0", argv)
+    self.assertIn("gradient_clipping_threshold=0.125", argv)
+
+  def test_optimizer_overrides_none_leave_argv_unchanged(self):
+    default_argv = self._build_config_argv()
+    none_argv = self._build_config_argv(
+        adam_b1=None,
+        adam_b2=None,
+        adam_eps=None,
+        adam_weight_decay=None,
+        gradient_clipping_threshold=None,
+    )
+    self.assertEqual(none_argv, default_argv)
+    self.assertFalse(
+        any(
+            arg.startswith(("adam_", "gradient_clipping_threshold="))
+            for arg in default_argv
+        )
+    )
+
+  def test_maxtext_extra_flags_override_optimizer_overrides(self):
+    with mock.patch.dict("os.environ", {"MAXTEXT_EXTRA_FLAGS": "adam_b2=0.98"}):
+      argv = self._build_config_argv(adam_b2=0.999)
+    # pyconfig keeps the last occurrence of a key.
+    self.assertGreater(argv.index("adam_b2=0.98"), argv.index("adam_b2=0.999"))
+
   def test_attention_default_dot_product(self):
     argv = self._build_config_argv()
     self.assertIn("attention=dot_product", argv)

@@ -664,6 +664,30 @@ def _checkpoint_root_directory(args) -> str | None:
   return None
 
 
+def _maxtext_gradient_clipping_threshold(args) -> float | None:
+  """Returns MaxText's `gradient_clipping_threshold` for the tunix clip chain.
+
+  The tunix backend clips by chaining `--optimizer_opt_chain_type` ahead of the
+  optimizer. MaxText clips by global norm inside its own update step, so only
+  `clip_by_global_norm` carries over. None keeps MaxText's default.
+  """
+  chain_type = args.optimizer_opt_chain_type
+  if chain_type and chain_type.lower() == "clip_by_global_norm":
+    if "max_norm" not in args.optimizer_chain_kwargs:
+      raise ValueError(
+          "--optimizer_opt_chain_type=clip_by_global_norm needs max_norm in"
+          " --optimizer_chain_kwargs."
+      )
+    return args.optimizer_chain_kwargs["max_norm"]
+  if chain_type:
+    logging.warning(
+        "--optimizer_opt_chain_type=%s is ignored by the maxtext backend, which"
+        " only supports clip_by_global_norm.",
+        chain_type,
+    )
+  return None
+
+
 def _create_maxtext_trainer_factory(args) -> tuple[Any, Mesh]:
   """Creates the trainer factory function and mesh for MaxText's MaxTextTrainingEngine."""
   logging.info("Trainer backend: MaxText's MaxTextTrainingEngine.")
@@ -716,6 +740,14 @@ def _create_maxtext_trainer_factory(args) -> tuple[Any, Mesh]:
       attention=args.maxtext_attention or None,
       remat_policy=args.remat_policy,
       learning_rate_final_fraction=args.learning_rate_final_fraction,
+      # MaxText builds its own optimizer, so these reach it only by being
+      # forwarded; otherwise base.yml's b2 0.95, weight decay 0.1 and clip 1.0
+      # silently replace the --optimizer_* flags.
+      adam_b1=args.optimizer_b1,
+      adam_b2=args.optimizer_b2,
+      adam_eps=args.optimizer_eps,
+      adam_weight_decay=args.optimizer_weight_decay,
+      gradient_clipping_threshold=_maxtext_gradient_clipping_threshold(args),
       skip_step_on_spikes=args.maxtext_skip_step_on_spikes,
       skip_step_on_nan=args.maxtext_skip_step_on_nan,
       skip_step_interval=args.maxtext_skip_step_interval,
