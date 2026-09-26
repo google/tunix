@@ -116,7 +116,7 @@ if [[ "$TRAINER_BACKEND" == "maxtext" ]]; then
   # MaxText shards the batch dimension of every loss input across the fsdp
   # axis, so the microbatch has to be a multiple of it. The trainer node
   # enforces this too.
-  if (( TRAIN_MICRO_BATCH_SIZE % TRAINER_FSDP != 0 )); then
+  if [[ -z "${MAX_SEQ_TOKEN_PER_TPU:-}" ]] && (( TRAIN_MICRO_BATCH_SIZE % TRAINER_FSDP != 0 )); then
     TRAIN_MICRO_BATCH_SIZE=$TRAINER_FSDP
   fi
   if [[ -z "$MAXTEXT_CKPT" ]]; then

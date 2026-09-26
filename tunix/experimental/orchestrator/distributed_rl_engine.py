@@ -59,6 +59,9 @@ def _response_to_trajectory_item(resp: Any) -> datatypes.TrajectoryItem:
         prompt_id=prompt_id,
         group_index=group_index,
         traj={
+            "prompt_tokens": np.zeros(0, dtype=np.int32),
+            "conversation_tokens": np.zeros(0, dtype=np.int32),
+            "conversation_masks": np.zeros(0, dtype=np.float32),
             "status": datatypes.TrajectoryStatus.FAILED,
             "trajectory_reward": 0.0,
         },
@@ -66,7 +69,6 @@ def _response_to_trajectory_item(resp: Any) -> datatypes.TrajectoryItem:
     )
 
   raise ValueError("RolloutResponse payload is None.")
-
 
 
 class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
@@ -84,6 +86,9 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     self._rollout_workers = list(rollout_workers)
     self._rollout_pool = remote_execution.RoutingActorPool(
         self._rollout_workers
+    )
+    self._rollout_session = remote_execution.PoolExecutionSession(
+        self._rollout_pool
     )
     self._trainer_workers = dict(trainer_workers)
     self._inference_workers = dict(inference_workers or {})
@@ -133,21 +138,24 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         len(self._rollout_workers),
     )
     for req in requests:
-      prompt_id = getattr(req, "prompt_id", "")
-      group_index = getattr(req, "group_index", 0)
       logging.debug(
           "Dispatched rollout request (prompt_id=%s, group_index=%d,"
           " request_id=%s).",
-          prompt_id,
-          group_index,
+          getattr(req, "prompt_id", ""),
+          getattr(req, "group_index", 0),
           req.request_id,
       )
-      worker = self._rollout_pool._get_next_actor(
-          kwargs={"route_key": req.traj_id}
-      )
-      res = worker.dispatch_task(method_name="generate", requests=[req])
-      if inspect.isawaitable(res):
-        await res
+    await asyncio.gather(
+        *(
+            self._rollout_session.submit(
+                req.request_id,
+                "generate",
+                requests=[req],
+                route_key=req.traj_id,
+            )
+            for req in requests
+        )
+    )
 
     return [r.request_id for r in requests]
 
@@ -242,6 +250,9 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
                 generation_kwargs=generation_kwargs,
                 max_turns=max_turns,
                 max_response_length=max_response_length,
+                exact_token_continuity=kwargs.get(
+                    "exact_token_continuity", True
+                ),
                 metadata=request_metadata,
             )
         )
@@ -309,42 +320,26 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     if not self._rollout_workers:
       return []
 
-    async def _poll_worker(worker: remote_execution.ActorHandle) -> Any:
-      res = worker.poll_responses(timeout_s=timeout_s)
-      if inspect.isawaitable(res):
-        return await res
-      return res
-
-    tasks = [_poll_worker(w) for w in self._rollout_workers]
-    responses = await asyncio.gather(*tasks, return_exceptions=True)
     completed: list[datatypes.TrajectoryItem] = []
-
-    for idx, resp in enumerate(responses):
-      if isinstance(resp, Exception):
-        logging.error(
-            "Failed polling rollout worker %s: %s",
-            self._rollout_workers[idx],
-            resp,
+    for res, exc in await self._rollout_session.poll_completed(
+        timeout_s=timeout_s
+    ):
+      if exc is not None:
+        logging.error("Failed polling rollout worker: %s", exc)
+        continue
+      if res is None:
+        continue
+      items = res if isinstance(res, list) else [res]
+      for it in items:
+        if isinstance(it, dict):
+          it = datatypes.RolloutResponse(**it)
+        traj_item = _response_to_trajectory_item(it)
+        logging.debug(
+            "Received rollout response (prompt_id=%s, group_index=%d).",
+            traj_item.prompt_id,
+            traj_item.group_index,
         )
-        continue
-      if resp is None:
-        continue
-      unwrap_fn = getattr(resp, "unwrap", None)
-      res = (
-          unwrap_fn() if callable(unwrap_fn) else getattr(resp, "result", resp)
-      )
-      if res is not None:
-        items = res if isinstance(res, list) else [res]
-        for it in items:
-          if isinstance(it, dict):
-            it = datatypes.RolloutResponse(**it)
-          traj_item = _response_to_trajectory_item(it)
-          logging.debug(
-              "Received rollout response (prompt_id=%s, group_index=%d).",
-              traj_item.prompt_id,
-              traj_item.group_index,
-          )
-          completed.append(traj_item)
+        completed.append(traj_item)
     return completed
 
   async def generate(
@@ -759,3 +754,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           restored_policy_version,
       )
     return restored_step
+
+  async def close(self) -> None:
+    """Closes the rollout execution session and cancels any pending polling tasks."""
+    await self._rollout_session.close()

@@ -97,8 +97,6 @@ class AgenticRLConfig(algo_config_lib.AlgorithmConfig):
   filter_statuses: Optional[Set] = None
   overlong_filter: bool = False
   use_rollout_logps: bool = True
-  # Defaults to True when the rollout backend supports token input (e.g. vLLM).
-  exact_token_continuity: Optional[bool] = None
 
 
 TConfig = TypeVar("TConfig", bound=AgenticRLConfig)
@@ -166,15 +164,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     """
     self.rl_engine = rl_engine
     self.algo_config = algo_config
-    if algo_config.exact_token_continuity is None:
-      algo_config.exact_token_continuity = bool(
-          getattr(rl_engine.rollout, "supports_token_input", False)
-      )
-    elif (
-        algo_config.exact_token_continuity
-        and not rl_engine.rollout.supports_token_input
-    ):
-      raise ValueError("exact_token_continuity requires a token-input backend")
     self._validate_rollout_config()
     reward_manager_fn = function_registry.get_reward_manager(
         algo_config.reward_manager
@@ -287,14 +276,14 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       if self.algo_config.exact_token_continuity:
         if not config.return_logprobs:
           raise ValueError("exact_token_continuity requires sampled logprobs")
-        if config.return_routed_experts:
-          # While Router Replay conceptually requires TiTO's 1-to-1 token
-          # alignment, multi-turn TrajectoryCollectEngine / AgenticGRPOLearner
-          # does not yet stitch `rollout_output.routed_experts` across turns
-          # (or pad routing for CPU-appended template/env spans) into
-          # TrainExample. Fail fast rather than silently dropping routing.
+        if (
+            config.return_routed_experts
+            and self.rl_engine.cluster_config.training_config.max_seq_token_per_tpu
+            is not None
+        ):
           raise ValueError(
-              "exact_token_continuity does not replay expert routing"
+              "exact_token_continuity does not replay expert routing when"
+              " sequence packing (max_seq_token_per_tpu) is enabled"
           )
       if config.max_tokens_to_generate != self.algo_config.max_response_length:
         raise ValueError(
@@ -978,7 +967,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
               jax.tree_util.tree_map(
                   lambda x: (
                       x[i : i + seqs_per_chunk]
-                      if hasattr(x, "shape") and x.shape and x.shape[0] == n_total
+                      if hasattr(x, "shape")
+                      and x.shape
+                      and x.shape[0] == n_total
                       else x
                   ),
                   merged_train_micro_batch,
@@ -1081,7 +1072,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         # step). Mirrors the per-iter view a wandb dashboard would show
         # without depending on the async metric logger pipeline.
         with self._rewards_window_lock:
-          train_rewards = np.asarray(self._train_rewards_window, dtype=np.float32)
+          train_rewards = np.asarray(
+              self._train_rewards_window, dtype=np.float32
+          )
           eval_rewards = np.asarray(self._eval_rewards_window, dtype=np.float32)
           self._train_rewards_window.clear()
           if did_eval_this_global_step:
@@ -1117,10 +1110,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         trainer_str = ""
         try:
           actor_trainer = self.rl_engine.actor_trainer
-          trainer_buf = (
-              getattr(actor_trainer, "_prev_buffered_train_metrics", None)
-              or getattr(actor_trainer, "_buffered_train_metrics", None)
-          )
+          trainer_buf = getattr(
+              actor_trainer, "_prev_buffered_train_metrics", None
+          ) or getattr(actor_trainer, "_buffered_train_metrics", None)
           if trainer_buf is not None:
             extras = []
             if trainer_buf.losses:
@@ -1138,9 +1130,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
                 vals, _ = am[key]
                 if vals:
                   v = float(
-                      np.mean([
-                          np.asarray(common._metric_scalar(x)) for x in vals
-                      ])
+                      np.mean(
+                          [np.asarray(common._metric_scalar(x)) for x in vals]
+                      )
                   )
                   extras.append(f"{label}={v:.4f}")
             if extras:

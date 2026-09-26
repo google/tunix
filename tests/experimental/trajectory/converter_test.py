@@ -1100,6 +1100,50 @@ class ToTunixTrajectoryTest(trajectory_testing.TrajectoryTestCase):
           restored_tunix_traj.steps[i], original_trajectory.steps[i]
       )
 
+  def test_to_tunix_trajectory_on_base_atif_trajectory_rehydrates_metadata(
+      self,
+  ):
+    rl_trajectory = converter.to_tunix_trajectory(
+        trajectory_testing.PAIRED_ATIF_TRAJECTORY
+    )
+
+    self.assertEqual(
+        rl_trajectory.reward,
+        trajectory_testing.PAIRED_TUNIX_TRAJECTORY.total_reward,
+    )
+    self.assertEqual(
+        rl_trajectory.status, agent_types.TrajectoryStatus.SUCCEEDED
+    )
+    self.assertEqual(
+        rl_trajectory.env_time,
+        trajectory_testing.PAIRED_TUNIX_TRAJECTORY.env_time,
+    )
+    self.assertEqual(
+        rl_trajectory.reward_time,
+        trajectory_testing.PAIRED_TUNIX_TRAJECTORY.reward_time,
+    )
+
+  def test_to_tunix_trajectory_on_base_atif_trajectory_rehydrates_steps(self):
+    prompt_step, agent_step, trailing_env_step = (
+        trajectory_testing.PAIRED_TUNIX_TRAJECTORY.steps
+    )
+
+    rl_trajectory = converter.to_tunix_trajectory(
+        trajectory_testing.PAIRED_ATIF_TRAJECTORY
+    )
+
+    self.assertEqual(rl_trajectory.task, {"prompts": [prompt_step.message]})
+    (paired_step,) = rl_trajectory.steps
+    self.assertEqual(paired_step.mc_return, agent_step.mc_return)
+    self.assertEqual(paired_step.reward, trailing_env_step.reward)
+    self.assertTrue(paired_step.done)
+    np.testing.assert_array_equal(
+        paired_step.assistant_tokens, agent_step.assistant_tokens
+    )
+    np.testing.assert_array_equal(
+        paired_step.env_tokens, trailing_env_step.env_tokens
+    )
+
 
 class CreateTrajectoryMetadataTest(parameterized.TestCase):
 
@@ -1240,4 +1284,3 @@ class UpdateTrajectoryMetadataTest(parameterized.TestCase):
 
 if __name__ == "__main__":
   absltest.main()
-

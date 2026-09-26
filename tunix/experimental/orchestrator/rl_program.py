@@ -49,7 +49,7 @@ BatchConfig = batch_assembly.BatchConfig
 def _generation_metrics(
     groups: Sequence[Sequence[Any]],
 ) -> dict[str, float]:
-  """Computes the step's `generation/completions/*` metrics, grouped by prompt.
+  """Computes the step's `rollout/completions/*` metrics, grouped by prompt.
 
   Matches `agentic_grpo_learner.GRPOLearner._process_results`: the two means are
   per group, not per rollout, so a short group still weighs the same as a full
@@ -101,12 +101,12 @@ def _generation_metrics(
   if not all_lengths:
     return {}
   return {
-      "generation/completions/clip_ratio": float(np.mean(clip_ratios)),
-      "generation/completions/mean_raw_length": float(
+      "rollout/completions/clip_ratio": float(np.mean(clip_ratios)),
+      "rollout/completions/mean_raw_length": float(
           np.mean(group_mean_lengths)
       ),
-      "generation/completions/max_raw_length": float(np.max(all_lengths)),
-      "generation/completions/min_raw_length": float(np.min(all_lengths)),
+      "rollout/completions/max_raw_length": float(np.max(all_lengths)),
+      "rollout/completions/min_raw_length": float(np.min(all_lengths)),
   }
 
 
@@ -133,8 +133,7 @@ def _extract_reward(item: Any) -> float:
   traj = getattr(item, "traj", item)
   if not isinstance(traj, dict):
     raise TypeError(
-        "Expected a Token-mode trajectory mapping, got"
-        f" {type(traj).__name__}."
+        f"Expected a Token-mode trajectory mapping, got {type(traj).__name__}."
     )
   if "trajectory_reward" not in traj:
     raise KeyError(
@@ -479,6 +478,9 @@ class StandardRLProgram(RLProgram):
         dispatch_kwargs: dict[str, Any] = {
             "num_generations": self.num_generations,
             "policy_version": self.policy_version,
+            "exact_token_continuity": getattr(
+                self.algo.algo_config, "exact_token_continuity", True
+            ),
         }
         if self.generation_args is not None:
           dispatch_kwargs["generation_args"] = self.generation_args
@@ -526,7 +528,14 @@ class StandardRLProgram(RLProgram):
         rewards = []
         for item in group:
           if self.reward_fns:
-            r = sum(_invoke_reward_fn(fn, item) for fn in self.reward_fns)
+            # Skip `reward_fn` for failed, timed-out, or masked-out trajectories
+            # (`not item.is_valid`): although the payload still goes through
+            # trainer fwd/bwd to keep static batch shapes, its advantage and
+            # completion_mask are zeroed out, so scoring it is wasted work.
+            if not item.is_valid:
+              r = 0.0
+            else:
+              r = sum(_invoke_reward_fn(fn, item) for fn in self.reward_fns)
           else:
             r = _extract_reward(item)
           rewards.append(float(r))
@@ -574,11 +583,13 @@ class StandardRLProgram(RLProgram):
           traj_dict["trajectory_reward"] = reward_val
           traj_dict["status"] = status
           traj_dict["steps"] = steps
+          traj_dict["conversation_masks"] = payload.completion_mask
           item = datatypes.TrajectoryItem(
               prompt_id=getattr(src_item, "prompt_id", ""),
               group_index=getattr(src_item, "group_index", 0),
               start_step=0,
               traj=traj_dict,
+              is_valid=getattr(src_item, "is_valid", True),
               prompt_tokens=getattr(src_item, "prompt_tokens", None),
               completion_tokens=getattr(src_item, "completion_tokens", None),
               action_mask=getattr(src_item, "action_mask", None),
@@ -592,6 +603,28 @@ class StandardRLProgram(RLProgram):
           await self.scored_q.put(item)
     finally:
       await self.scored_q.close()
+
+  def _log_metric(
+      self,
+      metric_name: str,
+      scalar_value: float | np.ndarray,
+      step: int,
+      *,
+      prefix: str | None = None,
+  ) -> None:
+    """Logs a scalar metric using RLEngine-compatible '<prefix>/<mode>/<name>' layout."""
+    if prefix is None:
+      if "/" in metric_name:
+        prefix, metric_name = metric_name.split("/", maxsplit=1)
+      else:
+        prefix = "global"
+    if self.metrics_prefix:
+      prefix = (
+          f"{self.metrics_prefix}/{prefix}"
+          if prefix
+          else self.metrics_prefix
+      )
+    self.metrics_logger.log(prefix, metric_name, scalar_value, self.mode, step)
 
   def _collect_and_log_step_metrics(
       self,
@@ -704,43 +737,53 @@ class StandardRLProgram(RLProgram):
         staleness_list.append(float(max(0, consumed_policy_version - pol_ver)))
 
     if prompt_lengths:
-      self.metrics_logger.log(
-          self.metrics_prefix,
-          "rollout/prompt_length_mean",
+      self._log_metric(
+          "rollout/prompts/mean_length",
           float(np.mean(prompt_lengths)),
-          self.mode,
+          log_step,
+      )
+      self._log_metric(
+          "rollout/prompts/max_length",
+          float(np.max(prompt_lengths)),
+          log_step,
+      )
+      self._log_metric(
+          "rollout/prompts/min_length",
+          float(np.min(prompt_lengths)),
           log_step,
       )
     if completion_lengths:
-      self.metrics_logger.log(
-          self.metrics_prefix,
-          "rollout/completion_length_mean",
+      self._log_metric(
+          "rollout/completions/mean_length",
           float(np.mean(completion_lengths)),
-          self.mode,
+          log_step,
+      )
+      self._log_metric(
+          "rollout/completions/max_length",
+          float(np.max(completion_lengths)),
+          log_step,
+      )
+      self._log_metric(
+          "rollout/completions/min_length",
+          float(np.min(completion_lengths)),
           log_step,
       )
     if total_lengths:
-      self.metrics_logger.log(
-          self.metrics_prefix,
+      self._log_metric(
           "rollout/total_tokens_mean",
           float(np.mean(total_lengths)),
-          self.mode,
           log_step,
       )
     if turns_list:
-      self.metrics_logger.log(
-          self.metrics_prefix,
+      self._log_metric(
           "rollout/num_turns_mean",
           float(np.mean(turns_list)),
-          self.mode,
           log_step,
       )
     if successes:
-      self.metrics_logger.log(
-          self.metrics_prefix,
+      self._log_metric(
           "rollout/success_rate",
           float(np.mean(successes)),
-          self.mode,
           log_step,
       )
     if staleness_list:
@@ -750,29 +793,36 @@ class StandardRLProgram(RLProgram):
           "staleness_min": float(np.min(staleness_list)),
       }
       for tag, val in staleness_stats.items():
-        self.metrics_logger.log(
-            self.metrics_prefix, f"rollout/{tag}", val, self.mode, log_step
-        )
+        self._log_metric(f"rollout/{tag}", val, log_step)
 
-    # Generation metrics, already named to match the agentic GRPO learner so
-    # the same dashboards work for both.
+    # Generation/rollout metrics grouped under rollout/*.
     if generation_metrics:
       for tag, val in generation_metrics.items():
-        self.metrics_logger.log(
-            self.metrics_prefix,
-            tag,
-            val,
-            self.mode,
-            log_step,
-        )
+        if tag.startswith("generation/"):
+          tag = "rollout/" + tag.removeprefix("generation/")
+        self._log_metric(tag, val, log_step)
 
     # --- 2. Reward Metrics ---
-    reward_mean = float(np.mean(step_rewards)) if step_rewards else 0.0
-    reward_std = float(np.std(step_rewards)) if step_rewards else 0.0
-    reward_min = float(np.min(step_rewards)) if step_rewards else 0.0
-    reward_max = float(np.max(step_rewards)) if step_rewards else 0.0
-    reward_sum = float(np.sum(step_rewards)) if step_rewards else 0.0
-    if step_rewards:
+    rewards_to_log = step_rewards
+    if all_step_items:
+      valid_flags = [item.is_valid for item in all_step_items]
+      self._log_metric(
+          "rollout/invalid_trajectory_frac",
+          1.0 - float(np.mean(valid_flags)),
+          log_step,
+      )
+      rewards_to_log = [
+          reward
+          for reward, is_valid in zip(step_rewards, valid_flags)
+          if is_valid
+      ]
+
+    reward_mean = float(np.mean(rewards_to_log)) if rewards_to_log else 0.0
+    reward_std = float(np.std(rewards_to_log)) if rewards_to_log else 0.0
+    reward_min = float(np.min(rewards_to_log)) if rewards_to_log else 0.0
+    reward_max = float(np.max(rewards_to_log)) if rewards_to_log else 0.0
+    reward_sum = float(np.sum(rewards_to_log)) if rewards_to_log else 0.0
+    if rewards_to_log:
       reward_stats = {
           "mean": reward_mean,
           "std": reward_std,
@@ -781,9 +831,7 @@ class StandardRLProgram(RLProgram):
           "sum": reward_sum,
       }
       for tag, val in reward_stats.items():
-        self.metrics_logger.log(
-            self.metrics_prefix, f"rewards/{tag}", val, self.mode, log_step
-        )
+        self._log_metric(f"rewards/{tag}", val, log_step)
 
     # --- Advantage Metrics ---
     advantage_mean = float(np.mean(step_advantages)) if step_advantages else 0.0
@@ -808,15 +856,10 @@ class StandardRLProgram(RLProgram):
           "nonzero_frac": advantage_nonzero_frac,
       }
       for tag, val in advantage_stats.items():
-        self.metrics_logger.log(
-            self.metrics_prefix,
-            f"rewards/advantage/{tag}",
-            val,
-            self.mode,
-            log_step,
-        )
+        self._log_metric(f"rewards/advantage/{tag}", val, log_step)
 
-    # --- 3. Orchestrator Metrics ---
+    # --- 3. Perf & Orchestrator Metrics ---
+    self._log_metric("perf/global_step_time", float(step_time_sec), log_step)
     orchestrator_stats = {
         "policy_version": float(self.policy_version),
         "num_rollouts": float(num_rollouts),
@@ -824,11 +867,9 @@ class StandardRLProgram(RLProgram):
         "step_time_sec": float(step_time_sec),
     }
     for tag, val in orchestrator_stats.items():
-      self.metrics_logger.log(
-          self.metrics_prefix, f"orchestrator/{tag}", val, self.mode, log_step
-      )
+      self._log_metric(f"orchestrator/{tag}", val, log_step)
 
-    # --- 4. Trainer Metrics ---
+    # --- 4. Actor Trainer Metrics ---
     loss_val = None
     perplexity_val = None
     if trainer_metrics is None:
@@ -861,74 +902,68 @@ class StandardRLProgram(RLProgram):
 
       # Loss & Perplexity
       raw_loss = scalar_metrics.pop(
-          "loss", scalar_metrics.pop("trainer/loss", None)
+          "loss",
+          scalar_metrics.pop(
+              "trainer/loss", scalar_metrics.pop("actor/loss", None)
+          ),
       )
       if raw_loss is None and "loss" in weighted_metrics:
         raw_loss = weighted_metrics.pop("loss")
       elif raw_loss is None and "trainer/loss" in weighted_metrics:
         raw_loss = weighted_metrics.pop("trainer/loss")
+      elif raw_loss is None and "actor/loss" in weighted_metrics:
+        raw_loss = weighted_metrics.pop("actor/loss")
 
       loss_val = _extract_scalar(raw_loss)
       if loss_val is not None:
-        self.metrics_logger.log(
-            self.metrics_prefix, "trainer/loss", loss_val, self.mode, log_step
-        )
+        self._log_metric("loss", loss_val, log_step, prefix="actor")
         perplexity_val = float(np.exp(loss_val))
-        self.metrics_logger.log(
-            self.metrics_prefix,
-            "trainer/perplexity",
-            perplexity_val,
-            self.mode,
-            log_step,
+        self._log_metric(
+            "perplexity", perplexity_val, log_step, prefix="actor"
         )
 
       # Learning Rate
       raw_lr = scalar_metrics.pop(
-          "learning_rate", scalar_metrics.pop("trainer/learning_rate", None)
+          "learning_rate",
+          scalar_metrics.pop(
+              "trainer/learning_rate",
+              scalar_metrics.pop("actor/learning_rate", None),
+          ),
       )
       lr_val = _extract_scalar(raw_lr)
       if lr_val is not None:
-        self.metrics_logger.log(
-            self.metrics_prefix,
-            "trainer/learning_rate",
-            lr_val,
-            self.mode,
-            log_step,
-        )
+        self._log_metric("learning_rate", lr_val, log_step, prefix="actor")
 
       # Grad Norm
       raw_gn = scalar_metrics.pop(
-          "grad_norm", scalar_metrics.pop("trainer/grad_norm", None)
+          "grad_norm",
+          scalar_metrics.pop(
+              "trainer/grad_norm", scalar_metrics.pop("actor/grad_norm", None)
+          ),
       )
       gn_val = _extract_scalar(raw_gn)
       if gn_val is not None:
-        self.metrics_logger.log(
-            self.metrics_prefix,
-            "trainer/grad_norm",
-            gn_val,
-            self.mode,
-            log_step,
-        )
+        self._log_metric("grad_norm", gn_val, log_step, prefix="actor")
 
       # Auxiliary weighted metrics
       for k, v in weighted_metrics.items():
         val = _extract_scalar(v)
         if val is not None:
-          metric_key = k if k.startswith("trainer/") else f"trainer/{k}"
-          self.metrics_logger.log(
-              self.metrics_prefix, metric_key, val, self.mode, log_step
+          clean_key = (
+              k.removeprefix("trainer/").removeprefix("actor/")
           )
+          self._log_metric(clean_key, val, log_step, prefix="actor")
 
       # Auxiliary scalar metrics
       for k, v in scalar_metrics.items():
-        if k in ("perplexity", "trainer/perplexity"):
+        if k in ("perplexity", "trainer/perplexity", "actor/perplexity"):
           continue
         val = _extract_scalar(v)
         if val is not None:
-          metric_key = k if k.startswith("trainer/") else f"trainer/{k}"
-          self.metrics_logger.log(
-              self.metrics_prefix, metric_key, val, self.mode, log_step
+          clean_key = (
+              k.removeprefix("trainer/").removeprefix("actor/")
           )
+          self._log_metric(clean_key, val, log_step, prefix="actor")
 
     # --- 5. Sampler/Trainer Agreement Metrics ---
     # Names are already namespaced (``sampler_trainer/*``, ``sampler_is/*``) by
@@ -938,13 +973,7 @@ class StandardRLProgram(RLProgram):
       for name, (agg_fn, values) in sampler_agreement.items():
         if not values:
           continue
-        self.metrics_logger.log(
-            self.metrics_prefix,
-            name,
-            float(agg_fn(values)),
-            self.mode,
-            log_step,
-        )
+        self._log_metric(name, float(agg_fn(values)), log_step)
 
     return {
         "reward_mean": reward_mean,

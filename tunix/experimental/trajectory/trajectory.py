@@ -9,7 +9,8 @@ from __future__ import annotations
 import dataclasses
 import datetime
 import enum
-from typing import Annotated, Any, Final, Literal, get_args
+import functools
+from typing import Annotated, Any, Final, Literal, TypeVar, get_args
 
 import numpy as np
 import pydantic
@@ -53,45 +54,111 @@ def _serialize_dict(value: dict[str, Any] | None) -> dict[str, Any] | None:
   return _convert(value)
 
 
-ATIF_EXT_KEY: Final[str] = "_atif_ext"
+TUNIX_EXTENSIONS_KEY: Final[str] = "_tunix_extensions"
+_EXTRA_FIELD: Final[str] = "extra"
+
+
+@functools.lru_cache(maxsize=None)
+def _get_field_names(model_cls: type[pydantic.BaseModel]) -> set[str]:
+  """Returns the cached set of field names for `model_cls`."""
+  return set(model_cls.model_fields)
+
+
+def _get_non_none_fields(
+    model: pydantic.BaseModel,
+    field_names: set[str],
+) -> dict[str, Any]:
+  """Returns non-None field values read directly from `model`."""
+  values_by_field = {}
+  for field in field_names:
+    value = getattr(model, field)
+    if value is not None:
+      values_by_field[field] = value
+  return values_by_field
 
 
 def _pack_subclass_values_into_extra(
-    source_model: pydantic.BaseModel,
-    target_field_names: set[str] | frozenset[str],
+    source_model: Step | TrajectoryMetadata,
+    target_cls: type[pydantic.BaseModel],
     exclude_field_names: set[str] | frozenset[str] = frozenset(),
 ) -> dict[str, Any] | None:
-  """Packs non-target fields from `source_model` into `extra[ATIF_EXT_KEY]`."""
-  source_field_names = set(type(source_model).model_fields)
+  """Packs subclass-specific fields into the `extra['tunix_extensions']` dict."""
+  source_field_names = _get_field_names(type(source_model))
+  target_field_names = _get_field_names(target_cls)
   if source_field_names == target_field_names:
     return None
 
-  extra_field_names = (
+  subclass_field_names = (
       source_field_names - target_field_names - exclude_field_names
   )
-
-  # Dump all non-excluded fields, then pop subclass extra fields
-  # so only target fields remain in source_values_by_key.
-  source_values_by_key = source_model.model_dump(
-      exclude=set(exclude_field_names),
-      exclude_none=True,
+  target_values_by_field = _get_non_none_fields(
+      source_model, target_field_names - {_EXTRA_FIELD}
   )
-  extra_values_by_key = {
-      field: source_values_by_key.pop(field)
-      for field in extra_field_names
-      if field in source_values_by_key
-  }
 
-  # Nest extra fields under extra[ATIF_EXT_KEY] to avoid colliding.
-  extra_by_key = source_values_by_key.get("extra") or {}
-  if extra_values_by_key:
-    atif_ext_by_key = extra_by_key.get(ATIF_EXT_KEY) or {}
-    extra_by_key = extra_by_key | {
-        ATIF_EXT_KEY: atif_ext_by_key | extra_values_by_key
-    }
+  # Serialize only subclass extension fields.
+  subclass_values_by_field = {}
+  if subclass_field_names:
+    subclass_values_by_field = source_model.model_dump(
+        include=subclass_field_names,
+        exclude_none=True,
+    )
 
-  source_values_by_key["extra"] = extra_by_key or None
-  return source_values_by_key
+  extra = dict(source_model.extra or {})
+  if subclass_values_by_field:
+    tunix_ext = extra.get(TUNIX_EXTENSIONS_KEY) or {}
+    extra[TUNIX_EXTENSIONS_KEY] = tunix_ext | subclass_values_by_field
+  if extra:
+    target_values_by_field[_EXTRA_FIELD] = extra
+  return target_values_by_field
+
+
+def _unpack_subclass_values_from_extra(
+    source_model: Step | TrajectoryMetadata,
+    target_cls: type[pydantic.BaseModel],
+) -> dict[str, Any]:
+  """Extracts `source_model.extra[TUNIX_EXTENSIONS_KEY]` into top-level values."""
+  extra = dict(source_model.extra or {})
+  tunix_ext = dict(extra.pop(TUNIX_EXTENSIONS_KEY, None) or {})
+
+  target_field_names = _get_field_names(target_cls)
+  source_field_names = _get_field_names(type(source_model))
+  subclass_field_names = target_field_names - source_field_names
+
+  target_values_by_field = _get_non_none_fields(
+      source_model, (source_field_names & target_field_names) - {_EXTRA_FIELD}
+  )
+
+  # Promote only target subclass fields from `extra[TUNIX_EXTENSIONS_KEY]`,
+  # leaving any non-subclass keys in place so `extra="forbid"` is not tripped.
+  for field in tunix_ext.keys() & subclass_field_names:
+    target_values_by_field[field] = tunix_ext.pop(field)
+  if tunix_ext:
+    extra[TUNIX_EXTENSIONS_KEY] = tunix_ext
+  if extra:
+    target_values_by_field[_EXTRA_FIELD] = extra
+  return target_values_by_field
+
+
+_StepT = TypeVar("_StepT", "TunixAgentStep", "TunixEnvStep")
+
+
+def _unpack_step_from_atif(
+    step: Step,
+    target_cls: type[_StepT],
+    step_id_offset: int = 1,
+) -> _StepT:
+  """Rehydrates a 1-indexed ATIF Step into a 0-indexed Tunix step subclass."""
+  if isinstance(step, target_cls):
+    return step
+  if step.step_id < step_id_offset:
+    raise ValueError(
+        f"Expected a {step_id_offset}-indexed ATIF step_id, got"
+        f" {step.step_id}; this step may already use the 0-indexed Tunix"
+        " convention."
+    )
+  target_values_by_field = _unpack_subclass_values_from_extra(step, target_cls)
+  target_values_by_field["step_id"] = step.step_id - step_id_offset
+  return target_cls.model_validate(target_values_by_field)
 
 
 IntArray = Annotated[
@@ -372,16 +439,11 @@ class Step(pydantic.BaseModel):
 
   def to_atif_step(self, step_id_offset: int = 0) -> Step:
     """Converts this step to a base ATIF Step, storing subclass fields in extra."""
-    packed_values_by_key = _pack_subclass_values_into_extra(
-        self, _STEP_FIELD_NAMES
-    )
-    if packed_values_by_key is None:
+    target_values_by_field = _pack_subclass_values_into_extra(self, Step)
+    if target_values_by_field is None:
       return self
-    packed_values_by_key["step_id"] = self.step_id + step_id_offset
-    return Step(**packed_values_by_key)
-
-
-_STEP_FIELD_NAMES: Final[frozenset[str]] = frozenset(Step.model_fields)
+    target_values_by_field["step_id"] = self.step_id + step_id_offset
+    return Step.model_validate(target_values_by_field)
 
 
 class Agent(pydantic.BaseModel):
@@ -446,21 +508,20 @@ class TrajectoryMetadata(pydantic.BaseModel):
 
   def to_atif_metadata(self) -> TrajectoryMetadata:
     """Converts this metadata to base ATIF TrajectoryMetadata, storing subclass fields in extra."""
-    packed_values_by_key = _pack_subclass_values_into_extra(
+    target_values_by_field = _pack_subclass_values_into_extra(
         self,
-        _TRAJECTORY_METADATA_FIELD_NAMES,
+        TrajectoryMetadata,
         exclude_field_names={"steps", "subagent_trajectories"},
     )
-    return (
-        TrajectoryMetadata(**packed_values_by_key)
-        if packed_values_by_key is not None
-        else self
-    )
+    if target_values_by_field is None:
+      return self
+    return TrajectoryMetadata.model_validate(target_values_by_field)
 
-
-_TRAJECTORY_METADATA_FIELD_NAMES: Final[frozenset[str]] = frozenset(
-    TrajectoryMetadata.model_fields
-)
+  def get_extensions(self) -> dict[str, Any]:
+    """Returns the packed subclass extensions dictionary from `extra`."""
+    if not self.extra:
+      return {}
+    return self.extra.get(TUNIX_EXTENSIONS_KEY) or {}
 
 
 class Trajectory(TrajectoryMetadata):
@@ -620,6 +681,13 @@ class TunixAgentStep(Step):
     """Converts this 0-indexed Tunix step to a 1-indexed base ATIF Step."""
     return super().to_atif_step(step_id_offset=step_id_offset)
 
+  @classmethod
+  def from_atif_step(
+      cls, step: Step, step_id_offset: int = 1
+  ) -> TunixAgentStep:
+    """Rehydrates a 1-indexed ATIF Step into a 0-indexed TunixAgentStep."""
+    return _unpack_step_from_atif(step, cls, step_id_offset=step_id_offset)
+
 
 class TunixEnvStep(Step):
   """A single turn/interaction environment step with Tunix RL extensions."""
@@ -660,6 +728,11 @@ class TunixEnvStep(Step):
     """Converts this 0-indexed Tunix step to a 1-indexed base ATIF Step."""
     return super().to_atif_step(step_id_offset=step_id_offset)
 
+  @classmethod
+  def from_atif_step(cls, step: Step, step_id_offset: int = 1) -> TunixEnvStep:
+    """Rehydrates a 1-indexed ATIF Step into a 0-indexed TunixEnvStep."""
+    return _unpack_step_from_atif(step, cls, step_id_offset=step_id_offset)
+
 
 class TunixTrajectoryMetadata(TrajectoryMetadata):
   """Tunix-specific trajectory metadata extending base ATIF TrajectoryMetadata."""
@@ -696,6 +769,16 @@ class TunixTrajectoryMetadata(TrajectoryMetadata):
       default=None,
       description="Timing information for reward operations.",
   )
+
+  @classmethod
+  def from_atif_metadata(
+      cls, metadata: TrajectoryMetadata
+  ) -> TunixTrajectoryMetadata:
+    """Rehydrates base ATIF TrajectoryMetadata into TunixTrajectoryMetadata."""
+    if isinstance(metadata, cls):
+      return metadata
+    target_values_by_field = _unpack_subclass_values_from_extra(metadata, cls)
+    return cls.model_validate(target_values_by_field)
 
 
 class TunixTrajectory(TunixTrajectoryMetadata):
@@ -816,6 +899,35 @@ class TunixTrajectory(TunixTrajectoryMetadata):
     """Returns trajectory metadata (excluding steps and sub-trajectories)."""
     data = self.model_dump(exclude={"steps", "subagent_trajectories"})
     return TunixTrajectoryMetadata(**data)
+
+  @classmethod
+  def from_atif_trajectory(cls, atif_trajectory: Trajectory) -> TunixTrajectory:
+    """Rehydrates a 1-indexed ATIF Trajectory to a 0-indexed TunixTrajectory."""
+    if isinstance(atif_trajectory, cls):
+      return atif_trajectory
+
+    def upcast_step(step: Step) -> TunixAgentStep | TunixEnvStep:
+      """Rehydrates a base ATIF Step into the subclass matching its source."""
+      match step.source:
+        case Source.AGENT:
+          return TunixAgentStep.from_atif_step(step)
+        case Source.USER | Source.SYSTEM:
+          return TunixEnvStep.from_atif_step(step)
+
+    target_values_by_field = _unpack_subclass_values_from_extra(
+        atif_trajectory, TunixTrajectoryMetadata
+    )
+    target_values_by_field["steps"] = [
+        upcast_step(step) for step in atif_trajectory.steps
+    ]
+    # Stores never persist subagent trajectories, so trajectories read back from
+    # a store carry none; hand-built ATIF trajectories may still nest them.
+    if atif_trajectory.subagent_trajectories is not None:
+      target_values_by_field["subagent_trajectories"] = [
+          cls.from_atif_trajectory(subagent_trajectory)
+          for subagent_trajectory in atif_trajectory.subagent_trajectories
+      ]
+    return cls.model_validate(target_values_by_field)
 
   def to_json_dict(self) -> dict[str, Any]:
     """Serializes the model to a dictionary suitable for JSON, excluding Nones."""

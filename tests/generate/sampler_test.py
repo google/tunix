@@ -25,6 +25,7 @@ import numpy as np
 from tunix.generate import base_sampler
 from tunix.generate import sampler as sampler_lib
 from tunix.generate import utils
+from tunix.models.gemma3 import model as gemma3_model_lib
 from tunix.models.gemma4 import model as gemma4_model_lib
 from tunix.tests import test_common as tc
 
@@ -705,6 +706,63 @@ class SamplerTest(parameterized.TestCase):
         max_generation_steps=10,
         max_prompt_length=10,
     )
+
+  def test_gemma3_decode_only_last_token_consistency(self):
+    """Verifies that decode_only_last_token yields identical generated tokens and logits."""
+    config = gemma3_model_lib.ModelConfig(
+        num_layers=2,
+        num_embed=32,
+        embed_dim=16,
+        hidden_dim=16,
+        num_heads=4,
+        head_dim=16,
+        num_kv_heads=1,
+        sliding_window_size=4,
+        local_base_frequency=10_000,
+        global_base_frequency=1_000_000,
+    )
+    rngs = nnx.Rngs(42)
+    model = gemma3_model_lib.Gemma3(config, rngs=rngs)
+    cache_config = sampler_lib.CacheConfig(
+        cache_size=32,
+        num_layers=config.num_layers,
+        num_kv_heads=config.num_kv_heads,
+        head_dim=config.head_dim,
+    )
+    mock_tokenizer = tc.MockVocab()
+    mock_tokenizer.DecodeIds = mock.MagicMock()
+    mock_tokenizer.DecodeIds.return_value = 'decoded_string'
+
+    # Run 1: Optimized (decode_only_last_token = True)
+    sampler_opt = sampler_lib.Sampler(model, mock_tokenizer, cache_config)
+    self.assertTrue(sampler_opt._supports_decode_only_last_token)
+    res_opt = sampler_opt(
+        ['input string', 'hello world'],
+        max_generation_steps=10,
+        max_prompt_length=10,
+        return_logits=True,
+        echo=False,
+    )
+
+    # Run 2: Unoptimized (force decode_only_last_token = False)
+    sampler_unopt = sampler_lib.Sampler(model, mock_tokenizer, cache_config)
+    sampler_unopt._supports_decode_only_last_token = False
+    res_unopt = sampler_unopt(
+        ['input string', 'hello world'],
+        max_generation_steps=10,
+        max_prompt_length=10,
+        return_logits=True,
+        echo=False,
+    )
+
+    # Verify tokens and generated logits are identical
+    self.assertEqual(len(res_opt.tokens), len(res_unopt.tokens))
+    for t_opt, t_unopt in zip(res_opt.tokens, res_unopt.tokens):
+      np.testing.assert_array_equal(t_opt, t_unopt)
+    self.assertEqual(len(res_opt.logits), len(res_unopt.logits))  # pyrefly: ignore[bad-argument-type]
+    for l_opt, l_unopt in zip(res_opt.logits, res_unopt.logits):  # pyrefly: ignore[bad-argument-type]
+      self.assertEqual(l_opt.shape, l_unopt.shape)
+      np.testing.assert_allclose(l_opt, l_unopt, atol=1e-5, rtol=1e-5)
 
   def test_gemma4_decode_only_last_token_consistency(self):
     """Verifies that decode_only_last_token yields identical generated tokens and logits."""

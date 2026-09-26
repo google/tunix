@@ -380,6 +380,7 @@ class RolloutWorker(abstract_worker.Worker):
               message=str(item.error_message),
           ),
           payload=None,
+          metadata={"prompt_id": getattr(item, "prompt_id", "")},
       )
     if isinstance(item, datatypes.RolloutResponse):
       return item

@@ -954,6 +954,18 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           step=expected_step,  # pyrefly: ignore[bad-argument-type]
       )
 
+    routed_experts_np = common.align_routed_experts(
+        [item.traj.get("routed_experts") for item in trajectories],
+        completion_lengths=[len(t) for t in completion_tokens_list],
+        prompt_width=rollout_config.max_prompt_length,
+        completion_width=max_response_length,
+    )
+    routed_experts = (
+        jnp.asarray(routed_experts_np)
+        if routed_experts_np is not None
+        else None
+    )
+
     combined_batch = TrainExample(
         prompt_ids=prompt_ids,
         prompt_mask=prompt_mask,
@@ -965,6 +977,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         policy_version=policy_versions,
         sampler_is_weights=sampler_is_weights,
         completion_attention_mask=completion_attention_mask,
+        routed_experts=routed_experts,
     )
     return [combined_batch]
 

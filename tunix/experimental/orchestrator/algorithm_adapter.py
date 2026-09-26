@@ -28,7 +28,8 @@ from typing import Any
 import jax.numpy as jnp
 import numpy as np
 from tunix.experimental.common import datatypes
-from tunix.rl import algo_core as _  # Registers policy loss functions.
+from tunix.generate import utils as generate_utils
+from tunix.rl import algo_core
 from tunix.rl import algorithm_config
 from tunix.rl import function_registry
 
@@ -53,8 +54,12 @@ def _extract_tokens_and_masks(
     item: datatypes.TrajectoryItem,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
   """Extracts prompt_tokens, conversation_tokens, and conversation_masks from TrajectoryItem."""
+  p_arr = np.asarray(item.traj["prompt_tokens"], dtype=np.int32).reshape(-1)
+  prompt_len = item.traj.get("prompt_length")
+  if prompt_len is not None:
+    p_arr = generate_utils.unpad_prompt(p_arr, int(prompt_len))
   return (
-      np.asarray(item.traj["prompt_tokens"], dtype=np.int32).reshape(-1),
+      p_arr,
       np.asarray(item.traj["conversation_tokens"], dtype=np.int32).reshape(-1),
       np.asarray(item.traj["conversation_masks"], dtype=np.float32).reshape(-1),
   )
@@ -213,26 +218,46 @@ class GRPOAdapter(AlgorithmAdapter):
         max_packed_len=max_packed_len,
         max_response_length=max_response_length,
     )
-    self.requires_reference_kl = (
-        getattr(self.algo_config, "beta", 0.0) != 0.0
-        or getattr(self.algo_config, "force_compute_kl", False)
+    self.requires_reference_kl = getattr(
+        self.algo_config, "beta", 0.0
+    ) != 0.0 or getattr(self.algo_config, "force_compute_kl", False)
+    self.use_rollout_logps = getattr(
+        self.algo_config, "use_rollout_logps", True
     )
-    self.use_rollout_logps = getattr(self.algo_config, "use_rollout_logps", True)
 
   def compute_advantages(
       self,
       rewards: np.ndarray | jnp.ndarray | Sequence[float],
       num_generations: int | None = None,
+      valid_mask: np.ndarray | jnp.ndarray | None = None,
       **kwargs: Any,
   ) -> jnp.ndarray:
-    """Computes returns and advantages using the registered advantage estimator."""
+    """Computes returns and advantages using the registered advantage estimator.
+
+    Args:
+      rewards: Per-trajectory rewards, flattened group-major.
+      num_generations: Group size `G`. Defaults to the adapter's configuration.
+      valid_mask: Optional boolean mask marking trajectories that should
+        contribute to (and receive) an advantage. When None, the estimator runs
+        the advantage math over all `G` trajectories.
+      **kwargs: Unused.
+
+    Returns:
+      Per-trajectory advantages.
+    """
     del kwargs
     g = num_generations or self.num_generations
     estimator = function_registry.get_advantage_estimator(
         self.algo_config.advantage_estimator
     )
     r = np.asarray(rewards, dtype=np.float32).reshape(-1)
-    return jnp.asarray(estimator(rewards=r, num_generations=g))
+    return jnp.asarray(
+        estimator(
+            rewards=r,
+            num_generations=g,
+            valid_mask=valid_mask,
+        )
+    )
 
   def create_trainer_payloads(
       self,
@@ -243,7 +268,21 @@ class GRPOAdapter(AlgorithmAdapter):
   ) -> list[datatypes.RLTrainerPayload]:
     """Packages group trajectories, advantages, and tool observation masks into unbatched RLTrainerPayloads."""
     del kwargs
-    advs = self.compute_advantages(rewards, num_generations=self.num_generations)
+    valid_mask = np.array([item.is_valid for item in group], dtype=bool)
+    # A sample std / leave-one-out baseline needs at least
+    # `MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE` valid peers per prompt group, so
+    # a group below that threshold trains on nothing at all.
+    if (
+        int(np.sum(valid_mask))
+        < algo_core.MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE
+    ):
+      valid_mask[:] = False
+
+    advs = self.compute_advantages(
+        rewards,
+        num_generations=self.num_generations,
+        valid_mask=valid_mask,
+    )
     payloads = []
 
     for i, item in enumerate(group):
@@ -252,6 +291,15 @@ class GRPOAdapter(AlgorithmAdapter):
       ref_lp = (
           ref_logps[i] if ref_logps is not None and i < len(ref_logps) else None
       )
+
+      if not valid_mask[i]:
+        # While collector-filtered rollouts (`overlong_filter=True`) already
+        # arrive with zeroed `conversation_masks`, a degenerate group (`< 2`
+        # valid peers) also clears `valid_mask` for its lone healthy survivor.
+        # Zeroing `act_arr` here keeps the static `[G]` batch dimension for
+        # `BatchAssembler` while preventing that survivor's tokens from
+        # inflating the `token-mean` loss denominator or contributing KL loss.
+        act_arr = np.zeros_like(act_arr)
 
       seq_tokens = (
           np.concatenate([p_arr, c_arr])
@@ -281,9 +329,7 @@ class GRPOAdapter(AlgorithmAdapter):
 
   def loss_fn(self) -> Callable[..., Any]:
     """Policy loss resolved by name via the function registry."""
-    return function_registry.get_policy_loss_fn(
-        self.algo_config.policy_loss_fn
-    )
+    return function_registry.get_policy_loss_fn(self.algo_config.policy_loss_fn)
 
   def build_gen_model_input_fn(
       self, pad_id: int, eos_id: int

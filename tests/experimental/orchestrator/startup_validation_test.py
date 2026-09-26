@@ -176,6 +176,18 @@ class StartupValidationTest(absltest.TestCase):
         self.registry, self.alg_config, self.training_config
     )
 
+  def test_sequence_packing_ignores_train_micro_batch_size_divisibility(self):
+    self.registry.register(mock_worker.MockWorker("t0", {"trainer"}))
+    self.registry.register(mock_worker.MockWorker("i0", {"inference"}))
+    self.registry.register(mock_worker.MockWorker("r0", {"rollout"}))
+    self.alg_config.num_generations = 2
+    self.training_config.mini_batch_size = 6
+    self.training_config.train_micro_batch_size = 4
+    self.training_config.max_seq_token_per_tpu = 4096
+    startup_validation.validate_startup(
+        self.registry, self.alg_config, self.training_config
+    )
+
 
 if __name__ == "__main__":
   absltest.main()

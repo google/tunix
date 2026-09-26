@@ -236,6 +236,11 @@ def to_tunix_step(
   if agent_step is None and env_step is None:
     return agent_types.Step()
 
+  if agent_step is not None:
+    agent_step = trajectory_lib.TunixAgentStep.from_atif_step(agent_step)
+  if env_step is not None:
+    env_step = trajectory_lib.TunixEnvStep.from_atif_step(env_step)
+
   thought = ""
   model_response = ""
   action = None
@@ -369,6 +374,9 @@ def to_tunix_trajectory(
       traj_obj = trajectory_lib.Trajectory.from_json_dict(traj)
   else:
     traj_obj = traj
+  metadata_obj = trajectory_lib.TunixTrajectoryMetadata.from_atif_metadata(
+      traj_obj
+  )
 
   dto_steps: list[agent_types.Step] = []
   converted_step_idx = 0
@@ -402,18 +410,22 @@ def to_tunix_trajectory(
       dto_steps.append(dto_step)
       converted_step_idx += 1
 
-  total_reward = getattr(traj_obj, "total_reward", None)
-  reward = float(total_reward) if total_reward is not None else 0.0
+  reward = (
+      float(metadata_obj.total_reward)
+      if metadata_obj.total_reward is not None
+      else 0.0
+  )
 
   status_enum = agent_types.TrajectoryStatus.RUNNING
-  traj_obj_status = getattr(traj_obj, "status", None)
-  if traj_obj_status is not None and hasattr(
-      agent_types.TrajectoryStatus, str(traj_obj_status)
+  if metadata_obj.status is not None and hasattr(
+      agent_types.TrajectoryStatus, str(metadata_obj.status)
   ):
-    status_enum = getattr(agent_types.TrajectoryStatus, str(traj_obj_status))
+    status_enum = getattr(
+        agent_types.TrajectoryStatus, str(metadata_obj.status)
+    )
 
-  env_time = getattr(traj_obj, "env_time", None) or {}
-  reward_time = getattr(traj_obj, "reward_time", None) or {}
+  env_time = metadata_obj.env_time or {}
+  reward_time = metadata_obj.reward_time or {}
 
   return agent_types.Trajectory(
       task=task_val,

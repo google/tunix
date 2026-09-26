@@ -19,6 +19,7 @@ from collections import abc
 import functools
 import gc
 import math
+import numbers
 import re
 from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
 
@@ -2107,6 +2108,17 @@ def detach_incompatible_vllm_cleanup_finalizer(llm_engine: Any) -> None:
   )
 
 
+def is_token_id_sequence(prompt: Any) -> bool:
+  """Returns True if prompt is a 1D integer array or sequence of token IDs."""
+  if isinstance(prompt, np.ndarray):
+    return prompt.ndim == 1 and np.issubdtype(prompt.dtype, np.integer)
+  return (
+      isinstance(prompt, (list, tuple))
+      and bool(prompt)
+      and isinstance(prompt[0], (int, np.integer))
+  )
+
+
 def as_token_ids(value) -> np.ndarray:
   """Copies token IDs into an owned 1-D int32 array.
 
@@ -2121,7 +2133,27 @@ def as_token_ids(value) -> np.ndarray:
 
 def unpad_prompt(padded_tokens, length: int) -> np.ndarray:
   """Returns the last `length` tokens of a left-padded prompt row."""
-  return as_token_ids(padded_tokens)[-int(length) :]
+  arr = as_token_ids(padded_tokens)
+  if length <= 0:
+    return np.zeros(0, dtype=np.int32)
+  return arr[-int(length) :]
+
+
+def unpad_prompt_tokens(
+    padded_tokens: Any,
+    pad_id: int | None = None,
+    prompt_length: int | None = None,
+) -> np.ndarray:
+  """Returns sampler-tokenized prompt ids without backend left padding."""
+  if prompt_length is not None:
+    return unpad_prompt(padded_tokens, int(prompt_length))
+  arr = np.asarray(padded_tokens, dtype=np.int32).reshape(-1)
+  if not isinstance(pad_id, numbers.Integral):
+    return arr
+  non_pad = np.flatnonzero(arr != pad_id)
+  if non_pad.size == 0:
+    return np.zeros(0, dtype=np.int32)
+  return arr[non_pad[0] :]
 
 
 def resolve_prompt_tokens(

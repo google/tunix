@@ -81,7 +81,7 @@ class MappingConfig:
   to_hf_hook_fns: Optional[Dict[str, Any]] = None
   to_hf_transpose_keys: Optional[Dict[str, Tuple[int, ...]]] = None
   lora_to_hf_transpose_keys: Optional[Dict[str, Tuple[int, ...]]] = None
-  preprocess_src_state: Optional[Callable[[Any], Any]] = None
+  preprocess_src_state: Optional[Callable[..., Any]] = None
 
   @classmethod
   def build(

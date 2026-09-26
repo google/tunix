@@ -19,6 +19,7 @@ import itertools
 
 import os
 import tempfile
+import threading
 import time
 from unittest import mock
 from absl.testing import absltest
@@ -913,10 +914,12 @@ class VllmSamplerTokenInputTest(absltest.TestCase):
 
     obj = object.__new__(vllm_sampler.VllmSampler)
     obj.args = {"max_model_len": 64}
+    obj._thread_local = threading.local()
     obj._postprocessed = None  # set by __init__ upstream; fixture bypasses it
     obj.config = SimpleNamespace(
         return_logprobs=True,
         return_routed_experts=False,
+        eos_tokens=None,
         sampling_kwargs={},
         overlap_postprocessing=False,  # upstream 323946941 added this field
     )
@@ -969,6 +972,32 @@ class VllmSamplerTokenInputTest(absltest.TestCase):
       with self.assertRaises(ValueError):
         obj(max_generation_steps=4, **kwargs)
       obj.llm.generate.assert_not_called()
+
+  def test_string_stops_enable_engine_detokenization_before_clone(self):
+    for config_stop in (False, True):
+      with self.subTest(config_stop=config_stop):
+        obj = self._sampler()
+        stop_kwargs = {"stop": ["</function>"]}
+        if config_stop:
+          obj.config.sampling_kwargs = stop_kwargs
+        obj(
+            None,
+            4,
+            prompt_token_ids=[[1, 2]],
+            routed_experts_prompt_start=[0],
+            **({} if config_stop else stop_kwargs),
+        )
+        params = obj.llm.generate.call_args.kwargs["sampling_params"][0]
+        # clone() runs vLLM's real validation and used to reject this request.
+        self.assertTrue(params.clone().detokenize)
+        self.assertEqual(params.stop, ["</function>"])
+        self.assertTrue(params.include_stop_str_in_output)
+
+  def test_token_stops_do_not_require_engine_detokenization(self):
+    obj = self._sampler()
+    obj(None, 4, prompt_token_ids=[[1, 2]])
+    params = obj.llm.generate.call_args.kwargs["sampling_params"]
+    self.assertFalse(params.detokenize)
 
   def test_engine_echo_count_and_duplicate_ids_are_checked(self):
     for outputs, message in (

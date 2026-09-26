@@ -274,7 +274,15 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     if self.to_hf_key_mappings:
       preprocess_fn = self.config.mapping_config.preprocess_src_state
       if preprocess_fn:
-        updated_weights = preprocess_fn(updated_weights)
+        tp_size = (
+            1
+            if self._is_torchax_backend()
+            else self.args.get("tensor_parallel_size", 1)
+        )
+        try:
+          updated_weights = preprocess_fn(updated_weights, tp_size=tp_size)
+        except TypeError:
+          updated_weights = preprocess_fn(updated_weights)
 
       if self._is_torchax_backend():
         self._update_params_torchax(updated_weights)
@@ -826,6 +834,11 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
               "Failed to update sampling_params with kwargs:"
               f" {sampling_kwargs}. Error: {e}",
           )
+
+      # vLLM must decode incrementally to recognize string stops (for example
+      # DeepSWE's </function>); token-only decoding cannot enforce them.
+      if sampling_params.stop:
+        sampling_params.detokenize = True
 
     if exact_input and (
         isinstance(sampling_params, BeamSearchParams)

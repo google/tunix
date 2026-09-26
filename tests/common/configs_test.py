@@ -115,6 +115,23 @@ class ConfigsTest(absltest.TestCase):
           gradient_accumulation_steps=4,
       )
 
+  def test_sequence_packing_skips_train_micro_batch_size_divisibility(self):
+    cfg = configs.RLTrainingConfig(
+        eval_every_n_steps=1,
+        actor_optimizer=self.actor_optimizer,
+        mini_batch_size=6,
+        train_micro_batch_size=4,
+        max_seq_token_per_tpu=4096,
+    )
+    self.assertTrue(cfg.sequence_packing_enabled)
+    self.assertIsNone(cfg.gradient_accumulation_steps)
+
+  def test_is_sequence_packing_enabled(self):
+    cfg_disabled = configs.TrainingConfig(eval_every_n_steps=1)
+    self.assertFalse(cfg_disabled.sequence_packing_enabled)
+    self.assertFalse(configs.is_sequence_packing_enabled(cfg_disabled))
+    self.assertFalse(configs.is_sequence_packing_enabled(object()))
+
 
 if __name__ == "__main__":
   absltest.main()

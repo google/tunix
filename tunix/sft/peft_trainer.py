@@ -53,7 +53,7 @@ _ModelInputT = Dict[str, ArrayLike]
 P = ParamSpec("P")
 MetricsLogger = sft_metrics_logger.MetricsLogger
 MetricsLoggerOptions = sft_metrics_logger.MetricsLoggerOptions
-_MetricValue = ArrayLike | utils.WeightedMetric
+_MetricValue = ArrayLike | utils.WeightedMetric | Any
 _MetricReducer = Callable[[Any], Any]
 
 
@@ -67,41 +67,6 @@ class TrainingInput:
 
   # Optional images for vision models.
   images: jax.Array | np.ndarray | None = None
-
-
-def _weighted_metric_mean(values: Iterable[Any]) -> float:
-  """Aggregates unreduced metrics without microbatch-mean bias."""
-  values = list(values)
-  if not values:
-    return 0.0
-  if not all(isinstance(value, utils.WeightedMetric) for value in values):
-    raise TypeError("weighted metrics must not include scalar values")
-
-  eps = values[0].eps
-  min_denom = values[0].min_denom
-  if any(
-      value.eps != eps or value.min_denom != min_denom for value in values[1:]
-  ):
-    raise ValueError("weighted metrics must use consistent denominator bounds")
-
-  numerator = sum(float(np.asarray(value.unreduced_sum)) for value in values)
-  denominator = sum(float(np.asarray(value.denominator)) for value in values)
-  if eps is not None:
-    denominator += eps
-  if min_denom is not None:
-    denominator = max(denominator, min_denom)
-  return numerator / denominator if denominator else 0.0
-
-
-def _metric_reducer(
-    metric: _MetricValue,
-) -> _MetricReducer:
-  """Selects the reduction that matches a buffered auxiliary metric."""
-  return (
-      _weighted_metric_mean
-      if isinstance(metric, utils.WeightedMetric)
-      else np.mean
-  )
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
@@ -126,13 +91,11 @@ class MetricsBuffer:
   @property
   def loss(self):
     """Returns the mean of the recorded losses for the step."""
-    weighted = [
-        isinstance(value, utils.WeightedMetric) for value in self.losses
-    ]
+    weighted = [utils.is_weighted_metric(value) for value in self.losses]
     if any(weighted):
       if not all(weighted):
         raise TypeError("loss values must not mix weighted and scalar metrics")
-      return _weighted_metric_mean(self.losses)
+      return utils.weighted_metric_mean(self.losses)
     return np.mean(np.array([np.array(x) for x in self.losses]))
 
 
@@ -362,12 +325,22 @@ class PeftTrainer:
           "Sequence packing is not supported in SFT PeftTrainer yet."
       )
 
+    if not training_config.get_with_default(
+        "resume_from_checkpoint_on_init", True
+    ):
+      raise ValueError(
+          "resume_from_checkpoint_on_init=False is not supported in SFT"
+          " PeftTrainer (v1). Checkpoint restoration control is only supported"
+          " in experimental PeftTrainer v2"
+          " (tunix.experimental.train.peft_trainer_v2)."
+      )
+
     self.model = model
     self.config = training_config
     self._lora_enabled = utils.is_lora_enabled(self.model)
     wrt_target = nnx.LoRAParam if self._lora_enabled else nnx.Param
     self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=wrt_target)
-     # Adam moments follow the param dtype by default (optax inits them as
+    # Adam moments follow the param dtype by default (optax inits them as
     # zeros_like(params)).
     # Depth-1 non-packing fast path never reads the accumulator; skip its
     # model-sized grad-tree allocation there.
@@ -785,9 +758,9 @@ class PeftTrainer:
       )
     else:
       assert metrics_buffer.step == step
-      if isinstance(
-          metrics_buffer.losses[0], utils.WeightedMetric
-      ) != isinstance(loss, utils.WeightedMetric):
+      if utils.is_weighted_metric(
+          metrics_buffer.losses[0]
+      ) != utils.is_weighted_metric(loss):
         raise TypeError("loss values must not mix weighted and scalar metrics")
       metrics_buffer.losses.append(loss)
     if additional_metrics is not None:
@@ -796,9 +769,7 @@ class PeftTrainer:
           metrics_buffer.additional_metrics[k] = ([v], op)
         else:
           values = metrics_buffer.additional_metrics[k][0]
-          if isinstance(values[0], utils.WeightedMetric) != isinstance(
-              v, utils.WeightedMetric
-          ):
+          if utils.is_weighted_metric(values[0]) != utils.is_weighted_metric(v):
             raise TypeError(
                 f"additional metric {k!r} must not mix weighted and scalar"
                 " values"
@@ -835,12 +806,12 @@ class PeftTrainer:
 
     def _apply_op(v, op):
       if isinstance(v, list) and v:
-        weighted = [isinstance(x, utils.WeightedMetric) for x in v]
+        weighted = [utils.is_weighted_metric(x) for x in v]
         if any(weighted) and not all(weighted):
           raise TypeError("metrics must not mix weighted and scalar values")
         if all(weighted):
           if getattr(op, "__name__", "") in (
-              "_weighted_metric_mean",
+              "weighted_metric_mean",
               "global_weighted_mean",
               "mean_of_means",
           ):
@@ -1059,7 +1030,7 @@ class PeftTrainer:
         post_process_aux = aux
         if isinstance(aux, utils.LossOutput):
           additional_metrics.update({
-              name: (metric, _metric_reducer(metric))
+              name: (metric, utils.metric_reducer(metric))
               for name, metric in aux.aux_metrics.items()
           })
           post_process_aux = aux.aux_metrics
@@ -1181,7 +1152,7 @@ class PeftTrainer:
         if isinstance(aux, utils.LossOutput):
           uses_weighted_loss = True
           additional_metrics = {
-              name: (metric, _metric_reducer(metric))
+              name: (metric, utils.metric_reducer(metric))
               for name, metric in aux.aux_metrics.items()
           }
           post_process_aux = aux.aux_metrics

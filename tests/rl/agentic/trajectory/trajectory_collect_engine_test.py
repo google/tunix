@@ -241,9 +241,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     )
     # This should not raise AttributeError: 'list' object has no attribute
     # 'size'
-    result_traj = asyncio.run(
-        self._run_collect(engine, mode='Trajectory')
-    )
+    result_traj = asyncio.run(self._run_collect(engine, mode='Trajectory'))
     self.assertLen(result_traj.steps, 1)
     self.assertEqual(len(result_traj.steps[0].logprobs), 2)
 
@@ -270,9 +268,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         env=self.mock_env,
         model_call=_async_model_call,
     )
-    result_traj = asyncio.run(
-        self._run_collect(engine, mode='Trajectory')
-    )
+    result_traj = asyncio.run(self._run_collect(engine, mode='Trajectory'))
     self.assertLen(result_traj.steps, 1)
     self.assertEqual(result_traj.steps[0].reward, 2.5)
 
@@ -319,9 +315,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
             {'role': 'user', 'content': 'obs2'},
         ],
         'prompt_tokens': np.array([101]),
-        'conversation_tokens': np.array(
-            [201, 202, 301, 302, 203, 204]
-        ),
+        'conversation_tokens': np.array([201, 202, 301, 302, 203, 204]),
         'conversation_masks': np.array([1, 1, 1, 1, 1, 1]),
         'trajectory_reward': (
             3.5
@@ -874,9 +868,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
 
     steps_data = asyncio.run(self._run_collect(engine, mode='Steps'))
     self.assertEqual(len(steps_data), 2)
-    self.assertEqual(
-        steps_data[0]['assistant_routed_experts'].dtype, np.int16
-    )
+    self.assertEqual(steps_data[0]['assistant_routed_experts'].dtype, np.int16)
     self.assertEqual(
         steps_data[0]['assistant_routed_experts'].shape, (2, num_layers, top_k)
     )
@@ -886,9 +878,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         steps_data[0]['env_routed_experts'].shape, (3, num_layers, top_k)
     )
     np.testing.assert_array_equal(steps_data[0]['env_routed_experts'], 6)
-    self.assertEqual(
-        steps_data[1]['assistant_routed_experts'].dtype, np.int16
-    )
+    self.assertEqual(steps_data[1]['assistant_routed_experts'].dtype, np.int16)
     self.assertEqual(
         steps_data[1]['assistant_routed_experts'].shape, (2, num_layers, top_k)
     )
@@ -1476,6 +1466,69 @@ class ExactTokenContinuityCollectTest(absltest.TestCase):
     )
     env.close.assert_called_once()
     self._assert_training_consumer(result)
+
+  def test_exact_token_continuity_prompt_routed_experts_uses_prompt_length(
+      self,
+  ):
+    agent, env = self._frozenlake()
+    env.max_steps = 2
+    tokenizer = _FreshTextTokenizer([[40, 41, 42]])
+    parser = _FreshTextParser([91, 92])
+
+    # Left-padded prompt tokens of length 5, with true prompt_length=3.
+    padded_prompt = np.array([[0, 0, 10, 11, 12]], dtype=np.int32)
+    # 3 unpadded prompt tokens + 2 assistant tokens -> 5 routed rows:
+    # first 3 belong to prompt, last 2 belong to assistant.
+    init_routed = np.arange(5 * 2 * 2, dtype=np.int16).reshape(5, 2, 2)
+    # Turn 2: 2 assistant suffix tokens ([91, 92]) + 3 env tokens ([40, 41, 42])
+    # + 2 new assistant tokens ([32, 33]) -> 7 routed rows.
+    delta_routed = np.arange(100, 100 + 7 * 2 * 2, dtype=np.int16).reshape(
+        7, 2, 2
+    )
+    outputs = [
+        RolloutOutput(
+            text=['```Right```'],
+            logits=None,
+            tokens=[np.array([30, 31], dtype=np.int32)],
+            left_padded_prompt_tokens=padded_prompt,
+            prompt_lengths=np.array([3], dtype=np.int32),
+            logprobs=[np.array([-0.1, -0.2], dtype=np.float32)],
+            routed_experts=[init_routed],
+        ),
+        RolloutOutput(
+            text=['```Right```'],
+            logits=None,
+            tokens=[np.array([32, 33], dtype=np.int32)],
+            left_padded_prompt_tokens=np.array(
+                [[10, 11, 12, 30, 31, 91, 92, 40, 41, 42]], dtype=np.int32
+            ),
+            prompt_lengths=np.array([10], dtype=np.int32),
+            logprobs=[np.array([-0.3, -0.4], dtype=np.float32)],
+            routed_experts=[delta_routed],
+        ),
+    ]
+    call_idx = 0
+
+    def model_call(chat_input, env_arg, **kwargs):
+      nonlocal call_idx
+      del chat_input, env_arg, kwargs
+      out = outputs[call_idx]
+      call_idx += 1
+      return out
+
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=agent,
+        env=env,
+        model_call=model_call,
+        tokenizer=tokenizer,
+        chat_parser=parser,
+        exact_token_continuity=True,
+    )
+    result = asyncio.run(engine.collect(mode='Token'))
+    # Prompt length is 3; conversation_tokens length is 2+2 (turn1+suffix) + 3 (env) + 2+2 (turn2+suffix) = 11.
+    # Total routed_experts length must be 3 + 11 = 14.
+    self.assertEqual(result['routed_experts'].shape, (14, 2, 2))
+    np.testing.assert_array_equal(result['routed_experts'][:3], init_routed[:3])
 
 
 if __name__ == '__main__':

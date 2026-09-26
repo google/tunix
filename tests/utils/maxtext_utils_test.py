@@ -484,6 +484,20 @@ class MaxTextUtilsTest(absltest.TestCase):
           ),
       )
 
+  def test_max_seq_token_per_tpu_ignores_train_micro_batch_size(self):
+    argv = self._build_config_argv(
+        train_micro_batch_size=1,
+        mesh_fsdp=2,
+        mesh_tp=4,
+        mesh_expert=1,
+        num_devices=8,
+        max_prompt_length=512,
+        max_response_length=512,
+        max_seq_token_per_tpu=4096,
+    )
+    self.assertIn("per_device_batch_size=0.25", argv)
+    self.assertIn("max_target_length=4096", argv)
+
 
 if __name__ == "__main__":
   absltest.main()

@@ -169,12 +169,20 @@ def build_maxtext_config(
         f" {max_seq_token_per_tpu}"
     )
 
-  if train_micro_batch_size % mesh_fsdp:
-    raise ValueError(
-        f"train_micro_batch_size={train_micro_batch_size} must be a multiple of "
-        f"mesh_fsdp={mesh_fsdp}; MaxText shards the batch dimension across it."
-    )
-  per_device_batch_size = train_micro_batch_size / num_devices
+  if max_seq_token_per_tpu is not None and max_seq_token_per_tpu > 0:
+    # When sequence packing is enabled, the batch assembler feeds 1 packed row
+    # per FSDP shard (global batch size = mesh_fsdp), independent of
+    # train_micro_batch_size.
+    # TODO(maxtext-team): verify this is the desired behavior.
+    per_device_batch_size = mesh_fsdp / num_devices
+  else:
+    if train_micro_batch_size % mesh_fsdp:
+      raise ValueError(
+          f"train_micro_batch_size={train_micro_batch_size} must be a multiple"
+          f" of mesh_fsdp={mesh_fsdp}; MaxText shards the batch dimension"
+          " across it."
+      )
+    per_device_batch_size = train_micro_batch_size / num_devices
 
   base_yml = os.path.join(
       os.path.dirname(os.path.abspath(pyconfig.__file__)), "base.yml"

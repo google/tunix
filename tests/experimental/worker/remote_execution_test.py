@@ -1262,6 +1262,155 @@ class RemoteExecutionTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_pool_execution_session_submit_pops_route_key_after_routing(self):
+    dispatched_kwargs = []
+
+    class CaptureHandle(remote_lib.ActorHandle):
+
+      def submit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def asubmit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def dispatch_task(
+          self, request_id=None, method_name=None, *args, **kwargs
+      ) -> str:
+        del method_name, args
+        dispatched_kwargs.append(dict(kwargs))
+        return request_id or ""
+
+      async def poll_responses(self, timeout_s=50.0):
+        await asyncio.sleep(timeout_s)
+        return None
+
+    async def _run():
+      h1, h2 = CaptureHandle(), CaptureHandle()
+      pool = remote_lib.RoutingActorPool([h1, h2])
+      session = remote_lib.PoolExecutionSession(pool)
+      await session.submit("req_1", "generate", route_key="sticky_key", x=42)
+      self.assertEqual(dispatched_kwargs, [{"x": 42}])
+      await session.close()
+
+    asyncio.run(_run())
+
+  def test_pool_execution_session_poll_completed_drains_batch_and_skips_idle_worker(
+      self,
+  ):
+    class FastBatchHandle(remote_lib.ActorHandle):
+
+      def __init__(self, items):
+        self._items = list(items)
+        self.poll_calls = 0
+
+      def submit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def asubmit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def dispatch_task(
+          self, request_id=None, method_name=None, *args, **kwargs
+      ) -> str:
+        del method_name, args, kwargs
+        return request_id or ""
+
+      async def poll_responses(self, timeout_s=50.0):
+        self.poll_calls += 1
+        if self._items:
+          return self._items.pop(0)
+        await asyncio.sleep(timeout_s)
+        return None
+
+    async def _run():
+      busy_handle = FastBatchHandle([
+          remote_lib.ExecutionResponse(request_id="req_1", result="r1"),
+          remote_lib.ExecutionResponse(request_id="req_2", result="r2"),
+      ])
+      idle_handle = FastBatchHandle([])
+      # Custom router sends all tasks to busy_handle, leaving idle_handle with 0 tasks
+      pool = remote_lib.RoutingActorPool(
+          [busy_handle, idle_handle],
+          router=lambda actors, method, args, kwargs: actors[0],
+      )
+      session = remote_lib.PoolExecutionSession(pool)
+
+      await session.submit("req_1", "generate")
+      await session.submit("req_2", "generate")
+      # Let background _poll_worker_loop(busy_handle) enqueue both completions
+      await asyncio.sleep(0.02)
+
+      batch = await session.poll_completed(timeout_s=1.0)
+      self.assertEqual(batch, [("r1", None), ("r2", None)])
+      self.assertEqual(idle_handle.poll_calls, 0)
+      self.assertEqual(session._in_flight, 0)
+
+      # Subsequent poll_completed when idle returns [] quickly without blocking 1.0s
+      loop = asyncio.get_running_loop()
+      t0 = loop.time()
+      empty_batch = await session.poll_completed(timeout_s=2.0)
+      self.assertEqual(empty_batch, [])
+      self.assertLess(loop.time() - t0, 0.5)
+
+      await session.close()
+
+    asyncio.run(_run())
+
+  def test_pool_execution_session_simultaneous_dispatch_and_poll_error_invariant(
+      self,
+  ):
+    class CrashingHandle(remote_lib.ActorHandle):
+
+      def __init__(self):
+        self.crash_event = asyncio.Event()
+        self.dispatch_count = 0
+
+      def submit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def asubmit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def dispatch_task(
+          self, request_id=None, method_name=None, *args, **kwargs
+      ) -> str:
+        del method_name, args, kwargs
+        self.dispatch_count += 1
+        if self.dispatch_count == 1:
+          return request_id or ""
+        # Second dispatch suspends until worker crashes
+        await self.crash_event.wait()
+        raise RuntimeError("dispatch transport error")
+
+      async def poll_responses(self, timeout_s=50.0):
+        del timeout_s
+        await self.crash_event.wait()
+        raise RuntimeError("poll transport error")
+
+    async def _run():
+      handle = CrashingHandle()
+      pool = remote_lib.RoutingActorPool([handle])
+      session = remote_lib.PoolExecutionSession(pool)
+
+      # First task succeeds dispatch and starts _poll_worker_loop
+      await session.submit("req_1", "generate")
+      # Second task suspends inside dispatch_task while _poll_worker_loop is polling
+      submit_task = asyncio.create_task(session.submit("req_2", "generate"))
+      await asyncio.sleep(0.01)
+
+      # Trigger simultaneous crash of both poll_responses and dispatch_task
+      handle.crash_event.set()
+      with self.assertRaisesRegex(RuntimeError, "dispatch transport error"):
+        await submit_task
+      await asyncio.sleep(0.01)
+
+      # _in_flight must be exactly 0 (not double-decremented) and _dispatched_tasks empty
+      self.assertEqual(session._in_flight, 0)
+      self.assertEqual(session._dispatched_tasks[handle], set())
+      await session.close()
+
+    asyncio.run(_run())
+
 
 if __name__ == "__main__":
   absltest.main()

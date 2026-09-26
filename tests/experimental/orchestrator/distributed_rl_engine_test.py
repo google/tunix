@@ -37,8 +37,22 @@ class MockActorHandle(mock.MagicMock):
   def __init__(self, *args, **kwargs):
     super().__init__(spec=remote_execution.ActorHandle, *args, **kwargs)
     # Ensure all mocked methods return awaitables by default
+    async def _poll_impl(
+        timeout_s: float = remote_execution.LONG_POLL_TIMEOUT_S,
+    ):
+      val = self.poll_responses.return_value
+      if val is None or val == [] or isinstance(val, mock.MagicMock):
+        await asyncio.sleep(min(timeout_s, 0.05))
+        return None
+      self.poll_responses.return_value = None
+      if isinstance(val, remote_execution.ExecutionResponse):
+        return val
+      return remote_execution.ExecutionResponse(result=val)
+
     self.generate = mock.AsyncMock()
-    self.poll_responses = mock.AsyncMock()
+    self.poll_responses = mock.AsyncMock(
+        return_value=None, side_effect=_poll_impl
+    )
     self.weight_sync = mock.AsyncMock()
     self.fwd_bwd = mock.AsyncMock()
     self.update = mock.AsyncMock()
@@ -65,9 +79,22 @@ class MockActorHandle(mock.MagicMock):
     method = getattr(self, method_name)
     return await method(*args, **kwargs)
 
-  async def dispatch_task(self, method_name: str, *args, **kwargs):
+  async def dispatch_task(
+      self,
+      request_id: str | None = None,
+      method_name: str | None = None,
+      *args,
+      **kwargs,
+  ):
+    if (
+        method_name is None
+        and request_id is not None
+        and hasattr(self, request_id)
+    ):
+      method_name = request_id
     method = getattr(self, method_name)
-    return await method(*args, **kwargs)
+    await method(*args, **kwargs)
+    return request_id
 
 
 class _FakeSyncResult:
@@ -262,12 +289,18 @@ class DistributedRLEngineTest(absltest.TestCase):
       self.mock_rollout_1.poll_responses.return_value = [resp1]
       self.mock_rollout_2.poll_responses.return_value = []
 
+      await self.engine.dispatch_rollouts(
+          [
+              {"prompt": "p1", "prompt_id": "p1"},
+              {"prompt": "p2", "prompt_id": "p2"},
+          ],
+          num_generations=2,
+      )
       results = await self.engine.poll_rollouts(timeout_s=0.1)
       self.assertEqual(len(results), 1)
       self.assertEqual(results[0].traj["trajectory_reward"], 1.0)
 
-      self.mock_rollout_1.poll_responses.assert_called_once_with(timeout_s=0.1)
-      self.mock_rollout_2.poll_responses.assert_called_once_with(timeout_s=0.1)
+      self.mock_rollout_1.poll_responses.assert_called()
 
     asyncio.run(_run())
 
@@ -1122,6 +1155,13 @@ class DistributedRLEngineTest(absltest.TestCase):
       self.mock_rollout_1.poll_responses.return_value = [resp]
       self.mock_rollout_2.poll_responses.return_value = []
 
+      await self.engine.dispatch_rollouts(
+          [
+              {"prompt": "p1", "prompt_id": "p1"},
+              {"prompt": "p2", "prompt_id": "p2"},
+          ],
+          num_generations=2,
+      )
       items = await self.engine.poll_rollouts()
       self.assertLen(items, 1)
       item = items[0]
@@ -1655,6 +1695,56 @@ class DistributedRLEngineTest(absltest.TestCase):
         assembler=mock_assembler_pad_only,
     )
     mock_algo.build_gen_model_input_fn.assert_called_with(pad_id=7, eos_id=7)
+
+  def test_poll_rollouts_does_not_block_on_slow_or_idle_worker(self):
+    async def _run():
+      resp1 = remote_execution.ExecutionResponse(
+          request_id="req_p1_g0_v0",
+          result=datatypes.RolloutResponse(
+              request_id="req_p1_g0_v0",
+              status="COMPLETED",
+              payload=datatypes.TrajectoryItem(
+                  prompt_id="p1",
+                  group_index=0,
+                  traj={
+                      "trajectory_reward": 1.0,
+                      "status": datatypes.TrajectoryStatus.SUCCEEDED,
+                  },
+              ),
+          ),
+      )
+
+      async def _fast_poll(timeout_s=50.0):
+        del timeout_s
+        await asyncio.sleep(0.01)
+        return resp1
+
+      async def _slow_poll(timeout_s=50.0):
+        await asyncio.sleep(timeout_s)
+        return None
+
+      self.mock_rollout_1.poll_responses.side_effect = _fast_poll
+      self.mock_rollout_2.poll_responses.side_effect = _slow_poll
+
+      await self.engine.dispatch_rollouts(
+          [
+              {"prompt": "p1", "prompt_id": "p1"},
+              {"prompt": "p2", "prompt_id": "p2"},
+          ],
+          num_generations=2,
+          policy_version=0,
+      )
+
+      loop = asyncio.get_running_loop()
+      start = loop.time()
+      results = await self.engine.poll_rollouts(timeout_s=5.0)
+      elapsed = loop.time() - start
+
+      self.assertGreaterEqual(len(results), 1)
+      self.assertEqual(results[0].prompt_id, "p1")
+      self.assertLess(elapsed, 1.0)
+
+    asyncio.run(_run())
 
 
 if __name__ == "__main__":

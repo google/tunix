@@ -95,6 +95,9 @@ class RunGeometryValidator:
         )
 
     # 3. Batch/micro-batch divisibility.
+    packing_enabled = rl_cluster_lib.configs.is_sequence_packing_enabled(
+        training_config
+    )
     if isinstance(mini_batch_size, int) and mini_batch_size > 0:
       for mbs_name, mbs_val in [
           ("train_micro_batch_size", training_config.train_micro_batch_size),
@@ -110,6 +113,8 @@ class RunGeometryValidator:
         if mbs_val is not None:
           try:
             rl_utils.is_positive_integer(mbs_val, mbs_name)
+            if mbs_name == "train_micro_batch_size" and packing_enabled:
+              continue
             if mini_batch_size % mbs_val != 0:
               errors.append(
                   f"mini_batch_size {mini_batch_size} is not divisible by "
