@@ -330,7 +330,6 @@ echo "Launching DeepSWE rollout node..."
     --lora_alpha="$LORA_ALPHA"
     --vllm_seed="$VLLM_SEED"
     --vllm_hbm_utilization="$VLLM_HBM_UTILIZATION"
-    --vllm_max_num_batched_tokens="$MAX_RESPONSE_LENGTH"
     --weight_sync_mode="$WEIGHT_SYNC_MODE"
     --registry_module=tunix.experimental.examples.deepswe_dist.deepswe
     --env_name=deepswe_env
