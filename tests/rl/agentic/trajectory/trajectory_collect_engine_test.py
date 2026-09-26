@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import asyncio
+import itertools
 import time
 from unittest import mock
 
@@ -1079,6 +1080,122 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     np.testing.assert_array_equal(routed[7], 7)
     # Step 2 terminal token padded with UNSET_ROUTED_EXPERT
     np.testing.assert_array_equal(routed[8], agent_types.UNSET_ROUTED_EXPERT)
+
+  def _collect_with_positional_routing(
+      self, *, exact, off, suffix, gens, env_rows, prompt, ignore_start=False
+  ):
+    """Collects with a fake vLLM whose routing rows hold their token index.
+
+    Each turn returns rows for positions [routed_experts_prompt_start,
+    P + G - off) of the full sequence it ran. off=1 is the real engine (the
+    last sampled token is never fed back); off=0 is the convention the tests
+    above use. ignore_start simulates the offset not reaching vLLM.
+    """
+    num_layers, top_k = 2, 2
+    self.mock_env.step.side_effect = [
+        (f'obs{i}', 0.0, i == len(gens) - 1, {}) for i in range(len(gens))
+    ]
+    self.mock_chat_parser.update_assistant_end_tokens.side_effect = (
+        lambda t: (np.concatenate([t, np.array(suffix, np.int32)]), len(suffix))
+    )
+    rows = ([] if exact else [(prompt, [1] * len(prompt))]) + [
+        (r, [1] * len(r)) for r in env_rows
+    ]
+    calls = []
+    next_token = itertools.count(1000)
+
+    def model_call(
+        chat, env, *, routed_experts_prompt_start=0, **kwargs
+    ):
+      del chat, env
+      full = list(prompt)
+      for st in self.trajectory.steps:
+        full += list(st.assistant_tokens)
+        full += list(st.env_tokens if st.env_tokens is not None else [])
+      if exact and calls:
+        np.testing.assert_array_equal(kwargs['prompt_token_ids'], full)
+      gen = np.array([next(next_token) for _ in range(gens[len(calls)])])
+      start = 0 if ignore_start else routed_experts_prompt_start
+      end = len(full) + len(gen) - off
+      calls.append((start, end))
+      routed = np.broadcast_to(
+          np.arange(start, end, dtype=np.int16)[:, None, None],
+          (end - start, num_layers, top_k),
+      ).copy()
+      return RolloutOutput(
+          text=[f'resp{len(calls)}'],
+          logits=None,
+          tokens=[gen.astype(np.int32)],
+          left_padded_prompt_tokens=np.array([[0, 0] + full], np.int32),
+          prompt_lengths=np.array([len(full)], np.int32),
+          logprobs=[np.full(len(gen), -0.5, np.float32)],
+          routed_experts=[routed],
+      )
+
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=model_call,
+        tokenizer=self.mock_tokenizer,
+        chat_parser=self.mock_chat_parser,
+        exact_token_continuity=exact,
+    )
+    with mock.patch.object(
+        utils, 'tokenize_and_generate_masks', side_effect=rows
+    ):
+      out = asyncio.run(engine.collect(mode='Token'))
+    return out, calls
+
+  def test_multi_turn_routed_experts_align_with_token_positions(self):
+    for exact, off, suffix, (gens, env_rows, prompt) in itertools.product(
+        (True, False),
+        (1, 0),
+        ([90], []),
+        (
+            ([3, 1, 4], [[20, 21], [22, 23, 24]], [5, 100, 101]),
+            # G=1 leaves no generated rows to split off (curr_gen_routed_len 0).
+            ([1, 1, 1], [[20], [21, 22]], [5, 6]),
+        ),
+    ):
+      with self.subTest(exact=exact, off=off, suffix=suffix, gens=gens):
+        self.setUp()
+        out, calls = self._collect_with_positional_routing(
+            exact=exact,
+            off=off,
+            suffix=suffix,
+            gens=gens,
+            env_rows=env_rows,
+            prompt=prompt,
+        )
+        routed = np.asarray(out['routed_experts'])
+        n = (out.get('prompt_length') or len(out['prompt_tokens'])) + len(
+            out['conversation_tokens']
+        )
+        self.assertEqual(routed.shape[0], n)
+        last_end = calls[-1][1]
+        expected = [
+            j if j < last_end else agent_types.UNSET_ROUTED_EXPERT
+            for j in range(n)
+        ]
+        np.testing.assert_array_equal(routed[:, 0, 0], expected)
+        # Each turn asks for routing from where the previous turn's ended.
+        for (_, prev_end), (start, _) in zip(calls, calls[1:]):
+          self.assertEqual(start, prev_end)
+
+  def test_exact_continuity_rejects_routing_from_token_zero(self):
+    # A sampler that drops routed_experts_prompt_start makes vLLM return
+    # routing for the whole prompt on later turns; slicing it would graft the
+    # first prompt tokens' routing onto the previous turn's env tokens.
+    with self.assertRaisesRegex(ValueError, 'routing rows at step 1'):
+      self._collect_with_positional_routing(
+          exact=True,
+          off=1,
+          suffix=[],
+          gens=[3, 1, 4],
+          env_rows=[[20, 21], [22, 23, 24]],
+          prompt=[5, 100, 101],
+          ignore_start=True,
+      )
 
   @mock.patch.object(utils, 'tokenize_and_generate_masks')
   def test_token_mode_with_zero_generated_tokens_and_routed_experts(

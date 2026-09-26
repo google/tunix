@@ -243,6 +243,15 @@ class RLVllmSampler:
             sparams, "return_logprobs", kwargs.get("return_logprobs", False)
         )
         else None,
+        # Multi-turn router replay: trajectory_collect_engine sets this to the
+        # number of routing rows earlier turns already returned. Dropping it
+        # makes vLLM return routing from token 0 on every later turn.
+        # `or` rather than a nested default: tunix `SamplingParams` defaults
+        # the field to 0, which would otherwise mask a value in `kwargs`.
+        routed_experts_prompt_start=int(
+            _get_val(sparams, "routed_experts_prompt_start")
+            or _get_val(kwargs, "routed_experts_prompt_start", 0)
+        ),
     )
 
   async def _process_request_output(

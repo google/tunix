@@ -969,6 +969,23 @@ class TrajectoryCollectEngine:
           len(prev_step.env_tokens) if prev_step.env_tokens is not None else 0
       )
       total_needed = needed_asst + num_env
+      if self.exact_token_continuity and len(delta_routed) not in (
+          total_needed + curr_gen_routed_len,
+          total_needed + curr_gen_len,
+      ):
+        # The prompt is exactly the recorded history, so the sampler must
+        # return rows for only the tokens after routed_experts_prompt_start.
+        # Anything else is a capture bug (e.g. the offset not reaching vLLM,
+        # which returns routing from token 0); slicing would silently graft
+        # the wrong tokens' routing onto this step.
+        raise ValueError(
+            f"Captured {len(delta_routed)} routing rows at step"
+            f" {len(self.agent.trajectory.steps)}, expected"
+            f" {total_needed + curr_gen_routed_len} or"
+            f" {total_needed + curr_gen_len} ({needed_asst} assistant tail +"
+            f" {num_env} env + {curr_gen_len} generated,"
+            f" routed_experts_prompt_start={self._cumulative_prompt_tokens})."
+        )
       if len(delta_routed) == total_needed + curr_gen_len:
         prefix_routed = delta_routed[:total_needed]
         curr_asst_routed = delta_routed[total_needed:]

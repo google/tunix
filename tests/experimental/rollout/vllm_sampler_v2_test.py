@@ -183,6 +183,44 @@ class TestRLVllmSamplerInference(unittest.TestCase):
             .detokenize
         )
 
+    def test_build_vllm_params_forwards_routed_experts_prompt_start(self):
+        """Multi-turn router replay offset reaches vLLM from request or kwargs."""
+        from tunix.experimental.rollout import sampler as sampler_lib  # pylint: disable=g-import-not-at-top
+
+        args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B")
+        sampler = RLVllmSampler(engine_args=args)
+        # collector.py sets it on tunix SamplingParams and in the kwargs.
+        req = SimpleNamespace(
+            prompt=[1, 2, 3],
+            sampling_params=sampler_lib.SamplingParams(
+                max_tokens=8, routed_experts_prompt_start=17
+            ),
+        )
+        self.assertEqual(
+            sampler._build_vllm_params(
+                req, {"routed_experts_prompt_start": 17}
+            ).routed_experts_prompt_start,
+            17,
+        )
+        # kwargs only: the tunix SamplingParams default of 0 must not mask it.
+        req_default = SimpleNamespace(
+            prompt=[1, 2, 3],
+            sampling_params=sampler_lib.SamplingParams(max_tokens=8),
+        )
+        self.assertEqual(
+            sampler._build_vllm_params(
+                req_default, {"routed_experts_prompt_start": 5}
+            ).routed_experts_prompt_start,
+            5,
+        )
+        # Neither (first turn): route from token 0.
+        self.assertEqual(
+            sampler._build_vllm_params(
+                req_default, {"routed_experts_prompt_start": None}
+            ).routed_experts_prompt_start,
+            0,
+        )
+
     def test_sample_error_resilience(self):
         """Verifies error isolation when an individual generator stream raises an exception."""
         args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B")
