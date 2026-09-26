@@ -1309,6 +1309,200 @@ class SamplerTrainerAgreementTest(parameterized.TestCase):
         metrics["sampler_trainer/seq_error_masked_frac"][0], 0.0, places=5
     )
 
+  def test_low_variance_identical_logps_preserve_unit_pearson(self):
+    # Converged policies often emit high-confidence tokens in [0.998, 1.000]
+    # where sigma_p ~ 5e-4 (sigma_p^4 ~ 6e-14 < 1e-12). Pearson correlation must
+    # still report 1.0 rather than collapsing due to a premature variance clamp.
+    logps = jnp.array(
+        [[-0.0020, -0.0015, -0.0010, -0.0005, -0.0012, -0.0018]],
+        dtype=jnp.float32,
+    )
+    mask = jnp.ones_like(logps, dtype=jnp.int32)
+    metrics, _, _ = common.sampler_trainer_agreement(logps, logps, mask)
+    self.assertAlmostEqual(
+        metrics["sampler_trainer/probs_pearson_corr"][0], 1.0, places=5
+    )
+
+  def test_multi_microbatch_weighted_agreement_reduction(self):
+    # Microbatch 1: high-variance batch with strong agreement (r ~ 1.0).
+    mb1_r = jnp.array([[-0.1, -0.5, -1.2, -2.0]], dtype=jnp.float32)
+    mb1_t = jnp.array([[-0.1, -0.5, -1.2, -2.0]], dtype=jnp.float32)
+    mb1_m = jnp.ones_like(mb1_r, dtype=jnp.int32)
+    # Microbatch 2: constant probabilities (zero variance -> cov_sum=0, std_sum=0).
+    mb2_r = jnp.array([[-0.001, -0.001, -0.001, -0.001]], dtype=jnp.float32)
+    mb2_t = jnp.array([[-0.001, -0.001, -0.001, -0.001]], dtype=jnp.float32)
+    mb2_m = jnp.ones_like(mb2_r, dtype=jnp.int32)
+
+    m1, _, _ = common.compute_sampler_trainer_agreement_jax(mb1_r, mb1_t, mb1_m)
+    m2, _, _ = common.compute_sampler_trainer_agreement_jax(mb2_r, mb2_t, mb2_m)
+    p1, op = m1["sampler_trainer/probs_pearson_corr"]
+    p2, _ = m2["sampler_trainer/probs_pearson_corr"]
+    # Zero-variance microbatch has std_sum=0 and should not drag the step
+    # correlation down to 0.5 when reduced with weighted_metric_mean.
+    self.assertAlmostEqual(op([p1, p2]), 1.0, places=5)
+
+  def test_chan_parallel_pearson_equivalence_with_global_batch(self):
+    """Proves Chan's parallel covariance/variance formula equals global Pearson."""
+    rng = np.random.default_rng(12345)
+
+    def _microbatch_chan_stats(rollout_logps, trainer_logps, comp_mask):
+      """Per-microbatch sufficient statistics (n, mean_x, mean_y, C_xy, C_xx, C_yy)."""
+      mf = np.asarray(comp_mask, dtype=np.float64).reshape(-1)
+      rp = np.exp(np.asarray(rollout_logps, dtype=np.float64)).reshape(-1)
+      tp = np.exp(np.asarray(trainer_logps, dtype=np.float64)).reshape(-1)
+      n = mf.sum()
+      denom = max(n, 1.0)
+      mean_x = (rp * mf).sum() / denom
+      mean_y = (tp * mf).sum() / denom
+      dx = (rp - mean_x) * mf
+      dy = (tp - mean_y) * mf
+      c_xy = (dx * dy).sum()
+      c_xx = (dx * dx).sum()
+      c_yy = (dy * dy).sum()
+      return n, mean_x, mean_y, c_xy, c_xx, c_yy
+
+    def _reduce_chan_pearson(stats_list):
+      """Reduces per-microbatch Chan stats via the Law of Total Covariance."""
+      ns = np.array([s[0] for s in stats_list], dtype=np.float64)
+      mean_xs = np.array([s[1] for s in stats_list], dtype=np.float64)
+      mean_ys = np.array([s[2] for s in stats_list], dtype=np.float64)
+      c_xys = np.array([s[3] for s in stats_list], dtype=np.float64)
+      c_xxs = np.array([s[4] for s in stats_list], dtype=np.float64)
+      c_yys = np.array([s[5] for s in stats_list], dtype=np.float64)
+
+      total_n = ns.sum()
+      if total_n == 0:
+        return 0.0
+      global_mean_x = (ns * mean_xs).sum() / total_n
+      global_mean_y = (ns * mean_ys).sum() / total_n
+
+      total_c_xy = c_xys.sum() + (
+          ns * (mean_xs - global_mean_x) * (mean_ys - global_mean_y)
+      ).sum()
+      total_c_xx = c_xxs.sum() + (ns * (mean_xs - global_mean_x) ** 2).sum()
+      total_c_yy = c_yys.sum() + (ns * (mean_ys - global_mean_y) ** 2).sum()
+      return float(
+          total_c_xy / np.sqrt(max(total_c_xx * total_c_yy, 1e-24))
+      )
+
+    # Case 1: 8 heterogeneous microbatches with different prompt means, lengths,
+    # and masks (including an all-masked empty microbatch and a constant microbatch).
+    microbatches = []
+    for m, prompt_base_logp in enumerate(
+        [-0.002, -0.8, -0.05, -1.5, -0.001, -0.3, -2.2, -0.15]
+    ):
+      b, l = 4, 16
+      if m == 4:
+        # Constant low-entropy microbatch (zero within-microbatch variance)
+        r_logps = np.full((b, l), prompt_base_logp, dtype=np.float32)
+        t_logps = r_logps + np.float32(1e-4)
+        mask = np.ones((b, l), dtype=np.int32)
+      elif m == 6:
+        # Empty (all-masked) microbatch
+        r_logps = rng.uniform(-2.0, -0.01, size=(b, l)).astype(np.float32)
+        t_logps = r_logps + rng.normal(0.0, 0.02, size=(b, l)).astype(np.float32)
+        mask = np.zeros((b, l), dtype=np.int32)
+      else:
+        r_logps = (
+            prompt_base_logp
+            + rng.normal(0.0, 0.15, size=(b, l))
+        ).clip(-5.0, -1e-4).astype(np.float32)
+        t_logps = (
+            r_logps + rng.normal(0.0, 0.01, size=(b, l)).astype(np.float32)
+        ).clip(-5.0, -1e-4)
+        mask = (rng.uniform(0.0, 1.0, size=(b, l)) > 0.25).astype(np.int32)
+      microbatches.append((r_logps, t_logps, mask))
+
+    # Compute Chan's parallel Pearson correlation across the 8 microbatches.
+    stats_list = [
+        _microbatch_chan_stats(r, t, m) for r, t, m in microbatches
+    ]
+    chan_pearson = _reduce_chan_pearson(stats_list)
+
+    # Compute the ground-truth global Pearson correlation on the single
+    # concatenated batch of all 8 * 4 = 32 sequences.
+    global_r = np.concatenate([r for r, _, _ in microbatches], axis=0)
+    global_t = np.concatenate([t for _, t, _ in microbatches], axis=0)
+    global_m = np.concatenate([m for _, _, m in microbatches], axis=0)
+    global_metrics, _, _ = common.sampler_trainer_agreement(
+        global_r, global_t, global_m
+    )
+    global_pearson = global_metrics["sampler_trainer/probs_pearson_corr"][0]
+
+    np.testing.assert_allclose(chan_pearson, global_pearson, rtol=1e-7, atol=1e-7)
+
+    # Also verify the production JAX implementation (`compute_sampler_trainer_agreement_jax`
+    # reduced via `utils.weighted_metric_mean` / `common.global_weighted_mean`)
+    # matches the concatenated global batch correlation within float32 tolerance.
+    mb_jax_metrics = [
+        common.compute_sampler_trainer_agreement_jax(
+            jnp.asarray(r), jnp.asarray(t), jnp.asarray(m)
+        )[0]["sampler_trainer/probs_pearson_corr"][0]
+        for r, t, m in microbatches
+    ]
+    prod_chan_pearson = utils.weighted_metric_mean(mb_jax_metrics)
+    np.testing.assert_allclose(
+        prod_chan_pearson, global_pearson, rtol=1e-7, atol=1e-7
+    )
+    np.testing.assert_allclose(
+        common.global_weighted_mean(mb_jax_metrics),
+        global_pearson,
+        rtol=1e-7,
+        atol=1e-7,
+    )
+
+    # Case 2: Regime where within-microbatch variance is near zero (each prompt
+    # is deterministic with tiny bf16 noise), while between-microbatch variance
+    # across prompts is large. Within-only correlation collapses, whereas Chan's
+    # parallel formula recovers the exact global correlation (~0.9999).
+    mb_easy_r = np.full((4, 8), -0.001, dtype=np.float32)
+    mb_easy_t = mb_easy_r + np.array(
+        [[1e-4, -1e-4, 1e-4, -1e-4, 1e-4, -1e-4, 1e-4, -1e-4]] * 4,
+        dtype=np.float32,
+    )
+    mb_hard_r = np.full((4, 8), -0.700, dtype=np.float32)
+    mb_hard_t = mb_hard_r + np.array(
+        [[1e-4, -1e-4, 1e-4, -1e-4, 1e-4, -1e-4, 1e-4, -1e-4]] * 4,
+        dtype=np.float32,
+    )
+    mask_4x8 = np.ones((4, 8), dtype=np.int32)
+    chan_two_prompt = _reduce_chan_pearson([
+        _microbatch_chan_stats(mb_easy_r, mb_easy_t, mask_4x8),
+        _microbatch_chan_stats(mb_hard_r, mb_hard_t, mask_4x8),
+    ])
+    concat_metrics, _, _ = common.sampler_trainer_agreement(
+        np.concatenate([mb_easy_r, mb_hard_r], axis=0),
+        np.concatenate([mb_easy_t, mb_hard_t], axis=0),
+        np.concatenate([mask_4x8, mask_4x8], axis=0),
+    )
+    np.testing.assert_allclose(
+        chan_two_prompt,
+        concat_metrics["sampler_trainer/probs_pearson_corr"][0],
+        rtol=1e-7,
+        atol=1e-7,
+    )
+    self.assertGreater(chan_two_prompt, 0.9999)
+
+    prod_two_prompt = common.global_weighted_mean([
+        common.compute_sampler_trainer_agreement_jax(
+            jnp.asarray(mb_easy_r),
+            jnp.asarray(mb_easy_t),
+            jnp.asarray(mask_4x8),
+        )[0]["sampler_trainer/probs_pearson_corr"][0],
+        common.compute_sampler_trainer_agreement_jax(
+            jnp.asarray(mb_hard_r),
+            jnp.asarray(mb_hard_t),
+            jnp.asarray(mask_4x8),
+        )[0]["sampler_trainer/probs_pearson_corr"][0],
+    ])
+    np.testing.assert_allclose(
+        prod_two_prompt,
+        concat_metrics["sampler_trainer/probs_pearson_corr"][0],
+        rtol=1e-7,
+        atol=1e-7,
+    )
+    self.assertGreater(prod_two_prompt, 0.9999)
+
 
 class ProcessIdsTokenMaskTest(absltest.TestCase):
 

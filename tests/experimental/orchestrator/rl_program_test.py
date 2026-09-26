@@ -2959,7 +2959,7 @@ class RLProgramTest(absltest.TestCase):
     )
     self.assertEqual(mock_algo.algo_config.temperature, 0.8)
 
-  def test_program_temperature_missing_in_generation_args_leaves_none(
+  def test_program_temperature_missing_in_generation_args_inherits_from_algo_config(
       self,
   ):
     mock_algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
@@ -2977,7 +2977,7 @@ class RLProgramTest(absltest.TestCase):
         dataset=("p0",),
         algo=mock_algo,
     )
-    self.assertIsNone(program.generation_args.temperature)
+    self.assertEqual(program.generation_args.temperature, 0.8)
 
   def test_program_temperature_missing_in_algo_config_propagates_from_generation_args(
       self,
@@ -3178,11 +3178,55 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
-  def test_sampler_trainer_agreement_triggered_in_train_stage(self):
-    """When use_rollout_logps is True and old_per_token_logps present, agreement runs."""
+  def test_sampler_trainer_agreement_fused_into_train_step_by_default(self):
+    """By default with GRPO, agreement is fused into train_step without extra per_token_logps RPC."""
 
     async def _run():
       self.mock_algo.algo_config.use_rollout_logps = True
+      payload_with_old_logps = datatypes.RLTrainerPayload(
+          prompt_ids=np.array([1, 2], dtype=np.int32),
+          prompt_mask=np.array([1, 1], dtype=np.float32),
+          completion_ids=np.array([3, 4], dtype=np.int32),
+          completion_mask=np.array([1, 1], dtype=np.float32),
+          advantages=np.array([1.0, 1.0], dtype=np.float32),
+          old_per_token_logps=np.array([-0.5, -0.2], dtype=np.float32),
+      )
+      self.mock_algo.create_trainer_payloads.return_value = [
+          payload_with_old_logps,
+          payload_with_old_logps,
+      ]
+      self.mock_engine.per_token_logps = mock.AsyncMock()
+      self.mock_engine.get_metrics = mock.AsyncMock(
+          return_value=exp_metrics.MetricsBuffer(
+              id=1,
+              scalar_metrics={
+                  "loss": 0.5,
+                  "sampler_trainer/logp_diff_mean": 0.15,
+              },
+          )
+      )
+      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group(), [])
+      program = self._create_program(dataset=["prompt_data_0"])
+      await program.run_async(self.mock_engine)
+      self.mock_engine.per_token_logps.assert_not_awaited()
+      logger = program.metrics_logger
+      self.assertTrue(
+          logger.metric_exists("sampler_trainer", "logp_diff_mean", "train")
+      )
+      self.assertAlmostEqual(
+          logger.get_metric("sampler_trainer", "logp_diff_mean", "train"),
+          0.15,
+          places=5,
+      )
+
+    asyncio.run(_run())
+
+  def test_sampler_trainer_agreement_triggered_in_train_stage(self):
+    """When use_rollout_logps and log_sampler_trainer_agreement are True, pre-step agreement runs."""
+
+    async def _run():
+      self.mock_algo.algo_config.use_rollout_logps = True
+      self.mock_algo.algo_config.log_sampler_trainer_agreement = True
       payload_with_old_logps = datatypes.RLTrainerPayload(
           prompt_ids=np.array([1, 2], dtype=np.int32),
           prompt_mask=np.array([1, 1], dtype=np.float32),

@@ -490,6 +490,9 @@ class RLTrainerPayload(TrainerPayload):
   returns: ArrayLike | None = None
   old_values: ArrayLike | None = None
   num_segments: int | None = flax.struct.field(default=None, pytree_node=False)
+  sampler_agreement_applied: bool = flax.struct.field(
+      default=False, pytree_node=False
+  )
   metadata: dict[str, Any] = flax.struct.field(
       default_factory=dict, pytree_node=False
   )

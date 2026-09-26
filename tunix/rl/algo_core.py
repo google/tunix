@@ -191,6 +191,7 @@ def ppo_policy_loss_fn(
       eos_id=eos_id,
       stop_gradient=False,
       return_entropy=return_entropy,
+      temperature=getattr(algo_config, "temperature", None),
       segment_ids=getattr(train_example, "segment_ids", None),
       segment_positions=getattr(train_example, "segment_positions", None),
       chunk_size=kwargs.get("compute_logps_chunk_size", 0),
@@ -439,7 +440,48 @@ def grpo_loss_fn(
   # TODO(tsbao): We should handle token level advantages.
   advantages = jnp.astype(train_example.advantages, jnp.float32)
 
-  if train_example.old_per_token_logps is None:
+  sampler_is_weights = getattr(train_example, "sampler_is_weights", None)
+  sa_metrics = {}
+  if (
+      getattr(algo_config, "use_rollout_logps", False)
+      and train_example.old_per_token_logps is not None
+      and sampler_is_weights is None
+      and not getattr(train_example, "sampler_agreement_applied", False)
+  ):
+    trainer_per_token_logps = jax.lax.stop_gradient(per_token_logps)
+    sa_metrics, computed_is_weights, filtered_completion_mask = (
+        common.compute_sampler_trainer_agreement_jax(
+            train_example.old_per_token_logps,
+            trainer_per_token_logps,
+            completion_mask,
+            sampler_is=getattr(algo_config, "sampler_is", None),
+            sampler_is_threshold=getattr(
+                algo_config, "sampler_is_threshold", 2.0
+            ),
+            seq_logprob_error_threshold=getattr(
+                algo_config, "seq_logprob_error_threshold", None
+            ),
+            segment_ids=segment_ids,
+            num_segments=num_segments,
+        )
+    )
+    if getattr(algo_config, "seq_logprob_error_threshold", None) is not None:
+      completion_mask = filtered_completion_mask
+    if computed_is_weights is not None:
+      sampler_is_weights = computed_is_weights
+    if (
+        getattr(algo_config, "sampler_is", None) == "token"
+        or getattr(algo_config, "seq_logprob_error_threshold", None) is not None
+        or getattr(algo_config, "force_on_policy_ratio", False)
+    ):
+      old_per_token_logps = trainer_per_token_logps
+    else:
+      old_per_token_logps = jnp.astype(
+          train_example.old_per_token_logps, jnp.float32
+      )
+  elif train_example.old_per_token_logps is None or getattr(
+      algo_config, "force_on_policy_ratio", False
+  ):
     old_per_token_logps = jax.lax.stop_gradient(per_token_logps)
   else:
     old_per_token_logps = jnp.astype(
@@ -526,10 +568,9 @@ def grpo_loss_fn(
 
   # Optional truncated importance-sampling (TIS) correction for the residual
   # sampler-vs-trainer log-probability mismatch. The weights are precomputed
-  # upstream (already detached and threshold-clipped) and applied per token
-  # BEFORE loss aggregation so they affect the gradient through the loss
-  # magnitude only, not as a stop-gradient bias on the ratio.
-  sampler_is_weights = getattr(train_example, "sampler_is_weights", None)
+  # upstream or computed in-loss above (detached and threshold-clipped) and
+  # applied per token BEFORE loss aggregation so they affect the gradient
+  # through the loss magnitude only, not as a stop-gradient bias on the ratio.
   if sampler_is_weights is not None:
     per_token_loss = per_token_loss * sampler_is_weights.astype(jnp.float32)
 
@@ -609,15 +650,21 @@ def grpo_loss_fn(
   }
   if sampler_is_weights is not None:
     sis = sampler_is_weights.astype(jnp.float32)
-    aux["sampler_is/weight_mean"] = masked_mean(sis, completion_mask)
+    aux["sampler_is/weight_mean"] = sft_utils.WeightedMetric(
+        jnp.sum(sis * completion_mask), token_denom, min_denom=1.0
+    )
     aux["sampler_is/weight_min"] = jnp.where(
         has_valid,
         jnp.min(jnp.where(completion_mask > 0, sis, jnp.inf)),
         0.0,
     )
   else:
-    aux["sampler_is/weight_mean"] = jnp.float32(1.0)
+    aux["sampler_is/weight_mean"] = sft_utils.WeightedMetric(
+        token_denom, token_denom, min_denom=1.0
+    )
     aux["sampler_is/weight_min"] = jnp.float32(1.0)
+  for metric_name, (metric_val, _) in sa_metrics.items():
+    aux[metric_name] = metric_val
   # We do not always compute KL divergence (e.g. when beta is 0.0 unless
   # force_compute_kl is True).
   if train_example.ref_per_token_logps is not None:

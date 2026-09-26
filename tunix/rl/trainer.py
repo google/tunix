@@ -74,7 +74,10 @@ class Trainer(peft_trainer.PeftTrainer):
   @override
   def _post_process_train_step(self, aux: Any) -> None:
     assert self._buffered_train_metrics is not None
+    aux_dict = getattr(aux, "aux_metrics", aux)
     for metric_name, op in self.rl_metrics_to_log.items():
+      if isinstance(aux_dict, dict) and metric_name not in aux_dict:
+        continue
       if metric_name not in self._buffered_train_metrics.additional_metrics:
         self._buffered_train_metrics.additional_metrics[metric_name] = (
             [aux[metric_name]],
@@ -88,7 +91,10 @@ class Trainer(peft_trainer.PeftTrainer):
   @override
   def _post_process_eval_step(self, aux: Any) -> None:
     assert self._buffered_eval_metrics is not None
+    aux_dict = getattr(aux, "aux_metrics", aux)
     for metric_name, op in self.rl_metrics_to_log.items():
+      if isinstance(aux_dict, dict) and metric_name not in aux_dict:
+        continue
       if metric_name not in self._buffered_eval_metrics.additional_metrics:
         self._buffered_eval_metrics.additional_metrics[metric_name] = (
             [aux[metric_name]],
