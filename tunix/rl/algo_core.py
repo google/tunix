@@ -203,7 +203,14 @@ def ppo_policy_loss_fn(
   advantages = train_example.advantages
   old_per_token_logps = train_example.old_per_token_logps
 
-  seq_importance_ratio = jnp.exp(per_token_logps - old_per_token_logps)
+  # Bound the log-ratio before the exp, the way grpo_loss_fn below does.
+  # Unbounded, a large ratio overflows to inf, and jnp.maximum keeps it
+  # whenever the advantage is negative, so inf * 0 at a padded position turns
+  # the whole batch's loss and gradient into nan.
+  log_importance_ratio = jnp.clip(
+      per_token_logps - old_per_token_logps, max=20.0, min=-20.0
+  )
+  seq_importance_ratio = jnp.exp(log_importance_ratio)
 
   # Compute pg_clipfrac
   pg_losses_1 = -seq_importance_ratio * advantages
@@ -554,13 +561,10 @@ def grpo_loss_fn(
       unreduced_pg_loss  # KL added below when beta != 0; feeds gradient
   )
   # Per-token diagnostics — log only over assistant tokens (completion_mask).
-  has_valid = jnp.any(completion_mask > 0)
   is_ratio_mean = masked_mean(is_ratio, completion_mask)
   is_ratio_max = jnp.max(jnp.where(completion_mask > 0, is_ratio, 0.0))
-  is_ratio_min = jnp.where(
-      has_valid,
-      jnp.min(jnp.where(completion_mask > 0, is_ratio, jnp.inf)),
-      0.0,
+  is_ratio_min = jnp.min(
+      jnp.where(completion_mask > 0, is_ratio, jnp.inf)
   )
   log_ratio_abs_mean = masked_mean(
       jnp.abs(seq_importance_ratio), completion_mask
@@ -569,16 +573,8 @@ def grpo_loss_fn(
   pg_loss_2_mean = masked_mean(pg_loss_2, completion_mask)
   adv_broadcast = jnp.broadcast_to(adv, completion_mask.shape)
   adv_abs_mean = masked_mean(jnp.abs(adv_broadcast), completion_mask)
-  adv_max = jnp.where(
-      has_valid,
-      jnp.max(jnp.where(completion_mask > 0, adv_broadcast, -jnp.inf)),
-      0.0,
-  )
-  adv_min = jnp.where(
-      has_valid,
-      jnp.min(jnp.where(completion_mask > 0, adv_broadcast, jnp.inf)),
-      0.0,
-  )
+  adv_max = jnp.max(jnp.where(completion_mask > 0, adv_broadcast, -jnp.inf))
+  adv_min = jnp.min(jnp.where(completion_mask > 0, adv_broadcast, jnp.inf))
   nonzero_adv_frac = masked_mean(
       (jnp.abs(adv_broadcast) > 1e-8).astype(jnp.float32), completion_mask
   )
@@ -610,10 +606,8 @@ def grpo_loss_fn(
   if sampler_is_weights is not None:
     sis = sampler_is_weights.astype(jnp.float32)
     aux["sampler_is/weight_mean"] = masked_mean(sis, completion_mask)
-    aux["sampler_is/weight_min"] = jnp.where(
-        has_valid,
-        jnp.min(jnp.where(completion_mask > 0, sis, jnp.inf)),
-        0.0,
+    aux["sampler_is/weight_min"] = jnp.min(
+        jnp.where(completion_mask > 0, sis, jnp.inf)
     )
   else:
     aux["sampler_is/weight_mean"] = jnp.float32(1.0)
