@@ -283,6 +283,42 @@ class PackCoreTest(absltest.TestCase):
         [0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
     )
 
+  def test_routed_experts_packed_and_dummy_padded(self):
+    experts1 = np.arange(3 * 2 * 2, dtype=np.int32).reshape(3, 2, 2)
+    experts2 = np.arange(100, 100 + 2 * 2 * 2, dtype=np.int32).reshape(2, 2, 2)
+    item1 = packing.PackItem(
+        prompt_ids=np.array([1], dtype=np.int32),
+        completion_ids=np.array([2, 3], dtype=np.int32),
+        completion_mask=np.ones(2, dtype=np.float32),
+        advantages=np.ones(2, dtype=np.float32),
+        routed_experts=experts1,
+    )
+    item2 = packing.PackItem(
+        prompt_ids=np.array([4], dtype=np.int32),
+        completion_ids=np.array([5], dtype=np.int32),
+        completion_mask=np.ones(1, dtype=np.float32),
+        advantages=np.ones(1, dtype=np.float32),
+        routed_experts=experts2,
+    )
+    [rows] = packing.pack_core([item1, item2], budget=6, pack_size=2)
+    self.assertLen(rows, 2)
+    row0, row1 = rows
+    self.assertIsNotNone(row0.routed_experts)
+    self.assertEqual(row0.routed_experts.shape, (6, 2, 2))
+    np.testing.assert_array_equal(row0.routed_experts[:3], experts1)
+    np.testing.assert_array_equal(row0.routed_experts[3:5], experts2)
+    np.testing.assert_array_equal(
+        row0.routed_experts[5:],
+        np.full((1, 2, 2), packing.UNSET_ROUTED_EXPERT, dtype=np.int32),
+    )
+    # Dummy row in the same chunk must also have routed_experts filled with -1.
+    self.assertIsNotNone(row1.routed_experts)
+    np.testing.assert_array_equal(
+        row1.routed_experts,
+        np.full((6, 2, 2), packing.UNSET_ROUTED_EXPERT, dtype=np.int32),
+    )
+
 
 if __name__ == "__main__":
   absltest.main()
+

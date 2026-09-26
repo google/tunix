@@ -1403,6 +1403,26 @@ class GrpoLossSequenceMaskingTest(absltest.TestCase):
         for g in grad_leaves:
           self.assertTrue(bool(jnp.all(jnp.isfinite(g))))
 
+  def test_grpo_loss_fn_ignores_non_finite_advantages_on_masked_rows(self):
+    from flax import nnx  # pylint: disable=g-import-not-at-top
+
+    example = self._example(
+        completion_mask=jnp.array([[1.0, 1.0, 1.0], [0.0, 0.0, 0.0]], jnp.float32),
+        advantages=jnp.array([1.5, jnp.nan], jnp.float32),
+    )
+    config = self._config(beta=0.0)
+    out = algo_core.grpo_loss_fn(self.model, example, config, pad_id=0, eos_id=-1)
+    self.assertTrue(bool(jnp.isfinite(out.primary_loss.compute())))
+    self.assertTrue(bool(jnp.isfinite(out.aux_metrics['entropy'].compute())))
+    loss_scalar_fn = lambda model: algo_core.grpo_loss_fn(
+        model, example, config, pad_id=0, eos_id=-1
+    ).primary_loss.compute()
+    loss_val, grads = nnx.value_and_grad(loss_scalar_fn)(self.model)
+    self.assertTrue(bool(jnp.isfinite(loss_val)))
+    for g in jax.tree_util.tree_leaves(grads):
+      self.assertTrue(bool(jnp.all(jnp.isfinite(g))))
+
 
 if __name__ == '__main__':
   absltest.main()
+

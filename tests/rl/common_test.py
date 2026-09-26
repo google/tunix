@@ -1380,6 +1380,36 @@ class ProcessIdsTokenMaskTest(absltest.TestCase):
         self.assertTrue(bool(jnp.all(jnp.isfinite(m_grad))))
         self.assertEqual(float(m_grad[4]), 0.0)
 
+  def test_compute_entropy_from_logits_nan_and_inf_safe(self):
+    logits = jnp.array(
+        [
+            [[1.0, 2.0, 3.0, -1e9], [0.0, 0.0, -jnp.inf, jnp.nan]],
+        ],
+        dtype=jnp.float32,
+    )
+    entropy = common.compute_entropy_from_logits(logits)
+    self.assertTrue(bool(jnp.all(jnp.isfinite(entropy))))
+    grad_fn = jax.grad(
+        lambda x: jnp.sum(common.compute_entropy_from_logits(x))
+    )
+    grads = grad_fn(logits)
+    self.assertTrue(bool(jnp.all(jnp.isfinite(grads))))
+
+  def test_selective_log_softmax_nan_and_inf_safe(self):
+    logits = jnp.array(
+        [
+            [[1.0, 2.0, -1e9], [jnp.nan, -jnp.inf, 0.5]],
+        ],
+        dtype=jnp.float32,
+    )
+    index = jnp.array([[1, 0]], dtype=jnp.int32)
+    val, grads = jax.value_and_grad(
+        lambda x: jnp.sum(common.selective_log_softmax(x, index))
+    )(logits)
+    self.assertTrue(bool(jnp.isfinite(val)))
+    self.assertTrue(bool(jnp.all(jnp.isfinite(grads))))
+
 
 if __name__ == "__main__":
   absltest.main()
+
