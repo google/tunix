@@ -32,21 +32,19 @@ RUN pip install wandb
 # Set the working directory
 WORKDIR /app
 
-# Copy scripts and requirements first to leverage Docker cache
+# Copy scripts and pyproject.toml first to leverage Docker cache
 COPY scripts/install_tunix_vllm_requirement.sh scripts/
-COPY requirements/ requirements/
+COPY pyproject.toml README.md /app/
 
 RUN bash scripts/install_tunix_vllm_requirement.sh
 
-# Copy pyproject.toml and README.md to install dependencies first
-COPY pyproject.toml README.md /app/
 RUN mkdir /app/tunix && touch /app/tunix/__init__.py
 RUN uv pip install .
 
 # Install SFT/MaxText dependencies (unconditional)
 RUN uv pip install --upgrade flax && \
     uv pip install torchax aqtp tokamax math_verify drjax && \
-    uv pip install --no-deps git+https://github.com/google/maxtext.git
+    uv pip install --no-deps --group maxtext-git
 
 # Build argument to conditionally install Kubernetes tools
 ARG INSTALL_K8S_TOOLS=false
@@ -79,8 +77,10 @@ RUN if [ "$INSTALL_DEEPSWE_DEPS" = "true" ]; then \
 ARG INSTALL_MAXTEXT=false
 
 # Install MaxText specific dependencies conditionally
+# Re-apply --no-deps --group maxtext-git after .[maxtext] so protobuf>=7.35.1 is preserved.
 RUN if [ "$INSTALL_MAXTEXT" = "true" ]; then \
-      uv pip install -r /app/requirements/maxtext_requirements.txt --torch-backend=cpu; \
+      uv pip install ".[maxtext]" --torch-backend=cpu && \
+      uv pip install --no-deps --group maxtext-git; \
 fi
 
 # Build argument to conditionally install Raiden weight sync dependencies

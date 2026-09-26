@@ -20,10 +20,10 @@
 #   1. A locally built wheel in $RAIDEN_WHEEL_DIR (see build_raiden_wheel.sh).
 #   2. The wheel pinned below.
 #
-# The pin lives here rather than in requirements/ because pip cannot install it:
-# the bucket enforces public access prevention, so the fetch needs Google Cloud
-# credentials that pip has no way to present. A requirements file would look
-# installable and fail with a bare 403.
+# The pin lives here rather than in pyproject.toml because pip cannot install
+# it directly: the bucket enforces public access prevention, so the fetch needs
+# Google Cloud credentials that pip has no way to present. Declaring it in
+# pyproject.toml would look installable and fail with a bare 403.
 #
 # Pinning a URL rather than a package name is also deliberate. A package named
 # `tpu-raiden-jax` exists on public PyPI and is malicious: a dependency
@@ -42,7 +42,11 @@ RAIDEN_WHEEL_SHA256=${RAIDEN_WHEEL_SHA256:-"a442ac543f54d8ff11d22dbd009671890f2f
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 RAIDEN_WHEEL_DIR=${RAIDEN_WHEEL_DIR:-"${ROOT_DIR}/raiden_wheels"}
-PIP_INSTALL=(python3 -m pip install --force-reinstall --no-deps)
+if command -v uv >/dev/null 2>&1 && [[ -n "${VIRTUAL_ENV:-}" || -n "${UV_SYSTEM_PYTHON:-}" ]]; then
+  PIP_INSTALL=(uv pip install --reinstall --no-deps)
+else
+  PIP_INSTALL=(python3 -m pip install --force-reinstall --no-deps)
+fi
 
 # Raiden is imported at module scope by the trainer, the rollout, and the
 # orchestrator. If it is missing, weight sync silently no-ops and only surfaces
@@ -54,7 +58,7 @@ verify_install() {
 
 compile_protos() {
   echo "Compiling distributed runtime gRPC protobuf definitions..."
-  python3 -m pip install grpcio-tools
+  python3 -c "import grpc_tools.protoc" 2>/dev/null || uv pip install grpcio-tools
 
   local proto_dir="${ROOT_DIR}/tunix/experimental/distributed"
   if [[ ! -d "${proto_dir}" ]]; then

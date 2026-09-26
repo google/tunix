@@ -107,4 +107,4 @@ echo "*************************
 "
 
 echo "Built your docker image and named it ${LOCAL_IMAGE_NAME}.
-It now installs Tunix and the pinned vLLM and tpu-inference dependencies from requirements/requirements.txt. "
+It now installs Tunix and the pinned vLLM and tpu-inference dependencies from pyproject.toml."
