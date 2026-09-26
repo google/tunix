@@ -46,8 +46,10 @@ MAX_RESTARTS="${MAX_RESTARTS:-1}"
 RENDER_DIR="${RENDER_DIR:-$HERE/rendered}"
 # Prompts per forward+backward chunk (x 8 generations); memory only, the
 # optimizer still sees the full 64-prompt mini-batch. Old/reference logps use
-# the same micro batch (the agentic learner requires it).
-TRAIN_MICRO_BATCH="${TRAIN_MICRO_BATCH:-4}"
+# the same micro batch (the agentic learner requires it). 8 is the largest
+# divisor of 64 that fits a v5p trainer chip (95.7 GB HBM) at 2048+8192 tokens:
+# probes needed 104.3 GB of HLO temporaries at 16 (sc-on) and 143.8 GB at 32.
+TRAIN_MICRO_BATCH="${TRAIN_MICRO_BATCH:-8}"
 # Appended after every other flag (argparse: last one wins), e.g. for short
 # memory probes: EXTRA_TRAIN_ARGS="--num_batches 2 --disable_eval".
 EXTRA_TRAIN_ARGS="${EXTRA_TRAIN_ARGS:-}"
