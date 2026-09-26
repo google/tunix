@@ -55,9 +55,142 @@ jobs:
     if: ${{ github.event.action != 'labeled' || github.event.label.name == 'ready-to-submit' }}
     uses: ./.github/workflows/build_package.yml
 
+  build_tunix_docker:
+    name: Build or resolve Tunix Docker image
+    if: ${{ github.event.action != 'labeled' || github.event.label.name == 'ready-to-submit' }}
+    runs-on: linux-x86-n2-16-buildkit
+    container: google/cloud-sdk:524.0.0
+    outputs:
+      image_uri: ${{ steps.resolve.outputs.image_uri }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Configure Docker for Artifact Registry
+        run: |
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+          gcloud auth configure-docker us-central1-docker.pkg.dev,europe-west4-docker.pkg.dev -q
+
+      # Compute a deterministic content hash (`ENV_HASH`) over all files that
+      # define the `tunix/mlperf` container environment (`Dockerfile`,
+      # `pyproject.toml`, `scripts/install_*.sh`,
+      # `scripts/verify_environment.py`, `examples/deepswe/install_deepswe.sh`,
+      # and `discovery_service.proto`).
+      #
+      # Fast Path (~5s):
+      #   If `:env-${ENV_HASH}` already exists in Artifact Registry and this is a
+      #   pull request, alias `:env-${ENV_HASH}` to `:${GITHUB_SHA}` and
+      #   `:${SHORT_SHA}` in `us-central1` and `europe-west4` without rebuilding.
+      #   Downstream CPU (`run_vllm`) and TPU (`run_dev`) jobs overlay the PR's
+      #   Tunix Python source/wheel in ~1s at runtime.
+      #
+      # Build Path:
+      #   When any container-defining file changes (or on `main` / `schedule` /
+      #   `workflow_dispatch`), build `Dockerfile` (`INSTALL_MAXTEXT=true`) via
+      #   BuildKit (which executes `scripts/verify_environment.py` inside the
+      #   final build stage) and publish `:env-${ENV_HASH}`, `:${GITHUB_SHA}`,
+      #   and `:${SHORT_SHA}` to both `us-central1` and `europe-west4`.
+      #   `:latest` is only updated on `main` branch runs, preventing concurrent
+      #   PRs from overwriting `:latest` or racing against each other.
+      - name: Check if container environment image already exists in GAR
+        id: check
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          FULL_SHA: ${{ github.sha }}
+        run: |
+          REGISTRY_US="us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/mlperf"
+          REGISTRY_EU="europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/mlperf"
+          SHORT_SHA=$(printf '%s' "${FULL_SHA}" | cut -c1-7)
+          DOCKER_BUILD_ARGS="INSTALL_MAXTEXT=true"
+          ENV_HASH=$(
+            {
+              printf '%s\n' "${DOCKER_BUILD_ARGS}"
+              sha256sum \
+                Dockerfile \
+                .dockerignore \
+                pyproject.toml \
+                scripts/install_k8s_tools.sh \
+                scripts/install_tunix_vllm_requirement.sh \
+                scripts/install_raiden.sh \
+                scripts/verify_environment.py \
+                examples/deepswe/install_deepswe.sh \
+                tunix/experimental/distributed/runtime/discovery/discovery_service.proto
+            } | sha256sum | cut -c1-16
+          )
+          ENV_TAG="env-${ENV_HASH}"
+          echo "env_tag=${ENV_TAG}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+          if [ "${EVENT_NAME}" = "pull_request" ] && \
+             gcloud artifacts docker images describe "${REGISTRY_US}:${ENV_TAG}" >/dev/null 2>&1; then
+            echo "Found existing verified environment image ${REGISTRY_US}:${ENV_TAG}; tagging commit ${SHORT_SHA}..."
+            gcloud artifacts docker tags add "${REGISTRY_US}:${ENV_TAG}" "${REGISTRY_US}:${FULL_SHA}" --quiet
+            gcloud artifacts docker tags add "${REGISTRY_US}:${ENV_TAG}" "${REGISTRY_US}:${SHORT_SHA}" --quiet
+            if gcloud artifacts docker images describe "${REGISTRY_EU}:${ENV_TAG}" >/dev/null 2>&1; then
+              gcloud artifacts docker tags add "${REGISTRY_EU}:${ENV_TAG}" "${REGISTRY_EU}:${FULL_SHA}" --quiet
+              gcloud artifacts docker tags add "${REGISTRY_EU}:${ENV_TAG}" "${REGISTRY_EU}:${SHORT_SHA}" --quiet
+            fi
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Building and verifying ${REGISTRY_US}:${ENV_TAG} for commit ${SHORT_SHA}..."
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Docker Buildx
+        if: steps.check.outputs.should_build == 'true'
+        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
+        with:
+          driver: remote
+          endpoint: tcp://localhost:1234
+
+      - name: Build, verify, and publish Tunix Docker image (us-central1 & europe-west4)
+        if: steps.check.outputs.should_build == 'true'
+        uses: docker/build-push-action@14487ce63c7a62a4a324b0bfb37086795e31c6c1 # v6.16.0
+        with:
+          context: .
+          push: true
+          tags: |
+            us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/mlperf:${{ github.sha }}
+            us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/mlperf:${{ steps.check.outputs.short_sha }}
+            us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/mlperf:${{ steps.check.outputs.env_tag }}
+            europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/mlperf:${{ github.sha }}
+            europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/mlperf:${{ steps.check.outputs.short_sha }}
+            europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/mlperf:${{ steps.check.outputs.env_tag }}
+          build-args: |
+            INSTALL_MAXTEXT=true
+          cache-from: |
+            type=registry,ref=us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/mlperf:buildcache
+            type=gha
+          cache-to: |
+            type=registry,ref=us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/mlperf:buildcache,mode=max
+
+      - name: Promote :latest tag on main branch
+        if: steps.check.outputs.should_build == 'true' && github.event_name != 'pull_request' && github.ref_name == 'main'
+        env:
+          FULL_SHA: ${{ github.sha }}
+        run: |
+          for REG in \
+            us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/mlperf \
+            europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/mlperf; do
+            gcloud artifacts docker tags add "${REG}:${FULL_SHA}" "${REG}:latest" --quiet
+          done
+
+      - name: Export immutable image URI for downstream CPU and TPU test jobs
+        id: resolve
+        env:
+          FULL_SHA: ${{ github.sha }}
+        run: |
+          IMAGE_URI="us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/mlperf:${FULL_SHA}"
+          echo "Resolved immutable Tunix test image: ${IMAGE_URI}"
+          echo "image_uri=${IMAGE_URI}" >> "$GITHUB_OUTPUT"
+
   tunix_cpu_unit_tests:
-    needs: build_tunix_package
+    needs: [build_tunix_package, build_tunix_docker]
     uses: ./.github/workflows/cpu-tests.yml
+    with:
+      dev_image: ${{ needs.build_tunix_docker.outputs.image_uri }}
     secrets:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
       KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
@@ -65,7 +198,7 @@ jobs:
 
 
   tunix_tpu_unit_tests:
-    needs: build_tunix_package
+    needs: [build_tunix_package, build_tunix_docker]
     # Run TPU unit tests on scheduled/manual runs, Copybara PRs, same-repo atwigg/mlperf PRs,
     # or when a maintainer applies the 'ready-to-submit' label.
     if: >-
@@ -78,6 +211,8 @@ jobs:
          github.event.label.name == 'ready-to-submit')
       }}
     uses: ./.github/workflows/tpu-tests.yml
+    with:
+      dev_image: ${{ needs.build_tunix_docker.outputs.image_uri }}
     secrets:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
       KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
@@ -85,7 +220,7 @@ jobs:
 
   notify_failure:
     name: Notify failed build # creates an issue or modifies last open existing issue for failed build
-    needs: [build_tunix_package,tunix_cpu_unit_tests, tunix_tpu_unit_tests]
+    needs: [build_tunix_package, build_tunix_docker, tunix_cpu_unit_tests, tunix_tpu_unit_tests]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     permissions:
