@@ -32,21 +32,15 @@ RUN pip install wandb
 # Set the working directory
 WORKDIR /app
 
-# Copy scripts and requirements first to leverage Docker cache
+# Copy scripts first to leverage Docker cache
 COPY scripts/install_tunix_vllm_requirement.sh scripts/
-COPY requirements/ requirements/
 
 RUN bash scripts/install_tunix_vllm_requirement.sh
 
 # Copy pyproject.toml and README.md to install dependencies first
 COPY pyproject.toml README.md /app/
 RUN mkdir /app/tunix && touch /app/tunix/__init__.py
-RUN uv pip install .
-
-# Install SFT/MaxText dependencies (unconditional)
-RUN uv pip install --upgrade flax && \
-    uv pip install torchax aqtp tokamax math_verify drjax && \
-    uv pip install --no-deps git+https://github.com/google/maxtext.git
+RUN uv pip install ".[tpu]"
 
 # Build argument to conditionally install Kubernetes tools
 ARG INSTALL_K8S_TOOLS=false
@@ -64,15 +58,11 @@ RUN if [ "$INSTALL_K8S_TOOLS" = "true" ]; then \
 
 # Build argument to conditionally install DeepSWE evaluation dependencies
 ARG INSTALL_DEEPSWE_DEPS=false
+COPY examples/deepswe/install_deepswe.sh /app/examples/deepswe/install_deepswe.sh
 
 # Install DeepSWE specific dependencies and apply runtime patches conditionally
 RUN if [ "$INSTALL_DEEPSWE_DEPS" = "true" ]; then \
-      uv pip install kubernetes gym swebench==3.0.2 && \
-      uv pip install --no-deps git+https://github.com/kubernetes-sigs/agent-sandbox.git#subdirectory=clients/python/agentic-sandbox-client && \
-      uv pip install --no-deps git+https://github.com/kubernetes-sigs/agent-sandbox.git#subdirectory=examples/agent-sandbox-rl && \
-      uv pip install --no-deps git+https://github.com/r2e-gym/r2e-gym.git@0d94c4eb9431cd195c55a7ea3abd54006c9a1735 && \
-      sed -i 's/create_repo, upload_folder, HfFolder/create_repo, upload_folder/' /opt/venv/lib/python3.12/site-packages/r2egym/agenthub/utils/utils.py && \
-      sed -i 's/self.commit = ParsedCommit(\*\*json.loads(self.commit_json))/self.commit = ParsedCommit(\*\*(json.loads(self.commit_json) if isinstance(self.commit_json, str) else self.commit_json))/' /opt/venv/lib/python3.12/site-packages/r2egym/agenthub/runtime/docker.py; \
+      bash /app/examples/deepswe/install_deepswe.sh; \
     fi
 
 # Build argument to conditionally install MaxText dependencies
@@ -80,7 +70,8 @@ ARG INSTALL_MAXTEXT=false
 
 # Install MaxText specific dependencies conditionally
 RUN if [ "$INSTALL_MAXTEXT" = "true" ]; then \
-      uv pip install -r /app/requirements/maxtext_requirements.txt --torch-backend=cpu; \
+      uv pip install ".[maxtext]" --torch-backend=cpu && \
+      uv pip install --directory /app --no-deps --group maxtext-git; \
 fi
 
 # Build argument to conditionally install Raiden weight sync dependencies

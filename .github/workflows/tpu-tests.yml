@@ -268,7 +268,7 @@ jobs:
         uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: /root/.cache/pip
-          key: pip-dev-v5-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements*.txt', 'constraints*.txt') }}
+          key: pip-dev-v5-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'constraints*.txt') }}
           restore-keys: |
             pip-dev-v5-${{ runner.os }}-
 
@@ -276,7 +276,7 @@ jobs:
         uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: /root/.cache/tensorflow_datasets
-          key: tfds-dev-v4-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements*.txt') }}
+          key: tfds-dev-v4-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}
           restore-keys: |
             tfds-dev-v4-${{ runner.os }}-
             tfds-dev-v3-${{ runner.os }}-
@@ -285,7 +285,7 @@ jobs:
         uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: /root/.cache/jax_compilation_cache
-          key: jax-cache-dev-v4-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements*.txt') }}
+          key: jax-cache-dev-v4-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}
           restore-keys: |
             jax-cache-dev-v4-${{ runner.os }}-
             jax-cache-dev-v3-${{ runner.os }}-
@@ -300,7 +300,7 @@ jobs:
 
           # Install Tunix with dev and test dependencies without overwriting the vLLM dependencies.
           python3 -m pip install -e .[test]
-          python3 -m pip install --no-deps --no-build-isolation -r requirements/special_requirements.txt
+          python3 -m pip install --no-deps --no-build-isolation "tpu-inference @ git+https://github.com/vllm-project/tpu-inference.git@6f913c734cb47a1125a817e37cc418c5960675d0"
           # tpu-inference/Numba needs NumPy 2.3 or less.
           python3 -m pip install numpy==2.3.5 --force-reinstall
 
@@ -397,7 +397,10 @@ jobs:
       - name: Install MaxText dependencies
         run: |
           unset PIP_NO_CACHE_DIR
-          python3 -m pip install -r requirements/maxtext_requirements.txt
+          python3 -m pip install -e ".[maxtext]"
+          python3 -m pip install --no-deps \
+            "maxtext @ git+https://github.com/AI-Hypercomputer/maxtext.git@b8cf3cdcf91e20d1ef5cc830fb9b2db4ca1d82bf" \
+            "maxtext-vllm-adapter @ git+https://github.com/AI-Hypercomputer/maxtext.git@b8cf3cdcf91e20d1ef5cc830fb9b2db4ca1d82bf#subdirectory=src/maxtext/integration/vllm"
           python3 -m pip install "protobuf>=7.35.1"
 
       - name: Run GSM8K Distributed RL Smoke Test (MaxText Backend + Raiden Sync)
