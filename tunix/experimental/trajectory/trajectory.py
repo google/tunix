@@ -1395,6 +1395,13 @@ class TunixTrajectoryMetadata(TrajectoryMetadata):
       default=None,
       description="Total cumulative reward.",
   )
+  masked_out: bool | None = pydantic.Field(
+      default=None,
+      description=(
+          "True if the overlong filter zeroed this trajectory's training"
+          " masks; None until the episode is post-processed."
+      ),
+  )
   hyperparams: MetadataDict = pydantic.Field(
       default=None,
       description="Hyperparameters / generation kwargs.",

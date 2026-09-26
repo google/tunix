@@ -126,6 +126,9 @@ class TrajectoryCollectEngine:
     self.trajectory_store = trajectory_store
     self.metadata = metadata
     self.store_routed_experts = store_routed_experts
+    # Set by `_post_process_episode()` and synced into `metadata`; None until
+    # the episode is post-processed.
+    self._masked_out: Optional[bool] = None
     self.final_reward_fn = None
     self.model_call_kwargs = model_call_kwargs or {}
     if exact_token_continuity and (tokenizer is None or chat_parser is None):
@@ -276,6 +279,7 @@ class TrajectoryCollectEngine:
           policy_version=self.policy_version,
           env_time=self.env_time,
           reward_time=self.reward_time,
+          masked_out=self._masked_out,
       )
     except Exception:  # pylint: disable=broad-exception-caught
       logging.warning(
@@ -298,8 +302,28 @@ class TrajectoryCollectEngine:
           exc_info=True,
       )
 
+  def _prompt_token_ids(self) -> Optional[np.ndarray]:
+    """Returns the unpadded first-turn prompt token ids, or None if unknown."""
+    prompt_tokens = self.agent.trajectory.prompt_tokens
+    if prompt_tokens is None or len(prompt_tokens) == 0:
+      return None
+    if not self.exact_token_continuity:
+      return np.asarray(prompt_tokens)
+    # Exact mode learns the prompt from the first `model_call`, left-padded.
+    prompt_length = self.agent.trajectory.prompt_length
+    if prompt_length is None:
+      return None
+    return generate_utils.unpad_prompt(prompt_tokens, prompt_length)
+
   def _record_task_step(self) -> None:
-    """Writes the initial task step (step 0) live to trajectory_store."""
+    """Writes the initial task step (step 0) live to trajectory_store.
+
+    The step carries the first-turn prompt token ids in `env_tokens` (with
+    all-zero `env_masks`) once they are known, so Token-mode data can be
+    rebuilt from the store without re-tokenizing. In exact token continuity
+    mode, the ids are only known after the first `model_call`, so the step is
+    re-recorded (upserted on `step_id=0`) at that point.
+    """
     if self.trajectory_store is None or self.metadata is None:
       return
     try:
@@ -319,6 +343,10 @@ class TrajectoryCollectEngine:
             source=trajectory_lib.Source.USER,
             message=user_msg,
         )
+      prompt_token_ids = self._prompt_token_ids()
+      if prompt_token_ids is not None:
+        task_step.env_tokens = prompt_token_ids
+        task_step.env_masks = np.zeros_like(prompt_token_ids)
       self.trajectory_store.add_step(task_step, self.metadata)
     except Exception:  # pylint: disable=broad-exception-caught
       logging.warning(
@@ -704,6 +732,7 @@ class TrajectoryCollectEngine:
     self._current_step_initial_routed_experts = None
     self._has_routed_experts = False
     self._current_prefill = None
+    self._masked_out = None
     self.env_time = {
         "reset_latency": 0.0,
         "step_latency": [],
@@ -933,6 +962,8 @@ class TrajectoryCollectEngine:
         self.agent.trajectory.prompt_length = int(
             rollout_output.prompt_lengths[0]
         )
+        # Prompt ids are only known now; upsert step 0 to include them.
+        self._record_task_step()
       else:
         echoed = generate_utils.unpad_prompt(
             rollout_output.left_padded_prompt_tokens[0],
@@ -1213,6 +1244,7 @@ class TrajectoryCollectEngine:
         self.overlong_filter
         and self.agent.trajectory.status in self.filter_statuses
     )
+    self._masked_out = masked_out
     if not masked_out:
       await self._append_final_reward()
     self.compute_mc_reward()
