@@ -168,6 +168,20 @@ def build_maxtext_config(
         "max_seq_token_per_tpu must be non-negative, got"
         f" {max_seq_token_per_tpu}"
     )
+  # 0 and None mean packing is off. Any positive value is a packing budget, and
+  # one too small to hold a maximal sequence is not a degraded mode: the
+  # learner's rl_utils.validate_packing_budget rejects it once the assembler is
+  # built. Reject it here too, before the mesh and the model are.
+  if max_seq_token_per_tpu:
+    longest = max_prompt_length + max_response_length
+    if max_seq_token_per_tpu < longest:
+      raise ValueError(
+          f"max_seq_token_per_tpu={max_seq_token_per_tpu} is smaller than the"
+          f" longest possible sequence (max_prompt_length {max_prompt_length} +"
+          f" max_response_length {max_response_length} = {longest}); packing"
+          f" cannot place such a sequence in a row. Set"
+          f" max_seq_token_per_tpu >= {longest}."
+      )
 
   if max_seq_token_per_tpu is not None and max_seq_token_per_tpu > 0:
     # When sequence packing is enabled, the batch assembler feeds 1 packed row
@@ -317,33 +331,19 @@ def build_maxtext_config(
   # narrower than the ones the trainer is fed: per-device TFLOPs, and the
   # divisibility checks MaxTextConfig runs against it (num_vocab_tiling,
   # context parallelism, num_moe_token_chunks). Declare the real width instead.
-  max_target_length = max_prompt_length + max_response_length
-  if (
-      max_seq_token_per_tpu is not None
-      and max_seq_token_per_tpu > max_target_length
-  ):
+  # An undersized budget was rejected above, so a packed row is exactly
+  # max_seq_token_per_tpu wide and an unpacked one holds one trajectory.
+  if max_seq_token_per_tpu:
     logging.info(
-        "Raising max_target_length %d -> %d: with sequence packing the rows"
-        " the trainer is fed are max_seq_token_per_tpu wide.",
-        max_target_length,
+        "Sequence packing: max_target_length=%d (max_seq_token_per_tpu) rather"
+        " than %d (max_prompt_length + max_response_length); the rows the"
+        " trainer is fed are one packing budget wide.",
         max_seq_token_per_tpu,
+        max_prompt_length + max_response_length,
     )
     max_target_length = max_seq_token_per_tpu
-  elif (
-      max_seq_token_per_tpu is not None
-      and 0 < max_seq_token_per_tpu < max_target_length
-  ):
-    logging.warning(
-        "max_seq_token_per_tpu=%d is smaller than max_prompt_length + "
-        "max_response_length (%d + %d = %d), which is not a legal packing "
-        "budget -- validate_packing_budget rejects it on the learner. Keeping "
-        "max_target_length=%d.",
-        max_seq_token_per_tpu,
-        max_prompt_length,
-        max_response_length,
-        max_target_length,
-        max_target_length,
-    )
+  else:
+    max_target_length = max_prompt_length + max_response_length
 
   if profiling_options is not None:
     argv.extend([
