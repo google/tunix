@@ -23,6 +23,7 @@ import collections
 import logging
 import os
 import re
+import queue
 import threading
 from typing import Any, Callable
 import numpy as np
@@ -414,6 +415,37 @@ def teardown_global_fleet() -> None:
       logging.warning("[SandboxFleet] Reaper note: %s", e)
 
 
+def _resolve_warm_concurrency(warm_concurrency: int | None) -> int:
+  """Resolves how many new pools PrewarmDatasetIterator warms at once.
+
+  An explicit argument wins; otherwise PREWARM_WARM_CONCURRENCY is read.
+  Anything missing, unparsable, or below 1 means 1, the historical
+  one-at-a-time behavior. An explicit argument that is not an int raises
+  TypeError here, at construction, rather than later inside the warm path.
+  """
+  if warm_concurrency is not None and (
+      isinstance(warm_concurrency, bool)
+      or not isinstance(warm_concurrency, int)
+  ):
+    raise TypeError(
+        f"warm_concurrency must be an int, got {warm_concurrency!r}"
+    )
+  if warm_concurrency is None:
+    raw = os.getenv("PREWARM_WARM_CONCURRENCY")
+    if not raw:
+      return 1
+    try:
+      warm_concurrency = int(raw)
+    except ValueError:
+      logging.warning(
+          "[PrewarmDatasetIterator] Ignoring PREWARM_WARM_CONCURRENCY=%r (not"
+          " an integer); warming one pool at a time.",
+          raw,
+      )
+      return 1
+  return max(1, warm_concurrency)
+
+
 class PrewarmDatasetIterator:
   """Lookahead dataset iterator: pre-warms Agent Sandboxes on Kubernetes.
 
@@ -426,6 +458,16 @@ class PrewarmDatasetIterator:
     * Changed count: fleet.set_pool_replicas(img, replicas)
     * Deleted image key (count 0): fleet.unwarm_image(img)
   Cleans up all warm pools upon iteration completion or close().
+
+  New pools are warmed one at a time by default. With wait=True (the initial
+  priming barrier) each warm blocks until its pool is ready, so priming takes
+  the sum of every image's ready time. warm_concurrency > 1 (or the
+  PREWARM_WARM_CONCURRENCY env var) warms up to that many new pools at once, so
+  priming takes roughly the slowest pool instead. SandboxFleet.warm_image is
+  safe to call concurrently for distinct images, which new keys always are.
+  Concurrent warms issue every new pool's sandbox creates at once, bypassing the
+  SDK's warm_create_budget staging; use an agent-sandbox controller >= v0.5.4
+  (kubernetes-sigs/agent-sandbox#1215) or keep warm_concurrency modest.
   """
 
   def __init__(
@@ -440,8 +482,10 @@ class PrewarmDatasetIterator:
       scaffold: str = "r2egym",
       image_rewrite: Any | None = None,
       wait_initial: bool = True,
+      warm_concurrency: int | None = None,
   ):
     del lookahead_steps
+    self.warm_concurrency = _resolve_warm_concurrency(warm_concurrency)
     self.scaffold = scaffold
     self.dataset_iter = iter(dataset)
     self.fleet = fleet or get_global_fleet()
@@ -613,24 +657,17 @@ class PrewarmDatasetIterator:
           reps = min(reps, self.max_warmpool_replicas)
         desired[img] = reps
 
-    # 1. Warm new keys or scale existing keys
+    # 1. Warm new keys, then scale existing keys
+    new_keys = {
+        img: reps
+        for img, reps in desired.items()
+        if img not in self._active_replicas
+    }
+    self._warm_new_keys(new_keys, wait)
     for img, target_reps in desired.items():
-      if img not in self._active_replicas:
-        try:
-          self.fleet.warm_image(img, replicas_override=target_reps, wait=wait)
-          self._active_replicas[img] = target_reps
-          logging.info(
-              "[PrewarmDatasetIterator] Warmed new pool on K8s: %s"
-              " (replicas=%d, wait=%s)",
-              img,
-              target_reps,
-              wait,
-          )
-        except Exception as e:  # pylint: disable=broad-exception-caught
-          logging.warning(
-              "[PrewarmDatasetIterator] Warm note for %s: %s", img, e
-          )
-      elif self._active_replicas[img] != target_reps:
+      if img in new_keys:
+        continue
+      if self._active_replicas[img] != target_reps:
         try:
           self.fleet.set_pool_replicas(img, target_reps)
           logging.info(
@@ -660,6 +697,73 @@ class PrewarmDatasetIterator:
             "[PrewarmDatasetIterator] Unwarm note for %s: %s", img, e
         )
       del self._active_replicas[img]
+
+  def _warm_new_keys(self, new_keys: dict[str, int], wait: bool) -> None:
+    """Warms each new image's pool; records only the ones that succeeded."""
+    workers = min(len(new_keys), self.warm_concurrency)
+    if workers <= 1:
+      for img, reps in new_keys.items():
+        try:
+          self.fleet.warm_image(img, replicas_override=reps, wait=wait)
+          err = None
+        except Exception as e:  # pylint: disable=broad-exception-caught
+          err = e
+        self._record_warm(img, reps, wait, err)
+      return
+    # Daemon threads, not a ThreadPoolExecutor: on SIGTERM/SIGINT the SDK raises
+    # in the main thread and tears down from an atexit hook, and Python joins
+    # executor workers *before* atexit hooks run. Workers blocked in
+    # wait_for_pool_ready would then hold teardown for up to ready_timeout,
+    # past the pod's termination grace period. Daemon threads are not joined at
+    # exit, and Thread.join() here stays interruptible, as the serial path is.
+    todo: queue.SimpleQueue[tuple[str, int]] = queue.SimpleQueue()
+    for item in new_keys.items():
+      todo.put(item)
+    # Pre-filled with a failure so an image no worker finished (a worker that
+    # died on a BaseException) is logged and retried, never recorded as warm.
+    errors: dict[str, BaseException | None] = {
+        img: RuntimeError("warm did not complete") for img in new_keys
+    }
+
+    def _worker() -> None:
+      while True:
+        try:
+          img, reps = todo.get_nowait()
+        except queue.Empty:
+          return
+        try:
+          self.fleet.warm_image(img, replicas_override=reps, wait=wait)
+          errors[img] = None
+        except Exception as e:  # pylint: disable=broad-exception-caught
+          errors[img] = e
+
+    threads = [
+        threading.Thread(target=_worker, name=f"prewarm-{i}", daemon=True)
+        for i in range(workers)
+    ]
+    for t in threads:
+      t.start()
+    for t in threads:
+      t.join()
+    # Record in plan order, not completion order, so the iterator's state and
+    # logs stay deterministic.
+    for img, reps in new_keys.items():
+      self._record_warm(img, reps, wait, errors[img])
+
+  def _record_warm(
+      self, img: str, reps: int, wait: bool, err: BaseException | None
+  ) -> None:
+    if err is not None:
+      logging.warning("[PrewarmDatasetIterator] Warm note for %s: %s", img, err)
+      return
+    self._active_replicas[img] = reps
+    logging.info(
+        "[PrewarmDatasetIterator] Warmed new pool on K8s: %s"
+        " (replicas=%d, wait=%s)",
+        img,
+        reps,
+        wait,
+    )
 
   def __iter__(self):
     return self
