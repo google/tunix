@@ -374,13 +374,43 @@ def _compute_mesh_global_shard_indices(
   return None
 
 
-def _tensor_metadata(name: str, arr: Any, layer_idx: int):
+def _tensor_metadata(
+    name: str,
+    arr: Any,
+    layer_idx: int,
+    layout_cache: Optional[
+        dict[Any, Tuple[Tuple[int, ...], Tuple[str, ...], Tuple[int, ...]]]
+    ] = None,
+):
+  shape_tuple = tuple(arr.shape)
   sharding: Any = getattr(arr, "sharding", None)
+  cache_key = None
+  if layout_cache is not None:
+    try:
+      hash(sharding)
+      sharding_key = sharding
+    except TypeError:
+      sharding_key = id(sharding)
+    cache_key = (shape_tuple, arr.ndim, sharding_key)
+    cached = layout_cache.get(cache_key)
+    if cached is not None:
+      mesh_shape, sharding_spec, global_shard_indices = cached
+      return weight_sync.TensorMetadata(
+          name=name,
+          shape=shape_tuple,
+          mesh_shape=mesh_shape,
+          layout=tuple(reversed(range(arr.ndim))),
+          item_size=arr.dtype.itemsize,
+          layer_idx=layer_idx,
+          sharding_spec=sharding_spec,
+          global_shard_indices=global_shard_indices,
+      )
+
   spec = tuple(getattr(sharding, "spec", ()) or ())
   spec = (spec + (None,) * arr.ndim)[: arr.ndim]
   if sharding is not None and hasattr(sharding, "shard_shape"):
     try:
-      local = sharding.shard_shape(tuple(arr.shape))
+      local = sharding.shard_shape(shape_tuple)
       mesh_shape = tuple(g // l for g, l in zip(arr.shape, local))
     except Exception as e:  # pylint: disable=broad-exception-caught
       logging.warning(
@@ -396,7 +426,6 @@ def _tensor_metadata(name: str, arr: Any, layer_idx: int):
   global_shard_indices: Tuple[int, ...] = ()
   if sharding is not None and hasattr(sharding, "devices_indices_map"):
     try:
-      shape_tuple = tuple(arr.shape)
       devices_indices_map = sharding.devices_indices_map(shape_tuple)
       if devices_indices_map is not None:
         if (
@@ -430,14 +459,22 @@ def _tensor_metadata(name: str, arr: Any, layer_idx: int):
     except Exception:  # pylint: disable=broad-exception-caught
       global_shard_indices = ()
 
+  sharding_spec = tuple(_axis_name(a) for a in spec)
+  if layout_cache is not None and cache_key is not None:
+    layout_cache[cache_key] = (
+        mesh_shape,
+        sharding_spec,
+        global_shard_indices,
+    )
+
   return weight_sync.TensorMetadata(
       name=name,
-      shape=tuple(arr.shape),
+      shape=shape_tuple,
       mesh_shape=mesh_shape,
       layout=tuple(reversed(range(arr.ndim))),
       item_size=arr.dtype.itemsize,
       layer_idx=layer_idx,
-      sharding_spec=tuple(_axis_name(a) for a in spec),
+      sharding_spec=sharding_spec,
       global_shard_indices=global_shard_indices,
   )
 
@@ -521,6 +558,8 @@ class RaidenSynchronizer(weight_sync.WeightSynchronizer):
     self._ffi_shard_idx: Any = None
     self._host_subgrid: Optional[Tuple[int, ...]] = None
     self._global_shard_indices: Optional[List[int]] = None
+    self._cached_variables_key: Optional[Tuple[Any, ...]] = None
+    self._cached_variables: Tuple[weight_sync.TensorMetadata, ...] = ()
     if state is not None:
       self.bind(state)
 
@@ -1019,10 +1058,42 @@ class RaidenSynchronizer(weight_sync.WeightSynchronizer):
     # differently (trainer `['base'][...]` vs rollout `['model'][...]`, plus
     # the nnx `.value` leaf). `_param_key` already normalises both away, so
     # canonicalising here is what makes the manifests line up.
-    variables = tuple(
-        _tensor_metadata(_param_key(name), arr, idx)
-        for idx, (name, arr) in enumerate(zip(self.names, self.arrays))
+    def _var_sig(name: str, arr: Any) -> Tuple[Any, ...]:
+      sharding = getattr(arr, "sharding", None)
+      try:
+        hash(sharding)
+        sharding_key = sharding
+      except TypeError:
+        sharding_key = id(sharding)
+      return (
+          _param_key(name),
+          tuple(arr.shape),
+          int(arr.dtype.itemsize),
+          sharding_key,
+      )
+
+    variables_key = tuple(
+        _var_sig(name, arr) for name, arr in zip(self.names, self.arrays)
     )
+    if not variables_key:
+      variables = ()
+    elif (
+        self._cached_variables_key == variables_key
+        and len(self._cached_variables) == len(variables_key)
+    ):
+      variables = self._cached_variables
+    else:
+      layout_cache: dict[
+          Any, Tuple[Tuple[int, ...], Tuple[str, ...], Tuple[int, ...]]
+      ] = {}
+      variables = tuple(
+          _tensor_metadata(
+              _param_key(name), arr, idx, layout_cache=layout_cache
+          )
+          for idx, (name, arr) in enumerate(zip(self.names, self.arrays))
+      )
+      self._cached_variables_key = variables_key
+      self._cached_variables = variables
     if self._is_proxy:
       shards = tuple(self._ips)
       control_addr = (

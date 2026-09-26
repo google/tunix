@@ -708,6 +708,34 @@ class RaidenSynchronizerTest(absltest.TestCase):
         ),
     )
 
+  def test_work_unit_metadata_caches_variables_across_rebinds(self):
+    sync = raiden_synchronizer.RaidenSynchronizer("trainer", self._state())
+    with mock.patch.object(
+        raiden_synchronizer,
+        "_tensor_metadata",
+        wraps=raiden_synchronizer._tensor_metadata,
+    ) as spy_tensor_meta:
+      md1 = sync.work_unit_metadata()
+      self.assertEqual(spy_tensor_meta.call_count, 2)
+
+      sync.release_buffers()
+      sync.bind({
+          "w1": jnp.zeros((2, 4), jnp.float32),
+          "w2": jnp.ones(3, dtype=jnp.float32),
+      })
+      md2 = sync.work_unit_metadata()
+      self.assertEqual(spy_tensor_meta.call_count, 2)
+      self.assertIs(md1.variables, md2.variables)
+
+      # Changing tensor shape invalidates the cached manifest.
+      sync.bind({
+          "w1": jnp.zeros((4, 4), jnp.float32),
+          "w2": jnp.ones(3, dtype=jnp.float32),
+      })
+      md3 = sync.work_unit_metadata()
+      self.assertEqual(spy_tensor_meta.call_count, 4)
+      self.assertEqual(md3.variables[0].shape, (4, 4))
+
 
 if __name__ == "__main__":
   absltest.main()
