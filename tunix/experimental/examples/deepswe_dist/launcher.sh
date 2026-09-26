@@ -34,6 +34,7 @@ TOKENIZER_PATH=${TOKENIZER_PATH:-"${MODEL_DIR}"}
 
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-4096}
 MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-1024}
+TRAIN_MAX_RESPONSE_LENGTH=${TRAIN_MAX_RESPONSE_LENGTH:-$MAX_RESPONSE_LENGTH}
 TOP_K=${TOP_K:-0}
 VLLM_SEED=${VLLM_SEED:-42}
 VLLM_HBM_UTILIZATION=${VLLM_HBM_UTILIZATION:-0.6}
@@ -225,6 +226,7 @@ echo "  max steps:      ${MAX_STEPS}"
 echo "  max turns:      ${MAX_TURNS}"
 echo "  prompt length:  ${MAX_PROMPT_LENGTH}"
 echo "  response len:   ${MAX_RESPONSE_LENGTH}"
+echo "  train response: ${TRAIN_MAX_RESPONSE_LENGTH}"
 echo "  max seq token:  ${MAX_SEQ_TOKEN_PER_TPU:-<unset>}"
 echo "  max segments:   ${MAX_SEGMENTS_PER_PACKED_ROW:-<unset>}"
 echo "  learning rate:  ${LEARNING_RATE}"
@@ -266,7 +268,7 @@ echo "Launching trainer node..."
     --model_name="$MODEL_NAME"
     --tokenizer_path="$TOKENIZER_PATH"
     --max_prompt_length="$MAX_PROMPT_LENGTH"
-    --max_response_length="$MAX_RESPONSE_LENGTH"
+    --max_response_length="$TRAIN_MAX_RESPONSE_LENGTH"
     --mini_batch_size="$MINI_BATCH_SIZE"
     --num_generations="$NUM_GENERATIONS"
     --train_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
@@ -384,6 +386,7 @@ echo "Launching CPU orchestrator..."
     --max_turns="$MAX_TURNS"
     --max_prompt_length="$MAX_PROMPT_LENGTH"
     --max_response_length="$MAX_RESPONSE_LENGTH"
+    --train_max_response_length="$TRAIN_MAX_RESPONSE_LENGTH"
     --top_k="$TOP_K"
     --action_compat_mode="$ACTION_COMPAT_MODE"
     --episode_timeout_secs="$EPISODE_TIMEOUT_SECS"

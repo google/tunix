@@ -31,12 +31,19 @@ tokens, 50 turns, RLOO advantages, `sequence-mean-token-scale` loss,
 `epsilon=0.2`, `epsilon_high=0.28`, and AdamW with learning rate `1e-6`,
 `b2=0.99`, and weight decay `0.01`. On the local 2-trainer/2-rollout TPU split,
 `TRAIN_MICRO_BATCH_SIZE=2` gives 64 gradient accumulation steps per update;
-the original 64-trainer-chip recipe uses a microbatch of 8. For a 200-update
-local run, set:
+the original 64-trainer-chip recipe uses a microbatch of 8.
+
+The rollout response budget also defines the 20K serving context used by the
+clean-data evaluation. Set `TRAIN_MAX_RESPONSE_LENGTH=20480` to retain longer
+multi-turn trajectories in a 24K trainer sequence without changing serving;
+the default keeps both budgets equal.
+
+For a 200-update local run, set:
 
 ```bash
 BATCH_SIZE=8 NUM_GENERATIONS=16 MINI_BATCH_SIZE=8 \
 TRAIN_MICRO_BATCH_SIZE=2 MAX_PROMPT_LENGTH=4096 MAX_RESPONSE_LENGTH=16384 \
+TRAIN_MAX_RESPONSE_LENGTH=20480 \
 MAX_TURNS=50 MAX_STEPS=200 WEIGHT_SYNC_MODE=raiden \
 ENV_BACKEND=docker ./tunix/experimental/examples/deepswe_dist/launcher.sh
 ```
