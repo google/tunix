@@ -16,12 +16,14 @@
 # This workflow will build tunix python package and run tests.
 
 name: Tunix Package Tests
+run-name: "[${{ github.base_ref || github.ref_name }}] ${{ github.workflow }} — ${{ github.event.pull_request.title || github.sha }}"
 
-# Trigger the workflow only when code is merging to the 'main' branch.
+# Trigger the workflow when code is merging to 'main' or 'atwigg/mlperf'.
 on:
   pull_request: # Automatically trigger on pull requests affecting this file
     branches:
       - main
+      - atwigg/mlperf
     types: [opened, synchronize, reopened, labeled]
     paths-ignore:
       - '**.md'
@@ -33,10 +35,13 @@ on:
     - cron:  '0 */16 * * *'
 
 concurrency:
-  # Dedup pull requests (canceling previous runs of the same workflow for same PR), and scheduled runs but nothing else
+  # Dedup pull requests (canceling previous runs of the same workflow for same PR), and scheduled runs but nothing else.
+  # Ignore non-'ready-to-submit' label events (e.g. 'cla: yes') so they fall back to github.run_id and do not cancel active runs.
   group: >
     ${{
-      github.event_name == 'pull_request' && format('{0}-pr-{1}', github.workflow, github.event.pull_request.number) ||
+      github.event_name == 'pull_request' &&
+      (github.event.action != 'labeled' || github.event.label.name == 'ready-to-submit') &&
+      format('{0}-pr-{1}', github.workflow, github.event.pull_request.number) ||
       github.event_name == 'schedule' && format('{0}-schedule', github.workflow) ||
       github.run_id
     }}
@@ -47,6 +52,7 @@ permissions:
 jobs:
   build_tunix_package:
     name: Build tunix package
+    if: ${{ github.event.action != 'labeled' || github.event.label.name == 'ready-to-submit' }}
     uses: ./.github/workflows/build_package.yml
 
   tunix_cpu_unit_tests:
@@ -60,7 +66,17 @@ jobs:
 
   tunix_tpu_unit_tests:
     needs: build_tunix_package
-    if: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ready-to-submit') }}
+    # Run TPU unit tests on scheduled/manual runs, Copybara PRs, same-repo atwigg/mlperf PRs,
+    # or when a maintainer applies the 'ready-to-submit' label.
+    if: >-
+      ${{
+        github.event_name != 'pull_request' ||
+        github.event.pull_request.user.login == 'copybara-service[bot]' ||
+        (github.base_ref == 'atwigg/mlperf' &&
+         github.event.pull_request.head.repo.full_name == github.repository) ||
+        (github.event.action == 'labeled' &&
+         github.event.label.name == 'ready-to-submit')
+      }}
     uses: ./.github/workflows/tpu-tests.yml
     secrets:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
