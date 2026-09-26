@@ -583,6 +583,80 @@ def compute_per_token_logps(
     return per_token_logps
 
 
+@flax.struct.dataclass
+class PearsonMetric(utils.WeightedMetric):
+  """WeightedMetric subclass for exact parallel Pearson correlation via Chan's formula.
+
+  Packs `(c_xy, c_xx, c_yy)` into `unreduced_sum` (shape `(3,)`) and
+  `(count, mean_x, mean_y)` into `denominator` (shape `(3,)`).
+  """
+
+  def compute(self) -> jax.Array:
+    """Computes single-microbatch Pearson correlation."""
+    c_xy = self.unreduced_sum[0]
+    c_xx = self.unreduced_sum[1]
+    c_yy = self.unreduced_sum[2]
+    denom = jnp.sqrt(jnp.maximum(c_xx * c_yy, 0.0))
+    if self.eps is not None:
+      denom = denom + self.eps
+    if self.min_denom is not None:
+      denom = jnp.maximum(denom, self.min_denom)
+    safe_denom = jnp.where(denom == 0, 1.0, denom)
+    return jnp.where(denom == 0, 0.0, c_xy / safe_denom)
+
+  @classmethod
+  def reduce(cls, values: Iterable["PearsonMetric"]) -> float:
+    """Combines per-microbatch statistics via Chan's parallel covariance/variance formula."""
+    values = list(values)
+    if not values:
+      return 0.0
+    eps = values[0].eps
+    min_denom = values[0].min_denom
+    sums = np.asarray(
+        [np.asarray(v.unreduced_sum, dtype=np.float64) for v in values],
+        dtype=np.float64,
+    )
+    denoms = np.asarray(
+        [np.asarray(v.denominator, dtype=np.float64) for v in values],
+        dtype=np.float64,
+    )
+    c_xys, c_xxs, c_yys = sums[:, 0], sums[:, 1], sums[:, 2]
+    ns, mean_xs, mean_ys = denoms[:, 0], denoms[:, 1], denoms[:, 2]
+    total_n = float(ns.sum())
+    if total_n <= 0:
+      return 0.0
+    global_mean_x = float((ns * mean_xs).sum() / total_n)
+    global_mean_y = float((ns * mean_ys).sum() / total_n)
+    dx = mean_xs - global_mean_x
+    dy = mean_ys - global_mean_y
+    total_c_xy = float(c_xys.sum() + (ns * dx * dy).sum())
+    total_c_xx = float(c_xxs.sum() + (ns * dx * dx).sum())
+    total_c_yy = float(c_yys.sum() + (ns * dy * dy).sum())
+    denominator = float(np.sqrt(max(total_c_xx * total_c_yy, 0.0)))
+    if eps is not None:
+      denominator += eps
+    if min_denom is not None:
+      denominator = max(denominator, min_denom)
+    return total_c_xy / denominator if denominator else 0.0
+
+
+def make_pearson_metric(
+    c_xy: jax.Array,
+    c_xx: jax.Array,
+    c_yy: jax.Array,
+    count: jax.Array,
+    mean_x: jax.Array,
+    mean_y: jax.Array,
+    min_denom: float = 1e-12,
+) -> PearsonMetric:
+  """Packs Chan's parallel covariance/variance sufficient statistics into a PearsonMetric."""
+  return PearsonMetric(
+      unreduced_sum=jnp.stack([c_xy, c_xx, c_yy]),
+      denominator=jnp.stack([count, mean_x, mean_y]),
+      min_denom=min_denom,
+  )
+
+
 def sampler_trainer_agreement(
     rollout_per_token_logps: ArrayLike | None,
     trainer_per_token_logps: ArrayLike | None,
@@ -657,7 +731,8 @@ def sampler_trainer_agreement(
   # statistic, inflating the per-position mean.
   mask = jnp.asarray(completion_mask, dtype=jnp.bool_)
   mask_f = mask.astype(jnp.float32)
-  mask_sum = jnp.maximum(mask_f.sum(), 1.0)
+  raw_mask_sum = mask_f.sum()
+  mask_sum = jnp.maximum(raw_mask_sum, 1.0)
   diff = jnp.abs(rollout_per_token_logps - trainer_per_token_logps)
   diff_mean = float((diff * mask_f).sum() / mask_sum)
   diff_max = float(jnp.where(mask, diff, 0.0).max())
@@ -678,10 +753,20 @@ def sampler_trainer_agreement(
   tp_mean = (tp_flat * mf).sum() / mask_sum
   rp_d = (rp_flat - rp_mean) * mf
   tp_d = (tp_flat - tp_mean) * mf
-  cov = (rp_d * tp_d).sum() / mask_sum
-  rp_var = (rp_d * rp_d).sum() / mask_sum
-  tp_var = (tp_d * tp_d).sum() / mask_sum
-  pearson = float(cov / jnp.sqrt(jnp.maximum(rp_var * tp_var, 1e-12)))
+  c_xy = (rp_d * tp_d).sum()
+  c_xx = (rp_d * rp_d).sum()
+  c_yy = (tp_d * tp_d).sum()
+  pearson = float(
+      make_pearson_metric(
+          c_xy=c_xy,
+          c_xx=c_xx,
+          c_yy=c_yy,
+          count=raw_mask_sum,
+          mean_x=rp_mean,
+          mean_y=tp_mean,
+          min_denom=1e-12,
+      ).compute()
+  )
   metrics.update({
       "sampler_trainer/logp_diff_mean": (diff_mean, np.mean),
       "sampler_trainer/logp_diff_max": (diff_max, np.max),
@@ -1438,11 +1523,10 @@ def global_weighted_mean(values: Iterable[utils.WeightedMetric]) -> float:
   Sums numerators and denominators before dividing (token-weighted / global),
   as opposed to `mean_of_means` which averages per-micro-batch means. Equal to
   `mean_of_means` when the denominator is constant across micro-batches; they
-  diverge otherwise (e.g. sequence packing).
+  diverge otherwise (e.g. sequence packing). Also supports Chan's parallel
+  covariance/variance reduction for Pearson correlation metrics.
   """
-  total_sum = sum(float(v.unreduced_sum) for v in values)
-  total_denom = sum(float(v.denominator) for v in values)
-  return total_sum / total_denom if total_denom != 0 else 0.0
+  return utils.weighted_metric_mean(values)
 
 
 def compute_entropy_from_logits(logits: jax.Array) -> jax.Array:
