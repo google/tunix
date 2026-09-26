@@ -129,6 +129,7 @@ maxtext_trainer_flags() {
     ${SKIP_STEP_ON_NAN:+--maxtext_skip_step_on_nan=${SKIP_STEP_ON_NAN}} \
     ${SKIP_STEP_INTERVAL:+--maxtext_skip_step_interval=${SKIP_STEP_INTERVAL}} \
     ${SKIP_STEP_SCALING_FACTOR:+--maxtext_skip_step_scaling_factor=${SKIP_STEP_SCALING_FACTOR}} \
+    ${FP32_MASTER_WEIGHTS:+--maxtext_fp32_master_weights=${FP32_MASTER_WEIGHTS}} \
     ${profiler_flags} \
   "
 }

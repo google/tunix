@@ -591,6 +591,73 @@ class MaxTextUtilsTest(absltest.TestCase):
     # pyconfig keeps the last occurrence of a key.
     self.assertGreater(argv.index("adam_b2=0.98"), argv.index("adam_b2=0.999"))
 
+  def test_fp32_master_weights_default_off_leaves_mu_dtype_unset(self):
+    default_argv = self._build_config_argv()
+    off_argv = self._build_config_argv(fp32_master_weights=False)
+    self.assertEqual(off_argv, default_argv)
+    self.assertFalse(any(arg.startswith("mu_dtype=") for arg in default_argv))
+    self.assertIn("weight_dtype=bfloat16", default_argv)
+
+  def test_fp32_master_weights_sets_mu_dtype_float32_only(self):
+    default_argv = self._build_config_argv()
+    argv = self._build_config_argv(fp32_master_weights=True)
+    self.assertIn("mu_dtype=float32", argv)
+    # Weights stay bf16: weight sync and the rollout see the same dtypes.
+    self.assertIn("weight_dtype=bfloat16", argv)
+    self.assertIn("grad_dtype=float32", argv)
+    self.assertEqual([a for a in argv if a != "mu_dtype=float32"], default_argv)
+
+  def test_maxtext_extra_flags_override_fp32_master_mu_dtype(self):
+    with mock.patch.dict("os.environ", {"MAXTEXT_EXTRA_FLAGS": "mu_dtype=bfloat16"}):
+      argv = self._build_config_argv(fp32_master_weights=True)
+    self.assertGreater(argv.index("mu_dtype=bfloat16"), argv.index("mu_dtype=float32"))
+
+  def test_check_fp32_master_weights_config(self):
+    ok = mock.MagicMock(opt_type="adamw", skip_step_on_spikes=True, grad_dtype="float32")
+    maxtext_utils.check_fp32_master_weights_config(ok)
+    with self.assertRaisesRegex(ValueError, "opt_type=adamw"):
+      maxtext_utils.check_fp32_master_weights_config(
+          mock.MagicMock(opt_type="sgd", skip_step_on_spikes=False, grad_dtype="float32")
+      )
+    with self.assertRaisesRegex(ValueError, "grad_dtype=float32"):
+      maxtext_utils.check_fp32_master_weights_config(
+          mock.MagicMock(opt_type="adamw", skip_step_on_spikes=True, grad_dtype="bfloat16")
+      )
+    # Without the skip wrapper's lax.cond, bf16 grads are fine.
+    maxtext_utils.check_fp32_master_weights_config(
+        mock.MagicMock(opt_type="adamw", skip_step_on_spikes=False, grad_dtype="bfloat16")
+    )
+
+  def test_create_maxtext_engine_default_off_does_not_install(self):
+    mock_engine_module = mock.MagicMock()
+    mock_engine_module.MaxTextTrainingEngine.return_value.model = mock.MagicMock()
+    mesh = mock.MagicMock()
+    with mock.patch.object(
+        maxtext_utils,
+        "maxtext_modules",
+        return_value=(mock.MagicMock(), mock_engine_module, mock.MagicMock()),
+    ), self.assertLogs(level="INFO") as logs:
+      maxtext_utils.create_maxtext_engine(
+          mock.MagicMock(), mesh, wrap_with_tunix_adapter=False, log_shapes=False
+      )
+    mock_engine_module.MaxTextTrainingEngine.assert_called_once()
+    self.assertIn("fp32 master weights: OFF", "\n".join(logs.output))
+
+  def test_create_maxtext_engine_fp32_master_rejects_non_adamw(self):
+    mock_engine_module = mock.MagicMock()
+    with mock.patch.object(
+        maxtext_utils,
+        "maxtext_modules",
+        return_value=(mock.MagicMock(), mock_engine_module, mock.MagicMock()),
+    ):
+      with self.assertRaisesRegex(ValueError, "opt_type=adamw"):
+        maxtext_utils.create_maxtext_engine(
+            mock.MagicMock(opt_type="muon"),
+            mock.MagicMock(),
+            fp32_master_weights=True,
+        )
+    mock_engine_module.MaxTextTrainingEngine.assert_not_called()
+
   def test_attention_default_dot_product(self):
     argv = self._build_config_argv()
     self.assertIn("attention=dot_product", argv)

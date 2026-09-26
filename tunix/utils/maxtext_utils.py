@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import logging
 import os
@@ -147,8 +148,14 @@ def build_maxtext_config(
     skip_step_on_nan: bool = True,
     skip_step_interval: int = 128,
     skip_step_scaling_factor: float = 6.0,
+    fp32_master_weights: bool = False,
 ) -> Any:
-  """Builds the MaxText HyperParameters the training engine runs on."""
+  """Builds the MaxText HyperParameters the training engine runs on.
+
+  `fp32_master_weights=True` only adds `mu_dtype=float32` here (Adam's first
+  moment would otherwise inherit weight_dtype=bfloat16); the master copies
+  themselves are installed by `create_maxtext_engine(fp32_master_weights=True)`.
+  """
   pyconfig, _, _ = maxtext_modules()
 
   # Backward compatibility: if rollout_mesh_tp was provided, default kv_tp_size and moe_mlp_tp_size
@@ -443,6 +450,10 @@ def build_maxtext_config(
       "dtype=bfloat16",
       "weight_dtype=bfloat16",
       "grad_dtype=float32",
+      # With fp32 master weights Adam runs on the fp32 master, so nu is fp32
+      # already; mu is set explicitly because MaxText's mu_dtype defaults to
+      # weight_dtype (bfloat16). MAXTEXT_EXTRA_FLAGS, appended later, still wins.
+      *(["mu_dtype=float32"] if fp32_master_weights else []),
       "enable_tensorboard=False",
       "record_internal_nn_metrics=False",
       "init_weights_seed=42",
@@ -593,23 +604,92 @@ def log_param_shapes(model: Any) -> None:
   logging.info("MaxText model has %d parameter arrays.", len(shapes))
 
 
+def check_fp32_master_weights_config(maxtext_config: Any) -> None:
+  """Raises if `maxtext_config` cannot carry fp32 master weights.
+
+  The master is installed around MaxText's `optax.adamw`, so any other
+  opt_type would silently train without it. With skip_step_on_spikes, MaxText's
+  skip branch returns `zeros_like(grads)` from a `lax.cond` whose other branch
+  returns the wrapper's fp32 updates, so the gradients must be fp32 too.
+  """
+  opt_type = getattr(maxtext_config, "opt_type", "adamw")
+  if opt_type != "adamw":
+    raise ValueError(
+        f"fp32 master weights support only opt_type=adamw, got opt_type={opt_type!r}."
+    )
+  import numpy as np  # pylint: disable=g-import-not-at-top
+
+  grad_dtype = getattr(maxtext_config, "grad_dtype", "float32")
+  if getattr(maxtext_config, "skip_step_on_spikes", False) and np.dtype(grad_dtype) != np.float32:
+    raise ValueError(
+        "fp32 master weights with skip_step_on_spikes need grad_dtype=float32, got"
+        f" grad_dtype={grad_dtype!r}."
+    )
+
+
 def create_maxtext_engine(
     maxtext_config: Any,
     mesh: Any,
     tokenizer_pad_id: int = 0,
     wrap_with_tunix_adapter: bool = True,
     log_shapes: bool = True,
+    fp32_master_weights: bool = False,
 ) -> Any:
-  """Builds and initializes a MaxTextTrainingEngine within the given mesh."""
+  """Builds and initializes a MaxTextTrainingEngine within the given mesh.
+
+  Args:
+    maxtext_config: MaxText HyperParameters, e.g. from `build_maxtext_config`.
+    mesh: the device mesh to build the engine on.
+    tokenizer_pad_id: pad id the Tunix adapter masks with.
+    wrap_with_tunix_adapter: whether the model is wrapped in TunixMaxTextAdapter.
+    log_shapes: whether to log a few parameter shapes.
+    fp32_master_weights: keep an fp32 master copy of every bf16 parameter in
+      the optimizer state and run AdamW on it, while the model (and so weight
+      sync) keeps its bf16 weights. Installed into MaxText's own get_optimizer
+      for the duration of construction, inside skip_step_on_spikes and the
+      trainable-parameter mask; fp32 parameters are updated exactly as without
+      it and frozen parameters get no master. Raises if it could not be put in
+      place.
+
+  Returns:
+    The constructed engine.
+  """
   _, maxtext_engine, _ = maxtext_modules()
 
-  with mesh:
+  install_scope: Any = contextlib.nullcontext()
+  if fp32_master_weights:
+    from tunix.utils import master_weights as master_weights_lib  # pylint: disable=g-import-not-at-top
+
+    check_fp32_master_weights_config(maxtext_config)
+    install_scope = master_weights_lib.install_in_maxtext_get_optimizer()
+
+  with mesh, install_scope as install_record:
     engine = maxtext_engine.MaxTextTrainingEngine(
         maxtext_config,
         mesh=mesh,
         wrap_with_tunix_adapter=wrap_with_tunix_adapter,
         tokenizer_pad_id=tokenizer_pad_id,
     )
+
+  if fp32_master_weights:
+    opt_state = engine.optimizer.opt_state
+    stats = master_weights_lib.verify_installed(install_record, opt_state)
+    mu_dtypes, nu_dtypes = master_weights_lib.adam_moment_dtypes(opt_state)
+    logging.info(master_weights_lib.summary_line(stats, mu_dtypes, nu_dtypes))
+    if mu_dtypes != ("float32",):
+      logging.warning(
+          "fp32 master weights: Adam mu dtype is %s, not float32 (mu_dtype=%r);"
+          " the first moment is rounded every step.",
+          "/".join(mu_dtypes) or "none",
+          install_record.adamw_kwargs.get("mu_dtype"),
+      )
+    if stats.mastered == 0:
+      logging.warning(
+          "fp32 master weights: no parameter is narrower than float32, so the"
+          " wrapper is a no-op."
+      )
+  else:
+    logging.info("fp32 master weights: OFF")
 
   model_type = type(engine.model).__name__
   logging.info(

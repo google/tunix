@@ -192,6 +192,16 @@ export WARMUP_STEPS_FRACTION=0.0
 export LEARNING_RATE_FINAL_FRACTION=1.0
 export SKIP_STEP_ON_SPIKES="${SKIP_STEP_ON_SPIKES:-false}"
 export SKIP_STEP_ON_NAN="${SKIP_STEP_ON_NAN:-true}"
+# fp32 master weights for the bf16 trainer weights (maxtext backend): AdamW runs
+# on an fp32 copy held in the optimizer state, with mu_dtype=float32, so updates
+# far below one bf16 ulp still accumulate. The model, weight sync and rollout
+# stay bf16; fp32 params and the frozen router are unaffected. Costs +8 B of
+# optimizer state per trainable bf16 param (4 B master, +2 B each as mu and nu
+# go bf16->fp32): ~280 GB for 35B, ~4.3 GB/chip over the 64-chip fsdp x tp
+# trainer if fully sharded; not yet measured.
+# Empty by default: no trainer flag is emitted, so images without the new
+# --maxtext_fp32_master_weights argument still parse the command (strict argparse).
+export FP32_MASTER_WEIGHTS="${FP32_MASTER_WEIGHTS:-}"
 
 # Architecture & Rematerialization
 export REMAT_POLICY="full"

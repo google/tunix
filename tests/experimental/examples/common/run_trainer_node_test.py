@@ -1160,6 +1160,54 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     self.assertEqual(args.maxtext_skip_step_interval, 64)
     self.assertEqual(args.maxtext_skip_step_scaling_factor, 4.5)
 
+  def test_parse_args_maxtext_fp32_master_weights(self):
+    self.assertFalse(run_trainer_node._parse_args([]).maxtext_fp32_master_weights)
+    self.assertTrue(
+        run_trainer_node._parse_args(
+            ["--maxtext_fp32_master_weights"]
+        ).maxtext_fp32_master_weights
+    )
+    self.assertTrue(
+        run_trainer_node._parse_args(
+            ["--maxtext_fp32_master_weights=true"]
+        ).maxtext_fp32_master_weights
+    )
+    self.assertFalse(
+        run_trainer_node._parse_args(
+            ["--maxtext_fp32_master_weights=false"]
+        ).maxtext_fp32_master_weights
+    )
+
+  @mock.patch.object(
+      run_trainer_node.maxtext_utils, "get_tokenizer_pad_id", return_value=0
+  )
+  @mock.patch.object(run_trainer_node.maxtext_utils, "create_maxtext_mesh")
+  @mock.patch.object(run_trainer_node.maxtext_utils, "create_maxtext_engine")
+  @mock.patch.object(
+      run_trainer_node.maxtext_utils, "build_maxtext_config", autospec=True
+  )
+  def test_create_maxtext_trainer_factory_plumbs_fp32_master_weights(
+      self, mock_build_cfg, mock_create_engine, mock_create_mesh, mock_get_pad_id
+  ):
+    for argv, expected in (
+        ([], False),
+        (["--maxtext_fp32_master_weights=true"], True),
+    ):
+      mock_build_cfg.reset_mock()
+      mock_create_engine.reset_mock()
+      args = run_trainer_node._parse_args(argv)
+      factory, _ = run_trainer_node._create_maxtext_trainer_factory(args)
+      self.assertIs(
+          mock_build_cfg.call_args.kwargs.get("fp32_master_weights"), expected
+      )
+      mock_create_engine.assert_not_called()
+      factory()
+      mock_create_engine.assert_called_once()
+      self.assertIs(
+          mock_create_engine.call_args.kwargs.get("fp32_master_weights"),
+          expected,
+      )
+
   def test_create_mesh_validates_device_count(self):
     args = mock.MagicMock(mesh_fsdp=2, mesh_tp=2)
     with mock.patch.object(jax, "device_count", return_value=2):

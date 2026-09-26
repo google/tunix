@@ -478,6 +478,23 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="Scaling factor for MaxText skip_step_on_spikes.",
   )
   parser.add_argument(
+      "--maxtext_fp32_master_weights",
+      dest="maxtext_fp32_master_weights",
+      type=_str2bool,
+      default=False,
+      nargs="?",
+      const=True,
+      help=(
+          "MaxText backend only. Keep an fp32 master copy of every bf16"
+          " parameter in the optimizer state and run AdamW (with"
+          " mu_dtype=float32) on it; the model and weight sync stay bf16, fp32"
+          " parameters are updated exactly as without it, and frozen parameters"
+          " get no master. Costs 8 bytes per trainable bf16 parameter of"
+          " optimizer state (4 B master, +2 B each for mu and nu, which become"
+          " fp32). Requires the adamw optimizer."
+      ),
+  )
+  parser.add_argument(
       "--prefuse_moe_weights",
       type=_str2bool,
       default=False,
@@ -752,6 +769,7 @@ def _create_maxtext_trainer_factory(args) -> tuple[Any, Mesh]:
       skip_step_on_nan=args.maxtext_skip_step_on_nan,
       skip_step_interval=args.maxtext_skip_step_interval,
       skip_step_scaling_factor=args.maxtext_skip_step_scaling_factor,
+      fp32_master_weights=args.maxtext_fp32_master_weights,
   )
   logging.info("Creating MaxText device mesh...")
   mesh = maxtext_utils.create_maxtext_mesh(maxtext_config)
@@ -763,6 +781,7 @@ def _create_maxtext_trainer_factory(args) -> tuple[Any, Mesh]:
         mesh=mesh,
         tokenizer_pad_id=pad_id,
         wrap_with_tunix_adapter=True,
+        fp32_master_weights=args.maxtext_fp32_master_weights,
     )
 
   return _factory, mesh
