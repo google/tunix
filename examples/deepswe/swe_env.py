@@ -250,12 +250,14 @@ class SWEEnv(BaseTaskEnv):
         self.env.runtime.copy_to_container(
             str(wheel), "/tmp/chardet-5.2.0-py3-none-any.whl"
         )
-        _, exit_code = self.env.runtime.run(
+        output, exit_code = self.env.runtime.run(
             "uv pip install --offline --no-index --python /root/.venv/bin/python "
             "/tmp/chardet-5.2.0-py3-none-any.whl"
         )
-        if exit_code != 0:
-          raise RuntimeError("Failed to install chardet for R2E-Gym file_editor")
+        if str(exit_code) != "0":
+          raise RuntimeError(
+              f"Failed to install chardet for R2E-Gym file_editor: {output}"
+          )
     elif self.scaffold == "sweagent":
       self.env.add_commands(SWEAGENT_COMMAND_FILES)
 
