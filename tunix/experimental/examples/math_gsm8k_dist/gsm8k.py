@@ -192,7 +192,11 @@ class GSM8KAgent(base_agent.ConversationAgentBase):
   name = GSM8K_AGENT_NAME
 
   def __init__(self):
-    super().__init__("")
+    super().__init__(
+        "You are a helpful math assistant. Solve the user's math problem "
+        "step by step. Keep your thinking concise inside <think>...</think> "
+        "tags, and put your final numerical answer inside \\boxed{}."
+    )
 
   def update_from_model(self, response: str, **kwargs) -> agent_types.Action:
     del kwargs
