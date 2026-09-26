@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from pathlib import Path
 import time
 from typing import Any, Optional, cast
 
@@ -241,6 +242,20 @@ class SWEEnv(BaseTaskEnv):
     )
     if self.scaffold == "r2egym":
       self.env.add_commands(R2EGYM_COMMAND_FILES)
+      if self.backend == "docker":
+        # R2E-Gym tries to fetch chardet from PyPI inside each task container.
+        # These Docker containers have no DNS, so file_editor cannot start.
+        # Install a pinned Python 3.8-compatible wheel from the host offline.
+        wheel = Path(__file__).with_name("vendor") / "chardet-5.2.0-py3-none-any.whl"
+        self.env.runtime.copy_to_container(
+            str(wheel), "/tmp/chardet-5.2.0-py3-none-any.whl"
+        )
+        _, exit_code = self.env.runtime.run(
+            "uv pip install --offline --no-index --python /root/.venv/bin/python "
+            "/tmp/chardet-5.2.0-py3-none-any.whl"
+        )
+        if exit_code != 0:
+          raise RuntimeError("Failed to install chardet for R2E-Gym file_editor")
     elif self.scaffold == "sweagent":
       self.env.add_commands(SWEAGENT_COMMAND_FILES)
 

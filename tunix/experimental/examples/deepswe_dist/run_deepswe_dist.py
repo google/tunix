@@ -112,6 +112,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--temperature", type=float, default=1.0)
   parser.add_argument("--top_p", type=float, default=1.0)
   parser.add_argument("--top_k", type=int, default=-1)
+  parser.add_argument("--action_compat_mode", type=str, default="q4_r2egym_xml_v2")
+  parser.add_argument("--episode_timeout_secs", type=int, default=4800)
   parser.add_argument("--beta", type=float, default=0.0)
   parser.add_argument("--epsilon", type=float, default=0.2)
   parser.add_argument("--epsilon_high", type=float, default=0.28)
@@ -386,6 +388,8 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           temperature=args.temperature,
           top_p=args.top_p,
           top_k=None if args.top_k < 0 else args.top_k,
+          action_compat_mode=args.action_compat_mode,
+          episode_timeout_secs=args.episode_timeout_secs,
           step_timeout_secs=args.step_timeout_secs,
           reward_timeout_secs=args.reward_timeout_secs,
           env_backend=args.env_backend,

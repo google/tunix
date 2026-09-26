@@ -194,6 +194,8 @@ def build_prompt_item(
     temperature: float,
     top_p: float | None,
     top_k: int | None,
+    action_compat_mode: str,
+    episode_timeout_secs: int,
     step_timeout_secs: int,
     reward_timeout_secs: int,
     env_backend: str,
@@ -215,7 +217,7 @@ def build_prompt_item(
       "scaffold": scaffold,
       "verbose": env_verbose,
   }
-  agent_config = {"scaffold": scaffold}
+  agent_config = {"scaffold": scaffold, "action_compat_mode": action_compat_mode}
   return {
       "prompt": problem,
       "prompt_id": prompt_id,
@@ -233,6 +235,7 @@ def build_prompt_item(
           "problem_statement": problem,
           "env_config": env_config,
           "agent_config": agent_config,
+          "episode_timeout": episode_timeout_secs,
       },
   }
 
@@ -247,6 +250,8 @@ def iter_prompt_items(
     temperature: float,
     top_p: float | None,
     top_k: int | None,
+    action_compat_mode: str,
+    episode_timeout_secs: int,
     step_timeout_secs: int,
     reward_timeout_secs: int,
     env_backend: str,
@@ -268,6 +273,8 @@ def iter_prompt_items(
         temperature=temperature,
         top_p=top_p,
         top_k=top_k,
+        action_compat_mode=action_compat_mode,
+        episode_timeout_secs=episode_timeout_secs,
         step_timeout_secs=step_timeout_secs,
         reward_timeout_secs=reward_timeout_secs,
         env_backend=env_backend,

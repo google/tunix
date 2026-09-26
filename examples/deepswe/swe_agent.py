@@ -7,6 +7,11 @@ from typing import Optional, Union  # Added Union for pytype compatibility
 
 from absl import logging
 
+from examples.deepswe.r2egym_action_compat import ACTION_COMPAT_MODES
+from examples.deepswe.r2egym_action_compat import Q4_R2EGYM_COMPAT_MODE
+from examples.deepswe.r2egym_action_compat import STRICT_XML_MODE
+from examples.deepswe.r2egym_action_compat import canonicalize_r2egym_action
+
 try:
   from examples.deepswe import template
 except ImportError:
@@ -55,7 +60,9 @@ def parse_oai_response(response: Any):
   return thought, action
 
 
-def parse_xml_response(response_text: str) -> tuple[str, Any]:
+def parse_xml_response(
+    response_text: str, *, action_compat_mode: str = STRICT_XML_MODE
+) -> tuple[str, Any]:
   """Extracts:
 
   - thought: everything before the first <function=...> block
@@ -78,8 +85,22 @@ def parse_xml_response(response_text: str) -> tuple[str, Any]:
   thought = thought.strip()
   action = action.strip()
 
+  if action_compat_mode not in ACTION_COMPAT_MODES:
+    raise ValueError(f"Unsupported R2E action compatibility mode: {action_compat_mode}")
+  if action_compat_mode == Q4_R2EGYM_COMPAT_MODE:
+    action, repair_count = canonicalize_r2egym_action(action)
+    if repair_count:
+      logging.info("Q4 R2E action compatibility applied %d repairs", repair_count)
+
   # convert action to Action object
-  action = SWEAction.from_string(action)
+  if action_compat_mode == STRICT_XML_MODE:
+    action = SWEAction.from_string(action)
+  else:
+    try:
+      action = SWEAction.from_string(action)
+    except Exception:
+      logging.warning("Invalid Q4 model action", exc_info=True)
+      action = SWEAction(function_name="", parameters={})
 
   return thought, action
 
@@ -92,9 +113,13 @@ class SWEAgent(ConversationAgentBase):
       use_fn_calling: bool = False,
       format_model_response: bool = False,
       scaffold: str = "r2egym",
+      action_compat_mode: str = STRICT_XML_MODE,
   ):
     self.use_fn_calling = use_fn_calling
     self.format_model_response = format_model_response
+    if action_compat_mode not in ACTION_COMPAT_MODES:
+      raise ValueError(f"Unsupported R2E action compatibility mode: {action_compat_mode}")
+    self.action_compat_mode = action_compat_mode
     assert scaffold in [
         "r2egym",
         "sweagent",
@@ -184,7 +209,9 @@ class SWEAgent(ConversationAgentBase):
     if self.use_fn_calling:
       thought, action = parse_oai_response(response)
     else:
-      thought, action = parse_xml_response(response)
+      thought, action = parse_xml_response(
+          response, action_compat_mode=self.action_compat_mode
+      )
     action_str = action.to_xml_string()
 
     # Update Trajectory
