@@ -53,6 +53,21 @@ from tunix.sft import metrics_logger as metrics_logger_lib
 ProcessContext = runtime_context.ProcessContext
 
 
+def _on_step_end(step: int, result: Any) -> None:
+  logging.info(
+      "<<< DeepSWE step %d finished | train_result=%s", step, result
+  )
+  # Metrax sends each scalar with an explicit W&B step. W&B accumulates those
+  # values until the next step unless the step is explicitly committed.
+  try:
+    import wandb  # pylint: disable=g-import-not-at-top
+
+    if wandb.run is not None:
+      wandb.log({"training_step": step}, step=step, commit=True)
+  except Exception as exc:  # pylint: disable=broad-exception-caught
+    logging.warning("Could not commit W&B metrics for step %d: %s", step, exc)
+
+
 def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser = argparse.ArgumentParser(
       description="Orchestrator V2 DeepSWE distributed GRPO demo."
@@ -429,11 +444,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           step,
           step,
       ),
-      on_step_end=lambda step, result: logging.info(
-          "<<< DeepSWE step %d finished | train_result=%s",
-          step,
-          result,
-      ),
+      on_step_end=_on_step_end,
   )
 
   try:
