@@ -250,13 +250,15 @@ def weighted_metric_mean(values: Iterable[Any]) -> float:
 
   Sums numerators and denominators before dividing, rather than averaging
   per-microbatch means, which would weight microbatches with unequal
-  denominators incorrectly.
+  denominators incorrectly. Subclasses of `WeightedMetric` may define a custom
+  `reduce(cls, values)` classmethod for non-linear sufficient-statistic
+  reductions across microbatches.
 
   Args:
     values: Sequence of unreduced `WeightedMetric` values across microbatches.
 
   Returns:
-    The global weighted mean across all microbatches.
+    The global weighted mean across microbatches.
   """
   values = list(values)
   if not values:
@@ -270,6 +272,12 @@ def weighted_metric_mean(values: Iterable[Any]) -> float:
       value.eps != eps or value.min_denom != min_denom for value in values[1:]
   ):
     raise ValueError("weighted metrics must use consistent denominator bounds")
+
+  reduce_fn: Callable[[Any], float] | None = getattr(
+      type(values[0]), "reduce", None
+  )
+  if reduce_fn is not None:
+    return float(reduce_fn(values))
 
   numerator = sum(float(np.asarray(value.unreduced_sum)) for value in values)
   denominator = sum(float(np.asarray(value.denominator)) for value in values)

@@ -423,7 +423,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   generation_args = datatypes.GenerationArgs(
       temperature=args.temperature,
       top_p=args.top_p,
-      top_k=None if args.top_k < 0 else args.top_k,
+      top_k=0 if args.top_k < 0 else args.top_k,
       return_logprobs=True,
   )
   program = rl_program.StandardRLProgram(

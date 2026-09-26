@@ -191,6 +191,7 @@ def ppo_policy_loss_fn(
       eos_id=eos_id,
       stop_gradient=False,
       return_entropy=return_entropy,
+      temperature=getattr(algo_config, "temperature", None),
       segment_ids=getattr(train_example, "segment_ids", None),
       segment_positions=getattr(train_example, "segment_positions", None),
       chunk_size=kwargs.get("compute_logps_chunk_size", 0),
