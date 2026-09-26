@@ -71,12 +71,6 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--max_steps", type=int, default=1)
   parser.add_argument("--max_prompt_length", type=int, default=4096)
   parser.add_argument("--max_response_length", type=int, default=1024)
-  parser.add_argument(
-      "--train_max_response_length",
-      type=int,
-      default=None,
-      help="Trainer completion budget; defaults to the rollout response budget.",
-  )
   parser.add_argument("--train_micro_batch_size", type=int, default=1)
   parser.add_argument(
       "--max_seq_token_per_tpu",
@@ -217,12 +211,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--init_timeout_s", type=float, default=None)
   parser.add_argument("--stop_workers_on_exit", action="store_true")
   parser.add_argument("--debug", action="store_true")
-  args = parser.parse_args(argv)
-  if args.train_max_response_length is None:
-    args.train_max_response_length = args.max_response_length
-  if args.train_max_response_length <= 0:
-    parser.error("--train_max_response_length must be positive")
-  return args
+  return parser.parse_args(argv)
 
 
 def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
@@ -244,9 +233,9 @@ def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
       max_packed_len=(
           args.max_seq_token_per_tpu
           if args.max_seq_token_per_tpu is not None
-          else args.max_prompt_length + args.train_max_response_length
+          else args.max_prompt_length + args.max_response_length
       ),
-      max_response_length=args.train_max_response_length,
+      max_response_length=args.max_response_length,
   )
 
 
@@ -414,7 +403,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       batch_config=batch_assembly.BatchConfig(
           pad_id=pad_id,
           max_prompt_length=args.max_prompt_length,
-          max_response_length=args.train_max_response_length,
+          max_response_length=args.max_response_length,
           max_seq_token_per_tpu=args.max_seq_token_per_tpu,
           max_segments_per_packed_row=args.max_segments_per_packed_row,
           trainer_fsdp=args.trainer_fsdp,
