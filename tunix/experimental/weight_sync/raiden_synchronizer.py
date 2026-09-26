@@ -20,6 +20,8 @@ import collections
 import dataclasses
 import inspect
 import ipaddress
+import itertools
+import math
 import os
 import re
 import socket
@@ -293,36 +295,44 @@ def _axis_name(axis: Any) -> str:
 
 
 def _devices_per_host(devices: List[Any]) -> int:
-  """Devices sharing one physical host, i.e. Raiden's `num_shards`.
+  """Contiguous devices sharing one physical host, i.e. Raiden's `num_shards`.
 
   The native layer derives `submanager_idx = shard_idx / num_shards` and
-  `slot = shard_idx % num_shards`, so this must be the real per-host device
-  count. Overstate it and every host allocates staging for the whole slice but
-  fills only its own share, leaving the rest of its SetGlobalShardIndices at
-  -1 -- the transfer then completes green while delivering only the shards one
-  host happened to own.
+  `slot = shard_idx % num_shards` across the flattened mesh, so this must be the
+  contiguous same-host run length in `devices`. When a mesh splits a physical
+  host's devices across non-adjacent slices (e.g. `fsdp=32, context=4, expert=2`
+  on TPU v7x where each host's 8 devices appear as two contiguous runs of 4),
+  overstating `num_shards` as 8 causes each 4-device submanager to allocate 8
+  slots and leave 4 slots unbound.
   """
   host_keys = [mesh.device_host_key(d) for d in devices]
-  per_host = collections.Counter(k for k in host_keys if k is not None)
-  per_task = collections.Counter(getattr(d, "task_id", None) for d in devices)
-  del per_task[None]
-  if len(per_task) > len(per_host):
-    per_host = per_task
+  task_keys = [getattr(d, "task_id", None) for d in devices]
+  num_unique_hosts = len({k for k in host_keys if k is not None})
+  num_unique_tasks = len({k for k in task_keys if k is not None})
+  keys = task_keys if num_unique_tasks > num_unique_hosts else host_keys
 
-  if not per_host:
+  run_lengths = [
+      sum(1 for _ in group)
+      for key, group in itertools.groupby(keys)
+      if key is not None
+  ]
+  if not run_lengths:
     logging.warning(
         "no host or task metadata on any of %d device(s); assuming a single"
         " host",
         len(devices),
     )
     return len(devices)
-  counts = set(per_host.values())
+  counts = set(run_lengths)
   if len(counts) > 1:
     # No right answer for a ragged slice; understating only wastes staging,
     # overstating drops another host's shards.
+    per_host = collections.Counter(k for k in keys if k is not None)
     logging.warning(
-        "uneven devices per host %s; using the smallest (%d)",
+        "uneven devices per host %s (contiguous runs %s); using the smallest"
+        " (%d)",
         dict(per_host),
+        run_lengths,
         min(counts),
     )
     return min(counts)
@@ -497,15 +507,42 @@ def _compute_host_subgrid(
     except ValueError:
       pass
   if array_mesh is not None:
+    local_shape: Optional[Tuple[int, ...]] = None
     try:
       if (
           hasattr(array_mesh, "local_mesh")
           and array_mesh.local_mesh is not None
           and hasattr(array_mesh.local_mesh, "devices")
       ):
-        return tuple(array_mesh.local_mesh.devices.shape)
+        local_shape = tuple(array_mesh.local_mesh.devices.shape)
+    except (AttributeError, ValueError, TypeError):
+      local_shape = None
+
+    try:
+      if hasattr(array_mesh, "devices") and array_mesh.devices is not None:
+        flat_devices = list(array_mesh.devices.flat)
+        if flat_devices:
+          devices_per_host = _devices_per_host(flat_devices)
+          if (
+              local_shape is not None
+              and math.prod(local_shape) == devices_per_host
+          ):
+            return local_shape
+          mesh_shape = tuple(int(d) for d in array_mesh.devices.shape)
+          if 0 < devices_per_host <= math.prod(mesh_shape):
+            rem = devices_per_host
+            subgrid = []
+            for dim in reversed(mesh_shape):
+              g = math.gcd(dim, rem)
+              subgrid.append(g)
+              rem //= g
+            subgrid.reverse()
+            if rem == 1:
+              return tuple(subgrid)
     except (AttributeError, ValueError, TypeError):
       pass
+    if local_shape is not None:
+      return local_shape
   return None
 
 

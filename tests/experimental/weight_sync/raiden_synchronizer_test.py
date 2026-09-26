@@ -558,9 +558,30 @@ class RaidenSynchronizerTest(absltest.TestCase):
       v5p_devices = [FakePathwaysDevice(t) for t in (0, 0, 0, 0, 1, 1, 1, 1)]
       self.assertEqual(raiden_synchronizer._devices_per_host(v5p_devices), 4)
 
-      # TPU v7x: 8 devices per host across 2 hosts
+      # TPU v7x: 8 devices per host across 2 hosts (contiguous)
       v7x_devices = [FakePathwaysDevice(t) for t in [0] * 8 + [1] * 8]
       self.assertEqual(raiden_synchronizer._devices_per_host(v7x_devices), 8)
+
+      # TPU v7x-256 with Mesh(1, 1, 32, 4, 2) where each host's 8 devices are
+      # split across two non-adjacent fsdp coordinates (runs of 4).
+      split_v7x_devices = [
+          FakePathwaysDevice(t)
+          for half in range(2)
+          for t in range(16)
+          for _ in range(4)
+      ]
+      self.assertEqual(
+          raiden_synchronizer._devices_per_host(split_v7x_devices), 4
+      )
+      fake_mesh = mock.Mock()
+      fake_mesh.devices = np.array(split_v7x_devices, dtype=object).reshape(
+          1, 1, 16, 4, 2
+      )
+      fake_mesh.local_mesh.devices = fake_mesh.devices
+      self.assertEqual(
+          raiden_synchronizer._compute_host_subgrid(fake_mesh),
+          (1, 1, 1, 2, 2),
+      )
 
   def test_metadata_transport_mode_follows_platform(self):
     fake_wheel = mock.MagicMock()
