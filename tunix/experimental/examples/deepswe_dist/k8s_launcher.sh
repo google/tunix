@@ -156,6 +156,13 @@ export WANDB_ENTITY=${WANDB_ENTITY:-}
 export LOG_DIR=${LOG_DIR:-}
 export TRAJECTORY_LOG_DIR=${TRAJECTORY_LOG_DIR:-}
 export RCP_LOGGING=${RCP_LOGGING:-false}
+export DEFERRED_OFFLINE_EVAL=${DEFERRED_OFFLINE_EVAL:-0}
+export VAL_START_AT=${VAL_START_AT:-}
+export UNSCAN_CHECKPOINT_FOR_EVAL=${UNSCAN_CHECKPOINT_FOR_EVAL:-0}
+export CHECKPOINT_STEP=${CHECKPOINT_STEP:-0}
+export CHECKPOINT_TIMESTAMP_MS=${CHECKPOINT_TIMESTAMP_MS:-}
+export SAMPLES_COUNT=${SAMPLES_COUNT:-0}
+export IS_LAST_CHECKPOINT=${IS_LAST_CHECKPOINT:-false}
 export METRIC_LOGGER_DIR=${METRIC_LOGGER_DIR:-}
 export TARGET_ACCURACY=${TARGET_ACCURACY:-0.69}
 export TRAJECTORY_STORE_ROOT_DIR=${TRAJECTORY_STORE_ROOT_DIR:-${TRAJECTORY_STORE_ROOT:-}}
@@ -400,6 +407,7 @@ start_orchestrator() {
         --tpu_topology="${TRAINER_TPU_SLICE}+${ROLLOUT_TPU_SLICE}" \
         --target_accuracy=${TARGET_ACCURACY} \
         ${METRIC_LOGGER_DIR:+--metric_logger_dir="${METRIC_LOGGER_DIR}"} \
+        ${VAL_START_AT:+--val_start_at=${VAL_START_AT}} \
         ${rcp_arg} \
         ${debug_arg} \
     " \
@@ -466,6 +474,8 @@ start_trainer() {
       ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} \
       ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE} \
       ${CHECKPOINT_ASYNC:+CHECKPOINT_ASYNC=${CHECKPOINT_ASYNC}} \
+      DEFERRED_OFFLINE_EVAL=${DEFERRED_OFFLINE_EVAL:-0} \
+      UNSCAN_CHECKPOINT_FOR_EVAL=${UNSCAN_CHECKPOINT_FOR_EVAL:-0} \
       ${CKPT_D2H_CONCURRENT_GB:+CKPT_D2H_CONCURRENT_GB=${CKPT_D2H_CONCURRENT_GB}} \
       ${TRAINER_MAXTEXT_ATTENTION:+TRAINER_MAXTEXT_ATTENTION=\"${TRAINER_MAXTEXT_ATTENTION}\"} \
       ${raiden_env} \
@@ -950,12 +960,12 @@ start_eval() {
       --worker_container_image="${TUNIX_IMAGE}" \
       --worker_container_port="${eval_port}" \
       --worker_startup_command=" \
+        ${BOOTSTRAP_CMD} \
         PYTHONUNBUFFERED=1 \
         TUNIX_IS_INTERNAL_ENV=false \
         VLLM_TPU_USING_PATHWAYS=1 \
         ${sandbox_env} \
         ${SCAFFOLD:+SCAFFOLD=\"${SCAFFOLD}\"} \
-        ${BOOTSTRAP_CMD} \
         ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} \
         ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE} \
         PREFUSE_MOE_WEIGHTS=${ROLLOUT_PREFUSE_MOE_WEIGHTS} \
@@ -1023,6 +1033,13 @@ start_eval() {
           --use_agent_sandbox=${USE_AGENT_SANDBOX} \
           --max_warmpool_size=${MAX_WARMPOOL_REPLICAS} \
           --output_dir=${output_dir} \
+          --rcp_logging=${RCP_LOGGING} \
+          ${METRIC_LOGGER_DIR:+--metric_logger_dir=\"${METRIC_LOGGER_DIR}\"} \
+          --target_accuracy=${TARGET_ACCURACY} \
+          --checkpoint_step=${CHECKPOINT_STEP:-0} \
+          ${CHECKPOINT_TIMESTAMP_MS:+--checkpoint_timestamp_ms=${CHECKPOINT_TIMESTAMP_MS}} \
+          --samples_count=${SAMPLES_COUNT:-0} \
+          --is_last_checkpoint=${IS_LAST_CHECKPOINT:-false} \
       " \
       | apply_manifest
   done

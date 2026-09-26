@@ -34,6 +34,16 @@ export ROLLOUT_TPU_SLICE="tpuv5:2x2x1"
 export ROLLOUT_MESH_EXPERT="${ROLLOUT_MESH_EXPERT:-4}"
 export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-16}"
 
+# MLPerf RCP Logging & Deferred Offline Evaluation
+export RCP_LOGGING="${RCP_LOGGING:-true}"
+export DEFERRED_OFFLINE_EVAL="${DEFERRED_OFFLINE_EVAL:-1}"
+export UNSCAN_CHECKPOINT_FOR_EVAL="${UNSCAN_CHECKPOINT_FOR_EVAL:-1}"
+export VAL_START_AT="${VAL_START_AT:-}"
+export METRIC_LOGGER_DIR="${METRIC_LOGGER_DIR:-${MAXTEXT_OUTPUT_DIR}/mllog}"
+export CHECKPOINT_MANIFEST_FILE="${CHECKPOINT_MANIFEST_FILE:-${METRIC_LOGGER_DIR}/eval_checkpoints.jsonl}"
+export TARGET_ACCURACY="${TARGET_ACCURACY:-0.69}"
+export CHECKPOINT_MAX_TO_KEEP="${CHECKPOINT_MAX_TO_KEEP:-35}"
+
 # vLLM Rollout Configuration (from paste.googleplex.com/5903655694368768)
 export VLLM_ADDITIONAL_CONFIG='{"sharding":{"sharding_strategy":{"expert_parallelism":4,"tensor_parallelism":1,"enable_dp_attention":true}},"custom_mamba_cache_multiplier":16,"maxtext_config":{"scan_layers":false,"attention":"vllm_rpa","allow_split_physical_axes":true,"use_multimodal":false,"prefuse_moe_weights":true}}'
 

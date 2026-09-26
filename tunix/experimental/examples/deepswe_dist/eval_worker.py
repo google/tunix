@@ -22,6 +22,86 @@ import signal
 from tunix.experimental.examples.deepswe_dist import eval_deepswe
 
 
+def _maybe_install_scanned_checkpoint_restore_hook(path, a) -> None:
+  """Installs a transparent Orbax restore hook if checkpoint has scanned layers while eval uses scan_layers=False."""
+  if getattr(a, "scan_layers", False):
+    return
+  try:
+    import jax  # pylint: disable=g-import-not-at-top
+    import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
+    from maxtext.integration.tunix.weight_mapping import raiden_unscan  # pylint: disable=g-import-not-at-top
+    import orbax.checkpoint as ocp  # pylint: disable=g-import-not-at-top
+
+    orig_restore = ocp.Checkpointer.restore
+    if getattr(orig_restore, "_patched_unscan_by_tunix", False):
+      return
+
+    def _patched_restore(self, directory, *args, **kwargs):
+      item = kwargs.get("item")
+      try:
+        meta = self.metadata(directory)
+        tree_meta = getattr(getattr(meta, "item_metadata", None), "tree", None)
+      except Exception:  # pylint: disable=broad-exception-caught
+        tree_meta = None
+      if isinstance(tree_meta, dict) and isinstance(item, dict):
+        root_meta = tree_meta.get("base", tree_meta)
+        dec_meta = (
+            root_meta.get("decoder", {}) if isinstance(root_meta, dict) else {}
+        )
+        root_item = item.get("base", item)
+        dec_item = (
+            root_item.get("decoder", {}) if isinstance(root_item, dict) else {}
+        )
+        if (
+            isinstance(dec_meta, dict)
+            and "layers" in dec_meta
+            and "layers_0" not in dec_meta
+            and isinstance(dec_item, dict)
+            and "layers_0" in dec_item
+        ):
+          logging.info(
+              "Detected scanned checkpoint at %s with unscanned target; "
+              "restoring raw tree and applying raiden_unscan.unscan_layers.",
+              directory,
+          )
+          raw_restored = orig_restore(self, directory)
+          num_layers = sum(
+              1 for k in dec_item.keys() if str(k).startswith("layers_")
+          )
+          cycle_interval = 4 if "qwen3" in str(a.model_name).lower() else 1
+          raw_dec_layers = (
+              raw_restored.get("base", raw_restored)
+              .get("decoder", {})
+              .get("layers", {})
+          )
+          if isinstance(raw_dec_layers, dict) and not any(
+              str(k).startswith("layer_") for k in raw_dec_layers.keys()
+          ):
+            cycle_interval = 1
+          unscanned = raiden_unscan.unscan_layers(
+              raw_restored,
+              num_layers=num_layers,
+              scan_axis=1,
+              cycle_interval=cycle_interval,
+          )
+          return jax.tree_util.tree_map(
+              lambda p: (
+                  {"value": p.value.astype(jnp.bfloat16)}
+                  if hasattr(p, "value")
+                  and hasattr(p.value, "dtype")
+                  and jnp.issubdtype(p.value.dtype, jnp.floating)
+                  else ({"value": p.value} if hasattr(p, "value") else p)
+              ),
+              unscanned,
+          )
+      return orig_restore(self, directory, *args, **kwargs)
+
+    _patched_restore._patched_unscan_by_tunix = True  # pylint: disable=protected-access
+    ocp.Checkpointer.restore = _patched_restore
+  except Exception as exc:  # pylint: disable=broad-exception-caught
+    logging.debug("Could not install scanned checkpoint restore hook: %s", exc)
+
+
 def create_worker(a):
   """Load real inference weights once, then expose the standard RolloutWorker."""
   os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
@@ -67,6 +147,7 @@ def create_worker(a):
         a.checkpoint_storage_use_zarr3 = bool(meta["use_zarr3"])
     except Exception as exc:  # pylint: disable=broad-exception-caught
       logging.warning("Could not read Orbax _METADATA from %s: %s", path, exc)
+  _maybe_install_scanned_checkpoint_restore_hook(path, a)
   if a.use_ocdbt_with_pathways:
     from orbax.checkpoint._src.serialization import jax_array_handlers
     from orbax.checkpoint._src.serialization import type_handler_registry
@@ -189,7 +270,13 @@ def create_worker(a):
       return True
 
     async def evaluate(self, fields):
-      request = datatypes.RolloutRequest(**fields)
+      import dataclasses  # pylint: disable=import-outside-toplevel
+
+      valid_names = {
+          f.name for f in dataclasses.fields(datatypes.RolloutRequest)
+      }
+      filtered = {k: v for k, v in fields.items() if k in valid_names}
+      request = datatypes.RolloutRequest(**filtered)
       response = await self.generate(request)
       # generate also enqueues each full trajectory for streaming consumers.
       # This controller consumes the direct return, so drain that extra copy.

@@ -183,7 +183,8 @@ class MllogUtilsTest(absltest.TestCase):
     self.assertIn('"key": "eval_stop"', content)
     self.assertIn('"key": "run_stop"', content)
     self.assertIn('"status": "success"', content)
-    self.assertIn('"key": "train_samples"', content)
+    # train_samples is EXACTLY_ONE in v6.1.0 and is emitted by init_print.
+    self.assertNotIn('"key": "train_samples"', content)
 
   def test_end_to_end_mlperf_logging_with_train_configs(self):
     args = types.SimpleNamespace(
@@ -308,8 +309,14 @@ class MllogUtilsTest(absltest.TestCase):
     self.assertEqual(event_map["max_steps"]["value"], 5)
     self.assertEqual(event_map["global_batch_size"]["value"], 128)
     self.assertEqual(event_map["micro_batch_size"]["value"], 16)
-    self.assertEqual(event_map["max_sequence_length"]["value"], 12288)
-    self.assertEqual(event_map["train_samples"]["value"], 640)
+    # closed_qwen35_397b_grpo (v6.1.0) requires max_sequence_length == 65536.
+    self.assertEqual(event_map["max_sequence_length"]["value"], 65536)
+    # train_samples is EXACTLY_ONE in v6.1.0: only init_print emits it.
+    self.assertLen([e for e in events if e["key"] == "train_samples"], 1)
+    self.assertEqual(
+        event_map["train_samples"]["value"],
+        len(mock_train_dataset) * args.num_generations,
+    )
     self.assertEqual(event_map["tensor_parallelism"]["value"], 2)
     self.assertEqual(event_map["generation_tensor_parallelism"]["value"], 4)
     self.assertEqual(
@@ -602,7 +609,144 @@ class MllogUtilsTest(absltest.TestCase):
       content = f.read()
 
     self.assertIn('"key": "block_stop"', content)
-    self.assertIn('"key": "run_stop"', content)
+    # run_stop is emitted by (offline) evaluation, not by train_stop.
+    self.assertNotIn('"key": "run_stop"', content)
+
+
+class OfflineEvalRcpTest(absltest.TestCase):
+
+  def test_compute_val_start_step(self):
+    self.assertEqual(mllog_utils.compute_val_start_step(256), 18)
+    self.assertEqual(mllog_utils.compute_val_start_step(128), 33)
+    self.assertEqual(mllog_utils.compute_val_start_step(256, 5), 5)
+    with self.assertRaises(ValueError):
+      mllog_utils.compute_val_start_step(0)
+
+  def test_append_checkpoint_manifest_upserts_sorted_records(self):
+    with tempfile.TemporaryDirectory() as tmpdir:
+      manifest_path = os.path.join(tmpdir, "mllog", "eval_checkpoints.jsonl")
+      for step, ts_ms in ((19, 2000), (18, 1000), (18, 1500)):
+        mllog_utils.append_checkpoint_manifest(
+            manifest_path,
+            {
+                "step": step,
+                "samples_count": step * 256,
+                "timestamp_ms": ts_ms,
+                "checkpoint_path": f"gs://ckpt/{step}/model_params",
+                "val_start_at": 18,
+            },
+        )
+      with open(manifest_path, "r", encoding="utf-8") as f:
+        records = [json.loads(line) for line in f if line.strip()]
+    self.assertEqual([r["step"] for r in records], [18, 19])
+    self.assertEqual(records[0]["timestamp_ms"], 1500)
+
+  def test_offline_eval_rcp_sequence_converged_and_aborted(self):
+    fake_mllogger = mock.MagicMock()
+    with (
+        mock.patch.object(mllog_utils, "mllogger", fake_mllogger),
+        mock.patch.object(mllog_utils, "_is_master_process", return_value=True),
+        mock.patch.object(mllog_utils, "_flush_to_gcs_if_needed"),
+    ):
+      args = types.SimpleNamespace(
+          batch_size=16, num_generations=16, max_steps=50
+      )
+      mllog_utils.train_stop(args, step=50, time_ms=5000)
+      fake_mllogger.end.assert_called_once_with(
+          key="block_stop",
+          metadata={"step": 50, "samples_count": 12800},
+          time_ms=5000,
+      )
+      fake_mllogger.reset_mock()
+
+      # Step 18: accuracy 0.68 < 0.69 -> no run_stop.
+      passed_18 = mllog_utils.log_offline_eval_step(
+          step=18,
+          samples_count=4608,
+          eval_accuracy=0.68,
+          target_accuracy=0.69,
+          checkpoint_timestamp_ms=1000,
+          is_last_checkpoint=False,
+          validation_time=12.5,
+      )
+      self.assertFalse(passed_18)
+      end_keys_18 = [c.kwargs["key"] for c in fake_mllogger.end.call_args_list]
+      self.assertEqual(end_keys_18, ["eval_stop"])
+      fake_mllogger.reset_mock()
+
+      # Step 19: accuracy 0.71 >= 0.69 -> run_stop(success) backdated to 2000.
+      passed_19 = mllog_utils.log_offline_eval_step(
+          step=19,
+          samples_count=4864,
+          eval_accuracy=0.71,
+          target_accuracy=0.69,
+          checkpoint_timestamp_ms=2000,
+          is_last_checkpoint=False,
+          validation_time=14.0,
+      )
+      self.assertTrue(passed_19)
+      fake_mllogger.end.assert_any_call(
+          key="run_stop",
+          metadata={"status": "success", "samples_count": 4864},
+          time_ms=2000,
+      )
+      train_samples_calls = [
+          c
+          for c in fake_mllogger.event.call_args_list
+          if c.kwargs.get("key") == "train_samples"
+      ]
+      self.assertEmpty(train_samples_calls)
+      fake_mllogger.reset_mock()
+
+      # Step 50 (final): accuracy 0.68 < 0.69 -> run_stop(aborted) at 5000.
+      passed_50 = mllog_utils.log_offline_eval_step(
+          step=50,
+          samples_count=12800,
+          eval_accuracy=0.68,
+          target_accuracy=0.69,
+          checkpoint_timestamp_ms=5000,
+          is_last_checkpoint=True,
+          validation_time=15.0,
+      )
+      self.assertFalse(passed_50)
+      fake_mllogger.end.assert_any_call(
+          key="run_stop",
+          metadata={"status": "aborted", "samples_count": 12800},
+          time_ms=5000,
+      )
+
+  def test_mlperf_6_1_0_init_print_disclosures(self):
+    fake_mllogger = mock.MagicMock()
+    with (
+        mock.patch.object(mllog_utils, "mllogger", fake_mllogger),
+        mock.patch.object(mllog_utils, "_is_master_process", return_value=True),
+        mock.patch.object(mllog_utils, "_flush_to_gcs_if_needed"),
+    ):
+      args = types.SimpleNamespace(
+          batch_size=16,
+          num_generations=16,
+          max_steps=50,
+          max_prompt_length=4096,
+          max_response_length=61440,
+          target_accuracy=0.69,
+      )
+      mllog_utils.init_print(args, train_dataset=list(range(1000)))
+      emitted = {
+          c.kwargs["key"]: c.kwargs["value"]
+          for c in fake_mllogger.event.call_args_list
+      }
+      self.assertEqual(emitted["eval_samples"], 251)
+      self.assertEqual(emitted["max_sequence_length"], 65536)
+      self.assertEqual(emitted["opt_adamw_beta_2"], 0.999)
+      self.assertEqual(emitted["opt_adamw_weight_decay"], 0.0)
+      self.assertAlmostEqual(emitted["opt_gradient_clip_norm"], 0.125)
+      for key in (
+          "lowest_numerical_precision_in_linear",
+          "lowest_numerical_precision_in_attn",
+          "lowest_numerical_precision_in_comm",
+      ):
+        self.assertEqual(emitted[key], "bfloat16")
+      self.assertEqual(emitted["config_filename"], "qwen35_397b_grpo")
 
 
 if __name__ == "__main__":

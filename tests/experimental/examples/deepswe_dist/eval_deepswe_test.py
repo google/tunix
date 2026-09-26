@@ -168,6 +168,21 @@ class EvalTest(unittest.TestCase):
     with self.assertRaisesRegex(ValueError, "duplicate"):
       eval_lib.summarize(rows + [rows[0]], ["a", "b"], 4)
 
+  def test_pass_at_4_is_reported_with_more_attempts(self):
+    rows = [
+        dict(
+            instance_id="a",
+            attempt=i,
+            reward=float(i == 5),
+            resolved=i == 5,
+            status="SUCCEEDED",
+        )
+        for i in range(8)
+    ]
+    summary = eval_lib.summarize(rows, ["a"], 8)
+    # Unbiased pass@k = 1 - C(n - c, k) / C(n, k) with n=8, c=1.
+    self.assertEqual(summary["pass_at_k"], {"1": 1 / 8, "4": 1 / 2, "8": 1.0})
+
   def test_reward_comes_from_trajectory_not_completion_status(self):
     response = types.SimpleNamespace(
         error=None,
