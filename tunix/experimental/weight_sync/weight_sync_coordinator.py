@@ -708,6 +708,9 @@ class WeightSyncCoordinator:
     self._in_flight = False
     self._poisoned: Optional[str] = None
     self._last_committed_version: Optional[int] = None
+    self._dst_metadata_cache: dict[
+        int, tuple[Any, tuple[weight_sync.WorkUnitMetadata, ...]]
+    ] = {}
 
   @property
   def round_index(self) -> int:
@@ -731,6 +734,7 @@ class WeightSyncCoordinator:
     """
     logging.warning("coordinator poison cleared: %s", self._poisoned)
     self._poisoned = None
+    self._dst_metadata_cache.clear()
 
   # ---------------------------------------------------------------- lookup
 
@@ -1038,25 +1042,39 @@ class WeightSyncCoordinator:
       # registration cost no downtime. Failures here need no rollback either.
       try:
         t_phase = time.monotonic()
-        await asyncio.gather(*[
-            asyncio.wait_for(d.bind_weight_sync(), self._timeouts.bind)
-            for d in destinations
-        ])
-        dst_meta_lists = await asyncio.gather(*[
-            asyncio.wait_for(
-                d.get_weight_sync_metadata(), self._timeouts.metadata
-            )
-            for d in destinations
-        ])
-        # Metadata is collected exactly once and the same objects flow to both
-        # registration and the request. Collecting twice would hand the
-        # controller endpoints from a different rebind than the one staged.
-        src_meta_lists = await asyncio.gather(*[
-            asyncio.wait_for(
-                s.prepare_weight_sync(request), self._timeouts.source_prepare
-            )
-            for s in sources
-        ])
+
+        async def _prepare_destination(
+            d: WeightSyncDestination,
+        ) -> tuple[weight_sync.WorkUnitMetadata, ...]:
+          cached = self._dst_metadata_cache.get(id(d))
+          if (
+              cached is not None
+              and cached[0] is d
+              and getattr(d, "bound", True)
+          ):
+            return cached[1]
+          await asyncio.wait_for(d.bind_weight_sync(), self._timeouts.bind)
+          raw_meta = await asyncio.wait_for(
+              d.get_weight_sync_metadata(), self._timeouts.metadata
+          )
+          parsed = tuple(weight_sync.dict_to_metadata(m) for m in raw_meta)
+          if parsed:
+            self._dst_metadata_cache[id(d)] = (d, parsed)
+          return parsed
+
+        # Destination metadata is static once bound and is cached across
+        # committed rounds. Any uncached destination setup runs concurrently
+        # with source preparation.
+        dst_meta_lists, src_meta_lists = await asyncio.gather(
+            asyncio.gather(*[_prepare_destination(d) for d in destinations]),
+            asyncio.gather(*[
+                asyncio.wait_for(
+                    s.prepare_weight_sync(request),
+                    self._timeouts.source_prepare,
+                )
+                for s in sources
+            ]),
+        )
         t_prepare_s = time.monotonic() - t_phase
       except asyncio.CancelledError:
         raise
@@ -1073,11 +1091,7 @@ class WeightSyncCoordinator:
           for per_source in src_meta_lists
           for m in per_source
       ]
-      dst_metadata = [
-          weight_sync.dict_to_metadata(m)
-          for per_dest in dst_meta_lists
-          for m in per_dest
-      ]
+      dst_metadata = [m for per_dest in dst_meta_lists for m in per_dest]
       if not src_metadata or not dst_metadata:
         failures.append(
             f"metadata: {len(src_metadata)} source, {len(dst_metadata)}"
@@ -1509,6 +1523,8 @@ class WeightSyncCoordinator:
             state = RoundState.ABORTED
       raise
     finally:
+      if state is not RoundState.COMMITTED:
+        self._dst_metadata_cache.clear()
       if release_source:
         t_rel_start = time.monotonic()
         release_request = prepared_request or request
