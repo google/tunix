@@ -25,12 +25,20 @@ unchanged on any spot VM:
                         throughput at full concurrency).
 """
 
+import os
+
 try:
   import gymnasium
 except ImportError:
   import subprocess
   import sys
   subprocess.check_call([sys.executable, "-m", "pip", "install", "gymnasium"])
+
+# tpu-inference >= 0.29 preloads the tpu_sync (Raiden) libraries, which
+# statically link their own XLA protos; they must be dlopened before jaxlib or
+# the duplicate proto registration aborts the process. Import it first.
+if os.getenv("ROLLOUT_ENGINE", "vllm") == "vllm":
+  import tpu_inference  # noqa: F401
 
 import contextlib
 import datetime
