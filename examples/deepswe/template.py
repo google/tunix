@@ -136,6 +136,8 @@ Reminder:
 - Required parameters MUST be specified
 - Only call one function at a time
 - VERY IMPORTANT: Each response must include both reasoning (as natural text) and function call (in above format) to solve the task.
+- Parameter values go between tags. Write <parameter=command>view</parameter>.
+  Never write <parameter=command=view>.
 </IMPORTANT>
 """
 
