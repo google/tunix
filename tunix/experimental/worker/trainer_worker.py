@@ -309,19 +309,29 @@ class TrainerWorker(abstract_worker.Worker):
           if items.segment_positions is None
           else np.asarray(items.segment_positions, dtype=np.int32)
       )
+      routed = (
+          None
+          if getattr(items, "routed_experts", None) is None
+          else np.asarray(items.routed_experts, dtype=np.int16)
+      )
       micro_batch_size = self._logps_micro_batch_size or batch_size
       outs = []
       for start in range(0, batch_size, micro_batch_size):
         sl = slice(start, start + micro_batch_size)
-        with self._trainer.model_scope(
-            prompt[sl],
-            completion[sl],
+        scope_kwargs: dict[str, Any] = dict(
             pad_id=items.pad_id,
             eos_id=items.eos_id,
             temperature=temperature,
             chunk_size=self._logps_chunk_size,
             segment_ids=None if seg_ids is None else seg_ids[sl],
             segment_positions=None if seg_pos is None else seg_pos[sl],
+        )
+        if routed is not None:
+          scope_kwargs["routed_experts"] = routed[sl]
+        with self._trainer.model_scope(
+            prompt[sl],
+            completion[sl],
+            **scope_kwargs,
         ) as (model, scoped_args, scoped_kwargs):
           # Split per call, never once in __init__: the optimizer writes new
           # arrays every step, and a cached State would pin the old ones.

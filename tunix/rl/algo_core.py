@@ -1194,12 +1194,19 @@ def grpo_loss_fn(
         train_example.old_per_token_logps, jnp.float32
     )
 
+  # Advantages must be broadcast against seq_length.
+  # When sequence packing is used, advantages are already 2D [B, seq_length].
+  # When unpacked, they are 1D [B].
+  adv = advantages if advantages.ndim == 2 else jnp.expand_dims(advantages, 1)
+
   valid_loss_mask = (
       (loss_mask > 0)
       & jnp.isfinite(per_token_logps)
       & jnp.isfinite(old_per_token_logps)
+      & jnp.isfinite(adv)
   )
   loss_mask = jnp.where(valid_loss_mask, loss_mask, 0.0)
+  adv = jnp.where(valid_loss_mask, adv, 0.0)
   masked_logps = jnp.where(valid_loss_mask, per_token_logps, 0.0)
   masked_old_logps = jnp.where(valid_loss_mask, old_per_token_logps, 0.0)
   seq_importance_ratio = masked_logps - masked_old_logps
@@ -1248,11 +1255,6 @@ def grpo_loss_fn(
     )
 
   is_ratio = jnp.exp(seq_importance_ratio)
-
-  # Advantages must be broadcast against seq_length.
-  # When sequence packing is used, advantages are already 2D [B, seq_length].
-  # When unpacked, they are 1D [B].
-  adv = advantages if advantages.ndim == 2 else jnp.expand_dims(advantages, 1)
 
   pg_loss_1 = -adv * is_ratio
   pg_loss_2 = -adv * jnp.clip(is_ratio, 1 - epsilon, 1 + epsilon_high)
@@ -1436,13 +1438,15 @@ def grpo_loss_fn(
     # scores a fully-masked row 0.0, while the metric is >= 1 on any real row.
     # A micro-batch with no rows left must therefore contribute no weight
     # rather than a 0.0 that would pull the pooled mean below its own floor.
-    scored = (seq_mult_prob_error > 0).astype(seq_mult_prob_error.dtype)
+    scored = (seq_mult_prob_error > 0) & jnp.isfinite(seq_mult_prob_error)
+    scored_f = scored.astype(seq_mult_prob_error.dtype)
+    safe_seq_err = jnp.where(scored, seq_mult_prob_error, 0.0)
     aux["sample_mask/mult_prob_error_mean"] = sft_utils.WeightedMetric(
-        jnp.sum(seq_mult_prob_error * scored),
-        jnp.sum(scored),
+        jnp.sum(safe_seq_err),
+        jnp.sum(scored_f),
         min_denom=1.0,
     )
-    aux["sample_mask/mult_prob_error_max"] = jnp.max(seq_mult_prob_error)
+    aux["sample_mask/mult_prob_error_max"] = jnp.max(safe_seq_err)
   if tis_oob_ratio is not None:
     # Normalised over the sequences that are actually training, not over every
     # row, so a batch with rows already dropped upstream still reports the rate
@@ -1573,6 +1577,11 @@ def grpo_loss_fn(
         min_denom=unreduced_pg_loss.min_denom,
     )
 
+  token_entropy = jnp.where(
+      (loss_mask > 0) & jnp.isfinite(token_entropy),
+      jax.lax.stop_gradient(token_entropy),
+      0.0,
+  )
   entropy_loss = common.aggregate_loss(
       token_entropy,
       loss_mask,

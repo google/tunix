@@ -342,12 +342,32 @@ def to_pack_item(item: datatypes.RLTrainerPayload) -> packing.PackItem:
       if getattr(item, name) is not None
   }
 
+  routed_experts = None
+  if item.routed_experts is not None:
+    routed_arr = np.asarray(item.routed_experts, dtype=np.int16)
+    if routed_arr.ndim != 3:
+      raise ValueError(
+          "RLTrainerPayload.routed_experts must have shape"
+          f" (seq_len, num_layers, top_k), got {routed_arr.shape}."
+      )
+    seq_len = p_len + c_len
+    if routed_arr.shape[0] >= seq_len:
+      routed_experts = routed_arr[:seq_len]
+    else:
+      pad = np.full(
+          (seq_len - routed_arr.shape[0],) + routed_arr.shape[1:],
+          datatypes.UNSET_ROUTED_EXPERT,
+          dtype=np.int16,
+      )
+      routed_experts = np.concatenate([routed_arr, pad], axis=0)
+
   return packing.PackItem(
       prompt_ids=prompt,
       completion_ids=completion,
       completion_mask=completion_mask,
       advantages=resolve(item.advantages, fill=0.0, name="advantages"),
       per_token=per_token,
+      routed_experts=routed_experts,
   )
 
 
@@ -364,6 +384,11 @@ def to_rl_trainer_payload(
       name: np.stack([r.per_token[name] for r in rows])
       for name in rows[0].per_token
   }
+  routed_experts = (
+      stack("routed_experts")
+      if rows and rows[0].routed_experts is not None
+      else None
+  )
   metadata: dict[str, Any] = {"trajectory_ids": trajectory_ids}
   if lineage_context is not None:
     metadata["lineage"] = lineage_context
@@ -376,6 +401,7 @@ def to_rl_trainer_payload(
       segment_ids=stack("segment_ids"),
       segment_positions=stack("segment_positions"),
       num_segments=max_segments + 1,
+      routed_experts=routed_experts,
       metadata=metadata,
       **per_token_kwargs,  # pyrefly: ignore[bad-argument-type]
   )

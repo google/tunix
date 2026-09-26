@@ -2071,7 +2071,50 @@ class CreateBatchAssemblerTest(absltest.TestCase):
     self.assertEqual(assembler.num_generations, 2)
     self.assertEqual(assembler.mini_batch_size, 2)
 
+  def test_sequence_packed_batch_assembler_carries_routed_experts(self):
+    assembler = batch_assembly.SequencePackedBatchAssembler(
+        batch_size=1,
+        num_generations=1,
+        mini_batch_size=2,
+        max_packed_len=8,
+        pad_id=0,
+    )
+    # Item 1: prompt=1, completion=2 (3 tokens total), routed_experts supplied for 2 tokens (e.g. T-1)
+    re1 = np.ones((2, 2, 2), dtype=np.int16) * 3
+    p1 = datatypes.RLTrainerPayload(
+        prompt_ids=np.array([10], dtype=np.int32),
+        prompt_mask=np.array([1.0], dtype=np.float32),
+        completion_ids=np.array([11, 12], dtype=np.int32),
+        completion_mask=np.array([1.0, 1.0], dtype=np.float32),
+        advantages=np.array([1.0, 1.0], dtype=np.float32),
+        routed_experts=re1,
+    )
+    # Item 2: prompt=1, completion=2 (3 tokens total), routed_experts supplied for 3 tokens
+    re2 = np.ones((3, 2, 2), dtype=np.int16) * 5
+    p2 = datatypes.RLTrainerPayload(
+        prompt_ids=np.array([20], dtype=np.int32),
+        prompt_mask=np.array([1.0], dtype=np.float32),
+        completion_ids=np.array([21, 22], dtype=np.int32),
+        completion_mask=np.array([1.0, 1.0], dtype=np.float32),
+        advantages=np.array([-1.0, -1.0], dtype=np.float32),
+        routed_experts=re2,
+    )
+    self.assertEmpty(assembler.feed([p1]))
+    batches = assembler.feed([p2])
+    self.assertLen(batches, 1)
+    packed_re = batches[0].payload.routed_experts
+    self.assertIsNotNone(packed_re)
+    self.assertEqual(packed_re.shape, (1, 8, 2, 2))
+    # First 2 tokens of item 1 have expert 3, 3rd token padded with -1
+    np.testing.assert_array_equal(packed_re[0, 0:2], re1)
+    np.testing.assert_array_equal(packed_re[0, 2:3], -1)
+    # Next 3 tokens of item 2 have expert 5
+    np.testing.assert_array_equal(packed_re[0, 3:6], re2)
+    # Remaining 2 tokens of packed row are padded with -1
+    np.testing.assert_array_equal(packed_re[0, 6:8], -1)
+
 
 if __name__ == "__main__":
   absltest.main()
+
 
