@@ -106,6 +106,9 @@ TIS_TYPE=${TIS_TYPE:-}
 TIS_RATIO_MIN=${TIS_RATIO_MIN:-}
 TIS_RATIO=${TIS_RATIO:-}
 SAMPLER_IS_LENGTH_BUCKETS=${SAMPLER_IS_LENGTH_BUCKETS:-}
+SAMPLER_IS=${SAMPLER_IS:-}
+SAMPLER_IS_THRESHOLD=${SAMPLER_IS_THRESHOLD:-}
+FUSED_TIS=${FUSED_TIS:-true}
 WAIT_TIMEOUT_SECS=${WAIT_TIMEOUT_SECS:-1800}
 WAIT_POLL_SECS=${WAIT_POLL_SECS:-5}
 WAIT_DEBUG_EVERY_POLLS=${WAIT_DEBUG_EVERY_POLLS:-6}
@@ -807,6 +810,17 @@ echo "Launching CPU orchestrator..."
   fi
   if [[ -n "$SAMPLER_IS_LENGTH_BUCKETS" ]]; then
     ORCHESTRATOR_CMD+=(--sampler_is_length_buckets="$SAMPLER_IS_LENGTH_BUCKETS")
+  fi
+  if [[ -n "$SAMPLER_IS" ]]; then
+    ORCHESTRATOR_CMD+=(--sampler_is="$SAMPLER_IS")
+  fi
+  if [[ -n "$SAMPLER_IS_THRESHOLD" ]]; then
+    ORCHESTRATOR_CMD+=(--sampler_is_threshold="$SAMPLER_IS_THRESHOLD")
+  fi
+  if [[ "$FUSED_TIS" == "false" || "$FUSED_TIS" == "False" || "$FUSED_TIS" == "0" ]]; then
+    ORCHESTRATOR_CMD+=(--no-fused_tis)
+  else
+    ORCHESTRATOR_CMD+=(--fused_tis)
   fi
   if [[ "$SHUFFLE" == "0" || "$SHUFFLE" == "false" || "$SHUFFLE" == "False" ]]; then
     ORCHESTRATOR_CMD+=(--no-shuffle)

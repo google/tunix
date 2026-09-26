@@ -1480,27 +1480,21 @@ class SamplerTrainerAgreementTest(parameterized.TestCase):
 
     np.testing.assert_allclose(chan_pearson, global_pearson, rtol=1e-7, atol=1e-7)
 
-    # Also verify `common.make_pearson_metric` reduced via `utils.weighted_metric_mean`
-    # and `common.global_weighted_mean` matches the concatenated global batch correlation.
-    mb_pearson_metrics = [
-        common.make_pearson_metric(
-            c_xy=jnp.asarray(s[3], dtype=jnp.float32),
-            c_xx=jnp.asarray(s[4], dtype=jnp.float32),
-            c_yy=jnp.asarray(s[5], dtype=jnp.float32),
-            count=jnp.asarray(s[0], dtype=jnp.float32),
-            mean_x=jnp.asarray(s[1], dtype=jnp.float32),
-            mean_y=jnp.asarray(s[2], dtype=jnp.float32),
-        )
-        for s in stats_list
+    # Also verify the production JAX implementation (`compute_sampler_trainer_agreement_jax`
+    # reduced via `utils.weighted_metric_mean` / `common.global_weighted_mean`)
+    # matches the concatenated global batch correlation within float32 tolerance.
+    mb_jax_metrics = [
+        common.compute_sampler_trainer_agreement_jax(
+            jnp.asarray(r), jnp.asarray(t), jnp.asarray(m)
+        )[0]["sampler_trainer/probs_pearson_corr"][0]
+        for r, t, m in microbatches
     ]
+    prod_chan_pearson = utils.weighted_metric_mean(mb_jax_metrics)
     np.testing.assert_allclose(
-        utils.weighted_metric_mean(mb_pearson_metrics),
-        global_pearson,
-        rtol=1e-7,
-        atol=1e-7,
+        prod_chan_pearson, global_pearson, rtol=1e-7, atol=1e-7
     )
     np.testing.assert_allclose(
-        common.global_weighted_mean(mb_pearson_metrics),
+        common.global_weighted_mean(mb_jax_metrics),
         global_pearson,
         rtol=1e-7,
         atol=1e-7,
@@ -1542,6 +1536,26 @@ class SamplerTrainerAgreementTest(parameterized.TestCase):
         atol=1e-7,
     )
     self.assertGreater(chan_two_prompt, 0.9999)
+
+    prod_two_prompt = common.global_weighted_mean([
+        common.compute_sampler_trainer_agreement_jax(
+            jnp.asarray(mb_easy_r),
+            jnp.asarray(mb_easy_t),
+            jnp.asarray(mask_4x8),
+        )[0]["sampler_trainer/probs_pearson_corr"][0],
+        common.compute_sampler_trainer_agreement_jax(
+            jnp.asarray(mb_hard_r),
+            jnp.asarray(mb_hard_t),
+            jnp.asarray(mask_4x8),
+        )[0]["sampler_trainer/probs_pearson_corr"][0],
+    ])
+    np.testing.assert_allclose(
+        prod_two_prompt,
+        concat_pearson,
+        rtol=1e-7,
+        atol=1e-7,
+    )
+    self.assertGreater(prod_two_prompt, 0.9999)
 
     # Also verify `sampler_trainer_agreement` directly preserves WeightedMetric
     # and PearsonMetric and reduces identically to the concatenated global batch.

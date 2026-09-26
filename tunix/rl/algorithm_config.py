@@ -211,7 +211,7 @@ class GRPOConfig(AlgorithmConfig):
   truncated_importance_sampling_ratio_min: float | None = None
   truncated_importance_sampling_ratio: float | None = None
   sampler_is_length_buckets: Sequence[int] | None = None
-  seq_logprob_error_threshold: float | None = None
+  fused_tis: bool = True
 
   def __post_init__(self):
     if self.epsilon_high is None:

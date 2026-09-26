@@ -73,6 +73,7 @@ USE_MULTISTEP_PROMPT=${USE_MULTISTEP_PROMPT:-1}
 USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-1}
 SAMPLER_IS=${SAMPLER_IS:-token}
 SAMPLER_IS_THRESHOLD=${SAMPLER_IS_THRESHOLD:-2.0}
+FUSED_TIS=${FUSED_TIS:-1}
 ROLLOUT_MAX_CONCURRENCY=${ROLLOUT_MAX_CONCURRENCY:-256}
 SAMPLER=${SAMPLER:-inprocess_vllm}
 WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-raiden}
@@ -357,6 +358,7 @@ is_true "$SHUFFLE" && cmd+=(--shuffle) || cmd+=(--no-shuffle)
 is_true "$IS_SLIPPERY" && cmd+=(--is_slippery) || cmd+=(--no-is_slippery)
 is_true "$USE_MULTISTEP_PROMPT" && cmd+=(--use_multistep_prompt) || cmd+=(--no-use_multistep_prompt)
 is_true "$USE_ROLLOUT_LOGPS" && cmd+=(--use_rollout_logps) || cmd+=(--no-use_rollout_logps)
+is_true "$FUSED_TIS" && cmd+=(--fused_tis) || cmd+=(--no-fused_tis)
 [[ -n "$LOG_DIR" ]] && cmd+=(--log_dir="$LOG_DIR")
 [[ -n "$TRAJECTORY_LOG_DIR" ]] && cmd+=(--trajectory_log_dir="$TRAJECTORY_LOG_DIR")
 is_true "$DEBUG" && cmd+=(--debug)

@@ -79,6 +79,9 @@ export DEBUG=${DEBUG:-0}
 export SAMPLER=${SAMPLER:-inprocess_vllm}
 export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
 export USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
+export SAMPLER_IS=${SAMPLER_IS:-}
+export SAMPLER_IS_THRESHOLD=${SAMPLER_IS_THRESHOLD:-}
+export FUSED_TIS=${FUSED_TIS:-true}
 export CHAT_PARSER=${CHAT_PARSER:-raw}
 export CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-1}
 export CHECKPOINT_MAX_TO_KEEP=${CHECKPOINT_MAX_TO_KEEP:-10}
@@ -272,6 +275,9 @@ start_orchestrator() {
         ${tis_ratio_min:+--truncated_importance_sampling_ratio_min=${tis_ratio_min}} \
         ${tis_ratio:+--truncated_importance_sampling_ratio=${tis_ratio}} \
         ${SAMPLER_IS_LENGTH_BUCKETS:+--sampler_is_length_buckets=${SAMPLER_IS_LENGTH_BUCKETS}} \
+        ${SAMPLER_IS:+--sampler_is=${SAMPLER_IS}} \
+        ${SAMPLER_IS_THRESHOLD:+--sampler_is_threshold=${SAMPLER_IS_THRESHOLD}} \
+        $([[ "${FUSED_TIS}" == "false" || "${FUSED_TIS}" == "False" || "${FUSED_TIS}" == "0" ]] && echo --no-fused_tis || echo --fused_tis) \
         ${MAX_STALENESS:+--max_staleness=${MAX_STALENESS}} \
         ${REWARD_MODE:+--reward_mode=${REWARD_MODE}} \
         ${TFDS_DATA_DIR:+--tfds_data_dir=\"${TFDS_DATA_DIR}\"} \

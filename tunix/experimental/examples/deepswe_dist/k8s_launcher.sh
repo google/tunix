@@ -95,6 +95,9 @@ export TIS_TYPE=${TIS_TYPE:-${TRUNCATED_IMPORTANCE_SAMPLING_TYPE:-}}
 export TIS_RATIO_MIN=${TIS_RATIO_MIN:-${TRUNCATED_IMPORTANCE_SAMPLING_RATIO_MIN:-}}
 export TIS_RATIO=${TIS_RATIO:-${TRUNCATED_IMPORTANCE_SAMPLING_RATIO:-}}
 export SAMPLER_IS_LENGTH_BUCKETS=${SAMPLER_IS_LENGTH_BUCKETS:-}
+export SAMPLER_IS=${SAMPLER_IS:-}
+export SAMPLER_IS_THRESHOLD=${SAMPLER_IS_THRESHOLD:-}
+export FUSED_TIS=${FUSED_TIS:-true}
 export MAX_STALENESS=${MAX_STALENESS:-}
 export TRAJECTORY_GROUP_ORDER=${TRAJECTORY_GROUP_ORDER:-arrival}
 export PROFILER_STEPS=${PROFILER_STEPS:-0}
@@ -353,6 +356,9 @@ start_orchestrator() {
         ${TIS_RATIO_MIN:+--truncated_importance_sampling_ratio_min=${TIS_RATIO_MIN}} \
         ${TIS_RATIO:+--truncated_importance_sampling_ratio=${TIS_RATIO}} \
         ${SAMPLER_IS_LENGTH_BUCKETS:+--sampler_is_length_buckets=${SAMPLER_IS_LENGTH_BUCKETS}} \
+        ${SAMPLER_IS:+--sampler_is=${SAMPLER_IS}} \
+        ${SAMPLER_IS_THRESHOLD:+--sampler_is_threshold=${SAMPLER_IS_THRESHOLD}} \
+        $([[ "${FUSED_TIS}" == "false" || "${FUSED_TIS}" == "False" || "${FUSED_TIS}" == "0" ]] && echo --no-fused_tis || echo --fused_tis) \
         --dataset_name=${DATASET_NAME} \
         --dataset_split=${DATASET_SPLIT} \
         ${DATASET_CACHE_DIR:+--dataset_cache_dir=${DATASET_CACHE_DIR}} \

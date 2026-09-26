@@ -413,6 +413,7 @@ class ExampleCommandLineTest(absltest.TestCase):
     self.assertIsNone(cfg.truncated_importance_sampling_type)
     self.assertEqual(cfg.advantage_estimator, "grpo")
     self.assertIsNone(cfg.sampler_is_length_buckets)
+    self.assertTrue(cfg.fused_tis)
 
   def test_flags_reach_the_config(self):
     cfg = self._config([
@@ -464,6 +465,7 @@ class DeepSWEExampleCommandLineTest(absltest.TestCase):
     self.assertIsNone(cfg.truncated_importance_sampling_type)
     self.assertEqual(cfg.advantage_estimator, "grpo")
     self.assertIsNone(cfg.sampler_is_length_buckets)
+    self.assertTrue(cfg.fused_tis)
 
   def test_flags_reach_the_config(self):
     cfg = self._config([
@@ -477,6 +479,7 @@ class DeepSWEExampleCommandLineTest(absltest.TestCase):
         "--truncated_importance_sampling_ratio=1.002",
         "--advantage_estimator=grpo-loo",
         "--sampler_is_length_buckets=512,2048",
+        "--no-fused_tis",
     ])
     self.assertEqual(cfg.epsilon_high, 0.28)
     self.assertEqual(cfg.loss_agg_mode, "token-mean")
@@ -488,6 +491,7 @@ class DeepSWEExampleCommandLineTest(absltest.TestCase):
     self.assertEqual(cfg.advantage_estimator, "grpo-loo")
     self.assertFalse(cfg.use_rollout_logps)
     self.assertEqual(cfg.sampler_is_length_buckets, (512, 2048))
+    self.assertFalse(cfg.fused_tis)
 
   def test_launcher_passes_every_option_it_exposes(self):
     block = _launcher_orchestrator_cmd("deepswe_dist")

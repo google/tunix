@@ -50,13 +50,46 @@ def _extract_scalar(val: Any, name: str | None = None) -> float | None:
   """Extracts a step scalar from a metric value, reducing multi-microbatch arrays by suffix."""
   if val is None:
     return None
+  if isinstance(val, rl_common.PearsonMetric):
+    try:
+      u = np.asarray(val.unreduced_sum, dtype=np.float64)
+      if u.size == 3:
+        return float(np.asarray(val.compute(), dtype=np.float64).item())
+    except Exception:  # pylint: disable=broad-exception-caught
+      return None
+  if hasattr(val, "unreduced_sum") and hasattr(val, "denominator"):
+    try:
+      u = np.asarray(val.unreduced_sum, dtype=np.float64)
+      d = np.asarray(val.denominator, dtype=np.float64)
+      if (
+          (
+              isinstance(val, rl_common.PearsonMetric)
+              or (name is not None and name.endswith("probs_pearson_corr"))
+          )
+          and u.size >= 3
+          and d.size == u.size
+          and u.size % 3 == 0
+      ):
+        u_rows = u.reshape(-1, 3)
+        d_rows = d.reshape(-1, 3)
+        items = [
+            rl_common.PearsonMetric(u_rows[i], d_rows[i])
+            for i in range(u_rows.shape[0])
+        ]
+        return float(rl_common.PearsonMetric.reduce(items))
+      eps = float(getattr(val, "eps", None) or 0.0)
+      min_denom = float(getattr(val, "min_denom", None) or 0.0)
+      denom = max(float(np.sum(d)) + eps, min_denom)
+      if denom == 0.0:
+        return 0.0
+      return float(np.sum(u) / denom)
+    except Exception:  # pylint: disable=broad-exception-caught
+      pass
   if hasattr(val, "compute") and callable(val.compute):
     try:
       val = val.compute()
     except Exception:  # pylint: disable=broad-exception-caught
       return None
-  if hasattr(val, "unreduced_sum") and hasattr(val, "denominator"):
-    return metrics_logger_lib.extract_scalar(val)
   try:
     arr = np.asarray(val, dtype=np.float64)
     if arr.size == 1:
@@ -69,6 +102,8 @@ def _extract_scalar(val: Any, name: str | None = None) -> float | None:
         return float(np.max(finite))
       if name is not None and name.endswith(("_min", "/min")):
         return float(np.min(finite))
+      if name is not None and name.endswith(("_count", "/count")):
+        return float(np.sum(finite))
       return float(np.mean(finite))
   except Exception:  # pylint: disable=broad-exception-caught
     pass
@@ -1228,10 +1263,19 @@ class StandardRLProgram(RLProgram):
       for k, v in weighted_metrics.items():
         val = _extract_scalar(v, k)
         if val is not None:
-          metric_key = k if k.startswith("trainer/") else f"trainer/{k}"
-          self.metrics_logger.log(
-              self.metrics_prefix, metric_key, val, self.mode, log_step
-          )
+          clean_key = k[len("trainer/") :] if k.startswith("trainer/") else k
+          if clean_key.startswith(("sampler_trainer/", "sampler_is/")):
+            self.metrics_logger.log(
+                self.metrics_prefix, clean_key, val, self.mode, log_step
+            )
+          if not clean_key.startswith("sampler_trainer/"):
+            self.metrics_logger.log(
+                self.metrics_prefix,
+                f"trainer/{clean_key}",
+                val,
+                self.mode,
+                log_step,
+            )
 
       # Auxiliary scalar metrics
       for k, v in scalar_metrics.items():
@@ -1239,10 +1283,19 @@ class StandardRLProgram(RLProgram):
           continue
         val = _extract_scalar(v, k)
         if val is not None:
-          metric_key = k if k.startswith("trainer/") else f"trainer/{k}"
-          self.metrics_logger.log(
-              self.metrics_prefix, metric_key, val, self.mode, log_step
-          )
+          clean_key = k[len("trainer/") :] if k.startswith("trainer/") else k
+          if clean_key.startswith(("sampler_trainer/", "sampler_is/")):
+            self.metrics_logger.log(
+                self.metrics_prefix, clean_key, val, self.mode, log_step
+            )
+          if not clean_key.startswith("sampler_trainer/"):
+            self.metrics_logger.log(
+                self.metrics_prefix,
+                f"trainer/{clean_key}",
+                val,
+                self.mode,
+                log_step,
+            )
 
       # Every trainer-side metric for the step on one line, the sequence gate's
       # included (``sample_mask/kept_frac``, ``sample_mask/mult_prob_error_*``,
@@ -1332,9 +1385,14 @@ class StandardRLProgram(RLProgram):
         datatypes.Role.ACTOR, items=logps_req
     )
     trainer_logps = np.asarray(trainer_logps.per_token_logps, dtype=np.float32)
+    sampler_logps = (
+        batch.old_per_token_logps
+        if batch.old_per_token_logps is not None
+        else getattr(batch, "rollout_per_token_logps", None)
+    )
     sa_metrics, sampler_is_weights, filtered_completion_mask = (
         rl_common.sampler_trainer_agreement(
-            batch.old_per_token_logps,
+            sampler_logps,
             trainer_logps,
             batch.completion_mask,
             sampler_is=self.sampler_is,
@@ -1347,16 +1405,18 @@ class StandardRLProgram(RLProgram):
       accumulator.setdefault(name, (agg_fn, []))[1].append(value)
 
     updates: dict[str, Any] = {}
-    if self.seq_logprob_error_threshold is not None:
-      updates["completion_mask"] = filtered_completion_mask
-    if sampler_is_weights is not None:
-      updates["sampler_is_weights"] = sampler_is_weights
-    if (
-        self.sampler_is == "token"
-        or self.seq_logprob_error_threshold is not None
-    ):
-      updates["old_per_token_logps"] = trainer_logps
+    if batch.old_per_token_logps is not None:
+      if self.seq_logprob_error_threshold is not None:
+        updates["completion_mask"] = filtered_completion_mask
+      if sampler_is_weights is not None:
+        updates["sampler_is_weights"] = sampler_is_weights
+      if (
+          self.sampler_is == "token"
+          or self.seq_logprob_error_threshold is not None
+      ):
+        updates["old_per_token_logps"] = trainer_logps
     if updates:
+      updates["sampler_agreement_applied"] = True
       batch = dataclasses.replace(batch, **updates)
     return batch
 
@@ -1548,12 +1608,32 @@ class StandardRLProgram(RLProgram):
             )
             batch = batch_assembly.with_ref_per_token_logps(batch, ref_logps)
           algo_config = getattr(self.algo, "algo_config", None)
-          if (
+          can_fuse_agreement_in_loss = (
+              algo_config is not None
+              and getattr(algo_config, "policy_loss_fn", "grpo") == "grpo"
+              and getattr(algo_config, "fused_tis", True)
+              and not getattr(
+                  algo_config, "log_sampler_trainer_agreement", False
+              )
+              and getattr(algo_config, "num_iterations", 1) == 1
+              and self.mini_batch_size >= self.full_batch_size
+          )
+          has_sampler_logps = (
               isinstance(batch, datatypes.RLTrainerPayload)
-              and batch.old_per_token_logps is not None
               and algo_config is not None
-              and algo_config.use_rollout_logps
-          ):
+              and (
+                  (
+                      batch.old_per_token_logps is not None
+                      and algo_config.use_rollout_logps
+                  )
+                  or (
+                      getattr(batch, "rollout_per_token_logps", None)
+                      is not None
+                      and not getattr(algo_config, "fused_tis", True)
+                  )
+              )
+          )
+          if has_sampler_logps and not can_fuse_agreement_in_loss:
             batch = await self._apply_sampler_trainer_agreement(
                 batch, step_sampler_agreement
             )

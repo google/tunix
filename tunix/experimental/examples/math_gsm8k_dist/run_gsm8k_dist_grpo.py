@@ -302,6 +302,28 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
+      "--sampler_is",
+      choices=(None, "none", "token"),
+      default=None,
+      help="Token-level truncated importance sampling mode ('none' or 'token').",
+  )
+  parser.add_argument(
+      "--sampler_is_threshold",
+      type=float,
+      default=2.0,
+      help="Maximum per-token TIS correction weight when sampler_is='token'.",
+  )
+  parser.add_argument(
+      "--fused_tis",
+      action=argparse.BooleanOptionalAction,
+      default=True,
+      help=(
+          "Fuse sampler-trainer agreement and TIS into the GRPO loss step"
+          " (default True). Pass --no-fused_tis to run the separate pre-step"
+          " per_token_logps RPC pass."
+      ),
+  )
+  parser.add_argument(
       "--debug",
       action="store_true",
       help="Enable debug logging and print full sampler responses.",
@@ -353,6 +375,11 @@ def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
           args.truncated_importance_sampling_ratio
       ),
       sampler_is_length_buckets=args.sampler_is_length_buckets,
+      sampler_is=(
+          None if args.sampler_is in (None, "none") else args.sampler_is
+      ),
+      sampler_is_threshold=args.sampler_is_threshold,
+      fused_tis=args.fused_tis,
   )
   return algorithm_adapter.GRPOAdapter(
       algo_config=algo_config,
