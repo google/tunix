@@ -20,7 +20,6 @@ import argparse
 import ast
 import asyncio
 import logging
-import math
 import os
 from pathlib import Path
 import pickle
@@ -35,6 +34,7 @@ from jax.sharding import Mesh
 from orbax import checkpoint as ocp
 from tunix.cli import config as cli_config
 from tunix.cli.utils import model as model_utils
+from tunix.common import configs as common_configs
 from tunix.experimental.train import peft_trainer_v2
 from tunix.experimental.weight_sync import raiden_preload
 from tunix.experimental.worker import remote_execution
@@ -638,9 +638,7 @@ def _create_maxtext_trainer_factory(args) -> tuple[Any, Mesh]:
       args.model_id, args.tokenizer_path, args.model_dir
   )
   checkpointing_options = _checkpointing_options(args)
-  grad_accumulation_steps = max(
-      1, math.ceil(args.mini_batch_size / args.train_micro_batch_size)
-  )
+  grad_accumulation_steps = _gradient_accumulation_steps(args)
   if args.optimizer_schedule_type:
     logging.warning(
         "--optimizer_schedule_type=%s is ignored by the maxtext backend, which"
@@ -696,6 +694,10 @@ def _create_maxtext_trainer_factory(args) -> tuple[Any, Mesh]:
 
 
 def _gradient_accumulation_steps(args: argparse.Namespace) -> int:
+  if common_configs.is_sequence_packing_enabled(args):
+    # With sequence packing, micro-batch count per step is dynamic and
+    # gradients/metrics are normalized by token count rather than this config.
+    return 1
   if args.mini_batch_size <= 0:
     raise ValueError("--mini_batch_size must be positive.")
   if args.num_generations <= 0:
@@ -751,16 +753,27 @@ def _create_tunix_trainer_factory(args) -> tuple[Any, Mesh]:
       # metadata.
       resume_from_checkpoint_on_init=False,
   )
-  logging.info(
-      "PeftTrainer v2 gradient_accumulation_steps=%d "
-      "(mini_batch_size=%d prompt groups, num_generations=%d, "
-      "update_trajectories=%d, train_micro_batch_size=%d).",
-      grad_accumulation_steps,
-      args.mini_batch_size,
-      args.num_generations,
-      update_trajectories,
-      args.train_micro_batch_size,
-  )
+  if common_configs.is_sequence_packing_enabled(args):
+    logging.info(
+        "Trainer gradient accumulation is dynamic via sequence packing "
+        "(max_seq_token_per_tpu=%d, mini_batch_size=%d prompt groups, "
+        "num_generations=%d, update_trajectories=%d).",
+        args.max_seq_token_per_tpu,
+        args.mini_batch_size,
+        args.num_generations,
+        update_trajectories,
+    )
+  else:
+    logging.info(
+        "Trainer gradient_accumulation_steps=%d "
+        "(mini_batch_size=%d prompt groups, num_generations=%d, "
+        "update_trajectories=%d, train_micro_batch_size=%d).",
+        grad_accumulation_steps,
+        args.mini_batch_size,
+        args.num_generations,
+        update_trajectories,
+        args.train_micro_batch_size,
+    )
 
   def _factory():
     # `sampler_type` and `rollout_tp_size` describe the weight-sync

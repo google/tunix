@@ -604,6 +604,31 @@ class MllogUtilsTest(absltest.TestCase):
     self.assertIn('"key": "block_stop"', content)
     self.assertIn('"key": "run_stop"', content)
 
+  def test_init_print_sequence_packing_sets_micro_batch_to_one_and_omits_grad_accum(
+      self,
+  ):
+    args = types.SimpleNamespace(
+        seed=1,
+        metric_logger_dir=self.test_dir,
+        batch_size=8,
+        mini_batch_size=4,
+        num_generations=8,
+        train_micro_batch_size=2,
+        max_seq_token_per_tpu=4096,
+        trainer_fsdp=4,
+        trainer_dp=2,
+        max_steps=5,
+    )
+    mllog_utils.init_start(args)
+    mllog_utils.init_print(args, total_devices=64)
+
+    expected_log_file = os.path.join(self.test_dir, "seed_1.out")
+    with open(expected_log_file, "r") as f:
+      content = f.read()
+
+    self.assertIn('"key": "micro_batch_size", "value": 1', content)
+    self.assertNotIn('"key": "gradient_accumulation_steps"', content)
+
 
 if __name__ == "__main__":
   absltest.main()

@@ -317,11 +317,22 @@ class TrainingConfig:
   # large budgets; ``pack_sequences`` raises if a pack exceeds it.
   max_segments_per_packed_row: int | None = None
 
+  @property
+  def sequence_packing_enabled(self) -> bool:
+    """Returns True if sequence packing (`max_seq_token_per_tpu > 0`) is enabled."""
+    return is_sequence_packing_enabled(self)
+
   def get_with_default(self, key: str, default: Any) -> Any:
     val = getattr(self, key)
     if val is None:
       return default
     return val
+
+
+def is_sequence_packing_enabled(config: Any) -> bool:
+  """Returns True if sequence packing (`max_seq_token_per_tpu > 0`) is enabled."""
+  budget = getattr(config, "max_seq_token_per_tpu", None)
+  return isinstance(budget, int) and budget > 0
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
@@ -376,7 +387,10 @@ class RLTrainingConfig(TrainingConfig):
           "`mini_batch_size // train_micro_batch_size`."
       )
 
-    if self.train_micro_batch_size is not None:
+    if (
+        self.train_micro_batch_size is not None
+        and not self.sequence_packing_enabled
+    ):
       if self.mini_batch_size is None:
         raise ValueError(
             "For RL training, `mini_batch_size` must be set when"

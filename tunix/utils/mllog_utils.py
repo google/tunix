@@ -19,6 +19,7 @@ import os
 from typing import Any, Callable, Iterable, Mapping, Optional
 import jax
 import numpy as np
+from tunix.common import configs as common_configs
 
 try:
   from mlperf_logging import mllog
@@ -675,7 +676,11 @@ def init_print(
   num_generations = getattr(args, "num_generations", 8)
   global_batch_size = batch_size * num_generations
   mini_batch_size = getattr(args, "mini_batch_size", batch_size)
-  train_micro_batch_size = getattr(args, "train_micro_batch_size", 1)
+  packing_enabled = common_configs.is_sequence_packing_enabled(args)
+  if packing_enabled:
+    train_micro_batch_size = 1
+  else:
+    train_micro_batch_size = getattr(args, "train_micro_batch_size", 1)
   max_steps = getattr(args, "max_steps", 50)
   max_prompt_length = getattr(args, "max_prompt_length", 4096)
   max_response_length = getattr(args, "max_response_length", 8192)
@@ -724,8 +729,11 @@ def init_print(
     else:
       platform = "TPU-Ironwood"
 
-  # Gradient accumulation steps
-  grad_accum_steps = max(1, batch_size // mini_batch_size)
+  # Gradient accumulation steps (dynamic per step when packing is enabled)
+  if packing_enabled:
+    grad_accum_steps = None
+  else:
+    grad_accum_steps = max(1, batch_size // mini_batch_size)
 
   # 1. Submission Metadata
   mllogger.event(

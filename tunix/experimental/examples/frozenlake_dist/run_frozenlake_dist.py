@@ -34,6 +34,7 @@ if REPO_ROOT not in sys.path:
   sys.path.insert(0, REPO_ROOT)
 
 # pylint: disable=g-import-not-at-top
+from tunix.common import configs as common_configs
 from tunix.experimental.common import datatypes
 from tunix.experimental.distributed.runtime import context as runtime_context
 from tunix.experimental.examples.frozenlake_dist import frozenlake
@@ -182,7 +183,10 @@ def _validate_args(args: argparse.Namespace) -> None:
   if args.train_micro_batch_size <= 0:
     raise ValueError("train_micro_batch_size must be positive.")
   update_size = args.mini_batch_size * args.num_generations
-  if update_size % args.train_micro_batch_size != 0:
+  if (
+      not common_configs.is_sequence_packing_enabled(args)
+      and update_size % args.train_micro_batch_size != 0
+  ):
     raise ValueError(
         "mini_batch_size * num_generations must be divisible by "
         "train_micro_batch_size."

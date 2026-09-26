@@ -490,6 +490,21 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
         "max_seq_token_per_tpu", mock_training_config.call_args.kwargs
     )
 
+  def test_gradient_accumulation_steps_with_sequence_packing(self):
+    args = run_trainer_node._parse_args([
+        "--mini_batch_size",
+        "5",
+        "--num_generations",
+        "3",
+        "--train_micro_batch_size",
+        "4",
+        "--mesh_fsdp",
+        "4",
+        "--max_seq_token_per_tpu",
+        "4096",
+    ])
+    self.assertEqual(run_trainer_node._gradient_accumulation_steps(args), 1)
+
   @mock.patch.object(
       run_trainer_node,
       "_ensure_model_dir_for_trainer",
