@@ -68,9 +68,9 @@ You can override configuration variables via environment variables at launch tim
 # Set your environment variables
 export WANDB_API_KEY="your_wandb_api_key_here"
 export MAXTEXT_OUTPUT_DIR="gs://<your-bucket>/trellis/maxtext"
-export TUNIX_IMAGE="gcr.io/cloud-tpu-multipod-dev/${USER}/trellis-35b:latest"
+export TUNIX_IMAGE="gcr.io/cloud-tpu-multipod-dev/${USER}/trellis:latest" 
 
-# Launch the run
+# Launch the run (change recipe script as needed)
 bash tunix/experimental/examples/recipes/mlperf_35b_128_v5p.sh start
 ```
 
