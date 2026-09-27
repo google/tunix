@@ -95,9 +95,15 @@ _CHUNK_BYTES = int(os.environ.get("TUNIX_GRPC_CHUNK_BYTES", 512 * 1024 * 1024))
 _CHUNKED_MAGIC = b"TUNIX_CHUNKED\x00"
 # PutChunk header: 16-byte upload id, chunk index, total chunk count.
 _CHUNK_HEADER = struct.Struct("!16sII")
-# Uploads never claimed by an Execute/DispatchTask (client died mid-upload) are
-# dropped after this long so they don't pin host memory forever.
-_CHUNK_UPLOAD_TTL_S = 3600.0
+_UPLOAD_ID_BYTES = 16
+# Bounds the list PutChunk allocates from a header's total; 64 TiB at the
+# default chunk size.
+_MAX_CHUNKS = 1 << 17
+# Uploads that receive no chunk and are not claimed by an Execute/DispatchTask
+# for this long (client died mid-upload) are dropped so they don't pin
+# gigabytes of host memory. Measured from the last chunk, so a slow upload that
+# is still making progress never expires.
+_CHUNK_UPLOAD_TTL_S = 300.0
 
 
 def _grpc_options() -> List[Tuple[str, int]]:
@@ -404,8 +410,8 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
     super().__init__(instance)
     self._server: Optional[Any] = None
     self._serve_loop: Optional[Any] = None
-    # upload id -> (first-chunk time, chunks); filled by PutChunk.
-    self._uploads: Dict[bytes, Tuple[float, List[Optional[bytes]]]] = {}
+    # upload id -> [last-chunk time, chunks]; filled by PutChunk.
+    self._uploads: Dict[bytes, List[Any]] = {}
 
   async def _handle_put_chunk(self, chunk_bytes: bytes, context: Any) -> bytes:
     del context
@@ -416,9 +422,25 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
     ]:
       logging.warning("Dropping abandoned chunked upload %s", stale.hex())
       del self._uploads[stale]
+    if len(chunk_bytes) < _CHUNK_HEADER.size:
+      raise ValueError(
+          f"chunk of {len(chunk_bytes)} bytes is shorter than its header"
+      )
     upload_id, index, total = _CHUNK_HEADER.unpack_from(chunk_bytes)
-    _, chunks = self._uploads.setdefault(upload_id, (now, [None] * total))
-    chunks[index] = chunk_bytes[_CHUNK_HEADER.size :]
+    if not 0 < total <= _MAX_CHUNKS:
+      raise ValueError(f"invalid chunk count {total} (max {_MAX_CHUNKS})")
+    if index >= total:
+      raise ValueError(f"chunk index {index} out of range for {total} chunks")
+    entry = self._uploads.get(upload_id)
+    if entry is None:
+      entry = self._uploads[upload_id] = [now, [None] * total]
+    elif len(entry[1]) != total:
+      raise ValueError(
+          f"chunked upload {upload_id.hex()} declared {len(entry[1])} chunks,"
+          f" this chunk declares {total}"
+      )
+    entry[0] = now
+    entry[1][index] = chunk_bytes[_CHUNK_HEADER.size :]
     return b""
 
   def _reassemble(self, request_bytes: bytes) -> bytes:
@@ -426,6 +448,8 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
     if not request_bytes.startswith(_CHUNKED_MAGIC):
       return request_bytes
     upload_id = request_bytes[len(_CHUNKED_MAGIC) :]
+    if len(upload_id) != _UPLOAD_ID_BYTES:
+      raise RuntimeError(f"invalid chunked upload id of {len(upload_id)} bytes")
     entry = self._uploads.pop(upload_id, None)
     if entry is None:
       raise RuntimeError(f"unknown chunked upload {upload_id.hex()}")
@@ -682,6 +706,12 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     upload_id = uuid.uuid4().bytes
     view = memoryview(payload)
     total = -(-len(payload) // _CHUNK_BYTES)
+    if total > _MAX_CHUNKS:
+      raise ValueError(
+          f"request {request.method_name} needs {total} chunks of"
+          f" {_CHUNK_BYTES} bytes, over the {_MAX_CHUNKS} the server accepts;"
+          " raise TUNIX_GRPC_CHUNK_BYTES"
+      )
     logging.info(
         "Request %s is %.2f GiB; uploading in %d chunks",
         request.method_name,

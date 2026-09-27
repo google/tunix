@@ -704,6 +704,66 @@ class RemoteExecutionTest(absltest.TestCase):
 
     asyncio.run(_run_test())
 
+  def test_put_chunk_rejects_malformed_chunks(self):
+    """Bad chunk headers and upload references raise instead of corrupting state."""
+    server = remote_lib.GrpcRemoteExecutionServer()
+    header = remote_lib._CHUNK_HEADER
+    upload_id = b"u" * 16
+
+    async def put(chunk_bytes):
+      return await server._handle_put_chunk(chunk_bytes, None)
+
+    async def _run():
+      with self.assertRaisesRegex(ValueError, "shorter than its header"):
+        await put(b"short")
+      with self.assertRaisesRegex(ValueError, "invalid chunk count 0"):
+        await put(header.pack(upload_id, 0, 0))
+      with self.assertRaisesRegex(ValueError, "invalid chunk count"):
+        await put(header.pack(upload_id, 0, remote_lib._MAX_CHUNKS + 1))
+      with self.assertRaisesRegex(ValueError, "out of range"):
+        await put(header.pack(upload_id, 2, 2))
+      self.assertEmpty(server._uploads)
+      await put(header.pack(upload_id, 0, 2) + b"a")
+      with self.assertRaisesRegex(ValueError, "declared 2 chunks"):
+        await put(header.pack(upload_id, 1, 3) + b"b")
+      await put(header.pack(upload_id, 1, 2) + b"b")
+      ref = remote_lib._CHUNKED_MAGIC + upload_id
+      self.assertEqual(server._reassemble(ref), b"ab")
+      with self.assertRaisesRegex(RuntimeError, "invalid chunked upload id"):
+        server._reassemble(remote_lib._CHUNKED_MAGIC + b"x")
+      with self.assertRaisesRegex(RuntimeError, "unknown chunked upload"):
+        server._reassemble(ref)
+
+    asyncio.run(_run())
+
+  def test_chunk_upload_expires_only_when_idle(self):
+    """An upload still receiving chunks survives the TTL; an idle one is dropped."""
+    server = remote_lib.GrpcRemoteExecutionServer()
+    header = remote_lib._CHUNK_HEADER
+    ttl = remote_lib._CHUNK_UPLOAD_TTL_S
+    active, idle = b"a" * 16, b"i" * 16
+    clock = [1000.0]
+
+    async def put(upload_id, index, total):
+      return await server._handle_put_chunk(
+          header.pack(upload_id, index, total) + bytes([index]), None
+      )
+
+    async def _run():
+      with mock.patch.object(remote_lib.time, "monotonic", lambda: clock[0]):
+        await put(active, 0, 3)
+        await put(idle, 0, 2)
+        clock[0] += 0.75 * ttl
+        await put(active, 1, 3)
+        clock[0] += 0.75 * ttl  # 1.5 TTL since the first chunk of each
+        await put(active, 2, 3)
+      self.assertNotIn(idle, server._uploads)
+      self.assertEqual(
+          server._reassemble(remote_lib._CHUNKED_MAGIC + active), b"\x00\x01\x02"
+      )
+
+    asyncio.run(_run())
+
   def test_dispatch_task_method_accepting_domain_request_id(self):
     class WorkerWithRequestIdParam:
 
