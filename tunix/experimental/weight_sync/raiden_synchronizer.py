@@ -475,7 +475,7 @@ def _compute_host_subgrid(
 def _use_direct_device_buffer() -> bool:
   """Returns whether zero-copy direct device buffer mode is enabled."""
   val = (
-      os.environ.get("RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFER", "1").strip().lower()
+      os.environ.get("RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFER", "0").strip().lower()
   )
   enabled = val in ("1", "true", "yes", "on")
   if enabled:
