@@ -239,6 +239,56 @@ class RaidenSynchronizerTest(absltest.TestCase):
     self.assertEqual(sums["__tensor_count__"], 2)
     self.assertEqual(sums["__element_count__"], 2 * 4 + 3)
 
+  def test_checksums_empty_arrays(self):
+    sync = raiden_synchronizer.RaidenSynchronizer("rollout")
+    self.assertEqual(
+        sync.checksums(),
+        {
+            "__grand_total__": 0.0,
+            "__tensor_count__": 0,
+            "__element_count__": 0,
+        },
+    )
+
+  def test_checksums_reuses_jitted_abs_sums_across_calls(self):
+    sync = raiden_synchronizer.RaidenSynchronizer("rollout", self._state())
+    raiden_synchronizer._jitted_abs_sums.cache_clear()
+    first = sync.checksums()
+    second = sync.checksums()
+    self.assertEqual(first, second)
+    cache_info = raiden_synchronizer._jitted_abs_sums.cache_info()
+    self.assertEqual(cache_info.misses, 1)
+    self.assertGreaterEqual(cache_info.hits, 1)
+
+  def test_patch_raiden_worker_sync_patches_checksums(self):
+    class _FakeRaidenWorkerSync:
+      _patched_by_tunix = False
+
+      def __init__(self):
+        self._sync = None
+        self.names = ["a", "b"]
+        self.arrays = [
+            jnp.array([-2.0, 3.0], dtype=jnp.float32),
+            jnp.array([4.0], dtype=jnp.float32),
+        ]
+
+    fake_mod = mock.MagicMock(RaidenWorkerSync=_FakeRaidenWorkerSync)
+    with (
+        mock.patch.dict("os.environ", {"JAX_PLATFORMS": "tpu"}),
+        mock.patch.object(
+            raiden_synchronizer, "_lazy_import_module", return_value=fake_mod
+        ),
+    ):
+      raiden_synchronizer.patch_raiden_worker_sync()
+
+    worker_sync = _FakeRaidenWorkerSync()
+    sums = worker_sync.checksums(sample=1)
+    self.assertEqual(sums["a"], 5.0)
+    self.assertNotIn("b", sums)
+    self.assertEqual(sums["__grand_total__"], 9.0)
+    self.assertEqual(sums["__tensor_count__"], 2)
+    self.assertEqual(sums["__element_count__"], 3)
+
   def test_work_unit_metadata_shards_and_addresses(self):
     sync = raiden_synchronizer.RaidenSynchronizer(
         "rollout", self._state(), bind_ip="1.2.3.4"
