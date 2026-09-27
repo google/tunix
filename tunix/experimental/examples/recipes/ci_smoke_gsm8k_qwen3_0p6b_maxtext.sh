@@ -40,6 +40,7 @@ export ARTIFACT_ROOT="${ARTIFACT_ROOT:-${DIR}/../../../../artifacts/qwen3_dist_g
 export MODEL_DIR="${MODEL_DIR:-${ARTIFACT_ROOT}/models/${MODEL_NAME}}"
 export TOKENIZER_PATH="${TOKENIZER_PATH:-$MODEL_DIR}"
 export MAXTEXT_CKPT="${MAXTEXT_CKPT:-${ARTIFACT_ROOT}/maxtext_models/${MAXTEXT_MODEL_NAME}/0/items}"
+export MAXTEXT_OUTPUT_DIR="${MAXTEXT_OUTPUT_DIR:-${ARTIFACT_ROOT}/maxtext_out}"
 export CHECKPOINT_ROOT_DIRECTORY="${CHECKPOINT_ROOT_DIRECTORY:-${ARTIFACT_ROOT}/checkpoints_maxtext}"
 
 # Stack Configuration: MaxText trainer + vLLM rollout + Raiden weight converter

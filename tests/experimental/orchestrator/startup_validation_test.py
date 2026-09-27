@@ -130,6 +130,16 @@ class StartupValidationTest(absltest.TestCase):
         any("divisible by train_micro_batch_size" in e for e in errors)
     )
 
+  def test_run_geometry_ignores_train_micro_batch_size_when_packed(self):
+    self.training_config.mini_batch_size = 8
+    self.training_config.train_micro_batch_size = 3  # Ignored when packed
+    self.training_config.max_seq_token_per_tpu = 4096
+    validator = startup_validation.RunGeometryValidator()
+    errors = validator.validate(
+        self.registry, self.alg_config, self.training_config
+    )
+    self.assertEmpty(errors)
+
   def test_run_geometry_grpo_num_generations_one_rejected(self):
     self.alg_config.algo_variant = "grpo"
     self.alg_config.num_generations = 1

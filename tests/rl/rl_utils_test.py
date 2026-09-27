@@ -840,12 +840,21 @@ class ComputePackSizeTest(parameterized.TestCase):
     with self.assertNoLogs(level='WARNING'):
       utils.compute_pack_size(mesh)
 
+  def test_multiplies_expert_and_fsdp_transpose_and_data_axes(self):
+    mesh = mock.Mock(
+        shape={'data': 2, 'fsdp': 4, 'fsdp_transpose': 2, 'expert': 4, 'tp': 2}
+    )
+    self.assertEqual(utils.compute_pack_size(mesh), 64)
+
   def test_warns_and_defaults_to_one_without_batch_axis(self):
-    # No 'fsdp'/'dp' axis (tp-only): pack_size falls back to 1, with a warning.
+    # No batch-sharding axis (tp-only): pack_size falls back to 1, with a warning.
     mesh = mock.Mock(shape={'tp': 4})
     with self.assertLogs(level='WARNING') as logs:
       self.assertEqual(utils.compute_pack_size(mesh), 1)
-    self.assertIn("no 'fsdp'/'dp' axis", logs.output[0])
+    self.assertIn(
+        'no batch-sharding axis (fsdp/dp/data/fsdp_transpose/expert)',
+        logs.output[0],
+    )
     self.assertIn("'tp': 4", logs.output[0])
 
 
