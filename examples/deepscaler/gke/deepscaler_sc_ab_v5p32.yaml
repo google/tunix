@@ -1,0 +1,335 @@
+# JobSet template: one arm of the DeepScaleR Score Centering A/B on a v5p-32
+# (2x2x4) slice with Pathways. Rendered by launch_sc_ab.sh, which fills in
+# every double-brace placeholder; do not kubectl-apply this file directly.
+#
+# Layout:
+#   pathways-head (CPU node pool): Pathways proxy + resource manager as native
+#     sidecars, plus the Python controller running train_deepscaler_nb.py
+#     with JAX_PLATFORMS=proxy.
+#   worker (4 x v5p hosts, 4 chips each): Pathways servers.
+# The recipe splits the 16 chips itself (--rollout_devices 8): devices[:8] run
+# vLLM rollout, devices[8:] hold actor + reference.
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: {{JOBSET_NAME}}
+  namespace: default
+  labels:
+    kueue.x-k8s.io/queue-name: multislice-queue
+    experiment: {{EXPERIMENT}}
+    arm: {{ARM}}
+spec:
+  coordinator:
+    replicatedJob: pathways-head
+  failurePolicy:
+    # Crash / preemption: recreate the whole JobSet. With CKPT_DIR set the recipe
+    # resumes from the latest checkpoint and the W&B run (fixed WANDB_RUN_ID);
+    # with an empty CKPT_DIR it retrains from step 0 as W&B run <id>-a<attempt>.
+    restartStrategy: Recreate
+    maxRestarts: {{MAX_RESTARTS}}
+  network:
+    enableDNSHostnames: true
+    publishNotReadyAddresses: true
+  startupPolicy:
+    startupPolicyOrder: InOrder
+  successPolicy:
+    operator: All
+    targetReplicatedJobs:
+    - pathways-head
+  replicatedJobs:
+  - name: pathways-head
+    replicas: 1
+    template:
+      metadata:
+        annotations:
+          # One head per node: the head uses hostNetwork (ports 29000/29001).
+          alpha.jobset.sigs.k8s.io/exclusive-topology: kubernetes.io/hostname
+      spec:
+        backoffLimit: 0
+        completionMode: Indexed
+        completions: 1
+        parallelism: 1
+        template:
+          metadata:
+            labels:
+              experiment: {{EXPERIMENT}}
+              arm: {{ARM}}
+          spec:
+            nodeSelector:
+              cloud.google.com/gke-nodepool: cpu-np
+            tolerations:
+            - key: cloud.google.com/gke-nodepool
+              operator: Equal
+              value: cpu-np
+              effect: NoSchedule
+            hostNetwork: true
+            dnsPolicy: ClusterFirstWithHostNet
+            restartPolicy: Never
+            initContainers:
+            - name: pathways-proxy
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:{{PATHWAYS_TAG}}
+              imagePullPolicy: Always
+              restartPolicy: Always
+              args:
+              - --server_port=29000
+              - --resource_manager_address=$(PATHWAYS_HEAD):29001
+              - --gcs_scratch_location=gs://cloud-pathways-staging/tmp
+              env:
+              - name: PATHWAYS_HEAD
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+              ports:
+              - containerPort: 29000
+                protocol: TCP
+              resources:
+                limits:
+                  cpu: "16"
+                  memory: 100G
+            - name: pathways-rm
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:{{PATHWAYS_TAG}}
+              imagePullPolicy: Always
+              restartPolicy: Always
+              args:
+              - --server_port=29001
+              - --gcs_scratch_location=gs://cloud-pathways-staging/tmp
+              - --node_type=resource_manager
+              - --instance_count=1
+              - --instance_type=tpuv5:2x2x4
+              env:
+              - name: REPLICATED_JOB_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.annotations['jobset.sigs.k8s.io/replicatedjob-name']
+              - name: JOBSET_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.annotations['jobset.sigs.k8s.io/jobset-name']
+              - name: HOST_ADDRESS
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+              - name: TPU_SKIP_MDS_QUERY
+                value: "true"
+              ports:
+              - containerPort: 29001
+                protocol: TCP
+              - containerPort: 29002
+                protocol: TCP
+              resources:
+                limits:
+                  cpu: "8"
+                  memory: 32G
+            containers:
+            - name: jax-tpu
+              image: {{IMAGE}}
+              imagePullPolicy: Always
+              securityContext:
+                privileged: true
+              workingDir: /app
+              command:
+              - bash
+              - -c
+              - |
+                set -euo pipefail
+                echo "[sc-ab] start $(date -u +%FT%TZ) jobset=${JOBSET_NAME} restart_attempt=${JOBSET_RESTART_ATTEMPT}"
+                if [[ -z "${CKPT_DIR}" && "${JOBSET_RESTART_ATTEMPT:-0}" != "0" ]]; then
+                  # No checkpoints: this attempt retrains from step 0, so it logs
+                  # to its own W&B run (W&B drops steps below a run's last step).
+                  export WANDB_RUN_ID="${WANDB_RUN_ID}-a${JOBSET_RESTART_ATTEMPT}"
+                  export WANDB_RUN_NAME="${WANDB_RUN_NAME}-a${JOBSET_RESTART_ATTEMPT}"
+                  echo "[sc-ab] no CKPT_DIR: retraining from step 0 as W&B run ${WANDB_RUN_ID}"
+                fi
+                if [[ -n "${CODE_TARBALL}" ]]; then
+                  # Hotfix path: overlay a source tarball on /app (tunix is
+                  # installed in editable mode) instead of rebuilding the image.
+                  echo "[sc-ab] overlaying code from ${CODE_TARBALL}"
+                  python3 -c 'import gcsfs, io, os, tarfile; tarfile.open(fileobj=io.BytesIO(gcsfs.GCSFileSystem().cat(os.environ["CODE_TARBALL"])), mode="r:gz").extractall("/app")'
+                fi
+                # tunix logs a warning and silently drops the W&B backend when
+                # wandb.init fails, so check the key before burning TPU time.
+                python3 -c 'import os, wandb; assert wandb.login(key=os.environ["WANDB_API_KEY"], verify=True)'
+                echo "[sc-ab] W&B login ok; waiting ${STARTUP_SLEEP_S}s for Pathways workers"
+                sleep "${STARTUP_SLEEP_S}"
+                exec python3 -X faulthandler -u examples/deepscaler/train_deepscaler_nb.py {{TRAIN_ARGS}}
+              env:
+              - name: PATHWAYS_HEAD
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+              - name: JOBSET_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.annotations['jobset.sigs.k8s.io/jobset-name']
+              - name: JOBSET_RESTART_ATTEMPT
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/restart-attempt']
+              - name: JAX_PLATFORMS
+                value: proxy,cpu
+              - name: JAX_BACKEND_TARGET
+                value: grpc://127.0.0.1:29000
+              - name: ENABLE_PATHWAYS_PERSISTENCE
+                value: "1"
+              - name: XCLOUD_ENVIRONMENT
+                value: GCP
+              - name: TPU_MIN_LOG_LEVEL
+                value: "0"
+              - name: TF_CPP_MIN_LOG_LEVEL
+                value: "0"
+              - name: TPU_STDERR_LOG_LEVEL
+                value: "0"
+              - name: ROLLOUT_ENGINE
+                value: vllm
+              - name: SKIP_JAX_PRECOMPILE
+                value: "True"
+              - name: PYTHONPATH
+                value: /app
+              - name: HF_HOME
+                value: /tmp/hf
+              - name: STARTUP_SLEEP_S
+                value: "60"
+              - name: CODE_TARBALL
+                value: "{{CODE_TARBALL}}"
+              - name: DATA_DIR
+                value: "{{DATA_DIR}}"
+              - name: DATA_PATH_PREFIX
+                value: "{{DATA_DIR}}"
+              - name: CKPT_DIR
+                value: "{{CKPT_DIR}}"
+              - name: TB_LOG_DIR
+                value: "{{TB_LOG_DIR}}"
+              - name: DISABLE_TRAJECTORY_LOG
+                value: "1"
+              - name: EXIT_AFTER_TRAIN
+                value: "1"
+              - name: WANDB_API_KEY
+                valueFrom:
+                  secretKeyRef:
+                    name: {{WANDB_SECRET}}
+                    key: api-key
+              - name: WANDB_PROJECT
+                value: "{{WANDB_PROJECT}}"
+              - name: WANDB_RUN_GROUP
+                value: "{{WANDB_GROUP}}"
+              - name: WANDB_RUN_NAME
+                value: "{{WANDB_RUN_NAME}}"
+              - name: WANDB_RUN_ID
+                value: "{{WANDB_RUN_ID}}"
+              - name: WANDB_RESUME
+                value: allow
+              - name: WANDB_TAGS
+                value: "{{WANDB_TAGS}}"
+              resources:
+                limits:
+                  cpu: "24"
+                  memory: 100G
+              volumeMounts:
+              - name: shared-tmp
+                mountPath: /tmp
+              - name: dshm
+                mountPath: /dev/shm
+            volumes:
+            - name: shared-tmp
+              hostPath:
+                path: /tmp
+                type: DirectoryOrCreate
+            # vLLM uses shared memory for IPC; the container default is 64MB.
+            - name: dshm
+              emptyDir:
+                medium: Memory
+                sizeLimit: 16Gi
+  - name: worker
+    replicas: 1
+    template:
+      metadata:
+        annotations:
+          alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool
+      spec:
+        backoffLimit: 16
+        completionMode: Indexed
+        completions: 4
+        parallelism: 4
+        template:
+          metadata:
+            labels:
+              experiment: {{EXPERIMENT}}
+              arm: {{ARM}}
+          spec:
+            nodeSelector:
+              cloud.google.com/gke-tpu-accelerator: tpu-v5p-slice
+              cloud.google.com/gke-tpu-topology: 2x2x4
+              cloud.google.com/reservation-name: {{RESERVATION}}
+            tolerations:
+            - key: google.com/tpu
+              operator: Exists
+            - key: cloud.google.com/reservation-name
+              operator: Equal
+              value: {{RESERVATION}}
+              effect: NoSchedule
+            priorityClassName: {{PRIORITY_CLASS}}
+            hostNetwork: true
+            dnsPolicy: ClusterFirstWithHostNet
+            restartPolicy: OnFailure
+            terminationGracePeriodSeconds: 30
+            containers:
+            - name: pathways-worker
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:{{PATHWAYS_TAG}}
+              imagePullPolicy: Always
+              args:
+              - --server_port=29005
+              - --resource_manager_address=$(PATHWAYS_HEAD):29001
+              - --gcs_scratch_location=gs://cloud-pathways-staging/tmp
+              env:
+              - name: TPU_MIN_LOG_LEVEL
+                value: "0"
+              - name: TF_CPP_MIN_LOG_LEVEL
+                value: "0"
+              - name: XCLOUD_ENVIRONMENT
+                value: GCP
+              - name: MEGASCALE_GRPC_ENABLE_XOR_TRACER
+                value: "false"
+              - name: MEGASCALE_NUM_SLICES
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/replicatedjob-replicas']
+              - name: JOBSET_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.annotations['jobset.sigs.k8s.io/jobset-name']
+              - name: REPLICATED_JOB_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.annotations['jobset.sigs.k8s.io/replicatedjob-name']
+              - name: MEGASCALE_SLICE_ID
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/job-index']
+              - name: PATHWAYS_HEAD
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+              - name: MEGASCALE_COORDINATOR_ADDRESS
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+              ports:
+              - containerPort: 29005
+                protocol: TCP
+              - containerPort: 29006
+                protocol: TCP
+              - containerPort: 8471
+                protocol: TCP
+              - containerPort: 8080
+                protocol: TCP
+              resources:
+                limits:
+                  google.com/tpu: "4"
+              volumeMounts:
+              - name: shared-tmp
+                mountPath: /tmp
+            volumes:
+            - name: shared-tmp
+              hostPath:
+                path: /tmp
+                type: DirectoryOrCreate

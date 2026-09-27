@@ -42,6 +42,12 @@ absl_logging.set_stderrthreshold("info")
 
 print("Logging configured at INFO level.")
 
+# ====== Pathways ======
+ON_PATHWAYS = "proxy" in os.getenv("JAX_PLATFORMS", "")
+if ON_PATHWAYS:
+  os.environ["FLAGS_pathways_enforce_subset_devices_form_subslice"] = "false"
+  sys.argv.append("--FLAGS_pathways_enforce_subset_devices_form_subslice=false")
+
 try:
   from etils import ecolab
 
@@ -74,12 +80,28 @@ with cm:
   from tunix import PerfMetricsConfig
   from tunix.perf.experimental.export import PerfMetricsExport
 
+if ON_PATHWAYS:
+  try:
+    from absl import flags
+
+    flags.FLAGS.pathways_enforce_subset_devices_form_subslice = False
+  except Exception:
+    pass
+
+_DISTRIBUTED_INITIALIZED = False
 try:
   import pathwaysutils
 
   pathwaysutils.initialize()
-except:
+  _DISTRIBUTED_INITIALIZED = True
+except Exception:
   pass
+
+if not _DISTRIBUTED_INITIALIZED:
+  try:
+    jax.distributed.initialize()
+  except Exception as exc:
+    print(f"jax.distributed.initialize() skipped: {exc}")
 
 print("jax devices: ", jax.devices())
 
@@ -93,7 +115,8 @@ arg_parser.add_argument("--learning_rate", type=float, default=1e-6)
 arg_parser.add_argument("--b1", type=float, default=0.9)
 arg_parser.add_argument("--b2", type=float, default=0.99)
 arg_parser.add_argument("--weight_decay", type=float, default=0.01)
-arg_parser.add_argument("--num_batches", type=int, default=312)
+arg_parser.add_argument("--num_batches", type=int, default=300)
+arg_parser.add_argument("--num_epochs", type=int, default=1)
 arg_parser.add_argument("--num_generations", type=int, default=8)
 arg_parser.add_argument("--beta", type=float, default=0.0)
 arg_parser.add_argument("--epsilon", type=float, default=0.2)
@@ -104,13 +127,57 @@ arg_parser.add_argument("--temperature", type=float, default=0.8)
 arg_parser.add_argument("--top_p", type=float, default=0.95)
 arg_parser.add_argument("--top_k", type=int, default=None)
 arg_parser.add_argument("--max_concurrency", type=int, default=768)
-arg_parser.add_argument("--shuffle_data", type=bool, default=False)
+arg_parser.add_argument("--shuffle_data", action="store_true", default=False)
 arg_parser.add_argument("--seed", type=int, default=42)
 arg_parser.add_argument(
     "--loss_agg_mode", type=str, default="token-mean"
 )
 arg_parser.add_argument(
     "--kl_loss_mode", type=str, default="low_var_kl"
+)
+arg_parser.add_argument(
+    "--score_centering", action="store_true", default=False,
+    help="Enable Score Centering off-policy gradient stabilization.",
+)
+arg_parser.add_argument(
+    "--score_centering_diagnostics", action="store_true", default=False,
+    help="Log score_centering/* diagnostics without adding the correction term or pinning PPO ratio.",
+)
+arg_parser.add_argument(
+    "--score_centering_top_k", type=int, default=32,
+    help="Top-k vocabulary cutoff for Score Centering.",
+)
+arg_parser.add_argument(
+    "--score_centering_eps", type=float, default=1e-6,
+    help="Epsilon for Score Centering probability division.",
+)
+arg_parser.add_argument(
+    "--no_ckpt", action="store_true", default=False,
+    help="Disable checkpoint saving.",
+)
+arg_parser.add_argument(
+    "--eval_every_n_steps", type=int, default=1000,
+    help="Evaluation interval.",
+)
+arg_parser.add_argument(
+    "--rollout_devices", type=int, default=8,
+    help="Number of rollout devices (e.g. 8 for v5p-32). If 0, uses default 4.",
+)
+arg_parser.add_argument(
+    "--rollout_dp", type=int, default=8,
+    help="Rollout DP dimension.",
+)
+arg_parser.add_argument(
+    "--train_micro_batch_size", type=int, default=2,
+    help="Train micro batch size.",
+)
+arg_parser.add_argument(
+    "--compute_logps_micro_batch_size", type=int, default=None,
+    help="Compute logps micro batch size.",
+)
+arg_parser.add_argument(
+    "--model_dtype", type=str, default="bfloat16",
+    help="Model parameter dtype (bfloat16 or float32).",
 )
 args, _ = arg_parser.parse_known_args()
 
@@ -172,8 +239,8 @@ NUM_BATCHES = args.num_batches
 # increased to a max. of 330 (if batch size is 4).
 NUM_TEST_BATCHES = 50
 
-EVAL_EVERY_N_STEPS = 1000  # this doesn't matter if `TRAIN_FRACTION = 1.0`.
-NUM_EPOCHS = 3  # can potentially train for more epochs
+EVAL_EVERY_N_STEPS = args.eval_every_n_steps  # this doesn't matter if `TRAIN_FRACTION = 1.0`.
+NUM_EPOCHS = args.num_epochs  # can potentially train for more epochs
 
 # Number of training steps.
 MAX_STEPS = int(NUM_BATCHES * NUM_ITERATIONS * TRAIN_FRACTION * NUM_EPOCHS)
@@ -184,7 +251,7 @@ MAX_CONCURRENCY = args.max_concurrency
 # Max number of off-policy steps. Default to 0 for synchronous training.
 OFF_POLICY_STEPS = 0
 
-MODEL_DTYPE = jnp.float32
+MODEL_DTYPE = jnp.bfloat16 if args.model_dtype == "bfloat16" else jnp.float32
 
 # === AdamW, warmup, cosine scheduler ===
 LEARNING_RATE = args.learning_rate
@@ -225,8 +292,22 @@ ROLLOUT_ENGINE = os.getenv(
 # )
 mesh = None
 
-trainer_devices = math.prod(TRAINER_MESH[0])
-rollout_devices = math.prod(ROLLOUT_MESH[0])
+if args.rollout_devices > 0:
+  rollout_devices = args.rollout_devices
+  trainer_devices = jax.device_count() - rollout_devices
+  if trainer_devices <= 0:
+    raise ValueError(
+        f"Not enough devices: {jax.device_count()} total, {rollout_devices} rollout"
+    )
+  rollout_dp = args.rollout_dp
+  rollout_tp = max(1, rollout_devices // rollout_dp)
+  ROLLOUT_MESH = [(rollout_dp, rollout_tp), ("fsdp", "tp")]
+  trainer_tp = 2 if trainer_devices % 2 == 0 else 1
+  trainer_fsdp = trainer_devices // trainer_tp
+  TRAINER_MESH = [(trainer_fsdp, trainer_tp), ("fsdp", "tp")]
+else:
+  trainer_devices = math.prod(TRAINER_MESH[0])
+  rollout_devices = math.prod(ROLLOUT_MESH[0])
 
 if trainer_devices + rollout_devices > jax.device_count():  # pyrefly: ignore[unsupported-operation]
   raise ValueError(
@@ -245,20 +326,10 @@ if ROLLOUT_ENGINE in ("sglang_jax", "vllm"):
       axis_names=ROLLOUT_MESH[1],
       axis_types=(jax.sharding.AxisType.Auto,) * len(ROLLOUT_MESH[0]),
   )
-  # rollout_mesh = jax.make_mesh(
-  #     *ROLLOUT_MESH,
-  #     devices=jax.devices()[:rollout_devices],
-  #     axis_types=(jax.sharding.AxisType.Auto,) * len(ROLLOUT_MESH[0]),
-  # )
   print(f"YY {rollout_device_list=} {rollout_mesh.devices=}")
   trainer_devices_list = jax._src.mesh_utils.create_device_mesh(
-      TRAINER_MESH[0], jax.devices()[-trainer_devices:]  # pyrefly: ignore[bad-argument-type, unsupported-operation]
+      TRAINER_MESH[0], jax.devices()[rollout_devices:rollout_devices + trainer_devices]  # pyrefly: ignore[bad-argument-type, unsupported-operation]
   )
-  # trainer_mesh = jax.make_mesh(
-  #     *TRAINER_MESH,
-  #     devices=jax.devices()[-trainer_devices:],
-  #     axis_types=(jax.sharding.AxisType.Auto,) * len(TRAINER_MESH[0]),
-  # )
   trainer_mesh = jax.sharding.Mesh(
       trainer_devices_list,
       axis_names=TRAINER_MESH[1],
@@ -289,9 +360,9 @@ if NOTEBOOK_ENV == "g3":
   MODEL_PATH_PREFIX = "/GOOGLE_INTERNAL_STOAGE_PATH/gg-d/home/qwix-dev/"
   CKPT_DIR_PREFIX = "/GOOGLE_INTERNAL_STOAGE_PATH/gg-d/home/qwix-dev/"
 else:
-  DATA_PATH_PREFIX = "gs://tunix/data"
-  MODEL_PATH_PREFIX = "gs://tunix/models"
-  CKPT_DIR_PREFIX = "gs://tunix/rl/checkpoints"
+  DATA_PATH_PREFIX = os.getenv("DATA_PATH_PREFIX", os.getenv("DATA_DIR", "gs://tunix/data"))
+  MODEL_PATH_PREFIX = os.getenv("MODEL_PATH_PREFIX", os.getenv("MODEL_DIR", "gs://tunix/models"))
+  CKPT_DIR_PREFIX = os.getenv("CKPT_DIR_PREFIX", "gs://tunix/rl/checkpoints")
 
 print("NOTEBOOK_ENV: ", NOTEBOOK_ENV)
 CKPT_DIR = os.path.join(CKPT_DIR_PREFIX, "deepscaler_ckpt/01")
@@ -446,9 +517,15 @@ TrajectoryCollectEngine = trajectory_collect_engine.TrajectoryCollectEngine
 
 # %%
 # Ckpt saving
-checkpointing_options = ocp.CheckpointManagerOptions(
-    save_interval_steps=SAVE_INTERVAL_STEPS, max_to_keep=MAX_TO_KEEP
-)
+CKPT_DIR = os.getenv("CKPT_DIR", "")
+if args.no_ckpt or not CKPT_DIR:
+  checkpointing_options = None
+  checkpoint_root_dir = None
+else:
+  checkpoint_root_dir = CKPT_DIR
+  checkpointing_options = ocp.CheckpointManagerOptions(
+      save_interval_steps=SAVE_INTERVAL_STEPS, max_to_keep=MAX_TO_KEEP
+  )
 
 # Metrics logger
 wandb_config = vars(args)
@@ -457,10 +534,21 @@ wandb_config.update({
     "num_steps": MAX_STEPS,
     "rollout_engine": ROLLOUT_ENGINE,
 })
+TB_LOG_DIR = os.getenv("TB_LOG_DIR", "/tmp/tensorboard/grpo")
+wandb_kwargs = {"config": wandb_config}
+if ON_PATHWAYS:
+  try:
+    import wandb
+    wandb_kwargs["settings"] = wandb.Settings(console="off")
+  except Exception:
+    pass
+
 metrics_logging_options = metrics_logger.MetricsLoggerOptions(
-    log_dir="/tmp/tensorboard/grpo",
-    flush_every_n_steps=20,
-    backend_kwargs={"wandb": {"config": wandb_config}},
+    log_dir=TB_LOG_DIR,
+    project_name=os.getenv("WANDB_PROJECT", "tunix-deepscaler"),
+    run_name=os.getenv("WANDB_RUN_NAME", ""),
+    flush_every_n_steps=1,
+    backend_kwargs={"wandb": wandb_kwargs},
 )
 
 # %%
@@ -496,6 +584,7 @@ if MAX_GRAD_NORM is not None:
 print("Rollout mesh: ", rollout_mesh)
 print("Trainer mesh: ", trainer_mesh)
 
+wants_sampler_topk = args.score_centering or args.score_centering_diagnostics
 base_rollout_dict = {
     "max_prompt_length": MAX_PROMPT_LENGTH,
     "kv_cache_size": MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH + 256,
@@ -503,6 +592,7 @@ base_rollout_dict = {
     "top_p": TOP_P,
     "top_k": TOP_K,
     "return_logprobs": True,
+    "num_logprobs": args.score_centering_top_k if wants_sampler_topk else 1,
     "max_tokens_to_generate": MAX_RESPONSE_LENGTH,
 }
 
@@ -526,7 +616,8 @@ vllm_rollout_dict = {
     "rollout_vllm_hbm_utilization": 0.4,
     "rollout_vllm_tpu_backend_type": "jax",
     "rollout_vllm_server_mode": True,
-    "rollout_vllm_async_scheduling": True,
+    "rollout_vllm_async_scheduling": False,
+    "rollout_vllm_init_with_random_weights": True,
     "tensor_parallel_size": ROLLOUT_MESH[0][1],
     "data_parallel_size": ROLLOUT_MESH[0][0],
     "rollout_vllm_max_num_seqs": VLLM_MAX_NUM_SEQS,
@@ -535,6 +626,7 @@ vllm_rollout_dict = {
         "kv_cache_metrics": True,
         "disable_log_stats": False,
         "enable_prefix_caching": True,
+        "dtype": "bfloat16",
     },
 }
 
@@ -564,16 +656,14 @@ cluster_config = rl_engine_lib.ClusterConfig(
         eval_every_n_steps=EVAL_EVERY_N_STEPS,
         max_steps=MAX_STEPS,
         mini_batch_size=MINI_BATCH_SIZE,
-        # deepscaler defaults to using dynamic batch size.
-        # with dynamic batch size, the config that matters are: ppo_max_token_len_per_gpu=30000.
-        # so 30000 * 8 = 240000 tokens , given that we have total 2k + 8K = 10k tokens per sample,
-        # so effective batch size is 240000 / 10240 = 24 samples per micro batch. num_generations = 8,
-        # ideally we can try max to 4. Given we use only 4 devices for trainer, we can set it to 2 here.
-        train_micro_batch_size=2,
-        # metrics logging
+        train_micro_batch_size=args.train_micro_batch_size,
+        compute_logps_micro_batch_size=(
+            args.compute_logps_micro_batch_size
+            if args.compute_logps_micro_batch_size is not None
+            else args.train_micro_batch_size
+        ),
         metrics_logging_options=metrics_logging_options,
-        # checkpoint saving
-        checkpoint_root_directory=CKPT_DIR,
+        checkpoint_root_directory=checkpoint_root_dir,
         checkpointing_options=checkpointing_options,
     ),
     rollout_config=rollout_engine_config,
@@ -591,6 +681,10 @@ grpo_config = GRPOConfig(
     off_policy_steps=OFF_POLICY_STEPS,
     loss_agg_mode=args.loss_agg_mode,
     kl_loss_mode=args.kl_loss_mode,
+    score_centering=args.score_centering,
+    score_centering_diagnostics=args.score_centering_diagnostics,
+    score_centering_top_k=args.score_centering_top_k,
+    score_centering_eps=args.score_centering_eps,
 )
 
 # Perf Metrics logging
@@ -655,3 +749,7 @@ show_hbm_usage("after GRPOLearner creation")
 
 # %%
 grpo_trainer.train(train_dataset)
+
+if os.getenv("EXIT_AFTER_TRAIN") == "1":
+  print("Training completed successfully. Exiting.")
+  sys.exit(0)
