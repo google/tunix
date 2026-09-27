@@ -795,6 +795,65 @@ class MaxTextUtilsTest(absltest.TestCase):
       )
     self.assertNotIn("pathways_checkpointing_impl=colocated_python", argv)
 
+  def _fp32_env(self, **env):
+    """os.environ with FLOAT32_* cleared, then `env` applied."""
+    patcher = mock.patch.dict(os.environ)
+    patcher.start()
+    self.addCleanup(patcher.stop)
+    for key in ("FLOAT32_GATE_LOGITS", "FLOAT32_LOGITS", "MAXTEXT_EXTRA_FLAGS"):
+      os.environ.pop(key, None)
+    os.environ.update(env)
+
+  def _trainer_argv(self):
+    mock_pyconfig = mock.MagicMock()
+    mock_cfg = mock.MagicMock()
+    mock_cfg.raw_data_dict = {}
+    mock_pyconfig.initialize.return_value = mock_cfg
+    mock_pyconfig.__file__ = "/fake/maxtext/configs/pyconfig.py"
+    with mock.patch.object(
+        maxtext_utils,
+        "maxtext_modules",
+        return_value=(mock_pyconfig, mock.MagicMock(), mock.MagicMock()),
+    ), mock.patch("os.path.exists", return_value=True):
+      maxtext_utils.build_maxtext_config(model_name="qwen3.5-35b-a3b")
+    return mock_pyconfig.initialize.call_args[0][0]
+
+  def test_fp32_env_unset_adds_nothing(self):
+    self._fp32_env()
+    argv = self._trainer_argv()
+    self.assertFalse([a for a in argv if a.startswith("float32_")])
+    mt = maxtext_utils.build_vllm_maxtext_additional_config("qwen3.5-35b-a3b")
+    self.assertFalse(
+        [k for k in mt["maxtext_config"] if k.startswith("float32_")]
+    )
+
+  def test_fp32_gate_logits_reaches_trainer_and_rollout(self):
+    self._fp32_env(FLOAT32_GATE_LOGITS="true")
+    argv = self._trainer_argv()
+    self.assertIn("float32_gate_logits=true", argv)
+    self.assertNotIn("float32_logits=true", argv)  # separate toggle
+    mt = maxtext_utils.build_vllm_maxtext_additional_config(
+        "qwen3.5-35b-a3b", attention="vllm_rpa", prefuse_moe_weights=True
+    )["maxtext_config"]
+    self.assertIs(mt["float32_gate_logits"], True)
+    self.assertNotIn("float32_logits", mt)
+
+  def test_fp32_env_false_and_extra_flags_override(self):
+    self._fp32_env(FLOAT32_GATE_LOGITS="false", FLOAT32_LOGITS="1")
+    argv = self._trainer_argv()
+    self.assertNotIn("float32_gate_logits=true", argv)
+    self.assertIn("float32_logits=true", argv)
+    self._fp32_env(
+        FLOAT32_GATE_LOGITS="true",
+        MAXTEXT_EXTRA_FLAGS="float32_gate_logits=false",
+    )
+    argv = self._trainer_argv()
+    # MAXTEXT_EXTRA_FLAGS is appended after the env-derived flag, so it wins.
+    self.assertLess(
+        argv.index("float32_gate_logits=true"),
+        argv.index("float32_gate_logits=false"),
+    )
+
 
 if __name__ == "__main__":
   absltest.main()

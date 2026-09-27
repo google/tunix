@@ -28,6 +28,34 @@ _PERSISTENCE_IMPL = "persistence"
 _COLOCATED_PYTHON_IMPL = "colocated_python"
 _PATHWAYS_CHECKPOINTING_IMPLS = (_PERSISTENCE_IMPL, _COLOCATED_PYTHON_IMPL)
 
+# Recipe-level fp32 knobs (env var -> MaxText key), one toggle per key. The
+# recipes export these and deepswe_dist/k8s_launcher.sh forwards them to both
+# the trainer and the rollout pods; both builders below read them from here so
+# the two models cannot disagree (a mismatch fails weight-sync preflight).
+# float32_gate_logits: fp32 MoE router (Megatron moe_router_dtype=fp32) and, via
+#   MaxText common_types.get_weight_dtype, fp32 storage for norms, GDN
+#   A_log/dt_bias/conv1d, shared_expert_gate and logits_dense. Needs a MaxText
+#   weight converter that keeps those fp32 leaves on the target-free sync path.
+# float32_logits: softmax of dot_product attention only; a no-op under flash
+#   (trainer) and vllm_rpa (rollout). It is NOT the lm-head knob
+#   (logits_dot_in_fp32), which is deliberately not wired here. Setting
+#   logits_dot_in_fp32 on the trainer alone (MAXTEXT_EXTRA_FLAGS) makes
+#   decoder_norm/logits_dense fp32 there but not on the rollout, and the first
+#   weight sync fails preflight; set it in the rollout maxtext_config as well.
+_FP32_ENV_FLAGS = (
+    ("FLOAT32_GATE_LOGITS", "float32_gate_logits"),
+    ("FLOAT32_LOGITS", "float32_logits"),
+)
+
+
+def _fp32_env_overrides() -> dict[str, bool]:
+  """MaxText fp32 keys switched on by the FLOAT32_* environment variables."""
+  return {
+      key: True
+      for env, key in _FP32_ENV_FLAGS
+      if os.environ.get(env, "").strip().lower() in ("1", "true")
+  }
+
 
 @dataclasses.dataclass(frozen=True)
 class ProfilerOptions:
@@ -100,6 +128,9 @@ def build_vllm_maxtext_additional_config(
       "allow_split_physical_axes": True,
       "log_config": False,
       "weight_dtype": "bfloat16",
+      # Must match build_maxtext_config: float32_gate_logits changes parameter
+      # dtypes, and weight-sync preflight rejects any item_size mismatch.
+      **_fp32_env_overrides(),
   }
   if prefuse_moe_weights is not None:
     overrides["prefuse_moe_weights"] = prefuse_moe_weights
@@ -454,6 +485,12 @@ def build_maxtext_config(
       # already; mu is set explicitly because MaxText's mu_dtype defaults to
       # weight_dtype (bfloat16). MAXTEXT_EXTRA_FLAGS, appended later, still wins.
       *(["mu_dtype=float32"] if fp32_master_weights else []),
+      # FLOAT32_GATE_LOGITS / FLOAT32_LOGITS from the trainer env; the rollout
+      # side reads the same variables (build_vllm_maxtext_additional_config).
+      # MAXTEXT_EXTRA_FLAGS, appended later, still wins, but on the trainer
+      # only: flipping float32_gate_logits there fails the first weight-sync
+      # preflight. Set FLOAT32_GATE_LOGITS instead.
+      *(f"{key}=true" for key in _fp32_env_overrides()),
       "enable_tensorboard=False",
       "record_internal_nn_metrics=False",
       "init_weights_seed=42",

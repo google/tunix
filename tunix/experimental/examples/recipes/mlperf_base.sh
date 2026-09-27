@@ -176,8 +176,13 @@ export TRUNCATED_IMPORTANCE_SAMPLING_RATIO_MIN=0.999
 export TRUNCATED_IMPORTANCE_SAMPLING_RATIO=1.002
 export ADVANTAGE_ESTIMATOR="grpo-loo"
 export LOSS_AGG_MODE="token-mean"
-export FLOAT32_GATE_LOGITS="true"
-export FLOAT32_LOGITS="true"
+# fp32 storage for norms, gates, shared_expert_gate, A_log, dt_bias, conv1d and
+# logits_dense (MaxText get_weight_dtype), forwarded to the trainer and the
+# rollout alike. Needs a MaxText image whose weight converter keeps fp32 leaves
+# on target-free sync; otherwise the first sync fails preflight. Turn off with
+# FLOAT32_GATE_LOGITS=false, not MAXTEXT_EXTRA_FLAGS (trainer only).
+export FLOAT32_GATE_LOGITS="${FLOAT32_GATE_LOGITS:-true}"
+export FLOAT32_LOGITS="${FLOAT32_LOGITS:-true}"
 
 # Optimizer Hyperparameters
 export LEARNING_RATE="1e-6"
@@ -194,8 +199,9 @@ export SKIP_STEP_ON_SPIKES="${SKIP_STEP_ON_SPIKES:-false}"
 export SKIP_STEP_ON_NAN="${SKIP_STEP_ON_NAN:-true}"
 # fp32 master weights for the bf16 trainer weights (maxtext backend): AdamW runs
 # on an fp32 copy held in the optimizer state, with mu_dtype=float32, so updates
-# far below one bf16 ulp still accumulate. The model, weight sync and rollout
-# stay bf16; fp32 params and the frozen router are unaffected. Costs +8 B of
+# far below one bf16 ulp still accumulate. Weight sync and rollout are
+# unchanged; fp32 params (FLOAT32_GATE_LOGITS) and the frozen router pass
+# through with no master copy. Costs +8 B of
 # optimizer state per trainable bf16 param (4 B master, +2 B each as mu and nu
 # go bf16->fp32): ~280 GB for 35B, ~4.3 GB/chip over the 64-chip fsdp x tp
 # trainer if fully sharded; not yet measured.
