@@ -144,6 +144,6 @@ export SANDBOX_TOLERATIONS='[{"key":"workload","operator":"Equal","value":"sandb
 export IMAGE_REWRITE_PREFIX="${IMAGE_REWRITE_PREFIX:-us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/}"
 
 # Prefix caching disabled for hybrid Mamba model stability
-export ENABLE_PREFIX_CACHING="${ENABLE_PREFIX_CACHING:-false}"
+export ENABLE_PREFIX_CACHING="${ENABLE_PREFIX_CACHING:-true}"
 
 source "${DIR}/mlperf_base.sh" "$@"
