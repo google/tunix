@@ -162,6 +162,40 @@ class PackCoreTest(absltest.TestCase):
     for [row] in chunks:
       self.assertEqual(row.num_real_segments, 2)
 
+  def test_max_logp_positions_caps_row_loss_tokens(self):
+    # Each item has 3 loss-masked tokens (one masked-out env token), so a cap
+    # of 6 fits two items per row even though the token budget fits four.
+    items = [_item([i], [i, i, i, i], mask=[1, 0, 1, 1]) for i in range(4)]
+    chunks = packing.pack_core(
+        items, budget=64, pack_size=1, max_logp_positions_per_packed_row=6
+    )
+    self.assertLen(chunks, 2)
+    for [row] in chunks:
+      self.assertEqual(row.num_real_segments, 2)
+      self.assertLessEqual(int((row.completion_mask > 0).sum()), 6)
+
+  def test_max_logp_positions_counts_only_masked_tokens(self):
+    item = _item([1], [2, 3, 4, 5], mask=[1, 0, 0, 1])
+    self.assertEqual(item.num_logp_positions, 2)
+    [[row]] = packing.pack_core(
+        [item, item], budget=16, pack_size=1,
+        max_logp_positions_per_packed_row=4,
+    )
+    self.assertEqual(row.num_real_segments, 2)
+
+  def test_item_over_max_logp_positions_raises(self):
+    with self.assertRaisesRegex(ValueError, "exceeding max_logp_positions"):
+      packing.pack_core(
+          [_item([1], [2, 3, 4])], budget=16,
+          max_logp_positions_per_packed_row=2,
+      )
+    with self.assertRaisesRegex(
+        ValueError, "Max logp positions per packed row must be positive"
+    ):
+      packing.pack_core(
+          [_item([1], [2])], budget=16, max_logp_positions_per_packed_row=0
+      )
+
   def test_every_item_is_packed_only_once(self):
     rng = np.random.default_rng(0)
     items = [

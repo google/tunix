@@ -178,6 +178,11 @@ arg_parser.add_argument(
 # Sequence packing: per-row token budget for the trainer. None disables
 # packing. Must be >= max_prompt_length + max_response_length.
 arg_parser.add_argument("--max_seq_token_per_tpu", type=int, default=None)
+# Packing only: run the lm_head on at most this many loss-masked tokens per
+# packed row instead of every position. Must be >= max_response_length.
+arg_parser.add_argument(
+    "--max_logp_positions_per_packed_row", type=int, default=None
+)
 # Overrides the NUM_BATCHES * NUM_EPOCHS default when set.
 arg_parser.add_argument("--max_steps", type=int, default=None)
 # Prompt groups (x num_generations sequences) per trainer forward+backward.
@@ -589,6 +594,7 @@ cluster_config = rl_engine_lib.ClusterConfig(
         checkpointing_options=checkpointing_options,
         compute_logps_chunk_size=args.compute_logps_chunk_size,
         max_seq_token_per_tpu=args.max_seq_token_per_tpu,
+        max_logp_positions_per_packed_row=args.max_logp_positions_per_packed_row,
         profiler_options=profiler_options,
         perf_metrics_options=perf_metrics_options,
     ),

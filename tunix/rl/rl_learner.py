@@ -119,12 +119,27 @@ class RLLearner(abc.ABC, Generic[TConfig]):
       else:
         r_config = rollout_config
 
+      max_response_length = (
+          getattr(algo_config, "max_response_length", None)
+          or r_config.max_tokens_to_generate
+      )
       rl_utils.validate_packing_budget(
           self._training_config.max_seq_token_per_tpu,
           getattr(r_config, "max_prompt_length", 1000000),
-          getattr(algo_config, "max_response_length", None)
-          or r_config.max_tokens_to_generate,
+          max_response_length,
       )
+      max_logp_positions = rl_utils.max_logp_positions_per_packed_row(
+          self._training_config
+      )
+      if (
+          max_logp_positions is not None
+          and max_logp_positions < max_response_length
+      ):
+        raise ValueError(
+            f"max_logp_positions_per_packed_row={max_logp_positions} is smaller"
+            f" than max_response_length {max_response_length}; a maximal"
+            " completion could not be packed. Set it >= max_response_length."
+        )
 
     self.rl_engine.global_steps = (
         self.rl_engine.actor_trainer.restored_global_step()
@@ -767,6 +782,9 @@ class RLLearner(abc.ABC, Generic[TConfig]):
           pack_size=pack_size,
           max_segments_per_packed_row=getattr(
               self._training_config, "max_segments_per_packed_row", None
+          ),
+          max_logp_positions_per_packed_row=(
+              rl_utils.max_logp_positions_per_packed_row(self._training_config)
           ),
       )
 

@@ -81,6 +81,11 @@ class PackItem:
   def num_tokens(self) -> int:
     return self.prompt_ids.shape[0] + self.completion_ids.shape[0]
 
+  @property
+  def num_logp_positions(self) -> int:
+    """Tokens whose logp the loss reads (`completion_mask > 0`)."""
+    return int(np.count_nonzero(self.completion_mask))
+
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class PackedRow:
@@ -121,20 +126,24 @@ def fill_one_chunk(
     pack_size: int,
     budget: int,
     max_segments: int,
+    max_logp_positions: int | None = None,
 ) -> tuple[list[list[PackItem]], list[PackItem]]:
   """Fills ONE chunk of `pack_size` fixed-capacity bins, first-fit-decreasing.
 
   Sorts the items by token length descending and greedily places each into the
-  first bin with room, where a bin has room only if it stays within both the
-  token `budget` AND `max_segments` sequences (so the loss's static
-  `num_segments = max_segments + 1` buckets never overflow). Items that fit no
-  bin are returned as `leftover` (in their original order) for a later chunk.
+  first bin with room, where a bin has room only if it stays within the token
+  `budget`, `max_segments` sequences (so the loss's static
+  `num_segments = max_segments + 1` buckets never overflow) AND, if set,
+  `max_logp_positions` loss-masked tokens (so a static-size logp gather never
+  drops one). Items that fit no bin are returned as `leftover` (in their
+  original order) for a later chunk.
 
   Args:
     items: Sequence of PackItems to pack.
     pack_size: Number of bins in the chunk.
     budget: Token capacity budget per bin.
     max_segments: Maximum number of segments allowed in a single bin.
+    max_logp_positions: Optional cap on `completion_mask > 0` tokens per bin.
 
   Returns:
     A tuple of (bins, leftover), where `bins` is a list of `pack_size` lists of
@@ -143,6 +152,7 @@ def fill_one_chunk(
   """
   bins: list[list[PackItem]] = [[] for _ in range(pack_size)]
   loads = [0] * pack_size
+  logp_loads = [0] * pack_size
   order = sorted(
       range(len(items)), key=lambda i: items[i].num_tokens, reverse=True
   )
@@ -150,10 +160,19 @@ def fill_one_chunk(
   for i in order:
     item = items[i]
     n = item.num_tokens
+    n_logp = item.num_logp_positions if max_logp_positions is not None else 0
     for b in range(pack_size):
-      if loads[b] + n <= budget and len(bins[b]) < max_segments:
+      if (
+          loads[b] + n <= budget
+          and len(bins[b]) < max_segments
+          and (
+              max_logp_positions is None
+              or logp_loads[b] + n_logp <= max_logp_positions
+          )
+      ):
         bins[b].append(item)
         loads[b] += n
+        logp_loads[b] += n_logp
         placed_flags[i] = True
         break
   leftover = [items[i] for i in range(len(items)) if not placed_flags[i]]
@@ -253,12 +272,24 @@ def effective_max_segments(
   )
 
 
-def validate_items(items: Iterable[PackItem], budget: int) -> None:
+def validate_items(
+    items: Iterable[PackItem],
+    budget: int,
+    max_logp_positions: int | None = None,
+) -> None:
   """Validates that all items are valid and fit within the budget."""
   for i, item in enumerate(items):
     if item.num_tokens > budget:
       raise ValueError(
           f"Item {i} has {item.num_tokens} tokens, exceeding budget {budget}."
+      )
+    if (
+        max_logp_positions is not None
+        and item.num_logp_positions > max_logp_positions
+    ):
+      raise ValueError(
+          f"Item {i} has {item.num_logp_positions} loss-masked tokens,"
+          f" exceeding max_logp_positions {max_logp_positions}."
       )
 
 
@@ -269,6 +300,7 @@ def pack_core(
     pack_size: int = 1,
     max_segments_per_packed_row: int | None = None,
     pad_id: int = 0,
+    max_logp_positions_per_packed_row: int | None = None,
 ) -> list[list[PackedRow]]:
   """Packs `items` into a sequence of chunks, each containing `pack_size` PackedRows with `budget` tokens."""
   if budget <= 0:
@@ -283,10 +315,18 @@ def pack_core(
         "Max segments per packed row must be positive or None, got"
         f" {max_segments_per_packed_row}."
     )
+  if (
+      max_logp_positions_per_packed_row is not None
+      and max_logp_positions_per_packed_row <= 0
+  ):
+    raise ValueError(
+        "Max logp positions per packed row must be positive or None, got"
+        f" {max_logp_positions_per_packed_row}."
+    )
   if not items:
     return []
 
-  validate_items(items, budget)
+  validate_items(items, budget, max_logp_positions_per_packed_row)
   max_segments = effective_max_segments(budget, max_segments_per_packed_row)
   carried = carried_per_token_fields(items)
 
@@ -298,6 +338,7 @@ def pack_core(
         pack_size=pack_size,
         budget=budget,
         max_segments=max_segments,
+        max_logp_positions=max_logp_positions_per_packed_row,
     )
     if not any(bins):
       raise ValueError("pack_core: no items placed in any bin.")

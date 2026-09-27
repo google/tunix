@@ -295,6 +295,11 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         pad_id=self.rl_engine.rollout.pad_id(),
         eos_id=self.rl_engine.rollout.eos_id(),
         compute_logps_chunk_size=self.rl_engine.cluster_config.training_config.compute_logps_chunk_size,
+        max_logp_positions_per_packed_row=(
+            rl_utils.max_logp_positions_per_packed_row(
+                self.rl_engine.cluster_config.training_config
+            )
+        ),
     )
 
     self.rl_engine.actor_trainer.with_loss_fn(
@@ -385,6 +390,10 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         else None
     )
 
+    # Only loss-masked tokens need a logp; with max_logp_positions_per_packed_row
+    # set, the lm_head runs on just those positions.
+    logps_mask = jnp.asarray(example.completion_mask)
+
     updates = {}
     if (
         example.old_per_token_logps is None
@@ -399,6 +408,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           micro_batch_size=micro,
           segment_ids=segment_ids,
           segment_positions=segment_positions,
+          logps_mask=logps_mask,
       )
     if example.ref_per_token_logps is None and (
         self.algo_config.force_compute_kl or self.algo_config.beta != 0.0
@@ -439,6 +449,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           micro_batch_size=micro,
           segment_ids=segment_ids,
           segment_positions=segment_positions,
+          logps_mask=logps_mask,
       )
       metrics, sampler_is_weights, filtered_mask = (
           self._sampler_trainer_agreement(

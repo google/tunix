@@ -307,6 +307,11 @@ class TrainingConfig:
   # Sequence packing configuration.
   max_seq_token_per_tpu: int | None = None
   max_segments_per_packed_row: int | None = None
+  # Packing only: if set, per-token logps are computed for at most this many
+  # loss-masked positions per packed row (gathered before the lm_head) instead
+  # of every row position; the packer caps each row's loss-masked tokens to
+  # match. Must be >= max_response_length. None computes the full row.
+  max_logp_positions_per_packed_row: int | None = None
 
   def get_with_default(self, key: str, default: Any) -> Any:
     val = getattr(self, key)
@@ -357,6 +362,7 @@ class RLTrainingConfig(TrainingConfig):
         "rollout_micro_batch_size",
         "compute_logps_micro_batch_size",
         "max_segments_per_packed_row",
+        "max_logp_positions_per_packed_row",
     ]:
       _is_positive_integer(getattr(self, name, None), name)
 

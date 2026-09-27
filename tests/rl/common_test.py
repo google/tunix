@@ -398,6 +398,90 @@ class CommonTest(parameterized.TestCase):
               rtol=1e-5,
           )
 
+  @parameterized.named_parameters(
+      dict(testcase_name="exact_k", max_logp_positions=7),
+      dict(testcase_name="loose_k", max_logp_positions=12),
+  )
+  def test_gathered_packed_logps_match_full_row(self, max_logp_positions):
+    # Two packed rows: [prompt | completion | prompt | completion | pad].
+    completion_tokens = np.array([
+        [5, 6, 7, 8, 9, 3, 4, 2, 6, 7, 1, 8, 0, 0, 0, 0],
+        [2, 3, 4, 5, 6, 7, 8, 9, 1, 2, 3, 4, 5, 6, 0, 0],
+    ])
+    segment_ids = np.array([
+        [1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 0, 0, 0, 0],
+        [1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 0, 0],
+    ])
+    segment_positions = np.array([
+        [0, 1, 2, 3, 4, 5, 0, 1, 2, 3, 4, 5, 0, 0, 0, 0],
+        [0, 1, 2, 3, 4, 5, 6, 0, 1, 2, 3, 4, 5, 6, 0, 0],
+    ])
+    # Loss mask: completions only, with a masked-out (env) token in row 1.
+    logps_mask = np.array([
+        [0, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0],
+        [0, 0, 0, 1, 1, 0, 1, 0, 0, 0, 1, 1, 1, 1, 0, 0],
+    ], dtype=np.float32)  # 7 masked tokens per row at most.
+    prompt_tokens = np.zeros((2, 0), dtype=np.int32)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    graphdef, state = nnx.split(model)
+    kwargs = dict(
+        pad_id=0,
+        eos_id=-1,
+        return_entropy=True,
+        segment_ids=segment_ids,
+        segment_positions=segment_positions,
+        temperature=1.3,
+        chunk_size=4,
+    )
+    full_logps, full_entropy = common.compute_per_token_logps(
+        graphdef, state, prompt_tokens, completion_tokens, **kwargs
+    )
+    logps, entropy = common.compute_per_token_logps(
+        graphdef,
+        state,
+        prompt_tokens,
+        completion_tokens,
+        logps_mask=logps_mask,
+        max_logp_positions=max_logp_positions,
+        **kwargs,
+    )
+    np.testing.assert_allclose(
+        logps, full_logps * logps_mask, atol=1e-5, rtol=1e-5
+    )
+    np.testing.assert_allclose(
+        entropy, full_entropy * logps_mask, atol=1e-5, rtol=1e-5
+    )
+
+    def masked_sum(state, **extra):
+      out = common.compute_per_token_logps(
+          graphdef,
+          state,
+          prompt_tokens,
+          completion_tokens,
+          pad_id=0,
+          eos_id=-1,
+          stop_gradient=False,
+          segment_ids=segment_ids,
+          segment_positions=segment_positions,
+          chunk_size=4,
+          **extra,
+      )
+      return jnp.sum(out * logps_mask)
+
+    full_grad = jax.grad(masked_sum)(state)
+    gathered_grad = jax.grad(
+        lambda st: masked_sum(
+            st,
+            logps_mask=logps_mask,
+            max_logp_positions=max_logp_positions,
+        )
+    )(state)
+    jax.tree.map(
+        lambda a, b: np.testing.assert_allclose(a, b, atol=1e-5, rtol=1e-4),
+        full_grad,
+        gathered_grad,
+    )
+
   def test_np_make_completion_mask(self):
     completion_ids = np.array(
         [

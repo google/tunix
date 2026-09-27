@@ -410,6 +410,12 @@ def compute_pack_size(mesh: jax.sharding.Mesh) -> int:
   return mesh.shape.get("fsdp", 1) * mesh.shape.get("dp", 1)
 
 
+def max_logp_positions_per_packed_row(training_config: Any) -> int | None:
+  """Returns the configured logp-gather cap K, or None when unset."""
+  value = getattr(training_config, "max_logp_positions_per_packed_row", None)
+  return value if isinstance(value, int) else None
+
+
 def validate_packing_budget(
     max_token_budget: int,
     max_prompt_length: int,
@@ -528,6 +534,7 @@ def pack_sequences(
     pad_id: int = 0,
     pack_size: int = 1,
     max_segments_per_packed_row: int | None = None,
+    max_logp_positions_per_packed_row: int | None = None,
 ) -> Iterator[list[common.TrainExample]]:
   """FFD-packs sequences into [pack_size, max_token_budget] chunks, streaming.
 
@@ -548,6 +555,10 @@ def pack_sequences(
     pad_id: Padding vocabulary id.
     pack_size: Rows per chunk (= fsdp * dp); each chunk is [pack_size,
       max_token_budget].
+    max_segments_per_packed_row: Optional cap on sequences per packed row.
+    max_logp_positions_per_packed_row: Optional cap on loss-masked tokens
+      (`completion_mask > 0`) per packed row; must match the static gather
+      size `compute_per_token_logps` uses so no logp position is dropped.
 
   Yields:
     Single-element lists, each one [pack_size, max_token_budget] TrainExample.
@@ -599,6 +610,7 @@ def pack_sequences(
         pack_size=pack_size,
         budget=max_token_budget,
         max_segments=max_segments,
+        max_logp_positions=max_logp_positions_per_packed_row,
     )
     chunks_in_mini += 1
     return bins
@@ -635,6 +647,15 @@ def pack_sequences(
           raise ValueError(
               f"pack_sequences: a single sequence has {n} tokens, exceeding"
               f" max_token_budget {max_token_budget}; increase the budget."
+          )
+        if (
+            max_logp_positions_per_packed_row is not None
+            and item.num_logp_positions > max_logp_positions_per_packed_row
+        ):
+          raise ValueError(
+              f"pack_sequences: a single sequence has {item.num_logp_positions}"
+              " loss-masked tokens, exceeding max_logp_positions_per_packed_row"
+              f" {max_logp_positions_per_packed_row}; increase it."
           )
         if first_item_for_dummy is None:
           first_item_for_dummy = item

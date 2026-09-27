@@ -292,6 +292,19 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
               "exact_token_continuity does not replay expert routing when"
               " sequence packing (max_seq_token_per_tpu) is enabled"
           )
+      max_logp_positions = rl_utils.max_logp_positions_per_packed_row(
+          self.rl_engine.cluster_config.training_config
+      )
+      if (
+          max_logp_positions is not None
+          and max_logp_positions < self.algo_config.max_response_length
+      ):
+        raise ValueError(
+            f"max_logp_positions_per_packed_row={max_logp_positions} is"
+            " smaller than max_response_length"
+            f" {self.algo_config.max_response_length}; a maximal completion"
+            " could not be packed. Set it >= max_response_length."
+        )
       if config.max_tokens_to_generate != self.algo_config.max_response_length:
         raise ValueError(
             f"RolloutConfig ({mode}) max_tokens_to_generate "
@@ -886,6 +899,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           pack_size=pack_size,
           max_segments_per_packed_row=getattr(
               self._training_config, "max_segments_per_packed_row", None
+          ),
+          max_logp_positions_per_packed_row=(
+              rl_utils.max_logp_positions_per_packed_row(self._training_config)
           ),
       )
     update_steps_since_last_sync = 0

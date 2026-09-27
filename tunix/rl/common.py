@@ -405,6 +405,7 @@ def model_call_contains(model, target_arg: str) -> bool:
         "return_entropy",
         "temperature",
         "chunk_size",
+        "max_logp_positions",
     ),
 )
 def compute_per_token_logps(
@@ -423,6 +424,8 @@ def compute_per_token_logps(
     chunk_size: int = 0,
     routed_experts: jax.Array | None = None,
     token_mask: jax.Array | None = None,
+    logps_mask: jax.Array | None = None,
+    max_logp_positions: int = 0,
 ) -> jax.Array | tuple[jax.Array, jax.Array]:
   """Computes the per-token log probabilities.
 
@@ -451,6 +454,15 @@ def compute_per_token_logps(
       name MaxText's adapter uses -- so it replays this routing instead of
       re-running its router. Ignored by models that do not accept the kwarg.
     token_mask: Optional explicit valid positions for prompt plus completion.
+    logps_mask: Packing only. `[B, FullSeqLen]` mask aligned with
+      `completion_tokens` marking the tokens whose logp the caller reads
+      (normally `completion_mask`). Used with `max_logp_positions`.
+    max_logp_positions: Packing with `chunk_size > 0` only. If > 0 and
+      `logps_mask` is given, only the first `max_logp_positions` masked tokens
+      of each row go through the lm_head; every other position returns 0. The
+      packer must cap each row's masked tokens at this value (see
+      `max_logp_positions_per_packed_row`), since a row with more would
+      silently lose the excess.
 
   Returns:
     per_token_logps: jax.Array token-level logarithmic values.
@@ -528,14 +540,30 @@ def compute_per_token_logps(
 
   if chunk_size > 0:
     hidden_state = outputs[:, -logits_to_keep - 1 : -1, :]
-    out = compute_chunked_logps(
-        model,
-        hidden_state,
-        input_tokens_to_keep,
-        temperature,
-        chunk_size,
-        return_entropy,
-    )
+    if (
+        segment_ids is not None
+        and logps_mask is not None
+        and max_logp_positions > 0
+    ):
+      out = _compute_gathered_chunked_logps(
+          model,
+          hidden_state,
+          input_tokens_to_keep,
+          logps_mask[:, -logits_to_keep:],
+          max_logp_positions,
+          temperature,
+          chunk_size,
+          return_entropy,
+      )
+    else:
+      out = compute_chunked_logps(
+          model,
+          hidden_state,
+          input_tokens_to_keep,
+          temperature,
+          chunk_size,
+          return_entropy,
+      )
     if return_entropy:
       per_token_logps, per_token_entropy = out
     else:
@@ -881,6 +909,65 @@ def compute_chunked_logps(
         :, :seq_len
     ]
     return per_token_logps
+
+
+def _compute_gathered_chunked_logps(
+    model,
+    hidden_states: jax.Array,
+    target_ids: jax.Array,
+    logps_mask: jax.Array,
+    max_positions: int,
+    temperature: float,
+    chunk_size: int,
+    return_entropy: bool,
+):
+  """`compute_chunked_logps` over only the masked positions of each row.
+
+  Packed rows interleave prompts, completions and padding, so the lm_head
+  cannot be restricted by a static slice. Instead gather the (at most
+  `max_positions`) masked positions of each row into a dense `[B, K]` buffer,
+  run the chunked lm_head on it, and scatter the results back; unmasked
+  positions return 0, which the loss masks out anyway.
+
+  Args:
+    model: The actor model (needs to expose `compute_final_logits`).
+    hidden_states: `[B, S, D]` hidden states; position i predicts target i.
+    target_ids: `[B, S]` target token ids.
+    logps_mask: `[B, S]` mask of targets whose logp is needed.
+    max_positions: Static gather size K. Rows with more masked targets lose
+      the excess, so the packer must cap them.
+    temperature: Sampling temperature.
+    chunk_size: Sequence chunk size for the lm_head.
+    return_entropy: Whether to also return per-token entropy.
+
+  Returns:
+    `[B, S]` per-token logps (and entropy if requested), 0 where unmasked.
+  """
+  batch_size, seq_len = target_ids.shape
+  k = min(max_positions, seq_len)
+  need = logps_mask > 0
+  idx = jax.vmap(lambda m: jnp.nonzero(m, size=k, fill_value=0)[0])(need)
+  valid = jnp.arange(k)[None, :] < jnp.sum(need, axis=-1, keepdims=True)
+  gathered_hidden = jnp.take_along_axis(hidden_states, idx[..., None], axis=1)
+  gathered_targets = jnp.take_along_axis(target_ids, idx, axis=1)
+  out = compute_chunked_logps(
+      model,
+      gathered_hidden,
+      gathered_targets,
+      temperature,
+      chunk_size,
+      return_entropy,
+  )
+  rows = jnp.arange(batch_size)[:, None]
+
+  def scatter(x):
+    x = jnp.where(valid, x, 0.0)
+    return jnp.zeros((batch_size, seq_len), x.dtype).at[rows, idx].add(x)
+
+  if return_entropy:
+    logps, entropy = out
+    return scatter(logps), scatter(entropy)
+  return scatter(out)
 
 
 @nnx.jit(static_argnames=("pad_id", "eos_id", "stop_gradient"))

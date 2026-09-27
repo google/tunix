@@ -1106,6 +1106,7 @@ class RLEngine:
       segment_ids: jax.Array | None = None,
       segment_positions: jax.Array | None = None,
       token_mask: jax.Array | None = None,
+      logps_mask: jax.Array | None = None,
   ) -> jax.Array:
     """Gets per-token logps from the actor model on the trainer side.
 
@@ -1162,6 +1163,14 @@ class RLEngine:
           )
       )
 
+      dest_logps_mask = (
+          None
+          if logps_mask is None
+          else sharding_utils.shard_input(
+              logps_mask, self.cluster_config.training_config.data_sharding_axis
+          )
+      )
+
       # Use the anchor (start-of-global-step) actor weights so old_per_token_logps
       # reference the same policy vllm sampled with even when mini_batch_size <
       # full_batch_size or num_iterations > 1. Only offload the live actor when
@@ -1210,6 +1219,17 @@ class RLEngine:
                     None
                     if dest_token_mask is None
                     else dest_token_mask[batch_slice]
+                ),
+                logps_mask=(
+                    None
+                    if dest_logps_mask is None
+                    else dest_logps_mask[batch_slice]
+                ),
+                max_logp_positions=(
+                    rl_utils.max_logp_positions_per_packed_row(
+                        self.cluster_config.training_config
+                    )
+                    or 0
                 ),
             )
         )
