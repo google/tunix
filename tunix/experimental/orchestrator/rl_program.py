@@ -1277,6 +1277,7 @@ class StandardRLProgram(RLProgram):
         eos_id=getattr(self.assembler, "eos_id", self.batch_config.pad_id),
         segment_ids=batch.segment_ids,
         segment_positions=batch.segment_positions,
+        routed_experts=batch.routed_experts,
     )
     trainer_logps = await self.engine.per_token_logps(
         datatypes.Role.ACTOR, items=logps_req

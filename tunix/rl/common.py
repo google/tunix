@@ -217,12 +217,11 @@ def selective_log_softmax(logits: jax.Array, input_ids: jax.Array) -> jax.Array:
   Returns:
     Selected log probabilities.
   """
-  target_logits = (
-      jnp.take_along_axis(logits, input_ids[..., None], axis=-1)
-      .squeeze(-1)
-      .astype(jnp.float32)
-  )
-  normalizer = jax.nn.logsumexp(logits.astype(jnp.float32), axis=-1)
+  logits_f32 = jnp.where(jnp.isfinite(logits), logits.astype(jnp.float32), 0.0)
+  target_logits = jnp.take_along_axis(
+      logits_f32, input_ids[..., None], axis=-1
+  ).squeeze(-1)
+  normalizer = jax.nn.logsumexp(logits_f32, axis=-1)
   return target_logits - normalizer
 
 
@@ -830,6 +829,7 @@ def compute_chunked_logps(
      per_token_logps: [Batch, SeqLen]
   """
   batch_size, seq_len, hidden_dim = hidden_states.shape
+  hidden_states = jnp.where(jnp.isfinite(hidden_states), hidden_states, 0.0)
 
   # 1. Pad the sequence dimension if it's not perfectly divisible by chunk_size
   pad_len = (chunk_size - (seq_len % chunk_size)) % chunk_size
@@ -1477,9 +1477,11 @@ def compute_entropy_from_logits(logits: jax.Array) -> jax.Array:
   Returns:
     A JAX array of shape `[batch_size, seq_len]`, containing the entropy values.
   """
-  log_probs = jax.nn.log_softmax(logits, axis=-1)
-  probs = jax.nn.softmax(log_probs)
-  return -jnp.sum(probs * log_probs, axis=-1)
+  logits_f32 = jnp.where(jnp.isfinite(logits), logits.astype(jnp.float32), 0.0)
+  log_probs = jax.nn.log_softmax(logits_f32, axis=-1)
+  safe_log_probs = jnp.where(jnp.isfinite(log_probs), log_probs, 0.0)
+  probs = jnp.where(jnp.isfinite(log_probs), jnp.exp(safe_log_probs), 0.0)
+  return -jnp.sum(probs * safe_log_probs, axis=-1)
 
 
 def _check_get_norm(arguments: dict[str, Any], default: Any) -> Any:

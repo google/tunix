@@ -389,6 +389,12 @@ def unpad_train_example(example: common.TrainExample) -> list[dict[str, Any]]:
   if has_policy_version:
     policy_version_np = np.asarray(policy_version_val)
 
+  routed_experts_val = getattr(example, "routed_experts", None)
+  has_routed_experts = routed_experts_val is not None
+  if has_routed_experts:
+    routed_experts_np = np.asarray(routed_experts_val, dtype=np.int16)
+  p_width = p_ids.shape[1]
+
   for i in range(batch_size):
     p_len = int(np.sum(p_mask[i]))
     c_len = int(
@@ -434,6 +440,11 @@ def unpad_train_example(example: common.TrainExample) -> list[dict[str, Any]]:
         "old_values": old_values_np[i, :c_len] if has_old_values else None,  # pyrefly: ignore[unbound-name]
         "policy_version": (
             policy_version_np[i : i + 1] if has_policy_version else None  # pyrefly: ignore[unbound-name]
+        ),
+        "routed_experts": (
+            routed_experts_np[i, p_width - p_len : p_width + c_len]  # pyrefly: ignore[unbound-name]
+            if has_routed_experts
+            else None
         ),
     }
     res.append(item)
@@ -514,6 +525,11 @@ def train_example_to_pack_items(
               if item.get("policy_version") is not None
               else None
           ),
+          routed_experts=(
+              np.asarray(item["routed_experts"], dtype=np.int16)
+              if item.get("routed_experts") is not None
+              else None
+          ),
       )
       for item in unpad_train_example(example)
   ]
@@ -547,6 +563,12 @@ def pack_rows_to_train_examples(
   )
   for name in rows[0].per_token:
     kwargs[name] = jnp.asarray(np.stack([r.per_token[name] for r in rows]))
+  if rows and rows[0].routed_experts is not None and hasattr(
+      example_cls, "__dataclass_fields__"
+  ) and "routed_experts" in example_cls.__dataclass_fields__:
+    kwargs["routed_experts"] = jnp.asarray(
+        np.stack([r.routed_experts for r in rows]), dtype=jnp.int16
+    )
   versions = [r.policy_version for r in rows]
   if any(v is not None for v in versions):
     fallback = next(v for v in versions if v is not None)
