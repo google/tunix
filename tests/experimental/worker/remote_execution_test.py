@@ -20,6 +20,7 @@ import socket
 import threading
 import time
 from typing import Any, Optional
+from unittest import mock
 from absl.testing import absltest
 import portpicker
 from tunix.experimental.worker import remote_execution as remote_lib
@@ -660,6 +661,46 @@ class RemoteExecutionTest(absltest.TestCase):
             "[grpc_custom_worker] Trajectory for prompt prompt_grpc_custom (2"
             " turns)",
         )
+
+    asyncio.run(_run_test())
+
+  def test_grpc_large_request_is_chunked(self):
+    """Requests above _CHUNK_BYTES go through PutChunk and arrive intact."""
+
+    class EchoWorker:
+
+      def checksum(self, blob: bytes) -> tuple[int, int]:
+        return len(blob), sum(blob[::997])
+
+    blob = bytes(range(256)) * 40  # 10 KiB -> 10+ chunks of 1 KiB
+    expected = (len(blob), sum(blob[::997]))
+
+    put_chunk = remote_lib.GrpcRemoteExecutionServer._handle_put_chunk
+    chunks_seen = []
+
+    async def counting_put_chunk(server, chunk_bytes, context):
+      chunks_seen.append(len(chunk_bytes))
+      return await put_chunk(server, chunk_bytes, context)
+
+    async def _run_test():
+      with mock.patch.object(
+          remote_lib.GrpcRemoteExecutionServer,
+          "_handle_put_chunk",
+          counting_put_chunk,
+      ):
+        async with running_grpc_server(EchoWorker()) as (server, handle):
+          with mock.patch.object(remote_lib, "_CHUNK_BYTES", 1024):
+            self.assertEqual(await handle.asubmit("checksum", blob), expected)
+            uploaded = len(chunks_seen)
+            self.assertGreater(uploaded, 10)
+            await handle.dispatch_task("big_req", "checksum", blob)
+            resp = await handle.poll_responses(timeout_s=2.0)
+            self.assertEqual(resp.unwrap(), expected)
+            self.assertLen(chunks_seen, 2 * uploaded)
+            # Small requests still take the single-message path.
+            self.assertEqual(await handle.asubmit("checksum", b"x"), (1, 120))
+            self.assertLen(chunks_seen, 2 * uploaded)
+          self.assertEmpty(server._uploads)
 
     asyncio.run(_run_test())
 
