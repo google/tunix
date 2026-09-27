@@ -331,6 +331,41 @@ class VllmSamplerAdapterTest(absltest.TestCase):
     asyncio.run(self.sampler_adapter.get_weight_sync_metadata())
     self.mock_sampler_instance.start.assert_awaited_once()  # not started twice
 
+  def test_bind_and_metadata_cached_across_warm_rounds_and_cleared_on_stop(
+      self,
+  ):
+    self.mock_sampler_instance._is_running = True
+    self.mock_sampler_instance.get_raiden_metadata.return_value = [{
+        "unit": {
+            "job_name": "rollout",
+            "job_replica_id": "",
+            "data_name": "",
+            "data_replica_idx": 0,
+        },
+        "variables": (),
+        "mesh_shape": (1,),
+        "mesh_axes": ("fsdp",),
+        "data_address": "",
+        "control_plane_rpc_address": "",
+    }]
+
+    asyncio.run(self.sampler_adapter.bind_weight_sync())
+    asyncio.run(self.sampler_adapter.bind_weight_sync())
+    self.mock_sampler_instance.bind_raiden_sync.assert_awaited_once()
+
+    meta1 = asyncio.run(self.sampler_adapter.get_weight_sync_metadata())
+    meta2 = asyncio.run(self.sampler_adapter.get_weight_sync_metadata())
+    self.assertIs(meta1, meta2)
+    self.mock_sampler_instance.get_raiden_metadata.assert_awaited_once()
+
+    asyncio.run(self.sampler_adapter.stop())
+    asyncio.run(self.sampler_adapter.bind_weight_sync())
+    asyncio.run(self.sampler_adapter.get_weight_sync_metadata())
+    self.assertEqual(self.mock_sampler_instance.bind_raiden_sync.await_count, 2)
+    self.assertEqual(
+        self.mock_sampler_instance.get_raiden_metadata.await_count, 2
+    )
+
   def test_weight_sync_apis_fail_when_uninitialized(self):
     """Weight sync entry points fail instead of silently initializing."""
     uninit = vllm_sampler_adapter.VllmSamplerAdapter(server_id="vllm_slice_01")

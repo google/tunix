@@ -584,6 +584,33 @@ class SuccessPathTest(CoordinatorTestBase):
 
     self.assertTrue(result.success)
 
+  def test_destination_setup_overlaps_with_source_prepare(self):
+    dest = FakeDestination("sampler", [])
+    coordinator = self.make(dest)
+    source = self.sources[0]
+
+    async def scenario():
+      dst_started, src_started = asyncio.Event(), asyncio.Event()
+      orig_bind = dest.bind_weight_sync
+      orig_prep = source.prepare_weight_sync
+
+      async def overlapping_bind():
+        dst_started.set()
+        await asyncio.wait_for(src_started.wait(), 5)
+        return await orig_bind()
+
+      async def overlapping_prep(sync_request=None, **kwargs):
+        src_started.set()
+        await asyncio.wait_for(dst_started.wait(), 5)
+        return await orig_prep(sync_request, **kwargs)
+
+      dest.bind_weight_sync = overlapping_bind
+      source.prepare_weight_sync = overlapping_prep
+      return await coordinator.sync(1)
+
+    result = asyncio.run(scenario())
+    self.assertTrue(result.success)
+
 
 class MultiHostAndVariablesTest(CoordinatorTestBase):
 
