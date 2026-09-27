@@ -673,14 +673,14 @@ class RaidenSynchronizer(weight_sync.WeightSynchronizer):
         sorted({getattr(d, "task_id", None) for d in src_devices}, key=str),
     )
 
-    if is_d2h:
+    if is_d2h or (not self._auto_h2d and _use_direct_device_buffer()):
       logging.info(
           "Initializing Pathways weight synchronizer and executing D2H via FFI"
           " (%d layers, %d devices/host)",
           len(self.arrays),
           devices_per_host,
       )
-      ws_info = raiden_ffi.init_weight_synchronizer_and_d2h(
+      init_kwargs: dict[str, Any] = dict(
           device_arrays=self.arrays,
           shard_idx=shard_idx,
           mesh=mesh,
@@ -690,28 +690,9 @@ class RaidenSynchronizer(weight_sync.WeightSynchronizer):
           listener_port=0,
           num_shards=devices_per_host,
       )
-    elif not self._auto_h2d and _use_direct_device_buffer():
-      logging.info(
-          "Initializing Pathways weight synchronizer and binding device buffers"
-          " via FFI (%d layers, %d devices/host)",
-          len(self.arrays),
-          devices_per_host,
-      )
-      ws_info = raiden_ffi.init_weight_synchronizer(
-          device_arrays=self.arrays,
-          shard_idx=shard_idx,
-          mesh=mesh,
-          slice_byte_sizes=slice_byte_sizes_sharded,
-          parallelism=self._parallelism,
-          num_layers=len(self.arrays),
-          listener_port=0,
-          num_shards=devices_per_host,
-          host_subgrid=(
-              list(self._host_subgrid)
-              if self._host_subgrid is not None
-              else None
-          ),
-      )
+      if self._host_subgrid is not None:
+        init_kwargs["host_subgrid"] = list(self._host_subgrid)
+      ws_info = raiden_ffi.init_weight_synchronizer_and_d2h(**init_kwargs)
     else:
       logging.info(
           "Initializing Pathways weight synchronizer for H2D via FFI (%d"

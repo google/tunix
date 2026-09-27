@@ -435,13 +435,13 @@ class RaidenSynchronizerTest(absltest.TestCase):
           return_value=fake_info,
       ):
         sync._init_ffi_transport(is_d2h=False)
-        ffi.init_weight_synchronizer.assert_called_once()
-        call_kwargs = ffi.init_weight_synchronizer.call_args.kwargs
+        ffi.init_weight_synchronizer_and_d2h.assert_called_once()
+        call_kwargs = ffi.init_weight_synchronizer_and_d2h.call_args.kwargs
         self.assertEqual(call_kwargs["device_arrays"], [arr1, arr2])
         self.assertEqual(call_kwargs["num_layers"], 2)
         self.assertEqual(call_kwargs["num_shards"], 1)
         self.assertEqual(call_kwargs["host_subgrid"], [1])
-        ffi.init_weight_synchronizer_and_d2h.assert_not_called()
+        ffi.init_weight_synchronizer.assert_not_called()
 
   def test_ffi_destination_init_runs_at_bind(self):
     with mock.patch.dict("os.environ", {"JAX_PLATFORMS": "proxy,cpu"}):
