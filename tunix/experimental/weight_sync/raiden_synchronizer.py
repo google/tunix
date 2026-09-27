@@ -1037,7 +1037,7 @@ class RaidenSynchronizer(weight_sync.WeightSynchronizer):
           self._cached_variables is not None
           and self._cached_variables_sig == variables_sig
       )
-    except Exception:  # pylint: disable=broad-exception-caught
+    except (AttributeError, TypeError, ValueError):
       cache_hit = False
     if cache_hit and self._cached_variables is not None:
       variables = self._cached_variables

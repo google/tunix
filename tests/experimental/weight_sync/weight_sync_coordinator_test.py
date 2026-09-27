@@ -611,6 +611,28 @@ class SuccessPathTest(CoordinatorTestBase):
     result = asyncio.run(scenario())
     self.assertTrue(result.success)
 
+  def test_destination_setup_failure_cancels_in_flight_source_prepare(self):
+    dest = FakeDestination("sampler", [], fail_on="bind", fail_persistently=True)
+    coordinator = self.make(dest)
+    source = self.sources[0]
+    src_cancelled = False
+
+    async def slow_prep(sync_request=None, **kwargs):
+      nonlocal src_cancelled
+      del sync_request, kwargs
+      try:
+        await asyncio.sleep(60)
+      except asyncio.CancelledError:
+        src_cancelled = True
+        raise
+
+    source.prepare_weight_sync = slow_prep
+
+    with self.assertRaises(WeightSyncError):
+      asyncio.run(coordinator.sync(1))
+
+    self.assertTrue(src_cancelled)
+
 
 class MultiHostAndVariablesTest(CoordinatorTestBase):
 

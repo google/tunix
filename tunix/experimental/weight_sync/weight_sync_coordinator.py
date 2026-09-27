@@ -1067,10 +1067,16 @@ class WeightSyncCoordinator:
               ])
           )
 
-        dst_meta_lists, src_meta_lists = await asyncio.gather(
-            _prepare_destinations(),
-            _prepare_sources(),
-        )
+        tasks = [
+            asyncio.create_task(_prepare_destinations()),
+            asyncio.create_task(_prepare_sources()),
+        ]
+        try:
+          dst_meta_lists, src_meta_lists = await asyncio.gather(*tasks)
+        finally:
+          for t in tasks:
+            if not t.done():
+              t.cancel()
         t_prepare_s = time.monotonic() - t_phase
       except asyncio.CancelledError:
         raise

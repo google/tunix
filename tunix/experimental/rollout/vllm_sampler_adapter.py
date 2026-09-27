@@ -419,7 +419,8 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
         parallelism=self._parallelism,
         job_name=self.raiden_job_name,
     )
-    self._raiden_bound = True
+    if result:
+      self._raiden_bound = True
     return result
 
   async def get_weight_sync_metadata(

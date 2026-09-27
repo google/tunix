@@ -366,6 +366,15 @@ class VllmSamplerAdapterTest(absltest.TestCase):
         self.mock_sampler_instance.get_raiden_metadata.await_count, 2
     )
 
+  def test_bind_weight_sync_does_not_cache_falsy_result(self):
+    self.mock_sampler_instance._is_running = True
+    self.mock_sampler_instance.bind_raiden_sync.side_effect = [False, True]
+
+    self.assertFalse(asyncio.run(self.sampler_adapter.bind_weight_sync()))
+    self.assertTrue(asyncio.run(self.sampler_adapter.bind_weight_sync()))
+    self.assertTrue(asyncio.run(self.sampler_adapter.bind_weight_sync()))
+    self.assertEqual(self.mock_sampler_instance.bind_raiden_sync.await_count, 2)
+
   def test_weight_sync_apis_fail_when_uninitialized(self):
     """Weight sync entry points fail instead of silently initializing."""
     uninit = vllm_sampler_adapter.VllmSamplerAdapter(server_id="vllm_slice_01")
