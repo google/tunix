@@ -173,8 +173,14 @@ export EPSILON=0.2
 export EPSILON_HIGH=0.28
 export USE_ROLLOUT_LOGPS="false"
 export EXACT_TOKEN_CONTINUITY="${EXACT_TOKEN_CONTINUITY:-true}"
-export OVERLONG_FILTER="true"
-export OVERLONG_LOSS_MASKING="true"
+# Per the MLPerf Qwen3.5 DeepSWE NeMo-RL reference (`overlong_filtering: true`),
+# truncated/overlong trajectories have their token loss masked out
+# (`OVERLONG_LOSS_MASKING="true"`), while their `0.0` reward remains in the
+# `grpo-loo` group baseline (`OVERLONG_FILTER="false"`) so groups where all
+# unsolved trajectories are truncated still produce positive advantages for
+# solved trajectories.
+export OVERLONG_FILTER="${OVERLONG_FILTER:-false}"
+export OVERLONG_LOSS_MASKING="${OVERLONG_LOSS_MASKING:-true}"
 export SEQ_LOGPROB_ERROR_THRESHOLD=2.0
 export TRUNCATED_IMPORTANCE_SAMPLING_TYPE="seq-mask-tis"
 export TRUNCATED_IMPORTANCE_SAMPLING_RATIO_MIN=0.999
