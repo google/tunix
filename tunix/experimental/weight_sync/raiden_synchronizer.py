@@ -577,7 +577,7 @@ class RaidenSynchronizer(weight_sync.WeightSynchronizer):
           and self._ffi_shard_idx is not None
           and self._ffi_devices_per_host is not None
       )
-    except Exception:  # pylint: disable=broad-exception-caught
+    except (AttributeError, TypeError, ValueError):
       ffi_cache_hit = False
 
     if ffi_cache_hit:
