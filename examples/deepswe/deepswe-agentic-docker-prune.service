@@ -1,0 +1,9 @@
+[Unit]
+Description=Reclaim unused R2E Docker images during DeepSWE agentic training
+After=docker.service deepswe-agentic-q4-clean.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/home/haoyugao_google_com/tunix/examples/deepswe/prune_agentic_docker_cache.sh
+

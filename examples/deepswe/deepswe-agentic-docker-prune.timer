@@ -1,0 +1,10 @@
+[Unit]
+Description=Periodically reclaim unused R2E Docker images
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Unit=deepswe-agentic-docker-prune.service
+
+[Install]
+WantedBy=timers.target
