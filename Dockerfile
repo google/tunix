@@ -34,7 +34,7 @@ WORKDIR /app
 
 # Copy scripts and requirements first to leverage Docker cache
 COPY scripts/install_tunix_vllm_requirement.sh scripts/
-COPY requirements/ requirements/
+COPY requirements/requirements.txt requirements/special_requirements.txt requirements/
 
 RUN bash scripts/install_tunix_vllm_requirement.sh
 
@@ -45,8 +45,7 @@ RUN uv pip install .
 
 # Install SFT/MaxText dependencies (unconditional)
 RUN uv pip install 'jax==0.11.0' 'flax==0.12.7' && \
-    uv pip install torchax aqtp tokamax math_verify drjax && \
-    uv pip install --no-deps git+https://github.com/google/maxtext.git@1c1c34ce1be634f8168cb86b9a5bfa8bf5a2bd8a
+    uv pip install torchax aqtp tokamax math_verify drjax
 
 # Build argument to conditionally install Kubernetes tools
 ARG INSTALL_K8S_TOOLS=false
@@ -80,10 +79,13 @@ RUN if [ "$INSTALL_DEEPSWE_DEPS" = "true" ]; then \
 # Build argument to conditionally install MaxText dependencies
 ARG INSTALL_MAXTEXT=false
 
-# Install MaxText specific dependencies conditionally
+# Install MaxText (and optional MaxText-specific dependencies) from requirements/maxtext_requirements.txt
+COPY requirements/maxtext_requirements.txt requirements/
 RUN if [ "$INSTALL_MAXTEXT" = "true" ]; then \
       uv pip install -r /app/requirements/maxtext_requirements.txt --torch-backend=cpu; \
-fi
+    else \
+      grep '^maxtext @' /app/requirements/maxtext_requirements.txt | uv pip install --no-deps -r /dev/stdin; \
+    fi
 
 # Build argument to conditionally install Raiden weight sync dependencies
 ARG INSTALL_RAIDEN=false
