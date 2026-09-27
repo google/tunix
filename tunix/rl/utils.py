@@ -416,6 +416,37 @@ def max_logp_positions_per_packed_row(training_config: Any) -> int | None:
   return value if isinstance(value, int) else None
 
 
+def logp_gather_bucket_size(training_config: Any) -> int | None:
+  """Returns the configured unpacked logp-gather bucket size, or None."""
+  value = getattr(training_config, "logp_gather_bucket_size", None)
+  return value if isinstance(value, int) else None
+
+
+def bucketed_logp_positions(
+    logps_mask: Any, bucket_size: int | None
+) -> int | None:
+  """Static logp-gather size for an unpacked batch, or None to skip gathering.
+
+  Rounds the largest per-row count of `logps_mask > 0` up to a multiple of
+  `bucket_size`, so a batch compiles against one of a few sizes. Returns None
+  when that would cover every completion slot (gathering would save nothing).
+
+  Args:
+    logps_mask: `[B, completion_len]` mask of tokens whose logp is needed.
+    bucket_size: Rounding granularity; None disables gathering.
+
+  Returns:
+    The gather size K, or None.
+  """
+  if bucket_size is None:
+    return None
+  mask = np.asarray(logps_mask) > 0
+  completion_len = mask.shape[-1]
+  count = int(np.max(np.count_nonzero(mask, axis=-1), initial=0))
+  k = max(bucket_size, _ceildiv(count, bucket_size) * bucket_size)
+  return k if k < completion_len else None
+
+
 def validate_packing_budget(
     max_token_budget: int,
     max_prompt_length: int,

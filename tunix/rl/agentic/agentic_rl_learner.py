@@ -1004,6 +1004,17 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           ]
         else:
           chunked_train_micro_batch = [merged_train_micro_batch]
+        # Size each train_step's lm_head gather to its own loss-masked tokens.
+        gather_bucket = rl_utils.logp_gather_bucket_size(training_config)
+        if gather_bucket is not None:
+          chunked_train_micro_batch = [
+              chunk.replace(
+                  logp_positions=rl_utils.bucketed_logp_positions(
+                      chunk.completion_mask, gather_bucket
+                  )
+              )
+              for chunk in chunked_train_micro_batch
+          ]
       else:
         chunked_train_micro_batch = [merged_train_micro_batch]
 

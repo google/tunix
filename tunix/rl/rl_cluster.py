@@ -1107,6 +1107,7 @@ class RLEngine:
       segment_positions: jax.Array | None = None,
       token_mask: jax.Array | None = None,
       logps_mask: jax.Array | None = None,
+      max_logp_positions: int | None = None,
   ) -> jax.Array:
     """Gets per-token logps from the actor model on the trainer side.
 
@@ -1129,6 +1130,10 @@ class RLEngine:
           " first."
       )
     micro_batch_size = micro_batch_size or batch_size
+    if max_logp_positions is None and segment_ids is not None:
+      max_logp_positions = rl_utils.max_logp_positions_per_packed_row(
+          self.cluster_config.training_config
+      )
     with self._get_mesh_and_logical_axis_rules_cm(Role.ACTOR) as (mesh, _):
       dest_prompt_tokens = sharding_utils.shard_input(
           prompt_tokens,
@@ -1225,12 +1230,7 @@ class RLEngine:
                     if dest_logps_mask is None
                     else dest_logps_mask[batch_slice]
                 ),
-                max_logp_positions=(
-                    rl_utils.max_logp_positions_per_packed_row(
-                        self.cluster_config.training_config
-                    )
-                    or 0
-                ),
+                max_logp_positions=max_logp_positions or 0,
             )
         )
       actor_per_token_logps = jnp.concatenate(outs, axis=0)

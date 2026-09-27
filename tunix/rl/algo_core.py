@@ -158,6 +158,20 @@ def masked_var(
   return variance * bessel_corr
 
 
+def _logp_gather_size(train_example, kwargs) -> int:
+  """Static logp-gather size K for the policy loss (0 disables gathering).
+
+  Unpacked batches carry a bucketed per-micro-batch size on the example;
+  packed batches use the packer-enforced per-row cap.
+  """
+  logp_positions = getattr(train_example, "logp_positions", None)
+  if logp_positions:
+    return logp_positions
+  if getattr(train_example, "segment_ids", None) is not None:
+    return kwargs.get("max_logp_positions_per_packed_row") or 0
+  return 0
+
+
 # ==============================================================================
 # PPO Core
 # ==============================================================================
@@ -195,7 +209,7 @@ def ppo_policy_loss_fn(
       segment_positions=getattr(train_example, "segment_positions", None),
       chunk_size=kwargs.get("compute_logps_chunk_size", 0),
       logps_mask=completion_mask,
-      max_logp_positions=kwargs.get("max_logp_positions_per_packed_row") or 0,
+      max_logp_positions=_logp_gather_size(train_example, kwargs),
   )
   if return_entropy:
     per_token_logps, token_entropy = outputs
@@ -437,7 +451,7 @@ def grpo_loss_fn(
       routed_experts=getattr(train_example, "routed_experts", None),
       token_mask=token_mask,
       logps_mask=completion_mask,
-      max_logp_positions=kwargs.get("max_logp_positions_per_packed_row") or 0,
+      max_logp_positions=_logp_gather_size(train_example, kwargs),
   )
   per_token_logps = jnp.astype(per_token_logps, jnp.float32)
   # TODO(tsbao): We should handle token level advantages.

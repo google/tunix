@@ -118,6 +118,12 @@ class TrainExample:
   # ``pytree_node=False`` so it is a static Python int (a fixed value every
   # step -> the segment-aware loss compiles once, no per-step recompilation).
   num_segments: int | None = flax.struct.field(default=None, pytree_node=False)
+  # Static per-micro-batch logp-gather size for unpacked batches (see
+  # `TrainingConfig.logp_gather_bucket_size`); None computes every completion
+  # slot. Bucketed, so the loss compiles once per distinct value.
+  logp_positions: int | None = flax.struct.field(
+      default=None, pytree_node=False
+  )
   is_update_step: ArrayType | None = None
   # Truncated importance-sampling correction weights for off-policy
   # correction between the rollout sampler and the trainer. Per-token,
@@ -454,15 +460,16 @@ def compute_per_token_logps(
       name MaxText's adapter uses -- so it replays this routing instead of
       re-running its router. Ignored by models that do not accept the kwarg.
     token_mask: Optional explicit valid positions for prompt plus completion.
-    logps_mask: Packing only. `[B, FullSeqLen]` mask aligned with
-      `completion_tokens` marking the tokens whose logp the caller reads
-      (normally `completion_mask`). Used with `max_logp_positions`.
-    max_logp_positions: Packing with `chunk_size > 0` only. If > 0 and
-      `logps_mask` is given, only the first `max_logp_positions` masked tokens
-      of each row go through the lm_head; every other position returns 0. The
-      packer must cap each row's masked tokens at this value (see
-      `max_logp_positions_per_packed_row`), since a row with more would
-      silently lose the excess.
+    logps_mask: Mask aligned with `completion_tokens` (`[B, FullSeqLen]` when
+      packing, `[B, completion_len]` otherwise) marking the tokens whose logp
+      the caller reads (normally `completion_mask`). Used with
+      `max_logp_positions`.
+    max_logp_positions: `chunk_size > 0` only. If > 0 and `logps_mask` is
+      given, only the first `max_logp_positions` masked tokens of each row go
+      through the lm_head; every other position returns 0. Callers must keep
+      each row's masked tokens within this value (the packer's
+      `max_logp_positions_per_packed_row`, or `bucketed_logp_positions` when
+      unpacked), since a row with more would silently lose the excess.
 
   Returns:
     per_token_logps: jax.Array token-level logarithmic values.
@@ -540,11 +547,7 @@ def compute_per_token_logps(
 
   if chunk_size > 0:
     hidden_state = outputs[:, -logits_to_keep - 1 : -1, :]
-    if (
-        segment_ids is not None
-        and logps_mask is not None
-        and max_logp_positions > 0
-    ):
+    if logps_mask is not None and max_logp_positions > 0:
       out = _compute_gathered_chunked_logps(
           model,
           hidden_state,
@@ -923,8 +926,9 @@ def _compute_gathered_chunked_logps(
 ):
   """`compute_chunked_logps` over only the masked positions of each row.
 
-  Packed rows interleave prompts, completions and padding, so the lm_head
-  cannot be restricted by a static slice. Instead gather the (at most
+  Packed rows interleave prompts, completions and padding, and unpacked
+  completions end in variable-length padding, so the lm_head cannot be
+  restricted by a static slice. Instead gather the (at most
   `max_positions`) masked positions of each row into a dense `[B, K]` buffer,
   run the chunked lm_head on it, and scatter the results back; unmasked
   positions return 0, which the loss masks out anyway.

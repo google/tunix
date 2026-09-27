@@ -312,6 +312,11 @@ class TrainingConfig:
   # of every row position; the packer caps each row's loss-masked tokens to
   # match. Must be >= max_response_length. None computes the full row.
   max_logp_positions_per_packed_row: int | None = None
+  # Unpacked only: if set, per-token logps are computed for only the
+  # loss-masked completion positions, gathered into a buffer sized to the
+  # micro-batch's largest per-row count rounded up to a multiple of this value
+  # (each distinct size compiles once). None computes every completion slot.
+  logp_gather_bucket_size: int | None = None
 
   def get_with_default(self, key: str, default: Any) -> Any:
     val = getattr(self, key)
@@ -363,6 +368,7 @@ class RLTrainingConfig(TrainingConfig):
         "compute_logps_micro_batch_size",
         "max_segments_per_packed_row",
         "max_logp_positions_per_packed_row",
+        "logp_gather_bucket_size",
     ]:
       _is_positive_integer(getattr(self, name, None), name)
 

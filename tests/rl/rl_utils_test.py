@@ -428,6 +428,27 @@ class UtilsTest(absltest.TestCase):
       # carries the version of pack i. With num_packs=2 we expect length-2.
       self.assertEqual(pack.policy_version.shape, (2,))
 
+  def test_bucketed_logp_positions(self):
+    mask = np.zeros((3, 16), dtype=np.float32)
+    mask[0, :3] = 1
+    mask[1, 2:7] = 1  # max row count 5
+    self.assertEqual(utils.bucketed_logp_positions(mask, 4), 8)
+    self.assertEqual(utils.bucketed_logp_positions(mask, 5), 5)
+    # Rounds up to the full completion length -> no gather.
+    self.assertIsNone(utils.bucketed_logp_positions(mask, 16))
+    self.assertIsNone(utils.bucketed_logp_positions(mask, None))
+    # An all-masked-out batch still gets the minimum bucket.
+    self.assertEqual(utils.bucketed_logp_positions(np.zeros((2, 16)), 4), 4)
+
+  def test_logp_gather_config_helpers_ignore_non_ints(self):
+    cfg = mock.Mock()
+    self.assertIsNone(utils.logp_gather_bucket_size(cfg))
+    self.assertIsNone(utils.max_logp_positions_per_packed_row(cfg))
+    cfg.logp_gather_bucket_size = 512
+    cfg.max_logp_positions_per_packed_row = 2048
+    self.assertEqual(utils.logp_gather_bucket_size(cfg), 512)
+    self.assertEqual(utils.max_logp_positions_per_packed_row(cfg), 2048)
+
   def test_pack_sequences(self):
     # 3 sequences with lengths (P+C): item1 (2+3=5), item2 (1+2=3),
     # item3 (3+4=7). Budget 10, pack_size=1 -> each bin is its own chunk.

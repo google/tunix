@@ -183,6 +183,9 @@ arg_parser.add_argument("--max_seq_token_per_tpu", type=int, default=None)
 arg_parser.add_argument(
     "--max_logp_positions_per_packed_row", type=int, default=None
 )
+# Unpacked only: run the lm_head on just the loss-masked completion tokens,
+# gathered into a size rounded up to a multiple of this value.
+arg_parser.add_argument("--logp_gather_bucket_size", type=int, default=None)
 # Overrides the NUM_BATCHES * NUM_EPOCHS default when set.
 arg_parser.add_argument("--max_steps", type=int, default=None)
 # Prompt groups (x num_generations sequences) per trainer forward+backward.
@@ -595,6 +598,7 @@ cluster_config = rl_engine_lib.ClusterConfig(
         compute_logps_chunk_size=args.compute_logps_chunk_size,
         max_seq_token_per_tpu=args.max_seq_token_per_tpu,
         max_logp_positions_per_packed_row=args.max_logp_positions_per_packed_row,
+        logp_gather_bucket_size=args.logp_gather_bucket_size,
         profiler_options=profiler_options,
         perf_metrics_options=perf_metrics_options,
     ),

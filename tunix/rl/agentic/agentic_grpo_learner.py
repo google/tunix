@@ -697,6 +697,18 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         is not None
     )
 
+    # Unpacked: run the lm_head on only this batch's loss-masked completion
+    # tokens, gathered into a bucketed static size (None = every slot).
+    unpacked_logp_positions = (
+        None
+        if is_packed
+        else rl_utils.bucketed_logp_positions(
+            padded_completion_masks,
+            rl_utils.logp_gather_bucket_size(
+                self.rl_engine.cluster_config.training_config
+            ),
+        )
+    )
     configured_compute_logps = (
         self.rl_engine.cluster_config.training_config.compute_logps_micro_batch_size
     )
@@ -732,6 +744,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
               eos_id=eos_value,
               micro_batch_size=compute_logps_micro_batch_size,
               token_mask=token_mask,
+              logps_mask=completion_mask,
+              max_logp_positions=unpacked_logp_positions,
           )
     elif self.algo_config.use_rollout_logps and padded_old_logprobs:
       rollout_per_token_logps = jnp.asarray(padded_old_logprobs)
@@ -754,6 +768,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             eos_id=eos_value,
             micro_batch_size=compute_logps_micro_batch_size,
             token_mask=token_mask,
+            logps_mask=completion_mask,
+            max_logp_positions=unpacked_logp_positions,
         )
       # When sampler-IS correction is enabled, use the trainer's recomputed
       # logp as ``old_per_token_logps`` so the PPO ratio is
@@ -777,6 +793,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           eos_id=eos_value,
           micro_batch_size=compute_logps_micro_batch_size,
           token_mask=token_mask,
+          logps_mask=completion_mask,
+          max_logp_positions=unpacked_logp_positions,
       )
       old_per_token_logps = trainer_per_token_logps
 

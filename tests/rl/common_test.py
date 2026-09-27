@@ -482,6 +482,63 @@ class CommonTest(parameterized.TestCase):
         gathered_grad,
     )
 
+  @parameterized.named_parameters(
+      dict(testcase_name="exact_k", max_logp_positions=4),
+      dict(testcase_name="loose_k", max_logp_positions=6),
+  )
+  def test_gathered_unpacked_logps_match_full(self, max_logp_positions):
+    prompt_tokens = np.array([[0, 0, 5, 6], [1, 2, 3, 4], [0, 7, 8, 9]])
+    completion_tokens = np.array([
+        [3, 4, 5, 6, 7, 0, 0, 0],
+        [8, 9, 2, 3, 0, 0, 0, 0],
+        [4, 5, 6, 7, 8, 9, 1, 0],
+    ])
+    # Loss mask: real completion tokens, with masked-out env tokens; at most
+    # 4 per row, so K=4 is exact.
+    logps_mask = np.array([
+        [1, 1, 0, 1, 1, 0, 0, 0],
+        [1, 1, 1, 1, 0, 0, 0, 0],
+        [1, 0, 0, 1, 1, 0, 1, 0],
+    ], dtype=np.float32)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    graphdef, state = nnx.split(model)
+    kwargs = dict(pad_id=0, eos_id=-1, temperature=0.9, chunk_size=2)
+    full_logps, full_entropy = common.compute_per_token_logps(
+        graphdef, state, prompt_tokens, completion_tokens,
+        return_entropy=True, **kwargs,
+    )
+    logps, entropy = common.compute_per_token_logps(
+        graphdef, state, prompt_tokens, completion_tokens,
+        return_entropy=True, logps_mask=logps_mask,
+        max_logp_positions=max_logp_positions, **kwargs,
+    )
+    self.assertEqual(logps.shape, full_logps.shape)
+    np.testing.assert_allclose(
+        logps, full_logps * logps_mask, atol=1e-5, rtol=1e-5
+    )
+    np.testing.assert_allclose(
+        entropy, full_entropy * logps_mask, atol=1e-5, rtol=1e-5
+    )
+
+    def masked_sum(state, **extra):
+      out = common.compute_per_token_logps(
+          graphdef, state, prompt_tokens, completion_tokens,
+          stop_gradient=False, **kwargs, **extra,
+      )
+      return jnp.sum(out * logps_mask)
+
+    full_grad = jax.grad(masked_sum)(state)
+    gathered_grad = jax.grad(
+        lambda st: masked_sum(
+            st, logps_mask=logps_mask, max_logp_positions=max_logp_positions
+        )
+    )(state)
+    jax.tree.map(
+        lambda a, b: np.testing.assert_allclose(a, b, atol=1e-5, rtol=1e-4),
+        full_grad,
+        gathered_grad,
+    )
+
   def test_np_make_completion_mask(self):
     completion_ids = np.array(
         [
