@@ -6,6 +6,19 @@ if ! systemctl is-active --quiet deepswe-agentic-q4-clean.service; then
   exit 0
 fi
 
+service_start=$(systemctl show -P ExecMainStartTimestamp deepswe-agentic-q4-clean.service)
+service_start_epoch=$(date -d "$service_start" +%s)
+while read -r container_id container_name created_at; do
+  if [[ "$container_name" != namanjain12-* ]]; then
+    continue
+  fi
+  created_epoch=$(date -d "${created_at% UTC}" +%s) || continue
+  if (( created_epoch + 5 < service_start_epoch )); then
+    # The training process that owned this container has already exited.
+    docker rm -f "$container_id" >/dev/null 2>&1 || true
+  fi
+done < <(docker ps --filter status=running --format '{{.ID}} {{.Names}} {{.CreatedAt}}')
+
 available_kib=$(df -Pk / | awk 'NR == 2 {print $4}')
 if (( available_kib >= 20 * 1024 * 1024 )); then
   exit 0

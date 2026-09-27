@@ -46,6 +46,7 @@ persistent disk is mounted. Its output is appended to
 `/mnt/disks/persist/haoyu-deepswe-agentic-q4-clean/agentic-training.log`.
 The exact-token collector counts chat-template end tokens and stops before an
 environment message would exceed the 16,384-token completion budget.
-The `deepswe-agentic-docker-prune.timer` reclaims exited R2E task containers
-and unreferenced task images when root disk space falls below 20 GiB. It never
-removes a container that is still running.
+The `deepswe-agentic-docker-prune.timer` removes R2E containers left running
+by an earlier crashed training process. When root disk space falls below
+20 GiB, it also reclaims exited task containers and unreferenced task images.
+Containers created by the current training process remain running.
