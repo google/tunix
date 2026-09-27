@@ -18,12 +18,13 @@ from __future__ import annotations
 
 import collections
 import dataclasses
+import functools
 import inspect
 import ipaddress
 import os
 import re
 import socket
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional, Sequence, Tuple
 
 from absl import logging
 import jax
@@ -973,20 +974,7 @@ class RaidenSynchronizer(weight_sync.WeightSynchronizer):
 
   def checksums(self, sample: int = 3) -> dict:
     """Per-tensor float32 abs-sums for cross-process verification."""
-
-    def total(arr):
-      return float(jnp.sum(jnp.abs(arr).astype(jnp.float32)))
-
-    head = {
-        name: total(arr)
-        for name, arr in list(zip(self.names, self.arrays))[:sample]
-    }
-    head["__grand_total__"] = float(sum(total(a) for a in self.arrays))
-    # Registration pairs tensors by position, so the totals only compare when
-    # both sides bound the same set. Check these before trusting a mismatch.
-    head["__tensor_count__"] = len(self.arrays)
-    head["__element_count__"] = int(sum(a.size for a in self.arrays))
-    return head
+    return _compute_checksums(self.names, self.arrays, sample=sample)
 
   def release_buffers(self) -> int:
     """Drops Python references to staged `self.arrays` and `self.names`.
@@ -1084,6 +1072,39 @@ class RaidenSynchronizer(weight_sync.WeightSynchronizer):
 RaidenWeightSync = RaidenSynchronizer
 
 
+@functools.lru_cache(maxsize=4)
+def _jitted_abs_sums(num_arrays: int):
+  del num_arrays
+
+  @jax.jit
+  def _compute(arrays):
+    return jnp.stack([jnp.sum(jnp.abs(a).astype(jnp.float32)) for a in arrays])
+
+  return _compute
+
+
+def _compute_checksums(
+    names: Sequence[str], arrays: Sequence[Any], sample: int = 3
+) -> dict[str, Any]:
+  """Computes per-tensor float32 abs-sums in a single fused JIT call."""
+  if not arrays:
+    return {
+        "__grand_total__": 0.0,
+        "__tensor_count__": 0,
+        "__element_count__": 0,
+    }
+  totals = jax.device_get(_jitted_abs_sums(len(arrays))(tuple(arrays))).tolist()
+  head = {
+      name: totals[i] for i, name in enumerate(list(names)[: max(0, sample)])
+  }
+  head["__grand_total__"] = float(sum(totals))
+  # Registration pairs tensors by position, so the totals only compare when
+  # both sides bound the same set. Check these before trusting a mismatch.
+  head["__tensor_count__"] = len(arrays)
+  head["__element_count__"] = int(sum(a.size for a in arrays))
+  return head
+
+
 def patch_raiden_worker_sync() -> None:
   """Monkey-patches tpu_inference.rl.raiden_worker_sync.RaidenWorkerSync to delegate apply_to_runner."""
   if os.environ.get("JAX_PLATFORMS") == "cpu":
@@ -1099,6 +1120,7 @@ def patch_raiden_worker_sync() -> None:
     if getattr(rws.RaidenWorkerSync, "_patched_by_tunix", False):
       return
     orig_apply = getattr(rws.RaidenWorkerSync, "apply_to_runner", None)
+    orig_checksums = getattr(rws.RaidenWorkerSync, "checksums", None)
 
     def _patched_apply_to_runner(self, runner: Any) -> None:
       if self._sync is not None and hasattr(self._sync, "apply_to_runner"):
@@ -1107,7 +1129,18 @@ def patch_raiden_worker_sync() -> None:
       if orig_apply is not None:
         orig_apply(self, runner)
 
+    def _patched_checksums(self, sample: int = 3) -> dict[str, Any]:
+      sync_obj = getattr(self, "_sync", None)
+      if sync_obj is not None and hasattr(sync_obj, "checksums"):
+        return sync_obj.checksums(sample=sample)
+      if hasattr(self, "names") and hasattr(self, "arrays"):
+        return _compute_checksums(self.names, self.arrays, sample=sample)
+      if orig_checksums is not None:
+        return orig_checksums(self, sample=sample)
+      return {}
+
     rws.RaidenWorkerSync.apply_to_runner = _patched_apply_to_runner
+    rws.RaidenWorkerSync.checksums = _patched_checksums
     rws.RaidenWorkerSync._patched_by_tunix = True
     logging.info(
         "Successfully patched RaidenWorkerSync.apply_to_runner with Tunix"
