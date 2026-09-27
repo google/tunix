@@ -513,10 +513,15 @@ def compute_per_token_logps(
   # ``process_ids`` so flash-attention variants that lack a separate
   # padding-mask input still skip pad positions.
   if model_call_contains(model, "segment_ids"):
-    if segment_ids is not None:
-      model_kwargs["segment_ids"] = segment_ids
-    elif input_seg_ids is not None:
-      model_kwargs["segment_ids"] = input_seg_ids
+    seg_to_pass = segment_ids if segment_ids is not None else input_seg_ids
+    if seg_to_pass is not None:
+      # Guard all-zero dummy padding rows (from batch-level padding) so
+      # flash-attention and GDN kernels never encounter a completely empty row.
+      row_all_zero = jnp.all(seg_to_pass == 0, axis=-1)
+      seg_to_pass = seg_to_pass.at[:, 0].set(
+          jnp.where(row_all_zero, jnp.ones_like(seg_to_pass[:, 0]), seg_to_pass[:, 0])
+      )
+      model_kwargs["segment_ids"] = seg_to_pass
   if images is not None:
     model_kwargs["images"] = images
   # Router replay. `forced_routed_experts` is the model-side name (MaxText's
@@ -1238,8 +1243,8 @@ def _aggregate_loss_segmented(
     denominator = completion_mask.sum()
     min_denom = 1.0
   elif loss_agg_mode == "sequence-mean-token-mean":
-    per_seg_mean = l_seg / jnp.clip(c_seg, min=1.0)
-    unreduced_sum = (per_seg_mean * a_seg).sum()
+    per_seg_mean = jnp.where(a_seg > 0, l_seg / jnp.clip(c_seg, min=1.0), 0.0)
+    unreduced_sum = per_seg_mean.sum()
     denominator = n_act
     min_denom = 1.0
   elif loss_agg_mode == "sequence-mean-token-scale":
@@ -1252,12 +1257,12 @@ def _aggregate_loss_segmented(
           " norm is the pack budget, which dilutes every sequence."
       )
     norm = _check_get_norm(kwargs, per_token_loss.shape[-1])
-    per_seg_scaled = l_seg / jnp.clip(norm, min=1e-6)
-    unreduced_sum = (per_seg_scaled * a_seg).sum()
+    per_seg_scaled = jnp.where(a_seg > 0, l_seg / jnp.clip(norm, min=1e-6), 0.0)
+    unreduced_sum = per_seg_scaled.sum()
     denominator = n_act
     min_denom = 1.0
   elif loss_agg_mode == "seq-mean-token-sum":
-    unreduced_sum = (l_seg * a_seg).sum()
+    unreduced_sum = jnp.where(a_seg > 0, l_seg, 0.0).sum()
     denominator = n_act
     min_denom = 1e-6
   elif loss_agg_mode == "sequence-mean-token-sum-norm":

@@ -602,6 +602,7 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
             args.maxtext_model_name,
             attention=args.maxtext_attention,
             prefuse_moe_weights=prefuse_moe,
+            return_routed_experts=args.return_routed_experts,
         )
     )
 
@@ -803,6 +804,7 @@ def _create_vllm_sampler(args, tokenizer):
             args.maxtext_model_name,
             attention=args.maxtext_attention,
             prefuse_moe_weights=prefuse_moe,
+            return_routed_experts=args.return_routed_experts,
         )
     )
 
