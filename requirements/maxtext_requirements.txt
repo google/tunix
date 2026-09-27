@@ -1,6 +1,6 @@
 # TODO(maxtext-dev): Update the commits after all code changes land.
-maxtext @ git+https://github.com/google/maxtext.git@atwigg/mlperf
-maxtext-vllm-adapter @ git+https://github.com/google/maxtext.git@atwigg/mlperf#subdirectory=src/maxtext/integration/vllm
+maxtext @ git+https://github.com/google/maxtext.git@1c1c34ce1be634f8168cb86b9a5bfa8bf5a2bd8a
+maxtext-vllm-adapter @ git+https://github.com/google/maxtext.git@1c1c34ce1be634f8168cb86b9a5bfa8bf5a2bd8a#subdirectory=src/maxtext/integration/vllm
 aqtp
 cheroot
 cloud-accelerator-diagnostics

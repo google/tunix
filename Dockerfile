@@ -46,7 +46,7 @@ RUN uv pip install .
 # Install SFT/MaxText dependencies (unconditional)
 RUN uv pip install 'jax==0.11.0' 'flax==0.12.7' && \
     uv pip install torchax aqtp tokamax math_verify drjax && \
-    uv pip install --no-deps git+https://github.com/google/maxtext.git@atwigg/mlperf
+    uv pip install --no-deps git+https://github.com/google/maxtext.git@1c1c34ce1be634f8168cb86b9a5bfa8bf5a2bd8a
 
 # Build argument to conditionally install Kubernetes tools
 ARG INSTALL_K8S_TOOLS=false

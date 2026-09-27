@@ -38,8 +38,12 @@ import asyncio
 import contextlib
 import hashlib
 import inspect
+import os
+import struct
 import threading
+import time
 import traceback as traceback_lib
+import uuid
 from typing import (
     Any,
     AsyncIterator,
@@ -78,6 +82,28 @@ LONG_POLL_TIMEOUT_S = RPC_TIMEOUT_S - 10.0
 # Cap for a single gRPC message. Set to -1 (unlimited) so large training-batch
 # payloads (which can exceed 1 GB for long sequence lengths) are not truncated.
 _MAX_MESSAGE_BYTES = -1
+
+# -1 does not make messages unbounded: the gRPC wire format frames each message
+# with a 4-byte length, so anything >= 4 GiB is silently truncated (and >2 GiB
+# is unreliable). A packed 397B train_step with router replay carries ~4.8 GB
+# of routed experts (4M tokens x 60 layers x top-10 x int16), so requests larger
+# than this are uploaded in chunks via PutChunk and reassembled server-side.
+_CHUNK_BYTES = int(os.environ.get("TUNIX_GRPC_CHUNK_BYTES", 512 * 1024 * 1024))
+
+# Pickle payloads start with the PROTO opcode (0x80), so this never collides
+# with a real serialized request.
+_CHUNKED_MAGIC = b"TUNIX_CHUNKED\x00"
+# PutChunk header: 16-byte upload id, chunk index, total chunk count.
+_CHUNK_HEADER = struct.Struct("!16sII")
+_UPLOAD_ID_BYTES = 16
+# Bounds the list PutChunk allocates from a header's total; 64 TiB at the
+# default chunk size.
+_MAX_CHUNKS = 1 << 17
+# Uploads that receive no chunk and are not claimed by an Execute/DispatchTask
+# for this long (client died mid-upload) are dropped so they don't pin
+# gigabytes of host memory. Measured from the last chunk, so a slow upload that
+# is still making progress never expires.
+_CHUNK_UPLOAD_TTL_S = 300.0
 
 
 def _grpc_options() -> List[Tuple[str, int]]:
@@ -384,11 +410,61 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
     super().__init__(instance)
     self._server: Optional[Any] = None
     self._serve_loop: Optional[Any] = None
+    # upload id -> [last-chunk time, chunks]; filled by PutChunk.
+    self._uploads: Dict[bytes, List[Any]] = {}
+
+  async def _handle_put_chunk(self, chunk_bytes: bytes, context: Any) -> bytes:
+    del context
+    now = time.monotonic()
+    for stale in [
+        k for k, (t, _) in self._uploads.items()
+        if now - t > _CHUNK_UPLOAD_TTL_S
+    ]:
+      logging.warning("Dropping abandoned chunked upload %s", stale.hex())
+      del self._uploads[stale]
+    if len(chunk_bytes) < _CHUNK_HEADER.size:
+      raise ValueError(
+          f"chunk of {len(chunk_bytes)} bytes is shorter than its header"
+      )
+    upload_id, index, total = _CHUNK_HEADER.unpack_from(chunk_bytes)
+    if not 0 < total <= _MAX_CHUNKS:
+      raise ValueError(f"invalid chunk count {total} (max {_MAX_CHUNKS})")
+    if index >= total:
+      raise ValueError(f"chunk index {index} out of range for {total} chunks")
+    entry = self._uploads.get(upload_id)
+    if entry is None:
+      entry = self._uploads[upload_id] = [now, [None] * total]
+    elif len(entry[1]) != total:
+      raise ValueError(
+          f"chunked upload {upload_id.hex()} declared {len(entry[1])} chunks,"
+          f" this chunk declares {total}"
+      )
+    entry[0] = now
+    entry[1][index] = chunk_bytes[_CHUNK_HEADER.size :]
+    return b""
+
+  def _reassemble(self, request_bytes: bytes) -> bytes:
+    """Returns the full payload, joining PutChunk uploads if this is a reference."""
+    if not request_bytes.startswith(_CHUNKED_MAGIC):
+      return request_bytes
+    upload_id = request_bytes[len(_CHUNKED_MAGIC) :]
+    if len(upload_id) != _UPLOAD_ID_BYTES:
+      raise RuntimeError(f"invalid chunked upload id of {len(upload_id)} bytes")
+    entry = self._uploads.pop(upload_id, None)
+    if entry is None:
+      raise RuntimeError(f"unknown chunked upload {upload_id.hex()}")
+    chunks = entry[1]
+    missing = [i for i, c in enumerate(chunks) if c is None]
+    if missing:
+      raise RuntimeError(
+          f"chunked upload {upload_id.hex()} is missing chunks {missing}"
+      )
+    return b"".join(chunks)
 
   async def _handle_execute(self, request_bytes: bytes, context: Any) -> bytes:
     del context
     try:
-      request = ExecutionRequest.deserialize(request_bytes)
+      request = ExecutionRequest.deserialize(self._reassemble(request_bytes))
       response = await self.execute_request(request)
     except Exception as e:  # pylint: disable=broad-exception-caught
       response = ExecutionResponse(
@@ -402,7 +478,7 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
       self, request_bytes: bytes, context: Any
   ) -> bytes:
     del context
-    request = ExecutionRequest.deserialize(request_bytes)
+    request = ExecutionRequest.deserialize(self._reassemble(request_bytes))
     request_id = await self.dispatch_task(request)
     return cloudpickle.dumps(request_id)
 
@@ -441,6 +517,11 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
             ),
             "PollResponses": _grpc_lib.unary_unary_rpc_method_handler(
                 self._handle_poll_responses,
+                request_deserializer=lambda b: b,
+                response_serializer=lambda b: b,
+            ),
+            "PutChunk": _grpc_lib.unary_unary_rpc_method_handler(
+                self._handle_put_chunk,
                 request_deserializer=lambda b: b,
                 response_serializer=lambda b: b,
             ),
@@ -606,9 +687,44 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
   def _make_rpc(self, channel: Any) -> Any:
     return channel.unary_unary(
         "/tunix.ExecutionService/Execute",
-        request_serializer=lambda req: req.serialize(),
+        request_serializer=lambda b: b,
         response_deserializer=lambda b: ExecutionResponse.deserialize(b),
     )
+
+  async def _encode_request(
+      self, channel: Any, request: ExecutionRequest
+  ) -> bytes:
+    """Serializes `request`, uploading it via PutChunk if it is too big for one message."""
+    payload = request.serialize()
+    if len(payload) <= _CHUNK_BYTES:
+      return payload
+    put_chunk = channel.unary_unary(
+        "/tunix.ExecutionService/PutChunk",
+        request_serializer=lambda b: b,
+        response_deserializer=lambda b: b,
+    )
+    upload_id = uuid.uuid4().bytes
+    view = memoryview(payload)
+    total = -(-len(payload) // _CHUNK_BYTES)
+    if total > _MAX_CHUNKS:
+      raise ValueError(
+          f"request {request.method_name} needs {total} chunks of"
+          f" {_CHUNK_BYTES} bytes, over the {_MAX_CHUNKS} the server accepts;"
+          " raise TUNIX_GRPC_CHUNK_BYTES"
+      )
+    logging.info(
+        "Request %s is %.2f GiB; uploading in %d chunks",
+        request.method_name,
+        len(payload) / 2**30,
+        total,
+    )
+    for index in range(total):
+      chunk = view[index * _CHUNK_BYTES : (index + 1) * _CHUNK_BYTES]
+      await put_chunk(
+          _CHUNK_HEADER.pack(upload_id, index, total) + chunk,
+          timeout=self._rpc_timeout_s,
+      )
+    return _CHUNKED_MAGIC + upload_id
 
   def _get_rpc(self) -> Any:
     if self._rpc is None:
@@ -666,7 +782,8 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
         method_name=method_name, args=args, kwargs=kwargs
     )
     response: ExecutionResponse = await self._sync_rpc(
-        request, timeout=self._rpc_timeout_s
+        await self._encode_request(self._sync_channel, request),
+        timeout=self._rpc_timeout_s,
     )
     return response.unwrap()
 
@@ -679,14 +796,15 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
         method_name=method_name, args=args, kwargs=kwargs
     )
     response: ExecutionResponse = await rpc(
-        request, timeout=self._rpc_timeout_s
+        await self._encode_request(self._channel, request),
+        timeout=self._rpc_timeout_s,
     )
     return response.unwrap()
 
   def _make_dispatch_task_rpc(self, channel: Any) -> Any:
     return channel.unary_unary(
         "/tunix.ExecutionService/DispatchTask",
-        request_serializer=lambda req: req.serialize(),
+        request_serializer=lambda b: b,
         response_deserializer=lambda b: cloudpickle.loads(b),
     )
 
@@ -712,7 +830,10 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     request = ExecutionRequest(
         request_id=request_id, method_name=method_name, args=args, kwargs=kwargs
     )
-    return await rpc(request, timeout=self._rpc_timeout_s)
+    return await rpc(
+        await self._encode_request(self._channel, request),
+        timeout=self._rpc_timeout_s,
+    )
 
   async def poll_responses(
       self, timeout_s: float = LONG_POLL_TIMEOUT_S
