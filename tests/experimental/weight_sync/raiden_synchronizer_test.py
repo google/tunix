@@ -708,6 +708,59 @@ class RaidenSynchronizerTest(absltest.TestCase):
         ),
     )
 
+  def test_apply_to_runner_caches_leaf_mapping_across_warm_rounds(self):
+    sync = raiden_synchronizer.RaidenSynchronizer("rollout")
+    sync.names = [
+        "['layers_0']['mlp']['down_proj']['weight']",
+        "['embed_tokens']['weight']",
+    ]
+    arr1_r1 = np.ones((4, 4), dtype=np.float32)
+    arr2_r1 = np.ones((8, 4), dtype=np.float32)
+    sync.arrays = [arr1_r1, arr2_r1]
+
+    class _Runner:
+
+      def __init__(self, state):
+        self.state = state
+        self.state_leaves = tuple(jax.tree_util.tree_leaves(state))
+
+    runner_state = {
+        "model": {
+            "layers": [{
+                "mlp": {
+                    "down_proj": {"weight": np.zeros((4, 4), dtype=np.float32)}
+                }
+            }],
+            "embed_tokens": {"weight": np.zeros((8, 4), dtype=np.float32)},
+        }
+    }
+    runner = _Runner(runner_state)
+
+    with mock.patch.object(
+        jax.tree_util,
+        "tree_leaves_with_path",
+        wraps=jax.tree_util.tree_leaves_with_path,
+    ) as spy_leaves_with_path:
+      sync.apply_to_runner(runner)
+      self.assertEqual(spy_leaves_with_path.call_count, 1)
+
+      arr1_r2 = np.full((4, 4), 2.0, dtype=np.float32)
+      arr2_r2 = np.full((8, 4), 3.0, dtype=np.float32)
+      sync.arrays = [arr1_r2, arr2_r2]
+      sync.apply_to_runner(runner)
+      # Warm call reuses cached leaf mapping without re-traversing runner.state.
+      self.assertEqual(spy_leaves_with_path.call_count, 1)
+      self.assertIs(
+          runner.state["model"]["layers"][0]["mlp"]["down_proj"]["weight"],
+          arr1_r2,
+      )
+      self.assertIs(runner.state["model"]["embed_tokens"]["weight"], arr2_r2)
+
+      # Shape checks remain enforced on cached path.
+      sync.arrays = [np.zeros((2, 2), dtype=np.float32), arr2_r2]
+      with self.assertRaisesRegex(ValueError, "Shape mismatch"):
+        sync.apply_to_runner(runner)
+
 
 if __name__ == "__main__":
   absltest.main()

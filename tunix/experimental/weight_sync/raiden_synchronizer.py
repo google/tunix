@@ -521,6 +521,13 @@ class RaidenSynchronizer(weight_sync.WeightSynchronizer):
     self._ffi_shard_idx: Any = None
     self._host_subgrid: Optional[Tuple[int, ...]] = None
     self._global_shard_indices: Optional[List[int]] = None
+    self._runner_id: Optional[int] = None
+    self._runner_leaf_count: Optional[int] = None
+    self._runner_names_sig: Optional[Tuple[str, ...]] = None
+    self._runner_leaf_map: Optional[Tuple[Tuple[int, int, str, str], ...]] = (
+        None
+    )
+    self._runner_treedef: Any = None
     if state is not None:
       self.bind(state)
 
@@ -887,6 +894,38 @@ class RaidenSynchronizer(weight_sync.WeightSynchronizer):
       )
 
     new_leaves = list(runner.state_leaves)
+    names_sig = tuple(self.names)
+    cached_leaf_map = getattr(self, "_runner_leaf_map", None)
+    cached_treedef = getattr(self, "_runner_treedef", None)
+    if (
+        getattr(self, "_runner_id", None) == id(runner)
+        and getattr(self, "_runner_leaf_count", None) == len(new_leaves)
+        and getattr(self, "_runner_names_sig", None) == names_sig
+        and cached_leaf_map is not None
+        and cached_treedef is not None
+    ):
+      for leaf_idx, sync_idx, orig_name, p_str in cached_leaf_map:
+        arr = self.arrays[sync_idx]
+        leaf = new_leaves[leaf_idx]
+        leaf_arr = getattr(leaf, "value", leaf)
+        if hasattr(leaf_arr, "shape") and leaf_arr.shape != arr.shape:
+          raise ValueError(
+              f"Shape mismatch for parameter '{orig_name}' (runner path"
+              f" '{p_str}'): runner shape {leaf_arr.shape} vs synchronizer"
+              f" shape {arr.shape}"
+          )
+        new_leaves[leaf_idx] = arr
+      runner.state_leaves = tuple(new_leaves)
+      runner.state = jax.tree_util.tree_unflatten(cached_treedef, new_leaves)
+      logging.info(
+          "%s apply_to_runner: successfully applied %d arrays to runner state"
+          " and state_leaves (cached mapping, total runner leaves: %d).",
+          self.job_name,
+          len(cached_leaf_map),
+          len(new_leaves),
+      )
+      return
+
     runner_leaves_with_path = list(
         jax.tree_util.tree_leaves_with_path(runner.state)
     )
@@ -902,6 +941,7 @@ class RaidenSynchronizer(weight_sync.WeightSynchronizer):
       key_to_entries[_param_key(name)].append((idx, name, arr))
 
     matched_indices = set()
+    leaf_map: List[Tuple[int, int, str, str]] = []
 
     def _claim(key: str):
       """First unapplied array whose key equals, or is a suffix of, `key`."""
@@ -933,6 +973,7 @@ class RaidenSynchronizer(weight_sync.WeightSynchronizer):
           )
         new_leaves[i] = arr
         matched_indices.add(idx)
+        leaf_map.append((i, idx, orig_name, p_str))
 
     if len(matched_indices) != len(self.arrays):
       unmatched = [
@@ -947,10 +988,14 @@ class RaidenSynchronizer(weight_sync.WeightSynchronizer):
           f" {unmatched[:10]}"
       )
 
+    treedef = jax.tree_util.tree_structure(runner.state)
+    self._runner_id = id(runner)
+    self._runner_leaf_count = len(new_leaves)
+    self._runner_names_sig = names_sig
+    self._runner_leaf_map = tuple(leaf_map)
+    self._runner_treedef = treedef
     runner.state_leaves = tuple(new_leaves)
-    runner.state = jax.tree_util.tree_unflatten(
-        jax.tree_util.tree_structure(runner.state), new_leaves
-    )
+    runner.state = jax.tree_util.tree_unflatten(treedef, new_leaves)
     logging.info(
         "%s apply_to_runner: successfully applied %d arrays to runner state and"
         " state_leaves (total runner leaves: %d).",
@@ -1103,6 +1148,9 @@ def patch_raiden_worker_sync() -> None:
     def _patched_apply_to_runner(self, runner: Any) -> None:
       if self._sync is not None and hasattr(self._sync, "apply_to_runner"):
         self._sync.apply_to_runner(runner)
+        return
+      if hasattr(self, "names") and hasattr(self, "arrays"):
+        RaidenSynchronizer.apply_to_runner(self, runner)
         return
       if orig_apply is not None:
         orig_apply(self, runner)
