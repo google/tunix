@@ -267,11 +267,12 @@ def _filter_bindable(
     if _is_kv_cache(name):
       cache_dropped.append(name)
     elif _bindable(arr, allow_proxy=allow_proxy):
-      arr.block_until_ready()
       keep_names.append(name)
       keep_arrays.append(arr)
     else:
       dropped.append(name)
+  if keep_arrays:
+    jax.block_until_ready(keep_arrays)
   if cache_dropped:
     logging.debug(
         "raiden bind skipped %d KV-cache leaves: %s",
@@ -520,6 +521,9 @@ class RaidenSynchronizer(weight_sync.WeightSynchronizer):
     self._listeners: List[str] = []
     self._ffi_mesh: Any = None
     self._ffi_shard_idx: Any = None
+    self._ffi_sizes_sig: Any = None
+    self._ffi_slice_byte_sizes_sharded: Any = None
+    self._ffi_devices_per_host: Optional[int] = None
     self._host_subgrid: Optional[Tuple[int, ...]] = None
     self._global_shard_indices: Optional[List[int]] = None
     if state is not None:
@@ -556,47 +560,74 @@ class RaidenSynchronizer(weight_sync.WeightSynchronizer):
     if mesh is None:
       raise ValueError("Arrays must be sharded on a Mesh for FFI weight sync.")
 
-    slice_byte_sizes = [
-        int(np.prod(arr.sharding.shard_shape(arr.shape)) * arr.dtype.itemsize)
-        for arr in self.arrays
-    ]
-    sizes_sharding = jax.sharding.NamedSharding(
-        mesh, jax.sharding.PartitionSpec(None)
-    )
-    slice_byte_sizes_sharded = jax.device_put(
-        jnp.array(slice_byte_sizes, dtype=jnp.int32), sizes_sharding
-    )
-
-    task_mesh_shape = tuple(mesh.shape[a] for a in mesh.axis_names)
-    # Mesh POSITION, not device id. The controller indexes a source shard by
-    # its position in the mesh (`_get_global_indices` walks
-    # physical_mesh_shape), while the native layer keys staging off whatever we
-    # pass here -- slot = shard_idx % num_shards, submanager = shard_idx /
-    # num_shards, and SetGlobalShardIndices records it as the global index.
-    # create_device_mesh reorders devices for topology (a 2x2x2 v5p slice comes
-    # back as ids [0,1,3,2,6,7,5,4]), so keying off d.id labels each slice with
-    # the wrong global index. A 2x2x1 slice happens to be identity-ordered,
-    # which is why this only ever showed up multi-host.
-    global_ids = jnp.arange(mesh.devices.size, dtype=jnp.int32).reshape(
-        task_mesh_shape
-    )
-    shard_idx = jax.device_put(
-        global_ids,
-        jax.sharding.NamedSharding(
-            mesh, jax.sharding.PartitionSpec(*mesh.axis_names)
-        ),
-    )
-
     src_devices = mesh.devices.flatten()
-    devices_per_host = _devices_per_host(list(src_devices))
-    # Loud on purpose: a wrong value here is silent, and costs exactly the
-    # shards of every host but one.
-    logging.warning(
-        "raiden ffi: %d device(s), devices_per_host=%d (task_id=%s)",
-        len(src_devices),
-        devices_per_host,
-        sorted({getattr(d, "task_id", None) for d in src_devices}, key=str),
+    sizes_sig = tuple(
+        (
+            tuple(arr.shape),
+            int(arr.dtype.itemsize),
+            getattr(arr, "sharding", None),
+        )
+        for arr in self.arrays
     )
+    try:
+      ffi_cache_hit = (
+          self._ffi_mesh == mesh
+          and self._ffi_sizes_sig == sizes_sig
+          and self._ffi_slice_byte_sizes_sharded is not None
+          and self._ffi_shard_idx is not None
+          and self._ffi_devices_per_host is not None
+      )
+    except Exception:  # pylint: disable=broad-exception-caught
+      ffi_cache_hit = False
+
+    if ffi_cache_hit:
+      slice_byte_sizes_sharded = self._ffi_slice_byte_sizes_sharded
+      shard_idx = self._ffi_shard_idx
+      devices_per_host = self._ffi_devices_per_host
+    else:
+      slice_byte_sizes = [
+          int(np.prod(arr.sharding.shard_shape(arr.shape)) * arr.dtype.itemsize)
+          for arr in self.arrays
+      ]
+      sizes_sharding = jax.sharding.NamedSharding(
+          mesh, jax.sharding.PartitionSpec(None)
+      )
+      slice_byte_sizes_sharded = jax.device_put(
+          jnp.array(slice_byte_sizes, dtype=jnp.int32), sizes_sharding
+      )
+
+      task_mesh_shape = tuple(mesh.shape[a] for a in mesh.axis_names)
+      # Mesh POSITION, not device id. The controller indexes a source shard by
+      # its position in the mesh (`_get_global_indices` walks
+      # physical_mesh_shape), while the native layer keys staging off whatever
+      # we pass here -- slot = shard_idx % num_shards, submanager = shard_idx /
+      # num_shards, and SetGlobalShardIndices records it as the global index.
+      # create_device_mesh reorders devices for topology (a 2x2x2 v5p slice
+      # comes back as ids [0,1,3,2,6,7,5,4]), so keying off d.id labels each
+      # slice with the wrong global index. A 2x2x1 slice happens to be
+      # identity-ordered, which is why this only ever showed up multi-host.
+      global_ids = jnp.arange(mesh.devices.size, dtype=jnp.int32).reshape(
+          task_mesh_shape
+      )
+      shard_idx = jax.device_put(
+          global_ids,
+          jax.sharding.NamedSharding(
+              mesh, jax.sharding.PartitionSpec(*mesh.axis_names)
+          ),
+      )
+
+      devices_per_host = _devices_per_host(list(src_devices))
+      # Loud on purpose: a wrong value here is silent, and costs exactly the
+      # shards of every host but one.
+      logging.warning(
+          "raiden ffi: %d device(s), devices_per_host=%d (task_id=%s)",
+          len(src_devices),
+          devices_per_host,
+          sorted({getattr(d, "task_id", None) for d in src_devices}, key=str),
+      )
+      self._ffi_sizes_sig = sizes_sig
+      self._ffi_slice_byte_sizes_sharded = slice_byte_sizes_sharded
+      self._ffi_devices_per_host = devices_per_host
 
     if is_d2h:
       logging.info(
