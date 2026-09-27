@@ -195,6 +195,10 @@ spec:
                 value: "{{DATA_DIR}}"
               - name: DATA_PATH_PREFIX
                 value: "{{DATA_DIR}}"
+              # The node service account cannot read gs://tunix; the launcher
+              # points these at a byte-identical mirror of gs://tunix/{data,models}.
+              - name: MODEL_PATH_PREFIX
+                value: "{{MODEL_DIR}}"
               - name: CKPT_DIR
                 value: "{{CKPT_DIR}}"
               - name: TB_LOG_DIR

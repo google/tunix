@@ -41,6 +41,10 @@ MAX_RESTARTS="${MAX_RESTARTS:-3}"
 RENDER_DIR="${RENDER_DIR:-$HERE/rendered}"
 TRAIN_MICRO_BATCH="${TRAIN_MICRO_BATCH:-2}"
 EXTRA_TRAIN_ARGS="${EXTRA_TRAIN_ARGS:-}"
+# The GKE node service account cannot read gs://tunix, so the recipe reads a
+# byte-identical mirror of gs://tunix/{data,models}/... under $BUCKET.
+DATA_DIR="${DATA_DIR:-$BUCKET/data}"
+MODEL_DIR="${MODEL_DIR:-$BUCKET/models}"
 
 COMMON_ARGS=(
   --batch_size 128 --mini_batch_size 128 --num_generations 8
@@ -173,7 +177,8 @@ cmd_up() {
     export R_PRIORITY_CLASS="$PRIORITY_CLASS"
     export R_TRAIN_ARGS="${extra_args[*]}"
     export R_CODE_TARBALL="$code_tarball"
-    export R_DATA_DIR="gs://tunix/data"
+    export R_DATA_DIR="$DATA_DIR"
+    export R_MODEL_DIR="$MODEL_DIR"
     export R_CKPT_DIR="$ckpt_dir"
     export R_TB_LOG_DIR="$BUCKET/tensorboard/$EXPERIMENT/$run_id"
     export R_WANDB_SECRET="$WANDB_SECRET"
