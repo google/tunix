@@ -161,19 +161,20 @@ navigating to your local clone of the Tunix repo and running:
 pip install ".[docs]"
 ```
 
-Once the dependencies are installed, you can navigate to the `docs/` folder and
-run:
+Once the dependencies are installed, build the documentation from the `docs/`
+folder, as in the documentation CI workflow:
 
 ```bash
-make html
+cd docs
+sphinx-build -b html . _build/html
 ```
 
 This will generate the documentation in the `docs/_build/html` directory. These
 files can be opened in a web browser directly, or you can use a simple HTTP
-server to serve the files. For example, you can run:
+server to serve the files. While still in the `docs/` folder, run:
 
 ```bash
-python -m http.server -d docs/_build/html
+python -m http.server -d _build/html
 ```
 
 Then, open your web browser and navigate to `http://localhost:8000` to view the
