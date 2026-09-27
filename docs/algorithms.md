@@ -19,8 +19,8 @@ further below.
   * **[PPO](https://arxiv.org/abs/1707.06347)** (Proximal Policy Optimization)
   * **[GRPO](https://arxiv.org/abs/2402.03300)** (Group Relative Policy Optimization)
       * **[GSPO-Token](https://arxiv.org/abs/2507.18071)** (Token-level Group Sequence Policy Optimization)
-      * **[DAPO](https://arxiv.org/abs/2503.14476)** (Direct Alignment via Preference Optimization)
-      * **[Dr.GRPO](https://arxiv.org/abs/2503.14476)** (Distributionally Robust GRPO)
+      * **[DAPO](https://arxiv.org/abs/2503.14476)** (Decoupled Clip and Dynamic Sampling Policy Optimization)
+      * **[Dr. GRPO](https://arxiv.org/abs/2503.20783)** (Group Relative Policy Optimization Done Right)
 
 
 ## Add a New RL Algorithm
