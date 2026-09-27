@@ -12,6 +12,7 @@ Currently available DeepSWE MLPerf recipes:
 | [`mlperf_35b_128_v7x.sh`](mlperf_35b_128_v7x.sh) | Qwen3.5-35B-A3B distributed GRPO recipe on Trellis GKE TPU v7x cluster (`us-central1`). | **Trainer**: 1x TPU v7x-64 (`tpu7x:4x4x4`)<br>**Rollouts**: 16x TPU v7x-4 (`tpu7x:2x2x1`)<br>**Total**: 128 chips<br>**Sandboxes**: GKE CPU pool (`sandbox-np`) |
 | [`mlperf_397b_512_v5p.sh`](mlperf_397b_512_v5p.sh) | Qwen3.5-397B-A17B distributed GRPO recipe on Trellis GKE TPU v5p cluster (`europe-west4`). | **Trainer**: 1x TPU v5p-256 (`tpuv5p:4x8x8`)<br>**Rollouts**: 16x TPU v5p-16 (`tpuv5p:2x2x4`)<br>**Total**: 512 chips<br>**Sandboxes**: GKE CPU pool (`sandbox-cpu-pool`) |
 | [`mlperf_397b_256_v7x.sh`](mlperf_397b_256_v7x.sh) | Qwen3.5-397B-A17B distributed GRPO recipe on Trellis GKE TPU v7x cluster (`us-central1`). | **Trainer**: 1x TPU v7x-128 (`tpu7x:4x4x8`)<br>**Rollouts**: 16x TPU v7x-8 (`tpu7x:2x2x2`)<br>**Total**: 256 chips<br>**Sandboxes**: GKE CPU pool (`sandbox-np`) |
+| [`mlperf_397b_1024_v7x.sh`](mlperf_397b_1024_v7x.sh) | `mlperf_397b_256_v7x.sh` with the rollout scaled to 1024 devices; only `ROLLOUT_REPLICAS` / `ROLLOUT_TPU_SLICE` / `VLLM_DATA_PARALLEL_SIZE` change. | **Trainer**: 1x TPU v7x-128 (`tpu7x:4x4x8`)<br>**Rollouts**: 32x TPU v7x-16 (`tpu7x:2x2x4`, DP=2, EP=16)<br>**Total**: 512 rollout chips<br>**Sandboxes**: GKE CPU pool (`sandbox-np`) |
 
 ---
 

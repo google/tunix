@@ -75,15 +75,18 @@ export TRAINER_MESH_TP=1
 export TRAINER_MESH_EXPERT=2
 export TRAINER_MESH_CONTEXT=4
 
-# Rollout: 8 chips = 16 devices = 2 hosts per replica. tp * expert must equal the
-# DEVICE count, so expert=16 on 8 chips.
+# Rollout: 8 chips = 16 devices = 2 hosts per replica. dp * tp * expert must equal
+# the DEVICE count, so expert=16 on 8 chips. Scaled rollout recipes
+# (mlperf_397b_1024_v7x.sh) override ROLLOUT_REPLICAS, ROLLOUT_TPU_SLICE and
+# VLLM_DATA_PARALLEL_SIZE; expert then fills the slice's devices (2 per chip) / dp.
 export ROLLOUT_JOBSET_YAML="jobset.mcjax.ray.yaml"
-export ROLLOUT_TPU_SLICE="tpu7x:2x2x2"
-export ROLLOUT_MESH_EXPERT=16
+export ROLLOUT_TPU_SLICE="${ROLLOUT_TPU_SLICE:-tpu7x:2x2x2}"
+_rollout_dims="${ROLLOUT_TPU_SLICE#*:}"
+export ROLLOUT_MESH_EXPERT="${ROLLOUT_MESH_EXPERT:-$(( 2 * ${_rollout_dims//x/*} / ${VLLM_DATA_PARALLEL_SIZE:-1} ))}"
 export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-32}"
 
 # vLLM Rollout Configuration
-export VLLM_ADDITIONAL_CONFIG='{"sharding":{"sharding_strategy":{"expert_parallelism":16,"tensor_parallelism":1,"enable_dp_attention":true}},"custom_mamba_cache_multiplier":16,"maxtext_config":{"scan_layers":false,"attention":"vllm_rpa","allow_split_physical_axes":true,"use_multimodal":false,"prefuse_moe_weights":true,"per_device_batch_size":0.0}}'
+export VLLM_ADDITIONAL_CONFIG='{"sharding":{"sharding_strategy":{"expert_parallelism":'"${ROLLOUT_MESH_EXPERT}"',"tensor_parallelism":1,"enable_dp_attention":true}},"custom_mamba_cache_multiplier":16,"maxtext_config":{"scan_layers":false,"attention":"vllm_rpa","allow_split_physical_axes":true,"use_multimodal":false,"prefuse_moe_weights":true,"per_device_batch_size":0.0}}'
 
 # Rollout Worker Flags & Raiden tuning
 export ONEHOT_MOE_PERMUTE_THRESHOLD=131072

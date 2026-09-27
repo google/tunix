@@ -99,7 +99,7 @@ export VLLM_MAX_NUM_SEQS=16
 export VLLM_GPU_MEMORY_UTILIZATION="0.9"
 
 # Sharding Configs
-export VLLM_DATA_PARALLEL_SIZE=1
+export VLLM_DATA_PARALLEL_SIZE="${VLLM_DATA_PARALLEL_SIZE:-1}"
 export VLLM_ENABLE_EXPERT_PARALLEL="true"
 
 # Prefix Caching Configs
