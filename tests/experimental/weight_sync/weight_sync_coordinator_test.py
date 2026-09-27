@@ -584,6 +584,55 @@ class SuccessPathTest(CoordinatorTestBase):
 
     self.assertTrue(result.success)
 
+  def test_destination_setup_overlaps_with_source_prepare(self):
+    dest = FakeDestination("sampler", [])
+    coordinator = self.make(dest)
+    source = self.sources[0]
+
+    async def scenario():
+      dst_started, src_started = asyncio.Event(), asyncio.Event()
+      orig_bind = dest.bind_weight_sync
+      orig_prep = source.prepare_weight_sync
+
+      async def overlapping_bind():
+        dst_started.set()
+        await asyncio.wait_for(src_started.wait(), 5)
+        return await orig_bind()
+
+      async def overlapping_prep(sync_request=None, **kwargs):
+        src_started.set()
+        await asyncio.wait_for(dst_started.wait(), 5)
+        return await orig_prep(sync_request, **kwargs)
+
+      dest.bind_weight_sync = overlapping_bind
+      source.prepare_weight_sync = overlapping_prep
+      return await coordinator.sync(1)
+
+    result = asyncio.run(scenario())
+    self.assertTrue(result.success)
+
+  def test_destination_setup_failure_cancels_in_flight_source_prepare(self):
+    dest = FakeDestination("sampler", [], fail_on="bind", fail_persistently=True)
+    coordinator = self.make(dest)
+    source = self.sources[0]
+    src_cancelled = False
+
+    async def slow_prep(sync_request=None, **kwargs):
+      nonlocal src_cancelled
+      del sync_request, kwargs
+      try:
+        await asyncio.sleep(60)
+      except asyncio.CancelledError:
+        src_cancelled = True
+        raise
+
+    source.prepare_weight_sync = slow_prep
+
+    with self.assertRaises(WeightSyncError):
+      asyncio.run(coordinator.sync(1))
+
+    self.assertTrue(src_cancelled)
+
 
 class MultiHostAndVariablesTest(CoordinatorTestBase):
 

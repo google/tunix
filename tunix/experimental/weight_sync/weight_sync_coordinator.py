@@ -1038,25 +1038,45 @@ class WeightSyncCoordinator:
       # registration cost no downtime. Failures here need no rollback either.
       try:
         t_phase = time.monotonic()
-        await asyncio.gather(*[
-            asyncio.wait_for(d.bind_weight_sync(), self._timeouts.bind)
-            for d in destinations
-        ])
-        dst_meta_lists = await asyncio.gather(*[
-            asyncio.wait_for(
-                d.get_weight_sync_metadata(), self._timeouts.metadata
-            )
-            for d in destinations
-        ])
-        # Metadata is collected exactly once and the same objects flow to both
-        # registration and the request. Collecting twice would hand the
-        # controller endpoints from a different rebind than the one staged.
-        src_meta_lists = await asyncio.gather(*[
-            asyncio.wait_for(
-                s.prepare_weight_sync(request), self._timeouts.source_prepare
-            )
-            for s in sources
-        ])
+
+        async def _prepare_destinations() -> list[Any]:
+          await asyncio.gather(*[
+              asyncio.wait_for(d.bind_weight_sync(), self._timeouts.bind)
+              for d in destinations
+          ])
+          return list(
+              await asyncio.gather(*[
+                  asyncio.wait_for(
+                      d.get_weight_sync_metadata(), self._timeouts.metadata
+                  )
+                  for d in destinations
+              ])
+          )
+
+        async def _prepare_sources() -> list[Any]:
+          # Metadata is collected exactly once and the same objects flow to both
+          # registration and the request. Collecting twice would hand the
+          # controller endpoints from a different rebind than the one staged.
+          return list(
+              await asyncio.gather(*[
+                  asyncio.wait_for(
+                      s.prepare_weight_sync(request),
+                      self._timeouts.source_prepare,
+                  )
+                  for s in sources
+              ])
+          )
+
+        tasks = [
+            asyncio.create_task(_prepare_destinations()),
+            asyncio.create_task(_prepare_sources()),
+        ]
+        try:
+          dst_meta_lists, src_meta_lists = await asyncio.gather(*tasks)
+        finally:
+          for t in tasks:
+            if not t.done():
+              t.cancel()
         t_prepare_s = time.monotonic() - t_phase
       except asyncio.CancelledError:
         raise

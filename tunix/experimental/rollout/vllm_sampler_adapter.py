@@ -255,6 +255,10 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
         free_kv_cache_during_weight_sync
     )
     self._weight_update_open = False
+    self._raiden_bound = False
+    self._cached_weight_sync_metadata: (
+        List[weight_sync.WorkUnitMetadata] | None
+    ) = None
 
     if self.sampler is None and self.engine_args is not None:
       sampler_cls = _get_rl_vllm_sampler_cls()
@@ -336,10 +340,14 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
           " sample has forced it up yet).",
           self.server_id,
       )
+      self._raiden_bound = False
+      self._cached_weight_sync_metadata = None
       await sampler.start()
 
   async def stop(self, **kwargs) -> Any:
     """Stops the underlying sampler engine."""
+    self._raiden_bound = False
+    self._cached_weight_sync_metadata = None
     return await self._require_sampler().stop(**kwargs)
 
   async def pause(self, **kwargs) -> Any:
@@ -404,11 +412,16 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
           worker_index=self.worker_index,
           job_name=self.raiden_job_name,
       )
-    return await sampler.bind_raiden_sync(
+    if self._raiden_bound:
+      return True
+    result = await sampler.bind_raiden_sync(
         worker_index=self.worker_index,
         parallelism=self._parallelism,
         job_name=self.raiden_job_name,
     )
+    if result:
+      self._raiden_bound = True
+    return result
 
   async def get_weight_sync_metadata(
       self,
@@ -423,15 +436,20 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
           f" (weight_sync_mode={self.weight_sync_mode.value})."
       )
     await self._ensure_started()
+    if self.enable_raiden and self._cached_weight_sync_metadata is not None:
+      return self._cached_weight_sync_metadata
     sampler = self._require_sampler()
     if self.enable_gcs:
       meta = await sampler.get_gcs_metadata()
     else:
       meta = await sampler.get_raiden_metadata()
-    return [
+    parsed = [
         weight_sync.WorkUnitMetadata.from_dict(_canonicalize_variable_names(m))
         for m in meta or []
     ]
+    if self.enable_raiden and parsed:
+      self._cached_weight_sync_metadata = parsed
+    return parsed
 
   async def pre_weight_sync(
       self, sync_request: Any = None, **kwargs: Any

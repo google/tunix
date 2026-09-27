@@ -522,6 +522,10 @@ class RaidenSynchronizer(weight_sync.WeightSynchronizer):
     self._ffi_shard_idx: Any = None
     self._host_subgrid: Optional[Tuple[int, ...]] = None
     self._global_shard_indices: Optional[List[int]] = None
+    self._cached_variables_sig: Any = None
+    self._cached_variables: Optional[Tuple[weight_sync.TensorMetadata, ...]] = (
+        None
+    )
     if state is not None:
       self.bind(state)
 
@@ -1007,10 +1011,31 @@ class RaidenSynchronizer(weight_sync.WeightSynchronizer):
     # differently (trainer `['base'][...]` vs rollout `['model'][...]`, plus
     # the nnx `.value` leaf). `_param_key` already normalises both away, so
     # canonicalising here is what makes the manifests line up.
-    variables = tuple(
-        _tensor_metadata(_param_key(name), arr, idx)
-        for idx, (name, arr) in enumerate(zip(self.names, self.arrays))
+    variables_sig = tuple(
+        (
+            name,
+            tuple(arr.shape),
+            int(arr.dtype.itemsize),
+            getattr(arr, "sharding", None),
+        )
+        for name, arr in zip(self.names, self.arrays)
     )
+    try:
+      cache_hit = (
+          self._cached_variables is not None
+          and self._cached_variables_sig == variables_sig
+      )
+    except (AttributeError, TypeError, ValueError):
+      cache_hit = False
+    if cache_hit and self._cached_variables is not None:
+      variables = self._cached_variables
+    else:
+      variables = tuple(
+          _tensor_metadata(_param_key(name), arr, idx)
+          for idx, (name, arr) in enumerate(zip(self.names, self.arrays))
+      )
+      self._cached_variables_sig = variables_sig
+      self._cached_variables = variables
     if self._is_proxy:
       shards = tuple(self._ips)
       control_addr = (

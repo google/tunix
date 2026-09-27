@@ -304,6 +304,26 @@ class RaidenSynchronizerTest(absltest.TestCase):
       self.assertTrue(all(m == 1 for m in v.mesh_shape))
       self.assertTrue(all("," not in s for s in v.sharding_spec))
 
+  def test_work_unit_metadata_caches_variables_across_rebinds(self):
+    sync = raiden_synchronizer.RaidenSynchronizer(
+        "rollout", self._state(), bind_ip="1.2.3.4"
+    )
+    md1 = sync.work_unit_metadata()
+    with mock.patch.object(
+        raiden_synchronizer,
+        "_tensor_metadata",
+        wraps=raiden_synchronizer._tensor_metadata,
+    ) as spy_tm:
+      sync.bind(self._state())
+      md2 = sync.work_unit_metadata()
+      spy_tm.assert_not_called()
+      self.assertIs(md1.variables, md2.variables)
+      # Changing tensor shapes invalidates the cache.
+      sync.bind({"w1": jnp.ones((4, 4), jnp.float32)})
+      md3 = sync.work_unit_metadata()
+      self.assertEqual(spy_tm.call_count, 1)
+      self.assertLen(md3.variables, 1)
+
   def test_tensor_metadata_clamps_overlong_spec(self):
     class _WideSpecSharding:
       spec = ("tp", "fsdp", "extra")
