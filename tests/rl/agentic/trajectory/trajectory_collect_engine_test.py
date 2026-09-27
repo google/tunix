@@ -1310,7 +1310,9 @@ class ExactTokenContinuityCollectTest(absltest.TestCase):
         cluster_config=SimpleNamespace(
             rollout_config=base_rollout.RolloutConfig(max_prompt_length=5),
             training_config=SimpleNamespace(
-                max_seq_token_per_tpu=64, compute_logps_micro_batch_size=1
+                max_seq_token_per_tpu=64,
+                compute_logps_micro_batch_size=1,
+                compute_logps_trajectory_micro_batch_size=None,
             ),
         ),
     )
@@ -1372,8 +1374,8 @@ class ExactTokenContinuityCollectTest(absltest.TestCase):
           [-0.5, -0.5, 0, 0, 0, -0.5, 0, 0, -0.5, -0.5, 0],
       )
       self.assertEqual(
-          engine._response_token_count, 8
-      )  # suffixes are not samples
+          engine._response_token_count, 11
+      )  # the training budget includes parser suffixes
       env.close.assert_called_once()
       self._assert_training_consumer(result)
 
@@ -1386,6 +1388,31 @@ class ExactTokenContinuityCollectTest(absltest.TestCase):
     np.testing.assert_array_equal(result['conversation_tokens'], [10, 11, 90])
     np.testing.assert_array_equal(result['conversation_masks'], [1, 1, 0])
     self.assertTrue(agent.trajectory.steps[0].done)
+
+  def test_exact_budget_stops_before_oversized_environment_message(self):
+    agent, env = self._frozenlake()
+    engine, calls, _ = self._collector(agent, env)
+    engine.max_response_length = 4
+    result = asyncio.run(engine.collect(mode='Token'))
+    self.assertLen(calls, 1)
+    np.testing.assert_array_equal(result['conversation_tokens'], [10, 11, 90])
+    self.assertEqual(engine._response_token_count, 3)
+    self.assertEqual(
+        result['status'], agent_types.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED.name
+    )
+
+  def test_exact_budget_truncates_only_terminal_parser_suffix(self):
+    agent, env = self._frozenlake()
+    engine, calls, _ = self._collector(agent, env)
+    engine.max_response_length = 2
+    result = asyncio.run(engine.collect(mode='Token'))
+    self.assertLen(calls, 1)
+    np.testing.assert_array_equal(result['conversation_tokens'], [10, 11])
+    np.testing.assert_array_equal(result['conversation_masks'], [1, 1])
+    self.assertEqual(engine._response_token_count, 2)
+    self.assertEqual(
+        result['status'], agent_types.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED.name
+    )
 
   def test_negatives_fail_closed(self):
     for poison, message in (

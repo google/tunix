@@ -1,0 +1,31 @@
+[Unit]
+Description=DeepSWE agentic Qwen3-4B clean training, 200 steps
+After=network-online.target docker.service tpu-runtime.service
+Wants=network-online.target
+Requires=docker.service
+RequiresMountsFor=/mnt/disks/persist
+ConditionPathIsMountPoint=/mnt/disks/persist
+
+[Service]
+Type=simple
+User=haoyugao_google_com
+Group=haoyugao_google_com
+SupplementaryGroups=docker
+WorkingDirectory=/home/haoyugao_google_com/tunix
+Environment=PYTHONUNBUFFERED=1
+Environment=ARTIFACT_ROOT=/mnt/disks/persist/haoyu-deepswe-agentic-q4-clean
+Environment=DATASET_CACHE=/mnt/disks/persist/haoyu-deepswe-dist-quality/dataset_cache
+EnvironmentFile=-/mnt/disks/persist/haoyu-deepswe-agentic-q4-clean/run.env
+ExecStartPre=+/home/haoyugao_google_com/tunix/examples/deepswe/ensure_docker_bridge.sh
+ExecStart=/home/haoyugao_google_com/tunix/examples/deepswe/run_deepswe_agentic_q4_clean.sh
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=90
+KillMode=control-group
+LimitNOFILE=1048576
+LimitMEMLOCK=infinity
+StandardOutput=append:/mnt/disks/persist/haoyu-deepswe-agentic-q4-clean/agentic-training.log
+StandardError=inherit
+
+[Install]
+WantedBy=multi-user.target

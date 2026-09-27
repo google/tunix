@@ -690,9 +690,12 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         self.rl_engine.cluster_config.training_config.compute_logps_micro_batch_size
     )
     compute_logps_micro_batch_size = (
-        configured_compute_logps * self.algo_config.num_generations
-        if configured_compute_logps
-        else len(trajectories)
+        self.rl_engine.cluster_config.training_config.compute_logps_trajectory_micro_batch_size
+        or (
+            configured_compute_logps * self.algo_config.num_generations
+            if configured_compute_logps
+            else len(trajectories)
+        )
     )
 
     rollout_per_token_logps = None

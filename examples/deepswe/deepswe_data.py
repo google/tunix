@@ -12,14 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Dataset loading for the DeepSWE agentic GRPO recipe.
+"""Canonical Qwen3-4B clean tasks for the DeepSWE agentic GRPO recipe.
 
 Returns a raw grain.MapDataset ready for post_init_dataset().
 The module-level ``batch_fn`` is picked up automatically by
 AgenticGrpoPipeline as the custom_batch_fn for post_init_dataset.
 """
 
-import json
 import os
 
 import grain
@@ -27,51 +26,69 @@ import numpy as np
 
 
 def create_dataset(
-    dataset_name: str = "R2E-Gym/R2E-Gym-V1",
+    dataset_name: str = "R2E-Gym/R2E-Gym-Subset",
+    dataset_revision: str = "2e8108ff942f24fcb5686badfaf7f9a8808566d5",
     dataset_split: str = "train",
+    dataset_path: str = "",
+    gold_whitelist: str = "",
     cache_dir: str | None = None,
     shuffle: bool = True,
     seed: int = 42,
 ) -> grain.MapDataset:
-  """Load the R2E-Gym dataset and return a raw grain.MapDataset.
+  """Load the pinned R2E-Gym subset joined to the Q4 clean selector.
 
   Args:
     dataset_name: HuggingFace dataset identifier.
+    dataset_revision: Pinned source revision.
     dataset_split: Which split to load.
+    dataset_path: Optional local Hugging Face dataset.
+    gold_whitelist: Optional clean selector; defaults to the canonical 1,012.
     cache_dir: Local directory for dataset caching. Defaults to
       <cwd>/dataset_cache.
     shuffle: Whether to shuffle the dataset.
     seed: Random seed for shuffling.
 
   Returns:
-    grain.MapDataset where each element is a raw R2E-Gym example dict with
-    list fields JSON-serialised to strings.
+    Grain dataset of full task records in the distributed recipe's order.
   """
-  from datasets import load_dataset  # pylint: disable=g-import-not-at-top
+  return grain.MapDataset.source(load_clean_dataset(
+      dataset_name=dataset_name,
+      dataset_revision=dataset_revision,
+      dataset_split=dataset_split,
+      dataset_path=dataset_path,
+      gold_whitelist=gold_whitelist,
+      cache_dir=cache_dir,
+      shuffle=shuffle,
+      seed=seed,
+  ))
+
+
+def load_clean_dataset(
+    dataset_name: str = "R2E-Gym/R2E-Gym-Subset",
+    dataset_revision: str = "2e8108ff942f24fcb5686badfaf7f9a8808566d5",
+    dataset_split: str = "train",
+    dataset_path: str = "",
+    gold_whitelist: str = "",
+    cache_dir: str | None = None,
+    shuffle: bool = True,
+    seed: int = 42,
+):
+  """Use the distributed recipe's verified selector, join, and task order."""
+  from tunix.experimental.examples.deepswe_dist import deepswe
 
   if cache_dir is None:
     cache_dir = os.path.join(os.getcwd(), "dataset_cache")
   os.makedirs(cache_dir, exist_ok=True)
-
-  dataset = load_dataset(
-      dataset_name,
-      split=dataset_split,
+  return deepswe.load_deepswe_dataset(
+      dataset_name=dataset_name,
+      dataset_revision=dataset_revision,
+      dataset_split=dataset_split,
+      dataset_path=dataset_path,
+      gold_whitelist=gold_whitelist or deepswe.DEFAULT_GOLD_WHITELIST,
       cache_dir=cache_dir,
-      trust_remote_code=True,
+      shuffle=shuffle,
+      seed=seed,
   )
-
-  def _transform(entry):
-    for k, v in entry.items():
-      if isinstance(v, list):
-        entry[k] = json.dumps(v)
-    return entry
-
-  dataset = dataset.map(_transform, keep_in_memory=True)
-
-  if shuffle:
-    dataset = dataset.shuffle(seed)
-
-  return grain.MapDataset.source(dataset)
 
 
 # R2E-Gym has heterogeneous field types that grain's default batching can't

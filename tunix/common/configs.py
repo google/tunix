@@ -359,6 +359,13 @@ class RLTrainingConfig(TrainingConfig):
       512, etc. When value is 0, it means this feature is disabled. This also
       requires model to support `skip_lm_head` in its `__call__` method and have
       a `compute_final_logits` method.
+    num_generations: Completions per prompt for optional agentic trajectory
+      microbatching.
+    train_trajectory_micro_batch_size: Optional training batch size in
+      trajectories; overrides the prompt-group size when deriving gradient
+      accumulation steps.
+    compute_logps_trajectory_micro_batch_size: Optional log-probability forward
+      batch size in trajectories.
   """
 
   actor_optimizer: optax.GradientTransformation
@@ -368,6 +375,11 @@ class RLTrainingConfig(TrainingConfig):
   rollout_micro_batch_size: int | None = None
   compute_logps_micro_batch_size: int | None = None
   compute_logps_chunk_size: int = 0
+  # Agentic rollouts are grouped by prompt. These opt-in sizes cap the actual
+  # trajectory batch used by the trainer and log-probability forward passes.
+  num_generations: int | None = None
+  train_trajectory_micro_batch_size: int | None = None
+  compute_logps_trajectory_micro_batch_size: int | None = None
 
   def __post_init__(self):
     """Validates the configuration after initialization."""
@@ -376,6 +388,9 @@ class RLTrainingConfig(TrainingConfig):
         "train_micro_batch_size",
         "rollout_micro_batch_size",
         "compute_logps_micro_batch_size",
+        "num_generations",
+        "train_trajectory_micro_batch_size",
+        "compute_logps_trajectory_micro_batch_size",
         "max_segments_per_packed_row",
     ]:
       _is_positive_integer(getattr(self, name, None), name)
@@ -404,6 +419,43 @@ class RLTrainingConfig(TrainingConfig):
       )
       self.gradient_accumulation_steps = (
           self.mini_batch_size // self.train_micro_batch_size
+      )
+
+    if self.train_trajectory_micro_batch_size is not None:
+      if self.num_generations is None or self.mini_batch_size is None:
+        raise ValueError(
+            "Trajectory microbatching requires num_generations and"
+            " mini_batch_size."
+        )
+      if self.sequence_packing_enabled:
+        raise ValueError("Trajectory microbatching does not support packing.")
+      trajectories_per_update = self.mini_batch_size * self.num_generations
+      _check_divisibility(
+          self.train_trajectory_micro_batch_size,
+          trajectories_per_update,
+          "train_trajectory_micro_batch_size",
+          "trajectories_per_update",
+      )
+      trajectories_per_stream_batch = (
+          (self.train_micro_batch_size or self.mini_batch_size)
+          * self.num_generations
+      )
+      _check_divisibility(
+          self.train_trajectory_micro_batch_size,
+          trajectories_per_stream_batch,
+          "train_trajectory_micro_batch_size",
+          "trajectories_per_stream_batch",
+      )
+      self.gradient_accumulation_steps = (
+          trajectories_per_update // self.train_trajectory_micro_batch_size
+      )
+    if (
+        self.compute_logps_trajectory_micro_batch_size is not None
+        and self.num_generations is None
+    ):
+      raise ValueError(
+          "compute_logps_trajectory_micro_batch_size requires"
+          " num_generations."
       )
 
 

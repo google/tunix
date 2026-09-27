@@ -5,14 +5,13 @@
 # %%
 import argparse
 import faulthandler
-import json
+from functools import partial
 import logging
 import os
 import signal
 import sys
 
 from absl import logging as absl_logging
-import datasets as datasets_lib
 from flax import nnx
 import grain
 from huggingface_hub import snapshot_download
@@ -26,13 +25,23 @@ from orbax import checkpoint as ocp
 import qwix
 from transformers import AutoTokenizer
 from tunix.cli.utils import data as data_lib
+from examples.deepswe import deepswe_data
+from examples.deepswe import wandb_step_backend
 from tunix.rl.agentic.agents import agent_types
 from tunix.utils import compat
 import vllm  # pytype: disable=import-error
 
 faulthandler.register(signal.SIGINT, all_threads=True)
 
-Dataset = datasets_lib.Dataset
+
+def _parse_bool(value: str) -> bool:
+  if value.lower() in ("1", "true", "yes", "on"):
+    return True
+  if value.lower() in ("0", "false", "no", "off"):
+    return False
+  raise argparse.ArgumentTypeError(f"Expected a boolean, got {value!r}")
+
+
 # ==========================================
 # 0. Argument Parsing
 # ==========================================
@@ -54,9 +63,13 @@ parser.add_argument(
     default=None,
 )
 parser.add_argument("--seed", type=int, default=42)
-parser.add_argument("--model_version", type=str, default="Qwen/Qwen3-32B")
+parser.add_argument("--model_version", type=str, default="Qwen/Qwen3-4B-Instruct-2507")
 parser.add_argument("--node_selector_val", type=str, default="deepswe-cpu-pool")
 parser.add_argument("--dataset_path", type=str, default=None)
+parser.add_argument("--dataset_name", type=str, default="R2E-Gym/R2E-Gym-Subset")
+parser.add_argument("--dataset_revision", type=str, default="2e8108ff942f24fcb5686badfaf7f9a8808566d5")
+parser.add_argument("--dataset_split", type=str, default="train")
+parser.add_argument("--gold_whitelist", type=str, default=None)
 
 parser.add_argument("--tpu_topology", type=str, default=None)
 
@@ -65,10 +78,10 @@ parser.add_argument("--tpu_topology", type=str, default=None)
 parser.add_argument("--batch_size", type=int, default=8)
 parser.add_argument("--mini_batch_size", type=int, default=8)
 parser.add_argument("--train_fraction", type=float, default=1.0)
-parser.add_argument("--max_steps", type=int, default=50)
-parser.add_argument("--eval_every_n_steps", type=int, default=10)
-parser.add_argument("--num_epochs", type=int, default=1)
-parser.add_argument("--enable_remat", type=bool, default=True)
+parser.add_argument("--max_steps", type=int, default=200)
+parser.add_argument("--eval_every_n_steps", type=int, default=1000000)
+parser.add_argument("--num_epochs", type=int, default=2)
+parser.add_argument("--enable_remat", type=_parse_bool, default=True)
 parser.add_argument(
     "--remat_policy",
     type=str,
@@ -84,10 +97,10 @@ parser.add_argument(
 # LoRA Config
 parser.add_argument("--rank", type=int, default=64)
 parser.add_argument("--alpha", type=float, default=64.0)
-parser.add_argument("--train_with_lora", type=bool, default=False)
+parser.add_argument("--train_with_lora", type=_parse_bool, default=False)
 
 # GRPO Config
-parser.add_argument("--num_generations", type=int, default=8)
+parser.add_argument("--num_generations", type=int, default=16)
 parser.add_argument("--num_iterations", type=int, default=1)
 parser.add_argument("--beta", type=float, default=0.0)
 parser.add_argument("--epsilon", type=float, default=0.2)
@@ -96,12 +109,12 @@ parser.add_argument("--off_policy_steps", type=int, default=0)
 
 # Rollout Config
 parser.add_argument("--max_prompt_length", type=int, default=4096)
-parser.add_argument("--max_response_length", type=int, default=8192)
+parser.add_argument("--max_response_length", type=int, default=16384)
 parser.add_argument("--temperature", type=float, default=1.0)
-parser.add_argument("--top_p", type=float, default=None)
-parser.add_argument("--top_k", type=int, default=None)
+parser.add_argument("--top_p", type=float, default=1.0)
+parser.add_argument("--top_k", type=int, default=0)
 parser.add_argument("--rollout_engine", type=str, default="vllm")
-parser.add_argument("--vllm_utilization", type=float, default=0.4)
+parser.add_argument("--vllm_utilization", type=float, default=0.6)
 parser.add_argument(
     "--vllm_reshard_chunk_size",
     type=int,
@@ -111,7 +124,7 @@ parser.add_argument(
 parser.add_argument(
     "--max_num_batched_tokens",
     type=int,
-    default=8192,
+    default=20480,
     help="Max number of tokens to be processed in parallel by vLLM.",
 )
 
@@ -123,29 +136,31 @@ parser.add_argument("--weight_decay", type=float, default=0.01)
 parser.add_argument("--max_grad_norm", type=float, default=1)
 parser.add_argument(
     "--optimizer_offload",
-    type=bool,
+    type=_parse_bool,
     default=False,
     help="Whether to offload optimizer states to CPU (pinned host memory).",
 )  # not supported yet
 
 
 # Checkpointing
-parser.add_argument("--ckpt_dir", type=str, default="/tmp/cp/deepswe_ckpt/01")
-parser.add_argument("--max_to_keep", type=int, default=4)
-parser.add_argument("--save_interval_steps", type=int, default=500)
+parser.add_argument("--ckpt_dir", type=str, default="artifacts/deepswe_agentic_q4_clean/checkpoints")
+parser.add_argument("--max_to_keep", type=int, default=2)
+parser.add_argument("--save_interval_steps", type=int, default=1)
 
 # Microbatch Sizes
-parser.add_argument("--train_micro_batch_size", type=int, default=1)
+parser.add_argument("--train_micro_batch_size", type=int, default=2)
 parser.add_argument("--rollout_micro_batch_size", type=int, default=1)
 parser.add_argument("--compute_logps_micro_batch_size", type=int, default=1)
 
 # DeepSWE Agentic Specifics
 parser.add_argument("--max_turns", type=int, default=50)
-parser.add_argument("--per_turn_timeout_secs", type=int, default=300)
-parser.add_argument("--episode_timeout_secs", type=int, default=3 * 60 * 60)
+parser.add_argument("--episode_timeout_secs", type=int, default=4800)
 parser.add_argument("--step_timeout_secs", type=int, default=30 * 60)
 parser.add_argument("--reward_timeout_secs", type=int, default=30 * 60)
-parser.add_argument("--max_concurrency", type=int, default=200)
+parser.add_argument("--max_concurrency", type=int, default=32)
+parser.add_argument("--env_backend", choices=["docker", "kubernetes"], default="docker")
+parser.add_argument("--scaffold", type=str, default="r2egym")
+parser.add_argument("--action_compat_mode", type=str, default="q4_r2egym_xml_v2")
 parser.add_argument(
     "--use_agent_sandbox",
     action="store_true",
@@ -154,8 +169,8 @@ parser.add_argument(
 
 parser.add_argument(
     "--overlong_filter",
-    type=bool,
-    default=True,
+    type=_parse_bool,
+    default=False,
     help="Whether to filter out trajectories that exceed length limits",
 )
 
@@ -163,25 +178,25 @@ parser.add_argument(
 parser.add_argument(
     "--rollout_mesh_fsdp",
     type=int,
-    default=None,
+    default=1,
     help="Optional override for rollout mesh FSDP dimension.",
 )
 parser.add_argument(
     "--rollout_mesh_tp",
     type=int,
-    default=None,
+    default=2,
     help="Optional override for rollout mesh TP dimension.",
 )
 parser.add_argument(
     "--train_mesh_fsdp",
     type=int,
-    default=None,
+    default=1,
     help="Optional override for train mesh FSDP dimension.",
 )
 parser.add_argument(
     "--train_mesh_tp",
     type=int,
-    default=None,
+    default=2,
     help="Optional override for train mesh TP dimension.",
 )
 parser.add_argument(
@@ -222,8 +237,8 @@ parser.add_argument(
 parser.add_argument("--advantage_estimator", type=str, default="rloo")
 parser.add_argument(
     "--use_rollout_logps",
-    type=bool,
-    default=False,
+    type=_parse_bool,
+    default=True,
     help=(
         "Whether to use rollout-cached logprobs as old policy logps. "
         "Default is False to recompute old logps on the actor side. "
@@ -232,7 +247,7 @@ parser.add_argument(
 
 
 # Other
-parser.add_argument("--do_mem_profiling", type=bool, default=False)
+parser.add_argument("--do_mem_profiling", type=_parse_bool, default=False)
 
 parser.add_argument(
     "--dtype",
@@ -244,17 +259,21 @@ parser.add_argument(
 parser.add_argument(
     "--param_dtype",
     type=str,
-    default="float32",
+    default="bfloat16",
     choices=["bfloat16", "float16", "float32"],  # Restrict to valid inputs
     help="Data type for the model weights (e.g., bfloat16, float32)",
 )
 
 
-parser.add_argument("--use_flash_attention", type=bool, default=True)
-parser.add_argument("--flash_attention_block_size", type=int, default=1024)
+parser.add_argument("--use_flash_attention", type=_parse_bool, default=True)
+parser.add_argument("--flash_attention_block_size", type=int, default=None)
 parser.add_argument("--target_accuracy", type=float, default=0.69)
 parser.add_argument("--rcp_logging", action="store_true", default=False)
-parser.add_argument("--metric_logger_dir", type=str, default=None)
+parser.add_argument(
+    "--metric_logger_dir",
+    type=str,
+    default="artifacts/deepswe_agentic_q4_clean/events",
+)
 parser.add_argument(
     "--logging_level",
     type=str,
@@ -362,16 +381,12 @@ for root in [workdir, pathways_root, r2egym_root]:
     sys.path.insert(0, root)
 
 # Verification
-try:
-  import tunix
+import tunix
+import r2egym  # pytype: disable=import-error
+
+if os.getenv("JAX_PLATFORMS") == "proxy":
   import pathwaysutils
-  import r2egym  # pytype: disable=import-error
 
-  print("✅ tunix pathways-utils, r2egym are successfully mapped.")
-except ImportError as e:
-  print(f"❌ Still missing a module: {e}")
-
-if pathwaysutils is not None and os.getenv("JAX_PLATFORMS", None) == "proxy":  # pyrefly: ignore[unbound-name]
   pathwaysutils.initialize()
 
 
@@ -526,14 +541,13 @@ MAX_STEPS = args.max_steps
 
 # Max turns in mult-agent interaction (set to 1 for single-turn)
 MAX_TURNS = args.max_turns
-PER_TURN_TIMEOUT_SECS = args.per_turn_timeout_secs
 EPISODE_TIMEOUT_SECS = args.episode_timeout_secs
 STEP_TIMEOUT_SECS = args.step_timeout_secs
 REWARD_TIMEOUT_SECS = args.reward_timeout_secs
 
 MAX_CONCURRENCY = args.max_concurrency
 USE_AGENT_SANDBOX = args.use_agent_sandbox
-KV_CACHE_SIZE = MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH + 128
+KV_CACHE_SIZE = MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH
 print(f"kv_cache_size (Capped): {KV_CACHE_SIZE}")
 # === AdamW, warmup, cosine scheduler ===
 LEARNING_RATE = args.learning_rate
@@ -558,8 +572,9 @@ CKPT_DIR = (
 )
 
 
-# Max number of sequences to be processed in parallel by vllm.
-VLLM_MAX_NUM_SEQS = ROLLOUT_MICRO_BATCH_SIZE * NUM_GENERATIONS
+# Agentic rollout dispatches one prompt at a time; vLLM still admits the
+# distributed recipe's 32 concurrent generations.
+VLLM_MAX_NUM_SEQS = MAX_CONCURRENCY
 
 VLLM_UTILIZATION = args.vllm_utilization
 VLLM_RESHARD_CHUNK_SIZE = args.vllm_reshard_chunk_size
@@ -599,71 +614,23 @@ chat_parser = template_parser.QwenChatTemplateParser(tokenizer)
 
 print("Loading Dataset...")
 
-if args.dataset_path:
-  dataset = datasets_lib.load_from_disk(args.dataset_path)
-  if isinstance(dataset, datasets_lib.DatasetDict):
-    dataset = dataset["train"]
-else:
-  dataset = datasets_lib.load_dataset(
-      "R2E-Gym/R2E-Gym-Subset",
-      split="train",
-      cache_dir=DATASET_CACHE,
-      trust_remote_code=True,
-  )
-
-
-def transform(entry):
-  for k, v in entry.items():
-    if isinstance(v, list):
-      entry[k] = json.dumps(v)
-  return entry
-
-
-dataset = dataset.map(
-    transform,
-    keep_in_memory=True,  # pyrefly: ignore[unexpected-keyword]
+dataset = deepswe_data.load_clean_dataset(
+    dataset_name=args.dataset_name,
+    dataset_revision=args.dataset_revision,
+    dataset_split=args.dataset_split,
+    dataset_path=args.dataset_path or "",
+    gold_whitelist=args.gold_whitelist or "",
+    cache_dir=DATASET_CACHE,
+    seed=SEED,
 )
-
-dataset = dataset.shuffle(seed=SEED)
+if len(dataset) * NUM_EPOCHS < MAX_STEPS * BATCH_SIZE:
+  raise ValueError(
+      "Clean dataset does not cover the requested run: "
+      f"{len(dataset)} tasks x {NUM_EPOCHS} epochs < "
+      f"{MAX_STEPS} steps x {BATCH_SIZE} prompts"
+  )
 grain_dataset = grain.MapDataset.source(dataset)  # pyrefly: ignore[bad-argument-type]
 
-
-def mixed_type_batch_fn(elements):
-  """elements: A list of dicts."""
-  batched_data = {}
-  str_set = {
-      "repo_name",
-      "docker_image",
-      "commit_hash",
-      "parsed_commit_content",
-      "execution_result_content",
-  }
-  dict_set = {"modified_files", "relevant_files", "modified_entity_summaries"}
-  int_set = {
-      "num_non_test_files",
-      "num_non_test_func_methods",
-      "num_non_test_lines",
-      "prompt",
-      "problem_statement",
-      "expected_output_json",
-  }
-  keys = elements[0].keys()
-
-  for key in keys:
-    if key in str_set or key in dict_set:
-      # Keep these as standard Python lists
-      batched_data[key] = [item[key] for item in elements]
-
-    elif key in int_set:
-      # Convert these to NumPy arrays.
-      # np.array() safely handles both single integers and lists of integers.
-      batched_data[key] = np.array([item[key] for item in elements])
-
-    else:
-      # Fallback for any unexpected keys (defaulting to lists is usually safest)
-      batched_data[key] = [item[key] for item in elements]
-
-  return batched_data
 
 train_dataset, _ = data_lib.post_init_dataset(
     grain_dataset,
@@ -674,7 +641,7 @@ train_dataset, _ = data_lib.post_init_dataset(
     fraction=TRAIN_FRACTION,
     num_epochs=NUM_EPOCHS,
     prompt_key="problem_statement",
-    custom_batch_fn=mixed_type_batch_fn,
+    custom_batch_fn=deepswe_data.batch_fn,
 )
 
 fleet = None
@@ -703,7 +670,7 @@ from tunix.models.automodel import AutoModel
 from tunix.models.automodel import ModelSource
 from tunix.models.automodel import call_model_config
 
-config = call_model_config(MODEL_VERSION)
+config = call_model_config(MODEL_VERSION.rsplit("/", 1)[-1].lower())
 
 if ENABLE_REMAT:
   _REMAT_POLICY_MAP = {
@@ -717,7 +684,8 @@ if DTYPE is not None:
 
 if USE_FLASH_ATTENTION:
   config.use_flash_attention = USE_FLASH_ATTENTION
-  config.flash_attention_block_size = FLASH_ATTENTION_BLOCK_SIZE
+  if FLASH_ATTENTION_BLOCK_SIZE is not None:
+    config.flash_attention_block_size = FLASH_ATTENTION_BLOCK_SIZE
 
 devices = jax.devices()
 total_devices = len(devices)
@@ -868,7 +836,25 @@ else:
 
 
 metrics_logging_options = metrics_logger.MetricsLoggerOptions(
-    log_dir=args.metric_logger_dir, flush_every_n_steps=2
+    log_dir=args.metric_logger_dir,
+    project_name=os.getenv("WANDB_PROJECT", "trellis-deepswe"),
+    run_name=os.getenv("WANDB_RUN_NAME", "deepswe-agentic-q4-clean"),
+    flush_every_n_steps=1,
+    backend_kwargs={
+        "custom_backend": [
+            partial(
+                metrics_logger.TensorboardBackend,
+                log_dir=args.metric_logger_dir,
+                flush_every_n_steps=1,
+            ),
+            partial(
+                wandb_step_backend.TrainingStepWandbBackend,
+                project=os.getenv("WANDB_PROJECT", "trellis-deepswe"),
+                name=os.getenv("WANDB_RUN_NAME", "deepswe-agentic-q4-clean"),
+                config=vars(args),
+            ),
+        ]
+    },
 )
 
 optimizer = optax.schedules.inject_hyperparams(optax.adamw)(
@@ -890,6 +876,9 @@ if MAX_GRAD_NORM is not None:
 base_rollout_dict = {
     "max_prompt_length": MAX_PROMPT_LENGTH,
     "kv_cache_size": KV_CACHE_SIZE,
+    # The TPU JAX vLLM backend rejects per-request seeds. Set the engine seed
+    # below while keeping the dataset and model seed at 42.
+    "seed": None if ROLLOUT_ENGINE == "vllm" else SEED,
     "temperature": TEMPERATURE,
     "top_p": TOP_P,
     "top_k": TOP_K,
@@ -923,9 +912,10 @@ vllm_rollout_dict = {
     "rollout_vllm_max_num_seqs": VLLM_MAX_NUM_SEQS,
     "rollout_vllm_max_num_batched_tokens": VLLM_MAX_BATCHED_TOKENS,
     "rollout_vllm_kwargs": {
+        "seed": SEED,
         "kv_cache_metrics": True,
         "disable_log_stats": False,
-        "enable_prefix_caching": True,
+        "enable_prefix_caching": False,
         "tokenizer": tokenizer_path,
     },
 }
@@ -1025,6 +1015,9 @@ cluster_config = rl_engine_lib.ClusterConfig(
         max_steps=MAX_STEPS,
         mini_batch_size=MINI_BATCH_SIZE,
         train_micro_batch_size=TRAIN_MICRO_BATCH_SIZE,
+        num_generations=NUM_GENERATIONS,
+        train_trajectory_micro_batch_size=TRAIN_MICRO_BATCH_SIZE,
+        compute_logps_trajectory_micro_batch_size=COMPUTE_LOGPS_MICRO_BATCH_SIZE,
         compute_logps_micro_batch_size=COMPUTE_LOGPS_MICRO_BATCH_SIZE,
         rollout_micro_batch_size=ROLLOUT_MICRO_BATCH_SIZE,
         metrics_logging_options=metrics_logging_options,
@@ -1087,52 +1080,23 @@ agentic_grpo_learner = agentic_grpo_learner.GRPOLearner(
     rl_engine,
     reward_fns=None,
     agent_class=swe_agent.SWEAgent,
-    agent_kwargs={},
+    agent_kwargs={
+        "scaffold": args.scaffold,
+        "action_compat_mode": args.action_compat_mode,
+    },
     env_class=swe_env.SWEEnv,
     env_kwargs={
         "max_steps": MAX_TURNS,
         "step_timeout": STEP_TIMEOUT_SECS,
         "reward_timeout": REWARD_TIMEOUT_SECS,
+        "backend": args.env_backend,
+        "scaffold": args.scaffold,
         "use_agent_sandbox": USE_AGENT_SANDBOX,
         "fleet": fleet,
     },
     algo_config=grpo_config,
     chat_parser=chat_parser,
 )
-
-
-try:
-  import datetime
-  import wandb # pytype: disable=import-error
-
-  settings = wandb.Settings(console="off")
-  run_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-  wandb_config = {
-      **vars(args),
-      # Derived values not present in args
-      "kv_cache_size": KV_CACHE_SIZE,
-      "vllm_max_num_seqs": VLLM_MAX_NUM_SEQS,
-      "vllm_max_batched_tokens": VLLM_MAX_BATCHED_TOKENS,
-      # Stringify set so wandb can serialize it
-      "filter_statuses": (
-          [s.name for s in FILTER_STATUSES] if FILTER_STATUSES else None
-      ),
-      # Mesh topology
-      "num_devices": len(devices),
-      "rollout_mesh_fsdp": rollout_fsdp,
-      "rollout_mesh_tp": rollout_tp,
-      "train_mesh_fsdp": train_fsdp,
-      "train_mesh_sp": train_sp,
-      "train_mesh_tp": train_tp,
-      "checkpoint_root_directory": CKPT_DIR,
-      "save_interval_steps": SAVE_INTERVAL_STEPS,
-      "max_to_keep": MAX_TO_KEEP,
-  }
-  wandb.init(
-      project="tunix", name=run_name, config=wandb_config, settings=settings
-  )
-except Exception as e:
-  print(f"W&B initialization failed with error: {e}")
 
 
 if RCP_LOGGING:

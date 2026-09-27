@@ -654,6 +654,10 @@ class TrajectoryCollectEngine:
         if self.max_response_length is not None
         else None
     )
+    if self.exact_token_continuity and max_generation_steps is not None:
+      # The parser may append chat-template end tokens after sampling. Leave
+      # room for them in the same completion budget used by the learner.
+      max_generation_steps = max(1, max_generation_steps - 2)
     logging.debug("%s model_call starting", self._debug_prefix)
 
     chat_input = self.agent.chat_completions
@@ -894,6 +898,23 @@ class TrajectoryCollectEngine:
           cur_step.assistant_tokens = utils.assistant_with_suffix(
               rollout_output.tokens[0], cur_step.assistant_tokens, n_append
           )
+          suffix_room = (
+              self.max_response_length - self._response_token_count
+              if self.max_response_length is not None
+              else n_append
+          )
+          if n_append > suffix_room:
+            # No subsequent turn will use this incomplete terminal suffix.
+            n_append = max(0, suffix_room)
+            cur_step.assistant_tokens = cur_step.assistant_tokens[
+                : len(rollout_output.tokens[0]) + n_append
+            ]
+            self.agent.trajectory.status = (
+                agent_types.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED
+            )
+            self._log_trajectory_clip("MAX_CONTEXT_LIMIT_REACHED")
+            done = True
+          self._response_token_count += n_append
         cur_step.assistant_masks = np.concatenate(
             [
                 np.ones(len(rollout_output.tokens[0]), dtype=np.int32),
@@ -917,9 +938,24 @@ class TrajectoryCollectEngine:
             contains_first_msg=False,
             contains_generation_msg=True,
         )
-        cur_step.env_tokens = np.array(e_tokens)
-        cur_step.env_masks = np.array(e_masks)
-        self._response_token_count += len(e_tokens)
+        if (
+            self.exact_token_continuity
+            and self.max_response_length is not None
+            and self._response_token_count + len(e_tokens)
+            > self.max_response_length
+        ):
+          # An environment message can be longer than the remaining budget.
+          # End the episode at the last exact sampled assistant token instead
+          # of handing a clipped observation to the next model call.
+          self.agent.trajectory.status = (
+              agent_types.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED
+          )
+          self._log_trajectory_clip("MAX_CONTEXT_LIMIT_REACHED")
+          done = True
+        else:
+          cur_step.env_tokens = np.array(e_tokens)
+          cur_step.env_masks = np.array(e_masks)
+          self._response_token_count += len(e_tokens)
 
     if self.exact_token_continuity:
       self._record_exact_turn(cur_step, terminal=done or step_timed_out)

@@ -959,7 +959,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       )
       if not is_packed:
         seqs_per_chunk = (
-            train_micro_batch_size * self.algo_config.num_generations
+            self._training_config.train_trajectory_micro_batch_size
+            or train_micro_batch_size * self.algo_config.num_generations
         )
         n_total = merged_train_micro_batch.completion_ids.shape[0]
         if n_total > seqs_per_chunk:
@@ -1041,7 +1042,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       else:
         # Mirror `peft_trainer._train_step`'s derivation:
         # `is_update_step` flips True every `grad_acc_steps` micro-batches.
-        unpacked_micro_step_counter += 1
+        unpacked_micro_step_counter += len(chunked_train_micro_batch)
         is_update = unpacked_micro_step_counter % grad_acc_steps == 0
 
       if is_update:
