@@ -50,10 +50,10 @@ See [Design Overview](design.md) for more details on the architecture.
         Optimization)
         -   [GSPO-Token](https://arxiv.org/abs/2507.18071) (Token-level Group
             Sequence Policy Optimization)
-        -   [DAPO](https://arxiv.org/abs/2503.14476) (Direct Alignment via
-            Preference Optimization)
-        -   [Dr.GRPO](https://arxiv.org/abs/2503.20783) (Distributionally Robust
-            GRPO)
+        -   [DAPO](https://arxiv.org/abs/2503.14476) (Decoupled Clip and Dynamic
+            Sampling Policy Optimization)
+        -   [Dr. GRPO](https://arxiv.org/abs/2503.20783) (Group Relative Policy
+            Optimization Done Right)
 -   **[Agentic RL](agentic_rl.md)**:
     -   Multi-turn tool use
     -   Asynchronous rollout for high-throughput trajectory collection
