@@ -26,7 +26,7 @@ From the root of the `tunix` repository:
 
 ```bash
 # Define your image tag
-IMAGE_TAG="gcr.io/cloud-tpu-multipod-dev/${USER}/trellis-35b:latest"
+IMAGE_TAG="gcr.io/cloud-tpu-multipod-dev/${USER}/trellis:latest"
 
 # Build the Docker image with all required dependencies
 docker build \
@@ -94,15 +94,6 @@ kubectl logs -f -n trellis -l jobset.sigs.k8s.io/jobset-name=${USER}-train -c ma
 # Tear down the run
 bash tunix/experimental/examples/recipes/mlperf_35b_128_v5p.sh stop
 ```
-
----
-
-## Key Configuration Reference (`mlperf_35b_128_v5p.sh`)
-
-- **Trainer Mesh**: `TRAINER_MESH_FSDP=1`, `TRAINER_MESH_TP=2`, `TRAINER_MESH_EXPERT=32` across 64 chips.
-- **Rollout Slices**: 16 replicas with `ROLLOUT_TPU_SLICE=tpuv5:2x2x2` (8 chips per slice), utilizing vLLM prefix caching and RPA attention.
-- **Micro-Batching**: `TRAIN_MICRO_BATCH_SIZE=32`, matching the 32 expert parallelism dimension to ensure JAX sharding divisibility.
-- **Agent Sandboxes**: `USE_AGENT_SANDBOX=1` deploying OpenHands environments into the `trellis` namespace on `sandbox-cpu-pool` nodes.
 
 ---
 
