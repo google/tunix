@@ -34,7 +34,7 @@ WORKDIR /app
 
 # Copy scripts and requirements first to leverage Docker cache
 COPY scripts/install_tunix_vllm_requirement.sh scripts/
-COPY requirements/ requirements/
+COPY requirements/requirements.txt requirements/special_requirements.txt requirements/
 
 RUN bash scripts/install_tunix_vllm_requirement.sh
 
@@ -46,7 +46,7 @@ RUN uv pip install .
 # Install SFT/MaxText dependencies (unconditional)
 RUN uv pip install 'jax==0.11.0' 'flax==0.12.7' && \
     uv pip install torchax aqtp tokamax math_verify drjax && \
-    uv pip install --no-deps git+https://github.com/google/maxtext.git@atwigg/mlperf
+    uv pip install --no-deps git+https://github.com/google/maxtext.git@a14b7f63005836ce8bc4f6b9187633b8dcc14434
 
 # Build argument to conditionally install Kubernetes tools
 ARG INSTALL_K8S_TOOLS=false
@@ -81,6 +81,7 @@ RUN if [ "$INSTALL_DEEPSWE_DEPS" = "true" ]; then \
 ARG INSTALL_MAXTEXT=false
 
 # Install MaxText specific dependencies conditionally
+COPY requirements/maxtext_requirements.txt requirements/
 RUN if [ "$INSTALL_MAXTEXT" = "true" ]; then \
       uv pip install -r /app/requirements/maxtext_requirements.txt --torch-backend=cpu; \
 fi
