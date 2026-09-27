@@ -40,11 +40,12 @@ export TRAINER_MESH_CONTEXT=2
 
 export ROLLOUT_JOBSET_YAML="jobset.tpu.yaml"
 export ROLLOUT_TPU_SLICE="tpu7x:2x2x1"
-export ROLLOUT_MESH_EXPERT="${ROLLOUT_MESH_EXPERT:-4}"
+export ROLLOUT_MESH_EXPERT="${ROLLOUT_MESH_EXPERT:-8}"
 export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-16}"
-
-# vLLM Rollout Configuration (from paste.googleplex.com/5903655694368768)
-export VLLM_ADDITIONAL_CONFIG='{"sharding":{"sharding_strategy":{"expert_parallelism":4,"tensor_parallelism":1,"enable_dp_attention":true}},"custom_mamba_cache_multiplier":16,"maxtext_config":{"scan_layers":false,"attention":"vllm_rpa","allow_split_physical_axes":true,"use_multimodal":false,"prefuse_moe_weights":true}}'
+export RAIDEN_DEVICES_PER_HOST=8
+ 
+ # vLLM Rollout Configuration (from paste.googleplex.com/5903655694368768)
+export VLLM_ADDITIONAL_CONFIG='{"sharding":{"sharding_strategy":{"expert_parallelism":8,"tensor_parallelism":1,"enable_dp_attention":true}},"custom_mamba_cache_multiplier":16,"maxtext_config":{"scan_layers":false,  "attention":"vllm_rpa","allow_split_physical_axes":true,"use_multimodal":false,"prefuse_moe_weights":true}}'
 
 # Rollout Worker Environment Flags
 export LIBTPU_INIT_ARGS=' --xla_tpu_use_minor_sharding_for_major_trivial_input=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=false --xla_tpu_ars_combiner_threshold_in_bytes=0 --xla_tpu_enable_async_collective_merger=false --xla_tpu_check_legacy_constraints_in_reduce_scatter_legalizer=false --xla_tpu_dvfs_p_state=7'

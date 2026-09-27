@@ -74,6 +74,10 @@ ${HEAD_AFFINITY}${HEAD_TOLERATIONS}
               - --instance_count=${REPLICAS}
               - --instance_type=${PW_INSTANCE_TYPE}:${TPU_TOPOLOGY}
               env:
+              - name: RAIDEN_BROADCAST_K
+                value: "64"
+              - name: TPU_RAIDEN_DATA_NICS
+                value: "eth0"
               - name: REPLICATED_JOB_NAME
                 valueFrom:
                   fieldRef:
@@ -108,8 +112,12 @@ ${HEAD_AFFINITY}${HEAD_TOLERATIONS}
               - --server_port=29000
               - --resource_manager_address=$$(PATHWAYS_HEAD):29001
               - --gcs_scratch_location=${GCS_SCRATCH_LOCATION}
-              - --temporary_flags_for_debugging=temporary_flag_for_debugging_test_only_hold_death_ref=false
+              - --temporary_flags_for_debugging=temporary_flag_for_debugging_test_only_hold_death_ref=false${PATHWAYS_PROXY_EXTRA_ARGS}
               env:
+              - name: RAIDEN_BROADCAST_K
+                value: "64"
+              - name: TPU_RAIDEN_DATA_NICS
+                value: "eth0"
               - name: PATHWAYS_HEAD
                 valueFrom:
                   fieldRef:
@@ -153,6 +161,10 @@ ${HEAD_AFFINITY}${HEAD_TOLERATIONS}
                   echo "EXIT_CODE=$$EXIT_CODE"
                   exit $$EXIT_CODE
               env:
+              - name: RAIDEN_BROADCAST_K
+                value: "64"
+              - name: TPU_RAIDEN_DATA_NICS
+                value: "eth0"
               # Injects the JobSet Name
               - name: JOBSET_NAME
                 valueFrom:
@@ -224,6 +236,10 @@ ${PW_NODE_AFFINITY}
               - --resource_manager_address=$$(PATHWAYS_HEAD):29001
               - --gcs_scratch_location=${GCS_SCRATCH_LOCATION}
               env:
+              - name: RAIDEN_BROADCAST_K
+                value: "64"
+              - name: TPU_RAIDEN_DATA_NICS
+                value: "eth0"
               - name: TPU_MIN_LOG_LEVEL
                 value: "0"
               - name: TF_CPP_MIN_LOG_LEVEL

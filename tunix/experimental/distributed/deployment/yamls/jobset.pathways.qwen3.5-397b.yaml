@@ -126,7 +126,7 @@ ${QUEUE_LABEL}spec:
               - --server_port=29000
               - --resource_manager_address=$$(PATHWAYS_HEAD):29001
               - --gcs_scratch_location=${GCS_SCRATCH_LOCATION}
-              - --temporary_flags_for_debugging=temporary_flag_for_debugging_test_only_hold_death_ref=false
+              - --temporary_flags_for_debugging=temporary_flag_for_debugging_test_only_hold_death_ref=false${PATHWAYS_PROXY_EXTRA_ARGS}
               env:
               - name: PATHWAYS_HEAD
                 valueFrom:

@@ -472,6 +472,17 @@ def _compute_host_subgrid(
   return None
 
 
+def _use_direct_device_buffer() -> bool:
+  """Returns whether zero-copy direct device buffer mode is enabled."""
+  val = (
+      os.environ.get("RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFER", "1").strip().lower()
+  )
+  enabled = val in ("1", "true", "yes", "on")
+  if enabled:
+    os.environ.setdefault("RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFER", "1")
+  return enabled
+
+
 class RaidenSynchronizer(weight_sync.WeightSynchronizer):
   """One host's weights on the raiden transport, plus its registration metadata.
 
@@ -602,6 +613,28 @@ class RaidenSynchronizer(weight_sync.WeightSynchronizer):
           num_layers=len(self.arrays),
           listener_port=0,
           num_shards=devices_per_host,
+      )
+    elif not self._auto_h2d and _use_direct_device_buffer():
+      logging.info(
+          "Initializing Pathways weight synchronizer and binding device buffers"
+          " via FFI (%d layers, %d devices/host)",
+          len(self.arrays),
+          devices_per_host,
+      )
+      ws_info = raiden_ffi.init_weight_synchronizer(
+          device_arrays=self.arrays,
+          shard_idx=shard_idx,
+          mesh=mesh,
+          slice_byte_sizes=slice_byte_sizes_sharded,
+          parallelism=self._parallelism,
+          num_layers=len(self.arrays),
+          listener_port=0,
+          num_shards=devices_per_host,
+          host_subgrid=(
+              list(self._host_subgrid)
+              if self._host_subgrid is not None
+              else None
+          ),
       )
     else:
       logging.info(
@@ -746,6 +779,15 @@ class RaidenSynchronizer(weight_sync.WeightSynchronizer):
             self._ips,
             self._unique_listeners,
         )
+      elif _use_direct_device_buffer():
+        self._init_ffi_transport(is_d2h=False)
+        logging.info(
+            "%s FFI source transport ready (direct device buffer): shards=%s"
+            " control=%s",
+            self.job_name,
+            self._ips,
+            self._unique_listeners,
+        )
       return
     ws_lib = _get_ws_lib()
     if ws_lib is None:
@@ -795,6 +837,10 @@ class RaidenSynchronizer(weight_sync.WeightSynchronizer):
   def d2h(self, sync_request: Any = None) -> None:
     del sync_request
     if self._is_proxy:
+      if _use_direct_device_buffer():
+        if not self.bound:
+          raise RuntimeError(f"{self.job_name}: bind() must run before d2h()")
+        return
       try:
         self._init_ffi_transport(is_d2h=True)
         logging.info(

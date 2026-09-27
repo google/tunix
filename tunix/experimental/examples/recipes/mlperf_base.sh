@@ -58,6 +58,7 @@ export ROLLOUT_PREFUSE_MOE_WEIGHTS="true"
 export VERIFY_WEIGHTS="true"
 export TRAINER_PADDED_MOE_MLP_DIM=""
 export WEIGHT_SYNC_MODE="raiden"
+export RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFER="${RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFER:-1}"
 
 # ==============================================================================
 # WandB Configuration
@@ -102,7 +103,7 @@ export VLLM_DATA_PARALLEL_SIZE=1
 export VLLM_ENABLE_EXPERT_PARALLEL="true"
 
 # Prefix Caching Configs
-export ENABLE_PREFIX_CACHING="${ENABLE_PREFIX_CACHING:-true}"
+export ENABLE_PREFIX_CACHING="${ENABLE_PREFIX_CACHING:-false}"
 export VLLM_PREFIX_CACHE_RETENTION_INTERVAL="${VLLM_PREFIX_CACHE_RETENTION_INTERVAL:-0}"
 export MAMBA_CACHE_MODE="${MAMBA_CACHE_MODE:-align}"
 export VLLM_MAMBA_CACHE_MODE="${VLLM_MAMBA_CACHE_MODE:-${MAMBA_CACHE_MODE}}"
@@ -194,7 +195,7 @@ export SKIP_STEP_ON_SPIKES="${SKIP_STEP_ON_SPIKES:-false}"
 export SKIP_STEP_ON_NAN="${SKIP_STEP_ON_NAN:-true}"
 
 # Architecture & Rematerialization
-export REMAT_POLICY="full"
+export REMAT_POLICY="${REMAT_POLICY:-full}"
 export TRAINER_MAXTEXT_ATTENTION="flash"
 export COMPUTE_LOGPS_CHUNK_SIZE=512
 

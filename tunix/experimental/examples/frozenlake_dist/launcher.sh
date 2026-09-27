@@ -82,8 +82,6 @@ VLLM_MAX_NUM_BATCHED_TOKENS=${VLLM_MAX_NUM_BATCHED_TOKENS:-32768}
 VLLM_MAX_MODEL_LEN=${VLLM_MAX_MODEL_LEN:-$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH + 256))}
 CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-1000000000}
 CHECKPOINT_MAX_TO_KEEP=${CHECKPOINT_MAX_TO_KEEP:-1}
-CHECKPOINT_RESTORE_STEP=${CHECKPOINT_RESTORE_STEP:-}
-CHECKPOINT_OVERWRITE=${CHECKPOINT_OVERWRITE:-1}
 CHECKPOINT_ROOT_DIRECTORY=${CHECKPOINT_ROOT_DIRECTORY:-"${REPO_ROOT}/checkpoints/frozenlake"}
 WANDB_PROJECT=${WANDB_PROJECT:-trellis-frozenlake}
 WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
@@ -361,8 +359,6 @@ is_true "$USE_MULTISTEP_PROMPT" && cmd+=(--use_multistep_prompt) || cmd+=(--no-u
 is_true "$USE_ROLLOUT_LOGPS" && cmd+=(--use_rollout_logps) || cmd+=(--no-use_rollout_logps)
 [[ -n "$LOG_DIR" ]] && cmd+=(--log_dir="$LOG_DIR")
 [[ -n "$TRAJECTORY_LOG_DIR" ]] && cmd+=(--trajectory_log_dir="$TRAJECTORY_LOG_DIR")
-[[ -n "$CHECKPOINT_RESTORE_STEP" ]] && cmd+=(--checkpoint_restore_step="$CHECKPOINT_RESTORE_STEP")
-is_true "$CHECKPOINT_OVERWRITE" && cmd+=(--checkpoint_overwrite) || cmd+=(--no-checkpoint_overwrite)
 is_true "$DEBUG" && cmd+=(--debug)
 
 export JAX_PLATFORMS=cpu
