@@ -511,6 +511,72 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     )
 
   @mock.patch.object(
+      run_trainer_node.maxtext_utils, "get_tokenizer_pad_id", return_value=0
+  )
+  @mock.patch.object(run_trainer_node.maxtext_utils, "create_maxtext_mesh")
+  @mock.patch.object(
+      run_trainer_node.maxtext_utils, "build_maxtext_config", autospec=True
+  )
+  def test_create_maxtext_trainer_factory_plumbs_optimizer_flags(
+      self, mock_build_cfg, mock_create_mesh, mock_get_pad_id
+  ):
+    # The flags deepswe_dist/k8s_launcher.sh hands the trainer for the MLPerf
+    # recipe, where base.yml's b2 0.95, weight decay 0.1 and clip 1.0 used to
+    # apply instead.
+    args = run_trainer_node._parse_args([
+        "--optimizer_b1=0.9",
+        "--optimizer_b2=0.999",
+        "--optimizer_eps=1.0e-8",
+        "--optimizer_weight_decay=0.0",
+        "--optimizer_opt_chain_type=clip_by_global_norm",
+        "--optimizer_chain_kwargs={'max_norm': 0.125}",
+    ])
+    run_trainer_node._create_maxtext_trainer_factory(args)
+    mock_build_cfg.assert_called_once()
+    kwargs = mock_build_cfg.call_args.kwargs
+    self.assertEqual(kwargs.get("adam_b1"), 0.9)
+    self.assertEqual(kwargs.get("adam_b2"), 0.999)
+    self.assertEqual(kwargs.get("adam_eps"), 1e-8)
+    self.assertEqual(kwargs.get("adam_weight_decay"), 0.0)
+    self.assertEqual(kwargs.get("gradient_clipping_threshold"), 0.125)
+
+  @mock.patch.object(
+      run_trainer_node.maxtext_utils, "get_tokenizer_pad_id", return_value=0
+  )
+  @mock.patch.object(run_trainer_node.maxtext_utils, "create_maxtext_mesh")
+  @mock.patch.object(
+      run_trainer_node.maxtext_utils, "build_maxtext_config", autospec=True
+  )
+  def test_create_maxtext_trainer_factory_clip_only_from_global_norm_chain(
+      self, mock_build_cfg, mock_create_mesh, mock_get_pad_id
+  ):
+    args = run_trainer_node._parse_args([])
+    run_trainer_node._create_maxtext_trainer_factory(args)
+    self.assertIsNone(
+        mock_build_cfg.call_args.kwargs.get("gradient_clipping_threshold")
+    )
+
+    mock_build_cfg.reset_mock()
+    args = run_trainer_node._parse_args([
+        "--optimizer_opt_chain_type=clip",
+        "--optimizer_chain_kwargs={'max_delta': 1.0}",
+    ])
+    with self.assertLogs(level="WARNING") as logs:
+      run_trainer_node._create_maxtext_trainer_factory(args)
+    self.assertIn(
+        "--optimizer_opt_chain_type=clip is ignored", "\n".join(logs.output)
+    )
+    self.assertIsNone(
+        mock_build_cfg.call_args.kwargs.get("gradient_clipping_threshold")
+    )
+
+    args = run_trainer_node._parse_args(
+        ["--optimizer_opt_chain_type=clip_by_global_norm"]
+    )
+    with self.assertRaisesRegex(ValueError, "needs max_norm"):
+      run_trainer_node._create_maxtext_trainer_factory(args)
+
+  @mock.patch.object(
       run_trainer_node,
       "_ensure_model_dir_for_trainer",
       return_value="/tmp/test",

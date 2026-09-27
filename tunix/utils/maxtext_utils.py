@@ -138,6 +138,11 @@ def build_maxtext_config(
     attention: str | None = None,
     remat_policy: str = "",
     learning_rate_final_fraction: float | None = None,
+    adam_b1: float | None = None,
+    adam_b2: float | None = None,
+    adam_eps: float | None = None,
+    adam_weight_decay: float | None = None,
+    gradient_clipping_threshold: float | None = None,
     skip_step_on_spikes: bool = False,
     skip_step_on_nan: bool = True,
     skip_step_interval: int = 128,
@@ -421,6 +426,20 @@ def build_maxtext_config(
       *(["context_parallel_load_balance=False"] if mesh_context > 1 else []),
       f"learning_rate={learning_rate}",
       f"warmup_steps_fraction={warmup_steps_fraction}",
+      # AdamW and clipping, each emitted only when given: an unset one keeps
+      # base.yml's default (adam_b2=0.95, adam_weight_decay=0.1,
+      # gradient_clipping_threshold=1.0).
+      *(
+          f"{key}={value}"
+          for key, value in (
+              ("adam_b1", adam_b1),
+              ("adam_b2", adam_b2),
+              ("adam_eps", adam_eps),
+              ("adam_weight_decay", adam_weight_decay),
+              ("gradient_clipping_threshold", gradient_clipping_threshold),
+          )
+          if value is not None
+      ),
       "dtype=bfloat16",
       "weight_dtype=bfloat16",
       "grad_dtype=float32",

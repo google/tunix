@@ -37,7 +37,7 @@ export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-16}"
 # vLLM Rollout Configuration (from paste.googleplex.com/5903655694368768)
 export ENABLE_PREFIX_CACHING="${ENABLE_PREFIX_CACHING:-true}"
 export MAMBA_CACHE_MODE="${MAMBA_CACHE_MODE:-align}"
-export VLLM_ADDITIONAL_CONFIG='{"sharding":{"sharding_strategy":{"expert_parallelism":4,"tensor_parallelism":1,"enable_dp_attention":true}},"custom_mamba_cache_multiplier":16,"maxtext_config":{"scan_layers":false,"attention":"vllm_rpa","allow_split_physical_axes":true,"use_multimodal":false,"prefuse_moe_weights":true}}'
+export VLLM_ADDITIONAL_CONFIG='{"sharding":{"sharding_strategy":{"expert_parallelism":4,"tensor_parallelism":1,"enable_dp_attention":true}},"custom_mamba_cache_multiplier":16,"maxtext_config":{"scan_layers":false,"attention":"vllm_rpa","allow_split_physical_axes":true,"use_multimodal":false,"prefuse_moe_weights":true,"return_routed_experts":true}}'
 
 # Sandbox
 export SANDBOX_NODE_SELECTOR_VAL="sandbox-cpu-pool"

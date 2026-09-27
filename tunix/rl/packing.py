@@ -46,6 +46,10 @@ class PackItem:
   advantages: np.ndarray
   per_token: Mapping[str, np.ndarray] = dataclasses.field(default_factory=dict)
   policy_version: np.ndarray | None = None
+  # Router replay: `[p + c, num_layers, top_k]` expert ids, aligned to the
+  # WHOLE sequence (prompt then completion), not just the completion like the
+  # `per_token` fields. `UNSET_ROUTED_EXPERT` (-1) marks tokens the trainer
+  # should route with its own gate.
   routed_experts: np.ndarray | None = None
 
   def __post_init__(self):
@@ -83,16 +87,18 @@ class PackItem:
             f" {getattr(arr, 'shape', None)}."
         )
     if self.routed_experts is not None:
+      re_arr = self.routed_experts
+      n = self.prompt_ids.shape[0] + c
       if (
-          not isinstance(self.routed_experts, np.ndarray)
-          or self.routed_experts.ndim != 3
-          or self.routed_experts.shape[0] != self.num_tokens
+          not isinstance(re_arr, np.ndarray)
+          or re_arr.ndim != 3
+          or re_arr.shape[0] != n
       ):
         raise ValueError(
-            "PackItem.routed_experts must be a 3D numpy array of shape"
-            f" ({self.num_tokens}, num_layers, top_k), got"
-            f" {type(self.routed_experts).__name__} with shape"
-            f" {getattr(self.routed_experts, 'shape', None)}."
+            "PackItem.routed_experts must be a numpy array of shape"
+            f" (p + c, num_layers, top_k) = ({n}, L, K), got"
+            f" {type(re_arr).__name__} with shape"
+            f" {getattr(re_arr, 'shape', None)}."
         )
 
   @property
@@ -112,8 +118,10 @@ class PackedRow:
   segment_positions: np.ndarray
   per_token: Mapping[str, np.ndarray] = dataclasses.field(default_factory=dict)
   policy_version: np.ndarray | None = None
-  routed_experts: np.ndarray | None = None
   num_real_segments: int = 0
+  # `[budget, num_layers, top_k]` int16, -1 wherever no routing was captured
+  # (padding, and any token the rollout did not report).
+  routed_experts: np.ndarray | None = None
 
 
 def carried_per_token_fields(items: Sequence[PackItem]) -> tuple[str, ...]:
@@ -134,27 +142,38 @@ def carried_per_token_fields(items: Sequence[PackItem]) -> tuple[str, ...]:
   return tuple(carried)
 
 
-def carried_routed_experts_shape(
+def routed_experts_shape(
     items: Sequence[PackItem],
-) -> tuple[int, int] | None:
-  """Returns `(num_layers, top_k)` if all items in `items` carry `routed_experts`."""
-  if not items:
-    return None
-  shapes = [
+) -> tuple[int, ...] | None:
+  """Returns the `(num_layers, top_k)` routing shape if ANY item carries routing.
+
+  An item without routing is packed with all-unset (-1) rows, which the MoE
+  layer routes with its own gate -- the same as no replay for those tokens. So
+  one routing-less trajectory neither disables replay for the rest of the chunk
+  nor changes the payload's pytree structure (which would recompile the
+  trainer step).
+
+  Args:
+    items: Items that will be packed together into one chunk.
+
+  Returns:
+    The trailing routing shape, or None if no item has routing.
+
+  Raises:
+    ValueError: If the items that carry routing disagree on the trailing shape.
+  """
+  shapes = {
       item.routed_experts.shape[1:]
       for item in items
       if item.routed_experts is not None
-  ]
-  if not shapes or len(shapes) != len(items):
+  }
+  if not shapes:
     return None
-  first = shapes[0]
-  for s in shapes[1:]:
-    if s != first:
-      raise ValueError(
-          "All PackItems in a packed chunk must share the same"
-          f" routed_experts (num_layers, top_k) shape; got {first} and {s}."
-      )
-  return (int(first[0]), int(first[1]))
+  if len(shapes) != 1:
+    raise ValueError(
+        f"Items disagree on routed_experts trailing shape: {sorted(shapes)}."
+    )
+  return shapes.pop()
 
 
 def fill_one_chunk(
@@ -208,23 +227,19 @@ def pack_bin(
     budget: int,
     pad_id: int,
     carried: Sequence[str],
-    routed_experts_shape: tuple[int, int] | None = None,
+    routed_shape: tuple[int, ...] | None = None,
 ) -> PackedRow:
   """Packs a single bin of items into a single `[budget]` PackedRow."""
   zeros_i = lambda: np.zeros(budget, dtype=np.int32)
   zeros_f = lambda: np.zeros(budget, dtype=np.float32)
-
-  if routed_experts_shape is None and bin_items:
-    routed_experts_shape = carried_routed_experts_shape(bin_items)
-
-  routed_experts = (
-      np.full(
-          (budget, *routed_experts_shape),
-          UNSET_ROUTED_EXPERT,
-          dtype=np.int16,
+  if routed_shape is None and bin_items:
+    routed_shape = routed_experts_shape(bin_items)
+  unset_routed = lambda: (
+      None
+      if routed_shape is None
+      else np.full(
+          (budget,) + tuple(routed_shape), UNSET_ROUTED_EXPERT, dtype=np.int16
       )
-      if routed_experts_shape is not None
-      else None
   )
 
   if not bin_items:
@@ -237,8 +252,8 @@ def pack_bin(
         segment_positions=zeros_i(),
         per_token={name: zeros_f() for name in carried},
         policy_version=None,
-        routed_experts=routed_experts,
         num_real_segments=0,
+        routed_experts=unset_routed(),
     )
 
   total = sum(item.num_tokens for item in bin_items)
@@ -252,6 +267,7 @@ def pack_bin(
   segment_ids = zeros_i()
   segment_positions = zeros_i()
   per_token = {name: zeros_f() for name in carried}
+  routed = unset_routed()
 
   cursor = 0
   for seg, item in enumerate(bin_items, start=1):
@@ -270,8 +286,10 @@ def pack_bin(
     advantages[comp] = item.advantages
     for name in carried:
       per_token[name][comp] = item.per_token[name]
-    if routed_experts is not None and item.routed_experts is not None:
-      routed_experts[seq] = item.routed_experts
+    if routed is not None and item.routed_experts is not None:
+      # Same `seq` slice as `ids`: routing is sequence-aligned, so a token's
+      # captured experts land on exactly the position the token itself does.
+      routed[seq] = item.routed_experts
     cursor += n
 
   return PackedRow(
@@ -283,8 +301,8 @@ def pack_bin(
       segment_positions=segment_positions,
       per_token=per_token,
       policy_version=bin_items[0].policy_version,
-      routed_experts=routed_experts,
       num_real_segments=len(bin_items),
+      routed_experts=routed,
   )
 
 
@@ -294,19 +312,19 @@ def pack_chunk(
     budget: int,
     pad_id: int,
     carried: Sequence[str],
-    routed_experts_shape: tuple[int, int] | None = None,
+    routed_shape: tuple[int, ...] | None = None,
 ) -> list[PackedRow]:
   """Packs a sequence of bins of one chunk into a row."""
-  if routed_experts_shape is None:
+  if routed_shape is None:
     placed = [item for bin_items in bins for item in bin_items]
-    routed_experts_shape = carried_routed_experts_shape(placed)
+    routed_shape = routed_experts_shape(placed)
   return [
       pack_bin(
           bin_items,
           budget=budget,
           pad_id=pad_id,
           carried=carried,
-          routed_experts_shape=routed_experts_shape,
+          routed_shape=routed_shape,
       )
       for bin_items in bins
   ]
@@ -371,7 +389,14 @@ def pack_core(
     )
     if not any(bins):
       raise ValueError("pack_core: no items placed in any bin.")
+    placed = [item for bin_items in bins for item in bin_items]
     chunks.append(
-        pack_chunk(bins, budget=budget, pad_id=pad_id, carried=carried)
+        pack_chunk(
+            bins,
+            budget=budget,
+            pad_id=pad_id,
+            carried=carried,
+            routed_shape=routed_experts_shape(placed),
+        )
     )
   return chunks
