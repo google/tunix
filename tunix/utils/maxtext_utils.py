@@ -69,12 +69,28 @@ def get_tokenizer_pad_id(
 VLLM_MAXTEXT_HF_OVERRIDES = {"architectures": ["MaxTextForCausalLM"]}
 
 
+def _resolve_bool_config(
+    value: bool | None, env_var: str, default: bool | None = None
+) -> bool | None:
+  """Resolves an optional boolean parameter from an explicit arg or env var."""
+  if value is not None:
+    return bool(value)
+  raw = os.environ.get(env_var, "").strip().lower()
+  if raw in ("1", "true", "yes"):
+    return True
+  if raw in ("0", "false", "no"):
+    return False
+  return default
+
+
 def build_vllm_maxtext_additional_config(
     model_name: str,
     *,
     attention: str = "",
     prefuse_moe_weights: bool | None = None,
     return_routed_experts: bool | None = None,
+    float32_gate_logits: bool | None = None,
+    float32_logits: bool | None = None,
 ) -> dict[str, Any]:
   """Builds the vLLM `additional_config` a MaxText rollout model reads.
 
@@ -91,10 +107,20 @@ def build_vllm_maxtext_additional_config(
       TPU GMM layout. None leaves MaxText's default in place.
     return_routed_experts: Whether the MaxText rollout model should sow and
       return top-k routed expert indices for router replay.
+    float32_gate_logits: Whether to keep gate/router/norm/GDN weights in
+      float32. Defaults to True (or `FLOAT32_GATE_LOGITS` env var if set).
+    float32_logits: Whether to cast output logits to float32. Defaults to
+      `FLOAT32_LOGITS` env var if set, else None.
 
   Returns:
     The `additional_config` mapping to hand to the vLLM engine.
   """
+  effective_float32_gate_logits = _resolve_bool_config(
+      float32_gate_logits, "FLOAT32_GATE_LOGITS", default=True
+  )
+  effective_float32_logits = _resolve_bool_config(
+      float32_logits, "FLOAT32_LOGITS", default=None
+  )
   overrides: dict[str, Any] = {
       "model_name": model_name,
       "model_call_mode": "inference",
@@ -103,6 +129,10 @@ def build_vllm_maxtext_additional_config(
       "log_config": False,
       "weight_dtype": "bfloat16",
   }
+  if effective_float32_gate_logits is not None:
+    overrides["float32_gate_logits"] = effective_float32_gate_logits
+  if effective_float32_logits is not None:
+    overrides["float32_logits"] = effective_float32_logits
   if prefuse_moe_weights is not None:
     overrides["prefuse_moe_weights"] = prefuse_moe_weights
   if return_routed_experts is not None:
@@ -152,6 +182,8 @@ def build_maxtext_config(
     skip_step_on_nan: bool = True,
     skip_step_interval: int = 128,
     skip_step_scaling_factor: float = 6.0,
+    float32_gate_logits: bool | None = None,
+    float32_logits: bool | None = None,
 ) -> Any:
   """Builds the MaxText HyperParameters the training engine runs on."""
   pyconfig, _, _ = maxtext_modules()
@@ -381,6 +413,12 @@ def build_maxtext_config(
       or os.environ.get("TRAINER_MAXTEXT_ATTENTION")
       or "dot_product"
   )
+  effective_float32_gate_logits = _resolve_bool_config(
+      float32_gate_logits, "FLOAT32_GATE_LOGITS", default=True
+  )
+  effective_float32_logits = _resolve_bool_config(
+      float32_logits, "FLOAT32_LOGITS", default=None
+  )
   argv.extend([
       "scan_layers=True",
       "convert_checkpoint_if_possible=False",
@@ -448,6 +486,17 @@ def build_maxtext_config(
       "dtype=bfloat16",
       "weight_dtype=bfloat16",
       "grad_dtype=float32",
+      "mu_dtype=float32",
+      *(
+          [f"float32_gate_logits={effective_float32_gate_logits}"]
+          if effective_float32_gate_logits is not None
+          else []
+      ),
+      *(
+          [f"float32_logits={effective_float32_logits}"]
+          if effective_float32_logits is not None
+          else []
+      ),
       "enable_tensorboard=False",
       "record_internal_nn_metrics=False",
       "init_weights_seed=42",
@@ -598,6 +647,115 @@ def log_param_shapes(model: Any) -> None:
   logging.info("MaxText model has %d parameter arrays.", len(shapes))
 
 
+def _build_fp32_master_optimizer_cls(nnx_mod: Any | None = None) -> type[Any]:
+  """Builds an `nnx.Optimizer` subclass that maintains FP32 master weights.
+
+  When `weight_dtype=bfloat16`, standard `nnx.Optimizer` initializes Optax's
+  first/second moments (`mu`, `nu`) in `bfloat16` and applies `w + lr * update`
+  directly in `bfloat16`. At `lr=1e-6`, the `bfloat16` unit-in-the-last-place
+  (`2^-8 * |w|`) is ~3-4 orders of magnitude larger than the per-step update,
+  causing parameter updates on `bfloat16` weights to underflow to zero.
+
+  `Fp32MasterOptimizer` keeps model weights in their original dtype (`bfloat16`
+  for bulk weights, `float32` for `float32_gate_logits` layers) during forward,
+  backward, and weight sync, while storing a `float32` master copy and `float32`
+  Optax state in `self.opt_state`. Each `update()` step updates the `float32`
+  master weights and casts them back to each model parameter's dtype.
+  """
+  from flax.nnx.training import optimizer as nnx_opt  # pylint: disable=g-import-not-at-top
+  import jax  # pylint: disable=g-import-not-at-top
+  import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
+  import optax  # pylint: disable=g-import-not-at-top
+
+  if nnx_mod is None:
+    from flax import nnx as nnx_mod  # pylint: disable=g-import-not-at-top
+
+  opt_state_var_cls = getattr(
+      nnx_opt, "OptState", getattr(nnx_mod, "Variable", None)
+  )
+  to_opt_state_fn = getattr(nnx_opt, "to_opt_state", lambda x: x)
+
+  class Fp32MasterOptimizer(nnx_mod.Optimizer):
+    """NNX Optimizer that keeps FP32 master weights and FP32 Optax state."""
+
+    def __init__(
+        self,
+        model: Any,
+        tx: optax.GradientTransformation,
+        *,
+        wrt: Any = nnx_mod.Param,
+    ):
+      self.step = opt_state_var_cls(jnp.array(0, dtype=jnp.uint32))
+      self.tx = tx
+      self.wrt = wrt
+      params_state = nnx_mod.state(model, wrt)
+      # Only allocate a separate float32 master copy for non-float32 (e.g.
+      # bfloat16) parameters. Parameters that are already float32 (such as
+      # float32_gate_logits layers) use the model parameter directly; storing a
+      # second reference via `x.astype(jnp.float32)` would alias the same PJRT
+      # buffer inside `TrainStateNNX` and fail `jax.jit(..., donate_argnums=(0,))`.
+      master_params = jax.tree.map(
+          lambda x: x.astype(jnp.float32) if x.dtype != jnp.float32 else None,
+          params_state,
+      )
+      full_f32_params = jax.tree.map(
+          lambda p, mp: p if mp is None else mp,
+          params_state,
+          master_params,
+      )
+      inner_state = tx.init(full_f32_params)
+      opt_state: dict[str, Any] = {
+          "master_params": master_params,
+          "inner": inner_state,
+      }
+      if isinstance(inner_state, dict) and "is_skipped" in inner_state:
+        opt_state["is_skipped"] = inner_state["is_skipped"]
+      self.opt_state = nnx_mod.data(to_opt_state_fn(opt_state))
+
+    def update(self, model: Any, grads: Any, /, **kwargs: Any) -> Any:
+      param_arrays = nnx_mod.as_pure(nnx_mod.state(model, self.wrt))
+      grad_arrays = nnx_mod.as_pure(nnx_mod.state(grads, self.wrt))
+      opt_state_arrays = nnx_mod.as_pure(self.opt_state)
+      kwargs_arrays = nnx_mod.as_pure(kwargs)
+
+      master_params = opt_state_arrays["master_params"]
+      inner_state = opt_state_arrays["inner"]
+      full_f32_params = jax.tree.map(
+          lambda p, mp: p if mp is None else mp,
+          param_arrays,
+          master_params,
+      )
+      grads_f32 = jax.tree.map(lambda g: g.astype(jnp.float32), grad_arrays)
+
+      updates, new_inner = self.tx.update(
+          grads_f32, inner_state, full_f32_params, **kwargs_arrays
+      )
+      updated_f32_params = optax.apply_updates(full_f32_params, updates)
+      new_master = jax.tree.map(
+          lambda p, up: up if p.dtype != jnp.float32 else None,
+          param_arrays,
+          updated_f32_params,
+      )
+      new_params = jax.tree.map(
+          lambda p, up: up.astype(p.dtype),
+          param_arrays,
+          updated_f32_params,
+      )
+      new_opt_state: dict[str, Any] = {
+          "master_params": new_master,
+          "inner": new_inner,
+      }
+      if isinstance(new_inner, dict) and "is_skipped" in new_inner:
+        new_opt_state["is_skipped"] = new_inner["is_skipped"]
+
+      nnx_mod.update(model, new_params)
+      nnx_mod.update(self.opt_state, nnx_mod.state(new_opt_state))
+      self.step[...] += 1
+      return updates
+
+  return Fp32MasterOptimizer
+
+
 def create_maxtext_engine(
     maxtext_config: Any,
     mesh: Any,
@@ -608,17 +766,70 @@ def create_maxtext_engine(
   """Builds and initializes a MaxTextTrainingEngine within the given mesh."""
   _, maxtext_engine, _ = maxtext_modules()
 
+  weight_dtype_str = str(getattr(maxtext_config, "weight_dtype", "bfloat16"))
+  use_fp32_master = weight_dtype_str in ("bfloat16", "bf16")
+
+  if use_fp32_master:
+    fp32_optimizer_cls = _build_fp32_master_optimizer_cls(
+        getattr(maxtext_engine, "nnx", None)
+    )
+
+    class _Fp32MasterMaxTextTrainingEngine(
+        maxtext_engine.MaxTextTrainingEngine
+    ):
+      """MaxTextTrainingEngine that uses `Fp32MasterOptimizer` for BF16 weights."""
+
+      def _build_optimizer(self, tx: Any) -> Any:
+        orig_optimizer_cls = maxtext_engine.nnx.Optimizer
+        maxtext_engine.nnx.Optimizer = fp32_optimizer_cls
+        try:
+          return super()._build_optimizer(tx)
+        finally:
+          maxtext_engine.nnx.Optimizer = orig_optimizer_cls
+
+      def _init_state(self) -> None:
+        orig_optimizer_cls = maxtext_engine.nnx.Optimizer
+        maxtext_engine.nnx.Optimizer = fp32_optimizer_cls
+        try:
+          super()._init_state()
+        finally:
+          maxtext_engine.nnx.Optimizer = orig_optimizer_cls
+
+    engine_cls = _Fp32MasterMaxTextTrainingEngine
+  else:
+    engine_cls = maxtext_engine.MaxTextTrainingEngine
+
   with mesh:
-    engine = maxtext_engine.MaxTextTrainingEngine(
+    engine = engine_cls(
         maxtext_config,
         mesh=mesh,
         wrap_with_tunix_adapter=wrap_with_tunix_adapter,
         tokenizer_pad_id=tokenizer_pad_id,
     )
 
+  # When `float32_gate_logits=True` and `weight_dtype=bfloat16`, both the
+  # trainer and vLLM rollout models store gate/router/norm/GDN/logits_dense
+  # weights in `float32` and all other weights in `bfloat16`. However,
+  # `MaxTextToMaxTextConverter` defaults `target_dtype` to `config.weight_dtype`
+  # ("bfloat16") and only exempts parameter paths containing "gate" or "router",
+  # which downcasts `A_log`, `conv1d`, `dt_bias`, `norm`, and `logits_dense` to
+  # `bfloat16` during target-free conversion and fails Raiden's `item_size`
+  # preflight check. Clearing `_direct.target_dtype` preserves each parameter's
+  # exact dtype during conversion.
+  if (
+      getattr(maxtext_config, "float32_gate_logits", False)
+      and getattr(engine, "_weight_converter", None) is not None
+  ):
+    direct_converter = getattr(engine._weight_converter, "_direct", None)
+    if direct_converter is not None:
+      direct_converter.target_dtype = None
+
   model_type = type(engine.model).__name__
   logging.info(
-      "MaxText engine model: %s (pad_id=%d)", model_type, tokenizer_pad_id
+      "MaxText engine model: %s (pad_id=%d, fp32_master=%s)",
+      model_type,
+      tokenizer_pad_id,
+      use_fp32_master,
   )
   if wrap_with_tunix_adapter and model_type != "TunixMaxTextAdapter":
     raise RuntimeError(

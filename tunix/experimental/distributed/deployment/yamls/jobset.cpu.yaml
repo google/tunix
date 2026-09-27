@@ -66,10 +66,11 @@ ${QUEUE_LABEL}spec:
               imagePullPolicy: Always
               securityContext:
                 privileged: true
-              # resources:
-              #   limits:
-              #     cpu: "24"
-              #     memory: 100G
+              resources:
+                requests:
+                  cpu: "24"
+                  memory: 100G
+                  ephemeral-storage: 20Gi
               command:
                 - bash
                 - -c

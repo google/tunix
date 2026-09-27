@@ -728,7 +728,195 @@ class MaxTextUtilsTest(absltest.TestCase):
       )
     self.assertNotIn("pathways_checkpointing_impl=colocated_python", argv)
 
+  def test_default_emits_mu_dtype_float32_and_float32_gate_logits_true(self):
+    with mock.patch.dict("os.environ", {}, clear=False):
+      os.environ.pop("FLOAT32_GATE_LOGITS", None)
+      os.environ.pop("FLOAT32_LOGITS", None)
+      argv = self._build_config_argv()
+    self.assertIn("mu_dtype=float32", argv)
+    self.assertIn("float32_gate_logits=True", argv)
+    self.assertFalse(any(arg.startswith("float32_logits=") for arg in argv))
+
+  def test_float32_gate_logits_and_logits_env_and_args(self):
+    with mock.patch.dict(
+        "os.environ",
+        {"FLOAT32_GATE_LOGITS": "false", "FLOAT32_LOGITS": "true"},
+        clear=False,
+    ):
+      argv = self._build_config_argv()
+      self.assertIn("float32_gate_logits=False", argv)
+      self.assertIn("float32_logits=True", argv)
+
+      # Explicit arguments override environment variables.
+      argv_override = self._build_config_argv(
+          float32_gate_logits=True, float32_logits=False
+      )
+      self.assertIn("float32_gate_logits=True", argv_override)
+      self.assertIn("float32_logits=False", argv_override)
+
+  def test_build_vllm_maxtext_additional_config_float32_gate_logits(self):
+    with mock.patch.dict("os.environ", {}, clear=False):
+      os.environ.pop("FLOAT32_GATE_LOGITS", None)
+      os.environ.pop("FLOAT32_LOGITS", None)
+      cfg = maxtext_utils.build_vllm_maxtext_additional_config("qwen3.5-35b-a3b")
+    mt_cfg = cfg["maxtext_config"]
+    self.assertEqual(mt_cfg["weight_dtype"], "bfloat16")
+    self.assertTrue(mt_cfg["float32_gate_logits"])
+    self.assertNotIn("float32_logits", mt_cfg)
+
+    with mock.patch.dict(
+        "os.environ",
+        {"FLOAT32_GATE_LOGITS": "false", "FLOAT32_LOGITS": "true"},
+        clear=False,
+    ):
+      cfg_env = maxtext_utils.build_vllm_maxtext_additional_config(
+          "qwen3.5-35b-a3b"
+      )
+    self.assertFalse(cfg_env["maxtext_config"]["float32_gate_logits"])
+    self.assertTrue(cfg_env["maxtext_config"]["float32_logits"])
+
+  def test_fp32_master_optimizer_preserves_bf16_params_and_accumulates_small_updates(
+      self,
+  ):
+    from flax import nnx
+    import jax
+    import jax.numpy as jnp
+    import optax
+
+    class ToyModel(nnx.Module):
+
+      def __init__(self):
+        self.bf16_w = nnx.Param(jnp.ones((4,), dtype=jnp.bfloat16))
+        self.f32_gate = nnx.Param(jnp.ones((4,), dtype=jnp.float32))
+
+    model = ToyModel()
+    tx = optax.adamw(learning_rate=1e-6, b1=0.9, b2=0.999, weight_decay=0.0)
+    opt_cls = maxtext_utils._build_fp32_master_optimizer_cls(nnx)
+    optimizer = opt_cls(model, tx, wrt=nnx.Param)
+
+    # Master weights and Optax moments are initialized in float32 while model
+    # weights retain their original dtypes. Parameters already in float32 store
+    # None in master_params to avoid duplicate buffers and PJRT donation aliasing.
+    self.assertEqual(model.bf16_w[...].dtype, jnp.bfloat16)
+    self.assertEqual(model.f32_gate[...].dtype, jnp.float32)
+    self.assertEqual(
+        optimizer.opt_state["master_params"]["bf16_w"][...].dtype, jnp.float32
+    )
+    self.assertIsNone(
+        optimizer.opt_state["master_params"]["f32_gate"].get_value()
+    )
+    leaves = jax.tree.leaves(optimizer.opt_state["inner"])
+    for leaf in leaves:
+      if hasattr(leaf, "dtype") and jnp.issubdtype(leaf.dtype, jnp.floating):
+        self.assertEqual(leaf.dtype, jnp.float32)
+
+    grads = nnx.state(model, nnx.Param)
+    grads = jax.tree.map(lambda x: jnp.full_like(x, 0.1, dtype=jnp.float32), grads)
+
+    # One step at lr=1e-6 updates FP32 master weights and FP32 model params by ~1e-6.
+    optimizer.update(model, grads)
+    master_delta_1 = float(
+        jnp.max(
+            jnp.abs(optimizer.opt_state["master_params"]["bf16_w"][...] - 1.0)
+        )
+    )
+    f32_gate_delta_1 = float(jnp.max(jnp.abs(model.f32_gate[...] - 1.0)))
+    self.assertGreater(master_delta_1, 5e-7)
+    self.assertGreater(f32_gate_delta_1, 5e-7)
+    self.assertIsNone(
+        optimizer.opt_state["master_params"]["f32_gate"].get_value()
+    )
+    self.assertEqual(model.bf16_w[...].dtype, jnp.bfloat16)
+    self.assertEqual(model.f32_gate[...].dtype, jnp.float32)
+
+  def test_fp32_master_optimizer_mirrors_is_skipped(self):
+    from flax import nnx
+    import jax.numpy as jnp
+    import optax
+
+    class ToyModel(nnx.Module):
+
+      def __init__(self):
+        self.w = nnx.Param(jnp.ones((2,), dtype=jnp.bfloat16))
+
+    def init_fn(params):
+      del params
+      return {"is_skipped": jnp.asarray(False)}
+
+    def update_fn(updates, state, params=None):
+      del state, params
+      return updates, {"is_skipped": jnp.asarray(True)}
+
+    tx = optax.GradientTransformation(init_fn, update_fn)
+    opt_cls = maxtext_utils._build_fp32_master_optimizer_cls(nnx)
+    model = ToyModel()
+    optimizer = opt_cls(model, tx, wrt=nnx.Param)
+    pure_before = nnx.to_pure_dict(nnx.state(optimizer))["opt_state"]
+    self.assertFalse(bool(pure_before["is_skipped"]))
+    grads = nnx.state(model, nnx.Param)
+    optimizer.update(model, grads)
+    pure_after = nnx.to_pure_dict(nnx.state(optimizer))["opt_state"]
+    self.assertTrue(bool(pure_after["is_skipped"]))
+
+  def test_create_maxtext_engine_uses_fp32_master_and_clears_direct_target_dtype(
+      self,
+  ):
+    mock_pyconfig = mock.MagicMock()
+    mock_mutils = mock.MagicMock()
+
+    class FakeOptimizer:
+      pass
+
+    class FakeNNX:
+      Optimizer = FakeOptimizer
+      Param = object
+
+    captured = {}
+
+    class FakeEngine:
+
+      def __init__(
+          self,
+          config,
+          mesh=None,
+          wrap_with_tunix_adapter=True,
+          tokenizer_pad_id=0,
+      ):
+        del mesh, wrap_with_tunix_adapter, tokenizer_pad_id
+        self._config = config
+        self.model = type("TunixMaxTextAdapter", (), {})()
+        self._weight_converter = mock.MagicMock()
+        self._weight_converter._direct = mock.MagicMock()
+        self._weight_converter._direct.target_dtype = "bfloat16"
+        self._init_state()
+
+      def _init_state(self):
+        captured["optimizer_cls_during_init"] = FakeNNX.Optimizer
+
+    mock_engine_mod = mock.MagicMock()
+    mock_engine_mod.nnx = FakeNNX
+    mock_engine_mod.MaxTextTrainingEngine = FakeEngine
+
+    mock_cfg = mock.MagicMock()
+    mock_cfg.weight_dtype = "bfloat16"
+    mock_cfg.float32_gate_logits = True
+    mock_mesh = mock.MagicMock()
+
+    with mock.patch.object(
+        maxtext_utils,
+        "maxtext_modules",
+        return_value=(mock_pyconfig, mock_engine_mod, mock_mutils),
+    ):
+      engine = maxtext_utils.create_maxtext_engine(
+          mock_cfg, mock_mesh, log_shapes=False
+      )
+
+    self.assertIsNot(captured["optimizer_cls_during_init"], FakeOptimizer)
+    self.assertEqual(FakeNNX.Optimizer, FakeOptimizer)
+    self.assertIsNone(engine._weight_converter._direct.target_dtype)
+
 
 if __name__ == "__main__":
   absltest.main()
+
 
