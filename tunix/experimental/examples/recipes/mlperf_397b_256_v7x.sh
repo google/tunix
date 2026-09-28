@@ -17,10 +17,7 @@ export JOB_PREFIX="${JOB_PREFIX:-$USER}"
 export WANDB_RUN_NAME="${WANDB_RUN_NAME:-${JOB_PREFIX}-mlperf-397b-v7x}"
 
 # Select pod: pod1 (bodaborg-tpu7x-gsc, us-central1) or pod2 (bodaborg-tpu7x-gsc-elm, us-east1).
-export POD="${POD:-pod1}"
-if [[ "${REGION:-}" == us-east1* && "${POD}" == "pod1" ]]; then
-  export POD="pod2"
-fi
+export POD="${POD:-pod2}"
 
 if [[ "${POD}" == "pod2" || "${POD}" == "2" || "${POD}" == "elm" ]]; then
   export REGION="${REGION:-us-east1}"
