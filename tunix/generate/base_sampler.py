@@ -55,6 +55,11 @@ class SamplerOutput:
   # Valid prompt length per row, before left padding (not a pad-ID count).
   prompt_lengths: np.ndarray | None = None
 
+  # Optional per-generation top-k token IDs and log-probabilities from the
+  # sampler, each of shape `[gen_length, k]`, used for score centering.
+  topk_token_ids: Optional[list[np.ndarray]] = None
+  topk_logprobs: Optional[list[np.ndarray]] = None
+
 
 class BaseSampler(ABC):
   """Base class for samplers."""

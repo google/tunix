@@ -282,24 +282,30 @@ class RlEngineTest(parameterized.TestCase):
             tokens=np.zeros((1, 1)),
             left_padded_prompt_tokens=np.zeros((1, 1)),
             logprobs=None,
+            topk_token_ids=[np.array([[3, 4]], dtype=np.int32)],
+            topk_logprobs=[np.array([[-0.2, -2.0]], dtype=np.float32)],
         )
     )
 
-    messages = [[{'role': 'user', 'content': 'Hello'}]]
+    messages = [[{'role': 'user', 'content': 'Hello'}]] * 2
     result = rl_engine.generate(
         prompts=messages,
         apply_chat_template=True,
         mode=rl_engine_lib.Mode.EVAL,
+        micro_batch_size=1,
     )
 
     self.assertEqual(result.text[0], expected_text)
-    mock_tokenizer.apply_chat_template.assert_called_once_with(
+    self.assertEqual(len(result.topk_token_ids), 2)
+    np.testing.assert_array_equal(result.topk_token_ids[1], [[3, 4]])
+    np.testing.assert_allclose(result.topk_logprobs[1], [[-0.2, -2.0]])
+    mock_tokenizer.apply_chat_template.assert_any_call(
         messages[0],
         add_generation_prompt=True,
         tokenize=False,
         enable_thinking=False,
     )
-    rl_engine.rollout.generate.assert_called_once()
+    self.assertEqual(rl_engine.rollout.generate.call_count, 2)
     called_prompts = rl_engine.rollout.generate.call_args[0][0]
     self.assertEqual(called_prompts, ['formatted prompt'])
 

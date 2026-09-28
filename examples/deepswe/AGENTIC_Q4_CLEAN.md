@@ -20,7 +20,7 @@ with seed 42. Two passes provide the 1,600 prompt groups for 200 updates.
 | Trainer | 2 trajectories per microbatch, 64 gradient accumulations/update, 1×2 TPU mesh |
 | Logprobs | 1 trajectory per forward pass |
 | Rollout | vLLM, 1×2 TPU mesh, 32 maximum sequences, seed 42, temperature 1, top-p 1, top-k 0, prefix caching off |
-| GRPO | RLOO, `sequence-mean-token-scale`, beta 0, epsilon 0.2/0.28, rollout logprobs |
+| GRPO | RLOO, `sequence-mean-token-scale`, beta 0, epsilon 0.2/0.28, rollout logprobs, token TIS with threshold 2.0, Score Centering with top-32 sampler logprobs |
 | Optimizer | AdamW, LR 1e-6, b1 0.9, b2 0.99, decay 0.01, global norm clip 1 |
 | Environment | Docker R2E-Gym, Q4 XML action compatibility, 50 turns, episode 4,800 s, step/reward 1,800 s |
 
@@ -40,6 +40,16 @@ launcher writes checkpoints every update and keeps the latest
 two. The older `run_deepswe_disagg_v5p_32.sh` remains the separate 32B recipe.
 The agentic learner dispatches rollouts one prompt at a time; its rollout
 microbatch is therefore 1, while vLLM can process up to 32 sequences at once.
+
+Score Centering requires `return_logprobs=True` and `num_logprobs=32` before
+the rollout engine is created. The learner checks that vLLM captured both
+settings, and each training batch checks that the top-k probabilities reached
+every trainable token. Watch `actor/train/score_centering/head_mass_q_mean` and
+`actor/train/score_centering/abs_coeff_sum_mean` in W&B. If head mass is below
+0.99 at temperature 1.0, increase `--score_centering_top_k` and start a new
+run. With one GRPO iteration, Score Centering pins the PPO ratio to 1, so
+`ppo_kl` is expected to be zero; use `abs_coeff_sum_mean` to track sampler to
+trainer drift.
 
 On this host the `deepswe-agentic-q4-clean.service` unit starts after the
 persistent disk is mounted. Its output is appended to

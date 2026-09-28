@@ -106,6 +106,11 @@ parser.add_argument("--beta", type=float, default=0.0)
 parser.add_argument("--epsilon", type=float, default=0.2)
 parser.add_argument("--epsilon_high", type=float, default=0.28)
 parser.add_argument("--off_policy_steps", type=int, default=0)
+parser.add_argument("--score_centering", type=_parse_bool, default=False)
+parser.add_argument("--score_centering_top_k", type=int, default=32)
+parser.add_argument("--score_centering_eps", type=float, default=1e-6)
+parser.add_argument("--sampler_is", choices=["none", "token"], default="none")
+parser.add_argument("--sampler_is_threshold", type=float, default=2.0)
 
 # Rollout Config
 parser.add_argument("--max_prompt_length", type=int, default=4096)
@@ -592,6 +597,15 @@ FILTER_STATUSES = (
 LOSS_AGG_MODE = args.loss_agg_mode
 ADVANTAGE_ESTIMATOR = args.advantage_estimator
 USE_ROLLOUT_LOGPS = args.use_rollout_logps
+if args.score_centering:
+  if ROLLOUT_ENGINE != "vllm":
+    raise ValueError("Score Centering requires --rollout_engine vllm.")
+  if not USE_ROLLOUT_LOGPS:
+    raise ValueError("Score Centering requires --use_rollout_logps true.")
+  if args.top_p != 1.0 or args.top_k != 0:
+    raise ValueError("Score Centering requires --top_p 1.0 --top_k 0.")
+  if args.score_centering_top_k < 2:
+    raise ValueError("Score Centering requires --score_centering_top_k >= 2.")
 RCP_LOGGING = args.rcp_logging
 
 
@@ -884,6 +898,8 @@ base_rollout_dict = {
     "top_k": TOP_K,
     "eos_tokens": [tokenizer.encode("<|im_end|>")[0]],  # pyrefly: ignore[missing-attribute]
     "return_logprobs": USE_ROLLOUT_LOGPS,
+    # Set before RLEngine creates VllmSampler and its max_logprobs limit.
+    "num_logprobs": args.score_centering_top_k if args.score_centering else 1,
     "max_tokens_to_generate": MAX_RESPONSE_LENGTH,
 }
 
@@ -1072,6 +1088,11 @@ config_kwargs = {
     "loss_agg_mode": LOSS_AGG_MODE,
     "advantage_estimator": ADVANTAGE_ESTIMATOR,
     "use_rollout_logps": USE_ROLLOUT_LOGPS,
+    "score_centering": args.score_centering,
+    "score_centering_top_k": args.score_centering_top_k,
+    "score_centering_eps": args.score_centering_eps,
+    "sampler_is": None if args.sampler_is == "none" else args.sampler_is,
+    "sampler_is_threshold": args.sampler_is_threshold,
 }
 
 grpo_config = agentic_grpo_learner.GRPOConfig(**config_kwargs)

@@ -921,6 +921,35 @@ class RLEngine:
           [cast(np.ndarray, out.prompt_lengths) for out in outputs]
       )
 
+    # Sampler top-k logprobs for score centering. Concatenated the same way as
+    # `logprobs`; without this the fields are dropped here and every downstream
+    # consumer sees None.
+    topk_token_ids = None
+    topk_logprobs = None
+    if any(
+        out.topk_token_ids is not None or out.topk_logprobs is not None
+        for out in outputs
+    ):
+      if not all(
+          out.topk_token_ids is not None and out.topk_logprobs is not None
+          for out in outputs
+      ):
+        raise ValueError("Incomplete top-k data across rollout microbatches.")
+      topk_token_ids = list(
+          itertools.chain.from_iterable(out.topk_token_ids for out in outputs)  # pyrefly: ignore[bad-argument-type]
+      )
+      topk_logprobs = list(
+          itertools.chain.from_iterable(out.topk_logprobs for out in outputs)  # pyrefly: ignore[bad-argument-type]
+      )
+
+    routed_experts = None
+    if any(out.routed_experts is not None for out in outputs):
+      if not all(out.routed_experts is not None for out in outputs):
+        raise ValueError("Incomplete routed experts across rollout microbatches.")
+      routed_experts = list(
+          itertools.chain.from_iterable(out.routed_experts for out in outputs)  # pyrefly: ignore[bad-argument-type]
+      )
+
     return base_rollout.RolloutOutput(
         text=texts,
         logits=logits,
@@ -932,6 +961,9 @@ class RLEngine:
         ),
         logprobs=logprobs,
         prompt_lengths=prompt_lengths,
+        topk_token_ids=topk_token_ids,
+        topk_logprobs=topk_logprobs,
+        routed_experts=routed_experts,
     )
 
   def per_token_logps(

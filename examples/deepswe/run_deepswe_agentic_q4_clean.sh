@@ -66,6 +66,11 @@ exec "$PYTHON_BIN" examples/deepswe/train_deepswe_nb.py \
   --epsilon 0.2 \
   --epsilon_high 0.28 \
   --advantage_estimator rloo \
+  --score_centering true \
+  --score_centering_top_k 32 \
+  --score_centering_eps 1e-6 \
+  --sampler_is token \
+  --sampler_is_threshold 2.0 \
   --loss_agg_mode sequence-mean-token-scale \
   --env_backend docker \
   --scaffold r2egym \

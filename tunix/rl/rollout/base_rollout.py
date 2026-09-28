@@ -66,6 +66,11 @@ class RolloutOutput:
   # Valid prompt length per row, before left padding. Optional for old backends.
   prompt_lengths: np.ndarray | None = None
 
+  # Optional per-generation top-k token IDs and log-probabilities from the
+  # sampler, each of shape `[gen_length, k]`, used for score centering.
+  topk_token_ids: list[np.ndarray] | None = None
+  topk_logprobs: list[np.ndarray] | None = None
+
 
 class BaseRollout(ABC):
   """Base RolloutWorker."""
