@@ -152,6 +152,18 @@ arg_parser.add_argument(
     help="Epsilon for Score Centering probability division.",
 )
 arg_parser.add_argument(
+    "--sampler_is", type=str, default="none", choices=["none", "token"],
+    help=(
+        "Truncated importance sampling against the rollout sampler. 'token'"
+        " weights each token's pg loss by min(p_trainer / q_sampler, threshold)"
+        " and, with Score Centering, gives the composed TIS+SC form."
+    ),
+)
+arg_parser.add_argument(
+    "--sampler_is_threshold", type=float, default=2.0,
+    help="Clip threshold for the --sampler_is token weights.",
+)
+arg_parser.add_argument(
     "--no_ckpt", action="store_true", default=False,
     help="Disable checkpoint saving.",
 )
@@ -721,6 +733,8 @@ grpo_config = GRPOConfig(
     score_centering_diagnostics=args.score_centering_diagnostics,
     score_centering_top_k=args.score_centering_top_k,
     score_centering_eps=args.score_centering_eps,
+    sampler_is=None if args.sampler_is == "none" else args.sampler_is,
+    sampler_is_threshold=args.sampler_is_threshold,
 )
 
 # Perf Metrics logging

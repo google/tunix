@@ -49,6 +49,8 @@ MODEL_DIR="${MODEL_DIR:-$BUCKET/models}"
 # Sampling / loss / LR settings follow the linchai_deepscaler branch. The actor
 # must be stored in fp32: at lr 1e-6 bf16 storage rounds ~98% of the AdamW
 # updates to zero (r4 ran with bf16 and its policy barely moved).
+# Both arms use token-level TIS (threshold 2.0), so the A/B is TIS vs TIS+SC
+# (arXiv:2609.20807 Eq. 12), as in the FrozenLake validation.
 COMMON_ARGS=(
   --batch_size 128 --mini_batch_size 128 --num_generations 8
   --train_micro_batch_size "$TRAIN_MICRO_BATCH"
@@ -58,6 +60,7 @@ COMMON_ARGS=(
   --temperature 0.6 --top_p 1.0
   --shuffle_data
   --loss_agg_mode sequence-mean-token-mean
+  --sampler_is token --sampler_is_threshold 2.0
   --score_centering_top_k 32
   --score_centering_eps 1e-6
   --rollout_devices 8 --rollout_dp 8
