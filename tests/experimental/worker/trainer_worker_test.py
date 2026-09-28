@@ -28,6 +28,8 @@ import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.experimental.train import abstract_trainer
 from tunix.experimental.worker import trainer_worker
+from tunix.rl import algo_core
+from tunix.rl import algorithm_config
 from tunix.rl import common as rl_common
 from tunix.tests import test_common as tc
 
@@ -47,7 +49,8 @@ class FakeTrainer(abstract_trainer.AbstractTrainer):
     pass
 
   def with_loss_fn(self, loss_fn, has_aux=False):
-    pass
+    self.loss_fn = loss_fn
+    self.has_aux = has_aux
 
   def with_gen_model_input_fn(self, gen_model_input_fn):
     pass
@@ -95,6 +98,69 @@ class TrainerWorkerTest(absltest.TestCase):
         worker_id="trainer_0",
     )
     self.worker.initialize()
+
+  def test_with_loss_fn_binds_logps_chunk_size(self):
+    worker = trainer_worker.TrainerWorker(
+        trainer_factory=lambda: self.fake_trainer, logps_chunk_size=2048
+    )
+    worker.with_loss_fn(lambda model, **kwargs: kwargs, has_aux=True)
+
+    self.assertTrue(self.fake_trainer.has_aux)
+    self.assertEqual(
+        self.fake_trainer.loss_fn(None, pad_id=0),
+        {"pad_id": 0, "compute_logps_chunk_size": 2048},
+    )
+
+  def test_with_loss_fn_per_call_chunk_size_wins(self):
+    worker = trainer_worker.TrainerWorker(
+        trainer_factory=lambda: self.fake_trainer, logps_chunk_size=2048
+    )
+    worker.with_loss_fn(lambda model, **kwargs: kwargs)
+
+    kwargs = self.fake_trainer.loss_fn(None, compute_logps_chunk_size=512)
+
+    self.assertEqual(kwargs["compute_logps_chunk_size"], 512)
+
+  def test_with_loss_fn_unchanged_without_chunk_size(self):
+    fn = lambda model, **kwargs: kwargs
+    self.worker.with_loss_fn(fn)
+
+    self.assertIs(self.fake_trainer.loss_fn, fn)
+
+  def test_with_loss_fn_chunked_grpo_loss_matches_unchunked(self):
+    batch, prompt_len, completion_len = 2, 3, 4
+    example = datatypes.RLTrainerPayload(
+        prompt_ids=np.arange(1, 1 + batch * prompt_len, dtype=np.int32).reshape(
+            batch, prompt_len
+        ),
+        prompt_mask=np.ones((batch, prompt_len), dtype=np.int32),
+        completion_ids=np.arange(
+            1, 1 + batch * completion_len, dtype=np.int32
+        ).reshape(batch, completion_len),
+        completion_mask=np.ones((batch, completion_len), dtype=np.int32),
+        advantages=np.array([1.0, -1.0], dtype=np.float32),
+    )
+    algo_config = algorithm_config.GRPOConfig(beta=0.0, temperature=1.0)
+
+    worker = trainer_worker.TrainerWorker(
+        trainer_factory=lambda: self.fake_trainer, logps_chunk_size=3
+    )
+    worker.with_loss_fn(algo_core.grpo_loss_fn)
+    chunked_fn = self.fake_trainer.loss_fn
+    self.assertEqual(chunked_fn.keywords, {"compute_logps_chunk_size": 3})
+
+    kwargs = dict(
+        train_example=example, algo_config=algo_config, pad_id=0, eos_id=0
+    )
+    chunked = chunked_fn(self.fake_trainer.model, **kwargs)
+    unchunked = algo_core.grpo_loss_fn(self.fake_trainer.model, **kwargs)
+
+    np.testing.assert_allclose(
+        np.asarray(chunked.primary_loss.compute()),
+        np.asarray(unchunked.primary_loss.compute()),
+        rtol=1e-5,
+        atol=1e-5,
+    )
 
   def test_fwd_bwd_with_train_request(self):
     payload = datatypes.RLTrainerPayload(
