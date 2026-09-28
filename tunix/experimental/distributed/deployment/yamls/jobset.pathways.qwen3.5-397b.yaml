@@ -275,7 +275,7 @@ ${QUEUE_LABEL}spec:
               - name: XCLOUD_ENVIRONMENT
                 value: GCP
               - name: MEGASCALE_GRPC_ENABLE_XOR_TRACER
-                value: "false"
+                value: "false"${PATHWAYS_WORKER_EXTRA_ENV}
               - name: MEGASCALE_NUM_SLICES
                 valueFrom:
                   fieldRef:
