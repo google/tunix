@@ -437,7 +437,7 @@ start_trainer() {
   fi
   local raiden_env=""
   if [[ "${WEIGHT_SYNC_MODE}" == "raiden" ]]; then
-    if [[ "${TRAINER_JOBSET_YAML}" == jobset.pathways*.yaml ]]; then
+    if [[ "${TRAINER_JOBSET_YAML}" == "jobset.pathways.yaml" ]]; then
       raiden_env+=" RAIDEN_USE_FFI=1 RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFER=${RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFER:-1}"
     fi
   fi
