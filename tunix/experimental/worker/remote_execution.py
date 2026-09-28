@@ -35,6 +35,7 @@ Security Notes / Trust Boundaries:
 
 import abc
 import asyncio
+import collections
 import contextlib
 import hashlib
 import inspect
@@ -1192,6 +1193,10 @@ class RoutingActorPool(ActorPool):
       await session.close()
 
 
+# Bound on remembered route_key placements per least-loaded session.
+_MAX_ROUTE_PLACEMENTS = 65536
+
+
 class PoolExecutionSession:
   """Dynamic, fault-isolated execution session for a RoutingActorPool.
 
@@ -1201,10 +1206,25 @@ class PoolExecutionSession:
     exceptions (`as_completed`) without terminating the stream on individual
     task
     failures.
+
+  Args:
+    pool: The pool whose actors receive the tasks.
+    least_loaded: If True, `submit` sends each task to the actor with the
+      fewest of this session's tasks in flight, instead of the pool's hash /
+      round-robin routing. A `route_key` seen before (e.g. a redispatched
+      trajectory) still goes back to the actor it went to last. Suited to
+      one-shot tasks of very uneven duration (e.g. agentic episodes), where
+      hash routing piles long tasks onto a few actors. Ignored when the pool
+      has a custom router.
   """
 
-  def __init__(self, pool: RoutingActorPool):
+  def __init__(self, pool: RoutingActorPool, *, least_loaded: bool = False):
     self._pool = pool
+    self._least_loaded = least_loaded
+    # route_key -> actor it was last placed on, for least_loaded affinity.
+    self._placements: collections.OrderedDict[Any, ActorHandle] = (
+        collections.OrderedDict()
+    )
     self._response_queue: asyncio.Queue[Any] = asyncio.Queue()
     self._active_workers: set[ActorHandle] = set()
     self._dispatched_tasks: Dict[ActorHandle, set[str]] = {}
@@ -1227,7 +1247,10 @@ class PoolExecutionSession:
     """Dispatches a task to a worker in the pool and tracks its completion."""
     if self._closed:
       raise RuntimeError("PoolExecutionSession is closed.")
-    actor = self._pool._get_next_actor(method_name, args, kwargs)
+    if self._least_loaded and self._pool.router is None:
+      actor = self._least_loaded_actor(kwargs.get("route_key"))
+    else:
+      actor = self._pool._get_next_actor(method_name, args, kwargs)
     kwargs.pop("route_key", None)  # remove route_key from worker method args
 
     # Increment in_flight and register request_id BEFORE awaiting dispatch_task
@@ -1253,6 +1276,29 @@ class PoolExecutionSession:
         self._in_flight = max(0, self._in_flight - 1)
         self._notify_if_zero_flight()
       raise
+
+  def _least_loaded_actor(self, route_key: Any = None) -> ActorHandle:
+    """Returns the pool actor with the fewest of this session's tasks in flight."""
+    actors = self._pool._actors
+    if not actors:
+      raise RuntimeError(
+          "RoutingActorPool contains no registered ActorHandles."
+      )
+    if route_key is not None:
+      placed = self._placements.get(route_key)
+      if placed is not None and placed in actors:
+        self._placements.move_to_end(route_key)
+        return placed
+    loads = [len(self._dispatched_tasks.get(a, ())) for a in actors]
+    min_load = min(loads)
+    candidates = [a for a, n in zip(actors, loads) if n == min_load]
+    actor = candidates[self._pool._idx % len(candidates)]
+    self._pool._idx += 1
+    if route_key is not None:
+      self._placements[route_key] = actor
+      if len(self._placements) > _MAX_ROUTE_PLACEMENTS:
+        self._placements.popitem(last=False)
+    return actor
 
   def _ensure_worker_polling(self, actor: ActorHandle) -> None:
     if actor in self._active_workers:
