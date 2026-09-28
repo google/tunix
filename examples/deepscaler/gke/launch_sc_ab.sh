@@ -46,18 +46,23 @@ EXTRA_TRAIN_ARGS="${EXTRA_TRAIN_ARGS:-}"
 DATA_DIR="${DATA_DIR:-$BUCKET/data}"
 MODEL_DIR="${MODEL_DIR:-$BUCKET/models}"
 
+# Sampling / loss / LR settings follow the linchai_deepscaler branch. The actor
+# must be stored in fp32: at lr 1e-6 bf16 storage rounds ~98% of the AdamW
+# updates to zero (r4 ran with bf16 and its policy barely moved).
 COMMON_ARGS=(
   --batch_size 128 --mini_batch_size 128 --num_generations 8
   --train_micro_batch_size "$TRAIN_MICRO_BATCH"
   --num_epochs 1 --seed "$SEED"
-  --learning_rate 1e-6
-  --max_prompt_length 2048 --max_response_length 8192
-  --temperature 0.8 --top_p 0.95
+  --learning_rate 1e-6 --lr_schedule constant
+  --max_prompt_length 1024 --max_response_length 8192
+  --temperature 0.6 --top_p 1.0
+  --shuffle_data
+  --loss_agg_mode sequence-mean-token-mean
   --score_centering_top_k 32
   --score_centering_eps 1e-6
   --rollout_devices 8 --rollout_dp 8
   --eval_every_n_steps 1000
-  --model_dtype bfloat16
+  --model_dtype float32
 )
 FULL_ARGS=(--num_batches 300)
 SMOKE_ARGS=(--num_batches 2)

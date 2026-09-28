@@ -176,8 +176,23 @@ arg_parser.add_argument(
     help="Compute logps micro batch size.",
 )
 arg_parser.add_argument(
-    "--model_dtype", type=str, default="bfloat16",
-    help="Model parameter dtype (bfloat16 or float32).",
+    "--model_dtype", type=str, default="float32",
+    choices=["float32", "bfloat16"],
+    help=(
+        "Storage dtype of the actor/reference parameters. Keep float32: at"
+        " lr=1e-6 the AdamW updates are far below half a bf16 ulp, so bf16"
+        " storage rounds almost every update to zero and the policy barely"
+        " moves. Compute runs in the model config dtype either way."
+    ),
+)
+arg_parser.add_argument(
+    "--lr_schedule", type=str, default="warmup_cosine",
+    choices=["warmup_cosine", "constant"],
+    help=(
+        "warmup_cosine: linear warmup over the first tenth of the steps, then"
+        " cosine decay to 0. constant: fixed learning rate (no warmup, no"
+        " decay)."
+    ),
 )
 args, _ = arg_parser.parse_known_args()
 
@@ -251,18 +266,29 @@ MAX_CONCURRENCY = args.max_concurrency
 # Max number of off-policy steps. Default to 0 for synchronous training.
 OFF_POLICY_STEPS = 0
 
+# Parameter storage dtype. Keep float32 (the upstream default): with lr=1e-6
+# an AdamW step changes a weight by ~1e-6, far below half a bf16 ulp (~5e-5 at
+# |w| ~ 0.01), so bf16 storage rounds ~98% of the updates to zero. See also
+# examples/frozenlake/train_frozenlake_qwen3.py ("Actor: storage MUST be fp32").
 MODEL_DTYPE = jnp.bfloat16 if args.model_dtype == "bfloat16" else jnp.float32
+if MODEL_DTYPE == jnp.bfloat16:
+  print(
+      "WARNING: --model_dtype bfloat16 stores the actor in bf16; at small"
+      " learning rates most optimizer updates round to zero."
+  )
 
 # === AdamW, warmup, cosine scheduler ===
 LEARNING_RATE = args.learning_rate
 B1 = args.b1  # Adam beta1
 B2 = args.b2  # Adam beta2
 WEIGHT_DECAY = args.weight_decay
-# == Cosine decay with warmup scheduler ==
-# Linearly increase learning rate from 0. to 5e-6 in the first 10% training
-# steps, and then gradually decrease the learning rate to 0 using cosine
-# scheduler.
-WARMUP_STEPS = int(0.1 * MAX_STEPS)
+# == Cosine decay with warmup scheduler (--lr_schedule warmup_cosine) ==
+# Linearly increase learning rate from 0. to LEARNING_RATE in the first 10%
+# training steps, and then gradually decrease the learning rate to 0 using
+# cosine scheduler. --lr_schedule constant keeps LEARNING_RATE fixed.
+WARMUP_STEPS = (
+    int(0.1 * MAX_STEPS) if args.lr_schedule == "warmup_cosine" else 0
+)
 # == Grad clipping ==
 # Grad clipping to prevent large gradients. Found this
 # important to keep KL divergence in check.
@@ -561,18 +587,28 @@ metrics_logging_options = metrics_logger.MetricsLoggerOptions(
 
 # %%
 # Optimizer, learning rate scheduler, gradient clipping
-optimizer = optax.adamw(
-    learning_rate=optax.schedules.warmup_cosine_decay_schedule(
-        init_value=0.0,
-        peak_value=LEARNING_RATE,
-        warmup_steps=WARMUP_STEPS,
-        decay_steps=MAX_STEPS,
-        end_value=0.0,
-    ),
-    b1=B1,
-    b2=B2,
-    weight_decay=WEIGHT_DECAY,
-)
+if args.lr_schedule == "constant":
+  # Same as the linchai_deepscaler branch: fixed LR, injected as a
+  # hyperparameter so the trainer can log it.
+  optimizer = optax.schedules.inject_hyperparams(optax.adamw)(
+      learning_rate=LEARNING_RATE,
+      b1=B1,
+      b2=B2,
+      weight_decay=WEIGHT_DECAY,
+  )
+else:
+  optimizer = optax.adamw(
+      learning_rate=optax.schedules.warmup_cosine_decay_schedule(
+          init_value=0.0,
+          peak_value=LEARNING_RATE,
+          warmup_steps=WARMUP_STEPS,
+          decay_steps=MAX_STEPS,
+          end_value=0.0,
+      ),
+      b1=B1,
+      b2=B2,
+      weight_decay=WEIGHT_DECAY,
+  )
 if MAX_GRAD_NORM is not None:
   optimizer = optax.chain(
       optax.clip_by_global_norm(max_norm=MAX_GRAD_NORM),
