@@ -438,6 +438,28 @@ class PackCoreTest(absltest.TestCase):
     self.assertEqual(row.ids.shape, (65536,))
     self.assertTrue(np.all(row.segment_ids == 1))
 
+  def test_zero_token_item_does_not_consume_max_segments_slot(self):
+    items = [
+        _item([1], [2], per_token={"returns": np.array([1.0], np.float32)}),
+        _item([3], [4], per_token={"returns": np.array([2.0], np.float32)}),
+        _item([], []),
+    ]
+    chunks = packing.pack_core(
+        items,
+        budget=8,
+        pack_size=1,
+        max_segments_per_packed_row=2,
+        segment_align_multiple=1,
+    )
+    self.assertLen(chunks, 1)
+    [[row]] = chunks
+    self.assertEqual(row.num_real_segments, 2)
+    np.testing.assert_array_equal(row.ids, [1, 2, 3, 4, 0, 0, 0, 0])
+    np.testing.assert_array_equal(row.segment_ids, [1, 1, 2, 2, 0, 0, 0, 0])
+    np.testing.assert_allclose(
+        row.per_token["returns"], [0.0, 1.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0]
+    )
+
 
 if __name__ == "__main__":
   absltest.main()

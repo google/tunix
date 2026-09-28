@@ -146,13 +146,20 @@ def carried_per_token_fields(items: Sequence[PackItem]) -> tuple[str, ...]:
   """Returns the per-token fields carried by all items in the sequence."""
   if not items:
     return ()
+  non_empty = [item for item in items if item.num_tokens > 0]
+  target_items = non_empty if non_empty else items
   carried = []
   for name in PER_TOKEN_FIELDS:
-    presented = [name in item.per_token for item in items]
+    presented = [name in item.per_token for item in target_items]
     if all(presented):
       carried.append(name)
     elif any(presented):
-      missing = [i for i, present in enumerate(presented) if not present]
+      missing = [
+          i
+          for i, item in enumerate(items)
+          if (not non_empty or item.num_tokens > 0)
+          and name not in item.per_token
+      ]
       raise ValueError(
           f"Some but not all items have per-token field {name!r} (missing at"
           f" indices {missing})."
@@ -232,6 +239,7 @@ def fill_one_chunk(
     )
   bins: list[list[PackItem]] = [[] for _ in range(pack_size)]
   loads = [0] * pack_size
+  seg_counts = [0] * pack_size
   order = sorted(
       range(len(items)), key=lambda i: items[i].num_tokens, reverse=True
   )
@@ -239,11 +247,20 @@ def fill_one_chunk(
   for i in order:
     item = items[i]
     n = item.num_tokens
+    if n == 0:
+      bins[0].append(item)
+      placed_flags[i] = True
+      continue
     for b in range(pack_size):
-      start = align_offset(loads[b], segment_align_multiple) if bins[b] else 0
-      if start + n <= budget and len(bins[b]) < max_segments:
+      start = (
+          align_offset(loads[b], segment_align_multiple)
+          if seg_counts[b] > 0
+          else 0
+      )
+      if start + n <= budget and seg_counts[b] < max_segments:
         bins[b].append(item)
         loads[b] = start + n
+        seg_counts[b] += 1
         placed_flags[i] = True
         break
   leftover = [items[i] for i in range(len(items)) if not placed_flags[i]]
@@ -301,12 +318,17 @@ def pack_bin(
   routed = unset_routed()
 
   cursor = 0
-  for seg, item in enumerate(bin_items, start=1):
-    if seg > 1:
-      cursor = align_offset(cursor, segment_align_multiple)
+  num_real_segments = 0
+  for item in bin_items:
     p = item.prompt_ids.shape[0]
     c = item.completion_ids.shape[0]
     n = p + c
+    if n == 0:
+      continue
+    num_real_segments += 1
+    seg = num_real_segments
+    if seg > 1:
+      cursor = align_offset(cursor, segment_align_multiple)
     if cursor + n > budget:
       raise ValueError(
           f"pack_bin: bin size {cursor + n} exceeds budget {budget}."
@@ -322,7 +344,8 @@ def pack_bin(
     completion_mask[comp] = item.completion_mask
     advantages[comp] = item.advantages
     for name in carried:
-      per_token[name][comp] = item.per_token[name]
+      if name in item.per_token:
+        per_token[name][comp] = item.per_token[name]
     if routed is not None and item.routed_experts is not None:
       # Same `seq` slice as `ids`: routing is sequence-aligned, so a token's
       # captured experts land on exactly the position the token itself does.
@@ -338,7 +361,7 @@ def pack_bin(
       segment_positions=segment_positions,
       per_token=per_token,
       policy_version=bin_items[0].policy_version,
-      num_real_segments=len(bin_items),
+      num_real_segments=num_real_segments,
       routed_experts=routed,
   )
 

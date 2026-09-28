@@ -2149,6 +2149,52 @@ class CreateBatchAssemblerTest(absltest.TestCase):
     # Remaining 2 tokens of packed row are padded with -1
     np.testing.assert_array_equal(packed_re[0, 6:8], -1)
 
+  def test_zero_token_failed_payload_does_not_spill_or_warn_router_replay(self):
+    assembler = batch_assembly.SequencePackedBatchAssembler(
+        batch_size=1,
+        num_generations=3,
+        mini_batch_size=1,
+        max_packed_len=8,
+        pad_id=0,
+        max_segments_per_packed_row=2,
+        segment_align_multiple=1,
+    )
+    re1 = np.array([[[1, 2], [3, 4]], [[5, 6], [7, 8]]], dtype=np.int16)
+    p1 = datatypes.RLTrainerPayload(
+        prompt_ids=np.array([10], dtype=np.int32),
+        prompt_mask=np.array([1.0], dtype=np.float32),
+        completion_ids=np.array([11, 12], dtype=np.int32),
+        completion_mask=np.array([1.0, 1.0], dtype=np.float32),
+        advantages=np.array([1.0, 1.0], dtype=np.float32),
+        routed_experts=re1,
+        metadata={"traj_id": "t1"},
+    )
+    p2 = datatypes.RLTrainerPayload(
+        prompt_ids=np.array([20], dtype=np.int32),
+        prompt_mask=np.array([1.0], dtype=np.float32),
+        completion_ids=np.array([21, 22], dtype=np.int32),
+        completion_mask=np.array([1.0, 1.0], dtype=np.float32),
+        advantages=np.array([-1.0, -1.0], dtype=np.float32),
+        routed_experts=re1,
+        metadata={"traj_id": "t2"},
+    )
+    p_failed = datatypes.RLTrainerPayload(
+        prompt_ids=np.zeros(0, dtype=np.int32),
+        prompt_mask=np.zeros(0, dtype=np.float32),
+        completion_ids=np.zeros(0, dtype=np.int32),
+        completion_mask=np.zeros(0, dtype=np.float32),
+        advantages=np.zeros(0, dtype=np.float32),
+        routed_experts=None,
+        metadata={"traj_id": "t_failed"},
+    )
+    with self.assertNoLogs(level="WARNING"):
+      batches = assembler.feed([p1, p2, p_failed])
+    self.assertLen(batches, 1)
+    self.assertTrue(batches[0].is_final_batch)
+    np.testing.assert_array_equal(
+        batches[0].payload.segment_ids[0], [1, 1, 1, 2, 2, 2, 0, 0]
+    )
+
 
 if __name__ == "__main__":
   absltest.main()

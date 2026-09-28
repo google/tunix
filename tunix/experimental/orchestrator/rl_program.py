@@ -1510,7 +1510,12 @@ class StandardRLProgram(RLProgram):
           for item in scored_items:
             step_rewards.append(_extract_reward(item))
             payload = getattr(item, "payload", None)
-            if payload is not None and payload.advantages is not None:
+            if (
+                item.is_valid
+                and payload is not None
+                and payload.advantages is not None
+                and np.asarray(payload.advantages).size > 0
+            ):
               step_advantages.append(float(np.mean(payload.advantages)))
 
           payloads = []
