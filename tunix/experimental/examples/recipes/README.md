@@ -95,14 +95,13 @@ bash tunix/experimental/examples/recipes/mlperf_35b_128_v5p.sh stop
 
 ---
 
-## Pathways Images & Rebuild Guide
+## Raiden wheel and pathways images
 
-For recipes using Pathways (`pathways-worker` and `pathways-proxy`) with Raiden weight synchronization:
-
-```bash
-export PATHWAYS_SERVER_IMAGE="us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_server:raiden_20260923"
-export PATHWAYS_PROXY_IMAGE="us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_proxy_server:raiden_20260923"
+Latest tested raiden wheel:
 ```
+export RAIDEN_WHL=https://storage.googleapis.com/tunix-ci-artifacts/raiden/tpu_sync_jax-0.0.1.dev20260926082434-cp312-cp312-manylinux_2_31_x86_64.whl`
+```
+pathways images are defined in tunix/experimental/examples/recipes/mlperf_pathways_config.sh
 
 ### When to Rebuild: Pathways Images vs. Python Wheels
 
