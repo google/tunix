@@ -623,7 +623,31 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     # Log trajectory.
     if self._trajectory_logger and trajectories_to_log:
       for traj in trajectories_to_log:
-        self._trajectory_logger.log_item_async(traj)
+        # Full top-k arrays are needed by the loss, but serializing them (and
+        # the conversation token arrays) makes the CSV hundreds of MB per
+        # batch at 20K context. Keep only compact audit fields in the logger.
+        topk_ids = traj.get("old_topk_token_ids")
+        masks = traj.get("conversation_masks")
+        tokens = traj.get("conversation_tokens")
+        self._trajectory_logger.log_item_async({
+            "group_id": traj.get("group_id"),
+            "policy_version": traj.get("policy_version"),
+            "status": traj.get("status"),
+            "trajectory_reward": traj.get("trajectory_reward"),
+            "env_time": traj.get("env_time"),
+            "reward_time": traj.get("reward_time"),
+            "original_input": traj.get("original_input"),
+            "prompt_length": traj.get("prompt_length"),
+            "completion_length": len(tokens) if tokens is not None else 0,
+            "trainable_token_count": (
+                int(np.sum(masks)) if masks is not None else 0
+            ),
+            "score_centering_top_k": (
+                int(np.asarray(topk_ids).shape[-1])
+                if topk_ids is not None
+                else 0
+            ),
+        })
 
     # Pad all prompts and completions to consistent lengths.
     rollout_config = self.rl_engine.cluster_config.rollout_config
