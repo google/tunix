@@ -307,6 +307,21 @@ class TestRLVllmSamplerWeightSync(unittest.TestCase):
             self.assertEqual(await sampler.get_transfer_status("transfer_99"),
                              "SUCCESS")
 
+            # Normal warm round: no finish_weight_update needed before start.
+            mock_call_worker_method.reset_mock()
+            await sampler.pre_weight_sync(req_pre, free_kv_cache=True)
+            mock_call_worker_method.assert_called_once_with(
+                "start_weight_update", free_kv_cache=True)
+
+            # Simulate an aborted round (no post_weight_sync called): next
+            # pre_weight_sync closes the stale session before starting a new one.
+            mock_call_worker_method.reset_mock()
+            await sampler.pre_weight_sync(req_pre, free_kv_cache=False)
+            self.assertEqual(
+                [c.args[0] for c in mock_call_worker_method.call_args_list],
+                ["finish_weight_update", "start_weight_update"],
+            )
+
         asyncio.run(run_sync_test())
 
     def test_get_weight_sync_metadata(self):

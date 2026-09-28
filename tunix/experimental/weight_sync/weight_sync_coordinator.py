@@ -708,6 +708,10 @@ class WeightSyncCoordinator:
     self._in_flight = False
     self._poisoned: Optional[str] = None
     self._last_committed_version: Optional[int] = None
+    self._registered_units: dict[
+        weight_sync.WorkUnitId, weight_sync.WorkUnitMetadata
+    ] = {}
+    self._validated_manifests_sig: Optional[tuple[Any, Any]] = None
 
   @property
   def round_index(self) -> int:
@@ -731,6 +735,8 @@ class WeightSyncCoordinator:
     """
     logging.warning("coordinator poison cleared: %s", self._poisoned)
     self._poisoned = None
+    self._registered_units.clear()
+    self._validated_manifests_sig = None
 
   # ---------------------------------------------------------------- lookup
 
@@ -1119,7 +1125,22 @@ class WeightSyncCoordinator:
       # the controller pairs variables by exact name and silently skips
       # mismatches, so a bad wire name or shape must stop the round HERE --
       # afterwards it degrades into a lost tensor under a green round.
-      preflight_problems = _manifest_mismatches(src_metadata, dst_metadata)
+      current_manifest_sig = (
+          tuple(
+              (m.unit.data_name, m.global_shape, m.item_size, m.variables)
+              for m in src_metadata
+          ),
+          tuple(
+              (m.unit.data_name, m.global_shape, m.item_size, m.variables)
+              for m in dst_metadata
+          ),
+      )
+      if current_manifest_sig == self._validated_manifests_sig:
+        preflight_problems = []
+      else:
+        preflight_problems = _manifest_mismatches(src_metadata, dst_metadata)
+        if not preflight_problems:
+          self._validated_manifests_sig = current_manifest_sig
       if preflight_problems:
         failures.extend(preflight_problems)
         src_names = []
@@ -1164,58 +1185,65 @@ class WeightSyncCoordinator:
       # fresh ports/layout with this round's stale ones. On cancel, every
       # registration is awaited to completion before the cancellation
       # propagates.
-      registration_metadata = (*src_metadata, *dst_metadata)
-      registration_gather = asyncio.gather(
-          *[
-              loop.run_in_executor(
-                  None, self._handler.register_work_unit, metadata
-              )
-              for metadata in registration_metadata
-          ],
-          return_exceptions=True,
+      all_metadata = (*src_metadata, *dst_metadata)
+      registration_metadata = tuple(
+          m for m in all_metadata if self._registered_units.get(m.unit) != m
       )
-      try:
-        registrations = await asyncio.shield(registration_gather)
-      except asyncio.CancelledError:
-        await registration_gather
-        raise
-      registration_errors: list[BaseException] = []
-      for metadata, result_or_error in zip(
-          registration_metadata, registrations
-      ):
-        if isinstance(result_or_error, asyncio.CancelledError):
-          raise result_or_error  # cancellation is never a phase failure
-        if isinstance(result_or_error, BaseException):
-          registration_errors.append(result_or_error)
-          # `WeightSyncError` carries these failures structurally, but an
-          # uncaught exception renderer normally prints only its outer
-          # message. Log the unit and original traceback here so a production
-          # registration failure remains diagnosable.
-          logging.error(
-              "work-unit registration failed: unit=%s shards=%r control=%s"
-              " mesh_shape=%s layout=%s global_shape=%s item_size=%s"
-              " variables=%d error=%r",
-              metadata.unit,
-              metadata.shards,
-              metadata.control_plane_rpc_address,
-              metadata.mesh_shape,
-              metadata.layout,
-              metadata.global_shape,
-              metadata.item_size,
-              len(metadata.variables),
-              result_or_error,
-              exc_info=(
-                  type(result_or_error),
-                  result_or_error,
-                  result_or_error.__traceback__,
-              ),
-          )
-      if registration_errors:
-        failures.extend(f"registration: {e!r}" for e in registration_errors)
-        raise fail(
-            "work-unit registration failed before any destination was"
-            " quiesced; no rollback needed"
+      if registration_metadata:
+        registration_gather = asyncio.gather(
+            *[
+                loop.run_in_executor(
+                    None, self._handler.register_work_unit, metadata
+                )
+                for metadata in registration_metadata
+            ],
+            return_exceptions=True,
         )
+        try:
+          registrations = await asyncio.shield(registration_gather)
+        except asyncio.CancelledError:
+          await registration_gather
+          raise
+        registration_errors: list[BaseException] = []
+        for metadata, result_or_error in zip(
+            registration_metadata, registrations
+        ):
+          if isinstance(result_or_error, asyncio.CancelledError):
+            raise result_or_error  # cancellation is never a phase failure
+          if isinstance(result_or_error, BaseException):
+            registration_errors.append(result_or_error)
+            # `WeightSyncError` carries these failures structurally, but an
+            # uncaught exception renderer normally prints only its outer
+            # message. Log the unit and original traceback here so a production
+            # registration failure remains diagnosable.
+            logging.error(
+                "work-unit registration failed: unit=%s shards=%r control=%s"
+                " mesh_shape=%s layout=%s global_shape=%s item_size=%s"
+                " variables=%d error=%r",
+                metadata.unit,
+                metadata.shards,
+                metadata.control_plane_rpc_address,
+                metadata.mesh_shape,
+                metadata.layout,
+                metadata.global_shape,
+                metadata.item_size,
+                len(metadata.variables),
+                result_or_error,
+                exc_info=(
+                    type(result_or_error),
+                    result_or_error,
+                    result_or_error.__traceback__,
+                ),
+            )
+        if registration_errors:
+          self._registered_units.clear()
+          failures.extend(f"registration: {e!r}" for e in registration_errors)
+          raise fail(
+              "work-unit registration failed before any destination was"
+              " quiesced; no rollback needed"
+          )
+        for metadata in registration_metadata:
+          self._registered_units[metadata.unit] = metadata
 
       prepared_request = self.build_request(
           policy_version,
@@ -1509,6 +1537,8 @@ class WeightSyncCoordinator:
             state = RoundState.ABORTED
       raise
     finally:
+      if state is not RoundState.COMMITTED:
+        self._registered_units.clear()
       if release_source:
         t_rel_start = time.monotonic()
         release_request = prepared_request or request

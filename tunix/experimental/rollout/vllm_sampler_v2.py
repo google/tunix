@@ -86,6 +86,7 @@ class RLVllmSampler:
     self._mesh: Any | None = None
     self._transfer_statuses: dict[str, str] = {}
     self._policy_version = 0
+    self._weight_update_active = False
     self._log_stats_task: asyncio.Task | None = None
 
   def _get_tpu_workers(self) -> list[Any]:
@@ -599,12 +600,15 @@ class RLVllmSampler:
     await self.pause()
     await self._clear_prefix_cache()
 
-    # Ensure any stale weight update session from an aborted round is closed
-    # before opening a new weight update session.
-    try:
-      await self._call_worker_method("finish_weight_update")
-    except Exception:
-      pass
+    if self._weight_update_active:
+      # Ensure any stale weight update session from an aborted round is closed
+      # before opening a new weight update session.
+      try:
+        await self._call_worker_method("finish_weight_update")
+      except Exception:  # pylint: disable=broad-exception-caught
+        pass
+      self._weight_update_active = False
+    self._weight_update_active = True
     await self._call_worker_method("start_weight_update",
                                        free_kv_cache=free_kv_cache)
 
@@ -631,6 +635,7 @@ class RLVllmSampler:
     logger.info("Executing post_weight_sync (req_id=%s)...", rid)
 
     await self._call_worker_method("finish_weight_update")
+    self._weight_update_active = False
 
     self._cache_valid = True
     if rid:

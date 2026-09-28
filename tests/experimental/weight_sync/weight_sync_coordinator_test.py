@@ -1846,6 +1846,19 @@ class SourcePrepareTimeoutTest(CoordinatorTestBase):
     # prepare for the same round.
     self.assertEqual(slow_source.release_calls, 1)
 
+  def test_unchanged_work_unit_metadata_skips_redundant_registration(self):
+    dest = FakeDestination("sampler", [])
+    self.make(dest)
+
+    self.sync(policy_version=1)
+    self.sync(policy_version=2)
+
+    sampler_regs = [
+        m for m in self.handler.registered if m.unit.job_name == "sampler"
+    ]
+    # Unchanged destination metadata is registered only once across warm rounds.
+    self.assertLen(sampler_regs, 1)
+
 
 class PhaseTimeoutsEnvTest(absltest.TestCase):
 
