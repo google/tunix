@@ -39,14 +39,26 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --namespace|-n)
+      if [[ $# -lt 2 ]]; then
+        echo "Error: --namespace requires an argument" >&2
+        exit 1
+      fi
       NAMESPACE="$2"
       shift 2
       ;;
     --nodepool|--node-pool|-p)
+      if [[ $# -lt 2 ]]; then
+        echo "Error: --nodepool requires an argument" >&2
+        exit 1
+      fi
       NODEPOOL="$2"
       shift 2
       ;;
     --parallelism)
+      if [[ $# -lt 2 ]]; then
+        echo "Error: --parallelism requires an argument" >&2
+        exit 1
+      fi
       PARALLELISM="$2"
       shift 2
       ;;
@@ -168,7 +180,7 @@ fi
 # ------------------------------------------------------------------------------
 echo "==> 4. Inspecting dead/inactive sandbox pods..."
 
-DEAD_PODS_JSON=$(kubectl get pods -n "${NAMESPACE}" -l "app=agent-sandbox-rl" --no-headers 2>/dev/null | \
+DEAD_PODS_JSON=$(kubectl get pods -n "${NAMESPACE}" -l "app=agent-sandbox-rl" -o wide --no-headers 2>/dev/null | \
   awk '$3 ~ /Error|Failed|ContainerStatusUnknown|CrashLoop/ {print $1 "\t" $7}' || true)
 
 DEAD_PODS=()
@@ -297,7 +309,7 @@ fi
 # ------------------------------------------------------------------------------
 echo "==> 8. Checking for orphaned running sandbox pods..."
 
-RUNNING_PODS_JSON=$(kubectl get pods -n "${NAMESPACE}" -l "app=agent-sandbox-rl" --no-headers 2>/dev/null | \
+RUNNING_PODS_JSON=$(kubectl get pods -n "${NAMESPACE}" -l "app=agent-sandbox-rl" -o wide --no-headers 2>/dev/null | \
   awk '$3 == "Running" {print $1 "\t" $7}' || true)
 
 ORPHAN_RUNNING_PODS=()
