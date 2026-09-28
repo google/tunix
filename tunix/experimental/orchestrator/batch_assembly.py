@@ -543,16 +543,17 @@ class SequencePackedBatchAssembler:
     placed = []
     for bin_items in bins:
       placed.extend(bin_items)
+    real_placed = [item for item in placed if item.num_tokens > 0]
     traj_ids = tuple(id_to_entry[id(item)][1] for item in placed)
     placed_items = [id_to_entry[id(item)][2] for item in placed]
-    routed_shape = packing.routed_experts_shape(placed)
-    num_unrouted = sum(item.routed_experts is None for item in placed)
+    routed_shape = packing.routed_experts_shape(real_placed)
+    num_unrouted = sum(item.routed_experts is None for item in real_placed)
     if routed_shape is not None and num_unrouted:
       logging.warning(
           "Router replay: %d of %d packed trajectories carry no"
           " routed_experts; their tokens use the trainer's own gate.",
           num_unrouted,
-          len(placed),
+          len(real_placed),
       )
     rows = packing.pack_chunk(
         bins,
@@ -596,7 +597,7 @@ class SequencePackedBatchAssembler:
           int(np.count_nonzero(forced & real)),
           int(np.count_nonzero(real)),
           batch_tracking_id,
-          len(placed),
+          len(real_placed),
       )
     self._buffer = [id_to_entry[id(item)] for item in leftover]
     return AssembledBatch(

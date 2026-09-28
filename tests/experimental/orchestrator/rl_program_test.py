@@ -236,6 +236,7 @@ class RLProgramTest(absltest.TestCase):
         num_generations=2,
         mini_batch_size=4,
         max_packed_len=16,
+        segment_align_multiple=1,
     )
 
   def tearDown(self):
@@ -2084,6 +2085,7 @@ class RLProgramTest(absltest.TestCase):
           num_generations=2,
           mini_batch_size=2,
           max_packed_len=8,
+          segment_align_multiple=1,
       )
       program = self._create_program(dataset=["p0", "p1"], assembler=assembler)
 
@@ -2116,6 +2118,7 @@ class RLProgramTest(absltest.TestCase):
           num_generations=2,
           mini_batch_size=2,
           max_packed_len=8,
+          segment_align_multiple=1,
       )
       program = self._create_program(dataset=["p0", "p1"], assembler=assembler)
 
@@ -4038,6 +4041,84 @@ class RLProgramTest(absltest.TestCase):
       )
       self.assertAlmostEqual(
           logger.get_metric("", "rewards/mean", "train"), 1.0
+      )
+      program.close()
+
+    asyncio.run(_run())
+
+  def test_train_stage_excludes_invalid_and_empty_advantages_from_metrics(self):
+    async def _run():
+      self.mock_algo.num_generations = 3
+      self.mock_algo.mini_batch_size = 1
+      assembler = batch_assembly.SequencePackedBatchAssembler(
+          batch_size=1,
+          num_generations=3,
+          mini_batch_size=1,
+          max_packed_len=16,
+      )
+      program = self._create_program(assembler=assembler)
+      program.engine = self.mock_engine
+
+      valid_pos = self._scoring_item(0)
+      valid_pos.traj["trajectory_reward"] = 1.0
+      valid_pos.payload = datatypes.RLTrainerPayload(
+          prompt_ids=np.array([1, 2], dtype=np.int32),
+          prompt_mask=np.ones(2, dtype=np.float32),
+          completion_ids=np.array([3, 4], dtype=np.int32),
+          completion_mask=np.ones(2, dtype=np.float32),
+          advantages=np.array([0.75, 0.75], dtype=np.float32),
+      )
+
+      valid_neg = self._scoring_item(1)
+      valid_neg.traj["trajectory_reward"] = 0.0
+      valid_neg.payload = datatypes.RLTrainerPayload(
+          prompt_ids=np.array([1, 2], dtype=np.int32),
+          prompt_mask=np.ones(2, dtype=np.float32),
+          completion_ids=np.array([5, 6], dtype=np.int32),
+          completion_mask=np.ones(2, dtype=np.float32),
+          advantages=np.array([-0.75, -0.75], dtype=np.float32),
+      )
+
+      # Failed rollout RPC with 0 tokens and empty advantages array.
+      failed_empty = datatypes.TrajectoryItem(
+          prompt_id="p0",
+          group_index=2,
+          start_step=0,
+          traj={
+              "status": datatypes.TrajectoryStatus.FAILED,
+              "trajectory_reward": 0.0,
+              "prompt_tokens": np.zeros(0, dtype=np.int32),
+              "conversation_tokens": np.zeros(0, dtype=np.int32),
+              "conversation_masks": np.zeros(0, dtype=np.int32),
+          },
+      )
+      failed_empty.payload = datatypes.RLTrainerPayload(
+          prompt_ids=np.zeros(0, dtype=np.int32),
+          prompt_mask=np.zeros(0, dtype=np.float32),
+          completion_ids=np.zeros(0, dtype=np.int32),
+          completion_mask=np.zeros(0, dtype=np.float32),
+          advantages=np.zeros(0, dtype=np.float32),
+      )
+
+      for item in (valid_pos, valid_neg, failed_empty):
+        await program.scored_q.put(item)
+      await program.scored_q.close()
+
+      await program.train_stage()
+
+      logger = program.metrics_logger
+      self.assertFalse(np.isnan(program.last_step_result.advantage_mean))
+      self.assertFalse(np.isnan(program.last_step_result.advantage_std))
+      self.assertAlmostEqual(
+          program.last_step_result.advantage_mean, 0.0, places=5
+      )
+      self.assertAlmostEqual(
+          program.last_step_result.advantage_std, 0.75, places=5
+      )
+      self.assertAlmostEqual(
+          logger.get_metric("", "rewards/advantage/abs_mean", "train"),
+          0.75,
+          places=5,
       )
       program.close()
 
