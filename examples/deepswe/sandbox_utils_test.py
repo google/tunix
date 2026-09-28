@@ -48,6 +48,52 @@ class FakeFleet:
     self.active_pools.clear()
 
 
+class _FakePlanEntry:
+
+  def __init__(self, cluster, image, template, pool, replicas, tasks):
+    self.cluster = cluster
+    self.image = image
+    self.template = template
+    self.pool = pool
+    self.replicas = replicas
+    self.tasks = tasks
+
+
+class _FakeFleetPlan:
+
+  def __init__(self, entries):
+    self.entries = list(entries)
+    self._by_image = {e.image: e for e in self.entries}
+
+  def for_image(self, image):
+    return self._by_image.get(image)
+
+
+def _fake_as_rl():
+  mod = mock.MagicMock()
+  mod.FleetPlan = _FakeFleetPlan
+  mod.PlanEntry = _FakePlanEntry
+  return mod
+
+
+def _claim_only_fleet(existing_pools):
+  cluster = mock.MagicMock()
+  cluster.name = "c0"
+  cluster.resources.get_warmpool.side_effect = (
+      lambda pool: {"metadata": {"name": pool}}
+      if pool in existing_pools
+      else None
+  )
+  fleet = mock.MagicMock()
+  fleet._tunix_claim_only = True
+  fleet._tunix_claim_lock = sandbox_utils.threading.Lock()
+  fleet.plan_ = None
+  fleet.registry = [cluster]
+  fleet.config.pool_name.side_effect = lambda img: f"pool-t-{img}"
+  fleet.config.template_name.side_effect = lambda img: f"t-{img}"
+  return fleet, cluster
+
+
 class SandboxUtilsTest(absltest.TestCase):
 
   def test_two_queue_batch_prewarming(self):
@@ -71,7 +117,8 @@ class SandboxUtilsTest(absltest.TestCase):
     # Dict maintains samples of both queues:
     # img_A: 2 (8 reps), img_B: 2 (8 reps).
     # Fleet warms both with wait=True (synchronous initial priming barrier).
-    self.assertEqual(
+    # Blocking warms run concurrently, so the call order is not fixed.
+    self.assertCountEqual(
         fleet.warm_calls, [("img_A", 8, True), ("img_B", 8, True)]
     )
     self.assertEqual(fleet.active_pools, {"img_A": 8, "img_B": 8})
@@ -451,6 +498,198 @@ class SandboxUtilsTest(absltest.TestCase):
             namespace="test-ns",
             delete_pods=False,
         )
+
+
+  # --- SANDBOX_TOLERATIONS parsing -------------------------------------- #
+
+  def test_parse_tolerations_json(self):
+    raw = (
+        '[{"key":"workload","operator":"Equal","value":"sandbox",'
+        '"effect":"NoSchedule"}]'
+    )
+    self.assertEqual(
+        sandbox_utils.parse_tolerations(raw),
+        [{
+            "key": "workload",
+            "operator": "Equal",
+            "value": "sandbox",
+            "effect": "NoSchedule",
+        }],
+    )
+
+  def test_parse_tolerations_quote_stripped_shell_form(self):
+    # What `SANDBOX_TOLERATIONS=\"${SANDBOX_TOLERATIONS}\"` inside a
+    # double-quoted startup command delivered in mk-7x-0927d.
+    raw = "[{key:workload,operator:Equal,value:sandbox,effect:NoSchedule}]"
+    self.assertEqual(
+        sandbox_utils.parse_tolerations(raw),
+        [{
+            "key": "workload",
+            "operator": "Equal",
+            "value": "sandbox",
+            "effect": "NoSchedule",
+        }],
+    )
+
+  def test_parse_tolerations_python_literal_and_wrapped(self):
+    self.assertEqual(
+        sandbox_utils.parse_tolerations("{'key': 'a', 'operator': 'Exists'}"),
+        [{"key": "a", "operator": "Exists"}],
+    )
+    self.assertEqual(
+        sandbox_utils.parse_tolerations("'[{\"key\":\"a\"}]'"),
+        [{"key": "a"}],
+    )
+
+  def test_parse_tolerations_empty_and_invalid(self):
+    self.assertIsNone(sandbox_utils.parse_tolerations(None))
+    self.assertIsNone(sandbox_utils.parse_tolerations("  "))
+    self.assertIsNone(sandbox_utils.parse_tolerations("''"))
+    with self.assertRaises(ValueError):
+      sandbox_utils.parse_tolerations("[{key: }")
+    with self.assertRaises(ValueError):
+      sandbox_utils.parse_tolerations('["a", "b"]')
+
+  # --- claim-only rollout fleets ---------------------------------------- #
+
+  def test_init_global_fleet_claim_only_skips_plan_and_preflight(self):
+    mock_fleet = mock.MagicMock()
+    mock_as_rl = mock.MagicMock()
+    mock_as_rl.SandboxFleet.return_value = mock_fleet
+    with mock.patch.dict("sys.modules", {"agent_sandbox_rl": mock_as_rl}):
+      with mock.patch.object(sandbox_utils, "_GLOBAL_FLEET", None):
+        fleet = sandbox_utils.init_global_fleet(
+            tasks=None, num_generations=16, claim_only=True
+        )
+        self.assertIs(fleet, mock_fleet)
+        self.assertIs(fleet._tunix_claim_only, True)
+        mock_fleet.plan.assert_not_called()
+        mock_fleet.preflight.assert_not_called()
+        mock_fleet.load_tasks.assert_not_called()
+        mock_fleet.warm_images.assert_not_called()
+
+  def test_init_global_fleet_ready_timeout_env(self):
+    mock_as_rl = mock.MagicMock()
+    with mock.patch.dict("sys.modules", {"agent_sandbox_rl": mock_as_rl}):
+      with mock.patch.dict(os.environ, {"SANDBOX_READY_TIMEOUT": "1200"}):
+        with mock.patch.object(sandbox_utils, "_GLOBAL_FLEET", None):
+          sandbox_utils.init_global_fleet(tasks=None, num_generations=4)
+          self.assertEqual(
+              mock_as_rl.FleetConfig.call_args[1].get("ready_timeout"), 1200
+          )
+
+  def test_ensure_claimable_registers_existing_pool(self):
+    fleet, _ = _claim_only_fleet({"pool-t-img_A"})
+    with mock.patch.dict("sys.modules", {"agent_sandbox_rl": _fake_as_rl()}):
+      self.assertTrue(
+          sandbox_utils.ensure_claimable(fleet, "img_A", wait_secs=0)
+      )
+      # Idempotent: a second call reuses the entry.
+      self.assertTrue(
+          sandbox_utils.ensure_claimable(fleet, "img_A", wait_secs=0)
+      )
+    entry = fleet.plan_.for_image("img_A")
+    self.assertIsNotNone(entry)
+    self.assertLen(fleet.plan_.entries, 1)
+    self.assertEqual(entry.pool, "pool-t-img_A")
+    self.assertEqual(entry.template, "t-img_A")
+    self.assertEqual(entry.cluster, "c0")
+    self.assertEqual(entry.replicas, 0)
+
+  def test_ensure_claimable_missing_pool_falls_back(self):
+    fleet, cluster = _claim_only_fleet(set())
+    with mock.patch.dict("sys.modules", {"agent_sandbox_rl": _fake_as_rl()}):
+      self.assertFalse(
+          sandbox_utils.ensure_claimable(fleet, "img_B", wait_secs=0)
+      )
+    self.assertIsNone(fleet.plan_.for_image("img_B"))
+    cluster.resources.get_warmpool.assert_called_with("pool-t-img_B")
+    cluster.resources.ensure_template.assert_not_called()
+    cluster.resources.create_warmpool.assert_not_called()
+
+  def test_ensure_claimable_waits_for_pool(self):
+    fleet, cluster = _claim_only_fleet(set())
+    calls = {"n": 0}
+
+    def get_warmpool(pool):
+      calls["n"] += 1
+      return {"metadata": {"name": pool}} if calls["n"] >= 3 else None
+
+    cluster.resources.get_warmpool.side_effect = get_warmpool
+    with mock.patch.dict("sys.modules", {"agent_sandbox_rl": _fake_as_rl()}):
+      with mock.patch.object(sandbox_utils, "_CLAIM_POOL_POLL_SECS", 0.0):
+        self.assertTrue(
+            sandbox_utils.ensure_claimable(fleet, "img_C", wait_secs=30)
+        )
+    self.assertEqual(calls["n"], 3)
+
+  def test_ensure_claimable_noop_for_regular_fleets(self):
+    self.assertFalse(sandbox_utils.ensure_claimable(FakeFleet(), "img_A"))
+    magic = mock.MagicMock()
+    self.assertFalse(sandbox_utils.ensure_claimable(magic, "img_A"))
+    magic.config.pool_name.assert_not_called()
+
+  # --- warm window sizing ------------------------------------------------ #
+
+  def test_warm_parallelism_env_default(self):
+    with mock.patch.dict(os.environ, {"SANDBOX_WARM_PARALLELISM": "3"}):
+      iterator = sandbox_utils.PrewarmDatasetIterator(
+          [], fleet=FakeFleet(), num_generations=4, batch_size=1
+      )
+    self.assertEqual(iterator.warm_parallelism, 3)
+
+  def test_initial_warm_runs_in_parallel(self):
+    barrier = sandbox_utils.threading.Barrier(4, timeout=10)
+
+    class BarrierFleet(FakeFleet):
+
+      def warm_image(self, image, replicas_override=None, wait=False):
+        if wait:
+          barrier.wait()  # Deadlocks (BrokenBarrierError) if run serially.
+        super().warm_image(image, replicas_override, wait)
+
+    fleet = BarrierFleet()
+    dataset = [
+        {"prompt": f"p{i}", "docker_image": f"img_{i}"} for i in range(4)
+    ]
+    sandbox_utils.PrewarmDatasetIterator(
+        dataset,
+        fleet=fleet,
+        num_generations=2,
+        batch_size=2,
+        warm_parallelism=4,
+    )
+    self.assertCountEqual(
+        fleet.active_pools, ["img_0", "img_1", "img_2", "img_3"]
+    )
+
+  def test_failed_initial_warm_is_retried_next_shift(self):
+
+    class FlakyFleet(FakeFleet):
+
+      def __init__(self):
+        super().__init__()
+        self.failed = False
+
+      def warm_image(self, image, replicas_override=None, wait=False):
+        if image == "img_B" and not self.failed:
+          self.failed = True
+          raise RuntimeError("boom")
+        super().warm_image(image, replicas_override, wait)
+
+    fleet = FlakyFleet()
+    dataset = [
+        {"prompt": "p0", "docker_image": "img_A"},
+        {"prompt": "p1", "docker_image": "img_B"},
+        {"prompt": "p2", "docker_image": "img_C"},
+    ]
+    iterator = sandbox_utils.PrewarmDatasetIterator(
+        dataset, fleet=fleet, num_generations=2, batch_size=1
+    )
+    self.assertNotIn("img_B", fleet.active_pools)
+    next(iterator)
+    next(iterator)  # Shift: the window is reconciled again and img_B warmed.
+    self.assertIn("img_B", fleet.active_pools)
 
 
 if __name__ == "__main__":

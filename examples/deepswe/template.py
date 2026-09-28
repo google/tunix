@@ -528,14 +528,19 @@ def get_openhands_pod_template(
 
   tolerations_raw = os.getenv("SANDBOX_TOLERATIONS")
   if tolerations_raw:
+    from examples.deepswe import sandbox_utils  # pylint: disable=g-import-not-at-top
+
     try:
-      extra_pod_spec["tolerations"] = json.loads(tolerations_raw)
-    except Exception:
-      try:
-        import ast  # pylint: disable=g-import-not-at-top
-        extra_pod_spec["tolerations"] = ast.literal_eval(tolerations_raw)
-      except Exception as e:
-        logging.warning("Failed to parse SANDBOX_TOLERATIONS: %s", e)
+      tolerations = sandbox_utils.parse_tolerations(tolerations_raw)
+      if tolerations:
+        extra_pod_spec["tolerations"] = tolerations
+    except ValueError as e:
+      logging.warning(
+          "Failed to parse SANDBOX_TOLERATIONS (expected a JSON list, e.g."
+          ' \'[{"key":"workload","operator":"Equal","value":"sandbox",'
+          '"effect":"NoSchedule"}]\'): %s',
+          e,
+      )
 
   if "tolerations" not in extra_pod_spec and node_selector and node_selector.get("cloud.google.com/gke-nodepool") == "sandbox-np":
     extra_pod_spec["tolerations"] = [{

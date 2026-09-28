@@ -260,18 +260,31 @@ class DeepSWEEnv(swe_env.SWEEnv):
     if max_warmpool_replicas is None:
       max_warmpool_replicas = num_generations
     if kwargs.get("use_agent_sandbox") and kwargs.get("fleet") is None:
-      logging.info(
-          "Initializing DeepSWE SandboxFleet in rollout worker "
-          "(max_concurrency=%s, max_warmpool_replicas=%s).",
-          num_generations,
-          max_warmpool_replicas,
+      # The orchestrator's fleet plans all dataset images and its
+      # PrewarmDatasetIterator warms each batch's pools ahead of dispatch. The
+      # rollout worker only needs to claim from those pools, so by default it
+      # builds a claim-only fleet (see sandbox_utils.ensure_claimable).
+      # SANDBOX_ROLLOUT_CLAIM_ONLY=0 restores the legacy per-worker fleet whose
+      # plan holds just this first entry's image, so every other image went
+      # through agent_sandbox_rl's "not in the plan" on-demand path.
+      claim_only = sandbox_utils._env_bool(  # pylint: disable=protected-access
+          "SANDBOX_ROLLOUT_CLAIM_ONLY", True
       )
+      if sandbox_utils._GLOBAL_FLEET is None:  # pylint: disable=protected-access
+        logging.info(
+            "Initializing DeepSWE SandboxFleet in rollout worker "
+            "(claim_only=%s, max_concurrency=%s, max_warmpool_replicas=%s).",
+            claim_only,
+            num_generations,
+            max_warmpool_replicas,
+        )
       kwargs["fleet"] = sandbox_utils.init_global_fleet(
-          tasks=[entry],
+          tasks=None if claim_only else [entry],
           max_concurrency=num_generations,
           num_generations=num_generations,
           max_warmpool_replicas=max_warmpool_replicas,
           scaffold=str(kwargs.get("scaffold") or os.getenv("SCAFFOLD", "r2egym")),
+          claim_only=claim_only,
       )
 
     super().__init__(

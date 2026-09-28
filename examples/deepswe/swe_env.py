@@ -190,6 +190,10 @@ class SWEEnv(BaseTaskEnv):
     max_acquire_retries = 5
     for attempt in range(max_acquire_retries):
       try:
+        # Claim-only fleets (rollout workers): resolve the orchestrator's warm
+        # pool for this image before every attempt, so a retry after the pool
+        # was retired does not claim against a missing pool. No-op otherwise.
+        sandbox_utils.ensure_claimable(fleet, task.image)
         self.handle = fleet.acquire(task)
         break
       except Exception as e:
