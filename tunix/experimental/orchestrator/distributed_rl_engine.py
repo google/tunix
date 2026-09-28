@@ -188,6 +188,8 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
               " 'prompt_id'. Every request must provide a non-empty"
               " 'prompt_id'."
           )
+        for k, v in base_generation_kwargs.items():
+          p.generation_kwargs.setdefault(k, v)
         rollout_reqs.append(p)
         continue
 

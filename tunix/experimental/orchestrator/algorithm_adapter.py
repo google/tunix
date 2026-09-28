@@ -482,6 +482,7 @@ class PPOAdapter(AlgorithmAdapter):
         entropy_coef=self.entropy_coef,
         gamma=self.gamma,
         lam=self.lam,
+        temperature=getattr(self.algo_config, "temperature", None),
     )
     return functools.partial(
         _algo_model_input,

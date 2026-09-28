@@ -366,6 +366,12 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       ),
       max_steps=args.max_steps,
       reward_fns=[],
+      generation_args=datatypes.GenerationArgs(
+          temperature=args.temperature,
+          top_p=args.top_p,
+          top_k=args.top_k,
+          return_logprobs=args.use_rollout_logps,
+      ),
       batch_size=args.batch_size,
       batch_config=batch_assembly.BatchConfig(
           pad_id=pad_id,
