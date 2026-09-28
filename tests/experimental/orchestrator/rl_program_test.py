@@ -928,6 +928,86 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_dispatch_stage_does_not_pull_next_batch_before_window_opens(self):
+    async def _run():
+      pulled = []
+      dispatched = []
+
+      class TrackingIterator:
+
+        def __init__(self, items):
+          self._items = list(items)
+          self._idx = 0
+
+        def __iter__(self):
+          return self
+
+        def has_next(self) -> bool:
+          return self._idx < len(self._items)
+
+        def __next__(self):
+          if self._idx >= len(self._items):
+            raise StopIteration
+          item = self._items[self._idx]
+          self._idx += 1
+          pulled.append(item)
+          return item
+
+      async def mock_dispatch(prompts, **kwargs):
+        dispatched.append((prompts[0]["prompt"], kwargs["policy_version"]))
+        return [f"{prompts[0]['prompt']}_{kwargs['policy_version']}"]
+
+      self.mock_engine.dispatch_rollouts.side_effect = mock_dispatch
+      self.mock_algo.num_generations = 1
+      self.mock_algo.mini_batch_size = 1
+
+      dataset = TrackingIterator(["p0", "p1", "p2", "p3", "p4", "p5"])
+      program = rl_program.StandardRLProgram(
+          dataset=dataset,
+          batch_size=2,
+          algo=self.mock_algo,
+          reward_fns=[lambda *_: 1.0],
+          assembler=self.assembler,
+          max_staleness=1,
+      )
+      program.engine = self.mock_engine
+
+      dispatch_task = asyncio.create_task(program.rollout_dispatch_stage())
+
+      for _ in range(50):
+        if len(dispatched) == 4:
+          break
+        await asyncio.sleep(0.01)
+
+      await asyncio.sleep(0.05)
+      # With batch_size=2 and max_staleness=1, batches 0 ("p0", "p1") and
+      # 1 ("p2", "p3") are in window at _next_batch=0; batch 2 ("p4", "p5")
+      # must not be pulled from the iterator before the window advances.
+      self.assertEqual(pulled, ["p0", "p1", "p2", "p3"])
+      self.assertEqual(
+          dispatched,
+          [("p0", 0), ("p1", 0), ("p2", 0), ("p3", 0)],
+      )
+
+      program.policy_version = 1
+      program._step = 1
+      program._release_window()
+      await asyncio.wait_for(dispatch_task, timeout=1.0)
+      self.assertEqual(pulled, ["p0", "p1", "p2", "p3", "p4", "p5"])
+      self.assertEqual(
+          dispatched,
+          [
+              ("p0", 0),
+              ("p1", 0),
+              ("p2", 0),
+              ("p3", 0),
+              ("p4", 1),
+              ("p5", 1),
+          ],
+      )
+
+    asyncio.run(_run())
+
   def _window_program(self, **kwargs: Any) -> rl_program.StandardRLProgram:
     """A program whose full batch is two single-rollout groups."""
     self.mock_algo.num_generations = 1
