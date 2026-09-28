@@ -15,6 +15,7 @@
 """Checkpoint manager for PEFT."""
 
 from collections.abc import Mapping
+import dataclasses
 import functools
 import os
 import time
@@ -79,7 +80,7 @@ def _get_named_sharding(
   )
 
 
-def _fix_sharding(state: Any) -> Any:
+def fix_sharding(state: Any) -> Any:
   """Replicates scalar values in optimizer states that are SingleDeviceSharding.
 
   Scalar values in optimizer states like step and count is initialized as
@@ -121,8 +122,19 @@ def _fix_sharding(state: Any) -> Any:
   )
 
 
-class CheckpointManager:
-  """Checkpoint manager for PEFT."""
+@dataclasses.dataclass
+class _PinnedStep(ocp.training.preservation_policies.PreservationPolicy):
+  """Preserves one step on top of the retention policy; None pins nothing."""
+
+  step: int | None = None
+
+  def should_preserve(self, checkpoints, *, context):
+    del context
+    return [ck.step == self.step for ck in checkpoints]
+
+
+class BaseCheckpointManager:
+  """Base checkpoint manager."""
 
   def __init__(
       self,
@@ -145,7 +157,7 @@ class CheckpointManager:
           root_directory,
           context=self._context,
           save_decision_policy=self._options.save_decision_policy,  # pyrefly: ignore[bad-argument-type]
-          preservation_policy=self._options.preservation_policy,  # pyrefly: ignore[bad-argument-type]
+          preservation_policy=self._checkpointer_preservation_policy(),  # pyrefly: ignore[bad-argument-type]
           step_name_format=self._options.step_name_format,
       )
 
@@ -190,6 +202,7 @@ class CheckpointManager:
       checkpointables: dict[str, Any],
       force: bool,
       custom_metadata: Mapping[str, Any] | None,
+      overwrite: bool = False,
   ) -> bool:
     """Internal helper to dispatch and report whether a save happened."""
     if self._checkpointer is None:
@@ -201,6 +214,7 @@ class CheckpointManager:
           step,
           checkpointables,
           force=force,
+          overwrite=overwrite,
           custom_metadata=custom_metadata,  # pyrefly: ignore[bad-argument-type]
       )
       return response is not None
@@ -208,6 +222,7 @@ class CheckpointManager:
         step,
         checkpointables,
         force=force,
+        overwrite=overwrite,
         custom_metadata=custom_metadata,  # pyrefly: ignore[bad-argument-type]
     )
 
@@ -216,6 +231,56 @@ class CheckpointManager:
     if self._checkpointer is None or self._checkpointer.latest is None:
       return None
     return self._checkpointer.latest.step
+
+  def has_step(self, step: int) -> bool:
+    """Whether a checkpoint for `step` is on disk (cached step list)."""
+    return self._checkpointer is not None and any(
+        c.step == step for c in self._checkpointer.checkpoints
+    )
+
+  def _checkpointer_preservation_policy(self) -> Any:
+    """The retention policy handed to the checkpointer."""
+    return self._options.preservation_policy
+
+  def wait(self) -> None:
+    """Blocks until all pending (async) saves are durable."""
+    if self._checkpointer is not None:
+      self._checkpointer.wait()
+
+  def close(self) -> None:
+    """Closes the checkpoint manager."""
+    if self._checkpointer is None:
+      return
+    self._checkpointer.close()
+
+
+class CheckpointManager(BaseCheckpointManager):
+  """Checkpoint manager for PEFT (model weights + optimizer state)."""
+
+  def __init__(
+      self,
+      root_directory: str | None = None,
+      options: checkpoint_options.CheckpointingOptions | None = None,
+  ):
+    self._pin = _PinnedStep()
+    super().__init__(root_directory=root_directory, options=options)
+
+  def _checkpointer_preservation_policy(self) -> Any:
+    """The configured retention policy OR the pinned step (see pin_step)."""
+    policy_fn: Any = ocp.training.preservation_policies.AnyPreservationPolicy
+    policies: Any = [self._options.preservation_policy, self._pin]
+    return policy_fn(policies)
+
+  def pin_step(self, step: int | None) -> None:
+    """Keeps checkpoint `step` on disk whatever the retention policy says.
+
+    Orbax evaluates retention inside each save against this live policy, so
+    the pin takes effect at the next save; the previously pinned step
+    becomes deletable then (and is removed only after that save commits).
+    None unpins. Sub-batch checkpointing pins the current global step's
+    start, the behavior policy a mid-step resume restores.
+    """
+    self._pin.step = step
 
   def save(
       self,
@@ -266,6 +331,67 @@ class CheckpointManager:
         step, checkpointables, force, custom_metadata
     )
 
+  def _model_params_target(
+      self, model: nnx.Module, restore_only_lora_params: bool
+  ) -> tuple[Any, ocp.Context]:
+    """The params state to load into and the context to load it with."""
+    if not restore_only_lora_params:
+      return nnx.state(model), self._context
+    # Partial (LoRA) restore is the one path that overrides the persistent
+    # context to enable partial loading.
+    load_ctx = ocp.Context(self._context)
+    load_ctx.pytree.loading.partial_load = True
+    return nnx.state(model, nnx.LoRAParam), load_ctx
+
+  def load_model_params(
+      self,
+      step: int,
+      model: nnx.Module,
+      *,
+      restore_only_lora_params: bool = False,
+      memory_kind: str | None = None,
+  ) -> Any:
+    """Loads checkpoint `step`'s model params into a new tree.
+
+    Unlike maybe_restore, `model` is not updated: it only supplies the
+    params' structure, shapes, dtypes and shardings.
+
+    Args:
+      step: The checkpoint step to load.
+      model: The model whose params layout to load into; left unchanged.
+      restore_only_lora_params: Whether to load only the LoRA params.
+      memory_kind: If set (e.g. "pinned_host"), the loaded arrays are placed
+        on that memory kind of the model's shardings.
+
+    Returns:
+      The loaded params, shaped like `nnx.state(model)` (its LoRA params only
+      when `restore_only_lora_params`).
+
+    Raises:
+      ValueError: If the manager has no checkpoint directory.
+    """
+    if self._checkpointer is None:
+      raise ValueError('load_model_params needs a checkpoint directory.')
+    target, load_ctx = self._model_params_target(
+        model, restore_only_lora_params
+    )
+    abstract = jax.tree.map(
+        lambda x: jax.ShapeDtypeStruct(
+            x.shape,
+            x.dtype,
+            sharding=(
+                x.sharding.with_memory_kind(memory_kind)
+                if memory_kind
+                else x.sharding
+            ),
+        ),
+        target,
+    )
+    with load_ctx:
+      return self._checkpointer.load_checkpointables(
+          step, {'model_params': abstract}
+      )['model_params']
+
   def maybe_restore(
       self,
       model: nnx.Module,
@@ -302,15 +428,9 @@ class CheckpointManager:
 
     metadata = self._checkpointer.checkpointables_metadata(step)
 
-    if restore_only_lora_params:
-      model_params_state = nnx.state(model, nnx.LoRAParam)
-      # Partial (LoRA) restore is the one path that overrides the persistent
-      # context to enable partial loading.
-      load_ctx = ocp.Context(self._context)
-      load_ctx.pytree.loading.partial_load = True
-    else:
-      model_params_state = nnx.state(model)
-      load_ctx = self._context
+    model_params_state, load_ctx = self._model_params_target(
+        model, restore_only_lora_params
+    )
     abstract_checkpointables = {'model_params': model_params_state}
 
     if (
@@ -319,7 +439,7 @@ class CheckpointManager:
         and 'optimizer_state' in metadata.metadata
     ):
       optimizer_state = nnx.state(optimizer, nnx.optimizer.OptState)
-      abstract_checkpointables['optimizer_state'] = _fix_sharding(
+      abstract_checkpointables['optimizer_state'] = fix_sharding(
           optimizer_state
       )
 
@@ -350,9 +470,3 @@ class CheckpointManager:
     )
     custom_metadata = metadata.custom_metadata if metadata else {}
     return step, custom_metadata
-
-  def close(self) -> None:
-    """Closes the checkpoint manager."""
-    if self._checkpointer is None:
-      return
-    self._checkpointer.close()
