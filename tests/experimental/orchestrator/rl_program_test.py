@@ -4864,6 +4864,56 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_checkpoint_on_flush_without_consumed_group_uses_scored_q_next_batch_idx(
+      self,
+  ):
+    async def _run():
+      class _FlushOnEofAssembler:
+        num_generations: int = 1
+        mini_batch_size: int = 2
+
+        def feed(self, items):
+          del items
+          return []
+
+        def flush(self):
+          return [
+              batch_assembly.AssembledBatch(
+                  payload="flushed_batch", is_final_batch=True
+              )
+          ]
+
+      program = rl_program.StandardRLProgram(
+          algo=self.mock_algo,
+          dataset=[f"p{i}" for i in range(6)],
+          batch_size=2,
+          max_staleness=1,
+          group_order=rl_program.trajectory_queue_manager.GroupOrder.PROMPT_BATCH,
+          assembler=_FlushOnEofAssembler(),
+      )
+      program.engine = self.mock_engine
+      assert isinstance(
+          program.scored_q,
+          rl_program.trajectory_queue_manager.BatchOrderedQueueManager,
+      )
+      # Batches 0, 1, 2 were skipped as holes -> scored_q.next_batch_idx is 3,
+      # while program.step is still 0.
+      program.scored_q.skip(0, 3)
+      self.assertEqual(program.scored_q.next_batch_idx, 3)
+      await program.scored_q.close()
+
+      await program.train_stage()
+
+      self.mock_engine.save_checkpoint.assert_called_once()
+      checkpoint_metadata = self.mock_engine.save_checkpoint.call_args.kwargs[
+          "metadata"
+      ]
+      self.assertEqual(checkpoint_metadata["global_step"], 1)
+      self.assertEqual(checkpoint_metadata["next_batch_idx"], 3)
+      program.close()
+
+    asyncio.run(_run())
+
 
 class ExtractScalarTest(absltest.TestCase):
 
