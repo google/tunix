@@ -51,18 +51,28 @@ class SimulatedRolloutWorker(abstract_worker.Worker):
   def stop(self) -> datatypes.Response:
     return datatypes.Response()
 
-  def generate(self, prompts: Any, **kwargs: Any) -> list[datatypes.RolloutResponse]:
-    del kwargs
-    logging.info("[%s] Generating rollouts for %d prompt(s)", self.worker_id, len(prompts))
+  def generate(
+      self,
+      requests: datatypes.RolloutRequest | list[datatypes.RolloutRequest],
+  ) -> datatypes.RolloutResponse | list[datatypes.RolloutResponse]:
+    req_list = requests if isinstance(requests, list) else [requests]
+    logging.info(
+        "[%s] Generating rollouts for %d request(s)",
+        self.worker_id,
+        len(req_list),
+    )
     responses = []
-    for idx, _ in enumerate(prompts):
+    for idx, req in enumerate(req_list):
+      prompt_id = getattr(req, "prompt_id", f"prompt_{idx}")
+      group_index = getattr(req, "group_index", 0)
+      request_id = getattr(req, "request_id", f"req_{idx}")
       responses.append(
           datatypes.RolloutResponse(
-              request_id=f"req_{idx}",
+              request_id=request_id,
               status="COMPLETED",
               payload=datatypes.TrajectoryItem(
-                  prompt_id=f"prompt_{idx}",
-                  group_index=0,
+                  prompt_id=prompt_id,
+                  group_index=group_index,
                   start_step=0,
                   traj={
                       "reward": 1.0,
@@ -71,12 +81,12 @@ class SimulatedRolloutWorker(abstract_worker.Worker):
                   prompt_tokens=np.array([10, 11], dtype=np.int32),
                   completion_tokens=np.array([20, 21], dtype=np.int32),
                   action_mask=np.array([1.0, 1.0], dtype=np.float32),
-                  metadata={"prompt_id": f"prompt_{idx}"},
+                  metadata={"prompt_id": prompt_id},
               ),
-              metadata={"prompt_id": f"prompt_{idx}"},
+              metadata={"prompt_id": prompt_id},
           )
       )
-    return responses
+    return responses if isinstance(requests, list) else responses[0]
 
   def heartbeat(self) -> datatypes.HealthReport:
     return datatypes.HealthReport(state=datatypes.WorkerState.READY)

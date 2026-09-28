@@ -366,9 +366,6 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         len(prompts),
         len(self._rollout_workers),
     )
-    generation_kwargs = (
-        generation_args.as_kwargs() if generation_args is not None else {}
-    )
     requests = self._build_rollout_requests(
         prompts,
         policy_version=self._policy_version,
@@ -385,9 +382,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       worker_to_requests[worker].append(req)
 
     tasks = [
-        self._invoke_worker(
-            worker, "generate", requests=w_requests, **generation_kwargs
-        )
+        self._invoke_worker(worker, "generate", requests=w_requests)
         for worker, w_requests in worker_to_requests.items()
         if w_requests
     ]
