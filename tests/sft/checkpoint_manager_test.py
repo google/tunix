@@ -606,6 +606,103 @@ class CheckpointManagerTest(parameterized.TestCase):
     cp_manager._checkpointer.wait()
     self.assertEqual(cp_manager.latest_step(), 1)
 
+  def test_load_model_params_leaves_model_untouched(self):
+    cp_manager = checkpoint_manager.CheckpointManager(
+        f'{self.temp_path}/{self.id()}'
+    )
+    model, _ = create_sharded_model(TestModel, nnx.Rngs(0), self.mesh)
+    saved = nnx.clone(nnx.state(model))
+    self.assertTrue(cp_manager.save(1, model))
+    cp_manager.wait()
+    changed = jax.tree.map(lambda x: x + 1, nnx.state(model))
+    nnx.update(model, changed)
+
+    loaded = cp_manager.load_model_params(1, model)
+
+    jax.tree.map_with_path(assert_close, saved, loaded)
+    jax.tree.map_with_path(assert_close, changed, nnx.state(model))
+
+  def test_load_model_params_only_lora(self):
+    cp_manager = checkpoint_manager.CheckpointManager(
+        f'{self.temp_path}/{self.id()}'
+    )
+    model, _ = create_sharded_model(TestModel, nnx.Rngs(0), self.mesh)
+    model = qwix.apply_lora_to_model(
+        model,
+        qwix.LoraProvider(module_path='.*w1', rank=4, alpha=2.0),
+        x=jnp.ones(2, dtype=jnp.int32),
+    )
+    saved_lora = nnx.clone(nnx.state(model, nnx.LoRAParam))
+    self.assertTrue(cp_manager.save(1, model, save_only_lora_params=True))
+    cp_manager.wait()
+    nnx.update(
+        model, jax.tree.map(lambda x: x + 1, nnx.state(model, nnx.LoRAParam))
+    )
+
+    loaded = cp_manager.load_model_params(
+        1, model, restore_only_lora_params=True
+    )
+
+    jax.tree.map_with_path(assert_close, saved_lora, loaded)
+
+  def test_load_model_params_without_directory_raises(self):
+    cp_manager = checkpoint_manager.CheckpointManager(root_directory=None)
+    model, _ = create_sharded_model(TestModel, nnx.Rngs(0), self.mesh)
+    with self.assertRaisesRegex(ValueError, 'checkpoint directory'):
+      cp_manager.load_model_params(1, model)
+
+  def _pinned_manager(self, n):
+    options = checkpoint_options.TunixCheckpointingOptions(
+        preservation_policy=(
+            checkpoint_manager.ocp.training.preservation_policies.LatestN(n)
+        ),
+        enable_async_checkpointing=False,
+    )
+    return checkpoint_manager.CheckpointManager(
+        f'{self.temp_path}/{self.id()}', options=options
+    )
+
+  def _steps(self, cp_manager):
+    assert cp_manager._checkpointer is not None
+    cp_manager.wait()
+    return sorted(ck.step for ck in cp_manager._checkpointer.checkpoints)
+
+  def test_pin_step_survives_retention(self):
+    cp_manager = self._pinned_manager(1)
+    model, _ = create_sharded_model(TestModel, nnx.Rngs(0), self.mesh)
+    cp_manager.save(0, model, force=True)
+    cp_manager.pin_step(0)
+    for step in (1, 2, 3):
+      cp_manager.save(step, model, force=True)
+    # LatestN(1) keeps only 3; the pin keeps 0.
+    self.assertEqual(self._steps(cp_manager), [0, 3])
+    self.assertTrue(cp_manager.has_step(0))
+
+  def test_moving_pin_frees_previous_step_at_next_save(self):
+    cp_manager = self._pinned_manager(1)
+    model, _ = create_sharded_model(TestModel, nnx.Rngs(0), self.mesh)
+    cp_manager.save(0, model, force=True)
+    cp_manager.pin_step(0)
+    cp_manager.save(1, model, force=True)
+    cp_manager.save(2, model, force=True)
+    self.assertEqual(self._steps(cp_manager), [0, 2])
+    cp_manager.pin_step(2)
+    # Nothing is deleted until a save runs retention.
+    self.assertEqual(self._steps(cp_manager), [0, 2])
+    cp_manager.save(3, model, force=True)
+    self.assertEqual(self._steps(cp_manager), [2, 3])
+
+  def test_no_pin_keeps_retention_unchanged(self):
+    cp_manager = self._pinned_manager(2)
+    model, _ = create_sharded_model(TestModel, nnx.Rngs(0), self.mesh)
+    for step in (0, 1, 2, 3):
+      cp_manager.save(step, model, force=True)
+    self.assertEqual(self._steps(cp_manager), [2, 3])
+    cp_manager.pin_step(1)  # already deleted: pinning cannot revive it
+    cp_manager.pin_step(None)
+    cp_manager.save(4, model, force=True)
+    self.assertEqual(self._steps(cp_manager), [3, 4])
+
   def test_context_timeout_secs(self):
     options = checkpoint_options.TunixCheckpointingOptions(
         async_options=checkpoint_manager.ocp.options.AsyncOptions(
