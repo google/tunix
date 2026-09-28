@@ -58,7 +58,11 @@ export ROLLOUT_PREFUSE_MOE_WEIGHTS="true"
 export VERIFY_WEIGHTS="true"
 export TRAINER_PADDED_MOE_MLP_DIM=""
 export WEIGHT_SYNC_MODE="raiden"
+
 export RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFER="${RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFER:-0}"
+export ENABLE_MULTI_NUMA="0"
+export RAIDEN_BROADCAST_K="64"
+export TPU_RAIDEN_DATA_NICS="eth0"
 
 # ==============================================================================
 # WandB Configuration
