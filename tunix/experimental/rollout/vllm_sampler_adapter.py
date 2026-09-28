@@ -255,6 +255,10 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
         free_kv_cache_during_weight_sync
     )
     self._weight_update_open = False
+    self._weight_sync_bound = False
+    self._cached_weight_sync_metadata: (
+        list[weight_sync.WorkUnitMetadata] | None
+    ) = None
 
     if self.sampler is None and self.engine_args is not None:
       sampler_cls = _get_rl_vllm_sampler_cls()
@@ -340,6 +344,8 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
 
   async def stop(self, **kwargs) -> Any:
     """Stops the underlying sampler engine."""
+    self._weight_sync_bound = False
+    self._cached_weight_sync_metadata = None
     return await self._require_sampler().stop(**kwargs)
 
   async def pause(self, **kwargs) -> Any:
@@ -397,18 +403,23 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
     del sync_request, kwargs
     if not self.enable_weight_sync:
       return None
+    if self._weight_sync_bound:
+      return True
     await self._ensure_started()
     sampler = self._require_sampler()
     if self.enable_gcs:
-      return await sampler.bind_gcs_sync(
+      res = await sampler.bind_gcs_sync(
           worker_index=self.worker_index,
           job_name=self.raiden_job_name,
       )
-    return await sampler.bind_raiden_sync(
-        worker_index=self.worker_index,
-        parallelism=self._parallelism,
-        job_name=self.raiden_job_name,
-    )
+    else:
+      res = await sampler.bind_raiden_sync(
+          worker_index=self.worker_index,
+          parallelism=self._parallelism,
+          job_name=self.raiden_job_name,
+      )
+    self._weight_sync_bound = True
+    return res
 
   async def get_weight_sync_metadata(
       self,
@@ -422,16 +433,21 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
           " get_weight_sync_metadata when weight sync is disabled"
           f" (weight_sync_mode={self.weight_sync_mode.value})."
       )
+    if self._cached_weight_sync_metadata is not None:
+      return list(self._cached_weight_sync_metadata)
     await self._ensure_started()
     sampler = self._require_sampler()
     if self.enable_gcs:
       meta = await sampler.get_gcs_metadata()
     else:
       meta = await sampler.get_raiden_metadata()
-    return [
+    parsed = [
         weight_sync.WorkUnitMetadata.from_dict(_canonicalize_variable_names(m))
         for m in meta or []
     ]
+    if parsed:
+      self._cached_weight_sync_metadata = parsed
+    return list(parsed)
 
   async def pre_weight_sync(
       self, sync_request: Any = None, **kwargs: Any

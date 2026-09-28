@@ -565,7 +565,7 @@ class PhaseTimeouts:
       default_factory=lambda: _env_float("WEIGHT_SYNC_BIND_TIMEOUT_S", 300.0)
   )
   metadata: float = dataclasses.field(
-      default_factory=lambda: _env_float("WEIGHT_SYNC_METADATA_TIMEOUT_S", 60.0)
+      default_factory=lambda: _env_float("WEIGHT_SYNC_METADATA_TIMEOUT_S", 300.0)
   )
   source_prepare: float = dataclasses.field(
       default_factory=lambda: _env_float(
