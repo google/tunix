@@ -228,7 +228,9 @@ export POOL_NAME_FORMAT="${POOL_NAME_FORMAT:-}"
 export TEMPLATE_NAME_PREFIX="${TEMPLATE_NAME_PREFIX:-}"
 export SANDBOX_NODE_SELECTOR_KEY="cloud.google.com/gke-nodepool"
 export SANDBOX_NODE_SELECTOR_VAL="${SANDBOX_NODE_SELECTOR_VAL:-sandbox-np}"
-export MAX_WARMPOOL_REPLICAS=2
+# Half the generations of each prompt get a warm sandbox (was 2, i.e. 14 of 16
+# cold-started inside the episode). 16 would cover all, at 2x the sandbox-np pods.
+export MAX_WARMPOOL_REPLICAS="${MAX_WARMPOOL_REPLICAS:-8}"
 export ROLLOUT_MAX_CONCURRENCY="${ROLLOUT_MAX_CONCURRENCY:-256}"
 export MAX_CONCURRENCY="${MAX_CONCURRENCY:-256}"
 # A single hung tool call used to hold the whole batch (and the weight sync) for
