@@ -182,6 +182,7 @@ class AbstractRLEngine(Protocol):
       self,
       role: datatypes.Role = datatypes.Role.ACTOR,
       resync_rollout_weights: bool = True,
+      step: int | None = None,
   ) -> int:
     """Restores a checkpoint and realigns the mesh to the restored state.
 
@@ -194,6 +195,8 @@ class AbstractRLEngine(Protocol):
       resync_rollout_weights: If True, resync rollout worker weights to the
         restored policy version. If False, the resync is skipped and rollout
         workers keep their current/base weights.
+      step: Optional checkpoint step to restore. If None, restores from the
+        latest checkpoint.
 
     Returns:
       The restored step.

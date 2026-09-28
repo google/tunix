@@ -15,6 +15,8 @@
 """Checkpoint manager for PEFT."""
 
 from collections.abc import Mapping
+import dataclasses
+import datetime
 import functools
 import os
 import time
@@ -24,10 +26,20 @@ from absl import logging
 from flax import nnx
 import jax
 import numpy as np
+import orbax.checkpoint as ocp_v0
 from orbax.checkpoint import pathways as ocp_pathways
 from orbax.checkpoint import utils as ocp_utils
 from orbax.checkpoint import v1 as ocp
 from tunix.sft import checkpoint_options
+
+
+@dataclasses.dataclass
+class _PolicyStepInfo:
+  """Step info fulfilling Orbax's PolicyCheckpointInfo protocol."""
+
+  step: int
+  time: datetime.datetime
+  metrics: dict[str, Any] | None = None
 
 
 def _convert_host_local_array(x: Any) -> Any:
@@ -184,16 +196,63 @@ class CheckpointManager:
       ctx.array.saving.use_zarr3 = False
     return ctx
 
+  def _should_save_for_overwrite(self, step: int) -> bool:
+    """Evaluates the save decision policy for overwriting `step` <= latest.
+
+    Orbax's `should_save` rejects any step <= latest, so when overwriting we
+    evaluate the policy directly against only the checkpoints preceding `step`.
+
+    Args:
+      step: The step to be overwritten.
+
+    Returns:
+      Whether the save decision policy allows saving at `step`.
+    """
+    assert self._checkpointer is not None
+    policy = self._options.save_decision_policy
+    if policy is None:
+      return True
+    now = datetime.datetime.now(tz=datetime.timezone.utc)
+    step_info = _PolicyStepInfo(step=step, time=now)
+    previous_steps = [
+        _PolicyStepInfo(
+            step=c.step,
+            time=datetime.datetime.fromtimestamp(
+                c.commit_timestamp_nsecs / 1e9, tz=datetime.timezone.utc
+            )
+            if c.commit_timestamp_nsecs is not None
+            else now,
+        )
+        for c in self._checkpointer.checkpoints
+        if c.step < step
+    ]
+    context = ocp.training.save_decision_policies.DecisionContext(
+        is_saving_in_progress=self._checkpointer.is_saving_in_progress(),
+        reached_preemption=self._checkpointer._manager.reached_preemption(step),  # pylint: disable=protected-access
+        multiprocessing_options=ocp_v0.options.MultiprocessingOptions(),
+    )
+    return policy.should_save(step_info, previous_steps, context=context)  # pyrefly: ignore[bad-argument-type]
+
   def _save_checkpointables(
       self,
       step: int,
       checkpointables: dict[str, Any],
       force: bool,
       custom_metadata: Mapping[str, Any] | None,
+      overwrite: bool = False,
   ) -> bool:
     """Internal helper to dispatch and report whether a save happened."""
     if self._checkpointer is None:
       return False
+    latest = self.latest_step()
+    # Orbax's `save_checkpointables*` natively applies `should_save(step)` and
+    # raises `StepAlreadyExistsError` for existing steps. Only when overwriting
+    # a step <= latest (which Orbax's `should_save` always rejects) do we
+    # evaluate the save decision policy ourselves and force the save.
+    if overwrite and latest is not None and step <= latest:
+      if not force and not self._should_save_for_overwrite(step):
+        return False
+      force = True
     if self._options.enable_async_checkpointing:
       # `save_checkpointables_async` returns an `AsyncResponse` when a save is
       # initiated, or `None` when the save is skipped by the save policy.
@@ -201,6 +260,7 @@ class CheckpointManager:
           step,
           checkpointables,
           force=force,
+          overwrite=overwrite,
           custom_metadata=custom_metadata,  # pyrefly: ignore[bad-argument-type]
       )
       return response is not None
@@ -208,6 +268,7 @@ class CheckpointManager:
         step,
         checkpointables,
         force=force,
+        overwrite=overwrite,
         custom_metadata=custom_metadata,  # pyrefly: ignore[bad-argument-type]
     )
 
@@ -225,6 +286,7 @@ class CheckpointManager:
       save_only_lora_params: bool = False,
       force: bool = False,
       custom_metadata: Mapping[str, Any] | None = None,
+      overwrite: bool = False,
   ) -> bool:
     """Saves the params for the given step.
 
@@ -237,6 +299,7 @@ class CheckpointManager:
       force: Whether to save the checkpoint regardless of the save decision
         policy.
       custom_metadata: Custom metadata to save with the checkpoint.
+      overwrite: Whether to overwrite an existing checkpoint at the given step.
 
     Returns:
       Whether the checkpoint save operation was successful if synchronous,
@@ -263,7 +326,7 @@ class CheckpointManager:
       }
 
     return self._save_checkpointables(
-        step, checkpointables, force, custom_metadata
+        step, checkpointables, force, custom_metadata, overwrite=overwrite
     )
 
   def maybe_restore(
