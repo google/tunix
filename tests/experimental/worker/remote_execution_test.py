@@ -1513,5 +1513,73 @@ class RemoteExecutionTest(absltest.TestCase):
     asyncio.run(_run())
 
 
+  def test_pool_execution_session_least_loaded_routes_to_idlest_actor(self):
+    """least_loaded=True fills actors evenly but keeps route_key affinity."""
+
+    class ParkedHandle(remote_lib.ActorHandle):
+      """Accepts tasks and never completes them until release is set."""
+
+      def __init__(self, release: asyncio.Event):
+        self.release = release
+        self.received: list[str] = []
+
+      def submit(
+          self, method_name: Optional[str] = None, *args, **kwargs
+      ) -> Any:
+        raise NotImplementedError()
+
+      async def asubmit(
+          self, method_name: Optional[str] = None, *args, **kwargs
+      ) -> Any:
+        raise NotImplementedError()
+
+      async def dispatch_task(
+          self,
+          request_id: Optional[str] = None,
+          method_name: Optional[str] = None,
+          *args,
+          **kwargs,
+      ) -> str:
+        assert "route_key" not in kwargs
+        self.received.append(request_id)
+        return request_id
+
+      async def poll_responses(
+          self, timeout_s: float = remote_lib.LONG_POLL_TIMEOUT_S
+      ) -> Any:
+        await self.release.wait()
+        return None
+
+    async def _run():
+      release = asyncio.Event()
+      handles = [ParkedHandle(release) for _ in range(3)]
+      pool = remote_lib.RoutingActorPool(handles)
+      session = remote_lib.PoolExecutionSession(pool, least_loaded=True)
+
+      # Keys 0, 3, 6 all hash to actor 0 under plain hash routing.
+      await asyncio.gather(
+          *(
+              session.submit(f"req_{i}", "generate", route_key=3 * i)
+              for i in range(9)
+          )
+      )
+      self.assertEqual([len(h.received) for h in handles], [3, 3, 3])
+
+      # Free up actor 2; a new key must go there.
+      session._dispatched_tasks[handles[2]].clear()
+      await session.submit("req_new", "generate", route_key=100)
+      self.assertEqual(handles[2].received[-1], "req_new")
+
+      # A key seen before goes back to its actor, even though it is busier.
+      first_actor = next(h for h in handles if "req_0" in h.received)
+      await session.submit("req_0_retry", "generate", route_key=0)
+      self.assertEqual(first_actor.received[-1], "req_0_retry")
+
+      release.set()
+      await session.close()
+
+    asyncio.run(_run())
+
+
 if __name__ == "__main__":
   absltest.main()
