@@ -69,6 +69,7 @@ exec "$PYTHON_BIN" examples/deepswe/train_deepswe_nb.py \
   --score_centering true \
   --score_centering_top_k 32 \
   --score_centering_eps 1e-6 \
+  --exact_token_continuity true \
   --sampler_is token \
   --sampler_is_threshold 2.0 \
   --loss_agg_mode sequence-mean-token-scale \

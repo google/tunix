@@ -109,6 +109,7 @@ parser.add_argument("--off_policy_steps", type=int, default=0)
 parser.add_argument("--score_centering", type=_parse_bool, default=False)
 parser.add_argument("--score_centering_top_k", type=int, default=32)
 parser.add_argument("--score_centering_eps", type=float, default=1e-6)
+parser.add_argument("--exact_token_continuity", type=_parse_bool, default=False)
 parser.add_argument("--sampler_is", choices=["none", "token"], default="none")
 parser.add_argument("--sampler_is_threshold", type=float, default=2.0)
 
@@ -1091,6 +1092,7 @@ config_kwargs = {
     "score_centering": args.score_centering,
     "score_centering_top_k": args.score_centering_top_k,
     "score_centering_eps": args.score_centering_eps,
+    "exact_token_continuity": args.exact_token_continuity,
     "sampler_is": None if args.sampler_is == "none" else args.sampler_is,
     "sampler_is_threshold": args.sampler_is_threshold,
 }
