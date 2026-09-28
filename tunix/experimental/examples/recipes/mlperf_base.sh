@@ -219,7 +219,8 @@ export DEBUG=${DEBUG:-1}
 # ==============================================================================
 # DeepSWE Environment & Agent Sandbox
 # ==============================================================================
-export DATASET_PATH="gs://mlperf_dataset/benchmark-r2e-gym-easy"
+export DATASET_PATH="${DATASET_PATH:-gs://mlperf_dataset/benchmark-r2e-gym-easy-curriculum-v2}"
+export SHUFFLE="${SHUFFLE:-false}"
 export USE_AGENT_SANDBOX=1
 export SCAFFOLD="openhands"
 export SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-${K8S_NAMESPACE:-trellis}}"
