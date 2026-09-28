@@ -583,6 +583,80 @@ def compute_per_token_logps(
     return per_token_logps
 
 
+@flax.struct.dataclass
+class PearsonMetric(utils.WeightedMetric):
+  """WeightedMetric subclass for exact parallel Pearson correlation via Chan's formula.
+
+  Packs `(c_xy, c_xx, c_yy)` into `unreduced_sum` (shape `(3,)`) and
+  `(count, mean_x, mean_y)` into `denominator` (shape `(3,)`).
+  """
+
+  def compute(self) -> jax.Array:
+    """Computes single-microbatch Pearson correlation."""
+    c_xy = self.unreduced_sum[0]
+    c_xx = self.unreduced_sum[1]
+    c_yy = self.unreduced_sum[2]
+    denom = jnp.sqrt(jnp.maximum(c_xx * c_yy, 0.0))
+    if self.eps is not None:
+      denom = denom + self.eps
+    if self.min_denom is not None:
+      denom = jnp.maximum(denom, self.min_denom)
+    safe_denom = jnp.where(denom == 0, 1.0, denom)
+    return jnp.where(denom == 0, 0.0, c_xy / safe_denom)
+
+  @classmethod
+  def reduce(cls, values: Iterable["PearsonMetric"]) -> float:
+    """Combines per-microbatch statistics via Chan's parallel covariance/variance formula."""
+    values = list(values)
+    if not values:
+      return 0.0
+    eps = values[0].eps
+    min_denom = values[0].min_denom
+    sums = np.asarray(
+        [np.asarray(v.unreduced_sum, dtype=np.float64) for v in values],
+        dtype=np.float64,
+    )
+    denoms = np.asarray(
+        [np.asarray(v.denominator, dtype=np.float64) for v in values],
+        dtype=np.float64,
+    )
+    c_xys, c_xxs, c_yys = sums[:, 0], sums[:, 1], sums[:, 2]
+    ns, mean_xs, mean_ys = denoms[:, 0], denoms[:, 1], denoms[:, 2]
+    total_n = float(ns.sum())
+    if total_n <= 0:
+      return 0.0
+    global_mean_x = float((ns * mean_xs).sum() / total_n)
+    global_mean_y = float((ns * mean_ys).sum() / total_n)
+    dx = mean_xs - global_mean_x
+    dy = mean_ys - global_mean_y
+    total_c_xy = float(c_xys.sum() + (ns * dx * dy).sum())
+    total_c_xx = float(c_xxs.sum() + (ns * dx * dx).sum())
+    total_c_yy = float(c_yys.sum() + (ns * dy * dy).sum())
+    denominator = float(np.sqrt(max(total_c_xx * total_c_yy, 0.0)))
+    if eps is not None:
+      denominator += eps
+    if min_denom is not None:
+      denominator = max(denominator, min_denom)
+    return total_c_xy / denominator if denominator else 0.0
+
+
+def make_pearson_metric(
+    c_xy: jax.Array,
+    c_xx: jax.Array,
+    c_yy: jax.Array,
+    count: jax.Array,
+    mean_x: jax.Array,
+    mean_y: jax.Array,
+    min_denom: float = 1e-12,
+) -> PearsonMetric:
+  """Packs Chan's parallel covariance/variance sufficient statistics into a PearsonMetric."""
+  return PearsonMetric(
+      unreduced_sum=jnp.stack([c_xy, c_xx, c_yy]),
+      denominator=jnp.stack([count, mean_x, mean_y]),
+      min_denom=min_denom,
+  )
+
+
 def sampler_trainer_agreement(
     rollout_per_token_logps: ArrayLike | None,
     trainer_per_token_logps: ArrayLike | None,
@@ -657,13 +731,18 @@ def sampler_trainer_agreement(
   # statistic, inflating the per-position mean.
   mask = jnp.asarray(completion_mask, dtype=jnp.bool_)
   mask_f = mask.astype(jnp.float32)
-  mask_sum = jnp.maximum(mask_f.sum(), 1.0)
+  raw_mask_sum = mask_f.sum()
+  mask_sum = jnp.maximum(raw_mask_sum, 1.0)
   diff = jnp.abs(rollout_per_token_logps - trainer_per_token_logps)
-  diff_mean = float((diff * mask_f).sum() / mask_sum)
+  diff_mean = utils.WeightedMetric(
+      (diff * mask_f).sum(), raw_mask_sum, min_denom=1.0
+  )
   diff_max = float(jnp.where(mask, diff, 0.0).max())
   # Multiplicative probability error: exp(min(|trainer_logp - rollout_logp|, 20))
   token_mult_err = jnp.exp(jnp.minimum(diff, 20.0))
-  mult_err_mean = float((token_mult_err * mask_f).sum() / mask_sum)
+  mult_err_mean = utils.WeightedMetric(
+      (token_mult_err * mask_f).sum(), raw_mask_sum, min_denom=1.0
+  )
   mult_err_max = float(jnp.where(mask, token_mult_err, 0.0).max())
   # Probability-space diff is more representative than logp_diff for
   # confidence agreement: logp can diverge arbitrarily for very
@@ -671,36 +750,55 @@ def sampler_trainer_agreement(
   rp = jnp.exp(rollout_per_token_logps)
   tp = jnp.exp(trainer_per_token_logps)
   prob_diff = jnp.abs(rp - tp)
-  prob_diff_mean = float((prob_diff * mask_f).sum() / mask_sum)
+  prob_diff_mean = utils.WeightedMetric(
+      (prob_diff * mask_f).sum(), raw_mask_sum, min_denom=1.0
+  )
   prob_diff_max = float(jnp.where(mask, prob_diff, 0.0).max())
   rp_flat, tp_flat, mf = rp.reshape(-1), tp.reshape(-1), mask_f.reshape(-1)
   rp_mean = (rp_flat * mf).sum() / mask_sum
   tp_mean = (tp_flat * mf).sum() / mask_sum
   rp_d = (rp_flat - rp_mean) * mf
   tp_d = (tp_flat - tp_mean) * mf
-  cov = (rp_d * tp_d).sum() / mask_sum
-  rp_var = (rp_d * rp_d).sum() / mask_sum
-  tp_var = (tp_d * tp_d).sum() / mask_sum
-  pearson = float(cov / jnp.sqrt(jnp.maximum(rp_var * tp_var, 1e-12)))
+  c_xy = (rp_d * tp_d).sum()
+  c_xx = (rp_d * rp_d).sum()
+  c_yy = (tp_d * tp_d).sum()
+  pearson = make_pearson_metric(
+      c_xy=c_xy,
+      c_xx=c_xx,
+      c_yy=c_yy,
+      count=raw_mask_sum,
+      mean_x=rp_mean,
+      mean_y=tp_mean,
+      min_denom=1e-12,
+  )
   metrics.update({
-      "sampler_trainer/logp_diff_mean": (diff_mean, np.mean),
+      "sampler_trainer/logp_diff_mean": (diff_mean, utils.weighted_metric_mean),
       "sampler_trainer/logp_diff_max": (diff_max, np.max),
-      "sampler_trainer/mult_prob_error_mean": (mult_err_mean, np.mean),
+      "sampler_trainer/mult_prob_error_mean": (
+          mult_err_mean,
+          utils.weighted_metric_mean,
+      ),
       "sampler_trainer/mult_prob_error_max": (mult_err_max, np.max),
-      "sampler_trainer/prob_diff_mean": (prob_diff_mean, np.mean),
+      "sampler_trainer/prob_diff_mean": (
+          prob_diff_mean,
+          utils.weighted_metric_mean,
+      ),
       "sampler_trainer/prob_diff_max": (prob_diff_max, np.max),
-      "sampler_trainer/probs_pearson_corr": (pearson, np.mean),
+      "sampler_trainer/probs_pearson_corr": (
+          pearson,
+          utils.weighted_metric_mean,
+      ),
   })
   logging.info(
       "sampler-trainer: logp_diff=(%.5f,%.5f) mult_err=(%.5f,%.5f)"
       " prob_diff=(%.5f,%.5f) pearson=%.5f",
-      diff_mean,
+      float(_metric_scalar(diff_mean)),
       diff_max,
-      mult_err_mean,
+      float(_metric_scalar(mult_err_mean)),
       mult_err_max,
-      prob_diff_mean,
+      float(_metric_scalar(prob_diff_mean)),
       prob_diff_max,
-      pearson,
+      float(_metric_scalar(pearson)),
   )
 
   if seq_logprob_error_threshold is not None:
@@ -711,7 +809,7 @@ def sampler_trainer_agreement(
       ) / jnp.maximum(seq_tok_cnt, 1.0)
       active_seq = seq_tok_cnt > 0
       keep_seq = (seq_mult_err <= seq_logprob_error_threshold) & active_seq
-      num_active = jnp.maximum(jnp.sum(active_seq.astype(jnp.float32)), 1.0)
+      raw_num_active = jnp.sum(active_seq.astype(jnp.float32))
       num_masked = jnp.sum((~keep_seq & active_seq).astype(jnp.float32))
       keep_token_mask = keep_seq
     else:
@@ -733,7 +831,7 @@ def sampler_trainer_agreement(
       seg_mult_err = seg_err_sum / jnp.maximum(seg_tok_cnt, 1.0)
       active_seg = (seg_tok_cnt > 0).at[:, 0].set(False)
       keep_seg = (seg_mult_err <= seq_logprob_error_threshold) & active_seg
-      num_active = jnp.maximum(jnp.sum(active_seg.astype(jnp.float32)), 1.0)
+      raw_num_active = jnp.sum(active_seg.astype(jnp.float32))
       num_masked = jnp.sum((~keep_seg & active_seg).astype(jnp.float32))
       keep_token_mask = jnp.take_along_axis(keep_seg, seg_ids_jnp, axis=1)
 
@@ -741,18 +839,23 @@ def sampler_trainer_agreement(
         keep_token_mask, jnp.asarray(completion_mask), 0
     ).astype(orig_mask_dtype)
     completion_mask = filtered_completion_mask
-    masked_frac = float(num_masked / num_active)
+    masked_frac = utils.WeightedMetric(
+        num_masked, raw_num_active, min_denom=1.0
+    )
     masked_count = float(num_masked)
     metrics.update({
-        "sampler_trainer/seq_error_masked_frac": (masked_frac, np.mean),
+        "sampler_trainer/seq_error_masked_frac": (
+            masked_frac,
+            utils.weighted_metric_mean,
+        ),
         "sampler_trainer/seq_error_masked_count": (masked_count, np.sum),
     })
     logging.info(
         "sampler_trainer/seq_error_masking: masked=%.0f/%.0f (%.4f) at"
         " threshold=%.2f",
         masked_count,
-        float(num_active),
-        masked_frac,
+        float(jnp.maximum(raw_num_active, 1.0)),
+        float(_metric_scalar(masked_frac)),
         seq_logprob_error_threshold,
     )
 
@@ -766,29 +869,37 @@ def sampler_trainer_agreement(
     sampler_is_weights = jax.lax.stop_gradient(
         jnp.minimum(jnp.exp(log_ratio), sampler_is_threshold) * asst_mask_f
     )
-    is_mask_sum = jnp.maximum(asst_mask_f.sum(), 1.0)
-    is_mean = float((sampler_is_weights * asst_mask_f).sum() / is_mask_sum)
+    raw_is_mask_sum = asst_mask_f.sum()
+    is_mean = utils.WeightedMetric(
+        (sampler_is_weights * asst_mask_f).sum(),
+        raw_is_mask_sum,
+        min_denom=1.0,
+    )
     is_max = float(jnp.where(asst_mask_f > 0, sampler_is_weights, 0.0).max())
-    frac_clipped = float(
+    frac_clipped = utils.WeightedMetric(
         (
             (jnp.exp(log_ratio) > sampler_is_threshold)
             & (asst_mask_f > 0)
         )
         .astype(jnp.float32)
-        .sum()
-        / is_mask_sum
+        .sum(),
+        raw_is_mask_sum,
+        min_denom=1.0,
     )
     metrics.update({
-        "sampler_is/weight_mean": (is_mean, np.mean),
+        "sampler_is/weight_mean": (is_mean, utils.weighted_metric_mean),
         "sampler_is/weight_max": (is_max, np.max),
-        "sampler_is/frac_clipped_at_threshold": (frac_clipped, np.mean),
+        "sampler_is/frac_clipped_at_threshold": (
+            frac_clipped,
+            utils.weighted_metric_mean,
+        ),
     })
     logging.info(
         "sampler_is: weight_mean=%.4f weight_max=%.4f frac_clipped=%.4f"
         " (threshold=%.2f)",
-        is_mean,
+        float(_metric_scalar(is_mean)),
         is_max,
-        frac_clipped,
+        float(_metric_scalar(frac_clipped)),
         sampler_is_threshold,
     )
   return metrics, sampler_is_weights, filtered_completion_mask
@@ -1438,11 +1549,10 @@ def global_weighted_mean(values: Iterable[utils.WeightedMetric]) -> float:
   Sums numerators and denominators before dividing (token-weighted / global),
   as opposed to `mean_of_means` which averages per-micro-batch means. Equal to
   `mean_of_means` when the denominator is constant across micro-batches; they
-  diverge otherwise (e.g. sequence packing).
+  diverge otherwise (e.g. sequence packing). Also supports Chan's parallel
+  covariance/variance reduction for Pearson correlation metrics.
   """
-  total_sum = sum(float(v.unreduced_sum) for v in values)
-  total_denom = sum(float(v.denominator) for v in values)
-  return total_sum / total_denom if total_denom != 0 else 0.0
+  return utils.weighted_metric_mean(values)
 
 
 def compute_entropy_from_logits(logits: jax.Array) -> jax.Array:
