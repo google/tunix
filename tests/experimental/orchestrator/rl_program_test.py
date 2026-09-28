@@ -16,6 +16,7 @@ import asyncio
 import builtins
 from collections.abc import Sequence
 import dataclasses
+import functools
 import types
 from typing import Any
 from unittest import mock
@@ -24,13 +25,17 @@ from absl.testing import absltest
 import metrax.logging as metrax_logging
 import numpy as np
 from tunix.experimental.common import datatypes
+from tunix.experimental.common import test_utils
 from tunix.experimental.metrics import metrics as exp_metrics
 from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import distributed_rl_engine
 from tunix.experimental.orchestrator import rl_program
+from tunix.experimental.rollout import collector as collector_lib
 from tunix.experimental.trajectory import in_memory_store
 from tunix.experimental.worker import remote_execution
+from tunix.experimental.worker import rollout_worker
+from tunix.rl import algorithm_config
 from tunix.sft import metrics_logger as metrics_logger_lib
 from tunix.sft import utils as sft_utils
 
@@ -4863,6 +4868,159 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
       program.close()
 
     asyncio.run(_run())
+
+
+class _ScriptedCollector:
+  """Collector stand-in that raises for the listed group members.
+
+  The others complete through the real `_convert_to_trajectory`, so they carry
+  exactly the metadata a real collector stamps on a successful rollout.
+  """
+
+  _convert_to_trajectory = (
+      collector_lib.TrajectoryCollectorEngine._convert_to_trajectory
+  )
+  _annotate_response_budget = (
+      collector_lib.TrajectoryCollectorEngine._annotate_response_budget
+  )
+
+  def __init__(self, traj_id, request, *, failing_group_indices, **kwargs):
+    del kwargs
+    self.traj_id = traj_id
+    self.request = request
+    self.env = None
+    self.max_response_length = None
+    self.eos_ids = frozenset()
+    self._failing_group_indices = failing_group_indices
+
+  async def run_episode(self):
+    if self.request.group_index in self._failing_group_indices:
+      raise TimeoutError("env.step timed out")
+    return self._convert_to_trajectory({
+        "status": datatypes.TrajectoryStatus.SUCCEEDED,
+        "trajectory_reward": float(self.request.group_index % 2),
+        "prompt_tokens": np.array([1, 2], dtype=np.int32),
+        "conversation_tokens": np.array([3, 4], dtype=np.int32),
+        "conversation_masks": np.ones(2, dtype=np.float32),
+        "old_logprobs": np.full(2, -0.5, dtype=np.float32),
+    })
+
+
+class FailedRolloutPromptBatchTest(absltest.TestCase):
+  """A rollout that raises must leave its prompt group whole.
+
+  Drives the real failure path: `RolloutManager` turns the exception into a
+  `TrajectoryError`, `RolloutWorker` and `DistributedRLEngine` turn that into a
+  0-token FAILED item, and `StandardRLProgram` groups, scores and orders it
+  under the MLPerf queue settings (16 generations, `max_staleness=1`,
+  `prompt_batch` order).
+  """
+
+  _NUM_GENERATIONS = 16
+
+  async def _rollouts(self, *, policy_version, failing_group_indices):
+    """One prompt's group, as the polling stage receives it."""
+    engine = distributed_rl_engine.DistributedRLEngine(
+        rollout_workers=[], trainer_workers={}
+    )
+    prompt = rl_program._tag_prompt(
+        {"prompt": "fix the bug", "prompt_id": "prompt_0"},
+        rl_program._prompt_coordinates(0, full_batch_size=1),
+    )
+    requests = engine._build_rollout_requests(
+        [prompt],
+        num_generations=self._NUM_GENERATIONS,
+        policy_version=policy_version,
+    )
+    worker = rollout_worker.RolloutWorker(
+        worker_id="w0",
+        sampler=test_utils.MockBaseSamplerImpl(sampler_name="mock_sampler"),
+        tokenizer="mock",
+        chat_parser="mock",
+    )
+    with mock.patch.object(
+        collector_lib,
+        "TrajectoryCollectorEngine",
+        functools.partial(
+            _ScriptedCollector,
+            failing_group_indices=frozenset(failing_group_indices),
+        ),
+    ):
+      responses = await worker.generate(requests)
+    items = [
+        distributed_rl_engine._response_to_trajectory_item(resp)
+        for resp in responses
+    ]
+    # Failures arrive first: the prompt-batch queue reads `batch_idx` off a
+    # group's first member.
+    items.sort(key=lambda item: item.is_valid)
+    return items
+
+  def _score(self, *, policy_version, failing_group_indices):
+    """Runs one group through raw_q and critique; returns what scored_q serves."""
+
+    async def _run():
+      program = rl_program.StandardRLProgram(
+          algo=algorithm_adapter.GRPOAdapter(
+              algo_config=algorithm_config.GRPOConfig(
+                  num_generations=self._NUM_GENERATIONS
+              ),
+              mini_batch_size=1,
+          ),
+          dataset=["prompt_0"],
+          batch_size=1,
+          max_staleness=1,
+          group_order=rl_program.trajectory_queue_manager.GroupOrder.PROMPT_BATCH,
+      )
+      program.engine = mock.AsyncMock(
+          spec=rl_program.rl_engine_interface.AbstractRLEngine
+      )
+      program.policy_version = policy_version
+      for item in await self._rollouts(
+          policy_version=policy_version,
+          failing_group_indices=failing_group_indices,
+      ):
+        await program.raw_q.put(item)
+      await program.raw_q.close()
+      await program.critique_stage()
+      served = await program.scored_q.get_ordered_group()
+      program.close()
+      return served
+
+    return asyncio.run(_run())
+
+  def _assert_whole_group(self, served, *, policy_version, failed):
+    self.assertIsNotNone(served)
+    batch_idx, group = served
+    self.assertEqual(batch_idx, 0)
+    self.assertCountEqual(
+        [item.group_index for item in group], range(self._NUM_GENERATIONS)
+    )
+    self.assertCountEqual(
+        [item.group_index for item in group if not item.is_valid], failed
+    )
+    for item in group:
+      self.assertEqual(item.policy_version, policy_version)
+      self.assertEqual(item.metadata["batch_idx"], 0)
+
+  def test_failed_rollout_inside_staleness_window_keeps_group_whole(self):
+    # The failed member used to carry no `batch_idx`, and the prompt-batch
+    # queue raised reading it off the group's first member.
+    served = self._score(policy_version=0, failing_group_indices={5})
+    self._assert_whole_group(served, policy_version=0, failed=[5])
+
+  def test_failed_rollout_past_staleness_window_keeps_group_whole(self):
+    # The failed member used to read as policy version 0, so at version 2 the
+    # staleness filter dropped it and forwarded 15 members to a reshape by 16.
+    served = self._score(policy_version=2, failing_group_indices={11})
+    self._assert_whole_group(served, policy_version=2, failed=[11])
+
+  def test_group_of_only_failed_rollouts_still_resolves_its_batch(self):
+    # With every member stale the whole group used to be dropped, and reporting
+    # the drop needed a `batch_idx`, so the batch could never seal.
+    everyone = range(self._NUM_GENERATIONS)
+    served = self._score(policy_version=2, failing_group_indices=everyone)
+    self._assert_whole_group(served, policy_version=2, failed=everyone)
 
 
 class ExtractScalarTest(absltest.TestCase):

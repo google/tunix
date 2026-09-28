@@ -294,11 +294,35 @@ class RolloutManager:
     try:
       trajectory: TrajectoryOrError = await collector.run_episode()
     except Exception as e:  # pylint: disable=broad-exception-caught
+      # The failure still takes its slot in the prompt group, so it carries the
+      # same request-scoped metadata as a successful rollout (see
+      # `TrajectoryCollectorEngine._convert_to_trajectory`). The queue managers
+      # read `batch_idx` and `policy_version` off every group member: without
+      # them a prompt-batch queue rejects the group, and the staleness filter
+      # reads version 0, drops the failure, and forwards a short group.
+      metadata = dict(request.metadata or {})
+      metadata["prompt_id"] = request.prompt_id
+      metadata["group_index"] = request.group_index
+      metadata["policy_version"] = int(
+          getattr(request, "target_policy_version", 0) or 0
+      )
+      logging.warning(
+          "Rollout %s failed (prompt_id=%s, group_index=%s, batch_idx=%s, "
+          "policy_version=%d): %s: %s",
+          collector.traj_id,
+          request.prompt_id,
+          request.group_index,
+          metadata.get("batch_idx"),
+          metadata["policy_version"],
+          type(e).__name__,
+          e,
+      )
       trajectory = trajectory_lib.TrajectoryError(
           trajectory_id=collector.traj_id,
           prompt_id=request.prompt_id,
           error_message=str(e),
           error_type=type(e).__name__,
+          metadata=metadata,
       )
     finally:
       self._active_collectors.pop(collector.traj_id, None)
