@@ -60,7 +60,7 @@ export RAIDEN_BROADCAST_K=64
 # Model configuration
 export MODEL_NAME="Qwen3.5-397B-A17B"
 export MODEL_ID="Qwen/Qwen3.5-397B-A17B"
-export TOKENIZER_PATH="${TOKENIZER_PATH:-/app/Qwen/Qwen3.5-397B-A17B}"
+export TOKENIZER_PATH="${TOKENIZER_PATH:-Qwen/Qwen3.5-397B-A17B}"
 export MAXTEXT_MODEL_NAME="qwen3.5-397b-a17b"
 
 # Topologies (128 chips / 256 devices Trainer 4x4x8, 16x 8-chip Rollout slices on TPU7x dynamic slicing)
@@ -140,7 +140,7 @@ context_parallel_strategy=ring context_parallel_load_balance=false allow_split_p
 num_vocab_tiling=16 use_iota_embed=false mu_dtype=float32 grad_dtype=float32 \
 checkpoint_storage_concurrent_gb=96 \
 checkpoint_storage_use_ocdbt=false checkpoint_storage_use_zarr3=false \
-packing=True enable_gdn_sequence_packing=True optimizer_memory_host_offload=true}"
+packing=True optimizer_memory_host_offload=true}"
 export DEBUG=${DEBUG:-0}
 
 # DeepSWE Environment & Agent Sandbox
