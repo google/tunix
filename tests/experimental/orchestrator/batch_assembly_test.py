@@ -248,6 +248,7 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
         num_generations=2,
         mini_batch_size=2,
         max_packed_len=max_packed_len,
+        segment_align_multiple=1,
     )
     defaults.update(kwargs)
     return batch_assembly.SequencePackedBatchAssembler(**defaults)
@@ -303,6 +304,27 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
         payload.advantages[0], [0, 0, 1.5, 1.5, 0, 0, 0, -0.5] + [0] * 8
     )
 
+  def test_sequence_packed_assembler_default_64_token_alignment(self):
+    payload1 = _make_payload(10, 20, advantage=1.5)  # 30 tokens -> [0:30]
+    payload2 = _make_payload(5, 15, advantage=-0.5)  # 20 tokens -> [64:84]
+    assembler = batch_assembly.SequencePackedBatchAssembler(
+        batch_size=1,
+        num_generations=2,
+        mini_batch_size=1,
+        max_packed_len=128,
+        pad_id=42,
+    )
+    payloads = self._drain(assembler, [payload1, payload2])
+    self.assertLen(payloads, 1)
+    payload = payloads[0]
+    seg_ids = payload.segment_ids[0]
+    np.testing.assert_array_equal(seg_ids[:30], 1)
+    np.testing.assert_array_equal(seg_ids[30:64], 0)
+    np.testing.assert_array_equal(seg_ids[64:84], 2)
+    np.testing.assert_array_equal(seg_ids[84:], 0)
+    np.testing.assert_array_equal(payload.completion_mask[0, 30:64], 0)
+    np.testing.assert_array_equal(payload.completion_ids[0, 30:64], 42)
+
   def test_sequence_packed_assembler_rejects_partial_optional_fields(self):
     items = [
         _make_payload(2, 2),
@@ -319,6 +341,7 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
         num_generations=1,
         mini_batch_size=3,
         max_packed_len=10,
+        segment_align_multiple=1,
     )
     p1 = dataclasses.replace(_make_payload(2, 2), metadata={"traj_id": "t1"})
     p2 = dataclasses.replace(_make_payload(2, 3), metadata={"traj_id": "t2"})
@@ -359,7 +382,11 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
     payload2 = _make_payload(2, 2, metadata={"lineage": ctx2})
 
     assembler = batch_assembly.SequencePackedBatchAssembler(
-        batch_size=1, num_generations=2, mini_batch_size=1, max_packed_len=16
+        batch_size=1,
+        num_generations=2,
+        mini_batch_size=1,
+        max_packed_len=16,
+        segment_align_multiple=1,
     )
     batches = assembler.feed([payload1, payload2])
 
@@ -535,6 +562,7 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
         pad_id=0,
         num_generations=1,
         mini_batch_size=3,  # rollouts_per_optimizer_update = 3
+        segment_align_multiple=1,
     )
     # 3 groups with 4 tokens each (total 12 tokens < 16)
     # Group 1: 4 tokens -> buffers
@@ -565,6 +593,7 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
         pad_id=0,
         num_generations=1,
         mini_batch_size=3,  # rollouts_per_optimizer_update = 3
+        segment_align_multiple=1,
     )
     # Item 1: 8 tokens -> buffers (8 < 16)
     res1 = assembler.feed([self._make_streaming_payload(prompt_length=4, completion_length=4, val=1)])
@@ -590,6 +619,7 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
         pad_id=0,
         num_generations=1,
         mini_batch_size=2,
+        segment_align_multiple=1,
     )
     # Item 1 has 10 tokens
     res1 = assembler.feed([self._make_streaming_payload(prompt_length=4, completion_length=6, val=1)])
@@ -642,6 +672,7 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
         pad_id=0,
         num_generations=2,
         mini_batch_size=2,  # rollouts_per_optimizer_update = 4
+        segment_align_multiple=1,
     )
     # Group 1: 2 items of 4 tokens each (8 tokens total) -> buffers
     res1 = assembler.feed([
@@ -677,6 +708,7 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
         pad_id=0,
         num_generations=2,
         mini_batch_size=2,
+        segment_align_multiple=1,
     )
 
     # Feed 1 (Input batch 1): 2 items with tokens [10, 11] and [12, 13] (total 4 tokens)
@@ -753,6 +785,7 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
         pad_id=0,
         num_generations=2,
         mini_batch_size=2,  # rollouts_per_optimizer_update = 4
+        segment_align_multiple=1,
     )
 
     # Group 1 (2 items, 6 tokens each = 12 tokens): buffered (12 < 16)
@@ -787,6 +820,7 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
         pad_id=0,
         num_generations=2,
         mini_batch_size=1,
+        segment_align_multiple=1,
     )
     item1 = self._make_streaming_payload(prompt_length=3, completion_length=3, val=1)
     item2 = self._make_streaming_payload(prompt_length=3, completion_length=3, val=2)
@@ -1361,6 +1395,7 @@ class SequencePackedConversionTest(absltest.TestCase):
         num_generations=2,
         mini_batch_size=2,
         max_packed_len=max_packed_len,
+        segment_align_multiple=1,
     )
     defaults.update(kwargs)
     return batch_assembly.SequencePackedBatchAssembler(**defaults)
@@ -2078,6 +2113,7 @@ class CreateBatchAssemblerTest(absltest.TestCase):
         mini_batch_size=2,
         max_packed_len=8,
         pad_id=0,
+        segment_align_multiple=1,
     )
     # Item 1: prompt=1, completion=2 (3 tokens total), routed_experts supplied for 2 tokens (e.g. T-1)
     re1 = np.ones((2, 2, 2), dtype=np.int16) * 3

@@ -107,7 +107,9 @@ class PackCoreTest(absltest.TestCase):
         _item([1, 2], [3, 4, 5], adv=1.5),
         _item([6], [7, 8], adv=0.5),
     ]
-    [[row]] = packing.pack_core(items, budget=10, pack_size=1)
+    [[row]] = packing.pack_core(
+        items, budget=10, pack_size=1, segment_align_multiple=1
+    )
     np.testing.assert_array_equal(row.ids, [1, 2, 3, 4, 5, 6, 7, 8, 0, 0])
     np.testing.assert_array_equal(
         row.segment_ids, [1, 1, 1, 1, 1, 2, 2, 2, 0, 0]
@@ -156,7 +158,11 @@ class PackCoreTest(absltest.TestCase):
   def test_max_segments_bound_row_segment_count(self):
     items = [_item([i], [i]) for i in range(4)]
     chunks = packing.pack_core(
-        items, budget=64, pack_size=1, max_segments_per_packed_row=2
+        items,
+        budget=64,
+        pack_size=1,
+        max_segments_per_packed_row=2,
+        segment_align_multiple=1,
     )
     self.assertLen(chunks, 2)
     for [row] in chunks:
@@ -171,7 +177,7 @@ class PackCoreTest(absltest.TestCase):
         )
         for _ in range(37)
     ]
-    chunks = packing.pack_core(items, budget=32, pack_size=2)
+    chunks = packing.pack_core(items, budget=256, pack_size=2)
     total_segments = sum(r.num_real_segments for c in chunks for r in c)
     self.assertEqual(total_segments, len(items))
     total_tokens = sum(
@@ -192,6 +198,10 @@ class PackCoreTest(absltest.TestCase):
         ValueError, "Max segments per packed row must be positive"
     ):
       packing.pack_core([item], budget=10, max_segments_per_packed_row=0)
+    with self.assertRaisesRegex(
+        ValueError, "segment_align_multiple must be positive"
+    ):
+      packing.pack_core([item], budget=10, segment_align_multiple=0)
 
   def test_pack_bin_exceeds_budget_raises(self):
     items = [_item([1] * 5, [2] * 6)]  # num_tokens = 11 > 10
@@ -219,7 +229,9 @@ class PackCoreTest(absltest.TestCase):
             },
         ),
     ]
-    [[row]] = packing.pack_core(items, budget=8, pack_size=1)
+    [[row]] = packing.pack_core(
+        items, budget=8, pack_size=1, segment_align_multiple=1
+    )
     # Total tokens: (2+2) + (1+1) = 6 tokens, 2 padded.
     # Item 1 completion spans [2:4], Item 2 completion spans [5:6].
     np.testing.assert_allclose(
@@ -252,14 +264,15 @@ class PackCoreTest(absltest.TestCase):
     [[row]] = packing.pack_core([item], budget=4)
     np.testing.assert_array_equal(row.policy_version, np.array([42]))
 
-
   def test_rollout_logps_and_overlong_carried_in_packed_row(self):
     items = [
         _item(
             [1],
             [2, 3],
             per_token={
-                "rollout_per_token_logps": np.array([-0.5, -1.0], dtype=np.float32),
+                "rollout_per_token_logps": np.array(
+                    [-0.5, -1.0], dtype=np.float32
+                ),
                 "overlong": np.array([0.0, 0.0], dtype=np.float32),
             },
         ),
@@ -272,7 +285,9 @@ class PackCoreTest(absltest.TestCase):
             },
         ),
     ]
-    [[row]] = packing.pack_core(items, budget=6, pack_size=1)
+    [[row]] = packing.pack_core(
+        items, budget=6, pack_size=1, segment_align_multiple=1
+    )
     # Item 1: prompt [0:1], completion [1:3]. Item 2: prompt [3:4], completion [4:5].
     np.testing.assert_allclose(
         row.per_token["rollout_per_token_logps"],
@@ -300,7 +315,9 @@ class PackCoreTest(absltest.TestCase):
         advantages=np.ones(1, dtype=np.float32),
         routed_experts=experts2,
     )
-    [rows] = packing.pack_core([item1, item2], budget=6, pack_size=2)
+    [rows] = packing.pack_core(
+        [item1, item2], budget=6, pack_size=2, segment_align_multiple=1
+    )
     self.assertLen(rows, 2)
     row0, row1 = rows
     self.assertIsNotNone(row0.routed_experts)
@@ -317,6 +334,109 @@ class PackCoreTest(absltest.TestCase):
         row1.routed_experts,
         np.full((6, 2, 2), packing.UNSET_ROUTED_EXPERT, dtype=np.int32),
     )
+
+  def test_default_segment_alignment_64_starts_at_multiples_of_64(self):
+    # Default segment_align_multiple=64:
+    # FFD sorts descending by length:
+    #   seg 1 (len 70 = 20p + 50c): [0:70]
+    #   gap 1: [70:128] -> padded (segment_ids=0, completion_mask=0, ids=pad_id)
+    #   seg 2 (len 50 = 10p + 40c): [128:178]
+    #   gap 2: [178:192] -> padded
+    #   seg 3 (len 20 = 5p + 15c):  [192:212]
+    #   trailing pad: [212:256]
+    pad_id = 77
+    items = [
+        packing.PackItem(
+            prompt_ids=np.full(10, 11, dtype=np.int32),
+            completion_ids=np.full(40, 12, dtype=np.int32),
+            completion_mask=np.ones(40, dtype=np.float32),
+            advantages=np.full(40, 1.5, dtype=np.float32),
+            routed_experts=np.full((50, 2, 2), 1, dtype=np.int32),
+        ),
+        packing.PackItem(
+            prompt_ids=np.full(20, 21, dtype=np.int32),
+            completion_ids=np.full(50, 22, dtype=np.int32),
+            completion_mask=np.ones(50, dtype=np.float32),
+            advantages=np.full(50, 2.5, dtype=np.float32),
+            routed_experts=np.full((70, 2, 2), 2, dtype=np.int32),
+        ),
+        packing.PackItem(
+            prompt_ids=np.full(5, 31, dtype=np.int32),
+            completion_ids=np.full(15, 32, dtype=np.int32),
+            completion_mask=np.ones(15, dtype=np.float32),
+            advantages=np.full(15, 3.5, dtype=np.float32),
+            routed_experts=np.full((20, 2, 2), 3, dtype=np.int32),
+        ),
+    ]
+    # Uses default segment_align_multiple=64.
+    [[row]] = packing.pack_core(items, budget=256, pack_size=1, pad_id=pad_id)
+    self.assertEqual(row.num_real_segments, 3)
+
+    # Every packed segment must start at an index divisible by 64.
+    for seg_id, expected_start, expected_len in (
+        (1, 0, 70),
+        (2, 128, 50),
+        (3, 192, 20),
+    ):
+      seg_indices = np.flatnonzero(row.segment_ids == seg_id)
+      self.assertLen(seg_indices, expected_len)
+      start_idx = int(seg_indices[0])
+      self.assertEqual(start_idx % 64, 0)
+      self.assertEqual(start_idx, expected_start)
+      np.testing.assert_array_equal(
+          row.segment_positions[seg_indices],
+          np.arange(expected_len, dtype=np.int32),
+      )
+
+    # Verify alignment gaps [70:128], [178:192] and trailing pad [212:256]
+    for gap_start, gap_end in ((70, 128), (178, 192), (212, 256)):
+      np.testing.assert_array_equal(row.segment_ids[gap_start:gap_end], 0)
+      np.testing.assert_array_equal(row.completion_mask[gap_start:gap_end], 0)
+      np.testing.assert_array_equal(row.prompt_mask[gap_start:gap_end], 0)
+      np.testing.assert_array_equal(row.ids[gap_start:gap_end], pad_id)
+      np.testing.assert_array_equal(row.advantages[gap_start:gap_end], 0.0)
+      np.testing.assert_array_equal(
+          row.routed_experts[gap_start:gap_end],
+          packing.UNSET_ROUTED_EXPERT,
+      )
+
+  def test_exact_64_multiple_segment_leaves_zero_alignment_gap(self):
+    # Segment 1 has length 64 (already a multiple of 64), so segment 2 starts
+    # immediately at offset 64 with no alignment gap.
+    items = [
+        _item(np.ones(24, dtype=np.int32), np.ones(40, dtype=np.int32)),
+        _item(np.ones(10, dtype=np.int32), np.ones(20, dtype=np.int32)),
+    ]
+    [[row]] = packing.pack_core(items, budget=128, pack_size=1)
+    self.assertEqual(row.num_real_segments, 2)
+    np.testing.assert_array_equal(row.segment_ids[:64], 1)
+    np.testing.assert_array_equal(row.segment_ids[64:94], 2)
+    np.testing.assert_array_equal(row.segment_ids[94:], 0)
+
+  def test_alignment_prevents_second_segment_overflow(self):
+    # Budget is 64. Two items of length 10 each would fit unaligned (20 <= 64),
+    # but with segment_align_multiple=64 the second segment would start at 64
+    # and require 64 + 10 = 74 > 64, so it must be placed in a second row/chunk.
+    items = [
+        _item(np.ones(4, dtype=np.int32), np.ones(6, dtype=np.int32)),
+        _item(np.ones(4, dtype=np.int32), np.ones(6, dtype=np.int32)),
+    ]
+    chunks = packing.pack_core(items, budget=64, pack_size=1)
+    self.assertLen(chunks, 2)
+    self.assertEqual(chunks[0][0].num_real_segments, 1)
+    self.assertEqual(chunks[1][0].num_real_segments, 1)
+
+  def test_single_max_length_65536_trajectory_fits_without_overflow(self):
+    # A single maximum-length trajectory of 65,536 tokens starts at offset=0
+    # and fits in a 65,536-token row without overflow (65536 % 64 == 0).
+    item = _item(
+        np.ones(16384, dtype=np.int32),
+        np.ones(49152, dtype=np.int32),
+    )
+    [[row]] = packing.pack_core([item], budget=65536, pack_size=1)
+    self.assertEqual(row.num_real_segments, 1)
+    self.assertEqual(row.ids.shape, (65536,))
+    self.assertTrue(np.all(row.segment_ids == 1))
 
 
 if __name__ == "__main__":

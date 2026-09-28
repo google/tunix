@@ -1552,7 +1552,7 @@ class ExactTokenContinuityCollectTest(absltest.TestCase):
         cluster_config=SimpleNamespace(
             rollout_config=base_rollout.RolloutConfig(max_prompt_length=5),
             training_config=SimpleNamespace(
-                max_seq_token_per_tpu=64, compute_logps_micro_batch_size=1
+                max_seq_token_per_tpu=128, compute_logps_micro_batch_size=1
             ),
         ),
     )
@@ -1572,7 +1572,7 @@ class ExactTokenContinuityCollectTest(absltest.TestCase):
       )
     packed = list(
         rl_utils.pack_sequences(
-            iter([[batch]]), max_token_budget=64, sequences_per_update=2
+            iter([[batch]]), max_token_budget=128, sequences_per_update=2
         )
     )[0][0]
     expected_ids = list(

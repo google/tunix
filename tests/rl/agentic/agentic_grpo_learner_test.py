@@ -2604,7 +2604,7 @@ class ExactTokenContinuityBatchTest(absltest.TestCase):
     packed = list(
         rl_utils.pack_sequences(
             iter([[self._make_batch(packed=True, raw=raw)]]),
-            max_token_budget=64,
+            max_token_budget=128,
             sequences_per_update=2,
         )
     )[0][0]

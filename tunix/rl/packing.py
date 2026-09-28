@@ -35,6 +35,24 @@ PER_TOKEN_FIELDS: tuple[str, ...] = (
 # Marks a router-replay slot the trainer must leave to the model's own router.
 UNSET_ROUTED_EXPERT = -1
 
+# Default token boundary alignment for packed segments (matches NeMo-RL's
+# `sequence_length_round: 64` and Qwen3.5's `gdn_chunk_size = 64`).
+DEFAULT_SEGMENT_ALIGN_MULTIPLE = 64
+
+
+def align_offset(offset: int, segment_align_multiple: int) -> int:
+  """Rounds `offset` up to the next multiple of `segment_align_multiple`."""
+  if segment_align_multiple <= 0:
+    raise ValueError(
+        "segment_align_multiple must be positive, got"
+        f" {segment_align_multiple}."
+    )
+  if segment_align_multiple == 1:
+    return offset
+  return (
+      (offset + segment_align_multiple - 1) // segment_align_multiple
+  ) * segment_align_multiple
+
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class PackItem:
@@ -182,26 +200,36 @@ def fill_one_chunk(
     pack_size: int,
     budget: int,
     max_segments: int,
+    segment_align_multiple: int = DEFAULT_SEGMENT_ALIGN_MULTIPLE,
 ) -> tuple[list[list[PackItem]], list[PackItem]]:
   """Fills ONE chunk of `pack_size` fixed-capacity bins, first-fit-decreasing.
 
   Sorts the items by token length descending and greedily places each into the
   first bin with room, where a bin has room only if it stays within both the
-  token `budget` AND `max_segments` sequences (so the loss's static
-  `num_segments = max_segments + 1` buckets never overflow). Items that fit no
-  bin are returned as `leftover` (in their original order) for a later chunk.
+  token `budget` (after aligning the starting offset of any segment after the
+  first to `segment_align_multiple`) AND `max_segments` sequences (so the loss's
+  static `num_segments = max_segments + 1` buckets never overflow). Items that
+  fit no bin are returned as `leftover` (in their original order) for a later
+  chunk.
 
   Args:
     items: Sequence of PackItems to pack.
     pack_size: Number of bins in the chunk.
     budget: Token capacity budget per bin.
     max_segments: Maximum number of segments allowed in a single bin.
+    segment_align_multiple: Token boundary alignment multiple for the start of
+      each segment after the first in a bin.
 
   Returns:
     A tuple of (bins, leftover), where `bins` is a list of `pack_size` lists of
     PackItems (some may be empty), and `leftover` contains the items that did
     not fit into any bin.
   """
+  if segment_align_multiple <= 0:
+    raise ValueError(
+        "segment_align_multiple must be positive, got"
+        f" {segment_align_multiple}."
+    )
   bins: list[list[PackItem]] = [[] for _ in range(pack_size)]
   loads = [0] * pack_size
   order = sorted(
@@ -212,9 +240,10 @@ def fill_one_chunk(
     item = items[i]
     n = item.num_tokens
     for b in range(pack_size):
-      if loads[b] + n <= budget and len(bins[b]) < max_segments:
+      start = align_offset(loads[b], segment_align_multiple) if bins[b] else 0
+      if start + n <= budget and len(bins[b]) < max_segments:
         bins[b].append(item)
-        loads[b] += n
+        loads[b] = start + n
         placed_flags[i] = True
         break
   leftover = [items[i] for i in range(len(items)) if not placed_flags[i]]
@@ -228,8 +257,14 @@ def pack_bin(
     pad_id: int,
     carried: Sequence[str],
     routed_shape: tuple[int, ...] | None = None,
+    segment_align_multiple: int = DEFAULT_SEGMENT_ALIGN_MULTIPLE,
 ) -> PackedRow:
   """Packs a single bin of items into a single `[budget]` PackedRow."""
+  if segment_align_multiple <= 0:
+    raise ValueError(
+        "segment_align_multiple must be positive, got"
+        f" {segment_align_multiple}."
+    )
   zeros_i = lambda: np.zeros(budget, dtype=np.int32)
   zeros_f = lambda: np.zeros(budget, dtype=np.float32)
   if routed_shape is None and bin_items:
@@ -256,10 +291,6 @@ def pack_bin(
         routed_experts=unset_routed(),
     )
 
-  total = sum(item.num_tokens for item in bin_items)
-  if total > budget:
-    raise ValueError(f"pack_bin: bin size {total} exceeds budget {budget}.")
-
   ids = np.full(budget, pad_id, dtype=np.int32)
   prompt_mask = zeros_f()
   completion_mask = zeros_f()
@@ -271,9 +302,15 @@ def pack_bin(
 
   cursor = 0
   for seg, item in enumerate(bin_items, start=1):
+    if seg > 1:
+      cursor = align_offset(cursor, segment_align_multiple)
     p = item.prompt_ids.shape[0]
     c = item.completion_ids.shape[0]
     n = p + c
+    if cursor + n > budget:
+      raise ValueError(
+          f"pack_bin: bin size {cursor + n} exceeds budget {budget}."
+      )
     seq = slice(cursor, cursor + n)
     comp = slice(cursor + p, cursor + n)
 
@@ -313,6 +350,7 @@ def pack_chunk(
     pad_id: int,
     carried: Sequence[str],
     routed_shape: tuple[int, ...] | None = None,
+    segment_align_multiple: int = DEFAULT_SEGMENT_ALIGN_MULTIPLE,
 ) -> list[PackedRow]:
   """Packs a sequence of bins of one chunk into a row."""
   if routed_shape is None:
@@ -325,6 +363,7 @@ def pack_chunk(
           pad_id=pad_id,
           carried=carried,
           routed_shape=routed_shape,
+          segment_align_multiple=segment_align_multiple,
       )
       for bin_items in bins
   ]
@@ -357,6 +396,7 @@ def pack_core(
     pack_size: int = 1,
     max_segments_per_packed_row: int | None = None,
     pad_id: int = 0,
+    segment_align_multiple: int = DEFAULT_SEGMENT_ALIGN_MULTIPLE,
 ) -> list[list[PackedRow]]:
   """Packs `items` into a sequence of chunks, each containing `pack_size` PackedRows with `budget` tokens."""
   if budget <= 0:
@@ -370,6 +410,11 @@ def pack_core(
     raise ValueError(
         "Max segments per packed row must be positive or None, got"
         f" {max_segments_per_packed_row}."
+    )
+  if segment_align_multiple <= 0:
+    raise ValueError(
+        "segment_align_multiple must be positive, got"
+        f" {segment_align_multiple}."
     )
   if not items:
     return []
@@ -386,6 +431,7 @@ def pack_core(
         pack_size=pack_size,
         budget=budget,
         max_segments=max_segments,
+        segment_align_multiple=segment_align_multiple,
     )
     if not any(bins):
       raise ValueError("pack_core: no items placed in any bin.")
@@ -397,6 +443,7 @@ def pack_core(
             pad_id=pad_id,
             carried=carried,
             routed_shape=routed_experts_shape(placed),
+            segment_align_multiple=segment_align_multiple,
         )
     )
   return chunks

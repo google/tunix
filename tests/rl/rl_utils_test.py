@@ -325,6 +325,7 @@ class UtilsTest(absltest.TestCase):
         iter([[example1, example2]]),
         max_token_budget=12,
         sequences_per_update=2,
+        segment_align_multiple=1,
     )
     [[pack]] = list(packed_iterator)
     # Both sequences land in one pack -> two distinct segments.
@@ -420,6 +421,7 @@ class UtilsTest(absltest.TestCase):
             max_token_budget=10,
             pad_id=0,
             sequences_per_update=3,
+            segment_align_multiple=1,
         )
     )
     self.assertLen(packed_batches, 2)
@@ -457,6 +459,28 @@ class UtilsTest(absltest.TestCase):
           jnp.array([[0, 0, 1, 1, 1, 0, 0, 0, 0, 0]], dtype=jnp.int32),
       )
       self.assertTrue(bool(np.asarray(pack2.is_update_step)[0]))
+
+  def test_pack_sequences_default_64_token_alignment(self):
+    # Default segment_align_multiple=64 aligns segments after the first to
+    # multiples of 64, leaving the gap as padding (segment_ids=0, mask=0).
+    example1 = self._create_mock_train_example(10, 20)  # 30 tokens -> [0:30]
+    example2 = self._create_mock_train_example(5, 15)   # 20 tokens -> [64:84]
+    packed_batches = list(
+        utils.pack_sequences(
+            iter([[example1, example2]]),
+            max_token_budget=128,
+            pad_id=99,
+            sequences_per_update=2,
+        )
+    )
+    self.assertLen(packed_batches, 1)
+    pack = packed_batches[0][0]
+    np.testing.assert_array_equal(pack.segment_ids[0, :30], 1)
+    np.testing.assert_array_equal(pack.segment_ids[0, 30:64], 0)
+    np.testing.assert_array_equal(pack.segment_ids[0, 64:84], 2)
+    np.testing.assert_array_equal(pack.segment_ids[0, 84:], 0)
+    np.testing.assert_array_equal(pack.completion_mask[0, 30:64], 0)
+    np.testing.assert_array_equal(pack.completion_ids[0, 30:64], 99)
 
   def test_pack_sequences_sets_num_segments_to_budget_plus_one(self):
     # num_segments is the static (pytree_node=False) segment-bucket upper bound.
@@ -511,6 +535,7 @@ class UtilsTest(absltest.TestCase):
             pad_id=0,
             max_segments_per_packed_row=max_seg,
             sequences_per_update=3,
+            segment_align_multiple=1,
         )
     )
     self.assertNotEmpty(packed)
@@ -539,6 +564,7 @@ class UtilsTest(absltest.TestCase):
             max_token_budget=10,
             pack_size=2,
             sequences_per_update=3,
+            segment_align_multiple=1,
         )
     )
     self.assertLen(packed, 1)  # all three fit one [2, 10] chunk
@@ -577,6 +603,7 @@ class UtilsTest(absltest.TestCase):
             max_token_budget=10,
             pack_size=1,
             sequences_per_update=2,
+            segment_align_multiple=1,
         )
     )
     pack = packed[0][0]  # one [1, 10] row: A (5 tok) then B (3 tok), pad 2.
@@ -603,7 +630,10 @@ class UtilsTest(absltest.TestCase):
     def run(stream):
       packed = list(
           utils.pack_sequences(
-              iter(stream), max_token_budget=10, sequences_per_update=2
+              iter(stream),
+              max_token_budget=10,
+              sequences_per_update=2,
+              segment_align_multiple=1,
           )
       )
       self.assertLen(packed, 1)
@@ -646,6 +676,7 @@ class UtilsTest(absltest.TestCase):
             ]),
             max_token_budget=10,
             sequences_per_update=4,
+            segment_align_multiple=1,
         )
     )
     self.assertLen(packed, 2)
@@ -681,6 +712,7 @@ class UtilsTest(absltest.TestCase):
             ]),
             max_token_budget=10,
             sequences_per_update=3,
+            segment_align_multiple=1,
         )
     )
     self.assertLen(packed, 2)

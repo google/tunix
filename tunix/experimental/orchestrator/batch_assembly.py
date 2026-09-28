@@ -62,6 +62,8 @@ class BatchConfig:
       PaddedBatchAssembler.
     max_segments_per_packed_row: Maximum segments per packed row when sequence
       packing is enabled.
+    segment_align_multiple: Token boundary alignment multiple for segments after
+      the first in a packed row. Defaults to 64.
     trainer_fsdp: Trainer FSDP mesh dimension size for sequence packing.
     trainer_dp: Trainer DP mesh dimension size for sequence packing.
     trainer_expert: Trainer expert-parallel mesh dimension size.
@@ -79,6 +81,7 @@ class BatchConfig:
   max_response_length: int | None = None
   max_seq_token_per_tpu: int | None = None
   max_segments_per_packed_row: int | None = None
+  segment_align_multiple: int = packing.DEFAULT_SEGMENT_ALIGN_MULTIPLE
   trainer_fsdp: int | None = None
   trainer_dp: int | None = None
   trainer_expert: int | None = None
@@ -461,6 +464,7 @@ class SequencePackedBatchAssembler:
       max_packed_len: int = 8192,
       pad_id: int = 0,
       max_segments_per_packed_row: int | None = None,
+      segment_align_multiple: int = packing.DEFAULT_SEGMENT_ALIGN_MULTIPLE,
       start_batch_index: int = 0,
   ):
     """Initializes SequencePackedBatchAssembler.
@@ -473,6 +477,8 @@ class SequencePackedBatchAssembler:
       pad_id: Token ID used for padding.
       max_segments_per_packed_row: Upper bound on the number of real segments
         that may be packed into a single row.
+      segment_align_multiple: Token boundary alignment multiple for the start of
+        each segment after the first in a packed row.
       start_batch_index: Initial microbatch index offset for tracking IDs.
     """
     if batch_size <= 0:
@@ -493,12 +499,18 @@ class SequencePackedBatchAssembler:
           "max_segments_per_packed_row must be positive or None, got"
           f" {max_segments_per_packed_row}."
       )
+    if segment_align_multiple <= 0:
+      raise ValueError(
+          "segment_align_multiple must be positive, got"
+          f" {segment_align_multiple}."
+      )
     self.batch_size = batch_size
     self.max_packed_len = max_packed_len
     self.pad_id = pad_id
     self.num_generations = num_generations
     self.mini_batch_size = mini_batch_size
     self.max_segments_per_packed_row = max_segments_per_packed_row
+    self.segment_align_multiple = segment_align_multiple
     self._batch_counter = start_batch_index
 
     # Each entry is a `(PackItem, trajectory_id, raw_payload)` converted once at ingest.
@@ -526,6 +538,7 @@ class SequencePackedBatchAssembler:
         pack_size=self.batch_size,
         budget=self.max_packed_len,
         max_segments=max_segments,
+        segment_align_multiple=self.segment_align_multiple,
     )
     placed = []
     for bin_items in bins:
@@ -547,6 +560,7 @@ class SequencePackedBatchAssembler:
         pad_id=self.pad_id,
         carried=carried,
         routed_shape=routed_shape,
+        segment_align_multiple=self.segment_align_multiple,
     )
     batch_tracking_id = f"{_BATCH_ID_PREFIX}_{self._batch_counter}"
     merged_lineage = _merge_batch_lineage(
@@ -1145,6 +1159,7 @@ def create_batch_assembler(
         max_packed_len=batch_config.max_seq_token_per_tpu,
         pad_id=batch_config.pad_id,
         max_segments_per_packed_row=batch_config.max_segments_per_packed_row,
+        segment_align_multiple=batch_config.segment_align_multiple,
     )
 
   if batch_config.max_prompt_length is not None:
@@ -1168,4 +1183,5 @@ def create_batch_assembler(
       mini_batch_size=mini_batch_size,
       pad_id=batch_config.pad_id,
       max_segments_per_packed_row=batch_config.max_segments_per_packed_row,
+      segment_align_multiple=batch_config.segment_align_multiple,
   )

@@ -592,6 +592,7 @@ def pack_sequences(
     pad_id: int = 0,
     pack_size: int = 1,
     max_segments_per_packed_row: int | None = None,
+    segment_align_multiple: int = packing.DEFAULT_SEGMENT_ALIGN_MULTIPLE,
 ) -> Iterator[list[common.TrainExample]]:
   """FFD-packs sequences into [pack_size, max_token_budget] chunks, streaming.
 
@@ -612,6 +613,11 @@ def pack_sequences(
     pad_id: Padding vocabulary id.
     pack_size: Rows per chunk (= fsdp * dp); each chunk is [pack_size,
       max_token_budget].
+    max_segments_per_packed_row: Optional cap on segments packed into a single
+      row.
+    segment_align_multiple: Token boundary alignment multiple for the start of
+      each segment after the first in a packed row (defaults to 64, matching
+      NeMo-RL's `sequence_length_round: 64` and Qwen3.5's `gdn_chunk_size=64`).
 
   Yields:
     Single-element lists, each one [pack_size, max_token_budget] TrainExample.
@@ -621,6 +627,11 @@ def pack_sequences(
       max_token_budget, a mid-mini-batch stream end, or a boundary inside an
       input example.
   """
+  if segment_align_multiple <= 0:
+    raise ValueError(
+        "segment_align_multiple must be positive, got"
+        f" {segment_align_multiple}."
+    )
   max_segments = packing.effective_max_segments(
       max_token_budget, max_segments_per_packed_row
   )
@@ -644,7 +655,11 @@ def pack_sequences(
       real = real + [first_item_for_dummy]
     carried = packing.carried_per_token_fields(real)
     rows = packing.pack_chunk(
-        bins, budget=max_token_budget, pad_id=pad_id, carried=carried
+        bins,
+        budget=max_token_budget,
+        pad_id=pad_id,
+        carried=carried,
+        segment_align_multiple=segment_align_multiple,
     )
     return [
         pack_rows_to_train_examples(
@@ -663,6 +678,7 @@ def pack_sequences(
         pack_size=pack_size,
         budget=max_token_budget,
         max_segments=max_segments,
+        segment_align_multiple=segment_align_multiple,
     )
     chunks_in_mini += 1
     return bins
