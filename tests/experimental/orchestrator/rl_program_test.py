@@ -16,6 +16,7 @@ import asyncio
 import builtins
 from collections.abc import Sequence
 import dataclasses
+import json
 import types
 from typing import Any
 from unittest import mock
@@ -33,6 +34,7 @@ from tunix.experimental.trajectory import in_memory_store
 from tunix.experimental.worker import remote_execution
 from tunix.sft import metrics_logger as metrics_logger_lib
 from tunix.sft import utils as sft_utils
+from tunix.utils import trajectory_logger
 
 
 class _MockWorkerHandle(mock.MagicMock):
@@ -4863,6 +4865,153 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
       program.close()
 
     asyncio.run(_run())
+
+  def test_trajectory_rows_drop_routed_experts_and_items_keep_them(self):
+    program = rl_program.StandardRLProgram(
+        algo=self.mock_algo,
+        dataset=["p0"],
+        batch_size=2,
+        group_order=rl_program.trajectory_queue_manager.GroupOrder.PROMPT_BATCH,
+    )
+    program.trajectory_logger = mock.Mock()
+    in_traj = np.zeros((7, 3, 2), dtype=np.int16)
+    in_metadata = np.zeros((5, 3, 2), dtype=np.int16)
+    from_traj = self._make_scored_item("p0", batch_idx=0, reward=2.0)
+    from_traj.traj["routed_experts"] = in_traj
+    from_traj.traj["conversation_text"] = "hi"
+    from_metadata = self._make_scored_item("p1", batch_idx=0)
+    from_metadata.metadata["routed_experts"] = in_metadata
+
+    program._log_consumed_trajectories(
+        [from_traj, from_metadata], log_step=0, consumed_policy_version=0
+    )
+
+    rows = [
+        call.args[0]
+        for call in program.trajectory_logger.log_item_async.call_args_list
+    ]
+    self.assertLen(rows, 2)
+    self.assertEqual(
+        rows[0]["trajectory"],
+        {"trajectory_reward": 2.0, "conversation_text": "hi"},
+    )
+    self.assertEqual(rows[0]["metadata"]["routed_experts_shape"], [7, 3, 2])
+    self.assertEqual(rows[0]["reward"], 2.0)
+    self.assertNotIn("routed_experts", rows[1]["metadata"])
+    self.assertEqual(rows[1]["metadata"]["routed_experts_shape"], [5, 3, 2])
+    # Router replay reads the items, which must be untouched.
+    self.assertIs(from_traj.traj["routed_experts"], in_traj)
+    self.assertIs(from_metadata.metadata["routed_experts"], in_metadata)
+    self.assertNotIn("routed_experts_shape", from_traj.metadata)
+    program.close()
+
+  def test_trajectory_rows_leave_router_replay_arrays_on_critique_items(self):
+    """Rows drop the array; `item.routed_experts` still returns the same one.
+
+    `critique_stage` passes `routed_experts=` to `TrajectoryItem`, which puts
+    it in `item.metadata`; rollouts also carry it in `item.traj`. Router replay
+    reads it back as `item.routed_experts` through `__getattr__`.
+    """
+    program = rl_program.StandardRLProgram(
+        algo=self.mock_algo,
+        dataset=["p0"],
+        batch_size=2,
+        group_order=rl_program.trajectory_queue_manager.GroupOrder.PROMPT_BATCH,
+    )
+    program.trajectory_logger = mock.Mock()
+    as_keyword = np.zeros((6, 3, 2), dtype=np.int16)
+    in_traj = np.zeros((4, 3, 2), dtype=np.int16)
+    prompt_tokens = np.array([1, 2], dtype=np.int32)
+    completion_tokens = np.array([3, 4], dtype=np.int32)
+    action_mask = np.array([1, 1], dtype=np.int32)
+    from_keyword = datatypes.TrajectoryItem(
+        prompt_id="p0",
+        group_index=0,
+        start_step=0,
+        traj={"trajectory_reward": 1.0},
+        is_valid=True,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        action_mask=action_mask,
+        routed_experts=as_keyword,
+        policy_version=0,
+        metadata={"batch_idx": 0},
+    )
+    from_traj = datatypes.TrajectoryItem(
+        prompt_id="p1",
+        group_index=0,
+        traj={"trajectory_reward": 1.0, "routed_experts": in_traj},
+        metadata={"batch_idx": 0},
+    )
+    self.assertIs(from_keyword.metadata["routed_experts"], as_keyword)
+
+    program._log_consumed_trajectories(
+        [from_keyword, from_traj], log_step=0, consumed_policy_version=0
+    )
+
+    self.assertIs(from_keyword.routed_experts, as_keyword)
+    self.assertIs(from_traj.routed_experts, in_traj)
+    self.assertIs(from_keyword.metadata["routed_experts"], as_keyword)
+    self.assertIs(from_traj.traj["routed_experts"], in_traj)
+    self.assertNotIn("routed_experts_shape", from_keyword.metadata)
+    self.assertNotIn("routed_experts_shape", from_traj.metadata)
+    rows = [
+        call.args[0]
+        for call in program.trajectory_logger.log_item_async.call_args_list
+    ]
+    self.assertLen(rows, 2)
+    for row, routed in zip(rows, (as_keyword, in_traj)):
+      self.assertNotIn("routed_experts", row)
+      self.assertNotIn("routed_experts", row["trajectory"])
+      self.assertNotIn("routed_experts", row["metadata"])
+      self.assertEqual(
+          row["metadata"]["routed_experts_shape"], list(routed.shape)
+      )
+    # The other token arrays stay in the row.
+    self.assertIs(rows[0]["prompt_tokens"], prompt_tokens)
+    self.assertIs(rows[0]["completion_tokens"], completion_tokens)
+    self.assertIs(rows[0]["metadata"]["action_mask"], action_mask)
+
+    log_dir = self.create_tempdir().full_path
+    trajectory_logger.log_trajectory_json(
+        log_dir, rows[0], gcs_timeout_sec=None
+    )
+    with open(f"{log_dir}/step0/worker0/traj_p0_g0/metadata.json") as f:
+      written = json.load(f)
+    self.assertNotIn("routed_experts", written["metadata"])
+    self.assertEqual(written["metadata"]["routed_experts_shape"], [6, 3, 2])
+    program.close()
+
+  def test_trajectory_row_shape_follows_traj_and_tolerates_ragged(self):
+    program = rl_program.StandardRLProgram(
+        algo=self.mock_algo,
+        dataset=["p0"],
+        batch_size=2,
+        group_order=rl_program.trajectory_queue_manager.GroupOrder.PROMPT_BATCH,
+    )
+    program.trajectory_logger = mock.Mock()
+    ragged = [[1, 2], [3]]
+    both = self._make_scored_item("p0", batch_idx=0)
+    both.traj["routed_experts"] = np.zeros((7, 3, 2), dtype=np.int16)
+    both.metadata["routed_experts"] = ragged
+    ragged_only = self._make_scored_item("p1", batch_idx=0)
+    ragged_only.metadata["routed_experts"] = ragged
+
+    program._log_consumed_trajectories(
+        [both, ragged_only], log_step=0, consumed_policy_version=0
+    )
+
+    rows = [
+        call.args[0]
+        for call in program.trajectory_logger.log_item_async.call_args_list
+    ]
+    self.assertLen(rows, 2)
+    # Router replay reads `traj` first, so the row records that shape.
+    self.assertEqual(rows[0]["metadata"]["routed_experts_shape"], [7, 3, 2])
+    self.assertNotIn("routed_experts", rows[0]["metadata"])
+    self.assertNotIn("routed_experts", rows[1]["metadata"])
+    self.assertNotIn("routed_experts_shape", rows[1]["metadata"])
+    program.close()
 
 
 class ExtractScalarTest(absltest.TestCase):

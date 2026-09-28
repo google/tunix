@@ -1382,6 +1382,27 @@ class StandardRLProgram(RLProgram):
       reward = traj.get("trajectory_reward", None)
       if isinstance(status, datatypes.TrajectoryStatus):
         status = status.name
+      # `routed_experts` is int16 [tokens, layers, top_k], ~25 MB for a
+      # 21k-token Qwen3.5-397B rollout, and rides on `item.traj`. The JSON log
+      # never writes it from there, but `critique_stage` also passes it to
+      # `TrajectoryItem` as a keyword, which puts it in `item.metadata`, and
+      # metadata.json gets `metadata` in full. Every queued row would also keep
+      # it alive, and the logger queues up to a thousand rows. Rows get shallow
+      # copies without it plus its shape; the item, which router replay reads,
+      # is untouched.
+      routed_experts = None
+      if isinstance(traj, dict) and traj.get("routed_experts") is not None:
+        traj = dict(traj)
+        routed_experts = traj.pop("routed_experts")
+      if metadata.get("routed_experts") is not None:
+        in_metadata = metadata.pop("routed_experts")
+        # Router replay reads `traj` before `metadata`; record the same one.
+        if routed_experts is None:
+          routed_experts = in_metadata
+      # `.shape`, not `np.shape`, which raises on a ragged list.
+      routed_experts_shape = getattr(routed_experts, "shape", None)
+      if routed_experts_shape is not None:
+        metadata["routed_experts_shape"] = list(routed_experts_shape)
       prompt_id = getattr(item, "prompt_id", "")
       group_index = getattr(item, "group_index", 0)
       worker_id = (
