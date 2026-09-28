@@ -584,6 +584,52 @@ class RaidenSynchronizerTest(absltest.TestCase):
             1,
         )
 
+  def test_filter_bindable_batches_block_until_ready(self):
+    a1 = _FakeBindableArray()
+    a2 = _FakeBindableArray()
+    with mock.patch.object(
+        raiden_synchronizer.jax,
+        "block_until_ready",
+        wraps=raiden_synchronizer.jax.block_until_ready,
+    ) as spy_ready:
+      names, arrays = raiden_synchronizer._filter_bindable(
+          ["w1", "w2"], [a1, a2]
+      )
+      self.assertEqual(names, ["w1", "w2"])
+      self.assertEqual(arrays, [a1, a2])
+      spy_ready.assert_called_once_with([a1, a2])
+
+  def test_init_ffi_transport_caches_sharded_metadata_across_rebinds(self):
+    with mock.patch.dict("os.environ", {"JAX_PLATFORMS": "proxy,cpu"}):
+      sync = raiden_synchronizer.RaidenSynchronizer("trainer")
+      mesh = jax.sharding.Mesh(np.array(jax.devices()[:1]), ("data",))
+      sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+      arr1 = jax.device_put(jnp.ones((2, 4), jnp.float32), sharding)
+      arr2 = jax.device_put(jnp.zeros((2, 4), jnp.float32), sharding)
+      fake_info = np.zeros((1, 6), dtype=np.int32)
+      with mock.patch.object(
+          raiden_synchronizer, "_raiden_ffi", autospec=True
+      ), mock.patch(
+          "jax.experimental.multihost_utils.global_array_to_host_local_array",
+          return_value=fake_info,
+      ), mock.patch(
+          "jax.experimental.multihost_utils.process_allgather",
+          return_value=fake_info,
+      ), mock.patch.object(
+          raiden_synchronizer.jax,
+          "device_put",
+          wraps=raiden_synchronizer.jax.device_put,
+      ) as spy_put:
+        sync.arrays = [arr1]
+        sync._init_ffi_transport(is_d2h=True)
+        first_put_count = spy_put.call_count
+        self.assertEqual(first_put_count, 2)
+        # Second round with new array of identical shape/dtype/sharding reuses
+        # cached slice_byte_sizes_sharded and shard_idx without device_put.
+        sync.arrays = [arr2]
+        sync._init_ffi_transport(is_d2h=True)
+        self.assertEqual(spy_put.call_count, first_put_count)
+
   def test_devices_per_host_pathways_logical_task(self):
     class FakePathwaysDevice:
 
