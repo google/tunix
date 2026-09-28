@@ -21,6 +21,7 @@ pipelines.
 import abc
 import asyncio
 from collections.abc import Callable, Iterable, Mapping, Sequence, Sized
+import concurrent.futures
 import copy
 import dataclasses
 import os
@@ -466,6 +467,12 @@ class StandardRLProgram(RLProgram):
     self.max_staleness = max_staleness
     self.sync_weights = sync_weights
     self.metrics_logger: MetricsLogger = MetricsLogger(metrics_logging_options)
+    # Step-boundary logging (metrics backends and trajectory rows) runs on this
+    # thread instead of the event loop; one worker keeps steps in order. See
+    # `train_stage`.
+    self._step_log_executor = concurrent.futures.ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix="rl-step-log"
+    )
     if trajectory_log_dir is None and metrics_logging_options is not None:
       log_dir = getattr(metrics_logging_options, "log_dir", "")
       if log_dir:
@@ -542,6 +549,9 @@ class StandardRLProgram(RLProgram):
     (see `__init__`), and closing a store the orchestrator may still be
     using — e.g. across a second `run_program()` call — would be wrong.
     """
+    # Finish any step still being logged (e.g. train_stage was cancelled
+    # mid-await) before the loggers it writes to are closed.
+    self._step_log_executor.shutdown(wait=True)
     if self.trajectory_logger is not None:
       self.trajectory_logger.stop()
     if self.metrics_logger is not None:
@@ -1659,27 +1669,42 @@ class StandardRLProgram(RLProgram):
 
       step_time_sec = time.monotonic() - step_start_time
 
-      metrics_summary = self._collect_and_log_step_metrics(
-          all_step_items=all_step_items,
-          step_rewards=step_rewards,
-          step_advantages=step_advantages,
-          generation_metrics=generation_metrics,
-          step_result=step_result,
-          trainer_metrics=trainer_metrics,
-          num_rollouts=num_rollouts,
-          num_microbatches=num_microbatches,
-          step_time_sec=step_time_sec,
-          consumed_policy_version=consumed_policy_version,
-          log_step=current_step,
-          sampler_agreement=step_sampler_agreement,
-          policy_training_time=policy_training_time,
-          exposed_generation_time=exposed_generation_time,
-          weight_sync_time=weight_sync_time,
-      )
-      self._log_consumed_trajectories(
-          all_step_items,
-          log_step=current_step,
-          consumed_policy_version=consumed_policy_version,
+      # `commit_batch` above already opened the dispatch window, but the
+      # dispatcher only runs once this coroutine yields. What follows took
+      # 28-60 s per step on the Qwen3.5-397B runs (0.2 s at step 0; the cause
+      # is not established) and reads only this step's own data, never
+      # `scored_q`, so it runs on the step-log thread while the loop keeps
+      # dispatching, polling and scoring. After startup only this coroutine
+      # writes `self.policy_version`, and it stays parked on the await, so the
+      # logged value is the one read inline before. Exceptions surface here as
+      # they did inline, and every later statement keeps its order.
+      def _log_step() -> dict[str, Any]:
+        summary = self._collect_and_log_step_metrics(
+            all_step_items=all_step_items,
+            step_rewards=step_rewards,
+            step_advantages=step_advantages,
+            generation_metrics=generation_metrics,
+            step_result=step_result,
+            trainer_metrics=trainer_metrics,
+            num_rollouts=num_rollouts,
+            num_microbatches=num_microbatches,
+            step_time_sec=step_time_sec,
+            consumed_policy_version=consumed_policy_version,
+            log_step=current_step,
+            sampler_agreement=step_sampler_agreement,
+            policy_training_time=policy_training_time,
+            exposed_generation_time=exposed_generation_time,
+            weight_sync_time=weight_sync_time,
+        )
+        self._log_consumed_trajectories(
+            all_step_items,
+            log_step=current_step,
+            consumed_policy_version=consumed_policy_version,
+        )
+        return summary
+
+      metrics_summary = await asyncio.get_running_loop().run_in_executor(
+          self._step_log_executor, _log_step
       )
 
       self.last_step_result = RLStepResult(

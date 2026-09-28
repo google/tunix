@@ -17,11 +17,13 @@ import builtins
 from collections.abc import Sequence
 import dataclasses
 import json
+import threading
 import types
 from typing import Any
 from unittest import mock
 
 from absl.testing import absltest
+import jax
 import metrax.logging as metrax_logging
 import numpy as np
 from tunix.experimental.common import datatypes
@@ -4562,6 +4564,21 @@ class StandardRLProgramTrajectoryStoreTest(absltest.TestCase):
     program.close()
 
 
+class _GatedBackend:
+  """Metrics backend whose writes block until `gate` is set."""
+
+  def __init__(self):
+    self.gate = threading.Event()
+    self.logged: list[tuple[str, float, Any]] = []
+
+  def log_scalar(self, event: str, value: Any, **kwargs: Any) -> None:
+    self.gate.wait(timeout=10)
+    self.logged.append((event, float(value), kwargs.get("step")))
+
+  def close(self) -> None:
+    pass
+
+
 class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
 
   def setUp(self):
@@ -5012,6 +5029,125 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
     self.assertNotIn("routed_experts", rows[1]["metadata"])
     self.assertNotIn("routed_experts_shape", rows[1]["metadata"])
     program.close()
+
+  def _run_step_with_gated_metrics(self, max_staleness: int):
+    """Trains batch 0 while every metrics write blocks until released.
+
+    Batches 0..max_staleness are dispatched before training starts. The gate
+    opens only once batch `max_staleness + 1`, which `commit_batch(0)` admits,
+    has been fully dispatched.
+
+    Args:
+      max_staleness: The program's staleness window.
+
+    Returns:
+      `(program, backend, dispatched)`, where `dispatched` holds one
+      `(batch_idx, policy_version, gate_was_open)` per dispatched prompt.
+    """
+    backend = _GatedBackend()
+    # If step logging blocks the loop, nothing on the loop can open the gate;
+    # the timer does, and the test fails on the recorded order, not a hang.
+    safety = threading.Timer(3.0, backend.gate.set)
+    safety.start()
+    program = rl_program.StandardRLProgram(
+        algo=self.mock_algo,
+        dataset=[f"p{i}" for i in range(8)],
+        max_steps=1,
+        batch_size=2,
+        max_staleness=max_staleness,
+        group_order=rl_program.trajectory_queue_manager.GroupOrder.PROMPT_BATCH,
+        metrics_logging_options=metrics_logger_lib.MetricsLoggerOptions(
+            log_dir=self.create_tempdir().full_path,
+            backend_kwargs={"custom_backend": [lambda: backend]},
+        ),
+    )
+    released_batch = max_staleness + 1
+    dispatched: list[tuple[int, int, bool]] = []
+
+    def _record_dispatch(prompts, **kwargs):
+      dispatched.append((
+          prompts[0]["metadata"]["batch_idx"],
+          kwargs["policy_version"],
+          backend.gate.is_set(),
+      ))
+
+    self.mock_engine.dispatch_rollouts.side_effect = _record_dispatch
+
+    async def _wait_for_dispatches(batch_idx: int, count: int) -> None:
+      while sum(b == batch_idx for b, _, _ in dispatched) < count:
+        await asyncio.sleep(0.005)
+
+    async def _open_gate_after_released_batch() -> None:
+      await _wait_for_dispatches(released_batch, 2)
+      backend.gate.set()
+
+    async def _run():
+      program.engine = self.mock_engine
+      await program.scored_q.put(self._make_scored_item("p0", batch_idx=0))
+      await program.scored_q.put(self._make_scored_item("p1", batch_idx=0))
+      dispatch_task = asyncio.create_task(program.rollout_dispatch_stage())
+      release_task = asyncio.create_task(_open_gate_after_released_batch())
+      try:
+        await asyncio.wait_for(
+            _wait_for_dispatches(max_staleness, 2), timeout=10
+        )
+        await asyncio.wait_for(program.train_stage(), timeout=20)
+        await asyncio.wait_for(release_task, timeout=20)
+      finally:
+        dispatch_task.cancel()
+        release_task.cancel()
+        await asyncio.gather(
+            dispatch_task, release_task, return_exceptions=True
+        )
+
+    try:
+      asyncio.run(_run())
+    finally:
+      safety.cancel()
+      backend.gate.set()
+      program.close()
+      try:
+        jax.monitoring.unregister_scalar_listener(backend.log_scalar)
+      except ValueError:
+        pass
+    return program, backend, dispatched
+
+  def _assert_step_zero_metrics_logged_as_inline(self, program, backend):
+    self.assertEqual(program.step, 1)
+    self.assertEqual(program._next_batch, 1)
+    history = lambda name: list(
+        program.metrics_logger.get_metric_history(
+            "", name, rl_program.Mode.TRAIN
+        )
+    )
+    # Synced after batch 0, so the step logs version 1, as it did inline.
+    self.assertEqual(history("orchestrator/policy_version"), [1.0])
+    self.assertEqual(history("orchestrator/num_rollouts"), [2.0])
+    self.assertNotEmpty(backend.logged)
+    self.assertEqual({step for _, _, step in backend.logged}, {0})
+    self.assertIn(
+        ("/train/orchestrator/policy_version", 1.0, 0), backend.logged
+    )
+
+  def test_zero_staleness_dispatch_does_not_wait_on_step_logging(self):
+    program, backend, dispatched = self._run_step_with_gated_metrics(0)
+
+    self.assertEqual(
+        [(b, v) for b, v, _ in dispatched], [(0, 0), (0, 0), (1, 1), (1, 1)]
+    )
+    # Batch 1 went out while step 0's metrics writes were still blocked.
+    self.assertEqual([g for b, _, g in dispatched if b == 1], [False, False])
+    self._assert_step_zero_metrics_logged_as_inline(program, backend)
+
+  def test_one_staleness_dispatch_does_not_wait_on_step_logging(self):
+    program, backend, dispatched = self._run_step_with_gated_metrics(1)
+
+    self.assertEqual(
+        [(b, v) for b, v, _ in dispatched],
+        [(0, 0), (0, 0), (1, 0), (1, 0), (2, 1), (2, 1)],
+    )
+    self.assertEqual([g for b, _, g in dispatched if b == 2], [False, False])
+    self._assert_step_zero_metrics_logged_as_inline(program, backend)
 
 
 class ExtractScalarTest(absltest.TestCase):
