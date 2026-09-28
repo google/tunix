@@ -360,7 +360,9 @@ echo "Launching trainer node..."
     )
   fi
 
-  TRAINER_CMD+=+="$(maxtext_trainer_flags)"
+  ROLLOUT_MESH_TP=${ROLLOUT_MESH_TP:-$ROLLOUT_TP}
+  # shellcheck disable=SC2206
+  TRAINER_CMD+=($(maxtext_trainer_flags))
   
   if [[ -n "$MAX_SEQ_TOKEN_PER_TPU" ]]; then
     TRAINER_CMD+=(--max_seq_token_per_tpu="$MAX_SEQ_TOKEN_PER_TPU")
@@ -419,7 +421,8 @@ echo "Launching DeepSWE rollout node..."
     --max_concurrency="$ROLLOUT_MAX_CONCURRENCY"
   )
   
-  ROLLOUT_CMD+="$(maxtext_rollout_flags)"
+  # shellcheck disable=SC2206
+  ROLLOUT_CMD+=($(maxtext_rollout_flags))
 
   if [[ -n "$EOS_TOKENS" ]]; then
     ROLLOUT_CMD+=(--eos_tokens="$EOS_TOKENS")
@@ -606,6 +609,9 @@ echo "Launching CPU orchestrator..."
     ORCHESTRATOR_CMD+=(--no-exact_token_continuity)
   else
     ORCHESTRATOR_CMD+=(--exact_token_continuity)
+  fi
+  if [[ "${WEIGHT_SYNC_DISABLE_TIMEOUTS:-${DISABLE_WEIGHT_SYNC_TIMEOUTS:-0}}" == "1" || "${WEIGHT_SYNC_DISABLE_TIMEOUTS:-${DISABLE_WEIGHT_SYNC_TIMEOUTS:-0}}" == "true" || "${WEIGHT_SYNC_DISABLE_TIMEOUTS:-${DISABLE_WEIGHT_SYNC_TIMEOUTS:-0}}" == "True" ]]; then
+    ORCHESTRATOR_CMD+=(--disable_weight_sync_timeouts)
   fi
   export JAX_PLATFORMS=cpu
   export PYTHONUNBUFFERED=1

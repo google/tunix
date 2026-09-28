@@ -15,6 +15,7 @@
 """Traffic controller for rollout worker admission and state management."""
 
 import asyncio
+import math
 import threading
 from typing import Any
 
@@ -102,12 +103,17 @@ class TrafficController:
     with self._lock:
       return list(self._active_tasks)
 
-  async def drain(self, timeout_s: float) -> None:
+  async def drain(self, timeout_s: float | None) -> None:
     """Waits for tracked tasks to finish, up to the timeout."""
     with self._lock:
       tasks = list(self._active_tasks)
     if tasks:
-      await asyncio.wait(tasks, timeout=timeout_s)
+      effective_timeout = (
+          None
+          if timeout_s is None or math.isinf(timeout_s) or timeout_s <= 0
+          else timeout_s
+      )
+      await asyncio.wait(tasks, timeout=effective_timeout)
 
   def transition_to_syncing(self) -> None:
     """Transitions state to SYNCING and closes admission.

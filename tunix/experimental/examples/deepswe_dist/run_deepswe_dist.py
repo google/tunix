@@ -43,6 +43,7 @@ from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import orchestrator
 from tunix.experimental.orchestrator import rl_program
 from tunix.experimental.weight_sync import weight_sync
+from tunix.experimental.weight_sync import weight_sync_coordinator
 from tunix.experimental.worker import remote_execution
 from tunix.rl import algorithm_config
 from tunix.sft import metrics_logger as metrics_logger_lib
@@ -257,6 +258,15 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       type=weight_sync.WeightSyncMode,
       default=weight_sync.WeightSyncMode(os.getenv("WEIGHT_SYNC_MODE", "none")),
       choices=list(weight_sync.WeightSyncMode),
+  )
+  parser.add_argument(
+      "--disable_weight_sync_timeouts",
+      action=argparse.BooleanOptionalAction,
+      default=weight_sync_coordinator.is_weight_sync_timeouts_disabled(),
+      help=(
+          "Disable all weight-sync phase and RPC timeouts (sets them to"
+          " infinity). Also controlled via WEIGHT_SYNC_DISABLE_TIMEOUTS=1."
+      ),
   )
   parser.add_argument(
       "--trainable_parameters_mask",
@@ -564,14 +574,16 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
 
   if args.image_rewrite_prefix:
     os.environ["IMAGE_REWRITE_PREFIX"] = args.image_rewrite_prefix.strip('"\'')
+  if args.disable_weight_sync_timeouts:
+    os.environ["WEIGHT_SYNC_DISABLE_TIMEOUTS"] = "1"
 
   logging.info("=== Starting Distributed DeepSWE GRPO Orchestrator ===")
   logging.info(
       "Configuration: model_id=%s, batch_size=%d prompt group(s), "
       "mini_batch_size=%d, num_generations=%d, max_steps=%d, max_turns=%d, "
       "train_micro=%d, beta=%.4f, env_backend=%s, use_agent_sandbox=%s, "
-      "weight_sync_mode=%s, trainable_parameters_mask=%s, "
-      "image_rewrite_prefix=%s.",
+      "weight_sync_mode=%s, disable_weight_sync_timeouts=%s, "
+      "trainable_parameters_mask=%s, image_rewrite_prefix=%s.",
       args.model_id,
       args.batch_size,
       args.mini_batch_size,
@@ -583,6 +595,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       args.env_backend,
       args.use_agent_sandbox,
       args.weight_sync_mode,
+      args.disable_weight_sync_timeouts,
       args.trainable_parameters_mask,
       args.image_rewrite_prefix or "(none)",
   )
@@ -629,6 +642,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   cluster = orchestrator.ClusterOrchestrator(
       weight_sync_mode=args.weight_sync_mode,
       trajectory_store_config=_build_trajectory_store_config(args),
+      disable_weight_sync_timeouts=args.disable_weight_sync_timeouts,
   )
   context.ipc.discovery.on_register(
       functools.partial(

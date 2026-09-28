@@ -125,6 +125,7 @@ import asyncio
 import dataclasses
 import enum
 import functools
+import math
 import os
 import threading
 import time
@@ -537,10 +538,35 @@ _POISONING_STATES = frozenset({
 })
 
 
+_TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "y", "t", "on"})
+_INFINITE_ENV_VALUES = frozenset({
+    "inf",
+    "+inf",
+    "infinity",
+    "+infinity",
+    "none",
+    "off",
+    "disable",
+    "disabled",
+})
+
+
+def is_weight_sync_timeouts_disabled() -> bool:
+  """Returns True if weight-sync timeouts are globally disabled via env."""
+  for name in ("WEIGHT_SYNC_DISABLE_TIMEOUTS", "DISABLE_WEIGHT_SYNC_TIMEOUTS"):
+    val = os.getenv(name)
+    if val is not None and val.strip().lower() in _TRUTHY_ENV_VALUES:
+      return True
+  return False
+
+
 def _env_float(name: str, default: float) -> float:
   val = os.getenv(name)
   if val is None or not val.strip():
     return default
+  stripped = val.strip().lower()
+  if stripped in _INFINITE_ENV_VALUES:
+    return float("inf")
   try:
     return float(val)
   except ValueError:
@@ -548,6 +574,31 @@ def _env_float(name: str, default: float) -> float:
         "Invalid float for %s=%r; using default %f", name, val, default
     )
     return default
+
+
+def _timeout_env_float(name: str, default: float) -> float:
+  if is_weight_sync_timeouts_disabled():
+    return float("inf")
+  parsed = _env_float(name, default)
+  if parsed <= 0:
+    return float("inf")
+  return parsed
+
+
+def _is_infinite_timeout(timeout: Optional[float]) -> bool:
+  return timeout is None or math.isinf(timeout) or timeout <= 0
+
+
+def _format_timeout(timeout: Optional[float]) -> str:
+  if _is_infinite_timeout(timeout):
+    return "inf"
+  return f"{timeout:.1f}s"
+
+
+async def _wait_for(aw: Any, timeout: Optional[float]) -> Any:
+  if _is_infinite_timeout(timeout):
+    return await aw
+  return await asyncio.wait_for(aw, timeout)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -559,21 +610,29 @@ class PhaseTimeouts:
   round into a spurious rollback. These deadlines govern the coordinator's
   waiting only; a remote worker adapter must configure its own RPC deadline
   at least this large.
+
+  Setting `WEIGHT_SYNC_DISABLE_TIMEOUTS=1` (or `DISABLE_WEIGHT_SYNC_TIMEOUTS=1`)
+  sets all phase timeouts to `float("inf")`. Individual `WEIGHT_SYNC_*_TIMEOUT_S`
+  variables also accept `"inf"`, `"none"`, or `<= 0` for an infinite deadline.
   """
 
   bind: float = dataclasses.field(
-      default_factory=lambda: _env_float("WEIGHT_SYNC_BIND_TIMEOUT_S", 300.0)
+      default_factory=lambda: _timeout_env_float(
+          "WEIGHT_SYNC_BIND_TIMEOUT_S", 300.0
+      )
   )
   metadata: float = dataclasses.field(
-      default_factory=lambda: _env_float("WEIGHT_SYNC_METADATA_TIMEOUT_S", 300.0)
+      default_factory=lambda: _timeout_env_float(
+          "WEIGHT_SYNC_METADATA_TIMEOUT_S", 300.0
+      )
   )
   source_prepare: float = dataclasses.field(
-      default_factory=lambda: _env_float(
+      default_factory=lambda: _timeout_env_float(
           "WEIGHT_SYNC_SOURCE_PREPARE_TIMEOUT_S", 900.0
       )
   )
   pre: float = dataclasses.field(
-      default_factory=lambda: _env_float(
+      default_factory=lambda: _timeout_env_float(
           "WEIGHT_SYNC_PRE_TIMEOUT_S",
           _env_float(
               "EPISODE_TIMEOUT_SECS",
@@ -583,23 +642,52 @@ class PhaseTimeouts:
       )
   )
   transfer: float = dataclasses.field(
-      default_factory=lambda: _env_float("WEIGHT_SYNC_TRANSFER_TIMEOUT_S", 1800.0)
+      default_factory=lambda: _timeout_env_float(
+          "WEIGHT_SYNC_TRANSFER_TIMEOUT_S", 1800.0
+      )
   )
   h2d: float = dataclasses.field(
-      default_factory=lambda: _env_float("WEIGHT_SYNC_H2D_TIMEOUT_S", 1800.0)
+      default_factory=lambda: _timeout_env_float(
+          "WEIGHT_SYNC_H2D_TIMEOUT_S", 1800.0
+      )
   )
   post: float = dataclasses.field(
-      default_factory=lambda: _env_float("WEIGHT_SYNC_POST_TIMEOUT_S", 300.0)
+      default_factory=lambda: _timeout_env_float(
+          "WEIGHT_SYNC_POST_TIMEOUT_S", 300.0
+      )
   )
   abort: float = dataclasses.field(
-      default_factory=lambda: _env_float("WEIGHT_SYNC_ABORT_TIMEOUT_S", 180.0)
+      default_factory=lambda: _timeout_env_float(
+          "WEIGHT_SYNC_ABORT_TIMEOUT_S", 180.0
+      )
   )
   status: float = dataclasses.field(
-      default_factory=lambda: _env_float("WEIGHT_SYNC_STATUS_TIMEOUT_S", 30.0)
+      default_factory=lambda: _timeout_env_float(
+          "WEIGHT_SYNC_STATUS_TIMEOUT_S", 30.0
+      )
   )
   release: float = dataclasses.field(
-      default_factory=lambda: _env_float("WEIGHT_SYNC_RELEASE_TIMEOUT_S", 120.0)
+      default_factory=lambda: _timeout_env_float(
+          "WEIGHT_SYNC_RELEASE_TIMEOUT_S", 120.0
+      )
   )
+
+  @classmethod
+  def disabled(cls) -> PhaseTimeouts:
+    """Returns a `PhaseTimeouts` instance with all deadlines set to infinity."""
+    inf = float("inf")
+    return cls(
+        bind=inf,
+        metadata=inf,
+        source_prepare=inf,
+        pre=inf,
+        transfer=inf,
+        h2d=inf,
+        post=inf,
+        abort=inf,
+        status=inf,
+        release=inf,
+    )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -631,6 +719,7 @@ class WeightSyncResult:
   destination_units: tuple[weight_sync.WorkUnitId, ...]
   workers: tuple[WorkerRoundReport, ...] = ()
   failures: tuple[str, ...] = ()
+  phase_timings_s: dict[str, float] = dataclasses.field(default_factory=dict)
 
   @property
   def success(self) -> bool:
@@ -691,6 +780,7 @@ class WeightSyncCoordinator:
       req_id_prefix: str = "wsync",
       first_uuid: int = 1,
       timeouts: Optional[PhaseTimeouts] = None,
+      disable_timeouts: Optional[bool] = None,
   ):
     self._registry = registry
     self._handler = handler
@@ -698,9 +788,14 @@ class WeightSyncCoordinator:
     self._destination_role = destination_role
     self._controller_id = controller_id
     self._req_id_prefix = req_id_prefix
-    self._timeouts = timeouts or PhaseTimeouts()
+    if disable_timeouts is True:
+      self._timeouts = PhaseTimeouts.disabled()
+    else:
+      self._timeouts = timeouts or PhaseTimeouts()
     logging.info(
-        "WeightSyncCoordinator initialized with timeouts: %s", self._timeouts
+        "WeightSyncCoordinator initialized with timeouts (disabled=%s): %s",
+        disable_timeouts or is_weight_sync_timeouts_disabled(),
+        self._timeouts,
     )
 
     self._round_index = 0
@@ -708,6 +803,7 @@ class WeightSyncCoordinator:
     self._in_flight = False
     self._poisoned: Optional[str] = None
     self._last_committed_version: Optional[int] = None
+    self._current_round_abort_s: float = 0.0
 
   @property
   def round_index(self) -> int:
@@ -809,7 +905,7 @@ class WeightSyncCoordinator:
   ) -> Optional[str]:
     """The worker's self-reported phase for THIS round, or None if unknown."""
     try:
-      report = await asyncio.wait_for(
+      report = await _wait_for(
           destination.get_weight_sync_status(), self._timeouts.status
       )
     except Exception:  # pylint: disable=broad-except
@@ -837,7 +933,7 @@ class WeightSyncCoordinator:
     method = getattr(destination, method_name)
     accepts = _PHASE_ACCEPTS.get(method_name)
     try:
-      await asyncio.wait_for(method(request), timeout)
+      await _wait_for(method(request), timeout)
       return None
     except asyncio.CancelledError:
       raise
@@ -897,9 +993,24 @@ class WeightSyncCoordinator:
     already have gated admission or freed its cache, and abort is idempotent
     by contract, so over-calling is safe where under-calling strands a worker.
     """
-    return await self._phase_on_all(
-        destinations, "abort_weight_sync", request, self._timeouts.abort
-    )
+    t_abort_start = time.monotonic()
+    try:
+      abort_failures = await self._phase_on_all(
+          destinations, "abort_weight_sync", request, self._timeouts.abort
+      )
+      return abort_failures
+    finally:
+      elapsed_abort_s = time.monotonic() - t_abort_start
+      self._current_round_abort_s += elapsed_abort_s
+      logging.info(
+          "WEIGHT_SYNC_PHASE round=%s req_id=%s phase=abort"
+          " elapsed_s=%.3f timeout=%s workers=%d",
+          request.extra_config.get("round_index", -1),
+          request.extra_config.get("req_id", ""),
+          elapsed_abort_s,
+          _format_timeout(self._timeouts.abort),
+          len(destinations),
+      )
 
   # ---------------------------------------------------------------- the round
 
@@ -974,6 +1085,33 @@ class WeightSyncCoordinator:
     # this window gets the timeout treatment, not the rollback treatment.
     transfer_in_flight = False
 
+    t_round_start = time.monotonic()
+    t_bind_s = 0.0
+    t_metadata_s = 0.0
+    t_source_prepare_s = 0.0
+    t_prepare_s = 0.0
+    t_register_s = 0.0
+    t_pre_s = 0.0
+    t_transfer_s = 0.0
+    t_h2d_s = 0.0
+    t_post_s = 0.0
+    t_release_s = 0.0
+    self._current_round_abort_s = 0.0
+
+    def current_phase_timings() -> dict[str, float]:
+      return {
+          "bind": t_bind_s,
+          "metadata": t_metadata_s,
+          "source_prepare": t_source_prepare_s,
+          "register": t_register_s,
+          "pre": t_pre_s,
+          "transfer": t_transfer_s,
+          "h2d": t_h2d_s,
+          "post": t_post_s,
+          "abort": self._current_round_abort_s,
+          "release": t_release_s,
+      }
+
     def result() -> WeightSyncResult:
       return WeightSyncResult(
           policy_version=policy_version,
@@ -986,6 +1124,7 @@ class WeightSyncCoordinator:
           destination_units=destination_units,
           workers=tuple(worker_reports.values()),
           failures=tuple(failures),
+          phase_timings_s=current_phase_timings(),
       )
 
     def fail(message: str) -> WeightSyncError:
@@ -1025,39 +1164,74 @@ class WeightSyncCoordinator:
     )
     prepared_request: Optional[datatypes.WeightSyncRequest] = None
 
-    t_round_start = time.monotonic()
-    t_prepare_s = 0.0
-    t_transfer_s = 0.0
-    t_h2d_s = 0.0
-    t_post_s = 0.0
-    t_release_s = 0.0
-
     try:
       # Everything up to `pre` runs while the destinations are still serving:
       # bind (a no-op on an already-bound worker), metadata collection, and
       # registration cost no downtime. Failures here need no rollback either.
       try:
         t_phase = time.monotonic()
-        await asyncio.gather(*[
-            asyncio.wait_for(d.bind_weight_sync(), self._timeouts.bind)
-            for d in destinations
-        ])
-        dst_meta_lists = await asyncio.gather(*[
-            asyncio.wait_for(
-                d.get_weight_sync_metadata(), self._timeouts.metadata
-            )
-            for d in destinations
-        ])
+        try:
+          await asyncio.gather(*[
+              _wait_for(d.bind_weight_sync(), self._timeouts.bind)
+              for d in destinations
+          ])
+        finally:
+          t_bind_s = time.monotonic() - t_phase
+          t_prepare_s = t_bind_s
+          logging.info(
+              "WEIGHT_SYNC_PHASE round=%d req_id=%s phase=bind"
+              " elapsed_s=%.3f timeout=%s workers=%d",
+              round_index,
+              req_id,
+              t_bind_s,
+              _format_timeout(self._timeouts.bind),
+              len(destinations),
+          )
+
+        t_phase = time.monotonic()
+        try:
+          dst_meta_lists = await asyncio.gather(*[
+              _wait_for(
+                  d.get_weight_sync_metadata(), self._timeouts.metadata
+              )
+              for d in destinations
+          ])
+        finally:
+          t_metadata_s = time.monotonic() - t_phase
+          t_prepare_s = t_bind_s + t_metadata_s
+          logging.info(
+              "WEIGHT_SYNC_PHASE round=%d req_id=%s phase=metadata"
+              " elapsed_s=%.3f timeout=%s workers=%d",
+              round_index,
+              req_id,
+              t_metadata_s,
+              _format_timeout(self._timeouts.metadata),
+              len(destinations),
+          )
+
         # Metadata is collected exactly once and the same objects flow to both
         # registration and the request. Collecting twice would hand the
         # controller endpoints from a different rebind than the one staged.
-        src_meta_lists = await asyncio.gather(*[
-            asyncio.wait_for(
-                s.prepare_weight_sync(request), self._timeouts.source_prepare
-            )
-            for s in sources
-        ])
-        t_prepare_s = time.monotonic() - t_phase
+        t_phase = time.monotonic()
+        try:
+          src_meta_lists = await asyncio.gather(*[
+              _wait_for(
+                  s.prepare_weight_sync(request), self._timeouts.source_prepare
+              )
+              for s in sources
+          ])
+        finally:
+          t_source_prepare_s = time.monotonic() - t_phase
+          t_prepare_s = t_bind_s + t_metadata_s + t_source_prepare_s
+          logging.info(
+              "WEIGHT_SYNC_PHASE round=%d req_id=%s phase=source_prepare"
+              " elapsed_s=%.3f timeout=%s workers=%d",
+              round_index,
+              req_id,
+              t_source_prepare_s,
+              _format_timeout(self._timeouts.source_prepare),
+              len(sources),
+          )
       except asyncio.CancelledError:
         raise
       except Exception as e:  # pylint: disable=broad-except
@@ -1164,6 +1338,7 @@ class WeightSyncCoordinator:
       # fresh ports/layout with this round's stale ones. On cancel, every
       # registration is awaited to completion before the cancellation
       # propagates.
+      t_phase = time.monotonic()
       registration_metadata = (*src_metadata, *dst_metadata)
       registration_gather = asyncio.gather(
           *[
@@ -1179,6 +1354,16 @@ class WeightSyncCoordinator:
       except asyncio.CancelledError:
         await registration_gather
         raise
+      finally:
+        t_register_s = time.monotonic() - t_phase
+        logging.info(
+            "WEIGHT_SYNC_PHASE round=%d req_id=%s phase=register"
+            " elapsed_s=%.3f units=%d",
+            round_index,
+            req_id,
+            t_register_s,
+            len(registration_metadata),
+        )
       registration_errors: list[BaseException] = []
       for metadata, result_or_error in zip(
           registration_metadata, registrations
@@ -1232,6 +1417,17 @@ class WeightSyncCoordinator:
       pre_failures = await self._phase_on_all(
           destinations, "pre_weight_sync", prepared_request, self._timeouts.pre
       )
+      t_pre_s = time.monotonic() - t_phase
+      logging.info(
+          "WEIGHT_SYNC_PHASE round=%d req_id=%s phase=pre"
+          " elapsed_s=%.3f timeout=%s workers=%d failures=%d",
+          round_index,
+          req_id,
+          t_pre_s,
+          _format_timeout(self._timeouts.pre),
+          len(destinations),
+          len(pre_failures),
+      )
       if pre_failures:
         failures += pre_failures
         state = await self._rollback(destinations, prepared_request, failures)
@@ -1242,8 +1438,9 @@ class WeightSyncCoordinator:
 
       state = RoundState.TRANSFERRING
       transfer_in_flight = True
+      t_phase = time.monotonic()
       try:
-        transfer = await asyncio.wait_for(
+        transfer = await _wait_for(
             loop.run_in_executor(
                 None,
                 functools.partial(
@@ -1258,10 +1455,28 @@ class WeightSyncCoordinator:
         )
         transfer_in_flight = False
         t_transfer_s = time.monotonic() - t_phase
+        logging.info(
+            "WEIGHT_SYNC_PHASE round=%d req_id=%s phase=transfer"
+            " elapsed_s=%.3f timeout=%s success=%s",
+            round_index,
+            req_id,
+            t_transfer_s,
+            _format_timeout(self._timeouts.transfer),
+            transfer.success if transfer is not None else False,
+        )
       except (
           asyncio.TimeoutError,
           weight_sync.TransferOutcomeUnknownError,
       ) as e:
+        t_transfer_s = time.monotonic() - t_phase
+        logging.info(
+            "WEIGHT_SYNC_PHASE round=%d req_id=%s phase=transfer"
+            " elapsed_s=%.3f timeout=%s outcome=timeout_or_unknown",
+            round_index,
+            req_id,
+            t_transfer_s,
+            _format_timeout(self._timeouts.transfer),
+        )
         # Two triggers, one meaning: the coordinator's own deadline elapsed
         # (the executor thread is still running), or the transport reported
         # its RPC outcome unknown (reply lost, server possibly still
@@ -1287,8 +1502,10 @@ class WeightSyncCoordinator:
             " NOT released because the transfer may still be running"
         ) from e
       except asyncio.CancelledError:
+        t_transfer_s = time.monotonic() - t_phase
         raise
       except Exception as e:  # pylint: disable=broad-except
+        t_transfer_s = time.monotonic() - t_phase
         logging.error("transfer raised exception: %s", e, exc_info=True)
         transfer_in_flight = False
         failures.append(f"transfer: {e!r}")
@@ -1310,6 +1527,16 @@ class WeightSyncCoordinator:
           destinations, "weight_sync", prepared_request, self._timeouts.h2d
       )
       t_h2d_s = time.monotonic() - t_phase
+      logging.info(
+          "WEIGHT_SYNC_PHASE round=%d req_id=%s phase=h2d"
+          " elapsed_s=%.3f timeout=%s workers=%d failures=%d",
+          round_index,
+          req_id,
+          t_h2d_s,
+          _format_timeout(self._timeouts.h2d),
+          len(destinations),
+          len(h2d_failures),
+      )
       if h2d_failures:
         # Staging-only H2D means the serving copy is untouched everywhere,
         # so rolling all destinations back is safe even though some finished.
@@ -1329,6 +1556,16 @@ class WeightSyncCoordinator:
       )
       t_post_s = time.monotonic() - t_phase
       failed_posts = [(d, e) for d, e in post_results if e is not None]
+      logging.info(
+          "WEIGHT_SYNC_PHASE round=%d req_id=%s phase=post"
+          " elapsed_s=%.3f timeout=%s workers=%d failures=%d",
+          round_index,
+          req_id,
+          t_post_s,
+          _format_timeout(self._timeouts.post),
+          len(destinations),
+          len(failed_posts),
+      )
       if failed_posts:
         state = await self._resolve_post_failures(
             destinations,
@@ -1337,6 +1574,7 @@ class WeightSyncCoordinator:
             failures,
             worker_reports,
         )
+        t_post_s = time.monotonic() - t_phase
         if state is not RoundState.COMMITTED:
           poison_if_needed()
           await record_workers("post_weight_sync failed")
@@ -1519,7 +1757,7 @@ class WeightSyncCoordinator:
         # next round's prepare, or a close() that frees what it is reading.
         release_gather = asyncio.gather(
             *[
-                asyncio.wait_for(
+                _wait_for(
                     s.release_weight_sync(release_request),
                     self._timeouts.release,
                 )
@@ -1531,6 +1769,7 @@ class WeightSyncCoordinator:
           release_errors = await asyncio.shield(release_gather)
         except asyncio.CancelledError:
           release_errors = await release_gather
+          t_release_s = time.monotonic() - t_rel_start
           for source, error in zip(sources, release_errors):
             if isinstance(error, BaseException):
               logging.warning(
@@ -1550,6 +1789,15 @@ class WeightSyncCoordinator:
                 error,
             )
         t_release_s = time.monotonic() - t_rel_start
+        logging.info(
+            "WEIGHT_SYNC_PHASE round=%d req_id=%s phase=release"
+            " elapsed_s=%.3f timeout=%s workers=%d",
+            round_index,
+            req_id,
+            t_release_s,
+            _format_timeout(self._timeouts.release),
+            len(sources),
+        )
       else:
         logging.error(
             "round %d: source staging deliberately NOT released; a timed-out"
@@ -1558,17 +1806,68 @@ class WeightSyncCoordinator:
         )
       t_e2e_s = time.monotonic() - t_round_start
       logging.info(
-          "WEIGHT_SYNC_PROFILE round=%d req_id=%s policy_version=%d "
-          "prepare_write_s=%.3f transfer_s=%.3f h2d_read_s=%.3f "
-          "post_verify_s=%.3f release_s=%.3f e2e_s=%.3f",
+          "WEIGHT_SYNC_PROFILE round=%d req_id=%s policy_version=%d"
+          " state=%s bind_s=%.3f metadata_s=%.3f source_prepare_s=%.3f"
+          " register_s=%.3f pre_s=%.3f transfer_s=%.3f h2d_s=%.3f"
+          " post_s=%.3f abort_s=%.3f release_s=%.3f"
+          " prepare_write_s=%.3f h2d_read_s=%.3f post_verify_s=%.3f"
+          " e2e_s=%.3f",
           round_index,
           req_id,
           policy_version,
-          t_prepare_s,
+          state.value,
+          t_bind_s,
+          t_metadata_s,
+          t_source_prepare_s,
+          t_register_s,
+          t_pre_s,
           t_transfer_s,
           t_h2d_s,
           t_post_s,
+          self._current_round_abort_s,
           t_release_s,
+          t_prepare_s,
+          t_h2d_s,
+          t_post_s,
+          t_e2e_s,
+      )
+      logging.info(
+          "WEIGHT_SYNC_PHASE_TIMINGS round=%d req_id=%s"
+          " policy_version=%d state=%s"
+          " bind=%.3fs(timeout=%s,WEIGHT_SYNC_BIND_TIMEOUT_S)"
+          " metadata=%.3fs(timeout=%s,WEIGHT_SYNC_METADATA_TIMEOUT_S)"
+          " source_prepare=%.3fs(timeout=%s,WEIGHT_SYNC_SOURCE_PREPARE_TIMEOUT_S)"
+          " register=%.3fs"
+          " pre=%.3fs(timeout=%s,WEIGHT_SYNC_PRE_TIMEOUT_S)"
+          " transfer=%.3fs(timeout=%s,WEIGHT_SYNC_TRANSFER_TIMEOUT_S)"
+          " h2d=%.3fs(timeout=%s,WEIGHT_SYNC_H2D_TIMEOUT_S)"
+          " post=%.3fs(timeout=%s,WEIGHT_SYNC_POST_TIMEOUT_S)"
+          " abort=%.3fs(timeout=%s,WEIGHT_SYNC_ABORT_TIMEOUT_S)"
+          " release=%.3fs(timeout=%s,WEIGHT_SYNC_RELEASE_TIMEOUT_S)"
+          " e2e=%.3fs",
+          round_index,
+          req_id,
+          policy_version,
+          state.value,
+          t_bind_s,
+          _format_timeout(self._timeouts.bind),
+          t_metadata_s,
+          _format_timeout(self._timeouts.metadata),
+          t_source_prepare_s,
+          _format_timeout(self._timeouts.source_prepare),
+          t_register_s,
+          t_pre_s,
+          _format_timeout(self._timeouts.pre),
+          t_transfer_s,
+          _format_timeout(self._timeouts.transfer),
+          t_h2d_s,
+          _format_timeout(self._timeouts.h2d),
+          t_post_s,
+          _format_timeout(self._timeouts.post),
+          self._current_round_abort_s,
+          _format_timeout(self._timeouts.abort),
+          t_release_s,
+          _format_timeout(self._timeouts.release),
           t_e2e_s,
       )
 
