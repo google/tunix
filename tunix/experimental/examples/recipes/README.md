@@ -71,7 +71,7 @@ export MAXTEXT_OUTPUT_DIR="gs://<your-bucket>/trellis/maxtext"
 export TUNIX_IMAGE="gcr.io/cloud-tpu-multipod-dev/${USER}/trellis:latest" 
 
 # Launch the run (change recipe script as needed)
-bash tunix/experimental/examples/recipes/mlperf_35b_128_v5p.sh start
+SEED=42 bash tunix/experimental/examples/recipes/mlperf_35b_128_v5p.sh start
 ```
 
 ### 3. Monitoring and Managing the Run
