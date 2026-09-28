@@ -172,11 +172,16 @@ class MockBaseSamplerImpl(sampler_lib.VanillaSamplerAdapter):
     """Simulates LLM inference latency and agentic turn responses."""
     if sampling_requests is None:
       raise ValueError("sampling_requests cannot be None.")
-    delay = kwargs.get("delay_seconds", self.default_delay)
-    await asyncio.sleep(delay)
-
     is_sequence = isinstance(sampling_requests, (list, tuple))
     requests = list(sampling_requests) if is_sequence else [sampling_requests]
+    first_meta: dict[str, Any] = (
+        getattr(requests[0], "metadata", None) or {} if requests else {}
+    )
+    raw_delay = kwargs.get(
+        "delay_seconds", first_meta.get("delay_seconds", self.default_delay)
+    )
+    delay = float(raw_delay) if raw_delay is not None else self.default_delay
+    await asyncio.sleep(delay)
     responses = []
     for req in requests:
       request_kwargs = dict(kwargs)

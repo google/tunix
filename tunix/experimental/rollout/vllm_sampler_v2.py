@@ -74,8 +74,9 @@ class RLVllmSampler:
     `weight_sync`, `post_weight_sync`).
   """
 
-  def __init__(self, engine_args: AsyncEngineArgs):
+  def __init__(self, engine_args: AsyncEngineArgs, config: Any = None):
     self.engine_args = engine_args
+    self.config = config
     self._engine: Any | None = None
     self._is_running = False
     self._is_paused = False
@@ -159,50 +160,88 @@ class RLVllmSampler:
       req: Any,
       kwargs: dict[str, Any],
   ) -> VllmSamplingParams:
-    """Builds a vLLM SamplingParams object from any duck-typed request."""
-    sparams = _get_val(req, "sampling_params")
+    """Builds a vLLM SamplingParams object from RolloutConfig and SamplingRequest."""
+    cfg = self.config
     stop_token_ids = _get_val(
-        sparams,
+        req,
         "stop_token_ids",
-        kwargs.get("stop_token_ids") or kwargs.get("eos_tokens"),
+        _get_val(
+            cfg,
+            "eos_tokens",
+            kwargs.get("stop_token_ids") or kwargs.get("eos_tokens"),
+        ),
     )
-    # `kwargs` goes through `_get_val` too: callers pass unset fields as
-    # explicit `None`, so `.get(key, default)` returns `None` rather than
-    # the default, defeating it before `_get_val` can coalesce.
+    max_tokens = _get_val(
+        req,
+        "max_tokens",
+        _get_val(
+            cfg,
+            "max_tokens_to_generate",
+            _get_val(kwargs, "max_tokens", 128),
+        ),
+    )
+    temperature = _get_val(
+        req,
+        "temperature",
+        _get_val(
+            cfg,
+            "temperature",
+            _get_val(kwargs, "temperature", 0.7),
+        ),
+    )
+    top_p = _get_val(
+        req,
+        "top_p",
+        _get_val(
+            cfg,
+            "top_p",
+            _get_val(kwargs, "top_p", 0.95),
+        ),
+    )
+    top_k = _get_val(
+        req,
+        "top_k",
+        _get_val(
+            cfg,
+            "top_k",
+            _get_val(kwargs, "top_k", -1),
+        ),
+    )
+    return_logprobs = _get_val(
+        req,
+        "return_logprobs",
+        _get_val(
+            cfg,
+            "return_logprobs",
+            kwargs.get("return_logprobs", False),
+        ),
+    )
     return VllmSamplingParams(
-        temperature=_get_val(
-            sparams, "temperature", _get_val(kwargs, "temperature", 0.7)
-        ),
-        top_p=_get_val(sparams, "top_p", _get_val(kwargs, "top_p", 0.95)),
-        top_k=_get_val(sparams, "top_k", _get_val(kwargs, "top_k", -1)),
-        max_tokens=_get_val(
-            sparams, "max_tokens", _get_val(kwargs, "max_tokens", 128)
-        ),
-        stop=_get_val(sparams, "stop_sequences")
-        or _get_val(sparams, "stop")
+        temperature=temperature,
+        top_p=top_p,
+        top_k=top_k,
+        max_tokens=max_tokens,
+        stop=_get_val(req, "stop_sequences")
+        or _get_val(req, "stop")
         or kwargs.get("stop"),
         stop_token_ids=list(stop_token_ids)
         if stop_token_ids is not None
         else None,
         include_stop_str_in_output=bool(
             _get_val(
-                sparams,
+                req,
                 "include_stop_str_in_output",
                 _get_val(kwargs, "include_stop_str_in_output", True),
             )
         ),
         detokenize=bool(
             _get_val(
-                sparams,
+                req,
                 "detokenize",
                 _get_val(kwargs, "detokenize", False),
             )
         ),
-        logprobs=1
-        if _get_val(
-            sparams, "return_logprobs", kwargs.get("return_logprobs", False)
-        )
-        else None,
+        logprobs=1 if return_logprobs else None,
     )
 
   async def _process_request_output(

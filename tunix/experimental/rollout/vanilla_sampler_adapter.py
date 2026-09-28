@@ -28,8 +28,23 @@ from tunix.experimental.weight_sync import weight_sync
 from tunix.generate import sampler as generate_sampler_lib
 from tunix.generate import tokenizer_adapter as tok_adapter
 from tunix.generate import utils as generate_utils
+from tunix.rl.rollout import base_rollout
 
 Sampler = base_sampler_lib.Sampler
+
+
+def _cfg_attr(config: Any, name: str, default: Any) -> Any:
+  """Reads a primitive attribute from config, falling back when unset or mocked."""
+  if config is None:
+    return default
+  val = getattr(config, name, default)
+  if val is None or type(val).__name__ in (
+      "MagicMock",
+      "AsyncMock",
+      "NonCallableMagicMock",
+  ):
+    return default
+  return val
 
 
 class VanillaSamplerAdapter(RaidenDestinationWeightSyncMixin, Sampler, abc.ABC):
@@ -73,7 +88,7 @@ class VanillaSamplerAdapter(RaidenDestinationWeightSyncMixin, Sampler, abc.ABC):
         pass
     self.tokenizer: Any = tokenizer
     self.image_processor = image_processor
-    self.config = config
+    self.config = config if config is not None else base_rollout.RolloutConfig()
     self.raiden_sync_delegate = raiden_sync_delegate
     self.weight_sync_mode = getattr(
         config, "weight_sync_mode", weight_sync.DEFAULT_WEIGHT_SYNC_MODE
@@ -99,13 +114,13 @@ class VanillaSamplerAdapter(RaidenDestinationWeightSyncMixin, Sampler, abc.ABC):
       )
 
     if self.transformer is not None and self.tokenizer is not None:
-      self.sampler = self._build_generate_sampler(cache_config)
+      self.sampler: Any = self._build_generate_sampler(cache_config)
     else:
       self.sampler = None
 
   def _build_generate_sampler(
       self, cache_config: generate_sampler_lib.CacheConfig | int | None
-  ) -> generate_sampler_lib.Sampler:
+  ) -> Any:
     """Helper to construct generate_sampler_lib.Sampler from model and tokenizer."""
     if isinstance(cache_config, generate_sampler_lib.CacheConfig):
       cache_cfg = cache_config
@@ -215,17 +230,23 @@ class VanillaSamplerAdapter(RaidenDestinationWeightSyncMixin, Sampler, abc.ABC):
       requests = [sampling_requests]
       is_sequence = False
 
+    cfg = (
+        self.config
+        if isinstance(self.config, base_rollout.RolloutConfig)
+        else base_rollout.RolloutConfig()
+    )
+    default_max_tokens = int(
+        _cfg_attr(
+            self.config, "max_tokens_to_generate", cfg.max_tokens_to_generate
+        )
+    )
+    default_seed = _cfg_attr(self.config, "seed", cfg.seed)
+
     prompts = []
     prompt_token_ids_batch = []
     has_token_prompts = False
     max_gen_steps_list = []
-    temps = []
-    top_ps = []
-    top_ks = []
     seeds = []
-    return_logprobs_list = []
-    return_logits_list = []
-    beam_sizes = []
 
     for req in requests:
       prompt = req.prompt if hasattr(req, "prompt") else req
@@ -236,36 +257,31 @@ class VanillaSamplerAdapter(RaidenDestinationWeightSyncMixin, Sampler, abc.ABC):
         )
       else:
         prompts.append(prompt)
-      sp = (
-          req.sampling_params
-          if hasattr(req, "sampling_params") and req.sampling_params is not None
-          else base_sampler_lib.SamplingParams()
+
+      req_max_tokens = getattr(req, "max_tokens", None)
+      max_gen_steps_list.append(
+          req_max_tokens if req_max_tokens is not None else default_max_tokens
       )
-      if sp is None:
-        raise ValueError("SamplingParams cannot be None")
+      req_seed = getattr(req, "seed", None)
+      seeds.append(req_seed if req_seed is not None else default_seed)
 
-      max_gen_steps_list.append(sp.max_tokens)
-      temps.append(sp.temperature)
-      top_ps.append(sp.top_p)
-      top_ks.append(sp.top_k)
-      seeds.append(sp.seed)
-      return_logprobs_list.append(sp.return_logprobs)
-      return_logits_list.append(sp.return_logits)
-      if sp.beam_size is not None:
-        beam_sizes.append(sp.beam_size)
-
-    max_generation_steps = max(max_gen_steps_list) if max_gen_steps_list else 64
-    temperature = temps[0] if temps else 0.0
-    top_p = top_ps[0] if top_ps else None
-    top_k = top_ks[0] if top_ks else None
-    seed = seeds[0] if seeds else None
-    return_logprobs = any(return_logprobs_list) or kwargs.get(
-        "return_logprobs", False
+    max_generation_steps = (
+        max(max_gen_steps_list) if max_gen_steps_list else default_max_tokens
     )
-    return_logits = any(return_logits_list) or kwargs.get(
-        "return_logits", False
+    temperature = kwargs.get(
+        "temperature", _cfg_attr(self.config, "temperature", cfg.temperature)
     )
-    beam_size = beam_sizes[0] if beam_sizes else None
+    top_p = kwargs.get("top_p", _cfg_attr(self.config, "top_p", cfg.top_p))
+    top_k = kwargs.get("top_k", _cfg_attr(self.config, "top_k", cfg.top_k))
+    seed = seeds[0] if seeds else default_seed
+    return_logprobs = kwargs.get(
+        "return_logprobs",
+        bool(_cfg_attr(self.config, "return_logprobs", cfg.return_logprobs)),
+    )
+    return_logits = kwargs.get("return_logits", False)
+    beam_size = kwargs.get(
+        "beam_size", _cfg_attr(self.config, "beam_size", None)
+    )
 
     sampler_call_kwargs: dict[str, Any] = dict(
         max_generation_steps=max_generation_steps,

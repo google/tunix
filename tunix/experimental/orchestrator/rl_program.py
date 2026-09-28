@@ -263,7 +263,6 @@ class StandardRLProgram(RLProgram):
       reward_fns: Sequence[Callable[..., Any]] | None = None,
       assembler: batch_assembly.BatchAssembler | None = None,
       batch_config: batch_assembly.BatchConfig | None = None,
-      generation_args: datatypes.GenerationArgs | None = None,
       batch_size: int | None = None,
       max_staleness: int = 0,
       sync_weights: bool = True,
@@ -289,16 +288,6 @@ class StandardRLProgram(RLProgram):
           algo_config, "max_response_length", None
       )
     self.max_response_length = algo_max_response_length
-    self.generation_args = generation_args or datatypes.GenerationArgs()
-
-    gen_temp = self.generation_args.temperature
-    if gen_temp is not None:
-      self.algo.algo_config.temperature = gen_temp
-
-    self.generation_args = dataclasses.replace(
-        self.generation_args,
-        return_logprobs=self.algo.algo_config.use_rollout_logps,
-    )
     self.sampler_is = getattr(self.algo.algo_config, "sampler_is", None)
     self.sampler_is_threshold = getattr(
         self.algo.algo_config, "sampler_is_threshold", 2.0
@@ -482,8 +471,6 @@ class StandardRLProgram(RLProgram):
                 self.algo.algo_config, "exact_token_continuity", True
             ),
         }
-        if self.generation_args is not None:
-          dispatch_kwargs["generation_args"] = self.generation_args
         await self.engine.dispatch_rollouts(
             [prompt_item],
             **dispatch_kwargs,
@@ -1008,7 +995,7 @@ class StandardRLProgram(RLProgram):
       ``sampler_is == "token"``; otherwise returned unchanged.
     """
     assert self.engine is not None
-    gen_temp = getattr(self.generation_args, "temperature", None)
+    gen_temp = getattr(self.algo.algo_config, "temperature", None)
     logps_req = datatypes.LogprobsRequest(
         prompt_tokens=batch.prompt_ids,
         completion_tokens=batch.completion_ids,

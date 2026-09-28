@@ -194,6 +194,7 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
       engine_args: Any = None,
       model_name: str = "",
       sampler_instance: Any = None,
+      config: Any = None,
       worker_index: int = 0,
       parallelism: int = 4,
       weight_sync_mode: weight_sync.WeightSyncMode | str | None = None,
@@ -204,6 +205,7 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
     self.engine_args = engine_args
     self.model_name = model_name or (engine_args.model if engine_args else "")
     self.sampler = sampler_instance
+    self._config = config
     self.worker_index = worker_index
     # Raiden treats units sharing a job_name as hosts of ONE job and splits the
     # weights across them (`num_dst_physical_hosts` in raiden_controller), so
@@ -245,8 +247,28 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
 
     if self.sampler is None and self.engine_args is not None:
       sampler_cls = _get_rl_vllm_sampler_cls()
-      self.sampler = sampler_cls(engine_args=self.engine_args)
+      self.sampler = sampler_cls(
+          engine_args=self.engine_args, config=self._config
+      )
+    elif self.sampler is not None and self._config is not None:
+      try:
+        self.sampler.config = self._config
+      except AttributeError:
+        pass
     self._verify_sampler_protocol()
+
+  @property
+  def config(self) -> Any:
+    return self._config
+
+  @config.setter
+  def config(self, value: Any) -> None:
+    self._config = value
+    if self.sampler is not None:
+      try:
+        self.sampler.config = value
+      except AttributeError:
+        pass
 
   def initialize(self) -> None:
     """Initializes RLVllmSampler if not already initialized."""
@@ -257,7 +279,9 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
         self.engine_args = AsyncEngineArgs(model=self.model_name)
       if self.engine_args is not None:
         sampler_cls = _get_rl_vllm_sampler_cls()
-        self.sampler = sampler_cls(engine_args=self.engine_args)
+        self.sampler = sampler_cls(
+            engine_args=self.engine_args, config=self._config
+        )
     if self.sampler is None:
       raise RuntimeError(
           f"VllmSamplerAdapter [{self.server_id}] requires valid"

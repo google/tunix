@@ -137,12 +137,12 @@ async def stream_chat_response(
     assert sampler_instance is not None and sampler_instance._engine is not None
 
     vllm_params = sampler_instance._build_vllm_params(
-        SimpleNamespace(sampling_params=SimpleNamespace(
+        SimpleNamespace(
             max_tokens=max_tokens,
             temperature=temperature,
             top_p=top_p,
             return_logprobs=False,
-        )),
+        ),
         {
             "max_tokens": max_tokens,
             "temperature": temperature,
@@ -247,12 +247,10 @@ async def create_chat_completion(request: ChatCompletionRequest, req: Request):
         prompt=prompt_text,
         request_id=req_id,
         route_key=route_key,
-        sampling_params=SimpleNamespace(
-            max_tokens=request.max_tokens or 128,
-            temperature=request.temperature or 0.7,
-            top_p=request.top_p or 0.95,
-            return_logprobs=False,
-        ),
+        max_tokens=request.max_tokens or 128,
+        temperature=request.temperature or 0.7,
+        top_p=request.top_p or 0.95,
+        return_logprobs=False,
     )
 
     results = await sampler_instance.sample([req_obj])
@@ -323,12 +321,10 @@ async def create_completion(request: CompletionRequest, req: Request):
         prompt=prompt_text,
         request_id=req_id,
         route_key=route_key,
-        sampling_params=SimpleNamespace(
-            max_tokens=request.max_tokens or 128,
-            temperature=request.temperature or 0.7,
-            top_p=request.top_p or 0.95,
-            return_logprobs=False,
-        ),
+        max_tokens=request.max_tokens or 128,
+        temperature=request.temperature or 0.7,
+        top_p=request.top_p or 0.95,
+        return_logprobs=False,
     )
 
     results = await sampler_instance.sample([req_obj])

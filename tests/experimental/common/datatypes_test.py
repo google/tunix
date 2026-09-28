@@ -54,7 +54,6 @@ def _rollout_request_dto() -> datatypes.RolloutRequest:
       prompt="Solve 2+2",
       prompt_id="req-rollout-42",
       group_index=1,
-      generation_kwargs={"max_tokens": 128, "temperature": 0.5},
       max_turns=5,
       target_policy_version=3,
       metadata={"env": "math"},
@@ -72,7 +71,6 @@ class WireSerializationTest(absltest.TestCase):
     self.assertEqual(restored.prompt, original.prompt)
     self.assertEqual(restored.prompt_id, original.prompt_id)
     self.assertEqual(restored.group_index, original.group_index)
-    self.assertEqual(restored.generation_kwargs, original.generation_kwargs)
     self.assertEqual(restored.max_turns, original.max_turns)
     self.assertEqual(
         restored.target_policy_version, original.target_policy_version
@@ -316,26 +314,6 @@ class TokenSegmentRoutingTest(absltest.TestCase):
           loss_mask=np.ones_like(tokens),
           routed_experts=np.zeros((3, 2, 2), dtype=np.int32),
       )
-
-
-class GenerationArgsTest(absltest.TestCase):
-
-  def test_generation_args_as_kwargs(self):
-    args = datatypes.GenerationArgs(
-        max_generation_steps=128,
-        temperature=0.7,
-        top_p=0.95,
-        return_logprobs=True,
-        return_routed_experts=True,
-    )
-    expected = {
-        "max_generation_steps": 128,
-        "temperature": 0.7,
-        "top_p": 0.95,
-        "return_logprobs": True,
-        "return_routed_experts": True,
-    }
-    self.assertEqual(args.as_kwargs(), expected)
 
 
 if __name__ == "__main__":

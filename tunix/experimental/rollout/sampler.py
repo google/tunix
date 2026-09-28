@@ -25,54 +25,33 @@ ArrayLike = typing.ArrayLike
 
 
 @dataclasses.dataclass(kw_only=True)
-class SamplingParams:
-  """Engine-neutral sampling configuration for a generation request.
-
-  Attributes:
-    max_tokens: Maximum number of tokens to generate.
-    temperature: Softmax temperature applied while sampling. Kept explicit so it
-      can be carried through to any later log-probability scoring, ensuring the
-      sampling distribution and the scoring distribution match.
-    top_p: Nucleus sampling probability threshold.
-    top_k: Top-k sampling candidate count threshold.
-    seed: Random seed for reproducible generation.
-    return_logprobs: Whether to record per-token log probabilities.
-    return_logits: Whether to record per-token output logits.
-    return_routed_experts: Whether to record the MoE expert ids each token was
-      routed through, so training can replay them instead of re-routing. Only
-      meaningful for MoE models on a backend that supports capture; the backend
-      must also be configured to capture, since it is an engine-level setting.
-    routed_experts_prompt_start: Token index in prompt from which to start
-      returning routing data. In multi-turn rollouts, set to the cumulative
-      length of previously processed tokens to return only newly prefilled
-      environment tokens and completion.
-    beam_size: Beam width for beam search decoding.
-  """
-
-  max_tokens: int = 64
-  temperature: float = 1.0
-  top_p: float | None = None
-  top_k: int | None = None
-  seed: int | None = None
-  return_logprobs: bool = False
-  return_logits: bool = False
-  return_routed_experts: bool = False
-  routed_experts_prompt_start: int = 0
-  beam_size: int | None = None
-
-
-@dataclasses.dataclass(kw_only=True)
 class SamplingRequest(datatypes.Request):
   """Request to generate completions for a single prompt from a Sampler.
+
+  Static sampling configuration (temperature, top_p, top_k, return_logprobs,
+  return_routed_experts, eos_tokens, default max_tokens_to_generate) is owned
+  by the sampler's `RolloutConfig`. `SamplingRequest` carries only the prompt
+  and optional per-turn runtime overrides.
 
   Attributes:
     prompt: The source prompt to sample from (formatted string, token array, or
       chat dictionary).
-    sampling_params: Optional per-request sampling configuration.
+    max_tokens: Optional per-turn token budget override (e.g. remaining episode
+      response budget in multi-turn rollouts). When None, the sampler uses
+      `config.max_tokens_to_generate`.
+    seed: Optional per-request deterministic RNG seed (used by stateless JAX
+      samplers to diversify grouped rollouts). When None, the sampler uses
+      `config.seed`.
+    routed_experts_prompt_start: Token index in prompt from which to start
+      returning MoE routing data. In multi-turn rollouts, set to the cumulative
+      length of previously processed tokens to return only newly prefilled
+      environment tokens and completion.
   """
 
   prompt: Any
-  sampling_params: SamplingParams | None = None
+  max_tokens: int | None = None
+  seed: int | None = None
+  routed_experts_prompt_start: int = 0
 
 
 @dataclasses.dataclass(kw_only=True)

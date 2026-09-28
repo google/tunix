@@ -176,15 +176,14 @@ class SamplerToPayloadTest(absltest.TestCase):
     )
 
     adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
-        server_id="rollout"
+        server_id="rollout",
+        config=base_rollout.RolloutConfig(return_routed_experts=True),
     )
     adapter.vllm_sampler = stub
     request = base_sampler_lib.SamplingRequest(
         request_id="req-0",
         prompt=np.arange(10, 10 + PROMPT_LEN, dtype=np.int32),
-        sampling_params=base_sampler_lib.SamplingParams(
-            max_tokens=GEN_LEN, return_routed_experts=True
-        ),
+        max_tokens=GEN_LEN,
     )
     return asyncio.run(adapter.sample([request]))[0]
 
@@ -248,18 +247,16 @@ class SamplerToPayloadTest(absltest.TestCase):
     ]
 
     adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
-        server_id="rollout"
+        server_id="rollout",
+        config=base_rollout.RolloutConfig(return_routed_experts=True),
     )
     adapter.vllm_sampler = stub
 
     req0 = base_sampler_lib.SamplingRequest(
         request_id="req-0",
         prompt=np.arange(10, 10 + PROMPT_LEN, dtype=np.int32),
-        sampling_params=base_sampler_lib.SamplingParams(
-            max_tokens=GEN_LEN,
-            return_routed_experts=True,
-            routed_experts_prompt_start=0,
-        ),
+        max_tokens=GEN_LEN,
+        routed_experts_prompt_start=0,
     )
     resp0 = asyncio.run(adapter.sample([req0]))[0]
 
@@ -268,11 +265,8 @@ class SamplerToPayloadTest(absltest.TestCase):
         prompt=np.arange(
             10, 10 + PROMPT_LEN + GEN_LEN + env_len, dtype=np.int32
         ),
-        sampling_params=base_sampler_lib.SamplingParams(
-            max_tokens=GEN_LEN,
-            return_routed_experts=True,
-            routed_experts_prompt_start=PROMPT_LEN + GEN_LEN,
-        ),
+        max_tokens=GEN_LEN,
+        routed_experts_prompt_start=PROMPT_LEN + GEN_LEN,
     )
     resp1 = asyncio.run(adapter.sample([req1]))[0]
 
@@ -342,29 +336,24 @@ class SamplerToPayloadTest(absltest.TestCase):
     )
 
     adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
-        server_id="rollout"
+        server_id="rollout",
+        config=base_rollout.RolloutConfig(return_routed_experts=True),
     )
     adapter.vllm_sampler = stub
 
     req_a = base_sampler_lib.SamplingRequest(
         request_id="req-a",
         prompt=np.arange(10, 10 + PROMPT_LEN, dtype=np.int32),
-        sampling_params=base_sampler_lib.SamplingParams(
-            max_tokens=GEN_LEN,
-            return_routed_experts=True,
-            routed_experts_prompt_start=0,
-        ),
+        max_tokens=GEN_LEN,
+        routed_experts_prompt_start=0,
     )
     req_b = base_sampler_lib.SamplingRequest(
         request_id="req-b",
         prompt=np.arange(
             10, 10 + PROMPT_LEN + GEN_LEN + env_len, dtype=np.int32
         ),
-        sampling_params=base_sampler_lib.SamplingParams(
-            max_tokens=GEN_LEN,
-            return_routed_experts=True,
-            routed_experts_prompt_start=PROMPT_LEN + GEN_LEN,
-        ),
+        max_tokens=GEN_LEN,
+        routed_experts_prompt_start=PROMPT_LEN + GEN_LEN,
     )
 
     # Concurrently sample the batch in a single call
@@ -463,7 +452,8 @@ class SamplerToPayloadTest(absltest.TestCase):
       )
 
     adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
-        server_id="rollout"
+        server_id="rollout",
+        config=base_rollout.RolloutConfig(return_routed_experts=True),
     )
     adapter.vllm_sampler = sampler
 
@@ -515,12 +505,9 @@ class SamplerToPayloadTest(absltest.TestCase):
       req = base_sampler_lib.SamplingRequest(
           request_id="req",
           prompt=np.array(prompt0_ids, dtype=np.int32),
-          sampling_params=base_sampler_lib.SamplingParams(
-              max_tokens=max_generation_steps,
-              return_routed_experts=True,
-              routed_experts_prompt_start=kwargs.get(
-                  "routed_experts_prompt_start", 0
-              ),
+          max_tokens=max_generation_steps,
+          routed_experts_prompt_start=kwargs.get(
+              "routed_experts_prompt_start", 0
           ),
       )
       resp = (await adapter.sample([req]))[0]

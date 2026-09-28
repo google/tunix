@@ -344,36 +344,6 @@ class RLProgramTest(absltest.TestCase):
           mini_batch_size=3,
       )
 
-  def test_program_use_rollout_logps_matching(self):
-    self.mock_algo.algo_config = types.SimpleNamespace(
-        temperature=0.7,
-        use_rollout_logps=True,
-    )
-    program = rl_program.StandardRLProgram(
-        dataset=["prompt_1"],
-        algo=self.mock_algo,
-        generation_args=datatypes.GenerationArgs(
-            temperature=0.7,
-            return_logprobs=True,
-        ),
-    )
-    self.assertTrue(program.generation_args.return_logprobs)
-    self.assertTrue(self.mock_algo.algo_config.use_rollout_logps)
-
-  def test_program_use_rollout_logps_missing_in_generation_args_inherits_from_algo(
-      self,
-  ):
-    self.mock_algo.algo_config = types.SimpleNamespace(
-        temperature=0.7,
-        use_rollout_logps=True,
-    )
-    program = rl_program.StandardRLProgram(
-        dataset=["prompt_1"],
-        algo=self.mock_algo,
-    )
-    self.assertTrue(program.generation_args.return_logprobs)
-    self.assertTrue(self.mock_algo.algo_config.use_rollout_logps)
-
   def test_run_async_four_stages_with_long_polling(self):
     async def _run():
       _set_mock_poll_batches(self.mock_engine, _make_trajectory_group(), [])
@@ -413,9 +383,6 @@ class RLProgramTest(absltest.TestCase):
           num_generations=2,
           policy_version=0,
           exact_token_continuity=True,
-          generation_args=datatypes.GenerationArgs(
-              return_logprobs=True,
-          ),
       )
       self.mock_engine.train_step.assert_called_once()
       self.mock_engine.save_checkpoint.assert_called_once_with(
@@ -1569,9 +1536,6 @@ class RLProgramTest(absltest.TestCase):
           num_generations=2,
           policy_version=0,
           exact_token_continuity=True,
-          generation_args=datatypes.GenerationArgs(
-              return_logprobs=True,
-          ),
       )
 
     asyncio.run(_run())
@@ -2882,40 +2846,7 @@ class RLProgramTest(absltest.TestCase):
     ):
       self._create_program()
 
-  def test_program_passes_generation_args_to_dispatch_rollouts(self):
-    async def _run():
-      self.mock_algo.max_response_length = 512
-      _set_mock_poll_batches(
-          self.mock_engine,
-          _make_trajectory_group(prompt_id="p0", num_generations=2),
-          [],
-      )
-      gen_args = datatypes.GenerationArgs(
-          max_generation_steps=128,
-          temperature=0.7,
-          top_p=0.9,
-          return_logprobs=True,
-      )
-      p = self._create_program(
-          dataset=("p0",),
-          generation_args=gen_args,
-          sync_weights=False,
-      )
-      await p.run_async(self.mock_engine)
-      self.mock_engine.dispatch_rollouts.assert_called_once()
-      args, kwargs = self.mock_engine.dispatch_rollouts.call_args
-      expected_gen_args = datatypes.GenerationArgs(
-          max_generation_steps=128,
-          temperature=0.7,
-          top_p=0.9,
-          return_logprobs=True,
-      )
-      self.assertEqual(kwargs.get("generation_args"), expected_gen_args)
-      self.assertEqual(args[0][0].get("max_response_length"), 512)
-
-    asyncio.run(_run())
-
-  def test_program_passes_algo_max_response_length_when_gen_args_none(self):
+  def test_program_passes_algo_max_response_length(self):
     async def _run():
       self.mock_algo.max_response_length = 512
       _set_mock_poll_batches(
@@ -2925,81 +2856,14 @@ class RLProgramTest(absltest.TestCase):
       )
       p = self._create_program(
           dataset=("p0",),
-          generation_args=None,
           sync_weights=False,
       )
       await p.run_async(self.mock_engine)
       self.mock_engine.dispatch_rollouts.assert_called_once()
-      args, kwargs = self.mock_engine.dispatch_rollouts.call_args
-      expected_gen_args = datatypes.GenerationArgs(
-          return_logprobs=True,
-      )
-      self.assertEqual(kwargs.get("generation_args"), expected_gen_args)
+      args, _ = self.mock_engine.dispatch_rollouts.call_args
       self.assertEqual(args[0][0].get("max_response_length"), 512)
 
     asyncio.run(_run())
-
-  def test_program_temperature_matching_sets_algo_config(self):
-    mock_algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
-    mock_algo.num_generations = 2
-    mock_algo.mini_batch_size = 1
-    mock_algo.max_turns = 1
-    mock_algo.max_packed_len = 16
-    mock_algo.max_response_length = 1024
-    mock_algo.requires_reference_kl = False
-    mock_algo.algo_config = mock.MagicMock(
-        temperature=0.8, use_rollout_logps=None
-    )
-
-    gen_args = datatypes.GenerationArgs(temperature=0.8)
-    rl_program.StandardRLProgram(
-        dataset=("p0",),
-        algo=mock_algo,
-        generation_args=gen_args,
-    )
-    self.assertEqual(mock_algo.algo_config.temperature, 0.8)
-
-  def test_program_temperature_missing_in_generation_args_leaves_none(
-      self,
-  ):
-    mock_algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
-    mock_algo.num_generations = 2
-    mock_algo.mini_batch_size = 1
-    mock_algo.max_turns = 1
-    mock_algo.max_packed_len = 16
-    mock_algo.max_response_length = 1024
-    mock_algo.requires_reference_kl = False
-    mock_algo.algo_config = mock.MagicMock(
-        temperature=0.8, use_rollout_logps=None
-    )
-
-    program = rl_program.StandardRLProgram(
-        dataset=("p0",),
-        algo=mock_algo,
-    )
-    self.assertIsNone(program.generation_args.temperature)
-
-  def test_program_temperature_missing_in_algo_config_propagates_from_generation_args(
-      self,
-  ):
-    mock_algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
-    mock_algo.num_generations = 2
-    mock_algo.mini_batch_size = 1
-    mock_algo.max_turns = 1
-    mock_algo.max_packed_len = 16
-    mock_algo.max_response_length = 1024
-    mock_algo.requires_reference_kl = False
-    mock_algo.algo_config = mock.MagicMock(
-        temperature=None, use_rollout_logps=None
-    )
-
-    gen_args = datatypes.GenerationArgs(temperature=0.8)
-    rl_program.StandardRLProgram(
-        dataset=("p0",),
-        algo=mock_algo,
-        generation_args=gen_args,
-    )
-    self.assertEqual(mock_algo.algo_config.temperature, 0.8)
 
   def test_run_async_auto_configures_worker_on_engine(self):
     async def _run():

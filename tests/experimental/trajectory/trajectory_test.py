@@ -657,7 +657,6 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
     class MockRolloutRequest:
       prompt_id = "prompt_123"
       group_index = 0
-      generation_kwargs = {"temperature": 0.7, "top_p": 0.9}
       metadata = {"req_key": "req_val"}
 
     class MockAgentTrajectory:

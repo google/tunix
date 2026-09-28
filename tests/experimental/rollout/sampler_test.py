@@ -38,9 +38,9 @@ def _sampling_request() -> base_sampler_lib.SamplingRequest:
   return base_sampler_lib.SamplingRequest(
       prompt="Solve 2+2",
       request_id="req-sample-42",
-      sampling_params=base_sampler_lib.SamplingParams(
-          max_tokens=64, temperature=0.7
-      ),
+      max_tokens=64,
+      seed=123,
+      routed_experts_prompt_start=4,
       metadata={"priority": "high"},
   )
 
@@ -86,13 +86,11 @@ class SamplerTest(absltest.TestCase):
     self.assertEqual(restored.request_id, original.request_id)
     self.assertEqual(restored.prompt, original.prompt)
     self.assertEqual(restored.metadata, original.metadata)
-    self.assertIsNotNone(restored.sampling_params)
+    self.assertEqual(restored.max_tokens, original.max_tokens)
+    self.assertEqual(restored.seed, original.seed)
     self.assertEqual(
-        restored.sampling_params.max_tokens, original.sampling_params.max_tokens
-    )
-    self.assertEqual(
-        restored.sampling_params.temperature,
-        original.sampling_params.temperature,
+        restored.routed_experts_prompt_start,
+        original.routed_experts_prompt_start,
     )
 
   def test_sampling_response_round_trips_through_cloudpickle(self):

@@ -108,6 +108,7 @@ class TrajectoryCollectorEngine:
       tokenizer: Any,
       chat_parser: Any,
       eos_ids: Collection[int] | None = None,
+      config: base_rollout.RolloutConfig | None = None,
   ):
     if (
         sampler is None
@@ -123,6 +124,12 @@ class TrajectoryCollectorEngine:
     self.traj_id = traj_id
     self.request = request
     self.sampler = sampler
+    raw_config = (
+        config if config is not None else getattr(sampler, "config", None)
+    )
+    self.config = (
+        raw_config if raw_config is not None else base_rollout.RolloutConfig()
+    )
     self.env = env_client
     self.agent = agent
     self.tokenizer = tokenizer
@@ -165,36 +172,31 @@ class TrajectoryCollectorEngine:
         chat_completions, env=None, max_generation_steps=None, **kwargs
     ):
       del env
-      generation_kwargs = dict(self.request.generation_kwargs)
-      # NB: extra kwargs can be passed in from trajectory_collect_engine.
-      generation_kwargs.update(kwargs)
-      prompt_token_ids = generation_kwargs.pop("prompt_token_ids", None)
-      request_max_generation_steps = generation_kwargs.pop(
-          "max_generation_steps", None
-      )
-      req_max_tokens = (
-          request_max_generation_steps
-          if request_max_generation_steps is not None
-          else generation_kwargs.get("max_tokens")
+      prompt_token_ids = kwargs.get("prompt_token_ids", None)
+      routed_experts_prompt_start = kwargs.get("routed_experts_prompt_start", 0)
+
+      raw_cfg_max_tokens = getattr(self.config, "max_tokens_to_generate", None)
+      config_max_tokens = (
+          int(raw_cfg_max_tokens)
+          if isinstance(raw_cfg_max_tokens, (int, np.integer))
+          else None
       )
 
-      if max_generation_steps is not None and req_max_tokens is not None:
-        effective_max_tokens = min(max_generation_steps, req_max_tokens)
+      if max_generation_steps is not None and config_max_tokens is not None:
+        effective_max_tokens = min(max_generation_steps, config_max_tokens)
       elif max_generation_steps is not None:
         effective_max_tokens = max_generation_steps
-      elif req_max_tokens is not None:
-        effective_max_tokens = req_max_tokens
+      elif config_max_tokens is not None:
+        effective_max_tokens = config_max_tokens
       else:
         raise ValueError(
             "TrajectoryCollectorEngine requires"
-            " request.max_response_length, request.generation_kwargs"
-            " ('max_generation_steps' or 'max_tokens'), or the model_call"
-            " callback to specify max_generation_steps."
+            " request.max_response_length, config.max_tokens_to_generate,"
+            " or the model_call callback to specify max_generation_steps."
         )
 
-      generation_kwargs["max_tokens"] = effective_max_tokens
-
-      seed = generation_kwargs.get("seed", None)
+      raw_seed = getattr(self.config, "seed", None)
+      seed = int(raw_seed) if isinstance(raw_seed, (int, np.integer)) else None
       if isinstance(
           self.sampler, vanilla_sampler_adapter.VanillaSamplerAdapter
       ):
@@ -209,20 +211,6 @@ class TrajectoryCollectorEngine:
               " diverse rollouts, but got seed=None."
           )
 
-      sampling_params = sampler_lib.SamplingParams(
-          max_tokens=effective_max_tokens,
-          temperature=generation_kwargs.get("temperature", 0.0),
-          top_p=generation_kwargs.get("top_p", None),
-          top_k=generation_kwargs.get("top_k", None),
-          seed=seed,
-          return_logprobs=generation_kwargs.get("return_logprobs", False),
-          return_routed_experts=generation_kwargs.get(
-              "return_routed_experts", False
-          ),
-          routed_experts_prompt_start=generation_kwargs.get(
-              "routed_experts_prompt_start", 0
-          ),
-      )
       prompt_payload = (
           np.asarray(prompt_token_ids, dtype=np.int32)
           if prompt_token_ids is not None
@@ -231,9 +219,12 @@ class TrajectoryCollectorEngine:
       sampling_req = sampler_lib.SamplingRequest(
           request_id=self.traj_id,
           prompt=prompt_payload,
-          sampling_params=sampling_params,
+          max_tokens=effective_max_tokens,
+          seed=seed,
+          routed_experts_prompt_start=routed_experts_prompt_start,
+          metadata=dict(self.request.metadata or {}),
       )
-      res = await self.sampler.sample(sampling_req, **generation_kwargs)
+      res = await self.sampler.sample(sampling_req)
       text = res if isinstance(res, str) else getattr(res, "text", str(res))
       tokens = getattr(res, "token_ids", np.array([], dtype=np.int32))
       logprobs = getattr(res, "logprobs", None)

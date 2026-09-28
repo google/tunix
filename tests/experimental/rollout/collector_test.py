@@ -28,6 +28,7 @@ from tunix.experimental.rollout import sampler as sampler_lib
 from tunix.experimental.rollout import vanilla_sampler_adapter
 from tunix.rl.agentic.agents import model_agent
 from tunix.rl.agentic.environments import base_environment
+from tunix.rl.rollout import base_rollout
 
 
 class _MultiStepEnv(base_environment.BaseTaskEnv):
@@ -83,8 +84,7 @@ class _MockSampler(sampler_lib.Sampler):
     self.routed_experts = routed_experts
 
   async def sample(self, req, **kwargs):
-    if hasattr(req, "sampling_params"):
-      self.sampled_params.append(req.sampling_params)
+    self.sampled_params.append(req)
     tok_len = (
         self.token_lengths[self._call_count]
         if self._call_count < len(self.token_lengths)
@@ -114,8 +114,7 @@ class _MockVanillaSampler(vanilla_sampler_adapter.VanillaSamplerAdapter):
 
   async def sample(self, req, **kwargs):
     self.calls.append((req, kwargs))
-    sp = getattr(req, "sampling_params", None)
-    seed = getattr(sp, "seed", None)
+    seed = getattr(req, "seed", None)
     tok_seed = int(seed if seed is not None else 0)
     return sampler_lib.SamplingResponse(
         request_id=getattr(req, "request_id", ""),
@@ -215,7 +214,6 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
     # None when absent
     req2 = datatypes.RolloutRequest(
         prompt_id="p2",
-        generation_kwargs={},
     )
     engine2 = collector.TrajectoryCollectorEngine(
         traj_id="t2",
@@ -258,7 +256,6 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
   def test_episode_timeout_defaults_to_constant(self):
     req_empty_meta = datatypes.RolloutRequest(
         prompt_id="p1",
-        generation_kwargs={},
     )
     engine1 = collector.TrajectoryCollectorEngine(
         traj_id="t1",
@@ -275,7 +272,6 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
 
     req_none_meta = datatypes.RolloutRequest(
         prompt_id="p2",
-        generation_kwargs={},
         metadata={"episode_timeout": None},
     )
     engine2 = collector.TrajectoryCollectorEngine(
@@ -294,7 +290,6 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
   def test_episode_timeout_invalid_raises_value_error(self):
     req = datatypes.RolloutRequest(
         prompt_id="p1",
-        generation_kwargs={},
         metadata={"episode_timeout": 0},
     )
     with self.assertRaises(ValueError):
@@ -311,7 +306,6 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
   def test_overlong_filter_defaults_to_false(self):
     req_empty_meta = datatypes.RolloutRequest(
         prompt_id="p1",
-        generation_kwargs={},
     )
     engine1 = collector.TrajectoryCollectorEngine(
         traj_id="t1",
@@ -326,7 +320,6 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
 
     req_none_meta = datatypes.RolloutRequest(
         prompt_id="p2",
-        generation_kwargs={},
         metadata={"overlong_filter": None},
     )
     engine2 = collector.TrajectoryCollectorEngine(
@@ -345,7 +338,6 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
       with self.subTest(invalid_val=invalid_val):
         req = datatypes.RolloutRequest(
             prompt_id="p1",
-            generation_kwargs={},
             metadata={"overlong_filter": invalid_val},
         )
         with self.assertRaises(TypeError):
@@ -400,7 +392,6 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
           prompt_id="prompt_42",
           prompt="test prompt",
           group_index=1,
-          generation_kwargs={"max_generation_steps": 128, "temperature": 0.7},
       )
       mock_agent = mock.MagicMock()
       mock_agent.name = "test_agent"
@@ -431,22 +422,17 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
       expected_seed = collector.generate_vanilla_rollout_seed(
           "prompt_42", group_index=1
       )
-      self.assertEqual(sampling_req.sampling_params.seed, expected_seed)
+      self.assertEqual(sampling_req.seed, expected_seed)
 
     asyncio.run(_run())
 
-  def test_model_call_preserves_explicit_seed_in_generation_kwargs(self):
+  def test_model_call_preserves_explicit_seed_in_config(self):
     async def _run():
       sampler = _MockVanillaSampler()
       req = datatypes.RolloutRequest(
           prompt_id="prompt_42",
           prompt="test prompt",
           group_index=1,
-          generation_kwargs={
-              "max_generation_steps": 128,
-              "seed": 99999,
-              "temperature": 0.7,
-          },
       )
       mock_agent = mock.MagicMock()
       mock_agent.name = "test_agent"
@@ -458,6 +444,7 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
           agent=mock_agent,
           tokenizer=mock.MagicMock(),
           chat_parser=mock.MagicMock(),
+          config=base_rollout.RolloutConfig(seed=99999),
       )
 
       with mock.patch(
@@ -474,7 +461,7 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
 
       self.assertLen(sampler.calls, 1)
       sampling_req, _ = sampler.calls[0]
-      self.assertEqual(sampling_req.sampling_params.seed, 99999)
+      self.assertEqual(sampling_req.seed, 99999)
 
     asyncio.run(_run())
 
@@ -485,7 +472,6 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
           prompt_id="prompt_42",
           prompt="test prompt",
           group_index=1,
-          generation_kwargs={"max_generation_steps": 128, "temperature": 0.7},
       )
       mock_agent = mock.MagicMock()
       mock_agent.name = "test_agent"
@@ -513,7 +499,7 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
 
       self.assertLen(sampler.calls, 1)
       sampling_req, _ = sampler.calls[0]
-      self.assertIsNone(sampling_req.sampling_params.seed)
+      self.assertIsNone(sampling_req.seed)
 
     asyncio.run(_run())
 
@@ -524,19 +510,16 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
           prompt_id="prompt_42",
           prompt="test prompt",
           group_index=0,
-          generation_kwargs={"max_generation_steps": 128, "temperature": 0.7},
       )
       req_1 = datatypes.RolloutRequest(
           prompt_id="prompt_42",
           prompt="test prompt",
           group_index=1,
-          generation_kwargs={"max_generation_steps": 128, "temperature": 0.7},
       )
       req_0_repeat = datatypes.RolloutRequest(
           prompt_id="prompt_42",
           prompt="test prompt",
           group_index=0,
-          generation_kwargs={"max_generation_steps": 128, "temperature": 0.7},
       )
 
       mock_agent = mock.MagicMock()
@@ -569,13 +552,8 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
       req_1_call, _ = sampler.calls[1]
       req_0_repeat_call, _ = sampler.calls[2]
 
-      self.assertNotEqual(
-          req_0_call.sampling_params.seed, req_1_call.sampling_params.seed
-      )
-      self.assertEqual(
-          req_0_call.sampling_params.seed,
-          req_0_repeat_call.sampling_params.seed,
-      )
+      self.assertNotEqual(req_0_call.seed, req_1_call.seed)
+      self.assertEqual(req_0_call.seed, req_0_repeat_call.seed)
       self.assertFalse(
           np.array_equal(outputs[0].tokens[0], outputs[1].tokens[0])
       )
@@ -592,7 +570,6 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
           prompt_id=None,
           prompt="test prompt",
           group_index=0,
-          generation_kwargs={"max_generation_steps": 128, "temperature": 0.7},
       )
       mock_agent = mock.MagicMock()
       mock_agent.name = "test_agent"
@@ -623,7 +600,7 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
 
     asyncio.run(_run())
 
-  def test_model_call_propagates_return_routed_experts_in_generation_kwargs(
+  def test_model_call_propagates_routed_experts_from_sampler_response(
       self,
   ):
     async def _run():
@@ -633,10 +610,6 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
           prompt_id="prompt_routed",
           prompt="test prompt",
           group_index=0,
-          generation_kwargs={
-              "max_generation_steps": 128,
-              "return_routed_experts": True,
-          },
       )
       mock_agent = mock.MagicMock()
       mock_agent.name = "test_agent"
@@ -648,6 +621,7 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
           agent=mock_agent,
           tokenizer=mock.MagicMock(),
           chat_parser=mock.MagicMock(),
+          config=base_rollout.RolloutConfig(return_routed_experts=True),
       )
 
       with mock.patch(
@@ -663,7 +637,6 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
         output = await model_call("prompt text", env=mock.MagicMock())
 
       self.assertLen(sampler.sampled_params, 1)
-      self.assertTrue(sampler.sampled_params[0].return_routed_experts)
       self.assertIsNotNone(output.routed_experts)
       np.testing.assert_array_equal(output.routed_experts[0], mock_routed)
 
@@ -677,7 +650,7 @@ class _RecordingSampler:
 
   async def sample(self, sampling_req, **kwargs):
     del kwargs
-    self.seen_max_tokens.append(sampling_req.sampling_params.max_tokens)
+    self.seen_max_tokens.append(sampling_req.max_tokens)
     return sampler_lib.SamplingResponse(
         request_id=getattr(sampling_req, "request_id", "req"),
         text="FINAL_ANSWER: 4",
@@ -717,13 +690,12 @@ class _FakeInnerEngine:
 
 class RunEpisodeSamplingParamsTest(absltest.TestCase):
 
-  def _make_collector(self, generation_kwargs: dict[str, object]):
+  def _make_collector(self, max_tokens_to_generate: int):
     request = datatypes.RolloutRequest(
         request_id="req_0",
         prompt="What is 2+2?",
         prompt_id="prompt_0",
         group_index=0,
-        generation_kwargs=generation_kwargs,
     )
     return collector.TrajectoryCollectorEngine(
         traj_id=request.traj_id,
@@ -733,10 +705,13 @@ class RunEpisodeSamplingParamsTest(absltest.TestCase):
         agent=mocks.MockAgent(),
         tokenizer=mocks.MockTokenizer(),
         chat_parser=mocks.MockChatParser(),
+        config=base_rollout.RolloutConfig(
+            max_tokens_to_generate=max_tokens_to_generate
+        ),
     )
 
-  def test_run_episode_uses_request_max_generation_steps_when_unbounded(self):
-    engine = self._make_collector({"max_generation_steps": 123})
+  def test_run_episode_uses_config_max_tokens_to_generate_when_unbounded(self):
+    engine = self._make_collector(123)
     _FakeInnerEngine.next_max_generation_steps = None
 
     with unittest.mock.patch.object(
@@ -749,7 +724,7 @@ class RunEpisodeSamplingParamsTest(absltest.TestCase):
     self.assertEqual(engine.sampler.seen_max_tokens, [123])
 
   def test_run_episode_prefers_explicit_max_generation_steps(self):
-    engine = self._make_collector({"max_generation_steps": 123})
+    engine = self._make_collector(123)
     _FakeInnerEngine.next_max_generation_steps = 17
 
     with unittest.mock.patch.object(
@@ -761,10 +736,10 @@ class RunEpisodeSamplingParamsTest(absltest.TestCase):
 
     self.assertEqual(engine.sampler.seen_max_tokens, [17])
 
-  def test_run_episode_caps_at_request_max_generation_steps_when_episode_budget_larger(
+  def test_run_episode_caps_at_config_max_tokens_when_episode_budget_larger(
       self,
   ):
-    engine = self._make_collector({"max_generation_steps": 123})
+    engine = self._make_collector(123)
     _FakeInnerEngine.next_max_generation_steps = 500
 
     with unittest.mock.patch.object(
@@ -776,10 +751,10 @@ class RunEpisodeSamplingParamsTest(absltest.TestCase):
 
     self.assertEqual(engine.sampler.seen_max_tokens, [123])
 
-  def test_run_episode_caps_at_episode_budget_when_request_max_generation_steps_larger(
+  def test_run_episode_caps_at_episode_budget_when_config_max_tokens_larger(
       self,
   ):
-    engine = self._make_collector({"max_generation_steps": 123})
+    engine = self._make_collector(123)
     _FakeInnerEngine.next_max_generation_steps = 50
 
     with unittest.mock.patch.object(
@@ -801,7 +776,6 @@ class ConvertTrajectoryItemTest(absltest.TestCase):
         prompt_id="prompt_test",
         group_index=2,
         target_policy_version=5,
-        generation_kwargs={"max_generation_steps": 64},
         metadata={"custom_key": "custom_val"},
     )
     engine = collector.TrajectoryCollectorEngine(
@@ -881,7 +855,6 @@ class ConvertTrajectoryItemTest(absltest.TestCase):
         prompt_id="prompt_multi",
         group_index=0,
         target_policy_version=1,
-        generation_kwargs={"max_generation_steps": 64},
     )
     engine = collector.TrajectoryCollectorEngine(
         traj_id=request.traj_id,
@@ -942,14 +915,14 @@ class ConvertTrajectoryItemTest(absltest.TestCase):
     with self.assertRaisesRegex(TypeError, "Expected rl_traj to be a dict"):
       engine._convert_to_trajectory(mock_traj)
 
-  def test_model_call_respects_min_of_remaining_budget_and_request_max_tokens(
+  def test_model_call_respects_min_of_remaining_budget_and_config_max_tokens(
       self,
   ):
     sampler = _MockVllmSampler()
     request = datatypes.RolloutRequest(
         prompt="test",
         prompt_id="p_budget",
-        generation_kwargs={"max_tokens": 4, "max_response_length": 16},
+        max_response_length=16,
     )
     engine = collector.TrajectoryCollectorEngine(
         traj_id=request.traj_id,
@@ -959,6 +932,7 @@ class ConvertTrajectoryItemTest(absltest.TestCase):
         agent=mocks.MockAgent(),
         tokenizer=mocks.MockTokenizer(),
         chat_parser=mocks.MockChatParser(),
+        config=base_rollout.RolloutConfig(max_tokens_to_generate=4),
     )
     captured_model_call = None
 
@@ -978,13 +952,13 @@ class ConvertTrajectoryItemTest(absltest.TestCase):
       asyncio.run(engine.run_episode())
 
     self.assertIsNotNone(captured_model_call)
-    # Remaining budget 12 > request max_tokens 4 -> should use 4
+    # Remaining budget 12 > config max_tokens 4 -> should use 4
     asyncio.run(captured_model_call("prompt", max_generation_steps=12))
-    self.assertEqual(sampler.calls[-1][0].sampling_params.max_tokens, 4)
+    self.assertEqual(sampler.calls[-1][0].max_tokens, 4)
 
-    # Remaining budget 2 < request max_tokens 4 -> should use 2
+    # Remaining budget 2 < config max_tokens 4 -> should use 2
     asyncio.run(captured_model_call("prompt", max_generation_steps=2))
-    self.assertEqual(sampler.calls[-1][0].sampling_params.max_tokens, 2)
+    self.assertEqual(sampler.calls[-1][0].max_tokens, 2)
 
 
 class ResponseBudgetAnnotationTest(absltest.TestCase):
@@ -997,7 +971,6 @@ class ResponseBudgetAnnotationTest(absltest.TestCase):
     request = datatypes.RolloutRequest(
         prompt_id="p1",
         max_response_length=max_response_length,
-        generation_kwargs={},
     )
     return collector.TrajectoryCollectorEngine(
         traj_id="t1",

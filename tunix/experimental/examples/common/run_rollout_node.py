@@ -342,6 +342,24 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " mesh_tp)."
       ),
   )
+  parser.add_argument(
+      "--temperature",
+      type=float,
+      default=float(os.getenv("TEMPERATURE", "1.0")),
+      help="Sampling temperature for rollout generation.",
+  )
+  parser.add_argument(
+      "--top_p",
+      type=float,
+      default=float(os.getenv("TOP_P", "1.0")),
+      help="Nucleus sampling probability threshold.",
+  )
+  parser.add_argument(
+      "--top_k",
+      type=int,
+      default=int(os.getenv("TOP_K", "-1")),
+      help="Top-k sampling cutoff (-1 or 0 disables top-k).",
+  )
   args = parser.parse_args(argv)
   _get_tensor_parallel_size(args)
   return args
@@ -410,12 +428,14 @@ def _eos_token_ids(
 def _rollout_config_kwargs(
     args: argparse.Namespace, tokenizer: Any = None
 ) -> dict[str, Any]:
+  top_k = getattr(args, "top_k", -1)
   return {
       "weight_sync_mode": args.weight_sync_mode,
       "max_prompt_length": args.max_prompt_length,
       "max_tokens_to_generate": args.max_response_length,
-      "temperature": 1.0,
-      "top_p": 1.0,
+      "temperature": getattr(args, "temperature", 1.0),
+      "top_p": getattr(args, "top_p", 1.0),
+      "top_k": None if top_k is None or top_k <= 0 else top_k,
       "return_logprobs": True,
       "eos_tokens": _eos_token_ids(args, tokenizer),
       "env_name": args.env_name,
@@ -642,17 +662,18 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
       engine_kwargs=engine_kwargs,
       eos_tokens=_eos_token_ids(args, tokenizer),
   )
-  sampler_adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
-      server_id=args.worker_id,
-      tokenizer=tokenizer,
-      config=vllm_config,
-      weight_sync_mode=args.weight_sync_mode,
-      max_concurrency=args.max_concurrency,
-  )
   config = rollout_worker.RolloutConfig(
       sampler_type="inprocess_vllm",
       rollout_vllm_model_version=vllm_model,
       **_rollout_config_kwargs(args, tokenizer),
+  )
+  sampler_adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
+      server_id=args.worker_id,
+      tokenizer=tokenizer,
+      config=config,
+      vllm_config=vllm_config,
+      weight_sync_mode=args.weight_sync_mode,
+      max_concurrency=args.max_concurrency,
   )
   return sampler_adapter, config
 
@@ -734,16 +755,17 @@ def _create_vllm_sampler(args, tokenizer):
         )
     )
   engine_args = AsyncEngineArgs(**engine_kwargs)  # pytype: disable=bad-argument-type  # type: ignore[arg-type]
-  sampler_adapter = vllm_sampler_adapter.VllmSamplerAdapter(  # pytype: disable=bad-instantiation  # type: ignore[abstract]
-      server_id=args.worker_id,
-      engine_args=engine_args,
-      model_name=vllm_model,
-      weight_sync_mode=args.weight_sync_mode,
-  )
   config = rollout_worker.RolloutConfig(
       sampler_type="vllm",
       rollout_vllm_model_version=vllm_model,
       **_rollout_config_kwargs(args, tokenizer),
+  )
+  sampler_adapter = vllm_sampler_adapter.VllmSamplerAdapter(  # pytype: disable=bad-instantiation  # type: ignore[abstract]
+      server_id=args.worker_id,
+      engine_args=engine_args,
+      model_name=vllm_model,
+      config=config,
+      weight_sync_mode=args.weight_sync_mode,
   )
   return sampler_adapter, config
 
