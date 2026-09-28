@@ -4,7 +4,7 @@ set -e
 # ==============================================================================
 # MLPerf DeepSWE recipe: Qwen3.5-397B-A17B on TPU v7x
 # ==============================================================================
-# - TPU7x dynamic slicing on pod1 (bodaborg-tpu7x-gsc) or pod2 (bodaborg-tpu7x-gsc-elm)
+# - TPU7x dynamic slicing
 # - Trainer on 128 chips (4x4x8 = 256 devices, FSDP=32, TP=1, EXPERT=2, CP=4)
 # - Rollout on 256 chips (32 replicas x 8 chips 2x2x2, EP=16, TP=1)
 # - Sandbox configured for sandbox-np nodepool with workload tolerations
@@ -16,29 +16,17 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export JOB_PREFIX="${JOB_PREFIX:-$USER}"
 export WANDB_RUN_NAME="${WANDB_RUN_NAME:-${JOB_PREFIX}-mlperf-397b-v7x}"
 
-# Select pod: pod1 (bodaborg-tpu7x-gsc, us-central1) or pod2 (bodaborg-tpu7x-gsc-elm, us-east1).
-export POD="${POD:-pod2}"
+export USE_DYNAMIC_SLICING="true"
 
-if [[ "${POD}" == "pod2" || "${POD}" == "2" || "${POD}" == "elm" ]]; then
-  export REGION="${REGION:-us-east1}"
-  export CLUSTER="${CLUSTER:-bodaborg-tpu7x-gsc-elm}"
-  export BUCKET="${BUCKET:-gs://atwigg-trellis-us-east1}"
-  export TPU_RESERVATION="${TPU_RESERVATION:-ghostfish-ev7rs12wndvw5}"
-  export MAXTEXT_CKPT="${MAXTEXT_CKPT:-gs://mlperf-6-submission-us-east1/ckpt/qwen35_397b/scanned_reshard_fsdp32_tp2/0/items}"
-else
-  export REGION="${REGION:-us-central1}"
-  export CLUSTER="${CLUSTER:-bodaborg-tpu7x-gsc}"
-  export BUCKET="${BUCKET:-gs://atwigg-trellis-us-central1}"
-  export TPU_RESERVATION="${TPU_RESERVATION:-ghostfish-pogoag4tylwed}"
-  export MAXTEXT_CKPT="${MAXTEXT_CKPT:-gs://mlperf-6-1-submission/ckpt/qwen35_397b/scanned_reshard_fsdp32_tp2/0/items}"
+if [[ -z "${TPU_RESERVATION:-}" ]]; then
+  echo "Error: TPU_RESERVATION must be set for v7x recipes (e.g. export TPU_RESERVATION=\"<your-reservation>\")" >&2
+  exit 1
 fi
 
-export MAXTEXT_OUTPUT_DIR="${MAXTEXT_OUTPUT_DIR:-${BUCKET}/maxtext/${JOB_PREFIX}}"
-export TRAJECTORY_LOG_DIR="${TRAJECTORY_LOG_DIR:-${BUCKET}/trajectories/${JOB_PREFIX}/logger}"
-export TRAJECTORY_STORE_ROOT_DIR="${TRAJECTORY_STORE_ROOT_DIR:-${TRAJECTORY_STORE_ROOT:-${BUCKET}/trajectories/${JOB_PREFIX}/store}}"
-
-export K8S_NAMESPACE="priority-dev"
-export USE_DYNAMIC_SLICING="true"
+if [[ -z "${MAXTEXT_CKPT:-}" ]]; then
+  echo "Error: MAXTEXT_CKPT must be set (e.g. export MAXTEXT_CKPT=\"gs://<your-bucket>/checkpoints/...\")" >&2
+  exit 1
+fi
 # Raiden weight sync: working 397B runs use ENABLE_MULTI_NUMA=0 and the default
 # RAIDEN_BROADCAST_K (64 -> every slice pushed direct from the trainer). K=3 routes
 # slices through the receiver relay tree, which fails with "Incoming push size
@@ -142,6 +130,5 @@ export DEBUG=${DEBUG:-0}
 
 # DeepSWE Environment & Agent Sandbox
 export SANDBOX_TOLERATIONS='[{"key":"workload","operator":"Equal","value":"sandbox","effect":"NoSchedule"}]'
-export IMAGE_REWRITE_PREFIX="${IMAGE_REWRITE_PREFIX:-us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/}"
 
 source "${DIR}/mlperf_base.sh" "$@"

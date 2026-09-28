@@ -15,9 +15,54 @@ set -e
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ==============================================================================
+# Validation of Required Parameters
+# ==============================================================================
+missing_vars=()
+[[ -z "${PROJECT:-}" ]] && missing_vars+=("PROJECT (e.g. export PROJECT=\"<your-project>\")")
+[[ -z "${CLUSTER:-}" ]] && missing_vars+=("CLUSTER (e.g. export CLUSTER=\"<your-cluster>\")")
+[[ -z "${REGION:-}" ]] && missing_vars+=("REGION (e.g. export REGION=\"<your-region>\")")
+[[ -z "${K8S_NAMESPACE:-}" ]] && missing_vars+=("K8S_NAMESPACE (e.g. export K8S_NAMESPACE=\"<your-namespace>\")")
+[[ -z "${BUCKET:-}" && -z "${MAXTEXT_OUTPUT_DIR:-}" ]] && missing_vars+=("BUCKET (e.g. export BUCKET=\"gs://<your-bucket>\")")
+[[ -z "${TUNIX_IMAGE:-}" ]] && missing_vars+=("TUNIX_IMAGE (e.g. export TUNIX_IMAGE=\"<your-registry>/<image>:<tag>\")")
+[[ -z "${IMAGE_REWRITE_PREFIX:-}" ]] && missing_vars+=("IMAGE_REWRITE_PREFIX (e.g. export IMAGE_REWRITE_PREFIX=\"<your-registry-prefix>/\")")
+
+if [[ ${#missing_vars[@]} -gt 0 ]]; then
+  echo "================================================================================" >&2
+  echo "Error: Missing required cluster configuration variables:" >&2
+  for var in "${missing_vars[@]}"; do
+    echo "  - ${var}" >&2
+  done
+  echo "" >&2
+  echo "Please set these variables in your environment before running the recipe." >&2
+  echo "Example:" >&2
+  echo "  export PROJECT=\"<your-project>\"" >&2
+  echo "  export CLUSTER=\"<your-cluster>\"" >&2
+  echo "  export REGION=\"<your-region>\"" >&2
+  echo "  export K8S_NAMESPACE=\"<your-namespace>\"" >&2
+  echo "  export BUCKET=\"gs://<your-bucket>\"" >&2
+  echo "  export TUNIX_IMAGE=\"<your-registry>/<image>:<tag>\"" >&2
+  echo "  export IMAGE_REWRITE_PREFIX=\"<your-registry-prefix>/\"" >&2
+  echo "================================================================================" >&2
+  exit 1
+fi
+
+# ==============================================================================
+# Storage Bucket Paths & Regional Registry
+# ==============================================================================
+if [[ -n "${BUCKET:-}" ]]; then
+  if [[ "${BUCKET}" != gs://* ]]; then
+    echo "Error: BUCKET must start with 'gs://', got: ${BUCKET}" >&2
+    exit 1
+  fi
+  _bucket_clean="${BUCKET%/}"
+  export MAXTEXT_OUTPUT_DIR="${MAXTEXT_OUTPUT_DIR:-${_bucket_clean}/maxtext/${JOB_PREFIX:-${USER}}}"
+  export TRAJECTORY_LOG_DIR="${TRAJECTORY_LOG_DIR:-${_bucket_clean}/trajectories/${JOB_PREFIX:-${USER}}/logger}"
+  export TRAJECTORY_STORE_ROOT_DIR="${TRAJECTORY_STORE_ROOT_DIR:-${TRAJECTORY_STORE_ROOT:-${_bucket_clean}/trajectories/${JOB_PREFIX:-${USER}}/store}}"
+fi
+
+# ==============================================================================
 # Container Image, User Identity & WandB
 # ==============================================================================
-export TUNIX_IMAGE="${TUNIX_IMAGE:-gcr.io/cloud-tpu-multipod-dev/atwigg/trellis:latest}"
 export JOB_PREFIX="${JOB_PREFIX:-${USER}}"
 export WANDB_API_KEY="${WANDB_API_KEY:-}"
 export ORCHESTRATOR_PORT="${ORCHESTRATOR_PORT:-20000}"
@@ -29,13 +74,8 @@ export SKIP_FIRST_N_PROFILER_STEPS=${SKIP_FIRST_N_PROFILER_STEPS:--1}
 # ==============================================================================
 # Cluster Context & Kueue / Priority
 # ==============================================================================
-export PROJECT="${PROJECT:-cloud-tpu-shared-capacity}"
-if [[ -n "${REGION:-}" && -n "${CLUSTER:-}" ]]; then
-  kubectl config use-context "gke_${PROJECT}_${REGION}_${CLUSTER}" || true
-  if [[ -n "${K8S_NAMESPACE:-}" ]]; then
-    kubectl config set-context --current --namespace="${K8S_NAMESPACE}" || true
-  fi
-fi
+kubectl config use-context "gke_${PROJECT}_${REGION}_${CLUSTER}" || true
+kubectl config set-context --current --namespace="${K8S_NAMESPACE}" || true
 
 export KUEUE_QUEUE="${KUEUE_QUEUE:-multislice-queue}"
 export PRIORITY_CLASS="${PRIORITY_CLASS:-medium}"
@@ -63,12 +103,6 @@ export RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFER="${RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFE
 export ENABLE_MULTI_NUMA="0"
 export RAIDEN_BROADCAST_K="64"
 export TPU_RAIDEN_DATA_NICS="eth0"
-
-# ==============================================================================
-# WandB Configuration
-# ==============================================================================
-export WANDB_ENTITY="${WANDB_ENTITY:-google-trellis}"
-export WANDB_PROJECT="${WANDB_PROJECT:-trellis-deepswe}"
 
 # ==============================================================================
 # Common Model & Backend Configuration
@@ -223,7 +257,7 @@ export DATASET_PATH="${DATASET_PATH:-gs://mlperf_dataset/benchmark-r2e-gym-easy-
 export SHUFFLE="${SHUFFLE:-false}"
 export USE_AGENT_SANDBOX=1
 export SCAFFOLD="openhands"
-export SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-${K8S_NAMESPACE:-trellis}}"
+export SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-${K8S_NAMESPACE}}"
 export POOL_NAME_FORMAT="${POOL_NAME_FORMAT:-}"
 export TEMPLATE_NAME_PREFIX="${TEMPLATE_NAME_PREFIX:-}"
 export SANDBOX_NODE_SELECTOR_KEY="cloud.google.com/gke-nodepool"
