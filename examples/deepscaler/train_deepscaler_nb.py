@@ -813,6 +813,16 @@ grpo_trainer = GRPOLearner(
 )
 show_hbm_usage("after GRPOLearner creation")
 
+# The learner always attaches a per-trajectory CSV logger to the metrics log
+# dir. On GCS each trajectory re-uploads the whole CSV (with top-k logprobs it
+# reaches ~16 GB within a few steps); the uploads time out, abandoned `.tmp`
+# objects pile up and the rollout slows down. Set DISABLE_TRAJECTORY_LOG=1 to
+# turn it off (as in examples/frozenlake/train_frozenlake_qwen3.py).
+if os.getenv("DISABLE_TRAJECTORY_LOG") and grpo_trainer._trajectory_logger:
+  grpo_trainer._trajectory_logger.stop()
+  grpo_trainer._trajectory_logger = None
+  print("Trajectory logging disabled via DISABLE_TRAJECTORY_LOG.")
+
 # %%
 grpo_trainer.train(train_dataset)
 
