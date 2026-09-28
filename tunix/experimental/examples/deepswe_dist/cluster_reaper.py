@@ -274,8 +274,9 @@ def reap_orphaned_warmpools_and_templates(custom_api, core_api):
   """Cleans up SandboxWarmPool and SandboxTemplate resources whose run is gone."""
   count = 0
   try:
-    # 1. Discover all active run prefixes from running or pending workload pods & jobsets
+    # 1. Discover all active run prefixes and start times from running or pending workload pods & jobsets
     active_prefixes = set()
+    active_prefix_start_times: dict[str, datetime.datetime] = {}
     jobsets = custom_api.list_namespaced_custom_object(
         group="jobset.x-k8s.io",
         version="v1alpha2",
@@ -283,7 +284,16 @@ def reap_orphaned_warmpools_and_templates(custom_api, core_api):
         plural="jobsets",
     )
     for js in jobsets.get("items", []):
-      active_prefixes.add(extract_run_prefix(js["metadata"]["name"]))
+      pfx = extract_run_prefix(js["metadata"]["name"])
+      active_prefixes.add(pfx)
+      created_str = (js.get("metadata") or {}).get("creationTimestamp")
+      if created_str:
+        try:
+          created_dt = datetime.datetime.fromisoformat(created_str.replace("Z", "+00:00"))
+          if pfx not in active_prefix_start_times or created_dt < active_prefix_start_times[pfx]:
+            active_prefix_start_times[pfx] = created_dt
+        except Exception:
+          pass
 
     pods = core_api.list_namespaced_pod(namespace=NAMESPACE)
     for pod in pods.items:
@@ -294,7 +304,12 @@ def reap_orphaned_warmpools_and_templates(custom_api, core_api):
         continue
       js_name = (pod.metadata.labels or {}).get("jobset.sigs.k8s.io/jobset-name")
       if js_name:
-        active_prefixes.add(extract_run_prefix(js_name))
+        pfx = extract_run_prefix(js_name)
+        active_prefixes.add(pfx)
+        if pod.metadata.creation_timestamp:
+          created_dt = pod.metadata.creation_timestamp
+          if pfx not in active_prefix_start_times or created_dt < active_prefix_start_times[pfx]:
+            active_prefix_start_times[pfx] = created_dt
 
     now = datetime.datetime.now(datetime.timezone.utc)
 
@@ -315,7 +330,31 @@ def reap_orphaned_warmpools_and_templates(custom_api, core_api):
       if age_m < 10:
         continue
 
-      is_active = any(f"-{prefix}-" in wp_name for prefix in active_prefixes)
+      matching_prefix = next(
+          (
+              pfx
+              for pfx in active_prefixes
+              if f"-{pfx}-" in wp_name
+              or wp_name.startswith(f"pool-oh-{pfx}-")
+              or wp_name.startswith(f"pool-r2e-{pfx}-")
+          ),
+          None,
+      )
+      is_active = False
+      if matching_prefix:
+        run_start = active_prefix_start_times.get(matching_prefix)
+        if run_start is not None and created_dt < run_start - datetime.timedelta(minutes=2):
+          logger.info(
+              "SandboxWarmPool %s matches active prefix %s but was created (at %s) before current run started (at %s). Marking as stale previous run...",
+              wp_name,
+              matching_prefix,
+              created_str,
+              run_start.isoformat(),
+          )
+          is_active = False
+        else:
+          is_active = True
+
       if not is_active:
         logger.info(
             "Found orphaned SandboxWarmPool %s (age: %.1fm, no active workloads for run). Deleting...",
@@ -349,10 +388,32 @@ def reap_orphaned_warmpools_and_templates(custom_api, core_api):
       if age_m < 10:
         continue
 
-      is_active = any(
-          f"-{prefix}-" in tmpl_name or tmpl_name.startswith(f"oh-{prefix}-") or tmpl_name.startswith(f"{prefix}-")
-          for prefix in active_prefixes
+      matching_prefix = next(
+          (
+              pfx
+              for pfx in active_prefixes
+              if f"-{pfx}-" in tmpl_name
+              or tmpl_name.startswith(f"oh-{pfx}-")
+              or tmpl_name.startswith(f"r2e-{pfx}-")
+              or tmpl_name.startswith(f"{pfx}-")
+          ),
+          None,
       )
+      is_active = False
+      if matching_prefix:
+        run_start = active_prefix_start_times.get(matching_prefix)
+        if run_start is not None and created_dt < run_start - datetime.timedelta(minutes=2):
+          logger.info(
+              "SandboxTemplate %s matches active prefix %s but was created (at %s) before current run started (at %s). Marking as stale previous run...",
+              tmpl_name,
+              matching_prefix,
+              created_str,
+              run_start.isoformat(),
+          )
+          is_active = False
+        else:
+          is_active = True
+
       if not is_active:
         logger.info(
             "Found orphaned SandboxTemplate %s (age: %.1fm). Deleting...",

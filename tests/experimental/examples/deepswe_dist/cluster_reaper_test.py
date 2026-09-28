@@ -18,7 +18,10 @@ from __future__ import annotations
 
 import datetime
 from unittest import mock
-from absl.testing import absltest
+try:
+  from absl.testing import absltest
+except (ImportError, ModuleNotFoundError):
+  import unittest as absltest
 
 import importlib.util
 from pathlib import Path
@@ -172,6 +175,79 @@ class ClusterReaperTest(absltest.TestCase):
     self.assertIn("oh-dead-run-5678", deleted_names)
     self.assertNotIn("pool-oh-atwigg-oh-rr-1234", deleted_names)
     self.assertNotIn("oh-atwigg-oh-rr-1234", deleted_names)
+
+  def test_reap_stale_warmpools_and_templates_from_previous_runs(self):
+    custom_api = mock.MagicMock()
+    core_api = mock.MagicMock()
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    # Active run jobset started 15 minutes ago
+    active_job_start = (now - datetime.timedelta(minutes=15)).isoformat()
+    # Resource from current run: created 14 minutes ago
+    current_run_res_time = (now - datetime.timedelta(minutes=14)).isoformat()
+    # Resource from stale previous run: created 30 minutes ago (> 2 min before active jobset started)
+    stale_run_res_time = (now - datetime.timedelta(minutes=30)).isoformat()
+
+    custom_api.list_namespaced_custom_object.side_effect = [
+        # 1. JobSets: active run 'atwigg-oh-rr-orch' started 15 min ago
+        {
+            "items": [
+                {
+                    "metadata": {
+                        "name": "atwigg-oh-rr-orch",
+                        "creationTimestamp": active_job_start,
+                    }
+                }
+            ]
+        },
+        # 2. WarmPools: one from current run, one from stale previous run
+        {
+            "items": [
+                {
+                    "metadata": {
+                        "name": "pool-oh-atwigg-oh-rr-current-1111",
+                        "creationTimestamp": current_run_res_time,
+                    }
+                },
+                {
+                    "metadata": {
+                        "name": "pool-oh-atwigg-oh-rr-stale-2222",
+                        "creationTimestamp": stale_run_res_time,
+                    }
+                },
+            ]
+        },
+        # 3. Templates: one from current run, one from stale previous run
+        {
+            "items": [
+                {
+                    "metadata": {
+                        "name": "oh-atwigg-oh-rr-current-1111",
+                        "creationTimestamp": current_run_res_time,
+                    }
+                },
+                {
+                    "metadata": {
+                        "name": "oh-atwigg-oh-rr-stale-2222",
+                        "creationTimestamp": stale_run_res_time,
+                    }
+                },
+            ]
+        },
+    ]
+    core_api.list_namespaced_pod.return_value.items = []
+
+    count = cluster_reaper.reap_orphaned_warmpools_and_templates(custom_api, core_api)
+    self.assertEqual(count, 2)  # 1 stale warmpool + 1 stale template
+
+    deleted_names = [
+        call.kwargs.get("name")
+        for call in custom_api.delete_namespaced_custom_object.call_args_list
+    ]
+    self.assertIn("pool-oh-atwigg-oh-rr-stale-2222", deleted_names)
+    self.assertIn("oh-atwigg-oh-rr-stale-2222", deleted_names)
+    self.assertNotIn("pool-oh-atwigg-oh-rr-current-1111", deleted_names)
+    self.assertNotIn("oh-atwigg-oh-rr-current-1111", deleted_names)
 
 
 if __name__ == "__main__":

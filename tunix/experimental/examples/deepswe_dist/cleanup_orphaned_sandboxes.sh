@@ -89,30 +89,54 @@ echo "==================================================================="
 echo "==> 1. Discovering active workloads in namespace '${NAMESPACE}'..."
 
 ACTIVE_RUN_PREFIXES=()
+declare -A ACTIVE_RUN_START_TIMES=()
 
 # Extract from non-terminal, non-suspended JobSets
-while IFS= read -r line; do
-  [[ -z "${line}" ]] && continue
-  NAME=$(echo "${line}" | awk '{print $1}')
-  TERM=$(echo "${line}" | awk '{print $2}')
-  SUSP=$(echo "${line}" | awk '{print $5}')
-  
+JOBSETS_RAW=$(kubectl get jobsets -n "${NAMESPACE}" \
+  -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.terminalState}{"\t"}{.spec.suspend}{"\t"}{.metadata.creationTimestamp}{"\n"}{end}' 2>/dev/null || true)
+
+while IFS=$'\t' read -r NAME TERM SUSP CREATED_STR; do
+  [[ -z "${NAME}" ]] && continue
   if [[ -z "${TERM}" || ("${TERM}" != "Failed" && "${TERM}" != "Completed") ]]; then
     if [[ "${SUSP}" != "true" ]]; then
       # Strip role suffixes: <prefix>-orch, <prefix>-train, <prefix>-roll(-<idx>)
       PREFIX=$(echo "${NAME}" | sed -E 's/-(orch|train|roll(-[0-9]+)?)$//')
       ACTIVE_RUN_PREFIXES+=("${PREFIX}")
+      if [[ -n "${CREATED_STR}" ]]; then
+        EPOCH=$(date -d "${CREATED_STR}" +%s 2>/dev/null || true)
+        if [[ -n "${EPOCH}" ]]; then
+          CURRENT_MIN="${ACTIVE_RUN_START_TIMES[${PREFIX}]:-}"
+          if [[ -z "${CURRENT_MIN}" || "${EPOCH}" -lt "${CURRENT_MIN}" ]]; then
+            ACTIVE_RUN_START_TIMES["${PREFIX}"]="${EPOCH}"
+          fi
+        fi
+      fi
     fi
   fi
-done < <(kubectl get jobsets -n "${NAMESPACE}" --no-headers 2>/dev/null || true)
+done <<< "${JOBSETS_RAW}"
 
 # Extract from running/pending workload pods (orch, train, roll)
-while IFS= read -r pod_name; do
+WORKLOAD_PODS_RAW=$(kubectl get pods -n "${NAMESPACE}" \
+  -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.phase}{"\t"}{.metadata.creationTimestamp}{"\n"}{end}' 2>/dev/null || true)
+
+while IFS=$'\t' read -r pod_name phase created_str; do
   [[ -z "${pod_name}" ]] && continue
-  PREFIX=$(echo "${pod_name}" | sed -E 's/-(orch|train|roll(-[0-9]+)?)-.*$//')
-  ACTIVE_RUN_PREFIXES+=("${PREFIX}")
-done < <(kubectl get pods -n "${NAMESPACE}" --no-headers 2>/dev/null | \
-  awk '($3 == "Running" || $3 == "Pending") && $1 !~ /^(pool-|sandbox-claim-)/ && ($1 ~ /-orch-/ || $1 ~ /-roll-/ || $1 ~ /-train-/) {print $1}' || true)
+  if [[ ("${phase}" == "Running" || "${phase}" == "Pending") && "${pod_name}" != pool-* && "${pod_name}" != sandbox-claim-* ]]; then
+    if [[ "${pod_name}" == *-orch-* || "${pod_name}" == *-roll-* || "${pod_name}" == *-train-* ]]; then
+      PREFIX=$(echo "${pod_name}" | sed -E 's/-(orch|train|roll(-[0-9]+)?)-.*$//')
+      ACTIVE_RUN_PREFIXES+=("${PREFIX}")
+      if [[ -n "${created_str}" ]]; then
+        EPOCH=$(date -d "${created_str}" +%s 2>/dev/null || true)
+        if [[ -n "${EPOCH}" ]]; then
+          CURRENT_MIN="${ACTIVE_RUN_START_TIMES[${PREFIX}]:-}"
+          if [[ -z "${CURRENT_MIN}" || "${EPOCH}" -lt "${CURRENT_MIN}" ]]; then
+            ACTIVE_RUN_START_TIMES["${PREFIX}"]="${EPOCH}"
+          fi
+        fi
+      fi
+    fi
+  fi
+done <<< "${WORKLOAD_PODS_RAW}"
 
 ACTIVE_RUN_PREFIXES=($(echo "${ACTIVE_RUN_PREFIXES[@]:-}" | tr ' ' '\n' | sort -u | grep -v '^$' || true))
 echo "Active workload run prefixes: ${ACTIVE_RUN_PREFIXES[*]:-none}"
@@ -131,11 +155,24 @@ if [[ -n "${NODEPOOL}" ]]; then
   fi
 fi
 
-# Helper function to check if a pod name matches any active workload prefix
+# Helper function to check if a resource name matches any active workload prefix,
+# and optionally verifies that the resource was not created prior to the current active run (stale run).
 is_active_run() {
   local target_name="$1"
+  local created_str="${2:-}"
   for pfx in "${ACTIVE_RUN_PREFIXES[@]}"; do
     if [[ "${target_name}" == *"-${pfx}-"* || "${target_name}" == "${pfx}-"* ]]; then
+      if [[ -n "${created_str}" && -n "${ACTIVE_RUN_START_TIMES[${pfx}]:-}" ]]; then
+        local res_epoch
+        res_epoch=$(date -d "${created_str}" +%s 2>/dev/null || true)
+        if [[ -n "${res_epoch}" ]]; then
+          local run_start="${ACTIVE_RUN_START_TIMES[${pfx}]}"
+          # If resource was created > 120s before the active run began, it belongs to a previous run
+          if [[ "${res_epoch}" -lt $((run_start - 120)) ]]; then
+            return 1
+          fi
+        fi
+      fi
       return 0
     fi
   done
@@ -216,12 +253,15 @@ fi
 echo "==> 5. Inspecting orphaned SandboxWarmPools and SandboxTemplates..."
 
 ORPHAN_WARMPOOLS=()
-while IFS= read -r wp_name; do
+WARMPOOLS_JSON=$(kubectl get sandboxwarmpools -n "${NAMESPACE}" \
+  -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.creationTimestamp}{"\n"}{end}' 2>/dev/null || true)
+
+while IFS=$'\t' read -r wp_name wp_created; do
   [[ -z "${wp_name}" ]] && continue
-  if ! is_active_run "${wp_name}"; then
+  if ! is_active_run "${wp_name}" "${wp_created}"; then
     ORPHAN_WARMPOOLS+=("${wp_name}")
   fi
-done < <(kubectl get sandboxwarmpools -n "${NAMESPACE}" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' || true)
+done <<< "${WARMPOOLS_JSON}"
 
 echo "Found ${#ORPHAN_WARMPOOLS[@]} orphaned SandboxWarmPool(s)."
 if [[ ${#ORPHAN_WARMPOOLS[@]} -gt 0 ]]; then
@@ -236,14 +276,14 @@ fi
 
 ORPHAN_TEMPLATES=()
 TEMPLATES_JSON=$(kubectl get sandboxtemplates -n "${NAMESPACE}" \
-  -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.podTemplate.spec.nodeSelector.cloud\.google\.com/gke-nodepool}{"\n"}{end}' 2>/dev/null || true)
+  -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.podTemplate.spec.nodeSelector.cloud\.google\.com/gke-nodepool}{"\t"}{.metadata.creationTimestamp}{"\n"}{end}' 2>/dev/null || true)
 
-while IFS=$'\t' read -r tmpl_name tmpl_np; do
+while IFS=$'\t' read -r tmpl_name tmpl_np tmpl_created; do
   [[ -z "${tmpl_name}" ]] && continue
   if [[ -n "${NODEPOOL}" && "${tmpl_np}" != "${NODEPOOL}" ]]; then
     continue
   fi
-  if ! is_active_run "${tmpl_name}"; then
+  if ! is_active_run "${tmpl_name}" "${tmpl_created}"; then
     ORPHAN_TEMPLATES+=("${tmpl_name}")
   fi
 done <<< "${TEMPLATES_JSON}"
@@ -264,13 +304,16 @@ fi
 # ------------------------------------------------------------------------------
 echo "==> 6. Checking for orphaned SandboxClaims..."
 
+CLAIMS_JSON=$(kubectl get sandboxclaims -n "${NAMESPACE}" \
+  -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.warmPoolRef.name}{"\t"}{.metadata.labels.app\.kubernetes\.io/created-by}{"\t"}{.metadata.creationTimestamp}{"\n"}{end}' 2>/dev/null || true)
+
 ORPHAN_CLAIMS=()
-while IFS= read -r claim_name; do
+while IFS=$'\t' read -r claim_name wp_ref created_by claim_created; do
   [[ -z "${claim_name}" ]] && continue
-  if ! is_active_run "${claim_name}"; then
+  if ! is_active_run "${wp_ref}" "${claim_created}" && ! is_active_run "${created_by}" "${claim_created}"; then
     ORPHAN_CLAIMS+=("${claim_name}")
   fi
-done < <(kubectl get sandboxclaims -n "${NAMESPACE}" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' || true)
+done <<< "${CLAIMS_JSON}"
 
 echo "Found ${#ORPHAN_CLAIMS[@]} orphaned SandboxClaim(s)."
 if [[ ${#ORPHAN_CLAIMS[@]} -gt 0 ]]; then
@@ -309,18 +352,18 @@ fi
 # ------------------------------------------------------------------------------
 echo "==> 8. Checking for orphaned running sandbox pods..."
 
-RUNNING_PODS_JSON=$(kubectl get pods -n "${NAMESPACE}" -l "app=agent-sandbox-rl" -o wide --no-headers 2>/dev/null | \
-  awk '$3 == "Running" {print $1 "\t" $7}' || true)
+RUNNING_PODS_JSON=$(kubectl get pods -n "${NAMESPACE}" -l "app=agent-sandbox-rl" \
+  -o jsonpath='{range .items[?(@.status.phase=="Running")]}{.metadata.name}{"\t"}{.spec.nodeName}{"\t"}{.metadata.creationTimestamp}{"\n"}{end}' 2>/dev/null || true)
 
 ORPHAN_RUNNING_PODS=()
-while IFS=$'\t' read -r pod_name node_name; do
+while IFS=$'\t' read -r pod_name node_name pod_created; do
   [[ -z "${pod_name}" ]] && continue
   if [[ -n "${NODEPOOL}" ]]; then
     if [[ ! " ${TARGET_NODES[*]} " =~ " ${node_name} " ]]; then
       continue
     fi
   fi
-  if ! is_active_run "${pod_name}"; then
+  if ! is_active_run "${pod_name}" "${pod_created}"; then
     ORPHAN_RUNNING_PODS+=("${pod_name}")
   fi
 done <<< "${RUNNING_PODS_JSON}"
