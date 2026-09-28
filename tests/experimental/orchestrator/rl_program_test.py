@@ -16,6 +16,7 @@ import asyncio
 import builtins
 from collections.abc import Sequence
 import dataclasses
+import functools
 import types
 from typing import Any
 from unittest import mock
@@ -24,13 +25,17 @@ from absl.testing import absltest
 import metrax.logging as metrax_logging
 import numpy as np
 from tunix.experimental.common import datatypes
+from tunix.experimental.common import test_utils
 from tunix.experimental.metrics import metrics as exp_metrics
 from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import distributed_rl_engine
 from tunix.experimental.orchestrator import rl_program
+from tunix.experimental.rollout import collector as collector_lib
 from tunix.experimental.trajectory import in_memory_store
 from tunix.experimental.worker import remote_execution
+from tunix.experimental.worker import rollout_worker
+from tunix.rl import algorithm_config
 from tunix.sft import metrics_logger as metrics_logger_lib
 from tunix.sft import utils as sft_utils
 
@@ -4056,8 +4061,11 @@ class RLProgramTest(absltest.TestCase):
           mini_batch_size=1,
           max_packed_len=16,
       )
-      program = self._create_program(assembler=assembler)
+      # Resumed at step 2, so the failure warning's step number is checked
+      # against a value no default could produce.
+      program = self._create_program(assembler=assembler, max_steps=3)
       program.engine = self.mock_engine
+      program._step = 2
 
       valid_pos = self._scoring_item(0)
       valid_pos.traj["trajectory_reward"] = 1.0
@@ -4104,8 +4112,20 @@ class RLProgramTest(absltest.TestCase):
         await program.scored_q.put(item)
       await program.scored_q.close()
 
-      await program.train_stage()
+      with self.assertLogs("absl", level="WARNING") as logs:
+        await program.train_stage()
 
+      self.assertLen(
+          [line for line in logs.output if "[RolloutFailures" in line], 1
+      )
+      self.assertTrue(
+          any(
+              "[RolloutFailures step=2] failed=1 env_timeout=0 timeout=0 of 3"
+              in line
+              for line in logs.output
+          ),
+          logs.output,
+      )
       logger = program.metrics_logger
       self.assertFalse(np.isnan(program.last_step_result.advantage_mean))
       self.assertFalse(np.isnan(program.last_step_result.advantage_std))
@@ -4119,6 +4139,15 @@ class RLProgramTest(absltest.TestCase):
           logger.get_metric("", "rewards/advantage/abs_mean", "train"),
           0.75,
           places=5,
+      )
+      # The step loop reports the failed member on its own, not only folded
+      # into `rollout/invalid_trajectory_frac`.
+      self.assertAlmostEqual(
+          logger.get_metric("", "rollout/failed_frac", "train"), 1 / 3
+      )
+      self.assertAlmostEqual(
+          logger.get_metric("", "rollout/zero_advantage_group_frac", "train"),
+          0.0,
       )
       program.close()
 
@@ -4459,7 +4488,7 @@ class GenerationMetricsTest(absltest.TestCase):
 class GenerationMetricsLoggingTest(absltest.TestCase):
   """Covers how the computed metrics reach the metrics logger."""
 
-  def _log_metrics(self, metrics):
+  def _log_metrics(self, metrics, *, rollout_failure_metrics=None):
     algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
     algo.num_generations = 2
     algo.mini_batch_size = 1
@@ -4482,6 +4511,7 @@ class GenerationMetricsLoggingTest(absltest.TestCase):
         all_step_items=[],
         step_rewards=[],
         generation_metrics=metrics,
+        rollout_failure_metrics=rollout_failure_metrics,
         num_rollouts=0,
         num_microbatches=0,
         step_time_sec=0.0,
@@ -4510,6 +4540,243 @@ class GenerationMetricsLoggingTest(absltest.TestCase):
 
     self.assertEmpty(
         [k for k in logged if k.startswith("generation/completions/")]
+    )
+
+  def test_logs_the_rollout_failure_metrics_alongside(self):
+    computed = rl_program._rollout_failure_metrics(
+        [[
+            _status_item(datatypes.TrajectoryStatus.FAILED, advantage=None),
+            _status_item(datatypes.TrajectoryStatus.SUCCEEDED),
+        ]],
+        step=0,
+    )
+
+    logged = self._log_metrics({}, rollout_failure_metrics=computed)
+
+    self.assertEqual(
+        {k: v for k, v in logged.items() if k in _FAILURE_METRIC_NAMES},
+        {
+            "rollout/failed_frac": 0.5,
+            "rollout/env_timeout_frac": 0.0,
+            "rollout/timeout_frac": 0.0,
+            "rollout/zero_advantage_group_frac": 0.0,
+        },
+    )
+
+
+def _status_item(
+    status, *, advantage=1.0, error_type=None, error=None, masked=False
+):
+  """Builds a scored TrajectoryItem with the given status and advantage."""
+  traj = {"status": status}
+  mask = np.zeros(2, dtype=np.float32) if masked else np.ones(2, np.float32)
+  if masked:
+    traj["conversation_masks"] = mask
+  metadata = {}
+  if error_type is not None:
+    metadata["error_type"] = error_type
+  if error is not None:
+    metadata["error"] = error
+  item = datatypes.TrajectoryItem(
+      prompt_id="p", group_index=0, traj=traj, metadata=metadata
+  )
+  if advantage is not None:
+    payload = datatypes.RLTrainerPayload(
+        prompt_ids=np.array([1], dtype=np.int32),
+        prompt_mask=np.ones(1, dtype=np.float32),
+        completion_ids=np.array([2, 3], dtype=np.int32),
+        completion_mask=mask,
+        advantages=np.full(2, advantage, dtype=np.float32),
+    )
+    item.payload = payload  # pyrefly: ignore[missing-attribute]
+  return item
+
+
+_FAILURE_METRIC_NAMES = (
+    "rollout/failed_frac",
+    "rollout/env_timeout_frac",
+    "rollout/timeout_frac",
+    "rollout/zero_advantage_group_frac",
+)
+
+
+def _warning_messages(logs):
+  return [line.split(":", 2)[2] for line in logs.output]
+
+
+class RolloutFailureMetricsTest(absltest.TestCase):
+  """Covers `_rollout_failure_metrics`, the per-step failure breakdown."""
+
+  def test_counts_each_failure_status_whether_enum_or_string(self):
+    # critique_stage normalizes status to the enum, but items that bypass it
+    # carry the wire form; both must count. Distinct counts per status keep the
+    # three fractions from being swapped unnoticed.
+    status = datatypes.TrajectoryStatus
+    group = [
+        _status_item(status.FAILED, error_type="SandboxError"),
+        _status_item("failed", error_type="SandboxError"),
+        _status_item(status.ENV_TIMEOUT),
+        _status_item("env_timeout"),
+        _status_item(status.ENV_TIMEOUT),
+        _status_item("TIMEOUT"),
+        _status_item(status.SUCCEEDED),
+        _status_item(status.MAX_CONTEXT_LIMIT_REACHED, masked=True),
+    ]
+
+    metrics = rl_program._rollout_failure_metrics([group], step=0)
+
+    self.assertEqual(
+        metrics,
+        {
+            "rollout/failed_frac": 0.25,
+            "rollout/env_timeout_frac": 0.375,
+            "rollout/timeout_frac": 0.125,
+            "rollout/zero_advantage_group_frac": 0.0,
+        },
+    )
+
+  def test_rollout_that_raised_after_a_timeout_counts_as_that_timeout(self):
+    # Under router replay an ENV_TIMEOUT step has no routed experts, so
+    # flattening it raises ValueError and the rollout arrives FAILED; the
+    # manager's `episode_status` puts it back under the timeout it hit.
+    failed = datatypes.TrajectoryStatus.FAILED
+    after_env_timeout = _status_item(failed, error_type="ValueError")
+    after_env_timeout.metadata["episode_status"] = "ENV_TIMEOUT"
+    after_timeout = _status_item(failed, error_type="TimeoutError")
+    after_timeout.metadata["episode_status"] = "TIMEOUT"
+    after_success = _status_item(failed, error_type="ValueError")
+    after_success.metadata["episode_status"] = "SUCCEEDED"
+
+    with self.assertLogs("absl", level="WARNING") as logs:
+      metrics = rl_program._rollout_failure_metrics(
+          [[after_env_timeout, after_timeout, after_success]], step=0
+      )
+
+    self.assertEqual(metrics["rollout/failed_frac"], 1 / 3)
+    self.assertEqual(metrics["rollout/env_timeout_frac"], 1 / 3)
+    self.assertEqual(metrics["rollout/timeout_frac"], 1 / 3)
+    self.assertIn(
+        "error_types={'ValueError@ENV_TIMEOUT': 1, 'TimeoutError@TIMEOUT': 1,"
+        " 'ValueError': 1}",
+        _warning_messages(logs)[0],
+    )
+
+  def test_zero_advantage_group_follows_the_payloads(self):
+    # A group counts when no member has a trainable token with a nonzero
+    # advantage, whatever the reason; the adapter decided that, not a rule
+    # copied here. A single-member group with an advantage (PPO's default
+    # `num_generations=1`) does not count.
+    status = datatypes.TrajectoryStatus
+    healthy = [
+        _status_item(status.SUCCEEDED, advantage=1.0),
+        _status_item(status.SUCCEEDED, advantage=-1.0),
+    ]
+    same_reward = [
+        _status_item(status.SUCCEEDED, advantage=0.0),
+        _status_item(status.SUCCEEDED, advantage=0.0),
+    ]
+    masked_out = [
+        _status_item(status.MAX_STEPS_REACHED, masked=True),
+        _status_item(status.MAX_STEPS_REACHED, masked=True),
+    ]
+    no_payload = [_status_item(status.SUCCEEDED, advantage=None)]
+    single_member = [_status_item(status.SUCCEEDED, advantage=0.5)]
+
+    with self.assertNoLogs("absl", level="WARNING"):
+      metrics = rl_program._rollout_failure_metrics(
+          [healthy, same_reward, masked_out, no_payload, single_member],
+          step=0,
+      )
+
+    self.assertEqual(metrics["rollout/zero_advantage_group_frac"], 0.6)
+
+  def test_step_that_trains_on_nothing_warns_without_any_failure(self):
+    # A swallowed sandbox error surfaces as SUCCEEDED rollouts that all score
+    # 0: no status says failed, but no group carries a gradient either.
+    group = [
+        _status_item(datatypes.TrajectoryStatus.SUCCEEDED, advantage=0.0)
+    ] * 4
+
+    with self.assertLogs("absl", level="WARNING") as logs:
+      metrics = rl_program._rollout_failure_metrics([group, group], step=5)
+
+    self.assertEqual(metrics["rollout/zero_advantage_group_frac"], 1.0)
+    self.assertEqual(metrics["rollout/failed_frac"], 0.0)
+    self.assertEqual(
+        _warning_messages(logs),
+        [
+            "[RolloutFailures step=5] failed=0 env_timeout=0 timeout=0 of 8"
+            " rollouts; zero_advantage_groups=2 of 2; error_types={};"
+            " error_examples={}"
+        ],
+    )
+
+  def test_clean_step_emits_zeros_and_no_warning(self):
+    # A continuous series lets an alert tell "no failures" from "no data".
+    group = [
+        _status_item(datatypes.TrajectoryStatus.SUCCEEDED, advantage=a)
+        for a in (1.0, -1.0)
+    ]
+
+    with self.assertNoLogs("absl", level="WARNING"):
+      metrics = rl_program._rollout_failure_metrics([group], step=0)
+
+    self.assertEqual(metrics, dict.fromkeys(_FAILURE_METRIC_NAMES, 0.0))
+
+  def test_empty_input_returns_empty(self):
+    with self.assertNoLogs("absl", level="WARNING"):
+      self.assertEmpty(rl_program._rollout_failure_metrics([], step=0))
+      self.assertEmpty(rl_program._rollout_failure_metrics([[]], step=0))
+
+  def test_items_without_a_status_stay_in_the_denominator(self):
+    # A rollout with no readable status is not a failure, but it is still one
+    # of the step's rollouts; this is only a metric, so it must not raise.
+    no_traj = datatypes.TrajectoryItem(prompt_id="p", traj=None)
+    non_dict_traj = datatypes.TrajectoryItem(prompt_id="p", traj=object())
+    unknown = _status_item("NOT_A_STATUS")
+    failed = _status_item(datatypes.TrajectoryStatus.FAILED)
+    failed.metadata = None
+
+    metrics = rl_program._rollout_failure_metrics(
+        [[no_traj, non_dict_traj, unknown, failed]], step=0
+    )
+
+    self.assertEqual(metrics["rollout/failed_frac"], 0.25)
+
+  def test_warning_names_counts_error_types_and_an_example_each(self):
+    status = datatypes.TrajectoryStatus
+    long_message = "sandbox unreachable: " + "x" * 300
+    groups = [
+        [
+            _status_item(
+                status.FAILED,
+                advantage=None,
+                error_type="SandboxError",
+                error=long_message,
+            ),
+            _status_item(
+                status.FAILED,
+                advantage=None,
+                error_type="SandboxError",
+                error="second",
+            ),
+            _status_item(status.FAILED, advantage=None),
+            _status_item(status.ENV_TIMEOUT, advantage=None),
+        ],
+        [_status_item(status.SUCCEEDED), _status_item(status.SUCCEEDED)],
+    ]
+
+    with self.assertLogs("absl", level="WARNING") as logs:
+      rl_program._rollout_failure_metrics(groups, step=7)
+
+    self.assertEqual(
+        _warning_messages(logs),
+        [
+            "[RolloutFailures step=7] failed=3 env_timeout=1 timeout=0 of 6"
+            " rollouts; zero_advantage_groups=1 of 2;"
+            " error_types={'SandboxError': 2, 'unknown': 1};"
+            f" error_examples={{'SandboxError': {long_message[:200]!r}}}"
+        ],
     )
 
 
@@ -4863,6 +5130,233 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
       program.close()
 
     asyncio.run(_run())
+
+
+class _ScriptedCollector:
+  """Collector stand-in that raises for the listed group members.
+
+  The others complete through the real `_convert_to_trajectory`, so they carry
+  exactly the metadata a real collector stamps on a successful rollout.
+  """
+
+  _convert_to_trajectory = (
+      collector_lib.TrajectoryCollectorEngine._convert_to_trajectory
+  )
+  _annotate_response_budget = (
+      collector_lib.TrajectoryCollectorEngine._annotate_response_budget
+  )
+
+  def __init__(self, traj_id, request, *, failing_group_indices, **kwargs):
+    del kwargs
+    self.traj_id = traj_id
+    self.request = request
+    self.env = None
+    self.max_response_length = None
+    self.eos_ids = frozenset()
+    self._failing_group_indices = failing_group_indices
+
+  async def run_episode(self):
+    if self.request.group_index in self._failing_group_indices:
+      raise TimeoutError("env.step timed out")
+    return self._convert_to_trajectory({
+        "status": datatypes.TrajectoryStatus.SUCCEEDED,
+        "trajectory_reward": float(self.request.group_index % 2),
+        "prompt_tokens": np.array([1, 2], dtype=np.int32),
+        "conversation_tokens": np.array([3, 4], dtype=np.int32),
+        "conversation_masks": np.ones(2, dtype=np.float32),
+        "old_logprobs": np.full(2, -0.5, dtype=np.float32),
+    })
+
+
+class FailedRolloutPromptBatchTest(absltest.TestCase):
+  """A rollout that raises must leave its prompt group whole.
+
+  Drives the real failure path: `RolloutManager` turns the exception into a
+  `TrajectoryError`, `RolloutWorker` and `DistributedRLEngine` turn that into a
+  0-token FAILED item, and `StandardRLProgram` groups, scores and orders it
+  under the MLPerf queue settings (16 generations, `max_staleness=1`,
+  `prompt_batch` order).
+  """
+
+  _NUM_GENERATIONS = 16
+
+  async def _rollouts(self, *, policy_version, failing_group_indices):
+    """One prompt's group, as the polling stage receives it."""
+    engine = distributed_rl_engine.DistributedRLEngine(
+        rollout_workers=[], trainer_workers={}
+    )
+    prompt = rl_program._tag_prompt(
+        {"prompt": "fix the bug", "prompt_id": "prompt_0"},
+        rl_program._prompt_coordinates(0, full_batch_size=1),
+    )
+    requests = engine._build_rollout_requests(
+        [prompt],
+        num_generations=self._NUM_GENERATIONS,
+        policy_version=policy_version,
+    )
+    worker = rollout_worker.RolloutWorker(
+        worker_id="w0",
+        sampler=test_utils.MockBaseSamplerImpl(sampler_name="mock_sampler"),
+        tokenizer="mock",
+        chat_parser="mock",
+    )
+    with mock.patch.object(
+        collector_lib,
+        "TrajectoryCollectorEngine",
+        functools.partial(
+            _ScriptedCollector,
+            failing_group_indices=frozenset(failing_group_indices),
+        ),
+    ):
+      responses = await worker.generate(requests)
+    items = [
+        distributed_rl_engine._response_to_trajectory_item(resp)
+        for resp in responses
+    ]
+    # Failures arrive first: the prompt-batch queue reads `batch_idx` off a
+    # group's first member.
+    items.sort(key=lambda item: item.is_valid)
+    return items
+
+  async def _critiqued_program(
+      self, *, policy_version, failing_group_indices, **kwargs
+  ):
+    """A program whose scored_q holds one group, run through raw_q and critique."""
+    program = rl_program.StandardRLProgram(
+        algo=algorithm_adapter.GRPOAdapter(
+            # No KL term: the mock engine has no reference model to score.
+            algo_config=algorithm_config.GRPOConfig(
+                num_generations=self._NUM_GENERATIONS, beta=0.0
+            ),
+            mini_batch_size=1,
+        ),
+        dataset=["prompt_0"],
+        batch_size=1,
+        max_staleness=1,
+        group_order=rl_program.trajectory_queue_manager.GroupOrder.PROMPT_BATCH,
+        **kwargs,
+    )
+    program.engine = mock.AsyncMock(
+        spec=rl_program.rl_engine_interface.AbstractRLEngine
+    )
+    program.policy_version = policy_version
+    for item in await self._rollouts(
+        policy_version=policy_version,
+        failing_group_indices=failing_group_indices,
+    ):
+      await program.raw_q.put(item)
+    await program.raw_q.close()
+    await program.critique_stage()
+    return program
+
+  def _score(self, *, policy_version, failing_group_indices):
+    """Runs one group through raw_q and critique; returns what scored_q serves."""
+
+    async def _run():
+      program = await self._critiqued_program(
+          policy_version=policy_version,
+          failing_group_indices=failing_group_indices,
+      )
+      served = await program.scored_q.get_ordered_group()
+      program.close()
+      return served
+
+    return asyncio.run(_run())
+
+  def _train_one_step(self, *, failing_group_indices):
+    """Trains step 0 on one group; returns the logged metrics and warnings."""
+
+    async def _run():
+      program = await self._critiqued_program(
+          policy_version=0,
+          failing_group_indices=failing_group_indices,
+          max_steps=1,
+      )
+      program.engine.train_step.return_value = {"loss": 0.1}
+      program.engine.get_metrics.return_value = {"loss": 0.1}
+      program.engine.sync_weights.return_value = None
+
+      async def _trainer_logps(role, items):
+        del role
+        return types.SimpleNamespace(
+            per_token_logps=np.zeros(np.shape(items.completion_tokens))
+        )
+
+      program.engine.per_token_logps.side_effect = _trainer_logps
+      program.metrics_logger = mock.MagicMock()
+      with self.assertLogs("absl", level="WARNING") as logs:
+        await program.train_stage()
+      program.close()
+      logged = {
+          call.args[1]: call.args[2]
+          for call in program.metrics_logger.log.call_args_list
+      }
+      return logged, [
+          line for line in logs.output if "[RolloutFailures" in line
+      ]
+
+    return asyncio.run(_run())
+
+  def _assert_whole_group(self, served, *, policy_version, failed):
+    self.assertIsNotNone(served)
+    batch_idx, group = served
+    self.assertEqual(batch_idx, 0)
+    self.assertCountEqual(
+        [item.group_index for item in group], range(self._NUM_GENERATIONS)
+    )
+    self.assertCountEqual(
+        [item.group_index for item in group if not item.is_valid], failed
+    )
+    for item in group:
+      self.assertEqual(item.policy_version, policy_version)
+      self.assertEqual(item.metadata["batch_idx"], 0)
+
+  def test_failed_rollout_inside_staleness_window_keeps_group_whole(self):
+    # The failed member used to carry no `batch_idx`, and the prompt-batch
+    # queue raised reading it off the group's first member.
+    served = self._score(policy_version=0, failing_group_indices={5})
+    self._assert_whole_group(served, policy_version=0, failed=[5])
+
+  def test_failed_rollout_past_staleness_window_keeps_group_whole(self):
+    # The failed member used to read as policy version 0, so at version 2 the
+    # staleness filter dropped it and forwarded 15 members to a reshape by 16.
+    served = self._score(policy_version=2, failing_group_indices={11})
+    self._assert_whole_group(served, policy_version=2, failed=[11])
+
+  def test_group_of_only_failed_rollouts_still_resolves_its_batch(self):
+    # With every member stale the whole group used to be dropped, and reporting
+    # the drop needed a `batch_idx`, so the batch could never seal.
+    everyone = range(self._NUM_GENERATIONS)
+    served = self._score(policy_version=2, failing_group_indices=everyone)
+    self._assert_whole_group(served, policy_version=2, failed=everyone)
+
+  def test_failed_rollouts_show_up_in_failure_metrics(self):
+    # The run no longer crashes on a failed rollout, so the failure has to be
+    # visible: in the metrics, and by exception class in the log.
+    logged, warnings = self._train_one_step(failing_group_indices={3, 9})
+
+    self.assertEqual(logged["rollout/failed_frac"], 2 / self._NUM_GENERATIONS)
+    self.assertEqual(logged["rollout/zero_advantage_group_frac"], 0.0)
+    self.assertLen(warnings, 1)
+    self.assertIn("[RolloutFailures step=0] failed=2", warnings[0])
+    self.assertIn("error_types={'TimeoutError': 2}", warnings[0])
+    self.assertIn("env.step timed out", warnings[0])
+
+  def test_step_of_only_failed_rollouts_still_reports_them(self):
+    # When the sandbox is down every rollout fails, and the step trains on 0
+    # tokens; it must get through to the summary rather than die before it.
+    logged, warnings = self._train_one_step(
+        failing_group_indices=range(self._NUM_GENERATIONS)
+    )
+
+    self.assertEqual(logged["rollout/failed_frac"], 1.0)
+    self.assertEqual(logged["rollout/zero_advantage_group_frac"], 1.0)
+    self.assertLen(warnings, 1)
+    self.assertIn(
+        "failed=16 env_timeout=0 timeout=0 of 16 rollouts;"
+        " zero_advantage_groups=1 of 1; error_types={'TimeoutError': 16}",
+        warnings[0],
+    )
 
 
 class ExtractScalarTest(absltest.TestCase):

@@ -20,6 +20,7 @@ pipelines.
 
 import abc
 import asyncio
+import collections
 from collections.abc import Callable, Iterable, Mapping, Sequence, Sized
 import copy
 import dataclasses
@@ -195,6 +196,144 @@ def _generation_metrics(
       ),
       "generation/completions/max_raw_length": float(np.max(all_lengths)),
       "generation/completions/min_raw_length": float(np.min(all_lengths)),
+  }
+
+
+def _rollout_status(item: Any) -> datatypes.TrajectoryStatus | None:
+  """Reads a rollout's status as a `TrajectoryStatus`; None when it has none."""
+  traj = getattr(item, "traj", None)
+  if isinstance(traj, dict):
+    status = traj.get("status")
+  else:
+    status = getattr(traj, "status", None)
+  if status is None:
+    status = getattr(item, "status", None)
+  if isinstance(status, str):
+    status = datatypes.TrajectoryStatus.__members__.get(status.upper())
+  return status if isinstance(status, datatypes.TrajectoryStatus) else None
+
+
+# `episode_status` values that move a raised rollout from FAILED to the timeout
+# its episode had already hit.
+_TIMEOUT_STATUS_NAMES = ("ENV_TIMEOUT", "TIMEOUT")
+# Longest error message quoted per exception class in the failure warning.
+_MAX_ERROR_EXAMPLE_CHARS = 200
+
+
+def _carries_advantage(item: Any) -> bool:
+  """Whether a scored rollout has a trainable token with a nonzero advantage."""
+  payload = getattr(item, "payload", None)
+  mask = getattr(payload, "completion_mask", None)
+  advantages = getattr(payload, "advantages", None)
+  if mask is None or advantages is None:
+    return False
+  try:
+    return bool(
+        np.any(np.asarray(mask) != 0) and np.any(np.asarray(advantages) != 0)
+    )
+  except (TypeError, ValueError):
+    return False
+
+
+def _rollout_failure_metrics(
+    groups: Sequence[Sequence[Any]],
+    *,
+    step: int,
+) -> dict[str, float]:
+  """Computes the step's rollout failure metrics, and warns when there are any.
+
+  A rollout that raises, times out, or hangs in `env.step` still takes its
+  slot in the prompt group as a zero-advantage member (see
+  `RolloutManager._run_and_enqueue`), so the run carries on without it. These
+  metrics keep that from hiding a broken sandbox: `rollout/success_rate` and
+  `rollout/invalid_trajectory_frac` also count wrong answers and masked
+  overlong rollouts, so neither can tell the failures apart.
+
+  The three status fractions split the failures by how the episode ended. A
+  rollout that raised arrives FAILED; when its episode had already hit
+  `TIMEOUT` or `ENV_TIMEOUT` (the manager stamps `episode_status`), it counts
+  as that timeout instead, so a hung sandbox does not read as whatever error
+  the timed-out trajectory raised afterwards.
+
+  `rollout/zero_advantage_group_frac` reads the trainer payloads, so it follows
+  whichever adapter built them: a group counts when none of its members has a
+  trainable token with a nonzero advantage, whether because its rollouts
+  failed, too few were valid to form a baseline, or every valid member earned
+  the same reward. All-solved and all-wrong prompts keep it above zero on a
+  healthy run; at 1.0 the step trained on nothing, which also catches failures
+  that surface as zero rewards rather than as errors.
+
+  The warning line fires on any failure, or when every group had zero
+  advantage. It names the exception classes behind the raised rollouts, read
+  from the `error_type` the rollout manager stamps on their metadata, with one
+  sample error message each, so the cause is in the orchestrator log even when
+  no metrics backend is up.
+
+  Args:
+    groups: Scored trajectory items for the step, grouped by prompt.
+    step: The step being logged, for the warning line.
+
+  Returns:
+    Fully-qualified metric name to step value. Every metric is present, zeros
+    included, whenever the step has a rollout, so dashboards and alerts see an
+    unbroken series; empty when it has none.
+  """
+  status_counts: collections.Counter[datatypes.TrajectoryStatus] = (
+      collections.Counter()
+  )
+  error_types: collections.Counter[str] = collections.Counter()
+  error_examples: dict[str, str] = {}
+  num_rollouts = 0
+  num_groups = 0
+  zero_advantage_groups = 0
+  for group in groups:
+    if not group:
+      continue
+    num_groups += 1
+    zero_advantage_groups += not any(_carries_advantage(i) for i in group)
+    for item in group:
+      num_rollouts += 1
+      status = _rollout_status(item)
+      if status == datatypes.TrajectoryStatus.FAILED:
+        meta = getattr(item, "metadata", None)
+        meta = meta if isinstance(meta, dict) else {}
+        error_type = str(meta.get("error_type") or "unknown")
+        episode_status = meta.get("episode_status")
+        if episode_status in _TIMEOUT_STATUS_NAMES:
+          status = datatypes.TrajectoryStatus[episode_status]
+          error_type = f"{error_type}@{episode_status}"
+        error_types[error_type] += 1
+        if meta.get("error") and error_type not in error_examples:
+          error_examples[error_type] = str(meta["error"])[
+              :_MAX_ERROR_EXAMPLE_CHARS
+          ]
+      status_counts[status] += 1
+
+  if not num_rollouts:
+    return {}
+  failed = status_counts[datatypes.TrajectoryStatus.FAILED]
+  env_timeout = status_counts[datatypes.TrajectoryStatus.ENV_TIMEOUT]
+  timeout = status_counts[datatypes.TrajectoryStatus.TIMEOUT]
+  if failed or env_timeout or timeout or zero_advantage_groups == num_groups:
+    logging.warning(
+        "[RolloutFailures step=%d] failed=%d env_timeout=%d timeout=%d of %d"
+        " rollouts; zero_advantage_groups=%d of %d; error_types=%s;"
+        " error_examples=%s",
+        step,
+        failed,
+        env_timeout,
+        timeout,
+        num_rollouts,
+        zero_advantage_groups,
+        num_groups,
+        dict(error_types.most_common()),
+        error_examples,
+    )
+  return {
+      "rollout/failed_frac": failed / num_rollouts,
+      "rollout/env_timeout_frac": env_timeout / num_rollouts,
+      "rollout/timeout_frac": timeout / num_rollouts,
+      "rollout/zero_advantage_group_frac": zero_advantage_groups / num_groups,
   }
 
 
@@ -858,6 +997,7 @@ class StandardRLProgram(RLProgram):
       step_rewards: Sequence[float],
       step_advantages: Sequence[float] | None = None,
       generation_metrics: Mapping[str, float] | None = None,
+      rollout_failure_metrics: Mapping[str, float] | None = None,
       step_result: Any = None,
       trainer_metrics: Any = None,
       num_rollouts: int,
@@ -1039,9 +1179,9 @@ class StandardRLProgram(RLProgram):
         )
 
     # Generation metrics, already named to match the agentic GRPO learner so
-    # the same dashboards work for both.
-    if generation_metrics:
-      for tag, val in generation_metrics.items():
+    # the same dashboards work for both, and the rollout failure breakdown.
+    for metrics in (generation_metrics, rollout_failure_metrics):
+      for tag, val in (metrics or {}).items():
         self.metrics_logger.log(
             self.metrics_prefix,
             tag,
@@ -1612,6 +1752,9 @@ class StandardRLProgram(RLProgram):
 
       # Before `commit()`, which will eventually take ownership of the groups.
       generation_metrics = _generation_metrics(uncommitted_groups)
+      rollout_failure_metrics = _rollout_failure_metrics(
+          uncommitted_groups, step=current_step
+      )
       logging.info(
           "[pipeline] COMMIT step=%d batch_idx=%s consumed_version=%d"
           " rollout_versions=%s groups=%s",
@@ -1643,6 +1786,7 @@ class StandardRLProgram(RLProgram):
           step_rewards=step_rewards,
           step_advantages=step_advantages,
           generation_metrics=generation_metrics,
+          rollout_failure_metrics=rollout_failure_metrics,
           step_result=step_result,
           trainer_metrics=trainer_metrics,
           num_rollouts=num_rollouts,

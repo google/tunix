@@ -23,6 +23,7 @@ from tunix.experimental.common import datatypes
 from tunix.experimental.rl.agentic import registry
 from tunix.experimental.rollout import manager as manager_lib
 from tunix.experimental.rollout import sampler as sampler_lib
+from tunix.experimental.trajectory import trajectory as trajectory_lib
 from tunix.experimental.weight_sync import weight_sync
 
 
@@ -490,6 +491,114 @@ class AgentConfigTest(unittest.IsolatedAsyncioTestCase):
       await manager._generate_one(request)
 
     self.assertIsNone(collector_cls.call_args.kwargs["eos_ids"])
+
+
+class FailedEpisodeTest(unittest.IsolatedAsyncioTestCase):
+
+  async def _run_failing_episode(
+      self, request, error=None, episode_status=None
+  ):
+    error = error or TimeoutError("env.step timed out")
+    manager = manager_lib.RolloutManager(
+        sampler=_FakeSyncSampler([]), tokenizer="mock", chat_parser="mock"
+    )
+    with mock.patch.object(
+        manager_lib.collector_lib, "TrajectoryCollectorEngine"
+    ) as collector_cls:
+      collector = collector_cls.return_value
+      collector.traj_id = request.traj_id
+      collector.env = None
+      if episode_status is not None:
+        collector.agent = types.SimpleNamespace(
+            trajectory=types.SimpleNamespace(status=episode_status)
+        )
+      collector.run_episode = mock.AsyncMock(side_effect=error)
+
+      result = await manager._generate_one(request)
+
+    self.assertIs(await manager.pop_next_completed(), result)
+    return result
+
+  async def test_error_metadata_is_exact_and_the_failure_is_logged(self):
+    request = datatypes.RolloutRequest(
+        prompt="prompt",
+        prompt_id="prompt_5",
+        group_index=3,
+        target_policy_version=7,
+        metadata={
+            "prompt_idx": 5,
+            "batch_idx": 2,
+            "intra_batch_idx": 1,
+            "group_index": 3,
+        },
+    )
+
+    with self.assertLogs("absl", level="WARNING") as logs:
+      result = await self._run_failing_episode(request)
+
+    # The failure no longer crashes the run, so it has to be visible in the log.
+    self.assertTrue(
+        any(
+            "batch_idx=2" in line and "TimeoutError" in line
+            for line in logs.output
+        ),
+        logs.output,
+    )
+    self.assertIsInstance(result, trajectory_lib.TrajectoryError)
+    self.assertEqual(result.error_type, "TimeoutError")
+    self.assertEqual(result.error_message, "env.step timed out")
+    self.assertEqual(
+        result.metadata,
+        {
+            "prompt_idx": 5,
+            "batch_idx": 2,
+            "intra_batch_idx": 1,
+            "prompt_id": "prompt_5",
+            "group_index": 3,
+            "policy_version": 7,
+            "error_type": "TimeoutError",
+        },
+    )
+    # Stamped on a copy: the request is not mutated.
+    self.assertNotIn("policy_version", request.metadata)
+
+  async def test_error_type_survives_in_metadata(self):
+    # `RolloutWorker._to_rollout_response` reports every failure as a
+    # "TrajectoryError"; the orchestrator's failure summary reads the real
+    # exception class from the metadata instead.
+    class SandboxError(RuntimeError):
+      pass
+
+    request = datatypes.RolloutRequest(
+        prompt="prompt",
+        prompt_id="p0",
+        group_index=1,
+        target_policy_version=3,
+    )
+
+    result = await self._run_failing_episode(
+        request, error=SandboxError("sandbox unreachable")
+    )
+
+    self.assertEqual(result.metadata["error_type"], "SandboxError")
+    self.assertEqual(result.metadata["policy_version"], 3)
+    # The mocked collector has no real agent, so no episode status is stamped.
+    self.assertNotIn("episode_status", result.metadata)
+
+  async def test_episode_status_survives_when_a_timed_out_rollout_raises(self):
+    # Under router replay an ENV_TIMEOUT step has no routed experts, so
+    # flattening the trajectory raises ValueError after the episode ended on
+    # the timeout; the status tells the orchestrator which it was.
+    request = datatypes.RolloutRequest(prompt="prompt", prompt_id="p0")
+
+    result = await self._run_failing_episode(
+        request,
+        error=ValueError("Step 1 ... missing assistant_routed_experts"),
+        episode_status=datatypes.TrajectoryStatus.ENV_TIMEOUT,
+    )
+
+    self.assertEqual(result.metadata["error_type"], "ValueError")
+    self.assertEqual(result.metadata["episode_status"], "ENV_TIMEOUT")
 
 
 class WeightSyncModeTest(absltest.TestCase):

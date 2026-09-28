@@ -297,8 +297,31 @@ class RolloutManager:
       error_metadata = dict(request.metadata or {})
       error_metadata["prompt_id"] = request.prompt_id
       error_metadata["group_index"] = request.group_index
-      error_metadata["policy_version"] = int(
-          getattr(request, "target_policy_version", 0) or 0
+      error_metadata["policy_version"] = int(request.target_policy_version or 0)
+      # `_to_rollout_response` reports every failure as a "TrajectoryError",
+      # so the exception class rides in the metadata to reach the
+      # orchestrator's per-step failure summary.
+      error_metadata["error_type"] = type(e).__name__
+      # Where the episode itself stopped. A rollout can end on ENV_TIMEOUT and
+      # then raise while being flattened (e.g. a step with no routed experts
+      # under router replay), which would otherwise read as a code bug.
+      episode_status = getattr(
+          getattr(getattr(collector, "agent", None), "trajectory", None),
+          "status",
+          None,
+      )
+      if isinstance(episode_status, datatypes.TrajectoryStatus):
+        error_metadata["episode_status"] = episode_status.name
+      logging.warning(
+          "Rollout %s failed (prompt_id=%s, group_index=%s, batch_idx=%s, "
+          "policy_version=%d): %s: %s",
+          collector.traj_id,
+          request.prompt_id,
+          request.group_index,
+          error_metadata.get("batch_idx"),
+          error_metadata["policy_version"],
+          type(e).__name__,
+          e,
       )
       trajectory = trajectory_lib.TrajectoryError(
           trajectory_id=collector.traj_id,
