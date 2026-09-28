@@ -481,7 +481,7 @@ def create_trajectory_metadata(
       target_policy_versions=target_policy_versions,
       status=status_str,
       total_reward=getattr(traj_obj, "reward", None),
-      hyperparams=getattr(request, "generation_kwargs", None),
+      hyperparams=None,
       env_time=getattr(traj_obj, "env_time", None),
       reward_time=getattr(traj_obj, "reward_time", None),
       extra=meta_extra or None,

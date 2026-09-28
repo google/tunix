@@ -53,14 +53,7 @@ class TestRLVllmSamplerDuckTyping(unittest.TestCase):
         SimpleNamespace(
             prompt="Solve 2+2",
             request_id="req_attr_1",
-            sampling_params=SimpleNamespace(
-                max_tokens=64,
-                temperature=0.5,
-                top_p=0.9,
-                top_k=-1,
-                stop_sequences=[],
-                return_logprobs=True,
-            ),
+            max_tokens=64,
         )
 
         args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B")
@@ -75,7 +68,12 @@ class TestRLVllmSamplerInference(unittest.TestCase):
     def test_sample_with_mocked_engine(self):
         """Verifies full sample() execution flow with a mocked AsyncLLMEngine."""
         args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B")
-        sampler = RLVllmSampler(engine_args=args)
+        sampler = RLVllmSampler(
+            engine_args=args,
+            config=SimpleNamespace(
+                temperature=0.7, top_p=0.9, return_logprobs=True
+            ),
+        )
 
         # Construct mock AsyncLLMEngine
         mock_engine = MagicMock()
@@ -106,10 +104,7 @@ class TestRLVllmSamplerInference(unittest.TestCase):
                 SimpleNamespace(
                     prompt="What is GRPO?",
                     request_id="req_001",
-                    sampling_params=SimpleNamespace(max_tokens=64,
-                                                    temperature=0.7,
-                                                    top_p=0.9,
-                                                    return_logprobs=True),
+                    max_tokens=64,
                 )
             ]
             results = await sampler.sample(reqs)
@@ -174,8 +169,7 @@ class TestRLVllmSamplerInference(unittest.TestCase):
         async def run_err_test():
             reqs = [
                 SimpleNamespace(prompt="Test error prompt",
-                                request_id="err_req",
-                                sampling_params=None)
+                                request_id="err_req")
             ]
             results = await sampler.sample(reqs)
             self.assertEqual(len(results), 1)

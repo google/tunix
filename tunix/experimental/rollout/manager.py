@@ -63,11 +63,12 @@ class RolloutManager:
       drain_timeout_s: How long pre_weight_sync waits for in-flight trajectories
         before pausing the stragglers, roughly one worst-case trajectory.
     """
-    self.config = config
+    self.eos_ids = getattr(config, "eos_tokens", None) if config else None
+    self.config = config if config is not None else base_rollout.RolloutConfig()
     if sampler is None:
-      sampler_type = getattr(config, "sampler_type", "vanilla")
+      sampler_type = getattr(self.config, "sampler_type", "vanilla")
       weight_sync_mode = getattr(
-          config, "weight_sync_mode", weight_sync.DEFAULT_WEIGHT_SYNC_MODE
+          self.config, "weight_sync_mode", weight_sync.DEFAULT_WEIGHT_SYNC_MODE
       )
 
       if sampler_type == "vllm":
@@ -75,7 +76,8 @@ class RolloutManager:
 
         sampler = vllm_sampler_adapter.VllmSamplerAdapter(  # pyrefly: ignore[bad-instantiation]
             server_id="vllm_sampler",
-            model_name=getattr(config, "rollout_vllm_model_version", ""),
+            model_name=getattr(self.config, "rollout_vllm_model_version", ""),
+            config=self.config,
             weight_sync_mode=weight_sync_mode,
         )
       elif "inprocess_vllm" in sampler_type:
@@ -94,7 +96,7 @@ class RolloutManager:
         sampler = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(  # pyrefly: ignore[bad-instantiation]
             server_id="inprocess_vllm_sampler",
             tokenizer=tokenizer,
-            config=config,
+            config=self.config,
             raiden_sync_delegate=raiden_delegate,
             weight_sync_mode=weight_sync_mode,
             max_concurrency=max_concurrency,
@@ -113,7 +115,7 @@ class RolloutManager:
         sampler = vanilla_sampler_adapter.VanillaSamplerAdapter(
             server_id="vanilla_sampler",
             tokenizer=tokenizer,
-            config=config,
+            config=self.config,
             raiden_sync_delegate=raiden_delegate,
         )
       else:
@@ -125,6 +127,11 @@ class RolloutManager:
           f"Expected object implementing Sampler Protocol, got {type(sampler)}"
       )
     self.sampler = sampler
+    if config is not None or getattr(self.sampler, "config", None) is None:
+      try:
+        setattr(self.sampler, "config", self.config)
+      except AttributeError:
+        pass
     self.env_pool = env_pool
     self.agent_factory = agent_factory
     self.max_concurrency = max_concurrency
@@ -135,10 +142,6 @@ class RolloutManager:
           "RolloutManager requires valid tokenizer and chat_parser arguments"
           " (none can be None)."
       )
-    # `RolloutConfig.eos_tokens` is the stop set the sampler runs with, and it
-    # overrides the tokenizer's own EOS. Collectors need it to tell a rollout
-    # that stopped on its own from one that exhausted its budget.
-    self.eos_ids = getattr(config, "eos_tokens", None) if config else None
 
     self._active_collectors: Dict[
         str, collector_lib.TrajectoryCollectorEngine
@@ -212,6 +215,7 @@ class RolloutManager:
         tokenizer=self.tokenizer,
         chat_parser=self.chat_parser,
         eos_ids=self.eos_ids,
+        config=self.config,
     )
 
     self._active_collectors[traj_id] = collector

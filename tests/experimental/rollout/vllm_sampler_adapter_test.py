@@ -49,11 +49,7 @@ class VllmSamplerAdapterTest(absltest.TestCase):
     req = base_sampler_lib.SamplingRequest(
         request_id="req_01",
         prompt="Test prompt",
-        sampling_params=base_sampler_lib.SamplingParams(
-            max_tokens=16,
-            temperature=0.7,
-            return_logprobs=True,
-        ),
+        max_tokens=16,
     )
     response = asyncio.run(self.sampler_adapter.sample(req))
     self.assertIsInstance(response, base_sampler_lib.SamplingResponse)

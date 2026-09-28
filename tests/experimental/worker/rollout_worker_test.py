@@ -68,7 +68,6 @@ class RolloutWorkerTest(absltest.TestCase):
           prompt="What is 2+2?",
           prompt_id="prompt_1",
           group_index=0,
-          generation_kwargs={"max_generation_steps": 64},
           metadata={"lineage": ctx},
       )
 
@@ -166,7 +165,7 @@ class RolloutWorkerTest(absltest.TestCase):
     with self.assertRaises(TypeError):
       self.worker._to_rollout_response(traj)
 
-  def test_sample_prompts_with_return_routed_experts(self):
+  def test_sample_prompts_with_routed_experts(self):
     async def _run():
       mock_routed = np.ones((2, 4, 8), dtype=np.int32)
       mock_response = sampler_lib.SamplingResponse(
@@ -185,7 +184,9 @@ class RolloutWorkerTest(absltest.TestCase):
         )
       self.assertLen(mock_sample.call_args[0][0], 1)
       req = mock_sample.call_args[0][0][0]
-      self.assertTrue(req.sampling_params.return_routed_experts)
+      self.assertEqual(
+          req.max_tokens, self.worker.manager.config.max_tokens_to_generate
+      )
       self.assertIsNotNone(output.routed_experts)
       self.assertLen(output.routed_experts, 1)
       np.testing.assert_array_equal(output.routed_experts[0], mock_routed)
@@ -207,7 +208,9 @@ class RolloutWorkerTest(absltest.TestCase):
         output = await self.worker.sample_prompts(["test prompt"])
       self.assertLen(mock_sample.call_args[0][0], 1)
       req = mock_sample.call_args[0][0][0]
-      self.assertFalse(req.sampling_params.return_routed_experts)
+      self.assertEqual(
+          req.max_tokens, self.worker.manager.config.max_tokens_to_generate
+      )
       self.assertIsNone(output.routed_experts)
 
     asyncio.run(_run())

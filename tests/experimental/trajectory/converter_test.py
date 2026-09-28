@@ -1166,7 +1166,6 @@ class CreateTrajectoryMetadataTest(parameterized.TestCase):
     class MockRolloutRequest:
       prompt_id = "prompt_123"
       group_index = 4
-      generation_kwargs = {"temperature": 0.8, "top_k": 40}
       metadata = {"experiment": "exp_v1"}
 
     class MockAgentTrajectory:
@@ -1196,7 +1195,7 @@ class CreateTrajectoryMetadataTest(parameterized.TestCase):
     self.assertEqual(meta.target_policy_versions, [1, 2, 3])
     self.assertEqual(meta.status, "SUCCEEDED")
     self.assertEqual(meta.total_reward, 8.5)
-    self.assertEqual(meta.hyperparams, {"temperature": 0.8, "top_k": 40})
+    self.assertIsNone(meta.hyperparams)
     self.assertEqual(meta.env_time, {"env": 0.2})
     self.assertEqual(meta.reward_time, {"rew": 0.05})
     self.assertEqual(

@@ -47,6 +47,7 @@ class VanillaSamplerAdapterTest(absltest.TestCase):
         transformer=self.transformer,
         tokenizer=self.vocab,
         cache_config=self.cache_config,
+        config=types.SimpleNamespace(temperature=0.0, return_logprobs=False),
     )
     self.vanilla_sampler.initialize()
 
@@ -54,10 +55,7 @@ class VanillaSamplerAdapterTest(absltest.TestCase):
     req = base_sampler_lib.SamplingRequest(
         request_id="req_01",
         prompt="input string",
-        sampling_params=base_sampler_lib.SamplingParams(
-            max_tokens=10,
-            temperature=0.0,
-        ),
+        max_tokens=10,
     )
     response = asyncio.run(self.vanilla_sampler.sample(req))
     self.assertIsInstance(response, base_sampler_lib.SamplingResponse)
@@ -66,14 +64,13 @@ class VanillaSamplerAdapterTest(absltest.TestCase):
     self.assertGreater(response.prompt_token_ids.size, 0)
 
   def test_sampling_request_with_logprobs(self):
+    self.vanilla_sampler.config = types.SimpleNamespace(
+        temperature=0.0, return_logprobs=True
+    )
     req = base_sampler_lib.SamplingRequest(
         request_id="req_logprobs",
         prompt="input string",
-        sampling_params=base_sampler_lib.SamplingParams(
-            max_tokens=10,
-            temperature=0.0,
-            return_logprobs=True,
-        ),
+        max_tokens=10,
     )
     response = asyncio.run(self.vanilla_sampler.sample(req))
     self.assertIsInstance(response, base_sampler_lib.SamplingResponse)
@@ -85,18 +82,12 @@ class VanillaSamplerAdapterTest(absltest.TestCase):
         base_sampler_lib.SamplingRequest(
             request_id="req_a",
             prompt="input string 1",
-            sampling_params=base_sampler_lib.SamplingParams(
-                max_tokens=8,
-                temperature=0.0,
-            ),
+            max_tokens=8,
         ),
         base_sampler_lib.SamplingRequest(
             request_id="req_b",
             prompt="hello world 2",
-            sampling_params=base_sampler_lib.SamplingParams(
-                max_tokens=8,
-                temperature=0.0,
-            ),
+            max_tokens=8,
         ),
     ]
     responses = asyncio.run(self.vanilla_sampler.sample(reqs))
@@ -115,14 +106,12 @@ class VanillaSamplerAdapterTest(absltest.TestCase):
         transformer=self.transformer,
         tokenizer=self.vocab,
         cache_config=64,
+        config=types.SimpleNamespace(temperature=0.0),
     )
     req = base_sampler_lib.SamplingRequest(
         request_id="req_direct",
         prompt="direct prompt",
-        sampling_params=base_sampler_lib.SamplingParams(
-            max_tokens=6,
-            temperature=0.0,
-        ),
+        max_tokens=6,
     )
     response = asyncio.run(sampler_adapter_direct.sample(req))
     self.assertIsInstance(response, base_sampler_lib.SamplingResponse)

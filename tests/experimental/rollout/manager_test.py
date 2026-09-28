@@ -101,8 +101,9 @@ class _NoopCollector:
       tokenizer,
       chat_parser,
       eos_ids=None,
+      config=None,
   ):
-    del request, sampler, agent, tokenizer, chat_parser, eos_ids
+    del request, sampler, agent, tokenizer, chat_parser, eos_ids, config
     self.traj_id = traj_id
     self.env = env_client
 

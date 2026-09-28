@@ -50,7 +50,6 @@ class AbstractRLEngine(Protocol):
       *,
       num_generations: int = 1,
       policy_version: int = 0,
-      generation_args: datatypes.GenerationArgs | None = None,
       route_metadata: Mapping[str, Any] | None = None,
       **kwargs: Any,
   ) -> list[str]:
@@ -70,7 +69,6 @@ class AbstractRLEngine(Protocol):
         Every prompt item MUST provide a unique `prompt_id`.
       num_generations: Number of rollout trajectories to generate per prompt (G).
       policy_version: Active policy version for generation.
-      generation_args: Optional generation parameters (temperature, max steps).
       route_metadata: Optional routing metadata merged into each request's
         metadata.
       **kwargs: Optional additional metadata.
@@ -92,7 +90,6 @@ class AbstractRLEngine(Protocol):
   async def generate(
       self,
       prompts: Sequence[Any],
-      generation_args: datatypes.GenerationArgs | None = None,
       route_metadata: Mapping[str, Any] | None = None,
       **kwargs: Any,
   ) -> list[datatypes.TrajectoryItem]:

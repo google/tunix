@@ -191,62 +191,12 @@ class DistributedRLEngineTest(absltest.TestCase):
 
     asyncio.run(_run())
 
-  def test_generate_uses_explicit_generation_args(self):
-    async def _run():
-      resp = datatypes.RolloutResponse(
-          request_id="r1",
-          status="COMPLETED",
-          payload=datatypes.TrajectoryItem(
-              prompt_id="p1",
-              group_index=0,
-              traj={
-                  "trajectory_reward": 1.0,
-                  "status": datatypes.TrajectoryStatus.SUCCEEDED,
-              },
-          ),
-      )
-      self.mock_rollout_1.generate.return_value = [resp]
-      results = await self.engine.generate(
-          [{
-              "prompt": "p1",
-              "prompt_id": "prompt_1",
-          }],
-          generation_args=datatypes.GenerationArgs(
-              max_generation_steps=8,
-              temperature=0.5,
-              return_logprobs=False,
-          ),
-      )
-      self.assertLen(results, 1)
-      self.assertEqual(self.mock_rollout_1.generate.call_count, 1)
-      req = self.mock_rollout_1.generate.call_args.kwargs["requests"][0]
-      self.assertEqual(
-          req.generation_kwargs,
-          {
-              "max_generation_steps": 8,
-              "temperature": 0.5,
-              "return_logprobs": False,
-          },
-      )
-
-    asyncio.run(_run())
-
-  def test_generate_rejects_legacy_generation_kwargs(self):
-    async def _run():
-      with self.assertRaisesRegex(TypeError, "GenerationArgs"):
-        await self.engine.generate(
-            [{"prompt": "p1", "prompt_id": "prompt_1"}], temperature=0.5
-        )
-
-    asyncio.run(_run())
-
   def test_generate_routes_rollout_requests(self):
     async def _run():
       request = datatypes.RolloutRequest(
           request_id="r1",
           prompt="p1",
           prompt_id="prompt_1",
-          generation_kwargs={"max_generation_steps": 8},
       )
       resp = datatypes.RolloutResponse(
           request_id="r1",
@@ -914,7 +864,6 @@ class DistributedRLEngineTest(absltest.TestCase):
       dict_item = {
           "prompt": "Solve math",
           "prompt_id": "math_1",
-          "generation_kwargs": {"max_generation_steps": 32},
           "metadata": {
               "env_config": {"gold_answer": "42"},
           },
@@ -934,12 +883,6 @@ class DistributedRLEngineTest(absltest.TestCase):
       self.assertEqual(group_indices, {0, 1})
       self.assertTrue(all(r.prompt_id == "math_1" for r in all_dispatched))
       self.assertTrue(all(r.prompt == "Solve math" for r in all_dispatched))
-      self.assertTrue(
-          all(
-              r.generation_kwargs == {"max_generation_steps": 32}
-              for r in all_dispatched
-          )
-      )
       self.assertEqual(
           {r.metadata["group_index"] for r in all_dispatched},
           {0, 1},
@@ -1032,15 +975,11 @@ class DistributedRLEngineTest(absltest.TestCase):
     self.assertLen(requests_omitted, 1)
     self.assertNotIn("env_config", requests_omitted[0].metadata)
 
-  def test_dispatch_rollouts_passes_generation_args_and_route_metadata(self):
+  def test_dispatch_rollouts_passes_route_metadata(self):
     async def _run():
-      gen_args = datatypes.GenerationArgs(
-          temperature=0.7, max_generation_steps=128
-      )
       req_ids = await self.engine.dispatch_rollouts(
           [{"prompt": "p1", "prompt_id": "p1", "max_response_length": 512}],
           num_generations=1,
-          generation_args=gen_args,
           route_metadata={"custom_key": "custom_value"},
       )
       self.assertLen(req_ids, 1)
@@ -1050,13 +989,6 @@ class DistributedRLEngineTest(absltest.TestCase):
           or self.mock_rollout_2.generate.call_args
       )
       dispatched = mock_call.kwargs["requests"][0]
-      self.assertEqual(
-          dispatched.generation_kwargs,
-          {
-              "temperature": 0.7,
-              "max_generation_steps": 128,
-          },
-      )
       self.assertEqual(dispatched.max_response_length, 512)
       # route_metadata has no fixed schema; any key is merged through verbatim.
       self.assertEqual(dispatched.metadata["custom_key"], "custom_value")

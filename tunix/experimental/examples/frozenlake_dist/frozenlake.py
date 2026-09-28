@@ -90,9 +90,6 @@ def build_prompt_item(
     max_turns: int,
     max_response_length: int,
     episode_timeout_secs: int,
-    temperature: float,
-    top_p: float,
-    top_k: int,
     is_slippery: bool,
     use_multistep_prompt: bool,
 ) -> dict[str, Any]:
@@ -107,13 +104,6 @@ def build_prompt_item(
       "prompt_id": prompt_id,
       "max_turns": max_turns,
       "max_response_length": max_response_length,
-      "generation_kwargs": {
-          "max_generation_steps": max_response_length,
-          "temperature": temperature,
-          "top_p": top_p,
-          "top_k": top_k,
-          "return_logprobs": True,
-      },
       "metadata": {
           "episode_timeout": episode_timeout_secs,
           "env_config": {
@@ -136,9 +126,6 @@ def iter_prompt_items(
     max_turns: int,
     max_response_length: int,
     episode_timeout_secs: int,
-    temperature: float,
-    top_p: float,
-    top_k: int,
     is_slippery: bool,
     use_multistep_prompt: bool,
 ) -> Iterator[dict[str, Any]]:
@@ -152,9 +139,6 @@ def iter_prompt_items(
         max_turns=max_turns,
         max_response_length=max_response_length,
         episode_timeout_secs=episode_timeout_secs,
-        temperature=temperature,
-        top_p=top_p,
-        top_k=top_k,
         is_slippery=is_slippery,
         use_multistep_prompt=use_multistep_prompt,
     )

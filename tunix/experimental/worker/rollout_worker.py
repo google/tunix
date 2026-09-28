@@ -253,15 +253,11 @@ class RolloutWorker(abstract_worker.Worker):
       return list(responses)
     return [responses]
 
-  # TODO(tunix-dev): can we remove the config knobs and only rely on self.config?
   async def sample_prompts(
       self,
       prompts: str | Sequence[str],
       *,
       max_generation_steps: int | None = None,
-      temperature: float | None = None,
-      top_p: float | None = None,
-      top_k: int | None = None,
       seed: int | None = None,
       return_logprobs: bool = True,
       return_routed_experts: bool = False,
@@ -269,6 +265,11 @@ class RolloutWorker(abstract_worker.Worker):
     """Direct single-turn prompt sampling path using the worker's Sampler."""
     if self.state == WorkerState.PENDING:
       self.initialize()
+    config = self.config or base_rollout.RolloutConfig()
+    return_routed = (
+        return_routed_experts
+        or getattr(config, "return_routed_experts", False)
+    )
     prompt_list = [prompts] if isinstance(prompts, str) else list(prompts)
     if not prompt_list:
       return base_rollout.RolloutOutput(
@@ -277,34 +278,21 @@ class RolloutWorker(abstract_worker.Worker):
           tokens=[],
           left_padded_prompt_tokens=np.zeros((0, 1), dtype=np.int32),
           logprobs=[] if return_logprobs else None,
-          routed_experts=[] if return_routed_experts else None,
+          routed_experts=[] if return_routed else None,
       )
 
-    config = self.config or base_rollout.RolloutConfig()
-    return_routed = (
-        return_routed_experts
-        or getattr(config, "return_routed_experts", False)
+    max_tokens = (
+        max_generation_steps
+        if max_generation_steps is not None
+        else config.max_tokens_to_generate
     )
-    sampling_params = sampler_lib.SamplingParams(
-        max_tokens=(
-            max_generation_steps
-            if max_generation_steps is not None
-            else config.max_tokens_to_generate
-        ),
-        temperature=(
-            temperature if temperature is not None else config.temperature
-        ),
-        top_p=top_p if top_p is not None else config.top_p,
-        top_k=top_k if top_k is not None else config.top_k,
-        seed=seed if seed is not None else config.seed,  # pyrefly: ignore[bad-argument-type]
-        return_logprobs=return_logprobs,
-        return_routed_experts=return_routed,
-    )
+    effective_seed = seed if seed is not None else config.seed
     requests = [
         sampler_lib.SamplingRequest(
             request_id=f"{self.worker_id}_sample_{i}",
             prompt=prompt,
-            sampling_params=sampling_params,
+            max_tokens=max_tokens,
+            seed=effective_seed,  # pyrefly: ignore[bad-argument-type]
         )
         for i, prompt in enumerate(prompt_list)
     ]
@@ -406,7 +394,6 @@ class RolloutWorker(abstract_worker.Worker):
       ) = None,
       on_complete: Optional[Callable[[datatypes.RolloutResponse], None]] = None,
       prompts: Any = None,
-      **generation_kwargs,
   ) -> datatypes.RolloutResponse | List[datatypes.RolloutResponse] | Any:
     """Coroutine method for single or batched generate requests."""
     if requests is None:
@@ -417,7 +404,7 @@ class RolloutWorker(abstract_worker.Worker):
         isinstance(requests, (list, tuple))
         and all(isinstance(req, str) for req in requests)
     ):
-      return await self.sample_prompts(requests, **generation_kwargs)  # pyrefly: ignore[bad-argument-type]
+      return await self.sample_prompts(requests)  # pyrefly: ignore[bad-argument-type]
 
     cb = None
     if on_complete is not None:

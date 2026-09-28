@@ -165,7 +165,6 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       *,
       num_generations: int = 1,
       policy_version: int = 0,
-      generation_args: datatypes.GenerationArgs | None = None,
       route_metadata: Mapping[str, Any] | None = None,
       **kwargs: Any,
   ) -> list[datatypes.RolloutRequest]:
@@ -174,9 +173,6 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         **(route_metadata or {}),
         **(kwargs.get("metadata") or {}),
     }
-    base_generation_kwargs = (
-        generation_args.as_kwargs() if generation_args else {}
-    )
     version = kwargs.get("policy_version", policy_version)
 
     rollout_reqs: list[datatypes.RolloutRequest] = []
@@ -192,12 +188,8 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         continue
 
       item_metadata = dict(getattr(p, "metadata", {}) or {})
-      item_generation_kwargs = dict(getattr(p, "generation_kwargs", {}) or {})
       if isinstance(p, Mapping):
         item_metadata.update(dict(p.get("metadata", {}) or {}))
-        item_generation_kwargs.update(
-            dict(p.get("generation_kwargs", {}) or {})
-        )
 
       if isinstance(p, Mapping):
         prompt_id = p.get("prompt_id")
@@ -237,9 +229,6 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           env_config["policy_version"] = version
           request_metadata["env_config"] = env_config
 
-        generation_kwargs = dict(base_generation_kwargs)
-        generation_kwargs.update(item_generation_kwargs)
-
         rollout_reqs.append(
             datatypes.RolloutRequest(
                 request_id=f"req_{prompt_id}_g{group_index}_v{version}",
@@ -247,7 +236,6 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
                 prompt_id=prompt_id,
                 group_index=group_index,
                 target_policy_version=version,
-                generation_kwargs=generation_kwargs,
                 max_turns=max_turns,
                 max_response_length=max_response_length,
                 exact_token_continuity=kwargs.get(
@@ -293,7 +281,6 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       *,
       num_generations: int = 1,
       policy_version: int = 0,
-      generation_args: datatypes.GenerationArgs | None = None,
       route_metadata: Mapping[str, Any] | None = None,
       **kwargs: Any,
   ) -> list[str]:
@@ -307,7 +294,6 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         prompts,
         num_generations=num_generations,
         policy_version=policy_version,
-        generation_args=generation_args,
         route_metadata=route_metadata,
         **kwargs,
     )
@@ -345,7 +331,6 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
   async def generate(
       self,
       prompts: Sequence[Any],
-      generation_args: datatypes.GenerationArgs | None = None,
       route_metadata: Mapping[str, Any] | None = None,
       **kwargs: Any,
   ) -> list[datatypes.TrajectoryItem]:
@@ -355,9 +340,8 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
 
     if kwargs:
       raise TypeError(
-          "Unexpected generate kwargs: "
-          f"{sorted(kwargs)}. Use generation_args=GenerationArgs(...) for "
-          "sampling parameters."
+          f"Unexpected generate kwargs: {sorted(kwargs)}. Configure sampling"
+          " parameters on the rollout worker's RolloutConfig."
       )
 
     logging.info(
@@ -366,13 +350,9 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         len(prompts),
         len(self._rollout_workers),
     )
-    generation_kwargs = (
-        generation_args.as_kwargs() if generation_args is not None else {}
-    )
     requests = self._build_rollout_requests(
         prompts,
         policy_version=self._policy_version,
-        generation_args=generation_args,
         route_metadata=route_metadata,
     )
     worker_to_requests: dict[Any, list[datatypes.RolloutRequest]] = (
@@ -385,9 +365,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       worker_to_requests[worker].append(req)
 
     tasks = [
-        self._invoke_worker(
-            worker, "generate", requests=w_requests, **generation_kwargs
-        )
+        self._invoke_worker(worker, "generate", requests=w_requests)
         for worker, w_requests in worker_to_requests.items()
         if w_requests
     ]

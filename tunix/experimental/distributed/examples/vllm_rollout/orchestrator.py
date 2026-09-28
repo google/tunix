@@ -161,11 +161,6 @@ def orchestrator_main(
             "What is 123 + 456? Please explain each step in detail and verify"
             " the result."
         ),
-        generation_kwargs={
-            "max_tokens": 128,
-            "temperature": 0.0,
-            "model": rollout_spec.model_name,
-        },
         max_turns=2,
         metadata={"system_prompt": "You are a helpful mathematical assistant."},
     )

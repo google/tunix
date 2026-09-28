@@ -23,6 +23,7 @@ from tunix.experimental.rollout import sampler as base_sampler_lib
 from tunix.experimental.weight_sync import raiden_weight_sync_delegate
 from tunix.experimental.weight_sync import weight_sync
 from tunix.generate import base_sampler
+from tunix.rl.rollout import base_rollout
 
 
 class InprocessVllmSamplerAdapterTest(absltest.TestCase):
@@ -113,10 +114,7 @@ class InprocessVllmSamplerAdapterTest(absltest.TestCase):
     req = base_sampler_lib.SamplingRequest(
         request_id="vllm_req_01",
         prompt="hello vllm",
-        sampling_params=base_sampler_lib.SamplingParams(
-            max_tokens=16,
-            temperature=0.7,
-        ),
+        max_tokens=16,
     )
     response = asyncio.run(self.sampler_adapter.sample(req))
     self.assertIsInstance(response, base_sampler_lib.SamplingResponse)
@@ -328,7 +326,8 @@ class RoutedExpertsTest(absltest.TestCase):
     )
     sampler.config = mock.Mock(return_routed_experts=engine_captures)
     adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
-        server_id="rollout"
+        server_id="rollout",
+        config=base_rollout.RolloutConfig(return_routed_experts=True),
     )
     adapter.vllm_sampler = sampler
     return adapter
@@ -338,9 +337,7 @@ class RoutedExpertsTest(absltest.TestCase):
         base_sampler_lib.SamplingRequest(
             request_id=f"req-{i}",
             prompt=np.array([1, 2], dtype=np.int32),
-            sampling_params=base_sampler_lib.SamplingParams(
-                max_tokens=3, return_routed_experts=True
-            ),
+            max_tokens=3,
         )
         for i in range(n)
     ]
@@ -371,11 +368,8 @@ class RoutedExpertsTest(absltest.TestCase):
     req = base_sampler_lib.SamplingRequest(
         request_id="req-0",
         prompt=np.array([1, 2, 3, 4], dtype=np.int32),
-        sampling_params=base_sampler_lib.SamplingParams(
-            max_tokens=3,
-            return_routed_experts=True,
-            routed_experts_prompt_start=12,
-        ),
+        max_tokens=3,
+        routed_experts_prompt_start=12,
     )
     asyncio.run(adapter.sample([req]))
     call_kwargs = adapter.vllm_sampler.call_args.kwargs
@@ -387,20 +381,14 @@ class RoutedExpertsTest(absltest.TestCase):
     req0 = base_sampler_lib.SamplingRequest(
         request_id="req-0",
         prompt=np.array([1, 2, 3, 4], dtype=np.int32),
-        sampling_params=base_sampler_lib.SamplingParams(
-            max_tokens=3,
-            return_routed_experts=True,
-            routed_experts_prompt_start=8,
-        ),
+        max_tokens=3,
+        routed_experts_prompt_start=8,
     )
     req1 = base_sampler_lib.SamplingRequest(
         request_id="req-1",
         prompt=np.array([1, 2, 3, 4, 5, 6], dtype=np.int32),
-        sampling_params=base_sampler_lib.SamplingParams(
-            max_tokens=3,
-            return_routed_experts=True,
-            routed_experts_prompt_start=14,
-        ),
+        max_tokens=3,
+        routed_experts_prompt_start=14,
     )
     asyncio.run(adapter.sample([req0, req1]))
     call_kwargs = adapter.vllm_sampler.call_args.kwargs
