@@ -713,6 +713,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           unwarm_on_exhaustion=True,
           scaffold=args.scaffold,
           wait_initial=True,
+          max_staleness=args.max_staleness,
       )
 
     program = rl_program.StandardRLProgram(

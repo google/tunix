@@ -20,7 +20,7 @@ pipelines.
 
 import abc
 import asyncio
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence, Sized
 import copy
 import dataclasses
 import os
@@ -643,17 +643,41 @@ class StandardRLProgram(RLProgram):
       )
     already_consumed = self._next_batch * self.full_batch_size
     last_coordinates: dict[str, int] | None = None
+    dataset_iter = iter(self.dataset)
+    dataset_len = len(self.dataset) if isinstance(self.dataset, Sized) else None
 
     try:
-      for prompt_idx, prompt_item in enumerate(self.dataset):
+      prompt_idx = 0
+      while True:
         if prompt_idx < already_consumed:
+          try:
+            next(dataset_iter)
+          except StopIteration:
+            break
+          prompt_idx += 1
           continue
+
+        if (dataset_len is not None and prompt_idx >= dataset_len) or (
+            hasattr(dataset_iter, "has_next") and not dataset_iter.has_next()
+        ):
+          try:
+            next(dataset_iter)
+          except StopIteration:
+            break
+
         coordinates = _prompt_coordinates(prompt_idx, self.full_batch_size)
         await self._wait_for_dispatch_window(coordinates["batch_idx"])
+        try:
+          prompt_item = next(dataset_iter)
+        except StopIteration:
+          break
+        prompt_idx += 1
         last_coordinates = coordinates
         if isinstance(prompt_item, dict):
           prompt_item = dict(prompt_item)
-          prompt_item.setdefault("prompt_id", f"prompt_{prompt_idx}")
+          prompt_item.setdefault(
+              "prompt_id", f"prompt_{coordinates['prompt_idx']}"
+          )
           if self.max_response_length is not None:
             prompt_item.setdefault(
                 "max_response_length", self.max_response_length
@@ -661,7 +685,7 @@ class StandardRLProgram(RLProgram):
         elif not hasattr(prompt_item, "prompt_id"):
           prompt_item = {
               "prompt": prompt_item,
-              "prompt_id": f"prompt_{prompt_idx}",
+              "prompt_id": f"prompt_{coordinates['prompt_idx']}",
           }
           if self.max_response_length is not None:
             prompt_item["max_response_length"] = self.max_response_length

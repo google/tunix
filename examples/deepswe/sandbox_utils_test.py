@@ -115,6 +115,58 @@ class SandboxUtilsTest(absltest.TestCase):
     iterator.close()
     self.assertEqual(fleet.active_pools, {})
 
+  def test_max_staleness_retains_multiple_previous_batches(self):
+    fleet = FakeFleet()
+    dataset = [
+        {"prompt": "p0", "docker_image": "img_A"},
+        {"prompt": "p1", "docker_image": "img_B"},
+        {"prompt": "p2", "docker_image": "img_C"},
+        {"prompt": "p3", "docker_image": "img_D"},
+    ]
+    iterator = sandbox_utils.PrewarmDatasetIterator(
+        dataset,
+        fleet=fleet,
+        num_generations=4,
+        batch_size=1,
+        unwarm_on_exhaustion=False,
+        max_staleness=1,
+    )
+    self.assertTrue(iterator.has_next())
+    self.assertEqual(fleet.active_pools, {"img_A": 4, "img_B": 4})
+
+    # Batch 0 (p0 / img_A)
+    self.assertEqual(next(iterator)["prompt"], "p0")
+    self.assertEqual(fleet.active_pools, {"img_A": 4, "img_B": 4})
+
+    # Batch 1 (p1 / img_B): img_A retained in _previous_batches (1/2)
+    self.assertEqual(next(iterator)["prompt"], "p1")
+    self.assertNotIn("img_A", fleet.unwarm_calls)
+    self.assertEqual(
+        fleet.active_pools, {"img_A": 4, "img_B": 4, "img_C": 4}
+    )
+
+    # Batch 2 (p2 / img_C): both img_A and img_B retained in _previous_batches (2/2)
+    self.assertEqual(next(iterator)["prompt"], "p2")
+    self.assertNotIn("img_A", fleet.unwarm_calls)
+    self.assertNotIn("img_B", fleet.unwarm_calls)
+    self.assertEqual(
+        fleet.active_pools, {"img_A": 4, "img_B": 4, "img_C": 4, "img_D": 4}
+    )
+
+    # Batch 3 (p3 / img_D): img_A evicted as _previous_batches slides to [img_B, img_C]
+    self.assertEqual(next(iterator)["prompt"], "p3")
+    self.assertIn("img_A", fleet.unwarm_calls)
+    self.assertNotIn("img_B", fleet.unwarm_calls)
+    self.assertEqual(
+        fleet.active_pools, {"img_B": 4, "img_C": 4, "img_D": 4}
+    )
+    self.assertFalse(iterator.has_next())
+
+    with self.assertRaises(StopIteration):
+      next(iterator)
+    iterator.close()
+    self.assertEqual(fleet.active_pools, {})
+
   def test_wait_initial_configurable(self):
     fleet = FakeFleet()
     dataset = [{"prompt": "p0", "docker_image": "img_A"}]

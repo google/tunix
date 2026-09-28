@@ -440,6 +440,7 @@ class PrewarmDatasetIterator:
       scaffold: str = "r2egym",
       image_rewrite: Any | None = None,
       wait_initial: bool = True,
+      max_staleness: int = 0,
   ):
     del lookahead_steps
     self.scaffold = scaffold
@@ -450,6 +451,7 @@ class PrewarmDatasetIterator:
     self.max_warmpool_replicas = max_warmpool_replicas
     self.unwarm_on_exhaustion = unwarm_on_exhaustion
     self.wait_initial = wait_initial
+    self.max_staleness = max(0, int(max_staleness))
     self.image_rewrite = get_image_rewrite_fn(
         image_rewrite or getattr(self.fleet, "_image_rewrite_fn", None)
     )
@@ -462,6 +464,9 @@ class PrewarmDatasetIterator:
     )
     self._current_batch_counts: dict[str, int] = {}
     self._next_batch_counts: dict[str, int] = {}
+    self._previous_batches: collections.deque[dict[str, int]] = (
+        collections.deque(maxlen=self.max_staleness + 1)
+    )
     self._previous_batch_counts: dict[str, int] = {}
     self._image_counts: dict[str, int] = {}
     self._active_replicas: dict[str, int] = {}
@@ -661,6 +666,10 @@ class PrewarmDatasetIterator:
         )
       del self._active_replicas[img]
 
+  def has_next(self) -> bool:
+    """Returns True if at least one more item can be yielded without exhaustion."""
+    return bool(self.current_batch or self.next_batch)
+
   def __iter__(self):
     return self
 
@@ -672,9 +681,17 @@ class PrewarmDatasetIterator:
         raise StopIteration
 
       # The previous current_batch is now in-flight/running on the cluster.
-      # Retain its counts in _previous_batch_counts so its warm pool stays alive
-      # while workers connect and claim sandboxes.
-      self._previous_batch_counts = self._current_batch_counts
+      # Retain up to (max_staleness + 1) previous batches in _previous_batches
+      # so warm pools stay alive for all in-flight batches within the staleness
+      # window while workers connect and claim sandboxes.
+      if self._current_batch_counts:
+        self._previous_batches.append(self._current_batch_counts)
+      self._previous_batch_counts = {}
+      for prev_counts in self._previous_batches:
+        for img, count in prev_counts.items():
+          self._previous_batch_counts[img] = (
+              self._previous_batch_counts.get(img, 0) + count
+          )
 
       # Shift next_batch to current_batch
       self.current_batch = self.next_batch
@@ -708,6 +725,7 @@ class PrewarmDatasetIterator:
           logging.warning("[PrewarmDatasetIterator] Final unwarm note: %s", e)
     self._active_replicas.clear()
     self._image_counts.clear()
+    self._previous_batches.clear()
     self._previous_batch_counts.clear()
     self._current_batch_counts.clear()
     self._next_batch_counts.clear()
