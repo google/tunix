@@ -1491,6 +1491,7 @@ class RLProgramTest(absltest.TestCase):
           pad_id=0,
           num_generations=3,
           mini_batch_size=1,
+          segment_align_multiple=1,
       )
       program = rl_program.StandardRLProgram(
           dataset=[],
@@ -1551,6 +1552,7 @@ class RLProgramTest(absltest.TestCase):
           pad_id=0,
           num_generations=2,
           mini_batch_size=2,
+          segment_align_multiple=1,
       )
       program = rl_program.StandardRLProgram(
           dataset=[],
