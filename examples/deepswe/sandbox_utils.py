@@ -652,16 +652,18 @@ class PrewarmDatasetIterator:
 
     def _scale(img: str, target_reps: int) -> None:
       try:
+        with self._lock:
+          old_reps = self._active_replicas.get(img, 0)
         self.fleet.set_pool_replicas(img, target_reps)
+        with self._lock:
+          self._active_replicas[img] = target_reps
         logging.info(
             "[PrewarmDatasetIterator] Scaled pool on K8s: %s (replicas %d ->"
             " %d)",
             img,
-            self._active_replicas[img],
+            old_reps,
             target_reps,
         )
-        with self._lock:
-          self._active_replicas[img] = target_reps
       except Exception as e:  # pylint: disable=broad-exception-caught
         logging.warning(
             "[PrewarmDatasetIterator] Set replicas note for %s: %s", img, e
