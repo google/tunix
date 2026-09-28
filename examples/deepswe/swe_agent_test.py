@@ -241,6 +241,85 @@ class SweAgentTest(absltest.TestCase):
         "ERROR: No code specified for execute_ipython_cell.",
     )
 
+  def _timeout_env(self, mock_res, step_timeout=60.0):
+    mock_workspace = mock.MagicMock()
+    mock_workspace.execute_command.return_value = mock_res
+    mock_env = mock.MagicMock()
+    mock_env.workspace = mock_workspace
+    mock_env.max_steps = 10
+    mock_env.step_timeout = step_timeout
+    mock_env.total_steps = 0
+    return mock_env
+
+  def test_step_openhands_bash_client_timeout_returns_observation(self):
+    # Shape of openhands RemoteWorkspace's CommandResult when its poll loop
+    # expires first.
+    mock_res = mock.MagicMock(
+        spec=["stdout", "stderr", "exit_code", "timeout_occurred"]
+    )
+    mock_res.exit_code = -1
+    mock_res.stdout = "collected 1200 items\n....."
+    mock_res.stderr = "Command timed out after 60.0 seconds"
+    mock_res.timeout_occurred = True
+    mock_env = self._timeout_env(mock_res)
+
+    action = SWEAction("execute_bash", {"command": "pytest"})
+    result = openhands_utils.step_openhands(mock_env, action)
+    self.assertFalse(result.done)
+    self.assertEqual(result.reward, 0)
+    self.assertIn("collected 1200 items", result.observation)
+    self.assertIn("Command timed out after 60 seconds", result.observation)
+    self.assertIn("terminated", result.observation)
+    self.assertTrue(result.info.get("command_timed_out"))
+    self.assertEqual(mock_env.total_steps, 1)
+    self.assertEqual(
+        mock_env.workspace.execute_command.call_args.kwargs["timeout"], 60.0
+    )
+
+  def test_step_openhands_ipython_server_kill_timeout_detected(self):
+    # Server-side kill observed first: exit_code=-1, no marker in stderr.
+    mock_res = mock.MagicMock(
+        spec=["stdout", "stderr", "exit_code", "timeout_occurred"]
+    )
+    mock_res.exit_code = -1
+    mock_res.stdout = ""
+    mock_res.stderr = ""
+    mock_res.timeout_occurred = False
+    mock_env = self._timeout_env(mock_res, step_timeout=60.0)
+
+    with mock.patch.object(
+        openhands_utils.time, "monotonic", side_effect=[0.0, 60.2, 60.3]
+    ):
+      action = SWEAction("execute_ipython_cell", {"code": "while True: pass"})
+      result = openhands_utils.step_openhands(mock_env, action)
+    self.assertFalse(result.done)
+    self.assertIn("Command timed out after 60 seconds", result.observation)
+    self.assertTrue(result.info.get("command_timed_out"))
+    self.assertEqual(mock_env.total_steps, 1)
+
+  def test_step_openhands_fast_nonzero_exit_is_not_timeout(self):
+    mock_res = mock.MagicMock(spec=["stdout", "stderr", "exit_code"])
+    mock_res.exit_code = -1
+    mock_res.stdout = "out"
+    mock_res.stderr = "Remote execution error: boom"
+    mock_env = self._timeout_env(mock_res)
+
+    action = SWEAction("execute_bash", {"command": "false"})
+    result = openhands_utils.step_openhands(mock_env, action)
+    self.assertFalse(result.done)
+    self.assertEqual(result.observation, "out\nRemote execution error: boom")
+    self.assertNotIn("command_timed_out", result.info)
+
+  def test_step_openhands_execute_command_exception_keeps_episode(self):
+    mock_env = self._timeout_env(None)
+    mock_env.workspace.execute_command.side_effect = RuntimeError("conn reset")
+
+    action = SWEAction("execute_bash", {"command": "ls"})
+    result = openhands_utils.step_openhands(mock_env, action)
+    self.assertFalse(result.done)
+    self.assertEqual(result.observation, "Command execution failed: conn reset")
+    self.assertEqual(mock_env.total_steps, 1)
+
   def test_step_openhands_submit(self):
     mock_env = mock.MagicMock()
     mock_env.max_steps = 10

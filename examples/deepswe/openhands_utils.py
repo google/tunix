@@ -17,6 +17,7 @@
 import base64
 import logging
 import os
+import time
 from typing import Any, Optional
 
 from tunix.rl.agentic.environments.base_environment import EnvStepResult
@@ -156,6 +157,87 @@ def restore_r2e_tests_for_reward(target: Any) -> None:
     logging.warning("[SWEEnv] Failed to restore R2E tests for reward: %s", e)
 
 
+def _command_timed_out(result: Any, timeout: float, elapsed: float) -> bool:
+  """Returns True if an OpenHands CommandResult represents a timeout.
+
+  The OpenHands remote workspace client and agent server both enforce the same
+  deadline. If the client's polling loop expires first, it returns
+  `timeout_occurred=True` with "Command timed out after N seconds" in stderr.
+  If the server's kill (SIGTERM/SIGKILL of the process group) is observed
+  first, the result is just `exit_code=-1` with no marker, so we also treat
+  `exit_code == -1` after (almost) the full budget as a timeout.
+  """
+  if getattr(result, "timeout_occurred", False) is True:
+    return True
+  exit_code = getattr(result, "exit_code", None)
+  return exit_code == -1 and elapsed >= 0.95 * float(timeout)
+
+
+def _timeout_notice(timeout: float) -> str:
+  return (
+      f"[Command timed out after {float(timeout):.0f} seconds and was"
+      " terminated. Any output above is partial. The environment is still"
+      " usable. Avoid long-running, interactive, or blocking commands (servers,"
+      " `watch`, prompts waiting for input); run a narrower subset (e.g. a"
+      " single test file or test case), add `timeout <secs>` or limit output,"
+      " and continue.]"
+  )
+
+
+def _format_command_result(
+    result: Any, timeout: float, elapsed: float
+) -> tuple[str, bool]:
+  """Formats an OpenHands CommandResult into (observation, timed_out)."""
+  if getattr(result, "stdout", None) is not None:
+    obs = (
+        str(result.stdout)
+        if getattr(result, "exit_code", 0) == 0
+        else f"{result.stdout}\n{getattr(result, 'stderr', '')}"
+    )
+  elif getattr(result, "output", None) is not None:
+    obs = str(result.output)
+  else:
+    obs = str(result)
+  timed_out = _command_timed_out(result, timeout, elapsed)
+  if timed_out:
+    obs = f"{obs.rstrip()}\n{_timeout_notice(timeout)}".lstrip("\n")
+  return obs, timed_out
+
+
+def _execute_in_workspace(
+    env: Any, wrapped_cmd: str, step_timeout: float, failure_prefix: str
+) -> EnvStepResult:
+  """Runs `wrapped_cmd` in env.workspace; never raises, never ends the episode.
+
+  A timed-out or failed command is returned to the agent as an observation so
+  the trajectory continues (the agent can react to it on the next turn).
+  """
+  max_steps = getattr(env, "max_steps", None)
+  info: dict[str, Any] = {"max_steps": max_steps}
+  start = time.monotonic()
+  try:
+    result = env.workspace.execute_command(
+        wrapped_cmd, timeout=float(step_timeout)
+    )
+    obs, timed_out = _format_command_result(
+        result, step_timeout, time.monotonic() - start
+    )
+    if timed_out:
+      info["command_timed_out"] = True
+      logging.warning(
+          "[SWEEnv] Command hit step_timeout=%.0fs (elapsed %.1fs); returning"
+          " timeout observation to agent. cmd=%r",
+          float(step_timeout),
+          time.monotonic() - start,
+          wrapped_cmd[:200],
+      )
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    obs = f"{failure_prefix}: {e}"
+  if hasattr(env, "total_steps"):
+    env.total_steps += 1
+  return EnvStepResult(observation=obs, reward=0, done=False, info=info)
+
+
 def step_openhands(
     env: Any,
     action_obj: Any,
@@ -229,29 +311,8 @@ def step_openhands(
     )
 
     if getattr(env, "workspace", None) is not None:
-      try:
-        result = env.workspace.execute_command(
-            wrapped_cmd, timeout=float(step_timeout)
-        )
-        if getattr(result, "stdout", None) is not None:
-          obs = (
-              str(result.stdout)
-              if getattr(result, "exit_code", 0) == 0
-              else f"{result.stdout}\n{getattr(result, 'stderr', '')}"
-          )
-        elif getattr(result, "output", None) is not None:
-          obs = str(result.output)
-        else:
-          obs = str(result)
-      except Exception as e:
-        obs = f"Python execution failed: {e}"
-      if hasattr(env, "total_steps"):
-        env.total_steps += 1
-      return EnvStepResult(
-          observation=obs,
-          reward=0,
-          done=False,
-          info={"max_steps": max_steps},
+      return _execute_in_workspace(
+          env, wrapped_cmd, step_timeout, "Python execution failed"
       )
     elif getattr(env, "env", None) is not None:
       from r2egym.agenthub.action.action import Action as SWEAction  # pytype: disable=import-error
@@ -288,29 +349,8 @@ def step_openhands(
     wrapped_cmd = f"(cd /testbed 2>/dev/null || cd /workspace) && {cmd}"
 
     if getattr(env, "workspace", None) is not None:
-      try:
-        result = env.workspace.execute_command(
-            wrapped_cmd, timeout=float(step_timeout)
-        )
-        if getattr(result, "stdout", None) is not None:
-          obs = (
-              str(result.stdout)
-              if getattr(result, "exit_code", 0) == 0
-              else f"{result.stdout}\n{getattr(result, 'stderr', '')}"
-          )
-        elif getattr(result, "output", None) is not None:
-          obs = str(result.output)
-        else:
-          obs = str(result)
-      except Exception as e:
-        obs = f"Command execution failed: {e}"
-      if hasattr(env, "total_steps"):
-        env.total_steps += 1
-      return EnvStepResult(
-          observation=obs,
-          reward=0,
-          done=False,
-          info={"max_steps": max_steps},
+      return _execute_in_workspace(
+          env, wrapped_cmd, step_timeout, "Command execution failed"
       )
     elif getattr(env, "env", None) is not None:
       try:
