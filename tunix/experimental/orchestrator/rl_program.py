@@ -1455,15 +1455,17 @@ class StandardRLProgram(RLProgram):
             and step_result.get("train_step") is not None
         ):
           optimizer_step = int(step_result["train_step"])
-        next_batch_idx = (
-            self.scored_q.next_batch_after(current_batch_idx)
-            if isinstance(
-                self.scored_q,
-                trajectory_queue_manager.BatchOrderedQueueManager,
-            )
-            and current_batch_idx is not None
-            else self.step + 1
-        )
+        if isinstance(
+            self.scored_q,
+            trajectory_queue_manager.BatchOrderedQueueManager,
+        ):
+          next_batch_idx = (
+              self.scored_q.next_batch_after(current_batch_idx)
+              if current_batch_idx is not None
+              else self.scored_q.next_batch_idx
+          )
+        else:
+          next_batch_idx = self.step + 1
         await self.engine.save_checkpoint(
             role=datatypes.Role.ACTOR,
             metadata={
