@@ -1853,7 +1853,7 @@ class PhaseTimeoutsEnvTest(absltest.TestCase):
     with mock.patch.dict(os.environ, {}, clear=True):
       timeouts = PhaseTimeouts()
       self.assertEqual(timeouts.bind, 300.0)
-      self.assertEqual(timeouts.metadata, 60.0)
+      self.assertEqual(timeouts.metadata, 300.0)
       self.assertEqual(timeouts.pre, 900.0)
 
   def test_phase_timeouts_derived_from_episode_timeout_env(self):
