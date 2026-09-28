@@ -95,6 +95,49 @@ class RunRolloutNodeTest(absltest.TestCase):
         parser.Gemma4ChatTemplateParser,
     )
 
+  def test_inprocess_vllm_sampler_sets_processed_logprobs_mode(self):
+    args = run_rollout_node._parse_args(["--model_id=Qwen/Qwen3-8B"])
+    mock_vllm_sampler = mock.MagicMock()
+    mock_tokenizer = mock.MagicMock()
+    mock_tokenizer.eos_token_id = 1
+    with (
+        mock.patch.object(
+            run_rollout_node,
+            "_import_vllm_sampler",
+            return_value=mock_vllm_sampler,
+        ),
+        mock.patch.object(
+            run_rollout_node,
+            "_create_rollout_mesh",
+            return_value=mock.sentinel.mesh,
+        ),
+        mock.patch.object(
+            run_rollout_node,
+            "_get_tensor_parallel_size",
+            return_value=1,
+        ),
+        mock.patch.object(
+            run_rollout_node,
+            "_eos_token_ids",
+            return_value=[1],
+        ),
+        mock.patch.object(
+            run_rollout_node,
+            "_rollout_config_kwargs",
+            return_value={},
+        ),
+        mock.patch(
+            "tunix.experimental.rollout.inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter"
+        ),
+    ):
+      run_rollout_node._create_inprocess_vllm_sampler(args, mock_tokenizer)
+
+    mock_vllm_sampler.VllmConfig.assert_called_once()
+    engine_kwargs = mock_vllm_sampler.VllmConfig.call_args.kwargs[
+        "engine_kwargs"
+    ]
+    self.assertEqual(engine_kwargs.get("logprobs_mode"), "processed_logprobs")
+
 
 if __name__ == "__main__":
   absltest.main()

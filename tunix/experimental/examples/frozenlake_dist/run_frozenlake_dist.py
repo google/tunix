@@ -226,7 +226,6 @@ def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
       epsilon=args.epsilon,
       epsilon_high=args.epsilon_high,
       beta=args.beta,
-      temperature=args.temperature,
       loss_algo=args.loss_algo,
       policy_loss_fn="grpo",
       advantage_estimator=args.advantage_estimator,
@@ -338,9 +337,6 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   trainer_handles = cluster.worker_handles(datatypes.Role.ACTOR)
   if len(trainer_handles) != 1:
     raise ValueError(f"Expected 1 trainer worker, got {len(trainer_handles)}.")
-  _configure_trainer_loss(
-      trainer_handles[0], algo=algo, pad_id=pad_id, eos_id=eos_id
-  )
 
   metrics_options = metrics_logger_lib.MetricsLoggerOptions(
       log_dir=args.log_dir,
@@ -358,14 +354,17 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           max_turns=args.max_turns,
           max_response_length=args.max_response_length,
           episode_timeout_secs=args.episode_timeout_secs,
-          temperature=args.temperature,
-          top_p=args.top_p,
-          top_k=args.top_k,
           is_slippery=args.is_slippery,
           use_multistep_prompt=args.use_multistep_prompt,
       ),
       max_steps=args.max_steps,
       reward_fns=[],
+      generation_args=datatypes.GenerationArgs(
+          max_generation_steps=args.max_response_length,
+          temperature=args.temperature,
+          top_p=args.top_p,
+          top_k=args.top_k,
+      ),
       batch_size=args.batch_size,
       batch_config=batch_assembly.BatchConfig(
           pad_id=pad_id,
@@ -386,6 +385,9 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       on_step_end=lambda step, result: logging.info(
           "<<< FrozenLake step %d finished | %s", step, result
       ),
+  )
+  _configure_trainer_loss(
+      trainer_handles[0], algo=algo, pad_id=pad_id, eos_id=eos_id
   )
 
   try:

@@ -570,6 +570,7 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
       "async_scheduling": args.vllm_async_scheduling,
       "dtype": args.vllm_dtype,
   }
+  engine_kwargs.setdefault("logprobs_mode", "processed_logprobs")
   hf_overrides = _vllm_hf_overrides(args)
   if hf_overrides:
     engine_kwargs["hf_overrides"] = hf_overrides
@@ -712,6 +713,7 @@ def _create_vllm_sampler(args, tokenizer):
       enable_prefix_caching=args.enable_prefix_caching,
       async_scheduling=args.vllm_async_scheduling,
   )
+  engine_kwargs.setdefault("logprobs_mode", "processed_logprobs")
   hf_overrides = _vllm_hf_overrides(args)
   if hf_overrides:
     engine_kwargs["hf_overrides"] = hf_overrides

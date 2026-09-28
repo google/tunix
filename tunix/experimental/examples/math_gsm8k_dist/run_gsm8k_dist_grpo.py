@@ -242,7 +242,6 @@ def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
       num_generations=args.num_generations,
       epsilon=args.epsilon,
       beta=args.beta,
-      temperature=args.temperature,
       use_rollout_logps=args.use_rollout_logps,
   )
   return algorithm_adapter.GRPOAdapter(
@@ -420,18 +419,17 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       if args.reward_mode == "exact"
       else []
   )
-  generation_args = datatypes.GenerationArgs(
-      temperature=args.temperature,
-      top_p=args.top_p,
-      top_k=None if args.top_k < 0 else args.top_k,
-      return_logprobs=True,
-  )
   program = rl_program.StandardRLProgram(
       algo=algo,
       dataset=_iter_prompt_items(args),
       max_steps=args.max_steps,
       reward_fns=reward_fns,
-      generation_args=generation_args,
+      generation_args=datatypes.GenerationArgs(
+          max_generation_steps=args.max_response_length,
+          temperature=args.temperature,
+          top_p=args.top_p,
+          top_k=None if args.top_k < 0 else args.top_k,
+      ),
       batch_size=args.batch_size,
       batch_config=batch_assembly.BatchConfig(
           pad_id=pad_id,

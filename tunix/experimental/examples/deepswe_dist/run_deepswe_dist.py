@@ -216,7 +216,6 @@ def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
       num_generations=args.num_generations,
       epsilon=args.epsilon,
       beta=args.beta,
-      temperature=args.temperature,
       use_rollout_logps=args.use_rollout_logps,
   )
   return algorithm_adapter.GRPOAdapter(
@@ -354,12 +353,6 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   trainer_handles = cluster.worker_handles(datatypes.Role.ACTOR)
   if len(trainer_handles) != 1:
     raise ValueError(f"Expected 1 trainer worker, got {len(trainer_handles)}.")
-  _configure_trainer_loss(
-      trainer_handles[0],
-      algo=algo,
-      pad_id=pad_id,
-      eos_id=eos_id,
-  )
 
   metrics_logging_options = metrics_logger_lib.MetricsLoggerOptions(
       log_dir=args.log_dir,
@@ -377,9 +370,6 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           batch_size=args.batch_size,
           max_turns=args.max_turns,
           max_response_length=args.max_response_length,
-          temperature=args.temperature,
-          top_p=args.top_p,
-          top_k=None if args.top_k < 0 else args.top_k,
           step_timeout_secs=args.step_timeout_secs,
           reward_timeout_secs=args.reward_timeout_secs,
           env_backend=args.env_backend,
@@ -390,6 +380,12 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       ),
       max_steps=args.max_steps,
       reward_fns=[],
+      generation_args=datatypes.GenerationArgs(
+          max_generation_steps=args.max_response_length,
+          temperature=args.temperature,
+          top_p=args.top_p,
+          top_k=None if args.top_k < 0 else args.top_k,
+      ),
       batch_size=args.batch_size,
       batch_config=batch_assembly.BatchConfig(
           pad_id=pad_id,
@@ -414,6 +410,12 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           step,
           result,
       ),
+  )
+  _configure_trainer_loss(
+      trainer_handles[0],
+      algo=algo,
+      pad_id=pad_id,
+      eos_id=eos_id,
   )
 
   try:

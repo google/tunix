@@ -151,9 +151,6 @@ class FrozenLakeDistTest(absltest.TestCase):
         max_turns=8,
         max_response_length=2048,
         episode_timeout_secs=600,
-        temperature=0.7,
-        top_p=1.0,
-        top_k=0,
         is_slippery=False,
         use_multistep_prompt=True,
     )
@@ -161,7 +158,7 @@ class FrozenLakeDistTest(absltest.TestCase):
     self.assertEqual(item["prompt_id"], "frozenlake_2")
     self.assertEqual(item["max_turns"], 8)
     self.assertEqual(item["max_response_length"], 2048)
-    self.assertEqual(item["generation_kwargs"]["temperature"], 0.7)
+    self.assertNotIn("generation_kwargs", item)
     self.assertEqual(item["metadata"]["env_config"]["max_steps"], 8)
     self.assertEqual(
         item["metadata"]["agent_config"], {"use_multistep_prompt": True}
@@ -176,9 +173,6 @@ class FrozenLakeDistTest(absltest.TestCase):
             max_turns=4,
             max_response_length=64,
             episode_timeout_secs=30,
-            temperature=0.7,
-            top_p=1.0,
-            top_k=0,
             is_slippery=False,
             use_multistep_prompt=True,
         )
