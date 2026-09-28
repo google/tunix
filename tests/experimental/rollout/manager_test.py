@@ -23,6 +23,7 @@ from tunix.experimental.common import datatypes
 from tunix.experimental.rl.agentic import registry
 from tunix.experimental.rollout import manager as manager_lib
 from tunix.experimental.rollout import sampler as sampler_lib
+from tunix.experimental.trajectory import trajectory as trajectory_lib
 from tunix.experimental.weight_sync import weight_sync
 
 
@@ -449,6 +450,87 @@ class AgentConfigTest(unittest.IsolatedAsyncioTestCase):
       await manager._generate_one(request)
 
     self.assertIsNone(collector_cls.call_args.kwargs["eos_ids"])
+
+
+class FailedEpisodeTest(unittest.IsolatedAsyncioTestCase):
+
+  async def _run_failing_episode(self, request):
+    manager = manager_lib.RolloutManager(
+        sampler=_FakeSyncSampler([]), tokenizer="mock", chat_parser="mock"
+    )
+    with mock.patch.object(
+        manager_lib.collector_lib, "TrajectoryCollectorEngine"
+    ) as collector_cls:
+      collector = collector_cls.return_value
+      collector.traj_id = request.traj_id
+      collector.env = None
+      collector.run_episode = mock.AsyncMock(
+          side_effect=TimeoutError("env.step timed out")
+      )
+
+      result = await manager._generate_one(request)
+
+    self.assertIs(await manager.pop_next_completed(), result)
+    return result
+
+  async def test_error_carries_request_metadata_and_policy_version(self):
+    # The queue managers read `batch_idx` and `policy_version` off every member
+    # of a prompt group, and a failed rollout is still a member of its group.
+    request = datatypes.RolloutRequest(
+        prompt="prompt",
+        prompt_id="prompt_5",
+        group_index=3,
+        target_policy_version=7,
+        metadata={
+            "prompt_idx": 5,
+            "batch_idx": 2,
+            "intra_batch_idx": 1,
+            "group_index": 3,
+        },
+    )
+
+    with self.assertLogs("absl", level="WARNING") as logs:
+      result = await self._run_failing_episode(request)
+
+    # The failure no longer crashes the run, so it has to be visible in the log.
+    self.assertTrue(
+        any(
+            "batch_idx=2" in line and "TimeoutError" in line
+            for line in logs.output
+        ),
+        logs.output,
+    )
+    self.assertIsInstance(result, trajectory_lib.TrajectoryError)
+    self.assertEqual(result.error_type, "TimeoutError")
+    self.assertEqual(result.error_message, "env.step timed out")
+    self.assertEqual(
+        result.metadata,
+        {
+            "prompt_idx": 5,
+            "batch_idx": 2,
+            "intra_batch_idx": 1,
+            "prompt_id": "prompt_5",
+            "group_index": 3,
+            "policy_version": 7,
+        },
+    )
+    # Stamped on a copy: the request is not mutated.
+    self.assertNotIn("policy_version", request.metadata)
+
+  async def test_error_takes_group_index_from_request_not_metadata(self):
+    # A pre-built RolloutRequest reaches the worker without `group_index` in
+    # its metadata; the error must not fall back to group 0.
+    request = datatypes.RolloutRequest(
+        prompt="prompt",
+        prompt_id="p0",
+        group_index=4,
+        target_policy_version=2,
+    )
+
+    result = await self._run_failing_episode(request)
+
+    self.assertEqual(result.metadata["group_index"], 4)
+    self.assertEqual(result.metadata["policy_version"], 2)
 
 
 class WeightSyncModeTest(absltest.TestCase):
