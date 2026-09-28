@@ -527,15 +527,15 @@ class StandardRLProgram(RLProgram):
 
         rewards = []
         for item in group:
-          if self.reward_fns:
-            # Skip `reward_fn` for failed, timed-out, or masked-out trajectories
-            # (`not item.is_valid`): although the payload still goes through
-            # trainer fwd/bwd to keep static batch shapes, its advantage and
-            # completion_mask are zeroed out, so scoring it is wasted work.
-            if not item.is_valid:
-              r = 0.0
-            else:
-              r = sum(_invoke_reward_fn(fn, item) for fn in self.reward_fns)
+          # Skip reward evaluation or extraction for failed, timed-out, or
+          # masked-out trajectories (`not item.is_valid`): although the payload
+          # still goes through trainer fwd/bwd to keep static batch shapes, its
+          # advantage and completion_mask are zeroed out, so scoring it is
+          # wasted work (and an aborted trajectory may lack trajectory_reward).
+          if not item.is_valid:
+            r = 0.0
+          elif self.reward_fns:
+            r = sum(_invoke_reward_fn(fn, item) for fn in self.reward_fns)
           else:
             r = _extract_reward(item)
           rewards.append(float(r))

@@ -3451,6 +3451,45 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_critique_stage_skips_extract_reward_for_invalid_items_when_no_reward_fns(
+      self,
+  ):
+    async def _run():
+      program = self._create_program(reward_fns=[])
+      program.engine = self.mock_engine
+      valid_item = datatypes.TrajectoryItem(
+          prompt_id="p0",
+          group_index=0,
+          traj={
+              "status": datatypes.TrajectoryStatus.SUCCEEDED,
+              "trajectory_reward": 2.5,
+              "conversation_masks": np.ones(2, dtype=np.float32),
+          },
+      )
+      # Invalid item missing 'trajectory_reward' (or traj=None) should not raise
+      # KeyError/TypeError in _extract_reward.
+      invalid_item = datatypes.TrajectoryItem(
+          prompt_id="p0",
+          group_index=1,
+          traj={
+              "status": datatypes.TrajectoryStatus.FAILED,
+              "conversation_masks": np.zeros(2, dtype=np.float32),
+          },
+      )
+      await program.raw_q.put(valid_item)
+      await program.raw_q.put(invalid_item)
+      await program.raw_q.close()
+
+      await program.critique_stage()
+
+      rewards = self.mock_algo.create_trainer_payloads.call_args.kwargs[
+          "rewards"
+      ]
+      self.assertEqual(rewards, [2.5, 0.0])
+      program.close()
+
+    asyncio.run(_run())
+
   def test_critique_stage_evaluates_unmasked_max_steps_and_skips_timeout(
       self,
   ):
