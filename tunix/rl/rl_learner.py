@@ -105,8 +105,12 @@ class RLLearner(abc.ABC, Generic[TConfig]):
     )
 
     self._training_config = self.rl_engine.cluster_config.training_config
+    self._packing_enabled = rl_engine_lib.configs.is_sequence_packing_enabled(
+        self._training_config
+    )
 
-    if self._training_config.max_seq_token_per_tpu is not None:
+    if self._packing_enabled:
+      assert self._training_config.max_seq_token_per_tpu is not None
       # Fail now rather than mid-run: a maximal sequence must fit one packed
       # row. `max_response_length` lives on the algo config for agentic
       # learners and on the rollout config elsewhere.
@@ -553,14 +557,25 @@ class RLLearner(abc.ABC, Generic[TConfig]):
     full_batch_iterator = itertools.chain([first_item], full_batch_iterator)
     # Initialize batch sizes.
     mini_batch_size = self._training_config.mini_batch_size or full_batch_size
-    train_micro_batch_size = (
-        self._training_config.train_micro_batch_size or mini_batch_size
-    )
+    if self._packing_enabled:
+      train_micro_batch_size = None
+      grad_acc_steps = None
+    else:
+      train_micro_batch_size = (
+          self._training_config.train_micro_batch_size or mini_batch_size
+      )
+      grad_acc_steps = self._training_config.get_with_default(
+          "gradient_accumulation_steps", 1
+      )
+    # Prompts fetched per iterator step (`mini_batch_size` when packing is on)
+    # and the number of iterator steps needed to assemble one mini-batch.
+    iterator_batch_size = train_micro_batch_size or mini_batch_size
+    iterator_steps_per_mini_batch = mini_batch_size // iterator_batch_size
     self._rollout_micro_batch_size = (
-        self._rollout_micro_batch_size or train_micro_batch_size
+        self._rollout_micro_batch_size or iterator_batch_size
     )
     self._compute_logps_micro_batch_size = (
-        self._compute_logps_micro_batch_size or train_micro_batch_size
+        self._compute_logps_micro_batch_size or iterator_batch_size
     )
     for v, n in [
         (self._rollout_micro_batch_size, f"{self._rollout_micro_batch_size=}"),
@@ -571,14 +586,12 @@ class RLLearner(abc.ABC, Generic[TConfig]):
         (mini_batch_size, f"{mini_batch_size=}"),
     ]:
       rl_utils.check_divisibility(v, full_batch_size, n, f"{full_batch_size=}")
-    grad_acc_steps = self._training_config.get_with_default(
-        "gradient_accumulation_steps", 1
-    )
 
     logging.info(  # pylint: disable=logging-fstring-interpolation
         f"Training with {full_batch_size=}, {mini_batch_size=},"
         f" {train_micro_batch_size=}, {self._rollout_micro_batch_size=},"
-        f" {self._compute_logps_micro_batch_size=}, {grad_acc_steps=}"
+        f" {self._compute_logps_micro_batch_size=}, {grad_acc_steps=},"
+        f" {iterator_steps_per_mini_batch=}"
     )
 
     service_target_batch_size = math.lcm(
@@ -586,13 +599,13 @@ class RLLearner(abc.ABC, Generic[TConfig]):
         self._compute_logps_micro_batch_size,
     )
 
-    # if the micro batch size is the same as the full batch size, we can use the
-    # full batch iterator directly.
-    if train_micro_batch_size == full_batch_size:
+    # if the iterator batch size is the same as the full batch size, we can
+    # use the full batch iterator directly.
+    if iterator_batch_size == full_batch_size:
       train_iterator = full_batch_iterator
     else:
       train_iterator = self._create_micro_batch_iterator(
-          full_batch_iterator, train_micro_batch_size
+          full_batch_iterator, iterator_batch_size
       )
 
     while True:  # loop over M
@@ -604,7 +617,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
               full_batch_size,
               mini_batch_size,
               service_target_batch_size,
-              grad_acc_steps,
+              iterator_steps_per_mini_batch,
               train_iterator,
               eval_ds,
               skip_jit,
@@ -657,7 +670,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
       full_batch_size: int,
       mini_batch_size: int,
       service_target_batch_size: int,
-      grad_acc_steps: int,
+      iterator_steps_per_mini_batch: int,
       train_iterator: Iterator[TrainingInputT],
       eval_ds: Iterable[TrainingInputT] | None,
       skip_jit: bool,
@@ -671,7 +684,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
             initial_steps,
             mini_batch_size,
             service_target_batch_size,
-            grad_acc_steps,
+            iterator_steps_per_mini_batch,
             train_iterator,
             eval_ds,
             skip_jit,
@@ -687,7 +700,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
       initial_steps: int,
       mini_batch_size: int,
       service_target_batch_size: int,
-      grad_acc_steps: int,
+      iterator_steps_per_mini_batch: int,
       train_iterator: Iterator[TrainingInputT],
       eval_ds: Iterable[TrainingInputT] | None,
       skip_jit: bool,
@@ -698,7 +711,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
           initial_steps,
           mini_batch_size,
           service_target_batch_size,
-          grad_acc_steps,
+          iterator_steps_per_mini_batch,
           train_iterator,
           eval_ds,
           skip_jit,
@@ -709,7 +722,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
       initial_steps: int,
       mini_batch_size: int,
       service_target_batch_size: int,
-      grad_acc_steps: int,
+      iterator_steps_per_mini_batch: int,
       train_iterator: Iterator[TrainingInputT],
       eval_ds: Iterable[TrainingInputT] | None,
       skip_jit: bool,
@@ -719,7 +732,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
     # reserve 1 for None and the other for repeated interable
     # if batch_repeat > 1
     train_data_queue = queue_lib.SimpleDataQueue(
-        maxsize=grad_acc_steps * self._num_iterations() + 1
+        maxsize=iterator_steps_per_mini_batch * self._num_iterations() + 1
     )
     # Use an unbounded queue for evaluation data.
     eval_data_queue = queue_lib.SimpleDataQueue(maxsize=0)
@@ -727,7 +740,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
     future = self.executor.submit(
         self._prepare_data,
         iterator=train_iterator,
-        proceed_num_steps=grad_acc_steps,
+        proceed_num_steps=iterator_steps_per_mini_batch,
         sample_repeat=self._num_generations(),
         batch_repeat=self._num_iterations(),
         service_target_batch_size=service_target_batch_size,
@@ -744,7 +757,8 @@ class RLLearner(abc.ABC, Generic[TConfig]):
         yield item
 
     train_data_gen = queue_iterator()
-    if self._training_config.max_seq_token_per_tpu is not None:
+    if self._packing_enabled:
+      assert self._training_config.max_seq_token_per_tpu is not None
       mesh = self.rl_engine.cluster_config.role_to_mesh[
           rl_engine_lib.Role.ACTOR
       ]
