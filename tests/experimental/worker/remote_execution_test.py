@@ -21,6 +21,7 @@ import threading
 import time
 from typing import Any, Optional
 from absl.testing import absltest
+import numpy as np
 import portpicker
 from tunix.experimental.worker import remote_execution as remote_lib
 
@@ -165,8 +166,8 @@ class RemoteExecutionTest(absltest.TestCase):
         args=("prompt_1",),
         kwargs={"turns": 5},
     )
-    payload = req.serialize()
-    restored = remote_lib.ExecutionRequest.deserialize(payload)
+    chunks = list(req.serialize_chunks())
+    restored = remote_lib.ExecutionRequest.deserialize_chunks(chunks)
     self.assertEqual(restored.method_name, "compute_trajectory")
     self.assertEqual(restored.args, ("prompt_1",))
     self.assertEqual(restored.kwargs, {"turns": 5})
@@ -174,7 +175,9 @@ class RemoteExecutionTest(absltest.TestCase):
 
     with self.assertRaises(ValueError) as ctx:
       remote_lib.ExecutionRequest(
-          method_name="compute", args=("data",), kwargs={"request_id": "disallowed"}
+          method_name="compute",
+          args=("data",),
+          kwargs={"request_id": "disallowed"},
       )
     self.assertIn("reserved framework parameter", str(ctx.exception))
 
@@ -749,7 +752,9 @@ class RemoteExecutionTest(absltest.TestCase):
         retryable=True,
     )
 
-    restored = remote_lib.ExecutionResponse.deserialize(resp.serialize())
+    restored = remote_lib.ExecutionResponse.deserialize_chunks(
+        resp.serialize_chunks()
+    )
 
     self.assertEqual(restored.error_type, "ValueError")
     self.assertEqual(restored.error_message, "worker 1 is paused!")
@@ -760,8 +765,8 @@ class RemoteExecutionTest(absltest.TestCase):
 
   def test_execution_response_serialization_success(self):
     res_success = remote_lib.ExecutionResponse(result=42)
-    payload = res_success.serialize()
-    restored = remote_lib.ExecutionResponse.deserialize(payload)
+    chunks = list(res_success.serialize_chunks())
+    restored = remote_lib.ExecutionResponse.deserialize_chunks(chunks)
     self.assertEqual(restored.unwrap(), 42)
 
   def test_execute_request_captures_traceback(self):
@@ -865,13 +870,18 @@ class RemoteExecutionTest(absltest.TestCase):
   def test_handle_execute_returns_error_for_unserializable_result(self):
     async def _run():
       server = remote_lib.GrpcRemoteExecutionServer(_LockReturner())
-      request_bytes = remote_lib.ExecutionRequest(
+      req = remote_lib.ExecutionRequest(
           request_id="req_err_6", method_name="get"
-      ).serialize()
+      )
 
-      response_bytes = await server._handle_execute(request_bytes, context=None)
+      async def _req_stream():
+        for chunk in req.serialize_chunks():
+          yield chunk
 
-      resp = remote_lib.ExecutionResponse.deserialize(response_bytes)
+      resp = await remote_lib.ExecutionResponse.deserialize_async_chunks(
+          server._handle_execute(_req_stream(), context=None)
+      )
+      self.assertIsNotNone(resp)
       self.assertEqual(resp.error_type, "ExecutionResponseSerializationError")
       self.assertIsNotNone(resp.error_message)
       self.assertEqual(resp.request_id, "req_err_6")
@@ -879,9 +889,12 @@ class RemoteExecutionTest(absltest.TestCase):
     asyncio.run(_run())
 
   def test_serialize_returns_error_for_unserializable_result(self):
-    resp = remote_lib.ExecutionResponse(result=_LockReturner().get())
-    payload = resp.serialize()
-    restored = remote_lib.ExecutionResponse.deserialize(payload)
+    resp = remote_lib.ExecutionResponse(
+        request_id="req_unser_chunks", result=_LockReturner().get()
+    )
+    chunks = list(resp.serialize_chunks(chunk_size=1024))
+    restored = remote_lib.ExecutionResponse.deserialize_chunks(chunks)
+    self.assertEqual(restored.request_id, "req_unser_chunks")
     self.assertEqual(restored.error_type, "ExecutionResponseSerializationError")
     self.assertIn("failed to serialize result", restored.error_message)
 
@@ -893,9 +906,10 @@ class RemoteExecutionTest(absltest.TestCase):
       )
       await server.dispatch_task(request)
 
-      response_bytes = await server._handle_poll_responses(b"", context=None)
-
-      resp = remote_lib.ExecutionResponse.deserialize(response_bytes)
+      resp = await remote_lib.ExecutionResponse.deserialize_async_chunks(
+          server._handle_poll_responses(b"", context=None)
+      )
+      self.assertIsNotNone(resp)
       self.assertEqual(resp.error_type, "ExecutionResponseSerializationError")
       self.assertIsNotNone(resp.error_message)
       self.assertEqual(resp.request_id, "req_err_7")
@@ -1411,6 +1425,240 @@ class RemoteExecutionTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_chunked_serialization_roundtrip_with_numpy_and_empty_buffers(self):
+    rng = np.random.default_rng(42)
+    packed_tokens = rng.integers(0, 32000, size=(16, 1024), dtype=np.int32)
+    empty_prompts = np.zeros((16, 0), dtype=np.int32)
+    strided_view = rng.standard_normal((32, 256), dtype=np.float32)[:, ::2]
+    advantages = rng.standard_normal((16, 1024), dtype=np.float32)
 
+    payload = {
+        "completion_ids": packed_tokens,
+        "prompt_ids": empty_prompts,
+        "strided_logps": strided_view,
+        "advantages": advantages,
+        "metadata": {"step": 7, "packed": True},
+    }
+    req = remote_lib.ExecutionRequest(
+        request_id="req_chunked_1",
+        method_name="train_step",
+        args=(payload,),
+        kwargs={"lr": 1e-4},
+    )
+    chunks = list(req.serialize_chunks(chunk_size=4096))
+    self.assertGreater(len(chunks), 10)
+    self.assertTrue(all(len(c) <= 4096 for c in chunks))
+
+    restored_req = remote_lib.ExecutionRequest.deserialize_chunks(chunks)
+    self.assertEqual(restored_req.request_id, "req_chunked_1")
+    self.assertEqual(restored_req.method_name, "train_step")
+    self.assertEqual(restored_req.kwargs, {"lr": 1e-4})
+
+    restored_payload = restored_req.args[0]
+    np.testing.assert_array_equal(
+        restored_payload["completion_ids"], packed_tokens
+    )
+    self.assertEqual(restored_payload["prompt_ids"].shape, (16, 0))
+    np.testing.assert_array_equal(
+        restored_payload["strided_logps"], strided_view
+    )
+    np.testing.assert_array_equal(restored_payload["advantages"], advantages)
+    self.assertEqual(
+        restored_payload["metadata"], {"step": 7, "packed": True}
+    )
+    # Reconstructed arrays backed by released bytearrays must be writable.
+    restored_payload["completion_ids"][0, 0] = 999
+    self.assertEqual(restored_payload["completion_ids"][0, 0], 999)
+
+  def test_grpc_streaming_payload_exceeds_max_message_bytes(self):
+    class PackedBatchWorker:
+
+      def echo_batch(self, batch: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "completion_ids": batch["completion_ids"] + 1,
+            "prompt_ids": batch["prompt_ids"],
+            "advantages": batch["advantages"] * 2.0,
+        }
+
+    rng = np.random.default_rng(123)
+    # ~4 MiB total payload, while max_message_bytes is capped at 512 KiB and
+    # stream_chunk_bytes is 128 KiB. A unary RPC would fail with
+    # RESOURCE_EXHAUSTED, whereas chunked streaming succeeds.
+    batch = {
+        "completion_ids": rng.integers(
+            0, 50000, size=(32, 16384), dtype=np.int32
+        ),
+        "prompt_ids": np.zeros((32, 0), dtype=np.int32),
+        "advantages": rng.standard_normal((32, 16384), dtype=np.float32),
+    }
+
+    max_msg_bytes = 512 * 1024
+    chunk_bytes = 128 * 1024
+    port = portpicker.pick_unused_port()
+    server = remote_lib.GrpcRemoteExecutionServer(
+        PackedBatchWorker(),
+        stream_chunk_bytes=chunk_bytes,
+        max_message_bytes=max_msg_bytes,
+    )
+
+    async def _run_async():
+      await server.start_serving_async(port=port)
+      handle = remote_lib.GrpcRemoteActorHandle(
+          target_address=f"grpc://localhost:{port}",
+          stream_chunk_bytes=chunk_bytes,
+          max_message_bytes=max_msg_bytes,
+      )
+      try:
+        # 1. Verify bidirectional streaming via asubmit (ExecuteStream)
+        out = await handle.asubmit("echo_batch", batch)
+        np.testing.assert_array_equal(
+            out["completion_ids"], batch["completion_ids"] + 1
+        )
+        self.assertEqual(out["prompt_ids"].shape, (32, 0))
+        np.testing.assert_array_equal(
+            out["advantages"], batch["advantages"] * 2.0
+        )
+
+        # 2. Verify client-streaming dispatch + server-streaming poll
+        ack_id = await handle.dispatch_task(
+            "req_stream_1", "echo_batch", batch
+        )
+        self.assertEqual(ack_id, "req_stream_1")
+        polled = await handle.poll_responses(timeout_s=5.0)
+        self.assertIsNotNone(polled)
+        self.assertEqual(polled.request_id, "req_stream_1")
+        polled_out = polled.unwrap()
+        np.testing.assert_array_equal(
+            polled_out["completion_ids"], batch["completion_ids"] + 1
+        )
+        np.testing.assert_array_equal(
+            polled_out["advantages"], batch["advantages"] * 2.0
+        )
+      finally:
+        await handle.close()
+        await server.stop_serving()
+
+    asyncio.run(_run_async())
+
+  def test_chunk_reassembler_rejects_malformed_truncated_and_overflow_streams(
+      self,
+  ):
+    with self.assertRaisesRegex(
+        ValueError, "Cannot deserialize from an empty chunk stream"
+    ):
+      remote_lib.ExecutionRequest.deserialize_chunks([])
+
+    with self.assertRaisesRegex(ValueError, "Invalid chunk stream manifest"):
+      remote_lib.ExecutionRequest.deserialize_chunks([b"not-a-valid-pickle"])
+
+    with self.assertRaisesRegex(
+        ValueError, "Invalid header_len in chunk stream manifest"
+    ):
+      bad_manifest = remote_lib.cloudpickle.dumps((0, ()))
+      remote_lib.ExecutionRequest.deserialize_chunks([bad_manifest])
+
+    with self.assertRaisesRegex(
+        ValueError, "Invalid buffer_lengths in chunk stream manifest"
+    ):
+      bad_manifest = remote_lib.cloudpickle.dumps((16, (-4,)))
+      remote_lib.ExecutionRequest.deserialize_chunks([bad_manifest])
+
+    req = remote_lib.ExecutionRequest(
+        request_id="r1",
+        method_name="m",
+        args=(np.arange(128, dtype=np.int32),),
+    )
+    valid_chunks = list(req.serialize_chunks(chunk_size=64))
+
+    # Truncated stream raises ValueError
+    with self.assertRaisesRegex(
+        ValueError, "Stream ended before all declared buffer bytes"
+    ):
+      remote_lib.ExecutionRequest.deserialize_chunks(valid_chunks[:-1])
+
+    # Extra trailing bytes raise ValueError
+    with self.assertRaisesRegex(
+        ValueError, "Received more chunk bytes than declared"
+    ):
+      remote_lib.ExecutionRequest.deserialize_chunks(valid_chunks + [b"extra"])
+
+  def test_stream_config_validation_rejects_invalid_bounds(self):
+    with self.assertRaisesRegex(ValueError, "stream_chunk_bytes must be"):
+      remote_lib.GrpcRemoteExecutionServer(stream_chunk_bytes=0)
+
+    with self.assertRaisesRegex(ValueError, "max_message_bytes must be"):
+      remote_lib.GrpcRemoteExecutionServer(max_message_bytes=0)
+
+    with self.assertRaisesRegex(
+        ValueError, "stream_chunk_bytes .* must not exceed max_message_bytes"
+    ):
+      remote_lib.GrpcRemoteActorHandle(
+          "grpc://localhost:50051",
+          stream_chunk_bytes=2 * 1024 * 1024,
+          max_message_bytes=1 * 1024 * 1024,
+      )
+
+  def test_unserializable_request_arg_raises_immediately_on_client(self):
+    async def _run():
+      engine = StubWorkerEngine("worker_1")
+      async with running_grpc_server(engine) as (_, handle):
+        with self.assertRaises(TypeError):
+          await handle.asubmit("compute_trajectory", threading.Lock())
+        with self.assertRaises(TypeError):
+          await handle.dispatch_task(
+              "req_bad", "compute_trajectory", threading.Lock()
+          )
+
+    asyncio.run(_run())
+
+  def test_interrupted_poll_responses_requeues_completed_response(self):
+    async def _run():
+      engine = StubWorkerEngine("requeue_worker", latency=0.01)
+      server = remote_lib.GrpcRemoteExecutionServer(
+          engine,
+          stream_chunk_bytes=16,
+      )
+      await server.dispatch_task(
+          remote_lib.ExecutionRequest(
+              request_id="req_requeue_1",
+              method_name="compute_trajectory",
+              args=("prompt_requeue",),
+              kwargs={"turns": 2},
+          )
+      )
+      await asyncio.sleep(0.05)
+
+      # Simulate a client disconnecting after reading only the first chunk
+      stream = server._handle_poll_responses(b"", context=None)
+      first_chunk = await stream.__anext__()
+      self.assertNotEmpty(first_chunk)
+      await stream.aclose()
+
+      # Subsequent poll must still receive the re-queued response
+      recovered = await remote_lib.ExecutionResponse.deserialize_async_chunks(
+          server._handle_poll_responses(b"", context=None)
+      )
+      self.assertIsNotNone(recovered)
+      self.assertEqual(recovered.request_id, "req_requeue_1")
+      self.assertIn("prompt_requeue", recovered.unwrap())
+
+    asyncio.run(_run())
+
+  def test_grpc_actor_handle_survives_multiple_asyncio_run_loops(self):
+    port = portpicker.pick_unused_port()
+    with background_server(StubWorkerEngine("multi_loop_worker"), port):
+      handle = remote_lib.GrpcRemoteActorHandle(
+          target_address=f"grpc://localhost:{port}"
+      )
+      res1 = asyncio.run(handle.asubmit("compute_trajectory", "p1", turns=1))
+      self.assertIn("multi_loop_worker", res1)
+
+      # Second asyncio.run() creates a brand-new event loop; handle must
+      # transparently rebind its async channel to the new loop.
+      res2 = asyncio.run(handle.asubmit("compute_trajectory", "p2", turns=2))
+      self.assertIn("multi_loop_worker", res2)
+      asyncio.run(handle.close())
+
+ 
 if __name__ == "__main__":
   absltest.main()
