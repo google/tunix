@@ -209,7 +209,8 @@ export REMAT_POLICY="${REMAT_POLICY:-full}"
 export TRAINER_MAXTEXT_ATTENTION="flash"
 export COMPUTE_LOGPS_CHUNK_SIZE=512
 
-export EPISODE_TIMEOUT_SECS=1800
+# Whole-episode wall-clock budget (= NeMo-RL swebench_agent_timeout: 1800).
+export EPISODE_TIMEOUT_SECS="${EPISODE_TIMEOUT_SECS:-1800}"
 export DEBUG=${DEBUG:-1}
 
 # ==============================================================================
@@ -226,8 +227,18 @@ export SANDBOX_NODE_SELECTOR_VAL="${SANDBOX_NODE_SELECTOR_VAL:-sandbox-np}"
 export MAX_WARMPOOL_REPLICAS=2
 export ROLLOUT_MAX_CONCURRENCY="${ROLLOUT_MAX_CONCURRENCY:-256}"
 export MAX_CONCURRENCY="${MAX_CONCURRENCY:-256}"
-export STEP_TIMEOUT_SECS=300
-export REWARD_TIMEOUT_SECS=180
+# Per-agent-command timeout (execute_bash / execute_ipython_cell / file_editor).
+# Aligned with NeMo-RL's qualified 397B recipe (command_exec_timeout: 60). Was a
+# hard-coded 300: in mk-7x-0927d, 50 commands hit the 300 s cap across 27/32
+# replicas and each one stalled its whole 16-generation group on the step
+# critical path. A timed-out command is killed server-side and returned to the
+# agent as an observation; the trajectory continues.
+export STEP_TIMEOUT_SECS="${STEP_TIMEOUT_SECS:-60}"
+# Reward / hidden-test run timeout (r2egym compute_reward -> run_tests.sh). This
+# is a separate knob from STEP_TIMEOUT_SECS on purpose: the grading test run can
+# legitimately take longer than a single agent command, and a test timeout is a
+# silent reward=0. NeMo uses 60; keep 180 until we have per-task test times.
+export REWARD_TIMEOUT_SECS="${REWARD_TIMEOUT_SECS:-180}"
 export FLUSH_EVERY_N_STEPS=1
 export MAX_TURNS=30
 export MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-4096}"
