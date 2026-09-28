@@ -422,3 +422,9 @@ class TrajectoryWriterTestCase(
     )
     with self.assertRaises(ValueError):
       self.writer.update_metadata(meta)
+
+
+class UnregisteredMetadata(trajectory_lib.TrajectoryMetadata):
+  """Metadata class not in TrajectoryMetadata._REGISTRY for testing."""
+
+  tag: str = ""

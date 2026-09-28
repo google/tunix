@@ -1,10 +1,12 @@
 """In-memory implementation for Trajectory Store."""
 
 import collections
-from typing import Any, ClassVar, Mapping
+from typing import Any, ClassVar, Mapping, TypeVar
 
 from tunix.experimental.trajectory import store
 from tunix.experimental.trajectory import trajectory as trajectory_lib
+
+MetadataT = TypeVar("MetadataT", bound=trajectory_lib.TrajectoryMetadata)
 
 
 def _validate_trajectory_id(trajectory_id: str | None) -> str:
@@ -24,9 +26,7 @@ def _validate_trajectory_id(trajectory_id: str | None) -> str:
   return trajectory_id
 
 
-class InMemoryTrajectoryStore(
-    store.TrajectoryStore, store.TrajectoryReader, store.TrajectoryWriter
-):
+class InMemoryTrajectoryStore(store.TrajectoryStore[MetadataT]):
   """In-memory implementation satisfying TrajectoryReader and TrajectoryWriter.
 
   Process-local: the steps written here are visible only to the process that
@@ -37,35 +37,35 @@ class InMemoryTrajectoryStore(
   BACKEND: ClassVar[str] = "memory"
 
   def __init__(self) -> None:
-    """Initializes the InMemoryTrajectoryStore."""
-    self._metadata_by_trajectory_id: dict[
-        str, trajectory_lib.TrajectoryMetadata
-    ] = {}
+    """Initializes the InMemoryTrajectoryStore.
+
+    Takes no type arguments: this store hands back the metadata objects it was
+    given rather than parsing them from a serialized form, so unlike
+    `FileTrajectoryStore` it needs no runtime class for `MetadataT`.
+    """
+    self._metadata_by_trajectory_id: dict[str, MetadataT] = {}
     self._steps_by_trajectory_id: dict[str, list[trajectory_lib.Step]] = (
         collections.defaultdict(list)
     )
 
   @classmethod
-  def _from_config(cls, config: Mapping[str, Any]) -> "InMemoryTrajectoryStore":
-    """Builds an in-memory store; this backend takes no configuration.
-
-    Args:
-      config: Unused beyond the keys `store.TrajectoryStore.from_config` has
-        already read.
-
-    Returns:
-      A new, empty InMemoryTrajectoryStore.
-    """
+  def _from_config(
+      cls, config: Mapping[str, Any]
+  ) -> "InMemoryTrajectoryStore[Any]":
+    """Builds an in-memory store; this backend takes no configuration."""
     del config
     return cls()
 
   def to_config(self) -> dict[str, Any]:
     """Returns the config dict that rebuilds an equivalent store."""
-    return {"enabled": True, "backend": self.BACKEND}
+    config: dict[str, Any] = {"enabled": True, "backend": self.BACKEND}
+    if (meta_type := self._metadata_type) is not None:
+      config["metadata_type"] = meta_type
+    return config
 
   def get_trajectories_metadata(
       self, trajectory_ids: list[str] | None = None
-  ) -> list[trajectory_lib.TrajectoryMetadata]:
+  ) -> list[MetadataT]:
     """Retrieves metadata for trajectories in the run.
 
     Args:
@@ -82,7 +82,7 @@ class InMemoryTrajectoryStore(
     """
     if trajectory_ids is None:
       trajectory_ids = list(self._metadata_by_trajectory_id.keys())
-    metas: list[trajectory_lib.TrajectoryMetadata] = []
+    metas: list[MetadataT] = []
     for traj_id in trajectory_ids:
       if traj_id not in self._metadata_by_trajectory_id:
         raise store.TrajectoryMetadataNotFoundError(traj_id)
@@ -92,7 +92,7 @@ class InMemoryTrajectoryStore(
 
   def get_trajectories(
       self, trajectory_ids: list[str]
-  ) -> list[trajectory_lib.Trajectory]:
+  ) -> list[trajectory_lib.Trajectory[Any]]:
     """Retrieves full trajectories for a list of trajectory IDs.
 
     Args:
@@ -105,7 +105,7 @@ class InMemoryTrajectoryStore(
       store.TrajectoryNotFoundError: If any requested trajectory ID does not
       exist.
     """
-    result: list[trajectory_lib.Trajectory] = []
+    result: list[trajectory_lib.Trajectory[Any]] = []
     for traj_id in trajectory_ids:
       if traj_id not in self._metadata_by_trajectory_id:
         raise store.TrajectoryNotFoundError(traj_id)
@@ -114,18 +114,13 @@ class InMemoryTrajectoryStore(
           s.model_copy(deep=True)
           for s in self._steps_by_trajectory_id.get(traj_id, [])
       ]
-      traj_data = meta.model_dump()
-      traj_data["steps"] = steps
-      if isinstance(meta, trajectory_lib.TunixTrajectoryMetadata):
-        result.append(trajectory_lib.TunixTrajectory(**traj_data))  # pyrefly: ignore[bad-argument-type]
-      else:
-        result.append(trajectory_lib.Trajectory(**traj_data))
+      result.append(meta.create_trajectory(steps=steps))
     return result
 
   def add_step(
       self,
       step: trajectory_lib.Step,
-      metadata: trajectory_lib.TrajectoryMetadata,
+      metadata: MetadataT,
   ) -> None:
     """Atomically logs a turn step and its trajectory metadata.
 
@@ -154,7 +149,7 @@ class InMemoryTrajectoryStore(
 
   def update_metadata(
       self,
-      metadata: trajectory_lib.TrajectoryMetadata,
+      metadata: MetadataT,
   ) -> None:
     """Updates (or creates) trajectory metadata.
 
