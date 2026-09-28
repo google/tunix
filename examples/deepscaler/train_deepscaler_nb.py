@@ -191,10 +191,60 @@ arg_parser.add_argument(
     "--model_dtype", type=str, default="float32",
     choices=["float32", "bfloat16"],
     help=(
-        "Storage dtype of the actor/reference parameters. Keep float32: at"
-        " lr=1e-6 the AdamW updates are far below half a bf16 ulp, so bf16"
-        " storage rounds almost every update to zero and the policy barely"
-        " moves. Compute runs in the model config dtype either way."
+        "Storage dtype of the actor parameters (and of the reference unless"
+        " --ref_model_dtype is set). Keep float32: at lr=1e-6 the AdamW"
+        " updates are far below half a bf16 ulp, so bf16 storage rounds"
+        " almost every update to zero and the policy barely moves. The"
+        " compute dtype is set separately by --mixed_precision."
+    ),
+)
+arg_parser.add_argument(
+    "--ref_model_dtype", type=str, default=None,
+    choices=["float32", "bfloat16"],
+    help=(
+        "Storage dtype of the frozen reference model; defaults to"
+        " --model_dtype. bfloat16 is lossless for this bf16 checkpoint (the"
+        " reference is never updated) and saves HBM."
+    ),
+)
+arg_parser.add_argument(
+    "--mixed_precision", action="store_true", default=False,
+    help=(
+        "Run the trainer forward/backward in bfloat16 (ModelConfig.dtype)"
+        " while parameters stay in their storage dtype, as in"
+        " examples/frozenlake."
+    ),
+)
+arg_parser.add_argument(
+    "--remat", type=str, default="block",
+    choices=["none", "block", "decoder"],
+    help=(
+        "Trainer gradient checkpointing. block: remat the attention and MLP"
+        " blocks separately. decoder: remat each whole decoder layer (fewer"
+        " saved activations; examples/frozenlake uses this)."
+    ),
+)
+arg_parser.add_argument(
+    "--flash_attention", action="store_true", default=False,
+    help=(
+        "Use the pallas splash (flash) attention kernel in the trainer"
+        " forward. Padding is masked through per-position segment ids derived"
+        " from the non-pad mask, so left-padded prompts stay isolated."
+    ),
+)
+arg_parser.add_argument(
+    "--flash_attention_block_size", type=int, default=256,
+    help=(
+        "Splash attention block size. Must divide max_prompt_length +"
+        " max_response_length, the padded trainer sequence length."
+    ),
+)
+arg_parser.add_argument(
+    "--compute_logps_chunk_size", type=int, default=0,
+    help=(
+        "If > 0, compute log-probs in sequence chunks of this many tokens so"
+        " the full [batch, seq, vocab] fp32 logits are never materialized."
+        " 0 disables chunking."
     ),
 )
 arg_parser.add_argument(
@@ -258,7 +308,7 @@ EPSILON = args.epsilon
 EPSILON_HIGH = args.epsilon_high
 
 # ====== Training ======
-ENABLE_REMAT = True
+ENABLE_REMAT = args.remat != "none"
 BATCH_SIZE = args.batch_size
 MINI_BATCH_SIZE = args.mini_batch_size
 NUM_BATCHES = args.num_batches
@@ -287,6 +337,27 @@ if MODEL_DTYPE == jnp.bfloat16:
   print(
       "WARNING: --model_dtype bfloat16 stores the actor in bf16; at small"
       " learning rates most optimizer updates round to zero."
+  )
+# The reference is frozen (and unused while beta == 0), so bf16 storage only
+# saves HBM; the checkpoint itself is bf16.
+if args.ref_model_dtype is None:
+  REF_MODEL_DTYPE = MODEL_DTYPE
+else:
+  REF_MODEL_DTYPE = (
+      jnp.bfloat16 if args.ref_model_dtype == "bfloat16" else jnp.float32
+  )
+
+# The trainer pads every prompt to MAX_PROMPT_LENGTH and every completion to
+# MAX_RESPONSE_LENGTH, and splash attention needs whole blocks.
+if (
+    args.flash_attention
+    and (MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH)
+    % args.flash_attention_block_size
+):
+  raise ValueError(
+      "--flash_attention_block_size"
+      f" {args.flash_attention_block_size} must divide max_prompt_length +"
+      f" max_response_length = {MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH}."
   )
 
 # === AdamW, warmup, cosine scheduler ===
@@ -504,11 +575,26 @@ show_hbm_usage("Done with loading datasets")
 # %%
 config = model_lib.ModelConfig.deepseek_r1_distill_qwen_1p5b()
 if ENABLE_REMAT:
-  config.remat_config = model_lib.RematConfig.BLOCK
+  config.remat_config = model_lib.RematConfig[args.remat.upper()]
+if args.flash_attention:
+  config.use_flash_attention = True
+  config.flash_attention_block_size = args.flash_attention_block_size
+if args.mixed_precision:
+  # Compute dtype only; parameters keep their storage dtype.
+  config.dtype = jnp.bfloat16
+print(
+    f"Trainer model: remat={config.remat_config.name}"
+    f" flash_attention={config.use_flash_attention}"
+    f" (block {config.flash_attention_block_size})"
+    f" compute_dtype={jnp.dtype(config.dtype).name}"
+    f" actor_storage={jnp.dtype(MODEL_DTYPE).name}"
+    f" ref_storage={jnp.dtype(REF_MODEL_DTYPE).name}"
+    f" logps_chunk={args.compute_logps_chunk_size}"
+)
 
 print("MODEL_PATH: ", MODEL_PATH)
 qwen2_ref = params_lib.create_model_from_safe_tensors(
-    MODEL_PATH, config, trainer_mesh, dtype=MODEL_DTYPE  # pyrefly: ignore[bad-argument-type]
+    MODEL_PATH, config, trainer_mesh, dtype=REF_MODEL_DTYPE  # pyrefly: ignore[bad-argument-type]
 )
 
 
@@ -710,6 +796,7 @@ cluster_config = rl_engine_lib.ClusterConfig(
             if args.compute_logps_micro_batch_size is not None
             else args.train_micro_batch_size
         ),
+        compute_logps_chunk_size=args.compute_logps_chunk_size,
         metrics_logging_options=metrics_logging_options,
         checkpoint_root_directory=checkpoint_root_dir,
         checkpointing_options=checkpointing_options,

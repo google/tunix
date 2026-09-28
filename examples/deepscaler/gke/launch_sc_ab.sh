@@ -51,6 +51,9 @@ MODEL_DIR="${MODEL_DIR:-$BUCKET/models}"
 # updates to zero (r4 ran with bf16 and its policy barely moved).
 # Both arms use token-level TIS (threshold 2.0), so the A/B is TIS vs TIS+SC
 # (arXiv:2609.20807 Eq. 12), as in the FrozenLake validation.
+# Trainer settings follow examples/frozenlake: decoder remat, splash attention
+# (block 256), bf16 compute over fp32 actor storage (bf16 for the frozen
+# reference), and log-probs in 2048-token chunks.
 COMMON_ARGS=(
   --batch_size 128 --mini_batch_size 128 --num_generations 8
   --train_micro_batch_size "$TRAIN_MICRO_BATCH"
@@ -65,7 +68,10 @@ COMMON_ARGS=(
   --score_centering_eps 1e-6
   --rollout_devices 8 --rollout_dp 8
   --eval_every_n_steps 1000
-  --model_dtype float32
+  --model_dtype float32 --ref_model_dtype bfloat16
+  --mixed_precision --remat decoder
+  --flash_attention --flash_attention_block_size 256
+  --compute_logps_chunk_size 2048
 )
 FULL_ARGS=(--num_batches 300)
 SMOKE_ARGS=(--num_batches 2)
