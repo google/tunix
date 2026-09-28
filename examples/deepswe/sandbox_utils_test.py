@@ -15,6 +15,8 @@
 """Unit tests for tunix.oss.examples.deepswe.sandbox_utils."""
 
 import os
+import threading
+import time
 from unittest import mock
 from absl.testing import absltest
 import numpy as np
@@ -46,6 +48,39 @@ class FakeFleet:
 
   def teardown(self) -> None:
     self.active_pools.clear()
+
+
+class GatedFleet(FakeFleet):
+  """FakeFleet whose pool calls block until `gate` is set."""
+
+  def __init__(self):
+    super().__init__()
+    self.gate = threading.Event()
+    self.gate.set()
+
+  def warm_image(
+      self, image: str, replicas_override: int | None = None, wait: bool = False
+  ) -> None:
+    self.gate.wait(timeout=10)
+    super().warm_image(image, replicas_override=replicas_override, wait=wait)
+
+  def set_pool_replicas(self, image: str, replicas: int) -> None:
+    self.gate.wait(timeout=10)
+    super().set_pool_replicas(image, replicas)
+
+  def unwarm_image(self, image: str) -> None:
+    self.gate.wait(timeout=10)
+    super().unwarm_image(image)
+
+
+# Four batches of two whose boundaries warm (img_C), scale (img_A, img_B) and
+# unwarm (img_A) pools.
+_RECONCILE_DATASET = [
+    {"prompt": f"p{i}", "docker_image": img}
+    for i, img in enumerate(
+        ["img_A", "img_A", "img_B", "img_A", "img_C", "img_C", "img_B", "img_B"]
+    )
+]
 
 
 class SandboxUtilsTest(absltest.TestCase):
@@ -324,6 +359,106 @@ class SandboxUtilsTest(absltest.TestCase):
       next(iterator)
     with self.assertRaises(StopIteration):
       next(iterator)
+
+  def test_async_reconcile_does_not_block_next_at_batch_boundary(self):
+    sync_fleet = FakeFleet()
+    sync_it = sandbox_utils.PrewarmDatasetIterator(
+        _RECONCILE_DATASET, fleet=sync_fleet, num_generations=4, batch_size=2
+    )
+    sync_prompts = [item["prompt"] for item in sync_it]
+
+    fleet = GatedFleet()
+    it = sandbox_utils.PrewarmDatasetIterator(
+        _RECONCILE_DATASET,
+        fleet=fleet,
+        num_generations=4,
+        batch_size=2,
+        async_reconcile=True,
+    )
+    # The initial reconcile stays synchronous.
+    self.assertEqual(fleet.active_pools, {"img_A": 12, "img_B": 4})
+    fleet.gate.clear()
+    prompts = []
+    slowest = 0.0
+    for _ in range(len(_RECONCILE_DATASET)):
+      start = time.monotonic()
+      prompts.append(next(it)["prompt"])
+      slowest = max(slowest, time.monotonic() - start)
+
+    # Every boundary returned while its reconcile was blocked on the fleet.
+    self.assertLess(slowest, 0.5)
+    self.assertEqual(prompts, sync_prompts)
+    self.assertEqual(fleet.active_pools, {"img_A": 12, "img_B": 4})
+
+    fleet.gate.set()
+    self.assertTrue(it.wait_for_reconcile(timeout=10))
+    # Same calls, in the same order, and end state as the synchronous path.
+    self.assertEqual(fleet.warm_calls, sync_fleet.warm_calls)
+    self.assertEqual(fleet.set_replicas_calls, sync_fleet.set_replicas_calls)
+    self.assertEqual(fleet.unwarm_calls, sync_fleet.unwarm_calls)
+    self.assertIn(("img_C", 8, False), fleet.warm_calls)
+    self.assertIn(("img_A", 4), fleet.set_replicas_calls)
+    self.assertIn("img_A", fleet.unwarm_calls)
+    self.assertEqual(fleet.active_pools, sync_fleet.active_pools)
+    self.assertEqual(it._active_replicas, sync_it._active_replicas)
+
+    with self.assertRaises(StopIteration):
+      next(it)
+    it.close()
+    self.assertEqual(fleet.active_pools, {})
+
+  def test_async_reconcile_close_drains_pending_reconcile(self):
+    fleet = GatedFleet()
+    it = sandbox_utils.PrewarmDatasetIterator(
+        _RECONCILE_DATASET,
+        fleet=fleet,
+        num_generations=4,
+        batch_size=2,
+        async_reconcile=True,
+    )
+    fleet.gate.clear()
+    for _ in range(3):  # The third crosses a boundary that warms img_C.
+      next(it)
+
+    closer = threading.Thread(target=it.close)
+    closer.start()
+    closer.join(timeout=0.3)
+    # close() waits for the queued reconcile instead of tearing down under it.
+    self.assertTrue(closer.is_alive())
+    fleet.gate.set()
+    closer.join(timeout=10)
+    self.assertFalse(closer.is_alive())
+    self.assertIn(("img_C", 8, False), fleet.warm_calls)
+    self.assertIn("img_C", fleet.unwarm_calls)
+    self.assertEqual(fleet.active_pools, {})
+
+  def test_async_reconcile_logs_background_failure(self):
+    fleet = FakeFleet()
+    it = sandbox_utils.PrewarmDatasetIterator(
+        _RECONCILE_DATASET,
+        fleet=fleet,
+        num_generations=4,
+        batch_size=2,
+        async_reconcile=True,
+    )
+    with mock.patch.object(
+        it, "_interact_fleet", side_effect=RuntimeError("k8s down")
+    ):
+      with self.assertLogs(level="WARNING") as logs:
+        for _ in range(3):
+          next(it)
+        self.assertTrue(it.wait_for_reconcile(timeout=10))
+    self.assertTrue(
+        any("Background reconcile failed" in line for line in logs.output)
+    )
+    self.assertIn("k8s down", "\n".join(logs.output))
+    # The iterator keeps going, and the next boundary reconciles normally.
+    for _ in range(2):
+      next(it)
+    self.assertTrue(it.wait_for_reconcile(timeout=10))
+    self.assertIn("img_C", fleet.active_pools)
+    it.close()
+    self.assertEqual(fleet.active_pools, {})
 
   def test_empty_dataset(self):
     fleet = FakeFleet()

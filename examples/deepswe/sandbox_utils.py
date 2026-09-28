@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import atexit
 import collections
+import concurrent.futures
 import logging
 import os
 import re
@@ -426,6 +427,12 @@ class PrewarmDatasetIterator:
     * Changed count: fleet.set_pool_replicas(img, replicas)
     * Deleted image key (count 0): fleet.unwarm_image(img)
   Cleans up all warm pools upon iteration completion or close().
+
+  With `async_reconcile=True`, the reconcile at each batch boundary runs on a
+  single background thread against a snapshot of the counts, so `__next__`
+  returns without waiting on K8s. Reconciles still run one at a time in
+  boundary order, and `close()` lets queued ones finish before tearing pools
+  down. The initial reconcile in `__init__` stays synchronous.
   """
 
   def __init__(
@@ -441,6 +448,7 @@ class PrewarmDatasetIterator:
       image_rewrite: Any | None = None,
       wait_initial: bool = True,
       max_staleness: int = 0,
+      async_reconcile: bool = False,
   ):
     del lookahead_steps
     self.scaffold = scaffold
@@ -472,6 +480,15 @@ class PrewarmDatasetIterator:
     self._active_replicas: dict[str, int] = {}
     self.unwarm_calls: list[str] = []
     self._exhausted = False
+    # One worker, so reconciles never overlap: `_active_replicas` keeps a
+    # single writer and the fleet sees the synchronous path's call order.
+    self._reconcile_executor: concurrent.futures.ThreadPoolExecutor | None = (
+        concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="prewarm-reconcile"
+        )
+        if async_reconcile
+        else None
+    )
 
     # 1. Fill current_batch queue up to batch_size
     self._fill_batch(self.current_batch, self._current_batch_counts)
@@ -605,13 +622,19 @@ class PrewarmDatasetIterator:
     for img, count in self._next_batch_counts.items():
       self._image_counts[img] = self._image_counts.get(img, 0) + count
 
-  def _interact_fleet(self, wait: bool = False) -> None:
-    """Interacts with the fleet to reconcile warm pools with self._image_counts."""
+  def _interact_fleet(
+      self,
+      wait: bool = False,
+      image_counts: dict[str, int] | None = None,
+  ) -> None:
+    """Reconciles warm pools with `image_counts` or self._image_counts."""
     if not self.fleet:
       return
+    if image_counts is None:
+      image_counts = self._image_counts
 
     desired: dict[str, int] = {}
-    for img, count in self._image_counts.items():
+    for img, count in image_counts.items():
       if count > 0:
         reps = count * self.num_generations
         if self.max_warmpool_replicas is not None:
@@ -666,6 +689,29 @@ class PrewarmDatasetIterator:
         )
       del self._active_replicas[img]
 
+  def _log_reconcile_failure(self, future: concurrent.futures.Future) -> None:
+    """Logs a background reconcile that raised; the next boundary retries."""
+    exc = None if future.cancelled() else future.exception()
+    if exc is not None:
+      logging.warning(
+          "[PrewarmDatasetIterator] Background reconcile failed: %r",
+          exc,
+          exc_info=exc,
+      )
+
+  def wait_for_reconcile(self, timeout: float | None = None) -> bool:
+    """Blocks until queued background reconciles finish; False on timeout."""
+    if self._reconcile_executor is None:
+      return True
+    # A single worker runs jobs in order, so once this no-op finishes, every
+    # reconcile queued before it has too.
+    barrier = self._reconcile_executor.submit(lambda: None)
+    try:
+      barrier.result(timeout=timeout)
+    except concurrent.futures.TimeoutError:
+      return False
+    return True
+
   def has_next(self) -> bool:
     """Returns True if at least one more item can be yielded without exhaustion."""
     return bool(self.current_batch or self.next_batch)
@@ -706,13 +752,29 @@ class PrewarmDatasetIterator:
       self._update_image_counts()
 
       # After the dict updated, we interact the fleet
-      self._interact_fleet(wait=False)
+      if self._reconcile_executor is not None:
+        # `__next__` runs on the orchestrator's event loop, which a round of
+        # blocking K8s calls would stall right as the next batch is released.
+        # The snapshot pins what this boundary reconciles.
+        future = self._reconcile_executor.submit(
+            self._interact_fleet,
+            wait=False,
+            image_counts=dict(self._image_counts),
+        )
+        future.add_done_callback(self._log_reconcile_failure)
+      else:
+        self._interact_fleet(wait=False)
 
     item, _, _ = self.current_batch.popleft()
     return item
 
   def close(self) -> None:
     """Explicitly tears down active warm pools managed by this iterator."""
+    if self._reconcile_executor is not None:
+      # Let queued reconciles finish first, or one could re-warm a pool after
+      # the teardown below.
+      self._reconcile_executor.shutdown(wait=True)
+      self._reconcile_executor = None
     for img in list(self._active_replicas):
       if self.fleet:
         try:

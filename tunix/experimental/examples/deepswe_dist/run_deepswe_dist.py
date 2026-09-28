@@ -714,6 +714,10 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           scaffold=args.scaffold,
           wait_initial=True,
           max_staleness=args.max_staleness,
+          # The dispatcher calls `next()` on the event loop right after each
+          # commit; a synchronous reconcile there delays the next batch's
+          # first dispatch by a round of K8s calls.
+          async_reconcile=True,
       )
 
     program = rl_program.StandardRLProgram(
