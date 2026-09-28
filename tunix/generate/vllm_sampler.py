@@ -400,6 +400,10 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
 
     args["gpu_memory_utilization"] = config.hbm_utilization
 
+    if config.return_logprobs:
+      args.setdefault("max_logprobs", 1)
+      args.setdefault("logprobs_mode", "processed_logprobs")
+
     if config.return_routed_experts:
       args["enable_return_routed_experts"] = True
 

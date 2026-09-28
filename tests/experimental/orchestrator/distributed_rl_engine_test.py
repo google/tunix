@@ -1521,6 +1521,51 @@ class DistributedRLEngineTest(absltest.TestCase):
         pad_id=10, eos_id=20
     )
 
+  def test_rollout_requests_inherit_temperature_from_algo_config(self):
+    async def _run():
+      mock_algo = mock.MagicMock()
+      mock_algo.algo_config.temperature = 0.85
+      mock_assembler = mock.MagicMock(pad_id=0, eos_id=1)
+
+      self.engine.configure_worker(
+          role=datatypes.Role.ACTOR,
+          algo=mock_algo,
+          assembler=mock_assembler,
+      )
+
+      await self.engine.dispatch_rollouts(
+          [{"prompt": "p1", "prompt_id": "p1"}],
+          num_generations=1,
+      )
+      mock_call = (
+          self.mock_rollout_1.generate.call_args
+          or self.mock_rollout_2.generate.call_args
+      )
+      dispatched = mock_call.kwargs["requests"][0]
+      self.assertEqual(dispatched.generation_kwargs.get("temperature"), 0.85)
+
+      # Pre-formed RolloutRequest without temperature also inherits algo_config.temperature
+      self.mock_rollout_1.generate.reset_mock()
+      self.mock_rollout_2.generate.reset_mock()
+      preformed = datatypes.RolloutRequest(
+          request_id="req_pre_0",
+          prompt="p2",
+          prompt_id="p2",
+          generation_kwargs={"top_p": 0.9},
+      )
+      await self.engine.dispatch_rollout_requests([preformed])
+      mock_call_2 = (
+          self.mock_rollout_1.generate.call_args
+          or self.mock_rollout_2.generate.call_args
+      )
+      dispatched_2 = mock_call_2.kwargs["requests"][0]
+      self.assertEqual(
+          dispatched_2.generation_kwargs,
+          {"top_p": 0.9, "temperature": 0.85},
+      )
+
+    asyncio.run(_run())
+
   def test_configure_worker_actor_raises_when_algo_none(self):
     with self.assertRaisesRegex(ValueError, "algo is required"):
       self.engine.configure_worker(

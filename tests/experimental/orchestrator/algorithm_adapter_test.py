@@ -337,6 +337,7 @@ class AlgorithmAdapterTest(absltest.TestCase):
         gamma=0.98,
         lam=0.92,
         entropy_coef=0.01,
+        temperature=0.75,
     )
     gen_fn = adapter.build_gen_model_input_fn(pad_id=5, eos_id=6)
     self.assertTrue(callable(gen_fn))
@@ -354,6 +355,7 @@ class AlgorithmAdapterTest(absltest.TestCase):
     self.assertEqual(algo_config.entropy_coef, 0.01)
     self.assertEqual(algo_config.gamma, 0.98)
     self.assertEqual(algo_config.lam, 0.92)
+    self.assertEqual(algo_config.temperature, 0.75)
 
   def test_grpo_with_ref_logps(self):
     adapter = algorithm_adapter.GRPOAdapter(
