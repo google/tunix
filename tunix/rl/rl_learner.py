@@ -103,6 +103,10 @@ class RLLearner(abc.ABC, Generic[TConfig]):
         if data_shuffle_seed is not None
         else None
     )
+    self._maybe_restore_data_shuffle_state()
+    self.rl_engine.actor_trainer.with_checkpoint_metadata_provider(
+        self._data_shuffle_checkpoint_metadata
+    )
 
     self._training_config = self.rl_engine.cluster_config.training_config
 
@@ -160,6 +164,24 @@ class RLLearner(abc.ABC, Generic[TConfig]):
         self._training_config.compute_logps_micro_batch_size
     )
     sft_utils.show_hbm_usage(title="RLLearner init")
+
+  def _data_shuffle_checkpoint_metadata(self) -> dict[str, Any]:
+    if self._data_shuffle_seed is None:
+      return {}
+    return {
+        "data_shuffle_prng_state": np.asarray(self._data_shuffle_seed).tolist()
+    }
+
+  def _maybe_restore_data_shuffle_state(self) -> None:
+    if self._data_shuffle_seed is None:
+      return
+    state = self.rl_engine.actor_trainer.restored_checkpoint_metadata().get(
+        "data_shuffle_prng_state"
+    )
+    if state is not None:
+      self._data_shuffle_seed = jax.device_put(
+          np.asarray(state, dtype=np.uint32)
+      )
 
   @abstractmethod
   def _generate_and_compute_advantage(
