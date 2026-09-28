@@ -696,6 +696,72 @@ perf_metrics_config = PerfMetricsConfig(
 )
 
 # %%
+# Work around a tpu_inference bug that breaks vLLM model loading for
+# DeepSeek-R1-Distill-Qwen-1.5B: `Qwen2ForCausalLM.__init__` in
+# tpu_inference/models/jax/qwen2.py sizes the untied lm_head with
+#   getattr(hf_config, "hidden_size", hf_config.text_config.hidden_size)
+# whose default argument is evaluated eagerly, so a plain `Qwen2Config` (it has
+# no `text_config`) raises AttributeError whenever `tie_word_embeddings` is
+# False. Only while that constructor runs, expose a shallow copy of the config
+# as `text_config` (a copy, so the config never references itself); the rest of
+# vLLM sees the unmodified config. The patch is applied when vLLM first imports
+# the module, so tpu_inference's import order and env handling are unchanged.
+import copy as copy_lib
+import functools
+import importlib.abc
+import importlib.machinery
+
+_TPU_QWEN2_MODULE = "tpu_inference.models.jax.qwen2"
+
+
+def _patch_tpu_qwen2(module):
+  model_cls = getattr(module, "Qwen2ForCausalLM", None)
+  if model_cls is None or getattr(model_cls, "_tunix_text_config_patch", False):
+    return
+  orig_init = model_cls.__init__
+
+  @functools.wraps(orig_init)
+  def patched_init(self, vllm_config, *args, **kwargs):
+    hf_config = vllm_config.model_config.hf_config
+    if hasattr(hf_config, "text_config"):
+      return orig_init(self, vllm_config, *args, **kwargs)
+    hf_config.text_config = copy_lib.copy(hf_config)
+    try:
+      return orig_init(self, vllm_config, *args, **kwargs)
+    finally:
+      del hf_config.text_config
+
+  model_cls.__init__ = patched_init
+  model_cls._tunix_text_config_patch = True
+  print(f"Patched {_TPU_QWEN2_MODULE}.Qwen2ForCausalLM (text_config fallback)")
+
+
+class _TpuQwen2PatchFinder(importlib.abc.MetaPathFinder):
+  """Applies `_patch_tpu_qwen2` right after the module is first imported."""
+
+  def find_spec(self, fullname, path, target=None):
+    if fullname != _TPU_QWEN2_MODULE:
+      return None
+    spec = importlib.machinery.PathFinder.find_spec(fullname, path, target)
+    if spec is None or spec.loader is None:
+      return None
+    exec_module = spec.loader.exec_module
+
+    def exec_and_patch(module):
+      exec_module(module)
+      _patch_tpu_qwen2(module)
+
+    spec.loader.exec_module = exec_and_patch
+    return spec
+
+
+if ROLLOUT_ENGINE == "vllm":
+  if _TPU_QWEN2_MODULE in sys.modules:
+    _patch_tpu_qwen2(sys.modules[_TPU_QWEN2_MODULE])
+  else:
+    sys.meta_path.insert(0, _TpuQwen2PatchFinder())
+
+# %%
 # RL engine
 rl_engine = rl_engine_lib.RLEngine(
     actor=qwen2_actor,
