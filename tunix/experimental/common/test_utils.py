@@ -20,6 +20,7 @@ import functools
 import os
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 import unittest
+from unittest import mock
 import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.experimental.rl.agentic import registry
@@ -30,6 +31,7 @@ from tunix.experimental.worker import remote_execution
 from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.agents import base_agent
 from tunix.rl.agentic.environments import base_environment
+from tunix.rl.rollout import base_rollout
 
 
 class MockEnvironment(base_environment.BaseTaskEnv):
@@ -146,9 +148,16 @@ class MockBaseSamplerImpl(sampler_lib.VanillaSamplerAdapter):
       sampler_name: str = "mock",
       default_delay: float = 0.05,
       server_id: str = "mock_server",
+      config: Optional[base_rollout.RolloutConfig] = None,
+      sampler: Any = None,
       **kwargs,
   ):
-    super().__init__(server_id=server_id or sampler_name, **kwargs)
+    super().__init__(
+        server_id=server_id or sampler_name,
+        config=config if config is not None else base_rollout.RolloutConfig(),
+        sampler=sampler if sampler is not None else mock.MagicMock(),
+        **kwargs,
+    )
     self.sampler_name = sampler_name
     self.default_delay = default_delay
     self.migration_history: List[Dict[str, Any]] = []

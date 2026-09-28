@@ -23,6 +23,7 @@ from tunix.experimental.rollout import sampler as base_sampler_lib
 from tunix.experimental.weight_sync import raiden_weight_sync_delegate
 from tunix.experimental.weight_sync import weight_sync
 from tunix.generate import base_sampler
+from tunix.rl.rollout import base_rollout
 
 
 class InprocessVllmSamplerAdapterTest(absltest.TestCase):
@@ -49,14 +50,20 @@ class InprocessVllmSamplerAdapterTest(absltest.TestCase):
     self.patcher.start()
 
     self.mock_tokenizer = mock.MagicMock()
-    self.mock_config = mock.MagicMock()
-    self.mock_config.enable_raiden = False
+    self.mock_vllm_config = mock.MagicMock()
+    self.mock_vllm_config.enable_raiden = False
+    self.rollout_config = base_rollout.RolloutConfig(
+        max_tokens_to_generate=16,
+        temperature=0.7,
+        return_logprobs=False,
+    )
 
     self.sampler_adapter = (
         inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
             server_id="vllm_slice_01",
+            config=self.rollout_config,
             tokenizer=self.mock_tokenizer,
-            config=self.mock_config,
+            vllm_config=self.mock_vllm_config,
         )
     )
 
@@ -67,16 +74,15 @@ class InprocessVllmSamplerAdapterTest(absltest.TestCase):
   def test_implements_sampler_protocol(self):
     self.assertIsInstance(self.sampler_adapter, base_sampler_lib.Sampler)
 
-  def test_explicit_weight_sync_mode_overrides_config(self):
-    fallback_config = mock.MagicMock()
-    fallback_config.weight_sync_mode = weight_sync.WeightSyncMode.FALLBACK
+  def test_explicit_weight_sync_mode_enables_raiden(self):
     mock_delegate = mock.MagicMock(
         spec=raiden_weight_sync_delegate.RaidenWeightSyncDelegate
     )
     adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
         server_id="vllm_raiden_slice",
+        config=base_rollout.RolloutConfig(),
         tokenizer=self.mock_tokenizer,
-        config=fallback_config,
+        vllm_config=self.mock_vllm_config,
         raiden_sync_delegate=mock_delegate,
         weight_sync_mode=weight_sync.WeightSyncMode.RAIDEN,
     )
@@ -86,12 +92,12 @@ class InprocessVllmSamplerAdapterTest(absltest.TestCase):
     self.assertTrue(adapter.enable_raiden)
 
   def test_real_raiden_delegate_instantiation(self):
-    raiden_config = mock.MagicMock()
-    raiden_config.weight_sync_mode = weight_sync.WeightSyncMode.RAIDEN
     adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
         server_id="vllm_raiden_slice",
+        config=base_rollout.RolloutConfig(),
         tokenizer=self.mock_tokenizer,
-        config=raiden_config,
+        vllm_config=self.mock_vllm_config,
+        weight_sync_mode=weight_sync.WeightSyncMode.RAIDEN,
     )
     self.assertTrue(adapter.enable_raiden)
     self.assertIsNotNone(adapter.raiden_sync_delegate)
@@ -194,14 +200,13 @@ class InprocessVllmSamplerAdapterTest(absltest.TestCase):
     fake_transformer_state = {"param": "tensor"}
     self.mock_vllm_sampler.transformer_state = fake_transformer_state
 
-    raiden_config = mock.MagicMock()
-    raiden_config.weight_sync_mode = weight_sync.WeightSyncMode.RAIDEN
-
     raiden_adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
         server_id="vllm_raiden_slice",
+        config=base_rollout.RolloutConfig(),
         tokenizer=self.mock_tokenizer,
-        config=raiden_config,
+        vllm_config=self.mock_vllm_config,
         raiden_sync_delegate=mock_delegate,
+        weight_sync_mode=weight_sync.WeightSyncMode.RAIDEN,
     )
 
     sync_req = base_sampler_lib.WeightSyncRequest(policy_version=5)
@@ -244,14 +249,13 @@ class InprocessVllmSamplerAdapterTest(absltest.TestCase):
     mock_delegate.bind_weight_sync = mock.AsyncMock(return_value=True)
     self.mock_vllm_sampler.transformer_state = {"param": "tensor"}
 
-    raiden_config = mock.MagicMock()
-    raiden_config.weight_sync_mode = weight_sync.WeightSyncMode.RAIDEN
-
     raiden_adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
         server_id="vllm_raiden_slice",
+        config=base_rollout.RolloutConfig(),
         tokenizer=self.mock_tokenizer,
-        config=raiden_config,
+        vllm_config=self.mock_vllm_config,
         raiden_sync_delegate=mock_delegate,
+        weight_sync_mode=weight_sync.WeightSyncMode.RAIDEN,
     )
 
     self.assertTrue(asyncio.run(raiden_adapter.bind_weight_sync()))
@@ -266,14 +270,13 @@ class InprocessVllmSamplerAdapterTest(absltest.TestCase):
     if hasattr(self.mock_vllm_sampler, "transformer_state"):
       del self.mock_vllm_sampler.transformer_state
 
-    raiden_config = mock.MagicMock()
-    raiden_config.weight_sync_mode = weight_sync.WeightSyncMode.RAIDEN
-
     raiden_adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
         server_id="vllm_raiden_slice",
+        config=base_rollout.RolloutConfig(),
         tokenizer=self.mock_tokenizer,
-        config=raiden_config,
+        vllm_config=self.mock_vllm_config,
         raiden_sync_delegate=mock_delegate,
+        weight_sync_mode=weight_sync.WeightSyncMode.RAIDEN,
     )
 
     with self.assertRaisesRegex(RuntimeError, "transformer_state"):
@@ -297,13 +300,21 @@ class InprocessVllmSamplerAdapterTest(absltest.TestCase):
     self.assertIsInstance(load_info, base_sampler_lib.LoadInfo)
 
   def test_uninitialized_sampler_raises(self):
-    uninit = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
-        server_id="empty"
+    with self.assertRaises(TypeError):
+      inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
+          server_id="empty",
+          config=None,  # pyrefly: ignore[bad-argument-type]
+      )
+    empty_adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
+        server_id="empty",
+        config=base_rollout.RolloutConfig(),
+    )
+    req = base_sampler_lib.SamplingRequest(
+        request_id="req_1",
+        prompt="hello",
     )
     with self.assertRaises(RuntimeError):
-      asyncio.run(
-          uninit.sample(base_sampler_lib.SamplingRequest(prompt="test"))
-      )
+      asyncio.run(empty_adapter.sample(req))
 
   def test_sample_none_requests_raises(self):
     with self.assertRaises(ValueError):
@@ -328,9 +339,10 @@ class RoutedExpertsTest(absltest.TestCase):
     )
     sampler.config = mock.Mock(return_routed_experts=engine_captures)
     adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
-        server_id="rollout"
+        server_id="rollout",
+        config=base_rollout.RolloutConfig(),
+        vllm_sampler=sampler,
     )
-    adapter.vllm_sampler = sampler
     return adapter
 
   def _requests(self, n):
@@ -428,11 +440,10 @@ class RoutedExpertsTest(absltest.TestCase):
 
     adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
         server_id="vllm_concurrent_slice",
-        tokenizer=None,
-        config=None,
+        config=base_rollout.RolloutConfig(),
+        vllm_sampler=mock.MagicMock(side_effect=_blocking_vllm_call),
         max_concurrency=num_concurrent,
     )
-    adapter.vllm_sampler = mock.MagicMock(side_effect=_blocking_vllm_call)
 
     async def _run_concurrent():
       reqs = [
@@ -488,14 +499,6 @@ class RoutedExpertsTest(absltest.TestCase):
         pass
 
     hf_tok = _DummyHFTokenizer()
-
-    adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
-        server_id="vllm_hf_tok_slice",
-        tokenizer=hf_tok,
-    )
-    self.assertIsInstance(
-        adapter.tokenizer, tokenizer_adapter.TokenizerAdapter
-    )
     sampler = mock.MagicMock()
     sampler.return_value = base_sampler.SamplerOutput(
         text=["completion"],
@@ -505,7 +508,14 @@ class RoutedExpertsTest(absltest.TestCase):
         prompt_lengths=np.array([2], dtype=np.int32),
         logprobs=None,
     )
-    adapter.vllm_sampler = sampler
+
+    adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
+        server_id="vllm_hf_tok_slice",
+        config=base_rollout.RolloutConfig(),
+        vllm_sampler=sampler,
+        tokenizer=hf_tok,
+    )
+    self.assertIsInstance(adapter.tokenizer, tokenizer_adapter.TokenizerAdapter)
     req = base_sampler_lib.SamplingRequest(
         request_id="req_hf",
         prompt="hello world",

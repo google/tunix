@@ -34,11 +34,17 @@ from typing import Any
 
 import numpy as np
 from tunix.generate import utils as generate_utils
+from tunix.rl.rollout import base_rollout
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.sampling_params import SamplingParams as VllmSamplingParams
 
 logger = logging.getLogger(__name__)
+
+_VLLM_DEFAULT_TOP_P: float = 1.0
+_VLLM_DISABLE_TOP_K: int = -1
+_VLLM_DEFAULT_INCLUDE_STOP_STR_IN_OUTPUT: bool = True
+_VLLM_DEFAULT_DETOKENIZE: bool = False
 
 
 def _get_val(obj: Any, key: str, default: Any = None) -> Any:
@@ -62,7 +68,7 @@ def _get_val(obj: Any, key: str, default: Any = None) -> Any:
 class RLVllmSampler:
   """Asynchronous vLLM sampler for RL inside `tpu-inference`.
 
-  Satisfies the open-source Tunix `Sampler` Protocol without importing Tunix.
+  Satisfies the open-source Tunix `Sampler` Protocol.
   Handles:
 
     - Direct binding to vLLM's `AsyncLLMEngine`.
@@ -74,8 +80,18 @@ class RLVllmSampler:
     `weight_sync`, `post_weight_sync`).
   """
 
-  def __init__(self, engine_args: AsyncEngineArgs):
+  def __init__(
+      self,
+      engine_args: AsyncEngineArgs,
+      config: base_rollout.RolloutConfig,
+  ):
+    if not isinstance(config, base_rollout.RolloutConfig):
+      raise TypeError(
+          "RLVllmSampler requires config to be a RolloutConfig instance, got"
+          f" {type(config).__name__}."
+      )
     self.engine_args = engine_args
+    self.config: base_rollout.RolloutConfig = config
     self._engine: Any | None = None
     self._is_running = False
     self._is_paused = False
@@ -161,22 +177,44 @@ class RLVllmSampler:
   ) -> VllmSamplingParams:
     """Builds a vLLM SamplingParams object from any duck-typed request."""
     sparams = _get_val(req, "sampling_params")
+    default_temp = float(self.config.temperature)
+    default_top_p = (
+        float(self.config.top_p)
+        if self.config.top_p is not None
+        else _VLLM_DEFAULT_TOP_P
+    )
+    default_top_k = (
+        int(self.config.top_k)
+        if self.config.top_k is not None
+        else _VLLM_DISABLE_TOP_K
+    )
+    default_max_tokens = int(self.config.max_tokens_to_generate)
     stop_token_ids = _get_val(
         sparams,
         "stop_token_ids",
-        kwargs.get("stop_token_ids") or kwargs.get("eos_tokens"),
+        self.config.eos_tokens
+        or kwargs.get("stop_token_ids")
+        or kwargs.get("eos_tokens"),
     )
     # `kwargs` goes through `_get_val` too: callers pass unset fields as
     # explicit `None`, so `.get(key, default)` returns `None` rather than
     # the default, defeating it before `_get_val` can coalesce.
     return VllmSamplingParams(
         temperature=_get_val(
-            sparams, "temperature", _get_val(kwargs, "temperature", 0.7)
+            sparams,
+            "temperature",
+            _get_val(kwargs, "temperature", default_temp),
         ),
-        top_p=_get_val(sparams, "top_p", _get_val(kwargs, "top_p", 0.95)),
-        top_k=_get_val(sparams, "top_k", _get_val(kwargs, "top_k", -1)),
+        top_p=_get_val(
+            sparams, "top_p", _get_val(kwargs, "top_p", default_top_p)
+        ),
+        top_k=_get_val(
+            sparams, "top_k", _get_val(kwargs, "top_k", default_top_k)
+        ),
         max_tokens=_get_val(
-            sparams, "max_tokens", _get_val(kwargs, "max_tokens", 128)
+            sparams,
+            "max_tokens",
+            _get_val(kwargs, "max_tokens", default_max_tokens),
         ),
         stop=_get_val(sparams, "stop_sequences")
         or _get_val(sparams, "stop")
@@ -188,19 +226,29 @@ class RLVllmSampler:
             _get_val(
                 sparams,
                 "include_stop_str_in_output",
-                _get_val(kwargs, "include_stop_str_in_output", True),
+                _get_val(
+                    kwargs,
+                    "include_stop_str_in_output",
+                    _VLLM_DEFAULT_INCLUDE_STOP_STR_IN_OUTPUT,
+                ),
             )
         ),
         detokenize=bool(
             _get_val(
                 sparams,
                 "detokenize",
-                _get_val(kwargs, "detokenize", False),
+                _get_val(kwargs, "detokenize", _VLLM_DEFAULT_DETOKENIZE),
             )
         ),
         logprobs=1
         if _get_val(
-            sparams, "return_logprobs", kwargs.get("return_logprobs", False)
+            sparams,
+            "return_logprobs",
+            _get_val(
+                kwargs,
+                "return_logprobs",
+                self.config.return_logprobs,
+            ),
         )
         else None,
     )

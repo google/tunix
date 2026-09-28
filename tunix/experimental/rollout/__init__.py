@@ -19,6 +19,7 @@ from tunix.experimental.common.datatypes import RolloutRequest
 from tunix.experimental.common.datatypes import WeightSyncMetadata
 from tunix.experimental.rollout.collector import TrajectoryCollectorEngine
 from tunix.experimental.rollout.manager import RolloutManager
+from tunix.experimental.rollout.sampler import RolloutConfig
 from tunix.experimental.rollout.sampler import Sampler
 from tunix.experimental.rollout.vanilla_sampler_adapter import VanillaSamplerAdapter
 from tunix.experimental.rollout.vllm_sampler_adapter import VllmSamplerAdapter

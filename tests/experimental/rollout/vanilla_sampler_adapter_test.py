@@ -15,7 +15,6 @@
 """Tests for VanillaSamplerAdapter with Tunix JAX Sampler."""
 
 import asyncio
-import types
 from unittest import mock
 from absl.testing import absltest
 from flax import nnx
@@ -24,6 +23,7 @@ from tunix.experimental.rollout import sampler as base_sampler_lib
 from tunix.experimental.rollout import vanilla_sampler_adapter
 from tunix.experimental.weight_sync import weight_sync
 from tunix.generate import sampler as generate_sampler_lib
+from tunix.rl.rollout import base_rollout
 from tunix.tests import test_common as tc
 
 
@@ -44,11 +44,11 @@ class VanillaSamplerAdapterTest(absltest.TestCase):
     )
     self.vanilla_sampler = vanilla_sampler_adapter.VanillaSamplerAdapter(
         server_id="tpu_slice_01",
+        config=base_rollout.RolloutConfig(),
         transformer=self.transformer,
         tokenizer=self.vocab,
         cache_config=self.cache_config,
     )
-    self.vanilla_sampler.initialize()
 
   def test_single_sampling_request(self):
     req = base_sampler_lib.SamplingRequest(
@@ -112,6 +112,7 @@ class VanillaSamplerAdapterTest(absltest.TestCase):
   def test_construct_with_integer_cache_size(self):
     sampler_adapter_direct = vanilla_sampler_adapter.VanillaSamplerAdapter(
         server_id="tpu_slice_02",
+        config=base_rollout.RolloutConfig(),
         transformer=self.transformer,
         tokenizer=self.vocab,
         cache_config=64,
@@ -131,15 +132,23 @@ class VanillaSamplerAdapterTest(absltest.TestCase):
     self.assertEqual(response.prompt_token_ids.dtype, np.int32)
 
   def test_uninitialized_sampler_raises(self):
-    uninit_sampler = vanilla_sampler_adapter.VanillaSamplerAdapter(
-        server_id="empty"
+    with self.assertRaises(TypeError):
+      vanilla_sampler_adapter.VanillaSamplerAdapter(
+          server_id="empty",
+          config=None,  # pyrefly: ignore[bad-argument-type]
+          transformer=self.transformer,
+          tokenizer=self.vocab,
+      )
+    empty_sampler = vanilla_sampler_adapter.VanillaSamplerAdapter(
+        server_id="empty",
+        config=base_rollout.RolloutConfig(),
+    )
+    req = base_sampler_lib.SamplingRequest(
+        request_id="req_1",
+        prompt="input string",
     )
     with self.assertRaises(RuntimeError):
-      asyncio.run(
-          uninit_sampler.sample(
-              base_sampler_lib.SamplingRequest(prompt="hello")
-          )
-      )
+      asyncio.run(empty_sampler.sample(req))
 
   def test_weight_sync_without_raiden_delegate(self):
     self.assertIsNone(asyncio.run(self.vanilla_sampler.bind_weight_sync()))
@@ -170,10 +179,9 @@ class VanillaSamplerAdapterTest(absltest.TestCase):
         transformer=self.transformer,
         tokenizer=self.vocab,
         cache_config=self.cache_config,
-        config=types.SimpleNamespace(
-            weight_sync_mode=weight_sync.WeightSyncMode.RAIDEN
-        ),
+        config=base_rollout.RolloutConfig(),
         raiden_sync_delegate=mock_delegate,
+        weight_sync_mode=weight_sync.WeightSyncMode.RAIDEN,
     )
     sampler_with_raiden.initialize()
 
@@ -215,9 +223,8 @@ class VanillaSamplerAdapterTest(absltest.TestCase):
         transformer=self.transformer,
         tokenizer=self.vocab,
         cache_config=self.cache_config,
-        config=types.SimpleNamespace(
-            weight_sync_mode=weight_sync.WeightSyncMode.RAIDEN
-        ),
+        config=base_rollout.RolloutConfig(),
+        weight_sync_mode=weight_sync.WeightSyncMode.RAIDEN,
     )
     sampler_with_raiden.initialize()
     self.assertTrue(sampler_with_raiden.enable_raiden)

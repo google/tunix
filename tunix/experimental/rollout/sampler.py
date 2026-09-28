@@ -15,13 +15,44 @@
 """Sampler abstractions for Distributed-RL."""
 
 import dataclasses
-from typing import Any, Protocol, Sequence, runtime_checkable
+from typing import Any, Mapping, Protocol, Sequence, runtime_checkable
 from jax import typing
 import numpy as np
-
 from tunix.experimental.common import datatypes
+from tunix.experimental.weight_sync import weight_sync
+from tunix.rl.rollout import base_rollout
 
 ArrayLike = typing.ArrayLike
+
+
+@dataclasses.dataclass
+class RolloutConfig(base_rollout.RolloutConfig):
+  """Rollout configuration extending base RolloutConfig with sampler choice and registry options.
+
+  Attributes:
+    sampler_type: Type of sampler adapter to construct ("vanilla",
+      "inprocess_vllm", "vllm").
+    weight_sync_mode: Mode of weight synchronization ("none", "fallback",
+      "raiden").
+    env_name: Registered name of environment class in ENV_REGISTRY.
+    agent_name: Registered name of agent class in AGENT_REGISTRY.
+    env_config: Configuration dictionary passed to environment constructor.
+    agent_config: Configuration dictionary passed to agent constructor.
+    trajectory_store_config: Trajectory Store configuration for this worker
+      process, or None to run without a store. See
+      `store.TrajectoryStore.from_config`. Must match what the orchestrator was
+      given: for the file backend it is the shared root_dir and run_id that will
+        make these writes visible to the orchestrator's reads once rollout step
+        logging is wired.
+  """
+
+  sampler_type: str = "vanilla"
+  weight_sync_mode: weight_sync.WeightSyncMode = weight_sync.WeightSyncMode.NONE
+  env_name: str = ""
+  agent_name: str = ""
+  env_config: dict[str, Any] = dataclasses.field(default_factory=dict)
+  agent_config: dict[str, Any] = dataclasses.field(default_factory=dict)
+  trajectory_store_config: Mapping[str, Any] | None = None
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -134,6 +165,8 @@ class LoadInfo(datatypes.Response):
 class Sampler(Protocol):
   """Protocol defining standard lifecycle, sampling, and weight-sync interface for worker slices."""
 
+  config: base_rollout.RolloutConfig
+
   # --- Lifecycle & Topology ---
   def initialize(self) -> None:
     """Initializes backend resources before serving requests."""
@@ -162,14 +195,9 @@ class Sampler(Protocol):
   # --- Inference ---
   async def sample(
       self,
-      sampling_requests: (
-          SamplingRequest
-          | Sequence[SamplingRequest]
-          | Any
-          | Sequence[Any]
-      ),
+      sampling_requests: SamplingRequest | Sequence[SamplingRequest],
       **kwargs,
-  ) -> list[SamplingResponse] | Any:
+  ) -> SamplingResponse | list[SamplingResponse]:
     """Generates completions for a batch of prompt conversations concurrently."""
     ...
 

@@ -20,11 +20,12 @@ from tunix.experimental.common import datatypes
 from tunix.experimental.rl.agentic import registry
 from tunix.experimental.rollout import collector as collector_lib
 from tunix.experimental.rollout import sampler as sampler_lib
-from tunix.experimental.rollout import vanilla_sampler_adapter
 from tunix.experimental.trajectory import trajectory as trajectory_lib
 from tunix.experimental.weight_sync import weight_sync
 from tunix.experimental.worker import traffic_controller as traffic_controller_lib
-from tunix.rl.rollout import base_rollout
+
+RolloutConfig = sampler_lib.RolloutConfig
+
 
 TrajectoryOrError = Union[
     datatypes.TrajectoryItem,
@@ -41,7 +42,7 @@ class RolloutManager:
 
   def __init__(
       self,
-      config: Optional[base_rollout.RolloutConfig] = None,
+      config: RolloutConfig,
       sampler: Optional[sampler_lib.Sampler] = None,
       env_pool: Any = None,
       agent_factory: Optional[Callable[[], Any]] = None,
@@ -54,7 +55,8 @@ class RolloutManager:
 
     Args:
       config: RolloutConfig configuration options.
-      sampler: Optional pre-constructed Sampler instance.
+      sampler: Optional pre-constructed Sampler instance. When None, constructs
+        a sampler adapter based on `config.sampler_type`.
       env_pool: Environment pool for rollout execution.
       agent_factory: Factory callable producing agent instances.
       max_concurrency: Maximum number of concurrent episodes.
@@ -63,19 +65,24 @@ class RolloutManager:
       drain_timeout_s: How long pre_weight_sync waits for in-flight trajectories
         before pausing the stragglers, roughly one worst-case trajectory.
     """
-    self.config = config
-    if sampler is None:
-      sampler_type = getattr(config, "sampler_type", "vanilla")
-      weight_sync_mode = getattr(
-          config, "weight_sync_mode", weight_sync.DEFAULT_WEIGHT_SYNC_MODE
+    if not isinstance(config, RolloutConfig):
+      raise TypeError(
+          "RolloutManager requires config to be a RolloutConfig, got"
+          f" {type(config).__name__}."
       )
+    self.config: RolloutConfig = config
+    self.eos_ids = self.config.eos_tokens
+
+    if sampler is None:
+      sampler_type = self.config.sampler_type
+      weight_sync_mode = self.config.weight_sync_mode
 
       if sampler_type == "vllm":
         from tunix.experimental.rollout import vllm_sampler_adapter  # pylint: disable=g-import-not-at-top
 
-        sampler = vllm_sampler_adapter.VllmSamplerAdapter(  # pyrefly: ignore[bad-instantiation]
+        sampler = vllm_sampler_adapter.VllmSamplerAdapter(
             server_id="vllm_sampler",
-            model_name=getattr(config, "rollout_vllm_model_version", ""),
+            config=self.config,
             weight_sync_mode=weight_sync_mode,
         )
       elif "inprocess_vllm" in sampler_type:
@@ -91,15 +98,17 @@ class RolloutManager:
               )
           )
 
-        sampler = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(  # pyrefly: ignore[bad-instantiation]
+        sampler = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
             server_id="inprocess_vllm_sampler",
+            config=self.config,
             tokenizer=tokenizer,
-            config=config,
             raiden_sync_delegate=raiden_delegate,
             weight_sync_mode=weight_sync_mode,
             max_concurrency=max_concurrency,
         )
       elif "vanilla" in sampler_type:
+        from tunix.experimental.rollout import vanilla_sampler_adapter  # pylint: disable=g-import-not-at-top
+
         raiden_delegate = None
         if weight_sync_mode == weight_sync.WeightSyncMode.RAIDEN:
           from tunix.experimental.weight_sync import raiden_weight_sync_delegate  # pylint: disable=g-import-not-at-top
@@ -112,9 +121,10 @@ class RolloutManager:
 
         sampler = vanilla_sampler_adapter.VanillaSamplerAdapter(
             server_id="vanilla_sampler",
+            config=self.config,
             tokenizer=tokenizer,
-            config=config,
             raiden_sync_delegate=raiden_delegate,
+            weight_sync_mode=weight_sync_mode,
         )
       else:
         raise ValueError(f"Unknown sampler_type: {sampler_type}")
@@ -124,21 +134,18 @@ class RolloutManager:
       raise TypeError(
           f"Expected object implementing Sampler Protocol, got {type(sampler)}"
       )
+    if tokenizer is None or chat_parser is None:
+      raise ValueError(
+          "RolloutManager requires valid tokenizer and chat_parser arguments"
+          " (none can be None)."
+      )
     self.sampler = sampler
+    self.sampler.config = self.config
     self.env_pool = env_pool
     self.agent_factory = agent_factory
     self.max_concurrency = max_concurrency
     self.tokenizer = tokenizer
     self.chat_parser = chat_parser
-    if self.tokenizer is None or self.chat_parser is None:
-      raise ValueError(
-          "RolloutManager requires valid tokenizer and chat_parser arguments"
-          " (none can be None)."
-      )
-    # `RolloutConfig.eos_tokens` is the stop set the sampler runs with, and it
-    # overrides the tokenizer's own EOS. Collectors need it to tell a rollout
-    # that stopped on its own from one that exhausted its budget.
-    self.eos_ids = getattr(config, "eos_tokens", None) if config else None
 
     self._active_collectors: Dict[
         str, collector_lib.TrajectoryCollectorEngine
@@ -175,11 +182,11 @@ class RolloutManager:
 
     traj_id = request.traj_id
 
-    env_name = getattr(self.config, "env_name", "")
+    env_name = self.config.env_name
     if env_name and registry.ENV_REGISTRY.contains(env_name):
       env_cls = registry.ENV_REGISTRY.get(env_name)
       request_metadata = dict(request.metadata or {})
-      env_config = dict(getattr(self.config, "env_config", {}))
+      env_config = dict(self.config.env_config)
       if isinstance(request_metadata.get("env_config"), dict):
         env_config.update(request_metadata["env_config"])
       env_config.setdefault("group_index", request.group_index)
@@ -191,11 +198,11 @@ class RolloutManager:
     else:
       env_client = None
 
-    agent_name = getattr(self.config, "agent_name", "")
+    agent_name = self.config.agent_name
     if agent_name and registry.AGENT_REGISTRY.contains(agent_name):
       agent_cls = registry.AGENT_REGISTRY.get(agent_name)
       agent_config = request.metadata.get(
-          "agent_config", getattr(self.config, "agent_config", {})
+          "agent_config", self.config.agent_config
       )
       agent = agent_cls(**agent_config)
     elif self.agent_factory and callable(self.agent_factory):
@@ -323,28 +330,23 @@ class RolloutManager:
     self._traffic.transition_to_syncing()
     await self._traffic.drain(self._drain_timeout_s)
     self.pause_all()
-    if self.sampler:
-      return await self.sampler.pre_weight_sync(sync_request, **kwargs)
-    return None
+    return await self.sampler.pre_weight_sync(sync_request, **kwargs)
 
   async def weight_sync(
       self, sync_request: sampler_lib.WeightSyncRequest | Any = None, **kwargs
   ) -> Any:
     """Phase 3 Barrier 2: Executes weight synchronization and resumes collectors."""
     completed_version = getattr(sync_request, "policy_version", 0)
-    if self.sampler:
-      res = await self.sampler.weight_sync(sync_request, **kwargs)
-      if res is not None:
-        completed_version = res
+    res = await self.sampler.weight_sync(sync_request, **kwargs)
+    if res is not None:
+      completed_version = res
     return completed_version
 
   async def post_weight_sync(
       self, sync_request: sampler_lib.WeightSyncRequest | Any = None, **kwargs
   ) -> Any:
     """Phase 3 Barrier 3: Finalizes policy weight update and resumes collectors."""
-    res = None
-    if self.sampler:
-      res = await self.sampler.post_weight_sync(sync_request, **kwargs)
+    res = await self.sampler.post_weight_sync(sync_request, **kwargs)
     self.resume_all()
     self._traffic.reopen()
     return res
@@ -352,10 +354,8 @@ class RolloutManager:
   async def abort_weight_sync(
       self, sync_request: sampler_lib.WeightSyncRequest | Any = None, **kwargs
   ) -> Any:
-    """Discards the round, delegates to sampler if available, and resumes serving."""
-    res = None
-    if self.sampler:
-      res = await self.sampler.abort_weight_sync(sync_request, **kwargs)
+    """Discards the round, delegates to sampler, and resumes serving."""
+    res = await self.sampler.abort_weight_sync(sync_request, **kwargs)
     # TODO(tunix-dev): It might be better to fail hard if weight sync failed
     # right now instead of letting it proceed silently, otherwise it may mess
     # up with the policy version.
@@ -373,12 +373,8 @@ class RolloutManager:
 
   async def get_weight_sync_metadata(self, **kwargs) -> Any:
     """Returns the sampler's transport metadata for weight sync registration."""
-    if self.sampler:
-      return await self.sampler.get_weight_sync_metadata(**kwargs)
-    return []
+    return await self.sampler.get_weight_sync_metadata(**kwargs)
 
   def get_target_state(self) -> Any:
     """Returns the sampler target-state skeleton used for trainer conversion."""
-    if self.sampler is None:
-      raise RuntimeError("RolloutManager has no sampler configured.")
     return self.sampler.get_target_state()

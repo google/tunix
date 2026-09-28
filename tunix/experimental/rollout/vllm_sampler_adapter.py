@@ -25,6 +25,7 @@ import numpy as np
 from tunix.experimental.rollout import sampler as base_sampler_lib
 from tunix.experimental.weight_sync import weight_sync
 from tunix.experimental.weight_sync import weight_sync_coordinator
+from tunix.rl.rollout import base_rollout
 
 Sampler = base_sampler_lib.Sampler
 logger = logging.getLogger(__name__)
@@ -190,20 +191,25 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
 
   def __init__(
       self,
-      server_id: str = "vllm-rollout-0",
+      server_id: str,
+      config: base_rollout.RolloutConfig,
       engine_args: Any = None,
-      model_name: str = "",
       sampler_instance: Any = None,
       worker_index: int = 0,
       parallelism: int = 4,
-      weight_sync_mode: weight_sync.WeightSyncMode | str | None = None,
+      weight_sync_mode: weight_sync.WeightSyncMode | str = (
+          weight_sync.WeightSyncMode.RAIDEN
+      ),
       free_kv_cache: bool = False,
-      **kwargs,
   ):
+    if not isinstance(config, base_rollout.RolloutConfig):
+      raise TypeError(
+          "VllmSamplerAdapter requires config to be a RolloutConfig instance,"
+          f" got {type(config).__name__}."
+      )
     self.server_id = server_id
+    self.config: base_rollout.RolloutConfig = config
     self.engine_args = engine_args
-    self.model_name = model_name or (engine_args.model if engine_args else "")
-    self.sampler = sampler_instance
     self.worker_index = worker_index
     # Raiden treats units sharing a job_name as hosts of ONE job and splits the
     # weights across them (`num_dst_physical_hosts` in raiden_controller), so
@@ -218,15 +224,15 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
     # reallocating the KV cache pool on every sync step is unnecessary.
     self.free_kv_cache = free_kv_cache
 
-    # Defaults to RAIDEN when unspecified: RLVllmSampler drives weight sync
-    # through its own native Raiden hooks, so callers that construct the
-    # adapter directly keep the historical always-Raiden behaviour.
     if isinstance(weight_sync_mode, weight_sync.WeightSyncMode):
       self.weight_sync_mode = weight_sync_mode
     elif isinstance(weight_sync_mode, str):
       self.weight_sync_mode = weight_sync.WeightSyncMode(weight_sync_mode)
     else:
-      self.weight_sync_mode = weight_sync.WeightSyncMode.RAIDEN
+      raise TypeError(
+          "VllmSamplerAdapter expected weight_sync_mode to be WeightSyncMode"
+          f" or str, got {type(weight_sync_mode).__name__}."
+      )
     self.enable_raiden = (
         self.weight_sync_mode == weight_sync.WeightSyncMode.RAIDEN
     )
@@ -243,31 +249,35 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
     self._policy_version = 0
     self._kv_cache_freed = False
 
-    if self.sampler is None and self.engine_args is not None:
-      sampler_cls = _get_rl_vllm_sampler_cls()
-      self.sampler = sampler_cls(engine_args=self.engine_args)
+    if sampler_instance is not None:
+      self.sampler = sampler_instance
+      self.sampler.config = self.config
+    else:
+      if self.engine_args is None and self.config.rollout_vllm_model_version:
+        from vllm.engine.arg_utils import AsyncEngineArgs  # pylint: disable=g-import-not-at-top
+
+        self.engine_args = AsyncEngineArgs(
+            model=self.config.rollout_vllm_model_version
+        )
+      if self.engine_args is not None:
+        sampler_cls = _get_rl_vllm_sampler_cls()
+        self.sampler = sampler_cls(
+            engine_args=self.engine_args, config=self.config
+        )
+      else:
+        raise ValueError(
+            f"VllmSamplerAdapter [{self.server_id}] requires sampler_instance,"
+            " engine_args, or config.rollout_vllm_model_version."
+        )
     self._verify_sampler_protocol()
 
   def initialize(self) -> None:
-    """Initializes RLVllmSampler if not already initialized."""
-    if self.sampler is None:
-      if self.engine_args is None and self.model_name:
-        from vllm.engine.arg_utils import AsyncEngineArgs  # pylint: disable=g-import-not-at-top
-
-        self.engine_args = AsyncEngineArgs(model=self.model_name)
-      if self.engine_args is not None:
-        sampler_cls = _get_rl_vllm_sampler_cls()
-        self.sampler = sampler_cls(engine_args=self.engine_args)
-    if self.sampler is None:
-      raise RuntimeError(
-          f"VllmSamplerAdapter [{self.server_id}] requires valid"
-          " engine_args or model_name."
-      )
+    """Verifies RLVllmSampler protocol before serving requests."""
     self._verify_sampler_protocol()
 
   def _verify_sampler_protocol(self) -> None:
     """Fails fast when a Raiden-enabled sampler lacks the required hooks."""
-    if not self.enable_raiden or self.sampler is None:
+    if not self.enable_raiden:
       return
     missing = [
         name
@@ -281,21 +291,13 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
           f" methods: {', '.join(missing)}."
       )
 
-  def _require_sampler(self) -> Any:
-    """Returns the sampler, failing if it has not been initialized."""
-    if self.sampler is None:
-      raise RuntimeError(
-          f"VllmSamplerAdapter [{self.server_id}] is not initialized."
-      )
-    return self.sampler
-
   # ---------------------------------------------------------------------------
   # Lifecycle & Inference Methods
   # ---------------------------------------------------------------------------
 
   async def start(self, **kwargs) -> Any:
     """Starts the underlying sampler engine."""
-    return await self._require_sampler().start(**kwargs)
+    return await self.sampler.start(**kwargs)
 
   async def _ensure_started(self) -> None:
     """Brings the engine up if nothing has needed it yet.
@@ -314,54 +316,47 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
     lifecycle and can guarantee the engine is up before it issues any phase
     call; the ordering belongs there, not in a guard on each entry point.
     """
-    if self.sampler is None:
-      self.initialize()
-    sampler = self._require_sampler()
-    if not getattr(sampler, "_is_running", False):
+    if not getattr(self.sampler, "_is_running", False):
       logger.info(
           "VllmSamplerAdapter [%s] starting engine for weight sync (no"
           " sample has forced it up yet).",
           self.server_id,
       )
-      await sampler.start()
+      await self.sampler.start()
 
   async def stop(self, **kwargs) -> Any:
     """Stops the underlying sampler engine."""
-    return await self._require_sampler().stop(**kwargs)
+    return await self.sampler.stop(**kwargs)
 
   async def pause(self, **kwargs) -> Any:
     """Pauses inference processing on this worker slice."""
-    return await self._require_sampler().pause(**kwargs)
+    return await self.sampler.pause(**kwargs)
 
   async def resume(self, **kwargs) -> Any:
     """Resumes inference processing on this worker slice."""
-    return await self._require_sampler().resume(**kwargs)
+    return await self.sampler.resume(**kwargs)
 
   async def get_mesh(self, **kwargs) -> Any:
     """Returns the underlying device mesh topology."""
-    return await self._require_sampler().get_mesh(**kwargs)
+    return await self.sampler.get_mesh(**kwargs)
 
   async def sample(
       self,
       sampling_requests: (
           base_sampler_lib.SamplingRequest
           | Sequence[base_sampler_lib.SamplingRequest]
-          | Any
       ),
       **kwargs,
   ) -> (
       base_sampler_lib.SamplingResponse
       | List[base_sampler_lib.SamplingResponse]
-      | Any
   ):
     """Generates completions using underlying tpu-inference RLVllmSampler."""
     if sampling_requests is None:
       raise ValueError("sampling_requests cannot be None.")
 
     is_sequence = isinstance(sampling_requests, (list, tuple))
-    raw_responses = await self._require_sampler().sample(
-        sampling_requests, **kwargs
-    )
+    raw_responses = await self.sampler.sample(sampling_requests, **kwargs)
 
     if isinstance(raw_responses, (list, tuple)):
       formatted = [_format_sampling_response(r) for r in raw_responses]
@@ -385,7 +380,7 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
     if not self.enable_raiden:
       return None
     await self._ensure_started()
-    return await self._require_sampler().bind_raiden_sync(
+    return await self.sampler.bind_raiden_sync(
         worker_index=self.worker_index,
         parallelism=self._parallelism,
         job_name=self.raiden_job_name,
@@ -404,7 +399,7 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
           f" (weight_sync_mode={self.weight_sync_mode.value})."
       )
     await self._ensure_started()
-    meta = await self._require_sampler().get_raiden_metadata()
+    meta = await self.sampler.get_raiden_metadata()
     return [
         weight_sync.WorkUnitMetadata.from_dict(_canonicalize_variable_names(m))
         for m in meta or []
@@ -416,7 +411,6 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
     """Quiesces intake, drains pending requests, resets prefix cache, and drops KV cache."""
     if not self.enable_raiden:
       return True
-    sampler = self._require_sampler()
     async with self._sync_lock:
       if not self._tracker.admit(sync_request, "prepared"):
         return True
@@ -424,7 +418,7 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
       logger.info("Executing pre_weight_sync for server_id=%s", self.server_id)
 
       # delegate to RLVllmSampler's native pause + clear prefix cache (+ optional free-kv-cache)
-      await sampler.pre_weight_sync(free_kv_cache=self.free_kv_cache)
+      await self.sampler.pre_weight_sync(free_kv_cache=self.free_kv_cache)
       self._kv_cache_freed = True
 
       self._tracker.complete(sync_request, "prepared")
@@ -440,18 +434,17 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
           " only; no fallback path exists"
           f" (weight_sync_mode={self.weight_sync_mode.value})."
       )
-    sampler = self._require_sampler()
     async with self._sync_lock:
       if not self._tracker.admit(sync_request, "h2d_done"):
         return True
 
       logger.info("Executing weight_sync barrier on Raiden synchronizers...")
-      checksums = await sampler.raiden_h2d(uuid=_round_uuid(sync_request))
+      checksums = await self.sampler.raiden_h2d(uuid=_round_uuid(sync_request))
       if checksums:
         logger.info("Destination weights checksums: %s", checksums)
 
-      if hasattr(sampler, "refresh_model_state_leaves"):
-        result = sampler.refresh_model_state_leaves()
+      if hasattr(self.sampler, "refresh_model_state_leaves"):
+        result = self.sampler.refresh_model_state_leaves()
         if asyncio.iscoroutine(result):
           await result
       else:
@@ -462,7 +455,7 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
         logger.warning(
             "sampler %s has no refresh_model_state_leaves(); the rollout's"
             " state_leaves are not re-pointed after h2d.",
-            type(sampler).__name__,
+            type(self.sampler).__name__,
         )
 
       self._tracker.complete(sync_request, "h2d_done")
@@ -474,7 +467,6 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
     """Reinitializes KV cache, restores request intake, and bumps active policy version."""
     if not self.enable_raiden:
       return True
-    sampler = self._require_sampler()
     async with self._sync_lock:
       if not self._tracker.admit(sync_request, "committed"):
         return True
@@ -482,7 +474,7 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
       logger.info("Executing post_weight_sync: restoring serving state...")
       # delegate to RLVllmSampler's native reinitialize-kv-cache + resume
       if self._kv_cache_freed:
-        await sampler.post_weight_sync(sync_request)
+        await self.sampler.post_weight_sync(sync_request)
         self._kv_cache_freed = False
       else:
         await self.resume()
@@ -494,10 +486,10 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
         self._policy_version += 1
 
       if os.environ.get("VERIFY_WEIGHTS", "").lower() == "true" and hasattr(
-          sampler, "raiden_metrics"
+          self.sampler, "raiden_metrics"
       ):
         logger.info(
-            "Raiden transfer metrics: %s", await sampler.raiden_metrics()
+            "Raiden transfer metrics: %s", await self.sampler.raiden_metrics()
         )
 
       self._tracker.complete(sync_request, "committed")
@@ -509,7 +501,6 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
     """Safely rolls back to serving previous policy version without publishing staging."""
     if not self.enable_raiden:
       return True
-    sampler = self._require_sampler()
     async with self._sync_lock:
       if not self._tracker.admit(sync_request, "aborted"):
         return False
@@ -521,7 +512,7 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
       # RLVllmSampler has no dedicated abort path; post_weight_sync does
       # the same recovery (reinitialize KV cache + resume).
       if self._kv_cache_freed:
-        await sampler.post_weight_sync(sync_request)
+        await self.sampler.post_weight_sync(sync_request)
         self._kv_cache_freed = False
       else:
         await self.resume()
@@ -535,21 +526,19 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
 
   async def get_transfer_status(self, req_id: Any, **kwargs) -> Any:
     """Queries status of an ongoing weight transfer or KV-cache migration."""
-    sampler = self._require_sampler()
-    if hasattr(sampler, "get_transfer_status"):
-      return await sampler.get_transfer_status(req_id, **kwargs)
+    if hasattr(self.sampler, "get_transfer_status"):
+      return await self.sampler.get_transfer_status(req_id, **kwargs)
     return "UNKNOWN"
 
   def get_target_state(self) -> Any:
     """Returns target state shape/dtype pytree for weight conversion."""
-    sampler = self._require_sampler()
-    if hasattr(sampler, "get_target_state"):
-      return sampler.get_target_state()
+    if hasattr(self.sampler, "get_target_state"):
+      return self.sampler.get_target_state()
     return None
 
   async def get_load_info(self, **kwargs) -> base_sampler_lib.LoadInfo:
     """Returns load information from the underlying engine."""
-    info = await self._require_sampler().get_load_info(**kwargs)
+    info = await self.sampler.get_load_info(**kwargs)
     return base_sampler_lib.LoadInfo(
         num_requests_waiting=getattr(info, "num_requests_waiting", 0),
         num_requests_running=getattr(info, "num_requests_running", 0),
@@ -564,9 +553,8 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
       **kwargs,
   ) -> bool:
     """Triggers KV-cache transfer across TPU slices."""
-    sampler = self._require_sampler()
-    if hasattr(sampler, "migrate_kv_cache"):
-      return await sampler.migrate_kv_cache(
+    if hasattr(self.sampler, "migrate_kv_cache"):
+      return await self.sampler.migrate_kv_cache(
           route_key=kwargs.get("route_key", ""),
           source_server_id=source_server_id,
           target_server_id=target_server_id,
