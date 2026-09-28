@@ -294,11 +294,18 @@ class RolloutManager:
     try:
       trajectory: TrajectoryOrError = await collector.run_episode()
     except Exception as e:  # pylint: disable=broad-exception-caught
+      error_metadata = dict(request.metadata or {})
+      error_metadata["prompt_id"] = request.prompt_id
+      error_metadata["group_index"] = request.group_index
+      error_metadata["policy_version"] = int(
+          getattr(request, "target_policy_version", 0) or 0
+      )
       trajectory = trajectory_lib.TrajectoryError(
           trajectory_id=collector.traj_id,
           prompt_id=request.prompt_id,
           error_message=str(e),
           error_type=type(e).__name__,
+          metadata=error_metadata,
       )
     finally:
       self._active_collectors.pop(collector.traj_id, None)
