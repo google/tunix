@@ -165,6 +165,47 @@ class RegisteredEnvMetadataTest(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(_CaptureEnv.last_init_kwargs["gold_answer"], "42")
     self.assertEqual(_CaptureEnv.last_init_kwargs["max_steps"], 3)
 
+  async def test_episode_exception_propagates_request_metadata_to_trajectory_error(
+      self,
+  ):
+    class _FailingCollector(_NoopCollector):
+
+      async def run_episode(self):
+        raise RuntimeError("sandbox timeout")
+
+    manager = manager_lib.RolloutManager(
+        config=types.SimpleNamespace(env_name="manager_capture_env"),
+        sampler=_FakeSyncSampler([]),
+        agent_factory=lambda: object(),
+        tokenizer="mock",
+        chat_parser="mock",
+    )
+    request = datatypes.RolloutRequest(
+        request_id="req_err",
+        prompt="prompt text",
+        prompt_id="prompt_err",
+        group_index=3,
+        target_policy_version=9,
+        metadata={"batch_idx": 4},
+    )
+
+    with mock.patch.object(
+        manager_lib.collector_lib,
+        "TrajectoryCollectorEngine",
+        _FailingCollector,
+    ):
+      result = await manager.generate(request)
+
+    self.assertIsInstance(result, manager_lib.trajectory_lib.TrajectoryError)
+    self.assertEqual(result.prompt_id, "prompt_err")
+    self.assertEqual(result.error_type, "RuntimeError")
+    self.assertEqual(result.error_message, "sandbox timeout")
+    self.assertEqual(result.metadata["prompt_id"], "prompt_err")
+    self.assertEqual(result.metadata["group_index"], 3)
+    self.assertEqual(result.metadata["policy_version"], 9)
+    self.assertEqual(result.metadata["batch_idx"], 4)
+
+
 
 class AdmissionGateTest(unittest.IsolatedAsyncioTestCase):
 
