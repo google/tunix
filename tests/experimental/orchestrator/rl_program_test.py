@@ -5149,6 +5149,94 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
     self.assertEqual([g for b, _, g in dispatched if b == 2], [False, False])
     self._assert_step_zero_metrics_logged_as_inline(program, backend)
 
+  def test_next_step_packing_waits_for_admitted_batch_dispatch(self):
+    """Step 1 packs only once batch 2, which commit 0 admits, is dispatched.
+
+    At staleness 1, batch 1 has already arrived when step 0 commits, so step 1
+    packs on the event loop without yielding until its first trainer call.
+    Step 0's logging returns at once and batch 2's dispatch acks come after
+    it, so without the wait step 1's first `feed` would run while batch 2 is
+    still being dispatched and hold the rest of it back.
+    """
+    program = rl_program.StandardRLProgram(
+        algo=self.mock_algo,
+        dataset=[f"p{i}" for i in range(8)],
+        max_steps=2,
+        batch_size=2,
+        max_staleness=1,
+        group_order=rl_program.trajectory_queue_manager.GroupOrder.PROMPT_BATCH,
+    )
+    events: list[tuple[str, int]] = []
+
+    async def _run():
+      loop = asyncio.get_running_loop()
+      step_zero_logged = asyncio.Event()
+      train_returned = asyncio.Event()
+
+      async def _dispatch(prompts, **kwargs):
+        del kwargs
+        batch_idx = prompts[0]["metadata"]["batch_idx"]
+        events.append(("dispatch", batch_idx))
+        if batch_idx == 2:
+          await step_zero_logged.wait()
+          await asyncio.sleep(0.05)
+        elif batch_idx == 3:
+          # Admitted by the last commit; the last step must not wait for it.
+          await train_returned.wait()
+        events.append(("acked", batch_idx))
+
+      self.mock_engine.dispatch_rollouts.side_effect = _dispatch
+
+      log_rows = program._log_consumed_trajectories
+
+      def _log_rows(*args, **kwargs):
+        log_rows(*args, **kwargs)
+        if kwargs["log_step"] == 0:
+          loop.call_soon_threadsafe(step_zero_logged.set)
+
+      program._log_consumed_trajectories = _log_rows
+
+      feed = program.assembler.feed
+
+      def _feed(payloads):
+        events.append(("feed", program.step))
+        return feed(payloads)
+
+      program.assembler.feed = _feed
+
+      async def _wait_for_batch_one_acks() -> None:
+        while events.count(("acked", 1)) < 2:
+          await asyncio.sleep(0.005)
+
+      program.engine = self.mock_engine
+      dispatch_task = asyncio.create_task(program.rollout_dispatch_stage())
+      try:
+        await asyncio.wait_for(_wait_for_batch_one_acks(), timeout=10)
+        for batch_idx in (0, 1):
+          for suffix in ("a", "b"):
+            await program.scored_q.put(
+                self._make_scored_item(
+                    f"p{batch_idx}{suffix}", batch_idx=batch_idx
+                )
+            )
+        await asyncio.wait_for(program.train_stage(), timeout=10)
+        events.append(("train_returned", program.step))
+        train_returned.set()
+      finally:
+        dispatch_task.cancel()
+        await asyncio.gather(dispatch_task, return_exceptions=True)
+
+    asyncio.run(_run())
+    program.close()
+
+    self.assertEqual(program.step, 2)
+    step_one_feed = events.index(("feed", 1))
+    self.assertEqual(events[:step_one_feed].count(("acked", 2)), 2)
+    # The last step returns without waiting on the batch its commit admitted.
+    returned = events.index(("train_returned", 2))
+    self.assertIn(("dispatch", 3), events[:returned])
+    self.assertNotIn(("acked", 3), events[:returned])
+
 
 class ExtractScalarTest(absltest.TestCase):
 

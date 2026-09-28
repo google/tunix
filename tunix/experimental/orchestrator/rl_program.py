@@ -509,6 +509,13 @@ class StandardRLProgram(RLProgram):
     self._in_flight_rollouts = 0
     self._window_release = asyncio.Event()
     self._dispatch_done = asyncio.Event()
+    # Dispatcher progress, read by `_wait_for_dispatch_to_catch_up`: whether
+    # `rollout_dispatch_stage` has started, and the batch of the next prompt it
+    # has not yet finished dispatching. `_dispatch_progress` is set whenever
+    # either changes.
+    self._dispatch_started = False
+    self._dispatch_cursor_batch = 0
+    self._dispatch_progress = asyncio.Event()
 
     self.scored_q: (
         trajectory_queue_manager.TrajectoryQueueManager
@@ -592,6 +599,32 @@ class StandardRLProgram(RLProgram):
       await self._window_release.wait()
       self._window_release.clear()
 
+  def _dispatch_caught_up(self) -> bool:
+    """Whether every prompt inside the staleness window has been dispatched.
+
+    True when no dispatcher is running (never started, finished or failed) or
+    when the next prompt it has yet to dispatch lies past the window, which is
+    exactly when `_wait_for_dispatch_window` parks it.
+    """
+    if not self._dispatch_started or self._dispatch_done.is_set():
+      return True
+    return self._dispatch_cursor_batch > self._next_batch + self.max_staleness
+
+  async def _wait_for_dispatch_to_catch_up(self) -> None:
+    """Blocks until the dispatcher has sent every prompt the window admits.
+
+    `train_stage` calls this between steps. The next step's packing runs on the
+    event loop without yielding until its first trainer call, and at staleness
+    >= 1 its batch has usually already arrived, so any prompt still waiting to
+    be dispatched would wait behind that packing. Dispatch acks never wait on
+    the trainer, so this does not deadlock.
+    """
+    while not self._dispatch_caught_up():
+      # A set left over from earlier progress costs one extra pass; the loop
+      # re-tests before it waits again.
+      await self._dispatch_progress.wait()
+      self._dispatch_progress.clear()
+
   async def _resume_from_checkpoint(self) -> None:
     """Realigns program orchestration state with the engine's restored checkpoint.
 
@@ -657,6 +690,7 @@ class StandardRLProgram(RLProgram):
     dataset_len = len(self.dataset) if isinstance(self.dataset, Sized) else None
 
     try:
+      self._dispatch_started = True
       prompt_idx = 0
       while True:
         if prompt_idx < already_consumed:
@@ -676,6 +710,10 @@ class StandardRLProgram(RLProgram):
             break
 
         coordinates = _prompt_coordinates(prompt_idx, self.full_batch_size)
+        # Every prompt before this one has been dispatched, and the previous
+        # `dispatch_rollouts` has returned.
+        self._dispatch_cursor_batch = coordinates["batch_idx"]
+        self._dispatch_progress.set()
         await self._wait_for_dispatch_window(coordinates["batch_idx"])
         try:
           prompt_item = next(dataset_iter)
@@ -736,6 +774,7 @@ class StandardRLProgram(RLProgram):
         )
     finally:
       self._dispatch_done.set()
+      self._dispatch_progress.set()
 
   async def polling_stage(self) -> None:
     """Stage 1B: Long-polls completed worker rollout responses into the queue."""
@@ -1742,6 +1781,11 @@ class StandardRLProgram(RLProgram):
       # waking, and waking it on the old value would park it again with no one
       # left to set the event.
       self._release_window()
+      # The logging await above let the dispatcher start on the batch the
+      # window just admitted, but logging can finish first. Do not start the
+      # next step's on-loop packing until that batch is fully dispatched.
+      if self.max_steps is None or self._step < self.max_steps:
+        await self._wait_for_dispatch_to_catch_up()
 
   async def run_async(
       self,
