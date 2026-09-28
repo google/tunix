@@ -80,6 +80,7 @@ def make_host_staged_transfer_options(
     parallelism: int = 16,
     group_size: int = 128,
     max_layers: int = 2048,
+    skip_d2h: bool = True,
 ) -> RaidenTransferOptions:
   """Transfer options for host-staged (CPU) weight sources.
 
@@ -87,12 +88,16 @@ def make_host_staged_transfer_options(
   given, marking aligned tensors as pre-tiled -- but a host-staged source
   can only stage logical bytes, so the derived plan installs permuted
   data. An explicit all-False map keeps every tensor on the logical path.
+  Since `prepare_weight_sync` already stages weights to host memory before
+  `transfer` is invoked, `skip_d2h` defaults to True.
 
   Args:
     parallelism: Number of concurrent transfer streams.
     group_size: Number of tensors the controller moves per group.
     max_layers: Upper bound for the skip_tiling map. The receiver drops indices
       past its own layer count, so a generous value is safe.
+    skip_d2h: Whether to skip D2H inside StartTransfer because host staging is
+      already populated during prepare_weight_sync.
 
   Returns:
     Options matching the validated e2e run and the pathways benchmark
@@ -101,6 +106,7 @@ def make_host_staged_transfer_options(
   return RaidenTransferOptions(
       parallelism=parallelism,
       group_size=group_size,
+      skip_d2h=skip_d2h,
       skip_tiling={i: False for i in range(max_layers)},
   )
 

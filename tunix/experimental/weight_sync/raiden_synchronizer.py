@@ -21,6 +21,8 @@ import dataclasses
 import functools
 import inspect
 import ipaddress
+import itertools
+import math
 import os
 import re
 import socket
@@ -294,36 +296,44 @@ def _axis_name(axis: Any) -> str:
 
 
 def _devices_per_host(devices: List[Any]) -> int:
-  """Devices sharing one physical host, i.e. Raiden's `num_shards`.
+  """Contiguous devices sharing one physical host, i.e. Raiden's `num_shards`.
 
   The native layer derives `submanager_idx = shard_idx / num_shards` and
-  `slot = shard_idx % num_shards`, so this must be the real per-host device
-  count. Overstate it and every host allocates staging for the whole slice but
-  fills only its own share, leaving the rest of its SetGlobalShardIndices at
-  -1 -- the transfer then completes green while delivering only the shards one
-  host happened to own.
+  `slot = shard_idx % num_shards` across the flattened mesh, so this must be the
+  contiguous same-host run length in `devices`. When a mesh splits a physical
+  host's devices across non-adjacent slices (e.g. `fsdp=32, context=4, expert=2`
+  on TPU v7x where each host's 8 devices appear as two contiguous runs of 4),
+  overstating `num_shards` as 8 causes each 4-device submanager to allocate 8
+  slots and leave 4 slots unbound.
   """
   host_keys = [mesh.device_host_key(d) for d in devices]
-  per_host = collections.Counter(k for k in host_keys if k is not None)
-  per_task = collections.Counter(getattr(d, "task_id", None) for d in devices)
-  del per_task[None]
-  if len(per_task) > len(per_host):
-    per_host = per_task
+  task_keys = [getattr(d, "task_id", None) for d in devices]
+  num_unique_hosts = len({k for k in host_keys if k is not None})
+  num_unique_tasks = len({k for k in task_keys if k is not None})
+  keys = task_keys if num_unique_tasks > num_unique_hosts else host_keys
 
-  if not per_host:
+  run_lengths = [
+      sum(1 for _ in group)
+      for key, group in itertools.groupby(keys)
+      if key is not None
+  ]
+  if not run_lengths:
     logging.warning(
         "no host or task metadata on any of %d device(s); assuming a single"
         " host",
         len(devices),
     )
     return len(devices)
-  counts = set(per_host.values())
+  counts = set(run_lengths)
   if len(counts) > 1:
     # No right answer for a ragged slice; understating only wastes staging,
     # overstating drops another host's shards.
+    per_host = collections.Counter(k for k in keys if k is not None)
     logging.warning(
-        "uneven devices per host %s; using the smallest (%d)",
+        "uneven devices per host %s (contiguous runs %s); using the smallest"
+        " (%d)",
         dict(per_host),
+        run_lengths,
         min(counts),
     )
     return min(counts)
@@ -375,13 +385,43 @@ def _compute_mesh_global_shard_indices(
   return None
 
 
-def _tensor_metadata(name: str, arr: Any, layer_idx: int):
+def _tensor_metadata(
+    name: str,
+    arr: Any,
+    layer_idx: int,
+    layout_cache: Optional[
+        dict[Any, Tuple[Tuple[int, ...], Tuple[str, ...], Tuple[int, ...]]]
+    ] = None,
+):
+  shape_tuple = tuple(arr.shape)
   sharding: Any = getattr(arr, "sharding", None)
+  cache_key = None
+  if layout_cache is not None:
+    try:
+      hash(sharding)
+      sharding_key = sharding
+    except TypeError:
+      sharding_key = id(sharding)
+    cache_key = (shape_tuple, arr.ndim, sharding_key)
+    cached = layout_cache.get(cache_key)
+    if cached is not None:
+      mesh_shape, sharding_spec, global_shard_indices = cached
+      return weight_sync.TensorMetadata(
+          name=name,
+          shape=shape_tuple,
+          mesh_shape=mesh_shape,
+          layout=tuple(reversed(range(arr.ndim))),
+          item_size=arr.dtype.itemsize,
+          layer_idx=layer_idx,
+          sharding_spec=sharding_spec,
+          global_shard_indices=global_shard_indices,
+      )
+
   spec = tuple(getattr(sharding, "spec", ()) or ())
   spec = (spec + (None,) * arr.ndim)[: arr.ndim]
   if sharding is not None and hasattr(sharding, "shard_shape"):
     try:
-      local = sharding.shard_shape(tuple(arr.shape))
+      local = sharding.shard_shape(shape_tuple)
       mesh_shape = tuple(g // l for g, l in zip(arr.shape, local))
     except Exception as e:  # pylint: disable=broad-exception-caught
       logging.warning(
@@ -397,7 +437,6 @@ def _tensor_metadata(name: str, arr: Any, layer_idx: int):
   global_shard_indices: Tuple[int, ...] = ()
   if sharding is not None and hasattr(sharding, "devices_indices_map"):
     try:
-      shape_tuple = tuple(arr.shape)
       devices_indices_map = sharding.devices_indices_map(shape_tuple)
       if devices_indices_map is not None:
         if (
@@ -431,14 +470,22 @@ def _tensor_metadata(name: str, arr: Any, layer_idx: int):
     except Exception:  # pylint: disable=broad-exception-caught
       global_shard_indices = ()
 
+  sharding_spec = tuple(_axis_name(a) for a in spec)
+  if layout_cache is not None and cache_key is not None:
+    layout_cache[cache_key] = (
+        mesh_shape,
+        sharding_spec,
+        global_shard_indices,
+    )
+
   return weight_sync.TensorMetadata(
       name=name,
-      shape=tuple(arr.shape),
+      shape=shape_tuple,
       mesh_shape=mesh_shape,
       layout=tuple(reversed(range(arr.ndim))),
       item_size=arr.dtype.itemsize,
       layer_idx=layer_idx,
-      sharding_spec=tuple(_axis_name(a) for a in spec),
+      sharding_spec=sharding_spec,
       global_shard_indices=global_shard_indices,
   )
 
@@ -461,15 +508,42 @@ def _compute_host_subgrid(
     except ValueError:
       pass
   if array_mesh is not None:
+    local_shape: Optional[Tuple[int, ...]] = None
     try:
       if (
           hasattr(array_mesh, "local_mesh")
           and array_mesh.local_mesh is not None
           and hasattr(array_mesh.local_mesh, "devices")
       ):
-        return tuple(array_mesh.local_mesh.devices.shape)
+        local_shape = tuple(array_mesh.local_mesh.devices.shape)
+    except (AttributeError, ValueError, TypeError):
+      local_shape = None
+
+    try:
+      if hasattr(array_mesh, "devices") and array_mesh.devices is not None:
+        flat_devices = list(array_mesh.devices.flat)
+        if flat_devices:
+          devices_per_host = _devices_per_host(flat_devices)
+          if (
+              local_shape is not None
+              and math.prod(local_shape) == devices_per_host
+          ):
+            return local_shape
+          mesh_shape = tuple(int(d) for d in array_mesh.devices.shape)
+          if 0 < devices_per_host <= math.prod(mesh_shape):
+            rem = devices_per_host
+            subgrid = []
+            for dim in reversed(mesh_shape):
+              g = math.gcd(dim, rem)
+              subgrid.append(g)
+              rem //= g
+            subgrid.reverse()
+            if rem == 1:
+              return tuple(subgrid)
     except (AttributeError, ValueError, TypeError):
       pass
+    if local_shape is not None:
+      return local_shape
   return None
 
 
@@ -522,6 +596,8 @@ class RaidenSynchronizer(weight_sync.WeightSynchronizer):
     self._ffi_shard_idx: Any = None
     self._host_subgrid: Optional[Tuple[int, ...]] = None
     self._global_shard_indices: Optional[List[int]] = None
+    self._cached_variables_key: Optional[Tuple[Any, ...]] = None
+    self._cached_variables: Tuple[weight_sync.TensorMetadata, ...] = ()
     if state is not None:
       self.bind(state)
 
@@ -598,14 +674,14 @@ class RaidenSynchronizer(weight_sync.WeightSynchronizer):
         sorted({getattr(d, "task_id", None) for d in src_devices}, key=str),
     )
 
-    if is_d2h:
+    if is_d2h or (not self._auto_h2d and _use_direct_device_buffer()):
       logging.info(
           "Initializing Pathways weight synchronizer and executing D2H via FFI"
           " (%d layers, %d devices/host)",
           len(self.arrays),
           devices_per_host,
       )
-      ws_info = raiden_ffi.init_weight_synchronizer_and_d2h(
+      init_kwargs: dict[str, Any] = dict(
           device_arrays=self.arrays,
           shard_idx=shard_idx,
           mesh=mesh,
@@ -615,28 +691,9 @@ class RaidenSynchronizer(weight_sync.WeightSynchronizer):
           listener_port=0,
           num_shards=devices_per_host,
       )
-    elif not self._auto_h2d and _use_direct_device_buffer():
-      logging.info(
-          "Initializing Pathways weight synchronizer and binding device buffers"
-          " via FFI (%d layers, %d devices/host)",
-          len(self.arrays),
-          devices_per_host,
-      )
-      ws_info = raiden_ffi.init_weight_synchronizer(
-          device_arrays=self.arrays,
-          shard_idx=shard_idx,
-          mesh=mesh,
-          slice_byte_sizes=slice_byte_sizes_sharded,
-          parallelism=self._parallelism,
-          num_layers=len(self.arrays),
-          listener_port=0,
-          num_shards=devices_per_host,
-          host_subgrid=(
-              list(self._host_subgrid)
-              if self._host_subgrid is not None
-              else None
-          ),
-      )
+      if self._host_subgrid is not None:
+        init_kwargs["host_subgrid"] = list(self._host_subgrid)
+      ws_info = raiden_ffi.init_weight_synchronizer_and_d2h(**init_kwargs)
     else:
       logging.info(
           "Initializing Pathways weight synchronizer for H2D via FFI (%d"
@@ -1007,10 +1064,42 @@ class RaidenSynchronizer(weight_sync.WeightSynchronizer):
     # differently (trainer `['base'][...]` vs rollout `['model'][...]`, plus
     # the nnx `.value` leaf). `_param_key` already normalises both away, so
     # canonicalising here is what makes the manifests line up.
-    variables = tuple(
-        _tensor_metadata(_param_key(name), arr, idx)
-        for idx, (name, arr) in enumerate(zip(self.names, self.arrays))
+    def _var_sig(name: str, arr: Any) -> Tuple[Any, ...]:
+      sharding = getattr(arr, "sharding", None)
+      try:
+        hash(sharding)
+        sharding_key = sharding
+      except TypeError:
+        sharding_key = id(sharding)
+      return (
+          _param_key(name),
+          tuple(arr.shape),
+          int(arr.dtype.itemsize),
+          sharding_key,
+      )
+
+    variables_key = tuple(
+        _var_sig(name, arr) for name, arr in zip(self.names, self.arrays)
     )
+    if not variables_key:
+      variables = ()
+    elif (
+        self._cached_variables_key == variables_key
+        and len(self._cached_variables) == len(variables_key)
+    ):
+      variables = self._cached_variables
+    else:
+      layout_cache: dict[
+          Any, Tuple[Tuple[int, ...], Tuple[str, ...], Tuple[int, ...]]
+      ] = {}
+      variables = tuple(
+          _tensor_metadata(
+              _param_key(name), arr, idx, layout_cache=layout_cache
+          )
+          for idx, (name, arr) in enumerate(zip(self.names, self.arrays))
+      )
+      self._cached_variables_key = variables_key
+      self._cached_variables = variables
     if self._is_proxy:
       shards = tuple(self._ips)
       control_addr = (

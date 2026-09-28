@@ -485,13 +485,13 @@ class RaidenSynchronizerTest(absltest.TestCase):
           return_value=fake_info,
       ):
         sync._init_ffi_transport(is_d2h=False)
-        ffi.init_weight_synchronizer.assert_called_once()
-        call_kwargs = ffi.init_weight_synchronizer.call_args.kwargs
+        ffi.init_weight_synchronizer_and_d2h.assert_called_once()
+        call_kwargs = ffi.init_weight_synchronizer_and_d2h.call_args.kwargs
         self.assertEqual(call_kwargs["device_arrays"], [arr1, arr2])
         self.assertEqual(call_kwargs["num_layers"], 2)
         self.assertEqual(call_kwargs["num_shards"], 1)
         self.assertEqual(call_kwargs["host_subgrid"], [1])
-        ffi.init_weight_synchronizer_and_d2h.assert_not_called()
+        ffi.init_weight_synchronizer.assert_not_called()
 
   def test_ffi_destination_init_runs_at_bind(self):
     with mock.patch.dict("os.environ", {"JAX_PLATFORMS": "proxy,cpu"}):
@@ -608,9 +608,30 @@ class RaidenSynchronizerTest(absltest.TestCase):
       v5p_devices = [FakePathwaysDevice(t) for t in (0, 0, 0, 0, 1, 1, 1, 1)]
       self.assertEqual(raiden_synchronizer._devices_per_host(v5p_devices), 4)
 
-      # TPU v7x: 8 devices per host across 2 hosts
+      # TPU v7x: 8 devices per host across 2 hosts (contiguous)
       v7x_devices = [FakePathwaysDevice(t) for t in [0] * 8 + [1] * 8]
       self.assertEqual(raiden_synchronizer._devices_per_host(v7x_devices), 8)
+
+      # TPU v7x-256 with Mesh(1, 1, 32, 4, 2) where each host's 8 devices are
+      # split across two non-adjacent fsdp coordinates (runs of 4).
+      split_v7x_devices = [
+          FakePathwaysDevice(t)
+          for half in range(2)
+          for t in range(16)
+          for _ in range(4)
+      ]
+      self.assertEqual(
+          raiden_synchronizer._devices_per_host(split_v7x_devices), 4
+      )
+      fake_mesh = mock.Mock()
+      fake_mesh.devices = np.array(split_v7x_devices, dtype=object).reshape(
+          1, 1, 16, 4, 2
+      )
+      fake_mesh.local_mesh.devices = fake_mesh.devices
+      self.assertEqual(
+          raiden_synchronizer._compute_host_subgrid(fake_mesh),
+          (1, 1, 1, 2, 2),
+      )
 
   def test_metadata_transport_mode_follows_platform(self):
     fake_wheel = mock.MagicMock()
@@ -757,6 +778,34 @@ class RaidenSynchronizerTest(absltest.TestCase):
             "10.0.1.2:40002",
         ),
     )
+
+  def test_work_unit_metadata_caches_variables_across_rebinds(self):
+    sync = raiden_synchronizer.RaidenSynchronizer("trainer", self._state())
+    with mock.patch.object(
+        raiden_synchronizer,
+        "_tensor_metadata",
+        wraps=raiden_synchronizer._tensor_metadata,
+    ) as spy_tensor_meta:
+      md1 = sync.work_unit_metadata()
+      self.assertEqual(spy_tensor_meta.call_count, 2)
+
+      sync.release_buffers()
+      sync.bind({
+          "w1": jnp.zeros((2, 4), jnp.float32),
+          "w2": jnp.ones(3, dtype=jnp.float32),
+      })
+      md2 = sync.work_unit_metadata()
+      self.assertEqual(spy_tensor_meta.call_count, 2)
+      self.assertIs(md1.variables, md2.variables)
+
+      # Changing tensor shape invalidates the cached manifest.
+      sync.bind({
+          "w1": jnp.zeros((4, 4), jnp.float32),
+          "w2": jnp.ones(3, dtype=jnp.float32),
+      })
+      md3 = sync.work_unit_metadata()
+      self.assertEqual(spy_tensor_meta.call_count, 4)
+      self.assertEqual(md3.variables[0].shape, (4, 4))
 
 
 if __name__ == "__main__":

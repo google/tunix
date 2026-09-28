@@ -520,6 +520,10 @@ class SuccessPathTest(CoordinatorTestBase):
     self.sync(policy_version=2)
 
     self.assertEqual(dest.bind_calls, 1)
+    self.assertEqual(
+        self.phases("sampler"),
+        ["bind", "metadata", "pre", "sync", "post", "pre", "sync", "post"],
+    )
     dst_addrs = {
         m.shards[0] for m in self.handler.registered
         if m.unit.job_name == "sampler"
