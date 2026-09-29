@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import asyncio
+import math
 import os
 import types
 import unittest
@@ -335,6 +336,21 @@ class AdmissionGateTest(unittest.IsolatedAsyncioTestCase):
         manager = self._manager(drain_timeout_s=None)
         self.assertEqual(manager._episode_timeout_s, 600.0)
         self.assertEqual(manager._drain_timeout_s, 660.0)
+
+  async def test_pre_weight_sync_allows_infinite_pre_timeout_and_disabled_timeouts(
+      self,
+  ):
+    with mock.patch.dict(
+        os.environ,
+        {"EPISODE_TIMEOUT_SECS": "100", "WEIGHT_SYNC_DISABLE_TIMEOUTS": "1"},
+        clear=False,
+    ):
+      manager = self._manager(drain_timeout_s=None)
+      self.assertTrue(math.isinf(manager._drain_timeout_s))
+      sync_req = datatypes.WeightSyncRequest(
+          extra_config={"pre_timeout_s": float("inf")}
+      )
+      await manager.pre_weight_sync(sync_req)
 
 
 class AgentConfigTest(unittest.IsolatedAsyncioTestCase):

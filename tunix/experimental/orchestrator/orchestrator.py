@@ -55,6 +55,7 @@ class ClusterOrchestrator:
       weight_sync_mode: str | None = None,
       trajectory_store_config: Mapping[str, Any] | None = None,
       run_id: str | None = None,
+      disable_weight_sync_timeouts: bool | None = None,
   ):
     """Initializes ClusterOrchestrator.
 
@@ -72,6 +73,8 @@ class ClusterOrchestrator:
         process's reads once read/write wiring is connected.
       run_id: Optional unique identifier for this orchestrator run. Generated
         automatically if omitted.
+      disable_weight_sync_timeouts: When True, sets all weight-sync phase
+        deadlines to infinity.
     """
     self.config = config
     self.registry = registry or worker_registry.WorkerRegistry()
@@ -89,6 +92,7 @@ class ClusterOrchestrator:
     self.engine: distributed_rl_engine.DistributedRLEngine | None = None
     mode = getattr(weight_sync_mode, "value", weight_sync_mode)
     self._weight_sync_mode = str(mode).lower() if mode is not None else None
+    self._disable_weight_sync_timeouts = disable_weight_sync_timeouts
     cfg_run_id = (
         trajectory_store_config.get("run_id")
         if trajectory_store_config is not None
@@ -443,6 +447,7 @@ class ClusterOrchestrator:
           registry=self.registry,
           handler=handler,
           controller_id="auto-coordinator",
+          disable_timeouts=self._disable_weight_sync_timeouts,
       )
 
     return distributed_rl_engine.DistributedRLEngine(

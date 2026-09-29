@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from typing import Any, List, Mapping, Sequence
 
 import numpy as np
@@ -405,6 +406,7 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
       return None
     if self._weight_sync_bound:
       return True
+    t_start = time.monotonic()
     await self._ensure_started()
     sampler = self._require_sampler()
     if self.enable_gcs:
@@ -419,6 +421,11 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
           job_name=self.raiden_job_name,
       )
     self._weight_sync_bound = True
+    logger.info(
+        "VllmSamplerAdapter.bind_weight_sync finished in %.3fs (server_id=%s)",
+        time.monotonic() - t_start,
+        self.server_id,
+    )
     return res
 
   async def get_weight_sync_metadata(
@@ -435,6 +442,7 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
       )
     if self._cached_weight_sync_metadata is not None:
       return list(self._cached_weight_sync_metadata)
+    t_start = time.monotonic()
     await self._ensure_started()
     sampler = self._require_sampler()
     if self.enable_gcs:
@@ -447,6 +455,13 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
     ]
     if parsed:
       self._cached_weight_sync_metadata = parsed
+    logger.info(
+        "VllmSamplerAdapter.get_weight_sync_metadata finished in %.3fs"
+        " (server_id=%s, units=%d)",
+        time.monotonic() - t_start,
+        self.server_id,
+        len(parsed),
+    )
     return list(parsed)
 
   async def pre_weight_sync(
@@ -460,6 +475,7 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
       if not self._tracker.admit(sync_request, "prepared"):
         return True
 
+      t_start = time.monotonic()
       logger.info("Executing pre_weight_sync for server_id=%s", self.server_id)
 
       # delegate to RLVllmSampler's native pause + clear + free-kv-cache
@@ -469,6 +485,13 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
       self._weight_update_open = True
 
       self._tracker.complete(sync_request, "prepared")
+      logger.info(
+          "VllmSamplerAdapter.pre_weight_sync finished in %.3fs"
+          " (server_id=%s, free_kv_cache=%s)",
+          time.monotonic() - t_start,
+          self.server_id,
+          self._free_kv_cache_during_weight_sync,
+      )
       return True
 
   async def weight_sync(self, sync_request: Any = None, **kwargs: Any) -> Any:
@@ -486,6 +509,7 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
       if not self._tracker.admit(sync_request, "h2d_done"):
         return True
 
+      t_start = time.monotonic()
       extra = getattr(sync_request, "extra_config", None) or {}
       if self.enable_gcs:
         src_checksums = extra.get("source_checksums")
@@ -529,10 +553,12 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
       else:
         logger.info("Executing weight_sync barrier on Raiden synchronizers...")
         checksums = await sampler.raiden_h2d(uuid=_round_uuid(sync_request))
+      t_h2d_s = time.monotonic() - t_start
 
       if checksums:
         logger.info("Destination weights checksums: %s", checksums)
 
+      t_refresh_start = time.monotonic()
       if hasattr(sampler, "refresh_model_state_leaves"):
         result = sampler.refresh_model_state_leaves()
         if asyncio.iscoroutine(result):
@@ -547,8 +573,17 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
             " state_leaves are not re-pointed after h2d.",
             type(sampler).__name__,
         )
+      t_refresh_s = time.monotonic() - t_refresh_start
 
       self._tracker.complete(sync_request, "h2d_done")
+      logger.info(
+          "VllmSamplerAdapter.weight_sync finished in %.3fs"
+          " (h2d_s=%.3f, refresh_state_s=%.3f, server_id=%s)",
+          time.monotonic() - t_start,
+          t_h2d_s,
+          t_refresh_s,
+          self.server_id,
+      )
       return True
 
   async def post_weight_sync(
@@ -562,6 +597,7 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
       if not self._tracker.admit(sync_request, "committed"):
         return True
 
+      t_start = time.monotonic()
       logger.info("Executing post_weight_sync: restoring serving state...")
       # delegate to RLVllmSampler's native finish-weight-update + resume; it
       # reinitializes the KV cache only if pre_weight_sync freed it.
@@ -588,6 +624,13 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
           )
 
       self._tracker.complete(sync_request, "committed")
+      logger.info(
+          "VllmSamplerAdapter.post_weight_sync finished in %.3fs"
+          " (server_id=%s, policy_version=%d)",
+          time.monotonic() - t_start,
+          self.server_id,
+          self._policy_version,
+      )
       return self._policy_version
 
   async def abort_weight_sync(
@@ -601,6 +644,7 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
       if not self._tracker.admit(sync_request, "aborted"):
         return False
 
+      t_start = time.monotonic()
       logger.warning(
           "Aborting weight sync round: rolling back to policy_version=%d",
           self._policy_version,
@@ -614,6 +658,12 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
         await self.resume()
 
       self._tracker.complete(sync_request, "aborted")
+      logger.info(
+          "VllmSamplerAdapter.abort_weight_sync finished in %.3fs"
+          " (server_id=%s)",
+          time.monotonic() - t_start,
+          self.server_id,
+      )
       return True
 
   async def get_weight_sync_status(self) -> Mapping[str, Any]:

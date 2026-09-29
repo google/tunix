@@ -1342,11 +1342,13 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
   def prepare_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
     """Stages this round's weights on the raiden transport, returns metadata."""
     del sync_request, kwargs
+    t_total_start = time.monotonic()
     worker = self._weight_sync_worker
     if worker is None:
       worker = _default_weight_sync_worker()
       self._weight_sync_worker = worker
 
+    t_bind_start = time.monotonic()
     backend = "vllm_jax" if "vllm" in self._sampler_type else self._sampler_type
     mapping_config = getattr(self.config, "mapping_config", None)
     if (
@@ -1383,11 +1385,26 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     else:
       # TODO(lancewang): Handle LoRA parameter synchronization.
       worker.bind(nnx.state(self.model))
+    t_bind_s = time.monotonic() - t_bind_start
 
+    t_d2h_start = time.monotonic()
     worker.d2h()
+    t_d2h_s = time.monotonic() - t_d2h_start
     if os.environ.get("VERIFY_WEIGHTS", "").lower() == "true":
       logging.info("source checksums: %s", worker.checksums())
-    return [worker.work_unit_metadata()]
+
+    t_meta_start = time.monotonic()
+    meta = worker.work_unit_metadata()
+    t_meta_s = time.monotonic() - t_meta_start
+    logging.info(
+        "PeftTrainer.prepare_weight_sync finished in %.3fs"
+        " (bind_s=%.3f, d2h_s=%.3f, metadata_s=%.3f)",
+        time.monotonic() - t_total_start,
+        t_bind_s,
+        t_d2h_s,
+        t_meta_s,
+    )
+    return [meta]
 
   def release_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
     """Ends this round's staging hold."""

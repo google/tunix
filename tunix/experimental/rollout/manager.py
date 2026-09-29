@@ -15,7 +15,9 @@
 """Rollout Manager concurrency controller and Raiden KV migration orchestrator."""
 
 import asyncio
+import math
 import os
+import time
 from typing import Any, AsyncIterator, Callable, Dict, Optional, Sequence, Union
 from absl import logging
 from tunix.experimental.common import datatypes
@@ -26,6 +28,7 @@ from tunix.experimental.rollout import vanilla_sampler_adapter
 from tunix.experimental.trajectory import store
 from tunix.experimental.trajectory import trajectory as trajectory_lib
 from tunix.experimental.weight_sync import weight_sync
+from tunix.experimental.weight_sync import weight_sync_coordinator
 from tunix.experimental.worker import traffic_controller as traffic_controller_lib
 from tunix.rl.rollout import base_rollout
 
@@ -39,6 +42,18 @@ def _env_float(name: str, default: float) -> float:
   val = os.getenv(name)
   if val is None or not val.strip():
     return default
+  stripped = val.strip().lower()
+  if stripped in (
+      "inf",
+      "+inf",
+      "infinity",
+      "+infinity",
+      "none",
+      "off",
+      "disable",
+      "disabled",
+  ):
+    return float("inf")
   try:
     return float(val)
   except ValueError:
@@ -171,9 +186,15 @@ class RolloutManager:
         collector_lib.DEFAULT_EPISODE_TIMEOUT_SECS,
     )
     if drain_timeout_s is None:
-      drain_timeout_s = self._episode_timeout_s + 60.0
+      if weight_sync_coordinator.is_weight_sync_timeouts_disabled():
+        drain_timeout_s = float("inf")
+      else:
+        drain_timeout_s = self._episode_timeout_s + 60.0
     self._drain_timeout_s = float(drain_timeout_s)
-    if self._drain_timeout_s <= self._episode_timeout_s:
+    if (
+        not math.isinf(self._drain_timeout_s)
+        and self._drain_timeout_s <= self._episode_timeout_s
+    ):
       raise ValueError(
           f"RolloutManager drain_timeout_s ({self._drain_timeout_s:.1f}s) must be strictly "
           f"greater than episode_timeout ({self._episode_timeout_s:.1f}s)."
@@ -376,46 +397,91 @@ class RolloutManager:
     """Phase 3 Barrier 1: Closes admission and drains in-flight work."""
     extra = getattr(sync_request, "extra_config", None)
     pre_timeout_s = extra.get("pre_timeout_s") if isinstance(extra, dict) else None
-    if pre_timeout_s is not None and self._drain_timeout_s >= pre_timeout_s:
+    timeouts_disabled = (
+        weight_sync_coordinator.is_weight_sync_timeouts_disabled()
+    )
+    effective_drain_timeout_s = (
+        float("inf") if timeouts_disabled else self._drain_timeout_s
+    )
+    if (
+        not timeouts_disabled
+        and pre_timeout_s is not None
+        and not math.isinf(pre_timeout_s)
+        and effective_drain_timeout_s >= pre_timeout_s
+    ):
       raise ValueError(
-          f"RolloutManager drain_timeout_s ({self._drain_timeout_s:.1f}s) cannot be greater than "
+          f"RolloutManager drain_timeout_s ({effective_drain_timeout_s:.1f}s) cannot be greater than "
           f"or equal to pre_weight_sync timeout ({pre_timeout_s:.1f}s). Rollout draining must "
           f"complete with sufficient margin before the coordinator's pre_weight_sync deadline expires."
       )
 
+    t_pre_start = time.monotonic()
+    in_flight_before = len(self._traffic.get_active_tasks())
     self._traffic.transition_to_syncing()
-    await self._traffic.drain(self._drain_timeout_s)
+    t_drain_start = time.monotonic()
+    await self._traffic.drain(effective_drain_timeout_s)
+    t_drain_s = time.monotonic() - t_drain_start
+    remaining_after_drain = len(self._traffic.get_active_tasks())
     self.pause_all()
+    t_sampler_pre_s = 0.0
+    res = None
     if self.sampler:
-      return await self.sampler.pre_weight_sync(sync_request, **kwargs)
-    return None
+      t_sampler_start = time.monotonic()
+      res = await self.sampler.pre_weight_sync(sync_request, **kwargs)
+      t_sampler_pre_s = time.monotonic() - t_sampler_start
+    t_total_pre_s = time.monotonic() - t_pre_start
+    logging.info(
+        "RolloutManager.pre_weight_sync finished in %.3fs"
+        " (drain_s=%.3f, sampler_pre_s=%.3f, in_flight_before=%d,"
+        " paused_stragglers=%d, drain_timeout_s=%s, pre_timeout_s=%s)",
+        t_total_pre_s,
+        t_drain_s,
+        t_sampler_pre_s,
+        in_flight_before,
+        remaining_after_drain,
+        effective_drain_timeout_s,
+        pre_timeout_s,
+    )
+    return res
 
   async def weight_sync(
       self, sync_request: sampler_lib.WeightSyncRequest | Any = None, **kwargs
   ) -> Any:
     """Phase 3 Barrier 2: Executes weight synchronization and resumes collectors."""
+    t_start = time.monotonic()
     completed_version = getattr(sync_request, "policy_version", 0)
     if self.sampler:
       res = await self.sampler.weight_sync(sync_request, **kwargs)
       if res is not None:
         completed_version = res
+    logging.info(
+        "RolloutManager.weight_sync finished in %.3fs (policy_version=%s)",
+        time.monotonic() - t_start,
+        completed_version,
+    )
     return completed_version
 
   async def post_weight_sync(
       self, sync_request: sampler_lib.WeightSyncRequest | Any = None, **kwargs
   ) -> Any:
     """Phase 3 Barrier 3: Finalizes policy weight update and resumes collectors."""
+    t_start = time.monotonic()
     res = None
     if self.sampler:
       res = await self.sampler.post_weight_sync(sync_request, **kwargs)
     self.resume_all()
     self._traffic.reopen()
+    logging.info(
+        "RolloutManager.post_weight_sync finished in %.3fs",
+        time.monotonic() - t_start,
+    )
     return res
 
   async def abort_weight_sync(
       self, sync_request: sampler_lib.WeightSyncRequest | Any = None, **kwargs
   ) -> Any:
     """Discards the round, delegates to sampler if available, and resumes serving."""
+    t_start = time.monotonic()
     res = None
     if self.sampler:
       res = await self.sampler.abort_weight_sync(sync_request, **kwargs)
@@ -424,6 +490,10 @@ class RolloutManager:
     # up with the policy version.
     self.resume_all()
     self.reopen_admission()
+    logging.info(
+        "RolloutManager.abort_weight_sync finished in %.3fs",
+        time.monotonic() - t_start,
+    )
     return res
 
   def reopen_admission(self) -> bool:
