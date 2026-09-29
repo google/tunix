@@ -152,7 +152,9 @@ class K8sContextTest(absltest.TestCase):
     return envs
 
   def test_register_writes_fail_fast_marker(self):
-    marker = os.path.join(self.create_tempdir().full_path, "registered")
+    marker = os.path.join(
+        self.create_tempdir().full_path, "not-yet-created", "registered"
+    )
     args = argparse.Namespace(
         discovery_port=portpicker.pick_unused_port(),
         discovery_addrs="door:8888",

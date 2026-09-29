@@ -168,6 +168,7 @@ def _write_registered_marker() -> None:
   if REGISTERED_MARKER_ENV not in os.environ:
     return
   marker = pathlib.Path(os.environ[REGISTERED_MARKER_ENV])
+  marker.parent.mkdir(parents=True, exist_ok=True)
   marker.touch()
   logging.info("wrote fail-fast registration marker %s", marker)
 
