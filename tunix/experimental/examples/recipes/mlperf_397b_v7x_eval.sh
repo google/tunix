@@ -1,75 +1,112 @@
 #!/bin/bash
 set -e
 
+# ==============================================================================
+# MLPerf DeepSWE evaluation recipe: Qwen3.5-397B-A17B on TPU v7x
+# ==============================================================================
+# - TPU7x dynamic slicing on pod1 (bodaborg-tpu7x-gsc) or pod2 (bodaborg-tpu7x-gsc-elm)
+# - Rollout on 256 chips (32 replicas x 8 chips 2x2x2, EP=16, TP=1; no Trainer)
+# - Sandbox configured for sandbox-np nodepool with workload tolerations
+# ==============================================================================
+
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Fill these before you run.
 # k8s has a 63 char limit on total label name, so keep job_prefix unique to your job and short
 export JOB_PREFIX="${JOB_PREFIX:-${USER}}"
 export EVAL_JOBSET_NAME="${EVAL_JOBSET_NAME:-${JOB_PREFIX}-eval}"
-export EVAL_OUTPUT_DIR="${EVAL_OUTPUT_DIR:-gs://atwigg-trellis-europe-west4-dev/eval_results/${JOB_PREFIX}}"
-export TRAJECTORY_LOG_DIR="${TRAJECTORY_LOG_DIR:-gs://atwigg-trellis-europe-west4-dev/trajectories/${JOB_PREFIX}}"
 export ROLLOUT_PORT="${ROLLOUT_PORT:-20001}"
-export TUNIX_IMAGE="${TUNIX_IMAGE:-gcr.io/cloud-tpu-multipod-dev/sanbao/tunix_stack:eval}"
+export TUNIX_IMAGE="${TUNIX_IMAGE:-gcr.io/cloud-tpu-multipod-dev/sanbao/trellis:latest}"
 
-export PROJECT="cloud-tpu-shared-capacity"
-export REGION="europe-west4"
-export CLUSTER="bodaborg-v5p-nap"
+# Select pod: pod1 (bodaborg-tpu7x-gsc, us-central1) or pod2 (bodaborg-tpu7x-gsc-elm, us-east1).
+export POD="${POD:-pod1}"
+if [[ "${REGION:-}" == us-east1* && "${POD}" == "pod1" ]]; then
+  export POD="pod2"
+fi
+
+if [[ "${POD}" == "pod2" || "${POD}" == "2" || "${POD}" == "elm" ]]; then
+  export REGION="${REGION:-us-east1}"
+  export CLUSTER="${CLUSTER:-bodaborg-tpu7x-gsc-elm}"
+  export BUCKET="${BUCKET:-gs://atwigg-trellis-us-east1}"
+  export TPU_RESERVATION="${TPU_RESERVATION:-ghostfish-ev7rs12wndvw5}"
+else
+  export REGION="${REGION:-us-central1}"
+  export CLUSTER="${CLUSTER:-bodaborg-tpu7x-gsc}"
+  export BUCKET="${BUCKET:-gs://atwigg-trellis-us-central1}"
+  export TPU_RESERVATION="${TPU_RESERVATION:-ghostfish-pogoag4tylwed}"
+fi
+
+export EVAL_OUTPUT_DIR="${EVAL_OUTPUT_DIR:-${BUCKET}/eval_results/${JOB_PREFIX}}"
+export TRAJECTORY_LOG_DIR="${TRAJECTORY_LOG_DIR:-${BUCKET}/trajectories/${JOB_PREFIX}/logger}"
+export TRAJECTORY_STORE_ROOT_DIR="${TRAJECTORY_STORE_ROOT_DIR:-${TRAJECTORY_STORE_ROOT:-${BUCKET}/trajectories/${JOB_PREFIX}/store}}"
+
+export PROJECT="${PROJECT:-cloud-tpu-shared-capacity}"
+export K8S_NAMESPACE="priority-dev"
+export USE_DYNAMIC_SLICING="true"
 kubectl config use-context "gke_${PROJECT}_${REGION}_${CLUSTER}" || true
-kubectl config set-context --current --namespace=trellis || true
+kubectl config set-context --current --namespace="${K8S_NAMESPACE}" || true
 
-export K8S_NAMESPACE="trellis"
 export KUEUE_QUEUE="${KUEUE_QUEUE:-multislice-queue}"
 export PRIORITY_CLASS="${PRIORITY_CLASS:-medium}"
 export KUEUE_PRIORITY_CLASS="${KUEUE_PRIORITY_CLASS:-${PRIORITY_CLASS}}"
-export SERVICE_ACCOUNT="xpk-sa"
-export CPU_MACHINE="n2d-standard-64"
+export SERVICE_ACCOUNT="${SERVICE_ACCOUNT:-xpk-sa}"
+export CPU_MACHINE="${CPU_MACHINE:-n2d-standard-64}"
+
+export ENABLE_MULTI_NUMA="${ENABLE_MULTI_NUMA:-0}"
+export USER_CONTAINER_MEMORY="${USER_CONTAINER_MEMORY:-48G}"
+export RAIDEN_DEVICES_PER_HOST=8
+export TPU_RAIDEN_DATA_NICS="eth0"
+export RAIDEN_BROADCAST_K=64
 
 # Pathways Images and settings
-export PATHWAYS_SERVER_IMAGE="${PATHWAYS_SERVER_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_server:raiden_20260920_v2}"
-export PATHWAYS_PROXY_IMAGE="${PATHWAYS_PROXY_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_proxy_server:raiden_20260920_v2}"
-export PATHWAYS_PROXY_MEMORY_LIMIT="160G"
-export USER_CONTAINER_MEMORY="260G"
-export USER_CONTAINER_MEMORY_LIMIT="${USER_CONTAINER_MEMORY_LIMIT:-260G}"
+source "${DIR}/mlperf_pathways_config.sh"
 export PREFUSE_MOE_WEIGHTS="true"
 export ROLLOUT_PREFUSE_MOE_WEIGHTS="true"
 
 # Model configuration
-export MODEL_NAME="Qwen3.5-35B-A3B"
-export MODEL_ID="Qwen/Qwen3.5-35B-A3B"
-export TOKENIZER_PATH="Qwen/Qwen3.5-35B-A3B"
-export MAXTEXT_MODEL_NAME="qwen3.5-35b-a3b"
-export MAXTEXT_CKPT="${MAXTEXT_CKPT:-gs://maxtext-model-checkpoints/qwen3.5-35b-a3b/unscanned/0/items}"
-export CHECKPOINT_STORAGE_USE_OCDBT="${CHECKPOINT_STORAGE_USE_OCDBT:-true}"
-export CHECKPOINT_STORAGE_USE_ZARR3="${CHECKPOINT_STORAGE_USE_ZARR3:-true}"
-export EOS_TOKENS="${EOS_TOKENS:-151645,151643}"
+export MODEL_NAME="Qwen3.5-397B-A17B"
+export MODEL_ID="Qwen/Qwen3.5-397B-A17B"
+export TOKENIZER_PATH="${TOKENIZER_PATH:-Qwen/Qwen3.5-397B-A17B}"
+export MAXTEXT_MODEL_NAME="qwen3.5-397b-a17b"
+export MAXTEXT_CKPT="${MAXTEXT_CKPT:-gs://}"
+export CHECKPOINT_STORAGE_USE_OCDBT="${CHECKPOINT_STORAGE_USE_OCDBT:-false}"
+export CHECKPOINT_STORAGE_USE_ZARR3="${CHECKPOINT_STORAGE_USE_ZARR3:-false}"
+export EOS_TOKENS="${EOS_TOKENS:-248046,248044}"
 
-# Backend & Rollout Topology (Pathways 4-chip 2x2x1 slices, mesh_fsdp=2, mesh_tp=2; no Trainer)
+# Backend & Rollout Topology (8 chips = 16 devices = 2 hosts per replica, EP=16, TP=1; no Trainer)
 export SAMPLER="vllm"
 export WEIGHT_SYNC_MODE="none"
-export ROLLOUT_JOBSET_YAML="jobset.pathways.yaml"
-export ROLLOUT_TPU_SLICE="tpuv5:2x2x1"
-export ROLLOUT_MESH_FSDP=2
-export ROLLOUT_MESH_TP=2
-export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-16}"
+export ROLLOUT_JOBSET_YAML="jobset.mcjax.ray.yaml"
+export ROLLOUT_TPU_SLICE="${ROLLOUT_TPU_SLICE:-tpu7x:2x2x2}"
+export ROLLOUT_MESH_FSDP=1
+export ROLLOUT_MESH_TP=1
+_rollout_dims="${ROLLOUT_TPU_SLICE#*:}"
+export ROLLOUT_MESH_EXPERT="${ROLLOUT_MESH_EXPERT:-$(( 2 * ${_rollout_dims//x/*} / ${VLLM_DATA_PARALLEL_SIZE:-1} ))}"
+export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-32}"
 
 # ==============================================================================
 # vLLM Rollout Configuration
 # ==============================================================================
 export VLLM_LOGGING_LEVEL="INFO"
-export VLLM_MAX_MODEL_LEN=65536
+export VLLM_MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-65536}"
 export VLLM_MAX_NUM_BATCHED_TOKENS=2048
 export VLLM_MAX_NUM_SEQS=16
 export VLLM_GPU_MEMORY_UTILIZATION="0.9"
 
 # Sharding Configs
-export VLLM_DATA_PARALLEL_SIZE=2
+export VLLM_DATA_PARALLEL_SIZE="${VLLM_DATA_PARALLEL_SIZE:-1}"
 export VLLM_ENABLE_EXPERT_PARALLEL="true"
+export VLLM_ADDITIONAL_CONFIG='{"sharding":{"sharding_strategy":{"expert_parallelism":'"${ROLLOUT_MESH_EXPERT}"',"tensor_parallelism":1,"enable_dp_attention":true}},"custom_mamba_cache_multiplier":16,"maxtext_config":{"scan_layers":false,"attention":"vllm_rpa","allow_split_physical_axes":true,"use_multimodal":false,"prefuse_moe_weights":true,"per_device_batch_size":0.0}}'
 
 # Prefix Caching Configs
-export ENABLE_PREFIX_CACHING="${ENABLE_PREFIX_CACHING:-false}"
-export VLLM_PREFIX_CACHE_RETENTION_INTERVAL="${VLLM_PREFIX_CACHE_RETENTION_INTERVAL:-256}"
-export VLLM_MAMBA_CACHE_MODE="${VLLM_MAMBA_CACHE_MODE:-${MAMBA_CACHE_MODE:-none}}"
+export ENABLE_PREFIX_CACHING="${ENABLE_PREFIX_CACHING:-true}"
+export VLLM_PREFIX_CACHE_RETENTION_INTERVAL="${VLLM_PREFIX_CACHE_RETENTION_INTERVAL:-0}"
+if [[ "${ENABLE_PREFIX_CACHING}" == "true" ]]; then
+  export MAMBA_CACHE_MODE="${MAMBA_CACHE_MODE:-align}"
+else
+  export MAMBA_CACHE_MODE="${MAMBA_CACHE_MODE:-none}"
+fi
+export VLLM_MAMBA_CACHE_MODE="${VLLM_MAMBA_CACHE_MODE:-${MAMBA_CACHE_MODE}}"
 
 # KV Cache Configs
 export ROLLOUT_FREE_KV_CACHE="false"
@@ -92,11 +129,17 @@ export NUM_PRECOMPILE_WORKERS=8
 export NEW_MODEL_DESIGN=1
 export ATTN_BUCKETIZED_NUM_REQS=true
 export ATTN_CUSTOM_NUM_REQS_BUCKETS=4
-export ONEHOT_MOE_PERMUTE_THRESHOLD=32768
+export ONEHOT_MOE_PERMUTE_THRESHOLD=131072
 export VLLM_MOE_CHUNK_SIZE=256
 export SLICE_ROPE_CACHE=1
 export DP_SCHED_BATCH_PREFILL=false
-export LIBTPU_INIT_ARGS=' --xla_tpu_use_minor_sharding_for_major_trivial_input=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=false --xla_tpu_ars_combiner_threshold_in_bytes=0 --xla_tpu_enable_async_collective_merger=false --xla_tpu_check_legacy_constraints_in_reduce_scatter_legalizer=false'
+export FLOAT32_GATE_LOGITS="true"
+export FLOAT32_LOGITS="true"
+export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800
+export VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY="RAIDEN_,TPU_"
+export VLLM_RAY_EXTRA_ENV_VARS_TO_COPY="ONEHOT_MOE_PERMUTE_THRESHOLD,LIBTPU_INIT_ARGS,RAY_memory_monitor_refresh_ms,VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,ENABLE_MULTI_NUMA,TPU_RAIDEN_DATA_NICS,FLOAT32_GATE_LOGITS,FLOAT32_LOGITS,NEW_MODEL_DESIGN,ATTN_BUCKETIZED_NUM_REQS,ATTN_CUSTOM_NUM_REQS_BUCKETS,VLLM_MOE_CHUNK_SIZE,SLICE_ROPE_CACHE,DP_SCHED_BATCH_PREFILL"
+export ROLLOUT_EXTRA_ENV="${ROLLOUT_EXTRA_ENV:-ONEHOT_MOE_PERMUTE_THRESHOLD=131072 RAY_memory_monitor_refresh_ms=0 RAIDEN_TRANSPORT_COALESCE_WINDOW_BYTES=67108864 RAIDEN_WEIGHT_SYNC_PIPELINE_GROUP_SIZE=16 RAIDEN_PARALLELISM=16 VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800 ENABLE_MULTI_NUMA=${ENABLE_MULTI_NUMA} TPU_RAIDEN_DATA_NICS=eth0 RAIDEN_BROADCAST_K=64}"
+export LIBTPU_INIT_ARGS="${LIBTPU_INIT_ARGS:- --xla_tpu_use_minor_sharding_for_major_trivial_input=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=false --xla_tpu_ars_combiner_threshold_in_bytes=0 --xla_tpu_enable_async_collective_merger=false --xla_tpu_check_legacy_constraints_in_reduce_scatter_legalizer=false --xla_tpu_dvfs_p_state=7}"
 export VLLM_ENABLE_V1_MULTIPROCESSING=0
 
 # ==============================================================================
@@ -113,29 +156,30 @@ export TOP_P="0.95"
 export TOP_K="-1"
 
 export EPISODE_TIMEOUT_SECS=1800
-export DEBUG=1
+export DEBUG=${DEBUG:-0}
 
 # DeepSWE Environment & Agent Sandbox
 export DATASET_PATH="${DATASET_PATH:-gs://mlperf_dataset/benchmark-r2e-gym-easy}"
 export USE_AGENT_SANDBOX=1
 export SCAFFOLD="openhands"
-export SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-trellis}"
+export SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-${K8S_NAMESPACE:-priority-dev}}"
 export POOL_NAME_FORMAT="${POOL_NAME_FORMAT:-}"
 export TEMPLATE_NAME_PREFIX="${TEMPLATE_NAME_PREFIX:-}"
 export SANDBOX_NODE_SELECTOR_KEY="cloud.google.com/gke-nodepool"
-export SANDBOX_NODE_SELECTOR_VAL="sandbox-cpu-pool"
-export IMAGE_REWRITE_PREFIX="${IMAGE_REWRITE_PREFIX:-europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/}"
+export SANDBOX_NODE_SELECTOR_VAL="${SANDBOX_NODE_SELECTOR_VAL:-sandbox-np}"
+export SANDBOX_TOLERATIONS='[{"key":"workload","operator":"Equal","value":"sandbox","effect":"NoSchedule"}]'
+export IMAGE_REWRITE_PREFIX="${IMAGE_REWRITE_PREFIX:-us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/}"
 export MAX_WARMPOOL_REPLICAS=2
-export ROLLOUT_MAX_CONCURRENCY=256
-export MAX_CONCURRENCY=256
+export ROLLOUT_MAX_CONCURRENCY="${ROLLOUT_MAX_CONCURRENCY:-256}"
+export MAX_CONCURRENCY="${MAX_CONCURRENCY:-256}"
 export ENABLE_THINKING="${ENABLE_THINKING:-false}"
 export STEP_TIMEOUT_SECS=60
 export REWARD_TIMEOUT_SECS=60
 export FLUSH_EVERY_N_STEPS=1
 export MAX_TURNS=30
-export MAX_PROMPT_LENGTH=4096
-export MAX_CONTEXT_LIMIT=61440
-export MAX_RESPONSE_LENGTH=61440
+export MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-4096}"
+export MAX_CONTEXT_LIMIT="${MAX_CONTEXT_LIMIT:-61440}"
+export MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-61440}"
 
 # ==============================================================================
 # Execution Dispatch
@@ -154,4 +198,5 @@ else
 fi
 
 COMMAND="${1:-eval}"
-exec "${LAUNCHER}" --command "${COMMAND}" --image "${TUNIX_IMAGE}"
+shift || true
+exec "${LAUNCHER}" --command "${COMMAND}" --image "${TUNIX_IMAGE}" "$@"

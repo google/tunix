@@ -994,6 +994,7 @@ start_eval() {
           --tokenizer_path=${TOKENIZER_PATH} \
           --model_absolute_path=${MAXTEXT_CKPT} \
           --maxtext_model_name=${MAXTEXT_MODEL_NAME} \
+          ${SCAN_LAYERS:+--scan_layers=${SCAN_LAYERS}} \
           --mesh_fsdp=${ROLLOUT_MESH_FSDP:-2} \
           --mesh_tp=${ROLLOUT_MESH_TP:-2} \
           --vllm_utilization=${VLLM_GPU_MEMORY_UTILIZATION:-0.9} \

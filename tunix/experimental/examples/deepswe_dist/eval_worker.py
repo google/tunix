@@ -22,6 +22,67 @@ import signal
 from tunix.experimental.examples.deepswe_dist import eval_deepswe
 
 
+def load_and_convert_scanned_checkpoint(
+    a, path, sampler, ckpt_prefuse_moe=False
+):
+  """Restores a scanned MaxText checkpoint and converts it into vLLM's unscanned state."""
+  import gc  # pylint: disable=import-outside-toplevel
+  from flax import nnx  # pylint: disable=import-outside-toplevel
+  import jax  # pylint: disable=import-outside-toplevel
+  from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE  # pylint: disable=import-outside-toplevel
+  from maxtext.configs import pyconfig  # pylint: disable=import-outside-toplevel
+  from maxtext.integration.vllm.weight_converter import MaxTextToMaxTextConverter  # pylint: disable=import-outside-toplevel
+  from maxtext.utils import model_creation_utils  # pylint: disable=import-outside-toplevel
+  from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR  # pylint: disable=import-outside-toplevel
+
+  logging.info(
+      "Restoring scanned MaxText checkpoint from %s and converting to unscanned"
+      " vLLM weights in-memory...",
+      path,
+  )
+  base_config_path = os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")
+  scanned_overrides = dict(eval_deepswe.maxtext_config(a))
+  scanned_overrides.update({
+      "load_parameters_path": str(path),
+      "scan_layers": True,
+      "prefuse_moe_weights": ckpt_prefuse_moe,
+      "attention": "dot_product",
+      "model_call_mode": "",
+  })
+  scanned_cfg = pyconfig.initialize(
+      ["", str(base_config_path)], **scanned_overrides
+  )
+  scanned_model, scanned_mesh = model_creation_utils.from_pretrained(
+      scanned_cfg,
+      devices=jax.devices(),
+      model_mode=MODEL_MODE_AUTOREGRESSIVE,
+  )
+  scanned_state = nnx.state(scanned_model, nnx.Param)
+  del scanned_model, scanned_mesh
+  gc.collect()
+
+  converter = MaxTextToMaxTextConverter(
+      config=scanned_cfg,
+      tp=a.mesh_tp,
+      prefuse_moe_weights=True,
+      target_dtype=None,
+  )
+  converted_state = converter.convert(
+      scanned_state,
+      target_state=sampler.vllm_sampler.transformer_state,
+  )
+  del scanned_state
+  gc.collect()
+
+  while isinstance(converted_state, dict) and "model" in converted_state:
+    converted_state = converted_state["model"]
+  sampler.vllm_sampler.update_params(converted_state)
+  del converted_state
+  gc.collect()
+  jax.clear_caches()
+  logging.info("Completed in-memory scanned-to-unscanned weight conversion.")
+
+
 def create_worker(a):
   """Load real inference weights once, then expose the standard RolloutWorker."""
   os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
@@ -57,14 +118,18 @@ def create_worker(a):
       path = alt_path
   if not path.exists():
     raise FileNotFoundError(f"MaxText checkpoint not found: {path}")
+  ckpt_prefuse_moe = False
   metadata_file = path / "_METADATA"
   if metadata_file.exists():
     try:
       import json  # pylint: disable=import-outside-toplevel
 
-      meta = json.loads(metadata_file.read_text())
+      meta_text = metadata_file.read_text()
+      meta = json.loads(meta_text)
       if "use_zarr3" in meta:
         a.checkpoint_storage_use_zarr3 = bool(meta["use_zarr3"])
+      if '"wi"' in meta_text and '"wi_0"' not in meta_text:
+        ckpt_prefuse_moe = True
     except Exception as exc:  # pylint: disable=broad-exception-caught
       logging.warning("Could not read Orbax _METADATA from %s: %s", path, exc)
   if a.use_ocdbt_with_pathways:
@@ -74,8 +139,10 @@ def create_worker(a):
     type_handler_registry.register_type_handler(
         jax.Array, jax_array_handlers.ArrayHandler(), override=True
     )
+  convert_in_memory = bool(a.scan_layers)
   mt_cfg = eval_deepswe.maxtext_config(a)
-  mt_cfg["load_parameters_path"] = str(path)
+  mt_cfg["scan_layers"] = False
+  mt_cfg["load_parameters_path"] = "" if convert_in_memory else str(path)
   additional_config = {
       "enable_continue_decode": False,
       "maxtext_config": mt_cfg,
@@ -156,7 +223,7 @@ def create_worker(a):
       mesh=mesh,
       tensor_parallel_size=a.mesh_tp,
       data_parallel_size=a.mesh_fsdp,
-      init_with_random_weights=False,
+      init_with_random_weights=convert_in_memory,
       hbm_utilization=a.vllm_utilization,
       additional_config=additional_config,
       engine_kwargs=engine_kwargs,
@@ -174,6 +241,10 @@ def create_worker(a):
       weight_sync_mode="none",
       max_concurrency=a.max_concurrent,
   )
+  if convert_in_memory:
+    load_and_convert_scanned_checkpoint(
+        a, path, sampler, ckpt_prefuse_moe=ckpt_prefuse_moe
+    )
 
   class EvaluationWorker(rollout_worker.RolloutWorker):
     """Compact eval RPC over the same manager and collector as training."""

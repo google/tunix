@@ -57,7 +57,15 @@ def parse_args(argv=None):
   p.add_argument("--tokenizer_path", default=MODEL_ID)
   p.add_argument("--model_absolute_path", default="")
   p.add_argument("--maxtext_model_name", default="qwen3.5-35b-a3b")
-  p.add_argument("--scan_layers", type=boolean, default=False)
+  p.add_argument(
+      "--scan_layers",
+      type=boolean,
+      default=False,
+      help=(
+          "Whether the input checkpoint uses scanned layers; when true,"
+          " converts to unscanned weights in-memory at worker startup."
+      ),
+  )
   p.add_argument(
       "--mesh_fsdp", type=int, default=32, help="Rollout data parallel size."
   )
@@ -195,7 +203,7 @@ def maxtext_config(a):
   return {
       "model_name": a.maxtext_model_name,
       "load_parameters_path": a.model_absolute_path,
-      "scan_layers": a.scan_layers,
+      "scan_layers": False,
       "model_call_mode": "inference",
       "attention": "vllm_rpa",
       "allow_split_physical_axes": True,

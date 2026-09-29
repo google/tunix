@@ -61,11 +61,101 @@ class EvalTest(unittest.TestCase):
   def test_checkpoint_is_required_and_never_dummy(self):
     with self.assertRaises(SystemExit):
       eval_lib.parse_args([])
-    config = eval_lib.maxtext_config(self.args())
+    a = self.args()
+    config = eval_lib.maxtext_config(a)
     self.assertEqual(config["load_parameters_path"], "gs://models/0/items")
     self.assertFalse(config["scan_layers"])
+    self.assertFalse(a.scan_layers)
+    self.assertFalse(eval_lib.model_profile(a)["scan_layers"])
     self.assertTrue(config["checkpoint_storage_use_ocdbt"])
     self.assertFalse(config["checkpoint_storage_use_zarr3"])
+
+  def test_in_memory_scanned_checkpoint_conversion(self):
+    worker_lib = load(
+        "deepswe_eval_worker_under_test", RECIPE / "eval_worker.py"
+    )
+    a = self.args("--scan_layers", "true", "--mesh_tp", "4")
+    self.assertTrue(a.scan_layers)
+    self.assertTrue(eval_lib.model_profile(a)["scan_layers"])
+    self.assertFalse(eval_lib.maxtext_config(a)["scan_layers"])
+
+    scanned_cfg = mock.sentinel.scanned_cfg
+    scanned_model = mock.sentinel.scanned_model
+    scanned_state = mock.sentinel.scanned_state
+    target_state = mock.sentinel.target_state
+    converted_inner = {"decoder": {"layers_0": "weights"}}
+    pyconfig_mod = types.SimpleNamespace(
+        initialize=mock.Mock(return_value=scanned_cfg)
+    )
+    model_creation_mod = types.SimpleNamespace(
+        from_pretrained=mock.Mock(
+            return_value=(scanned_model, mock.sentinel.mesh)
+        )
+    )
+    converter_inst = types.SimpleNamespace(
+        convert=mock.Mock(return_value={"model": converted_inner})
+    )
+    converter_cls = mock.Mock(return_value=converter_inst)
+    nnx_mod = types.SimpleNamespace(
+        Param=mock.sentinel.Param,
+        state=mock.Mock(return_value=scanned_state),
+    )
+    jax_mod = types.SimpleNamespace(
+        devices=mock.Mock(return_value=["d0", "d1", "d2", "d3"]),
+        clear_caches=mock.Mock(),
+    )
+    sampler = types.SimpleNamespace(
+        vllm_sampler=types.SimpleNamespace(
+            transformer_state=target_state,
+            update_params=mock.Mock(),
+        )
+    )
+    with mock.patch.dict(
+        sys.modules,
+        {
+            "flax": types.SimpleNamespace(nnx=nnx_mod),
+            "flax.nnx": nnx_mod,
+            "jax": jax_mod,
+            "maxtext.common.common_types": types.SimpleNamespace(
+                MODEL_MODE_AUTOREGRESSIVE="autoregressive"
+            ),
+            "maxtext.configs": types.SimpleNamespace(pyconfig=pyconfig_mod),
+            "maxtext.integration.vllm.weight_converter": types.SimpleNamespace(
+                MaxTextToMaxTextConverter=converter_cls
+            ),
+            "maxtext.utils": types.SimpleNamespace(
+                model_creation_utils=model_creation_mod
+            ),
+            "maxtext.utils.globals": types.SimpleNamespace(
+                MAXTEXT_CONFIGS_DIR="/maxtext/configs"
+            ),
+        },
+    ):
+      worker_lib.load_and_convert_scanned_checkpoint(
+          a, Path("/ckpt/0/items"), sampler, ckpt_prefuse_moe=False
+      )
+
+    pyconfig_mod.initialize.assert_called_once()
+    init_args, init_kwargs = pyconfig_mod.initialize.call_args
+    self.assertEqual(init_args[0], ["", "/maxtext/configs/base.yml"])
+    self.assertTrue(init_kwargs["scan_layers"])
+    self.assertFalse(init_kwargs["prefuse_moe_weights"])
+    self.assertEqual(init_kwargs["load_parameters_path"], "/ckpt/0/items")
+    model_creation_mod.from_pretrained.assert_called_once_with(
+        scanned_cfg,
+        devices=["d0", "d1", "d2", "d3"],
+        model_mode="autoregressive",
+    )
+    converter_cls.assert_called_once_with(
+        config=scanned_cfg,
+        tp=4,
+        prefuse_moe_weights=True,
+        target_dtype=None,
+    )
+    converter_inst.convert.assert_called_once_with(
+        scanned_state, target_state=target_state
+    )
+    sampler.vllm_sampler.update_params.assert_called_once_with(converted_inner)
 
   def test_request_limits_and_engine_seed(self):
     a = self.args("--seed", "0")
