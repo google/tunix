@@ -7,15 +7,11 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # k8s has a 63 char limit on total label name, so keep job_prefix unique to your job and short
 export JOB_PREFIX="${JOB_PREFIX:-${USER}}"
 export WANDB_RUN_NAME="${WANDB_RUN_NAME:-${JOB_PREFIX}-mlperf-35b-v7x}"
-export MAXTEXT_OUTPUT_DIR="${MAXTEXT_OUTPUT_DIR:-gs://atwigg-trellis-us-central1/maxtext/${JOB_PREFIX}}"
-export TRAJECTORY_LOG_DIR="${TRAJECTORY_LOG_DIR:-gs://atwigg-trellis-us-central1/trajectories/${JOB_PREFIX}/logger}"
-export TRAJECTORY_STORE_ROOT_DIR="${TRAJECTORY_STORE_ROOT_DIR:-${TRAJECTORY_STORE_ROOT:-gs://atwigg-trellis-us-central1/trajectories/${JOB_PREFIX}/store}}"
-
-export REGION="us-central1"
-export CLUSTER="bodaborg-tpu7x-gsc"
-export K8S_NAMESPACE="priority-dev"
 export USE_DYNAMIC_SLICING="true"
-export TPU_RESERVATION="${TPU_RESERVATION:-ghostfish-pogoag4tylwed}"
+if [[ -z "${TPU_RESERVATION:-}" ]]; then
+  echo "Error: TPU_RESERVATION must be set for v7x recipes (e.g. export TPU_RESERVATION=\"<your-reservation>\")" >&2
+  exit 1
+fi
 
 # Container memory overrides for v7x
 export PATHWAYS_PROXY_MEMORY_LIMIT="100G"
@@ -28,7 +24,10 @@ export MODEL_NAME="Qwen3.5-35B-A3B"
 export MODEL_ID="Qwen/Qwen3.5-35B-A3B"
 export TOKENIZER_PATH="Qwen/Qwen3.5-35B-A3B"
 export MAXTEXT_MODEL_NAME="qwen3.5-35b-a3b"
-export MAXTEXT_CKPT="${MAXTEXT_CKPT:-gs://hengtaoguo-maxtext-logs/checkpoints/qwen3.5-35b-a3b/scanned/2026-06-11-10-27/0/items}"
+if [[ -z "${MAXTEXT_CKPT:-}" ]]; then
+  echo "Error: MAXTEXT_CKPT must be set (e.g. export MAXTEXT_CKPT=\"gs://<your-bucket>/checkpoints/...\")" >&2
+  exit 1
+fi
 
 # Topologies (64 chips / 128 devices Trainer 4x4x4, 16x 4-chip Rollout slices on TPU7x dynamic slicing)
 # use_gdn_kernel=true requires TRAINER_MESH_TP=1 (the GDN kernel shard_map does not shard over 'tensor').
@@ -45,7 +44,7 @@ export ROLLOUT_MESH_EXPERT="${ROLLOUT_MESH_EXPERT:-8}"
 export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-16}"
 export RAIDEN_DEVICES_PER_HOST=8
 
-# vLLM Rollout Configuration (from paste.googleplex.com/5903655694368768)
+# vLLM Rollout Configuration
 export VLLM_ADDITIONAL_CONFIG='{"sharding":{"sharding_strategy":{"expert_parallelism":8,"tensor_parallelism":1,"enable_dp_attention":true}},"custom_mamba_cache_multiplier":16,"maxtext_config":{"scan_layers":false,  "attention":"vllm_rpa","allow_split_physical_axes":true,"use_multimodal":false,"prefuse_moe_weights":true}}'
 
 # Rollout Worker Environment Flags
@@ -78,9 +77,6 @@ num_vocab_tiling=16 use_iota_embed=false mu_dtype=float32 grad_dtype=float32 \
 checkpoint_storage_concurrent_gb=96 \
 checkpoint_storage_use_ocdbt=false checkpoint_storage_use_zarr3=false \
 packing=True}"
-
-# Sandbox
-export IMAGE_REWRITE_PREFIX="${IMAGE_REWRITE_PREFIX:-us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/}"
 
 source "${DIR}/mlperf_base.sh" "$@"
 

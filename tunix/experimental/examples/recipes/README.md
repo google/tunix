@@ -21,7 +21,7 @@ This directory contains executable recipe scripts for running distributed DeepSW
 From the root of the `tunix` repository:
 
 ```bash
-IMAGE_TAG="gcr.io/cloud-tpu-multipod-dev/${USER}/trellis:latest"
+IMAGE_TAG="<your-registry>/${USER}/trellis:latest"
 
 docker build \
   --network=host \
@@ -38,7 +38,7 @@ docker build \
 - `INSTALL_DEEPSWE_DEPS=true`: **(Required for DeepSWE)** Installs the agentic evaluation and Kubernetes sandbox client dependencies (`swebench`, `openhands-sdk`, `k8s-agent-sandbox`, `agent-sandbox-rl`, `r2e-gym`, and `kubernetes`).
 - `INSTALL_K8S_TOOLS=true`: *(Optional, omitted above)* Installs interactive CLI debugging tools (`gcloud`, `kubectl`, `k9s`, `vim`, `lsof`, `procps`) inside the container; not required at runtime.
 
-### 2. Push Image to Google Container Registry (GCR)
+### 2. Push Image to Container Registry
 
 ```bash
 gcloud auth configure-docker
@@ -53,22 +53,33 @@ docker push "${IMAGE_TAG}"
 
 - **GKE Cluster Access**: Ensure you have credentials and context for the cluster:
   ```bash
-  gcloud container clusters get-credentials bodaborg-v5p-nap \
-    --region europe-west4 \
-    --project cloud-tpu-shared-capacity
+  gcloud container clusters get-credentials <your-cluster> \
+    --region <your-region> \
+    --project <your-project>
   ```
 - **Weights & Biases (WandB)**: Obtain your API key from [wandb.ai/authorize](https://wandb.ai/authorize).
-- **Storage Bucket**: Ensure your GCS bucket (e.g., `gs://<user>-storage-europe-west4/`) is accessible by the cluster's service account (`xpk-sa`).
+- **Storage Bucket**: Ensure your GCS bucket (e.g., `gs://<your-bucket>/`) is accessible by the cluster's service account.
 
 ### 2. Launching the Run
 
-You can override configuration variables via environment variables at launch time:
+Cluster, storage, image, and namespace parameters must be provided via environment variables:
 
 ```bash
-# Set your environment variables
+# Required cluster and run configuration
+export PROJECT="<your-project>"
+export CLUSTER="<your-cluster>"
+export REGION="<your-region>"
+export K8S_NAMESPACE="<your-namespace>"
+export BUCKET="gs://<your-bucket>"
+export TUNIX_IMAGE="<your-registry>/${USER}/trellis:latest"
+export IMAGE_REWRITE_PREFIX="<your-registry-prefix>/"
+export MAXTEXT_CKPT="gs://<your-bucket>/checkpoints/<path>"
+# export TPU_RESERVATION="<your-reservation>" # Required for v7x clusters
+
+# Optional credentials & overrides
 export WANDB_API_KEY="your_wandb_api_key_here"
-export MAXTEXT_OUTPUT_DIR="gs://<your-bucket>/trellis/maxtext"
-export TUNIX_IMAGE="gcr.io/cloud-tpu-multipod-dev/${USER}/trellis:latest" 
+# export WANDB_ENTITY="<your-wandb-entity>"
+# export WANDB_PROJECT="<your-wandb-project>"
 
 # Launch the run (change recipe script as needed)
 SEED=42 bash tunix/experimental/examples/recipes/mlperf_35b_128_v5p.sh start
@@ -77,17 +88,17 @@ SEED=42 bash tunix/experimental/examples/recipes/mlperf_35b_128_v5p.sh start
 ### 3. Monitoring and Managing the Run
 
 ```bash
-# Check JobSets status in the trellis namespace
-kubectl get jobsets -n trellis
+# Check JobSets status in the namespace
+kubectl get jobsets -n "${K8S_NAMESPACE}"
 
 # Check Pods
-kubectl get pods -n trellis -l kueue.x-k8s.io/local-queue-name=multislice-queue
+kubectl get pods -n "${K8S_NAMESPACE}" -l kueue.x-k8s.io/local-queue-name=multislice-queue
 
 # Follow Orchestrator logs
-kubectl logs -f -n trellis -l jobset.sigs.k8s.io/jobset-name=${USER}-orch
+kubectl logs -f -n "${K8S_NAMESPACE}" -l jobset.sigs.k8s.io/jobset-name=${USER}-orch
 
 # Follow Trainer logs
-kubectl logs -f -n trellis -l jobset.sigs.k8s.io/jobset-name=${USER}-train -c main
+kubectl logs -f -n "${K8S_NAMESPACE}" -l jobset.sigs.k8s.io/jobset-name=${USER}-train -c main
 
 # Tear down the run
 bash tunix/experimental/examples/recipes/mlperf_35b_128_v5p.sh stop

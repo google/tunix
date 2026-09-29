@@ -33,29 +33,62 @@ set -e
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# ==============================================================================
+# Validation of Required Parameters
+# ==============================================================================
+missing_vars=()
+[[ -z "${PROJECT:-}" ]] && missing_vars+=("PROJECT (e.g. export PROJECT=\"<your-project>\")")
+[[ -z "${CLUSTER:-}" ]] && missing_vars+=("CLUSTER (e.g. export CLUSTER=\"<your-cluster>\")")
+[[ -z "${REGION:-}" ]] && missing_vars+=("REGION (e.g. export REGION=\"<your-region>\")")
+[[ -z "${K8S_NAMESPACE:-}" ]] && missing_vars+=("K8S_NAMESPACE (e.g. export K8S_NAMESPACE=\"<your-namespace>\")")
+[[ -z "${BUCKET:-}" && -z "${MAXTEXT_OUTPUT_DIR:-}" ]] && missing_vars+=("BUCKET (e.g. export BUCKET=\"gs://<your-bucket>\")")
+[[ -z "${TUNIX_IMAGE:-}" ]] && missing_vars+=("TUNIX_IMAGE (e.g. export TUNIX_IMAGE=\"<your-registry>/<image>:<tag>\")")
+
+if [[ ${#missing_vars[@]} -gt 0 ]]; then
+  echo "================================================================================" >&2
+  echo "Error: Missing required cluster configuration variables:" >&2
+  for var in "${missing_vars[@]}"; do
+    echo "  - ${var}" >&2
+  done
+  echo "" >&2
+  echo "Please set these variables in your environment before running the recipe." >&2
+  echo "Example:" >&2
+  echo "  export PROJECT=\"<your-project>\"" >&2
+  echo "  export CLUSTER=\"<your-cluster>\"" >&2
+  echo "  export REGION=\"<your-region>\"" >&2
+  echo "  export K8S_NAMESPACE=\"<your-namespace>\"" >&2
+  echo "  export BUCKET=\"gs://<your-bucket>\"" >&2
+  echo "  export TUNIX_IMAGE=\"<your-registry>/<image>:<tag>\"" >&2
+  echo "================================================================================" >&2
+  exit 1
+fi
+
 # --- Job Identification & Cloud Storage ---
 export JOB_PREFIX="${JOB_PREFIX:-${USER}-$(date +%Y%m%d-%H%M%S)}"
 export WANDB_API_KEY="${WANDB_API_KEY:-}"
 export WANDB_RUN_NAME="${WANDB_RUN_NAME:-${JOB_PREFIX}-gsm8k-35b-256}"
-export MAXTEXT_OUTPUT_DIR="${MAXTEXT_OUTPUT_DIR:-gs://atwigg-trellis-europe-west4-dev/maxtext/${JOB_PREFIX}}"
-export TRAJECTORY_LOG_DIR="${TRAJECTORY_LOG_DIR:-gs://atwigg-trellis-europe-west4-dev/trajectories/${JOB_PREFIX}}"
+
+if [[ -n "${BUCKET:-}" ]]; then
+  if [[ "${BUCKET}" != gs://* ]]; then
+    echo "Error: BUCKET must start with 'gs://', got: ${BUCKET}" >&2
+    exit 1
+  fi
+  _bucket_clean="${BUCKET%/}"
+  export MAXTEXT_OUTPUT_DIR="${MAXTEXT_OUTPUT_DIR:-${_bucket_clean}/maxtext/${JOB_PREFIX}}"
+  export TRAJECTORY_LOG_DIR="${TRAJECTORY_LOG_DIR:-${_bucket_clean}/trajectories/${JOB_PREFIX}}"
+fi
+
 export ORCHESTRATOR_PORT="${ORCHESTRATOR_PORT:-20000}"
 export ROLLOUT_PORT="${ROLLOUT_PORT:-20001}"
 export TRAINER_PORT="${TRAINER_PORT:-20002}"
 export PROFILER_STEPS="${PROFILER_STEPS:-0}"
 export SKIP_FIRST_N_PROFILER_STEPS="${SKIP_FIRST_N_PROFILER_STEPS:--1}"
-export TUNIX_IMAGE="${TUNIX_IMAGE:-gcr.io/cloud-tpu-multipod-dev/atwigg/trellis-35b:latest}"
 
 # --- Cluster & Kubernetes Infrastructure ---
-export PROJECT="${PROJECT:-cloud-tpu-shared-capacity}"
-export REGION="${REGION:-europe-west4}"
-export CLUSTER="${CLUSTER:-bodaborg-v5p-nap}"
 if [[ "${DRY_RUN:-false}" != "true" ]]; then
   kubectl config use-context "gke_${PROJECT}_${REGION}_${CLUSTER}" || true
-  kubectl config set-context --current --namespace=trellis || true
+  kubectl config set-context --current --namespace="${K8S_NAMESPACE}" || true
 fi
-
-export K8S_NAMESPACE="${K8S_NAMESPACE:-trellis}"
 export KUEUE_QUEUE="${KUEUE_QUEUE:-multislice-queue}"
 export KUEUE_QUEUE_NAME="${KUEUE_QUEUE_NAME:-${KUEUE_QUEUE}}"
 export PRIORITY_CLASS="${PRIORITY_CLASS:-medium}"
@@ -76,10 +109,6 @@ export ROLLOUT_PREFUSE_MOE_WEIGHTS="${ROLLOUT_PREFUSE_MOE_WEIGHTS:-true}"
 export VERIFY_WEIGHTS="${VERIFY_WEIGHTS:-true}"
 export TRAINER_PADDED_MOE_MLP_DIM="${TRAINER_PADDED_MOE_MLP_DIM:-}"
 
-# --- WandB Monitoring ---
-export WANDB_ENTITY="${WANDB_ENTITY:-google-trellis}"
-export WANDB_PROJECT="${WANDB_PROJECT:-trellis-gsm8k}"
-
 # --- Model Configuration ---
 export MODEL_NAME="${MODEL_NAME:-Qwen3.5-35B-A3B}"
 export MODEL_ID="${MODEL_ID:-Qwen/Qwen3.5-35B-A3B}"
@@ -89,7 +118,10 @@ export MAXTEXT_MODEL_NAME="${MAXTEXT_MODEL_NAME:-qwen3.5-35b-a3b}"
 export RETURN_ROUTED_EXPERTS="${RETURN_ROUTED_EXPERTS:-false}"
 
 if [[ "${MAXTEXT_MODEL_NAME}" == "qwen3-0.6b" || "${MODEL_NAME}" == "Qwen3-0.6B" ]]; then
-  export MAXTEXT_CKPT="${MAXTEXT_CKPT:-gs://maxtext-model-checkpoints/qwen3-0.6b/2025-10-27/scanned/0/items}"
+  if [[ -z "${MAXTEXT_CKPT:-}" ]]; then
+    echo "Error: MAXTEXT_CKPT must be set (e.g. export MAXTEXT_CKPT=\"gs://<your-bucket>/checkpoints/...\")" >&2
+    exit 1
+  fi
   export TRAINER_BASE_NUM_KV_HEADS="${TRAINER_BASE_NUM_KV_HEADS:-8}"
   export PREFUSE_MOE_WEIGHTS="${PREFUSE_MOE_WEIGHTS:-false}"
   export TRAINER_PREFUSE_MOE_WEIGHTS="${TRAINER_PREFUSE_MOE_WEIGHTS:-false}"
@@ -102,7 +134,10 @@ if [[ "${MAXTEXT_MODEL_NAME}" == "qwen3-0.6b" || "${MODEL_NAME}" == "Qwen3-0.6B"
   fi
   export TRAINABLE_PARAMETERS_MASK="${TRAINABLE_PARAMETERS_MASK:-.*}"
 else
-  export MAXTEXT_CKPT="${MAXTEXT_CKPT:-gs://hengtaoguo-maxtext-logs/checkpoints/qwen3.5-35b-a3b/scanned/2026-06-11-10-27/0/items}"
+  if [[ -z "${MAXTEXT_CKPT:-}" ]]; then
+    echo "Error: MAXTEXT_CKPT must be set (e.g. export MAXTEXT_CKPT=\"gs://<your-bucket>/checkpoints/...\")" >&2
+    exit 1
+  fi
   export TRAINER_BASE_NUM_KV_HEADS="${TRAINER_BASE_NUM_KV_HEADS:-2}"
   export TRAINABLE_PARAMETERS_MASK="${TRAINABLE_PARAMETERS_MASK:-^(?!.*routed_experts/gate/kernel).*}"
   export VLLM_ENABLE_EXPERT_PARALLEL="${VLLM_ENABLE_EXPERT_PARALLEL:-true}"
@@ -196,8 +231,6 @@ if [[ -z "${TRAIN_MICRO_BATCH_SIZE:-}" ]]; then
   else
     export TRAIN_MICRO_BATCH_SIZE=32
   fi
-else
-  export TRAIN_MICRO_BATCH_SIZE="${TRAIN_MICRO_BATCH_SIZE}"
 fi
 export CHECKPOINT_SAVE_INTERVAL_STEPS="${CHECKPOINT_SAVE_INTERVAL_STEPS:-0}"
 export CHECKPOINT_MAX_TO_KEEP="${CHECKPOINT_MAX_TO_KEEP:-10}"
@@ -259,7 +292,7 @@ export SEED="${SEED:-42}"
 # ==============================================================================
 # Worker Passthrough Environments & Arguments
 # ==============================================================================
-export ORCHESTRATOR_EXTRA_ENV="${ORCHESTRATOR_EXTRA_ENV:-} WANDB_ENTITY=\"${WANDB_ENTITY}\""
+export ORCHESTRATOR_EXTRA_ENV="${ORCHESTRATOR_EXTRA_ENV:-} ${WANDB_ENTITY:+WANDB_ENTITY=\"${WANDB_ENTITY}\"}"
 
 export TRAINER_EXTRA_ENV="${TRAINER_EXTRA_ENV:-} RAIDEN_DEVICES_PER_HOST=${RAIDEN_DEVICES_PER_HOST} USE_WEIGHT_CONVERTER=${USE_WEIGHT_CONVERTER} PREFUSE_MOE_WEIGHTS=${TRAINER_PREFUSE_MOE_WEIGHTS} ROLLOUT_PREFUSE_MOE_WEIGHTS=${ROLLOUT_PREFUSE_MOE_WEIGHTS} ROLLOUT_MESH_TP=${ROLLOUT_MESH_TP} ROLLOUT_TENSOR_PARALLEL_SIZE=${ROLLOUT_MESH_TP} FLOAT32_GATE_LOGITS=${FLOAT32_GATE_LOGITS} FLOAT32_LOGITS=${FLOAT32_LOGITS}"
 export TRAINER_EXTRA_ARGS="${TRAINER_EXTRA_ARGS:-} --prefuse_moe_weights=${TRAINER_PREFUSE_MOE_WEIGHTS} --trainable_parameters_mask='${TRAINABLE_PARAMETERS_MASK}' --remat_policy=${REMAT_POLICY} --maxtext_attention=${TRAINER_MAXTEXT_ATTENTION} --base_num_kv_heads=${TRAINER_BASE_NUM_KV_HEADS} --maxtext_warmup_steps_fraction=${WARMUP_STEPS_FRACTION} --learning_rate_final_fraction=${LEARNING_RATE_FINAL_FRACTION}"

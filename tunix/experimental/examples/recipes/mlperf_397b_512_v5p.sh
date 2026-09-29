@@ -4,7 +4,6 @@ set -e
 # ==============================================================================
 # MLPerf DeepSWE recipe: Qwen3.5-397B-A17B on TPU v5p
 # ==============================================================================
-# - Cluster: bodaborg-v5p-nap in europe-west4
 # - Trainer on 256 chips (tpuv5p:4x8x8, FSDP=16, TP=1, EXPERT=2, CONTEXT=8)
 # - Rollout on 256 chips (16 replicas x 16 chips tpuv5p:2x2x4, EP=16, TP=1)
 # - Sandboxes on sandbox-cpu-pool
@@ -15,20 +14,17 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Fill these before you run.
 export JOB_PREFIX="${JOB_PREFIX:-$USER}"
 export WANDB_RUN_NAME="${WANDB_RUN_NAME:-${JOB_PREFIX}-mlperf-397b}"
-export MAXTEXT_OUTPUT_DIR="${MAXTEXT_OUTPUT_DIR:-gs://atwigg-trellis-europe-west4-dev/maxtext/${JOB_PREFIX}}"
-export TRAJECTORY_LOG_DIR="${TRAJECTORY_LOG_DIR:-gs://atwigg-trellis-europe-west4-dev/trajectories/${JOB_PREFIX}/logger}"
-export TRAJECTORY_STORE_ROOT_DIR="${TRAJECTORY_STORE_ROOT_DIR:-${TRAJECTORY_STORE_ROOT:-gs://atwigg-trellis-europe-west4-dev/trajectories/${JOB_PREFIX}/store}}"
 
-export REGION="europe-west4"
-export CLUSTER="bodaborg-v5p-nap"
-export K8S_NAMESPACE="trellis"
 
 # Model configuration
 export MODEL_NAME="Qwen3.5-397B-A17B"
 export MODEL_ID="Qwen/Qwen3.5-397B-A17B"
 export TOKENIZER_PATH="${TOKENIZER_PATH:-Qwen/Qwen3.5-397B-A17B}"
 export MAXTEXT_MODEL_NAME="qwen3.5-397b-a17b"
-export MAXTEXT_CKPT="${MAXTEXT_CKPT:-gs://sanbao-europe/qwen35_397b/scanned_reshard_fsdp32_tp2/0/items}"
+if [[ -z "${MAXTEXT_CKPT:-}" ]]; then
+  echo "Error: MAXTEXT_CKPT must be set (e.g. export MAXTEXT_CKPT=\"gs://<your-bucket>/checkpoints/...\")" >&2
+  exit 1
+fi
 
 # Trainer: 256 chips. TRAINER_MESH_EXPERT=2 is required, not a tuning choice:
 # at expert=1 the GMM_v2 kernel overflows smem by ~8.6K.
@@ -89,6 +85,5 @@ export DEBUG=${DEBUG:-0}
 
 # Sandbox
 export SANDBOX_NODE_SELECTOR_VAL="sandbox-cpu-pool"
-export IMAGE_REWRITE_PREFIX="${IMAGE_REWRITE_PREFIX:-europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/}"
 
 source "${DIR}/mlperf_base.sh" "$@"
