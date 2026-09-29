@@ -47,6 +47,15 @@ export SERVICE_ACCOUNT="${SERVICE_ACCOUNT:-xpk-sa}"
 export CPU_MACHINE="${CPU_MACHINE:-n2d-standard-64}"
 
 # ==============================================================================
+# Fail-fast (see k8s_launcher.sh). `enforce`: a trainer/rollout worker dying
+# after registration fails its JobSet and cluster_reaper tears down the run,
+# instead of the run deadlocking. `off`: legacy in-place pod restarts.
+# ==============================================================================
+export FAIL_FAST_MODE="${FAIL_FAST_MODE:-enforce}"
+# JobSet recreations allowed for worker failures before registration.
+export FT_STARTUP_RETRIES="${FT_STARTUP_RETRIES:-3}"
+
+# ==============================================================================
 # Pathways & Raiden Weight Sync Defaults
 # ==============================================================================
 source "${DIR}/mlperf_pathways_config.sh"

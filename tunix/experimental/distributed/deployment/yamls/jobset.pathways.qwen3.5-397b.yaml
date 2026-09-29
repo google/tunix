@@ -21,7 +21,7 @@ ${QUEUE_LABEL}spec:
   coordinator:
     replicatedJob: proc
   failurePolicy:
-    restartStrategy: Recreate
+    restartStrategy: Recreate${FAIL_FAST_JOBSET_FAILURE_POLICY}
   network:
     enableDNSHostnames: true
     publishNotReadyAddresses: true
@@ -32,7 +32,7 @@ ${QUEUE_LABEL}spec:
       metadata:
         annotations: {}
       spec:
-        backoffLimit: 0
+        backoffLimit: 0${FAIL_FAST_POD_FAILURE_POLICY}
         completionMode: Indexed
         completions: 1
         parallelism: 1
@@ -75,7 +75,7 @@ ${QUEUE_LABEL}spec:
                     resources:
                       requests:
                         storage: 400Gi
-            containers:
+            ${FAIL_FAST_PROC_SIDECARS_KEY}:
             - name: pathways-rm
               image: ${SERVER_IMAGE}
               imagePullPolicy: IfNotPresent
@@ -135,7 +135,7 @@ ${QUEUE_LABEL}spec:
               ports:
               - containerPort: 29000
                 protocol: TCP
-            - name: ${USER_CONTAINER}
+${FAIL_FAST_PROC_MAIN_CONTAINERS}            - name: ${USER_CONTAINER}
               image: ${USER_CONTAINER_IMAGE}
               imagePullPolicy: Always
               securityContext:
@@ -167,7 +167,7 @@ ${QUEUE_LABEL}spec:
                   # Disable core dumps to prevent large crash dumps from filling disk.
                   ulimit -c 0
 
-                  (
+${FAIL_FAST_WRAPPER_PRE}                  (
                     ${STARTUP_COMMAND}
                   ) & PID=$$!
 
@@ -177,7 +177,7 @@ ${QUEUE_LABEL}spec:
                   wait $$PID
                   EXIT_CODE=$$?
 
-                  echo "Program End: $$(date)"
+${FAIL_FAST_WRAPPER_POST}                  echo "Program End: $$(date)"
                   echo "EXIT_CODE=$$EXIT_CODE"
                   exit $$EXIT_CODE
               env:

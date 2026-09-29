@@ -56,6 +56,11 @@ logger = logging.getLogger("cluster-reaper")
 NAMESPACE = os.environ.get("NAMESPACE", "trellis")
 LOOP_INTERVAL_SECONDS = int(os.environ.get("INTERVAL_SECONDS", "30"))
 SANDBOX_POD_PREFIXES = ("pool-", "sandbox-claim-")
+# Fail-fast worker pods exit with this code when they failed before
+# registering with the orchestrator; JobSet recreates them (bounded by
+# maxRestarts), so it is not a crash of the run. Kept in sync with
+# distributed/deployment/yaml_generator.py (STARTUP_RETRY_EXIT_CODE).
+STARTUP_RETRY_EXIT_CODE = 75
 
 FATAL_EXCEPTION_PATTERNS = (
     "Error:",
@@ -532,7 +537,10 @@ def reap_failed_crashed_hung_jobs(custom_api, batch_api, core_api):
             is_crashed = True
             crash_reason = f"Container {cs.name} in CrashLoopBackOff"
             break
-          if cs.state.terminated and cs.state.terminated.exit_code != 0:
+          if cs.state.terminated and cs.state.terminated.exit_code not in (
+              0,
+              STARTUP_RETRY_EXIT_CODE,
+          ):
             is_crashed = True
             crash_reason = f"Container {cs.name} terminated with exit code {cs.state.terminated.exit_code}"
             break

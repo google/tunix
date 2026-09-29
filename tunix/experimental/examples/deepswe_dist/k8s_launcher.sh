@@ -218,6 +218,23 @@ export VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY=${VLLM_RAY_EXTRA_ENV_VAR_PREFIXES
 export VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY:-}
 export DRY_RUN=${DRY_RUN:-false}
 
+# Worker fail-fast. `enforce`: a trainer/rollout worker that dies after it
+# registered with the orchestrator fails its JobSet (and cluster_reaper then
+# tears down the whole run) instead of being restarted in place, which
+# deadlocks the run. Failures before registration are retried by recreating
+# the JobSet up to FT_STARTUP_RETRIES times. `off`: legacy restart behaviour.
+# The orchestrator JobSet is already fail-fast in both modes.
+export FAIL_FAST_MODE=${FAIL_FAST_MODE:-off}
+export FT_STARTUP_RETRIES=${FT_STARTUP_RETRIES:-3}
+case "${FAIL_FAST_MODE}" in
+  off) FAIL_FAST_GENERATOR_FLAGS=() ;;
+  enforce) FAIL_FAST_GENERATOR_FLAGS=(--fail_fast "--startup_retries=${FT_STARTUP_RETRIES}") ;;
+  *)
+    echo "Invalid FAIL_FAST_MODE='${FAIL_FAST_MODE}' (expected off|enforce)" >&2
+    exit 1
+    ;;
+esac
+
 apply_manifest() {
   local priority_sed="s/priorityClassName: [a-zA-Z0-9_-]\+/priorityClassName: ${PRIORITY_CLASS:-medium}/g"
   local filter
@@ -452,6 +469,7 @@ start_trainer() {
     "${YAML_DIR}/${TRAINER_JOBSET_YAML}" \
     --jobset_name="${TRAINER_ID}" \
     --namespace="${K8S_NAMESPACE}" \
+    "${FAIL_FAST_GENERATOR_FLAGS[@]}" \
     ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
     --tpu_slice=${TRAINER_TPU_SLICE} \
     --cpu_machine=${CPU_MACHINE} \
@@ -658,6 +676,7 @@ if cfg:
       "${YAML_DIR}/${ROLLOUT_JOBSET_YAML}" \
       --jobset_name="${replica_id}" \
       --namespace="${K8S_NAMESPACE}" \
+      "${FAIL_FAST_GENERATOR_FLAGS[@]}" \
       ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
       --tpu_slice=${ROLLOUT_TPU_SLICE} \
       --worker_container_image="${TUNIX_IMAGE}" \

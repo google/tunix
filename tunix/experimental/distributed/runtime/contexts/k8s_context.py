@@ -17,6 +17,7 @@
 import argparse
 import logging
 import os
+import pathlib
 from typing import Any, Callable
 
 from tunix.experimental.distributed.runtime import context
@@ -151,6 +152,24 @@ class K8sDiscoveryContext(context.DiscoveryContext):
         server_address, hostname, self._args.discovery_port, metadata
     )
     logging.info("registered to discovery server at %s", server_address)
+    _write_registered_marker()
+
+
+# Set by the fail-fast PID-1 wrapper of the worker templates (see
+# distributed/deployment/yaml_generator.py). Its presence after the workload
+# exits tells the wrapper the worker had registered, so a restart would
+# re-register a worker_id the orchestrator already holds: the failure is fatal
+# rather than a retryable startup failure.
+REGISTERED_MARKER_ENV = "FT_REGISTERED_MARKER"
+
+
+def _write_registered_marker() -> None:
+  """Creates the fail-fast registration marker file if fail-fast is on."""
+  if REGISTERED_MARKER_ENV not in os.environ:
+    return
+  marker = pathlib.Path(os.environ[REGISTERED_MARKER_ENV])
+  marker.touch()
+  logging.info("wrote fail-fast registration marker %s", marker)
 
 
 class K8sIpcContext(context.IpcContext):

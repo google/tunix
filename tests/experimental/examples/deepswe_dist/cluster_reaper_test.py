@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import datetime
+import types
 from unittest import mock
 from absl.testing import absltest
 
@@ -172,6 +173,60 @@ class ClusterReaperTest(absltest.TestCase):
     self.assertIn("oh-dead-run-5678", deleted_names)
     self.assertNotIn("pool-oh-atwigg-oh-rr-1234", deleted_names)
     self.assertNotIn("oh-atwigg-oh-rr-1234", deleted_names)
+
+  def _run_zombie_detector(self, exit_code: int) -> list[str]:
+    """Runs the reaper on one terminated rollout pod; returns deleted names."""
+    custom_api = mock.MagicMock()
+    batch_api = mock.MagicMock()
+    core_api = mock.MagicMock()
+    now = datetime.datetime.now(datetime.timezone.utc)
+    custom_api.list_namespaced_custom_object.return_value = {
+        "items": [
+            {
+                "metadata": {"name": name, "creationTimestamp": now.isoformat()},
+                "status": {"terminalState": None, "restarts": 0},
+            }
+            for name in ("run-orch", "run-train", "run-roll-0")
+        ]
+    }
+    pod = types.SimpleNamespace(
+        metadata=types.SimpleNamespace(
+            name="run-roll-0-proc-0-0-abcde",
+            labels={"jobset.sigs.k8s.io/jobset-name": "run-roll-0"},
+            deletion_timestamp=None,
+            creation_timestamp=now - datetime.timedelta(minutes=30),
+        ),
+        status=types.SimpleNamespace(
+            phase="Failed",
+            container_statuses=[
+                types.SimpleNamespace(
+                    name="main",
+                    state=types.SimpleNamespace(
+                        waiting=None,
+                        terminated=types.SimpleNamespace(exit_code=exit_code),
+                    ),
+                )
+            ],
+        ),
+    )
+    core_api.list_namespaced_pod.return_value.items = [pod]
+    batch_api.list_namespaced_job.return_value.items = []
+
+    cluster_reaper.reap_failed_crashed_hung_jobs(custom_api, batch_api, core_api)
+    return [
+        call.kwargs["name"]
+        for call in custom_api.delete_namespaced_custom_object.call_args_list
+    ]
+
+  def test_startup_retry_exit_code_is_not_a_crash(self):
+    self.assertEmpty(
+        self._run_zombie_detector(cluster_reaper.STARTUP_RETRY_EXIT_CODE)
+    )
+
+  def test_nonzero_exit_code_tears_down_run(self):
+    self.assertCountEqual(
+        self._run_zombie_detector(1), ["run-orch", "run-train", "run-roll-0"]
+    )
 
 
 if __name__ == "__main__":
