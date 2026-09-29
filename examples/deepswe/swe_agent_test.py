@@ -432,6 +432,52 @@ class SweAgentTest(absltest.TestCase):
     mock_ws.cleanup.assert_called_once()
     self.assertIsNone(env.workspace)
 
+  def test_deepswe_dist_agent_registration_and_openhands_dispatch(self):
+    from tunix.experimental.examples.deepswe_dist import deepswe  # pylint: disable=g-import-not-at-top
+    from tunix.experimental.rl.agentic import registry  # pylint: disable=g-import-not-at-top
+
+    self.assertEqual(deepswe.get_agent_name("openhands"), "codeact_agent")
+    self.assertEqual(deepswe.get_agent_name("r2egym"), "deepswe_agent")
+    self.assertEqual(deepswe.get_agent_name("sweagent"), "deepswe_agent")
+
+    codeact_cls = registry.AGENT_REGISTRY.get(deepswe.CODEACT_AGENT_NAME)
+    codeact_agent = codeact_cls(scaffold="openhands")
+    self.assertIsInstance(codeact_agent, swe_agent.CodeActAgent)
+    self.assertEqual(codeact_agent.name, "codeact_agent")
+    self.assertEqual(codeact_agent.scaffold, "openhands")
+
+    # Even if a caller requests deepswe_agent with scaffold="openhands",
+    # DeepSWEAgent.__new__ dispatches to DeepSWECodeActAgent.
+    deepswe_cls = registry.AGENT_REGISTRY.get(deepswe.DEEPSWE_AGENT_NAME)
+    dispatched_agent = deepswe_cls(scaffold="openhands")
+    self.assertIsInstance(dispatched_agent, swe_agent.CodeActAgent)
+    self.assertEqual(dispatched_agent.name, "codeact_agent")
+
+    r2e_agent = deepswe_cls(scaffold="r2egym")
+    self.assertIsInstance(r2e_agent, swe_agent.SWEAgent)
+    self.assertNotIsInstance(r2e_agent, swe_agent.CodeActAgent)
+    self.assertEqual(r2e_agent.name, "deepswe_agent")
+
+    prompt_item = deepswe.build_prompt_item(
+        entry={"instance_id": "inst_1", "problem_statement": "fix it"},
+        prompt_idx=0,
+        max_turns=10,
+        max_response_length=1024,
+        temperature=1.0,
+        top_p=0.95,
+        top_k=20,
+        step_timeout_secs=60,
+        reward_timeout_secs=120,
+        env_backend="kubernetes",
+        use_agent_sandbox=True,
+        scaffold="openhands",
+        env_verbose=False,
+    )
+    self.assertEqual(prompt_item["metadata"]["agent_name"], "codeact_agent")
+    self.assertEqual(
+        prompt_item["metadata"]["agent_config"], {"scaffold": "openhands"}
+    )
+
 
 if __name__ == "__main__":
   absltest.main()

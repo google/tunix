@@ -33,7 +33,16 @@ from examples.deepswe import swe_env
 
 DEEPSWE_ENV_NAME = "deepswe_env"
 DEEPSWE_AGENT_NAME = "deepswe_agent"
+CODEACT_AGENT_NAME = "codeact_agent"
 DEFAULT_DATASET_NAME = "R2E-Gym/R2E-Gym-Subset"
+
+
+def get_agent_name(scaffold: str | None = None) -> str:
+  """Returns the registered DeepSWE agent name for the given scaffold."""
+  resolved = str(scaffold or os.getenv("SCAFFOLD", "r2egym"))
+  if resolved in swe_agent.OPENHANDS_SCAFFOLDS:
+    return CODEACT_AGENT_NAME
+  return DEEPSWE_AGENT_NAME
 
 
 def normalize_example_value(value: Any) -> Any:
@@ -180,6 +189,7 @@ def build_prompt_item(
           "docker_image": entry.get("docker_image"),
           "prefix_hash": prompt_id,
           "env_config": env_config,
+          "agent_name": get_agent_name(scaffold),
           "agent_config": agent_config,
           "episode_timeout": episode_timeout_secs,
           "overlong_filter": overlong_filter,
@@ -291,6 +301,20 @@ class DeepSWEEnv(swe_env.SWEEnv):
 
 @registry.register_agent(DEEPSWE_AGENT_NAME)
 class DeepSWEAgent(swe_agent.SWEAgent):
-  """Registry adapter for the legacy DeepSWE XML-tool agent."""
+  """Registry adapter for the DeepSWE agent."""
 
   name = DEEPSWE_AGENT_NAME
+
+  def __new__(cls, *args: Any, **kwargs: Any):
+    if cls is DeepSWEAgent:
+      scaffold = kwargs.get("scaffold") or os.getenv("SCAFFOLD", "r2egym")
+      if str(scaffold) in swe_agent.OPENHANDS_SCAFFOLDS:
+        return super().__new__(DeepSWECodeActAgent)
+    return super().__new__(cls)
+
+
+@registry.register_agent(CODEACT_AGENT_NAME)
+class DeepSWECodeActAgent(swe_agent.CodeActAgent, DeepSWEAgent):
+  """Registry adapter for the OpenHands CodeActAgent."""
+
+  name = CODEACT_AGENT_NAME

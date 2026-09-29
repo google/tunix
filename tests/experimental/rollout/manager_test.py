@@ -206,6 +206,55 @@ class RegisteredEnvMetadataTest(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(result.metadata["policy_version"], 9)
     self.assertEqual(result.metadata["batch_idx"], 4)
 
+  async def test_generate_respects_request_metadata_agent_name_override(self):
+    captured = {}
+
+    class _OverrideAgent:
+
+      def __init__(self, **kwargs):
+        captured["kwargs"] = dict(kwargs)
+
+    if not registry.AGENT_REGISTRY.contains("manager_override_agent"):
+      registry.AGENT_REGISTRY.register("manager_override_agent")(_OverrideAgent)
+
+    class _AgentCapturingCollector(_NoopCollector):
+
+      def __init__(self, *args, **kwargs):
+        captured["agent"] = kwargs.get("agent")
+        super().__init__(*args, **kwargs)
+
+    manager = manager_lib.RolloutManager(
+        config=types.SimpleNamespace(
+            env_name="manager_capture_env",
+            agent_name="nonexistent_default_agent",
+            agent_config={"base_flag": True, "scaffold": "r2egym"},
+        ),
+        sampler=_FakeSyncSampler([]),
+        tokenizer="mock",
+        chat_parser="mock",
+    )
+    request = datatypes.RolloutRequest(
+        request_id="req_agent",
+        prompt="prompt text",
+        prompt_id="prompt_agent",
+        metadata={
+            "agent_name": "manager_override_agent",
+            "agent_config": {"scaffold": "openhands"},
+        },
+    )
+    with mock.patch.object(
+        manager_lib.collector_lib,
+        "TrajectoryCollectorEngine",
+        _AgentCapturingCollector,
+    ):
+      await manager.generate(request)
+
+    self.assertIsInstance(captured.get("agent"), _OverrideAgent)
+    self.assertEqual(
+        captured.get("kwargs"),
+        {"base_flag": True, "scaffold": "openhands"},
+    )
+
 
 
 class AdmissionGateTest(unittest.IsolatedAsyncioTestCase):

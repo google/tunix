@@ -250,6 +250,9 @@ def request_fields(a, entry, index, attempt):
               "scaffold": a.scaffold,
               "verbose": False,
           },
+          "agent_name": (
+              "codeact_agent" if a.scaffold == "openhands" else "deepswe_agent"
+          ),
           "agent_config": {"scaffold": a.scaffold},
       },
   }
@@ -302,12 +305,16 @@ def compact_result(response):
   reward = float(traj["trajectory_reward"])
   if not math.isfinite(reward):
     raise ValueError("Non-finite trajectory reward")
-  return {
+  result = {
       "reward": reward,
       "resolved": reward > 0,
       "status": str(traj.get("status", "UNKNOWN")),
       "error": None,
   }
+  metadata = getattr(response.payload, "metadata", None)
+  if isinstance(metadata, dict) and metadata.get("agent_name"):
+    result["agent_name"] = str(metadata["agent_name"])
+  return result
 
 
 async def evaluate_worker(handle, jobs, limit, timeout, write_record):

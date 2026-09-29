@@ -192,6 +192,31 @@ class EvalTest(unittest.TestCase):
           row,
       )
 
+  def test_scaffold_selects_agent_name_and_compact_result_records_it(self):
+    openhands_req = eval_lib.request_fields(
+        self.args("--scaffold", "openhands"), self.entry(), 0, 0
+    )
+    self.assertEqual(openhands_req["metadata"]["agent_name"], "codeact_agent")
+    self.assertEqual(
+        openhands_req["metadata"]["agent_config"], {"scaffold": "openhands"}
+    )
+    r2e_req = eval_lib.request_fields(
+        self.args("--scaffold", "r2egym"), self.entry(), 0, 0
+    )
+    self.assertEqual(r2e_req["metadata"]["agent_name"], "deepswe_agent")
+
+    response = types.SimpleNamespace(
+        error=None,
+        status="COMPLETED",
+        payload=types.SimpleNamespace(
+            traj={"trajectory_reward": 1, "status": "SUCCEEDED"},
+            metadata={"agent_name": "codeact_agent"},
+        ),
+    )
+    self.assertEqual(
+        eval_lib.compact_result(response)["agent_name"], "codeact_agent"
+    )
+
 
 class RpcTest(unittest.IsolatedAsyncioTestCase):
 

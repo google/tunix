@@ -112,6 +112,11 @@ export SHUFFLE=${SHUFFLE:-true}
 export SEED=${SEED:-42}
 export ENV_BACKEND=${ENV_BACKEND:-kubernetes}
 export SCAFFOLD=${SCAFFOLD:-r2egym}
+if [[ "${SCAFFOLD}" == "openhands" ]]; then
+  export ROLLOUT_AGENT_NAME=${ROLLOUT_AGENT_NAME:-codeact_agent}
+else
+  export ROLLOUT_AGENT_NAME=${ROLLOUT_AGENT_NAME:-deepswe_agent}
+fi
 export USE_AGENT_SANDBOX=${USE_AGENT_SANDBOX:-1}
 export SANDBOX_NAMESPACE=${SANDBOX_NAMESPACE:-rl-tunix-swebench}
 export SANDBOX_NODE_SELECTOR_KEY=${SANDBOX_NODE_SELECTOR_KEY:-}
@@ -723,7 +728,7 @@ if cfg:
           --return_routed_experts=${RETURN_ROUTED_EXPERTS} \
           --registry_module=tunix.experimental.examples.deepswe_dist.deepswe \
           --env_name=deepswe_env \
-          --agent_name=deepswe_agent \
+          --agent_name=${ROLLOUT_AGENT_NAME} \
           --max_concurrency=${ROLLOUT_MAX_CONCURRENCY} \
           ${lora_args} \
           ${maxtext_args} \
