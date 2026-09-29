@@ -39,11 +39,6 @@ export TRAJECTORY_STORE_ROOT_DIR="${TRAJECTORY_STORE_ROOT_DIR:-${TRAJECTORY_STOR
 
 export K8S_NAMESPACE="priority-dev"
 export USE_DYNAMIC_SLICING="true"
-# Raiden weight sync: working 397B runs use ENABLE_MULTI_NUMA=0 and the default
-# RAIDEN_BROADCAST_K (64 -> every slice pushed direct from the trainer). K=3 routes
-# slices through the receiver relay tree, which fails with "Incoming push size
-# mismatch" on the first sync; MULTI_NUMA=1 doubles the listeners per rollout worker.
-export ENABLE_MULTI_NUMA="${ENABLE_MULTI_NUMA:-0}"
 
 # Head pod lands on cpu-np (~257G allocatable). mlperf_pathways_config.sh's
 # 260G user-container request plus proxy/rm requests (~280G) never schedules
@@ -51,8 +46,6 @@ export ENABLE_MULTI_NUMA="${ENABLE_MULTI_NUMA:-0}"
 export USER_CONTAINER_MEMORY="${USER_CONTAINER_MEMORY:-48G}"
 
 export RAIDEN_DEVICES_PER_HOST=8
-export TPU_RAIDEN_DATA_NICS="eth0"
-export RAIDEN_BROADCAST_K=64
 
 # Model configuration
 export MODEL_NAME="Qwen3.5-397B-A17B"
