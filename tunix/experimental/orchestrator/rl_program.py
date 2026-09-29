@@ -33,6 +33,7 @@ from tunix.experimental.common import datatypes
 from tunix.experimental.common import logging_utils
 from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
+from tunix.experimental.orchestrator import compile_warmup
 from tunix.experimental.orchestrator import rl_engine_interface
 from tunix.experimental.queue_manager import trajectory_queue_manager
 from tunix.experimental.trajectory import store as trajectory_store_lib
@@ -609,6 +610,8 @@ class StandardRLProgram(RLProgram):
       ) = trajectory_queue_manager.GroupOrder.ARRIVAL,
       on_step_begin: Callable[[int], None] | None = None,
       on_step_end: Callable[[int, Any], None] | None = None,
+      trainer_compile_warmup: bool = False,
+      trainer_warmup_routed_experts: bool = False,
   ):
     super().__init__()
     self.engine: rl_engine_interface.AbstractRLEngine | None = None
@@ -743,6 +746,12 @@ class StandardRLProgram(RLProgram):
     )
     self.on_step_begin = on_step_begin
     self.on_step_end = on_step_end
+    # Compile the trainer step on a dummy batch while step-0 rollout runs,
+    # rather than inside the first fwd_bwd. The dummy carries router-replay
+    # experts only when told to: whether rollouts return them is set on the
+    # rollout workers, not here.
+    self.trainer_compile_warmup = trainer_compile_warmup
+    self.trainer_warmup_routed_experts = trainer_warmup_routed_experts
     self._in_flight_rollouts = 0
     self._window_release = asyncio.Event()
     self._dispatch_done = asyncio.Event()
@@ -2006,6 +2015,8 @@ class StandardRLProgram(RLProgram):
         asyncio.create_task(self.critique_stage()),
         train_task,
     ]
+    if self.trainer_compile_warmup:
+      tasks.append(asyncio.create_task(self._warmup_trainer_compile()))
 
     pending_tasks = set(tasks)
     try:
@@ -2028,6 +2039,65 @@ class StandardRLProgram(RLProgram):
       for task in tasks:
         if not task.done():
           task.cancel()
+
+  async def _warmup_trainer_compile(self) -> None:
+    """Hands the trainer a dummy batch to compile its step on, then returns.
+
+    Runs beside the rollout stages and never raises: without a warmup the first
+    fwd_bwd compiles, which is also the fallback when one cannot be built or
+    sent.
+    """
+    assert self.engine is not None
+    warmup = getattr(self.engine, "warmup_trainer_compile", None)
+    if warmup is None:
+      logging.warning(
+          "Trainer compile warmup skipped: %s cannot run one.",
+          type(self.engine).__name__,
+      )
+      return
+    try:
+      start = time.monotonic()
+      routed_shape = None
+      if self.trainer_warmup_routed_experts:
+        routed_shape = await self.engine.trainer_routed_experts_shape(
+            role=datatypes.Role.ACTOR
+        )
+        if routed_shape is None:
+          logging.warning(
+              "Trainer compile warmup: the trainer reports no routing shape,"
+              " so the dummy batch has no routed_experts."
+          )
+      dummy = await asyncio.to_thread(
+          compile_warmup.build_trainer_warmup_payload,
+          algo=self.algo,
+          assembler=self.assembler,
+          rollout_logprobs=bool(self.generation_args.return_logprobs),
+          routed_experts_shape=routed_shape,
+          sampler_is=self.sampler_is,
+          sampler_is_threshold=self.sampler_is_threshold,
+          seq_logprob_error_threshold=self.seq_logprob_error_threshold,
+      )
+      if dummy is None:
+        logging.warning(
+            "Trainer compile warmup skipped: %s batch shapes depend on the"
+            " data.",
+            type(self.assembler).__name__,
+        )
+        return
+      await warmup(dummy, role=datatypes.Role.ACTOR)
+      logging.info(
+          "Trainer compile warmup started in %.1fs on: %s",
+          time.monotonic() - start,
+          compile_warmup.describe_payload(dummy),
+      )
+    except asyncio.CancelledError:
+      raise
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+      logging.warning(
+          "Trainer compile warmup failed to start; the first fwd_bwd compiles"
+          " instead: %s",
+          exc,
+      )
 
   def run(
       self,

@@ -20,10 +20,13 @@ per-token log-prob scorer run through AbstractTrainer.model_scope.
 """
 
 import contextlib
+import threading
+import types
 from typing import Any
 
 from absl.testing import absltest
 from flax import nnx
+import jax
 import jax.numpy as jnp
 import numpy as np
 from tunix.experimental.common import datatypes
@@ -440,6 +443,158 @@ class TrainerWorkerExecutionContextTest(absltest.TestCase):
       self.worker.save_checkpoint(metadata={"step": 1})
 
     self.assertEqual(self.events, ["enter_ctx", "save_failed", "exit_ctx"])
+
+
+def _train_request(payload=None):
+  if payload is None:
+    payload = datatypes.RLTrainerPayload(
+        prompt_ids=np.array([[1]], dtype=np.int32),
+        prompt_mask=np.ones((1, 1), dtype=np.float32),
+        completion_ids=np.array([[2]], dtype=np.int32),
+        completion_mask=np.array([[1]], dtype=np.float32),
+        advantages=np.array([1.0], dtype=np.float32),
+    )
+  return datatypes.TrainRequest(request_id="req-1", payload=payload)
+
+
+class BlockingCompileTrainer(FakeTrainer):
+  """Compiles until released, recording what it compiled for."""
+
+  def __init__(self, error=None):
+    super().__init__()
+    self.release = threading.Event()
+    self.compile_started = threading.Event()
+    self.compiled = []
+    self.error = error
+
+  def compile(self, dummy_data=None):
+    self.compile_started.set()
+    self.release.wait(timeout=10)
+    if self.error is not None:
+      raise self.error
+    self.compiled.append(dummy_data)
+
+
+class TrainerWorkerWarmupCompileTest(absltest.TestCase):
+
+  def _worker(self, trainer, execution_context=None):
+    worker = trainer_worker.TrainerWorker(
+        trainer_factory=lambda: trainer,
+        worker_id="trainer_warmup",
+        execution_context=execution_context,
+    )
+    worker.initialize()
+    return worker
+
+  def test_returns_while_compiling_and_fwd_bwd_waits(self):
+    trainer = BlockingCompileTrainer()
+    worker = self._worker(trainer)
+    dummy = jax.tree.map(
+        lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype),
+        _train_request().payload,
+    )
+
+    resp = worker.warmup_compile(dummy_data=dummy)
+
+    self.assertTrue(resp.metadata["warmup_compile_started"])
+    self.assertTrue(trainer.compile_started.wait(timeout=10))
+    fwd_bwd = threading.Thread(
+        target=lambda: worker.fwd_bwd(request=_train_request())
+    )
+    fwd_bwd.start()
+    fwd_bwd.join(timeout=0.2)
+    self.assertTrue(fwd_bwd.is_alive())
+    self.assertEmpty(trainer.fwd_bwd_calls)
+
+    trainer.release.set()
+    fwd_bwd.join(timeout=10)
+
+    self.assertFalse(fwd_bwd.is_alive())
+    self.assertEqual(trainer.compiled, [dummy])
+    self.assertLen(trainer.fwd_bwd_calls, 1)
+    self.assertEqual(worker.state, datatypes.WorkerState.READY)
+
+  def test_runs_only_once(self):
+    trainer = BlockingCompileTrainer()
+    trainer.release.set()
+    worker = self._worker(trainer)
+
+    first = worker.warmup_compile(dummy_data=_train_request().payload)
+    second = worker.warmup_compile(dummy_data=_train_request().payload)
+    worker.update()
+
+    self.assertTrue(first.metadata["warmup_compile_started"])
+    self.assertFalse(second.metadata["warmup_compile_started"])
+    self.assertLen(trainer.compiled, 1)
+
+  def test_failure_leaves_worker_ready(self):
+    trainer = BlockingCompileTrainer(error=RuntimeError("compile OOM"))
+    trainer.release.set()
+    worker = self._worker(trainer)
+
+    worker.warmup_compile(dummy_data=_train_request().payload)
+    worker.fwd_bwd(request=_train_request())
+
+    self.assertEqual(worker.state, datatypes.WorkerState.READY)
+    self.assertLen(trainer.fwd_bwd_calls, 1)
+
+  def test_compile_runs_in_execution_context(self):
+    contexts = []
+
+    @contextlib.contextmanager
+    def _context():
+      contexts.append(threading.current_thread().name)
+      yield
+
+    trainer = BlockingCompileTrainer()
+    trainer.release.set()
+    worker = self._worker(trainer, execution_context=_context)
+    contexts.clear()
+
+    worker.warmup_compile(dummy_data=_train_request().payload)
+    worker.update()
+
+    self.assertIn("trainer-warmup-compile", contexts)
+
+  def test_first_batch_is_checked_against_warmup(self):
+    trainer = BlockingCompileTrainer()
+    trainer.release.set()
+    worker = self._worker(trainer)
+    worker.warmup_compile(dummy_data=_train_request().payload)
+
+    wider = _train_request().payload.replace(
+        completion_ids=np.array([[2, 3]], dtype=np.int32)
+    )
+    with self.assertLogs(level="WARNING") as logs:
+      worker.fwd_bwd(request=_train_request(wider))
+    self.assertIn("completion_ids", "\n".join(logs.output))
+
+    # Only the first batch is compared.
+    with self.assertNoLogs(level="WARNING"):
+      worker.fwd_bwd(request=_train_request(wider))
+
+  def test_matching_first_batch_logs_no_warning(self):
+    trainer = BlockingCompileTrainer()
+    trainer.release.set()
+    worker = self._worker(trainer)
+    abstract = jax.tree.map(
+        lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype),
+        _train_request().payload,
+    )
+    worker.warmup_compile(dummy_data=abstract)
+
+    with self.assertNoLogs(level="WARNING"):
+      worker.fwd_bwd(request=_train_request())
+
+  def test_routed_experts_shape(self):
+    trainer = FakeTrainer()
+    worker = self._worker(trainer)
+    self.assertIsNone(worker.routed_experts_shape())
+
+    trainer._config = types.SimpleNamespace(
+        num_decoder_layers=60, num_experts_per_tok=10
+    )
+    self.assertEqual(worker.routed_experts_shape(), (60, 10))
 
 
 if __name__ == "__main__":

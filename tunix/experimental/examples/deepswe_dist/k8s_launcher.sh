@@ -175,6 +175,22 @@ export DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS=${DP_SCHED_BATCH_PREFILL_FLUSH_TI
 export LIBTPU_INIT_ARGS=${LIBTPU_INIT_ARGS:-}
 export VLLM_ENABLE_V1_MULTIPROCESSING=${VLLM_ENABLE_V1_MULTIPROCESSING:-}
 export ROLLOUT_ENV_FLAGS=${ROLLOUT_ENV_FLAGS:-}
+# Step-0 compile. SKIP_JAX_PRECOMPILE=0 makes tpu_inference compile every vLLM
+# bucket at engine init (before the rollout registers); 1 leaves them to
+# compile lazily inside the first rollout batch. *_COMPILE_CACHE_DIR point the
+# JAX persistent compile cache at a directory (gs:// works) that later runs
+# reuse; empty keeps the pod-local default. Both vLLM (VLLM_XLA_CACHE_PATH) and
+# MaxText's pyconfig (jax_cache_dir, default ~/jax_cache, set here through its
+# M_JAX_CACHE_DIR env override) set the JAX cache dir, and JAX freezes whichever
+# is current at the first compile, so the rollout sets both. pathwaysutils
+# disables the JAX cache on Pathways, so the trainer one only applies to McJAX
+# trainers. TRAINER_COMPILE_WARMUP AOT-compiles the trainer step on a dummy
+# batch while step-0 rollout runs.
+export ROLLOUT_SKIP_JAX_PRECOMPILE=${ROLLOUT_SKIP_JAX_PRECOMPILE:-1}
+export EVAL_SKIP_JAX_PRECOMPILE=${EVAL_SKIP_JAX_PRECOMPILE:-1}
+export ROLLOUT_COMPILE_CACHE_DIR=${ROLLOUT_COMPILE_CACHE_DIR:-}
+export TRAINER_COMPILE_CACHE_DIR=${TRAINER_COMPILE_CACHE_DIR:-}
+export TRAINER_COMPILE_WARMUP=${TRAINER_COMPILE_WARMUP:-false}
 
 JOB_PREFIX=${JOB_PREFIX:-$USER}
 export ORCHESTRATOR_ID=${ORCHESTRATOR_ID:-$JOB_PREFIX-orch}
@@ -304,6 +320,13 @@ start_orchestrator() {
   if [[ "${WEIGHT_SYNC_DISABLE_TIMEOUTS}" == "1" || "${WEIGHT_SYNC_DISABLE_TIMEOUTS}" == "true" || "${WEIGHT_SYNC_DISABLE_TIMEOUTS}" == "True" ]]; then
     disable_ws_timeouts_arg="--disable_weight_sync_timeouts"
   fi
+  local warmup_arg=""
+  if [[ "${TRAINER_COMPILE_WARMUP}" == "1" || "${TRAINER_COMPILE_WARMUP}" == "true" || "${TRAINER_COMPILE_WARMUP}" == "True" ]]; then
+    warmup_arg="--trainer_compile_warmup"
+    if [[ "${RETURN_ROUTED_EXPERTS}" == "1" || "${RETURN_ROUTED_EXPERTS}" == "true" || "${RETURN_ROUTED_EXPERTS}" == "True" ]]; then
+      warmup_arg+=" --trainer_warmup_routed_experts"
+    fi
+  fi
 
   "$PYTHON_BIN" "$YAML_GENERATOR" \
     "${YAML_DIR}/jobset.cpu.yaml" \
@@ -411,6 +434,7 @@ start_orchestrator() {
         --target_accuracy=${TARGET_ACCURACY} \
         ${METRIC_LOGGER_DIR:+--metric_logger_dir="${METRIC_LOGGER_DIR}"} \
         ${rcp_arg} \
+        ${warmup_arg} \
         ${debug_arg} \
     " \
     | apply_manifest
@@ -482,6 +506,7 @@ start_trainer() {
       ${raiden_env} \
       ${MAXTEXT_EXTRA_FLAGS:+MAXTEXT_EXTRA_FLAGS=\"${MAXTEXT_EXTRA_FLAGS}\"} \
       ${TRAINER_EXTRA_ENV:+${TRAINER_EXTRA_ENV}} \
+      ${TRAINER_COMPILE_CACHE_DIR:+M_JAX_CACHE_DIR=\"${TRAINER_COMPILE_CACHE_DIR}\"} \
       RAIDEN_DEVICES_PER_HOST=${RAIDEN_DEVICES_PER_HOST} \
       USE_WEIGHT_CONVERTER=${USE_WEIGHT_CONVERTER} \
       PREFUSE_MOE_WEIGHTS=${TRAINER_PREFUSE_MOE_WEIGHTS:-false} \
@@ -702,7 +727,8 @@ if cfg:
         ${VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY:+VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY=\"${VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY}\"} \
         ${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY:+VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=\"${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY}\"} \
         ${ROLLOUT_EXTRA_ENV} \
-        SKIP_JAX_PRECOMPILE=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ${sandbox_env} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} python -m tunix.experimental.distributed.runtime.main \
+        ${ROLLOUT_COMPILE_CACHE_DIR:+VLLM_XLA_CACHE_PATH=\"${ROLLOUT_COMPILE_CACHE_DIR}\" M_JAX_CACHE_DIR=\"${ROLLOUT_COMPILE_CACHE_DIR}\"} \
+        SKIP_JAX_PRECOMPILE=${ROLLOUT_SKIP_JAX_PRECOMPILE} VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ${sandbox_env} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} python -m tunix.experimental.distributed.runtime.main \
           --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
           --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
           --process_main=tunix.experimental.examples.common.run_rollout_node.main \
@@ -1000,7 +1026,7 @@ start_eval() {
         ${VLLM_ENABLE_V1_MULTIPROCESSING:+VLLM_ENABLE_V1_MULTIPROCESSING=${VLLM_ENABLE_V1_MULTIPROCESSING}} \
         ${VLLM_LOGGING_LEVEL:+VLLM_LOGGING_LEVEL=${VLLM_LOGGING_LEVEL}} \
         ${ROLLOUT_ENV_FLAGS} \
-        SKIP_JAX_PRECOMPILE=1 python3 -u ${eval_cmd} \
+        SKIP_JAX_PRECOMPILE=${EVAL_SKIP_JAX_PRECOMPILE} python3 -u ${eval_cmd} \
           ${role_arg} \
           --worker_addresses ${worker_addrs} \
           --port=${eval_port} \

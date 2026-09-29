@@ -508,6 +508,29 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         "accumulated": accumulate_gradients,
     }
 
+  async def warmup_trainer_compile(
+      self,
+      dummy_data: datatypes.RLTrainerPayload,
+      role: datatypes.Role = datatypes.Role.ACTOR,
+  ) -> Any:
+    """Starts the trainer compiling its step for `dummy_data`, in background."""
+    worker = self._trainer_workers.get(role)
+    if worker is None:
+      raise ValueError(f"No trainer worker registered for role {role}")
+    return await self._invoke_worker(
+        worker, "warmup_compile", dummy_data=dummy_data
+    )
+
+  async def trainer_routed_experts_shape(
+      self,
+      role: datatypes.Role = datatypes.Role.ACTOR,
+  ) -> tuple[int, int] | None:
+    """Returns the trainer's router-replay `(num_layers, top_k)`, if known."""
+    worker = self._trainer_workers.get(role)
+    if worker is None:
+      raise ValueError(f"No trainer worker registered for role {role}")
+    return await self._invoke_worker(worker, "routed_experts_shape")
+
   async def get_metrics(
       self,
       role: datatypes.Role = datatypes.Role.ACTOR,

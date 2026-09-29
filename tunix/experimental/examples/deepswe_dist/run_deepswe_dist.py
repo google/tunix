@@ -399,6 +399,24 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="Enable MLPerf RCP (mllog) compliance logging.",
   )
   parser.add_argument(
+      "--trainer_compile_warmup",
+      action="store_true",
+      default=False,
+      help=(
+          "Compile the trainer step on a dummy packed batch while step-0"
+          " rollout runs, instead of in the first fwd_bwd."
+      ),
+  )
+  parser.add_argument(
+      "--trainer_warmup_routed_experts",
+      action="store_true",
+      default=False,
+      help=(
+          "Give the warmup batch routed_experts; set when rollouts return"
+          " them (router replay), else step 0 recompiles."
+      ),
+  )
+  parser.add_argument(
       "--metric_logger_dir",
       type=str,
       default=os.getenv("METRIC_LOGGER_DIR", None),
@@ -802,6 +820,8 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
             if args.rcp_logging
             else None,
         ),
+        trainer_compile_warmup=args.trainer_compile_warmup,
+        trainer_warmup_routed_experts=args.trainer_warmup_routed_experts,
     )
 
     if args.rcp_logging:

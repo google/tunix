@@ -156,6 +156,19 @@ export DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS="${DP_SCHED_BATCH_PREFILL_FLUSH_T
 export LIBTPU_INIT_ARGS="${LIBTPU_INIT_ARGS:- --xla_tpu_use_minor_sharding_for_major_trivial_input=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=false --xla_tpu_ars_combiner_threshold_in_bytes=0 --xla_tpu_enable_async_collective_merger=false --xla_tpu_check_legacy_constraints_in_reduce_scatter_legalizer=false}"
 export VLLM_ENABLE_V1_MULTIPROCESSING=0
 
+# Step-0 compile. Precompile the vLLM buckets at engine init, which finishes
+# before the rollout registers and so before mllog run_start, rather than
+# lazily in the first (timed) rollout batch. Compile the trainer step on a
+# dummy batch alongside step-0 rollout. Keep the rollout JAX compile cache in
+# GCS so later runs with the same model, flags and libtpu load entries instead
+# of recompiling them. Set COMPILE_CACHE_DIR="" to turn the cache off (check the
+# MLPerf rules on cross-run caches before a submission run). The trainer runs
+# on Pathways, where pathwaysutils disables the JAX cache, so it gets no cache.
+export ROLLOUT_SKIP_JAX_PRECOMPILE="${ROLLOUT_SKIP_JAX_PRECOMPILE:-0}"
+export TRAINER_COMPILE_WARMUP="${TRAINER_COMPILE_WARMUP:-true}"
+export COMPILE_CACHE_DIR="${COMPILE_CACHE_DIR-${BUCKET:+${BUCKET}/compile_cache}}"
+export ROLLOUT_COMPILE_CACHE_DIR="${ROLLOUT_COMPILE_CACHE_DIR-${COMPILE_CACHE_DIR:+${COMPILE_CACHE_DIR}/rollout}}"
+
 # ==============================================================================
 # Hyperparameters & DeepSWE Pipeline Configuration
 # ==============================================================================

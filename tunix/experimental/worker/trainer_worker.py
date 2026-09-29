@@ -15,9 +15,14 @@
 """TrainerWorker implementation for role-based isolation."""
 
 import contextlib
+import dataclasses
+import threading
+import time
 from typing import Any, Callable, ContextManager, cast
 
+from absl import logging
 from flax import nnx
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -27,6 +32,53 @@ from tunix.experimental.worker import abstract_worker
 from tunix.rl import common as rl_common
 
 WorkerState = datatypes.WorkerState
+
+# Stack for the warmup compile thread. Tracing a large model's train step
+# recurses deeply, and threads get a smaller default stack than the main one.
+_WARMUP_THREAD_STACK_BYTES = 64 * 1024 * 1024
+
+
+def payload_signature(payload: Any) -> tuple[Any, dict[str, Any]]:
+  """Returns what a compiled train step is keyed on: structure, shapes, dtypes.
+
+  Metadata is dropped, as the trainer drops it before building its inputs.
+  Dtypes are canonicalized the way `jax.jit` sees them.
+
+  Args:
+    payload: A trainer payload, of arrays or `jax.ShapeDtypeStruct` leaves.
+
+  Returns:
+    `(treedef, {leaf path: (shape, dtype)})`.
+  """
+  if dataclasses.is_dataclass(payload) and any(
+      field.name == "metadata" for field in dataclasses.fields(payload)
+  ):
+    payload = dataclasses.replace(payload, metadata={})
+  leaves, treedef = jax.tree_util.tree_flatten_with_path(payload)
+  return treedef, {
+      jax.tree_util.keystr(path): (
+          tuple(np.shape(leaf)),
+          jnp.result_type(leaf).name,
+      )
+      for path, leaf in leaves
+  }
+
+
+def signature_mismatch(expected: Any, actual: Any) -> str:
+  """Describes how two `payload_signature`s differ, or "" if they match."""
+  expected_treedef, expected_leaves = expected
+  actual_treedef, actual_leaves = actual
+  diffs = []
+  for path in sorted(expected_leaves.keys() | actual_leaves.keys()):
+    want = expected_leaves.get(path)
+    got = actual_leaves.get(path)
+    if want != got:
+      diffs.append(f"{path}: expected {want}, got {got}")
+  if not diffs and expected_treedef != actual_treedef:
+    diffs.append(
+        f"structure: expected {expected_treedef}, got {actual_treedef}"
+    )
+  return "; ".join(diffs)
 
 
 class TrainerWorker(abstract_worker.Worker):
@@ -67,6 +119,10 @@ class TrainerWorker(abstract_worker.Worker):
     self._worker_id = worker_id
     self._state = WorkerState.PENDING
     self._last_error: str | None = None
+    # Set by `warmup_compile`: done once its background compile has ended, and
+    # the signature it compiled for, checked against the first real batch.
+    self._warmup_done: threading.Event | None = None
+    self._warmup_signature: Any = None
 
   def _policy_version(self) -> int:
     return int(getattr(self._trainer, "policy_version", 0))
@@ -81,7 +137,23 @@ class TrainerWorker(abstract_worker.Worker):
         }
     )
 
+  def _wait_for_warmup_compile(self) -> None:
+    """Blocks until a background `warmup_compile` has finished, if one runs."""
+    done = self._warmup_done
+    if done is None or done.is_set():
+      return
+    logging.info("Waiting for the trainer warmup compile to finish...")
+    start = time.monotonic()
+    done.wait()
+    logging.info(
+        "Waited %.1fs for the trainer warmup compile.",
+        time.monotonic() - start,
+    )
+
   def _ensure_ready(self) -> None:
+    # Everything that runs the trainer comes through here, so nothing sees it
+    # mid-compile.
+    self._wait_for_warmup_compile()
     if self.state == WorkerState.PENDING:
       self.initialize()
     if self.state != WorkerState.READY:
@@ -99,6 +171,7 @@ class TrainerWorker(abstract_worker.Worker):
 
   def compile(self, dummy_data: Any = None) -> datatypes.Response:
     """Triggers JIT compilation using the provided dummy_data."""
+    self._wait_for_warmup_compile()
     if self.state == WorkerState.PENDING:
       self.initialize()
     self.state = WorkerState.COMPILING
@@ -112,6 +185,77 @@ class TrainerWorker(abstract_worker.Worker):
     finally:
       if self.state == WorkerState.COMPILING:
         self.state = WorkerState.READY
+
+  def warmup_compile(self, dummy_data: Any) -> datatypes.Response:
+    """Compiles the train step for `dummy_data` in a background thread.
+
+    Returns at once, so neither the caller nor this worker's RPC loop waits on
+    the compile; the orchestrator runs rollout meanwhile. Every call that runs
+    the trainer waits for it first (`_ensure_ready`). A failure is logged and
+    leaves the worker READY, and the first `fwd_bwd` then compiles as it would
+    have without the warmup.
+
+    Args:
+      dummy_data: A payload shaped like the real micro-batches, e.g. of
+        `jax.ShapeDtypeStruct` leaves.
+
+    Returns:
+      A response whose `warmup_compile_started` is False if a warmup already
+      ran on this worker.
+    """
+    if self.state == WorkerState.PENDING:
+      self.initialize()
+    if self._warmup_done is not None:
+      return self._response(warmup_compile_started=False)
+    signature = payload_signature(dummy_data)
+    done = threading.Event()
+    stack_size = threading.stack_size(_WARMUP_THREAD_STACK_BYTES)
+    try:
+      threading.Thread(
+          target=self._run_warmup_compile,
+          args=(dummy_data, done),
+          name="trainer-warmup-compile",
+          daemon=True,
+      ).start()
+    finally:
+      threading.stack_size(stack_size)
+    # Assigned only once the thread runs: an event nothing would ever set
+    # would hang every later call.
+    self._warmup_signature = signature
+    self._warmup_done = done
+    return self._response(warmup_compile_started=True)
+
+  def _run_warmup_compile(
+      self, dummy_data: Any, done: threading.Event
+  ) -> None:
+    start = time.monotonic()
+    try:
+      # The mesh and sharding contexts are per thread, so enter them here.
+      with self.execution_context():
+        self._trainer.compile(dummy_data)
+      logging.info(
+          "Trainer warmup compile finished in %.1fs.", time.monotonic() - start
+      )
+    except Exception:  # pylint: disable=broad-exception-caught
+      logging.exception(
+          "Trainer warmup compile failed after %.1fs; the first fwd_bwd"
+          " compiles instead.",
+          time.monotonic() - start,
+      )
+    finally:
+      done.set()
+
+  def routed_experts_shape(self) -> tuple[int, int] | None:
+    """Returns the `(num_layers, top_k)` router replay needs, if known.
+
+    Read off a MaxText engine's config; None for trainers without one.
+    """
+    config = getattr(self._trainer, "_config", None)
+    num_layers = getattr(config, "num_decoder_layers", None)
+    top_k = getattr(config, "num_experts_per_tok", None)
+    if not num_layers or not top_k:
+      return None
+    return int(num_layers), int(top_k)
 
   def start(self) -> datatypes.Response:
     """Starts the worker's main loop."""
@@ -191,6 +335,8 @@ class TrainerWorker(abstract_worker.Worker):
   ) -> datatypes.Response:
     """Executes one forward/backward pass."""
     self._ensure_ready()
+    if self._warmup_signature is not None:
+      self._check_warmup_signature(request.payload)
     req_metadata = dict(request.metadata) if request.metadata else {}
     kwargs.pop("skip_jit", None)
     try:
@@ -203,6 +349,23 @@ class TrainerWorker(abstract_worker.Worker):
       self._last_error = str(exc)
       self.state = WorkerState.ERROR
       raise
+
+  def _check_warmup_signature(self, payload: Any) -> None:
+    """Logs whether the first real batch hit the warmup-compiled step."""
+    expected, self._warmup_signature = self._warmup_signature, None
+    try:
+      mismatch = signature_mismatch(expected, payload_signature(payload))
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+      logging.warning("Could not compare batch to the warmup compile: %s", exc)
+      return
+    if mismatch:
+      logging.warning(
+          "First trainer batch differs from the warmup compile's dummy batch,"
+          " so this fwd_bwd recompiles: %s",
+          mismatch,
+      )
+    else:
+      logging.info("First trainer batch matches the warmup compile.")
 
   def update(self, **kwargs) -> int:
     """Applies the accumulated (mean) gradients as one optimizer update."""

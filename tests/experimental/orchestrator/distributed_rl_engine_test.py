@@ -669,6 +669,31 @@ class DistributedRLEngineTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_trainer_compile_warmup_delegates_to_trainer_worker(self):
+    async def _run():
+      self.mock_actor.routed_experts_shape = mock.AsyncMock(
+          return_value=(60, 10)
+      )
+      self.mock_actor.warmup_compile = mock.AsyncMock(
+          return_value=datatypes.Response(
+              metadata={"warmup_compile_started": True}
+          )
+      )
+      dummy = object()
+
+      shape = await self.engine.trainer_routed_experts_shape()
+      res = await self.engine.warmup_trainer_compile(dummy)
+
+      self.assertEqual(shape, (60, 10))
+      self.assertTrue(res.metadata["warmup_compile_started"])
+      self.mock_actor.warmup_compile.assert_called_once_with(dummy_data=dummy)
+      with self.assertRaises(ValueError):
+        await self.engine.warmup_trainer_compile(
+            dummy, role=datatypes.Role.CRITIC
+        )
+
+    asyncio.run(_run())
+
   def test_sync_weights_delegates_to_coordinator(self):
     async def _run():
       class _FakeResult:
