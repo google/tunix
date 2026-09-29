@@ -224,11 +224,11 @@ export FLOAT32_GATE_LOGITS="true"
 export FLOAT32_LOGITS="true"
 
 # Optimizer Hyperparameters
-export LEARNING_RATE="1e-6"
+export LEARNING_RATE="${LEARNING_RATE:-1e-6}"
 export ADAM_B1=0.9
 export ADAM_B2=0.999
 export WEIGHT_DECAY=0.0
-export MAX_GRAD_NORM="0.125"
+export MAX_GRAD_NORM="${MAX_GRAD_NORM:-0.125}"
 # The maxtext trainer clips only via clip_by_global_norm; an empty chain type
 # would leave it at base.yml's 1.0.
 export OPT_CHAIN_TYPE="clip_by_global_norm"
@@ -257,7 +257,7 @@ export POOL_NAME_FORMAT="${POOL_NAME_FORMAT:-}"
 export TEMPLATE_NAME_PREFIX="${TEMPLATE_NAME_PREFIX:-}"
 export SANDBOX_NODE_SELECTOR_KEY="cloud.google.com/gke-nodepool"
 export SANDBOX_NODE_SELECTOR_VAL="${SANDBOX_NODE_SELECTOR_VAL:-sandbox-np}"
-export MAX_WARMPOOL_REPLICAS=2
+export MAX_WARMPOOL_REPLICAS="${MAX_WARMPOOL_REPLICAS:-2}"
 export ROLLOUT_MAX_CONCURRENCY="${ROLLOUT_MAX_CONCURRENCY:-256}"
 export MAX_CONCURRENCY="${MAX_CONCURRENCY:-256}"
 export STEP_TIMEOUT_SECS="${STEP_TIMEOUT_SECS:-300}"

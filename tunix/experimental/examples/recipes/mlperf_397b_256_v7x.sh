@@ -70,10 +70,15 @@ export TRAINER_MESH_CONTEXT=4
 # (mlperf_397b_1024_v7x.sh) override ROLLOUT_REPLICAS, ROLLOUT_TPU_SLICE and
 # VLLM_DATA_PARALLEL_SIZE; expert then fills the slice's devices (2 per chip) / dp.
 export ROLLOUT_JOBSET_YAML="jobset.mcjax.ray.yaml"
-export ROLLOUT_TPU_SLICE="${ROLLOUT_TPU_SLICE:-tpu7x:2x2x2}"
+export ROLLOUT_TPU_SLICE="${ROLLOUT_TPU_SLICE:-tpu7x:2x2x4}"
+export VLLM_DATA_PARALLEL_SIZE="${VLLM_DATA_PARALLEL_SIZE:-2}"
 _rollout_dims="${ROLLOUT_TPU_SLICE#*:}"
 export ROLLOUT_MESH_EXPERT="${ROLLOUT_MESH_EXPERT:-$(( 2 * ${_rollout_dims//x/*} / ${VLLM_DATA_PARALLEL_SIZE:-1} ))}"
-export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-32}"
+export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-16}"
+
+# Sandbox Concurrency
+export MAX_WARMPOOL_REPLICAS="${MAX_WARMPOOL_REPLICAS:-16}"
+export MAX_CONCURRENCY="${MAX_CONCURRENCY:-1024}"
 
 # vLLM Rollout Configuration
 export VLLM_ADDITIONAL_CONFIG='{"sharding":{"sharding_strategy":{"expert_parallelism":'"${ROLLOUT_MESH_EXPERT}"',"tensor_parallelism":1,"enable_dp_attention":true}},"custom_mamba_cache_multiplier":16,"maxtext_config":{"scan_layers":false,"attention":"vllm_rpa","allow_split_physical_axes":true,"use_multimodal":false,"prefuse_moe_weights":true,"per_device_batch_size":0.0}}'
