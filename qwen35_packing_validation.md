@@ -1,14 +1,22 @@
 # Sequence packing on Qwen3.5-35B-A3B: validation, performance, and test inventory
 
 **Author:** Anisha Mazumder
-**Last Modified:** 2026-09-21
+**Last Modified:** 2026-09-28
+
+> **Update, 2026-09-28.** §§2-9 measure `decoder_block: qwen3`, where attention
+> is the only operator mixing tokens across positions. Production is `qwen3_5`:
+> 30 of its 40 layers are GatedDeltaNet, a recurrence plus a depthwise
+> convolution, which keep segment boundaries by their own means rather than
+> through the attention mask.
+> [MaxText #5351](https://github.com/AI-Hypercomputer/maxtext/pull/5351) added
+> that handling; **§10** extends the measurement to cover it.
 
 Packing is confirmed active and correct on two completed GRPO runs:
 `maz-q35-10` (100 steps) and `maz-q35-11` (20 steps), both 2026-09-17.
 A matched unpacked control, `maz-q35-13` (20 steps, 2026-09-18), supplies a
 prompt-paired measurement of its effect on generation quality.
 
-This document answers five questions:
+This document answers six questions:
 
 1. Is sequence packing actually on in these runs, and how would you check that yourself?
 2. What did it cost or save?
@@ -16,6 +24,7 @@ This document answers five questions:
 4. Do the two assemblers produce the same loss and the same gradient when handed
    the same trajectories?
 5. Which tests establish that the packed arithmetic equals the unpacked arithmetic?
+6. Which of those answers hold for the decoder block production actually runs?
 
 Everything below is measured, not estimated. Every number was re-derived from
 Cloud Logging while writing this document; the log links reproduce the raw
@@ -515,10 +524,13 @@ in bfloat16 never computes the same quantity twice and compares.
 Covered at the floor of float32 arithmetic, on real length statistics, at both
 random initialization and a trained checkpoint: the assembler, the segment-id
 plumbing, the attention mask, the loss reduction and the backward pass. Not
-covered: **MoE expert routing**, since Qwen3-0.6B is dense; **cross-step
-optimizer state**, since the harness stops at `fwd_bwd` (§3 covers that range,
-with the weaker guarantee described there); and the production **scale and mesh**
-— 0.6B against 35B, `pack_size` 4 against 8, `trainer_fsdp` 4 against 8.
+covered: **the production decoder block**, since Qwen3-0.6B is
+`decoder_block: qwen3`, where attention is the only operator mixing tokens
+across positions — §10 extends the coverage to the GatedDeltaNet layers;
+**MoE expert routing**, since Qwen3-0.6B is dense; **cross-step optimizer
+state**, since the harness stops at `fwd_bwd` (§3 covers that range, with the
+weaker guarantee described there); and the production **scale and mesh** — 0.6B
+against 35B, `pack_size` 4 against 8, `trainer_fsdp` 4 against 8.
 
 Reproducing. The numbers above were produced on Tunix `maz-q35` at `929737ea`
 and MaxText `packing-compare-harness` at `02cf283fa`. Neither branch is
@@ -575,22 +587,32 @@ the appendix, for anyone reimplementing it.
 
 The suites in this section are on `main` in both repositories — unlike the §4
 harness, which is a file on `maz-q35`. Counts below are from runs on a CPU box
-on 2026-09-18; all exit 0.
+on 2026-09-18; all exit 0. §5.1 also carries a second set of counts from
+2026-09-28, after the parameterization described in §10.
 
 ### 5.1 The core equivalence tests (MaxText)
 
 `tests/post_training/unit/maxtext_engine_packing_test.py` — **17 tests,
-6 subtests, 126.83 s, exit 0**
+6 subtests, 126.83 s, exit 0** as of 2026-09-18; **18 tests, 10 subtests,
+158.35 s** after the §10 parameterization.
 
 ```bash
 JAX_PLATFORMS=cpu python3 -m pytest tests/post_training/unit/maxtext_engine_packing_test.py -q
 ```
 
+Until 2026-09-28 every test below ran a single-layer `decoder_block: qwen3`
+fixture. The two marked **[both]** now also run a four-layer `qwen3_5` arm, three
+of whose layers are GatedDeltaNet (§10). The rest stay `qwen3`-only: they assert
+engine accumulation arithmetic, which is architecture-independent, except
+`test_segment_positions_matter_only_up_to_a_per_segment_offset`, whose claim is
+about RoPE — a GDN layer takes no positions at all.
+
 | Class | Test | What it establishes |
 | --- | --- | --- |
-| `PackedVersusUnpackedLogpsTest` | `test_packed_logps_match_unpacked_per_segment` | Per-token log-probs of a packed row equal those of the same sequences run separately. Every other test in this table depends on this one holding. |
-| | `test_segment_positions_matter_only_up_to_a_per_segment_offset` | A sequence's result does not depend on where in the row it landed. Establishes segment isolation in attention and position encoding. |
-| `PackedVersusUnpackedGradientsTest` | `test_packed_gradients_match_unpacked_over_the_whole_tree` | Gradients match across the entire parameter pytree, not just the loss scalar. |
+| `PackedVersusUnpackedLogpsTest` | `test_packed_logps_match_unpacked_per_segment` **[both]** | Per-token log-probs of a packed row equal those of the same sequences run separately. Every other test in this table depends on this one holding. |
+| | `test_segment_positions_matter_only_up_to_a_per_segment_offset` | A sequence's result does not depend on where in the row it landed. Establishes segment isolation in attention and position encoding. `qwen3` only: the claim is about RoPE. |
+| | `test_the_qwen3_5_fixture_is_a_gated_delta_net_stack` | New 2026-09-28. The `qwen3_5` arm really builds three `Qwen3NextGatedDeltaNet` layers under one attention layer. Without it, a change to the cycle rule would silently turn the **[both]** arms back into attention runs. |
+| `PackedVersusUnpackedGradientsTest` | `test_packed_gradients_match_unpacked_over_the_whole_tree` **[both]** | Gradients match across the entire parameter pytree, not just the loss scalar. |
 | | `test_packed_denominator_counts_segments_not_rows` | The loss denominator is the segment count, not the row count. Getting this wrong silently scales the learning rate by roughly 6× at our density. |
 | | `test_packed_accumulation_over_uneven_micro_batches` | Microbatches holding different numbers of segments still accumulate to the correct total — which is exactly our situation (2 to 89 trajectories per microbatch). |
 | `PackedDenominatorPartitionsTest` | `test_any_partition_into_packed_micro_batches_gives_the_full_batch_gradient` | *How* the packer splits a step into microbatches cannot change the gradient. Since FFD's split depends on generated lengths and so varies step to step, this is the property that makes our runs reproducible in expectation. |
@@ -675,6 +697,9 @@ JAX_PLATFORMS=cpu python3 -m pytest \
   tests/post_training/unit/tunix_adapter_test.py \
   tests/post_training/unit/router_replay_engine_test.py -q
 # observed: 17 passed + 6 subtests (126.83s); 28 passed (29.48s)
+# after the §10 parameterization, on a branch carrying MaxText #5351:
+#   18 passed + 10 subtests (158.35s)
+# on main, which does not carry it: 2 failed + 18 passed + 8 subtests (153.07s)
 
 # Tunix (google/tunix, main)
 cd tunix
@@ -700,7 +725,9 @@ A larger end-to-end comparison harness exists at
 ## 6. What these runs do *not* exercise
 
 Three code paths related to packing are inactive here. Stating this explicitly
-matters, because open issues against them do not apply to these results.
+matters, because open issues against them do not apply to these results. This
+section is about code the runs never reach; for code the runs do reach but the
+measurements in §§4-5 do not, see §10.
 
 **Router replay is not invoked.** `router_replay_gen_model_input_fn` is defined
 at `src/maxtext/training_engine/maxtext_engine.py:414` and has no production
@@ -865,8 +892,9 @@ comparison.
 | 2.33× less padding | 16.9M padded token slots against 39.3M |
 | 1.74× faster steps | 98.48 s packed against 171.74 s unpacked, same data, same image |
 | No recompilation after step 1 | 99 warm steps, median 97.12 s, stdev 4.48 s, no sustained step-up |
-| Packed arithmetic equals unpacked, measured directly | one 64-trajectory set through both assemblers, identical weights: whole-tree gradient relative L2 3.12e-04 at a trained checkpoint, bracketed by two null controls containing no packing at 3.00e-04 and 3.22e-04 (§4) |
-| Packed arithmetic equals unpacked, by unit test | 17 + 28 MaxText tests and 132 Tunix tests, all passing |
+| Packed arithmetic equals unpacked **on attention**, measured directly | one 64-trajectory set through both assemblers, identical weights: whole-tree gradient relative L2 3.12e-04 at a trained checkpoint, bracketed by two null controls containing no packing at 3.00e-04 and 3.22e-04 (§4). Qwen3-0.6B, `decoder_block: qwen3`; the 30 of 40 production layers that are GatedDeltaNet are covered separately in §10 |
+| Packed arithmetic equals unpacked, by unit test | 17 + 28 MaxText tests and 132 Tunix tests, all passing — all on `decoder_block: qwen3` until 2026-09-28 (§10) |
+| Packed arithmetic equals unpacked **on a GatedDeltaNet stack** | added 2026-09-28, CPU scale: forward and whole-tree backward pass with MaxText #5351 and fail without it, at 3.57e+01 logp against a scale of 44.75 (§10). Not run at production scale, nor on the `use_gdn_kernel` Pallas path |
 | Generation quality is unchanged | paired on all 320 prompts: generated length −1.22 chars, 95% CI [−12.1, +9.7]; reward +0.0024, 95% CI [−0.0038, +0.0086] |
 | The comparison has power | resolves an effect 12× smaller than training's own 132-char shift over the same 20 steps |
 | The difference does not grow with training | post-step-0 divergence at or below the step-0 sampling-noise floor; all trend slopes p ≥ 0.124 |
@@ -875,10 +903,123 @@ comparison.
 
 ---
 
+## 10. Extending the measurement to the GatedDeltaNet layers
+
+Added 2026-09-28, alongside
+[MaxText #5351](https://github.com/AI-Hypercomputer/maxtext/pull/5351)
+(A9isha, branch `anisha/gdn-packed-segment-reset`, merged as `6c2adb7be`),
+which gives the GatedDeltaNet layers the segment handling attention already
+had. This section extends the measurement to that operator, and is the coverage
+behind
+[MaxText #5422](https://github.com/AI-Hypercomputer/maxtext/pull/5422).
+
+### 10.1 The operator §§4-5 did not reach
+
+| | measured in §§4-5 | production |
+| --- | --- | --- |
+| Config | `qwen3-0.6b.yml` | `qwen3.5-35b-a3b.yml` |
+| `decoder_block` | `qwen3` | `qwen3_5` |
+| Layers mixing tokens by attention | 28 of 28 | 10 of 40 |
+| Layers mixing tokens by GatedDeltaNet | 0 | 30 |
+
+`qwen3_5.py::Qwen3_5DecoderLayer.__init__` makes a layer full attention when
+`(layer_idx + 1) % inhomogeneous_layer_cycle_interval == 0`; production sets
+that interval to 4. §4 ran Qwen3-0.6B and the `_tiny_cfg` fixture behind §5.1
+was a single `qwen3` layer, so three quarters of the production layers are a
+different operator from the one those measurements exercised.
+
+§4.5 filed the 0.6B-for-35B substitution under **scale**. It belongs under
+architecture: the two configs name different `decoder_block` values, so the
+substitution changed the operator under test, not its size.
+
+### 10.2 Attention coverage does not carry over
+
+A `qwen3` layer mixes tokens in one place, and that place reads the attention
+mask. Correct `segment_ids` therefore buy segment isolation outright, which is
+what §5.1 and §5.2 test.
+
+A GDN layer mixes tokens in two places, neither of which reads that mask: a
+chunked recurrence carrying state along the row, which must be **reset** at a
+boundary, and a depthwise causal convolution, whose taps must be **dropped**
+where the window crosses one. #5351 supplies both — a `segment_ids` argument on
+`jax_chunk_gated_delta_rule`, and a new `segmented_causal_depthwise_conv1d`.
+
+The two operators are therefore independent: §§4-5 can hold exactly as written
+and say nothing either way about the GDN path.
+
+### 10.3 The runs in §3 predate the fix
+
+#5351 was committed 2026-09-23. The image under test, `q35-0916-v3`, was built
+2026-09-16 and the runs are 2026-09-17 and -18, so all four ran the pre-#5351
+GDN path. §3 reports length −1.22 chars, 95% CI [−12.1, +9.7], which is a bound
+rather than a clean bill: generation is unseeded, reward was near saturation,
+and the window was 20 steps. That comparison resolves training's own 132-char
+shift; it does not resolve this.
+
+TODO(packing): rerun the §4 harness on `qwen3.5-35b-a3b` itself, null control
+unchanged. Blocker: the harness assumes a 4-chip v5p, so §10.4 is CPU-scale
+only.
+
+### 10.4 The new measurement
+
+`tests/post_training/unit/maxtext_engine_packing_test.py` is parameterized over
+`_DECODER_BLOCKS = ("qwen3", "qwen3_5")`. The `qwen3_5` arm is four layers —
+`WeightConverter` rejects a count that is not a multiple of the cycle interval —
+giving the production 3 GDN : 1 attention mix, pinned by
+`test_the_qwen3_5_fixture_is_a_gated_delta_net_stack`. Two fixture values carry
+the coverage: `gdn_chunk_size: 8`, since at production's 64 the 12-token row is
+one chunk and the inter-chunk state carry never runs, and
+`gdn_conv_kernel_dim: 4`, wide enough to straddle a boundary. Every `qwen3_5`
+layer is MoE, so the arm also routes two experts at top-1, closing part of
+§4.5's MoE gap at CPU scale.
+
+**What the arm resolves.** #5351 is on `origin/atwigg/mlperf` only, so the same
+file ran in two worktrees — `2fd1b5fad`, which carries it, and `24216aae6` on
+`main`, which does not.
+
+| | with #5351 | without |
+| --- | --- | --- |
+| Suite | 18 passed, 10 subtests, 158.35 s | **2 failed**, 18 passed, 8 subtests, 153.07 s |
+| Which failed | — | exactly the two `qwen3_5` subtests |
+| Forward `qwen3`, max abs logp diff | 0.0 exactly | 0.0 exactly |
+| Forward `qwen3_5`, max abs logp diff | 1.53e-05 | **3.5722e+01** (scale 44.75) |
+| &nbsp;&nbsp;*by segment* | 0, 1.5e-05, 0 | 0, 3.57e+01, 2.44e+01 |
+| Gradient `qwen3`, whole-tree rel L2 | — | 2.1455e-07 (13 leaves) |
+| Gradient `qwen3_5`, whole-tree rel L2 | — | **1.7492e+00** (69 leaves) |
+
+Segment 1 is clean in both columns because nothing precedes it to leak from.
+A whole-tree gradient rel L2 of 1.75 means the two gradients are unrelated, so
+unlike §4's 3e-04 this needs no null control to read — §4's calibration is
+delicate precisely because what it measures is already correct.
+
+The parameterization is
+[MaxText #5422](https://github.com/AI-Hypercomputer/maxtext/pull/5422), against
+`atwigg/mlperf` rather than `main`, since the `qwen3_5` arm is red until #5351
+lands on `main`.
+
+TODO(packing): `use_gdn_kernel: true` selects a Pallas kernel #5351 does not
+touch; [#5364](https://github.com/AI-Hypercomputer/maxtext/pull/5364) is the
+same fix there. The flag exists only on `atwigg/mlperf`, so these runs took the
+pure-JAX path and the test above does not cover the kernel path.
+
+### 10.5 The scope check this adds
+
+An equivalence comparison is only about the operators the fixture instantiates,
+and nothing inside the harness reports which those are. So before measuring,
+list the operators that move information between token positions in the
+production configuration and check the fixture builds each one. For `qwen3_5`
+that list is attention, the GDN recurrence, the GDN depthwise convolution, and
+MoE routing. §§4-5 built the first;
+`test_the_qwen3_5_fixture_is_a_gated_delta_net_stack` is that check made
+executable for the other three.
+
+---
+
 ## Appendix. Five ways to get a meaningless PASS
 
 Recorded for anyone reimplementing the §4 harness. Each was hit while building
-it, and each yields a verdict that carries no information.
+it, and each yields a verdict that carries no information. §10.5 adds a sixth
+check, about the model handed to the harness rather than the harness itself.
 
 | Trap | Why the verdict is empty | Guard |
 | --- | --- | --- |
