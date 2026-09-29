@@ -1425,6 +1425,229 @@ class RemoteExecutionTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_dispatch_task_deduplicates_identical_request_id_and_allows_failed_retry(
+      self,
+  ):
+    class CountingWorker:
+
+      def __init__(self):
+        self.calls = 0
+        self.should_fail = False
+
+      async def run_job(self, x: int) -> int:
+        self.calls += 1
+        await asyncio.sleep(0.02)
+        if self.should_fail:
+          raise RuntimeError("transient worker error")
+        return x * 2
+
+    async def _run():
+      worker = CountingWorker()
+      server = remote_lib.InProcessRemoteExecutionServer(worker)
+
+      # 1. Duplicate dispatch with the same request_id should only execute once.
+      req1 = remote_lib.ExecutionRequest(
+          request_id="idemp_1", method_name="run_job", args=(21,)
+      )
+      req1_dup = remote_lib.ExecutionRequest(
+          request_id="idemp_1", method_name="run_job", args=(21,)
+      )
+      ack1 = await server.dispatch_task(req1)
+      ack2 = await server.dispatch_task(req1_dup)
+      self.assertEqual(ack1, "idemp_1")
+      self.assertEqual(ack2, "idemp_1")
+
+      resp = await server.poll_response(timeout_s=1.0, ack_request_id="")
+      self.assertIsNotNone(resp)
+      self.assertEqual(resp.unwrap(), 42)
+      self.assertEqual(worker.calls, 1)
+      # Acknowledge idemp_1 and confirm no second duplicate item is in the queue
+      empty_resp = await server.poll_response(
+          timeout_s=0.05, ack_request_id="idemp_1"
+      )
+      self.assertIsNone(empty_resp)
+      # Even after ACK, a late transport retry of idemp_1 is still deduplicated
+      await server.dispatch_task(req1_dup)
+      self.assertEqual(worker.calls, 1)
+
+      # 2. If a dispatched task fails, its request_id is evicted so an
+      # application-level retry with the same request_id can re-execute.
+      worker.should_fail = True
+      fail_req = remote_lib.ExecutionRequest(
+          request_id="retryable_fail_1", method_name="run_job", args=(5,)
+      )
+      await server.dispatch_task(fail_req)
+      err_resp = await server.poll_response(
+          timeout_s=1.0, ack_request_id="idemp_1"
+      )
+      self.assertIsNotNone(err_resp)
+      self.assertIsNotNone(err_resp.error_message)
+      self.assertEqual(worker.calls, 2)
+
+      worker.should_fail = False
+      await server.dispatch_task(fail_req)
+      recovered_resp = await server.poll_response(
+          timeout_s=1.0, ack_request_id="retryable_fail_1"
+      )
+      self.assertIsNotNone(recovered_resp)
+      self.assertEqual(recovered_resp.unwrap(), 10)
+      self.assertEqual(worker.calls, 3)
+
+    asyncio.run(_run())
+
+  def test_poll_response_redelivers_unacked_and_handles_multiple_unacked(self):
+    async def _run():
+      server = remote_lib.InProcessRemoteExecutionServer(
+          StubWorkerEngine("w_poll")
+      )
+      await server.dispatch_task(
+          remote_lib.ExecutionRequest(
+              request_id="poll_1",
+              method_name="compute_trajectory",
+              args=("p1",),
+          )
+      )
+      await server.dispatch_task(
+          remote_lib.ExecutionRequest(
+              request_id="poll_2",
+              method_name="compute_trajectory",
+              args=("p2",),
+          )
+      )
+
+      # First poll pops poll_1, but suppose reply drops in transit (next poll
+      # sends ack="")
+      first = await server.poll_response(timeout_s=1.0, ack_request_id="")
+      self.assertIsNotNone(first)
+      first_id = first.request_id
+
+      # Retry poll with empty ack_request_id must re-deliver first_id!
+      redelivered = await server.poll_response(timeout_s=1.0, ack_request_id="")
+      self.assertIsNotNone(redelivered)
+      self.assertEqual(redelivered.request_id, first_id)
+
+      # Simulate a second unacked item staged simultaneously (e.g. overlapping
+      # zombie poll)
+      second = await server._get_response_queue().get()
+      server._unacked_responses[second.request_id] = second
+
+      # If client ACKs second.request_id first, first_id must still be
+      # preserved and re-delivered
+      still_unacked = await server.poll_response(
+          timeout_s=1.0, ack_request_id=second.request_id
+      )
+      self.assertIsNotNone(still_unacked)
+      self.assertEqual(still_unacked.request_id, first_id)
+
+      # Once client ACKs first_id, _unacked_responses is empty
+      done = await server.poll_response(
+          timeout_s=0.0, ack_request_id=first_id
+      )
+      self.assertIsNone(done)
+      self.assertEmpty(server._unacked_responses)
+
+    asyncio.run(_run())
+
+  def test_execute_idempotent_request_coalesces_inflight_and_evicts_on_ack(
+      self,
+  ):
+    class StatefulTrainer:
+
+      def __init__(self):
+        self.step_count = 0
+
+      async def update_step(self, delta: int) -> int:
+        await asyncio.sleep(0.05)
+        self.step_count += delta
+        return self.step_count
+
+    async def _run():
+      trainer = StatefulTrainer()
+      server = remote_lib.InProcessRemoteExecutionServer(trainer)
+
+      req_a1 = remote_lib.ExecutionRequest(
+          request_id="step_a", method_name="update_step", args=(1,)
+      )
+      req_a2 = remote_lib.ExecutionRequest(
+          request_id="step_a", method_name="update_step", args=(1,)
+      )
+
+      # 1. In-flight coalescing: two concurrent calls with request_id="step_a"
+      # must coalesce onto the same Task and increment step_count only once.
+      res1, res2 = await asyncio.gather(
+          server.execute_idempotent_request(req_a1),
+          server.execute_idempotent_request(req_a2),
+      )
+      self.assertEqual(res1.unwrap(), 1)
+      self.assertEqual(res2.unwrap(), 1)
+      self.assertEqual(trainer.step_count, 1)
+      self.assertIn("step_a", server._completed_executions)
+
+      # 2. Post-execution retry: repeating "step_a" after completion returns the
+      # cached response without re-running update_step.
+      res3 = await server.execute_idempotent_request(req_a1)
+      self.assertEqual(res3.unwrap(), 1)
+      self.assertEqual(trainer.step_count, 1)
+
+      # 3. Piggybacked ack_execute_ids on the next request ("step_b") evicts
+      # "step_a".
+      req_b = remote_lib.ExecutionRequest(
+          request_id="step_b",
+          method_name="update_step",
+          args=(10,),
+          ack_execute_ids=("step_a",),
+      )
+      res_b = await server.execute_idempotent_request(req_b)
+      self.assertEqual(res_b.unwrap(), 11)
+      self.assertEqual(trainer.step_count, 11)
+      self.assertNotIn("step_a", server._completed_executions)
+      self.assertIn("step_b", server._completed_executions)
+
+    asyncio.run(_run())
+
+  def test_grpc_actor_handle_retries_transient_unavailable_without_duplicate_execution(
+      self,
+  ):
+    class CounterService:
+
+      def __init__(self):
+        self.exec_count = 0
+
+      async def increment(self, val: int) -> int:
+        self.exec_count += 1
+        return self.exec_count * val
+
+    async def _run():
+      service = CounterService()
+      async with running_grpc_server(service) as (server, handle):
+        handle._ensure_async_channel()
+        real_rpc = handle._rpc
+        attempts = 0
+
+        async def _flaky_rpc(chunks, **kwargs):
+          nonlocal attempts
+          attempts += 1
+          if attempts == 1:
+            # Simulate server having executed the request, but TCP connection
+            # dropping with UNAVAILABLE while returning the response stream.
+            request = remote_lib.ExecutionRequest.deserialize_chunks(chunks)
+            await server.execute_idempotent_request(request)
+            err = remote_lib._grpc_lib.RpcError("Socket reset")
+            err.code = lambda: remote_lib._grpc_lib.StatusCode.UNAVAILABLE
+            raise err
+          async for chunk in real_rpc(chunks, **kwargs):
+            yield chunk
+
+        handle._rpc = _flaky_rpc
+        result = await handle.asubmit("increment", 7)
+        self.assertEqual(result, 7)
+        self.assertEqual(attempts, 2)
+        # Server executed increment() exactly once despite attempt #1 executing
+        # on server!
+        self.assertEqual(service.exec_count, 1)
+
+    asyncio.run(_run())
+
   def test_chunked_serialization_roundtrip_with_numpy_and_empty_buffers(self):
     rng = np.random.default_rng(42)
     packed_tokens = rng.integers(0, 32000, size=(16, 1024), dtype=np.int32)
