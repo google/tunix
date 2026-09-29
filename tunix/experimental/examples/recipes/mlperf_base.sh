@@ -59,10 +59,11 @@ export VERIFY_WEIGHTS="true"
 export TRAINER_PADDED_MOE_MLP_DIM=""
 export WEIGHT_SYNC_MODE="raiden"
 
+export RAIDEN_BROADCAST_HOST_RATIO="1.0"
+export RAIDEN_BROADCAST_PIPELINE_STAGES="4"
+export TPU_RAIDEN_DATA_NICS="${TPU_RAIDEN_DATA_NICS:-eth0}"
 export RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFER="${RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFER:-0}"
-export ENABLE_MULTI_NUMA="0"
-export RAIDEN_BROADCAST_K="64"
-export TPU_RAIDEN_DATA_NICS="eth0"
+export ENABLE_MULTI_NUMA="${ENABLE_MULTI_NUMA:-0}"
 
 # ==============================================================================
 # WandB Configuration
