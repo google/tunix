@@ -248,6 +248,14 @@ arg_parser.add_argument(
     ),
 )
 arg_parser.add_argument(
+    "--no_prefix_caching", action="store_true", default=False,
+    help=(
+        "Disable vLLM automatic prefix caching in the rollout engine (on by"
+        " default). Used to test whether the rare single-token"
+        " sampler-vs-trainer logp outliers come from reused KV blocks."
+    ),
+)
+arg_parser.add_argument(
     "--lr_schedule", type=str, default="warmup_cosine",
     choices=["warmup_cosine", "constant"],
     help=(
@@ -759,10 +767,11 @@ vllm_rollout_dict = {
     "rollout_vllm_kwargs": {
         "kv_cache_metrics": True,
         "disable_log_stats": False,
-        "enable_prefix_caching": True,
+        "enable_prefix_caching": not args.no_prefix_caching,
         "dtype": "bfloat16",
     },
 }
+print(f"vLLM rollout: enable_prefix_caching={not args.no_prefix_caching}")
 
 if ROLLOUT_ENGINE == "sglang_jax":
   rollout_engine_config = base_rollout.RolloutConfig(
