@@ -15,6 +15,7 @@
 """Common configuration classes for Tunix."""
 
 import dataclasses
+import math
 from typing import Any, List, Optional, TYPE_CHECKING, Tuple
 
 import flax
@@ -270,6 +271,46 @@ class RolloutConfig:
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
+class RLProfileConfig:
+  """Configuration for targeted Reinforcement Learning profiling.
+
+  This profiler captures discrete execution traces across both Trainer and
+  Sampler hosts. Due to the multi-host nature of RL, it tracks function
+  invocations independently by role.
+
+  Attributes:
+    start_step: The invocation index at which to start profiling for each role.
+      Note that this counts function invocations per role, not outer global
+      steps. Defaults to 2.
+    num_steps: The number of invocations to profile for each role once
+      start_step is reached. Note that this counts function invocations per
+      role, not outer global steps. Defaults to 1.
+    output_dir: Location to save raw JAX `.xplane.pb` traces.
+    mldiagnostics_dir: Explicit GCS output directory for ML Diagnostics tracing.
+    managed_mldiagnostics: If True, securely streams traces to the ML
+      Diagnostics visual UI unified under a single MLRun, bypassing local
+      output_dir dumps.
+    timeout_secs: Timeout in seconds for joining background trace deactivation
+      or upload threads. Defaults to 60.0.
+  """
+
+  start_step: int = 2
+  num_steps: int = 1
+  output_dir: str = ""
+  mldiagnostics_dir: str = ""
+  managed_mldiagnostics: bool = False
+  timeout_secs: float = 60.0
+
+  def __post_init__(self):
+    if self.start_step < 0:
+      raise ValueError(f"start_step must be >= 0. Got: {self.start_step}")
+    if self.num_steps <= 0:
+      raise ValueError(f"num_steps must be > 0. Got: {self.num_steps}")
+    if math.isnan(self.timeout_secs) or self.timeout_secs <= 0:
+      raise ValueError(f"timeout_secs must be > 0. Got: {self.timeout_secs}")
+
+
+@dataclasses.dataclass(slots=True, kw_only=True)
 class TrainingConfig:
   """Configuration for the trainer."""
 
@@ -359,6 +400,8 @@ class RLTrainingConfig(TrainingConfig):
       512, etc. When value is 0, it means this feature is disabled. This also
       requires model to support `skip_lm_head` in its `__call__` method and have
       a `compute_final_logits` method.
+    rl_profiler_config: Configuration for targeted Reinforcement Learning
+      profiling.
   """
 
   actor_optimizer: optax.GradientTransformation
@@ -368,9 +411,19 @@ class RLTrainingConfig(TrainingConfig):
   rollout_micro_batch_size: int | None = None
   compute_logps_micro_batch_size: int | None = None
   compute_logps_chunk_size: int = 0
+  rl_profiler_config: Optional[RLProfileConfig] = None
 
   def __post_init__(self):
     """Validates the configuration after initialization."""
+    if (
+        self.profiler_options is not None
+        and self.rl_profiler_config is not None
+    ):
+      raise ValueError(
+          "Cannot supply both SFT profiler_options and targeted"
+          " rl_profiler_config. Choose one."
+      )
+
     for name in [
         "mini_batch_size",
         "train_micro_batch_size",

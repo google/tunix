@@ -608,62 +608,64 @@ class RLLearner(abc.ABC, Generic[TConfig]):
           full_batch_iterator, iterator_batch_size
       )
 
-    while True:  # loop over M
-      try:
-        initial_steps = self._iter_steps
+    try:
+      while True:  # loop over M
+        try:
+          initial_steps = self._iter_steps
 
-        with self.rl_engine.perf.span_group("global_step"):
-          self._run_global_step(
-              full_batch_size,
-              mini_batch_size,
-              service_target_batch_size,
-              iterator_steps_per_mini_batch,
-              train_iterator,
-              eval_ds,
-              skip_jit,
+          with self.rl_engine.perf.span_group("global_step"):
+            self._run_global_step(
+                full_batch_size,
+                mini_batch_size,
+                service_target_batch_size,
+                iterator_steps_per_mini_batch,
+                train_iterator,
+                eval_ds,
+                skip_jit,
+            )
+
+            if self.should_sync_weights:
+              logging.debug(
+                  "Syncing weights at global step %s mini batch step %s",
+                  self.rl_engine.global_steps,
+                  self._iter_steps,
+              )
+              with self.rl_engine.perf.span(
+                  "weight_sync", self.rl_engine.perf.all_devices
+              ), self.rl_engine.perf_v2.span(
+                  perf_constants.WEIGHT_SYNC,
+                  self.rl_engine.perf_v2.all_devices,
+                  tags={
+                      perf_constants.STEP: self.rl_engine.global_steps,
+                  },
+              ):
+                with jax.profiler.StepTraceAnnotation(
+                    "sync_sampler_weights", step_num=initial_steps
+                ):
+                  self.rl_engine.sync_weights()
+            else:
+              self.rl_engine.global_steps += (
+                  1  # manually increment the global steps.
+              )
+
+          self.rl_engine.buffer_metrics(
+              self.rl_engine.perf.export(),
+              mode=rl_engine_lib.Mode.TRAIN,
+          )
+          self.rl_engine.buffer_metrics(
+              self.rl_engine.perf_v2.export(),
+              mode=rl_engine_lib.Mode.TRAIN,
           )
 
-          if self.should_sync_weights:
-            logging.debug(
-                "Syncing weights at global step"
-                f" {self.rl_engine.global_steps} mini batch step"
-                f" {self._iter_steps}"
-            )
-            with self.rl_engine.perf.span(
-                "weight_sync", self.rl_engine.perf.all_devices
-            ), self.rl_engine.perf_v2.span(
-                perf_constants.WEIGHT_SYNC,
-                self.rl_engine.perf_v2.all_devices,
-                tags={
-                    perf_constants.STEP: self.rl_engine.global_steps,
-                },
-            ):
-              with jax.profiler.StepTraceAnnotation(
-                  "sync_sampler_weights", step_num=initial_steps
-              ):
-                self.rl_engine.sync_weights()
-          else:
-            self.rl_engine.global_steps += (
-                1  # manually increment the global steps.
-            )
-
-        self.rl_engine.buffer_metrics(
-            self.rl_engine.perf.export(),
-            mode=rl_engine_lib.Mode.TRAIN,
-        )
-        self.rl_engine.buffer_metrics(
-            self.rl_engine.perf_v2.export(),
-            mode=rl_engine_lib.Mode.TRAIN,
-        )
-
-        if (
-            self.rl_engine.actor_trainer.train_steps  # pyrefly: ignore[unsupported-operation]
-            >= self.rl_engine.cluster_config.training_config.max_steps
-        ):
+          if (
+              self.rl_engine.actor_trainer.train_steps  # pyrefly: ignore[unsupported-operation]
+              >= self.rl_engine.cluster_config.training_config.max_steps
+          ):
+            break
+        except StopIteration:
           break
-      except StopIteration:
-        break
-    self.rl_engine.close()
+    finally:
+      self.rl_engine.close()
 
   def _run_global_step(
       self,
