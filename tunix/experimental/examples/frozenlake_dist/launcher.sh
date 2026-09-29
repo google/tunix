@@ -90,6 +90,7 @@ TRAJECTORY_LOG_DIR=${TRAJECTORY_LOG_DIR:-}
 MODEL_DTYPE=${MODEL_DTYPE:-float32}
 MODEL_LOAD_DTYPE=${MODEL_LOAD_DTYPE:-$MODEL_DTYPE}
 DEBUG=${DEBUG:-0}
+GRID_SIZE_RANGE=${GRID_SIZE_RANGE:-2 9}
 
 # Qwen3-8B defaults target an 8-chip host split between trainer and rollout.
 TRAINER_TPU_CHIPS=${TRAINER_TPU_CHIPS:-0,1,2,3}
@@ -354,6 +355,7 @@ cmd=(
   --seed="$SEED"
   --weight_sync_mode="$WEIGHT_SYNC_MODE"
   --trainer_fsdp="$TRAINER_FSDP"
+  --grid_size_range $GRID_SIZE_RANGE
   --stop_workers_on_exit
 )
 is_true "$SHUFFLE" && cmd+=(--shuffle) || cmd+=(--no-shuffle)

@@ -41,6 +41,7 @@ def create_dataset(
     *,
     shuffle_seed: int | None = None,
     limit: int | None = None,
+    grid_size_range: tuple[int, int] = (2, 9),
 ) -> list[dict[str, Any]]:
   """Builds the same generated and shuffled dataset as the agentic recipe.
 
@@ -52,6 +53,7 @@ def create_dataset(
     shuffle_seed: If set, shuffles the dataset with this seed, matching
       `datasets.Dataset.shuffle(seed=...)` ordering.
     limit: If set, truncates the dataset to this many entries after shuffling.
+    grid_size_range: Lower (inclusive) and upper (exclusive) grid size bounds.
 
   Returns:
     The list of serializable FrozenLake environment configurations.
@@ -61,8 +63,9 @@ def create_dataset(
   """
   if size <= 0:
     raise ValueError("dataset size must be positive.")
+  print(f"Creating dataset with grid size range {grid_size_range}")
   seeds, sizes, probabilities = frozenlake_data.generate_dataset_parameters(
-      size, random_seed=seed
+      size, random_seed=seed, grid_size_range=grid_size_range
   )
   dataset = [
       frozenlake_data.get_frozenlake_dict(
