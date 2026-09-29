@@ -239,6 +239,17 @@ export MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-4096}"
 export MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-61440}"
 
 # ==============================================================================
+# uBench Reporting (see ubench_reporting.sh)
+# ==============================================================================
+# Off by default. Set UBENCH_REPORTING=true (or 1) to enable.
+if [[ "${UBENCH_REPORTING:-false}" =~ ^(1|true|True)$ ]]; then
+  # A subshell, so that ubench_reporting.sh can't stop the launch or change
+  # variables here.
+  ( source "${DIR}/ubench_reporting.sh" "$@" ) ||
+    echo "UBENCH_REPORTING: Not recording this run for uBench. The launch continues." >&2
+fi
+
+# ==============================================================================
 # Execution Dispatch
 # ==============================================================================
 if [[ -z "${LAUNCHER:-}" ]]; then
