@@ -455,6 +455,7 @@ class PrewarmDatasetIterator:
     self.wait_initial = wait_initial
     self.max_staleness = max(0, int(max_staleness))
     self.max_workers = max(1, int(max_workers))
+    self._lock = threading.Lock()
     self.image_rewrite = get_image_rewrite_fn(
         image_rewrite or getattr(self.fleet, "_image_rewrite_fn", None)
     )
@@ -637,7 +638,8 @@ class PrewarmDatasetIterator:
     def _warm(img: str, target_reps: int) -> None:
       try:
         self.fleet.warm_image(img, replicas_override=target_reps, wait=wait)
-        self._active_replicas[img] = target_reps
+        with self._lock:
+          self._active_replicas[img] = target_reps
         logging.info(
             "[PrewarmDatasetIterator] Warmed new pool on K8s: %s"
             " (replicas=%d, wait=%s)",
@@ -650,15 +652,18 @@ class PrewarmDatasetIterator:
 
     def _scale(img: str, target_reps: int) -> None:
       try:
+        with self._lock:
+          old_reps = self._active_replicas.get(img, 0)
         self.fleet.set_pool_replicas(img, target_reps)
+        with self._lock:
+          self._active_replicas[img] = target_reps
         logging.info(
             "[PrewarmDatasetIterator] Scaled pool on K8s: %s (replicas %d ->"
             " %d)",
             img,
-            self._active_replicas[img],
+            old_reps,
             target_reps,
         )
-        self._active_replicas[img] = target_reps
       except Exception as e:  # pylint: disable=broad-exception-caught
         logging.warning(
             "[PrewarmDatasetIterator] Set replicas note for %s: %s", img, e
@@ -667,7 +672,8 @@ class PrewarmDatasetIterator:
     def _unwarm(img: str) -> None:
       try:
         self.fleet.unwarm_image(img)
-        self.unwarm_calls.append(img)
+        with self._lock:
+          self.unwarm_calls.append(img)
         logging.info(
             "[PrewarmDatasetIterator] Unwarmed retired pool on K8s: %s", img
         )
@@ -675,7 +681,8 @@ class PrewarmDatasetIterator:
         logging.warning(
             "[PrewarmDatasetIterator] Unwarm note for %s: %s", img, e
         )
-      self._active_replicas.pop(img, None)
+      with self._lock:
+        self._active_replicas.pop(img, None)
 
     num_tasks = len(new_pools) + len(scale_pools) + len(to_delete)
     if num_tasks > 0:
