@@ -415,7 +415,7 @@ def _rollout_config_kwargs(
       "temperature": 1.0,
       "top_p": 1.0,
       "return_logprobs": True,
-      "return_routed_experts": args.return_routed_experts,
+      "return_routed_experts": getattr(args, "return_routed_experts", False),
       "eos_tokens": _eos_token_ids(args, tokenizer),
       "env_name": args.env_name,
       "agent_name": args.agent_name,
@@ -587,6 +587,7 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
   if "prefuse_moe_weights" in vllm_overrides:
     prefuse_moe = vllm_overrides.pop("prefuse_moe_weights")
 
+  return_routed_experts = getattr(args, "return_routed_experts", False)
   maxtext_additional_config = {}
   if args.maxtext_model_name:
     logging.info(
@@ -602,7 +603,7 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
             args.maxtext_model_name,
             attention=args.maxtext_attention,
             prefuse_moe_weights=prefuse_moe,
-            return_routed_experts=args.return_routed_experts,
+            return_routed_experts=return_routed_experts,
         )
     )
 
@@ -679,20 +680,22 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
       expert_parallel_size=ep_size,
       hbm_utilization=hbm_utilization,
       return_logprobs=True,
-      return_routed_experts=args.return_routed_experts,
+      return_routed_experts=return_routed_experts,
       lora_config=lora_config,
       mapping_config=mapping_config,
       additional_config=merged_additional_config or None,
       engine_kwargs=engine_kwargs,
       eos_tokens=_eos_token_ids(args, tokenizer),
-      free_kv_cache_during_weight_sync=args.free_kv_cache_during_weight_sync,
+      free_kv_cache_during_weight_sync=getattr(
+          args, "free_kv_cache_during_weight_sync", False
+      ),
   )
   sampler_adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
       server_id=args.worker_id,
       tokenizer=tokenizer,
       config=vllm_config,
       weight_sync_mode=args.weight_sync_mode,
-      max_concurrency=args.max_concurrency,
+      max_concurrency=getattr(args, "max_concurrency", 256),
   )
   config = rollout_worker.RolloutConfig(
       sampler_type="inprocess_vllm",
@@ -768,6 +771,7 @@ def _create_vllm_sampler(args, tokenizer):
   else:
     enable_prefix_caching = vllm_overrides.pop("enable_prefix_caching", False)
 
+  return_routed_experts = getattr(args, "return_routed_experts", False)
   engine_kwargs = dict(
       model=vllm_model,
       tokenizer=args.tokenizer_path or vllm_model,
@@ -780,7 +784,7 @@ def _create_vllm_sampler(args, tokenizer):
       max_lora_rank=args.lora_rank if args.use_lora else None,
       max_loras=1 if args.use_lora else None,
       enable_prefix_caching=enable_prefix_caching,
-      enable_return_routed_experts=args.return_routed_experts,
+      enable_return_routed_experts=return_routed_experts,
   )
   if gpu_mem_util is not None:
     engine_kwargs["gpu_memory_utilization"] = gpu_mem_util
@@ -804,7 +808,7 @@ def _create_vllm_sampler(args, tokenizer):
             args.maxtext_model_name,
             attention=args.maxtext_attention,
             prefuse_moe_weights=prefuse_moe,
-            return_routed_experts=args.return_routed_experts,
+            return_routed_experts=return_routed_experts,
         )
     )
 
@@ -839,7 +843,9 @@ def _create_vllm_sampler(args, tokenizer):
       engine_args=engine_args,
       model_name=vllm_model,
       weight_sync_mode=args.weight_sync_mode,
-      free_kv_cache_during_weight_sync=args.free_kv_cache_during_weight_sync,
+      free_kv_cache_during_weight_sync=getattr(
+          args, "free_kv_cache_during_weight_sync", False
+      ),
   )
   config = rollout_worker.RolloutConfig(
       sampler_type="vllm",

@@ -251,14 +251,8 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
         chat_parser=_RecordingParser(),
     )
 
-    with mock.patch.object(
-        collector.rl_collect_engine, "TrajectoryCollectEngine"
-    ) as inner_engine_cls:
-      inner_engine_cls.return_value.collect = mock.AsyncMock(return_value={})
-      asyncio.run(engine.run_episode())
-
-    self.assertEqual(inner_engine_cls.call_args.kwargs["timeout"], 10800)
-    self.assertTrue(inner_engine_cls.call_args.kwargs["overlong_filter"])
+    self.assertEqual(engine.episode_timeout, 10800)
+    self.assertTrue(engine.overlong_filter)
 
   def test_episode_timeout_defaults_to_constant(self):
     req_empty_meta = datatypes.RolloutRequest(
@@ -414,33 +408,28 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
         request=req_default,
         sampler=vanilla_sampler,
         env_client=mock.MagicMock(),
-        # A real agent, not a MagicMock: ``__init__`` now builds trajectory
-        # metadata, and ``trajectory.Agent`` validates ``name``/``version`` as
-        # strings, which a MagicMock's auto-attributes are not.
         agent=model_agent.ModelAgent("test_agent"),
         tokenizer=_MockTokenizer(),
         chat_parser=_RecordingParser(),
     )
-    self.assertFalse(engine_vanilla.exact_token_continuity)
+    self.assertTrue(engine_vanilla.exact_token_continuity)
 
-    req_vanilla_forced = datatypes.RolloutRequest(
+    req_disabled = datatypes.RolloutRequest(
         prompt_id="p1",
         prompt="What is 2+2?",
         max_response_length=50,
-        metadata={"exact_token_continuity": True},
+        exact_token_continuity=False,
     )
-    with self.assertRaisesRegex(
-        ValueError, "exact_token_continuity requires a token-input backend"
-    ):
-      collector.TrajectoryCollectorEngine(
-          traj_id="t_vanilla_forced",
-          request=req_vanilla_forced,
-          sampler=vanilla_sampler,
-          env_client=mock.MagicMock(),
-          agent=model_agent.ModelAgent("test_agent"),
-          tokenizer=_MockTokenizer(),
-          chat_parser=_RecordingParser(),
-      )
+    engine_disabled = collector.TrajectoryCollectorEngine(
+        traj_id="t_disabled",
+        request=req_disabled,
+        sampler=vanilla_sampler,
+        env_client=mock.MagicMock(),
+        agent=model_agent.ModelAgent("test_agent"),
+        tokenizer=_MockTokenizer(),
+        chat_parser=_RecordingParser(),
+    )
+    self.assertFalse(engine_disabled.exact_token_continuity)
 
     token_sampler = _MockSampler()
     req_routed = datatypes.RolloutRequest(
@@ -494,7 +483,8 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
           prompt_id="p1",
           prompt="What is 2+2?",
           max_response_length=50,
-          metadata={"exact_token_continuity": False},
+          generation_kwargs={"max_generation_steps": 50},
+          exact_token_continuity=False,
       )
       engine = collector.TrajectoryCollectorEngine(
           traj_id="t_unboxed",

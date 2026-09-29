@@ -983,6 +983,8 @@ class RaidenSynchronizer(weight_sync.WeightSynchronizer):
     runner.state = jax.tree_util.tree_unflatten(
         jax.tree_util.tree_structure(runner.state), new_leaves
     )
+    if hasattr(runner, "refresh_state_leaves"):
+      runner.refresh_state_leaves()
     logging.info(
         "%s apply_to_runner: successfully applied %d arrays to runner state and"
         " state_leaves (total runner leaves: %d).",
@@ -1003,7 +1005,7 @@ class RaidenSynchronizer(weight_sync.WeightSynchronizer):
   def metrics(self) -> dict:
     return self._sync.get_metrics() if self._sync else {}
 
-  def checksums(self, sample: int = 3) -> dict:
+  def checksums(self, sample: int | None = 3) -> dict:
     """Per-tensor float32 abs-sums for cross-process verification."""
     return _compute_checksums(self.names, self.arrays, sample=sample)
 
@@ -1115,7 +1117,7 @@ def _jitted_abs_sums(num_arrays: int):
 
 
 def _compute_checksums(
-    names: Sequence[str], arrays: Sequence[Any], sample: int = 3
+    names: Sequence[str], arrays: Sequence[Any], sample: int | None = 3
 ) -> dict[str, Any]:
   """Computes per-tensor float32 abs-sums in a single fused JIT call."""
   if not arrays:
@@ -1125,8 +1127,9 @@ def _compute_checksums(
         "__element_count__": 0,
     }
   totals = jax.device_get(_jitted_abs_sums(len(arrays))(tuple(arrays))).tolist()
+  limit = None if sample is None else max(0, sample)
   head = {
-      name: totals[i] for i, name in enumerate(list(names)[: max(0, sample)])
+      name: totals[i] for i, name in enumerate(list(names)[:limit])
   }
   head["__grand_total__"] = float(sum(totals))
   # Registration pairs tensors by position, so the totals only compare when

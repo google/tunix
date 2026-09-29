@@ -22,27 +22,56 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
 
-# Ensure transformers (which sets up GOOGLE_INTERNAL_PACKAGE_PATH_version monkeypatch) is loaded
+import importlib.util
 import sys
-import importlib.metadata
-try:
-    import transformers  # pylint: disable=g-import-not-at-top
-except ImportError:
-    pass
+import types
 
-_orig_meta_version = importlib.metadata.version
-def _version_shim(pkg):
-    if pkg == "transformers":
-        return "5.0.0"
-    return _orig_meta_version(pkg)
-importlib.metadata.version = _version_shim
+if importlib.util.find_spec("vllm") is not None:
+    from vllm.engine.arg_utils import AsyncEngineArgs  # pylint: disable=g-import-not-at-top
+    from tunix.experimental.rollout.vllm_sampler_v2 import RLVllmSampler  # pylint: disable=g-import-not-at-top
+else:
 
-if "openai_harmony" not in sys.modules:
-    sys.modules["openai_harmony"] = MagicMock()
+    class _StubAsyncEngineArgs(SimpleNamespace):
 
-from vllm.engine.arg_utils import AsyncEngineArgs
+        def __init__(self, **kwargs):
+            defaults = {
+                "model": "",
+                "tensor_parallel_size": 1,
+                "data_parallel_size": 1,
+                "expert_parallel_size": 1,
+            }
+            defaults.update(kwargs)
+            super().__init__(**defaults)
 
-from tunix.experimental.rollout.vllm_sampler_v2 import RLVllmSampler
+    class _StubSamplingParams(SimpleNamespace):
+        pass
+
+    _vllm_mod = types.ModuleType("vllm")
+    _vllm_envs = types.ModuleType("vllm.envs")
+    _vllm_envs.VLLM_LOG_STATS_INTERVAL = 10.0
+    _vllm_mod.envs = _vllm_envs
+    _vllm_engine = types.ModuleType("vllm.engine")
+    _vllm_arg_utils = types.ModuleType("vllm.engine.arg_utils")
+    _vllm_arg_utils.AsyncEngineArgs = _StubAsyncEngineArgs
+    _vllm_async_engine = types.ModuleType("vllm.engine.async_llm_engine")
+    _vllm_async_engine.AsyncLLMEngine = MagicMock()
+    _vllm_sampling_params = types.ModuleType("vllm.sampling_params")
+    _vllm_sampling_params.SamplingParams = _StubSamplingParams
+
+    with patch.dict(
+        sys.modules,
+        {
+            "vllm": _vllm_mod,
+            "vllm.envs": _vllm_envs,
+            "vllm.engine": _vllm_engine,
+            "vllm.engine.arg_utils": _vllm_arg_utils,
+            "vllm.engine.async_llm_engine": _vllm_async_engine,
+            "vllm.sampling_params": _vllm_sampling_params,
+        },
+    ):
+        from tunix.experimental.rollout.vllm_sampler_v2 import RLVllmSampler  # pylint: disable=g-import-not-at-top
+
+    AsyncEngineArgs = _StubAsyncEngineArgs
 
 
 class TestRLVllmSamplerDuckTyping(unittest.TestCase):
@@ -286,8 +315,16 @@ class TestRLVllmSamplerWeightSync(unittest.TestCase):
 
             await sampler.pre_weight_sync(req_pre)
             mock_engine.pause_background_loop.assert_called_once()
-            mock_call_worker_method.assert_called_once_with(
-                "start_weight_update", free_kv_cache=True)
+            mock_engine.reset_prefix_cache.assert_called_once()
+            self.assertEqual(
+                mock_call_worker_method.call_args_list,
+                [
+                    unittest.mock.call("finish_weight_update"),
+                    unittest.mock.call(
+                        "start_weight_update", free_kv_cache=False
+                    ),
+                ],
+            )
             self.assertEqual(await sampler.get_transfer_status("transfer_99"),
                              "IN_PROGRESS")
 
