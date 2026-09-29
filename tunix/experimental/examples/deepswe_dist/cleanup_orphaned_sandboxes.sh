@@ -265,12 +265,31 @@ fi
 echo "==> 6. Checking for orphaned SandboxClaims..."
 
 ORPHAN_CLAIMS=()
-while IFS= read -r claim_name; do
+ACTIVE_CLAIMS=()
+while IFS=$'\t' read -r claim_name wp_ref creator; do
   [[ -z "${claim_name}" ]] && continue
-  if ! is_active_run "${claim_name}"; then
+  is_claim_active=false
+  for pfx in "${ACTIVE_RUN_PREFIXES[@]}"; do
+    if [[ "${claim_name}" == *"-${pfx}-"* || "${claim_name}" == "${pfx}-"* ]]; then
+      is_claim_active=true
+      break
+    fi
+    if [[ -n "${wp_ref}" && "${wp_ref}" != "-" && ("${wp_ref}" == *"-${pfx}-"* || "${wp_ref}" == "${pfx}-"*) ]]; then
+      is_claim_active=true
+      break
+    fi
+    if [[ -n "${creator}" && "${creator}" != "-" && ("${creator}" == *"-${pfx}-"* || "${creator}" == "${pfx}-"*) ]]; then
+      is_claim_active=true
+      break
+    fi
+  done
+  if [[ "${is_claim_active}" == "true" ]]; then
+    ACTIVE_CLAIMS+=("${claim_name}")
+  else
     ORPHAN_CLAIMS+=("${claim_name}")
   fi
-done < <(kubectl get sandboxclaims -n "${NAMESPACE}" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' || true)
+done < <(kubectl get sandboxclaims -n "${NAMESPACE}" -o json 2>/dev/null | \
+  jq -r '.items[] | "\(.metadata.name)\t\(.spec.warmPoolRef.name // "-")\t\(.metadata.labels["app.kubernetes.io/created-by"] // "-")"' || true)
 
 echo "Found ${#ORPHAN_CLAIMS[@]} orphaned SandboxClaim(s)."
 if [[ ${#ORPHAN_CLAIMS[@]} -gt 0 ]]; then
@@ -309,21 +328,47 @@ fi
 # ------------------------------------------------------------------------------
 echo "==> 8. Checking for orphaned running sandbox pods..."
 
-RUNNING_PODS_JSON=$(kubectl get pods -n "${NAMESPACE}" -l "app=agent-sandbox-rl" -o wide --no-headers 2>/dev/null | \
-  awk '$3 == "Running" {print $1 "\t" $7}' || true)
-
 ORPHAN_RUNNING_PODS=()
-while IFS=$'\t' read -r pod_name node_name; do
+while IFS=$'\t' read -r pod_name phase node_name creator sandbox; do
   [[ -z "${pod_name}" ]] && continue
+  if [[ "${phase}" != "Running" ]]; then
+    continue
+  fi
   if [[ -n "${NODEPOOL}" ]]; then
     if [[ ! " ${TARGET_NODES[*]} " =~ " ${node_name} " ]]; then
       continue
     fi
   fi
-  if ! is_active_run "${pod_name}"; then
+  
+  is_pod_active=false
+  # 1. Protected if belonging to an active SandboxClaim
+  if [[ " ${ACTIVE_CLAIMS[*]:-} " =~ " ${pod_name} " ]]; then
+    is_pod_active=true
+  fi
+
+  # 2. Protected if name, creator, or sandbox label matches any active run prefix
+  if [[ "${is_pod_active}" == "false" ]]; then
+    for pfx in "${ACTIVE_RUN_PREFIXES[@]}"; do
+      if [[ "${pod_name}" == *"-${pfx}-"* || "${pod_name}" == "${pfx}-"* ]]; then
+        is_pod_active=true
+        break
+      fi
+      if [[ -n "${creator}" && "${creator}" != "-" && ("${creator}" == *"-${pfx}-"* || "${creator}" == "${pfx}-"*) ]]; then
+        is_pod_active=true
+        break
+      fi
+      if [[ -n "${sandbox}" && "${sandbox}" != "-" && ("${sandbox}" == *"-${pfx}-"* || "${sandbox}" == "${pfx}-"*) ]]; then
+        is_pod_active=true
+        break
+      fi
+    done
+  fi
+
+  if [[ "${is_pod_active}" == "false" ]]; then
     ORPHAN_RUNNING_PODS+=("${pod_name}")
   fi
-done <<< "${RUNNING_PODS_JSON}"
+done < <(kubectl get pods -n "${NAMESPACE}" -l "app=agent-sandbox-rl" -o json 2>/dev/null | \
+  jq -r '.items[] | "\(.metadata.name)\t\(.status.phase // "-")\t\(.spec.nodeName // "-")\t\(.metadata.labels["app.kubernetes.io/created-by"] // "-")\t\(.metadata.labels["sandbox"] // "-")"' || true)
 
 echo "Found ${#ORPHAN_RUNNING_PODS[@]} orphaned running sandbox pod(s)."
 if [[ ${#ORPHAN_RUNNING_PODS[@]} -gt 0 ]]; then

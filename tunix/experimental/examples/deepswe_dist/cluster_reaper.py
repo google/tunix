@@ -55,6 +55,7 @@ logger = logging.getLogger("cluster-reaper")
 
 NAMESPACE = os.environ.get("NAMESPACE", "trellis")
 LOOP_INTERVAL_SECONDS = int(os.environ.get("INTERVAL_SECONDS", "30"))
+SANDBOX_ONLY = os.environ.get("SANDBOX_ONLY", "false").lower() in ("1", "true", "yes")
 SANDBOX_POD_PREFIXES = ("pool-", "sandbox-claim-")
 
 FATAL_EXCEPTION_PATTERNS = (
@@ -93,6 +94,48 @@ def extract_run_prefix(js_name: str) -> str:
   if match:
     return match.group(1)
   return js_name
+
+
+def get_active_run_prefixes(custom_api, core_api) -> set[str]:
+  """Discovers all active run prefixes from running or pending workload pods & jobsets."""
+  active_prefixes = set()
+  try:
+    jobsets = custom_api.list_namespaced_custom_object(
+        group="jobset.x-k8s.io",
+        version="v1alpha2",
+        namespace=NAMESPACE,
+        plural="jobsets",
+    )
+    for js in jobsets.get("items", []):
+      active_prefixes.add(extract_run_prefix(js["metadata"]["name"]))
+  except Exception as e:
+    logger.warning("Failed to list jobsets for active prefixes: %s", e)
+
+  try:
+    pods = core_api.list_namespaced_pod(namespace=NAMESPACE)
+    for pod in pods.items:
+      pname = pod.metadata.name
+      if pname.startswith(SANDBOX_POD_PREFIXES) or pname.startswith("cluster-reaper"):
+        continue
+      if (pod.metadata.labels or {}).get("app") == "agent-sandbox-rl":
+        continue
+      js_name = (pod.metadata.labels or {}).get("jobset.sigs.k8s.io/jobset-name")
+      if js_name:
+        active_prefixes.add(extract_run_prefix(js_name))
+  except Exception as e:
+    logger.warning("Failed to list pods for active prefixes: %s", e)
+
+  return active_prefixes
+
+
+def matches_active_run(text: str | None, active_prefixes: set[str]) -> bool:
+  """Returns True if the given text matches any active run prefix."""
+  if not text or text == "-":
+    return False
+  for prefix in active_prefixes:
+    if f"-{prefix}-" in text or text.startswith(f"{prefix}-") or text == prefix:
+      return True
+  return False
 
 
 def reap_stuck_terminating_pods(core_api):
@@ -181,29 +224,21 @@ def reap_dead_sandbox_pods(core_api):
   return count
 
 
-def reap_orphaned_claims(custom_api, core_api):
+def reap_orphaned_claims(custom_api, core_api, active_prefixes: set[str] | None = None) -> tuple[int, set[str]]:
   """Deletes SandboxClaims whose parent run is no longer active on the cluster.
 
-  A SandboxClaim is considered orphaned if:
-  1. No workload pods (*-roll-*, *-orch-*, *-train-*) are currently Running or Pending,
-     and the claim is older than 5 minutes.
-  2. Workload pods ARE active, but the claim was created BEFORE the oldest active
-     workload pod started (with a 5-minute safety buffer), meaning it was left behind
-     by an earlier completed or crashed workload run.
+  Returns (reaped_count, active_claim_names).
+  A SandboxClaim is considered active if:
+  1. It is younger than 5 minutes (safety buffer during rollout init).
+  2. Its name, spec.warmPoolRef.name, or metadata.labels["app.kubernetes.io/created-by"]
+     matches any currently active run prefix.
+  Otherwise, it is orphaned and reaped.
   """
-  count = 0
+  reaped_count = 0
+  active_claims = set()
   try:
-    running_pods = core_api.list_namespaced_pod(namespace=NAMESPACE)
-    workload_start_times = []
-    for pod in running_pods.items:
-      name = pod.metadata.name
-      if name.startswith(SANDBOX_POD_PREFIXES) or name.startswith("cluster-reaper"):
-        continue
-      if (pod.metadata.labels or {}).get("app") == "agent-sandbox-rl":
-        continue
-      if pod.status.phase in ("Running", "Pending"):
-        if pod.metadata.creation_timestamp:
-          workload_start_times.append(pod.metadata.creation_timestamp)
+    if active_prefixes is None:
+      active_prefixes = get_active_run_prefixes(custom_api, core_api)
 
     now = datetime.datetime.now(datetime.timezone.utc)
     claims = custom_api.list_namespaced_custom_object(
@@ -213,38 +248,41 @@ def reap_orphaned_claims(custom_api, core_api):
         plural="sandboxclaims",
     )
 
-    earliest_workload_time = min(workload_start_times) if workload_start_times else None
-
     for claim in claims.get("items", []):
-      cname = claim["metadata"]["name"]
-      created_str = claim["metadata"]["creationTimestamp"]
-      created_dt = datetime.datetime.fromisoformat(created_str.replace("Z", "+00:00"))
+      cname = claim.get("metadata", {}).get("name", "")
+      created_str = claim.get("metadata", {}).get("creationTimestamp")
+      created_dt = (
+          datetime.datetime.fromisoformat(created_str.replace("Z", "+00:00"))
+          if created_str
+          else now
+      )
       age_s = (now - created_dt).total_seconds()
 
-      # Never reap claims created within the last 5 minutes (safety buffer)
+      # Safety: never reap claims created within the last 5 minutes
       if age_s < 300:
+        active_claims.add(cname)
         continue
 
-      is_orphan = False
-      reason = ""
-      if earliest_workload_time is None:
-        # No workloads running at all
-        is_orphan = True
-        reason = f"no active workload pods in namespace {NAMESPACE}"
-      elif created_dt < earliest_workload_time - datetime.timedelta(minutes=5):
-        # Claim was created well before current active workloads started
-        is_orphan = True
-        reason = (
-            f"created at {created_str} before earliest running workload"
-            f" ({earliest_workload_time.isoformat()})"
-        )
+      spec = claim.get("spec", {}) or {}
+      wp_ref = spec.get("warmPoolRef", {}).get("name") if isinstance(spec.get("warmPoolRef"), dict) else None
+      labels = claim.get("metadata", {}).get("labels") or {}
+      creator = labels.get("app.kubernetes.io/created-by")
 
-      if is_orphan:
+      is_active = (
+          matches_active_run(cname, active_prefixes)
+          or matches_active_run(wp_ref, active_prefixes)
+          or matches_active_run(creator, active_prefixes)
+      )
+
+      if is_active:
+        active_claims.add(cname)
+      else:
         logger.info(
-            "Found orphaned SandboxClaim %s (age: %.1f min, reason: %s). Deleting...",
+            "Found orphaned SandboxClaim %s (age: %.1f min, wp_ref: %s, creator: %s). Deleting...",
             cname,
             age_s / 60,
-            reason,
+            wp_ref,
+            creator,
         )
         try:
           custom_api.patch_namespaced_custom_object(
@@ -262,43 +300,87 @@ def reap_orphaned_claims(custom_api, core_api):
               plural="sandboxclaims",
               name=cname,
           )
-          count += 1
+          reaped_count += 1
         except Exception as e:
           logger.warning("Failed to delete orphaned claim %s: %s", cname, e)
   except Exception as e:
     logger.error("Error checking orphaned claims: %s", e)
+  return reaped_count, active_claims
+
+
+def reap_orphaned_running_pods(core_api, active_prefixes: set[str], active_claims: set[str]) -> int:
+  """Reaps running sandbox pods whose parent claim and run are gone."""
+  count = 0
+  try:
+    pods = core_api.list_namespaced_pod(
+        namespace=NAMESPACE, label_selector="app=agent-sandbox-rl"
+    )
+    now = datetime.datetime.now(datetime.timezone.utc)
+    for pod in pods.items:
+      name = pod.metadata.name
+      if not name.startswith(SANDBOX_POD_PREFIXES):
+        continue
+      if pod.metadata.deletion_timestamp is not None:
+        continue
+      if pod.status.phase != "Running":
+        continue
+
+      created_dt = pod.metadata.creation_timestamp
+      if created_dt:
+        age_s = (now - created_dt).total_seconds()
+        # Safety buffer: keep pods younger than 5 minutes
+        if age_s < 300:
+          continue
+
+      # Active if claimed by an active claim
+      if name in active_claims:
+        continue
+
+      labels = pod.metadata.labels or {}
+      creator = labels.get("app.kubernetes.io/created-by")
+      sandbox_lbl = labels.get("sandbox")
+
+      is_active = (
+          matches_active_run(name, active_prefixes)
+          or matches_active_run(creator, active_prefixes)
+          or matches_active_run(sandbox_lbl, active_prefixes)
+      )
+
+      if not is_active:
+        logger.info(
+            "Found orphaned running sandbox pod %s (not in active claims, creator: %s). Deleting...",
+            name,
+            creator,
+        )
+        try:
+          core_api.patch_namespaced_pod(
+              name=name,
+              namespace=NAMESPACE,
+              body={"metadata": {"finalizers": []}},
+          )
+          core_api.delete_namespaced_pod(
+              name=name,
+              namespace=NAMESPACE,
+              grace_period_seconds=0,
+          )
+          count += 1
+        except Exception as e:
+          logger.warning("Failed to delete orphaned pod %s: %s", name, e)
+  except Exception as e:
+    logger.error("Error checking orphaned running sandbox pods: %s", e)
   return count
 
 
-def reap_orphaned_warmpools_and_templates(custom_api, core_api):
+def reap_orphaned_warmpools_and_templates(custom_api, core_api, active_prefixes: set[str] | None = None) -> int:
   """Cleans up SandboxWarmPool and SandboxTemplate resources whose run is gone."""
   count = 0
   try:
-    # 1. Discover all active run prefixes from running or pending workload pods & jobsets
-    active_prefixes = set()
-    jobsets = custom_api.list_namespaced_custom_object(
-        group="jobset.x-k8s.io",
-        version="v1alpha2",
-        namespace=NAMESPACE,
-        plural="jobsets",
-    )
-    for js in jobsets.get("items", []):
-      active_prefixes.add(extract_run_prefix(js["metadata"]["name"]))
-
-    pods = core_api.list_namespaced_pod(namespace=NAMESPACE)
-    for pod in pods.items:
-      pname = pod.metadata.name
-      if pname.startswith(SANDBOX_POD_PREFIXES) or pname.startswith("cluster-reaper"):
-        continue
-      if (pod.metadata.labels or {}).get("app") == "agent-sandbox-rl":
-        continue
-      js_name = (pod.metadata.labels or {}).get("jobset.sigs.k8s.io/jobset-name")
-      if js_name:
-        active_prefixes.add(extract_run_prefix(js_name))
+    if active_prefixes is None:
+      active_prefixes = get_active_run_prefixes(custom_api, core_api)
 
     now = datetime.datetime.now(datetime.timezone.utc)
 
-    # 2. Check SandboxWarmPools
+    # 1. Check SandboxWarmPools
     warmpools = custom_api.list_namespaced_custom_object(
         group="extensions.agents.x-k8s.io",
         version="v1beta1",
@@ -315,8 +397,7 @@ def reap_orphaned_warmpools_and_templates(custom_api, core_api):
       if age_m < 10:
         continue
 
-      is_active = any(f"-{prefix}-" in wp_name for prefix in active_prefixes)
-      if not is_active:
+      if not matches_active_run(wp_name, active_prefixes):
         logger.info(
             "Found orphaned SandboxWarmPool %s (age: %.1fm, no active workloads for run). Deleting...",
             wp_name, age_m,
@@ -333,7 +414,7 @@ def reap_orphaned_warmpools_and_templates(custom_api, core_api):
         except Exception as e:
           logger.warning("Failed to delete orphaned warmpool %s: %s", wp_name, e)
 
-    # 3. Check SandboxTemplates
+    # 2. Check SandboxTemplates
     templates = custom_api.list_namespaced_custom_object(
         group="extensions.agents.x-k8s.io",
         version="v1beta1",
@@ -349,11 +430,7 @@ def reap_orphaned_warmpools_and_templates(custom_api, core_api):
       if age_m < 10:
         continue
 
-      is_active = any(
-          f"-{prefix}-" in tmpl_name or tmpl_name.startswith(f"oh-{prefix}-") or tmpl_name.startswith(f"{prefix}-")
-          for prefix in active_prefixes
-      )
-      if not is_active:
+      if not matches_active_run(tmpl_name, active_prefixes):
         logger.info(
             "Found orphaned SandboxTemplate %s (age: %.1fm). Deleting...",
             tmpl_name, age_m,
@@ -620,12 +697,24 @@ def main():
     cycle += 1
     t0 = time.time()
     try:
+      active_prefixes = get_active_run_prefixes(custom_api, core_api)
       stuck_terminating = reap_stuck_terminating_pods(core_api)
       dead_sandboxes = reap_dead_sandbox_pods(core_api)
-      orphaned_claims = reap_orphaned_claims(custom_api, core_api)
+      orphaned_claims, active_claims = reap_orphaned_claims(
+          custom_api, core_api, active_prefixes=active_prefixes
+      )
+      orphaned_pods = reap_orphaned_running_pods(
+          core_api, active_prefixes=active_prefixes, active_claims=active_claims
+      )
       failed_crs = reap_failed_sandbox_crs(custom_api)
-      failed_jobs = reap_failed_crashed_hung_jobs(custom_api, batch_api, core_api)
-      orphaned_pools = reap_orphaned_warmpools_and_templates(custom_api, core_api)
+      failed_jobs = (
+          0
+          if SANDBOX_ONLY
+          else reap_failed_crashed_hung_jobs(custom_api, batch_api, core_api)
+      )
+      orphaned_pools = reap_orphaned_warmpools_and_templates(
+          custom_api, core_api, active_prefixes=active_prefixes
+      )
 
       pods = core_api.list_namespaced_pod(namespace=NAMESPACE)
       running_count = sum(1 for p in pods.items if p.status.phase == "Running")
@@ -635,9 +724,9 @@ def main():
       dt = time.time() - t0
       logger.info(
           "[Cycle %d] (%.1fs) Pods: %d running, %d pending, %d terminating. Actions: "
-          "stuck_terminating=%d, dead_sandboxes=%d, orphaned_claims=%d, failed_crs=%d, failed_jobs=%d, orphaned_pools=%d",
+          "stuck_terminating=%d, dead_sandboxes=%d, orphaned_claims=%d, orphaned_pods=%d, failed_crs=%d, failed_jobs=%d, orphaned_pools=%d",
           cycle, dt, running_count, pending_count, term_count,
-          stuck_terminating, dead_sandboxes, orphaned_claims, failed_crs, failed_jobs, orphaned_pools,
+          stuck_terminating, dead_sandboxes, orphaned_claims, orphaned_pods, failed_crs, failed_jobs, orphaned_pools,
       )
 
     except Exception as e:
