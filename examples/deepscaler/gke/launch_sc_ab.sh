@@ -72,6 +72,7 @@ COMMON_ARGS=(
   --mixed_precision --remat decoder
   --flash_attention --flash_attention_block_size 256
   --compute_logps_chunk_size 2048
+  --no_prefix_caching
 )
 FULL_ARGS=(--num_batches 300)
 SMOKE_ARGS=(--num_batches 2)
