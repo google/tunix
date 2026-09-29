@@ -261,10 +261,7 @@ export SANDBOX_PREWARM_LOOKAHEAD="${SANDBOX_PREWARM_LOOKAHEAD:-2}"
 export SANDBOX_RETAINED_REPLICAS="${SANDBOX_RETAINED_REPLICAS:-0}"
 export ROLLOUT_MAX_CONCURRENCY="${ROLLOUT_MAX_CONCURRENCY:-256}"
 export MAX_CONCURRENCY="${MAX_CONCURRENCY:-256}"
-# A single hung tool call used to hold the whole batch (and the weight sync) for
-# the full 300s. 60s matches command_exec_timeout in the NeMo-RL MLPerf reference
-# (qwen_35/configs/grpo_qwen35_397b_swe_openhands_async.yaml).
-export STEP_TIMEOUT_SECS="${STEP_TIMEOUT_SECS:-60}"
+export STEP_TIMEOUT_SECS=300
 export REWARD_TIMEOUT_SECS=180
 export FLUSH_EVERY_N_STEPS=1
 export MAX_TURNS=30
