@@ -126,6 +126,56 @@ class MainTest(absltest.TestCase):
     distributed_main.main(argv)
     self.assertEqual(mock_executor.return_value.run.call_count, 2)
 
+  def _run_single(
+      self, run_side_effect: BaseException, *extra_main_args: str
+  ) -> None:
+    mock_executor = mock.MagicMock()
+    mock_executor.return_value.run.side_effect = run_side_effect
+    with mock.patch.object(
+        distributed_main,
+        "import_symbol",
+        side_effect=lambda fqn: (
+            mock_executor if "Executor" in fqn else dummy_process_main
+        ),
+    ):
+      distributed_main.main([
+          "prog",
+          *extra_main_args,
+          f"--process_main={__name__}.dummy_process_main",
+      ])
+
+  def test_exit_on_failure_hard_exits_on_exception(self):
+    with mock.patch.object(
+        distributed_main, "_hard_exit", side_effect=_HardExit
+    ) as hard_exit:
+      with self.assertRaises(_HardExit):
+        self._run_single(RuntimeError("boom"), "--exit_on_failure")
+    hard_exit.assert_called_once_with(1)
+
+  def test_exit_on_failure_propagates_nonzero_system_exit_code(self):
+    with mock.patch.object(
+        distributed_main, "_hard_exit", side_effect=_HardExit
+    ) as hard_exit:
+      with self.assertRaises(_HardExit):
+        self._run_single(SystemExit(143), "--exit_on_failure")
+    hard_exit.assert_called_once_with(143)
+
+  def test_exit_on_failure_reraises_clean_system_exit(self):
+    with mock.patch.object(distributed_main, "_hard_exit") as hard_exit:
+      with self.assertRaises(SystemExit):
+        self._run_single(SystemExit(0), "--exit_on_failure")
+    hard_exit.assert_not_called()
+
+  def test_without_exit_on_failure_exception_propagates(self):
+    with mock.patch.object(distributed_main, "_hard_exit") as hard_exit:
+      with self.assertRaisesRegex(RuntimeError, "boom"):
+        self._run_single(RuntimeError("boom"))
+    hard_exit.assert_not_called()
+
+
+class _HardExit(Exception):
+  """Stands in for os._exit so the test process keeps running."""
+
 
 if __name__ == "__main__":
   absltest.main()

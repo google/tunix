@@ -228,18 +228,26 @@ export DRY_RUN=${DRY_RUN:-false}
 # SandboxFailFastConfig): sandbox readiness is capped at
 # FT_SANDBOX_READY_TIMEOUT_S, SWEEnv tries fleet.acquire FT_SANDBOX_ACQUIRE_RETRIES
 # times, and a failed sandbox preflight or warm-pool error ends the run.
+# In `enforce` the orchestrator also fails the run when a rollout is lost (a
+# rollout worker unreachable for FT_POLL_RETRY_S, or a rollout RPC error)
+# instead of waiting for it forever, and exits the process on a fatal error.
 export FAIL_FAST_MODE=${FAIL_FAST_MODE:-off}
 export FT_STARTUP_RETRIES=${FT_STARTUP_RETRIES:-3}
 export FT_SANDBOX_READY_TIMEOUT_S=${FT_SANDBOX_READY_TIMEOUT_S:-600}
 export FT_SANDBOX_ACQUIRE_RETRIES=${FT_SANDBOX_ACQUIRE_RETRIES:-2}
+export FT_POLL_RETRY_S=${FT_POLL_RETRY_S:-600}
 case "${FAIL_FAST_MODE}" in
   off)
     FAIL_FAST_GENERATOR_FLAGS=()
     FAIL_FAST_SANDBOX_ENV=""
+    FAIL_FAST_RUNTIME_ARGS=""
+    FAIL_FAST_ORCHESTRATOR_ARGS=""
     ;;
   enforce)
     FAIL_FAST_GENERATOR_FLAGS=(--fail_fast "--startup_retries=${FT_STARTUP_RETRIES}")
     FAIL_FAST_SANDBOX_ENV="FT_SANDBOX_FAIL_FAST=true FT_SANDBOX_READY_TIMEOUT_S=${FT_SANDBOX_READY_TIMEOUT_S} FT_SANDBOX_ACQUIRE_RETRIES=${FT_SANDBOX_ACQUIRE_RETRIES}"
+    FAIL_FAST_RUNTIME_ARGS="--exit_on_failure"
+    FAIL_FAST_ORCHESTRATOR_ARGS="--fail_fast --ft_poll_retry_s=${FT_POLL_RETRY_S}"
     ;;
   *)
     echo "Invalid FAIL_FAST_MODE='${FAIL_FAST_MODE}' (expected off|enforce)" >&2
@@ -359,6 +367,7 @@ start_orchestrator() {
       TUNIX_IS_INTERNAL_ENV=false \
       ${BOOTSTRAP_CMD} \
       ${ORCHESTRATOR_EXTRA_ENV:+${ORCHESTRATOR_EXTRA_ENV} }python -m tunix.experimental.distributed.runtime.main \
+        ${FAIL_FAST_RUNTIME_ARGS} \
         --discovery_id=${ORCHESTRATOR_ID} \
         --discovery_port=${ORCHESTRATOR_PORT} \
         --process_main=tunix.experimental.examples.deepswe_dist.run_deepswe_dist.main \
@@ -406,6 +415,7 @@ start_orchestrator() {
         --weight_sync_mode=${WEIGHT_SYNC_MODE} \
         ${disable_ws_timeouts_arg} \
         --stop_workers_on_exit \
+        ${FAIL_FAST_ORCHESTRATOR_ARGS} \
         ${MAX_WARMPOOL_REPLICAS:+--max_warmpool_replicas=${MAX_WARMPOOL_REPLICAS}} \
         ${MAX_CONCURRENCY:+--max_concurrency=${MAX_CONCURRENCY}} \
         ${MAX_STALENESS:+--max_staleness=${MAX_STALENESS}} \

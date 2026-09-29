@@ -1764,5 +1764,55 @@ class DistributedRLEngineTest(absltest.TestCase):
     asyncio.run(_run())
 
 
+class DistributedRLEngineFailFastTest(absltest.TestCase):
+
+  def _make_engine(
+      self, *, fail_fast: bool, poll_retry_budget_s: float | None = None
+  ) -> distributed_rl_engine.DistributedRLEngine:
+    return distributed_rl_engine.DistributedRLEngine(
+        rollout_workers=[MockActorHandle()],
+        trainer_workers={datatypes.Role.ACTOR: MockActorHandle()},
+        poll_retry_budget_s=poll_retry_budget_s,
+        fail_fast=fail_fast,
+    )
+
+  def test_lost_rollout_raises_when_fail_fast(self):
+    engine = self._make_engine(fail_fast=True)
+    lost = ConnectionError("worker gone")
+    engine._rollout_session.poll_completed = mock.AsyncMock(
+        return_value=[(None, lost)]
+    )
+
+    async def _run():
+      with self.assertRaises(rl_engine_interface.FatalRolloutError) as cm:
+        await engine.poll_rollouts(timeout_s=0.1)
+      self.assertIs(cm.exception.__cause__, lost)
+
+    asyncio.run(_run())
+
+  def test_lost_rollout_is_logged_and_dropped_by_default(self):
+    engine = self._make_engine(fail_fast=False)
+    engine._rollout_session.poll_completed = mock.AsyncMock(
+        return_value=[(None, ConnectionError("worker gone"))]
+    )
+
+    async def _run():
+      with self.assertLogs(level="ERROR") as logs:
+        results = await engine.poll_rollouts(timeout_s=0.1)
+      self.assertEqual(results, [])
+      self.assertTrue(
+          any("Failed polling rollout worker" in line for line in logs.output)
+      )
+
+    asyncio.run(_run())
+
+  def test_poll_retry_budget_is_passed_to_session(self):
+    engine = self._make_engine(fail_fast=True, poll_retry_budget_s=600.0)
+    self.assertEqual(engine._rollout_session._poll_retry_budget_s, 600.0)
+    self.assertIsNone(
+        self._make_engine(fail_fast=False)._rollout_session._poll_retry_budget_s
+    )
+
+
 if __name__ == "__main__":
   absltest.main()

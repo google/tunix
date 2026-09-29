@@ -28,6 +28,7 @@ from tunix.experimental.metrics import metrics as exp_metrics
 from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import distributed_rl_engine
+from tunix.experimental.orchestrator import rl_engine_interface
 from tunix.experimental.orchestrator import rl_program
 from tunix.experimental.trajectory import in_memory_store
 from tunix.experimental.worker import remote_execution
@@ -1889,6 +1890,52 @@ class RLProgramTest(absltest.TestCase):
       with self.assertRaises(RuntimeError) as cm:
         await prog.run_async(self.mock_engine)
       self.assertIn("Rollout worker cluster down!", str(cm.exception))
+
+    asyncio.run(_run())
+
+  def test_fatal_rollout_error_in_polling_fails_run(self):
+    self.mock_engine.poll_rollouts = mock.AsyncMock(
+        side_effect=rl_engine_interface.FatalRolloutError("rollout lost")
+    )
+
+    async def _run():
+      program = self._create_program(dataset=["prompt"])
+      with self.assertRaisesRegex(
+          rl_engine_interface.FatalRolloutError, "rollout lost"
+      ):
+        # Without the fail-fast path this would wait forever for rollouts.
+        await asyncio.wait_for(
+            program.run_async(self.mock_engine), timeout=10.0
+        )
+
+    asyncio.run(_run())
+
+  def test_other_polling_errors_are_logged_and_retried(self):
+    group = _make_trajectory_group()
+    poll_results: list[Any] = [RuntimeError("transient"), list(group)]
+
+    async def _mock_poll(*args, **kwargs):
+      del args, kwargs
+      if poll_results:
+        result = poll_results.pop(0)
+        if isinstance(result, Exception):
+          raise result
+        return result
+      await asyncio.sleep(0.01)
+      return []
+
+    self.mock_engine.poll_rollouts = mock.AsyncMock(side_effect=_mock_poll)
+
+    async def _run():
+      program = self._create_program(dataset=["prompt"])
+      with self.assertLogs(level="WARNING") as logs:
+        await asyncio.wait_for(
+            program.run_async(self.mock_engine), timeout=10.0
+        )
+      self.assertEqual(program.step, 1)
+      self.assertTrue(
+          any("Error in polling_stage" in line for line in logs.output)
+      )
 
     asyncio.run(_run())
 
