@@ -88,8 +88,11 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     self._rollout_pool = remote_execution.RoutingActorPool(
         self._rollout_workers
     )
+    # Least-loaded, not hash-by-traj_id: each rollout request is one whole
+    # episode, and episode lengths vary by 10x, so hashing left some workers
+    # with twice the episodes of others and stretched the batch tail.
     self._rollout_session = remote_execution.PoolExecutionSession(
-        self._rollout_pool
+        self._rollout_pool, least_loaded=True
     )
     self._trainer_workers = dict(trainer_workers)
     self._inference_workers = dict(inference_workers or {})
