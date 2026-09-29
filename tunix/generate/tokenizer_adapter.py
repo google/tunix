@@ -246,7 +246,7 @@ class Tokenizer(TokenizerAdapter):
           pretrained_model_name_or_path=tokenizer_path,
           add_bos_token=add_bos,
           add_eos_token=add_eos,
-          token=hf_access_token,
+          token=hf_access_token or None,
           extra_special_tokens={},
       )
     elif tokenizer_type == 'sentencepiece':

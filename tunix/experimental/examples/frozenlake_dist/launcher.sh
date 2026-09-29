@@ -111,6 +111,14 @@ is_true() {
   [[ "$1" == "1" || "$1" == "true" || "$1" == "True" ]]
 }
 
+print_command() {
+  local label="$1"
+  shift
+  echo "$label:"
+  printf '  %q' "$@"
+  echo
+}
+
 has_direct_safetensors() {
   [[ -d "$MODEL_DIR" ]] && [[ -n "$(
     find "$MODEL_DIR" -maxdepth 1 -type f -name '*.safetensors' -print -quit 2>/dev/null || true
@@ -118,6 +126,9 @@ has_direct_safetensors() {
 }
 
 ensure_model_dir() {
+  if is_true "${DRY_RUN:-false}"; then
+    return 0
+  fi
   if has_direct_safetensors; then
     return
   fi
@@ -139,6 +150,9 @@ PY
 }
 
 wait_for_port() {
+  if is_true "${DRY_RUN:-false}"; then
+    return 0
+  fi
   local name="$1"
   local port="$2"
   local pid="$3"
@@ -174,6 +188,9 @@ PY
 
 cleanup() {
   trap - EXIT
+  if is_true "${DRY_RUN:-false}"; then
+    return 0
+  fi
   local pid
   for pid in "${TRAINER_PID:-}" "${ROLLOUT_PID:-}"; do
     if [[ -n "$pid" ]]; then
@@ -233,10 +250,7 @@ echo "Starting distributed FrozenLake with ${MODEL_ID}: full batch ${BATCH_SIZE}
     --num_generations="$NUM_GENERATIONS"
     --train_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
     --compute_logps_micro_batch_size="$COMPUTE_LOGPS_MICRO_BATCH_SIZE"
-    --model_parameter_dtype="$MODEL_PARAMETER_DTYPE"
-    --remat_config=decoder
-    --use_flash_attention
-    --flash_attention_block_size="$FLASH_ATTENTION_BLOCK_SIZE"
+    --remat_policy=decoder
     --learning_rate="$LEARNING_RATE"
     --adam_b1="$ADAM_B1"
     --adam_b2="$ADAM_B2"
@@ -252,7 +266,9 @@ echo "Starting distributed FrozenLake with ${MODEL_ID}: full batch ${BATCH_SIZE}
       --optimizer_chain_kwargs="{'max_norm': $MAX_GRAD_NORM}"
     )
   fi
-  is_true "$DEBUG" && cmd+=(--debug)
+  if is_true "$DEBUG"; then
+    cmd+=(--debug)
+  fi
   export JAX_PLATFORMS=tpu,cpu
   export TPU_VISIBLE_DEVICES="$TRAINER_TPU_CHIPS"
   export TPU_VISIBLE_CHIPS="$TPU_VISIBLE_DEVICES"
@@ -260,11 +276,19 @@ echo "Starting distributed FrozenLake with ${MODEL_ID}: full batch ${BATCH_SIZE}
   export TPU_HOST_BOUNDS
   export LIBTPU_INIT_ARGS="--deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS} --deepsea_host_bounds=${TPU_HOST_BOUNDS}"
   export PYTHONUNBUFFERED=1
+  print_command "Trainer command" "${cmd[@]}"
+  if is_true "${DRY_RUN:-false}"; then
+    exit 0
+  fi
   exec "${cmd[@]}" > "$TRAINER_LOG" 2>&1
 ) &
 TRAINER_PID=$!
+if is_true "${DRY_RUN:-false}"; then
+  wait "$TRAINER_PID"
+fi
 
 (
+  vllm_config_json="{\"hbm_utilization\": ${VLLM_HBM_UTILIZATION}, \"max_num_seqs\": ${VLLM_MAX_NUM_SEQS}, \"max_num_batched_tokens\": ${VLLM_MAX_NUM_BATCHED_TOKENS}, \"max_model_len\": ${VLLM_MAX_MODEL_LEN}, \"dtype\": \"bfloat16\", \"async_scheduling\": false}"
   cmd=(
     "$PYTHON_BIN" -m tunix.experimental.distributed.runtime.main
     --discovery_addrs="${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT}"
@@ -284,21 +308,12 @@ TRAINER_PID=$!
     --env_name=frozenlake_env
     --agent_name=frozenlake_agent
     --max_concurrency="$ROLLOUT_MAX_CONCURRENCY"
-    --vllm_hbm_utilization="$VLLM_HBM_UTILIZATION"
-    --vllm_max_num_seqs="$VLLM_MAX_NUM_SEQS"
-    --vllm_max_num_batched_tokens="$VLLM_MAX_NUM_BATCHED_TOKENS"
-    --vllm_max_model_len="$VLLM_MAX_MODEL_LEN"
-    --vllm_dtype=bfloat16
-    --vllm_server_mode
-    --no-vllm_async_scheduling
+    --vllm_config_json="$vllm_config_json"
     --no-enable_thinking
   )
-  if [[ "$WEIGHT_SYNC_MODE" == "none" ]]; then
-    cmd+=(--no-vllm_init_with_random_weights)
-  else
-    cmd+=(--vllm_init_with_random_weights)
+  if is_true "$DEBUG"; then
+    cmd+=(--debug)
   fi
-  is_true "$DEBUG" && cmd+=(--debug)
   export JAX_PLATFORMS=tpu,cpu
   export SKIP_JAX_PRECOMPILE=1
   export TPU_VISIBLE_DEVICES="$ROLLOUT_TPU_CHIPS"
@@ -307,9 +322,16 @@ TRAINER_PID=$!
   export TPU_HOST_BOUNDS
   export LIBTPU_INIT_ARGS="--deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS} --deepsea_host_bounds=${TPU_HOST_BOUNDS}"
   export PYTHONUNBUFFERED=1
+  print_command "Rollout command" "${cmd[@]}"
+  if is_true "${DRY_RUN:-false}"; then
+    exit 0
+  fi
   exec "${cmd[@]}" > "$ROLLOUT_LOG" 2>&1
 ) &
 ROLLOUT_PID=$!
+if is_true "${DRY_RUN:-false}"; then
+  wait "$ROLLOUT_PID"
+fi
 
 wait_for_port trainer "$TRAINER_PORT" "$TRAINER_PID" "$TRAINER_LOG"
 wait_for_port rollout "$ROLLOUT_PORT" "$ROLLOUT_PID" "$ROLLOUT_LOG"
@@ -353,17 +375,43 @@ cmd=(
   --trainer_fsdp="$TRAINER_FSDP"
   --stop_workers_on_exit
 )
-is_true "$SHUFFLE" && cmd+=(--shuffle) || cmd+=(--no-shuffle)
-is_true "$IS_SLIPPERY" && cmd+=(--is_slippery) || cmd+=(--no-is_slippery)
-is_true "$USE_MULTISTEP_PROMPT" && cmd+=(--use_multistep_prompt) || cmd+=(--no-use_multistep_prompt)
-is_true "$USE_ROLLOUT_LOGPS" && cmd+=(--use_rollout_logps) || cmd+=(--no-use_rollout_logps)
-[[ -n "$LOG_DIR" ]] && cmd+=(--log_dir="$LOG_DIR")
-[[ -n "$TRAJECTORY_LOG_DIR" ]] && cmd+=(--trajectory_log_dir="$TRAJECTORY_LOG_DIR")
-is_true "$DEBUG" && cmd+=(--debug)
+if is_true "$SHUFFLE"; then
+  cmd+=(--shuffle)
+else
+  cmd+=(--no-shuffle)
+fi
+if is_true "$IS_SLIPPERY"; then
+  cmd+=(--is_slippery)
+else
+  cmd+=(--no-is_slippery)
+fi
+if is_true "$USE_MULTISTEP_PROMPT"; then
+  cmd+=(--use_multistep_prompt)
+else
+  cmd+=(--no-use_multistep_prompt)
+fi
+if is_true "$USE_ROLLOUT_LOGPS"; then
+  cmd+=(--use_rollout_logps)
+else
+  cmd+=(--no-use_rollout_logps)
+fi
+if [[ -n "$LOG_DIR" ]]; then
+  cmd+=(--log_dir="$LOG_DIR")
+fi
+if [[ -n "$TRAJECTORY_LOG_DIR" ]]; then
+  cmd+=(--trajectory_log_dir="$TRAJECTORY_LOG_DIR")
+fi
+if is_true "$DEBUG"; then
+  cmd+=(--debug)
+fi
 
 export JAX_PLATFORMS=cpu
 export PYTHONUNBUFFERED=1
 export WANDB_PROJECT WANDB_RUN_NAME WANDB_API_KEY
+print_command "Orchestrator command" "${cmd[@]}"
+if is_true "${DRY_RUN:-false}"; then
+  exit 0
+fi
 "${cmd[@]}" > "$ORCHESTRATOR_LOG" 2>&1
 
 echo "Distributed FrozenLake finished. Logs: ${TRAINER_LOG}, ${ROLLOUT_LOG}, ${ORCHESTRATOR_LOG}"

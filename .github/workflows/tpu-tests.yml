@@ -235,7 +235,7 @@ jobs:
   #      prevents background process or chip-lock leakage into earlier tests.
   # ---------------------------------------------------------------------------
   run_dev:
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    if: ${{ github.event_name != 'pull_request' || github.base_ref == 'atwigg/mlperf' || github.event.pull_request.head.repo.full_name == github.repository || contains(github.event.pull_request.labels.*.name, 'ready-to-submit') }}
     runs-on: [linux-x86-ct6e-180-8tpu]
     environment: testing
     # Note: GitHub Actions `timeout-minutes` only counts active execution time after
@@ -305,6 +305,7 @@ jobs:
           python3 -m pip install numpy==2.3.5 --force-reinstall
 
       - name: GRPO Integration Test (Llama3 / Qwen2 multi-device RL training demo)
+        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
@@ -330,9 +331,13 @@ jobs:
           unset JAX_PLATFORMS
           python3 -m pytest tests/generate/vllm_sampler_qwen_test.py -v --tb=short
           python3 -m pytest tests/generate/vllm_sampler_test.py::VllmSamplerConfigTest -v --tb=short
-          python3 -m pytest tests/generate/vllm_sampler_test.py::VllmSamplerTest -k "batch_mode and not data_parallel or sampling_kwargs" -v --tb=short
-          python3 -m pytest tests/generate/vllm_sampler_test.py::VllmSamplerTest -k "server_mode or concurrency" -v --tb=short
-          python3 -m pytest tests/generate/vllm_sampler_test.py::VllmSamplerTest -k "data_parallel" -v --tb=short
+          if [ -n "${HF_TOKEN:-}" ]; then
+            python3 -m pytest tests/generate/vllm_sampler_test.py::VllmSamplerTest -k "batch_mode and not data_parallel or sampling_kwargs" -v --tb=short
+            python3 -m pytest tests/generate/vllm_sampler_test.py::VllmSamplerTest -k "server_mode or concurrency" -v --tb=short
+            python3 -m pytest tests/generate/vllm_sampler_test.py::VllmSamplerTest -k "data_parallel" -v --tb=short
+          else
+            echo "Skipping VllmSamplerTest (meta-llama/Llama-3.2-1B-Instruct requires HF_TOKEN)."
+          fi
 
       # [ORDERING CONSTRAINT]: Must run AFTER `Run vllm tests` (installing tensorflow
       # upgrades NumPy past ==2.3.5) and BEFORE the Distributed RL smoke stage

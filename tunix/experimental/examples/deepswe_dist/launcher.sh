@@ -192,6 +192,9 @@ PY
 }
 
 ensure_model_dir() {
+  if [[ "${DRY_RUN:-false}" == "true" || "${DRY_RUN:-0}" == "1" ]]; then
+    return 0
+  fi
   if has_direct_safetensors; then
     return
   fi
@@ -203,6 +206,9 @@ ensure_model_dir() {
 }
 
 wait_for_port() {
+  if [[ "${DRY_RUN:-false}" == "true" || "${DRY_RUN:-0}" == "1" ]]; then
+    return 0
+  fi
   local name="$1"
   local port="$2"
   local pid="$3"
@@ -241,6 +247,9 @@ PY
 
 cleanup() {
   trap - EXIT ERR
+  if [[ "${DRY_RUN:-false}" == "true" || "${DRY_RUN:-0}" == "1" ]]; then
+    return 0
+  fi
   local pids=()
   for pid in "${TRAINER_PID:-}" "${ROLLOUT_PID:-}" "${INFERENCE_PID:-}"; do
     if [[ -n "$pid" ]]; then
@@ -361,10 +370,10 @@ echo "Launching trainer node..."
   fi
 
   ROLLOUT_MESH_TP=${ROLLOUT_MESH_TP:-$ROLLOUT_TP}
-  # shellcheck disable=SC2206
-  TRAINER_CMD+=($(maxtext_trainer_flags))
+  read -r -a _maxtext_trainer_flags <<< "$(maxtext_trainer_flags)"
+  TRAINER_CMD+=("${_maxtext_trainer_flags[@]}")
   
-  if [[ -n "$MAX_SEQ_TOKEN_PER_TPU" ]]; then
+  if [[ -n "$MAX_SEQ_TOKEN_PER_TPU" && "$TRAINER_BACKEND" != "maxtext" ]]; then
     TRAINER_CMD+=(--max_seq_token_per_tpu="$MAX_SEQ_TOKEN_PER_TPU")
   fi
   if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
@@ -392,9 +401,15 @@ echo "Launching trainer node..."
   fi
   export PYTHONUNBUFFERED=1
   print_command "Trainer command" "${TRAINER_CMD[@]}"
+  if [[ "${DRY_RUN:-false}" == "true" || "${DRY_RUN:-0}" == "1" ]]; then
+    exit 0
+  fi
   exec "${TRAINER_CMD[@]}" > "$TRAINER_LOG" 2>&1
 ) &
 TRAINER_PID=$!
+if [[ "${DRY_RUN:-false}" == "true" || "${DRY_RUN:-0}" == "1" ]]; then
+  wait "$TRAINER_PID"
+fi
 
 echo "Launching DeepSWE rollout node..."
 (
@@ -421,8 +436,8 @@ echo "Launching DeepSWE rollout node..."
     --max_concurrency="$ROLLOUT_MAX_CONCURRENCY"
   )
   
-  # shellcheck disable=SC2206
-  ROLLOUT_CMD+=($(maxtext_rollout_flags))
+  read -r -a _maxtext_rollout_flags <<< "$(maxtext_rollout_flags)"
+  ROLLOUT_CMD+=("${_maxtext_rollout_flags[@]}")
 
   if [[ -n "$EOS_TOKENS" ]]; then
     ROLLOUT_CMD+=(--eos_tokens="$EOS_TOKENS")
@@ -449,9 +464,15 @@ echo "Launching DeepSWE rollout node..."
   fi
   export PYTHONUNBUFFERED=1
   print_command "Rollout command" "${ROLLOUT_CMD[@]}"
+  if [[ "${DRY_RUN:-false}" == "true" || "${DRY_RUN:-0}" == "1" ]]; then
+    exit 0
+  fi
   exec "${ROLLOUT_CMD[@]}" > "$ROLLOUT_LOG" 2>&1
 ) &
 ROLLOUT_PID=$!
+if [[ "${DRY_RUN:-false}" == "true" || "${DRY_RUN:-0}" == "1" ]]; then
+  wait "$ROLLOUT_PID"
+fi
 
 if [[ "$RUN_INFERENCE_NODE" == "1" || "$RUN_INFERENCE_NODE" == "true" || "$RUN_INFERENCE_NODE" == "True" ]]; then
   if [[ -z "$INFERENCE_TPU_CHIPS" ]]; then
@@ -484,9 +505,15 @@ if [[ "$RUN_INFERENCE_NODE" == "1" || "$RUN_INFERENCE_NODE" == "true" || "$RUN_I
     export LIBTPU_INIT_ARGS="--deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS} --deepsea_host_bounds=${TPU_HOST_BOUNDS}"
     export PYTHONUNBUFFERED=1
     print_command "Inference command" "${INFERENCE_CMD[@]}"
+    if [[ "${DRY_RUN:-false}" == "true" || "${DRY_RUN:-0}" == "1" ]]; then
+      exit 0
+    fi
     exec "${INFERENCE_CMD[@]}" > "$INFERENCE_LOG" 2>&1
   ) &
   INFERENCE_PID=$!
+  if [[ "${DRY_RUN:-false}" == "true" || "${DRY_RUN:-0}" == "1" ]]; then
+    wait "$INFERENCE_PID"
+  fi
   INFERENCE_ADDR="localhost:$INFERENCE_PORT"
 fi
 
@@ -619,6 +646,9 @@ echo "Launching CPU orchestrator..."
   export WANDB_RUN_NAME="$WANDB_RUN_NAME"
   export WANDB_API_KEY="$WANDB_API_KEY"
   print_command "Orchestrator command" "${ORCHESTRATOR_CMD[@]}"
+  if [[ "${DRY_RUN:-false}" == "true" || "${DRY_RUN:-0}" == "1" ]]; then
+    exit 0
+  fi
   "${ORCHESTRATOR_CMD[@]}" > "$ORCHESTRATOR_LOG" 2>&1
 )
 

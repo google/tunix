@@ -294,6 +294,9 @@ PY
 }
 
 ensure_model_dir() {
+  if [[ "${DRY_RUN:-false}" == "true" || "${DRY_RUN:-0}" == "1" ]]; then
+    return 0
+  fi
   if [[ -e "$MODEL_DIR" && ! -d "$MODEL_DIR" ]]; then
     echo "Error: MODEL_DIR exists but is not a directory: $MODEL_DIR"
     exit 1
@@ -341,6 +344,9 @@ check_process_alive() {
 }
 
 wait_for_port() {
+  if [[ "${DRY_RUN:-false}" == "true" || "${DRY_RUN:-0}" == "1" ]]; then
+    return 0
+  fi
   local name="$1"
   local port="$2"
   local pid="$3"
@@ -518,10 +524,10 @@ echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
   fi
 
   ROLLOUT_MESH_TP=${ROLLOUT_MESH_TP:-$ROLLOUT_TP}
-  # shellcheck disable=SC2206
-  TRAINER_CMD+=($(maxtext_trainer_flags))
+  read -r -a _maxtext_trainer_flags <<< "$(maxtext_trainer_flags)"
+  TRAINER_CMD+=("${_maxtext_trainer_flags[@]}")
 
-  if [[ -n "$MAX_SEQ_TOKEN_PER_TPU" ]]; then
+  if [[ -n "$MAX_SEQ_TOKEN_PER_TPU" && "$TRAINER_BACKEND" != "maxtext" ]]; then
     TRAINER_CMD+=(--max_seq_token_per_tpu="$MAX_SEQ_TOKEN_PER_TPU")
   fi
   if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
@@ -547,9 +553,15 @@ echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
   export PYTHONUNBUFFERED=1
   env | egrep 'JAX|TPU'
   print_command "Trainer command" "${TRAINER_CMD[@]}"
+  if [[ "${DRY_RUN:-false}" == "true" || "${DRY_RUN:-0}" == "1" ]]; then
+    exit 0
+  fi
   exec "${TRAINER_CMD[@]}" > "$TRAINER_LOG" 2>&1
 ) &
 TRAINER_PID=$!
+if [[ "${DRY_RUN:-false}" == "true" || "${DRY_RUN:-0}" == "1" ]]; then
+  wait "$TRAINER_PID"
+fi
 echo "Trainer pid=$TRAINER_PID log=$TRAINER_LOG"
 print_process_debug "trainer" "$TRAINER_PID"
 
@@ -576,8 +588,8 @@ echo "Launching rollout node with sampler=$SAMPLER on TPU chips $ROLLOUT_TPU_CHI
     --chat_parser="$CHAT_PARSER"
   )
 
-  # shellcheck disable=SC2206
-  ROLLOUT_CMD+=($(maxtext_rollout_flags))
+  read -r -a _maxtext_rollout_flags <<< "$(maxtext_rollout_flags)"
+  ROLLOUT_CMD+=("${_maxtext_rollout_flags[@]}")
 
   if [[ -n "$EOS_TOKENS" ]]; then
     ROLLOUT_CMD+=( --eos_tokens="$EOS_TOKENS" )
@@ -597,9 +609,15 @@ echo "Launching rollout node with sampler=$SAMPLER on TPU chips $ROLLOUT_TPU_CHI
   export PYTHONUNBUFFERED=1
   env | egrep 'JAX|TPU'
   print_command "Rollout command" "${ROLLOUT_CMD[@]}"
+  if [[ "${DRY_RUN:-false}" == "true" || "${DRY_RUN:-0}" == "1" ]]; then
+    exit 0
+  fi
   exec "${ROLLOUT_CMD[@]}" > "$ROLLOUT_LOG" 2>&1
 ) &
 ROLLOUT_PID=$!
+if [[ "${DRY_RUN:-false}" == "true" || "${DRY_RUN:-0}" == "1" ]]; then
+  wait "$ROLLOUT_PID"
+fi
 echo "Rollout pid=$ROLLOUT_PID log=$ROLLOUT_LOG"
 print_process_debug "rollout" "$ROLLOUT_PID"
 
@@ -625,6 +643,9 @@ on_shutdown_signal() {
 
 cleanup() {
   trap - EXIT ERR
+  if [[ "${DRY_RUN:-false}" == "true" || "${DRY_RUN:-0}" == "1" ]]; then
+    return 0
+  fi
   local trainer_pids=()
   local worker_pids=()
   local all_pids=()
@@ -730,9 +751,15 @@ if [[ "$RUN_INFERENCE_NODE" == "1" || "$RUN_INFERENCE_NODE" == "true" || "$RUN_I
     export PYTHONUNBUFFERED=1
     env | egrep 'JAX|TPU'
     print_command "Inference command" "${INFERENCE_CMD[@]}"
+    if [[ "${DRY_RUN:-false}" == "true" || "${DRY_RUN:-0}" == "1" ]]; then
+      exit 0
+    fi
     exec "${INFERENCE_CMD[@]}" > "$INFERENCE_LOG" 2>&1
   ) &
   INFERENCE_PID=$!
+  if [[ "${DRY_RUN:-false}" == "true" || "${DRY_RUN:-0}" == "1" ]]; then
+    wait "$INFERENCE_PID"
+  fi
   INFERENCE_ADDR="localhost:$INFERENCE_PORT"
   echo "Inference pid=$INFERENCE_PID log=$INFERENCE_LOG"
   print_process_debug "inference" "$INFERENCE_PID"
@@ -850,6 +877,9 @@ echo "Launching CPU orchestrator..."
   export WANDB_API_KEY="$WANDB_API_KEY"
   env | egrep 'JAX|TPU'
   print_command "Orchestrator command" "${ORCHESTRATOR_CMD[@]}"
+  if [[ "${DRY_RUN:-false}" == "true" || "${DRY_RUN:-0}" == "1" ]]; then
+    exit 0
+  fi
   "${ORCHESTRATOR_CMD[@]}" > "$ORCHESTRATOR_LOG" 2>&1
 ) || {
   exit_code="$?"

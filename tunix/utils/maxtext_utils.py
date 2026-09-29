@@ -674,6 +674,7 @@ def _build_fp32_master_optimizer_cls(nnx_mod: Any | None = None) -> type[Any]:
       nnx_opt, "OptState", getattr(nnx_mod, "Variable", None)
   )
   to_opt_state_fn = getattr(nnx_opt, "to_opt_state", lambda x: x)
+  as_pure_fn = getattr(nnx_mod, "as_pure", getattr(nnx_mod, "pure", None))
 
   class Fp32MasterOptimizer(nnx_mod.Optimizer):
     """NNX Optimizer that keeps FP32 master weights and FP32 Optax state."""
@@ -713,10 +714,10 @@ def _build_fp32_master_optimizer_cls(nnx_mod: Any | None = None) -> type[Any]:
       self.opt_state = nnx_mod.data(to_opt_state_fn(opt_state))
 
     def update(self, model: Any, grads: Any, /, **kwargs: Any) -> Any:
-      param_arrays = nnx_mod.as_pure(nnx_mod.state(model, self.wrt))
-      grad_arrays = nnx_mod.as_pure(nnx_mod.state(grads, self.wrt))
-      opt_state_arrays = nnx_mod.as_pure(self.opt_state)
-      kwargs_arrays = nnx_mod.as_pure(kwargs)
+      param_arrays = as_pure_fn(nnx_mod.state(model, self.wrt))
+      grad_arrays = as_pure_fn(nnx_mod.state(grads, self.wrt))
+      opt_state_arrays = as_pure_fn(self.opt_state)
+      kwargs_arrays = as_pure_fn(kwargs)
 
       master_params = opt_state_arrays["master_params"]
       inner_state = opt_state_arrays["inner"]

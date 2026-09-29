@@ -66,16 +66,14 @@ jobs:
 
   tunix_tpu_unit_tests:
     needs: build_tunix_package
-    # Run TPU unit tests on scheduled/manual runs, Copybara PRs, same-repo atwigg/mlperf PRs,
+    # Run TPU unit tests on scheduled/manual runs, Copybara PRs, atwigg/mlperf PRs,
     # or when a maintainer applies the 'ready-to-submit' label.
     if: >-
       ${{
         github.event_name != 'pull_request' ||
         github.event.pull_request.user.login == 'copybara-service[bot]' ||
-        (github.base_ref == 'atwigg/mlperf' &&
-         github.event.pull_request.head.repo.full_name == github.repository) ||
-        (github.event.action == 'labeled' &&
-         github.event.label.name == 'ready-to-submit')
+        github.base_ref == 'atwigg/mlperf' ||
+        contains(github.event.pull_request.labels.*.name, 'ready-to-submit')
       }}
     uses: ./.github/workflows/tpu-tests.yml
     secrets:

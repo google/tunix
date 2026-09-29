@@ -143,7 +143,7 @@ def create_tokenizer(
       tokenizer_path,
       add_bos,
       add_eos,
-      os.environ.get('HF_TOKEN'),
+      os.environ.get('HF_TOKEN') or None,
   )
 
 

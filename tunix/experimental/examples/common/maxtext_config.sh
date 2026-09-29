@@ -34,8 +34,16 @@ export MAXTEXT_MODEL_NAME=${MAXTEXT_MODEL_NAME:-$(printf '%s' "${MODEL_NAME}" | 
 # Orbax checkpoint
 export MAXTEXT_CKPT=${MAXTEXT_CKPT:-}
 
-# Output directory
-export MAXTEXT_OUTPUT_DIR=${MAXTEXT_OUTPUT_DIR:-artifacts/maxtext}
+# Output directory (must be an absolute path or gs:// URI for Orbax / TensorStore)
+_MAXTEXT_REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+export MAXTEXT_OUTPUT_DIR=${MAXTEXT_OUTPUT_DIR:-"${ARTIFACT_ROOT:-${_MAXTEXT_REPO_ROOT}/artifacts}/maxtext"}
+if [[ ! "$MAXTEXT_OUTPUT_DIR" =~ ^gs:// ]]; then
+  if [[ "$MAXTEXT_OUTPUT_DIR" != /* ]]; then
+    MAXTEXT_OUTPUT_DIR="${_MAXTEXT_REPO_ROOT}/${MAXTEXT_OUTPUT_DIR}"
+  fi
+  MAXTEXT_OUTPUT_DIR="$(realpath -m "$MAXTEXT_OUTPUT_DIR" 2>/dev/null || echo "$MAXTEXT_OUTPUT_DIR")"
+  export MAXTEXT_OUTPUT_DIR
+fi
 
 # Padded MoE MLP intermediate dimension
 export TRAINER_PADDED_MOE_MLP_DIM=${TRAINER_PADDED_MOE_MLP_DIM:-}
@@ -63,6 +71,10 @@ maxtext_require_ckpt() {
 
 convert_maxtext_ckpt() {
   if [[ "$TRAINER_BACKEND" != "maxtext" ]]; then
+    return
+  fi
+  if [[ "${DRY_RUN:-false}" == "true" || "${DRY_RUN:-0}" == "1" ]]; then
+    echo "Skipping MaxText checkpoint conversion in dry-run mode."
     return
   fi
   if [[ "$MAXTEXT_CKPT" =~ ^gs:// ]]; then
@@ -101,6 +113,7 @@ convert_maxtext_ckpt() {
 # --mesh_tp= that overrode the real one.
 maxtext_trainer_flags() {
   [[ "${TRAINER_BACKEND}" == "maxtext" ]] || return 0
+  local rollout_mesh_tp="${ROLLOUT_MESH_TP:-${ROLLOUT_TP:-}}"
   local profiler_flags=""
   if [[ -n "$PROFILER_STEPS" ]]; then
     profiler_flags+=" --profiler_steps=${PROFILER_STEPS}"
@@ -122,7 +135,7 @@ maxtext_trainer_flags() {
     ${TRAINER_BASE_NUM_KV_HEADS:+--base_num_kv_heads=${TRAINER_BASE_NUM_KV_HEADS}} \
     ${REMAT_POLICY:+--remat_policy=${REMAT_POLICY}} \
     ${LEARNING_RATE_FINAL_FRACTION:+--learning_rate_final_fraction=${LEARNING_RATE_FINAL_FRACTION}} \
-    ${ROLLOUT_MESH_TP:+--rollout_mesh_tp=${ROLLOUT_MESH_TP}} \
+    ${rollout_mesh_tp:+--rollout_mesh_tp=${rollout_mesh_tp}} \
     ${USE_WEIGHT_CONVERTER:+--use_weight_converter=${USE_WEIGHT_CONVERTER}} \
     ${MAX_SEQ_TOKEN_PER_TPU:+--max_seq_token_per_tpu=${MAX_SEQ_TOKEN_PER_TPU}} \
     ${SKIP_STEP_ON_SPIKES:+--maxtext_skip_step_on_spikes=${SKIP_STEP_ON_SPIKES}} \
