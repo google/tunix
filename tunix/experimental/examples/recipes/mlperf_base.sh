@@ -26,23 +26,32 @@ export TRAINER_PORT="${TRAINER_PORT:-20002}"
 export PROFILER_STEPS=${PROFILER_STEPS:-0}
 export SKIP_FIRST_N_PROFILER_STEPS=${SKIP_FIRST_N_PROFILER_STEPS:--1}
 
-# TPU advanced profiling, appended so the per-recipe MAXTEXT_EXTRA_FLAGS is kept
-# and non-profiling runs are unchanged.
+# TPU advanced profiling. Appended rather than assigned so the per-recipe
+# MAXTEXT_EXTRA_FLAGS is preserved and non-profiling runs are unchanged.
 #
-# XSpace serializes as one proto with a 2 GB cap; 397B traces of 2 steps exceeded
-# it on both v7x (1.58 GB) and v5p (1.39 GB). Tracing 1 of the 4 chips per host
-# brings them to 0.47 GB and 0.35 GB.
+# The 397B v7x trace captured 814 ms, 4.5% of one 17.95 s fwd_bwd micro step,
+# and recorded zero Steps events. The limit is a per-chip SparseCore
+# trace-entry budget, not the 2 GB XSpace proto cap: all four chips recorded
+# equal entry counts to within 0.06% but stopped at different wall-clock times,
+# each with a nonzero dropped_traces counter. Capturing a full micro step
+# therefore requires the per-chip entry rate to fall by 22x. Measured factors:
 #
-# The SparseCore counts are measured hardware values, identical on v7x and v5p.
-# They must be stated because enable_tpu_profiling_options replaces libtpu's
-# SparseCore defaults with MaxText's, which trace 1 tile; on v7x the SparseCore
-# planes are 92% of all events. Re-measure them for a new TPU generation.
+#   tpu_num_sparse_core_tiles_to_trace=1   15.7x   12.8 s   insufficient
+#   tpu_num_sparse_cores_to_trace=1         2.0x    1.6 s   insufficient
+#   both                                   31.5x   25.6 s   sufficient
+#
+# Cost: tiles=1 retains one TEC line per plane, representative to 11.4% across
+# all 256; sparse_cores=1 drops the "SparseCore 1" plane on every device.
+# tpu_num_chips_to_profile_per_task=1 does not extend the window, since the
+# budget is per chip; it bounds output size at ~0.4 GB rather than ~1.2 GB.
+# Re-measure all three on a new TPU generation.
+#
+# TODO(profiling): if the budget is a host-wide pool partitioned across the
+# profiled chips, chips=1 would also extend the window and one of the two
+# SparseCore levers could be relaxed.
 export TPU_PROFILE_CHIPS_PER_TASK="${TPU_PROFILE_CHIPS_PER_TASK:-1}"
-export TPU_PROFILE_SPARSE_CORES="${TPU_PROFILE_SPARSE_CORES:-2}"
-export TPU_PROFILE_SPARSE_CORE_TILES="${TPU_PROFILE_SPARSE_CORE_TILES:-16}"
-if [[ "${PROFILER_STEPS}" =~ ^[0-9]+$ && "${PROFILER_STEPS}" -gt 0 ]]; then
-  tpu_profiling_flags=(
-    "enable_tpu_profiling_options=true"
+export TPU_PROFILE_SPARSE_CORES="${TPU_PROFILE_SPARSE_CORES:-1}"
+export TPU_PROFILE_SPARSE_CORE_TILES="${TPU_PROFILE_SPARSE_CORE_TILES:-1}"
 if [[ "${PROFILER_STEPS}" =~ ^[0-9]+$ && "${PROFILER_STEPS}" -gt 0 ]]; then
   tpu_profiling_flags=(
     "enable_tpu_profiling_options=true"
