@@ -466,6 +466,10 @@ spec:
                 # Model name without the "Qwen/" prefix: tunix's
                 # call_model_config() only parses "Qwen3-32B"; the recipe adds
                 # the prefix back for the HF download.
+                # The prior 8192-token response budget ended about 91% of
+                # trajectories at the context limit. A 4096-token prompt plus
+                # 32768 response tokens fits Qwen3-32B's 40960-token window;
+                # quarter the micro-batches and concurrency to bound memory.
                 exec python3 -X faulthandler -u /app/_run_deepswe.py \
                   --model_version Qwen3-32B \
                   --models_base_dir /app/models \
@@ -485,11 +489,11 @@ spec:
                   --batch_size 16 \
                   --mini_batch_size 16 \
                   --num_generations 8 \
-                  --train_micro_batch_size 8 \
-                  --compute_logps_micro_batch_size 8 \
+                  --train_micro_batch_size 2 \
+                  --compute_logps_micro_batch_size 2 \
                   --rollout_micro_batch_size 16 \
                   --max_prompt_length 4096 \
-                  --max_response_length 8192 \
+                  --max_response_length 32768 \
                   --max_num_batched_tokens 16384 \
                   --vllm_utilization 0.7 \
                   --vllm_reshard_chunk_size 1 \
@@ -497,7 +501,7 @@ spec:
                   --step_timeout_secs 60 \
                   --reward_timeout_secs 180 \
                   --episode_timeout_secs 3600 \
-                  --max_concurrency 128 \
+                  --max_concurrency 32 \
                   --env_backend kubernetes \
                   --scaffold r2egym \
                   --action_compat_mode q4_r2egym_xml_v2 \
