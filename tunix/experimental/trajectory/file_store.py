@@ -58,13 +58,43 @@ def _dump_json(model: pydantic.BaseModel) -> str:
   return model.model_dump_json(indent=2, exclude_none=True)
 
 
+def _get_step_path(traj_dir: epath.Path, atif_step_id: int) -> epath.Path:
+  """Returns the step file path for a 1-indexed ATIF step_id under traj_dir."""
+  return traj_dir / _STEP_FILENAME_TEMPLATE.format(step_id=atif_step_id)
+
+
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class _FileWriteTask(async_writer.WriteTask):
   """File-specific write task containing filesystem destination paths."""
 
   traj_dir: epath.Path
   meta_path: epath.Path
-  step_path: epath.Path | None = None
+  step_path: epath.Path | None = dataclasses.field(default=None, init=False)
+
+  def to_atif(self) -> None:
+    """Projects the payload to ATIF and records the resulting step file path."""
+    super().to_atif()
+    if self.step is not None:
+      object.__setattr__(
+          self, "step_path", _get_step_path(self.traj_dir, self.step.step_id)
+      )
+
+
+def _resolve_target_path(task: _FileWriteTask) -> epath.Path:
+  """Returns the most specific filesystem path a task was writing to.
+
+  If `to_atif()` failed, `task.step` is still an unprojected subclass whose
+  step_id may not match the on-disk id, so the trajectory directory is returned
+  instead of a guessed step file path.
+
+  Args:
+    task: The write task.
+  """
+  if task.step is None:
+    return task.meta_path
+  if task.step_path is None:
+    return task.traj_dir
+  return task.step_path
 
 
 class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
@@ -84,7 +114,6 @@ class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
       traj_dir: epath.Path,
       meta_path: epath.Path,
       metadata: trajectory_lib.TrajectoryMetadata,
-      step_path: epath.Path | None = None,
       step: trajectory_lib.Step | None = None,
   ) -> None:
     """Enqueues a step and/or trajectory metadata for asynchronous writing.
@@ -109,7 +138,6 @@ class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
       traj_dir: Directory path for the trajectory.
       meta_path: File path for the trajectory metadata.json.
       metadata: TrajectoryMetadata containing trajectory_id and run metadata.
-      step_path: Optional file path for the step JSON.
       step: Optional Step object to write.
 
     Raises:
@@ -119,7 +147,6 @@ class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
         traj_dir=traj_dir,
         meta_path=meta_path,
         metadata=metadata,
-        step_path=step_path,
         step=step,
     )
     self._enqueue(task)
@@ -135,6 +162,10 @@ class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
 
     Args:
       task: Container holding directory paths, metadata, and step payload.
+
+    Raises:
+      RuntimeError: If the task has a step but `to_atif()` was not called first,
+        so its step file path is unknown.
     """
     traj_id = task.trajectory_id
 
@@ -149,8 +180,10 @@ class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
       task.meta_path.write_text(meta_json)
       self._metadata_hash_by_trajectory_id[traj_id] = meta_hash
 
-    # Write step file if provided.
-    if task.step_path is not None and task.step is not None:
+    # Write step file if provided. `step_path` is set by `to_atif()`.
+    if task.step is not None:
+      if task.step_path is None:
+        raise RuntimeError("to_atif() must run before _process_task().")
       task.step_path.write_text(_dump_json(task.step))
 
   def _log_task_error(self, task: _FileWriteTask) -> None:
@@ -162,15 +195,12 @@ class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
     step_info = (
         f"step {task.step.step_id}" if task.step is not None else "metadata"
     )
-    target_path = (
-        task.step_path if task.step_path is not None else task.meta_path
-    )
     logging.exception(
         "%s failed to write trajectory %s (trajectory_id=%s) to %s.",
         self._thread_name,
         step_info,
         task.trajectory_id,
-        target_path,
+        _resolve_target_path(task),
     )
 
 
@@ -304,9 +334,16 @@ class FileTrajectoryStore(
     return self.get_trajectory_dir(trajectory_id) / _METADATA_FILENAME
 
   def get_step_path(self, trajectory_id: str, step_id: int) -> epath.Path:
-    """Returns the file path for a given trajectory ID and step ID."""
-    step_filename = _STEP_FILENAME_TEMPLATE.format(step_id=step_id)
-    return self.get_trajectory_dir(trajectory_id) / step_filename
+    """Returns the file path for a given trajectory ID and ATIF step ID.
+
+    Args:
+      trajectory_id: The trajectory identifier.
+      step_id: The 1-indexed ATIF step_id, as serialized on disk.
+
+    Returns:
+      The path of the step JSON file.
+    """
+    return _get_step_path(self.get_trajectory_dir(trajectory_id), step_id)
 
   def get_trajectories_metadata(
       self, trajectory_ids: list[str] | None = None
@@ -433,12 +470,10 @@ class FileTrajectoryStore(
     traj_id = _validate_trajectory_id(metadata.trajectory_id)
     traj_dir = self.get_trajectory_dir(traj_id)
     meta_path = self.get_trajectory_metadata_path(traj_id)
-    step_path = self.get_step_path(traj_id, step.step_id) if step else None
     self._writer.enqueue_write(
         traj_dir=traj_dir,
         meta_path=meta_path,
         metadata=metadata,
-        step_path=step_path,
         step=step,
     )
 

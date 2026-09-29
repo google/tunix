@@ -226,6 +226,72 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
     saved_step = trajectory_lib.Step.model_validate_json(step_path.read_text())
     self.assertEqual(saved_step.extra, {"notes": "initial note"})
 
+  @parameterized.named_parameters(
+      (
+          "agent_step",
+          trajectory_lib.TunixAgentStep(
+              step_id=0,
+              source=trajectory_lib.Source.AGENT,
+              message="agent turn",
+              policy_version=7,
+          ),
+      ),
+      (
+          "env_step",
+          trajectory_lib.TunixEnvStep(
+              step_id=0,
+              source=trajectory_lib.Source.USER,
+              message="env turn",
+              reward=1.0,
+          ),
+      ),
+  )
+  def test_tunix_step_filename_matches_projected_atif_step_id(
+      self, step: trajectory_lib.Step
+  ) -> None:
+    """Verifies 0-indexed Tunix steps are written to their 1-indexed ATIF path."""
+    self.file_s.add_step(step, trajectory_testing.METADATA_1)
+    self.file_s.flush()
+
+    traj_id = trajectory_testing.TRAJECTORY_ID_1
+    atif_step_path = self.file_s.get_step_path(traj_id, step_id=1)
+    self.assertTrue(atif_step_path.exists())
+    self.assertFalse(self.file_s.get_step_path(traj_id, step_id=0).exists())
+    saved_step = trajectory_lib.Step.model_validate_json(
+        atif_step_path.read_text()
+    )
+    self.assertEqual(saved_step.step_id, 1)
+
+  def test_tunix_step_sequence_writes_distinct_offset_files(self) -> None:
+    """Verifies a mixed Tunix step sequence maps each step_id to step_id + 1."""
+    steps = [
+        trajectory_lib.TunixEnvStep(
+            step_id=0, source=trajectory_lib.Source.USER, message="prompt"
+        ),
+        trajectory_lib.TunixAgentStep(
+            step_id=1, source=trajectory_lib.Source.AGENT, message="answer"
+        ),
+        trajectory_lib.TunixEnvStep(
+            step_id=4, source=trajectory_lib.Source.USER, message="feedback"
+        ),
+    ]
+    for step in steps:
+      self.file_s.add_step(step, trajectory_testing.METADATA_1)
+    self.file_s.flush()
+
+    traj_id = trajectory_testing.TRAJECTORY_ID_1
+    traj_dir = self.file_s.get_trajectory_dir(traj_id)
+    self.assertCountEqual(
+        [p.name for p in traj_dir.glob("step_*.json")],
+        ["step_000001.json", "step_000002.json", "step_000005.json"],
+    )
+    for step in steps:
+      saved_step = trajectory_lib.Step.model_validate_json(
+          self.file_s.get_step_path(traj_id, step.step_id + 1).read_text()
+      )
+      self.assertEqual(saved_step.step_id, step.step_id + 1)
+      self.assertEqual(saved_step.message, step.message)
+
   def test_add_step_is_non_blocking(self) -> None:
     """Verifies that add_step returns immediately without waiting for disk I/O."""
     block_event = threading.Event()
