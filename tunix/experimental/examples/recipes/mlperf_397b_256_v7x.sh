@@ -37,7 +37,7 @@ export MAXTEXT_OUTPUT_DIR="${MAXTEXT_OUTPUT_DIR:-${BUCKET}/maxtext/${JOB_PREFIX}
 export TRAJECTORY_LOG_DIR="${TRAJECTORY_LOG_DIR:-${BUCKET}/trajectories/${JOB_PREFIX}/logger}"
 export TRAJECTORY_STORE_ROOT_DIR="${TRAJECTORY_STORE_ROOT_DIR:-${TRAJECTORY_STORE_ROOT:-${BUCKET}/trajectories/${JOB_PREFIX}/store}}"
 
-export K8S_NAMESPACE="priority-dev"
+export K8S_NAMESPACE="${K8S_NAMESPACE:-priority-dev}"
 export USE_DYNAMIC_SLICING="true"
 
 # Head pod lands on cpu-np (~257G allocatable). mlperf_pathways_config.sh's
