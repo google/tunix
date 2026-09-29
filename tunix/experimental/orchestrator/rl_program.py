@@ -963,7 +963,10 @@ class StandardRLProgram(RLProgram):
           clean_key = (
               k.removeprefix("trainer/").removeprefix("actor/")
           )
-          self._log_metric(clean_key, val, log_step, prefix="actor")
+          if clean_key.startswith(("sampler_trainer/", "sampler_is/")):
+            self._log_metric(clean_key, val, log_step)
+          else:
+            self._log_metric(clean_key, val, log_step, prefix="actor")
 
     # --- 5. Sampler/Trainer Agreement Metrics ---
     # Names are already namespaced (``sampler_trainer/*``, ``sampler_is/*``) by
@@ -1048,6 +1051,7 @@ class StandardRLProgram(RLProgram):
     ):
       updates["old_per_token_logps"] = trainer_logps
     if updates:
+      updates["sampler_agreement_applied"] = True
       batch = dataclasses.replace(batch, **updates)
     return batch
 
@@ -1186,11 +1190,21 @@ class StandardRLProgram(RLProgram):
             )
             batch = batch_assembly.with_ref_per_token_logps(batch, ref_logps)
           algo_config = getattr(self.algo, "algo_config", None)
+          can_fuse_agreement_in_loss = (
+              algo_config is not None
+              and getattr(algo_config, "policy_loss_fn", "grpo") == "grpo"
+              and not getattr(
+                  algo_config, "log_sampler_trainer_agreement", False
+              )
+              and getattr(algo_config, "num_iterations", 1) == 1
+              and self.mini_batch_size >= self.full_batch_size
+          )
           if (
               isinstance(batch, datatypes.RLTrainerPayload)
               and batch.old_per_token_logps is not None
               and algo_config is not None
               and algo_config.use_rollout_logps
+              and not can_fuse_agreement_in_loss
           ):
             batch = await self._apply_sampler_trainer_agreement(
                 batch, step_sampler_agreement

@@ -325,8 +325,19 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         "advantage/max": np.max,
         "advantage/min": np.min,
         "advantage/nonzero_frac": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
-        "sampler_is/weight_mean": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
+        "sampler_is/weight_mean": common.global_weighted_mean,  # pyrefly: ignore[bad-assignment]
         "sampler_is/weight_min": np.min,
+        "sampler_is/weight_max": np.max,
+        "sampler_is/frac_clipped_at_threshold": common.global_weighted_mean,  # pyrefly: ignore[bad-assignment]
+        "sampler_trainer/logp_diff_mean": common.global_weighted_mean,  # pyrefly: ignore[bad-assignment]
+        "sampler_trainer/logp_diff_max": np.max,
+        "sampler_trainer/mult_prob_error_mean": common.global_weighted_mean,  # pyrefly: ignore[bad-assignment]
+        "sampler_trainer/mult_prob_error_max": np.max,
+        "sampler_trainer/prob_diff_mean": common.global_weighted_mean,  # pyrefly: ignore[bad-assignment]
+        "sampler_trainer/prob_diff_max": np.max,
+        "sampler_trainer/probs_pearson_corr": common.global_weighted_mean,  # pyrefly: ignore[bad-assignment]
+        "sampler_trainer/seq_error_masked_frac": common.global_weighted_mean,  # pyrefly: ignore[bad-assignment]
+        "sampler_trainer/seq_error_masked_count": np.sum,
     })
     self.rl_engine.actor_trainer.with_tqdm_metrics_to_display([  # pyrefly: ignore[bad-argument-type]
         lambda: "kl"
@@ -454,6 +465,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             mode=rl_engine_lib.Mode.TRAIN,
             step=self.rl_engine.global_steps,
         )
+      updates["sampler_agreement_applied"] = True
       if self.algo_config.seq_logprob_error_threshold is not None:
         updates["completion_mask"] = filtered_mask
       if sampler_is_weights is not None:
@@ -978,6 +990,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         sampler_is_weights=sampler_is_weights,
         completion_attention_mask=completion_attention_mask,
         routed_experts=routed_experts,
+        sampler_agreement_applied=trainer_per_token_logps is not None,
     )
     return [combined_batch]
 
