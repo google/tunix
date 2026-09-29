@@ -18,8 +18,10 @@ import tempfile
 
 from absl.testing import absltest
 from etils import epath
+from tunix.experimental.trajectory import db_engine
 from tunix.experimental.trajectory import file_store
 from tunix.experimental.trajectory import in_memory_store
+from tunix.experimental.trajectory import sql_store
 from tunix.experimental.trajectory import store as store_lib
 from tunix.experimental.trajectory import trajectory_testing
 
@@ -35,6 +37,16 @@ class FromConfigTest(absltest.TestCase):
         "enabled": True,
         "backend": "file",
         "root_dir": str(self.tmp_dir),
+        "run_id": "run_1",
+    }
+    config.update(overrides)
+    return config
+
+  def _sql_config(self, **overrides):
+    config = {
+        "enabled": True,
+        "backend": "sql",
+        "db_url": f"sqlite:///{self.tmp_dir / 'test.db'}",
         "run_id": "run_1",
     }
     config.update(overrides)
@@ -67,6 +79,12 @@ class FromConfigTest(absltest.TestCase):
     )
     self.assertIsInstance(store, in_memory_store.InMemoryTrajectoryStore)
 
+  def test_sql_backend_is_scoped_by_run_id(self):
+    store = store_lib.TrajectoryStore.from_config(self._sql_config())
+    self.assertIsInstance(store, sql_store.SqlTrajectoryStore)
+    self.assertEqual(store.run_id, "run_1")
+    store.close()
+
   def test_unknown_backend_raises(self):
     with self.assertRaisesRegex(ValueError, "Unknown Trajectory Store"):
       store_lib.TrajectoryStore.from_config(
@@ -91,6 +109,14 @@ class FromConfigTest(absltest.TestCase):
   def test_file_backend_rejects_a_run_id_that_is_not_a_path_segment(self):
     with self.assertRaisesRegex(ValueError, "unsupported characters"):
       store_lib.TrajectoryStore.from_config(self._file_config(run_id="a/b"))
+
+  def test_sql_backend_without_db_url_raises(self):
+    with self.assertRaisesRegex(ValueError, "db_url"):
+      store_lib.TrajectoryStore.from_config(self._sql_config(db_url=""))
+
+  def test_sql_backend_without_run_id_raises(self):
+    with self.assertRaisesRegex(ValueError, "run_id"):
+      store_lib.TrajectoryStore.from_config(self._sql_config(run_id=None))
 
   def test_two_calls_build_two_independent_stores(self):
     # Nothing here is a singleton: the guard against a second store (and, for
@@ -170,6 +196,24 @@ class ToConfigTest(absltest.TestCase):
     rebuilt = store_lib.TrajectoryStore.from_config(original.to_config())
     self.assertIsInstance(rebuilt, in_memory_store.InMemoryTrajectoryStore)
 
+  def test_sql_store_round_trips_through_its_own_config(self):
+    tmp_dir = epath.Path(self.enter_context(tempfile.TemporaryDirectory()))
+    db_url = f"sqlite:///{tmp_dir / 'test.db'}"
+    original = sql_store.SqlTrajectoryStore(run_id="run_1", db_url=db_url)
+    rebuilt = store_lib.TrajectoryStore.from_config(original.to_config())
+    self.assertIsInstance(rebuilt, sql_store.SqlTrajectoryStore)
+    self.assertEqual(rebuilt.run_id, original.run_id)
+
+    original.add_step(
+        trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1
+    )
+    original.close()
+    self.assertEqual(
+        [m.trajectory_id for m in rebuilt.get_trajectories_metadata()],
+        [trajectory_testing.METADATA_1.trajectory_id],
+    )
+    rebuilt.close()
+
   def test_config_reports_the_backend_it_was_built_from(self):
     # What to_config is for: two processes in one run that report different
     # dicts are reading and writing different data.
@@ -188,6 +232,17 @@ class ToConfigTest(absltest.TestCase):
     tmp_dir = epath.Path(self.enter_context(tempfile.TemporaryDirectory()))
     store = file_store.FileTrajectoryStore(root_dir=str(tmp_dir))
     with self.assertRaisesRegex(ValueError, "run_id"):
+      store.to_config()
+    store.close()
+
+  def test_sql_store_without_db_url_raises_on_to_config(self):
+    tmp_dir = epath.Path(self.enter_context(tempfile.TemporaryDirectory()))
+    engine = db_engine.create_trajectory_engine(
+        f"sqlite:///{tmp_dir / 'test.db'}"
+    )
+    self.addCleanup(engine.dispose)
+    store = sql_store.SqlTrajectoryStore(engine=engine, run_id="run_1")
+    with self.assertRaisesRegex(ValueError, "db_url"):
       store.to_config()
     store.close()
 
