@@ -166,12 +166,28 @@ class GroupQueueManager(Generic[_T]):
                 x for x in candidate_group if id(x) not in valid_set
             ]
 
-        if filtered_out:
-          self._filtered_groups.append(filtered_out)
+        self._on_candidate_group(valid_group, filtered_out)
 
-        if valid_group:
-          self._ready_groups.append(valid_group)
-          self._have_ready.set()
+  def _on_candidate_group(
+      self, valid_group: List[_T], filtered_out: List[_T]
+  ) -> None:
+    """Routes a candidate group that has been through `filter_fn`.
+
+    Called exactly once per completed candidate group, while `self._lock` is
+    held: implementations must not await, and must not re-acquire the lock.
+    Subclasses override this to stage ready groups somewhere other than the
+    flat `_ready_groups` FIFO.
+
+    Args:
+      valid_group: The items that survived `filter_fn`. May be empty.
+      filtered_out: The items `filter_fn` discarded. May be empty.
+    """
+    if filtered_out:
+      self._filtered_groups.append(filtered_out)
+
+    if valid_group:
+      self._ready_groups.append(valid_group)
+      self._have_ready.set()
 
   async def close(self):
     """Gracefully marks the queue as closed (EOF)."""
