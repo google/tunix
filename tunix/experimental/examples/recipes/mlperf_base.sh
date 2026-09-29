@@ -43,12 +43,15 @@ export TPU_PROFILE_SPARSE_CORE_TILES="${TPU_PROFILE_SPARSE_CORE_TILES:-16}"
 if [[ "${PROFILER_STEPS}" =~ ^[0-9]+$ && "${PROFILER_STEPS}" -gt 0 ]]; then
   tpu_profiling_flags=(
     "enable_tpu_profiling_options=true"
+if [[ "${PROFILER_STEPS}" =~ ^[0-9]+$ && "${PROFILER_STEPS}" -gt 0 ]]; then
+  tpu_profiling_flags=(
+    "enable_tpu_profiling_options=true"
     "tpu_num_chips_to_profile_per_task=${TPU_PROFILE_CHIPS_PER_TASK}"
     "tpu_num_sparse_cores_to_trace=${TPU_PROFILE_SPARSE_CORES}"
     "tpu_num_sparse_core_tiles_to_trace=${TPU_PROFILE_SPARSE_CORE_TILES}"
     "upload_all_profiler_results=false"
   )
-  export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS:+${MAXTEXT_EXTRA_FLAGS} }${tpu_profiling_flags[*]}"
+  export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS:+$MAXTEXT_EXTRA_FLAGS }${tpu_profiling_flags[*]}"
   unset tpu_profiling_flags
 fi
 
