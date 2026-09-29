@@ -195,11 +195,11 @@ export FLOAT32_GATE_LOGITS="true"
 export FLOAT32_LOGITS="true"
 
 # Optimizer Hyperparameters
-export LEARNING_RATE="1e-6"
+export LEARNING_RATE="${LEARNING_RATE:-1e-6}"
 export ADAM_B1=0.9
 export ADAM_B2=0.999
 export WEIGHT_DECAY=0.0
-export MAX_GRAD_NORM="0.125"
+export MAX_GRAD_NORM="${MAX_GRAD_NORM:-0.125}"
 # The maxtext trainer clips only via clip_by_global_norm; an empty chain type
 # would leave it at base.yml's 1.0.
 export OPT_CHAIN_TYPE="clip_by_global_norm"
