@@ -557,6 +557,48 @@ class BatchOrderedQueueManager(group_queue_manager.GroupQueueManager):
       await self._have_ready.wait()
       self._have_ready.clear()
 
+  async def get_group_ahead(
+      self, batch_idx: int
+  ) -> Optional[list[TrajectoryItem]]:
+    """Waits for a group of a batch past the cursor, without moving anything.
+
+    `get_ordered_group` must not run ahead of `commit_batch`: passing over a
+    hole advances `next_batch_idx`, which widens the dispatch window before the
+    batch being trained has been synced. This lets a consumer start on the next
+    batch's groups while the current one is still training. It only pops staged
+    groups; the indices, the seal and hole accounting, and `on_cursor_advance`
+    are left to `commit_batch` and `get_ordered_group`.
+
+    Args:
+      batch_idx: The batch to draw from, normally
+        `next_batch_after(<batch being trained>)`.
+
+    Returns:
+      A group of `batch_idx`, or None once that batch is sealed and drained or
+      moved past, or the queue is closed. None does not mean the batch is over,
+      only that this call cannot tell; follow up with `get_ordered_group` once
+      the batch before it is committed.
+
+    Raises:
+      Exception: Whatever was set via `put_exception` / `abort`.
+    """
+    while True:
+      if self._exc:
+        raise self._exc
+      if self._clearing:
+        return None
+      pending = self._pending.get(batch_idx)
+      if pending:
+        return pending.popleft()
+      if (
+          batch_idx in self._sealed
+          or batch_idx < self._next_batch_idx
+          or self._closed
+      ):
+        return None
+      await self._have_ready.wait()
+      self._have_ready.clear()
+
   def _serve(self) -> Optional[Tuple[int, list[TrajectoryItem]]]:
     """Pops the next group at the cursor, passing over sealed empty batches."""
     while True:

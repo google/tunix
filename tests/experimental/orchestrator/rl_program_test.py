@@ -16,6 +16,8 @@ import asyncio
 import builtins
 from collections.abc import Sequence
 import dataclasses
+import os
+import threading
 import types
 from typing import Any
 from unittest import mock
@@ -4910,6 +4912,421 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
       ]
       self.assertEqual(checkpoint_metadata["global_step"], 1)
       self.assertEqual(checkpoint_metadata["next_batch_idx"], 3)
+      program.close()
+
+    asyncio.run(_run())
+
+
+class _OneMicrobatchPerGroupAssembler:
+  """Emits one microbatch per fed group; every second one closes an update.
+
+  `feed` runs in a thread, so it signals through a `threading.Event`.
+  """
+
+  num_generations: int = 1
+  mini_batch_size: int = 2
+
+  def __init__(self, fail_on_feed: int | None = None, feed_delay_s: float = 0):
+    self.fed: list[str] = []
+    self.fed_second = threading.Event()
+    self.feed_finished = threading.Event()
+    self._fail_on_feed = fail_on_feed
+    self._feed_delay_s = feed_delay_s
+
+  def feed(self, items):
+    self.feed_finished.clear()
+    if self._feed_delay_s:
+      threading.Event().wait(self._feed_delay_s)
+    n = len(self.fed)
+    if n == self._fail_on_feed:
+      raise ValueError(f"feed {n} failed")
+    self.fed.append(items[0].metadata["traj_id"])
+    if n % 2 == 1:
+      self.fed_second.set()
+    self.feed_finished.set()
+    return [
+        batch_assembly.AssembledBatch(
+            payload=f"mb{n}", is_final_batch=n % 2 == 1
+        )
+    ]
+
+  def flush(self):
+    return []
+
+  def reset(self):
+    pass
+
+
+class TrainFeedAheadTest(absltest.TestCase):
+  """Tests train_stage packing ahead of train_step (TUNIX_TRAIN_FEED_AHEAD)."""
+
+  def setUp(self):
+    super().setUp()
+    self.mock_algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
+    self.mock_algo.num_generations = 2
+    self.mock_algo.mini_batch_size = 3
+    self.mock_algo.train_micro_batch_size = 2
+    self.mock_algo.max_packed_len = 16
+    self.mock_algo.max_response_length = 16
+    self.mock_algo.requires_reference_kl = False
+    self.mock_algo.algo_config = mock.MagicMock(
+        temperature=1.0,
+        use_rollout_logps=False,
+        sampler_is=None,
+        sampler_is_threshold=2.0,
+    )
+    self.mock_engine = mock.AsyncMock(
+        spec=rl_program.rl_engine_interface.AbstractRLEngine
+    )
+    self.mock_engine.train_step.return_value = {"loss": 0.1}
+    self.mock_engine.get_metrics.return_value = {"loss": 0.1}
+    self.mock_engine.sync_weights.return_value = None
+
+  def _set_feed_ahead(self, enabled: bool) -> None:
+    patcher = mock.patch.dict(
+        os.environ, {rl_program._FEED_AHEAD_ENV: "1" if enabled else "0"}
+    )
+    patcher.start()
+    self.addCleanup(patcher.stop)
+
+  def _make_program(self, **kwargs: Any) -> rl_program.StandardRLProgram:
+    program = rl_program.StandardRLProgram(
+        algo=self.mock_algo,
+        dataset=[],
+        reward_fns=[lambda *_: 1.0],
+        **kwargs,
+    )
+    program.engine = self.mock_engine
+    return program
+
+  def _group(
+      self,
+      prompt_id: str,
+      *,
+      batch_idx: int = 0,
+      completion_len: int = 3,
+      num_generations: int = 2,
+  ) -> list[datatypes.TrajectoryItem]:
+    group = []
+    for g in range(num_generations):
+      n = completion_len + g
+      item = datatypes.TrajectoryItem(
+          prompt_id=prompt_id,
+          group_index=g,
+          start_step=0,
+          traj={"trajectory_reward": float(batch_idx)},
+          metadata={"batch_idx": batch_idx},
+      )
+      item.payload = datatypes.RLTrainerPayload(  # pyrefly: ignore[missing-attribute]
+          prompt_ids=np.array([1, 2], dtype=np.int32),
+          prompt_mask=np.ones(2, dtype=np.int32),
+          completion_ids=np.arange(10, 10 + n, dtype=np.int32),
+          completion_mask=np.ones(n, dtype=np.int32),
+          advantages=np.full(n, float(len(prompt_id) + g), dtype=np.float32),
+          metadata={"prompt_id": prompt_id, "batch_idx": batch_idx},
+      )
+      group.append(item)
+    return group
+
+  async def _put(self, program, group) -> None:
+    for item in group:
+      await program.scored_q.put(item)
+
+  def test_enabled_by_default_and_env_disables(self):
+    with mock.patch.dict(os.environ):
+      os.environ.pop(rl_program._FEED_AHEAD_ENV, None)
+      self.assertTrue(rl_program._train_feed_ahead_enabled())
+      for value in ("0", "false", "OFF", " no "):
+        os.environ[rl_program._FEED_AHEAD_ENV] = value
+        self.assertFalse(rl_program._train_feed_ahead_enabled())
+      os.environ[rl_program._FEED_AHEAD_ENV] = "1"
+      self.assertTrue(rl_program._train_feed_ahead_enabled())
+
+  def _run_packed_steps(self, *, enabled: bool, group_order) -> dict[str, Any]:
+    """Trains 3 steps of 3 variable-length groups; returns what was observed."""
+    self._set_feed_ahead(enabled)
+    observed: dict[str, list[Any]] = {"train": [], "steps": [], "ckpt": []}
+
+    async def _run():
+      program = self._make_program(
+          batch_size=3,
+          group_order=group_order,
+          sync_weights=True,
+          assembler=batch_assembly.SequencePackedBatchAssembler(
+              batch_size=2,
+              num_generations=2,
+              mini_batch_size=3,
+              max_packed_len=16,
+              segment_align_multiple=1,
+          ),
+      )
+
+      async def _train_step(batch, **kwargs):
+        # Yield like a real RPC, so the feeder gets to run meanwhile.
+        await asyncio.sleep(0.002)
+        observed["train"].append((
+            program.step,
+            np.asarray(batch.completion_ids).tolist(),
+            np.asarray(batch.advantages).tolist(),
+            kwargs["apply_optimizer"],
+        ))
+        return {"loss": 0.1}
+
+      async def _sync_weights(**_):
+        await asyncio.sleep(0.01)
+
+      async def _save_checkpoint(**kwargs):
+        observed["ckpt"].append(kwargs["metadata"])
+
+      self.mock_engine.train_step.side_effect = _train_step
+      self.mock_engine.sync_weights.side_effect = _sync_weights
+      self.mock_engine.save_checkpoint.side_effect = _save_checkpoint
+      program.on_step_begin = lambda s: observed["steps"].append(("begin", s))
+      program.on_step_end = lambda s, _: observed["steps"].append((
+          "end",
+          s,
+          program.last_step_result.num_rollouts,
+          program.last_step_result.num_microbatches,
+      ))
+
+      # Later batches first: PROMPT_BATCH must still train them in order.
+      for batch_idx in (2, 0, 1):
+        for g in range(3):
+          k = batch_idx * 3 + g
+          await self._put(
+              program,
+              self._group(
+                  f"p{k}", batch_idx=batch_idx, completion_len=3 + (7 * k) % 9
+              ),
+          )
+      await program.scored_q.close()
+      await program.train_stage()
+      observed["final_step"] = program.step
+      program.close()
+
+    asyncio.run(_run())
+    return observed
+
+  def test_feed_ahead_trains_the_same_microbatches_as_the_serial_loop(self):
+    for group_order in (
+        rl_program.trajectory_queue_manager.GroupOrder.ARRIVAL,
+        rl_program.trajectory_queue_manager.GroupOrder.PROMPT_BATCH,
+    ):
+      with self.subTest(group_order=group_order.name):
+        serial = self._run_packed_steps(enabled=False, group_order=group_order)
+        ahead = self._run_packed_steps(enabled=True, group_order=group_order)
+        self.assertEqual(serial["final_step"], 3)
+        # Some step packs into more than one microbatch, so this also covers
+        # accumulation order and `is_final_batch` mid-step.
+        self.assertGreater(len(serial["train"]), 3)
+        self.assertEqual(ahead["train"], serial["train"])
+        self.assertEqual(ahead["steps"], serial["steps"])
+        self.assertEqual(ahead["ckpt"], serial["ckpt"])
+        self.assertEqual(ahead["final_step"], serial["final_step"])
+
+  def test_packs_next_microbatch_while_train_step_is_in_flight(self):
+    for enabled in (True, False):
+      with self.subTest(enabled=enabled):
+        self._set_feed_ahead(enabled)
+        assembler = _OneMicrobatchPerGroupAssembler()
+        overlapped: list[bool] = []
+
+        async def _run():
+          self.mock_algo.num_generations = 1
+          self.mock_algo.mini_batch_size = 2
+          program = self._make_program(
+              batch_size=2,
+              max_steps=1,
+              sync_weights=False,
+              assembler=assembler,
+          )
+
+          async def _train_step(batch, **kwargs):
+            del kwargs
+            if batch == "mb0":
+              # Parks mb0's train_step until the second group is packed, or
+              # the timeout says the loop is serial.
+              overlapped.append(
+                  await asyncio.to_thread(
+                      assembler.fed_second.wait, 5.0 if enabled else 0.2
+                  )
+              )
+            return {"loss": 0.1}
+
+          self.mock_engine.train_step.side_effect = _train_step
+          await self._put(program, self._group("p0", num_generations=1))
+          await self._put(program, self._group("p1", num_generations=1))
+          await program.train_stage()
+          self.assertEqual(
+              [
+                  (c.args[0], c.kwargs["apply_optimizer"])
+                  for c in self.mock_engine.train_step.call_args_list
+              ],
+              [("mb0", False), ("mb1", True)],
+          )
+          program.close()
+
+        self.mock_engine.train_step.reset_mock()
+        asyncio.run(_run())
+        self.assertEqual(overlapped, [enabled])
+        self.assertEqual(assembler.fed, ["traj_p0_g0", "traj_p1_g0"])
+
+  def test_prefetches_next_batch_during_sync_without_moving_the_cursor(self):
+    self._set_feed_ahead(True)
+    self.mock_algo.mini_batch_size = 2
+    fed: list[str] = []
+
+    class _RecordingAssembler(batch_assembly.SequencePackedBatchAssembler):
+
+      def feed(self, items):
+        fed.extend(item.metadata["prompt_id"] for item in items[:1])
+        return super().feed(items)
+
+    async def _run():
+      program = self._make_program(
+          batch_size=2,
+          max_steps=2,
+          max_staleness=1,
+          sync_weights=True,
+          group_order=rl_program.trajectory_queue_manager.GroupOrder.PROMPT_BATCH,
+          assembler=_RecordingAssembler(
+              batch_size=1,
+              num_generations=2,
+              mini_batch_size=2,
+              max_packed_len=16,
+              segment_align_multiple=1,
+          ),
+      )
+      scored_q = program.scored_q
+      assert isinstance(
+          scored_q, rl_program.trajectory_queue_manager.BatchOrderedQueueManager
+      )
+      releases: list[int] = []
+      program._release_window = lambda: releases.append(scored_q.next_batch_idx)
+      # Batch 0 trains in step 0, batch 1 lost every group, batch 2 is step 1.
+      await self._put(program, self._group("p0", batch_idx=0, completion_len=1))
+      await self._put(program, self._group("p1", batch_idx=0, completion_len=1))
+      scored_q.dropped(1, num_groups=2)
+      await self._put(program, self._group("p4", batch_idx=2, completion_len=1))
+      await self._put(program, self._group("p5", batch_idx=2, completion_len=1))
+
+      during_sync = []
+
+      async def _sync_weights(**_):
+        if not during_sync:
+          for _ in range(500):
+            if fed == ["p0", "p1", "p4", "p5"]:
+              break
+            await asyncio.sleep(0.01)
+          during_sync.append(
+              (list(fed), scored_q.next_batch_idx, list(releases))
+          )
+
+      trained = []
+
+      async def _train_step(batch, **kwargs):
+        trained.append((program.step, kwargs["apply_optimizer"]))
+        return {"loss": 0.1}
+
+      self.mock_engine.sync_weights.side_effect = _sync_weights
+      self.mock_engine.train_step.side_effect = _train_step
+      await program.train_stage()
+
+      # Step 1's groups were pulled and packed while step 0 synced, yet
+      # nothing that widens the dispatch window moved before the commit.
+      self.assertEqual(during_sync, [(["p0", "p1", "p4", "p5"], 0, [])])
+      self.assertEqual(trained, [(0, True), (1, True)])
+      self.assertEqual(program.step, 2)
+      self.assertEqual(scored_q.next_batch_idx, 3)
+      # The first releases are step 0's commit passing batch 0, then the hole.
+      self.assertEqual(releases[:2], [1, 2])
+      first_ckpt = self.mock_engine.save_checkpoint.call_args_list[0]
+      self.assertEqual(first_ckpt.kwargs["metadata"]["next_batch_idx"], 2)
+      program.close()
+
+    asyncio.run(_run())
+
+  def test_does_not_pull_past_max_steps(self):
+    self._set_feed_ahead(True)
+    self.mock_algo.num_generations = 1
+    self.mock_algo.mini_batch_size = 2
+    assembler = _OneMicrobatchPerGroupAssembler()
+
+    async def _run():
+      program = self._make_program(
+          batch_size=2, max_steps=1, sync_weights=True, assembler=assembler
+      )
+
+      async def _sync_weights(**_):
+        await asyncio.sleep(0.05)
+
+      self.mock_engine.sync_weights.side_effect = _sync_weights
+      for k in range(4):
+        await self._put(program, self._group(f"p{k}", num_generations=1))
+      await program.train_stage()
+
+      self.assertEqual(program.step, 1)
+      self.assertEqual(assembler.fed, ["traj_p0_g0", "traj_p1_g0"])
+      self.assertEqual(program.scored_q.ready_groups_count, 2)
+      program.close()
+
+    asyncio.run(_run())
+
+  def test_assembler_error_surfaces_in_order_and_leaves_no_task(self):
+    self._set_feed_ahead(True)
+    self.mock_algo.num_generations = 1
+    self.mock_algo.mini_batch_size = 2
+    assembler = _OneMicrobatchPerGroupAssembler(fail_on_feed=1)
+
+    async def _run():
+      program = self._make_program(
+          batch_size=2, max_steps=1, sync_weights=False, assembler=assembler
+      )
+      await self._put(program, self._group("p0", num_generations=1))
+      await self._put(program, self._group("p1", num_generations=1))
+
+      with self.assertRaisesRegex(ValueError, "feed 1 failed"):
+        await program.train_stage()
+      # The group before the failure still trained, as in the serial loop.
+      self.assertEqual(
+          [c.args[0] for c in self.mock_engine.train_step.call_args_list],
+          ["mb0"],
+      )
+      self.assertEqual(
+          [t for t in asyncio.all_tasks() if t is not asyncio.current_task()],
+          [],
+      )
+      program.close()
+
+    asyncio.run(_run())
+
+  def test_train_step_error_waits_out_the_feed_in_flight(self):
+    self._set_feed_ahead(True)
+    self.mock_algo.num_generations = 1
+    self.mock_algo.mini_batch_size = 2
+    assembler = _OneMicrobatchPerGroupAssembler(feed_delay_s=0.2)
+
+    async def _run():
+      program = self._make_program(
+          batch_size=2, max_steps=1, sync_weights=False, assembler=assembler
+      )
+
+      async def _train_step(batch, **kwargs):
+        del batch, kwargs
+        # Let the feeder start packing the next group, then fail.
+        await asyncio.sleep(0.05)
+        raise RuntimeError("train_step failed")
+
+      self.mock_engine.train_step.side_effect = _train_step
+      await self._put(program, self._group("p0", num_generations=1))
+      await self._put(program, self._group("p1", num_generations=1))
+
+      with self.assertRaisesRegex(RuntimeError, "train_step failed"):
+        await program.train_stage()
+      # No feed is still running when train_stage returns, so a following
+      # `assembler.reset()` cannot race it.
+      self.assertTrue(assembler.feed_finished.is_set())
+      self.assertEqual(assembler.fed, ["traj_p0_g0", "traj_p1_g0"])
       program.close()
 
     asyncio.run(_run())

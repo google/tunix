@@ -635,6 +635,102 @@ class BatchOrderedQueueManagerTest(absltest.TestCase):
 
     asyncio.run(_run_test())
 
+  def test_get_group_ahead_pops_next_batch_without_moving_the_cursor(self):
+    """Tests reading the next batch while the current one is uncommitted."""
+
+    async def _run_test():
+      cursor_log: list[int] = []
+      manager = _create_batch_manager(full_batch_size=2, cursor_log=cursor_log)
+      await _put_group(manager, "p0", batch_idx=0)
+      await _put_group(manager, "p1", batch_idx=0)
+      ahead_0 = await _put_group(manager, "p2", batch_idx=1)
+      ahead_1 = await _put_group(manager, "p3", batch_idx=1)
+      await manager.get_ordered_group()
+      await manager.get_ordered_group()
+
+      # Batch 0 is still training: batch 1 can be read, but nothing moves.
+      self.assertEqual(await manager.get_group_ahead(1), ahead_0)
+      self.assertEqual(await manager.get_group_ahead(1), ahead_1)
+      self.assertEqual(manager.next_batch_idx, 0)
+      self.assertEqual(manager.serving_batch_idx, 0)
+      self.assertEqual(cursor_log, [])
+      # Sealed and drained.
+      self.assertIsNone(await manager.get_group_ahead(1))
+
+      manager.commit_batch(0)
+      self.assertEqual(cursor_log, [1])
+      self.assertIsNone(await manager.get_ordered_group(batch_idx=1))
+      manager.commit_batch(1)
+      self.assertEqual(manager.next_batch_idx, 2)
+      self.assertEqual(cursor_log, [1, 2])
+
+    asyncio.run(_run_test())
+
+  def test_get_group_ahead_leaves_a_hole_for_commit_to_pass_over(self):
+    """Tests a hole ahead of the cursor not advancing it before the commit."""
+
+    async def _run_test():
+      cursor_log: list[int] = []
+      manager = _create_batch_manager(full_batch_size=1, cursor_log=cursor_log)
+      await _put_group(manager, "p0", batch_idx=0)
+      manager.dropped(1)
+      ahead = await _put_group(manager, "p2", batch_idx=2)
+      await manager.get_ordered_group()
+
+      # `get_ordered_group` would pass over batch 1 here and advance
+      # `next_batch_idx`, opening the dispatch window mid-step.
+      self.assertIsNone(await manager.get_group_ahead(1))
+      self.assertEqual(manager.next_batch_after(0), 2)
+      self.assertEqual(await manager.get_group_ahead(2), ahead)
+      self.assertEqual(manager.next_batch_idx, 0)
+      self.assertEqual(cursor_log, [])
+
+      manager.commit_batch(0)
+      self.assertEqual(manager.next_batch_idx, 2)
+      self.assertEqual(cursor_log, [1, 2])
+
+    asyncio.run(_run_test())
+
+  def test_get_group_ahead_waits_for_a_group_then_returns_none_at_eof(self):
+    """Tests get_group_ahead parking until a put, and ending on close."""
+
+    async def _run_test():
+      manager = _create_batch_manager(full_batch_size=2)
+      waiter = asyncio.ensure_future(manager.get_group_ahead(1))
+      await asyncio.sleep(0)
+      self.assertFalse(waiter.done())
+
+      arrived = await _put_group(manager, "p2", batch_idx=1)
+      self.assertEqual(await waiter, arrived)
+
+      waiter = asyncio.ensure_future(manager.get_group_ahead(1))
+      await asyncio.sleep(0)
+      self.assertFalse(waiter.done())
+      await manager.close()
+      self.assertIsNone(await waiter)
+
+      # A batch the cursor already passed has nothing to give.
+      resumed = _create_batch_manager(full_batch_size=2)
+      resumed.skip(0, 2)
+      self.assertIsNone(await resumed.get_group_ahead(1))
+
+    asyncio.run(_run_test())
+
+  def test_get_group_ahead_raises_on_abort(self):
+    """Tests abort() raising in a consumer parked ahead of the cursor."""
+
+    async def _run_test():
+      manager = _create_batch_manager(full_batch_size=1)
+      waiter = asyncio.ensure_future(manager.get_group_ahead(1))
+      await asyncio.sleep(0)
+
+      await manager.abort(ValueError("Test Exception"))
+
+      with self.assertRaises(ValueError):
+        await waiter
+
+    asyncio.run(_run_test())
+
   def test_dropped_seals_short_batch_and_advances_over_hole(self):
     """Tests dropped() sealing a short batch and advancing over a 0-admitted hole."""
 
