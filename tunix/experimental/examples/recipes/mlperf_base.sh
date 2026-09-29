@@ -98,9 +98,14 @@ export TARGET_ACCURACY="${TARGET_ACCURACY:-0.69}"
 # ==============================================================================
 export VLLM_LOGGING_LEVEL="INFO"
 export VLLM_MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-65536}"
-export VLLM_MAX_NUM_BATCHED_TOKENS=2048
-export VLLM_MAX_NUM_SEQS=16
-export VLLM_GPU_MEMORY_UTILIZATION="0.9"
+# Token budget is per attention-DP rank, and tpu_runner pads every rank to the
+# busiest rank's bucket, so each prefill chunk stalls decode on all ranks; 4096
+# halves the chunks per turn vs 2048. 8192 (global bucket 65536) leaves too
+# little fused-MoE activation headroom at 0.9 HBM utilization; pair it with
+# VLLM_GPU_MEMORY_UTILIZATION=0.85.
+export VLLM_MAX_NUM_BATCHED_TOKENS="${VLLM_MAX_NUM_BATCHED_TOKENS:-4096}"
+export VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-16}"
+export VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-0.9}"
 
 # Sharding Configs
 export VLLM_DATA_PARALLEL_SIZE="${VLLM_DATA_PARALLEL_SIZE:-1}"
@@ -143,7 +148,11 @@ export ATTN_CUSTOM_NUM_REQS_BUCKETS=4
 export ONEHOT_MOE_PERMUTE_THRESHOLD="${ONEHOT_MOE_PERMUTE_THRESHOLD:-32768}"
 export VLLM_MOE_CHUNK_SIZE=256
 export SLICE_ROPE_CACHE=1
-export DP_SCHED_BATCH_PREFILL=false
+# Hold new requests until every DP rank has one, a rank goes idle, or the flush
+# timeout passes, so their prefills share one padded step. tpu-inference's 30s
+# default timeout could hold a new turn for 30s while all ranks are decoding.
+export DP_SCHED_BATCH_PREFILL="${DP_SCHED_BATCH_PREFILL:-true}"
+export DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS="${DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS:-1000}"
 export LIBTPU_INIT_ARGS="${LIBTPU_INIT_ARGS:- --xla_tpu_use_minor_sharding_for_major_trivial_input=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=false --xla_tpu_ars_combiner_threshold_in_bytes=0 --xla_tpu_enable_async_collective_merger=false --xla_tpu_check_legacy_constraints_in_reduce_scatter_legalizer=false}"
 export VLLM_ENABLE_V1_MULTIPROCESSING=0
 
