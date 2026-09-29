@@ -1027,6 +1027,7 @@ class WeightSyncCoordinator:
 
     t_round_start = time.monotonic()
     t_prepare_s = 0.0
+    t_quiesce_s = 0.0
     t_transfer_s = 0.0
     t_h2d_s = 0.0
     t_post_s = 0.0
@@ -1239,6 +1240,11 @@ class WeightSyncCoordinator:
         await record_workers("pre_weight_sync failed")
         raise fail("pre_weight_sync failed")
       state = RoundState.PREPARED
+      # `pre_weight_sync` drains every in-flight episode on each destination,
+      # so with max_staleness >= 1 this barrier waits out the rollout tail.
+      # Time it separately so transfer_s measures only the Raiden transfer.
+      t_quiesce_s = time.monotonic() - t_phase
+      t_phase = time.monotonic()
 
       state = RoundState.TRANSFERRING
       transfer_in_flight = True
@@ -1559,12 +1565,13 @@ class WeightSyncCoordinator:
       t_e2e_s = time.monotonic() - t_round_start
       logging.info(
           "WEIGHT_SYNC_PROFILE round=%d req_id=%s policy_version=%d "
-          "prepare_write_s=%.3f transfer_s=%.3f h2d_read_s=%.3f "
+          "prepare_write_s=%.3f quiesce_s=%.3f transfer_s=%.3f h2d_read_s=%.3f "
           "post_verify_s=%.3f release_s=%.3f e2e_s=%.3f",
           round_index,
           req_id,
           policy_version,
           t_prepare_s,
+          t_quiesce_s,
           t_transfer_s,
           t_h2d_s,
           t_post_s,
