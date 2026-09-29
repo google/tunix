@@ -40,6 +40,35 @@ from absl import logging
 _WARN_EVERY = 50
 
 
+def _routing_hints(kwargs: Dict[str, Any]) -> tuple[Any, str]:
+  """Returns (request_id, prompt) from either routing call shape.
+
+  `DistributedRLEngine.generate` routes with flat `request_id`/`prompt`
+  kwargs; the async `dispatch_rollout_requests` path routes the worker method
+  call itself, so the hints live on the single `RolloutRequest` in
+  `kwargs["requests"]`.
+  """
+  request_id = kwargs.get("request_id")
+  prompt = kwargs.get("prompt")
+  requests = kwargs.get("requests")
+  if (request_id is None or prompt is None) and requests:
+    first = requests[0]
+    if isinstance(first, dict):
+      request_id = request_id or first.get("request_id")
+      prompt = prompt if prompt is not None else first.get("prompt")
+    else:
+      request_id = request_id or getattr(first, "request_id", None)
+      if prompt is None:
+        prompt = getattr(first, "prompt", None)
+  if prompt is None or prompt == "":
+    return request_id, ""
+  if isinstance(prompt, str):
+    return request_id, prompt
+  # Chat-style prompts (message lists) are serialized deterministically so the
+  # sidecar's prefix scoring sees identical text for identical prompts.
+  return request_id, json.dumps(prompt, sort_keys=True, default=str)
+
+
 class RemoteSchedulerRouter:
   """Load/state-aware rollout worker picker backed by a remote scheduler.
 
@@ -220,12 +249,11 @@ class RemoteSchedulerRouter:
     self._ensure_poller(actors)
     candidates = self._candidates(actors)
     self._request_seq += 1
+    request_id, prompt = _routing_hints(kwargs)
     payload = {
-        "request_id": str(
-            kwargs.get("request_id") or f"req-{self._request_seq}"
-        ),
+        "request_id": str(request_id or f"req-{self._request_seq}"),
         "target_model": self._target_model,
-        "prompt": str(kwargs.get("prompt") or ""),
+        "prompt": prompt,
         "candidates": candidates,
     }
     try:

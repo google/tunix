@@ -1140,25 +1140,14 @@ class DistributedRLEngineTest(absltest.TestCase):
 
       await engine.dispatch_rollouts([req1, req2])
 
+      # dispatch_rollout_requests routes the worker `generate` call itself:
+      # the router sees the request (carrying request_id/prompt) plus the
+      # trajectory-stable route_key, not flattened hints.
       self.assertEqual(
           router.calls,
           [
-              (
-                  None,
-                  {
-                      "route_key": req1.traj_id,
-                      "request_id": "r1",
-                      "prompt": "p1",
-                  },
-              ),
-              (
-                  None,
-                  {
-                      "route_key": req2.traj_id,
-                      "request_id": "r2",
-                      "prompt": "p2",
-                  },
-              ),
+              ("generate", {"requests": [req1], "route_key": req1.traj_id}),
+              ("generate", {"requests": [req2], "route_key": req2.traj_id}),
           ],
       )
       # Both dispatches must land on the router-picked worker.

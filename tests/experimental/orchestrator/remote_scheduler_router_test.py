@@ -168,6 +168,45 @@ class RemoteSchedulerRouterTest(absltest.TestCase):
       finally:
         router.stop()
 
+  def test_payload_derives_hints_from_dispatch_requests(self):
+    # dispatch_rollout_requests routes the worker `generate` call itself, so
+    # the only hints available are the RolloutRequest in kwargs["requests"].
+    actors = [_FakeActor("rollout-0"), _FakeActor("rollout-1")]
+    req = datatypes.RolloutRequest(
+        request_id="r-7", prompt="solve that", prompt_id="p7"
+    )
+    with _FakeSidecar() as sidecar:
+      router = _router(sidecar.url)
+      try:
+        _call_until(
+            router,
+            actors,
+            lambda: bool(sidecar.payloads),
+            requests=[req],
+            route_key=req.traj_id,
+        )
+        payload = sidecar.payloads[-1]
+        self.assertEqual(payload["request_id"], "r-7")
+        self.assertEqual(payload["prompt"], "solve that")
+      finally:
+        router.stop()
+
+  def test_payload_serializes_chat_prompt_deterministically(self):
+    actors = [_FakeActor("rollout-0")]
+    msgs = [{"role": "user", "content": "hi"}]
+    with _FakeSidecar() as sidecar:
+      router = _router(sidecar.url)
+      try:
+        _call_until(
+            router, actors, lambda: bool(sidecar.payloads), prompt=msgs
+        )
+        self.assertEqual(
+            sidecar.payloads[-1]["prompt"],
+            json.dumps(msgs, sort_keys=True),
+        )
+      finally:
+        router.stop()
+
   def test_stale_stats_marked_unknown(self):
     actors = [_FakeActor("rollout-0")]
     with _FakeSidecar() as sidecar:
