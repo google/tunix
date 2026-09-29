@@ -45,6 +45,11 @@ try:
 except ImportError:
   client = None
   config = None
+try:
+  # Same image as the workloads, which installs agent_sandbox_rl.
+  from agent_sandbox_rl import reap as sandbox_reap
+except ImportError:
+  sandbox_reap = None
 
 logging.basicConfig(
     level=logging.INFO,
@@ -61,6 +66,15 @@ SANDBOX_POD_PREFIXES = ("pool-", "sandbox-claim-")
 # maxRestarts), so it is not a crash of the run. Kept in sync with
 # distributed/deployment/yaml_generator.py (STARTUP_RETRY_EXIT_CODE).
 STARTUP_RETRY_EXIT_CODE = 75
+# Labels set by examples/deepswe/sandbox_utils.py (created-by, from
+# ORCHESTRATOR_ID=<prefix>-orch) and by the agent_sandbox_rl SDK (run id, one
+# per SandboxFleet) on sandbox claims, warm pools and templates. The controller
+# does not copy them onto sandbox pods, so pod sweeps keep using app=.
+CREATED_BY_LABEL = "app.kubernetes.io/created-by"
+SANDBOX_RUN_ID_LABEL = "agents.x-k8s.io/asrl-run-id"
+ORCHESTRATOR_SUFFIX = "-orch"
+SANDBOX_GROUP = "extensions.agents.x-k8s.io"
+SANDBOX_VERSION = "v1beta1"
 
 FATAL_EXCEPTION_PATTERNS = (
     "Error:",
@@ -98,6 +112,86 @@ def extract_run_prefix(js_name: str) -> str:
   if match:
     return match.group(1)
   return js_name
+
+
+def owner_run_prefix(obj: dict) -> str | None:
+  """Run prefix from a sandbox object's created-by=<prefix>-orch label, if any."""
+  created_by = (obj["metadata"].get("labels") or {}).get(CREATED_BY_LABEL)
+  if created_by and created_by.endswith(ORCHESTRATOR_SUFFIX):
+    return created_by.removesuffix(ORCHESTRATOR_SUFFIX)
+  return None
+
+
+def active_run_prefixes(custom_api, core_api) -> set[str]:
+  """Run prefixes of all JobSets and non-sandbox workload pods in the namespace."""
+  active_prefixes = set()
+  jobsets = custom_api.list_namespaced_custom_object(
+      group="jobset.x-k8s.io",
+      version="v1alpha2",
+      namespace=NAMESPACE,
+      plural="jobsets",
+  )
+  for js in jobsets.get("items", []):
+    active_prefixes.add(extract_run_prefix(js["metadata"]["name"]))
+
+  pods = core_api.list_namespaced_pod(namespace=NAMESPACE)
+  for pod in pods.items:
+    pname = pod.metadata.name
+    if pname.startswith(SANDBOX_POD_PREFIXES) or pname.startswith("cluster-reaper"):
+      continue
+    if (pod.metadata.labels or {}).get("app") == "agent-sandbox-rl":
+      continue
+    js_name = (pod.metadata.labels or {}).get("jobset.sigs.k8s.io/jobset-name")
+    if js_name:
+      active_prefixes.add(extract_run_prefix(js_name))
+  return active_prefixes
+
+
+def reap_run_sandboxes(custom_api, prefix: str) -> int:
+  """Deletes the sandbox claims, warm pools, sandboxes and templates of a run.
+
+  Finds every SDK run id on objects labelled created-by=<prefix>-orch (the
+  orchestrator's fleet and, since the launcher passes ORCHESTRATOR_ID to them,
+  the rollout workers' fleets) and calls agent_sandbox_rl.reap for each, which
+  deletes claims, then pools, then sandboxes, then templates. Sandbox pods go
+  with their owners.
+
+  Args:
+    custom_api: Kubernetes CustomObjectsApi.
+    prefix: Run prefix (JOB_PREFIX) of the torn-down run.
+
+  Returns:
+    Number of run ids reaped.
+  """
+  if sandbox_reap is None:
+    logger.error(
+        "agent_sandbox_rl is not installed; cannot reap sandboxes of run '%s'",
+        prefix,
+    )
+    return 0
+  selector = f"{CREATED_BY_LABEL}={prefix}{ORCHESTRATOR_SUFFIX}"
+  run_ids = set()
+  for plural in ("sandboxclaims", "sandboxwarmpools", "sandboxtemplates"):
+    objs = custom_api.list_namespaced_custom_object(
+        group=SANDBOX_GROUP,
+        version=SANDBOX_VERSION,
+        namespace=NAMESPACE,
+        plural=plural,
+        label_selector=selector,
+    )
+    for obj in objs.get("items", []):
+      run_id = (obj["metadata"].get("labels") or {}).get(SANDBOX_RUN_ID_LABEL)
+      if run_id:
+        run_ids.add(run_id)
+  for run_id in sorted(run_ids):
+    logger.info("Reaping sandboxes of run '%s' (sandbox run id %s)...", prefix, run_id)
+    try:
+      sandbox_reap(
+          run_id=run_id, namespace=NAMESPACE, in_cluster=True, delete_pods=False
+      )
+    except Exception as e:
+      logger.warning("Failed to reap sandbox run id %s: %s", run_id, e)
+  return len(run_ids)
 
 
 def reap_stuck_terminating_pods(core_api):
@@ -189,7 +283,8 @@ def reap_dead_sandbox_pods(core_api):
 def reap_orphaned_claims(custom_api, core_api):
   """Deletes SandboxClaims whose parent run is no longer active on the cluster.
 
-  A SandboxClaim is considered orphaned if:
+  A claim labelled created-by=<prefix>-orch is orphaned when that run has no
+  JobSet or workload pod left. For unlabelled claims, it is orphaned if:
   1. No workload pods (*-roll-*, *-orch-*, *-train-*) are currently Running or Pending,
      and the claim is older than 5 minutes.
   2. Workload pods ARE active, but the claim was created BEFORE the oldest active
@@ -219,6 +314,7 @@ def reap_orphaned_claims(custom_api, core_api):
     )
 
     earliest_workload_time = min(workload_start_times) if workload_start_times else None
+    active_prefixes = active_run_prefixes(custom_api, core_api)
 
     for claim in claims.get("items", []):
       cname = claim["metadata"]["name"]
@@ -232,7 +328,14 @@ def reap_orphaned_claims(custom_api, core_api):
 
       is_orphan = False
       reason = ""
-      if earliest_workload_time is None:
+      owner = owner_run_prefix(claim)
+      if owner is not None:
+        # Labelled claims belong to exactly one run: orphaned once that run is
+        # gone, even while other runs keep workload pods alive.
+        if owner not in active_prefixes:
+          is_orphan = True
+          reason = f"run '{owner}' has no active JobSets or workload pods"
+      elif earliest_workload_time is None:
         # No workloads running at all
         is_orphan = True
         reason = f"no active workload pods in namespace {NAMESPACE}"
@@ -280,26 +383,7 @@ def reap_orphaned_warmpools_and_templates(custom_api, core_api):
   count = 0
   try:
     # 1. Discover all active run prefixes from running or pending workload pods & jobsets
-    active_prefixes = set()
-    jobsets = custom_api.list_namespaced_custom_object(
-        group="jobset.x-k8s.io",
-        version="v1alpha2",
-        namespace=NAMESPACE,
-        plural="jobsets",
-    )
-    for js in jobsets.get("items", []):
-      active_prefixes.add(extract_run_prefix(js["metadata"]["name"]))
-
-    pods = core_api.list_namespaced_pod(namespace=NAMESPACE)
-    for pod in pods.items:
-      pname = pod.metadata.name
-      if pname.startswith(SANDBOX_POD_PREFIXES) or pname.startswith("cluster-reaper"):
-        continue
-      if (pod.metadata.labels or {}).get("app") == "agent-sandbox-rl":
-        continue
-      js_name = (pod.metadata.labels or {}).get("jobset.sigs.k8s.io/jobset-name")
-      if js_name:
-        active_prefixes.add(extract_run_prefix(js_name))
+    active_prefixes = active_run_prefixes(custom_api, core_api)
 
     now = datetime.datetime.now(datetime.timezone.utc)
 
@@ -320,7 +404,13 @@ def reap_orphaned_warmpools_and_templates(custom_api, core_api):
       if age_m < 10:
         continue
 
-      is_active = any(f"-{prefix}-" in wp_name for prefix in active_prefixes)
+      owner = owner_run_prefix(wp)
+      if owner is not None:
+        # Exact match: a live `atwigg` run must not keep `atwigg-35b`'s pools.
+        is_active = owner in active_prefixes
+      else:
+        # Unlabelled (older) pools: fall back to the name match.
+        is_active = any(f"-{prefix}-" in wp_name for prefix in active_prefixes)
       if not is_active:
         logger.info(
             "Found orphaned SandboxWarmPool %s (age: %.1fm, no active workloads for run). Deleting...",
@@ -354,10 +444,15 @@ def reap_orphaned_warmpools_and_templates(custom_api, core_api):
       if age_m < 10:
         continue
 
-      is_active = any(
-          f"-{prefix}-" in tmpl_name or tmpl_name.startswith(f"oh-{prefix}-") or tmpl_name.startswith(f"{prefix}-")
-          for prefix in active_prefixes
-      )
+      owner = owner_run_prefix(tmpl)
+      if owner is not None:
+        is_active = owner in active_prefixes
+      else:
+        # Unlabelled (older) templates: fall back to the name match.
+        is_active = any(
+            f"-{prefix}-" in tmpl_name or tmpl_name.startswith(f"oh-{prefix}-") or tmpl_name.startswith(f"{prefix}-")
+            for prefix in active_prefixes
+        )
       if not is_active:
         logger.info(
             "Found orphaned SandboxTemplate %s (age: %.1fm). Deleting...",
@@ -579,6 +674,11 @@ def reap_failed_crashed_hung_jobs(custom_api, batch_api, core_api):
             count += 1
           except Exception as e:
             logger.warning("Failed to delete JobSet %s: %s", js_name, e)
+
+      # 3b. Remove the failed runs' sandboxes now instead of waiting for the
+      # orphan sweeps (and not relying on the orchestrator's SIGTERM cleanup).
+      for prefix in sorted(failed_run_prefixes):
+        reap_run_sandboxes(custom_api, prefix)
 
   except Exception as e:
     logger.error("Error checking JobSets: %s", e)

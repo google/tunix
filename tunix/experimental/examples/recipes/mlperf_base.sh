@@ -54,6 +54,10 @@ export CPU_MACHINE="${CPU_MACHINE:-n2d-standard-64}"
 export FAIL_FAST_MODE="${FAIL_FAST_MODE:-enforce}"
 # JobSet recreations allowed for worker failures before registration.
 export FT_STARTUP_RETRIES="${FT_STARTUP_RETRIES:-3}"
+# Sandbox side (enforce only): max wait for a sandbox/warm pool to become ready,
+# and fleet.acquire attempts per episode (legacy: SDK 900s x 5 attempts).
+export FT_SANDBOX_READY_TIMEOUT_S="${FT_SANDBOX_READY_TIMEOUT_S:-600}"
+export FT_SANDBOX_ACQUIRE_RETRIES="${FT_SANDBOX_ACQUIRE_RETRIES:-2}"
 
 # ==============================================================================
 # Pathways & Raiden Weight Sync Defaults

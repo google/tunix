@@ -53,7 +53,10 @@ ${QUEUE_LABEL}spec:
             dnsPolicy: ClusterFirstWithHostNet
             hostNetwork: true
             restartPolicy: Never${PRIORITY_CLASS_LINE}
-            terminationGracePeriodSeconds: 10
+            # Room for the orchestrator's SIGTERM cleanup (sandbox fleet teardown
+            # and reap, stopping workers) when the API server is slow. A clean
+            # exit still ends the pod immediately.
+            terminationGracePeriodSeconds: 60
             nodeSelector:
               node.kubernetes.io/instance-type: ${CPU_MACHINE}
             tolerations:
