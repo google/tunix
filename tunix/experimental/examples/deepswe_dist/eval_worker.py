@@ -81,6 +81,9 @@ def load_and_convert_scanned_checkpoint(
   if hasattr(sampler.vllm_sampler, "delete_cache"):
     sampler.vllm_sampler.delete_cache()
     reinit_needed = True
+  _delete_pytree_buffers(
+      getattr(sampler.vllm_sampler, "transformer_state", None), jax
+  )
   try:
     base_config_path = os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")
     scanned_overrides = dict(eval_deepswe.maxtext_config(a))
@@ -109,6 +112,39 @@ def load_and_convert_scanned_checkpoint(
         prefuse_moe_weights=True,
         target_dtype=None,
     )
+    orig_exec_group = getattr(converter, "_execute_group", None)
+    if callable(orig_exec_group):
+
+      def _exec_and_free_group(group, src_flat, tgt_flat):
+        outs = orig_exec_group(group, src_flat, tgt_flat)
+        out_arrays = [out for _, out in outs]
+        if hasattr(jax, "block_until_ready"):
+          jax.block_until_ready(out_arrays)
+        _delete_pytree_buffers(
+            [src_flat.get(k) for k in group.source_keys],
+            jax,
+            keep_tree=out_arrays,
+        )
+        aligned_outs = []
+        for tgt_key, out in outs:
+          tgt_sharding = getattr(tgt_flat.get(tgt_key), "sharding", None)
+          out_sharding = getattr(out, "sharding", None)
+          if (
+              tgt_sharding is not None
+              and out_sharding is not None
+              and out_sharding != tgt_sharding
+              and hasattr(jax, "device_put")
+          ):
+            resharded_out = jax.device_put(out, tgt_sharding)
+            if hasattr(jax, "block_until_ready"):
+              jax.block_until_ready(resharded_out)
+            _delete_pytree_buffers(out, jax, keep_tree=resharded_out)
+            out = resharded_out
+          aligned_outs.append((tgt_key, out))
+        return aligned_outs
+
+      converter._execute_group = _exec_and_free_group
+
     converted_state = converter.convert(
         scanned_state,
         target_state=sampler.vllm_sampler.transformer_state,
@@ -125,9 +161,42 @@ def load_and_convert_scanned_checkpoint(
     )
     if sampler_cfg is not None and orig_free_kv is not None:
       sampler_cfg.free_kv_cache_during_weight_sync = False
+    reshard_mod = None
+    orig_reshard_pytree = None
+    try:
+      from tunix.rl import reshard as reshard_mod  # pylint: disable=import-outside-toplevel
+
+      orig_reshard_pytree = getattr(reshard_mod, "reshard_pytree", None)
+    except Exception:  # pylint: disable=broad-exception-caught
+      reshard_mod = None
+    if (
+        reshard_mod is not None
+        and orig_reshard_pytree is not None
+        and hasattr(jax, "tree_util")
+        and hasattr(jax, "device_put")
+    ):
+
+      def _inplace_or_chunked_reshard(source, target, **kwargs):
+        del kwargs
+
+        def _put_or_keep(x, dst):
+          sharding = getattr(dst, "sharding", dst)
+          if sharding is None or getattr(x, "sharding", None) == sharding:
+            return x
+          out = jax.device_put(x, sharding)
+          if hasattr(jax, "block_until_ready"):
+            jax.block_until_ready(out)
+          _delete_pytree_buffers(x, jax, keep_tree=out)
+          return out
+
+        return jax.tree_util.tree_map(_put_or_keep, source, target)
+
+      reshard_mod.reshard_pytree = _inplace_or_chunked_reshard
     try:
       sampler.vllm_sampler.update_params(converted_state)
     finally:
+      if reshard_mod is not None and orig_reshard_pytree is not None:
+        reshard_mod.reshard_pytree = orig_reshard_pytree
       if sampler_cfg is not None and orig_free_kv is not None:
         sampler_cfg.free_kv_cache_during_weight_sync = orig_free_kv
     _delete_pytree_buffers(
@@ -181,6 +250,15 @@ def create_worker(a):
       path = alt_path
   if not path.exists():
     raise FileNotFoundError(f"MaxText checkpoint not found: {path}")
+  if not (path / "_METADATA").exists():
+    for subdir in ("model_params", "items", "default"):
+      candidate = path / subdir
+      if (candidate / "_METADATA").exists():
+        logging.info(
+            "Resolved composite checkpoint path %s -> %s", path, candidate
+        )
+        path = candidate
+        break
   ckpt_prefuse_moe = False
   metadata_file = path / "_METADATA"
   if metadata_file.exists():
@@ -191,7 +269,7 @@ def create_worker(a):
       meta = json.loads(meta_text)
       if "use_zarr3" in meta:
         a.checkpoint_storage_use_zarr3 = bool(meta["use_zarr3"])
-      if '"wi"' in meta_text and '"wi_0"' not in meta_text:
+      if '"wi"' in meta_text:
         ckpt_prefuse_moe = True
     except Exception as exc:  # pylint: disable=broad-exception-caught
       logging.warning("Could not read Orbax _METADATA from %s: %s", path, exc)
@@ -213,15 +291,34 @@ def create_worker(a):
       "enable_continue_decode": False,
       "maxtext_config": mt_cfg,
   }
+  raw_add_cfg = os.environ.get("VLLM_ADDITIONAL_CONFIG", "").strip()
+  if raw_add_cfg:
+    import json  # pylint: disable=import-outside-toplevel
 
-  if jax.device_count() != a.mesh_fsdp * a.mesh_tp:
+    extra_add_cfg = json.loads(raw_add_cfg)
+    if isinstance(extra_add_cfg, dict):
+      extra_mt_cfg = extra_add_cfg.get("maxtext_config")
+      if isinstance(extra_mt_cfg, dict):
+        merged_mt_cfg = dict(extra_mt_cfg)
+        merged_mt_cfg.update(mt_cfg)
+        if convert_in_memory:
+          merged_mt_cfg.pop("load_parameters_path", None)
+        mt_cfg = merged_mt_cfg
+      for k, v in extra_add_cfg.items():
+        if k != "maxtext_config":
+          additional_config[k] = v
+      additional_config["maxtext_config"] = mt_cfg
+
+  mesh_expert = getattr(a, "mesh_expert", 1)
+  expected_devices = a.mesh_fsdp * a.mesh_tp * mesh_expert
+  if jax.device_count() != expected_devices:
     raise ValueError(
-        f"Expected {a.mesh_fsdp * a.mesh_tp} rollout chips; got"
+        f"Expected {expected_devices} rollout chips; got"
         f" {jax.device_count()}"
     )
   mesh = Mesh(
       mesh_utils.create_device_mesh(
-          (a.mesh_fsdp, a.mesh_tp),
+          (a.mesh_fsdp * mesh_expert, a.mesh_tp),
           jax.devices(),
           allow_split_physical_axes=True,
       ),
@@ -268,6 +365,12 @@ def create_worker(a):
     engine_kwargs["block_size"] = int(os.environ["VLLM_BLOCK_SIZE"])
   if os.environ.get("VLLM_MAMBA_CACHE_MODE"):
     engine_kwargs["mamba_cache_mode"] = os.environ["VLLM_MAMBA_CACHE_MODE"]
+  if os.environ.get("VLLM_PREFIX_CACHE_RETENTION_INTERVAL"):
+    engine_kwargs["prefix_cache_retention_interval"] = int(
+        os.environ["VLLM_PREFIX_CACHE_RETENTION_INTERVAL"]
+    )
+  if os.environ.get("VLLM_REASONING_PARSER"):
+    engine_kwargs["reasoning_parser"] = os.environ["VLLM_REASONING_PARSER"]
   if os.environ.get("VLLM_LIMIT_MM_PER_PROMPT"):
     raw_mm = os.environ["VLLM_LIMIT_MM_PER_PROMPT"].strip()
     mm_limits = {}
@@ -289,6 +392,7 @@ def create_worker(a):
       mesh=mesh,
       tensor_parallel_size=a.mesh_tp,
       data_parallel_size=a.mesh_fsdp,
+      expert_parallel_size=mesh_expert,
       init_with_random_weights=convert_in_memory,
       hbm_utilization=a.vllm_utilization,
       additional_config=additional_config,

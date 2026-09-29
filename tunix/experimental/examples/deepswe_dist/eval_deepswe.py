@@ -70,6 +70,12 @@ def parse_args(argv=None):
       "--mesh_fsdp", type=int, default=32, help="Rollout data parallel size."
   )
   p.add_argument("--mesh_tp", type=int, default=2)
+  p.add_argument(
+      "--mesh_expert",
+      type=int,
+      default=1,
+      help="Rollout expert parallel size.",
+  )
   p.add_argument("--vllm_utilization", type=float, default=0.70)
   p.add_argument("--max_model_len", type=int, default=16384)
   p.add_argument(
@@ -140,6 +146,7 @@ def parse_args(argv=None):
   for name in (
       "mesh_fsdp",
       "mesh_tp",
+      "mesh_expert",
       "max_model_len",
       "max_response_length",
       "max_steps",
@@ -184,6 +191,7 @@ def model_profile(a):
       "scan_layers",
       "mesh_fsdp",
       "mesh_tp",
+      "mesh_expert",
       "max_model_len",
       "enable_thinking",
       "enable_prefix_caching",
@@ -200,7 +208,7 @@ def model_profile(a):
 
 def maxtext_config(a):
   """Native adapter restores the checkpoint directly, never dummy weights."""
-  return {
+  cfg = {
       "model_name": a.maxtext_model_name,
       "load_parameters_path": a.model_absolute_path,
       "scan_layers": False,
@@ -218,6 +226,11 @@ def maxtext_config(a):
       "checkpoint_storage_use_zarr3": a.checkpoint_storage_use_zarr3,
       "checkpoint_storage_concurrent_gb": a.checkpoint_storage_concurrent_gb,
   }
+  if os.environ.get("FLOAT32_GATE_LOGITS"):
+    cfg["float32_gate_logits"] = boolean(os.environ["FLOAT32_GATE_LOGITS"])
+  if os.environ.get("FLOAT32_LOGITS"):
+    cfg["float32_logits"] = boolean(os.environ["FLOAT32_LOGITS"])
+  return cfg
 
 
 def request_fields(a, entry, index, attempt):

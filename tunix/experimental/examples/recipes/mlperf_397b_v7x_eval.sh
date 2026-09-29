@@ -29,11 +29,13 @@ if [[ "${POD}" == "pod2" || "${POD}" == "2" || "${POD}" == "elm" ]]; then
   export CLUSTER="${CLUSTER:-bodaborg-tpu7x-gsc-elm}"
   export BUCKET="${BUCKET:-gs://atwigg-trellis-us-east1}"
   export TPU_RESERVATION="${TPU_RESERVATION:-ghostfish-ev7rs12wndvw5}"
+  export MAXTEXT_CKPT="${MAXTEXT_CKPT:-gs://mlperf-6-submission-us-east1/ckpt/qwen35_397b/scanned_reshard_fsdp32_tp2/0/items}"
 else
   export REGION="${REGION:-us-central1}"
   export CLUSTER="${CLUSTER:-bodaborg-tpu7x-gsc}"
   export BUCKET="${BUCKET:-gs://atwigg-trellis-us-central1}"
   export TPU_RESERVATION="${TPU_RESERVATION:-ghostfish-pogoag4tylwed}"
+  export MAXTEXT_CKPT="${MAXTEXT_CKPT:-gs://mlperf-6-1-submission/ckpt/qwen35_397b/scanned_reshard_fsdp32_tp2/0/items}"
 fi
 
 export EVAL_OUTPUT_DIR="${EVAL_OUTPUT_DIR:-${BUCKET}/eval_results/${JOB_PREFIX}}"
@@ -69,6 +71,7 @@ export MODEL_ID="Qwen/Qwen3.5-397B-A17B"
 export TOKENIZER_PATH="${TOKENIZER_PATH:-Qwen/Qwen3.5-397B-A17B}"
 export MAXTEXT_MODEL_NAME="qwen3.5-397b-a17b"
 export MAXTEXT_CKPT="${MAXTEXT_CKPT:-gs://}"
+export SCAN_LAYERS="${SCAN_LAYERS:-true}"
 export CHECKPOINT_STORAGE_USE_OCDBT="${CHECKPOINT_STORAGE_USE_OCDBT:-false}"
 export CHECKPOINT_STORAGE_USE_ZARR3="${CHECKPOINT_STORAGE_USE_ZARR3:-false}"
 export EOS_TOKENS="${EOS_TOKENS:-248046,248044}"
@@ -76,7 +79,7 @@ export EOS_TOKENS="${EOS_TOKENS:-248046,248044}"
 # Backend & Rollout Topology (8 chips = 16 devices = 2 hosts per replica, EP=16, TP=1; no Trainer)
 export SAMPLER="vllm"
 export WEIGHT_SYNC_MODE="none"
-export ROLLOUT_JOBSET_YAML="jobset.mcjax.ray.yaml"
+export ROLLOUT_JOBSET_YAML="${ROLLOUT_JOBSET_YAML:-jobset.pathways.yaml}"
 export ROLLOUT_TPU_SLICE="${ROLLOUT_TPU_SLICE:-tpu7x:2x2x2}"
 export ROLLOUT_MESH_FSDP=1
 export ROLLOUT_MESH_TP=1
@@ -91,7 +94,7 @@ export VLLM_LOGGING_LEVEL="INFO"
 export VLLM_MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-65536}"
 export VLLM_MAX_NUM_BATCHED_TOKENS=2048
 export VLLM_MAX_NUM_SEQS=16
-export VLLM_GPU_MEMORY_UTILIZATION="0.9"
+export VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-0.84}"
 
 # Sharding Configs
 export VLLM_DATA_PARALLEL_SIZE="${VLLM_DATA_PARALLEL_SIZE:-1}"
@@ -140,6 +143,13 @@ export VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY="RAIDEN_,TPU_"
 export VLLM_RAY_EXTRA_ENV_VARS_TO_COPY="ONEHOT_MOE_PERMUTE_THRESHOLD,LIBTPU_INIT_ARGS,RAY_memory_monitor_refresh_ms,VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,ENABLE_MULTI_NUMA,TPU_RAIDEN_DATA_NICS,FLOAT32_GATE_LOGITS,FLOAT32_LOGITS,NEW_MODEL_DESIGN,ATTN_BUCKETIZED_NUM_REQS,ATTN_CUSTOM_NUM_REQS_BUCKETS,VLLM_MOE_CHUNK_SIZE,SLICE_ROPE_CACHE,DP_SCHED_BATCH_PREFILL"
 export ROLLOUT_EXTRA_ENV="${ROLLOUT_EXTRA_ENV:-ONEHOT_MOE_PERMUTE_THRESHOLD=131072 RAY_memory_monitor_refresh_ms=0 RAIDEN_TRANSPORT_COALESCE_WINDOW_BYTES=67108864 RAIDEN_WEIGHT_SYNC_PIPELINE_GROUP_SIZE=16 RAIDEN_PARALLELISM=16 VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800 ENABLE_MULTI_NUMA=${ENABLE_MULTI_NUMA} TPU_RAIDEN_DATA_NICS=eth0 RAIDEN_BROADCAST_K=64}"
 export LIBTPU_INIT_ARGS="${LIBTPU_INIT_ARGS:- --xla_tpu_use_minor_sharding_for_major_trivial_input=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=false --xla_tpu_ars_combiner_threshold_in_bytes=0 --xla_tpu_enable_async_collective_merger=false --xla_tpu_check_legacy_constraints_in_reduce_scatter_legalizer=false --xla_tpu_dvfs_p_state=7}"
+export PATHWAYS_WORKER_EXTRA_ENV="${PATHWAYS_WORKER_EXTRA_ENV:-LIBTPU_INIT_ARGS=${LIBTPU_INIT_ARGS} --megascale_port=-1 --xprof_compress_jftrace=true
+SKIP_MEGASCALE_PJRT_CLIENT=true
+TPU_RAIDEN_DATA_NICS=eth0
+RAIDEN_BROADCAST_K=64}"
+_rollout_xla_flags=""
+for _f in ${LIBTPU_INIT_ARGS}; do [[ "${_f}" == --xla_* ]] && _rollout_xla_flags+="${_f} "; done
+export PATHWAYS_PROXY_EXTRA_ARGS="${PATHWAYS_PROXY_EXTRA_ARGS:-${_rollout_xla_flags% }}"
 export VLLM_ENABLE_V1_MULTIPROCESSING=0
 
 # ==============================================================================

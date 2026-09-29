@@ -66,16 +66,29 @@ class EvalTest(unittest.TestCase):
     self.assertEqual(config["load_parameters_path"], "gs://models/0/items")
     self.assertFalse(config["scan_layers"])
     self.assertFalse(a.scan_layers)
+    self.assertEqual(a.mesh_expert, 1)
+    self.assertEqual(eval_lib.model_profile(a)["mesh_expert"], 1)
     self.assertFalse(eval_lib.model_profile(a)["scan_layers"])
     self.assertTrue(config["checkpoint_storage_use_ocdbt"])
     self.assertFalse(config["checkpoint_storage_use_zarr3"])
+    with mock.patch.dict(
+        eval_lib.os.environ,
+        {"FLOAT32_GATE_LOGITS": "true", "FLOAT32_LOGITS": "false"},
+    ):
+      f32_cfg = eval_lib.maxtext_config(a)
+      self.assertTrue(f32_cfg["float32_gate_logits"])
+      self.assertFalse(f32_cfg["float32_logits"])
 
   def test_in_memory_scanned_checkpoint_conversion(self):
     worker_lib = load(
         "deepswe_eval_worker_under_test", RECIPE / "eval_worker.py"
     )
-    a = self.args("--scan_layers", "true", "--mesh_tp", "4")
+    a = self.args(
+        "--scan_layers", "true", "--mesh_tp", "4", "--mesh_expert", "16"
+    )
     self.assertTrue(a.scan_layers)
+    self.assertEqual(a.mesh_expert, 16)
+    self.assertEqual(eval_lib.model_profile(a)["mesh_expert"], 16)
     self.assertTrue(eval_lib.model_profile(a)["scan_layers"])
     self.assertFalse(eval_lib.maxtext_config(a)["scan_layers"])
 
