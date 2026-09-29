@@ -26,6 +26,35 @@ export TRAINER_PORT="${TRAINER_PORT:-20002}"
 export PROFILER_STEPS=${PROFILER_STEPS:-0}
 export SKIP_FIRST_N_PROFILER_STEPS=${SKIP_FIRST_N_PROFILER_STEPS:--1}
 
+# TPU advanced profiling, appended so the per-recipe MAXTEXT_EXTRA_FLAGS is kept
+# and non-profiling runs are unchanged.
+#
+# XSpace serializes as one proto with a 2 GB cap; 397B traces of 2 steps exceeded
+# it on both v7x (1.58 GB) and v5p (1.39 GB). Tracing 1 of the 4 chips per host
+# brings them to 0.47 GB and 0.35 GB.
+#
+# The SparseCore counts are measured hardware values, identical on v7x and v5p.
+# They must be stated because enable_tpu_profiling_options replaces libtpu's
+# SparseCore defaults with MaxText's, which trace 1 tile; on v7x the SparseCore
+# planes are 92% of all events. Re-measure them for a new TPU generation.
+export TPU_PROFILE_CHIPS_PER_TASK="${TPU_PROFILE_CHIPS_PER_TASK:-1}"
+export TPU_PROFILE_SPARSE_CORES="${TPU_PROFILE_SPARSE_CORES:-2}"
+export TPU_PROFILE_SPARSE_CORE_TILES="${TPU_PROFILE_SPARSE_CORE_TILES:-16}"
+if [[ "${PROFILER_STEPS}" =~ ^[0-9]+$ && "${PROFILER_STEPS}" -gt 0 ]]; then
+  tpu_profiling_flags=(
+    "enable_tpu_profiling_options=true"
+if [[ "${PROFILER_STEPS}" =~ ^[0-9]+$ && "${PROFILER_STEPS}" -gt 0 ]]; then
+  tpu_profiling_flags=(
+    "enable_tpu_profiling_options=true"
+    "tpu_num_chips_to_profile_per_task=${TPU_PROFILE_CHIPS_PER_TASK}"
+    "tpu_num_sparse_cores_to_trace=${TPU_PROFILE_SPARSE_CORES}"
+    "tpu_num_sparse_core_tiles_to_trace=${TPU_PROFILE_SPARSE_CORE_TILES}"
+    "upload_all_profiler_results=false"
+  )
+  export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS:+$MAXTEXT_EXTRA_FLAGS }${tpu_profiling_flags[*]}"
+  unset tpu_profiling_flags
+fi
+
 # ==============================================================================
 # Cluster Context & Kueue / Priority
 # ==============================================================================
