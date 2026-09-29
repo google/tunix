@@ -1,35 +1,32 @@
-# DeepSWE validation run: Qwen3-32B, tunix agentic GRPO on R2E-Gym
+# DeepSWE run: Qwen3-32B, tunix agentic GRPO on R2E-Gym
 # (examples/deepswe/train_deepswe_nb.py) on one v5p-256 slice (4x4x8 = 128
 # chips, 32 hosts) with Pathways, namespace trellis on bodaborg-v5p-nap.
 # The recipe splits the chips itself: devices[:64] run vLLM rollout
 # (dp 8 x tp 8), devices[64:128] hold actor + reference (fsdp 32 x tp 2).
-# Use the original Qwen3-32B training whitelist: 1,851 tasks with partial
-# success across eight sampled rollouts. The P34 DeepSWE runbook pins this
-# file and its SHA-256 for Qwen3-32B training.
-# This is a separate JobSet and W&B run; applying it does not change the 8B run.
+# No checkpoints (no writable GCS bucket for the node SA yet).
 #
-# Prerequisite (once): the W&B key as a Secret. Never inline it here: CitC and
-# experimental/ are readable by almost all Googlers (go/citc-privacy).
+# Prerequisite (once): the W&B key as a Secret, never inline in this file:
 #   kubectl -n trellis create secret generic haoyugao-wandb \
 #     --from-literal=WANDB_API_KEY=<key>
-# Apply:   kubectl apply -f examples/deepswe/deepswe_qwen3_32b_v5p256_trellis.yaml
-# W&B:     https://wandb.ai/linchai-google/tunix/runs/haoyugao-dswe-qwen3-32b-0929a
+# Apply:   kubectl apply -f deepswe_qwen3_32b_v5p256_trellis.yaml
+# W&B:     https://wandb.ai/linchai-google/tunix-deepswe/runs/haoyugao-dswe-dq-qwen3-32b-0929b
 # Logs:    kubectl -n trellis logs -f -c jax-tpu \
-#            -l jobset.sigs.k8s.io/jobset-name=hy-dswe-32b-0929a,jobset.sigs.k8s.io/replicatedjob-name=pathways-head
-# Cleanup: kubectl -n trellis delete jobset hy-dswe-32b-0929a
+#            -l jobset.sigs.k8s.io/jobset-name=hy-dq-32b-0929a,jobset.sigs.k8s.io/replicatedjob-name=pathways-head
+# Cleanup: kubectl -n trellis delete jobset hy-dq-32b-0929a
 apiVersion: jobset.x-k8s.io/v1alpha2
 kind: JobSet
 metadata:
-  name: hy-dswe-32b-0929a
+  name: hy-dq-32b-0929a
   namespace: trellis
   labels:
     kueue.x-k8s.io/queue-name: multislice-queue
 spec:
   coordinator:
     replicatedJob: pathways-head
-  # Validation run: fail fast instead of recreating the slice.
+  # Crash / preemption: recreate once. Without checkpoints that attempt
+  # retrains from step 0 and logs to W&B run <WANDB_RUN_ID>-a1.
   failurePolicy:
-    maxRestarts: 0
+    maxRestarts: 1
   network:
     enableDNSHostnames: true
     publishNotReadyAddresses: true
@@ -99,7 +96,7 @@ spec:
               args:
               - --server_port=29000
               - --resource_manager_address=$(PATHWAYS_HEAD):29001
-              - --gcs_scratch_location=gs://cloud-pathways-staging/tmp/hy-dswe-32b-0929a
+              - --gcs_scratch_location=gs://cloud-pathways-staging/tmp/hy-dq-32b-0929a
               env:
               - name: PATHWAYS_HEAD
                 valueFrom:
@@ -124,7 +121,7 @@ spec:
               restartPolicy: Always
               args:
               - --server_port=29001
-              - --gcs_scratch_location=gs://cloud-pathways-staging/tmp/hy-dswe-32b-0929a
+              - --gcs_scratch_location=gs://cloud-pathways-staging/tmp/hy-dq-32b-0929a
               - --node_type=resource_manager
               - --instance_count=1
               - --instance_type=tpuv5:4x4x8
@@ -169,9 +166,21 @@ spec:
                   # step 0, so it logs to its own W&B run.
                   export WANDB_RUN_ID="${WANDB_RUN_ID}-a${JOBSET_RESTART_ATTEMPT}"
                 fi
-                echo "[deepswe] W&B run: https://wandb.ai/${WANDB_ENTITY}/tunix/runs/${WANDB_RUN_ID}"
-                # Fetch the Qwen3-32B partial-success task whitelist from the
-                # pinned source commit and verify it before launching training.
+                echo "[deepswe] W&B run: https://wandb.ai/${WANDB_ENTITY}/${WANDB_PROJECT}/runs/${WANDB_RUN_ID}"
+                # Code: tunix branch haoyu/deepswe-dist-quality, checked out over the
+                # image's /app repo (the image only supplies the dependencies).
+                DSWE_CODE_REF="${DSWE_CODE_REF:-haoyu/deepswe-dist-quality}"
+                (cd /app \
+                  && git remote set-url origin https://github.com/google/tunix.git 2>/dev/null \
+                     || git remote add origin https://github.com/google/tunix.git) || exit 1
+                for i in 1 2 3 4 5; do
+                  git -C /app fetch --depth 50 origin "${DSWE_CODE_REF}" && break
+                  echo "[deepswe] git fetch failed (attempt ${i}), retrying"; sleep 10
+                done
+                git -C /app checkout -f FETCH_HEAD || exit 1
+                echo "[deepswe] code: ${DSWE_CODE_REF} @ $(git -C /app rev-parse HEAD) ($(git -C /app log -1 --format=%s))"
+                # Clean data: Qwen3 128-retry "partial" (learnable) task list from
+                # yuxzhang/canon-zero-tim, as in the branch's Qwen3-32B JobSet.
                 python3 - <<'PY' || exit 1
                 import hashlib
                 import json
@@ -183,22 +192,28 @@ spec:
                     "task_report_good_qwen3_128_retry_20260713_090141.jsonl"
                 )
                 expected = "2f95c2e6df3526f68bd3eed3ab9aece7077ef85c74251c77f7b3474b0b307ed7"
-                with urllib.request.urlopen(url, timeout=30) as response:
-                  data = response.read()
+                for attempt in range(5):
+                  try:
+                    with urllib.request.urlopen(url, timeout=30) as response:
+                      data = response.read()
+                    break
+                  except OSError:
+                    if attempt == 4:
+                      raise
                 actual = hashlib.sha256(data).hexdigest()
                 if actual != expected:
-                  raise RuntimeError(f"Qwen3-32B whitelist checksum mismatch: {actual}")
+                  raise RuntimeError(f"clean-data whitelist checksum mismatch: {actual}")
                 rows = [json.loads(line) for line in data.splitlines() if line]
                 images = [row["docker_image"] for row in rows]
                 if len(images) != 1851 or len(set(images)) != 1851:
-                  raise RuntimeError("Qwen3-32B whitelist must contain 1,851 unique images")
+                  raise RuntimeError("clean-data whitelist must contain 1,851 unique images")
                 if any(row.get("status") != "partial" or row.get("n") != 8
                        or not 0 < row.get("k", 0) < row.get("valid_n", 0)
                        for row in rows):
-                  raise RuntimeError("Qwen3-32B whitelist contains a non-partial task")
-                with open("/tmp/deepswe-qwen3-32b-clean.jsonl", "wb") as output:
+                  raise RuntimeError("clean-data whitelist contains a non-partial task")
+                with open("/app/_deepswe_clean.jsonl", "wb") as output:
                   output.write(data)
-                print(f"[deepswe] Qwen3-32B whitelist verified: {len(images)} tasks")
+                print(f"[deepswe] clean-data whitelist verified: {len(images)} tasks")
                 PY
                 # kubernetes' WebSocket errors can carry body=None, which crashes
                 # api_client.py's error path (same patch as niting's manifests).
@@ -219,11 +234,212 @@ spec:
                 # (vLLM / sandbox threads keep it alive and would hold the
                 # slice), so run it under a wrapper that finishes W&B, runs
                 # the atexit hooks (sandbox fleet teardown) and exits.
+                # Sandbox names/labels are scoped to this JobSet (see the patch in
+                # _run_deepswe.py below).
+                export DSWE_SANDBOX_OWNER="${JOBSET_NAME}"
                 cat > /app/_run_deepswe.py <<'PY'
                 import atexit, os, runpy, sys, threading, traceback
                 script = "examples/deepswe/train_deepswe_nb.py"
                 sys.argv = [script] + sys.argv[1:]
                 sys.path.insert(0, os.path.abspath(os.path.dirname(script)))
+                # trellis is a namespace shared with other agent_sandbox_rl runs, and the
+                # library version in this image tears down EVERY app=agent-sandbox-rl
+                # claim/pool/template in the namespace on exit (it deleted other users'
+                # pools on 2026-09-29). Scope everything this run creates/deletes to itself:
+                #  * names: oh-<jobset>-<hash> / pool-oh-<jobset>-<hash> (unique, and the
+                #    form trellis' cluster-reaper maps back to our live JobSet);
+                #  * CR label app=asrl-<jobset>, so other runs' old-library teardown does not
+                #    match our claims/pools/templates (sandbox pods keep app=agent-sandbox-rl
+                #    so cluster-reaper still cleans our dead/stuck pods);
+                #  * teardown selector = our app label + our run-id, never the namespace;
+                #  * every delete re-checks name prefix / run-id label and refuses otherwise.
+                import agent_sandbox_rl as _asrl
+                from agent_sandbox_rl import constants as _asrl_c
+                from agent_sandbox_rl import fleet as _asrl_f
+                from agent_sandbox_rl import resources as _asrl_r
+
+                _OWNER = os.environ["DSWE_SANDBOX_OWNER"]
+                _PREFIX = f"oh-{_OWNER}-"
+                _POOL_PREFIX = f"pool-{_PREFIX}"
+                _APP = f"asrl-{_OWNER}"
+                _SHARED_APP = "agent-sandbox-rl"
+                _asrl_c.MANAGED_BY_VALUE = _APP
+                _asrl_c.DEFAULT_LABELS.clear()
+                _asrl_c.DEFAULT_LABELS[_asrl_c.MANAGED_BY_LABEL] = _APP
+
+
+                class _ScopedFleetConfig(_asrl.FleetConfig):
+
+                  def __init__(self, **kw):
+                    kw["template_name_prefix"] = _PREFIX
+                    kw["pool_name_format"] = "pool-{template}"
+                    labels = dict(kw.get("labels") or {})
+                    labels[_asrl_c.MANAGED_BY_LABEL] = _APP
+                    kw["labels"] = labels
+                    super().__init__(**kw)
+
+
+                _asrl.FleetConfig = _ScopedFleetConfig
+
+                _orig_template_manifest = _asrl_r.Resources._template_manifest
+
+
+                def _template_manifest(self, image, template_name, template):
+                  m = _orig_template_manifest(self, image, template_name, template)
+                  m["spec"]["podTemplate"]["metadata"]["labels"][
+                      _asrl_c.MANAGED_BY_LABEL] = _SHARED_APP
+                  return m
+
+
+                _asrl_r.Resources._template_manifest = _template_manifest
+                # Pre-existing templates are never ours to re-label.
+                _asrl_r.Resources._reconcile_template_labels = lambda self, *a, **k: None
+
+
+                def _unscoped_selector(self):
+                  raise RuntimeError("[deepswe] refusing unscoped agent_sandbox_rl selector")
+
+
+                _asrl_r.Resources.managed_selector = _unscoped_selector
+                _RUN_IDS = set()
+
+
+                def _scope_resources(res, run_id):
+                  sel = (f"{_asrl_c.MANAGED_BY_LABEL}={_APP},"
+                         f"{_asrl_c.RUN_ID_LABEL}={run_id}")
+                  res.managed_selector = lambda: sel
+                  orig_pool, orig_tmpl, orig_claim = (
+                      res.delete_warmpool, res.delete_template, res.delete_claim)
+
+                  def delete_warmpool(name):
+                    if not name.startswith(_POOL_PREFIX):
+                      print(f"[deepswe] refusing to delete foreign warmpool {name}", flush=True)
+                      return
+                    orig_pool(name)
+
+                  def delete_template(name):
+                    if not name.startswith(_PREFIX):
+                      print(f"[deepswe] refusing to delete foreign template {name}", flush=True)
+                      return
+                    orig_tmpl(name)
+
+                  def delete_claim(name):
+                    try:
+                      obj = res.custom_api.get_namespaced_custom_object(
+                          group=_asrl_c.GROUP, version=_asrl_c.VERSION,
+                          namespace=res.namespace, plural=_asrl_c.CLAIMS_PLURAL, name=name)
+                    except Exception as e:  # pylint: disable=broad-exception-caught
+                      if getattr(e, "status", None) == 404:
+                        return
+                      raise
+                    labels = (obj.get("metadata") or {}).get("labels") or {}
+                    if labels.get(_asrl_c.RUN_ID_LABEL) not in _RUN_IDS:
+                      print(f"[deepswe] refusing to delete foreign claim {name}", flush=True)
+                      return
+                    orig_claim(name)
+
+                  res.delete_warmpool = delete_warmpool
+                  res.delete_template = delete_template
+                  res.delete_claim = delete_claim
+                  res.delete_sandbox = lambda name: print(
+                      f"[deepswe] refusing to delete sandbox {name} directly", flush=True)
+
+
+                _orig_fleet_init = _asrl_f.SandboxFleet.__init__
+
+
+                def _fleet_init(self, *a, **k):
+                  _orig_fleet_init(self, *a, **k)
+                  _RUN_IDS.add(self.run_id)
+                  for c in self.registry:
+                    _scope_resources(c.resources, self.run_id)
+                  print(f"[deepswe] sandbox fleet scoped: run_id={self.run_id} "
+                        f"prefix={_PREFIX} app={_APP}", flush=True)
+
+
+                _asrl_f.SandboxFleet.__init__ = _fleet_init
+                _orig_fleet_teardown = _asrl_f.SandboxFleet._teardown
+                _asrl_f.SandboxFleet._teardown = (
+                    lambda self, delete_namespace=False: _orig_fleet_teardown(self, False))
+
+                # preflight reads the cluster-scoped CRD objects, which xpk-sa may not GET
+                # (403); on 403 only, prove the CRD is served at the wanted version by
+                # listing its objects in our namespace instead (a 404 there = not served).
+                import types
+                from agent_sandbox_rl import preflight as _asrl_pf
+                from kubernetes import client as _k8s_client
+
+                _orig_crd_api = _asrl_pf._crd_api
+
+
+                class _CrdApiWithFallback:
+
+                  def __init__(self, cluster):
+                    self._cluster = cluster
+                    self._api = _orig_crd_api(cluster)
+
+                  def read_custom_resource_definition(self, name):
+                    try:
+                      return self._api.read_custom_resource_definition(name)
+                    except _k8s_client.ApiException as e:
+                      if e.status != 403:
+                        raise
+                    plural, group = name.split(".", 1)
+                    version = (_asrl_c.SANDBOX_VERSION if group == _asrl_c.SANDBOX_GROUP
+                               else _asrl_c.VERSION)
+                    self._cluster.resources.custom_api.list_namespaced_custom_object(
+                        group=group, version=version,
+                        namespace=self._cluster.resources.namespace, plural=plural, limit=1)
+                    print(f"[deepswe] preflight: CRD {name} not readable (403); "
+                          f"verified {version} is served by listing it", flush=True)
+                    # preflight_cluster only reads crd.spec.versions[].{name,served}.
+                    return types.SimpleNamespace(spec=types.SimpleNamespace(
+                        versions=[types.SimpleNamespace(name=version, served=True)]))
+
+
+                _asrl_pf._crd_api = _CrdApiWithFallback
+
+                # sandbox_utils.init_global_fleet() warms a pool for EVERY image in the
+                # dataset up front (685 x 8 replicas ~ 5.5k sandbox pods on r2e-gym-easy),
+                # which fills the sandbox-cpu-flavor quota that all of trellis shares.
+                # PrewarmDatasetIterator already warms the current + next batch and unwarms
+                # images leaving that window, so keep only the first DSWE_INITIAL_WARM_IMAGES
+                # images (default 0) of that one bulk call.
+                _orig_warm_images = _asrl_f.SandboxFleet.warm_images
+
+
+                def _warm_images(self, images, *args, **kwargs):
+                  if sys._getframe(1).f_code.co_name == "init_global_fleet":
+                    images = list(images)
+                    keep = min(len(images),
+                               int(os.environ.get("DSWE_INITIAL_WARM_IMAGES", "0")))
+                    print(f"[deepswe] initial bulk warm limited: {len(images)} -> {keep} "
+                          "images", flush=True)
+                    images = images[:keep]
+                    if not images:
+                      return None
+                  return _orig_warm_images(self, images, *args, **kwargs)
+
+
+                _asrl_f.SandboxFleet.warm_images = _warm_images
+
+                # Log the effective GRPO config (the branch recipe sets exact continuity and
+                # score centering explicitly via flags; nothing is overridden here).
+                from tunix.rl.agentic import agentic_grpo_learner as _agl
+
+                _orig_grpo_config_init = _agl.GRPOConfig.__init__
+
+
+                def _grpo_config_init(self, *a, **k):
+                  _orig_grpo_config_init(self, *a, **k)
+                  print("[deepswe] GRPOConfig " + " ".join(
+                      f"{f}={getattr(self, f, None)}" for f in (
+                          "exact_token_continuity", "use_rollout_logps", "score_centering",
+                          "score_centering_top_k", "advantage_estimator", "loss_agg_mode",
+                          "sampler_is")), flush=True)
+
+
+                _agl.GRPOConfig.__init__ = _grpo_config_init
                 code = 1
                 try:
                   runpy.run_path(script, run_name="__main__")
@@ -248,41 +464,60 @@ spec:
                 os._exit(code)
                 PY
                 # Model name without the "Qwen/" prefix: tunix's
-                # call_model_config() only parses "Qwen3-8B"; the recipe adds
+                # call_model_config() only parses "Qwen3-32B"; the recipe adds
                 # the prefix back for the HF download.
                 exec python3 -X faulthandler -u /app/_run_deepswe.py \
                   --model_version Qwen3-32B \
                   --models_base_dir /app/models \
                   --dataset_name R2E-Gym/R2E-Gym-Subset \
                   --dataset_revision 2e8108ff942f24fcb5686badfaf7f9a8808566d5 \
-                  --gold_whitelist /tmp/deepswe-qwen3-32b-clean.jsonl \
+                  --dataset_split train \
+                  --gold_whitelist /app/_deepswe_clean.jsonl \
                   --use_agent_sandbox \
                   --node_selector_val sandbox-cpu-pool \
-                  --docker_image_prefix europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/tunix \
                   --ckpt_dir none \
                   --metric_logger_dir "/tmp/deepswe-logs/${JOBSET_NAME}" \
                   --rollout_mesh_fsdp 8 \
                   --rollout_mesh_tp 8 \
-                  --train_mesh_fsdp 32 \
-                  --train_mesh_tp 2 \
-                  --max_steps 2 \
-                  --batch_size 8 \
-                  --mini_batch_size 8 \
+                  --train_mesh_fsdp 8 \
+                  --train_mesh_tp 8 \
+                  --max_steps 100 \
+                  --batch_size 16 \
+                  --mini_batch_size 16 \
                   --num_generations 8 \
-                  --train_micro_batch_size 1 \
-                  --compute_logps_micro_batch_size 1 \
-                  --rollout_micro_batch_size 8 \
+                  --train_micro_batch_size 8 \
+                  --compute_logps_micro_batch_size 8 \
+                  --rollout_micro_batch_size 16 \
                   --max_prompt_length 4096 \
                   --max_response_length 8192 \
                   --max_num_batched_tokens 16384 \
                   --vllm_utilization 0.7 \
                   --vllm_reshard_chunk_size 1 \
                   --max_turns 30 \
-                  --per_turn_timeout_secs 60 \
                   --step_timeout_secs 60 \
                   --reward_timeout_secs 180 \
                   --episode_timeout_secs 3600 \
-                  --max_concurrency 64 \
+                  --max_concurrency 128 \
+                  --env_backend kubernetes \
+                  --scaffold r2egym \
+                  --action_compat_mode q4_r2egym_xml_v2 \
+                  --rollout_engine vllm \
+                  --temperature 1.0 \
+                  --top_p 1.0 \
+                  --top_k 0 \
+                  --learning_rate 1e-6 \
+                  --beta 0 \
+                  --epsilon 0.2 \
+                  --epsilon_high 0.28 \
+                  --advantage_estimator rloo \
+                  --loss_agg_mode sequence-mean-token-scale \
+                  --use_rollout_logps true \
+                  --exact_token_continuity true \
+                  --score_centering true \
+                  --score_centering_top_k 32 \
+                  --score_centering_eps 1e-6 \
+                  --sampler_is token \
+                  --sampler_is_threshold 2.0 \
                   --logging_level INFO
               env:
               - name: PATHWAYS_HEAD
@@ -351,20 +586,23 @@ spec:
                   secretKeyRef:
                     name: haoyugao-wandb
                     key: WANDB_API_KEY
-              # Set the W&B project explicitly so the run URL is stable across
-              # recipe versions in the pinned image.
+              # The branch recipe reads project / run name from WANDB_PROJECT /
+              # WANDB_RUN_NAME (default "trellis-deepswe"); wandb.init takes the
+              # entity and run id from WANDB_ENTITY / WANDB_RUN_ID.
               - name: WANDB_PROJECT
-                value: tunix
+                value: tunix-deepswe
+              - name: WANDB_RUN_NAME
+                value: haoyugao-dswe-dq-qwen3-32b-0929b
               - name: WANDB_ENTITY
                 value: linchai-google
               - name: WANDB_RUN_ID
-                value: haoyugao-dswe-qwen3-32b-0929a
+                value: haoyugao-dswe-dq-qwen3-32b-0929b
               - name: WANDB_RESUME
                 value: allow
               - name: WANDB_RUN_GROUP
                 value: deepswe-v5p256
               - name: WANDB_TAGS
-                value: qwen3-32b,validation,v5p-256,partial-clean
+                value: qwen3-32b,v5p-256,dist-quality,score-centering,clean-qwen3-128
               resources:
                 limits:
                   cpu: "32"
@@ -384,12 +622,12 @@ spec:
               hostPath:
                 path: /tmp
                 type: DirectoryOrCreate
-            # Qwen3-32B BF16 weights need roughly 64 GiB. This RAM disk counts
-            # against jax-tpu's memory limit.
+            # HF weights on a RAM disk: cpu-np nodes have ~256 GB RAM but only
+            # a small boot disk. Counts against jax-tpu's memory limit.
             - name: model-volume
               emptyDir:
                 medium: Memory
-                sizeLimit: 96Gi
+                sizeLimit: 80Gi
   - name: worker
     replicas: 1
     template:
@@ -433,7 +671,7 @@ spec:
                     - key: jobset.sigs.k8s.io/jobset-name
                       operator: In
                       values:
-                      - hy-dswe-32b-0929a
+                      - hy-dq-32b-0929a
                     - key: jobset.sigs.k8s.io/replicatedjob-name
                       operator: In
                       values:
@@ -463,7 +701,7 @@ spec:
               args:
               - --server_port=29005
               - --resource_manager_address=$(PATHWAYS_HEAD):29001
-              - --gcs_scratch_location=gs://cloud-pathways-staging/tmp/hy-dswe-32b-0929a
+              - --gcs_scratch_location=gs://cloud-pathways-staging/tmp/hy-dq-32b-0929a
               - --node_type=worker
               - --instance_type=tpuv5:4x4x8
               env:
