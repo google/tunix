@@ -33,6 +33,7 @@ from tunix.experimental.common import datatypes
 from tunix.experimental.train import abstract_trainer
 from tunix.experimental.worker import trainer_worker
 from tunix.rl import common as rl_common
+from tunix.sft import utils as sft_utils
 from tunix.tests import test_common as tc
 
 
@@ -154,6 +155,29 @@ class TrainerWorkerTest(absltest.TestCase):
   def test_update_returns_step_count(self):
     step = self.worker.update()
     self.assertEqual(step, 11)
+
+  def test_get_metrics_returns_host_arrays(self):
+    self.fake_trainer.get_metrics = lambda: {
+        "loss": sft_utils.WeightedMetric(
+            unreduced_sum=jnp.asarray(3.0), denominator=jnp.asarray(4.0)
+        ),
+        "grad_norm": [jnp.asarray(0.5), jnp.asarray(0.25)],
+        "step": 7,
+    }
+
+    metrics = self.worker.get_metrics()
+
+    self.assertIsInstance(metrics["loss"], sft_utils.WeightedMetric)
+    self.assertIsInstance(metrics["loss"].unreduced_sum, np.ndarray)
+    self.assertIsInstance(metrics["loss"].denominator, np.ndarray)
+    self.assertAlmostEqual(float(metrics["loss"].compute()), 0.75)
+    for value in metrics["grad_norm"]:
+      self.assertIsInstance(value, np.ndarray)
+    np.testing.assert_allclose(metrics["grad_norm"], [0.5, 0.25])
+    self.assertEqual(metrics["step"], 7)
+
+  def test_get_metrics_passes_host_values_through(self):
+    self.assertEqual(self.worker.get_metrics(), {"loss": 0.25})
 
   def test_set_target_state_configures_trainer(self):
     target_state = {"params": np.zeros((4, 4))}

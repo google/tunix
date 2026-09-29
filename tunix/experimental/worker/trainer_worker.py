@@ -562,5 +562,12 @@ class TrainerWorker(abstract_worker.Worker):
     return result
 
   def get_metrics(self) -> Any:
-    """Returns and clears the recently collected step metric records."""
-    return self._trainer.get_metrics()
+    """Returns and clears the recently collected step metric records.
+
+    The records come back host-resident. A trainer may hand back an on-device
+    buffer of a few hundred scalars, and pickling that for the RPC reply reads
+    them one at a time, each a blocking device-to-host round trip (through the
+    Pathways proxy on a remote trainer). `jax.device_get` starts every copy
+    before waiting on any of them.
+    """
+    return jax.device_get(self._trainer.get_metrics())
