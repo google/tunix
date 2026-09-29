@@ -202,7 +202,7 @@ _LEGACY_ACQUIRE_RETRIES = 5
 
 @dataclasses.dataclass(frozen=True)
 class SandboxFailFastConfig:
-  """Sandbox-side fail-fast settings (FAIL_FAST_MODE=enforce in the launcher).
+  """Sandbox-side fail-fast settings (FAIL_FAST=true in the launcher).
 
   Read from the environment because the fleet is created in several processes
   (orchestrator and each rollout worker) that all get these variables from the

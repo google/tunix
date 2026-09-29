@@ -531,7 +531,7 @@ class SandboxUtilsTest(absltest.TestCase):
     self.assertEqual(fleet.active_pools, {})
 
 
-_ENFORCE_ENV = {
+_FAIL_FAST_ENV = {
     "FT_SANDBOX_FAIL_FAST": "true",
     "FT_SANDBOX_READY_TIMEOUT_S": "300",
     "FT_SANDBOX_ACQUIRE_RETRIES": "2",
@@ -566,8 +566,8 @@ class SandboxFailFastTest(absltest.TestCase):
           ),
       )
 
-  def test_config_enforce_reads_knobs(self):
-    with mock.patch.dict(os.environ, _ENFORCE_ENV, clear=True):
+  def test_config_fail_fast_reads_knobs(self):
+    with mock.patch.dict(os.environ, _FAIL_FAST_ENV, clear=True):
       self.assertEqual(
           sandbox_utils.SandboxFailFastConfig.from_env(),
           sandbox_utils.SandboxFailFastConfig(
@@ -579,20 +579,20 @@ class SandboxFailFastTest(absltest.TestCase):
     for env, error in (
         ({"FT_SANDBOX_FAIL_FAST": "1"}, ValueError),
         ({"FT_SANDBOX_FAIL_FAST": "true"}, KeyError),
-        ({**_ENFORCE_ENV, "FT_SANDBOX_ACQUIRE_RETRIES": "0"}, ValueError),
+        ({**_FAIL_FAST_ENV, "FT_SANDBOX_ACQUIRE_RETRIES": "0"}, ValueError),
     ):
       with self.subTest(env=env):
         with mock.patch.dict(os.environ, env, clear=True):
           with self.assertRaises(error):
             sandbox_utils.SandboxFailFastConfig.from_env()
 
-  def test_init_global_fleet_enforce_sets_timeout_and_raises_on_preflight(self):
+  def test_init_global_fleet_fail_fast_sets_timeout_and_raises_on_preflight(self):
     sdk = self._fake_sdk()
     sdk.SandboxFleet.return_value.preflight.side_effect = RuntimeError(
         "CRDs missing"
     )
     with mock.patch.dict("sys.modules", {"agent_sandbox_rl": sdk}):
-      with mock.patch.dict(os.environ, _ENFORCE_ENV):
+      with mock.patch.dict(os.environ, _FAIL_FAST_ENV):
         with mock.patch.object(sandbox_utils, "_GLOBAL_FLEET", None):
           with self.assertRaisesRegex(RuntimeError, "CRDs missing"):
             sandbox_utils.init_global_fleet(tasks=None, num_generations=4)
@@ -611,10 +611,10 @@ class SandboxFailFastTest(absltest.TestCase):
             sandbox_utils.init_global_fleet(tasks=None, num_generations=4)
     self.assertNotIn("ready_timeout", sdk.FleetConfig.call_args[1])
 
-  def test_prewarm_enforce_raises_fleet_error(self):
+  def test_prewarm_fail_fast_raises_fleet_error(self):
     dataset = [{"prompt": "p0", "docker_image": "img_A"}]
     with mock.patch.dict("sys.modules", {"agent_sandbox_rl": self._fake_sdk()}):
-      with mock.patch.dict(os.environ, _ENFORCE_ENV):
+      with mock.patch.dict(os.environ, _FAIL_FAST_ENV):
         with self.assertRaisesRegex(_FakeFleetError, "never became ready"):
           sandbox_utils.PrewarmDatasetIterator(
               dataset, fleet=_FailingWarmFleet(), num_generations=2, batch_size=1
