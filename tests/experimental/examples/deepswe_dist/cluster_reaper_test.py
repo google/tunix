@@ -174,5 +174,93 @@ class ClusterReaperTest(absltest.TestCase):
     self.assertNotIn("oh-atwigg-oh-rr-1234", deleted_names)
 
 
+  def test_reap_orphaned_claims_and_running_pods(self):
+    custom_api = mock.MagicMock()
+    core_api = mock.MagicMock()
+
+    old_time = (
+        datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=30)
+    ).isoformat()
+
+    # Active run prefixes: "atwigg-256"
+    active_prefixes = {"atwigg-256"}
+
+    # Mock claims:
+    # 1. active claim for atwigg-256 via warmPoolRef
+    # 2. dead claim from terminated run jlu-989342825 via warmPoolRef
+    custom_api.list_namespaced_custom_object.return_value = {
+        "items": [
+            {
+                "metadata": {
+                    "name": "sandbox-claim-active-1",
+                    "creationTimestamp": old_time,
+                },
+                "spec": {
+                    "warmPoolRef": {"name": "pool-oh-atwigg-256-abc"},
+                },
+            },
+            {
+                "metadata": {
+                    "name": "sandbox-claim-dead-1",
+                    "creationTimestamp": old_time,
+                    "labels": {"app.kubernetes.io/created-by": "jlu-989342825-flat"},
+                },
+                "spec": {
+                    "warmPoolRef": {"name": "pool-oh-jlu-989342825-flat-xyz"},
+                },
+            },
+        ]
+    }
+
+    reaped_claims, active_claims = cluster_reaper.reap_orphaned_claims(
+        custom_api, core_api, active_prefixes=active_prefixes
+    )
+    self.assertEqual(reaped_claims, 1)
+    self.assertIn("sandbox-claim-active-1", active_claims)
+    self.assertNotIn("sandbox-claim-dead-1", active_claims)
+
+    deleted_claim_names = [
+        call.kwargs.get("name")
+        for call in custom_api.delete_namespaced_custom_object.call_args_list
+    ]
+    self.assertIn("sandbox-claim-dead-1", deleted_claim_names)
+    self.assertNotIn("sandbox-claim-active-1", deleted_claim_names)
+
+    # Mock running pods:
+    # 1. pod matching active claim
+    # 2. pod from terminated run
+    pod_active = mock.MagicMock()
+    pod_active.metadata.name = "pool-oh-atwigg-256-abc-pod1"
+    pod_active.metadata.deletion_timestamp = None
+    pod_active.status.phase = "Running"
+    pod_active.metadata.creation_timestamp = datetime.datetime.now(
+        datetime.timezone.utc
+    ) - datetime.timedelta(minutes=20)
+    pod_active.metadata.labels = {"app.kubernetes.io/created-by": "atwigg-256"}
+
+    pod_dead = mock.MagicMock()
+    pod_dead.metadata.name = "pool-oh-jlu-989342825-pod2"
+    pod_dead.metadata.deletion_timestamp = None
+    pod_dead.status.phase = "Running"
+    pod_dead.metadata.creation_timestamp = datetime.datetime.now(
+        datetime.timezone.utc
+    ) - datetime.timedelta(minutes=20)
+    pod_dead.metadata.labels = {"app.kubernetes.io/created-by": "jlu-989342825-flat"}
+
+    core_api.list_namespaced_pod.return_value.items = [pod_active, pod_dead]
+
+    reaped_pods = cluster_reaper.reap_orphaned_running_pods(
+        core_api, active_prefixes=active_prefixes, active_claims=active_claims
+    )
+    self.assertEqual(reaped_pods, 1)
+
+    deleted_pod_names = [
+        call.kwargs.get("name")
+        for call in core_api.delete_namespaced_pod.call_args_list
+    ]
+    self.assertIn("pool-oh-jlu-989342825-pod2", deleted_pod_names)
+    self.assertNotIn("pool-oh-atwigg-256-abc-pod1", deleted_pod_names)
+
+
 if __name__ == "__main__":
   absltest.main()
