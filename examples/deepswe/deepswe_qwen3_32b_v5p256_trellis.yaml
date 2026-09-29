@@ -1,0 +1,529 @@
+# DeepSWE validation run: Qwen3-32B, tunix agentic GRPO on R2E-Gym
+# (examples/deepswe/train_deepswe_nb.py) on one v5p-256 slice (4x4x8 = 128
+# chips, 32 hosts) with Pathways, namespace trellis on bodaborg-v5p-nap.
+# The recipe splits the chips itself: devices[:64] run vLLM rollout
+# (dp 8 x tp 8), devices[64:128] hold actor + reference (fsdp 32 x tp 2).
+# Use the original Qwen3-32B training whitelist: 1,851 tasks with partial
+# success across eight sampled rollouts. The P34 DeepSWE runbook pins this
+# file and its SHA-256 for Qwen3-32B training.
+# This is a separate JobSet and W&B run; applying it does not change the 8B run.
+#
+# Prerequisite (once): the W&B key as a Secret. Never inline it here: CitC and
+# experimental/ are readable by almost all Googlers (go/citc-privacy).
+#   kubectl -n trellis create secret generic haoyugao-wandb \
+#     --from-literal=WANDB_API_KEY=<key>
+# Apply:   kubectl apply -f examples/deepswe/deepswe_qwen3_32b_v5p256_trellis.yaml
+# W&B:     https://wandb.ai/linchai-google/tunix/runs/haoyugao-dswe-qwen3-32b-0929a
+# Logs:    kubectl -n trellis logs -f -c jax-tpu \
+#            -l jobset.sigs.k8s.io/jobset-name=hy-dswe-32b-0929a,jobset.sigs.k8s.io/replicatedjob-name=pathways-head
+# Cleanup: kubectl -n trellis delete jobset hy-dswe-32b-0929a
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: hy-dswe-32b-0929a
+  namespace: trellis
+  labels:
+    kueue.x-k8s.io/queue-name: multislice-queue
+spec:
+  coordinator:
+    replicatedJob: pathways-head
+  # Validation run: fail fast instead of recreating the slice.
+  failurePolicy:
+    maxRestarts: 0
+  network:
+    enableDNSHostnames: true
+    publishNotReadyAddresses: true
+  startupPolicy:
+    startupPolicyOrder: InOrder
+  successPolicy:
+    operator: All
+    targetReplicatedJobs:
+    - pathways-head
+  suspend: false
+  replicatedJobs:
+  - name: pathways-head
+    replicas: 1
+    template:
+      spec:
+        backoffLimit: 0
+        completionMode: Indexed
+        completions: 1
+        parallelism: 1
+        template:
+          metadata:
+            annotations:
+              cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+          spec:
+            restartPolicy: Never
+            # trellis:xpk-sa has power-users + pods/exec + the agent-sandbox
+            # ClusterRoles, which the sandbox fleet needs in namespace trellis.
+            serviceAccountName: xpk-sa
+            # Kyverno on this cluster only admits medium / low / very-low.
+            priorityClassName: medium
+            affinity:
+              podAntiAffinity:
+                # One Pathways head per node: hostNetwork ports 29000-29002.
+                requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchExpressions:
+                    - key: jobset.sigs.k8s.io/replicatedjob-name
+                      operator: In
+                      values:
+                      - pathways-head
+                  namespaceSelector: {}
+                  topologyKey: kubernetes.io/hostname
+            nodeSelector:
+              cloud.google.com/gke-nodepool: cpu-np
+            tolerations:
+            - key: google.com/tpu
+              operator: Exists
+            - effect: NoExecute
+              key: node.kubernetes.io/not-ready
+              operator: Exists
+              tolerationSeconds: 900
+            - effect: NoExecute
+              key: node.kubernetes.io/unreachable
+              operator: Exists
+              tolerationSeconds: 900
+            - effect: NoSchedule
+              key: cloud.google.com/gke-nodepool
+              operator: Equal
+              value: cpu-np
+            dnsPolicy: ClusterFirstWithHostNet
+            hostNetwork: true
+            initContainers:
+            - name: pathways-proxy
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:20260730-jax_0.10.2
+              imagePullPolicy: IfNotPresent
+              restartPolicy: Always
+              args:
+              - --server_port=29000
+              - --resource_manager_address=$(PATHWAYS_HEAD):29001
+              - --gcs_scratch_location=gs://cloud-pathways-staging/tmp/hy-dswe-32b-0929a
+              env:
+              - name: PATHWAYS_HEAD
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+              - name: ENABLE_PATHWAYS_PERSISTENCE
+                value: "1"
+              ports:
+              - containerPort: 29000
+                hostPort: 29000
+                protocol: TCP
+              resources:
+                limits:
+                  cpu: "64"
+                  memory: 400Gi
+                requests:
+                  cpu: "6"
+                  memory: 24Gi
+            - name: pathways-rm
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:20260730-jax_0.10.2
+              imagePullPolicy: IfNotPresent
+              restartPolicy: Always
+              args:
+              - --server_port=29001
+              - --gcs_scratch_location=gs://cloud-pathways-staging/tmp/hy-dswe-32b-0929a
+              - --node_type=resource_manager
+              - --instance_count=1
+              - --instance_type=tpuv5:4x4x8
+              env:
+              - name: HOST_ADDRESS
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+              - name: TPU_SKIP_MDS_QUERY
+                value: "true"
+              - name: ENABLE_PATHWAYS_PERSISTENCE
+                value: "1"
+              ports:
+              - containerPort: 29001
+                hostPort: 29001
+                protocol: TCP
+              - containerPort: 29002
+                hostPort: 29002
+                protocol: TCP
+              resources:
+                limits:
+                  cpu: "64"
+                  memory: 400Gi
+                requests:
+                  cpu: "4"
+                  memory: 16Gi
+            containers:
+            - name: jax-tpu
+              # niting_tunix_deepswe:latest pinned by digest, so a push mid-run
+              # cannot change the code under us.
+              image: gcr.io/cloud-tpu-multipod-dev/niting_tunix_deepswe@sha256:32ce7c09b1b12e27606d8aebbf4ed8909f2b0e325fe44db6ebe158c9af14a075
+              imagePullPolicy: IfNotPresent
+              workingDir: /app
+              command:
+              - bash
+              - -c
+              - |
+                set -uo pipefail
+                echo "[deepswe] start $(date -u +%FT%TZ) jobset=${JOBSET_NAME} restart_attempt=${JOBSET_RESTART_ATTEMPT:-0}"
+                if [[ "${JOBSET_RESTART_ATTEMPT:-0}" != "0" ]]; then
+                  # No checkpoints (--ckpt_dir none): a restart retrains from
+                  # step 0, so it logs to its own W&B run.
+                  export WANDB_RUN_ID="${WANDB_RUN_ID}-a${JOBSET_RESTART_ATTEMPT}"
+                fi
+                echo "[deepswe] W&B run: https://wandb.ai/${WANDB_ENTITY}/tunix/runs/${WANDB_RUN_ID}"
+                # Fetch the Qwen3-32B partial-success task whitelist from the
+                # pinned source commit and verify it before launching training.
+                python3 - <<'PY' || exit 1
+                import hashlib
+                import json
+                import urllib.request
+
+                url = (
+                    "https://raw.githubusercontent.com/google/tunix/4804a30967a066fb7ae3ac657747ee569768ea1d/"
+                    "canon-zero-tim/clean_data/final_filter_result/"
+                    "task_report_good_qwen3_128_retry_20260713_090141.jsonl"
+                )
+                expected = "2f95c2e6df3526f68bd3eed3ab9aece7077ef85c74251c77f7b3474b0b307ed7"
+                with urllib.request.urlopen(url, timeout=30) as response:
+                  data = response.read()
+                actual = hashlib.sha256(data).hexdigest()
+                if actual != expected:
+                  raise RuntimeError(f"Qwen3-32B whitelist checksum mismatch: {actual}")
+                rows = [json.loads(line) for line in data.splitlines() if line]
+                images = [row["docker_image"] for row in rows]
+                if len(images) != 1851 or len(set(images)) != 1851:
+                  raise RuntimeError("Qwen3-32B whitelist must contain 1,851 unique images")
+                if any(row.get("status") != "partial" or row.get("n") != 8
+                       or not 0 < row.get("k", 0) < row.get("valid_n", 0)
+                       for row in rows):
+                  raise RuntimeError("Qwen3-32B whitelist contains a non-partial task")
+                with open("/tmp/deepswe-qwen3-32b-clean.jsonl", "wb") as output:
+                  output.write(data)
+                print(f"[deepswe] Qwen3-32B whitelist verified: {len(images)} tasks")
+                PY
+                # kubernetes' WebSocket errors can carry body=None, which crashes
+                # api_client.py's error path (same patch as niting's manifests).
+                python3 - <<'PY'
+                import kubernetes.client.api_client as m
+                old = "e.body = e.body.decode('utf-8') if six.PY3 else e.body"
+                new = ("e.body = (e.body.decode('utf-8') if hasattr(e.body, 'decode') "
+                       "else str(e.body)) if six.PY3 else e.body")
+                src = open(m.__file__).read()
+                if old in src:
+                  open(m.__file__, "w").write(src.replace(old, new))
+                  print("[deepswe] patched kubernetes api_client.py for WebSocket None body")
+                PY
+                # tunix drops the W&B backend with only an INFO log when
+                # wandb.init fails, so check the key before burning TPU time.
+                python3 -c 'import os, wandb; assert wandb.login(key=os.environ["WANDB_API_KEY"], verify=True)' || exit 1
+                # train_deepswe_nb.py does not exit on its own after train()
+                # (vLLM / sandbox threads keep it alive and would hold the
+                # slice), so run it under a wrapper that finishes W&B, runs
+                # the atexit hooks (sandbox fleet teardown) and exits.
+                cat > /app/_run_deepswe.py <<'PY'
+                import atexit, os, runpy, sys, threading, traceback
+                script = "examples/deepswe/train_deepswe_nb.py"
+                sys.argv = [script] + sys.argv[1:]
+                sys.path.insert(0, os.path.abspath(os.path.dirname(script)))
+                code = 1
+                try:
+                  runpy.run_path(script, run_name="__main__")
+                  code = 0
+                except SystemExit as e:
+                  code = e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
+                except BaseException:
+                  traceback.print_exc()
+                print(f"[deepswe] train_deepswe_nb.py returned, exit code {code}", flush=True)
+                killer = threading.Timer(900, os._exit, args=(code,))
+                killer.daemon = True
+                killer.start()
+                try:
+                  import wandb
+                  if wandb.run is not None:
+                    wandb.finish(exit_code=code)
+                  atexit._run_exitfuncs()
+                except BaseException:
+                  traceback.print_exc()
+                sys.stdout.flush()
+                sys.stderr.flush()
+                os._exit(code)
+                PY
+                # Model name without the "Qwen/" prefix: tunix's
+                # call_model_config() only parses "Qwen3-8B"; the recipe adds
+                # the prefix back for the HF download.
+                exec python3 -X faulthandler -u /app/_run_deepswe.py \
+                  --model_version Qwen3-32B \
+                  --models_base_dir /app/models \
+                  --dataset_name R2E-Gym/R2E-Gym-Subset \
+                  --dataset_revision 2e8108ff942f24fcb5686badfaf7f9a8808566d5 \
+                  --gold_whitelist /tmp/deepswe-qwen3-32b-clean.jsonl \
+                  --use_agent_sandbox \
+                  --node_selector_val sandbox-cpu-pool \
+                  --docker_image_prefix europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/tunix \
+                  --ckpt_dir none \
+                  --metric_logger_dir "/tmp/deepswe-logs/${JOBSET_NAME}" \
+                  --rollout_mesh_fsdp 8 \
+                  --rollout_mesh_tp 8 \
+                  --train_mesh_fsdp 32 \
+                  --train_mesh_tp 2 \
+                  --max_steps 2 \
+                  --batch_size 8 \
+                  --mini_batch_size 8 \
+                  --num_generations 8 \
+                  --train_micro_batch_size 1 \
+                  --compute_logps_micro_batch_size 1 \
+                  --rollout_micro_batch_size 8 \
+                  --max_prompt_length 4096 \
+                  --max_response_length 8192 \
+                  --max_num_batched_tokens 16384 \
+                  --vllm_utilization 0.7 \
+                  --vllm_reshard_chunk_size 1 \
+                  --max_turns 30 \
+                  --per_turn_timeout_secs 60 \
+                  --step_timeout_secs 60 \
+                  --reward_timeout_secs 180 \
+                  --episode_timeout_secs 3600 \
+                  --max_concurrency 64 \
+                  --logging_level INFO
+              env:
+              - name: PATHWAYS_HEAD
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+              - name: JOBSET_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.annotations['jobset.sigs.k8s.io/jobset-name']
+              - name: JOBSET_RESTART_ATTEMPT
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/restart-attempt']
+              - name: JAX_PLATFORMS
+                value: proxy,cpu
+              - name: JAX_BACKEND_TARGET
+                value: grpc://$(PATHWAYS_HEAD):29000
+              - name: VLLM_ENABLE_V1_MULTIPROCESSING
+                value: "0"
+              - name: NEW_MODEL_DESIGN
+                value: "1"
+              - name: VLLM_TPU_USING_PATHWAYS
+                value: "1"
+              - name: TOKENIZERS_PARALLELISM
+                value: "false"
+              - name: XCLOUD_ENVIRONMENT
+                value: GCP
+              - name: TPU_MIN_LOG_LEVEL
+                value: "0"
+              - name: TF_CPP_MIN_LOG_LEVEL
+                value: "0"
+              - name: TPU_STDERR_LOG_LEVEL
+                value: "0"
+              - name: NUM_SLICES
+                value: "1"
+              - name: PYTHONPATH
+                value: /app
+              - name: SKIP_JAX_PRECOMPILE
+                value: "true"
+              - name: XLA_PYTHON_CLIENT_PREALLOCATE
+                value: "false"
+              - name: TPU_FLAGS
+                value: tpu_program_cache_eviction_policy=lru_program_eviction
+              - name: ENABLE_PATHWAYS_PERSISTENCE
+                value: "1"
+              # Agent-sandbox fleet: SandboxClaims in trellis, pods on
+              # sandbox-cpu-pool (Kueue flavor sandbox-cpu-flavor).
+              - name: NAMESPACE
+                value: trellis
+              - name: SANDBOX_READY_TIMEOUT
+                value: "900"
+              - name: SANDBOX_ACQUIRE_RETRIES
+                value: "3"
+              # R2E-Gym task images from the europe-west4 mirror instead of
+              # Docker Hub; same '<prefix>/<last path component>' mapping as
+              # --docker_image_prefix, so applying both is idempotent.
+              - name: IMAGE_REWRITE_PREFIX
+                value: europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/tunix
+              - name: HF_HOME
+                value: /tmp/hf-haoyugao
+              - name: HF_HUB_DISABLE_PROGRESS_BARS
+                value: "1"
+              - name: WANDB_API_KEY
+                valueFrom:
+                  secretKeyRef:
+                    name: haoyugao-wandb
+                    key: WANDB_API_KEY
+              # Set the W&B project explicitly so the run URL is stable across
+              # recipe versions in the pinned image.
+              - name: WANDB_PROJECT
+                value: tunix
+              - name: WANDB_ENTITY
+                value: linchai-google
+              - name: WANDB_RUN_ID
+                value: haoyugao-dswe-qwen3-32b-0929a
+              - name: WANDB_RESUME
+                value: allow
+              - name: WANDB_RUN_GROUP
+                value: deepswe-v5p256
+              - name: WANDB_TAGS
+                value: qwen3-32b,validation,v5p-256,partial-clean
+              resources:
+                limits:
+                  cpu: "32"
+                  memory: 240Gi
+                requests:
+                  cpu: "16"
+                  memory: 128Gi
+              securityContext:
+                privileged: true
+              volumeMounts:
+              - mountPath: /tmp
+                name: shared-tmp
+              - mountPath: /app/models
+                name: model-volume
+            volumes:
+            - name: shared-tmp
+              hostPath:
+                path: /tmp
+                type: DirectoryOrCreate
+            # Qwen3-32B BF16 weights need roughly 64 GiB. This RAM disk counts
+            # against jax-tpu's memory limit.
+            - name: model-volume
+              emptyDir:
+                medium: Memory
+                sizeLimit: 96Gi
+  - name: worker
+    replicas: 1
+    template:
+      spec:
+        backoffLimit: 256
+        completionMode: Indexed
+        completions: 32
+        parallelism: 32
+        template:
+          metadata:
+            annotations:
+              cloud.google.com/gke-tpu-slice-topology: 4x4x8
+              cloud.google.com/skip-tpu-webhook-check: "true"
+              cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+          spec:
+            serviceAccountName: xpk-sa
+            priorityClassName: medium
+            restartPolicy: OnFailure
+            terminationGracePeriodSeconds: 30
+            dnsPolicy: ClusterFirstWithHostNet
+            hostNetwork: true
+            nodeSelector:
+              cloud.google.com/gke-tpu-accelerator: tpu-v5p-slice
+              cloud.google.com/gke-tpu-topology: 4x4x8
+              cloud.google.com/reservation-name: cloudtpu-20260902214500-1810493672
+            affinity:
+              nodeAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  nodeSelectorTerms:
+                  - matchExpressions:
+                    - key: cloud.google.com/gke-tpu-topology
+                      operator: In
+                      values:
+                      - 4x4x8
+              podAffinity:
+                # All 32 workers on one node pool, i.e. one 4x4x8 slice.
+                requiredDuringSchedulingIgnoredDuringExecution:
+                - topologyKey: cloud.google.com/gke-nodepool
+                  labelSelector:
+                    matchExpressions:
+                    - key: jobset.sigs.k8s.io/jobset-name
+                      operator: In
+                      values:
+                      - hy-dswe-32b-0929a
+                    - key: jobset.sigs.k8s.io/replicatedjob-name
+                      operator: In
+                      values:
+                      - worker
+            tolerations:
+            - key: google.com/tpu
+              operator: Exists
+            - effect: NoSchedule
+              key: google.com/tpu
+              operator: Exists
+            - effect: NoExecute
+              key: node.kubernetes.io/not-ready
+              operator: Exists
+              tolerationSeconds: 900
+            - effect: NoExecute
+              key: node.kubernetes.io/unreachable
+              operator: Exists
+              tolerationSeconds: 900
+            - effect: NoSchedule
+              key: cloud.google.com/reservation-name
+              operator: Equal
+              value: cloudtpu-20260902214500-1810493672
+            containers:
+            - name: pathways-worker
+              image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:20260730-jax_0.10.2
+              imagePullPolicy: IfNotPresent
+              args:
+              - --server_port=29005
+              - --resource_manager_address=$(PATHWAYS_HEAD):29001
+              - --gcs_scratch_location=gs://cloud-pathways-staging/tmp/hy-dswe-32b-0929a
+              - --node_type=worker
+              - --instance_type=tpuv5:4x4x8
+              env:
+              - name: ENABLE_PATHWAYS_PERSISTENCE
+                value: "1"
+              - name: TPU_MIN_LOG_LEVEL
+                value: "0"
+              - name: TF_CPP_MIN_LOG_LEVEL
+                value: "0"
+              - name: XCLOUD_ENVIRONMENT
+                value: GCP
+              - name: MEGASCALE_GRPC_ENABLE_XOR_TRACER
+                value: "false"
+              - name: MEGASCALE_NUM_SLICES
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/replicatedjob-replicas']
+              - name: JOBSET_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.annotations['jobset.sigs.k8s.io/jobset-name']
+              - name: REPLICATED_JOB_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.annotations['jobset.sigs.k8s.io/replicatedjob-name']
+              - name: MEGASCALE_SLICE_ID
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/job-index']
+              - name: PATHWAYS_HEAD
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+              - name: MEGASCALE_COORDINATOR_ADDRESS
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+              - name: XLA_PYTHON_CLIENT_PREALLOCATE
+                value: "false"
+              - name: TPU_FLAGS
+                value: tpu_program_cache_eviction_policy=lru_program_eviction
+              ports:
+              - containerPort: 29005
+                protocol: TCP
+              - containerPort: 29006
+                protocol: TCP
+              - containerPort: 8471
+                protocol: TCP
+              - containerPort: 8080
+                protocol: TCP
+              resources:
+                limits:
+                  google.com/tpu: "4"
+                requests:
+                  google.com/tpu: "4"
+              volumeMounts:
+              - mountPath: /tmp
+                name: shared-tmp
+            volumes:
+            - name: shared-tmp
+              hostPath:
+                path: /tmp
+                type: DirectoryOrCreate
