@@ -913,6 +913,7 @@ class MaxTextUtilsTest(absltest.TestCase):
     mock_cfg = mock.MagicMock()
     mock_cfg.weight_dtype = "bfloat16"
     mock_cfg.float32_gate_logits = True
+    mock_cfg.checkpoint_dir = "/tmp/ckpts"
     mock_mesh = mock.MagicMock()
 
     with mock.patch.object(
@@ -927,6 +928,7 @@ class MaxTextUtilsTest(absltest.TestCase):
     self.assertIsNot(captured["optimizer_cls_during_init"], FakeOptimizer)
     self.assertEqual(FakeNNX.Optimizer, FakeOptimizer)
     self.assertIsNone(engine._weight_converter._direct.target_dtype)
+    self.assertEqual(engine.checkpoint_dir, "/tmp/ckpts")
 
 
 if __name__ == "__main__":

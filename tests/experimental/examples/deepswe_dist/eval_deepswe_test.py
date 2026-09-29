@@ -168,6 +168,21 @@ class EvalTest(unittest.TestCase):
     with self.assertRaisesRegex(ValueError, "duplicate"):
       eval_lib.summarize(rows + [rows[0]], ["a", "b"], 4)
 
+  def test_pass_at_4_is_reported_with_more_attempts(self):
+    rows = [
+        dict(
+            instance_id="a",
+            attempt=i,
+            reward=float(i == 5),
+            resolved=i == 5,
+            status="SUCCEEDED",
+        )
+        for i in range(8)
+    ]
+    summary = eval_lib.summarize(rows, ["a"], 8)
+    # Unbiased pass@k = 1 - C(n - c, k) / C(n, k) with n=8, c=1.
+    self.assertEqual(summary["pass_at_k"], {"1": 1 / 8, "4": 1 / 2, "8": 1.0})
+
   def test_reward_comes_from_trajectory_not_completion_status(self):
     response = types.SimpleNamespace(
         error=None,
@@ -181,6 +196,21 @@ class EvalTest(unittest.TestCase):
     self.assertTrue(eval_lib.compact_result(response)["resolved"])
     response.error = "infrastructure failure"
     self.assertFalse(eval_lib.compact_result(response)["resolved"])
+
+  def test_rcp_logging_fails_fast_without_mlperf_logging(self):
+    from tunix.utils import mllog_utils  # pylint: disable=g-import-not-at-top
+
+    log_file = "gs://bucket/mllog/seed_42.out"
+    a = self.args("--rcp_logging=true", "--metric_logger_dir", log_file)
+    with mock.patch.object(mllog_utils, "configure_logger") as configure:
+      with mock.patch.object(mllog_utils, "mllogger", None):
+        with self.assertRaisesRegex(RuntimeError, "mlperf_logging"):
+          eval_lib.setup_rcp_logging(a)
+      configure.assert_not_called()
+      with mock.patch.object(mllog_utils, "mllogger", object()):
+        eval_lib.setup_rcp_logging(a)
+        eval_lib.setup_rcp_logging(self.args("--rcp_logging=false"))
+      configure.assert_called_once_with(metric_logger_dir=log_file, seed=42)
 
   def test_individual_results_are_persisted(self):
     with tempfile.TemporaryDirectory() as directory:

@@ -34,6 +34,14 @@ export ROLLOUT_TPU_SLICE="tpuv5:2x2x1"
 export ROLLOUT_MESH_EXPERT="${ROLLOUT_MESH_EXPERT:-4}"
 export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-16}"
 
+# MLPerf RCP logging with deferred offline eval: from VAL_START_AT (default
+# CEIL(2.5 + 3840 / global_batch_size) = 18) save a checkpoint every step and
+# record it in ${METRIC_LOGGER_DIR}/eval_checkpoints.jsonl for
+# mlperf_35b_eval.sh. Keep all of them (max_steps - VAL_START_AT + 1 <= 35).
+export RCP_LOGGING="${RCP_LOGGING:-true}"
+export CHECKPOINT_SAVE_INTERVAL_STEPS="${CHECKPOINT_SAVE_INTERVAL_STEPS:-1}"
+export CHECKPOINT_MAX_TO_KEEP="${CHECKPOINT_MAX_TO_KEEP:-35}"
+
 # vLLM Rollout Configuration (from paste.googleplex.com/5903655694368768)
 export VLLM_ADDITIONAL_CONFIG='{"sharding":{"sharding_strategy":{"expert_parallelism":4,"tensor_parallelism":1,"enable_dp_attention":true}},"custom_mamba_cache_multiplier":16,"maxtext_config":{"scan_layers":false,"attention":"vllm_rpa","allow_split_physical_axes":true,"use_multimodal":false,"prefuse_moe_weights":true}}'
 

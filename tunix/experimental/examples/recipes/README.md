@@ -12,6 +12,7 @@ This directory contains executable recipe scripts for running distributed DeepSW
 | [`mlperf_397b_256_v7x.sh`](mlperf_397b_256_v7x.sh) | Qwen3.5-397B-A17B | `1x tpu7x:4x4x8` (128 chips)<br>`FSDP=32, TP=1, EP=2, CP=4` | `32x tpu7x:2x2x2` (256 chips)<br>`DP=1, TP=1, EP=16` |
 | [`mlperf_397b_512_v7x.sh`](mlperf_397b_512_v7x.sh) | Qwen3.5-397B-A17B | `1x tpu7x:4x4x8` (128 chips)<br>`FSDP=32, TP=1, EP=2, CP=4` | `32x tpu7x:2x2x4` (512 chips / 1024)<br>`DP=2, TP=1, EP=16` |
 | [`mlperf_397b_1024_v7x.sh`](mlperf_397b_1024_v7x.sh) | Qwen3.5-397B-A17B | `1x tpu7x:4x4x8` (128 chips)<br>`FSDP=32, TP=1, EP=2, CP=4` | `64x tpu7x:2x2x4` (1024 chips)<br>`DP=2, TP=1, EP=16` |
+| [`mlperf_35b_eval.sh`](mlperf_35b_eval.sh) | Qwen3.5-35B-A3B (offline eval, pass@4) | None (no trainer) | `16x tpuv5:2x2x1` (64 chips)<br>`DP=2, FSDP=2, TP=2` |
 
 ---
 
