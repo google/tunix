@@ -19,12 +19,12 @@ from typing import Any, Collection, List, Mapping, Sequence
 from collections import abc
 import functools
 import gc
-from absl import logging
 import math
 import numbers
 import re
-from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
 
+from absl import logging
 from flax import nnx
 from flax import traverse_util
 import jax
@@ -203,6 +203,7 @@ def padded_fill_tokens_and_logits(
     eos_value: int | jax.Array,
     max_prompt_length: int,
     max_total_length: int,
+    prompt_lengths: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array, jax.Array | None]:
   """Truncates the token_buffers and logits_buffers to the valid output.
 
@@ -219,6 +220,9 @@ def padded_fill_tokens_and_logits(
     eos_value: The value to use for EOS.
     max_prompt_length: The maximum length of the input prompt.
     max_total_length: The maximum total length of the output.
+    prompt_lengths: Optional true prompt lengths per row. When provided, echo
+      starts at `max_prompt_length - prompt_length` instead of scanning for
+      `pad_value`.
 
   Returns:
     The shape of the valid output tokens, the output tokens and the output
@@ -226,7 +230,7 @@ def padded_fill_tokens_and_logits(
   """
   return jax.vmap(
       single_padded_fill_tokens_and_logits,
-      in_axes=(0, 0, None, None, None, None, None, None),
+      in_axes=(0, 0, None, None, None, None, None, None, 0),
       out_axes=(0, 0, 0),
   )(
       token_buffers,
@@ -237,6 +241,7 @@ def padded_fill_tokens_and_logits(
       eos_value,
       max_prompt_length,
       max_total_length,
+      prompt_lengths,
   )
 
 
@@ -249,13 +254,15 @@ def single_padded_fill_tokens_and_logits(
     eos_value: int | jax.Array,
     max_prompt_length: int,
     max_total_length: int,
+    prompt_length: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array, jax.Array | None]:
   """Generates tokens and logits from the input token_buffer and logits_buffer."""
-  start_idx = (
-      find_first_non_pad_idx(token_buffer, pad_value)
-      if echo
-      else max_prompt_length
-  )
+  if not echo:
+    start_idx = max_prompt_length
+  elif prompt_length is not None:
+    start_idx = max_prompt_length - prompt_length
+  else:
+    start_idx = find_first_non_pad_idx(token_buffer, pad_value)
   end_idx = (
       find_first_eos_idx(token_buffer[max_prompt_length:], eos_value)
       + max_prompt_length

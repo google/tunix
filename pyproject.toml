@@ -76,6 +76,7 @@ test = [
   "opentelemetry-sdk>=1.25.0",
   "wandb",  # Offline end-to-end test for the OpenTelemetry W&B exporter
   "mlperf-logging",
+  "scikit-learn>=1.8.0",
 ]
 cli = [
   "tensorflow",

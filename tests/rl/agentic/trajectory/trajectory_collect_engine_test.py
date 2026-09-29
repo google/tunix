@@ -580,21 +580,23 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     self.mock_env.max_steps = 10
     with mock.patch.object(time, 'perf_counter') as mock_perf:
       # Reset: 3 calls
-      # Step 1: 3 calls
+      # Step 1 (_one_model_step: 2 calls, remaining_time: 1 call, env.step: 2 calls, step_timed_out: 1 call)
       # Final reward: 2 calls
       # Close: 2 calls
       mock_perf.side_effect = [
           100.0,
           100.01,
           100.02,  # _reset
-          100.03,
+          100.025,
+          100.03,  # _one_model_step
+          100.035,  # remaining_time check
           100.04,
-          100.2,  # _one_step: 100.2 - 100.02 = 0.18 > 0.1
+          100.05,  # env.step _run_with_timing
+          100.2,  # _one_step step_timed_out: 100.2 - 100.02 = 0.18 > 0.1
           100.21,
-          100.22,
-          100.23,  # _append_final_reward
-          100.24,
-          100.25,  # _close
+          100.22,  # _append_final_reward
+          100.23,
+          100.24,  # _close
       ]
 
       engine = trajectory_collect_engine.TrajectoryCollectEngine(
@@ -641,10 +643,9 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     # Verify final reward was NOT called
     self.mock_final_reward_fn.assert_not_called()
 
-    # Verify masks are zeroed out
-    # Assistant tokens (201, 202) and Env tokens (301) should have masks
-    # [0, 0, 0]
-    expected_masks = np.array([0, 0, 0])
+    # Verify masks are zeroed out (terminal step env tokens are stripped by
+    # _finalize_terminal_step_routing, leaving the 2 assistant tokens)
+    expected_masks = np.array([0, 0])
     np.testing.assert_array_equal(
         token_data['conversation_masks'], expected_masks
     )
@@ -675,8 +676,8 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     # Verify final reward WAS called
     self.mock_final_reward_fn.assert_called_once()
 
-    # Verify masks are NOT zeroed out
-    expected_masks = np.array([1, 1, 1])
+    # Verify masks are NOT zeroed out (terminal step env tokens are stripped)
+    expected_masks = np.array([1, 1])
     np.testing.assert_array_equal(
         token_data['conversation_masks'], expected_masks
     )
@@ -1654,6 +1655,7 @@ class ExactTokenContinuityCollectTest(absltest.TestCase):
       def from_string(cls, text):
         obj = cls()
         obj.text = text
+        obj.function_name = 'execute_bash' if 'execute_bash' in text else ''
         return obj
 
       def to_xml_string(self):

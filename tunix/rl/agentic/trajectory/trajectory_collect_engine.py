@@ -861,13 +861,24 @@ class TrajectoryCollectEngine:
             len(rollout_output.left_padded_prompt_tokens[0])
             if rollout_output.left_padded_prompt_tokens is not None
             and len(rollout_output.left_padded_prompt_tokens) > 0
-            else 0
+            and hasattr(rollout_output.left_padded_prompt_tokens[0], "__len__")
+            else (
+                len(rollout_output.left_padded_prompt_tokens)
+                if rollout_output.left_padded_prompt_tokens is not None
+                else 0
+            )
         )
     )
     comp_len = (
         len(rollout_output.tokens[0])
-        if rollout_output.tokens and len(rollout_output.tokens) > 0
-        else 0
+        if rollout_output.tokens is not None
+        and len(rollout_output.tokens) > 0
+        and hasattr(rollout_output.tokens[0], "__len__")
+        else (
+            len(rollout_output.tokens)
+            if rollout_output.tokens is not None
+            else 0
+        )
     )
     self.model_time["prompt_tokens"].append(prompt_len)
     self.model_time["completion_tokens"].append(comp_len)

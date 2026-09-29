@@ -36,6 +36,11 @@ class ConfigTest(parameterized.TestCase):
       "base_config.yaml",
   ]
 
+  def setUp(self):
+    super().setUp()
+    if "HF_TOKEN" not in os.environ or not os.environ["HF_TOKEN"]:
+      self.enterContext(mock.patch.dict(os.environ, {"HF_TOKEN": "TestToken"}))
+
   def initialize_config(self, configs: list[str]):
     """Helper to build argv and initialize config."""
     argv = self.TEST_ARGV + configs

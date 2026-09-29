@@ -60,6 +60,9 @@ class _SamplingState:
   # Fixed-size buffer for accumulating the output tokens.
   token_buffer: jnp.ndarray  # [B, L]
 
+  # Boolean mask indicating valid tokens (True) vs left-padding (False).
+  input_mask: jnp.ndarray  # [B, L]
+
   # Position indices, based on ignoring pad tokens.
   positions: jnp.ndarray  # [B, L]
 
@@ -408,6 +411,7 @@ class Sampler(base_sampler.BaseSampler):
       seed: jax.Array,
       beam_size: Optional[int],
       include_logprobs: bool = False,
+      prompt_lengths: jax.Array | None = None,
   ) -> _SamplingState:
     """Initializes the sampling state given input prompts."""
     batch_size = all_input_ids.shape[0]
@@ -423,9 +427,13 @@ class Sampler(base_sampler.BaseSampler):
     )
     input_mask = jnp.ones_like(token_buffer, dtype=jnp.bool_)
     token_buffer = token_buffer.at[:, :num_input_tokens].set(all_input_ids)
-    input_mask = input_mask.at[:, :num_input_tokens].set(
-        all_input_ids != self.tokenizer.pad_id()
-    )
+    if prompt_lengths is not None:
+      prompt_mask = jnp.arange(num_input_tokens)[None, :] >= (
+          num_input_tokens - prompt_lengths[:, None]
+      )
+    else:
+      prompt_mask = all_input_ids != self.tokenizer.pad_id()
+    input_mask = input_mask.at[:, :num_input_tokens].set(prompt_mask)
     positions = utils.build_positions_from_mask(input_mask)
 
     done = jnp.zeros((batch_size,), dtype=jnp.bool_)
@@ -485,6 +493,7 @@ class Sampler(base_sampler.BaseSampler):
         decoding_step=num_input_tokens - 1,
         num_input_tokens=int(num_input_tokens),
         token_buffer=token_buffer,
+        input_mask=input_mask,
         positions=positions,
         logits_buffer=logits_buffer,
         logprobs_buffer=logprobs_buffer,
@@ -574,6 +583,7 @@ class Sampler(base_sampler.BaseSampler):
         decoding_step=sampler_state.decoding_step + 1,
         num_input_tokens=sampler_state.num_input_tokens,
         token_buffer=token_buffer,
+        input_mask=sampler_state.input_mask,
         positions=sampler_state.positions,
         logits_buffer=logits_buffer,
         logprobs_buffer=logprobs_buffer,
@@ -614,7 +624,13 @@ class Sampler(base_sampler.BaseSampler):
         slice_sizes=(batch_size, sampler_state.num_input_tokens),
     )
 
-    input_mask = tokens != self.tokenizer.pad_id()
+    input_mask = jax.lax.dynamic_slice(
+        sampler_state.input_mask,
+        start_indices=jnp.zeros(
+            (sampler_state.token_buffer.ndim,), dtype=jnp.int32
+        ),
+        slice_sizes=(batch_size, sampler_state.num_input_tokens),
+    )
 
     if hasattr(self.transformer, 'get_attention_mask'):
       attention_mask = self.transformer.get_attention_mask(
@@ -650,6 +666,7 @@ class Sampler(base_sampler.BaseSampler):
     token_buffer = sampler_state.token_buffer
     done = sampler_state.done
     positions = sampler_state.positions
+    state_input_mask = sampler_state.input_mask
     beam_search_sampling_state = None
     if sampler_state.logits_buffer is not None:
       start_idx = (
@@ -667,6 +684,7 @@ class Sampler(base_sampler.BaseSampler):
       # init beam state in prefill instead of init as one minor optimization
       # to avoid running unnecessary prefill for
       # duplicated input prompt per beam.
+      beam_size = int(sampler_state.sampling_parameters['beam_size'])
       sampling_state, updated_args = beam_search_lib.init_batched_beam_state(
           logits=logits,
           input_token_buffer=sampler_state.token_buffer,
@@ -674,7 +692,7 @@ class Sampler(base_sampler.BaseSampler):
           done=sampler_state.done,
           positions=sampler_state.positions,
           logits_buffer=sampler_state.logits_buffer,
-          beam_size=int(sampler_state.sampling_parameters['beam_size']),
+          beam_size=beam_size,
       )
       beam_search_sampling_state = sampling_state
       logits = updated_args['logits']
@@ -683,11 +701,13 @@ class Sampler(base_sampler.BaseSampler):
       done = updated_args['done']
       positions = updated_args['positions']
       logits_buffer = updated_args['logits_buffer']
+      state_input_mask = jnp.repeat(sampler_state.input_mask, beam_size, axis=0)
 
     updated_sampling_state = _SamplingState(
         decoding_step=sampler_state.decoding_step,
         num_input_tokens=sampler_state.num_input_tokens,
         token_buffer=token_buffer,
+        input_mask=state_input_mask,
         positions=positions,
         logits_buffer=logits_buffer,
         logprobs_buffer=sampler_state.logprobs_buffer,
@@ -739,7 +759,7 @@ class Sampler(base_sampler.BaseSampler):
         sampler_state.positions[:, decoding_step], -1
     )
 
-    input_mask = sampler_state.token_buffer == self.tokenizer.pad_id()
+    input_mask = jnp.logical_not(sampler_state.input_mask)
     attention_mask = utils.compute_attention_masks(
         decoding_step, self.cache_config.cache_size, input_mask
     )
@@ -774,8 +794,8 @@ class Sampler(base_sampler.BaseSampler):
 
   def __call__(
       self,
-      input_strings: str | Sequence[str],
-      max_generation_steps: int,
+      input_strings: str | Sequence[str] | None = None,
+      max_generation_steps: int = 0,
       max_prompt_length: int | None = None,
       echo: bool = False,
       return_logits: bool = False,
@@ -800,6 +820,8 @@ class Sampler(base_sampler.BaseSampler):
       ) = None,
       max_audio_length: int | None = None,
       max_audio_clips: int | None = None,
+      *,
+      prompt_token_ids: Sequence[Sequence[int] | np.ndarray] | None = None,
   ) -> base_sampler.SamplerOutput:
     """Samples a completion of the input string.
 
@@ -843,18 +865,25 @@ class Sampler(base_sampler.BaseSampler):
       max_audio_clips: Maximum number of audio clips in a sample. If specified,
         audio input to the model will be padded upto this count. Specify to
         avoid recompilation on different number of clips across calls.
+      prompt_token_ids: Optional explicit prompt token ID rows. Mutually
+        exclusive with `input_strings`.
 
     Returns:
       sampler_output: A SamplerOutput object containing the generated samples.
     """
     self.eos_ids = jnp.array(eos_tokens or [self.tokenizer.eos_id()])
-    input_strings = (
-        [input_strings] if isinstance(input_strings, str) else input_strings
+    exact_input = prompt_token_ids is not None
+    tokens = utils.resolve_prompt_tokens(
+        input_strings,
+        prompt_token_ids,
+        self.tokenize,
+        max_generation_steps=max_generation_steps,
+        max_total_length=self.cache_config.cache_size,
+        max_length_name='cache_size',
+        single_output_per_row=beam_size is None,
     )
 
     forbidden_token_ids = tuple(forbidden_tokens) if forbidden_tokens else None
-
-    tokens = [self.tokenize(x) for x in input_strings]
 
     is_gemma4 = self.transformer.__class__.__name__ == 'Gemma4'
 
@@ -888,19 +917,16 @@ class Sampler(base_sampler.BaseSampler):
       else:
         raise NotImplementedError('Audio support only implemented for Gemma4.')
 
-    max_tokens_length = max(len(x) for x in tokens)
-    if max_prompt_length is None or max_prompt_length < max_tokens_length:
-      max_prompt_length = utils.next_power_of_2(max_tokens_length)
-
-    all_input_ids = np.array([
-        utils.pad_to_length(
-            x,  # pyrefly: ignore[bad-argument-type]
-            target_length=max_prompt_length,
-            pad_value=self.tokenizer.pad_id(),
-            left=True,
+    all_input_ids, prompt_lengths, max_prompt_length = (
+        utils.left_pad_prompt_tokens(
+            tokens,
+            max_prompt_length,
+            self.tokenizer.pad_id(),
+            max_allowed_length=(
+                self.cache_config.cache_size - max_generation_steps
+            ),
         )
-        for x in tokens
-    ])
+    )
 
     total_sampling_steps = max_prompt_length + max_generation_steps
     if total_sampling_steps > self.cache_config.cache_size:
@@ -924,6 +950,11 @@ class Sampler(base_sampler.BaseSampler):
         seed=seed,  # pyrefly: ignore[bad-argument-type]
         beam_size=beam_size,
         include_logprobs=return_logprobs,
+        prompt_lengths=(
+            jnp.asarray(prompt_lengths, dtype=jnp.int32)
+            if exact_input
+            else None
+        ),
     )
     sampling_state = self._compiled_prefill_fn(
         self._flattened_transformer_state,
@@ -955,6 +986,26 @@ class Sampler(base_sampler.BaseSampler):
       # if need more internal states, they should be updated by
       # finalize_beam_search_state
       del sampling_state
+
+    def _output_slice_bounds(
+        token_buffer: np.ndarray, prompt_length: int
+    ) -> tuple[int, int]:
+      if not echo:
+        start_idx = max_prompt_length
+      elif exact_input:
+        start_idx = max_prompt_length - int(prompt_length)
+      else:
+        start_idx = utils.np_find_first_non_pad_idx(
+            token_buffer, self.tokenizer.pad_id()
+        )
+      end_idx = (
+          utils.np_find_first_eos_idx(
+              token_buffer[max_prompt_length:], self.eos_ids
+          )
+          + max_prompt_length
+      )
+      return start_idx, end_idx
+
     if pad_output:
       max_len = total_sampling_steps if echo else max_generation_steps
       lengths, out_tokens, out_logits = utils.padded_fill_tokens_and_logits(
@@ -966,6 +1017,7 @@ class Sampler(base_sampler.BaseSampler):
           self.eos_ids,
           max_prompt_length,
           max_len,
+          jnp.asarray(prompt_lengths, dtype=jnp.int32) if exact_input else None,
       )
       out_tokens, lengths = jax.device_get(out_tokens), jax.device_get(lengths)
       decoded_outputs = [
@@ -976,19 +1028,9 @@ class Sampler(base_sampler.BaseSampler):
       if return_logprobs:
         token_buffers = jax.device_get(token_buffers)
         final_logprobs_buffer = jax.device_get(final_logprobs_buffer)
-        for i in range(len(token_buffers)):
-          start_idx = (
-              utils.np_find_first_non_pad_idx(
-                  token_buffers[i], self.tokenizer.pad_id()
-              )
-              if echo
-              else max_prompt_length
-          )
-          end_idx = (
-              utils.np_find_first_eos_idx(
-                  token_buffers[i][max_prompt_length:], self.eos_ids
-              )
-              + max_prompt_length
+        for i, token_buffer in enumerate(token_buffers):
+          start_idx, end_idx = _output_slice_bounds(
+              token_buffer, int(prompt_lengths[i])
           )
           length = end_idx - start_idx
           # Slice logprobs and pad to max_len
@@ -1010,20 +1052,9 @@ class Sampler(base_sampler.BaseSampler):
         final_logprobs_buffer = jax.device_get(final_logprobs_buffer)
       if return_logits:
         logits_buffers = jax.device_get(logits_buffers)
-      for i in range(len(token_buffers)):
-        token_buffer = token_buffers[i]
-        start_idx = (
-            utils.np_find_first_non_pad_idx(
-                token_buffer, self.tokenizer.pad_id()
-            )
-            if echo
-            else max_prompt_length
-        )
-        end_idx = (
-            utils.np_find_first_eos_idx(
-                token_buffer[max_prompt_length:], self.eos_ids
-            )
-            + max_prompt_length
+      for i, token_buffer in enumerate(token_buffers):
+        start_idx, end_idx = _output_slice_bounds(
+            token_buffer, int(prompt_lengths[i])
         )
         out_tokens.append(token_buffer[start_idx:end_idx])
         if return_logits:
@@ -1044,5 +1075,6 @@ class Sampler(base_sampler.BaseSampler):
         tokens=out_tokens,
         padded_prompt_tokens=all_input_ids,
         logprobs=out_logprobs if return_logprobs else None,
+        prompt_lengths=prompt_lengths,
     )
     return result

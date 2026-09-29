@@ -998,5 +998,166 @@ class SamplerTest(parameterized.TestCase):
       dummy.update_params({})
 
 
+class SamplerTokenInputTest(absltest.TestCase):
+
+  def _make_sampler(self, cache_size: int = 16):
+    vocab = tc.MockVocab()
+    transformer = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(42),
+    )
+    return sampler_lib.Sampler(
+        transformer=transformer,
+        tokenizer=vocab,
+        cache_config=sampler_lib.CacheConfig(
+            cache_size=cache_size,
+            num_layers=4,
+            num_kv_heads=4,
+            head_dim=16,
+        ),
+    )
+
+  def test_prompt_token_ids_bypasses_tokenize_and_returns_exact_padded_ids(
+      self,
+  ):
+    sampler = self._make_sampler(cache_size=16)
+    with mock.patch.object(
+        sampler,
+        'tokenize',
+        side_effect=AssertionError('tokenize must not be called'),
+    ):
+      out = sampler(
+          prompt_token_ids=[[0, 3], [4, 0, 5]],
+          max_generation_steps=2,
+          max_prompt_length=4,
+          echo=True,
+          pad_output=True,
+      )
+
+    np.testing.assert_array_equal(
+        out.padded_prompt_tokens,
+        np.array([[0, 0, 0, 3], [0, 4, 0, 5]], dtype=np.int32),
+    )
+    np.testing.assert_array_equal(
+        out.prompt_lengths, np.array([2, 3], dtype=np.int32)
+    )
+    # With echo=True, the leading 0 in [0, 3] and middle 0 in [4, 0, 5] must be
+    # preserved in the output tokens rather than stripped as pad_id=0.
+    np.testing.assert_array_equal(
+        out.tokens[0][:2], np.array([0, 3], dtype=np.int32)
+    )
+    np.testing.assert_array_equal(
+        out.tokens[1][:3], np.array([4, 0, 5], dtype=np.int32)
+    )
+
+    # Also verify init_sample_state builds input_mask and positions from
+    # prompt_lengths so valid token 0 is not masked out as padding.
+    state = sampler.init_sample_state(
+        jnp.array([[0, 0, 0, 3], [0, 4, 0, 5]], dtype=jnp.int32),
+        total_sampling_steps=6,
+        include_logits=False,
+        forbidden_token_ids=None,
+        temperature=0.0,
+        top_p=None,
+        top_k=1,
+        seed=jax.random.PRNGKey(0),
+        beam_size=None,
+        prompt_lengths=jnp.array([2, 3], dtype=jnp.int32),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(state.input_mask[:, :4]),
+        np.array([[False, False, True, True], [False, True, True, True]]),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(state.positions[:, :4]),
+        np.array([[0, 0, 0, 1], [0, 0, 1, 2]], dtype=np.int32),
+    )
+
+  def test_input_strings_populates_prompt_lengths(self):
+    sampler = self._make_sampler(cache_size=16)
+    out = sampler(
+        input_strings=['input string', 'hello world'],
+        max_generation_steps=2,
+        max_prompt_length=4,
+    )
+    expected_lengths = np.array(
+        [
+            len(sampler.tokenize('input string')),
+            len(sampler.tokenize('hello world')),
+        ],
+        dtype=np.int32,
+    )
+    np.testing.assert_array_equal(out.prompt_lengths, expected_lengths)
+
+  def test_rejects_invalid_inputs(self):
+    sampler = self._make_sampler(cache_size=5)
+    with self.assertRaisesRegex(ValueError, 'exactly one'):
+      sampler(
+          input_strings=['hi'], prompt_token_ids=[[1]], max_generation_steps=1
+      )
+    with self.assertRaisesRegex(ValueError, 'exactly one'):
+      sampler(max_generation_steps=1)
+    with self.assertRaisesRegex(ValueError, 'one output per row'):
+      sampler(prompt_token_ids=[[1]], max_generation_steps=1, beam_size=2)
+    with self.assertRaisesRegex(ValueError, 'exceeds cache_size'):
+      sampler(prompt_token_ids=[[1, 2, 3, 4]], max_generation_steps=2)
+    with self.assertRaisesRegex(ValueError, 'must not be empty'):
+      sampler(input_strings=[], max_generation_steps=1)
+    with self.assertRaisesRegex(ValueError, 'must not be empty'):
+      sampler(prompt_token_ids=[], max_generation_steps=1)
+    with self.assertRaisesRegex(ValueError, '1-D'):
+      sampler(
+          prompt_token_ids=[np.zeros((1, 2), dtype=np.int32)],
+          max_generation_steps=1,
+      )
+
+  def test_check_prompt_echo(self):
+    expected = [np.array([1, 2], dtype=np.int32), np.array([3], dtype=np.int32)]
+    utils.check_prompt_echo(
+        expected,
+        [
+            {
+                'prompt_token_ids': [1, 2],
+                'meta_info': {'id': '0', 'prompt_tokens': 2},
+            },
+            {'meta_info': {'id': '1', 'prompt_tokens': 1}},
+        ],
+    )
+    with self.assertRaisesRegex(ValueError, 'Expected 2 outputs, got 1'):
+      utils.check_prompt_echo(expected, [{'meta_info': {'id': '0'}}])
+    with self.assertRaisesRegex(ValueError, 'Duplicate request_id'):
+      utils.check_prompt_echo(
+          expected,
+          [
+              {'meta_info': {'id': 'dup', 'prompt_tokens': 2}},
+              {'meta_info': {'id': 'dup', 'prompt_tokens': 1}},
+          ],
+      )
+    with self.assertRaisesRegex(ValueError, 'missing request_id'):
+      utils.check_prompt_echo(
+          [np.array([1, 2], dtype=np.int32)],
+          [{'prompt_token_ids': [1, 2]}],
+      )
+    with self.assertRaisesRegex(ValueError, 'missing prompt echo'):
+      utils.check_prompt_echo(
+          [np.array([1, 2], dtype=np.int32)],
+          [{'meta_info': {'id': '0'}}],
+      )
+    with self.assertRaisesRegex(
+        ValueError, 'prompt_token_ids differed from input'
+    ):
+      utils.check_prompt_echo(
+          [np.array([1, 2], dtype=np.int32)],
+          [{'request_id': '0', 'prompt_token_ids': [1, 999]}],
+      )
+    with self.assertRaisesRegex(
+        ValueError, 'prompt_token_ids differed from input'
+    ):
+      utils.check_prompt_echo(
+          [np.array([1, 2], dtype=np.int32)],
+          [{'meta_info': {'id': '0', 'prompt_tokens': 3}}],
+      )
+
+
 if __name__ == '__main__':
   absltest.main()
