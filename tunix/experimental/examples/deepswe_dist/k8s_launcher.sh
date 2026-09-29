@@ -379,6 +379,8 @@ start_orchestrator() {
         ${disable_ws_timeouts_arg} \
         --stop_workers_on_exit \
         ${MAX_WARMPOOL_REPLICAS:+--max_warmpool_replicas=${MAX_WARMPOOL_REPLICAS}} \
+        ${SANDBOX_PREWARM_LOOKAHEAD:+--sandbox_prewarm_lookahead=${SANDBOX_PREWARM_LOOKAHEAD}} \
+        ${SANDBOX_RETAINED_REPLICAS:+--sandbox_retained_replicas=${SANDBOX_RETAINED_REPLICAS}} \
         ${MAX_CONCURRENCY:+--max_concurrency=${MAX_CONCURRENCY}} \
         ${MAX_STALENESS:+--max_staleness=${MAX_STALENESS}} \
         ${TRAJECTORY_GROUP_ORDER:+--trajectory_group_order=${TRAJECTORY_GROUP_ORDER}} \

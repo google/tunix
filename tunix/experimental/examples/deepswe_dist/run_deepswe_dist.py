@@ -313,6 +313,28 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
+      "--sandbox_prewarm_lookahead",
+      type=int,
+      default=int(os.getenv("SANDBOX_PREWARM_LOOKAHEAD", "1")),
+      help=(
+          "Number of upcoming prompt batches whose SandboxWarmPools are"
+          " created ahead of dispatch (1 = only the next batch)."
+      ),
+  )
+  parser.add_argument(
+      "--sandbox_retained_replicas",
+      type=int,
+      default=(
+          int(os.environ["SANDBOX_RETAINED_REPLICAS"])
+          if os.getenv("SANDBOX_RETAINED_REPLICAS")
+          else None
+      ),
+      help=(
+          "Idle replicas left in a warm pool once only already-dispatched"
+          " batches use it (default: keep it full-size until it is retired)."
+      ),
+  )
+  parser.add_argument(
       "--max_concurrency",
       type=int,
       default=128,
@@ -728,6 +750,8 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           scaffold=args.scaffold,
           wait_initial=True,
           max_staleness=args.max_staleness,
+          lookahead_steps=args.sandbox_prewarm_lookahead,
+          retained_replicas=args.sandbox_retained_replicas,
       )
 
     program = rl_program.StandardRLProgram(

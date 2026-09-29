@@ -54,6 +54,59 @@ class FakeFleet:
       self.active_pools.clear()
 
 
+class _OwnedByAnotherRunError(Exception):
+  """Stand-in for agent_sandbox_rl.exceptions.OwnedByAnotherRunError."""
+
+  def __init__(self, kind: str, name: str, owner: str):
+    super().__init__(f"{kind} '{name}' belongs to run {owner}")
+    self.kind = kind
+    self.name = name
+    self.owner = owner
+
+
+class TemplateCollisionFleet(FakeFleet):
+  """FakeFleet whose warm of a `relabelled` image hits a foreign template.
+
+  Mirrors SandboxFleet._warm_entry, which re-raises the template owner check
+  as a FleetError `from` the OwnedByAnotherRunError, until the template is
+  relabelled back through ensure_template.
+  """
+
+  def __init__(self, relabelled=(), job_scoped_names=True):
+    super().__init__()
+    self.relabelled = set(relabelled)
+    self._job_scoped_names = job_scoped_names
+    self.ensure_template_calls: list[tuple[str, str, str]] = []
+    self.plan_ = mock.Mock()
+    self.plan_.for_image.side_effect = lambda img: mock.Mock(
+        cluster="default", image=img, template=f"tmpl-{img}"
+    )
+    cluster = mock.Mock()
+    cluster.template_spec.return_value = "spec"
+    cluster.resources.ensure_template.side_effect = self._ensure_template
+    self.registry = mock.Mock()
+    self.registry.get.return_value = cluster
+    self.config = mock.Mock(template="base")
+
+  def _ensure_template(self, image: str, template: str, spec: str) -> bool:
+    with self._lock:
+      self.ensure_template_calls.append((image, template, spec))
+      self.relabelled.discard(image)
+    return False
+
+  def warm_image(
+      self, image: str, replicas_override: int | None = None, wait: bool = False
+  ) -> None:
+    if image in self.relabelled:
+      try:
+        raise _OwnedByAnotherRunError(
+            "SandboxTemplate", f"tmpl-{image}", "rollout-run"
+        )
+      except _OwnedByAnotherRunError as exc:
+        raise RuntimeError(f"template tmpl-{image} is another run's") from exc
+    super().warm_image(image, replicas_override=replicas_override, wait=wait)
+
+
 class SandboxUtilsTest(absltest.TestCase):
 
   def test_two_queue_batch_prewarming(self):
@@ -530,6 +583,238 @@ class SandboxUtilsTest(absltest.TestCase):
     iterator.close()
     self.assertEqual(fleet.active_pools, {})
 
+
+  def test_lookahead_prewarms_next_lookahead_steps_batches(self):
+    fleet = FakeFleet()
+    dataset = [
+        {"prompt": f"p{i}", "docker_image": f"img_{i}"} for i in range(5)
+    ]
+    iterator = sandbox_utils.PrewarmDatasetIterator(
+        dataset,
+        fleet=fleet,
+        num_generations=4,
+        batch_size=1,
+        lookahead_steps=2,
+    )
+    # Current + 2 upcoming batches are warm; the barrier covers only the first
+    # two, the deeper lookahead pool is created without waiting.
+    self.assertCountEqual(
+        fleet.warm_calls,
+        [("img_0", 4, True), ("img_1", 4, True), ("img_2", 4, False)],
+    )
+    self.assertLen(iterator.next_batch, 1)
+    self.assertEqual(iterator.next_batch[0][0]["prompt"], "p1")
+
+    self.assertEqual(next(iterator)["prompt"], "p0")
+    self.assertLen(fleet.warm_calls, 3)
+
+    # Batch 1 pulled -> pools now cover batches 1..3 (plus retained batch 0).
+    self.assertEqual(next(iterator)["prompt"], "p1")
+    self.assertEqual(fleet.warm_calls[-1], ("img_3", 4, False))
+    self.assertEqual(
+        fleet.active_pools,
+        {"img_0": 4, "img_1": 4, "img_2": 4, "img_3": 4},
+    )
+
+    # Batch 2 pulled -> batch 0 leaves the (max_staleness + 1) window.
+    self.assertEqual(next(iterator)["prompt"], "p2")
+    self.assertEqual(fleet.unwarm_calls, ["img_0"])
+    self.assertEqual(
+        fleet.active_pools,
+        {"img_1": 4, "img_2": 4, "img_3": 4, "img_4": 4},
+    )
+
+    # Dataset runs dry: the lookahead shrinks instead of stalling.
+    self.assertEqual(next(iterator)["prompt"], "p3")
+    self.assertEqual(next(iterator)["prompt"], "p4")
+    self.assertFalse(iterator.has_next())
+    with self.assertRaises(StopIteration):
+      next(iterator)
+    self.assertLen(fleet.warm_calls, 5)
+    iterator.close()
+    self.assertEqual(fleet.active_pools, {})
+
+  def test_lookahead_keeps_image_shared_with_retained_and_upcoming_batches(self):
+    fleet = FakeFleet()
+    images = ["img_A", "img_B", "img_C", "img_D", "img_A", "img_E", "img_F"]
+    dataset = [
+        {"prompt": f"p{i}", "docker_image": img} for i, img in enumerate(images)
+    ]
+    iterator = sandbox_utils.PrewarmDatasetIterator(
+        dataset,
+        fleet=fleet,
+        num_generations=4,
+        batch_size=1,
+        lookahead_steps=2,
+        max_staleness=1,
+    )
+    for i in range(len(images)):
+      self.assertEqual(next(iterator)["prompt"], f"p{i}")
+      # img_A (batches 0 and 4) never falls out of retained + current + the
+      # 2-batch lookahead, so it is neither retired nor warmed twice.
+      self.assertNotIn("img_A", fleet.unwarm_calls)
+      self.assertIn("img_A", fleet.active_pools)
+    self.assertEqual([c[0] for c in fleet.warm_calls].count("img_A"), 1)
+    # While batch 4 was upcoming and batch 0 retained, the pool held both.
+    self.assertIn(("img_A", 8), fleet.set_replicas_calls)
+    iterator.close()
+    self.assertEqual(fleet.active_pools, {})
+
+  def test_lookahead_epoch_wrap_inside_window_does_not_rewarm(self):
+    fleet = FakeFleet()
+    epoch = [{"prompt": f"p{i}", "docker_image": f"img_{i}"} for i in range(3)]
+    iterator = sandbox_utils.PrewarmDatasetIterator(
+        epoch * 3,
+        fleet=fleet,
+        num_generations=2,
+        batch_size=1,
+        lookahead_steps=2,
+    )
+    # Window (1 retained + current + 2 upcoming) spans the 3-image epoch, so
+    # the wrap never retires a pool it is about to need again.
+    for _ in range(8):
+      next(iterator)
+      self.assertEqual(fleet.unwarm_calls, [])
+    self.assertCountEqual(
+        [c[0] for c in fleet.warm_calls], ["img_0", "img_1", "img_2"]
+    )
+    # Dataset tail: nothing upcoming, so img_0 finally retires.
+    next(iterator)
+    self.assertEqual(fleet.unwarm_calls, ["img_0"])
+    iterator.close()
+
+  def test_lookahead_steps_one_matches_two_queue_behaviour(self):
+    fleet = FakeFleet()
+    dataset = [
+        {"prompt": f"p{i}", "docker_image": f"img_{i}"} for i in range(4)
+    ]
+    iterator = sandbox_utils.PrewarmDatasetIterator(
+        dataset, fleet=fleet, num_generations=2, batch_size=1, lookahead_steps=1
+    )
+    self.assertEqual(fleet.active_pools, {"img_0": 2, "img_1": 2})
+    next(iterator)
+    next(iterator)
+    self.assertEqual(fleet.active_pools, {"img_0": 2, "img_1": 2, "img_2": 2})
+    iterator.close()
+
+  def test_retained_replicas_shrinks_settled_previous_batches(self):
+    fleet = FakeFleet()
+    dataset = [
+        {"prompt": f"p{i}", "docker_image": img}
+        for i, img in enumerate(["img_A", "img_B", "img_C", "img_B", "img_D"])
+    ]
+    iterator = sandbox_utils.PrewarmDatasetIterator(
+        dataset,
+        fleet=fleet,
+        num_generations=4,
+        batch_size=1,
+        max_staleness=1,
+        retained_replicas=0,
+        retained_grace_secs=0,
+    )
+    self.assertEqual(next(iterator)["prompt"], "p0")
+    # Batch 0 dispatched and settled: its pool drops to 0 idle replicas but is
+    # kept (not unwarmed) while it stays in the retention window.
+    self.assertEqual(next(iterator)["prompt"], "p1")
+    self.assertEqual(fleet.set_replicas_calls, [("img_A", 0)])
+    self.assertEqual(
+        fleet.active_pools, {"img_A": 0, "img_B": 4, "img_C": 4}
+    )
+    # img_B is retained (settled) but also upcoming again: stays full-size.
+    self.assertEqual(next(iterator)["prompt"], "p2")
+    self.assertNotIn(("img_B", 0), fleet.set_replicas_calls)
+    self.assertEqual(fleet.active_pools["img_B"], 8)
+    self.assertEqual(fleet.active_pools["img_A"], 0)
+    # Batch 0 leaves the window -> retired; batch 2 (img_C) shrinks.
+    self.assertEqual(next(iterator)["prompt"], "p3")
+    self.assertIn("img_A", fleet.unwarm_calls)
+    self.assertEqual(fleet.active_pools["img_C"], 0)
+    iterator.close()
+    self.assertEqual(fleet.active_pools, {})
+
+  def test_retained_replicas_waits_for_grace_period(self):
+    fleet = FakeFleet()
+    dataset = [
+        {"prompt": f"p{i}", "docker_image": f"img_{i}"} for i in range(4)
+    ]
+    now = [0.0]
+    fake_time = mock.Mock()
+    fake_time.monotonic.side_effect = lambda: now[0]
+    with mock.patch.object(sandbox_utils, "time", fake_time):
+      iterator = sandbox_utils.PrewarmDatasetIterator(
+          dataset,
+          fleet=fleet,
+          num_generations=4,
+          batch_size=1,
+          max_staleness=1,
+          retained_replicas=1,
+          retained_grace_secs=300,
+      )
+      next(iterator)  # batch 0 drained at t=0
+      now[0] = 5.0
+      next(iterator)  # batch 1 pulled right away (start-up burst)
+      self.assertEqual(fleet.set_replicas_calls, [])
+      self.assertEqual(fleet.active_pools["img_0"], 4)
+      now[0] = 900.0
+      next(iterator)  # a step later: batches 0 and 1 have settled
+      self.assertCountEqual(
+          fleet.set_replicas_calls, [("img_0", 1), ("img_1", 1)]
+      )
+    iterator.close()
+
+  def test_rewarm_reclaims_template_relabelled_by_rollout_worker(self):
+    fleet = TemplateCollisionFleet()
+    images = ["img_A", "img_B", "img_C", "img_D", "img_A"]
+    dataset = [
+        {"prompt": f"p{i}", "docker_image": img} for i, img in enumerate(images)
+    ]
+    iterator = sandbox_utils.PrewarmDatasetIterator(
+        dataset, fleet=fleet, num_generations=2, batch_size=1
+    )
+    for i in range(3):
+      self.assertEqual(next(iterator)["prompt"], f"p{i}")
+    self.assertIn("img_A", fleet.unwarm_calls)
+    # A rollout worker's on-demand acquire relabelled the template, and the
+    # pool retire left it behind; the epoch-wrap re-warm must reclaim it.
+    fleet.relabelled.add("img_A")
+    self.assertEqual(next(iterator)["prompt"], "p3")
+    self.assertEqual(
+        fleet.ensure_template_calls, [("img_A", "tmpl-img_A", "spec")]
+    )
+    self.assertEqual(fleet.active_pools.get("img_A"), 2)
+    self.assertEqual(next(iterator)["prompt"], "p4")
+    iterator.close()
+
+  def test_template_reclaim_requires_job_scoped_names(self):
+    fleet = TemplateCollisionFleet(
+        relabelled={"img_A"}, job_scoped_names=False
+    )
+    _ = sandbox_utils.PrewarmDatasetIterator(
+        [{"prompt": "p0", "docker_image": "img_A"}],
+        fleet=fleet,
+        num_generations=2,
+        batch_size=1,
+    )
+    self.assertEqual(fleet.ensure_template_calls, [])
+    self.assertNotIn("img_A", fleet.active_pools)
+
+  def test_init_global_fleet_marks_job_scoped_template_names(self):
+    cases = [
+        ({"JOB_PREFIX": "mk-7x-0928d"}, True),
+        ({"JOB_PREFIX": "mk-7x-0928d", "TEMPLATE_NAME_PREFIX": "shared-"}, False),
+        ({}, False),
+    ]
+    for env, expected in cases:
+      mock_fleet = mock.MagicMock()
+      mock_as_rl = mock.MagicMock()
+      mock_as_rl.SandboxFleet.return_value = mock_fleet
+      with mock.patch.dict("sys.modules", {"agent_sandbox_rl": mock_as_rl}):
+        with mock.patch.dict(os.environ, env, clear=True):
+          with mock.patch.object(sandbox_utils, "_GLOBAL_FLEET", None):
+            fleet = sandbox_utils.init_global_fleet(
+                tasks=None, num_generations=4
+            )
+            self.assertEqual(fleet._job_scoped_names, expected, env)
 
 if __name__ == "__main__":
   absltest.main()

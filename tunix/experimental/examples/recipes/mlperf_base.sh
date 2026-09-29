@@ -237,9 +237,15 @@ export POOL_NAME_FORMAT="${POOL_NAME_FORMAT:-}"
 export TEMPLATE_NAME_PREFIX="${TEMPLATE_NAME_PREFIX:-}"
 export SANDBOX_NODE_SELECTOR_KEY="cloud.google.com/gke-nodepool"
 export SANDBOX_NODE_SELECTOR_VAL="${SANDBOX_NODE_SELECTOR_VAL:-sandbox-np}"
-# Half the generations of each prompt get a warm sandbox (was 2, i.e. 14 of 16
-# cold-started inside the episode). 16 would cover all, at 2x the sandbox-np pods.
-export MAX_WARMPOOL_REPLICAS="${MAX_WARMPOOL_REPLICAS:-8}"
+# Every generation of a prompt gets a warm sandbox (at 8, claims 9-16 of each
+# prompt waited 14-60s for a cold pod). Pools are created two batches ahead of
+# dispatch; 5 min after a batch is dispatched its pools drop to
+# SANDBOX_RETAINED_REPLICAS idle pods (claimed ones stay; =16 keeps them full).
+# Peak on sandbox-np ~1280 pods (768 warm + 512 claimed); ~1790 without the
+# shrink, vs 1024 with the old 8 replicas / one batch ahead.
+export MAX_WARMPOOL_REPLICAS="${MAX_WARMPOOL_REPLICAS:-16}"
+export SANDBOX_PREWARM_LOOKAHEAD="${SANDBOX_PREWARM_LOOKAHEAD:-2}"
+export SANDBOX_RETAINED_REPLICAS="${SANDBOX_RETAINED_REPLICAS:-0}"
 export ROLLOUT_MAX_CONCURRENCY="${ROLLOUT_MAX_CONCURRENCY:-256}"
 export MAX_CONCURRENCY="${MAX_CONCURRENCY:-256}"
 # A single hung tool call used to hold the whole batch (and the weight sync) for
