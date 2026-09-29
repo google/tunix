@@ -1,7 +1,9 @@
 """Benchmark engine for progressive recovery load testing on Trajectory Store."""
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
+import concurrent.futures
 import dataclasses
+import itertools
 import time
 
 import termcolor
@@ -90,36 +92,70 @@ class BenchmarkReport:
   checkpoints: list[BenchmarkCheckpointMetrics]
 
 
+def _write_trajectory(
+    writer: store.TrajectoryWriter,
+    metadata: trajectory_lib.TrajectoryMetadata,
+    steps: list[trajectory_lib.Step],
+) -> tuple[int, int]:
+  """Writes all trajectory steps and returns (step_count, byte_count)."""
+  step_bytes = 0
+  for step in steps:
+    writer.add_step(step, metadata)
+    # Generated steps consist solely of string messages; see
+    # data_generator.generate_trajectories for details.
+    step_bytes += len(step.message)
+  return len(steps), step_bytes
+
+
 def _run_checkpoint(
     reader: store.TrajectoryReader,
-    writer: store.TrajectoryWriter,
+    writers: Sequence[store.TrajectoryWriter],
     data_iter: Iterator[
         tuple[trajectory_lib.TrajectoryMetadata, list[trajectory_lib.Step]]
     ],
     current_traj_count: int,
     target_traj_count: int,
+    num_workers: int = 1,
 ) -> BenchmarkCheckpointMetrics:
   """Executes write, flush, read scan, and validation for a single checkpoint."""
   total_steps = 0
   total_bytes = 0
   checkpoint_write_count = target_traj_count - current_traj_count
+  checkpoint_trajectories = itertools.islice(data_iter, checkpoint_write_count)
 
   # 1. Write + Flush Phase using generator iterator
   print(
       f"  ├─ Writing {checkpoint_write_count:,d} trajectories"
-      f" ({current_traj_count + 1:,d}..{target_traj_count:,d})..."
+      f" ({current_traj_count + 1:,d}..{target_traj_count:,d}) across"
+      f" {num_workers} worker(s) ({len(writers)} writer(s))..."
   )
   with Timer() as write_timer:
-    for _, (metadata, steps) in zip(
-        range(current_traj_count, target_traj_count), data_iter
-    ):
-      for step in steps:
-        writer.add_step(step, metadata)
-        total_steps += 1
-        # We assume generated steps consist solely of string messages.
-        # Check data_generator.generate_trajectories for details.
-        total_bytes += len(step.message)
-    writer.flush()
+    if num_workers == 1:
+      for i, (metadata, steps) in enumerate(checkpoint_trajectories):
+        steps_written, bytes_written = _write_trajectory(
+            writers[i % len(writers)], metadata, steps
+        )
+        total_steps += steps_written
+        total_bytes += bytes_written
+    else:
+      with concurrent.futures.ThreadPoolExecutor(
+          max_workers=num_workers
+      ) as executor:
+        futures = [
+            executor.submit(
+                _write_trajectory,
+                writers[i % len(writers)],
+                metadata,
+                steps,
+            )
+            for i, (metadata, steps) in enumerate(checkpoint_trajectories)
+        ]
+        for future in futures:
+          steps_written, bytes_written = future.result()
+          total_steps += steps_written
+          total_bytes += bytes_written
+    for w in writers:
+      w.flush()
 
   write_duration = write_timer.duration_sec
   write_qps = (
@@ -173,10 +209,16 @@ def _run_checkpoint(
 
 def run_recovery_benchmark(
     reader: store.TrajectoryReader,
-    writer: store.TrajectoryWriter,
+    writer: store.TrajectoryWriter | Sequence[store.TrajectoryWriter],
     workload: data_generator.WorkloadConfig,
 ) -> BenchmarkReport:
   """Runs progressive recovery benchmarks across all checkpoints."""
+  writers: Sequence[store.TrajectoryWriter] = (
+      (writer,) if isinstance(writer, store.TrajectoryWriter) else tuple(writer)
+  )
+  if not writers:
+    raise ValueError("writer must contain at least one TrajectoryWriter.")
+
   total_checkpoints = len(workload.cumulative_trajectory_checkpoints)
   print(
       termcolor.colored(
@@ -204,10 +246,11 @@ def run_recovery_benchmark(
     )
     checkpoint = _run_checkpoint(
         reader=reader,
-        writer=writer,
+        writers=writers,
         data_iter=data_iter,
         current_traj_count=current_traj_count,
         target_traj_count=target_traj_count,
+        num_workers=workload.num_workers,
     )
     status_color = "green" if checkpoint.validation_passed else "red"
     print(
@@ -232,7 +275,7 @@ def run_recovery_benchmark(
   )
 
   reader_type = type(reader).__name__
-  writer_type = type(writer).__name__
+  writer_type = type(writers[0]).__name__
   return BenchmarkReport(
       reader_type=reader_type,
       writer_type=writer_type,

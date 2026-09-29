@@ -25,6 +25,12 @@ class WorkloadConfigTest(absltest.TestCase):
     with self.assertRaises(ValueError):
       data_generator.WorkloadConfig(cumulative_trajectory_checkpoints=[0, 100])
 
+  def test_non_positive_num_workers_raises(self) -> None:
+    with self.assertRaises(ValueError):
+      data_generator.WorkloadConfig(num_workers=0)
+    with self.assertRaises(ValueError):
+      data_generator.WorkloadConfig(num_workers=-1)
+
 
 class DataGeneratorTest(absltest.TestCase):
 

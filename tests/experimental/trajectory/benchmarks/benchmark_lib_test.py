@@ -1,9 +1,11 @@
-import tempfile
+from collections.abc import Sequence
+import contextlib
 
 from absl.testing import absltest
 from absl.testing import parameterized
 from tunix.experimental.trajectory import file_store
 from tunix.experimental.trajectory import in_memory_store
+from tunix.experimental.trajectory import sql_store
 from tunix.experimental.trajectory import store as store_lib
 from tunix.experimental.trajectory.benchmarks import benchmark_lib
 from tunix.experimental.trajectory.benchmarks import data_generator
@@ -20,6 +22,13 @@ _THREE_CHECKPOINTS_WORKLOAD = data_generator.WorkloadConfig(
     step_payload_chars=100,
 )
 
+_MULTI_WORKER_WORKLOAD = data_generator.WorkloadConfig(
+    cumulative_trajectory_checkpoints=[4, 12],
+    steps_per_trajectory=2,
+    step_payload_chars=100,
+    num_workers=4,
+)
+
 
 class BenchmarkLibTest(parameterized.TestCase):
   """Unit tests for progressive recovery benchmark engine."""
@@ -27,11 +36,11 @@ class BenchmarkLibTest(parameterized.TestCase):
   def _verify_recovery_benchmark(
       self,
       reader: store_lib.TrajectoryReader,
-      writer: store_lib.TrajectoryWriter,
+      writer: store_lib.TrajectoryWriter | Sequence[store_lib.TrajectoryWriter],
       expected_type_name: str,
       workload: data_generator.WorkloadConfig,
   ) -> None:
-    """Helper function to execute recovery benchmark validation for a given store."""
+    """Helper function to execute recovery benchmark validation."""
     report = benchmark_lib.run_recovery_benchmark(
         reader=reader,
         writer=writer,
@@ -58,6 +67,7 @@ class BenchmarkLibTest(parameterized.TestCase):
   @parameterized.named_parameters(
       ("two_checkpoints", _TWO_CHECKPOINTS_WORKLOAD),
       ("three_checkpoints", _THREE_CHECKPOINTS_WORKLOAD),
+      ("multi_worker", _MULTI_WORKER_WORKLOAD),
   )
   def test_run_recovery_benchmark_in_memory(
       self, workload: data_generator.WorkloadConfig
@@ -73,17 +83,53 @@ class BenchmarkLibTest(parameterized.TestCase):
   @parameterized.named_parameters(
       ("two_checkpoints", _TWO_CHECKPOINTS_WORKLOAD),
       ("three_checkpoints", _THREE_CHECKPOINTS_WORKLOAD),
+      ("multi_worker", _MULTI_WORKER_WORKLOAD),
   )
   def test_run_recovery_benchmark_file_store(
       self, workload: data_generator.WorkloadConfig
   ) -> None:
-    with tempfile.TemporaryDirectory() as tmp_dir:
-      store_instance = file_store.FileTrajectoryStore(root_dir=tmp_dir)
+    tmp_dir = self.create_tempdir().full_path
+    with file_store.FileTrajectoryStore(root_dir=tmp_dir) as store_instance:
       self._verify_recovery_benchmark(
           reader=store_instance,
           writer=store_instance,
           expected_type_name="FileTrajectoryStore",
           workload=workload,
+      )
+
+  @parameterized.named_parameters(
+      ("two_checkpoints", _TWO_CHECKPOINTS_WORKLOAD),
+      ("three_checkpoints", _THREE_CHECKPOINTS_WORKLOAD),
+      ("multi_worker", _MULTI_WORKER_WORKLOAD),
+  )
+  def test_run_recovery_benchmark_sql_store(
+      self, workload: data_generator.WorkloadConfig
+  ) -> None:
+    with sql_store.SqlTrajectoryStore(
+        run_id="bench_run", db_url="sqlite:///:memory:"
+    ) as store_instance:
+      self._verify_recovery_benchmark(
+          reader=store_instance,
+          writer=store_instance,
+          expected_type_name="SqlTrajectoryStore",
+          workload=workload,
+      )
+
+  def test_run_recovery_benchmark_sql_store_multiple_writers(self) -> None:
+    db_file = self.create_tempfile("bench.db").full_path
+    db_url = f"sqlite:///{db_file}"
+    with contextlib.ExitStack() as stack:
+      writers = [
+          stack.enter_context(
+              sql_store.SqlTrajectoryStore(run_id="bench_run", db_url=db_url)
+          )
+          for _ in range(4)
+      ]
+      self._verify_recovery_benchmark(
+          reader=writers[0],
+          writer=writers,
+          expected_type_name="SqlTrajectoryStore",
+          workload=_MULTI_WORKER_WORKLOAD,
       )
 
 
