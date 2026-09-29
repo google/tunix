@@ -74,6 +74,250 @@ def _extract_scalar(val: Any, name: str | None = None) -> float | None:
     pass
   return metrics_logger_lib.extract_scalar(val)
 
+_EXHAUSTED = object()
+
+
+def _next_or_exhausted(iterator: Any) -> Any:
+  """`next()` that returns `_EXHAUSTED` instead of raising StopIteration.
+
+  StopIteration cannot cross `asyncio.to_thread` (it becomes a TypeError).
+  """
+  try:
+    return next(iterator)
+  except StopIteration:
+    return _EXHAUSTED
+
+
+_FEED_AHEAD_ENV = "TUNIX_TRAIN_FEED_AHEAD"
+# Packed microbatches the feeder may hold before the train loop takes them. One
+# is enough to have the next one ready when `train_step` returns; each is a full
+# `[pack_size, max_packed_len]` payload in host RAM.
+_FEED_AHEAD_MAX_UNTAKEN_MICROBATCHES = 1
+
+
+def _train_feed_ahead_enabled() -> bool:
+  """Whether `train_stage` packs ahead of training; see `_TrainFeeder`.
+
+  On unless `TUNIX_TRAIN_FEED_AHEAD` is 0/false/no/off, which restores the
+  serial pull -> pack -> train loop.
+  """
+  value = os.environ.get(_FEED_AHEAD_ENV, "1").strip().lower()
+  return value not in ("0", "false", "no", "off")
+
+
+def _payloads_for_assembler(scored_items: Sequence[Any]) -> list[Any]:
+  """Returns a group's trainer payloads, each tagged with its `traj_id`."""
+  payloads = []
+  for item in scored_items:
+    payload = getattr(item, "payload", None)
+    if isinstance(payload, datatypes.RLTrainerPayload):
+      payload = dataclasses.replace(
+          payload,
+          metadata={
+              **payload.metadata,
+              "traj_id": item.traj_id,
+          },
+      )
+    payloads.append(payload)
+  return payloads
+
+
+@dataclasses.dataclass(frozen=True)
+class _FedGroup:
+  """A scored group `_TrainFeeder` pulled, and what feeding it emitted.
+
+  An empty `scored_items` stands for a pull that came back empty; the
+  microbatches are then what `flush` emitted, and the step ends there, as in
+  the serial loop.
+  """
+
+  scored_items: list[Any]
+  batch_idx: int | None
+  assembled_batches: list[Any]
+
+
+class _TrainFeeder:
+  """Pulls scored groups and feeds the assembler ahead of the train loop.
+
+  Serially, `train_stage` pulls a group, packs it and trains whatever comes out,
+  so packing microbatch i+1 waits for `train_step(i)`, and a step's first
+  packing waits for the previous step's weight sync even when its groups
+  arrived long before. This task does the pull and the `feed` / `flush` and
+  hands the loop one `_FedGroup` per group, with the step boundaries the loop
+  would have drawn. The assembler sees the identical sequence of calls, so the
+  microbatches, their `is_final_batch` and the gradient-accumulation order are
+  unchanged; only when the packing runs moves.
+
+  It runs at most one step ahead. Pulls for step k+1 happen before step k
+  commits, so on a `BatchOrderedQueueManager` they go through
+  `get_group_ahead`, which moves no cursor: serving a hole would advance
+  `next_batch_idx` and open the dispatch window before the weight sync. Pulling
+  early changes nothing else: the staleness filter and the group's shape are
+  settled at `put()`, and advantages arrive already computed per group. It
+  also stops feeding while a packed microbatch waits to be taken, which bounds
+  the extra host memory to one microbatch.
+  """
+
+  def __init__(self, program: "StandardRLProgram"):
+    self._program = program
+    self._fed: asyncio.Queue[_FedGroup | Exception] = asyncio.Queue()
+    self._untaken_microbatches = 0
+    self._wake = asyncio.Event()
+    self._task: asyncio.Task[None] | None = None
+    self._thread_call: asyncio.Future[Any] | None = None
+
+  def start(self) -> None:
+    self._task = asyncio.create_task(self._run())
+
+  async def stop(self) -> None:
+    """Cancels the feeder, then waits out an assembler call still running.
+
+    A cancelled `to_thread` keeps running; waiting for it keeps it from racing
+    the `assembler.reset()` that `run_async` does on failure.
+    """
+    if self._task is not None:
+      self._task.cancel()
+      await asyncio.gather(self._task, return_exceptions=True)
+    if self._thread_call is not None:
+      await asyncio.gather(self._thread_call, return_exceptions=True)
+
+  def wake(self) -> None:
+    """Tells the feeder the train loop moved on, to re-check what it awaits."""
+    self._wake.set()
+
+  async def next_group(self) -> _FedGroup:
+    """Returns the next fed group, or raises what stopped the feeder."""
+    fed = await self._fed.get()
+    if isinstance(fed, Exception):
+      raise fed
+    self._untaken_microbatches -= len(fed.assembled_batches)
+    self._wake.set()
+    return fed
+
+  async def _wait_until(self, predicate: Callable[[], bool]) -> None:
+    while not predicate():
+      self._wake.clear()
+      await self._wake.wait()
+
+  async def _in_thread(self, fn: Callable[..., Any], *args: Any) -> Any:
+    # Packing is CPU-bound (seconds per microbatch with routed experts); a
+    # thread keeps the event loop, and so train_step and the dispatcher, going.
+    # Shielded so a cancel lets the call finish; `stop` waits for it.
+    self._thread_call = asyncio.ensure_future(asyncio.to_thread(fn, *args))
+    return await asyncio.shield(self._thread_call)
+
+  async def _run(self) -> None:
+    try:
+      await self._feed()
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+      # Raised by `next_group`, in the train loop, after the groups before it.
+      self._fed.put_nowait(exc)
+    else:
+      # The train loop stops where `_feed` does and never reads this; if it
+      # ever asks for more, fail rather than park forever.
+      self._fed.put_nowait(
+          RuntimeError("Train feeder stopped before the train loop.")
+      )
+
+  async def _feed(self) -> None:
+    """Feeds the groups of every step the train loop will run, in order."""
+    program = self._program
+    step = program.step
+    prev_batch_idx: int | None = None
+    while program.max_steps is None or step < program.max_steps:
+      await self._wait_until(lambda s=step: program.step >= s - 1)
+      ahead = program.step < step
+      batch_idx: int | None = None
+      groups = 0
+      num_microbatches = 0
+      while groups < program.full_batch_size:
+        scored_items, pulled_batch_idx = await self._pull(
+            step, batch_idx, prev_batch_idx
+        )
+        if scored_items:
+          batch_idx = pulled_batch_idx
+        await self._wait_until(
+            lambda: self._untaken_microbatches
+            < _FEED_AHEAD_MAX_UNTAKEN_MICROBATCHES
+        )
+        if scored_items:
+          groups += 1
+          assembled = await self._in_thread(
+              program.assembler.feed, _payloads_for_assembler(scored_items)
+          )
+        else:
+          assembled = await self._in_thread(program.assembler.flush)
+        assembled = list(assembled)
+        num_microbatches += len(assembled)
+        self._untaken_microbatches += len(assembled)
+        self._fed.put_nowait(
+            _FedGroup(
+                scored_items=scored_items,
+                batch_idx=batch_idx if scored_items else None,
+                assembled_batches=assembled,
+            )
+        )
+        if not scored_items:
+          break
+      logging.info(
+          "[pipeline] FED step=%d batch_idx=%s groups=%d microbatches=%d"
+          " started_ahead=%s",
+          step,
+          batch_idx,
+          groups,
+          num_microbatches,
+          ahead,
+      )
+      if not groups:
+        # The train loop stops at this step too ("Dataset exhausted").
+        return
+      prev_batch_idx = batch_idx
+      step += 1
+
+  async def _pull(
+      self,
+      step: int,
+      batch_idx: int | None,
+      prev_batch_idx: int | None,
+  ) -> tuple[list[Any], int | None]:
+    """Pulls the next group of `step` the way the train loop would.
+
+    Args:
+      step: The step the group is for.
+      batch_idx: Prompt batch of the groups `step` got so far, if any.
+      prev_batch_idx: Prompt batch of step `step - 1`.
+
+    Returns:
+      `(group, batch_idx)`; the group is empty where the loop's own pull would
+      have come back empty.
+    """
+    program = self._program
+    scored_q = program.scored_q
+    if not isinstance(
+        scored_q, trajectory_queue_manager.BatchOrderedQueueManager
+    ):
+      # FIFO, and `commit` releases nothing, so an early pull gets the same
+      # group a late one would.
+      return await scored_q.get_group_batch(num_groups=1), None
+    while program.step < step:
+      # Step `step - 1` has not committed.
+      if batch_idx is None:
+        assert prev_batch_idx is not None
+        target = scored_q.next_batch_after(prev_batch_idx)
+      else:
+        target = batch_idx
+      group = await scored_q.get_group_ahead(target)
+      if group:
+        return group, target
+      # Short, a hole or closed: `get_ordered_group` decides which once step
+      # `step - 1` commits.
+      await self._wait_until(lambda: program.step >= step)
+    ordered = await scored_q.get_ordered_group(batch_idx=batch_idx)
+    if ordered is None:
+      return [], batch_idx
+    return ordered[1], ordered[0]
+
+
 def _prompt_coordinates(prompt_idx: int, full_batch_size: int) -> dict[str, int]:
   """Returns the dataset coordinates of the prompt at `prompt_idx`.
 
@@ -672,9 +916,11 @@ class StandardRLProgram(RLProgram):
 
         coordinates = _prompt_coordinates(prompt_idx, self.full_batch_size)
         await self._wait_for_dispatch_window(coordinates["batch_idx"])
-        try:
-          prompt_item = next(dataset_iter)
-        except StopIteration:
+        # Off the event loop: dataset iterators such as the DeepSWE
+        # PrewarmDatasetIterator make blocking K8s calls here, which would
+        # otherwise stall the train loop and the polling stage.
+        prompt_item = await asyncio.to_thread(_next_or_exhausted, dataset_iter)
+        if prompt_item is _EXHAUSTED:
           break
         prompt_idx += 1
         last_coordinates = coordinates
@@ -1427,8 +1673,23 @@ class StandardRLProgram(RLProgram):
   async def train_stage(self) -> None:
     """Stage 3: Streaming gradient accumulation with RLTrainerPayloads."""
     assert self.engine is not None
+    if not _train_feed_ahead_enabled():
+      await self._train_steps(feeder=None)
+      return
+    feeder = _TrainFeeder(self)
+    feeder.start()
+    try:
+      await self._train_steps(feeder=feeder)
+    finally:
+      await feeder.stop()
+
+  async def _train_steps(self, *, feeder: _TrainFeeder | None) -> None:
+    """Runs the train steps, pulling and packing inline unless `feeder` does."""
+    assert self.engine is not None
 
     while self.max_steps is None or self._step < self.max_steps:
+      if feeder is not None:
+        feeder.wake()
       current_step = self._step
       step_start_time = time.monotonic()
       consumed_policy_version = self.policy_version
@@ -1505,7 +1766,13 @@ class StandardRLProgram(RLProgram):
 
       while groups_consumed < self.full_batch_size:
         _t_gen = time.monotonic()
-        if isinstance(
+        fed = None
+        if feeder is not None:
+          fed = await feeder.next_group()
+          scored_items = fed.scored_items
+          if fed.batch_idx is not None:
+            current_batch_idx = fed.batch_idx
+        elif isinstance(
             self.scored_q, trajectory_queue_manager.BatchOrderedQueueManager
         ):
           ordered = await self.scored_q.get_ordered_group(
@@ -1521,10 +1788,13 @@ class StandardRLProgram(RLProgram):
         # requests/responses or reading from the rollout worker. Currently this
         # measures time spent waiting on the scored queue (which includes
         # rollout + reward calculation), as MLPerf does not strictly validate
-        # per-component timing accuracy.
+        # per-component timing accuracy. With the feeder it is the wait for its
+        # next group: queue wait plus any packing that training did not hide.
         exposed_generation_time += time.monotonic() - _t_gen
-        if not scored_items:
-          assembled_batches = self.assembler.flush()
+        if fed is not None and not scored_items:
+          assembled_batches = fed.assembled_batches
+        elif not scored_items:
+          assembled_batches = await asyncio.to_thread(self.assembler.flush)
         else:
           if groups_consumed == 0 and self.on_step_begin:
             self.on_step_begin(current_step)
@@ -1544,19 +1814,18 @@ class StandardRLProgram(RLProgram):
             ):
               step_advantages.append(float(np.mean(payload.advantages)))
 
-          payloads = []
-          for item in scored_items:
-            payload = getattr(item, "payload", None)
-            if isinstance(payload, datatypes.RLTrainerPayload):
-              payload = dataclasses.replace(
-                  payload,
-                  metadata={
-                      **payload.metadata,
-                      "traj_id": item.traj_id,
-                  },
-              )
-            payloads.append(payload)
-          assembled_batches = self.assembler.feed(payloads)  # pyrefly: ignore[bad-argument-type]
+          if fed is not None:
+            # Packed by the feeder, typically while the previous microbatch
+            # trained or the previous step synced.
+            assembled_batches = fed.assembled_batches
+          else:
+            # Packing is CPU-bound (seconds per microbatch with routed
+            # experts); run it in a thread so the dispatcher can refill the
+            # rollout workers meanwhile.
+            assembled_batches = await asyncio.to_thread(
+                self.assembler.feed,
+                _payloads_for_assembler(scored_items),  # pyrefly: ignore[bad-argument-type]
+            )
 
         for mb in assembled_batches:
           batch = mb.payload
@@ -1661,6 +1930,10 @@ class StandardRLProgram(RLProgram):
         self.scored_q.commit_batch(current_batch_idx)
       else:
         self.scored_q.commit(current_step, groups=uncommitted_groups)
+      # The commit may have opened the dispatch window. Yield so the
+      # dispatcher refills the just-synced rollout workers now, rather than
+      # after this step's bookkeeping and the next step's first packing.
+      await asyncio.sleep(0)
 
       step_time_sec = time.monotonic() - step_start_time
 
