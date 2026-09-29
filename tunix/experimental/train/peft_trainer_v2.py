@@ -966,11 +966,51 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
 
   def _post_process_train_step(self, aux: Any) -> None:
     """Override this function for post processing aux data from train step."""
-    pass
+    if not isinstance(aux, Mapping) or self._buffered_train_metrics is None:
+      return
+    metrics = self._buffered_train_metrics.additional_metrics
+    for k, v in aux.items():
+      if (
+          not isinstance(v, (utils.WeightedMetric, exp_metrics.WeightedMetric))
+          and getattr(v, "ndim", 0) != 0
+      ):
+        continue
+      if k not in metrics:
+        if k.endswith(("_max", "/max")):
+          op = np.max
+        elif k.endswith(("_min", "/min")):
+          op = np.min
+        elif k.endswith(("_count", "/count")):
+          op = np.sum
+        else:
+          op = utils.metric_reducer(v)
+        metrics[k] = ([v], op)
+      else:
+        metrics[k][0].append(v)
 
   def _post_process_eval_step(self, aux: Any) -> None:
     """Override this function for post processing aux data from eval step."""
-    pass
+    if not isinstance(aux, Mapping) or self._buffered_eval_metrics is None:
+      return
+    metrics = self._buffered_eval_metrics.additional_metrics
+    for k, v in aux.items():
+      if (
+          not isinstance(v, (utils.WeightedMetric, exp_metrics.WeightedMetric))
+          and getattr(v, "ndim", 0) != 0
+      ):
+        continue
+      if k not in metrics:
+        if k.endswith(("_max", "/max")):
+          op = np.max
+        elif k.endswith(("_min", "/min")):
+          op = np.min
+        elif k.endswith(("_count", "/count")):
+          op = np.sum
+        else:
+          op = utils.metric_reducer(v)
+        metrics[k] = ([v], op)
+      else:
+        metrics[k][0].append(v)
 
   def _try_get_learning_rate(self) -> float | jax.Array | None:
     """Returns the learning rate from the optimizer state if available."""
@@ -1006,7 +1046,11 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
           perplexity,
       )
     for k, v in (additional_metrics or {}).items():
-      self.metrics_logger.log(self.metrics_prefix, k, v, self._mode, step)  # pyrefly: ignore[missing-attribute]
+      if k.startswith(("sampler_trainer/", "sampler_is/")):
+        prefix, metric_name = k.split("/", maxsplit=1)
+        self.metrics_logger.log(prefix, metric_name, v, self._mode, step)  # pyrefly: ignore[missing-attribute]
+      if not k.startswith("sampler_trainer/"):
+        self.metrics_logger.log(self.metrics_prefix, k, v, self._mode, step)  # pyrefly: ignore[missing-attribute]
 
   def _buffer_metrics(
       self,
@@ -1125,7 +1169,6 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
         self._buffered_train_metrics,
         loss=train_loss,
         step=self._train_steps,
-        additional_metrics=_aux_to_additional_metrics(aux),
     )
     self._post_process_train_step(aux)
 
@@ -1416,6 +1459,11 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
 
   @override
   def get_metrics(self) -> exp_metrics.MetricsBuffer:
+    if (
+        self._written_metrics is None
+        and self._prev_buffered_train_metrics is not None
+    ):
+      self._write_train_metrics()
     if self._written_metrics is None:
       return exp_metrics.MetricsBuffer(id=-1)
     ret = self._written_metrics

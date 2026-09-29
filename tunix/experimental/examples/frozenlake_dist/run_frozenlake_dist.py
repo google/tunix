@@ -135,6 +135,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   )
   parser.add_argument("--sampler_is_threshold", type=float, default=2.0)
   parser.add_argument(
+      "--fused_tis",
+      action=argparse.BooleanOptionalAction,
+      default=True,
+  )
+  parser.add_argument(
       "--max_seq_token_per_tpu",
       type=int,
       default=None,
@@ -239,6 +244,7 @@ def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
       use_rollout_logps=args.use_rollout_logps,
       sampler_is=None if args.sampler_is == "none" else args.sampler_is,
       sampler_is_threshold=args.sampler_is_threshold,
+      fused_tis=args.fused_tis,
   )
   return algorithm_adapter.GRPOAdapter(
       algo_config=algo_config,

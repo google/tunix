@@ -3527,11 +3527,55 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
-  def test_sampler_trainer_agreement_triggered_in_train_stage(self):
-    """When use_rollout_logps is True and old_per_token_logps present, agreement runs."""
+  def test_sampler_trainer_agreement_fused_into_train_step_by_default(self):
+    """By default with GRPO, agreement is fused into train_step without extra per_token_logps RPC."""
 
     async def _run():
       self.mock_algo.algo_config.use_rollout_logps = True
+      payload_with_old_logps = datatypes.RLTrainerPayload(
+          prompt_ids=np.array([1, 2], dtype=np.int32),
+          prompt_mask=np.array([1, 1], dtype=np.float32),
+          completion_ids=np.array([3, 4], dtype=np.int32),
+          completion_mask=np.array([1, 1], dtype=np.float32),
+          advantages=np.array([1.0, 1.0], dtype=np.float32),
+          old_per_token_logps=np.array([-0.5, -0.2], dtype=np.float32),
+      )
+      self.mock_algo.create_trainer_payloads.return_value = [
+          payload_with_old_logps,
+          payload_with_old_logps,
+      ]
+      self.mock_engine.per_token_logps = mock.AsyncMock()
+      self.mock_engine.get_metrics = mock.AsyncMock(
+          return_value=exp_metrics.MetricsBuffer(
+              id=1,
+              scalar_metrics={
+                  "loss": 0.5,
+                  "sampler_trainer/logp_diff_mean": 0.15,
+              },
+          )
+      )
+      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group(), [])
+      program = self._create_program(dataset=["prompt_data_0"])
+      await program.run_async(self.mock_engine)
+      self.mock_engine.per_token_logps.assert_not_awaited()
+      logger = program.metrics_logger
+      self.assertTrue(
+          logger.metric_exists("", "sampler_trainer/logp_diff_mean", "train")
+      )
+      self.assertAlmostEqual(
+          logger.get_metric("", "sampler_trainer/logp_diff_mean", "train"),
+          0.15,
+          places=5,
+      )
+
+    asyncio.run(_run())
+
+  def test_sampler_trainer_agreement_triggered_in_train_stage(self):
+    """When use_rollout_logps and log_sampler_trainer_agreement are True, pre-step agreement runs."""
+
+    async def _run():
+      self.mock_algo.algo_config.use_rollout_logps = True
+      self.mock_algo.algo_config.log_sampler_trainer_agreement = True
       payload_with_old_logps = datatypes.RLTrainerPayload(
           prompt_ids=np.array([1, 2], dtype=np.int32),
           prompt_mask=np.array([1, 1], dtype=np.float32),
@@ -3607,8 +3651,10 @@ class RLProgramTest(absltest.TestCase):
       self.assertEqual(req.model_role, "actor")
       self.assertEqual(req.pad_id, program.batch_config.pad_id)
       self.assertIn("sampler_trainer/logp_diff_mean", acc)
-      _, diff_mean_vals = acc["sampler_trainer/logp_diff_mean"]
-      self.assertAlmostEqual(diff_mean_vals[0], 0.4 / 3, places=5)
+      diff_mean_fn, diff_mean_vals = acc["sampler_trainer/logp_diff_mean"]
+      self.assertAlmostEqual(
+          float(diff_mean_fn(diff_mean_vals)), 0.4 / 3, places=5
+      )
       self.assertIn("sampler_trainer/probs_pearson_corr", acc)
       # sampler_is is None -> no batch mutation, no TIS weights.
       self.assertIs(out, batch)
@@ -3693,9 +3739,105 @@ class RLProgramTest(absltest.TestCase):
           np.asarray(out.old_per_token_logps), trainer_logps
       )
       self.assertIn("sampler_trainer/seq_error_masked_frac", acc)
+      masked_frac_fn, masked_frac_vals = acc[
+          "sampler_trainer/seq_error_masked_frac"
+      ]
       self.assertAlmostEqual(
-          acc["sampler_trainer/seq_error_masked_frac"][1][0], 0.5, places=5
+          float(masked_frac_fn(masked_frac_vals)), 0.5, places=5
       )
+
+    asyncio.run(_run())
+
+  def test_apply_sampler_trainer_agreement_multi_microbatch_token_weighted_and_chan_pearson(
+      self,
+  ):
+    """Non-fused path reduces multi-microbatch metrics with token weighting and Chan's Pearson."""
+
+    async def _run():
+      self.mock_algo.algo_config.use_rollout_logps = True
+      self.mock_algo.algo_config.sampler_is = "token"
+      self.mock_algo.algo_config.sampler_is_threshold = 2.0
+      program = self._create_program()
+
+      # Microbatch 1: 4 active tokens, near-deterministic easy prompt (~ -0.01)
+      # with small drift.
+      mb1_old = np.array([[-0.010, -0.012, -0.010, -0.012]], dtype=np.float32)
+      mb1_trainer = np.array(
+          [[-0.011, -0.013, -0.011, -0.013]], dtype=np.float32
+      )
+      mb1_mask = np.array([[1.0, 1.0, 1.0, 1.0]], dtype=np.float32)
+
+      # Microbatch 2: only 1 active token + 3 padded tokens, higher entropy
+      # prompt (~ -0.80) with larger drift.
+      mb2_old = np.array([[-0.800, 0.0, 0.0, 0.0]], dtype=np.float32)
+      mb2_trainer = np.array([[-0.500, 0.0, 0.0, 0.0]], dtype=np.float32)
+      mb2_mask = np.array([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32)
+
+      responses = [
+          datatypes.LogprobsResponse(
+              per_token_logps=mb1_trainer, model_version=1
+          ),
+          datatypes.LogprobsResponse(
+              per_token_logps=mb2_trainer, model_version=1
+          ),
+      ]
+      program.engine = mock.MagicMock()
+      program.engine.per_token_logps = mock.AsyncMock(side_effect=responses)
+
+      batch1 = datatypes.RLTrainerPayload(
+          prompt_ids=np.array([[1, 2]], dtype=np.int32),
+          prompt_mask=np.array([[1, 1]], dtype=np.float32),
+          completion_ids=np.array([[3, 4, 5, 6]], dtype=np.int32),
+          completion_mask=mb1_mask,
+          advantages=np.ones((1, 4), dtype=np.float32),
+          old_per_token_logps=mb1_old,
+      )
+      batch2 = datatypes.RLTrainerPayload(
+          prompt_ids=np.array([[1, 2]], dtype=np.int32),
+          prompt_mask=np.array([[1, 1]], dtype=np.float32),
+          completion_ids=np.array([[7, 0, 0, 0]], dtype=np.int32),
+          completion_mask=mb2_mask,
+          advantages=np.ones((1, 4), dtype=np.float32),
+          old_per_token_logps=mb2_old,
+      )
+
+      acc: dict[str, Any] = {}
+      await program._apply_sampler_trainer_agreement(batch1, acc)
+      await program._apply_sampler_trainer_agreement(batch2, acc)
+
+      program._collect_and_log_step_metrics(
+          all_step_items=[],
+          step_rewards=[],
+          step_advantages=[],
+          step_result=None,
+          trainer_metrics=None,
+          num_rollouts=2,
+          num_microbatches=2,
+          step_time_sec=1.0,
+          consumed_policy_version=1,
+          log_step=0,
+          sampler_agreement=acc,
+      )
+
+      # Ground-truth global metrics over the combined 5 active tokens (matching
+      # the fused loss path).
+      global_metrics, _, _ = rl_program.rl_common.sampler_trainer_agreement(
+          np.concatenate([mb1_old, mb2_old], axis=0),
+          np.concatenate([mb1_trainer, mb2_trainer], axis=0),
+          np.concatenate([mb1_mask, mb2_mask], axis=0),
+          sampler_is="token",
+          sampler_is_threshold=2.0,
+      )
+      logger = program.metrics_logger
+      for full_name, (expected_val, _) in global_metrics.items():
+        logged_val = logger.get_metric("", full_name, "train")
+        expected_scalar = float(rl_program.rl_common._metric_scalar(expected_val))
+        self.assertAlmostEqual(
+            logged_val,
+            expected_scalar,
+            places=5,
+            msg=f"Mismatch for {full_name}: {logged_val} vs {expected_scalar}",
+        )
 
     asyncio.run(_run())
 
@@ -4954,6 +5096,75 @@ class ExtractScalarTest(absltest.TestCase):
     )
     self.assertAlmostEqual(
         rl_program._extract_scalar(3.14), 3.14
+    )
+
+  def test_extract_scalar_pearson_and_weighted_metrics(self):
+    from tunix.rl import common as rl_common
+    from tunix.sft import utils as sft_utils
+
+    r1 = np.array([-1.0, -2.0, -0.5], dtype=np.float32)
+    t1 = np.array([-1.2, -1.8, -0.6], dtype=np.float32)
+    m1 = np.ones_like(r1)
+    r2 = np.array([-0.2, -3.0], dtype=np.float32)
+    t2 = np.array([-0.3, -2.8], dtype=np.float32)
+    m2 = np.ones_like(r2)
+
+    metrics1, _, _ = rl_common.compute_sampler_trainer_agreement_jax(r1, t1, m1)
+    metrics2, _, _ = rl_common.compute_sampler_trainer_agreement_jax(r2, t2, m2)
+    metrics_all, _, _ = rl_common.compute_sampler_trainer_agreement_jax(
+        np.concatenate([r1, r2]),
+        np.concatenate([t1, t2]),
+        np.concatenate([m1, m2]),
+    )
+    p1 = metrics1["sampler_trainer/probs_pearson_corr"][0]
+    p2 = metrics2["sampler_trainer/probs_pearson_corr"][0]
+    p_all = metrics_all["sampler_trainer/probs_pearson_corr"][0]
+    expected_single = float(np.asarray(p1.compute()).item())
+    expected_combined = float(np.asarray(p_all.compute()).item())
+
+    self.assertAlmostEqual(
+        rl_program._extract_scalar(p1, "sampler_trainer/probs_pearson_corr"),
+        expected_single,
+        places=5,
+    )
+
+    stacked_pearson = rl_common.PearsonMetric(
+        unreduced_sum=np.stack([p1.unreduced_sum, p2.unreduced_sum]),
+        denominator=np.stack([p1.denominator, p2.denominator]),
+    )
+    self.assertAlmostEqual(
+        rl_program._extract_scalar(
+            stacked_pearson, "sampler_trainer/probs_pearson_corr"
+        ),
+        expected_combined,
+        places=5,
+    )
+    self.assertAlmostEqual(
+        rl_program._extract_scalar(stacked_pearson),
+        expected_combined,
+        places=5,
+    )
+
+    stacked_weighted_pearson = sft_utils.WeightedMetric(
+        unreduced_sum=np.stack([p1.unreduced_sum, p2.unreduced_sum]),
+        denominator=np.stack([p1.denominator, p2.denominator]),
+    )
+    self.assertAlmostEqual(
+        rl_program._extract_scalar(
+            stacked_weighted_pearson, "sampler_trainer/probs_pearson_corr"
+        ),
+        expected_combined,
+        places=5,
+    )
+
+    wm_stacked = sft_utils.WeightedMetric(
+        unreduced_sum=np.array([2.0, 6.0]),
+        denominator=np.array([1.0, 3.0]),
+    )
+    self.assertAlmostEqual(
+        rl_program._extract_scalar(wm_stacked, "sampler_is/tis_mean"),
+        2.0,
+        places=6,
     )
 
 
