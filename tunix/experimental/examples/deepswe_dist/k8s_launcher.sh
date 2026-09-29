@@ -218,39 +218,39 @@ export VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY=${VLLM_RAY_EXTRA_ENV_VAR_PREFIXES
 export VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY:-}
 export DRY_RUN=${DRY_RUN:-false}
 
-# Worker fail-fast. `enforce`: a trainer/rollout worker that dies after it
-# registered with the orchestrator fails its JobSet (and cluster_reaper then
+# Worker fail-fast. `FAIL_FAST=true`: a trainer/rollout worker that dies after
+# it registered with the orchestrator fails its JobSet (and cluster_reaper then
 # tears down the whole run) instead of being restarted in place, which
 # deadlocks the run. Failures before registration are retried by recreating
-# the JobSet up to FT_STARTUP_RETRIES times. `off`: legacy restart behaviour.
-# The orchestrator JobSet is already fail-fast in both modes.
-# In `enforce` the sandbox side fails fast too (examples/deepswe/sandbox_utils.py
+# the JobSet up to FT_STARTUP_RETRIES times. `false`: legacy restart behaviour.
+# The orchestrator JobSet is already fail-fast either way.
+# With `true` the sandbox side fails fast too (examples/deepswe/sandbox_utils.py
 # SandboxFailFastConfig): sandbox readiness is capped at
 # FT_SANDBOX_READY_TIMEOUT_S, SWEEnv tries fleet.acquire FT_SANDBOX_ACQUIRE_RETRIES
 # times, and a failed sandbox preflight or warm-pool error ends the run.
-# In `enforce` the orchestrator also fails the run when a rollout is lost (a
+# With `true` the orchestrator also fails the run when a rollout is lost (a
 # rollout worker unreachable for FT_POLL_RETRY_S, or a rollout RPC error)
 # instead of waiting for it forever, and exits the process on a fatal error.
-export FAIL_FAST_MODE=${FAIL_FAST_MODE:-off}
+export FAIL_FAST=${FAIL_FAST:-false}
 export FT_STARTUP_RETRIES=${FT_STARTUP_RETRIES:-3}
 export FT_SANDBOX_READY_TIMEOUT_S=${FT_SANDBOX_READY_TIMEOUT_S:-600}
 export FT_SANDBOX_ACQUIRE_RETRIES=${FT_SANDBOX_ACQUIRE_RETRIES:-2}
 export FT_POLL_RETRY_S=${FT_POLL_RETRY_S:-600}
-case "${FAIL_FAST_MODE}" in
-  off)
+case "${FAIL_FAST}" in
+  false)
     FAIL_FAST_GENERATOR_FLAGS=()
     FAIL_FAST_SANDBOX_ENV=""
     FAIL_FAST_RUNTIME_ARGS=""
     FAIL_FAST_ORCHESTRATOR_ARGS=""
     ;;
-  enforce)
+  true)
     FAIL_FAST_GENERATOR_FLAGS=(--fail_fast "--startup_retries=${FT_STARTUP_RETRIES}")
     FAIL_FAST_SANDBOX_ENV="FT_SANDBOX_FAIL_FAST=true FT_SANDBOX_READY_TIMEOUT_S=${FT_SANDBOX_READY_TIMEOUT_S} FT_SANDBOX_ACQUIRE_RETRIES=${FT_SANDBOX_ACQUIRE_RETRIES}"
     FAIL_FAST_RUNTIME_ARGS="--exit_on_failure"
     FAIL_FAST_ORCHESTRATOR_ARGS="--fail_fast --ft_poll_retry_s=${FT_POLL_RETRY_S}"
     ;;
   *)
-    echo "Invalid FAIL_FAST_MODE='${FAIL_FAST_MODE}' (expected off|enforce)" >&2
+    echo "Invalid FAIL_FAST='${FAIL_FAST}' (expected true|false)" >&2
     exit 1
     ;;
 esac

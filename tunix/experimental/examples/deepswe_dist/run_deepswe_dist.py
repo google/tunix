@@ -274,7 +274,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help=(
           "Fail the run when a rollout is lost (worker unreachable past"
           " --ft_poll_retry_s, or the rollout RPC failed) instead of logging"
-          " it and waiting forever. Set by FAIL_FAST_MODE=enforce."
+          " it and waiting forever. Set by FAIL_FAST=true."
       ),
   )
   parser.add_argument(
