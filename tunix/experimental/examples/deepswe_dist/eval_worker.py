@@ -22,6 +22,43 @@ import signal
 from tunix.experimental.examples.deepswe_dist import eval_deepswe
 
 
+def _iter_leaves(tree, jax_mod):
+  tree_util = getattr(jax_mod, "tree_util", None)
+  if tree_util is not None and hasattr(tree_util, "tree_leaves"):
+    yield from tree_util.tree_leaves(tree)
+    return
+  if isinstance(tree, dict):
+    for v in tree.values():
+      yield from _iter_leaves(v, jax_mod)
+  elif isinstance(tree, (list, tuple)):
+    for v in tree:
+      yield from _iter_leaves(v, jax_mod)
+  else:
+    yield tree
+
+
+def _delete_pytree_buffers(tree, jax_mod, keep_tree=None):
+  array_cls = getattr(jax_mod, "Array", ())
+  if not isinstance(array_cls, type):
+    return
+  keep_ids = set()
+  if keep_tree is not None:
+    for leaf in _iter_leaves(keep_tree, jax_mod):
+      val = getattr(leaf, "value", leaf)
+      keep_ids.add(id(val))
+  for leaf in _iter_leaves(tree, jax_mod):
+    val = getattr(leaf, "value", leaf)
+    if id(val) in keep_ids:
+      continue
+    if isinstance(val, array_cls) and not getattr(
+        val, "is_deleted", lambda: False
+    )():
+      try:
+        val.delete()
+      except Exception:  # pylint: disable=broad-exception-caught
+        pass
+
+
 def load_and_convert_scanned_checkpoint(
     a, path, sampler, ckpt_prefuse_moe=False
 ):
@@ -40,46 +77,72 @@ def load_and_convert_scanned_checkpoint(
       " vLLM weights in-memory...",
       path,
   )
-  base_config_path = os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")
-  scanned_overrides = dict(eval_deepswe.maxtext_config(a))
-  scanned_overrides.update({
-      "load_parameters_path": str(path),
-      "scan_layers": True,
-      "prefuse_moe_weights": ckpt_prefuse_moe,
-      "attention": "dot_product",
-      "model_call_mode": "",
-  })
-  scanned_cfg = pyconfig.initialize(
-      ["", str(base_config_path)], **scanned_overrides
-  )
-  scanned_model, scanned_mesh = model_creation_utils.from_pretrained(
-      scanned_cfg,
-      devices=jax.devices(),
-      model_mode=MODEL_MODE_AUTOREGRESSIVE,
-  )
-  scanned_state = nnx.state(scanned_model, nnx.Param)
-  del scanned_model, scanned_mesh
-  gc.collect()
+  reinit_needed = False
+  if hasattr(sampler.vllm_sampler, "delete_cache"):
+    sampler.vllm_sampler.delete_cache()
+    reinit_needed = True
+  try:
+    base_config_path = os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")
+    scanned_overrides = dict(eval_deepswe.maxtext_config(a))
+    scanned_overrides.update({
+        "load_parameters_path": str(path),
+        "scan_layers": True,
+        "prefuse_moe_weights": ckpt_prefuse_moe,
+        "attention": "dot_product",
+        "model_call_mode": "",
+    })
+    scanned_cfg = pyconfig.initialize(
+        ["", str(base_config_path)], **scanned_overrides
+    )
+    scanned_model, scanned_mesh = model_creation_utils.from_pretrained(
+        scanned_cfg,
+        devices=jax.devices(),
+        model_mode=MODEL_MODE_AUTOREGRESSIVE,
+    )
+    scanned_state = nnx.state(scanned_model, nnx.Param)
+    del scanned_model, scanned_mesh
+    gc.collect()
 
-  converter = MaxTextToMaxTextConverter(
-      config=scanned_cfg,
-      tp=a.mesh_tp,
-      prefuse_moe_weights=True,
-      target_dtype=None,
-  )
-  converted_state = converter.convert(
-      scanned_state,
-      target_state=sampler.vllm_sampler.transformer_state,
-  )
-  del scanned_state
-  gc.collect()
+    converter = MaxTextToMaxTextConverter(
+        config=scanned_cfg,
+        tp=a.mesh_tp,
+        prefuse_moe_weights=True,
+        target_dtype=None,
+    )
+    converted_state = converter.convert(
+        scanned_state,
+        target_state=sampler.vllm_sampler.transformer_state,
+    )
+    _delete_pytree_buffers(scanned_state, jax, keep_tree=converted_state)
+    del scanned_state
+    gc.collect()
 
-  while isinstance(converted_state, dict) and "model" in converted_state:
-    converted_state = converted_state["model"]
-  sampler.vllm_sampler.update_params(converted_state)
-  del converted_state
-  gc.collect()
-  jax.clear_caches()
+    while isinstance(converted_state, dict) and "model" in converted_state:
+      converted_state = converted_state["model"]
+    sampler_cfg = getattr(sampler.vllm_sampler, "config", None)
+    orig_free_kv = getattr(
+        sampler_cfg, "free_kv_cache_during_weight_sync", None
+    )
+    if sampler_cfg is not None and orig_free_kv is not None:
+      sampler_cfg.free_kv_cache_during_weight_sync = False
+    try:
+      sampler.vllm_sampler.update_params(converted_state)
+    finally:
+      if sampler_cfg is not None and orig_free_kv is not None:
+        sampler_cfg.free_kv_cache_during_weight_sync = orig_free_kv
+    _delete_pytree_buffers(
+        converted_state,
+        jax,
+        keep_tree=getattr(sampler.vllm_sampler, "transformer_state", None),
+    )
+    del converted_state
+    gc.collect()
+    jax.clear_caches()
+    if hasattr(jax, "effects_barrier"):
+      jax.effects_barrier()
+  finally:
+    if reinit_needed and hasattr(sampler.vllm_sampler, "reinitialize_cache"):
+      sampler.vllm_sampler.reinitialize_cache()
   logging.info("Completed in-memory scanned-to-unscanned weight conversion.")
 
 
@@ -142,7 +205,10 @@ def create_worker(a):
   convert_in_memory = bool(a.scan_layers)
   mt_cfg = eval_deepswe.maxtext_config(a)
   mt_cfg["scan_layers"] = False
-  mt_cfg["load_parameters_path"] = "" if convert_in_memory else str(path)
+  if convert_in_memory:
+    mt_cfg.pop("load_parameters_path", None)
+  else:
+    mt_cfg["load_parameters_path"] = str(path)
   additional_config = {
       "enable_continue_decode": False,
       "maxtext_config": mt_cfg,
