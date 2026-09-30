@@ -239,6 +239,15 @@ def main() -> None:
       help="Kueue local queue name for scheduling (optional).",
   )
   parser.add_argument(
+      "--preemptible",
+      action=argparse.BooleanOptionalAction,
+      default=None,
+      help=(
+          'Add scheduling.x-k8s.io/preemptible: "true" label to JobSet'
+          " metadata (or set PREEMPTIBLE=true)."
+      ),
+  )
+  parser.add_argument(
       "--service_account",
       default=os.environ.get("SERVICE_ACCOUNT", "xpk-sa"),
       help="Kubernetes service account for pods.",
@@ -425,11 +434,17 @@ def main() -> None:
   if args.jobset_name is None:
     jobset_name = f"{os.environ.get('USER')}-{pw_instance_type}-{num_chips}"
 
-  queue_label = (
-      f"  labels:\n    kueue.x-k8s.io/queue-name: {args.queue_name}\n"
-      if args.queue_name
-      else ""
-  )
+  if args.preemptible is not None:
+    preemptible = args.preemptible
+  else:
+    preemptible = os.environ.get("PREEMPTIBLE", "").lower() in ("true", "1")
+
+  labels = []
+  if args.queue_name:
+    labels.append(f"    kueue.x-k8s.io/queue-name: {args.queue_name}\n")
+  if preemptible:
+    labels.append('    scheduling.x-k8s.io/preemptible: "true"\n')
+  queue_label = "  labels:\n" + "".join(labels) if labels else ""
 
   # Optional reservation pin. NAP will not create a large TPU slice without being
   # told which reservation to draw from -- it fails the scale-up with

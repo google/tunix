@@ -352,6 +352,53 @@ class YamlGeneratorTest(parameterized.TestCase):
         "sidecar must be attached to the pathways-worker pod, not another job",
     )
 
+  @parameterized.named_parameters(
+      ("flag_only", ["--preemptible"], {}, {"scheduling.x-k8s.io/preemptible": "true"}),
+      (
+          "flag_with_queue",
+          ["--queue_name=multislice-queue", "--preemptible"],
+          {},
+          {
+              "kueue.x-k8s.io/queue-name": "multislice-queue",
+              "scheduling.x-k8s.io/preemptible": "true",
+          },
+      ),
+      (
+          "env_with_queue",
+          ["--queue_name=multislice-queue"],
+          {"PREEMPTIBLE": "true"},
+          {
+              "kueue.x-k8s.io/queue-name": "multislice-queue",
+              "scheduling.x-k8s.io/preemptible": "true",
+          },
+      ),
+      (
+          "no_preemptible_overrides_env",
+          ["--queue_name=multislice-queue", "--no-preemptible"],
+          {"PREEMPTIBLE": "true"},
+          {"kueue.x-k8s.io/queue-name": "multislice-queue"},
+      ),
+  )
+  def test_preemptible_label(self, extra_args, env, expected_labels):
+    import yaml  # pylint: disable=g-import-not-at-top
+
+    template_file = _get_template_path("jobset.pathways.yaml")
+    argv = [
+        "yaml_generator.py",
+        template_file,
+        "--jobset_name=test-preemptible",
+        "--tpu_slice=tpu7x:4x4x8",
+        *extra_args,
+    ]
+    with mock.patch.dict(os.environ, env, clear=False):
+      with mock.patch.object(sys, "argv", argv):
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+          yaml_generator.main()
+          rendered = mock_stdout.getvalue()
+
+    jobset = yaml.safe_load(rendered)
+    self.assertEqual(jobset["metadata"]["labels"], expected_labels)
+
 
 _FAIL_FAST_TEMPLATES = (
     ("tpu", "jobset.tpu.yaml", "tpuv5:2x2x1"),

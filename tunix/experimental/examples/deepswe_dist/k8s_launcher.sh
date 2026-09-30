@@ -215,6 +215,7 @@ export ROLLOUT_REPLICAS=${ROLLOUT_REPLICAS:-1}
 export KUEUE_QUEUE=${KUEUE_QUEUE:-}
 export K8S_NAMESPACE=${K8S_NAMESPACE:-default}
 export KUEUE_QUEUE_NAME=${KUEUE_QUEUE_NAME:-${KUEUE_QUEUE:-${QUEUE_NAME:-}}}
+export PREEMPTIBLE=${PREEMPTIBLE:-${preemptible:-false}}
 export PRIORITY_CLASS=${PRIORITY_CLASS:-medium}
 
 export TRAINER_EXTRA_ENV=${TRAINER_EXTRA_ENV:-}
@@ -259,12 +260,7 @@ esac
 
 apply_manifest() {
   local priority_sed="s/priorityClassName: [a-zA-Z0-9_-]\+/priorityClassName: ${PRIORITY_CLASS:-medium}/g"
-  local filter
-  if [[ -n "${KUEUE_QUEUE}" ]]; then
-    filter=(sed -e "${priority_sed}" -e "s|^metadata:|metadata:\n  labels:\n    kueue.x-k8s.io/queue-name: ${KUEUE_QUEUE}|")
-  else
-    filter=(sed -e "${priority_sed}")
-  fi
+  local filter=(sed -e "${priority_sed}")
 
   if [[ "$DRY_RUN" == "true" ]]; then
     echo "---"
@@ -901,6 +897,18 @@ while [[ $# -gt 0 ]]; do
       KUEUE_QUEUE_NAME="${1#*=}"
       shift
       ;;
+    --preemptible)
+      export PREEMPTIBLE=true
+      shift
+      ;;
+    --no-preemptible)
+      export PREEMPTIBLE=false
+      shift
+      ;;
+    --preemptible=*)
+      export PREEMPTIBLE="${1#*=}"
+      shift
+      ;;
     --scratch|--gcs-scratch)
       GCS_SCRATCH_LOCATION="$2"
       shift 2
@@ -923,6 +931,7 @@ while [[ $# -gt 0 ]]; do
       echo "  --command <cmd>          Command to run"
       echo "  --namespace <ns>         Kubernetes namespace (default: default)"
       echo "  --queue <name>           Kueue local queue name (optional)"
+      echo "  --preemptible            Label JobSets with scheduling.x-k8s.io/preemptible=true"
       echo "  --image <image>          Container image to use"
       echo "  --dry-run, --render      Print generated YAMLs without applying"
       echo "  --scratch, --gcs-scratch GCS scratch location"
