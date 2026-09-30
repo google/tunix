@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import math
 import os
 import threading
 import time
@@ -159,6 +160,7 @@ class FakeDestination:
       pre_gate: Optional[asyncio.Event] = None,
       pre_await: Optional[asyncio.Event] = None,
       delay_after_phase: Optional[str] = None,
+      delay_duration: float = 60.0,
       round_report_override: Optional[Mapping[str, Any]] = None,
       round_report_sequence: Optional[list] = None,
       crash_after_publish: bool = False,
@@ -180,6 +182,7 @@ class FakeDestination:
     self._pre_gate = pre_gate
     self._pre_await = pre_await
     self._delay_after_phase = delay_after_phase
+    self._delay_duration = delay_duration
     self._round_report_override = round_report_override
     # Consumed one per status query, last entry repeats: models a worker
     # whose answer changes between the coordinator's polls (e.g. a post
@@ -236,7 +239,7 @@ class FakeDestination:
 
   async def _maybe_delay(self, phase: str) -> None:
     if self._delay_after_phase == phase:
-      await asyncio.sleep(60)
+      await asyncio.sleep(self._delay_duration)
 
   async def bind_weight_sync(self):
     if not self.bound:
@@ -297,6 +300,7 @@ class FakeDestination:
     # Staging copy only. The serving copy must survive an abort after this.
     self.staging = list(self.host_staging)
     self.tracker.complete(sync_request, "h2d_done")
+    await self._maybe_delay("weight_sync")
 
   async def post_weight_sync(self, sync_request: Any = None, **kwargs):
     del kwargs
@@ -1875,7 +1879,100 @@ class PhaseTimeoutsEnvTest(absltest.TestCase):
       timeouts = PhaseTimeouts()
       self.assertEqual(timeouts.pre, 750.0)
 
+  def test_phase_timeouts_disabled_via_env(self):
+    for env_key in ("WEIGHT_SYNC_DISABLE_TIMEOUTS", "DISABLE_WEIGHT_SYNC_TIMEOUTS"):
+      with mock.patch.dict(
+          os.environ,
+          {
+              env_key: "1",
+              "WEIGHT_SYNC_PRE_TIMEOUT_S": "10",
+              "WEIGHT_SYNC_TRANSFER_TIMEOUT_S": "10",
+          },
+          clear=True,
+      ):
+        self.assertTrue(
+            weight_sync_coordinator.is_weight_sync_timeouts_disabled()
+        )
+        timeouts = PhaseTimeouts()
+        self.assertEqual(timeouts, PhaseTimeouts.disabled())
+        for field in dataclasses.fields(PhaseTimeouts):
+          self.assertTrue(math.isinf(getattr(timeouts, field.name)))
+
+  def test_phase_timeouts_individual_inf_or_nonpositive_env(self):
+    with mock.patch.dict(
+        os.environ,
+        {
+            "WEIGHT_SYNC_BIND_TIMEOUT_S": "inf",
+            "WEIGHT_SYNC_TRANSFER_TIMEOUT_S": "none",
+            "WEIGHT_SYNC_H2D_TIMEOUT_S": "0",
+            "WEIGHT_SYNC_POST_TIMEOUT_S": "-1",
+        },
+        clear=True,
+    ):
+      timeouts = PhaseTimeouts()
+      self.assertTrue(math.isinf(timeouts.bind))
+      self.assertTrue(math.isinf(timeouts.transfer))
+      self.assertTrue(math.isinf(timeouts.h2d))
+      self.assertTrue(math.isinf(timeouts.post))
+      self.assertEqual(timeouts.metadata, 300.0)
+
+
+class PhaseTimingsAndDisabledTimeoutsRoundTest(CoordinatorTestBase):
+
+  def test_round_records_concrete_phase_timings_without_conflating_pre_and_transfer(
+      self,
+  ):
+    dest = FakeDestination(
+        "sampler", [], delay_after_phase="pre", delay_duration=0.08
+    )
+    self.make(dest)
+
+    result = self.sync(policy_version=1)
+
+    self.assertTrue(result.success)
+    timings = result.phase_timings_s
+    for key in (
+        "bind",
+        "metadata",
+        "source_prepare",
+        "register",
+        "pre",
+        "transfer",
+        "h2d",
+        "post",
+        "abort",
+        "release",
+    ):
+      self.assertIn(key, timings)
+      self.assertGreaterEqual(timings[key], 0.0)
+    # pre had a 80ms delay while transfer was instantaneous; transfer_s must
+    # NOT include pre_s.
+    self.assertGreaterEqual(timings["pre"], 0.06)
+    self.assertLess(timings["transfer"], timings["pre"])
+    self.assertEqual(timings["abort"], 0.0)
+
+  def test_coordinator_disable_timeouts_allows_slow_phases(self):
+    dest = FakeDestination(
+        "sampler", [], delay_after_phase="weight_sync", delay_duration=0.05
+    )
+    wire = Wire()
+    source = FakeSource("trainer", wire, [], prepare_delay=0.05)
+    self.make(dest, sources=[source])
+    self.coordinator = weight_sync_coordinator.WeightSyncCoordinator(
+        registry=self.registry,
+        handler=self.handler,
+        timeouts=dataclasses.replace(
+            FAST_TIMEOUTS, source_prepare=0.005, h2d=0.005
+        ),
+        disable_timeouts=True,
+    )
+
+    result = self.sync(policy_version=1)
+    self.assertTrue(result.success)
+    self.assertTrue(math.isinf(self.coordinator._timeouts.h2d))
+
 
 if __name__ == "__main__":
   absltest.main()
+
 

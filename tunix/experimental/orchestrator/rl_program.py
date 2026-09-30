@@ -365,6 +365,8 @@ class StandardRLProgram(RLProgram):
       ) = trajectory_queue_manager.GroupOrder.ARRIVAL,
       on_step_begin: Callable[[int], None] | None = None,
       on_step_end: Callable[[int, Any], None] | None = None,
+      val_start_step: int | None = None,
+      on_checkpoint_saved: Callable[[dict[str, Any]], None] | None = None,
   ):
     super().__init__()
     self.engine: rl_engine_interface.AbstractRLEngine | None = None
@@ -499,6 +501,9 @@ class StandardRLProgram(RLProgram):
     )
     self.on_step_begin = on_step_begin
     self.on_step_end = on_step_end
+    self.val_start_step = val_start_step
+    self.on_checkpoint_saved = on_checkpoint_saved
+    self.last_step_timestamp_ms: int | None = None
     self._in_flight_rollouts = 0
     self._window_release = asyncio.Event()
     self._dispatch_done = asyncio.Event()
@@ -1449,22 +1454,32 @@ class StandardRLProgram(RLProgram):
 
       async def _maybe_save_checkpoint() -> None:
         nonlocal checkpoint_saved
+        ckpt_ts_ms = time.time_ns() // 1_000_000
+        self.last_step_timestamp_ms = ckpt_ts_ms
         optimizer_step = self.step + 1
         if (
             isinstance(step_result, dict)
             and step_result.get("train_step") is not None
         ):
           optimizer_step = int(step_result["train_step"])
-        next_batch_idx = (
-            self.scored_q.next_batch_after(current_batch_idx)
-            if isinstance(
-                self.scored_q,
-                trajectory_queue_manager.BatchOrderedQueueManager,
-            )
-            and current_batch_idx is not None
-            else self.step + 1
-        )
-        await self.engine.save_checkpoint(
+        if (
+            self.val_start_step is not None
+            and optimizer_step < self.val_start_step
+        ):
+          checkpoint_saved = True
+          return
+        if isinstance(
+            self.scored_q,
+            trajectory_queue_manager.BatchOrderedQueueManager,
+        ):
+          next_batch_idx = (
+              self.scored_q.next_batch_after(current_batch_idx)
+              if current_batch_idx is not None
+              else self.scored_q.next_batch_idx
+          )
+        else:
+          next_batch_idx = self.step + 1
+        save_resp = await self.engine.save_checkpoint(
             role=datatypes.Role.ACTOR,
             metadata={
                 "step": optimizer_step,
@@ -1476,6 +1491,17 @@ class StandardRLProgram(RLProgram):
             },
         )
         checkpoint_saved = True
+        if self.on_checkpoint_saved is not None:
+          # `TrainerWorker.save_checkpoint` always returns the saved path in
+          # `Response.metadata["checkpoint_path"]`. The callback runs in a
+          # worker thread (it may do blocking file/GCS I/O) and is awaited, so
+          # calls never overlap and its exceptions still propagate.
+          ckpt_info: dict[str, Any] = {
+              "step": optimizer_step,
+              "timestamp_ms": ckpt_ts_ms,
+              "checkpoint_path": save_resp.metadata["checkpoint_path"],
+          }
+          await asyncio.to_thread(self.on_checkpoint_saved, ckpt_info)
 
       while groups_consumed < self.full_batch_size:
         _t_gen = time.monotonic()

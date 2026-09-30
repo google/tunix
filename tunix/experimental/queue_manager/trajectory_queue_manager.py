@@ -100,12 +100,23 @@ def build_filter(
 
   def _staleness_filter(group: Sequence[Any]) -> Any:
     min_allowed = current_policy_version() - max_staleness
+    valid_versions = [
+        getattr(item, "policy_version", 0)
+        for item in group
+        if getattr(item, "is_valid", True)
+    ]
+    group_pv = (
+        max(valid_versions)
+        if valid_versions
+        else max((getattr(item, "policy_version", 0) for item in group), default=0)
+    )
     valid = [
-        item for item in group if getattr(item, "policy_version", 0) >= min_allowed
+        item
+        for item in group
+        if getattr(item, "policy_version", 0) >= min_allowed
+        or (not getattr(item, "is_valid", True) and group_pv >= min_allowed)
     ]
-    filtered = [
-        item for item in group if getattr(item, "policy_version", 0) < min_allowed
-    ]
+    filtered = [item for item in group if item not in valid]
     if filter_fn is not None:
       res = filter_fn(valid)
       if isinstance(res, tuple):

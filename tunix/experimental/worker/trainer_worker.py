@@ -14,6 +14,7 @@
 
 """TrainerWorker implementation for role-based isolation."""
 
+from collections.abc import Mapping
 import contextlib
 from typing import Any, Callable, ContextManager, cast
 
@@ -357,13 +358,22 @@ class TrainerWorker(abstract_worker.Worker):
       self.state = WorkerState.ERROR
       raise
 
+  def _resolve_checkpoint_path(self, metadata: Mapping[str, Any]) -> str:
+    """Resolves the saved Orbax model_params directory from the underlying trainer."""
+    ckpt_dir = self._trainer.checkpoint_dir
+    step = metadata.get("step")
+    if ckpt_dir and step is not None:
+      return f"{str(ckpt_dir).rstrip('/')}/{int(step)}/model_params"
+    return ""
+
   def save_checkpoint(self, metadata: Any, **kwargs) -> datatypes.Response:
     """Force the trainer to serialize its state (model + optimizer)."""
     self._ensure_ready()
     try:
       self._trainer.save_checkpoint(metadata, **kwargs)
+      ckpt_path = self._resolve_checkpoint_path(metadata)
       self._last_error = None
-      return self._response(checkpoint_saved=True)
+      return self._response(checkpoint_saved=True, checkpoint_path=ckpt_path)
     except Exception as exc:
       self._last_error = str(exc)
       self.state = WorkerState.ERROR

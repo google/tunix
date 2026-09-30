@@ -15,6 +15,7 @@
 """Unit tests for tunix.oss.examples.deepswe.sandbox_utils."""
 
 import os
+import threading
 from unittest import mock
 from absl.testing import absltest
 import numpy as np
@@ -25,6 +26,7 @@ class FakeFleet:
   """Fake SandboxFleet that records calls and tracks active pool replica state."""
 
   def __init__(self):
+    self._lock = threading.Lock()
     self.warm_calls: list[tuple[str, int | None, bool]] = []
     self.set_replicas_calls: list[tuple[str, int]] = []
     self.unwarm_calls: list[str] = []
@@ -33,19 +35,23 @@ class FakeFleet:
   def warm_image(
       self, image: str, replicas_override: int | None = None, wait: bool = False
   ) -> None:
-    self.warm_calls.append((image, replicas_override, wait))
-    self.active_pools[image] = replicas_override or 1
+    with self._lock:
+      self.warm_calls.append((image, replicas_override, wait))
+      self.active_pools[image] = replicas_override or 1
 
   def set_pool_replicas(self, image: str, replicas: int) -> None:
-    self.set_replicas_calls.append((image, replicas))
-    self.active_pools[image] = replicas
+    with self._lock:
+      self.set_replicas_calls.append((image, replicas))
+      self.active_pools[image] = replicas
 
   def unwarm_image(self, image: str) -> None:
-    self.unwarm_calls.append(image)
-    self.active_pools.pop(image, None)
+    with self._lock:
+      self.unwarm_calls.append(image)
+      self.active_pools.pop(image, None)
 
   def teardown(self) -> None:
-    self.active_pools.clear()
+    with self._lock:
+      self.active_pools.clear()
 
 
 class SandboxUtilsTest(absltest.TestCase):
@@ -503,6 +509,26 @@ class SandboxUtilsTest(absltest.TestCase):
             namespace="test-ns",
             delete_pods=False,
         )
+
+  def test_parallel_prewarming_across_images(self):
+    fleet = FakeFleet()
+    dataset = [
+        {"prompt": f"p{i}", "docker_image": f"img_{i}"} for i in range(8)
+    ]
+    iterator = sandbox_utils.PrewarmDatasetIterator(
+        dataset,
+        fleet=fleet,
+        num_generations=4,
+        batch_size=4,
+        wait_initial=True,
+        max_workers=8,
+    )
+    # Both current_batch (img_0..3) and next_batch (img_4..7) should be warmed concurrently
+    self.assertEqual(len(fleet.active_pools), 8)
+    for i in range(8):
+      self.assertEqual(fleet.active_pools[f"img_{i}"], 4)
+    iterator.close()
+    self.assertEqual(fleet.active_pools, {})
 
 
 if __name__ == "__main__":

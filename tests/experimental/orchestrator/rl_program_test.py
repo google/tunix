@@ -1480,6 +1480,48 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_train_stage_on_checkpoint_saved_gets_path_from_response(self):
+    async def _run():
+      self.mock_algo.num_generations = 1
+      self.mock_algo.mini_batch_size = 1
+      self.mock_engine.save_checkpoint.return_value = datatypes.Response(
+          metadata={
+              "checkpoint_saved": True,
+              "checkpoint_path": "gs://ckpt/1/model_params",
+          }
+      )
+      saved = []
+      program = self._create_program(
+          batch_size=1, on_checkpoint_saved=saved.append
+      )
+      program.engine = self.mock_engine
+
+      payload = datatypes.RLTrainerPayload(
+          prompt_ids=np.array([1, 2], dtype=np.int32),
+          prompt_mask=np.array([1.0, 1.0], dtype=np.float32),
+          completion_ids=np.array([3, 4], dtype=np.int32),
+          completion_mask=np.array([1.0, 1.0], dtype=np.float32),
+          advantages=np.array([1.0, 1.0], dtype=np.float32),
+      )
+      item = datatypes.TrajectoryItem(
+          group_index=0,
+          prompt_id="prompt_0",
+          start_step=0,
+          traj={"trajectory_reward": 1.0},
+      )
+      item.payload = payload
+      await program.scored_q.put(item)
+      await program.scored_q.close()
+
+      await program.train_stage()
+
+      self.assertLen(saved, 1)
+      self.assertEqual(saved[0]["step"], 1)
+      self.assertEqual(saved[0]["checkpoint_path"], "gs://ckpt/1/model_params")
+      self.assertEqual(saved[0]["timestamp_ms"], program.last_step_timestamp_ms)
+
+    asyncio.run(_run())
+
   def test_train_stage_sequence_packed_final_batch_broken_down_into_multiple_microbatches(
       self,
   ):
@@ -4860,6 +4902,56 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
           [c["batch_idx"] for c in dispatched_coords],
           [2, 2],
       )
+      program.close()
+
+    asyncio.run(_run())
+
+  def test_checkpoint_on_flush_without_consumed_group_uses_scored_q_next_batch_idx(
+      self,
+  ):
+    async def _run():
+      class _FlushOnEofAssembler:
+        num_generations: int = 1
+        mini_batch_size: int = 2
+
+        def feed(self, items):
+          del items
+          return []
+
+        def flush(self):
+          return [
+              batch_assembly.AssembledBatch(
+                  payload="flushed_batch", is_final_batch=True
+              )
+          ]
+
+      program = rl_program.StandardRLProgram(
+          algo=self.mock_algo,
+          dataset=[f"p{i}" for i in range(6)],
+          batch_size=2,
+          max_staleness=1,
+          group_order=rl_program.trajectory_queue_manager.GroupOrder.PROMPT_BATCH,
+          assembler=_FlushOnEofAssembler(),
+      )
+      program.engine = self.mock_engine
+      assert isinstance(
+          program.scored_q,
+          rl_program.trajectory_queue_manager.BatchOrderedQueueManager,
+      )
+      # Batches 0, 1, 2 were skipped as holes -> scored_q.next_batch_idx is 3,
+      # while program.step is still 0.
+      program.scored_q.skip(0, 3)
+      self.assertEqual(program.scored_q.next_batch_idx, 3)
+      await program.scored_q.close()
+
+      await program.train_stage()
+
+      self.mock_engine.save_checkpoint.assert_called_once()
+      checkpoint_metadata = self.mock_engine.save_checkpoint.call_args.kwargs[
+          "metadata"
+      ]
+      self.assertEqual(checkpoint_metadata["global_step"], 1)
+      self.assertEqual(checkpoint_metadata["next_batch_idx"], 3)
       program.close()
 
     asyncio.run(_run())

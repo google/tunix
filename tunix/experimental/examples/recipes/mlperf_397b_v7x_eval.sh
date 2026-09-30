@@ -167,6 +167,7 @@ export TOP_K="-1"
 
 export EPISODE_TIMEOUT_SECS=1800
 export DEBUG=${DEBUG:-0}
+export RCP_LOGGING="${RCP_LOGGING:-false}"
 
 # DeepSWE Environment & Agent Sandbox
 export DATASET_PATH="${DATASET_PATH:-gs://mlperf_dataset/benchmark-r2e-gym-easy}"

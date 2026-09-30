@@ -17,10 +17,7 @@ export JOB_PREFIX="${JOB_PREFIX:-$USER}"
 export WANDB_RUN_NAME="${WANDB_RUN_NAME:-${JOB_PREFIX}-mlperf-397b-v7x}"
 
 # Select pod: pod1 (bodaborg-tpu7x-gsc, us-central1) or pod2 (bodaborg-tpu7x-gsc-elm, us-east1).
-export POD="${POD:-pod1}"
-if [[ "${REGION:-}" == us-east1* && "${POD}" == "pod1" ]]; then
-  export POD="pod2"
-fi
+export POD="${POD:-pod2}"
 
 if [[ "${POD}" == "pod2" || "${POD}" == "2" || "${POD}" == "elm" ]]; then
   export REGION="${REGION:-us-east1}"
@@ -40,13 +37,8 @@ export MAXTEXT_OUTPUT_DIR="${MAXTEXT_OUTPUT_DIR:-${BUCKET}/maxtext/${JOB_PREFIX}
 export TRAJECTORY_LOG_DIR="${TRAJECTORY_LOG_DIR:-${BUCKET}/trajectories/${JOB_PREFIX}/logger}"
 export TRAJECTORY_STORE_ROOT_DIR="${TRAJECTORY_STORE_ROOT_DIR:-${TRAJECTORY_STORE_ROOT:-${BUCKET}/trajectories/${JOB_PREFIX}/store}}"
 
-export K8S_NAMESPACE="priority-dev"
+export K8S_NAMESPACE="${K8S_NAMESPACE:-priority-dev}"
 export USE_DYNAMIC_SLICING="true"
-# Raiden weight sync: working 397B runs use ENABLE_MULTI_NUMA=0 and the default
-# RAIDEN_BROADCAST_K (64 -> every slice pushed direct from the trainer). K=3 routes
-# slices through the receiver relay tree, which fails with "Incoming push size
-# mismatch" on the first sync; MULTI_NUMA=1 doubles the listeners per rollout worker.
-export ENABLE_MULTI_NUMA="${ENABLE_MULTI_NUMA:-0}"
 
 # Head pod lands on cpu-np (~257G allocatable). mlperf_pathways_config.sh's
 # 260G user-container request plus proxy/rm requests (~280G) never schedules
@@ -54,8 +46,6 @@ export ENABLE_MULTI_NUMA="${ENABLE_MULTI_NUMA:-0}"
 export USER_CONTAINER_MEMORY="${USER_CONTAINER_MEMORY:-48G}"
 
 export RAIDEN_DEVICES_PER_HOST=8
-export TPU_RAIDEN_DATA_NICS="eth0"
-export RAIDEN_BROADCAST_K=64
 
 # Model configuration
 export MODEL_NAME="Qwen3.5-397B-A17B"
@@ -80,10 +70,15 @@ export TRAINER_MESH_CONTEXT=4
 # (mlperf_397b_1024_v7x.sh) override ROLLOUT_REPLICAS, ROLLOUT_TPU_SLICE and
 # VLLM_DATA_PARALLEL_SIZE; expert then fills the slice's devices (2 per chip) / dp.
 export ROLLOUT_JOBSET_YAML="jobset.mcjax.ray.yaml"
-export ROLLOUT_TPU_SLICE="${ROLLOUT_TPU_SLICE:-tpu7x:2x2x2}"
+export ROLLOUT_TPU_SLICE="${ROLLOUT_TPU_SLICE:-tpu7x:2x2x4}"
+export VLLM_DATA_PARALLEL_SIZE="${VLLM_DATA_PARALLEL_SIZE:-2}"
 _rollout_dims="${ROLLOUT_TPU_SLICE#*:}"
 export ROLLOUT_MESH_EXPERT="${ROLLOUT_MESH_EXPERT:-$(( 2 * ${_rollout_dims//x/*} / ${VLLM_DATA_PARALLEL_SIZE:-1} ))}"
-export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-32}"
+export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-16}"
+
+# Sandbox Concurrency
+export MAX_WARMPOOL_REPLICAS="${MAX_WARMPOOL_REPLICAS:-16}"
+export MAX_CONCURRENCY="${MAX_CONCURRENCY:-1024}"
 
 # vLLM Rollout Configuration
 export VLLM_ADDITIONAL_CONFIG='{"sharding":{"sharding_strategy":{"expert_parallelism":'"${ROLLOUT_MESH_EXPERT}"',"tensor_parallelism":1,"enable_dp_attention":true}},"custom_mamba_cache_multiplier":16,"maxtext_config":{"scan_layers":false,"attention":"vllm_rpa","allow_split_physical_axes":true,"use_multimodal":false,"prefuse_moe_weights":true,"per_device_batch_size":0.0}}'

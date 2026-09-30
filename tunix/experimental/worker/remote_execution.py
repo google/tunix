@@ -38,6 +38,7 @@ import asyncio
 import contextlib
 import hashlib
 import inspect
+import math
 import os
 import struct
 import threading
@@ -658,6 +659,34 @@ class RemoteActorHandle(ActorHandle):
     )
 
 
+_WEIGHT_SYNC_RPC_METHODS = frozenset({
+    "prepare_weight_sync",
+    "release_weight_sync",
+    "bind_weight_sync",
+    "get_weight_sync_metadata",
+    "pre_weight_sync",
+    "weight_sync",
+    "post_weight_sync",
+    "abort_weight_sync",
+    "get_weight_sync_status",
+})
+_TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "y", "t", "on"})
+
+
+def _normalize_rpc_timeout(timeout_s: Optional[float]) -> Optional[float]:
+  if timeout_s is None or math.isinf(timeout_s) or timeout_s <= 0:
+    return None
+  return float(timeout_s)
+
+
+def _weight_sync_timeouts_disabled() -> bool:
+  for name in ("WEIGHT_SYNC_DISABLE_TIMEOUTS", "DISABLE_WEIGHT_SYNC_TIMEOUTS"):
+    val = os.getenv(name)
+    if val is not None and val.strip().lower() in _TRUTHY_ENV_VALUES:
+      return True
+  return False
+
+
 class GrpcRemoteActorHandle(RemoteActorHandle):
   """ActorHandle connecting to GrpcRemoteExecutionServer over TCP sockets via gRPC."""
 
@@ -673,7 +702,7 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     self._host_port = target_address.replace("grpc://", "")
     self._channel: Optional[Any] = None
     self._rpc: Optional[Any] = None
-    self._rpc_timeout_s = rpc_timeout_s
+    self._rpc_timeout_s = _normalize_rpc_timeout(rpc_timeout_s)
     # Blocking submit() runs on a persistent background event loop so repeated
     # calls reuse one channel. gRPC aio channels are bound to the loop that
     # created them, so they cannot be shared with the caller's async loop nor
@@ -683,6 +712,16 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     self._sync_channel: Optional[Any] = None
     self._sync_rpc: Optional[Any] = None
     self._sync_lock = threading.Lock()
+
+  def _effective_rpc_timeout(
+      self, method_name: Optional[str] = None
+  ) -> Optional[float]:
+    if (
+        method_name in _WEIGHT_SYNC_RPC_METHODS
+        and _weight_sync_timeouts_disabled()
+    ):
+      return None
+    return self._rpc_timeout_s
 
   def _make_rpc(self, channel: Any) -> Any:
     return channel.unary_unary(
@@ -718,11 +757,12 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
         len(payload) / 2**30,
         total,
     )
+    chunk_timeout = self._effective_rpc_timeout(request.method_name)
     for index in range(total):
       chunk = view[index * _CHUNK_BYTES : (index + 1) * _CHUNK_BYTES]
       await put_chunk(
           _CHUNK_HEADER.pack(upload_id, index, total) + chunk,
-          timeout=self._rpc_timeout_s,
+          timeout=chunk_timeout,
       )
     return _CHUNKED_MAGIC + upload_id
 
@@ -783,7 +823,7 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     )
     response: ExecutionResponse = await self._sync_rpc(
         await self._encode_request(self._sync_channel, request),
-        timeout=self._rpc_timeout_s,
+        timeout=self._effective_rpc_timeout(method_name),
     )
     return response.unwrap()
 
@@ -797,7 +837,7 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     )
     response: ExecutionResponse = await rpc(
         await self._encode_request(self._channel, request),
-        timeout=self._rpc_timeout_s,
+        timeout=self._effective_rpc_timeout(method_name),
     )
     return response.unwrap()
 
@@ -832,7 +872,7 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     )
     return await rpc(
         await self._encode_request(self._channel, request),
-        timeout=self._rpc_timeout_s,
+        timeout=self._effective_rpc_timeout(method_name),
     )
 
   async def poll_responses(

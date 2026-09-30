@@ -43,6 +43,7 @@ from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import orchestrator
 from tunix.experimental.orchestrator import rl_program
 from tunix.experimental.weight_sync import weight_sync
+from tunix.experimental.weight_sync import weight_sync_coordinator
 from tunix.experimental.worker import remote_execution
 from tunix.rl import algorithm_config
 from tunix.sft import metrics_logger as metrics_logger_lib
@@ -259,6 +260,15 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       choices=list(weight_sync.WeightSyncMode),
   )
   parser.add_argument(
+      "--disable_weight_sync_timeouts",
+      action=argparse.BooleanOptionalAction,
+      default=weight_sync_coordinator.is_weight_sync_timeouts_disabled(),
+      help=(
+          "Disable all weight-sync phase and RPC timeouts (sets them to"
+          " infinity). Also controlled via WEIGHT_SYNC_DISABLE_TIMEOUTS=1."
+      ),
+  )
+  parser.add_argument(
       "--trainable_parameters_mask",
       type=str,
       default=None,
@@ -365,6 +375,19 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       action="store_true",
       default=False,
       help="Enable MLPerf RCP (mllog) compliance logging.",
+  )
+  parser.add_argument(
+      "--val_start_at",
+      type=int,
+      default=(
+          int(os.getenv("VAL_START_AT"))
+          if os.getenv("VAL_START_AT", "").strip()
+          else None
+      ),
+      help=(
+          "First optimizer step to save/evaluate checkpoints from "
+          "(defaults to CEIL(2.5 + 3840 / global_batch_size))."
+      ),
   )
   parser.add_argument(
       "--metric_logger_dir",
@@ -564,14 +587,16 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
 
   if args.image_rewrite_prefix:
     os.environ["IMAGE_REWRITE_PREFIX"] = args.image_rewrite_prefix.strip('"\'')
+  if args.disable_weight_sync_timeouts:
+    os.environ["WEIGHT_SYNC_DISABLE_TIMEOUTS"] = "1"
 
   logging.info("=== Starting Distributed DeepSWE GRPO Orchestrator ===")
   logging.info(
       "Configuration: model_id=%s, batch_size=%d prompt group(s), "
       "mini_batch_size=%d, num_generations=%d, max_steps=%d, max_turns=%d, "
       "train_micro=%d, beta=%.4f, env_backend=%s, use_agent_sandbox=%s, "
-      "weight_sync_mode=%s, trainable_parameters_mask=%s, "
-      "image_rewrite_prefix=%s.",
+      "weight_sync_mode=%s, disable_weight_sync_timeouts=%s, "
+      "trainable_parameters_mask=%s, image_rewrite_prefix=%s.",
       args.model_id,
       args.batch_size,
       args.mini_batch_size,
@@ -583,6 +608,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       args.env_backend,
       args.use_agent_sandbox,
       args.weight_sync_mode,
+      args.disable_weight_sync_timeouts,
       args.trainable_parameters_mask,
       args.image_rewrite_prefix or "(none)",
   )
@@ -629,6 +655,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   cluster = orchestrator.ClusterOrchestrator(
       weight_sync_mode=args.weight_sync_mode,
       trajectory_store_config=_build_trajectory_store_config(args),
+      disable_weight_sync_timeouts=args.disable_weight_sync_timeouts,
   )
   context.ipc.discovery.on_register(
       functools.partial(
@@ -716,6 +743,58 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           max_staleness=args.max_staleness,
       )
 
+    global_batch_size = int(args.batch_size) * int(args.num_generations)
+    val_start_step = (
+        mllog_utils.compute_val_start_step(global_batch_size, args.val_start_at)
+        if args.rcp_logging or args.val_start_at is not None
+        else None
+    )
+    manifest_file = (
+        os.path.join(
+            args.metric_logger_dir.rstrip("/"), "eval_checkpoints.jsonl"
+        )
+        if args.rcp_logging and args.metric_logger_dir
+        else ""
+    )
+
+    def _on_checkpoint_saved(ckpt_info: dict[str, Any]) -> None:
+      if not manifest_file:
+        return
+      step_num = int(ckpt_info["step"])
+      samples_count = step_num * global_batch_size
+      ts_ms = int(ckpt_info["timestamp_ms"])
+      ckpt_path = str(ckpt_info["checkpoint_path"])
+      if not ckpt_path:
+        raise ValueError(
+            f"save_checkpoint for step {step_num} returned no checkpoint_path;"
+            " cannot write the eval manifest entry."
+        )
+      record = {
+          "step": step_num,
+          "checkpoint_path": ckpt_path,
+          "timestamp_ms": ts_ms,
+          "samples_count": samples_count,
+          "global_batch_size": global_batch_size,
+          "batch_size": int(args.batch_size),
+          "num_generations": int(args.num_generations),
+          "val_start_at": int(val_start_step or 1),
+          "max_steps": int(args.max_steps),
+          "target_accuracy": float(args.target_accuracy),
+          "seed": int(args.seed),
+          "mllog_file": (
+              mllog_utils.get_mllog_file_path(
+                  metric_logger_dir=args.metric_logger_dir, seed=args.seed
+              )
+              or ""
+          ),
+      }
+      mllog_utils.append_checkpoint_manifest(manifest_file, record)
+      logging.info(
+          "Appended checkpoint manifest entry for step=%d to %s",
+          step_num,
+          manifest_file,
+      )
+
     program = rl_program.StandardRLProgram(
         algo=algo,
         dataset=prompt_stream,
@@ -764,6 +843,8 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
             if args.rcp_logging
             else None,
         ),
+        val_start_step=val_start_step,
+        on_checkpoint_saved=_on_checkpoint_saved if manifest_file else None,
     )
 
     if args.rcp_logging:
@@ -788,7 +869,12 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           if program.last_step_result is not None
           else args.max_steps
       )
-      mllog_utils.train_stop(args, step=completed_steps, status="success")
+      mllog_utils.train_stop(
+          args,
+          step=completed_steps,
+          status="success",
+          time_ms=program.last_step_timestamp_ms,
+      )
   except BaseException as e:
     if args.rcp_logging:
       completed_steps = (

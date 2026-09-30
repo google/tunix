@@ -700,6 +700,47 @@ class BatchOrderedQueueManagerTest(absltest.TestCase):
 
     asyncio.run(_run_test())
 
+  def test_staleness_filter_retains_invalid_items_in_fresh_group(self):
+    """Tests that invalid (TrajectoryError) items inherit the group's policy_version."""
+
+    async def _run_test():
+      manager = trajectory_queue_manager.TrajectoryQueueManager.create(
+          num_generations=2,
+          max_staleness=1,
+          current_policy_version=lambda: 5,
+      )
+      fresh_valid = _create_item("p0", group_index=0, batch_idx=0)
+      fresh_valid.policy_version = 5
+      error_item = _create_item("p0", group_index=1, batch_idx=0)
+      error_item.is_valid = False
+      error_item.policy_version = 0
+
+      await manager.put(fresh_valid)
+      await manager.put(error_item)
+
+      self.assertEmpty(await manager.get_filtered_groups())
+      batch = await manager.get_group_batch(1)
+      self.assertLen(batch, 2)
+      self.assertCountEqual(batch, [fresh_valid, error_item])
+
+      # When the valid items in the group are stale, the whole group (including
+      # the invalid item) is filtered out.
+      stale_valid = _create_item("p1", group_index=0, batch_idx=0)
+      stale_valid.policy_version = 1
+      stale_error = _create_item("p1", group_index=1, batch_idx=0)
+      stale_error.is_valid = False
+      stale_error.policy_version = 0
+
+      await manager.put(stale_valid)
+      await manager.put(stale_error)
+
+      filtered = await manager.get_filtered_groups()
+      self.assertLen(filtered, 1)
+      self.assertCountEqual(filtered[0], [stale_valid, stale_error])
+
+    asyncio.run(_run_test())
+
 
 if __name__ == "__main__":
   absltest.main()
+

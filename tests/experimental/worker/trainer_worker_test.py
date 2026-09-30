@@ -44,6 +44,11 @@ class FakeTrainer(abstract_trainer.AbstractTrainer):
     self.step_count = 10
     self.target_state = None
     self.gen_model_input_fn = None
+    self._checkpoint_dir = None
+
+  @property
+  def checkpoint_dir(self) -> str | None:
+    return self._checkpoint_dir
 
   def compile(self, dummy_data=None):
     pass
@@ -151,6 +156,19 @@ class TrainerWorkerTest(absltest.TestCase):
   def test_update_returns_step_count(self):
     step = self.worker.update()
     self.assertEqual(step, 11)
+
+  def test_save_checkpoint_returns_checkpoint_path_from_checkpoint_dir(self):
+    resp_empty = self.worker.save_checkpoint(metadata={"step": 5})
+    self.assertTrue(resp_empty.metadata["checkpoint_saved"])
+    self.assertEqual(resp_empty.metadata["checkpoint_path"], "")
+
+    self.fake_trainer._checkpoint_dir = "gs://bucket/checkpoints"
+    resp = self.worker.save_checkpoint(metadata={"step": 5})
+    self.assertTrue(resp.metadata["checkpoint_saved"])
+    self.assertEqual(
+        resp.metadata["checkpoint_path"],
+        "gs://bucket/checkpoints/5/model_params",
+    )
 
   def test_set_target_state_configures_trainer(self):
     target_state = {"params": np.zeros((4, 4))}

@@ -78,6 +78,7 @@ export USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
 export EXACT_TOKEN_CONTINUITY=${EXACT_TOKEN_CONTINUITY:-true}
 export SAMPLER=${SAMPLER:-inprocess_vllm}
 export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
+export WEIGHT_SYNC_DISABLE_TIMEOUTS=${WEIGHT_SYNC_DISABLE_TIMEOUTS:-${DISABLE_WEIGHT_SYNC_TIMEOUTS:-0}}
 export CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-5}
 export CHECKPOINT_MAX_TO_KEEP=${CHECKPOINT_MAX_TO_KEEP:-2}
 export CHECKPOINT_ROOT_DIRECTORY=${CHECKPOINT_ROOT_DIRECTORY:-checkpoints}
@@ -156,6 +157,11 @@ export WANDB_ENTITY=${WANDB_ENTITY:-}
 export LOG_DIR=${LOG_DIR:-}
 export TRAJECTORY_LOG_DIR=${TRAJECTORY_LOG_DIR:-}
 export RCP_LOGGING=${RCP_LOGGING:-false}
+export VAL_START_AT=${VAL_START_AT:-}
+export CHECKPOINT_STEP=${CHECKPOINT_STEP:-0}
+export CHECKPOINT_TIMESTAMP_MS=${CHECKPOINT_TIMESTAMP_MS:-}
+export SAMPLES_COUNT=${SAMPLES_COUNT:-0}
+export IS_LAST_CHECKPOINT=${IS_LAST_CHECKPOINT:-false}
 export METRIC_LOGGER_DIR=${METRIC_LOGGER_DIR:-}
 export TARGET_ACCURACY=${TARGET_ACCURACY:-0.69}
 export TRAJECTORY_STORE_ROOT_DIR=${TRAJECTORY_STORE_ROOT_DIR:-${TRAJECTORY_STORE_ROOT:-}}
@@ -298,6 +304,10 @@ start_orchestrator() {
   if [[ "${RCP_LOGGING}" == "1" || "${RCP_LOGGING}" == "true" || "${RCP_LOGGING}" == "True" ]]; then
     rcp_arg="--rcp_logging"
   fi
+  local disable_ws_timeouts_arg=""
+  if [[ "${WEIGHT_SYNC_DISABLE_TIMEOUTS}" == "1" || "${WEIGHT_SYNC_DISABLE_TIMEOUTS}" == "true" || "${WEIGHT_SYNC_DISABLE_TIMEOUTS}" == "True" ]]; then
+    disable_ws_timeouts_arg="--disable_weight_sync_timeouts"
+  fi
 
   "$PYTHON_BIN" "$YAML_GENERATOR" \
     "${YAML_DIR}/jobset.cpu.yaml" \
@@ -318,6 +328,7 @@ start_orchestrator() {
       WANDB_RUN_NAME=\"${WANDB_RUN_NAME}\" \
       ROLLOUT_WORKERS=\"${ROLLOUT_WORKERS:-${ROLLOUT_REPLICAS:-1}}\" \
       EPISODE_TIMEOUT_SECS=\"${EPISODE_TIMEOUT_SECS:-5400}\" \
+      WEIGHT_SYNC_DISABLE_TIMEOUTS=\"${WEIGHT_SYNC_DISABLE_TIMEOUTS}\" \
       ${LOG_DIR:+LOG_DIR=\"${LOG_DIR}\"} \
       ${TRAJECTORY_LOG_DIR:+TRAJECTORY_LOG_DIR=\"${TRAJECTORY_LOG_DIR}\"} \
       PYTHONUNBUFFERED=1 \
@@ -369,6 +380,7 @@ start_orchestrator() {
         --wandb_project=\"${WANDB_PROJECT}\" \
         --wandb_run_name=\"${WANDB_RUN_NAME}\" \
         --weight_sync_mode=${WEIGHT_SYNC_MODE} \
+        ${disable_ws_timeouts_arg} \
         --stop_workers_on_exit \
         ${MAX_WARMPOOL_REPLICAS:+--max_warmpool_replicas=${MAX_WARMPOOL_REPLICAS}} \
         ${MAX_CONCURRENCY:+--max_concurrency=${MAX_CONCURRENCY}} \
@@ -400,6 +412,7 @@ start_orchestrator() {
         --tpu_topology="${TRAINER_TPU_SLICE}+${ROLLOUT_TPU_SLICE}" \
         --target_accuracy=${TARGET_ACCURACY} \
         ${METRIC_LOGGER_DIR:+--metric_logger_dir="${METRIC_LOGGER_DIR}"} \
+        ${VAL_START_AT:+--val_start_at=${VAL_START_AT}} \
         ${rcp_arg} \
         ${debug_arg} \
     " \
@@ -462,6 +475,7 @@ start_trainer() {
     --worker_startup_command=" \
       PYTHONUNBUFFERED=1 \
       TUNIX_IS_INTERNAL_ENV=false \
+      WEIGHT_SYNC_DISABLE_TIMEOUTS=\"${WEIGHT_SYNC_DISABLE_TIMEOUTS}\" \
       ${BOOTSTRAP_CMD} \
       ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} \
       ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE} \
@@ -659,6 +673,7 @@ if cfg:
         PYTHONUNBUFFERED=1 \
         TUNIX_IS_INTERNAL_ENV=false \
         EPISODE_TIMEOUT_SECS="${EPISODE_TIMEOUT_SECS:-5400}" \
+        WEIGHT_SYNC_DISABLE_TIMEOUTS=\"${WEIGHT_SYNC_DISABLE_TIMEOUTS}\" \
         ${SCAFFOLD:+SCAFFOLD=\"${SCAFFOLD}\"} \
         ${BOOTSTRAP_CMD} \
         USE_RAIDEN_FFI=false RAIDEN_USE_FFI=0 \
@@ -1038,6 +1053,13 @@ start_eval() {
           --use_agent_sandbox=${USE_AGENT_SANDBOX} \
           --max_warmpool_size=${MAX_WARMPOOL_REPLICAS} \
           --output_dir=${output_dir} \
+          --rcp_logging=${RCP_LOGGING} \
+          ${METRIC_LOGGER_DIR:+--metric_logger_dir=\"${METRIC_LOGGER_DIR}\"} \
+          --target_accuracy=${TARGET_ACCURACY} \
+          --checkpoint_step=${CHECKPOINT_STEP:-0} \
+          ${CHECKPOINT_TIMESTAMP_MS:+--checkpoint_timestamp_ms=${CHECKPOINT_TIMESTAMP_MS}} \
+          --samples_count=${SAMPLES_COUNT:-0} \
+          --is_last_checkpoint=${IS_LAST_CHECKPOINT:-false} \
       " \
       | apply_manifest
   done

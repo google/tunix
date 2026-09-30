@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import atexit
 import collections
+import concurrent.futures
 import logging
 import os
 import re
@@ -441,6 +442,7 @@ class PrewarmDatasetIterator:
       image_rewrite: Any | None = None,
       wait_initial: bool = True,
       max_staleness: int = 0,
+      max_workers: int = 16,
   ):
     del lookahead_steps
     self.scaffold = scaffold
@@ -452,6 +454,8 @@ class PrewarmDatasetIterator:
     self.unwarm_on_exhaustion = unwarm_on_exhaustion
     self.wait_initial = wait_initial
     self.max_staleness = max(0, int(max_staleness))
+    self.max_workers = max(1, int(max_workers))
+    self._lock = threading.Lock()
     self.image_rewrite = get_image_rewrite_fn(
         image_rewrite or getattr(self.fleet, "_image_rewrite_fn", None)
     )
@@ -618,45 +622,58 @@ class PrewarmDatasetIterator:
           reps = min(reps, self.max_warmpool_replicas)
         desired[img] = reps
 
-    # 1. Warm new keys or scale existing keys
-    for img, target_reps in desired.items():
-      if img not in self._active_replicas:
-        try:
-          self.fleet.warm_image(img, replicas_override=target_reps, wait=wait)
-          self._active_replicas[img] = target_reps
-          logging.info(
-              "[PrewarmDatasetIterator] Warmed new pool on K8s: %s"
-              " (replicas=%d, wait=%s)",
-              img,
-              target_reps,
-              wait,
-          )
-        except Exception as e:  # pylint: disable=broad-exception-caught
-          logging.warning(
-              "[PrewarmDatasetIterator] Warm note for %s: %s", img, e
-          )
-      elif self._active_replicas[img] != target_reps:
-        try:
-          self.fleet.set_pool_replicas(img, target_reps)
-          logging.info(
-              "[PrewarmDatasetIterator] Scaled pool on K8s: %s (replicas %d ->"
-              " %d)",
-              img,
-              self._active_replicas[img],
-              target_reps,
-          )
-          self._active_replicas[img] = target_reps
-        except Exception as e:  # pylint: disable=broad-exception-caught
-          logging.warning(
-              "[PrewarmDatasetIterator] Set replicas note for %s: %s", img, e
-          )
-
-    # 2. Delete / unwarm keys no longer in desired
+    # Partition actions
+    new_pools = {
+        img: reps
+        for img, reps in desired.items()
+        if img not in self._active_replicas
+    }
+    scale_pools = {
+        img: reps
+        for img, reps in desired.items()
+        if img in self._active_replicas and self._active_replicas[img] != reps
+    }
     to_delete = [img for img in self._active_replicas if img not in desired]
-    for img in to_delete:
+
+    def _warm(img: str, target_reps: int) -> None:
+      try:
+        self.fleet.warm_image(img, replicas_override=target_reps, wait=wait)
+        with self._lock:
+          self._active_replicas[img] = target_reps
+        logging.info(
+            "[PrewarmDatasetIterator] Warmed new pool on K8s: %s"
+            " (replicas=%d, wait=%s)",
+            img,
+            target_reps,
+            wait,
+        )
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        logging.warning("[PrewarmDatasetIterator] Warm note for %s: %s", img, e)
+
+    def _scale(img: str, target_reps: int) -> None:
+      try:
+        with self._lock:
+          old_reps = self._active_replicas.get(img, 0)
+        self.fleet.set_pool_replicas(img, target_reps)
+        with self._lock:
+          self._active_replicas[img] = target_reps
+        logging.info(
+            "[PrewarmDatasetIterator] Scaled pool on K8s: %s (replicas %d ->"
+            " %d)",
+            img,
+            old_reps,
+            target_reps,
+        )
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        logging.warning(
+            "[PrewarmDatasetIterator] Set replicas note for %s: %s", img, e
+        )
+
+    def _unwarm(img: str) -> None:
       try:
         self.fleet.unwarm_image(img)
-        self.unwarm_calls.append(img)
+        with self._lock:
+          self.unwarm_calls.append(img)
         logging.info(
             "[PrewarmDatasetIterator] Unwarmed retired pool on K8s: %s", img
         )
@@ -664,7 +681,23 @@ class PrewarmDatasetIterator:
         logging.warning(
             "[PrewarmDatasetIterator] Unwarm note for %s: %s", img, e
         )
-      del self._active_replicas[img]
+      with self._lock:
+        self._active_replicas.pop(img, None)
+
+    num_tasks = len(new_pools) + len(scale_pools) + len(to_delete)
+    if num_tasks > 0:
+      workers = min(self.max_workers, num_tasks)
+      with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        warm_futures = [
+            executor.submit(_warm, img, reps) for img, reps in new_pools.items()
+        ]
+        scale_futures = [
+            executor.submit(_scale, img, reps) for img, reps in scale_pools.items()
+        ]
+        unwarm_futures = [
+            executor.submit(_unwarm, img) for img in to_delete
+        ]
+        concurrent.futures.wait(warm_futures + scale_futures + unwarm_futures)
 
   def has_next(self) -> bool:
     """Returns True if at least one more item can be yielded without exhaustion."""

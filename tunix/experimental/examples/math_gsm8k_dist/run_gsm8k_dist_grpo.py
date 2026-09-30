@@ -238,6 +238,19 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="W&B run name. Defaults to timestamp-based name if unset.",
   )
   parser.add_argument("--rpc_timeout_s", type=float, default=1800.0)
+  parser.add_argument(
+      "--disable_weight_sync_timeouts",
+      action=argparse.BooleanOptionalAction,
+      default=os.getenv(
+          "WEIGHT_SYNC_DISABLE_TIMEOUTS",
+          os.getenv("DISABLE_WEIGHT_SYNC_TIMEOUTS", "0"),
+      ).strip().lower()
+      in ("1", "true", "yes", "on"),
+      help=(
+          "Disable all weight-sync phase timeouts and weight-sync gRPC "
+          "timeouts (sets them to infinity)."
+      ),
+  )
   parser.add_argument("--init_timeout_s", type=float, default=None)
   parser.add_argument("--inference_addr", type=str, default="")
   parser.add_argument("--stop_workers_on_exit", action="store_true")
@@ -488,9 +501,15 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       eos_id,
   )
 
+  if args.disable_weight_sync_timeouts:
+    os.environ["WEIGHT_SYNC_DISABLE_TIMEOUTS"] = "1"
+    logging.info(
+        "Weight-sync timeouts disabled via --disable_weight_sync_timeouts."
+    )
   cluster = orchestrator.ClusterOrchestrator(
       weight_sync_mode=args.weight_sync_mode,
       trajectory_store_config=_build_trajectory_store_config(args),
+      disable_weight_sync_timeouts=args.disable_weight_sync_timeouts,
   )
   context.ipc.discovery.on_register(
       functools.partial(

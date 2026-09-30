@@ -164,6 +164,11 @@ class AbstractTrainer(abc.ABC):
         f"{type(self).__name__} does not implement model_scope."
     )
 
+  @property
+  def checkpoint_dir(self) -> str | None:
+    """Returns the root directory where checkpoints are saved, if configured."""
+    return None
+
   @abc.abstractmethod
   def save_checkpoint(self, metadata: Any, **kwargs) -> None:
     """Force the trainer to serialize its state (model + optimizer).
