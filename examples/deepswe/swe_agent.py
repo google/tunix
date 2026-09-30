@@ -261,7 +261,7 @@ class SWEAgent(ConversationAgentBase):
     super().__init__(system_prompt)
     agent_key = (
         self.__class__.__name__,
-        getattr(self, "name", "swe_agent"),
+        self.name,
         scaffold,
         use_fn_calling,
     )
@@ -337,7 +337,7 @@ class SWEAgent(ConversationAgentBase):
 
     self._messages.append({"role": "user", "content": str(observation)})
 
-  def _parse_model_response(self, response: str) -> tuple[str, Any]:
+  def _parse_model_response(self, response: str | Any) -> tuple[str, Any]:
     if self.use_fn_calling:
       return parse_oai_response(response)
     if self.scaffold in OPENHANDS_SCAFFOLDS:
@@ -400,7 +400,7 @@ class CodeActAgent(SWEAgent):
         scaffold=scaffold,
     )
 
-  def _parse_model_response(self, response: str) -> tuple[str, Any]:
+  def _parse_model_response(self, response: str | Any) -> tuple[str, Any]:
     if self.use_fn_calling:
       return parse_oai_response(response)
     return parse_codeact_response(response)

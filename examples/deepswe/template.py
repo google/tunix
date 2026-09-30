@@ -21,6 +21,19 @@ from typing import Any, Optional
 
 OPENHANDS_SCAFFOLDS = ("openhands",)
 
+# Registered agent names. Kept here (stdlib-only module) so JAX-free callers
+# such as the distributed eval controller can share the scaffold mapping.
+DEEPSWE_AGENT_NAME = "deepswe_agent"
+CODEACT_AGENT_NAME = "codeact_agent"
+
+
+def get_agent_name(scaffold: str | None = None) -> str:
+  """Returns the registered DeepSWE agent name for the given scaffold."""
+  resolved = str(scaffold or os.getenv("SCAFFOLD", "r2egym"))
+  if resolved in OPENHANDS_SCAFFOLDS:
+    return CODEACT_AGENT_NAME
+  return DEEPSWE_AGENT_NAME
+
 # ==============================================================================
 # Agent System Prompts
 # ==============================================================================

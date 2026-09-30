@@ -29,20 +29,15 @@ from examples.deepswe import deepswe_data
 from examples.deepswe import sandbox_utils
 from examples.deepswe import swe_agent
 from examples.deepswe import swe_env
+from examples.deepswe import template
 
 
 DEEPSWE_ENV_NAME = "deepswe_env"
-DEEPSWE_AGENT_NAME = "deepswe_agent"
-CODEACT_AGENT_NAME = "codeact_agent"
+DEEPSWE_AGENT_NAME = template.DEEPSWE_AGENT_NAME
+CODEACT_AGENT_NAME = template.CODEACT_AGENT_NAME
 DEFAULT_DATASET_NAME = "R2E-Gym/R2E-Gym-Subset"
 
-
-def get_agent_name(scaffold: str | None = None) -> str:
-  """Returns the registered DeepSWE agent name for the given scaffold."""
-  resolved = str(scaffold or os.getenv("SCAFFOLD", "r2egym"))
-  if resolved in swe_agent.OPENHANDS_SCAFFOLDS:
-    return CODEACT_AGENT_NAME
-  return DEEPSWE_AGENT_NAME
+get_agent_name = template.get_agent_name
 
 
 def normalize_example_value(value: Any) -> Any:

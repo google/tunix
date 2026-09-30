@@ -214,6 +214,9 @@ def maxtext_config(a):
 
 def request_fields(a, entry, index, attempt):
   """Construct a wire request without importing JAX on the controller."""
+  # template is stdlib-only, so this keeps the controller JAX-free.
+  from examples.deepswe import template  # pylint: disable=import-outside-toplevel
+
   instance_id = str(entry["instance_id"])
   prompt_id = f"eval_{index}"
   max_context_limit = getattr(a, "max_context_limit", 0)
@@ -250,9 +253,7 @@ def request_fields(a, entry, index, attempt):
               "scaffold": a.scaffold,
               "verbose": False,
           },
-          "agent_name": (
-              "codeact_agent" if a.scaffold == "openhands" else "deepswe_agent"
-          ),
+          "agent_name": template.get_agent_name(a.scaffold),
           "agent_config": {"scaffold": a.scaffold},
       },
   }
@@ -293,17 +294,6 @@ def summarize(rows, instance_ids, attempts):
   }
 
 
-def _response_agent_name(response):
-  """Returns the agent name recorded on a rollout response, if any."""
-  for metadata in (
-      getattr(response, "metadata", None),
-      getattr(getattr(response, "payload", None), "metadata", None),
-  ):
-    if isinstance(metadata, dict) and metadata.get("agent_name"):
-      return str(metadata["agent_name"])
-  return None
-
-
 def compact_result(response):
   if response.error is not None or response.payload is None:
     result = {
@@ -323,9 +313,10 @@ def compact_result(response):
         "status": str(traj.get("status", "UNKNOWN")),
         "error": None,
     }
-  agent_name = _response_agent_name(response)
-  if agent_name:
-    result["agent_name"] = agent_name
+  # Worker-reported metadata (success and error); evaluate_worker falls back to
+  # the requested agent_name if the worker did not report one.
+  if response.metadata.get("agent_name"):
+    result["agent_name"] = str(response.metadata["agent_name"])
   return result
 
 

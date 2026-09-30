@@ -248,17 +248,17 @@ class RolloutManager:
     else:
       env_client = None
 
-    request_metadata = dict(request.metadata or {})
-    req_agent_name = request_metadata.get("agent_name")
+    req_agent_name = request.metadata.get("agent_name")
     if req_agent_name and registry.AGENT_REGISTRY.contains(req_agent_name):
       agent_name = req_agent_name
     else:
       agent_name = getattr(self.config, "agent_name", "")
     if agent_name and registry.AGENT_REGISTRY.contains(agent_name):
       agent_cls = registry.AGENT_REGISTRY.get(agent_name)
-      agent_config = dict(getattr(self.config, "agent_config", {}) or {})
-      if isinstance(request_metadata.get("agent_config"), dict):
-        agent_config.update(request_metadata["agent_config"])
+      # agent_name/agent_config live on the worker's RolloutConfig subclass,
+      # not on base_rollout.RolloutConfig, so config access mirrors env_name.
+      agent_config = dict(getattr(self.config, "agent_config", {}))
+      agent_config.update(request.metadata.get("agent_config", {}))
       agent = agent_cls(**agent_config)
     elif self.agent_factory and callable(self.agent_factory):
       agent = self.agent_factory()

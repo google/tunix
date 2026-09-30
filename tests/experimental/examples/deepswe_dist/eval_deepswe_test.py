@@ -175,6 +175,7 @@ class EvalTest(unittest.TestCase):
         payload=types.SimpleNamespace(
             traj={"trajectory_reward": 0, "status": "SUCCEEDED"}
         ),
+        metadata={},
     )
     self.assertFalse(eval_lib.compact_result(response)["resolved"])
     response.payload.traj["trajectory_reward"] = 1
@@ -210,8 +211,8 @@ class EvalTest(unittest.TestCase):
         status="COMPLETED",
         payload=types.SimpleNamespace(
             traj={"trajectory_reward": 1, "status": "SUCCEEDED"},
-            metadata={"agent_name": "codeact_agent"},
         ),
+        metadata={"agent_name": "codeact_agent"},
     )
     self.assertEqual(
         eval_lib.compact_result(response)["agent_name"], "codeact_agent"
@@ -226,7 +227,7 @@ class EvalTest(unittest.TestCase):
     error_row = eval_lib.compact_result(error_response)
     self.assertEqual(error_row["status"], "ERROR")
     self.assertEqual(error_row["agent_name"], "codeact_agent")
-    error_response.metadata = None
+    error_response.metadata = {}
     self.assertNotIn("agent_name", eval_lib.compact_result(error_response))
 
 
