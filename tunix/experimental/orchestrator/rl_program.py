@@ -1471,7 +1471,14 @@ class StandardRLProgram(RLProgram):
           "prompt_tokens": getattr(item, "prompt_tokens", None),
           "completion_tokens": getattr(item, "completion_tokens", None),
           "metadata": metadata,
-          "trajectory": traj,
+          # The JSON logger writes only the text and timing fields. Leaving out
+          # the arrays (routed_experts alone is ~1.2 KB/token) keeps a
+          # backlogged queue from pinning a full batch of them in memory.
+          # `ndim` catches numpy and jax arrays alike but keeps 0-d scalars
+          # such as an np.float32 trajectory_reward, which the logger writes.
+          "trajectory": {
+              k: v for k, v in traj.items() if getattr(v, "ndim", 0) == 0
+          },
       }
       self.trajectory_logger.log_item_async(row)
 
