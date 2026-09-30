@@ -118,6 +118,9 @@ export PATHWAYS_PROXY_EXTRA_ARGS="${PATHWAYS_PROXY_EXTRA_ARGS:-${_trainer_xla_fl
 # Must be a multiple of TRAINER_MESH_FSDP=32. Only the padded batch assembler reads it;
 # sequence packing (MAX_SEQ_TOKEN_PER_TPU set) sizes micro steps from the trainer mesh.
 export TRAIN_MICRO_BATCH_SIZE="${TRAIN_MICRO_BATCH_SIZE:-64}"
+export MAX_STEPS="${MAX_STEPS:-30}"
+export CHECKPOINT_SAVE_INTERVAL_STEPS="${CHECKPOINT_SAVE_INTERVAL_STEPS:-1}"
+export CHECKPOINT_MAX_TO_KEEP="${CHECKPOINT_MAX_TO_KEEP:-30}"
 
 export RPC_TIMEOUT_S="${RPC_TIMEOUT_S:-10800}"
 # Architecture & Rematerialization: custom remat with per-tensor policies below
