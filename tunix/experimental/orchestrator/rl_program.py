@@ -23,6 +23,7 @@ import asyncio
 from collections.abc import Callable, Iterable, Mapping, Sequence, Sized
 import copy
 import dataclasses
+import functools
 import os
 import time
 from typing import Any
@@ -355,6 +356,7 @@ class StandardRLProgram(RLProgram):
       batch_size: int | None = None,
       max_staleness: int = 0,
       sync_weights: bool = True,
+      async_weight_sync: bool = False,
       metrics_logging_options: MetricsLoggerOptions | None = None,
       trajectory_log_dir: str | None = None,
       trajectory_store: trajectory_store_lib.TrajectoryStore | None = None,
@@ -467,6 +469,19 @@ class StandardRLProgram(RLProgram):
       )
     self.max_staleness = max_staleness
     self.sync_weights = sync_weights
+    # Run each step's weight sync in the background instead of holding the
+    # trainer for the whole round. The trainer waits only for the source to
+    # snapshot its weights; the dispatch window stays shut until the round
+    # commits, so rollouts never run further behind than `max_staleness`.
+    # Requires a source that transfers from a host snapshot (raiden:
+    # RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFER=0), since the next train step
+    # overwrites the device buffers while the transfer is still reading.
+    self.async_weight_sync = async_weight_sync
+    self._pending_sync: asyncio.Task[int] | None = None
+    # Trained steps whose weights have not reached the rollouts yet. Held out
+    # of the dispatch window; stays set if the round fails.
+    self._unsynced_steps = 0
+    self._sync_error: BaseException | None = None
     self.metrics_logger: MetricsLogger = MetricsLogger(metrics_logging_options)
     if trajectory_log_dir is None and metrics_logging_options is not None:
       log_dir = getattr(metrics_logging_options, "log_dir", "")
@@ -581,7 +596,12 @@ class StandardRLProgram(RLProgram):
     Args:
       batch_idx: The prompt batch the dispatcher is about to emit into.
     """
-    while batch_idx > self._next_batch + self.max_staleness:
+    while (
+        batch_idx
+        > self._next_batch - self._unsynced_steps + self.max_staleness
+    ):
+      if self._sync_error is not None:
+        raise self._sync_error
       # Wait first, clear second. The reverse loses a release that lands
       # between the test above and the clear, and nothing would set it again.
       await self._window_release.wait()
@@ -1424,8 +1444,97 @@ class StandardRLProgram(RLProgram):
       }
       self.trajectory_logger.log_item_async(row)
 
+  async def _await_pending_sync(self) -> None:
+    """Waits for the background weight sync, if any; raises if it failed."""
+    task, self._pending_sync = self._pending_sync, None
+    if task is not None:
+      await task
+
+  def _on_background_sync_done(
+      self, task: asyncio.Task[int], target_version: int, start_time: float
+  ) -> None:
+    if task.cancelled():
+      return
+    exc = task.exception()
+    if exc is not None:
+      logging.error(
+          "Background weight sync to policy_version=%d failed after %.2fs: %s",
+          target_version,
+          time.monotonic() - start_time,
+          exc,
+      )
+      self._sync_error = exc
+    else:
+      new_version = task.result()
+      if new_version is not None and new_version != target_version:
+        logging.warning(
+            "Background weight sync committed policy_version=%d, expected %d.",
+            new_version,
+            target_version,
+        )
+        self.policy_version = new_version
+      logging.info(
+          "Background weight sync committed policy_version=%d in %.2fs.",
+          target_version,
+          time.monotonic() - start_time,
+      )
+      self._unsynced_steps = 0
+    # On failure too: the dispatcher has to wake to see `_sync_error`.
+    self._release_window()
+
+  async def _start_background_sync(self) -> None:
+    """Launches this step's weight sync and returns once the source staged.
+
+    Any previous round is awaited first, since rounds must not overlap.
+    """
+    assert self.engine is not None
+    await self._await_pending_sync()
+    target_version = self.policy_version + 1
+    staged = asyncio.Event()
+    start_time = time.monotonic()
+    task = asyncio.create_task(
+        self.engine.sync_weights(
+            role=datatypes.Role.ACTOR,
+            policy_version=target_version,
+            source_staged=staged,
+        )
+    )
+    task.add_done_callback(
+        functools.partial(
+            self._on_background_sync_done,
+            target_version=target_version,
+            start_time=start_time,
+        )
+    )
+    self._pending_sync = task
+    # Before commit advances `_next_batch`, so the dispatcher cannot slip a
+    # batch through against the old weights.
+    self._unsynced_steps = 1
+    # The trainer's weights are this version from here on; rollouts catch up
+    # when the round commits.
+    self.policy_version = target_version
+    staged_wait = asyncio.create_task(staged.wait())
+    try:
+      await asyncio.wait(
+          {task, staged_wait}, return_when=asyncio.FIRST_COMPLETED
+      )
+    finally:
+      staged_wait.cancel()
+    if task.done():
+      # Failed (or finished) before signalling; surface a failure now.
+      await self._await_pending_sync()
+
   async def train_stage(self) -> None:
     """Stage 3: Streaming gradient accumulation with RLTrainerPayloads."""
+    try:
+      await self._train_loop()
+      # The last round must land before the run is reported done.
+      await self._await_pending_sync()
+    finally:
+      if self._pending_sync is not None and not self._pending_sync.done():
+        self._pending_sync.cancel()
+
+  async def _train_loop(self) -> None:
     assert self.engine is not None
 
     while self.max_steps is None or self._step < self.max_steps:
@@ -1628,7 +1737,13 @@ class StandardRLProgram(RLProgram):
         )
         break
 
-      if self.sync_weights:
+      if self.sync_weights and self.async_weight_sync:
+        # Only the time the trainer is actually held: the previous round, if
+        # it outlived this step, plus this round's source snapshot.
+        _t_sync = time.monotonic()
+        await self._start_background_sync()
+        weight_sync_time = time.monotonic() - _t_sync
+      elif self.sync_weights:
         _t_sync = time.monotonic()
         new_version = await self.engine.sync_weights(role=datatypes.Role.ACTOR)
         weight_sync_time = time.monotonic() - _t_sync

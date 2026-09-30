@@ -76,6 +76,7 @@ export TOP_K=${TOP_K:--1}
 export DEBUG=${DEBUG:-0}
 export USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
 export EXACT_TOKEN_CONTINUITY=${EXACT_TOKEN_CONTINUITY:-true}
+export ASYNC_WEIGHT_SYNC=${ASYNC_WEIGHT_SYNC:-false}
 export SAMPLER=${SAMPLER:-inprocess_vllm}
 export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
 export WEIGHT_SYNC_DISABLE_TIMEOUTS=${WEIGHT_SYNC_DISABLE_TIMEOUTS:-${DISABLE_WEIGHT_SYNC_TIMEOUTS:-0}}
@@ -418,6 +419,7 @@ start_orchestrator() {
         ${TRAJECTORY_GROUP_ORDER:+--trajectory_group_order=${TRAJECTORY_GROUP_ORDER}} \
         $([[ "${USE_ROLLOUT_LOGPS}" == "false" || "${USE_ROLLOUT_LOGPS}" == "False" || "${USE_ROLLOUT_LOGPS}" == "0" ]] && echo --no-use_rollout_logps || echo --use_rollout_logps) \
         $([[ "${EXACT_TOKEN_CONTINUITY}" == "false" || "${EXACT_TOKEN_CONTINUITY}" == "False" || "${EXACT_TOKEN_CONTINUITY}" == "0" ]] && echo --no-exact_token_continuity || echo --exact_token_continuity) \
+        $([[ "${ASYNC_WEIGHT_SYNC}" == "true" || "${ASYNC_WEIGHT_SYNC}" == "True" || "${ASYNC_WEIGHT_SYNC}" == "1" ]] && echo --async_weight_sync || echo --no-async_weight_sync) \
         ${dataset_args} \
         ${shuffle_arg} \
         ${sandbox_arg} \
