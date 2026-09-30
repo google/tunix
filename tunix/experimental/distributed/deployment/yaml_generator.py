@@ -75,6 +75,12 @@ def main() -> None:
       default=None,
       help="Kubernetes nodepool for Pathways head pod (e.g. cpu-np).",
   )
+  parser.add_argument(
+      "--termination_grace_seconds",
+      default=int(os.environ.get("TERMINATION_GRACE_SECONDS") or 360),
+      type=int,
+      help="Termination grace period in seconds for pods (default: 360).",
+  )
 
   parser.add_argument(
       "--pathways_server_image",
@@ -353,16 +359,36 @@ def main() -> None:
   # The image MUST match the head image's jax/jaxlib exactly and must contain orbax, since
   # Orbax ships its serialization callables here by reference via cloudpickle.
   sidecar_image = os.environ.get("COLOCATED_PYTHON_SIDECAR_IMAGE", "").strip()
+  sidecar_shm = os.environ.get("COLOCATED_PYTHON_SIDECAR_SHM", "1").strip().lower() not in (
+      "0",
+      "false",
+      "no",
+  )
   sidecar_memory = os.environ.get("COLOCATED_PYTHON_SIDECAR_MEMORY", "16Gi").strip()
+  worker_shm_mount = (
+      "\n              - mountPath: /tmp/sidecar\n                name: sidecar-shared-memory"
+      if sidecar_shm
+      else ""
+  )
+  sidecar_shm_env = (
+      "\n              - name: CLOUD_PATHWAYS_SIDECAR_SHM_DIRECTORY\n                value: /tmp/sidecar"
+      if sidecar_shm
+      else ""
+  )
+  sidecar_volume_mount = (
+      "- mountPath: /tmp/sidecar\n                name: sidecar-shared-memory"
+      if sidecar_shm
+      else "- mountPath: /tmp\n                name: shared-tmp"
+  )
   colocated_python_sidecar_block = (
-      f"""
+      f"""{worker_shm_mount}
             initContainers:
             - name: colocated-python-sidecar
               image: {sidecar_image}
               imagePullPolicy: Always
               env:
               - name: GRPC_SERVER_ADDRESS
-                value: "0.0.0.0:50051"
+                value: "0.0.0.0:50051"{sidecar_shm_env}
               ports:
               - containerPort: 50051
                 protocol: TCP
@@ -370,18 +396,45 @@ def main() -> None:
                 requests:
                   cpu: "4"
                   memory: {sidecar_memory}
-                limits:
-                  memory: {sidecar_memory}
               restartPolicy: Always
               volumeMounts:
-              - mountPath: /tmp
-                name: shared-tmp"""
+              {sidecar_volume_mount}"""
       if sidecar_image
+      else ""
+  )
+  colocated_python_worker_args = (
+      "\n              - --cloud_pathways_sidecar_shm_directory=/tmp/sidecar"
+      if (sidecar_image and sidecar_shm)
+      else ""
+  )
+  colocated_python_proxy_args = (
+      "\n              - --sidecar_name=external" if sidecar_image else ""
+  )
+  colocated_python_sidecar_volume = (
+      "\n            - name: sidecar-shared-memory\n              emptyDir:\n                medium: Memory"
+      if (sidecar_image and sidecar_shm)
       else ""
   )
 
   with open(args.template_file, "r") as f:
-    template = string.Template(f.read())
+    template_text = f.read()
+    if sidecar_image:
+      missing_placeholders = [
+          p
+          for p in (
+              "${COLOCATED_PYTHON_SIDECAR_BLOCK}",
+              "${COLOCATED_PYTHON_WORKER_ARGS}",
+              "${COLOCATED_PYTHON_PROXY_ARGS}",
+              "${COLOCATED_PYTHON_SIDECAR_VOLUME}",
+          )
+          if p not in template_text
+      ]
+      if missing_placeholders:
+        raise SystemExit(
+            f"COLOCATED_PYTHON_SIDECAR_IMAGE is set, but template "
+            f"{args.template_file} lacks {', '.join(missing_placeholders)}"
+        )
+    template = string.Template(template_text)
     content = template.substitute(
         JOBSET_NAME=jobset_name,
         USER=os.environ.get("USER"),
@@ -413,6 +466,10 @@ def main() -> None:
         RESERVATION_SELECTOR=reservation_selector,
         PRIORITY_CLASS_LINE=priority_class_line,
         COLOCATED_PYTHON_SIDECAR_BLOCK=colocated_python_sidecar_block,
+        COLOCATED_PYTHON_SIDECAR_VOLUME=colocated_python_sidecar_volume,
+        COLOCATED_PYTHON_WORKER_ARGS=colocated_python_worker_args,
+        COLOCATED_PYTHON_PROXY_ARGS=colocated_python_proxy_args,
+        TERMINATION_GRACE_SECONDS=args.termination_grace_seconds,
         PW_INSTANCE_TYPE=pw_instance_type,
         REPLICAS=1,
         COMPLETIONS=num_chips // 4 if num_chips else None,

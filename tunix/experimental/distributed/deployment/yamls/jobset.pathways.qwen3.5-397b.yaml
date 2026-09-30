@@ -44,7 +44,7 @@ ${QUEUE_LABEL}spec:
             dnsPolicy: ClusterFirstWithHostNet
             hostNetwork: true
             restartPolicy: Never${PRIORITY_CLASS_LINE}
-            terminationGracePeriodSeconds: 10
+            terminationGracePeriodSeconds: ${TERMINATION_GRACE_SECONDS}
             nodeSelector:
               cloud.google.com/gke-tpu-accelerator: ${TPU_TYPE}
               cloud.google.com/gke-tpu-topology: ${TPU_TOPOLOGY}${RESERVATION_SELECTOR}
@@ -126,7 +126,7 @@ ${QUEUE_LABEL}spec:
               - --server_port=29000
               - --resource_manager_address=$$(PATHWAYS_HEAD):29001
               - --gcs_scratch_location=${GCS_SCRATCH_LOCATION}
-              - --temporary_flags_for_debugging=temporary_flag_for_debugging_test_only_hold_death_ref=false
+              - --temporary_flags_for_debugging=temporary_flag_for_debugging_test_only_hold_death_ref=false${COLOCATED_PYTHON_PROXY_ARGS}
               env:
               - name: PATHWAYS_HEAD
                 valueFrom:
@@ -231,7 +231,7 @@ ${QUEUE_LABEL}spec:
             dnsPolicy: ClusterFirstWithHostNet
             hostNetwork: true
             restartPolicy: OnFailure${PRIORITY_CLASS_LINE}
-            terminationGracePeriodSeconds: 10
+            terminationGracePeriodSeconds: ${TERMINATION_GRACE_SECONDS}
             nodeSelector:
               cloud.google.com/gke-tpu-accelerator: ${TPU_TYPE}
               cloud.google.com/gke-tpu-topology: ${TPU_TOPOLOGY}${RESERVATION_SELECTOR}
@@ -266,7 +266,7 @@ ${QUEUE_LABEL}spec:
               args:
               - --server_port=29005
               - --resource_manager_address=$$(PATHWAYS_HEAD):29001
-              - --gcs_scratch_location=${GCS_SCRATCH_LOCATION}
+              - --gcs_scratch_location=${GCS_SCRATCH_LOCATION}${COLOCATED_PYTHON_WORKER_ARGS}
               env:
               - name: TPU_MIN_LOG_LEVEL
                 value: "0"
@@ -321,7 +321,7 @@ ${QUEUE_LABEL}spec:
             - name: shared-tmp
               hostPath:
                 path: /tmp
-                type: DirectoryOrCreate
+                type: DirectoryOrCreate${COLOCATED_PYTHON_SIDECAR_VOLUME}
   startupPolicy:
     startupPolicyOrder: AnyOrder
   successPolicy:
