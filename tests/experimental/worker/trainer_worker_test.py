@@ -170,6 +170,18 @@ class TrainerWorkerTest(absltest.TestCase):
         "gs://bucket/checkpoints/5/model_params",
     )
 
+  def test_restore_checkpoint_transitions_to_error_state_on_failure(self):
+    def _failing_restore(**kwargs):
+      del kwargs
+      raise RuntimeError("CheckpointRestoreError: corrupted step 2")
+
+    self.fake_trainer.restore_checkpoint = _failing_restore
+    with self.assertRaisesRegex(RuntimeError, "corrupted step 2"):
+      self.worker.restore_checkpoint(step=2)
+
+    self.assertEqual(self.worker.state, datatypes.WorkerState.ERROR)
+    self.assertIn("corrupted step 2", self.worker.heartbeat().last_error)
+
   def test_set_target_state_configures_trainer(self):
     target_state = {"params": np.zeros((4, 4))}
     resp = self.worker.set_target_state(target_state=target_state)

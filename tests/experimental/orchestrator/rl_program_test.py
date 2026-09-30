@@ -580,6 +580,27 @@ class RLProgramTest(absltest.TestCase):
     )
     self.assertEqual(program.step, 2)
 
+  def test_run_async_skips_redundant_prepare_rollout_policy_when_resumed(self):
+    async def _run():
+      self.mock_engine.resume_from_checkpoint = mock.AsyncMock(return_value=1)
+      _set_mock_poll_batches(
+          self.mock_engine, _make_trajectory_group(prompt_id="p1"), []
+      )
+      program = self._create_program(
+          dataset=["p0", "p1"],
+          max_steps=2,
+          sync_weights=True,
+      )
+
+      await program.run_async(self.mock_engine)
+
+      self.mock_engine.resume_from_checkpoint.assert_called_once_with(
+          role=datatypes.Role.ACTOR, resync_rollout_weights=True
+      )
+      self.mock_engine.prepare_rollout_policy.assert_not_called()
+
+    asyncio.run(_run())
+
   def test_resume_skips_already_consumed_dataset_prefix(self):
     self.mock_engine.resume_from_checkpoint = mock.AsyncMock(return_value=3)
     dataset = [f"p{i}" for i in range(5)]
