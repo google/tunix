@@ -269,25 +269,6 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
-      "--fail_fast",
-      action="store_true",
-      help=(
-          "Fail the run when a rollout is lost (worker unreachable past"
-          " --ft_poll_retry_s, or the rollout RPC failed) instead of logging"
-          " it and waiting forever. Set by FAIL_FAST=true."
-      ),
-  )
-  parser.add_argument(
-      "--ft_poll_retry_s",
-      type=float,
-      default=None,
-      help=(
-          "Seconds a rollout worker may stay unreachable (gRPC UNAVAILABLE or"
-          " DEADLINE_EXCEEDED on poll) before its in-flight rollouts are"
-          " failed. Unset: fail them on the first poll error."
-      ),
-  )
-  parser.add_argument(
       "--trainable_parameters_mask",
       type=str,
       default=None,
@@ -662,8 +643,6 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       weight_sync_mode=args.weight_sync_mode,
       trajectory_store_config=_build_trajectory_store_config(args),
       disable_weight_sync_timeouts=args.disable_weight_sync_timeouts,
-      fail_fast=args.fail_fast,
-      poll_retry_budget_s=args.ft_poll_retry_s,
   )
   context.ipc.discovery.on_register(
       functools.partial(

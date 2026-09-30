@@ -59,9 +59,6 @@ export FT_STARTUP_RETRIES="${FT_STARTUP_RETRIES:-3}"
 # attempts).
 export FT_SANDBOX_READY_TIMEOUT_S="${FT_SANDBOX_READY_TIMEOUT_S:-600}"
 export FT_SANDBOX_ACQUIRE_RETRIES="${FT_SANDBOX_ACQUIRE_RETRIES:-2}"
-# Seconds a rollout worker may be unreachable before its in-flight rollouts are
-# failed (which then fails the run). Short network blips are retried.
-export FT_POLL_RETRY_S="${FT_POLL_RETRY_S:-600}"
 
 # ==============================================================================
 # Pathways & Raiden Weight Sync Defaults

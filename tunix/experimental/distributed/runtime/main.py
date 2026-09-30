@@ -51,7 +51,7 @@ import importlib
 import logging
 import os
 import sys
-from typing import Any, Callable, NoReturn
+from typing import Any, Callable
 
 
 @dataclasses.dataclass(frozen=True)
@@ -181,23 +181,6 @@ def prepare_process(argv: list[str]) -> PreparedProcess:
   )
 
 
-def _system_exit_code(e: SystemExit) -> int:
-  """Maps SystemExit.code to the process exit status Python would use."""
-  if e.code is None:
-    return 0
-  if isinstance(e.code, int):
-    return e.code
-  return 1
-
-
-def _hard_exit(code: int) -> NoReturn:
-  """Flushes logs and output, then exits without waiting for other threads."""
-  logging.shutdown()
-  sys.stdout.flush()
-  sys.stderr.flush()
-  os._exit(code)  # pylint: disable=protected-access
-
-
 def main(argv: list[str]) -> None:
   """Main entry point for distributed process runtime execution.
 
@@ -219,18 +202,6 @@ def main(argv: list[str]) -> None:
       help="Fully qualified class name of the process executor implementation.",
   )
 
-  parser.add_argument(
-      "--exit_on_failure",
-      action="store_true",
-      help=(
-          "Single-process mode only: if the process fails (exception or"
-          " non-zero SystemExit), flush logs and os._exit right away. Without"
-          " this, leftover non-daemon threads (gRPC, thread pools) can keep"
-          " the interpreter, and so the pod, alive after a fatal error."
-          " Multi-process mode always does this."
-      ),
-  )
-
   main_args, processes_argv = parser.parse_known_args(argv)
   # Strip the first argument (program path), which should be hidden from processes.
   processes_argv = processes_argv[1:]
@@ -250,29 +221,7 @@ def main(argv: list[str]) -> None:
 
   if len(prepared_processes) == 1:
     prepared = prepared_processes[0]
-    if not main_args.exit_on_failure:
-      process_executor.run(
-          prepared.main_fn, prepared.argv, prepared.context_args
-      )
-      return
-    try:
-      process_executor.run(
-          prepared.main_fn, prepared.argv, prepared.context_args
-      )
-    except SystemExit as e:
-      code = _system_exit_code(e)
-      if code == 0:
-        raise
-      logging.exception(
-          "Process exited with code %d. Forcefully terminating application.",
-          code,
-      )
-      _hard_exit(code)
-    except BaseException:  # pylint: disable=broad-exception-caught
-      logging.exception(
-          "Process failed. Forcefully terminating application."
-      )
-      _hard_exit(1)
+    process_executor.run(prepared.main_fn, prepared.argv, prepared.context_args)
   else:
     with concurrent.futures.ThreadPoolExecutor(
         max_workers=len(prepared_processes)

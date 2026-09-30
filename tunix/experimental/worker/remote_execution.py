@@ -80,30 +80,6 @@ RPC_TIMEOUT_S = 60.0
 # be sent before the connection is torn down.
 LONG_POLL_TIMEOUT_S = RPC_TIMEOUT_S - 10.0
 
-# Backoff between poll retries when PoolExecutionSession has a retry budget.
-_POLL_RETRY_INITIAL_BACKOFF_S = 1.0
-_POLL_RETRY_MAX_BACKOFF_S = 30.0
-
-
-def _is_transient_poll_error(exc: Exception) -> bool:
-  """True for poll errors that can clear on their own (network blip, busy worker).
-
-  Only these are retried. Anything else (e.g. a response that fails to
-  deserialize) means a result may already be lost, so retrying would hang.
-
-  Args:
-    exc: Exception raised by `ActorHandle.poll_responses`.
-  """
-  if isinstance(exc, ConnectionError):
-    return True
-  if _grpc_aio_lib is not None and isinstance(exc, _grpc_aio_lib.AioRpcError):
-    assert _grpc_lib is not None
-    return exc.code() in (
-        _grpc_lib.StatusCode.UNAVAILABLE,
-        _grpc_lib.StatusCode.DEADLINE_EXCEEDED,
-    )
-  return False
-
 # Cap for a single gRPC message. Set to -1 (unlimited) so large training-batch
 # payloads (which can exceed 1 GB for long sequence lengths) are not truncated.
 _MAX_MESSAGE_BYTES = -1
@@ -647,9 +623,6 @@ class RemoteActorHandle(ActorHandle):
 
   def __init__(self, target_address: str):
     self.target_address = target_address
-
-  def __repr__(self) -> str:
-    return f"{type(self).__name__}({self.target_address})"
 
   def submit(self, method_name: Optional[str] = None, *args, **kwargs) -> Any:
     del method_name, args, kwargs
@@ -1270,30 +1243,8 @@ class PoolExecutionSession:
     failures.
   """
 
-  def __init__(
-      self,
-      pool: RoutingActorPool,
-      *,
-      poll_retry_budget_s: Optional[float] = None,
-  ):
-    """Initializes the session.
-
-    Args:
-      pool: Worker pool that tasks are routed to.
-      poll_retry_budget_s: How long a worker's poll loop keeps retrying
-        transient transport errors (see `_is_transient_poll_error`) before it
-        gives up and fails every task in flight on that worker. The clock
-        starts at the first failure and resets on any successful poll. `None`
-        keeps the legacy behavior: the first poll error fails every in-flight
-        task on that worker.
-    """
-    if poll_retry_budget_s is not None and poll_retry_budget_s <= 0:
-      raise ValueError(
-          f"poll_retry_budget_s must be positive or None, got"
-          f" {poll_retry_budget_s}"
-      )
+  def __init__(self, pool: RoutingActorPool):
     self._pool = pool
-    self._poll_retry_budget_s = poll_retry_budget_s
     self._response_queue: asyncio.Queue[Any] = asyncio.Queue()
     self._active_workers: set[ActorHandle] = set()
     self._dispatched_tasks: Dict[ActorHandle, set[str]] = {}
@@ -1352,11 +1303,6 @@ class PoolExecutionSession:
     task.add_done_callback(self._poll_tasks.discard)
 
   async def _poll_worker_loop(self, actor: ActorHandle) -> None:
-    loop = asyncio.get_running_loop()
-    # Monotonic time of the first poll failure in the current streak, or None
-    # while polls are succeeding.
-    first_failure_t: Optional[float] = None
-    backoff_s = _POLL_RETRY_INITIAL_BACKOFF_S
     try:
       while not self._closed:
         dispatched_set = self._dispatched_tasks.setdefault(actor, set())
@@ -1364,8 +1310,6 @@ class PoolExecutionSession:
           break
         try:
           response = await actor.poll_responses(timeout_s=LONG_POLL_TIMEOUT_S)
-          first_failure_t = None
-          backoff_s = _POLL_RETRY_INITIAL_BACKOFF_S
           if isinstance(response, ExecutionResponse):
             try:
               res = response.unwrap()
@@ -1382,36 +1326,6 @@ class PoolExecutionSession:
         except asyncio.CancelledError:
           break
         except Exception as exc:  # pylint: disable=broad-exception-caught
-          if self._poll_retry_budget_s is not None and _is_transient_poll_error(
-              exc
-          ):
-            now = loop.time()
-            if first_failure_t is None:
-              first_failure_t = now
-            remaining_s = self._poll_retry_budget_s - (now - first_failure_t)
-            if remaining_s > 0:
-              sleep_s = min(backoff_s, remaining_s)
-              logging.warning(
-                  "Transient poll error on worker %s (%d tasks in flight);"
-                  " retrying in %.1fs, %.0fs of retry budget left: %r",
-                  actor,
-                  len(dispatched_set),
-                  sleep_s,
-                  remaining_s,
-                  exc,
-              )
-              await asyncio.sleep(sleep_s)
-              backoff_s = min(backoff_s * 2, _POLL_RETRY_MAX_BACKOFF_S)
-              continue
-            logging.error(
-                "Worker %s unreachable for %.0fs (poll retry budget %.0fs);"
-                " failing its %d in-flight tasks: %r",
-                actor,
-                now - first_failure_t,
-                self._poll_retry_budget_s,
-                len(dispatched_set),
-                exc,
-            )
           # Transport or polling failure on this worker; fail all dispatched tasks on this worker.
           failed_count = len(dispatched_set)
           dispatched_set.clear()
