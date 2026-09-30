@@ -856,6 +856,13 @@ class RaidenSynchronizer(weight_sync.WeightSynchronizer):
       self._sync.bind_weights(self.arrays)
       _log_rss("bind:after_native_rebind")
 
+  @property
+  def staged_on_host(self) -> bool:
+    # Only the FFI path copies every layer into host buffers inside `d2h`.
+    # Direct-device mode and the native (non-proxy) path read device memory
+    # during the transfer.
+    return self._is_proxy and not _use_direct_device_buffer()
+
   def _require_sync(self, op: str) -> Any:
     if self._sync is None and not self._is_proxy:
       if not self.bound:

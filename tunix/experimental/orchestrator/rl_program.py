@@ -747,6 +747,9 @@ class StandardRLProgram(RLProgram):
             prompt_item["max_response_length"] = self.max_response_length
 
         prompt_item = _tag_prompt(prompt_item, coordinates)
+        # What the rollouts actually hold. While a background sync is in
+        # flight the trainer is already a version ahead of them.
+        rollout_policy_version = self.policy_version - self._unsynced_steps
         logging.info(
             "[pipeline] DISPATCH prompt_id=%s prompt_idx=%d batch_idx=%d"
             " intra_batch_idx=%d policy_version=%d next_batch=%d",
@@ -756,13 +759,13 @@ class StandardRLProgram(RLProgram):
             coordinates["prompt_idx"],
             coordinates["batch_idx"],
             coordinates["intra_batch_idx"],
-            self.policy_version,
+            rollout_policy_version,
             self._next_batch,
         )
         self._in_flight_rollouts += self.num_generations
         dispatch_kwargs: dict[str, Any] = {
             "num_generations": self.num_generations,
-            "policy_version": self.policy_version,
+            "policy_version": rollout_policy_version,
             "exact_token_continuity": getattr(
                 self.algo.algo_config, "exact_token_continuity", True
             ),
