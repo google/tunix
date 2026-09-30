@@ -805,6 +805,62 @@ class TrajectoryLoggerTest(absltest.TestCase):
     self.assertEqual(lines[2]['total_preemptions'], 1)
     self.assertEqual(lines[2]['total_completion_tokens'], 40)
 
+  def test_log_trajectory_json_gcs_skips_mkdir(self):
+    """Tests that log_trajectory_json avoids calling mkdir on gs:// paths."""
+    temp_dir = self.create_tempdir().full_path
+    gcs_dir = f'{_FAKE_GCS_ROOT}/trajectories/no_mkdir_run'
+    item = {
+        'global_step': 0,
+        'prompt_id': 'p0',
+        'worker_id': 'worker0',
+        'trajectory': {
+            'steps': [
+                {'action': 'step_0', 'output': 'ok0'},
+                {'action': 'step_1', 'output': 'ok1'},
+            ],
+        },
+    }
+
+    with mock.patch.object(
+        trajectory_logger.epath,
+        'Path',
+        lambda path: _FakeGcsPath(path, temp_dir),
+    ), mock.patch.object(_FakeGcsPath, 'mkdir') as mock_mkdir:
+      out_dir = trajectory_logger.log_trajectory_json(gcs_dir, item)
+      self.assertIsNotNone(out_dir)
+      mock_mkdir.assert_not_called()
+
+    local_traj_dir = os.path.join(
+        temp_dir, 'trajectories/no_mkdir_run/step0/worker0/traj_p0_g0'
+    )
+    self.assertTrue(
+        os.path.exists(os.path.join(local_traj_dir, 'metadata.json'))
+    )
+    self.assertTrue(os.path.exists(os.path.join(local_traj_dir, 'step0.json')))
+    self.assertTrue(os.path.exists(os.path.join(local_traj_dir, 'step1.json')))
+
+  def test_async_trajectory_logger_handles_large_burst_without_dropping(self):
+    """Tests that a 1024-trajectory step burst fits in the default queue without drops."""
+    temp_dir = self.create_tempdir().full_path
+    logged_items = []
+    lock = threading.Lock()
+
+    def _fast_noop_log(log_dir, item, **kwargs):
+      del log_dir, kwargs
+      with lock:
+        logged_items.append(item['traj_id'])
+      return 'ok'
+
+    with mock.patch.object(
+        trajectory_logger, 'log_trajectory_json', side_effect=_fast_noop_log
+    ):
+      logger = trajectory_logger.AsyncTrajectoryLogger(temp_dir)
+      for i in range(1024):
+        logger.log_item_async({'global_step': 0, 'traj_id': f'traj_{i}'})
+      logger.stop()
+
+    self.assertLen(logged_items, 1024)
+
 
 if __name__ == '__main__':
   absltest.main()

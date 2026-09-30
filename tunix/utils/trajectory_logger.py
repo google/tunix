@@ -43,7 +43,9 @@ _T = TypeVar('_T')
 
 _DEFAULT_GCS_TIMEOUT_SEC = 10.0
 _DEFAULT_STOP_TIMEOUT_SEC = 15.0
-_DEFAULT_MAX_QUEUE_SIZE = 1000
+_DEFAULT_MAX_QUEUE_SIZE = 16384
+_DEFAULT_NUM_WORKERS = 32
+_DEFAULT_FILE_WRITE_WORKERS = 8
 
 
 class _AbandonedOperationError(TimeoutError):
@@ -625,15 +627,18 @@ def log_trajectory_json(
     _run_with_timeout(_write, gcs_timeout_sec, f'Write({path})')
 
   try:
-    step_dir.mkdir(parents=True, exist_ok=True)
+    if not _is_gcs_path(log_path):
+      step_dir.mkdir(parents=True, exist_ok=True)
 
     meta_json = json.dumps(_make_serializable(meta_summary), indent=2)
-    _write_single_file(step_dir / 'metadata.json', meta_json)
+    files_to_write: list[tuple[Any, str]] = [
+        (step_dir / 'metadata.json', meta_json)
+    ]
 
     for idx, s_data in enumerate(steps_list):
       step_file = step_dir / f'step{idx}.json'
       step_json = json.dumps(_make_serializable(s_data), indent=2)
-      _write_single_file(step_file, step_json)
+      files_to_write.append((step_file, step_json))
 
     # Generate and write inference_metrics.json and inference_metrics.jsonl
     raw_env_time = (
@@ -830,16 +835,30 @@ def log_trajectory_json(
     }
 
     inf_json = json.dumps(_make_serializable(inference_summary), indent=2)
-    _write_single_file(step_dir / 'inference_metrics.json', inf_json)
+    files_to_write.append((step_dir / 'inference_metrics.json', inf_json))
 
     jsonl_lines = [
         json.dumps(_make_serializable(r)) for r in inference_step_records
     ]
     jsonl_lines.append(json.dumps(_make_serializable(inference_summary)))
-    _write_single_file(
+    files_to_write.append((
         step_dir / 'inference_metrics.jsonl',
         '\n'.join(jsonl_lines) + '\n',
-    )
+    ))
+
+    if len(files_to_write) <= 1:
+      for file_path, content in files_to_write:
+        _write_single_file(file_path, content)
+    else:
+      with concurrent.futures.ThreadPoolExecutor(
+          max_workers=min(len(files_to_write), _DEFAULT_FILE_WRITE_WORKERS)
+      ) as executor:
+        futures = [
+            executor.submit(_write_single_file, file_path, content)
+            for file_path, content in files_to_write
+        ]
+        for fut in futures:
+          fut.result()
 
     logging.log_first_n(
         logging.INFO,
@@ -866,7 +885,7 @@ class AsyncTrajectoryLogger:
       max_queue_size: int = _DEFAULT_MAX_QUEUE_SIZE,
       stop_timeout_sec: float = _DEFAULT_STOP_TIMEOUT_SEC,
       gcs_timeout_sec: float | None = _DEFAULT_GCS_TIMEOUT_SEC,
-      num_workers: int = 8,
+      num_workers: int = _DEFAULT_NUM_WORKERS,
   ):
     self._log_dir = log_dir
     self._log_format = log_format.lower()
