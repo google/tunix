@@ -76,6 +76,19 @@ export TUNIX_IMAGE="gcr.io/cloud-tpu-multipod-dev/${USER}/trellis:latest"
 SEED=42 bash tunix/experimental/examples/recipes/mlperf_35b_128_v5p.sh start
 ```
 
+#### FP8 MoE
+
+Every recipe can run its routed experts in FP8 (see `fp8_moe.sh`):
+
+```bash
+# FP8 rollout experts (W8A8), bf16 trainer
+ROLLOUT_FP8=true bash tunix/experimental/examples/recipes/mlperf_35b_128_v5p.sh start
+# Experimental: also round the trainer's experts to the rollout's FP8 grid in the forward pass
+ROLLOUT_FP8=true TRAINER_FP8=true bash tunix/experimental/examples/recipes/mlperf_35b_128_v5p.sh start
+```
+
+Both need an image whose MaxText has the `rollout_fp8_moe` and `fp8_moe_fake_quant` flags.
+
 ### 3. Monitoring and Managing the Run
 
 ```bash
