@@ -267,6 +267,9 @@ def maxtext_config(a):
 
 def request_fields(a, entry, index, attempt):
   """Construct a wire request without importing JAX on the controller."""
+  # template is stdlib-only, so this keeps the controller JAX-free.
+  from examples.deepswe import template  # pylint: disable=import-outside-toplevel
+
   instance_id = str(entry["instance_id"])
   prompt_id = f"eval_{index}"
   max_context_limit = getattr(a, "max_context_limit", 0)
@@ -303,6 +306,7 @@ def request_fields(a, entry, index, attempt):
               "scaffold": a.scaffold,
               "verbose": False,
           },
+          "agent_name": template.get_agent_name(a.scaffold),
           "agent_config": {"scaffold": a.scaffold},
       },
   }
@@ -348,22 +352,28 @@ def summarize(rows, instance_ids, attempts):
 
 def compact_result(response):
   if response.error is not None or response.payload is None:
-    return {
+    result = {
         "reward": 0.0,
         "resolved": False,
         "status": response.status,
         "error": str(response.error or "Missing trajectory"),
     }
-  traj = response.payload.traj
-  reward = float(traj["trajectory_reward"])
-  if not math.isfinite(reward):
-    raise ValueError("Non-finite trajectory reward")
-  return {
-      "reward": reward,
-      "resolved": reward > 0,
-      "status": str(traj.get("status", "UNKNOWN")),
-      "error": None,
-  }
+  else:
+    traj = response.payload.traj
+    reward = float(traj["trajectory_reward"])
+    if not math.isfinite(reward):
+      raise ValueError("Non-finite trajectory reward")
+    result = {
+        "reward": reward,
+        "resolved": reward > 0,
+        "status": str(traj.get("status", "UNKNOWN")),
+        "error": None,
+    }
+  # Worker-reported metadata (success and error); evaluate_worker falls back to
+  # the requested agent_name if the worker did not report one.
+  if response.metadata.get("agent_name"):
+    result["agent_name"] = str(response.metadata["agent_name"])
+  return result
 
 
 async def evaluate_worker(handle, jobs, limit, timeout, write_record):
@@ -401,6 +411,9 @@ async def evaluate_worker(handle, jobs, limit, timeout, write_record):
             "status": "ERROR",
             "error": str(exc),
         }
+      requested_agent = fields["metadata"].get("agent_name")
+      if requested_agent and not row.get("agent_name"):
+        row["agent_name"] = requested_agent
       row.update(
           instance_id=fields["metadata"]["instance_id"],
           attempt=fields["group_index"],

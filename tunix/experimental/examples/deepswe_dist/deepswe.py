@@ -29,11 +29,15 @@ from examples.deepswe import deepswe_data
 from examples.deepswe import sandbox_utils
 from examples.deepswe import swe_agent
 from examples.deepswe import swe_env
+from examples.deepswe import template
 
 
 DEEPSWE_ENV_NAME = "deepswe_env"
-DEEPSWE_AGENT_NAME = "deepswe_agent"
+DEEPSWE_AGENT_NAME = template.DEEPSWE_AGENT_NAME
+CODEACT_AGENT_NAME = template.CODEACT_AGENT_NAME
 DEFAULT_DATASET_NAME = "R2E-Gym/R2E-Gym-Subset"
+
+get_agent_name = template.get_agent_name
 
 
 def normalize_example_value(value: Any) -> Any:
@@ -180,6 +184,7 @@ def build_prompt_item(
           "docker_image": entry.get("docker_image"),
           "prefix_hash": prompt_id,
           "env_config": env_config,
+          "agent_name": get_agent_name(scaffold),
           "agent_config": agent_config,
           "episode_timeout": episode_timeout_secs,
           "overlong_filter": overlong_filter,
@@ -291,6 +296,28 @@ class DeepSWEEnv(swe_env.SWEEnv):
 
 @registry.register_agent(DEEPSWE_AGENT_NAME)
 class DeepSWEAgent(swe_agent.SWEAgent):
-  """Registry adapter for the legacy DeepSWE XML-tool agent."""
+  """Registry adapter for the DeepSWE agent."""
 
   name = DEEPSWE_AGENT_NAME
+
+  def __new__(
+      cls,
+      system_prompt: str | None = None,
+      use_fn_calling: bool = False,
+      format_model_response: bool = False,
+      scaffold: str | None = None,
+  ):
+    # Mirrors SWEAgent.__init__ so scaffold is honored positionally or by name.
+    del system_prompt, use_fn_calling, format_model_response  # Used by __init__.
+    if cls is DeepSWEAgent:
+      resolved = scaffold or os.getenv("SCAFFOLD", "r2egym")
+      if str(resolved) in swe_agent.OPENHANDS_SCAFFOLDS:
+        return super().__new__(DeepSWECodeActAgent)
+    return super().__new__(cls)
+
+
+@registry.register_agent(CODEACT_AGENT_NAME)
+class DeepSWECodeActAgent(swe_agent.CodeActAgent, DeepSWEAgent):
+  """Registry adapter for the OpenHands CodeActAgent."""
+
+  name = CODEACT_AGENT_NAME

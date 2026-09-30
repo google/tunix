@@ -225,7 +225,12 @@ def parse_codeact_response(response_text: str) -> tuple[str, Any]:
   return thought, action
 
 
+_LOGGED_AGENT_CONFIGS: set[tuple[str, str, str, bool]] = set()
+
+
 class SWEAgent(ConversationAgentBase):
+
+  name = "swe_agent"
 
   def __init__(
       self,
@@ -254,6 +259,19 @@ class SWEAgent(ConversationAgentBase):
     )
 
     super().__init__(system_prompt)
+    agent_key = (
+        self.__class__.__name__,
+        self.name,
+        scaffold,
+        use_fn_calling,
+    )
+    if agent_key not in _LOGGED_AGENT_CONFIGS:
+      _LOGGED_AGENT_CONFIGS.add(agent_key)
+      logging.info(
+          "Initialized DeepSWE agent: class=%s, name=%s, scaffold=%s,"
+          " use_fn_calling=%s",
+          *agent_key,
+      )
 
   def update_from_env(
       self,
@@ -319,6 +337,15 @@ class SWEAgent(ConversationAgentBase):
 
     self._messages.append({"role": "user", "content": str(observation)})
 
+  def _parse_model_response(
+      self, response: str | Any
+  ) -> tuple[str, SWEAction]:
+    if self.use_fn_calling:
+      return parse_oai_response(response)
+    if self.scaffold in OPENHANDS_SCAFFOLDS:
+      return parse_codeact_response(response)
+    return parse_xml_response(response)
+
   def update_from_model(self, response: str, **kwargs):
     """Updates the agent's internal state after an environment step.
 
@@ -332,12 +359,7 @@ class SWEAgent(ConversationAgentBase):
         Action: The action produced by the agent.
     """
     self._trajectory.steps.append(self.cur_step)
-    if self.use_fn_calling:
-      thought, action = parse_oai_response(response)
-    elif self.scaffold in OPENHANDS_SCAFFOLDS:
-      thought, action = parse_codeact_response(response)
-    else:
-      thought, action = parse_xml_response(response)
+    thought, action = self._parse_model_response(response)
     action_str = action.to_xml_string() if action.function_name else ""
 
     # Update Trajectory
@@ -364,6 +386,8 @@ class CodeActAgent(SWEAgent):
   supporting markdown code blocks, JSON tool calls, and XML function calls.
   """
 
+  name = "codeact_agent"
+
   def __init__(
       self,
       system_prompt: Optional[str] = None,
@@ -377,6 +401,13 @@ class CodeActAgent(SWEAgent):
         format_model_response=format_model_response,
         scaffold=scaffold,
     )
+
+  def _parse_model_response(
+      self, response: str | Any
+  ) -> tuple[str, SWEAction]:
+    if self.use_fn_calling:
+      return parse_oai_response(response)
+    return parse_codeact_response(response)
 
 
 __all__ = [

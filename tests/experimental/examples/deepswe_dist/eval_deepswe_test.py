@@ -190,6 +190,7 @@ class EvalTest(unittest.TestCase):
         payload=types.SimpleNamespace(
             traj={"trajectory_reward": 0, "status": "SUCCEEDED"}
         ),
+        metadata={},
     )
     self.assertFalse(eval_lib.compact_result(response)["resolved"])
     response.payload.traj["trajectory_reward"] = 1
@@ -221,6 +222,43 @@ class EvalTest(unittest.TestCase):
           json.loads((Path(directory) / "attempts/eval_0_0.json").read_text()),
           row,
       )
+
+  def test_scaffold_selects_agent_name_and_compact_result_records_it(self):
+    openhands_req = eval_lib.request_fields(
+        self.args("--scaffold", "openhands"), self.entry(), 0, 0
+    )
+    self.assertEqual(openhands_req["metadata"]["agent_name"], "codeact_agent")
+    self.assertEqual(
+        openhands_req["metadata"]["agent_config"], {"scaffold": "openhands"}
+    )
+    r2e_req = eval_lib.request_fields(
+        self.args("--scaffold", "r2egym"), self.entry(), 0, 0
+    )
+    self.assertEqual(r2e_req["metadata"]["agent_name"], "deepswe_agent")
+
+    response = types.SimpleNamespace(
+        error=None,
+        status="COMPLETED",
+        payload=types.SimpleNamespace(
+            traj={"trajectory_reward": 1, "status": "SUCCEEDED"},
+        ),
+        metadata={"agent_name": "codeact_agent"},
+    )
+    self.assertEqual(
+        eval_lib.compact_result(response)["agent_name"], "codeact_agent"
+    )
+
+    error_response = types.SimpleNamespace(
+        error="RESOURCE_EXHAUSTED",
+        status="ERROR",
+        payload=None,
+        metadata={"agent_name": "codeact_agent"},
+    )
+    error_row = eval_lib.compact_result(error_response)
+    self.assertEqual(error_row["status"], "ERROR")
+    self.assertEqual(error_row["agent_name"], "codeact_agent")
+    error_response.metadata = {}
+    self.assertNotIn("agent_name", eval_lib.compact_result(error_response))
 
 
 class RpcTest(unittest.IsolatedAsyncioTestCase):
@@ -271,6 +309,11 @@ class RpcTest(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(len(written), 4)
     self.assertLessEqual(worker.peak, 2)
     self.assertEqual(rows[0]["attempt"], 1)
+    expected_agent = eval_lib.request_fields(a, entry, 0, 0)["metadata"][
+        "agent_name"
+    ]
+    self.assertTrue(expected_agent)
+    self.assertEqual({row["agent_name"] for row in rows}, {expected_agent})
     summary = eval_lib.summarize(rows, ["a"], 4)
     self.assertEqual(summary["error_attempts"], 1)
     self.assertEqual(summary["avg_at_k"], 0.75)
