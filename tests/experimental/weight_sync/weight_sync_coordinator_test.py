@@ -95,6 +95,7 @@ class FakeSource:
     self.port = 20000
     self.prepare_calls = 0
     self.release_calls = 0
+    self.prepare_requests = []
 
   def info(self) -> datatypes.WorkerInfo:
     return self._info
@@ -102,6 +103,7 @@ class FakeSource:
   async def prepare_weight_sync(self, sync_request: Any = None, **kwargs):
     del kwargs
     self.prepare_calls += 1
+    self.prepare_requests.append(sync_request)
     if self._prepare_delay:
       await asyncio.sleep(self._prepare_delay)
     self.port += 1  # rebind: a snapshot from last round would be stale
@@ -579,6 +581,19 @@ class SuccessPathTest(CoordinatorTestBase):
     # taken, and nothing about it may wait on the destinations draining.
     self.assertEqual(self.sources[0].prepare_calls, 1)
     self.assertLess(self.log.index("staged"), self.log.index("sampler:pre"))
+    # The trainer must know to go back to READY once it has staged.
+    extra = self.sources[0].prepare_requests[0].extra_config
+    self.assertTrue(extra[weight_sync.RELEASE_SOURCE_AFTER_STAGE])
+
+  def test_blocking_round_keeps_source_held_until_release(self):
+    dest = FakeDestination("sampler", [])
+    self.make(dest)
+
+    result = asyncio.run(self.coordinator.sync(1))
+
+    self.assertTrue(result.success)
+    extra = self.sources[0].prepare_requests[0].extra_config
+    self.assertNotIn(weight_sync.RELEASE_SOURCE_AFTER_STAGE, extra)
 
   def test_fresh_req_id_and_uuid_even_for_the_same_policy_version(self):
     dest = FakeDestination("sampler", [])

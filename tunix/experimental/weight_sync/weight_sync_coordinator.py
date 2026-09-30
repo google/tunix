@@ -1163,6 +1163,13 @@ class WeightSyncCoordinator:
             needs_restart=phase is None and quiesce_attempted,
         )
 
+    if source_staged is not None:
+      # The caller trains again once `source_staged` fires, so the sources
+      # must not hold their not-ready state until release.
+      extra_config = {
+          **extra_config,
+          weight_sync.RELEASE_SOURCE_AFTER_STAGE: True,
+      }
     request = self.build_request(
         policy_version,
         req_id=req_id,
