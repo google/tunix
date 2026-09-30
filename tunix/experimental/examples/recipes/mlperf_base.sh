@@ -114,9 +114,13 @@ export TRAINER_PADDED_MOE_MLP_DIM=""
 export WEIGHT_SYNC_MODE="${WEIGHT_SYNC_MODE:-raiden}"
 export WEIGHT_SYNC_DISABLE_TIMEOUTS="${WEIGHT_SYNC_DISABLE_TIMEOUTS:-${DISABLE_WEIGHT_SYNC_TIMEOUTS:-0}}"
 
-export TPU_RAIDEN_DATA_NICS="${TPU_RAIDEN_DATA_NICS:-eth0}"
 export RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFER="${RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFER:-0}"
 export ENABLE_MULTI_NUMA="${ENABLE_MULTI_NUMA:-0}"
+export TPU_RAIDEN_DATA_NICS="${TPU_RAIDEN_DATA_NICS:-eth0}"
+if [[ "${ENABLE_MULTI_NUMA}" != "1" && "${ENABLE_MULTI_NUMA}" != "true" ]] || [[ "${TPU_RAIDEN_DATA_NICS}" != *?,?* ]]; then
+  export ENABLE_MULTI_NUMA="0"
+  export TPU_RAIDEN_DATA_NICS="${TPU_RAIDEN_DATA_NICS%%,*}"
+fi
 
 # ==============================================================================
 # WandB Configuration
