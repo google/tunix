@@ -94,7 +94,11 @@ export REWARD_MODE="env"
 export RPC_TIMEOUT_S="${RPC_TIMEOUT_S:-10800}"
 
 # Checkpoint saving OOMs the trainer at this size; restore is unaffected.
-export CHECKPOINT_SAVE_INTERVAL_STEPS=0
+export CHECKPOINT_SAVE_INTERVAL_STEPS="${CHECKPOINT_SAVE_INTERVAL_STEPS:-0}"
+if [[ "${CHECKPOINT_SAVE_INTERVAL_STEPS}" -gt 0 ]]; then
+  export ENABLE_PATHWAYS_PERSISTENCE="${ENABLE_PATHWAYS_PERSISTENCE:-1}"
+  export PATHWAYS_CHECKPOINTING_IMPL="${PATHWAYS_CHECKPOINTING_IMPL:-persistence}"
+fi
 
 # Profiling off. MaxText decided whether to profile from profiler_steps alone
 # (default 5), so profiler=ProfilerType.NONE still opened a trace at step 1 and

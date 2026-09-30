@@ -173,8 +173,18 @@ export NUM_GENERATIONS=16
 # ('data','fsdp','fsdp_transpose','expert') and the MoE shard_map rejects a row
 # count that is not divisible by their product.
 export TRAIN_MICRO_BATCH_SIZE="${TRAIN_MICRO_BATCH_SIZE:-32}"
-export CHECKPOINT_SAVE_INTERVAL_STEPS=0
+# Checkpointing is off by default: a 397B save is expensive and the MLPerf timing
+# runs do not need one. Override to a positive value to turn it on.
+export CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-0}
 export CHECKPOINT_MAX_TO_KEEP=10
+# When saving is enabled, route the write through Pathways; the default Orbax path
+# stages every shard through the controller and OOMs the proxy pod at 397B.
+# PATHWAYS_CHECKPOINTING_IMPL then picks the transport: "persistence" (default) or
+# "colocated_python", which additionally requires COLOCATED_PYTHON_SIDECAR_IMAGE.
+if [[ "${CHECKPOINT_SAVE_INTERVAL_STEPS}" -gt 0 ]]; then
+  export ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE:-1}
+  export PATHWAYS_CHECKPOINTING_IMPL=${PATHWAYS_CHECKPOINTING_IMPL:-persistence}
+fi
 export MAX_STALENESS=0
 
 # Step 0 is a cold single-threaded Pallas lowering of the MoE and GDN kernels
