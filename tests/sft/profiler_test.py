@@ -92,7 +92,7 @@ class ProfilerTest(parameterized.TestCase):
   )
   @mock.patch.object(jax, 'process_index', return_value=0)
   @mock.patch.object(jax.profiler, 'start_trace')
-  def test_profiler_active_with_profile_options_or_continuous_profioing(
+  def test_profiler_active_with_profile_options_or_continuous_profiling(
       self,
       mock_start_trace,
       _,
