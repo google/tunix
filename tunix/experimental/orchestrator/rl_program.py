@@ -367,6 +367,7 @@ class StandardRLProgram(RLProgram):
       on_step_end: Callable[[int, Any], None] | None = None,
       val_start_step: int | None = None,
       on_checkpoint_saved: Callable[[dict[str, Any]], None] | None = None,
+      pipeline_train_microbatches: bool = False,
   ):
     super().__init__()
     self.engine: rl_engine_interface.AbstractRLEngine | None = None
@@ -467,6 +468,12 @@ class StandardRLProgram(RLProgram):
       )
     self.max_staleness = max_staleness
     self.sync_weights = sync_weights
+    # Packs the next microbatch (in a worker thread) while the previous one's
+    # train_step RPC is in flight, so orchestrator-side packing overlaps
+    # trainer compute. At most one train_step is ever outstanding, so the
+    # gradient-accumulation order is unchanged.
+    self.pipeline_train_microbatches = pipeline_train_microbatches
+    self._pending_train: asyncio.Task[Any] | None = None
     self.metrics_logger: MetricsLogger = MetricsLogger(metrics_logging_options)
     if trajectory_log_dir is None and metrics_logging_options is not None:
       log_dir = getattr(metrics_logging_options, "log_dir", "")
@@ -1424,6 +1431,25 @@ class StandardRLProgram(RLProgram):
       }
       self.trajectory_logger.log_item_async(row)
 
+  async def _assemble(self, fn: Callable[..., Any], *args: Any) -> Any:
+    """Runs a CPU-heavy assembler call, off the event loop when pipelining."""
+    if self.pipeline_train_microbatches:
+      return await asyncio.to_thread(fn, *args)
+    return fn(*args)
+
+  async def _timed_train_step(
+      self, batch: Any, *, apply_optimizer: bool
+  ) -> tuple[Any, float]:
+    assert self.engine is not None
+    start = time.monotonic()
+    result = await self.engine.train_step(
+        batch,
+        role=datatypes.Role.ACTOR,
+        accumulate_gradients=True,
+        apply_optimizer=apply_optimizer,
+    )
+    return result, time.monotonic() - start
+
   async def train_stage(self) -> None:
     """Stage 3: Streaming gradient accumulation with RLTrainerPayloads."""
     assert self.engine is not None
@@ -1451,6 +1477,13 @@ class StandardRLProgram(RLProgram):
       weight_sync_time = 0.0
 
       current_batch_idx: int | None = None
+
+      async def _await_pending_train() -> None:
+        nonlocal step_result, policy_training_time
+        task, self._pending_train = self._pending_train, None
+        if task is not None:
+          step_result, elapsed = await task
+          policy_training_time += elapsed
 
       async def _maybe_save_checkpoint() -> None:
         nonlocal checkpoint_saved
@@ -1524,7 +1557,7 @@ class StandardRLProgram(RLProgram):
         # per-component timing accuracy.
         exposed_generation_time += time.monotonic() - _t_gen
         if not scored_items:
-          assembled_batches = self.assembler.flush()
+          assembled_batches = await self._assemble(self.assembler.flush)
         else:
           if groups_consumed == 0 and self.on_step_begin:
             self.on_step_begin(current_step)
@@ -1556,7 +1589,9 @@ class StandardRLProgram(RLProgram):
                   },
               )
             payloads.append(payload)
-          assembled_batches = self.assembler.feed(payloads)  # pyrefly: ignore[bad-argument-type]
+          assembled_batches = await self._assemble(
+              self.assembler.feed, payloads  # pyrefly: ignore[bad-argument-type]
+          )
 
         for mb in assembled_batches:
           batch = mb.payload
@@ -1567,6 +1602,7 @@ class StandardRLProgram(RLProgram):
                   "datatypes.RLTrainerPayload microbatches; got "
                   f"{type(batch).__name__}."
               )
+            await _await_pending_train()
             ref_logps = await self.engine.per_token_logps(
                 datatypes.Role.REFERENCE, items=batch
             )
@@ -1578,6 +1614,7 @@ class StandardRLProgram(RLProgram):
               and algo_config is not None
               and algo_config.use_rollout_logps
           ):
+            await _await_pending_train()
             batch = await self._apply_sampler_trainer_agreement(
                 batch, step_sampler_agreement
             )
@@ -1588,14 +1625,15 @@ class StandardRLProgram(RLProgram):
               len(mb.trajectory_ids),
               logging_utils.summarize_list(list(mb.trajectory_ids)),
           )
-          _t_train = time.monotonic()
-          step_result = await self.engine.train_step(
-              batch,
-              role=datatypes.Role.ACTOR,
-              accumulate_gradients=True,
-              apply_optimizer=mb.is_final_batch,
+          await _await_pending_train()
+          train_step = self._timed_train_step(
+              batch, apply_optimizer=mb.is_final_batch
           )
-          policy_training_time += time.monotonic() - _t_train
+          if self.pipeline_train_microbatches and not mb.is_final_batch:
+            self._pending_train = asyncio.create_task(train_step)
+            continue
+          step_result, elapsed = await train_step
+          policy_training_time += elapsed
           if mb.is_final_batch:
             _t_metrics = time.monotonic()
             trainer_metrics = await self.engine.get_metrics(
@@ -1622,6 +1660,7 @@ class StandardRLProgram(RLProgram):
             await _maybe_save_checkpoint()
           break
 
+      await _await_pending_train()
       if not all_step_items:
         logging.info(
             "Dataset exhausted at step %d before max_steps.", current_step
@@ -1779,6 +1818,8 @@ class StandardRLProgram(RLProgram):
       for task in tasks:
         if not task.done():
           task.cancel()
+      if self._pending_train is not None and not self._pending_train.done():
+        self._pending_train.cancel()
 
   def run(
       self,
