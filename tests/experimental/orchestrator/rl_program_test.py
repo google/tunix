@@ -4978,6 +4978,20 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
     asyncio.run(_run())
 
 
+class NextOrExhaustedTest(absltest.TestCase):
+
+  def test_returns_items_then_sentinel_through_to_thread(self):
+    async def drain(it):
+      out = []
+      while True:
+        item = await asyncio.to_thread(rl_program._next_or_exhausted, it)
+        if item is rl_program._EXHAUSTED:
+          return out
+        out.append(item)
+
+    self.assertEqual(asyncio.run(drain(iter([1, 2]))), [1, 2])
+
+
 class ExtractScalarTest(absltest.TestCase):
 
   def test_extract_scalar_with_compute(self):
