@@ -275,8 +275,29 @@ def pack_bin(
     carried: Sequence[str],
     routed_shape: tuple[int, ...] | None = None,
     segment_align_multiple: int = DEFAULT_SEGMENT_ALIGN_MULTIPLE,
+    routed_out: np.ndarray | None = None,
 ) -> PackedRow:
-  """Packs a single bin of items into a single `[budget]` PackedRow."""
+  """Packs a single bin of items into a single `[budget]` PackedRow.
+
+  Args:
+    bin_items: Items to pack into this row.
+    budget: Token capacity of the row.
+    pad_id: Token id written to padding positions.
+    carried: Per-token fields carried by the chunk.
+    routed_shape: Trailing `(num_layers, top_k)` routing shape, or None when no
+      item in the chunk carries routing.
+    segment_align_multiple: Token boundary alignment for every segment after
+      the first.
+    routed_out: Optional `[budget, *routed_shape]` int16 buffer, already filled
+      with `UNSET_ROUTED_EXPERT`, that this row's routing is written into in
+      place and returned as `PackedRow.routed_experts`. `pack_chunk_contiguous`
+      passes one row view of a single chunk-wide buffer here so the chunk's
+      routing is never allocated per row and then stacked (a second full copy
+      of `[B, T, L, K]`). Requires `routed_shape`.
+
+  Returns:
+    The packed row.
+  """
   if segment_align_multiple <= 0:
     raise ValueError(
         "segment_align_multiple must be positive, got"
@@ -286,13 +307,24 @@ def pack_bin(
   zeros_f = lambda: np.zeros(budget, dtype=np.float32)
   if routed_shape is None and bin_items:
     routed_shape = routed_experts_shape(bin_items)
-  unset_routed = lambda: (
-      None
-      if routed_shape is None
-      else np.full(
-          (budget,) + tuple(routed_shape), UNSET_ROUTED_EXPERT, dtype=np.int16
+  if routed_out is not None:
+    if routed_shape is None:
+      raise ValueError("pack_bin: routed_out requires routed_shape.")
+    expected = (budget,) + tuple(routed_shape)
+    if routed_out.shape != expected or routed_out.dtype != np.int16:
+      raise ValueError(
+          f"pack_bin: routed_out must be int16 with shape {expected}; got"
+          f" {routed_out.dtype} with shape {routed_out.shape}."
       )
-  )
+
+  def unset_routed() -> np.ndarray | None:
+    if routed_out is not None:
+      return routed_out
+    if routed_shape is None:
+      return None
+    return np.full(
+        (budget,) + tuple(routed_shape), UNSET_ROUTED_EXPERT, dtype=np.int16
+    )
 
   if not bin_items:
     return PackedRow(
@@ -366,6 +398,78 @@ def pack_bin(
   )
 
 
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class PackedChunk:
+  """The packed rows of one chunk plus their contiguous routing buffer.
+
+  Attributes:
+    rows: One PackedRow per bin.
+    routed_experts: `[len(rows), budget, num_layers, top_k]` int16 routing for
+      the whole chunk, or None when no item carries routing. `rows[i].
+      routed_experts` is a view of `routed_experts[i]`, so callers building a
+      batched payload use this buffer as-is rather than stacking the rows.
+  """
+
+  rows: list[PackedRow]
+  routed_experts: np.ndarray | None
+
+
+def pack_chunk_contiguous(
+    bins: Sequence[Sequence[PackItem]],
+    *,
+    budget: int,
+    pad_id: int,
+    carried: Sequence[str],
+    routed_shape: tuple[int, ...] | None = None,
+    segment_align_multiple: int = DEFAULT_SEGMENT_ALIGN_MULTIPLE,
+) -> PackedChunk:
+  """Packs the bins of one chunk, writing all routing into one buffer.
+
+  Routing dominates a chunk's size (`[B, T, L, K]` int16 is ~4.9 GB at
+  B=64, T=65536, L=60, K=10), so it is allocated once for the chunk and each
+  row is packed into its own view. That avoids allocating B row arrays and
+  then `np.stack`-ing them into a second full-size copy.
+
+  Args:
+    bins: The chunk's bins, one per packed row.
+    budget: Token capacity of each row.
+    pad_id: Token id written to padding positions.
+    carried: Per-token fields carried by the chunk.
+    routed_shape: Trailing `(num_layers, top_k)` routing shape. Inferred from
+      the placed items when None.
+    segment_align_multiple: Token boundary alignment for every segment after
+      the first.
+
+  Returns:
+    The packed rows and the chunk-wide routing buffer they view into.
+  """
+  if routed_shape is None:
+    placed = [item for bin_items in bins for item in bin_items]
+    routed_shape = routed_experts_shape(placed)
+  routed = (
+      None
+      if routed_shape is None
+      else np.full(
+          (len(bins), budget) + tuple(routed_shape),
+          UNSET_ROUTED_EXPERT,
+          dtype=np.int16,
+      )
+  )
+  rows = [
+      pack_bin(
+          bin_items,
+          budget=budget,
+          pad_id=pad_id,
+          carried=carried,
+          routed_shape=routed_shape,
+          segment_align_multiple=segment_align_multiple,
+          routed_out=None if routed is None else routed[i],
+      )
+      for i, bin_items in enumerate(bins)
+  ]
+  return PackedChunk(rows=rows, routed_experts=routed)
+
+
 def pack_chunk(
     bins: Sequence[Sequence[PackItem]],
     *,
@@ -376,20 +480,14 @@ def pack_chunk(
     segment_align_multiple: int = DEFAULT_SEGMENT_ALIGN_MULTIPLE,
 ) -> list[PackedRow]:
   """Packs a sequence of bins of one chunk into a row."""
-  if routed_shape is None:
-    placed = [item for bin_items in bins for item in bin_items]
-    routed_shape = routed_experts_shape(placed)
-  return [
-      pack_bin(
-          bin_items,
-          budget=budget,
-          pad_id=pad_id,
-          carried=carried,
-          routed_shape=routed_shape,
-          segment_align_multiple=segment_align_multiple,
-      )
-      for bin_items in bins
-  ]
+  return pack_chunk_contiguous(
+      bins,
+      budget=budget,
+      pad_id=pad_id,
+      carried=carried,
+      routed_shape=routed_shape,
+      segment_align_multiple=segment_align_multiple,
+  ).rows
 
 
 def effective_max_segments(

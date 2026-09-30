@@ -385,11 +385,31 @@ def to_pack_item(item: datatypes.RLTrainerPayload) -> packing.PackItem:
 def to_rl_trainer_payload(
     rows: Sequence[packing.PackedRow],
     *,
+    routed_experts: np.ndarray | None,
     max_segments: int,
     trajectory_ids: tuple[str, ...] = (),
     lineage_context: lineage.LineageContext | None = None,
 ) -> datatypes.RLTrainerPayload:
-  """Converts a sequence of packing.PackedRow to an RLTrainerPayload."""
+  """Converts a sequence of packing.PackedRow to an RLTrainerPayload.
+
+  Args:
+    rows: The chunk's packed rows.
+    routed_experts: The chunk's `[len(rows), T, num_layers, top_k]` routing
+      buffer from `packing.pack_chunk_contiguous` (which `rows` view into), or
+      None when the chunk carries no routing. Used as-is: stacking the rows'
+      routing would copy the largest array in the payload a second time.
+    max_segments: Maximum real segments per packed row.
+    trajectory_ids: Trajectory ids of the packed items, in placement order.
+    lineage_context: Optional merged lineage for the microbatch.
+
+  Returns:
+    The batched trainer payload.
+  """
+  if routed_experts is not None and routed_experts.shape[0] != len(rows):
+    raise ValueError(
+        f"routed_experts has {routed_experts.shape[0]} rows but the chunk has"
+        f" {len(rows)} packed rows."
+    )
   stack = lambda attr: np.stack([getattr(r, attr) for r in rows])
   per_token_kwargs = {
       name: np.stack([r.per_token[name] for r in rows])
@@ -398,11 +418,6 @@ def to_rl_trainer_payload(
   metadata: dict[str, Any] = {"trajectory_ids": trajectory_ids}
   if lineage_context is not None:
     metadata["lineage"] = lineage_context
-  routed_experts = (
-      np.stack([r.routed_experts for r in rows])
-      if all(r.routed_experts is not None for r in rows)
-      else None
-  )
   return datatypes.RLTrainerPayload(
       prompt_ids=np.zeros((len(rows), 0), dtype=np.int32),
       prompt_mask=np.zeros((len(rows), 0), dtype=np.float32),
@@ -555,7 +570,7 @@ class SequencePackedBatchAssembler:
           num_unrouted,
           len(real_placed),
       )
-    rows = packing.pack_chunk(
+    chunk = packing.pack_chunk_contiguous(
         bins,
         budget=self.max_packed_len,
         pad_id=self.pad_id,
@@ -575,7 +590,8 @@ class SequencePackedBatchAssembler:
     )
     self._batch_counter += 1
     payload = to_rl_trainer_payload(
-        rows,
+        chunk.rows,
+        routed_experts=chunk.routed_experts,
         max_segments=max_segments,
         trajectory_ids=traj_ids,
         lineage_context=merged_lineage,

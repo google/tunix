@@ -22,6 +22,7 @@ import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.experimental.common import lineage
 from tunix.experimental.orchestrator import batch_assembly
+from tunix.rl import packing
 
 
 class HelperFunctionsTest(absltest.TestCase):
@@ -2194,6 +2195,99 @@ class CreateBatchAssemblerTest(absltest.TestCase):
     np.testing.assert_array_equal(
         batches[0].payload.segment_ids[0], [1, 1, 1, 2, 2, 2, 0, 0]
     )
+
+
+def _packed_chunk_with_routing():
+  items = [
+      packing.PackItem(
+          prompt_ids=np.array([10], dtype=np.int32),
+          completion_ids=np.array([11, 12], dtype=np.int32),
+          completion_mask=np.ones(2, dtype=np.float32),
+          advantages=np.ones(2, dtype=np.float32),
+          routed_experts=np.full((3, 2, 2), 7, dtype=np.int16),
+      ),
+      packing.PackItem(
+          prompt_ids=np.array([20], dtype=np.int32),
+          completion_ids=np.array([21], dtype=np.int32),
+          completion_mask=np.ones(1, dtype=np.float32),
+          advantages=np.ones(1, dtype=np.float32),
+          routed_experts=np.full((2, 2, 2), 9, dtype=np.int16),
+      ),
+  ]
+  return packing.pack_chunk_contiguous(
+      [items[:1], items[1:]],
+      budget=4,
+      pad_id=0,
+      carried=(),
+      segment_align_multiple=1,
+  )
+
+
+class ToRlTrainerPayloadTest(absltest.TestCase):
+
+  def test_uses_chunk_routing_buffer_without_copying(self):
+    chunk = _packed_chunk_with_routing()
+    payload = batch_assembly.to_rl_trainer_payload(
+        chunk.rows, routed_experts=chunk.routed_experts, max_segments=1
+    )
+    # The `[B, T, L, K]` routing buffer is the largest array in the payload;
+    # it must be passed through, not stacked into a second copy.
+    self.assertIs(payload.routed_experts, chunk.routed_experts)
+    self.assertEqual(payload.routed_experts.shape, (2, 4, 2, 2))
+    np.testing.assert_array_equal(payload.routed_experts[0, :3], 7)
+    np.testing.assert_array_equal(payload.routed_experts[0, 3:], -1)
+    np.testing.assert_array_equal(payload.routed_experts[1, :2], 9)
+    np.testing.assert_array_equal(payload.routed_experts[1, 2:], -1)
+    np.testing.assert_array_equal(
+        payload.completion_ids, [[10, 11, 12, 0], [20, 21, 0, 0]]
+    )
+
+  def test_none_routing_is_passed_through(self):
+    chunk = _packed_chunk_with_routing()
+    payload = batch_assembly.to_rl_trainer_payload(
+        chunk.rows, routed_experts=None, max_segments=1
+    )
+    self.assertIsNone(payload.routed_experts)
+
+  def test_rejects_routing_row_count_mismatch(self):
+    chunk = _packed_chunk_with_routing()
+    with self.assertRaisesRegex(ValueError, "routed_experts has 1 rows"):
+      batch_assembly.to_rl_trainer_payload(
+          chunk.rows,
+          routed_experts=chunk.routed_experts[:1],
+          max_segments=1,
+      )
+
+  def test_assembler_emits_contiguous_int16_routing(self):
+    assembler = batch_assembly.SequencePackedBatchAssembler(
+        batch_size=2,
+        num_generations=1,
+        mini_batch_size=2,
+        max_packed_len=8,
+        pad_id=0,
+        max_segments_per_packed_row=1,
+        segment_align_multiple=1,
+    )
+    payloads = [
+        datatypes.RLTrainerPayload(
+            prompt_ids=np.array([10 * i], dtype=np.int32),
+            prompt_mask=np.array([1.0], dtype=np.float32),
+            completion_ids=np.array([10 * i + 1], dtype=np.int32),
+            completion_mask=np.array([1.0], dtype=np.float32),
+            advantages=np.array([1.0], dtype=np.float32),
+            routed_experts=np.full((2, 2, 2), i, dtype=np.int16),
+        )
+        for i in (1, 2)
+    ]
+    [batch] = assembler.feed(payloads) + assembler.flush()
+    routed = batch.payload.routed_experts
+    self.assertEqual(routed.shape, (2, 8, 2, 2))
+    self.assertEqual(routed.dtype, np.int16)
+    self.assertTrue(routed.flags["C_CONTIGUOUS"])
+    # One trajectory per row (max_segments_per_packed_row=1), padded with -1.
+    np.testing.assert_array_equal(np.sort(routed[:, :2], axis=0)[0], 1)
+    np.testing.assert_array_equal(np.sort(routed[:, :2], axis=0)[1], 2)
+    np.testing.assert_array_equal(routed[:, 2:], -1)
 
 
 if __name__ == "__main__":
