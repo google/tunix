@@ -22,8 +22,6 @@ import logging
 import os
 import signal
 import sys
-import threading
-import time
 from typing import Any
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
@@ -563,42 +561,6 @@ def _register_signal_handlers() -> None:
       pass
 
 
-# Backstop for _terminate_run: time allowed for the SIGTERM unwind (sandbox
-# fleet teardown, worker stop) before the process is killed outright.
-_TERMINATE_FORCE_EXIT_S = 600.0
-_terminating = threading.Event()
-
-
-def _terminate_run(message: str) -> None:
-  """Fails the run from any thread: the orchestrator JobSet then fails.
-
-  Sends SIGTERM to this process so the main thread unwinds through the
-  signal handler above (exit 143, running the `finally` teardown), and
-  hard-exits if that has not finished within _TERMINATE_FORCE_EXIT_S. Only
-  the first call acts: a second SIGTERM would interrupt the teardown.
-
-  Args:
-    message: Why the run is terminated.
-  """
-  if _terminating.is_set():
-    return
-  _terminating.set()
-  logging.error("Terminating the run: %s", message)
-
-  def _force_exit() -> None:
-    time.sleep(_TERMINATE_FORCE_EXIT_S)
-    logging.error(
-        "Orchestrator still running %.0fs after SIGTERM; forcing exit.",
-        _TERMINATE_FORCE_EXIT_S,
-    )
-    os._exit(1)  # pylint: disable=protected-access
-
-  threading.Thread(
-      target=_force_exit, name="terminate-run-force-exit", daemon=True
-  ).start()
-  os.kill(os.getpid(), signal.SIGTERM)
-
-
 def main(argv: list[str], context: ProcessContext | None = None) -> None:
   assert (
       context and context.ipc and context.ipc.discovery
@@ -694,7 +656,6 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       weight_sync_mode=args.weight_sync_mode,
       trajectory_store_config=_build_trajectory_store_config(args),
       disable_weight_sync_timeouts=args.disable_weight_sync_timeouts,
-      late_registration_handler=_terminate_run,
   )
   context.ipc.discovery.on_register(
       functools.partial(
@@ -712,10 +673,6 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       timeout=args.init_timeout_s,
       poll_interval_s=1.0,
   )
-  # From here on a registration can only come from a restarted or re-admitted
-  # (e.g. preempted) worker, which cannot rejoin: it terminates the run, also
-  # during the setup and sandbox prewarm below, before bring-up.
-  cluster.close_registration()
   logging.info("Registered workers: %s", cluster.worker_infos())
 
   algo = _build_algo(args)
