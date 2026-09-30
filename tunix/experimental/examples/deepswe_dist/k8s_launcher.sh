@@ -232,7 +232,7 @@ export DRY_RUN=${DRY_RUN:-false}
 # With `true` the sandbox side fails fast too (examples/deepswe/sandbox_utils.py
 # SandboxFailFastConfig): sandbox readiness is capped at
 # FT_SANDBOX_READY_TIMEOUT_S, SWEEnv tries fleet.acquire FT_SANDBOX_ACQUIRE_RETRIES
-# times, and a failed sandbox preflight or warm-pool error ends the run.
+# times, and a warm-pool error ends the run.
 export FAIL_FAST=${FAIL_FAST:-false}
 export FT_STARTUP_RETRIES=${FT_STARTUP_RETRIES:-3}
 export FT_SANDBOX_READY_TIMEOUT_S=${FT_SANDBOX_READY_TIMEOUT_S:-600}
