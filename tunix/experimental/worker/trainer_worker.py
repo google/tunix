@@ -24,6 +24,7 @@ import numpy as np
 
 from tunix.experimental.common import datatypes
 from tunix.experimental.train import abstract_trainer
+from tunix.experimental.weight_sync import weight_sync
 from tunix.experimental.worker import abstract_worker
 from tunix.rl import common as rl_common
 
@@ -400,6 +401,7 @@ class TrainerWorker(abstract_worker.Worker):
         kwargs["sync_request"] = sync_request
       metadata = self._trainer.prepare_weight_sync(**kwargs)
       self._last_error = None
+      self._maybe_release_after_stage(sync_request)
       if metadata is not None:
         return metadata
       return self._response(weight_sync_ready=True)
@@ -407,6 +409,29 @@ class TrainerWorker(abstract_worker.Worker):
       self._last_error = str(exc)
       self.state = WorkerState.ERROR
       raise
+
+  def _maybe_release_after_stage(self, sync_request: Any) -> None:
+    """Goes back to READY once staged if the round runs in the background.
+
+    The next train step then runs during the transfer. That is only safe when
+    `d2h` left a host copy, since the step rewrites the device weights.
+    """
+    extra = getattr(sync_request, "extra_config", None) or {}
+    if not extra.get(weight_sync.RELEASE_SOURCE_AFTER_STAGE):
+      return
+    # MaxText's engine keeps its synchronizer in `_weight_sync`, PeftTrainer in
+    # `_weight_sync_worker`.
+    synchronizer = getattr(self._trainer, "_weight_sync", None) or getattr(
+        self._trainer, "_weight_sync_worker", None
+    )
+    if not getattr(synchronizer, "staged_on_host", False):
+      raise RuntimeError(
+          "Weight sync runs in the background, but"
+          f" {type(synchronizer).__name__} transfers straight from device"
+          " memory, which the next train step would overwrite. Use a"
+          " host-staged source (raiden: RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFER=0)."
+      )
+    self.state = WorkerState.READY
 
   def release_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
     """Releases this round's staging and restores READY."""

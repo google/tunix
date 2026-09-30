@@ -289,6 +289,24 @@ class RaidenSynchronizerTest(absltest.TestCase):
     self.assertEqual(sums["__tensor_count__"], 2)
     self.assertEqual(sums["__element_count__"], 3)
 
+  def test_staged_on_host_only_for_ffi_host_copy(self):
+    cases = [
+        ("proxy", "0", True),
+        ("proxy", "1", False),
+        ("tpu", "0", False),
+    ]
+    for platforms, direct, want in cases:
+      with self.subTest(platforms=platforms, direct=direct):
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "JAX_PLATFORMS": platforms,
+                "RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFER": direct,
+            },
+        ):
+          sync = raiden_synchronizer.RaidenSynchronizer("trainer")
+          self.assertEqual(sync.staged_on_host, want)
+
   def test_work_unit_metadata_shards_and_addresses(self):
     sync = raiden_synchronizer.RaidenSynchronizer(
         "rollout", self._state(), bind_ip="1.2.3.4"

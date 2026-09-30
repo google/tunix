@@ -14,8 +14,11 @@
 
 """Tests for TrainerWorker weight sync staging."""
 
+import types
+
 from absl.testing import absltest
 from tunix.experimental.common import datatypes
+from tunix.experimental.weight_sync import weight_sync
 from tunix.experimental.worker import trainer_worker as trainer_worker_lib
 
 WorkerState = datatypes.WorkerState
@@ -37,6 +40,20 @@ class _ReleasingTrainer(_FakeTrainer):
     self.calls.append("release")
     self.release_kwargs = kwargs
     return "released"
+
+class _StagingTrainer(_ReleasingTrainer):
+  """MaxText-style trainer: the synchronizer lives in `_weight_sync`."""
+
+  def __init__(self, staged_on_host):
+    super().__init__()
+    self._weight_sync = types.SimpleNamespace(staged_on_host=staged_on_host)
+
+
+def _background_request():
+  return types.SimpleNamespace(
+      extra_config={weight_sync.RELEASE_SOURCE_AFTER_STAGE: True}
+  )
+
 
 class _FailingTrainer(_FakeTrainer):
 
@@ -82,6 +99,34 @@ class WeightSyncStagingTest(absltest.TestCase):
     worker.prepare_weight_sync()
     self.assertIsNone(worker.release_weight_sync())
     self.assertEqual(worker.state, WorkerState.READY)
+
+  def test_background_round_host_staged_returns_to_ready(self):
+    trainer = _StagingTrainer(staged_on_host=True)
+    worker = self._worker(trainer)
+    worker.prepare_weight_sync(_background_request())
+    # The next train step may run while the transfer is in flight.
+    self.assertEqual(worker.state, WorkerState.READY)
+    worker.release_weight_sync()
+    self.assertEqual(worker.state, WorkerState.READY)
+    self.assertEqual(trainer.calls, ["prepare", "release"])
+
+  def test_background_round_finds_peft_synchronizer(self):
+    trainer = _ReleasingTrainer()
+    trainer._weight_sync_worker = types.SimpleNamespace(staged_on_host=True)
+    worker = self._worker(trainer)
+    worker.prepare_weight_sync(_background_request())
+    self.assertEqual(worker.state, WorkerState.READY)
+
+  def test_background_round_from_device_memory_fails(self):
+    worker = self._worker(_StagingTrainer(staged_on_host=False))
+    with self.assertRaisesRegex(RuntimeError, "DIRECT_DEVICE_BUFFER=0"):
+      worker.prepare_weight_sync(_background_request())
+    self.assertEqual(worker.state, WorkerState.ERROR)
+
+  def test_blocking_round_stays_syncing_even_if_host_staged(self):
+    worker = self._worker(_StagingTrainer(staged_on_host=True))
+    worker.prepare_weight_sync(types.SimpleNamespace(extra_config={}))
+    self.assertEqual(worker.state, WorkerState.SYNCING)
 
   def test_release_forwards_sync_request(self):
     trainer = _ReleasingTrainer()
