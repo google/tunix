@@ -581,12 +581,14 @@ class RLProgramTest(absltest.TestCase):
 
       await program.run_async(self.mock_engine)
 
+      # mb1 is packed before mb0's train_step returns. Where feed:1 lands
+      # relative to train_start:mb0 is up to the thread scheduler.
+      self.assertLess(events.index("feed:1"), events.index("train_end:mb0"))
+      # train_steps never overlap, so accumulation order is unchanged.
       self.assertEqual(
-          events,
+          [e for e in events if e.startswith("train")],
           [
-              "feed:0",
               "train_start:mb0",
-              "feed:1",
               "train_end:mb0",
               "train_start:mb1",
               "train_end:mb1",
