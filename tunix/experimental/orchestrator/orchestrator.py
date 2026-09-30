@@ -56,6 +56,8 @@ class ClusterOrchestrator:
       trajectory_store_config: Mapping[str, Any] | None = None,
       run_id: str | None = None,
       disable_weight_sync_timeouts: bool | None = None,
+      fail_fast: bool = False,
+      poll_retry_budget_s: float | None = None,
   ):
     """Initializes ClusterOrchestrator.
 
@@ -75,6 +77,11 @@ class ClusterOrchestrator:
         automatically if omitted.
       disable_weight_sync_timeouts: When True, sets all weight-sync phase
         deadlines to infinity.
+      fail_fast: When True, a lost rollout raises `FatalRolloutError` and
+        fails the run instead of being logged and dropped.
+      poll_retry_budget_s: Seconds a rollout worker may stay unreachable
+        before its in-flight rollouts are failed. None fails them on the
+        first poll error.
     """
     self.config = config
     self.registry = registry or worker_registry.WorkerRegistry()
@@ -93,6 +100,8 @@ class ClusterOrchestrator:
     mode = getattr(weight_sync_mode, "value", weight_sync_mode)
     self._weight_sync_mode = str(mode).lower() if mode is not None else None
     self._disable_weight_sync_timeouts = disable_weight_sync_timeouts
+    self._fail_fast = fail_fast
+    self._poll_retry_budget_s = poll_retry_budget_s
     cfg_run_id = (
         trajectory_store_config.get("run_id")
         if trajectory_store_config is not None
@@ -455,6 +464,8 @@ class ClusterOrchestrator:
         trainer_workers=trainer_workers,
         inference_workers=inference_workers,
         weight_sync_coordinator=coordinator,
+        poll_retry_budget_s=self._poll_retry_budget_s,
+        fail_fast=self._fail_fast,
     )
 
   def run(

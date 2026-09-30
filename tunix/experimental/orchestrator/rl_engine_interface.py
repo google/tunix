@@ -23,6 +23,16 @@ from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.worker import remote_execution
 
 
+class FatalRolloutError(RuntimeError):
+  """A dispatched rollout will never complete, so the run cannot make progress.
+
+  Raised by engines running in fail-fast mode when a rollout result is lost
+  (worker unreachable past its retry budget, or the rollout RPC itself failed).
+  `StandardRLProgram.polling_stage` re-raises it instead of logging and
+  retrying, because the in-flight count it tracks can no longer reach zero.
+  """
+
+
 @runtime_checkable
 class AbstractRLEngine(Protocol):
   """Stateless compute primitives for distributed worker meshes."""

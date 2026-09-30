@@ -742,6 +742,10 @@ class StandardRLProgram(RLProgram):
             self._in_flight_rollouts -= len(completed)
             for item in completed:
               await self.raw_q.put(item)
+        except rl_engine_interface.FatalRolloutError:
+          # A rollout is lost for good, so _in_flight_rollouts can never reach
+          # 0. Fail the run instead of waiting forever.
+          raise
         except Exception as exc:  # pylint: disable=broad-exception-caught
           logging.warning("Error in polling_stage: %s", exc)
           await asyncio.sleep(0.01)

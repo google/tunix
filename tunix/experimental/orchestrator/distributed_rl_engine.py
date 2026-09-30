@@ -83,14 +83,32 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           Mapping[datatypes.Role, remote_execution.ActorHandle] | None
       ) = None,
       weight_sync_coordinator: Any = None,
+      *,
+      poll_retry_budget_s: float | None = None,
+      fail_fast: bool = False,
   ):
+    """Initializes the engine.
+
+    Args:
+      rollout_workers: Rollout worker handles.
+      trainer_workers: Trainer handle per role.
+      inference_workers: Inference handle per role.
+      weight_sync_coordinator: Coordinates trainer to rollout weight sync.
+      poll_retry_budget_s: Seconds a rollout worker may stay unreachable before
+        its in-flight rollouts are failed. `None` fails them on the first poll
+        error.
+      fail_fast: If True, a failed rollout poll raises `FatalRolloutError`
+        instead of being logged and dropped (which leaves the program waiting
+        forever for rollouts that will never arrive).
+    """
     self._rollout_workers = list(rollout_workers)
     self._rollout_pool = remote_execution.RoutingActorPool(
         self._rollout_workers
     )
     self._rollout_session = remote_execution.PoolExecutionSession(
-        self._rollout_pool
+        self._rollout_pool, poll_retry_budget_s=poll_retry_budget_s
     )
+    self._fail_fast = fail_fast
     self._trainer_workers = dict(trainer_workers)
     self._inference_workers = dict(inference_workers or {})
     self._policy_version = 0
@@ -332,6 +350,10 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         timeout_s=timeout_s
     ):
       if exc is not None:
+        if self._fail_fast:
+          raise rl_engine_interface.FatalRolloutError(
+              f"Rollout lost, failing the run (fail-fast): {exc!r}"
+          ) from exc
         logging.error("Failed polling rollout worker: %s", exc)
         continue
       if res is None:
