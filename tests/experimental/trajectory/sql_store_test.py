@@ -1,4 +1,4 @@
-"""Unit tests for the SQL-backed trajectory store writer."""
+"""Unit and contract tests for SqlTrajectoryStore."""
 
 from concurrent import futures
 import os
@@ -581,85 +581,7 @@ class SqlStoreWriterTest(parameterized.TestCase):
     self.assertLen(self._fetch_steps(), 2)
 
 
-class _SqlTestReader(store.TrajectoryReader):
-  """Minimal reader used to verify SqlTrajectoryStore writes against contract tests."""
-
-  def __init__(self, engine: sa.Engine, run_id: str) -> None:
-    self._engine = engine
-    self._run_id = run_id
-
-  def get_trajectories_metadata(
-      self, trajectory_ids: list[str] | None = None
-  ) -> list[trajectory_lib.TrajectoryMetadata]:
-    query = sa.select(
-        schema.TRAJECTORIES_TABLE.c.trajectory_id,
-        schema.TRAJECTORIES_TABLE.c.trajectory_metadata,
-    ).where(schema.TRAJECTORIES_TABLE.c.run_id == self._run_id)
-    rows = schema_testing.fetch_all(self._engine, query)
-    metadata_by_id = {
-        row["trajectory_id"]: trajectory_lib.TrajectoryMetadata.model_validate(
-            row["trajectory_metadata"]
-        )
-        for row in rows
-    }
-    if trajectory_ids is None:
-      return list(metadata_by_id.values())
-    result = []
-    for trajectory_id in trajectory_ids:
-      if trajectory_id not in metadata_by_id:
-        raise store.TrajectoryMetadataNotFoundError(trajectory_id)
-      result.append(metadata_by_id[trajectory_id])
-    return result
-
-  def get_trajectories(
-      self, trajectory_ids: list[str]
-  ) -> list[trajectory_lib.Trajectory]:
-    metadata_by_id = {
-        meta.trajectory_id: meta for meta in self.get_trajectories_metadata()
-    }
-    step_rows = schema_testing.fetch_all(
-        self._engine,
-        sa.select(
-            schema.STEPS_TABLE.c.trajectory_id,
-            schema.STEPS_TABLE.c.payload,
-        )
-        .where(schema.STEPS_TABLE.c.run_id == self._run_id)
-        .order_by(schema.STEPS_TABLE.c.step_id),
-    )
-    steps_by_trajectory_id: dict[str, list[trajectory_lib.Step]] = {}
-    for row in step_rows:
-      steps_by_trajectory_id.setdefault(row["trajectory_id"], []).append(
-          trajectory_lib.Step.model_validate(row["payload"])
-      )
-    result = []
-    for trajectory_id in trajectory_ids:
-      if trajectory_id not in metadata_by_id:
-        raise store.TrajectoryNotFoundError(trajectory_id)
-      meta = metadata_by_id[trajectory_id]
-      steps = steps_by_trajectory_id.get(trajectory_id, [])
-      # TODO(b/556801905): Replace with `meta.create_trajectory(steps=steps)`.
-      result.append(trajectory_lib.Trajectory(**meta.model_dump(), steps=steps))
-    return result
-
-
-class SqlTrajectoryWriterTest(store_testing.TrajectoryWriterTestCase):
-  """Contract tests for SqlTrajectoryStore's TrajectoryWriter implementation."""
-
-  def _create_reader_and_writer(
-      self,
-  ) -> tuple[store.TrajectoryReader, store.TrajectoryWriter]:
-    engine = schema_testing.create_sqlite_memory_engine(shared_pool=True)
-    self.addCleanup(engine.dispose)
-    run_id = "test_contract_run"
-    writer = sql_store.SqlTrajectoryStore(
-        engine=engine, run_id=run_id, owns_engine=False
-    )
-    self.addCleanup(writer.close)
-    reader = _SqlTestReader(engine=engine, run_id=run_id)
-    return reader, writer
-
-
-class SqlTrajectoryStoreTest(parameterized.TestCase):
+class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
   """Unit tests for SqlTrajectoryStore initialization and lifecycle behavior."""
 
   def setUp(self) -> None:
@@ -865,8 +787,7 @@ class SqlTrajectoryStoreTest(parameterized.TestCase):
     store_inst.add_step(trajectory_testing.STEP_1_1, meta)
     store_inst.flush()
 
-    reader = _SqlTestReader(engine=self.engine, run_id="arb_run")
-    trajs = reader.get_trajectories([traj_id])
+    trajs = store_inst.get_trajectories([traj_id])
     self.assertLen(trajs, 1)
     self.assertEqual(trajs[0].trajectory_id, traj_id)
 
@@ -890,9 +811,11 @@ class SqlTrajectoryStoreTest(parameterized.TestCase):
           trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1
       )
 
-    ctx_reader = _SqlTestReader(engine=self.engine, run_id="ctx_run")
-    trajs = ctx_reader.get_trajectories([trajectory_testing.TRAJECTORY_ID_1])
-    self.assertEqual(trajs, [trajectory_testing.TRAJECTORY_1])
+    with sql_store.SqlTrajectoryStore(
+        engine=self.engine, run_id="ctx_run", owns_engine=False
+    ) as ctx_reader:
+      trajs = ctx_reader.get_trajectories([trajectory_testing.TRAJECTORY_ID_1])
+      self.assertEqual(trajs, [trajectory_testing.TRAJECTORY_1])
 
   def test_close_with_owns_engine_false_does_not_dispose_engine(self) -> None:
     with mock.patch.object(
@@ -957,9 +880,136 @@ class SqlTrajectoryStoreTest(parameterized.TestCase):
 
     read_engine = schema_testing.create_sqlite_file_engine(db_path)
     self.addCleanup(read_engine.dispose)
-    read_reader = _SqlTestReader(engine=read_engine, run_id="persisted_run")
-    trajs = read_reader.get_trajectories([trajectory_testing.TRAJECTORY_ID_1])
-    self.assertEqual(trajs, [trajectory_testing.TRAJECTORY_1])
+    with sql_store.SqlTrajectoryStore(
+        engine=read_engine, run_id="persisted_run"
+    ) as read_reader:
+      trajs = read_reader.get_trajectories([trajectory_testing.TRAJECTORY_ID_1])
+      self.assertEqual(trajs, [trajectory_testing.TRAJECTORY_1])
+
+  def test_get_trajectories_metadata_rehydrates_tunix_metadata_and_orders_by_creation(
+      self,
+  ) -> None:
+    store_inst = self._create_store(run_id="meta_reader_run")
+    store_inst.update_metadata(trajectory_testing.METADATA_1)
+    store_inst.update_metadata(trajectory_testing.TUNIX_METADATA_1)
+    store_inst.flush()
+
+    metas = store_inst.get_trajectories_metadata()
+    self.assertEqual(
+        metas,
+        [
+            trajectory_testing.METADATA_1,
+            trajectory_testing.TUNIX_METADATA_1.to_atif_metadata(),
+        ],
+    )
+    rehydrated_meta = trajectory_lib.TunixTrajectoryMetadata.from_atif_metadata(
+        metas[1]
+    )
+    self.assertEqual(rehydrated_meta, trajectory_testing.TUNIX_METADATA_1)
+
+  def test_get_trajectories_orders_steps_by_step_id_and_rehydrates_tunix_steps(
+      self,
+  ) -> None:
+    store_inst = self._create_store(run_id="trajs_reader_run")
+    tunix_meta = trajectory_testing.PAIRED_TUNIX_TRAJECTORY.get_metadata()
+    # Log Tunix steps out of step_id order (step 2, then step 0, then step 1).
+    store_inst.add_step(trajectory_testing.TUNIX_ENV_STEP_2, tunix_meta)
+    store_inst.add_step(trajectory_testing.TUNIX_ENV_STEP_0, tunix_meta)
+    store_inst.add_step(trajectory_testing.TUNIX_AGENT_STEP_1, tunix_meta)
+    store_inst.flush()
+
+    (trajectory,) = store_inst.get_trajectories([tunix_meta.trajectory_id])
+    self.assertTrajectoryEqual(
+        trajectory, trajectory_testing.PAIRED_ATIF_TRAJECTORY
+    )
+    rehydrated_tunix_traj = trajectory_lib.TunixTrajectory.from_atif_trajectory(
+        trajectory
+    )
+    self.assertTrajectoryEqual(
+        rehydrated_tunix_traj, trajectory_testing.PAIRED_TUNIX_TRAJECTORY
+    )
+
+  def test_reader_methods_isolate_trajectories_across_runs(self) -> None:
+    store_run_1 = self._create_store(run_id="run_1")
+    store_run_1.add_step(
+        trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1
+    )
+    store_run_1.flush()
+
+    run_2_step_for_traj_1 = trajectory_testing.make_step(
+        step_id=2, message="run_2_only_step"
+    )
+    store_run_2 = self._create_store(run_id="run_2")
+    store_run_2.add_step(run_2_step_for_traj_1, trajectory_testing.METADATA_1)
+    store_run_2.add_step(
+        trajectory_testing.STEP_2_1, trajectory_testing.METADATA_2
+    )
+    store_run_2.flush()
+
+    self.assertEqual(
+        store_run_1.get_trajectories_metadata(),
+        [trajectory_testing.METADATA_1],
+    )
+    self.assertEqual(
+        store_run_1.get_trajectories([trajectory_testing.TRAJECTORY_ID_1]),
+        [trajectory_testing.TRAJECTORY_1],
+    )
+    with self.assertRaisesRegex(
+        store.TrajectoryMetadataNotFoundError,
+        trajectory_testing.TRAJECTORY_ID_2,
+    ):
+      store_run_1.get_trajectories_metadata(
+          [trajectory_testing.TRAJECTORY_ID_2]
+      )
+    with self.assertRaisesRegex(
+        store.TrajectoryNotFoundError, trajectory_testing.TRAJECTORY_ID_2
+    ):
+      store_run_1.get_trajectories([trajectory_testing.TRAJECTORY_ID_2])
+
+
+class SqlTrajectoryReaderContractTest(store_testing.TrajectoryReaderTestCase):
+  """Contract tests for SqlTrajectoryStore's TrajectoryReader implementation."""
+
+  def _create_reader(
+      self,
+      initial_data: (
+          list[
+              tuple[
+                  trajectory_lib.TrajectoryMetadata, list[trajectory_lib.Step]
+              ]
+          ]
+          | None
+      ) = None,
+  ) -> store.TrajectoryReader:
+    engine = schema_testing.create_sqlite_memory_engine(shared_pool=True)
+    self.addCleanup(engine.dispose)
+    sql_s = sql_store.SqlTrajectoryStore(
+        engine=engine, run_id="test_contract_reader_run", owns_engine=False
+    )
+    self.addCleanup(sql_s.close)
+    if initial_data:
+      for meta, steps in initial_data:
+        if not steps:
+          sql_s.update_metadata(meta)
+        for step in steps:
+          sql_s.add_step(step, meta)
+      sql_s.flush()
+    return sql_s
+
+
+class SqlTrajectoryWriterContractTest(store_testing.TrajectoryWriterTestCase):
+  """Contract tests for SqlTrajectoryStore's TrajectoryWriter implementation."""
+
+  def _create_reader_and_writer(
+      self,
+  ) -> tuple[store.TrajectoryReader, store.TrajectoryWriter]:
+    engine = schema_testing.create_sqlite_memory_engine(shared_pool=True)
+    self.addCleanup(engine.dispose)
+    sql_s = sql_store.SqlTrajectoryStore(
+        engine=engine, run_id="test_contract_writer_run", owns_engine=False
+    )
+    self.addCleanup(sql_s.close)
+    return sql_s, sql_s
 
 
 if __name__ == "__main__":

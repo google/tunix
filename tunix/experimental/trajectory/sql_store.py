@@ -1,7 +1,7 @@
 """SQL-backed implementation for Trajectory Store."""
 
 import collections
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 import datetime
 import threading
 import types
@@ -179,8 +179,6 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
     if step is not None and step.step_id is None:
       raise ValueError("Step must have a non-empty step_id.")
 
-    # TODO(b/566314252): Support pre-deepcopy token/logprob array exclusion and
-    # bounded queue size.
     self._enqueue(
         async_writer.WriteTask(run_id=run_id, metadata=metadata, step=step)
     )
@@ -406,12 +404,12 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
     )
 
 
-class SqlTrajectoryStore(store.TrajectoryWriter):
-  """SQL-backed implementation of TrajectoryWriter.
+class SqlTrajectoryStore(store.TrajectoryReader, store.TrajectoryWriter):
+  """SQL-backed implementation of TrajectoryReader and TrajectoryWriter.
 
-  `SqlTrajectoryStore` manages the persistence of reinforcement learning (RL)
-  agent rollouts and step trajectories into relational database backends (e.g.
-  SQLite, PostgreSQL) using SQLAlchemy.
+  `SqlTrajectoryStore` manages the persistence and retrieval of reinforcement
+  learning (RL) agent rollouts and step trajectories in relational database
+  backends (e.g. SQLite, PostgreSQL) using SQLAlchemy.
 
   Architectural Separation of Responsibilities:
     `SqlTrajectoryStore` acts as a lightweight frontend responsible for:
@@ -419,6 +417,8 @@ class SqlTrajectoryStore(store.TrajectoryWriter):
     2. Synchronous frontend input validation on the calling thread.
     3. Forwarding step write tasks, metadata updates, and flush barriers to
        `_AsyncSqlWriter`.
+    4. Synchronous read queries (`get_trajectories()` and
+       `get_trajectories_metadata()`) via `self._engine.connect()`.
 
     All asynchronous queuing, background worker thread lifecycle, error
     suppression for rollout resilience, and database transactions are handled
@@ -451,7 +451,6 @@ class SqlTrajectoryStore(store.TrajectoryWriter):
       ValueError: If run_id is empty, None, or whitespace, or if the engine uses
         an unsupported database dialect.
     """
-    # TODO(b/556801905): Support constructing `self._engine` internally.
     self._engine = engine
     self._owns_engine = owns_engine
     try:
@@ -593,6 +592,135 @@ class SqlTrajectoryStore(store.TrajectoryWriter):
     finally:
       if self._owns_engine:
         self._engine.dispose()
+
+  def get_trajectories_metadata(
+      self, trajectory_ids: Sequence[str] | None = None
+  ) -> list[trajectory_lib.TrajectoryMetadata]:
+    """Retrieves metadata for trajectories in the run.
+
+    Args:
+      trajectory_ids: Optional sequence of unique trajectory identifiers. If
+        specified, only metadata for these IDs is returned. If None, metadata
+        for all trajectories in the run is returned.
+
+    Returns:
+      A list of TrajectoryMetadata objects for the requested trajectories.
+
+    Raises:
+      store.TrajectoryMetadataNotFoundError: If any requested trajectory ID does
+        not exist.
+    """
+    # Query all trajectory metadata in the run when no ID filter is provided.
+    if trajectory_ids is None:
+      statement = (
+          sa.select(schema.TRAJECTORIES_TABLE.c.trajectory_metadata)
+          .where(schema.TRAJECTORIES_TABLE.c.run_id == self._run_id)
+          .order_by(
+              schema.TRAJECTORIES_TABLE.c.created_at,
+              schema.TRAJECTORIES_TABLE.c.trajectory_id,
+          )
+      )
+      with self._engine.connect() as conn:
+        metadata_rows = conn.execute(statement)
+        return [
+            trajectory_lib.TrajectoryMetadata.model_validate(row)
+            for row in metadata_rows.scalars()
+        ]
+
+    # Query only the requested trajectory IDs when a sequence is provided.
+    if not trajectory_ids:
+      return []
+
+    statement = sa.select(
+        schema.TRAJECTORIES_TABLE.c.trajectory_id,
+        schema.TRAJECTORIES_TABLE.c.trajectory_metadata,
+    ).where(
+        schema.TRAJECTORIES_TABLE.c.run_id == self._run_id,
+        schema.TRAJECTORIES_TABLE.c.trajectory_id.in_(trajectory_ids),
+    )
+    with self._engine.connect() as conn:
+      metadata_rows = conn.execute(statement)
+      metadata_by_trajectory_id = {
+          row.trajectory_id: trajectory_lib.TrajectoryMetadata.model_validate(
+              row.trajectory_metadata
+          )
+          for row in metadata_rows
+      }
+    metadata_list = []
+    for trajectory_id in trajectory_ids:
+      if trajectory_id not in metadata_by_trajectory_id:
+        raise store.TrajectoryMetadataNotFoundError(trajectory_id)
+      metadata_list.append(metadata_by_trajectory_id[trajectory_id])
+    return metadata_list
+
+  def get_trajectories(
+      self, trajectory_ids: Sequence[str]
+  ) -> list[trajectory_lib.Trajectory]:
+    """Retrieves full trajectories for a sequence of trajectory IDs.
+
+    Args:
+      trajectory_ids: Sequence of unique trajectory identifiers to load.
+
+    Returns:
+      A list of full Trajectory objects corresponding to the requested IDs.
+
+    Raises:
+      store.TrajectoryNotFoundError: If any requested trajectory ID does not
+        exist.
+    """
+    if not trajectory_ids:
+      return []
+
+    metadata_statement = sa.select(
+        schema.TRAJECTORIES_TABLE.c.trajectory_id,
+        schema.TRAJECTORIES_TABLE.c.trajectory_metadata,
+    ).where(
+        schema.TRAJECTORIES_TABLE.c.run_id == self._run_id,
+        schema.TRAJECTORIES_TABLE.c.trajectory_id.in_(trajectory_ids),
+    )
+    steps_statement = (
+        sa.select(
+            schema.STEPS_TABLE.c.trajectory_id,
+            schema.STEPS_TABLE.c.payload,
+        )
+        .where(
+            schema.STEPS_TABLE.c.run_id == self._run_id,
+            schema.STEPS_TABLE.c.trajectory_id.in_(trajectory_ids),
+        )
+        .order_by(
+            schema.STEPS_TABLE.c.trajectory_id,
+            schema.STEPS_TABLE.c.step_id,
+        )
+    )
+
+    with self._engine.connect() as conn:
+      metadata_rows = conn.execute(metadata_statement)
+      metadata_by_trajectory_id = {
+          trajectory_id: payload for trajectory_id, payload in metadata_rows
+      }
+      step_rows = conn.execute(steps_statement)
+      steps_by_trajectory_id: dict[str, list[dict[str, Any]]] = (
+          collections.defaultdict(list)
+      )
+      for trajectory_id, payload in step_rows:
+        steps_by_trajectory_id[trajectory_id].append(payload)
+
+    trajectories = []
+    for trajectory_id in trajectory_ids:
+      if trajectory_id not in metadata_by_trajectory_id:
+        raise store.TrajectoryNotFoundError(trajectory_id)
+      meta = trajectory_lib.TrajectoryMetadata.model_validate(
+          metadata_by_trajectory_id[trajectory_id]
+      )
+      steps = [
+          trajectory_lib.Step.model_validate(step_payload)
+          for step_payload in steps_by_trajectory_id.get(trajectory_id, [])
+      ]
+      trajectories.append(
+          trajectory_lib.Trajectory(**meta.model_dump(), steps=steps)
+      )
+
+    return trajectories
 
   def __enter__(self) -> Self:
     """Returns this store, for use as a context manager."""
