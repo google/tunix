@@ -19,10 +19,11 @@ Provides supervised RL program execution (`run`).
 """
 
 import collections
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from concurrent import futures
 import contextlib
 import pickle
+import threading
 import time
 from typing import Any, Mapping
 import uuid
@@ -56,6 +57,7 @@ class ClusterOrchestrator:
       trajectory_store_config: Mapping[str, Any] | None = None,
       run_id: str | None = None,
       disable_weight_sync_timeouts: bool | None = None,
+      late_registration_handler: Callable[[str], None] | None = None,
   ):
     """Initializes ClusterOrchestrator.
 
@@ -75,6 +77,12 @@ class ClusterOrchestrator:
         automatically if omitted.
       disable_weight_sync_timeouts: When True, sets all weight-sync phase
         deadlines to infinity.
+      late_registration_handler: Called with an error message when a remote
+        worker registers after registration was closed (see
+        `close_registration`). Such a worker is a restarted or re-admitted
+        (e.g. preempted) one: the worker it replaces is gone and the run
+        cannot make progress. The handler is expected to terminate the run;
+        the registration is rejected either way.
     """
     self.config = config
     self.registry = registry or worker_registry.WorkerRegistry()
@@ -89,6 +97,10 @@ class ClusterOrchestrator:
         str, remote_execution.ActorHandle
     ] = {}
     self._remote_worker_infos: dict[str, datatypes.WorkerInfo] = {}
+    # Once closed, the set of remote workers is fixed for the rest of the run.
+    self._registration_closed = False
+    self._registration_lock = threading.Lock()
+    self._late_registration_handler = late_registration_handler
     self.engine: distributed_rl_engine.DistributedRLEngine | None = None
     mode = getattr(weight_sync_mode, "value", weight_sync_mode)
     self._weight_sync_mode = str(mode).lower() if mode is not None else None
@@ -204,11 +216,6 @@ class ClusterOrchestrator:
           "register_worker_handle expects a remote_execution.ActorHandle, got "
           f"{type(handle)}"
       )
-    if (
-        worker_id in self._remote_worker_infos
-        or worker_id in self.registry.worker_ids()
-    ):
-      raise ValueError(f"duplicate worker_id: {worker_id!r}")
     role_names = frozenset(
         role.value if isinstance(role, datatypes.Role) else role
         for role in roles
@@ -218,16 +225,53 @@ class ClusterOrchestrator:
         roles=role_names,
         resources={"remote": True, **dict(resources or {})},
     )
-    for role in role_names:
-      self._remote_worker_handles[role].append(handle)
-    self._remote_worker_handles_by_id[worker_id] = handle
-    self._remote_worker_infos[worker_id] = info
+    # Registrations arrive on discovery RPC threads; the lock makes the
+    # closed-check and the insert atomic with respect to close_registration.
+    with self._registration_lock:
+      closed = self._registration_closed
+      if not closed:
+        if (
+            worker_id in self._remote_worker_infos
+            or worker_id in self.registry.worker_ids()
+        ):
+          raise ValueError(f"duplicate worker_id: {worker_id!r}")
+        for role in role_names:
+          self._remote_worker_handles[role].append(handle)
+        self._remote_worker_handles_by_id[worker_id] = handle
+        self._remote_worker_infos[worker_id] = info
+    if closed:
+      message = (
+          f"worker {worker_id!r} registered after all workers of the run had"
+          " registered; it was restarted or re-admitted (e.g. preempted) and"
+          " cannot rejoin the run"
+      )
+      logging.error(message)
+      if self._late_registration_handler is not None:
+        self._late_registration_handler(message)
+      raise RuntimeError(message)
     logging.info(
         "Registered remote worker %r with roles %s.",
         worker_id,
         sorted(role_names),
     )
     return info
+
+  def close_registration(self) -> None:
+    """Fixes the set of remote workers for the rest of the run.
+
+    Any later remote registration comes from a restarted or re-admitted
+    worker: it is rejected and reported to the late-registration handler.
+    Called once all required workers have registered; bring-up and run() also
+    close registration.
+    """
+    with self._registration_lock:
+      if self._registration_closed:
+        return
+      self._registration_closed = True
+    logging.info(
+        "Closed worker registration with %d remote worker(s).",
+        len(self._remote_worker_infos),
+    )
 
   def unregister_worker(self, worker_id: str) -> None:
     """Unregisters a worker by its id."""
@@ -307,7 +351,15 @@ class ClusterOrchestrator:
     return self._get_actor_handles(role)
 
   def bring_up_workers(self, dummy_data: Any = None) -> None:
-    """Brings up all registered workers through lifecycle initialization."""
+    """Brings up all registered workers through lifecycle initialization.
+
+    Closes remote worker registration (see `close_registration`) if the
+    caller has not already.
+
+    Args:
+      dummy_data: Optional initialization data passed to worker compilation.
+    """
+    self.close_registration()
     logging.info(
         "Bringing up %d registered worker(s)...",
         len(self.worker_infos()),
@@ -474,6 +526,7 @@ class ClusterOrchestrator:
     """
     if bring_up:
       self.bring_up_workers(dummy_data=dummy_data)
+    self.close_registration()
 
     self.monitor.poll()
     logging.info("Executing program %s...", type(program).__name__)

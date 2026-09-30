@@ -428,6 +428,106 @@ class ClusterOrchestratorTest(absltest.TestCase):
         engine=mock_engine,
     )
 
+  def test_registration_before_bring_up_does_not_call_handler(self):
+    handler = mock.MagicMock()
+    orch = orchestrator.ClusterOrchestrator(
+        lifecycle_driver=self.mock_lifecycle,
+        monitor=self.mock_monitor,
+        late_registration_handler=handler,
+    )
+    orch.register_worker_handle(
+        "actor-0",
+        [datatypes.Role.ACTOR],
+        mock.MagicMock(spec=remote_execution.ActorHandle),
+    )
+
+    handler.assert_not_called()
+    self.assertLen(orch.worker_handles(datatypes.Role.ACTOR), 1)
+
+  def test_close_registration_rejects_later_registrations(self):
+    handler = mock.MagicMock()
+    orch = orchestrator.ClusterOrchestrator(
+        lifecycle_driver=self.mock_lifecycle,
+        monitor=self.mock_monitor,
+        late_registration_handler=handler,
+    )
+    first = mock.MagicMock(spec=remote_execution.ActorHandle)
+    orch.register_worker_handle("rollout-0", [datatypes.Role.ROLLOUT], first)
+    orch.close_registration()
+    orch.close_registration()  # Idempotent.
+
+    # Before bring-up, e.g. a worker preempted during sandbox prewarm.
+    for worker_id in ("rollout-0", "rollout-1"):
+      with self.assertRaisesRegex(
+          RuntimeError, f"'{worker_id}'.*cannot rejoin"
+      ):
+        orch.register_worker_handle(
+            worker_id,
+            [datatypes.Role.ROLLOUT],
+            mock.MagicMock(spec=remote_execution.ActorHandle),
+        )
+
+    self.assertEqual(handler.call_count, 2)
+    self.mock_lifecycle.bring_up.assert_not_called()
+    self.assertEqual(orch.worker_handles(datatypes.Role.ROLLOUT), [first])
+
+  def test_registration_after_bring_up_calls_handler_and_raises(self):
+    handler = mock.MagicMock()
+    orch = orchestrator.ClusterOrchestrator(
+        lifecycle_driver=self.mock_lifecycle,
+        monitor=self.mock_monitor,
+        late_registration_handler=handler,
+    )
+    first = mock.MagicMock(spec=remote_execution.ActorHandle)
+    orch.register_worker_handle("rollout-0", [datatypes.Role.ROLLOUT], first)
+    orch.bring_up_workers()
+
+    # The re-admitted worker comes back under its original worker_id.
+    with self.assertRaisesRegex(RuntimeError, "'rollout-0'.*cannot rejoin"):
+      orch.register_worker_handle(
+          "rollout-0",
+          [datatypes.Role.ROLLOUT],
+          mock.MagicMock(spec=remote_execution.ActorHandle),
+      )
+
+    handler.assert_called_once()
+    (message,), _ = handler.call_args
+    self.assertIn("'rollout-0'", message)
+    self.assertEqual(orch.worker_handles(datatypes.Role.ROLLOUT), [first])
+
+  def test_registration_after_run_without_bring_up_raises(self):
+    handler = mock.MagicMock()
+    orch = orchestrator.ClusterOrchestrator(
+        lifecycle_driver=self.mock_lifecycle,
+        monitor=self.mock_monitor,
+        late_registration_handler=handler,
+    )
+    orch.engine = mock.MagicMock()
+    orch.run(program=mock.MagicMock(spec=rl_program.RLProgram), bring_up=False)
+
+    with self.assertRaisesRegex(RuntimeError, "cannot rejoin"):
+      orch.register_worker_handle(
+          "rollout-1",
+          [datatypes.Role.ROLLOUT],
+          mock.MagicMock(spec=remote_execution.ActorHandle),
+      )
+    handler.assert_called_once()
+
+  def test_registration_after_bring_up_without_handler_raises(self):
+    orch = orchestrator.ClusterOrchestrator(
+        lifecycle_driver=self.mock_lifecycle,
+        monitor=self.mock_monitor,
+    )
+    orch.bring_up_workers()
+
+    with self.assertRaisesRegex(RuntimeError, "cannot rejoin"):
+      orch.register_worker_handle(
+          "actor-0",
+          [datatypes.Role.ACTOR],
+          mock.MagicMock(spec=remote_execution.ActorHandle),
+      )
+    self.assertEmpty(orch.worker_handles(datatypes.Role.ACTOR))
+
 
 def _trajectory_store_orchestrator(
     **kwargs,
