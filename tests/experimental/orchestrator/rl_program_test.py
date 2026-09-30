@@ -22,6 +22,7 @@ from typing import Any
 from unittest import mock
 
 from absl.testing import absltest
+import jax.numpy as jnp
 import metrax.logging as metrax_logging
 import numpy as np
 from tunix.experimental.common import datatypes
@@ -4264,14 +4265,14 @@ class RLProgramTest(absltest.TestCase):
     program.trajectory_logger = mock_traj_logger
     traj = {
         "status": datatypes.TrajectoryStatus.SUCCEEDED,
-        "trajectory_reward": 1.0,
+        "trajectory_reward": np.float32(1.0),
         "conversation_text": [
             {"role": "user", "content": "Q"},
             {"role": "assistant", "content": "A"},
             {"role": "user", "content": "obs"},
             {"role": "assistant", "content": "B"},
         ],
-        "conversation_tokens": np.arange(6, dtype=np.int32),
+        "conversation_tokens": jnp.arange(6, dtype=jnp.int32),
         "conversation_masks": np.ones(6, dtype=np.float32),
         "old_logprobs": np.zeros(6, dtype=np.float32),
         "routed_experts": np.zeros((8, 2, 2), dtype=np.int16),
@@ -4294,6 +4295,8 @@ class RLProgramTest(absltest.TestCase):
     row = mock_traj_logger.log_item_async.call_args[0][0]
     self.assertNotIn("routed_experts", row["trajectory"])
     self.assertNotIn("old_logprobs", row["trajectory"])
+    self.assertNotIn("conversation_tokens", row["trajectory"])
+    self.assertEqual(row["trajectory"]["trajectory_reward"], 1.0)
     self.assertIn("routed_experts", item.traj)
     full_dir = self.create_tempdir().full_path
     slim_dir = self.create_tempdir().full_path
