@@ -530,41 +530,6 @@ class SandboxUtilsTest(absltest.TestCase):
     iterator.close()
     self.assertEqual(fleet.active_pools, {})
 
-  def test_retained_replicas_shrinks_settled_previous_batches(self):
-    fleet = FakeFleet()
-    dataset = [
-        {"prompt": f"p{i}", "docker_image": img}
-        for i, img in enumerate(["img_A", "img_B", "img_C", "img_B", "img_D"])
-    ]
-    iterator = sandbox_utils.PrewarmDatasetIterator(
-        dataset,
-        fleet=fleet,
-        num_generations=4,
-        batch_size=1,
-        max_staleness=1,
-        retained_replicas=0,
-        retained_grace_secs=0,
-    )
-    self.assertEqual(next(iterator)["prompt"], "p0")
-    # Batch 0 dispatched and settled: its pool drops to 0 idle replicas but is
-    # kept (not unwarmed) while it stays in the retention window.
-    self.assertEqual(next(iterator)["prompt"], "p1")
-    self.assertEqual(fleet.set_replicas_calls, [("img_A", 0)])
-    self.assertEqual(
-        fleet.active_pools, {"img_A": 0, "img_B": 4, "img_C": 4}
-    )
-    # img_B is retained (settled) but also upcoming again: stays full-size.
-    self.assertEqual(next(iterator)["prompt"], "p2")
-    self.assertNotIn(("img_B", 0), fleet.set_replicas_calls)
-    self.assertEqual(fleet.active_pools["img_B"], 8)
-    self.assertEqual(fleet.active_pools["img_A"], 0)
-    # Batch 0 leaves the window -> retired; batch 2 (img_C) shrinks.
-    self.assertEqual(next(iterator)["prompt"], "p3")
-    self.assertIn("img_A", fleet.unwarm_calls)
-    self.assertEqual(fleet.active_pools["img_C"], 0)
-    iterator.close()
-    self.assertEqual(fleet.active_pools, {})
-
 
 _FAIL_FAST_ENV = {
     "FT_SANDBOX_FAIL_FAST": "true",

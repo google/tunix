@@ -26,7 +26,6 @@ import logging
 import os
 import re
 import threading
-import time
 from typing import Any, Callable
 import numpy as np
 
@@ -479,10 +478,6 @@ class PrewarmDatasetIterator:
     * New image key: fleet.warm_image(img, replicas, wait=False)
     * Changed count: fleet.set_pool_replicas(img, replicas)
     * Deleted image key (count 0): fleet.unwarm_image(img)
-  With `retained_replicas` set, a pool used only by previous batches that
-  finished dispatching over `retained_grace_secs` ago is shrunk to that many
-  idle replicas instead of staying full-size; sandboxes already claimed from
-  it are unaffected (a claim detaches the sandbox from its pool).
   Cleans up all warm pools upon iteration completion or close().
   """
 
@@ -500,8 +495,6 @@ class PrewarmDatasetIterator:
       wait_initial: bool = True,
       max_staleness: int = 0,
       max_workers: int = 16,
-      retained_replicas: int | None = None,
-      retained_grace_secs: float = 300.0,
   ):
     del lookahead_steps
     self.scaffold = scaffold
@@ -516,10 +509,6 @@ class PrewarmDatasetIterator:
     self.max_workers = max(1, int(max_workers))
     self._fail_fast = SandboxFailFastConfig.from_env().enabled
     self._lock = threading.Lock()
-    self.retained_replicas = (
-        None if retained_replicas is None else max(0, int(retained_replicas))
-    )
-    self.retained_grace_secs = max(0.0, float(retained_grace_secs))
     self.image_rewrite = get_image_rewrite_fn(
         image_rewrite or getattr(self.fleet, "_image_rewrite_fn", None)
     )
@@ -532,14 +521,10 @@ class PrewarmDatasetIterator:
     )
     self._current_batch_counts: dict[str, int] = {}
     self._next_batch_counts: dict[str, int] = {}
-    self._current_drained_at: float | None = None
-    # (counts, time the batch's last item was handed out), oldest first.
-    self._previous_batches: collections.deque[tuple[dict[str, int], float]] = (
+    self._previous_batches: collections.deque[dict[str, int]] = (
         collections.deque(maxlen=self.max_staleness + 1)
     )
     self._previous_batch_counts: dict[str, int] = {}
-    self._recent_previous_images: set[str] = set()
-    self._full_size_images: set[str] = set()
     self._image_counts: dict[str, int] = {}
     self._active_replicas: dict[str, int] = {}
     self.unwarm_calls: list[str] = []
@@ -667,20 +652,6 @@ class PrewarmDatasetIterator:
       current_samples += sample_count
     return current_samples
 
-  def _update_previous_counts(self) -> None:
-    """Re-sums the retained previous batches and notes the recently drained."""
-    now = time.monotonic()
-    self._previous_batch_counts = {}
-    self._recent_previous_images = set()
-    for prev_counts, drained_at in self._previous_batches:
-      recent = now - drained_at < self.retained_grace_secs
-      for img, count in prev_counts.items():
-        self._previous_batch_counts[img] = (
-            self._previous_batch_counts.get(img, 0) + count
-        )
-        if recent:
-          self._recent_previous_images.add(img)
-
   def _update_image_counts(self) -> None:
     """Updates dict to maintain samples of active batches."""
     self._image_counts.clear()
@@ -690,13 +661,6 @@ class PrewarmDatasetIterator:
       self._image_counts[img] = self._image_counts.get(img, 0) + count
     for img, count in self._next_batch_counts.items():
       self._image_counts[img] = self._image_counts.get(img, 0) + count
-    # Images a batch may still claim from: current, next and recently drained
-    # previous batches. Only these keep full-size pools.
-    self._full_size_images = (
-        set(self._current_batch_counts)
-        | set(self._next_batch_counts)
-        | self._recent_previous_images
-    )
 
   def _interact_fleet(self, wait: bool = False) -> None:
     """Interacts with the fleet to reconcile warm pools with self._image_counts."""
@@ -707,13 +671,6 @@ class PrewarmDatasetIterator:
     for img, count in self._image_counts.items():
       if count > 0:
         reps = count * self.num_generations
-        if (
-            self.retained_replicas is not None
-            and img not in self._full_size_images
-        ):
-          # Only settled previous batches use this image: their episodes have
-          # claimed already, so idle replicas would just hold sandbox nodes.
-          reps = min(reps, self.retained_replicas)
         if self.max_warmpool_replicas is not None:
           reps = min(reps, self.max_warmpool_replicas)
         desired[img] = reps
@@ -722,7 +679,7 @@ class PrewarmDatasetIterator:
     new_pools = {
         img: reps
         for img, reps in desired.items()
-        if img not in self._active_replicas and reps > 0
+        if img not in self._active_replicas
     }
     scale_pools = {
         img: reps
@@ -823,11 +780,13 @@ class PrewarmDatasetIterator:
       # so warm pools stay alive for all in-flight batches within the staleness
       # window while workers connect and claim sandboxes.
       if self._current_batch_counts:
-        drained_at = self._current_drained_at
-        if drained_at is None:
-          drained_at = time.monotonic()
-        self._previous_batches.append((self._current_batch_counts, drained_at))
-      self._update_previous_counts()
+        self._previous_batches.append(self._current_batch_counts)
+      self._previous_batch_counts = {}
+      for prev_counts in self._previous_batches:
+        for img, count in prev_counts.items():
+          self._previous_batch_counts[img] = (
+              self._previous_batch_counts.get(img, 0) + count
+          )
 
       # Shift next_batch to current_batch
       self.current_batch = self.next_batch
@@ -836,7 +795,6 @@ class PrewarmDatasetIterator:
       # Refill new next_batch from dataset
       self.next_batch = collections.deque()
       self._next_batch_counts = {}
-      self._current_drained_at = None
       self._fill_batch(self.next_batch, self._next_batch_counts)
 
       # Dict maintains the samples of active batches
@@ -846,8 +804,6 @@ class PrewarmDatasetIterator:
       self._interact_fleet(wait=False)
 
     item, _, _ = self.current_batch.popleft()
-    if not self.current_batch:
-      self._current_drained_at = time.monotonic()
     return item
 
   def close(self) -> None:
@@ -866,8 +822,6 @@ class PrewarmDatasetIterator:
     self._image_counts.clear()
     self._previous_batches.clear()
     self._previous_batch_counts.clear()
-    self._recent_previous_images.clear()
-    self._full_size_images.clear()
     self._current_batch_counts.clear()
     self._next_batch_counts.clear()
     self.current_batch.clear()
