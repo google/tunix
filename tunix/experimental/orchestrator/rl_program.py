@@ -620,6 +620,10 @@ class StandardRLProgram(RLProgram):
     Args:
       batch_idx: The prompt batch the dispatcher is about to emit into.
     """
+    # Checked up front too: a batch already inside the window would otherwise
+    # skip the loop and keep dispatching after a sync round failed.
+    if self._sync_error is not None:
+      raise self._sync_error
     while (
         batch_idx
         > self._next_batch - self._unsynced_steps + self.max_staleness
