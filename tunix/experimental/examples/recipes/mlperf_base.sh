@@ -222,6 +222,8 @@ if [[ "${ASYNC_WEIGHT_SYNC}" == "true" && "${WEIGHT_SYNC_MODE}" == "raiden" \
   echo "ASYNC_WEIGHT_SYNC=true requires RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFER=0" >&2
   exit 1
 fi
+# Pack the next microbatch while the trainer runs the current one.
+export PIPELINE_TRAIN_MICROBATCHES=${PIPELINE_TRAIN_MICROBATCHES:-false}
 export TRAJECTORY_GROUP_ORDER=${TRAJECTORY_GROUP_ORDER:-prompt_batch}
 
 # Sequence packing
