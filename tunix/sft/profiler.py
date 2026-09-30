@@ -128,18 +128,23 @@ class Profiler:
         )
         return
       logging.info("Starting JAX profiler at step %d.", step)
-      profile_options = jax.profiler.ProfileOptions()
-      if self._profiler_options.set_profile_options:
-        profile_options.host_tracer_level = (
-            self._profiler_options.host_tracer_level
-        )
-        profile_options.python_tracer_level = (
-            self._profiler_options.python_tracer_level
-        )
-      if self._profiler_options.enable_continuous_profiling:
-        profile_options.advanced_configuration = {
-            "enable_continuous_profiling": True
-        }
+      profile_options = None
+      if (
+          self._profiler_options.set_profile_options
+          or self._profiler_options.enable_continuous_profiling
+      ):
+        profile_options = jax.profiler.ProfileOptions()
+        if self._profiler_options.set_profile_options:
+          profile_options.host_tracer_level = (
+              self._profiler_options.host_tracer_level
+          )
+          profile_options.python_tracer_level = (
+              self._profiler_options.python_tracer_level
+          )
+        if self._profiler_options.enable_continuous_profiling:
+          profile_options.advanced_configuration = {
+              "enable_continuous_profiling": True
+          }
       self._start_trace(
           log_dir=self._output_path, profiler_options=profile_options
       )
