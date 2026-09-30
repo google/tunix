@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 import functools
 import logging
 import os
@@ -544,7 +545,9 @@ def _configure_trainer_loss(
   )
 
 
-def _register_signal_handlers() -> None:
+def _register_signal_handlers(
+    on_exit_signal: Callable[[int], None] | None = None,
+) -> None:
   """Registers SIGTERM and SIGINT handlers so Python unwinds cleanly via SystemExit."""
 
   def _handle_exit_signal(signum, frame):
@@ -552,6 +555,11 @@ def _register_signal_handlers() -> None:
     logging.info(
         "Received signal %d in orchestrator; shutting down cleanly...", signum
     )
+    if on_exit_signal is not None:
+      try:
+        on_exit_signal(signum)
+      except Exception:  # pylint: disable=broad-exception-caught
+        logging.exception("Error in exit signal callback")
     sys.exit(128 + signum)
 
   for sig in (signal.SIGTERM, signal.SIGINT):
@@ -574,7 +582,24 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       format="%(asctime)s - [DeepSWEOrchestrator] %(message)s",
       force=True,
   )
-  _register_signal_handlers()
+  program = None
+
+  def _finish_training(status: str) -> None:
+    if not args.rcp_logging:
+      return
+    last = program.last_step_result if program is not None else None
+    mllog_utils.finish_training(
+        args,
+        status=status,
+        completed_steps=last.step + 1 if last is not None else None,
+        last_step_time_ms=(
+            program.last_step_timestamp_ms if program is not None else None
+        ),
+    )
+
+  _register_signal_handlers(
+      on_exit_signal=lambda _sig: _finish_training("aborted")
+  )
 
   if args.mini_batch_size is None:
     args.mini_batch_size = args.batch_size
@@ -696,7 +721,6 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
 
   fleet = None
   prompt_stream = None
-  program = None
   try:
     if args.use_agent_sandbox:
       # Initialize fleet plan from dataset. Eager warmpools are skipped;
@@ -863,26 +887,9 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         num_steps=args.max_steps,
         bring_up=False,
     )
-    if args.rcp_logging:
-      completed_steps = (
-          program.last_step_result.step + 1
-          if program.last_step_result is not None
-          else args.max_steps
-      )
-      mllog_utils.train_stop(
-          args,
-          step=completed_steps,
-          status="success",
-          time_ms=program.last_step_timestamp_ms,
-      )
+    _finish_training("success")
   except BaseException as e:
-    if args.rcp_logging:
-      completed_steps = (
-          program.last_step_result.step + 1
-          if program is not None and program.last_step_result is not None
-          else 0
-      )
-      mllog_utils.train_stop(args, step=completed_steps, status="aborted")
+    _finish_training("aborted")
     logging.exception("FATAL ERROR in orchestrator execution: %s", e)
     raise
   finally:

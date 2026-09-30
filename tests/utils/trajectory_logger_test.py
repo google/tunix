@@ -805,6 +805,57 @@ class TrajectoryLoggerTest(absltest.TestCase):
     self.assertEqual(lines[2]['total_preemptions'], 1)
     self.assertEqual(lines[2]['total_completion_tokens'], 40)
 
+  def test_async_trajectory_logger_chains_previous_signal_handler(self):
+    """Tests that AsyncTrajectoryLogger chains to a prior SIGTERM handler."""
+    import signal  # pylint: disable=g-import-not-at-top
+
+    temp_dir = self.create_tempdir().full_path
+    prev_calls = []
+    orig_handler = signal.getsignal(signal.SIGTERM)
+
+    def _custom_handler(signum, frame):
+      prev_calls.append((signum, frame))
+
+    signal.signal(signal.SIGTERM, _custom_handler)
+    try:
+      logger = trajectory_logger.AsyncTrajectoryLogger(temp_dir)
+      logger._handle_signal(signal.SIGTERM, None)
+      self.assertTrue(logger._stopped)
+      self.assertEqual(prev_calls, [(signal.SIGTERM, None)])
+      self.assertEqual(signal.getsignal(signal.SIGTERM), _custom_handler)
+    finally:
+      signal.signal(signal.SIGTERM, orig_handler)
+
+  def test_async_trajectory_logger_keeps_ignored_signals_ignored(self):
+    """Tests that an ignored signal (e.g. SIGHUP under nohup) stays ignored."""
+    import signal  # pylint: disable=g-import-not-at-top
+
+    temp_dir = self.create_tempdir().full_path
+    orig_handler = signal.getsignal(signal.SIGHUP)
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    try:
+      logger = trajectory_logger.AsyncTrajectoryLogger(temp_dir)
+      self.assertEqual(signal.getsignal(signal.SIGHUP), signal.SIG_IGN)
+      logger.stop()
+      self.assertEqual(signal.getsignal(signal.SIGHUP), signal.SIG_IGN)
+    finally:
+      signal.signal(signal.SIGHUP, orig_handler)
+
+  def test_async_trajectory_logger_stop_skips_non_python_prev_handler(self):
+    """Tests stop() when the prior handler was not installed from Python."""
+    import signal  # pylint: disable=g-import-not-at-top
+
+    temp_dir = self.create_tempdir().full_path
+    orig_handler = signal.getsignal(signal.SIGTERM)
+    try:
+      logger = trajectory_logger.AsyncTrajectoryLogger(temp_dir)
+      # signal.getsignal() returns None for handlers installed from C.
+      logger._prev_signal_handlers[signal.SIGTERM] = None
+      logger.stop()  # Must not raise TypeError from signal.signal(sig, None).
+      self.assertTrue(logger._stopped)
+    finally:
+      signal.signal(signal.SIGTERM, orig_handler)
+
 
 if __name__ == '__main__':
   absltest.main()

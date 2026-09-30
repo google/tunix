@@ -317,7 +317,9 @@ class EvalTest(unittest.TestCase):
       with mock.patch.object(mllog_utils, "mllogger", object()):
         eval_lib.setup_rcp_logging(a)
         eval_lib.setup_rcp_logging(self.args("--rcp_logging=false"))
-      configure.assert_called_once_with(metric_logger_dir=log_file, seed=42)
+      configure.assert_called_once_with(
+          metric_logger_dir=log_file, seed=42, append=True
+      )
 
   def test_individual_results_are_persisted(self):
     with tempfile.TemporaryDirectory() as directory:

@@ -528,6 +528,7 @@ def setup_rcp_logging(a):
     mllog_utils.configure_logger(
         metric_logger_dir=a.metric_logger_dir,
         seed=a.seed,
+        append=True,
     )
 
 

@@ -876,6 +876,7 @@ class AsyncTrajectoryLogger:
     self._num_workers = num_workers
     self._logging_queue: queue.Queue[Any] = queue.Queue(maxsize=max_queue_size)
     self._stopped = False
+    self._prev_signal_handlers: dict[int, Any] = {}
     self._stop_event = threading.Event()
     self._stop_lock = threading.RLock()
     self._staging_tempdir = (
@@ -963,23 +964,34 @@ class AsyncTrajectoryLogger:
     # Register cleanup
     atexit.register(self.stop)
 
-    # Register signal handlers for robust termination
+    # Register signal handlers for robust termination while chaining to any
+    # previously registered handlers (e.g., orchestrator SIGTERM cleanup).
+    # Ignored signals (e.g. SIGHUP under nohup) are left ignored.
     if threading.current_thread() is threading.main_thread():
       try:
-        signal.signal(signal.SIGINT, self._handle_signal)  # pyrefly: ignore[bad-argument-type]
-        signal.signal(signal.SIGTERM, self._handle_signal)  # pyrefly: ignore[bad-argument-type]
-        signal.signal(signal.SIGHUP, self._handle_signal)  # pyrefly: ignore[bad-argument-type]
+        for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+          prev = signal.getsignal(sig)
+          if prev == signal.SIG_IGN:
+            continue
+          if prev != self._handle_signal:
+            self._prev_signal_handlers[sig] = prev
+          signal.signal(sig, self._handle_signal)  # pyrefly: ignore[bad-argument-type]
       except ValueError:
         logging.warning('Failed to register signal handlers.')
 
     logging.info('Started trajectory logging thread.')
 
-  def _handle_signal(self, signum: int, frame: types.FrameType):
-    """Gracefully stops the logger and exits."""
-    del frame  # Unused.
+  def _handle_signal(self, signum: int, frame: types.FrameType | None):
+    """Gracefully stops the logger and chains to any previous signal handler."""
     logging.info('Received signal %d, flushing trajectory logger...', signum)
+    prev = self._prev_signal_handlers.get(signum, signal.SIG_DFL)
+    if callable(prev):
+      try:
+        prev(signum, frame)
+      finally:
+        self.stop()
+      return
     self.stop()
-    # Restore default handler and re-send signal to self
     signal.signal(signum, signal.SIG_DFL)
     os.kill(os.getpid(), signum)
 
@@ -994,6 +1006,18 @@ class AsyncTrajectoryLogger:
         return
       self._stopped = True
       self._stop_event.set()
+
+    if threading.current_thread() is threading.main_thread():
+      for sig, prev in list(self._prev_signal_handlers.items()):
+        if prev is None:
+          # The previous handler was not installed from Python and cannot be
+          # restored; signal.signal(sig, None) would raise TypeError.
+          continue
+        try:
+          if signal.getsignal(sig) == self._handle_signal:
+            signal.signal(sig, prev)
+        except (ValueError, OSError):
+          pass
 
     logging.info('Stopping trajectory logging thread...')
     try:

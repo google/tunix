@@ -660,7 +660,15 @@ class MllogUtilsTest(absltest.TestCase):
             mllog_utils, "_download_from_gcs_if_exists", calls.download
         ),
     ):
-      mllog_utils.configure_logger(metric_logger_dir="gs://b/mllog", seed=42)
+      mllog_utils.configure_logger(
+          metric_logger_dir="gs://b/mllog", seed=42, append=False
+      )
+      calls.download.assert_not_called()
+      calls.reset_mock()
+
+      mllog_utils.configure_logger(
+          metric_logger_dir="gs://b/mllog", seed=42, append=True
+      )
       local_path = mllog_utils._local_log_path  # pylint: disable=protected-access
 
     self.assertEqual(
@@ -759,6 +767,254 @@ class MllogUtilsTest(absltest.TestCase):
     ):
       self.assertEqual(emitted[key], "bfloat16")
     self.assertEqual(emitted["config_filename"], "qwen35_397b_grpo")
+
+  def _finish_training_args(self):
+    return types.SimpleNamespace(
+        seed=42,
+        metric_logger_dir=self.test_dir,
+        batch_size=16,
+        num_generations=16,
+        max_steps=30,
+    )
+
+  def test_finish_training_noop_before_train_start(self):
+    args = self._finish_training_args()
+    mllog_utils.init_start(args)
+    mllog_utils.finish_training(args, status="aborted", completed_steps=3)
+
+    events = _read_mllog_events(os.path.join(self.test_dir, "seed_42.out"))
+    self.assertNotIn("block_stop", [e["key"] for e in events])
+
+  def test_finish_training_uses_checkpoint_ahead_of_step_result(self):
+    args = self._finish_training_args()
+    mllog_utils.init_start(args)
+    mllog_utils.train_start(args, step=0)
+    manifest = os.path.join(self.test_dir, "eval_checkpoints.jsonl")
+    for step, ts_ms in ((21, 2100), (22, 2200)):
+      mllog_utils.append_checkpoint_manifest(
+          manifest, {"step": step, "timestamp_ms": ts_ms}
+      )
+    # Interrupted during step 22's weight sync: the trainer reports 21 steps.
+    mllog_utils.finish_training(
+        args, status="aborted", completed_steps=21, last_step_time_ms=None
+    )
+    mllog_utils.finish_training(args, status="aborted", completed_steps=21)
+
+    events = _read_mllog_events(os.path.join(self.test_dir, "seed_42.out"))
+    block_stops = [e for e in events if e["key"] == "block_stop"]
+    self.assertLen(block_stops, 1)
+    self.assertEqual(block_stops[0]["metadata"]["step"], 22)
+    self.assertEqual(block_stops[0]["metadata"]["samples_count"], 22 * 256)
+    self.assertEqual(block_stops[0]["time_ms"], 2200)
+
+  def test_finish_training_success_prefers_step_result(self):
+    args = self._finish_training_args()
+    mllog_utils.init_start(args)
+    mllog_utils.train_start(args, step=0)
+    mllog_utils.finish_training(
+        args, status="success", completed_steps=30, last_step_time_ms=3000
+    )
+
+    events = _read_mllog_events(os.path.join(self.test_dir, "seed_42.out"))
+    block_stop = next(e for e in events if e["key"] == "block_stop")
+    self.assertEqual(block_stop["metadata"]["step"], 30)
+    self.assertEqual(block_stop["time_ms"], 3000)
+
+  def test_train_stop_is_idempotent(self):
+    args = types.SimpleNamespace(
+        seed=42,
+        metric_logger_dir=self.test_dir,
+        batch_size=16,
+        num_generations=16,
+        max_steps=30,
+    )
+    mllog_utils.init_start(args)
+    mllog_utils.train_start(args, step=0)
+    mllog_utils.train_stop(args, step=22, time_ms=1000)
+    mllog_utils.train_stop(args, step=22, time_ms=2000)
+
+    events = _read_mllog_events(os.path.join(self.test_dir, "seed_42.out"))
+    block_stops = [e for e in events if e["key"] == "block_stop"]
+    self.assertLen(block_stops, 1)
+    self.assertEqual(block_stops[0]["metadata"]["step"], 22)
+    self.assertEqual(block_stops[0]["metadata"]["samples_count"], 5632)
+    self.assertEqual(block_stops[0]["time_ms"], 1000)
+
+  def _simulate_new_process(self):
+    """Drops mllog file handlers, as a freshly started process would have."""
+    for h in list(getattr(mllog_utils.mllogger.logger, "handlers", [])):
+      if isinstance(h, logging.FileHandler):
+        h.close()
+        mllog_utils.mllogger.logger.removeHandler(h)
+
+  def test_training_restart_overwrites_stale_aborted_run_log(self):
+    args = types.SimpleNamespace(
+        seed=42,
+        metric_logger_dir=self.test_dir,
+        batch_size=16,
+        num_generations=16,
+        max_steps=30,
+        model_id="",
+    )
+    # Run 1 is aborted after training started.
+    mllog_utils.init_start(args)
+    mllog_utils.init_print(args)
+    mllog_utils.train_start(args, step=0)
+    mllog_utils.train_stop(args, step=0, time_ms=500)
+
+    # Run 2 (a new process) restarts with the same metric_logger_dir and seed.
+    self._simulate_new_process()
+    mllog_utils.init_start(args)
+    mllog_utils.init_print(args)
+    mllog_utils.train_start(args, step=0)
+    mllog_utils.train_stop(args, step=8, time_ms=1500)
+
+    events = _read_mllog_events(os.path.join(self.test_dir, "seed_42.out"))
+    self.assertEqual(events[0]["key"], "cache_clear")
+    for key in ("init_start", "submission_org", "init_stop", "run_start"):
+      self.assertLen([e for e in events if e["key"] == key], 1, key)
+    block_stops = [e for e in events if e["key"] == "block_stop"]
+    self.assertLen(block_stops, 1)
+    self.assertEqual(block_stops[0]["metadata"]["step"], 8)
+
+  def test_offline_eval_auto_closes_unclosed_training_block(self):
+    args = types.SimpleNamespace(
+        seed=42,
+        metric_logger_dir=self.test_dir,
+        batch_size=16,
+        num_generations=16,
+        max_steps=30,
+    )
+    mllog_utils.init_start(args)
+    mllog_utils.train_start(args, step=0)
+    mllog_utils.log_tracked_stats(
+        {"reduced_train_loss": 0.1, "reward": 0.5},
+        step=21,
+        samples_count=5376,
+    )
+
+    # Training is killed before block_stop; a separate offline evaluation
+    # process re-opens the existing log.
+    self._simulate_new_process()
+    mllog_utils.configure_logger(
+        metric_logger_dir=self.test_dir, seed=42, append=True
+    )
+    mllog_utils.start_eval(step=18, samples_count=4608, time_ms=5000)
+    self.assertTrue(
+        mllog_utils.log_offline_eval_step(
+            step=18,
+            samples_count=4608,
+            eval_accuracy=0.70,
+            checkpoint_timestamp_ms=4000,
+            is_last_checkpoint=True,
+            emit_start_eval=False,
+        )
+    )
+
+    events = _read_mllog_events(os.path.join(self.test_dir, "seed_42.out"))
+    keys = [e["key"] for e in events]
+    self.assertEqual(
+        keys,
+        [
+            "cache_clear",
+            "init_start",
+            "init_stop",
+            "run_start",
+            "block_start",
+            "tracked_stats",
+            "block_stop",
+            "eval_start",
+            "eval_accuracy",
+            "eval_stop",
+            "run_stop",
+        ],
+    )
+    tracked_stats = events[5]
+    block_stop = events[6]
+    self.assertEqual(block_stop["metadata"]["step"], 21)
+    self.assertEqual(block_stop["metadata"]["samples_count"], 5376)
+    self.assertEqual(block_stop["time_ms"], tracked_stats["time_ms"])
+
+  def test_offline_eval_auto_close_in_same_process(self):
+    args = types.SimpleNamespace(
+        seed=42,
+        metric_logger_dir=self.test_dir,
+        batch_size=16,
+        num_generations=16,
+        max_steps=30,
+    )
+    mllog_utils.init_start(args)
+    mllog_utils.train_start(args, step=0)
+    mllog_utils.log_tracked_stats({"reward": 0.5}, step=3, samples_count=768)
+    mllog_utils.start_eval(step=3, samples_count=768, time_ms=5000)
+
+    events = _read_mllog_events(os.path.join(self.test_dir, "seed_42.out"))
+    self.assertEqual(
+        [e["key"] for e in events][-3:],
+        ["tracked_stats", "block_stop", "eval_start"],
+    )
+    self.assertEqual(events[-2]["metadata"]["samples_count"], 768)
+    self.assertEqual(events[-2]["time_ms"], events[-3]["time_ms"])
+
+  def test_auto_close_without_tracked_stats_ignores_block_length(self):
+    args = types.SimpleNamespace(
+        seed=42,
+        metric_logger_dir=self.test_dir,
+        batch_size=16,
+        num_generations=16,
+        max_steps=30,
+    )
+    mllog_utils.init_start(args)
+    # block_start's samples_count is the block length (30 * 256 = 7680).
+    mllog_utils.train_start(args, step=0)
+
+    self._simulate_new_process()
+    mllog_utils.configure_logger(
+        metric_logger_dir=self.test_dir, seed=42, append=True
+    )
+    mllog_utils.start_eval(step=18, samples_count=4608, time_ms=5000)
+
+    events = _read_mllog_events(os.path.join(self.test_dir, "seed_42.out"))
+    block_start = next(e for e in events if e["key"] == "block_start")
+    block_stop = next(e for e in events if e["key"] == "block_stop")
+    self.assertEqual(block_start["metadata"]["samples_count"], 7680)
+    self.assertEqual(block_stop["metadata"]["step"], 0)
+    self.assertEqual(block_stop["metadata"]["samples_count"], 4608)
+    self.assertEqual(block_stop["time_ms"], 5000)
+
+  def test_offline_eval_tolerates_malformed_log_line(self):
+    args = types.SimpleNamespace(
+        seed=42,
+        metric_logger_dir=self.test_dir,
+        batch_size=16,
+        num_generations=16,
+        max_steps=30,
+    )
+    mllog_utils.init_start(args)
+    mllog_utils.train_start(args, step=0)
+    mllog_utils.log_tracked_stats({"reward": 0.5}, step=5, samples_count=1280)
+    self._simulate_new_process()
+    log_path = os.path.join(self.test_dir, "seed_42.out")
+    with open(log_path, "a", encoding="utf-8") as f:
+      # Valid JSON that is not an event dict, or has non-dict metadata.
+      f.write(":::MLLOG null\n")
+      f.write(":::MLLOG []\n")
+      f.write(':::MLLOG {"key": "tracked_stats", "metadata": [1]}\n')
+      # A truncated trailing line from an interrupted upload.
+      f.write(':::MLLOG {"key": "tracked_st\n')
+
+    mllog_utils.configure_logger(
+        metric_logger_dir=self.test_dir, seed=42, append=True
+    )
+    mllog_utils.start_eval(step=5, samples_count=1280, time_ms=5000)
+
+    with open(log_path, "r", encoding="utf-8") as f:
+      lines = f.read().splitlines()
+    block_stop = json.loads(
+        next(l for l in lines if '"block_stop"' in l).split(":::MLLOG ", 1)[1]
+    )
+    self.assertEqual(block_stop["metadata"]["step"], 5)
+    self.assertEqual(block_stop["metadata"]["samples_count"], 1280)
 
 
 if __name__ == "__main__":
