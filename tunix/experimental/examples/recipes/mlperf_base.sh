@@ -85,6 +85,20 @@ export SERVICE_ACCOUNT="${SERVICE_ACCOUNT:-xpk-sa}"
 export CPU_MACHINE="${CPU_MACHINE:-n2d-standard-64}"
 
 # ==============================================================================
+# Fail-fast (see k8s_launcher.sh). `true`: a trainer/rollout worker dying
+# after registration fails its JobSet and cluster_reaper tears down the run,
+# instead of the run deadlocking. `false`: legacy in-place pod restarts.
+# ==============================================================================
+export FAIL_FAST="${FAIL_FAST:-true}"
+# JobSet recreations allowed for worker failures before registration.
+export FT_STARTUP_RETRIES="${FT_STARTUP_RETRIES:-3}"
+# Sandbox side (FAIL_FAST=true only): max wait for a sandbox/warm pool to
+# become ready, and fleet.acquire attempts per episode (legacy: SDK 900s x 5
+# attempts).
+export FT_SANDBOX_READY_TIMEOUT_S="${FT_SANDBOX_READY_TIMEOUT_S:-600}"
+export FT_SANDBOX_ACQUIRE_RETRIES="${FT_SANDBOX_ACQUIRE_RETRIES:-2}"
+
+# ==============================================================================
 # Pathways & Raiden Weight Sync Defaults
 # ==============================================================================
 source "${DIR}/mlperf_pathways_config.sh"

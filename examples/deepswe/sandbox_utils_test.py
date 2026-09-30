@@ -531,5 +531,105 @@ class SandboxUtilsTest(absltest.TestCase):
     self.assertEqual(fleet.active_pools, {})
 
 
+_FAIL_FAST_ENV = {
+    "FT_SANDBOX_FAIL_FAST": "true",
+    "FT_SANDBOX_READY_TIMEOUT_S": "300",
+    "FT_SANDBOX_ACQUIRE_RETRIES": "2",
+}
+
+
+class _FakeFleetError(Exception):
+  """Stands in for agent_sandbox_rl.FleetError."""
+
+
+class _FailingWarmFleet(FakeFleet):
+
+  def warm_image(
+      self, image: str, replicas_override: int | None = None, wait: bool = False
+  ) -> None:
+    raise _FakeFleetError(f"pool for {image} never became ready")
+
+
+class SandboxFailFastTest(absltest.TestCase):
+
+  def _fake_sdk(self) -> mock.MagicMock:
+    sdk = mock.MagicMock()
+    sdk.FleetError = _FakeFleetError
+    return sdk
+
+  def test_config_defaults_to_legacy_when_unset(self):
+    with mock.patch.dict(os.environ, {}, clear=True):
+      self.assertEqual(
+          sandbox_utils.SandboxFailFastConfig.from_env(),
+          sandbox_utils.SandboxFailFastConfig(
+              enabled=False, ready_timeout_s=None, acquire_retries=5
+          ),
+      )
+
+  def test_config_fail_fast_reads_knobs(self):
+    with mock.patch.dict(os.environ, _FAIL_FAST_ENV, clear=True):
+      self.assertEqual(
+          sandbox_utils.SandboxFailFastConfig.from_env(),
+          sandbox_utils.SandboxFailFastConfig(
+              enabled=True, ready_timeout_s=300, acquire_retries=2
+          ),
+      )
+
+  def test_config_rejects_bad_values(self):
+    for env, error in (
+        ({"FT_SANDBOX_FAIL_FAST": "1"}, ValueError),
+        ({"FT_SANDBOX_FAIL_FAST": "true"}, KeyError),
+        ({**_FAIL_FAST_ENV, "FT_SANDBOX_ACQUIRE_RETRIES": "0"}, ValueError),
+    ):
+      with self.subTest(env=env):
+        with mock.patch.dict(os.environ, env, clear=True):
+          with self.assertRaises(error):
+            sandbox_utils.SandboxFailFastConfig.from_env()
+
+  def test_init_global_fleet_fail_fast_sets_timeout_and_raises_on_preflight(self):
+    sdk = self._fake_sdk()
+    sdk.SandboxFleet.return_value.preflight.side_effect = RuntimeError(
+        "CRDs missing"
+    )
+    with mock.patch.dict("sys.modules", {"agent_sandbox_rl": sdk}):
+      with mock.patch.dict(os.environ, _FAIL_FAST_ENV):
+        with mock.patch.object(sandbox_utils, "_GLOBAL_FLEET", None):
+          with self.assertRaisesRegex(RuntimeError, "CRDs missing"):
+            sandbox_utils.init_global_fleet(tasks=None, num_generations=4)
+          self.assertIsNone(sandbox_utils._GLOBAL_FLEET)
+    self.assertEqual(sdk.FleetConfig.call_args[1]["ready_timeout"], 300)
+
+  def test_init_global_fleet_off_logs_preflight_and_keeps_sdk_timeout(self):
+    sdk = self._fake_sdk()
+    sdk.SandboxFleet.return_value.preflight.side_effect = RuntimeError(
+        "CRDs missing"
+    )
+    with mock.patch.dict("sys.modules", {"agent_sandbox_rl": sdk}):
+      with mock.patch.dict(os.environ, {}, clear=True):
+        with mock.patch.object(sandbox_utils, "_GLOBAL_FLEET", None):
+          with self.assertLogs(level="WARNING"):
+            sandbox_utils.init_global_fleet(tasks=None, num_generations=4)
+    self.assertNotIn("ready_timeout", sdk.FleetConfig.call_args[1])
+
+  def test_prewarm_fail_fast_raises_fleet_error(self):
+    dataset = [{"prompt": "p0", "docker_image": "img_A"}]
+    with mock.patch.dict("sys.modules", {"agent_sandbox_rl": self._fake_sdk()}):
+      with mock.patch.dict(os.environ, _FAIL_FAST_ENV):
+        with self.assertRaisesRegex(_FakeFleetError, "never became ready"):
+          sandbox_utils.PrewarmDatasetIterator(
+              dataset, fleet=_FailingWarmFleet(), num_generations=2, batch_size=1
+          )
+
+  def test_prewarm_off_logs_fleet_error(self):
+    dataset = [{"prompt": "p0", "docker_image": "img_A"}]
+    with mock.patch.dict(os.environ, {}, clear=True):
+      with self.assertLogs(level="WARNING") as logs:
+        iterator = sandbox_utils.PrewarmDatasetIterator(
+            dataset, fleet=_FailingWarmFleet(), num_generations=2, batch_size=1
+        )
+    self.assertEqual(next(iterator), dataset[0])
+    self.assertTrue(any("Warm note for img_A" in line for line in logs.output))
+
+
 if __name__ == "__main__":
   absltest.main()

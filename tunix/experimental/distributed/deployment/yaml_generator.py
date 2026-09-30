@@ -15,10 +15,193 @@
 """Generates Kubernetes deployment YAML manifests from templates."""
 
 import argparse
+import dataclasses
 import json
 import math
 import os
 import string
+
+# Exit code a worker container uses to say "I failed before registering with
+# the orchestrator, recreating me is safe". Anything else after registration is
+# fatal for the JobSet. Kept in sync with
+# examples/deepswe_dist/cluster_reaper.py (STARTUP_RETRY_EXIT_CODE).
+STARTUP_RETRY_EXIT_CODE = 75
+
+# Written by K8sDiscoveryContext.register() once registration succeeded. It
+# lives in the container's own /dev/shm (fresh per container, and containers
+# are never restarted in place under --fail_fast), not in the hostPath /tmp
+# that pods on the same node share.
+REGISTERED_MARKER_PATH = "/dev/shm/tunix_ft_registered"
+
+# Indentation of the PID-1 wrapper script inside the `command: - |` block of
+# the worker templates.
+_WRAPPER_INDENT = " " * 18
+
+
+@dataclasses.dataclass(frozen=True)
+class FailFastPlaceholders:
+  """Template placeholder values controlling worker fail-fast behaviour.
+
+  Every field renders to the templates' pre-fail-fast text when disabled, so
+  `--fail_fast` off produces byte-identical manifests.
+  """
+
+  # Line prefix that comments out a template's own `maxRestarts:` line.
+  FAIL_FAST_LINE_DISABLE: str
+  # Appended after `restartStrategy: Recreate` in the JobSet failurePolicy.
+  FAIL_FAST_JOBSET_FAILURE_POLICY: str
+  # Job `backoffLimit` and pod `restartPolicy` of the tpu / mcjax.ray workers.
+  FAIL_FAST_WORKER_BACKOFF_LIMIT: str
+  FAIL_FAST_WORKER_RESTART_POLICY: str
+  # Appended after the worker Job's `backoffLimit:` line.
+  FAIL_FAST_POD_FAILURE_POLICY: str
+  # Line prefixes in the PID-1 wrapper: before the workload subshell starts,
+  # and after its exit code is collected.
+  FAIL_FAST_WRAPPER_PRE: str
+  FAIL_FAST_WRAPPER_POST: str
+  # Same as FAIL_FAST_WRAPPER_POST, but only pod 0 (the one that registers)
+  # may ask for a startup retry. Used by the Ray template, whose other pods
+  # only join the Ray cluster.
+  FAIL_FAST_WRAPPER_POST_POD0: str
+  # Pathways head pod: key holding pathways-rm/proxy, and a line prefix that
+  # opens `containers:` for the user container. With fail-fast rm/proxy
+  # become native sidecars so the pod terminates when the user container
+  # exits (as regular `restartPolicy: Always` containers they keep the pod
+  # Running forever).
+  FAIL_FAST_PROC_SIDECARS_KEY: str
+  FAIL_FAST_PROC_MAIN_CONTAINERS: str
+
+
+def _indent_lines(lines: list[str], indent: str) -> str:
+  return "".join(f"{indent}{line}\n" if line else "\n" for line in lines)
+
+
+def _wrapper_post(retry_only_on_pod_zero: bool) -> str:
+  """Maps the workload exit code to startup-retry or fatal.
+
+  Workers are servers that never finish on their own, so every exit is
+  abnormal, including exit 0 after a forwarded SIGTERM (which would otherwise
+  complete the Job and the JobSet silently while the orchestrator waits).
+
+  Args:
+    retry_only_on_pod_zero: Only pod 0 registers (Ray template); other pods
+      never ask for a startup retry.
+
+  Returns:
+    Wrapper script lines, indented for the templates.
+  """
+  startup_condition = f'[ ! -f "{REGISTERED_MARKER_PATH}" ]'
+  if retry_only_on_pod_zero:
+    startup_condition += ' && [ "${POD_INDEX}" = "0" ]'
+  return _indent_lines(
+      [
+          "# fail-fast: a worker never exits on its own. Before registration",
+          f"# ask the JobSet to retry startup (exit {STARTUP_RETRY_EXIT_CODE});"
+          " after it, fail the JobSet.",
+          f"if {startup_condition}; then",
+          '  echo "fail-fast: exited (code $EXIT_CODE) before registering;'
+          f' exiting {STARTUP_RETRY_EXIT_CODE} to retry startup"',
+          f"  EXIT_CODE={STARTUP_RETRY_EXIT_CODE}",
+          'elif [ "$EXIT_CODE" -eq 0 ] || [ "$EXIT_CODE" -eq'
+          f" {STARTUP_RETRY_EXIT_CODE} ]; then",
+          '  echo "fail-fast: stopped (code $EXIT_CODE,'
+          ' sigterm=$FT_GOT_SIGTERM); exiting 1 to fail the JobSet"',
+          "  EXIT_CODE=1",
+          "fi",
+      ],
+      _WRAPPER_INDENT,
+  )
+
+
+def render_fail_fast(
+    enabled: bool, startup_retries: int, user_container: str
+) -> FailFastPlaceholders:
+  """Returns template placeholder values for worker fail-fast.
+
+  With fail-fast, pods are never restarted in place (a restarted worker would
+  re-register under the same worker_id, which the orchestrator rejects, and the
+  run deadlocks). Instead:
+
+  * The PID-1 wrapper exits STARTUP_RETRY_EXIT_CODE if the workload stopped
+    before registering, and non-zero for any stop after registering.
+  * The Job's podFailurePolicy counts the startup exit code (backoffLimit 0 ->
+    the Job fails -> JobSet restarts, bounded by maxRestarts=startup_retries)
+    and fails the Job with reason PodFailurePolicy for anything else.
+  * The JobSet fails immediately on a PodFailurePolicy Job failure.
+
+  Args:
+    enabled: Whether to render fail-fast.
+    startup_retries: JobSet maxRestarts for pre-registration failures.
+    user_container: Name of the worker container running the wrapper.
+
+  Returns:
+    Placeholder values for string.Template substitution.
+  """
+  if not enabled:
+    return FailFastPlaceholders(
+        FAIL_FAST_LINE_DISABLE="",
+        FAIL_FAST_JOBSET_FAILURE_POLICY="",
+        FAIL_FAST_WORKER_BACKOFF_LIMIT="2048000",
+        FAIL_FAST_WORKER_RESTART_POLICY="OnFailure",
+        FAIL_FAST_POD_FAILURE_POLICY="",
+        FAIL_FAST_WRAPPER_PRE="",
+        FAIL_FAST_WRAPPER_POST="",
+        FAIL_FAST_WRAPPER_POST_POD0="",
+        FAIL_FAST_PROC_SIDECARS_KEY="containers",
+        FAIL_FAST_PROC_MAIN_CONTAINERS="",
+    )
+
+  jobset_failure_policy = (
+      f"\n    maxRestarts: {startup_retries}"
+      "\n    rules:"
+      "\n    - name: failJobSetOnPodFailurePolicy"
+      "\n      action: FailJobSet"
+      "\n      onJobFailureReasons:"
+      "\n      - PodFailurePolicy"
+  )
+  # First matching rule wins. A disrupted pod whose workload had not
+  # registered yet still exits with the startup code, so rule 1 retries it;
+  # disruptions without a container exit code (e.g. node lost) are fatal.
+  pod_failure_policy = (
+      "\n        podFailurePolicy:"
+      "\n          rules:"
+      "\n          - action: Count"
+      "\n            onExitCodes:"
+      f"\n              containerName: {user_container}"
+      "\n              operator: In"
+      f"\n              values: [{STARTUP_RETRY_EXIT_CODE}]"
+      "\n          - action: FailJob"
+      "\n            onPodConditions:"
+      "\n            - type: DisruptionTarget"
+      "\n          - action: FailJob"
+      "\n            onExitCodes:"
+      f"\n              containerName: {user_container}"
+      "\n              operator: NotIn"
+      f"\n              values: [0, {STARTUP_RETRY_EXIT_CODE}]"
+  )
+  wrapper_pre = _indent_lines(
+      [
+          "# fail-fast: the workload writes this marker once registered.",
+          f"export FT_REGISTERED_MARKER={REGISTERED_MARKER_PATH}",
+          'rm -f "$FT_REGISTERED_MARKER"',
+          'FT_GOT_SIGTERM=""',
+          '_sigterm() { FT_GOT_SIGTERM=1; kill -SIGTERM "$!" 2>/dev/null; }',
+          "",
+      ],
+      _WRAPPER_INDENT,
+  )
+  return FailFastPlaceholders(
+      FAIL_FAST_LINE_DISABLE="# overridden by fail-fast: ",
+      FAIL_FAST_JOBSET_FAILURE_POLICY=jobset_failure_policy,
+      FAIL_FAST_WORKER_BACKOFF_LIMIT="0",
+      FAIL_FAST_WORKER_RESTART_POLICY="Never",
+      FAIL_FAST_POD_FAILURE_POLICY=pod_failure_policy,
+      FAIL_FAST_WRAPPER_PRE=wrapper_pre,
+      FAIL_FAST_WRAPPER_POST=_wrapper_post(retry_only_on_pod_zero=False),
+      FAIL_FAST_WRAPPER_POST_POD0=_wrapper_post(retry_only_on_pod_zero=True),
+      FAIL_FAST_PROC_SIDECARS_KEY="initContainers",
+      FAIL_FAST_PROC_MAIN_CONTAINERS="            containers:\n",
+  )
 
 
 def main() -> None:
@@ -160,8 +343,38 @@ def main() -> None:
       default="sleep infinity",
       help="Command to run on startup",
   )
+  parser.add_argument(
+      "--fail_fast",
+      action="store_true",
+      default=False,
+      help=(
+          "Render worker templates (tpu, mcjax.ray, pathways) so that a worker"
+          " failure after it registered with the orchestrator fails the"
+          " JobSet instead of restarting pods in place. Failures before"
+          " registration are retried up to --startup_retries times by"
+          " recreating the JobSet."
+      ),
+  )
+  parser.add_argument(
+      "--startup_retries",
+      type=int,
+      default=3,
+      help=(
+          "With --fail_fast: JobSet maxRestarts for failures that happen"
+          " before the worker registered with the orchestrator."
+      ),
+  )
 
   args = parser.parse_args()
+  if args.startup_retries < 0:
+    raise ValueError(
+        f"--startup_retries must be >= 0, got {args.startup_retries}"
+    )
+  fail_fast = render_fail_fast(
+      enabled=args.fail_fast,
+      startup_retries=args.startup_retries,
+      user_container=args.worker_container_name,
+  )
 
   tpu_type = None
   tpu_topology = None
@@ -436,7 +649,12 @@ def main() -> None:
   )
 
   with open(args.template_file, "r") as f:
-    template = string.Template(f.read())
+    template_text = f.read()
+    if args.fail_fast and "${FAIL_FAST_POD_FAILURE_POLICY}" not in template_text:
+      raise ValueError(
+          f"--fail_fast is not supported by template {args.template_file}"
+      )
+    template = string.Template(template_text)
     content = template.substitute(
         JOBSET_NAME=jobset_name,
         USER=os.environ.get("USER"),
@@ -480,6 +698,7 @@ def main() -> None:
         STARTUP_COMMAND=args.worker_startup_command,
         PATHWAYS_WORKER_EXTRA_ENV=pathways_worker_extra_env,
         PATHWAYS_PROXY_EXTRA_ARGS=pathways_proxy_extra_args,
+        **dataclasses.asdict(fail_fast),
     )
     print(content)
 

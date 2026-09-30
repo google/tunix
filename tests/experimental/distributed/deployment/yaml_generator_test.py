@@ -16,7 +16,9 @@
 
 import io
 import os
+import subprocess
 import sys
+from typing import Any
 from unittest import mock
 
 from absl.testing import absltest
@@ -349,6 +351,148 @@ class YamlGeneratorTest(parameterized.TestCase):
         any(c["name"] == "pathways-worker" for c in with_sidecar[0]["containers"]),
         "sidecar must be attached to the pathways-worker pod, not another job",
     )
+
+
+_FAIL_FAST_TEMPLATES = (
+    ("tpu", "jobset.tpu.yaml", "tpuv5:2x2x1"),
+    ("mcjax_ray", "jobset.mcjax.ray.yaml", "tpuv5p:2x2x4"),
+    ("pathways", "jobset.pathways.yaml", "tpuv5:4x4x4"),
+    ("pathways_397b", "jobset.pathways.qwen3.5-397b.yaml", "tpuv5p:4x8x8"),
+)
+
+
+def _render(template_name: str, tpu_slice: str, *extra_args: str) -> str:
+  argv = [
+      "yaml_generator.py",
+      _get_template_path(template_name),
+      "--jobset_name=run-roll-0",
+      f"--tpu_slice={tpu_slice}",
+      '--worker_startup_command=eval "$FT_TEST_CMD"',
+      *extra_args,
+  ]
+  with mock.patch.object(sys, "argv", argv):
+    with mock.patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+      yaml_generator.main()
+      return mock_stdout.getvalue()
+
+
+def _proc_job_spec(rendered: str) -> dict[str, Any]:
+  import yaml  # pylint: disable=g-import-not-at-top
+
+  jobset = yaml.safe_load(rendered)
+  (proc,) = [j for j in jobset["spec"]["replicatedJobs"] if j["name"] == "proc"]
+  return proc["template"]["spec"]
+
+
+class FailFastRenderTest(parameterized.TestCase):
+
+  @parameterized.named_parameters(*_FAIL_FAST_TEMPLATES)
+  def test_fail_fast_off_renders_legacy_policy(self, template_name, tpu_slice):
+    rendered = _render(template_name, tpu_slice)
+    self.assertNotIn("fail-fast", rendered)
+    self.assertNotIn("podFailurePolicy", rendered)
+    self.assertNotIn("FT_REGISTERED_MARKER", rendered)
+    job = _proc_job_spec(rendered)
+    self.assertNotIn("initContainers", job["template"]["spec"])
+
+  @parameterized.named_parameters(*_FAIL_FAST_TEMPLATES)
+  def test_fail_fast_on_structure(self, template_name, tpu_slice):
+    import yaml  # pylint: disable=g-import-not-at-top
+
+    rendered = _render(
+        template_name, tpu_slice, "--fail_fast", "--startup_retries=2"
+    )
+    jobset = yaml.safe_load(rendered)
+    self.assertEqual(
+        jobset["spec"]["failurePolicy"],
+        {
+            "maxRestarts": 2,
+            "restartStrategy": "Recreate",
+            "rules": [{
+                "name": "failJobSetOnPodFailurePolicy",
+                "action": "FailJobSet",
+                "onJobFailureReasons": ["PodFailurePolicy"],
+            }],
+        },
+    )
+    job = _proc_job_spec(rendered)
+    self.assertEqual(job["backoffLimit"], 0)
+    self.assertEqual(
+        job["podFailurePolicy"]["rules"],
+        [
+            {
+                "action": "Count",
+                "onExitCodes": {
+                    "containerName": "main",
+                    "operator": "In",
+                    "values": [yaml_generator.STARTUP_RETRY_EXIT_CODE],
+                },
+            },
+            {
+                "action": "FailJob",
+                "onPodConditions": [{"type": "DisruptionTarget"}],
+            },
+            {
+                "action": "FailJob",
+                "onExitCodes": {
+                    "containerName": "main",
+                    "operator": "NotIn",
+                    "values": [0, yaml_generator.STARTUP_RETRY_EXIT_CODE],
+                },
+            },
+        ],
+    )
+    pod = job["template"]["spec"]
+    self.assertEqual(pod["restartPolicy"], "Never")
+    self.assertEqual([c["name"] for c in pod["containers"]], ["main"])
+    if template_name.startswith("jobset.pathways"):
+      # rm/proxy must be native sidecars so the pod ends with the user
+      # container; pw-node keeps restarting in place.
+      self.assertEqual(
+          [c["name"] for c in pod["initContainers"]],
+          ["pathways-rm", "pathways-proxy"],
+      )
+      (pw_node,) = [
+          j for j in jobset["spec"]["replicatedJobs"] if j["name"] == "pw-node"
+      ]
+      self.assertEqual(pw_node["template"]["spec"]["backoffLimit"], 2048000)
+
+  def test_negative_startup_retries_raises(self):
+    with self.assertRaises(ValueError):
+      _render(
+          "jobset.tpu.yaml", "tpuv5:2x2x1", "--fail_fast", "--startup_retries=-1"
+      )
+
+  def test_fail_fast_on_unsupported_template_raises(self):
+    with self.assertRaisesRegex(ValueError, "not supported by template"):
+      _render("jobset.mcjax.yaml", "tpu7x:4x4x4", "--fail_fast")
+
+  @parameterized.named_parameters(
+      ("crash_before_register", "exit 1", "0", 75),
+      ("exit0_before_register", "exit 0", "0", 75),
+      ("crash_after_register", 'touch "$FT_REGISTERED_MARKER"; exit 3', "0", 3),
+      ("exit0_after_register", 'touch "$FT_REGISTERED_MARKER"; exit 0', "0", 1),
+      (
+          "exit75_after_register",
+          'touch "$FT_REGISTERED_MARKER"; exit 75',
+          "0",
+          1,
+      ),
+  )
+  def test_wrapper_exit_code_mapping(self, cmd, pod_index, expected):
+    rendered = _render("jobset.tpu.yaml", "tpuv5:2x2x1", "--fail_fast")
+    job = _proc_job_spec(rendered)
+    (container,) = job["template"]["spec"]["containers"]
+    marker = os.path.join(self.create_tempdir().full_path, "registered")
+    script = container["command"][2].replace(
+        yaml_generator.REGISTERED_MARKER_PATH, marker
+    )
+    env = dict(os.environ, FT_TEST_CMD=cmd, POD_INDEX=pod_index)
+    result = subprocess.run(
+        ["bash", "-c", script], env=env, capture_output=True, timeout=60,
+        check=False,
+    )
+    self.assertEqual(result.returncode, expected, result.stdout)
 
 
 if __name__ == "__main__":

@@ -19,8 +19,8 @@ metadata:
   namespace: ${NAMESPACE}
 ${QUEUE_LABEL}spec:
   failurePolicy:
-    maxRestarts: 3
-    restartStrategy: Recreate
+${FAIL_FAST_LINE_DISABLE}    maxRestarts: 3
+    restartStrategy: Recreate${FAIL_FAST_JOBSET_FAILURE_POLICY}
   network:
     enableDNSHostnames: true
     publishNotReadyAddresses: true
@@ -28,7 +28,7 @@ ${QUEUE_LABEL}spec:
   - name: proc
     template:
       spec:
-        backoffLimit: 2048000
+        backoffLimit: ${FAIL_FAST_WORKER_BACKOFF_LIMIT}${FAIL_FAST_POD_FAILURE_POLICY}
         completionMode: Indexed
         completions: ${COMPLETIONS}
         parallelism: ${PARALLELISM}
@@ -41,7 +41,7 @@ ${QUEUE_LABEL}spec:
             serviceAccountName: ${SERVICE_ACCOUNT}
             dnsPolicy: ClusterFirstWithHostNet
             hostNetwork: true
-            restartPolicy: OnFailure
+            restartPolicy: ${FAIL_FAST_WORKER_RESTART_POLICY}
             terminationGracePeriodSeconds: 10
             nodeSelector:
               cloud.google.com/gke-tpu-accelerator: ${TPU_TYPE}${TPU_TOPOLOGY_SELECTOR}${RESERVATION_SELECTOR}
@@ -73,7 +73,7 @@ ${TPU_AFFINITY}            # tolerations:
                   _sigterm() (kill -SIGTERM $$! 2>/dev/null)
                   trap _sigterm SIGTERM
 
-                  (
+${FAIL_FAST_WRAPPER_PRE}                  (
                     ${STARTUP_COMMAND}
                   ) & PID=$$!
 
@@ -83,7 +83,7 @@ ${TPU_AFFINITY}            # tolerations:
                   wait $$PID
                   EXIT_CODE=$$?
 
-                  echo "Program End: $$(date)"
+${FAIL_FAST_WRAPPER_POST}                  echo "Program End: $$(date)"
                   echo "EXIT_CODE=$$EXIT_CODE"
                   exit $$EXIT_CODE
               env:

@@ -21,6 +21,7 @@ from __future__ import annotations
 import atexit
 import collections
 import concurrent.futures
+import dataclasses
 import logging
 import os
 import re
@@ -195,6 +196,53 @@ def normalize_tasks_for_fleet(
   return normalized
 
 
+# Legacy sandbox behaviour when FT_SANDBOX_FAIL_FAST is unset.
+_LEGACY_ACQUIRE_RETRIES = 5
+
+
+@dataclasses.dataclass(frozen=True)
+class SandboxFailFastConfig:
+  """Sandbox-side fail-fast settings (FAIL_FAST=true in the launcher).
+
+  Read from the environment because the fleet is created in several processes
+  (orchestrator and each rollout worker) that all get these variables from the
+  launcher.
+
+  Attributes:
+    enabled: Preflight failures and warm-pool errors are fatal instead of logged.
+    ready_timeout_s: SDK `FleetConfig.ready_timeout` (claim and warm-pool
+      readiness). None keeps the SDK default (900s).
+    acquire_retries: `fleet.acquire` attempts per episode in SWEEnv.
+  """
+
+  enabled: bool
+  ready_timeout_s: int | None
+  acquire_retries: int
+
+  @classmethod
+  def from_env(cls) -> "SandboxFailFastConfig":
+    """Builds the config from FT_SANDBOX_* variables set by k8s_launcher.sh."""
+    flag = os.environ.get("FT_SANDBOX_FAIL_FAST")
+    if flag is None:
+      return cls(
+          enabled=False,
+          ready_timeout_s=None,
+          acquire_retries=_LEGACY_ACQUIRE_RETRIES,
+      )
+    if flag != "true":
+      raise ValueError(
+          f"FT_SANDBOX_FAIL_FAST must be 'true' or unset, got {flag!r}"
+      )
+    config = cls(
+        enabled=True,
+        ready_timeout_s=int(os.environ["FT_SANDBOX_READY_TIMEOUT_S"]),
+        acquire_retries=int(os.environ["FT_SANDBOX_ACQUIRE_RETRIES"]),
+    )
+    if config.ready_timeout_s <= 0 or config.acquire_retries < 1:
+      raise ValueError(f"Invalid sandbox fail-fast settings: {config}")
+    return config
+
+
 def init_global_fleet(
     tasks: list[Any] | None = None,
     max_concurrency: int = 128,
@@ -304,6 +352,9 @@ def init_global_fleet(
     }
     if pool_name_fmt:
       fleet_kwargs["pool_name_format"] = pool_name_fmt
+    fail_fast = SandboxFailFastConfig.from_env()
+    if fail_fast.ready_timeout_s is not None:
+      fleet_kwargs["ready_timeout"] = fail_fast.ready_timeout_s
 
     try:
       from examples.deepswe import template as template_mod  # pyrefly: ignore[missing-import]
@@ -350,7 +401,11 @@ def init_global_fleet(
     if getattr(fleet_cfg, "install_teardown_hooks", False):
       fleet_inst._install_teardown_hooks()
     fleet_inst._torndown = False
-    if hasattr(fleet_inst, "preflight"):
+    if fail_fast.enabled:
+      # PreflightError (bad CRDs, controller, runtime class, pull secret, ...)
+      # would otherwise surface much later as sandboxes that never get ready.
+      fleet_inst.preflight()
+    elif hasattr(fleet_inst, "preflight"):
       try:
         fleet_inst.preflight()
       except Exception as e:  # pylint: disable=broad-exception-caught
@@ -415,6 +470,12 @@ def teardown_global_fleet() -> None:
       logging.warning("[SandboxFleet] Reaper note: %s", e)
 
 
+def _fleet_error_cls() -> type[Exception]:
+  from agent_sandbox_rl import FleetError  # pyrefly: ignore[missing-import]
+
+  return FleetError
+
+
 class PrewarmDatasetIterator:
   """Lookahead dataset iterator: pre-warms Agent Sandboxes on Kubernetes.
 
@@ -455,6 +516,7 @@ class PrewarmDatasetIterator:
     self.wait_initial = wait_initial
     self.max_staleness = max(0, int(max_staleness))
     self.max_workers = max(1, int(max_workers))
+    self._fail_fast = SandboxFailFastConfig.from_env().enabled
     self._lock = threading.Lock()
     self.image_rewrite = get_image_rewrite_fn(
         image_rewrite or getattr(self.fleet, "_image_rewrite_fn", None)
@@ -635,6 +697,8 @@ class PrewarmDatasetIterator:
     }
     to_delete = [img for img in self._active_replicas if img not in desired]
 
+    fleet_error_cls = _fleet_error_cls() if self._fail_fast else None
+
     def _warm(img: str, target_reps: int) -> None:
       try:
         self.fleet.warm_image(img, replicas_override=target_reps, wait=wait)
@@ -648,6 +712,10 @@ class PrewarmDatasetIterator:
             wait,
         )
       except Exception as e:  # pylint: disable=broad-exception-caught
+        if self._fail_fast and isinstance(e, fleet_error_cls):
+          # A pool that never gets ready or whose name collides with another
+          # run's leaves this image cold for the rest of the run. Fail loud.
+          raise
         logging.warning("[PrewarmDatasetIterator] Warm note for %s: %s", img, e)
 
     def _scale(img: str, target_reps: int) -> None:
@@ -698,6 +766,9 @@ class PrewarmDatasetIterator:
             executor.submit(_unwarm, img) for img in to_delete
         ]
         concurrent.futures.wait(warm_futures + scale_futures + unwarm_futures)
+      # Only _warm can raise (fail-fast FleetError); surface it to the caller.
+      for future in warm_futures:
+        future.result()
 
   def has_next(self) -> bool:
     """Returns True if at least one more item can be yielded without exhaustion."""

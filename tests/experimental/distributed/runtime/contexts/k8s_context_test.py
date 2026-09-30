@@ -140,6 +140,63 @@ class K8sContextTest(absltest.TestCase):
               b"pod-meta",
           )
 
+  def _register_envs(self, marker: str | None) -> dict[str, str]:
+    envs = {
+        "JOBSET_NAME": "myjobset",
+        "REPLICATED_JOB_NAME": "worker",
+        "JOB_INDEX": "0",
+        "POD_INDEX": "0",
+    }
+    if marker is not None:
+      envs[k8s_context.REGISTERED_MARKER_ENV] = marker
+    return envs
+
+  def test_register_writes_fail_fast_marker(self):
+    marker = os.path.join(
+        self.create_tempdir().full_path, "not-yet-created", "registered"
+    )
+    args = argparse.Namespace(
+        discovery_port=portpicker.pick_unused_port(),
+        discovery_addrs="door:8888",
+    )
+    with mock.patch.dict(os.environ, self._register_envs(marker), clear=True):
+      with k8s_context.K8sDiscoveryContext(args) as disc_ctx:
+        with mock.patch(
+            "tunix.experimental.distributed.runtime.contexts.k8s_context.discovery.register"
+        ):
+          self.assertFalse(os.path.exists(marker))
+          disc_ctx.register(b"pod-meta")
+          self.assertTrue(os.path.exists(marker))
+
+  def test_register_failure_does_not_write_fail_fast_marker(self):
+    marker = os.path.join(self.create_tempdir().full_path, "registered")
+    args = argparse.Namespace(
+        discovery_port=portpicker.pick_unused_port(),
+        discovery_addrs="door:8888",
+    )
+    with mock.patch.dict(os.environ, self._register_envs(marker), clear=True):
+      with k8s_context.K8sDiscoveryContext(args) as disc_ctx:
+        with mock.patch(
+            "tunix.experimental.distributed.runtime.contexts.k8s_context.discovery.register",
+            side_effect=RuntimeError("duplicate worker_id"),
+        ):
+          with self.assertRaises(RuntimeError):
+            disc_ctx.register(b"pod-meta")
+          self.assertFalse(os.path.exists(marker))
+
+  def test_register_without_fail_fast_writes_no_marker(self):
+    args = argparse.Namespace(
+        discovery_port=portpicker.pick_unused_port(),
+        discovery_addrs="door:8888",
+    )
+    with mock.patch.dict(os.environ, self._register_envs(None), clear=True):
+      with k8s_context.K8sDiscoveryContext(args) as disc_ctx:
+        with mock.patch(
+            "tunix.experimental.distributed.runtime.contexts.k8s_context.discovery.register"
+        ), mock.patch.object(k8s_context.pathlib.Path, "touch") as mock_touch:
+          disc_ctx.register(b"pod-meta")
+          mock_touch.assert_not_called()
+
   def test_k8s_process_context(self):
     args = argparse.Namespace(
         discovery_port=portpicker.pick_unused_port(),

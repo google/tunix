@@ -223,6 +223,35 @@ export VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY=${VLLM_RAY_EXTRA_ENV_VAR_PREFIXES
 export VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY:-}
 export DRY_RUN=${DRY_RUN:-false}
 
+# Worker fail-fast. `FAIL_FAST=true`: a trainer/rollout worker that dies after
+# it registered with the orchestrator fails its JobSet (and cluster_reaper then
+# tears down the whole run) instead of being restarted in place, which
+# deadlocks the run. Failures before registration are retried by recreating
+# the JobSet up to FT_STARTUP_RETRIES times. `false`: legacy restart behaviour.
+# The orchestrator JobSet is already fail-fast either way.
+# With `true` the sandbox side fails fast too (examples/deepswe/sandbox_utils.py
+# SandboxFailFastConfig): sandbox readiness is capped at
+# FT_SANDBOX_READY_TIMEOUT_S, SWEEnv tries fleet.acquire FT_SANDBOX_ACQUIRE_RETRIES
+# times, and a failed sandbox preflight or warm-pool error ends the run.
+export FAIL_FAST=${FAIL_FAST:-false}
+export FT_STARTUP_RETRIES=${FT_STARTUP_RETRIES:-3}
+export FT_SANDBOX_READY_TIMEOUT_S=${FT_SANDBOX_READY_TIMEOUT_S:-600}
+export FT_SANDBOX_ACQUIRE_RETRIES=${FT_SANDBOX_ACQUIRE_RETRIES:-2}
+case "${FAIL_FAST}" in
+  false)
+    FAIL_FAST_GENERATOR_FLAGS=()
+    FAIL_FAST_SANDBOX_ENV=""
+    ;;
+  true)
+    FAIL_FAST_GENERATOR_FLAGS=(--fail_fast "--startup_retries=${FT_STARTUP_RETRIES}")
+    FAIL_FAST_SANDBOX_ENV="FT_SANDBOX_FAIL_FAST=true FT_SANDBOX_READY_TIMEOUT_S=${FT_SANDBOX_READY_TIMEOUT_S} FT_SANDBOX_ACQUIRE_RETRIES=${FT_SANDBOX_ACQUIRE_RETRIES}"
+    ;;
+  *)
+    echo "Invalid FAIL_FAST='${FAIL_FAST}' (expected true|false)" >&2
+    exit 1
+    ;;
+esac
+
 apply_manifest() {
   local priority_sed="s/priorityClassName: [a-zA-Z0-9_-]\+/priorityClassName: ${PRIORITY_CLASS:-medium}/g"
   local filter
@@ -281,7 +310,7 @@ start_orchestrator() {
   local sandbox_env=""
   local sandbox_arg=""
   if [[ "${USE_AGENT_SANDBOX}" == "1" || "${USE_AGENT_SANDBOX}" == "true" || "${USE_AGENT_SANDBOX}" == "True" ]]; then
-    sandbox_env="NAMESPACE=\"${SANDBOX_NAMESPACE}\" ${SANDBOX_NODE_SELECTOR_KEY:+NODE_SELECTOR_KEY=\"${SANDBOX_NODE_SELECTOR_KEY}\"} ${SANDBOX_NODE_SELECTOR_VAL:+NODE_SELECTOR_VAL=\"${SANDBOX_NODE_SELECTOR_VAL}\"} ${IMAGE_REWRITE_PREFIX:+IMAGE_REWRITE_PREFIX=\"${IMAGE_REWRITE_PREFIX}\"} ${JOB_PREFIX:+JOB_PREFIX=\"${JOB_PREFIX}\"} ${POOL_NAME_FORMAT:+POOL_NAME_FORMAT=\"${POOL_NAME_FORMAT}\"} ${TEMPLATE_NAME_PREFIX:+TEMPLATE_NAME_PREFIX=\"${TEMPLATE_NAME_PREFIX}\"} ${SANDBOX_TOLERATIONS:+SANDBOX_TOLERATIONS=\"${SANDBOX_TOLERATIONS}\"}"
+    sandbox_env="NAMESPACE=\"${SANDBOX_NAMESPACE}\" ${SANDBOX_NODE_SELECTOR_KEY:+NODE_SELECTOR_KEY=\"${SANDBOX_NODE_SELECTOR_KEY}\"} ${SANDBOX_NODE_SELECTOR_VAL:+NODE_SELECTOR_VAL=\"${SANDBOX_NODE_SELECTOR_VAL}\"} ${IMAGE_REWRITE_PREFIX:+IMAGE_REWRITE_PREFIX=\"${IMAGE_REWRITE_PREFIX}\"} ${JOB_PREFIX:+JOB_PREFIX=\"${JOB_PREFIX}\"} ${POOL_NAME_FORMAT:+POOL_NAME_FORMAT=\"${POOL_NAME_FORMAT}\"} ${TEMPLATE_NAME_PREFIX:+TEMPLATE_NAME_PREFIX=\"${TEMPLATE_NAME_PREFIX}\"} ${SANDBOX_TOLERATIONS:+SANDBOX_TOLERATIONS=\"${SANDBOX_TOLERATIONS}\"} ${FAIL_FAST_SANDBOX_ENV}"
     sandbox_arg="--use_agent_sandbox"
   elif [[ -n "${IMAGE_REWRITE_PREFIX}" ]]; then
     sandbox_env="IMAGE_REWRITE_PREFIX=\"${IMAGE_REWRITE_PREFIX}\""
@@ -458,6 +487,7 @@ start_trainer() {
     "${YAML_DIR}/${TRAINER_JOBSET_YAML}" \
     --jobset_name="${TRAINER_ID}" \
     --namespace="${K8S_NAMESPACE}" \
+    "${FAIL_FAST_GENERATOR_FLAGS[@]}" \
     ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
     --tpu_slice=${TRAINER_TPU_SLICE} \
     --cpu_machine=${CPU_MACHINE} \
@@ -636,7 +666,7 @@ if cfg:
   fi
   local sandbox_env=""
   if [[ "$USE_AGENT_SANDBOX" == "1" || "$USE_AGENT_SANDBOX" == "true" || "$USE_AGENT_SANDBOX" == "True" ]]; then
-    sandbox_env="NAMESPACE=\"${SANDBOX_NAMESPACE}\" ${SANDBOX_NODE_SELECTOR_KEY:+NODE_SELECTOR_KEY=\"${SANDBOX_NODE_SELECTOR_KEY}\"} ${SANDBOX_NODE_SELECTOR_VAL:+NODE_SELECTOR_VAL=\"${SANDBOX_NODE_SELECTOR_VAL}\"} ${IMAGE_REWRITE_PREFIX:+IMAGE_REWRITE_PREFIX=\"${IMAGE_REWRITE_PREFIX}\"} ${JOB_PREFIX:+JOB_PREFIX=\"${JOB_PREFIX}\"} ${POOL_NAME_FORMAT:+POOL_NAME_FORMAT=\"${POOL_NAME_FORMAT}\"} ${TEMPLATE_NAME_PREFIX:+TEMPLATE_NAME_PREFIX=\"${TEMPLATE_NAME_PREFIX}\"} ${SANDBOX_TOLERATIONS:+SANDBOX_TOLERATIONS=\"${SANDBOX_TOLERATIONS}\"}"
+    sandbox_env="NAMESPACE=\"${SANDBOX_NAMESPACE}\" ${SANDBOX_NODE_SELECTOR_KEY:+NODE_SELECTOR_KEY=\"${SANDBOX_NODE_SELECTOR_KEY}\"} ${SANDBOX_NODE_SELECTOR_VAL:+NODE_SELECTOR_VAL=\"${SANDBOX_NODE_SELECTOR_VAL}\"} ${IMAGE_REWRITE_PREFIX:+IMAGE_REWRITE_PREFIX=\"${IMAGE_REWRITE_PREFIX}\"} ${JOB_PREFIX:+JOB_PREFIX=\"${JOB_PREFIX}\"} ${POOL_NAME_FORMAT:+POOL_NAME_FORMAT=\"${POOL_NAME_FORMAT}\"} ${TEMPLATE_NAME_PREFIX:+TEMPLATE_NAME_PREFIX=\"${TEMPLATE_NAME_PREFIX}\"} ${SANDBOX_TOLERATIONS:+SANDBOX_TOLERATIONS=\"${SANDBOX_TOLERATIONS}\"} ORCHESTRATOR_ID=\"${ORCHESTRATOR_ID}\" ${FAIL_FAST_SANDBOX_ENV}"
   elif [[ -n "${IMAGE_REWRITE_PREFIX}" ]]; then
     sandbox_env="IMAGE_REWRITE_PREFIX=\"${IMAGE_REWRITE_PREFIX}\" ${JOB_PREFIX:+JOB_PREFIX=\"${JOB_PREFIX}\"} ${POOL_NAME_FORMAT:+POOL_NAME_FORMAT=\"${POOL_NAME_FORMAT}\"} ${TEMPLATE_NAME_PREFIX:+TEMPLATE_NAME_PREFIX=\"${TEMPLATE_NAME_PREFIX}\"}"
   fi
@@ -664,6 +694,7 @@ if cfg:
       "${YAML_DIR}/${ROLLOUT_JOBSET_YAML}" \
       --jobset_name="${replica_id}" \
       --namespace="${K8S_NAMESPACE}" \
+      "${FAIL_FAST_GENERATOR_FLAGS[@]}" \
       ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
       --tpu_slice=${ROLLOUT_TPU_SLICE} \
       --worker_container_image="${TUNIX_IMAGE}" \

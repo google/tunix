@@ -19,7 +19,7 @@ metadata:
   namespace: ${NAMESPACE}
 ${QUEUE_LABEL}spec:
   failurePolicy:
-    restartStrategy: Recreate
+    restartStrategy: Recreate${FAIL_FAST_JOBSET_FAILURE_POLICY}
   network:
     enableDNSHostnames: true
     publishNotReadyAddresses: true
@@ -27,7 +27,7 @@ ${QUEUE_LABEL}spec:
   - name: proc
     template:
       spec:
-        backoffLimit: 2048000
+        backoffLimit: ${FAIL_FAST_WORKER_BACKOFF_LIMIT}${FAIL_FAST_POD_FAILURE_POLICY}
         completionMode: Indexed
         completions: ${COMPLETIONS}
         parallelism: ${PARALLELISM}
@@ -39,7 +39,7 @@ ${QUEUE_LABEL}spec:
             serviceAccountName: ${SERVICE_ACCOUNT}
             dnsPolicy: ClusterFirstWithHostNet
             hostNetwork: true
-            restartPolicy: OnFailure${PRIORITY_CLASS_LINE}
+            restartPolicy: ${FAIL_FAST_WORKER_RESTART_POLICY}${PRIORITY_CLASS_LINE}
             terminationGracePeriodSeconds: 10
             nodeSelector:
               # tpu7x dynamic slicing: no gke-tpu-topology selector and no
@@ -83,7 +83,7 @@ ${PW_NODE_AFFINITY}            # tolerations:
                   RAY_HEAD="$${JOBSET_NAME}-$${REPLICATED_JOB_NAME}-$${JOB_INDEX}-0.$${JOBSET_NAME}"
                   echo "Ray head: $${RAY_HEAD}, this pod index: $${POD_INDEX}"
 
-                  (
+${FAIL_FAST_WRAPPER_PRE}                  (
                     if [ "$${POD_INDEX}" = "0" ]; then
                       echo "Starting Ray head..."
                       ray start --head --port=6379
@@ -105,7 +105,7 @@ ${PW_NODE_AFFINITY}            # tolerations:
                   wait $$PID
                   EXIT_CODE=$$?
 
-                  echo "Program End: $$(date)"
+${FAIL_FAST_WRAPPER_POST_POD0}                  echo "Program End: $$(date)"
                   echo "EXIT_CODE=$$EXIT_CODE"
                   exit $$EXIT_CODE
               env:

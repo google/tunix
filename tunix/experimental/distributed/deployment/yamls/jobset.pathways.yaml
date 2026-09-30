@@ -21,8 +21,8 @@ ${QUEUE_LABEL}spec:
   coordinator:
     replicatedJob: proc
   failurePolicy:
-    maxRestarts: 3
-    restartStrategy: Recreate
+${FAIL_FAST_LINE_DISABLE}    maxRestarts: 3
+    restartStrategy: Recreate${FAIL_FAST_JOBSET_FAILURE_POLICY}
   network:
     enableDNSHostnames: true
     publishNotReadyAddresses: true
@@ -33,7 +33,7 @@ ${QUEUE_LABEL}spec:
       metadata:
         annotations: {}
       spec:
-        backoffLimit: 0
+        backoffLimit: 0${FAIL_FAST_POD_FAILURE_POLICY}
         completionMode: Indexed
         completions: 1
         parallelism: 1
@@ -51,7 +51,7 @@ ${QUEUE_LABEL}spec:
             nodeSelector:
 ${HEAD_NODE_SELECTOR}
 ${HEAD_AFFINITY}${HEAD_TOLERATIONS}
-            containers:
+            ${FAIL_FAST_PROC_SIDECARS_KEY}:
             - name: pathways-rm
               image: ${SERVER_IMAGE}
               imagePullPolicy: IfNotPresent
@@ -125,7 +125,7 @@ ${HEAD_AFFINITY}${HEAD_TOLERATIONS}
               ports:
               - containerPort: 29000
                 protocol: TCP
-            - name: ${USER_CONTAINER}
+${FAIL_FAST_PROC_MAIN_CONTAINERS}            - name: ${USER_CONTAINER}
               image: ${USER_CONTAINER_IMAGE}
               imagePullPolicy: Always
               securityContext:
@@ -147,7 +147,7 @@ ${HEAD_AFFINITY}${HEAD_TOLERATIONS}
                   _sigterm() (kill -SIGTERM $$! 2>/dev/null)
                   trap _sigterm SIGTERM
 
-                  (
+${FAIL_FAST_WRAPPER_PRE}                  (
                     ${STARTUP_COMMAND}
                   ) & PID=$$!
 
@@ -157,7 +157,7 @@ ${HEAD_AFFINITY}${HEAD_TOLERATIONS}
                   wait $$PID
                   EXIT_CODE=$$?
 
-                  echo "Program End: $$(date)"
+${FAIL_FAST_WRAPPER_POST}                  echo "Program End: $$(date)"
                   echo "EXIT_CODE=$$EXIT_CODE"
                   exit $$EXIT_CODE
               env:
