@@ -138,20 +138,4 @@ export MAX_PROMPT_LENGTH=4096
 export MAX_CONTEXT_LIMIT=61440
 export MAX_RESPONSE_LENGTH=61440
 
-# ==============================================================================
-# Execution Dispatch
-# ==============================================================================
-if [ -f "${DIR}/../deepswe_dist/k8s_launcher.sh" ]; then
-  LAUNCHER="${DIR}/../deepswe_dist/k8s_launcher.sh"
-elif [ -f "${DIR}/tunix/experimental/examples/deepswe_dist/k8s_launcher.sh" ]; then
-  LAUNCHER="${DIR}/tunix/experimental/examples/deepswe_dist/k8s_launcher.sh"
-elif [ -f "${DIR}/../../../../third_party/py/tunix/experimental/examples/deepswe_dist/k8s_launcher.sh" ]; then
-  LAUNCHER="${DIR}/../../../../third_party/py/tunix/experimental/examples/deepswe_dist/k8s_launcher.sh"
-elif [ -f "${HOME}/github/tunix_build/tunix/experimental/examples/deepswe_dist/k8s_launcher.sh" ]; then
-  LAUNCHER="${HOME}/github/tunix_build/tunix/experimental/examples/deepswe_dist/k8s_launcher.sh"
-else
-  echo "Error: k8s_launcher.sh not found relative to ${DIR}"
-  exit 1
-fi
-
-COMMAND="${1:-eval}"\nshift || true\nexec "${LAUNCHER}" --command "${COMMAND}" --image "${TUNIX_IMAGE}" "$@"
+source "${DIR}/mlperf_base.sh" "${1:-eval}" "${@:2}"
