@@ -930,6 +930,87 @@ class MaxTextUtilsTest(absltest.TestCase):
     self.assertIsNone(engine._weight_converter._direct.target_dtype)
     self.assertEqual(engine.checkpoint_dir, "/tmp/ckpts")
 
+  def test_load_and_convert_scanned_checkpoint(self):
+    scanned_cfg = mock.sentinel.scanned_cfg
+    scanned_model = mock.sentinel.scanned_model
+    scanned_state = mock.sentinel.scanned_state
+    target_state = mock.sentinel.target_state
+    converted_inner = {"decoder": {"layers_0": "weights"}}
+
+    pyconfig_mod = mock.MagicMock(initialize=mock.Mock(return_value=scanned_cfg))
+    model_creation_mod = mock.MagicMock(
+        from_pretrained=mock.Mock(
+            return_value=(scanned_model, mock.sentinel.mesh)
+        )
+    )
+    converter_inst = mock.MagicMock(
+        convert=mock.Mock(return_value={"model": converted_inner})
+    )
+    converter_cls = mock.Mock(return_value=converter_inst)
+    nnx_mod = mock.MagicMock(
+        Param=mock.sentinel.Param,
+        state=mock.Mock(return_value=scanned_state),
+    )
+    jax_mod = mock.MagicMock(
+        devices=mock.Mock(return_value=["d0", "d1"]),
+        clear_caches=mock.Mock(),
+    )
+    mock_sampler = mock.MagicMock()
+    mock_sampler.vllm_sampler.transformer_state = target_state
+
+    with mock.patch.dict(
+        "sys.modules",
+        {
+            "flax": mock.MagicMock(nnx=nnx_mod),
+            "flax.nnx": nnx_mod,
+            "jax": jax_mod,
+            "maxtext.common.common_types": mock.MagicMock(
+                MODEL_MODE_AUTOREGRESSIVE="autoregressive"
+            ),
+            "maxtext.configs": mock.MagicMock(pyconfig=pyconfig_mod),
+            "maxtext.integration.vllm.weight_converter": mock.MagicMock(
+                MaxTextToMaxTextConverter=converter_cls
+            ),
+            "maxtext.utils": mock.MagicMock(
+                model_creation_utils=model_creation_mod
+            ),
+            "maxtext.utils.globals": mock.MagicMock(
+                MAXTEXT_CONFIGS_DIR="/maxtext/configs"
+            ),
+        },
+    ):
+      maxtext_utils.load_and_convert_scanned_checkpoint(
+          path="/ckpt/0/items",
+          sampler=mock_sampler,
+          mesh_tp=2,
+          ckpt_prefuse_moe=False,
+          maxtext_config_overrides={"model_name": "qwen3.5-35b-a3b"},
+      )
+
+    pyconfig_mod.initialize.assert_called_once()
+    init_args, init_kwargs = pyconfig_mod.initialize.call_args
+    self.assertEqual(init_args[0], ["", "/maxtext/configs/base.yml"])
+    self.assertTrue(init_kwargs["scan_layers"])
+    self.assertEqual(init_kwargs["model_name"], "qwen3.5-35b-a3b")
+    self.assertEqual(init_kwargs["load_parameters_path"], "/ckpt/0/items")
+    model_creation_mod.from_pretrained.assert_called_once_with(
+        scanned_cfg,
+        devices=["d0", "d1"],
+        model_mode="autoregressive",
+    )
+    converter_cls.assert_called_once_with(
+        config=scanned_cfg,
+        tp=2,
+        prefuse_moe_weights=True,
+        target_dtype=None,
+    )
+    converter_inst.convert.assert_called_once_with(
+        scanned_state, target_state=target_state
+    )
+    mock_sampler.vllm_sampler.update_params.assert_called_once_with(
+        converted_inner
+    )
+
 
 if __name__ == "__main__":
   absltest.main()
