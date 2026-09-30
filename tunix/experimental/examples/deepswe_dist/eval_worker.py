@@ -115,7 +115,7 @@ def load_and_convert_scanned_checkpoint(
     orig_exec_group = getattr(converter, "_execute_group", None)
     prefused_moe_sources = {}
     orig_build_plan = getattr(converter, "_build_plan", None)
-    if ckpt_prefuse_moe and callable(orig_build_plan):
+    if ckpt_prefuse_moe and a.mesh_tp > 1 and callable(orig_build_plan):
 
       def _split_prefused_moe_and_build_plan(
           src_flat, tgt_flat, skip_paths=frozenset()
@@ -146,8 +146,14 @@ def load_and_convert_scanned_checkpoint(
           )
           if prefused_wi is not None:
             half = prefused_wi.shape[-1] // 2
-            src_flat[group.source_keys[0]] = prefused_wi[..., :half]
-            src_flat[group.source_keys[1]] = prefused_wi[..., half:]
+            wi_0 = prefused_wi[..., :half]
+            wi_1 = prefused_wi[..., half:]
+            if hasattr(jax, "block_until_ready"):
+              jax.block_until_ready([wi_0, wi_1])
+            _delete_pytree_buffers(prefused_wi, jax, keep_tree=[wi_0, wi_1])
+            prefused_wi = None
+            src_flat[group.source_keys[0]] = wi_0
+            src_flat[group.source_keys[1]] = wi_1
         outs = orig_exec_group(group, src_flat, tgt_flat)
         out_arrays = [out for _, out in outs]
         if hasattr(jax, "block_until_ready"):
@@ -157,7 +163,23 @@ def load_and_convert_scanned_checkpoint(
             jax,
             keep_tree=out_arrays,
         )
-        return outs
+        aligned_outs = []
+        for tgt_key, out in outs:
+          tgt_sharding = getattr(tgt_flat.get(tgt_key), "sharding", None)
+          out_sharding = getattr(out, "sharding", None)
+          if (
+              tgt_sharding is not None
+              and out_sharding is not None
+              and out_sharding != tgt_sharding
+              and hasattr(jax, "device_put")
+          ):
+            resharded_out = jax.device_put(out, tgt_sharding)
+            if hasattr(jax, "block_until_ready"):
+              jax.block_until_ready(resharded_out)
+            _delete_pytree_buffers(out, jax, keep_tree=resharded_out)
+            out = resharded_out
+          aligned_outs.append((tgt_key, out))
+        return aligned_outs
 
       converter._execute_group = _exec_and_free_group
 
@@ -177,9 +199,42 @@ def load_and_convert_scanned_checkpoint(
     )
     if sampler_cfg is not None and orig_free_kv is not None:
       sampler_cfg.free_kv_cache_during_weight_sync = False
+    reshard_mod = None
+    orig_reshard_pytree = None
+    try:
+      from tunix.rl import reshard as reshard_mod  # pylint: disable=import-outside-toplevel
+
+      orig_reshard_pytree = getattr(reshard_mod, "reshard_pytree", None)
+    except Exception:  # pylint: disable=broad-exception-caught
+      reshard_mod = None
+    if (
+        reshard_mod is not None
+        and orig_reshard_pytree is not None
+        and hasattr(jax, "tree_util")
+        and hasattr(jax, "device_put")
+    ):
+
+      def _inplace_or_chunked_reshard(source, target, **kwargs):
+        del kwargs
+
+        def _put_or_keep(x, dst):
+          sharding = getattr(dst, "sharding", dst)
+          if sharding is None or getattr(x, "sharding", None) == sharding:
+            return x
+          out = jax.device_put(x, sharding)
+          if hasattr(jax, "block_until_ready"):
+            jax.block_until_ready(out)
+          _delete_pytree_buffers(x, jax, keep_tree=out)
+          return out
+
+        return jax.tree_util.tree_map(_put_or_keep, source, target)
+
+      reshard_mod.reshard_pytree = _inplace_or_chunked_reshard
     try:
       sampler.vllm_sampler.update_params(converted_state)
     finally:
+      if reshard_mod is not None and orig_reshard_pytree is not None:
+        reshard_mod.reshard_pytree = orig_reshard_pytree
       if sampler_cfg is not None and orig_free_kv is not None:
         sampler_cfg.free_kv_cache_during_weight_sync = orig_free_kv
     _delete_pytree_buffers(
@@ -250,18 +305,34 @@ def create_worker(a):
 
       meta_text = metadata_file.read_text()
       meta = json.loads(meta_text)
+      if "use_ocdbt" in meta:
+        a.checkpoint_storage_use_ocdbt = bool(meta["use_ocdbt"])
       if "use_zarr3" in meta:
         a.checkpoint_storage_use_zarr3 = bool(meta["use_zarr3"])
       if '"wi"' in meta_text:
         ckpt_prefuse_moe = True
     except Exception as exc:  # pylint: disable=broad-exception-caught
       logging.warning("Could not read Orbax _METADATA from %s: %s", path, exc)
-  if a.use_ocdbt_with_pathways:
+  is_ocdbt = bool(
+      getattr(a, "checkpoint_storage_use_ocdbt", False)
+      or (path / "manifest.ocdbt").exists()
+  )
+  if a.use_ocdbt_with_pathways and is_ocdbt:
     from orbax.checkpoint._src.serialization import jax_array_handlers
     from orbax.checkpoint._src.serialization import type_handler_registry
 
+    logging.info(
+        "Checkpoint at %s uses OCDBT; registering standard Orbax ArrayHandler.",
+        path,
+    )
     type_handler_registry.register_type_handler(
         jax.Array, jax_array_handlers.ArrayHandler(), override=True
+    )
+  else:
+    logging.info(
+        "Checkpoint at %s is not OCDBT (or use_ocdbt_with_pathways=False);"
+        " keeping registered jax.Array handler.",
+        path,
     )
   convert_in_memory = bool(a.scan_layers)
   mt_cfg = eval_deepswe.maxtext_config(a)
