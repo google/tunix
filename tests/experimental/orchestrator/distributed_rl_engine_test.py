@@ -1763,6 +1763,259 @@ class DistributedRLEngineTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_poll_rollouts_evicts_failed_worker_and_redispatches_to_survivor(
+      self,
+  ):
+    from tunix.experimental.orchestrator import worker_registry
+
+    async def _run():
+      registry = worker_registry.WorkerRegistry()
+      for wid in ("rollout-0", "rollout-1"):
+        w = mock.MagicMock()
+        w.info.return_value = datatypes.WorkerInfo(
+            worker_id=wid, roles=frozenset({datatypes.Role.ROLLOUT.value})
+        )
+        registry.register(w)
+
+      evicted_handles = []
+      engine = distributed_rl_engine.DistributedRLEngine(
+          rollout_workers=[self.mock_rollout_1, self.mock_rollout_2],
+          trainer_workers={datatypes.Role.ACTOR: self.mock_actor},
+          registry=registry,
+          rollout_worker_ids={
+              "rollout-0": self.mock_rollout_1,
+              "rollout-1": self.mock_rollout_2,
+          },
+          on_worker_evicted=lambda h, exc: evicted_handles.append((h, exc)),
+      )
+      # Force initial dispatch to the first actor in the pool (mock_rollout_1).
+      engine._rollout_pool.router = lambda actors, *a, **kw: actors[0]
+
+      resp_ok = remote_execution.ExecutionResponse(
+          request_id="req_p1_g0_v0",
+          result=[
+              datatypes.RolloutResponse(
+                  request_id="req_p1_g0_v0",
+                  status="COMPLETED",
+                  payload=datatypes.TrajectoryItem(
+                      prompt_id="p1",
+                      group_index=0,
+                      traj={
+                          "trajectory_reward": 1.0,
+                          "status": datatypes.TrajectoryStatus.SUCCEEDED,
+                      },
+                  ),
+              )
+          ],
+      )
+      self.mock_rollout_1.poll_responses.side_effect = ConnectionError(
+          "rollout-0 crashed"
+      )
+      self.mock_rollout_2.poll_responses.return_value = resp_ok
+
+      await engine.dispatch_rollouts(
+          [{"prompt": "p1", "prompt_id": "p1"}],
+          num_generations=1,
+          policy_version=0,
+      )
+      results = await engine.poll_rollouts(timeout_s=2.0)
+
+      self.assertLen(results, 1)
+      self.assertEqual(results[0].prompt_id, "p1")
+      self.assertEqual(results[0].status, datatypes.TrajectoryStatus.SUCCEEDED)
+      self.assertEqual(engine._rollout_workers, [self.mock_rollout_2])
+      self.assertEqual(
+          registry.state("rollout-0"),
+          worker_registry.MembershipState.EVICTED,
+      )
+      self.assertEqual(
+          registry.state("rollout-1"),
+          worker_registry.MembershipState.ACTIVE,
+      )
+      self.assertLen(evicted_handles, 1)
+      self.assertIs(evicted_handles[0][0], self.mock_rollout_1)
+      await engine.close()
+
+    asyncio.run(_run())
+
+  def test_poll_rollouts_returns_failed_trajectory_item_when_all_workers_fail(
+      self,
+  ):
+    async def _run():
+      self.mock_rollout_1.poll_responses.side_effect = ConnectionError(
+          "rollout-0 down"
+      )
+      self.mock_rollout_2.poll_responses.side_effect = ConnectionError(
+          "rollout-1 down"
+      )
+
+      await self.engine.dispatch_rollouts(
+          [{"prompt": "p_fail", "prompt_id": "p_fail"}],
+          num_generations=1,
+          policy_version=0,
+      )
+      results = await self.engine.poll_rollouts(timeout_s=2.0)
+
+      self.assertLen(results, 1)
+      self.assertEqual(results[0].prompt_id, "p_fail")
+      self.assertEqual(results[0].status, datatypes.TrajectoryStatus.FAILED)
+      self.assertIn("down", results[0].metadata.get("error", ""))
+      self.assertEmpty(self.engine._rollout_workers)
+      await self.engine.close()
+
+    asyncio.run(_run())
+
+  def test_add_rollout_worker_holds_in_pending_weight_sync_until_sync_weights(
+      self,
+  ):
+    from tunix.experimental.orchestrator import worker_registry
+
+    async def _run():
+      registry = worker_registry.WorkerRegistry()
+      for wid in ("rollout-0", "rollout-1"):
+        w = mock.MagicMock()
+        w.info.return_value = datatypes.WorkerInfo(
+            worker_id=wid, roles=frozenset({datatypes.Role.ROLLOUT.value})
+        )
+        registry.register(w)
+
+      coordinator = _FakeWeightSyncCoordinator()
+      engine = distributed_rl_engine.DistributedRLEngine(
+          rollout_workers=[self.mock_rollout_1],
+          trainer_workers={datatypes.Role.ACTOR: self.mock_actor},
+          weight_sync_coordinator=coordinator,
+          registry=registry,
+          rollout_worker_ids={"rollout-0": self.mock_rollout_1},
+      )
+
+      await engine.sync_weights(policy_version=1)
+      self.assertEqual(engine._policy_version, 1)
+
+      # Returning worker arrives while policy_version > 0
+      engine.add_rollout_worker(
+          self.mock_rollout_2,
+          worker_id="rollout-1",
+          require_weight_sync=True,
+      )
+      self.assertNotIn(self.mock_rollout_2, engine._rollout_workers)
+      self.assertIn("rollout-1", engine._pending_sync_rollout_workers)
+      self.assertEqual(
+          registry.state("rollout-1"),
+          worker_registry.MembershipState.PENDING_WEIGHT_SYNC,
+      )
+
+      # Next sync_weights promotes the pending worker to ACTIVE
+      await engine.sync_weights(policy_version=2)
+      self.assertEmpty(engine._pending_sync_rollout_workers)
+      self.assertIn(self.mock_rollout_2, engine._rollout_workers)
+      self.assertEqual(
+          registry.state("rollout-1"),
+          worker_registry.MembershipState.ACTIVE,
+      )
+      await engine.close()
+
+    asyncio.run(_run())
+
+  def test_sync_weights_evicts_failed_destination_and_retries(self):
+    from tunix.experimental.orchestrator import worker_registry
+    from tunix.experimental.weight_sync import weight_sync_coordinator
+
+    async def _run():
+      registry = worker_registry.WorkerRegistry()
+      for wid in ("rollout-0", "rollout-1"):
+        w = mock.MagicMock()
+        w.info.return_value = datatypes.WorkerInfo(
+            worker_id=wid, roles=frozenset({datatypes.Role.ROLLOUT.value})
+        )
+        registry.register(w)
+
+      class _RecoveringCoordinator:
+
+        def __init__(self):
+          self.calls = []
+          self.poisoned = None
+          self.reset_calls = 0
+
+        def reset_after_recovery(self):
+          self.reset_calls += 1
+          self.poisoned = None
+
+        async def sync(self, policy_version=0, **kwargs):
+          del kwargs
+          self.calls.append(policy_version)
+          if len(self.calls) == 1:
+            self.poisoned = "failed_needs_restart"
+            failed_result = weight_sync_coordinator.WeightSyncResult(
+                policy_version=policy_version,
+                round_index=0,
+                req_id="wsync_0",
+                uuid=1,
+                state=weight_sync_coordinator.RoundState.FAILED_NEEDS_RESTART,
+                transfer=None,
+                source_units=(),
+                destination_units=(),
+                workers=(
+                    weight_sync_coordinator.WorkerRoundReport(
+                        worker_id="rollout-0",
+                        phase="unknown",
+                        error="ConnectionError",
+                        needs_restart=True,
+                    ),
+                    weight_sync_coordinator.WorkerRoundReport(
+                        worker_id="rollout-1",
+                        phase="aborted",
+                    ),
+                ),
+            )
+            raise weight_sync_coordinator.WeightSyncError(
+                "rollout-0 died during weight sync", failed_result
+            )
+          return weight_sync_coordinator.WeightSyncResult(
+              policy_version=policy_version,
+              round_index=1,
+              req_id="wsync_1",
+              uuid=2,
+              state=weight_sync_coordinator.RoundState.COMMITTED,
+              transfer=None,
+              source_units=(),
+              destination_units=(),
+              workers=(
+                  weight_sync_coordinator.WorkerRoundReport(
+                      worker_id="rollout-1",
+                      phase="committed",
+                  ),
+              ),
+          )
+
+      coordinator = _RecoveringCoordinator()
+      engine = distributed_rl_engine.DistributedRLEngine(
+          rollout_workers=[self.mock_rollout_1, self.mock_rollout_2],
+          trainer_workers={datatypes.Role.ACTOR: self.mock_actor},
+          weight_sync_coordinator=coordinator,
+          registry=registry,
+          rollout_worker_ids={
+              "rollout-0": self.mock_rollout_1,
+              "rollout-1": self.mock_rollout_2,
+          },
+      )
+
+      version = await engine.sync_weights(policy_version=3)
+      self.assertEqual(version, 3)
+      self.assertEqual(coordinator.calls, [3, 3])
+      self.assertEqual(coordinator.reset_calls, 1)
+      self.assertEqual(engine._rollout_workers, [self.mock_rollout_2])
+      self.assertEqual(
+          registry.state("rollout-0"),
+          worker_registry.MembershipState.EVICTED,
+      )
+      self.assertEqual(
+          registry.state("rollout-1"),
+          worker_registry.MembershipState.ACTIVE,
+      )
+      await engine.close()
+
+    asyncio.run(_run())
+
 
 if __name__ == "__main__":
   absltest.main()

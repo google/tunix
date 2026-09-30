@@ -1171,10 +1171,13 @@ class WeightSyncCoordinator:
       try:
         t_phase = time.monotonic()
         try:
-          await asyncio.gather(*[
-              _wait_for(d.bind_weight_sync(), self._timeouts.bind)
-              for d in destinations
-          ])
+          bind_results = await asyncio.gather(
+              *[
+                  _wait_for(d.bind_weight_sync(), self._timeouts.bind)
+                  for d in destinations
+              ],
+              return_exceptions=True,
+          )
         finally:
           t_bind_s = time.monotonic() - t_phase
           t_prepare_s = t_bind_s
@@ -1187,15 +1190,36 @@ class WeightSyncCoordinator:
               _format_timeout(self._timeouts.bind),
               len(destinations),
           )
+        first_bind_err: Optional[BaseException] = None
+        for d, res in zip(destinations, bind_results):
+          if isinstance(res, asyncio.CancelledError):
+            raise res
+          if isinstance(res, (KeyboardInterrupt, SystemExit)):
+            raise res
+          if isinstance(res, BaseException):
+            wid = _worker_id(d)
+            worker_reports[wid] = WorkerRoundReport(
+                worker_id=wid,
+                phase="unknown",
+                error=repr(res),
+                needs_restart=True,
+            )
+            if first_bind_err is None:
+              first_bind_err = res
+        if first_bind_err is not None:
+          raise first_bind_err
 
         t_phase = time.monotonic()
         try:
-          dst_meta_lists = await asyncio.gather(*[
-              _wait_for(
-                  d.get_weight_sync_metadata(), self._timeouts.metadata
-              )
-              for d in destinations
-          ])
+          dst_meta_results = await asyncio.gather(
+              *[
+                  _wait_for(
+                      d.get_weight_sync_metadata(), self._timeouts.metadata
+                  )
+                  for d in destinations
+              ],
+              return_exceptions=True,
+          )
         finally:
           t_metadata_s = time.monotonic() - t_phase
           t_prepare_s = t_bind_s + t_metadata_s
@@ -1208,6 +1232,25 @@ class WeightSyncCoordinator:
               _format_timeout(self._timeouts.metadata),
               len(destinations),
           )
+        first_meta_err: Optional[BaseException] = None
+        for d, res in zip(destinations, dst_meta_results):
+          if isinstance(res, asyncio.CancelledError):
+            raise res
+          if isinstance(res, (KeyboardInterrupt, SystemExit)):
+            raise res
+          if isinstance(res, BaseException):
+            wid = _worker_id(d)
+            worker_reports[wid] = WorkerRoundReport(
+                worker_id=wid,
+                phase="unknown",
+                error=repr(res),
+                needs_restart=True,
+            )
+            if first_meta_err is None:
+              first_meta_err = res
+        if first_meta_err is not None:
+          raise first_meta_err
+        dst_meta_lists = dst_meta_results
 
         # Metadata is collected exactly once and the same objects flow to both
         # registration and the request. Collecting twice would hand the

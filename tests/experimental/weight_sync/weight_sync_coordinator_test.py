@@ -242,6 +242,7 @@ class FakeDestination:
       await asyncio.sleep(self._delay_duration)
 
   async def bind_weight_sync(self):
+    self._maybe_fail("bind")
     if not self.bound:
       self.bind_calls += 1
       self.port = self._port_base + self.bind_calls
@@ -249,6 +250,7 @@ class FakeDestination:
     self._log.append(f"{self._info.worker_id}:bind")
 
   async def get_weight_sync_metadata(self):
+    self._maybe_fail("metadata")
     self._log.append(f"{self._info.worker_id}:metadata")
     if self._variables:
       return [
@@ -1970,6 +1972,116 @@ class PhaseTimingsAndDisabledTimeoutsRoundTest(CoordinatorTestBase):
     result = self.sync(policy_version=1)
     self.assertTrue(result.success)
     self.assertTrue(math.isinf(self.coordinator._timeouts.h2d))
+
+
+class ElasticWorkerMembershipTest(CoordinatorTestBase):
+
+  def test_bind_failure_reports_failed_destination_worker(self):
+    d0 = FakeDestination("roll-0", [])
+    d1 = FakeDestination("roll-1", [], fail_on="bind", fail_persistently=True)
+    d2 = FakeDestination("roll-2", [], fail_on="bind", fail_persistently=True)
+    self.make(d0, d1, d2)
+
+    with self.assertRaises(WeightSyncError) as ctx:
+      self.sync(policy_version=1)
+
+    result = ctx.exception.result
+    self.assertIs(result.state, RoundState.PREPARING)
+    self.assertIsNone(self.coordinator.poisoned)
+    reports = {w.worker_id: w for w in result.workers}
+    self.assertEqual(set(reports.keys()), {"roll-1", "roll-2"})
+    for wid in ("roll-1", "roll-2"):
+      self.assertEqual(reports[wid].phase, "unknown")
+      self.assertTrue(reports[wid].needs_restart)
+      self.assertIn(f"{wid} failed at bind", reports[wid].error)
+
+  def test_metadata_failure_reports_failed_destination_worker(self):
+    d0 = FakeDestination("roll-0", [])
+    d1 = FakeDestination("roll-1", [])
+    d2 = FakeDestination(
+        "roll-2", [], fail_on="metadata", fail_persistently=True
+    )
+    self.make(d0, d1, d2)
+
+    with self.assertRaises(WeightSyncError) as ctx:
+      self.sync(policy_version=1)
+
+    result = ctx.exception.result
+    self.assertIs(result.state, RoundState.PREPARING)
+    self.assertIsNone(self.coordinator.poisoned)
+    reports = {w.worker_id: w for w in result.workers}
+    self.assertEqual(set(reports.keys()), {"roll-2"})
+    self.assertEqual(reports["roll-2"].phase, "unknown")
+    self.assertTrue(reports["roll-2"].needs_restart)
+    self.assertIn("roll-2 failed at metadata", reports["roll-2"].error)
+
+  def test_evicting_failed_destination_and_rejoining_later_syncs_cleanly(self):
+    d0 = FakeDestination("roll-0", [])
+    d1 = FakeDestination("roll-1", [])
+    d2 = FakeDestination("roll-2", [], fail_on="bind", fail_persistently=True)
+    self.make(d0, d1, d2)
+
+    # Round 0 fails during bind on roll-2; result.workers identifies roll-2.
+    with self.assertRaises(WeightSyncError) as ctx:
+      self.sync(policy_version=1)
+
+    failed_ids = [
+        w.worker_id for w in ctx.exception.result.workers if w.needs_restart
+    ]
+    self.assertEqual(failed_ids, ["roll-2"])
+    for wid in failed_ids:
+      self.registry.unregister(wid)
+
+    # Retry succeeds across surviving destinations roll-0 and roll-1.
+    r1 = self.sync(policy_version=1)
+    self.assertTrue(r1.success)
+    self.assertEqual(d0.serving, expected_pattern(1))
+    self.assertEqual(d1.serving, expected_pattern(1))
+    self.assertEqual(d2.serving, [0.0] * 4)
+
+    # Next round: roll-1 fails mid-round during post with unreachable status,
+    # poisoning the coordinator.
+    d1._fail_on = "post"  # pylint: disable=protected-access
+    d1._fail_persistently = True  # pylint: disable=protected-access
+    d1._status_unreachable = True  # pylint: disable=protected-access
+    with self.assertRaises(WeightSyncError) as ctx2:
+      self.sync(policy_version=2)
+
+    self.assertIs(ctx2.exception.result.state, RoundState.FAILED_NEEDS_RESTART)
+    self.assertIsNotNone(self.coordinator.poisoned)
+    failed_ids_2 = [
+        w.worker_id for w in ctx2.exception.result.workers if w.needs_restart
+    ]
+    self.assertEqual(failed_ids_2, ["roll-1"])
+    for wid in failed_ids_2:
+      self.registry.unregister(wid)
+    self.coordinator.reset_after_recovery()
+
+    # Retry succeeds on surviving roll-0.
+    r2 = self.sync(policy_version=2)
+    self.assertTrue(r2.success)
+    self.assertEqual(d0.serving, expected_pattern(2))
+
+    # Now roll-1 and roll-2 restart/recover and re-register in WorkerRegistry.
+    d1.restart()
+    d1._fail_on = None  # pylint: disable=protected-access
+    d1._status_unreachable = False  # pylint: disable=protected-access
+    d2.restart()
+    d2._fail_on = None  # pylint: disable=protected-access
+    self.registry.register(d1)
+    self.registry.register(d2)
+
+    # Subsequent sync automatically binds, collects metadata, registers work
+    # units, and syncs weights to the rejoined workers alongside roll-0.
+    r3 = self.sync(policy_version=3)
+    self.assertTrue(r3.success)
+    self.assertEqual(d0.serving, expected_pattern(3))
+    self.assertEqual(d1.serving, expected_pattern(3))
+    self.assertEqual(d2.serving, expected_pattern(3))
+    self.assertEqual(
+        sorted(u.job_name for u in r3.destination_units),
+        ["roll-0", "roll-1", "roll-2"],
+    )
 
 
 if __name__ == "__main__":

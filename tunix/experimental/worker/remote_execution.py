@@ -35,6 +35,7 @@ Security Notes / Trust Boundaries:
 
 import abc
 import asyncio
+import collections
 import contextlib
 import hashlib
 import inspect
@@ -990,7 +991,7 @@ class ActorPool(abc.ABC):
   """Stateless load-balanced routing across worker farms with out-of-order task streaming."""
 
   @abc.abstractmethod
-  def add_actor(self, actor: Union[str, ActorHandle]) -> None:
+  def add_actor(self, actor: Union[str, ActorHandle]) -> ActorHandle:
     """Adds a worker actor handle or string URI target address to the pool."""
     pass
 
@@ -1073,13 +1074,39 @@ class RoutingActorPool(ActorPool):
     self._idx = 0
     self.router = router
 
-  def add_actor(self, actor: Union[str, ActorHandle]) -> None:
+  @property
+  def actors(self) -> List[ActorHandle]:
+    return list(self._actors)
+
+  def add_actor(self, actor: Union[str, ActorHandle]) -> ActorHandle:
     if isinstance(actor, str):
-      self._actors.append(ActorHandle.from_address(actor))
+      handle = ActorHandle.from_address(actor)
     elif isinstance(actor, ActorHandle):
-      self._actors.append(actor)
+      handle = actor
     else:
       raise TypeError(f"Expected str or ActorHandle, got {type(actor)}")
+    if handle not in self._actors:
+      self._actors.append(handle)
+    return handle
+
+  def remove_actor(self, actor: ActorHandle) -> bool:
+    if actor in self._actors:
+      self._actors.remove(actor)
+      return True
+    return False
+
+  def replace_actor(
+      self, old_actor: ActorHandle, new_actor: ActorHandle
+  ) -> None:
+    if old_actor in self._actors:
+      if new_actor in self._actors:
+        if old_actor != new_actor:
+          self._actors.remove(old_actor)
+      else:
+        idx = self._actors.index(old_actor)
+        self._actors[idx] = new_actor
+    elif new_actor not in self._actors:
+      self._actors.append(new_actor)
 
   def _get_next_actor(
       self,
@@ -1199,6 +1226,13 @@ class RoutingActorPool(ActorPool):
       initial_tasks: Optional[
           Sequence[Tuple[str, str, Sequence[Any], Dict[str, Any]]]
       ] = None,
+      *,
+      evict_on_failure: bool = False,
+      retry_on_worker_failure: bool = False,
+      max_task_retries: int = 3,
+      on_worker_evicted: Optional[
+          Callable[[ActorHandle, Optional[BaseException]], None]
+      ] = None,
   ) -> AsyncIterator["PoolExecutionSession"]:
     """Creates a dynamic, fault-isolated execution session over the worker pool.
 
@@ -1221,8 +1255,18 @@ class RoutingActorPool(ActorPool):
           - method_name: Target remote method name to execute on the worker instance.
           - args: Positional arguments sequence passed to the remote method.
           - kwargs: Keyword arguments dictionary passed to the remote method.
+      evict_on_failure: Whether to automatically remove a failing worker from the pool.
+      retry_on_worker_failure: Whether to re-dispatch tasks that were on a failed worker.
+      max_task_retries: Maximum number of retries per request_id on worker failure.
+      on_worker_evicted: Optional callback `(actor, exc)` invoked when a worker is evicted.
     """
-    session = PoolExecutionSession(self)
+    session = PoolExecutionSession(
+        self,
+        evict_on_failure=evict_on_failure,
+        retry_on_worker_failure=retry_on_worker_failure,
+        max_task_retries=max_task_retries,
+        on_worker_evicted=on_worker_evicted,
+    )
     try:
       if initial_tasks:
         for request_id, method_name, args, kwargs in initial_tasks:
@@ -1243,15 +1287,118 @@ class PoolExecutionSession:
     failures.
   """
 
-  def __init__(self, pool: RoutingActorPool):
+  def __init__(
+      self,
+      pool: RoutingActorPool,
+      *,
+      evict_on_failure: bool = False,
+      retry_on_worker_failure: bool = False,
+      max_task_retries: int = 3,
+      on_worker_evicted: Optional[
+          Callable[[ActorHandle, Optional[BaseException]], None]
+      ] = None,
+  ):
     self._pool = pool
+    self._evict_on_failure = evict_on_failure
+    self._retry_on_worker_failure = retry_on_worker_failure
+    self._max_task_retries = max_task_retries
+    self._on_worker_evicted = on_worker_evicted
     self._response_queue: asyncio.Queue[Any] = asyncio.Queue()
     self._active_workers: set[ActorHandle] = set()
+    self._evicted_actors: set[ActorHandle] = set()
     self._dispatched_tasks: Dict[ActorHandle, set[str]] = {}
+    self._task_payloads: Dict[
+        str, Tuple[Optional[str], Tuple[Any, ...], Dict[str, Any]]
+    ] = {}
+    self._task_retries: Dict[str, int] = {}
+    self._failed_tasks: collections.deque[
+        Tuple[
+            str,
+            Tuple[Optional[str], Tuple[Any, ...], Dict[str, Any]],
+            Exception,
+        ]
+    ] = collections.deque()
     self._poll_tasks: set[asyncio.Task[Any]] = set()
     self._in_flight = 0
     self._closed = False
     self._sentinel = object()
+
+  def pop_failed_tasks(
+      self,
+  ) -> List[
+      Tuple[
+          str,
+          Tuple[Optional[str], Tuple[Any, ...], Dict[str, Any]],
+          Exception,
+      ]
+  ]:
+    """Drains and returns tasks that failed terminally during the session."""
+    failed = list(self._failed_tasks)
+    self._failed_tasks.clear()
+    return failed
+
+  def add_actor(self, actor: ActorHandle) -> None:
+    """Dynamically adds a worker actor handle to the underlying pool."""
+    self._evicted_actors.discard(actor)
+    self._pool.add_actor(actor)
+
+  def _evict_actor_from_pool(
+      self, actor: ActorHandle, exc: Optional[BaseException] = None
+  ) -> None:
+    self._pool.remove_actor(actor)
+    if actor not in self._evicted_actors:
+      self._evicted_actors.add(actor)
+      if self._on_worker_evicted is not None:
+        try:
+          self._on_worker_evicted(actor, exc)
+        except Exception:  # pylint: disable=broad-exception-caught
+          logging.exception("Error in on_worker_evicted callback for %s", actor)
+
+  async def remove_actor(
+      self, actor: ActorHandle, exc: Optional[Exception] = None
+  ) -> None:
+    """Evicts `actor` from the pool and retries or fails its in-flight tasks."""
+    self._evict_actor_from_pool(actor, exc)
+    dispatched_set = self._dispatched_tasks.get(actor)
+    if dispatched_set:
+      await self._handle_worker_failure_tasks(
+          dispatched_set, exc or RuntimeError("Worker evicted")
+      )
+
+  async def _handle_worker_failure_tasks(
+      self, dispatched_set: set[str], exc: Exception
+  ) -> None:
+    pending_req_ids = list(dispatched_set)
+    dispatched_set.clear()
+    if not pending_req_ids:
+      return
+    for req_id in pending_req_ids:
+      if (
+          self._retry_on_worker_failure
+          and self._task_retries.get(req_id, 0) < self._max_task_retries
+          and req_id in self._task_payloads
+          and len(self._pool._actors) > 0
+      ):
+        method_name, args, orig_kwargs = self._task_payloads[req_id]
+        self._task_retries[req_id] = self._task_retries.get(req_id, 0) + 1
+        self._in_flight = max(0, self._in_flight - 1)
+        try:
+          await self.submit(req_id, method_name, *args, **dict(orig_kwargs))
+          continue
+        except Exception as sub_exc:  # pylint: disable=broad-exception-caught
+          payload = self._task_payloads.pop(req_id, None)
+          self._task_retries.pop(req_id, None)
+          if payload is not None:
+            self._failed_tasks.append((req_id, payload, sub_exc))
+          self._response_queue.put_nowait((None, sub_exc))
+      else:
+        payload = self._task_payloads.pop(req_id, None)
+        self._task_retries.pop(req_id, None)
+        if payload is not None:
+          self._failed_tasks.append((req_id, payload, exc))
+        self._response_queue.put_nowait((None, exc))
+        self._in_flight = max(0, self._in_flight - 1)
+    self._notify_if_zero_flight()
 
   def _notify_if_zero_flight(self) -> None:
     if self._in_flight == 0:
@@ -1267,8 +1414,10 @@ class PoolExecutionSession:
     """Dispatches a task to a worker in the pool and tracks its completion."""
     if self._closed:
       raise RuntimeError("PoolExecutionSession is closed.")
+    orig_kwargs = dict(kwargs)
     actor = self._pool._get_next_actor(method_name, args, kwargs)
     kwargs.pop("route_key", None)  # remove route_key from worker method args
+    self._task_payloads[request_id] = (method_name, tuple(args), orig_kwargs)
 
     # Increment in_flight and register request_id BEFORE awaiting dispatch_task
     # so a fast worker completing before dispatch_task's coroutine resumes
@@ -1286,11 +1435,31 @@ class PoolExecutionSession:
       # exited or died while dispatch_task was awaiting.
       self._ensure_worker_polling(actor)
       return request_id
-    except Exception:
+    except Exception as exc:
       # Only decrement _in_flight if _poll_worker_loop hasn't already failed and cleared it.
-      if request_id in dispatched_set:
+      was_in_dispatched = request_id in dispatched_set
+      if was_in_dispatched:
         dispatched_set.remove(request_id)
         self._in_flight = max(0, self._in_flight - 1)
+      if self._evict_on_failure:
+        self._evict_actor_from_pool(actor, exc)
+      if (
+          was_in_dispatched
+          and self._retry_on_worker_failure
+          and self._task_retries.get(request_id, 0) < self._max_task_retries
+          and len(self._pool._actors) > 0
+      ):
+        self._task_retries[request_id] = (
+            self._task_retries.get(request_id, 0) + 1
+        )
+        return await self.submit(
+            request_id, method_name, *args, **dict(orig_kwargs)
+        )
+      if was_in_dispatched:
+        payload = self._task_payloads.pop(request_id, None)
+        self._task_retries.pop(request_id, None)
+        if payload is not None:
+          self._failed_tasks.append((request_id, payload, exc))
         self._notify_if_zero_flight()
       raise
 
@@ -1303,6 +1472,7 @@ class PoolExecutionSession:
     task.add_done_callback(self._poll_tasks.discard)
 
   async def _poll_worker_loop(self, actor: ActorHandle) -> None:
+    discarded = False
     try:
       while not self._closed:
         dispatched_set = self._dispatched_tasks.setdefault(actor, set())
@@ -1311,32 +1481,42 @@ class PoolExecutionSession:
         try:
           response = await actor.poll_responses(timeout_s=LONG_POLL_TIMEOUT_S)
           if isinstance(response, ExecutionResponse):
+            req_id: Optional[str] = None
+            if response.request_id and response.request_id in dispatched_set:
+              req_id = response.request_id
+              dispatched_set.remove(req_id)
+              self._in_flight = max(0, self._in_flight - 1)
+            elif dispatched_set:
+              req_id = dispatched_set.pop()
+              self._in_flight = max(0, self._in_flight - 1)
+            payload = (
+                self._task_payloads.pop(req_id, None)
+                if req_id is not None
+                else None
+            )
+            if req_id is not None:
+              self._task_retries.pop(req_id, None)
             try:
               res = response.unwrap()
               self._response_queue.put_nowait((res, None))
             except Exception as exc:  # pylint: disable=broad-exception-caught
+              if req_id is not None and payload is not None:
+                self._failed_tasks.append((req_id, payload, exc))
               self._response_queue.put_nowait((None, exc))
-            if response.request_id and response.request_id in dispatched_set:
-              dispatched_set.remove(response.request_id)
-              self._in_flight = max(0, self._in_flight - 1)
-            elif dispatched_set:
-              dispatched_set.pop()
-              self._in_flight = max(0, self._in_flight - 1)
             self._notify_if_zero_flight()
         except asyncio.CancelledError:
           break
         except Exception as exc:  # pylint: disable=broad-exception-caught
-          # Transport or polling failure on this worker; fail all dispatched tasks on this worker.
-          failed_count = len(dispatched_set)
-          dispatched_set.clear()
-          if failed_count > 0:
-            for _ in range(failed_count):
-              self._response_queue.put_nowait((None, exc))
-            self._in_flight = max(0, self._in_flight - failed_count)
-            self._notify_if_zero_flight()
+          # Transport or polling failure on this worker; evict and/or retry in-flight tasks.
+          self._active_workers.discard(actor)
+          discarded = True
+          if self._evict_on_failure:
+            self._evict_actor_from_pool(actor, exc)
+          await self._handle_worker_failure_tasks(dispatched_set, exc)
           break
     finally:
-      self._active_workers.discard(actor)
+      if not discarded:
+        self._active_workers.discard(actor)
 
   async def poll_completed(
       self, timeout_s: float = LONG_POLL_TIMEOUT_S
