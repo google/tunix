@@ -101,7 +101,7 @@ bash tunix/experimental/examples/recipes/mlperf_35b_128_v5p.sh stop
 
 Latest tested raiden wheel:
 ```
-export RAIDEN_WHL=https://storage.googleapis.com/tunix-ci-artifacts/raiden/tpu_sync_jax-0.0.1.dev20260926082434-cp312-cp312-manylinux_2_31_x86_64.whl`
+export RAIDEN_WHL=https://storage.googleapis.com/cloud-tpu-inference-test-datenglin/wheels/tpu_sync_jax-0.0.1.dev20260929200000-cp312-cp312-manylinux_2_31_x86_64.whl`
 ```
 pathways images are defined in tunix/experimental/examples/recipes/mlperf_pathways_config.sh
 
