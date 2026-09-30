@@ -29,6 +29,8 @@ import types
 import unittest
 from unittest import mock
 
+from tunix.utils import maxtext_utils
+
 ROOT = Path(__file__).resolve().parents[4]
 RECIPE = ROOT / "tunix/experimental/examples/deepswe_dist"
 
@@ -80,9 +82,6 @@ class EvalTest(unittest.TestCase):
       self.assertFalse(f32_cfg["float32_logits"])
 
   def test_in_memory_scanned_checkpoint_conversion(self):
-    worker_lib = load(
-        "deepswe_eval_worker_under_test", RECIPE / "eval_worker.py"
-    )
     a = self.args(
         "--scan_layers", "true", "--mesh_tp", "4", "--mesh_expert", "16"
     )
@@ -144,8 +143,12 @@ class EvalTest(unittest.TestCase):
             ),
         },
     ):
-      worker_lib.load_and_convert_scanned_checkpoint(
-          a, Path("/ckpt/0/items"), sampler, ckpt_prefuse_moe=False
+      maxtext_utils.load_and_convert_scanned_checkpoint(
+          path=Path("/ckpt/0/items"),
+          sampler=sampler,
+          mesh_tp=a.mesh_tp,
+          ckpt_prefuse_moe=False,
+          maxtext_config_overrides=eval_lib.maxtext_config(a),
       )
 
     pyconfig_mod.initialize.assert_called_once()

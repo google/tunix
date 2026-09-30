@@ -23,18 +23,6 @@ from tunix.experimental.examples.deepswe_dist import eval_deepswe
 from tunix.utils import maxtext_utils
 
 
-def load_and_convert_scanned_checkpoint(
-    a, path, sampler, ckpt_prefuse_moe=False
-):
-  """Restores a scanned MaxText checkpoint and converts it into vLLM's unscanned state."""
-  maxtext_utils.load_and_convert_scanned_checkpoint(
-      path=path,
-      sampler=sampler,
-      mesh_tp=a.mesh_tp,
-      ckpt_prefuse_moe=ckpt_prefuse_moe,
-      maxtext_config_overrides=eval_deepswe.maxtext_config(a),
-  )
-
 
 def create_worker(a):
   """Load real inference weights once, then expose the standard RolloutWorker."""
@@ -249,8 +237,12 @@ def create_worker(a):
       max_concurrency=a.max_concurrent,
   )
   if convert_in_memory:
-    load_and_convert_scanned_checkpoint(
-        a, path, sampler, ckpt_prefuse_moe=ckpt_prefuse_moe
+    maxtext_utils.load_and_convert_scanned_checkpoint(
+        path=path,
+        sampler=sampler,
+        mesh_tp=a.mesh_tp,
+        ckpt_prefuse_moe=ckpt_prefuse_moe,
+        maxtext_config_overrides=eval_deepswe.maxtext_config(a),
     )
 
   class EvaluationWorker(rollout_worker.RolloutWorker):

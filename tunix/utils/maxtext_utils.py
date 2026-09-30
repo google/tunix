@@ -976,10 +976,6 @@ def load_and_convert_scanned_checkpoint(
             half = prefused_wi.shape[-1] // 2
             wi_0 = prefused_wi[..., :half]
             wi_1 = prefused_wi[..., half:]
-            if hasattr(jax, "block_until_ready"):
-              jax.block_until_ready([wi_0, wi_1])
-            _delete_pytree_buffers(prefused_wi, jax, keep_tree=[wi_0, wi_1])
-            prefused_wi = None
             src_flat[group.source_keys[0]] = wi_0
             src_flat[group.source_keys[1]] = wi_1
         outs = orig_exec_group(group, src_flat, tgt_flat)
