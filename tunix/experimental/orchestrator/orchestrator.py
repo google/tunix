@@ -213,23 +213,21 @@ class ClusterOrchestrator:
           "register_worker_handle expects a remote_execution.ActorHandle, got "
           f"{type(handle)}"
       )
-    if self._registration_closed:
-      # All workers of the run registered already, so this one was restarted
-      # or re-admitted (e.g. preempted). The worker it replaces is gone and it
-      # cannot rejoin: the run is dead. Raising here would only fail this
-      # registration RPC, so terminate the process instead.
+    if self._registration_closed or worker_id in self._remote_worker_infos:
+      # Either all workers of the run registered already, or this worker_id
+      # did: this worker was restarted or re-admitted (e.g. preempted). The
+      # worker it replaces is gone and it cannot rejoin: the run is dead.
+      # Raising here would only fail this registration RPC, so terminate the
+      # process instead.
       message = (
-          f"worker {worker_id!r} registered after all workers had registered;"
-          " it was restarted or re-admitted (e.g. preempted) and cannot rejoin"
-          " the run. Terminating the orchestrator."
+          f"worker {worker_id!r} registered again or after all workers had"
+          " registered; it was restarted or re-admitted (e.g. preempted) and"
+          " cannot rejoin the run. Terminating the orchestrator."
       )
       logging.error(message)
       self._terminate_process()
       raise RuntimeError(message)
-    if (
-        worker_id in self._remote_worker_infos
-        or worker_id in self.registry.worker_ids()
-    ):
+    if worker_id in self.registry.worker_ids():
       raise ValueError(f"duplicate worker_id: {worker_id!r}")
     role_names = frozenset(
         role.value if isinstance(role, datatypes.Role) else role

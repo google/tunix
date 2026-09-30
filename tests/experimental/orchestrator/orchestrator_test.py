@@ -472,6 +472,27 @@ class ClusterOrchestratorTest(absltest.TestCase):
     mock_kill.assert_not_called()
     self.assertLen(orch.worker_handles(datatypes.Role.ACTOR), 1)
 
+  @mock.patch.object(orchestrator.threading, "Thread")
+  @mock.patch.object(orchestrator.os, "kill")
+  def test_duplicate_registration_before_wait_for_workers_terminates(
+      self, mock_kill, mock_thread
+  ):
+    del mock_thread
+    orch = orchestrator.ClusterOrchestrator()
+    first = mock.MagicMock(spec=remote_execution.ActorHandle)
+    orch.register_worker_handle("rollout-0", [datatypes.Role.ROLLOUT], first)
+
+    # rollout-0 restarted while other workers are still registering.
+    with self.assertRaisesRegex(RuntimeError, "'rollout-0'.*cannot rejoin"):
+      orch.register_worker_handle(
+          "rollout-0",
+          [datatypes.Role.ROLLOUT],
+          mock.MagicMock(spec=remote_execution.ActorHandle),
+      )
+
+    mock_kill.assert_called_once_with(os.getpid(), signal.SIGTERM)
+    self.assertEqual(orch.worker_handles(datatypes.Role.ROLLOUT), [first])
+
 
 def _trajectory_store_orchestrator(
     **kwargs,
