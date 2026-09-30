@@ -1420,7 +1420,12 @@ class StandardRLProgram(RLProgram):
           "prompt_tokens": getattr(item, "prompt_tokens", None),
           "completion_tokens": getattr(item, "completion_tokens", None),
           "metadata": metadata,
-          "trajectory": traj,
+          # The JSON logger writes only the text and timing fields. Leaving out
+          # the arrays (routed_experts alone is ~1.2 KB/token) keeps a
+          # backlogged queue from pinning a full batch of them in memory.
+          "trajectory": {
+              k: v for k, v in traj.items() if not isinstance(v, np.ndarray)
+          },
       }
       self.trajectory_logger.log_item_async(row)
 

@@ -16,6 +16,7 @@ import asyncio
 import builtins
 from collections.abc import Sequence
 import dataclasses
+import pathlib
 import types
 from typing import Any
 from unittest import mock
@@ -33,6 +34,7 @@ from tunix.experimental.trajectory import in_memory_store
 from tunix.experimental.worker import remote_execution
 from tunix.sft import metrics_logger as metrics_logger_lib
 from tunix.sft import utils as sft_utils
+from tunix.utils import trajectory_logger
 
 
 class _MockWorkerHandle(mock.MagicMock):
@@ -4250,6 +4252,65 @@ class RLProgramTest(absltest.TestCase):
 
     program.close()
     mock_traj_logger.stop.assert_called_once()
+
+  def test_log_consumed_trajectories_drops_arrays_without_changing_output(self):
+    program = rl_program.StandardRLProgram(
+        dataset=["prompt_0"],
+        max_steps=1,
+        algo=self.mock_algo,
+        trajectory_log_dir="/tmp/trajectories",
+    )
+    mock_traj_logger = mock.MagicMock()
+    program.trajectory_logger = mock_traj_logger
+    traj = {
+        "status": datatypes.TrajectoryStatus.SUCCEEDED,
+        "trajectory_reward": 1.0,
+        "conversation_text": [
+            {"role": "user", "content": "Q"},
+            {"role": "assistant", "content": "A"},
+            {"role": "user", "content": "obs"},
+            {"role": "assistant", "content": "B"},
+        ],
+        "conversation_tokens": np.arange(6, dtype=np.int32),
+        "conversation_masks": np.ones(6, dtype=np.float32),
+        "old_logprobs": np.zeros(6, dtype=np.float32),
+        "routed_experts": np.zeros((8, 2, 2), dtype=np.int16),
+        "env_time": {"step_latency": [0.5, 0.25]},
+        "model_time": {"step_latency": [1.0, 2.0]},
+        "total_time": 4.0,
+    }
+    item = datatypes.TrajectoryItem(
+        traj_id="traj_1",
+        prompt_id="prompt_1",
+        group_index=0,
+        policy_version=2,
+        traj=traj,
+    )
+
+    program._log_consumed_trajectories(
+        [item], log_step=3, consumed_policy_version=3
+    )
+
+    row = mock_traj_logger.log_item_async.call_args[0][0]
+    self.assertNotIn("routed_experts", row["trajectory"])
+    self.assertNotIn("old_logprobs", row["trajectory"])
+    self.assertIn("routed_experts", item.traj)
+    full_dir = self.create_tempdir().full_path
+    slim_dir = self.create_tempdir().full_path
+    trajectory_logger.log_trajectory_json(
+        full_dir, {**row, "trajectory": traj}, gcs_timeout_sec=None
+    )
+    trajectory_logger.log_trajectory_json(slim_dir, row, gcs_timeout_sec=None)
+    full_files = sorted(pathlib.Path(full_dir).rglob("*.json*"))
+    slim_files = sorted(pathlib.Path(slim_dir).rglob("*.json*"))
+    self.assertNotEmpty(full_files)
+    self.assertEqual(
+        [f.relative_to(full_dir) for f in full_files],
+        [f.relative_to(slim_dir) for f in slim_files],
+    )
+    for full, slim in zip(full_files, slim_files):
+      self.assertEqual(full.read_text(), slim.read_text(), full.name)
+    program.close()
 
   def test_log_consumed_trajectories_reward_distinction(self):
     program = rl_program.StandardRLProgram(
