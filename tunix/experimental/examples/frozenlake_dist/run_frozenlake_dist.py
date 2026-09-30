@@ -165,6 +165,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--init_timeout_s", type=float, default=None)
   parser.add_argument("--stop_workers_on_exit", action="store_true")
   parser.add_argument("--debug", action="store_true")
+  parser.add_argument("--grid_size_range", nargs=2, type=int, default=(2, 9))
   args = parser.parse_args(argv)
   if args.max_steps is None:
     args.max_steps = args.num_batches * args.num_iterations * args.num_epochs
@@ -307,6 +308,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       seed=args.seed,
       shuffle_seed=args.seed if args.shuffle else None,
       limit=args.num_batches * args.batch_size,
+      grid_size_range=tuple(args.grid_size_range),
   )
   logging.info(
       "Prepared %d FrozenLake configurations; the prompt iterator repeats "
@@ -366,6 +368,12 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       ),
       max_steps=args.max_steps,
       reward_fns=[],
+      generation_args=datatypes.GenerationArgs(
+          temperature=args.temperature,
+          top_p=args.top_p,
+          top_k=args.top_k,
+          return_logprobs=args.use_rollout_logps,
+      ),
       batch_size=args.batch_size,
       batch_config=batch_assembly.BatchConfig(
           pad_id=pad_id,

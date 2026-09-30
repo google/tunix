@@ -225,22 +225,17 @@ class RolloutManager:
 
   async def generate(
       self,
-      requests: (
-          datatypes.RolloutRequest
-          | Sequence[datatypes.RolloutRequest]
-          | Any
-          | Sequence[Any]
-      ),
+      requests: datatypes.RolloutRequest | Sequence[datatypes.RolloutRequest],
       on_complete: Optional[Callable[[TrajectoryOrError], None]] = None,
-  ) -> TrajectoryOrError | Sequence[TrajectoryOrError] | Any:
+  ) -> TrajectoryOrError | Sequence[TrajectoryOrError]:
     """Dispatches 1 or N requests concurrently to the internal Collector Engine pool."""
-    if isinstance(requests, (list, tuple)):
-      tasks = [
-          asyncio.create_task(self._generate_one(req, on_complete=on_complete))
-          for req in requests
-      ]
-      return await asyncio.gather(*tasks)
-    return await self._generate_one(requests, on_complete=on_complete)  # pyrefly: ignore[bad-argument-type]
+    if isinstance(requests, datatypes.RolloutRequest):
+      return await self._generate_one(requests, on_complete=on_complete)
+    tasks = [
+        asyncio.create_task(self._generate_one(req, on_complete=on_complete))
+        for req in requests
+    ]
+    return await asyncio.gather(*tasks)
 
   async def _run_and_enqueue(
       self,

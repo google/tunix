@@ -2201,8 +2201,8 @@ def unpad_prompt_tokens(
 
 
 def resolve_prompt_tokens(
-    input_strings: str | Sequence[str] | None,
-    prompt_token_ids: Sequence[Sequence[int] | np.ndarray] | None,
+    input_strings: str | Sequence[str] | np.ndarray | None,
+    prompt_token_ids: Sequence[Sequence[int] | np.ndarray] | np.ndarray | None,
     tokenize_fn: Callable[[str], Any],
     *,
     max_generation_steps: int = 0,
@@ -2214,7 +2214,7 @@ def resolve_prompt_tokens(
   if (input_strings is None) == (prompt_token_ids is None):
     raise ValueError('Provide exactly one of input_strings or prompt_token_ids')
   if prompt_token_ids is not None:
-    if not prompt_token_ids:
+    if len(prompt_token_ids) == 0:
       raise ValueError('prompt_token_ids must not be empty')
     if not single_output_per_row:
       raise ValueError('prompt_token_ids requires exactly one output per row')
@@ -2227,11 +2227,13 @@ def resolve_prompt_tokens(
       )
     return prompt_ids
   assert input_strings is not None
+  if isinstance(input_strings, np.ndarray):
+    input_strings = input_strings.tolist()
   if isinstance(input_strings, str):
     input_strings = [input_strings]
-  if not input_strings:
+  if len(input_strings) == 0:
     raise ValueError('input_strings must not be empty')
-  return [np.asarray(tokenize_fn(x), dtype=np.int32) for x in input_strings]
+  return [np.asarray(tokenize_fn(str(x)), dtype=np.int32) for x in input_strings]
 
 
 def left_pad_prompt_tokens(

@@ -527,15 +527,15 @@ class StandardRLProgram(RLProgram):
 
         rewards = []
         for item in group:
-          if self.reward_fns:
-            # Skip `reward_fn` for failed, timed-out, or masked-out trajectories
-            # (`not item.is_valid`): although the payload still goes through
-            # trainer fwd/bwd to keep static batch shapes, its advantage and
-            # completion_mask are zeroed out, so scoring it is wasted work.
-            if not item.is_valid:
-              r = 0.0
-            else:
-              r = sum(_invoke_reward_fn(fn, item) for fn in self.reward_fns)
+          # Skip reward evaluation or extraction for failed, timed-out, or
+          # masked-out trajectories (`not item.is_valid`): although the payload
+          # still goes through trainer fwd/bwd to keep static batch shapes, its
+          # advantage and completion_mask are zeroed out, so scoring it is
+          # wasted work (and an aborted trajectory may lack trajectory_reward).
+          if not item.is_valid:
+            r = 0.0
+          elif self.reward_fns:
+            r = sum(_invoke_reward_fn(fn, item) for fn in self.reward_fns)
           else:
             r = _extract_reward(item)
           rewards.append(float(r))
@@ -640,7 +640,7 @@ class StandardRLProgram(RLProgram):
       step_time_sec: float,
       consumed_policy_version: int,
       log_step: int,
-      sampler_agreement: dict[str, tuple[Any, list[float]]] | None = None,
+      sampler_agreement: dict[str, tuple[Any, list[Any]]] | None = None,
   ) -> dict[str, Any]:
     """Logs rollout, reward, trainer, and orchestrator metrics.
 
@@ -963,7 +963,10 @@ class StandardRLProgram(RLProgram):
           clean_key = (
               k.removeprefix("trainer/").removeprefix("actor/")
           )
-          self._log_metric(clean_key, val, log_step, prefix="actor")
+          if clean_key.startswith(("sampler_trainer/", "sampler_is/")):
+            self._log_metric(clean_key, val, log_step)
+          else:
+            self._log_metric(clean_key, val, log_step, prefix="actor")
 
     # --- 5. Sampler/Trainer Agreement Metrics ---
     # Names are already namespaced (``sampler_trainer/*``, ``sampler_is/*``) by
@@ -987,7 +990,7 @@ class StandardRLProgram(RLProgram):
   async def _apply_sampler_trainer_agreement(
       self,
       batch: datatypes.RLTrainerPayload,
-      accumulator: dict[str, tuple[Any, list[float]]],
+      accumulator: dict[str, tuple[Any, list[Any]]],
   ) -> datatypes.RLTrainerPayload:
     """Records sampler-vs-trainer agreement and feeds TIS weights into a batch.
 
@@ -1035,7 +1038,7 @@ class StandardRLProgram(RLProgram):
         )
     )
     for name, (value, agg_fn) in sa_metrics.items():
-      accumulator.setdefault(name, (agg_fn, []))[1].append(float(value))
+      accumulator.setdefault(name, (agg_fn, []))[1].append(value)
 
     updates: dict[str, Any] = {}
     if self.seq_logprob_error_threshold is not None:
@@ -1048,6 +1051,7 @@ class StandardRLProgram(RLProgram):
     ):
       updates["old_per_token_logps"] = trainer_logps
     if updates:
+      updates["sampler_agreement_applied"] = True
       batch = dataclasses.replace(batch, **updates)
     return batch
 
@@ -1109,7 +1113,7 @@ class StandardRLProgram(RLProgram):
       uncommitted_groups = []
       step_result = None
       trainer_metrics = None
-      step_sampler_agreement: dict[str, tuple[Any, list[float]]] = {}
+      step_sampler_agreement: dict[str, tuple[Any, list[Any]]] = {}
       step_rewards = []
       step_advantages = []
       num_microbatches = 0
@@ -1186,11 +1190,21 @@ class StandardRLProgram(RLProgram):
             )
             batch = batch_assembly.with_ref_per_token_logps(batch, ref_logps)
           algo_config = getattr(self.algo, "algo_config", None)
+          can_fuse_agreement_in_loss = (
+              algo_config is not None
+              and getattr(algo_config, "policy_loss_fn", "grpo") == "grpo"
+              and not getattr(
+                  algo_config, "log_sampler_trainer_agreement", False
+              )
+              and getattr(algo_config, "num_iterations", 1) == 1
+              and self.mini_batch_size >= self.full_batch_size
+          )
           if (
               isinstance(batch, datatypes.RLTrainerPayload)
               and batch.old_per_token_logps is not None
               and algo_config is not None
               and algo_config.use_rollout_logps
+              and not can_fuse_agreement_in_loss
           ):
             batch = await self._apply_sampler_trainer_agreement(
                 batch, step_sampler_agreement

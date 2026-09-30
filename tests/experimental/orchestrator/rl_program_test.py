@@ -3178,11 +3178,55 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
-  def test_sampler_trainer_agreement_triggered_in_train_stage(self):
-    """When use_rollout_logps is True and old_per_token_logps present, agreement runs."""
+  def test_sampler_trainer_agreement_fused_into_train_step_by_default(self):
+    """By default with GRPO, agreement is fused into train_step without extra per_token_logps RPC."""
 
     async def _run():
       self.mock_algo.algo_config.use_rollout_logps = True
+      payload_with_old_logps = datatypes.RLTrainerPayload(
+          prompt_ids=np.array([1, 2], dtype=np.int32),
+          prompt_mask=np.array([1, 1], dtype=np.float32),
+          completion_ids=np.array([3, 4], dtype=np.int32),
+          completion_mask=np.array([1, 1], dtype=np.float32),
+          advantages=np.array([1.0, 1.0], dtype=np.float32),
+          old_per_token_logps=np.array([-0.5, -0.2], dtype=np.float32),
+      )
+      self.mock_algo.create_trainer_payloads.return_value = [
+          payload_with_old_logps,
+          payload_with_old_logps,
+      ]
+      self.mock_engine.per_token_logps = mock.AsyncMock()
+      self.mock_engine.get_metrics = mock.AsyncMock(
+          return_value=exp_metrics.MetricsBuffer(
+              id=1,
+              scalar_metrics={
+                  "loss": 0.5,
+                  "sampler_trainer/logp_diff_mean": 0.15,
+              },
+          )
+      )
+      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group(), [])
+      program = self._create_program(dataset=["prompt_data_0"])
+      await program.run_async(self.mock_engine)
+      self.mock_engine.per_token_logps.assert_not_awaited()
+      logger = program.metrics_logger
+      self.assertTrue(
+          logger.metric_exists("sampler_trainer", "logp_diff_mean", "train")
+      )
+      self.assertAlmostEqual(
+          logger.get_metric("sampler_trainer", "logp_diff_mean", "train"),
+          0.15,
+          places=5,
+      )
+
+    asyncio.run(_run())
+
+  def test_sampler_trainer_agreement_triggered_in_train_stage(self):
+    """When use_rollout_logps and log_sampler_trainer_agreement are True, pre-step agreement runs."""
+
+    async def _run():
+      self.mock_algo.algo_config.use_rollout_logps = True
+      self.mock_algo.algo_config.log_sampler_trainer_agreement = True
       payload_with_old_logps = datatypes.RLTrainerPayload(
           prompt_ids=np.array([1, 2], dtype=np.int32),
           prompt_mask=np.array([1, 1], dtype=np.float32),
@@ -3258,8 +3302,10 @@ class RLProgramTest(absltest.TestCase):
       self.assertEqual(req.model_role, "actor")
       self.assertEqual(req.pad_id, program.batch_config.pad_id)
       self.assertIn("sampler_trainer/logp_diff_mean", acc)
-      _, diff_mean_vals = acc["sampler_trainer/logp_diff_mean"]
-      self.assertAlmostEqual(diff_mean_vals[0], 0.4 / 3, places=5)
+      diff_mean_fn, diff_mean_vals = acc["sampler_trainer/logp_diff_mean"]
+      self.assertAlmostEqual(
+          float(diff_mean_fn(diff_mean_vals)), 0.4 / 3, places=5
+      )
       self.assertIn("sampler_trainer/probs_pearson_corr", acc)
       # sampler_is is None -> no batch mutation, no TIS weights.
       self.assertIs(out, batch)
@@ -3344,9 +3390,106 @@ class RLProgramTest(absltest.TestCase):
           np.asarray(out.old_per_token_logps), trainer_logps
       )
       self.assertIn("sampler_trainer/seq_error_masked_frac", acc)
+      masked_frac_fn, masked_frac_vals = acc[
+          "sampler_trainer/seq_error_masked_frac"
+      ]
       self.assertAlmostEqual(
-          acc["sampler_trainer/seq_error_masked_frac"][1][0], 0.5, places=5
+          float(masked_frac_fn(masked_frac_vals)), 0.5, places=5
       )
+
+    asyncio.run(_run())
+
+  def test_apply_sampler_trainer_agreement_multi_microbatch_token_weighted_and_chan_pearson(
+      self,
+  ):
+    """Non-fused path reduces multi-microbatch metrics with token weighting and Chan's Pearson."""
+
+    async def _run():
+      self.mock_algo.algo_config.use_rollout_logps = True
+      self.mock_algo.algo_config.sampler_is = "token"
+      self.mock_algo.algo_config.sampler_is_threshold = 2.0
+      program = self._create_program()
+
+      # Microbatch 1: 4 active tokens, near-deterministic easy prompt (~ -0.01)
+      # with small drift.
+      mb1_old = np.array([[-0.010, -0.012, -0.010, -0.012]], dtype=np.float32)
+      mb1_trainer = np.array(
+          [[-0.011, -0.013, -0.011, -0.013]], dtype=np.float32
+      )
+      mb1_mask = np.array([[1.0, 1.0, 1.0, 1.0]], dtype=np.float32)
+
+      # Microbatch 2: only 1 active token + 3 padded tokens, higher entropy
+      # prompt (~ -0.80) with larger drift.
+      mb2_old = np.array([[-0.800, 0.0, 0.0, 0.0]], dtype=np.float32)
+      mb2_trainer = np.array([[-0.500, 0.0, 0.0, 0.0]], dtype=np.float32)
+      mb2_mask = np.array([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32)
+
+      responses = [
+          datatypes.LogprobsResponse(
+              per_token_logps=mb1_trainer, model_version=1
+          ),
+          datatypes.LogprobsResponse(
+              per_token_logps=mb2_trainer, model_version=1
+          ),
+      ]
+      program.engine = mock.MagicMock()
+      program.engine.per_token_logps = mock.AsyncMock(side_effect=responses)
+
+      batch1 = datatypes.RLTrainerPayload(
+          prompt_ids=np.array([[1, 2]], dtype=np.int32),
+          prompt_mask=np.array([[1, 1]], dtype=np.float32),
+          completion_ids=np.array([[3, 4, 5, 6]], dtype=np.int32),
+          completion_mask=mb1_mask,
+          advantages=np.ones((1, 4), dtype=np.float32),
+          old_per_token_logps=mb1_old,
+      )
+      batch2 = datatypes.RLTrainerPayload(
+          prompt_ids=np.array([[1, 2]], dtype=np.int32),
+          prompt_mask=np.array([[1, 1]], dtype=np.float32),
+          completion_ids=np.array([[7, 0, 0, 0]], dtype=np.int32),
+          completion_mask=mb2_mask,
+          advantages=np.ones((1, 4), dtype=np.float32),
+          old_per_token_logps=mb2_old,
+      )
+
+      acc: dict[str, Any] = {}
+      await program._apply_sampler_trainer_agreement(batch1, acc)
+      await program._apply_sampler_trainer_agreement(batch2, acc)
+
+      program._collect_and_log_step_metrics(
+          all_step_items=[],
+          step_rewards=[],
+          step_advantages=[],
+          step_result=None,
+          trainer_metrics=None,
+          num_rollouts=2,
+          num_microbatches=2,
+          step_time_sec=1.0,
+          consumed_policy_version=1,
+          log_step=0,
+          sampler_agreement=acc,
+      )
+
+      # Ground-truth global metrics over the combined 5 active tokens (matching
+      # the fused loss path).
+      global_metrics, _, _ = rl_program.rl_common.sampler_trainer_agreement(
+          np.concatenate([mb1_old, mb2_old], axis=0),
+          np.concatenate([mb1_trainer, mb2_trainer], axis=0),
+          np.concatenate([mb1_mask, mb2_mask], axis=0),
+          sampler_is="token",
+          sampler_is_threshold=2.0,
+      )
+      logger = program.metrics_logger
+      for full_name, (expected_val, _) in global_metrics.items():
+        prefix, metric_name = full_name.split("/", 1)
+        logged_val = logger.get_metric(prefix, metric_name, "train")
+        expected_scalar = float(rl_program.rl_common._metric_scalar(expected_val))
+        self.assertAlmostEqual(
+            logged_val,
+            expected_scalar,
+            places=5,
+            msg=f"Mismatch for {full_name}: {logged_val} vs {expected_scalar}",
+        )
 
     asyncio.run(_run())
 
@@ -3447,6 +3590,45 @@ class RLProgramTest(absltest.TestCase):
           "rewards"
       ]
       self.assertEqual(rewards, [1.0, 0.0])
+      program.close()
+
+    asyncio.run(_run())
+
+  def test_critique_stage_skips_extract_reward_for_invalid_items_when_no_reward_fns(
+      self,
+  ):
+    async def _run():
+      program = self._create_program(reward_fns=[])
+      program.engine = self.mock_engine
+      valid_item = datatypes.TrajectoryItem(
+          prompt_id="p0",
+          group_index=0,
+          traj={
+              "status": datatypes.TrajectoryStatus.SUCCEEDED,
+              "trajectory_reward": 2.5,
+              "conversation_masks": np.ones(2, dtype=np.float32),
+          },
+      )
+      # Invalid item missing 'trajectory_reward' (or traj=None) should not raise
+      # KeyError/TypeError in _extract_reward.
+      invalid_item = datatypes.TrajectoryItem(
+          prompt_id="p0",
+          group_index=1,
+          traj={
+              "status": datatypes.TrajectoryStatus.FAILED,
+              "conversation_masks": np.zeros(2, dtype=np.float32),
+          },
+      )
+      await program.raw_q.put(valid_item)
+      await program.raw_q.put(invalid_item)
+      await program.raw_q.close()
+
+      await program.critique_stage()
+
+      rewards = self.mock_algo.create_trainer_payloads.call_args.kwargs[
+          "rewards"
+      ]
+      self.assertEqual(rewards, [2.5, 0.0])
       program.close()
 
     asyncio.run(_run())

@@ -185,6 +185,10 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
         self.rl_engine.inference_worker._models.get("reward", None)
     )
 
+    self.algo_config.temperature = self.rl_engine.get_rollout_config(  # pyrefly: ignore[missing-attribute]
+        mode=rl_engine_lib.Mode.TRAIN
+    ).temperature
+
     # ===== Configure the actor (policy) trainer =====
     # policy_loss_fn is retrieved from the registry.
     policy_loss_fn = registry.get(

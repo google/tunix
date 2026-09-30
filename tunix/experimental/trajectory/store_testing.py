@@ -73,6 +73,14 @@ class TrajectoryReaderTestCase(
           ],
           [trajectory_testing.METADATA_1, trajectory_testing.METADATA_2],
       ),
+      (
+          "multiple_trajectories_reverse_order",
+          [
+              trajectory_testing.TRAJECTORY_ID_2,
+              trajectory_testing.TRAJECTORY_ID_1,
+          ],
+          [trajectory_testing.METADATA_2, trajectory_testing.METADATA_1],
+      ),
   )
   def test_get_trajectories_metadata(
       self,
@@ -81,7 +89,10 @@ class TrajectoryReaderTestCase(
   ) -> None:
     """Tests that metadata for trajectories is retrieved."""
     metas = self.reader.get_trajectories_metadata(trajectory_ids)
-    self.assertCountEqual(metas, expected_metas)
+    if trajectory_ids is None:
+      self.assertCountEqual(metas, expected_metas)
+    else:
+      self.assertEqual(metas, expected_metas)
 
   @parameterized.named_parameters(
       ("all_trajectory_ids", None),
@@ -119,13 +130,22 @@ class TrajectoryReaderTestCase(
     ):
       empty_reader.get_trajectories_metadata(trajectory_ids)
 
-  def test_get_trajectories_metadata_not_found(self) -> None:
+  @parameterized.named_parameters(
+      ("single_missing_id", ["non_existent_id"]),
+      (
+          "partial_missing_id",
+          [trajectory_testing.TRAJECTORY_ID_1, "non_existent_id"],
+      ),
+  )
+  def test_get_trajectories_metadata_not_found(
+      self, trajectory_ids: list[str]
+  ) -> None:
     """Tests that passing a non-existent trajectory ID raises TrajectoryMetadataNotFoundError."""
     with self.assertRaisesRegex(
         store.TrajectoryMetadataNotFoundError,
         "Trajectory metadata for ID 'non_existent_id' not found.",
     ):
-      self.reader.get_trajectories_metadata(["non_existent_id"])
+      self.reader.get_trajectories_metadata(trajectory_ids)
 
   @parameterized.named_parameters(
       ("empty_list", [], []),
@@ -142,23 +162,40 @@ class TrajectoryReaderTestCase(
           ],
           [trajectory_testing.TRAJECTORY_1, trajectory_testing.TRAJECTORY_2],
       ),
+      (
+          "multiple_trajectories_reverse_order",
+          [
+              trajectory_testing.TRAJECTORY_ID_2,
+              trajectory_testing.TRAJECTORY_ID_1,
+          ],
+          [trajectory_testing.TRAJECTORY_2, trajectory_testing.TRAJECTORY_1],
+      ),
   )
   def test_get_trajectories(
       self,
       trajectory_ids: list[str],
       expected_trajs: list[trajectory_lib.Trajectory],
   ) -> None:
-    """Tests that full trajectories are retrieved by their IDs."""
+    """Tests that full trajectories are retrieved in requested ID order."""
     trajs = self.reader.get_trajectories(trajectory_ids)
-    self.assertCountEqual(trajs, expected_trajs)
+    self.assertEqual(trajs, expected_trajs)
 
-  def test_get_trajectories_not_found(self) -> None:
+  @parameterized.named_parameters(
+      ("single_missing_id", ["non_existent_id"]),
+      (
+          "partial_missing_id",
+          [trajectory_testing.TRAJECTORY_ID_1, "non_existent_id"],
+      ),
+  )
+  def test_get_trajectories_not_found(
+      self, trajectory_ids: list[str]
+  ) -> None:
     """Tests that loading a non-existent trajectory ID raises TrajectoryNotFoundError."""
     with self.assertRaisesRegex(
         store.TrajectoryNotFoundError,
         "Trajectory with ID 'non_existent_id' not found.",
     ):
-      self.reader.get_trajectories(["non_existent_id"])
+      self.reader.get_trajectories(trajectory_ids)
 
 
 class TrajectoryWriterTestCase(
@@ -371,12 +408,16 @@ class TrajectoryWriterTestCase(
     self.assertEqual(metas, [trajectory_testing.METADATA_1])
 
   def test_close_persists_pending_writes(self) -> None:
-    """Tests that close() drains pending writes without an explicit flush()."""
+    """Tests that close() drains pending writes and allows subsequent reads."""
     self.writer.add_step(
         trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1
     )
     self.writer.close()
 
+    self.assertEqual(
+        self.reader.get_trajectories_metadata(),
+        [trajectory_testing.METADATA_1],
+    )
     trajs = self.reader.get_trajectories([trajectory_testing.TRAJECTORY_ID_1])
     self.assertEqual(trajs, [trajectory_testing.TRAJECTORY_1])
 

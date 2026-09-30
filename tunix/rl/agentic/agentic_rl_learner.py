@@ -164,6 +164,10 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     """
     self.rl_engine = rl_engine
     self.algo_config = algo_config
+    self._training_config = self.rl_engine.cluster_config.training_config
+    self._packing_enabled = rl_engine_lib.configs.is_sequence_packing_enabled(
+        self._training_config
+    )
     self._validate_rollout_config()
     reward_manager_fn = function_registry.get_reward_manager(
         algo_config.reward_manager
@@ -181,8 +185,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     self.agent_kwargs = agent_kwargs or {}
     self.env_class = env_class
     self.env_kwargs = env_kwargs or {}
-
-    self._training_config = self.rl_engine.cluster_config.training_config
 
     self.rl_engine.global_steps = (
         self.rl_engine.actor_trainer.restored_global_step()
@@ -276,11 +278,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       if self.algo_config.exact_token_continuity:
         if not config.return_logprobs:
           raise ValueError("exact_token_continuity requires sampled logprobs")
-        if (
-            config.return_routed_experts
-            and self.rl_engine.cluster_config.training_config.max_seq_token_per_tpu
-            is not None
-        ):
+        if config.return_routed_experts and self._packing_enabled:
           raise ValueError(
               "exact_token_continuity does not replay expert routing when"
               " sequence packing (max_seq_token_per_tpu) is enabled"
@@ -759,9 +757,18 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     self._full_batch_size = full_batch_size
     # Initialize batch sizes.
     mini_batch_size = self._training_config.mini_batch_size or full_batch_size
-    train_micro_batch_size = (
-        self._training_config.train_micro_batch_size or mini_batch_size
-    )
+    if self._packing_enabled:
+      train_micro_batch_size = None
+      grad_acc_steps = None
+    else:
+      train_micro_batch_size = (
+          self._training_config.train_micro_batch_size or mini_batch_size
+      )
+      grad_acc_steps = self._training_config.get_with_default(
+          "gradient_accumulation_steps", 1
+      )
+    # Prompt groups dequeued per consumer step (`mini_batch_size` when packed).
+    iterator_batch_size = train_micro_batch_size or mini_batch_size
     # Rollout micro batch size has to be 1 since we only process individual
     # prompts.
     self._rollout_micro_batch_size = 1
@@ -771,8 +778,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     # computed on the packed buffer after pack_sequences; do not defer
     # conversion to the consumer (which would enqueue raw lists pack_sequences
     # cannot consume).
-    packing_enabled = self._training_config.max_seq_token_per_tpu is not None
-    if self._compute_logps_micro_batch_size > 1 and not packing_enabled:
+    if self._compute_logps_micro_batch_size > 1 and not self._packing_enabled:
       if self._compute_logps_micro_batch_size != train_micro_batch_size:
         raise ValueError(
             "compute_logps_micro_batch_size"
@@ -790,14 +796,12 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         (mini_batch_size, f"{mini_batch_size=}"),
     ]:
       rl_utils.check_divisibility(v, full_batch_size, n, f"{full_batch_size=}")
-    grad_acc_steps = self._training_config.get_with_default(
-        "gradient_accumulation_steps", 1
-    )
 
     logging.info(  # pylint: disable=logging-fstring-interpolation
         f"Training with {full_batch_size=}, {mini_batch_size=},"
         f" {train_micro_batch_size=}, {self._rollout_micro_batch_size=},"
-        f" {self._compute_logps_micro_batch_size=}, {grad_acc_steps=}"
+        f" {self._compute_logps_micro_batch_size=}, {grad_acc_steps=},"
+        f" {iterator_batch_size=}"
     )
 
     logging.info("Starting AgenticRLLearner training loop.")
@@ -835,7 +839,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
     # 2. Consume training examples and train.
     train_data_gen = self._data_consumer_batch_generator(
-        train_data_queue, train_micro_batch_size
+        train_data_queue, iterator_batch_size
     )
     if self._process_in_consumer:
       # Convert raw Trajectory groups into TrainExamples up front, before
@@ -851,8 +855,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           )
 
       train_data_gen = _to_train_examples(train_data_gen)
-    is_packed = self._training_config.max_seq_token_per_tpu is not None
-    if is_packed:
+    if self._packing_enabled:
       mesh = self.rl_engine.cluster_config.role_to_mesh[
           rl_engine_lib.Role.ACTOR
       ]
@@ -909,14 +912,14 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       # `train_micro_batch` is always a Sequence[TrainExample] now:
       #  - _process_in_consumer: converted up front (GRPO -> single-element list)
       #  - producer-side processing: TrainExamples straight from the queue
-      #  - is_packed: a single packed TrainExample from pack_sequences
+      #  - _packing_enabled: a single packed TrainExample from pack_sequences
       # jax.tree.map(concatenate) over a single-element list is a no-op, so this
       # equals the old `train_examples[0]` for the GRPO consumer path.
       merged_train_micro_batch = jax.tree.map(
           lambda *xs: jnp.concatenate(xs, axis=0), *train_micro_batch
       )
 
-      if is_packed:
+      if self._packing_enabled:
         # pack-first: old/ref logp were deferred (left None) so they can be
         # computed here on the packed buffer (segment-aware forward), sharing
         # the same packed representation training uses.
@@ -958,6 +961,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           and getattr(merged_train_micro_batch, "segment_ids") is not None
       )
       if not is_packed:
+        assert train_micro_batch_size is not None
         seqs_per_chunk = (
             self._training_config.train_trajectory_micro_batch_size
             or train_micro_batch_size * self.algo_config.num_generations
@@ -1042,6 +1046,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       else:
         # Mirror `peft_trainer._train_step`'s derivation:
         # `is_update_step` flips True every `grad_acc_steps` micro-batches.
+        assert grad_acc_steps is not None
         unpacked_micro_step_counter += len(chunked_train_micro_batch)
         is_update = unpacked_micro_step_counter % grad_acc_steps == 0
 

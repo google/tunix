@@ -195,8 +195,8 @@ class AgenticRLLearnerTest(parameterized.TestCase):
       }
       training_config = mock.Mock()
       training_config.compute_logps_micro_batch_size = 1
-      training_config.train_micro_batch_size = 1
-      training_config.mini_batch_size = None
+      training_config.train_micro_batch_size = 3
+      training_config.mini_batch_size = 4
       training_config.max_seq_token_per_tpu = 16  # Enable packing
       training_config.max_segments_per_packed_row = None
       training_config.max_steps = 100
@@ -217,16 +217,25 @@ class AgenticRLLearnerTest(parameterized.TestCase):
           reward_fns=mock.Mock(),
           algo_config=algo_config,
       )
-      train_dataset = [{"prompt": ["p1"]}]
+      self.assertTrue(learner._packing_enabled)
+      train_dataset = [{"prompt": ["p1", "p2", "p3", "p4"]}]
 
       async def mock_producer(*args, **kwargs):
         if False:
           yield
 
-      with mock.patch.object(
-          learner, "_orchestrator_producer", side_effect=mock_producer
+      with (
+          mock.patch.object(
+              learner, "_orchestrator_producer", side_effect=mock_producer
+          ),
+          mock.patch.object(
+              learner,
+              "_data_consumer_batch_generator",
+              wraps=learner._data_consumer_batch_generator,
+          ) as spy_consumer_gen,
       ):
         learner.train(train_dataset)
+        spy_consumer_gen.assert_called_once_with(mock.ANY, 4)
 
 
 class ExactTokenContinuityConfigTest(absltest.TestCase):

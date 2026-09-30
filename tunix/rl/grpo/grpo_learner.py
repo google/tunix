@@ -372,6 +372,10 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         routed_experts=(
             None if routed_experts is None else jax.device_put(routed_experts)
         ),
+        sampler_agreement_applied=(
+            rollout_per_token_logps is not None
+            and trainer_per_token_logps is not None
+        ),
     )
 
   def _compute_trajectory_ids(

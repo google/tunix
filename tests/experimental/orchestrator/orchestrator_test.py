@@ -230,8 +230,8 @@ class ClusterOrchestratorTest(absltest.TestCase):
       def heartbeat(self):
         return datatypes.HealthReport(state=datatypes.WorkerState.READY)
 
-      def generate(self, prompts):
-        del prompts
+      def generate(self, requests):
+        del requests
         return []
 
     registry = worker_registry.WorkerRegistry()

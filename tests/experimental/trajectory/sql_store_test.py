@@ -1,5 +1,8 @@
-"""Unit tests for the SQL-backed trajectory store writer."""
+"""Unit and contract tests for SqlTrajectoryStore."""
 
+from concurrent import futures
+import os
+import threading
 from typing import Any
 from unittest import mock
 
@@ -9,6 +12,8 @@ import sqlalchemy as sa
 from tunix.experimental.trajectory import schema
 from tunix.experimental.trajectory import schema_testing
 from tunix.experimental.trajectory import sql_store
+from tunix.experimental.trajectory import store
+from tunix.experimental.trajectory import store_testing
 from tunix.experimental.trajectory import trajectory as trajectory_lib
 from tunix.experimental.trajectory import trajectory_testing
 
@@ -19,6 +24,7 @@ class SqlStoreWriterTest(parameterized.TestCase):
   def setUp(self) -> None:
     super().setUp()
     self.engine = schema_testing.create_sqlite_memory_engine(shared_pool=True)
+    self.addCleanup(self.engine.dispose)
     schema.METADATA.create_all(self.engine)
     self.executed_sql: list[str] = []
     sa.event.listen(
@@ -74,7 +80,7 @@ class SqlStoreWriterTest(parameterized.TestCase):
 
   def test_init_with_postgresql_engine_binds_postgresql_insert(self) -> None:
     mock_engine = mock.MagicMock()
-    mock_engine.dialect.name = "postgresql"
+    mock_engine.dialect.name = sql_store._POSTGRESQL_DIALECT
 
     writer = sql_store._AsyncSqlWriter(engine=mock_engine)
 
@@ -99,6 +105,41 @@ class SqlStoreWriterTest(parameterized.TestCase):
         ValueError, r"max_cached_trajectories must be non-negative"
     ):
       sql_store._AsyncSqlWriter(engine=self.engine, max_cached_trajectories=-1)
+
+  def test_resolve_status_with_stated_status_returns_schema_status(
+      self,
+  ) -> None:
+    atif_metadata = trajectory_testing.TUNIX_METADATA_1.to_atif_metadata()
+    self.assertEqual(
+        sql_store._resolve_status(atif_metadata),
+        schema.Status.COMPLETED,
+    )
+
+  @parameterized.named_parameters(
+      ("lowercase", "completed", schema.Status.COMPLETED),
+      ("uppercase_with_whitespace", "  FAILED  ", schema.Status.FAILED),
+      ("unrecognized_string", "not_a_status", schema.Status.UNKNOWN),
+      ("non_string", 123, schema.Status.UNKNOWN),
+  )
+  def test_resolve_status_normalizes_case_and_ignores_invalid_values(
+      self, raw_status: Any, expected: schema.Status
+  ) -> None:
+    metadata = trajectory_testing.TUNIX_METADATA_1.model_copy(
+        update={"status": raw_status}
+    ).to_atif_metadata()
+    self.assertEqual(sql_store._resolve_status(metadata), expected)
+
+  def test_resolve_status_with_final_metrics_returns_unknown(self) -> None:
+    metadata = trajectory_testing.METADATA_1.model_copy(
+        update={"final_metrics": trajectory_lib.FinalMetrics(total_steps=5)}
+    )
+    self.assertEqual(sql_store._resolve_status(metadata), schema.Status.UNKNOWN)
+
+  def test_resolve_status_without_stated_status_returns_unknown(self) -> None:
+    self.assertEqual(
+        sql_store._resolve_status(trajectory_testing.METADATA_1),
+        schema.Status.UNKNOWN,
+    )
 
   @parameterized.named_parameters(
       ("empty", ""),
@@ -252,18 +293,6 @@ class SqlStoreWriterTest(parameterized.TestCase):
       self.assertEqual(saved_step["step_id"], step.step_id)
       self.assertEqual(saved_step["payload"]["message"], step.message)
 
-  def test_enqueue_write_for_known_run_skips_repeat_run_insert(self) -> None:
-    writer = self._create_writer()
-    first = trajectory_testing.make_metadata(trajectory_id="traj_1")
-    second = trajectory_testing.make_metadata(trajectory_id="traj_2")
-
-    writer.enqueue_write(run_id="cached_run", metadata=first)
-    writer.enqueue_write(run_id="cached_run", metadata=second)
-    writer.flush()
-
-    self.assertEqual(self._count_sql("INSERT INTO runs"), 1)
-    self.assertLen(self._fetch_runs(), 1)
-
   def test_enqueue_write_for_run_registered_elsewhere_preserves_stored_row(
       self,
   ) -> None:
@@ -338,62 +367,6 @@ class SqlStoreWriterTest(parameterized.TestCase):
     self.assertEqual(trajectories[0]["created_at"], created_at)
     self.assertEqual(trajectories[0]["trajectory_metadata"]["notes"], "second")
 
-  def test_enqueue_write_for_existing_step_replaces_stored_payload(
-      self,
-  ) -> None:
-    writer = self._create_writer()
-    metadata = trajectory_testing.make_metadata(trajectory_id="traj_revise")
-    original = trajectory_lib.Step(
-        step_id=0, source=trajectory_lib.Source.USER, message="original"
-    )
-    revised = trajectory_lib.Step(
-        step_id=0, source=trajectory_lib.Source.USER, message="revised"
-    )
-
-    writer.enqueue_write(run_id="revise_run", metadata=metadata, step=original)
-    writer.flush()
-    writer.enqueue_write(run_id="revise_run", metadata=metadata, step=revised)
-    writer.flush()
-
-    steps = self._fetch_steps()
-    self.assertLen(steps, 1)
-    self.assertEqual(steps[0]["payload"]["message"], "revised")
-
-  def test_resolve_status_with_stated_status_returns_schema_status(
-      self,
-  ) -> None:
-    atif_metadata = trajectory_testing.TUNIX_METADATA_1.to_atif_metadata()
-    self.assertEqual(
-        sql_store._resolve_status(atif_metadata),
-        schema.Status.COMPLETED,
-    )
-
-  @parameterized.named_parameters(
-      ("lowercase", "completed", schema.Status.COMPLETED),
-      ("uppercase_with_whitespace", "  FAILED  ", schema.Status.FAILED),
-      ("unrecognized_string", "not_a_status", schema.Status.UNKNOWN),
-      ("non_string", 123, schema.Status.UNKNOWN),
-  )
-  def test_resolve_status_normalizes_case_and_ignores_invalid_values(
-      self, raw_status: Any, expected: schema.Status
-  ) -> None:
-    metadata = trajectory_testing.TUNIX_METADATA_1.model_copy(
-        update={"status": raw_status}
-    ).to_atif_metadata()
-    self.assertEqual(sql_store._resolve_status(metadata), expected)
-
-  def test_resolve_status_with_final_metrics_returns_unknown(self) -> None:
-    metadata = trajectory_testing.METADATA_1.model_copy(
-        update={"final_metrics": trajectory_lib.FinalMetrics(total_steps=5)}
-    )
-    self.assertEqual(sql_store._resolve_status(metadata), schema.Status.UNKNOWN)
-
-  def test_resolve_status_without_stated_status_returns_unknown(self) -> None:
-    self.assertEqual(
-        sql_store._resolve_status(trajectory_testing.METADATA_1),
-        schema.Status.UNKNOWN,
-    )
-
   @parameterized.named_parameters(
       ("metadata_only", None),
       ("with_step", trajectory_testing.STEP_1_1),
@@ -429,6 +402,39 @@ class SqlStoreWriterTest(parameterized.TestCase):
     self.assertEqual(
         trajectories[0]["trajectory_metadata"]["notes"], "new notes"
     )
+
+  def test_enqueue_write_for_existing_step_replaces_stored_payload(
+      self,
+  ) -> None:
+    writer = self._create_writer()
+    metadata = trajectory_testing.make_metadata(trajectory_id="traj_revise")
+    original = trajectory_lib.Step(
+        step_id=0, source=trajectory_lib.Source.USER, message="original"
+    )
+    revised = trajectory_lib.Step(
+        step_id=0, source=trajectory_lib.Source.USER, message="revised"
+    )
+
+    writer.enqueue_write(run_id="revise_run", metadata=metadata, step=original)
+    writer.flush()
+    writer.enqueue_write(run_id="revise_run", metadata=metadata, step=revised)
+    writer.flush()
+
+    steps = self._fetch_steps()
+    self.assertLen(steps, 1)
+    self.assertEqual(steps[0]["payload"]["message"], "revised")
+
+  def test_enqueue_write_for_known_run_skips_repeat_run_insert(self) -> None:
+    writer = self._create_writer()
+    first = trajectory_testing.make_metadata(trajectory_id="traj_1")
+    second = trajectory_testing.make_metadata(trajectory_id="traj_2")
+
+    writer.enqueue_write(run_id="cached_run", metadata=first)
+    writer.enqueue_write(run_id="cached_run", metadata=second)
+    writer.flush()
+
+    self.assertEqual(self._count_sql("INSERT INTO runs"), 1)
+    self.assertLen(self._fetch_runs(), 1)
 
   def test_enqueue_write_with_unchanged_metadata_skips_repeat_trajectory_upsert(
       self,
@@ -573,6 +579,437 @@ class SqlStoreWriterTest(parameterized.TestCase):
     self.assertLen(trajectories, 1)
     self.assertEqual(trajectories[0]["updated_at"], initial_updated_at)
     self.assertLen(self._fetch_steps(), 2)
+
+
+class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
+  """Unit tests for SqlTrajectoryStore initialization and lifecycle behavior."""
+
+  def setUp(self) -> None:
+    super().setUp()
+    self.engine = schema_testing.create_sqlite_memory_engine(shared_pool=True)
+    self.addCleanup(self.engine.dispose)
+
+  def _create_store(
+      self, run_id: str = "default_run"
+  ) -> sql_store.SqlTrajectoryStore:
+    store_inst = sql_store.SqlTrajectoryStore(
+        engine=self.engine, run_id=run_id, owns_engine=False
+    )
+    self.addCleanup(store_inst.close)
+    return store_inst
+
+  @parameterized.named_parameters(
+      ("none", None),
+      ("empty", ""),
+      ("whitespace", "   "),
+  )
+  def test_init_with_missing_or_blank_run_id_raises_value_error(
+      self, invalid_run_id: Any
+  ) -> None:
+    with self.assertRaisesRegex(
+        ValueError, r"SqlTrajectoryStore requires a non-empty run_id"
+    ):
+      sql_store.SqlTrajectoryStore(engine=self.engine, run_id=invalid_run_id)
+
+  def test_init_sets_engine_and_run_id(self) -> None:
+    store_inst = sql_store.SqlTrajectoryStore(
+        engine=self.engine, run_id="  my_run  "
+    )
+    self.addCleanup(store_inst.close)
+
+    self.assertEqual(store_inst.run_id, "my_run")
+    self.assertIs(store_inst.engine, self.engine)
+
+  def test_init_with_auto_init_false_does_not_create_tables(self) -> None:
+    uninitialized_engine = schema_testing.create_sqlite_memory_engine(
+        shared_pool=True
+    )
+    self.addCleanup(uninitialized_engine.dispose)
+    store_inst = sql_store.SqlTrajectoryStore(
+        engine=uninitialized_engine, run_id="no_init_run", auto_init=False
+    )
+    self.addCleanup(store_inst.close)
+
+    inspector = sa.inspect(uninitialized_engine)
+    self.assertEmpty(inspector.get_table_names())
+
+  def test_init_on_postgresql_acquires_advisory_lock_when_cold(
+      self,
+  ) -> None:
+    mock_engine = mock.MagicMock()
+    mock_engine.dialect.name = sql_store._POSTGRESQL_DIALECT
+    mock_read_conn = mock.MagicMock()
+    mock_write_conn = mock.MagicMock()
+    mock_engine.connect.return_value.__enter__.return_value = mock_read_conn
+    mock_engine.begin.return_value.__enter__.return_value = mock_write_conn
+    mock_inspector = mock.MagicMock()
+    mock_inspector.get_table_names.return_value = []
+
+    with (
+        mock.patch.object(
+            sa, "inspect", return_value=mock_inspector
+        ) as mock_inspect,
+        mock.patch.object(schema.METADATA, "create_all") as mock_create_all,
+    ):
+      with sql_store.SqlTrajectoryStore(
+          engine=mock_engine, run_id="test_run", auto_init=True
+      ):
+        pass
+
+    self.assertEqual(
+        mock_inspect.call_args_list,
+        [mock.call(mock_read_conn), mock.call(mock_write_conn)],
+    )
+    mock_write_conn.execute.assert_called_once()
+    executed_stmt = str(
+        mock_write_conn.execute.call_args.args[0].compile(
+            compile_kwargs={"literal_binds": True}
+        )
+    )
+    self.assertIn(
+        f"pg_advisory_xact_lock({sql_store._POSTGRES_SCHEMA_INIT_LOCK_ID})",
+        executed_stmt,
+    )
+    mock_create_all.assert_called_once_with(mock_write_conn, checkfirst=True)
+
+  def test_init_skips_ddl_when_tables_created_by_peer_while_waiting_for_lock(
+      self,
+  ) -> None:
+    mock_engine = mock.MagicMock()
+    mock_engine.dialect.name = sql_store._POSTGRESQL_DIALECT
+    mock_read_conn = mock.MagicMock()
+    mock_write_conn = mock.MagicMock()
+    mock_engine.connect.return_value.__enter__.return_value = mock_read_conn
+    mock_engine.begin.return_value.__enter__.return_value = mock_write_conn
+    cold_inspector = mock.MagicMock()
+    cold_inspector.get_table_names.return_value = []
+    warm_inspector = mock.MagicMock()
+    warm_inspector.get_table_names.return_value = list(
+        schema.METADATA.tables.keys()
+    )
+
+    with (
+        mock.patch.object(
+            sa, "inspect", side_effect=[cold_inspector, warm_inspector]
+        ),
+        mock.patch.object(schema.METADATA, "create_all") as mock_create_all,
+    ):
+      with sql_store.SqlTrajectoryStore(
+          engine=mock_engine, run_id="test_run", auto_init=True
+      ):
+        pass
+
+    mock_write_conn.execute.assert_called_once()
+    mock_create_all.assert_not_called()
+
+  def test_init_when_tables_exist_skips_advisory_lock_and_ddl(
+      self,
+  ) -> None:
+    mock_engine = mock.MagicMock()
+    mock_engine.dialect.name = sql_store._POSTGRESQL_DIALECT
+    mock_read_conn = mock.MagicMock()
+    mock_engine.connect.return_value.__enter__.return_value = mock_read_conn
+    mock_inspector = mock.MagicMock()
+    mock_inspector.get_table_names.return_value = list(
+        schema.METADATA.tables.keys()
+    )
+
+    with (
+        mock.patch.object(sa, "inspect", return_value=mock_inspector),
+        mock.patch.object(schema.METADATA, "create_all") as mock_create_all,
+    ):
+      with sql_store.SqlTrajectoryStore(
+          engine=mock_engine, run_id="test_run", auto_init=True
+      ):
+        pass
+
+    mock_engine.begin.assert_not_called()
+    mock_create_all.assert_not_called()
+
+  def test_init_concurrent_workers_with_auto_init_true_succeeds(self) -> None:
+    num_workers = 32
+    barrier = threading.Barrier(num_workers)
+    db_path = os.path.join(
+        self.create_tempdir().full_path, "concurrent_init.db"
+    )
+
+    def _init_worker(worker_idx: int) -> None:
+      worker_engine = schema_testing.create_sqlite_file_engine(db_path)
+      try:
+        barrier.wait(timeout=5.0)
+        with sql_store.SqlTrajectoryStore(
+            engine=worker_engine,
+            run_id=f"concurrent_run_{worker_idx}",
+            auto_init=True,
+        ) as worker_store:
+          worker_store.add_step(
+              trajectory_testing.STEP_1_1,
+              trajectory_testing.make_metadata(
+                  trajectory_id=f"traj_{worker_idx}"
+              ),
+          )
+      finally:
+        worker_engine.dispose()
+
+    with futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
+      worker_futures = [
+          executor.submit(_init_worker, idx) for idx in range(num_workers)
+      ]
+      for future in futures.as_completed(worker_futures):
+        future.result()
+
+    verify_engine = schema_testing.create_sqlite_file_engine(db_path)
+    self.addCleanup(verify_engine.dispose)
+    inspector = sa.inspect(verify_engine)
+    self.assertContainsSubset(
+        schema.METADATA.tables.keys(),
+        set(inspector.get_table_names()),
+    )
+    for table in (
+        schema.RUNS_TABLE,
+        schema.TRAJECTORIES_TABLE,
+        schema.STEPS_TABLE,
+    ):
+      self.assertLen(
+          schema_testing.fetch_all(verify_engine, sa.select(table)),
+          num_workers,
+      )
+
+  @parameterized.named_parameters(
+      ("slash", "traj/001"),
+      ("colons_uuid", "urn:uuid:1234-5678"),
+      ("dots", "sim.attempt.001"),
+  )
+  def test_valid_arbitrary_trajectory_id_succeeds(self, traj_id: str) -> None:
+    store_inst = self._create_store(run_id="arb_run")
+    meta = trajectory_testing.make_metadata(trajectory_id=traj_id)
+
+    store_inst.add_step(trajectory_testing.STEP_1_1, meta)
+    store_inst.flush()
+
+    trajs = store_inst.get_trajectories([traj_id])
+    self.assertLen(trajs, 1)
+    self.assertEqual(trajs[0].trajectory_id, traj_id)
+
+  def test_write_to_closed_store_raises_runtime_error(self) -> None:
+    store_inst = self._create_store()
+    store_inst.close()
+
+    with self.assertRaisesRegex(RuntimeError, r"Cannot write to a closed"):
+      store_inst.add_step(
+          trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1
+      )
+
+    with self.assertRaisesRegex(RuntimeError, r"Cannot write to a closed"):
+      store_inst.update_metadata(trajectory_testing.METADATA_1)
+
+  def test_context_manager_lifecycle_drains_writes_on_exit(self) -> None:
+    with sql_store.SqlTrajectoryStore(
+        engine=self.engine, run_id="ctx_run", owns_engine=False
+    ) as store_ctx:
+      store_ctx.add_step(
+          trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1
+      )
+
+    with sql_store.SqlTrajectoryStore(
+        engine=self.engine, run_id="ctx_run", owns_engine=False
+    ) as ctx_reader:
+      trajs = ctx_reader.get_trajectories([trajectory_testing.TRAJECTORY_ID_1])
+      self.assertEqual(trajs, [trajectory_testing.TRAJECTORY_1])
+
+  def test_close_with_owns_engine_false_does_not_dispose_engine(self) -> None:
+    with mock.patch.object(
+        self.engine, "dispose", wraps=self.engine.dispose
+    ) as mock_dispose:
+      store_inst = sql_store.SqlTrajectoryStore(
+          engine=self.engine, run_id="shared_engine_run", owns_engine=False
+      )
+      store_inst.close()
+
+    mock_dispose.assert_not_called()
+
+  def test_close_with_owns_engine_true_disposes_engine(self) -> None:
+    owned_engine = schema_testing.create_sqlite_memory_engine(shared_pool=True)
+    with mock.patch.object(
+        owned_engine, "dispose", wraps=owned_engine.dispose
+    ) as mock_dispose:
+      with sql_store.SqlTrajectoryStore(
+          engine=owned_engine, run_id="owned_engine_run", owns_engine=True
+      ) as store_ctx:
+        store_ctx.add_step(
+            trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1
+        )
+
+    mock_dispose.assert_called_once()
+
+  def test_init_schema_error_with_owns_engine_true_disposes_engine(
+      self,
+  ) -> None:
+    owned_engine = schema_testing.create_sqlite_memory_engine(shared_pool=True)
+    with (
+        mock.patch.object(
+            owned_engine, "dispose", wraps=owned_engine.dispose
+        ) as mock_dispose,
+        mock.patch.object(
+            sql_store.SqlTrajectoryStore,
+            "_initialize_schema",
+            side_effect=RuntimeError("DDL failure"),
+        ),
+    ):
+      with self.assertRaisesRegex(RuntimeError, "DDL failure"):
+        sql_store.SqlTrajectoryStore(
+            engine=owned_engine,
+            run_id="failed_init_run",
+            auto_init=True,
+            owns_engine=True,
+        )
+
+    mock_dispose.assert_called_once()
+
+  def test_file_based_sqlite_persistence(self) -> None:
+    db_path = os.path.join(self.create_tempdir().full_path, "test.db")
+    engine = schema_testing.create_sqlite_file_engine(db_path)
+    self.addCleanup(engine.dispose)
+
+    with sql_store.SqlTrajectoryStore(
+        engine=engine, run_id="persisted_run"
+    ) as store_ctx:
+      store_ctx.add_step(
+          trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1
+      )
+
+    read_engine = schema_testing.create_sqlite_file_engine(db_path)
+    self.addCleanup(read_engine.dispose)
+    with sql_store.SqlTrajectoryStore(
+        engine=read_engine, run_id="persisted_run"
+    ) as read_reader:
+      trajs = read_reader.get_trajectories([trajectory_testing.TRAJECTORY_ID_1])
+      self.assertEqual(trajs, [trajectory_testing.TRAJECTORY_1])
+
+  def test_get_trajectories_metadata_rehydrates_tunix_metadata_and_orders_by_creation(
+      self,
+  ) -> None:
+    store_inst = self._create_store(run_id="meta_reader_run")
+    store_inst.update_metadata(trajectory_testing.METADATA_1)
+    store_inst.update_metadata(trajectory_testing.TUNIX_METADATA_1)
+    store_inst.flush()
+
+    metas = store_inst.get_trajectories_metadata()
+    self.assertEqual(
+        metas,
+        [
+            trajectory_testing.METADATA_1,
+            trajectory_testing.TUNIX_METADATA_1.to_atif_metadata(),
+        ],
+    )
+    rehydrated_meta = trajectory_lib.TunixTrajectoryMetadata.from_atif_metadata(
+        metas[1]
+    )
+    self.assertEqual(rehydrated_meta, trajectory_testing.TUNIX_METADATA_1)
+
+  def test_get_trajectories_orders_steps_by_step_id_and_rehydrates_tunix_steps(
+      self,
+  ) -> None:
+    store_inst = self._create_store(run_id="trajs_reader_run")
+    tunix_meta = trajectory_testing.PAIRED_TUNIX_TRAJECTORY.get_metadata()
+    # Log Tunix steps out of step_id order (step 2, then step 0, then step 1).
+    store_inst.add_step(trajectory_testing.TUNIX_ENV_STEP_2, tunix_meta)
+    store_inst.add_step(trajectory_testing.TUNIX_ENV_STEP_0, tunix_meta)
+    store_inst.add_step(trajectory_testing.TUNIX_AGENT_STEP_1, tunix_meta)
+    store_inst.flush()
+
+    (trajectory,) = store_inst.get_trajectories([tunix_meta.trajectory_id])
+    self.assertTrajectoryEqual(
+        trajectory, trajectory_testing.PAIRED_ATIF_TRAJECTORY
+    )
+    rehydrated_tunix_traj = trajectory_lib.TunixTrajectory.from_atif_trajectory(
+        trajectory
+    )
+    self.assertTrajectoryEqual(
+        rehydrated_tunix_traj, trajectory_testing.PAIRED_TUNIX_TRAJECTORY
+    )
+
+  def test_reader_methods_isolate_trajectories_across_runs(self) -> None:
+    store_run_1 = self._create_store(run_id="run_1")
+    store_run_1.add_step(
+        trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1
+    )
+    store_run_1.flush()
+
+    run_2_step_for_traj_1 = trajectory_testing.make_step(
+        step_id=2, message="run_2_only_step"
+    )
+    store_run_2 = self._create_store(run_id="run_2")
+    store_run_2.add_step(run_2_step_for_traj_1, trajectory_testing.METADATA_1)
+    store_run_2.add_step(
+        trajectory_testing.STEP_2_1, trajectory_testing.METADATA_2
+    )
+    store_run_2.flush()
+
+    self.assertEqual(
+        store_run_1.get_trajectories_metadata(),
+        [trajectory_testing.METADATA_1],
+    )
+    self.assertEqual(
+        store_run_1.get_trajectories([trajectory_testing.TRAJECTORY_ID_1]),
+        [trajectory_testing.TRAJECTORY_1],
+    )
+    with self.assertRaisesRegex(
+        store.TrajectoryMetadataNotFoundError,
+        trajectory_testing.TRAJECTORY_ID_2,
+    ):
+      store_run_1.get_trajectories_metadata(
+          [trajectory_testing.TRAJECTORY_ID_2]
+      )
+    with self.assertRaisesRegex(
+        store.TrajectoryNotFoundError, trajectory_testing.TRAJECTORY_ID_2
+    ):
+      store_run_1.get_trajectories([trajectory_testing.TRAJECTORY_ID_2])
+
+
+class SqlTrajectoryReaderContractTest(store_testing.TrajectoryReaderTestCase):
+  """Contract tests for SqlTrajectoryStore's TrajectoryReader implementation."""
+
+  def _create_reader(
+      self,
+      initial_data: (
+          list[
+              tuple[
+                  trajectory_lib.TrajectoryMetadata, list[trajectory_lib.Step]
+              ]
+          ]
+          | None
+      ) = None,
+  ) -> store.TrajectoryReader:
+    engine = schema_testing.create_sqlite_memory_engine(shared_pool=True)
+    self.addCleanup(engine.dispose)
+    sql_s = sql_store.SqlTrajectoryStore(
+        engine=engine, run_id="test_contract_reader_run", owns_engine=False
+    )
+    self.addCleanup(sql_s.close)
+    if initial_data:
+      for meta, steps in initial_data:
+        if not steps:
+          sql_s.update_metadata(meta)
+        for step in steps:
+          sql_s.add_step(step, meta)
+      sql_s.flush()
+    return sql_s
+
+
+class SqlTrajectoryWriterContractTest(store_testing.TrajectoryWriterTestCase):
+  """Contract tests for SqlTrajectoryStore's TrajectoryWriter implementation."""
+
+  def _create_reader_and_writer(
+      self,
+  ) -> tuple[store.TrajectoryReader, store.TrajectoryWriter]:
+    engine = schema_testing.create_sqlite_memory_engine(shared_pool=True)
+    self.addCleanup(engine.dispose)
+    sql_s = sql_store.SqlTrajectoryStore(
+        engine=engine, run_id="test_contract_writer_run", owns_engine=False
+    )
+    self.addCleanup(sql_s.close)
+    return sql_s, sql_s
 
 
 if __name__ == "__main__":

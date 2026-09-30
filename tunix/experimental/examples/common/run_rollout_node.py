@@ -570,6 +570,8 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
       "enable_prefix_caching": args.enable_prefix_caching,
       "async_scheduling": args.vllm_async_scheduling,
       "dtype": args.vllm_dtype,
+      "max_logprobs": 1,
+      "logprobs_mode": "processed_logprobs",
   }
   if args.vllm_seed is not None:
     engine_kwargs["seed"] = args.vllm_seed
@@ -714,6 +716,8 @@ def _create_vllm_sampler(args, tokenizer):
       max_loras=1 if args.use_lora else None,
       enable_prefix_caching=args.enable_prefix_caching,
       async_scheduling=args.vllm_async_scheduling,
+      max_logprobs=1,
+      logprobs_mode="processed_logprobs",
   )
   hf_overrides = _vllm_hf_overrides(args)
   if hf_overrides:

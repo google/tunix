@@ -45,6 +45,24 @@ def create_sqlite_memory_engine(shared_pool: bool = False) -> sa.Engine:
   return engine
 
 
+def create_sqlite_file_engine(db_path: str, timeout: float = 30.0) -> sa.Engine:
+  """Creates a file-backed SQLite engine with foreign key enforcement enabled.
+
+  Args:
+    db_path: Filesystem path to the SQLite database file.
+    timeout: Busy timeout in seconds when waiting for SQLite file locks.
+
+  Returns:
+    A configured SQLAlchemy Engine.
+  """
+  engine = sa.create_engine(
+      f"sqlite:///{db_path}",
+      connect_args={"check_same_thread": False, "timeout": timeout},
+  )
+  sa.event.listen(engine, "connect", _set_sqlite_pragma)
+  return engine
+
+
 def fetch_all(
     engine: sa.Engine, statement: sa.sql.Executable
 ) -> list[dict[str, Any]]:

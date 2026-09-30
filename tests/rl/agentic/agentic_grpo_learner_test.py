@@ -2829,8 +2829,12 @@ class ScoreCenteringTest(parameterized.TestCase):
       dict(sampler_is=None, chunk_size=0),
       dict(sampler_is="token", chunk_size=0),
       dict(sampler_is="token", chunk_size=2),
+      dict(sampler_is="token", chunk_size=0, precompute_weights=False),
+      dict(sampler_is="token", chunk_size=2, precompute_weights=False),
   )
-  def test_grpo_loss_fn_with_score_centering(self, sampler_is, chunk_size):
+  def test_grpo_loss_fn_with_score_centering(
+      self, sampler_is, chunk_size, precompute_weights=True
+  ):
     batch_size, seq_len, vocab_size, top_k = 2, 4, 16, 4
     prompt_ids = jnp.ones((batch_size, 3), dtype=jnp.int32)
     completion_ids = jnp.array([[1, 2, 3, 4], [2, 3, 4, 5]], dtype=jnp.int32)
@@ -2847,7 +2851,7 @@ class ScoreCenteringTest(parameterized.TestCase):
     old_per_token_logps = old_topk_logps[..., 0]
     sampler_is_weights = (
         jnp.full((batch_size, seq_len), 0.9, dtype=jnp.float32)
-        if sampler_is == "token"
+        if sampler_is == "token" and precompute_weights
         else None
     )
 
@@ -2921,6 +2925,14 @@ class ScoreCenteringTest(parameterized.TestCase):
     self.assertIn("score_centering/head_mass_p_mean", out_sc.aux_metrics)
     self.assertIn("score_centering/tail_ratio_rho_mean", out_sc.aux_metrics)
     self.assertIn("score_centering/abs_coeff_sum_mean", out_sc.aux_metrics)
+    # Single-iteration score centering must retain its on-policy ratio when
+    # sampler/trainer agreement is fused into the loss by main.
+    self.assertAlmostEqual(float(out_sc.aux_metrics["is_ratio/mean"]), 1.0)
+    self.assertAlmostEqual(
+        float(out_sc.aux_metrics["ppo_kl"].compute()), 0.0
+    )
+    if sampler_is == "token" and not precompute_weights:
+      self.assertIn("sampler_trainer/logp_diff_mean", out_sc.aux_metrics)
     self.assertGreater(
         float(out_sc.aux_metrics["score_centering/abs_coeff_sum_mean"]),
         0.0,

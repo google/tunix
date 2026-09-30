@@ -1521,6 +1521,31 @@ class DistributedRLEngineTest(absltest.TestCase):
         pad_id=10, eos_id=20
     )
 
+  def test_preformed_rollout_requests_inherit_generation_args(self):
+    async def _run():
+      preformed = datatypes.RolloutRequest(
+          request_id="req_pre_0",
+          prompt="p2",
+          prompt_id="p2",
+          generation_kwargs={"top_p": 0.9},
+      )
+      await self.engine.dispatch_rollouts(
+          [preformed],
+          num_generations=1,
+          generation_args=datatypes.GenerationArgs(temperature=0.85),
+      )
+      mock_call = (
+          self.mock_rollout_1.generate.call_args
+          or self.mock_rollout_2.generate.call_args
+      )
+      dispatched = mock_call.kwargs["requests"][0]
+      self.assertEqual(
+          dispatched.generation_kwargs,
+          {"top_p": 0.9, "temperature": 0.85},
+      )
+
+    asyncio.run(_run())
+
   def test_configure_worker_actor_raises_when_algo_none(self):
     with self.assertRaisesRegex(ValueError, "algo is required"):
       self.engine.configure_worker(

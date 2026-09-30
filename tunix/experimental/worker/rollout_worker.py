@@ -230,126 +230,6 @@ class RolloutWorker(abstract_worker.Worker):
       self.initialize()
     return self.manager.get_target_state()
 
-  def _left_pad_prompt_token_ids(
-      self, prompt_token_ids: Sequence[np.ndarray]
-  ) -> np.ndarray:
-    pad_id = getattr(self.manager.tokenizer, "pad_token_id", None)
-    if pad_id is None:
-      pad_id = getattr(self.manager.tokenizer, "eos_token_id", 0) or 0
-    configured_len = (
-        getattr(self.config, "max_prompt_length", 0) if self.config else 0
-    )
-    max_len = max([1, configured_len] + [len(ids) for ids in prompt_token_ids])
-    padded = np.full((len(prompt_token_ids), max_len), pad_id, dtype=np.int32)
-    for i, ids in enumerate(prompt_token_ids):
-      if ids.size:
-        padded[i, -min(ids.size, max_len) :] = ids[-max_len:]
-    return padded
-
-  def _as_sampling_response_list(
-      self, responses: Any
-  ) -> list[sampler_lib.SamplingResponse]:
-    if isinstance(responses, (list, tuple)):
-      return list(responses)
-    return [responses]
-
-  # TODO(tunix-dev): can we remove the config knobs and only rely on self.config?
-  async def sample_prompts(
-      self,
-      prompts: str | Sequence[str],
-      *,
-      max_generation_steps: int | None = None,
-      temperature: float | None = None,
-      top_p: float | None = None,
-      top_k: int | None = None,
-      seed: int | None = None,
-      return_logprobs: bool = True,
-      return_routed_experts: bool = False,
-  ) -> base_rollout.RolloutOutput:
-    """Direct single-turn prompt sampling path using the worker's Sampler."""
-    if self.state == WorkerState.PENDING:
-      self.initialize()
-    prompt_list = [prompts] if isinstance(prompts, str) else list(prompts)
-    if not prompt_list:
-      return base_rollout.RolloutOutput(
-          text=[],
-          logits=None,
-          tokens=[],
-          left_padded_prompt_tokens=np.zeros((0, 1), dtype=np.int32),
-          logprobs=[] if return_logprobs else None,
-          routed_experts=[] if return_routed_experts else None,
-      )
-
-    config = self.config or base_rollout.RolloutConfig()
-    return_routed = (
-        return_routed_experts
-        or getattr(config, "return_routed_experts", False)
-    )
-    sampling_params = sampler_lib.SamplingParams(
-        max_tokens=(
-            max_generation_steps
-            if max_generation_steps is not None
-            else config.max_tokens_to_generate
-        ),
-        temperature=(
-            temperature if temperature is not None else config.temperature
-        ),
-        top_p=top_p if top_p is not None else config.top_p,
-        top_k=top_k if top_k is not None else config.top_k,
-        seed=seed if seed is not None else config.seed,  # pyrefly: ignore[bad-argument-type]
-        return_logprobs=return_logprobs,
-        return_routed_experts=return_routed,
-    )
-    requests = [
-        sampler_lib.SamplingRequest(
-            request_id=f"{self.worker_id}_sample_{i}",
-            prompt=prompt,
-            sampling_params=sampling_params,
-        )
-        for i, prompt in enumerate(prompt_list)
-    ]
-    responses = self._as_sampling_response_list(
-        await self.sampler.sample(requests)
-    )
-    if len(responses) != len(prompt_list):
-      raise RuntimeError(
-          f"Sampler returned {len(responses)} responses for"
-          f" {len(prompt_list)} prompts."
-      )
-    prompt_token_ids = [
-        np.asarray(response.prompt_token_ids, dtype=np.int32).reshape(-1)
-        for response in responses
-    ]
-
-    logprobs: list[np.ndarray] | None = None
-    if return_logprobs:
-      logprobs = []
-      for response in responses:
-        assert response.logprobs is not None
-        logprobs.append(response.logprobs)
-
-    routed_experts: list[np.ndarray | None] | None = None
-    if return_routed:
-      routed_experts = [
-          (
-              np.asarray(response.routed_experts)
-              if response.routed_experts is not None
-              else None
-          )
-          for response in responses
-      ]
-
-    return base_rollout.RolloutOutput(
-        text=[response.text for response in responses],
-        logits=None,
-        tokens=[response.token_ids for response in responses],
-        left_padded_prompt_tokens=self._left_pad_prompt_token_ids(
-            prompt_token_ids
-        ),
-        logprobs=logprobs,
-        routed_experts=routed_experts,
-    )
-
   def _stamp_worker_lineage(self, metadata: dict[str, Any] | None) -> None:
     """Appends worker generation telemetry to the lineage context if present."""
     if metadata is None:
@@ -401,23 +281,25 @@ class RolloutWorker(abstract_worker.Worker):
 
   async def generate(
       self,
-      requests: (
-          datatypes.RolloutRequest | Sequence[datatypes.RolloutRequest] | Any
-      ) = None,
+      requests: datatypes.RolloutRequest | Sequence[datatypes.RolloutRequest],
       on_complete: Optional[Callable[[datatypes.RolloutResponse], None]] = None,
-      prompts: Any = None,
-      **generation_kwargs,
-  ) -> datatypes.RolloutResponse | List[datatypes.RolloutResponse] | Any:
+  ) -> datatypes.RolloutResponse | List[datatypes.RolloutResponse]:
     """Coroutine method for single or batched generate requests."""
-    if requests is None:
-      requests = prompts
-    if requests is None:
-      raise ValueError("generate requires `requests` or v2 `prompts`.")
-    if isinstance(requests, str) or (
-        isinstance(requests, (list, tuple))
-        and all(isinstance(req, str) for req in requests)
+    if isinstance(requests, datatypes.RolloutRequest):
+      pass
+    elif isinstance(requests, Sequence) and not isinstance(
+        requests, (str, bytes)
     ):
-      return await self.sample_prompts(requests, **generation_kwargs)  # pyrefly: ignore[bad-argument-type]
+      if not all(isinstance(req, datatypes.RolloutRequest) for req in requests):
+        raise TypeError(
+            "generate requires `requests` to be a RolloutRequest or"
+            " Sequence[RolloutRequest]."
+        )
+    else:
+      raise TypeError(
+          "generate requires `requests` to be a RolloutRequest or"
+          " Sequence[RolloutRequest]."
+      )
 
     cb = None
     if on_complete is not None:

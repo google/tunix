@@ -38,13 +38,17 @@ import asyncio
 import contextlib
 import hashlib
 import inspect
+import pickle
 import threading
 import traceback as traceback_lib
 from typing import (
     Any,
+    AsyncIterable,
     AsyncIterator,
     Callable,
     Dict,
+    Iterable,
+    Iterator,
     List,
     Optional,
     Sequence,
@@ -75,17 +79,23 @@ RPC_TIMEOUT_S = 60.0
 # be sent before the connection is torn down.
 LONG_POLL_TIMEOUT_S = RPC_TIMEOUT_S - 10.0
 
-# Cap for a single gRPC message. The library default (~4 MiB) is far too small
-# for training-batch payloads; raise it and enable keepalive so idle connections
-# are detected.
+# Cap for a single gRPC message frame. Payloads exceeding this (including >4 GiB
+# packed training batches) are streamed in _STREAM_CHUNK_BYTES frames using
+# Pickle Protocol 5 out-of-band buffers.
 _MAX_MESSAGE_BYTES = 128 * 1024 * 1024
 
+# Default slice size (8 MiB) per frame on streaming gRPC calls. Must remain
+# strictly smaller than _MAX_MESSAGE_BYTES.
+_STREAM_CHUNK_BYTES = 8 * 1024 * 1024
 
-def _grpc_options() -> List[Tuple[str, int]]:
+
+def _grpc_options(
+    max_message_bytes: int = _MAX_MESSAGE_BYTES,
+) -> List[Tuple[str, int]]:
   """Channel/server options lifting the message-size cap and enabling keepalive."""
   return [
-      ("grpc.max_send_message_length", _MAX_MESSAGE_BYTES),
-      ("grpc.max_receive_message_length", _MAX_MESSAGE_BYTES),
+      ("grpc.max_send_message_length", max_message_bytes),
+      ("grpc.max_receive_message_length", max_message_bytes),
       ("grpc.keepalive_time_ms", 20000),
       ("grpc.keepalive_timeout_ms", 10000),
       ("grpc.keepalive_permit_without_calls", 1),
@@ -94,6 +104,205 @@ def _grpc_options() -> List[Tuple[str, int]]:
       ("grpc.http2.min_ping_interval_without_data_ms", 5000),
       ("grpc.http2.min_recv_ping_interval_without_data_ms", 5000),
   ]
+
+
+def _validate_stream_config(
+    stream_chunk_bytes: int, max_message_bytes: int
+) -> None:
+  """Validates streaming chunk size and gRPC max message size bounds."""
+  if stream_chunk_bytes <= 0:
+    raise ValueError(
+        f"stream_chunk_bytes must be positive, got {stream_chunk_bytes}."
+    )
+  if max_message_bytes <= 0:
+    raise ValueError(
+        f"max_message_bytes must be positive, got {max_message_bytes}."
+    )
+  if stream_chunk_bytes > max_message_bytes:
+    raise ValueError(
+        f"stream_chunk_bytes ({stream_chunk_bytes}) must not exceed "
+        f"max_message_bytes ({max_message_bytes})."
+    )
+
+
+def _iter_serialized_chunks(
+    obj: Any,
+    chunk_size: int = _STREAM_CHUNK_BYTES,
+) -> Iterator[bytes]:
+  """Serializes `obj` with Pickle Protocol 5 and returns a chunk iterator.
+
+  Pickling and out-of-band buffer extraction (`buffer_callback`) run eagerly
+  when this function is called so any serialization error (`TypeError`,
+  `pickle.PicklingError`) is raised immediately in the caller before opening a
+  gRPC stream.
+
+  Args:
+    obj: Arbitrary Python object to serialize with cloudpickle.
+    chunk_size: Maximum byte length of each yielded data chunk.
+
+  Returns:
+    An iterator yielding Frame 0 (pickled `(header_len, buffer_lengths)`
+    manifest), followed by `chunk_size` slices of the pickle header and each
+    out-of-band buffer.
+  """
+  if chunk_size <= 0:
+    raise ValueError(f"chunk_size must be positive, got {chunk_size}.")
+  raw_buffers: List[pickle.PickleBuffer] = []
+  header_bytes = cloudpickle.dumps(
+      obj, protocol=5, buffer_callback=raw_buffers.append
+  )
+  views: List[Any] = [memoryview(header_bytes)]
+  try:
+    for pb in raw_buffers:
+      try:
+        views.append(pb.raw())
+      except BufferError:
+        with memoryview(pb) as view:
+          views.append(memoryview(view.tobytes()))
+    manifest = cloudpickle.dumps(
+        (len(views[0]), tuple(len(v) for v in views[1:]))
+    )
+  except Exception:
+    for mv in views:
+      mv.release()
+    for pb in raw_buffers:
+      pb.release()
+    raise
+
+  def _gen() -> Iterator[bytes]:
+    try:
+      yield manifest
+      pending = bytearray()
+      for mv in views:
+        if len(mv) >= chunk_size:
+          if pending:
+            yield bytes(pending)
+            pending.clear()
+          for offset in range(0, len(mv), chunk_size):
+            yield bytes(mv[offset : offset + chunk_size])
+        else:
+          if len(pending) + len(mv) > chunk_size:
+            yield bytes(pending)
+            pending.clear()
+          pending.extend(mv)
+      if pending:
+        yield bytes(pending)
+    finally:
+      for mv in views:
+        mv.release()
+      for pb in raw_buffers:
+        pb.release()
+
+  return _gen()
+
+
+class _ChunkReassembler:
+  """Incremental zero-copy reassembler for Pickle Protocol 5 chunk streams."""
+
+  def __init__(self, manifest_bytes: bytes):
+    try:
+      header_len, buffer_lengths = cloudpickle.loads(  # pylint: disable=g-unsafe-pickle-load
+          manifest_bytes
+      )
+    except Exception as exc:
+      raise ValueError("Invalid chunk stream manifest.") from exc
+
+    if not isinstance(header_len, int) or header_len <= 0:
+      raise ValueError(
+          f"Invalid header_len in chunk stream manifest: {header_len!r}."
+      )
+    if not isinstance(buffer_lengths, (tuple, list)) or any(
+        not isinstance(length, int) or length < 0 for length in buffer_lengths
+    ):
+      raise ValueError(
+          "Invalid buffer_lengths in chunk stream manifest:"
+          f" {buffer_lengths!r}."
+      )
+
+    self._header_buf = bytearray(header_len)
+    self._buffers: List[bytearray] = [
+        bytearray(length) for length in buffer_lengths
+    ]
+    self._targets: List[bytearray] = [self._header_buf, *self._buffers]
+    self._target_idx = 0
+    self._target_offset = 0
+    self._advance_empty_targets()
+
+  def _advance_empty_targets(self) -> None:
+    while (
+        self._target_idx < len(self._targets)
+        and not self._targets[self._target_idx]
+    ):
+      self._target_idx += 1
+
+  def feed(self, chunk: bytes) -> None:
+    """Writes a chunk into pre-allocated target buffers."""
+    if not chunk:
+      return
+    with memoryview(chunk) as chunk_view:
+      chunk_pos = 0
+      while chunk_pos < len(chunk_view):
+        if self._target_idx >= len(self._targets):
+          raise ValueError(
+              "Received more chunk bytes than declared in stream manifest."
+          )
+        target_buf = self._targets[self._target_idx]
+        remaining = len(target_buf) - self._target_offset
+        take = min(len(chunk_view) - chunk_pos, remaining)
+        with memoryview(target_buf) as target_mv:
+          target_mv[self._target_offset : self._target_offset + take] = (
+              chunk_view[chunk_pos : chunk_pos + take]
+          )
+        self._target_offset += take
+        chunk_pos += take
+        if self._target_offset == len(target_buf):
+          self._target_idx += 1
+          self._target_offset = 0
+          self._advance_empty_targets()
+
+  def finish(self) -> Any:
+    """Validates completion and unpickles the object from reassembled buffers."""
+    if self._target_idx < len(self._targets):
+      raise ValueError(
+          "Stream ended before all declared buffer bytes were received."
+      )
+    return cloudpickle.loads(  # pylint: disable=g-unsafe-pickle-load
+        self._header_buf, buffers=self._buffers
+    )
+
+
+def _deserialize_from_chunks(chunks: Iterable[bytes]) -> Any:
+  """Deserializes an object from a synchronous iterable of chunks."""
+  reassembler: Optional[_ChunkReassembler] = None
+  for chunk in chunks:
+    if reassembler is None:
+      reassembler = _ChunkReassembler(chunk)
+    else:
+      reassembler.feed(chunk)
+  if reassembler is None:
+    raise ValueError("Cannot deserialize from an empty chunk stream.")
+  return reassembler.finish()
+
+
+async def _deserialize_from_async_chunks(
+    chunks: AsyncIterable[bytes],
+    *,
+    allow_empty: bool = False,
+) -> Any:
+  """Deserializes an object from an async iterable of chunks."""
+  reassembler: Optional[_ChunkReassembler] = None
+  async for chunk in chunks:
+    if reassembler is None:
+      if not chunk and allow_empty:
+        return None
+      reassembler = _ChunkReassembler(chunk)
+    else:
+      reassembler.feed(chunk)
+  if reassembler is None:
+    if allow_empty:
+      return None
+    raise ValueError("Cannot deserialize from an empty chunk stream.")
+  return reassembler.finish()
 
 
 def _running_loop() -> Optional["asyncio.AbstractEventLoop"]:
@@ -124,27 +333,32 @@ class ExecutionRequest:
           "and cannot be passed in method kwargs."
       )
 
-  def serialize(self) -> bytes:
-    """Serializes request to bytes using cloudpickle."""
-    return cloudpickle.dumps(
-        (self.request_id, self.method_name, self.args, self.kwargs)
+  def serialize_chunks(
+      self, chunk_size: int = _STREAM_CHUNK_BYTES
+  ) -> Iterator[bytes]:
+    """Serializes request into Pickle Protocol 5 out-of-band buffer chunks."""
+    return _iter_serialized_chunks(
+        (self.request_id, self.method_name, self.args, self.kwargs),
+        chunk_size=chunk_size,
     )
 
   @classmethod
-  def deserialize(cls, payload: bytes) -> "ExecutionRequest":
-    """Deserializes bytes into an ExecutionRequest."""
-    # SECURITY WARNING: cloudpickle.loads executes arbitrary code via __reduce__ during
-    # deserialization. In production across untrusted boundaries, verify ALTS/mTLS transport
-    # identity or cryptographic HMAC signatures before calling cloudpickle.loads(). Where
-    # dynamic function shipping is not needed, use `pickle.Unpickler` (`find_class`) to
-    # whitelist only trusted domain data types (`int`, `str`, `dict`, `list`, `data_types.*`).
-    request_id, method_name, args, kwargs = cloudpickle.loads(payload)
-    return cls(
-        request_id=request_id,
-        method_name=method_name,
-        args=args,
-        kwargs=kwargs,
-    )
+  def deserialize_chunks(cls, chunks: Iterable[bytes]) -> "ExecutionRequest":
+    """Deserializes an ExecutionRequest from a synchronous stream of chunks."""
+    # SECURITY WARNING: cloudpickle.loads executes arbitrary code via __reduce__
+    # during deserialization. In production across untrusted boundaries, verify
+    # ALTS/mTLS transport identity or cryptographic HMAC signatures before
+    # calling deserialize_chunks(). Where dynamic function shipping is not
+    # needed, use `pickle.Unpickler` (`find_class`) to whitelist only trusted
+    # domain data types (`int`, `str`, `dict`, `list`, `data_types.*`).
+    return cls(*_deserialize_from_chunks(chunks))
+
+  @classmethod
+  async def deserialize_async_chunks(
+      cls, chunks: AsyncIterable[bytes]
+  ) -> "ExecutionRequest":
+    """Deserializes an ExecutionRequest from an async stream of chunks."""
+    return cls(*(await _deserialize_from_async_chunks(chunks)))
 
 
 class ExecutionResponse:
@@ -166,51 +380,57 @@ class ExecutionResponse:
     self.retryable = retryable
     self.request_id = request_id
 
-  def serialize(self) -> bytes:
+  def _as_tuple(self) -> Tuple[Any, ...]:
+    return (
+        self.result,
+        self.error_message,
+        self.error_type,
+        self.traceback,
+        self.retryable,
+        self.request_id,
+    )
+
+  def _record_serialization_error(self, e: Exception) -> None:
+    err_msg = (
+        f"failed to serialize result of type {type(self.result).__name__}: {e}"
+    )
+    self.result = None
+    self.error_message = err_msg
+    self.error_type = "ExecutionResponseSerializationError"
+    self.traceback = traceback_lib.format_exc()
+    self.retryable = False
+
+  def serialize_chunks(
+      self, chunk_size: int = _STREAM_CHUNK_BYTES
+  ) -> Iterator[bytes]:
+    """Serializes response into Pickle Protocol 5 out-of-band buffer chunks."""
     try:
-      return cloudpickle.dumps((
-          self.result,
-          self.error_message,
-          self.error_type,
-          self.traceback,
-          self.retryable,
-          self.request_id,
-      ))
+      return _iter_serialized_chunks(self._as_tuple(), chunk_size=chunk_size)
     except Exception as e:  # pylint: disable=broad-exception-caught
-      err_msg = (
-          "failed to serialize result of type"
-          f" {type(self.result).__name__}: {e}"
-      )
-      self.result = None
-      self.error_message = err_msg
-      self.error_type = "ExecutionResponseSerializationError"
-      self.traceback = traceback_lib.format_exc()
-      self.retryable = False
-      return cloudpickle.dumps((
-          self.result,
-          self.error_message,
-          self.error_type,
-          self.traceback,
-          self.retryable,
-          self.request_id,
-      ))
+      self._record_serialization_error(e)
+      return _iter_serialized_chunks(self._as_tuple(), chunk_size=chunk_size)
 
   @classmethod
-  def deserialize(cls, payload: bytes) -> "ExecutionResponse":
-    # SECURITY WARNING: cloudpickle.loads executes arbitrary code during unpickling. Ensure
-    # payload authenticity over trusted channels before deserialization, or use custom
-    # `pickle.Unpickler` (`find_class`) to whitelist only trusted domain data types.
-    result, err_msg, err_type, tb, retryable, request_id = cloudpickle.loads(
-        payload
+  def deserialize_chunks(cls, chunks: Iterable[bytes]) -> "ExecutionResponse":
+    """Deserializes an ExecutionResponse from a synchronous stream of chunks."""
+    # SECURITY WARNING: cloudpickle.loads executes arbitrary code during
+    # unpickling. Ensure payload authenticity over trusted channels before
+    # deserialization, or use custom `pickle.Unpickler` (`find_class`) to
+    # whitelist only trusted domain data types.
+    return cls(*_deserialize_from_chunks(chunks))
+
+  @classmethod
+  async def deserialize_async_chunks(
+      cls,
+      chunks: AsyncIterable[bytes],
+      *,
+      allow_empty: bool = False,
+  ) -> Optional["ExecutionResponse"]:
+    """Deserializes an ExecutionResponse from an async stream of chunks."""
+    unpacked = await _deserialize_from_async_chunks(
+        chunks, allow_empty=allow_empty
     )
-    return cls(
-        result=result,
-        error_message=err_msg,
-        error_type=err_type,
-        traceback=tb,
-        retryable=retryable,
-        request_id=request_id,
-    )
+    return None if unpacked is None else cls(*unpacked)
 
   def unwrap(self) -> Any:
     """Returns the result, or raises RuntimeError if the remote call failed."""
@@ -381,15 +601,29 @@ class InProcessRemoteExecutionServer(RemoteExecutionServer):
 class GrpcRemoteExecutionServer(RemoteExecutionServer):
   """RemoteExecutionServer implementation speaking gRPC over physical TCP sockets."""
 
-  def __init__(self, instance: Optional[Any] = None):
+  def __init__(
+      self,
+      instance: Optional[Any] = None,
+      *,
+      stream_chunk_bytes: int = _STREAM_CHUNK_BYTES,
+      max_message_bytes: int = _MAX_MESSAGE_BYTES,
+  ):
+    _validate_stream_config(stream_chunk_bytes, max_message_bytes)
     super().__init__(instance)
     self._server: Optional[Any] = None
     self._serve_loop: Optional[Any] = None
+    self._stream_chunk_bytes = stream_chunk_bytes
+    self._max_message_bytes = max_message_bytes
 
-  async def _handle_execute(self, request_bytes: bytes, context: Any) -> bytes:
+  async def _handle_execute(
+      self, request_iterator: AsyncIterator[bytes], context: Any
+  ) -> AsyncIterator[bytes]:
+    """Handles bidirectional chunked streaming execution requests."""
     del context
     try:
-      request = ExecutionRequest.deserialize(request_bytes)
+      request = await ExecutionRequest.deserialize_async_chunks(
+          request_iterator
+      )
       response = await self.execute_request(request)
     except Exception as e:  # pylint: disable=broad-exception-caught
       response = ExecutionResponse(
@@ -397,50 +631,65 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
           error_type=type(e).__name__,
           traceback=traceback_lib.format_exc(),
       )
-    return response.serialize()
+    for chunk in response.serialize_chunks(
+        chunk_size=self._stream_chunk_bytes
+    ):
+      yield chunk
 
   async def _handle_dispatch_task(
-      self, request_bytes: bytes, context: Any
+      self, request_iterator: AsyncIterator[bytes], context: Any
   ) -> bytes:
     del context
-    request = ExecutionRequest.deserialize(request_bytes)
+    request = await ExecutionRequest.deserialize_async_chunks(request_iterator)
     request_id = await self.dispatch_task(request)
     return cloudpickle.dumps(request_id)
 
   async def _handle_poll_responses(
       self, request_bytes: bytes, context: Any
-  ) -> bytes:
+  ) -> AsyncIterator[bytes]:
+    """Handles server-streaming long-polling for completed task responses."""
     del context
     timeout_s = (
-        cloudpickle.loads(request_bytes)
+        cloudpickle.loads(request_bytes)  # pylint: disable=g-unsafe-pickle-load
         if request_bytes
         else LONG_POLL_TIMEOUT_S
     )
     response = await self.poll_response(timeout_s=timeout_s)
     if response is None:
-      return b""
-    return response.serialize()
+      return
+    completed = False
+    try:
+      for chunk in response.serialize_chunks(
+          chunk_size=self._stream_chunk_bytes
+      ):
+        yield chunk
+      completed = True
+    finally:
+      if not completed:
+        self._get_response_queue().put_nowait(response)
 
   async def start_serving_async(self, port: int = 50051) -> Any:
     """Starts an asynchronous gRPC server listening on [::]:port."""
     if not _GRPC_AVAILABLE or _grpc_lib is None or _grpc_aio_lib is None:
       raise RuntimeError("grpc is not installed or available.")
 
-    self._server = _grpc_aio_lib.server(options=_grpc_options())
+    self._server = _grpc_aio_lib.server(
+        options=_grpc_options(self._max_message_bytes)
+    )
     handler = _grpc_lib.method_handlers_generic_handler(
         "tunix.ExecutionService",
         {
-            "Execute": _grpc_lib.unary_unary_rpc_method_handler(
+            "Execute": _grpc_lib.stream_stream_rpc_method_handler(
                 self._handle_execute,
                 request_deserializer=lambda b: b,
                 response_serializer=lambda b: b,
             ),
-            "DispatchTask": _grpc_lib.unary_unary_rpc_method_handler(
+            "DispatchTask": _grpc_lib.stream_unary_rpc_method_handler(
                 self._handle_dispatch_task,
                 request_deserializer=lambda b: b,
                 response_serializer=lambda b: b,
             ),
-            "PollResponses": _grpc_lib.unary_unary_rpc_method_handler(
+            "PollResponses": _grpc_lib.unary_stream_rpc_method_handler(
                 self._handle_poll_responses,
                 request_deserializer=lambda b: b,
                 response_serializer=lambda b: b,
@@ -498,11 +747,16 @@ class ActorHandle(abc.ABC):
       target_address: str,
       *,
       rpc_timeout_s: Optional[float] = RPC_TIMEOUT_S,
+      stream_chunk_bytes: int = _STREAM_CHUNK_BYTES,
+      max_message_bytes: int = _MAX_MESSAGE_BYTES,
   ) -> "ActorHandle":
     """Instantiates a remote actor handle targeting the specified string URI."""
     if target_address.startswith("grpc://") and _GRPC_AVAILABLE:
       return GrpcRemoteActorHandle(
-          target_address=target_address, rpc_timeout_s=rpc_timeout_s
+          target_address=target_address,
+          rpc_timeout_s=rpc_timeout_s,
+          stream_chunk_bytes=stream_chunk_bytes,
+          max_message_bytes=max_message_bytes,
       )
     return RemoteActorHandle(target_address=target_address)
 
@@ -586,14 +840,22 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
       target_address: str,
       *,
       rpc_timeout_s: Optional[float] = RPC_TIMEOUT_S,
+      stream_chunk_bytes: int = _STREAM_CHUNK_BYTES,
+      max_message_bytes: int = _MAX_MESSAGE_BYTES,
   ):
     if not _GRPC_AVAILABLE or _grpc_aio_lib is None:
       raise RuntimeError("grpc is not installed or available.")
+    _validate_stream_config(stream_chunk_bytes, max_message_bytes)
     self.target_address = target_address
     self._host_port = target_address.replace("grpc://", "")
     self._channel: Optional[Any] = None
+    self._channel_loop: Optional[Any] = None
     self._rpc: Optional[Any] = None
+    self._dispatch_rpc: Optional[Any] = None
+    self._poll_rpc: Optional[Any] = None
     self._rpc_timeout_s = rpc_timeout_s
+    self._stream_chunk_bytes = stream_chunk_bytes
+    self._max_message_bytes = max_message_bytes
     # Blocking submit() runs on a persistent background event loop so repeated
     # calls reuse one channel. gRPC aio channels are bound to the loop that
     # created them, so they cannot be shared with the caller's async loop nor
@@ -605,20 +867,54 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     self._sync_lock = threading.Lock()
 
   def _make_rpc(self, channel: Any) -> Any:
-    return channel.unary_unary(
+    return channel.stream_stream(
         "/tunix.ExecutionService/Execute",
-        request_serializer=lambda req: req.serialize(),
-        response_deserializer=lambda b: ExecutionResponse.deserialize(b),
+        request_serializer=lambda b: b,
+        response_deserializer=lambda b: b,
     )
 
-  def _get_rpc(self) -> Any:
-    if self._rpc is None:
-      assert _grpc_aio_lib is not None
+  def _ensure_async_channel(self) -> Any:
+    """Ensures the async gRPC channel and stubs are bound to the active loop."""
+    assert _grpc_aio_lib is not None
+    current_loop = _running_loop()
+    if (
+        self._channel is None
+        or self._channel_loop is not current_loop
+        or (self._channel_loop is not None and self._channel_loop.is_closed())
+    ):
       self._channel = _grpc_aio_lib.insecure_channel(
-          self._host_port, options=_grpc_options()
+          self._host_port, options=_grpc_options(self._max_message_bytes)
       )
+      self._channel_loop = current_loop
       self._rpc = self._make_rpc(self._channel)
-    return self._rpc
+      self._dispatch_rpc = self._channel.stream_unary(
+          "/tunix.ExecutionService/DispatchTask",
+          request_serializer=lambda b: b,
+          response_deserializer=cloudpickle.loads,  # pylint: disable=g-unsafe-pickle-load
+      )
+      self._poll_rpc = self._channel.unary_stream(
+          "/tunix.ExecutionService/PollResponses",
+          request_serializer=cloudpickle.dumps,
+          response_deserializer=lambda b: b,
+      )
+    return self._channel
+
+  async def _execute_rpc(
+      self,
+      rpc: Any,
+      method_name: Optional[str],
+      args: Sequence[Any],
+      kwargs: Dict[str, Any],
+  ) -> Any:
+    """Streams an ExecutionRequest over `rpc` and unwraps the ExecutionResponse."""
+    request = ExecutionRequest(
+        method_name=method_name, args=args, kwargs=kwargs
+    )
+    chunks = request.serialize_chunks(chunk_size=self._stream_chunk_bytes)
+    call = rpc(chunks, timeout=self._rpc_timeout_s)
+    response = await ExecutionResponse.deserialize_async_chunks(call)
+    assert response is not None
+    return response.unwrap()
 
   def submit(self, method_name: Optional[str] = None, *args, **kwargs) -> Any:
     """Blocking gRPC invocation; safe to call repeatedly.
@@ -660,43 +956,17 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     assert _grpc_aio_lib is not None
     if self._sync_rpc is None:
       self._sync_channel = _grpc_aio_lib.insecure_channel(
-          self._host_port, options=_grpc_options()
+          self._host_port, options=_grpc_options(self._max_message_bytes)
       )
       self._sync_rpc = self._make_rpc(self._sync_channel)
-    request = ExecutionRequest(
-        method_name=method_name, args=args, kwargs=kwargs
-    )
-    response: ExecutionResponse = await self._sync_rpc(
-        request, timeout=self._rpc_timeout_s
-    )
-    return response.unwrap()
+    return await self._execute_rpc(self._sync_rpc, method_name, args, kwargs)
 
   async def asubmit(
       self, method_name: Optional[str] = None, *args, **kwargs
   ) -> Any:
     """Asynchronously invokes remote method over gRPC."""
-    rpc = self._get_rpc()
-    request = ExecutionRequest(
-        method_name=method_name, args=args, kwargs=kwargs
-    )
-    response: ExecutionResponse = await rpc(
-        request, timeout=self._rpc_timeout_s
-    )
-    return response.unwrap()
-
-  def _make_dispatch_task_rpc(self, channel: Any) -> Any:
-    return channel.unary_unary(
-        "/tunix.ExecutionService/DispatchTask",
-        request_serializer=lambda req: req.serialize(),
-        response_deserializer=lambda b: cloudpickle.loads(b),
-    )
-
-  def _make_poll_responses_rpc(self, channel: Any) -> Any:
-    return channel.unary_unary(
-        "/tunix.ExecutionService/PollResponses",
-        request_serializer=lambda b: cloudpickle.dumps(b),
-        response_deserializer=lambda b: b,
-    )
+    self._ensure_async_channel()
+    return await self._execute_rpc(self._rpc, method_name, args, kwargs)
 
   async def dispatch_task(
       self,
@@ -706,33 +976,33 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
       **kwargs,
   ) -> str:
     """Asynchronously dispatches task request on remote server, returning task ACK ID."""
-    if self._channel is None:
-      self._get_rpc()
-    assert self._channel is not None
-    rpc = self._make_dispatch_task_rpc(self._channel)
+    self._ensure_async_channel()
+    assert self._dispatch_rpc is not None
     request = ExecutionRequest(
         request_id=request_id, method_name=method_name, args=args, kwargs=kwargs
     )
-    return await rpc(request, timeout=self._rpc_timeout_s)
+    chunks = request.serialize_chunks(chunk_size=self._stream_chunk_bytes)
+    return await self._dispatch_rpc(chunks, timeout=self._rpc_timeout_s)
 
   async def poll_responses(
       self, timeout_s: float = LONG_POLL_TIMEOUT_S
   ) -> Optional[ExecutionResponse]:
     """Long-polls remote server response queue for completed task results."""
-    if self._channel is None:
-      self._get_rpc()
-    assert self._channel is not None
-    rpc = self._make_poll_responses_rpc(self._channel)
-    resp_bytes = await rpc(timeout_s, timeout=self._rpc_timeout_s)
-    if not resp_bytes:
-      return None
-    return ExecutionResponse.deserialize(resp_bytes)
+    self._ensure_async_channel()
+    assert self._poll_rpc is not None
+    call = self._poll_rpc(timeout_s, timeout=self._rpc_timeout_s)
+    return await ExecutionResponse.deserialize_async_chunks(
+        call, allow_empty=True
+    )
 
   async def close(self) -> None:
     if self._channel is not None:
       await self._channel.close()
       self._channel = None
+      self._channel_loop = None
       self._rpc = None
+      self._dispatch_rpc = None
+      self._poll_rpc = None
     sync_loop = self._sync_loop
     if sync_loop is not None:
 

@@ -97,6 +97,48 @@ class RLLearnerTest(parameterized.TestCase):
           learner._compute_logps_micro_batch_size, expected_compute_logps_micro
       )
 
+  def test_sequence_packing_ignores_train_micro_batch_size(self):
+    config = rl_engine_lib.RLTrainingConfig(
+        actor_optimizer=optax.sgd(1e-3),
+        mini_batch_size=8,
+        train_micro_batch_size=3,
+        rollout_micro_batch_size=None,
+        compute_logps_micro_batch_size=None,
+        max_seq_token_per_tpu=128,
+        eval_every_n_steps=1,
+        max_steps=1,
+    )
+
+    actor_model = DummyModel()
+    rollout_model = DummyModel()
+    mock_engine = mock.MagicMock()
+    mock_engine.actor_trainer.model = actor_model
+    mock_engine.rollout.model.return_value = rollout_model
+    mock_engine.cluster_config.training_config = config
+    mock_engine.cluster_config.rollout_config.max_prompt_length = 32
+    mock_engine.cluster_config.rollout_config.max_tokens_to_generate = 32
+    mock_engine.actor_trainer.train_steps = 0
+    mock_engine.actor_trainer.iter_steps = 0
+
+    learner = DummyLearner(
+        rl_engine=mock_engine,
+        algo_config=DummyConfig(),
+        reward_fns=lambda prompts, completions, **kwargs: [1.0] * len(prompts),
+    )
+    self.assertTrue(learner._packing_enabled)
+
+    full_batch_size = 32
+    train_ds = [{'prompts': [''] * full_batch_size}]
+    with mock.patch.object(learner, '_run_global_step') as mock_global_step:
+      mock_engine.actor_trainer.train_steps = 1
+      learner.train(train_ds)
+
+    self.assertEqual(learner._rollout_micro_batch_size, 8)
+    self.assertEqual(learner._compute_logps_micro_batch_size, 8)
+    mock_global_step.assert_called_once()
+    # Arg 3 of _run_global_step is iterator_steps_per_mini_batch (8 // 8 == 1)
+    self.assertEqual(mock_global_step.call_args.args[3], 1)
+
 
 if __name__ == '__main__':
   absltest.main()

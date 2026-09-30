@@ -412,7 +412,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           max_response_length=args.max_response_length,
           temperature=args.temperature,
           top_p=args.top_p,
-          top_k=None if args.top_k < 0 else args.top_k,
+          top_k=0 if args.top_k < 0 else args.top_k,
           action_compat_mode=args.action_compat_mode,
           episode_timeout_secs=args.episode_timeout_secs,
           step_timeout_secs=args.step_timeout_secs,
@@ -425,6 +425,12 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       ),
       max_steps=args.max_steps,
       reward_fns=[],
+      generation_args=datatypes.GenerationArgs(
+          temperature=args.temperature,
+          top_p=args.top_p,
+          top_k=0 if args.top_k < 0 else args.top_k,
+          return_logprobs=args.use_rollout_logps,
+      ),
       batch_size=args.batch_size,
       batch_config=batch_assembly.BatchConfig(
           pad_id=pad_id,

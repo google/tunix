@@ -2556,6 +2556,39 @@ class TokenIdsTest(parameterized.TestCase):
     source[:] = 9
     np.testing.assert_array_equal(result, [0, 4, 0, 5])
 
+  def test_resolve_prompt_tokens_accepts_numpy_string_array(self):
+    seen_types = []
+
+    def fake_tokenize(s: str):
+      seen_types.append(type(s))
+      return [ord(c) for c in s]
+
+    prompts = np.array(["ab", "cde"])
+    tokens = utils.resolve_prompt_tokens(prompts, None, fake_tokenize)
+    self.assertLen(tokens, 2)
+    np.testing.assert_array_equal(tokens[0], [97, 98])
+    np.testing.assert_array_equal(tokens[1], [99, 100, 101])
+    self.assertEqual(seen_types, [str, str])
+
+  def test_resolve_prompt_tokens_rejects_empty_numpy_arrays(self):
+    with self.assertRaisesRegex(ValueError, "input_strings must not be empty"):
+      utils.resolve_prompt_tokens(
+          np.array([], dtype=str), None, lambda s: [1]
+      )
+    with self.assertRaisesRegex(
+        ValueError, "prompt_token_ids must not be empty"
+    ):
+      utils.resolve_prompt_tokens(
+          None, np.zeros((0, 2), dtype=np.int32), lambda s: [1]
+      )
+
+  def test_resolve_prompt_tokens_accepts_2d_numpy_prompt_token_ids(self):
+    prompt_ids = np.array([[1, 2, 3], [4, 5, 6]], dtype=np.int32)
+    tokens = utils.resolve_prompt_tokens(None, prompt_ids, lambda s: [1])
+    self.assertLen(tokens, 2)
+    np.testing.assert_array_equal(tokens[0], [1, 2, 3])
+    np.testing.assert_array_equal(tokens[1], [4, 5, 6])
+
 
 if __name__ == "__main__":
   absltest.main()
