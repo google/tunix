@@ -26,6 +26,7 @@ Continuously monitors the cluster namespace for:
    - JobSets with terminalState == 'Failed' -> delete JobSet and sibling workers matching run prefix.
    - Workload pods (orch, train, roll) that are marked Running by K8s but have crashed -> delete JobSet group.
    - Workload pods in CrashLoopBackOff or terminated with non-zero exit code -> delete JobSet group.
+   - Workload pods with a native sidecar (init container) in CrashLoopBackOff -> delete JobSet group.
    - Failed batch/v1 Jobs -> delete Jobs.
 3. Safety invariants:
    - NEVER kill healthy workloads quietly computing rollouts (no silence timeouts).
@@ -638,6 +639,18 @@ def reap_failed_crashed_hung_jobs(custom_api, batch_api, core_api):
           ):
             is_crashed = True
             crash_reason = f"Container {cs.name} terminated with exit code {cs.state.terminated.exit_code}"
+            break
+
+      # Native sidecars (FAIL_FAST=true puts pathways-rm/pathways-proxy in
+      # initContainers) report here. Only CrashLoopBackOff counts: sidecars are
+      # SIGTERMed whenever the main container exits, so their exit codes are
+      # not a crash signal. A sidecar crash-looping before main starts leaves
+      # the pod Pending in Init:CrashLoopBackOff, which nothing else catches.
+      if not is_crashed and pod.status.init_container_statuses:
+        for cs in pod.status.init_container_statuses:
+          if cs.state.waiting and cs.state.waiting.reason == "CrashLoopBackOff":
+            is_crashed = True
+            crash_reason = f"Init container {cs.name} in CrashLoopBackOff"
             break
 
       if is_crashed:

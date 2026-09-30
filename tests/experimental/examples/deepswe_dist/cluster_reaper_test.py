@@ -174,8 +174,13 @@ class ClusterReaperTest(absltest.TestCase):
     self.assertNotIn("pool-oh-atwigg-oh-rr-1234", deleted_names)
     self.assertNotIn("oh-atwigg-oh-rr-1234", deleted_names)
 
-  def _run_zombie_detector(self, exit_code: int) -> list[str]:
-    """Runs the reaper on one terminated rollout pod; returns deleted names."""
+  def _run_zombie_detector(
+      self,
+      container_statuses: list[types.SimpleNamespace],
+      init_container_statuses: list[types.SimpleNamespace] | None = None,
+      phase: str = "Failed",
+  ) -> list[str]:
+    """Runs the reaper on one rollout pod; returns deleted JobSet names."""
     custom_api = mock.MagicMock()
     batch_api = mock.MagicMock()
     core_api = mock.MagicMock()
@@ -197,16 +202,9 @@ class ClusterReaperTest(absltest.TestCase):
             creation_timestamp=now - datetime.timedelta(minutes=30),
         ),
         status=types.SimpleNamespace(
-            phase="Failed",
-            container_statuses=[
-                types.SimpleNamespace(
-                    name="main",
-                    state=types.SimpleNamespace(
-                        waiting=None,
-                        terminated=types.SimpleNamespace(exit_code=exit_code),
-                    ),
-                )
-            ],
+            phase=phase,
+            container_statuses=container_statuses,
+            init_container_statuses=init_container_statuses,
         ),
     )
     core_api.list_namespaced_pod.return_value.items = [pod]
@@ -220,13 +218,79 @@ class ClusterReaperTest(absltest.TestCase):
 
   def test_startup_retry_exit_code_is_not_a_crash(self):
     self.assertEmpty(
-        self._run_zombie_detector(cluster_reaper.STARTUP_RETRY_EXIT_CODE)
+        self._run_zombie_detector(
+            [_terminated("main", cluster_reaper.STARTUP_RETRY_EXIT_CODE)]
+        )
     )
 
   def test_nonzero_exit_code_tears_down_run(self):
     self.assertCountEqual(
-        self._run_zombie_detector(1), ["run-orch", "run-train", "run-roll-0"]
+        self._run_zombie_detector([_terminated("main", 1)]),
+        ["run-orch", "run-train", "run-roll-0"],
     )
+
+  def test_sidecar_crash_loop_before_main_starts_tears_down_run(self):
+    # Init:CrashLoopBackOff: main never started, pod stays Pending.
+    self.assertCountEqual(
+        self._run_zombie_detector(
+            [_waiting("main", "PodInitializing")],
+            init_container_statuses=[
+                _waiting("pathways-rm", "CrashLoopBackOff"),
+                _running("pathways-proxy"),
+            ],
+            phase="Pending",
+        ),
+        ["run-orch", "run-train", "run-roll-0"],
+    )
+
+  def test_sidecar_terminated_by_sigterm_is_not_a_crash(self):
+    # Sidecars get SIGTERM (143) whenever main exits; main's own exit code
+    # decides. Here main exited 75 (startup retry), so nothing is torn down.
+    self.assertEmpty(
+        self._run_zombie_detector(
+            [_terminated("main", cluster_reaper.STARTUP_RETRY_EXIT_CODE)],
+            init_container_statuses=[
+                _terminated("pathways-rm", 143),
+                _terminated("pathways-proxy", 143),
+            ],
+        )
+    )
+
+  def test_healthy_sidecars_are_not_a_crash(self):
+    self.assertEmpty(
+        self._run_zombie_detector(
+            [_running("main")],
+            init_container_statuses=[
+                _running("pathways-rm"),
+                _running("pathways-proxy"),
+            ],
+            phase="Running",
+        )
+    )
+
+
+def _state(
+    waiting: types.SimpleNamespace | None = None,
+    terminated: types.SimpleNamespace | None = None,
+) -> types.SimpleNamespace:
+  return types.SimpleNamespace(waiting=waiting, terminated=terminated)
+
+
+def _terminated(name: str, exit_code: int) -> types.SimpleNamespace:
+  return types.SimpleNamespace(
+      name=name,
+      state=_state(terminated=types.SimpleNamespace(exit_code=exit_code)),
+  )
+
+
+def _waiting(name: str, reason: str) -> types.SimpleNamespace:
+  return types.SimpleNamespace(
+      name=name, state=_state(waiting=types.SimpleNamespace(reason=reason))
+  )
+
+
+def _running(name: str) -> types.SimpleNamespace:
+  return types.SimpleNamespace(name=name, state=_state())
 
 
 def _sandbox_obj(
@@ -275,7 +339,9 @@ def _workload_pod(jobset: str, age_min: float) -> types.SimpleNamespace:
           deletion_timestamp=None,
           creation_timestamp=now - datetime.timedelta(minutes=age_min),
       ),
-      status=types.SimpleNamespace(phase="Running", container_statuses=[]),
+      status=types.SimpleNamespace(
+          phase="Running", container_statuses=[], init_container_statuses=None
+      ),
   )
 
 
