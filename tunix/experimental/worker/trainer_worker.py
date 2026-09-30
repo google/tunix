@@ -31,7 +31,7 @@ from tunix.rl import common as rl_common
 WorkerState = datatypes.WorkerState
 
 
-def _with_dense_routing(payload: Any) -> Any:
+def _with_dense_routing(payload: datatypes.TrainerPayload) -> datatypes.TrainerPayload:
   """Returns `payload` with any `CompactRoutedExperts` materialized to dense.
 
   Batch assemblers ship routing compactly so its padding never crosses the RPC;
