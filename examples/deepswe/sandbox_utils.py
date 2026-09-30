@@ -22,6 +22,7 @@ import atexit
 import collections
 import concurrent.futures
 import dataclasses
+import hashlib
 import logging
 import os
 import re
@@ -30,7 +31,7 @@ from typing import Any, Callable
 import numpy as np
 
 _GLOBAL_FLEET = None
-_FLEET_LOCK = threading.Lock()
+_FLEET_LOCK = threading.RLock()
 _PATCH_LOCK = threading.Lock()
 _R2EGYM_PATCHED = False
 
@@ -243,6 +244,76 @@ class SandboxFailFastConfig:
     return config
 
 
+def ensure_tasks_in_fleet_plan(
+    fleet_inst: Any,
+    tasks: list[Any] | None,
+    scaffold: str = "r2egym",
+    image_rewrite: Any | None = None,
+) -> None:
+  """Ensures all task images in `tasks` are present in `fleet_inst.plan_`.
+
+  When rollout workers initialize `SandboxFleet` lazily per episode via
+  `init_global_fleet(tasks=[entry])`, subsequent episodes on the same worker
+  reuse the singleton `_GLOBAL_FLEET`. If a new episode's image is not added to
+  `fleet_inst.plan_`, `fleet.acquire(task)` treats it as `on_demand=True` and
+  calls `_ensure_pool` -> `ensure_template` (without `owner_run_id`), which
+  re-labels the orchestrator's `SandboxTemplate` with the rollout worker's
+  `run_id`. That causes the orchestrator to skip template deletion on unwarm
+  and later crash with `OwnedByAnotherRunError` / `FleetError` when re-warming
+  the same image in a subsequent batch.
+  """
+  if fleet_inst is None or not tasks:
+    return
+  with _FLEET_LOCK:
+    image_rewrite_fn = get_image_rewrite_fn(
+        image_rewrite or getattr(fleet_inst, "_image_rewrite_fn", None)
+    )
+    normalized_tasks = normalize_tasks_for_fleet(
+        tasks, scaffold=scaffold, image_rewrite=image_rewrite_fn
+    )
+    if not normalized_tasks:
+      return
+
+    plan_obj = getattr(fleet_inst, "plan_", None)
+    for_image_fn = getattr(plan_obj, "for_image", None)
+    if callable(for_image_fn):
+      missing = [
+          t
+          for t in normalized_tasks
+          if getattr(t, "image", None) and for_image_fn(t.image) is None
+      ]
+      if not missing:
+        return
+    else:
+      missing = list(normalized_tasks)
+
+    existing_tasks = list(getattr(fleet_inst, "tasks", None) or [])
+    existing_images = {
+        getattr(t, "image", None) for t in existing_tasks if hasattr(t, "image")
+    }
+    new_tasks = []
+    for t in missing:
+      img = getattr(t, "image", None)
+      if img not in existing_images:
+        new_tasks.append(t)
+        if img is not None:
+          existing_images.add(img)
+    if not new_tasks and plan_obj is not None:
+      return
+
+    combined_tasks = existing_tasks + new_tasks
+    if hasattr(fleet_inst, "load_tasks"):
+      if image_rewrite_fn is not None:
+        try:
+          fleet_inst.load_tasks(combined_tasks, image_rewrite=image_rewrite_fn)
+        except TypeError:
+          fleet_inst.load_tasks(combined_tasks)
+      else:
+        fleet_inst.load_tasks(combined_tasks)
+    if hasattr(fleet_inst, "plan"):
+      fleet_inst.plan()
+
+
 def init_global_fleet(
     tasks: list[Any] | None = None,
     max_concurrency: int = 128,
@@ -258,6 +329,13 @@ def init_global_fleet(
   global _GLOBAL_FLEET
   with _FLEET_LOCK:
     if _GLOBAL_FLEET is not None:
+      if tasks is not None:
+        ensure_tasks_in_fleet_plan(
+            _GLOBAL_FLEET,
+            tasks,
+            scaffold=scaffold,
+            image_rewrite=image_rewrite,
+        )
       return _GLOBAL_FLEET
 
     patch_r2egym_for_agent_sandbox()
@@ -367,6 +445,29 @@ def init_global_fleet(
 
     fleet_cfg = FleetConfig(**fleet_kwargs)
     fleet_inst = SandboxFleet(fleet_cfg)
+
+    # Share a deterministic per-job run_id across the orchestrator and rollout
+    # workers so on-demand template reconciliation never stamps a conflicting
+    # run-id onto the orchestrator's SandboxTemplates (OwnedByAnotherRunError).
+    run_id_seed = os.getenv("ASRL_RUN_ID") or clean_job or orchestrator_id
+    if run_id_seed:
+      shared_run_id = hashlib.sha256(run_id_seed.encode("utf-8")).hexdigest()[:12]
+      run_id_label = "agents.x-k8s.io/asrl-run-id"
+      try:
+        from agent_sandbox_rl import constants as asrl_constants  # pyrefly: ignore[missing-import]
+
+        run_id_label = getattr(asrl_constants, "RUN_ID_LABEL", run_id_label)
+      except ImportError:
+        pass
+      fleet_inst.run_id = shared_run_id
+      if isinstance(getattr(fleet_inst, "config", None), object) and isinstance(
+          getattr(fleet_inst.config, "labels", None), dict
+      ):
+        fleet_inst.config.labels[run_id_label] = shared_run_id
+      for c in getattr(fleet_inst, "registry", []):
+        res = getattr(c, "resources", None)
+        if isinstance(getattr(res, "labels", None), dict):
+          res.labels[run_id_label] = shared_run_id
 
     # Workaround for agent-sandbox-rl teardown bug: scope teardown to this run's
     # run-id selector so teardown does not delete other concurrent tenants' warm pools/templates.

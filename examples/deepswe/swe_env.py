@@ -187,6 +187,9 @@ class SWEEnv(BaseTaskEnv):
         image=task_img_str,
         metadata={"ds": self.entry},
     )
+    sandbox_utils.ensure_tasks_in_fleet_plan(
+        fleet, [task], scaffold=self.scaffold
+    )
     max_acquire_retries = (
         sandbox_utils.SandboxFailFastConfig.from_env().acquire_retries
     )
