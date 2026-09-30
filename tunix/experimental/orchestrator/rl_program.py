@@ -24,6 +24,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence, Sized
 import copy
 import dataclasses
 import os
+import threading
 import time
 from typing import Any
 
@@ -474,6 +475,9 @@ class StandardRLProgram(RLProgram):
     # gradient-accumulation order is unchanged.
     self.pipeline_train_microbatches = pipeline_train_microbatches
     self._pending_train: asyncio.Task[Any] | None = None
+    # A cancelled asyncio.to_thread leaves its worker running, so the error
+    # path's reset() must wait for any in-flight feed/flush to finish.
+    self._assembler_lock = threading.Lock()
     self.metrics_logger: MetricsLogger = MetricsLogger(metrics_logging_options)
     if trajectory_log_dir is None and metrics_logging_options is not None:
       log_dir = getattr(metrics_logging_options, "log_dir", "")
@@ -1433,12 +1437,21 @@ class StandardRLProgram(RLProgram):
 
   async def _assemble(self, fn: Callable[..., Any], *args: Any) -> Any:
     """Runs a CPU-heavy assembler call, off the event loop when pipelining."""
+
+    def _locked() -> Any:
+      with self._assembler_lock:
+        return fn(*args)
+
     if self.pipeline_train_microbatches:
-      return await asyncio.to_thread(fn, *args)
-    return fn(*args)
+      return await asyncio.to_thread(_locked)
+    return _locked()
+
+  def _reset_assembler(self) -> None:
+    with self._assembler_lock:
+      self.assembler.reset()
 
   async def _timed_train_step(
-      self, batch: Any, *, apply_optimizer: bool
+      self, batch: datatypes.RLTrainerPayload, *, apply_optimizer: bool
   ) -> tuple[Any, float]:
     assert self.engine is not None
     start = time.monotonic()
@@ -1812,7 +1825,7 @@ class StandardRLProgram(RLProgram):
       logging.error("Exception in StandardRLProgram execution: %s", exc)
       await self.raw_q.abort(exc)
       await self.scored_q.abort(exc)
-      self.assembler.reset()
+      self._reset_assembler()
       raise
     finally:
       for task in tasks:
