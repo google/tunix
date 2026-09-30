@@ -183,13 +183,13 @@ class _OneMicrobatchPerGroupAssembler:
   """Emits one microbatch per fed group; every `groups_per_update`-th is final."""
 
   def __init__(self, groups_per_update: int, events: list[str]):
-    self.groups_per_update = groups_per_update
-    self.events = events
-    self.num_generations = None
-    self.mini_batch_size = None
+    self.groups_per_update: int = groups_per_update
+    self.events: list[str] = events
+    self.num_generations: int | None = None
+    self.mini_batch_size: int | None = None
     self.feed_threads: list[threading.Thread] = []
 
-  def feed(self, items):
+  def feed(self, items: Any) -> list[batch_assembly.AssembledBatch]:
     del items
     self.feed_threads.append(threading.current_thread())
     idx = len(self.feed_threads) - 1
@@ -202,10 +202,10 @@ class _OneMicrobatchPerGroupAssembler:
         )
     ]
 
-  def flush(self):
+  def flush(self) -> list[batch_assembly.AssembledBatch]:
     return []
 
-  def reset(self, **kwargs):
+  def reset(self, **kwargs: Any) -> None:
     del kwargs
 
 
@@ -545,7 +545,9 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
-  def _pipelined_program(self, events):
+  def _pipelined_program(
+      self, events: list[str]
+  ) -> tuple[rl_program.StandardRLProgram, _OneMicrobatchPerGroupAssembler]:
     self.mock_algo.mini_batch_size = 2
     assembler = _OneMicrobatchPerGroupAssembler(2, events)
     _set_mock_poll_batches(
@@ -631,6 +633,35 @@ class RLProgramTest(absltest.TestCase):
           ],
           [False],
       )
+
+    asyncio.run(_run())
+
+  def test_pipeline_reset_waits_for_in_flight_feed(self):
+    async def _run():
+      events = []
+      program, assembler = self._pipelined_program(events)
+      in_feed = threading.Event()
+      release = threading.Event()
+
+      def slow_feed(items):
+        in_feed.set()
+        release.wait(5)
+        events.append("feed_done")
+        return []
+
+      assembler.reset = lambda **kwargs: events.append("reset")
+      feed_task = asyncio.create_task(program._assemble(slow_feed, []))
+      await asyncio.to_thread(in_feed.wait, 5)
+      # Cancelling the awaiting task does not stop the worker thread.
+      feed_task.cancel()
+      reset_thread = threading.Thread(target=program._reset_assembler)
+      reset_thread.start()
+      await asyncio.sleep(0.05)
+      self.assertEqual(events, [])
+
+      release.set()
+      reset_thread.join(5)
+      self.assertEqual(events, ["feed_done", "reset"])
 
     asyncio.run(_run())
 
