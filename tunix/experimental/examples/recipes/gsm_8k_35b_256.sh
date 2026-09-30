@@ -50,12 +50,12 @@ export TUNIX_IMAGE="${TUNIX_IMAGE:-gcr.io/cloud-tpu-multipod-dev/atwigg/trellis-
 export PROJECT="${PROJECT:-cloud-tpu-shared-capacity}"
 export REGION="${REGION:-europe-west4}"
 export CLUSTER="${CLUSTER:-bodaborg-v5p-nap}"
+export K8S_NAMESPACE="${K8S_NAMESPACE:-trellis}"
 if [[ "${DRY_RUN:-false}" != "true" ]]; then
   kubectl config use-context "gke_${PROJECT}_${REGION}_${CLUSTER}" || true
-  kubectl config set-context --current --namespace=trellis || true
+  kubectl config set-context --current --namespace="${K8S_NAMESPACE}" || true
 fi
 
-export K8S_NAMESPACE="${K8S_NAMESPACE:-trellis}"
 export KUEUE_QUEUE="${KUEUE_QUEUE:-multislice-queue}"
 export KUEUE_QUEUE_NAME="${KUEUE_QUEUE_NAME:-${KUEUE_QUEUE}}"
 export PRIORITY_CLASS="${PRIORITY_CLASS:-medium}"
