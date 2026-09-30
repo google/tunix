@@ -18,6 +18,7 @@ import json
 import logging
 import math
 import os
+import time
 from typing import Any, Callable, Iterable, Mapping, Optional
 import jax
 import numpy as np
@@ -34,6 +35,97 @@ except ImportError:
 
 _gcs_target_path: Optional[str] = None
 _local_log_path: Optional[str] = None
+# Training block state, used to keep block_start/block_stop balanced. Only
+# tracked_stats update the progress fields: block_start's samples_count is the
+# block length, not cumulative progress.
+_block_open: bool = False
+_train_stopped: bool = False
+_last_block_step: int = 0
+_last_block_samples: Optional[int] = None
+_last_block_time_ms: Optional[int] = None
+# Last checkpoint recorded via append_checkpoint_manifest (see finish_training).
+_last_checkpoint_step: int = 0
+_last_checkpoint_time_ms: Optional[int] = None
+
+
+def _reset_block_state() -> None:
+  global _block_open, _train_stopped, _last_block_step, _last_block_samples, _last_block_time_ms
+  global _last_checkpoint_step, _last_checkpoint_time_ms
+  _block_open = False
+  _train_stopped = False
+  _last_block_step = 0
+  _last_block_samples = None
+  _last_block_time_ms = None
+  _last_checkpoint_step = 0
+  _last_checkpoint_time_ms = None
+
+
+def _inspect_existing_log(local_path: str) -> None:
+  """Restores block state from an existing MLLOG file (e.g. the training log)."""
+  global _block_open, _train_stopped, _last_block_step, _last_block_samples, _last_block_time_ms
+  _reset_block_state()
+  if not os.path.exists(local_path):
+    return
+  with open(local_path, "r", encoding="utf-8") as f:
+    for line in f:
+      if ":::MLLOG " not in line:
+        continue
+      try:
+        payload = json.loads(line.split(":::MLLOG ", 1)[1])
+      except ValueError:
+        # A truncated trailing line from an interrupted upload.
+        continue
+      if not isinstance(payload, dict):
+        continue
+      key = payload.get("key")
+      metadata = payload.get("metadata")
+      if not isinstance(metadata, dict):
+        metadata = {}
+      if key == "block_start":
+        _block_open = True
+        _train_stopped = False
+        _last_block_step = int(metadata.get("step", 0))
+        _last_block_samples = None
+        _last_block_time_ms = None
+      elif key == "tracked_stats" and _block_open:
+        if "step" in metadata:
+          _last_block_step = int(metadata["step"])
+        if "samples_count" in metadata:
+          _last_block_samples = int(metadata["samples_count"])
+        _last_block_time_ms = payload.get("time_ms")
+      elif key == "block_stop":
+        _block_open = False
+        _train_stopped = True
+
+
+def _ensure_training_block_closed(
+    fallback_samples_count: Optional[int] = None,
+    fallback_time_ms: Optional[int] = None,
+) -> None:
+  """Emits the missing block_stop if a training block_start was left open.
+
+  This happens when the training process died before train_stop ran (e.g. it
+  was SIGKILLed). The block is closed at the last logged training progress.
+
+  Args:
+    fallback_samples_count: Used only if no tracked_stats were logged.
+    fallback_time_ms: Used only if no timestamp is known.
+  """
+  if not _block_open:
+    return
+  block_stop(
+      step=_last_block_step,
+      samples_count=(
+          _last_block_samples
+          if _last_block_samples is not None
+          else fallback_samples_count
+      ),
+      time_ms=(
+          _last_block_time_ms
+          if _last_block_time_ms is not None
+          else fallback_time_ms
+      ),
+  )
 
 
 def _download_from_gcs_if_exists(gcs_path: str, local_path: str) -> None:
@@ -119,8 +211,18 @@ def configure_logger(
     metric_logger_dir: Optional[str] = None,
     seed: Optional[int] = None,
     filename: Optional[str] = None,
+    append: bool = False,
 ):
-  """Configures mllog output file if metric_logger_dir or filename is provided."""
+  """Configures mllog output file if metric_logger_dir or filename is provided.
+
+  Args:
+    metric_logger_dir: Directory or file path (local or gs://) for MLLOG output.
+    seed: Run seed used to construct seed_<seed>.out when a directory is given.
+    filename: Optional explicit local filename override.
+    append: When True (offline evaluation), downloads any existing GCS log file
+      so new events append to it. When False (training initialization), starts
+      a fresh log file so training restarts do not append to aborted runs.
+  """
   global _gcs_target_path, _local_log_path
   if not (_is_master_process() and mllog is not None and mllogger is not None):
     return
@@ -150,14 +252,19 @@ def configure_logger(
     abs_filename = os.path.abspath(filename)
     _local_log_path = abs_filename
     os.makedirs(os.path.dirname(abs_filename), exist_ok=True)
-    if _gcs_target_path and not os.path.exists(abs_filename):
-      _download_from_gcs_if_exists(_gcs_target_path, abs_filename)
     existing_files = [
         os.path.abspath(getattr(h, "baseFilename", ""))
         for h in getattr(mllogger.logger, "handlers", [])
         if isinstance(h, logging.FileHandler)
     ]
     if abs_filename not in existing_files:
+      if append:
+        if _gcs_target_path and not os.path.exists(abs_filename):
+          _download_from_gcs_if_exists(_gcs_target_path, abs_filename)
+      elif os.path.exists(abs_filename):
+        # A stale log from an earlier (aborted) run of this job.
+        os.remove(abs_filename)
+      _inspect_existing_log(abs_filename)
       try:
         mllog.config(filename=filename)
       except TypeError:
@@ -201,6 +308,7 @@ def init_start(
 ):
   """Logs CACHE_CLEAR and marks the beginning of the initialization phase."""
   if _is_master_process() and mllogger is not None:
+    _reset_block_state()
     if args is not None:
       if metric_logger_dir is None:
         metric_logger_dir = getattr(args, "metric_logger_dir", None)
@@ -208,7 +316,10 @@ def init_start(
         seed = getattr(args, "seed", 1)
     if metric_logger_dir is not None or filename is not None:
       configure_logger(
-          metric_logger_dir=metric_logger_dir, seed=seed, filename=filename
+          metric_logger_dir=metric_logger_dir,
+          seed=seed,
+          filename=filename,
+          append=False,
       )
     cache_clear_key = getattr(constants, "CACHE_CLEAR", "cache_clear")
     init_start_key = getattr(constants, "INIT_START", "init_start")
@@ -232,6 +343,7 @@ def run_start():
 
 def block_start(args=None, step: int = 0, samples_count: Optional[int] = None):
   """Marks the start of a training block."""
+  global _block_open, _train_stopped, _last_block_step, _last_block_samples, _last_block_time_ms
   if _is_master_process() and mllogger is not None:
     if samples_count is None and args is not None:
       global_batch_size = getattr(args, "batch_size", 1) * getattr(args, "num_generations", 1)
@@ -249,6 +361,11 @@ def block_start(args=None, step: int = 0, samples_count: Optional[int] = None):
         key=getattr(constants, "BLOCK_START", "block_start"),
         metadata=metadata,
     )
+    _block_open = True
+    _train_stopped = False
+    _last_block_step = int(step)
+    _last_block_samples = None
+    _last_block_time_ms = None
 
 
 def train_start(args=None, step: int = 0, samples_count: Optional[int] = None):
@@ -265,6 +382,7 @@ def block_stop(
     time_ms: Optional[int] = None,
 ):
   """Marks the end of a training block."""
+  global _block_open, _train_stopped
   if _is_master_process() and mllogger is not None:
     metadata = {"step": int(step)}
     if samples_count is not None:
@@ -276,6 +394,8 @@ def block_stop(
         metadata=metadata,
         **extra_kwargs,
     )
+    _block_open = False
+    _train_stopped = True
 
 
 def train_stop(
@@ -289,6 +409,8 @@ def train_stop(
 
   run_stop is not emitted here: the offline evaluator emits it (backdated to
   the passing checkpoint's weight-update timestamp) via log_offline_eval_step.
+  Idempotent within a training block so signal/exception/normal-exit handlers
+  cannot emit duplicate block_stop events.
 
   Args:
     args: Optional namespace providing max_steps, batch_size, num_generations.
@@ -299,6 +421,8 @@ def train_stop(
       weight update.
   """
   del status
+  if _train_stopped:
+    return
   if args is not None:
     if step is None:
       step = getattr(args, "max_steps", 0)
@@ -313,6 +437,43 @@ def train_stop(
   _flush_to_gcs_if_needed()
 
 
+def finish_training(
+    args: Any,
+    status: str,
+    completed_steps: Optional[int] = None,
+    last_step_time_ms: Optional[int] = None,
+) -> None:
+  """Closes the open training block when training ends, fails or is signaled.
+
+  Safe to call from the success path, exception handlers and signal handlers:
+  it is a no-op before train_start (no block is open, so no orphan block_stop)
+  and after the block has been closed.
+
+  Args:
+    args: Namespace providing max_steps, batch_size, num_generations.
+    status: "success" or "aborted".
+    completed_steps: Optimizer steps completed according to the trainer.
+    last_step_time_ms: Timestamp (ms) of the last weight update, if known.
+  """
+  if not _block_open:
+    return
+  # A checkpoint is saved before weight sync, so it can be one step ahead of
+  # the trainer's last step result if the run is interrupted during sync.
+  step = max(completed_steps or 0, _last_checkpoint_step)
+  if step == 0 and status == "success":
+    step = getattr(args, "max_steps", 0)
+  train_stop(
+      args,
+      step=step,
+      status=status,
+      time_ms=(
+          last_step_time_ms
+          if last_step_time_ms is not None
+          else _last_checkpoint_time_ms
+      ),
+  )
+
+
 def start_eval(
     step: int = 0,
     samples_count: Optional[int] = None,
@@ -320,6 +481,10 @@ def start_eval(
 ):
   """Marks the start of an evaluation interval."""
   if _is_master_process() and mllogger is not None:
+    # eval_start must not appear inside an open training block.
+    _ensure_training_block_closed(
+        fallback_samples_count=samples_count, fallback_time_ms=time_ms
+    )
     metadata = {"step": int(step)}
     if samples_count is not None:
       metadata[getattr(constants, "SAMPLES_COUNT", "samples_count")] = int(samples_count)
@@ -489,9 +654,17 @@ def append_checkpoint_manifest(
     manifest_path: str,
     record: Mapping[str, Any],
 ) -> None:
-  """Upserts a checkpoint record (keyed by step) into a JSONL manifest."""
+  """Upserts a checkpoint record (keyed by step) into a JSONL manifest.
+
+  Also records the checkpoint as the latest training progress for
+  finish_training.
+  """
+  global _last_checkpoint_step, _last_checkpoint_time_ms
   if not manifest_path:
     return
+  if int(record["step"]) >= _last_checkpoint_step:
+    _last_checkpoint_step = int(record["step"])
+    _last_checkpoint_time_ms = record.get("timestamp_ms")
   records_by_step: dict[int, dict[str, Any]] = {}
   for line in _read_manifest_text(manifest_path).splitlines():
     if line.strip():
@@ -514,6 +687,7 @@ def check_eval(
     validation_time: Optional[float] = None,
 ) -> bool:
   """Logs an evaluation block completion, checks for early stopping, and handles next block."""
+  global _block_open, _train_stopped
   target_acc = target_accuracy if target_accuracy is not None else getattr(args, "target_accuracy", 0.69)
   is_early_stop = (target_acc is not None) and (eval_accuracy >= target_acc)
 
@@ -532,6 +706,8 @@ def check_eval(
           "step": int(step),
       },
   )
+  _block_open = False
+  _train_stopped = True
   mllogger.start(
       key=getattr(constants, "EVAL_START", "eval_start"),
       metadata={
@@ -580,6 +756,8 @@ def check_eval(
             "step": int(step),
         },
     )
+    _block_open = True
+    _train_stopped = False
 
   return is_early_stop
 
@@ -590,6 +768,7 @@ def log_tracked_stats(
     samples_count: Optional[int] = None,
 ):
   """Logs tracked training/timing metrics to the MLPerf log."""
+  global _last_block_step, _last_block_samples, _last_block_time_ms
   if _is_master_process() and mllogger is not None:
     metadata = {"step": int(step)}
     if samples_count is not None:
@@ -604,11 +783,18 @@ def log_tracked_stats(
           clean_stats[k] = v
 
     if clean_stats:
+      time_ms = int(time.time() * 1000)
       mllogger.event(
           key="tracked_stats",
           value=clean_stats,
           metadata=metadata,
+          time_ms=time_ms,
       )
+      if _block_open:
+        _last_block_step = int(step)
+        if samples_count is not None:
+          _last_block_samples = int(samples_count)
+        _last_block_time_ms = time_ms
 
 
 def _clean_metric_val(v: Any, op: Optional[Callable] = None) -> Optional[Any]:
