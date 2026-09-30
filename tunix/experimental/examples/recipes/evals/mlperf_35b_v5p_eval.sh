@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Fill these before you run.
 # k8s has a 63 char limit on total label name, so keep job_prefix unique to your job and short
