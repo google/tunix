@@ -1743,7 +1743,7 @@ class StandardRLProgram(RLProgram):
         assembler=self.assembler,
     )
 
-    if self.sync_weights:
+    if self.sync_weights and self._step == 0:
       await engine.prepare_rollout_policy(
           role=datatypes.Role.ACTOR,
           sync_weights=True,

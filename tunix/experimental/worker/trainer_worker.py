@@ -381,7 +381,15 @@ class TrainerWorker(abstract_worker.Worker):
 
   def restore_checkpoint(self, **kwargs) -> Any:
     """Restore state from latest checkpoint and return the metadata pytree."""
-    return self._trainer.restore_checkpoint(**kwargs)
+    self._ensure_ready()
+    try:
+      result = self._trainer.restore_checkpoint(**kwargs)
+      self._last_error = None
+      return result
+    except Exception as exc:
+      self._last_error = str(exc)
+      self.state = WorkerState.ERROR
+      raise
 
   def prepare_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
     """Stages weights for transfer and returns their metadata."""
