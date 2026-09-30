@@ -756,6 +756,88 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_async_weight_sync_trains_next_step_while_round_runs(self):
+    async def _run():
+      events = []
+      round_gate = asyncio.Event()
+
+      async def mock_train_step(*args, **kwargs):
+        del args, kwargs
+        events.append("train")
+        if events.count("train") == 2:
+          round_gate.set()
+        return "step_done"
+
+      async def mock_sync_weights(
+          *args, policy_version=None, source_staged=None, **kwargs
+      ):
+        del args, kwargs
+        events.append(f"sync_start:{policy_version}")
+        source_staged.set()
+        if policy_version == 1:
+          await round_gate.wait()
+        events.append(f"sync_done:{policy_version}")
+        return policy_version
+
+      self.mock_engine.train_step.side_effect = mock_train_step
+      self.mock_engine.sync_weights = mock.AsyncMock(
+          side_effect=mock_sync_weights
+      )
+      _set_mock_poll_batches(
+          self.mock_engine,
+          _make_trajectory_group("prompt_0"),
+          _make_trajectory_group("prompt_1"),
+      )
+      program = self._create_program(
+          dataset=["prompt_data_0", "prompt_data_1"],
+          max_steps=2,
+          sync_weights=True,
+          async_weight_sync=True,
+      )
+
+      await program.run_async(self.mock_engine)
+
+      # Step 1 trains while round 1 is still transferring; round 2 starts
+      # only once round 1 lands, and the run waits for round 2.
+      self.assertEqual(
+          events,
+          [
+              "train",
+              "sync_start:1",
+              "train",
+              "sync_done:1",
+              "sync_start:2",
+              "sync_done:2",
+          ],
+      )
+      self.assertEqual(program.policy_version, 2)
+      self.assertEqual(program._unsynced_steps, 0)
+      self.assertIsNone(program._pending_sync)
+
+    asyncio.run(_run())
+
+  def test_async_weight_sync_failure_fails_the_run(self):
+    async def _run():
+      async def mock_sync_weights(*args, source_staged=None, **kwargs):
+        del args, kwargs
+        source_staged.set()
+        await asyncio.sleep(0)
+        raise RuntimeError("transfer failed")
+
+      self.mock_engine.sync_weights = mock.AsyncMock(
+          side_effect=mock_sync_weights
+      )
+      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
+      program = self._create_program(
+          sync_weights=True, async_weight_sync=True
+      )
+
+      with self.assertRaisesRegex(RuntimeError, "transfer failed"):
+        await program.run_async(self.mock_engine)
+      self.assertEqual(program._unsynced_steps, 1)
+
+    asyncio.run(_run())
+
   def test_checkpoint_called_before_sync_weights(self):
     async def _run():
       call_order = []
@@ -1359,6 +1441,56 @@ class RLProgramTest(absltest.TestCase):
 
       dispatch_task.cancel()
       await asyncio.gather(dispatch_task, return_exceptions=True)
+
+    asyncio.run(_run())
+
+  def test_dispatch_window_waits_for_background_sync_to_commit(self):
+    async def _run():
+      dispatched = []
+
+      async def mock_dispatch(prompts, **kwargs):
+        del kwargs
+        dispatched.append(prompts[0]["metadata"]["batch_idx"])
+        return ["rollout"]
+
+      self.mock_engine.dispatch_rollouts.side_effect = mock_dispatch
+
+      program = rl_program.StandardRLProgram(
+          dataset=[f"prompt_{i}" for i in range(8)],
+          algo=self.mock_algo,
+          reward_fns=[lambda *_: 1.0],
+          assembler=self.assembler,
+          batch_size=2,
+          max_staleness=1,
+          async_weight_sync=True,
+      )
+      program.engine = self.mock_engine
+
+      dispatch_task = asyncio.create_task(program.rollout_dispatch_stage())
+      await asyncio.sleep(0.05)
+      self.assertEqual(dispatched, [0, 0, 1, 1])
+
+      # Step 0 trained, but its weights are still in flight: batch 2 would
+      # be generated two versions behind.
+      program._unsynced_steps = 1
+      program._step = 1
+      program._release_window()
+      await asyncio.sleep(0.05)
+      self.assertEqual(dispatched, [0, 0, 1, 1])
+
+      program._unsynced_steps = 0
+      program._release_window()
+      await asyncio.sleep(0.05)
+      self.assertEqual(dispatched, [0, 0, 1, 1, 2, 2])
+
+      # A failed round keeps the window shut and fails the dispatcher.
+      program._unsynced_steps = 1
+      program._step = 2
+      program._sync_error = RuntimeError("round failed")
+      program._release_window()
+      with self.assertRaisesRegex(RuntimeError, "round failed"):
+        await asyncio.wait_for(dispatch_task, timeout=1.0)
+      self.assertEqual(dispatched, [0, 0, 1, 1, 2, 2])
 
     asyncio.run(_run())
 

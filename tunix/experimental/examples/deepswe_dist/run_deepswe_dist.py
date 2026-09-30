@@ -175,6 +175,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
+      "--async_weight_sync",
+      action=argparse.BooleanOptionalAction,
+      default=False,
+      help=(
+          "Run each step's weight sync in the background: the trainer waits"
+          " only for the source snapshot, not the transfer. Needs a source"
+          " that transfers from host staging"
+          " (RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFER=0)."
+      ),
+  )
+  parser.add_argument(
       "--pipeline_train_microbatches",
       action=argparse.BooleanOptionalAction,
       default=False,
@@ -870,6 +881,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         checkpoint_optimizer_interval_steps=(
             args.checkpoint_optimizer_interval_steps
         ),
+        async_weight_sync=args.async_weight_sync,
         pipeline_train_microbatches=args.pipeline_train_microbatches,
         on_step_begin=lambda step: logging.info(
             ">>> DeepSWE step %d starting | policy_version=%d",

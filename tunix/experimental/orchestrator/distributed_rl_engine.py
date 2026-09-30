@@ -633,8 +633,18 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       role: datatypes.Role = datatypes.Role.ACTOR,
       target_roles: Sequence[datatypes.Role] | None = None,
       policy_version: int | None = None,
+      source_staged: asyncio.Event | None = None,
   ) -> int:
-    """Runs one weight sync round through the coordinator."""
+    """Runs one weight sync round through the coordinator.
+
+    Args:
+      role: Unused; the coordinator knows its sources.
+      target_roles: Unused; the coordinator knows its destinations.
+      policy_version: Version to push; defaults to the last one plus one.
+      source_staged: Set by the coordinator once the source has snapshotted
+        this round's weights, so a caller running the round in the background
+        knows when the trainer may step again.
+    """
     del role, target_roles
     if self._weight_sync_coordinator is None:
       raise RuntimeError(
@@ -648,8 +658,11 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         "Synchronizing weights (target policy_version=%d)...",
         next_policy_version,
     )
+    sync_kwargs = {}
+    if source_staged is not None:
+      sync_kwargs["source_staged"] = source_staged
     result = await self._weight_sync_coordinator.sync(
-        policy_version=next_policy_version
+        policy_version=next_policy_version, **sync_kwargs
     )
     self._policy_version = result.policy_version
     logging.info(
