@@ -20,6 +20,8 @@ import os
 import signal
 
 from tunix.experimental.examples.deepswe_dist import eval_deepswe
+from tunix.utils import maxtext_utils
+
 
 
 def create_worker(a):
@@ -57,38 +59,91 @@ def create_worker(a):
       path = alt_path
   if not path.exists():
     raise FileNotFoundError(f"MaxText checkpoint not found: {path}")
+  if not (path / "_METADATA").exists():
+    for subdir in ("model_params", "items", "default"):
+      candidate = path / subdir
+      if (candidate / "_METADATA").exists():
+        logging.info(
+            "Resolved composite checkpoint path %s -> %s", path, candidate
+        )
+        path = candidate
+        break
+  ckpt_prefuse_moe = False
   metadata_file = path / "_METADATA"
   if metadata_file.exists():
     try:
       import json  # pylint: disable=import-outside-toplevel
 
-      meta = json.loads(metadata_file.read_text())
+      meta_text = metadata_file.read_text()
+      meta = json.loads(meta_text)
+      if "use_ocdbt" in meta:
+        a.checkpoint_storage_use_ocdbt = bool(meta["use_ocdbt"])
       if "use_zarr3" in meta:
         a.checkpoint_storage_use_zarr3 = bool(meta["use_zarr3"])
+      if '"wi"' in meta_text:
+        ckpt_prefuse_moe = True
     except Exception as exc:  # pylint: disable=broad-exception-caught
       logging.warning("Could not read Orbax _METADATA from %s: %s", path, exc)
-  if a.use_ocdbt_with_pathways:
+  is_ocdbt = bool(
+      getattr(a, "checkpoint_storage_use_ocdbt", False)
+      or (path / "manifest.ocdbt").exists()
+  )
+  if a.use_ocdbt_with_pathways and is_ocdbt:
     from orbax.checkpoint._src.serialization import jax_array_handlers
     from orbax.checkpoint._src.serialization import type_handler_registry
 
+    logging.info(
+        "Checkpoint at %s uses OCDBT; registering standard Orbax ArrayHandler.",
+        path,
+    )
     type_handler_registry.register_type_handler(
         jax.Array, jax_array_handlers.ArrayHandler(), override=True
     )
+  else:
+    logging.info(
+        "Checkpoint at %s is not OCDBT (or use_ocdbt_with_pathways=False);"
+        " keeping registered jax.Array handler.",
+        path,
+    )
+  convert_in_memory = bool(a.scan_layers)
   mt_cfg = eval_deepswe.maxtext_config(a)
-  mt_cfg["load_parameters_path"] = str(path)
+  mt_cfg["scan_layers"] = False
+  if convert_in_memory:
+    mt_cfg.pop("load_parameters_path", None)
+  else:
+    mt_cfg["load_parameters_path"] = str(path)
   additional_config = {
       "enable_continue_decode": False,
       "maxtext_config": mt_cfg,
   }
+  raw_add_cfg = os.environ.get("VLLM_ADDITIONAL_CONFIG", "").strip()
+  if raw_add_cfg:
+    import json  # pylint: disable=import-outside-toplevel
 
-  if jax.device_count() != a.mesh_fsdp * a.mesh_tp:
+    extra_add_cfg = json.loads(raw_add_cfg)
+    if isinstance(extra_add_cfg, dict):
+      extra_mt_cfg = extra_add_cfg.get("maxtext_config")
+      if isinstance(extra_mt_cfg, dict):
+        merged_mt_cfg = dict(extra_mt_cfg)
+        merged_mt_cfg.update(mt_cfg)
+        if convert_in_memory:
+          merged_mt_cfg.pop("load_parameters_path", None)
+        mt_cfg = merged_mt_cfg
+      for k, v in extra_add_cfg.items():
+        if k != "maxtext_config":
+          additional_config[k] = v
+      additional_config["maxtext_config"] = mt_cfg
+
+  mesh_expert = a.mesh_expert
+  expected_devices = a.mesh_fsdp * a.mesh_tp * mesh_expert
+  if jax.device_count() != expected_devices:
     raise ValueError(
-        f"Expected {a.mesh_fsdp * a.mesh_tp} rollout chips; got"
+        f"Expected {expected_devices} rollout chips; got"
         f" {jax.device_count()}"
     )
   mesh = Mesh(
       mesh_utils.create_device_mesh(
-          (a.mesh_fsdp, a.mesh_tp),
+          (a.mesh_fsdp * mesh_expert, a.mesh_tp),
           jax.devices(),
           allow_split_physical_axes=True,
       ),
@@ -135,6 +190,12 @@ def create_worker(a):
     engine_kwargs["block_size"] = int(os.environ["VLLM_BLOCK_SIZE"])
   if os.environ.get("VLLM_MAMBA_CACHE_MODE"):
     engine_kwargs["mamba_cache_mode"] = os.environ["VLLM_MAMBA_CACHE_MODE"]
+  if os.environ.get("VLLM_PREFIX_CACHE_RETENTION_INTERVAL"):
+    engine_kwargs["prefix_cache_retention_interval"] = int(
+        os.environ["VLLM_PREFIX_CACHE_RETENTION_INTERVAL"]
+    )
+  if os.environ.get("VLLM_REASONING_PARSER"):
+    engine_kwargs["reasoning_parser"] = os.environ["VLLM_REASONING_PARSER"]
   if os.environ.get("VLLM_LIMIT_MM_PER_PROMPT"):
     raw_mm = os.environ["VLLM_LIMIT_MM_PER_PROMPT"].strip()
     mm_limits = {}
@@ -156,7 +217,8 @@ def create_worker(a):
       mesh=mesh,
       tensor_parallel_size=a.mesh_tp,
       data_parallel_size=a.mesh_fsdp,
-      init_with_random_weights=False,
+      expert_parallel_size=mesh_expert,
+      init_with_random_weights=convert_in_memory,
       hbm_utilization=a.vllm_utilization,
       additional_config=additional_config,
       engine_kwargs=engine_kwargs,
@@ -174,6 +236,14 @@ def create_worker(a):
       weight_sync_mode="none",
       max_concurrency=a.max_concurrent,
   )
+  if convert_in_memory:
+    maxtext_utils.load_and_convert_scanned_checkpoint(
+        path=path,
+        sampler=sampler,
+        mesh_tp=a.mesh_tp,
+        ckpt_prefuse_moe=ckpt_prefuse_moe,
+        maxtext_config_overrides=eval_deepswe.maxtext_config(a),
+    )
 
   class EvaluationWorker(rollout_worker.RolloutWorker):
     """Compact eval RPC over the same manager and collector as training."""
