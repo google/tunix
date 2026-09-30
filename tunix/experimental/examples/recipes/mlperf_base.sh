@@ -281,12 +281,7 @@ export POOL_NAME_FORMAT="${POOL_NAME_FORMAT:-}"
 export TEMPLATE_NAME_PREFIX="${TEMPLATE_NAME_PREFIX:-}"
 export SANDBOX_NODE_SELECTOR_KEY="cloud.google.com/gke-nodepool"
 export SANDBOX_NODE_SELECTOR_VAL="${SANDBOX_NODE_SELECTOR_VAL:-sandbox-np}"
-# Every generation of a prompt gets a warm sandbox (at 8, claims 9-16 of each
-# prompt waited 14-60s for a cold pod). 5 min after a batch is dispatched its
-# pools drop to SANDBOX_RETAINED_REPLICAS idle pods (claimed ones stay; =16
-# keeps them full).
-export MAX_WARMPOOL_REPLICAS="${MAX_WARMPOOL_REPLICAS:-16}"
-export SANDBOX_RETAINED_REPLICAS="${SANDBOX_RETAINED_REPLICAS:-0}"
+export MAX_WARMPOOL_REPLICAS="${MAX_WARMPOOL_REPLICAS:-2}"
 export ROLLOUT_MAX_CONCURRENCY="${ROLLOUT_MAX_CONCURRENCY:-256}"
 export MAX_CONCURRENCY="${MAX_CONCURRENCY:-256}"
 export STEP_TIMEOUT_SECS="${STEP_TIMEOUT_SECS:-300}"
