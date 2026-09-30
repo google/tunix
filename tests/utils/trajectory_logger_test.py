@@ -83,6 +83,9 @@ class TrajectoryLoggerTest(absltest.TestCase):
 
   def setUp(self):
     super().setUp()
+    # Tests see the default (heavy fields off) unless they opt in.
+    self.enter_context(mock.patch.dict(os.environ))
+    os.environ.pop('TRAJECTORY_LOG_HEAVY_FIELDS', None)
 
   def test_log_item_with_none_log_path(self):
     """Tests that log_item with log_path=None raises ValueError."""
@@ -562,6 +565,37 @@ class TrajectoryLoggerTest(absltest.TestCase):
             'nested': {'key': None},
         },
     )
+
+  def test_make_serializable_summarizes_large_arrays_by_default(self):
+    """Large numpy arrays become {shape, dtype}; small ones stay lists."""
+    size = trajectory_logger._MAX_INLINE_ARRAY_SIZE
+    sample = {
+        'routed_experts': np.zeros((size, 60, 10), dtype=np.int16),
+        'at_limit': np.arange(size, dtype=np.int32),
+        'logps': np.array([0.5, -1.25], dtype=np.float32),
+        'mask': np.array([True, False]),
+        'mixed': np.array([np.int64(3), 'x'], dtype=object),
+    }
+    serialized = trajectory_logger._make_serializable(sample)
+    self.assertEqual(
+        serialized['routed_experts'],
+        {'shape': [size, 60, 10], 'dtype': 'int16'},
+    )
+    self.assertEqual(serialized['at_limit'], list(range(size)))
+    self.assertEqual(serialized['logps'], [0.5, -1.25])
+    self.assertIsInstance(serialized['logps'][0], float)
+    self.assertEqual(serialized['mask'], [True, False])
+    self.assertEqual(serialized['mixed'], [3, 'x'])
+
+  def test_make_serializable_heavy_fields_env_serializes_in_full(self):
+    """TRAJECTORY_LOG_HEAVY_FIELDS=1 restores full serialization."""
+    arr = np.arange(2 * (trajectory_logger._MAX_INLINE_ARRAY_SIZE + 1))
+    arr = arr.reshape(2, -1).astype(np.int16)
+    with mock.patch.dict(os.environ, {'TRAJECTORY_LOG_HEAVY_FIELDS': '1'}):
+      serialized = trajectory_logger._make_serializable({'a': arr})
+    self.assertEqual(serialized['a'], arr.tolist())
+    self.assertIsInstance(serialized['a'][0][0], int)
+
 
   def test_log_trajectory_json_multiturn_conversation(self):
     """Tests that log_trajectory_json correctly extracts multi-turn conversation steps."""

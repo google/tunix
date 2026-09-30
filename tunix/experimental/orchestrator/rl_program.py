@@ -46,6 +46,20 @@ Mode = metrics_logger_lib.Mode
 BatchConfig = batch_assembly.BatchConfig
 
 
+_EXHAUSTED = object()
+
+
+def _next_or_exhausted(iterator: Any) -> Any:
+  """`next()` that returns `_EXHAUSTED` instead of raising StopIteration.
+
+  StopIteration cannot cross `asyncio.to_thread` (it becomes a TypeError).
+  """
+  try:
+    return next(iterator)
+  except StopIteration:
+    return _EXHAUSTED
+
+
 def _extract_scalar(val: Any, name: str | None = None) -> float | None:
   """Extracts a step scalar from a metric value, reducing multi-microbatch arrays by suffix."""
   if val is None:
@@ -672,9 +686,11 @@ class StandardRLProgram(RLProgram):
 
         coordinates = _prompt_coordinates(prompt_idx, self.full_batch_size)
         await self._wait_for_dispatch_window(coordinates["batch_idx"])
-        try:
-          prompt_item = next(dataset_iter)
-        except StopIteration:
+        # Off the event loop: dataset iterators such as the DeepSWE
+        # PrewarmDatasetIterator make blocking K8s calls here, which would
+        # otherwise stall the train loop and the polling stage.
+        prompt_item = await asyncio.to_thread(_next_or_exhausted, dataset_iter)
+        if prompt_item is _EXHAUSTED:
           break
         prompt_idx += 1
         last_coordinates = coordinates
@@ -1524,7 +1540,7 @@ class StandardRLProgram(RLProgram):
         # per-component timing accuracy.
         exposed_generation_time += time.monotonic() - _t_gen
         if not scored_items:
-          assembled_batches = self.assembler.flush()
+          assembled_batches = await asyncio.to_thread(self.assembler.flush)
         else:
           if groups_consumed == 0 and self.on_step_begin:
             self.on_step_begin(current_step)
@@ -1556,7 +1572,9 @@ class StandardRLProgram(RLProgram):
                   },
               )
             payloads.append(payload)
-          assembled_batches = self.assembler.feed(payloads)  # pyrefly: ignore[bad-argument-type]
+          assembled_batches = await asyncio.to_thread(
+              self.assembler.feed, payloads  # pyrefly: ignore[bad-argument-type]
+          )
 
         for mb in assembled_batches:
           batch = mb.payload
@@ -1661,6 +1679,10 @@ class StandardRLProgram(RLProgram):
         self.scored_q.commit_batch(current_batch_idx)
       else:
         self.scored_q.commit(current_step, groups=uncommitted_groups)
+      # The commit may have opened the dispatch window. Yield so the
+      # dispatcher refills the just-synced rollout workers now, rather than
+      # after this step's bookkeeping and the next step's first packing.
+      await asyncio.sleep(0)
 
       step_time_sec = time.monotonic() - step_start_time
 
