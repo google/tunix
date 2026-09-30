@@ -410,6 +410,7 @@ class CoordinatorTestBase(absltest.TestCase):
       *destinations: FakeDestination,
       sources=None,
       timeouts=None,
+      parallel_h2h: Optional[bool] = False,
   ):
     self.log: list[str] = []
     self.wire = Wire()
@@ -433,6 +434,7 @@ class CoordinatorTestBase(absltest.TestCase):
         handler=self.handler,
         controller_id="test-controller",
         timeouts=timeouts or FAST_TIMEOUTS,
+        parallel_h2h=parallel_h2h,
     )
     return self.coordinator
 
@@ -1970,6 +1972,91 @@ class PhaseTimingsAndDisabledTimeoutsRoundTest(CoordinatorTestBase):
     result = self.sync(policy_version=1)
     self.assertTrue(result.success)
     self.assertTrue(math.isinf(self.coordinator._timeouts.h2d))
+
+
+class ParallelH2HTest(CoordinatorTestBase):
+  """Tests verifying parallel H2H weight transfer and two-phase staging."""
+
+  def test_phase_order_in_parallel_h2h(self):
+    dest = FakeDestination("sampler", [])
+    self.make(dest, parallel_h2h=True)
+
+    self.sync()
+
+    self.assertEqual(
+        self.phases("sampler"),
+        ["bind", "metadata", "pre", "sync", "post"],
+    )
+    # With parallel H2H, transfer happens BEFORE destination is drained/pre'd.
+    self.assertLess(self.log.index("transfer"), self.log.index("sampler:pre"))
+    self.assertLess(self.log.index("sampler:pre"), self.log.index("sampler:sync"))
+
+  def test_destinations_admit_and_serve_during_transfer(self):
+    dest = FakeDestination("sampler", [])
+    self.make(dest, parallel_h2h=True)
+
+    admitting_during_transfer = None
+
+    original_transfer = self.handler.transfer
+    def transfer_hook(*args, **kwargs):
+      nonlocal admitting_during_transfer
+      admitting_during_transfer = dest.admitting
+      return original_transfer(*args, **kwargs)
+
+    self.handler.transfer = transfer_hook
+    self.sync()
+
+    self.assertTrue(admitting_during_transfer)
+    self.assertTrue(dest.admitting)
+
+  def test_transfer_failure_before_quiesce_needs_no_dest_abort(self):
+    dest = FakeDestination("sampler", [])
+    self.make(dest, parallel_h2h=True)
+    self.handler.result_success = False
+    self.handler.result_message = "network connection dropped"
+
+    with self.assertRaises(weight_sync_coordinator.WeightSyncError) as ctx:
+      self.sync()
+
+    self.assertIs(ctx.exception.result.state, RoundState.ABORTED)
+    # Because transfer ran before pre, the destination was NEVER quiesced.
+    # Therefore, no abort was called on the destination, and it kept admitting.
+    self.assertNotIn("abort", self.phases("sampler"))
+    self.assertTrue(dest.admitting)
+    self.assertTrue(dest.kv_cache)
+
+  def test_two_phase_start_and_commit_staging(self):
+    dest = FakeDestination("sampler", [])
+    self.make(dest, parallel_h2h=True)
+
+    async def run_two_phase():
+      handle = await self.coordinator.start_staging(policy_version=5)
+      self.assertIsInstance(handle, weight_sync_coordinator.StagingHandle)
+      # Sampler is still admitting while transfer is running in background!
+      self.assertTrue(dest.admitting)
+      # Commit the staged weights
+      result = await self.coordinator.commit_staging(handle)
+      return result
+
+    result = asyncio.run(run_two_phase())
+    self.assertTrue(result.success)
+    self.assertIs(result.state, RoundState.COMMITTED)
+    self.assertEqual(dest.serving, expected_pattern(5))
+    self.assertTrue(dest.admitting)
+    self.assertTrue(dest.kv_cache)
+
+  def test_two_phase_staging_abort(self):
+    dest = FakeDestination("sampler", [])
+    self.make(dest, parallel_h2h=True)
+
+    async def run_abort():
+      handle = await self.coordinator.start_staging(policy_version=5)
+      await self.coordinator.abort_staging(handle)
+
+    asyncio.run(run_abort())
+    self.assertFalse(self.coordinator._in_flight)
+    self.assertIsNone(self.coordinator._active_staging_handle)
+    self.assertTrue(dest.admitting)
 
 
 if __name__ == "__main__":

@@ -511,6 +511,30 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_pipelined_weight_staging_invokes_start_and_commit(self):
+    async def _run():
+      staging_handle = mock.Mock()
+      self.mock_engine.start_weight_staging = mock.AsyncMock(
+          return_value=staging_handle
+      )
+      self.mock_engine.commit_weights = mock.AsyncMock(return_value=3)
+
+      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
+      program = self._create_program(
+          sync_weights=True, pipelined_weight_staging=True
+      )
+
+      await program.run_async(self.mock_engine, num_steps=1)
+
+      self.mock_engine.start_weight_staging.assert_called_once_with(
+          role=datatypes.Role.ACTOR, policy_version=1
+      )
+      self.mock_engine.commit_weights.assert_called_once_with(staging_handle)
+      self.mock_engine.sync_weights.assert_not_called()
+      self.assertEqual(program.policy_version, 3)
+
+    asyncio.run(_run())
+
   def test_checkpoint_called_before_sync_weights(self):
     async def _run():
       call_order = []

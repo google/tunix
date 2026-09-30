@@ -697,6 +697,49 @@ class DistributedRLEngineTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_start_weight_staging_and_commit_weights_delegate_to_coordinator(
+      self,
+  ):
+    async def _run():
+      class _FakeResult:
+        policy_version = 1
+
+      class _FakeHandle:
+        req_id = "test-req"
+
+      class _FakeCoordinator:
+
+        def __init__(self):
+          self.staging_calls = []
+          self.commit_calls = []
+
+        async def start_staging(self, policy_version=0, **kwargs):
+          self.staging_calls.append(policy_version)
+          return _FakeHandle()
+
+        async def commit_staging(self, handle):
+          self.commit_calls.append(handle)
+          _FakeResult.policy_version = self.staging_calls[-1]
+          return _FakeResult
+
+      coordinator = _FakeCoordinator()
+      engine = distributed_rl_engine.DistributedRLEngine(
+          rollout_workers=[self.mock_rollout_1, self.mock_rollout_2],
+          trainer_workers={datatypes.Role.ACTOR: self.mock_actor},
+          inference_workers={datatypes.Role.REFERENCE: self.mock_ref},
+          weight_sync_coordinator=coordinator,
+      )
+      handle = await engine.start_weight_staging()
+      self.assertIsInstance(handle, _FakeHandle)
+      self.assertEqual(coordinator.staging_calls, [1])
+
+      version = await engine.commit_weights(handle)
+      self.assertEqual(version, 1)
+      self.assertEqual(coordinator.commit_calls, [handle])
+      self.assertEqual(engine._policy_version, 1)
+
+    asyncio.run(_run())
+
   def test_prepare_rollout_policy_sets_target_state_and_bootstraps_sync(self):
     async def _run():
       class _FakeResult:

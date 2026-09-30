@@ -169,6 +169,42 @@ class AbstractRLEngine(Protocol):
     """Coordinates decentralized peer-to-peer weight sync across worker roles."""
     ...
 
+  async def start_weight_staging(
+      self,
+      role: datatypes.Role = datatypes.Role.ACTOR,
+      target_roles: Sequence[datatypes.Role] | None = None,
+      policy_version: int | None = None,
+      **kwargs: Any,
+  ) -> Any:
+    """Initiates non-blocking weight staging (D2H on source, H2H transfer into destination host DRAM).
+
+    Destinations remain un-quiesced and continue serving rollouts during transfer.
+
+    Args:
+      role: Source role (e.g. Role.ACTOR).
+      target_roles: Destination roles (e.g. [Role.ROLLOUT]).
+      policy_version: Desired policy version.
+      **kwargs: Additional config passed to coordinator.
+
+    Returns:
+      A staging handle to be passed to `commit_weights()`.
+    """
+    ...
+
+  async def commit_weights(
+      self,
+      staging_handle: Any,
+  ) -> int:
+    """Awaits H2H transfer completion, quiesces destinations, executes H2D, and publishes.
+
+    Args:
+      staging_handle: The handle returned by `start_weight_staging()`.
+
+    Returns:
+      The newly committed policy version.
+    """
+    ...
+
   async def save_checkpoint(
       self,
       role: datatypes.Role = datatypes.Role.ACTOR,

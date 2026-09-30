@@ -355,6 +355,7 @@ class StandardRLProgram(RLProgram):
       batch_size: int | None = None,
       max_staleness: int = 0,
       sync_weights: bool = True,
+      pipelined_weight_staging: bool = False,
       metrics_logging_options: MetricsLoggerOptions | None = None,
       trajectory_log_dir: str | None = None,
       trajectory_store: trajectory_store_lib.TrajectoryStore | None = None,
@@ -467,6 +468,10 @@ class StandardRLProgram(RLProgram):
       )
     self.max_staleness = max_staleness
     self.sync_weights = sync_weights
+    self.pipelined_weight_staging = pipelined_weight_staging or (
+        os.getenv("WEIGHT_SYNC_PIPELINED", "false").lower()
+        in ("1", "true", "yes")
+    )
     self.metrics_logger: MetricsLogger = MetricsLogger(metrics_logging_options)
     if trajectory_log_dir is None and metrics_logging_options is not None:
       log_dir = getattr(metrics_logging_options, "log_dir", "")
@@ -1449,6 +1454,7 @@ class StandardRLProgram(RLProgram):
       policy_training_time = 0.0
       exposed_generation_time = 0.0
       weight_sync_time = 0.0
+      pending_staging_handle = None
 
       current_batch_idx: int | None = None
 
@@ -1603,6 +1609,22 @@ class StandardRLProgram(RLProgram):
             )
             policy_training_time += time.monotonic() - _t_metrics
             final_minibatch_completed = True
+            if (
+                self.sync_weights
+                and self.pipelined_weight_staging
+                and pending_staging_handle is None
+            ):
+              try:
+                pending_staging_handle = await self.engine.start_weight_staging(
+                    role=datatypes.Role.ACTOR,
+                    policy_version=self.policy_version + 1,
+                )
+              except Exception as e:
+                logging.warning(
+                    "Pipelined start_weight_staging failed; will fall back to"
+                    " synchronous sync_weights: %s",
+                    e,
+                )
             # TODO(tunix-dev): Configurable checkpointing frequency. Today we
             # checkpoint at the same frequency as the weight update.
             # Save only at a resumable full-batch boundary. An optimizer step
@@ -1630,7 +1652,11 @@ class StandardRLProgram(RLProgram):
 
       if self.sync_weights:
         _t_sync = time.monotonic()
-        new_version = await self.engine.sync_weights(role=datatypes.Role.ACTOR)
+        if pending_staging_handle is not None:
+          new_version = await self.engine.commit_weights(pending_staging_handle)
+          pending_staging_handle = None
+        else:
+          new_version = await self.engine.sync_weights(role=datatypes.Role.ACTOR)
         weight_sync_time = time.monotonic() - _t_sync
         self.policy_version = (
             new_version if new_version is not None else self.policy_version + 1

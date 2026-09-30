@@ -655,6 +655,54 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     )
     return result.policy_version
 
+  async def start_weight_staging(
+      self,
+      role: datatypes.Role = datatypes.Role.ACTOR,
+      target_roles: Sequence[datatypes.Role] | None = None,
+      policy_version: int | None = None,
+      **kwargs: Any,
+  ) -> Any:
+    """Starts non-blocking H2H weight transfer while rollouts are still active."""
+    del role, target_roles
+    if self._weight_sync_coordinator is None:
+      raise RuntimeError(
+          "start_weight_staging needs a coordinator; construct the engine with"
+          " weight_sync_coordinator."
+      )
+    next_policy_version = (
+        self._policy_version + 1 if policy_version is None else policy_version
+    )
+    logging.info(
+        "Starting background weight staging (target policy_version=%d)...",
+        next_policy_version,
+    )
+    handle = await self._weight_sync_coordinator.start_staging(
+        policy_version=next_policy_version, **kwargs
+    )
+    return handle
+
+  async def commit_weights(
+      self,
+      staging_handle: Any,
+  ) -> int:
+    """Commits in-flight or completed staged weights to rollout workers."""
+    if self._weight_sync_coordinator is None:
+      raise RuntimeError(
+          "commit_weights needs a coordinator; construct the engine with"
+          " weight_sync_coordinator."
+      )
+    logging.info(
+        "Committing staged weights (handle req_id=%s)...",
+        getattr(staging_handle, "req_id", "unknown"),
+    )
+    result = await self._weight_sync_coordinator.commit_staging(staging_handle)
+    self._policy_version = result.policy_version
+    logging.info(
+        "Weight staging commit complete (policy_version=%d).",
+        self._policy_version,
+    )
+    return result.policy_version
+
   async def save_checkpoint(
       self,
       role: datatypes.Role = datatypes.Role.ACTOR,

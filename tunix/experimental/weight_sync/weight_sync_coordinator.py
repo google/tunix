@@ -740,6 +740,35 @@ class WeightSyncError(RuntimeError):
     self.result = result
 
 
+@dataclasses.dataclass
+class StagingHandle:
+  """Handle representing an active or completed background weight staging round.
+
+  `transfer_future` is actively executing the H2H transfer in the background
+  while rollout workers remain un-quiesced and continue generating.
+  `commit_staging()` completes the round by awaiting the transfer,
+  draining the rollout workers, performing H2D on device, and publishing.
+  """
+
+  policy_version: int
+  round_index: int
+  req_id: str
+  uuid: int
+  request: datatypes.WeightSyncRequest
+  prepared_request: datatypes.WeightSyncRequest
+  source_units: tuple[weight_sync.WorkUnitId, ...]
+  destination_units: tuple[weight_sync.WorkUnitId, ...]
+  transfer_future: asyncio.Future[weight_sync.TransferResult]
+  destinations: list[WeightSyncDestination]
+  sources: list[WeightSyncSource]
+  t_round_start: float
+  t_bind_s: float = 0.0
+  t_metadata_s: float = 0.0
+  t_source_prepare_s: float = 0.0
+  t_register_s: float = 0.0
+  t_transfer_start: float = 0.0
+
+
 class WeightSyncCoordinator:
   """Runs weight sync rounds against a `WorkerRegistry`.
 
@@ -781,6 +810,7 @@ class WeightSyncCoordinator:
       first_uuid: int = 1,
       timeouts: Optional[PhaseTimeouts] = None,
       disable_timeouts: Optional[bool] = None,
+      parallel_h2h: Optional[bool] = None,
   ):
     self._registry = registry
     self._handler = handler
@@ -798,12 +828,29 @@ class WeightSyncCoordinator:
         self._timeouts,
     )
 
+    if parallel_h2h is None:
+      env_val = os.getenv("WEIGHT_SYNC_PARALLEL_H2H", "true").lower()
+      self._parallel_h2h = env_val in _TRUTHY_ENV_VALUES
+    else:
+      self._parallel_h2h = bool(parallel_h2h)
+    logging.info(
+        "WeightSyncCoordinator parallel_h2h=%s (env=%s)",
+        self._parallel_h2h,
+        os.getenv("WEIGHT_SYNC_PARALLEL_H2H"),
+    )
+
     self._round_index = 0
     self._next_uuid = first_uuid
     self._in_flight = False
     self._poisoned: Optional[str] = None
     self._last_committed_version: Optional[int] = None
     self._current_round_abort_s: float = 0.0
+    self._active_staging_handle: Optional[StagingHandle] = None
+
+  @property
+  def parallel_h2h(self) -> bool:
+    """Whether H2H transfer runs in parallel before quiescing destinations."""
+    return self._parallel_h2h
 
   @property
   def round_index(self) -> int:
@@ -1056,6 +1103,414 @@ class WeightSyncCoordinator:
     finally:
       elapsed_time = time.monotonic() - start_time
       logging.info("Weight sync finished in %.2f seconds.", elapsed_time)
+      self._in_flight = False
+
+  async def start_staging(
+      self,
+      policy_version: int = 0,
+      **extra_config,
+  ) -> StagingHandle:
+    """Begins non-blocking H2H weight staging into destination host DRAM.
+
+    Destination workers remain actively serving during the transfer. The caller
+    must call `commit_staging(handle)` to quiesce destinations and complete H2D.
+    """
+    if self._poisoned:
+      raise RuntimeError(
+          f"coordinator is poisoned ({self._poisoned}); recover the fleet and"
+          " call reset_after_recovery() before starting another round"
+      )
+    if self._in_flight:
+      raise RuntimeError(
+          "a weight sync round is already in flight; rounds must not overlap"
+      )
+    if (
+        self._last_committed_version is not None
+        and policy_version < self._last_committed_version
+    ):
+      raise ValueError(
+          f"policy_version {policy_version} regresses below the last"
+          f" committed version {self._last_committed_version}"
+      )
+
+    self._in_flight = True
+    round_index = self._round_index
+    self._round_index += 1
+    uuid = self._next_uuid
+    self._next_uuid += 1
+    req_id = f"{self._req_id_prefix}-v{policy_version}-r{round_index}"
+
+    sources = self._sources()
+    destinations = self._destinations()
+
+    t_round_start = time.monotonic()
+    t_bind_s = 0.0
+    t_metadata_s = 0.0
+    t_source_prepare_s = 0.0
+    t_register_s = 0.0
+
+    request = self.build_request(
+        policy_version,
+        req_id=req_id,
+        uuid=uuid,
+        round_index=round_index,
+        **extra_config,
+    )
+
+    try:
+      t_phase = time.monotonic()
+      await asyncio.gather(*[
+          _wait_for(d.bind_weight_sync(), self._timeouts.bind)
+          for d in destinations
+      ])
+      t_bind_s = time.monotonic() - t_phase
+
+      t_phase = time.monotonic()
+      dst_meta_lists = await asyncio.gather(*[
+          _wait_for(d.get_weight_sync_metadata(), self._timeouts.metadata)
+          for d in destinations
+      ])
+      t_metadata_s = time.monotonic() - t_phase
+
+      t_phase = time.monotonic()
+      src_meta_lists = await asyncio.gather(*[
+          _wait_for(
+              s.prepare_weight_sync(request), self._timeouts.source_prepare
+          )
+          for s in sources
+      ])
+      t_source_prepare_s = time.monotonic() - t_phase
+
+      src_metadata = [
+          weight_sync.dict_to_metadata(m)
+          for per_source in src_meta_lists
+          for m in per_source
+      ]
+      dst_metadata = [
+          weight_sync.dict_to_metadata(m)
+          for per_dest in dst_meta_lists
+          for m in per_dest
+      ]
+      if not src_metadata or not dst_metadata:
+        raise RuntimeError(
+            f"metadata: {len(src_metadata)} source, {len(dst_metadata)}"
+            " destination unit(s)"
+        )
+
+      source_units = tuple(m.unit for m in src_metadata)
+      destination_units = tuple(m.unit for m in dst_metadata)
+
+      preflight_problems = _manifest_mismatches(src_metadata, dst_metadata)
+      if preflight_problems:
+        raise RuntimeError(
+            f"manifest preflight failed: {preflight_problems[0]}"
+        )
+
+      loop = asyncio.get_running_loop()
+      t_phase = time.monotonic()
+      registration_metadata = (*src_metadata, *dst_metadata)
+      registration_gather = asyncio.gather(
+          *[
+              loop.run_in_executor(
+                  None, self._handler.register_work_unit, metadata
+              )
+              for metadata in registration_metadata
+          ],
+          return_exceptions=True,
+      )
+      registrations = await asyncio.shield(registration_gather)
+      t_register_s = time.monotonic() - t_phase
+
+      for r in registrations:
+        if isinstance(r, BaseException):
+          raise r
+
+      prepared_request = self.build_request(
+          policy_version,
+          req_id=req_id,
+          uuid=uuid,
+          round_index=round_index,
+          source_metadata=tuple(src_metadata),
+          **extra_config,
+      )
+
+      transfer_future = asyncio.ensure_future(
+          _wait_for(
+              loop.run_in_executor(
+                  None,
+                  functools.partial(
+                      self._handler.transfer,
+                      src_units=list(source_units),
+                      dst_units=list(destination_units),
+                      req_id=req_id,
+                      generation=uuid,
+                  ),
+              ),
+              self._timeouts.transfer,
+          )
+      )
+
+      handle = StagingHandle(
+          policy_version=policy_version,
+          round_index=round_index,
+          req_id=req_id,
+          uuid=uuid,
+          request=request,
+          prepared_request=prepared_request,
+          source_units=source_units,
+          destination_units=destination_units,
+          transfer_future=transfer_future,
+          destinations=destinations,
+          sources=sources,
+          t_round_start=t_round_start,
+          t_bind_s=t_bind_s,
+          t_metadata_s=t_metadata_s,
+          t_source_prepare_s=t_source_prepare_s,
+          t_register_s=t_register_s,
+          t_transfer_start=time.monotonic(),
+      )
+      self._active_staging_handle = handle
+      return handle
+    except Exception:
+      self._in_flight = False
+      try:
+        await asyncio.gather(*[
+            _wait_for(s.release_weight_sync(request), self._timeouts.release)
+            for s in sources
+        ])
+      except Exception:
+        pass
+      raise
+
+  async def commit_staging(
+      self,
+      handle: StagingHandle,
+  ) -> WeightSyncResult:
+    """Commits an in-flight or completed staged transfer to rollout workers.
+
+    Awaits H2H transfer, drains destinations (pre_weight_sync), copies weights
+    to TPU device memory (weight_sync / H2D), publishes them (post_weight_sync),
+    and releases source buffers.
+    """
+    if handle is not self._active_staging_handle:
+      raise ValueError(
+          f"handle {getattr(handle, 'req_id', None)} is not the active staging"
+          " handle"
+      )
+
+    policy_version = handle.policy_version
+    round_index = handle.round_index
+    req_id = handle.req_id
+    uuid = handle.uuid
+    sources = handle.sources
+    destinations = handle.destinations
+    source_units = handle.source_units
+    destination_units = handle.destination_units
+    prepared_request = handle.prepared_request
+
+    state = RoundState.TRANSFERRING
+    transfer: Optional[weight_sync.TransferResult] = None
+    failures: list[str] = []
+    worker_reports: dict[str, WorkerRoundReport] = {}
+    quiesce_attempted = False
+    release_source = True
+    t_transfer_s = 0.0
+    t_pre_s = 0.0
+    t_h2d_s = 0.0
+    t_post_s = 0.0
+    t_release_s = 0.0
+    self._current_round_abort_s = 0.0
+
+    def current_phase_timings() -> dict[str, float]:
+      return {
+          "bind": handle.t_bind_s,
+          "metadata": handle.t_metadata_s,
+          "source_prepare": handle.t_source_prepare_s,
+          "register": handle.t_register_s,
+          "pre": t_pre_s,
+          "transfer": t_transfer_s,
+          "h2d": t_h2d_s,
+          "post": t_post_s,
+          "abort": self._current_round_abort_s,
+          "release": t_release_s,
+      }
+
+    def result() -> WeightSyncResult:
+      return WeightSyncResult(
+          policy_version=policy_version,
+          round_index=round_index,
+          req_id=req_id,
+          uuid=uuid,
+          state=state,
+          transfer=transfer,
+          source_units=source_units,
+          destination_units=destination_units,
+          workers=tuple(worker_reports.values()),
+          failures=tuple(failures),
+          phase_timings_s=current_phase_timings(),
+      )
+
+    def fail(message: str) -> WeightSyncError:
+      return WeightSyncError(
+          f"round {round_index} (req_id {req_id}, uuid {uuid}): {message};"
+          f" final state {state.value}",
+          result(),
+      )
+
+    def poison_if_needed() -> None:
+      if state in _POISONING_STATES and not self._poisoned:
+        self._poisoned = (
+            f"round {round_index} (req_id {req_id}) ended {state.value}"
+        )
+
+    async def record_workers(final_error: str = "") -> None:
+      for destination in destinations:
+        wid = _worker_id(destination)
+        if wid in worker_reports:
+          continue
+        phase = await self._worker_phase(destination, prepared_request)
+        worker_reports[wid] = WorkerRoundReport(
+            worker_id=wid,
+            phase=phase or "unknown",
+            error=final_error if phase is None else "",
+            needs_restart=phase is None and quiesce_attempted,
+        )
+
+    try:
+      # Await background transfer
+      t_phase = handle.t_transfer_start
+      try:
+        transfer = await handle.transfer_future
+        t_transfer_s = time.monotonic() - t_phase
+      except (
+          asyncio.TimeoutError,
+          weight_sync.TransferOutcomeUnknownError,
+      ) as e:
+        t_transfer_s = time.monotonic() - t_phase
+        failures.append(
+            f"transfer: outcome unknown ({e!r}); the transfer may still be"
+            " running"
+        )
+        state = RoundState.UNKNOWN_TRANSFER_STATE
+        release_source = False
+        poison_if_needed()
+        await record_workers("transfer timed out")
+        raise fail(
+            "transfer timed out; destinations NOT aborted and source staging"
+            " NOT released"
+        ) from e
+      except Exception as e:
+        t_transfer_s = time.monotonic() - t_phase
+        failures.append(f"transfer: {e!r}")
+        state = RoundState.ABORTED
+        poison_if_needed()
+        await record_workers("transfer raised")
+        raise fail("transfer raised") from e
+
+      if not transfer.success:
+        failures.append(f"transfer: {transfer.message}")
+        state = RoundState.ABORTED
+        poison_if_needed()
+        await record_workers("transfer failed")
+        raise fail("transfer failed")
+
+      # Downtime starts here:
+      quiesce_attempted = True
+      t_phase = time.monotonic()
+      pre_failures = await self._phase_on_all(
+          destinations, "pre_weight_sync", prepared_request, self._timeouts.pre
+      )
+      t_pre_s = time.monotonic() - t_phase
+      if pre_failures:
+        failures.extend(pre_failures)
+        state = await self._rollback(destinations, prepared_request, failures)
+        poison_if_needed()
+        await record_workers("pre_weight_sync failed")
+        raise fail("pre_weight_sync failed")
+      state = RoundState.PREPARED
+
+      # H2D phase
+      state = RoundState.H2D_IN_PROGRESS
+      t_phase = time.monotonic()
+      h2d_failures = await self._phase_on_all(
+          destinations, "weight_sync", prepared_request, self._timeouts.h2d
+      )
+      t_h2d_s = time.monotonic() - t_phase
+      if h2d_failures:
+        failures.extend(h2d_failures)
+        state = await self._rollback(destinations, prepared_request, failures)
+        poison_if_needed()
+        await record_workers("weight_sync failed")
+        raise fail("weight_sync (H2D) failed")
+
+      # Post phase
+      state = RoundState.PENDING_COMMIT
+      t_phase = time.monotonic()
+      post_results = await self._phase_results(
+          destinations,
+          "post_weight_sync",
+          prepared_request,
+          self._timeouts.post,
+      )
+      t_post_s = time.monotonic() - t_phase
+      failed_posts = [(d, e) for d, e in post_results if e is not None]
+      if failed_posts:
+        state = await self._resolve_post_failures(
+            destinations,
+            failed_posts,
+            prepared_request,
+            failures,
+            worker_reports,
+        )
+        t_post_s = time.monotonic() - t_phase
+        if state is not RoundState.COMMITTED:
+          poison_if_needed()
+          await record_workers("post_weight_sync failed")
+          raise fail("post_weight_sync did not commit everywhere; see workers")
+
+      state = RoundState.COMMITTED
+      self._last_committed_version = policy_version
+      for destination in destinations:
+        wid = _worker_id(destination)
+        worker_reports.setdefault(
+            wid, WorkerRoundReport(worker_id=wid, phase="committed")
+        )
+      return result()
+    finally:
+      self._active_staging_handle = None
+      self._in_flight = False
+      if release_source:
+        t_rel_start = time.monotonic()
+        try:
+          await asyncio.gather(*[
+              _wait_for(
+                  s.release_weight_sync(prepared_request),
+                  self._timeouts.release,
+              )
+              for s in sources
+          ])
+        except Exception as e:
+          logging.warning("source release raised: %s", e)
+        t_release_s = time.monotonic() - t_rel_start
+
+  async def abort_staging(self, handle: StagingHandle) -> None:
+    """Aborts an in-flight staging round, cancelling transfer and releasing sources."""
+    if handle is not self._active_staging_handle:
+      return
+    if not handle.transfer_future.done():
+      handle.transfer_future.cancel()
+    try:
+      await asyncio.gather(*[
+          _wait_for(
+              s.release_weight_sync(handle.prepared_request),
+              self._timeouts.release,
+          )
+          for s in handle.sources
+      ])
+    except Exception as e:
+      logging.warning("abort_staging source release raised: %s", e)
+    finally:
+      self._active_staging_handle = None
       self._in_flight = False
 
   async def _run_round(
@@ -1411,115 +1866,123 @@ class WeightSyncCoordinator:
           **extra_config,
       )
 
-      # --- downtime starts here ---
-      quiesce_attempted = True
-      t_phase = time.monotonic()
-      pre_failures = await self._phase_on_all(
-          destinations, "pre_weight_sync", prepared_request, self._timeouts.pre
-      )
-      t_pre_s = time.monotonic() - t_phase
-      logging.info(
-          "WEIGHT_SYNC_PHASE round=%d req_id=%s phase=pre"
-          " elapsed_s=%.3f timeout=%s workers=%d failures=%d",
-          round_index,
-          req_id,
-          t_pre_s,
-          _format_timeout(self._timeouts.pre),
-          len(destinations),
-          len(pre_failures),
-      )
-      if pre_failures:
-        failures += pre_failures
-        state = await self._rollback(destinations, prepared_request, failures)
-        poison_if_needed()
-        await record_workers("pre_weight_sync failed")
-        raise fail("pre_weight_sync failed")
-      state = RoundState.PREPARED
+      async def _exec_transfer():
+        nonlocal transfer, transfer_in_flight, t_transfer_s, state, release_source
+        state = RoundState.TRANSFERRING
+        transfer_in_flight = True
+        t_phase = time.monotonic()
+        try:
+          transfer = await _wait_for(
+              loop.run_in_executor(
+                  None,
+                  functools.partial(
+                      self._handler.transfer,
+                      src_units=list(source_units),
+                      dst_units=list(destination_units),
+                      req_id=req_id,
+                      generation=uuid,
+                  ),
+              ),
+              self._timeouts.transfer,
+          )
+          transfer_in_flight = False
+          t_transfer_s = time.monotonic() - t_phase
+          logging.info(
+              "WEIGHT_SYNC_PHASE round=%d req_id=%s phase=transfer"
+              " elapsed_s=%.3f timeout=%s success=%s",
+              round_index,
+              req_id,
+              t_transfer_s,
+              _format_timeout(self._timeouts.transfer),
+              transfer.success if transfer is not None else False,
+          )
+        except (
+            asyncio.TimeoutError,
+            weight_sync.TransferOutcomeUnknownError,
+        ) as e:
+          t_transfer_s = time.monotonic() - t_phase
+          logging.info(
+              "WEIGHT_SYNC_PHASE round=%d req_id=%s phase=transfer"
+              " elapsed_s=%.3f timeout=%s outcome=timeout_or_unknown",
+              round_index,
+              req_id,
+              t_transfer_s,
+              _format_timeout(self._timeouts.transfer),
+          )
+          failures.append(
+              f"transfer: outcome unknown ({e!r}); the transfer may still be"
+              " running"
+          )
+          state = RoundState.UNKNOWN_TRANSFER_STATE
+          release_source = False
+          poison_if_needed()
+          await record_workers("transfer timed out")
+          raise fail(
+              "transfer timed out; destinations NOT aborted and source staging"
+              " NOT released because the transfer may still be running"
+          ) from e
+        except asyncio.CancelledError:
+          t_transfer_s = time.monotonic() - t_phase
+          raise
+        except Exception as e:  # pylint: disable=broad-except
+          t_transfer_s = time.monotonic() - t_phase
+          logging.error("transfer raised exception: %s", e, exc_info=True)
+          transfer_in_flight = False
+          failures.append(f"transfer: {e!r}")
+          if quiesce_attempted:
+            state = await self._rollback(destinations, prepared_request, failures)
+          else:
+            state = RoundState.ABORTED
+          poison_if_needed()
+          await record_workers("transfer raised")
+          raise fail("transfer raised") from e
 
-      state = RoundState.TRANSFERRING
-      transfer_in_flight = True
-      t_phase = time.monotonic()
-      try:
-        transfer = await _wait_for(
-            loop.run_in_executor(
-                None,
-                functools.partial(
-                    self._handler.transfer,
-                    src_units=list(source_units),
-                    dst_units=list(destination_units),
-                    req_id=req_id,
-                    generation=uuid,
-                ),
-            ),
-            self._timeouts.transfer,
+        if not transfer.success:
+          failures.append(f"transfer: {transfer.message}")
+          if quiesce_attempted:
+            state = await self._rollback(destinations, prepared_request, failures)
+          else:
+            state = RoundState.ABORTED
+          poison_if_needed()
+          await record_workers("transfer failed")
+          raise fail("transfer failed")
+
+      async def _exec_pre():
+        nonlocal quiesce_attempted, t_pre_s, state
+        # --- downtime starts here ---
+        quiesce_attempted = True
+        t_phase = time.monotonic()
+        pre_failures = await self._phase_on_all(
+            destinations, "pre_weight_sync", prepared_request, self._timeouts.pre
         )
-        transfer_in_flight = False
-        t_transfer_s = time.monotonic() - t_phase
+        t_pre_s = time.monotonic() - t_phase
         logging.info(
-            "WEIGHT_SYNC_PHASE round=%d req_id=%s phase=transfer"
-            " elapsed_s=%.3f timeout=%s success=%s",
+            "WEIGHT_SYNC_PHASE round=%d req_id=%s phase=pre"
+            " elapsed_s=%.3f timeout=%s workers=%d failures=%d",
             round_index,
             req_id,
-            t_transfer_s,
-            _format_timeout(self._timeouts.transfer),
-            transfer.success if transfer is not None else False,
+            t_pre_s,
+            _format_timeout(self._timeouts.pre),
+            len(destinations),
+            len(pre_failures),
         )
-      except (
-          asyncio.TimeoutError,
-          weight_sync.TransferOutcomeUnknownError,
-      ) as e:
-        t_transfer_s = time.monotonic() - t_phase
-        logging.info(
-            "WEIGHT_SYNC_PHASE round=%d req_id=%s phase=transfer"
-            " elapsed_s=%.3f timeout=%s outcome=timeout_or_unknown",
-            round_index,
-            req_id,
-            t_transfer_s,
-            _format_timeout(self._timeouts.transfer),
-        )
-        # Two triggers, one meaning: the coordinator's own deadline elapsed
-        # (the executor thread is still running), or the transport reported
-        # its RPC outcome unknown (reply lost, server possibly still
-        # executing). Either way the transfer may still be WRITING into
-        # destination staging. Aborting destinations would discard buffers a
-        # live transfer is filling; releasing source staging would pull
-        # memory out from under it. Neither is safe, so neither happens: the
-        # round parks in UNKNOWN_TRANSFER_STATE, the coordinator poisons
-        # itself, and recovery is worker restarts plus reset_after_recovery().
-        # (On Python 3.11+ asyncio.TimeoutError is the builtin TimeoutError,
-        # so an unwrapped transport timeout also lands here rather than in the
-        # rollback branch below.)
-        failures.append(
-            f"transfer: outcome unknown ({e!r}); the transfer may still be"
-            " running"
-        )
-        state = RoundState.UNKNOWN_TRANSFER_STATE
-        release_source = False
-        poison_if_needed()
-        await record_workers("transfer timed out")
-        raise fail(
-            "transfer timed out; destinations NOT aborted and source staging"
-            " NOT released because the transfer may still be running"
-        ) from e
-      except asyncio.CancelledError:
-        t_transfer_s = time.monotonic() - t_phase
-        raise
-      except Exception as e:  # pylint: disable=broad-except
-        t_transfer_s = time.monotonic() - t_phase
-        logging.error("transfer raised exception: %s", e, exc_info=True)
-        transfer_in_flight = False
-        failures.append(f"transfer: {e!r}")
-        state = await self._rollback(destinations, prepared_request, failures)
-        poison_if_needed()
-        await record_workers("transfer raised")
-        raise fail("transfer raised") from e
+        if pre_failures:
+          failures.extend(pre_failures)
+          state = await self._rollback(destinations, prepared_request, failures)
+          poison_if_needed()
+          await record_workers("pre_weight_sync failed")
+          raise fail("pre_weight_sync failed")
+        state = RoundState.PREPARED
 
-      if not transfer.success:
-        failures.append(f"transfer: {transfer.message}")
-        state = await self._rollback(destinations, prepared_request, failures)
-        poison_if_needed()
-        await record_workers("transfer failed")
-        raise fail("transfer failed")
+      if self._parallel_h2h:
+        # In parallel H2H mode: transfer runs while destinations are still active and serving.
+        await _exec_transfer()
+        # Downtime begins here:
+        await _exec_pre()
+      else:
+        # Legacy sequential mode: quiesce destinations first, then transfer.
+        await _exec_pre()
+        await _exec_transfer()
 
       state = RoundState.H2D_IN_PROGRESS
       t_phase = time.monotonic()
