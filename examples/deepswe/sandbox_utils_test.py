@@ -586,30 +586,23 @@ class SandboxFailFastTest(absltest.TestCase):
           with self.assertRaises(error):
             sandbox_utils.SandboxFailFastConfig.from_env()
 
-  def test_init_global_fleet_fail_fast_sets_timeout_and_raises_on_preflight(self):
+  def test_init_global_fleet_fail_fast_sets_timeout_and_skips_preflight(self):
     sdk = self._fake_sdk()
-    sdk.SandboxFleet.return_value.preflight.side_effect = RuntimeError(
-        "CRDs missing"
-    )
     with mock.patch.dict("sys.modules", {"agent_sandbox_rl": sdk}):
       with mock.patch.dict(os.environ, _FAIL_FAST_ENV):
         with mock.patch.object(sandbox_utils, "_GLOBAL_FLEET", None):
-          with self.assertRaisesRegex(RuntimeError, "CRDs missing"):
-            sandbox_utils.init_global_fleet(tasks=None, num_generations=4)
-          self.assertIsNone(sandbox_utils._GLOBAL_FLEET)
+          sandbox_utils.init_global_fleet(tasks=None, num_generations=4)
     self.assertEqual(sdk.FleetConfig.call_args[1]["ready_timeout"], 300)
+    sdk.SandboxFleet.return_value.preflight.assert_not_called()
 
-  def test_init_global_fleet_off_logs_preflight_and_keeps_sdk_timeout(self):
+  def test_init_global_fleet_off_keeps_sdk_timeout_and_skips_preflight(self):
     sdk = self._fake_sdk()
-    sdk.SandboxFleet.return_value.preflight.side_effect = RuntimeError(
-        "CRDs missing"
-    )
     with mock.patch.dict("sys.modules", {"agent_sandbox_rl": sdk}):
       with mock.patch.dict(os.environ, {}, clear=True):
         with mock.patch.object(sandbox_utils, "_GLOBAL_FLEET", None):
-          with self.assertLogs(level="WARNING"):
-            sandbox_utils.init_global_fleet(tasks=None, num_generations=4)
+          sandbox_utils.init_global_fleet(tasks=None, num_generations=4)
     self.assertNotIn("ready_timeout", sdk.FleetConfig.call_args[1])
+    sdk.SandboxFleet.return_value.preflight.assert_not_called()
 
   def test_prewarm_fail_fast_raises_fleet_error(self):
     dataset = [{"prompt": "p0", "docker_image": "img_A"}]

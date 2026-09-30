@@ -209,7 +209,7 @@ class SandboxFailFastConfig:
   launcher.
 
   Attributes:
-    enabled: Preflight failures and warm-pool errors are fatal instead of logged.
+    enabled: Warm-pool errors are fatal instead of logged.
     ready_timeout_s: SDK `FleetConfig.ready_timeout` (claim and warm-pool
       readiness). None keeps the SDK default (900s).
     acquire_retries: `fleet.acquire` attempts per episode in SWEEnv.
@@ -401,15 +401,6 @@ def init_global_fleet(
     if getattr(fleet_cfg, "install_teardown_hooks", False):
       fleet_inst._install_teardown_hooks()
     fleet_inst._torndown = False
-    if fail_fast.enabled:
-      # PreflightError (bad CRDs, controller, runtime class, pull secret, ...)
-      # would otherwise surface much later as sandboxes that never get ready.
-      fleet_inst.preflight()
-    elif hasattr(fleet_inst, "preflight"):
-      try:
-        fleet_inst.preflight()
-      except Exception as e:  # pylint: disable=broad-exception-caught
-        logging.warning("Preflight CRD check skipped (non-fatal): %s", e)
     if hasattr(fleet_inst, "plan"):
       fleet_inst.plan()
       logging.info(
