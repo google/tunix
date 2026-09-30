@@ -276,6 +276,7 @@ def pack_bin(
     routed_shape: tuple[int, ...] | None = None,
     segment_align_multiple: int = DEFAULT_SEGMENT_ALIGN_MULTIPLE,
     routed_out: np.ndarray | None = None,
+    with_routing: bool = True,
 ) -> PackedRow:
   """Packs a single bin of items into a single `[budget]` PackedRow.
 
@@ -294,6 +295,9 @@ def pack_bin(
       passes one row view of a single chunk-wide buffer here so the chunk's
       routing is never allocated per row and then stacked (a second full copy
       of `[B, T, L, K]`). Requires `routed_shape`.
+    with_routing: When False the row carries no routing at all
+      (`routed_experts=None`) whatever the items hold; `pack_chunk_compact`
+      gathers the routing separately, unpadded. Excludes `routed_out`.
 
   Returns:
     The packed row.
@@ -305,7 +309,11 @@ def pack_bin(
     )
   zeros_i = lambda: np.zeros(budget, dtype=np.int32)
   zeros_f = lambda: np.zeros(budget, dtype=np.float32)
-  if routed_shape is None and bin_items:
+  if not with_routing:
+    if routed_out is not None:
+      raise ValueError("pack_bin: routed_out requires with_routing=True.")
+    routed_shape = None
+  elif routed_shape is None and bin_items:
     routed_shape = routed_experts_shape(bin_items)
   if routed_out is not None:
     if routed_shape is None:
@@ -468,6 +476,90 @@ def pack_chunk_contiguous(
       for i, bin_items in enumerate(bins)
   ]
   return PackedChunk(rows=rows, routed_experts=routed)
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class CompactPackedChunk:
+  """The packed rows of one chunk plus their routing, without the padding.
+
+  Attributes:
+    rows: One PackedRow per bin; `rows[i].routed_experts` is None.
+    routed_values: `[N, num_layers, top_k]` int16 routing of every real token
+      of the chunk, in row-major order: row 0's segments in placement order,
+      then row 1's, and so on. So it lines up one-to-one with the positions
+      where the stacked `segment_ids > 0`. Tokens of an item that carries no
+      routing are `UNSET_ROUTED_EXPERT`. None when no item carries routing.
+  """
+
+  rows: list[PackedRow]
+  routed_values: np.ndarray | None
+
+
+def pack_chunk_compact(
+    bins: Sequence[Sequence[PackItem]],
+    *,
+    budget: int,
+    pad_id: int,
+    carried: Sequence[str],
+    routed_shape: tuple[int, ...] | None = None,
+    segment_align_multiple: int = DEFAULT_SEGMENT_ALIGN_MULTIPLE,
+) -> CompactPackedChunk:
+  """Packs the bins of one chunk, gathering routing only for real tokens.
+
+  Unlike `pack_chunk_contiguous`, the `[B, budget, L, K]` routing tensor is
+  never built: roughly three quarters of it is padding for long-context packed
+  microbatches. The receiver rebuilds it from `routed_values` and the rows'
+  `segment_ids`.
+
+  Args:
+    bins: The chunk's bins, one per packed row.
+    budget: Token capacity of each row.
+    pad_id: Token id written to padding positions.
+    carried: Per-token fields carried by the chunk.
+    routed_shape: Trailing `(num_layers, top_k)` routing shape. Inferred from
+      the placed items when None.
+    segment_align_multiple: Token boundary alignment for every segment after
+      the first.
+
+  Returns:
+    The packed rows and the chunk's unpadded routing.
+  """
+  if routed_shape is None:
+    placed = [item for bin_items in bins for item in bin_items]
+    routed_shape = routed_experts_shape(placed)
+  rows = [
+      pack_bin(
+          bin_items,
+          budget=budget,
+          pad_id=pad_id,
+          carried=carried,
+          segment_align_multiple=segment_align_multiple,
+          with_routing=False,
+      )
+      for bin_items in bins
+  ]
+  if routed_shape is None:
+    return CompactPackedChunk(rows=rows, routed_values=None)
+  # Same order `pack_bin` lays the segments out in, skipping empty items just
+  # as it does, so part k covers exactly the k-th real segment's positions.
+  parts = [
+      item.routed_experts
+      if item.routed_experts is not None
+      else np.full(
+          (item.num_tokens,) + tuple(routed_shape),
+          UNSET_ROUTED_EXPERT,
+          dtype=np.int16,
+      )
+      for bin_items in bins
+      for item in bin_items
+      if item.num_tokens > 0
+  ]
+  routed_values = (
+      np.concatenate(parts, axis=0).astype(np.int16, copy=False)
+      if parts
+      else np.zeros((0,) + tuple(routed_shape), dtype=np.int16)
+  )
+  return CompactPackedChunk(rows=rows, routed_values=routed_values)
 
 
 def pack_chunk(

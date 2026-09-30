@@ -209,8 +209,9 @@ class SamplerToPayloadTest(absltest.TestCase):
         mini_batch_size=1,
     ).pack([payload])
 
-    routed = packed[0].routed_experts
-    self.assertIsNotNone(routed, "routing lost between adapter and payload")
+    compact = packed[0].routed_experts
+    self.assertIsNotNone(compact, "routing lost between adapter and payload")
+    routed = compact.materialize()
     self.assertEqual(routed.shape, (1, PROMPT_LEN + GEN_LEN, NUM_LAYERS, TOP_K))
     # Nothing was truncated, so every slot should be the captured value.
     np.testing.assert_array_equal(routed[0], 3)
@@ -312,7 +313,7 @@ class SamplerToPayloadTest(absltest.TestCase):
         mini_batch_size=1,
     ).pack([payload])
 
-    routed = packed[0].routed_experts
+    routed = packed[0].routed_experts.materialize()
     self.assertEqual(routed.shape, (1, total_len, NUM_LAYERS, TOP_K))
     np.testing.assert_array_equal(routed[0, : PROMPT_LEN + GEN_LEN], 3)
     np.testing.assert_array_equal(routed[0, PROMPT_LEN + GEN_LEN :], 7)
@@ -574,7 +575,7 @@ class SamplerToPayloadTest(absltest.TestCase):
         mini_batch_size=1,
     ).pack([payload])
 
-    routed = packed[0].routed_experts
+    routed = packed[0].routed_experts.materialize()
     self.assertEqual(routed.dtype, np.int16)
     self.assertEqual(
         routed.shape, (1, max_prompt_len + max_resp_len, NUM_LAYERS, TOP_K)

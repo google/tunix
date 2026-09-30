@@ -1695,6 +1695,16 @@ def _routing(length, fill):
   return np.full(shape, fill, dtype=np.int32)
 
 
+def _aligned_row(routed, prompt_len, completion_len, max_prompt, max_response):
+  """One padded routing row, via the compact row the assembler ships."""
+  values, valid = batch_assembly._routed_experts_compact_row(  # pylint: disable=protected-access
+      routed, prompt_len, completion_len, max_prompt, max_response
+  )
+  return datatypes.CompactRoutedExperts(
+      values=values, valid=valid[None]
+  ).materialize()[0]
+
+
 class RoutedExpertsAlignmentTest(absltest.TestCase):
   """Replayed routing must be padded the same way the token ids are."""
 
@@ -1710,7 +1720,7 @@ class RoutedExpertsAlignmentTest(absltest.TestCase):
         [_routing(prompt_len, 7), _routing(completion_len, 9)], axis=0
     )
 
-    out = batch_assembly._routed_experts_aligned(  # pylint: disable=protected-access
+    out = _aligned_row(
         routed, prompt_len, completion_len, max_prompt, max_response
     )
 
@@ -1727,6 +1737,18 @@ class RoutedExpertsAlignmentTest(absltest.TestCase):
     )
     np.testing.assert_array_equal(out[max_prompt + completion_len :], _UNSET)
 
+  def test_compact_row_holds_only_the_kept_tokens(self):
+    """Padding positions must not be shipped at all."""
+    routed = np.concatenate([_routing(2, 7), _routing(3, 9)], axis=0)
+    values, valid = batch_assembly._routed_experts_compact_row(  # pylint: disable=protected-access
+        routed, 2, 3, 5, 6
+    )
+    self.assertEqual(values.dtype, np.int16)
+    self.assertEqual(values.shape, (5, _ROUTING_LAYERS, _ROUTING_TOP_K))
+    np.testing.assert_array_equal(
+        valid, [0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0]
+    )
+
   def test_overlong_prompt_keeps_the_tail(self):
     """`_left_pad` keeps the last tokens, so routing must keep its last rows."""
     # One prompt row per position, so a dropped row is visible by value.
@@ -1735,7 +1757,7 @@ class RoutedExpertsAlignmentTest(absltest.TestCase):
         (4, _ROUTING_LAYERS, _ROUTING_TOP_K),
     )
     routed = np.concatenate([prompt, _routing(1, 9)], axis=0)
-    out = batch_assembly._routed_experts_aligned(routed, 4, 1, 2, 3)  # pylint: disable=protected-access
+    out = _aligned_row(routed, 4, 1, 2, 3)
     # Prompt rows 0 and 1 are dropped; 2 and 3 survive, in order.
     np.testing.assert_array_equal(out[0], 2)
     np.testing.assert_array_equal(out[1], 3)
@@ -1778,8 +1800,12 @@ class PaddedBatchAssemblerRoutingTest(absltest.TestCase):
   def test_batches_routing_across_rows(self):
     packed = self._assembler().pack([self._payload(1), self._payload(2)])
     self.assertLen(packed, 1)
-    routed = packed[0].routed_experts
-    self.assertIsNotNone(routed, "assembler dropped the replayed routing")
+    compact = packed[0].routed_experts
+    self.assertIsNotNone(compact, "assembler dropped the replayed routing")
+    self.assertIsInstance(compact, datatypes.CompactRoutedExperts)
+    # Only the 2 x (2 prompt + 3 completion) real tokens cross the RPC.
+    self.assertEqual(compact.values.shape[0], 10)
+    routed = compact.materialize()
     self.assertEqual(routed.dtype, np.int16)
     self.assertEqual(
         routed.shape,
@@ -1804,7 +1830,7 @@ class PaddedBatchAssemblerRoutingTest(absltest.TestCase):
   def test_short_batch_pads_rows_as_unset(self):
     """Filler rows must not replay a real expert id."""
     packed = self._assembler(batch_size=2).pack([self._payload(1)])
-    routed = packed[0].routed_experts
+    routed = packed[0].routed_experts.materialize()
     self.assertEqual(routed.shape[0], 2)
     np.testing.assert_array_equal(routed[1], _UNSET)
 
@@ -2139,8 +2165,11 @@ class CreateBatchAssemblerTest(absltest.TestCase):
     self.assertEmpty(assembler.feed([p1]))
     batches = assembler.feed([p2])
     self.assertLen(batches, 1)
-    packed_re = batches[0].payload.routed_experts
-    self.assertIsNotNone(packed_re)
+    compact = batches[0].payload.routed_experts
+    self.assertIsInstance(compact, datatypes.CompactRoutedExperts)
+    # 3 + 3 real tokens; the 2 trailing pad slots are not shipped.
+    self.assertEqual(compact.values.shape, (6, 2, 2))
+    packed_re = compact.materialize()
     self.assertEqual(packed_re.shape, (1, 8, 2, 2))
     # First 2 tokens of item 1 have expert 3, 3rd token padded with -1
     np.testing.assert_array_equal(packed_re[0, 0:2], re1)
@@ -2214,7 +2243,7 @@ def _packed_chunk_with_routing():
           routed_experts=np.full((2, 2, 2), 9, dtype=np.int16),
       ),
   ]
-  return packing.pack_chunk_contiguous(
+  return packing.pack_chunk_compact(
       [items[:1], items[1:]],
       budget=4,
       pad_id=0,
@@ -2225,19 +2254,26 @@ def _packed_chunk_with_routing():
 
 class ToRlTrainerPayloadTest(absltest.TestCase):
 
-  def test_uses_chunk_routing_buffer_without_copying(self):
+  def test_ships_only_real_token_routing(self):
     chunk = _packed_chunk_with_routing()
     payload = batch_assembly.to_rl_trainer_payload(
-        chunk.rows, routed_experts=chunk.routed_experts, max_segments=1
+        chunk.rows, routed_values=chunk.routed_values, max_segments=1
     )
-    # The `[B, T, L, K]` routing buffer is the largest array in the payload;
-    # it must be passed through, not stacked into a second copy.
-    self.assertIs(payload.routed_experts, chunk.routed_experts)
-    self.assertEqual(payload.routed_experts.shape, (2, 4, 2, 2))
-    np.testing.assert_array_equal(payload.routed_experts[0, :3], 7)
-    np.testing.assert_array_equal(payload.routed_experts[0, 3:], -1)
-    np.testing.assert_array_equal(payload.routed_experts[1, :2], 9)
-    np.testing.assert_array_equal(payload.routed_experts[1, 2:], -1)
+    compact = payload.routed_experts
+    self.assertIsInstance(compact, datatypes.CompactRoutedExperts)
+    # The routing values are passed through, not copied again.
+    self.assertIs(compact.values, chunk.routed_values)
+    # 3 + 2 real tokens, none of the 3 padding slots.
+    self.assertEqual(compact.values.shape, (5, 2, 2))
+    np.testing.assert_array_equal(
+        compact.valid, np.asarray(payload.segment_ids) > 0
+    )
+    self.assertEqual(compact.shape, (2, 4, 2, 2))
+    routed = compact.materialize()
+    np.testing.assert_array_equal(routed[0, :3], 7)
+    np.testing.assert_array_equal(routed[0, 3:], -1)
+    np.testing.assert_array_equal(routed[1, :2], 9)
+    np.testing.assert_array_equal(routed[1, 2:], -1)
     np.testing.assert_array_equal(
         payload.completion_ids, [[10, 11, 12, 0], [20, 21, 0, 0]]
     )
@@ -2245,49 +2281,59 @@ class ToRlTrainerPayloadTest(absltest.TestCase):
   def test_none_routing_is_passed_through(self):
     chunk = _packed_chunk_with_routing()
     payload = batch_assembly.to_rl_trainer_payload(
-        chunk.rows, routed_experts=None, max_segments=1
+        chunk.rows, routed_values=None, max_segments=1
     )
     self.assertIsNone(payload.routed_experts)
 
-  def test_rejects_routing_row_count_mismatch(self):
+  def test_rejects_routing_that_does_not_cover_the_real_tokens(self):
     chunk = _packed_chunk_with_routing()
-    with self.assertRaisesRegex(ValueError, "routed_experts has 1 rows"):
+    with self.assertRaisesRegex(ValueError, "4 routing rows but valid marks 5"):
       batch_assembly.to_rl_trainer_payload(
           chunk.rows,
-          routed_experts=chunk.routed_experts[:1],
+          routed_values=chunk.routed_values[:4],
           max_segments=1,
       )
 
-  def test_assembler_emits_contiguous_int16_routing(self):
+  def test_assembler_matches_dense_packing_with_alignment_gaps(self):
+    """Compact + materialize must equal the dense layout, gaps included."""
     assembler = batch_assembly.SequencePackedBatchAssembler(
         batch_size=2,
         num_generations=1,
-        mini_batch_size=2,
-        max_packed_len=8,
+        mini_batch_size=3,
+        max_packed_len=16,
         pad_id=0,
-        max_segments_per_packed_row=1,
-        segment_align_multiple=1,
+        max_segments_per_packed_row=2,
+        segment_align_multiple=4,
     )
+    lengths = [(2, 3), (1, 4), (3, 2)]
     payloads = [
         datatypes.RLTrainerPayload(
-            prompt_ids=np.array([10 * i], dtype=np.int32),
-            prompt_mask=np.array([1.0], dtype=np.float32),
-            completion_ids=np.array([10 * i + 1], dtype=np.int32),
-            completion_mask=np.array([1.0], dtype=np.float32),
-            advantages=np.array([1.0], dtype=np.float32),
-            routed_experts=np.full((2, 2, 2), i, dtype=np.int16),
+            prompt_ids=np.arange(p, dtype=np.int32) + 100 * i,
+            prompt_mask=np.ones(p, dtype=np.float32),
+            completion_ids=np.arange(c, dtype=np.int32) + 100 * i + 50,
+            completion_mask=np.ones(c, dtype=np.float32),
+            advantages=np.ones(c, dtype=np.float32),
+            routed_experts=(
+                np.arange((p + c) * 4, dtype=np.int16).reshape(p + c, 2, 2)
+                + 100 * i
+            ),
         )
-        for i in (1, 2)
+        for i, (p, c) in enumerate(lengths, start=1)
     ]
     [batch] = assembler.feed(payloads) + assembler.flush()
-    routed = batch.payload.routed_experts
-    self.assertEqual(routed.shape, (2, 8, 2, 2))
-    self.assertEqual(routed.dtype, np.int16)
-    self.assertTrue(routed.flags["C_CONTIGUOUS"])
-    # One trajectory per row (max_segments_per_packed_row=1), padded with -1.
-    np.testing.assert_array_equal(np.sort(routed[:, :2], axis=0)[0], 1)
-    np.testing.assert_array_equal(np.sort(routed[:, :2], axis=0)[1], 2)
-    np.testing.assert_array_equal(routed[:, 2:], -1)
+    compact = batch.payload.routed_experts
+    self.assertIsInstance(compact, datatypes.CompactRoutedExperts)
+    self.assertEqual(compact.values.shape[0], sum(p + c for p, c in lengths))
+
+    items = [batch_assembly.to_pack_item(p) for p in payloads]
+    bins, leftover = packing.fill_one_chunk(
+        items, pack_size=2, budget=16, max_segments=2, segment_align_multiple=4
+    )
+    self.assertEmpty(leftover)
+    dense = packing.pack_chunk_contiguous(
+        bins, budget=16, pad_id=0, carried=(), segment_align_multiple=4
+    ).routed_experts
+    np.testing.assert_array_equal(compact.materialize(), dense)
 
 
 if __name__ == "__main__":

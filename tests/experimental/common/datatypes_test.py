@@ -303,6 +303,89 @@ class RLTrainerPayloadTest(absltest.TestCase):
     np.testing.assert_allclose(restored.advantages, payload.advantages)
 
 
+class CompactRoutedExpertsTest(absltest.TestCase):
+
+  def _compact(self):
+    valid = np.array(
+        [[True, True, False, False], [False, True, True, True]], dtype=bool
+    )
+    values = np.arange(5 * 3 * 2, dtype=np.int16).reshape(5, 3, 2)
+    return datatypes.CompactRoutedExperts(values=values, valid=valid)
+
+  def test_materialize_scatters_values_and_unsets_the_rest(self):
+    compact = self._compact()
+    dense = compact.materialize()
+    self.assertEqual(compact.shape, (2, 4, 3, 2))
+    self.assertEqual(dense.shape, (2, 4, 3, 2))
+    self.assertEqual(dense.dtype, np.int16)
+    np.testing.assert_array_equal(dense[compact.valid], compact.values)
+    np.testing.assert_array_equal(
+        dense[~compact.valid],
+        np.full((3, 3, 2), datatypes.UNSET_ROUTED_EXPERT, dtype=np.int16),
+    )
+    # Row-major order: row 0's two tokens come first, then row 1's three.
+    np.testing.assert_array_equal(dense[1, 1], compact.values[2])
+
+  def test_nbytes_counts_only_what_is_stored(self):
+    compact = self._compact()
+    self.assertEqual(compact.nbytes, 5 * 3 * 2 * 2 + 2 * 4)
+
+  def test_cloudpickle_roundtrip_inside_payload(self):
+    compact = self._compact()
+    payload = datatypes.RLTrainerPayload(
+        prompt_ids=np.zeros((2, 0), dtype=np.int32),
+        prompt_mask=np.zeros((2, 0), dtype=np.float32),
+        completion_ids=np.zeros((2, 4), dtype=np.int32),
+        completion_mask=np.ones((2, 4), dtype=np.float32),
+        advantages=np.zeros((2, 4), dtype=np.float32),
+        routed_experts=compact,
+    )
+    restored = cloudpickle.loads(cloudpickle.dumps(payload))
+    self.assertIsInstance(
+        restored.routed_experts, datatypes.CompactRoutedExperts
+    )
+    np.testing.assert_array_equal(
+        restored.routed_experts.materialize(), compact.materialize()
+    )
+
+  def test_rejects_non_int16_values(self):
+    with self.assertRaisesRegex(TypeError, "values must be an int16"):
+      datatypes.CompactRoutedExperts(
+          values=np.zeros((1, 3, 2), dtype=np.int32),
+          valid=np.array([[True]]),
+      )
+
+  def test_rejects_wrong_values_rank(self):
+    with self.assertRaisesRegex(ValueError, r"\[N, num_layers, top_k\]"):
+      datatypes.CompactRoutedExperts(
+          values=np.zeros((1, 3), dtype=np.int16),
+          valid=np.array([[True]]),
+      )
+
+  def test_rejects_non_bool_valid(self):
+    with self.assertRaisesRegex(TypeError, "valid must be a bool"):
+      datatypes.CompactRoutedExperts(
+          values=np.zeros((1, 3, 2), dtype=np.int16),
+          valid=np.array([[1]], dtype=np.int32),
+      )
+
+  def test_rejects_wrong_valid_rank(self):
+    with self.assertRaisesRegex(ValueError, r"valid must be \[B, T\]"):
+      datatypes.CompactRoutedExperts(
+          values=np.zeros((1, 3, 2), dtype=np.int16),
+          valid=np.array([True]),
+      )
+
+  def test_rejects_count_mismatch(self):
+    with self.assertRaisesRegex(
+        ValueError, "2 routing rows but valid marks 1 positions"
+    ):
+      datatypes.CompactRoutedExperts(
+          values=np.zeros((2, 3, 2), dtype=np.int16),
+          valid=np.array([[True, False]]),
+      )
+
+
 class TokenSegmentRoutingTest(absltest.TestCase):
   """`routed_experts` must line up with the tokens it describes."""
 

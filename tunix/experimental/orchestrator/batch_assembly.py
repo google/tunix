@@ -161,19 +161,20 @@ def _left_pad(
   return out, mask
 
 
-def _routed_experts_aligned(
+def _routed_experts_compact_row(
     routed: np.ndarray,
     prompt_len: int,
     completion_len: int,
     max_prompt_length: int,
     max_response_length: int,
-) -> np.ndarray:
-  """Lays one row of routing out over the padded `[prompt | completion]`.
+) -> tuple[np.ndarray, np.ndarray]:
+  """Places one row of routing over the padded `[prompt | completion]`.
 
   Mirrors how the token ids themselves are padded -- prompts right-aligned in
   the prompt window (keeping the tail, as `_left_pad` does) and completions
   left-aligned in the response window -- so replayed routing stays attached to
-  the token it was captured for. Everything else is left unset.
+  the token it was captured for. Returns the routing unpadded together with the
+  positions it occupies, the row's share of a `CompactRoutedExperts`.
 
   Args:
     routed: `[prompt_len + completion_len, num_layers, top_k]` for one
@@ -185,7 +186,9 @@ def _routed_experts_aligned(
     max_response_length: Padded completion width.
 
   Returns:
-    `[max_prompt_length + max_response_length, num_layers, top_k]`.
+    `(values, valid)`: `values` is the kept `[n, num_layers, top_k]` routing in
+    position order and `valid` the `[max_prompt_length + max_response_length]`
+    bool mask of the `n` positions it lands on.
   """
   routed = np.asarray(routed, dtype=np.int16)
   # Prompts are left-padded, so an over-long one keeps its tail; completions are
@@ -195,15 +198,11 @@ def _routed_experts_aligned(
   prompt_part = routed[kept_prompt_start:prompt_len]
   completion_part = routed[prompt_len:kept_completion_end]
 
-  out = np.full(
-      (max_prompt_length + max_response_length,) + routed.shape[1:],
-      datatypes.UNSET_ROUTED_EXPERT,
-      dtype=np.int16,
-  )
+  valid = np.zeros(max_prompt_length + max_response_length, dtype=np.bool_)
   prompt_end = max_prompt_length
-  out[prompt_end - len(prompt_part) : prompt_end] = prompt_part
-  out[prompt_end : prompt_end + len(completion_part)] = completion_part
-  return out
+  valid[prompt_end - len(prompt_part) : prompt_end] = True
+  valid[prompt_end : prompt_end + len(completion_part)] = True
+  return np.concatenate([prompt_part, completion_part], axis=0), valid
 
 
 def _right_pad(
@@ -385,7 +384,7 @@ def to_pack_item(item: datatypes.RLTrainerPayload) -> packing.PackItem:
 def to_rl_trainer_payload(
     rows: Sequence[packing.PackedRow],
     *,
-    routed_experts: np.ndarray | None,
+    routed_values: np.ndarray | None,
     max_segments: int,
     trajectory_ids: tuple[str, ...] = (),
     lineage_context: lineage.LineageContext | None = None,
@@ -394,10 +393,11 @@ def to_rl_trainer_payload(
 
   Args:
     rows: The chunk's packed rows.
-    routed_experts: The chunk's `[len(rows), T, num_layers, top_k]` routing
-      buffer from `packing.pack_chunk_contiguous` (which `rows` view into), or
-      None when the chunk carries no routing. Used as-is: stacking the rows'
-      routing would copy the largest array in the payload a second time.
+    routed_values: The chunk's unpadded `[N, num_layers, top_k]` routing from
+      `packing.pack_chunk_compact`, covering the rows' real tokens (`segment_ids
+      > 0`) in row-major order, or None when the chunk carries no routing. It
+      is shipped as `CompactRoutedExperts` so the ~75% padding of the dense
+      `[B, T, L, K]` tensor never crosses the trainer RPC.
     max_segments: Maximum real segments per packed row.
     trajectory_ids: Trajectory ids of the packed items, in placement order.
     lineage_context: Optional merged lineage for the microbatch.
@@ -405,11 +405,6 @@ def to_rl_trainer_payload(
   Returns:
     The batched trainer payload.
   """
-  if routed_experts is not None and routed_experts.shape[0] != len(rows):
-    raise ValueError(
-        f"routed_experts has {routed_experts.shape[0]} rows but the chunk has"
-        f" {len(rows)} packed rows."
-    )
   stack = lambda attr: np.stack([getattr(r, attr) for r in rows])
   per_token_kwargs = {
       name: np.stack([r.per_token[name] for r in rows])
@@ -418,13 +413,21 @@ def to_rl_trainer_payload(
   metadata: dict[str, Any] = {"trajectory_ids": trajectory_ids}
   if lineage_context is not None:
     metadata["lineage"] = lineage_context
+  segment_ids = stack("segment_ids")
+  routed_experts = (
+      None
+      if routed_values is None
+      else datatypes.CompactRoutedExperts(
+          values=routed_values, valid=segment_ids > 0
+      )
+  )
   return datatypes.RLTrainerPayload(
       prompt_ids=np.zeros((len(rows), 0), dtype=np.int32),
       prompt_mask=np.zeros((len(rows), 0), dtype=np.float32),
       completion_ids=stack("ids"),
       completion_mask=stack("completion_mask"),
       advantages=stack("advantages"),
-      segment_ids=stack("segment_ids"),
+      segment_ids=segment_ids,
       segment_positions=stack("segment_positions"),
       num_segments=max_segments + 1,
       routed_experts=routed_experts,
@@ -570,7 +573,7 @@ class SequencePackedBatchAssembler:
           num_unrouted,
           len(real_placed),
       )
-    chunk = packing.pack_chunk_contiguous(
+    chunk = packing.pack_chunk_compact(
         bins,
         budget=self.max_packed_len,
         pad_id=self.pad_id,
@@ -591,7 +594,7 @@ class SequencePackedBatchAssembler:
     self._batch_counter += 1
     payload = to_rl_trainer_payload(
         chunk.rows,
-        routed_experts=chunk.routed_experts,
+        routed_values=chunk.routed_values,
         max_segments=max_segments,
         trajectory_ids=traj_ids,
         lineage_context=merged_lineage,
@@ -887,7 +890,9 @@ class PaddedBatchAssembler:
     # Router replay is all-or-nothing per batch: a partially replayed batch
     # would silently mix replayed and freshly routed rows.
     replay_routing = all(it.routed_experts is not None for it in chunk)
-    routed_experts_rows: list[np.ndarray] = []
+    # Per row: the kept routing, unpadded, and the positions it lands on.
+    routed_values_rows: list[np.ndarray] = []
+    routed_valid_rows: list[np.ndarray] = []
     # `overlong` is one scalar per sequence rather than one value per token, so
     # it is stacked into `[B]` here instead of going through `optional_fields`,
     # whose members are all completion-aligned and right-padded to `[B, C]`.
@@ -970,18 +975,18 @@ class PaddedBatchAssembler:
       # also narrows the optional field for the type checker.
       routed = item.routed_experts
       if replay_routing and routed is not None:
-        routed_experts_rows.append(
-            _routed_experts_aligned(
-                # `routed_experts` is declared ArrayLike, which admits jax
-                # arrays and scalars; concretise it here as the sibling fields
-                # above do.
-                np.asarray(routed, dtype=np.int16),
-                p_full.size,
-                c.size,
-                self.max_prompt_length,
-                self.max_response_length,
-            )
+        row_values, row_valid = _routed_experts_compact_row(
+            # `routed_experts` is declared ArrayLike, which admits jax
+            # arrays and scalars; concretise it here as the sibling fields
+            # above do.
+            np.asarray(routed, dtype=np.int16),
+            p_full.size,
+            c.size,
+            self.max_prompt_length,
+            self.max_response_length,
         )
+        routed_values_rows.append(row_values)
+        routed_valid_rows.append(row_valid)
 
     if truncated_prompts or truncated_completions:
       logging.warning(
@@ -1011,10 +1016,8 @@ class PaddedBatchAssembler:
       # completion mask is all zeros and it contributes nothing either way.
       if carry_overlong:
         overlong_rows.append(np.float32(0.0))
-      if routed_experts_rows:
-        routed_experts_rows.append(
-            np.full_like(routed_experts_rows[0], datatypes.UNSET_ROUTED_EXPERT)
-        )
+      if routed_valid_rows:
+        routed_valid_rows.append(np.zeros_like(routed_valid_rows[0]))
 
     batched_prompt_ids = np.stack(prompt_ids)
     batched_prompt_mask = np.stack(prompt_mask)
@@ -1055,7 +1058,12 @@ class PaddedBatchAssembler:
         rollout_per_token_logps=stacked_optional.get("rollout_per_token_logps"),
         overlong=np.stack(overlong_rows) if overlong_rows else None,
         routed_experts=(
-            np.stack(routed_experts_rows) if routed_experts_rows else None
+            datatypes.CompactRoutedExperts(
+                values=np.concatenate(routed_values_rows, axis=0),
+                valid=np.stack(routed_valid_rows),
+            )
+            if routed_valid_rows
+            else None
         ),
         metadata=payload_metadata,
     )
