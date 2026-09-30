@@ -105,6 +105,29 @@ RUN if [ "$INSTALL_RAIDEN" = "true" ]; then \
 RUN uv pip install numpy==2.3.5 'jax==0.11.0' 'flax==0.12.7'
 RUN uv pip install "git+https://github.com/mlcommons/logging.git@6.1.0-rc1"
 
+# Pre-cache HuggingFace tokenizers and model configs (excluding weight shards)
+# so distributed workers and Ray pods never hit HuggingFace rate limits.
+ENV HF_HOME=/opt/hf_cache
+ARG HF_TOKEN=""
+RUN python3 -c "\
+from huggingface_hub import snapshot_download; \
+ignore = ['*.safetensors', '*.safetensors.index.json', '*.bin', '*.pt', '*.pth']; \
+token = '${HF_TOKEN}' or None; \
+[ \
+    ( \
+        snapshot_download(repo_id=repo_id, ignore_patterns=ignore, token=token), \
+        snapshot_download(repo_id=repo_id, local_dir=f'/opt/hf_models/{model_name}', ignore_patterns=ignore, token=token), \
+    ) \
+    for repo_id, model_name in [ \
+        ('Qwen/Qwen3.5-397B-A17B', 'Qwen3.5-397B-A17B'), \
+        ('Qwen/Qwen3.5-35B-A3B', 'Qwen3.5-35B-A3B'), \
+    ] \
+]" && chmod -R a+rX /opt/hf_cache /opt/hf_models
+
+# Force transformers / huggingface_hub / vLLM to use the baked cache without HTTP checks
+ENV HF_HUB_OFFLINE=1
+ENV TRANSFORMERS_OFFLINE=1
+
 # Copy the rest of the project files
 COPY . .
 

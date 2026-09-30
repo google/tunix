@@ -96,6 +96,7 @@ MSG
         --build-arg INSTALL_RAIDEN=${INSTALL_RAIDEN} \
         --build-arg RAIDEN_WHEEL_DIR=${RAIDEN_WHEEL_DIR} \
         --build-arg INSTALL_DEEPSWE_DEPS=${INSTALL_DEEPSWE_DEPS} \
+        --build-arg HF_TOKEN="${HF_TOKEN:-}" \
         -t ${LOCAL_IMAGE_NAME} \
         -f ${DOCKERFILE} .
 }
