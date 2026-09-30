@@ -470,8 +470,13 @@ spec:
                 # trajectories at the context limit. A 4096-token prompt plus
                 # 32768 response tokens fits Qwen3-32B's 40960-token window;
                 # quarter the micro-batches and concurrency to bound memory.
+                # Keep trainable weights in FP32 so 1e-6 AdamW updates are not
+                # rounded away in BF16; retain BF16 activations. FP32 weights
+                # and optimizer states require additional trainer HBM.
                 exec python3 -X faulthandler -u /app/_run_deepswe.py \
                   --model_version Qwen3-32B \
+                  --param_dtype float32 \
+                  --dtype bfloat16 \
                   --models_base_dir /app/models \
                   --dataset_name R2E-Gym/R2E-Gym-Subset \
                   --dataset_revision 2e8108ff942f24fcb5686badfaf7f9a8808566d5 \
