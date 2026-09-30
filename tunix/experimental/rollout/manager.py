@@ -247,10 +247,11 @@ class RolloutManager:
           if sampler_version > req_version:
             request.target_policy_version = sampler_version
     else:
-      if not self._traffic.is_admission_open():
-        raise traffic_controller_lib.AdmissionClosedError(
-            "rollout admission is closed during weight sync"
-        )
+      # A request that lands mid-sync waits for the new weights rather than
+      # being rejected: the orchestrator dispatches during background syncs and
+      # does not resubmit. Nothing below awaits before `track`, so a later pre
+      # drain sees it.
+      await self._traffic.wait_for_admission()
     loop = asyncio.get_running_loop()
     future: asyncio.Future[TrajectoryOrError] = loop.create_future()
 

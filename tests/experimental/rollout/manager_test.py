@@ -326,6 +326,25 @@ class AdmissionGateTest(unittest.IsolatedAsyncioTestCase):
     manager._active_tasks.pop("t0", None)
     await pre
 
+  async def test_request_during_sync_waits_for_reopen(self):
+    manager = self._manager(agent_factory=lambda: object())
+    await manager.pre_weight_sync()
+    request = datatypes.RolloutRequest(
+        request_id="req_1", prompt="p", prompt_id="prompt_1"
+    )
+    with mock.patch.object(
+        manager_lib.collector_lib,
+        "TrajectoryCollectorEngine",
+        _NoopCollector,
+    ):
+      gen = asyncio.create_task(manager.generate(request))
+      await asyncio.sleep(0.01)
+      self.assertFalse(gen.done())
+      self.assertEqual(manager._traffic.get_active_tasks(), [])
+      await manager.post_weight_sync()
+      result = await asyncio.wait_for(gen, timeout=1)
+    self.assertIsInstance(result, datatypes.TrajectoryItem)
+
   async def test_drain_timeout_returns(self):
     with mock.patch.dict(
         os.environ, {"EPISODE_TIMEOUT_SECS": "0.01"}, clear=False
