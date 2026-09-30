@@ -300,10 +300,18 @@ class DeepSWEAgent(swe_agent.SWEAgent):
 
   name = DEEPSWE_AGENT_NAME
 
-  def __new__(cls, *args: Any, **kwargs: Any):
+  def __new__(
+      cls,
+      system_prompt: str | None = None,
+      use_fn_calling: bool = False,
+      format_model_response: bool = False,
+      scaffold: str | None = None,
+  ):
+    # Mirrors SWEAgent.__init__ so scaffold is honored positionally or by name.
+    del system_prompt, use_fn_calling, format_model_response  # Used by __init__.
     if cls is DeepSWEAgent:
-      scaffold = kwargs.get("scaffold") or os.getenv("SCAFFOLD", "r2egym")
-      if str(scaffold) in swe_agent.OPENHANDS_SCAFFOLDS:
+      resolved = scaffold or os.getenv("SCAFFOLD", "r2egym")
+      if str(resolved) in swe_agent.OPENHANDS_SCAFFOLDS:
         return super().__new__(DeepSWECodeActAgent)
     return super().__new__(cls)
 

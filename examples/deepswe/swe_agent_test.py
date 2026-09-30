@@ -458,6 +458,11 @@ class SweAgentTest(absltest.TestCase):
     self.assertNotIsInstance(r2e_agent, swe_agent.CodeActAgent)
     self.assertEqual(r2e_agent.name, "deepswe_agent")
 
+    # scaffold passed positionally (4th arg) dispatches the same way.
+    positional_agent = deepswe_cls(None, False, False, "openhands")
+    self.assertIsInstance(positional_agent, swe_agent.CodeActAgent)
+    self.assertEqual(positional_agent.scaffold, "openhands")
+
     prompt_item = deepswe.build_prompt_item(
         entry={"instance_id": "inst_1", "problem_statement": "fix it"},
         prompt_idx=0,

@@ -337,7 +337,9 @@ class SWEAgent(ConversationAgentBase):
 
     self._messages.append({"role": "user", "content": str(observation)})
 
-  def _parse_model_response(self, response: str | Any) -> tuple[str, Any]:
+  def _parse_model_response(
+      self, response: str | Any
+  ) -> tuple[str, SWEAction]:
     if self.use_fn_calling:
       return parse_oai_response(response)
     if self.scaffold in OPENHANDS_SCAFFOLDS:
@@ -400,7 +402,9 @@ class CodeActAgent(SWEAgent):
         scaffold=scaffold,
     )
 
-  def _parse_model_response(self, response: str | Any) -> tuple[str, Any]:
+  def _parse_model_response(
+      self, response: str | Any
+  ) -> tuple[str, SWEAction]:
     if self.use_fn_calling:
       return parse_oai_response(response)
     return parse_codeact_response(response)
