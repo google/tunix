@@ -1249,6 +1249,16 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_failed_sync_stops_dispatch_inside_the_window(self):
+    async def _run():
+      program = self._window_program()
+      program._sync_error = RuntimeError("round failed")
+      # Batch 0 is inside the window, so the wait loop never runs.
+      with self.assertRaisesRegex(RuntimeError, "round failed"):
+        await program._wait_for_dispatch_window(0)
+
+    asyncio.run(_run())
+
   def test_window_advances_a_whole_batch_when_a_group_goes_missing(self):
     async def _run():
       program = self._window_program()
