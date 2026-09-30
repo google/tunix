@@ -146,7 +146,7 @@ def create_worker(a):
           additional_config[k] = v
       additional_config["maxtext_config"] = mt_cfg
 
-  mesh_expert = getattr(a, "mesh_expert", 1)
+  mesh_expert = a.mesh_expert
   expected_devices = a.mesh_fsdp * a.mesh_tp * mesh_expert
   if jax.device_count() != expected_devices:
     raise ValueError(
