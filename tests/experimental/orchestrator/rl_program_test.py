@@ -1494,6 +1494,48 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_dispatch_stamps_the_version_the_rollouts_hold(self):
+    async def _run():
+      dispatched = []
+
+      async def mock_dispatch(prompts, **kwargs):
+        dispatched.append(
+            (prompts[0]["metadata"]["batch_idx"], kwargs["policy_version"])
+        )
+        return ["rollout"]
+
+      self.mock_engine.dispatch_rollouts.side_effect = mock_dispatch
+
+      program = rl_program.StandardRLProgram(
+          dataset=[f"prompt_{i}" for i in range(8)],
+          algo=self.mock_algo,
+          reward_fns=[lambda *_: 1.0],
+          assembler=self.assembler,
+          batch_size=2,
+          max_staleness=1,
+          async_weight_sync=True,
+      )
+      program.engine = self.mock_engine
+      # Step 0 trained and staged version 1, which is still transferring.
+      program.policy_version = 1
+      program._unsynced_steps = 1
+      program._step = 1
+
+      dispatch_task = asyncio.create_task(program.rollout_dispatch_stage())
+      await asyncio.sleep(0.05)
+      # Batch 1 is generated with the old weights, so it must say so.
+      self.assertEqual(dispatched, [(1, 0), (1, 0)])
+
+      program._unsynced_steps = 0
+      program._release_window()
+      await asyncio.sleep(0.05)
+      self.assertEqual(dispatched[2:], [(2, 1), (2, 1)])
+
+      dispatch_task.cancel()
+      await asyncio.gather(dispatch_task, return_exceptions=True)
+
+    asyncio.run(_run())
+
   def test_failed_sync_stops_dispatch_inside_the_window(self):
     async def _run():
       program = self._window_program()
