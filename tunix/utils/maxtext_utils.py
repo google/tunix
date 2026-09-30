@@ -115,11 +115,16 @@ def build_vllm_maxtext_additional_config(
   Returns:
     The `additional_config` mapping to hand to the vLLM engine.
   """
+  rollout_moe_fp8 = bool(
+      _resolve_bool_config(None, "ROLLOUT_MOE_FP8", default=False)
+  )
   effective_float32_gate_logits = _resolve_bool_config(
       float32_gate_logits, "FLOAT32_GATE_LOGITS", default=True
   )
   effective_float32_logits = _resolve_bool_config(
-      float32_logits, "FLOAT32_LOGITS", default=None
+      float32_logits,
+      "FLOAT32_LOGITS",
+      default=True if rollout_moe_fp8 else None,
   )
   overrides: dict[str, Any] = {
       "model_name": model_name,
@@ -413,11 +418,16 @@ def build_maxtext_config(
       or os.environ.get("TRAINER_MAXTEXT_ATTENTION")
       or "dot_product"
   )
+  rollout_moe_fp8 = bool(
+      _resolve_bool_config(None, "ROLLOUT_MOE_FP8", default=False)
+  )
   effective_float32_gate_logits = _resolve_bool_config(
       float32_gate_logits, "FLOAT32_GATE_LOGITS", default=True
   )
   effective_float32_logits = _resolve_bool_config(
-      float32_logits, "FLOAT32_LOGITS", default=None
+      float32_logits,
+      "FLOAT32_LOGITS",
+      default=True if rollout_moe_fp8 else None,
   )
   argv.extend([
       "scan_layers=True",
@@ -824,6 +834,14 @@ def create_maxtext_engine(
     direct_converter = getattr(engine._weight_converter, "_direct", None)
     if direct_converter is not None:
       direct_converter.target_dtype = None
+
+  if getattr(engine, "_weight_converter", None) is not None:
+    try:
+      from tunix.experimental.rollout import moe_fp8_utils  # pylint: disable=g-import-not-at-top
+
+      moe_fp8_utils.patch_trainer_converter_moe_fp8(engine._weight_converter)
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      logging.warning("Failed to patch trainer converter for MoE FP8: %s", e)
 
   model_type = type(engine.model).__name__
   logging.info(

@@ -855,6 +855,8 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
 
     logging.info("Bringing up remote workers through ClusterOrchestrator...")
     cluster.bring_up_workers(dummy_data=None)
+    logging.info("Preparing RL program and initial rollout policy...")
+    program.prepare(cluster.engine)
     if args.rcp_logging:
       mllog_utils.train_start(args, step=0)
     logging.info("Starting DeepSWE StandardRLProgram execution...")

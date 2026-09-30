@@ -176,6 +176,7 @@ def build_prompt_item(
       },
       "metadata": {
           "instance_id": prompt_id,
+          "prompt_idx": prompt_idx,
           "problem_statement": problem,
           "docker_image": entry.get("docker_image"),
           "prefix_hash": prompt_id,

@@ -1150,6 +1150,7 @@ def grpo_loss_fn(
       chunk_size=kwargs.get("compute_logps_chunk_size", 0),
       routed_experts=getattr(train_example, "routed_experts", None),
       token_mask=token_mask,
+      stop_gradient_entropy=True,
   )
   per_token_logps = jnp.astype(per_token_logps, jnp.float32)
 

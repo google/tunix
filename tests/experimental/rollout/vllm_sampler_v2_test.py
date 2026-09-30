@@ -286,8 +286,9 @@ class TestRLVllmSamplerWeightSync(unittest.TestCase):
 
             await sampler.pre_weight_sync(req_pre)
             mock_engine.pause_background_loop.assert_called_once()
-            mock_call_worker_method.assert_called_once_with(
-                "start_weight_update", free_kv_cache=True)
+            mock_call_worker_method.assert_any_call("finish_weight_update")
+            mock_call_worker_method.assert_called_with(
+                "start_weight_update", free_kv_cache=False)
             self.assertEqual(await sampler.get_transfer_status("transfer_99"),
                              "IN_PROGRESS")
 
@@ -308,6 +309,70 @@ class TestRLVllmSamplerWeightSync(unittest.TestCase):
                              "SUCCESS")
 
         asyncio.run(run_sync_test())
+
+    def test_dp_rank_for_request_balances_colocated_groups(self):
+        from tunix.experimental.rollout.vllm_sampler_v2 import _dp_rank_for_request
+
+        # Co-located generations {c, c+4, c+8, c+12} split 2-and-2 across DP=2
+        for offset in range(4):
+            ranks = [
+                _dp_rank_for_request(f"traj_django_g{offset + 4 * k}", 2)
+                for k in range(4)
+            ]
+            self.assertEqual(ranks, [0, 1, 0, 1])
+
+    def test_sample_respects_live_parallel_config_dp_size(self):
+        """When tpu_inference SPMD mode resets parallel_config.data_parallel_size=1, sample() must not pass data_parallel_rank."""
+        args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B", data_parallel_size=2)
+        sampler = RLVllmSampler(engine_args=args)
+
+        captured_kwargs = []
+
+        async def mock_generate_stream(prompt, sampling_params, **kwargs):
+            captured_kwargs.append(kwargs)
+            yield SimpleNamespace(outputs=[
+                SimpleNamespace(
+                    text="ok",
+                    token_ids=[1],
+                    cumulative_logprob=0.0,
+                    finish_reason="stop",
+                    logprobs=None,
+                )
+            ])
+
+        mock_engine = MagicMock()
+        mock_engine.generate.side_effect = mock_generate_stream
+        # Simulate tpu_inference resetting vllm_config.parallel_config.data_parallel_size = 1
+        mock_engine.vllm_config = SimpleNamespace(
+            parallel_config=SimpleNamespace(
+                data_parallel_size=1,
+                data_parallel_size_local=1,
+                local_engines_only=False,
+            )
+        )
+        sampler._engine = mock_engine
+        sampler._is_running = True
+
+        async def run_test():
+            reqs = [
+                SimpleNamespace(
+                    prompt="p",
+                    request_id="traj_deepswe_1_g7",
+                    sampling_params=None,
+                )
+            ]
+            await sampler.sample(reqs)
+            self.assertEqual(len(captured_kwargs), 1)
+            self.assertNotIn("data_parallel_rank", captured_kwargs[0])
+
+            # When multi-engine DP is active (data_parallel_size=2), data_parallel_rank is passed.
+            captured_kwargs.clear()
+            mock_engine.vllm_config.parallel_config.data_parallel_size = 2
+            await sampler.sample(reqs)
+            self.assertEqual(len(captured_kwargs), 1)
+            self.assertEqual(captured_kwargs[0].get("data_parallel_rank"), 1)
+
+        asyncio.run(run_test())
 
     def test_get_weight_sync_metadata(self):
         """Verifies get_weight_sync_metadata structure."""

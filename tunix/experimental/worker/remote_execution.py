@@ -702,6 +702,7 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     self._host_port = target_address.replace("grpc://", "")
     self._channel: Optional[Any] = None
     self._rpc: Optional[Any] = None
+    self._channel_loop: Optional[Any] = None
     self._rpc_timeout_s = _normalize_rpc_timeout(rpc_timeout_s)
     # Blocking submit() runs on a persistent background event loop so repeated
     # calls reuse one channel. gRPC aio channels are bound to the loop that
@@ -767,12 +768,19 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     return _CHUNKED_MAGIC + upload_id
 
   def _get_rpc(self) -> Any:
-    if self._rpc is None:
+    current_loop = _running_loop()
+    if (
+        self._rpc is None
+        or self._channel is None
+        or self._channel_loop is not current_loop
+        or (current_loop is not None and current_loop.is_closed())
+    ):
       assert _grpc_aio_lib is not None
       self._channel = _grpc_aio_lib.insecure_channel(
           self._host_port, options=_grpc_options()
       )
       self._rpc = self._make_rpc(self._channel)
+      self._channel_loop = current_loop
     return self._rpc
 
   def submit(self, method_name: Optional[str] = None, *args, **kwargs) -> Any:
@@ -863,8 +871,7 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
       **kwargs,
   ) -> str:
     """Asynchronously dispatches task request on remote server, returning task ACK ID."""
-    if self._channel is None:
-      self._get_rpc()
+    self._get_rpc()
     assert self._channel is not None
     rpc = self._make_dispatch_task_rpc(self._channel)
     request = ExecutionRequest(
@@ -879,8 +886,7 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
       self, timeout_s: float = LONG_POLL_TIMEOUT_S
   ) -> Optional[ExecutionResponse]:
     """Long-polls remote server response queue for completed task results."""
-    if self._channel is None:
-      self._get_rpc()
+    self._get_rpc()
     assert self._channel is not None
     rpc = self._make_poll_responses_rpc(self._channel)
     resp_bytes = await rpc(timeout_s, timeout=self._rpc_timeout_s)
@@ -890,9 +896,16 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
 
   async def close(self) -> None:
     if self._channel is not None:
-      await self._channel.close()
+      current_loop = _running_loop()
+      if (
+          self._channel_loop is not None
+          and self._channel_loop is current_loop
+          and not current_loop.is_closed()
+      ):
+        await self._channel.close()
       self._channel = None
       self._rpc = None
+      self._channel_loop = None
     sync_loop = self._sync_loop
     if sync_loop is not None:
 

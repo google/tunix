@@ -418,6 +418,7 @@ def model_call_contains(model, target_arg: str) -> bool:
         "eos_id",
         "stop_gradient",
         "return_entropy",
+        "stop_gradient_entropy",
         "temperature",
         "chunk_size",
     ),
@@ -438,6 +439,7 @@ def compute_per_token_logps(
     chunk_size: int = 0,
     routed_experts: jax.Array | None = None,
     token_mask: jax.Array | None = None,
+    stop_gradient_entropy: bool = False,
 ) -> jax.Array | tuple[jax.Array, jax.Array]:
   """Computes the per-token log probabilities.
 
@@ -555,6 +557,7 @@ def compute_per_token_logps(
         temperature,
         chunk_size,
         return_entropy,
+        stop_gradient_entropy=stop_gradient or stop_gradient_entropy,
     )
     if return_entropy:
       per_token_logps, per_token_entropy = out
@@ -598,7 +601,10 @@ def compute_per_token_logps(
       logits = jax.lax.stop_gradient(logits)
 
     if return_entropy:
-      entropy = compute_entropy_from_logits(logits)
+      entropy_logits = (
+          jax.lax.stop_gradient(logits) if stop_gradient_entropy else logits
+      )
+      entropy = compute_entropy_from_logits(entropy_logits)
       return per_token_logps, entropy
     return per_token_logps
 
@@ -821,6 +827,7 @@ def compute_chunked_logps(
     temperature,
     chunk_size,
     return_entropy,
+    stop_gradient_entropy: bool = False,
 ):
   """Computes per-token log probabilities in sequence chunks to save VRAM.
 
@@ -870,7 +877,12 @@ def compute_chunked_logps(
     logps_chunk = selective_log_softmax(logits_chunk, ids_chunk)
 
     if return_entropy:
-      entropy_chunk = compute_entropy_from_logits(logits_chunk)
+      entropy_logits = (
+          jax.lax.stop_gradient(logits_chunk)
+          if stop_gradient_entropy
+          else logits_chunk
+      )
+      entropy_chunk = compute_entropy_from_logits(entropy_logits)
       return None, (logps_chunk, entropy_chunk)
     else:
       return None, logps_chunk

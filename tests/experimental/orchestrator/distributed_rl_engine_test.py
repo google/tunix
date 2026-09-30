@@ -835,6 +835,33 @@ class DistributedRLEngineTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_dispatch_rollouts_balances_16x16_across_16_workers(self):
+    async def _run():
+      workers = [MockActorHandle() for _ in range(16)]
+      engine = distributed_rl_engine.DistributedRLEngine(
+          rollout_workers=workers,
+          trainer_workers={datatypes.Role.ACTOR: self.mock_actor},
+      )
+      prompts = [
+          {"prompt": f"problem {i}", "prompt_id": f"django__django-{10000 + i}"}
+          for i in range(16)
+      ]
+      await engine.dispatch_rollouts(prompts, num_generations=16)
+
+      for w in workers:
+        dispatched = [
+            req
+            for call in w.generate.call_args_list
+            for req in call.kwargs["requests"]
+        ]
+        self.assertLen(dispatched, 16)
+        prompt_counts = {}
+        for req in dispatched:
+          prompt_counts[req.prompt_id] = prompt_counts.get(req.prompt_id, 0) + 1
+        self.assertEqual(list(prompt_counts.values()), [4, 4, 4, 4])
+
+    asyncio.run(_run())
+
   def test_dispatch_routes_same_trajectory_to_same_worker(self):
     async def _run():
       # Same (prompt_id, group_index) => same traj_id => same worker, so a

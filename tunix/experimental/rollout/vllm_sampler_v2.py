@@ -24,9 +24,11 @@ without importing or depending on Tunix.
 """
 
 import asyncio
+import inspect
 import logging
 import os
 import time
+import zlib
 
 os.environ["VLLM_USE_V1"] = "0"
 from types import SimpleNamespace
@@ -40,6 +42,25 @@ from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.sampling_params import SamplingParams as VllmSamplingParams
 
 logger = logging.getLogger(__name__)
+
+
+def _dp_rank_for_request(req_id: str, dp_size: int) -> int:
+  """Computes a deterministic vLLM data-parallel rank for a multi-turn trajectory.
+
+  When the orchestrator co-locates 4 generations of a prompt on the same worker
+  (`(prompt_idx + group_idx) % 4 == const`), their `group_idx // 4` spans
+  `{0, 1, 2, 3}`, so `(group_idx // 4) % dp_size` splits each prompt's 4
+  generations evenly (2 per DP rank for DP=2) while pinning every turn of the
+  same trajectory (`req_id`) to the same DP engine so its KV and GDN prefix
+  caches are preserved across turns.
+  """
+  if dp_size <= 1:
+    return 0
+  if "_g" in req_id:
+    tail = req_id.rsplit("_g", 1)[-1]
+    if tail.isdigit():
+      return (int(tail) // 4) % dp_size
+  return zlib.crc32(req_id.encode("utf-8")) % dp_size
 
 
 def _get_val(obj: Any, key: str, default: Any = None) -> Any:
@@ -402,6 +423,33 @@ class RLVllmSampler:
     else:
       req_list = list(sampling_requests)
 
+    dp_size = int(getattr(self.engine_args, "data_parallel_size", 1) or 1)
+    vllm_cfg = getattr(self._engine, "vllm_config", None)
+    parallel_cfg = (
+        getattr(vllm_cfg, "parallel_config", None)
+        if vllm_cfg is not None
+        else None
+    )
+    if parallel_cfg is not None:
+      local_only = bool(getattr(parallel_cfg, "local_engines_only", False))
+      cfg_dp = getattr(
+          parallel_cfg,
+          "data_parallel_size_local" if local_only else "data_parallel_size",
+          None,
+      )
+      if isinstance(cfg_dp, int) and not isinstance(cfg_dp, bool):
+        dp_size = cfg_dp
+    supports_dp_rank = False
+    if dp_size > 1 and self._engine is not None:
+      try:
+        sig = inspect.signature(self._engine.generate)
+        supports_dp_rank = "data_parallel_rank" in sig.parameters or any(
+            p.kind == inspect.Parameter.VAR_KEYWORD
+            for p in sig.parameters.values()
+        )
+      except (TypeError, ValueError):
+        supports_dp_rank = False
+
     pending_tasks = []
     for idx, req in enumerate(req_list):
       vllm_params = self._build_vllm_params(req, kwargs)
@@ -418,8 +466,16 @@ class RLVllmSampler:
             prompt_val if isinstance(prompt_val, str) else str(prompt_val)
         )
 
+      gen_kwargs: dict[str, Any] = {"request_id": req_id}
+      if supports_dp_rank:
+        route_id = (
+            _get_val(req, "route_key") or kwargs.get("route_key") or req_id
+        )
+        gen_kwargs["data_parallel_rank"] = _dp_rank_for_request(
+            str(route_id), dp_size
+        )
       task_gen = self._engine.generate(
-          engine_prompt, vllm_params, request_id=req_id
+          engine_prompt, vllm_params, **gen_kwargs
       )
       pending_tasks.append((req_id, task_gen, expected_prompt_ids))
 

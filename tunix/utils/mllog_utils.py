@@ -1166,7 +1166,12 @@ def init_print(
       getattr(constants, "CONTEXT_PARALLELISM", "context_parallelism"): train_sp,
       getattr(constants, "EXPERT_PARALLELISM", "expert_parallelism"): getattr(args, "train_mesh_expert", 1),
       # Mandatory v6.1 precision and run-config disclosures.
-      "lowest_numerical_precision_in_linear": "bfloat16",
+      "lowest_numerical_precision_in_linear": (
+          "fp8"
+          if os.environ.get("ROLLOUT_MOE_FP8", "").strip().lower()
+          in ("1", "true", "yes", "on")
+          else "bfloat16"
+      ),
       "lowest_numerical_precision_in_attn": "bfloat16",
       "lowest_numerical_precision_in_comm": "bfloat16",
       "config_filename": args.model_id or "qwen35_397b_grpo",

@@ -42,6 +42,32 @@ from tunix.experimental.worker import remote_execution
 _summarize_list = logging_utils.summarize_list
 
 
+def _route_key_for_request(req: datatypes.RolloutRequest) -> int:
+  """Computes a deterministic, load-balanced integer route key for a request.
+
+  Maps (prompt_idx, group_index) to `p * 4 + ((p + g) % 4)` when
+  `num_generations > 1` (or `p` when `num_generations <= 1`), which:
+  1. Distributes every batch of prompts x generations uniformly across workers
+     (eliminating the 2-15x Poisson balls-into-bins imbalance of hashing
+     traj_id).
+  2. Co-locates 4 generations of each prompt on the same rollout worker when
+     num_generations=16 so vLLM prefix caching shares the Turn-1 prompt KV/GDN
+     cache.
+  3. Spreads both single-prompt groups (g=0..G-1) and single-generation batches
+     (g=0, p=0..B-1) across workers while routing identical (prompt_id,
+     group_index) pairs to the same worker.
+  """
+  meta = req.metadata if isinstance(req.metadata, Mapping) else {}
+  prompt_idx = meta.get("prompt_idx")
+  if isinstance(prompt_idx, int):
+    num_generations = int(meta.get("num_generations", 1) or 1)
+    if num_generations <= 1:
+      return prompt_idx
+    group_idx = int(getattr(req, "group_index", 0) or 0)
+    return prompt_idx * 4 + ((prompt_idx + group_idx) % 4)
+  return remote_execution.stable_route_hash(req.traj_id)
+
+
 def _response_to_trajectory_item(resp: Any) -> datatypes.TrajectoryItem:
   """Converts a worker rollout response to a TrajectoryItem."""
   if not isinstance(resp, datatypes.RolloutResponse):
@@ -158,7 +184,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
                 req.request_id,
                 "generate",
                 requests=[req],
-                route_key=req.traj_id,
+                route_key=_route_key_for_request(req),
             )
             for req in requests
         )
@@ -235,6 +261,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       for group_index in range(num_generations):
         request_metadata = dict(base_metadata)
         request_metadata.update(item_metadata)
+        request_metadata.setdefault("prompt_idx", idx)
         request_metadata["group_index"] = group_index
         request_metadata["num_generations"] = num_generations
         if isinstance(request_metadata.get("env_config"), Mapping):
@@ -387,7 +414,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     )
     for req in requests:
       worker = self._rollout_pool._get_next_actor(
-          kwargs={"route_key": req.traj_id}
+          kwargs={"route_key": _route_key_for_request(req)}
       )
       worker_to_requests[worker].append(req)
 

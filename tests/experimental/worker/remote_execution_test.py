@@ -1512,6 +1512,39 @@ class RemoteExecutionTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_grpc_handle_survives_multiple_asyncio_run_loops(self):
+    """Verifies GrpcRemoteActorHandle recreates its channel across sequential asyncio.run() calls."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+      s.bind(("localhost", 0))
+      port = s.getsockname()[1]
+
+    engine = StubWorkerEngine("multi_loop_worker", latency=0.01)
+    with background_server(engine, port):
+      self.assertTrue(_wait_for_port("localhost", port))
+      handle = remote_lib.ActorHandle.from_address(f"grpc://localhost:{port}")
+      try:
+        # First asyncio.run() loop (simulates program.prepare(engine))
+        status = asyncio.run(handle.asubmit("get_status"))
+        self.assertIn("multi_loop_worker", status)
+
+        # Second asyncio.run() loop (simulates program.run(engine))
+        async def _dispatch_and_poll():
+          req_id = await handle.dispatch_task(
+              "loop2_req", "compute_trajectory", "prompt_loop2", turns=2
+          )
+          self.assertEqual(req_id, "loop2_req")
+          resp = await handle.poll_responses(timeout_s=2.0)
+          self.assertIsNotNone(resp)
+          self.assertEqual(
+              resp.unwrap(),
+              "[multi_loop_worker] Trajectory for prompt prompt_loop2 (2"
+              " turns)",
+          )
+
+        asyncio.run(_dispatch_and_poll())
+      finally:
+        asyncio.run(handle.close())
+
 
 if __name__ == "__main__":
   absltest.main()

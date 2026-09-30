@@ -1312,10 +1312,15 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     save_only_lora_params = kwargs.pop(
         "save_only_lora_params", self._lora_enabled
     )
+    save_optimizer = kwargs.pop(
+        "save_optimizer",
+        os.environ.get("SAVE_OPTIMIZER_STATE", "true").lower()
+        in ("1", "true", "yes"),
+    )
     self.checkpoint_manager.save(
         step,
         self.model,
-        self.optimizer,
+        self.optimizer if save_optimizer else None,
         save_only_lora_params=save_only_lora_params,
         custom_metadata=metadata,
         **kwargs,

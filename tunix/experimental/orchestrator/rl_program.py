@@ -507,6 +507,7 @@ class StandardRLProgram(RLProgram):
     self._in_flight_rollouts = 0
     self._window_release = asyncio.Event()
     self._dispatch_done = asyncio.Event()
+    self._prepared = False
 
     self.scored_q: (
         trajectory_queue_manager.TrajectoryQueueManager
@@ -672,10 +673,18 @@ class StandardRLProgram(RLProgram):
 
         coordinates = _prompt_coordinates(prompt_idx, self.full_batch_size)
         await self._wait_for_dispatch_window(coordinates["batch_idx"])
-        try:
-          prompt_item = next(dataset_iter)
-        except StopIteration:
-          break
+        if hasattr(dataset_iter, "_interact_fleet"):
+          _exhausted = object()
+          prompt_item = await asyncio.to_thread(
+              next, dataset_iter, _exhausted
+          )
+          if prompt_item is _exhausted:
+            break
+        else:
+          try:
+            prompt_item = next(dataset_iter)
+          except StopIteration:
+            break
         prompt_idx += 1
         last_coordinates = coordinates
         if isinstance(prompt_item, dict):
@@ -1723,19 +1732,21 @@ class StandardRLProgram(RLProgram):
       # left to set the event.
       self._release_window()
 
-  async def run_async(
+  async def prepare_async(
       self,
       engine: rl_engine_interface.AbstractRLEngine,
-      **kwargs: Any,
   ) -> None:
-    """Launches all stages concurrently on event loop."""
-    del kwargs
+    """Restores checkpoint, configures worker, and syncs initial rollout policy.
+
+    Can be invoked before `run_start` so Step-0 weight sync and target-state
+    seeding execute during the initialization phase rather than inside the
+    timed training loop.
+    """
     self.engine = engine
     # Must happen before any stage starts: train_stage reads `_step` for its
     # loop bound and rollout_dipatch_stage reads resumed `_step` to skip
     # the dataset prefix the previous run already consumed.
     await self._resume_from_checkpoint()
-    logging.info("Starting StandardRLProgram concurrent stages...")
 
     engine.configure_worker(
         role=datatypes.Role.ACTOR,
@@ -1749,6 +1760,27 @@ class StandardRLProgram(RLProgram):
           sync_weights=True,
           policy_version=self.policy_version,
       )
+    self._prepared = True
+
+  def prepare(
+      self,
+      engine: rl_engine_interface.AbstractRLEngine,
+  ) -> None:
+    """Synchronous wrapper for `prepare_async`."""
+    asyncio.run(self.prepare_async(engine))
+
+  async def run_async(
+      self,
+      engine: rl_engine_interface.AbstractRLEngine,
+      **kwargs: Any,
+  ) -> None:
+    """Launches all stages concurrently on event loop."""
+    del kwargs
+    self.engine = engine
+    if not self._prepared:
+      await self.prepare_async(engine)
+    self._prepared = False
+    logging.info("Starting StandardRLProgram concurrent stages...")
 
     train_task = asyncio.create_task(self.train_stage())
     tasks = [

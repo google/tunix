@@ -1140,6 +1140,12 @@ def patch_raiden_worker_sync() -> None:
   """Monkey-patches tpu_inference.rl.raiden_worker_sync.RaidenWorkerSync to delegate apply_to_runner."""
   if os.environ.get("JAX_PLATFORMS") == "cpu":
     return
+  try:
+    from tunix.experimental.rollout import moe_fp8_utils  # pylint: disable=g-import-not-at-top
+
+    moe_fp8_utils.patch_sampler_moe_fp8()
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    logging.warning("moe_fp8_utils patch failed: %s", e, exc_info=True)
   # Resolved through importlib, like the other optional deps in this module, so
   # static dependency analysis does not try to follow tpu-inference -- it is not
   # a declared dependency and is absent in many environments.
@@ -1179,3 +1185,4 @@ def patch_raiden_worker_sync() -> None:
     )
   except AttributeError as e:
     logging.debug("tpu_inference not available to patch: %s", e)
+
