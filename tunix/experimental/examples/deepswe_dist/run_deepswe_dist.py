@@ -163,6 +163,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " detokenizing and re-tokenizing intermediate turns (TITO)."
       ),
   )
+  parser.add_argument(
+      "--async_weight_sync",
+      action=argparse.BooleanOptionalAction,
+      default=False,
+      help=(
+          "Run each step's weight sync in the background: the trainer waits"
+          " only for the source snapshot, not the transfer. Needs a source"
+          " that transfers from host staging"
+          " (RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFER=0)."
+      ),
+  )
   # ---- Optional GRPO algorithm options -------------------------------------
   # All default to off, so omitting them reproduces the previous behaviour.
   parser.add_argument(
@@ -838,6 +849,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         max_staleness=args.max_staleness,
         group_order=args.trajectory_group_order,
         sync_weights=(args.weight_sync_mode != weight_sync.WeightSyncMode.NONE),
+        async_weight_sync=args.async_weight_sync,
         on_step_begin=lambda step: logging.info(
             ">>> DeepSWE step %d starting | policy_version=%d",
             step,

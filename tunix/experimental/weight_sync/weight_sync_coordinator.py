@@ -1017,6 +1017,8 @@ class WeightSyncCoordinator:
   async def sync(
       self,
       policy_version: int = 0,
+      *,
+      source_staged: Optional[asyncio.Event] = None,
       **extra_config,
   ) -> WeightSyncResult:
     """Runs one full round; returns only if it committed.
@@ -1029,6 +1031,11 @@ class WeightSyncCoordinator:
       policy_version: Version of the weights being pushed. Must not regress
         below the last committed version; pushing the same version again is
         allowed (it is how a failed round is retried).
+      source_staged: Set once every source has staged this round's weights
+        (source_prepare returned), i.e. from the point the trainer may mutate
+        its live weights again without affecting what this round pushes. Only
+        true when the source transfers from a host snapshot rather than
+        straight out of device buffers.
       **extra_config: Carried to the workers in the request.
     """
     if self._poisoned:
@@ -1052,7 +1059,7 @@ class WeightSyncCoordinator:
     self._in_flight = True
     start_time = time.monotonic()
     try:
-      return await self._run_round(policy_version, extra_config)
+      return await self._run_round(policy_version, extra_config, source_staged)
     finally:
       elapsed_time = time.monotonic() - start_time
       logging.info("Weight sync finished in %.2f seconds.", elapsed_time)
@@ -1062,6 +1069,7 @@ class WeightSyncCoordinator:
       self,
       policy_version: int,
       extra_config: dict[str, Any],
+      source_staged: Optional[asyncio.Event] = None,
   ) -> WeightSyncResult:
     round_index = self._round_index
     self._round_index += 1
@@ -1232,6 +1240,8 @@ class WeightSyncCoordinator:
               _format_timeout(self._timeouts.source_prepare),
               len(sources),
           )
+        if source_staged is not None:
+          source_staged.set()
       except asyncio.CancelledError:
         raise
       except Exception as e:  # pylint: disable=broad-except
