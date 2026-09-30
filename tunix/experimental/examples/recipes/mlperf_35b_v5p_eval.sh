@@ -154,5 +154,4 @@ else
   exit 1
 fi
 
-COMMAND="${1:-eval}"
-exec "${LAUNCHER}" --command "${COMMAND}" --image "${TUNIX_IMAGE}"
+COMMAND="${1:-eval}"\nshift || true\nexec "${LAUNCHER}" --command "${COMMAND}" --image "${TUNIX_IMAGE}" "$@"
