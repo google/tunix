@@ -18,6 +18,7 @@ from collections.abc import Mapping
 import contextlib
 from typing import Any, Callable, ContextManager, cast
 
+from absl import logging
 from flax import nnx
 import jax.numpy as jnp
 import numpy as np
@@ -414,7 +415,9 @@ class TrainerWorker(abstract_worker.Worker):
     """Goes back to READY once staged if the round runs in the background.
 
     The next train step then runs during the transfer. That is only safe when
-    `d2h` left a host copy, since the step rewrites the device weights.
+    `d2h` left a host copy, since the step rewrites the device weights. The
+    device copy staged for the transfer is dropped here too, so the step does
+    not run with a second set of weights in HBM.
     """
     extra = getattr(sync_request, "extra_config", None) or {}
     if not extra.get(weight_sync.RELEASE_SOURCE_AFTER_STAGE):
@@ -431,6 +434,13 @@ class TrainerWorker(abstract_worker.Worker):
           " memory, which the next train step would overwrite. Use a"
           " host-staged source (raiden: RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFER=0)."
       )
+    # The transfer reads the host copy; the synchronizer's references are the
+    # last ones to the converted device tree (the trainer deletes its own).
+    released = synchronizer.release_buffers()
+    logging.info(
+        "Background weight sync staged on host; released %d device arrays.",
+        released,
+    )
     self.state = WorkerState.READY
 
   def release_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:

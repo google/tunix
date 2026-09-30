@@ -41,12 +41,26 @@ class _ReleasingTrainer(_FakeTrainer):
     self.release_kwargs = kwargs
     return "released"
 
+class _FakeSynchronizer:
+  """Records when the staged device copy is dropped."""
+
+  def __init__(self, staged_on_host):
+    self.staged_on_host = staged_on_host
+    self.arrays = ["layer0", "layer1"]
+    self.released = 0
+
+  def release_buffers(self):
+    self.released += 1
+    released, self.arrays = len(self.arrays), []
+    return released
+
+
 class _StagingTrainer(_ReleasingTrainer):
   """MaxText-style trainer: the synchronizer lives in `_weight_sync`."""
 
   def __init__(self, staged_on_host):
     super().__init__()
-    self._weight_sync = types.SimpleNamespace(staged_on_host=staged_on_host)
+    self._weight_sync = _FakeSynchronizer(staged_on_host)
 
 
 def _background_request():
@@ -104,29 +118,38 @@ class WeightSyncStagingTest(absltest.TestCase):
     trainer = _StagingTrainer(staged_on_host=True)
     worker = self._worker(trainer)
     worker.prepare_weight_sync(_background_request())
-    # The next train step may run while the transfer is in flight.
+    # The next train step may run while the transfer is in flight, without
+    # the staged device copy still held.
     self.assertEqual(worker.state, WorkerState.READY)
+    self.assertEqual(trainer._weight_sync.released, 1)
+    self.assertEqual(trainer._weight_sync.arrays, [])
     worker.release_weight_sync()
     self.assertEqual(worker.state, WorkerState.READY)
     self.assertEqual(trainer.calls, ["prepare", "release"])
 
   def test_background_round_finds_peft_synchronizer(self):
     trainer = _ReleasingTrainer()
-    trainer._weight_sync_worker = types.SimpleNamespace(staged_on_host=True)
+    trainer._weight_sync_worker = _FakeSynchronizer(staged_on_host=True)
     worker = self._worker(trainer)
     worker.prepare_weight_sync(_background_request())
     self.assertEqual(worker.state, WorkerState.READY)
+    self.assertEqual(trainer._weight_sync_worker.released, 1)
 
   def test_background_round_from_device_memory_fails(self):
-    worker = self._worker(_StagingTrainer(staged_on_host=False))
+    trainer = _StagingTrainer(staged_on_host=False)
+    worker = self._worker(trainer)
     with self.assertRaisesRegex(RuntimeError, "DIRECT_DEVICE_BUFFER=0"):
       worker.prepare_weight_sync(_background_request())
     self.assertEqual(worker.state, WorkerState.ERROR)
+    self.assertEqual(trainer._weight_sync.released, 0)
 
   def test_blocking_round_stays_syncing_even_if_host_staged(self):
-    worker = self._worker(_StagingTrainer(staged_on_host=True))
+    trainer = _StagingTrainer(staged_on_host=True)
+    worker = self._worker(trainer)
     worker.prepare_weight_sync(types.SimpleNamespace(extra_config={}))
     self.assertEqual(worker.state, WorkerState.SYNCING)
+    # A blocking round keeps the staged copy until release_weight_sync.
+    self.assertEqual(trainer._weight_sync.released, 0)
 
   def test_release_forwards_sync_request(self):
     trainer = _ReleasingTrainer()
