@@ -580,25 +580,6 @@ class SequencePackedBatchAssembler:
         trajectory_ids=traj_ids,
         lineage_context=merged_lineage,
     )
-    if payload.routed_experts is not None:
-      # Real tokens the trainer will actually replay, judged on layer 0 only so
-      # it stays cheap on [B, 65536, L, K] rows. The MoE layer forces a token
-      # only if all top_k slots are >= 0 and distinct and re-gates it otherwise
-      # (e.g. a zero-filled row). Each trajectory's last token has no routing,
-      # so correct alignment gives forced == real - segments.
-      real = np.asarray(payload.segment_ids) > 0
-      layer0 = np.sort(np.asarray(payload.routed_experts)[..., 0, :], axis=-1)
-      forced = np.all(layer0 >= 0, axis=-1) & ~np.any(
-          layer0[..., 1:] == layer0[..., :-1], axis=-1
-      )
-      logging.info(
-          "Router replay: %d/%d real tokens forced in %s (%d segments; aligned"
-          " routing forces real - segments).",
-          int(np.count_nonzero(forced & real)),
-          int(np.count_nonzero(real)),
-          batch_tracking_id,
-          len(real_placed),
-      )
     self._buffer = [id_to_entry[id(item)] for item in leftover]
     return AssembledBatch(
         payload=payload,
