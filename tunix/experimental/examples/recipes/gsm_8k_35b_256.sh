@@ -107,8 +107,10 @@ else
   export TRAINABLE_PARAMETERS_MASK="${TRAINABLE_PARAMETERS_MASK:-^(?!.*routed_experts/gate/kernel).*}"
   export VLLM_ENABLE_EXPERT_PARALLEL="${VLLM_ENABLE_EXPERT_PARALLEL:-true}"
   export VLLM_PREFIX_CACHE_RETENTION_INTERVAL="${VLLM_PREFIX_CACHE_RETENTION_INTERVAL:-0}"
+  export FP8_MOE="${FP8_MOE:-false}"
+  export FP8_MOE="${FP8_MOE,,}"
   if [[ -z "${VLLM_ADDITIONAL_CONFIG:-}" ]]; then
-    export VLLM_ADDITIONAL_CONFIG='{"sharding":{"sharding_strategy":{"expert_parallelism":4,"tensor_parallelism":1,"enable_dp_attention":true}},"custom_mamba_cache_multiplier":16,"maxtext_config":{"scan_layers":false,"attention":"vllm_rpa","allow_split_physical_axes":true,"use_multimodal":false,"prefuse_moe_weights":true}}'
+    export VLLM_ADDITIONAL_CONFIG='{"sharding":{"sharding_strategy":{"expert_parallelism":4,"tensor_parallelism":1,"enable_dp_attention":true}},"custom_mamba_cache_multiplier":16,"maxtext_config":{"scan_layers":false,"attention":"vllm_rpa","allow_split_physical_axes":true,"use_multimodal":false,"prefuse_moe_weights":true,"fp8_moe":'"${FP8_MOE}"'}}'
   fi
 fi
 
