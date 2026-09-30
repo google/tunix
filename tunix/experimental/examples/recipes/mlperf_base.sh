@@ -169,6 +169,9 @@ else
 fi
 export VLLM_MAMBA_CACHE_MODE="${VLLM_MAMBA_CACHE_MODE:-${MAMBA_CACHE_MODE}}"
 
+# FP8 MoE rollout/trainer (ROLLOUT_FP8, TRAINER_FP8); see fp8_moe.sh.
+source "${DIR}/fp8_moe.sh"
+
 # Router replay
 export RETURN_ROUTED_EXPERTS="${RETURN_ROUTED_EXPERTS:-true}"
 

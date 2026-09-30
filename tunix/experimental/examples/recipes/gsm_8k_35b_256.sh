@@ -112,6 +112,9 @@ else
   fi
 fi
 
+# FP8 MoE rollout/trainer (ROLLOUT_FP8, TRAINER_FP8); see fp8_moe.sh.
+source "${DIR}/fp8_moe.sh"
+
 # Qwen3.5 <|im_end|>, <|endoftext|> (generation_config.json eos_token_id).
 # 151645/151643 are the Qwen2.5/Qwen3 ids and are ordinary tokens in the
 # Qwen3.5 vocab.
