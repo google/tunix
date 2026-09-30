@@ -293,27 +293,39 @@ def summarize(rows, instance_ids, attempts):
   }
 
 
+def _response_agent_name(response):
+  """Returns the agent name recorded on a rollout response, if any."""
+  for metadata in (
+      getattr(response, "metadata", None),
+      getattr(getattr(response, "payload", None), "metadata", None),
+  ):
+    if isinstance(metadata, dict) and metadata.get("agent_name"):
+      return str(metadata["agent_name"])
+  return None
+
+
 def compact_result(response):
   if response.error is not None or response.payload is None:
-    return {
+    result = {
         "reward": 0.0,
         "resolved": False,
         "status": response.status,
         "error": str(response.error or "Missing trajectory"),
     }
-  traj = response.payload.traj
-  reward = float(traj["trajectory_reward"])
-  if not math.isfinite(reward):
-    raise ValueError("Non-finite trajectory reward")
-  result = {
-      "reward": reward,
-      "resolved": reward > 0,
-      "status": str(traj.get("status", "UNKNOWN")),
-      "error": None,
-  }
-  metadata = getattr(response.payload, "metadata", None)
-  if isinstance(metadata, dict) and metadata.get("agent_name"):
-    result["agent_name"] = str(metadata["agent_name"])
+  else:
+    traj = response.payload.traj
+    reward = float(traj["trajectory_reward"])
+    if not math.isfinite(reward):
+      raise ValueError("Non-finite trajectory reward")
+    result = {
+        "reward": reward,
+        "resolved": reward > 0,
+        "status": str(traj.get("status", "UNKNOWN")),
+        "error": None,
+    }
+  agent_name = _response_agent_name(response)
+  if agent_name:
+    result["agent_name"] = agent_name
   return result
 
 
@@ -352,6 +364,9 @@ async def evaluate_worker(handle, jobs, limit, timeout, write_record):
             "status": "ERROR",
             "error": str(exc),
         }
+      requested_agent = fields["metadata"].get("agent_name")
+      if requested_agent and not row.get("agent_name"):
+        row["agent_name"] = requested_agent
       row.update(
           instance_id=fields["metadata"]["instance_id"],
           attempt=fields["group_index"],

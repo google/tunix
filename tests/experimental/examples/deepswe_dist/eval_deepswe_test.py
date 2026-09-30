@@ -217,6 +217,18 @@ class EvalTest(unittest.TestCase):
         eval_lib.compact_result(response)["agent_name"], "codeact_agent"
     )
 
+    error_response = types.SimpleNamespace(
+        error="RESOURCE_EXHAUSTED",
+        status="ERROR",
+        payload=None,
+        metadata={"agent_name": "codeact_agent"},
+    )
+    error_row = eval_lib.compact_result(error_response)
+    self.assertEqual(error_row["status"], "ERROR")
+    self.assertEqual(error_row["agent_name"], "codeact_agent")
+    error_response.metadata = None
+    self.assertNotIn("agent_name", eval_lib.compact_result(error_response))
+
 
 class RpcTest(unittest.IsolatedAsyncioTestCase):
 
@@ -266,6 +278,11 @@ class RpcTest(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(len(written), 4)
     self.assertLessEqual(worker.peak, 2)
     self.assertEqual(rows[0]["attempt"], 1)
+    expected_agent = eval_lib.request_fields(a, entry, 0, 0)["metadata"][
+        "agent_name"
+    ]
+    self.assertTrue(expected_agent)
+    self.assertEqual({row["agent_name"] for row in rows}, {expected_agent})
     summary = eval_lib.summarize(rows, ["a"], 4)
     self.assertEqual(summary["error_attempts"], 1)
     self.assertEqual(summary["avg_at_k"], 0.75)
