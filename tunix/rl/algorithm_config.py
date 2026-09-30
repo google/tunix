@@ -77,7 +77,13 @@ class AlgorithmConfig:
         "ppo",
         "dapo",
     ]
-    valid_advantage_estimators = ["grpo", "gae", "drgrpo", "rloo"]
+    valid_advantage_estimators = [
+        "grpo",
+        "grpo-loo",
+        "gae",
+        "drgrpo",
+        "rloo",
+    ]
     valid_policy_loss_fns = ["grpo", "ppo"]
     if self.algo_variant not in valid_algo_variants:
       raise ValueError(

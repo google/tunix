@@ -43,6 +43,12 @@ class AlgorithmConfigTest(parameterized.TestCase):
           adv="grpo",
           loss="ppo",
       ),
+      dict(
+          testcase_name="grpo_grpo_loo_grpo",
+          algo="grpo",
+          adv="grpo-loo",
+          loss="grpo",
+      ),
   )
   def test_valid_combinations(self, algo: str, adv: str, loss: str):
     """Tests various valid combinations of core algorithm parameters."""

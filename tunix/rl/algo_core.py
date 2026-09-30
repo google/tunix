@@ -785,6 +785,69 @@ def compute_advantages(
   return advantages.reshape(np.shape(rewards)).astype(np.float32)
 
 
+@function_registry.register_advantage_estimator("grpo-loo")
+def compute_grpo_loo_advantages(
+    rewards: np.ndarray,
+    num_generations: int,
+    valid_mask: np.ndarray | jax.Array | None = None,
+) -> np.ndarray:
+  """GRPO advantages with leave-one-out centering and std normalization.
+
+  Combines RLOO's unbiased baseline with GRPO's variance normalization. In
+  plain GRPO the sample `r_i` appears in its own baseline `mean(r)` with weight
+  `1/k`, which shrinks every residual by `(k - 1) / k`; divided by the sample
+  std (`ddof=1`), `A_i = ((k - 1) / k) * (r_i - mean_{-i}) / std(r)`. At small
+  valid group sizes (`k = 2..4`, or larger groups after invalid trajectories are
+  masked out) that `(k - 1) / k` factor attenuates the advantage by 25%--50% as
+  a pure function of how many peers survived. Using the leave-one-out mean
+  `mean_{-i}` removes the self-inclusion bias while keeping the group-std
+  scaling that makes advantages comparable across prompts of different
+  difficulty:
+
+    `A_i = (r_i - mean_{j != i, valid} r_j) / (std_{valid}(r) + 1e-6)`
+
+  Equivalently, `A_i = (k / (k - 1)) * A_i^{grpo}` for a group with `k` valid
+  trajectories.
+
+  Args:
+    rewards: reward functions output.
+    num_generations: Number of generations `G`.
+    valid_mask: Optional boolean mask, same shape as `rewards`, marking the
+      trajectories that are healthy enough to be trained on. Invalid
+      trajectories are excluded from every peer's leave-one-out mean and from
+      the group std, receive a `0.0` advantage themselves, and groups with fewer
+      than `MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE` valid trajectories are zeroed
+      out entirely.
+
+  Returns:
+    Leave-one-out, std-normalized group advantages (`float32` ndarray).
+  """
+  if num_generations < MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE:
+    return np.zeros_like(rewards, dtype=np.float32)
+
+  if valid_mask is None:
+    valid_mask = np.ones_like(rewards, dtype=bool)
+
+  grouped_rewards, grouped_mask, valid_counts, masked_sum = (
+      _grouped_valid_stats(rewards, valid_mask, num_generations)
+  )
+  loo_mean = (masked_sum - grouped_rewards) / np.maximum(valid_counts - 1, 1)
+  group_mean = masked_sum / np.maximum(valid_counts, 1)
+  squared_deviations = np.where(
+      grouped_mask, (grouped_rewards - group_mean) ** 2, 0.0
+  ).sum(axis=-1, keepdims=True)
+  std_grouped_rewards = np.sqrt(
+      squared_deviations / np.maximum(valid_counts - 1, 1)
+  )
+  advantages = (grouped_rewards - loo_mean) / (std_grouped_rewards + 1e-6)
+  advantages = np.where(
+      grouped_mask & (valid_counts >= MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE),
+      advantages,
+      0.0,
+  )
+  return advantages.reshape(np.shape(rewards)).astype(np.float32)
+
+
 @function_registry.register_advantage_estimator("rloo")
 def compute_rloo_advantages(
     rewards: jax.Array,

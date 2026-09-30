@@ -246,6 +246,18 @@ class AlgoCoreTest(absltest.TestCase):
                 dtype=np.float32,
             ),
         ),
+        (
+            algo_core.compute_grpo_loo_advantages,
+            np.array(
+                [
+                    -2.0 / s0, -0.5 * (4.0 / 3.0) / s0, 0.5 * (4.0 / 3.0) / s0, 2.0 / s0,
+                    -10.0 / s1, 0.0, 10.0 / s1, 0.0,
+                    0.0, 0.0, 0.0, 0.0,
+                    0.0, 0.0, 0.0, 0.0,
+                ],
+                dtype=np.float32,
+            ),
+        ),
     ]
     for estimator, expected in expected_by_estimator:
       with self.subTest(estimator=estimator.__name__):
@@ -279,6 +291,7 @@ class AlgoCoreTest(absltest.TestCase):
         algo_core.compute_advantages,
         algo_core.compute_rloo_advantages,
         algo_core.compute_drgrpo_advantages,
+        algo_core.compute_grpo_loo_advantages,
     ):
       with self.subTest(estimator=estimator.__name__):
         adv = np.asarray(
@@ -289,6 +302,98 @@ class AlgoCoreTest(absltest.TestCase):
         np.testing.assert_allclose(
             adv, np.zeros(4, dtype=np.float32), atol=1e-6
         )
+
+  def test_grpo_loo_removes_self_inclusion_attenuation_and_matches_relation_to_grpo(
+      self,
+  ):
+    """Verify A_i^{grpo-loo} = (r_i - mean_{-i}) / (std + 1e-6) = (k/(k-1)) * A_i^{grpo}."""
+    # k=2 binary rewards [1, 0]:
+    #   loo_mean = [0, 1], r - loo_mean = [1, -1]
+    #   sample std (ddof=1) of [1, 0] = sqrt((0.25 + 0.25) / 1) = sqrt(0.5)
+    #   Plain GRPO gives (r - 0.5) / sqrt(0.5) = [1/sqrt(2), -1/sqrt(2)] (~0.7071),
+    #   attenuated by (k-1)/k = 1/2 relative to the LOO residual.
+    #   GRPO-LOO gives [1 / sqrt(0.5), -1 / sqrt(0.5)] = [sqrt(2), -sqrt(2)].
+    rewards_k2 = np.array([1.0, 0.0], dtype=np.float32)
+    adv_loo_k2 = algo_core.compute_grpo_loo_advantages(
+        rewards_k2, num_generations=2
+    )
+    adv_grpo_k2 = algo_core.compute_advantages(rewards_k2, num_generations=2)
+    expected_k2 = np.array(
+        [1.0 / (np.sqrt(0.5) + 1e-6), -1.0 / (np.sqrt(0.5) + 1e-6)],
+        dtype=np.float32,
+    )
+    np.testing.assert_allclose(adv_loo_k2, expected_k2, rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(
+        adv_loo_k2, 2.0 * adv_grpo_k2, rtol=1e-5, atol=1e-5
+    )
+
+    # k=4 arbitrary rewards: verify exact LOO formula and (k/(k-1)) = 4/3 ratio.
+    rewards_k4 = np.array([1.0, 2.0, 4.0, 9.0, -3.0, 0.0, 3.0, 12.0], np.float32)
+    adv_loo_k4 = algo_core.compute_grpo_loo_advantages(
+        rewards_k4, num_generations=4
+    )
+    adv_grpo_k4 = algo_core.compute_advantages(rewards_k4, num_generations=4)
+    np.testing.assert_allclose(
+        adv_loo_k4, (4.0 / 3.0) * adv_grpo_k4, rtol=1e-5, atol=1e-5
+    )
+    # Sum of advantages within each group is zero.
+    np.testing.assert_allclose(
+        adv_loo_k4.reshape(2, 4).sum(axis=-1), [0.0, 0.0], atol=1e-5
+    )
+
+  def test_grpo_loo_valid_mask_excludes_invalid_from_loo_mean_and_std(self):
+    """Invalid trajectories must not enter peer LOO means or group std."""
+    # Group of G=4 with 2 valid peers (rewards 10.0 and 20.0) and 2 invalid
+    # peers carrying extreme garbage. The k=2 valid slice must match running
+    # compute_grpo_loo_advantages on [10.0, 20.0] with G=2.
+    rewards_4 = np.array([10.0, -999.0, 20.0, 1e6], dtype=np.float32)
+    valid_mask_4 = np.array([True, False, True, False])
+    adv_4 = algo_core.compute_grpo_loo_advantages(
+        rewards_4, num_generations=4, valid_mask=valid_mask_4
+    )
+    adv_2 = algo_core.compute_grpo_loo_advantages(
+        np.array([10.0, 20.0], dtype=np.float32), num_generations=2
+    )
+    self.assertEqual(float(adv_4[1]), 0.0)
+    self.assertEqual(float(adv_4[3]), 0.0)
+    np.testing.assert_allclose(
+        [adv_4[0], adv_4[2]], adv_2, rtol=1e-5, atol=1e-5
+    )
+    # And for k_valid=3 out of G=4, ratio to masked GRPO is 3/2 (not 4/3).
+    rewards_3v = np.array([1.0, 2.0, 6.0, -500.0], dtype=np.float32)
+    mask_3v = np.array([True, True, True, False])
+    adv_loo_3v = algo_core.compute_grpo_loo_advantages(
+        rewards_3v, num_generations=4, valid_mask=mask_3v
+    )
+    adv_grpo_3v = algo_core.compute_advantages(
+        rewards_3v, num_generations=4, valid_mask=mask_3v
+    )
+    np.testing.assert_allclose(
+        adv_loo_3v, (3.0 / 2.0) * adv_grpo_3v, rtol=1e-5, atol=1e-5
+    )
+    self.assertEqual(float(adv_loo_3v[3]), 0.0)
+
+  def test_grpo_loo_degenerate_groups_and_zero_variance(self):
+    # num_generations < 2 -> all zeros.
+    adv_g1 = algo_core.compute_grpo_loo_advantages(
+        np.array([5.0, -2.0], dtype=np.float32), num_generations=1
+    )
+    np.testing.assert_array_equal(adv_g1, np.zeros(2, dtype=np.float32))
+
+    # 1 valid and 0 valid in G=4 -> all zeros, no NaN/Inf.
+    rewards = np.array([42.0, 1.0, 2.0, 3.0, 7.0, 8.0, 9.0, 10.0], np.float32)
+    mask = np.array([True, False, False, False, False, False, False, False])
+    adv = algo_core.compute_grpo_loo_advantages(
+        rewards, num_generations=4, valid_mask=mask
+    )
+    self.assertTrue(np.all(np.isfinite(adv)))
+    np.testing.assert_array_equal(adv, np.zeros(8, dtype=np.float32))
+
+  def test_grpo_loo_registered_in_function_registry(self):
+    from tunix.rl import function_registry  # pylint: disable=g-import-not-at-top
+
+    fn = function_registry.get_advantage_estimator('grpo-loo')
+    self.assertIs(fn, algo_core.compute_grpo_loo_advantages)
 
   def test_grpo_loss_fn_packed_equals_unpacked(self):
     # P3.4 gate: grpo_loss_fn gives the SAME primary loss whether two sequences
