@@ -482,22 +482,10 @@ class StandardRLProgram(RLProgram):
     self.max_staleness = max_staleness
     self.sync_weights = sync_weights
     self.metrics_logger: MetricsLogger = MetricsLogger(metrics_logging_options)
-    if trajectory_log_dir is None and metrics_logging_options is not None:
-      log_dir = getattr(metrics_logging_options, "log_dir", "")
-      if log_dir:
-        trajectory_log_dir = os.path.join(log_dir, "trajectories")
-    self.trajectory_logger = (
-        trajectory_logger.AsyncTrajectoryLogger(trajectory_log_dir)
-        if trajectory_log_dir
-        else None
-    )
-    if trajectory_log_dir:
-      logging.info(
-          "Trajectory logging enabled; resolved trajectory_log_dir=%s",
-          trajectory_log_dir,
-      )
-    else:
-      logging.info("Trajectory logging disabled; no trajectory_log_dir set.")
+    # Trajectory logging is disabled on mlperf to prevent GCS write timeouts
+    # and queue stalls (b/565475624). Rollout data is handled by TrajectoryStore.
+    self.trajectory_logger = None
+    logging.info("Trajectory logging disabled in mlperf branch.")
     # Received, not built: the orchestrator running this program owns the
     # Trajectory Store's construction and lifecycle (ClusterOrchestrator, one
     # per process), since a store's lifetime should span the whole
