@@ -34,6 +34,7 @@ from tunix.experimental.common import datatypes
 from tunix.experimental.common import logging_utils
 from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
+from tunix.experimental.orchestrator import fault_tolerance
 from tunix.experimental.orchestrator import rl_engine_interface
 from tunix.experimental.queue_manager import trajectory_queue_manager
 from tunix.experimental.trajectory import store as trajectory_store_lib
@@ -839,12 +840,11 @@ class StandardRLProgram(RLProgram):
         try:
           completed = await self.engine.poll_rollouts()
           if isinstance(completed, list) and completed:
-            # TODO: Fault-tolerance must either decrement `_in_flight_rollouts` for failed
-            # requests or retry them internally. Otherwise, a dropped RPC will cause
-            # `_in_flight_rollouts` to never reach 0, hanging the EOF cascade.
             self._in_flight_rollouts -= len(completed)
             for item in completed:
               await self.raw_q.put(item)
+        except fault_tolerance.NoHealthyRolloutWorkersError:
+          raise
         except Exception as exc:  # pylint: disable=broad-exception-caught
           logging.warning("Error in polling_stage: %s", exc)
           await asyncio.sleep(0.01)
