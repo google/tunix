@@ -17,6 +17,7 @@ import builtins
 from collections.abc import Sequence
 import dataclasses
 import pathlib
+import threading
 import types
 from typing import Any
 from unittest import mock
@@ -176,6 +177,36 @@ def _set_mock_poll_batches(
     return []
 
   mock_engine.poll_rollouts.side_effect = _mock_poll
+
+
+class _OneMicrobatchPerGroupAssembler:
+  """Emits one microbatch per fed group; every `groups_per_update`-th is final."""
+
+  def __init__(self, groups_per_update: int, events: list[str]):
+    self.groups_per_update: int = groups_per_update
+    self.events: list[str] = events
+    self.num_generations: int | None = None
+    self.mini_batch_size: int | None = None
+    self.feed_threads: list[threading.Thread] = []
+
+  def feed(self, items: Any) -> list[batch_assembly.AssembledBatch]:
+    del items
+    self.feed_threads.append(threading.current_thread())
+    idx = len(self.feed_threads) - 1
+    self.events.append(f"feed:{idx}")
+    return [
+        batch_assembly.AssembledBatch(
+            payload=f"mb{idx}",
+            is_final_batch=(idx + 1) % self.groups_per_update == 0,
+            trajectory_ids=(),
+        )
+    ]
+
+  def flush(self) -> list[batch_assembly.AssembledBatch]:
+    return []
+
+  def reset(self, **kwargs: Any) -> None:
+    del kwargs
 
 
 class RLProgramTest(absltest.TestCase):
@@ -511,6 +542,190 @@ class RLProgramTest(absltest.TestCase):
       self.assertEqual(program.policy_version, 5)
       self.assertIsNotNone(program.last_step_result)
       self.assertEqual(program.last_step_result.policy_version, 5)
+
+    asyncio.run(_run())
+
+  def _pipelined_program(
+      self, events: list[str]
+  ) -> tuple[rl_program.StandardRLProgram, _OneMicrobatchPerGroupAssembler]:
+    self.mock_algo.mini_batch_size = 2
+    assembler = _OneMicrobatchPerGroupAssembler(2, events)
+    _set_mock_poll_batches(
+        self.mock_engine,
+        _make_trajectory_group("prompt_0"),
+        _make_trajectory_group("prompt_1"),
+    )
+    program = self._create_program(
+        dataset=["prompt_data_0", "prompt_data_1"],
+        batch_size=2,
+        assembler=assembler,
+        pipeline_train_microbatches=True,
+    )
+    return program, assembler
+
+  def test_pipeline_packs_next_microbatch_while_previous_trains(self):
+    async def _run():
+      events = []
+
+      async def mock_train_step(batch, **kwargs):
+        events.append(f"train_start:{batch}")
+        if batch == "mb0":
+          # Held open until the next microbatch is packed; without
+          # pipelining this would time out and record the serial order.
+          for _ in range(200):
+            if "feed:1" in events:
+              break
+            await asyncio.sleep(0.005)
+        events.append(f"train_end:{batch}")
+        return f"result_{batch}"
+
+      self.mock_engine.train_step.side_effect = mock_train_step
+      program, assembler = self._pipelined_program(events)
+
+      await program.run_async(self.mock_engine)
+
+      # mb1 is packed before mb0's train_step returns. Where feed:1 lands
+      # relative to train_start:mb0 is up to the thread scheduler.
+      self.assertLess(events.index("feed:1"), events.index("train_end:mb0"))
+      # train_steps never overlap, so accumulation order is unchanged.
+      self.assertEqual(
+          [e for e in events if e.startswith("train")],
+          [
+              "train_start:mb0",
+              "train_end:mb0",
+              "train_start:mb1",
+              "train_end:mb1",
+          ],
+      )
+      self.assertEqual(
+          [
+              c.kwargs["apply_optimizer"]
+              for c in self.mock_engine.train_step.call_args_list
+          ],
+          [False, True],
+      )
+      self.assertEqual(program.last_step_result.train_result, "result_mb1")
+      self.assertEqual(program.last_step_result.num_microbatches, 2)
+      self.assertTrue(
+          all(t is not threading.main_thread() for t in assembler.feed_threads)
+      )
+      self.assertIsNone(program._pending_train)
+
+    asyncio.run(_run())
+
+  def test_pipeline_scores_reference_while_previous_trains(self):
+    async def _run():
+      events = []
+
+      def _payload(name: str) -> datatypes.RLTrainerPayload:
+        return datatypes.RLTrainerPayload(
+            prompt_ids=np.array([[1, 2]], dtype=np.int32),
+            prompt_mask=np.ones((1, 2), dtype=np.float32),
+            completion_ids=np.array([[3, 4]], dtype=np.int32),
+            completion_mask=np.ones((1, 2), dtype=np.float32),
+            advantages=np.ones((1, 2), dtype=np.float32),
+            metadata={"name": name},
+        )
+
+      async def mock_per_token_logps(role, items):
+        self.assertEqual(role, datatypes.Role.REFERENCE)
+        events.append(f"ref:{items.metadata['name']}")
+        return np.array([[-0.1, -0.2]], dtype=np.float32)
+
+      async def mock_train_step(batch, **kwargs):
+        del kwargs
+        name = batch.metadata["name"]
+        events.append(f"train_start:{name}")
+        if name == "mb0":
+          # Held open until mb1's reference logps are in; this would time
+          # out if reference scoring waited for the in-flight step.
+          for _ in range(200):
+            if "ref:mb1" in events:
+              break
+            await asyncio.sleep(0.005)
+        events.append(f"train_end:{name}")
+        return f"result_{name}"
+
+      self.mock_algo.requires_reference_kl = True
+      self.mock_engine.per_token_logps.side_effect = mock_per_token_logps
+      self.mock_engine.train_step.side_effect = mock_train_step
+      program, assembler = self._pipelined_program(events)
+      feed = assembler.feed
+      assembler.feed = lambda items: [
+          batch_assembly.AssembledBatch(
+              payload=_payload(mb.payload),
+              is_final_batch=mb.is_final_batch,
+              trajectory_ids=mb.trajectory_ids,
+          )
+          for mb in feed(items)
+      ]
+
+      await program.run_async(self.mock_engine)
+
+      self.assertLess(events.index("ref:mb1"), events.index("train_end:mb0"))
+      self.assertEqual(
+          [e for e in events if e.startswith("train")],
+          [
+              "train_start:mb0",
+              "train_end:mb0",
+              "train_start:mb1",
+              "train_end:mb1",
+          ],
+      )
+
+    asyncio.run(_run())
+
+  def test_pipeline_train_step_failure_fails_the_run(self):
+    async def _run():
+      async def mock_train_step(batch, **kwargs):
+        del kwargs
+        await asyncio.sleep(0)
+        if batch == "mb0":
+          raise RuntimeError("fwd_bwd failed")
+        return "ok"
+
+      self.mock_engine.train_step.side_effect = mock_train_step
+      program, _ = self._pipelined_program([])
+
+      with self.assertRaisesRegex(RuntimeError, "fwd_bwd failed"):
+        await program.run_async(self.mock_engine)
+      # The optimizer step never runs on a partially accumulated batch.
+      self.assertEqual(
+          [
+              c.kwargs["apply_optimizer"]
+              for c in self.mock_engine.train_step.call_args_list
+          ],
+          [False],
+      )
+
+    asyncio.run(_run())
+
+  def test_pipeline_reset_waits_for_in_flight_feed(self):
+    async def _run():
+      events = []
+      program, assembler = self._pipelined_program(events)
+      in_feed = threading.Event()
+      release = threading.Event()
+
+      def slow_feed(items):
+        in_feed.set()
+        release.wait(5)
+        events.append("feed_done")
+        return []
+
+      assembler.reset = lambda **kwargs: events.append("reset")
+      feed_task = asyncio.create_task(program._assemble(slow_feed, []))
+      await asyncio.to_thread(in_feed.wait, 5)
+      # Cancelling the awaiting task does not stop the worker thread.
+      feed_task.cancel()
+      reset_thread = threading.Thread(target=program._reset_assembler)
+      reset_thread.start()
+      await asyncio.sleep(0.05)
+      self.assertEqual(events, [])
+
+      release.set()
+      reset_thread.join(5)
+      self.assertEqual(events, ["feed_done", "reset"])
 
     asyncio.run(_run())
 
