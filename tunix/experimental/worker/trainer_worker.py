@@ -18,12 +18,14 @@ from collections.abc import Mapping
 import contextlib
 from typing import Any, Callable, ContextManager, cast
 
+from absl import logging
 from flax import nnx
 import jax.numpy as jnp
 import numpy as np
 
 from tunix.experimental.common import datatypes
 from tunix.experimental.train import abstract_trainer
+from tunix.experimental.weight_sync import weight_sync
 from tunix.experimental.worker import abstract_worker
 from tunix.rl import common as rl_common
 
@@ -400,6 +402,7 @@ class TrainerWorker(abstract_worker.Worker):
         kwargs["sync_request"] = sync_request
       metadata = self._trainer.prepare_weight_sync(**kwargs)
       self._last_error = None
+      self._maybe_release_after_stage(sync_request)
       if metadata is not None:
         return metadata
       return self._response(weight_sync_ready=True)
@@ -407,6 +410,46 @@ class TrainerWorker(abstract_worker.Worker):
       self._last_error = str(exc)
       self.state = WorkerState.ERROR
       raise
+
+  def _maybe_release_after_stage(self, sync_request: Any) -> None:
+    """Goes back to READY once staged if the round runs in the background.
+
+    The next train step then runs during the transfer. That is only safe when
+    `d2h` left a host copy, since the step rewrites the device weights. The
+    device copy staged for the transfer is dropped here too, so the step does
+    not run with a second set of weights in HBM.
+    """
+    if sync_request is None:
+      return
+    if not sync_request.extra_config.get(
+        weight_sync.RELEASE_SOURCE_AFTER_STAGE
+    ):
+      return
+    # MaxText's engine keeps its synchronizer in `_weight_sync`, PeftTrainer in
+    # `_weight_sync_worker`.
+    synchronizer = getattr(self._trainer, "_weight_sync", None) or getattr(
+        self._trainer, "_weight_sync_worker", None
+    )
+    if synchronizer is None:
+      raise RuntimeError(
+          "Weight sync runs in the background, but trainer"
+          f" {type(self._trainer).__name__} has no weight synchronizer."
+      )
+    if not synchronizer.staged_on_host:
+      raise RuntimeError(
+          "Weight sync runs in the background, but"
+          f" {type(synchronizer).__name__} transfers straight from device"
+          " memory, which the next train step would overwrite. Use a"
+          " host-staged source (raiden: RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFER=0)."
+      )
+    # The transfer reads the host copy; the synchronizer's references are the
+    # last ones to the converted device tree (the trainer deletes its own).
+    released = synchronizer.release_buffers()
+    logging.info(
+        "Background weight sync staged on host; released %d device arrays.",
+        released,
+    )
+    self.state = WorkerState.READY
 
   def release_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
     """Releases this round's staging and restores READY."""

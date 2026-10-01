@@ -17,6 +17,7 @@ import builtins
 from collections.abc import Sequence
 import dataclasses
 import pathlib
+import threading
 import types
 from typing import Any
 from unittest import mock
@@ -36,6 +37,19 @@ from tunix.experimental.worker import remote_execution
 from tunix.sft import metrics_logger as metrics_logger_lib
 from tunix.sft import utils as sft_utils
 from tunix.utils import trajectory_logger
+
+
+def _padding_stats(
+    row_valid_tokens: Sequence[int] = (3, 1),
+    row_capacity: int = 4,
+) -> batch_assembly.PaddingStats:
+  """Returns a valid `PaddingStats` for hand-built `AssembledBatch` fakes."""
+  valid = np.asarray(row_valid_tokens, dtype=np.int64)
+  return batch_assembly.PaddingStats(
+      row_valid_tokens=valid,
+      row_num_sequences=(valid > 0).astype(np.int64),
+      row_capacity=row_capacity,
+  )
 
 
 class _MockWorkerHandle(mock.MagicMock):
@@ -176,6 +190,36 @@ def _set_mock_poll_batches(
     return []
 
   mock_engine.poll_rollouts.side_effect = _mock_poll
+
+
+class _OneMicrobatchPerGroupAssembler:
+  """Emits one microbatch per fed group; every `groups_per_update`-th is final."""
+
+  def __init__(self, groups_per_update: int, events: list[str]):
+    self.groups_per_update: int = groups_per_update
+    self.events: list[str] = events
+    self.num_generations: int | None = None
+    self.mini_batch_size: int | None = None
+    self.feed_threads: list[threading.Thread] = []
+
+  def feed(self, items: Any) -> list[batch_assembly.AssembledBatch]:
+    del items
+    self.feed_threads.append(threading.current_thread())
+    idx = len(self.feed_threads) - 1
+    self.events.append(f"feed:{idx}")
+    return [
+        batch_assembly.AssembledBatch(
+            payload=f"mb{idx}",
+            is_final_batch=(idx + 1) % self.groups_per_update == 0,
+            trajectory_ids=(),
+        )
+    ]
+
+  def flush(self) -> list[batch_assembly.AssembledBatch]:
+    return []
+
+  def reset(self, **kwargs: Any) -> None:
+    del kwargs
 
 
 class RLProgramTest(absltest.TestCase):
@@ -512,6 +556,299 @@ class RLProgramTest(absltest.TestCase):
       self.assertEqual(program.policy_version, 5)
       self.assertIsNotNone(program.last_step_result)
       self.assertEqual(program.last_step_result.policy_version, 5)
+
+    asyncio.run(_run())
+
+  def _pipelined_program(
+      self, events: list[str]
+  ) -> tuple[rl_program.StandardRLProgram, _OneMicrobatchPerGroupAssembler]:
+    self.mock_algo.mini_batch_size = 2
+    assembler = _OneMicrobatchPerGroupAssembler(2, events)
+    _set_mock_poll_batches(
+        self.mock_engine,
+        _make_trajectory_group("prompt_0"),
+        _make_trajectory_group("prompt_1"),
+    )
+    program = self._create_program(
+        dataset=["prompt_data_0", "prompt_data_1"],
+        batch_size=2,
+        assembler=assembler,
+        pipeline_train_microbatches=True,
+    )
+    return program, assembler
+
+  def test_pipeline_packs_next_microbatch_while_previous_trains(self):
+    async def _run():
+      events = []
+
+      async def mock_train_step(batch, **kwargs):
+        events.append(f"train_start:{batch}")
+        if batch == "mb0":
+          # Held open until the next microbatch is packed; without
+          # pipelining this would time out and record the serial order.
+          for _ in range(200):
+            if "feed:1" in events:
+              break
+            await asyncio.sleep(0.005)
+        events.append(f"train_end:{batch}")
+        return f"result_{batch}"
+
+      self.mock_engine.train_step.side_effect = mock_train_step
+      program, assembler = self._pipelined_program(events)
+
+      await program.run_async(self.mock_engine)
+
+      # mb1 is packed before mb0's train_step returns. Where feed:1 lands
+      # relative to train_start:mb0 is up to the thread scheduler.
+      self.assertLess(events.index("feed:1"), events.index("train_end:mb0"))
+      # train_steps never overlap, so accumulation order is unchanged.
+      self.assertEqual(
+          [e for e in events if e.startswith("train")],
+          [
+              "train_start:mb0",
+              "train_end:mb0",
+              "train_start:mb1",
+              "train_end:mb1",
+          ],
+      )
+      self.assertEqual(
+          [
+              c.kwargs["apply_optimizer"]
+              for c in self.mock_engine.train_step.call_args_list
+          ],
+          [False, True],
+      )
+      self.assertEqual(program.last_step_result.train_result, "result_mb1")
+      self.assertEqual(program.last_step_result.num_microbatches, 2)
+      self.assertTrue(
+          all(t is not threading.main_thread() for t in assembler.feed_threads)
+      )
+      self.assertIsNone(program._pending_train)
+
+    asyncio.run(_run())
+
+  def test_pipeline_scores_reference_while_previous_trains(self):
+    async def _run():
+      events = []
+
+      def _payload(name: str) -> datatypes.RLTrainerPayload:
+        return datatypes.RLTrainerPayload(
+            prompt_ids=np.array([[1, 2]], dtype=np.int32),
+            prompt_mask=np.ones((1, 2), dtype=np.float32),
+            completion_ids=np.array([[3, 4]], dtype=np.int32),
+            completion_mask=np.ones((1, 2), dtype=np.float32),
+            advantages=np.ones((1, 2), dtype=np.float32),
+            metadata={"name": name},
+        )
+
+      async def mock_per_token_logps(role, items):
+        self.assertEqual(role, datatypes.Role.REFERENCE)
+        events.append(f"ref:{items.metadata['name']}")
+        return np.array([[-0.1, -0.2]], dtype=np.float32)
+
+      async def mock_train_step(batch, **kwargs):
+        del kwargs
+        name = batch.metadata["name"]
+        events.append(f"train_start:{name}")
+        if name == "mb0":
+          # Held open until mb1's reference logps are in; this would time
+          # out if reference scoring waited for the in-flight step.
+          for _ in range(200):
+            if "ref:mb1" in events:
+              break
+            await asyncio.sleep(0.005)
+        events.append(f"train_end:{name}")
+        return f"result_{name}"
+
+      self.mock_algo.requires_reference_kl = True
+      self.mock_engine.per_token_logps.side_effect = mock_per_token_logps
+      self.mock_engine.train_step.side_effect = mock_train_step
+      program, assembler = self._pipelined_program(events)
+      feed = assembler.feed
+      assembler.feed = lambda items: [
+          batch_assembly.AssembledBatch(
+              payload=_payload(mb.payload),
+              is_final_batch=mb.is_final_batch,
+              trajectory_ids=mb.trajectory_ids,
+          )
+          for mb in feed(items)
+      ]
+
+      await program.run_async(self.mock_engine)
+
+      self.assertLess(events.index("ref:mb1"), events.index("train_end:mb0"))
+      self.assertEqual(
+          [e for e in events if e.startswith("train")],
+          [
+              "train_start:mb0",
+              "train_end:mb0",
+              "train_start:mb1",
+              "train_end:mb1",
+          ],
+      )
+
+    asyncio.run(_run())
+
+  def test_pipeline_train_step_failure_fails_the_run(self):
+    async def _run():
+      async def mock_train_step(batch, **kwargs):
+        del kwargs
+        await asyncio.sleep(0)
+        if batch == "mb0":
+          raise RuntimeError("fwd_bwd failed")
+        return "ok"
+
+      self.mock_engine.train_step.side_effect = mock_train_step
+      program, _ = self._pipelined_program([])
+
+      with self.assertRaisesRegex(RuntimeError, "fwd_bwd failed"):
+        await program.run_async(self.mock_engine)
+      # The optimizer step never runs on a partially accumulated batch.
+      self.assertEqual(
+          [
+              c.kwargs["apply_optimizer"]
+              for c in self.mock_engine.train_step.call_args_list
+          ],
+          [False],
+      )
+
+    asyncio.run(_run())
+
+  def test_pipeline_cancelled_run_cancels_in_flight_train_step(self):
+    async def _run():
+      started = asyncio.Event()
+      step_cancelled = asyncio.Event()
+
+      async def mock_train_step(batch, **kwargs):
+        del kwargs
+        if batch == "mb1":
+          started.set()
+          try:
+            await asyncio.Event().wait()
+          except asyncio.CancelledError:
+            step_cancelled.set()
+            raise
+        return f"result_{batch}"
+
+      self.mock_engine.train_step.side_effect = mock_train_step
+      program, _ = self._pipelined_program([])
+
+      run_task = asyncio.create_task(program.run_async(self.mock_engine))
+      await asyncio.wait_for(started.wait(), 5)
+      run_task.cancel()
+      with self.assertRaises(asyncio.CancelledError):
+        await run_task
+      await asyncio.wait_for(step_cancelled.wait(), 5)
+
+    asyncio.run(_run())
+
+  def test_pipeline_reset_waits_for_in_flight_feed(self):
+    async def _run():
+      events = []
+      program, assembler = self._pipelined_program(events)
+      in_feed = threading.Event()
+      release = threading.Event()
+
+      def slow_feed(items):
+        in_feed.set()
+        release.wait(5)
+        events.append("feed_done")
+        return []
+
+      assembler.reset = lambda **kwargs: events.append("reset")
+      feed_task = asyncio.create_task(program._assemble(slow_feed, []))
+      await asyncio.to_thread(in_feed.wait, 5)
+      # Cancelling the awaiting task does not stop the worker thread.
+      feed_task.cancel()
+      reset_task = asyncio.create_task(program._reset_assembler())
+      await asyncio.sleep(0.05)
+      self.assertEqual(events, [])
+
+      release.set()
+      await reset_task
+      self.assertEqual(events, ["feed_done", "reset"])
+
+    asyncio.run(_run())
+
+  def test_async_weight_sync_trains_next_step_while_round_runs(self):
+    async def _run():
+      events = []
+      round_gate = asyncio.Event()
+
+      async def mock_train_step(*args, **kwargs):
+        del args, kwargs
+        events.append("train")
+        if events.count("train") == 2:
+          round_gate.set()
+        return "step_done"
+
+      async def mock_sync_weights(
+          *args, policy_version=None, source_staged=None, **kwargs
+      ):
+        del args, kwargs
+        events.append(f"sync_start:{policy_version}")
+        source_staged.set()
+        if policy_version == 1:
+          await round_gate.wait()
+        events.append(f"sync_done:{policy_version}")
+        return policy_version
+
+      self.mock_engine.train_step.side_effect = mock_train_step
+      self.mock_engine.sync_weights = mock.AsyncMock(
+          side_effect=mock_sync_weights
+      )
+      _set_mock_poll_batches(
+          self.mock_engine,
+          _make_trajectory_group("prompt_0"),
+          _make_trajectory_group("prompt_1"),
+      )
+      program = self._create_program(
+          dataset=["prompt_data_0", "prompt_data_1"],
+          max_steps=2,
+          sync_weights=True,
+          async_weight_sync=True,
+      )
+
+      await program.run_async(self.mock_engine)
+
+      # Step 1 trains while round 1 is still transferring; round 2 starts
+      # only once round 1 lands, and the run waits for round 2.
+      self.assertEqual(
+          events,
+          [
+              "train",
+              "sync_start:1",
+              "train",
+              "sync_done:1",
+              "sync_start:2",
+              "sync_done:2",
+          ],
+      )
+      self.assertEqual(program.policy_version, 2)
+      self.assertEqual(program._unsynced_steps, 0)
+      self.assertIsNone(program._pending_sync)
+
+    asyncio.run(_run())
+
+  def test_async_weight_sync_failure_fails_the_run(self):
+    async def _run():
+      async def mock_sync_weights(*args, source_staged=None, **kwargs):
+        del args, kwargs
+        source_staged.set()
+        await asyncio.sleep(0)
+        raise RuntimeError("transfer failed")
+
+      self.mock_engine.sync_weights = mock.AsyncMock(
+          side_effect=mock_sync_weights
+      )
+      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
+      program = self._create_program(
+          sync_weights=True, async_weight_sync=True
+      )
+
+      with self.assertRaisesRegex(RuntimeError, "transfer failed"):
+        await program.run_async(self.mock_engine)
+      self.assertEqual(program._unsynced_steps, 1)
 
     asyncio.run(_run())
 
@@ -1136,6 +1473,299 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_dispatch_window_waits_for_background_sync_to_commit(self):
+    async def _run():
+      dispatched = []
+
+      async def mock_dispatch(prompts, **kwargs):
+        del kwargs
+        dispatched.append(prompts[0]["metadata"]["batch_idx"])
+        return ["rollout"]
+
+      self.mock_engine.dispatch_rollouts.side_effect = mock_dispatch
+
+      program = rl_program.StandardRLProgram(
+          dataset=[f"prompt_{i}" for i in range(8)],
+          algo=self.mock_algo,
+          reward_fns=[lambda *_: 1.0],
+          assembler=self.assembler,
+          batch_size=2,
+          max_staleness=1,
+          async_weight_sync=True,
+      )
+      program.engine = self.mock_engine
+
+      dispatch_task = asyncio.create_task(program.rollout_dispatch_stage())
+      await asyncio.sleep(0.05)
+      self.assertEqual(dispatched, [0, 0, 1, 1])
+
+      # Step 0 trained, but its weights are still in flight: batch 2 would
+      # be generated two versions behind.
+      program._unsynced_steps = 1
+      program._step = 1
+      program._release_window()
+      await asyncio.sleep(0.05)
+      self.assertEqual(dispatched, [0, 0, 1, 1])
+
+      program._unsynced_steps = 0
+      program._release_window()
+      await asyncio.sleep(0.05)
+      self.assertEqual(dispatched, [0, 0, 1, 1, 2, 2])
+
+      # A failed round keeps the window shut and fails the dispatcher.
+      program._unsynced_steps = 1
+      program._step = 2
+      program._sync_error = RuntimeError("round failed")
+      program._release_window()
+      with self.assertRaisesRegex(RuntimeError, "round failed"):
+        await asyncio.wait_for(dispatch_task, timeout=1.0)
+      self.assertEqual(dispatched, [0, 0, 1, 1, 2, 2])
+
+    asyncio.run(_run())
+
+  def test_dispatch_holds_while_a_background_round_is_in_flight(self):
+    async def _run():
+      dispatched = []
+
+      async def mock_dispatch(prompts, **kwargs):
+        dispatched.append(
+            (prompts[0]["metadata"]["batch_idx"], kwargs["policy_version"])
+        )
+        return ["rollout"]
+
+      self.mock_engine.dispatch_rollouts.side_effect = mock_dispatch
+
+      program = rl_program.StandardRLProgram(
+          dataset=[f"prompt_{i}" for i in range(8)],
+          algo=self.mock_algo,
+          reward_fns=[lambda *_: 1.0],
+          assembler=self.assembler,
+          batch_size=2,
+          max_staleness=1,
+          async_weight_sync=True,
+      )
+      program.engine = self.mock_engine
+      # Step 0 trained and staged version 1, which is still transferring.
+      program.policy_version = 1
+      program._unsynced_steps = 1
+      program._step = 1
+
+      dispatch_task = asyncio.create_task(program.rollout_dispatch_stage())
+      await asyncio.sleep(0.05)
+      # Batch 1 is inside the staleness window, but the rollouts could not
+      # start it before the round commits, so it is held back.
+      self.assertEqual(dispatched, [])
+
+      program._unsynced_steps = 0
+      program._release_window()
+      await asyncio.sleep(0.05)
+      # Both go out on, and are stamped with, the weights just committed.
+      self.assertEqual(dispatched, [(1, 1), (1, 1), (2, 1), (2, 1)])
+
+      dispatch_task.cancel()
+      await asyncio.gather(dispatch_task, return_exceptions=True)
+
+    asyncio.run(_run())
+
+  def test_partial_rollout_gates_each_batch_on_the_committed_version(self):
+    async def _run():
+      dispatched = []
+
+      async def mock_dispatch(prompts, **kwargs):
+        dispatched.append(
+            (prompts[0]["metadata"]["batch_idx"], kwargs["policy_version"])
+        )
+        return ["rollout"]
+
+      self.mock_engine.dispatch_rollouts.side_effect = mock_dispatch
+
+      program = rl_program.StandardRLProgram(
+          dataset=[f"prompt_{i}" for i in range(10)],
+          algo=self.mock_algo,
+          reward_fns=[lambda *_: 1.0],
+          assembler=self.assembler,
+          batch_size=2,
+          max_staleness=1,
+          async_weight_sync=True,
+          partial_rollout=True,
+      )
+      program.engine = self.mock_engine
+      # Steps 0 and 1 trained: version 1 is on the rollouts, version 2 is
+      # transferring, and step 2's round is not due yet.
+      program.policy_version = 2
+      program._unsynced_steps = 1
+      program._step = 2
+
+      dispatch_task = asyncio.create_task(program.rollout_dispatch_stage())
+      await asyncio.sleep(0.05)
+      # Batch 2 only needs version 1, so the round in flight does not hold
+      # it. Batch 3 needs version 2.
+      self.assertEqual(dispatched, [(2, 1), (2, 1)])
+
+      # A trained step waiting for its round does not hold dispatch either.
+      program._round_due = True
+      program._release_window()
+      await asyncio.sleep(0.05)
+      self.assertEqual(dispatched, [(2, 1), (2, 1)])
+
+      program._unsynced_steps = 0
+      program._release_window()
+      await asyncio.sleep(0.05)
+      self.assertEqual(dispatched, [(2, 1), (2, 1), (3, 2), (3, 2)])
+
+      # Batch 4 is past the trainer cursor's window even on fresh weights.
+      program.policy_version = 3
+      program._release_window()
+      await asyncio.sleep(0.05)
+      self.assertEqual(len(dispatched), 4)
+
+      program._sync_error = RuntimeError("round failed")
+      program._release_window()
+      with self.assertRaisesRegex(RuntimeError, "round failed"):
+        await asyncio.wait_for(dispatch_task, timeout=1.0)
+
+    asyncio.run(_run())
+
+  def test_no_dispatch_slips_into_a_round_queued_behind_the_last(self):
+    async def _run():
+      dispatched = []
+      rounds = {1: asyncio.Event(), 2: asyncio.Event()}
+
+      async def mock_dispatch(prompts, **kwargs):
+        dispatched.append(
+            (prompts[0]["metadata"]["batch_idx"], kwargs["policy_version"])
+        )
+        return ["rollout"]
+
+      async def mock_sync_weights(
+          *args, policy_version=None, source_staged=None, **kwargs
+      ):
+        del args, kwargs
+        source_staged.set()
+        await rounds[policy_version].wait()
+        return policy_version
+
+      self.mock_engine.dispatch_rollouts.side_effect = mock_dispatch
+      self.mock_engine.sync_weights = mock.AsyncMock(
+          side_effect=mock_sync_weights
+      )
+      program = rl_program.StandardRLProgram(
+          dataset=[f"prompt_{i}" for i in range(8)],
+          algo=self.mock_algo,
+          reward_fns=[lambda *_: 1.0],
+          assembler=self.assembler,
+          batch_size=2,
+          max_staleness=1,
+          sync_weights=True,
+          async_weight_sync=True,
+      )
+      program.engine = self.mock_engine
+
+      dispatch_task = asyncio.create_task(program.rollout_dispatch_stage())
+      await asyncio.sleep(0.05)
+      self.assertEqual(dispatched, [(0, 0), (0, 0), (1, 0), (1, 0)])
+
+      # Step 0 starts round 1; step 1 trains before round 1 commits, so
+      # round 2 is already waiting on it when it lands.
+      await program._start_background_sync()
+      program._step = 1
+      program._release_window()
+      round_2 = asyncio.create_task(program._start_background_sync())
+      await asyncio.sleep(0.05)
+      rounds[1].set()
+      await round_2
+      await asyncio.sleep(0.05)
+      # The dispatcher woke on round 1's commit, but round 2 shut the window
+      # while it was fetching the prompt.
+      self.assertEqual(dispatched, [(0, 0), (0, 0), (1, 0), (1, 0)])
+
+      program._step = 2
+      rounds[2].set()
+      await asyncio.sleep(0.05)
+      self.assertEqual(
+          dispatched[4:], [(2, 2), (2, 2), (3, 2), (3, 2)]
+      )
+
+      dispatch_task.cancel()
+      await asyncio.gather(dispatch_task, return_exceptions=True)
+
+    asyncio.run(_run())
+
+  def test_no_dispatch_while_a_trained_step_waits_to_start_its_round(self):
+    async def _run():
+      dispatched = []
+      rounds = {1: asyncio.Event(), 2: asyncio.Event()}
+
+      async def mock_dispatch(prompts, **kwargs):
+        dispatched.append(
+            (prompts[0]["metadata"]["batch_idx"], kwargs["policy_version"])
+        )
+        return ["rollout"]
+
+      async def mock_sync_weights(
+          *args, policy_version=None, source_staged=None, **kwargs
+      ):
+        del args, kwargs
+        source_staged.set()
+        await rounds[policy_version].wait()
+        return policy_version
+
+      self.mock_engine.dispatch_rollouts.side_effect = mock_dispatch
+      self.mock_engine.sync_weights = mock.AsyncMock(
+          side_effect=mock_sync_weights
+      )
+      program = rl_program.StandardRLProgram(
+          dataset=[f"prompt_{i}" for i in range(8)],
+          algo=self.mock_algo,
+          reward_fns=[lambda *_: 1.0],
+          assembler=self.assembler,
+          batch_size=2,
+          max_staleness=1,
+          sync_weights=True,
+          async_weight_sync=True,
+      )
+      program.engine = self.mock_engine
+
+      dispatch_task = asyncio.create_task(program.rollout_dispatch_stage())
+      await asyncio.sleep(0.05)
+      self.assertEqual(dispatched, [(0, 0), (0, 0), (1, 0), (1, 0)])
+
+      # Step 0 starts round 1. Step 1 applies its optimizer update, then the
+      # trainer is held up (checkpoint save) and has not started round 2 when
+      # round 1 commits.
+      await program._start_background_sync()
+      program._step = 1
+      program._release_window()
+      program._round_due = True
+      rounds[1].set()
+      await asyncio.sleep(0.05)
+      # Round 2 is due, so round 1's commit must not let batch 2 out.
+      self.assertEqual(dispatched, [(0, 0), (0, 0), (1, 0), (1, 0)])
+
+      await program._start_background_sync()
+      self.assertFalse(program._round_due)
+      program._step = 2
+      rounds[2].set()
+      await asyncio.sleep(0.05)
+      self.assertEqual(
+          dispatched[4:], [(2, 2), (2, 2), (3, 2), (3, 2)]
+      )
+
+      dispatch_task.cancel()
+      await asyncio.gather(dispatch_task, return_exceptions=True)
+
+    asyncio.run(_run())
+
+  def test_failed_sync_stops_dispatch_inside_the_window(self):
+    async def _run():
+      program = self._window_program()
+      program._sync_error = RuntimeError("round failed")
+      # Batch 0 is inside the window, so the wait loop never runs.
+      with self.assertRaisesRegex(RuntimeError, "round failed"):
+        await program._wait_for_dispatch_window(0)
+
+    asyncio.run(_run())
+
   def test_window_advances_a_whole_batch_when_a_group_goes_missing(self):
     async def _run():
       program = self._window_program()
@@ -1164,10 +1794,14 @@ class RLProgramTest(absltest.TestCase):
         del items
         return [
             batch_assembly.AssembledBatch(
-                payload="microbatch_0", is_final_batch=False
+                payload="microbatch_0",
+                is_final_batch=False,
+                padding_stats=_padding_stats(),
             ),
             batch_assembly.AssembledBatch(
-                payload="microbatch_1", is_final_batch=True
+                payload="microbatch_1",
+                is_final_batch=True,
+                padding_stats=_padding_stats(),
             ),
         ]
 
@@ -1835,11 +2469,13 @@ class RLProgramTest(absltest.TestCase):
             batch_assembly.AssembledBatch(
                 payload="microbatch_0",
                 is_final_batch=False,
+                padding_stats=_padding_stats(),
                 trajectory_ids=("traj_prompt_0_g0",),
             ),
             batch_assembly.AssembledBatch(
                 payload="microbatch_1",
                 is_final_batch=True,
+                padding_stats=_padding_stats(),
                 trajectory_ids=("traj_prompt_0_g1",),
             ),
         ]
@@ -2235,6 +2871,7 @@ class RLProgramTest(absltest.TestCase):
               batch_assembly.AssembledBatch(
                   payload=mock_payload,
                   is_final_batch=True,
+                  padding_stats=_padding_stats(),
                   trajectory_ids=(),
               )
           ]
@@ -2264,6 +2901,7 @@ class RLProgramTest(absltest.TestCase):
               batch_assembly.AssembledBatch(
                   payload={"raw": "batch"},  # pyrefly: ignore[bad-argument-type]
                   is_final_batch=True,
+                  padding_stats=_padding_stats(),
                   trajectory_ids=(),
               )
           ]
@@ -3793,6 +4431,8 @@ class RLProgramTest(absltest.TestCase):
         trainer_metrics=None,
         num_rollouts=0,
         num_microbatches=0,
+        padding_stats=[],
+        packing_time_sec=0.0,
         step_time_sec=0.0,
         consumed_policy_version=0,
         log_step=0,
@@ -4052,6 +4692,8 @@ class RLProgramTest(absltest.TestCase):
         trainer_metrics=None,
         num_rollouts=2,
         num_microbatches=1,
+        padding_stats=[],
+        packing_time_sec=0.0,
         step_time_sec=0.0,
         consumed_policy_version=0,
         log_step=0,
@@ -4081,6 +4723,8 @@ class RLProgramTest(absltest.TestCase):
         trainer_metrics=None,
         num_rollouts=2,
         num_microbatches=1,
+        padding_stats=[],
+        packing_time_sec=0.0,
         step_time_sec=0.0,
         consumed_policy_version=0,
         log_step=0,
@@ -4130,6 +4774,8 @@ class RLProgramTest(absltest.TestCase):
           trainer_metrics=None,
           num_rollouts=2,
           num_microbatches=1,
+          padding_stats=[],
+          packing_time_sec=0.0,
           step_time_sec=0.0,
           consumed_policy_version=0,
           log_step=0,
@@ -4644,6 +5290,8 @@ class GenerationMetricsLoggingTest(absltest.TestCase):
         generation_metrics=metrics,
         num_rollouts=0,
         num_microbatches=0,
+        padding_stats=[],
+        packing_time_sec=0.0,
         step_time_sec=0.0,
         consumed_policy_version=0,
         log_step=0,
@@ -4671,6 +5319,76 @@ class GenerationMetricsLoggingTest(absltest.TestCase):
     self.assertEmpty(
         [k for k in logged if k.startswith("generation/completions/")]
     )
+
+
+class EfficiencyMetricsLoggingTest(absltest.TestCase):
+  """Covers `efficiency/padding/*` and `efficiency/packing/*` step metrics."""
+
+  def _log_padding(self, padding_stats, packing_time_sec=0.0):
+    algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
+    algo.num_generations = 2
+    algo.mini_batch_size = 1
+    algo.max_turns = 1
+    algo.max_packed_len = 16
+    algo.max_response_length = 1024
+    algo.requires_reference_kl = False
+    algo.algo_config = types.SimpleNamespace(
+        temperature=None,
+        use_rollout_logps=True,
+    )
+    program = rl_program.StandardRLProgram(
+        dataset=["prompt_0"],
+        max_steps=1,
+        algo=algo,
+        reward_fns=[lambda *_: 1.0],
+    )
+    program.metrics_logger = mock.MagicMock()
+    program._collect_and_log_step_metrics(
+        all_step_items=[],
+        step_rewards=[],
+        num_rollouts=0,
+        num_microbatches=len(padding_stats),
+        padding_stats=padding_stats,
+        packing_time_sec=packing_time_sec,
+        step_time_sec=0.0,
+        consumed_policy_version=0,
+        log_step=0,
+    )
+    return {
+        f"{call.args[0]}/{call.args[1]}": call.args[2]
+        for call in program.metrics_logger.log.call_args_list
+    }
+
+  def test_logs_step_padding_summary(self):
+    stats = [
+        _padding_stats(row_valid_tokens=(4, 4), row_capacity=4),
+        _padding_stats(row_valid_tokens=(3, 1), row_capacity=4),
+    ]
+
+    logged = self._log_padding(stats)
+
+    self.assertAlmostEqual(logged["efficiency/padding/ratio"], 0.25)
+    self.assertAlmostEqual(
+        logged["efficiency/padding/microbatch_ratio_max"], 0.5
+    )
+    self.assertAlmostEqual(logged["efficiency/padding/row_imbalance_max"], 1.5)
+    self.assertEqual(logged["efficiency/padding/valid_tokens"], 12.0)
+
+  def test_logs_step_packing_time(self):
+    stats = [
+        _padding_stats(row_valid_tokens=(4, 4), row_capacity=4),
+        _padding_stats(row_valid_tokens=(3, 1), row_capacity=4),
+    ]
+
+    logged = self._log_padding(stats, packing_time_sec=0.5)
+
+    self.assertAlmostEqual(logged["efficiency/packing/time_sec_total"], 0.5)
+    self.assertAlmostEqual(logged["efficiency/packing/time_sec_mean"], 0.25)
+
+  def test_no_padding_stats_logs_no_efficiency_metrics(self):
+    logged = self._log_padding([])
+
+    self.assertEmpty([k for k in logged if k.startswith("efficiency/")])
 
 
 class StandardRLProgramTrajectoryStoreTest(absltest.TestCase):

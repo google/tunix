@@ -76,6 +76,8 @@ export TOP_K=${TOP_K:--1}
 export DEBUG=${DEBUG:-0}
 export USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
 export EXACT_TOKEN_CONTINUITY=${EXACT_TOKEN_CONTINUITY:-true}
+export ASYNC_WEIGHT_SYNC=${ASYNC_WEIGHT_SYNC:-false}
+export PIPELINE_TRAIN_MICROBATCHES=${PIPELINE_TRAIN_MICROBATCHES:-false}
 export SAMPLER=${SAMPLER:-inprocess_vllm}
 export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
 export WEIGHT_SYNC_DISABLE_TIMEOUTS=${WEIGHT_SYNC_DISABLE_TIMEOUTS:-${DISABLE_WEIGHT_SYNC_TIMEOUTS:-0}}
@@ -422,6 +424,9 @@ start_orchestrator() {
         ${TRAJECTORY_GROUP_ORDER:+--trajectory_group_order=${TRAJECTORY_GROUP_ORDER}} \
         $([[ "${USE_ROLLOUT_LOGPS}" == "false" || "${USE_ROLLOUT_LOGPS}" == "False" || "${USE_ROLLOUT_LOGPS}" == "0" ]] && echo --no-use_rollout_logps || echo --use_rollout_logps) \
         $([[ "${EXACT_TOKEN_CONTINUITY}" == "false" || "${EXACT_TOKEN_CONTINUITY}" == "False" || "${EXACT_TOKEN_CONTINUITY}" == "0" ]] && echo --no-exact_token_continuity || echo --exact_token_continuity) \
+        $([[ "${ASYNC_WEIGHT_SYNC}" == "true" || "${ASYNC_WEIGHT_SYNC}" == "True" || "${ASYNC_WEIGHT_SYNC}" == "1" ]] && echo --async_weight_sync || echo --no-async_weight_sync) \
+        $([[ "${PIPELINE_TRAIN_MICROBATCHES}" == "true" || "${PIPELINE_TRAIN_MICROBATCHES}" == "True" || "${PIPELINE_TRAIN_MICROBATCHES}" == "1" ]] && echo --pipeline_train_microbatches || echo --no-pipeline_train_microbatches) \
+        $([[ "${PARTIAL_ROLLOUT}" == "true" || "${PARTIAL_ROLLOUT}" == "True" || "${PARTIAL_ROLLOUT}" == "1" ]] && echo --partial_rollout || echo --no-partial_rollout) \
         ${dataset_args} \
         ${shuffle_arg} \
         ${sandbox_arg} \
@@ -1075,6 +1080,7 @@ start_eval() {
         ${LIBTPU_INIT_ARGS:+LIBTPU_INIT_ARGS=\"${LIBTPU_INIT_ARGS}\"} \
         ${VLLM_ENABLE_V1_MULTIPROCESSING:+VLLM_ENABLE_V1_MULTIPROCESSING=${VLLM_ENABLE_V1_MULTIPROCESSING}} \
         ${VLLM_LOGGING_LEVEL:+VLLM_LOGGING_LEVEL=${VLLM_LOGGING_LEVEL}} \
+        ${VLLM_DATA_PARALLEL_SIZE:+VLLM_DATA_PARALLEL_SIZE=${VLLM_DATA_PARALLEL_SIZE}} \
         ${ROLLOUT_ENV_FLAGS} \
         ${ROLLOUT_EXTRA_ENV} \
         SKIP_JAX_PRECOMPILE=1 python3 -u ${eval_cmd} \
@@ -1086,8 +1092,9 @@ start_eval() {
           --model_absolute_path=${MAXTEXT_CKPT} \
           --maxtext_model_name=${MAXTEXT_MODEL_NAME} \
           ${SCAN_LAYERS:+--scan_layers=${SCAN_LAYERS}} \
-          --mesh_fsdp=${ROLLOUT_MESH_FSDP:-2} \
-          --mesh_tp=${ROLLOUT_MESH_TP:-2} \
+          --mesh_fsdp=${ROLLOUT_MESH_FSDP:-1} \
+          --mesh_dp=${VLLM_DATA_PARALLEL_SIZE:-1} \
+          --mesh_tp=${ROLLOUT_MESH_TP:-1} \
           --mesh_expert=${ROLLOUT_MESH_EXPERT:-1} \
           --vllm_utilization=${VLLM_GPU_MEMORY_UTILIZATION:-0.9} \
           --max_model_len=${max_model_len} \

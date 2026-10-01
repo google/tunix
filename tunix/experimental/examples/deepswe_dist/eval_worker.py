@@ -134,20 +134,38 @@ def create_worker(a):
           additional_config[k] = v
       additional_config["maxtext_config"] = mt_cfg
 
+  mesh_fsdp = a.mesh_fsdp
+  mesh_dp = (
+      getattr(a, "mesh_dp", None)
+      or int(os.environ.get("VLLM_DATA_PARALLEL_SIZE", 0))
+      or 1
+  )
+  mesh_tp = a.mesh_tp
   mesh_expert = a.mesh_expert
-  expected_devices = a.mesh_fsdp * a.mesh_tp * mesh_expert
+  expected_devices = mesh_fsdp * mesh_dp * mesh_tp * mesh_expert
   if jax.device_count() != expected_devices:
     raise ValueError(
-        f"Expected {expected_devices} rollout chips; got"
+        f"Expected {expected_devices} rollout chips (fsdp={mesh_fsdp},"
+        f" dp={mesh_dp}, tp={mesh_tp}, expert={mesh_expert}); got"
         f" {jax.device_count()}"
     )
+  if mesh_dp > 1 and mesh_fsdp > 1:
+    mesh_shape = (mesh_dp, mesh_fsdp * mesh_expert, mesh_tp)
+    axis_names = ("dp", "fsdp", "tp")
+  elif mesh_dp > 1:
+    mesh_shape = (mesh_dp * mesh_expert, mesh_tp)
+    axis_names = ("dp", "tp")
+  else:
+    mesh_shape = (mesh_fsdp * mesh_expert, mesh_tp)
+    axis_names = ("fsdp", "tp")
+
   mesh = Mesh(
       mesh_utils.create_device_mesh(
-          (a.mesh_fsdp * mesh_expert, a.mesh_tp),
+          mesh_shape,
           jax.devices(),
           allow_split_physical_axes=True,
       ),
-      ("fsdp", "tp"),
+      axis_names,
   )
   tokenizer = AutoTokenizer.from_pretrained(a.tokenizer_path)
   if tokenizer.pad_token_id is None:
@@ -212,12 +230,26 @@ def create_worker(a):
   engine_kwargs["hf_overrides"] = {
       "architectures": ["MaxTextForCausalLM"]
   }
+  enable_dp_attention = mesh_dp > 1
+  if raw_add_cfg:
+    try:
+      parsed_add = json.loads(raw_add_cfg)
+      if "enable_dp_attention" in parsed_add.get("sharding", {}).get(
+          "sharding_strategy", {}
+      ):
+        enable_dp_attention = bool(
+            parsed_add["sharding"]["sharding_strategy"]["enable_dp_attention"]
+        )
+    except Exception:
+      pass
+
   config = vllm_sampler.VllmConfig(
       server_mode=True,
       mesh=mesh,
       tensor_parallel_size=a.mesh_tp,
-      data_parallel_size=a.mesh_fsdp,
+      data_parallel_size=mesh_dp,
       expert_parallel_size=mesh_expert,
+      enable_dp_attention=enable_dp_attention,
       init_with_random_weights=convert_in_memory,
       hbm_utilization=a.vllm_utilization,
       additional_config=additional_config,

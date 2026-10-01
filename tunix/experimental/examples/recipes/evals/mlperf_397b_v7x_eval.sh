@@ -5,7 +5,7 @@ set -e
 # MLPerf DeepSWE evaluation recipe: Qwen3.5-397B-A17B on TPU v7x
 # ==============================================================================
 # - TPU7x dynamic slicing on pod1 (bodaborg-tpu7x-gsc) or pod2 (bodaborg-tpu7x-gsc-elm)
-# - Rollout on 256 chips (32 replicas x 8 chips 2x2x2, EP=16, TP=1; no Trainer)
+# - Rollout on 256 chips (16 replicas x 16 chips 2x2x4, DP=2, EP=16, TP=1; no Trainer)
 # - Sandbox configured for sandbox-np nodepool with workload tolerations
 # ==============================================================================
 
@@ -58,14 +58,14 @@ export SCAN_LAYERS="${SCAN_LAYERS:-true}"
 export CHECKPOINT_STORAGE_USE_OCDBT="${CHECKPOINT_STORAGE_USE_OCDBT:-false}"
 export CHECKPOINT_STORAGE_USE_ZARR3="${CHECKPOINT_STORAGE_USE_ZARR3:-false}"
 
-# Backend & Rollout Topology (8 chips = 16 devices = 2 hosts per replica, EP=16, TP=1; no Trainer)
+# Backend & Rollout Topology (16 chips = 32 devices = 4 hosts per replica, DP=2, EP=16, TP=1; no Trainer)
 export WEIGHT_SYNC_MODE="none"
-export ROLLOUT_JOBSET_YAML="${ROLLOUT_JOBSET_YAML:-jobset.pathways.yaml}"
-export ROLLOUT_TPU_SLICE="${ROLLOUT_TPU_SLICE:-tpu7x:2x2x2}"
+export ROLLOUT_JOBSET_YAML="jobset.mcjax.ray.yaml"
+export ROLLOUT_TPU_SLICE="${ROLLOUT_TPU_SLICE:-tpu7x:2x2x4}"
+export VLLM_DATA_PARALLEL_SIZE="${VLLM_DATA_PARALLEL_SIZE:-2}"
 _rollout_dims="${ROLLOUT_TPU_SLICE#*:}"
-export VLLM_DATA_PARALLEL_SIZE="${VLLM_DATA_PARALLEL_SIZE:-1}"
 export ROLLOUT_MESH_EXPERT="${ROLLOUT_MESH_EXPERT:-$(( 2 * ${_rollout_dims//x/*} / ${VLLM_DATA_PARALLEL_SIZE:-1} ))}"
-export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-32}"
+export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-16}"
 
 # ==============================================================================
 # vLLM Rollout Configuration
@@ -96,6 +96,7 @@ export PATHWAYS_PROXY_EXTRA_ARGS="${PATHWAYS_PROXY_EXTRA_ARGS:-${_rollout_xla_fl
 # Evaluation & DeepSWE Pipeline Configuration
 # ==============================================================================
 export NUM_GENERATIONS="${NUM_GENERATIONS:-4}"
+export BATCH_SIZE="${BATCH_SIZE:-64}"
 export DATASET_SPLIT="${DATASET_SPLIT:-validation}"
 export TASKS_LIMIT="${TASKS_LIMIT:-0}"
 
@@ -107,6 +108,8 @@ export DEBUG=${DEBUG:-0}
 
 # DeepSWE Environment & Agent Sandbox
 export DATASET_PATH="${DATASET_PATH:-gs://mlperf_dataset/benchmark-r2e-gym-easy}"
+export MAX_WARMPOOL_REPLICAS="${MAX_WARMPOOL_REPLICAS:-16}"
+export MAX_CONCURRENCY="${MAX_CONCURRENCY:-256}"
 export SANDBOX_TOLERATIONS='[{"key":"workload","operator":"Equal","value":"sandbox","effect":"NoSchedule"}]'
 export IMAGE_REWRITE_PREFIX="${IMAGE_REWRITE_PREFIX:-us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/}"
 export ENABLE_THINKING="${ENABLE_THINKING:-false}"

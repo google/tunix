@@ -52,6 +52,11 @@ class WeightSyncMode(str, enum.Enum):
 
 DEFAULT_WEIGHT_SYNC_MODE = WeightSyncMode.FALLBACK
 
+# `WeightSyncRequest.extra_config` key set on a round run in the background:
+# a source whose `d2h` left a host copy may go back to training once it has
+# staged, instead of holding until release.
+RELEASE_SOURCE_AFTER_STAGE = "release_source_after_stage"
+
 
 @dataclasses.dataclass(frozen=True)
 class WorkUnitId:
@@ -579,6 +584,15 @@ class WeightSynchronizer(abc.ABC):
   @property
   def active(self) -> bool:
     return self.bound
+
+  @property
+  def staged_on_host(self) -> bool:
+    """Whether `d2h` left a host copy that the transfer reads from.
+
+    When true, the bound device arrays may change once `d2h` returns without
+    affecting what the round pushes.
+    """
+    return False
 
   @abc.abstractmethod
   def bind(self, state: Any) -> None:

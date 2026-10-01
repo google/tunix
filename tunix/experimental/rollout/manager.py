@@ -228,16 +228,21 @@ class RolloutManager:
   ) -> TrajectoryOrError:
     """Spawns an async task running the multi-turn episode loop concurrently."""
     partial = self._is_partial_rollout()
+    # A request that lands mid-sync waits for the new weights rather than
+    # being rejected: the orchestrator dispatches during background syncs and
+    # does not resubmit. Nothing below awaits before `track`, so a later pre
+    # drain sees it. A stopped worker never reopens admission, so fail instead
+    # of waiting on it.
+    if self._traffic.state == datatypes.WorkerState.STOPPED:
+      raise traffic_controller_lib.AdmissionClosedError(
+          "rollout worker is stopped"
+      )
+    await self._traffic.wait_for_admission()
+    if self._traffic.state == datatypes.WorkerState.STOPPED:
+      raise traffic_controller_lib.AdmissionClosedError(
+          "rollout worker is stopped"
+      )
     if partial:
-      if self._traffic.state == datatypes.WorkerState.STOPPED:
-        raise traffic_controller_lib.AdmissionClosedError(
-            "rollout worker is stopped"
-        )
-      await self._traffic.wait_for_admission()
-      if self._traffic.state == datatypes.WorkerState.STOPPED:
-        raise traffic_controller_lib.AdmissionClosedError(
-            "rollout worker is stopped"
-        )
       if self.sampler is not None:
         sampler_version = self.sampler._policy_version
         if isinstance(sampler_version, int) and not isinstance(
@@ -246,11 +251,6 @@ class RolloutManager:
           req_version = int(request.target_policy_version or 0)
           if sampler_version > req_version:
             request.target_policy_version = sampler_version
-    else:
-      if not self._traffic.is_admission_open():
-        raise traffic_controller_lib.AdmissionClosedError(
-            "rollout admission is closed during weight sync"
-        )
     loop = asyncio.get_running_loop()
     future: asyncio.Future[TrajectoryOrError] = loop.create_future()
 

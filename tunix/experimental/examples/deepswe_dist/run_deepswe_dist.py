@@ -174,6 +174,36 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " just the model params."
       ),
   )
+  parser.add_argument(
+      "--async_weight_sync",
+      action=argparse.BooleanOptionalAction,
+      default=False,
+      help=(
+          "Run each step's weight sync in the background: the trainer waits"
+          " only for the source snapshot, not the transfer. Needs a source"
+          " that transfers from host staging"
+          " (RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFER=0)."
+      ),
+  )
+  parser.add_argument(
+      "--pipeline_train_microbatches",
+      action=argparse.BooleanOptionalAction,
+      default=False,
+      help=(
+          "Pack the next training microbatch in a worker thread while the"
+          " previous one's train_step is still running on the trainer."
+      ),
+  )
+  parser.add_argument(
+      "--partial_rollout",
+      action=argparse.BooleanOptionalAction,
+      default=False,
+      help=(
+          "The rollouts pause and resume in-flight requests across a weight"
+          " sync. Lets the dispatcher release each prompt batch as soon as"
+          " the rollouts commit a version recent enough for it."
+      ),
+  )
   # ---- Optional GRPO algorithm options -------------------------------------
   # All default to off, so omitting them reproduces the previous behaviour.
   parser.add_argument(
@@ -861,6 +891,9 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         checkpoint_optimizer_interval_steps=(
             args.checkpoint_optimizer_interval_steps
         ),
+        async_weight_sync=args.async_weight_sync,
+        pipeline_train_microbatches=args.pipeline_train_microbatches,
+        partial_rollout=args.partial_rollout,
         on_step_begin=lambda step: logging.info(
             ">>> DeepSWE step %d starting | policy_version=%d",
             step,
