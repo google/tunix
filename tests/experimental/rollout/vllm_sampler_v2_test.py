@@ -79,8 +79,10 @@ class TestRLVllmSamplerInference(unittest.TestCase):
 
         # Construct mock AsyncLLMEngine
         mock_engine = MagicMock()
+        captured_priorities = []
 
-        async def mock_generate_stream(prompt, sampling_params, request_id):
+        async def mock_generate_stream(prompt, sampling_params, request_id, priority):
+            captured_priorities.append(priority)
             mock_output_choice = SimpleNamespace(
                 text=f"Completion for {request_id}",
                 token_ids=[101, 202, 303],
@@ -106,6 +108,7 @@ class TestRLVllmSamplerInference(unittest.TestCase):
                 SimpleNamespace(
                     prompt="What is GRPO?",
                     request_id="req_001",
+                    priority=3,
                     sampling_params=SimpleNamespace(max_tokens=64,
                                                     temperature=0.7,
                                                     top_p=0.9,
@@ -113,6 +116,7 @@ class TestRLVllmSamplerInference(unittest.TestCase):
                 )
             ]
             results = await sampler.sample(reqs)
+            self.assertEqual(captured_priorities, [3])
             self.assertEqual(len(results), 1)
             res = results[0]
             self.assertEqual(res.request_id, "req_001")
@@ -134,7 +138,7 @@ class TestRLVllmSamplerInference(unittest.TestCase):
 
         mock_engine = MagicMock()
 
-        async def mock_generate_stream(prompt, sampling_params, request_id):
+        async def mock_generate_stream(prompt, sampling_params, request_id, priority):
             yield SimpleNamespace(outputs=[
                 SimpleNamespace(text="Output text",
                                 token_ids=[1, 2],
@@ -228,7 +232,7 @@ class TestRLVllmSamplerInference(unittest.TestCase):
 
         mock_engine = MagicMock()
 
-        async def mock_failing_stream(prompt, sampling_params, request_id):
+        async def mock_failing_stream(prompt, sampling_params, request_id, priority):
             raise RuntimeError("OOM on sequence generation")
             yield None
 
@@ -240,6 +244,7 @@ class TestRLVllmSamplerInference(unittest.TestCase):
             reqs = [
                 SimpleNamespace(prompt="Test error prompt",
                                 request_id="err_req",
+                                priority=0,
                                 sampling_params=None)
             ]
             results = await sampler.sample(reqs)
@@ -440,8 +445,8 @@ class TestRLVllmSamplerWeightSync(unittest.TestCase):
 
         captured_prompts = []
 
-        async def mock_mid_turn_sync_stream(prompt, sampling_params, request_id):
-            del sampling_params, request_id
+        async def mock_mid_turn_sync_stream(prompt, sampling_params, request_id, priority):
+            del sampling_params, request_id, priority
             captured_prompts.append(prompt)
             # Simulate a mid-turn weight sync advancing _policy_version from 3 to 4
             # while this turn's generation stream is in flight.
@@ -467,6 +472,7 @@ class TestRLVllmSamplerWeightSync(unittest.TestCase):
             req = SimpleNamespace(
                 prompt=np.array([10, 11], dtype=np.int32),
                 request_id="req_mid_sync",
+                priority=0,
                 sampling_params=None,
             )
             res = await sampler.sample(req)

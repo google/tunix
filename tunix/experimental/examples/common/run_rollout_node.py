@@ -793,6 +793,11 @@ def _create_vllm_sampler(args, tokenizer):
       max_loras=1 if args.use_lora else None,
       enable_prefix_caching=enable_prefix_caching,
       enable_return_routed_experts=args.return_routed_experts,
+      # Honors each request's `priority` (its prompt batch index, lower first)
+      # so under max_staleness > 0 the batch the trainer needs next is served,
+      # and kept resident under KV pressure, ahead of batches dispatched early.
+      # Equal priorities fall back to arrival order, i.e. FCFS.
+      scheduling_policy="priority",
   )
   if gpu_mem_util is not None:
     engine_kwargs["gpu_memory_utilization"] = gpu_mem_util

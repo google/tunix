@@ -59,6 +59,22 @@ def _get_val(obj: Any, key: str, default: Any = None) -> Any:
   return default if val is None else val
 
 
+def _scheduling_priority(req: Any) -> int:
+  """Returns the vLLM scheduling priority of `req`; lower is served first.
+
+  Read strictly: every request must carry `priority`
+  (`sampler.SamplingRequest.priority`, or the key on the dicts `sample()`
+  builds for raw prompts). Takes effect only when the engine runs with
+  `scheduling_policy="priority"`; under `"fcfs"` vLLM ignores it.
+
+  Args:
+    req: A sampling request object or a raw-prompt request dict.
+  """
+  if isinstance(req, dict):
+    return int(req["priority"])
+  return int(req.priority)
+
+
 class RLVllmSampler:
   """Asynchronous vLLM sampler for RL inside `tpu-inference`.
 
@@ -123,7 +139,9 @@ class RLVllmSampler:
       return
 
     logger.info(
-        "Initializing RLVllmSampler with model: %s", self.engine_args.model
+        "Initializing RLVllmSampler with model: %s (scheduling_policy=%s)",
+        self.engine_args.model,
+        self.engine_args.scheduling_policy,
     )
 
     self._engine = AsyncLLMEngine.from_engine_args(self.engine_args)
@@ -453,6 +471,7 @@ class RLVllmSampler:
           {
               "prompt": item,
               "request_id": f"req_{idx}_{time.time_ns()}",
+              "priority": 0,
           }
           for idx, item in enumerate(items)
       ]
@@ -490,7 +509,10 @@ class RLVllmSampler:
             engine_prompt = prompt_str
 
         task_gen = self._engine.generate(
-            engine_prompt, vllm_params, request_id=req_id
+            engine_prompt,
+            vllm_params,
+            request_id=req_id,
+            priority=_scheduling_priority(req),
         )
         pending_tasks.append(
             (req_id, task_gen, expected_prompt_ids, turn_start_version)
@@ -523,7 +545,10 @@ class RLVllmSampler:
           )
 
         task_gen = self._engine.generate(
-            engine_prompt, vllm_params, request_id=req_id
+            engine_prompt,
+            vllm_params,
+            request_id=req_id,
+            priority=_scheduling_priority(req),
         )
         pending_tasks.append((req_id, task_gen, expected_prompt_ids))
 

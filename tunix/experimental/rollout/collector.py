@@ -278,6 +278,7 @@ class TrajectoryCollectorEngine:
           request_id=self.traj_id,
           prompt=prompt_payload,
           sampling_params=sampling_params,
+          priority=self.request.priority,
       )
       if self.partial_rollout or self.is_paused:
         await self._unpaused_event.wait()
