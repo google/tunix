@@ -428,6 +428,159 @@ class ClusterOrchestratorTest(absltest.TestCase):
         engine=mock_engine,
     )
 
+  def test_re_register_rollout_worker_before_and_after_bring_up(self):
+    h_actor = mock.MagicMock(spec=remote_execution.ActorHandle)
+    h_r0_v1 = mock.MagicMock(spec=remote_execution.ActorHandle)
+    h_r0_v2 = mock.MagicMock(spec=remote_execution.ActorHandle)
+    h_r0_v3 = mock.MagicMock(spec=remote_execution.ActorHandle)
+
+    registry = worker_registry.WorkerRegistry()
+    orch = orchestrator.ClusterOrchestrator(
+        registry=registry,
+        lifecycle_driver=mock.MagicMock(),
+        monitor=mock.MagicMock(),
+        weight_sync_mode="fallback",
+    )
+    orch.register_worker_handle("actor-0", [datatypes.Role.ACTOR], h_actor)
+    orch.register_worker_handle("rollout-0", [datatypes.Role.ROLLOUT], h_r0_v1)
+
+    with self.assertRaisesRegex(ValueError, "duplicate worker_id"):
+      orch.register_worker_handle(
+          "rollout-0",
+          [datatypes.Role.ROLLOUT],
+          h_r0_v2,
+          override=False,
+      )
+
+    # Re-register rollout-0 before bring_up_workers (default override=True)
+    orch.register_worker_handle("rollout-0", [datatypes.Role.ROLLOUT], h_r0_v2)
+    self.assertEqual(orch.worker_handles(datatypes.Role.ROLLOUT), [h_r0_v2])
+
+    orch.bring_up_workers(dummy_data="warmup_batch")
+    h_r0_v1.submit.assert_not_called()
+    h_r0_v2.submit.assert_has_calls([
+        mock.call("initialize"),
+        mock.call("compile", "warmup_batch"),
+        mock.call("start"),
+    ])
+    self.assertEqual(orch.engine._rollout_workers, [h_r0_v2])
+
+    # Re-register rollout-0 after bring_up_workers (at initial weights -> ACTIVE)
+    orch.register_worker_handle("rollout-0", [datatypes.Role.ROLLOUT], h_r0_v3)
+    orch.wait_for_pending_bring_ups(timeout=5.0)
+    h_r0_v3.submit.assert_has_calls([
+        mock.call("initialize"),
+        mock.call("compile", "warmup_batch"),
+        mock.call("start"),
+    ])
+    self.assertEqual(orch.worker_handles(datatypes.Role.ROLLOUT), [h_r0_v3])
+    self.assertEqual(orch.engine._rollout_workers, [h_r0_v3])
+    self.assertEqual(
+        orch.registry.state("rollout-0"),
+        worker_registry.MembershipState.ACTIVE,
+    )
+    orch.shutdown()
+
+  def test_dynamic_worker_arrival_and_weight_sync_promotion(self):
+    import asyncio
+
+    tmp_dir = epath.Path(self.enter_context(tempfile.TemporaryDirectory()))
+    cfg = {
+        "enabled": True,
+        "backend": "file",
+        "root_dir": str(tmp_dir),
+        "run_id": "dynamic_run",
+    }
+    h_actor = mock.MagicMock(spec=remote_execution.ActorHandle)
+    h_r0 = mock.MagicMock(spec=remote_execution.ActorHandle)
+    h_r1 = mock.MagicMock(spec=remote_execution.ActorHandle)
+
+    registry = worker_registry.WorkerRegistry()
+    orch = orchestrator.ClusterOrchestrator(
+        registry=registry,
+        lifecycle_driver=mock.MagicMock(),
+        monitor=mock.MagicMock(),
+        weight_sync_mode="fallback",
+        trajectory_store_config=cfg,
+    )
+    orch.register_worker_handle("actor-0", [datatypes.Role.ACTOR], h_actor)
+    orch.register_worker_handle("rollout-0", [datatypes.Role.ROLLOUT], h_r0)
+    orch.bring_up_workers(dummy_data="warmup")
+
+    # Simulate that weight sync has already committed policy_version=1
+    orch.engine._policy_version = 1
+
+    # Dynamically register rollout-1 after bring_up_workers()
+    orch.register_worker_handle("rollout-1", [datatypes.Role.ROLLOUT], h_r1)
+    orch.wait_for_pending_bring_ups(timeout=5.0)
+
+    h_r1.submit.assert_has_calls([
+        mock.call("with_trajectory_store_config", cfg),
+        mock.call("initialize"),
+        mock.call("compile", "warmup"),
+        mock.call("start"),
+    ])
+    self.assertEqual(
+        orch.registry.state("rollout-1"),
+        worker_registry.MembershipState.PENDING_WEIGHT_SYNC,
+    )
+    self.assertNotIn(h_r1, orch.engine._rollout_workers)
+    self.assertIn("rollout-1", orch.engine._pending_sync_rollout_workers)
+
+    # Next sync_weights promotes rollout-1 to ACTIVE
+    class _FakeSyncResult:
+      policy_version = 2
+      workers = ()
+
+    orch.engine._weight_sync_coordinator.sync = mock.AsyncMock(
+        return_value=_FakeSyncResult()
+    )
+    asyncio.run(orch.engine.sync_weights(policy_version=2))
+
+    self.assertEqual(
+        orch.registry.state("rollout-1"),
+        worker_registry.MembershipState.ACTIVE,
+    )
+    self.assertIn(h_r1, orch.engine._rollout_workers)
+    self.assertEmpty(orch.engine._pending_sync_rollout_workers)
+    orch.shutdown()
+
+  def test_worker_eviction_callback_removes_dead_worker_from_orchestrator(self):
+    h_actor = mock.MagicMock(spec=remote_execution.ActorHandle)
+    h_r0 = mock.MagicMock(spec=remote_execution.ActorHandle)
+    h_r1 = mock.MagicMock(spec=remote_execution.ActorHandle)
+
+    registry = worker_registry.WorkerRegistry()
+    orch = orchestrator.ClusterOrchestrator(
+        registry=registry,
+        lifecycle_driver=mock.MagicMock(),
+        monitor=mock.MagicMock(),
+        weight_sync_mode="fallback",
+    )
+    orch.register_worker_handle("actor-0", [datatypes.Role.ACTOR], h_actor)
+    orch.register_worker_handle("rollout-0", [datatypes.Role.ROLLOUT], h_r0)
+    orch.register_worker_handle("rollout-1", [datatypes.Role.ROLLOUT], h_r1)
+    orch.bring_up_workers()
+
+    self.assertEqual(orch.worker_handles(datatypes.Role.ROLLOUT), [h_r0, h_r1])
+    self.assertEqual(
+        orch.registry.state("rollout-0"),
+        worker_registry.MembershipState.ACTIVE,
+    )
+
+    orch.engine.evict_rollout_worker(h_r0, ConnectionError("pod died"))
+
+    self.assertEqual(orch.worker_handles(datatypes.Role.ROLLOUT), [h_r1])
+    self.assertEqual(
+        orch.registry.state("rollout-0"),
+        worker_registry.MembershipState.EVICTED,
+    )
+    self.assertEqual(
+        orch.registry.state("rollout-1"),
+        worker_registry.MembershipState.ACTIVE,
+    )
+    orch.shutdown()
+
 
 def _trajectory_store_orchestrator(
     **kwargs,
@@ -576,6 +729,56 @@ class ClusterOrchestratorTrajectoryStoreTest(absltest.TestCase):
     orch.bring_up_workers()
     mock_rollout_remote.submit.assert_any_call(
         "with_trajectory_store_config", expected_cfg
+    )
+    orch.shutdown()
+
+  @mock.patch.object(remote_execution.ActorHandle, "from_address")
+  def test_orchestrator_plumbs_max_concurrent_rollouts_per_worker(
+      self, mock_from_address
+  ):
+    h_actor = mock.MagicMock(spec=remote_execution.ActorHandle)
+    h_r0 = mock.MagicMock(spec=remote_execution.ActorHandle)
+    h_r1 = mock.MagicMock(spec=remote_execution.ActorHandle)
+    mock_from_address.side_effect = [h_r0, h_r1]
+
+    orch = orchestrator.ClusterOrchestrator(
+        lifecycle_driver=mock.MagicMock(),
+        monitor=mock.MagicMock(),
+        max_concurrent_rollouts_per_worker=8,
+    )
+    orch.register_worker_handle("actor-0", [datatypes.Role.ACTOR], h_actor)
+
+    # rollout-0 advertises max_concurrency=4 (< 8), rollout-1 advertises 16 (> 8)
+    orch.register_worker_from_hostname(
+        "host0",
+        0,
+        pickle.dumps({
+            "service_type": "rollout",
+            "service_port": 5001,
+            "worker_id": "rollout-0",
+            "max_concurrency": 4,
+        }),
+    )
+    orch.register_worker_from_hostname(
+        "host1",
+        0,
+        pickle.dumps({
+            "service_type": "rollout",
+            "service_port": 5002,
+            "worker_id": "rollout-1",
+            "max_concurrency": 16,
+        }),
+    )
+
+    orch.bring_up_workers()
+    assert orch.engine is not None
+    self.assertEqual(orch.engine.max_concurrent_rollouts_per_worker, 8)
+    # Effective limit is min(orchestrator_cap, worker_max_concurrency)
+    self.assertEqual(
+        orch.engine._rollout_session._get_worker_limit(h_r0), 4
+    )
+    self.assertEqual(
+        orch.engine._rollout_session._get_worker_limit(h_r1), 8
     )
     orch.shutdown()
 

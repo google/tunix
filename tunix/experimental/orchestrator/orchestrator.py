@@ -23,6 +23,7 @@ from collections.abc import Sequence
 from concurrent import futures
 import contextlib
 import pickle
+import threading
 import time
 from typing import Any, Mapping
 import uuid
@@ -56,6 +57,7 @@ class ClusterOrchestrator:
       trajectory_store_config: Mapping[str, Any] | None = None,
       run_id: str | None = None,
       disable_weight_sync_timeouts: bool | None = None,
+      max_concurrent_rollouts_per_worker: int | None = None,
   ):
     """Initializes ClusterOrchestrator.
 
@@ -75,13 +77,36 @@ class ClusterOrchestrator:
         automatically if omitted.
       disable_weight_sync_timeouts: When True, sets all weight-sync phase
         deadlines to infinity.
+      max_concurrent_rollouts_per_worker: Optional cap on concurrent in-flight
+        rollouts dispatched to any single rollout worker.
     """
     self.config = config
+    if max_concurrent_rollouts_per_worker is None and config is not None:
+      max_concurrent_rollouts_per_worker = getattr(
+          config, "max_concurrent_rollouts_per_worker", None
+      )
+    if (
+        max_concurrent_rollouts_per_worker is not None
+        and max_concurrent_rollouts_per_worker <= 0
+    ):
+      raise ValueError("max_concurrent_rollouts_per_worker must be positive")
+    self._max_concurrent_rollouts_per_worker = (
+        int(max_concurrent_rollouts_per_worker)
+        if max_concurrent_rollouts_per_worker is not None
+        else None
+    )
     self.registry = registry or worker_registry.WorkerRegistry()
     self.lifecycle_driver = lifecycle_driver or lifecycle.LifecycleDriver(
         self.registry
     )
     self.monitor = monitor or health_monitor.HealthMonitor(self.registry)
+    self._lock = threading.RLock()
+    self._brought_up = False
+    self._warmup_data: Any = None
+    self._bring_up_executor = futures.ThreadPoolExecutor(
+        max_workers=4, thread_name_prefix="worker_bringup"
+    )
+    self._pending_bring_up_futures: set[futures.Future[Any]] = set()
     self._remote_worker_handles: dict[
         str, list[remote_execution.ActorHandle]
     ] = collections.defaultdict(list)
@@ -133,6 +158,23 @@ class ClusterOrchestrator:
           self.trajectory_store_config,
       )
 
+  def _effective_worker_capacity(
+      self, info: datatypes.WorkerInfo | None
+  ) -> int | None:
+    worker_cap = None
+    if info is not None and info.resources:
+      raw_cap = info.resources.get("max_concurrency")
+      if raw_cap is not None and int(raw_cap) > 0:
+        worker_cap = int(raw_cap)
+    if (
+        self._max_concurrent_rollouts_per_worker is not None
+        and worker_cap is not None
+    ):
+      return min(self._max_concurrent_rollouts_per_worker, worker_cap)
+    if worker_cap is not None:
+      return worker_cap
+    return self._max_concurrent_rollouts_per_worker
+
   def __enter__(self) -> "ClusterOrchestrator":
     """Interactive context manager bring-up."""
     self.bring_up_workers()
@@ -173,6 +215,9 @@ class ClusterOrchestrator:
       case _:
         raise RuntimeError(f"unknown service type {service_type}")
 
+    resources: dict[str, Any] = {"address": service_address}
+    if md.get("max_concurrency") is not None:
+      resources["max_concurrency"] = int(md["max_concurrency"])
     self.register_worker_handle(
         worker_id=worker_id,
         roles=[role],
@@ -180,7 +225,7 @@ class ClusterOrchestrator:
             f"grpc://{service_address}",
             rpc_timeout_s=rpc_timeout_s,
         ),
-        resources={"address": service_address},
+        resources=resources,
     )
 
   def register_worker(
@@ -195,6 +240,8 @@ class ClusterOrchestrator:
       roles: Sequence[datatypes.Role | str],
       handle: remote_execution.ActorHandle,
       resources: dict[str, Any] | None = None,
+      *,
+      override: bool = True,
   ) -> datatypes.WorkerInfo:
     """Registers a remote worker handle used directly by DistributedRLEngine."""
     if not roles:
@@ -204,11 +251,6 @@ class ClusterOrchestrator:
           "register_worker_handle expects a remote_execution.ActorHandle, got "
           f"{type(handle)}"
       )
-    if (
-        worker_id in self._remote_worker_infos
-        or worker_id in self.registry.worker_ids()
-    ):
-      raise ValueError(f"duplicate worker_id: {worker_id!r}")
     role_names = frozenset(
         role.value if isinstance(role, datatypes.Role) else role
         for role in roles
@@ -218,31 +260,147 @@ class ClusterOrchestrator:
         roles=role_names,
         resources={"remote": True, **dict(resources or {})},
     )
-    for role in role_names:
-      self._remote_worker_handles[role].append(handle)
-    self._remote_worker_handles_by_id[worker_id] = handle
-    self._remote_worker_infos[worker_id] = info
-    logging.info(
-        "Registered remote worker %r with roles %s.",
-        worker_id,
-        sorted(role_names),
-    )
+    with self._lock:
+      if not override and (
+          worker_id in self._remote_worker_infos
+          or worker_id in self.registry.worker_ids()
+      ):
+        raise ValueError(f"duplicate worker_id: {worker_id!r}")
+
+      if worker_id in self._remote_worker_infos:
+        old_info = self._remote_worker_infos[worker_id]
+        old_handle = self._remote_worker_handles_by_id.get(worker_id)
+        for old_role in old_info.roles:
+          handles = self._remote_worker_handles.get(old_role)
+          if handles is not None:
+            self._remote_worker_handles[old_role] = [
+                h for h in handles if h is not old_handle
+            ]
+            if not self._remote_worker_handles[old_role]:
+              del self._remote_worker_handles[old_role]
+        if self.engine is not None and old_handle is not None:
+          self.engine.evict_rollout_worker(old_handle)
+
+      for role in role_names:
+        self._remote_worker_handles[role].append(handle)
+      self._remote_worker_handles_by_id[worker_id] = handle
+      self._remote_worker_infos[worker_id] = info
+      logging.info(
+          "Registered remote worker %r with roles %s.",
+          worker_id,
+          sorted(role_names),
+      )
+
+      if self._brought_up:
+        if self._weight_sync_mode not in (None, "none"):
+          from tunix.experimental.weight_sync import weight_sync_coordinator
+
+          self.registry.register(
+              weight_sync_coordinator.RemoteWorkerShim(handle, info),  # pyrefly: ignore[bad-argument-type]
+              override=True,
+              state=worker_registry.MembershipState.INITIALIZING,
+          )
+          incarnation = self.registry.incarnation(worker_id)
+        else:
+          incarnation = None
+        fut = self._bring_up_executor.submit(
+            self._bring_up_single_remote_worker,
+            worker_id,
+            info,
+            handle,
+            incarnation,
+        )
+        self._pending_bring_up_futures.add(fut)
+        fut.add_done_callback(self._pending_bring_up_futures.discard)
     return info
+
+  def _bring_up_single_remote_worker(
+      self,
+      worker_id: str,
+      info: datatypes.WorkerInfo,
+      handle: remote_execution.ActorHandle,
+      incarnation: int | None,
+  ) -> None:
+    """Brings up a single dynamically registered remote worker."""
+    try:
+      if (
+          datatypes.Role.ROLLOUT.value in info.roles
+          and self.trajectory_store_config is not None
+      ):
+        logging.info(
+            "Configuring TrajectoryStore on dynamic remote rollout worker %s.",
+            worker_id,
+        )
+        handle.submit(
+            "with_trajectory_store_config", self.trajectory_store_config
+        )
+      logging.info("Initializing dynamic remote worker %s.", worker_id)
+      handle.submit("initialize")
+      logging.info("Compiling dynamic remote worker %s.", worker_id)
+      handle.submit("compile", self._warmup_data)
+      logging.info("Starting dynamic remote worker %s.", worker_id)
+      handle.submit("start")
+
+      with self._lock:
+        if self._remote_worker_handles_by_id.get(worker_id) is not handle:
+          return
+        if (
+            datatypes.Role.ROLLOUT.value in info.roles
+            and self.engine is not None
+        ):
+          self.engine.add_rollout_worker(
+              handle,
+              worker_id=worker_id,
+              require_weight_sync=True,
+              max_concurrent_rollouts=self._effective_worker_capacity(info),
+          )
+    except Exception as err:  # pylint: disable=broad-exception-caught
+      logging.error(
+          "Failed to bring up dynamic remote worker %s: %r", worker_id, err
+      )
+      with self._lock:
+        if incarnation is not None and worker_id in self.registry:
+          self.registry.evict(worker_id, expected_incarnation=incarnation)
+        if self._remote_worker_handles_by_id.get(worker_id) is handle:
+          self._remote_worker_handles_by_id.pop(worker_id, None)
+          self._remote_worker_infos.pop(worker_id, None)
+          for role in info.roles:
+            handles = self._remote_worker_handles.get(role)
+            if handles is not None:
+              self._remote_worker_handles[role] = [
+                  h for h in handles if h is not handle
+              ]
+              if not self._remote_worker_handles[role]:
+                del self._remote_worker_handles[role]
+
+  def wait_for_pending_bring_ups(self, timeout: float | None = None) -> None:
+    """Waits for all in-flight dynamic worker bring-up tasks to complete."""
+    with self._lock:
+      futs = list(self._pending_bring_up_futures)
+    if not futs:
+      return
+    _, not_done = futures.wait(futs, timeout=timeout)
+    if not_done:
+      raise TimeoutError(
+          f"Timed out after {timeout}s waiting for {len(not_done)} worker"
+          " bring-up(s)."
+      )
 
   def unregister_worker(self, worker_id: str) -> None:
     """Unregisters a worker by its id."""
-    if worker_id in self._remote_worker_infos:
-      info = self._remote_worker_infos.pop(worker_id)
-      handle = self._remote_worker_handles_by_id.pop(worker_id)
-      for role in info.roles:
-        handles = self._remote_worker_handles.get(role)
-        if handles is not None:
-          self._remote_worker_handles[role] = [
-              h for h in handles if h is not handle
-          ]
-          if not self._remote_worker_handles[role]:
-            del self._remote_worker_handles[role]
-      return
+    with self._lock:
+      if worker_id in self._remote_worker_infos:
+        info = self._remote_worker_infos.pop(worker_id)
+        handle = self._remote_worker_handles_by_id.pop(worker_id)
+        for role in info.roles:
+          handles = self._remote_worker_handles.get(role)
+          if handles is not None:
+            self._remote_worker_handles[role] = [
+                h for h in handles if h is not handle
+            ]
+            if not self._remote_worker_handles[role]:
+              del self._remote_worker_handles[role]
+        return
     self.registry.unregister(worker_id)
 
   def wait_for_workers(
@@ -312,6 +470,7 @@ class ClusterOrchestrator:
         "Bringing up %d registered worker(s)...",
         len(self.worker_infos()),
     )
+    self._warmup_data = dummy_data
     if self.trajectory_store_config is not None:
       for worker in self._get_role_members(datatypes.Role.ROLLOUT):
         if hasattr(worker, "with_trajectory_store_config"):
@@ -319,6 +478,7 @@ class ClusterOrchestrator:
     self.lifecycle_driver.bring_up(dummy_data)
     self._bring_up_remote_workers(dummy_data)
     self.engine = self._create_engine()
+    self._brought_up = True
     logging.info("All workers brought up successfully.")
 
   def shutdown(self) -> None:
@@ -327,6 +487,7 @@ class ClusterOrchestrator:
     with contextlib.ExitStack() as stack:
       # Registered in reverse order of execution (LIFO) so that every stage
       # runs even if a preceding stage raises an exception.
+      stack.callback(self._bring_up_executor.shutdown, wait=False)
       if self.trajectory_store is not None:
         stack.callback(self.trajectory_store.close)
       stack.callback(self.lifecycle_driver.shutdown)
@@ -347,7 +508,12 @@ class ClusterOrchestrator:
     # Fallback in case workers were registered with the enum object directly
     if not members and isinstance(role, datatypes.Role):
       members = self.registry.group(role).members()
-    return members
+    return [
+        m
+        for m in members
+        if type(m).__name__ != "RemoteWorkerShim"
+        and "_handle" not in getattr(m, "__dict__", {})
+    ]
 
   def _get_actor_handles(
       self, role: datatypes.Role | str
@@ -404,6 +570,27 @@ class ClusterOrchestrator:
         logging.warning("Failed to stop remote worker %s: %r", worker_id, err)
     pool.shutdown(wait=False)
 
+  def _on_engine_worker_evicted(
+      self,
+      handle: remote_execution.ActorHandle,
+      exc: BaseException | None = None,
+  ) -> None:
+    """Callback invoked when DistributedRLEngine evicts a failed worker."""
+    del exc
+    with self._lock:
+      for role in list(self._remote_worker_handles):
+        handles = [
+            h for h in self._remote_worker_handles[role] if h is not handle
+        ]
+        if handles:
+          self._remote_worker_handles[role] = handles
+        else:
+          del self._remote_worker_handles[role]
+      for wid, h in list(self._remote_worker_handles_by_id.items()):
+        if h is handle:
+          del self._remote_worker_handles_by_id[wid]
+          self._remote_worker_infos.pop(wid, None)
+
   def _create_engine(self) -> distributed_rl_engine.DistributedRLEngine:
     """Constructs a DistributedRLEngine from the registered role groups."""
     rollout_workers = self._get_actor_handles(datatypes.Role.ROLLOUT)
@@ -450,11 +637,29 @@ class ClusterOrchestrator:
           disable_timeouts=self._disable_weight_sync_timeouts,
       )
 
+    rollout_worker_ids = {
+        wid: h
+        for wid, h in self._remote_worker_handles_by_id.items()
+        if datatypes.Role.ROLLOUT.value in self._remote_worker_infos[wid].roles
+    }
+    rollout_worker_capacities: dict[str, int] = {}
+    for wid in rollout_worker_ids:
+      cap = self._effective_worker_capacity(self._remote_worker_infos.get(wid))
+      if cap is not None:
+        rollout_worker_capacities[wid] = cap
+
     return distributed_rl_engine.DistributedRLEngine(
         rollout_workers=rollout_workers,
         trainer_workers=trainer_workers,
         inference_workers=inference_workers,
         weight_sync_coordinator=coordinator,
+        registry=self.registry,
+        rollout_worker_ids=rollout_worker_ids,
+        on_worker_evicted=self._on_engine_worker_evicted,
+        max_concurrent_rollouts_per_worker=(
+            self._max_concurrent_rollouts_per_worker
+        ),
+        rollout_worker_capacities=rollout_worker_capacities or None,
     )
 
   def run(

@@ -22,9 +22,10 @@ AbstractRLEngine.
 
 import asyncio
 import collections
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 import concurrent.futures
 import inspect
+import threading
 from typing import Any
 import uuid
 
@@ -37,6 +38,7 @@ from tunix.experimental.metrics import metrics as exp_metrics
 from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import rl_engine_interface
+from tunix.experimental.orchestrator import worker_registry
 from tunix.experimental.worker import remote_execution
 
 _summarize_list = logging_utils.summarize_list
@@ -83,19 +85,228 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           Mapping[datatypes.Role, remote_execution.ActorHandle] | None
       ) = None,
       weight_sync_coordinator: Any = None,
+      registry: worker_registry.WorkerRegistry | None = None,
+      rollout_worker_ids: Mapping[str, remote_execution.ActorHandle] | None = (
+          None
+      ),
+      on_worker_evicted: (
+          Callable[[remote_execution.ActorHandle, BaseException | None], None]
+          | None
+      ) = None,
+      max_concurrent_rollouts_per_worker: int | None = None,
+      rollout_worker_capacities: (
+          Mapping[str | remote_execution.ActorHandle, int] | None
+      ) = None,
   ):
+    self._worker_lock = threading.RLock()
+    self._registry = registry
+    self._on_worker_evicted = on_worker_evicted
+    self._max_concurrent_rollouts_per_worker = (
+        max_concurrent_rollouts_per_worker
+    )
+    self._worker_id_capacities: dict[str, int] = {}
+    self._pending_sync_rollout_workers: dict[
+        str, remote_execution.ActorHandle
+    ] = {}
+    self._handle_to_worker_id: dict[remote_execution.ActorHandle, str] = {}
+    self._worker_id_to_handle: dict[str, remote_execution.ActorHandle] = {}
+    if rollout_worker_ids:
+      for w_id, handle in rollout_worker_ids.items():
+        self._worker_id_to_handle[w_id] = handle
+        self._handle_to_worker_id[handle] = w_id
+
+    worker_max_in_flight: dict[remote_execution.ActorHandle, int] = {}
+    if rollout_worker_capacities:
+      for key, cap in rollout_worker_capacities.items():
+        if isinstance(key, str):
+          self._worker_id_capacities[key] = int(cap)
+          handle = self._worker_id_to_handle.get(key)
+          if handle is not None:
+            worker_max_in_flight[handle] = int(cap)
+        else:
+          worker_max_in_flight[key] = int(cap)
+          w_id = self._handle_to_worker_id.get(key)
+          if w_id is not None:
+            self._worker_id_capacities[w_id] = int(cap)
+
     self._rollout_workers = list(rollout_workers)
     self._rollout_pool = remote_execution.RoutingActorPool(
         self._rollout_workers
     )
     self._rollout_session = remote_execution.PoolExecutionSession(
-        self._rollout_pool
+        self._rollout_pool,
+        evict_on_failure=True,
+        retry_on_worker_failure=True,
+        on_worker_evicted=self._handle_rollout_worker_evicted,
+        max_in_flight_per_worker=max_concurrent_rollouts_per_worker,
+        worker_max_in_flight=worker_max_in_flight,
     )
     self._trainer_workers = dict(trainer_workers)
     self._inference_workers = dict(inference_workers or {})
     self._policy_version = 0
     self._restored_next_batch_idx = 0
     self._weight_sync_coordinator = weight_sync_coordinator
+
+  @property
+  def max_concurrent_rollouts_per_worker(self) -> int | None:
+    return self._rollout_session.max_in_flight_per_worker
+
+  def set_max_concurrent_rollouts_per_worker(
+      self, max_concurrent_rollouts: int | None
+  ) -> None:
+    """Updates the default per-worker concurrent rollout limit."""
+    self._max_concurrent_rollouts_per_worker = max_concurrent_rollouts
+    self._rollout_session.set_max_in_flight_per_worker(max_concurrent_rollouts)
+
+  def add_rollout_worker(
+      self,
+      worker: remote_execution.ActorHandle,
+      *,
+      worker_id: str | None = None,
+      require_weight_sync: bool = False,
+      max_concurrent_rollouts: int | None = None,
+  ) -> None:
+    """Dynamically adds or replaces a rollout worker in the engine."""
+    with self._worker_lock:
+      if worker_id is not None:
+        old_handle = self._worker_id_to_handle.get(worker_id)
+        if old_handle is not None and old_handle is not worker:
+          if old_handle in self._rollout_workers:
+            self._rollout_workers.remove(old_handle)
+          self._pending_sync_rollout_workers.pop(worker_id, None)
+          for k, v in list(self._pending_sync_rollout_workers.items()):
+            if v is old_handle:
+              self._pending_sync_rollout_workers.pop(k, None)
+          self._handle_to_worker_id.pop(old_handle, None)
+          self._rollout_pool.remove_actor(old_handle)
+          self._rollout_session.set_worker_max_in_flight(old_handle, None)
+        self._worker_id_to_handle[worker_id] = worker
+        self._handle_to_worker_id[worker] = worker_id
+
+      if max_concurrent_rollouts is not None and worker_id is not None:
+        self._worker_id_capacities[worker_id] = int(max_concurrent_rollouts)
+      effective_cap = (
+          int(max_concurrent_rollouts)
+          if max_concurrent_rollouts is not None
+          else (
+              self._worker_id_capacities.get(worker_id)
+              if worker_id is not None
+              else None
+          )
+      )
+      if effective_cap is not None:
+        self._rollout_session.set_worker_max_in_flight(worker, effective_cap)
+
+      needs_sync = (
+          require_weight_sync
+          and self._weight_sync_coordinator is not None
+          and (
+              self._policy_version > 0
+              or getattr(
+                  self._weight_sync_coordinator,
+                  "last_committed_version",
+                  None,
+              )
+              is not None
+          )
+      )
+      if needs_sync:
+        key = worker_id or f"worker_{id(worker)}"
+        self._pending_sync_rollout_workers[key] = worker
+        if (
+            self._registry is not None
+            and worker_id
+            and worker_id in self._registry
+        ):
+          self._registry.set_state(
+              worker_id, worker_registry.MembershipState.PENDING_WEIGHT_SYNC
+          )
+      else:
+        if worker_id:
+          self._pending_sync_rollout_workers.pop(worker_id, None)
+        if worker not in self._rollout_workers:
+          self._rollout_workers.append(worker)
+        self._rollout_session.add_actor(worker, max_in_flight=effective_cap)
+        if (
+            self._registry is not None
+            and worker_id
+            and worker_id in self._registry
+        ):
+          self._registry.set_state(
+              worker_id, worker_registry.MembershipState.ACTIVE
+          )
+
+  def evict_rollout_worker(
+      self,
+      worker_or_id: remote_execution.ActorHandle | str,
+      exc: BaseException | None = None,
+  ) -> bool:
+    """Evicts a failed rollout worker from active routing and marks it EVICTED."""
+    evicted = False
+    with self._worker_lock:
+      if isinstance(worker_or_id, str):
+        worker_id: str | None = worker_or_id
+        handle = self._worker_id_to_handle.get(
+            worker_id
+        ) or self._pending_sync_rollout_workers.get(worker_id)
+      else:
+        handle = worker_or_id
+        worker_id = self._handle_to_worker_id.get(handle)
+        if worker_id is None:
+          for k, v in self._pending_sync_rollout_workers.items():
+            if v is handle:
+              worker_id = k
+              break
+
+      if handle is not None:
+        if handle in self._rollout_workers:
+          self._rollout_workers.remove(handle)
+          evicted = True
+        if self._rollout_pool.remove_actor(handle):
+          evicted = True
+        self._rollout_session.set_worker_max_in_flight(handle, None)
+        if handle in self._handle_to_worker_id:
+          self._handle_to_worker_id.pop(handle, None)
+          evicted = True
+
+      if worker_id and worker_id in self._pending_sync_rollout_workers:
+        self._pending_sync_rollout_workers.pop(worker_id, None)
+        evicted = True
+      if handle is not None:
+        for k, v in list(self._pending_sync_rollout_workers.items()):
+          if v is handle:
+            self._pending_sync_rollout_workers.pop(k, None)
+            evicted = True
+
+      if worker_id and self._worker_id_to_handle.get(worker_id) is handle:
+        if worker_id in self._worker_id_to_handle:
+          self._worker_id_to_handle.pop(worker_id, None)
+          evicted = True
+
+      if (
+          self._registry is not None
+          and worker_id
+          and worker_id in self._registry
+      ):
+        if self._registry.evict(worker_id):
+          evicted = True
+
+    if evicted and self._on_worker_evicted is not None and handle is not None:
+      try:
+        self._on_worker_evicted(handle, exc)
+      except Exception:  # pylint: disable=broad-exception-caught
+        logging.exception(
+            "Error in DistributedRLEngine on_worker_evicted callback for %s",
+            handle,
+        )
+    return evicted
+
+  def _handle_rollout_worker_evicted(
+      self,
+      actor: remote_execution.ActorHandle,
+      exc: BaseException | None = None,
+  ) -> None:
+    self.evict_rollout_worker(actor, exc)
 
   @property
   def restored_next_batch_idx(self) -> int:
@@ -324,7 +535,19 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       self, timeout_s: float = remote_execution.LONG_POLL_TIMEOUT_S
   ) -> list[datatypes.TrajectoryItem]:
     """Concurrently long-polls completed rollout responses across all workers."""
-    if not self._rollout_workers:
+    if (
+        not self._rollout_workers
+        and self._pending_sync_rollout_workers
+        and self._weight_sync_coordinator is not None
+    ):
+      await self.sync_weights(policy_version=self._policy_version)
+
+    if (
+        not self._rollout_workers
+        and self._rollout_session._in_flight == 0
+        and self._rollout_session._response_queue.empty()
+        and not self._rollout_session._failed_tasks
+    ):
       return []
 
     completed: list[datatypes.TrajectoryItem] = []
@@ -347,6 +570,29 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
             traj_item.group_index,
         )
         completed.append(traj_item)
+
+    for _, payload, task_exc in self._rollout_session.pop_failed_tasks():
+      _, args, orig_kwargs = payload
+      reqs = orig_kwargs.get("requests")
+      if reqs is None and args:
+        reqs = args[0]
+      for req in reqs or ():
+        if isinstance(req, datatypes.RolloutRequest):
+          err_resp = datatypes.RolloutResponse(
+              request_id=req.request_id,
+              status="FAILED",
+              error=datatypes.ErrorInfo(
+                  error_type=type(task_exc).__name__,
+                  message=str(task_exc),
+              ),
+              metadata={
+                  **(req.metadata or {}),
+                  "prompt_id": req.prompt_id,
+                  "group_index": req.group_index,
+              },
+          )
+          completed.append(_response_to_trajectory_item(err_resp))
+
     return completed
 
   async def generate(
@@ -645,9 +891,75 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         "Synchronizing weights (target policy_version=%d)...",
         next_policy_version,
     )
-    result = await self._weight_sync_coordinator.sync(
-        policy_version=next_policy_version
-    )
+    try:
+      result = await self._weight_sync_coordinator.sync(
+          policy_version=next_policy_version
+      )
+    except Exception as err:
+      res = getattr(err, "result", None)
+      state_val = getattr(getattr(res, "state", None), "value", None)
+      if res is None or state_val in (
+          "unknown_transfer_state",
+          "partially_committed",
+      ):
+        raise
+      failed_worker_ids = [
+          w.worker_id
+          for w in getattr(res, "workers", ())
+          if w.phase != "committed"
+          and (w.needs_restart or w.phase == "unknown" or w.error)
+      ]
+      evicted_any = False
+      for wid in failed_worker_ids:
+        if self.evict_rollout_worker(wid, err):
+          evicted_any = True
+      has_available_rollout = bool(
+          self._rollout_workers
+          or self._pending_sync_rollout_workers
+          or (
+              self._registry is not None
+              and not self._registry.group(
+                  datatypes.Role.ROLLOUT.value
+              ).is_empty()
+          )
+      )
+      if not (evicted_any and has_available_rollout):
+        raise
+      logging.warning(
+          "Weight sync failed on rollout worker(s) %s; evicted failed"
+          " worker(s) and retrying sync (policy_version=%d).",
+          failed_worker_ids,
+          next_policy_version,
+      )
+      if getattr(
+          self._weight_sync_coordinator, "poisoned", None
+      ) is not None and hasattr(
+          self._weight_sync_coordinator, "reset_after_recovery"
+      ):
+        self._weight_sync_coordinator.reset_after_recovery()
+      result = await self._weight_sync_coordinator.sync(
+          policy_version=next_policy_version
+      )
+
+    committed_ids = {
+        w.worker_id
+        for w in getattr(result, "workers", ())
+        if w.phase == "committed"
+    }
+    with self._worker_lock:
+      for w_id, handle in list(self._pending_sync_rollout_workers.items()):
+        if not getattr(result, "workers", None) or w_id in committed_ids:
+          self._pending_sync_rollout_workers.pop(w_id, None)
+          if handle not in self._rollout_workers:
+            self._rollout_workers.append(handle)
+          self._rollout_session.add_actor(
+              handle, max_in_flight=self._worker_id_capacities.get(w_id)
+          )
+          if self._registry is not None and w_id in self._registry:
+            self._registry.set_state(
+                w_id, worker_registry.MembershipState.ACTIVE
+            )
+
     self._policy_version = result.policy_version
     logging.info(
         "Weight synchronization complete (policy_version=%d).",

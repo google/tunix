@@ -176,6 +176,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="Number of rollout worker replicas to wait for.",
   )
   parser.add_argument(
+      "--max_concurrent_rollouts_per_worker",
+      type=int,
+      default=(
+          int(os.getenv("MAX_CONCURRENT_ROLLOUTS_PER_WORKER", "0")) or None
+      ),
+      help=(
+          "Optional cap on concurrent in-flight rollouts dispatched to any "
+          "single rollout worker."
+      ),
+  )
+  parser.add_argument(
       "--weight_sync_mode",
       type=weight_sync.WeightSyncMode,
       default=weight_sync.WeightSyncMode(os.getenv("WEIGHT_SYNC_MODE", "none")),
@@ -510,6 +521,9 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       weight_sync_mode=args.weight_sync_mode,
       trajectory_store_config=_build_trajectory_store_config(args),
       disable_weight_sync_timeouts=args.disable_weight_sync_timeouts,
+      max_concurrent_rollouts_per_worker=(
+          args.max_concurrent_rollouts_per_worker
+      ),
   )
   context.ipc.discovery.on_register(
       functools.partial(
