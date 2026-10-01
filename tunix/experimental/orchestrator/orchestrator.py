@@ -52,6 +52,7 @@ class ClusterOrchestrator:
       lifecycle_driver: lifecycle.LifecycleDriver | None = None,
       monitor: health_monitor.HealthMonitor | None = None,
       weight_sync_mode: str | None = None,
+      rollout_router: Any = None,
       trajectory_store_config: Mapping[str, Any] | None = None,
   ):
     """Initializes ClusterOrchestrator.
@@ -62,6 +63,8 @@ class ClusterOrchestrator:
       lifecycle_driver: Lifecycle driver to use; one is created if omitted.
       monitor: Health monitor to use; one is created if omitted.
       weight_sync_mode: Weight sync mode, if any.
+      rollout_router: Optional rollout worker picker forwarded to the engine's
+        RoutingActorPool (e.g. remote_scheduler_router.RemoteSchedulerRouter).
       trajectory_store_config: Trajectory Store configuration for this
         process, or None to run without a store. See
         `store.TrajectoryStore.from_config`. Pass the same config to every
@@ -75,6 +78,7 @@ class ClusterOrchestrator:
         self.registry
     )
     self.monitor = monitor or health_monitor.HealthMonitor(self.registry)
+    self.rollout_router = rollout_router
     self._remote_worker_handles: dict[
         str, list[remote_execution.ActorHandle]
     ] = collections.defaultdict(list)
@@ -408,6 +412,7 @@ class ClusterOrchestrator:
         rollout_workers=rollout_workers,
         trainer_workers=trainer_workers,
         inference_workers=inference_workers,
+        router=self.rollout_router,
         weight_sync_coordinator=coordinator,
     )
 

@@ -82,10 +82,14 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           Mapping[datatypes.Role, remote_execution.ActorHandle] | None
       ) = None,
       weight_sync_coordinator: Any = None,
+      router: Any | None = None,
   ):
     self._rollout_workers = list(rollout_workers)
     self._rollout_pool = remote_execution.RoutingActorPool(
-        self._rollout_workers
+        self._rollout_workers, router=router
+    )
+    self._rollout_session = remote_execution.PoolExecutionSession(
+        self._rollout_pool
     )
     self._rollout_session = remote_execution.PoolExecutionSession(
         self._rollout_pool
@@ -379,7 +383,11 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     )
     for req in requests:
       worker = self._rollout_pool._get_next_actor(
-          kwargs={"route_key": req.traj_id}
+            kwargs={
+                "route_key": req.traj_id,
+                "request_id": req.request_id,
+                "prompt": req.prompt,
+            },
       )
       worker_to_requests[worker].append(req)
 
@@ -643,6 +651,11 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         "Weight synchronization complete (policy_version=%d).",
         self._policy_version,
     )
+    notify = getattr(self._rollout_pool.router, "notify_weights_synced", None)
+    if callable(notify):
+      # External schedulers may cache prefix affinity that a weight sync
+      # invalidates; best-effort notification, only after a successful round.
+      notify()
     return result.policy_version
 
   async def save_checkpoint(
