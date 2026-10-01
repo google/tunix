@@ -164,6 +164,16 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " detokenizing and re-tokenizing intermediate turns (TITO)."
       ),
   )
+  parser.add_argument(
+      "--checkpoint_optimizer_interval_steps",
+      type=int,
+      default=1,
+      help=(
+          "Include the optimizer state in a checkpoint only every this many"
+          " optimizer steps (and on the last step); other checkpoints hold"
+          " just the model params."
+      ),
+  )
   # ---- Optional GRPO algorithm options -------------------------------------
   # All default to off, so omitting them reproduces the previous behaviour.
   parser.add_argument(
@@ -848,6 +858,9 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         max_staleness=args.max_staleness,
         group_order=args.trajectory_group_order,
         sync_weights=(args.weight_sync_mode != weight_sync.WeightSyncMode.NONE),
+        checkpoint_optimizer_interval_steps=(
+            args.checkpoint_optimizer_interval_steps
+        ),
         on_step_begin=lambda step: logging.info(
             ">>> DeepSWE step %d starting | policy_version=%d",
             step,
