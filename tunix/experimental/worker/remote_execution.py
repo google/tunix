@@ -866,6 +866,9 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
 class ActorHandle(abc.ABC):
   """Stateful 1-to-1 routing handle targeting a specific remote worker instance."""
 
+  worker_id: Optional[str] = None
+  target_address: Optional[str] = None
+
   @classmethod
   def from_address(
       cls,
@@ -1301,8 +1304,23 @@ def stable_route_hash(route_key: Any) -> int:
   return int.from_bytes(digest.digest(), "big")
 
 
+# Bound on remembered route_key placements per pool / least-loaded session.
+_MAX_ROUTE_PLACEMENTS = 65536
+
+
+def hrw_route_score(actor_id: str, route_key: Any) -> int:
+  """Computes a deterministic 64-bit Rendezvous (HRW) hash score for (actor_id, route_key)."""
+  payload = (
+      f"{actor_id}\x00{type(route_key).__qualname__}:{route_key}".encode(
+          "utf-8"
+      )
+  )
+  digest = hashlib.blake2b(payload, digest_size=8, person=b"tnx_hrw_47")
+  return int.from_bytes(digest.digest(), "big")
+
+
 class RoutingActorPool(ActorPool):
-  """ActorPool with smart task routing (`route_key affinity, round-robin fallback`).
+  """ActorPool with smart task routing (`route_key` affinity, load-aware selection, and dynamic membership).
 
   Args:
     actors: Initial sequence of worker actor handles or string URI targets.
@@ -1318,19 +1336,265 @@ class RoutingActorPool(ActorPool):
       *,
       router: Optional[Union[Callable[..., ActorHandle], Any]] = None,
   ):
+    self._lock = threading.RLock()
     self._actors: List[ActorHandle] = []
+    self._next_actor_seq: int = 0
+    # route_key -> actor it was last placed on, preserving past trajectory
+    # assignments across pool membership changes for surviving workers.
+    self._placements: collections.OrderedDict[Any, ActorHandle] = (
+        collections.OrderedDict()
+    )
+    self._available_event: Optional[asyncio.Event] = None
+    self._available_event_loop: Optional[asyncio.AbstractEventLoop] = None
     for a in actors or []:
       self.add_actor(a)
     self._idx = 0
     self.router = router
 
-  def add_actor(self, actor: Union[str, ActorHandle]) -> None:
+  @property
+  def actors(self) -> List[ActorHandle]:
+    """Returns a thread-safe snapshot list of active ActorHandles in the pool."""
+    with self._lock:
+      return list(self._actors)
+
+  def __len__(self) -> int:
+    with self._lock:
+      return len(self._actors)
+
+  def __bool__(self) -> bool:
+    with self._lock:
+      return bool(self._actors)
+
+  def __contains__(self, actor_or_id: Any) -> bool:
+    with self._lock:
+      if isinstance(actor_or_id, str):
+        return any(
+            self._resolve_actor_id(a) == actor_or_id for a in self._actors
+        )
+      return actor_or_id in self._actors
+
+  def _resolve_actor_id(
+      self,
+      actor: ActorHandle,
+      explicit_worker_id: Optional[str] = None,
+  ) -> str:
+    """Resolves and caches a stable `worker_id` on `actor`."""
+    with self._lock:
+      wid = actor.worker_id if isinstance(actor.worker_id, str) else None
+      addr = (
+          actor.target_address
+          if isinstance(actor.target_address, str)
+          else None
+      )
+      resolved = explicit_worker_id or wid or addr
+      if not resolved:
+        resolved = f"actor_{self._next_actor_seq}"
+        self._next_actor_seq += 1
+      actor.worker_id = resolved
+      return resolved
+
+  def _evict_placements_for_actor(self, actor: ActorHandle) -> None:
+    """Removes cached `route_key` placements pointing to an evicted actor handle."""
+    with self._lock:
+      stale_keys = [k for k, v in self._placements.items() if v is actor]
+      for k in stale_keys:
+        del self._placements[k]
+
+  def get_placement(self, route_key: Any) -> Optional[ActorHandle]:
+    """Returns the previously assigned actor for `route_key` if still in the available pool."""
+    with self._lock:
+      placed = self._placements.get(route_key)
+      if placed is not None:
+        if placed in self._actors:
+          self._placements.move_to_end(route_key)
+          return placed
+        del self._placements[route_key]
+      return None
+
+  def record_placement(self, route_key: Any, actor: ActorHandle) -> None:
+    """Records `actor` as the assigned worker for `route_key`."""
+    with self._lock:
+      self._placements[route_key] = actor
+      self._placements.move_to_end(route_key)
+      if len(self._placements) > _MAX_ROUTE_PLACEMENTS:
+        self._placements.popitem(last=False)
+
+  def clear_placement(self, route_key: Any) -> None:
+    """Clears any cached worker placement for `route_key`."""
+    with self._lock:
+      self._placements.pop(route_key, None)
+
+  def _signal_availability(self) -> None:
+    """Notifies coroutines awaiting `wait_for_available_actor()` when pool membership changes."""
+    with self._lock:
+      event = self._available_event
+      loop = self._available_event_loop
+      has_actors = bool(self._actors)
+      if event is None:
+        return
+      action = event.set if has_actors else event.clear
+      if loop is not None and loop.is_running():
+        loop.call_soon_threadsafe(action)
+      else:
+        action()
+
+  def add_actor(
+      self,
+      actor: Union[str, ActorHandle],
+      *,
+      worker_id: Optional[str] = None,
+  ) -> None:
+    """Appends an actor to the pool (or use `upsert_actor` for idempotent rejoin)."""
+    self.upsert_actor(actor, worker_id=worker_id)
+
+  def upsert_actor(
+      self,
+      actor: Union[str, ActorHandle],
+      *,
+      worker_id: Optional[str] = None,
+  ) -> ActorHandle:
+    """Adds a new actor or replaces an existing actor with the same `worker_id`."""
     if isinstance(actor, str):
-      self._actors.append(ActorHandle.from_address(actor))
+      handle = ActorHandle.from_address(actor)
     elif isinstance(actor, ActorHandle):
-      self._actors.append(actor)
+      handle = actor
     else:
       raise TypeError(f"Expected str or ActorHandle, got {type(actor)}")
+
+    with self._lock:
+      resolved_id = self._resolve_actor_id(handle, explicit_worker_id=worker_id)
+      for idx, existing in enumerate(self._actors):
+        if existing is handle or self._resolve_actor_id(existing) == resolved_id:
+          if existing is not handle:
+            self._evict_placements_for_actor(existing)
+          self._actors[idx] = handle
+          self._signal_availability()
+          return handle
+
+      self._actors.append(handle)
+      self._signal_availability()
+      return handle
+
+  def remove_actor(
+      self, actor_or_id: Union[str, ActorHandle]
+  ) -> Optional[ActorHandle]:
+    """Removes an actor by handle, `worker_id`, or `target_address` from the pool."""
+    with self._lock:
+      for idx, existing in enumerate(self._actors):
+        existing_id = self._resolve_actor_id(existing)
+        existing_addr = existing.target_address
+        if existing is actor_or_id or (
+            isinstance(actor_or_id, str)
+            and actor_or_id in (existing_id, existing_addr)
+        ):
+          removed = self._actors.pop(idx)
+          self._evict_placements_for_actor(removed)
+          self._signal_availability()
+          return removed
+      return None
+
+  def get_actor(self, worker_id: str) -> Optional[ActorHandle]:
+    """Looks up an actor in the pool by `worker_id` or `target_address`."""
+    with self._lock:
+      for existing in self._actors:
+        if worker_id in (
+            self._resolve_actor_id(existing),
+            existing.target_address,
+        ):
+          return existing
+      return None
+
+  def hrw_score(
+      self, actor_or_id: Union[str, ActorHandle], route_key: Any
+  ) -> int:
+    """Returns the 64-bit Rendezvous (HRW) score for `(actor, route_key)`."""
+    actor_id = (
+        actor_or_id
+        if isinstance(actor_or_id, str)
+        else self._resolve_actor_id(actor_or_id)
+    )
+    return hrw_route_score(actor_id, route_key)
+
+  async def wait_for_available_actor(
+      self, timeout_s: Optional[float] = None
+  ) -> bool:
+    """Blocks until at least one healthy actor is in the pool, or returns False on timeout."""
+    loop = asyncio.get_running_loop()
+    with self._lock:
+      if self._actors:
+        return True
+      if self._available_event is None or self._available_event_loop is not loop:
+        self._available_event = asyncio.Event()
+        self._available_event_loop = loop
+      self._available_event.clear()
+      event = self._available_event
+
+    try:
+      await asyncio.wait_for(event.wait(), timeout=timeout_s)
+      return bool(self)
+    except asyncio.TimeoutError:
+      return bool(self)
+
+  def select_actor(
+      self,
+      *,
+      route_key: Optional[Any] = None,
+      load_fn: Optional[Callable[[ActorHandle], int]] = None,
+      max_load: Optional[int] = None,
+  ) -> Optional[ActorHandle]:
+    """Selects an eligible actor preserving past `route_key` assignments, capacity gating, and least-loaded / HRW routing.
+
+    Args:
+      route_key: Optional routing key for sticky trajectory affinity and HRW
+        tie-breaking.
+      load_fn: Optional callable returning the current in-flight count for an
+        actor. When provided, selects the eligible actor with minimum load.
+      max_load: Optional per-worker maximum in-flight cap
+        (`max_inflight_per_worker`). Actors with `load_fn(actor) >= max_load`
+        are excluded; returns `None` if all actors are at capacity.
+
+    Returns:
+      The selected `ActorHandle`, or `None` if no actor has available capacity.
+    """
+    with self._lock:
+      if not self._actors:
+        return None
+
+      if route_key is not None:
+        placed = self.get_placement(route_key)
+        if placed is not None:
+          if load_fn is None or max_load is None or load_fn(placed) < max_load:
+            return placed
+
+      if load_fn is None:
+        kwargs = {"route_key": route_key} if route_key is not None else {}
+        return self._get_next_actor(kwargs=kwargs)
+
+      eligible = (
+          [a for a in self._actors if load_fn(a) < max_load]
+          if max_load is not None
+          else list(self._actors)
+      )
+      if not eligible:
+        return None
+
+      if route_key is not None:
+        actor = min(
+            eligible,
+            key=lambda a: (load_fn(a), -self.hrw_score(a, route_key)),
+        )
+        self.record_placement(route_key, actor)
+        return actor
+
+      # Without a route_key, break load ties via round-robin offset.
+      start_idx = self._idx
+      self._idx += 1
+      n = len(eligible)
+      best_offset = min(
+          range(n),
+          key=lambda i: (load_fn(eligible[(start_idx + i) % n]), i),
+      )
+      return eligible[(start_idx + best_offset) % n]
 
   def _get_next_actor(
       self,
@@ -1338,15 +1602,15 @@ class RoutingActorPool(ActorPool):
       args: Sequence[Any] = (),
       kwargs: Optional[Dict[str, Any]] = None,
   ) -> ActorHandle:
-    """Selects target actor via custom router, route_key affinity, or round-robin.
+    """Selects target actor via custom router, sticky route_key affinity, or round-robin.
 
     Args:
       method_name: Target remote method being invoked.
       args: Positional arguments passed to the method call.
       kwargs: Keyword arguments passed to the method call. If this dictionary
-        contains `route_key`, process-stable hash routing
-        (`stable_route_hash(route_key) % N`) is used for sticky endpoint
-        affinity (popped prior to remote dispatch).
+        contains `route_key`, past placements on available actors are preserved
+        and new keys are placed via Rendezvous (HRW) hashing (or explicit modulo
+        indexing when `route_key` is a non-negative `int`).
 
     Returns:
       The selected `ActorHandle` target worker.
@@ -1354,44 +1618,52 @@ class RoutingActorPool(ActorPool):
     Raises:
       RuntimeError: If the pool contains no registered ActorHandles.
     """
-
-    if not self._actors:
-
-      raise RuntimeError(
-          "RoutingActorPool contains no registered ActorHandles."
-      )
-
-    kwargs = kwargs or {}
-    if self.router is not None:
-      if (
-          method_name
-          and hasattr(self.router, method_name)
-          and callable(getattr(self.router, method_name))
-      ):
-        return getattr(self.router, method_name)(self._actors, args, kwargs)
-      elif callable(self.router):
-        return self.router(self._actors, method_name, args, kwargs)  # pyrefly: ignore[bad-return]
-      else:
-        raise TypeError(
-            f"Router object {type(self.router)} must provide a method matching "
-            f"'{method_name}' or be callable."
+    with self._lock:
+      if not self._actors:
+        raise RuntimeError(
+            "RoutingActorPool contains no registered ActorHandles."
         )
 
-    # Check for sticky routing key (e.g. route_key for KV-cache locality)
-    route_key = kwargs.get("route_key")
+      kwargs = kwargs or {}
+      if self.router is not None:
+        if (
+            method_name
+            and hasattr(self.router, method_name)
+            and callable(getattr(self.router, method_name))
+        ):
+          return getattr(self.router, method_name)(self._actors, args, kwargs)
+        elif callable(self.router):
+          return self.router(self._actors, method_name, args, kwargs)  # pyrefly: ignore[bad-return]
+        else:
+          raise TypeError(
+              f"Router object {type(self.router)} must provide a method matching "
+              f"'{method_name}' or be callable."
+          )
 
-    if route_key is not None:
-      # Not builtin `hash()`: it salts `str` per process, so placement would
-      # not survive a restart.
-      # TODO(tunix-dev): `% len(self._actors)` remaps every key when pool
-      # membership changes, not just the keys on the affected actor. Switch to
-      # rendezvous (HRW) hashing before adding actor eviction.
-      return self._actors[stable_route_hash(route_key) % len(self._actors)]
+      # Check for sticky routing key (e.g. route_key for KV-cache locality)
+      route_key = kwargs.get("route_key")
 
-    # Default fallback: round-robin load balancing across all endpoints
-    actor = self._actors[self._idx % len(self._actors)]
-    self._idx += 1
-    return actor
+      if route_key is not None:
+        placed = self.get_placement(route_key)
+        if placed is not None:
+          return placed
+        if isinstance(route_key, int):
+          shard_idx = stable_route_hash(route_key)
+          actor = self._actors[shard_idx % len(self._actors)]
+        else:
+          # Rendezvous (Highest Random Weight) hashing: removing or adding an actor
+          # only remaps keys belonging to that actor, keeping all other keys pinned.
+          actor = max(
+              self._actors,
+              key=lambda a: self.hrw_score(a, route_key),
+          )
+        self.record_placement(route_key, actor)
+        return actor
+
+      # Default fallback: round-robin load balancing across all endpoints
+      actor = self._actors[self._idx % len(self._actors)]
+      self._idx += 1
+      return actor
 
   def submit(self, method_name: Optional[str] = None, *args, **kwargs) -> Any:
     actor = self._get_next_actor(method_name, args, kwargs)
@@ -1484,10 +1756,6 @@ class RoutingActorPool(ActorPool):
       await session.close()
 
 
-# Bound on remembered route_key placements per least-loaded session.
-_MAX_ROUTE_PLACEMENTS = 65536
-
-
 class PoolExecutionSession:
   """Dynamic, fault-isolated execution session for a RoutingActorPool.
 
@@ -1502,9 +1770,10 @@ class PoolExecutionSession:
   def __init__(self, pool: RoutingActorPool, *, least_loaded: bool = False):
     self._pool = pool
     self._least_loaded = least_loaded
-    # route_key -> actor it was last placed on, for least_loaded affinity.
+    # Shares the pool's route_key -> ActorHandle placement table so membership
+    # changes on the pool automatically invalidate only evicted actors.
     self._placements: collections.OrderedDict[Any, ActorHandle] = (
-        collections.OrderedDict()
+        pool._placements
     )
     self._response_queue: asyncio.Queue[Any] = asyncio.Queue()
     self._active_workers: set[ActorHandle] = set()
@@ -1560,26 +1829,24 @@ class PoolExecutionSession:
 
   def _least_loaded_actor(self, route_key: Any = None) -> ActorHandle:
     """Returns the pool actor with the fewest of this session's tasks in flight."""
-    actors = self._pool._actors
-    if not actors:
-      raise RuntimeError(
-          "RoutingActorPool contains no registered ActorHandles."
-      )
-    if route_key is not None:
-      placed = self._placements.get(route_key)
-      if placed is not None and placed in actors:
-        self._placements.move_to_end(route_key)
-        return placed
-    loads = [len(self._dispatched_tasks.get(a, ())) for a in actors]
-    min_load = min(loads)
-    candidates = [a for a, n in zip(actors, loads) if n == min_load]
-    actor = candidates[self._pool._idx % len(candidates)]
-    self._pool._idx += 1
-    if route_key is not None:
-      self._placements[route_key] = actor
-      if len(self._placements) > _MAX_ROUTE_PLACEMENTS:
-        self._placements.popitem(last=False)
-    return actor
+    with self._pool._lock:
+      actors = self._pool._actors
+      if not actors:
+        raise RuntimeError(
+            "RoutingActorPool contains no registered ActorHandles."
+        )
+      if route_key is not None:
+        placed = self._pool.get_placement(route_key)
+        if placed is not None:
+          return placed
+      loads = [len(self._dispatched_tasks.get(a, ())) for a in actors]
+      min_load = min(loads)
+      candidates = [a for a, n in zip(actors, loads) if n == min_load]
+      actor = candidates[self._pool._idx % len(candidates)]
+      self._pool._idx += 1
+      if route_key is not None:
+        self._pool.record_placement(route_key, actor)
+      return actor
 
   def _ensure_worker_polling(self, actor: ActorHandle) -> None:
     if actor in self._active_workers:
