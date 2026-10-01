@@ -19,7 +19,10 @@ import dataclasses
 import json
 import math
 import os
+import re
 import string
+
+_K8S_LABEL_VALUE_RE = re.compile(r"^([a-zA-Z0-9][-a-zA-Z0-9_.]*)?[a-zA-Z0-9]$")
 
 # Exit code a worker container uses to say "I failed before registering with
 # the orchestrator, recreating me is safe". Anything else after registration is
@@ -453,6 +456,13 @@ def main() -> None:
   if preemptible:
     labels.append('    scheduling.x-k8s.io/preemptible: "true"\n')
   if args.gang_id:
+    if len(args.gang_id) > 63 or not _K8S_LABEL_VALUE_RE.match(args.gang_id):
+      raise ValueError(
+          f"Invalid gang_id '{args.gang_id}': must be a valid Kubernetes label"
+          " value (63 characters or less, consisting of alphanumeric"
+          " characters, '-', '_', or '.', and must start and end with an"
+          " alphanumeric character)."
+      )
     labels.append(f'    scheduling.x-k8s.io/gang-id: "{args.gang_id}"\n')
   queue_label = "  labels:\n" + "".join(labels) if labels else ""
 

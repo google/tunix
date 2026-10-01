@@ -469,6 +469,25 @@ class YamlGeneratorTest(parameterized.TestCase):
           },
       )
 
+  @parameterized.named_parameters(
+      ("contains_at", "user@example.com"),
+      ("starts_with_hyphen", "-invalid"),
+      ("ends_with_hyphen", "invalid-"),
+      ("too_long", "a" * 64),
+  )
+  def test_invalid_gang_id_raises(self, invalid_gang_id):
+    template_file = _get_template_path("jobset.pathways.yaml")
+    argv = [
+        "yaml_generator.py",
+        template_file,
+        "--jobset_name=test-invalid-gang-id",
+        "--tpu_slice=tpu7x:4x4x8",
+        f"--gang_id={invalid_gang_id}",
+    ]
+    with mock.patch.object(sys, "argv", argv):
+      with self.assertRaisesRegex(ValueError, "Invalid gang_id"):
+        yaml_generator.main()
+
 
 _FAIL_FAST_TEMPLATES = (
     ("tpu", "jobset.tpu.yaml", "tpuv5:2x2x1"),

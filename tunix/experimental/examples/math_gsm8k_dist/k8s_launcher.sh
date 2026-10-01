@@ -654,6 +654,14 @@ while [[ $# -gt 0 ]]; do
       KUEUE_QUEUE_NAME="${1#*=}"
       shift
       ;;
+    --gang-id|--gang_id)
+      export GANG_ID="$2"
+      shift 2
+      ;;
+    --gang-id=*|--gang_id=*)
+      export GANG_ID="${1#*=}"
+      shift
+      ;;
     --dry-run|--render)
       DRY_RUN=true
       shift
@@ -672,6 +680,7 @@ while [[ $# -gt 0 ]]; do
       echo "  --command <cmd>          Command to run (start, stop, orchestrator, trainer, rollout)"
       echo "  --namespace <ns>         Kubernetes namespace (default: default)"
       echo "  --queue <name>           Kueue local queue name (optional)"
+      echo "  --gang-id <id>           Label JobSets with scheduling.x-k8s.io/gang-id=<id> (default: JOB_PREFIX)"
       echo "  --image <image>          Container image to use"
       echo "  --dry-run, --render      Print generated YAMLs without applying"
       echo "  --scratch, --gcs-scratch GCS scratch location"
