@@ -182,43 +182,58 @@ class RLVllmSampler:
     if self._is_paused:
       return
     self._is_paused = True
-    self._unpaused_event.clear()
-    use_pause_gen = mode is not None or self._partial_rollout
-    if self._engine:
-      pause_gen = getattr(self._engine, "pause_generation", None)
-      if use_pause_gen and inspect.iscoroutinefunction(pause_gen):
-        effective_mode = mode or "keep"
-        logger.info(
-            "Pausing RLVllmSampler generation (mode=%s, clear_cache=%s)...",
-            effective_mode,
-            clear_cache,
-        )
-        self._paused_with_generation = True
-        await pause_gen(mode=effective_mode, clear_cache=clear_cache)
-      elif hasattr(self._engine, "pause_background_loop"):
+    if mode is not None or self._partial_rollout:
+      self._unpaused_event.clear()
+      if self._engine:
+        pause_gen = getattr(self._engine, "pause_generation", None)
+        if inspect.iscoroutinefunction(pause_gen):
+          effective_mode = mode or "keep"
+          logger.info(
+              "Pausing RLVllmSampler generation (mode=%s, clear_cache=%s)...",
+              effective_mode,
+              clear_cache,
+          )
+          self._paused_with_generation = True
+          await pause_gen(mode=effective_mode, clear_cache=clear_cache)
+        elif hasattr(self._engine, "pause_background_loop"):
+          logger.info(
+              "Pausing RLVllmSampler inference intake for weight sync..."
+          )
+          self._paused_with_generation = False
+          await self._engine.pause_background_loop()
+    else:
+      # Note: vLLM's pause_background_loop stops the scheduler from taking new requests from the queue.
+      # Ongoing requests in the batch will be completed or drained depending on internal vLLM state.
+      if self._engine and hasattr(self._engine, "pause_background_loop"):
         logger.info("Pausing RLVllmSampler inference intake for weight sync...")
-        self._paused_with_generation = False
         await self._engine.pause_background_loop()
     await asyncio.sleep(0.01)
 
   async def resume(self, **kwargs: Any) -> None:
     """Resumes inference processing after weight sync completion."""
     del kwargs
-    if not self._is_paused:
+    if self._paused_with_generation or self._partial_rollout:
+      if not self._is_paused:
+        self._unpaused_event.set()
+        return
+      self._paused_with_generation = False
+      if self._engine:
+        resume_gen = getattr(self._engine, "resume_generation", None)
+        if inspect.iscoroutinefunction(resume_gen):
+          logger.info("Resuming RLVllmSampler generation...")
+          await resume_gen()
+        elif hasattr(self._engine, "resume_background_loop"):
+          logger.info("Resuming RLVllmSampler inference serving...")
+          await self._engine.resume_background_loop()
+      self._is_paused = False
       self._unpaused_event.set()
-      return
-    use_resume_gen = self._paused_with_generation or self._partial_rollout
-    self._paused_with_generation = False
-    if self._engine:
-      resume_gen = getattr(self._engine, "resume_generation", None)
-      if use_resume_gen and inspect.iscoroutinefunction(resume_gen):
-        logger.info("Resuming RLVllmSampler generation...")
-        await resume_gen()
-      elif hasattr(self._engine, "resume_background_loop"):
+    else:
+      if not self._is_paused:
+        return
+      if self._engine and hasattr(self._engine, "resume_background_loop"):
         logger.info("Resuming RLVllmSampler inference serving...")
         await self._engine.resume_background_loop()
-    self._is_paused = False
-    self._unpaused_event.set()
+      self._is_paused = False
 
   async def get_mesh(self, **kwargs: Any) -> Any | None:
     """Returns the JAX device mesh."""
@@ -418,14 +433,6 @@ class RLVllmSampler:
     if not self._is_running or self._engine is None:
       await self.start()
 
-    turn_start_version = int(self._policy_version)
-    enable_prefix_caching = bool(self.engine_args.enable_prefix_caching)
-    cache_salt = (
-        f"policy_v{turn_start_version}"
-        if (self._partial_rollout and enable_prefix_caching)
-        else None
-    )
-
     raw_input_mode = False
     if isinstance(sampling_requests, (str, list)) and (
         isinstance(sampling_requests, str)
@@ -454,44 +461,78 @@ class RLVllmSampler:
     else:
       req_list = list(sampling_requests)
 
-    pending_tasks = []
-    for idx, req in enumerate(req_list):
-      vllm_params = self._build_vllm_params(req, kwargs)
-      req_id = _get_val(req, "request_id") or f"req_{time.time_ns()}_{idx}"
-      prompt_val = _get_val(req, "prompt")
-      if generate_utils.is_token_id_sequence(prompt_val):
-        expected_prompt_ids = (
-            np.asarray(prompt_val, dtype=np.int32).reshape(-1).tolist()
-        )
-        engine_prompt: Any = {"prompt_token_ids": expected_prompt_ids}
-        if cache_salt is not None:
-          engine_prompt["cache_salt"] = cache_salt
-      else:
-        expected_prompt_ids = None
-        prompt_str = (
-            prompt_val if isinstance(prompt_val, str) else str(prompt_val)
-        )
-        if cache_salt is not None:
-          engine_prompt = {"prompt": prompt_str, "cache_salt": cache_salt}
+    if self._partial_rollout:
+      turn_start_version = int(self._policy_version)
+      enable_prefix_caching = bool(self.engine_args.enable_prefix_caching)
+      cache_salt = (
+          f"policy_v{turn_start_version}" if enable_prefix_caching else None
+      )
+      pending_tasks = []
+      for idx, req in enumerate(req_list):
+        vllm_params = self._build_vllm_params(req, kwargs)
+        req_id = _get_val(req, "request_id") or f"req_{time.time_ns()}_{idx}"
+        prompt_val = _get_val(req, "prompt")
+        if generate_utils.is_token_id_sequence(prompt_val):
+          expected_prompt_ids = (
+              np.asarray(prompt_val, dtype=np.int32).reshape(-1).tolist()
+          )
+          engine_prompt: Any = {"prompt_token_ids": expected_prompt_ids}
+          if cache_salt is not None:
+            engine_prompt["cache_salt"] = cache_salt
         else:
-          engine_prompt = prompt_str
+          expected_prompt_ids = None
+          prompt_str = (
+              prompt_val if isinstance(prompt_val, str) else str(prompt_val)
+          )
+          if cache_salt is not None:
+            engine_prompt = {"prompt": prompt_str, "cache_salt": cache_salt}
+          else:
+            engine_prompt = prompt_str
 
-      task_gen = self._engine.generate(
-          engine_prompt, vllm_params, request_id=req_id
-      )
-      pending_tasks.append(
-          (req_id, task_gen, expected_prompt_ids, turn_start_version)
-      )
-
-    results = await asyncio.gather(*[
-        self._process_request_output(
-            req_id,
-            task_gen,
-            expected_prompt_token_ids=expected_ids,
-            policy_version=ver,
+        task_gen = self._engine.generate(
+            engine_prompt, vllm_params, request_id=req_id
         )
-        for req_id, task_gen, expected_ids, ver in pending_tasks
-    ])
+        pending_tasks.append(
+            (req_id, task_gen, expected_prompt_ids, turn_start_version)
+        )
+
+      results = await asyncio.gather(*[
+          self._process_request_output(
+              req_id,
+              task_gen,
+              expected_prompt_token_ids=expected_ids,
+              policy_version=ver,
+          )
+          for req_id, task_gen, expected_ids, ver in pending_tasks
+      ])
+    else:
+      pending_tasks = []
+      for idx, req in enumerate(req_list):
+        vllm_params = self._build_vllm_params(req, kwargs)
+        req_id = _get_val(req, "request_id") or f"req_{time.time_ns()}_{idx}"
+        prompt_val = _get_val(req, "prompt")
+        if generate_utils.is_token_id_sequence(prompt_val):
+          expected_prompt_ids = (
+              np.asarray(prompt_val, dtype=np.int32).reshape(-1).tolist()
+          )
+          engine_prompt: Any = {"prompt_token_ids": expected_prompt_ids}
+        else:
+          expected_prompt_ids = None
+          engine_prompt = (
+              prompt_val if isinstance(prompt_val, str) else str(prompt_val)
+          )
+
+        task_gen = self._engine.generate(
+            engine_prompt, vllm_params, request_id=req_id
+        )
+        pending_tasks.append((req_id, task_gen, expected_prompt_ids))
+
+      results = await asyncio.gather(*[
+          self._process_request_output(
+              req_id, task_gen, expected_prompt_token_ids=expected_ids
+          )
+          for req_id, task_gen, expected_ids in pending_tasks
+      ])
 
     if raw_input_mode:
       return [r.text for r in results]
@@ -649,19 +690,13 @@ class RLVllmSampler:
     in-flight requests are paused in-place via `pause(mode="keep",
     clear_cache=False)` without resetting the prefix cache.
     """
-    del kwargs
-    if sync_request is not None and sync_request.policy_version is not None:
-      self._policy_version = sync_request.policy_version
-    keep_active_kv = bool(
-        (preserve_active_kv_cache or self._partial_rollout)
-        and not free_kv_cache
+    self._policy_version = _get_val(
+        sync_request, "policy_version", self._policy_version
     )
     logger.info(
-        "Executing pre_weight_sync (policy_version=%d, free_kv_cache=%s,"
-        " preserve_active_kv_cache=%s)",
+        "Executing pre_weight_sync (policy_version=%d, free_kv_cache=%s)",
         self._policy_version,
         free_kv_cache,
-        keep_active_kv,
     )
 
     if sync_request is not None:
@@ -669,7 +704,7 @@ class RLVllmSampler:
       if rid:
         self._transfer_statuses[str(rid)] = "IN_PROGRESS"
 
-    if keep_active_kv:
+    if (preserve_active_kv_cache or self._partial_rollout) and not free_kv_cache:
       await self.pause(mode="keep", clear_cache=False)
     else:
       await self.pause()

@@ -478,25 +478,29 @@ class TrajectoryCollectorEngine:
     metadata["prompt_id"] = self.request.prompt_id
     metadata["group_index"] = self.request.group_index
     metadata["status"] = rl_traj.get("status", "")
-    turn_versions = rl_traj.get("turn_policy_versions")
-    if isinstance(turn_versions, (list, tuple)) and turn_versions:
-      effective_policy_version = min(int(v) for v in turn_versions)
-      metadata["turn_policy_versions"] = [int(v) for v in turn_versions]
-      rl_traj["policy_version"] = effective_policy_version
-      metadata["policy_version"] = effective_policy_version
-    elif self.partial_rollout:
-      if "policy_version" in rl_traj and rl_traj["policy_version"] is not None:
-        req_target_version = self.request.target_policy_version
-        if int(rl_traj["policy_version"]) != 0 or not req_target_version:
-          effective_policy_version = int(rl_traj["policy_version"])
-        else:
-          effective_policy_version = int(req_target_version)
+    if self.partial_rollout:
+      turn_versions = rl_traj.get("turn_policy_versions")
+      if isinstance(turn_versions, (list, tuple)) and turn_versions:
+        effective_policy_version = min(int(v) for v in turn_versions)
+        metadata["turn_policy_versions"] = [int(v) for v in turn_versions]
         rl_traj["policy_version"] = effective_policy_version
+        metadata["policy_version"] = effective_policy_version
       else:
-        effective_policy_version = int(
-            self.request.target_policy_version or 0
-        )
-      metadata["policy_version"] = effective_policy_version
+        if (
+            "policy_version" in rl_traj
+            and rl_traj["policy_version"] is not None
+        ):
+          req_target_version = self.request.target_policy_version
+          if int(rl_traj["policy_version"]) != 0 or not req_target_version:
+            effective_policy_version = int(rl_traj["policy_version"])
+          else:
+            effective_policy_version = int(req_target_version)
+          rl_traj["policy_version"] = effective_policy_version
+        else:
+          effective_policy_version = int(
+              self.request.target_policy_version or 0
+          )
+        metadata["policy_version"] = effective_policy_version
     else:
       policy_version = (
           self.request.target_policy_version

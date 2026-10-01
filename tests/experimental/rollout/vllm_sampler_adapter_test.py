@@ -490,6 +490,7 @@ class RoundUuidTest(absltest.TestCase):
         server_id="vllm_partial",
         sampler_instance=mock_sampler,
         free_kv_cache_during_weight_sync=False,
+        partial_rollout=True,
     )
     sync_req = base_sampler_lib.WeightSyncRequest(
         policy_version=3, extra_config={"req_id": "r3", "uuid": 3}
