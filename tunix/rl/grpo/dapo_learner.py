@@ -42,7 +42,7 @@ class DAPOConfig(grpo_learner_lib.GRPOConfig):
    num_iterations: The number of iterations per batch (𝜇 in GRPO algo 1).
    beta: The coefficient for the KL divergence penalty (𝛽) in the GRPO loss
      function. This term prevents policy updates from deviating too far from the
-     reference model. A value of 0.0 means no KL penalty is applied. Always None
+     reference model. A value of 0.0 means no KL penalty is applied. Always 0.0
      for DAPO.
    epsilon: Epsilon value for clipping (𝜀 in GRPO loss in paper). Similar to
      PPO, it ensures stable updates.
@@ -60,7 +60,7 @@ class DAPOConfig(grpo_learner_lib.GRPOConfig):
   reward_manager: str = "sequence-level"
   num_generations: int = 2
   num_iterations: int = 1
-  beta: None = None  # No KL term.
+  beta: float = 0.0  # No KL term.
   epsilon: float = 0.2
   epsilon_high: float = 0.28  # Clip higher
   dynamic_sampling: bool = True  # TODO(sizhi): Add dynamic sampling.
@@ -74,9 +74,10 @@ class DAPOConfig(grpo_learner_lib.GRPOConfig):
   )
 
   def __post_init__(self):
-    if self.beta is not None:
+    if self.beta != 0.0:
       raise ValueError(
-          "DAPO does not support KL penalty, so beta must be None."
+          "DAPO does not use a KL penalty, so beta must be 0.0. Received:"
+          f" {self.beta}"
       )
     if self.epsilon_high < self.epsilon:
       raise ValueError("epsilon_high must be greater than or equal to epsilon.")
@@ -101,6 +102,8 @@ class DAPOConfig(grpo_learner_lib.GRPOConfig):
 
       if buffer["max_response_length"] <= 0:
         raise ValueError("max_response_length must be positive.")
+
+    super().__post_init__()
 
 
 def reward_shaping(
