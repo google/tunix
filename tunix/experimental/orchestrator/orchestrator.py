@@ -30,6 +30,7 @@ import uuid
 from absl import logging
 from tunix.experimental.common import datatypes
 from tunix.experimental.orchestrator import distributed_rl_engine
+from tunix.experimental.orchestrator import fault_tolerance
 from tunix.experimental.orchestrator import health_monitor
 from tunix.experimental.orchestrator import lifecycle
 from tunix.experimental.orchestrator import rl_program
@@ -56,6 +57,9 @@ class ClusterOrchestrator:
       trajectory_store_config: Mapping[str, Any] | None = None,
       run_id: str | None = None,
       disable_weight_sync_timeouts: bool | None = None,
+      fault_tolerance_config: (
+          fault_tolerance.RolloutFaultToleranceConfig | None
+      ) = None,
   ):
     """Initializes ClusterOrchestrator.
 
@@ -75,6 +79,7 @@ class ClusterOrchestrator:
         automatically if omitted.
       disable_weight_sync_timeouts: When True, sets all weight-sync phase
         deadlines to infinity.
+      fault_tolerance_config: Optional rollout fault-tolerance configuration.
     """
     self.config = config
     self.registry = registry or worker_registry.WorkerRegistry()
@@ -90,6 +95,9 @@ class ClusterOrchestrator:
     ] = {}
     self._remote_worker_infos: dict[str, datatypes.WorkerInfo] = {}
     self.engine: distributed_rl_engine.DistributedRLEngine | None = None
+    self._fault_tolerance_config = fault_tolerance_config
+    self._bring_up_complete = False
+    self._bring_up_dummy_data: Any = None
     mode = getattr(weight_sync_mode, "value", weight_sync_mode)
     self._weight_sync_mode = str(mode).lower() if mode is not None else None
     self._disable_weight_sync_timeouts = disable_weight_sync_timeouts
@@ -204,15 +212,31 @@ class ClusterOrchestrator:
           "register_worker_handle expects a remote_execution.ActorHandle, got "
           f"{type(handle)}"
       )
-    if (
-        worker_id in self._remote_worker_infos
-        or worker_id in self.registry.worker_ids()
-    ):
-      raise ValueError(f"duplicate worker_id: {worker_id!r}")
     role_names = frozenset(
         role.value if isinstance(role, datatypes.Role) else role
         for role in roles
     )
+    is_post_bringup_rollout_rejoin = (
+        (self._bring_up_complete or self.engine is not None)
+        and datatypes.Role.ROLLOUT.value in role_names
+    )
+    if not is_post_bringup_rollout_rejoin and (
+        worker_id in self._remote_worker_infos
+        or worker_id in self.registry.worker_ids()
+    ):
+      raise ValueError(f"duplicate worker_id: {worker_id!r}")
+
+    if is_post_bringup_rollout_rejoin and worker_id in self._remote_worker_infos:
+      old_info = self._remote_worker_infos.pop(worker_id)
+      old_handle = self._remote_worker_handles_by_id.pop(worker_id, None)
+      for role in old_info.roles:
+        handles = self._remote_worker_handles.get(role)
+        if handles is not None:
+          self._remote_worker_handles[role] = [
+              h for h in handles if h is not old_handle
+          ]
+
+    handle.worker_id = worker_id
     info = datatypes.WorkerInfo(
         worker_id=worker_id,
         roles=role_names,
@@ -227,6 +251,20 @@ class ClusterOrchestrator:
         worker_id,
         sorted(role_names),
     )
+    if is_post_bringup_rollout_rejoin:
+      if self._bring_up_complete:
+        self._bring_up_single_remote_worker(
+            worker_id, handle, info, self._bring_up_dummy_data
+        )
+      if self.engine is not None:
+        shim = None
+        if self._weight_sync_mode not in (None, "none"):
+          from tunix.experimental.weight_sync import weight_sync_coordinator
+
+          shim = weight_sync_coordinator.RemoteWorkerShim(handle, info)
+        self.engine.fault_tolerance_manager.on_worker_rejoined(
+            worker_id, handle, shim=shim
+        )
     return info
 
   def unregister_worker(self, worker_id: str) -> None:
@@ -312,6 +350,7 @@ class ClusterOrchestrator:
         "Bringing up %d registered worker(s)...",
         len(self.worker_infos()),
     )
+    self._bring_up_dummy_data = dummy_data
     if self.trajectory_store_config is not None:
       for worker in self._get_role_members(datatypes.Role.ROLLOUT):
         if hasattr(worker, "with_trajectory_store_config"):
@@ -319,6 +358,7 @@ class ClusterOrchestrator:
     self.lifecycle_driver.bring_up(dummy_data)
     self._bring_up_remote_workers(dummy_data)
     self.engine = self._create_engine()
+    self._bring_up_complete = True
     logging.info("All workers brought up successfully.")
 
   def shutdown(self) -> None:
@@ -361,6 +401,30 @@ class ClusterOrchestrator:
         for worker in self._get_role_members(role)
     )
     return handles
+
+  def _bring_up_single_remote_worker(
+      self,
+      worker_id: str,
+      handle: remote_execution.ActorHandle,
+      info: datatypes.WorkerInfo,
+      dummy_data: Any = None,
+  ) -> None:
+    """Runs lifecycle initialization hooks on a single rejoined remote worker."""
+    if (
+        self.trajectory_store_config is not None
+        and datatypes.Role.ROLLOUT.value in info.roles
+    ):
+      logging.info(
+          "Configuring TrajectoryStore on rejoined remote rollout worker %s.",
+          worker_id,
+      )
+      handle.submit("with_trajectory_store_config", self.trajectory_store_config)
+    logging.info("Initializing rejoined remote worker %s.", worker_id)
+    handle.submit("initialize")
+    logging.info("Compiling rejoined remote worker %s.", worker_id)
+    handle.submit("compile", dummy_data)
+    logging.info("Starting rejoined remote worker %s.", worker_id)
+    handle.submit("start")
 
   def _bring_up_remote_workers(self, dummy_data: Any = None) -> None:
     """Runs lifecycle hooks on remote worker handles registered directly."""
@@ -455,6 +519,9 @@ class ClusterOrchestrator:
         trainer_workers=trainer_workers,
         inference_workers=inference_workers,
         weight_sync_coordinator=coordinator,
+        fault_tolerance_config=self._fault_tolerance_config,
+        registry=self.registry,
+        monitor=self.monitor,
     )
 
   def run(

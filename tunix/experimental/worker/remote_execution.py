@@ -1787,20 +1787,17 @@ class PoolExecutionSession:
     if self._in_flight == 0:
       self._response_queue.put_nowait(self._sentinel)
 
-  async def submit(
+  async def submit_to_actor(
       self,
+      actor: ActorHandle,
       request_id: str,
       method_name: Optional[str] = None,
       *args,
       **kwargs,
   ) -> str:
-    """Dispatches a task to a worker in the pool and tracks its completion."""
+    """Dispatches a task directly to a caller-selected `actor` and tracks its completion."""
     if self._closed:
       raise RuntimeError("PoolExecutionSession is closed.")
-    if self._least_loaded and self._pool.router is None:
-      actor = self._least_loaded_actor(kwargs.get("route_key"))
-    else:
-      actor = self._pool._get_next_actor(method_name, args, kwargs)
     kwargs.pop("route_key", None)  # remove route_key from worker method args
 
     # Increment in_flight and register request_id BEFORE awaiting dispatch_task
@@ -1827,6 +1824,49 @@ class PoolExecutionSession:
         self._notify_if_zero_flight()
       raise
 
+  async def submit(
+      self,
+      request_id: str,
+      method_name: Optional[str] = None,
+      *args,
+      **kwargs,
+  ) -> str:
+    """Dispatches a task to a worker in the pool and tracks its completion."""
+    if self._closed:
+      raise RuntimeError("PoolExecutionSession is closed.")
+    if self._least_loaded and self._pool.router is None:
+      actor = self._least_loaded_actor(kwargs.get("route_key"))
+    else:
+      actor = self._pool._get_next_actor(method_name, args, kwargs)
+    return await self.submit_to_actor(
+        actor, request_id, method_name, *args, **kwargs
+    )
+
+  def evict_actor_tasks(self, actor: ActorHandle) -> set[str]:
+    """Clears any pending dispatched tasks for `actor` and adjusts `_in_flight`."""
+    dispatched_set = self._dispatched_tasks.pop(actor, set())
+    if dispatched_set:
+      cleared = set(dispatched_set)
+      dispatched_set.clear()
+      self._in_flight = max(0, self._in_flight - len(cleared))
+      self._notify_if_zero_flight()
+      return cleared
+    return set()
+
+  def ensure_actor_polling(
+      self, actor: ActorHandle, request_ids: Sequence[str]
+  ) -> None:
+    """Ensures `actor` has `request_ids` registered and its background poll loop is active."""
+    if self._closed or not request_ids:
+      return
+    dispatched_set = self._dispatched_tasks.setdefault(actor, set())
+    for req_id in request_ids:
+      if req_id not in dispatched_set:
+        dispatched_set.add(req_id)
+        self._in_flight += 1
+    if dispatched_set:
+      self._ensure_worker_polling(actor)
+
   def _least_loaded_actor(self, route_key: Any = None) -> ActorHandle:
     """Returns the pool actor with the fewest of this session's tasks in flight."""
     with self._pool._lock:
@@ -1848,7 +1888,24 @@ class PoolExecutionSession:
         self._pool.record_placement(route_key, actor)
       return actor
 
+  def _sync_event_loop(self) -> None:
+    try:
+      current_loop = asyncio.get_running_loop()
+    except RuntimeError:
+      return
+    for t in list(self._poll_tasks):
+      if t.done() or t.get_loop() is not current_loop:
+        self._poll_tasks.discard(t)
+    if getattr(self, "_loop", None) is not current_loop:
+      self._active_workers.clear()
+      self._loop = current_loop
+      new_q: asyncio.Queue[Any] = asyncio.Queue()
+      while not self._response_queue.empty():
+        new_q.put_nowait(self._response_queue.get_nowait())
+      self._response_queue = new_q
+
   def _ensure_worker_polling(self, actor: ActorHandle) -> None:
+    self._sync_event_loop()
     if actor in self._active_workers:
       return
     self._active_workers.add(actor)
@@ -1864,16 +1921,85 @@ class PoolExecutionSession:
           break
         try:
           response = await actor.poll_responses(timeout_s=LONG_POLL_TIMEOUT_S)
-          if isinstance(response, ExecutionResponse):
+          if response is None or response == []:
+            await asyncio.sleep(0.005)
+            continue
+          if isinstance(response, ExecutionResponse) or hasattr(
+              response, "unwrap"
+          ):
+            res: Any = None
             try:
               res = response.unwrap()
-              self._response_queue.put_nowait((res, None))
+              self._response_queue.put_nowait((actor, res, None))
             except Exception as exc:  # pylint: disable=broad-exception-caught
-              self._response_queue.put_nowait((None, exc))
-            if response.request_id and response.request_id in dispatched_set:
-              dispatched_set.remove(response.request_id)
+              self._response_queue.put_nowait((actor, None, exc))
+            req_id = getattr(response, "request_id", None)
+            if isinstance(req_id, str) and req_id in dispatched_set:
+              dispatched_set.remove(req_id)
               self._in_flight = max(0, self._in_flight - 1)
+            elif isinstance(res, list) and not req_id:
+              if res and dispatched_set:
+                removed = 0
+                for item in res:
+                  item_req_id = (
+                      item.request_id
+                      if hasattr(item, "request_id")
+                      and isinstance(item.request_id, str)
+                      else None
+                  )
+                  if item_req_id and item_req_id in dispatched_set:
+                    dispatched_set.remove(item_req_id)
+                    removed += 1
+                if removed == 0:
+                  pop_count = min(len(dispatched_set), len(res))
+                  for _ in range(pop_count):
+                    dispatched_set.pop()
+                  removed = pop_count
+                self._in_flight = max(0, self._in_flight - removed)
             elif dispatched_set:
+              dispatched_set.pop()
+              self._in_flight = max(0, self._in_flight - 1)
+            self._notify_if_zero_flight()
+          elif isinstance(response, list):
+            unwrapped_items: list[Any] = []
+            pop_count = 0
+            for elem in response:
+              if isinstance(elem, ExecutionResponse) or hasattr(elem, "unwrap"):
+                try:
+                  val = elem.unwrap()
+                  if isinstance(val, list):
+                    unwrapped_items.extend(val)
+                    pop_count += len(val)
+                  elif val is not None:
+                    unwrapped_items.append(val)
+                    pop_count += 1
+                except Exception as exc:  # pylint: disable=broad-exception-caught
+                  self._response_queue.put_nowait((actor, None, exc))
+                  pop_count += 1
+              else:
+                unwrapped_items.append(elem)
+                pop_count += 1
+            if unwrapped_items:
+              self._response_queue.put_nowait((actor, unwrapped_items, None))
+            removed = 0
+            for item in unwrapped_items:
+              item_req_id = (
+                  item.request_id
+                  if hasattr(item, "request_id")
+                  and isinstance(item.request_id, str)
+                  else None
+              )
+              if item_req_id and item_req_id in dispatched_set:
+                dispatched_set.remove(item_req_id)
+                removed += 1
+            while removed < pop_count and dispatched_set:
+              dispatched_set.pop()
+              removed += 1
+            self._in_flight = max(0, self._in_flight - removed)
+            self._notify_if_zero_flight()
+          else:
+            self._response_queue.put_nowait((actor, response, None))
+            if dispatched_set:
               dispatched_set.pop()
               self._in_flight = max(0, self._in_flight - 1)
             self._notify_if_zero_flight()
@@ -1885,21 +2011,26 @@ class PoolExecutionSession:
           dispatched_set.clear()
           if failed_count > 0:
             for _ in range(failed_count):
-              self._response_queue.put_nowait((None, exc))
+              self._response_queue.put_nowait((actor, None, exc))
             self._in_flight = max(0, self._in_flight - failed_count)
             self._notify_if_zero_flight()
           break
     finally:
       self._active_workers.discard(actor)
 
-  async def poll_completed(
+  async def poll_completed_with_actors(
       self, timeout_s: float = LONG_POLL_TIMEOUT_S
-  ) -> List[Tuple[Any, Optional[Exception]]]:
-    """Waits up to `timeout_s` for the first completion, then drains ready items."""
+  ) -> List[Tuple[ActorHandle, Any, Optional[Exception]]]:
+    """Waits up to `timeout_s` for the first completion, then drains `(actor, result, exc)` items."""
     if self._closed:
       return []
 
-    batch: List[Tuple[Any, Optional[Exception]]] = []
+    self._sync_event_loop()
+    for actor, tasks in list(self._dispatched_tasks.items()):
+      if tasks:
+        self._ensure_worker_polling(actor)
+
+    batch: List[Tuple[ActorHandle, Any, Optional[Exception]]] = []
     # When idle (_in_flight == 0), yield briefly (<= 50ms) so concurrent dispatch
     # coroutines can run without stalling for the full 50s long-poll timeout.
     wait_s = (
@@ -1908,7 +2039,7 @@ class PoolExecutionSession:
         else timeout_s
     )
     try:
-      # Block until the first real (result, exc) completion arrives.
+      # Block until the first real (actor, result, exc) completion arrives.
       while not batch:
         item = await asyncio.wait_for(
             self._response_queue.get(), timeout=wait_s
@@ -1930,6 +2061,13 @@ class PoolExecutionSession:
         batch.append(item)
     return batch
 
+  async def poll_completed(
+      self, timeout_s: float = LONG_POLL_TIMEOUT_S
+  ) -> List[Tuple[Any, Optional[Exception]]]:
+    """Waits up to `timeout_s` for the first completion, then drains ready items."""
+    batch = await self.poll_completed_with_actors(timeout_s=timeout_s)
+    return [(res, exc) for _actor, res, exc in batch]
+
   async def as_completed(
       self,
   ) -> AsyncIterator[Tuple[Any, Optional[Exception]]]:
@@ -1940,7 +2078,7 @@ class PoolExecutionSession:
         if self._in_flight == 0 and self._response_queue.empty():
           break
         continue
-      result, exc = item
+      _actor, result, exc = item
       yield result, exc
 
   async def close(self) -> None:
