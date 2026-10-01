@@ -426,6 +426,7 @@ start_orchestrator() {
         $([[ "${EXACT_TOKEN_CONTINUITY}" == "false" || "${EXACT_TOKEN_CONTINUITY}" == "False" || "${EXACT_TOKEN_CONTINUITY}" == "0" ]] && echo --no-exact_token_continuity || echo --exact_token_continuity) \
         $([[ "${ASYNC_WEIGHT_SYNC}" == "true" || "${ASYNC_WEIGHT_SYNC}" == "True" || "${ASYNC_WEIGHT_SYNC}" == "1" ]] && echo --async_weight_sync || echo --no-async_weight_sync) \
         $([[ "${PIPELINE_TRAIN_MICROBATCHES}" == "true" || "${PIPELINE_TRAIN_MICROBATCHES}" == "True" || "${PIPELINE_TRAIN_MICROBATCHES}" == "1" ]] && echo --pipeline_train_microbatches || echo --no-pipeline_train_microbatches) \
+        $([[ "${PARTIAL_ROLLOUT}" == "true" || "${PARTIAL_ROLLOUT}" == "True" || "${PARTIAL_ROLLOUT}" == "1" ]] && echo --partial_rollout || echo --no-partial_rollout) \
         ${dataset_args} \
         ${shuffle_arg} \
         ${sandbox_arg} \

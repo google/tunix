@@ -1538,6 +1538,65 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_partial_rollout_gates_each_batch_on_the_committed_version(self):
+    async def _run():
+      dispatched = []
+
+      async def mock_dispatch(prompts, **kwargs):
+        dispatched.append(
+            (prompts[0]["metadata"]["batch_idx"], kwargs["policy_version"])
+        )
+        return ["rollout"]
+
+      self.mock_engine.dispatch_rollouts.side_effect = mock_dispatch
+
+      program = rl_program.StandardRLProgram(
+          dataset=[f"prompt_{i}" for i in range(10)],
+          algo=self.mock_algo,
+          reward_fns=[lambda *_: 1.0],
+          assembler=self.assembler,
+          batch_size=2,
+          max_staleness=1,
+          async_weight_sync=True,
+          partial_rollout=True,
+      )
+      program.engine = self.mock_engine
+      # Steps 0 and 1 trained: version 1 is on the rollouts, version 2 is
+      # transferring, and step 2's round is not due yet.
+      program.policy_version = 2
+      program._unsynced_steps = 1
+      program._step = 2
+
+      dispatch_task = asyncio.create_task(program.rollout_dispatch_stage())
+      await asyncio.sleep(0.05)
+      # Batch 2 only needs version 1, so the round in flight does not hold
+      # it. Batch 3 needs version 2.
+      self.assertEqual(dispatched, [(2, 1), (2, 1)])
+
+      # A trained step waiting for its round does not hold dispatch either.
+      program._round_due = True
+      program._release_window()
+      await asyncio.sleep(0.05)
+      self.assertEqual(dispatched, [(2, 1), (2, 1)])
+
+      program._unsynced_steps = 0
+      program._release_window()
+      await asyncio.sleep(0.05)
+      self.assertEqual(dispatched, [(2, 1), (2, 1), (3, 2), (3, 2)])
+
+      # Batch 4 is past the trainer cursor's window even on fresh weights.
+      program.policy_version = 3
+      program._release_window()
+      await asyncio.sleep(0.05)
+      self.assertEqual(len(dispatched), 4)
+
+      program._sync_error = RuntimeError("round failed")
+      program._release_window()
+      with self.assertRaisesRegex(RuntimeError, "round failed"):
+        await asyncio.wait_for(dispatch_task, timeout=1.0)
+
+    asyncio.run(_run())
+
   def test_no_dispatch_slips_into_a_round_queued_behind_the_last(self):
     async def _run():
       dispatched = []

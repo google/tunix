@@ -371,6 +371,7 @@ class StandardRLProgram(RLProgram):
       max_staleness: int = 0,
       sync_weights: bool = True,
       async_weight_sync: bool = False,
+      partial_rollout: bool = False,
       metrics_logging_options: MetricsLoggerOptions | None = None,
       trajectory_log_dir: str | None = None,
       trajectory_store: trajectory_store_lib.TrajectoryStore | None = None,
@@ -514,6 +515,10 @@ class StandardRLProgram(RLProgram):
     # committing in that gap must not reopen the window: anything dispatched
     # then is drained on the old weights before the next transfer.
     self._round_due = False
+    # Rollouts pause and resume in-flight requests across a sync instead of
+    # draining them, so dispatch need not wait out a round; each batch is
+    # gated only on the version the rollouts have committed.
+    self.partial_rollout = partial_rollout
     self._sync_error: BaseException | None = None
     self.metrics_logger: MetricsLogger = MetricsLogger(metrics_logging_options)
     # Trajectory logging is disabled on mlperf to prevent GCS write timeouts
@@ -628,6 +633,9 @@ class StandardRLProgram(RLProgram):
     # skip the loop and keep dispatching after a sync round failed.
     if self._sync_error is not None:
       raise self._sync_error
+    if self.partial_rollout:
+      await self._wait_for_partial_dispatch_window(batch_idx)
+      return
     # Nothing goes out while a background round is in flight. The rollouts
     # cannot start a request until the round commits anyway, and one that
     # lands before they close admission is drained on the old weights,
@@ -642,6 +650,29 @@ class StandardRLProgram(RLProgram):
         raise self._sync_error
       # Wait first, clear second. The reverse loses a release that lands
       # between the test above and the clear, and nothing would set it again.
+      await self._window_release.wait()
+      self._window_release.clear()
+
+  async def _wait_for_partial_dispatch_window(self, batch_idx: int) -> None:
+    """Per-batch dispatch gate for partial rollout.
+
+    A paused request resumes on the new weights rather than draining on the
+    old ones, so a round in flight is no reason to hold dispatch. Batch
+    `batch_idx` goes out once the rollouts have committed version
+    `batch_idx - max_staleness`: its trajectories are then stamped no older
+    than that, which the staleness filter keeps until step `batch_idx`
+    consumes them.
+
+    Args:
+      batch_idx: The prompt batch the dispatcher is about to emit into.
+    """
+    while (
+        batch_idx > self._next_batch + self.max_staleness
+        or batch_idx - self.max_staleness
+        > self.policy_version - self._unsynced_steps
+    ):
+      if self._sync_error is not None:
+        raise self._sync_error
       await self._window_release.wait()
       self._window_release.clear()
 
