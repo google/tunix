@@ -1538,6 +1538,71 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_no_dispatch_slips_into_a_round_queued_behind_the_last(self):
+    async def _run():
+      dispatched = []
+      rounds = {1: asyncio.Event(), 2: asyncio.Event()}
+
+      async def mock_dispatch(prompts, **kwargs):
+        dispatched.append(
+            (prompts[0]["metadata"]["batch_idx"], kwargs["policy_version"])
+        )
+        return ["rollout"]
+
+      async def mock_sync_weights(
+          *args, policy_version=None, source_staged=None, **kwargs
+      ):
+        del args, kwargs
+        source_staged.set()
+        await rounds[policy_version].wait()
+        return policy_version
+
+      self.mock_engine.dispatch_rollouts.side_effect = mock_dispatch
+      self.mock_engine.sync_weights = mock.AsyncMock(
+          side_effect=mock_sync_weights
+      )
+      program = rl_program.StandardRLProgram(
+          dataset=[f"prompt_{i}" for i in range(8)],
+          algo=self.mock_algo,
+          reward_fns=[lambda *_: 1.0],
+          assembler=self.assembler,
+          batch_size=2,
+          max_staleness=1,
+          sync_weights=True,
+          async_weight_sync=True,
+      )
+      program.engine = self.mock_engine
+
+      dispatch_task = asyncio.create_task(program.rollout_dispatch_stage())
+      await asyncio.sleep(0.05)
+      self.assertEqual(dispatched, [(0, 0), (0, 0), (1, 0), (1, 0)])
+
+      # Step 0 starts round 1; step 1 trains before round 1 commits, so
+      # round 2 is already waiting on it when it lands.
+      await program._start_background_sync()
+      program._step = 1
+      program._release_window()
+      round_2 = asyncio.create_task(program._start_background_sync())
+      await asyncio.sleep(0.05)
+      rounds[1].set()
+      await round_2
+      await asyncio.sleep(0.05)
+      # The dispatcher woke on round 1's commit, but round 2 shut the window
+      # while it was fetching the prompt.
+      self.assertEqual(dispatched, [(0, 0), (0, 0), (1, 0), (1, 0)])
+
+      program._step = 2
+      rounds[2].set()
+      await asyncio.sleep(0.05)
+      self.assertEqual(
+          dispatched[4:], [(2, 2), (2, 2), (3, 2), (3, 2)]
+      )
+
+      dispatch_task.cancel()
+      await asyncio.gather(dispatch_task, return_exceptions=True)
+
+    asyncio.run(_run())
+
   def test_failed_sync_stops_dispatch_inside_the_window(self):
     async def _run():
       program = self._window_program()

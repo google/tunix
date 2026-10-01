@@ -730,6 +730,10 @@ class StandardRLProgram(RLProgram):
         prompt_item = await asyncio.to_thread(_next_or_exhausted, dataset_iter)
         if prompt_item is _EXHAUSTED:
           break
+        # Again: the fetch yielded, and the train loop may have started a
+        # round meanwhile. Nothing below awaits before the dispatch, so the
+        # window cannot shut between this check and the request going out.
+        await self._wait_for_dispatch_window(coordinates["batch_idx"])
         prompt_idx += 1
         last_coordinates = coordinates
         if isinstance(prompt_item, dict):
