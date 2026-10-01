@@ -185,7 +185,8 @@ export LIBTPU_INIT_ARGS=${LIBTPU_INIT_ARGS:-}
 export VLLM_ENABLE_V1_MULTIPROCESSING=${VLLM_ENABLE_V1_MULTIPROCESSING:-}
 export ROLLOUT_ENV_FLAGS=${ROLLOUT_ENV_FLAGS:-}
 
-JOB_PREFIX=${JOB_PREFIX:-$USER}
+export JOB_PREFIX=${JOB_PREFIX:-$USER}
+export GANG_ID=${GANG_ID:-$JOB_PREFIX}
 export ORCHESTRATOR_ID=${ORCHESTRATOR_ID:-$JOB_PREFIX-orch}
 export ORCHESTRATOR_PORT=${ORCHESTRATOR_PORT:-20000}
 
@@ -344,6 +345,7 @@ start_orchestrator() {
     --jobset_name="${ORCHESTRATOR_ID}" \
     --namespace="${K8S_NAMESPACE}" \
     ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
+    ${GANG_ID:+--gang_id="${GANG_ID}"} \
     --cpu_machine=${CPU_MACHINE} \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ORCHESTRATOR_PORT}" \
@@ -490,6 +492,7 @@ start_trainer() {
     --namespace="${K8S_NAMESPACE}" \
     "${FAIL_FAST_GENERATOR_FLAGS[@]}" \
     ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
+    ${GANG_ID:+--gang_id="${GANG_ID}"} \
     --tpu_slice=${TRAINER_TPU_SLICE} \
     --cpu_machine=${CPU_MACHINE} \
     ${PATHWAYS_SERVER_IMAGE:+--pathways_server_image="${PATHWAYS_SERVER_IMAGE}"} \
@@ -697,6 +700,7 @@ if cfg:
       --namespace="${K8S_NAMESPACE}" \
       "${FAIL_FAST_GENERATOR_FLAGS[@]}" \
       ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
+      ${GANG_ID:+--gang_id="${GANG_ID}"} \
       --tpu_slice=${ROLLOUT_TPU_SLICE} \
       --worker_container_image="${TUNIX_IMAGE}" \
       --worker_container_port="${ROLLOUT_PORT}" \
@@ -807,6 +811,7 @@ start_mock_trainer() {
     --jobset_name="${TRAINER_ID}" \
     --namespace="${K8S_NAMESPACE}" \
     ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
+    ${GANG_ID:+--gang_id="${GANG_ID}"} \
     --cpu_machine="${CPU_MACHINE}" \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${TRAINER_PORT}" \
@@ -828,6 +833,7 @@ start_mock_rollout() {
     --jobset_name="${ROLLOUT_ID}" \
     --namespace="${K8S_NAMESPACE}" \
     ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
+    ${GANG_ID:+--gang_id="${GANG_ID}"} \
     --cpu_machine="${CPU_MACHINE}" \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ROLLOUT_PORT}" \
@@ -909,6 +915,14 @@ while [[ $# -gt 0 ]]; do
       export PREEMPTIBLE="${1#*=}"
       shift
       ;;
+    --gang-id|--gang_id)
+      export GANG_ID="$2"
+      shift 2
+      ;;
+    --gang-id=*|--gang_id=*)
+      export GANG_ID="${1#*=}"
+      shift
+      ;;
     --scratch|--gcs-scratch)
       GCS_SCRATCH_LOCATION="$2"
       shift 2
@@ -932,6 +946,7 @@ while [[ $# -gt 0 ]]; do
       echo "  --namespace <ns>         Kubernetes namespace (default: default)"
       echo "  --queue <name>           Kueue local queue name (optional)"
       echo "  --preemptible            Label JobSets with scheduling.x-k8s.io/preemptible=true"
+      echo "  --gang-id <id>           Label JobSets with scheduling.x-k8s.io/gang-id=<id> (default: JOB_PREFIX)"
       echo "  --image <image>          Container image to use"
       echo "  --dry-run, --render      Print generated YAMLs without applying"
       echo "  --scratch, --gcs-scratch GCS scratch location"
@@ -1002,6 +1017,7 @@ start_eval() {
       --jobset_name="${replica_id}" \
       --namespace="${K8S_NAMESPACE}" \
       ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
+      ${GANG_ID:+--gang_id="${GANG_ID}"} \
       --tpu_slice="${ROLLOUT_TPU_SLICE:-tpuv5:2x2x1}" \
       --cpu_machine="${CPU_MACHINE}" \
       ${PATHWAYS_SERVER_IMAGE:+--pathways_server_image="${PATHWAYS_SERVER_IMAGE}"} \

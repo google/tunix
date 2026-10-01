@@ -378,6 +378,22 @@ class YamlGeneratorTest(parameterized.TestCase):
           {"PREEMPTIBLE": "true"},
           {"kueue.x-k8s.io/queue-name": "multislice-queue"},
       ),
+      (
+          "gang_id_flag",
+          ["--gang_id=atwigg-256-prof"],
+          {},
+          {"scheduling.x-k8s.io/gang-id": "atwigg-256-prof"},
+      ),
+      (
+          "gang_id_env_with_preemptible_and_queue",
+          ["--queue_name=multislice-queue"],
+          {"PREEMPTIBLE": "true", "GANG_ID": "atwigg-256-prof"},
+          {
+              "kueue.x-k8s.io/queue-name": "multislice-queue",
+              "scheduling.x-k8s.io/preemptible": "true",
+              "scheduling.x-k8s.io/gang-id": "atwigg-256-prof",
+          },
+      ),
   )
   def test_preemptible_label(self, extra_args, env, expected_labels):
     import yaml  # pylint: disable=g-import-not-at-top
@@ -398,6 +414,60 @@ class YamlGeneratorTest(parameterized.TestCase):
 
     jobset = yaml.safe_load(rendered)
     self.assertEqual(jobset["metadata"]["labels"], expected_labels)
+
+  def test_k8s_launcher_attaches_gang_id_to_all_jobsets(self):
+    import yaml  # pylint: disable=g-import-not-at-top
+
+    launcher_path = os.path.abspath(
+        os.path.join(
+            os.path.dirname(yaml_generator.__file__),
+            "..",
+            "..",
+            "examples",
+            "deepswe_dist",
+            "k8s_launcher.sh",
+        )
+    )
+    env = dict(
+        os.environ,
+        JOB_PREFIX="atwigg-256-prof",
+        ROLLOUT_REPLICAS="2",
+        KUEUE_QUEUE="multislice-queue",
+        PREEMPTIBLE="true",
+        PYTHON_BIN=sys.executable,
+    )
+    env.pop("GANG_ID", None)
+    result = subprocess.run(
+        ["bash", launcher_path, "start", "--dry-run"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=True,
+    )
+    docs = [
+        d
+        for d in yaml.safe_load_all(result.stdout)
+        if isinstance(d, dict) and d.get("kind") == "JobSet"
+    ]
+    self.assertEqual(
+        [d["metadata"]["name"] for d in docs],
+        [
+            "atwigg-256-prof-orch",
+            "atwigg-256-prof-train",
+            "atwigg-256-prof-roll-0",
+            "atwigg-256-prof-roll-1",
+        ],
+    )
+    for doc in docs:
+      self.assertEqual(
+          doc["metadata"]["labels"],
+          {
+              "kueue.x-k8s.io/queue-name": "multislice-queue",
+              "scheduling.x-k8s.io/preemptible": "true",
+              "scheduling.x-k8s.io/gang-id": "atwigg-256-prof",
+          },
+      )
 
 
 _FAIL_FAST_TEMPLATES = (

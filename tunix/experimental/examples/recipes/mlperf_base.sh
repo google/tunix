@@ -77,6 +77,7 @@ fi
 
 export KUEUE_QUEUE="${KUEUE_QUEUE:-multislice-queue}"
 export PREEMPTIBLE="${PREEMPTIBLE:-${preemptible:-false}}"
+export GANG_ID="${GANG_ID:-${JOB_PREFIX}}"
 export PRIORITY_CLASS="${PRIORITY_CLASS:-medium}"
 # yaml_generator reads KUEUE_PRIORITY_CLASS (not PRIORITY_CLASS) to render
 # ${PRIORITY_CLASS_LINE}; without it the trainer admits at priority 0 and is

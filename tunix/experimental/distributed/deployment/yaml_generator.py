@@ -248,6 +248,14 @@ def main() -> None:
       ),
   )
   parser.add_argument(
+      "--gang_id",
+      default=os.environ.get("GANG_ID", ""),
+      help=(
+          'Add scheduling.x-k8s.io/gang-id: "<gang_id>" label to JobSet'
+          " metadata (or set GANG_ID)."
+      ),
+  )
+  parser.add_argument(
       "--service_account",
       default=os.environ.get("SERVICE_ACCOUNT", "xpk-sa"),
       help="Kubernetes service account for pods.",
@@ -444,6 +452,8 @@ def main() -> None:
     labels.append(f"    kueue.x-k8s.io/queue-name: {args.queue_name}\n")
   if preemptible:
     labels.append('    scheduling.x-k8s.io/preemptible: "true"\n')
+  if args.gang_id:
+    labels.append(f'    scheduling.x-k8s.io/gang-id: "{args.gang_id}"\n')
   queue_label = "  labels:\n" + "".join(labels) if labels else ""
 
   # Optional reservation pin. NAP will not create a large TPU slice without being
