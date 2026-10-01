@@ -24,11 +24,10 @@ without importing or depending on Tunix.
 """
 
 import asyncio
+import inspect
 import logging
 import os
 import time
-
-os.environ["VLLM_USE_V1"] = "0"
 from types import SimpleNamespace
 from typing import Any
 
@@ -86,6 +85,8 @@ class RLVllmSampler:
     self._mesh: Any | None = None
     self._transfer_statuses: dict[str, str] = {}
     self._policy_version = 0
+    self._unpaused_event: asyncio.Event = asyncio.Event()
+    self._unpaused_event.set()
     self._log_stats_task: asyncio.Task | None = None
 
   def _get_tpu_workers(self) -> list[Any]:
@@ -159,26 +160,52 @@ class RLVllmSampler:
     self._is_running = False
     logger.info("RLVllmSampler stopped.")
 
-  async def pause(self, **kwargs: Any) -> None:
-    """Pauses request intake and drains active batch iterations during weight updates."""
+  async def pause(
+      self,
+      mode: str = "keep",
+      clear_cache: bool = False,
+      **kwargs: Any,
+  ) -> None:
+    """Pauses vLLM generation during weight updates."""
+    del kwargs
     if self._is_paused:
       return
     self._is_paused = True
-    # Note: vLLM's pause_background_loop stops the scheduler from taking new requests from the queue.
-    # Ongoing requests in the batch will be completed or drained depending on internal vLLM state.
-    if self._engine and hasattr(self._engine, "pause_background_loop"):
-      logger.info("Pausing RLVllmSampler inference intake for weight sync...")
-      await self._engine.pause_background_loop()
+    self._unpaused_event.clear()
+    if self._engine:
+      pause_gen = getattr(self._engine, "pause_generation", None)
+      if inspect.iscoroutinefunction(pause_gen):
+        logger.info(
+            "Pausing RLVllmSampler generation (mode=%s, clear_cache=%s)...",
+            mode,
+            clear_cache,
+        )
+        await pause_gen(mode=mode, clear_cache=clear_cache)
+      elif inspect.iscoroutinefunction(
+          getattr(self._engine, "pause_background_loop", None)
+      ):
+        logger.info("Pausing RLVllmSampler inference intake for weight sync...")
+        await self._engine.pause_background_loop()
     await asyncio.sleep(0.01)
 
   async def resume(self, **kwargs: Any) -> None:
     """Resumes inference processing after weight sync completion."""
+    del kwargs
     if not self._is_paused:
+      self._unpaused_event.set()
       return
-    if self._engine and hasattr(self._engine, "resume_background_loop"):
-      logger.info("Resuming RLVllmSampler inference serving...")
-      await self._engine.resume_background_loop()
+    if self._engine:
+      resume_gen = getattr(self._engine, "resume_generation", None)
+      if inspect.iscoroutinefunction(resume_gen):
+        logger.info("Resuming RLVllmSampler generation...")
+        await resume_gen()
+      elif inspect.iscoroutinefunction(
+          getattr(self._engine, "resume_background_loop", None)
+      ):
+        logger.info("Resuming RLVllmSampler inference serving...")
+        await self._engine.resume_background_loop()
     self._is_paused = False
+    self._unpaused_event.set()
 
   async def get_mesh(self, **kwargs: Any) -> Any | None:
     """Returns the JAX device mesh."""
@@ -259,6 +286,7 @@ class RLVllmSampler:
       req_id: str,
       task: Any,
       expected_prompt_token_ids: list[int] | None = None,
+      policy_version: int | None = None,
   ) -> SimpleNamespace:
     """Consumes an AsyncLLMEngine output stream and formats output result."""
     try:
@@ -316,6 +344,7 @@ class RLVllmSampler:
             routed_experts=routed_experts,
             finish_reason=getattr(output_choice, "finish_reason", "stop")
             or "stop",
+            policy_version=policy_version,
             error=None,
         )
 
@@ -333,6 +362,7 @@ class RLVllmSampler:
           cumulative_logprob=0.0,
           routed_experts=None,
           finish_reason="stop",
+          policy_version=policy_version,
           error=err_obj,
       )
     except Exception as e:
@@ -351,6 +381,7 @@ class RLVllmSampler:
           cumulative_logprob=0.0,
           routed_experts=None,
           finish_reason="stop",
+          policy_version=policy_version,
           error=err_obj,
       )
 
@@ -373,6 +404,14 @@ class RLVllmSampler:
 
     if not self._is_running or self._engine is None:
       await self.start()
+
+    turn_start_version = int(self._policy_version)
+    enable_prefix_caching = bool(
+        getattr(self.engine_args, "enable_prefix_caching", False)
+    )
+    cache_salt = (
+        f"policy_v{turn_start_version}" if enable_prefix_caching else None
+    )
 
     raw_input_mode = False
     if isinstance(sampling_requests, (str, list)) and (
@@ -412,22 +451,33 @@ class RLVllmSampler:
             np.asarray(prompt_val, dtype=np.int32).reshape(-1).tolist()
         )
         engine_prompt: Any = {"prompt_token_ids": expected_prompt_ids}
+        if cache_salt is not None:
+          engine_prompt["cache_salt"] = cache_salt
       else:
         expected_prompt_ids = None
-        engine_prompt = (
+        prompt_str = (
             prompt_val if isinstance(prompt_val, str) else str(prompt_val)
         )
+        if cache_salt is not None:
+          engine_prompt = {"prompt": prompt_str, "cache_salt": cache_salt}
+        else:
+          engine_prompt = prompt_str
 
       task_gen = self._engine.generate(
           engine_prompt, vllm_params, request_id=req_id
       )
-      pending_tasks.append((req_id, task_gen, expected_prompt_ids))
+      pending_tasks.append(
+          (req_id, task_gen, expected_prompt_ids, turn_start_version)
+      )
 
     results = await asyncio.gather(*[
         self._process_request_output(
-            req_id, task_gen, expected_prompt_token_ids=expected_ids
+            req_id,
+            task_gen,
+            expected_prompt_token_ids=expected_ids,
+            policy_version=ver,
         )
-        for req_id, task_gen, expected_ids in pending_tasks
+        for req_id, task_gen, expected_ids, ver in pending_tasks
     ])
 
     if raw_input_mode:
@@ -570,6 +620,7 @@ class RLVllmSampler:
       self,
       sync_request: Any = None,
       free_kv_cache: bool = False,
+      preserve_active_kv_cache: bool = False,
       **kwargs: Any,
   ) -> None:
     """Phase 1: Pauses intake, invalidates prefix cache, and optionally drops KV cache.
@@ -581,14 +632,21 @@ class RLVllmSampler:
     serving stale KV activations computed under old weights while avoiding the
     per-step latency overhead of deallocating (`delete_kv_cache`) and
     reallocating (`reinitialize_kv_cache`) the HBM KV buffer pool.
+    When `preserve_active_kv_cache=True` and `free_kv_cache=False`, active
+    in-flight requests are paused in-place via `pause(mode="keep",
+    clear_cache=False)` without resetting the prefix cache.
     """
+    del kwargs
     self._policy_version = _get_val(
         sync_request, "policy_version", self._policy_version
     )
+    keep_active_kv = bool(preserve_active_kv_cache and not free_kv_cache)
     logger.info(
-        "Executing pre_weight_sync (policy_version=%d, free_kv_cache=%s)",
+        "Executing pre_weight_sync (policy_version=%d, free_kv_cache=%s,"
+        " preserve_active_kv_cache=%s)",
         self._policy_version,
         free_kv_cache,
+        keep_active_kv,
     )
 
     if sync_request is not None:
@@ -596,8 +654,11 @@ class RLVllmSampler:
       if rid:
         self._transfer_statuses[str(rid)] = "IN_PROGRESS"
 
-    await self.pause()
-    await self._clear_prefix_cache()
+    if keep_active_kv:
+      await self.pause(mode="keep", clear_cache=False)
+    else:
+      await self.pause(mode="wait", clear_cache=True)
+      await self._clear_prefix_cache()
 
     # Ensure any stale weight update session from an aborted round is closed
     # before opening a new weight update session.
@@ -628,6 +689,9 @@ class RLVllmSampler:
     rid = None
     if sync_request is not None:
       rid = _get_val(sync_request, "req_id")
+      self._policy_version = _get_val(
+          sync_request, "policy_version", self._policy_version
+      )
     logger.info("Executing post_weight_sync (req_id=%s)...", rid)
 
     await self._call_worker_method("finish_weight_update")

@@ -14,6 +14,7 @@
 
 """Trajectory Collector Engine wrapping TrajectoryCollectEngine with pause/resume/cancel control."""
 
+import asyncio
 from typing import Any, Collection, List, Mapping, Optional, Sequence
 import zlib
 from absl import logging
@@ -157,6 +158,8 @@ class TrajectoryCollectorEngine:
     self.is_paused: bool = False
     self.is_cancelled: bool = False
     self.is_done: bool = False
+    self._unpaused_event: asyncio.Event = asyncio.Event()
+    self._unpaused_event.set()
     self._inner_engine: Optional[rl_collect_engine.TrajectoryCollectEngine] = (
         None
     )
@@ -274,12 +277,23 @@ class TrajectoryCollectorEngine:
           prompt=prompt_payload,
           sampling_params=sampling_params,
       )
+      await self._unpaused_event.wait()
       res = await self.sampler.sample(sampling_req, **generation_kwargs)
       if isinstance(res, (list, tuple)) and len(res) == 1:
         res = res[0]
       err = getattr(res, "error", None) if not isinstance(res, str) else None
       if err is not None:
         raise RuntimeError(f"Sampler generation failed: {err}")
+      res_policy_version = (
+          None if isinstance(res, str) else getattr(res, "policy_version", None)
+      )
+      if isinstance(res_policy_version, int) and not isinstance(
+          res_policy_version, bool
+      ):
+        turn_policy_versions.append(int(res_policy_version))
+      else:
+        req_version = getattr(self.request, "target_policy_version", 0)
+        turn_policy_versions.append(int(req_version or 0))
       text = res if isinstance(res, str) else getattr(res, "text", str(res))
       tokens = getattr(res, "token_ids", np.array([], dtype=np.int32))
       if tokens is None:
@@ -322,6 +336,7 @@ class TrajectoryCollectorEngine:
           " to run an episode."
       )
 
+    turn_policy_versions: list[int] = []
     inner_engine = rl_collect_engine.TrajectoryCollectEngine(
         agent=self.agent,
         env=self.env,
@@ -346,6 +361,9 @@ class TrajectoryCollectorEngine:
       # past it, so the environment is closed here or not at all.
       await inner_engine._close()
       raise
+    if isinstance(rl_traj, dict) and turn_policy_versions:
+      rl_traj["turn_policy_versions"] = list(turn_policy_versions)
+      rl_traj["policy_version"] = min(turn_policy_versions)
     self.is_done = True
     return self._convert_to_trajectory(rl_traj)
 
@@ -450,12 +468,23 @@ class TrajectoryCollectorEngine:
     metadata["prompt_id"] = self.request.prompt_id
     metadata["group_index"] = self.request.group_index
     metadata["status"] = rl_traj.get("status", "")
-    policy_version = getattr(
-        self.request,
-        "target_policy_version",
-        rl_traj.get("policy_version", 0),
-    )
-    metadata["policy_version"] = int(policy_version or 0)
+    turn_versions = rl_traj.get("turn_policy_versions")
+    if isinstance(turn_versions, (list, tuple)) and turn_versions:
+      effective_policy_version = min(int(v) for v in turn_versions)
+      metadata["turn_policy_versions"] = [int(v) for v in turn_versions]
+      rl_traj["policy_version"] = effective_policy_version
+    elif "policy_version" in rl_traj and rl_traj["policy_version"] is not None:
+      req_target_version = getattr(self.request, "target_policy_version", 0)
+      if int(rl_traj["policy_version"]) != 0 or not req_target_version:
+        effective_policy_version = int(rl_traj["policy_version"])
+      else:
+        effective_policy_version = int(req_target_version)
+      rl_traj["policy_version"] = effective_policy_version
+    else:
+      effective_policy_version = int(
+          getattr(self.request, "target_policy_version", 0) or 0
+      )
+    metadata["policy_version"] = effective_policy_version
 
     self._annotate_response_budget(rl_traj, metadata)
 
@@ -469,11 +498,14 @@ class TrajectoryCollectorEngine:
 
   def pause(self) -> None:
     self.is_paused = True
+    self._unpaused_event.clear()
 
   def resume(self) -> None:
     self.is_paused = False
+    self._unpaused_event.set()
 
   def cancel(self) -> None:
+    self._unpaused_event.set()
     if not self.is_done:
       self.is_cancelled = True
       self.is_done = True

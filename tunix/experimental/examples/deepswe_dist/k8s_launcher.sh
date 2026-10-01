@@ -102,6 +102,7 @@ export PROFILER_STEPS=${PROFILER_STEPS:-0}
 export SKIP_FIRST_N_PROFILER_STEPS=${SKIP_FIRST_N_PROFILER_STEPS:-}
 export PROFILER_PERIOD=${PROFILER_PERIOD:-}
 export ROLLOUT_FREE_KV_CACHE=${ROLLOUT_FREE_KV_CACHE:-false}
+export PARTIAL_ROLLOUT=${PARTIAL_ROLLOUT:-false}
 
 # DeepSWE dataset and environment configuration
 export DATASET_NAME=${DATASET_NAME:-R2E-Gym/R2E-Gym-Subset}
@@ -718,6 +719,7 @@ if cfg:
         FLOAT32_LOGITS=${FLOAT32_LOGITS:-true} \
         ENABLE_PREFIX_CACHING=${ENABLE_PREFIX_CACHING} \
         ROLLOUT_FREE_KV_CACHE=${ROLLOUT_FREE_KV_CACHE} \
+        PARTIAL_ROLLOUT=${PARTIAL_ROLLOUT} \
         VLLM_MAX_NUM_SEQS=${VLLM_MAX_NUM_SEQS:-8} \
         VLLM_GPU_MEMORY_UTILIZATION=${VLLM_GPU_MEMORY_UTILIZATION:-0.9} \
         ${NUM_PRECOMPILE_WORKERS:+NUM_PRECOMPILE_WORKERS=${NUM_PRECOMPILE_WORKERS}} \
@@ -758,6 +760,7 @@ if cfg:
           --prefuse_moe_weights=${ROLLOUT_PREFUSE_MOE_WEIGHTS} \
           --enable_prefix_caching=${ENABLE_PREFIX_CACHING} \
           --free_kv_cache_during_weight_sync=${ROLLOUT_FREE_KV_CACHE} \
+          --partial_rollout=${PARTIAL_ROLLOUT} \
           --return_routed_experts=${RETURN_ROUTED_EXPERTS} \
           --registry_module=tunix.experimental.examples.deepswe_dist.deepswe \
           --env_name=deepswe_env \

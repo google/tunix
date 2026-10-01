@@ -286,8 +286,9 @@ class TestRLVllmSamplerWeightSync(unittest.TestCase):
 
             await sampler.pre_weight_sync(req_pre)
             mock_engine.pause_background_loop.assert_called_once()
-            mock_call_worker_method.assert_called_once_with(
-                "start_weight_update", free_kv_cache=True)
+            mock_engine.reset_prefix_cache.assert_called_once()
+            mock_call_worker_method.assert_any_call(
+                "start_weight_update", free_kv_cache=False)
             self.assertEqual(await sampler.get_transfer_status("transfer_99"),
                              "IN_PROGRESS")
 
@@ -302,7 +303,6 @@ class TestRLVllmSamplerWeightSync(unittest.TestCase):
             await sampler.post_weight_sync(req_post)
             mock_call_worker_method.assert_called_once_with(
                 "finish_weight_update")
-            mock_engine.reset_prefix_cache.assert_called_once()
             mock_engine.resume_background_loop.assert_called_once()
             self.assertEqual(await sampler.get_transfer_status("transfer_99"),
                              "SUCCESS")
@@ -380,6 +380,103 @@ class TestRLVllmSamplerWeightSync(unittest.TestCase):
             await sampler.raiden_h2d()
             mock_call_worker_method.assert_called_once_with("raiden_h2d",
                                                             uuid=None)
+
+        asyncio.run(run_test())
+
+    @patch(
+        "tunix.experimental.rollout.vllm_sampler_v2.RLVllmSampler._call_worker_method"
+    )
+    def test_v1_pause_generation_and_preserve_active_kv_cache(
+        self, mock_call_worker_method
+    ):
+        """Verifies V1 pause_generation(mode='keep') and skipping reset_prefix_cache for partial rollout."""
+        mock_call_worker_method.return_value = []
+        args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B")
+        sampler = RLVllmSampler(engine_args=args)
+
+        mock_engine = MagicMock()
+        mock_engine.pause_generation = AsyncMock()
+        mock_engine.resume_generation = AsyncMock()
+        mock_engine.reset_prefix_cache = AsyncMock()
+        sampler._engine = mock_engine
+        sampler._is_running = True
+
+        async def run_test():
+            req_pre = SimpleNamespace(policy_version=5, req_id="r5")
+            await sampler.pre_weight_sync(
+                req_pre, free_kv_cache=False, preserve_active_kv_cache=True
+            )
+            mock_engine.pause_generation.assert_awaited_once_with(
+                mode="keep", clear_cache=False
+            )
+            mock_engine.reset_prefix_cache.assert_not_awaited()
+            mock_call_worker_method.assert_any_call(
+                "start_weight_update", free_kv_cache=False
+            )
+
+            await sampler.post_weight_sync(SimpleNamespace(req_id="r5"))
+            mock_engine.resume_generation.assert_awaited_once()
+
+            mock_engine.pause_generation.reset_mock()
+            mock_engine.reset_prefix_cache.reset_mock()
+            await sampler.pre_weight_sync(
+                req_pre, free_kv_cache=False, preserve_active_kv_cache=False
+            )
+            mock_engine.pause_generation.assert_awaited_once_with(
+                mode="wait", clear_cache=True
+            )
+            mock_engine.reset_prefix_cache.assert_awaited_once()
+
+        asyncio.run(run_test())
+
+    def test_sample_turn_start_version_and_cache_salt(self):
+        """Verifies turn_start_version is captured before generate() and cache_salt is attached."""
+        args = AsyncEngineArgs(
+            model="Qwen/Qwen2.5-1.5B", enable_prefix_caching=True
+        )
+        sampler = RLVllmSampler(engine_args=args)
+        sampler._policy_version = 3
+        sampler._is_running = True
+
+        captured_prompts = []
+
+        async def mock_mid_turn_sync_stream(prompt, sampling_params, request_id):
+            del sampling_params, request_id
+            captured_prompts.append(prompt)
+            # Simulate a mid-turn weight sync advancing _policy_version from 3 to 4
+            # while this turn's generation stream is in flight.
+            sampler._policy_version = 4
+            yield SimpleNamespace(
+                prompt_token_ids=[10, 11],
+                outputs=[
+                    SimpleNamespace(
+                        text="done",
+                        token_ids=[20, 21],
+                        cumulative_logprob=-0.5,
+                        logprobs=None,
+                        finish_reason="stop",
+                    )
+                ],
+            )
+
+        mock_engine = MagicMock()
+        mock_engine.generate.side_effect = mock_mid_turn_sync_stream
+        sampler._engine = mock_engine
+
+        async def run_test():
+            req = SimpleNamespace(
+                prompt=np.array([10, 11], dtype=np.int32),
+                request_id="req_mid_sync",
+                sampling_params=None,
+            )
+            res = await sampler.sample(req)
+            self.assertEqual(len(res), 1)
+            # Must record the turn-start policy version (3), not the post-sync version (4)!
+            self.assertEqual(res[0].policy_version, 3)
+            self.assertEqual(sampler._policy_version, 4)
+            self.assertEqual(len(captured_prompts), 1)
+            self.assertEqual(captured_prompts[0]["cache_salt"], "policy_v3")
+            self.assertEqual(captured_prompts[0]["prompt_token_ids"], [10, 11])
 
         asyncio.run(run_test())
 

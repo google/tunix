@@ -68,6 +68,7 @@ BETA=${BETA:-0.0}
 EPSILON=${EPSILON:-0.2}
 SAMPLER=${SAMPLER:-inprocess_vllm}
 WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
+PARTIAL_ROLLOUT=${PARTIAL_ROLLOUT:-false}
 USE_LORA=${USE_LORA:-0}
 LORA_RANK=${LORA_RANK:-64}
 LORA_ALPHA=${LORA_ALPHA:-64.0}
@@ -415,6 +416,7 @@ echo "Launching DeepSWE rollout node..."
     --lora_rank="$LORA_RANK"
     --lora_alpha="$LORA_ALPHA"
     --weight_sync_mode="$WEIGHT_SYNC_MODE"
+    --partial_rollout="$PARTIAL_ROLLOUT"
     --registry_module=tunix.experimental.examples.deepswe_dist.deepswe
     --env_name=deepswe_env
     --agent_name=deepswe_agent

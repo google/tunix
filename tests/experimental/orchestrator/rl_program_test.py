@@ -3792,6 +3792,45 @@ class RLProgramTest(absltest.TestCase):
         logger.get_metric("", "sampler_trainer/logp_diff_max", "train"), 0.9
     )
 
+  def test_partial_rollout_fraction_metric_logged(self):
+    """Logs rollout/partial_rollout_fraction when trajectories span multiple versions."""
+    program = self._create_program()
+    items = [
+        datatypes.TrajectoryItem(
+            prompt_id="p0",
+            group_index=0,
+            policy_version=0,
+            traj={"steps": [1, 2], "status": "SUCCEEDED"},
+            metadata={"turn_policy_versions": [0, 1], "policy_version": 0},
+        ),
+        datatypes.TrajectoryItem(
+            prompt_id="p1",
+            group_index=0,
+            policy_version=1,
+            traj={"steps": [1, 2], "status": "SUCCEEDED"},
+            metadata={"turn_policy_versions": [1, 1], "policy_version": 1},
+        ),
+    ]
+    program._collect_and_log_step_metrics(
+        all_step_items=items,
+        step_rewards=[1.0, 1.0],
+        step_advantages=[0.5, -0.5],
+        step_result=None,
+        trainer_metrics=None,
+        num_rollouts=2,
+        num_microbatches=1,
+        step_time_sec=1.0,
+        consumed_policy_version=1,
+        log_step=0,
+    )
+    logger = program.metrics_logger
+    self.assertTrue(
+        logger.metric_exists("", "rollout/partial_rollout_fraction", "train")
+    )
+    self.assertAlmostEqual(
+        logger.get_metric("", "rollout/partial_rollout_fraction", "train"), 0.5
+    )
+
   def test_trajectory_logger_initialization(self):
     with mock.patch("tunix.utils.trajectory_logger.AsyncTrajectoryLogger") as mock_logger_cls:
       mock_logger_inst = mock.MagicMock()
@@ -5018,6 +5057,7 @@ class ExtractScalarTest(absltest.TestCase):
     self.assertAlmostEqual(
         rl_program._extract_scalar(3.14), 3.14
     )
+
 
 
 if __name__ == "__main__":

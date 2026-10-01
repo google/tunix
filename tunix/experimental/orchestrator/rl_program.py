@@ -899,6 +899,7 @@ class StandardRLProgram(RLProgram):
     turns_list = []
     successes = []
     staleness_list = []
+    partial_rollouts = []
     for item in all_step_items:
       p_len = None
       prompt_tokens = getattr(item, "prompt_tokens", None)
@@ -968,6 +969,16 @@ class StandardRLProgram(RLProgram):
         pol_ver = item.metadata.get("policy_version")
       if pol_ver is not None:
         staleness_list.append(float(max(0, consumed_policy_version - pol_ver)))
+
+      turn_vers = None
+      if hasattr(item, "metadata") and isinstance(item.metadata, dict):
+        turn_vers = item.metadata.get("turn_policy_versions")
+      if turn_vers is None and isinstance(traj, dict):
+        turn_vers = traj.get("turn_policy_versions")
+      if isinstance(turn_vers, (list, tuple)) and turn_vers:
+        partial_rollouts.append(
+            1.0 if len({int(v) for v in turn_vers}) > 1 else 0.0
+        )
 
     if prompt_lengths:
       self.metrics_logger.log(
@@ -1042,6 +1053,14 @@ class StandardRLProgram(RLProgram):
         self.metrics_logger.log(
             self.metrics_prefix, f"rollout/{tag}", val, self.mode, log_step
         )
+    if partial_rollouts:
+      self.metrics_logger.log(
+          self.metrics_prefix,
+          "rollout/partial_rollout_fraction",
+          float(np.mean(partial_rollouts)),
+          self.mode,
+          log_step,
+      )
 
     # Generation metrics, already named to match the agentic GRPO learner so
     # the same dashboards work for both.

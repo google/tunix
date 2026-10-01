@@ -322,6 +322,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="Free the KV cache during weight sync.",
   )
   parser.add_argument(
+      "--partial_rollout",
+      type=_str2bool,
+      default=_str2bool(os.getenv("PARTIAL_ROLLOUT", "false")),
+      nargs="?",
+      const=True,
+      help=(
+          "Keep in-flight multi-turn rollouts across weight syncs by pausing"
+          " generation with mode='keep' instead of draining."
+      ),
+  )
+  parser.add_argument(
       "--tensor_parallel_size",
       type=int,
       default=None,
@@ -420,6 +431,7 @@ def _rollout_config_kwargs(
       "env_name": args.env_name,
       "agent_name": args.agent_name,
       "agent_config": _agent_config(args),
+      "partial_rollout": bool(getattr(args, "partial_rollout", False)),
   }
 
 

@@ -401,6 +401,71 @@ class AdmissionGateTest(unittest.IsolatedAsyncioTestCase):
       )
       await manager.pre_weight_sync(sync_req)
 
+  async def test_partial_rollout_skips_drain_and_preserves_kv_cache(self):
+    sampler = _FakeSyncSampler([])
+    sampler._policy_version = 1
+    sampler.pre_weight_sync = mock.AsyncMock(return_value="ok")
+    sampler.post_weight_sync = mock.AsyncMock(return_value=2)
+    config = types.SimpleNamespace(partial_rollout=True)
+    manager = manager_lib.RolloutManager(
+        config=config,
+        sampler=sampler,
+        tokenizer="mock",
+        chat_parser="mock",
+        drain_timeout_s=1000.0,
+    )
+    never_done = asyncio.Event()
+    task = asyncio.create_task(never_done.wait())
+    collector = mock.MagicMock()
+    manager._active_tasks["t0"] = task
+    manager._active_collectors["t0"] = collector
+    manager._traffic.track(task)
+
+    # Even with pre_timeout_s < drain_timeout_s and an uncompleted in-flight task,
+    # partial_rollout=True returns immediately without draining and pauses collectors.
+    sync_req = datatypes.WeightSyncRequest(
+        policy_version=2, extra_config={"pre_timeout_s": 5.0}
+    )
+    await manager.pre_weight_sync(sync_req)
+    collector.pause.assert_called_once()
+    sampler.pre_weight_sync.assert_awaited_once_with(
+        sync_req, preserve_active_kv_cache=True
+    )
+
+    await manager.post_weight_sync(sync_req)
+    collector.resume.assert_called_once()
+    task.cancel()
+    manager._active_tasks.pop("t0", None)
+    manager._active_collectors.pop("t0", None)
+
+  async def test_generate_one_waits_for_admission_during_sync_and_updates_policy_version(
+      self,
+  ):
+    sampler = _FakeSyncSampler([])
+    sampler._policy_version = 1
+    manager = manager_lib.RolloutManager(
+        config=types.SimpleNamespace(partial_rollout=True),
+        sampler=sampler,
+        tokenizer="mock",
+        chat_parser="mock",
+    )
+    await manager.pre_weight_sync()
+    sampler._policy_version = 5
+    request = datatypes.RolloutRequest(
+        prompt="p", prompt_id="p0", target_policy_version=1
+    )
+    with mock.patch.object(
+        manager_lib.collector_lib,
+        "TrajectoryCollectorEngine",
+        _NoopCollector,
+    ):
+      gen_task = asyncio.create_task(manager._generate_one(request))
+      await asyncio.sleep(0.01)
+      self.assertFalse(gen_task.done())
+      await manager.post_weight_sync()
+      await gen_task
+    self.assertEqual(request.target_policy_version, 5)
+
 
 class AgentConfigTest(unittest.IsolatedAsyncioTestCase):
 
