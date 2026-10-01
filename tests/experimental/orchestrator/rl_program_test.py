@@ -1494,7 +1494,7 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
-  def test_dispatch_stamps_the_version_the_rollouts_hold(self):
+  def test_dispatch_holds_while_a_background_round_is_in_flight(self):
     async def _run():
       dispatched = []
 
@@ -1523,13 +1523,15 @@ class RLProgramTest(absltest.TestCase):
 
       dispatch_task = asyncio.create_task(program.rollout_dispatch_stage())
       await asyncio.sleep(0.05)
-      # Batch 1 is generated with the old weights, so it must say so.
-      self.assertEqual(dispatched, [(1, 0), (1, 0)])
+      # Batch 1 is inside the staleness window, but the rollouts could not
+      # start it before the round commits, so it is held back.
+      self.assertEqual(dispatched, [])
 
       program._unsynced_steps = 0
       program._release_window()
       await asyncio.sleep(0.05)
-      self.assertEqual(dispatched[2:], [(2, 1), (2, 1)])
+      # Both go out on, and are stamped with, the weights just committed.
+      self.assertEqual(dispatched, [(1, 1), (1, 1), (2, 1), (2, 1)])
 
       dispatch_task.cancel()
       await asyncio.gather(dispatch_task, return_exceptions=True)

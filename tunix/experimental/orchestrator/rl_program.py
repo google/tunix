@@ -623,8 +623,13 @@ class StandardRLProgram(RLProgram):
     # skip the loop and keep dispatching after a sync round failed.
     if self._sync_error is not None:
       raise self._sync_error
+    # Nothing goes out while a background round is in flight. The rollouts
+    # cannot start a request until the round commits anyway, and one that
+    # lands before they close admission is drained on the old weights,
+    # idling every other worker until it finishes.
     while (
-        batch_idx
+        self._unsynced_steps
+        or batch_idx
         > self._next_batch - self._unsynced_steps + self.max_staleness
     ):
       if self._sync_error is not None:
