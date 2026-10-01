@@ -439,6 +439,7 @@ class YamlGeneratorTest(parameterized.TestCase):
         ROLLOUT_REPLICAS="2",
         KUEUE_QUEUE="multislice-queue",
         PREEMPTIBLE="true",
+        USE_AGENT_SANDBOX="0",
         PYTHON_BIN=sys.executable,
     )
     env.pop("GANG_ID", None)
