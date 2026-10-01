@@ -488,7 +488,7 @@ class StandardRLProgram(RLProgram):
     # trainer compute. At most one train_step is ever outstanding, so the
     # gradient-accumulation order is unchanged.
     self.pipeline_train_microbatches = pipeline_train_microbatches
-    self._pending_train: asyncio.Task[Any] | None = None
+    self._pending_train: asyncio.Task[tuple[Any, float]] | None = None
     # A cancelled asyncio.to_thread leaves its worker running, so the error
     # path's reset() must wait for any in-flight feed/flush to finish.
     self._assembler_lock = threading.Lock()
@@ -1458,10 +1458,14 @@ class StandardRLProgram(RLProgram):
       }
       self.trajectory_logger.log_item_async(row)
 
-  async def _assemble(self, fn: Callable[..., Any], *args: Any) -> Any:
+  async def _assemble(
+      self,
+      fn: Callable[..., list[batch_assembly.AssembledBatch]],
+      *args: Any,
+  ) -> list[batch_assembly.AssembledBatch]:
     """Runs a CPU-heavy assembler call off the event loop, under the lock."""
 
-    def _locked() -> Any:
+    def _locked() -> list[batch_assembly.AssembledBatch]:
       with self._assembler_lock:
         return fn(*args)
 
