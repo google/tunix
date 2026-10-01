@@ -252,6 +252,41 @@ class PackCoreTest(absltest.TestCase):
     [[row]] = packing.pack_core([item], budget=4)
     np.testing.assert_array_equal(row.policy_version, np.array([42]))
 
+  def test_pack_chunk_rows_share_contiguous_base_buffers(self):
+    items = [
+        _item(
+            [1, 2],
+            [3, 4],
+            adv=1.0,
+            per_token={"returns": np.array([2.0, 3.0], dtype=np.float32)},
+        ),
+        _item(
+            [5, 6],
+            [7, 8],
+            adv=0.5,
+            per_token={"returns": np.array([4.0, 5.0], dtype=np.float32)},
+        ),
+    ]
+    [rows] = packing.pack_core(items, budget=4, pack_size=2)
+    self.assertIsInstance(rows, packing.PackedChunk)
+    self.assertLen(rows, 2)
+    for attr in (
+        "ids",
+        "prompt_mask",
+        "completion_mask",
+        "advantages",
+        "segment_ids",
+        "segment_positions",
+    ):
+      base = getattr(rows, attr)
+      self.assertEqual(base.shape, (2, 4))
+      self.assertIs(getattr(rows[0], attr).base, base)
+      self.assertIs(getattr(rows[1], attr).base, base)
+    returns_base = rows.per_token["returns"]
+    self.assertEqual(returns_base.shape, (2, 4))
+    self.assertIs(rows[0].per_token["returns"].base, returns_base)
+    self.assertIs(rows[1].per_token["returns"].base, returns_base)
+
 
 if __name__ == "__main__":
   absltest.main()

@@ -154,6 +154,8 @@ def _routed_experts_aligned(
     completion_len: int,
     max_prompt_length: int,
     max_response_length: int,
+    *,
+    out: np.ndarray,
 ) -> np.ndarray:
   """Lays one row of routing out over the padded `[prompt | completion]`.
 
@@ -170,6 +172,8 @@ def _routed_experts_aligned(
     completion_len: Unpadded completion length.
     max_prompt_length: Padded prompt width.
     max_response_length: Padded completion width.
+    out: Pre-initialized `[max_prompt_length + max_response_length, num_layers,
+      top_k]` buffer (filled with `UNSET_ROUTED_EXPERT`) to populate in-place.
 
   Returns:
     `[max_prompt_length + max_response_length, num_layers, top_k]`.
@@ -182,11 +186,6 @@ def _routed_experts_aligned(
   prompt_part = routed[kept_prompt_start:prompt_len]
   completion_part = routed[prompt_len:kept_completion_end]
 
-  out = np.full(
-      (max_prompt_length + max_response_length,) + routed.shape[1:],
-      datatypes.UNSET_ROUTED_EXPERT,
-      dtype=np.int16,
-  )
   prompt_end = max_prompt_length
   out[prompt_end - len(prompt_part) : prompt_end] = prompt_part
   out[prompt_end : prompt_end + len(completion_part)] = completion_part
@@ -342,32 +341,28 @@ def to_pack_item(item: datatypes.RLTrainerPayload) -> packing.PackItem:
 
 
 def to_rl_trainer_payload(
-    rows: Sequence[packing.PackedRow],
+    chunk: packing.PackedChunk,
     *,
     max_segments: int,
     trajectory_ids: tuple[str, ...] = (),
     lineage_context: lineage.LineageContext | None = None,
 ) -> datatypes.RLTrainerPayload:
-  """Converts a sequence of packing.PackedRow to an RLTrainerPayload."""
-  stack = lambda attr: np.stack([getattr(r, attr) for r in rows])
-  per_token_kwargs = {
-      name: np.stack([r.per_token[name] for r in rows])
-      for name in rows[0].per_token
-  }
+  """Converts a packing.PackedChunk to an RLTrainerPayload."""
+  n_rows = chunk.ids.shape[0]
   metadata: dict[str, Any] = {"trajectory_ids": trajectory_ids}
   if lineage_context is not None:
     metadata["lineage"] = lineage_context
   return datatypes.RLTrainerPayload(
-      prompt_ids=np.zeros((len(rows), 0), dtype=np.int32),
-      prompt_mask=np.zeros((len(rows), 0), dtype=np.float32),
-      completion_ids=stack("ids"),
-      completion_mask=stack("completion_mask"),
-      advantages=stack("advantages"),
-      segment_ids=stack("segment_ids"),
-      segment_positions=stack("segment_positions"),
+      prompt_ids=np.zeros((n_rows, 0), dtype=np.int32),
+      prompt_mask=np.zeros((n_rows, 0), dtype=np.float32),
+      completion_ids=chunk.ids,
+      completion_mask=chunk.completion_mask,
+      advantages=chunk.advantages,
+      segment_ids=chunk.segment_ids,
+      segment_positions=chunk.segment_positions,
       num_segments=max_segments + 1,
       metadata=metadata,
-      **per_token_kwargs,  # pyrefly: ignore[bad-argument-type]
+      **chunk.per_token,  # pyrefly: ignore[bad-argument-type]
   )
 
 
@@ -488,7 +483,7 @@ class SequencePackedBatchAssembler:
       placed.extend(bin_items)
     traj_ids = tuple(id_to_entry[id(item)][1] for item in placed)
     placed_items = [id_to_entry[id(item)][2] for item in placed]
-    rows = packing.pack_chunk(
+    chunk = packing.pack_chunk(
         bins,
         budget=self.max_packed_len,
         pad_id=self.pad_id,
@@ -506,7 +501,7 @@ class SequencePackedBatchAssembler:
     )
     self._batch_counter += 1
     payload = to_rl_trainer_payload(
-        rows,
+        chunk,
         max_segments=max_segments,
         trajectory_ids=traj_ids,
         lineage_context=merged_lineage,
@@ -792,19 +787,36 @@ class PaddedBatchAssembler:
           partially_present_fields,
       )
 
-    prompt_ids, prompt_mask = [], []
-    completion_ids, completion_mask = [], []
-    advantages = []
-    optional_rows: dict[str, list[np.ndarray]] = {
-        name: [] for name in present_fields
+    batched_prompt_ids = np.full(
+        (self.batch_size, self.max_prompt_length), self.pad_id, dtype=np.int32
+    )
+    batched_prompt_mask = np.zeros(
+        (self.batch_size, self.max_prompt_length), dtype=np.float32
+    )
+    batched_completion_ids = np.full(
+        (self.batch_size, self.max_response_length), self.pad_id, dtype=np.int32
+    )
+    batched_completion_mask = np.zeros(
+        (self.batch_size, self.max_response_length), dtype=np.float32
+    )
+    batched_advantages = np.zeros(
+        (self.batch_size, self.max_response_length), dtype=np.float32
+    )
+    stacked_optional: dict[str, np.ndarray] = {
+        name: np.zeros(
+            (self.batch_size, self.max_response_length), dtype=np.float32
+        )
+        for name in present_fields
     }
     # Router replay is all-or-nothing per batch: a partially replayed batch
     # would silently mix replayed and freshly routed rows.
-    replay_routing = all(it.routed_experts is not None for it in chunk)
-    routed_experts_rows: list[np.ndarray] = []
+    replay_routing = bool(chunk) and all(
+        it.routed_experts is not None for it in chunk
+    )
+    batched_routed_experts: np.ndarray | None = None
     truncated_prompts = truncated_completions = 0
 
-    for item in chunk:
+    for row_idx, item in enumerate(chunk):
       p_full = np.asarray(item.prompt_ids, dtype=np.int32).reshape(-1)
       c_full = np.asarray(item.completion_ids, dtype=np.int32).reshape(-1)
       truncated_prompts += p_full.size > self.max_prompt_length
@@ -817,8 +829,8 @@ class PaddedBatchAssembler:
       c_ids, c_valid = _right_pad(
           c, self.max_response_length, pad_value=self.pad_id, dtype=np.int32
       )
-      prompt_ids.append(p_ids)
-      completion_ids.append(c_ids)
+      batched_prompt_ids[row_idx] = p_ids
+      batched_completion_ids[row_idx] = c_ids
 
       # A caller-supplied prompt mask is prompt-aligned, so it must be
       # left-padded exactly like the prompt ids to stay in register. If its
@@ -832,11 +844,11 @@ class PaddedBatchAssembler:
           p_mask = np.zeros(self.max_prompt_length, dtype=np.float32)
           if src.size:
             p_mask[-src.size :] = src
-      prompt_mask.append(p_mask)
+      batched_prompt_mask[row_idx] = p_mask
 
       action_source = item.completion_mask
       if action_source is None:
-        c_mask = c_valid.copy()
+        c_mask = c_valid
       else:
         c_mask = _completion_aligned(
             action_source,
@@ -845,46 +857,49 @@ class PaddedBatchAssembler:
             prompt_len=p_full.size,
             full_completion_len=c_full.size,
         )
-      completion_mask.append(c_mask)
+      batched_completion_mask[row_idx] = c_mask
 
-      advantages.append(
-          _completion_aligned(
-              item.advantages,
-              c.size,
-              self.max_response_length,
-              fill_value=0.0,
-              prompt_len=p_full.size,
-              full_completion_len=c_full.size,
-          )
+      batched_advantages[row_idx] = _completion_aligned(
+          item.advantages,
+          c.size,
+          self.max_response_length,
+          fill_value=0.0,
+          prompt_len=p_full.size,
+          full_completion_len=c_full.size,
       )
 
-      for name in optional_rows:
-        optional_rows[name].append(
-            _completion_aligned(
-                getattr(item, name),
-                c.size,
-                self.max_response_length,
-                fill_value=0.0,
-                prompt_len=p_full.size,
-                full_completion_len=c_full.size,
-            )
+      for name, batch_arr in stacked_optional.items():
+        batch_arr[row_idx] = _completion_aligned(
+            getattr(item, name),
+            c.size,
+            self.max_response_length,
+            fill_value=0.0,
+            prompt_len=p_full.size,
+            full_completion_len=c_full.size,
         )
 
       # `replay_routing` already guarantees this is set; binding it locally
       # also narrows the optional field for the type checker.
       routed = item.routed_experts
       if replay_routing and routed is not None:
-        routed_experts_rows.append(
-            _routed_experts_aligned(
-                # `routed_experts` is declared ArrayLike, which admits jax
-                # arrays and scalars; concretise it here as the sibling fields
-                # above do.
-                np.asarray(routed, dtype=np.int16),
-                p_full.size,
-                c.size,
-                self.max_prompt_length,
-                self.max_response_length,
-            )
+        routed_arr = np.asarray(routed, dtype=np.int16)
+        if batched_routed_experts is None:
+          batched_routed_experts = np.full(
+              (
+                  self.batch_size,
+                  self.max_prompt_length + self.max_response_length,
+              )
+              + routed_arr.shape[1:],
+              datatypes.UNSET_ROUTED_EXPERT,
+              dtype=np.int16,
+          )
+        _routed_experts_aligned(
+            routed_arr,
+            p_full.size,
+            c.size,
+            self.max_prompt_length,
+            self.max_response_length,
+            out=batched_routed_experts[row_idx],
         )
 
     if truncated_prompts or truncated_completions:
@@ -898,32 +913,6 @@ class PaddedBatchAssembler:
           self.max_response_length,
       )
 
-    # Zero-pad trailing rows so every chunk yields a static [B, ...] shape.
-    while len(prompt_ids) < self.batch_size:
-      prompt_ids.append(
-          np.full(self.max_prompt_length, self.pad_id, dtype=np.int32)
-      )
-      prompt_mask.append(np.zeros(self.max_prompt_length, dtype=np.float32))
-      completion_ids.append(
-          np.full(self.max_response_length, self.pad_id, dtype=np.int32)
-      )
-      completion_mask.append(np.zeros(self.max_response_length, np.float32))
-      advantages.append(np.zeros(self.max_response_length, dtype=np.float32))
-      for rows in optional_rows.values():
-        rows.append(np.zeros(self.max_response_length, dtype=np.float32))
-      if routed_experts_rows:
-        routed_experts_rows.append(
-            np.full_like(routed_experts_rows[0], datatypes.UNSET_ROUTED_EXPERT)
-        )
-
-    batched_prompt_ids = np.stack(prompt_ids)
-    batched_prompt_mask = np.stack(prompt_mask)
-    batched_completion_ids = np.stack(completion_ids)
-    batched_completion_mask = np.stack(completion_mask)
-
-    stacked_optional = {
-        name: np.stack(rows) for name, rows in optional_rows.items()
-    }
     batch_tracking_id = f"{_BATCH_ID_PREFIX}_{self._batch_counter}"
     merged_lineage = _merge_batch_lineage(
         chunk,
@@ -942,19 +931,37 @@ class PaddedBatchAssembler:
       payload_metadata["lineage"] = merged_lineage
 
     return datatypes.RLTrainerPayload(
-        advantages=np.stack(advantages),
+        advantages=batched_advantages,
         prompt_ids=batched_prompt_ids,
         prompt_mask=batched_prompt_mask,
         completion_ids=batched_completion_ids,
         completion_mask=batched_completion_mask,
-        ref_per_token_logps=stacked_optional.get("ref_per_token_logps"),
-        old_per_token_logps=stacked_optional.get("old_per_token_logps"),
-        returns=stacked_optional.get("returns"),
-        old_values=stacked_optional.get("old_values"),
-        sampler_is_weights=stacked_optional.get("sampler_is_weights"),
-        routed_experts=(
-            np.stack(routed_experts_rows) if routed_experts_rows else None
+        ref_per_token_logps=(
+            stacked_optional["ref_per_token_logps"]
+            if "ref_per_token_logps" in stacked_optional
+            else None
         ),
+        old_per_token_logps=(
+            stacked_optional["old_per_token_logps"]
+            if "old_per_token_logps" in stacked_optional
+            else None
+        ),
+        returns=(
+            stacked_optional["returns"]
+            if "returns" in stacked_optional
+            else None
+        ),
+        old_values=(
+            stacked_optional["old_values"]
+            if "old_values" in stacked_optional
+            else None
+        ),
+        sampler_is_weights=(
+            stacked_optional["sampler_is_weights"]
+            if "sampler_is_weights" in stacked_optional
+            else None
+        ),
+        routed_experts=batched_routed_experts,
         metadata=payload_metadata,
     )
 

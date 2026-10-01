@@ -15,6 +15,7 @@
 """Unit tests for Universal BatchAssembler (SequencePacked, GRPO, & Padded)."""
 
 import dataclasses
+import tracemalloc
 
 from absl.testing import absltest
 import jax
@@ -22,6 +23,7 @@ import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.experimental.common import lineage
 from tunix.experimental.orchestrator import batch_assembly
+from tunix.rl import packing
 
 
 class HelperFunctionsTest(absltest.TestCase):
@@ -507,6 +509,47 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
     # Reset clears state
     assembler.reset()
     self.assertEmpty(assembler.flush())
+
+  def test_to_rl_trainer_payload_reuses_contiguous_pack_chunk_buffers(self):
+    item1 = batch_assembly.to_pack_item(_make_payload(2, 2, advantage=1.0))
+    item2 = batch_assembly.to_pack_item(_make_payload(2, 2, advantage=2.0))
+    was_tracing = tracemalloc.is_tracing()
+    if not was_tracing:
+      tracemalloc.start()
+    try:
+      base_bytes, _ = tracemalloc.get_traced_memory()
+      tracemalloc.reset_peak()
+      chunk = packing.pack_chunk(
+          [[item1], [item2]], budget=4096, pad_id=0, carried=()
+      )
+      after_pack_bytes, _ = tracemalloc.get_traced_memory()
+      tracemalloc.reset_peak()
+      payload = batch_assembly.to_rl_trainer_payload(chunk, max_segments=2)
+      retained_bytes, peak_bytes = tracemalloc.get_traced_memory()
+    finally:
+      if not was_tracing:
+        tracemalloc.stop()
+
+    # 6 pre-allocated [2, 4096] 4-byte arrays = 196,608 bytes; while both
+    # `chunk` and `payload` are alive, `to_rl_trainer_payload` passes `chunk`'s
+    # 2D arrays directly by reference instead of allocating 163,840 extra bytes.
+    pack_allocated = after_pack_bytes - base_bytes
+    to_payload_peak = peak_bytes - after_pack_bytes
+    self.assertGreater(pack_allocated, 190_000)
+    self.assertLess(to_payload_peak, 4_096)
+    self.assertLess(
+        peak_bytes - base_bytes, (retained_bytes - base_bytes) * 1.05
+    )
+
+    chunk = packing.pack_chunk(
+        [[item1], [item2]], budget=6, pad_id=0, carried=()
+    )
+    payload = batch_assembly.to_rl_trainer_payload(chunk, max_segments=2)
+    self.assertIs(payload.completion_ids, chunk.ids)
+    self.assertIs(payload.completion_mask, chunk.completion_mask)
+    self.assertIs(payload.advantages, chunk.advantages)
+    self.assertIs(payload.segment_ids, chunk.segment_ids)
+    self.assertIs(payload.segment_positions, chunk.segment_positions)
 
   def _make_streaming_payload(
       self,
@@ -1674,8 +1717,13 @@ class RoutedExpertsAlignmentTest(absltest.TestCase):
         [_routing(prompt_len, 7), _routing(completion_len, 9)], axis=0
     )
 
-    out = batch_assembly._routed_experts_aligned(  # pylint: disable=protected-access
-        routed, prompt_len, completion_len, max_prompt, max_response
+    out = np.full(
+        (max_prompt + max_response, _ROUTING_LAYERS, _ROUTING_TOP_K),
+        _UNSET,
+        dtype=np.int16,
+    )
+    batch_assembly._routed_experts_aligned(  # pylint: disable=protected-access
+        routed, prompt_len, completion_len, max_prompt, max_response, out=out
     )
 
     self.assertEqual(out.dtype, np.int16)
@@ -1699,7 +1747,10 @@ class RoutedExpertsAlignmentTest(absltest.TestCase):
         (4, _ROUTING_LAYERS, _ROUTING_TOP_K),
     )
     routed = np.concatenate([prompt, _routing(1, 9)], axis=0)
-    out = batch_assembly._routed_experts_aligned(routed, 4, 1, 2, 3)  # pylint: disable=protected-access
+    out = np.full((5, _ROUTING_LAYERS, _ROUTING_TOP_K), _UNSET, dtype=np.int16)
+    batch_assembly._routed_experts_aligned(  # pylint: disable=protected-access
+        routed, 4, 1, 2, 3, out=out
+    )
     # Prompt rows 0 and 1 are dropped; 2 and 3 survive, in order.
     np.testing.assert_array_equal(out[0], 2)
     np.testing.assert_array_equal(out[1], 3)
@@ -1758,6 +1809,42 @@ class PaddedBatchAssemblerRoutingTest(absltest.TestCase):
     self.assertEqual(int(routed[0, self.MAX_PROMPT, 0, 0]), 1)
     self.assertEqual(int(routed[1, self.MAX_PROMPT, 0, 0]), 2)
 
+  def test_pack_does_not_double_allocate_routed_experts_buffer(self):
+    assembler = batch_assembly.PaddedBatchAssembler(
+        batch_size=4,
+        max_prompt_length=512,
+        max_response_length=512,
+        pad_id=0,
+        num_generations=2,
+        mini_batch_size=2,
+    )
+    items = [
+        dataclasses.replace(
+            self._payload(i + 1, with_routing=False),
+            routed_experts=np.full((5, 16, 4), i + 1, dtype=np.int16),
+        )
+        for i in range(4)
+    ]
+    was_tracing = tracemalloc.is_tracing()
+    if not was_tracing:
+      tracemalloc.start()
+    try:
+      base_bytes, _ = tracemalloc.get_traced_memory()
+      tracemalloc.reset_peak()
+      [packed] = assembler.pack(items)
+      retained_bytes, peak_bytes = tracemalloc.get_traced_memory()
+    finally:
+      if not was_tracing:
+        tracemalloc.stop()
+
+    self.assertIsNotNone(packed.routed_experts)
+    net_retained = retained_bytes - base_bytes
+    net_peak = peak_bytes - base_bytes
+    # Pre-allocating the batch buffer (~565 KB for [4, 1024, 16, 4] int16 +
+    # token/mask arrays) avoids the ~2x np.stack peak spike (~1.09 MB).
+    self.assertGreater(net_retained, 500_000)
+    self.assertLess(net_peak, net_retained * 1.10)
+
   def test_partial_capture_disables_replay_for_the_batch(self):
     """A half-replayed batch would silently mix replayed and fresh routing."""
     packed = self._assembler().pack(
@@ -1771,7 +1858,6 @@ class PaddedBatchAssemblerRoutingTest(absltest.TestCase):
     routed = packed[0].routed_experts
     self.assertEqual(routed.shape[0], 2)
     np.testing.assert_array_equal(routed[1], _UNSET)
-
 
   def _make_streaming_payload(
       self,
@@ -2047,4 +2133,3 @@ class CreateBatchAssemblerTest(absltest.TestCase):
 
 if __name__ == "__main__":
   absltest.main()
-
