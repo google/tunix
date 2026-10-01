@@ -96,6 +96,7 @@ export PATHWAYS_PROXY_EXTRA_ARGS="${PATHWAYS_PROXY_EXTRA_ARGS:-${_rollout_xla_fl
 # Evaluation & DeepSWE Pipeline Configuration
 # ==============================================================================
 export NUM_GENERATIONS="${NUM_GENERATIONS:-4}"
+export BATCH_SIZE="${BATCH_SIZE:-64}"
 export DATASET_SPLIT="${DATASET_SPLIT:-validation}"
 export TASKS_LIMIT="${TASKS_LIMIT:-0}"
 
@@ -107,6 +108,8 @@ export DEBUG=${DEBUG:-0}
 
 # DeepSWE Environment & Agent Sandbox
 export DATASET_PATH="${DATASET_PATH:-gs://mlperf_dataset/benchmark-r2e-gym-easy}"
+export MAX_WARMPOOL_REPLICAS="${MAX_WARMPOOL_REPLICAS:-16}"
+export MAX_CONCURRENCY="${MAX_CONCURRENCY:-256}"
 export SANDBOX_TOLERATIONS='[{"key":"workload","operator":"Equal","value":"sandbox","effect":"NoSchedule"}]'
 export IMAGE_REWRITE_PREFIX="${IMAGE_REWRITE_PREFIX:-us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/}"
 export ENABLE_THINKING="${ENABLE_THINKING:-false}"
