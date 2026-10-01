@@ -19,7 +19,9 @@ class InMemoryTrajectoryReaderTest(store_testing.TrajectoryReaderTestCase):
           | None
       ) = None,
   ) -> store.TrajectoryReader:
-    mem_store = in_memory_store.InMemoryTrajectoryStore()
+    mem_store = in_memory_store.InMemoryTrajectoryStore(
+        metadata_cls=trajectory_lib.TrajectoryMetadata
+    )
     if initial_data:
       for meta, steps in initial_data:
         for step in steps:
@@ -34,12 +36,16 @@ class InMemoryTrajectoryWriterTest(store_testing.TrajectoryWriterTestCase):
   def _create_reader_and_writer(
       self,
   ) -> tuple[store.TrajectoryReader, store.TrajectoryWriter]:
-    mem_store = in_memory_store.InMemoryTrajectoryStore()
+    mem_store = in_memory_store.InMemoryTrajectoryStore(
+        metadata_cls=trajectory_lib.TrajectoryMetadata
+    )
     return mem_store, mem_store
 
   def test_update_metadata(self) -> None:
     """Verifies that updating metadata in-memory updates the stored metadata."""
-    mem_store = in_memory_store.InMemoryTrajectoryStore()
+    mem_store = in_memory_store.InMemoryTrajectoryStore(
+        metadata_cls=trajectory_lib.TrajectoryMetadata
+    )
     meta = trajectory_lib.TrajectoryMetadata(
         trajectory_id="t1",
         agent=trajectory_lib.Agent(name="a1", version="1.0"),
@@ -56,7 +62,9 @@ class InMemoryTrajectoryWriterTest(store_testing.TrajectoryWriterTestCase):
 
   def test_tunix_trajectory_with_step_zero(self) -> None:
     """Verifies storing and retrieving TunixTrajectoryMetadata and TunixTrajectory with step_id=0."""
-    mem_store = in_memory_store.InMemoryTrajectoryStore()
+    mem_store = in_memory_store.InMemoryTrajectoryStore(
+        metadata_cls=trajectory_lib.TunixTrajectoryMetadata
+    )
     meta = trajectory_lib.TunixTrajectoryMetadata(
         trajectory_id="tunix_1",
         agent=trajectory_lib.Agent(name="a1", version="1.0"),
@@ -80,7 +88,9 @@ class InMemoryTrajectoryWriterTest(store_testing.TrajectoryWriterTestCase):
 
   def test_metadata_mutation_isolation(self) -> None:
     """Verifies that mutating returned metadata does not alter internal store state."""
-    mem_store = in_memory_store.InMemoryTrajectoryStore()
+    mem_store = in_memory_store.InMemoryTrajectoryStore(
+        metadata_cls=trajectory_lib.TrajectoryMetadata
+    )
     meta = trajectory_lib.TrajectoryMetadata(
         trajectory_id="iso_1",
         agent=trajectory_lib.Agent(name="a1", version="1.0"),

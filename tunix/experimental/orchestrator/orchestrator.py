@@ -35,6 +35,7 @@ from tunix.experimental.orchestrator import rl_program
 from tunix.experimental.orchestrator import startup_validation
 from tunix.experimental.orchestrator import worker_registry
 from tunix.experimental.trajectory import store as trajectory_store_lib
+from tunix.experimental.trajectory import trajectory as trajectory_lib
 from tunix.experimental.worker import abstract_worker
 from tunix.experimental.worker import remote_execution
 
@@ -94,8 +95,18 @@ class ClusterOrchestrator:
     # `trajectory_store` argument.
     # TODO(sizhi): Wire active trajectory reads/writes between
     # orchestrator/program and rollout workers in follow-up CLs.
+    store_config = (
+        {
+            "metadata_type": (
+                trajectory_lib.TunixTrajectoryMetadata.METADATA_TYPE
+            ),
+            **trajectory_store_config,
+        }
+        if trajectory_store_config is not None
+        else None
+    )
     self.trajectory_store = trajectory_store_lib.TrajectoryStore.from_config(
-        trajectory_store_config
+        store_config
     )
     if self.trajectory_store is not None:
       # Logged so a config mismatch between this process and its workers is one

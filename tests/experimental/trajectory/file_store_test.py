@@ -2,6 +2,7 @@
 
 import tempfile
 import threading
+from typing import Any, ClassVar, Sequence
 from unittest import mock
 
 from absl import logging
@@ -13,6 +14,38 @@ from tunix.experimental.trajectory import store
 from tunix.experimental.trajectory import store_testing
 from tunix.experimental.trajectory import trajectory as trajectory_lib
 from tunix.experimental.trajectory import trajectory_testing
+
+# `trajectory.py` uses `from __future__ import annotations`, so the field
+# annotations of `Trajectory` are strings naming these symbols. Parametrizing
+# it below (`Trajectory[Step]`) builds the concrete model in *this* module, so
+# the names have to resolve here for `model_rebuild` to succeed.
+from tunix.experimental.trajectory.trajectory import Step  # pylint: disable=g-importing-member,unused-import
+from tunix.experimental.trajectory.trajectory import StepT  # pylint: disable=g-importing-member,unused-import
+from tunix.experimental.trajectory.trajectory import Trajectory  # pylint: disable=g-importing-member,unused-import
+
+
+class _CustomMetadata(trajectory_lib.TrajectoryMetadata):
+  METADATA_TYPE: ClassVar[str] = "file_store_test_custom"
+  custom_tag: str = ""
+
+  def create_trajectory(
+      self,
+      steps: Sequence[Any] | None = None,
+      subagent_trajectories: Sequence[Any] | None = None,
+  ) -> "_CustomTrajectory":
+    """Creates a _CustomTrajectory, mirroring TunixTrajectoryMetadata."""
+    return self._create_paired_trajectory(
+        _CustomTrajectory, steps, subagent_trajectories
+    )
+
+
+class _CustomTrajectory(
+    _CustomMetadata, trajectory_lib.Trajectory[trajectory_lib.Step]
+):
+  subagent_trajectories: list["_CustomTrajectory"] | None = None
+
+
+_CustomTrajectory.model_rebuild()
 
 
 class FileTrajectoryReaderTest(store_testing.TrajectoryReaderTestCase):
@@ -31,7 +64,9 @@ class FileTrajectoryReaderTest(store_testing.TrajectoryReaderTestCase):
   ) -> store.TrajectoryReader:
     tmp_dir = epath.Path(self.enter_context(tempfile.TemporaryDirectory()))
     file_s = file_store.FileTrajectoryStore(
-        root_dir=tmp_dir, run_id="test_reader_run"
+        root_dir=tmp_dir,
+        run_id="test_reader_run",
+        metadata_cls=trajectory_lib.TrajectoryMetadata,
     )
     if initial_data:
       for meta, steps in initial_data:
@@ -49,7 +84,9 @@ class FileTrajectoryWriterTest(store_testing.TrajectoryWriterTestCase):
   ) -> tuple[store.TrajectoryReader, store.TrajectoryWriter]:
     tmp_dir = epath.Path(self.enter_context(tempfile.TemporaryDirectory()))
     file_s = file_store.FileTrajectoryStore(
-        root_dir=tmp_dir, run_id="test_writer_run"
+        root_dir=tmp_dir,
+        run_id="test_writer_run",
+        metadata_cls=trajectory_lib.TrajectoryMetadata,
     )
     return file_s, file_s
 
@@ -60,7 +97,9 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
   def setUp(self) -> None:
     super().setUp()
     self.tmp_dir = epath.Path(self.enter_context(tempfile.TemporaryDirectory()))
-    self.file_s = file_store.FileTrajectoryStore(root_dir=self.tmp_dir)
+    self.file_s = file_store.FileTrajectoryStore(
+        root_dir=self.tmp_dir, metadata_cls=trajectory_lib.TrajectoryMetadata
+    )
 
   def test_root_dir_without_run_id(self) -> None:
     """Verifies root_dir directly returns base directory when run_id is omitted."""
@@ -69,7 +108,9 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
   def test_root_dir_with_run_id(self) -> None:
     """Verifies root_dir is scoped under root_dir / run_id when run_id is provided."""
     file_s_with_run = file_store.FileTrajectoryStore(
-        root_dir=self.tmp_dir, run_id="my_run_123"
+        root_dir=self.tmp_dir,
+        run_id="my_run_123",
+        metadata_cls=trajectory_lib.TrajectoryMetadata,
     )
     self.assertEqual(file_s_with_run.root_dir, self.tmp_dir / "my_run_123")
 
@@ -309,7 +350,8 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
     with mock.patch.object(
         self.file_s._writer, "_process_task", side_effect=blocking_process_task
     ):
-      # add_step should enqueue task and return immediately while worker loop is blocked.
+      # add_step should enqueue task and return immediately while worker loop
+      # is blocked.
       self.file_s.add_step(
           trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1
       )
@@ -628,7 +670,9 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
 
     # Instance 1: write initial steps.
     store_instance_1 = file_store.FileTrajectoryStore(
-        root_dir=self.tmp_dir, run_id=run_id
+        root_dir=self.tmp_dir,
+        run_id=run_id,
+        metadata_cls=trajectory_lib.TrajectoryMetadata,
     )
 
     meta = trajectory_testing.METADATA_2
@@ -637,7 +681,9 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
 
     # Instance 2: new process reading and appending to same run_id.
     store_instance_2 = file_store.FileTrajectoryStore(
-        root_dir=self.tmp_dir, run_id=run_id
+        root_dir=self.tmp_dir,
+        run_id=run_id,
+        metadata_cls=trajectory_lib.TrajectoryMetadata,
     )
 
     metas_2 = store_instance_2.get_trajectories_metadata()
@@ -651,7 +697,9 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
 
     # Instance 3: verify complete recovered state.
     store_instance_3 = file_store.FileTrajectoryStore(
-        root_dir=self.tmp_dir, run_id=run_id
+        root_dir=self.tmp_dir,
+        run_id=run_id,
+        metadata_cls=trajectory_lib.TrajectoryMetadata,
     )
     (recovered_traj,) = store_instance_3.get_trajectories(
         [trajectory_testing.TRAJECTORY_ID_2]
@@ -676,7 +724,9 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
 
   def test_context_manager_closes_store_on_exit(self) -> None:
     """Verifies the store persists pending writes when used as a context manager."""
-    with file_store.FileTrajectoryStore(root_dir=self.tmp_dir) as file_s:
+    with file_store.FileTrajectoryStore(
+        root_dir=self.tmp_dir, metadata_cls=trajectory_lib.TrajectoryMetadata
+    ) as file_s:
       file_s.add_step(
           trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1
       )
@@ -692,8 +742,121 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
   ) -> None:
     """Verifies get_trajectories_metadata on a non-existent root_dir gracefully returns empty list."""
     nonexistent_root = self.tmp_dir / "does_not_exist"
-    store_instance = file_store.FileTrajectoryStore(root_dir=nonexistent_root)
+    store_instance = file_store.FileTrajectoryStore(
+        root_dir=nonexistent_root,
+        metadata_cls=trajectory_lib.TrajectoryMetadata,
+    )
     self.assertEmpty(store_instance.get_trajectories_metadata())
+
+  def test_tunix_trajectory_with_step_zero(self) -> None:
+    """Verifies storing and retrieving TunixTrajectoryMetadata and TunixTrajectory with step_id=0."""
+    tunix_store = file_store.FileTrajectoryStore(
+        root_dir=self.tmp_dir,
+        run_id="tunix_run",
+        metadata_cls=trajectory_lib.TunixTrajectoryMetadata,
+    )
+    meta = trajectory_lib.TunixTrajectoryMetadata(
+        trajectory_id="tunix_1",
+        agent=trajectory_lib.Agent(name="a1", version="1.0"),
+        status="RUNNING",
+    )
+    step0 = trajectory_lib.TunixEnvStep(
+        step_id=0, source=trajectory_lib.Source.USER, message="prompt"
+    )
+    step1 = trajectory_lib.TunixAgentStep(
+        step_id=1, source=trajectory_lib.Source.AGENT, message="response"
+    )
+    tunix_store.add_step(step0, meta)
+    tunix_store.add_step(step1, meta)
+    tunix_store.flush()
+
+    metas = tunix_store.get_trajectories_metadata(["tunix_1"])
+    self.assertLen(metas, 1)
+    self.assertIsInstance(metas[0], trajectory_lib.TunixTrajectoryMetadata)
+    self.assertEqual(metas[0].status, "RUNNING")
+
+    trajs = tunix_store.get_trajectories(["tunix_1"])
+    self.assertLen(trajs, 1)
+    self.assertIsInstance(trajs[0], trajectory_lib.TunixTrajectory)
+    self.assertEqual(trajs[0].steps[0].step_id, 0)
+    self.assertEqual(trajs[0].steps[1].step_id, 1)
+    self.assertIsInstance(trajs[0].steps[0], trajectory_lib.TunixEnvStep)
+    self.assertIsInstance(trajs[0].steps[1], trajectory_lib.TunixAgentStep)
+
+  def test_custom_metadata_and_trajectory_subclass(self) -> None:
+    """Verifies FileTrajectoryStore supports custom metadata and trajectory types."""
+    custom_store = file_store.FileTrajectoryStore(
+        root_dir=self.tmp_dir, run_id="custom_run", metadata_cls=_CustomMetadata
+    )
+    meta = _CustomMetadata(
+        trajectory_id="custom_1",
+        agent=trajectory_lib.Agent(name="custom_agent", version="1.0"),
+        custom_tag="experiment_42",
+    )
+    step = trajectory_lib.Step(
+        step_id=1, source=trajectory_lib.Source.AGENT, message="custom step"
+    )
+    custom_store.add_step(step, meta)
+    custom_store.flush()
+
+    metas = custom_store.get_trajectories_metadata(["custom_1"])
+    self.assertLen(metas, 1)
+    self.assertIsInstance(metas[0], _CustomMetadata)
+    self.assertEqual(metas[0].custom_tag, "experiment_42")
+
+    trajs = custom_store.get_trajectories(["custom_1"])
+    self.assertLen(trajs, 1)
+    self.assertIsInstance(trajs[0], _CustomTrajectory)
+    self.assertEqual(trajs[0].custom_tag, "experiment_42")
+    self.assertLen(trajs[0].steps, 1)
+    self.assertEqual(trajs[0].steps[0].message, "custom step")
+
+  def test_base_metadata_cls_reads_subclass_fields_losslessly(self) -> None:
+    """Verifies a base store reads a subclass-written run without loss.
+
+    Metadata is persisted in its base ATIF form, so a store built with
+    `metadata_cls=TrajectoryMetadata` (e.g. generic tooling) returns it with
+    subclass-only fields packed under `extra[TUNIX_EXTENSIONS_KEY]`, and
+    `from_atif_metadata` on the subclass recovers exactly what was written.
+    """
+    written = trajectory_lib.TunixTrajectoryMetadata(
+        trajectory_id="base_read_1",
+        agent=trajectory_lib.Agent(name="a1", version="1.0"),
+        status="RUNNING",
+    )
+    writer = file_store.FileTrajectoryStore(
+        root_dir=self.tmp_dir,
+        run_id="base_read_run",
+        metadata_cls=trajectory_lib.TunixTrajectoryMetadata,
+    )
+    writer.add_step(
+        trajectory_lib.TunixEnvStep(
+            step_id=0, source=trajectory_lib.Source.USER, message="prompt"
+        ),
+        written,
+    )
+    writer.flush()
+
+    reader = file_store.FileTrajectoryStore(
+        root_dir=self.tmp_dir,
+        run_id="base_read_run",
+        metadata_cls=trajectory_lib.TrajectoryMetadata,
+    )
+    (meta,) = reader.get_trajectories_metadata(["base_read_1"])
+    self.assertIs(type(meta), trajectory_lib.TrajectoryMetadata)
+    self.assertEqual(meta.get_extensions()["status"], "RUNNING")
+    self.assertEqual(
+        trajectory_lib.TunixTrajectoryMetadata.from_atif_metadata(meta),
+        written,
+    )
+
+  def test_non_metadata_cls_raises_at_construction(self) -> None:
+    """Verifies a metadata_cls that is not a TrajectoryMetadata is rejected."""
+    with self.assertRaisesRegex(TypeError, "TrajectoryMetadata subclass"):
+      file_store.FileTrajectoryStore(
+          root_dir=self.tmp_dir,
+          metadata_cls=trajectory_lib.Step,  # pyrefly: ignore[bad-argument-type]
+      )
 
 
 if __name__ == "__main__":
