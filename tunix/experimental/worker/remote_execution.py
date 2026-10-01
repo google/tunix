@@ -106,6 +106,71 @@ _MAX_CHUNKS = 1 << 17
 # is still making progress never expires.
 _CHUNK_UPLOAD_TTL_S = 300.0
 
+_BENCH_LOCK = threading.Lock()
+_BENCH_TRACKED_METHODS = frozenset({
+    "fwd_bwd",
+    "update",
+    "get_metrics",
+    "per_token_logps",
+    "eval_step",
+})
+_CLIENT_RPC_TIMINGS: List[Dict[str, Any]] = []
+_SERVER_RPC_TIMINGS: List[Dict[str, Any]] = []
+_TRAINER_STAGE_TIMINGS: List[Dict[str, Any]] = []
+_CLIENT_STAGE_TIMINGS: List[Dict[str, Any]] = []
+
+
+def _utc_ts() -> str:
+  """Returns an ISO-8601 UTC timestamp with millisecond precision."""
+  now = time.time()
+  sec = int(now)
+  ms = int((now - sec) * 1000)
+  return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(sec)) + f".{ms:03d}Z"
+
+
+def pop_client_rpc_timings() -> List[Dict[str, Any]]:
+  """Returns and clears buffered client-side RPC timing records."""
+  with _BENCH_LOCK:
+    out = list(_CLIENT_RPC_TIMINGS)
+    _CLIENT_RPC_TIMINGS.clear()
+    return out
+
+
+def record_client_stage_timing(**metrics: float) -> None:
+  """Records orchestrator-side stage latency metrics (in ms) for the current step."""
+  with _BENCH_LOCK:
+    _CLIENT_STAGE_TIMINGS.append(dict(metrics))
+
+
+def pop_client_stage_timings() -> List[Dict[str, Any]]:
+  """Returns and clears buffered orchestrator-side stage timing records."""
+  with _BENCH_LOCK:
+    out = list(_CLIENT_STAGE_TIMINGS)
+    _CLIENT_STAGE_TIMINGS.clear()
+    return out
+
+
+def pop_server_rpc_timings() -> List[Dict[str, Any]]:
+  """Returns and clears buffered server-side RPC timing records."""
+  with _BENCH_LOCK:
+    out = list(_SERVER_RPC_TIMINGS)
+    _SERVER_RPC_TIMINGS.clear()
+    return out
+
+
+def record_trainer_stage_timing(**metrics: float) -> None:
+  """Records trainer-side stage latency metrics (in ms) for the current step."""
+  with _BENCH_LOCK:
+    _TRAINER_STAGE_TIMINGS.append(dict(metrics))
+
+
+def pop_trainer_stage_timings() -> List[Dict[str, Any]]:
+  """Returns and clears buffered trainer-side stage timing records."""
+  with _BENCH_LOCK:
+    out = list(_TRAINER_STAGE_TIMINGS)
+    _TRAINER_STAGE_TIMINGS.clear()
+    return out
+
 
 def _grpc_options() -> List[Tuple[str, int]]:
   """Channel/server options lifting the message-size cap and enabling keepalive."""
@@ -464,16 +529,60 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
 
   async def _handle_execute(self, request_bytes: bytes, context: Any) -> bytes:
     del context
+    method_name = None
+    raw_mib = 0.0
     try:
-      request = ExecutionRequest.deserialize(self._reassemble(request_bytes))
+      ts_recv_start = _utc_ts()
+      t_re0 = time.perf_counter()
+      raw_bytes = self._reassemble(request_bytes)
+      reassemble_ms = (time.perf_counter() - t_re0) * 1000.0
+      t_des0 = time.perf_counter()
+      request = ExecutionRequest.deserialize(raw_bytes)
+      deserialize_ms = (time.perf_counter() - t_des0) * 1000.0
+      ts_recv_end = _utc_ts()
+      method_name = request.method_name
+      raw_mib = len(raw_bytes) / (1024.0 * 1024.0)
+      if method_name in _BENCH_TRACKED_METHODS or raw_mib >= 1.0:
+        logging.info(
+            "[BENCH_TIMING][trainer.rpc_recv] start_ts=%s end_ts=%s method=%s"
+            " raw_MiB=%.2f reassemble_ms=%.2f deserialize_ms=%.2f",
+            ts_recv_start,
+            ts_recv_end,
+            method_name,
+            raw_mib,
+            reassemble_ms,
+            deserialize_ms,
+        )
+        with _BENCH_LOCK:
+          _SERVER_RPC_TIMINGS.append({
+              "method": method_name,
+              "raw_mib": raw_mib,
+              "reassemble_ms": reassemble_ms,
+              "deserialize_ms": deserialize_ms,
+          })
+      t_exec0 = time.perf_counter()
       response = await self.execute_request(request)
+      exec_ms = (time.perf_counter() - t_exec0) * 1000.0
     except Exception as e:  # pylint: disable=broad-exception-caught
+      exec_ms = 0.0
       response = ExecutionResponse(
           error_message=str(e),
           error_type=type(e).__name__,
           traceback=traceback_lib.format_exc(),
       )
-    return response.serialize()
+    t_ser0 = time.perf_counter()
+    resp_bytes = response.serialize()
+    resp_ser_ms = (time.perf_counter() - t_ser0) * 1000.0
+    if method_name in _BENCH_TRACKED_METHODS or raw_mib >= 1.0:
+      logging.info(
+          "[BENCH_TIMING][trainer.rpc_done] end_ts=%s method=%s"
+          " exec_ms=%.2f resp_serialize_ms=%.2f",
+          _utc_ts(),
+          method_name,
+          exec_ms,
+          resp_ser_ms,
+      )
+    return resp_bytes
 
   async def _handle_dispatch_task(
       self, request_bytes: bytes, context: Any
@@ -730,13 +839,25 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
         response_deserializer=lambda b: ExecutionResponse.deserialize(b),
     )
 
-  async def _encode_request(
+  async def _encode_request_with_stats(
       self, channel: Any, request: ExecutionRequest
-  ) -> bytes:
+  ) -> Tuple[bytes, Dict[str, Any]]:
     """Serializes `request`, uploading it via PutChunk if it is too big for one message."""
+    t_ser0 = time.perf_counter()
     payload = request.serialize()
-    if len(payload) <= _CHUNK_BYTES:
-      return payload
+    t_ser1 = time.perf_counter()
+    serialize_ms = (t_ser1 - t_ser0) * 1000.0
+    payload_bytes = len(payload)
+    if payload_bytes <= _CHUNK_BYTES:
+      ts = _utc_ts()
+      return payload, {
+          "serialize_ms": serialize_ms,
+          "payload_bytes": payload_bytes,
+          "chunks": 1,
+          "upload_ms": 0.0,
+          "upload_start_ts": ts,
+          "upload_end_ts": ts,
+      }
     put_chunk = channel.unary_unary(
         "/tunix.ExecutionService/PutChunk",
         request_serializer=lambda b: b,
@@ -744,18 +865,24 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     )
     upload_id = uuid.uuid4().bytes
     view = memoryview(payload)
-    total = -(-len(payload) // _CHUNK_BYTES)
+    total = -(-payload_bytes // _CHUNK_BYTES)
     if total > _MAX_CHUNKS:
       raise ValueError(
           f"request {request.method_name} needs {total} chunks of"
           f" {_CHUNK_BYTES} bytes, over the {_MAX_CHUNKS} the server accepts;"
           " raise TUNIX_GRPC_CHUNK_BYTES"
       )
+    upload_start_ts = _utc_ts()
+    t_up0 = time.perf_counter()
     logging.info(
-        "Request %s is %.2f GiB; uploading in %d chunks",
+        "[BENCH_TIMING][client_upload_start] ts=%s method=%s target=%s"
+        " payload_MiB=%.2f chunks=%d serialize_ms=%.2f",
+        upload_start_ts,
         request.method_name,
-        len(payload) / 2**30,
+        self._host_port,
+        payload_bytes / (1024.0 * 1024.0),
         total,
+        serialize_ms,
     )
     chunk_timeout = self._effective_rpc_timeout(request.method_name)
     for index in range(total):
@@ -764,7 +891,78 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
           _CHUNK_HEADER.pack(upload_id, index, total) + chunk,
           timeout=chunk_timeout,
       )
-    return _CHUNKED_MAGIC + upload_id
+    t_up1 = time.perf_counter()
+    upload_end_ts = _utc_ts()
+    upload_ms = (t_up1 - t_up0) * 1000.0
+    logging.info(
+        "[BENCH_TIMING][client_upload_end] ts=%s method=%s target=%s"
+        " payload_MiB=%.2f chunks=%d upload_ms=%.2f",
+        upload_end_ts,
+        request.method_name,
+        self._host_port,
+        payload_bytes / (1024.0 * 1024.0),
+        total,
+        upload_ms,
+    )
+    return _CHUNKED_MAGIC + upload_id, {
+        "serialize_ms": serialize_ms,
+        "payload_bytes": payload_bytes,
+        "chunks": total,
+        "upload_ms": upload_ms,
+        "upload_start_ts": upload_start_ts,
+        "upload_end_ts": upload_end_ts,
+    }
+
+  async def _encode_request(
+      self, channel: Any, request: ExecutionRequest
+  ) -> bytes:
+    """Serializes `request`, uploading it via PutChunk if it is too big for one message."""
+    wire_bytes, _ = await self._encode_request_with_stats(channel, request)
+    return wire_bytes
+
+  def _record_client_rpc_timing(
+      self,
+      method_name: Optional[str],
+      encode_stats: Dict[str, Any],
+      execute_rpc_ms: float,
+      total_rpc_ms: float,
+      rpc_start_ts: str,
+      rpc_end_ts: str,
+  ) -> None:
+    if method_name not in _BENCH_TRACKED_METHODS:
+      return
+    payload_mib = encode_stats["payload_bytes"] / (1024.0 * 1024.0)
+    entry = {
+        "method": method_name,
+        "target": self._host_port,
+        "rpc_start_ts": rpc_start_ts,
+        "rpc_end_ts": rpc_end_ts,
+        "upload_start_ts": encode_stats["upload_start_ts"],
+        "upload_end_ts": encode_stats["upload_end_ts"],
+        "serialize_ms": encode_stats["serialize_ms"],
+        "upload_ms": encode_stats["upload_ms"],
+        "execute_rpc_ms": execute_rpc_ms,
+        "total_rpc_ms": total_rpc_ms,
+        "payload_mib": payload_mib,
+        "chunks": encode_stats["chunks"],
+    }
+    with _BENCH_LOCK:
+      _CLIENT_RPC_TIMINGS.append(entry)
+    logging.info(
+        "[BENCH_TIMING][client_rpc] start_ts=%s end_ts=%s method=%s target=%s"
+        " payload_MiB=%.2f chunks=%d serialize_ms=%.2f upload_ms=%.2f"
+        " execute_rpc_ms=%.2f total_rpc_ms=%.2f",
+        rpc_start_ts,
+        rpc_end_ts,
+        method_name,
+        self._host_port,
+        payload_mib,
+        encode_stats["chunks"],
+        encode_stats["serialize_ms"],
+        encode_stats["upload_ms"],
+        execute_rpc_ms,
+        total_rpc_ms,
+    )
 
   def _get_rpc(self) -> Any:
     if self._rpc is None:
@@ -818,12 +1016,28 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
           self._host_port, options=_grpc_options()
       )
       self._sync_rpc = self._make_rpc(self._sync_channel)
+    rpc_start_ts = _utc_ts()
+    t0 = time.perf_counter()
     request = ExecutionRequest(
         method_name=method_name, args=args, kwargs=kwargs
     )
+    wire_bytes, encode_stats = await self._encode_request_with_stats(
+        self._sync_channel, request
+    )
+    t_exec0 = time.perf_counter()
     response: ExecutionResponse = await self._sync_rpc(
-        await self._encode_request(self._sync_channel, request),
+        wire_bytes,
         timeout=self._effective_rpc_timeout(method_name),
+    )
+    t_exec1 = time.perf_counter()
+    rpc_end_ts = _utc_ts()
+    self._record_client_rpc_timing(
+        method_name=method_name,
+        encode_stats=encode_stats,
+        execute_rpc_ms=(t_exec1 - t_exec0) * 1000.0,
+        total_rpc_ms=(t_exec1 - t0) * 1000.0,
+        rpc_start_ts=rpc_start_ts,
+        rpc_end_ts=rpc_end_ts,
     )
     return response.unwrap()
 
@@ -832,12 +1046,28 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
   ) -> Any:
     """Asynchronously invokes remote method over gRPC."""
     rpc = self._get_rpc()
+    rpc_start_ts = _utc_ts()
+    t0 = time.perf_counter()
     request = ExecutionRequest(
         method_name=method_name, args=args, kwargs=kwargs
     )
+    wire_bytes, encode_stats = await self._encode_request_with_stats(
+        self._channel, request
+    )
+    t_exec0 = time.perf_counter()
     response: ExecutionResponse = await rpc(
-        await self._encode_request(self._channel, request),
+        wire_bytes,
         timeout=self._effective_rpc_timeout(method_name),
+    )
+    t_exec1 = time.perf_counter()
+    rpc_end_ts = _utc_ts()
+    self._record_client_rpc_timing(
+        method_name=method_name,
+        encode_stats=encode_stats,
+        execute_rpc_ms=(t_exec1 - t_exec0) * 1000.0,
+        total_rpc_ms=(t_exec1 - t0) * 1000.0,
+        rpc_start_ts=rpc_start_ts,
+        rpc_end_ts=rpc_end_ts,
     )
     return response.unwrap()
 
