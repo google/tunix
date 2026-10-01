@@ -1590,6 +1590,7 @@ class ResponseBudgetAnnotationTest(absltest.TestCase):
         agent=agent,
         tokenizer=tokenizer,
         chat_parser=parser,
+        partial_rollout=True,
     )
 
     async def _run():
@@ -1606,6 +1607,30 @@ class ResponseBudgetAnnotationTest(absltest.TestCase):
     self.assertEqual(item.traj["policy_version"], 2)
     self.assertEqual(item.metadata["turn_policy_versions"], [2, 3])
     self.assertEqual(item.metadata["policy_version"], 2)
+
+    # Also verify cancel() while paused wakes model_call and raises RuntimeError without calling sampler.sample().
+    sampler_cancel = _VersionedTwoTurnSampler([2, 3])
+    engine_cancel = collector.TrajectoryCollectorEngine(
+        traj_id="traj_cancel_paused",
+        request=req,
+        sampler=sampler_cancel,
+        env_client=_TwoTurnEnv(),
+        agent=agent,
+        tokenizer=tokenizer,
+        chat_parser=parser,
+        partial_rollout=True,
+    )
+
+    async def _run_cancel():
+      engine_cancel.pause()
+      ep_task = asyncio.create_task(engine_cancel.run_episode())
+      await asyncio.sleep(0.02)
+      engine_cancel.cancel()
+      with self.assertRaisesRegex(RuntimeError, "Collector was cancelled"):
+        await ep_task
+
+    asyncio.run(_run_cancel())
+    self.assertEqual(sampler_cancel.calls, 0)
 
 
 if __name__ == "__main__":

@@ -137,6 +137,8 @@ class LoadInfo(datatypes.Response):
 class Sampler(Protocol):
   """Protocol defining standard lifecycle, sampling, and weight-sync interface for worker slices."""
 
+  _policy_version: int = 0
+
   # --- Lifecycle & Topology ---
   def initialize(self) -> None:
     """Initializes backend resources before serving requests."""

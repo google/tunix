@@ -76,8 +76,19 @@ class RLVllmSampler:
 
   supports_token_input: bool = True
 
-  def __init__(self, engine_args: AsyncEngineArgs):
+  def __init__(
+      self,
+      engine_args: AsyncEngineArgs,
+      partial_rollout: bool | None = None,
+  ):
     self.engine_args = engine_args
+    if partial_rollout is None:
+      partial_rollout = (
+          os.environ.get("PARTIAL_ROLLOUT", "false").lower()
+          in ("true", "1")
+      )
+    self._partial_rollout = bool(partial_rollout)
+    self._paused_with_generation = False
     self._engine: Any | None = None
     self._is_running = False
     self._is_paused = False
@@ -162,7 +173,7 @@ class RLVllmSampler:
 
   async def pause(
       self,
-      mode: str = "keep",
+      mode: str | None = None,
       clear_cache: bool = False,
       **kwargs: Any,
   ) -> None:
@@ -172,19 +183,21 @@ class RLVllmSampler:
       return
     self._is_paused = True
     self._unpaused_event.clear()
+    use_pause_gen = mode is not None or self._partial_rollout
     if self._engine:
       pause_gen = getattr(self._engine, "pause_generation", None)
-      if inspect.iscoroutinefunction(pause_gen):
+      if use_pause_gen and inspect.iscoroutinefunction(pause_gen):
+        effective_mode = mode or "keep"
         logger.info(
             "Pausing RLVllmSampler generation (mode=%s, clear_cache=%s)...",
-            mode,
+            effective_mode,
             clear_cache,
         )
-        await pause_gen(mode=mode, clear_cache=clear_cache)
-      elif inspect.iscoroutinefunction(
-          getattr(self._engine, "pause_background_loop", None)
-      ):
+        self._paused_with_generation = True
+        await pause_gen(mode=effective_mode, clear_cache=clear_cache)
+      elif hasattr(self._engine, "pause_background_loop"):
         logger.info("Pausing RLVllmSampler inference intake for weight sync...")
+        self._paused_with_generation = False
         await self._engine.pause_background_loop()
     await asyncio.sleep(0.01)
 
@@ -194,14 +207,14 @@ class RLVllmSampler:
     if not self._is_paused:
       self._unpaused_event.set()
       return
+    use_resume_gen = self._paused_with_generation or self._partial_rollout
+    self._paused_with_generation = False
     if self._engine:
       resume_gen = getattr(self._engine, "resume_generation", None)
-      if inspect.iscoroutinefunction(resume_gen):
+      if use_resume_gen and inspect.iscoroutinefunction(resume_gen):
         logger.info("Resuming RLVllmSampler generation...")
         await resume_gen()
-      elif inspect.iscoroutinefunction(
-          getattr(self._engine, "resume_background_loop", None)
-      ):
+      elif hasattr(self._engine, "resume_background_loop"):
         logger.info("Resuming RLVllmSampler inference serving...")
         await self._engine.resume_background_loop()
     self._is_paused = False
@@ -406,11 +419,11 @@ class RLVllmSampler:
       await self.start()
 
     turn_start_version = int(self._policy_version)
-    enable_prefix_caching = bool(
-        getattr(self.engine_args, "enable_prefix_caching", False)
-    )
+    enable_prefix_caching = bool(self.engine_args.enable_prefix_caching)
     cache_salt = (
-        f"policy_v{turn_start_version}" if enable_prefix_caching else None
+        f"policy_v{turn_start_version}"
+        if (self._partial_rollout and enable_prefix_caching)
+        else None
     )
 
     raw_input_mode = False
@@ -637,10 +650,12 @@ class RLVllmSampler:
     clear_cache=False)` without resetting the prefix cache.
     """
     del kwargs
-    self._policy_version = _get_val(
-        sync_request, "policy_version", self._policy_version
+    if sync_request is not None and sync_request.policy_version is not None:
+      self._policy_version = sync_request.policy_version
+    keep_active_kv = bool(
+        (preserve_active_kv_cache or self._partial_rollout)
+        and not free_kv_cache
     )
-    keep_active_kv = bool(preserve_active_kv_cache and not free_kv_cache)
     logger.info(
         "Executing pre_weight_sync (policy_version=%d, free_kv_cache=%s,"
         " preserve_active_kv_cache=%s)",
@@ -657,7 +672,7 @@ class RLVllmSampler:
     if keep_active_kv:
       await self.pause(mode="keep", clear_cache=False)
     else:
-      await self.pause(mode="wait", clear_cache=True)
+      await self.pause()
       await self._clear_prefix_cache()
 
     # Ensure any stale weight update session from an aborted round is closed
@@ -689,9 +704,6 @@ class RLVllmSampler:
     rid = None
     if sync_request is not None:
       rid = _get_val(sync_request, "req_id")
-      self._policy_version = _get_val(
-          sync_request, "policy_version", self._policy_version
-      )
     logger.info("Executing post_weight_sync (req_id=%s)...", rid)
 
     await self._call_worker_method("finish_weight_update")

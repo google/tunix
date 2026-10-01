@@ -970,9 +970,7 @@ class StandardRLProgram(RLProgram):
       if pol_ver is not None:
         staleness_list.append(float(max(0, consumed_policy_version - pol_ver)))
 
-      turn_vers = None
-      if hasattr(item, "metadata") and isinstance(item.metadata, dict):
-        turn_vers = item.metadata.get("turn_policy_versions")
+      turn_vers = item.metadata.get("turn_policy_versions")
       if turn_vers is None and isinstance(traj, dict):
         turn_vers = traj.get("turn_policy_versions")
       if isinstance(turn_vers, (list, tuple)) and turn_vers:

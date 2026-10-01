@@ -852,6 +852,7 @@ def _create_vllm_sampler(args, tokenizer):
       model_name=vllm_model,
       weight_sync_mode=args.weight_sync_mode,
       free_kv_cache_during_weight_sync=args.free_kv_cache_during_weight_sync,
+      partial_rollout=args.partial_rollout,
   )
   config = rollout_worker.RolloutConfig(
       sampler_type="vllm",

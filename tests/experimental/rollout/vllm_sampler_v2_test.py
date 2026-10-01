@@ -419,22 +419,22 @@ class TestRLVllmSamplerWeightSync(unittest.TestCase):
 
             mock_engine.pause_generation.reset_mock()
             mock_engine.reset_prefix_cache.reset_mock()
+            mock_engine.pause_background_loop = AsyncMock()
             await sampler.pre_weight_sync(
                 req_pre, free_kv_cache=False, preserve_active_kv_cache=False
             )
-            mock_engine.pause_generation.assert_awaited_once_with(
-                mode="wait", clear_cache=True
-            )
+            mock_engine.pause_generation.assert_not_awaited()
+            mock_engine.pause_background_loop.assert_awaited_once()
             mock_engine.reset_prefix_cache.assert_awaited_once()
 
         asyncio.run(run_test())
 
     def test_sample_turn_start_version_and_cache_salt(self):
-        """Verifies turn_start_version is captured before generate() and cache_salt is attached."""
+        """Verifies turn_start_version is captured before generate() and cache_salt is attached when partial_rollout=True."""
         args = AsyncEngineArgs(
             model="Qwen/Qwen2.5-1.5B", enable_prefix_caching=True
         )
-        sampler = RLVllmSampler(engine_args=args)
+        sampler = RLVllmSampler(engine_args=args, partial_rollout=True)
         sampler._policy_version = 3
         sampler._is_running = True
 

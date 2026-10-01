@@ -227,22 +227,30 @@ class RolloutManager:
       on_complete: Optional[Callable[[TrajectoryOrError], None]] = None,
   ) -> TrajectoryOrError:
     """Spawns an async task running the multi-turn episode loop concurrently."""
-    if self._traffic.state == datatypes.WorkerState.STOPPED:
-      raise traffic_controller_lib.AdmissionClosedError(
-          "rollout worker is stopped"
-      )
-    await self._traffic.wait_for_admission()
-    if self._traffic.state == datatypes.WorkerState.STOPPED:
-      raise traffic_controller_lib.AdmissionClosedError(
-          "rollout worker is stopped"
-      )
-    sampler_version = getattr(self.sampler, "_policy_version", None)
-    if isinstance(sampler_version, int) and not isinstance(
-        sampler_version, bool
-    ):
-      req_version = int(getattr(request, "target_policy_version", 0) or 0)
-      if sampler_version > req_version:
-        request.target_policy_version = sampler_version
+    partial = self._is_partial_rollout()
+    if partial:
+      if self._traffic.state == datatypes.WorkerState.STOPPED:
+        raise traffic_controller_lib.AdmissionClosedError(
+            "rollout worker is stopped"
+        )
+      await self._traffic.wait_for_admission()
+      if self._traffic.state == datatypes.WorkerState.STOPPED:
+        raise traffic_controller_lib.AdmissionClosedError(
+            "rollout worker is stopped"
+        )
+      if self.sampler is not None:
+        sampler_version = self.sampler._policy_version
+        if isinstance(sampler_version, int) and not isinstance(
+            sampler_version, bool
+        ):
+          req_version = int(request.target_policy_version or 0)
+          if sampler_version > req_version:
+            request.target_policy_version = sampler_version
+    else:
+      if not self._traffic.is_admission_open():
+        raise traffic_controller_lib.AdmissionClosedError(
+            "rollout admission is closed during weight sync"
+        )
     loop = asyncio.get_running_loop()
     future: asyncio.Future[TrajectoryOrError] = loop.create_future()
 
@@ -297,6 +305,7 @@ class RolloutManager:
         chat_parser=self.chat_parser,
         eos_ids=self.eos_ids,
         trajectory_store=self.trajectory_store,
+        partial_rollout=partial,
     )
 
     self._active_collectors[traj_id] = collector
