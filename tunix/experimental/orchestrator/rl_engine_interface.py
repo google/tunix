@@ -52,7 +52,6 @@ class AbstractRLEngine(Protocol):
       policy_version: int = 0,
       generation_args: datatypes.GenerationArgs | None = None,
       route_metadata: Mapping[str, Any] | None = None,
-      priority: int = 0,
       **kwargs: Any,
   ) -> list[str]:
     """High-level convenience: Expands prompts by num_generations and dispatches rollouts.
@@ -74,8 +73,6 @@ class AbstractRLEngine(Protocol):
       generation_args: Optional generation parameters (temperature, max steps).
       route_metadata: Optional routing metadata merged into each request's
         metadata.
-      priority: Sampler scheduling priority stamped on every request; lower
-        values are served first.
       **kwargs: Optional additional metadata.
 
     Returns:

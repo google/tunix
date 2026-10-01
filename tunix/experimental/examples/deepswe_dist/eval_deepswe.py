@@ -630,7 +630,7 @@ async def run_controller(a):
           num_generations=a.num_rollouts_per_instance,
           batch_size=a.batch_size,
           max_warmpool_replicas=a.max_warmpool_size,
-          unwarm_on_exhaustion=True,
+          unwarm_on_exhaustion=False,
           scaffold=a.scaffold,
           wait_initial=True,
       )

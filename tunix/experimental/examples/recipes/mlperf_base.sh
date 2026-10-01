@@ -85,8 +85,6 @@ export PRIORITY_CLASS="${PRIORITY_CLASS:-medium}"
 export KUEUE_PRIORITY_CLASS="${KUEUE_PRIORITY_CLASS:-${PRIORITY_CLASS}}"
 export SERVICE_ACCOUNT="${SERVICE_ACCOUNT:-xpk-sa}"
 export CPU_MACHINE="${CPU_MACHINE:-n2d-standard-64}"
-export CPU_NODEPOOL="${CPU_NODEPOOL:-cpu-highmem-np}"
-export CPU_MEMORY="${CPU_MEMORY:-300Gi}"
 
 # ==============================================================================
 # Fail-fast (see k8s_launcher.sh). `true`: a trainer/rollout worker dying
@@ -221,18 +219,8 @@ export CHECKPOINT_MAX_TO_KEEP="${CHECKPOINT_MAX_TO_KEEP:-10}"
 # adds the optimizer state, which is ~6x larger and slower to write than a step.
 export CHECKPOINT_OPTIMIZER_INTERVAL_STEPS="${CHECKPOINT_OPTIMIZER_INTERVAL_STEPS:-5}"
 export CHECKPOINT_ASYNC=${CHECKPOINT_ASYNC:-true}
-# `true` drops an async save whose background half outlived
-# async_checkpointing_timeout_secs (1200 s) rather than failing the run from the
-# next checkpoint call. The step is not restorable and its uncommitted
-# <step>.orbax-checkpoint-tmp directory stays in the bucket, ~5 TiB at 397B.
-# `false` is the pre-maxtext#5494 behaviour and is passed through explicitly.
-export CHECKPOINT_ABANDON_FAILED_SAVES="${CHECKPOINT_ABANDON_FAILED_SAVES:-false}"
 export ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE:-1}
 export MAX_STALENESS=${MAX_STALENESS:-1}
-# With MAX_STALENESS > 0, `true` has the rollouts serve the oldest in-flight
-# prompt batch first (vLLM priority scheduling, priority = batch index) instead
-# of in arrival order (FCFS, the default).
-export ROLLOUT_PRIORITY_SCHEDULING=${ROLLOUT_PRIORITY_SCHEDULING:-false}
 # Overlap each step's weight sync with the next step's training. Safe only
 # while the trainer transfers from host staging, since the next step rewrites
 # the device buffers mid-transfer.
@@ -320,7 +308,7 @@ export REWARD_TIMEOUT_SECS="${REWARD_TIMEOUT_SECS:-60}"
 export FLUSH_EVERY_N_STEPS=1
 export MAX_TURNS=30
 export MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-4096}"
-export MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-61440}"
+export MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-4096}"
 
 # ==============================================================================
 # Execution Dispatch
@@ -341,60 +329,72 @@ if [[ -z "${LAUNCHER:-}" ]]; then
 fi
 
 if [[ "${MLPERF_NO_LAUNCH:-0}" != "1" ]]; then
-  COMMAND="${1:-start}"
-  shift || true
+  if [[ "${1:-}" == --* ]]; then
+    if [[ -n "${CHECKPOINT_MANIFEST_FILE:-}" ]]; then
+      COMMAND="eval"
+    else
+      COMMAND="start"
+    fi
+  else
+    COMMAND="${1:-start}"
+    shift || true
+  fi
   if [[ "${COMMAND}" == "eval" && -n "${CHECKPOINT_MANIFEST_FILE:-}" ]]; then
+    # MLPerf offline evaluation (see evals/README.md): evaluate the training
+    # run's checkpoints in step order, appending eval_* events to its MLLOG,
+    # and stop at the first checkpoint that reaches TARGET_ACCURACY. The eval
+    # container emits run_stop backdated to that checkpoint's manifest
+    # timestamp_ms, which is taken before the checkpoint is written.
     echo "Running sequential offline evaluation from manifest: ${CHECKPOINT_MANIFEST_FILE}"
-    # Stdlib-only (the launcher host has no JAX/tunix install). Prints one
-    # "step, samples_count, timestamp_ms, checkpoint_path, is_last, mllog_file"
-    # TSV row per checkpoint; a missing, empty or non-contiguous manifest aborts
-    # (set -e).
-    MANIFEST_ROWS_TSV="$(python3 -c '
-import json, subprocess, sys
-path = sys.argv[1]
-if path.startswith("gs://"):
-    text = subprocess.check_output(["gsutil", "cat", path], text=True)
-else:
-    with open(path, encoding="utf-8") as f:
-        text = f.read()
-records = sorted(
-    (json.loads(line) for line in text.splitlines() if line.strip()),
-    key=lambda r: int(r["step"]),
-)
-if not records:
-    sys.exit(f"Checkpoint manifest is empty: {path}")
-steps = [int(r["step"]) for r in records]
-first = int(records[0].get("val_start_at", steps[0]))
-if steps != list(range(first, first + len(steps))):
-    sys.exit(f"Manifest steps must be contiguous from val_start_at={first}: {steps}")
-for i, r in enumerate(records):
-    print("\t".join([
-        str(int(r["step"])),
-        str(int(r["samples_count"])),
-        str(int(r["timestamp_ms"])),
-        str(r["checkpoint_path"]),
-        "true" if i == len(records) - 1 else "false",
-        str(r.get("mllog_file") or ""),
-    ]))
-' "${CHECKPOINT_MANIFEST_FILE}")"
-    mapfile -t MANIFEST_ROWS <<< "${MANIFEST_ROWS_TSV}"
+    export RCP_LOGGING=true
+    RCP_EVAL="${DIR}/evals/rcp_eval.py"
+    # check needs mlperf_logging; point RCP_PYTHON at a venv that has it.
+    RCP_PYTHON="${RCP_PYTHON:-python3}"
+    MAX_EVAL_ATTEMPTS="${MAX_EVAL_ATTEMPTS:-3}"
+    for arg in "$@"; do
+      case "${arg}" in
+        --dry-run|--dry_run|--render) export DRY_RUN=true ;;
+      esac
+    done
+    # Validates the manifest against the MLLOG and lists the checkpoints that
+    # still need an eval_accuracy (already-evaluated ones are skipped).
+    PLAN_TSV="$("${RCP_PYTHON}" "${RCP_EVAL}" plan --manifest "${CHECKPOINT_MANIFEST_FILE}")" || exit 1
+    MANIFEST_ROWS=()
+    if [[ -n "${PLAN_TSV}" ]]; then
+      mapfile -t MANIFEST_ROWS <<< "${PLAN_TSV}"
+    fi
     BASE_EVAL_OUTPUT_DIR="${EVAL_OUTPUT_DIR:-${MAXTEXT_OUTPUT_DIR}/eval_results}"
     EVAL_JOBSET_NAME="${EVAL_JOBSET_NAME:-${JOB_PREFIX}-eval}"
     for row in "${MANIFEST_ROWS[@]}"; do
       IFS=$'\t' read -r STEP SAMPLES TS_MS CKPT_PATH IS_LAST MLLOG_FILE <<< "${row}"
-
-      echo "=== Evaluating checkpoint step=${STEP} samples=${SAMPLES} is_last=${IS_LAST} path=${CKPT_PATH} ==="
       export MAXTEXT_CKPT="${CKPT_PATH}"
       export CHECKPOINT_STEP="${STEP}"
       export SAMPLES_COUNT="${SAMPLES}"
       export CHECKPOINT_TIMESTAMP_MS="${TS_MS}"
       export IS_LAST_CHECKPOINT="${IS_LAST}"
       # Append eval_* / run_stop to the training run's MLLOG.
-      export METRIC_LOGGER_DIR="${MLLOG_FILE:-${METRIC_LOGGER_DIR:-}}"
+      export METRIC_LOGGER_DIR="${MLLOG_FILE}"
       export EVAL_OUTPUT_DIR="${BASE_EVAL_OUTPUT_DIR%/}/step_${STEP}"
-      "${LAUNCHER}" --command eval --image "${TUNIX_IMAGE}" "$@"
+      if [[ -z "${SCAN_LAYERS_OVERRIDE:-}" ]]; then
+        # Checkpoints saved during RL training are unscanned.
+        export SCAN_LAYERS="false"
+      fi
 
-      if [[ "${DRY_RUN:-false}" != "true" ]]; then
+      STEP_STATUS="missing"
+      for (( attempt = 1; attempt <= MAX_EVAL_ATTEMPTS; attempt++ )); do
+        echo "=== Evaluating checkpoint step=${STEP} samples=${SAMPLES} is_last=${IS_LAST} attempt=${attempt}/${MAX_EVAL_ATTEMPTS} path=${CKPT_PATH} ==="
+        if [[ "${DRY_RUN:-false}" == "true" ]]; then
+          "${LAUNCHER}" --command eval --image "${TUNIX_IMAGE}" "$@"
+          STEP_STATUS="dry_run"
+          break
+        fi
+        # Clear any JobSet left over from an earlier attempt or run.
+        "${LAUNCHER}" --command stop_eval --image "${TUNIX_IMAGE}" &>/dev/null || true
+        if ! "${LAUNCHER}" --command eval --image "${TUNIX_IMAGE}" "$@"; then
+          echo "Launching the eval JobSet failed for step ${STEP}. Retrying in ${EVAL_RETRY_DELAY_SECS:-30}s..."
+          sleep "${EVAL_RETRY_DELAY_SECS:-30}"
+          continue
+        fi
         HEAD_JOBSET="${EVAL_JOBSET_NAME}"
         if [[ "${ROLLOUT_REPLICAS:-1}" -gt 1 ]]; then
           HEAD_JOBSET="${EVAL_JOBSET_NAME}-0"
@@ -405,45 +405,63 @@ for i, r in enumerate(records):
             echo "JobSet ${HEAD_JOBSET} no longer exists."
             break
           fi
-          MAIN_EXIT="$(kubectl get pods -n "${K8S_NAMESPACE}" -l "jobset.sigs.k8s.io/jobset-name=${HEAD_JOBSET},jobset.sigs.k8s.io/replicatedjob-name=proc" -o jsonpath='{.items[0].status.containerStatuses[?(@.name=="main")].state.terminated.exitCode}' 2>/dev/null || true)"
+          JS_COND="$(kubectl get jobset "${HEAD_JOBSET}" -n "${K8S_NAMESPACE}" -o jsonpath='{.status.conditions[?(@.status=="True")].type}' 2>/dev/null || true)"
+          if [[ "${JS_COND}" =~ (Failed|Completed) ]]; then
+            echo "JobSet ${HEAD_JOBSET} reached terminal condition: ${JS_COND}."
+            break
+          fi
+          PROC_SELECTOR="jobset.sigs.k8s.io/jobset-name=${HEAD_JOBSET},jobset.sigs.k8s.io/replicatedjob-name=proc,batch.kubernetes.io/job-completion-index=0"
+          MAIN_EXIT="$(kubectl get pods -n "${K8S_NAMESPACE}" -l "${PROC_SELECTOR}" -o jsonpath='{.items[0].status.containerStatuses[?(@.name=="main")].state.terminated.exitCode}' 2>/dev/null || true)"
           if [[ -n "${MAIN_EXIT}" ]]; then
             echo "Main evaluation container finished with exit code ${MAIN_EXIT}."
+            break
+          fi
+          WAIT_REASON="$(kubectl get pods -n "${K8S_NAMESPACE}" -l "${PROC_SELECTOR}" -o jsonpath='{.items[0].status.containerStatuses[?(@.name=="main")].state.waiting.reason}' 2>/dev/null || true)"
+          RESTARTS="$(kubectl get pods -n "${K8S_NAMESPACE}" -l "${PROC_SELECTOR}" -o jsonpath='{.items[0].status.containerStatuses[?(@.name=="main")].restartCount}' 2>/dev/null || true)"
+          if [[ "${WAIT_REASON}" == "CrashLoopBackOff" ]] || [[ "${RESTARTS:-0}" -ge 2 ]]; then
+            LAST_EXIT="$(kubectl get pods -n "${K8S_NAMESPACE}" -l "${PROC_SELECTOR}" -o jsonpath='{.items[0].status.containerStatuses[?(@.name=="main")].lastState.terminated.exitCode}' 2>/dev/null || true)"
+            echo "Main evaluation container is crashing (reason=${WAIT_REASON}, restarts=${RESTARTS}, lastExit=${LAST_EXIT})."
             break
           fi
           sleep 10
         done
         "${LAUNCHER}" --command stop_eval --image "${TUNIX_IMAGE}" || true
-
-        TARGET_REACHED="$(
-          python3 -c '
-import glob, json, os, subprocess, sys
-out_dir = os.environ["EVAL_OUTPUT_DIR"].rstrip("/")
-if out_dir.startswith("gs://"):
-    res = subprocess.run(["gsutil", "ls", f"{out_dir}/*/summary.json"], capture_output=True, text=True, check=False)
-    if res.returncode == 0 and res.stdout.strip():
-        matches = sorted(line.strip() for line in res.stdout.splitlines() if line.strip())
-        if matches:
-            res_cat = subprocess.run(["gsutil", "cat", matches[-1]], capture_output=True, text=True, check=False)
-            if res_cat.returncode == 0 and res_cat.stdout.strip():
-                data = json.loads(res_cat.stdout)
-                print("true" if data.get("target_reached") else "false")
-                sys.exit(0)
-else:
-    matches = sorted(glob.glob(f"{out_dir}/*/summary.json"))
-    if matches:
-        with open(matches[-1], "r", encoding="utf-8") as f:
-            data = json.load(f)
-        print("true" if data.get("target_reached") else "false")
-        sys.exit(0)
-print("false")
-'
-        )"
-        if [[ "${TARGET_REACHED}" == "true" ]]; then
-          echo "Target accuracy ${TARGET_ACCURACY} reached at step ${STEP}. Stopping offline evaluation loop."
+        # The MLLOG, not the container exit code, decides whether this
+        # checkpoint was evaluated: retrying after eval_accuracy was logged
+        # would log the checkpoint twice. If the MLLOG cannot be read, stop
+        # rather than risk that.
+        STEP_STATUS="$("${RCP_PYTHON}" "${RCP_EVAL}" status --mllog "${MLLOG_FILE}" --samples_count "${SAMPLES}")" || exit 1
+        if [[ "${STEP_STATUS}" == done* ]]; then
           break
         fi
+        echo "No eval_accuracy logged for step ${STEP} (attempt ${attempt}/${MAX_EVAL_ATTEMPTS})."
+      done
+
+      if [[ "${STEP_STATUS}" == "dry_run" ]]; then
+        continue
+      fi
+      if [[ "${STEP_STATUS}" != done* ]]; then
+        # Skipping a checkpoint would make a later one look like the first to
+        # reach the target, which invalidates the result.
+        echo "ERROR: step ${STEP} was not evaluated after ${MAX_EVAL_ATTEMPTS} attempts. Fix the failure and rerun; evaluated steps are skipped." >&2
+        exit 1
+      fi
+      read -r _ STEP_ACC RUN_STOP_STATUS <<< "${STEP_STATUS}"
+      echo ">>> step ${STEP}: pass@4=${STEP_ACC} run_stop=${RUN_STOP_STATUS}"
+      if [[ "${RUN_STOP_STATUS}" != "none" ]]; then
+        echo "run_stop(${RUN_STOP_STATUS}) logged at step ${STEP}. Stopping offline evaluation loop."
+        break
       fi
     done
+
+    if [[ "${DRY_RUN:-false}" != "true" ]]; then
+      echo "=== Final state ==="
+      "${RCP_PYTHON}" "${RCP_EVAL}" inspect --manifest "${CHECKPOINT_MANIFEST_FILE}" || true
+      if [[ "${RUN_COMPLIANCE_CHECK:-true}" == "true" ]]; then
+        "${RCP_PYTHON}" "${RCP_EVAL}" check --manifest "${CHECKPOINT_MANIFEST_FILE}" \
+          || echo "WARNING: compliance check did not pass (see above)." >&2
+      fi
+    fi
     exit 0
   fi
   exec "${LAUNCHER}" --command "${COMMAND}" --image "${TUNIX_IMAGE}" "$@"

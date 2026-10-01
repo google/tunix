@@ -682,42 +682,6 @@ class TrajectoryCollectorEngineTest(absltest.TestCase):
 
     asyncio.run(_run())
 
-  def test_model_call_forwards_request_priority(self):
-    async def _run():
-      sampler = _MockVllmSampler()
-      req = datatypes.RolloutRequest(
-          prompt_id="prompt_42",
-          prompt="test prompt",
-          priority=5,
-          generation_kwargs={"max_generation_steps": 128},
-      )
-      engine = collector.TrajectoryCollectorEngine(
-          traj_id="traj_1",
-          request=req,
-          sampler=sampler,
-          env_client=mock.MagicMock(),
-          agent=model_agent.ModelAgent("test_agent"),
-          tokenizer=mock.MagicMock(),
-          chat_parser=mock.MagicMock(),
-      )
-
-      with mock.patch(
-          "tunix.rl.agentic.trajectory.trajectory_collect_engine.TrajectoryCollectEngine"
-      ) as mock_engine_cls:
-        mock_instance = mock.AsyncMock()
-        mock_instance.collect.return_value = {}
-        mock_engine_cls.return_value = mock_instance
-
-        await engine.run_episode()
-
-        model_call = mock_engine_cls.call_args.kwargs["model_call"]
-        await model_call("turn 1")
-        await model_call("turn 2")
-
-      self.assertEqual([c[0].priority for c in sampler.calls], [5, 5])
-
-    asyncio.run(_run())
-
   def test_model_call_grpo_group_seeds_distinct_and_reproducible(self):
     async def _run():
       sampler = _MockVanillaSampler()

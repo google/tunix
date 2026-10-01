@@ -91,6 +91,7 @@ export IMAGE_REWRITE_PREFIX="${IMAGE_REWRITE_PREFIX:-europe-west4-docker.pkg.dev
 export ENABLE_THINKING="${ENABLE_THINKING:-false}"
 export STEP_TIMEOUT_SECS=60
 export REWARD_TIMEOUT_SECS=60
+export MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-4096}"
 export MAX_CONTEXT_LIMIT="${MAX_CONTEXT_LIMIT:-61440}"
 
 source "${DIR}/mlperf_base.sh" "${1:-eval}" "${@:2}"

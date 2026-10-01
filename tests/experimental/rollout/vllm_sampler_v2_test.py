@@ -42,7 +42,6 @@ if "openai_harmony" not in sys.modules:
 
 from vllm.engine.arg_utils import AsyncEngineArgs
 
-from tunix.experimental.rollout import vllm_sampler_v2
 from tunix.experimental.rollout.vllm_sampler_v2 import RLVllmSampler
 
 
@@ -69,22 +68,6 @@ class TestRLVllmSamplerDuckTyping(unittest.TestCase):
         self.assertIsNotNone(sampler)
         self.assertEqual(sampler.engine_args.model, "Qwen/Qwen2.5-1.5B")
 
-    def test_scheduling_priority_reads_objects_and_dicts(self):
-        self.assertEqual(
-            vllm_sampler_v2._scheduling_priority(SimpleNamespace(priority=3)), 3
-        )
-        self.assertEqual(
-            vllm_sampler_v2._scheduling_priority({"priority": 2}), 2
-        )
-
-    def test_scheduling_priority_missing_raises(self):
-        with self.assertRaisesRegex(ValueError, "req_x"):
-            vllm_sampler_v2._scheduling_priority(
-                SimpleNamespace(request_id="req_x")
-            )
-        with self.assertRaisesRegex(ValueError, "has no `priority`"):
-            vllm_sampler_v2._scheduling_priority({"priority": None})
-
 
 class TestRLVllmSamplerInference(unittest.TestCase):
     """Tests sampling batch processing, text decoding, and logprob conversion."""
@@ -96,10 +79,8 @@ class TestRLVllmSamplerInference(unittest.TestCase):
 
         # Construct mock AsyncLLMEngine
         mock_engine = MagicMock()
-        captured_priorities = []
 
-        async def mock_generate_stream(prompt, sampling_params, request_id, priority):
-            captured_priorities.append(priority)
+        async def mock_generate_stream(prompt, sampling_params, request_id):
             mock_output_choice = SimpleNamespace(
                 text=f"Completion for {request_id}",
                 token_ids=[101, 202, 303],
@@ -125,7 +106,6 @@ class TestRLVllmSamplerInference(unittest.TestCase):
                 SimpleNamespace(
                     prompt="What is GRPO?",
                     request_id="req_001",
-                    priority=3,
                     sampling_params=SimpleNamespace(max_tokens=64,
                                                     temperature=0.7,
                                                     top_p=0.9,
@@ -133,7 +113,6 @@ class TestRLVllmSamplerInference(unittest.TestCase):
                 )
             ]
             results = await sampler.sample(reqs)
-            self.assertEqual(captured_priorities, [3])
             self.assertEqual(len(results), 1)
             res = results[0]
             self.assertEqual(res.request_id, "req_001")
@@ -155,7 +134,7 @@ class TestRLVllmSamplerInference(unittest.TestCase):
 
         mock_engine = MagicMock()
 
-        async def mock_generate_stream(prompt, sampling_params, request_id, priority):
+        async def mock_generate_stream(prompt, sampling_params, request_id):
             yield SimpleNamespace(outputs=[
                 SimpleNamespace(text="Output text",
                                 token_ids=[1, 2],
@@ -249,7 +228,7 @@ class TestRLVllmSamplerInference(unittest.TestCase):
 
         mock_engine = MagicMock()
 
-        async def mock_failing_stream(prompt, sampling_params, request_id, priority):
+        async def mock_failing_stream(prompt, sampling_params, request_id):
             raise RuntimeError("OOM on sequence generation")
             yield None
 
@@ -261,7 +240,6 @@ class TestRLVllmSamplerInference(unittest.TestCase):
             reqs = [
                 SimpleNamespace(prompt="Test error prompt",
                                 request_id="err_req",
-                                priority=0,
                                 sampling_params=None)
             ]
             results = await sampler.sample(reqs)
@@ -462,8 +440,8 @@ class TestRLVllmSamplerWeightSync(unittest.TestCase):
 
         captured_prompts = []
 
-        async def mock_mid_turn_sync_stream(prompt, sampling_params, request_id, priority):
-            del sampling_params, request_id, priority
+        async def mock_mid_turn_sync_stream(prompt, sampling_params, request_id):
+            del sampling_params, request_id
             captured_prompts.append(prompt)
             # Simulate a mid-turn weight sync advancing _policy_version from 3 to 4
             # while this turn's generation stream is in flight.
@@ -489,7 +467,6 @@ class TestRLVllmSamplerWeightSync(unittest.TestCase):
             req = SimpleNamespace(
                 prompt=np.array([10, 11], dtype=np.int32),
                 request_id="req_mid_sync",
-                priority=0,
                 sampling_params=None,
             )
             res = await sampler.sample(req)
