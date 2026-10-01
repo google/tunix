@@ -509,6 +509,11 @@ class StandardRLProgram(RLProgram):
     # Trained steps whose weights have not reached the rollouts yet. Held out
     # of the dispatch window; stays set if the round fails.
     self._unsynced_steps = 0
+    # Set from the optimizer step until that step's round starts. The trainer
+    # can spend minutes in between (checkpoint save), and the previous round
+    # committing in that gap must not reopen the window: anything dispatched
+    # then is drained on the old weights before the next transfer.
+    self._round_due = False
     self._sync_error: BaseException | None = None
     self.metrics_logger: MetricsLogger = MetricsLogger(metrics_logging_options)
     # Trajectory logging is disabled on mlperf to prevent GCS write timeouts
@@ -629,6 +634,7 @@ class StandardRLProgram(RLProgram):
     # idling every other worker until it finishes.
     while (
         self._unsynced_steps
+        or self._round_due
         or batch_idx
         > self._next_batch - self._unsynced_steps + self.max_staleness
     ):
@@ -1610,6 +1616,7 @@ class StandardRLProgram(RLProgram):
     # Before commit advances `_next_batch`, so the dispatcher cannot slip a
     # batch through against the old weights.
     self._unsynced_steps = 1
+    self._round_due = False
     # The trainer's weights are this version from here on; rollouts catch up
     # when the round commits.
     self.policy_version = target_version
@@ -1834,6 +1841,8 @@ class StandardRLProgram(RLProgram):
             )
             policy_training_time += time.monotonic() - _t_metrics
             final_minibatch_completed = True
+            if self.sync_weights and self.async_weight_sync:
+              self._round_due = True
             # TODO(tunix-dev): Configurable checkpointing frequency. Today we
             # checkpoint at the same frequency as the weight update.
             # Save only at a resumable full-batch boundary. An optimizer step
