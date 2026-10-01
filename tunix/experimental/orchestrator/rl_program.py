@@ -381,11 +381,14 @@ class StandardRLProgram(RLProgram):
       on_step_end: Callable[[int, Any], None] | None = None,
       val_start_step: int | None = None,
       on_checkpoint_saved: Callable[[dict[str, Any]], None] | None = None,
+      checkpoint_optimizer_interval_steps: int = 1,
   ):
     super().__init__()
     self.engine: rl_engine_interface.AbstractRLEngine | None = None
     if max_staleness < 0:
       raise ValueError("max_staleness must be non-negative.")
+    if checkpoint_optimizer_interval_steps < 1:
+      raise ValueError("checkpoint_optimizer_interval_steps must be positive.")
     self.dataset = dataset
     self.max_steps = max_steps
     self.algo = algo
@@ -517,6 +520,13 @@ class StandardRLProgram(RLProgram):
     self.on_step_end = on_step_end
     self.val_start_step = val_start_step
     self.on_checkpoint_saved = on_checkpoint_saved
+    # Checkpoints carry the optimizer state only every this many optimizer
+    # steps, and on the last step; the rest hold just the model params, which
+    # is all eval reads. The optimizer state can be several times the params'
+    # size, too much to write every step.
+    self.checkpoint_optimizer_interval_steps = (
+        checkpoint_optimizer_interval_steps
+    )
     self.last_step_timestamp_ms: int | None = None
     self._in_flight_rollouts = 0
     self._window_release = asyncio.Event()
@@ -1502,6 +1512,14 @@ class StandardRLProgram(RLProgram):
           )
         else:
           next_batch_idx = self.step + 1
+        save_kwargs = {}
+        if (
+            optimizer_step % self.checkpoint_optimizer_interval_steps != 0
+            and (self.max_steps is None or self.step + 1 < self.max_steps)
+        ):
+          # Sent only when skipping, so an interval of 1 leaves the request,
+          # and trainers that predate the option, untouched.
+          save_kwargs["save_optimizer_state"] = False
         save_resp = await self.engine.save_checkpoint(
             role=datatypes.Role.ACTOR,
             metadata={
@@ -1512,6 +1530,7 @@ class StandardRLProgram(RLProgram):
                 "num_rollouts": num_rollouts,
                 "num_microbatches": num_microbatches,
             },
+            **save_kwargs,
         )
         checkpoint_saved = True
         if self.on_checkpoint_saved is not None:
