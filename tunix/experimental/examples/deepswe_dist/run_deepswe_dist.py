@@ -148,6 +148,40 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
+      "--sampler_is",
+      choices=("none", "token", "seq-mask-tis"),
+      default="none",
+      help=(
+          "Sampler/trainer importance-sampling correction. 'token' clips"
+          " per-token ratios at --sampler_is_threshold; 'seq-mask-tis' uses"
+          " raw per-token ratios and zeroes sequences whose geometric-mean"
+          " ratio leaves the TIS keep-band. Both use the trainer recompute"
+          " as the PPO ratio's denominator and need rollout logprobs."
+      ),
+  )
+  parser.add_argument("--sampler_is_threshold", type=float, default=2.0)
+  parser.add_argument(
+      "--truncated_importance_sampling_type",
+      choices=("seq-mask-tis",),
+      default=None,
+      help="MLPerf-compatible alias for --sampler_is=seq-mask-tis.",
+  )
+  parser.add_argument(
+      "--truncated_importance_sampling_ratio_min", type=float, default=None
+  )
+  parser.add_argument(
+      "--truncated_importance_sampling_ratio", type=float, default=None
+  )
+  parser.add_argument(
+      "--seq_logprob_error_threshold",
+      type=float,
+      default=None,
+      help=(
+          "Drop a sequence from the loss (and its denominator) when"
+          " mean_t exp|log p_trainer - log q_sampler| exceeds this value."
+      ),
+  )
+  parser.add_argument(
       "--offpolicy",
       "--max_staleness",
       dest="max_staleness",
@@ -268,7 +302,37 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
+  sampler_is = None if args.sampler_is == "none" else args.sampler_is
+  if args.truncated_importance_sampling_type is not None:
+    if sampler_is not in (None, args.truncated_importance_sampling_type):
+      raise ValueError(
+          "--truncated_importance_sampling_type conflicts with --sampler_is="
+          f"{args.sampler_is}."
+      )
+    sampler_is = args.truncated_importance_sampling_type
+  needs_rollout_logps = (
+      sampler_is is not None or args.seq_logprob_error_threshold is not None
+  )
+  if needs_rollout_logps and not args.use_rollout_logps:
+    # The sampler's logprobs reach the trainer only as old_per_token_logps; the
+    # loss then swaps in the trainer recompute as the ratio's denominator, so
+    # this matches MLPerf's --no-use_rollout_logps + TIS semantics.
+    logging.info(
+        "sampler_is/seq_logprob_error_threshold need rollout logprobs;"
+        " enabling use_rollout_logps (the PPO ratio still uses the trainer"
+        " recompute)."
+    )
+    args.use_rollout_logps = True
   algo_config = algorithm_config.GRPOConfig(
+      sampler_is=sampler_is,
+      sampler_is_threshold=args.sampler_is_threshold,
+      seq_logprob_error_threshold=args.seq_logprob_error_threshold,
+      truncated_importance_sampling_ratio_min=(
+          args.truncated_importance_sampling_ratio_min
+      ),
+      truncated_importance_sampling_ratio=(
+          args.truncated_importance_sampling_ratio
+      ),
       num_generations=args.num_generations,
       epsilon=args.epsilon,
       epsilon_high=args.epsilon_high,

@@ -250,7 +250,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
     needs_trainer_logps = not self.algo_config.use_rollout_logps or (
         rollout_per_token_logps is not None
         and (
-            self.algo_config.sampler_is == "token"
+            self.algo_config.sampler_is is not None
             or self.algo_config.seq_logprob_error_threshold is not None
         )
     )
@@ -274,7 +274,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
       old_per_token_logps = trainer_per_token_logps
     elif (
         (
-            self.algo_config.sampler_is == "token"
+            self.algo_config.sampler_is is not None
             or self.algo_config.seq_logprob_error_threshold is not None
         )
         and rollout_per_token_logps is not None
@@ -344,6 +344,8 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
             sampler_is=self.algo_config.sampler_is,
             sampler_is_threshold=self.algo_config.sampler_is_threshold,
             seq_logprob_error_threshold=self.algo_config.seq_logprob_error_threshold,
+            tis_ratio_min=self.algo_config.truncated_importance_sampling_ratio_min,
+            tis_ratio_max=self.algo_config.truncated_importance_sampling_ratio,
         )
     )
     if agreement_metrics:

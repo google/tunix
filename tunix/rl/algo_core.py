@@ -477,6 +477,12 @@ def grpo_loss_fn(
             ),
             segment_ids=segment_ids,
             num_segments=num_segments,
+            tis_ratio_min=getattr(
+                algo_config, "truncated_importance_sampling_ratio_min", None
+            ),
+            tis_ratio_max=getattr(
+                algo_config, "truncated_importance_sampling_ratio", None
+            ),
         )
     )
     if getattr(algo_config, "seq_logprob_error_threshold", None) is not None:
@@ -484,7 +490,7 @@ def grpo_loss_fn(
     if computed_is_weights is not None:
       sampler_is_weights = computed_is_weights
     if (
-        getattr(algo_config, "sampler_is", None) == "token"
+        getattr(algo_config, "sampler_is", None) is not None
         or getattr(algo_config, "seq_logprob_error_threshold", None) is not None
         or getattr(algo_config, "force_on_policy_ratio", False)
         or (use_score_centering and getattr(algo_config, "num_iterations", 1) == 1)

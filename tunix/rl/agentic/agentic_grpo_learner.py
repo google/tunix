@@ -142,9 +142,13 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
   # significantly with the rollout sampler. Without this correction, importance
   # ratios computed directly against the sampler's logp can spike on outlier
   # tokens, producing large-variance gradient updates.
-  sampler_is: str | None = None  # None | "token"
+  sampler_is: str | None = None  # None | "token" | "seq-mask-tis"
   sampler_is_threshold: float = 2.0
   seq_logprob_error_threshold: float | None = None
+  # Keep-band on the per-sequence geometric-mean ratio for
+  # sampler_is="seq-mask-tis".
+  truncated_importance_sampling_ratio_min: float | None = None
+  truncated_importance_sampling_ratio: float | None = None
   # Score Centering (arXiv:2609.20807) off-policy gradient stabilization.
   # Subtracting the expected score under the reconstructed rollout distribution
   # (using top-k logprobs from the rollout sampler plus a scaled trainer tail)
@@ -154,6 +158,29 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
   score_centering_eps: float = 1e-6
 
   def __post_init__(self):
+    if self.sampler_is not in (None, "token", "seq-mask-tis"):
+      raise ValueError(
+          "sampler_is should be either None, 'token' or 'seq-mask-tis'."
+          " Received: "
+          f"{self.sampler_is}"
+      )
+    if self.sampler_is == "seq-mask-tis":
+      if (
+          self.truncated_importance_sampling_ratio_min is None
+          or self.truncated_importance_sampling_ratio is None
+      ):
+        raise ValueError(
+            "sampler_is='seq-mask-tis' requires"
+            " truncated_importance_sampling_ratio_min and"
+            " truncated_importance_sampling_ratio."
+        )
+      if self.score_centering:
+        # With raw (unclipped) IS weights w = p/q the centering coefficient
+        # q*w - rho*(1/rho)*p is identically zero, so SC would be a no-op.
+        raise ValueError(
+            "score_centering is a no-op under sampler_is='seq-mask-tis'; use"
+            " sampler_is='token' or None with score_centering."
+        )
     if self.score_centering_top_k < 1:
       raise ValueError(
           "score_centering_top_k must be >= 1. Received: "
@@ -414,6 +441,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         sampler_is_threshold=self.algo_config.sampler_is_threshold,
         seq_logprob_error_threshold=self.algo_config.seq_logprob_error_threshold,
         segment_ids=segment_ids,
+        tis_ratio_min=self.algo_config.truncated_importance_sampling_ratio_min,
+        tis_ratio_max=self.algo_config.truncated_importance_sampling_ratio,
     )
 
   def _compute_packed_logps(self, example: TrainExample) -> TrainExample:
@@ -478,7 +507,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         and example.old_per_token_logps is not None
         and (
             self._have_actor_mesh()
-            or self.algo_config.sampler_is == "token"
+            or self.algo_config.sampler_is is not None
             or (
                 self.algo_config.score_centering
                 and self.algo_config.num_iterations > 1
@@ -517,7 +546,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       if sampler_is_weights is not None:
         updates["sampler_is_weights"] = sampler_is_weights
       if (
-          self.algo_config.sampler_is == "token"
+          self.algo_config.sampler_is is not None
           or (
               self.algo_config.score_centering
               and self.algo_config.num_iterations > 1
@@ -890,7 +919,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       # actor mesh; skip when not available.
       need_trainer_logps = (
           have_actor_mesh
-          or self.algo_config.sampler_is == "token"
+          or self.algo_config.sampler_is is not None
           or (
               self.algo_config.score_centering
               and self.algo_config.num_iterations > 1
@@ -913,7 +942,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       # ``exp(current_logp - trainer_logp)`` rather than against the rollout
       # sampler's logp directly.
       if (
-          self.algo_config.sampler_is == "token"
+          self.algo_config.sampler_is is not None
           or (
               self.algo_config.score_centering
               and self.algo_config.num_iterations > 1

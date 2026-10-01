@@ -189,6 +189,33 @@ class AlgorithmConfigTest(parameterized.TestCase):
     with self.assertRaisesRegex(ValueError, "sampler_is should be either"):
       algorithm_config.GRPOConfig(sampler_is="invalid_is")
 
+  def test_grpo_config_seq_mask_tis_validation(self):
+    config = algorithm_config.GRPOConfig(
+        sampler_is="seq-mask-tis",
+        truncated_importance_sampling_ratio_min=0.999,
+        truncated_importance_sampling_ratio=1.002,
+        use_rollout_logps=True,
+    )
+    self.assertEqual(config.sampler_is, "seq-mask-tis")
+    with self.assertRaisesRegex(ValueError, "requires a keep-band"):
+      algorithm_config.GRPOConfig(
+          sampler_is="seq-mask-tis", use_rollout_logps=True
+      )
+    with self.assertRaisesRegex(ValueError, "must be set together"):
+      algorithm_config.GRPOConfig(truncated_importance_sampling_ratio_min=0.9)
+    with self.assertRaisesRegex(ValueError, "Expected 0 <"):
+      algorithm_config.GRPOConfig(
+          truncated_importance_sampling_ratio_min=1.1,
+          truncated_importance_sampling_ratio=1.0,
+      )
+    with self.assertRaisesRegex(ValueError, "use_rollout_logps=True"):
+      algorithm_config.GRPOConfig(
+          sampler_is="seq-mask-tis",
+          truncated_importance_sampling_ratio_min=0.999,
+          truncated_importance_sampling_ratio=1.002,
+          use_rollout_logps=False,
+      )
+
   def test_grpo_config_custom_policy_loss_and_advantage(self):
     """Verifies GRPOConfig supports dynamically registered custom functions."""
     function_registry.register_policy_loss_fn("chicken_loss_custom_123")(

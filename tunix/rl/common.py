@@ -837,6 +837,8 @@ def compute_sampler_trainer_agreement_jax(
     seq_logprob_error_threshold: float | None = None,
     segment_ids: ArrayLike | None = None,
     num_segments: int | None = None,
+    tis_ratio_min: float | None = None,
+    tis_ratio_max: float | None = None,
 ):
   """JIT-safe pure-JAX sampler-vs-trainer agreement metrics, masking, and TIS weights."""
   metrics: dict[str, tuple[jax.Array | utils.WeightedMetric, Any]] = {}
@@ -923,8 +925,24 @@ def compute_sampler_trainer_agreement_jax(
       ),
   })
 
+  seg_ids_jnp = None
+  if segment_ids is not None and (
+      seq_logprob_error_threshold is not None or sampler_is == "seq-mask-tis"
+  ):
+    seg_ids_jnp = jnp.maximum(jnp.asarray(segment_ids, dtype=jnp.int32), 0)
+    if seg_ids_jnp.shape != comp_mask.shape:
+      raise ValueError(
+          f"Shape mismatch: `segment_ids` ({seg_ids_jnp.shape}) must match "
+          f"`completion_mask` ({comp_mask.shape})."
+      )
+    if num_segments is None:
+      if isinstance(seg_ids_jnp, jax.core.Tracer):
+        num_segments = seg_ids_jnp.shape[-1] + 1
+      else:
+        num_segments = int(jnp.max(seg_ids_jnp)) + 1
+
   if seq_logprob_error_threshold is not None:
-    if segment_ids is None:
+    if seg_ids_jnp is None:
       seq_tok_cnt = jnp.sum(mask_f, axis=-1, keepdims=True)
       seq_mult_err = jnp.sum(
           token_mult_err * mask_f, axis=-1, keepdims=True
@@ -935,19 +953,6 @@ def compute_sampler_trainer_agreement_jax(
       num_masked = jnp.sum((~keep_seq & active_seq).astype(jnp.float32))
       keep_token_mask = keep_seq
     else:
-      seg_ids_jnp = jnp.maximum(
-          jnp.asarray(segment_ids, dtype=jnp.int32), 0
-      )
-      if seg_ids_jnp.shape != comp_mask.shape:
-        raise ValueError(
-            f"Shape mismatch: `segment_ids` ({seg_ids_jnp.shape}) must match "
-            f"`completion_mask` ({comp_mask.shape})."
-        )
-      if num_segments is None:
-        if isinstance(seg_ids_jnp, jax.core.Tracer):
-          num_segments = seg_ids_jnp.shape[-1] + 1
-        else:
-          num_segments = int(jnp.max(seg_ids_jnp)) + 1
       seg_err_sum = segmented_sum(
           token_mult_err * mask_f,
           seg_ids_jnp,
@@ -1009,7 +1014,113 @@ def compute_sampler_trainer_agreement_jax(
             utils.weighted_metric_mean,
         ),
     })
+  elif sampler_is == "seq-mask-tis":
+    if tis_ratio_min is None or tis_ratio_max is None:
+      raise ValueError(
+          "sampler_is='seq-mask-tis' requires tis_ratio_min and tis_ratio_max."
+      )
+    sampler_is_weights, tis_metrics = _seq_mask_tis_weights(
+        trainer_logps=trainer_logps,
+        rollout_logps=rollout_logps,
+        completion_mask=jnp.asarray(comp_mask, dtype=jnp.float32),
+        band_min=tis_ratio_min,
+        band_max=tis_ratio_max,
+        segment_ids=seg_ids_jnp,
+        num_segments=num_segments,
+    )
+    metrics.update(tis_metrics)
   return metrics, sampler_is_weights, filtered_completion_mask
+
+
+def _seq_mask_tis_weights(
+    *,
+    trainer_logps: jax.Array,
+    rollout_logps: jax.Array,
+    completion_mask: jax.Array,
+    band_min: float,
+    band_max: float,
+    segment_ids: jax.Array | None,
+    num_segments: int | None,
+) -> tuple[jax.Array, dict[str, tuple[Any, Any]]]:
+  """Sequence-masked truncated importance sampling (`seq-mask-tis`) weights.
+
+  Every token is weighted by its raw, unclipped ratio
+  `exp(log p_trainer - log q_sampler)`; a sequence (or packed segment) whose
+  geometric-mean ratio over its scored tokens leaves `[band_min, band_max]` has
+  all of its weights zeroed. Non-finite log ratios get weight 0. The weights
+  multiply the per-token loss and never the loss mask, so a rejected sequence
+  stays in the loss denominator and the loss scales down with the rejection
+  rate.
+
+  Args:
+    trainer_logps: `[B, T]` trainer log-probabilities (treated as constants).
+    rollout_logps: `[B, T]` sampler log-probabilities.
+    completion_mask: `[B, T]` float mask of scored tokens.
+    band_min: Lower edge of the keep-band on the geometric-mean ratio.
+    band_max: Upper edge of the keep-band.
+    segment_ids: Optional `[B, T]` non-negative packing segment ids (0 =
+      padding).
+    num_segments: Number of segment slots when `segment_ids` is set.
+
+  Returns:
+    `(weights, metrics)` with detached `[B, T]` weights (0 outside the mask).
+  """
+  log_is = trainer_logps - rollout_logps
+  finite = jnp.isfinite(log_is)
+  safe_log_is = jnp.where(finite, log_is, 0.0)
+  scored = completion_mask * finite.astype(jnp.float32)
+  if segment_ids is None:
+    tok_cnt = jnp.sum(scored, axis=-1)
+    log_sum = jnp.sum(safe_log_is * scored, axis=-1)
+    seq_valid = tok_cnt > 0
+  else:
+    tok_cnt = segmented_count(segment_ids, num_segments, mask=scored)
+    log_sum = segmented_sum(safe_log_is * scored, segment_ids, num_segments)
+    seq_valid = (tok_cnt > 0).at[:, 0].set(False)
+  geomean = jnp.exp(
+      jnp.clip(log_sum / jnp.maximum(tok_cnt, 1.0), -20.0, 20.0)
+  )
+  keep = (geomean >= band_min) & (geomean <= band_max) & seq_valid
+  if segment_ids is None:
+    token_keep = keep[:, None]
+  else:
+    token_keep = jnp.take_along_axis(keep, segment_ids, axis=1)
+  weights = jnp.where(
+      finite, jnp.exp(jnp.clip(safe_log_is, -20.0, 20.0)), 0.0
+  )
+  weights = jax.lax.stop_gradient(
+      weights * token_keep.astype(jnp.float32) * completion_mask
+  )
+  valid_f = seq_valid.astype(jnp.float32)
+  num_valid = jnp.sum(valid_f)
+  num_rejected = jnp.sum((~keep).astype(jnp.float32) * valid_f)
+  kept_tokens = completion_mask * token_keep.astype(jnp.float32)
+  metrics = {
+      "sampler_is/seq_mask_tis_oob_frac": (
+          utils.WeightedMetric(num_rejected, num_valid, min_denom=1.0),
+          utils.weighted_metric_mean,
+      ),
+      "sampler_is/seq_mask_tis_oob_count": (num_rejected, np.sum),
+      "sampler_is/seq_geomean_ratio_mean": (
+          utils.WeightedMetric(
+              jnp.sum(geomean * valid_f), num_valid, min_denom=1.0
+          ),
+          utils.weighted_metric_mean,
+      ),
+      "sampler_is/weight_mean": (
+          utils.WeightedMetric(
+              jnp.sum(weights * kept_tokens),
+              jnp.sum(kept_tokens),
+              min_denom=1.0,
+          ),
+          utils.weighted_metric_mean,
+      ),
+      "sampler_is/weight_max": (
+          jnp.where(kept_tokens > 0, weights, 0.0).max(),
+          np.max,
+      ),
+  }
+  return weights, metrics
 
 
 def sampler_trainer_agreement(
@@ -1020,6 +1131,8 @@ def sampler_trainer_agreement(
     sampler_is_threshold: float = 2.0,
     seq_logprob_error_threshold: float | None = None,
     segment_ids: ArrayLike | None = None,
+    tis_ratio_min: float | None = None,
+    tis_ratio_max: float | None = None,
 ):
   """Sampler-vs-trainer agreement metrics, sequence error masking, and TIS weights.
 
@@ -1035,7 +1148,9 @@ def sampler_trainer_agreement(
     completion_mask: assistant-vs-env mask (1 for assistant-generated tokens, 0
       for env-injected tokens) scoping the comparison to model-emitted positions.
     sampler_is: if ``"token"``, also builds truncated per-token
-      importance-sampling weights; otherwise no weights are returned.
+      importance-sampling weights; if ``"seq-mask-tis"``, builds raw per-token
+      ratios zeroed for sequences whose geometric-mean ratio leaves
+      ``[tis_ratio_min, tis_ratio_max]``; otherwise no weights are returned.
     sampler_is_threshold: clamp applied to the importance-sampling weights.
     seq_logprob_error_threshold: if set, sequences (or packed segments) whose
       mean multiplicative probability error ``exp(|trainer_logp - rollout_logp|)``
@@ -1044,6 +1159,8 @@ def sampler_trainer_agreement(
     segment_ids: optional ``[B, L]`` packing segment IDs (``1..K`` for packed
       trajectories, ``0`` for padding). When provided, sequence-level error
       gating operates per segment rather than per row.
+    tis_ratio_min: keep-band lower edge for ``sampler_is="seq-mask-tis"``.
+    tis_ratio_max: keep-band upper edge for ``sampler_is="seq-mask-tis"``.
 
   Returns:
     ``(metrics, sampler_is_weights, filtered_completion_mask)``, where
@@ -1060,6 +1177,8 @@ def sampler_trainer_agreement(
           sampler_is_threshold=sampler_is_threshold,
           seq_logprob_error_threshold=seq_logprob_error_threshold,
           segment_ids=segment_ids,
+          tis_ratio_min=tis_ratio_min,
+          tis_ratio_max=tis_ratio_max,
       )
   )
   scalar_metrics = {
@@ -1104,6 +1223,18 @@ def sampler_trainer_agreement(
           scalar_metrics["sampler_is/weight_max"],
           scalar_metrics["sampler_is/frac_clipped_at_threshold"],
           sampler_is_threshold,
+      )
+    elif sampler_is == "seq-mask-tis":
+      logging.info(
+          "seq-mask-tis: oob=%.0f (frac=%.4f) geomean_mean=%.5f"
+          " weight_mean=%.4f weight_max=%.4f band=[%s, %s]",
+          scalar_metrics["sampler_is/seq_mask_tis_oob_count"],
+          scalar_metrics["sampler_is/seq_mask_tis_oob_frac"],
+          scalar_metrics["sampler_is/seq_geomean_ratio_mean"],
+          scalar_metrics["sampler_is/weight_mean"],
+          scalar_metrics["sampler_is/weight_max"],
+          tis_ratio_min,
+          tis_ratio_max,
       )
   return metrics, sampler_is_weights, filtered_completion_mask
 

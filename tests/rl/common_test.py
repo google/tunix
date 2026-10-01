@@ -1257,6 +1257,120 @@ class SamplerTrainerAgreementTest(parameterized.TestCase):
         places=5,
     )
 
+  def test_seq_mask_tis_unpacked(self):
+    rollout = jnp.full((2, 3), -1.0, dtype=jnp.float32)
+    # Seq 0: log ratios [+1e-3, -1e-3, 0] -> geomean 1.0 (in band), raw
+    # weights exp(log ratio) kept. Seq 1: log ratios all +0.01 -> geomean
+    # 1.01 > 1.002 (out of band) -> all weights zeroed.
+    log_ratio = jnp.array(
+        [[1e-3, -1e-3, 0.0], [0.01, 0.01, 0.01]], dtype=jnp.float32
+    )
+    trainer = rollout + log_ratio
+    mask = jnp.ones((2, 3), dtype=jnp.int32)
+    metrics, weights, filtered_mask = common.sampler_trainer_agreement(
+        rollout,
+        trainer,
+        mask,
+        sampler_is="seq-mask-tis",
+        tis_ratio_min=0.999,
+        tis_ratio_max=1.002,
+    )
+    np.testing.assert_array_equal(filtered_mask, mask)
+    weights = np.asarray(weights)
+    np.testing.assert_allclose(
+        weights[0], np.exp(np.asarray(log_ratio[0])), rtol=1e-5
+    )
+    np.testing.assert_array_equal(weights[1], np.zeros(3))
+    self.assertAlmostEqual(
+        float(
+            common._metric_scalar(
+                metrics["sampler_is/seq_mask_tis_oob_frac"][0]
+            )
+        ),
+        0.5,
+        places=5,
+    )
+    self.assertAlmostEqual(
+        float(metrics["sampler_is/seq_mask_tis_oob_count"][0]), 1.0
+    )
+    self.assertIn("sampler_is/seq_geomean_ratio_mean", metrics)
+    self.assertIn("sampler_is/weight_mean", metrics)
+    self.assertIn("sampler_is/weight_max", metrics)
+    self.assertNotIn("sampler_is/frac_clipped_at_threshold", metrics)
+
+  def test_seq_mask_tis_respects_completion_mask(self):
+    rollout = jnp.full((1, 4), -1.0, dtype=jnp.float32)
+    # The masked-out 4th token has a huge ratio; it must not affect the
+    # geomean nor receive weight.
+    trainer = rollout + jnp.array([[0.0, 0.0, 0.0, 5.0]], dtype=jnp.float32)
+    mask = jnp.array([[1, 1, 1, 0]], dtype=jnp.int32)
+    _, weights, _ = common.sampler_trainer_agreement(
+        rollout,
+        trainer,
+        mask,
+        sampler_is="seq-mask-tis",
+        tis_ratio_min=0.999,
+        tis_ratio_max=1.002,
+    )
+    np.testing.assert_allclose(
+        np.asarray(weights), np.array([[1.0, 1.0, 1.0, 0.0]]), rtol=1e-6
+    )
+
+  def test_seq_mask_tis_non_finite_gets_zero_weight(self):
+    rollout = jnp.array([[-1.0, -1.0, -jnp.inf]], dtype=jnp.float32)
+    trainer = jnp.array([[-1.0, -1.0, -1.0]], dtype=jnp.float32)
+    mask = jnp.ones((1, 3), dtype=jnp.int32)
+    _, weights, _ = common.sampler_trainer_agreement(
+        rollout,
+        trainer,
+        mask,
+        sampler_is="seq-mask-tis",
+        tis_ratio_min=0.999,
+        tis_ratio_max=1.002,
+    )
+    weights = np.asarray(weights)
+    self.assertTrue(np.all(np.isfinite(weights)))
+    np.testing.assert_allclose(weights, np.array([[1.0, 1.0, 0.0]]))
+
+  def test_seq_mask_tis_packed_rejects_only_divergent_segment(self):
+    # Seg 1: tokens 0..1 (ratio 1, kept); seg 2: tokens 2..3 (ratio e^0.01,
+    # rejected); token 4 is padding.
+    rollout = jnp.array([[-1.0, -1.0, -1.0, -1.0, 0.0]], dtype=jnp.float32)
+    trainer = jnp.array([[-1.0, -1.0, -0.99, -0.99, 0.0]], dtype=jnp.float32)
+    mask = jnp.array([[1, 1, 1, 1, 0]], dtype=jnp.int32)
+    segment_ids = jnp.array([[1, 1, 2, 2, 0]], dtype=jnp.int32)
+    metrics, weights, _ = common.sampler_trainer_agreement(
+        rollout,
+        trainer,
+        mask,
+        sampler_is="seq-mask-tis",
+        segment_ids=segment_ids,
+        tis_ratio_min=0.999,
+        tis_ratio_max=1.002,
+    )
+    np.testing.assert_allclose(
+        np.asarray(weights),
+        np.array([[1.0, 1.0, 0.0, 0.0, 0.0]]),
+        atol=1e-6,
+    )
+    self.assertAlmostEqual(
+        float(
+            common._metric_scalar(
+                metrics["sampler_is/seq_mask_tis_oob_frac"][0]
+            )
+        ),
+        0.5,
+        places=5,
+    )
+
+  def test_seq_mask_tis_requires_band(self):
+    logps = jnp.full((1, 3), -1.0, dtype=jnp.float32)
+    mask = jnp.ones((1, 3), dtype=jnp.int32)
+    with self.assertRaises(ValueError):
+      common.sampler_trainer_agreement(
+          logps, logps, mask, sampler_is="seq-mask-tis"
+      )
+
   def test_seq_logprob_error_threshold_unpacked_masks_divergent_sequence(self):
     # Seq 0: |diff| = 0.1 -> exp(0.1) = 1.105 <= 2.0 (kept)
     # Seq 1: |diff| = 1.0 -> exp(1.0) = 2.718 > 2.0 (masked out)

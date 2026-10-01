@@ -1035,6 +1035,16 @@ class StandardRLProgram(RLProgram):
             sampler_is_threshold=self.sampler_is_threshold,
             seq_logprob_error_threshold=self.seq_logprob_error_threshold,
             segment_ids=batch.segment_ids,
+            tis_ratio_min=getattr(
+                self.algo.algo_config,
+                "truncated_importance_sampling_ratio_min",
+                None,
+            ),
+            tis_ratio_max=getattr(
+                self.algo.algo_config,
+                "truncated_importance_sampling_ratio",
+                None,
+            ),
         )
     )
     for name, (value, agg_fn) in sa_metrics.items():
@@ -1046,7 +1056,7 @@ class StandardRLProgram(RLProgram):
     if sampler_is_weights is not None:
       updates["sampler_is_weights"] = sampler_is_weights
     if (
-        self.sampler_is == "token"
+        self.sampler_is is not None
         or self.seq_logprob_error_threshold is not None
     ):
       updates["old_per_token_logps"] = trainer_logps

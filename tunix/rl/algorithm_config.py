@@ -164,11 +164,21 @@ class GRPOConfig(AlgorithmConfig):
     sampler_is: Optional truncated importance-sampling correction between the
       rollout sampler and trainer actor. Set to "token" to use trainer
       recomputed logps as old-policy logps and multiply the policy loss by
-      detached per-token sampler/trainer correction weights.
+      detached per-token sampler/trainer correction weights. Set to
+      "seq-mask-tis" (sequence-masked TIS, as in the MLPerf recipe) to weight
+      every token by its raw, unclipped sampler/trainer ratio and zero the
+      weights of whole sequences whose geometric-mean ratio leaves the band
+      `[truncated_importance_sampling_ratio_min,
+      truncated_importance_sampling_ratio]`. Rejected sequences stay in the
+      loss denominator.
     sampler_is_threshold: Maximum per-token TIS correction weight.
     seq_logprob_error_threshold: Optional sequence-level multiplicative
       log-probability error threshold. Sequences exceeding this threshold are
       masked out of the loss.
+    truncated_importance_sampling_ratio_min: Lower edge of the keep-band on the
+      per-sequence geometric-mean sampler/trainer ratio, used when
+      `sampler_is == "seq-mask-tis"`.
+    truncated_importance_sampling_ratio: Upper edge of that keep-band.
 
   References:
     - GRPO: https://arxiv.org/abs/2402.03300
@@ -191,6 +201,8 @@ class GRPOConfig(AlgorithmConfig):
   sampler_is: str | None = None
   sampler_is_threshold: float = 2.0
   seq_logprob_error_threshold: float | None = None
+  truncated_importance_sampling_ratio_min: float | None = None
+  truncated_importance_sampling_ratio: float | None = None
 
   def __post_init__(self):
     if self.epsilon_high is None:
@@ -219,8 +231,33 @@ class GRPOConfig(AlgorithmConfig):
           "loss_algo should be either grpo or gspo-token. Received: "
           f"{self.loss_algo}"
       )
-    if self.sampler_is not in (None, "token"):
+    if self.sampler_is not in (None, "token", "seq-mask-tis"):
       raise ValueError(
-          "sampler_is should be either None or 'token'. Received: "
+          "sampler_is should be either None, 'token' or 'seq-mask-tis'."
+          " Received: "
           f"{self.sampler_is}"
       )
+    lo = self.truncated_importance_sampling_ratio_min
+    hi = self.truncated_importance_sampling_ratio
+    if (lo is None) != (hi is None):
+      raise ValueError(
+          "truncated_importance_sampling_ratio_min and"
+          " truncated_importance_sampling_ratio must be set together."
+      )
+    if lo is not None and (lo <= 0.0 or lo > hi):
+      raise ValueError(
+          "Expected 0 < truncated_importance_sampling_ratio_min <="
+          f" truncated_importance_sampling_ratio; got min={lo}, max={hi}."
+      )
+    if self.sampler_is == "seq-mask-tis":
+      if lo is None:
+        raise ValueError(
+            "sampler_is='seq-mask-tis' requires a keep-band: set"
+            " truncated_importance_sampling_ratio_min and"
+            " truncated_importance_sampling_ratio."
+        )
+      if not self.use_rollout_logps:
+        raise ValueError(
+            "sampler_is='seq-mask-tis' needs the rollout sampler's"
+            " log-probabilities; set use_rollout_logps=True."
+        )

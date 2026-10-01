@@ -746,12 +746,21 @@ def _create_tunix_trainer_factory(args) -> tuple[Any, Mesh]:
       data_sharding_axis=("fsdp",),
       checkpointing_options=checkpointing_options,
       checkpoint_root_directory=_checkpoint_root_directory(args),
-      # No max_seq_token_per_tpu here. Under the orchestrator the trainer never
-      # packs: the SequencePackedBatchAssembler does, and the weighting that
-      # packing needs rides in on the payload (`_fwd_bwd_step` accumulates with
-      # `denom=aux.primary_loss.denominator`). The only thing the field would
-      # change on this path is `_is_single_microstep()`, and the orchestrator
-      # drives `fwd_bwd` + `update` rather than the fused step it gates.
+      # Under the orchestrator the trainer never packs: the
+      # SequencePackedBatchAssembler does, and the weighting that packing needs
+      # rides in on the payload (`_fwd_bwd_step` accumulates with
+      # `denom=aux.primary_loss.denominator`). The field is still forwarded
+      # because it is what makes `_is_single_microstep()` False: with packing
+      # the orchestrator sends a dynamic number of `fwd_bwd` calls per
+      # `update`, which needs a persistently allocated gradient accumulator.
+      # Without it the accumulator starts empty, `add()` changes its pytree
+      # structure inside jit, and `update()` (bound via nnx.cached_partial)
+      # then sees an empty accumulator ("The gradient accumulator is empty").
+      max_seq_token_per_tpu=(
+          args.max_seq_token_per_tpu
+          if common_configs.is_sequence_packing_enabled(args)
+          else None
+      ),
       # The orchestrator owns resume: it calls restore_checkpoint() explicitly.
       # Orchestrator needs to realign its step/policy_version from the returned
       # metadata.
