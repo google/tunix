@@ -25,7 +25,7 @@ fi
 YAML_GENERATOR="${YAML_GENERATOR:-${TUNIX_ROOT}/experimental/distributed/deployment/yaml_generator.py}"
 YAML_DIR="${YAML_DIR:-${TUNIX_ROOT}/experimental/distributed/deployment/yamls}"
 
-BOOTSTRAP_CMD="${BOOTSTRAP_CMD:-}"
+export BOOTSTRAP_CMD="${BOOTSTRAP_CMD:-}"
 
 export MODEL_NAME=${MODEL_NAME:-Qwen3-4B}
 export MODEL_ID=${MODEL_ID:-Qwen/Qwen3-4B}
@@ -418,6 +418,7 @@ start_orchestrator() {
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ORCHESTRATOR_PORT}" \
     --worker_startup_command=" \
+      ${BOOTSTRAP_CMD:+${BOOTSTRAP_CMD} && } \
       ORCHESTRATOR_ID=\"${ORCHESTRATOR_ID}\" \
       ${sandbox_env} \
       ${SCAFFOLD:+SCAFFOLD=\"${SCAFFOLD}\"} \
@@ -439,7 +440,6 @@ start_orchestrator() {
       PYTHONUNBUFFERED=1 \
       TUNIX_IS_INTERNAL_ENV=false \
       ${TUNIX_DEBUG_INFERENCE_LOGS:+TUNIX_DEBUG_INFERENCE_LOGS=\"${TUNIX_DEBUG_INFERENCE_LOGS}\"} \
-      ${BOOTSTRAP_CMD} \
       ${ORCHESTRATOR_EXTRA_ENV:+${ORCHESTRATOR_EXTRA_ENV} }${jax_cache_env} python -m tunix.experimental.distributed.runtime.main \
         --discovery_id=${ORCHESTRATOR_ID} \
         --discovery_port=${ORCHESTRATOR_PORT} \
@@ -586,10 +586,10 @@ start_trainer() {
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${TRAINER_PORT}" \
     --worker_startup_command=" \
+      ${BOOTSTRAP_CMD:+${BOOTSTRAP_CMD} && } \
       PYTHONUNBUFFERED=1 \
       TUNIX_IS_INTERNAL_ENV=false \
       WEIGHT_SYNC_DISABLE_TIMEOUTS=\"${WEIGHT_SYNC_DISABLE_TIMEOUTS}\" \
-      ${BOOTSTRAP_CMD} \
       ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} \
       ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE} \
       ${CHECKPOINT_ASYNC:+CHECKPOINT_ASYNC=${CHECKPOINT_ASYNC}} \
@@ -803,13 +803,13 @@ if cfg:
       --worker_container_port="${ROLLOUT_PORT}" \
       "${extra_generator_flags[@]}" \
       --worker_startup_command=" \
+        ${BOOTSTRAP_CMD:+${BOOTSTRAP_CMD} && } \
         PYTHONUNBUFFERED=1 \
         TUNIX_IS_INTERNAL_ENV=false \
         ${TUNIX_DEBUG_INFERENCE_LOGS:+TUNIX_DEBUG_INFERENCE_LOGS=\"${TUNIX_DEBUG_INFERENCE_LOGS}\"} \
         EPISODE_TIMEOUT_SECS="${EPISODE_TIMEOUT_SECS:-5400}" \
         WEIGHT_SYNC_DISABLE_TIMEOUTS=\"${WEIGHT_SYNC_DISABLE_TIMEOUTS}\" \
         ${SCAFFOLD:+SCAFFOLD=\"${SCAFFOLD}\"} \
-        ${BOOTSTRAP_CMD} \
         USE_RAIDEN_FFI=false RAIDEN_USE_FFI=0 \
         RAIDEN_DEVICES_PER_HOST=${RAIDEN_DEVICES_PER_HOST} \
         ROLLOUT_PREFUSE_MOE_WEIGHTS=${ROLLOUT_PREFUSE_MOE_WEIGHTS} \
@@ -1129,6 +1129,7 @@ start_eval() {
       "${YAML_DIR}/${ROLLOUT_JOBSET_YAML:-jobset.pathways.yaml}" \
       --jobset_name="${replica_id}" \
       --namespace="${K8S_NAMESPACE}" \
+      "${FAIL_FAST_GENERATOR_FLAGS[@]}" \
       ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
       ${GANG_ID:+--gang_id="${GANG_ID}"} \
       --tpu_slice="${ROLLOUT_TPU_SLICE:-tpuv5:2x2x1}" \
@@ -1145,16 +1146,16 @@ start_eval() {
       --worker_container_image="${TUNIX_IMAGE}" \
       --worker_container_port="${eval_port}" \
       --worker_startup_command=" \
+        ${BOOTSTRAP_CMD:+${BOOTSTRAP_CMD} && } \
         PYTHONUNBUFFERED=1 \
         ${eval_cache_dir:+JAX_CACHE_GCS_DIR=\"${eval_cache_dir}\"} \
         ${eval_cache_dir:+ROLLOUT_JAX_CACHE_GCS_DIR=\"${eval_cache_dir}\"} \
         SAVE_JAX_CACHE=\"${SAVE_JAX_CACHE:-true}\" \
         TUNIX_IS_INTERNAL_ENV=false \
         ${TUNIX_DEBUG_INFERENCE_LOGS:+TUNIX_DEBUG_INFERENCE_LOGS=\"${TUNIX_DEBUG_INFERENCE_LOGS}\"} \
-        VLLM_TPU_USING_PATHWAYS=1 \
+        $([[ "${ROLLOUT_JOBSET_YAML}" == *pathways* ]] && echo "VLLM_TPU_USING_PATHWAYS=1") \
         ${sandbox_env} \
         ${SCAFFOLD:+SCAFFOLD=\"${SCAFFOLD}\"} \
-        ${BOOTSTRAP_CMD} \
         ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} \
         ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE} \
         PREFUSE_MOE_WEIGHTS=${ROLLOUT_PREFUSE_MOE_WEIGHTS} \
@@ -1192,6 +1193,8 @@ start_eval() {
         ${PHASED_PROFILING_DIR:+PHASED_PROFILING_DIR=\"${PHASED_PROFILING_DIR}\"} \
         ${PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR:+PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR=${PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR}} \
         ${PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP:+PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP=${PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP}} \
+        ${VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY:+VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY=\"${VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY}\"} \
+        ${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY:+VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=\"${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY}\"} \
         ${ROLLOUT_ENV_FLAGS} \
         ${ROLLOUT_EXTRA_ENV} \
         SKIP_JAX_PRECOMPILE=${EVAL_SKIP_JAX_PRECOMPILE} python3 -u ${eval_cmd} \

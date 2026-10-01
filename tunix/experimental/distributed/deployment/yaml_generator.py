@@ -729,6 +729,11 @@ def main() -> None:
       for flag in os.environ.get("PATHWAYS_PROXY_EXTRA_ARGS", "").split()
   )
 
+  ray_bootstrap_cmd = os.environ.get("BOOTSTRAP_CMD", "").strip()
+  ray_bootstrap_cmd_block = (
+      f"                  {ray_bootstrap_cmd}\n" if ray_bootstrap_cmd else ""
+  )
+
   with open(args.template_file, "r") as f:
     template_text = f.read()
     if args.fail_fast and "${FAIL_FAST_POD_FAILURE_POLICY}" not in template_text:
@@ -804,6 +809,7 @@ def main() -> None:
         USER_CONTAINER_IMAGE=args.worker_container_image,
         USER_CONTAINER_PORT=args.worker_container_port,
         STARTUP_COMMAND=args.worker_startup_command,
+        RAY_BOOTSTRAP_COMMAND_BLOCK=ray_bootstrap_cmd_block,
         PATHWAYS_WORKER_EXTRA_ENV=pathways_worker_extra_env,
         PATHWAYS_PROXY_EXTRA_ARGS=pathways_proxy_extra_args,
         **dataclasses.asdict(fail_fast),

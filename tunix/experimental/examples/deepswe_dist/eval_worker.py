@@ -142,31 +142,41 @@ def create_worker(a):
   )
   mesh_tp = a.mesh_tp
   mesh_expert = a.mesh_expert
-  expected_devices = mesh_fsdp * mesh_dp * mesh_tp * mesh_expert
-  if jax.device_count() != expected_devices:
-    raise ValueError(
-        f"Expected {expected_devices} rollout chips (fsdp={mesh_fsdp},"
-        f" dp={mesh_dp}, tp={mesh_tp}, expert={mesh_expert}); got"
-        f" {jax.device_count()}"
-    )
-  if mesh_dp > 1 and mesh_fsdp > 1:
-    mesh_shape = (mesh_dp, mesh_fsdp * mesh_expert, mesh_tp)
-    axis_names = ("dp", "fsdp", "tp")
-  elif mesh_dp > 1:
-    mesh_shape = (mesh_dp * mesh_expert, mesh_tp)
-    axis_names = ("dp", "tp")
+  multihost_backend = os.environ.get("TPU_MULTIHOST_BACKEND", "")
+  if multihost_backend:
+    if convert_in_memory:
+      raise ValueError(
+          "Converting scanned checkpoints in memory is not supported with"
+          f" TPU_MULTIHOST_BACKEND={multihost_backend!r}. Use unscanned"
+          " checkpoints or single-host/Pathways."
+      )
+    mesh = None
   else:
-    mesh_shape = (mesh_fsdp * mesh_expert, mesh_tp)
-    axis_names = ("fsdp", "tp")
+    expected_devices = mesh_fsdp * mesh_dp * mesh_tp * mesh_expert
+    if jax.device_count() != expected_devices:
+      raise ValueError(
+          f"Expected {expected_devices} rollout chips (fsdp={mesh_fsdp},"
+          f" dp={mesh_dp}, tp={mesh_tp}, expert={mesh_expert}); got"
+          f" {jax.device_count()}"
+      )
+    if mesh_dp > 1 and mesh_fsdp > 1:
+      mesh_shape = (mesh_dp, mesh_fsdp * mesh_expert, mesh_tp)
+      axis_names = ("dp", "fsdp", "tp")
+    elif mesh_dp > 1:
+      mesh_shape = (mesh_dp * mesh_expert, mesh_tp)
+      axis_names = ("dp", "tp")
+    else:
+      mesh_shape = (mesh_fsdp * mesh_expert, mesh_tp)
+      axis_names = ("fsdp", "tp")
 
-  mesh = Mesh(
-      mesh_utils.create_device_mesh(
-          mesh_shape,
-          jax.devices(),
-          allow_split_physical_axes=True,
-      ),
-      axis_names,
-  )
+    mesh = Mesh(
+        mesh_utils.create_device_mesh(
+            mesh_shape,
+            jax.devices(),
+            allow_split_physical_axes=True,
+        ),
+        axis_names,
+    )
   tokenizer = AutoTokenizer.from_pretrained(a.tokenizer_path)
   if tokenizer.pad_token_id is None:
     tokenizer.pad_token = tokenizer.eos_token
@@ -195,6 +205,8 @@ def create_worker(a):
       "generation_config": "vllm",
       "seed": a.seed,
   }
+  if multihost_backend:
+    engine_kwargs["distributed_executor_backend"] = multihost_backend
   if os.environ.get("VLLM_LANGUAGE_MODEL_ONLY", "0").lower() in ("1", "true"):
     engine_kwargs["language_model_only"] = True
   if os.environ.get("VLLM_ENABLE_CHUNKED_PREFILL", "0").lower() in (
@@ -336,7 +348,11 @@ def create_worker(a):
 async def serve(a):
   # Initialization may compile for minutes. Publish RPC readiness only after
   # real checkpoint restore and sampler startup have succeeded.
-  worker = create_worker(a)
+  try:
+    worker = create_worker(a)
+  except BaseException as e:
+    logging.exception("Fatal error creating eval worker: %s", e)
+    raise
   from tunix.experimental.worker import remote_execution
   from examples.deepswe import sandbox_utils
 
@@ -347,6 +363,13 @@ async def serve(a):
     stop = asyncio.Event()
     worker._stop_event = stop
     await server.start_serving_async(a.port)
+    marker_path = os.environ.get("FT_REGISTERED_MARKER")
+    if marker_path:
+      try:
+        Path(marker_path).touch()
+        logging.info("Created fail-fast registered marker %s", marker_path)
+      except Exception:
+        logging.warning("Failed to create marker %s", marker_path, exc_info=True)
     logging.info(
         "DeepSWE eval worker ready on port %d: %s",
         a.port,
@@ -356,10 +379,15 @@ async def serve(a):
     for sig in (signal.SIGTERM, signal.SIGINT):
       loop.add_signal_handler(sig, stop.set)
     await stop.wait()
+  except BaseException as e:
+    logging.exception("Fatal error in eval worker serving loop: %s", e)
+    raise
   finally:
     worker.stop()
     await server.stop_serving()
     try:
       await worker.sampler.stop()
+    except Exception:
+      logging.warning("Error stopping worker sampler", exc_info=True)
     finally:
       await asyncio.to_thread(sandbox_utils.teardown_global_fleet)

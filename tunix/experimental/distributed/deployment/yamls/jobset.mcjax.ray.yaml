@@ -82,7 +82,7 @@ ${PW_NODE_AFFINITY}            # tolerations:
                   export RAY_memory_monitor_refresh_ms=0
                   RAY_HEAD="$${JOBSET_NAME}-$${REPLICATED_JOB_NAME}-$${JOB_INDEX}-0.$${JOBSET_NAME}"
                   echo "Ray head: $${RAY_HEAD}, this pod index: $${POD_INDEX}"
-
+${RAY_BOOTSTRAP_COMMAND_BLOCK}
 ${FAIL_FAST_WRAPPER_PRE}                  (
                     if [ "$${POD_INDEX}" = "0" ]; then
                       echo "Starting Ray head..."
@@ -107,6 +107,7 @@ ${FAIL_FAST_WRAPPER_PRE}                  (
 
 ${FAIL_FAST_WRAPPER_POST_POD0}                  echo "Program End: $$(date)"
                   echo "EXIT_CODE=$$EXIT_CODE"
+                  ray stop 2>/dev/null || true
                   exit $$EXIT_CODE
               env:
               - name: RAIDEN_BROADCAST_K

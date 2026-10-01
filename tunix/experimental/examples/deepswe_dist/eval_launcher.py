@@ -104,6 +104,7 @@ def main(argv=None):
     )
     while controller.poll() is None:
       if worker.poll() is not None:
+        time.sleep(2)
         raise RuntimeError(
             f"Rollout worker exited early: code={worker.returncode}"
         )
