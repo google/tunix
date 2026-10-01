@@ -164,15 +164,6 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " detokenizing and re-tokenizing intermediate turns (TITO)."
       ),
   )
-  parser.add_argument(
-      "--pipeline_train_microbatches",
-      action=argparse.BooleanOptionalAction,
-      default=False,
-      help=(
-          "Pack the next training microbatch in a worker thread while the"
-          " previous one's train_step is still running on the trainer."
-      ),
-  )
   # ---- Optional GRPO algorithm options -------------------------------------
   # All default to off, so omitting them reproduces the previous behaviour.
   parser.add_argument(
@@ -857,7 +848,6 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         max_staleness=args.max_staleness,
         group_order=args.trajectory_group_order,
         sync_weights=(args.weight_sync_mode != weight_sync.WeightSyncMode.NONE),
-        pipeline_train_microbatches=args.pipeline_train_microbatches,
         on_step_begin=lambda step: logging.info(
             ">>> DeepSWE step %d starting | policy_version=%d",
             step,
