@@ -45,6 +45,20 @@ _DEFAULT_GCS_TIMEOUT_SEC = 10.0
 _DEFAULT_STOP_TIMEOUT_SEC = 15.0
 _DEFAULT_MAX_QUEUE_SIZE = 1000
 
+# Numpy arrays larger than this are logged as {'shape', 'dtype'} rather than
+# element by element, unless TRAJECTORY_LOG_HEAVY_FIELDS=1. Rows carry
+# per-token arrays: a DeepSWE rollout's routed_experts alone is [T, 60, 10]
+# int16 (6-16M values), which made each metadata.json 100-250 MB and cost
+# 12-28 s of GIL-holding serialization per trajectory, starving the
+# orchestrator's packing thread and event loop.
+_MAX_INLINE_ARRAY_SIZE = 4096
+
+
+def _log_heavy_fields() -> bool:
+  """Whether large numpy arrays are serialized in full (off by default)."""
+  value = os.environ.get('TRAJECTORY_LOG_HEAVY_FIELDS', '0')
+  return value.strip().lower() in ('1', 'true', 'yes')
+
 
 class _AbandonedOperationError(TimeoutError):
   """Raised when a timed-out worker thread may still be running."""
@@ -139,6 +153,12 @@ def _make_serializable(item: Any) -> Any:
   elif isinstance(item, message.Message):
     return json_format.MessageToDict(item)
   elif isinstance(item, np.ndarray):
+    if item.size > _MAX_INLINE_ARRAY_SIZE and not _log_heavy_fields():
+      return {'shape': list(item.shape), 'dtype': str(item.dtype)}
+    if item.dtype.kind in 'biuf':
+      # tolist() already yields Python scalars; walking them again is pure
+      # GIL time.
+      return item.tolist()
     return _make_serializable(item.tolist())
   elif isinstance(item, np.integer):
     return int(item)
