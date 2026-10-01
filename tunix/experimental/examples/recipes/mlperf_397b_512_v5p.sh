@@ -47,7 +47,9 @@ export ROLLOUT_WORKERS="${ROLLOUT_WORKERS:-16}"
 export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-16}"
 
 # vLLM Rollout Configuration
-export VLLM_ADDITIONAL_CONFIG='{"sharding":{"sharding_strategy":{"expert_parallelism":16,"tensor_parallelism":1,"enable_dp_attention":true}},"custom_mamba_cache_multiplier":16,"maxtext_config":{"scan_layers":false,"attention":"vllm_rpa","allow_split_physical_axes":true,"use_multimodal":false,"prefuse_moe_weights":true,"per_device_batch_size":0.0}}'
+export FP8_MOE="${FP8_MOE:-false}"
+export FP8_MOE="${FP8_MOE,,}"
+export VLLM_ADDITIONAL_CONFIG='{"sharding":{"sharding_strategy":{"expert_parallelism":16,"tensor_parallelism":1,"enable_dp_attention":true}},"custom_mamba_cache_multiplier":16,"maxtext_config":{"scan_layers":false,"attention":"vllm_rpa","allow_split_physical_axes":true,"use_multimodal":false,"prefuse_moe_weights":true,"per_device_batch_size":0.0,"fp8_moe":'"${FP8_MOE}"'}}'
 
 # Rollout Worker Flags & Raiden tuning
 export ONEHOT_MOE_PERMUTE_THRESHOLD=131072
