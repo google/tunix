@@ -907,6 +907,54 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
     np.testing.assert_array_equal(flushed[0].payload.segment_ids[0, 6:], 0)
     np.testing.assert_array_equal(flushed[0].payload.segment_ids[1], 0)
 
+  def test_padding_stats_reflect_bin_occupancy(self):
+    assembler = batch_assembly.SequencePackedBatchAssembler(
+        batch_size=2,
+        max_packed_len=16,
+        pad_id=0,
+        num_generations=2,
+        mini_batch_size=1,
+    )
+    res = assembler.feed([
+        self._make_streaming_payload(
+            prompt_length=3, completion_length=3, val=1
+        ),
+        self._make_streaming_payload(
+            prompt_length=2, completion_length=2, val=2
+        ),
+    ])
+
+    stats = res[0].padding_stats
+    # First-fit packs both items into row 0; row 1 is a filler row.
+    np.testing.assert_array_equal(stats.row_valid_tokens, [10, 0])
+    np.testing.assert_array_equal(stats.row_num_sequences, [2, 0])
+    self.assertEqual(stats.row_capacity, 16)
+    self.assertAlmostEqual(stats.padding_ratio, 1.0 - 10 / 32)
+    self.assertAlmostEqual(stats.row_imbalance, 2.0)
+
+  def test_padding_stats_with_one_segment_per_row(self):
+    assembler = batch_assembly.SequencePackedBatchAssembler(
+        batch_size=2,
+        max_packed_len=16,
+        pad_id=0,
+        num_generations=2,
+        mini_batch_size=1,
+        max_segments_per_packed_row=1,
+    )
+    res = assembler.feed([
+        self._make_streaming_payload(
+            prompt_length=3, completion_length=3, val=1
+        ),
+        self._make_streaming_payload(
+            prompt_length=2, completion_length=2, val=2
+        ),
+    ])
+
+    stats = res[0].padding_stats
+    np.testing.assert_array_equal(stats.row_valid_tokens, [6, 4])
+    np.testing.assert_array_equal(stats.row_num_sequences, [1, 1])
+    self.assertAlmostEqual(stats.row_imbalance, 1.2)
+
 
 def _make_payload(
     prompt_len: int,
@@ -977,6 +1025,67 @@ def _make_payload(
   )
 
 
+def _stats(row_valid_tokens, row_num_sequences, row_capacity):
+  return batch_assembly.PaddingStats(
+      row_valid_tokens=np.asarray(row_valid_tokens, dtype=np.int64),
+      row_num_sequences=np.asarray(row_num_sequences, dtype=np.int64),
+      row_capacity=row_capacity,
+  )
+
+
+class PaddingStatsTest(absltest.TestCase):
+
+  def test_properties(self):
+    stats = _stats([8, 2, 0, 6], [3, 1, 0, 2], 10)
+
+    self.assertEqual(stats.num_rows, 4)
+    self.assertEqual(stats.valid_tokens, 16)
+    self.assertEqual(stats.capacity_tokens, 40)
+    self.assertAlmostEqual(stats.padding_ratio, 0.6)
+    np.testing.assert_allclose(stats.row_fill, [0.8, 0.2, 0.0, 0.6])
+    self.assertAlmostEqual(stats.row_imbalance, 2.0)
+
+  def test_rejects_invalid_inputs(self):
+    for valid, nseq, cap in (
+        ([[1, 2]], [[1, 1]], 4),  # Not 1D.
+        ([1, 2], [1], 4),  # Shape mismatch.
+        ([], [], 4),  # No rows.
+        ([1], [1], 0),  # Non-positive capacity.
+        ([5], [1], 4),  # Exceeds capacity.
+        ([-1, 2], [1, 1], 4),  # Negative tokens.
+        ([1], [-1], 4),  # Negative sequences.
+        ([0, 0], [0, 0], 4),  # No valid tokens.
+    ):
+      with self.subTest(valid=valid, nseq=nseq, cap=cap):
+        with self.assertRaises(ValueError):
+          _stats(valid, nseq, cap)
+
+  def test_summarize_rejects_empty(self):
+    with self.assertRaises(ValueError):
+      batch_assembly.summarize_padding_stats([])
+
+  def test_summarize(self):
+    summary = batch_assembly.summarize_padding_stats([
+        _stats([10, 10], [1, 2], 10),  # Fully packed, balanced.
+        _stats([6, 0], [3, 0], 10),  # Half padded, one filler row.
+    ])
+
+    self.assertAlmostEqual(summary["ratio"], 1.0 - 26 / 40)
+    self.assertAlmostEqual(summary["microbatch_ratio_mean"], 0.35)
+    self.assertAlmostEqual(summary["microbatch_ratio_max"], 0.7)
+    self.assertAlmostEqual(summary["microbatch_ratio_min"], 0.0)
+    self.assertAlmostEqual(summary["microbatch_imbalance"], 20 / 13)
+    self.assertAlmostEqual(summary["row_imbalance_mean"], 1.5)
+    self.assertAlmostEqual(summary["row_imbalance_max"], 2.0)
+    self.assertAlmostEqual(summary["row_fill_min"], 0.0)
+    self.assertAlmostEqual(summary["row_fill_max"], 1.0)
+    self.assertEqual(summary["empty_rows"], 1.0)
+    self.assertAlmostEqual(summary["sequences_per_row_mean"], 1.5)
+    self.assertEqual(summary["sequences_per_row_max"], 3.0)
+    self.assertEqual(summary["valid_tokens"], 26.0)
+    self.assertEqual(summary["capacity_tokens"], 40.0)
+
+
 class PaddedBatchAssemblerTest(absltest.TestCase):
 
   def _assembler(self, **kwargs):
@@ -1022,6 +1131,52 @@ class PaddedBatchAssemblerTest(absltest.TestCase):
   def test_max_seq_len_is_sum_of_prompt_and_response_lengths(self):
     assembler = self._assembler(max_prompt_length=128, max_response_length=256)
     self.assertEqual(assembler.max_seq_len, 384)
+
+  def test_padding_stats_count_truncated_tokens_per_row(self):
+    # P=4, C=5: the second item is truncated to 4 + 5 = 9 valid tokens.
+    res = self._assembler(num_generations=1, mini_batch_size=2).feed(
+        [_make_payload(2, 3), _make_payload(6, 7)]
+    )
+
+    self.assertLen(res, 1)
+    stats = res[0].padding_stats
+    np.testing.assert_array_equal(stats.row_valid_tokens, [5, 9])
+    np.testing.assert_array_equal(stats.row_num_sequences, [1, 1])
+    self.assertEqual(stats.row_capacity, 9)
+    self.assertAlmostEqual(stats.padding_ratio, 1.0 - 14 / 18)
+    self.assertAlmostEqual(stats.row_imbalance, 9 / 7)
+
+  def test_padding_stats_mark_filler_rows_in_remainder(self):
+    res = self._assembler(num_generations=1, mini_batch_size=1).feed(
+        [_make_payload(2, 3)]
+    )
+
+    self.assertLen(res, 1)
+    self.assertTrue(res[0].is_final_batch)
+    stats = res[0].padding_stats
+    np.testing.assert_array_equal(stats.row_valid_tokens, [5, 0])
+    np.testing.assert_array_equal(stats.row_num_sequences, [1, 0])
+
+  def test_flush_reports_padding_stats(self):
+    assembler = self._assembler()
+    self.assertEmpty(assembler.feed([_make_payload(1, 1)]))
+
+    flushed = assembler.flush()
+
+    np.testing.assert_array_equal(
+        flushed[0].padding_stats.row_valid_tokens, [2, 0]
+    )
+
+  def test_final_marking_preserves_padding_stats(self):
+    # A full chunk lands on the update boundary, so `feed` re-marks the last
+    # batch final via `_replace`; its padding stats must survive.
+    res = self._assembler(num_generations=2, mini_batch_size=1).feed(
+        [_make_payload(1, 1), _make_payload(2, 2)]
+    )
+
+    self.assertLen(res, 1)
+    self.assertTrue(res[0].is_final_batch)
+    np.testing.assert_array_equal(res[0].padding_stats.row_valid_tokens, [2, 4])
 
   def test_empty_input_returns_empty_list(self):
     self.assertEmpty(self._assembler().pack([]))

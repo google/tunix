@@ -637,6 +637,8 @@ class StandardRLProgram(RLProgram):
       trainer_metrics: Any = None,
       num_rollouts: int,
       num_microbatches: int,
+      padding_stats: Sequence[batch_assembly.PaddingStats],
+      packing_time_sec: float,
       step_time_sec: float,
       consumed_policy_version: int,
       log_step: int,
@@ -868,6 +870,17 @@ class StandardRLProgram(RLProgram):
     }
     for tag, val in orchestrator_stats.items():
       self._log_metric(f"orchestrator/{tag}", val, log_step)
+    if padding_stats:
+      for tag, val in batch_assembly.summarize_padding_stats(
+          padding_stats
+      ).items():
+        self._log_metric(f"efficiency/padding/{tag}", val, log_step)
+      packing_stats = {
+          "time_sec_total": float(packing_time_sec),
+          "time_sec_mean": float(packing_time_sec) / len(padding_stats),
+      }
+      for tag, val in packing_stats.items():
+        self._log_metric(f"efficiency/packing/{tag}", val, log_step)
 
     # --- 4. Actor Trainer Metrics ---
     loss_val = None
@@ -1117,6 +1130,8 @@ class StandardRLProgram(RLProgram):
       step_rewards = []
       step_advantages = []
       num_microbatches = 0
+      step_padding_stats: list[batch_assembly.PaddingStats] = []
+      step_packing_time_sec = 0.0
       num_rollouts = 0
       all_step_items = []
       scored_items = []
@@ -1147,7 +1162,9 @@ class StandardRLProgram(RLProgram):
       while groups_consumed < self.full_batch_size:
         scored_items = await self.scored_q.get_batch(num_groups=1)
         if not scored_items:
+          packing_start_time = time.perf_counter()
           assembled_batches = self.assembler.flush()
+          step_packing_time_sec += time.perf_counter() - packing_start_time
         else:
           if groups_consumed == 0 and self.on_step_begin:
             self.on_step_begin(current_step)
@@ -1174,7 +1191,9 @@ class StandardRLProgram(RLProgram):
                   },
               )
             payloads.append(payload)
+          packing_start_time = time.perf_counter()
           assembled_batches = self.assembler.feed(payloads)  # pyrefly: ignore[bad-argument-type]
+          step_packing_time_sec += time.perf_counter() - packing_start_time
 
         for mb in assembled_batches:
           batch = mb.payload
@@ -1211,10 +1230,14 @@ class StandardRLProgram(RLProgram):
             )
 
           num_microbatches += 1
+          step_padding_stats.append(mb.padding_stats)
           logging.info(
-              "Packed %d trajectories into microbatch: %s",
+              "Packed %d trajectories into microbatch: %s (padding_ratio=%.3f,"
+              " row_imbalance=%.3f)",
               len(mb.trajectory_ids),
               logging_utils.summarize_list(list(mb.trajectory_ids)),
+              mb.padding_stats.padding_ratio,
+              mb.padding_stats.row_imbalance,
           )
           step_result = await self.engine.train_step(
               batch,
@@ -1279,6 +1302,8 @@ class StandardRLProgram(RLProgram):
           trainer_metrics=trainer_metrics,
           num_rollouts=num_rollouts,
           num_microbatches=num_microbatches,
+          padding_stats=step_padding_stats,
+          packing_time_sec=step_packing_time_sec,
           step_time_sec=step_time_sec,
           consumed_policy_version=consumed_policy_version,
           log_step=current_step,

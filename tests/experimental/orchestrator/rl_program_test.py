@@ -34,6 +34,19 @@ from tunix.sft import metrics_logger as metrics_logger_lib
 from tunix.sft import utils as sft_utils
 
 
+def _padding_stats(
+    row_valid_tokens: Sequence[int] = (3, 1),
+    row_capacity: int = 4,
+) -> batch_assembly.PaddingStats:
+  """Returns a valid `PaddingStats` for hand-built `AssembledBatch` fakes."""
+  valid = np.asarray(row_valid_tokens, dtype=np.int64)
+  return batch_assembly.PaddingStats(
+      row_valid_tokens=valid,
+      row_num_sequences=(valid > 0).astype(np.int64),
+      row_capacity=row_capacity,
+  )
+
+
 class _MockWorkerHandle(mock.MagicMock):
   """Mock remote worker handle (used for rollout and trainer workers).
 
@@ -734,10 +747,14 @@ class RLProgramTest(absltest.TestCase):
         del items
         return [
             batch_assembly.AssembledBatch(
-                payload="microbatch_0", is_final_batch=False
+                payload="microbatch_0",
+                is_final_batch=False,
+                padding_stats=_padding_stats(),
             ),
             batch_assembly.AssembledBatch(
-                payload="microbatch_1", is_final_batch=True
+                payload="microbatch_1",
+                is_final_batch=True,
+                padding_stats=_padding_stats(),
             ),
         ]
 
@@ -1371,11 +1388,13 @@ class RLProgramTest(absltest.TestCase):
             batch_assembly.AssembledBatch(
                 payload="microbatch_0",
                 is_final_batch=False,
+                padding_stats=_padding_stats(),
                 trajectory_ids=("traj_prompt_0_g0",),
             ),
             batch_assembly.AssembledBatch(
                 payload="microbatch_1",
                 is_final_batch=True,
+                padding_stats=_padding_stats(),
                 trajectory_ids=("traj_prompt_0_g1",),
             ),
         ]
@@ -1762,6 +1781,7 @@ class RLProgramTest(absltest.TestCase):
               batch_assembly.AssembledBatch(
                   payload=mock_payload,
                   is_final_batch=True,
+                  padding_stats=_padding_stats(),
                   trajectory_ids=(),
               )
           ]
@@ -1791,6 +1811,7 @@ class RLProgramTest(absltest.TestCase):
               batch_assembly.AssembledBatch(
                   payload={"raw": "batch"},  # pyrefly: ignore[bad-argument-type]
                   is_final_batch=True,
+                  padding_stats=_padding_stats(),
                   trajectory_ids=(),
               )
           ]
@@ -3464,6 +3485,8 @@ class RLProgramTest(absltest.TestCase):
           trainer_metrics=None,
           num_rollouts=2,
           num_microbatches=2,
+          padding_stats=[],
+          packing_time_sec=0.0,
           step_time_sec=1.0,
           consumed_policy_version=1,
           log_step=0,
@@ -3504,6 +3527,8 @@ class RLProgramTest(absltest.TestCase):
         trainer_metrics=None,
         num_rollouts=0,
         num_microbatches=0,
+        padding_stats=[],
+        packing_time_sec=0.0,
         step_time_sec=0.0,
         consumed_policy_version=0,
         log_step=0,
@@ -3711,6 +3736,8 @@ class RLProgramTest(absltest.TestCase):
         trainer_metrics=None,
         num_rollouts=2,
         num_microbatches=1,
+        padding_stats=[],
+        packing_time_sec=0.0,
         step_time_sec=0.0,
         consumed_policy_version=0,
         log_step=0,
@@ -3740,6 +3767,8 @@ class RLProgramTest(absltest.TestCase):
         trainer_metrics=None,
         num_rollouts=2,
         num_microbatches=1,
+        padding_stats=[],
+        packing_time_sec=0.0,
         step_time_sec=0.0,
         consumed_policy_version=0,
         log_step=0,
@@ -3789,6 +3818,8 @@ class RLProgramTest(absltest.TestCase):
           trainer_metrics=None,
           num_rollouts=2,
           num_microbatches=1,
+          padding_stats=[],
+          packing_time_sec=0.0,
           step_time_sec=0.0,
           consumed_policy_version=0,
           log_step=0,
@@ -4202,6 +4233,8 @@ class GenerationMetricsLoggingTest(absltest.TestCase):
         generation_metrics=metrics,
         num_rollouts=0,
         num_microbatches=0,
+        padding_stats=[],
+        packing_time_sec=0.0,
         step_time_sec=0.0,
         consumed_policy_version=0,
         log_step=0,
@@ -4229,6 +4262,76 @@ class GenerationMetricsLoggingTest(absltest.TestCase):
     self.assertEmpty(
         [k for k in logged if k.startswith("rollout/completions/")]
     )
+
+
+class EfficiencyMetricsLoggingTest(absltest.TestCase):
+  """Covers `efficiency/padding/*` and `efficiency/packing/*` step metrics."""
+
+  def _log_padding(self, padding_stats, packing_time_sec=0.0):
+    algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
+    algo.num_generations = 2
+    algo.mini_batch_size = 1
+    algo.max_turns = 1
+    algo.max_packed_len = 16
+    algo.max_response_length = 1024
+    algo.requires_reference_kl = False
+    algo.algo_config = types.SimpleNamespace(
+        temperature=None,
+        use_rollout_logps=True,
+    )
+    program = rl_program.StandardRLProgram(
+        dataset=["prompt_0"],
+        max_steps=1,
+        algo=algo,
+        reward_fns=[lambda *_: 1.0],
+    )
+    program.metrics_logger = mock.MagicMock()
+    program._collect_and_log_step_metrics(
+        all_step_items=[],
+        step_rewards=[],
+        num_rollouts=0,
+        num_microbatches=len(padding_stats),
+        padding_stats=padding_stats,
+        packing_time_sec=packing_time_sec,
+        step_time_sec=0.0,
+        consumed_policy_version=0,
+        log_step=0,
+    )
+    return {
+        f"{call.args[0]}/{call.args[1]}": call.args[2]
+        for call in program.metrics_logger.log.call_args_list
+    }
+
+  def test_logs_step_padding_summary(self):
+    stats = [
+        _padding_stats(row_valid_tokens=(4, 4), row_capacity=4),
+        _padding_stats(row_valid_tokens=(3, 1), row_capacity=4),
+    ]
+
+    logged = self._log_padding(stats)
+
+    self.assertAlmostEqual(logged["efficiency/padding/ratio"], 0.25)
+    self.assertAlmostEqual(
+        logged["efficiency/padding/microbatch_ratio_max"], 0.5
+    )
+    self.assertAlmostEqual(logged["efficiency/padding/row_imbalance_max"], 1.5)
+    self.assertEqual(logged["efficiency/padding/valid_tokens"], 12.0)
+
+  def test_logs_step_packing_time(self):
+    stats = [
+        _padding_stats(row_valid_tokens=(4, 4), row_capacity=4),
+        _padding_stats(row_valid_tokens=(3, 1), row_capacity=4),
+    ]
+
+    logged = self._log_padding(stats, packing_time_sec=0.5)
+
+    self.assertAlmostEqual(logged["efficiency/packing/time_sec_total"], 0.5)
+    self.assertAlmostEqual(logged["efficiency/packing/time_sec_mean"], 0.25)
+
+  def test_no_padding_stats_logs_no_efficiency_metrics(self):
+    logged = self._log_padding([])
+
+    self.assertEmpty([k for k in logged if k.startswith("efficiency/")])
 
 
 class StandardRLProgramTrajectoryStoreTest(absltest.TestCase):
