@@ -691,6 +691,9 @@ def main() -> None:
   enable_multi_numa = os.environ.get("ENABLE_MULTI_NUMA", "0")
   tpu_raiden_data_nics = os.environ.get("TPU_RAIDEN_DATA_NICS", "eth0")
   nics = [n.strip() for n in tpu_raiden_data_nics.split(",") if n.strip()]
+  enable_multi_numa = os.environ.get("ENABLE_MULTI_NUMA", "0")
+  tpu_raiden_data_nics = os.environ.get("TPU_RAIDEN_DATA_NICS", "eth0")
+  nics = [n.strip() for n in tpu_raiden_data_nics.split(",") if n.strip()]
   if enable_multi_numa.lower() in ("1", "true") and len(nics) >= 2:
     enable_multi_numa = "1"
     tpu_raiden_data_nics = ",".join(nics)
