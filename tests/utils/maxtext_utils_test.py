@@ -627,7 +627,7 @@ class MaxTextUtilsTest(absltest.TestCase):
           checkpointing_options=mock.MagicMock(save_interval_steps=1, max_to_keep=2),
       )
     self.assertIn("pathways_checkpointing_impl=colocated_python", argv)
-    # D3: identical on-disk layout in both modes keeps cross-mode restore safe.
+    # D3: with CKPT_USE_OCDBT unset, both modes default to plain Zarr v2 so cross-mode restore stays safe.
     self.assertIn("checkpoint_storage_use_ocdbt=false", argv)
     self.assertIn("checkpoint_storage_use_zarr3=false", argv)
 
@@ -659,6 +659,49 @@ class MaxTextUtilsTest(absltest.TestCase):
           checkpointing_options=mock.MagicMock(save_interval_steps=1, max_to_keep=2),
       )
     self.assertNotIn("pathways_checkpointing_impl=colocated_python", argv)
+
+  def test_pathways_ocdbt_selection(self):
+    """CKPT_USE_OCDBT only enables OCDBT under colocated_python; persistence always forces it off."""
+    ckpt_opts = mock.MagicMock(save_interval_steps=1, max_to_keep=2)
+    colocated_env = {
+        "ENABLE_PATHWAYS_PERSISTENCE": "1",
+        "PATHWAYS_CHECKPOINTING_IMPL": "colocated_python",
+        "COLOCATED_PYTHON_SIDECAR_IMAGE": "sidecar:tag",
+    }
+
+    # Case 1: colocated_python + CKPT_USE_OCDBT=1 -> OCDBT on, zarr3 off.
+    with mock.patch.dict("os.environ", {**colocated_env, "CKPT_USE_OCDBT": "1"}, clear=False):
+      argv = self._build_config_argv(base_output_directory="gs://bucket/out", checkpointing_options=ckpt_opts)
+    self.assertIn("checkpoint_storage_use_ocdbt=true", argv)
+    self.assertIn("checkpoint_storage_use_zarr3=false", argv)
+    self.assertNotIn("checkpoint_storage_use_ocdbt=false", argv)
+
+    # Case 2: colocated_python + CKPT_USE_OCDBT unset -> default off.
+    with mock.patch.dict("os.environ", colocated_env, clear=False):
+      os.environ.pop("CKPT_USE_OCDBT", None)
+      argv = self._build_config_argv(base_output_directory="gs://bucket/out", checkpointing_options=ckpt_opts)
+    self.assertIn("checkpoint_storage_use_ocdbt=false", argv)
+    self.assertNotIn("checkpoint_storage_use_ocdbt=true", argv)
+
+    # Case 3: persistence + CKPT_USE_OCDBT=1 -> ignored (persistence rejects OCDBT).
+    with mock.patch.dict(
+        "os.environ",
+        {"ENABLE_PATHWAYS_PERSISTENCE": "1", "PATHWAYS_CHECKPOINTING_IMPL": "persistence", "CKPT_USE_OCDBT": "1"},
+        clear=False,
+    ):
+      argv = self._build_config_argv(base_output_directory="gs://bucket/out", checkpointing_options=ckpt_opts)
+    self.assertIn("checkpoint_storage_use_ocdbt=false", argv)
+    self.assertNotIn("checkpoint_storage_use_ocdbt=true", argv)
+
+    # Case 4: MAXTEXT_EXTRA_FLAGS is appended last, so it wins over the derived
+    # value (pyconfig parses argv last-wins). Documents the pinned-image hedge.
+    with mock.patch.dict(
+        "os.environ", {**colocated_env, "MAXTEXT_EXTRA_FLAGS": "checkpoint_storage_use_ocdbt=true"}, clear=False
+    ):
+      os.environ.pop("CKPT_USE_OCDBT", None)
+      argv = self._build_config_argv(base_output_directory="gs://bucket/out", checkpointing_options=ckpt_opts)
+    ocdbt_entries = [a for a in argv if a.startswith("checkpoint_storage_use_ocdbt=")]
+    self.assertEqual(ocdbt_entries, ["checkpoint_storage_use_ocdbt=false", "checkpoint_storage_use_ocdbt=true"])
 
 
 if __name__ == "__main__":

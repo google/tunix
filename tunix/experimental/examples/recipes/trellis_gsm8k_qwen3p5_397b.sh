@@ -98,6 +98,7 @@ export CHECKPOINT_SAVE_INTERVAL_STEPS="${CHECKPOINT_SAVE_INTERVAL_STEPS:-0}"
 if [[ "${CHECKPOINT_SAVE_INTERVAL_STEPS}" -gt 0 ]]; then
   export ENABLE_PATHWAYS_PERSISTENCE="${ENABLE_PATHWAYS_PERSISTENCE:-1}"
   export PATHWAYS_CHECKPOINTING_IMPL="${PATHWAYS_CHECKPOINTING_IMPL:-persistence}"
+  export CKPT_USE_OCDBT="${CKPT_USE_OCDBT:-0}"
 fi
 
 # Profiling off. MaxText decided whether to profile from profiler_steps alone
