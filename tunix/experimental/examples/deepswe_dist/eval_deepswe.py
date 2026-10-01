@@ -67,7 +67,19 @@ def parse_args(argv=None):
       ),
   )
   p.add_argument(
-      "--mesh_fsdp", type=int, default=32, help="Rollout data parallel size."
+      "--mesh_fsdp",
+      type=int,
+      default=1,
+      help="Rollout fully sharded data parallel size (FSDP).",
+  )
+  p.add_argument(
+      "--mesh_dp",
+      type=int,
+      default=None,
+      help=(
+          "Rollout data parallel size (DP). If unset, defaults to"
+          " VLLM_DATA_PARALLEL_SIZE env var or 1."
+      ),
   )
   p.add_argument("--mesh_tp", type=int, default=2)
   p.add_argument(
@@ -196,8 +208,11 @@ def parse_args(argv=None):
       help="Whether this checkpoint is the final checkpoint in the manifest.",
   )
   a = p.parse_args(argv)
+  if a.mesh_dp is None:
+    a.mesh_dp = int(os.environ.get("VLLM_DATA_PARALLEL_SIZE", 0)) or 1
   for name in (
       "mesh_fsdp",
+      "mesh_dp",
       "mesh_tp",
       "mesh_expert",
       "max_model_len",
@@ -243,6 +258,7 @@ def model_profile(a):
       "maxtext_model_name",
       "scan_layers",
       "mesh_fsdp",
+      "mesh_dp",
       "mesh_tp",
       "mesh_expert",
       "max_model_len",
