@@ -21,6 +21,7 @@ pipelines.
 import abc
 import asyncio
 from collections.abc import Callable, Iterable, Mapping, Sequence
+import contextlib
 import dataclasses
 import os
 import time
@@ -32,6 +33,7 @@ from tunix.experimental.common import datatypes
 from tunix.experimental.common import logging_utils
 from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
+from tunix.experimental.orchestrator import dataset_utils
 from tunix.experimental.orchestrator import rl_engine_interface
 from tunix.experimental.queue_manager import trajectory_queue_manager
 from tunix.experimental.trajectory import store as trajectory_store_lib
@@ -455,9 +457,11 @@ class StandardRLProgram(RLProgram):
     already_consumed = self._step * self.full_batch_size
 
     try:
-      for prompt_idx, prompt_item in enumerate(self.dataset):
-        if prompt_idx < already_consumed:
-          continue
+      async for prompt_idx, prompt_item in dataset_utils.iter_dataset_async(
+          self.dataset,
+          skip_count=already_consumed,
+          prefetch_size=max(1, self.full_batch_size),
+      ):
         await self._wait_for_dispatch_window()
         if isinstance(prompt_item, dict):
           prompt_item = dict(prompt_item)

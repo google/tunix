@@ -4381,5 +4381,73 @@ class StandardRLProgramTrajectoryStoreTest(absltest.TestCase):
     program.close()
 
 
+class StandardRLProgramAsyncDatasetTest(absltest.TestCase):
+  """Tests rollout_dispatch_stage with generator datasets and checkpoint resume."""
+
+  def setUp(self):
+    super().setUp()
+    self.mock_algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
+    self.mock_algo.num_generations = 2
+    self.mock_algo.mini_batch_size = 2
+    self.mock_algo.train_micro_batch_size = 2
+    self.mock_algo.max_turns = 1
+    self.mock_algo.max_packed_len = 16
+    self.mock_algo.max_response_length = 16
+    self.mock_algo.requires_reference_kl = False
+    self.mock_algo.use_rollout_logps = True
+    self.mock_algo.algo_config = types.SimpleNamespace(
+        temperature=None,
+        use_rollout_logps=True,
+    )
+
+  def test_rollout_dispatch_stage_with_generator_and_checkpoint_resume(self):
+    closed = False
+
+    def _gen_dataset():
+      nonlocal closed
+      try:
+        for i in range(4):
+          yield f"prompt_{i}"
+      finally:
+        closed = True
+
+    async def _run():
+      program = rl_program.StandardRLProgram(
+          dataset=_gen_dataset(),
+          max_steps=2,
+          batch_size=2,
+          algo=self.mock_algo,
+          reward_fns=[lambda *_: 1.0],
+      )
+      mock_engine = mock.MagicMock(
+          spec=distributed_rl_engine.DistributedRLEngine
+      )
+      mock_engine.dispatch_rollouts = mock.AsyncMock()
+      program.engine = mock_engine
+      # Simulate resuming at step 1 (first 2 prompts already consumed).
+      program._step = 1
+      program._dispatch_capacity = asyncio.Semaphore(4)
+
+      await program.rollout_dispatch_stage()
+
+      self.assertEqual(mock_engine.dispatch_rollouts.call_count, 2)
+      dispatched_ids = [
+          call.args[0][0]["prompt_id"]
+          for call in mock_engine.dispatch_rollouts.call_args_list
+      ]
+      dispatched_prompts = [
+          call.args[0][0]["prompt"]
+          for call in mock_engine.dispatch_rollouts.call_args_list
+      ]
+      self.assertEqual(dispatched_ids, ["prompt_2", "prompt_3"])
+      self.assertEqual(dispatched_prompts, ["prompt_2", "prompt_3"])
+      program.close()
+
+    asyncio.run(_run())
+    self.assertTrue(closed)
+
+
 if __name__ == "__main__":
   absltest.main()
+
+
