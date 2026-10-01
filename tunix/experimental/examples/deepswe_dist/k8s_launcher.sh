@@ -1080,6 +1080,7 @@ start_eval() {
         ${LIBTPU_INIT_ARGS:+LIBTPU_INIT_ARGS=\"${LIBTPU_INIT_ARGS}\"} \
         ${VLLM_ENABLE_V1_MULTIPROCESSING:+VLLM_ENABLE_V1_MULTIPROCESSING=${VLLM_ENABLE_V1_MULTIPROCESSING}} \
         ${VLLM_LOGGING_LEVEL:+VLLM_LOGGING_LEVEL=${VLLM_LOGGING_LEVEL}} \
+        ${VLLM_DATA_PARALLEL_SIZE:+VLLM_DATA_PARALLEL_SIZE=${VLLM_DATA_PARALLEL_SIZE}} \
         ${ROLLOUT_ENV_FLAGS} \
         ${ROLLOUT_EXTRA_ENV} \
         SKIP_JAX_PRECOMPILE=1 python3 -u ${eval_cmd} \
@@ -1091,8 +1092,9 @@ start_eval() {
           --model_absolute_path=${MAXTEXT_CKPT} \
           --maxtext_model_name=${MAXTEXT_MODEL_NAME} \
           ${SCAN_LAYERS:+--scan_layers=${SCAN_LAYERS}} \
-          --mesh_fsdp=${ROLLOUT_MESH_FSDP:-2} \
-          --mesh_tp=${ROLLOUT_MESH_TP:-2} \
+          --mesh_fsdp=${ROLLOUT_MESH_FSDP:-1} \
+          --mesh_dp=${VLLM_DATA_PARALLEL_SIZE:-1} \
+          --mesh_tp=${ROLLOUT_MESH_TP:-1} \
           --mesh_expert=${ROLLOUT_MESH_EXPERT:-1} \
           --vllm_utilization=${VLLM_GPU_MEMORY_UTILIZATION:-0.9} \
           --max_model_len=${max_model_len} \
