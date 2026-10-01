@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import Iterable, Mapping, Sequence
+from typing import Iterable, Mapping, Sequence, overload
 
 import numpy as np
 
@@ -97,6 +97,59 @@ class PackedRow:
   num_real_segments: int = 0
 
 
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class PackedChunk(Sequence[PackedRow]):
+  """A packed chunk of `n_bins` rows with contiguous `[n_bins, budget]` arrays."""
+
+  ids: np.ndarray
+  prompt_mask: np.ndarray
+  completion_mask: np.ndarray
+  advantages: np.ndarray
+  segment_ids: np.ndarray
+  segment_positions: np.ndarray
+  per_token: Mapping[str, np.ndarray] = dataclasses.field(default_factory=dict)
+  policy_versions: tuple[np.ndarray | None, ...] = ()
+  num_real_segments: tuple[int, ...] = ()
+
+  def __len__(self) -> int:
+    return int(self.ids.shape[0])
+
+  @overload
+  def __getitem__(self, index: int) -> PackedRow:
+    ...
+
+  @overload
+  def __getitem__(self, index: slice) -> list[PackedRow]:
+    ...
+
+  def __getitem__(self, index: int | slice) -> PackedRow | list[PackedRow]:
+    if isinstance(index, slice):
+      return [self[i] for i in range(*index.indices(len(self)))]
+    if index < 0:
+      index += len(self)
+    if index < 0 or index >= len(self):
+      raise IndexError(f"PackedChunk index {index} out of range.")
+    return PackedRow(
+        ids=self.ids[index],
+        prompt_mask=self.prompt_mask[index],
+        completion_mask=self.completion_mask[index],
+        advantages=self.advantages[index],
+        segment_ids=self.segment_ids[index],
+        segment_positions=self.segment_positions[index],
+        per_token={name: arr[index] for name, arr in self.per_token.items()},
+        policy_version=(
+            self.policy_versions[index]
+            if index < len(self.policy_versions)
+            else None
+        ),
+        num_real_segments=(
+            self.num_real_segments[index]
+            if index < len(self.num_real_segments)
+            else 0
+        ),
+    )
+
+
 def carried_per_token_fields(items: Sequence[PackItem]) -> tuple[str, ...]:
   """Returns the per-token fields carried by all items in the sequence."""
   if not items:
@@ -168,64 +221,9 @@ def pack_bin(
     carried: Sequence[str],
 ) -> PackedRow:
   """Packs a single bin of items into a single `[budget]` PackedRow."""
-  zeros_i = lambda: np.zeros(budget, dtype=np.int32)
-  zeros_f = lambda: np.zeros(budget, dtype=np.float32)
-
-  if not bin_items:
-    return PackedRow(
-        ids=np.full(budget, pad_id, dtype=np.int32),
-        prompt_mask=zeros_f(),
-        completion_mask=zeros_f(),
-        advantages=zeros_f(),
-        segment_ids=zeros_i(),
-        segment_positions=zeros_i(),
-        per_token={name: zeros_f() for name in carried},
-        policy_version=None,
-        num_real_segments=0,
-    )
-
-  total = sum(item.num_tokens for item in bin_items)
-  if total > budget:
-    raise ValueError(f"pack_bin: bin size {total} exceeds budget {budget}.")
-
-  ids = np.full(budget, pad_id, dtype=np.int32)
-  prompt_mask = zeros_f()
-  completion_mask = zeros_f()
-  advantages = zeros_f()
-  segment_ids = zeros_i()
-  segment_positions = zeros_i()
-  per_token = {name: zeros_f() for name in carried}
-
-  cursor = 0
-  for seg, item in enumerate(bin_items, start=1):
-    p = item.prompt_ids.shape[0]
-    c = item.completion_ids.shape[0]
-    n = p + c
-    seq = slice(cursor, cursor + n)
-    comp = slice(cursor + p, cursor + n)
-
-    ids[seq] = np.concatenate([item.prompt_ids, item.completion_ids])
-    prompt_mask[cursor : cursor + p] = 1.0
-    segment_ids[seq] = seg
-    segment_positions[seq] = np.arange(n, dtype=np.int32)
-
-    completion_mask[comp] = item.completion_mask
-    advantages[comp] = item.advantages
-    for name in carried:
-      per_token[name][comp] = item.per_token[name]
-    cursor += n
-
-  return PackedRow(
-      ids=ids,
-      prompt_mask=prompt_mask,
-      completion_mask=completion_mask,
-      advantages=advantages,
-      segment_ids=segment_ids,
-      segment_positions=segment_positions,
-      per_token=per_token,
-      policy_version=bin_items[0].policy_version,
-      num_real_segments=len(bin_items),
-  )
+  return pack_chunk([bin_items], budget=budget, pad_id=pad_id, carried=carried)[
+      0
+  ]
 
 
 def pack_chunk(
@@ -234,12 +232,57 @@ def pack_chunk(
     budget: int,
     pad_id: int,
     carried: Sequence[str],
-) -> list[PackedRow]:
-  """Packs a sequence of bins of one chunk into a row."""
-  return [
-      pack_bin(bin_items, budget=budget, pad_id=pad_id, carried=carried)
-      for bin_items in bins
-  ]
+) -> PackedChunk:
+  """Packs a sequence of bins of one chunk into a contiguous `[n_bins, budget]` PackedChunk."""
+  n_bins = len(bins)
+  ids = np.full((n_bins, budget), pad_id, dtype=np.int32)
+  prompt_mask = np.zeros((n_bins, budget), dtype=np.float32)
+  completion_mask = np.zeros((n_bins, budget), dtype=np.float32)
+  advantages = np.zeros((n_bins, budget), dtype=np.float32)
+  segment_ids = np.zeros((n_bins, budget), dtype=np.int32)
+  segment_positions = np.zeros((n_bins, budget), dtype=np.int32)
+  per_token = {
+      name: np.zeros((n_bins, budget), dtype=np.float32) for name in carried
+  }
+  policy_versions: list[np.ndarray | None] = []
+  num_real_segments: list[int] = []
+  for b, bin_items in enumerate(bins):
+    total = sum(item.num_tokens for item in bin_items)
+    if total > budget:
+      raise ValueError(f"pack_bin: bin size {total} exceeds budget {budget}.")
+    cursor = 0
+    for seg, item in enumerate(bin_items, start=1):
+      p = item.prompt_ids.shape[0]
+      c = item.completion_ids.shape[0]
+      n = p + c
+      seq = slice(cursor, cursor + n)
+      comp = slice(cursor + p, cursor + n)
+
+      ids[b, cursor : cursor + p] = item.prompt_ids
+      ids[b, comp] = item.completion_ids
+      prompt_mask[b, cursor : cursor + p] = 1.0
+      segment_ids[b, seq] = seg
+      segment_positions[b, seq] = np.arange(n, dtype=np.int32)
+
+      completion_mask[b, comp] = item.completion_mask
+      advantages[b, comp] = item.advantages
+      for name in carried:
+        per_token[name][b, comp] = item.per_token[name]
+      cursor += n
+
+    policy_versions.append(bin_items[0].policy_version if bin_items else None)
+    num_real_segments.append(len(bin_items))
+  return PackedChunk(
+      ids=ids,
+      prompt_mask=prompt_mask,
+      completion_mask=completion_mask,
+      advantages=advantages,
+      segment_ids=segment_ids,
+      segment_positions=segment_positions,
+      per_token=per_token,
+      policy_versions=tuple(policy_versions),
+      num_real_segments=tuple(num_real_segments),
+  )
 
 
 def effective_max_segments(
@@ -269,7 +312,7 @@ def pack_core(
     pack_size: int = 1,
     max_segments_per_packed_row: int | None = None,
     pad_id: int = 0,
-) -> list[list[PackedRow]]:
+) -> list[PackedChunk]:
   """Packs `items` into a sequence of chunks, each containing `pack_size` PackedRows with `budget` tokens."""
   if budget <= 0:
     raise ValueError(f"Budget must be positive, got {budget}.")
@@ -290,7 +333,7 @@ def pack_core(
   max_segments = effective_max_segments(budget, max_segments_per_packed_row)
   carried = carried_per_token_fields(items)
 
-  chunks: list[list[PackedRow]] = []
+  chunks: list[PackedChunk] = []
   remaining = list(items)
   while remaining:
     bins, remaining = fill_one_chunk(
