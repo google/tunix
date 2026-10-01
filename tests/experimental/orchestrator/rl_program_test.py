@@ -3796,40 +3796,17 @@ class RLProgramTest(absltest.TestCase):
     )
 
   def test_trajectory_logger_initialization(self):
-    with mock.patch("tunix.utils.trajectory_logger.AsyncTrajectoryLogger") as mock_logger_cls:
-      mock_logger_inst = mock.MagicMock()
-      mock_logger_cls.return_value = mock_logger_inst
-
-      # Case 1: derived from metrics_logging_options.log_dir
-      program1 = rl_program.StandardRLProgram(
-          dataset=["prompt_0"],
-          max_steps=1,
-          algo=self.mock_algo,
-          metrics_logging_options=metrics_logger_lib.MetricsLoggerOptions(
-              log_dir="/tmp/metrics_dir"
-          ),
-      )
-      mock_logger_cls.assert_called_with("/tmp/metrics_dir/trajectories")
-      self.assertIs(program1.trajectory_logger, mock_logger_inst)
-
-      # Case 2: explicit trajectory_log_dir
-      mock_logger_cls.reset_mock()
-      program2 = rl_program.StandardRLProgram(
-          dataset=["prompt_0"],
-          max_steps=1,
-          algo=self.mock_algo,
-          trajectory_log_dir="/custom/trajectories",
-      )
-      mock_logger_cls.assert_called_with("/custom/trajectories")
-      self.assertIs(program2.trajectory_logger, mock_logger_inst)
-
-      # Case 3: disabled when no log_dir provided
-      program3 = rl_program.StandardRLProgram(
-          dataset=["prompt_0"],
-          max_steps=1,
-          algo=self.mock_algo,
-      )
-      self.assertIsNone(program3.trajectory_logger)
+    # Trajectory logging is disabled on mlperf (b/565475624).
+    program = rl_program.StandardRLProgram(
+        dataset=["prompt_0"],
+        max_steps=1,
+        algo=self.mock_algo,
+        metrics_logging_options=metrics_logger_lib.MetricsLoggerOptions(
+            log_dir="/tmp/metrics_dir"
+        ),
+        trajectory_log_dir="/custom/trajectories",
+    )
+    self.assertIsNone(program.trajectory_logger)
 
   def _scoring_item(self, group_index, *, masked=False, failed=False):
     """A Token-mode trajectory as the collector hands it to critique."""
