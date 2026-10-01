@@ -80,6 +80,7 @@ TRAJECTORY_LOG_DIR=${TRAJECTORY_LOG_DIR:-}
 TRAJECTORY_STORE_ROOT_DIR=${TRAJECTORY_STORE_ROOT_DIR:-${TRAJECTORY_STORE_ROOT:-}}
 SAMPLER=${SAMPLER:-inprocess_vllm}
 WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
+PARTIAL_ROLLOUT=${PARTIAL_ROLLOUT:-false}
 USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
 CHAT_PARSER=${CHAT_PARSER:-raw}
 # Model-specific EOS token IDs (comma-separated), fetched from HuggingFace
@@ -573,6 +574,7 @@ echo "Launching rollout node with sampler=$SAMPLER on TPU chips $ROLLOUT_TPU_CHI
     --lora_rank="$LORA_RANK"
     --lora_alpha="$LORA_ALPHA"
     --weight_sync_mode="$WEIGHT_SYNC_MODE"
+    --partial_rollout="$PARTIAL_ROLLOUT"
     --chat_parser="$CHAT_PARSER"
   )
 

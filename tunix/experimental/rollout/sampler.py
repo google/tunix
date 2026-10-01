@@ -94,6 +94,8 @@ class SamplingResponse(datatypes.Response):
       `[Length, Layers, Top K]` to match what the backend reports. Covers the
       prompt as well as the generated tokens. None if not requested, or if the
       model is dense.
+    policy_version: Policy weight version active on the sampler when this
+      turn/request started generation, or None if untracked.
   """
 
   text: str = ""
@@ -106,6 +108,7 @@ class SamplingResponse(datatypes.Response):
   logprobs: np.ndarray | None = None
   finish_reason: str = "stop"
   routed_experts: ArrayLike | None = None
+  policy_version: int | None = None
 
   def __post_init__(self):
     if (
@@ -133,6 +136,8 @@ class LoadInfo(datatypes.Response):
 @runtime_checkable
 class Sampler(Protocol):
   """Protocol defining standard lifecycle, sampling, and weight-sync interface for worker slices."""
+
+  _policy_version: int = 0
 
   # --- Lifecycle & Topology ---
   def initialize(self) -> None:

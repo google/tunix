@@ -1527,6 +1527,111 @@ class ResponseBudgetAnnotationTest(absltest.TestCase):
     )
     np.testing.assert_array_equal(item.traj["prompt_tokens"], [10, 11])
 
+  def test_partial_rollout_pause_gate_and_min_turn_policy_version(self):
+    class _TwoTurnEnv(base_environment.BaseTaskEnv):
+
+      def __init__(self):
+        super().__init__(task={"question": "q0"}, max_steps=2)
+        self._step_idx = 0
+
+      def _initial_observation(self):
+        return "obs0"
+
+      def _step_impl(self, action):
+        self._step_idx += 1
+        return base_environment.EnvStepResult(
+            observation="obs1",
+            reward=1.0,
+            done=self._step_idx >= 2,
+            info={},
+        )
+
+    class _VersionedTwoTurnSampler:
+      supports_token_input = True
+
+      def __init__(self, versions):
+        self.versions = list(versions)
+        self.calls = 0
+
+      async def sample(self, req, **kwargs):
+        del kwargs
+        ver = self.versions[self.calls]
+        self.calls += 1
+        prompt_toks = (
+            np.asarray(req.prompt, dtype=np.int32)
+            if isinstance(req.prompt, np.ndarray)
+            else np.array([10, 11], dtype=np.int32)
+        )
+        return sampler_lib.SamplingResponse(
+            request_id=req.request_id,
+            text=f"turn_{self.calls}",
+            token_ids=np.array([20 + self.calls], dtype=np.int32),
+            prompt_token_ids=prompt_toks,
+            logprobs=np.array([-0.1], dtype=np.float32),
+            policy_version=ver,
+        )
+
+    sampler = _VersionedTwoTurnSampler([2, 3])
+    parser = _RecordingParser()
+    tokenizer = _MockTokenizer()
+    agent = model_agent.ModelAgent("sys")
+    env = _TwoTurnEnv()
+    req = datatypes.RolloutRequest(
+        prompt_id="p_partial",
+        prompt="q0",
+        max_response_length=64,
+        target_policy_version=2,
+    )
+    engine = collector.TrajectoryCollectorEngine(
+        traj_id="traj_partial",
+        request=req,
+        sampler=sampler,
+        env_client=env,
+        agent=agent,
+        tokenizer=tokenizer,
+        chat_parser=parser,
+        partial_rollout=True,
+    )
+
+    async def _run():
+      engine.pause()
+      ep_task = asyncio.create_task(engine.run_episode())
+      await asyncio.sleep(0.02)
+      self.assertEqual(sampler.calls, 0)
+      engine.resume()
+      return await ep_task
+
+    item = asyncio.run(_run())
+    self.assertEqual(sampler.calls, 2)
+    self.assertEqual(item.traj["turn_policy_versions"], [2, 3])
+    self.assertEqual(item.traj["policy_version"], 2)
+    self.assertEqual(item.metadata["turn_policy_versions"], [2, 3])
+    self.assertEqual(item.metadata["policy_version"], 2)
+
+    # Also verify cancel() while paused wakes model_call and raises RuntimeError without calling sampler.sample().
+    sampler_cancel = _VersionedTwoTurnSampler([2, 3])
+    engine_cancel = collector.TrajectoryCollectorEngine(
+        traj_id="traj_cancel_paused",
+        request=req,
+        sampler=sampler_cancel,
+        env_client=_TwoTurnEnv(),
+        agent=agent,
+        tokenizer=tokenizer,
+        chat_parser=parser,
+        partial_rollout=True,
+    )
+
+    async def _run_cancel():
+      engine_cancel.pause()
+      ep_task = asyncio.create_task(engine_cancel.run_episode())
+      await asyncio.sleep(0.02)
+      engine_cancel.cancel()
+      with self.assertRaisesRegex(RuntimeError, "Collector was cancelled"):
+        await ep_task
+
+    asyncio.run(_run_cancel())
+    self.assertEqual(sampler_cancel.calls, 0)
+
 
 if __name__ == "__main__":
   absltest.main()

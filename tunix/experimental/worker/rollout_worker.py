@@ -59,6 +59,7 @@ class RolloutConfig(base_rollout.RolloutConfig):
   env_config: dict[str, Any] = dataclasses.field(default_factory=dict)
   agent_config: dict[str, Any] = dataclasses.field(default_factory=dict)
   trajectory_store_config: Mapping[str, Any] | None = None
+  partial_rollout: bool = False
 
 
 TrajectoryOrError = Union[

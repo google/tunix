@@ -101,7 +101,9 @@ def _round_uuid(sync_request: Any) -> int:
   return uuid
 
 
-def _format_sampling_response(r: Any) -> base_sampler_lib.SamplingResponse:
+def _format_sampling_response(
+    r: Any, default_policy_version: int | None = None
+) -> base_sampler_lib.SamplingResponse:
   """Formats raw sampler output into a standardized SamplingResponse."""
   if isinstance(r, base_sampler_lib.SamplingResponse):
     return r
@@ -116,6 +118,12 @@ def _format_sampling_response(r: Any) -> base_sampler_lib.SamplingResponse:
   lps = getattr(r, "logprobs", None)
   if lps is not None and not isinstance(lps, np.ndarray):
     lps = np.array(lps, dtype=np.float32)
+  raw_ver = getattr(r, "policy_version", None)
+  pol_ver = (
+      int(raw_ver)
+      if isinstance(raw_ver, int) and not isinstance(raw_ver, bool)
+      else default_policy_version
+  )
   return base_sampler_lib.SamplingResponse(
       request_id=getattr(r, "request_id", ""),
       text=getattr(r, "text", ""),
@@ -124,6 +132,7 @@ def _format_sampling_response(r: Any) -> base_sampler_lib.SamplingResponse:
       prompt_token_ids=prompt_ids,
       finish_reason=getattr(r, "finish_reason", "stop"),
       routed_experts=getattr(r, "routed_experts", None),
+      policy_version=pol_ver,
       error=getattr(r, "error", None),
   )
 
@@ -201,6 +210,7 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
       parallelism: int = 4,
       weight_sync_mode: weight_sync.WeightSyncMode | str | None = None,
       free_kv_cache_during_weight_sync: bool | None = None,
+      partial_rollout: bool | None = None,
       **kwargs,
   ):
     self.server_id = server_id
@@ -255,6 +265,12 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
     self._free_kv_cache_during_weight_sync = bool(
         free_kv_cache_during_weight_sync
     )
+    if partial_rollout is None:
+      partial_rollout = (
+          os.environ.get("PARTIAL_ROLLOUT", "false").lower()
+          in ("true", "1")
+      )
+    self._partial_rollout = bool(partial_rollout)
     self._weight_update_open = False
     self._weight_sync_bound = False
     self._cached_weight_sync_metadata: (
@@ -263,7 +279,13 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
 
     if self.sampler is None and self.engine_args is not None:
       sampler_cls = _get_rl_vllm_sampler_cls()
-      self.sampler = sampler_cls(engine_args=self.engine_args)
+      if self._partial_rollout:
+        self.sampler = sampler_cls(
+            engine_args=self.engine_args,
+            partial_rollout=self._partial_rollout,
+        )
+      else:
+        self.sampler = sampler_cls(engine_args=self.engine_args)
     self._verify_sampler_protocol()
 
   def initialize(self) -> None:
@@ -275,7 +297,13 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
         self.engine_args = AsyncEngineArgs(model=self.model_name)
       if self.engine_args is not None:
         sampler_cls = _get_rl_vllm_sampler_cls()
-        self.sampler = sampler_cls(engine_args=self.engine_args)
+        if self._partial_rollout:
+          self.sampler = sampler_cls(
+              engine_args=self.engine_args,
+              partial_rollout=self._partial_rollout,
+          )
+        else:
+          self.sampler = sampler_cls(engine_args=self.engine_args)
     if self.sampler is None:
       raise RuntimeError(
           f"VllmSamplerAdapter [{self.server_id}] requires valid"
@@ -379,17 +407,44 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
       raise ValueError("sampling_requests cannot be None.")
 
     is_sequence = isinstance(sampling_requests, (list, tuple))
-    raw_responses = await self._require_sampler().sample(
-        sampling_requests, **kwargs
-    )
+    if self._partial_rollout:
+      sampler = self._require_sampler()
+      raw_responses = await sampler.sample(sampling_requests, **kwargs)
+      sampler_ver = sampler._policy_version
+      default_ver = (
+          int(sampler_ver)
+          if isinstance(sampler_ver, int) and not isinstance(sampler_ver, bool)
+          else self._policy_version
+      )
 
-    if isinstance(raw_responses, (list, tuple)):
-      formatted = [_format_sampling_response(r) for r in raw_responses]
-      if is_sequence:
-        return formatted
-      return formatted[0] if formatted else base_sampler_lib.SamplingResponse()
+      if isinstance(raw_responses, (list, tuple)):
+        formatted = [
+            _format_sampling_response(r, default_policy_version=default_ver)
+            for r in raw_responses
+        ]
+        if is_sequence:
+          return formatted
+        return (
+            formatted[0] if formatted else base_sampler_lib.SamplingResponse()
+        )
 
-    return _format_sampling_response(raw_responses)
+      return _format_sampling_response(
+          raw_responses, default_policy_version=default_ver
+      )
+    else:
+      raw_responses = await self._require_sampler().sample(
+          sampling_requests, **kwargs
+      )
+
+      if isinstance(raw_responses, (list, tuple)):
+        formatted = [_format_sampling_response(r) for r in raw_responses]
+        if is_sequence:
+          return formatted
+        return (
+            formatted[0] if formatted else base_sampler_lib.SamplingResponse()
+        )
+
+      return _format_sampling_response(raw_responses)
 
   # ---------------------------------------------------------------------------
   # WeightSyncDestination Protocol Implementation
@@ -478,10 +533,16 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
       t_start = time.monotonic()
       logger.info("Executing pre_weight_sync for server_id=%s", self.server_id)
 
-      # delegate to RLVllmSampler's native pause + clear + free-kv-cache
-      await sampler.pre_weight_sync(
-          free_kv_cache=self._free_kv_cache_during_weight_sync
-      )
+      if self._partial_rollout or kwargs.get("preserve_active_kv_cache", False):
+        await sampler.pre_weight_sync(
+            free_kv_cache=self._free_kv_cache_during_weight_sync,
+            preserve_active_kv_cache=True,
+        )
+      else:
+        # delegate to RLVllmSampler's native pause + clear + free-kv-cache
+        await sampler.pre_weight_sync(
+            free_kv_cache=self._free_kv_cache_during_weight_sync
+        )
       self._weight_update_open = True
 
       self._tracker.complete(sync_request, "prepared")
@@ -599,19 +660,39 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
 
       t_start = time.monotonic()
       logger.info("Executing post_weight_sync: restoring serving state...")
-      # delegate to RLVllmSampler's native finish-weight-update + resume; it
-      # reinitializes the KV cache only if pre_weight_sync freed it.
-      if self._weight_update_open:
-        await sampler.post_weight_sync(sync_request)
-        self._weight_update_open = False
-      else:
-        await self.resume()
+      if self._partial_rollout:
+        version = (
+            sync_request.policy_version if sync_request is not None else None
+        )
+        if version is not None:
+          self._policy_version = version
+        else:
+          self._policy_version += 1
+        sampler._policy_version = self._policy_version
 
-      version = getattr(sync_request, "policy_version", None)
-      if version is not None:
-        self._policy_version = version
+        # delegate to RLVllmSampler's native finish-weight-update + resume; it
+        # reinitializes the KV cache only if pre_weight_sync freed it.
+        if self._weight_update_open:
+          await sampler.post_weight_sync(sync_request)
+          self._weight_update_open = False
+        else:
+          await self.resume()
       else:
-        self._policy_version += 1
+        # delegate to RLVllmSampler's native finish-weight-update + resume; it
+        # reinitializes the KV cache only if pre_weight_sync freed it.
+        if self._weight_update_open:
+          await sampler.post_weight_sync(sync_request)
+          self._weight_update_open = False
+        else:
+          await self.resume()
+
+        version = (
+            sync_request.policy_version if sync_request is not None else None
+        )
+        if version is not None:
+          self._policy_version = version
+        else:
+          self._policy_version += 1
 
       if weight_sync.is_verify_weights_enabled():
         if self.enable_gcs and hasattr(sampler, "gcs_metrics"):

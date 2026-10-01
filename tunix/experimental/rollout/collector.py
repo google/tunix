@@ -14,6 +14,7 @@
 
 """Trajectory Collector Engine wrapping TrajectoryCollectEngine with pause/resume/cancel control."""
 
+import asyncio
 from typing import Any, Collection, List, Mapping, Optional, Sequence
 import zlib
 from absl import logging
@@ -134,6 +135,7 @@ class TrajectoryCollectorEngine:
       chat_parser: Any,
       eos_ids: Collection[int] | None = None,
       trajectory_store: Optional[store.TrajectoryWriter] = None,
+      partial_rollout: bool = False,
   ):
     if (
         sampler is None
@@ -154,9 +156,12 @@ class TrajectoryCollectorEngine:
     self.tokenizer = tokenizer
     self.chat_parser = chat_parser
     self.trajectory_store = trajectory_store
+    self.partial_rollout: bool = bool(partial_rollout)
     self.is_paused: bool = False
     self.is_cancelled: bool = False
     self.is_done: bool = False
+    self._unpaused_event: asyncio.Event = asyncio.Event()
+    self._unpaused_event.set()
     self._inner_engine: Optional[rl_collect_engine.TrajectoryCollectEngine] = (
         None
     )
@@ -274,12 +279,27 @@ class TrajectoryCollectorEngine:
           prompt=prompt_payload,
           sampling_params=sampling_params,
       )
+      if self.partial_rollout or self.is_paused:
+        await self._unpaused_event.wait()
+        if self.is_cancelled:
+          raise RuntimeError("Collector was cancelled.")
       res = await self.sampler.sample(sampling_req, **generation_kwargs)
       if isinstance(res, (list, tuple)) and len(res) == 1:
         res = res[0]
       err = getattr(res, "error", None) if not isinstance(res, str) else None
       if err is not None:
         raise RuntimeError(f"Sampler generation failed: {err}")
+      if self.partial_rollout:
+        res_policy_version = (
+            None if isinstance(res, str) else res.policy_version
+        )
+        if isinstance(res_policy_version, int) and not isinstance(
+            res_policy_version, bool
+        ):
+          turn_policy_versions.append(res_policy_version)
+        else:
+          req_version = self.request.target_policy_version
+          turn_policy_versions.append(int(req_version or 0))
       text = res if isinstance(res, str) else getattr(res, "text", str(res))
       tokens = getattr(res, "token_ids", np.array([], dtype=np.int32))
       if tokens is None:
@@ -322,6 +342,7 @@ class TrajectoryCollectorEngine:
           " to run an episode."
       )
 
+    turn_policy_versions: list[int] = []
     inner_engine = rl_collect_engine.TrajectoryCollectEngine(
         agent=self.agent,
         env=self.env,
@@ -346,6 +367,13 @@ class TrajectoryCollectorEngine:
       # past it, so the environment is closed here or not at all.
       await inner_engine._close()
       raise
+    if (
+        self.partial_rollout
+        and isinstance(rl_traj, dict)
+        and turn_policy_versions
+    ):
+      rl_traj["turn_policy_versions"] = list(turn_policy_versions)
+      rl_traj["policy_version"] = min(turn_policy_versions)
     self.is_done = True
     return self._convert_to_trajectory(rl_traj)
 
@@ -450,12 +478,36 @@ class TrajectoryCollectorEngine:
     metadata["prompt_id"] = self.request.prompt_id
     metadata["group_index"] = self.request.group_index
     metadata["status"] = rl_traj.get("status", "")
-    policy_version = getattr(
-        self.request,
-        "target_policy_version",
-        rl_traj.get("policy_version", 0),
-    )
-    metadata["policy_version"] = int(policy_version or 0)
+    if self.partial_rollout:
+      turn_versions = rl_traj.get("turn_policy_versions")
+      if isinstance(turn_versions, (list, tuple)) and turn_versions:
+        effective_policy_version = min(int(v) for v in turn_versions)
+        metadata["turn_policy_versions"] = [int(v) for v in turn_versions]
+        rl_traj["policy_version"] = effective_policy_version
+        metadata["policy_version"] = effective_policy_version
+      else:
+        if (
+            "policy_version" in rl_traj
+            and rl_traj["policy_version"] is not None
+        ):
+          req_target_version = self.request.target_policy_version
+          if int(rl_traj["policy_version"]) != 0 or not req_target_version:
+            effective_policy_version = int(rl_traj["policy_version"])
+          else:
+            effective_policy_version = int(req_target_version)
+          rl_traj["policy_version"] = effective_policy_version
+        else:
+          effective_policy_version = int(
+              self.request.target_policy_version or 0
+          )
+        metadata["policy_version"] = effective_policy_version
+    else:
+      policy_version = (
+          self.request.target_policy_version
+          if self.request.target_policy_version is not None
+          else rl_traj.get("policy_version", 0)
+      )
+      metadata["policy_version"] = int(policy_version or 0)
 
     self._annotate_response_budget(rl_traj, metadata)
 
@@ -469,11 +521,14 @@ class TrajectoryCollectorEngine:
 
   def pause(self) -> None:
     self.is_paused = True
+    self._unpaused_event.clear()
 
   def resume(self) -> None:
     self.is_paused = False
+    self._unpaused_event.set()
 
   def cancel(self) -> None:
+    self._unpaused_event.set()
     if not self.is_done:
       self.is_cancelled = True
       self.is_done = True

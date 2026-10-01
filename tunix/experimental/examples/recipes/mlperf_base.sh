@@ -178,6 +178,7 @@ export RETURN_ROUTED_EXPERTS="${RETURN_ROUTED_EXPERTS:-true}"
 
 # KV Cache Configs
 export ROLLOUT_FREE_KV_CACHE="false"
+export PARTIAL_ROLLOUT="${PARTIAL_ROLLOUT:-false}"
 export VLLM_KV_CACHE_DTYPE="bfloat16"
 export VLLM_BLOCK_SIZE=256
 

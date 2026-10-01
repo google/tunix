@@ -174,6 +174,9 @@ class RolloutManager:
     # overrides the tokenizer's own EOS. Collectors need it to tell a rollout
     # that stopped on its own from one that exhausted its budget.
     self.eos_ids = getattr(config, "eos_tokens", None) if config else None
+    self.partial_rollout = (
+        bool(getattr(config, "partial_rollout", False)) if config else False
+    )
 
     self._active_collectors: Dict[
         str, collector_lib.TrajectoryCollectorEngine
@@ -205,6 +208,13 @@ class RolloutManager:
         self._drain_timeout_s,
     )
 
+  def _is_partial_rollout(self, kwargs: Dict[str, Any] | None = None) -> bool:
+    if kwargs and "partial_rollout" in kwargs:
+      return bool(kwargs["partial_rollout"])
+    return bool(
+        getattr(self.config, "partial_rollout", False) or self.partial_rollout
+    )
+
   @property
   def _traffic(self) -> traffic_controller_lib.TrafficController:
     if self._traffic_inst is None:
@@ -217,10 +227,30 @@ class RolloutManager:
       on_complete: Optional[Callable[[TrajectoryOrError], None]] = None,
   ) -> TrajectoryOrError:
     """Spawns an async task running the multi-turn episode loop concurrently."""
-    if not self._traffic.is_admission_open():
-      raise traffic_controller_lib.AdmissionClosedError(
-          "rollout admission is closed during weight sync"
-      )
+    partial = self._is_partial_rollout()
+    if partial:
+      if self._traffic.state == datatypes.WorkerState.STOPPED:
+        raise traffic_controller_lib.AdmissionClosedError(
+            "rollout worker is stopped"
+        )
+      await self._traffic.wait_for_admission()
+      if self._traffic.state == datatypes.WorkerState.STOPPED:
+        raise traffic_controller_lib.AdmissionClosedError(
+            "rollout worker is stopped"
+        )
+      if self.sampler is not None:
+        sampler_version = self.sampler._policy_version
+        if isinstance(sampler_version, int) and not isinstance(
+            sampler_version, bool
+        ):
+          req_version = int(request.target_policy_version or 0)
+          if sampler_version > req_version:
+            request.target_policy_version = sampler_version
+    else:
+      if not self._traffic.is_admission_open():
+        raise traffic_controller_lib.AdmissionClosedError(
+            "rollout admission is closed during weight sync"
+        )
     loop = asyncio.get_running_loop()
     future: asyncio.Future[TrajectoryOrError] = loop.create_future()
 
@@ -265,17 +295,31 @@ class RolloutManager:
     else:
       agent = None
 
-    collector = collector_lib.TrajectoryCollectorEngine(
-        traj_id=traj_id,
-        request=request,
-        sampler=self.sampler,
-        env_client=env_client,
-        agent=agent,
-        tokenizer=self.tokenizer,
-        chat_parser=self.chat_parser,
-        eos_ids=self.eos_ids,
-        trajectory_store=self.trajectory_store,
-    )
+    if partial:
+      collector = collector_lib.TrajectoryCollectorEngine(
+          traj_id=traj_id,
+          request=request,
+          sampler=self.sampler,
+          env_client=env_client,
+          agent=agent,
+          tokenizer=self.tokenizer,
+          chat_parser=self.chat_parser,
+          eos_ids=self.eos_ids,
+          trajectory_store=self.trajectory_store,
+          partial_rollout=True,
+      )
+    else:
+      collector = collector_lib.TrajectoryCollectorEngine(
+          traj_id=traj_id,
+          request=request,
+          sampler=self.sampler,
+          env_client=env_client,
+          agent=agent,
+          tokenizer=self.tokenizer,
+          chat_parser=self.chat_parser,
+          eos_ids=self.eos_ids,
+          trajectory_store=self.trajectory_store,
+      )
 
     self._active_collectors[traj_id] = collector
     task = asyncio.create_task(
@@ -399,54 +443,98 @@ class RolloutManager:
   async def pre_weight_sync(
       self, sync_request: sampler_lib.WeightSyncRequest | Any = None, **kwargs
   ) -> Any:
-    """Phase 3 Barrier 1: Closes admission and drains in-flight work."""
-    extra = getattr(sync_request, "extra_config", None)
-    pre_timeout_s = extra.get("pre_timeout_s") if isinstance(extra, dict) else None
-    timeouts_disabled = (
-        weight_sync_coordinator.is_weight_sync_timeouts_disabled()
-    )
-    effective_drain_timeout_s = (
-        float("inf") if timeouts_disabled else self._drain_timeout_s
-    )
-    if (
-        not timeouts_disabled
-        and pre_timeout_s is not None
-        and not math.isinf(pre_timeout_s)
-        and effective_drain_timeout_s >= pre_timeout_s
-    ):
-      raise ValueError(
-          f"RolloutManager drain_timeout_s ({effective_drain_timeout_s:.1f}s) cannot be greater than "
-          f"or equal to pre_weight_sync timeout ({pre_timeout_s:.1f}s). Rollout draining must "
-          f"complete with sufficient margin before the coordinator's pre_weight_sync deadline expires."
+    """Phase 3 Barrier 1: Closes admission and drains or pauses in-flight work."""
+    if self._is_partial_rollout(kwargs):
+      extra = getattr(sync_request, "extra_config", None)
+      pre_timeout_s = (
+          extra.get("pre_timeout_s") if isinstance(extra, dict) else None
       )
+      timeouts_disabled = (
+          weight_sync_coordinator.is_weight_sync_timeouts_disabled()
+      )
+      effective_drain_timeout_s = (
+          float("inf") if timeouts_disabled else self._drain_timeout_s
+      )
+      t_pre_start = time.monotonic()
+      in_flight_before = len(self._traffic.get_active_tasks())
+      self._traffic.transition_to_syncing()
+      sync_kwargs = dict(kwargs)
+      sync_kwargs.pop("partial_rollout", None)
+      sync_kwargs.setdefault("preserve_active_kv_cache", True)
+      t_drain_s = 0.0
+      remaining_after_drain = len(self._traffic.get_active_tasks())
+      self.pause_all()
+      t_sampler_pre_s = 0.0
+      res = None
+      if self.sampler:
+        t_sampler_start = time.monotonic()
+        res = await self.sampler.pre_weight_sync(sync_request, **sync_kwargs)
+        t_sampler_pre_s = time.monotonic() - t_sampler_start
+      t_total_pre_s = time.monotonic() - t_pre_start
+      logging.info(
+          "RolloutManager.pre_weight_sync finished in %.3fs"
+          " (partial_rollout=True, drain_s=%.3f, sampler_pre_s=%.3f,"
+          " in_flight_before=%d, paused_stragglers=%d, drain_timeout_s=%s,"
+          " pre_timeout_s=%s)",
+          t_total_pre_s,
+          t_drain_s,
+          t_sampler_pre_s,
+          in_flight_before,
+          remaining_after_drain,
+          effective_drain_timeout_s,
+          pre_timeout_s,
+      )
+    else:
+      kwargs.pop("partial_rollout", None)
+      extra = getattr(sync_request, "extra_config", None)
+      pre_timeout_s = (
+          extra.get("pre_timeout_s") if isinstance(extra, dict) else None
+      )
+      timeouts_disabled = (
+          weight_sync_coordinator.is_weight_sync_timeouts_disabled()
+      )
+      effective_drain_timeout_s = (
+          float("inf") if timeouts_disabled else self._drain_timeout_s
+      )
+      if (
+          not timeouts_disabled
+          and pre_timeout_s is not None
+          and not math.isinf(pre_timeout_s)
+          and effective_drain_timeout_s >= pre_timeout_s
+      ):
+        raise ValueError(
+            f"RolloutManager drain_timeout_s ({effective_drain_timeout_s:.1f}s) cannot be greater than "
+            f"or equal to pre_weight_sync timeout ({pre_timeout_s:.1f}s). Rollout draining must "
+            f"complete with sufficient margin before the coordinator's pre_weight_sync deadline expires."
+        )
 
-    t_pre_start = time.monotonic()
-    in_flight_before = len(self._traffic.get_active_tasks())
-    self._traffic.transition_to_syncing()
-    t_drain_start = time.monotonic()
-    await self._traffic.drain(effective_drain_timeout_s)
-    t_drain_s = time.monotonic() - t_drain_start
-    remaining_after_drain = len(self._traffic.get_active_tasks())
-    self.pause_all()
-    t_sampler_pre_s = 0.0
-    res = None
-    if self.sampler:
-      t_sampler_start = time.monotonic()
-      res = await self.sampler.pre_weight_sync(sync_request, **kwargs)
-      t_sampler_pre_s = time.monotonic() - t_sampler_start
-    t_total_pre_s = time.monotonic() - t_pre_start
-    logging.info(
-        "RolloutManager.pre_weight_sync finished in %.3fs"
-        " (drain_s=%.3f, sampler_pre_s=%.3f, in_flight_before=%d,"
-        " paused_stragglers=%d, drain_timeout_s=%s, pre_timeout_s=%s)",
-        t_total_pre_s,
-        t_drain_s,
-        t_sampler_pre_s,
-        in_flight_before,
-        remaining_after_drain,
-        effective_drain_timeout_s,
-        pre_timeout_s,
-    )
+      t_pre_start = time.monotonic()
+      in_flight_before = len(self._traffic.get_active_tasks())
+      self._traffic.transition_to_syncing()
+      t_drain_start = time.monotonic()
+      await self._traffic.drain(effective_drain_timeout_s)
+      t_drain_s = time.monotonic() - t_drain_start
+      remaining_after_drain = len(self._traffic.get_active_tasks())
+      self.pause_all()
+      t_sampler_pre_s = 0.0
+      res = None
+      if self.sampler:
+        t_sampler_start = time.monotonic()
+        res = await self.sampler.pre_weight_sync(sync_request, **kwargs)
+        t_sampler_pre_s = time.monotonic() - t_sampler_start
+      t_total_pre_s = time.monotonic() - t_pre_start
+      logging.info(
+          "RolloutManager.pre_weight_sync finished in %.3fs"
+          " (drain_s=%.3f, sampler_pre_s=%.3f, in_flight_before=%d,"
+          " paused_stragglers=%d, drain_timeout_s=%s, pre_timeout_s=%s)",
+          t_total_pre_s,
+          t_drain_s,
+          t_sampler_pre_s,
+          in_flight_before,
+          remaining_after_drain,
+          effective_drain_timeout_s,
+          pre_timeout_s,
+      )
     return res
 
   async def weight_sync(

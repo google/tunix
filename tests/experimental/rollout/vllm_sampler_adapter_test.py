@@ -470,6 +470,45 @@ class RoundUuidTest(absltest.TestCase):
     with self.assertRaisesRegex(ValueError, "missing a usable transfer uuid"):
       vllm_sampler_adapter._round_uuid(req)
 
+  def test_pre_weight_sync_forwards_preserve_active_kv_cache_and_sample_policy_version(
+      self,
+  ):
+    mock_sampler = mock.AsyncMock()
+    mock_sampler._policy_version = 2
+    mock_sampler.sample.return_value = [
+        SimpleNamespace(
+            request_id="req_1",
+            text="out",
+            token_ids=[1, 2],
+            prompt_token_ids=[10],
+            finish_reason="stop",
+            policy_version=2,
+            error=None,
+        )
+    ]
+    adapter = vllm_sampler_adapter.VllmSamplerAdapter(
+        server_id="vllm_partial",
+        sampler_instance=mock_sampler,
+        free_kv_cache_during_weight_sync=False,
+        partial_rollout=True,
+    )
+    sync_req = base_sampler_lib.WeightSyncRequest(
+        policy_version=3, extra_config={"req_id": "r3", "uuid": 3}
+    )
+    asyncio.run(
+        adapter.pre_weight_sync(sync_req, preserve_active_kv_cache=True)
+    )
+    mock_sampler.pre_weight_sync.assert_awaited_once_with(
+        free_kv_cache=False, preserve_active_kv_cache=True
+    )
+    resp = asyncio.run(
+        adapter.sample(base_sampler_lib.SamplingRequest(prompt="hi"))
+    )
+    self.assertEqual(resp.policy_version, 2)
+    asyncio.run(adapter.post_weight_sync(sync_req))
+    self.assertEqual(adapter._policy_version, 3)
+    self.assertEqual(mock_sampler._policy_version, 3)
+
 
 if __name__ == "__main__":
   absltest.main()
