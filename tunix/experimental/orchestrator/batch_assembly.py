@@ -145,12 +145,13 @@ def summarize_padding_stats(
   row_imbalance = np.array([s.row_imbalance for s in stats])
   row_fill = np.concatenate([s.row_fill for s in stats])
   row_num_sequences = np.concatenate([s.row_num_sequences for s in stats])
+  valid_mean = valid.mean()
   return {
       "ratio": float(1.0 - valid.sum() / capacity.sum()),
       "microbatch_ratio_mean": float(mb_ratio.mean()),
       "microbatch_ratio_max": float(mb_ratio.max()),
       "microbatch_ratio_min": float(mb_ratio.min()),
-      "microbatch_imbalance": float(valid.max() / valid.mean()),
+      "microbatch_imbalance": float(valid.max() / valid_mean) if valid_mean > 0 else 1.0,
       "row_imbalance_mean": float(row_imbalance.mean()),
       "row_imbalance_max": float(row_imbalance.max()),
       "row_fill_min": float(row_fill.min()),
