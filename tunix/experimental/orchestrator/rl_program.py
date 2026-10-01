@@ -726,10 +726,13 @@ class StandardRLProgram(RLProgram):
         dispatch_kwargs: dict[str, Any] = {
             "num_generations": self.num_generations,
             "policy_version": self.policy_version,
-            # Lower is served first: with `max_staleness > 0` the batches
-            # dispatched ahead must not take sampler slots from the batch the
-            # trainer is waiting on, including its later turns, which re-enter
-            # the sampler queue after the early batch's first turns.
+            # Lower is served first, so with `max_staleness > 0` the oldest
+            # in-flight batch (the window's lower edge) keeps its sampler
+            # slots, including for its later turns, which re-enter the
+            # sampler queue behind newer batches' first turns. Under
+            # PROMPT_BATCH ordering this is exactly the batch the trainer
+            # consumes next; under ARRIVAL ordering it drains the oldest
+            # prompts first, keeping consumed staleness near the bound.
             "priority": coordinates["batch_idx"],
             "exact_token_continuity": getattr(
                 self.algo.algo_config, "exact_token_continuity", True

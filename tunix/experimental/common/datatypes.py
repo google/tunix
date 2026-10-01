@@ -259,8 +259,8 @@ class RolloutRequest(Request):
       multi-turn rollout steps (Token-In-Token-Out). Defaults to True.
     priority: Sampler scheduling priority for every generation call of this
       rollout; lower values are served first. The RL program sets it to the
-      prompt batch index, so under `max_staleness > 0` the batch the trainer
-      needs next is served ahead of batches dispatched early.
+      prompt batch index, so under `max_staleness > 0` the oldest in-flight
+      batch is served ahead of batches dispatched early.
   """
 
   prompt: Any = ""
