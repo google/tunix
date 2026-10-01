@@ -247,6 +247,8 @@ async def create_chat_completion(request: ChatCompletionRequest, req: Request):
         prompt=prompt_text,
         request_id=req_id,
         route_key=route_key,
+        # Standalone server: no RL batches to order, so all requests tie.
+        priority=0,
         sampling_params=SimpleNamespace(
             max_tokens=request.max_tokens or 128,
             temperature=request.temperature or 0.7,
@@ -323,6 +325,8 @@ async def create_completion(request: CompletionRequest, req: Request):
         prompt=prompt_text,
         request_id=req_id,
         route_key=route_key,
+        # Standalone server: no RL batches to order, so all requests tie.
+        priority=0,
         sampling_params=SimpleNamespace(
             max_tokens=request.max_tokens or 128,
             temperature=request.temperature or 0.7,

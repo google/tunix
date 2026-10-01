@@ -42,6 +42,7 @@ if "openai_harmony" not in sys.modules:
 
 from vllm.engine.arg_utils import AsyncEngineArgs
 
+from tunix.experimental.rollout import vllm_sampler_v2
 from tunix.experimental.rollout.vllm_sampler_v2 import RLVllmSampler
 
 
@@ -67,6 +68,22 @@ class TestRLVllmSamplerDuckTyping(unittest.TestCase):
         sampler = RLVllmSampler(engine_args=args)
         self.assertIsNotNone(sampler)
         self.assertEqual(sampler.engine_args.model, "Qwen/Qwen2.5-1.5B")
+
+    def test_scheduling_priority_reads_objects_and_dicts(self):
+        self.assertEqual(
+            vllm_sampler_v2._scheduling_priority(SimpleNamespace(priority=3)), 3
+        )
+        self.assertEqual(
+            vllm_sampler_v2._scheduling_priority({"priority": 2}), 2
+        )
+
+    def test_scheduling_priority_missing_raises(self):
+        with self.assertRaisesRegex(ValueError, "req_x"):
+            vllm_sampler_v2._scheduling_priority(
+                SimpleNamespace(request_id="req_x")
+            )
+        with self.assertRaisesRegex(ValueError, "has no `priority`"):
+            vllm_sampler_v2._scheduling_priority({"priority": None})
 
 
 class TestRLVllmSamplerInference(unittest.TestCase):

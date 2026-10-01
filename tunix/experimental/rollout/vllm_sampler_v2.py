@@ -62,17 +62,24 @@ def _get_val(obj: Any, key: str, default: Any = None) -> Any:
 def _scheduling_priority(req: Any) -> int:
   """Returns the vLLM scheduling priority of `req`; lower is served first.
 
-  Read strictly: every request must carry `priority`
-  (`sampler.SamplingRequest.priority`, or the key on the dicts `sample()`
-  builds for raw prompts). Takes effect only when the engine runs with
+  Every request must carry `priority` (`sampler.SamplingRequest.priority`, or
+  the field set by request builders such as `sample()`'s raw-prompt dicts and
+  `serve_vllm_sampler`). A missing priority is a caller bug, so it raises
+  instead of silently defaulting. Takes effect only when the engine runs with
   `scheduling_policy="priority"`; under `"fcfs"` vLLM ignores it.
 
   Args:
     req: A sampling request object or a raw-prompt request dict.
+
+  Raises:
+    ValueError: If `req` has no `priority`.
   """
-  if isinstance(req, dict):
-    return int(req["priority"])
-  return int(req.priority)
+  priority = _get_val(req, "priority")
+  if priority is None:
+    raise ValueError(
+        f"Sampling request {_get_val(req, 'request_id')!r} has no `priority`."
+    )
+  return int(priority)
 
 
 class RLVllmSampler:
