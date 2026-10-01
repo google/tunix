@@ -23,7 +23,6 @@ import asyncio
 from collections.abc import Callable, Iterable, Mapping, Sequence, Sized
 import copy
 import dataclasses
-import functools
 import os
 import threading
 import time
@@ -506,7 +505,7 @@ class StandardRLProgram(RLProgram):
     # RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFER=0), since the next train step
     # overwrites the device buffers while the transfer is still reading.
     self.async_weight_sync = async_weight_sync
-    self._pending_sync: asyncio.Task[int] | None = None
+    self._pending_sync: asyncio.Task[None] | None = None
     # Trained steps whose weights have not reached the rollouts yet. Held out
     # of the dispatch window; stays set if the round fails.
     self._unsynced_steps = 0
@@ -1543,13 +1542,25 @@ class StandardRLProgram(RLProgram):
     if task is not None:
       await task
 
-  def _on_background_sync_done(
-      self, task: asyncio.Task[int], target_version: int, start_time: float
+  async def _run_background_sync(
+      self, target_version: int, staged: asyncio.Event
   ) -> None:
-    if task.cancelled():
-      return
-    exc = task.exception()
-    if exc is not None:
+    """Runs one weight sync round and records its outcome.
+
+    Completion is handled here rather than in a done callback, so the state
+    updates land before anything awaiting the task resumes.
+    """
+    assert self.engine is not None
+    start_time = time.monotonic()
+    try:
+      new_version = await self.engine.sync_weights(
+          role=datatypes.Role.ACTOR,
+          policy_version=target_version,
+          source_staged=staged,
+      )
+    except asyncio.CancelledError:
+      raise
+    except Exception as exc:
       logging.error(
           "Background weight sync to policy_version=%d failed after %.2fs: %s",
           target_version,
@@ -1557,22 +1568,22 @@ class StandardRLProgram(RLProgram):
           exc,
       )
       self._sync_error = exc
-    else:
-      new_version = task.result()
-      if new_version is not None and new_version != target_version:
-        logging.warning(
-            "Background weight sync committed policy_version=%d, expected %d.",
-            new_version,
-            target_version,
-        )
-        self.policy_version = new_version
-      logging.info(
-          "Background weight sync committed policy_version=%d in %.2fs.",
+      # The dispatcher has to wake to see `_sync_error`.
+      self._release_window()
+      raise
+    if new_version is not None and new_version != target_version:
+      logging.warning(
+          "Background weight sync committed policy_version=%d, expected %d.",
+          new_version,
           target_version,
-          time.monotonic() - start_time,
       )
-      self._unsynced_steps = 0
-    # On failure too: the dispatcher has to wake to see `_sync_error`.
+      self.policy_version = new_version
+    logging.info(
+        "Background weight sync committed policy_version=%d in %.2fs.",
+        target_version,
+        time.monotonic() - start_time,
+    )
+    self._unsynced_steps = 0
     self._release_window()
 
   async def _start_background_sync(self) -> None:
@@ -1580,24 +1591,11 @@ class StandardRLProgram(RLProgram):
 
     Any previous round is awaited first, since rounds must not overlap.
     """
-    assert self.engine is not None
     await self._await_pending_sync()
     target_version = self.policy_version + 1
     staged = asyncio.Event()
-    start_time = time.monotonic()
     task = asyncio.create_task(
-        self.engine.sync_weights(
-            role=datatypes.Role.ACTOR,
-            policy_version=target_version,
-            source_staged=staged,
-        )
-    )
-    task.add_done_callback(
-        functools.partial(
-            self._on_background_sync_done,
-            target_version=target_version,
-            start_time=start_time,
-        )
+        self._run_background_sync(target_version, staged)
     )
     self._pending_sync = task
     # Before commit advances `_next_batch`, so the dispatcher cannot slip a

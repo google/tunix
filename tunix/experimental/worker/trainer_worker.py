@@ -419,15 +419,23 @@ class TrainerWorker(abstract_worker.Worker):
     device copy staged for the transfer is dropped here too, so the step does
     not run with a second set of weights in HBM.
     """
-    extra = getattr(sync_request, "extra_config", None) or {}
-    if not extra.get(weight_sync.RELEASE_SOURCE_AFTER_STAGE):
+    if sync_request is None:
+      return
+    if not sync_request.extra_config.get(
+        weight_sync.RELEASE_SOURCE_AFTER_STAGE
+    ):
       return
     # MaxText's engine keeps its synchronizer in `_weight_sync`, PeftTrainer in
     # `_weight_sync_worker`.
     synchronizer = getattr(self._trainer, "_weight_sync", None) or getattr(
         self._trainer, "_weight_sync_worker", None
     )
-    if not getattr(synchronizer, "staged_on_host", False):
+    if synchronizer is None:
+      raise RuntimeError(
+          "Weight sync runs in the background, but trainer"
+          f" {type(self._trainer).__name__} has no weight synchronizer."
+      )
+    if not synchronizer.staged_on_host:
       raise RuntimeError(
           "Weight sync runs in the background, but"
           f" {type(synchronizer).__name__} transfers straight from device"
