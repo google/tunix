@@ -540,7 +540,15 @@ class PhaseTimeouts:
   bind: float = 60.0
   metadata: float = 60.0
   source_prepare: float = 900.0
-  pre: float = 180.0
+  # Must exceed RolloutManager's `drain_timeout_s` (default 300s): the
+  # destination's pre_weight_sync first drains in-flight trajectories for up to
+  # that long before pausing stragglers, so a shorter deadline aborts the round
+  # whenever an agentic episode is still running.
+  pre: float = dataclasses.field(
+      default_factory=lambda: float(
+          os.environ.get("WEIGHT_SYNC_PRE_TIMEOUT_S", "600")
+      )
+  )
   transfer: float = 1800.0
   h2d: float = 900.0
   post: float = 300.0
