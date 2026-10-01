@@ -221,6 +221,15 @@ export CHECKPOINT_OPTIMIZER_INTERVAL_STEPS="${CHECKPOINT_OPTIMIZER_INTERVAL_STEP
 export CHECKPOINT_ASYNC=${CHECKPOINT_ASYNC:-true}
 export ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE:-1}
 export MAX_STALENESS=${MAX_STALENESS:-1}
+# Overlap each step's weight sync with the next step's training. Safe only
+# while the trainer transfers from host staging, since the next step rewrites
+# the device buffers mid-transfer.
+export ASYNC_WEIGHT_SYNC=${ASYNC_WEIGHT_SYNC:-false}
+if [[ "${ASYNC_WEIGHT_SYNC}" == "true" && "${WEIGHT_SYNC_MODE}" == "raiden" \
+      && "${RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFER}" != "0" ]]; then
+  echo "ASYNC_WEIGHT_SYNC=true requires RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFER=0" >&2
+  exit 1
+fi
 # Pack the next microbatch while the trainer runs the current one.
 export PIPELINE_TRAIN_MICROBATCHES=${PIPELINE_TRAIN_MICROBATCHES:-false}
 export TRAJECTORY_GROUP_ORDER=${TRAJECTORY_GROUP_ORDER:-prompt_batch}

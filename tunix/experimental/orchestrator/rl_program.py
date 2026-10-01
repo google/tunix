@@ -370,6 +370,8 @@ class StandardRLProgram(RLProgram):
       batch_size: int | None = None,
       max_staleness: int = 0,
       sync_weights: bool = True,
+      async_weight_sync: bool = False,
+      partial_rollout: bool = False,
       metrics_logging_options: MetricsLoggerOptions | None = None,
       trajectory_log_dir: str | None = None,
       trajectory_store: trajectory_store_lib.TrajectoryStore | None = None,
@@ -495,6 +497,29 @@ class StandardRLProgram(RLProgram):
     # A cancelled asyncio.to_thread leaves its worker running, so the error
     # path's reset() must wait for any in-flight feed/flush to finish.
     self._assembler_lock = threading.Lock()
+
+    # Run each step's weight sync in the background instead of holding the
+    # trainer for the whole round. The trainer waits only for the source to
+    # snapshot its weights; the dispatch window stays shut until the round
+    # commits, so rollouts never run further behind than `max_staleness`.
+    # Requires a source that transfers from a host snapshot (raiden:
+    # RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFER=0), since the next train step
+    # overwrites the device buffers while the transfer is still reading.
+    self.async_weight_sync = async_weight_sync
+    self._pending_sync: asyncio.Task[None] | None = None
+    # Trained steps whose weights have not reached the rollouts yet. Held out
+    # of the dispatch window; stays set if the round fails.
+    self._unsynced_steps = 0
+    # Set from the optimizer step until that step's round starts. The trainer
+    # can spend minutes in between (checkpoint save), and the previous round
+    # committing in that gap must not reopen the window: anything dispatched
+    # then is drained on the old weights before the next transfer.
+    self._round_due = False
+    # Rollouts pause and resume in-flight requests across a sync instead of
+    # draining them, so dispatch need not wait out a round; each batch is
+    # gated only on the version the rollouts have committed.
+    self.partial_rollout = partial_rollout
+    self._sync_error: BaseException | None = None
     self.metrics_logger: MetricsLogger = MetricsLogger(metrics_logging_options)
     # Trajectory logging is disabled on mlperf to prevent GCS write timeouts
     # and queue stalls (b/565475624). Rollout data is handled by TrajectoryStore.
@@ -604,9 +629,50 @@ class StandardRLProgram(RLProgram):
     Args:
       batch_idx: The prompt batch the dispatcher is about to emit into.
     """
-    while batch_idx > self._next_batch + self.max_staleness:
+    # Checked up front too: a batch already inside the window would otherwise
+    # skip the loop and keep dispatching after a sync round failed.
+    if self._sync_error is not None:
+      raise self._sync_error
+    if self.partial_rollout:
+      await self._wait_for_partial_dispatch_window(batch_idx)
+      return
+    # Nothing goes out while a background round is in flight. The rollouts
+    # cannot start a request until the round commits anyway, and one that
+    # lands before they close admission is drained on the old weights,
+    # idling every other worker until it finishes.
+    while (
+        self._unsynced_steps
+        or self._round_due
+        or batch_idx
+        > self._next_batch - self._unsynced_steps + self.max_staleness
+    ):
+      if self._sync_error is not None:
+        raise self._sync_error
       # Wait first, clear second. The reverse loses a release that lands
       # between the test above and the clear, and nothing would set it again.
+      await self._window_release.wait()
+      self._window_release.clear()
+
+  async def _wait_for_partial_dispatch_window(self, batch_idx: int) -> None:
+    """Per-batch dispatch gate for partial rollout.
+
+    A paused request resumes on the new weights rather than draining on the
+    old ones, so a round in flight is no reason to hold dispatch. Batch
+    `batch_idx` goes out once the rollouts have committed version
+    `batch_idx - max_staleness`: its trajectories are then stamped no older
+    than that, which the staleness filter keeps until step `batch_idx`
+    consumes them.
+
+    Args:
+      batch_idx: The prompt batch the dispatcher is about to emit into.
+    """
+    while (
+        batch_idx > self._next_batch + self.max_staleness
+        or batch_idx - self.max_staleness
+        > self.policy_version - self._unsynced_steps
+    ):
+      if self._sync_error is not None:
+        raise self._sync_error
       await self._window_release.wait()
       self._window_release.clear()
 
@@ -701,6 +767,10 @@ class StandardRLProgram(RLProgram):
         prompt_item = await asyncio.to_thread(_next_or_exhausted, dataset_iter)
         if prompt_item is _EXHAUSTED:
           break
+        # Again: the fetch yielded, and the train loop may have started a
+        # round meanwhile. Nothing below awaits before the dispatch, so the
+        # window cannot shut between this check and the request going out.
+        await self._wait_for_dispatch_window(coordinates["batch_idx"])
         prompt_idx += 1
         last_coordinates = coordinates
         if isinstance(prompt_item, dict):
@@ -721,6 +791,9 @@ class StandardRLProgram(RLProgram):
             prompt_item["max_response_length"] = self.max_response_length
 
         prompt_item = _tag_prompt(prompt_item, coordinates)
+        # What the rollouts actually hold. While a background sync is in
+        # flight the trainer is already a version ahead of them.
+        rollout_policy_version = self.policy_version - self._unsynced_steps
         logging.info(
             "[pipeline] DISPATCH prompt_id=%s prompt_idx=%d batch_idx=%d"
             " intra_batch_idx=%d policy_version=%d next_batch=%d",
@@ -730,13 +803,13 @@ class StandardRLProgram(RLProgram):
             coordinates["prompt_idx"],
             coordinates["batch_idx"],
             coordinates["intra_batch_idx"],
-            self.policy_version,
+            rollout_policy_version,
             self._next_batch,
         )
         self._in_flight_rollouts += self.num_generations
         dispatch_kwargs: dict[str, Any] = {
             "num_generations": self.num_generations,
-            "policy_version": self.policy_version,
+            "policy_version": rollout_policy_version,
             "exact_token_continuity": getattr(
                 self.algo.algo_config, "exact_token_continuity", True
             ),
@@ -1544,8 +1617,97 @@ class StandardRLProgram(RLProgram):
     )
     return result, time.monotonic() - start
 
+  async def _await_pending_sync(self) -> None:
+    """Waits for the background weight sync, if any; raises if it failed."""
+    task, self._pending_sync = self._pending_sync, None
+    if task is not None:
+      await task
+
+  async def _run_background_sync(
+      self, target_version: int, staged: asyncio.Event
+  ) -> None:
+    """Runs one weight sync round and records its outcome.
+
+    Completion is handled here rather than in a done callback, so the state
+    updates land before anything awaiting the task resumes.
+    """
+    assert self.engine is not None
+    start_time = time.monotonic()
+    try:
+      new_version = await self.engine.sync_weights(
+          role=datatypes.Role.ACTOR,
+          policy_version=target_version,
+          source_staged=staged,
+      )
+    except asyncio.CancelledError:
+      raise
+    except Exception as exc:
+      logging.error(
+          "Background weight sync to policy_version=%d failed after %.2fs: %s",
+          target_version,
+          time.monotonic() - start_time,
+          exc,
+      )
+      self._sync_error = exc
+      # The dispatcher has to wake to see `_sync_error`.
+      self._release_window()
+      raise
+    if new_version is not None and new_version != target_version:
+      logging.warning(
+          "Background weight sync committed policy_version=%d, expected %d.",
+          new_version,
+          target_version,
+      )
+      self.policy_version = new_version
+    logging.info(
+        "Background weight sync committed policy_version=%d in %.2fs.",
+        target_version,
+        time.monotonic() - start_time,
+    )
+    self._unsynced_steps = 0
+    self._release_window()
+
+  async def _start_background_sync(self) -> None:
+    """Launches this step's weight sync and returns once the source staged.
+
+    Any previous round is awaited first, since rounds must not overlap.
+    """
+    await self._await_pending_sync()
+    target_version = self.policy_version + 1
+    staged = asyncio.Event()
+    task = asyncio.create_task(
+        self._run_background_sync(target_version, staged)
+    )
+    self._pending_sync = task
+    # Before commit advances `_next_batch`, so the dispatcher cannot slip a
+    # batch through against the old weights.
+    self._unsynced_steps = 1
+    self._round_due = False
+    # The trainer's weights are this version from here on; rollouts catch up
+    # when the round commits.
+    self.policy_version = target_version
+    staged_wait = asyncio.create_task(staged.wait())
+    try:
+      await asyncio.wait(
+          {task, staged_wait}, return_when=asyncio.FIRST_COMPLETED
+      )
+    finally:
+      staged_wait.cancel()
+    if task.done():
+      # Failed (or finished) before signalling; surface a failure now.
+      await self._await_pending_sync()
+
   async def train_stage(self) -> None:
     """Stage 3: Streaming gradient accumulation with RLTrainerPayloads."""
+    try:
+      await self._train_loop()
+      # The last round must land before the run is reported done.
+      await self._await_pending_sync()
+    finally:
+      if self._pending_sync is not None and not self._pending_sync.done():
+        self._pending_sync.cancel()
+
+  async def _train_loop(self) -> None:
     assert self.engine is not None
 
     while self.max_steps is None or self._step < self.max_steps:
@@ -1762,6 +1924,8 @@ class StandardRLProgram(RLProgram):
             )
             policy_training_time += time.monotonic() - _t_metrics
             final_minibatch_completed = True
+            if self.sync_weights and self.async_weight_sync:
+              self._round_due = True
             # TODO(tunix-dev): Configurable checkpointing frequency. Today we
             # checkpoint at the same frequency as the weight update.
             # Save only at a resumable full-batch boundary. An optimizer step
@@ -1788,7 +1952,13 @@ class StandardRLProgram(RLProgram):
         )
         break
 
-      if self.sync_weights:
+      if self.sync_weights and self.async_weight_sync:
+        # Only the time the trainer is actually held: the previous round, if
+        # it outlived this step, plus this round's source snapshot.
+        _t_sync = time.monotonic()
+        await self._start_background_sync()
+        weight_sync_time = time.monotonic() - _t_sync
+      elif self.sync_weights:
         _t_sync = time.monotonic()
         new_version = await self.engine.sync_weights(role=datatypes.Role.ACTOR)
         weight_sync_time = time.monotonic() - _t_sync

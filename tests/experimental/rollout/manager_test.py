@@ -25,6 +25,7 @@ from tunix.experimental.rl.agentic import registry
 from tunix.experimental.rollout import manager as manager_lib
 from tunix.experimental.rollout import sampler as sampler_lib
 from tunix.experimental.weight_sync import weight_sync
+from tunix.experimental.worker import traffic_controller as traffic_controller_lib
 
 
 class _FakeSampler(sampler_lib.Sampler):
@@ -326,6 +327,25 @@ class AdmissionGateTest(unittest.IsolatedAsyncioTestCase):
     manager._active_tasks.pop("t0", None)
     await pre
 
+  async def test_request_during_sync_waits_for_reopen(self):
+    manager = self._manager(agent_factory=lambda: object())
+    await manager.pre_weight_sync()
+    request = datatypes.RolloutRequest(
+        request_id="req_1", prompt="p", prompt_id="prompt_1"
+    )
+    with mock.patch.object(
+        manager_lib.collector_lib,
+        "TrajectoryCollectorEngine",
+        _NoopCollector,
+    ):
+      gen = asyncio.create_task(manager.generate(request))
+      await asyncio.sleep(0.01)
+      self.assertFalse(gen.done())
+      self.assertEqual(manager._traffic.get_active_tasks(), [])
+      await manager.post_weight_sync()
+      result = await asyncio.wait_for(gen, timeout=1)
+    self.assertIsInstance(result, datatypes.TrajectoryItem)
+
   async def test_drain_timeout_returns(self):
     with mock.patch.dict(
         os.environ, {"EPISODE_TIMEOUT_SECS": "0.01"}, clear=False
@@ -466,6 +486,25 @@ class AdmissionGateTest(unittest.IsolatedAsyncioTestCase):
       await gen_task
     self.assertEqual(request.target_policy_version, 5)
 
+
+  async def test_generate_one_rejects_on_a_stopped_worker(self):
+    manager = manager_lib.RolloutManager(
+        config=types.SimpleNamespace(partial_rollout=False),
+        sampler=_FakeSyncSampler([]),
+        tokenizer="mock",
+        chat_parser="mock",
+    )
+    await manager.pre_weight_sync()
+    request = datatypes.RolloutRequest(prompt="p", prompt_id="p0")
+    gen_task = asyncio.create_task(manager._generate_one(request))
+    await asyncio.sleep(0.01)
+    self.assertFalse(gen_task.done())
+    # Stopping never reopens admission, so the waiter must fail, not hang.
+    manager._traffic.stop_and_cancel_all()
+    with self.assertRaises(traffic_controller_lib.AdmissionClosedError):
+      await asyncio.wait_for(gen_task, timeout=1.0)
+    with self.assertRaises(traffic_controller_lib.AdmissionClosedError):
+      await manager._generate_one(request)
 
 class AgentConfigTest(unittest.IsolatedAsyncioTestCase):
 
