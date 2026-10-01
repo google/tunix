@@ -15,10 +15,6 @@ export REGION="europe-west4"
 export CLUSTER="bodaborg-v5p-nap"
 export K8S_NAMESPACE="trellis"
 
-# Pathways Images and settings
-export PATHWAYS_SERVER_IMAGE="${PATHWAYS_SERVER_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_server:raiden_20260920_v2}"
-export PATHWAYS_PROXY_IMAGE="${PATHWAYS_PROXY_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_proxy_server:raiden_20260920_v2}"
-
 # Model configuration
 export MODEL_NAME="Qwen3.5-35B-A3B"
 export MODEL_ID="Qwen/Qwen3.5-35B-A3B"
