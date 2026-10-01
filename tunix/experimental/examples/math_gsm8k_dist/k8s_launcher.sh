@@ -118,15 +118,17 @@ export TFDS_DATA_DIR=${TFDS_DATA_DIR:-"artifacts/data"}
 export TFDS_SPLIT=${TFDS_SPLIT:-train}
 export FLUSH_METRICS_EVERY_N_STEPS=${FLUSH_METRICS_EVERY_N_STEPS:-1}
 
-export ORCHESTRATOR_ID=$USER-orch
-export ORCHESTRATOR_PORT=20000
+export JOB_PREFIX=${JOB_PREFIX:-$USER}
+export GANG_ID=${GANG_ID:-$JOB_PREFIX}
+export ORCHESTRATOR_ID=${ORCHESTRATOR_ID:-$JOB_PREFIX-orch}
+export ORCHESTRATOR_PORT=${ORCHESTRATOR_PORT:-20000}
 
-export ROLLOUT_ID=$USER-roll
-export ROLLOUT_PORT=20001
+export ROLLOUT_ID=${ROLLOUT_ID:-$JOB_PREFIX-roll}
+export ROLLOUT_PORT=${ROLLOUT_PORT:-20001}
 export ROLLOUT_REPLICAS=${ROLLOUT_REPLICAS:-1}
 
-export TRAINER_ID=$USER-train
-export TRAINER_PORT=20002
+export TRAINER_ID=${TRAINER_ID:-$JOB_PREFIX-train}
+export TRAINER_PORT=${TRAINER_PORT:-20002}
 
 export CPU_MACHINE=${CPU_MACHINE:-n2-standard-64}
 export GCS_SCRATCH_LOCATION=${GCS_SCRATCH_LOCATION:-gs://cloud-pathways-staging/tmp}
@@ -230,6 +232,7 @@ start_orchestrator() {
     --jobset_name="${ORCHESTRATOR_ID}" \
     --namespace="${K8S_NAMESPACE}" \
     ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
+    ${GANG_ID:+--gang_id="${GANG_ID}"} \
     --cpu_machine=${CPU_MACHINE} \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ORCHESTRATOR_PORT}" \
@@ -350,6 +353,7 @@ start_trainer() {
     --jobset_name="${TRAINER_ID}" \
     --namespace="${K8S_NAMESPACE}" \
     ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
+    ${GANG_ID:+--gang_id="${GANG_ID}"} \
     --tpu_slice=${TRAINER_TPU_SLICE} \
     --cpu_machine=${CPU_MACHINE} \
     --pathways_server_image="${PATHWAYS_SERVER_IMAGE}" \
@@ -556,6 +560,7 @@ if cfg:
     --jobset_name="${target_id}" \
     --namespace="${K8S_NAMESPACE}" \
     ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
+    ${GANG_ID:+--gang_id="${GANG_ID}"} \
     --tpu_slice="${ROLLOUT_TPU_SLICE}" \
     --pathways_server_image="${PATHWAYS_SERVER_IMAGE}" \
     --pathways_proxy_server_image="${PATHWAYS_PROXY_IMAGE}" \
@@ -649,6 +654,14 @@ while [[ $# -gt 0 ]]; do
       KUEUE_QUEUE_NAME="${1#*=}"
       shift
       ;;
+    --gang-id|--gang_id)
+      export GANG_ID="$2"
+      shift 2
+      ;;
+    --gang-id=*|--gang_id=*)
+      export GANG_ID="${1#*=}"
+      shift
+      ;;
     --dry-run|--render)
       DRY_RUN=true
       shift
@@ -667,6 +680,7 @@ while [[ $# -gt 0 ]]; do
       echo "  --command <cmd>          Command to run (start, stop, orchestrator, trainer, rollout)"
       echo "  --namespace <ns>         Kubernetes namespace (default: default)"
       echo "  --queue <name>           Kueue local queue name (optional)"
+      echo "  --gang-id <id>           Label JobSets with scheduling.x-k8s.io/gang-id=<id> (default: JOB_PREFIX)"
       echo "  --image <image>          Container image to use"
       echo "  --dry-run, --render      Print generated YAMLs without applying"
       echo "  --scratch, --gcs-scratch GCS scratch location"
