@@ -418,7 +418,11 @@ def main() -> None:
 
   with open(args.template_file, "r") as f:
     template_text = f.read()
-    if sidecar_image:
+    # Guard: only Pathways templates run the colocated sidecar; non-Pathways
+    # templates (e.g. CPU orchestrator, Ray/MCJAX rollout) share the launcher
+    # environment but do not include pathways-worker or the sidecar.
+    is_pathways = "name: pathways-worker" in template_text
+    if is_pathways and sidecar_image:
       missing_placeholders = [
           p
           for p in (

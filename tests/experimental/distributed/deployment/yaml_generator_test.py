@@ -423,6 +423,40 @@ class YamlGeneratorTest(parameterized.TestCase):
     self.assertIn(template_file, str(cm.exception))
     self.assertIn("COLOCATED_PYTHON_SIDECAR_BLOCK", str(cm.exception))
 
+  @parameterized.named_parameters(
+      (
+          "cpu",
+          "jobset.cpu.yaml",
+          ["--jobset_name=test-cpu", "--cpu_machine=n2-standard-64"],
+      ),
+      (
+          "mcjax_ray",
+          "jobset.mcjax.ray.yaml",
+          ["--jobset_name=test-ray", "--tpu_slice=tpuv5p:2x2x2"],
+      ),
+      (
+          "tpu",
+          "jobset.tpu.yaml",
+          ["--jobset_name=test-tpu", "--tpu_slice=tpuv5p:2x2x2"],
+      ),
+  )
+  def test_non_pathways_templates_ignore_colocated_sidecar_image(
+      self, template_name, extra_args
+  ):
+    template_file = _get_template_path(template_name)
+    argv = ["yaml_generator.py", template_file] + extra_args
+    with mock.patch.dict(
+        os.environ,
+        {"COLOCATED_PYTHON_SIDECAR_IMAGE": "sidecar:latest"},
+        clear=False,
+    ):
+      with mock.patch.object(sys, "argv", argv):
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+          yaml_generator.main()
+          rendered = mock_stdout.getvalue()
+    self.assertNotIn("colocated-python-sidecar", rendered)
+    self.assertNotIn("sidecar-shared-memory", rendered)
+
   def test_pathways_default_template_renders_sidecar(self):
     template_file = _get_template_path("jobset.pathways.yaml")
     image = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways-colocated-python/sidecar:tag"
