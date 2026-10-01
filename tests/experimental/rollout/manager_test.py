@@ -25,6 +25,7 @@ from tunix.experimental.rl.agentic import registry
 from tunix.experimental.rollout import manager as manager_lib
 from tunix.experimental.rollout import sampler as sampler_lib
 from tunix.experimental.weight_sync import weight_sync
+from tunix.experimental.worker import traffic_controller as traffic_controller_lib
 
 
 class _FakeSampler(sampler_lib.Sampler):
@@ -485,6 +486,25 @@ class AdmissionGateTest(unittest.IsolatedAsyncioTestCase):
       await gen_task
     self.assertEqual(request.target_policy_version, 5)
 
+
+  async def test_generate_one_rejects_on_a_stopped_worker(self):
+    manager = manager_lib.RolloutManager(
+        config=types.SimpleNamespace(partial_rollout=False),
+        sampler=_FakeSyncSampler([]),
+        tokenizer="mock",
+        chat_parser="mock",
+    )
+    await manager.pre_weight_sync()
+    request = datatypes.RolloutRequest(prompt="p", prompt_id="p0")
+    gen_task = asyncio.create_task(manager._generate_one(request))
+    await asyncio.sleep(0.01)
+    self.assertFalse(gen_task.done())
+    # Stopping never reopens admission, so the waiter must fail, not hang.
+    manager._traffic.stop_and_cancel_all()
+    with self.assertRaises(traffic_controller_lib.AdmissionClosedError):
+      await asyncio.wait_for(gen_task, timeout=1.0)
+    with self.assertRaises(traffic_controller_lib.AdmissionClosedError):
+      await manager._generate_one(request)
 
 class AgentConfigTest(unittest.IsolatedAsyncioTestCase):
 

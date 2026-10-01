@@ -41,6 +41,8 @@ class TrafficController:
     self._state = WorkerState.READY
     self._admission_open = asyncio.Event()
     self._run_threadsafe(self._loop, self._admission_open.set)
+    # Wakes admission waiters on stop, since admission never reopens then.
+    self._stopped = asyncio.Event()
     self._active_tasks: set[asyncio.Task[Any]] = set()
 
   def _run_threadsafe(self, loop: asyncio.AbstractEventLoop, callback) -> None:
@@ -61,8 +63,20 @@ class TrafficController:
       return self._state
 
   async def wait_for_admission(self) -> None:
-    """Blocks until admission is open."""
-    await self._admission_open.wait()
+    """Blocks until admission is open or the worker stops.
+
+    Callers must check `state` afterwards: a stopped worker returns here with
+    admission still closed.
+    """
+    waiters = {
+        asyncio.ensure_future(self._admission_open.wait()),
+        asyncio.ensure_future(self._stopped.wait()),
+    }
+    try:
+      await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+      for waiter in waiters:
+        waiter.cancel()
 
   def is_admission_open(self) -> bool:
     """Returns True if admission is currently open."""
@@ -151,6 +165,7 @@ class TrafficController:
     with self._lock:
       self._state = WorkerState.STOPPED
       self._run_threadsafe(self._loop, self._admission_open.clear)
+      self._run_threadsafe(self._loop, self._stopped.set)
       tasks = list(self._active_tasks)
 
     # Cancel outside the lock to avoid reentrancy if callbacks are invoked immediately
