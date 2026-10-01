@@ -88,11 +88,14 @@ frozenlake = [
   "gymnasium",
 ]
 experimental = [
+  "absl-py",
   "cloudpickle",  # serialization envelope for the remote-execution actor protocol
+  "etils[epath]",  # path abstraction for local and GCS trajectory stores
   "grpcio",  # transport for cross-process worker execution
   "grpcio-tools",
   "pydantic",  # data modeling and serialization for agent trajectories
   "simple_parsing",  # Argument parsing for CLI
+  "termcolor",  # terminal formatting for CLI subcommands
 ]
 
 [project.urls]
