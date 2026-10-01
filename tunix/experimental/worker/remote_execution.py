@@ -1518,6 +1518,13 @@ class PoolExecutionSession:
     if self._in_flight == 0:
       self._response_queue.put_nowait(self._sentinel)
 
+  def worker_for(self, request_id: str) -> Optional[ActorHandle]:
+    """Returns the actor `request_id` was dispatched to while it is in flight."""
+    for actor, dispatched in self._dispatched_tasks.items():
+      if request_id in dispatched:
+        return actor
+    return None
+
   async def submit(
       self,
       request_id: str,

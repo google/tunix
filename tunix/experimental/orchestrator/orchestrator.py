@@ -455,6 +455,9 @@ class ClusterOrchestrator:
         trainer_workers=trainer_workers,
         inference_workers=inference_workers,
         weight_sync_coordinator=coordinator,
+        rollout_worker_ids={
+            h: w_id for w_id, h in self._remote_worker_handles_by_id.items()
+        },
     )
 
   def run(
