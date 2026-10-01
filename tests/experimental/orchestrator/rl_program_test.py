@@ -700,6 +700,34 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_pipeline_cancelled_run_cancels_in_flight_train_step(self):
+    async def _run():
+      started = asyncio.Event()
+      step_cancelled = asyncio.Event()
+
+      async def mock_train_step(batch, **kwargs):
+        del kwargs
+        if batch == "mb1":
+          started.set()
+          try:
+            await asyncio.Event().wait()
+          except asyncio.CancelledError:
+            step_cancelled.set()
+            raise
+        return f"result_{batch}"
+
+      self.mock_engine.train_step.side_effect = mock_train_step
+      program, _ = self._pipelined_program([])
+
+      run_task = asyncio.create_task(program.run_async(self.mock_engine))
+      await asyncio.wait_for(started.wait(), 5)
+      run_task.cancel()
+      with self.assertRaises(asyncio.CancelledError):
+        await run_task
+      await asyncio.wait_for(step_cancelled.wait(), 5)
+
+    asyncio.run(_run())
+
   def test_pipeline_reset_waits_for_in_flight_feed(self):
     async def _run():
       events = []
@@ -718,13 +746,12 @@ class RLProgramTest(absltest.TestCase):
       await asyncio.to_thread(in_feed.wait, 5)
       # Cancelling the awaiting task does not stop the worker thread.
       feed_task.cancel()
-      reset_thread = threading.Thread(target=program._reset_assembler)
-      reset_thread.start()
+      reset_task = asyncio.create_task(program._reset_assembler())
       await asyncio.sleep(0.05)
       self.assertEqual(events, [])
 
       release.set()
-      reset_thread.join(5)
+      await reset_task
       self.assertEqual(events, ["feed_done", "reset"])
 
     asyncio.run(_run())

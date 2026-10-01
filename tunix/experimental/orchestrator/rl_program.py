@@ -1486,9 +1486,15 @@ class StandardRLProgram(RLProgram):
 
     return await asyncio.to_thread(_locked)
 
-  def _reset_assembler(self) -> None:
-    with self._assembler_lock:
-      self.assembler.reset()
+  async def _reset_assembler(self) -> None:
+    """Resets the assembler once any in-flight feed/flush has finished."""
+
+    def _locked() -> None:
+      with self._assembler_lock:
+        self.assembler.reset()
+
+    # Off the event loop: the lock can be held by a worker thread.
+    await asyncio.to_thread(_locked)
 
   async def _timed_train_step(
       self, batch: datatypes.RLTrainerPayload, *, apply_optimizer: bool
@@ -1879,7 +1885,7 @@ class StandardRLProgram(RLProgram):
       logging.error("Exception in StandardRLProgram execution: %s", exc)
       await self.raw_q.abort(exc)
       await self.scored_q.abort(exc)
-      self._reset_assembler()
+      await self._reset_assembler()
       raise
     finally:
       for task in tasks:
