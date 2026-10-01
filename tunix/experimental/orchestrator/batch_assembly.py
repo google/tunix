@@ -40,11 +40,134 @@ T = TypeVar("T")
 _BATCH_ID_PREFIX: str = "batch"
 
 
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class PaddingStats:
+  """Per-row token occupancy of one assembled microbatch.
+
+  Attributes:
+    row_valid_tokens: `[B]` number of real (non-padding) tokens in each row.
+    row_num_sequences: `[B]` number of trajectories placed in each row. Rows
+      with 0 sequences are fully padded filler rows.
+    row_capacity: Static token capacity of every row (`max_packed_len` for
+      sequence packing, `max_prompt_length + max_response_length` for padding).
+  """
+
+  row_valid_tokens: np.ndarray
+  row_num_sequences: np.ndarray
+  row_capacity: int
+
+  def __post_init__(self):
+    if self.row_valid_tokens.ndim != 1:
+      raise ValueError(
+          "row_valid_tokens must be 1D, got shape"
+          f" {self.row_valid_tokens.shape}."
+      )
+    if self.row_num_sequences.shape != self.row_valid_tokens.shape:
+      raise ValueError(
+          "row_num_sequences shape"
+          f" {self.row_num_sequences.shape} does not match row_valid_tokens"
+          f" shape {self.row_valid_tokens.shape}."
+      )
+    if self.row_valid_tokens.size == 0:
+      raise ValueError("PaddingStats requires at least one row.")
+    if self.row_capacity <= 0:
+      raise ValueError(
+          f"row_capacity must be positive, got {self.row_capacity}."
+      )
+    if np.any(self.row_valid_tokens < 0) or np.any(
+        self.row_valid_tokens > self.row_capacity
+    ):
+      raise ValueError(
+          f"row_valid_tokens must lie in [0, {self.row_capacity}], got"
+          f" {self.row_valid_tokens.tolist()}."
+      )
+    if np.any(self.row_num_sequences < 0):
+      raise ValueError(
+          "row_num_sequences must be non-negative, got"
+          f" {self.row_num_sequences.tolist()}."
+      )
+    if self.valid_tokens == 0:
+      raise ValueError("PaddingStats requires at least one valid token.")
+
+  @property
+  def num_rows(self) -> int:
+    return int(self.row_valid_tokens.size)
+
+  @property
+  def valid_tokens(self) -> int:
+    return int(self.row_valid_tokens.sum())
+
+  @property
+  def capacity_tokens(self) -> int:
+    return self.num_rows * self.row_capacity
+
+  @property
+  def padding_ratio(self) -> float:
+    """Fraction of the `[B, row_capacity]` microbatch that is padding."""
+    return 1.0 - self.valid_tokens / self.capacity_tokens
+
+  @property
+  def row_fill(self) -> np.ndarray:
+    """`[B]` fraction of each row occupied by real tokens."""
+    return self.row_valid_tokens / self.row_capacity
+
+  @property
+  def row_imbalance(self) -> float:
+    """Max-over-mean of per-row valid tokens; 1.0 means perfectly balanced."""
+    return float(self.row_valid_tokens.max() / self.row_valid_tokens.mean())
+
+
+def summarize_padding_stats(
+    stats: Sequence[PaddingStats],
+) -> dict[str, float]:
+  """Aggregates per-microbatch padding stats of one optimizer step.
+
+  Args:
+    stats: Padding stats of every microbatch sent to the trainer in the step.
+
+  Returns:
+    Mapping of metric name to value:
+      ratio: token-weighted padding fraction over the whole step.
+      microbatch_ratio_{mean,max,min}: padding fraction across microbatches.
+      microbatch_imbalance: max-over-mean of valid tokens across microbatches.
+      row_imbalance_{mean,max}: per-microbatch row max-over-mean, aggregated.
+      row_fill_{min,max}: per-row occupancy extremes over all rows.
+      empty_rows: number of fully padded rows holding no sequence.
+      sequences_per_row_{mean,max}: trajectories per row over all rows.
+      valid_tokens / capacity_tokens: step totals.
+  """
+  if not stats:
+    raise ValueError("summarize_padding_stats requires at least one entry.")
+  valid = np.array([s.valid_tokens for s in stats], dtype=np.float64)
+  capacity = np.array([s.capacity_tokens for s in stats], dtype=np.float64)
+  mb_ratio = np.array([s.padding_ratio for s in stats])
+  row_imbalance = np.array([s.row_imbalance for s in stats])
+  row_fill = np.concatenate([s.row_fill for s in stats])
+  row_num_sequences = np.concatenate([s.row_num_sequences for s in stats])
+  return {
+      "ratio": float(1.0 - valid.sum() / capacity.sum()),
+      "microbatch_ratio_mean": float(mb_ratio.mean()),
+      "microbatch_ratio_max": float(mb_ratio.max()),
+      "microbatch_ratio_min": float(mb_ratio.min()),
+      "microbatch_imbalance": float(valid.max() / valid.mean()),
+      "row_imbalance_mean": float(row_imbalance.mean()),
+      "row_imbalance_max": float(row_imbalance.max()),
+      "row_fill_min": float(row_fill.min()),
+      "row_fill_max": float(row_fill.max()),
+      "empty_rows": float(np.sum(row_num_sequences == 0)),
+      "sequences_per_row_mean": float(row_num_sequences.mean()),
+      "sequences_per_row_max": float(row_num_sequences.max()),
+      "valid_tokens": float(valid.sum()),
+      "capacity_tokens": float(capacity.sum()),
+  }
+
+
 class AssembledBatch(NamedTuple):
   """Microbatch payload paired with optimizer-update completion status."""
 
   payload: datatypes.RLTrainerPayload
   is_final_batch: bool
+  padding_stats: PaddingStats | None = None
   trajectory_ids: tuple[str, ...] = ()
 
 
@@ -581,9 +704,17 @@ class SequencePackedBatchAssembler:
         lineage_context=merged_lineage,
     )
     self._buffer = [id_to_entry[id(item)] for item in leftover]
+    padding_stats = PaddingStats(
+        row_valid_tokens=np.array(
+            [sum(item.num_tokens for item in b) for b in bins], dtype=np.int64
+        ),
+        row_num_sequences=np.array([len(b) for b in bins], dtype=np.int64),
+        row_capacity=self.max_packed_len,
+    )
     return AssembledBatch(
         payload=payload,
         is_final_batch=drain_all and not self._buffer,
+        padding_stats=padding_stats,
         trajectory_ids=traj_ids,
     )
 
@@ -725,6 +856,21 @@ class PaddedBatchAssembler:
   def max_seq_len(self) -> int:
     return self.max_prompt_length + self.max_response_length
 
+  def _assemble(
+      self,
+      chunk: Sequence[datatypes.RLTrainerPayload],
+      *,
+      is_final_batch: bool,
+  ) -> AssembledBatch:
+    """Pads one `<= batch_size` chunk into an `AssembledBatch`."""
+    payload, padding_stats = self._pack_chunk(chunk)
+    return AssembledBatch(
+        payload=payload,
+        is_final_batch=is_final_batch,
+        padding_stats=padding_stats,
+        trajectory_ids=tuple(_extract_trajectory_id(it) for it in chunk),
+    )
+
   def feed(
       self,
       items: Sequence[datatypes.RLTrainerPayload],
@@ -743,35 +889,15 @@ class PaddedBatchAssembler:
       is_final = is_update_done and will_be_empty
 
       chunk = [self._buffer.popleft() for _ in range(self.batch_size)]
-      traj_ids = tuple(_extract_trajectory_id(it) for it in chunk)
-      payload = self.pack(chunk)[0]
-      out.append(
-          AssembledBatch(
-              payload=payload,
-              is_final_batch=is_final,
-              trajectory_ids=traj_ids,
-          )
-      )
+      out.append(self._assemble(chunk, is_final_batch=is_final))
 
     if self._rollouts_since_update >= self.rollouts_per_optimizer_update:
       if self._buffer:
         remainder = list(self._buffer)
         self._buffer.clear()
-        traj_ids = tuple(_extract_trajectory_id(it) for it in remainder)
-        payload = self.pack(remainder)[0]
-        out.append(
-            AssembledBatch(
-                payload=payload,
-                is_final_batch=True,
-                trajectory_ids=traj_ids,
-            )
-        )
+        out.append(self._assemble(remainder, is_final_batch=True))
       elif out:
-        out[-1] = AssembledBatch(
-            payload=out[-1].payload,
-            is_final_batch=True,
-            trajectory_ids=out[-1].trajectory_ids,
-        )
+        out[-1] = out[-1]._replace(is_final_batch=True)
       self._rollouts_since_update %= self.rollouts_per_optimizer_update
 
     return out
@@ -785,14 +911,7 @@ class PaddedBatchAssembler:
     remainder = list(self._buffer)
     self._buffer.clear()
     self._rollouts_since_update = 0
-    traj_ids = tuple(_extract_trajectory_id(it) for it in remainder)
-    return [
-        AssembledBatch(
-            payload=self.pack(remainder)[0],
-            is_final_batch=True,
-            trajectory_ids=traj_ids,
-        )
-    ]
+    return [self._assemble(remainder, is_final_batch=True)]
 
   def reset(self, *, start_batch_index: int | None = None) -> None:
     """Resets internal buffering state, discarding all pending rollouts.
@@ -830,13 +949,27 @@ class PaddedBatchAssembler:
     payloads: list[datatypes.RLTrainerPayload] = []
     for i in range(0, len(item_list), self.batch_size):
       chunk = item_list[i : i + self.batch_size]
-      payloads.append(self._pack_chunk(chunk))
+      payload, _ = self._pack_chunk(chunk)
+      payloads.append(payload)
     return payloads
 
   def _pack_chunk(
       self, chunk: Sequence[datatypes.RLTrainerPayload]
-  ) -> datatypes.RLTrainerPayload:
-    """Pads a single `<= batch_size` chunk into one rectangular payload."""
+  ) -> tuple[datatypes.RLTrainerPayload, PaddingStats]:
+    """Pads a single `<= batch_size` chunk into one rectangular payload.
+
+    Args:
+      chunk: At most `batch_size` unbatched payloads.
+
+    Returns:
+      The padded `[batch_size, ...]` payload and its per-row padding stats,
+      recorded from the same truncated lengths used to fill the rows. Filler
+      rows past `len(chunk)` count as empty.
+    """
+    if len(chunk) > self.batch_size:
+      raise ValueError(
+          f"Chunk of {len(chunk)} items exceeds batch_size {self.batch_size}."
+      )
     # Optional per-token fields are emitted for the whole batch only when all
     # rows carry them.
     optional_fields = (
@@ -878,13 +1011,19 @@ class PaddedBatchAssembler:
     carry_overlong = all(it.overlong is not None for it in chunk)
     overlong_rows: list[np.ndarray] = []
     truncated_prompts = truncated_completions = 0
+    row_valid_tokens = np.zeros(self.batch_size, dtype=np.int64)
+    row_num_sequences = np.zeros(self.batch_size, dtype=np.int64)
 
-    for item in chunk:
+    for row_idx, item in enumerate(chunk):
       p_full = np.asarray(item.prompt_ids, dtype=np.int32).reshape(-1)
       c_full = np.asarray(item.completion_ids, dtype=np.int32).reshape(-1)
       truncated_prompts += p_full.size > self.max_prompt_length
       truncated_completions += c_full.size > self.max_response_length
       c = c_full[: self.max_response_length]
+      row_valid_tokens[row_idx] = (
+          min(p_full.size, self.max_prompt_length) + c.size
+      )
+      row_num_sequences[row_idx] = 1
 
       p_ids, p_default_mask = _left_pad(
           p_full, self.max_prompt_length, pad_id=self.pad_id
@@ -1025,7 +1164,7 @@ class PaddedBatchAssembler:
     if merged_lineage:
       payload_metadata["lineage"] = merged_lineage
 
-    return datatypes.RLTrainerPayload(
+    payload = datatypes.RLTrainerPayload(
         advantages=np.stack(advantages),
         prompt_ids=batched_prompt_ids,
         prompt_mask=batched_prompt_mask,
@@ -1043,6 +1182,12 @@ class PaddedBatchAssembler:
         ),
         metadata=payload_metadata,
     )
+    padding_stats = PaddingStats(
+        row_valid_tokens=row_valid_tokens,
+        row_num_sequences=row_num_sequences,
+        row_capacity=self.max_seq_len,
+    )
+    return payload, padding_stats
 
 
 def create_batch_assembler(

@@ -870,6 +870,28 @@ class StandardRLProgram(RLProgram):
     finally:
       await self.scored_q.close()
 
+  def _log_metric(
+      self,
+      metric_name: str,
+      scalar_value: float | np.ndarray,
+      step: int,
+      *,
+      prefix: str | None = None,
+  ) -> None:
+    """Logs a scalar metric using RLEngine-compatible '<prefix>/<mode>/<name>' layout."""
+    if prefix is None:
+      if "/" in metric_name:
+        prefix, metric_name = metric_name.split("/", maxsplit=1)
+      else:
+        prefix = "global"
+    if self.metrics_prefix:
+      prefix = (
+          f"{self.metrics_prefix}/{prefix}"
+          if prefix
+          else self.metrics_prefix
+      )
+    self.metrics_logger.log(prefix, metric_name, scalar_value, self.mode, step)
+
   def _collect_and_log_step_metrics(
       self,
       *,
@@ -881,6 +903,8 @@ class StandardRLProgram(RLProgram):
       trainer_metrics: Any = None,
       num_rollouts: int,
       num_microbatches: int,
+      padding_stats: Sequence[batch_assembly.PaddingStats] = (),
+      packing_time_sec: float = 0.0,
       step_time_sec: float,
       consumed_policy_version: int,
       log_step: int,
@@ -1166,6 +1190,17 @@ class StandardRLProgram(RLProgram):
       self.metrics_logger.log(
           self.metrics_prefix, f"orchestrator/{tag}", val, self.mode, log_step
       )
+    if padding_stats:
+      for tag, val in batch_assembly.summarize_padding_stats(
+          padding_stats
+      ).items():
+        self._log_metric(f"efficiency/padding/{tag}", val, log_step)
+      packing_stats = {
+          "time_sec_total": float(packing_time_sec),
+          "time_sec_mean": float(packing_time_sec) / len(padding_stats),
+      }
+      for tag, val in packing_stats.items():
+        self._log_metric(f"efficiency/packing/{tag}", val, log_step)
 
     # --- 4. Trainer Metrics ---
     loss_val = None
@@ -1478,6 +1513,8 @@ class StandardRLProgram(RLProgram):
       step_rewards = []
       step_advantages = []
       num_microbatches = 0
+      step_padding_stats: list[batch_assembly.PaddingStats] = []
+      step_packing_time_sec = 0.0
       num_rollouts = 0
       all_step_items = []
       scored_items = []
@@ -1571,7 +1608,9 @@ class StandardRLProgram(RLProgram):
         # per-component timing accuracy.
         exposed_generation_time += time.monotonic() - _t_gen
         if not scored_items:
+          packing_start_time = time.perf_counter()
           assembled_batches = await asyncio.to_thread(self.assembler.flush)
+          step_packing_time_sec += time.perf_counter() - packing_start_time
         else:
           if groups_consumed == 0 and self.on_step_begin:
             self.on_step_begin(current_step)
@@ -1603,9 +1642,11 @@ class StandardRLProgram(RLProgram):
                   },
               )
             payloads.append(payload)
+          packing_start_time = time.perf_counter()
           assembled_batches = await asyncio.to_thread(
               self.assembler.feed, payloads  # pyrefly: ignore[bad-argument-type]
           )
+          step_packing_time_sec += time.perf_counter() - packing_start_time
 
         for mb in assembled_batches:
           batch = mb.payload
@@ -1632,11 +1673,22 @@ class StandardRLProgram(RLProgram):
             )
 
           num_microbatches += 1
-          logging.info(
-              "Packed %d trajectories into microbatch: %s",
-              len(mb.trajectory_ids),
-              logging_utils.summarize_list(list(mb.trajectory_ids)),
-          )
+          if getattr(mb, "padding_stats", None) is not None:
+            step_padding_stats.append(mb.padding_stats)
+            logging.info(
+                "Packed %d trajectories into microbatch: %s (padding_ratio=%.3f,"
+                " row_imbalance=%.3f)",
+                len(mb.trajectory_ids),
+                logging_utils.summarize_list(list(mb.trajectory_ids)),
+                mb.padding_stats.padding_ratio,
+                mb.padding_stats.row_imbalance,
+            )
+          else:
+            logging.info(
+                "Packed %d trajectories into microbatch: %s",
+                len(mb.trajectory_ids),
+                logging_utils.summarize_list(list(mb.trajectory_ids)),
+            )
           _t_train = time.monotonic()
           step_result = await self.engine.train_step(
               batch,
@@ -1726,6 +1778,8 @@ class StandardRLProgram(RLProgram):
           trainer_metrics=trainer_metrics,
           num_rollouts=num_rollouts,
           num_microbatches=num_microbatches,
+          padding_stats=step_padding_stats,
+          packing_time_sec=step_packing_time_sec,
           step_time_sec=step_time_sec,
           consumed_policy_version=consumed_policy_version,
           log_step=current_step,
