@@ -839,6 +839,72 @@ def create_maxtext_engine(
   if log_shapes:
     log_param_shapes(engine.model)
 
+  if hasattr(engine, "_prepare_batch") and hasattr(
+      engine, "_batch_data_shardings"
+  ):
+    import contextlib as _contextlib  # pylint: disable=g-import-not-at-top
+    import time as _time  # pylint: disable=g-import-not-at-top
+    import jax as _jax  # pylint: disable=g-import-not-at-top
+    from tunix.experimental.worker import remote_execution as _remote_exec  # pylint: disable=g-import-not-at-top
+
+    orig_prepare_batch = engine._prepare_batch
+
+    def _timed_prepare_batch(payload: Any) -> dict[str, Any]:
+      # Wait on the throttler first so `shard_input_ms` reflects pure H2D
+      # sharding/transfer rather than blocking on an in-flight TPU step.
+      # `wait_for_next()` is idempotent when the queue has capacity, so the
+      # subsequent call inside `MaxTextTrainingEngine.fwd_bwd` is a no-op.
+      throttler_wait_ms = 0.0
+      throttler = getattr(engine, "_throttler", None)
+      if throttler is not None and hasattr(throttler, "wait_for_next"):
+        t_wait0 = _time.perf_counter()
+        throttler.wait_for_next()
+        throttler_wait_ms = (_time.perf_counter() - t_wait0) * 1000.0
+
+      t_prep0 = _time.perf_counter()
+      batch = orig_prepare_batch(payload)
+      prepare_batch_ms = (_time.perf_counter() - t_prep0) * 1000.0
+
+      shard_start_ts = _remote_exec._utc_ts()
+      t_shard0 = _time.perf_counter()
+      try:
+        sharding_ctx = getattr(engine, "_sharding_ctx", None)
+        ctx = (
+            sharding_ctx()
+            if callable(sharding_ctx)
+            else _contextlib.nullcontext()
+        )
+        with ctx:
+          batch_shardings = engine._batch_data_shardings(batch)
+          batch = _jax.tree.map(
+              lambda x, s: _jax.device_put(x, s)
+              if s is not None and hasattr(x, "shape")
+              else x,
+              batch,
+              batch_shardings,
+          )
+      except Exception as exc:  # pylint: disable=broad-exception-caught
+        logging.warning("Pre-sharding batch in _timed_prepare_batch failed: %s", exc)
+      shard_input_ms = (_time.perf_counter() - t_shard0) * 1000.0
+      shard_end_ts = _remote_exec._utc_ts()
+      logging.info(
+          "[BENCH_TIMING][trainer.shard_input] start_ts=%s end_ts=%s"
+          " throttler_wait_ms=%.2f prepare_batch_ms=%.2f shard_input_ms=%.2f",
+          shard_start_ts,
+          shard_end_ts,
+          throttler_wait_ms,
+          prepare_batch_ms,
+          shard_input_ms,
+      )
+      _remote_exec.record_trainer_stage_timing(
+          throttler_wait_ms=throttler_wait_ms,
+          prepare_batch_ms=prepare_batch_ms,
+          shard_input_ms=shard_input_ms,
+      )
+      return batch
+
+    engine._prepare_batch = _timed_prepare_batch
+
   return engine
 
 

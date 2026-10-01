@@ -19,13 +19,16 @@ import contextlib
 import dataclasses
 from typing import Any, Callable, ContextManager, cast
 
+from absl import logging
 from flax import nnx
 import jax.numpy as jnp
 import numpy as np
+import time
 
 from tunix.experimental.common import datatypes
 from tunix.experimental.train import abstract_trainer
 from tunix.experimental.worker import abstract_worker
+from tunix.experimental.worker import remote_execution
 from tunix.rl import common as rl_common
 
 WorkerState = datatypes.WorkerState
@@ -47,8 +50,47 @@ def _with_dense_routing(payload: Any) -> Any:
   if isinstance(payload, datatypes.RLTrainerPayload) and isinstance(
       payload.routed_experts, datatypes.CompactRoutedExperts
   ):
-    return dataclasses.replace(
-        payload, routed_experts=payload.routed_experts.materialize()
+    ts_start = remote_execution._utc_ts()
+    t0 = time.perf_counter()
+    dense = payload.routed_experts.materialize()
+    materialize_ms = (time.perf_counter() - t0) * 1000.0
+    ts_end = remote_execution._utc_ts()
+    dense_mib = dense.nbytes / (1024.0 * 1024.0)
+    compact_mib = payload.routed_experts.nbytes / (1024.0 * 1024.0)
+    logging.info(
+        "[BENCH_TIMING][trainer.materialize_routed_experts] start_ts=%s"
+        " end_ts=%s compact_MiB=%.2f dense_MiB=%.2f materialize_ms=%.2f",
+        ts_start,
+        ts_end,
+        compact_mib,
+        dense_mib,
+        materialize_ms,
+    )
+    remote_execution.record_trainer_stage_timing(
+        materialize_ms=materialize_ms,
+        compact_routed_mib=compact_mib,
+        dense_routed_mib=dense_mib,
+    )
+    return dataclasses.replace(payload, routed_experts=dense)
+  if (
+      isinstance(payload, datatypes.RLTrainerPayload)
+      and payload.routed_experts is not None
+  ):
+    dense_arr = np.asarray(payload.routed_experts)
+    dense_mib = dense_arr.nbytes / (1024.0 * 1024.0)
+    logging.info(
+        "[BENCH_TIMING][trainer.materialize_routed_experts] start_ts=%s"
+        " end_ts=%s compact_MiB=%.2f dense_MiB=%.2f materialize_ms=0.00"
+        " (already_dense)",
+        remote_execution._utc_ts(),
+        remote_execution._utc_ts(),
+        dense_mib,
+        dense_mib,
+    )
+    remote_execution.record_trainer_stage_timing(
+        materialize_ms=0.0,
+        compact_routed_mib=dense_mib,
+        dense_routed_mib=dense_mib,
     )
   return payload
 
@@ -218,7 +260,26 @@ class TrainerWorker(abstract_worker.Worker):
     req_metadata = dict(request.metadata) if request.metadata else {}
     kwargs.pop("skip_jit", None)
     try:
-      self._trainer.fwd_bwd(_with_dense_routing(request.payload), **kwargs)
+      ts_start = remote_execution._utc_ts()
+      t0 = time.perf_counter()
+      dense_payload = _with_dense_routing(request.payload)
+      t_eng0 = time.perf_counter()
+      self._trainer.fwd_bwd(dense_payload, **kwargs)
+      engine_fwd_bwd_ms = (time.perf_counter() - t_eng0) * 1000.0
+      total_fwd_bwd_ms = (time.perf_counter() - t0) * 1000.0
+      ts_end = remote_execution._utc_ts()
+      logging.info(
+          "[BENCH_TIMING][trainer.fwd_bwd] start_ts=%s end_ts=%s"
+          " engine_fwd_bwd_ms=%.2f total_fwd_bwd_ms=%.2f",
+          ts_start,
+          ts_end,
+          engine_fwd_bwd_ms,
+          total_fwd_bwd_ms,
+      )
+      remote_execution.record_trainer_stage_timing(
+          engine_fwd_bwd_ms=engine_fwd_bwd_ms,
+          total_fwd_bwd_ms=total_fwd_bwd_ms,
+      )
       self._last_error = None
       resp = self._response(queued=True, **req_metadata)
       resp.request_id = request.request_id
@@ -232,7 +293,20 @@ class TrainerWorker(abstract_worker.Worker):
     """Applies the accumulated (mean) gradients as one optimizer update."""
     self._ensure_ready()
     try:
+      ts_start = remote_execution._utc_ts()
+      t0 = time.perf_counter()
       train_step = self._trainer.update(**kwargs)
+      update_ms = (time.perf_counter() - t0) * 1000.0
+      ts_end = remote_execution._utc_ts()
+      logging.info(
+          "[BENCH_TIMING][trainer.update] start_ts=%s end_ts=%s"
+          " train_step=%s update_ms=%.2f",
+          ts_start,
+          ts_end,
+          train_step,
+          update_ms,
+      )
+      remote_execution.record_trainer_stage_timing(update_ms=update_ms)
       self._last_error = None
       return train_step
     except Exception as exc:
@@ -442,4 +516,26 @@ class TrainerWorker(abstract_worker.Worker):
 
   def get_metrics(self) -> Any:
     """Returns and clears the recently collected step metric records."""
-    return self._trainer.get_metrics()
+    res = self._trainer.get_metrics()
+    server_rpcs = remote_execution.pop_server_rpc_timings()
+    stage_timings = remote_execution.pop_trainer_stage_timings()
+    scalar_dict = getattr(res, "scalar_metrics", None)
+    if isinstance(scalar_dict, dict):
+      fwd_rpcs = [r for r in server_rpcs if r.get("method") == "fwd_bwd"]
+      if fwd_rpcs:
+        scalar_dict["bench/rpc_raw_mib"] = sum(
+            float(r.get("raw_mib", 0.0)) for r in fwd_rpcs
+        )
+        scalar_dict["bench/rpc_reassemble_ms"] = sum(
+            float(r.get("reassemble_ms", 0.0)) for r in fwd_rpcs
+        )
+        scalar_dict["bench/rpc_deserialize_ms"] = sum(
+            float(r.get("deserialize_ms", 0.0)) for r in fwd_rpcs
+        )
+      stage_sums: dict[str, float] = {}
+      for st in stage_timings:
+        for k, v in st.items():
+          stage_sums[k] = stage_sums.get(k, 0.0) + float(v)
+      for k, v in stage_sums.items():
+        scalar_dict[f"bench/{k}"] = v
+    return res

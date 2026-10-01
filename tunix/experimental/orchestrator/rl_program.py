@@ -1131,6 +1131,47 @@ class StandardRLProgram(RLProgram):
         "exposed_generation_time": float(exposed_generation_time),
         "weight_sync_time": float(weight_sync_time),
     }
+    try:
+      from tunix.experimental.worker import remote_execution as _remote_exec  # pylint: disable=g-import-not-at-top
+
+      rpc_records = _remote_exec.pop_client_rpc_timings()
+      client_stages = _remote_exec.pop_client_stage_timings()
+      pack_ms_sum = sum(float(s.get("pack_ms", 0.0)) for s in client_stages)
+      if client_stages:
+        orchestrator_stats["bench/pack_ms"] = pack_ms_sum
+      if rpc_records or client_stages:
+        by_method: dict[str, list[dict[str, Any]]] = {}
+        for rec in rpc_records:
+          by_method.setdefault(str(rec.get("method", "unknown")), []).append(rec)
+        summary_parts = [
+            f"step={log_step}",
+            f"policy_training_time_s={policy_training_time:.3f}",
+            f"pack_ms={pack_ms_sum:.2f}",
+        ]
+        for m_name, recs in sorted(by_method.items()):
+          ser_sum = sum(float(r.get("serialize_ms", 0.0)) for r in recs)
+          up_sum = sum(float(r.get("upload_ms", 0.0)) for r in recs)
+          exec_sum = sum(float(r.get("execute_rpc_ms", 0.0)) for r in recs)
+          tot_sum = sum(float(r.get("total_rpc_ms", 0.0)) for r in recs)
+          mib_sum = sum(float(r.get("payload_mib", 0.0)) for r in recs)
+          orchestrator_stats[f"bench/{m_name}_serialize_ms"] = ser_sum
+          orchestrator_stats[f"bench/{m_name}_upload_ms"] = up_sum
+          orchestrator_stats[f"bench/{m_name}_execute_rpc_ms"] = exec_sum
+          orchestrator_stats[f"bench/{m_name}_total_rpc_ms"] = tot_sum
+          orchestrator_stats[f"bench/{m_name}_payload_mib"] = mib_sum
+          orchestrator_stats[f"bench/{m_name}_calls"] = float(len(recs))
+          summary_parts.append(
+              f"{m_name}(n={len(recs)},mib={mib_sum:.2f},"
+              f"ser_ms={ser_sum:.1f},up_ms={up_sum:.1f},"
+              f"exec_ms={exec_sum:.1f},tot_ms={tot_sum:.1f})"
+          )
+        logging.info(
+            "[BENCH_TIMING][orchestrator.step_summary] %s",
+            " ".join(summary_parts),
+        )
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+      logging.warning("Failed to aggregate client RPC timings: %s", exc)
+
     for tag, val in orchestrator_stats.items():
       self.metrics_logger.log(
           self.metrics_prefix, f"orchestrator/{tag}", val, self.mode, log_step
@@ -1524,7 +1565,21 @@ class StandardRLProgram(RLProgram):
         # per-component timing accuracy.
         exposed_generation_time += time.monotonic() - _t_gen
         if not scored_items:
+          _t_pack0 = time.perf_counter()
           assembled_batches = self.assembler.flush()
+          _pack_ms = (time.perf_counter() - _t_pack0) * 1000.0
+          if assembled_batches:
+            from tunix.experimental.worker import remote_execution as _remote_exec  # pylint: disable=g-import-not-at-top
+
+            _remote_exec.record_client_stage_timing(pack_ms=_pack_ms)
+            logging.info(
+                "[BENCH_TIMING][orchestrator.pack] ts=%s step=%d"
+                " microbatches=%d pack_ms=%.2f (flush)",
+                _remote_exec._utc_ts(),
+                current_step,
+                len(assembled_batches),
+                _pack_ms,
+            )
         else:
           if groups_consumed == 0 and self.on_step_begin:
             self.on_step_begin(current_step)
@@ -1556,7 +1611,21 @@ class StandardRLProgram(RLProgram):
                   },
               )
             payloads.append(payload)
+          _t_pack0 = time.perf_counter()
           assembled_batches = self.assembler.feed(payloads)  # pyrefly: ignore[bad-argument-type]
+          _pack_ms = (time.perf_counter() - _t_pack0) * 1000.0
+          from tunix.experimental.worker import remote_execution as _remote_exec  # pylint: disable=g-import-not-at-top
+
+          _remote_exec.record_client_stage_timing(pack_ms=_pack_ms)
+          if assembled_batches:
+            logging.info(
+                "[BENCH_TIMING][orchestrator.pack] ts=%s step=%d"
+                " microbatches=%d pack_ms=%.2f (feed)",
+                _remote_exec._utc_ts(),
+                current_step,
+                len(assembled_batches),
+                _pack_ms,
+            )
 
         for mb in assembled_batches:
           batch = mb.payload
