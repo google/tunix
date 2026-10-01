@@ -557,7 +557,11 @@ def _create_mesh(args) -> Mesh:
         "Trainer mesh dimensions must multiply to visible JAX device count. "
         f"Got shape={shape}, devices={jax.device_count()}."
     )
-  devices = mesh_utils.create_device_mesh(shape, jax.devices())
+  # fsdp8 x tp8 on a 4x4x4 torus needs a physical axis split across logical
+  # axes, which create_device_mesh rejects by default.
+  devices = mesh_utils.create_device_mesh(
+      shape, jax.devices(), allow_split_physical_axes=True
+  )
   return Mesh(devices, axis_names=("fsdp", "tp"))
 
 

@@ -188,6 +188,18 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       "--scaffold", choices=("r2egym", "sweagent"), default="r2egym"
   )
   parser.add_argument("--use_agent_sandbox", action="store_true")
+  parser.add_argument(
+      "--max_concurrency",
+      type=int,
+      default=256,
+      help="Orchestrator-side SandboxFleet max concurrent sandboxes.",
+  )
+  parser.add_argument(
+      "--max_warmpool_replicas",
+      type=int,
+      default=2,
+      help="Max warm-pool replicas per image for orchestrator prewarming.",
+  )
   parser.add_argument("--env_verbose", action="store_true")
   parser.add_argument(
       "--flush_every_n_steps",
@@ -231,6 +243,22 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " of overlong (max-steps or max-context-limit) trajectories, rather"
           " than training on them."
       ),
+  )
+  parser.add_argument(
+      "--overlong_filter_statuses",
+      type=str,
+      default="",
+      help=(
+          "Comma-separated TrajectoryStatus names masked by --overlong_filter"
+          " (e.g. MAX_CONTEXT_LIMIT_REACHED). Empty keeps the collector"
+          " default (max-steps, context limit, timeouts)."
+      ),
+  )
+  parser.add_argument(
+      "--rollout_replicas",
+      type=int,
+      default=1,
+      help="Number of rollout workers to wait for before starting.",
   )
   parser.add_argument("--rpc_timeout_s", type=float, default=1800.0)
   parser.add_argument("--init_timeout_s", type=float, default=None)
@@ -375,7 +403,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   cluster.wait_for_workers(
       min_workers={
           datatypes.Role.ACTOR: 1,
-          datatypes.Role.ROLLOUT: 1,
+          datatypes.Role.ROLLOUT: args.rollout_replicas,
           datatypes.Role.REFERENCE: 1 if args.beta != 0.0 else 0,
       },
       timeout=args.init_timeout_s,
@@ -402,27 +430,54 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       backend_kwargs={"wandb": {"config": vars(args)}},
   )
 
+  prompt_stream = deepswe.iter_prompt_items(
+      dataset=dataset,
+      max_steps=args.max_steps,
+      batch_size=args.batch_size,
+      max_turns=args.max_turns,
+      max_response_length=args.max_response_length,
+      temperature=args.temperature,
+      top_p=args.top_p,
+      top_k=0 if args.top_k < 0 else args.top_k,
+      action_compat_mode=args.action_compat_mode,
+      episode_timeout_secs=args.episode_timeout_secs,
+      step_timeout_secs=args.step_timeout_secs,
+      reward_timeout_secs=args.reward_timeout_secs,
+      env_backend=args.env_backend,
+      use_agent_sandbox=args.use_agent_sandbox,
+      scaffold=args.scaffold,
+      env_verbose=args.env_verbose,
+      overlong_filter=args.overlong_filter,
+      overlong_filter_statuses=args.overlong_filter_statuses,
+  )
+  if args.use_agent_sandbox:
+    # The orchestrator owns the fleet plan and prewarms a sliding window of
+    # batches; rollout workers claim from these warm pools (shared run id).
+    from examples.deepswe import sandbox_utils  # pylint: disable=g-import-not-at-top
+
+    fleet = sandbox_utils.init_global_fleet(
+        tasks=dataset,
+        max_concurrency=args.max_concurrency,
+        num_generations=args.num_generations,
+        batch_size=args.batch_size,
+        max_warmpool_replicas=args.max_warmpool_replicas,
+        scaffold=args.scaffold,
+    )
+    prompt_stream = sandbox_utils.PrewarmDatasetIterator(
+        prompt_stream,
+        fleet=fleet,
+        num_generations=args.num_generations,
+        batch_size=args.batch_size,
+        max_warmpool_replicas=args.max_warmpool_replicas,
+        unwarm_on_exhaustion=True,
+        scaffold=args.scaffold,
+        wait_initial=True,
+        max_staleness=args.max_staleness,
+    )
+
   program = rl_program.StandardRLProgram(
       algo=algo,
-      dataset=deepswe.iter_prompt_items(
-          dataset=dataset,
-          max_steps=args.max_steps,
-          batch_size=args.batch_size,
-          max_turns=args.max_turns,
-          max_response_length=args.max_response_length,
-          temperature=args.temperature,
-          top_p=args.top_p,
-          top_k=0 if args.top_k < 0 else args.top_k,
-          action_compat_mode=args.action_compat_mode,
-          episode_timeout_secs=args.episode_timeout_secs,
-          step_timeout_secs=args.step_timeout_secs,
-          reward_timeout_secs=args.reward_timeout_secs,
-          env_backend=args.env_backend,
-          use_agent_sandbox=args.use_agent_sandbox,
-          scaffold=args.scaffold,
-          env_verbose=args.env_verbose,
-          overlong_filter=args.overlong_filter,
-      ),
+      dataset=prompt_stream,
       max_steps=args.max_steps,
       reward_fns=[],
       generation_args=datatypes.GenerationArgs(

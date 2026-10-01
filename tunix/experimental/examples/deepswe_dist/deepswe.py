@@ -203,6 +203,7 @@ def build_prompt_item(
     scaffold: str,
     env_verbose: bool,
     overlong_filter: bool = False,
+    overlong_filter_statuses: str = "",
 ) -> dict[str, Any]:
   """Builds one StandardRLProgram prompt item for a DeepSWE task."""
   problem = _problem_statement(entry)
@@ -240,6 +241,7 @@ def build_prompt_item(
           # Read by TrajectoryCollectorEngine to decide which terminal statuses
           # get their policy loss mask zeroed out.
           "overlong_filter": overlong_filter,
+          "overlong_filter_statuses": overlong_filter_statuses,
       },
   }
 
@@ -263,6 +265,7 @@ def iter_prompt_items(
     scaffold: str,
     env_verbose: bool,
     overlong_filter: bool = False,
+    overlong_filter_statuses: str = "",
 ) -> Iterator[dict[str, Any]]:
   """Yields exactly the prompt groups needed for the requested training run."""
   dataset_size = len(dataset)
@@ -287,6 +290,7 @@ def iter_prompt_items(
         scaffold=scaffold,
         env_verbose=env_verbose,
         overlong_filter=overlong_filter,
+        overlong_filter_statuses=overlong_filter_statuses,
     )
 
 

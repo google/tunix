@@ -154,6 +154,18 @@ class TrajectoryCollectorEngine:
           "overlong_filter must be a boolean, got"
           f" {type(overlong_filter).__name__}: {overlong_filter!r}."
       )
+    # Optional subset of terminal statuses masked by `overlong_filter`. None
+    # keeps TrajectoryCollectEngine's default set.
+    status_names = metadata.get("overlong_filter_statuses")
+    self.filter_statuses = None
+    if status_names:
+      if isinstance(status_names, str):
+        status_names = status_names.split(",")
+      self.filter_statuses = {
+          agent_types.TrajectoryStatus[name.strip().upper()]
+          for name in status_names
+          if name.strip()
+      } or None
 
   async def run_episode(self) -> agent_types.TrajectoryItem:
     """Executes multi-turn agentic rollout episode and returns TrajectoryItem."""
@@ -275,6 +287,7 @@ class TrajectoryCollectorEngine:
         max_response_length=self.max_response_length,
         timeout=self.episode_timeout,
         overlong_filter=self.overlong_filter,
+        filter_statuses=self.filter_statuses,
         exact_token_continuity=self.exact_token_continuity,
     )
     rl_traj = await inner_engine.collect(mode="Token")

@@ -328,7 +328,9 @@ def to_pack_item(item: datatypes.RLTrainerPayload) -> packing.PackItem:
   per_token = {
       name: resolve(getattr(item, name), fill=0.0, name=name)
       for name in packing.PER_TOKEN_FIELDS
-      if getattr(item, name) is not None
+      # PER_TOKEN_FIELDS also lists learner-only fields (e.g. old_topk_*)
+      # that RLTrainerPayload does not define.
+      if getattr(item, name, None) is not None
   }
 
   return packing.PackItem(

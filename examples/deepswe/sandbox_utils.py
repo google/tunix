@@ -20,14 +20,18 @@ from __future__ import annotations
 
 import atexit
 import collections
+import concurrent.futures
+import dataclasses
+import hashlib
 import logging
 import os
+import re
 import threading
 from typing import Any, Callable
 import numpy as np
 
 _GLOBAL_FLEET = None
-_FLEET_LOCK = threading.Lock()
+_FLEET_LOCK = threading.RLock()
 _PATCH_LOCK = threading.Lock()
 _R2EGYM_PATCHED = False
 
@@ -107,7 +111,7 @@ def get_image_rewrite_fn(
     return image_rewrite
   prefix = os.getenv("IMAGE_REWRITE_PREFIX")
   if prefix:
-    prefix = prefix.rstrip("/")
+    prefix = prefix.strip('"\'').rstrip("/")
     return lambda img: f"{prefix}/{img.split('/')[-1]}"
   return None
 
@@ -193,6 +197,123 @@ def normalize_tasks_for_fleet(
   return normalized
 
 
+# Legacy sandbox behaviour when FT_SANDBOX_FAIL_FAST is unset.
+_LEGACY_ACQUIRE_RETRIES = 5
+
+
+@dataclasses.dataclass(frozen=True)
+class SandboxFailFastConfig:
+  """Sandbox-side fail-fast settings (FAIL_FAST=true in the launcher).
+
+  Read from the environment because the fleet is created in several processes
+  (orchestrator and each rollout worker) that all get these variables from the
+  launcher.
+
+  Attributes:
+    enabled: Warm-pool errors are fatal instead of logged.
+    ready_timeout_s: SDK `FleetConfig.ready_timeout` (claim and warm-pool
+      readiness). None keeps the SDK default (900s).
+    acquire_retries: `fleet.acquire` attempts per episode in SWEEnv.
+  """
+
+  enabled: bool
+  ready_timeout_s: int | None
+  acquire_retries: int
+
+  @classmethod
+  def from_env(cls) -> "SandboxFailFastConfig":
+    """Builds the config from FT_SANDBOX_* variables set by k8s_launcher.sh."""
+    flag = os.environ.get("FT_SANDBOX_FAIL_FAST")
+    if flag is None:
+      return cls(
+          enabled=False,
+          ready_timeout_s=None,
+          acquire_retries=_LEGACY_ACQUIRE_RETRIES,
+      )
+    if flag != "true":
+      raise ValueError(
+          f"FT_SANDBOX_FAIL_FAST must be 'true' or unset, got {flag!r}"
+      )
+    config = cls(
+        enabled=True,
+        ready_timeout_s=int(os.environ["FT_SANDBOX_READY_TIMEOUT_S"]),
+        acquire_retries=int(os.environ["FT_SANDBOX_ACQUIRE_RETRIES"]),
+    )
+    if config.ready_timeout_s <= 0 or config.acquire_retries < 1:
+      raise ValueError(f"Invalid sandbox fail-fast settings: {config}")
+    return config
+
+
+def ensure_tasks_in_fleet_plan(
+    fleet_inst: Any,
+    tasks: list[Any] | None,
+    scaffold: str = "r2egym",
+    image_rewrite: Any | None = None,
+) -> None:
+  """Ensures all task images in `tasks` are present in `fleet_inst.plan_`.
+
+  When rollout workers initialize `SandboxFleet` lazily per episode via
+  `init_global_fleet(tasks=[entry])`, subsequent episodes on the same worker
+  reuse the singleton `_GLOBAL_FLEET`. If a new episode's image is not added to
+  `fleet_inst.plan_`, `fleet.acquire(task)` treats it as `on_demand=True` and
+  calls `_ensure_pool` -> `ensure_template` (without `owner_run_id`), which
+  re-labels the orchestrator's `SandboxTemplate` with the rollout worker's
+  `run_id`. That causes the orchestrator to skip template deletion on unwarm
+  and later crash with `OwnedByAnotherRunError` / `FleetError` when re-warming
+  the same image in a subsequent batch.
+  """
+  if fleet_inst is None or not tasks:
+    return
+  with _FLEET_LOCK:
+    image_rewrite_fn = get_image_rewrite_fn(
+        image_rewrite or getattr(fleet_inst, "_image_rewrite_fn", None)
+    )
+    normalized_tasks = normalize_tasks_for_fleet(
+        tasks, scaffold=scaffold, image_rewrite=image_rewrite_fn
+    )
+    if not normalized_tasks:
+      return
+
+    plan_obj = getattr(fleet_inst, "plan_", None)
+    for_image_fn = getattr(plan_obj, "for_image", None)
+    if callable(for_image_fn):
+      missing = [
+          t
+          for t in normalized_tasks
+          if getattr(t, "image", None) and for_image_fn(t.image) is None
+      ]
+      if not missing:
+        return
+    else:
+      missing = list(normalized_tasks)
+
+    existing_tasks = list(getattr(fleet_inst, "tasks", None) or [])
+    existing_images = {
+        getattr(t, "image", None) for t in existing_tasks if hasattr(t, "image")
+    }
+    new_tasks = []
+    for t in missing:
+      img = getattr(t, "image", None)
+      if img not in existing_images:
+        new_tasks.append(t)
+        if img is not None:
+          existing_images.add(img)
+    if not new_tasks and plan_obj is not None:
+      return
+
+    combined_tasks = existing_tasks + new_tasks
+    if hasattr(fleet_inst, "load_tasks"):
+      if image_rewrite_fn is not None:
+        try:
+          fleet_inst.load_tasks(combined_tasks, image_rewrite=image_rewrite_fn)
+        except TypeError:
+          fleet_inst.load_tasks(combined_tasks)
+      else:
+        fleet_inst.load_tasks(combined_tasks)
+    if hasattr(fleet_inst, "plan"):
+      fleet_inst.plan()
+
+
 def init_global_fleet(
     tasks: list[Any] | None = None,
     max_concurrency: int = 128,
@@ -208,6 +329,13 @@ def init_global_fleet(
   global _GLOBAL_FLEET
   with _FLEET_LOCK:
     if _GLOBAL_FLEET is not None:
+      if tasks is not None:
+        ensure_tasks_in_fleet_plan(
+            _GLOBAL_FLEET,
+            tasks,
+            scaffold=scaffold,
+            image_rewrite=image_rewrite,
+        )
       return _GLOBAL_FLEET
 
     patch_r2egym_for_agent_sandbox()
@@ -223,7 +351,17 @@ def init_global_fleet(
           " git+https://github.com/kubernetes-sigs/agent-sandbox.git#subdirectory=examples/agent-sandbox-rl"
       ) from e
 
-    fleet_ns = namespace or os.getenv("NAMESPACE", "rl-tunix-swebench")
+    scaffold_env = os.getenv("SCAFFOLD")
+    if scaffold == "r2egym" and scaffold_env:
+      scaffold = scaffold_env
+    elif not scaffold:
+      scaffold = scaffold_env or "r2egym"
+
+    fleet_ns = (
+        namespace
+        or os.getenv("SANDBOX_NAMESPACE")
+        or os.getenv("NAMESPACE", "priority-dev")
+    )
     if node_selector is None:
       key = os.environ.get("NODE_SELECTOR_KEY")
       val = os.environ.get("NODE_SELECTOR_VAL")
@@ -243,6 +381,32 @@ def init_global_fleet(
         max_concurrency, batch_size * num_generations * 2
     )
 
+    orchestrator_id = os.getenv("ORCHESTRATOR_ID") or os.getenv("USER")
+    fleet_labels: dict[str, str] = {"app": "agent-sandbox-rl"}
+    if orchestrator_id:
+      fleet_labels["app.kubernetes.io/created-by"] = orchestrator_id
+
+    # Derive sanitized DNS-1123 job name for template and warmpool naming
+    job_prefix = os.getenv("JOB_PREFIX")
+    if not job_prefix and orchestrator_id:
+      job_prefix = orchestrator_id.removesuffix("-orch")
+    clean_job = (
+        re.sub(r"[^a-z0-9-]+", "-", job_prefix.lower()).strip("-")[:24].rstrip("-")
+        if job_prefix
+        else ""
+    )
+
+    scaffold_prefix = "oh" if scaffold == "openhands" else "r2e"
+    custom_tmpl_prefix = os.getenv("TEMPLATE_NAME_PREFIX")
+    if custom_tmpl_prefix:
+      template_name_prefix = custom_tmpl_prefix
+    elif clean_job:
+      template_name_prefix = f"{scaffold_prefix}-{clean_job}-"
+    else:
+      template_name_prefix = f"{scaffold_prefix}-img-"
+
+    pool_name_fmt = os.getenv("POOL_NAME_FORMAT")
+
     fleet_kwargs: dict[str, Any] = {
         "clusters": [
             ClusterConfig(
@@ -260,7 +424,15 @@ def init_global_fleet(
             else num_generations
         ),
         "warm_per_task": True,
+        "install_teardown_hooks": True,
+        "labels": fleet_labels,
+        "template_name_prefix": template_name_prefix,
     }
+    if pool_name_fmt:
+      fleet_kwargs["pool_name_format"] = pool_name_fmt
+    fail_fast = SandboxFailFastConfig.from_env()
+    if fail_fast.ready_timeout_s is not None:
+      fleet_kwargs["ready_timeout"] = fail_fast.ready_timeout_s
 
     try:
       from examples.deepswe import template as template_mod  # pyrefly: ignore[missing-import]
@@ -268,13 +440,39 @@ def init_global_fleet(
       template = template_mod.get_template(scaffold, node_sel)
       if template is not None:
         fleet_kwargs["template"] = template
-      if scaffold == "openhands":
-        fleet_kwargs["template_name_prefix"] = "oh-img-"
     except (ImportError, AttributeError):
       pass
 
     fleet_cfg = FleetConfig(**fleet_kwargs)
     fleet_inst = SandboxFleet(fleet_cfg)
+
+    # Share a deterministic per-job run_id across the orchestrator and rollout
+    # workers so on-demand template reconciliation never stamps a conflicting
+    # run-id onto the orchestrator's SandboxTemplates (OwnedByAnotherRunError).
+    run_id_seed = os.getenv("ASRL_RUN_ID") or clean_job or orchestrator_id
+    if run_id_seed:
+      shared_run_id = hashlib.sha256(run_id_seed.encode("utf-8")).hexdigest()[:12]
+      run_id_label = "agents.x-k8s.io/asrl-run-id"
+      try:
+        from agent_sandbox_rl import constants as asrl_constants  # pyrefly: ignore[missing-import]
+
+        run_id_label = getattr(asrl_constants, "RUN_ID_LABEL", run_id_label)
+      except ImportError:
+        pass
+      fleet_inst.run_id = shared_run_id
+      if isinstance(getattr(fleet_inst, "config", None), object) and isinstance(
+          getattr(fleet_inst.config, "labels", None), dict
+      ):
+        fleet_inst.config.labels[run_id_label] = shared_run_id
+      for c in getattr(fleet_inst, "registry", []):
+        res = getattr(c, "resources", None)
+        if isinstance(getattr(res, "labels", None), dict):
+          res.labels[run_id_label] = shared_run_id
+
+    # Workaround for agent-sandbox-rl teardown bug: scope teardown to this run's
+    # run-id selector so teardown does not delete other concurrent tenants' warm pools/templates.
+    for c in getattr(fleet_inst, "registry", []):
+      c.resources.managed_selector = fleet_inst.run_selector
 
     image_rewrite_fn = get_image_rewrite_fn(image_rewrite)
     fleet_inst._image_rewrite_fn = image_rewrite_fn
@@ -304,25 +502,14 @@ def init_global_fleet(
     if getattr(fleet_cfg, "install_teardown_hooks", False):
       fleet_inst._install_teardown_hooks()
     fleet_inst._torndown = False
-    if hasattr(fleet_inst, "preflight"):
-      fleet_inst.preflight()
     if hasattr(fleet_inst, "plan"):
       fleet_inst.plan()
-      entries = (
-          getattr(getattr(fleet_inst, "plan_", None), "entries", None) or []
+      logging.info(
+          "[SandboxFleet] Task plan initialized with %d image entry(ies). Eager"
+          " full-dataset warmpool allocation is skipped in favor of dynamic"
+          " batch prewarming.",
+          len(getattr(getattr(fleet_inst, "plan_", None), "entries", None) or []),
       )
-      images = [e.image for e in entries]
-      if images and hasattr(fleet_inst, "warm_images"):
-        target_replicas = fleet_kwargs["max_warmpool_size"]
-        fleet_inst.warm_images(
-            images, replicas_override=target_replicas, wait=False
-        )
-        logging.info(
-            "[SandboxFleet] Started initial warmpools for %d image(s) (%d"
-            " replicas each).",
-            len(images),
-            target_replicas,
-        )
     _GLOBAL_FLEET = fleet_inst
     atexit.register(teardown_global_fleet)
     return _GLOBAL_FLEET
@@ -338,17 +525,47 @@ def get_global_fleet() -> Any:
 
 
 def teardown_global_fleet() -> None:
-  """Atexit handler to cleanly tear down warm pools on process exit."""
+  """Atexit handler to cleanly tear down warm pools and sandboxes on process exit."""
   global _GLOBAL_FLEET
   if _GLOBAL_FLEET is not None:
     logging.info(
         "[SandboxFleet] Automatically tearing down warm pools on exit..."
     )
+    fleet = _GLOBAL_FLEET
+    _GLOBAL_FLEET = None
     try:
-      _GLOBAL_FLEET.teardown()
+      if hasattr(fleet, "teardown"):
+        fleet.teardown()
     except Exception as e:  # pylint: disable=broad-exception-caught
       logging.warning("[SandboxFleet] Teardown note: %s", e)
-    _GLOBAL_FLEET = None
+    try:
+      from agent_sandbox_rl import reap  # pyrefly: ignore[missing-import]
+
+      run_id = getattr(fleet, "run_id", None)
+      if run_id:
+        for c in getattr(fleet, "registry", []):
+          c_ns = getattr(c, "namespace", None) or os.getenv(
+              "NAMESPACE", "rl-tunix-swebench"
+          )
+          logging.info(
+              "[SandboxFleet] Reaping resources for run_id=%s in namespace=%s",
+              run_id,
+              c_ns,
+          )
+          reap(
+              run_id=run_id,
+              in_cluster=getattr(c, "in_cluster", True),
+              namespace=c_ns,
+              delete_pods=False,
+          )
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      logging.warning("[SandboxFleet] Reaper note: %s", e)
+
+
+def _fleet_error_cls() -> type[Exception]:
+  from agent_sandbox_rl import FleetError  # pyrefly: ignore[missing-import]
+
+  return FleetError
 
 
 class PrewarmDatasetIterator:
@@ -376,6 +593,9 @@ class PrewarmDatasetIterator:
       unwarm_on_exhaustion: bool = False,
       scaffold: str = "r2egym",
       image_rewrite: Any | None = None,
+      wait_initial: bool = True,
+      max_staleness: int = 0,
+      max_workers: int = 16,
   ):
     del lookahead_steps
     self.scaffold = scaffold
@@ -385,6 +605,11 @@ class PrewarmDatasetIterator:
     self.batch_size = max(1, batch_size)
     self.max_warmpool_replicas = max_warmpool_replicas
     self.unwarm_on_exhaustion = unwarm_on_exhaustion
+    self.wait_initial = wait_initial
+    self.max_staleness = max(0, int(max_staleness))
+    self.max_workers = max(1, int(max_workers))
+    self._fail_fast = SandboxFailFastConfig.from_env().enabled
+    self._lock = threading.Lock()
     self.image_rewrite = get_image_rewrite_fn(
         image_rewrite or getattr(self.fleet, "_image_rewrite_fn", None)
     )
@@ -397,6 +622,9 @@ class PrewarmDatasetIterator:
     )
     self._current_batch_counts: dict[str, int] = {}
     self._next_batch_counts: dict[str, int] = {}
+    self._previous_batches: collections.deque[dict[str, int]] = (
+        collections.deque(maxlen=self.max_staleness + 1)
+    )
     self._previous_batch_counts: dict[str, int] = {}
     self._image_counts: dict[str, int] = {}
     self._active_replicas: dict[str, int] = {}
@@ -415,9 +643,10 @@ class PrewarmDatasetIterator:
     # 4. After the dict updated, we interact the fleet
     if self._image_counts:
       logging.info(
-          "[PrewarmDatasetIterator] Priming initial sandboxes on K8s..."
+          "[PrewarmDatasetIterator] Priming initial sandboxes on K8s (wait=%s)...",
+          self.wait_initial,
       )
-      self._interact_fleet(wait=False)
+      self._interact_fleet(wait=self.wait_initial)
 
   def _extract_item_image_counts(self, item: Any) -> dict[str, int]:
     """Extracts a dict mapping docker_image -> count for a dataset item."""
@@ -547,45 +776,64 @@ class PrewarmDatasetIterator:
           reps = min(reps, self.max_warmpool_replicas)
         desired[img] = reps
 
-    # 1. Warm new keys or scale existing keys
-    for img, target_reps in desired.items():
-      if img not in self._active_replicas:
-        try:
-          self.fleet.warm_image(img, replicas_override=target_reps, wait=wait)
-          self._active_replicas[img] = target_reps
-          logging.info(
-              "[PrewarmDatasetIterator] Warmed new pool on K8s: %s"
-              " (replicas=%d, wait=%s)",
-              img,
-              target_reps,
-              wait,
-          )
-        except Exception as e:  # pylint: disable=broad-exception-caught
-          logging.warning(
-              "[PrewarmDatasetIterator] Warm note for %s: %s", img, e
-          )
-      elif self._active_replicas[img] != target_reps:
-        try:
-          self.fleet.set_pool_replicas(img, target_reps)
-          logging.info(
-              "[PrewarmDatasetIterator] Scaled pool on K8s: %s (replicas %d ->"
-              " %d)",
-              img,
-              self._active_replicas[img],
-              target_reps,
-          )
-          self._active_replicas[img] = target_reps
-        except Exception as e:  # pylint: disable=broad-exception-caught
-          logging.warning(
-              "[PrewarmDatasetIterator] Set replicas note for %s: %s", img, e
-          )
-
-    # 2. Delete / unwarm keys no longer in desired
+    # Partition actions
+    new_pools = {
+        img: reps
+        for img, reps in desired.items()
+        if img not in self._active_replicas
+    }
+    scale_pools = {
+        img: reps
+        for img, reps in desired.items()
+        if img in self._active_replicas and self._active_replicas[img] != reps
+    }
     to_delete = [img for img in self._active_replicas if img not in desired]
-    for img in to_delete:
+
+    fleet_error_cls = _fleet_error_cls() if self._fail_fast else None
+
+    def _warm(img: str, target_reps: int) -> None:
+      try:
+        self.fleet.warm_image(img, replicas_override=target_reps, wait=wait)
+        with self._lock:
+          self._active_replicas[img] = target_reps
+        logging.info(
+            "[PrewarmDatasetIterator] Warmed new pool on K8s: %s"
+            " (replicas=%d, wait=%s)",
+            img,
+            target_reps,
+            wait,
+        )
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        if self._fail_fast and isinstance(e, fleet_error_cls):
+          # A pool that never gets ready or whose name collides with another
+          # run's leaves this image cold for the rest of the run. Fail loud.
+          raise
+        logging.warning("[PrewarmDatasetIterator] Warm note for %s: %s", img, e)
+
+    def _scale(img: str, target_reps: int) -> None:
+      try:
+        with self._lock:
+          old_reps = self._active_replicas.get(img, 0)
+        self.fleet.set_pool_replicas(img, target_reps)
+        with self._lock:
+          self._active_replicas[img] = target_reps
+        logging.info(
+            "[PrewarmDatasetIterator] Scaled pool on K8s: %s (replicas %d ->"
+            " %d)",
+            img,
+            old_reps,
+            target_reps,
+        )
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        logging.warning(
+            "[PrewarmDatasetIterator] Set replicas note for %s: %s", img, e
+        )
+
+    def _unwarm(img: str) -> None:
       try:
         self.fleet.unwarm_image(img)
-        self.unwarm_calls.append(img)
+        with self._lock:
+          self.unwarm_calls.append(img)
         logging.info(
             "[PrewarmDatasetIterator] Unwarmed retired pool on K8s: %s", img
         )
@@ -593,7 +841,30 @@ class PrewarmDatasetIterator:
         logging.warning(
             "[PrewarmDatasetIterator] Unwarm note for %s: %s", img, e
         )
-      del self._active_replicas[img]
+      with self._lock:
+        self._active_replicas.pop(img, None)
+
+    num_tasks = len(new_pools) + len(scale_pools) + len(to_delete)
+    if num_tasks > 0:
+      workers = min(self.max_workers, num_tasks)
+      with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        warm_futures = [
+            executor.submit(_warm, img, reps) for img, reps in new_pools.items()
+        ]
+        scale_futures = [
+            executor.submit(_scale, img, reps) for img, reps in scale_pools.items()
+        ]
+        unwarm_futures = [
+            executor.submit(_unwarm, img) for img in to_delete
+        ]
+        concurrent.futures.wait(warm_futures + scale_futures + unwarm_futures)
+      # Only _warm can raise (fail-fast FleetError); surface it to the caller.
+      for future in warm_futures:
+        future.result()
+
+  def has_next(self) -> bool:
+    """Returns True if at least one more item can be yielded without exhaustion."""
+    return bool(self.current_batch or self.next_batch)
 
   def __iter__(self):
     return self
@@ -606,9 +877,17 @@ class PrewarmDatasetIterator:
         raise StopIteration
 
       # The previous current_batch is now in-flight/running on the cluster.
-      # Retain its counts in _previous_batch_counts so its warm pool stays alive
-      # while workers connect and claim sandboxes.
-      self._previous_batch_counts = self._current_batch_counts
+      # Retain up to (max_staleness + 1) previous batches in _previous_batches
+      # so warm pools stay alive for all in-flight batches within the staleness
+      # window while workers connect and claim sandboxes.
+      if self._current_batch_counts:
+        self._previous_batches.append(self._current_batch_counts)
+      self._previous_batch_counts = {}
+      for prev_counts in self._previous_batches:
+        for img, count in prev_counts.items():
+          self._previous_batch_counts[img] = (
+              self._previous_batch_counts.get(img, 0) + count
+          )
 
       # Shift next_batch to current_batch
       self.current_batch = self.next_batch
@@ -642,6 +921,7 @@ class PrewarmDatasetIterator:
           logging.warning("[PrewarmDatasetIterator] Final unwarm note: %s", e)
     self._active_replicas.clear()
     self._image_counts.clear()
+    self._previous_batches.clear()
     self._previous_batch_counts.clear()
     self._current_batch_counts.clear()
     self._next_batch_counts.clear()

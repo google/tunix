@@ -14,6 +14,8 @@
 
 """Unit tests for tunix.oss.examples.deepswe.sandbox_utils."""
 
+import os
+import threading
 from unittest import mock
 from absl.testing import absltest
 import numpy as np
@@ -24,6 +26,7 @@ class FakeFleet:
   """Fake SandboxFleet that records calls and tracks active pool replica state."""
 
   def __init__(self):
+    self._lock = threading.Lock()
     self.warm_calls: list[tuple[str, int | None, bool]] = []
     self.set_replicas_calls: list[tuple[str, int]] = []
     self.unwarm_calls: list[str] = []
@@ -32,16 +35,23 @@ class FakeFleet:
   def warm_image(
       self, image: str, replicas_override: int | None = None, wait: bool = False
   ) -> None:
-    self.warm_calls.append((image, replicas_override, wait))
-    self.active_pools[image] = replicas_override or 1
+    with self._lock:
+      self.warm_calls.append((image, replicas_override, wait))
+      self.active_pools[image] = replicas_override or 1
 
   def set_pool_replicas(self, image: str, replicas: int) -> None:
-    self.set_replicas_calls.append((image, replicas))
-    self.active_pools[image] = replicas
+    with self._lock:
+      self.set_replicas_calls.append((image, replicas))
+      self.active_pools[image] = replicas
 
   def unwarm_image(self, image: str) -> None:
-    self.unwarm_calls.append(image)
-    self.active_pools.pop(image, None)
+    with self._lock:
+      self.unwarm_calls.append(image)
+      self.active_pools.pop(image, None)
+
+  def teardown(self) -> None:
+    with self._lock:
+      self.active_pools.clear()
 
 
 class SandboxUtilsTest(absltest.TestCase):
@@ -66,9 +76,9 @@ class SandboxUtilsTest(absltest.TestCase):
     # current_batch has p0, p1 (img_A: 2).
     # Dict maintains samples of both queues:
     # img_A: 2 (8 reps), img_B: 2 (8 reps).
-    # Fleet warms both with wait=False.
+    # Fleet warms both with wait=True (synchronous initial priming barrier).
     self.assertEqual(
-        fleet.warm_calls, [("img_A", 8, False), ("img_B", 8, False)]
+        fleet.warm_calls, [("img_A", 8, True), ("img_B", 8, True)]
     )
     self.assertEqual(fleet.active_pools, {"img_A": 8, "img_B": 8})
     self.assertLen(iterator.current_batch, 2)
@@ -110,6 +120,70 @@ class SandboxUtilsTest(absltest.TestCase):
 
     iterator.close()
     self.assertEqual(fleet.active_pools, {})
+
+  def test_max_staleness_retains_multiple_previous_batches(self):
+    fleet = FakeFleet()
+    dataset = [
+        {"prompt": "p0", "docker_image": "img_A"},
+        {"prompt": "p1", "docker_image": "img_B"},
+        {"prompt": "p2", "docker_image": "img_C"},
+        {"prompt": "p3", "docker_image": "img_D"},
+    ]
+    iterator = sandbox_utils.PrewarmDatasetIterator(
+        dataset,
+        fleet=fleet,
+        num_generations=4,
+        batch_size=1,
+        unwarm_on_exhaustion=False,
+        max_staleness=1,
+    )
+    self.assertTrue(iterator.has_next())
+    self.assertEqual(fleet.active_pools, {"img_A": 4, "img_B": 4})
+
+    # Batch 0 (p0 / img_A)
+    self.assertEqual(next(iterator)["prompt"], "p0")
+    self.assertEqual(fleet.active_pools, {"img_A": 4, "img_B": 4})
+
+    # Batch 1 (p1 / img_B): img_A retained in _previous_batches (1/2)
+    self.assertEqual(next(iterator)["prompt"], "p1")
+    self.assertNotIn("img_A", fleet.unwarm_calls)
+    self.assertEqual(
+        fleet.active_pools, {"img_A": 4, "img_B": 4, "img_C": 4}
+    )
+
+    # Batch 2 (p2 / img_C): both img_A and img_B retained in _previous_batches (2/2)
+    self.assertEqual(next(iterator)["prompt"], "p2")
+    self.assertNotIn("img_A", fleet.unwarm_calls)
+    self.assertNotIn("img_B", fleet.unwarm_calls)
+    self.assertEqual(
+        fleet.active_pools, {"img_A": 4, "img_B": 4, "img_C": 4, "img_D": 4}
+    )
+
+    # Batch 3 (p3 / img_D): img_A evicted as _previous_batches slides to [img_B, img_C]
+    self.assertEqual(next(iterator)["prompt"], "p3")
+    self.assertIn("img_A", fleet.unwarm_calls)
+    self.assertNotIn("img_B", fleet.unwarm_calls)
+    self.assertEqual(
+        fleet.active_pools, {"img_B": 4, "img_C": 4, "img_D": 4}
+    )
+    self.assertFalse(iterator.has_next())
+
+    with self.assertRaises(StopIteration):
+      next(iterator)
+    iterator.close()
+    self.assertEqual(fleet.active_pools, {})
+
+  def test_wait_initial_configurable(self):
+    fleet = FakeFleet()
+    dataset = [{"prompt": "p0", "docker_image": "img_A"}]
+    _ = sandbox_utils.PrewarmDatasetIterator(
+        dataset,
+        fleet=fleet,
+        num_generations=2,
+        batch_size=1,
+        wait_initial=False,
+    )
+    self.assertEqual(fleet.warm_calls, [("img_A", 2, False)])
 
   def test_batched_items_format_preserved(self):
     fleet = FakeFleet()
@@ -279,7 +353,36 @@ class SandboxUtilsTest(absltest.TestCase):
         rewrite("my-image:latest"), "gcr.io/rewritten/my-image:latest"
     )
 
-  def test_init_global_fleet_starts_initial_warmpools(self):
+    with mock.patch.dict(os.environ, {"IMAGE_REWRITE_PREFIX": "europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/"}):
+      rewrite = sandbox_utils.get_image_rewrite_fn()
+      self.assertIsNotNone(rewrite)
+      self.assertEqual(
+          rewrite("namanjain12/aiohttp_final:v1"),
+          "europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/aiohttp_final:v1",
+      )
+      self.assertEqual(
+          rewrite("gcr.io/other/project/my_image:tag"),
+          "europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/my_image:tag",
+      )
+
+    # Verify both without trailing slash and with wrapping quotes are normalized
+    for test_prefix in (
+        "europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/tunix",
+        '"europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/"',
+    ):
+      with mock.patch.dict(os.environ, {"IMAGE_REWRITE_PREFIX": test_prefix}):
+        rewrite = sandbox_utils.get_image_rewrite_fn()
+        self.assertIsNotNone(rewrite)
+        self.assertEqual(
+            rewrite("my_image:v1"),
+            "europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/my_image:v1",
+        )
+
+    with mock.patch.dict(os.environ, {}, clear=True):
+      rewrite = sandbox_utils.get_image_rewrite_fn()
+      self.assertIsNone(rewrite)
+
+  def test_init_global_fleet_plans_without_eager_warming(self):
     mock_fleet = mock.MagicMock()
     mock_entry = mock.MagicMock()
     mock_entry.image = "test-image:v1"
@@ -294,11 +397,317 @@ class SandboxUtilsTest(absltest.TestCase):
             num_generations=4,
         )
         self.assertEqual(fleet, mock_fleet)
-        mock_fleet.warm_images.assert_called_once_with(
-            ["test-image:v1"],
-            replicas_override=4,
-            wait=False,
+        mock_fleet.plan.assert_called_once()
+        mock_fleet.warm_images.assert_not_called()
+
+  def test_init_global_fleet_configures_labels_and_teardown_hooks(self):
+    mock_fleet = mock.MagicMock()
+    mock_as_rl = mock.MagicMock()
+    mock_as_rl.SandboxFleet.return_value = mock_fleet
+    with mock.patch.dict("sys.modules", {"agent_sandbox_rl": mock_as_rl}):
+      with mock.patch.dict(os.environ, {"ORCHESTRATOR_ID": "test-user-orch"}):
+        with mock.patch.object(sandbox_utils, "_GLOBAL_FLEET", None):
+          _ = sandbox_utils.init_global_fleet(
+              tasks=None,
+              num_generations=4,
+          )
+          fleet_cfg_call = mock_as_rl.FleetConfig.call_args[1]
+          self.assertTrue(fleet_cfg_call.get("install_teardown_hooks"))
+          self.assertEqual(
+              fleet_cfg_call.get("labels"),
+              {
+                  "app": "agent-sandbox-rl",
+                  "app.kubernetes.io/created-by": "test-user-orch",
+              },
+          )
+
+  def test_init_global_fleet_scopes_teardown_to_run_selector(self):
+    mock_fleet = mock.MagicMock()
+    mock_cluster = mock.MagicMock()
+    mock_fleet.registry = [mock_cluster]
+    mock_fleet.run_selector.return_value = "agents.x-k8s.io/asrl-run-id=test-run"
+
+    mock_as_rl = mock.MagicMock()
+    mock_as_rl.SandboxFleet.return_value = mock_fleet
+    with mock.patch.dict("sys.modules", {"agent_sandbox_rl": mock_as_rl}):
+      with mock.patch.object(sandbox_utils, "_GLOBAL_FLEET", None):
+        _ = sandbox_utils.init_global_fleet(tasks=None, num_generations=4)
+        self.assertEqual(
+            mock_cluster.resources.managed_selector, mock_fleet.run_selector
         )
+
+  def test_init_global_fleet_derives_template_name_prefix_from_job_prefix(self):
+    mock_fleet = mock.MagicMock()
+    mock_as_rl = mock.MagicMock()
+    mock_as_rl.SandboxFleet.return_value = mock_fleet
+    with mock.patch.dict("sys.modules", {"agent_sandbox_rl": mock_as_rl}):
+      with mock.patch.dict(os.environ, {"JOB_PREFIX": "atwigg-openhands-rr"}):
+        with mock.patch.object(sandbox_utils, "_GLOBAL_FLEET", None):
+          _ = sandbox_utils.init_global_fleet(tasks=None, num_generations=4, scaffold="openhands")
+          fleet_cfg_call = mock_as_rl.FleetConfig.call_args[1]
+          self.assertEqual(
+              fleet_cfg_call.get("template_name_prefix"),
+              "oh-atwigg-openhands-rr-",
+          )
+
+  def test_init_global_fleet_derives_template_name_prefix_from_orchestrator_id(self):
+    mock_fleet = mock.MagicMock()
+    mock_as_rl = mock.MagicMock()
+    mock_as_rl.SandboxFleet.return_value = mock_fleet
+    with mock.patch.dict("sys.modules", {"agent_sandbox_rl": mock_as_rl}):
+      with mock.patch.dict(os.environ, {"ORCHESTRATOR_ID": "atwigg-mamba-orch"}, clear=True):
+        with mock.patch.object(sandbox_utils, "_GLOBAL_FLEET", None):
+          _ = sandbox_utils.init_global_fleet(tasks=None, num_generations=4, scaffold="r2egym")
+          fleet_cfg_call = mock_as_rl.FleetConfig.call_args[1]
+          self.assertEqual(
+              fleet_cfg_call.get("template_name_prefix"),
+              "r2e-atwigg-mamba-",
+          )
+
+  def test_init_global_fleet_respects_custom_prefixes_and_formats(self):
+    mock_fleet = mock.MagicMock()
+    mock_as_rl = mock.MagicMock()
+    mock_as_rl.SandboxFleet.return_value = mock_fleet
+    with mock.patch.dict("sys.modules", {"agent_sandbox_rl": mock_as_rl}):
+      with mock.patch.dict(
+          os.environ,
+          {
+              "JOB_PREFIX": "my-job",
+              "TEMPLATE_NAME_PREFIX": "custom-tmpl-",
+              "POOL_NAME_FORMAT": "custom-pool-{image_hash}",
+          },
+      ):
+        with mock.patch.object(sandbox_utils, "_GLOBAL_FLEET", None):
+          _ = sandbox_utils.init_global_fleet(tasks=None, num_generations=4)
+          fleet_cfg_call = mock_as_rl.FleetConfig.call_args[1]
+          self.assertEqual(
+              fleet_cfg_call.get("template_name_prefix"),
+              "custom-tmpl-",
+          )
+          self.assertEqual(
+              fleet_cfg_call.get("pool_name_format"),
+              "custom-pool-{image_hash}",
+          )
+
+  def test_teardown_global_fleet_invokes_teardown_and_reaper(self):
+    mock_fleet = mock.MagicMock()
+    mock_fleet.run_id = "test-run-1234"
+    mock_cluster = mock.MagicMock()
+    mock_cluster.namespace = "test-ns"
+    mock_cluster.in_cluster = True
+    mock_fleet.registry = [mock_cluster]
+
+    mock_as_rl = mock.MagicMock()
+    with mock.patch.dict("sys.modules", {"agent_sandbox_rl": mock_as_rl}):
+      with mock.patch.object(sandbox_utils, "_GLOBAL_FLEET", mock_fleet):
+        sandbox_utils.teardown_global_fleet()
+        self.assertIsNone(sandbox_utils._GLOBAL_FLEET)
+        mock_fleet.teardown.assert_called_once()
+        mock_as_rl.reap.assert_called_once_with(
+            run_id="test-run-1234",
+            in_cluster=True,
+            namespace="test-ns",
+            delete_pods=False,
+        )
+
+  def test_init_global_fleet_registers_subsequent_task_images_in_plan(self):
+    class _FakeTask:
+
+      def __init__(self, id, image, metadata=None):
+        self.id = id
+        self.image = image
+        self.metadata = metadata or {}
+
+    mock_fleet = mock.MagicMock()
+    mock_fleet.tasks = []
+    planned_images = set()
+
+    def _load_tasks(tasks, **kwargs):
+      del kwargs
+      mock_fleet.tasks = list(tasks)
+
+    def _plan():
+      planned_images.clear()
+      for t in mock_fleet.tasks:
+        planned_images.add(t.image)
+
+    mock_fleet.load_tasks.side_effect = _load_tasks
+    mock_fleet.plan.side_effect = _plan
+    mock_fleet.plan_.for_image.side_effect = (
+        lambda img: img if img in planned_images else None
+    )
+
+    mock_as_rl = mock.MagicMock()
+    mock_as_rl.Task = _FakeTask
+    mock_as_rl.SandboxFleet.return_value = mock_fleet
+
+    with mock.patch.dict("sys.modules", {"agent_sandbox_rl": mock_as_rl}):
+      with mock.patch.object(sandbox_utils, "_GLOBAL_FLEET", None):
+        fleet1 = sandbox_utils.init_global_fleet(
+            tasks=[{"docker_image": "img_A"}],
+            num_generations=4,
+        )
+        self.assertEqual(planned_images, {"img_A"})
+        self.assertEqual(mock_fleet.plan.call_count, 1)
+
+        # Second call with a new image updates the singleton's plan
+        fleet2 = sandbox_utils.init_global_fleet(
+            tasks=[{"docker_image": "img_B"}],
+            num_generations=4,
+        )
+        self.assertIs(fleet1, fleet2)
+        self.assertEqual(planned_images, {"img_A", "img_B"})
+        self.assertEqual(mock_fleet.plan.call_count, 2)
+
+        # Third call with an already-planned image is a no-op
+        _ = sandbox_utils.init_global_fleet(
+            tasks=[{"docker_image": "img_B"}],
+            num_generations=4,
+        )
+        self.assertEqual(mock_fleet.plan.call_count, 2)
+
+  def test_init_global_fleet_shares_deterministic_run_id_across_job_processes(self):
+    mock_fleet_orch = mock.MagicMock()
+    mock_fleet_orch.config.labels = {}
+    mock_cluster_orch = mock.MagicMock()
+    mock_cluster_orch.resources.labels = {}
+    mock_fleet_orch.registry = [mock_cluster_orch]
+
+    mock_fleet_roll = mock.MagicMock()
+    mock_fleet_roll.config.labels = {}
+    mock_cluster_roll = mock.MagicMock()
+    mock_cluster_roll.resources.labels = {}
+    mock_fleet_roll.registry = [mock_cluster_roll]
+
+    mock_as_rl = mock.MagicMock()
+    mock_as_rl.SandboxFleet.side_effect = [mock_fleet_orch, mock_fleet_roll]
+
+    with mock.patch.dict("sys.modules", {"agent_sandbox_rl": mock_as_rl}):
+      with mock.patch.dict(
+          os.environ,
+          {"JOB_PREFIX": "trellis-1024-0929", "ORCHESTRATOR_ID": "trellis-1024-0929-orch"},
+          clear=True,
+      ):
+        with mock.patch.object(sandbox_utils, "_GLOBAL_FLEET", None):
+          _ = sandbox_utils.init_global_fleet(tasks=None, num_generations=4)
+        with mock.patch.object(sandbox_utils, "_GLOBAL_FLEET", None):
+          _ = sandbox_utils.init_global_fleet(tasks=None, num_generations=4)
+
+    self.assertEqual(mock_fleet_orch.run_id, mock_fleet_roll.run_id)
+    self.assertLen(mock_fleet_orch.run_id, 12)
+
+  def test_parallel_prewarming_across_images(self):
+    fleet = FakeFleet()
+    dataset = [
+        {"prompt": f"p{i}", "docker_image": f"img_{i}"} for i in range(8)
+    ]
+    iterator = sandbox_utils.PrewarmDatasetIterator(
+        dataset,
+        fleet=fleet,
+        num_generations=4,
+        batch_size=4,
+        wait_initial=True,
+        max_workers=8,
+    )
+    # Both current_batch (img_0..3) and next_batch (img_4..7) should be warmed concurrently
+    self.assertEqual(len(fleet.active_pools), 8)
+    for i in range(8):
+      self.assertEqual(fleet.active_pools[f"img_{i}"], 4)
+    iterator.close()
+    self.assertEqual(fleet.active_pools, {})
+
+
+_FAIL_FAST_ENV = {
+    "FT_SANDBOX_FAIL_FAST": "true",
+    "FT_SANDBOX_READY_TIMEOUT_S": "300",
+    "FT_SANDBOX_ACQUIRE_RETRIES": "2",
+}
+
+
+class _FakeFleetError(Exception):
+  """Stands in for agent_sandbox_rl.FleetError."""
+
+
+class _FailingWarmFleet(FakeFleet):
+
+  def warm_image(
+      self, image: str, replicas_override: int | None = None, wait: bool = False
+  ) -> None:
+    raise _FakeFleetError(f"pool for {image} never became ready")
+
+
+class SandboxFailFastTest(absltest.TestCase):
+
+  def _fake_sdk(self) -> mock.MagicMock:
+    sdk = mock.MagicMock()
+    sdk.FleetError = _FakeFleetError
+    return sdk
+
+  def test_config_defaults_to_legacy_when_unset(self):
+    with mock.patch.dict(os.environ, {}, clear=True):
+      self.assertEqual(
+          sandbox_utils.SandboxFailFastConfig.from_env(),
+          sandbox_utils.SandboxFailFastConfig(
+              enabled=False, ready_timeout_s=None, acquire_retries=5
+          ),
+      )
+
+  def test_config_fail_fast_reads_knobs(self):
+    with mock.patch.dict(os.environ, _FAIL_FAST_ENV, clear=True):
+      self.assertEqual(
+          sandbox_utils.SandboxFailFastConfig.from_env(),
+          sandbox_utils.SandboxFailFastConfig(
+              enabled=True, ready_timeout_s=300, acquire_retries=2
+          ),
+      )
+
+  def test_config_rejects_bad_values(self):
+    for env, error in (
+        ({"FT_SANDBOX_FAIL_FAST": "1"}, ValueError),
+        ({"FT_SANDBOX_FAIL_FAST": "true"}, KeyError),
+        ({**_FAIL_FAST_ENV, "FT_SANDBOX_ACQUIRE_RETRIES": "0"}, ValueError),
+    ):
+      with self.subTest(env=env):
+        with mock.patch.dict(os.environ, env, clear=True):
+          with self.assertRaises(error):
+            sandbox_utils.SandboxFailFastConfig.from_env()
+
+  def test_init_global_fleet_fail_fast_sets_timeout_and_skips_preflight(self):
+    sdk = self._fake_sdk()
+    with mock.patch.dict("sys.modules", {"agent_sandbox_rl": sdk}):
+      with mock.patch.dict(os.environ, _FAIL_FAST_ENV):
+        with mock.patch.object(sandbox_utils, "_GLOBAL_FLEET", None):
+          sandbox_utils.init_global_fleet(tasks=None, num_generations=4)
+    self.assertEqual(sdk.FleetConfig.call_args[1]["ready_timeout"], 300)
+    sdk.SandboxFleet.return_value.preflight.assert_not_called()
+
+  def test_init_global_fleet_off_keeps_sdk_timeout_and_skips_preflight(self):
+    sdk = self._fake_sdk()
+    with mock.patch.dict("sys.modules", {"agent_sandbox_rl": sdk}):
+      with mock.patch.dict(os.environ, {}, clear=True):
+        with mock.patch.object(sandbox_utils, "_GLOBAL_FLEET", None):
+          sandbox_utils.init_global_fleet(tasks=None, num_generations=4)
+    self.assertNotIn("ready_timeout", sdk.FleetConfig.call_args[1])
+    sdk.SandboxFleet.return_value.preflight.assert_not_called()
+
+  def test_prewarm_fail_fast_raises_fleet_error(self):
+    dataset = [{"prompt": "p0", "docker_image": "img_A"}]
+    with mock.patch.dict("sys.modules", {"agent_sandbox_rl": self._fake_sdk()}):
+      with mock.patch.dict(os.environ, _FAIL_FAST_ENV):
+        with self.assertRaisesRegex(_FakeFleetError, "never became ready"):
+          sandbox_utils.PrewarmDatasetIterator(
+              dataset, fleet=_FailingWarmFleet(), num_generations=2, batch_size=1
+          )
+
+  def test_prewarm_off_logs_fleet_error(self):
+    dataset = [{"prompt": "p0", "docker_image": "img_A"}]
+    with mock.patch.dict(os.environ, {}, clear=True):
+      with self.assertLogs(level="WARNING") as logs:
+        iterator = sandbox_utils.PrewarmDatasetIterator(
+            dataset, fleet=_FailingWarmFleet(), num_generations=2, batch_size=1
+        )
+    self.assertEqual(next(iterator), dataset[0])
+    self.assertTrue(any("Warm note for img_A" in line for line in logs.output))
 
 
 if __name__ == "__main__":
