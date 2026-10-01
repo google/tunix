@@ -110,8 +110,21 @@ parser.add_argument("--score_centering", type=_parse_bool, default=False)
 parser.add_argument("--score_centering_top_k", type=int, default=32)
 parser.add_argument("--score_centering_eps", type=float, default=1e-6)
 parser.add_argument("--exact_token_continuity", type=_parse_bool, default=False)
-parser.add_argument("--sampler_is", choices=["none", "token"], default="none")
+parser.add_argument(
+    "--sampler_is", choices=["none", "token", "seq-mask-tis"], default="none"
+)
 parser.add_argument("--sampler_is_threshold", type=float, default=2.0)
+# seq-mask-tis keep-band on the per-sequence geometric-mean
+# trainer/sampler ratio (MLPerf: 0.999 / 1.002).
+parser.add_argument(
+    "--truncated_importance_sampling_ratio_min", type=float, default=None
+)
+parser.add_argument(
+    "--truncated_importance_sampling_ratio", type=float, default=None
+)
+# Masks sequences whose mean multiplicative trainer/sampler probability error
+# exceeds this value (MLPerf: 2.0).
+parser.add_argument("--seq_logprob_error_threshold", type=float, default=None)
 
 # Rollout Config
 parser.add_argument("--max_prompt_length", type=int, default=4096)
@@ -1095,6 +1108,13 @@ config_kwargs = {
     "exact_token_continuity": args.exact_token_continuity,
     "sampler_is": None if args.sampler_is == "none" else args.sampler_is,
     "sampler_is_threshold": args.sampler_is_threshold,
+    "truncated_importance_sampling_ratio_min": (
+        args.truncated_importance_sampling_ratio_min
+    ),
+    "truncated_importance_sampling_ratio": (
+        args.truncated_importance_sampling_ratio
+    ),
+    "seq_logprob_error_threshold": args.seq_logprob_error_threshold,
 }
 
 grpo_config = agentic_grpo_learner.GRPOConfig(**config_kwargs)
