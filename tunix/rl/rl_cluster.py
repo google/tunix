@@ -52,6 +52,7 @@ from tunix.rl import reshard
 from tunix.rl import trainer as rl_trainer
 from tunix.rl import utils as rl_utils
 from tunix.rl.inference import inference_worker
+from tunix.rl.profiler import profiler as profiler_lib
 from tunix.rl.rollout import base_rollout
 from tunix.rl.rollout import vanilla_rollout
 from tunix.sft import metrics_logger
@@ -64,11 +65,38 @@ Role = datatypes.Role
 
 
 RLTrainingConfig = configs.RLTrainingConfig
+RLProfileConfig = configs.RLProfileConfig
+RLProfiler = profiler_lib.RLProfiler
+ProfileScope = profiler_lib.ProfileScope
 ClusterConfig = configs.ClusterConfig
 
 ModelOrPath = nnx.Module | str
 MetricsT = perf_metrics.MetricsT
 MetricsBuffer = perf_metrics.MetricsBuffer
+
+
+@contextlib.contextmanager
+def _profile_scope(
+    engine: Any,
+    role: Role | str,
+    future_output: Any = None,
+):
+  """Context manager to activate and deactivate targeted profiling around a role execution block.
+
+  Acts as a nullcontext if engine has no profiler.
+  """
+  profiler = getattr(engine, "profiler", None)
+  scope = ProfileScope(future_output)
+  if not profiler:
+    yield scope
+    return
+
+  role_str = role.value if isinstance(role, Role) else role
+  profiler.maybe_activate(role_str)
+  try:
+    yield scope
+  finally:
+    profiler.maybe_deactivate(role_str, future_output=scope.future_output)
 
 
 class RLEngine:
@@ -88,6 +116,13 @@ class RLEngine:
     self.cluster_config = cluster_config
     self.perf_config = perf_config
     self.r2m = cluster_config.role_to_mesh
+
+    self.profiler = None
+    if getattr(cluster_config.training_config, "rl_profiler_config", None):
+      self.profiler = RLProfiler(
+          cluster_config.training_config.rl_profiler_config
+      )
+
     self._init_backbone_sharing_map(actor, reference)
     self._anchor_policy_state = None
 
@@ -584,11 +619,14 @@ class RLEngine:
     return self._perf_v2
 
   def close(self):
+    """Closes engine components and flushes buffered metrics and profiler traces."""
     for m in self._buffered_train_metrics + self._buffered_eval_metrics:
       self._log_metrics(m)
     self.actor_trainer.close()
     if getattr(self, "critic_trainer", None):
       self.critic_trainer.close()
+    if self.profiler:
+      self.profiler.close()
 
   def _log_metrics(self, metrics_buffer: MetricsBuffer) -> None:
     """Log metrics."""
@@ -757,32 +795,40 @@ class RLEngine:
       raise ValueError(f"Unsupported role for train: {role}")
 
   def update_actor(self, train_ds, eval_ds, skip_jit=False):
-    with self._get_mesh_and_logical_axis_rules_cm(Role.ACTOR):
-      self._maybe_load_model_from_cpu(self.actor_trainer.model, Role.ACTOR)
-      with self._perf.span_group("actor_training"):
-        self.actor_trainer.train(train_ds, eval_ds, skip_jit)
-      self._maybe_offload_model_to_cpu(self.actor_trainer.model, Role.ACTOR)
+    """Runs a training update step for the actor model."""
+    with _profile_scope(
+        self, Role.ACTOR, future_output=self.actor_trainer.model
+    ):
+      with self._get_mesh_and_logical_axis_rules_cm(Role.ACTOR):
+        self._maybe_load_model_from_cpu(self.actor_trainer.model, Role.ACTOR)
+        with self._perf.span_group("actor_training"):
+          self.actor_trainer.train(train_ds, eval_ds, skip_jit)
+        self._maybe_offload_model_to_cpu(self.actor_trainer.model, Role.ACTOR)
 
   def eval_actor(self, eval_ds: Any) -> Any:
     """Runs an explicit actor evaluation phase."""
     if eval_ds is None:
       return None
-    with self._get_mesh_and_logical_axis_rules_cm(Role.ACTOR):
-      self._maybe_load_model_from_cpu(self.actor_trainer.model, Role.ACTOR)
-      run_eval = getattr(self.actor_trainer, "_run_eval", None)
-      if callable(run_eval):
-        res = run_eval(eval_ds)
-      else:
-        eval_step = getattr(self.actor_trainer, "eval_step", None)
-        if not callable(eval_step):
-          raise TypeError(
-              "actor_trainer must expose _run_eval(...) or eval_step(...)."
-          )
-        res = None
-        for chunk in eval_ds:
-          eval_step(chunk)
-      self._maybe_offload_model_to_cpu(self.actor_trainer.model, Role.ACTOR)
-      return res
+
+    with _profile_scope(
+        self, Role.ACTOR, future_output=self.actor_trainer.model
+    ):
+      with self._get_mesh_and_logical_axis_rules_cm(Role.ACTOR):
+        self._maybe_load_model_from_cpu(self.actor_trainer.model, Role.ACTOR)
+        run_eval = getattr(self.actor_trainer, "_run_eval", None)
+        if callable(run_eval):
+          res = run_eval(eval_ds)
+        else:
+          eval_step = getattr(self.actor_trainer, "eval_step", None)
+          if not callable(eval_step):
+            raise TypeError(
+                "actor_trainer must expose _run_eval(...) or eval_step(...)."
+            )
+          res = None
+          for chunk in eval_ds:
+            eval_step(chunk)
+        self._maybe_offload_model_to_cpu(self.actor_trainer.model, Role.ACTOR)
+        return res
 
   def update_critic(self, train_ds, eval_ds, skip_jit=False):
     with self._get_mesh_and_logical_axis_rules_cm(Role.CRITIC):
@@ -875,27 +921,31 @@ class RLEngine:
       if trace_tags:
         perf_tags.update(trace_tags)
 
-      with self._perf.span("rollout", mesh.devices) as span, self._perf_v2.span(
-          perf_constants.ROLLOUT,
-          mesh.devices,
-          tags=perf_tags,
-      ) as span_v2:
-        outputs = [
-            self.rollout.generate(
-                cast(Any, None),
-                rollout_config,
-                prompt_token_ids=prompt_rows[s],
-            )
-            if exact_input
-            else self.rollout.generate(
-                cast(list[str], prompt_rows[s]), rollout_config
-            )
-            for s in rl_utils.chunk_slices_by_size(
-                stop=len(prompt_rows), step=micro_batch_size
-            )
-        ]
-        span.device_end([o.tokens for o in outputs])
-        span_v2.async_end([o.tokens for o in outputs])
+      with _profile_scope(self, Role.ROLLOUT) as scope:
+        with self._perf.span(
+            "rollout", mesh.devices
+        ) as span, self._perf_v2.span(
+            perf_constants.ROLLOUT,
+            mesh.devices,
+            tags=perf_tags,
+        ) as span_v2:
+          outputs = [
+              self.rollout.generate(
+                  cast(Any, None),
+                  rollout_config,
+                  prompt_token_ids=prompt_rows[s],
+              )
+              if exact_input
+              else self.rollout.generate(
+                  cast(list[str], prompt_rows[s]), rollout_config
+              )
+              for s in rl_utils.chunk_slices_by_size(
+                  stop=len(prompt_rows), step=micro_batch_size
+              )
+          ]
+          scope.set_future_output([o.tokens for o in outputs])
+          span.device_end([o.tokens for o in outputs])
+          span_v2.async_end([o.tokens for o in outputs])
       self._maybe_offload_model_to_cpu(model, Role.ROLLOUT)
       if self.cluster_config.offload_to_cpu:
         self.rollout.update_params(nnx.state(model))

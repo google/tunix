@@ -1008,6 +1008,150 @@ class RlEngineTest(parameterized.TestCase):
             eos_id=1,
         )
 
+  def test_profiler_lifecycle_in_engine(self):
+    rl_engine = self._create_test_rl_engine(
+        'vanilla',
+        base_rollout.RolloutConfig(
+            max_tokens_to_generate=10,
+            kv_cache_size=1024,
+            data_type=jnp.bfloat16,
+        ),
+    )
+    rl_engine.profiler = mock.MagicMock()
+
+    # 1. Verify update_actor profiler calls.
+    with mock.patch.object(rl_engine.actor_trainer, 'train'):
+      rl_engine.update_actor('dummy_train_ds', 'dummy_eval_ds')
+    rl_engine.profiler.maybe_activate.assert_called_once_with(
+        rl_engine_lib.Role.ACTOR.value
+    )
+    rl_engine.profiler.maybe_deactivate.assert_called_once_with(
+        rl_engine_lib.Role.ACTOR.value,
+        future_output=rl_engine.actor_trainer.model,
+    )
+
+    # 2. Verify generate profiler calls.
+    rl_engine.profiler.reset_mock()
+    rl_engine.generate(['test prompt'])
+    rl_engine.profiler.maybe_activate.assert_called_once_with(
+        rl_engine_lib.Role.ROLLOUT.value
+    )
+    rl_engine.profiler.maybe_deactivate.assert_called_once_with(
+        rl_engine_lib.Role.ROLLOUT.value,
+        future_output=mock.ANY,
+    )
+
+    # 3. Verify eval_actor profiler calls.
+    rl_engine.profiler.reset_mock()
+    with mock.patch.object(
+        rl_engine.actor_trainer, '_run_eval', return_value={'loss': 0.1}
+    ):
+      rl_engine.eval_actor(['dummy_eval_ds'])
+    rl_engine.profiler.maybe_activate.assert_called_once_with(
+        rl_engine_lib.Role.ACTOR.value
+    )
+    rl_engine.profiler.maybe_deactivate.assert_called_once_with(
+        rl_engine_lib.Role.ACTOR.value,
+        future_output=rl_engine.actor_trainer.model,
+    )
+
+    # 4. Verify close calls profiler.close().
+    rl_engine.close()
+    rl_engine.profiler.close.assert_called_once()
+
+  def test_profiler_deactivation_on_update_actor_failure(self):
+    rl_engine = self._create_test_rl_engine(
+        'vanilla',
+        base_rollout.RolloutConfig(
+            max_tokens_to_generate=10,
+            kv_cache_size=1024,
+            data_type=jnp.bfloat16,
+        ),
+    )
+    rl_engine.profiler = mock.MagicMock()
+
+    with mock.patch.object(
+        rl_engine.actor_trainer,
+        'train',
+        side_effect=RuntimeError('train crash'),
+    ):
+      with self.assertRaisesRegex(RuntimeError, 'train crash'):
+        rl_engine.update_actor('dummy_train_ds', 'dummy_eval_ds')
+
+    rl_engine.profiler.maybe_activate.assert_called_once_with(
+        rl_engine_lib.Role.ACTOR.value
+    )
+    rl_engine.profiler.maybe_deactivate.assert_called_once_with(
+        rl_engine_lib.Role.ACTOR.value,
+        future_output=rl_engine.actor_trainer.model,
+    )
+
+  def test_profiler_deactivation_on_generate_failure(self):
+    rl_engine = self._create_test_rl_engine(
+        'vanilla',
+        base_rollout.RolloutConfig(
+            max_tokens_to_generate=10,
+            kv_cache_size=1024,
+            data_type=jnp.bfloat16,
+        ),
+    )
+    rl_engine.profiler = mock.MagicMock()
+
+    with mock.patch.object(
+        rl_engine.rollout, 'generate', side_effect=RuntimeError('rollout crash')
+    ):
+      with self.assertRaisesRegex(RuntimeError, 'rollout crash'):
+        rl_engine.generate(['test prompt'])
+
+    rl_engine.profiler.maybe_activate.assert_called_once_with(
+        rl_engine_lib.Role.ROLLOUT.value
+    )
+    # When generation crashes, outputs is None, so future_output is None.
+    rl_engine.profiler.maybe_deactivate.assert_called_once_with(
+        rl_engine_lib.Role.ROLLOUT.value,
+        future_output=None,
+    )
+
+  def test_profiler_deactivation_on_eval_actor_failure(self):
+    rl_engine = self._create_test_rl_engine(
+        'vanilla',
+        base_rollout.RolloutConfig(
+            max_tokens_to_generate=10,
+            kv_cache_size=1024,
+            data_type=jnp.bfloat16,
+        ),
+    )
+    rl_engine.profiler = mock.MagicMock()
+
+    with mock.patch.object(
+        rl_engine.actor_trainer,
+        '_run_eval',
+        side_effect=RuntimeError('eval crash'),
+    ):
+      with self.assertRaisesRegex(RuntimeError, 'eval crash'):
+        rl_engine.eval_actor(['dummy_eval_ds'])
+
+    rl_engine.profiler.maybe_activate.assert_called_once_with(
+        rl_engine_lib.Role.ACTOR.value
+    )
+    rl_engine.profiler.maybe_deactivate.assert_called_once_with(
+        rl_engine_lib.Role.ACTOR.value,
+        future_output=rl_engine.actor_trainer.model,
+    )
+
+  def test_close_calls_profiler_close(self):
+    rl_engine = self._create_test_rl_engine(
+        'vanilla',
+        base_rollout.RolloutConfig(
+            max_tokens_to_generate=10,
+            kv_cache_size=1024,
+            data_type=jnp.bfloat16,
+        ),
+    )
+    rl_engine.profiler = mock.MagicMock()
+    rl_engine.close()
+    rl_engine.profiler.close.assert_called_once()
+
 
 class RlEngineTokenInputTest(parameterized.TestCase):
   """Explicit token rows through RLEngine.generate and VllmRollout.generate."""

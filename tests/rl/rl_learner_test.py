@@ -10,6 +10,7 @@ from tunix.rl import algorithm_config as algo_config_lib
 from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl import rl_learner
 
+
 class DummyModel(nnx.Module):
   pass
 
@@ -138,6 +139,36 @@ class RLLearnerTest(parameterized.TestCase):
     mock_global_step.assert_called_once()
     # Arg 3 of _run_global_step is iterator_steps_per_mini_batch (8 // 8 == 1)
     self.assertEqual(mock_global_step.call_args.args[3], 1)
+
+  def test_train_closes_engine_on_exception(self):
+    config = rl_engine_lib.RLTrainingConfig(
+        actor_optimizer=optax.sgd(1e-3),
+        eval_every_n_steps=1,
+        max_steps=10,
+    )
+    mock_engine = mock.MagicMock()
+    mock_engine.actor_trainer.model = DummyModel()
+    mock_engine.rollout.model.return_value = DummyModel()
+    mock_engine.cluster_config.training_config = config
+    mock_engine.actor_trainer.train_steps = 0
+    mock_engine.actor_trainer.iter_steps = 0
+
+    learner = DummyLearner(
+        rl_engine=mock_engine,
+        algo_config=DummyConfig(),
+        reward_fns=lambda prompts, completions, **kwargs: [1.0] * len(prompts),
+    )
+
+    full_batch_size = 8
+    train_ds = [{'prompts': [''] * full_batch_size}]
+
+    with mock.patch.object(
+        learner, '_run_global_step', side_effect=RuntimeError('Loop crash')
+    ):
+      with self.assertRaises(RuntimeError):
+        learner.train(train_ds)
+
+    mock_engine.close.assert_called_once()
 
 
 if __name__ == '__main__':
