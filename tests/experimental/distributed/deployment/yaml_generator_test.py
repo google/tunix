@@ -395,7 +395,12 @@ class YamlGeneratorTest(parameterized.TestCase):
           },
       ),
   )
-  def test_preemptible_label(self, extra_args, env, expected_labels):
+  def test_preemptible_label(
+      self,
+      extra_args: list[str],
+      env: dict[str, str],
+      expected_labels: dict[str, str],
+  ) -> None:
     import yaml  # pylint: disable=g-import-not-at-top
 
     template_file = _get_template_path("jobset.pathways.yaml")
@@ -415,7 +420,7 @@ class YamlGeneratorTest(parameterized.TestCase):
     jobset = yaml.safe_load(rendered)
     self.assertEqual(jobset["metadata"]["labels"], expected_labels)
 
-  def test_k8s_launcher_attaches_gang_id_to_all_jobsets(self):
+  def test_k8s_launcher_attaches_gang_id_to_all_jobsets(self) -> None:
     import yaml  # pylint: disable=g-import-not-at-top
 
     launcher_path = os.path.abspath(
@@ -475,7 +480,7 @@ class YamlGeneratorTest(parameterized.TestCase):
       ("ends_with_hyphen", "invalid-"),
       ("too_long", "a" * 64),
   )
-  def test_invalid_gang_id_raises(self, invalid_gang_id):
+  def test_invalid_gang_id_raises(self, invalid_gang_id: str) -> None:
     template_file = _get_template_path("jobset.pathways.yaml")
     argv = [
         "yaml_generator.py",
