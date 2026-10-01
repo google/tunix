@@ -15,7 +15,6 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # k8s has a 63 char limit on total label name, so keep job_prefix unique to your job and short
 export JOB_PREFIX="${JOB_PREFIX:-${USER}}"
 export EVAL_JOBSET_NAME="${EVAL_JOBSET_NAME:-${JOB_PREFIX}-eval}"
-export ROLLOUT_PORT="${ROLLOUT_PORT:-20001}"
 export TUNIX_IMAGE="${TUNIX_IMAGE:-gcr.io/cloud-tpu-multipod-dev/sanbao/tunix_stack:eval}"
 
 export BUCKET="${BUCKET:-gs://atwigg-trellis-europe-west4-dev}"
@@ -23,30 +22,13 @@ export EVAL_OUTPUT_DIR="${EVAL_OUTPUT_DIR:-${BUCKET}/eval_results/${JOB_PREFIX}}
 export TRAJECTORY_LOG_DIR="${TRAJECTORY_LOG_DIR:-${BUCKET}/trajectories/${JOB_PREFIX}/logger}"
 export TRAJECTORY_STORE_ROOT_DIR="${TRAJECTORY_STORE_ROOT_DIR:-${TRAJECTORY_STORE_ROOT:-${BUCKET}/trajectories/${JOB_PREFIX}/store}}"
 
-export PROJECT="${PROJECT:-cloud-tpu-shared-capacity}"
 export REGION="${REGION:-europe-west4}"
 export CLUSTER="${CLUSTER:-bodaborg-v5p-nap}"
 export K8S_NAMESPACE="${K8S_NAMESPACE:-trellis}"
-kubectl config use-context "gke_${PROJECT}_${REGION}_${CLUSTER}" || true
-kubectl config set-context --current --namespace="${K8S_NAMESPACE}" || true
-
-export KUEUE_QUEUE="${KUEUE_QUEUE:-multislice-queue}"
-export PRIORITY_CLASS="${PRIORITY_CLASS:-medium}"
-export KUEUE_PRIORITY_CLASS="${KUEUE_PRIORITY_CLASS:-${PRIORITY_CLASS}}"
-export SERVICE_ACCOUNT="${SERVICE_ACCOUNT:-xpk-sa}"
-export CPU_MACHINE="${CPU_MACHINE:-n2d-standard-64}"
 
 # Pathways Images and settings
-if [ -f "${DIR}/mlperf_pathways_config.sh" ]; then
-  source "${DIR}/mlperf_pathways_config.sh"
-fi
 export PATHWAYS_SERVER_IMAGE="${PATHWAYS_SERVER_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_server:raiden_20260920_v2}"
 export PATHWAYS_PROXY_IMAGE="${PATHWAYS_PROXY_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_proxy_server:raiden_20260920_v2}"
-export PATHWAYS_PROXY_MEMORY_LIMIT="${PATHWAYS_PROXY_MEMORY_LIMIT:-160G}"
-export USER_CONTAINER_MEMORY="${USER_CONTAINER_MEMORY:-260G}"
-export USER_CONTAINER_MEMORY_LIMIT="${USER_CONTAINER_MEMORY_LIMIT:-260G}"
-export PREFUSE_MOE_WEIGHTS="true"
-export ROLLOUT_PREFUSE_MOE_WEIGHTS="true"
 
 # Model configuration
 export MODEL_NAME="Qwen3.5-397B-A17B"
@@ -57,70 +39,27 @@ export MAXTEXT_CKPT="${MAXTEXT_CKPT:-gs://sanbao-europe/qwen35_397b/scanned_resh
 export SCAN_LAYERS="${SCAN_LAYERS:-true}"
 export CHECKPOINT_STORAGE_USE_OCDBT="${CHECKPOINT_STORAGE_USE_OCDBT:-false}"
 export CHECKPOINT_STORAGE_USE_ZARR3="${CHECKPOINT_STORAGE_USE_ZARR3:-false}"
-export EOS_TOKENS="${EOS_TOKENS:-248046,248044}"
 
 # Backend & Rollout Topology (16 chips = 4 hosts per replica, EP=16, TP=1; no Trainer)
-export SAMPLER="vllm"
 export WEIGHT_SYNC_MODE="none"
 export ROLLOUT_JOBSET_YAML="${ROLLOUT_JOBSET_YAML:-jobset.pathways.yaml}"
 export ROLLOUT_TPU_SLICE="${ROLLOUT_TPU_SLICE:-tpuv5p:2x2x4}"
-export ROLLOUT_MESH_FSDP=1
-export ROLLOUT_MESH_TP=1
 _rollout_dims="${ROLLOUT_TPU_SLICE#*:}"
-export VLLM_DATA_PARALLEL_SIZE="${VLLM_DATA_PARALLEL_SIZE:-1}"
-export ROLLOUT_MESH_EXPERT="${ROLLOUT_MESH_EXPERT:-$(( ${_rollout_dims//x/*} / VLLM_DATA_PARALLEL_SIZE ))}"
+export ROLLOUT_MESH_EXPERT="${ROLLOUT_MESH_EXPERT:-$(( ${_rollout_dims//x/*} / ${VLLM_DATA_PARALLEL_SIZE:-1} ))}"
 export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-16}"
 
 # ==============================================================================
 # vLLM Rollout Configuration
 # ==============================================================================
-export VLLM_LOGGING_LEVEL="INFO"
-export VLLM_MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-65536}"
-export VLLM_MAX_NUM_BATCHED_TOKENS=2048
-export VLLM_MAX_NUM_SEQS=16
 export VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-0.84}"
 
 # Sharding Configs
-export VLLM_ENABLE_EXPERT_PARALLEL="true"
 export VLLM_ADDITIONAL_CONFIG='{"sharding":{"sharding_strategy":{"expert_parallelism":'"${ROLLOUT_MESH_EXPERT}"',"tensor_parallelism":1,"enable_dp_attention":true}},"custom_mamba_cache_multiplier":16,"maxtext_config":{"scan_layers":false,"attention":"vllm_rpa","allow_split_physical_axes":true,"use_multimodal":false,"prefuse_moe_weights":true,"per_device_batch_size":0.0}}'
-
-# Prefix Caching Configs
-export ENABLE_PREFIX_CACHING="${ENABLE_PREFIX_CACHING:-true}"
-export VLLM_PREFIX_CACHE_RETENTION_INTERVAL="${VLLM_PREFIX_CACHE_RETENTION_INTERVAL:-0}"
-if [[ "${ENABLE_PREFIX_CACHING}" == "true" ]]; then
-  export MAMBA_CACHE_MODE="${MAMBA_CACHE_MODE:-align}"
-else
-  export MAMBA_CACHE_MODE="${MAMBA_CACHE_MODE:-none}"
-fi
-export VLLM_MAMBA_CACHE_MODE="${VLLM_MAMBA_CACHE_MODE:-${MAMBA_CACHE_MODE}}"
-
-# KV Cache Configs
-export ROLLOUT_FREE_KV_CACHE="false"
-export VLLM_KV_CACHE_DTYPE="bfloat16"
-export VLLM_BLOCK_SIZE=256
-
-# Engine Configs
-export VLLM_ASYNC_SCHEDULING="true"
-export VLLM_ENABLE_CHUNKED_PREFILL="true"
-
-# Model Configs
-export VLLM_LANGUAGE_MODEL_ONLY="true"
-export VLLM_REASONING_PARSER="qwen3"
-export VLLM_LIMIT_MM_PER_PROMPT='{"image": 0, "video": 0}'
 
 # ==============================================================================
 # Rollout Worker Environment Flags (Optimizations & Runtime Settings)
 # ==============================================================================
-export NUM_PRECOMPILE_WORKERS=8
-export NEW_MODEL_DESIGN=1
-export ATTN_BUCKETIZED_NUM_REQS=true
-export ATTN_CUSTOM_NUM_REQS_BUCKETS=4
 export ONEHOT_MOE_PERMUTE_THRESHOLD=131072
-export VLLM_MOE_CHUNK_SIZE=256
-export SLICE_ROPE_CACHE=1
-export DP_SCHED_BATCH_PREFILL=false
-export FLOAT32_GATE_LOGITS="true"
-export FLOAT32_LOGITS="true"
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800
 export VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY="RAIDEN_,TPU_"
 export VLLM_RAY_EXTRA_ENV_VARS_TO_COPY="ONEHOT_MOE_PERMUTE_THRESHOLD,LIBTPU_INIT_ARGS,RAY_memory_monitor_refresh_ms,VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,ENABLE_MULTI_NUMA,TPU_RAIDEN_DATA_NICS,FLOAT32_GATE_LOGITS,FLOAT32_LOGITS,NEW_MODEL_DESIGN,ATTN_BUCKETIZED_NUM_REQS,ATTN_CUSTOM_NUM_REQS_BUCKETS,VLLM_MOE_CHUNK_SIZE,SLICE_ROPE_CACHE,DP_SCHED_BATCH_PREFILL"
@@ -131,12 +70,10 @@ SKIP_MEGASCALE_PJRT_CLIENT=true}"
 _rollout_xla_flags=""
 for _f in ${LIBTPU_INIT_ARGS}; do [[ "${_f}" == --xla_* ]] && _rollout_xla_flags+="${_f} "; done
 export PATHWAYS_PROXY_EXTRA_ARGS="${PATHWAYS_PROXY_EXTRA_ARGS:-${_rollout_xla_flags% }}"
-export VLLM_ENABLE_V1_MULTIPROCESSING=0
 
 # ==============================================================================
 # Evaluation & DeepSWE Pipeline Configuration
 # ==============================================================================
-export BATCH_SIZE="${BATCH_SIZE:-16}"
 export NUM_GENERATIONS="${NUM_GENERATIONS:-4}"
 export DATASET_SPLIT="${DATASET_SPLIT:-validation}"
 export TASKS_LIMIT="${TASKS_LIMIT:-0}"
@@ -144,32 +81,16 @@ export TASKS_LIMIT="${TASKS_LIMIT:-0}"
 # Sampling Parameters
 export TEMPERATURE="0.1"
 export TOP_P="0.95"
-export TOP_K="-1"
 
-export EPISODE_TIMEOUT_SECS=1800
 export DEBUG=${DEBUG:-0}
-export RCP_LOGGING="${RCP_LOGGING:-false}"
 
 # DeepSWE Environment & Agent Sandbox
 export DATASET_PATH="${DATASET_PATH:-gs://mlperf_dataset/benchmark-r2e-gym-easy}"
-export USE_AGENT_SANDBOX=1
-export SCAFFOLD="openhands"
-export SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-${K8S_NAMESPACE:-trellis}}"
-export POOL_NAME_FORMAT="${POOL_NAME_FORMAT:-}"
-export TEMPLATE_NAME_PREFIX="${TEMPLATE_NAME_PREFIX:-}"
-export SANDBOX_NODE_SELECTOR_KEY="cloud.google.com/gke-nodepool"
 export SANDBOX_NODE_SELECTOR_VAL="${SANDBOX_NODE_SELECTOR_VAL:-sandbox-cpu-pool}"
 export IMAGE_REWRITE_PREFIX="${IMAGE_REWRITE_PREFIX:-europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/}"
-export MAX_WARMPOOL_REPLICAS=2
-export ROLLOUT_MAX_CONCURRENCY="${ROLLOUT_MAX_CONCURRENCY:-256}"
-export MAX_CONCURRENCY="${MAX_CONCURRENCY:-256}"
 export ENABLE_THINKING="${ENABLE_THINKING:-false}"
 export STEP_TIMEOUT_SECS=60
 export REWARD_TIMEOUT_SECS=60
-export FLUSH_EVERY_N_STEPS=1
-export MAX_TURNS=30
-export MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-4096}"
 export MAX_CONTEXT_LIMIT="${MAX_CONTEXT_LIMIT:-61440}"
-export MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-61440}"
 
 source "${DIR}/mlperf_base.sh" "${1:-eval}" "${@:2}"
