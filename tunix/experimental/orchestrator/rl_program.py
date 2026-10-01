@@ -1673,7 +1673,7 @@ class StandardRLProgram(RLProgram):
             )
 
           num_microbatches += 1
-          if getattr(mb, "padding_stats", None) is not None:
+          if mb.padding_stats is not None:
             step_padding_stats.append(mb.padding_stats)
             logging.info(
                 "Packed %d trajectories into microbatch: %s (padding_ratio=%.3f,"
