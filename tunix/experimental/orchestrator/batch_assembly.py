@@ -1017,8 +1017,16 @@ class PaddedBatchAssembler:
     row_num_sequences = np.zeros(self.batch_size, dtype=np.int64)
 
     for row_idx, item in enumerate(chunk):
-      p_full = np.asarray(item.prompt_ids, dtype=np.int32).reshape(-1)
-      c_full = np.asarray(item.completion_ids, dtype=np.int32).reshape(-1)
+      p_full = (
+          np.zeros(0, dtype=np.int32)
+          if item.prompt_ids is None
+          else np.asarray(item.prompt_ids, dtype=np.int32).reshape(-1)
+      )
+      c_full = (
+          np.zeros(0, dtype=np.int32)
+          if item.completion_ids is None
+          else np.asarray(item.completion_ids, dtype=np.int32).reshape(-1)
+      )
       truncated_prompts += p_full.size > self.max_prompt_length
       truncated_completions += c_full.size > self.max_response_length
       c = c_full[: self.max_response_length]
