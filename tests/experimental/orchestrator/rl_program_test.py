@@ -613,6 +613,68 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_pipeline_scores_reference_while_previous_trains(self):
+    async def _run():
+      events = []
+
+      def _payload(name: str) -> datatypes.RLTrainerPayload:
+        return datatypes.RLTrainerPayload(
+            prompt_ids=np.array([[1, 2]], dtype=np.int32),
+            prompt_mask=np.ones((1, 2), dtype=np.float32),
+            completion_ids=np.array([[3, 4]], dtype=np.int32),
+            completion_mask=np.ones((1, 2), dtype=np.float32),
+            advantages=np.ones((1, 2), dtype=np.float32),
+            metadata={"name": name},
+        )
+
+      async def mock_per_token_logps(role, items):
+        self.assertEqual(role, datatypes.Role.REFERENCE)
+        events.append(f"ref:{items.metadata['name']}")
+        return np.array([[-0.1, -0.2]], dtype=np.float32)
+
+      async def mock_train_step(batch, **kwargs):
+        del kwargs
+        name = batch.metadata["name"]
+        events.append(f"train_start:{name}")
+        if name == "mb0":
+          # Held open until mb1's reference logps are in; this would time
+          # out if reference scoring waited for the in-flight step.
+          for _ in range(200):
+            if "ref:mb1" in events:
+              break
+            await asyncio.sleep(0.005)
+        events.append(f"train_end:{name}")
+        return f"result_{name}"
+
+      self.mock_algo.requires_reference_kl = True
+      self.mock_engine.per_token_logps.side_effect = mock_per_token_logps
+      self.mock_engine.train_step.side_effect = mock_train_step
+      program, assembler = self._pipelined_program(events)
+      feed = assembler.feed
+      assembler.feed = lambda items: [
+          batch_assembly.AssembledBatch(
+              payload=_payload(mb.payload),
+              is_final_batch=mb.is_final_batch,
+              trajectory_ids=mb.trajectory_ids,
+          )
+          for mb in feed(items)
+      ]
+
+      await program.run_async(self.mock_engine)
+
+      self.assertLess(events.index("ref:mb1"), events.index("train_end:mb0"))
+      self.assertEqual(
+          [e for e in events if e.startswith("train")],
+          [
+              "train_start:mb0",
+              "train_end:mb0",
+              "train_start:mb1",
+              "train_end:mb1",
+          ],
+      )
+
+    asyncio.run(_run())
+
   def test_pipeline_train_step_failure_fails_the_run(self):
     async def _run():
       async def mock_train_step(batch, **kwargs):

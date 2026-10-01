@@ -1640,7 +1640,8 @@ class StandardRLProgram(RLProgram):
                   "datatypes.RLTrainerPayload microbatches; got "
                   f"{type(batch).__name__}."
               )
-            await _await_pending_train()
+            # The reference model is static and on its own worker, so this
+            # overlaps the in-flight actor train_step.
             ref_logps = await self.engine.per_token_logps(
                 datatypes.Role.REFERENCE, items=batch
             )
