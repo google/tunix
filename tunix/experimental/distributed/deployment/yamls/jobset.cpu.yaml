@@ -58,7 +58,8 @@ ${QUEUE_LABEL}spec:
             # exit still ends the pod immediately.
             terminationGracePeriodSeconds: 60
             nodeSelector:
-              cloud.google.com/gke-nodepool: ${CPU_NODEPOOL}
+              cloud.google.com/gke-nodepool: cpu-np
+              node.kubernetes.io/instance-type: ${CPU_MACHINE}
             tolerations:
             - key: "cloud.google.com/gke-nodepool"
               operator: "Exists"
@@ -72,7 +73,7 @@ ${QUEUE_LABEL}spec:
               resources:
                 requests:
                   cpu: "24"
-                  memory: ${CPU_MEMORY}
+                  memory: 100G
                   ephemeral-storage: 20Gi
               command:
                 - bash

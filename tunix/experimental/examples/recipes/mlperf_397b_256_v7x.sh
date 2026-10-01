@@ -147,6 +147,6 @@ export DEBUG=${DEBUG:-0}
 
 # DeepSWE Environment & Agent Sandbox
 export SANDBOX_TOLERATIONS='[{"key":"workload","operator":"Equal","value":"sandbox","effect":"NoSchedule"}]'
-export IMAGE_REWRITE_PREFIX="${IMAGE_REWRITE_PREFIX:-us-east1-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/}"
+export IMAGE_REWRITE_PREFIX="${IMAGE_REWRITE_PREFIX:-us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/}"
 
 source "${DIR}/mlperf_base.sh" "$@"

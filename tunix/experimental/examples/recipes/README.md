@@ -15,6 +15,9 @@ This directory contains executable recipe scripts for running distributed DeepSW
 | [`mlperf_397b_1024_v7x.sh`](mlperf_397b_1024_v7x.sh) | Qwen3.5-397B-A17B | `1x tpu7x:4x4x8` (128 chips)<br>`FSDP=32, TP=1, EP=2, CP=4` | `64x tpu7x:2x2x4` (1024 chips)<br>`DP=2, TP=1, EP=16` |
 | [`mlperf_35b_eval.sh`](mlperf_35b_eval.sh) | Qwen3.5-35B-A3B (offline eval, pass@4) | None (no trainer) | `16x tpuv5:2x2x1` (64 chips)<br>`DP=2, FSDP=2, TP=2` |
 
+MLPerf offline-evaluation recipes (evaluate a training run's checkpoints and
+append the compliance events to its MLLOG) live in [`evals/`](evals/README.md).
+
 ---
 
 ## Building the Docker Image

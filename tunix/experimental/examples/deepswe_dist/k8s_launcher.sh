@@ -25,7 +25,7 @@ fi
 YAML_GENERATOR="${YAML_GENERATOR:-${TUNIX_ROOT}/experimental/distributed/deployment/yaml_generator.py}"
 YAML_DIR="${YAML_DIR:-${TUNIX_ROOT}/experimental/distributed/deployment/yamls}"
 
-BOOTSTRAP_CMD="${BOOTSTRAP_CMD:-}"
+export BOOTSTRAP_CMD="${BOOTSTRAP_CMD:-}"
 
 export MODEL_NAME=${MODEL_NAME:-Qwen3-4B}
 export MODEL_ID=${MODEL_ID:-Qwen/Qwen3-4B}
@@ -105,19 +105,6 @@ export SKIP_FIRST_N_PROFILER_STEPS=${SKIP_FIRST_N_PROFILER_STEPS:-}
 export PROFILER_PERIOD=${PROFILER_PERIOD:-}
 export ROLLOUT_FREE_KV_CACHE=${ROLLOUT_FREE_KV_CACHE:-false}
 export PARTIAL_ROLLOUT=${PARTIAL_ROLLOUT:-false}
-# Serve the oldest in-flight prompt batch first: the orchestrator stamps each
-# rollout request with its batch index as its priority and the rollouts run
-# vLLM with scheduling_policy=priority. `false` serves requests in arrival
-# order (FCFS). Needs SAMPLER=vllm.
-export ROLLOUT_PRIORITY_SCHEDULING=${ROLLOUT_PRIORITY_SCHEDULING:-false}
-case "${ROLLOUT_PRIORITY_SCHEDULING}" in
-  true|True|1) ROLLOUT_PRIORITY_SCHEDULING=true ;;
-  false|False|0) ROLLOUT_PRIORITY_SCHEDULING=false ;;
-  *)
-    echo "ROLLOUT_PRIORITY_SCHEDULING must be true or false, got '${ROLLOUT_PRIORITY_SCHEDULING}'" >&2
-    exit 1
-    ;;
-esac
 
 # DeepSWE dataset and environment configuration
 export DATASET_NAME=${DATASET_NAME:-R2E-Gym/R2E-Gym-Subset}
@@ -213,8 +200,6 @@ export TRAINER_ID=${TRAINER_ID:-$JOB_PREFIX-train}
 export TRAINER_PORT=${TRAINER_PORT:-20002}
 
 export CPU_MACHINE=${CPU_MACHINE:-n2-standard-64}
-export CPU_NODEPOOL=${CPU_NODEPOOL:-cpu-np}
-export CPU_MEMORY=${CPU_MEMORY:-240G}
 export GCS_SCRATCH_LOCATION=${GCS_SCRATCH_LOCATION:-gs://cloud-pathways-staging/tmp}
 export PATHWAYS_SERVER_IMAGE=${PATHWAYS_SERVER_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_server:raiden_20260908}
 export PATHWAYS_PROXY_IMAGE=${PATHWAYS_PROXY_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_proxy_server:raiden_20260908}
@@ -365,8 +350,6 @@ start_orchestrator() {
     ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
     ${GANG_ID:+--gang_id="${GANG_ID}"} \
     --cpu_machine=${CPU_MACHINE} \
-    --cpu_nodepool="${CPU_NODEPOOL}" \
-    --cpu_memory="${CPU_MEMORY}" \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ORCHESTRATOR_PORT}" \
     --worker_startup_command=" \
@@ -385,7 +368,7 @@ start_orchestrator() {
       ${TRAJECTORY_LOG_DIR:+TRAJECTORY_LOG_DIR=\"${TRAJECTORY_LOG_DIR}\"} \
       PYTHONUNBUFFERED=1 \
       TUNIX_IS_INTERNAL_ENV=false \
-      ${BOOTSTRAP_CMD} \
+      ${BOOTSTRAP_CMD:+${BOOTSTRAP_CMD} && } \
       ${ORCHESTRATOR_EXTRA_ENV:+${ORCHESTRATOR_EXTRA_ENV} }python -m tunix.experimental.distributed.runtime.main \
         --discovery_id=${ORCHESTRATOR_ID} \
         --discovery_port=${ORCHESTRATOR_PORT} \
@@ -437,14 +420,13 @@ start_orchestrator() {
         ${MAX_WARMPOOL_REPLICAS:+--max_warmpool_replicas=${MAX_WARMPOOL_REPLICAS}} \
         ${MAX_CONCURRENCY:+--max_concurrency=${MAX_CONCURRENCY}} \
         ${MAX_STALENESS:+--max_staleness=${MAX_STALENESS}} \
-        $([[ -n "${CHECKPOINT_OPTIMIZER_INTERVAL_STEPS}" && "${CHECKPOINT_OPTIMIZER_INTERVAL_STEPS}" -gt 0 ]] && echo "--checkpoint_optimizer_interval_steps=${CHECKPOINT_OPTIMIZER_INTERVAL_STEPS}") \
+        ${CHECKPOINT_OPTIMIZER_INTERVAL_STEPS:+--checkpoint_optimizer_interval_steps=${CHECKPOINT_OPTIMIZER_INTERVAL_STEPS}} \
         ${TRAJECTORY_GROUP_ORDER:+--trajectory_group_order=${TRAJECTORY_GROUP_ORDER}} \
         $([[ "${USE_ROLLOUT_LOGPS}" == "false" || "${USE_ROLLOUT_LOGPS}" == "False" || "${USE_ROLLOUT_LOGPS}" == "0" ]] && echo --no-use_rollout_logps || echo --use_rollout_logps) \
         $([[ "${EXACT_TOKEN_CONTINUITY}" == "false" || "${EXACT_TOKEN_CONTINUITY}" == "False" || "${EXACT_TOKEN_CONTINUITY}" == "0" ]] && echo --no-exact_token_continuity || echo --exact_token_continuity) \
         $([[ "${ASYNC_WEIGHT_SYNC}" == "true" || "${ASYNC_WEIGHT_SYNC}" == "True" || "${ASYNC_WEIGHT_SYNC}" == "1" ]] && echo --async_weight_sync || echo --no-async_weight_sync) \
         $([[ "${PIPELINE_TRAIN_MICROBATCHES}" == "true" || "${PIPELINE_TRAIN_MICROBATCHES}" == "True" || "${PIPELINE_TRAIN_MICROBATCHES}" == "1" ]] && echo --pipeline_train_microbatches || echo --no-pipeline_train_microbatches) \
         $([[ "${PARTIAL_ROLLOUT}" == "true" || "${PARTIAL_ROLLOUT}" == "True" || "${PARTIAL_ROLLOUT}" == "1" ]] && echo --partial_rollout || echo --no-partial_rollout) \
-        $([[ "${ROLLOUT_PRIORITY_SCHEDULING}" == "true" ]] && echo --rollout_priority_scheduling || echo --no-rollout_priority_scheduling) \
         ${dataset_args} \
         ${shuffle_arg} \
         ${sandbox_arg} \
@@ -532,14 +514,13 @@ start_trainer() {
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${TRAINER_PORT}" \
     --worker_startup_command=" \
+      ${BOOTSTRAP_CMD:+${BOOTSTRAP_CMD} && } \
       PYTHONUNBUFFERED=1 \
       TUNIX_IS_INTERNAL_ENV=false \
       WEIGHT_SYNC_DISABLE_TIMEOUTS=\"${WEIGHT_SYNC_DISABLE_TIMEOUTS}\" \
-      ${BOOTSTRAP_CMD} \
       ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} \
       ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE} \
       ${CHECKPOINT_ASYNC:+CHECKPOINT_ASYNC=${CHECKPOINT_ASYNC}} \
-      ${CHECKPOINT_ABANDON_FAILED_SAVES:+CHECKPOINT_ABANDON_FAILED_SAVES=${CHECKPOINT_ABANDON_FAILED_SAVES}} \
       ${CKPT_D2H_CONCURRENT_GB:+CKPT_D2H_CONCURRENT_GB=${CKPT_D2H_CONCURRENT_GB}} \
       ${TRAINER_MAXTEXT_ATTENTION:+TRAINER_MAXTEXT_ATTENTION=\"${TRAINER_MAXTEXT_ATTENTION}\"} \
       ${raiden_env} \
@@ -732,12 +713,12 @@ if cfg:
       --worker_container_port="${ROLLOUT_PORT}" \
       "${extra_generator_flags[@]}" \
       --worker_startup_command=" \
+        ${BOOTSTRAP_CMD:+${BOOTSTRAP_CMD} && } \
         PYTHONUNBUFFERED=1 \
         TUNIX_IS_INTERNAL_ENV=false \
         EPISODE_TIMEOUT_SECS="${EPISODE_TIMEOUT_SECS:-5400}" \
         WEIGHT_SYNC_DISABLE_TIMEOUTS=\"${WEIGHT_SYNC_DISABLE_TIMEOUTS}\" \
         ${SCAFFOLD:+SCAFFOLD=\"${SCAFFOLD}\"} \
-        ${BOOTSTRAP_CMD} \
         USE_RAIDEN_FFI=false RAIDEN_USE_FFI=0 \
         RAIDEN_DEVICES_PER_HOST=${RAIDEN_DEVICES_PER_HOST} \
         ROLLOUT_PREFUSE_MOE_WEIGHTS=${ROLLOUT_PREFUSE_MOE_WEIGHTS} \
@@ -790,7 +771,6 @@ if cfg:
           --enable_prefix_caching=${ENABLE_PREFIX_CACHING} \
           --free_kv_cache_during_weight_sync=${ROLLOUT_FREE_KV_CACHE} \
           --partial_rollout=${PARTIAL_ROLLOUT} \
-          --priority_scheduling=${ROLLOUT_PRIORITY_SCHEDULING} \
           --return_routed_experts=${RETURN_ROUTED_EXPERTS} \
           --registry_module=tunix.experimental.examples.deepswe_dist.deepswe \
           --env_name=deepswe_env \
@@ -842,8 +822,6 @@ start_mock_trainer() {
     ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
     ${GANG_ID:+--gang_id="${GANG_ID}"} \
     --cpu_machine="${CPU_MACHINE}" \
-    --cpu_nodepool="${CPU_NODEPOOL}" \
-    --cpu_memory="${CPU_MEMORY}" \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${TRAINER_PORT}" \
     --worker_startup_command=" \
@@ -866,8 +844,6 @@ start_mock_rollout() {
     ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
     ${GANG_ID:+--gang_id="${GANG_ID}"} \
     --cpu_machine="${CPU_MACHINE}" \
-    --cpu_nodepool="${CPU_NODEPOOL}" \
-    --cpu_memory="${CPU_MEMORY}" \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ROLLOUT_PORT}" \
     --worker_startup_command=" \
@@ -1049,6 +1025,7 @@ start_eval() {
       "${YAML_DIR}/${ROLLOUT_JOBSET_YAML:-jobset.pathways.yaml}" \
       --jobset_name="${replica_id}" \
       --namespace="${K8S_NAMESPACE}" \
+      "${FAIL_FAST_GENERATOR_FLAGS[@]}" \
       ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
       ${GANG_ID:+--gang_id="${GANG_ID}"} \
       --tpu_slice="${ROLLOUT_TPU_SLICE:-tpuv5:2x2x1}" \
@@ -1065,12 +1042,12 @@ start_eval() {
       --worker_container_image="${TUNIX_IMAGE}" \
       --worker_container_port="${eval_port}" \
       --worker_startup_command=" \
+        ${BOOTSTRAP_CMD:+${BOOTSTRAP_CMD} && } \
         PYTHONUNBUFFERED=1 \
         TUNIX_IS_INTERNAL_ENV=false \
-        VLLM_TPU_USING_PATHWAYS=1 \
+        $([[ "${ROLLOUT_JOBSET_YAML}" == *pathways* ]] && echo "VLLM_TPU_USING_PATHWAYS=1") \
         ${sandbox_env} \
         ${SCAFFOLD:+SCAFFOLD=\"${SCAFFOLD}\"} \
-        ${BOOTSTRAP_CMD} \
         ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} \
         ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE} \
         PREFUSE_MOE_WEIGHTS=${ROLLOUT_PREFUSE_MOE_WEIGHTS} \
@@ -1105,6 +1082,8 @@ start_eval() {
         ${VLLM_ENABLE_V1_MULTIPROCESSING:+VLLM_ENABLE_V1_MULTIPROCESSING=${VLLM_ENABLE_V1_MULTIPROCESSING}} \
         ${VLLM_LOGGING_LEVEL:+VLLM_LOGGING_LEVEL=${VLLM_LOGGING_LEVEL}} \
         ${VLLM_DATA_PARALLEL_SIZE:+VLLM_DATA_PARALLEL_SIZE=${VLLM_DATA_PARALLEL_SIZE}} \
+        ${VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY:+VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY=\"${VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY}\"} \
+        ${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY:+VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=\"${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY}\"} \
         ${ROLLOUT_ENV_FLAGS} \
         ${ROLLOUT_EXTRA_ENV} \
         SKIP_JAX_PRECOMPILE=1 python3 -u ${eval_cmd} \
