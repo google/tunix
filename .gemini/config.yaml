@@ -1,0 +1,77 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# ==============================================================================
+# Gemini Code Assist Repository Configuration (google/tunix — atwigg/mlperf)
+# ==============================================================================
+# Official Documentation & Schema Reference:
+# - Behavior & Schema: https://developers.google.com/gemini-code-assist/docs/customize-gemini-behavior-github
+# - Canonical Cloud Docs: https://docs.cloud.google.com/gemini/docs/code-review/customize-repo-review#schema
+# - Custom Style Guide (.gemini/styleguide.md): https://docs.cloud.google.com/gemini/docs/code-review/style-guide
+
+# Enables playful elements (such as a poem) in the initial pull request summary.
+# Type: boolean | Default: false
+have_fun: false
+
+# Controls persistent repository memory used to learn from team review feedback
+# and improve response consistency across pull requests.
+# Reference: https://docs.cloud.google.com/gemini/docs/code-review/customize-repo-review#fields
+memory_config:
+  # Set to true to disable persistent memory for this repository.
+  # Type: boolean | Default: false
+  disabled: false
+
+# Controls automated pull request code review behavior.
+# Reference: https://docs.cloud.google.com/gemini/docs/code-review/customize-repo-review#schema
+code_review:
+  # Master switch to disable Gemini Code Assist from acting on pull requests.
+  # Type: boolean | Default: false
+  disable: false
+
+  # Minimum severity threshold required for Gemini Code Assist to post a review comment.
+  # Accepted values: LOW, MEDIUM, HIGH, CRITICAL | Default: MEDIUM
+  # Setting to MEDIUM filters out low-severity stylistic nitpicks while surfacing
+  # architectural, bottleneck, concurrency, and correctness issues (as well as
+  # violations of .gemini/styleguide.md, which are evaluated at >= MEDIUM).
+  comment_severity_threshold: MEDIUM
+
+  # Maximum number of review comments Gemini Code Assist will post on a single review.
+  # Type: integer (int64) | Default: -1 (unlimited)
+  max_review_comments: -1
+
+  # Controls which automated actions run automatically when a pull request is opened.
+  pull_request_opened:
+    # Posts a "/gemini help" command reference table comment when a PR is opened.
+    # Set to false to reduce comment noise on PR threads.
+    # Type: boolean | Default: false
+    help: false
+
+    # Posts an automated high-level summary of changes when a PR is opened.
+    # Type: boolean | Default: false (enabled here for fast reviewer context)
+    summary: true
+
+    # Automatically runs a code review when a PR is opened.
+    # Type: boolean | Default: true
+    code_review: true
+
+    # Runs summary and code review on draft pull requests before they are marked ready.
+    # Set to false so WIP draft PRs are not reviewed until ready (or explicitly triggered via `/gemini review`).
+    # Type: boolean | Default: true
+    include_drafts: false
+
+# List of VS Code-style glob patterns for files and directories that Gemini Code Assist
+# should completely ignore during summaries and code reviews.
+# Reference: https://code.visualstudio.com/docs/editor/glob-patterns
+# Type: array of strings | Default: []
+ignore_patterns: []
