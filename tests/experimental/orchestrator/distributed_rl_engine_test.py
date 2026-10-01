@@ -2016,6 +2016,114 @@ class DistributedRLEngineTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_max_concurrent_rollouts_per_worker_caps_in_flight_and_drains(self):
+    async def _run():
+      q1: asyncio.Queue[Any] = asyncio.Queue()
+      q2: asyncio.Queue[Any] = asyncio.Queue()
+
+      async def _dispatch_1(request_id, method_name, *args, **kwargs):
+        del method_name, args
+        req = kwargs["requests"][0]
+        await q1.put(
+            remote_execution.ExecutionResponse(
+                request_id=request_id,
+                result=[
+                    datatypes.RolloutResponse(
+                        request_id=request_id,
+                        status="COMPLETED",
+                        payload=datatypes.TrajectoryItem(
+                            prompt_id=req.prompt_id,
+                            group_index=req.group_index,
+                            traj={
+                                "trajectory_reward": 1.0,
+                                "status": datatypes.TrajectoryStatus.SUCCEEDED,
+                            },
+                        ),
+                    )
+                ],
+            )
+        )
+        return request_id
+
+      async def _dispatch_2(request_id, method_name, *args, **kwargs):
+        del method_name, args
+        req = kwargs["requests"][0]
+        await q2.put(
+            remote_execution.ExecutionResponse(
+                request_id=request_id,
+                result=[
+                    datatypes.RolloutResponse(
+                        request_id=request_id,
+                        status="COMPLETED",
+                        payload=datatypes.TrajectoryItem(
+                            prompt_id=req.prompt_id,
+                            group_index=req.group_index,
+                            traj={
+                                "trajectory_reward": 1.0,
+                                "status": datatypes.TrajectoryStatus.SUCCEEDED,
+                            },
+                        ),
+                    )
+                ],
+            )
+        )
+        return request_id
+
+      gate = asyncio.Event()
+
+      async def _poll_1(timeout_s=50.0):
+        await gate.wait()
+        return await asyncio.wait_for(q1.get(), timeout=timeout_s)
+
+      async def _poll_2(timeout_s=50.0):
+        await gate.wait()
+        return await asyncio.wait_for(q2.get(), timeout=timeout_s)
+
+      self.mock_rollout_1.dispatch_task = mock.AsyncMock(side_effect=_dispatch_1)
+      self.mock_rollout_2.dispatch_task = mock.AsyncMock(side_effect=_dispatch_2)
+      self.mock_rollout_1.poll_responses.side_effect = _poll_1
+      self.mock_rollout_2.poll_responses.side_effect = _poll_2
+
+      engine = distributed_rl_engine.DistributedRLEngine(
+          rollout_workers=[self.mock_rollout_1, self.mock_rollout_2],
+          trainer_workers={datatypes.Role.ACTOR: self.mock_actor},
+          max_concurrent_rollouts_per_worker=1,
+      )
+      self.assertEqual(engine.max_concurrent_rollouts_per_worker, 1)
+
+      # Dispatch 4 rollouts across 2 workers with per-worker cap = 1.
+      await engine.dispatch_rollouts(
+          [
+              {"prompt": "p0", "prompt_id": "p0"},
+              {"prompt": "p1", "prompt_id": "p1"},
+          ],
+          num_generations=2,
+          policy_version=0,
+      )
+
+      # Exactly 1 task per worker is dispatched; 2 remain queued in _rollout_session.
+      self.assertEqual(
+          engine._rollout_session.worker_in_flight(self.mock_rollout_1), 1
+      )
+      self.assertEqual(
+          engine._rollout_session.worker_in_flight(self.mock_rollout_2), 1
+      )
+      self.assertEqual(engine._rollout_session.pending_count, 2)
+
+      # Release gate and collect all 4 completions.
+      gate.set()
+      collected = []
+      while len(collected) < 4:
+        batch = await engine.poll_rollouts(timeout_s=2.0)
+        collected.extend(batch)
+
+      self.assertLen(collected, 4)
+      self.assertEqual(engine._rollout_session.pending_count, 0)
+      self.assertEqual(engine._rollout_session.in_flight_count, 0)
+      await engine.close()
+
+    asyncio.run(_run())
+
 
 if __name__ == "__main__":
   absltest.main()

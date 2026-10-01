@@ -57,6 +57,7 @@ class ClusterOrchestrator:
       trajectory_store_config: Mapping[str, Any] | None = None,
       run_id: str | None = None,
       disable_weight_sync_timeouts: bool | None = None,
+      max_concurrent_rollouts_per_worker: int | None = None,
   ):
     """Initializes ClusterOrchestrator.
 
@@ -76,8 +77,24 @@ class ClusterOrchestrator:
         automatically if omitted.
       disable_weight_sync_timeouts: When True, sets all weight-sync phase
         deadlines to infinity.
+      max_concurrent_rollouts_per_worker: Optional cap on concurrent in-flight
+        rollouts dispatched to any single rollout worker.
     """
     self.config = config
+    if max_concurrent_rollouts_per_worker is None and config is not None:
+      max_concurrent_rollouts_per_worker = getattr(
+          config, "max_concurrent_rollouts_per_worker", None
+      )
+    if (
+        max_concurrent_rollouts_per_worker is not None
+        and max_concurrent_rollouts_per_worker <= 0
+    ):
+      raise ValueError("max_concurrent_rollouts_per_worker must be positive")
+    self._max_concurrent_rollouts_per_worker = (
+        int(max_concurrent_rollouts_per_worker)
+        if max_concurrent_rollouts_per_worker is not None
+        else None
+    )
     self.registry = registry or worker_registry.WorkerRegistry()
     self.lifecycle_driver = lifecycle_driver or lifecycle.LifecycleDriver(
         self.registry
@@ -141,6 +158,23 @@ class ClusterOrchestrator:
           self.trajectory_store_config,
       )
 
+  def _effective_worker_capacity(
+      self, info: datatypes.WorkerInfo | None
+  ) -> int | None:
+    worker_cap = None
+    if info is not None and info.resources:
+      raw_cap = info.resources.get("max_concurrency")
+      if raw_cap is not None and int(raw_cap) > 0:
+        worker_cap = int(raw_cap)
+    if (
+        self._max_concurrent_rollouts_per_worker is not None
+        and worker_cap is not None
+    ):
+      return min(self._max_concurrent_rollouts_per_worker, worker_cap)
+    if worker_cap is not None:
+      return worker_cap
+    return self._max_concurrent_rollouts_per_worker
+
   def __enter__(self) -> "ClusterOrchestrator":
     """Interactive context manager bring-up."""
     self.bring_up_workers()
@@ -181,6 +215,9 @@ class ClusterOrchestrator:
       case _:
         raise RuntimeError(f"unknown service type {service_type}")
 
+    resources: dict[str, Any] = {"address": service_address}
+    if md.get("max_concurrency") is not None:
+      resources["max_concurrency"] = int(md["max_concurrency"])
     self.register_worker_handle(
         worker_id=worker_id,
         roles=[role],
@@ -188,7 +225,7 @@ class ClusterOrchestrator:
             f"grpc://{service_address}",
             rpc_timeout_s=rpc_timeout_s,
         ),
-        resources={"address": service_address},
+        resources=resources,
     )
 
   def register_worker(
@@ -312,7 +349,10 @@ class ClusterOrchestrator:
             and self.engine is not None
         ):
           self.engine.add_rollout_worker(
-              handle, worker_id=worker_id, require_weight_sync=True
+              handle,
+              worker_id=worker_id,
+              require_weight_sync=True,
+              max_concurrent_rollouts=self._effective_worker_capacity(info),
           )
     except Exception as err:  # pylint: disable=broad-exception-caught
       logging.error(
@@ -602,6 +642,12 @@ class ClusterOrchestrator:
         for wid, h in self._remote_worker_handles_by_id.items()
         if datatypes.Role.ROLLOUT.value in self._remote_worker_infos[wid].roles
     }
+    rollout_worker_capacities: dict[str, int] = {}
+    for wid in rollout_worker_ids:
+      cap = self._effective_worker_capacity(self._remote_worker_infos.get(wid))
+      if cap is not None:
+        rollout_worker_capacities[wid] = cap
+
     return distributed_rl_engine.DistributedRLEngine(
         rollout_workers=rollout_workers,
         trainer_workers=trainer_workers,
@@ -610,6 +656,10 @@ class ClusterOrchestrator:
         registry=self.registry,
         rollout_worker_ids=rollout_worker_ids,
         on_worker_evicted=self._on_engine_worker_evicted,
+        max_concurrent_rollouts_per_worker=(
+            self._max_concurrent_rollouts_per_worker
+        ),
+        rollout_worker_capacities=rollout_worker_capacities or None,
     )
 
   def run(

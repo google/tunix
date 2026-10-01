@@ -732,6 +732,56 @@ class ClusterOrchestratorTrajectoryStoreTest(absltest.TestCase):
     )
     orch.shutdown()
 
+  @mock.patch.object(remote_execution.ActorHandle, "from_address")
+  def test_orchestrator_plumbs_max_concurrent_rollouts_per_worker(
+      self, mock_from_address
+  ):
+    h_actor = mock.MagicMock(spec=remote_execution.ActorHandle)
+    h_r0 = mock.MagicMock(spec=remote_execution.ActorHandle)
+    h_r1 = mock.MagicMock(spec=remote_execution.ActorHandle)
+    mock_from_address.side_effect = [h_r0, h_r1]
+
+    orch = orchestrator.ClusterOrchestrator(
+        lifecycle_driver=mock.MagicMock(),
+        monitor=mock.MagicMock(),
+        max_concurrent_rollouts_per_worker=8,
+    )
+    orch.register_worker_handle("actor-0", [datatypes.Role.ACTOR], h_actor)
+
+    # rollout-0 advertises max_concurrency=4 (< 8), rollout-1 advertises 16 (> 8)
+    orch.register_worker_from_hostname(
+        "host0",
+        0,
+        pickle.dumps({
+            "service_type": "rollout",
+            "service_port": 5001,
+            "worker_id": "rollout-0",
+            "max_concurrency": 4,
+        }),
+    )
+    orch.register_worker_from_hostname(
+        "host1",
+        0,
+        pickle.dumps({
+            "service_type": "rollout",
+            "service_port": 5002,
+            "worker_id": "rollout-1",
+            "max_concurrency": 16,
+        }),
+    )
+
+    orch.bring_up_workers()
+    assert orch.engine is not None
+    self.assertEqual(orch.engine.max_concurrent_rollouts_per_worker, 8)
+    # Effective limit is min(orchestrator_cap, worker_max_concurrency)
+    self.assertEqual(
+        orch.engine._rollout_session._get_worker_limit(h_r0), 4
+    )
+    self.assertEqual(
+        orch.engine._rollout_session._get_worker_limit(h_r1), 8
+    )
+    orch.shutdown()
+
 
 if __name__ == "__main__":
   absltest.main()

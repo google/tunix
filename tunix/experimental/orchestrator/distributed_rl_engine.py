@@ -93,10 +93,18 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           Callable[[remote_execution.ActorHandle, BaseException | None], None]
           | None
       ) = None,
+      max_concurrent_rollouts_per_worker: int | None = None,
+      rollout_worker_capacities: (
+          Mapping[str | remote_execution.ActorHandle, int] | None
+      ) = None,
   ):
     self._worker_lock = threading.RLock()
     self._registry = registry
     self._on_worker_evicted = on_worker_evicted
+    self._max_concurrent_rollouts_per_worker = (
+        max_concurrent_rollouts_per_worker
+    )
+    self._worker_id_capacities: dict[str, int] = {}
     self._pending_sync_rollout_workers: dict[
         str, remote_execution.ActorHandle
     ] = {}
@@ -107,6 +115,20 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         self._worker_id_to_handle[w_id] = handle
         self._handle_to_worker_id[handle] = w_id
 
+    worker_max_in_flight: dict[remote_execution.ActorHandle, int] = {}
+    if rollout_worker_capacities:
+      for key, cap in rollout_worker_capacities.items():
+        if isinstance(key, str):
+          self._worker_id_capacities[key] = int(cap)
+          handle = self._worker_id_to_handle.get(key)
+          if handle is not None:
+            worker_max_in_flight[handle] = int(cap)
+        else:
+          worker_max_in_flight[key] = int(cap)
+          w_id = self._handle_to_worker_id.get(key)
+          if w_id is not None:
+            self._worker_id_capacities[w_id] = int(cap)
+
     self._rollout_workers = list(rollout_workers)
     self._rollout_pool = remote_execution.RoutingActorPool(
         self._rollout_workers
@@ -116,6 +138,8 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         evict_on_failure=True,
         retry_on_worker_failure=True,
         on_worker_evicted=self._handle_rollout_worker_evicted,
+        max_in_flight_per_worker=max_concurrent_rollouts_per_worker,
+        worker_max_in_flight=worker_max_in_flight,
     )
     self._trainer_workers = dict(trainer_workers)
     self._inference_workers = dict(inference_workers or {})
@@ -123,12 +147,24 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     self._restored_next_batch_idx = 0
     self._weight_sync_coordinator = weight_sync_coordinator
 
+  @property
+  def max_concurrent_rollouts_per_worker(self) -> int | None:
+    return self._rollout_session.max_in_flight_per_worker
+
+  def set_max_concurrent_rollouts_per_worker(
+      self, max_concurrent_rollouts: int | None
+  ) -> None:
+    """Updates the default per-worker concurrent rollout limit."""
+    self._max_concurrent_rollouts_per_worker = max_concurrent_rollouts
+    self._rollout_session.set_max_in_flight_per_worker(max_concurrent_rollouts)
+
   def add_rollout_worker(
       self,
       worker: remote_execution.ActorHandle,
       *,
       worker_id: str | None = None,
       require_weight_sync: bool = False,
+      max_concurrent_rollouts: int | None = None,
   ) -> None:
     """Dynamically adds or replaces a rollout worker in the engine."""
     with self._worker_lock:
@@ -143,8 +179,23 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
               self._pending_sync_rollout_workers.pop(k, None)
           self._handle_to_worker_id.pop(old_handle, None)
           self._rollout_pool.remove_actor(old_handle)
+          self._rollout_session.set_worker_max_in_flight(old_handle, None)
         self._worker_id_to_handle[worker_id] = worker
         self._handle_to_worker_id[worker] = worker_id
+
+      if max_concurrent_rollouts is not None and worker_id is not None:
+        self._worker_id_capacities[worker_id] = int(max_concurrent_rollouts)
+      effective_cap = (
+          int(max_concurrent_rollouts)
+          if max_concurrent_rollouts is not None
+          else (
+              self._worker_id_capacities.get(worker_id)
+              if worker_id is not None
+              else None
+          )
+      )
+      if effective_cap is not None:
+        self._rollout_session.set_worker_max_in_flight(worker, effective_cap)
 
       needs_sync = (
           require_weight_sync
@@ -175,7 +226,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           self._pending_sync_rollout_workers.pop(worker_id, None)
         if worker not in self._rollout_workers:
           self._rollout_workers.append(worker)
-        self._rollout_session.add_actor(worker)
+        self._rollout_session.add_actor(worker, max_in_flight=effective_cap)
         if (
             self._registry is not None
             and worker_id
@@ -213,6 +264,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           evicted = True
         if self._rollout_pool.remove_actor(handle):
           evicted = True
+        self._rollout_session.set_worker_max_in_flight(handle, None)
         if handle in self._handle_to_worker_id:
           self._handle_to_worker_id.pop(handle, None)
           evicted = True
@@ -900,7 +952,9 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           self._pending_sync_rollout_workers.pop(w_id, None)
           if handle not in self._rollout_workers:
             self._rollout_workers.append(handle)
-          self._rollout_session.add_actor(handle)
+          self._rollout_session.add_actor(
+              handle, max_in_flight=self._worker_id_capacities.get(w_id)
+          )
           if self._registry is not None and w_id in self._registry:
             self._registry.set_state(
                 w_id, worker_registry.MembershipState.ACTIVE

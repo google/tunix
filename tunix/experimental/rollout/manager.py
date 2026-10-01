@@ -181,6 +181,9 @@ class RolloutManager:
     self._active_tasks: Dict[str, asyncio.Task[Any]] = {}
     self._completed_queue: asyncio.Queue[TrajectoryOrError] = asyncio.Queue()
     self._traffic_inst = None
+    self._concurrency_sem: Optional[asyncio.Semaphore] = None
+    self._concurrency_sem_loop: Optional[asyncio.AbstractEventLoop] = None
+    self._concurrency_sem_limit: Optional[int] = None
     self._episode_timeout_s = _env_float(
         "EPISODE_TIMEOUT_SECS",
         collector_lib.DEFAULT_EPISODE_TIMEOUT_SECS,
@@ -204,6 +207,21 @@ class RolloutManager:
         self._episode_timeout_s,
         self._drain_timeout_s,
     )
+
+  def _get_concurrency_semaphore(self) -> Optional[asyncio.Semaphore]:
+    if self.max_concurrency is None or self.max_concurrency <= 0:
+      return None
+    loop = asyncio.get_running_loop()
+    limit = int(self.max_concurrency)
+    if (
+        self._concurrency_sem is None
+        or self._concurrency_sem_loop is not loop
+        or self._concurrency_sem_limit != limit
+    ):
+      self._concurrency_sem = asyncio.Semaphore(limit)
+      self._concurrency_sem_loop = loop
+      self._concurrency_sem_limit = limit
+    return self._concurrency_sem
 
   @property
   def _traffic(self) -> traffic_controller_lib.TrafficController:
@@ -317,8 +335,13 @@ class RolloutManager:
       resolve_cb: Callable[[TrajectoryOrError], None],
   ) -> None:
     """Runs episode loop, removes active tracking, and resolves callbacks/streams."""
+    sem = self._get_concurrency_semaphore()
     try:
-      trajectory: TrajectoryOrError = await collector.run_episode()
+      if sem is not None:
+        async with sem:
+          trajectory: TrajectoryOrError = await collector.run_episode()
+      else:
+        trajectory = await collector.run_episode()
     except Exception as e:  # pylint: disable=broad-exception-caught
       error_metadata = dict(request.metadata or {})
       error_metadata["prompt_id"] = request.prompt_id
