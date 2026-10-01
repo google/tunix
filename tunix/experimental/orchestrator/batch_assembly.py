@@ -112,10 +112,11 @@ class PaddingStats:
     return self.row_valid_tokens / self.row_capacity
 
   @property
+  @property
   def row_imbalance(self) -> float:
     """Max-over-mean of per-row valid tokens; 1.0 means perfectly balanced."""
-    return float(self.row_valid_tokens.max() / self.row_valid_tokens.mean())
-
+    mean = self.row_valid_tokens.mean()
+    return float(self.row_valid_tokens.max() / mean) if mean > 0 else 1.0
 
 def summarize_padding_stats(
     stats: Sequence[PaddingStats],
