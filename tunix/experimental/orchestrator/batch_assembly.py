@@ -86,8 +86,6 @@ class PaddingStats:
           "row_num_sequences must be non-negative, got"
           f" {self.row_num_sequences.tolist()}."
       )
-    if self.valid_tokens == 0:
-      raise ValueError("PaddingStats requires at least one valid token.")
 
   @property
   def num_rows(self) -> int:
@@ -111,7 +109,6 @@ class PaddingStats:
     """`[B]` fraction of each row occupied by real tokens."""
     return self.row_valid_tokens / self.row_capacity
 
-  @property
   @property
   def row_imbalance(self) -> float:
     """Max-over-mean of per-row valid tokens; 1.0 means perfectly balanced."""

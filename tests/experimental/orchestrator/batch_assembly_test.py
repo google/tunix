@@ -1045,11 +1045,18 @@ class PaddingStatsTest(absltest.TestCase):
         ([5], [1], 4),  # Exceeds capacity.
         ([-1, 2], [1, 1], 4),  # Negative tokens.
         ([1], [-1], 4),  # Negative sequences.
-        ([0, 0], [0, 0], 4),  # No valid tokens.
     ):
       with self.subTest(valid=valid, nseq=nseq, cap=cap):
         with self.assertRaises(ValueError):
           _stats(valid, nseq, cap)
+
+  def test_zero_valid_tokens_allowed(self):
+    stats = _stats([0, 0], [0, 0], 4)
+    self.assertEqual(stats.valid_tokens, 0)
+    self.assertEqual(stats.capacity_tokens, 8)
+    self.assertAlmostEqual(stats.padding_ratio, 1.0)
+    self.assertAlmostEqual(stats.row_imbalance, 1.0)
+
 
   def test_summarize_rejects_empty(self):
     with self.assertRaises(ValueError):
