@@ -227,6 +227,16 @@ export CHECKPOINT_ASYNC=${CHECKPOINT_ASYNC:-true}
 # <step>.orbax-checkpoint-tmp directory stays in the bucket, ~5 TiB at 397B.
 # `false` is the pre-maxtext#5494 behaviour and is passed through explicitly.
 export CHECKPOINT_ABANDON_FAILED_SAVES="${CHECKPOINT_ABANDON_FAILED_SAVES:-false}"
+# `CHECKPOINT_SKIP_IF_IN_PROGRESS=true` skips a save requested while the
+# previous async save is still being written, instead of blocking training until
+# it finishes: at most one save is in flight and the skipped step is not
+# restorable. The skip shows up only as a WARNING in the trainer log; the step
+# is still recorded in the eval manifest, so an eval pass over the manifest
+# must expect a missing checkpoint for it. No default on purpose: the MaxText
+# key behind it (skip_checkpoint_save_if_in_progress) exists only from
+# AI-Hypercomputer/maxtext#5516 on and MaxText rejects unknown keys at
+# startup, so it is passed through only when set (k8s_launcher.sh,
+# maxtext_utils.build_maxtext_config).
 export ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE:-1}
 export MAX_STALENESS=${MAX_STALENESS:-1}
 # With MAX_STALENESS > 0, `true` has the rollouts serve the oldest in-flight

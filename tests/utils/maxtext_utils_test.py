@@ -682,6 +682,24 @@ class MaxTextUtilsTest(absltest.TestCase):
       argv = self._build_config_argv(base_output_directory="gs://bucket/out")
     self.assertIn("abandon_failed_checkpoint_saves=false", argv)
 
+  def test_checkpoint_skip_if_in_progress_reaches_maxtext(self):
+    with mock.patch.dict(
+        "os.environ", {"CHECKPOINT_SKIP_IF_IN_PROGRESS": "true"}, clear=False
+    ):
+      argv = self._build_config_argv(base_output_directory="gs://bucket/out")
+    self.assertIn("skip_checkpoint_save_if_in_progress=true", argv)
+
+  def test_checkpoint_skip_if_in_progress_unset_is_not_emitted(self):
+    # The key does not exist at every MaxText pin and MaxText rejects unknown
+    # keys at startup, so unset must leave the argv untouched (MaxText's own
+    # default waits for the in-flight save).
+    with mock.patch.dict("os.environ", {}, clear=False):
+      os.environ.pop("CHECKPOINT_SKIP_IF_IN_PROGRESS", None)
+      argv = self._build_config_argv(base_output_directory="gs://bucket/out")
+    self.assertFalse(
+        [a for a in argv if a.startswith("skip_checkpoint_save_if_in_progress")]
+    )
+
   def test_pathways_checkpointing_impl_defaults_to_persistence(self):
     with mock.patch.dict("os.environ", {"ENABLE_PATHWAYS_PERSISTENCE": "1"}, clear=False):
       os.environ.pop("PATHWAYS_CHECKPOINTING_IMPL", None)

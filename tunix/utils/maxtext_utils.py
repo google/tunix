@@ -579,6 +579,23 @@ def build_maxtext_config(
   _abandon_failed_saves = os.environ.get("CHECKPOINT_ABANDON_FAILED_SAVES", "").strip() or "false"
   argv.append(f"abandon_failed_checkpoint_saves={_abandon_failed_saves}")
 
+  # A save requested while the previous async save is still being written blocks
+  # the trainer until it finishes and only then saves. `true` skips such a
+  # request instead (the step is not restorable; the next request after the
+  # in-flight save ends saves), so at most one save is in flight and a slow save
+  # never stalls training. The skip is visible only as a WARNING in the trainer
+  # log: the worker still reports the save as done, so the step is still
+  # recorded in the eval manifest.
+  #
+  # Emitted only when set: the key does not exist before the MaxText commit that
+  # adds it, and MaxText rejects unknown keys at startup. Unset leaves MaxText's
+  # own default, which waits.
+  _skip_if_in_progress = os.environ.get(
+      "CHECKPOINT_SKIP_IF_IN_PROGRESS", ""
+  ).strip()
+  if _skip_if_in_progress:
+    argv.append(f"skip_checkpoint_save_if_in_progress={_skip_if_in_progress}")
+
   _d2h_gb = os.environ.get("CKPT_D2H_CONCURRENT_GB", "").strip()
   if _d2h_gb:
     logging.info(
