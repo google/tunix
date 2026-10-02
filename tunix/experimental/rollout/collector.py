@@ -283,6 +283,10 @@ class TrajectoryCollectorEngine:
         await self._unpaused_event.wait()
         if self.is_cancelled:
           raise RuntimeError("Collector was cancelled.")
+      if self.partial_rollout and turn_policy_versions:
+        generation_kwargs.setdefault(
+            "cache_salt", f"policy_v{turn_policy_versions[0]}"
+        )
       res = await self.sampler.sample(sampling_req, **generation_kwargs)
       if isinstance(res, (list, tuple)) and len(res) == 1:
         res = res[0]

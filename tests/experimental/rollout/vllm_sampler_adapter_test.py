@@ -509,6 +509,94 @@ class RoundUuidTest(absltest.TestCase):
     self.assertEqual(adapter._policy_version, 3)
     self.assertEqual(mock_sampler._policy_version, 3)
 
+  def test_rl_vllm_sampler_partial_rollout_preserves_trajectory_cache_salt(self):
+    from tunix.experimental.rollout import vllm_sampler_v2
+
+    sampler = vllm_sampler_v2.RLVllmSampler(
+        engine_args=SimpleNamespace(enable_prefix_caching=True),
+        partial_rollout=True,
+    )
+    sampler._is_running = True
+    sampler._policy_version = 2
+    seen_prompts = []
+
+    class _FakeEngine:
+      def generate(self, engine_prompt, vllm_params, request_id=None):
+        del vllm_params, request_id
+        seen_prompts.append(engine_prompt)
+        prompt_ids = (
+            engine_prompt.get("prompt_token_ids", [10])
+            if isinstance(engine_prompt, dict)
+            else [10]
+        )
+        async def _gen():
+          yield SimpleNamespace(
+              prompt_token_ids=prompt_ids,
+              outputs=[
+                  SimpleNamespace(
+                      text="ok",
+                      token_ids=[21],
+                      cumulative_logprob=-0.1,
+                      logprobs=None,
+                      routed_experts=None,
+                      finish_reason="stop",
+                  )
+              ],
+          )
+        return _gen()
+
+    sampler._engine = _FakeEngine()
+
+    # Turn 1 at policy_version=2 (no explicit cache_salt): uses policy_v2.
+    res_t1 = asyncio.run(
+        sampler.sample(
+            base_sampler_lib.SamplingRequest(
+                request_id="traj_1",
+                prompt=np.array([10, 11], dtype=np.int32),
+            )
+        )
+    )
+    self.assertEqual(res_t1[0].policy_version, 2)
+    self.assertEqual(
+        seen_prompts[0],
+        {"prompt_token_ids": [10, 11], "cache_salt": "policy_v2"},
+    )
+
+    # Weight sync advances sampler._policy_version to 3.
+    sampler._policy_version = 3
+
+    # Turn 2 of traj_1 passes cache_salt="policy_v2" from Turn 1: reuses policy_v2
+    # prefix cache while stamping policy_version=3 for Turn 2.
+    res_t2 = asyncio.run(
+        sampler.sample(
+            base_sampler_lib.SamplingRequest(
+                request_id="traj_1",
+                prompt=np.array([10, 11, 21, 30], dtype=np.int32),
+            ),
+            cache_salt="policy_v2",
+        )
+    )
+    self.assertEqual(res_t2[0].policy_version, 3)
+    self.assertEqual(
+        seen_prompts[1],
+        {"prompt_token_ids": [10, 11, 21, 30], "cache_salt": "policy_v2"},
+    )
+
+    # New trajectory traj_2 starting Turn 1 at policy_version=3 uses policy_v3.
+    res_new = asyncio.run(
+        sampler.sample(
+            base_sampler_lib.SamplingRequest(
+                request_id="traj_2",
+                prompt=np.array([40, 41], dtype=np.int32),
+            )
+        )
+    )
+    self.assertEqual(res_new[0].policy_version, 3)
+    self.assertEqual(
+        seen_prompts[2],
+        {"prompt_token_ids": [40, 41], "cache_salt": "policy_v3"},
+    )
+
 
 if __name__ == "__main__":
   absltest.main()
