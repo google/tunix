@@ -648,6 +648,35 @@ CKPT_DIR = (
 )
 
 
+def latest_committed_checkpoint_step(actor_ckpt_dir: str) -> int:
+  """Returns the latest finalized orbax step under `actor_ckpt_dir`, or 0.
+
+  Mirrors what the actor trainer will restore: integer step directories, which
+  on GCS must also contain orbax's `commit_success.txt` marker.
+  """
+  from etils import epath  # pylint: disable=g-import-not-at-top
+
+  root = epath.Path(actor_ckpt_dir)
+  if not root.exists():
+    return 0
+  needs_marker = str(actor_ckpt_dir).startswith("gs://")
+  steps = [
+      int(p.name)
+      for p in root.iterdir()
+      if p.name.isdigit()
+      and (not needs_marker or (p / "commit_success.txt").exists())
+  ]
+  return max(steps, default=0)
+
+
+RESUME_STEP = (
+    latest_committed_checkpoint_step(os.path.join(CKPT_DIR, "actor"))
+    if CKPT_DIR
+    else 0
+)
+print(f"[resume] latest committed checkpoint step: {RESUME_STEP}", flush=True)
+
+
 # Agentic rollout dispatches one prompt at a time; vLLM still admits the
 # distributed recipe's 32 concurrent generations.
 VLLM_MAX_NUM_SEQS = MAX_CONCURRENCY
@@ -730,6 +759,43 @@ train_dataset, _ = data_lib.post_init_dataset(
     custom_batch_fn=deepswe_data.batch_fn,
 )
 
+
+class SkippedBatchesIterator:
+  """Answers the learner's resume fast-forward without touching the dataset.
+
+  On resume the learner skips `global_steps` batches by calling next() on the
+  iterator it is given. We already advanced the underlying dataset past those
+  batches (before the sandbox prewarmer saw them), so the first `num_skipped`
+  calls just return None.
+  """
+
+  def __init__(self, inner, num_skipped: int):
+    self._inner = inner
+    self._remaining = num_skipped
+
+  def __iter__(self):
+    return self
+
+  def __next__(self):
+    if self._remaining > 0:
+      self._remaining -= 1
+      return None
+    return next(self._inner)
+
+
+if RESUME_STEP:
+  # Fast-forward here so the sandbox prewarmer starts at the resumed batch
+  # instead of warming (and immediately tearing down) pools for every skipped
+  # batch inside the learner's skip loop.
+  train_dataset = iter(train_dataset)
+  for skipped in range(RESUME_STEP):
+    try:
+      next(train_dataset)
+    except StopIteration:
+      print(f"[resume] dataset exhausted after {skipped} batches", flush=True)
+      break
+  print(f"[resume] fast-forwarded the dataset by {RESUME_STEP} batches", flush=True)
+
 fleet = None
 if USE_AGENT_SANDBOX:
   fleet = swe_env._init_global_fleet(
@@ -744,6 +810,9 @@ if USE_AGENT_SANDBOX:
       num_generations=NUM_GENERATIONS,
       batch_size=MINI_BATCH_SIZE,
   )
+
+if RESUME_STEP:
+  train_dataset = SkippedBatchesIterator(train_dataset, RESUME_STEP)
 
 
 # %%
@@ -1202,6 +1271,13 @@ agentic_grpo_learner = agentic_grpo_learner.GRPOLearner(
 
 if RCP_LOGGING:
   mllog_utils.train_start(args)
+
+if rl_engine.global_steps != RESUME_STEP:
+  raise RuntimeError(
+      f"Restored global step {rl_engine.global_steps} does not match the"
+      f" latest committed checkpoint step {RESUME_STEP} used to fast-forward"
+      " the dataset."
+  )
 
 print("Starting training...", flush=True)
 agentic_grpo_learner.train(train_dataset=train_dataset)

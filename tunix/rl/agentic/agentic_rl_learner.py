@@ -746,6 +746,22 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           self.rl_engine.close()
           return
 
+      if self.should_sync_weights:
+        # The rollout engine was initialized from the actor weights *before*
+        # the actor trainer restored its checkpoint, so it still holds the
+        # initial weights. Push the restored weights before the first rollout.
+        restored_global_steps = self.rl_engine.global_steps
+        sync_start = time.time()
+        self.rl_engine.sync_weights()
+        # `sync_weights` also marks the end of a global step; undo that here.
+        self.rl_engine.global_steps = restored_global_steps
+        logging.info(
+            "Synced weights restored from global step %d to the rollout"
+            " engine in %.1f seconds.",
+            restored_global_steps,
+            time.time() - sync_start,
+        )
+
     try:
       first_item = next(full_batch_iterator)
     except StopIteration:
