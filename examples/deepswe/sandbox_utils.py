@@ -443,6 +443,26 @@ def init_global_fleet(
     except (ImportError, AttributeError):
       pass
 
+    # Optional pod priority class for the sandbox pods. Kueue orders a
+    # ClusterQueue's pending workloads by priority, then age, so on a shared
+    # queue a large backlog of other jobs' pending pods (even ones that target
+    # a different resource flavor) can starve our sandbox pods although their
+    # flavor has free quota.
+    sandbox_priority_class = os.getenv("SANDBOX_PRIORITY_CLASS")
+    if sandbox_priority_class:
+      from agent_sandbox_rl import TemplateSpec  # pyrefly: ignore[missing-import]
+
+      base_template = fleet_kwargs.get("template") or TemplateSpec()
+      extra_pod_spec = dict(base_template.extra_pod_spec or {})
+      extra_pod_spec["priorityClassName"] = sandbox_priority_class
+      fleet_kwargs["template"] = base_template.model_copy(
+          update={"extra_pod_spec": extra_pod_spec}
+      )
+      logging.info(
+          "[SandboxFleet] Sandbox pods use priorityClassName=%s",
+          sandbox_priority_class,
+      )
+
     fleet_cfg = FleetConfig(**fleet_kwargs)
     fleet_inst = SandboxFleet(fleet_cfg)
 

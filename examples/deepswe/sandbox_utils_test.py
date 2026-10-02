@@ -489,6 +489,43 @@ class SandboxUtilsTest(absltest.TestCase):
               "custom-pool-{image_hash}",
           )
 
+  def test_init_global_fleet_sets_sandbox_priority_class(self):
+    mock_as_rl = mock.MagicMock()
+    base_template = mock.MagicMock()
+    base_template.extra_pod_spec = {"tolerations": []}
+    mock_as_rl.TemplateSpec.return_value = base_template
+    with mock.patch.dict("sys.modules", {"agent_sandbox_rl": mock_as_rl}):
+      with mock.patch.dict(
+          os.environ, {"SANDBOX_PRIORITY_CLASS": "low"}, clear=True
+      ):
+        with mock.patch.object(sandbox_utils, "_GLOBAL_FLEET", None):
+          _ = sandbox_utils.init_global_fleet(
+              tasks=None, num_generations=4, scaffold="r2egym"
+          )
+    base_template.model_copy.assert_called_once_with(
+        update={
+            "extra_pod_spec": {"tolerations": [], "priorityClassName": "low"}
+        }
+    )
+    self.assertIs(
+        mock_as_rl.FleetConfig.call_args[1]["template"],
+        base_template.model_copy.return_value,
+    )
+    self.assertEqual(base_template.extra_pod_spec, {"tolerations": []})
+
+  def test_init_global_fleet_without_priority_class_keeps_default_template(
+      self,
+  ):
+    mock_as_rl = mock.MagicMock()
+    with mock.patch.dict("sys.modules", {"agent_sandbox_rl": mock_as_rl}):
+      with mock.patch.dict(os.environ, {}, clear=True):
+        with mock.patch.object(sandbox_utils, "_GLOBAL_FLEET", None):
+          _ = sandbox_utils.init_global_fleet(
+              tasks=None, num_generations=4, scaffold="r2egym"
+          )
+    self.assertNotIn("template", mock_as_rl.FleetConfig.call_args[1])
+    mock_as_rl.TemplateSpec.assert_not_called()
+
   def test_teardown_global_fleet_invokes_teardown_and_reaper(self):
     mock_fleet = mock.MagicMock()
     mock_fleet.run_id = "test-run-1234"
