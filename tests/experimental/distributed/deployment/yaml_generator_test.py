@@ -53,6 +53,25 @@ class YamlGeneratorTest(parameterized.TestCase):
         rendered = mock_stdout.getvalue()
         self.assertIn("test-cpu-job", rendered)
         self.assertIn("9999", rendered)
+        self.assertIn("cloud.google.com/gke-nodepool: cpu-np", rendered)
+        self.assertIn("memory: 240G", rendered)
+
+  def test_generate_cpu_yaml_custom_nodepool_and_memory(self):
+    template_file = _get_template_path("jobset.cpu.yaml")
+    argv = [
+        "yaml_generator.py",
+        template_file,
+        "--jobset_name=test-cpu-highmem-job",
+        "--cpu_nodepool=cpu-highmem-np",
+        "--cpu_memory=300Gi",
+    ]
+    with mock.patch.object(sys, "argv", argv):
+      with mock.patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+        yaml_generator.main()
+        rendered = mock_stdout.getvalue()
+        self.assertIn("test-cpu-highmem-job", rendered)
+        self.assertIn("cloud.google.com/gke-nodepool: cpu-highmem-np", rendered)
+        self.assertIn("memory: 300Gi", rendered)
 
   @parameterized.named_parameters(
       (
