@@ -228,6 +228,13 @@ export CHECKPOINT_ASYNC=${CHECKPOINT_ASYNC:-true}
 # `false` is the pre-maxtext#5494 behaviour and is passed through explicitly.
 export CHECKPOINT_ABANDON_FAILED_SAVES="${CHECKPOINT_ABANDON_FAILED_SAVES:-false}"
 export ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE:-1}
+export PATHWAYS_CHECKPOINTING_IMPL="${PATHWAYS_CHECKPOINTING_IMPL:-colocated_python}"
+# Sidecar image must match TUNIX_IMAGE's Python/jax/jaxlib versions (Orbax dispatches via cloudpickle).
+export COLOCATED_PYTHON_SIDECAR_IMAGE="${COLOCATED_PYTHON_SIDECAR_IMAGE:-gcr.io/cloud-tpu-multipod-dev/yixuannwang_google_com-runner@sha256:6682fc0f364d2246a8768265c8c06ef50e213d86e1639d367543c78a90a8f0f2}"
+export COLOCATED_PYTHON_SIDECAR_MEMORY="${COLOCATED_PYTHON_SIDECAR_MEMORY:-16Gi}"
+export COLOCATED_PYTHON_SIDECAR_SHM="${COLOCATED_PYTHON_SIDECAR_SHM:-1}"
+export CKPT_D2H_CONCURRENT_GB="${CKPT_D2H_CONCURRENT_GB:-32}"
+export CKPT_USE_OCDBT="${CKPT_USE_OCDBT:-1}"
 export MAX_STALENESS=${MAX_STALENESS:-1}
 # With MAX_STALENESS > 0, `true` has the rollouts serve the oldest in-flight
 # prompt batch first (vLLM priority scheduling, priority = batch index) instead

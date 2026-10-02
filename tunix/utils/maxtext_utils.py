@@ -552,17 +552,18 @@ def build_maxtext_config(
       )
     argv.append(f"pathways_checkpointing_impl={impl}")
 
-    # Keep OCDBT/zarr3 off in BOTH modes: colocated_python supports them, but matching
-    # the persistence layout keeps checkpoints restorable across a mode switch.
+    # OCDBT packfile layout: colocated_python can write OCDBT (fewer GCS objects,
+    # no metadata-QPS bursts at scale); persistence rejects it. Default off (plain
+    # Zarr v2) because OCDBT checkpoints are NOT restorable by Pathways persistence.
+    use_ocdbt = os.environ.get("CKPT_USE_OCDBT", "0").strip().lower() in ("1", "true")
+    ocdbt_on = impl == _COLOCATED_PYTHON_IMPL and use_ocdbt
+    if use_ocdbt and not ocdbt_on:
+      logging.warning("CKPT_USE_OCDBT=1 ignored: Pathways persistence (impl=%s) rejects OCDBT/zarr3; forcing both off.", impl)
     logging.info(
-        "ENABLE_PATHWAYS_PERSISTENCE=1 (impl=%s); disabling OCDBT/zarr3 so the Pathways "
-        "handler can save directly from the TPU workers and both modes share one layout.",
-        impl,
+        "ENABLE_PATHWAYS_PERSISTENCE=1 (impl=%s, CKPT_USE_OCDBT=%d); %s OCDBT packfile layout (zarr3 off).",
+        impl, int(use_ocdbt), "enabling" if ocdbt_on else "disabling",
     )
-    argv.extend([
-        "checkpoint_storage_use_ocdbt=false",
-        "checkpoint_storage_use_zarr3=false",
-    ])
+    argv.extend([f"checkpoint_storage_use_ocdbt={str(ocdbt_on).lower()}", "checkpoint_storage_use_zarr3=false"])
 
   _ckpt_async = os.environ.get("CHECKPOINT_ASYNC", "").strip()
   if _ckpt_async:
@@ -616,6 +617,11 @@ def build_maxtext_config(
     return pyconfig.initialize(argv)
   except ValueError as e:
     if "pathways_checkpointing_impl" in str(e):
+      if f"pathways_checkpointing_impl={_COLOCATED_PYTHON_IMPL}" in argv:
+        raise ValueError(
+            "PATHWAYS_CHECKPOINTING_IMPL='colocated_python' was requested, but "
+            "the installed MaxText does not recognize 'pathways_checkpointing_impl'."
+        ) from e
       argv = [
           arg
           for arg in argv
