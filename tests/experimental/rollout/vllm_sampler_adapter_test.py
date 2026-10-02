@@ -521,8 +521,8 @@ class RoundUuidTest(absltest.TestCase):
     seen_prompts = []
 
     class _FakeEngine:
-      def generate(self, engine_prompt, vllm_params, request_id=None):
-        del vllm_params, request_id
+      def generate(self, engine_prompt, vllm_params, request_id=None, **kwargs):
+        del vllm_params, request_id, kwargs
         seen_prompts.append(engine_prompt)
         prompt_ids = (
             engine_prompt.get("prompt_token_ids", [10])
@@ -596,6 +596,20 @@ class RoundUuidTest(absltest.TestCase):
         seen_prompts[2],
         {"prompt_token_ids": [40, 41], "cache_salt": "policy_v3"},
     )
+
+  def test_in_flight_weight_updates_env_var_enables_partial_rollout(self):
+    from tunix.experimental.rollout import vllm_sampler_v2
+
+    with mock.patch.dict("os.environ", {"IN_FLIGHT_WEIGHT_UPDATES": "true"}):
+      sampler = vllm_sampler_v2.RLVllmSampler(
+          engine_args=SimpleNamespace(enable_prefix_caching=True),
+      )
+      self.assertTrue(sampler._partial_rollout)
+    with mock.patch.dict("os.environ", {"IN_FLIGHT_WEIGHT_UPDATES": "false"}):
+      sampler = vllm_sampler_v2.RLVllmSampler(
+          engine_args=SimpleNamespace(enable_prefix_caching=True),
+      )
+      self.assertFalse(sampler._partial_rollout)
 
 
 if __name__ == "__main__":

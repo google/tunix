@@ -267,7 +267,7 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
     )
     if partial_rollout is None:
       partial_rollout = (
-          os.environ.get("PARTIAL_ROLLOUT", "false").lower()
+          os.environ.get("IN_FLIGHT_WEIGHT_UPDATES", "false").lower()
           in ("true", "1")
       )
     self._partial_rollout = bool(partial_rollout)
