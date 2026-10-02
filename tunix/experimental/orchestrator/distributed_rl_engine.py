@@ -111,10 +111,11 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
   ) -> None:
     """Seeds trainer-side weight sync with the rollout target-state skeleton."""
     trainer = self._trainer_workers.get(role)
-    if trainer is None or not self._rollout_workers:
+    active_rollouts = self._rollout_pool.actors
+    if trainer is None or not active_rollouts:
       return
 
-    rollout = self._rollout_workers[0]
+    rollout = active_rollouts[0]
     try:
       target_state = await self._invoke_worker(rollout, "get_target_state")
       await self._invoke_worker(
@@ -145,14 +146,14 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     logging.info(
         "Dispatching %d rollout request(s) across %d worker(s).",
         len(requests),
-        len(self._rollout_workers),
+        len(self._rollout_pool),
     )
     for req in requests:
       logging.debug(
           "Dispatched rollout request (prompt_id=%s, group_index=%d,"
           " request_id=%s).",
-          getattr(req, "prompt_id", ""),
-          getattr(req, "group_index", 0),
+          req.prompt_id,
+          req.group_index,
           req.request_id,
       )
     await asyncio.gather(
@@ -327,7 +328,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       self, timeout_s: float = remote_execution.LONG_POLL_TIMEOUT_S
   ) -> list[datatypes.TrajectoryItem]:
     """Concurrently long-polls completed rollout responses across all workers."""
-    if not self._rollout_workers:
+    if not self._rollout_pool:
       return []
 
     completed: list[datatypes.TrajectoryItem] = []
@@ -360,7 +361,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       **kwargs: Any,
   ) -> list[datatypes.TrajectoryItem]:
     """Blocking rollout generation: load-balances prompts across workers and awaits completion."""
-    if not self._rollout_workers:
+    if not self._rollout_pool:
       raise ValueError("DistributedRLEngine has no registered rollout workers.")
 
     if kwargs:
@@ -374,7 +375,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         "Generating rollouts for %d prompt(s)/request(s) across %d"
         " worker(s)...",
         len(prompts),
-        len(self._rollout_workers),
+        len(self._rollout_pool),
     )
     generation_kwargs = (
         generation_args.as_kwargs() if generation_args is not None else {}
@@ -385,13 +386,29 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         generation_args=generation_args,
         route_metadata=route_metadata,
     )
-    worker_to_requests: dict[Any, list[datatypes.RolloutRequest]] = (
-        collections.defaultdict(list)
-    )
+    worker_to_requests: dict[
+        remote_execution.ActorHandle, list[datatypes.RolloutRequest]
+    ] = collections.defaultdict(list)
+    active_actors = set(self._rollout_pool.actors)
+    routed_by_key: dict[str, remote_execution.ActorHandle] = {}
     for req in requests:
-      worker = self._rollout_pool._get_next_actor(
-          kwargs={"route_key": req.traj_id}
-      )
+      if (
+          req.traj_id in routed_by_key
+          and routed_by_key[req.traj_id] in active_actors
+      ):
+        worker = routed_by_key[req.traj_id]
+      else:
+        selected = self._rollout_pool.select_actor(
+            route_key=req.traj_id,
+            load_fn=lambda a: len(worker_to_requests[a]),
+        )
+        if selected is None:
+          raise RuntimeError(
+              "Failed to select an available rollout worker for trajectory"
+              f" {req.traj_id}."
+          )
+        worker = selected
+        routed_by_key[req.traj_id] = worker
       worker_to_requests[worker].append(req)
 
     tasks = [
@@ -520,11 +537,12 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
   ):
     """Retrieves step metrics from the worker(s) registered for the specified role."""
     if role == datatypes.Role.ROLLOUT:
-      if not self._rollout_workers:
+      active_rollouts = self._rollout_pool.actors
+      if not active_rollouts:
         raise ValueError(f"No rollout workers registered for role {role}")
       tasks = [
           self._invoke_worker(w, "get_metrics", **kwargs)
-          for w in self._rollout_workers
+          for w in active_rollouts
       ]
       results = await asyncio.gather(*tasks, return_exceptions=True)
       return [  # pyrefly: ignore[bad-return]
@@ -589,7 +607,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           _configure()
 
       case datatypes.Role.ROLLOUT:
-        if not self._rollout_workers:
+        if not self._rollout_pool:
           raise ValueError("No rollout workers registered on engine.")
         logging.info("Configuring rollout workers...")
 
