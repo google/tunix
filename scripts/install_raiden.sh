@@ -37,8 +37,8 @@
 
 set -euo pipefail
 
-RAIDEN_WHEEL_URL=${RAIDEN_WHEEL_URL:-"https://storage.googleapis.com/cloud-tpu-inference-test-datenglin/wheels/tpu_sync_jax-0.0.1.dev20261001051000-cp312-cp312-manylinux_2_31_x86_64.whl"}
-RAIDEN_WHEEL_SHA256=${RAIDEN_WHEEL_SHA256:-"e3da1065427962eba6b1e264ef47eea64a51a8e7fe633993f8739cb9201ee27b"}
+RAIDEN_WHEEL_URL=${RAIDEN_WHEEL_URL:-"https://storage.googleapis.com/atwigg-trellis-us-east1/wheels/tpu_sync_jax-0.0.1.dev991963055-cp312-cp312-manylinux_2_31_x86_64.whl"}
+RAIDEN_WHEEL_SHA256=${RAIDEN_WHEEL_SHA256:-"e43462742b0b59aed1ef65e6a0f9bc2f708d42077b321f3ddc4871db553e85d1"}
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 RAIDEN_WHEEL_DIR=${RAIDEN_WHEEL_DIR:-"${ROOT_DIR}/raiden_wheels"}
