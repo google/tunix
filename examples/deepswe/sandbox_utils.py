@@ -703,7 +703,7 @@ class PrewarmDatasetIterator:
       unwarm_on_exhaustion: bool = False,
       scaffold: str = "r2egym",
       image_rewrite: Any | None = None,
-      wait_initial: bool = True,
+      wait_initial: bool | None = None,
       max_staleness: int = 0,
       max_workers: int = 16,
       scale_on_hold: bool | None = None,
@@ -716,7 +716,14 @@ class PrewarmDatasetIterator:
     self.batch_size = max(1, batch_size)
     self.max_warmpool_replicas = max_warmpool_replicas
     self.unwarm_on_exhaustion = unwarm_on_exhaustion
-    self.wait_initial = wait_initial
+    if wait_initial is None:
+      # Waiting blocks startup for up to the readiness timeout per wave of
+      # pools when the cluster cannot start pods (e.g. out of Cilium
+      # identities); rollouts wait for their own claims anyway.
+      wait_initial = os.environ.get(
+          "DEEPSWE_PREWARM_WAIT_INITIAL", "1"
+      ).lower() in ("1", "true")
+    self.wait_initial = bool(wait_initial)
     self.max_staleness = max(0, int(max_staleness))
     self.max_workers = max(1, int(max_workers))
     if scale_on_hold is None:

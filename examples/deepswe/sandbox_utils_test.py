@@ -187,6 +187,25 @@ class SandboxUtilsTest(absltest.TestCase):
     )
     self.assertEqual(fleet.warm_calls, [("img_A", 2, False)])
 
+  def test_wait_initial_env_default(self):
+    dataset = [{"prompt": "p0", "docker_image": "img_A"}]
+    for env, explicit, want in (
+        ({}, None, True),
+        ({"DEEPSWE_PREWARM_WAIT_INITIAL": "0"}, None, False),
+        ({"DEEPSWE_PREWARM_WAIT_INITIAL": "1"}, None, True),
+        ({"DEEPSWE_PREWARM_WAIT_INITIAL": "0"}, True, True),
+    ):
+      fleet = FakeFleet()
+      with mock.patch.dict(os.environ, env, clear=True):
+        sandbox_utils.PrewarmDatasetIterator(
+            list(dataset),
+            fleet=fleet,
+            num_generations=2,
+            batch_size=1,
+            wait_initial=explicit,
+        )
+      self.assertEqual(fleet.warm_calls, [("img_A", 2, want)], (env, explicit))
+
   def test_batched_items_format_preserved(self):
     fleet = FakeFleet()
     dataset = [
