@@ -41,6 +41,9 @@ _ACTIVE_PREWARM_ITERATOR = None
 # this many seconds (0 disables the early report).
 _EARLY_NOTE_ENV = "DEEPSWE_PREWARM_EARLY_NOTE_S"
 _EARLY_NOTE_DEFAULT_S = 90.0
+# Optional cap on every prewarm pool's replicas (see
+# _max_warmpool_replicas_from_env).
+_MAX_REPLICAS_ENV = "DEEPSWE_PREWARM_MAX_REPLICAS"
 
 
 def patch_r2egym_for_agent_sandbox() -> None:
@@ -668,6 +671,32 @@ def _fleet_error_cls() -> type[Exception]:
   return FleetError
 
 
+def _max_warmpool_replicas_from_env() -> int | None:
+  """Warm pool cap from DEEPSWE_PREWARM_MAX_REPLICAS (unset: no cap).
+
+  When the cluster runs out of Cilium identities, warm pods are not ready by
+  the time their batch is claimed, so the claims start cold sandboxes anyway
+  and every prewarmed pod is wasted (it costs identities and queues for them
+  ahead of the cold pods). A cap of 1 then roughly halves the identities per
+  rollout. Values below 1 are raised to 1: claims need their image's pool to
+  exist (it carries the sandbox template), and scale-on-hold never creates a
+  pool with 0 replicas.
+
+  Returns:
+    The cap, or None when the variable is unset, empty or not an integer.
+  """
+  raw = os.environ.get(_MAX_REPLICAS_ENV, "").strip()
+  if not raw:
+    return None
+  try:
+    return max(1, int(raw))
+  except ValueError:
+    logging.warning(
+        "[PrewarmDatasetIterator] ignoring %s=%r", _MAX_REPLICAS_ENV, raw
+    )
+    return None
+
+
 class PrewarmDatasetIterator:
   """Lookahead dataset iterator: pre-warms Agent Sandboxes on Kubernetes.
 
@@ -714,6 +743,8 @@ class PrewarmDatasetIterator:
     self.fleet = fleet or get_global_fleet()
     self.num_generations = num_generations
     self.batch_size = max(1, batch_size)
+    if max_warmpool_replicas is None:
+      max_warmpool_replicas = _max_warmpool_replicas_from_env()
     self.max_warmpool_replicas = max_warmpool_replicas
     self.unwarm_on_exhaustion = unwarm_on_exhaustion
     if wait_initial is None:

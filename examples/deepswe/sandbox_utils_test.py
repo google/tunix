@@ -206,6 +206,35 @@ class SandboxUtilsTest(absltest.TestCase):
         )
       self.assertEqual(fleet.warm_calls, [("img_A", 2, want)], (env, explicit))
 
+  def test_max_warmpool_replicas_env_default(self):
+    dataset = [{"prompt": "p0", "docker_image": "img_A"}]
+    key = "DEEPSWE_PREWARM_MAX_REPLICAS"
+    for env, explicit, scale_on_hold, want in (
+        ({}, None, False, 4),
+        ({key: ""}, None, False, 4),
+        ({key: "1"}, None, False, 1),
+        ({key: "0"}, None, False, 1),  # Raised to 1: claims need the pool.
+        ({key: "-3"}, None, False, 1),
+        ({key: "abc"}, None, False, 4),
+        ({key: "1"}, 3, False, 3),  # An explicit cap wins.
+        ({key: "1"}, None, True, 1),
+        ({}, None, True, 4),
+    ):
+      fleet = FakeFleet()
+      with mock.patch.dict(os.environ, env, clear=True):
+        iterator = sandbox_utils.PrewarmDatasetIterator(
+            list(dataset),
+            fleet=fleet,
+            num_generations=4,
+            batch_size=1,
+            max_warmpool_replicas=explicit,
+            scale_on_hold=scale_on_hold,
+        )
+      case = (env, explicit, scale_on_hold)
+      self.assertEqual(fleet.warm_calls, [("img_A", want, True)], case)
+      self.assertEqual(fleet.active_pools.get("img_A"), want, case)
+      iterator.close()
+
   def test_batched_items_format_preserved(self):
     fleet = FakeFleet()
     dataset = [
