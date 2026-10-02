@@ -219,6 +219,12 @@ export CHECKPOINT_MAX_TO_KEEP="${CHECKPOINT_MAX_TO_KEEP:-10}"
 # adds the optimizer state, which is ~6x larger and slower to write than a step.
 export CHECKPOINT_OPTIMIZER_INTERVAL_STEPS="${CHECKPOINT_OPTIMIZER_INTERVAL_STEPS:-5}"
 export CHECKPOINT_ASYNC=${CHECKPOINT_ASYNC:-true}
+# `true` drops an async save whose background half outlived
+# async_checkpointing_timeout_secs (1200 s) rather than failing the run from the
+# next checkpoint call. The step is not restorable and its uncommitted
+# <step>.orbax-checkpoint-tmp directory stays in the bucket, ~5 TiB at 397B.
+# `false` is the pre-maxtext#5494 behaviour and is passed through explicitly.
+export CHECKPOINT_ABANDON_FAILED_SAVES="${CHECKPOINT_ABANDON_FAILED_SAVES:-false}"
 export ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE:-1}
 export MAX_STALENESS=${MAX_STALENESS:-1}
 # With MAX_STALENESS > 0, `true` has the rollouts serve the oldest in-flight

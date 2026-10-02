@@ -667,6 +667,21 @@ class MaxTextUtilsTest(absltest.TestCase):
     self.assertIn("checkpoint_storage_use_zarr3=false", argv)
     self.assertIn("async_checkpointing=false", argv)
 
+  def test_checkpoint_abandon_failed_saves_reaches_maxtext(self):
+    with mock.patch.dict(
+        "os.environ", {"CHECKPOINT_ABANDON_FAILED_SAVES": "true"}, clear=False
+    ):
+      argv = self._build_config_argv(base_output_directory="gs://bucket/out")
+    self.assertIn("abandon_failed_checkpoint_saves=true", argv)
+
+  def test_checkpoint_abandon_failed_saves_unset_pins_pre_5494_behaviour(self):
+    # Skipping the variable must keep aborting the run on a failed save even if
+    # MaxText later flips its own default, so the flag is emitted either way.
+    with mock.patch.dict("os.environ", {}, clear=False):
+      os.environ.pop("CHECKPOINT_ABANDON_FAILED_SAVES", None)
+      argv = self._build_config_argv(base_output_directory="gs://bucket/out")
+    self.assertIn("abandon_failed_checkpoint_saves=false", argv)
+
   def test_pathways_checkpointing_impl_defaults_to_persistence(self):
     with mock.patch.dict("os.environ", {"ENABLE_PATHWAYS_PERSISTENCE": "1"}, clear=False):
       os.environ.pop("PATHWAYS_CHECKPOINTING_IMPL", None)
