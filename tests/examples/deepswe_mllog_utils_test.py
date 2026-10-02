@@ -1016,6 +1016,82 @@ class MllogUtilsTest(absltest.TestCase):
     self.assertEqual(block_stop["metadata"]["step"], 5)
     self.assertEqual(block_stop["metadata"]["samples_count"], 1280)
 
+  def test_append_checkpoint_manifest_tolerates_gcs_io_error(self):
+    args = self._finish_training_args()
+    mllog_utils.init_start(args)
+    mllog_utils.train_start(args, step=0)
+    manifest = "gs://forbidden-bucket/mllog/eval_checkpoints.jsonl"
+    fake_fs = mock.MagicMock()
+    fake_fs.exists.side_effect = OSError("Forbidden: scope not authorized")
+    fake_fs.open.side_effect = OSError("Forbidden: scope not authorized")
+    with (
+        mock.patch("fsspec.filesystem", return_value=fake_fs),
+        self.assertLogs(level="WARNING") as cm,
+    ):
+      mllog_utils.append_checkpoint_manifest(
+          manifest, {"step": 22, "timestamp_ms": 2200}
+      )
+    self.assertTrue(
+        any("Failed to write checkpoint manifest" in msg for msg in cm.output)
+    )
+    # In-memory checkpoint progress is still recorded for finish_training.
+    mllog_utils.finish_training(
+        args, status="aborted", completed_steps=21, last_step_time_ms=None
+    )
+    events = _read_mllog_events(os.path.join(self.test_dir, "seed_42.out"))
+    block_stops = [e for e in events if e["key"] == "block_stop"]
+    self.assertLen(block_stops, 1)
+    self.assertEqual(block_stops[0]["metadata"]["step"], 22)
+    self.assertEqual(block_stops[0]["time_ms"], 2200)
+
+  def test_download_from_gcs_tolerates_io_error(self):
+    fake_fs = mock.MagicMock()
+    fake_fs.exists.side_effect = OSError("Forbidden")
+    with (
+        mock.patch("fsspec.filesystem", return_value=fake_fs),
+        self.assertLogs(level="WARNING") as cm,
+    ):
+      mllog_utils._download_from_gcs_if_exists(  # pylint: disable=protected-access
+          "gs://forbidden-bucket/mllog/seed_1.out",
+          os.path.join(self.test_dir, "seed_1.out"),
+      )
+    self.assertTrue(
+        any("Failed to download mllog file" in msg for msg in cm.output)
+    )
+
+  def test_rcp_logging_functions_do_not_raise_on_mllogger_failure(self):
+    broken_mllogger = mock.MagicMock()
+    broken_mllogger.logger.handlers = []
+    broken_mllogger.event.side_effect = OSError("disk full")
+    broken_mllogger.start.side_effect = OSError("disk full")
+    broken_mllogger.end.side_effect = OSError("disk full")
+    args = self._finish_training_args()
+    with (
+        mock.patch.object(mllog_utils, "mllogger", broken_mllogger),
+        mock.patch.object(mllog_utils, "_is_master_process", return_value=True),
+    ):
+      mllog_utils.init_start(args)
+      mllog_utils.init_print(args)
+      mllog_utils.train_start(args, step=0)
+      mllog_utils.log_rcp_step_stats(
+          {"loss": 0.5, "reward": 1.0, "train_step_time": 10.0},
+          args=args,
+          step=1,
+      )
+      self.assertTrue(
+          mllog_utils.check_eval(args, step=1, eval_accuracy=0.75)
+      )
+      self.assertTrue(
+          mllog_utils.log_offline_eval_step(
+              step=1,
+              samples_count=256,
+              eval_accuracy=0.75,
+              target_accuracy=0.69,
+          )
+      )
+      mllog_utils.train_stop(args, step=1)
+      mllog_utils.run_stop(status="success", samples_count=256)
+
 
 if __name__ == "__main__":
   absltest.main()

@@ -66,36 +66,41 @@ def _inspect_existing_log(local_path: str) -> None:
   _reset_block_state()
   if not os.path.exists(local_path):
     return
-  with open(local_path, "r", encoding="utf-8") as f:
-    for line in f:
-      if ":::MLLOG " not in line:
-        continue
-      try:
-        payload = json.loads(line.split(":::MLLOG ", 1)[1])
-      except ValueError:
-        # A truncated trailing line from an interrupted upload.
-        continue
-      if not isinstance(payload, dict):
-        continue
-      key = payload.get("key")
-      metadata = payload.get("metadata")
-      if not isinstance(metadata, dict):
-        metadata = {}
-      if key == "block_start":
-        _block_open = True
-        _train_stopped = False
-        _last_block_step = int(metadata.get("step", 0))
-        _last_block_samples = None
-        _last_block_time_ms = None
-      elif key == "tracked_stats" and _block_open:
-        if "step" in metadata:
-          _last_block_step = int(metadata["step"])
-        if "samples_count" in metadata:
-          _last_block_samples = int(metadata["samples_count"])
-        _last_block_time_ms = payload.get("time_ms")
-      elif key == "block_stop":
-        _block_open = False
-        _train_stopped = True
+  try:
+    with open(local_path, "r", encoding="utf-8") as f:
+      for line in f:
+        if ":::MLLOG " not in line:
+          continue
+        try:
+          payload = json.loads(line.split(":::MLLOG ", 1)[1])
+        except ValueError:
+          # A truncated trailing line from an interrupted upload.
+          continue
+        if not isinstance(payload, dict):
+          continue
+        key = payload.get("key")
+        metadata = payload.get("metadata")
+        if not isinstance(metadata, dict):
+          metadata = {}
+        if key == "block_start":
+          _block_open = True
+          _train_stopped = False
+          _last_block_step = int(metadata.get("step", 0))
+          _last_block_samples = None
+          _last_block_time_ms = None
+        elif key == "tracked_stats" and _block_open:
+          if "step" in metadata:
+            _last_block_step = int(metadata["step"])
+          if "samples_count" in metadata:
+            _last_block_samples = int(metadata["samples_count"])
+          _last_block_time_ms = payload.get("time_ms")
+        elif key == "block_stop":
+          _block_open = False
+          _train_stopped = True
+  except Exception as exc:  # pylint: disable=broad-exception-caught
+    logging.warning(
+        "Failed to inspect existing mllog file %s: %s", local_path, exc
+    )
 
 
 def _ensure_training_block_closed(
@@ -131,16 +136,24 @@ def _ensure_training_block_closed(
 def _download_from_gcs_if_exists(gcs_path: str, local_path: str) -> None:
   """Downloads an existing GCS mllog file so new events append to it."""
   try:
-    import fsspec  # pylint: disable=g-import-not-at-top
+    try:
+      import fsspec  # pylint: disable=g-import-not-at-top
 
-    fs = fsspec.filesystem("gs")
-    if fs.exists(gcs_path):
-      fs.get(gcs_path, local_path)
-  except (ImportError, ModuleNotFoundError):
-    import tensorflow as tf  # pylint: disable=g-import-not-at-top
+      fs = fsspec.filesystem("gs")
+      if fs.exists(gcs_path):
+        fs.get(gcs_path, local_path)
+    except (ImportError, ModuleNotFoundError):
+      import tensorflow as tf  # pylint: disable=g-import-not-at-top
 
-    if tf.io.gfile.exists(gcs_path):
-      tf.io.gfile.copy(gcs_path, local_path, overwrite=True)
+      if tf.io.gfile.exists(gcs_path):
+        tf.io.gfile.copy(gcs_path, local_path, overwrite=True)
+  except Exception as exc:  # pylint: disable=broad-exception-caught
+    logging.warning(
+        "Failed to download mllog file %s to %s: %s",
+        gcs_path,
+        local_path,
+        exc,
+    )
 
 
 def get_mllog_file_path(
@@ -227,48 +240,51 @@ def configure_logger(
   if not (_is_master_process() and mllog is not None and mllogger is not None):
     return
 
-  seed_val = seed if seed is not None else 1
-  if filename is None and metric_logger_dir is not None:
-    if metric_logger_dir.startswith("gs://"):
-      if metric_logger_dir.endswith(".out") or metric_logger_dir.endswith(
+  try:
+    seed_val = seed if seed is not None else 1
+    if filename is None and metric_logger_dir is not None:
+      if metric_logger_dir.startswith("gs://"):
+        if metric_logger_dir.endswith(".out") or metric_logger_dir.endswith(
+            ".log"
+        ):
+          _gcs_target_path = metric_logger_dir
+        else:
+          _gcs_target_path = os.path.join(
+              metric_logger_dir.rstrip("/"), f"seed_{seed_val}.out"
+          )
+        filename = os.path.join(
+            "/tmp/rcp_logs", f"seed_{seed_val}_{os.getpid()}.out"
+        )
+      elif metric_logger_dir.endswith(".out") or metric_logger_dir.endswith(
           ".log"
       ):
-        _gcs_target_path = metric_logger_dir
+        filename = metric_logger_dir
       else:
-        _gcs_target_path = os.path.join(
-            metric_logger_dir.rstrip("/"), f"seed_{seed_val}.out"
-        )
-      filename = os.path.join(
-          "/tmp/rcp_logs", f"seed_{seed_val}_{os.getpid()}.out"
-      )
-    elif metric_logger_dir.endswith(".out") or metric_logger_dir.endswith(
-        ".log"
-    ):
-      filename = metric_logger_dir
-    else:
-      filename = os.path.join(metric_logger_dir, f"seed_{seed_val}.out")
+        filename = os.path.join(metric_logger_dir, f"seed_{seed_val}.out")
 
-  if filename is not None:
-    abs_filename = os.path.abspath(filename)
-    _local_log_path = abs_filename
-    os.makedirs(os.path.dirname(abs_filename), exist_ok=True)
-    existing_files = [
-        os.path.abspath(getattr(h, "baseFilename", ""))
-        for h in getattr(mllogger.logger, "handlers", [])
-        if isinstance(h, logging.FileHandler)
-    ]
-    if abs_filename not in existing_files:
-      if append:
-        if _gcs_target_path and not os.path.exists(abs_filename):
-          _download_from_gcs_if_exists(_gcs_target_path, abs_filename)
-      elif os.path.exists(abs_filename):
-        # A stale log from an earlier (aborted) run of this job.
-        os.remove(abs_filename)
-      _inspect_existing_log(abs_filename)
-      try:
-        mllog.config(filename=filename)
-      except TypeError:
-        mllog.config(filename=filename, root_dir=os.getcwd())
+    if filename is not None:
+      abs_filename = os.path.abspath(filename)
+      _local_log_path = abs_filename
+      os.makedirs(os.path.dirname(abs_filename), exist_ok=True)
+      existing_files = [
+          os.path.abspath(getattr(h, "baseFilename", ""))
+          for h in getattr(mllogger.logger, "handlers", [])
+          if isinstance(h, logging.FileHandler)
+      ]
+      if abs_filename not in existing_files:
+        if append:
+          if _gcs_target_path and not os.path.exists(abs_filename):
+            _download_from_gcs_if_exists(_gcs_target_path, abs_filename)
+        elif os.path.exists(abs_filename):
+          # A stale log from an earlier (aborted) run of this job.
+          os.remove(abs_filename)
+        _inspect_existing_log(abs_filename)
+        try:
+          mllog.config(filename=filename)
+        except TypeError:
+          mllog.config(filename=filename, root_dir=os.getcwd())
+  except Exception as exc:  # pylint: disable=broad-exception-caught
+    logging.warning("Failed to configure mllogger: %s", exc)
 
 
 def _is_master_process() -> bool:
@@ -307,73 +323,88 @@ def init_start(
     filename: Optional[str] = None,
 ):
   """Logs CACHE_CLEAR and marks the beginning of the initialization phase."""
-  if _is_master_process() and mllogger is not None:
-    _reset_block_state()
-    if args is not None:
-      if metric_logger_dir is None:
-        metric_logger_dir = getattr(args, "metric_logger_dir", None)
-      if seed is None:
-        seed = getattr(args, "seed", 1)
-    if metric_logger_dir is not None or filename is not None:
-      configure_logger(
-          metric_logger_dir=metric_logger_dir,
-          seed=seed,
-          filename=filename,
-          append=False,
-      )
-    cache_clear_key = getattr(constants, "CACHE_CLEAR", "cache_clear")
-    init_start_key = getattr(constants, "INIT_START", "init_start")
-    mllogger.event(key=cache_clear_key, value=True)
-    mllogger.start(key=init_start_key)
+  try:
+    if _is_master_process() and mllogger is not None:
+      _reset_block_state()
+      if args is not None:
+        if metric_logger_dir is None:
+          metric_logger_dir = getattr(args, "metric_logger_dir", None)
+        if seed is None:
+          seed = getattr(args, "seed", 1)
+      if metric_logger_dir is not None or filename is not None:
+        configure_logger(
+            metric_logger_dir=metric_logger_dir,
+            seed=seed,
+            filename=filename,
+            append=False,
+        )
+      cache_clear_key = getattr(constants, "CACHE_CLEAR", "cache_clear")
+      init_start_key = getattr(constants, "INIT_START", "init_start")
+      mllogger.event(key=cache_clear_key, value=True)
+      mllogger.start(key=init_start_key)
+  except Exception as exc:  # pylint: disable=broad-exception-caught
+    logging.warning("RCP logging init_start failed: %s", exc)
 
 
 def init_stop():
   """Marks the end of the initialization phase."""
-  if _is_master_process() and mllogger is not None:
-    init_stop_key = getattr(constants, "INIT_STOP", "init_stop")
-    mllogger.end(key=init_stop_key)
+  try:
+    if _is_master_process() and mllogger is not None:
+      init_stop_key = getattr(constants, "INIT_STOP", "init_stop")
+      mllogger.end(key=init_stop_key)
+  except Exception as exc:  # pylint: disable=broad-exception-caught
+    logging.warning("RCP logging init_stop failed: %s", exc)
 
 
 def run_start():
   """Marks the start of the training run."""
-  if _is_master_process() and mllogger is not None:
-    run_start_key = getattr(constants, "RUN_START", "run_start")
-    mllogger.start(key=run_start_key)
+  try:
+    if _is_master_process() and mllogger is not None:
+      run_start_key = getattr(constants, "RUN_START", "run_start")
+      mllogger.start(key=run_start_key)
+  except Exception as exc:  # pylint: disable=broad-exception-caught
+    logging.warning("RCP logging run_start failed: %s", exc)
 
 
 def block_start(args=None, step: int = 0, samples_count: Optional[int] = None):
   """Marks the start of a training block."""
   global _block_open, _train_stopped, _last_block_step, _last_block_samples, _last_block_time_ms
-  if _is_master_process() and mllogger is not None:
-    if samples_count is None and args is not None:
-      global_batch_size = getattr(args, "batch_size", 1) * getattr(args, "num_generations", 1)
-      max_steps = getattr(args, "max_steps", None)
-      eval_interval = getattr(args, "eval_every_n_steps", max_steps if max_steps is not None else 1)
-      if max_steps is not None:
-        eval_interval = min(int(eval_interval), max(0, int(max_steps) - int(step)))
-      samples_count = int(eval_interval) * global_batch_size
+  try:
+    if _is_master_process() and mllogger is not None:
+      if samples_count is None and args is not None:
+        global_batch_size = getattr(args, "batch_size", 1) * getattr(args, "num_generations", 1)
+        max_steps = getattr(args, "max_steps", None)
+        eval_interval = getattr(args, "eval_every_n_steps", max_steps if max_steps is not None else 1)
+        if max_steps is not None:
+          eval_interval = min(int(eval_interval), max(0, int(max_steps) - int(step)))
+        samples_count = int(eval_interval) * global_batch_size
 
-    metadata = {"step": int(step)}
-    if samples_count is not None:
-      metadata[getattr(constants, "SAMPLES_COUNT", "samples_count")] = int(samples_count)
+      metadata = {"step": int(step)}
+      if samples_count is not None:
+        metadata[getattr(constants, "SAMPLES_COUNT", "samples_count")] = int(samples_count)
 
-    mllogger.start(
-        key=getattr(constants, "BLOCK_START", "block_start"),
-        metadata=metadata,
-    )
-    _block_open = True
-    _train_stopped = False
-    _last_block_step = int(step)
-    _last_block_samples = None
-    _last_block_time_ms = None
+      mllogger.start(
+          key=getattr(constants, "BLOCK_START", "block_start"),
+          metadata=metadata,
+      )
+      _block_open = True
+      _train_stopped = False
+      _last_block_step = int(step)
+      _last_block_samples = None
+      _last_block_time_ms = None
+  except Exception as exc:  # pylint: disable=broad-exception-caught
+    logging.warning("RCP logging block_start failed: %s", exc)
 
 
 def train_start(args=None, step: int = 0, samples_count: Optional[int] = None):
   """Marks initialization end, run start, and the first training block start."""
-  init_stop()
-  run_start()
-  block_start(args=args, step=step, samples_count=samples_count)
-  _flush_to_gcs_if_needed()
+  try:
+    init_stop()
+    run_start()
+    block_start(args=args, step=step, samples_count=samples_count)
+    _flush_to_gcs_if_needed()
+  except Exception as exc:  # pylint: disable=broad-exception-caught
+    logging.warning("RCP logging train_start failed: %s", exc)
 
 
 def block_stop(
@@ -383,19 +414,22 @@ def block_stop(
 ):
   """Marks the end of a training block."""
   global _block_open, _train_stopped
-  if _is_master_process() and mllogger is not None:
-    metadata = {"step": int(step)}
-    if samples_count is not None:
-      metadata[getattr(constants, "SAMPLES_COUNT", "samples_count")] = int(samples_count)
+  try:
+    if _is_master_process() and mllogger is not None:
+      metadata = {"step": int(step)}
+      if samples_count is not None:
+        metadata[getattr(constants, "SAMPLES_COUNT", "samples_count")] = int(samples_count)
 
-    extra_kwargs = {} if time_ms is None else {"time_ms": int(time_ms)}
-    mllogger.end(
-        key=getattr(constants, "BLOCK_STOP", "block_stop"),
-        metadata=metadata,
-        **extra_kwargs,
-    )
-    _block_open = False
-    _train_stopped = True
+      extra_kwargs = {} if time_ms is None else {"time_ms": int(time_ms)}
+      mllogger.end(
+          key=getattr(constants, "BLOCK_STOP", "block_stop"),
+          metadata=metadata,
+          **extra_kwargs,
+      )
+      _block_open = False
+      _train_stopped = True
+  except Exception as exc:  # pylint: disable=broad-exception-caught
+    logging.warning("RCP logging block_stop failed: %s", exc)
 
 
 def train_stop(
@@ -423,18 +457,21 @@ def train_stop(
   del status
   if _train_stopped:
     return
-  if args is not None:
-    if step is None:
-      step = getattr(args, "max_steps", 0)
-    if samples_count is None:
-      global_batch_size = getattr(args, "batch_size", 1) * getattr(
-          args, "num_generations", 1
-      )
-      samples_count = int(step) * global_batch_size
+  try:
+    if args is not None:
+      if step is None:
+        step = getattr(args, "max_steps", 0)
+      if samples_count is None:
+        global_batch_size = getattr(args, "batch_size", 1) * getattr(
+            args, "num_generations", 1
+        )
+        samples_count = int(step) * global_batch_size
 
-  step_val = 0 if step is None else int(step)
-  block_stop(step=step_val, samples_count=samples_count, time_ms=time_ms)
-  _flush_to_gcs_if_needed()
+    step_val = 0 if step is None else int(step)
+    block_stop(step=step_val, samples_count=samples_count, time_ms=time_ms)
+    _flush_to_gcs_if_needed()
+  except Exception as exc:  # pylint: disable=broad-exception-caught
+    logging.warning("RCP logging train_stop failed: %s", exc)
 
 
 def finish_training(
@@ -457,21 +494,24 @@ def finish_training(
   """
   if not _block_open:
     return
-  # A checkpoint is saved before weight sync, so it can be one step ahead of
-  # the trainer's last step result if the run is interrupted during sync.
-  step = max(completed_steps or 0, _last_checkpoint_step)
-  if step == 0 and status == "success":
-    step = getattr(args, "max_steps", 0)
-  train_stop(
-      args,
-      step=step,
-      status=status,
-      time_ms=(
-          last_step_time_ms
-          if last_step_time_ms is not None
-          else _last_checkpoint_time_ms
-      ),
-  )
+  try:
+    # A checkpoint is saved before weight sync, so it can be one step ahead of
+    # the trainer's last step result if the run is interrupted during sync.
+    step = max(completed_steps or 0, _last_checkpoint_step)
+    if step == 0 and status == "success":
+      step = getattr(args, "max_steps", 0)
+    train_stop(
+        args,
+        step=step,
+        status=status,
+        time_ms=(
+            last_step_time_ms
+            if last_step_time_ms is not None
+            else _last_checkpoint_time_ms
+        ),
+    )
+  except Exception as exc:  # pylint: disable=broad-exception-caught
+    logging.warning("RCP logging finish_training failed: %s", exc)
 
 
 def start_eval(
@@ -480,21 +520,24 @@ def start_eval(
     time_ms: Optional[int] = None,
 ):
   """Marks the start of an evaluation interval."""
-  if _is_master_process() and mllogger is not None:
-    # eval_start must not appear inside an open training block.
-    _ensure_training_block_closed(
-        fallback_samples_count=samples_count, fallback_time_ms=time_ms
-    )
-    metadata = {"step": int(step)}
-    if samples_count is not None:
-      metadata[getattr(constants, "SAMPLES_COUNT", "samples_count")] = int(samples_count)
+  try:
+    if _is_master_process() and mllogger is not None:
+      # eval_start must not appear inside an open training block.
+      _ensure_training_block_closed(
+          fallback_samples_count=samples_count, fallback_time_ms=time_ms
+      )
+      metadata = {"step": int(step)}
+      if samples_count is not None:
+        metadata[getattr(constants, "SAMPLES_COUNT", "samples_count")] = int(samples_count)
 
-    extra_kwargs = {} if time_ms is None else {"time_ms": int(time_ms)}
-    mllogger.start(
-        key=getattr(constants, "EVAL_START", "eval_start"),
-        metadata=metadata,
-        **extra_kwargs,
-    )
+      extra_kwargs = {} if time_ms is None else {"time_ms": int(time_ms)}
+      mllogger.start(
+          key=getattr(constants, "EVAL_START", "eval_start"),
+          metadata=metadata,
+          **extra_kwargs,
+      )
+  except Exception as exc:  # pylint: disable=broad-exception-caught
+    logging.warning("RCP logging start_eval failed: %s", exc)
 
 
 def end_eval(
@@ -505,35 +548,38 @@ def end_eval(
     time_ms: Optional[int] = None,
 ):
   """Marks the end of an evaluation interval and records eval accuracy."""
-  if _is_master_process() and mllogger is not None:
-    metadata = {"step": int(step)}
-    if samples_count is not None:
-      metadata[getattr(constants, "SAMPLES_COUNT", "samples_count")] = int(samples_count)
+  try:
+    if _is_master_process() and mllogger is not None:
+      metadata = {"step": int(step)}
+      if samples_count is not None:
+        metadata[getattr(constants, "SAMPLES_COUNT", "samples_count")] = int(samples_count)
 
-    extra_kwargs = {} if time_ms is None else {"time_ms": int(time_ms)}
-    if validation_time is not None:
+      extra_kwargs = {} if time_ms is None else {"time_ms": int(time_ms)}
+      if validation_time is not None:
+        mllogger.event(
+            key="tracked_stats",
+            value={"validation_time": float(validation_time)},
+            metadata={"step": int(step)},
+            **extra_kwargs,
+        )
+
+      eval_accuracy_metadata = {}
+      if samples_count is not None:
+        eval_accuracy_metadata[getattr(constants, "SAMPLES_COUNT", "samples_count")] = int(samples_count)
+
       mllogger.event(
-          key="tracked_stats",
-          value={"validation_time": float(validation_time)},
-          metadata={"step": int(step)},
+          key=getattr(constants, "EVAL_ACCURACY", "eval_accuracy"),
+          value=float(accuracy),
+          metadata=eval_accuracy_metadata,
           **extra_kwargs,
       )
-
-    eval_accuracy_metadata = {}
-    if samples_count is not None:
-      eval_accuracy_metadata[getattr(constants, "SAMPLES_COUNT", "samples_count")] = int(samples_count)
-
-    mllogger.event(
-        key=getattr(constants, "EVAL_ACCURACY", "eval_accuracy"),
-        value=float(accuracy),
-        metadata=eval_accuracy_metadata,
-        **extra_kwargs,
-    )
-    mllogger.end(
-        key=getattr(constants, "EVAL_STOP", "eval_stop"),
-        metadata=metadata,
-        **extra_kwargs,
-    )
+      mllogger.end(
+          key=getattr(constants, "EVAL_STOP", "eval_stop"),
+          metadata=metadata,
+          **extra_kwargs,
+      )
+  except Exception as exc:  # pylint: disable=broad-exception-caught
+    logging.warning("RCP logging end_eval failed: %s", exc)
 
 
 def log_offline_eval_step(
@@ -572,23 +618,26 @@ def log_offline_eval_step(
   if not (_is_master_process() and mllogger is not None):
     return passed
 
-  if emit_start_eval:
-    start_eval(step=int(step), samples_count=int(samples_count))
-  end_eval(
-      step=int(step),
-      accuracy=float(eval_accuracy),
-      samples_count=int(samples_count),
-      validation_time=validation_time,
-  )
-  if passed or is_last_checkpoint:
-    # run_stop flushes to GCS.
-    run_stop(
-        status="success" if passed else "aborted",
+  try:
+    if emit_start_eval:
+      start_eval(step=int(step), samples_count=int(samples_count))
+    end_eval(
+        step=int(step),
+        accuracy=float(eval_accuracy),
         samples_count=int(samples_count),
-        time_ms=checkpoint_timestamp_ms,
+        validation_time=validation_time,
     )
-  else:
-    _flush_to_gcs_if_needed()
+    if passed or is_last_checkpoint:
+      # run_stop flushes to GCS.
+      run_stop(
+          status="success" if passed else "aborted",
+          samples_count=int(samples_count),
+          time_ms=checkpoint_timestamp_ms,
+      )
+    else:
+      _flush_to_gcs_if_needed()
+  except Exception as exc:  # pylint: disable=broad-exception-caught
+    logging.warning("RCP logging log_offline_eval_step failed: %s", exc)
   return passed
 
 
@@ -608,46 +657,59 @@ def compute_val_start_step(
 
 def _read_manifest_text(manifest_path: str) -> str:
   """Returns the manifest content (local or gs://), or "" if it is missing."""
-  if not manifest_path.startswith("gs://"):
-    if not os.path.exists(manifest_path):
-      return ""
-    with open(manifest_path, "r", encoding="utf-8") as f:
-      return f.read()
   try:
-    import fsspec  # pylint: disable=g-import-not-at-top
+    if not manifest_path.startswith("gs://"):
+      if not os.path.exists(manifest_path):
+        return ""
+      with open(manifest_path, "r", encoding="utf-8") as f:
+        return f.read()
+    try:
+      import fsspec  # pylint: disable=g-import-not-at-top
 
-    fs = fsspec.filesystem("gs")
-    if not fs.exists(manifest_path):
-      return ""
-    with fs.open(manifest_path, "r", encoding="utf-8") as f:
-      return f.read()
-  except (ImportError, ModuleNotFoundError):
-    import tensorflow as tf  # pylint: disable=g-import-not-at-top
+      fs = fsspec.filesystem("gs")
+      if not fs.exists(manifest_path):
+        return ""
+      with fs.open(manifest_path, "r", encoding="utf-8") as f:
+        return f.read()
+    except (ImportError, ModuleNotFoundError):
+      import tensorflow as tf  # pylint: disable=g-import-not-at-top
 
-    if not tf.io.gfile.exists(manifest_path):
-      return ""
-    with tf.io.gfile.GFile(manifest_path, "r") as f:
-      return f.read()
+      if not tf.io.gfile.exists(manifest_path):
+        return ""
+      with tf.io.gfile.GFile(manifest_path, "r") as f:
+        return f.read()
+  except Exception as exc:  # pylint: disable=broad-exception-caught
+    logging.warning(
+        "Failed to read checkpoint manifest %s: %s", manifest_path, exc
+    )
+    return ""
 
 
 def _write_manifest_text(manifest_path: str, content: str) -> None:
   """Writes the manifest content to a local path or gs:// URI."""
-  if not manifest_path.startswith("gs://"):
-    os.makedirs(os.path.dirname(os.path.abspath(manifest_path)), exist_ok=True)
-    with open(manifest_path, "w", encoding="utf-8") as f:
-      f.write(content)
-    return
   try:
-    import fsspec  # pylint: disable=g-import-not-at-top
+    if not manifest_path.startswith("gs://"):
+      os.makedirs(
+          os.path.dirname(os.path.abspath(manifest_path)), exist_ok=True
+      )
+      with open(manifest_path, "w", encoding="utf-8") as f:
+        f.write(content)
+      return
+    try:
+      import fsspec  # pylint: disable=g-import-not-at-top
 
-    fs = fsspec.filesystem("gs")
-    with fs.open(manifest_path, "w", encoding="utf-8") as f:
-      f.write(content)
-  except (ImportError, ModuleNotFoundError):
-    import tensorflow as tf  # pylint: disable=g-import-not-at-top
+      fs = fsspec.filesystem("gs")
+      with fs.open(manifest_path, "w", encoding="utf-8") as f:
+        f.write(content)
+    except (ImportError, ModuleNotFoundError):
+      import tensorflow as tf  # pylint: disable=g-import-not-at-top
 
-    with tf.io.gfile.GFile(manifest_path, "w") as f:
-      f.write(content)
+      with tf.io.gfile.GFile(manifest_path, "w") as f:
+        f.write(content)
+  except Exception as exc:  # pylint: disable=broad-exception-caught
+    logging.warning(
+        "Failed to write checkpoint manifest %s: %s", manifest_path, exc
+    )
 
 
 def append_checkpoint_manifest(
@@ -662,20 +724,28 @@ def append_checkpoint_manifest(
   global _last_checkpoint_step, _last_checkpoint_time_ms
   if not manifest_path:
     return
-  if int(record["step"]) >= _last_checkpoint_step:
-    _last_checkpoint_step = int(record["step"])
-    _last_checkpoint_time_ms = record.get("timestamp_ms")
-  records_by_step: dict[int, dict[str, Any]] = {}
-  for line in _read_manifest_text(manifest_path).splitlines():
-    if line.strip():
-      parsed = json.loads(line)
-      records_by_step[int(parsed["step"])] = parsed
-  records_by_step[int(record["step"])] = dict(record)
-  content = "".join(
-      json.dumps(records_by_step[s], ensure_ascii=False) + "\n"
-      for s in sorted(records_by_step)
-  )
-  _write_manifest_text(manifest_path, content)
+  try:
+    if int(record["step"]) >= _last_checkpoint_step:
+      _last_checkpoint_step = int(record["step"])
+      _last_checkpoint_time_ms = record.get("timestamp_ms")
+    records_by_step: dict[int, dict[str, Any]] = {}
+    for line in _read_manifest_text(manifest_path).splitlines():
+      if line.strip():
+        try:
+          parsed = json.loads(line)
+          records_by_step[int(parsed["step"])] = parsed
+        except (ValueError, KeyError, TypeError):
+          continue
+    records_by_step[int(record["step"])] = dict(record)
+    content = "".join(
+        json.dumps(records_by_step[s], ensure_ascii=False) + "\n"
+        for s in sorted(records_by_step)
+    )
+    _write_manifest_text(manifest_path, content)
+  except Exception as exc:  # pylint: disable=broad-exception-caught
+    logging.warning(
+        "Failed to append checkpoint manifest %s: %s", manifest_path, exc
+    )
 
 
 def check_eval(
@@ -694,70 +764,73 @@ def check_eval(
   if not (_is_master_process() and mllogger is not None):
     return is_early_stop
 
-  global_batch_size = getattr(args, "batch_size", 1) * getattr(args, "num_generations", 1)
-  eval_interval = getattr(args, "eval_every_n_steps", 10)
-  eval_frequency_samples = eval_interval * global_batch_size
-  current_samples = (step - start_step) * global_batch_size
+  try:
+    global_batch_size = getattr(args, "batch_size", 1) * getattr(args, "num_generations", 1)
+    eval_interval = getattr(args, "eval_every_n_steps", 10)
+    eval_frequency_samples = eval_interval * global_batch_size
+    current_samples = (step - start_step) * global_batch_size
 
-  mllogger.end(
-      key=getattr(constants, "BLOCK_STOP", "block_stop"),
-      metadata={
-          getattr(constants, "SAMPLES_COUNT", "samples_count"): current_samples,
-          "step": int(step),
-      },
-  )
-  _block_open = False
-  _train_stopped = True
-  mllogger.start(
-      key=getattr(constants, "EVAL_START", "eval_start"),
-      metadata={
-          getattr(constants, "SAMPLES_COUNT", "samples_count"): current_samples,
-          "step": int(step),
-      },
-  )
-  if validation_time is not None:
-    mllogger.event(
-        key="tracked_stats",
-        value={"validation_time": float(validation_time)},
-        metadata={"step": int(step)},
-    )
-  mllogger.event(
-      key=getattr(constants, "EVAL_ACCURACY", "eval_accuracy"),
-      value=float(eval_accuracy),
-      metadata={
-          getattr(constants, "SAMPLES_COUNT", "samples_count"): current_samples,
-      },
-  )
-  mllogger.end(
-      key=getattr(constants, "EVAL_STOP", "eval_stop"),
-      metadata={
-          getattr(constants, "SAMPLES_COUNT", "samples_count"): current_samples,
-          "step": int(step),
-      },
-  )
-
-  if is_early_stop:
     mllogger.end(
-        key=getattr(constants, "RUN_STOP", "run_stop"),
+        key=getattr(constants, "BLOCK_STOP", "block_stop"),
         metadata={
-            "status": "success",
             getattr(constants, "SAMPLES_COUNT", "samples_count"): current_samples,
-        },
-    )
-    mllogger.event(
-        key=getattr(constants, "TRAIN_SAMPLES", "train_samples"),
-        value=current_samples,
-    )
-  else:
-    mllogger.start(
-        key=getattr(constants, "BLOCK_START", "block_start"),
-        metadata={
-            getattr(constants, "SAMPLES_COUNT", "samples_count"): eval_frequency_samples,
             "step": int(step),
         },
     )
-    _block_open = True
-    _train_stopped = False
+    _block_open = False
+    _train_stopped = True
+    mllogger.start(
+        key=getattr(constants, "EVAL_START", "eval_start"),
+        metadata={
+            getattr(constants, "SAMPLES_COUNT", "samples_count"): current_samples,
+            "step": int(step),
+        },
+    )
+    if validation_time is not None:
+      mllogger.event(
+          key="tracked_stats",
+          value={"validation_time": float(validation_time)},
+          metadata={"step": int(step)},
+      )
+    mllogger.event(
+        key=getattr(constants, "EVAL_ACCURACY", "eval_accuracy"),
+        value=float(eval_accuracy),
+        metadata={
+            getattr(constants, "SAMPLES_COUNT", "samples_count"): current_samples,
+        },
+    )
+    mllogger.end(
+        key=getattr(constants, "EVAL_STOP", "eval_stop"),
+        metadata={
+            getattr(constants, "SAMPLES_COUNT", "samples_count"): current_samples,
+            "step": int(step),
+        },
+    )
+
+    if is_early_stop:
+      mllogger.end(
+          key=getattr(constants, "RUN_STOP", "run_stop"),
+          metadata={
+              "status": "success",
+              getattr(constants, "SAMPLES_COUNT", "samples_count"): current_samples,
+          },
+      )
+      mllogger.event(
+          key=getattr(constants, "TRAIN_SAMPLES", "train_samples"),
+          value=current_samples,
+      )
+    else:
+      mllogger.start(
+          key=getattr(constants, "BLOCK_START", "block_start"),
+          metadata={
+              getattr(constants, "SAMPLES_COUNT", "samples_count"): eval_frequency_samples,
+              "step": int(step),
+          },
+      )
+      _block_open = True
+      _train_stopped = False
+  except Exception as exc:  # pylint: disable=broad-exception-caught
+    logging.warning("RCP logging check_eval failed: %s", exc)
 
   return is_early_stop
 
@@ -769,32 +842,35 @@ def log_tracked_stats(
 ):
   """Logs tracked training/timing metrics to the MLPerf log."""
   global _last_block_step, _last_block_samples, _last_block_time_ms
-  if _is_master_process() and mllogger is not None:
-    metadata = {"step": int(step)}
-    if samples_count is not None:
-      metadata[getattr(constants, "SAMPLES_COUNT", "samples_count")] = int(samples_count)
+  try:
+    if _is_master_process() and mllogger is not None:
+      metadata = {"step": int(step)}
+      if samples_count is not None:
+        metadata[getattr(constants, "SAMPLES_COUNT", "samples_count")] = int(samples_count)
 
-    clean_stats = {}
-    for k, v in stats.items():
-      if v is not None:
-        if hasattr(v, "item"):
-          clean_stats[k] = v.item()
-        else:
-          clean_stats[k] = v
+      clean_stats = {}
+      for k, v in stats.items():
+        if v is not None:
+          if hasattr(v, "item"):
+            clean_stats[k] = v.item()
+          else:
+            clean_stats[k] = v
 
-    if clean_stats:
-      time_ms = int(time.time() * 1000)
-      mllogger.event(
-          key="tracked_stats",
-          value=clean_stats,
-          metadata=metadata,
-          time_ms=time_ms,
-      )
-      if _block_open:
-        _last_block_step = int(step)
-        if samples_count is not None:
-          _last_block_samples = int(samples_count)
-        _last_block_time_ms = time_ms
+      if clean_stats:
+        time_ms = int(time.time() * 1000)
+        mllogger.event(
+            key="tracked_stats",
+            value=clean_stats,
+            metadata=metadata,
+            time_ms=time_ms,
+        )
+        if _block_open:
+          _last_block_step = int(step)
+          if samples_count is not None:
+            _last_block_samples = int(samples_count)
+          _last_block_time_ms = time_ms
+  except Exception as exc:  # pylint: disable=broad-exception-caught
+    logging.warning("RCP logging log_tracked_stats failed: %s", exc)
 
 
 def _clean_metric_val(v: Any, op: Optional[Callable] = None) -> Optional[Any]:
@@ -967,80 +1043,83 @@ def log_rcp_step_stats(
   if not (_is_master_process() and mllog is not None and mllogger is not None):
     return
 
-  stats = _extract_kv_from_metrics_buffer(metrics_source)
-  if not stats:
-    return
+  try:
+    stats = _extract_kv_from_metrics_buffer(metrics_source)
+    if not stats:
+      return
 
-  step_num = int(step)
-  gbs = None
-  if args is not None:
-    gbs = getattr(args, "batch_size", 1) * getattr(args, "num_generations", 1)
-  if samples_count is None and gbs is not None:
-    samples_count = step_num * gbs
+    step_num = int(step)
+    gbs = None
+    if args is not None:
+      gbs = getattr(args, "batch_size", 1) * getattr(args, "num_generations", 1)
+    if samples_count is None and gbs is not None:
+      samples_count = step_num * gbs
 
-  # 1. Train stats event: reduced_train_loss, reward, grad_norm, global_valid_toks, global_valid_seqs
-  loss_val = stats.get("reduced_train_loss", stats.get("loss", stats.get("trainer/loss")))
-  reward_val = stats.get(
-      "reward",
-      stats.get("rewards/mean", stats.get("trajectory_rewards/mean", stats.get("train_reward"))),
-  )
-  grad_norm_val = stats.get("grad_norm", stats.get("trainer/grad_norm"))
-  valid_seqs = stats.get(
-      "global_valid_seqs",
-      stats.get("rollout/global_valid_seqs", stats.get("orchestrator/num_rollouts", float(gbs) if gbs else None)),
-  )
-  valid_toks = stats.get("global_valid_toks", stats.get("rollout/global_valid_toks"))
-  if valid_toks is None and valid_seqs is not None:
-    mean_toks = stats.get(
-        "rollout/total_tokens_mean",
-        stats.get("rollout/completion_length_mean", stats.get("generation/completions/mean_raw_length")),
+    # 1. Train stats event: reduced_train_loss, reward, grad_norm, global_valid_toks, global_valid_seqs
+    loss_val = stats.get("reduced_train_loss", stats.get("loss", stats.get("trainer/loss")))
+    reward_val = stats.get(
+        "reward",
+        stats.get("rewards/mean", stats.get("trajectory_rewards/mean", stats.get("train_reward"))),
     )
-    if mean_toks is not None:
-      valid_toks = float(mean_toks) * float(valid_seqs)
-
-  train_tracked = {
-      "reduced_train_loss": loss_val,
-      "reward": reward_val,
-      "grad_norm": grad_norm_val,
-      "global_valid_toks": float(valid_toks) if valid_toks is not None else None,
-      "global_valid_seqs": float(valid_seqs) if valid_seqs is not None else None,
-  }
-  log_tracked_stats(train_tracked, step=step_num, samples_count=samples_count)
-
-  # 2. Timing stats event: train_step_time, policy_training_time, exposed_generation_time, weight_sync_time, valid_tokens_per_sec_per_gpu
-  step_time = stats.get(
-      "train_step_time",
-      stats.get("orchestrator/step_time_sec", stats.get("perf/global_step_time", stats.get("step_time"))),
-  )
-  policy_time = stats.get("policy_training_time", stats.get("orchestrator/policy_training_time"))
-  exposed_gen_time = stats.get("exposed_generation_time", stats.get("orchestrator/exposed_generation_time"))
-  weight_sync_time = stats.get("weight_sync_time", stats.get("orchestrator/weight_sync_time"))
-
-  if total_devices is None and args is not None:
-    total_devices = _parse_topology_devices(
-        getattr(args, "tpu_topology", None),
-        getattr(args, "rollout_replicas", 1),
+    grad_norm_val = stats.get("grad_norm", stats.get("trainer/grad_norm"))
+    valid_seqs = stats.get(
+        "global_valid_seqs",
+        stats.get("rollout/global_valid_seqs", stats.get("orchestrator/num_rollouts", float(gbs) if gbs else None)),
     )
+    valid_toks = stats.get("global_valid_toks", stats.get("rollout/global_valid_toks"))
+    if valid_toks is None and valid_seqs is not None:
+      mean_toks = stats.get(
+          "rollout/total_tokens_mean",
+          stats.get("rollout/completion_length_mean", stats.get("generation/completions/mean_raw_length")),
+      )
+      if mean_toks is not None:
+        valid_toks = float(mean_toks) * float(valid_seqs)
 
-  toks_per_sec_per_gpu = stats.get("valid_tokens_per_sec_per_gpu")
-  if (
-      toks_per_sec_per_gpu is None
-      and valid_toks is not None
-      and step_time is not None
-      and float(step_time) > 0
-      and total_devices
-  ):
-    toks_per_sec_per_gpu = float(valid_toks) / (float(step_time) * float(total_devices))
+    train_tracked = {
+        "reduced_train_loss": loss_val,
+        "reward": reward_val,
+        "grad_norm": grad_norm_val,
+        "global_valid_toks": float(valid_toks) if valid_toks is not None else None,
+        "global_valid_seqs": float(valid_seqs) if valid_seqs is not None else None,
+    }
+    log_tracked_stats(train_tracked, step=step_num, samples_count=samples_count)
 
-  timing_tracked = {
-      "train_step_time": step_time,
-      "policy_training_time": policy_time,
-      "exposed_generation_time": exposed_gen_time,
-      "weight_sync_time": weight_sync_time,
-      "valid_tokens_per_sec_per_gpu": toks_per_sec_per_gpu,
-  }
-  log_tracked_stats(timing_tracked, step=step_num, samples_count=samples_count)
-  _flush_to_gcs_if_needed()
+    # 2. Timing stats event: train_step_time, policy_training_time, exposed_generation_time, weight_sync_time, valid_tokens_per_sec_per_gpu
+    step_time = stats.get(
+        "train_step_time",
+        stats.get("orchestrator/step_time_sec", stats.get("perf/global_step_time", stats.get("step_time"))),
+    )
+    policy_time = stats.get("policy_training_time", stats.get("orchestrator/policy_training_time"))
+    exposed_gen_time = stats.get("exposed_generation_time", stats.get("orchestrator/exposed_generation_time"))
+    weight_sync_time = stats.get("weight_sync_time", stats.get("orchestrator/weight_sync_time"))
+
+    if total_devices is None and args is not None:
+      total_devices = _parse_topology_devices(
+          getattr(args, "tpu_topology", None),
+          getattr(args, "rollout_replicas", 1),
+      )
+
+    toks_per_sec_per_gpu = stats.get("valid_tokens_per_sec_per_gpu")
+    if (
+        toks_per_sec_per_gpu is None
+        and valid_toks is not None
+        and step_time is not None
+        and float(step_time) > 0
+        and total_devices
+    ):
+      toks_per_sec_per_gpu = float(valid_toks) / (float(step_time) * float(total_devices))
+
+    timing_tracked = {
+        "train_step_time": step_time,
+        "policy_training_time": policy_time,
+        "exposed_generation_time": exposed_gen_time,
+        "weight_sync_time": weight_sync_time,
+        "valid_tokens_per_sec_per_gpu": toks_per_sec_per_gpu,
+    }
+    log_tracked_stats(timing_tracked, step=step_num, samples_count=samples_count)
+    _flush_to_gcs_if_needed()
+  except Exception as exc:  # pylint: disable=broad-exception-caught
+    logging.warning("RCP logging log_rcp_step_stats failed: %s", exc)
 
 
 MLPERF_TRACKED_KEYS = frozenset({
@@ -1074,89 +1153,92 @@ def log_metrics_buffer(
   if not (_is_master_process() and mllog is not None and mllogger is not None):
     return
 
-  stats = _extract_kv_from_metrics_buffer(metrics_buffer)
+  try:
+    stats = _extract_kv_from_metrics_buffer(metrics_buffer)
 
-  # If rl_engine is provided, extract actor metrics from actor_trainer or _rl_metrics_logger
-  if rl_engine is not None:
-    actor_trainer = getattr(rl_engine, "actor_trainer", None)
-    if actor_trainer is not None:
-      trainer_buf = (
-          getattr(actor_trainer, "_prev_buffered_train_metrics", None)
-          or getattr(actor_trainer, "_buffered_train_metrics", None)
-      )
-      if trainer_buf is not None:
-        trainer_stats = _extract_kv_from_metrics_buffer(trainer_buf)
-        for k, v in trainer_stats.items():
-          if k not in stats:
-            stats[k] = v
-
-    # Fallback to _rl_metrics_logger history if any keys are still missing
-    metrics_logger = getattr(rl_engine, "_rl_metrics_logger", None)
-    if metrics_logger is not None and hasattr(metrics_logger, "_metrics"):
-      actor_m = metrics_logger._metrics.get("actor", {}).get("train", {})
-      for k, vals in actor_m.items():
-        if vals and k not in stats:
-          val = _clean_metric_val(vals[-1])
-          if val is not None:
-            stats[k] = val
-
-  if not stats:
-    return
-
-  # Map canonical Tunix metric names to MLPerf RCP tracked keys
-  key_mappings = {
-      "perf/global_step_time": "step_time",
-      "generation/completions/mean_length": "completion_length",
-      "trajectory_rewards/mean": "train_reward",
-      "rewards/mean": "train_reward",
-      "advantage/abs_mean": "adv_abs_mean",
-      "log_ratio/abs_mean": "log_ratio_abs",
-      "pg_clipfrac": "clipfrac",
-  }
-  for orig_key, rcp_key in key_mappings.items():
-    if rcp_key not in stats and orig_key in stats:
-      stats[rcp_key] = stats[orig_key]
-
-  # In SWE-bench, tasks are strictly binary pass/fail (1.0 or 0.0),
-  # so train_solve is equivalent to train_reward.
-  if "train_solve" not in stats and "train_reward" in stats:
-    stats["train_solve"] = stats["train_reward"]
-
-  # Filter out internal/framework metrics not part of MLPerf RCP tracked stats
-  if allowed_keys is not None:
-    allowed_set = set(allowed_keys)
-    stats = {k: v for k, v in stats.items() if k in allowed_set}
-
-  if not stats:
-    return
-
-  # Determine step number
-  if step is not None:
-    step_num = int(step)
-  else:
-    raw_step = getattr(
-        metrics_buffer, "global_steps", getattr(metrics_buffer, "step", 0)
-    )
-    step_num = int(raw_step) + 1
-
-  # Determine samples count
-  if samples_count is None:
-    gbs = global_batch_size
-    if gbs is None:
-      if batch_size is not None and num_generations is not None:
-        gbs = batch_size * num_generations
-      elif args is not None:
-        gbs = getattr(args, "batch_size", 1) * getattr(
-            args, "num_generations", 1
+    # If rl_engine is provided, extract actor metrics from actor_trainer or _rl_metrics_logger
+    if rl_engine is not None:
+      actor_trainer = getattr(rl_engine, "actor_trainer", None)
+      if actor_trainer is not None:
+        trainer_buf = (
+            getattr(actor_trainer, "_prev_buffered_train_metrics", None)
+            or getattr(actor_trainer, "_buffered_train_metrics", None)
         )
-    if gbs is not None:
-      samples_count = step_num * gbs
+        if trainer_buf is not None:
+          trainer_stats = _extract_kv_from_metrics_buffer(trainer_buf)
+          for k, v in trainer_stats.items():
+            if k not in stats:
+              stats[k] = v
 
-  log_tracked_stats(
-      stats=stats,
-      step=step_num,
-      samples_count=samples_count,
-  )
+      # Fallback to _rl_metrics_logger history if any keys are still missing
+      metrics_logger = getattr(rl_engine, "_rl_metrics_logger", None)
+      if metrics_logger is not None and hasattr(metrics_logger, "_metrics"):
+        actor_m = metrics_logger._metrics.get("actor", {}).get("train", {})
+        for k, vals in actor_m.items():
+          if vals and k not in stats:
+            val = _clean_metric_val(vals[-1])
+            if val is not None:
+              stats[k] = val
+
+    if not stats:
+      return
+
+    # Map canonical Tunix metric names to MLPerf RCP tracked keys
+    key_mappings = {
+        "perf/global_step_time": "step_time",
+        "generation/completions/mean_length": "completion_length",
+        "trajectory_rewards/mean": "train_reward",
+        "rewards/mean": "train_reward",
+        "advantage/abs_mean": "adv_abs_mean",
+        "log_ratio/abs_mean": "log_ratio_abs",
+        "pg_clipfrac": "clipfrac",
+    }
+    for orig_key, rcp_key in key_mappings.items():
+      if rcp_key not in stats and orig_key in stats:
+        stats[rcp_key] = stats[orig_key]
+
+    # In SWE-bench, tasks are strictly binary pass/fail (1.0 or 0.0),
+    # so train_solve is equivalent to train_reward.
+    if "train_solve" not in stats and "train_reward" in stats:
+      stats["train_solve"] = stats["train_reward"]
+
+    # Filter out internal/framework metrics not part of MLPerf RCP tracked stats
+    if allowed_keys is not None:
+      allowed_set = set(allowed_keys)
+      stats = {k: v for k, v in stats.items() if k in allowed_set}
+
+    if not stats:
+      return
+
+    # Determine step number
+    if step is not None:
+      step_num = int(step)
+    else:
+      raw_step = getattr(
+          metrics_buffer, "global_steps", getattr(metrics_buffer, "step", 0)
+      )
+      step_num = int(raw_step) + 1
+
+    # Determine samples count
+    if samples_count is None:
+      gbs = global_batch_size
+      if gbs is None:
+        if batch_size is not None and num_generations is not None:
+          gbs = batch_size * num_generations
+        elif args is not None:
+          gbs = getattr(args, "batch_size", 1) * getattr(
+              args, "num_generations", 1
+          )
+      if gbs is not None:
+        samples_count = step_num * gbs
+
+    log_tracked_stats(
+        stats=stats,
+        step=step_num,
+        samples_count=samples_count,
+    )
+  except Exception as exc:  # pylint: disable=broad-exception-caught
+    logging.warning("RCP logging log_metrics_buffer failed: %s", exc)
 
 
 def create_rcp_metrics_logger(
@@ -1211,18 +1293,21 @@ def run_stop(
     time_ms: Optional[int] = None,
 ):
   """Marks the end of the training run."""
-  if _is_master_process() and mllogger is not None:
-    metadata = {"status": status}
-    if samples_count is not None:
-      metadata[getattr(constants, "SAMPLES_COUNT", "samples_count")] = int(samples_count)
+  try:
+    if _is_master_process() and mllogger is not None:
+      metadata = {"status": status}
+      if samples_count is not None:
+        metadata[getattr(constants, "SAMPLES_COUNT", "samples_count")] = int(samples_count)
 
-    extra_kwargs = {} if time_ms is None else {"time_ms": int(time_ms)}
-    mllogger.end(
-        key=getattr(constants, "RUN_STOP", "run_stop"),
-        metadata=metadata,
-        **extra_kwargs,
-    )
-    _flush_to_gcs_if_needed()
+      extra_kwargs = {} if time_ms is None else {"time_ms": int(time_ms)}
+      mllogger.end(
+          key=getattr(constants, "RUN_STOP", "run_stop"),
+          metadata=metadata,
+          **extra_kwargs,
+      )
+      _flush_to_gcs_if_needed()
+  except Exception as exc:  # pylint: disable=broad-exception-caught
+    logging.warning("RCP logging run_stop failed: %s", exc)
 
 
 def init_print(
@@ -1237,159 +1322,162 @@ def init_print(
   if not (_is_master_process() and mllogger is not None):
     return
 
-  if getattr(args, "metric_logger_dir", None) is not None:
-    configure_logger(
-        metric_logger_dir=args.metric_logger_dir,
-        seed=getattr(args, "seed", 1),
+  try:
+    if getattr(args, "metric_logger_dir", None) is not None:
+      configure_logger(
+          metric_logger_dir=args.metric_logger_dir,
+          seed=getattr(args, "seed", 1),
+      )
+
+    # Extract batch & step configs
+    batch_size = getattr(args, "batch_size", None) or 8
+    num_generations = getattr(args, "num_generations", None) or 8
+    global_batch_size = batch_size * num_generations
+    mini_batch_size = getattr(args, "mini_batch_size", None) or batch_size
+    train_micro_batch_size = getattr(args, "train_micro_batch_size", None) or 1
+    max_steps = getattr(args, "max_steps", None) or 50
+    max_prompt_length = getattr(args, "max_prompt_length", None) or 4096
+    max_response_length = getattr(args, "max_response_length", None) or 8192
+    max_seq_len = max_prompt_length + max_response_length
+
+    # Train / Eval sample counts
+    train_samples = None
+    if train_dataset is not None:
+      try:
+        train_samples = len(train_dataset) * num_generations
+      except (TypeError, AttributeError):
+        pass
+    if train_samples is None:
+      train_samples = max_steps * global_batch_size
+
+    eval_samples = None
+    if val_dataset is not None:
+      try:
+        eval_samples = len(val_dataset)
+      except (TypeError, AttributeError):
+        pass
+    if eval_samples is None:
+      # v6.1 qwen35_397b_grpo validation split size (compliance: == 251).
+      eval_samples = 251
+
+    # Parallelism dimensions from meshes
+    train_tp = 1
+    train_sp = 1
+    if train_mesh is not None and hasattr(train_mesh, "shape"):
+      train_tp = train_mesh.shape.get("tp", train_mesh.shape.get("tensor", 1))
+      train_sp = train_mesh.shape.get("sp", 1)
+    elif getattr(args, "train_mesh_tp", None) is not None:
+      train_tp = args.train_mesh_tp
+      train_sp = getattr(args, "train_mesh_sp", 1) or 1
+
+    rollout_tp = 1
+    if rollout_mesh is not None and hasattr(rollout_mesh, "shape"):
+      rollout_tp = rollout_mesh.shape.get("tp", rollout_mesh.shape.get("tensor", 1))
+    elif getattr(args, "rollout_mesh_tp", None) is not None:
+      rollout_tp = args.rollout_mesh_tp
+
+    # Submission platform description
+    platform = getattr(args, "tpu_topology", None)
+    if not platform:
+      if total_devices:
+        platform = f"{total_devices}xTPU"
+      else:
+        platform = "TPU-Ironwood"
+
+    # Gradient accumulation steps
+    grad_accum_steps = max(
+        1,
+        (mini_batch_size * num_generations) // max(1, train_micro_batch_size),
     )
 
-  # Extract batch & step configs
-  batch_size = getattr(args, "batch_size", None) or 8
-  num_generations = getattr(args, "num_generations", None) or 8
-  global_batch_size = batch_size * num_generations
-  mini_batch_size = getattr(args, "mini_batch_size", None) or batch_size
-  train_micro_batch_size = getattr(args, "train_micro_batch_size", None) or 1
-  max_steps = getattr(args, "max_steps", None) or 50
-  max_prompt_length = getattr(args, "max_prompt_length", None) or 4096
-  max_response_length = getattr(args, "max_response_length", None) or 8192
-  max_seq_len = max_prompt_length + max_response_length
+    # 1. Submission Metadata
+    mllogger.event(
+        key=getattr(constants, "SUBMISSION_BENCHMARK", "submission_benchmark"),
+        value=getattr(constants, "QWEN35_397B_GRPO", "qwen35_397b_grpo"),
+    )
+    mllogger.event(
+        key=getattr(constants, "SUBMISSION_ORG", "submission_org"),
+        value="Google",
+    )
+    mllogger.event(
+        key=getattr(constants, "SUBMISSION_DIVISION", "submission_division"),
+        value=getattr(constants, "CLOSED", "closed"),
+    )
+    mllogger.event(
+        key=getattr(constants, "SUBMISSION_STATUS", "submission_status"),
+        value=getattr(constants, "CLOUD", "cloud"),
+    )
+    mllogger.event(
+        key=getattr(constants, "SUBMISSION_PLATFORM", "submission_platform"),
+        value=str(platform),
+    )
 
-  # Train / Eval sample counts
-  train_samples = None
-  if train_dataset is not None:
-    try:
-      train_samples = len(train_dataset) * num_generations
-    except (TypeError, AttributeError):
-      pass
-  if train_samples is None:
-    train_samples = max_steps * global_batch_size
+    # 2. Hyperparameters & Training Configuration
+    logging_configs = {
+        getattr(constants, "SEED", "seed"): getattr(args, "seed", 42),
+        getattr(constants, "MAX_STEPS", "max_steps"): max_steps,
+        getattr(constants, "GLOBAL_BATCH_SIZE", "global_batch_size"): global_batch_size,
+        getattr(constants, "MICRO_BATCH_SIZE", "micro_batch_size"): train_micro_batch_size,
+        getattr(constants, "MAX_SEQUENCE_LENGTH", "max_sequence_length"): max_seq_len,
+        getattr(constants, "TRAIN_SAMPLES", "train_samples"): train_samples,
+        getattr(constants, "EVAL_SAMPLES", "eval_samples"): eval_samples,
+        getattr(constants, "INIT_CHECKPOINT_STEP", "init_checkpoint_step"): 0,
+        getattr(constants, "OPT_NAME", "opt_name"): getattr(constants, "ADAMW", "adamw"),
+        getattr(constants, "OPT_BASE_LR", "opt_base_learning_rate"): getattr(args, "learning_rate", 1e-6),
+        getattr(constants, "OPT_END_LR", "opt_end_learning_rate"): getattr(args, "learning_rate", 1e-6),
+        getattr(constants, "OPT_ADAMW_BETA_1", "opt_adamw_beta_1"): getattr(args, "b1", 0.9),
+        getattr(constants, "OPT_ADAMW_BETA_2", "opt_adamw_beta_2"): getattr(args, "b2", 0.99),
+        getattr(constants, "OPT_ADAMW_EPSILON", "opt_adamw_epsilon"): 1e-8,
+        getattr(constants, "OPT_ADAMW_WEIGHT_DECAY", "opt_adamw_weight_decay"): getattr(args, "weight_decay", 0.01),
+        getattr(constants, "OPT_GRADIENT_CLIP_NORM", "opt_gradient_clip_norm"): getattr(args, "max_grad_norm", 1.0),
+        getattr(constants, "OPT_LR_WARMUP_STEPS", "opt_learning_rate_warmup_steps"): getattr(args, "warmup_steps", 0),
+        getattr(constants, "OPT_LR_DECAY_STEPS", "opt_learning_rate_decay_steps"): getattr(args, "lr_decay_steps", max_steps),
+        getattr(constants, "OPT_LR_DECAY_SCHEDULE", "opt_learning_rate_decay_schedule"): getattr(args, "schedule_type", "constant") or "constant",
+        getattr(constants, "TENSOR_PARALLELISM", "tensor_parallelism"): train_tp,
+        getattr(constants, "PIPELINE_PARALLELISM", "pipeline_parallelism"): 1,
+        getattr(constants, "CONTEXT_PARALLELISM", "context_parallelism"): train_sp,
+        getattr(constants, "EXPERT_PARALLELISM", "expert_parallelism"): getattr(args, "train_mesh_expert", 1),
+        # Mandatory v6.1 precision and run-config disclosures.
+        "lowest_numerical_precision_in_linear": "bfloat16",
+        "lowest_numerical_precision_in_attn": "bfloat16",
+        "lowest_numerical_precision_in_comm": "bfloat16",
+        "config_filename": getattr(args, "model_id", "") or "qwen35_397b_grpo",
+        "generation_backend": getattr(args, "rollout_engine", "vllm"),
+        "generation_tensor_parallelism": rollout_tp,
+        "generation_pipeline_parallelism": 1,
+        "generation_expert_parallelism": getattr(args, "rollout_mesh_expert", 1),
+        getattr(
+            constants,
+            "GENERATION_TRAINING_ROLLOUT_TEMPERATURE",
+            "generation_training_rollout_temperature",
+        ): getattr(args, "temperature", 1.0),
+        getattr(
+            constants,
+            "GENERATION_TRAINING_ROLLOUT_TOP_P",
+            "generation_training_rollout_top_p",
+        ): (getattr(args, "top_p", None) if getattr(args, "top_p", None) is not None else 1.0),
+        getattr(
+            constants,
+            "GENERATION_VALIDATION_ROLLOUT_TEMPERATURE",
+            "generation_validation_rollout_temperature",
+        ): 0.1,
+        getattr(
+            constants,
+            "GENERATION_VALIDATION_ROLLOUT_TOP_P",
+            "generation_validation_rollout_top_p",
+        ): 0.95,
+        getattr(constants, "NUM_PROMPTS_PER_STEP", "num_prompts_per_step"): batch_size,
+        getattr(constants, "NUM_GENERATIONS_PER_PROMPT", "num_generations_per_prompt"): num_generations,
+        "truncated_importance_sampling_ratio_min": 0.999,
+        "truncated_importance_sampling_ratio": 1.002,
+        "truncated_importance_sampling_type": "seq-mask-tis",
+        "target_accuracy": getattr(args, "target_accuracy", 0.69),
+        getattr(constants, "GRADIENT_ACCUMULATION_STEPS", "gradient_accumulation_steps"): grad_accum_steps,
+    }
 
-  eval_samples = None
-  if val_dataset is not None:
-    try:
-      eval_samples = len(val_dataset)
-    except (TypeError, AttributeError):
-      pass
-  if eval_samples is None:
-    # v6.1 qwen35_397b_grpo validation split size (compliance: == 251).
-    eval_samples = 251
-
-  # Parallelism dimensions from meshes
-  train_tp = 1
-  train_sp = 1
-  if train_mesh is not None and hasattr(train_mesh, "shape"):
-    train_tp = train_mesh.shape.get("tp", train_mesh.shape.get("tensor", 1))
-    train_sp = train_mesh.shape.get("sp", 1)
-  elif getattr(args, "train_mesh_tp", None) is not None:
-    train_tp = args.train_mesh_tp
-    train_sp = getattr(args, "train_mesh_sp", 1) or 1
-
-  rollout_tp = 1
-  if rollout_mesh is not None and hasattr(rollout_mesh, "shape"):
-    rollout_tp = rollout_mesh.shape.get("tp", rollout_mesh.shape.get("tensor", 1))
-  elif getattr(args, "rollout_mesh_tp", None) is not None:
-    rollout_tp = args.rollout_mesh_tp
-
-  # Submission platform description
-  platform = getattr(args, "tpu_topology", None)
-  if not platform:
-    if total_devices:
-      platform = f"{total_devices}xTPU"
-    else:
-      platform = "TPU-Ironwood"
-
-  # Gradient accumulation steps
-  grad_accum_steps = max(
-      1,
-      (mini_batch_size * num_generations) // max(1, train_micro_batch_size),
-  )
-
-  # 1. Submission Metadata
-  mllogger.event(
-      key=getattr(constants, "SUBMISSION_BENCHMARK", "submission_benchmark"),
-      value=getattr(constants, "QWEN35_397B_GRPO", "qwen35_397b_grpo"),
-  )
-  mllogger.event(
-      key=getattr(constants, "SUBMISSION_ORG", "submission_org"),
-      value="Google",
-  )
-  mllogger.event(
-      key=getattr(constants, "SUBMISSION_DIVISION", "submission_division"),
-      value=getattr(constants, "CLOSED", "closed"),
-  )
-  mllogger.event(
-      key=getattr(constants, "SUBMISSION_STATUS", "submission_status"),
-      value=getattr(constants, "CLOUD", "cloud"),
-  )
-  mllogger.event(
-      key=getattr(constants, "SUBMISSION_PLATFORM", "submission_platform"),
-      value=str(platform),
-  )
-
-  # 2. Hyperparameters & Training Configuration
-  logging_configs = {
-      getattr(constants, "SEED", "seed"): getattr(args, "seed", 42),
-      getattr(constants, "MAX_STEPS", "max_steps"): max_steps,
-      getattr(constants, "GLOBAL_BATCH_SIZE", "global_batch_size"): global_batch_size,
-      getattr(constants, "MICRO_BATCH_SIZE", "micro_batch_size"): train_micro_batch_size,
-      getattr(constants, "MAX_SEQUENCE_LENGTH", "max_sequence_length"): max_seq_len,
-      getattr(constants, "TRAIN_SAMPLES", "train_samples"): train_samples,
-      getattr(constants, "EVAL_SAMPLES", "eval_samples"): eval_samples,
-      getattr(constants, "INIT_CHECKPOINT_STEP", "init_checkpoint_step"): 0,
-      getattr(constants, "OPT_NAME", "opt_name"): getattr(constants, "ADAMW", "adamw"),
-      getattr(constants, "OPT_BASE_LR", "opt_base_learning_rate"): getattr(args, "learning_rate", 1e-6),
-      getattr(constants, "OPT_END_LR", "opt_end_learning_rate"): getattr(args, "learning_rate", 1e-6),
-      getattr(constants, "OPT_ADAMW_BETA_1", "opt_adamw_beta_1"): getattr(args, "b1", 0.9),
-      getattr(constants, "OPT_ADAMW_BETA_2", "opt_adamw_beta_2"): getattr(args, "b2", 0.99),
-      getattr(constants, "OPT_ADAMW_EPSILON", "opt_adamw_epsilon"): 1e-8,
-      getattr(constants, "OPT_ADAMW_WEIGHT_DECAY", "opt_adamw_weight_decay"): getattr(args, "weight_decay", 0.01),
-      getattr(constants, "OPT_GRADIENT_CLIP_NORM", "opt_gradient_clip_norm"): getattr(args, "max_grad_norm", 1.0),
-      getattr(constants, "OPT_LR_WARMUP_STEPS", "opt_learning_rate_warmup_steps"): getattr(args, "warmup_steps", 0),
-      getattr(constants, "OPT_LR_DECAY_STEPS", "opt_learning_rate_decay_steps"): getattr(args, "lr_decay_steps", max_steps),
-      getattr(constants, "OPT_LR_DECAY_SCHEDULE", "opt_learning_rate_decay_schedule"): getattr(args, "schedule_type", "constant") or "constant",
-      getattr(constants, "TENSOR_PARALLELISM", "tensor_parallelism"): train_tp,
-      getattr(constants, "PIPELINE_PARALLELISM", "pipeline_parallelism"): 1,
-      getattr(constants, "CONTEXT_PARALLELISM", "context_parallelism"): train_sp,
-      getattr(constants, "EXPERT_PARALLELISM", "expert_parallelism"): getattr(args, "train_mesh_expert", 1),
-      # Mandatory v6.1 precision and run-config disclosures.
-      "lowest_numerical_precision_in_linear": "bfloat16",
-      "lowest_numerical_precision_in_attn": "bfloat16",
-      "lowest_numerical_precision_in_comm": "bfloat16",
-      "config_filename": args.model_id or "qwen35_397b_grpo",
-      "generation_backend": getattr(args, "rollout_engine", "vllm"),
-      "generation_tensor_parallelism": rollout_tp,
-      "generation_pipeline_parallelism": 1,
-      "generation_expert_parallelism": getattr(args, "rollout_mesh_expert", 1),
-      getattr(
-          constants,
-          "GENERATION_TRAINING_ROLLOUT_TEMPERATURE",
-          "generation_training_rollout_temperature",
-      ): getattr(args, "temperature", 1.0),
-      getattr(
-          constants,
-          "GENERATION_TRAINING_ROLLOUT_TOP_P",
-          "generation_training_rollout_top_p",
-      ): (getattr(args, "top_p", None) if getattr(args, "top_p", None) is not None else 1.0),
-      getattr(
-          constants,
-          "GENERATION_VALIDATION_ROLLOUT_TEMPERATURE",
-          "generation_validation_rollout_temperature",
-      ): 0.1,
-      getattr(
-          constants,
-          "GENERATION_VALIDATION_ROLLOUT_TOP_P",
-          "generation_validation_rollout_top_p",
-      ): 0.95,
-      getattr(constants, "NUM_PROMPTS_PER_STEP", "num_prompts_per_step"): batch_size,
-      getattr(constants, "NUM_GENERATIONS_PER_PROMPT", "num_generations_per_prompt"): num_generations,
-      "truncated_importance_sampling_ratio_min": 0.999,
-      "truncated_importance_sampling_ratio": 1.002,
-      "truncated_importance_sampling_type": "seq-mask-tis",
-      "target_accuracy": getattr(args, "target_accuracy", 0.69),
-      getattr(constants, "GRADIENT_ACCUMULATION_STEPS", "gradient_accumulation_steps"): grad_accum_steps,
-  }
-
-  for key, value in logging_configs.items():
-    if value is not None:
-      mllogger.event(key=key, value=value)
-  _flush_to_gcs_if_needed()
+    for key, value in logging_configs.items():
+      if value is not None:
+        mllogger.event(key=key, value=value)
+    _flush_to_gcs_if_needed()
+  except Exception as exc:  # pylint: disable=broad-exception-caught
+    logging.warning("RCP logging init_print failed: %s", exc)
