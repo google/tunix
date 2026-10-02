@@ -386,6 +386,7 @@ class StandardRLProgram(RLProgram):
       on_checkpoint_saved: Callable[[dict[str, Any]], None] | None = None,
       checkpoint_optimizer_interval_steps: int = 1,
       pipeline_train_microbatches: bool = False,
+      rollout_priority_scheduling: bool = False,
   ):
     super().__init__()
     self.engine: rl_engine_interface.AbstractRLEngine | None = None
@@ -519,6 +520,12 @@ class StandardRLProgram(RLProgram):
     # draining them, so dispatch need not wait out a round; each batch is
     # gated only on the version the rollouts have committed.
     self.partial_rollout = partial_rollout
+    # Stamp each rollout request with its prompt batch index as its sampler
+    # priority, so rollouts that schedule by priority (vLLM
+    # `scheduling_policy="priority"`) serve the oldest in-flight batch first
+    # under `max_staleness > 0`. Off, every request gets priority 0 and the
+    # rollouts serve requests in arrival order.
+    self.rollout_priority_scheduling = rollout_priority_scheduling
     self._sync_error: BaseException | None = None
     self.metrics_logger: MetricsLogger = MetricsLogger(metrics_logging_options)
     # Trajectory logging is disabled on mlperf to prevent GCS write timeouts
@@ -817,7 +824,11 @@ class StandardRLProgram(RLProgram):
             # PROMPT_BATCH ordering this is exactly the batch the trainer
             # consumes next; under ARRIVAL ordering it drains the oldest
             # prompts first, keeping consumed staleness near the bound.
-            "priority": coordinates["batch_idx"],
+            "priority": (
+                coordinates["batch_idx"]
+                if self.rollout_priority_scheduling
+                else 0
+            ),
             "exact_token_continuity": getattr(
                 self.algo.algo_config, "exact_token_continuity", True
             ),

@@ -258,9 +258,10 @@ class RolloutRequest(Request):
     exact_token_continuity: Whether to preserve exact token IDs across
       multi-turn rollout steps (Token-In-Token-Out). Defaults to True.
     priority: Sampler scheduling priority for every generation call of this
-      rollout; lower values are served first. The RL program sets it to the
-      prompt batch index, so under `max_staleness > 0` the oldest in-flight
-      batch is served ahead of batches dispatched early.
+      rollout; lower values are served first. With
+      `rollout_priority_scheduling` the RL program sets it to the prompt batch
+      index, so under `max_staleness > 0` the oldest in-flight batch is served
+      ahead of batches dispatched early; otherwise it stays 0.
   """
 
   prompt: Any = ""

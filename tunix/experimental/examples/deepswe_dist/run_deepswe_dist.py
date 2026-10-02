@@ -204,6 +204,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " the rollouts commit a version recent enough for it."
       ),
   )
+  parser.add_argument(
+      "--rollout_priority_scheduling",
+      action=argparse.BooleanOptionalAction,
+      default=False,
+      help=(
+          "Stamp each rollout request with its prompt batch index as its"
+          " sampler priority, so under --max_staleness > 0 the rollouts serve"
+          " the oldest in-flight batch first. Needs rollouts started with"
+          " --priority_scheduling; off, requests are served in arrival order."
+      ),
+  )
   # ---- Optional GRPO algorithm options -------------------------------------
   # All default to off, so omitting them reproduces the previous behaviour.
   parser.add_argument(
@@ -894,6 +905,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         async_weight_sync=args.async_weight_sync,
         pipeline_train_microbatches=args.pipeline_train_microbatches,
         partial_rollout=args.partial_rollout,
+        rollout_priority_scheduling=args.rollout_priority_scheduling,
         on_step_begin=lambda step: logging.info(
             ">>> DeepSWE step %d starting | policy_version=%d",
             step,
