@@ -6,8 +6,9 @@ This directory contains executable recipe scripts for running distributed DeepSW
 
 | Recipe | Model | Trainer Topology & Sharding | Rollout Topology & Sharding |
 | :--- | :--- | :--- | :--- |
-| [`mlperf_35b_128_v5p.sh`](mlperf_35b_128_v5p.sh) | Qwen3.5-35B-A3B | `1x tpuv5:4x4x4` (64 chips)<br>`FSDP=32, TP=2, EP=1, CP=1` | `16x tpuv5:2x2x1` (64 chips)<br>`DP=1, TP=1, EP=4` |
-| [`mlperf_35b_128_v7x.sh`](mlperf_35b_128_v7x.sh) | Qwen3.5-35B-A3B | `1x tpu7x:4x4x4` (64 chips)<br>`FSDP=32, TP=2, EP=1, CP=2` | `16x tpu7x:2x2x1` (64 chips)<br>`DP=1, TP=1, EP=8` |
+| [`mlperf_35b_128_v5p.sh`](mlperf_35b_128_v5p.sh) | Qwen3.5-35B-A3B | `1x tpuv5:4x4x4` (64 chips)<br>`FSDP=32, TP=1, EP=1, CP=2` | `16x tpuv5:2x2x1` (64 chips)<br>`DP=1, TP=1, EP=4` |
+| [`mlperf_35b_256_v5p.sh`](mlperf_35b_256_v5p.sh) | Qwen3.5-35B-A3B | `1x tpuv5:4x4x4` (64 chips)<br>`FSDP=32, TP=1, EP=1, CP=2` | `32x tpuv5:2x2x1` (128 chips)<br>`DP=1, TP=1, EP=4` |
+| [`mlperf_35b_128_v7x.sh`](mlperf_35b_128_v7x.sh) | Qwen3.5-35B-A3B | `1x tpu7x:4x4x4` (64 chips)<br>`FSDP=64, TP=1, EP=1, CP=2` | `16x tpu7x:2x2x1` (64 chips)<br>`DP=1, TP=1, EP=8` |
 | [`mlperf_397b_512_v5p.sh`](mlperf_397b_512_v5p.sh) | Qwen3.5-397B-A17B | `1x tpuv5p:4x8x8` (256 chips)<br>`FSDP=16, TP=1, EP=2, CP=8` | `16x tpuv5p:2x2x4` (256 chips)<br>`DP=1, TP=1, EP=16` |
 | [`mlperf_397b_256_v7x.sh`](mlperf_397b_256_v7x.sh) | Qwen3.5-397B-A17B | `1x tpu7x:4x4x8` (128 chips)<br>`FSDP=32, TP=1, EP=2, CP=4` | `32x tpu7x:2x2x2` (256 chips)<br>`DP=1, TP=1, EP=16` |
 | [`mlperf_397b_512_v7x.sh`](mlperf_397b_512_v7x.sh) | Qwen3.5-397B-A17B | `1x tpu7x:4x4x8` (128 chips)<br>`FSDP=32, TP=1, EP=2, CP=4` | `32x tpu7x:2x2x4` (512 chips / 1024)<br>`DP=2, TP=1, EP=16` |
