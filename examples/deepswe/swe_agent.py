@@ -1,6 +1,7 @@
 """DeepSWE Agent."""
 
 import json
+import os
 import re
 from typing import Any
 from typing import Optional, Union  # Added Union for pytype compatibility
@@ -40,6 +41,11 @@ except ImportError:
   raise  # This halts execution and preserves the original traceback
 
 TOKEN_WARNING_THRESHOLD = 28000
+
+
+def _turn_hints_from_env() -> bool:
+  """Reads DEEPSWE_TURN_HINTS; any value other than "0" keeps the hints on."""
+  return os.environ.get("DEEPSWE_TURN_HINTS", "1") != "0"
 
 
 def parse_oai_response(response: Any):
@@ -225,7 +231,7 @@ def parse_codeact_response(response_text: str) -> tuple[str, Any]:
   return thought, action
 
 
-_LOGGED_AGENT_CONFIGS: set[tuple[str, str, str, bool]] = set()
+_LOGGED_AGENT_CONFIGS: set[tuple[str, str, str, bool, bool]] = set()
 
 
 class SWEAgent(ConversationAgentBase):
@@ -238,8 +244,16 @@ class SWEAgent(ConversationAgentBase):
       use_fn_calling: bool = False,
       format_model_response: bool = False,
       scaffold: str = "r2egym",
+      turn_hints: Optional[bool] = None,
   ):
     self.use_fn_calling = use_fn_calling
+    # Turn hints are the text appended to observations: the "Steps Remaining"
+    # countdown, the max-steps "submit NOW" message and the token warning. The
+    # reference OpenHands harness appends none of them. None reads
+    # DEEPSWE_TURN_HINTS from the environment (default on).
+    self.turn_hints = (
+        _turn_hints_from_env() if turn_hints is None else turn_hints
+    )
     self.format_model_response = format_model_response
     assert scaffold in [
         "r2egym",
@@ -264,12 +278,13 @@ class SWEAgent(ConversationAgentBase):
         self.name,
         scaffold,
         use_fn_calling,
+        self.turn_hints,
     )
     if agent_key not in _LOGGED_AGENT_CONFIGS:
       _LOGGED_AGENT_CONFIGS.add(agent_key)
       logging.info(
           "Initialized DeepSWE agent: class=%s, name=%s, scaffold=%s,"
-          " use_fn_calling=%s",
+          " use_fn_calling=%s, turn_hints=%s",
           *agent_key,
       )
 
@@ -290,7 +305,7 @@ class SWEAgent(ConversationAgentBase):
           problem_statement=observation
       )
 
-    max_steps = info.get("max_steps", None)
+    max_steps = info.get("max_steps", None) if self.turn_hints else None
     if max_steps:
       remaining_steps = max_steps - self.step - 1
       if remaining_steps > 0:
@@ -300,7 +315,7 @@ class SWEAgent(ConversationAgentBase):
             "\nYou have reached the maximum number of steps. Please submit your"
             " answer NOW."
         )
-    cur_tokens = info.get("cur_tokens", None)
+    cur_tokens = info.get("cur_tokens", None) if self.turn_hints else None
     if cur_tokens is not None and cur_tokens >= TOKEN_WARNING_THRESHOLD:
       if self.scaffold in OPENHANDS_SCAFFOLDS:
         observation += (
@@ -394,12 +409,14 @@ class CodeActAgent(SWEAgent):
       use_fn_calling: bool = False,
       format_model_response: bool = False,
       scaffold: str = "openhands",
+      turn_hints: Optional[bool] = None,
   ):
     super().__init__(
         system_prompt=system_prompt,
         use_fn_calling=use_fn_calling,
         format_model_response=format_model_response,
         scaffold=scaffold,
+        turn_hints=turn_hints,
     )
 
   def _parse_model_response(

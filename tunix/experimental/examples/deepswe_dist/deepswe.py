@@ -306,9 +306,11 @@ class DeepSWEAgent(swe_agent.SWEAgent):
       use_fn_calling: bool = False,
       format_model_response: bool = False,
       scaffold: str | None = None,
+      turn_hints: bool | None = None,
   ):
     # Mirrors SWEAgent.__init__ so scaffold is honored positionally or by name.
     del system_prompt, use_fn_calling, format_model_response  # Used by __init__.
+    del turn_hints  # Used by __init__.
     if cls is DeepSWEAgent:
       resolved = scaffold or os.getenv("SCAFFOLD", "r2egym")
       if str(resolved) in swe_agent.OPENHANDS_SCAFFOLDS:

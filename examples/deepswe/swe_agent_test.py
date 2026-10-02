@@ -319,6 +319,36 @@ class SweAgentTest(absltest.TestCase):
     self.assertIn("You are running out of tokens", agent.cur_step.observation)
     self.assertIn("<function=finish>", agent.cur_step.observation)
 
+  def test_codeact_agent_turn_hints_on_by_default(self):
+    with mock.patch.dict(os.environ, {}, clear=False):
+      os.environ.pop("DEEPSWE_TURN_HINTS", None)
+      agent = swe_agent.CodeActAgent()
+    agent.update_from_env("Fix bug", 0.0, False, {"max_steps": 30})
+    self.assertIn("Steps Remaining: 29", agent.cur_step.observation)
+
+  def test_codeact_agent_turn_hints_off(self):
+    agent = swe_agent.CodeActAgent(turn_hints=False)
+    agent.update_from_env("Fix bug", 0.0, False, {"max_steps": 30})
+    first = agent.cur_step.observation
+    self.assertNotIn("Steps Remaining", first)
+    self.assertEqual(
+        first, agent.user_prompt_template.format(problem_statement="Fix bug")
+    )
+    agent.update_from_model("```bash\nls\n```")
+    agent.step = 29
+    agent.update_from_env(
+        "out", 0.0, False, {"max_steps": 30, "cur_tokens": 30000}
+    )
+    self.assertEqual(agent.cur_step.observation, "out")
+
+  def test_turn_hints_env_var(self):
+    with mock.patch.dict(os.environ, {"DEEPSWE_TURN_HINTS": "0"}):
+      self.assertFalse(swe_agent.CodeActAgent().turn_hints)
+      self.assertFalse(swe_agent.SWEAgent(scaffold="sweagent").turn_hints)
+      self.assertTrue(swe_agent.CodeActAgent(turn_hints=True).turn_hints)
+    with mock.patch.dict(os.environ, {"DEEPSWE_TURN_HINTS": "1"}):
+      self.assertTrue(swe_agent.CodeActAgent().turn_hints)
+
   def test_swe_env_init_global_fleet_node_selector(self):
     mock_agent_sandbox_rl = mock.MagicMock()
     mock_fleet_inst = mock.MagicMock()
