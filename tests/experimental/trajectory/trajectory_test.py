@@ -622,6 +622,28 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
     ):
       meta.create_trajectory()
 
+  def test_metadata_registry_contains_base_and_tunix(self):
+    self.assertIs(
+        trajectory.TrajectoryMetadata._REGISTRY.get("base"),
+        trajectory.TrajectoryMetadata,
+    )
+    self.assertIs(
+        trajectory.TrajectoryMetadata._REGISTRY.get("tunix"),
+        trajectory.TunixTrajectoryMetadata,
+    )
+
+  def test_custom_metadata_registers_via_init_subclass(self):
+    class _CustomMetadata(trajectory.TrajectoryMetadata):
+      METADATA_TYPE = "custom_test_meta"
+
+    try:
+      self.assertIs(
+          trajectory.TrajectoryMetadata._REGISTRY.get("custom_test_meta"),
+          _CustomMetadata,
+      )
+    finally:
+      trajectory.TrajectoryMetadata._REGISTRY.pop("custom_test_meta", None)
+
   def test_step_initialization_with_rl_fields(self):
     step = trajectory.TunixAgentStep(
         step_id=1,
