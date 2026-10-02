@@ -190,14 +190,18 @@ export ROLLOUT_ENV_FLAGS=${ROLLOUT_ENV_FLAGS:-}
 
 export JOB_PREFIX=${JOB_PREFIX:-$USER}
 export GANG_ID=${GANG_ID:-$JOB_PREFIX}
+# Deterministic port offset from JOB_PREFIX so concurrent/recycled hostNetwork
+# jobs do not collide on fixed ports 20000/20001/20002.
+_JOB_PORT_OFFSET=$(( ($(printf '%s' "${JOB_PREFIX}" | cksum | awk '{print $1}') % 1000) * 10 ))
 export ORCHESTRATOR_ID=${ORCHESTRATOR_ID:-$JOB_PREFIX-orch}
-export ORCHESTRATOR_PORT=${ORCHESTRATOR_PORT:-20000}
+export ORCHESTRATOR_PORT=${ORCHESTRATOR_PORT:-$(( 20000 + _JOB_PORT_OFFSET ))}
 
 export ROLLOUT_ID=${ROLLOUT_ID:-$JOB_PREFIX-roll}
-export ROLLOUT_PORT=${ROLLOUT_PORT:-20001}
+export ROLLOUT_PORT=${ROLLOUT_PORT:-$(( 20001 + _JOB_PORT_OFFSET ))}
 
 export TRAINER_ID=${TRAINER_ID:-$JOB_PREFIX-train}
-export TRAINER_PORT=${TRAINER_PORT:-20002}
+export TRAINER_PORT=${TRAINER_PORT:-$(( 20002 + _JOB_PORT_OFFSET ))}
+export STOP_WORKERS_ON_EXIT=${STOP_WORKERS_ON_EXIT:-true}
 
 export CPU_MACHINE=${CPU_MACHINE:-n2-standard-64}
 export GCS_SCRATCH_LOCATION=${GCS_SCRATCH_LOCATION:-gs://cloud-pathways-staging/tmp}
@@ -416,7 +420,7 @@ start_orchestrator() {
         --wandb_run_name=\"${WANDB_RUN_NAME}\" \
         --weight_sync_mode=${WEIGHT_SYNC_MODE} \
         ${disable_ws_timeouts_arg} \
-        --stop_workers_on_exit \
+        $([[ "${STOP_WORKERS_ON_EXIT}" == "false" || "${STOP_WORKERS_ON_EXIT}" == "False" || "${STOP_WORKERS_ON_EXIT}" == "0" ]] || echo --stop_workers_on_exit) \
         ${MAX_WARMPOOL_REPLICAS:+--max_warmpool_replicas=${MAX_WARMPOOL_REPLICAS}} \
         ${MAX_CONCURRENCY:+--max_concurrency=${MAX_CONCURRENCY}} \
         ${MAX_STALENESS:+--max_staleness=${MAX_STALENESS}} \
@@ -1197,12 +1201,51 @@ if [[ "$COMMAND" != "eval" && "$COMMAND" != "stop_eval" && -z "$TUNIX_IMAGE" ]];
   exit 1
 fi
 
-if [[ "$COMMAND" == "start" ]]; then
+ensure_sandbox_namespace_permissions() {
   if [[ "${USE_AGENT_SANDBOX}" == "1" || "${USE_AGENT_SANDBOX}" == "true" || "${USE_AGENT_SANDBOX}" == "True" ]]; then
-    echo "Ensuring RBAC permissions for default:xpk-sa in namespace '${SANDBOX_NAMESPACE:-trellis}'..."
-    kubectl create rolebinding xpk-sa-default-pod-exec -n "${SANDBOX_NAMESPACE:-trellis}" --role=pod-exec --serviceaccount=default:xpk-sa --dry-run=client -o yaml | kubectl apply -f - || true
-    kubectl create rolebinding xpk-sa-default-power-users -n "${SANDBOX_NAMESPACE:-trellis}" --clusterrole=power-users --serviceaccount=default:xpk-sa --dry-run=client -o yaml | kubectl apply -f - || true
+    local sb_ns="${SANDBOX_NAMESPACE:-trellis}"
+    if [[ "$DRY_RUN" == "true" ]]; then
+      echo "kubectl create rolebinding xpk-sa-default-pod-exec -n ${sb_ns} --role=pod-exec --serviceaccount=default:xpk-sa"
+      echo "kubectl create rolebinding xpk-sa-default-power-users -n ${sb_ns} --clusterrole=power-users --serviceaccount=default:xpk-sa"
+      if [[ -n "${K8S_NAMESPACE}" && "${K8S_NAMESPACE}" != "default" ]]; then
+        echo "kubectl create rolebinding xpk-sa-${K8S_NAMESPACE}-pod-exec -n ${sb_ns} --role=pod-exec --serviceaccount=${K8S_NAMESPACE}:xpk-sa"
+        echo "kubectl create rolebinding xpk-sa-${K8S_NAMESPACE}-power-users -n ${sb_ns} --clusterrole=power-users --serviceaccount=${K8S_NAMESPACE}:xpk-sa"
+      fi
+      echo "kubectl apply -n ${sb_ns} -f - (NetworkPolicy allow-all-ingress-sandbox)"
+    else
+      echo "Ensuring RBAC permissions and sandbox ingress NetworkPolicy for default:xpk-sa and ${K8S_NAMESPACE}:xpk-sa in namespace '${sb_ns}'..."
+      kubectl create rolebinding xpk-sa-default-pod-exec -n "${sb_ns}" --role=pod-exec --serviceaccount=default:xpk-sa --dry-run=client -o yaml | kubectl apply -f - || true
+      kubectl create rolebinding xpk-sa-default-power-users -n "${sb_ns}" --clusterrole=power-users --serviceaccount=default:xpk-sa --dry-run=client -o yaml | kubectl apply -f - || true
+      if [[ -n "${K8S_NAMESPACE}" && "${K8S_NAMESPACE}" != "default" ]]; then
+        kubectl create rolebinding "xpk-sa-${K8S_NAMESPACE}-pod-exec" -n "${sb_ns}" --role=pod-exec --serviceaccount="${K8S_NAMESPACE}:xpk-sa" --dry-run=client -o yaml | kubectl apply -f - || true
+        kubectl create rolebinding "xpk-sa-${K8S_NAMESPACE}-power-users" -n "${sb_ns}" --clusterrole=power-users --serviceaccount="${K8S_NAMESPACE}:xpk-sa" --dry-run=client -o yaml | kubectl apply -f - || true
+      fi
+      kubectl apply -n "${sb_ns}" -f - <<EOF || true
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-all-ingress-sandbox
+  namespace: ${sb_ns}
+spec:
+  podSelector:
+    matchLabels:
+      app: agent-sandbox-rl
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+    ports:
+    - port: 8000
+      protocol: TCP
+EOF
+    fi
   fi
+}
+
+if [[ "$COMMAND" == "start" ]]; then
+  ensure_sandbox_namespace_permissions
   stop_orchestrator
   stop_trainer
   stop_rollout
@@ -1233,6 +1276,7 @@ elif [[ "$COMMAND" == "mock_rollout" ]]; then
 elif [[ "$COMMAND" == "start_rollout_only" ]]; then
   start_rollout
 elif [[ "$COMMAND" == "eval" ]]; then
+  ensure_sandbox_namespace_permissions
   stop_eval
   start_eval
 elif [[ "$COMMAND" == "stop_eval" ]]; then

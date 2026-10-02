@@ -111,6 +111,10 @@ class InferenceWorker(abstract_worker.Worker):
     self._max_response_length = max_response_length
     self._temperature = temperature
 
+  @property
+  def worker_id(self) -> str:
+    return self._worker_id
+
   def info(self) -> datatypes.WorkerInfo:
     return datatypes.WorkerInfo(
         worker_id=self._worker_id, roles=frozenset({"inference"})

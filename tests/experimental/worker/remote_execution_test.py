@@ -1835,6 +1835,76 @@ class RemoteExecutionTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_worker_id_verification_rejects_mismatched_rpc(self):
+    engine = StubWorkerEngine("job-b-roll-43", latency=0.0)
+    server = remote_lib.GrpcRemoteExecutionServer(engine)
+
+    # Matching worker_id succeeds (both sync and async paths).
+    ok_req = remote_lib.ExecutionRequest(
+        "req_ok", "get_status", (), {}, worker_id="job-b-roll-43"
+    )
+    ok_resp = server.execute_sync_request(ok_req)
+    self.assertIn("worker_id=job-b-roll-43", ok_resp.unwrap())
+
+    # Mismatched worker_id from a stale orchestrator is rejected without
+    # mutating worker state.
+    stale_req = remote_lib.ExecutionRequest(
+        "req_stale", "pause", (), {}, worker_id="job-a-roll-15"
+    )
+    stale_resp = server.execute_sync_request(stale_req)
+    with self.assertRaisesRegex(
+        remote_lib.WorkerIdMismatchError,
+        "Worker ID mismatch for method 'pause': request targeted"
+        " 'job-a-roll-15', but server is bound to 'job-b-roll-43'",
+    ):
+      stale_resp.unwrap()
+    self.assertFalse(engine.is_paused)
+
+    async def _run_async():
+      async_stale_req = remote_lib.ExecutionRequest(
+          "req_stale_async", "pause", (), {}, worker_id="job-a-roll-15"
+      )
+      async_resp = await server.execute_request(async_stale_req)
+      with self.assertRaises(remote_lib.WorkerIdMismatchError):
+        async_resp.unwrap()
+      self.assertFalse(engine.is_paused)
+
+    asyncio.run(_run_async())
+
+  def test_grpc_worker_id_verification_over_tcp(self):
+    async def _run_test():
+      port = portpicker.pick_unused_port()
+      engine = StubWorkerEngine("trellis-dp2-0110-roll-43", latency=0.0)
+      server = remote_lib.GrpcRemoteExecutionServer(engine)
+      await server.start_serving_async(port=port)
+      try:
+        good_handle = remote_lib.ActorHandle.from_address(
+            f"grpc://localhost:{port}",
+            worker_id="trellis-dp2-0110-roll-43",
+        )
+        stale_handle = remote_lib.ActorHandle.from_address(
+            f"grpc://localhost:{port}",
+            worker_id="mk-1001-b512-roll-15",
+        )
+        try:
+          status = await good_handle.asubmit("get_status")
+          self.assertIn("trellis-dp2-0110-roll-43", status)
+
+          with self.assertRaisesRegex(
+              remote_lib.WorkerIdMismatchError,
+              "mk-1001-b512-roll-15.*trellis-dp2-0110-roll-43",
+          ):
+            await stale_handle.asubmit("pause")
+          self.assertFalse(engine.is_paused)
+        finally:
+          await good_handle.close()
+          await stale_handle.close()
+      finally:
+        await server.stop_serving()
+
+    asyncio.run(_run_test())
+
 
 if __name__ == "__main__":
   absltest.main()
+

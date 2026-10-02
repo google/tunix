@@ -120,15 +120,19 @@ export FLUSH_METRICS_EVERY_N_STEPS=${FLUSH_METRICS_EVERY_N_STEPS:-1}
 
 export JOB_PREFIX=${JOB_PREFIX:-$USER}
 export GANG_ID=${GANG_ID:-$JOB_PREFIX}
+# Deterministic port offset from JOB_PREFIX so concurrent/recycled hostNetwork
+# jobs do not collide on fixed ports 20000/20001/20002.
+_JOB_PORT_OFFSET=$(( ($(printf '%s' "${JOB_PREFIX}" | cksum | awk '{print $1}') % 1000) * 10 ))
 export ORCHESTRATOR_ID=${ORCHESTRATOR_ID:-$JOB_PREFIX-orch}
-export ORCHESTRATOR_PORT=${ORCHESTRATOR_PORT:-20000}
+export ORCHESTRATOR_PORT=${ORCHESTRATOR_PORT:-$(( 20000 + _JOB_PORT_OFFSET ))}
 
 export ROLLOUT_ID=${ROLLOUT_ID:-$JOB_PREFIX-roll}
-export ROLLOUT_PORT=${ROLLOUT_PORT:-20001}
+export ROLLOUT_PORT=${ROLLOUT_PORT:-$(( 20001 + _JOB_PORT_OFFSET ))}
 export ROLLOUT_REPLICAS=${ROLLOUT_REPLICAS:-1}
 
 export TRAINER_ID=${TRAINER_ID:-$JOB_PREFIX-train}
-export TRAINER_PORT=${TRAINER_PORT:-20002}
+export TRAINER_PORT=${TRAINER_PORT:-$(( 20002 + _JOB_PORT_OFFSET ))}
+export STOP_WORKERS_ON_EXIT=${STOP_WORKERS_ON_EXIT:-true}
 
 export CPU_MACHINE=${CPU_MACHINE:-n2-standard-64}
 export GCS_SCRATCH_LOCATION=${GCS_SCRATCH_LOCATION:-gs://cloud-pathways-staging/tmp}
@@ -285,7 +289,7 @@ start_orchestrator() {
         --wandb_run_name=\"${WANDB_RUN_NAME}\" \
         --flush_metrics_every_n_steps=${FLUSH_METRICS_EVERY_N_STEPS} \
         --weight_sync_mode=${WEIGHT_SYNC_MODE} \
-        --stop_workers_on_exit \
+        $([[ "${STOP_WORKERS_ON_EXIT}" == "false" || "${STOP_WORKERS_ON_EXIT}" == "False" || "${STOP_WORKERS_ON_EXIT}" == "0" ]] || echo --stop_workers_on_exit) \
         $([[ "${USE_ROLLOUT_LOGPS}" == "false" || "${USE_ROLLOUT_LOGPS}" == "False" || "${USE_ROLLOUT_LOGPS}" == "0" ]] && echo --no-use_rollout_logps || echo --use_rollout_logps) \
         ${LOG_DIR:+--log_dir=\"${LOG_DIR}\"} \
         ${TRAJECTORY_LOG_DIR:+--trajectory_log_dir=\"${TRAJECTORY_LOG_DIR}\"} \
