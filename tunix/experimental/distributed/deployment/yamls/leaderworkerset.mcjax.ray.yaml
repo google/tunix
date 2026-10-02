@@ -56,7 +56,12 @@ ${QUEUE_LABEL}spec:
                   if [ "$$LWS_WORKER_INDEX" = "0" ]; then
                     echo "Starting Ray Head..."
                     ray start --head --port=6379
-                    sleep 5; until ray status; do sleep 5; done
+                    sleep 5
+                    echo "Waiting for ${PARALLELISM} node(s) to join Ray cluster..."
+                    until [ "$$(ray status 2>/dev/null | awk '/Active:/,/Pending:/' | grep -c 'node_')" -ge "${PARALLELISM}" ]; do
+                      sleep 5
+                    done
+                    echo "Ray cluster ready with $$(ray status 2>/dev/null | awk '/Active:/,/Pending:/' | grep -c 'node_') node(s)."
 
                     ${STARTUP_COMMAND}
                   else
