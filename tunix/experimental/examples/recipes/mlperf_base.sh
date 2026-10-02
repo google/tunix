@@ -219,6 +219,7 @@ export CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-0}
 export CHECKPOINT_MAX_TO_KEEP="${CHECKPOINT_MAX_TO_KEEP:-10}"
 # Every checkpoint has the params eval reads; only every Nth (and the last)
 # adds the optimizer state, which is ~6x larger and slower to write than a step.
+# 0 never adds it (params-only checkpoints; the run cannot be resumed).
 export CHECKPOINT_OPTIMIZER_INTERVAL_STEPS="${CHECKPOINT_OPTIMIZER_INTERVAL_STEPS:-5}"
 export CHECKPOINT_ASYNC=${CHECKPOINT_ASYNC:-true}
 # `true` drops an async save whose background half outlived

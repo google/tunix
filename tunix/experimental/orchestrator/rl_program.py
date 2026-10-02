@@ -392,8 +392,10 @@ class StandardRLProgram(RLProgram):
     self.engine: rl_engine_interface.AbstractRLEngine | None = None
     if max_staleness < 0:
       raise ValueError("max_staleness must be non-negative.")
-    if checkpoint_optimizer_interval_steps < 1:
-      raise ValueError("checkpoint_optimizer_interval_steps must be positive.")
+    if checkpoint_optimizer_interval_steps < 0:
+      raise ValueError(
+          "checkpoint_optimizer_interval_steps must be non-negative."
+      )
     self.dataset = dataset
     self.max_steps = max_steps
     self.algo = algo
@@ -554,7 +556,8 @@ class StandardRLProgram(RLProgram):
     # Checkpoints carry the optimizer state only every this many optimizer
     # steps, and on the last step; the rest hold just the model params, which
     # is all eval reads. The optimizer state can be several times the params'
-    # size, too much to write every step.
+    # size, too much to write every step. 0 never writes it, not even on the
+    # last step, so such a run cannot be resumed.
     self.checkpoint_optimizer_interval_steps = (
         checkpoint_optimizer_interval_steps
     )
@@ -1819,8 +1822,9 @@ class StandardRLProgram(RLProgram):
         else:
           next_batch_idx = self.step + 1
         save_kwargs = {}
-        if (
-            optimizer_step % self.checkpoint_optimizer_interval_steps != 0
+        interval = self.checkpoint_optimizer_interval_steps
+        if interval == 0 or (
+            optimizer_step % interval != 0
             and (self.max_steps is None or self.step + 1 < self.max_steps)
         ):
           # Sent only when skipping, so an interval of 1 leaves the request,

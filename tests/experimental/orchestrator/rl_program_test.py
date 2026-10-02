@@ -2172,6 +2172,56 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def _save_checkpoint_kwargs_for_last_step(self, **program_kwargs):
+    """Trains the one and only step and returns its save_checkpoint kwargs."""
+
+    async def _run():
+      self.mock_algo.num_generations = 1
+      self.mock_algo.mini_batch_size = 1
+      program = self._create_program(batch_size=1, **program_kwargs)
+      program.engine = self.mock_engine
+
+      item = datatypes.TrajectoryItem(
+          group_index=0,
+          prompt_id="prompt_0",
+          start_step=0,
+          traj={"trajectory_reward": 1.0},
+      )
+      item.payload = datatypes.RLTrainerPayload(
+          prompt_ids=np.array([1, 2], dtype=np.int32),
+          prompt_mask=np.array([1.0, 1.0], dtype=np.float32),
+          completion_ids=np.array([3, 4], dtype=np.int32),
+          completion_mask=np.array([1.0, 1.0], dtype=np.float32),
+          advantages=np.array([1.0, 1.0], dtype=np.float32),
+      )
+      await program.scored_q.put(item)
+      await program.scored_q.close()
+
+      await program.train_stage()
+
+      self.mock_engine.save_checkpoint.assert_called_once()
+      return self.mock_engine.save_checkpoint.call_args.kwargs
+
+    return asyncio.run(_run())
+
+  def test_checkpoint_optimizer_interval_keeps_optimizer_state_on_last_step(
+      self,
+  ):
+    kwargs = self._save_checkpoint_kwargs_for_last_step(
+        checkpoint_optimizer_interval_steps=2
+    )
+    self.assertNotIn("save_optimizer_state", kwargs)
+
+  def test_checkpoint_optimizer_interval_zero_never_saves_optimizer_state(self):
+    kwargs = self._save_checkpoint_kwargs_for_last_step(
+        checkpoint_optimizer_interval_steps=0
+    )
+    self.assertIs(kwargs["save_optimizer_state"], False)
+
+  def test_checkpoint_optimizer_interval_rejects_negative(self):
+    with self.assertRaisesRegex(ValueError, "must be non-negative"):
+      self._create_program(checkpoint_optimizer_interval_steps=-1)
+
   def test_train_stage_on_checkpoint_saved_gets_path_from_response(self):
     async def _run():
       self.mock_algo.num_generations = 1
