@@ -72,8 +72,12 @@ from jax.sharding import Mesh
 from kubernetes import client
 from kubernetes import config as k8s_config
 import numpy as np
-from swe_agent import SWEAgent
-from swe_env import SWEEnv
+from swe_agent import CodeActAgent, SWEAgent
+from swe_env import SWEEnv, _init_global_fleet
+try:
+  from examples.deepswe import template
+except ImportError:
+  import template  # pytype: disable=import-error
 from transformers import AutoTokenizer
 from tunix.generate import tokenizer_adapter as tok_adapter
 from tunix.models.qwen3 import model as model_lib
@@ -114,6 +118,9 @@ MAX_CONTEXT_LIMIT = int(
 ENABLE_GUARD = False
 if os.getenv("ENABLE_GUARD", "false").lower() == "true":
   ENABLE_GUARD = True
+
+SCAFFOLD = os.getenv("SCAFFOLD", "openhands")
+USE_AGENT_SANDBOX = os.getenv("USE_AGENT_SANDBOX", "true").lower() == "true"
 
 ROLLOUT_ENGINE = os.getenv("ROLLOUT_ENGINE", "vllm")
 
@@ -518,13 +525,18 @@ class LoggedGuardedSWEEnv(_EvalLoggingEnvMixin, GuardedSWEEnv):
 def pairs_generator():
   """Yield one full (agent, env) trajectory task per dataset entry."""
   for pair_index, entry in enumerate(entries):
-    agent = SWEAgent()
+    agent_cls = (
+        CodeActAgent if SCAFFOLD in template.OPENHANDS_SCAFFOLDS else SWEAgent
+    )
+    agent = agent_cls(scaffold=SCAFFOLD)
     env_cls = LoggedGuardedSWEEnv if ENABLE_GUARD else LoggedSWEEnv
     env = env_cls(
         entry=entry,
         max_steps=MAX_STEPS,
         pair_index=pair_index,
         group_id=pair_index,
+        scaffold=SCAFFOLD,
+        use_agent_sandbox=USE_AGENT_SANDBOX,
     )
     yield agent, env
 
@@ -532,6 +544,15 @@ def pairs_generator():
 async def run_evaluation():
   """Run evaluation with orchestrator-managed task-level parallelism."""
   os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+  if USE_AGENT_SANDBOX:
+    _init_global_fleet(
+        tasks=entries,
+        max_concurrency=MAX_CONCURRENT,
+        num_generations=1,
+        batch_size=MAX_CONCURRENT,
+        scaffold=SCAFFOLD,
+    )
 
   orchestrator = RolloutOrchestrator(
       engine_cls=EvalTrajectoryCollectEngine,

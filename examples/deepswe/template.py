@@ -18,6 +18,8 @@ import json
 import os
 from typing import Any, Optional
 
+OPENHANDS_SCAFFOLDS = ("openhands",)
+
 # ==============================================================================
 # Agent System Prompts
 # ==============================================================================
@@ -209,10 +211,18 @@ Description:
 Execute a bash command in the terminal.
 Parameters:
   1. command (string, required)
-The bash command to execute. For example: `python my_script.py`. If not provided, will show help.
+The bash command to execute. For example: `pytest tests/test_foo.py`. If not provided, will show help.
 –– END FUNCTION #1 ––
 
-–– BEGIN FUNCTION #2: str_replace_editor ––
+–– BEGIN FUNCTION #2: execute_ipython_cell ––
+Description:
+Execute a Python code cell in the interactive environment.
+Parameters:
+  1. code (string, required)
+The Python code to execute.
+–– END FUNCTION #2 ––
+
+–– BEGIN FUNCTION #3: str_replace_editor ––
 Description:
 Custom editing tool for viewing, creating and editing files
 * State is persistent across command calls and discussions with the user
@@ -231,31 +241,37 @@ Parameters:
   5. new_str (string, optional): Optional parameter of `str_replace` command containing the new string (if not given, no string will be added). Required parameter of `insert` command containing the string to insert.
   6. insert_line (integer, optional): Required parameter of `insert` command. The `new_str` will be inserted AFTER the line `insert_line` of `path`.
   7. view_range (array, optional): Optional parameter of `view` command when `path` points to a file. If none is given, the full file is shown. If provided, the file will be shown in the indicated line number range, e.g. [11, 12] will show lines 11 and 12. Indexing at 1 to start. Setting `[start_line, -1]` shows all lines from `start_line` to the end of the file.
-–– END FUNCTION #2 ––
+–– END FUNCTION #3 ––
 
-–– BEGIN FUNCTION #3: submit ––
+–– BEGIN FUNCTION #4: submit ––
 Description:
 Finish the interaction when the task is complete OR if the assistant cannot proceed further with the task.
 No parameters are required for this function.
-–– END FUNCTION #3 ––
+–– END FUNCTION #4 ––
 
-If you choose to call a function ONLY reply in the following format with NO suffix:
+You can execute actions in two primary ways:
+1. By writing executable code blocks (CodeAct format):
+```bash
+<bash command>
+```
+or
+```python
+<python code>
+```
 
+2. By calling functions using the following XML format:
 <function=example_function_name>
 <parameter=example_parameter_1>value_1</parameter>
 <parameter=example_parameter_2>
-This is the value for the second parameter
-that can span
-multiple lines
+value_2
 </parameter>
 </function>
 
 <IMPORTANT>
 Reminder:
-- Function calls MUST follow the specified format, start with <function= and end with </function>
-- Required parameters MUST be specified
-- Only call one function at a time
-- VERY IMPORTANT: Each response must include both reasoning (as natural text) and function call (in above format) to solve the task.
+- Each response must include both reasoning (as natural text) and an action (either an executable code block or a function call).
+- Only execute one action at a time.
+- When the task is complete and verified, call submit (or `<function=submit></function>`).
 </IMPORTANT>
 """
 
@@ -404,7 +420,7 @@ def get_system_prompt(
   """Get system prompt for the given scaffold and function calling mode."""
   if scaffold == "sweagent":
     return SWEAGENT_SYSTEM_PROMPT
-  elif scaffold == "openhands":
+  elif scaffold in OPENHANDS_SCAFFOLDS:
     return OPENHANDS_SYSTEM_PROMPT
   return SWE_SYSTEM_PROMPT_FN_CALL if use_fn_calling else SWE_SYSTEM_PROMPT
 
@@ -525,6 +541,7 @@ def get_template(
     node_selector: Optional[dict[str, str]] = None,
 ) -> Any:
   """Returns the fleet TemplateSpec for the given scaffold, or None."""
-  if scaffold == "openhands":
+  if scaffold in OPENHANDS_SCAFFOLDS:
     return get_openhands_pod_template(node_selector=node_selector)
   return None
+
