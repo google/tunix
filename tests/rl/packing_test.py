@@ -460,6 +460,30 @@ class PackCoreTest(absltest.TestCase):
         row.per_token["returns"], [0.0, 1.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0]
     )
 
+  def test_pack_chunk_returns_packed_chunk_sharing_underlying_buffers(self):
+    item = packing.PackItem(
+        prompt_ids=np.array([1], dtype=np.int32),
+        completion_ids=np.array([2, 3], dtype=np.int32),
+        completion_mask=np.ones(2, dtype=np.float32),
+        advantages=np.ones(2, dtype=np.float32),
+        per_token={"returns": np.array([1.0, 2.0], dtype=np.float32)},
+        routed_experts=np.ones((3, 2, 2), dtype=np.int16) * 4,
+    )
+    chunk = packing.pack_chunk(
+        [[item], []],
+        budget=8,
+        pad_id=0,
+        carried=("returns",),
+    )
+    self.assertIsInstance(chunk, packing.PackedChunk)
+    self.assertLen(chunk, 2)
+    self.assertEqual(chunk.ids.shape, (2, 8))
+    self.assertIsNotNone(chunk.routed_experts)
+    self.assertEqual(chunk.routed_experts.shape, (2, 8, 2, 2))
+    row0 = chunk[0]
+    self.assertTrue(np.shares_memory(row0.ids, chunk.ids))
+    self.assertTrue(np.shares_memory(row0.routed_experts, chunk.routed_experts))
+
 
 if __name__ == "__main__":
   absltest.main()
