@@ -15,6 +15,7 @@
 """Utility functions for OpenHands workspace and environment setup."""
 
 import base64
+import json
 import logging
 import os
 from typing import Any, Optional
@@ -178,18 +179,88 @@ def step_openhands(
   max_steps = getattr(env, "max_steps", None)
 
   if action_obj.function_name in ("finish", "submit"):
+    message = (
+        action_obj.parameters.get("message", "")
+        if getattr(action_obj, "parameters", None)
+        else ""
+    )
+    obs = f"Task completed: {message}" if message else "Task submitted."
     return EnvStepResult(
-        observation="Task submitted.",
+        observation=obs,
         reward=0,
         done=True,
+        info={"max_steps": max_steps, "message": message or "Task submitted."},
+    )
+
+  if action_obj.function_name == "task_tracker":
+    command = (
+        action_obj.parameters.get("command", "view")
+        if getattr(action_obj, "parameters", None)
+        else "view"
+    )
+    task_list = getattr(env, "_task_tracker_list", None)
+    if task_list is None:
+      task_list = []
+      env._task_tracker_list = task_list
+
+    if command == "plan":
+      raw_tasks = (
+          action_obj.parameters.get("task_list", [])
+          if getattr(action_obj, "parameters", None)
+          else []
+      )
+      if isinstance(raw_tasks, str):
+        try:
+          raw_tasks = json.loads(raw_tasks)
+        except Exception:
+          raw_tasks = []
+      if isinstance(raw_tasks, list):
+        task_list = raw_tasks
+        env._task_tracker_list = task_list
+      obs = "Task list updated:\n" + json.dumps(task_list, indent=2)
+    elif command == "view":
+      if not task_list:
+        obs = (
+            "No tasks currently tracked. Use 'plan' command to initialize the"
+            " task list."
+        )
+      else:
+        obs = "Current task list:\n" + json.dumps(task_list, indent=2)
+    else:
+      obs = (
+          f"ERROR: Unknown task_tracker command '{command}'. Allowed values are"
+          " 'view' and 'plan'."
+      )
+
+    if hasattr(env, "total_steps"):
+      env.total_steps += 1
+    return EnvStepResult(
+        observation=obs,
+        reward=0,
+        done=False,
+        info={"max_steps": max_steps},
+    )
+
+  if action_obj.function_name == "think":
+    if hasattr(env, "total_steps"):
+      env.total_steps += 1
+    return EnvStepResult(
+        observation="Your thought has been recorded.",
+        reward=0,
+        done=False,
         info={"max_steps": max_steps},
     )
 
   if action_obj.function_name in ("str_replace_editor", "file_editor") and env.env is not None:
     # R2E registers this editor as `file_editor` and `RepoEnv.run_action`
     # asserts the tool name is in its registered command list, so translate
-    # before delegating. The parameter schemas are identical.
+    # before delegating. Strip OpenHands-specific security_risk parameter.
     action_obj.function_name = "file_editor"
+    if getattr(action_obj, "parameters", None):
+      action_obj.parameters = {
+          k: v for k, v in action_obj.parameters.items()
+          if k != "security_risk"
+      }
     try:
       obs, _, done, _ = env.env.step(action_obj)
       obs_str = str(obs)
@@ -314,7 +385,9 @@ def step_openhands(
       )
     elif getattr(env, "env", None) is not None:
       try:
-        obs, reward, done, info = env.env.step(action_obj)
+        from r2egym.agenthub.action.action import Action as SWEAction  # pytype: disable=import-error
+        clean_action = SWEAction("execute_bash", {"command": cmd})
+        obs, reward, done, info = env.env.step(clean_action)
         obs_str = str(obs)
       except Exception as e:
         obs_str = f"Command execution failed: {e}"
@@ -330,8 +403,8 @@ def step_openhands(
   return EnvStepResult(
       observation=(
           f"ERROR: Tool '{action_obj.function_name}' is not recognized. "
-          "Only 'execute_bash', 'execute_ipython_cell', 'str_replace_editor', "
-          "and 'submit' are available."
+          "Only 'execute_bash', 'str_replace_editor', 'task_tracker', "
+          "'finish', 'think', 'execute_ipython_cell', and 'submit' are available."
       ),
       reward=0,
       done=False,

@@ -483,6 +483,107 @@ class SweAgentTest(absltest.TestCase):
         prompt_item["metadata"]["agent_config"], {"scaffold": "openhands"}
     )
 
+  def test_codeact_agent_user_prompt(self):
+    agent = swe_agent.CodeActAgent()
+    self.assertEqual(agent.user_prompt_template, template.OPENHANDS_USER_PROMPT)
+    self.assertIn("<uploaded_files>", agent.user_prompt_template)
+    self.assertIn("/workspace", agent.user_prompt_template)
+    self.assertIn("Phase 1. READING", agent.user_prompt_template)
+
+  def test_step_openhands_finish_with_message(self):
+    mock_env = mock.MagicMock()
+    mock_env.max_steps = 10
+    action = SWEAction("finish", {"message": "All unit tests pass."})
+    result = openhands_utils.step_openhands(mock_env, action)
+    self.assertTrue(result.done)
+    self.assertEqual(result.observation, "Task completed: All unit tests pass.")
+    self.assertEqual(result.info["message"], "All unit tests pass.")
+
+  def test_step_openhands_task_tracker_plan_and_view(self):
+    mock_env = mock.MagicMock()
+    mock_env.max_steps = 10
+    mock_env.total_steps = 0
+    del mock_env._task_tracker_list  # Ensure starts without attribute
+
+    # 1. View empty
+    view_action = SWEAction("task_tracker", {"command": "view"})
+    res_view1 = openhands_utils.step_openhands(mock_env, view_action)
+    self.assertFalse(res_view1.done)
+    self.assertIn("No tasks currently tracked", res_view1.observation)
+
+    # 2. Plan new tasks
+    plan_action = SWEAction(
+        "task_tracker",
+        {
+            "command": "plan",
+            "task_list": [
+                {"id": "1", "title": "Explore codebase", "status": "done"},
+                {"id": "2", "title": "Fix bug", "status": "in_progress"},
+            ],
+        },
+    )
+    res_plan = openhands_utils.step_openhands(mock_env, plan_action)
+    self.assertFalse(res_plan.done)
+    self.assertIn("Task list updated:", res_plan.observation)
+    self.assertIn("Explore codebase", res_plan.observation)
+
+    # 3. View populated list
+    res_view2 = openhands_utils.step_openhands(mock_env, view_action)
+    self.assertFalse(res_view2.done)
+    self.assertIn("Current task list:", res_view2.observation)
+    self.assertIn("Fix bug", res_view2.observation)
+
+  def test_step_openhands_think(self):
+    mock_env = mock.MagicMock()
+    mock_env.max_steps = 10
+    mock_env.total_steps = 0
+    action = SWEAction("think", {"thought": "Considering reproduction script"})
+    result = openhands_utils.step_openhands(mock_env, action)
+    self.assertFalse(result.done)
+    self.assertEqual(result.observation, "Your thought has been recorded.")
+    self.assertEqual(mock_env.total_steps, 1)
+
+  def test_step_openhands_file_editor_strips_security_risk(self):
+    mock_local_env = mock.MagicMock()
+    mock_local_env.step.return_value = ("Edited", 0.0, False, {})
+
+    mock_env = mock.MagicMock()
+    mock_env.workspace = None
+    mock_env.env = mock_local_env
+    mock_env.max_steps = 10
+    mock_env.total_steps = 0
+
+    action = SWEAction(
+        "str_replace_editor",
+        {
+            "command": "view",
+            "path": "/workspace/main.py",
+            "security_risk": "LOW",
+        },
+    )
+    result = openhands_utils.step_openhands(mock_env, action)
+    self.assertFalse(result.done)
+    self.assertEqual(result.observation, "Edited")
+    delegated_action = mock_local_env.step.call_args[0][0]
+    self.assertEqual(delegated_action.function_name, "file_editor")
+    self.assertNotIn("security_risk", delegated_action.parameters)
+    self.assertEqual(delegated_action.parameters["path"], "/workspace/main.py")
+
+  def test_parse_codeact_task_tracker_and_finish_json(self):
+    response = (
+        "Planning steps:\n"
+        "<tool_call>\n"
+        '{"name": "task_tracker", "arguments": {"command": "plan", "task_list": [{"id": "1", "title": "Check bug", "status": "todo"}]}}\n'
+        "</tool_call>"
+    )
+    thought, action = swe_agent.parse_codeact_response(response)
+    self.assertEqual(action.function_name, "task_tracker")
+    self.assertEqual(action.parameters["command"], "plan")
+    # Verify task_list argument was serialized as valid JSON
+    import json
+    parsed_tasks = json.loads(action.parameters["task_list"])
+    self.assertEqual(parsed_tasks[0]["title"], "Check bug")
+
 
 if __name__ == "__main__":
   absltest.main()

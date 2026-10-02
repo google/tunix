@@ -83,8 +83,40 @@ def test_get_user_prompt_template():
   )
   assert (
       template.get_user_prompt_template("openhands", use_fn_calling=False)
-      == template.SWE_USER_PROMPT
+      == template.OPENHANDS_USER_PROMPT
   )
+  assert (
+      template.get_user_prompt_template("openhands", use_fn_calling=True)
+      == template.OPENHANDS_USER_PROMPT
+  )
+
+
+def test_get_tools():
+  """Verify get_tools returns correct tool definitions."""
+  assert template.get_tools("r2egym") == []
+  tools = template.get_tools("openhands")
+  assert len(tools) == 4
+  tool_names = [t["function"]["name"] for t in tools]
+  assert tool_names == [
+      "execute_bash",
+      "finish",
+      "task_tracker",
+      "str_replace_editor",
+  ]
+  # Verify security_risk parameter in bash and str_replace_editor
+  bash_tool = tools[0]["function"]
+  assert "security_risk" in bash_tool["parameters"]["properties"]
+  assert "security_risk" in bash_tool["parameters"]["required"]
+  editor_tool = tools[3]["function"]
+  assert "security_risk" in editor_tool["parameters"]["properties"]
+  assert "security_risk" in editor_tool["parameters"]["required"]
+  # Verify finish message parameter
+  finish_tool = tools[1]["function"]
+  assert "message" in finish_tool["parameters"]["properties"]
+  assert "message" in finish_tool["parameters"]["required"]
+  # Verify task_tracker command parameter
+  tracker_tool = tools[2]["function"]
+  assert "command" in tracker_tool["parameters"]["properties"]
 
 
 def test_get_openhands_pod_template_default():

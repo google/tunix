@@ -196,7 +196,13 @@ def parse_codeact_response(response_text: str) -> tuple[str, Any]:
             args = {"command": args}
         if not isinstance(args, dict):
           args = {"command": str(args)}
-        action = SWEAction(fn_name, {str(k): str(v) for k, v in args.items()})
+        clean_args = {}
+        for k, v in args.items():
+          if isinstance(v, (dict, list)):
+            clean_args[str(k)] = json.dumps(v)
+          else:
+            clean_args[str(k)] = str(v)
+        action = SWEAction(fn_name, clean_args)
         return thought, action
 
     elif match_type == "code_block":
