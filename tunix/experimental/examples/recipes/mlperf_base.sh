@@ -319,8 +319,8 @@ export STEP_TIMEOUT_SECS="${STEP_TIMEOUT_SECS:-60}"
 export REWARD_TIMEOUT_SECS="${REWARD_TIMEOUT_SECS:-60}"
 export FLUSH_EVERY_N_STEPS=1
 export MAX_TURNS=30
-export MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-4096}"
-export MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-61440}"
+export MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-8192}"
+export MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-57344}"
 
 # ==============================================================================
 # Execution Dispatch

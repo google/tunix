@@ -442,7 +442,7 @@ Remember: when making multiple file edits in a row to the same file, you should 
 def get_openhands_tools(
     max_timeout: int | None = None,
     workspace_mount_path_in_sandbox: str = "/workspace",
-    enable_think: bool = True,
+    enable_think: bool = False,
     enable_task_tracker: bool = True,
 ) -> list[dict[str, Any]]:
   """Returns the OpenHands CodeActAgent tool schemas matching nv-OpenHands@0d766ad0."""

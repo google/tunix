@@ -439,7 +439,6 @@ class SweAgentTest(absltest.TestCase):
         tool_names,
         [
             "execute_bash",
-            "think",
             "finish",
             "task_tracker",
             "str_replace_editor",
