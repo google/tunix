@@ -672,7 +672,9 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       "mini_batch_size=%d, num_generations=%d, max_steps=%d, max_turns=%d, "
       "train_micro=%d, beta=%.4f, env_backend=%s, use_agent_sandbox=%s, "
       "weight_sync_mode=%s, disable_weight_sync_timeouts=%s, "
-      "trainable_parameters_mask=%s, image_rewrite_prefix=%s.",
+      "trainable_parameters_mask=%s, image_rewrite_prefix=%s, "
+      "max_staleness=%d, trajectory_group_order=%s, "
+      "async_weight_sync=%s, partial_rollout=%s.",
       args.model_id,
       args.batch_size,
       args.mini_batch_size,
@@ -687,6 +689,10 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       args.disable_weight_sync_timeouts,
       args.trainable_parameters_mask,
       args.image_rewrite_prefix or "(none)",
+      args.max_staleness,
+      args.trajectory_group_order,
+      args.async_weight_sync,
+      args.partial_rollout,
   )
   logging.info("Control-plane JAX backend: %s", jax.default_backend())
 

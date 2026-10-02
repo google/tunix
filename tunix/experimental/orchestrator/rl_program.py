@@ -89,6 +89,29 @@ def _extract_scalar(val: Any, name: str | None = None) -> float | None:
     pass
   return metrics_logger_lib.extract_scalar(val)
 
+
+def _rollout_worker_label(engine: Any, request_ids: Any) -> str:
+  """Worker id(s) the engine routed `request_ids` to, or "n/a" (logging only)."""
+  resolver = getattr(engine, "rollout_worker_ids_for", None)
+  if not callable(resolver) or not isinstance(request_ids, (list, tuple)):
+    return "n/a"
+  try:
+    label = resolver(request_ids)
+  except Exception:  # pylint: disable=broad-exception-caught
+    return "n/a"
+  return label if isinstance(label, str) else "n/a"
+
+
+def _group_worker_label(group: Sequence[Any]) -> str:
+  """Sorted, comma-joined `metadata["worker_id"]` of a group, or "n/a"."""
+  ids = set()
+  for item in group:
+    worker_id = (getattr(item, "metadata", None) or {}).get("worker_id")
+    if worker_id:
+      ids.add(str(worker_id))
+  return ",".join(sorted(ids)) if ids else "n/a"
+
+
 def _prompt_coordinates(prompt_idx: int, full_batch_size: int) -> dict[str, int]:
   """Returns the dataset coordinates of the prompt at `prompt_idx`.
 
@@ -801,18 +824,9 @@ class StandardRLProgram(RLProgram):
         # What the rollouts actually hold. While a background sync is in
         # flight the trainer is already a version ahead of them.
         rollout_policy_version = self.policy_version - self._unsynced_steps
-        logging.info(
-            "[pipeline] DISPATCH prompt_id=%s prompt_idx=%d batch_idx=%d"
-            " intra_batch_idx=%d policy_version=%d next_batch=%d",
-            prompt_item.get("prompt_id")
-            if isinstance(prompt_item, dict)
-            else getattr(prompt_item, "prompt_id", ""),
-            coordinates["prompt_idx"],
-            coordinates["batch_idx"],
-            coordinates["intra_batch_idx"],
-            rollout_policy_version,
-            self._next_batch,
-        )
+        # DISPATCH is logged after dispatch below so the line can name the
+        # worker the engine routed the group to; the values are captured here.
+        dispatch_next_batch = self._next_batch
         self._in_flight_rollouts += self.num_generations
         dispatch_kwargs: dict[str, Any] = {
             "num_generations": self.num_generations,
@@ -835,9 +849,22 @@ class StandardRLProgram(RLProgram):
         }
         if self.generation_args is not None:
           dispatch_kwargs["generation_args"] = self.generation_args
-        await self.engine.dispatch_rollouts(
+        request_ids = await self.engine.dispatch_rollouts(
             [prompt_item],
             **dispatch_kwargs,
+        )
+        logging.info(
+            "[pipeline] DISPATCH prompt_id=%s prompt_idx=%d batch_idx=%d"
+            " intra_batch_idx=%d policy_version=%d next_batch=%d worker_id=%s",
+            prompt_item.get("prompt_id")
+            if isinstance(prompt_item, dict)
+            else getattr(prompt_item, "prompt_id", ""),
+            coordinates["prompt_idx"],
+            coordinates["batch_idx"],
+            coordinates["intra_batch_idx"],
+            rollout_policy_version,
+            dispatch_next_batch,
+            _rollout_worker_label(self.engine, request_ids),
         )
       if last_coordinates is not None and isinstance(
           self.scored_q, trajectory_queue_manager.BatchOrderedQueueManager
@@ -963,12 +990,13 @@ class StandardRLProgram(RLProgram):
           first_meta = getattr(group[0], "metadata", None) or {}
           logging.info(
               "[pipeline] ARRIVE prompt_id=%s prompt_idx=%s batch_idx=%s"
-              " intra_batch_idx=%s policy_version=%d",
+              " intra_batch_idx=%s policy_version=%d worker_id=%s",
               getattr(group[0], "prompt_id", ""),
               first_meta.get("prompt_idx"),
               first_meta.get("batch_idx"),
               first_meta.get("intra_batch_idx"),
               getattr(group[0], "policy_version", 0),
+              _group_worker_label(group),
           )
     finally:
       await self.scored_q.close()
@@ -1944,11 +1972,13 @@ class StandardRLProgram(RLProgram):
             step_padding_stats.append(mb.padding_stats)
             logging.info(
                 "Packed %d trajectories into microbatch: %s (padding_ratio=%.3f,"
-                " row_imbalance=%.3f)",
+                " row_imbalance=%.3f) tokens=%d rows=%d",
                 len(mb.trajectory_ids),
                 logging_utils.summarize_list(list(mb.trajectory_ids)),
                 mb.padding_stats.padding_ratio,
                 mb.padding_stats.row_imbalance,
+                mb.padding_stats.valid_tokens,
+                mb.padding_stats.num_rows,
             )
           else:
             logging.info(

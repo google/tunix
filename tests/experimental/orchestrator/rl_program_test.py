@@ -501,6 +501,40 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_pipeline_logs_dispatch_and_arrive_worker_id(self):
+    async def _run():
+      group = _make_trajectory_group()
+      for item in group:
+        item.metadata["worker_id"] = "vllm-rollout-0"
+      _set_mock_poll_batches(self.mock_engine, group, [])
+      self.mock_engine.dispatch_rollouts.return_value = [
+          "req_prompt_0_g0_v0",
+          "req_prompt_0_g1_v0",
+      ]
+      self.mock_engine.rollout_worker_ids_for.return_value = "vllm-rollout-0"
+      program = self._create_program(dataset=["prompt_data_0"], max_steps=1)
+
+      with self.assertLogs(level="INFO") as logs:
+        await program.run_async(self.mock_engine)
+
+      output = "\n".join(logs.output)
+      self.assertRegex(
+          output,
+          r"\[pipeline\] DISPATCH prompt_id=prompt_0 prompt_idx=0 batch_idx=0"
+          r" intra_batch_idx=0 policy_version=0 next_batch=0"
+          r" worker_id=vllm-rollout-0",
+      )
+      self.assertRegex(
+          output,
+          r"\[pipeline\] ARRIVE prompt_id=prompt_0 prompt_idx=\S+ batch_idx=\S+"
+          r" intra_batch_idx=\S+ policy_version=0 worker_id=vllm-rollout-0",
+      )
+      self.mock_engine.rollout_worker_ids_for.assert_called_once_with(
+          ["req_prompt_0_g0_v0", "req_prompt_0_g1_v0"]
+      )
+
+    asyncio.run(_run())
+
   def test_step_can_skip_weight_sync(self):
     async def _run():
       _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
@@ -2384,7 +2418,16 @@ class RLProgramTest(absltest.TestCase):
       for i in range(2):
         await program.scored_q.put(_make_item("prompt_1", i, length=10))
 
-      await program.train_stage()
+      with self.assertLogs(level="INFO") as logs:
+        await program.train_stage()
+
+      # Packing receipts: 2 x 10 real tokens over 2 rows of 16 -> 20/32,
+      # appended after the existing padding fields.
+      self.assertRegex(
+          "\n".join(logs.output),
+          r"Packed 2 trajectories into microbatch: \[[^\]]*\]"
+          r" \(padding_ratio=0\.375, row_imbalance=1\.000\) tokens=20 rows=2",
+      )
 
       self.assertEqual(self.mock_engine.train_step.call_count, 2)
       calls = self.mock_engine.train_step.call_args_list

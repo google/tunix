@@ -83,8 +83,13 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           Mapping[datatypes.Role, remote_execution.ActorHandle] | None
       ) = None,
       weight_sync_coordinator: Any = None,
+      rollout_worker_ids: (
+          Mapping[remote_execution.ActorHandle, str] | None
+      ) = None,
   ):
     self._rollout_workers = list(rollout_workers)
+    # Handle -> registered worker id, used only to label log lines.
+    self._rollout_worker_ids = dict(rollout_worker_ids or {})
     self._rollout_pool = remote_execution.RoutingActorPool(
         self._rollout_workers
     )
@@ -168,6 +173,25 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     )
 
     return [r.request_id for r in requests]
+
+  def rollout_worker_ids_for(self, request_ids: Sequence[str]) -> str:
+    """Labels the workers the given in-flight rollout requests were routed to.
+
+    Logging only: reads the session's dispatch bookkeeping and never blocks.
+    Returns the sorted, comma-joined worker ids (the handle's address when it
+    was not registered with an id), or "n/a" when none is known.
+    """
+    labels = set()
+    for request_id in request_ids:
+      actor = self._rollout_session.worker_for(request_id)
+      if actor is None:
+        continue
+      labels.add(
+          self._rollout_worker_ids.get(actor)
+          or getattr(actor, "target_address", None)
+          or f"actor-{id(actor)}"
+      )
+    return ",".join(sorted(labels)) if labels else "n/a"
 
   def _build_rollout_requests(
       self,
@@ -485,16 +509,18 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     if worker is None:
       raise ValueError(f"No trainer worker registered for role {role}")
     role_name = role.value if isinstance(role, datatypes.Role) else str(role)
+    request_id = f"train_req_{uuid.uuid4().hex[:8]}"
     logging.info(
         "Executing train_step on %s worker (accumulate_gradients=%s,"
-        " apply_optimizer=%s)...",
+        " apply_optimizer=%s)... request_id=%s",
         role_name,
         accumulate_gradients,
         apply_optimizer,
+        request_id,
     )
     metadata = dict(getattr(payload, "metadata", {}) or {})
     request = datatypes.TrainRequest(
-        request_id=f"train_req_{uuid.uuid4().hex[:8]}",
+        request_id=request_id,
         payload=payload,
         metadata=metadata,
     )

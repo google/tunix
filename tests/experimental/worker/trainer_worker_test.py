@@ -119,8 +119,15 @@ class TrainerWorkerTest(absltest.TestCase):
         metadata={"batch_id": "b0"},
     )
 
-    resp = self.worker.fwd_bwd(request=request)
+    with self.assertLogs(level="INFO") as logs:
+      resp = self.worker.fwd_bwd(request=request)
 
+    self.assertRegex(
+        "\n".join(logs.output),
+        r"fwd_bwd request_id=req-train-123 train_step=1 micro=0"
+        r" received=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}\+00:00"
+        r" compute_s=n/a total_s=\d+\.\d{3}",
+    )
     self.assertIsInstance(resp, datatypes.Response)
     self.assertEqual(resp.request_id, "req-train-123")
     self.assertEqual(resp.metadata["worker_id"], "trainer_0")

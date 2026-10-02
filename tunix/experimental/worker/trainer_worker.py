@@ -16,6 +16,8 @@
 
 from collections.abc import Mapping
 import contextlib
+import datetime
+import time
 from typing import Any, Callable, ContextManager, cast
 
 from absl import logging
@@ -70,6 +72,9 @@ class TrainerWorker(abstract_worker.Worker):
     self._worker_id = worker_id
     self._state = WorkerState.PENDING
     self._last_error: str | None = None
+    # Receipts for the per-request fwd_bwd log line (no extra device work).
+    self._updates_completed = 0
+    self._fwd_bwd_since_update = 0
 
   def _policy_version(self) -> int:
     return int(getattr(self._trainer, "policy_version", 0))
@@ -193,6 +198,8 @@ class TrainerWorker(abstract_worker.Worker):
       **kwargs: Any,
   ) -> datatypes.Response:
     """Executes one forward/backward pass."""
+    received = datetime.datetime.now(datetime.timezone.utc)
+    t_received = time.monotonic()
     self._ensure_ready()
     req_metadata = dict(request.metadata) if request.metadata else {}
     kwargs.pop("skip_jit", None)
@@ -201,6 +208,18 @@ class TrainerWorker(abstract_worker.Worker):
       self._last_error = None
       resp = self._response(queued=True, **req_metadata)
       resp.request_id = request.request_id
+      # `fwd_bwd` returns once the device work is enqueued; nothing here waits
+      # for it, so completion time is not measured (compute_s=n/a).
+      logging.info(
+          "fwd_bwd request_id=%s train_step=%d micro=%d received=%s"
+          " compute_s=n/a total_s=%.3f",
+          request.request_id,
+          self._updates_completed + 1,
+          self._fwd_bwd_since_update,
+          received.isoformat(timespec="milliseconds"),
+          time.monotonic() - t_received,
+      )
+      self._fwd_bwd_since_update += 1
       return resp
     except Exception as exc:
       self._last_error = str(exc)
@@ -213,6 +232,11 @@ class TrainerWorker(abstract_worker.Worker):
     try:
       train_step = self._trainer.update(**kwargs)
       self._last_error = None
+      self._updates_completed = (
+          int(train_step) if isinstance(train_step, int)
+          else self._updates_completed + 1
+      )
+      self._fwd_bwd_since_update = 0
       return train_step
     except Exception as exc:
       self._last_error = str(exc)

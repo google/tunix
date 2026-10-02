@@ -304,18 +304,41 @@ class DistributedRLEngineTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_rollout_worker_ids_for_labels_in_flight_requests(self):
+    async def _run():
+      engine = distributed_rl_engine.DistributedRLEngine(
+          rollout_workers=[self.mock_rollout_1, self.mock_rollout_2],
+          trainer_workers={datatypes.Role.ACTOR: self.mock_actor},
+          rollout_worker_ids={
+              self.mock_rollout_1: "rollout-a",
+              self.mock_rollout_2: "rollout-b",
+          },
+      )
+      request_ids = await engine.dispatch_rollouts(
+          [{"prompt": "p1", "prompt_id": "p1"}], num_generations=2
+      )
+      self.assertLen(request_ids, 2)
+      # Least-loaded routing spreads the two generations over both workers.
+      self.assertEqual(
+          engine.rollout_worker_ids_for(request_ids), "rollout-a,rollout-b"
+      )
+      self.assertEqual(engine.rollout_worker_ids_for(["unknown"]), "n/a")
+
+    asyncio.run(_run())
+
   def test_train_step_routes_to_actor(self):
     async def _run():
       self.mock_actor.fwd_bwd.return_value = {"loss": 0.5}
       mock_payload = mock.MagicMock(spec=datatypes.RLTrainerPayload)
       mock_payload.metadata = {"lineage_id": "batch_1"}
 
-      res = await self.engine.train_step(
-          mock_payload,
-          role=datatypes.Role.ACTOR,
-          accumulate_gradients=True,
-          apply_optimizer=False,
-      )
+      with self.assertLogs(level="INFO") as logs:
+        res = await self.engine.train_step(
+            mock_payload,
+            role=datatypes.Role.ACTOR,
+            accumulate_gradients=True,
+            apply_optimizer=False,
+        )
       self.assertEqual(res, {"loss": 0.5})
 
       self.mock_actor.fwd_bwd.assert_called_once()
@@ -326,6 +349,11 @@ class DistributedRLEngineTest(absltest.TestCase):
       self.assertIs(req.payload, mock_payload)
       self.assertEqual(req.metadata, {"lineage_id": "batch_1"})
       self.mock_actor.update.assert_not_called()
+      self.assertIn(
+          "Executing train_step on actor worker (accumulate_gradients=True,"
+          f" apply_optimizer=False)... request_id={req.request_id}",
+          "\n".join(logs.output),
+      )
 
     asyncio.run(_run())
 
