@@ -16,6 +16,8 @@
 
 import os
 import threading
+import time
+import types
 from unittest import mock
 from absl.testing import absltest
 import numpy as np
@@ -869,6 +871,127 @@ class ScaleOnHoldTest(absltest.TestCase):
     self.addCleanup(on.close)
     self.assertTrue(on.scale_on_hold)
     self.assertIs(sandbox_utils._ACTIVE_PREWARM_ITERATOR, on)
+
+
+class _BlockingAcquireFleet(FakeFleet):
+  """FakeFleet whose acquire() blocks until `release` is set, then may raise."""
+
+  def __init__(self, error: Exception | None = None):
+    super().__init__()
+    self.release = threading.Event()
+    self.error = error
+
+  def acquire(self, task):
+    self.release.wait(10)
+    if self.error is not None:
+      raise self.error
+    return ("handle", task.image)
+
+
+class AcquireSandboxTest(absltest.TestCase):
+
+  _TASK = types.SimpleNamespace(image="img_A")
+
+  def setUp(self):
+    super().setUp()
+    self.addCleanup(mock.patch.stopall)
+
+  def _prewarm(self, fleet):
+    iterator = sandbox_utils.PrewarmDatasetIterator(
+        [{"prompt": "p0", "docker_image": "img_A"}],
+        fleet=fleet,
+        num_generations=4,
+        batch_size=1,
+        scale_on_hold=True,
+    )
+    self.addCleanup(iterator.close)
+    self.assertEqual(fleet.active_pools, {"img_A": 4})
+
+  def _set_delay(self, delay):
+    mock.patch.dict(
+        os.environ, {"DEEPSWE_PREWARM_EARLY_NOTE_S": delay}
+    ).start()
+
+  def _start_acquire(self, fleet):
+    out = {}
+
+    def run():
+      try:
+        out["handle"] = sandbox_utils.acquire_sandbox(fleet, self._TASK)
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        out["error"] = e
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    return thread, out
+
+  def _wait_for_replicas(self, fleet, replicas):
+    deadline = time.time() + 5
+    while fleet.active_pools["img_A"] != replicas and time.time() < deadline:
+      time.sleep(0.01)
+    self.assertEqual(fleet.active_pools["img_A"], replicas)
+
+  def test_reports_claim_still_waiting_after_delay_once(self):
+    fleet = _BlockingAcquireFleet()
+    self._prewarm(fleet)
+    self._set_delay("0.05")
+    thread, out = self._start_acquire(fleet)
+    self._wait_for_replicas(fleet, 3)  # Reported while still waiting.
+    fleet.release.set()
+    thread.join()
+    self.assertEqual(out, {"handle": ("handle", "img_A")})
+    self.assertEqual(fleet.active_pools["img_A"], 3)  # Not reported twice.
+
+  def test_fast_acquire_reports_once(self):
+    fleet = _BlockingAcquireFleet()
+    fleet.release.set()
+    self._prewarm(fleet)
+    self.assertEqual(
+        sandbox_utils.acquire_sandbox(fleet, self._TASK), ("handle", "img_A")
+    )
+    time.sleep(0.1)
+    self.assertEqual(fleet.active_pools["img_A"], 3)
+
+  def test_failure_before_delay_reports_nothing(self):
+    fleet = _BlockingAcquireFleet(error=RuntimeError("boom"))
+    fleet.release.set()
+    self._prewarm(fleet)
+    self._set_delay("0.2")
+    with self.assertRaisesRegex(RuntimeError, "boom"):
+      sandbox_utils.acquire_sandbox(fleet, self._TASK)
+    time.sleep(0.4)
+    self.assertEqual(fleet.active_pools["img_A"], 4)
+
+  def test_failure_after_delay_keeps_the_report(self):
+    fleet = _BlockingAcquireFleet(error=RuntimeError("not ready"))
+    self._prewarm(fleet)
+    self._set_delay("0.05")
+    thread, out = self._start_acquire(fleet)
+    self._wait_for_replicas(fleet, 3)
+    fleet.release.set()
+    thread.join()
+    self.assertIsInstance(out.get("error"), RuntimeError)
+    self.assertEqual(fleet.active_pools["img_A"], 3)
+
+  def test_zero_delay_reports_only_on_success(self):
+    fleet = _BlockingAcquireFleet()
+    self._prewarm(fleet)
+    self._set_delay("0")
+    thread, out = self._start_acquire(fleet)
+    time.sleep(0.2)
+    self.assertEqual(fleet.active_pools["img_A"], 4)
+    fleet.release.set()
+    thread.join()
+    self.assertEqual(out, {"handle": ("handle", "img_A")})
+    self.assertEqual(fleet.active_pools["img_A"], 3)
+
+  def test_without_prewarmer_returns_handle(self):
+    fleet = _BlockingAcquireFleet()
+    fleet.release.set()
+    self.assertIsNone(sandbox_utils._ACTIVE_PREWARM_ITERATOR)
+    self.assertEqual(
+        sandbox_utils.acquire_sandbox(fleet, self._TASK), ("handle", "img_A")
+    )
 
 
 class SandboxRetryOverrideTest(absltest.TestCase):

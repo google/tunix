@@ -33,6 +33,21 @@ import vllm  # pytype: disable=import-error
 
 faulthandler.register(signal.SIGINT, all_threads=True)
 
+# Optional KEY=VALUE environment overrides, one per line ('#' starts a comment).
+# The launcher mounts its patch ConfigMap at /patch, so a running JobSet picks
+# up new settings (e.g. sandbox timeouts) on its next in-pod training attempt
+# without editing the pod spec.
+_ENV_OVERRIDES_FILE = os.environ.get("DEEPSWE_ENV_OVERRIDES_FILE", "/patch/env")
+if os.path.isfile(_ENV_OVERRIDES_FILE):
+  with open(_ENV_OVERRIDES_FILE) as _f:
+    for _line in _f:
+      _line = _line.split("#", 1)[0].strip()
+      if "=" not in _line:
+        continue
+      _key, _value = (s.strip() for s in _line.split("=", 1))
+      os.environ[_key] = _value
+      print(f"[deepswe] env override: {_key}={_value}", flush=True)
+
 
 def _parse_bool(value: str) -> bool:
   if value.lower() in ("1", "true", "yes", "on"):

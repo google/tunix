@@ -35,8 +35,12 @@ _FLEET_LOCK = threading.RLock()
 _PATCH_LOCK = threading.Lock()
 _R2EGYM_PATCHED = False
 # The PrewarmDatasetIterator running with scale-on-hold in this process (if
-# any); SWEEnv reports each successful claim to it via note_sandbox_acquired().
+# any); SWEEnv reports each claim to it via acquire_sandbox().
 _ACTIVE_PREWARM_ITERATOR = None
+# acquire_sandbox() reports a claim that is still waiting for readiness after
+# this many seconds (0 disables the early report).
+_EARLY_NOTE_ENV = "DEEPSWE_PREWARM_EARLY_NOTE_S"
+_EARLY_NOTE_DEFAULT_S = 90.0
 
 
 def patch_r2egym_for_agent_sandbox() -> None:
@@ -574,6 +578,50 @@ def note_sandbox_acquired(image: str) -> None:
     it.note_acquired(image)
   except Exception as e:  # pylint: disable=broad-exception-caught
     logging.warning("[PrewarmDatasetIterator] note_acquired(%s): %r", image, e)
+
+
+def acquire_sandbox(fleet: Any, task: Any) -> Any:
+  """`fleet.acquire(task)` that reports the claim to the active prewarmer.
+
+  A claim adopts a warm sandbox within seconds of its creation, and the warm
+  pool controller then creates a replacement to keep the pool at its replica
+  count. Reporting the claim only once its sandbox is ready keeps those
+  replacements alive (queued for, then admitted by, Kueue; each one costs a
+  Cilium identity) for as long as readiness takes, which is tens of minutes
+  when the cluster runs out of identities. So a claim still waiting after
+  DEEPSWE_PREWARM_EARLY_NOTE_S seconds (default 90, 0 disables) is reported
+  then. Each call reports at most once; a call that fails before the delay
+  reports nothing.
+
+  Args:
+    fleet: The SandboxFleet.
+    task: The agent_sandbox_rl Task to acquire a sandbox for.
+
+  Returns:
+    The SandboxHandle returned by `fleet.acquire(task)`.
+  """
+  try:
+    delay = float(os.environ.get(_EARLY_NOTE_ENV, _EARLY_NOTE_DEFAULT_S))
+  except ValueError:
+    delay = _EARLY_NOTE_DEFAULT_S
+  once = threading.Lock()
+
+  def _note() -> None:
+    if once.acquire(blocking=False):
+      note_sandbox_acquired(task.image)
+
+  timer = None
+  if delay > 0 and _ACTIVE_PREWARM_ITERATOR is not None:
+    timer = threading.Timer(delay, _note)
+    timer.daemon = True
+    timer.start()
+  try:
+    handle = fleet.acquire(task)
+  finally:
+    if timer is not None:
+      timer.cancel()
+  _note()
+  return handle
 
 
 def teardown_global_fleet() -> None:
