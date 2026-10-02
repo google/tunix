@@ -1,0 +1,68 @@
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: ${JOBSET_NAME}
+  namespace: default
+spec:
+  failurePolicy:
+    restartStrategy: Recreate
+  network:
+    enableDNSHostnames: true
+    publishNotReadyAddresses: true
+  replicatedJobs:
+  - name: proc
+    replicas: ${REPLICAS}
+    template:
+      metadata:
+        annotations: {}
+      spec:
+        backoffLimit: 0
+        completionMode: Indexed
+        completions: 1
+        parallelism: 1
+        template:
+          metadata:
+            annotations:
+              # ensure exclusive access to the node
+              alpha.jobset.sigs.k8s.io/exclusive-topology: kubernetes.io/hostname
+          spec:
+            dnsPolicy: ClusterFirstWithHostNet
+            hostNetwork: true
+            restartPolicy: Never
+            terminationGracePeriodSeconds: 10
+            nodeSelector:
+              node.kubernetes.io/instance-type: ${CPU_MACHINE}
+            containers:
+            - name: ${USER_CONTAINER}
+              image: ${USER_CONTAINER_IMAGE}
+              imagePullPolicy: Always
+              securityContext:
+                privileged: true
+              # resources:
+              #   limits:
+              #     cpu: "24"
+              #     memory: 100G
+              command:
+                - bash
+                - -c
+                - |
+                  echo "XPK Start: $$(date)"
+                  _sigterm() (kill -SIGTERM $$! 2>/dev/null)
+                  trap _sigterm SIGTERM
+
+                  (
+                    ${STARTUP_COMMAND}
+                  ) & PID=$$!
+
+                  while kill -0 $$PID 2>/dev/null; do
+                    sleep 5
+                  done
+                  wait $$PID
+                  EXIT_CODE=$$?
+
+                  echo "XPK End: $$(date)"
+                  echo "EXIT_CODE=$$EXIT_CODE"
+                  exit $$EXIT_CODE
+              ports:
+              - containerPort: ${USER_CONTAINER_PORT}
+                name: grpc # Naming it 'grpc' tells GKE to optimize for HTTP/2
