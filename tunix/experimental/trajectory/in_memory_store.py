@@ -24,9 +24,7 @@ def _validate_trajectory_id(trajectory_id: str | None) -> str:
   return trajectory_id
 
 
-class InMemoryTrajectoryStore(
-    store.TrajectoryStore, store.TrajectoryReader, store.TrajectoryWriter
-):
+class InMemoryTrajectoryStore(store.TrajectoryStore):
   """In-memory implementation satisfying TrajectoryReader and TrajectoryWriter.
 
   Process-local: the steps written here are visible only to the process that

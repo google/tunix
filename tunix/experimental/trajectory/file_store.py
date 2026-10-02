@@ -204,9 +204,7 @@ class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
     )
 
 
-class FileTrajectoryStore(
-    store.TrajectoryStore, store.TrajectoryReader, store.TrajectoryWriter
-):
+class FileTrajectoryStore(store.TrajectoryStore):
   """File-based implementation satisfying TrajectoryReader and TrajectoryWriter.
 
   Architectural Separation of Responsibilities:
