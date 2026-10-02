@@ -154,6 +154,66 @@ class SWEEnv(BaseTaskEnv):
     self.extra_kwargs["group_id"] = group_id
     self.extra_kwargs["pair_index"] = pair_index
 
+  def _release_sandbox_quietly(self) -> None:
+    """Best-effort release of a (possibly partially initialized) sandbox."""
+    env, self.env = self.env, None
+    if env is not None:
+      try:
+        env.close()
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        logging.warning("[SWEEnv] env.close() failed: %r", e)
+    workspace, self.workspace = getattr(self, "workspace", None), None
+    if workspace is not None:
+      try:
+        workspace.cleanup()
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        logging.warning("[SWEEnv] Workspace cleanup note: %r", e)
+    handle, self.handle = getattr(self, "handle", None), None
+    fleet = self.fleet or getattr(sandbox_utils, "_GLOBAL_FLEET", None)
+    if handle is not None and fleet is not None:
+      try:
+        fleet.release(handle)
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        logging.warning("[SWEEnv] fleet.release failed: %r", e)
+
+  def _init_agent_sandbox_env_with_retries(self) -> None:
+    """Initializes the sandbox env, retrying on a fresh sandbox on failure.
+
+    Transient Kubernetes failures while preparing a freshly acquired sandbox
+    (e.g. `error dialing backend` when the sandbox's node kubelet is down) must
+    not kill the whole training run. Retrying on the same handle cannot help
+    when the sandbox's node is broken, so release it and acquire a new one.
+    Failures of `fleet.acquire` itself keep their own retry policy and are
+    re-raised unchanged.
+    """
+    max_attempts = max(1, int(os.environ.get("DEEPSWE_ENV_INIT_ATTEMPTS", "4")))
+    for attempt in range(max_attempts):
+      try:
+        self._init_agent_sandbox_env()
+        return
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        acquired = self.handle is not None
+        self._release_sandbox_quietly()
+        if not acquired:
+          raise
+        if attempt == max_attempts - 1:
+          logging.error(
+              "[SWEEnv] Sandbox env init failed after %d attempts: %r",
+              max_attempts,
+              e,
+          )
+          raise
+        delay = min(60, 15 * (attempt + 1))
+        logging.warning(
+            "[SWEEnv] Sandbox env init failed (attempt %d/%d): %r; released"
+            " the sandbox, retrying on a fresh one in %ds.",
+            attempt + 1,
+            max_attempts,
+            e,
+            delay,
+        )
+        time.sleep(delay)
+
   def _init_agent_sandbox_env(self) -> None:
     sandbox_utils.patch_r2egym_for_agent_sandbox()
     from agent_sandbox_rl import Task  # pytype: disable=import-error
@@ -269,7 +329,7 @@ class SWEEnv(BaseTaskEnv):
   def _initial_observation(self) -> Any:
     if not self.env and not self.workspace:
       if self.use_agent_sandbox:
-        self._init_agent_sandbox_env()
+        self._init_agent_sandbox_env_with_retries()
       else:
         self._init_local_repo_env()
     elif self.env is not None:
@@ -322,7 +382,10 @@ class SWEEnv(BaseTaskEnv):
   def close(self) -> None:
     """Close the environment and clean up resources."""
     if self.env is not None:
-      self.env.close()
+      try:
+        self.env.close()
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        logging.warning("[SWEEnv] env.close() failed: %r", e)
 
     if getattr(self, "workspace", None) is not None:
       try:
@@ -339,7 +402,11 @@ class SWEEnv(BaseTaskEnv):
     ):
       msg = "[SWEEnv] Releasing SandboxHandle back to SandboxFleet."
       logging.info(msg)
-      fleet.release(self.handle)
+      try:
+        fleet.release(self.handle)
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        # The fleet keeps tracking the handle and releases it at teardown.
+        logging.warning("[SWEEnv] fleet.release failed: %r", e)
       self.handle = None
 
     if (
