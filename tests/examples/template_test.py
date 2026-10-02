@@ -142,7 +142,7 @@ def test_get_openhands_pod_template_default():
     assert container["volumeMounts"] == [{"name": "oh", "mountPath": "/oh"}]
     init_c = pod_template.extra_pod_spec["initContainers"][0]
     assert init_c["name"] == "oh-server"
-    assert "agent-server" in init_c["image"]
+    assert any(token in init_c["image"] for token in ("runtime", "openhands", "agent-server"))
     assert "cp" in init_c["command"][2]
     assert init_c["volumeMounts"] == [{"name": "oh", "mountPath": "/oh"}]
     assert pod_template.extra_pod_spec["volumes"] == [

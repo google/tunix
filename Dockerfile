@@ -66,7 +66,7 @@ ARG INSTALL_DEEPSWE_DEPS=false
 
 # Install DeepSWE specific dependencies and apply runtime patches conditionally
 RUN if [ "$INSTALL_DEEPSWE_DEPS" = "true" ]; then \
-      uv pip install kubernetes gym swebench==3.0.2 'openhands-sdk>=1.44.1' 'k8s-agent-sandbox>=0.5.1' httpx && \
+      uv pip install kubernetes gym swebench==3.0.2 'k8s-agent-sandbox>=0.5.1' httpx && \
       uv pip install --no-deps git+https://github.com/kubernetes-sigs/agent-sandbox.git#subdirectory=clients/python/agentic-sandbox-client && \
       uv pip install --no-deps git+https://github.com/kubernetes-sigs/agent-sandbox.git#subdirectory=examples/agent-sandbox-rl && \
       uv pip install --no-deps git+https://github.com/kubernetes-sigs/agent-sandbox.git#subdirectory=clients/integrations/openhands && \
