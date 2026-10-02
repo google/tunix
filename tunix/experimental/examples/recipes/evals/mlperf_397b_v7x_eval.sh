@@ -41,7 +41,7 @@ export EVAL_OUTPUT_DIR="${EVAL_OUTPUT_DIR:-${BUCKET}/eval_results/${JOB_PREFIX}}
 export TRAJECTORY_LOG_DIR="${TRAJECTORY_LOG_DIR:-${BUCKET}/trajectories/${JOB_PREFIX}/logger}"
 export TRAJECTORY_STORE_ROOT_DIR="${TRAJECTORY_STORE_ROOT_DIR:-${TRAJECTORY_STORE_ROOT:-${BUCKET}/trajectories/${JOB_PREFIX}/store}}"
 
-export K8S_NAMESPACE="priority-dev"
+export K8S_NAMESPACE="${K8S_NAMESPACE:-priority-dev}"
 export USE_DYNAMIC_SLICING="true"
 
 export ENABLE_MULTI_NUMA="${ENABLE_MULTI_NUMA:-0}"
@@ -60,7 +60,7 @@ export CHECKPOINT_STORAGE_USE_ZARR3="${CHECKPOINT_STORAGE_USE_ZARR3:-false}"
 
 # Backend & Rollout Topology (16 chips = 32 devices = 4 hosts per replica, DP=2, EP=16, TP=1; no Trainer)
 export WEIGHT_SYNC_MODE="none"
-export ROLLOUT_JOBSET_YAML="jobset.mcjax.ray.yaml"
+export ROLLOUT_JOBSET_YAML="${ROLLOUT_JOBSET_YAML:-jobset.pathways.yaml}"
 export ROLLOUT_TPU_SLICE="${ROLLOUT_TPU_SLICE:-tpu7x:2x2x4}"
 export VLLM_DATA_PARALLEL_SIZE="${VLLM_DATA_PARALLEL_SIZE:-2}"
 _rollout_dims="${ROLLOUT_TPU_SLICE#*:}"
@@ -115,6 +115,7 @@ export IMAGE_REWRITE_PREFIX="${IMAGE_REWRITE_PREFIX:-us-central1-docker.pkg.dev/
 export ENABLE_THINKING="${ENABLE_THINKING:-false}"
 export STEP_TIMEOUT_SECS=60
 export REWARD_TIMEOUT_SECS=60
+export MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-4096}"
 export MAX_CONTEXT_LIMIT="${MAX_CONTEXT_LIMIT:-61440}"
 
 source "${DIR}/mlperf_base.sh" "${1:-eval}" "${@:2}"

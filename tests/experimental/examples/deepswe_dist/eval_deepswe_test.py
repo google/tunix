@@ -381,6 +381,102 @@ class EvalTest(unittest.TestCase):
     error_response.metadata = {}
     self.assertNotIn("agent_name", eval_lib.compact_result(error_response))
 
+  def test_multihost_ray_rejects_in_memory_scanned_conversion(self):
+    eval_worker_lib = load("eval_worker_under_test", RECIPE / "eval_worker.py")
+    with tempfile.TemporaryDirectory() as td:
+      ckpt_path = Path(td) / "items"
+      ckpt_path.mkdir()
+      a = eval_lib.parse_args(
+          ["--model_absolute_path", str(ckpt_path), "--scan_layers", "true"]
+      )
+      vllm_sampler_mod = types.SimpleNamespace(
+          VllmConfig=mock.Mock(), InprocessVllmSampler=mock.Mock()
+      )
+      rollout_worker_mod = types.SimpleNamespace(
+          RolloutWorker=mock.Mock, RolloutConfig=mock.Mock()
+      )
+      with mock.patch.dict(
+          sys.modules,
+          {
+              "tunix.generate.vllm_sampler": vllm_sampler_mod,
+              "tunix.worker.rollout_worker": rollout_worker_mod,
+              "maxtext": types.SimpleNamespace(),
+              "maxtext.integration": types.SimpleNamespace(),
+              "maxtext.integration.vllm": types.SimpleNamespace(
+                  maxtext_vllm_adapter=mock.Mock()
+              ),
+          },
+      ):
+        with mock.patch.dict(
+            eval_worker_lib.os.environ, {"TPU_MULTIHOST_BACKEND": "ray"}
+        ):
+          with self.assertRaisesRegex(
+              ValueError,
+              "Converting scanned checkpoints in memory is not supported",
+          ):
+            eval_worker_lib.create_worker(a)
+
+  def test_multihost_ray_sets_distributed_backend_and_none_mesh(self):
+    eval_worker_lib = load("eval_worker_under_test", RECIPE / "eval_worker.py")
+    with tempfile.TemporaryDirectory() as td:
+      ckpt_path = Path(td) / "items"
+      ckpt_path.mkdir()
+      a = eval_lib.parse_args(
+          [
+              "--model_absolute_path",
+              str(ckpt_path),
+              "--scan_layers",
+              "false",
+              "--use_agent_sandbox",
+              "false",
+          ]
+      )
+      captured_config = []
+      fake_tokenizer = types.SimpleNamespace(
+          pad_token_id=0,
+          bos_token="<|im_start|>",
+          eos_token="<|im_end|>",
+          encode=mock.Mock(return_value=[151645]),
+          decode=mock.Mock(return_value=""),
+          bos_id=mock.Mock(return_value=1),
+          eos_id=mock.Mock(return_value=2),
+          pad_id=mock.Mock(return_value=0),
+      )
+      vllm_sampler_mod = types.SimpleNamespace(
+          VllmConfig=mock.Mock(
+              side_effect=lambda **kw: captured_config.append(kw)
+              or types.SimpleNamespace(sampling_kwargs={})
+          ),
+          InprocessVllmSampler=mock.Mock(),
+          VllmSampler=mock.Mock(),
+      )
+      rollout_worker_mod = types.SimpleNamespace(
+          RolloutWorker=mock.Mock, RolloutConfig=mock.Mock()
+      )
+      with mock.patch.dict(
+          sys.modules,
+          {
+              "tunix.generate.vllm_sampler": vllm_sampler_mod,
+              "tunix.worker.rollout_worker": rollout_worker_mod,
+              "maxtext": types.SimpleNamespace(),
+              "maxtext.integration": types.SimpleNamespace(),
+              "maxtext.integration.vllm": types.SimpleNamespace(
+                  maxtext_vllm_adapter=mock.Mock()
+              ),
+              "transformers": types.SimpleNamespace(
+                  AutoTokenizer=types.SimpleNamespace(from_pretrained=mock.Mock(return_value=fake_tokenizer))
+              ),
+          },
+      ):
+        with mock.patch.dict(
+            eval_worker_lib.os.environ, {"TPU_MULTIHOST_BACKEND": "ray"}
+        ):
+          eval_worker_lib.create_worker(a)
+      self.assertEqual(len(captured_config), 1)
+      cfg = captured_config[0]
+      self.assertIsNone(cfg["mesh"])
+      self.assertEqual(cfg["engine_kwargs"]["distributed_executor_backend"], "ray")
+
 
 class RpcTest(unittest.IsolatedAsyncioTestCase):
 

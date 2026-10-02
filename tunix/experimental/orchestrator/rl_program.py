@@ -386,7 +386,6 @@ class StandardRLProgram(RLProgram):
       on_checkpoint_saved: Callable[[dict[str, Any]], None] | None = None,
       checkpoint_optimizer_interval_steps: int = 1,
       pipeline_train_microbatches: bool = False,
-      rollout_priority_scheduling: bool = False,
   ):
     super().__init__()
     self.engine: rl_engine_interface.AbstractRLEngine | None = None
@@ -520,12 +519,6 @@ class StandardRLProgram(RLProgram):
     # draining them, so dispatch need not wait out a round; each batch is
     # gated only on the version the rollouts have committed.
     self.partial_rollout = partial_rollout
-    # Stamp each rollout request with its prompt batch index as its sampler
-    # priority, so rollouts that schedule by priority (vLLM
-    # `scheduling_policy="priority"`) serve the oldest in-flight batch first
-    # under `max_staleness > 0`. Off, every request gets priority 0 and the
-    # rollouts serve requests in arrival order.
-    self.rollout_priority_scheduling = rollout_priority_scheduling
     self._sync_error: BaseException | None = None
     self.metrics_logger: MetricsLogger = MetricsLogger(metrics_logging_options)
     # Trajectory logging is disabled on mlperf to prevent GCS write timeouts
@@ -817,18 +810,6 @@ class StandardRLProgram(RLProgram):
         dispatch_kwargs: dict[str, Any] = {
             "num_generations": self.num_generations,
             "policy_version": rollout_policy_version,
-            # Lower is served first, so with `max_staleness > 0` the oldest
-            # in-flight batch (the window's lower edge) keeps its sampler
-            # slots, including for its later turns, which re-enter the
-            # sampler queue behind newer batches' first turns. Under
-            # PROMPT_BATCH ordering this is exactly the batch the trainer
-            # consumes next; under ARRIVAL ordering it drains the oldest
-            # prompts first, keeping consumed staleness near the bound.
-            "priority": (
-                coordinates["batch_idx"]
-                if self.rollout_priority_scheduling
-                else 0
-            ),
             "exact_token_continuity": getattr(
                 self.algo.algo_config, "exact_token_continuity", True
             ),
@@ -995,17 +976,6 @@ class StandardRLProgram(RLProgram):
       )
     self.metrics_logger.log(prefix, metric_name, scalar_value, self.mode, step)
 
-  async def _drain_filtered_groups(
-      self,
-  ) -> list[list[datatypes.TrajectoryItem]]:
-    """Drains and returns all filtered groups across raw and scored queues."""
-    filtered: list[list[datatypes.TrajectoryItem]] = []
-    if hasattr(self.raw_q, "get_filtered_groups"):
-      filtered.extend(await self.raw_q.get_filtered_groups())
-    if hasattr(self.scored_q, "get_filtered_groups"):
-      filtered.extend(await self.scored_q.get_filtered_groups())
-    return filtered
-
   def _collect_and_log_step_metrics(
       self,
       *,
@@ -1026,7 +996,6 @@ class StandardRLProgram(RLProgram):
       policy_training_time: float = 0.0,
       exposed_generation_time: float = 0.0,
       weight_sync_time: float = 0.0,
-      filtered_groups: Sequence[Sequence[datatypes.TrajectoryItem]] = (),
   ) -> dict[str, Any]:
     """Logs rollout, reward, trainer, and orchestrator metrics.
 
@@ -1224,21 +1193,6 @@ class StandardRLProgram(RLProgram):
             self.mode,
             log_step,
         )
-
-    self.metrics_logger.log(
-        self.metrics_prefix,
-        "rollout/filtered_groups_count",
-        len(filtered_groups),
-        self.mode,
-        log_step,
-    )
-    self.metrics_logger.log(
-        self.metrics_prefix,
-        "rollout/filtered_trajectories_count",
-        sum(len(g) for g in filtered_groups),
-        self.mode,
-        log_step,
-    )
 
     # --- 2. Reward Metrics ---
     rewards_to_log = step_rewards
@@ -1491,8 +1445,6 @@ class StandardRLProgram(RLProgram):
         "loss_val": loss_val,
         "perplexity_val": perplexity_val,
         "grad_norm_val": grad_norm_val,
-        "filtered_groups_count": len(filtered_groups),
-        "filtered_trajectories_count": sum(len(g) for g in filtered_groups),
     }
 
   async def _apply_sampler_trainer_agreement(
@@ -2046,8 +1998,6 @@ class StandardRLProgram(RLProgram):
 
       step_time_sec = time.monotonic() - step_start_time
 
-      filtered_groups = await self._drain_filtered_groups()
-
       metrics_summary = self._collect_and_log_step_metrics(
           all_step_items=all_step_items,
           step_rewards=step_rewards,
@@ -2066,7 +2016,6 @@ class StandardRLProgram(RLProgram):
           policy_training_time=policy_training_time,
           exposed_generation_time=exposed_generation_time,
           weight_sync_time=weight_sync_time,
-          filtered_groups=filtered_groups,
       )
       self._log_consumed_trajectories(
           all_step_items,

@@ -546,31 +546,6 @@ class DeepSWEExampleCommandLineTest(absltest.TestCase):
         "deepswe k8s_launcher passes flags the rollout worker does not define",
     )
 
-  def test_launchers_pass_priority_scheduling_to_both_sides(self):
-    # One env var drives both halves: the orchestrator stamps each request's
-    # batch index as its priority and the rollouts' vLLM schedules by it.
-    self.assertIn(
-        "--rollout_priority_scheduling", _deepswe_k8s_orchestrator_block()
-    )
-    self.assertIn(
-        "--priority_scheduling=${ROLLOUT_PRIORITY_SCHEDULING}",
-        _deepswe_k8s_rollout_cmd(),
-    )
-    self.assertIn(
-        "--rollout_priority_scheduling",
-        _launcher_orchestrator_cmd("deepswe_dist"),
-    )
-
-  def test_rollout_priority_scheduling_flag(self):
-    parse = run_deepswe_dist._parse_args  # pylint: disable=protected-access
-    self.assertFalse(parse([]).rollout_priority_scheduling)
-    self.assertTrue(
-        parse(["--rollout_priority_scheduling"]).rollout_priority_scheduling
-    )
-    self.assertFalse(
-        parse(["--no-rollout_priority_scheduling"]).rollout_priority_scheduling
-    )
-
 
 class AuxMetricForwardingTest(absltest.TestCase):
   """Tests for converting a loss function's aux metrics for the buffer."""

@@ -568,17 +568,6 @@ def build_maxtext_config(
   if _ckpt_async:
     argv.append(f"async_checkpointing={_ckpt_async}")
 
-  # An async save whose background half outlives async_checkpointing_timeout_secs
-  # (1200 s) raises from the next checkpoint call, which takes the trainer worker
-  # and the run down. `true` logs and drops that save instead; the training state
-  # in memory is intact and the next save proceeds.
-  #
-  # Emitted even when unset, pinned to the pre-AI-Hypercomputer/maxtext#5494
-  # behaviour, so a run that does not ask for abandonment keeps aborting on a
-  # failed save whatever MaxText's own default becomes.
-  _abandon_failed_saves = os.environ.get("CHECKPOINT_ABANDON_FAILED_SAVES", "").strip() or "false"
-  argv.append(f"abandon_failed_checkpoint_saves={_abandon_failed_saves}")
-
   _d2h_gb = os.environ.get("CKPT_D2H_CONCURRENT_GB", "").strip()
   if _d2h_gb:
     logging.info(

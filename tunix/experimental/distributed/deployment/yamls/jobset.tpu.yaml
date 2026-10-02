@@ -115,14 +115,9 @@ ${FAIL_FAST_WRAPPER_POST}                  echo "Program End: $$(date)"
               - containerPort: ${USER_CONTAINER_PORT}
                 name: grpc # Naming it 'grpc' tells GKE to optimize for HTTP/2
               volumeMounts:
-              - name: dshm
-                mountPath: /dev/shm
               - mountPath: /tmp
                 name: shared-tmp
             volumes:
-            - name: dshm
-              emptyDir:
-                medium: Memory
             - name: shared-tmp
               hostPath:
                 path: /tmp

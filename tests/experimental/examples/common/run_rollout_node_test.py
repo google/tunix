@@ -168,53 +168,6 @@ class RunRolloutNodeTest(unittest.TestCase):
     finally:
       os.remove(tmp_path)
 
-  def test_parse_args_priority_scheduling_defaults_off(self):
-    with mock.patch.dict(os.environ):
-      os.environ.pop("ROLLOUT_PRIORITY_SCHEDULING", None)
-      args = run_rollout_node._parse_args(["--sampler", "vllm"])
-    self.assertFalse(args.priority_scheduling)
-
-  def test_parse_args_priority_scheduling_from_flag_and_env(self):
-    # The launchers pass the normalized value of ROLLOUT_PRIORITY_SCHEDULING.
-    for value, expected in (("true", True), ("false", False)):
-      args = run_rollout_node._parse_args(
-          ["--sampler", "vllm", f"--priority_scheduling={value}"]
-      )
-      self.assertEqual(args.priority_scheduling, expected)
-    with mock.patch.dict(os.environ, {"ROLLOUT_PRIORITY_SCHEDULING": "true"}):
-      args = run_rollout_node._parse_args(["--sampler", "vllm"])
-    self.assertTrue(args.priority_scheduling)
-
-  def test_parse_args_priority_scheduling_requires_vllm_sampler(self):
-    with self.assertRaisesRegex(ValueError, "--sampler=vllm"):
-      run_rollout_node._parse_args(
-          ["--sampler", "inprocess_vllm", "--priority_scheduling=true"]
-      )
-
-  def test_vllm_scheduling_policy_follows_flag(self):
-    for enabled, expected in ((True, "priority"), (False, "fcfs")):
-      self.assertEqual(
-          run_rollout_node._vllm_scheduling_policy(
-              argparse.Namespace(priority_scheduling=enabled), {}
-          ),
-          expected,
-      )
-
-  def test_vllm_scheduling_policy_accepts_matching_override(self):
-    overrides = {"scheduling_policy": "priority", "block_size": 32}
-    policy = run_rollout_node._vllm_scheduling_policy(
-        argparse.Namespace(priority_scheduling=True), overrides
-    )
-    self.assertEqual(policy, "priority")
-    self.assertEqual(overrides, {"block_size": 32})
-
-  def test_vllm_scheduling_policy_rejects_conflicting_override(self):
-    with self.assertRaisesRegex(ValueError, "ROLLOUT_PRIORITY_SCHEDULING"):
-      run_rollout_node._vllm_scheduling_policy(
-          argparse.Namespace(priority_scheduling=False),
-          {"scheduling_policy": "priority"},
-      )
-
   def test_inprocess_vllm_sampler_with_vllm_config_json(self):
     mock_vllm_sampler = mock.MagicMock()
     mock_vllm_config = mock.MagicMock()

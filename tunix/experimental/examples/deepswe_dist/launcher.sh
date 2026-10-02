@@ -69,17 +69,6 @@ EPSILON=${EPSILON:-0.2}
 SAMPLER=${SAMPLER:-inprocess_vllm}
 WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
 PARTIAL_ROLLOUT=${PARTIAL_ROLLOUT:-false}
-# Rollouts serve the oldest in-flight prompt batch first (vLLM priority
-# scheduling, priority = batch index). Needs SAMPLER=vllm.
-ROLLOUT_PRIORITY_SCHEDULING=${ROLLOUT_PRIORITY_SCHEDULING:-false}
-case "${ROLLOUT_PRIORITY_SCHEDULING}" in
-  true|True|1) ROLLOUT_PRIORITY_SCHEDULING=true ;;
-  false|False|0) ROLLOUT_PRIORITY_SCHEDULING=false ;;
-  *)
-    echo "ROLLOUT_PRIORITY_SCHEDULING must be true or false, got '${ROLLOUT_PRIORITY_SCHEDULING}'" >&2
-    exit 1
-    ;;
-esac
 USE_LORA=${USE_LORA:-0}
 LORA_RANK=${LORA_RANK:-64}
 LORA_ALPHA=${LORA_ALPHA:-64.0}
@@ -293,7 +282,6 @@ echo "  beta:           ${BETA}"
 echo "  epsilon:        ${EPSILON}"
 echo "  max staleness:  ${MAX_STALENESS}"
 echo "  traj order:     ${TRAJECTORY_GROUP_ORDER}"
-echo "  priority sched: ${ROLLOUT_PRIORITY_SCHEDULING}"
 echo "  sampler:        ${SAMPLER}"
 echo "  weight sync:    ${WEIGHT_SYNC_MODE}"
 echo "  trainer backend:${TRAINER_BACKEND}"
@@ -429,7 +417,6 @@ echo "Launching DeepSWE rollout node..."
     --lora_alpha="$LORA_ALPHA"
     --weight_sync_mode="$WEIGHT_SYNC_MODE"
     --partial_rollout="$PARTIAL_ROLLOUT"
-    --priority_scheduling="$ROLLOUT_PRIORITY_SCHEDULING"
     --registry_module=tunix.experimental.examples.deepswe_dist.deepswe
     --env_name=deepswe_env
     --agent_name=deepswe_agent
@@ -549,9 +536,6 @@ echo "Launching CPU orchestrator..."
   )
   if [[ "$DEBUG" == "1" || "$DEBUG" == "true" || "$DEBUG" == "True" ]]; then
     ORCHESTRATOR_CMD+=(--debug)
-  fi
-  if [[ "$ROLLOUT_PRIORITY_SCHEDULING" == "true" ]]; then
-    ORCHESTRATOR_CMD+=(--rollout_priority_scheduling)
   fi
   # Explicit if-blocks rather than `[[ -n x ]] && cmd`: this script runs under
   # `set -Ee`, where a false test at the head of an AND-list aborts the
