@@ -4720,6 +4720,90 @@ class RLProgramTest(absltest.TestCase):
     self.assertFalse(logger.metric_exists("", "rewards/mean", "train"))
     program.close()
 
+  def test_collect_and_log_step_metrics_logs_filtered_groups_metrics(self):
+    program = self._create_program()
+
+    filtered_groups = [
+        [self._scoring_item(0), self._scoring_item(1)],
+        [self._scoring_item(2)],
+    ]
+
+    metrics_summary = program._collect_and_log_step_metrics(
+        all_step_items=[],
+        step_rewards=[],
+        step_advantages=[],
+        step_result=None,
+        trainer_metrics=None,
+        num_rollouts=0,
+        num_microbatches=1,
+        padding_stats=[],
+        packing_time_sec=0.0,
+        step_time_sec=0.0,
+        consumed_policy_version=0,
+        log_step=0,
+        filtered_groups=filtered_groups,
+    )
+
+    logger = program.metrics_logger
+    self.assertEqual(
+        logger.get_metric("", "rollout/filtered_groups_count", "train"), 2
+    )
+    self.assertEqual(
+        logger.get_metric("", "rollout/filtered_trajectories_count", "train"), 3
+    )
+    self.assertEqual(metrics_summary["filtered_groups_count"], 2)
+    self.assertEqual(metrics_summary["filtered_trajectories_count"], 3)
+    program.close()
+
+  def test_drain_filtered_groups_drains_both_queues(self):
+    program = self._create_program()
+
+    item0 = self._scoring_item(0)
+    item1 = self._scoring_item(1)
+
+    async def _test():
+      program.raw_q._filtered_groups.append([item0])
+      program.scored_q._filtered_groups.append([item1])
+
+      drained = await program._drain_filtered_groups()
+      self.assertEqual(drained, [[item0], [item1]])
+
+      # Subsequent drain should be empty
+      drained_again = await program._drain_filtered_groups()
+      self.assertEqual(drained_again, [])
+
+    asyncio.run(_test())
+    program.close()
+
+  def test_train_loop_drains_and_logs_filtered_groups(self):
+    async def _run():
+      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group(), [])
+      program = self._create_program(
+          dataset=["prompt_data_0"],
+          max_steps=1,
+      )
+
+      # Inject a filtered group into raw_q
+      filtered_item = self._scoring_item(99)
+      program.raw_q._filtered_groups.append([filtered_item])
+
+      await program.run_async(self.mock_engine)
+
+      # Verify that raw_q._filtered_groups was drained
+      self.assertEqual(len(program.raw_q._filtered_groups), 0)
+
+      # Verify metric was logged
+      logger = program.metrics_logger
+      self.assertEqual(
+          logger.get_metric("", "rollout/filtered_groups_count", "train"), 1
+      )
+      self.assertEqual(
+          logger.get_metric("", "rollout/filtered_trajectories_count", "train"), 1
+      )
+      program.close()
+
+    asyncio.run(_run())
+
   def test_critique_stage_preserves_is_valid_for_degenerate_group_survivor(
       self,
   ):

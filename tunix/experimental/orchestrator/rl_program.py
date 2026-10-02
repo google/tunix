@@ -976,6 +976,17 @@ class StandardRLProgram(RLProgram):
       )
     self.metrics_logger.log(prefix, metric_name, scalar_value, self.mode, step)
 
+  async def _drain_filtered_groups(
+      self,
+  ) -> list[list[datatypes.TrajectoryItem]]:
+    """Drains and returns all filtered groups across raw and scored queues."""
+    filtered: list[list[datatypes.TrajectoryItem]] = []
+    if hasattr(self.raw_q, "get_filtered_groups"):
+      filtered.extend(await self.raw_q.get_filtered_groups())
+    if hasattr(self.scored_q, "get_filtered_groups"):
+      filtered.extend(await self.scored_q.get_filtered_groups())
+    return filtered
+
   def _collect_and_log_step_metrics(
       self,
       *,
@@ -996,6 +1007,7 @@ class StandardRLProgram(RLProgram):
       policy_training_time: float = 0.0,
       exposed_generation_time: float = 0.0,
       weight_sync_time: float = 0.0,
+      filtered_groups: Sequence[Sequence[datatypes.TrajectoryItem]] = (),
   ) -> dict[str, Any]:
     """Logs rollout, reward, trainer, and orchestrator metrics.
 
@@ -1193,6 +1205,21 @@ class StandardRLProgram(RLProgram):
             self.mode,
             log_step,
         )
+
+    self.metrics_logger.log(
+        self.metrics_prefix,
+        "rollout/filtered_groups_count",
+        len(filtered_groups),
+        self.mode,
+        log_step,
+    )
+    self.metrics_logger.log(
+        self.metrics_prefix,
+        "rollout/filtered_trajectories_count",
+        sum(len(g) for g in filtered_groups),
+        self.mode,
+        log_step,
+    )
 
     # --- 2. Reward Metrics ---
     rewards_to_log = step_rewards
@@ -1445,6 +1472,8 @@ class StandardRLProgram(RLProgram):
         "loss_val": loss_val,
         "perplexity_val": perplexity_val,
         "grad_norm_val": grad_norm_val,
+        "filtered_groups_count": len(filtered_groups),
+        "filtered_trajectories_count": sum(len(g) for g in filtered_groups),
     }
 
   async def _apply_sampler_trainer_agreement(
@@ -1998,6 +2027,8 @@ class StandardRLProgram(RLProgram):
 
       step_time_sec = time.monotonic() - step_start_time
 
+      filtered_groups = await self._drain_filtered_groups()
+
       metrics_summary = self._collect_and_log_step_metrics(
           all_step_items=all_step_items,
           step_rewards=step_rewards,
@@ -2016,6 +2047,7 @@ class StandardRLProgram(RLProgram):
           policy_training_time=policy_training_time,
           exposed_generation_time=exposed_generation_time,
           weight_sync_time=weight_sync_time,
+          filtered_groups=filtered_groups,
       )
       self._log_consumed_trajectories(
           all_step_items,
