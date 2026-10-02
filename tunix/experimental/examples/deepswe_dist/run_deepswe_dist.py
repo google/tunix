@@ -171,7 +171,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help=(
           "Include the optimizer state in a checkpoint only every this many"
           " optimizer steps (and on the last step); other checkpoints hold"
-          " just the model params."
+          " just the model params. 0 never includes it, so every checkpoint"
+          " is params-only and the run cannot be resumed."
       ),
   )
   parser.add_argument(
