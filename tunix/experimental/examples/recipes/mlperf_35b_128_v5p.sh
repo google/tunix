@@ -107,7 +107,7 @@ use_tokamax_splash=true use_splash_scheduler=true \
 sa_block_q=1024 sa_block_kv=4096 sa_block_kv_compute=512 \
 sa_block_q_dkv=2048 sa_block_kv_dkv=2048 sa_block_kv_dkv_compute=512 \
 sa_fuse_reciprocal=false sa_use_base2_exp=true dq_reduction_steps=3 \
-context_parallel_strategy=ring context_parallel_load_balance=false allow_split_physical_axes=false \
+context_parallel_strategy=ring context_parallel_load_balance=false allow_split_physical_axes=true \
 context_parallel_attention_load_balance=true \
 num_vocab_tiling=16 use_iota_embed=false mu_dtype=float32 grad_dtype=float32 \
 checkpoint_storage_concurrent_gb=96 \
