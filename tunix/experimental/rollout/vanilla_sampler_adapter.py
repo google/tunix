@@ -14,6 +14,8 @@
 
 """Vanilla Sampler adapter using Tunix JAX Sampler."""
 
+from __future__ import annotations
+
 import abc
 from typing import Any, List, Sequence
 from absl import logging
