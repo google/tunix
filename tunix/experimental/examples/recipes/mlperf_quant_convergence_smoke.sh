@@ -294,11 +294,8 @@ case "$SAMPLER_QUANT" in
     ROLLOUT_QUANT_FLAGS="quantization=fp8_full use_qwix_quantization=true quantize_router_proj=false"
     ROLLOUT_QWIX_MOE_ONLY_QTYPE="int8"
     ;;
-  fp8_full)
+  fp8|fp8_full)
     ROLLOUT_QUANT_FLAGS="quantization=fp8_full use_qwix_quantization=true quantize_router_proj=false"
-    ;;
-  fp8)
-    ROLLOUT_QUANT_FLAGS="quantization=fp8 use_qwix_quantization=true quantize_router_proj=false"
     ;;
   int8)
     ROLLOUT_QUANT_FLAGS="quantization=int8 use_qwix_quantization=true quantize_router_proj=false"
@@ -326,11 +323,8 @@ case "$TRAINER_QUANT" in
     TRAINER_QUANT_FLAGS="quantization=fp8_full use_qwix_quantization=true quantize_router_proj=false"
     TRAINER_QWIX_MOE_ONLY_QTYPE="int8"
     ;;
-  fp8_full)
+  fp8|fp8_full)
     TRAINER_QUANT_FLAGS="quantization=fp8_full use_qwix_quantization=true quantize_router_proj=false"
-    ;;
-  fp8)
-    TRAINER_QUANT_FLAGS="quantization=fp8 use_qwix_quantization=true quantize_router_proj=false"
     ;;
   int8)
     TRAINER_QUANT_FLAGS="quantization=int8 use_qwix_quantization=true quantize_router_proj=false"
@@ -724,58 +718,99 @@ import sys
 
 
 def _patch_quantizations(quantizations_mod):
+  orig_get_quantization_rule = quantizations_mod.get_quantization_rule
   qtype_name = os.environ.get("QWIX_MOE_ONLY_QTYPE", "").strip().lower()
-  if not qtype_name:
-    return
-  import jax.numpy as jnp
-  import qwix
-
-  qtype_map = {
-      "float8_e4m3fn": jnp.float8_e4m3fn,
-      "fp8": jnp.float8_e4m3fn,
-      "fp8_e4m3": jnp.float8_e4m3fn,
-      "int8": jnp.int8,
-  }
-  if qtype_name not in qtype_map:
-    raise ValueError(f"Unsupported QWIX_MOE_ONLY_QTYPE={qtype_name!r}")
-  qtype = qtype_map[qtype_name]
   bwd_quant_env = os.environ.get("QWIX_MOE_BWD_QUANT", "").strip().lower()
 
-  def _moe_only_rule(config):
+  def _custom_get_quantization_rule(config):
+    import jax.numpy as jnp
+    import qwix
+
+    qtype_map = {
+        "float8_e4m3fn": jnp.float8_e4m3fn,
+        "fp8": jnp.float8_e4m3fn,
+        "fp8_e4m3": jnp.float8_e4m3fn,
+        "fp8_full": jnp.float8_e4m3fn,
+        "int8": jnp.int8,
+    }
+    quant_mode = getattr(config, "quantization", "") or ""
+    if qtype_name:
+      if qtype_name not in qtype_map:
+        raise ValueError(f"Unsupported QWIX_MOE_ONLY_QTYPE={qtype_name!r}")
+      qtype = qtype_map[qtype_name]
+      moe_only = True
+    elif quant_mode in ("fp8", "fp8_e4m3", "fp8_full", "int8"):
+      qtype = qtype_map[quant_mode]
+      moe_only = False
+    else:
+      return orig_get_quantization_rule(config)
+
     use_gmm_v2 = bool(getattr(config, "use_gmm_v2", False))
     if bwd_quant_env in ("1", "true", "yes"):
-      enable_bwd_q = True
+      enable_moe_bwd_q = True
     elif bwd_quant_env in ("0", "false", "no"):
-      enable_bwd_q = False
+      enable_moe_bwd_q = False
     else:
       # When use_gmm_v2=True, gmm_v2 forward dynamically quantizes lhs inside the
       # Pallas kernel whenever rhs is quantized (rhs_scale is not None), while
       # keeping act_qtype=None and bwd_qtype=None in _gmm_bwd avoids the 2.2x
       # higher dlhs error and tgmm_v2 sublane alignment constraints.
-      enable_bwd_q = not use_gmm_v2
+      enable_moe_bwd_q = not use_gmm_v2
 
-    act_q = qtype if enable_bwd_q else None
-    bwd_q = (jnp.float8_e5m2 if qtype == jnp.float8_e4m3fn else qtype) if enable_bwd_q else None
-    return [
+    dense_bwd_q = jnp.float8_e5m2 if qtype == jnp.float8_e4m3fn else qtype
+    moe_act_q = qtype if enable_moe_bwd_q else None
+    moe_bwd_q = dense_bwd_q if enable_moe_bwd_q else None
+    w_cal = getattr(config, "weight_quantization_calibration_method", "absmax")
+    a_cal = getattr(config, "act_quantization_calibration_method", "absmax")
+    b_cal = getattr(config, "bwd_quantization_calibration_method", "absmax")
+
+    rules = []
+    if not moe_only:
+      if not getattr(config, "quantize_router_proj", False):
+        rules.append(
+            qwix.QtRule(
+                module_path=r".*/(gate|shared_expert_gate)$",
+                weight_qtype=None,
+                act_qtype=None,
+                bwd_qtype=None,
+                op_names=("dot_general",),
+            )
+        )
+      # Quantize only linear DenseGeneral projections (matching qwen3.5-35b-a3b-fp8.yml
+      # unquantized_modules exclusion of gate, shared_expert_gate, in_proj_ba, conv1d,
+      # norms, embeddings, logits_dense, and internal GDN / RPA Pallas kernels).
+      rules.append(
+          qwix.QtRule(
+              module_path=(
+                  r"decoder/.*layers.*/"
+                  r"(query|key|value|qkv_proj|out|wq_a|wq_b|wkv_a|wkv_b|"
+                  r"in_proj_qkvz|out_proj|wi|wi_0|wi_1|wo)$"
+              ),
+              weight_qtype=qtype,
+              act_qtype=qtype,
+              bwd_qtype=dense_bwd_q,
+              weight_calibration_method=w_cal,
+              act_calibration_method=a_cal,
+              bwd_calibration_method=b_cal,
+              op_names=("dot_general",),
+          )
+      )
+
+    rules.append(
         qwix.QtRule(
-            module_path=".*",
+            module_path="decoder/.*layers.*" if not moe_only else ".*",
             weight_qtype=qtype,
-            act_qtype=act_q,
-            bwd_qtype=bwd_q,
-            weight_calibration_method=getattr(
-                config, "weight_quantization_calibration_method", "absmax"
-            ),
-            act_calibration_method=getattr(
-                config, "act_quantization_calibration_method", "absmax"
-            ),
-            bwd_calibration_method=getattr(
-                config, "bwd_quantization_calibration_method", "absmax"
-            ),
+            act_qtype=moe_act_q,
+            bwd_qtype=moe_bwd_q,
+            weight_calibration_method=w_cal,
+            act_calibration_method=a_cal,
+            bwd_calibration_method=b_cal,
             op_names=("gmm", "ragged_dot"),
         )
-    ]
+    )
+    return rules
 
-  quantizations_mod.get_quantization_rule = _moe_only_rule
+  quantizations_mod.get_quantization_rule = _custom_get_quantization_rule
 
 
 def _patch_maxtext_utils(maxtext_utils_mod):
@@ -1233,6 +1268,14 @@ PY
   done
 }
 
+kill_tree() {
+  local sig="$1" p="$2" c
+  for c in $(cat "/proc/$p/task/$p/children" 2>/dev/null); do
+    kill_tree "$sig" "$c"
+  done
+  kill "$sig" "$p" 2>/dev/null || true
+}
+
 cleanup() {
   trap - EXIT INT TERM
   local pids=()
@@ -1243,9 +1286,13 @@ cleanup() {
   done
   if (( ${#pids[@]} > 0 )); then
     echo "Stopping worker processes: ${pids[*]}"
-    kill "${pids[@]}" 2>/dev/null || true
+    for pid in "${pids[@]}"; do
+      kill_tree -TERM "$pid"
+    done
     sleep 3 || true
-    kill -9 "${pids[@]}" 2>/dev/null || true
+    for pid in "${pids[@]}"; do
+      kill_tree -KILL "$pid"
+    done
     wait "${pids[@]}" 2>/dev/null || true
   fi
 }
