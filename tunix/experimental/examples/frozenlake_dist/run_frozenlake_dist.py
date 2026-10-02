@@ -107,6 +107,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
+      "--rollout_priority_scheduling",
+      action=argparse.BooleanOptionalAction,
+      default=False,
+      help=(
+          "Stamp each rollout request with its prompt batch index as its"
+          " sampler priority, so under --max_staleness > 0 the rollouts serve"
+          " the oldest in-flight batch first. Needs rollouts started with"
+          " --priority_scheduling; off, requests are served in arrival order."
+      ),
+  )
+  parser.add_argument(
       "--weight_sync_mode",
       type=weight_sync.WeightSyncMode,
       default=weight_sync.WeightSyncMode(os.getenv("WEIGHT_SYNC_MODE", "none")),
@@ -384,6 +395,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       trajectory_log_dir=args.trajectory_log_dir,
       max_staleness=args.max_staleness,
       group_order=args.trajectory_group_order,
+      rollout_priority_scheduling=args.rollout_priority_scheduling,
       sync_weights=(args.weight_sync_mode != weight_sync.WeightSyncMode.NONE),
       on_step_begin=lambda step: logging.info(
           ">>> FrozenLake step %d starting", step

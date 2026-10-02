@@ -77,6 +77,17 @@ ROLLOUT_MAX_CONCURRENCY=${ROLLOUT_MAX_CONCURRENCY:-256}
 SAMPLER=${SAMPLER:-inprocess_vllm}
 WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-raiden}
 PARTIAL_ROLLOUT=${PARTIAL_ROLLOUT:-false}
+# Rollouts serve the oldest in-flight prompt batch first (vLLM priority
+# scheduling, priority = batch index). Needs SAMPLER=vllm.
+ROLLOUT_PRIORITY_SCHEDULING=${ROLLOUT_PRIORITY_SCHEDULING:-false}
+case "${ROLLOUT_PRIORITY_SCHEDULING}" in
+  true|True|1) ROLLOUT_PRIORITY_SCHEDULING=true ;;
+  false|False|0) ROLLOUT_PRIORITY_SCHEDULING=false ;;
+  *)
+    echo "ROLLOUT_PRIORITY_SCHEDULING must be true or false, got '${ROLLOUT_PRIORITY_SCHEDULING}'" >&2
+    exit 1
+    ;;
+esac
 VLLM_HBM_UTILIZATION=${VLLM_HBM_UTILIZATION:-0.20}
 VLLM_MAX_NUM_SEQS=${VLLM_MAX_NUM_SEQS:-64}
 VLLM_MAX_NUM_BATCHED_TOKENS=${VLLM_MAX_NUM_BATCHED_TOKENS:-32768}
@@ -282,6 +293,7 @@ TRAINER_PID=$!
     --max_response_length="$MAX_RESPONSE_LENGTH"
     --weight_sync_mode="$WEIGHT_SYNC_MODE"
     --partial_rollout="$PARTIAL_ROLLOUT"
+    --priority_scheduling="$ROLLOUT_PRIORITY_SCHEDULING"
     --registry_module=tunix.experimental.examples.frozenlake_dist.frozenlake
     --env_name=frozenlake_env
     --agent_name=frozenlake_agent
@@ -358,6 +370,7 @@ cmd=(
 is_true "$SHUFFLE" && cmd+=(--shuffle) || cmd+=(--no-shuffle)
 is_true "$IS_SLIPPERY" && cmd+=(--is_slippery) || cmd+=(--no-is_slippery)
 is_true "$USE_MULTISTEP_PROMPT" && cmd+=(--use_multistep_prompt) || cmd+=(--no-use_multistep_prompt)
+is_true "$ROLLOUT_PRIORITY_SCHEDULING" && cmd+=(--rollout_priority_scheduling) || cmd+=(--no-rollout_priority_scheduling)
 is_true "$USE_ROLLOUT_LOGPS" && cmd+=(--use_rollout_logps) || cmd+=(--no-use_rollout_logps)
 [[ -n "$LOG_DIR" ]] && cmd+=(--log_dir="$LOG_DIR")
 [[ -n "$TRAJECTORY_LOG_DIR" ]] && cmd+=(--trajectory_log_dir="$TRAJECTORY_LOG_DIR")

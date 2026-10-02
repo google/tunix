@@ -177,6 +177,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       policy_version: int = 0,
       generation_args: datatypes.GenerationArgs | None = None,
       route_metadata: Mapping[str, Any] | None = None,
+      priority: int = 0,
       **kwargs: Any,
   ) -> list[datatypes.RolloutRequest]:
     """Validates prompts and constructs typed RolloutRequests with lineage attached."""
@@ -263,6 +264,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
                 exact_token_continuity=kwargs.get(
                     "exact_token_continuity", True
                 ),
+                priority=priority,
                 metadata=request_metadata,
             )
         )
@@ -305,6 +307,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       policy_version: int = 0,
       generation_args: datatypes.GenerationArgs | None = None,
       route_metadata: Mapping[str, Any] | None = None,
+      priority: int = 0,
       **kwargs: Any,
   ) -> list[str]:
     """Dispatches rollout requests across workers, constructing RolloutRequests internally.
@@ -312,6 +315,9 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     Every prompt item in `prompts` MUST have a unique, collision-free
     `prompt_id`
     attribute or dict key. Missing prompt IDs raise a ValueError.
+
+    `priority` is stamped on every request built here; lower values are served
+    first by samplers that schedule by priority.
     """
     rollout_reqs = self._build_rollout_requests(
         prompts,
@@ -319,6 +325,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         policy_version=policy_version,
         generation_args=generation_args,
         route_metadata=route_metadata,
+        priority=priority,
         **kwargs,
     )
     return await self.dispatch_rollout_requests(rollout_reqs)

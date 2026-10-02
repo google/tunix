@@ -105,6 +105,19 @@ export SKIP_FIRST_N_PROFILER_STEPS=${SKIP_FIRST_N_PROFILER_STEPS:-}
 export PROFILER_PERIOD=${PROFILER_PERIOD:-}
 export ROLLOUT_FREE_KV_CACHE=${ROLLOUT_FREE_KV_CACHE:-false}
 export PARTIAL_ROLLOUT=${PARTIAL_ROLLOUT:-false}
+# Serve the oldest in-flight prompt batch first: the orchestrator stamps each
+# rollout request with its batch index as its priority and the rollouts run
+# vLLM with scheduling_policy=priority. `false` serves requests in arrival
+# order (FCFS). Needs SAMPLER=vllm.
+export ROLLOUT_PRIORITY_SCHEDULING=${ROLLOUT_PRIORITY_SCHEDULING:-false}
+case "${ROLLOUT_PRIORITY_SCHEDULING}" in
+  true|True|1) ROLLOUT_PRIORITY_SCHEDULING=true ;;
+  false|False|0) ROLLOUT_PRIORITY_SCHEDULING=false ;;
+  *)
+    echo "ROLLOUT_PRIORITY_SCHEDULING must be true or false, got '${ROLLOUT_PRIORITY_SCHEDULING}'" >&2
+    exit 1
+    ;;
+esac
 
 # DeepSWE dataset and environment configuration
 export DATASET_NAME=${DATASET_NAME:-R2E-Gym/R2E-Gym-Subset}
@@ -427,6 +440,7 @@ start_orchestrator() {
         $([[ "${ASYNC_WEIGHT_SYNC}" == "true" || "${ASYNC_WEIGHT_SYNC}" == "True" || "${ASYNC_WEIGHT_SYNC}" == "1" ]] && echo --async_weight_sync || echo --no-async_weight_sync) \
         $([[ "${PIPELINE_TRAIN_MICROBATCHES}" == "true" || "${PIPELINE_TRAIN_MICROBATCHES}" == "True" || "${PIPELINE_TRAIN_MICROBATCHES}" == "1" ]] && echo --pipeline_train_microbatches || echo --no-pipeline_train_microbatches) \
         $([[ "${PARTIAL_ROLLOUT}" == "true" || "${PARTIAL_ROLLOUT}" == "True" || "${PARTIAL_ROLLOUT}" == "1" ]] && echo --partial_rollout || echo --no-partial_rollout) \
+        $([[ "${ROLLOUT_PRIORITY_SCHEDULING}" == "true" ]] && echo --rollout_priority_scheduling || echo --no-rollout_priority_scheduling) \
         ${dataset_args} \
         ${shuffle_arg} \
         ${sandbox_arg} \
@@ -771,6 +785,7 @@ if cfg:
           --enable_prefix_caching=${ENABLE_PREFIX_CACHING} \
           --free_kv_cache_during_weight_sync=${ROLLOUT_FREE_KV_CACHE} \
           --partial_rollout=${PARTIAL_ROLLOUT} \
+          --priority_scheduling=${ROLLOUT_PRIORITY_SCHEDULING} \
           --return_routed_experts=${RETURN_ROUTED_EXPERTS} \
           --registry_module=tunix.experimental.examples.deepswe_dist.deepswe \
           --env_name=deepswe_env \

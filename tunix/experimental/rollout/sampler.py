@@ -69,10 +69,13 @@ class SamplingRequest(datatypes.Request):
     prompt: The source prompt to sample from (formatted string, token array, or
       chat dictionary).
     sampling_params: Optional per-request sampling configuration.
+    priority: Scheduling priority; lower values are served first. Honored by
+      samplers whose engine schedules by priority (the `vllm` sampler).
   """
 
   prompt: Any
   sampling_params: SamplingParams | None = None
+  priority: int = 0
 
 
 @dataclasses.dataclass(kw_only=True)

@@ -333,6 +333,19 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
+      "--priority_scheduling",
+      type=_str2bool,
+      default=_str2bool(os.getenv("ROLLOUT_PRIORITY_SCHEDULING", "false")),
+      nargs="?",
+      const=True,
+      help=(
+          "Run vLLM with scheduling_policy='priority', serving each request"
+          " by the priority the orchestrator stamps on it (its prompt batch"
+          " index; lower first) instead of in arrival order. Only the vllm"
+          " sampler honors it."
+      ),
+  )
+  parser.add_argument(
       "--tensor_parallel_size",
       type=int,
       default=None,
@@ -352,6 +365,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   )
 
   args = parser.parse_args(argv)
+  if args.priority_scheduling and args.sampler != "vllm":
+    raise ValueError(
+        "--priority_scheduling is honored only by --sampler=vllm, got"
+        f" --sampler={args.sampler}."
+    )
   _get_tensor_parallel_size(args)
   return args
 
@@ -365,6 +383,39 @@ def _get_tensor_parallel_size(args: argparse.Namespace) -> int:
     if tp > 1:
       logging.info("Auto-derived tensor_parallel_size=%d from mesh_tp", tp)
   return tp
+
+
+def _vllm_scheduling_policy(
+    args: argparse.Namespace, vllm_overrides: dict[str, Any]
+) -> str:
+  """Returns the vLLM `scheduling_policy` that --priority_scheduling selects.
+
+  "priority" serves requests by their `priority` (lower first, ties in arrival
+  order); "fcfs" serves them in arrival order. --priority_scheduling is the
+  one switch, so a `scheduling_policy` in --vllm_config_json may only repeat
+  it. The key is popped from `vllm_overrides`.
+
+  Args:
+    args: Parsed rollout node flags.
+    vllm_overrides: Engine overrides parsed from --vllm_config_json.
+
+  Returns:
+    "priority" or "fcfs".
+
+  Raises:
+    ValueError: If --vllm_config_json sets a different `scheduling_policy`.
+  """
+  policy = "priority" if args.priority_scheduling else "fcfs"
+  if "scheduling_policy" in vllm_overrides:
+    override = vllm_overrides.pop("scheduling_policy")
+    if override != policy:
+      raise ValueError(
+          f"--vllm_config_json sets scheduling_policy={override!r} but"
+          f" --priority_scheduling={args.priority_scheduling} selects"
+          f" {policy!r}; set --priority_scheduling"
+          " (ROLLOUT_PRIORITY_SCHEDULING) instead."
+      )
+  return policy
 
 
 def _agent_config(args: argparse.Namespace) -> dict[str, Any]:
@@ -793,6 +844,12 @@ def _create_vllm_sampler(args, tokenizer):
       max_loras=1 if args.use_lora else None,
       enable_prefix_caching=enable_prefix_caching,
       enable_return_routed_experts=args.return_routed_experts,
+      # "priority" honors each request's `priority` (its prompt batch index,
+      # lower first) so under max_staleness > 0 the oldest in-flight batch is
+      # served, and kept resident under KV pressure, ahead of batches
+      # dispatched early. Equal priorities fall back to arrival order, i.e.
+      # FCFS.
+      scheduling_policy=_vllm_scheduling_policy(args, vllm_overrides),
   )
   if gpu_mem_util is not None:
     engine_kwargs["gpu_memory_utilization"] = gpu_mem_util

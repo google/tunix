@@ -926,6 +926,14 @@ class DistributedRLEngineTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_build_rollout_requests_stamps_priority(self):
+    requests = self.engine._build_rollout_requests(
+        [{"prompt": "p1", "prompt_id": "p1"}],
+        num_generations=2,
+        priority=7,
+    )
+    self.assertEqual([r.priority for r in requests], [7, 7])
+
   def test_dispatch_rollouts_auto_extracts_prompt_and_group_ids(self):
     async def _run():
       dict_item = {

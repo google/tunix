@@ -471,6 +471,7 @@ class RLProgramTest(absltest.TestCase):
           }],
           num_generations=2,
           policy_version=0,
+          priority=0,
           exact_token_continuity=True,
           generation_args=datatypes.GenerationArgs(
               return_logprobs=True,
@@ -1068,6 +1069,39 @@ class RLProgramTest(absltest.TestCase):
     ]
     self.assertEqual(
         coordinates, [(0, 0, 0), (1, 0, 1), (2, 1, 0), (3, 1, 1), (4, 2, 0)]
+    )
+
+  def test_dispatch_priority_is_batch_idx(self):
+    program = self._create_program(
+        dataset=[f"p{i}" for i in range(5)],
+        max_steps=3,
+        batch_size=2,
+        rollout_priority_scheduling=True,
+    )
+
+    self._run_dispatch(program)
+
+    self.assertEqual(
+        [
+            call.kwargs["priority"]
+            for call in self.mock_engine.dispatch_rollouts.call_args_list
+        ],
+        [0, 0, 1, 1, 2],
+    )
+
+  def test_dispatch_priority_is_zero_without_priority_scheduling(self):
+    program = self._create_program(
+        dataset=[f"p{i}" for i in range(5)], max_steps=3, batch_size=2
+    )
+
+    self._run_dispatch(program)
+
+    self.assertEqual(
+        [
+            call.kwargs["priority"]
+            for call in self.mock_engine.dispatch_rollouts.call_args_list
+        ],
+        [0, 0, 0, 0, 0],
     )
 
   def test_dispatch_coordinates_follow_full_batch_size_not_mini_batch(self):
@@ -2658,6 +2692,7 @@ class RLProgramTest(absltest.TestCase):
           }],
           num_generations=2,
           policy_version=0,
+          priority=0,
           exact_token_continuity=True,
           generation_args=datatypes.GenerationArgs(
               return_logprobs=True,
