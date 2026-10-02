@@ -179,6 +179,7 @@ class ClusterOrchestrator:
         handle=remote_execution.ActorHandle.from_address(
             f"grpc://{service_address}",
             rpc_timeout_s=rpc_timeout_s,
+            worker_id=worker_id,
         ),
         resources={"address": service_address},
     )
@@ -209,6 +210,17 @@ class ClusterOrchestrator:
         or worker_id in self.registry.worker_ids()
     ):
       raise ValueError(f"duplicate worker_id: {worker_id!r}")
+    if (
+        isinstance(
+            handle,
+            (
+                remote_execution.RemoteActorHandle,
+                remote_execution.InProcessActorHandle,
+            ),
+        )
+        and getattr(handle, "worker_id", None) is None
+    ):
+      handle.worker_id = worker_id
     role_names = frozenset(
         role.value if isinstance(role, datatypes.Role) else role
         for role in roles

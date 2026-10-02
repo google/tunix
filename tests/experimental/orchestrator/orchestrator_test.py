@@ -331,7 +331,9 @@ class ClusterOrchestratorTest(absltest.TestCase):
       })
       orch.register_worker_from_hostname("host", 0, meta, rpc_timeout_s=120.0)
       mock_from_address.assert_called_with(
-          f"grpc://host:{port}", rpc_timeout_s=120.0
+          f"grpc://host:{port}",
+          rpc_timeout_s=120.0,
+          worker_id=f"{service_type}-0",
       )
       self.assertEqual(
           orch.worker_handles(role), [mock_from_address.return_value]

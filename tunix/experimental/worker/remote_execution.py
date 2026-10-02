@@ -425,7 +425,7 @@ def _running_loop() -> Optional["asyncio.AbstractEventLoop"]:
 
 
 class ExecutionRequest:
-  """Universal execution request payload wrapping request_id, method name, args, and kwargs."""
+  """Universal execution request payload wrapping request_id, method name, args, kwargs, and optional target worker_id."""
 
   def __init__(
       self,
@@ -433,11 +433,13 @@ class ExecutionRequest:
       method_name: Optional[str] = None,
       args: Optional[Sequence[Any]] = None,
       kwargs: Optional[Dict[str, Any]] = None,
+      worker_id: Optional[str] = None,
   ):
     self.request_id = request_id
     self.method_name = method_name or "__call__"
     self.args: Tuple[Any, ...] = tuple(args or ())
     self.kwargs: Dict[str, Any] = dict(kwargs or {})
+    self.worker_id: Optional[str] = worker_id
     if "request_id" in self.kwargs:
       raise ValueError(
           "'request_id' is a reserved framework parameter for remote execution "
@@ -448,8 +450,19 @@ class ExecutionRequest:
       self, chunk_size: int = _STREAM_CHUNK_BYTES
   ) -> Iterator[bytes]:
     """Serializes request into Pickle Protocol 5 out-of-band buffer chunks."""
+    payload = (
+        (
+            self.request_id,
+            self.method_name,
+            self.args,
+            self.kwargs,
+            self.worker_id,
+        )
+        if self.worker_id is not None
+        else (self.request_id, self.method_name, self.args, self.kwargs)
+    )
     return _iter_serialized_chunks(
-        (self.request_id, self.method_name, self.args, self.kwargs),
+        payload,
         chunk_size=chunk_size,
     )
 
@@ -565,8 +578,15 @@ class ExecutionResponse:
       )
       if self.traceback:
         message = f"{message}\nRemote traceback:\n{self.traceback}"
+      if self.error_type == "WorkerIdMismatchError":
+        raise WorkerIdMismatchError(message)
       raise RuntimeError(message)
     return self.result
+
+
+class WorkerIdMismatchError(RuntimeError):
+  """Raised when an RPC targets a different worker_id than the server hosts."""
+
 
 
 class RemoteExecutionServer(abc.ABC):
@@ -641,6 +661,41 @@ class RemoteExecutionServer(abc.ABC):
     """Starts network event loop listening on the specified port."""
     pass
 
+  def _get_instance_worker_id(self) -> Optional[str]:
+    if self._instance is None:
+      return None
+    for attr in ("worker_id", "_worker_id"):
+      wid = getattr(self._instance, attr, None)
+      if isinstance(wid, str) and wid:
+        return wid
+    return None
+
+  def _verify_worker_id(
+      self, request: ExecutionRequest
+  ) -> Optional[ExecutionResponse]:
+    """Verifies that `request.worker_id` matches the bound instance's worker_id."""
+    if not request.worker_id:
+      return None
+    actual_worker_id = self._get_instance_worker_id()
+    if actual_worker_id is not None and request.worker_id != actual_worker_id:
+      logging.warning(
+          "[RemoteExecutionServer] Rejecting RPC %r targeting worker_id=%r "
+          "(bound instance is worker_id=%r).",
+          request.method_name,
+          request.worker_id,
+          actual_worker_id,
+      )
+      return ExecutionResponse(
+          error_message=(
+              f"Worker ID mismatch for method '{request.method_name}': "
+              f"request targeted '{request.worker_id}', but server is bound "
+              f"to '{actual_worker_id}'."
+          ),
+          error_type="WorkerIdMismatchError",
+          request_id=request.request_id,
+      )
+    return None
+
   def execute_sync_request(
       self, request: ExecutionRequest
   ) -> ExecutionResponse:
@@ -651,6 +706,9 @@ class RemoteExecutionServer(abc.ABC):
           error_type="InstanceNotBoundError",
           request_id=request.request_id,
       )
+    mismatch_resp = self._verify_worker_id(request)
+    if mismatch_resp is not None:
+      return mismatch_resp
 
     target_name = request.method_name or "__call__"
     method = getattr(self._instance, target_name, None)
@@ -691,6 +749,9 @@ class RemoteExecutionServer(abc.ABC):
           error_type="InstanceNotBoundError",
           request_id=request.request_id,
       )
+    mismatch_resp = self._verify_worker_id(request)
+    if mismatch_resp is not None:
+      return mismatch_resp
 
     target_name = request.method_name or "__call__"
     method = getattr(self._instance, target_name, None)
@@ -874,6 +935,7 @@ class ActorHandle(abc.ABC):
       rpc_timeout_s: Optional[float] = RPC_TIMEOUT_S,
       stream_chunk_bytes: int = _STREAM_CHUNK_BYTES,
       max_message_bytes: int = _MAX_MESSAGE_BYTES,
+      worker_id: Optional[str] = None,
   ) -> "ActorHandle":
     """Instantiates a remote actor handle targeting the specified string URI."""
     if target_address.startswith("grpc://") and _GRPC_AVAILABLE:
@@ -882,8 +944,9 @@ class ActorHandle(abc.ABC):
           rpc_timeout_s=rpc_timeout_s,
           stream_chunk_bytes=stream_chunk_bytes,
           max_message_bytes=max_message_bytes,
+          worker_id=worker_id,
       )
-    return RemoteActorHandle(target_address=target_address)
+    return RemoteActorHandle(target_address=target_address, worker_id=worker_id)
 
   @abc.abstractmethod
   def submit(self, method_name: Optional[str] = None, *args, **kwargs) -> Any:
@@ -919,8 +982,9 @@ class ActorHandle(abc.ABC):
 class RemoteActorHandle(ActorHandle):
   """ActorHandle targeting a remote network worker address over gRPC/Stubby."""
 
-  def __init__(self, target_address: str):
+  def __init__(self, target_address: str, *, worker_id: Optional[str] = None):
     self.target_address = target_address
+    self.worker_id = worker_id
 
   def submit(self, method_name: Optional[str] = None, *args, **kwargs) -> Any:
     del method_name, args, kwargs
@@ -967,11 +1031,13 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
       rpc_timeout_s: Optional[float] = RPC_TIMEOUT_S,
       stream_chunk_bytes: int = _STREAM_CHUNK_BYTES,
       max_message_bytes: int = _MAX_MESSAGE_BYTES,
+      worker_id: Optional[str] = None,
   ):
     if not _GRPC_AVAILABLE or _grpc_aio_lib is None:
       raise RuntimeError("grpc is not installed or available.")
     _validate_stream_config(stream_chunk_bytes, max_message_bytes)
     self.target_address = target_address
+    self.worker_id = worker_id
     self._host_port = target_address.replace("grpc://", "")
     self._channel: Optional[Any] = None
     self._channel_loop: Optional[asyncio.AbstractEventLoop] = None
@@ -1049,7 +1115,10 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
   ) -> Any:
     """Streams an ExecutionRequest over `rpc` and unwraps the ExecutionResponse."""
     request = ExecutionRequest(
-        method_name=method_name, args=args, kwargs=kwargs
+        method_name=method_name,
+        args=args,
+        kwargs=kwargs,
+        worker_id=self.worker_id,
     )
     chunks = request.serialize_async_chunks(chunk_size=self._stream_chunk_bytes)
     call = rpc(chunks, timeout=self._rpc_timeout_s)
@@ -1120,7 +1189,11 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     await self._ensure_async_channel()
     assert self._dispatch_rpc is not None
     request = ExecutionRequest(
-        request_id=request_id, method_name=method_name, args=args, kwargs=kwargs
+        request_id=request_id,
+        method_name=method_name,
+        args=args,
+        kwargs=kwargs,
+        worker_id=self.worker_id,
     )
     chunks = request.serialize_async_chunks(chunk_size=self._stream_chunk_bytes)
     return await self._dispatch_rpc(chunks, timeout=self._rpc_timeout_s)
@@ -1177,13 +1250,22 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
 class InProcessActorHandle(ActorHandle):
   """ActorHandle bridging calls directly to an in-process RemoteExecutionServer."""
 
-  def __init__(self, server: RemoteExecutionServer):
+  def __init__(
+      self,
+      server: RemoteExecutionServer,
+      *,
+      worker_id: Optional[str] = None,
+  ):
     self.server = server
+    self.worker_id = worker_id
 
   def submit(self, method_name: Optional[str] = None, *args, **kwargs) -> Any:
     """Executes method synchronously or raises runtime error if coroutine required."""
     request = ExecutionRequest(
-        method_name=method_name, args=args, kwargs=kwargs
+        method_name=method_name,
+        args=args,
+        kwargs=kwargs,
+        worker_id=self.worker_id,
     )
     target_name = method_name or "__call__"
     method = getattr(self.server.bound_instance, target_name, None)
@@ -1209,7 +1291,10 @@ class InProcessActorHandle(ActorHandle):
   ) -> Any:
     """Executes method asynchronously over in-process server."""
     request = ExecutionRequest(
-        method_name=method_name, args=args, kwargs=kwargs
+        method_name=method_name,
+        args=args,
+        kwargs=kwargs,
+        worker_id=self.worker_id,
     )
     return await self._run_async(request)
 
@@ -1222,7 +1307,11 @@ class InProcessActorHandle(ActorHandle):
   ) -> str:
     """Dispatches task execution asynchronously on bound server and returns task ACK ID."""
     request = ExecutionRequest(
-        request_id=request_id, method_name=method_name, args=args, kwargs=kwargs
+        request_id=request_id,
+        method_name=method_name,
+        args=args,
+        kwargs=kwargs,
+        worker_id=self.worker_id,
     )
     return await self.server.dispatch_task(request)
 
