@@ -34,6 +34,9 @@ _GLOBAL_FLEET = None
 _FLEET_LOCK = threading.RLock()
 _PATCH_LOCK = threading.Lock()
 _R2EGYM_PATCHED = False
+# The PrewarmDatasetIterator running with scale-on-hold in this process (if
+# any); SWEEnv reports each successful claim to it via note_sandbox_acquired().
+_ACTIVE_PREWARM_ITERATOR = None
 
 
 def patch_r2egym_for_agent_sandbox() -> None:
@@ -222,14 +225,28 @@ class SandboxFailFastConfig:
 
   @classmethod
   def from_env(cls) -> "SandboxFailFastConfig":
-    """Builds the config from FT_SANDBOX_* variables set by k8s_launcher.sh."""
+    """Builds the config from FT_SANDBOX_* variables set by k8s_launcher.sh.
+
+    Without FT_SANDBOX_FAIL_FAST, DEEPSWE_ACQUIRE_RETRIES and
+    DEEPSWE_SANDBOX_READY_TIMEOUT_S (both optional) override the legacy acquire
+    attempts and the SDK readiness timeout. Every failed attempt leaves a new
+    claim (and pod) behind for the controllers to clean up, so on a congested
+    cluster fewer, longer attempts create much less churn.
+    """
     flag = os.environ.get("FT_SANDBOX_FAIL_FAST")
     if flag is None:
-      return cls(
+      retries = os.environ.get("DEEPSWE_ACQUIRE_RETRIES")
+      timeout = os.environ.get("DEEPSWE_SANDBOX_READY_TIMEOUT_S")
+      config = cls(
           enabled=False,
-          ready_timeout_s=None,
-          acquire_retries=_LEGACY_ACQUIRE_RETRIES,
+          ready_timeout_s=int(timeout) if timeout else None,
+          acquire_retries=int(retries) if retries else _LEGACY_ACQUIRE_RETRIES,
       )
+      if (
+          config.ready_timeout_s is not None and config.ready_timeout_s <= 0
+      ) or config.acquire_retries < 1:
+        raise ValueError(f"Invalid sandbox retry settings: {config}")
+      return config
     if flag != "true":
       raise ValueError(
           f"FT_SANDBOX_FAIL_FAST must be 'true' or unset, got {flag!r}"
@@ -544,6 +561,21 @@ def get_global_fleet() -> Any:
   return _GLOBAL_FLEET
 
 
+def note_sandbox_acquired(image: str) -> None:
+  """Reports a successful `fleet.acquire` of `image` to the active prewarmer.
+
+  A no-op unless a PrewarmDatasetIterator with scale-on-hold runs in this
+  process. Never raises: it must not fail the rollout that claimed a sandbox.
+  """
+  it = _ACTIVE_PREWARM_ITERATOR
+  if it is None:
+    return
+  try:
+    it.note_acquired(image)
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    logging.warning("[PrewarmDatasetIterator] note_acquired(%s): %r", image, e)
+
+
 def teardown_global_fleet() -> None:
   """Atexit handler to cleanly tear down warm pools and sandboxes on process exit."""
   global _GLOBAL_FLEET
@@ -600,6 +632,16 @@ class PrewarmDatasetIterator:
     * Changed count: fleet.set_pool_replicas(img, replicas)
     * Deleted image key (count 0): fleet.unwarm_image(img)
   Cleans up all warm pools upon iteration completion or close().
+
+  Scale-on-hold (`scale_on_hold=True`, or DEEPSWE_PREWARM_SCALE_ON_HOLD=1):
+  when a rollout claims a warm sandbox, ownership moves from the warm pool to
+  the claim and the controller creates a replacement to keep the pool at its
+  replica count. Without scale-on-hold every claimed sandbox is therefore
+  replaced by an idle one that lives until the pool is retired, which doubles
+  the pods (and pod churn) per step. With it, each image's pool is kept at the
+  number of claims still expected for that image (num_generations per
+  occurrence in the active batches, minus claims reported through
+  `note_sandbox_acquired`), so a fully claimed pool drops to 0 replicas.
   """
 
   def __init__(
@@ -616,6 +658,7 @@ class PrewarmDatasetIterator:
       wait_initial: bool = True,
       max_staleness: int = 0,
       max_workers: int = 16,
+      scale_on_hold: bool | None = None,
   ):
     del lookahead_steps
     self.scaffold = scaffold
@@ -628,6 +671,11 @@ class PrewarmDatasetIterator:
     self.wait_initial = wait_initial
     self.max_staleness = max(0, int(max_staleness))
     self.max_workers = max(1, int(max_workers))
+    if scale_on_hold is None:
+      scale_on_hold = os.environ.get(
+          "DEEPSWE_PREWARM_SCALE_ON_HOLD", ""
+      ).lower() in ("1", "true")
+    self.scale_on_hold = bool(scale_on_hold)
     self._fail_fast = SandboxFailFastConfig.from_env().enabled
     self._lock = threading.Lock()
     self.image_rewrite = get_image_rewrite_fn(
@@ -648,6 +696,10 @@ class PrewarmDatasetIterator:
     self._previous_batch_counts: dict[str, int] = {}
     self._image_counts: dict[str, int] = {}
     self._active_replicas: dict[str, int] = {}
+    # Scale-on-hold: claims still expected per image (guarded by self._lock).
+    self._remaining: dict[str, int] = {}
+    # Serializes pool mutations (warm/scale/unwarm) per image.
+    self._image_locks: dict[str, threading.Lock] = {}
     self.unwarm_calls: list[str] = []
     self._exhausted = False
 
@@ -663,10 +715,68 @@ class PrewarmDatasetIterator:
     # 4. After the dict updated, we interact the fleet
     if self._image_counts:
       logging.info(
-          "[PrewarmDatasetIterator] Priming initial sandboxes on K8s (wait=%s)...",
+          "[PrewarmDatasetIterator] Priming initial sandboxes on K8s (wait=%s,"
+          " scale_on_hold=%s)...",
           self.wait_initial,
+          self.scale_on_hold,
       )
       self._interact_fleet(wait=self.wait_initial)
+
+    if self.scale_on_hold:
+      global _ACTIVE_PREWARM_ITERATOR
+      _ACTIVE_PREWARM_ITERATOR = self
+
+  def _image_lock(self, img: str) -> threading.Lock:
+    with self._lock:
+      lock = self._image_locks.get(img)
+      if lock is None:
+        lock = self._image_locks[img] = threading.Lock()
+      return lock
+
+  def _target_replicas(self, img: str) -> int:
+    """Scale-on-hold target for img's pool. Caller holds self._lock."""
+    reps = max(0, self._remaining.get(img, 0))
+    if self.max_warmpool_replicas is not None:
+      reps = min(reps, self.max_warmpool_replicas)
+    return reps
+
+  def _sync_pool(self, img: str) -> None:
+    """Scale-on-hold: patches img's live pool to the claims still expected."""
+    with self._image_lock(img):
+      with self._lock:
+        if img not in self._active_replicas:
+          return  # Never warmed, or already retired: never (re)create it.
+        old_reps = self._active_replicas[img]
+        target = self._target_replicas(img)
+      if target == old_reps:
+        return
+      try:
+        self.fleet.set_pool_replicas(img, target)
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        logging.warning(
+            "[PrewarmDatasetIterator] Set replicas note for %s: %s", img, e
+        )
+        return
+      with self._lock:
+        if img in self._active_replicas:
+          self._active_replicas[img] = target
+      logging.info(
+          "[PrewarmDatasetIterator] Scaled pool on K8s: %s (replicas %d ->"
+          " %d, scale-on-hold)",
+          img,
+          old_reps,
+          target,
+      )
+
+  def note_acquired(self, image: str) -> None:
+    """Records one claimed sandbox of `image` (scale-on-hold only)."""
+    if not self.scale_on_hold:
+      return
+    with self._lock:
+      if image not in self._active_replicas:
+        return
+      self._remaining[image] = max(0, self._remaining.get(image, 0) - 1)
+    self._sync_pool(image)
 
   def _extract_item_image_counts(self, item: Any) -> dict[str, int]:
     """Extracts a dict mapping docker_image -> count for a dataset item."""
@@ -770,6 +880,12 @@ class PrewarmDatasetIterator:
       queue.append((item, item_counts, sample_count))
       for img, count in item_counts.items():
         counts_dict[img] = counts_dict.get(img, 0) + count
+      if self.scale_on_hold:
+        with self._lock:
+          for img, count in item_counts.items():
+            self._remaining[img] = (
+                self._remaining.get(img, 0) + count * self.num_generations
+            )
       current_samples += sample_count
     return current_samples
 
@@ -788,49 +904,75 @@ class PrewarmDatasetIterator:
     if not self.fleet:
       return
 
+    if self.scale_on_hold:
+      with self._lock:
+        for img in list(self._remaining):
+          # Left the window without a live pool (e.g. its warm failed).
+          if img not in self._image_counts and img not in self._active_replicas:
+            del self._remaining[img]
+
     desired: dict[str, int] = {}
     for img, count in self._image_counts.items():
       if count > 0:
-        reps = count * self.num_generations
-        if self.max_warmpool_replicas is not None:
-          reps = min(reps, self.max_warmpool_replicas)
+        if self.scale_on_hold:
+          with self._lock:
+            reps = self._target_replicas(img)
+        else:
+          reps = count * self.num_generations
+          if self.max_warmpool_replicas is not None:
+            reps = min(reps, self.max_warmpool_replicas)
         desired[img] = reps
 
     # Partition actions
+    with self._lock:
+      active = dict(self._active_replicas)
     new_pools = {
         img: reps
         for img, reps in desired.items()
-        if img not in self._active_replicas
+        # Scale-on-hold: an image whose claims all happened needs no pool.
+        if img not in active and (reps > 0 or not self.scale_on_hold)
     }
     scale_pools = {
         img: reps
         for img, reps in desired.items()
-        if img in self._active_replicas and self._active_replicas[img] != reps
+        if img in active and active[img] != reps
     }
-    to_delete = [img for img in self._active_replicas if img not in desired]
+    to_delete = [img for img in active if img not in desired]
 
     fleet_error_cls = _fleet_error_cls() if self._fail_fast else None
 
     def _warm(img: str, target_reps: int) -> None:
-      try:
-        self.fleet.warm_image(img, replicas_override=target_reps, wait=wait)
-        with self._lock:
-          self._active_replicas[img] = target_reps
-        logging.info(
-            "[PrewarmDatasetIterator] Warmed new pool on K8s: %s"
-            " (replicas=%d, wait=%s)",
-            img,
-            target_reps,
-            wait,
-        )
-      except Exception as e:  # pylint: disable=broad-exception-caught
-        if self._fail_fast and isinstance(e, fleet_error_cls):
-          # A pool that never gets ready or whose name collides with another
-          # run's leaves this image cold for the rest of the run. Fail loud.
-          raise
-        logging.warning("[PrewarmDatasetIterator] Warm note for %s: %s", img, e)
+      with self._image_lock(img):
+        if self.scale_on_hold:
+          with self._lock:
+            # Claims may have landed since `desired` was computed.
+            target_reps = self._target_replicas(img)
+          if target_reps <= 0:
+            return
+        try:
+          self.fleet.warm_image(img, replicas_override=target_reps, wait=wait)
+          with self._lock:
+            self._active_replicas[img] = target_reps
+          logging.info(
+              "[PrewarmDatasetIterator] Warmed new pool on K8s: %s"
+              " (replicas=%d, wait=%s)",
+              img,
+              target_reps,
+              wait,
+          )
+        except Exception as e:  # pylint: disable=broad-exception-caught
+          if self._fail_fast and isinstance(e, fleet_error_cls):
+            # A pool that never gets ready or whose name collides with another
+            # run's leaves this image cold for the rest of the run. Fail loud.
+            raise
+          logging.warning(
+              "[PrewarmDatasetIterator] Warm note for %s: %s", img, e
+          )
 
     def _scale(img: str, target_reps: int) -> None:
+      if self.scale_on_hold:
+        self._sync_pool(img)  # Recomputes the target under the image lock.
+        return
       try:
         with self._lock:
           old_reps = self._active_replicas.get(img, 0)
@@ -850,19 +992,22 @@ class PrewarmDatasetIterator:
         )
 
     def _unwarm(img: str) -> None:
-      try:
-        self.fleet.unwarm_image(img)
+      with self._image_lock(img):
+        try:
+          self.fleet.unwarm_image(img)
+          with self._lock:
+            self.unwarm_calls.append(img)
+          logging.info(
+              "[PrewarmDatasetIterator] Unwarmed retired pool on K8s: %s", img
+          )
+        except Exception as e:  # pylint: disable=broad-exception-caught
+          logging.warning(
+              "[PrewarmDatasetIterator] Unwarm note for %s: %s", img, e
+          )
         with self._lock:
-          self.unwarm_calls.append(img)
-        logging.info(
-            "[PrewarmDatasetIterator] Unwarmed retired pool on K8s: %s", img
-        )
-      except Exception as e:  # pylint: disable=broad-exception-caught
-        logging.warning(
-            "[PrewarmDatasetIterator] Unwarm note for %s: %s", img, e
-        )
-      with self._lock:
-        self._active_replicas.pop(img, None)
+          self._active_replicas.pop(img, None)
+          # The image left the window: no more claims are expected for it.
+          self._remaining.pop(img, None)
 
     num_tasks = len(new_pools) + len(scale_pools) + len(to_delete)
     if num_tasks > 0:
@@ -929,17 +1074,29 @@ class PrewarmDatasetIterator:
 
   def close(self) -> None:
     """Explicitly tears down active warm pools managed by this iterator."""
-    for img in list(self._active_replicas):
-      if self.fleet:
-        try:
-          self.fleet.unwarm_image(img)
-          self.unwarm_calls.append(img)
-          logging.info(
-              "[PrewarmDatasetIterator] Cleaned up warm pool on K8s: %s", img
-          )
-        except Exception as e:  # pylint: disable=broad-exception-caught
-          logging.warning("[PrewarmDatasetIterator] Final unwarm note: %s", e)
-    self._active_replicas.clear()
+    global _ACTIVE_PREWARM_ITERATOR
+    if _ACTIVE_PREWARM_ITERATOR is self:
+      _ACTIVE_PREWARM_ITERATOR = None
+    with self._lock:
+      images = list(self._active_replicas)
+    for img in images:
+      # Under the image lock: an in-flight scale-on-hold patch
+      # (set_pool_replicas creates missing pools) must not outlive teardown.
+      with self._image_lock(img):
+        if self.fleet:
+          try:
+            self.fleet.unwarm_image(img)
+            self.unwarm_calls.append(img)
+            logging.info(
+                "[PrewarmDatasetIterator] Cleaned up warm pool on K8s: %s", img
+            )
+          except Exception as e:  # pylint: disable=broad-exception-caught
+            logging.warning("[PrewarmDatasetIterator] Final unwarm note: %s", e)
+        with self._lock:
+          self._active_replicas.pop(img, None)
+    with self._lock:
+      self._active_replicas.clear()
+      self._remaining.clear()
     self._image_counts.clear()
     self._previous_batches.clear()
     self._previous_batch_counts.clear()

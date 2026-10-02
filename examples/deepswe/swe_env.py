@@ -251,6 +251,9 @@ class SWEEnv(BaseTaskEnv):
     for attempt in range(max_acquire_retries):
       try:
         self.handle = fleet.acquire(task)
+        # Scale-on-hold: shrink the image's warm pool instead of letting the
+        # controller replace the sandbox this rollout just claimed.
+        sandbox_utils.note_sandbox_acquired(task.image)
         break
       except Exception as e:
         if attempt < max_acquire_retries - 1:

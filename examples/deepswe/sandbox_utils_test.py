@@ -747,5 +747,163 @@ class SandboxFailFastTest(absltest.TestCase):
     self.assertTrue(any("Warm note for img_A" in line for line in logs.output))
 
 
+class ScaleOnHoldTest(absltest.TestCase):
+
+  def _iterator(self, dataset, fleet, **kwargs):
+    iterator = sandbox_utils.PrewarmDatasetIterator(
+        dataset, fleet=fleet, scale_on_hold=True, **kwargs
+    )
+    self.addCleanup(iterator.close)
+    return iterator
+
+  def _claim(self, image, n=1):
+    for _ in range(n):
+      sandbox_utils.note_sandbox_acquired(image)
+
+  def test_pool_shrinks_as_claims_land_and_is_not_recreated(self):
+    fleet = FakeFleet()
+    dataset = [
+        {"prompt": "p0", "docker_image": "img_A"},
+        {"prompt": "p1", "docker_image": "img_A"},
+        {"prompt": "p2", "docker_image": "img_B"},
+        {"prompt": "p3", "docker_image": "img_B"},
+        {"prompt": "p4", "docker_image": "img_C"},
+        {"prompt": "p5", "docker_image": "img_D"},
+    ]
+    iterator = self._iterator(dataset, fleet, num_generations=4, batch_size=2)
+    self.assertIs(sandbox_utils._ACTIVE_PREWARM_ITERATOR, iterator)
+    self.assertEqual(fleet.active_pools, {"img_A": 8, "img_B": 8})
+
+    # Batch 0 (img_A x2): every claim shrinks img_A's pool, none is replaced.
+    self.assertEqual(next(iterator)["prompt"], "p0")
+    self._claim("img_A", 8)
+    self.assertEqual(fleet.active_pools, {"img_A": 0, "img_B": 8})
+    self.assertEqual(
+        [r for img, r in fleet.set_replicas_calls if img == "img_A"],
+        [7, 6, 5, 4, 3, 2, 1, 0],
+    )
+    # A re-acquire after a failed env init: the pool stays at 0.
+    self._claim("img_A")
+    self.assertLen(fleet.set_replicas_calls, 8)
+    self.assertEqual(next(iterator)["prompt"], "p1")
+
+    # Batch 1 (img_B x2): img_A is retained (previous batch) at 0 replicas.
+    self.assertEqual(next(iterator)["prompt"], "p2")
+    self.assertEqual(
+        fleet.active_pools, {"img_A": 0, "img_B": 8, "img_C": 4, "img_D": 4}
+    )
+    self._claim("img_B", 3)
+    self._claim("img_unknown")  # Not prewarmed: ignored.
+    self.assertEqual(fleet.active_pools["img_B"], 5)
+    self.assertNotIn("img_unknown", fleet.active_pools)
+    self.assertEqual(next(iterator)["prompt"], "p3")
+
+    # Batch 2 (img_C, img_D): img_A leaves the window and is unwarmed.
+    self.assertEqual(next(iterator)["prompt"], "p4")
+    self.assertIn("img_A", fleet.unwarm_calls)
+    self.assertEqual(fleet.active_pools, {"img_B": 5, "img_C": 4, "img_D": 4})
+    # A late claim of the retired image must not recreate its pool.
+    calls = len(fleet.set_replicas_calls)
+    self._claim("img_A")
+    self.assertLen(fleet.set_replicas_calls, calls)
+    self.assertNotIn("img_A", fleet.active_pools)
+
+    iterator.close()
+    self.assertEqual(fleet.active_pools, {})
+    self.assertIsNone(sandbox_utils._ACTIVE_PREWARM_ITERATOR)
+    self._claim("img_C")  # No active iterator: a no-op.
+    self.assertNotIn("img_C", fleet.active_pools)
+
+  def test_same_image_in_consecutive_batches_keeps_next_batch_warm(self):
+    fleet = FakeFleet()
+    dataset = [
+        {"prompt": "p0", "docker_image": "img_A"},
+        {"prompt": "p1", "docker_image": "img_A"},
+        {"prompt": "p2", "docker_image": "img_B"},
+    ]
+    iterator = self._iterator(dataset, fleet, num_generations=4, batch_size=1)
+    self.assertEqual(fleet.active_pools, {"img_A": 8})
+    self.assertEqual(next(iterator)["prompt"], "p0")
+    self._claim("img_A", 4)
+    self.assertEqual(fleet.active_pools, {"img_A": 4})  # p1's sandboxes.
+    self.assertEqual(next(iterator)["prompt"], "p1")
+    self.assertEqual(fleet.active_pools, {"img_A": 4, "img_B": 4})
+    self._claim("img_A", 4)
+    self.assertEqual(fleet.active_pools, {"img_A": 0, "img_B": 4})
+
+  def test_concurrent_claims_end_at_zero(self):
+    fleet = FakeFleet()
+    dataset = [{"prompt": f"p{i}", "docker_image": f"img_{i}"} for i in range(8)]
+    iterator = self._iterator(dataset, fleet, num_generations=16, batch_size=4)
+    next(iterator)
+    threads = [
+        threading.Thread(target=self._claim, args=(f"img_{i % 4}",))
+        for i in range(64)
+    ]
+    for t in threads:
+      t.start()
+    for t in threads:
+      t.join()
+    for i in range(4):
+      self.assertEqual(fleet.active_pools[f"img_{i}"], 0)
+    for i in range(4, 8):
+      self.assertEqual(fleet.active_pools[f"img_{i}"], 16)
+
+  def test_env_enables_and_default_is_off(self):
+    fleet = FakeFleet()
+    dataset = [{"prompt": "p0", "docker_image": "img_A"}]
+    with mock.patch.dict(os.environ, {}, clear=True):
+      off = sandbox_utils.PrewarmDatasetIterator(
+          dataset, fleet=fleet, num_generations=4, batch_size=1
+      )
+    self.addCleanup(off.close)
+    self.assertFalse(off.scale_on_hold)
+    self.assertIsNone(sandbox_utils._ACTIVE_PREWARM_ITERATOR)
+    self._claim("img_A", 2)
+    self.assertEqual(fleet.active_pools, {"img_A": 4})
+    off.close()
+    with mock.patch.dict(os.environ, {"DEEPSWE_PREWARM_SCALE_ON_HOLD": "1"}):
+      on = sandbox_utils.PrewarmDatasetIterator(
+          list(dataset), fleet=FakeFleet(), num_generations=4, batch_size=1
+      )
+    self.addCleanup(on.close)
+    self.assertTrue(on.scale_on_hold)
+    self.assertIs(sandbox_utils._ACTIVE_PREWARM_ITERATOR, on)
+
+
+class SandboxRetryOverrideTest(absltest.TestCase):
+
+  def test_legacy_defaults(self):
+    with mock.patch.dict(os.environ, {}, clear=True):
+      self.assertEqual(
+          sandbox_utils.SandboxFailFastConfig.from_env(),
+          sandbox_utils.SandboxFailFastConfig(
+              enabled=False, ready_timeout_s=None, acquire_retries=5
+          ),
+      )
+
+  def test_overrides_without_fail_fast(self):
+    env = {
+        "DEEPSWE_ACQUIRE_RETRIES": "3",
+        "DEEPSWE_SANDBOX_READY_TIMEOUT_S": "1200",
+    }
+    with mock.patch.dict(os.environ, env, clear=True):
+      self.assertEqual(
+          sandbox_utils.SandboxFailFastConfig.from_env(),
+          sandbox_utils.SandboxFailFastConfig(
+              enabled=False, ready_timeout_s=1200, acquire_retries=3
+          ),
+      )
+
+  def test_invalid_overrides(self):
+    for env in (
+        {"DEEPSWE_ACQUIRE_RETRIES": "0"},
+        {"DEEPSWE_SANDBOX_READY_TIMEOUT_S": "-1"},
+    ):
+      with mock.patch.dict(os.environ, env, clear=True):
+        with self.assertRaises(ValueError):
+          sandbox_utils.SandboxFailFastConfig.from_env()
+
+
 if __name__ == "__main__":
   absltest.main()
