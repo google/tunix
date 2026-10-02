@@ -102,7 +102,7 @@ export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS:-use_gdn_kernel=true gdn_cp_mo
 decoder_layer_input=offload context=remat gdn=remat gdn_conv=remat gdn_states=remat \
 megablox=true sparse_matmul=true use_tokamax_gmm=true use_gmm_v2=true \
 use_gmm_v2_heuristic_tiling=true merge_gating_gmm=false \
-use_ragged_sort=false use_custom_sort_vjp=false ragged_buffer_factor=2.0 \
+use_ragged_sort=false use_custom_sort_vjp=false ragged_buffer_factor=-1.0 \
 use_tokamax_splash=true use_splash_scheduler=true \
 sa_block_q=1024 sa_block_kv=4096 sa_block_kv_compute=512 \
 sa_block_q_dkv=2048 sa_block_kv_dkv=2048 sa_block_kv_dkv_compute=512 \
