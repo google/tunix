@@ -490,7 +490,7 @@ class RLVllmSampler:
     if self._partial_rollout:
       turn_start_version = int(self._policy_version)
       enable_prefix_caching = bool(self.engine_args.enable_prefix_caching)
-      cache_salt = (
+      default_cache_salt = (
           f"policy_v{turn_start_version}" if enable_prefix_caching else None
       )
       pending_tasks = []
@@ -498,6 +498,16 @@ class RLVllmSampler:
         vllm_params = self._build_vllm_params(req, kwargs)
         req_id = _get_val(req, "request_id") or f"req_{time.time_ns()}_{idx}"
         prompt_val = _get_val(req, "prompt")
+        req_cache_salt = (
+            _get_val(req, "cache_salt", kwargs.get("cache_salt"))
+            if enable_prefix_caching
+            else None
+        )
+        cache_salt = (
+            str(req_cache_salt)
+            if req_cache_salt is not None
+            else default_cache_salt
+        )
         if generate_utils.is_token_id_sequence(prompt_val):
           expected_prompt_ids = (
               np.asarray(prompt_val, dtype=np.int32).reshape(-1).tolist()

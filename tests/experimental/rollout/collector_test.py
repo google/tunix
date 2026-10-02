@@ -1588,9 +1588,10 @@ class ResponseBudgetAnnotationTest(absltest.TestCase):
       def __init__(self, versions):
         self.versions = list(versions)
         self.calls = 0
+        self.seen_cache_salts = []
 
       async def sample(self, req, **kwargs):
-        del kwargs
+        self.seen_cache_salts.append(kwargs.get("cache_salt"))
         ver = self.versions[self.calls]
         self.calls += 1
         prompt_toks = (
@@ -1639,6 +1640,7 @@ class ResponseBudgetAnnotationTest(absltest.TestCase):
 
     item = asyncio.run(_run())
     self.assertEqual(sampler.calls, 2)
+    self.assertEqual(sampler.seen_cache_salts, [None, "policy_v2"])
     self.assertEqual(item.traj["turn_policy_versions"], [2, 3])
     self.assertEqual(item.traj["policy_version"], 2)
     self.assertEqual(item.metadata["turn_policy_versions"], [2, 3])

@@ -2,11 +2,12 @@
 set -e
 
 # ==============================================================================
-# MLPerf DeepSWE recipe: Qwen3.5-35B-A3B on TPU v5p (128 chips)
+# MLPerf DeepSWE recipe: Qwen3.5-35B-A3B on TPU v5p (Scaled Rollout / Batch 32)
 # ==============================================================================
 # - Cluster: bodaborg-v5p-nap in europe-west4
 # - Trainer on 64 chips (tpuv5:4x4x4 = 64 devices, FSDP=32, TP=1, EXPERT=1, CP=2)
-# - Rollout on 64 chips (16 replicas x 4 chips tpuv5:2x2x1, EP=4, TP=1)
+# - Rollout on 128 chips (32 replicas x 4 chips tpuv5:2x2x1, EP=4, TP=1)
+# - Batch size 32 (512 sequences/step) with sqrt-scaled LR and grad norm clip
 # - Sandboxes on sandbox-cpu-pool
 # ==============================================================================
 
@@ -15,7 +16,7 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Fill these before you run.
 # k8s has a 63 char limit on total label name, so keep job_prefix unique to your job and short
 export JOB_PREFIX="${JOB_PREFIX:-${USER}}"
-export WANDB_RUN_NAME="${WANDB_RUN_NAME:-${JOB_PREFIX}-mlperf-35b}"
+export WANDB_RUN_NAME="${WANDB_RUN_NAME:-${JOB_PREFIX}-mlperf-35b-256}"
 
 export REGION="${REGION:-europe-west4}"
 export CLUSTER="${CLUSTER:-bodaborg-v5p-nap}"
@@ -39,7 +40,7 @@ export MODEL_ID="Qwen/Qwen3.5-35B-A3B"
 export TOKENIZER_PATH="${TOKENIZER_PATH:-Qwen/Qwen3.5-35B-A3B}"
 export MAXTEXT_MODEL_NAME="qwen3.5-35b-a3b"
 
-# Topologies (64 chips / 64 devices Trainer 4x4x4, 16x 4-chip Rollout slices)
+# Topologies (64 chips / 64 devices Trainer 4x4x4, 32x 4-chip Rollout slices)
 # use_gdn_kernel=true requires TRAINER_MESH_TP=1 (the GDN kernel shard_map does not shard over 'tensor').
 # Mesh product: 32 * 1 * 1 * 2 = 64 devices.
 export TRAINER_JOBSET_YAML="${TRAINER_JOBSET_YAML:-jobset.pathways.yaml}"
@@ -49,26 +50,27 @@ export TRAINER_MESH_TP="${TRAINER_MESH_TP:-1}"
 export TRAINER_MESH_EXPERT="${TRAINER_MESH_EXPERT:-1}"
 export TRAINER_MESH_CONTEXT="${TRAINER_MESH_CONTEXT:-2}"
 
-# Rollout: 4 chips = 4 devices = 1 host per replica.
+# Rollout: 32 replicas x 4 chips (tpuv5:2x2x1 = 1 host per replica).
 # dp * tp * expert must equal the DEVICE count (1 per chip on v5p).
 export ROLLOUT_JOBSET_YAML="${ROLLOUT_JOBSET_YAML:-jobset.tpu.yaml}"
 export ROLLOUT_TPU_SLICE="${ROLLOUT_TPU_SLICE:-tpuv5:2x2x1}"
 export VLLM_DATA_PARALLEL_SIZE="${VLLM_DATA_PARALLEL_SIZE:-1}"
 _rollout_dims="${ROLLOUT_TPU_SLICE#*:}"
 export ROLLOUT_MESH_EXPERT="${ROLLOUT_MESH_EXPERT:-$(( ${_rollout_dims//x/*} / ${VLLM_DATA_PARALLEL_SIZE:-1} ))}"
-export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-16}"
+export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-32}"
 
 # Sandbox Concurrency
 export MAX_WARMPOOL_REPLICAS="${MAX_WARMPOOL_REPLICAS:-16}"
-export MAX_CONCURRENCY="${MAX_CONCURRENCY:-1024}"
+export MAX_CONCURRENCY="${MAX_CONCURRENCY:-2048}"
 
-# MLPerf RCP logging with deferred offline eval: from VAL_START_AT (default
-# CEIL(2.5 + 3840 / global_batch_size) = 18) save a checkpoint every step and
-# record it in ${METRIC_LOGGER_DIR}/eval_checkpoints.jsonl for
-# mlperf_35b_eval.sh. Keep all of them (max_steps - VAL_START_AT + 1 <= 35).
+# MLPerf RCP logging with deferred offline eval
 export RCP_LOGGING="${RCP_LOGGING:-true}"
+export BATCH_SIZE="${BATCH_SIZE:-32}"
+export MAX_STEPS="${MAX_STEPS:-30}"
 export CHECKPOINT_SAVE_INTERVAL_STEPS="${CHECKPOINT_SAVE_INTERVAL_STEPS:-1}"
-export CHECKPOINT_MAX_TO_KEEP="${CHECKPOINT_MAX_TO_KEEP:-35}"
+export CHECKPOINT_MAX_TO_KEEP="${CHECKPOINT_MAX_TO_KEEP:-30}"
+export LEARNING_RATE="${LEARNING_RATE:-1.4142135624e-6}"
+export MAX_GRAD_NORM="${MAX_GRAD_NORM:-0.08838834765}"
 
 # vLLM Rollout Configuration (from paste.googleplex.com/5903655694368768)
 export VLLM_ADDITIONAL_CONFIG='{"sharding":{"sharding_strategy":{"expert_parallelism":'"${ROLLOUT_MESH_EXPERT}"',"tensor_parallelism":1,"enable_dp_attention":true}},"custom_mamba_cache_multiplier":16,"maxtext_config":{"scan_layers":false,"attention":"vllm_rpa","allow_split_physical_axes":true,"use_multimodal":false,"prefuse_moe_weights":true,"per_device_batch_size":0.0}}'
