@@ -2284,6 +2284,141 @@ class CreateBatchAssemblerTest(absltest.TestCase):
     )
     self.assertEqual(assembler.batch_size, 2)
     self.assertEqual(assembler.max_packed_len, 8192)
+    self.assertEqual(assembler.segment_alignment_boundary, 1)
+
+  def test_create_sequence_packed_assembler_forwards_segment_alignment(self):
+    for max_seq_token_per_tpu in (1024, None):
+      assembler = batch_assembly.create_batch_assembler(
+          num_generations=2,
+          mini_batch_size=1,
+          train_micro_batch_size=2,
+          batch_config=batch_assembly.BatchConfig(
+              max_seq_token_per_tpu=max_seq_token_per_tpu,
+              segment_alignment_boundary=64,
+          ),
+      )
+      self.assertIsInstance(
+          assembler, batch_assembly.SequencePackedBatchAssembler
+      )
+      self.assertEqual(assembler.segment_alignment_boundary, 64)
+
+
+class SequencePackedRoutingTest(absltest.TestCase):
+  """Packed payloads must replay rollout routing on the packed token layout."""
+
+  def _assembler(self, **kwargs):
+    defaults = dict(
+        batch_size=1,
+        num_generations=2,
+        mini_batch_size=1,
+        max_packed_len=8,
+        pad_id=0,
+    )
+    defaults.update(kwargs)
+    return batch_assembly.SequencePackedBatchAssembler(**defaults)
+
+  def _payload(self, prompt_len, completion_len, *, routed_fill=None):
+    payload = _make_payload(prompt_len, completion_len)
+    if routed_fill is None:
+      return payload
+    return dataclasses.replace(
+        payload,
+        routed_experts=_routing(prompt_len + completion_len, routed_fill),
+    )
+
+  def test_to_pack_item_carries_sequence_aligned_routing(self):
+    item = batch_assembly.to_pack_item(self._payload(1, 2, routed_fill=3))
+    self.assertEqual(item.routed_experts.dtype, np.int16)
+    self.assertEqual(
+        item.routed_experts.shape, (3, _ROUTING_LAYERS, _ROUTING_TOP_K)
+    )
+
+  def test_to_pack_item_rejects_completion_only_routing(self):
+    payload = dataclasses.replace(
+        _make_payload(1, 2), routed_experts=_routing(2, 3)
+    )
+    with self.assertRaisesRegex(ValueError, "routed_experts"):
+      batch_assembly.to_pack_item(payload)
+
+  def test_packed_payload_carries_routing_on_token_positions(self):
+    payloads = [
+        self._payload(1, 2, routed_fill=3),  # 3 tokens -> [0:3]
+        self._payload(1, 2, routed_fill=5),  # 3 tokens -> [3:6]
+    ]
+    [batch] = self._assembler().feed(payloads)
+    routed = batch.payload.routed_experts
+    self.assertIsNotNone(routed, "packed assembler dropped the routing")
+    self.assertEqual(routed.dtype, np.int16)
+    self.assertEqual(routed.shape, (1, 8, _ROUTING_LAYERS, _ROUTING_TOP_K))
+    np.testing.assert_array_equal(
+        batch.payload.segment_ids[0], [1, 1, 1, 2, 2, 2, 0, 0]
+    )
+    np.testing.assert_array_equal(routed[0, 0:3], 3)
+    np.testing.assert_array_equal(routed[0, 3:6], 5)
+    np.testing.assert_array_equal(routed[0, 6:], _UNSET)
+
+  def test_to_rl_trainer_payload_reuses_chunk_routing_buffer(self):
+    items = [
+        batch_assembly.to_pack_item(self._payload(1, 2, routed_fill=3)),
+        batch_assembly.to_pack_item(self._payload(1, 2, routed_fill=5)),
+    ]
+    chunk = packing.pack_chunk(
+        [[items[0]], [items[1]]], budget=4, pad_id=0, carried=()
+    )
+    payload = batch_assembly.to_rl_trainer_payload(chunk, max_segments=2)
+    self.assertIs(payload.routed_experts, chunk.routed_experts)
+
+  def test_no_routing_leaves_payload_without_routed_experts(self):
+    [batch] = self._assembler().feed(
+        [self._payload(1, 2), self._payload(1, 2)]
+    )
+    self.assertIsNone(batch.payload.routed_experts)
+
+  def test_routing_less_trajectory_is_unset_and_warned(self):
+    payloads = [
+        self._payload(1, 2, routed_fill=3),
+        self._payload(1, 2),
+    ]
+    with self.assertLogs(level="WARNING") as logs:
+      [batch] = self._assembler().feed(payloads)
+    self.assertIn("1 of 2 packed trajectories carry no", logs.output[0])
+    routed = batch.payload.routed_experts
+    np.testing.assert_array_equal(routed[0, 0:3], 3)
+    np.testing.assert_array_equal(routed[0, 3:], _UNSET)
+
+  def test_dummy_rows_carry_unset_routing(self):
+    [batch] = self._assembler(batch_size=2).feed(
+        [self._payload(1, 2, routed_fill=3), self._payload(1, 2, routed_fill=4)]
+    )
+    routed = batch.payload.routed_experts
+    self.assertEqual(routed.shape[0], 2)
+    np.testing.assert_array_equal(routed[1], _UNSET)
+
+  def test_segment_alignment_pads_gaps_and_routing(self):
+    payloads = [
+        self._payload(10, 20, routed_fill=3),  # 30 tokens -> [0:30]
+        self._payload(5, 15, routed_fill=5),  # 20 tokens -> [64:84]
+    ]
+    [batch] = self._assembler(
+        max_packed_len=128, pad_id=42, segment_alignment_boundary=64
+    ).feed(payloads)
+    payload = batch.payload
+    seg_ids = payload.segment_ids[0]
+    np.testing.assert_array_equal(seg_ids[:30], 1)
+    np.testing.assert_array_equal(seg_ids[30:64], 0)
+    np.testing.assert_array_equal(seg_ids[64:84], 2)
+    np.testing.assert_array_equal(seg_ids[84:], 0)
+    np.testing.assert_array_equal(payload.completion_mask[0, 30:64], 0)
+    np.testing.assert_array_equal(payload.completion_ids[0, 30:64], 42)
+    np.testing.assert_array_equal(payload.routed_experts[0, :30], 3)
+    np.testing.assert_array_equal(payload.routed_experts[0, 30:64], _UNSET)
+    np.testing.assert_array_equal(payload.routed_experts[0, 64:84], 5)
+
+  def test_invalid_segment_alignment_boundary_raises(self):
+    with self.assertRaisesRegex(
+        ValueError, "segment_alignment_boundary must be positive"
+    ):
+      self._assembler(segment_alignment_boundary=0)
 
 
 if __name__ == "__main__":

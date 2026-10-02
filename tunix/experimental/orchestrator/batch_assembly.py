@@ -185,6 +185,11 @@ class BatchConfig:
       PaddedBatchAssembler.
     max_segments_per_packed_row: Maximum segments per packed row when sequence
       packing is enabled.
+    segment_alignment_boundary: Enforces that every packed sequence starts at an
+      index that is a multiple of this value, padding any gaps. By default (1),
+      sequences are packed tightly back-to-back. Use larger values to align
+      with chunk boundaries for models with chunked processing (e.g., 64 for
+      Qwen3.5 GatedDeltaNet).
     trainer_fsdp: Trainer FSDP mesh dimension size for sequence packing.
     trainer_dp: Trainer DP mesh dimension size for sequence packing.
   """
@@ -194,6 +199,7 @@ class BatchConfig:
   max_response_length: int | None = None
   max_seq_token_per_tpu: int | None = None
   max_segments_per_packed_row: int | None = None
+  segment_alignment_boundary: int = packing.DEFAULT_SEGMENT_ALIGNMENT_BOUNDARY
   trainer_fsdp: int | None = None
   trainer_dp: int | None = None
 
@@ -454,12 +460,20 @@ def to_pack_item(item: datatypes.RLTrainerPayload) -> packing.PackItem:
       if getattr(item, name) is not None
   }
 
+  routed = None
+  if item.routed_experts is not None:
+    # The adapter aligns routing to the whole `[prompt | completion]` sequence
+    # (see `algorithm_adapter._routed_experts_for`); `PackItem` re-validates
+    # the `(p + c, num_layers, top_k)` shape.
+    routed = np.asarray(item.routed_experts, dtype=np.int16)
+
   return packing.PackItem(
       prompt_ids=prompt,
       completion_ids=completion,
       completion_mask=completion_mask,
       advantages=resolve(item.advantages, fill=0.0, name="advantages"),
       per_token=per_token,
+      routed_experts=routed,
   )
 
 
@@ -484,8 +498,42 @@ def to_rl_trainer_payload(
       segment_ids=chunk.segment_ids,
       segment_positions=chunk.segment_positions,
       num_segments=max_segments + 1,
+      # `packing.pack_chunk` pre-allocates one `[B, T, L, K]` buffer for the
+      # whole chunk, or none if no item carries routing.
+      routed_experts=chunk.routed_experts,
       metadata=metadata,
       **chunk.per_token,  # pyrefly: ignore[bad-argument-type]
+  )
+
+
+def _log_router_replay_coverage(
+    payload: datatypes.RLTrainerPayload, *, batch_id: str, num_segments: int
+) -> None:
+  """Logs how many real packed tokens the trainer will actually replay.
+
+  Judged on layer 0 only so it stays cheap on `[B, T, L, K]` payloads. The MoE
+  layer forces a token only if all `top_k` slots are `>= 0` and distinct, and
+  re-gates it otherwise. A trajectory's last token has no routing (vLLM routes
+  `P + G - 1` positions), so correctly aligned routing forces
+  `real - segments` tokens.
+
+  Args:
+    payload: Packed payload carrying `routed_experts` and `segment_ids`.
+    batch_id: Microbatch tracking id for the log line.
+    num_segments: Number of trajectories packed into the payload.
+  """
+  real = np.asarray(payload.segment_ids) > 0
+  layer0 = np.sort(np.asarray(payload.routed_experts)[..., 0, :], axis=-1)
+  forced = np.all(layer0 >= 0, axis=-1) & ~np.any(
+      layer0[..., 1:] == layer0[..., :-1], axis=-1
+  )
+  logging.info(
+      "Router replay: %d/%d real tokens forced in %s (%d segments; aligned"
+      " routing forces real - segments).",
+      int(np.count_nonzero(forced & real)),
+      int(np.count_nonzero(real)),
+      batch_id,
+      num_segments,
   )
 
 
@@ -535,6 +583,9 @@ class SequencePackedBatchAssembler:
       max_packed_len: int = 8192,
       pad_id: int = 0,
       max_segments_per_packed_row: int | None = None,
+      segment_alignment_boundary: int = (
+          packing.DEFAULT_SEGMENT_ALIGNMENT_BOUNDARY
+      ),
       start_batch_index: int = 0,
   ):
     """Initializes SequencePackedBatchAssembler.
@@ -547,6 +598,11 @@ class SequencePackedBatchAssembler:
       pad_id: Token ID used for padding.
       max_segments_per_packed_row: Upper bound on the number of real segments
         that may be packed into a single row.
+      segment_alignment_boundary: Enforces that every packed sequence starts at
+        an index that is a multiple of this value, padding any gaps. By default
+        (1), sequences are packed tightly back-to-back. Use larger values to
+        align with chunk boundaries for models with chunked processing (e.g.,
+        64 for Qwen3.5 GatedDeltaNet).
       start_batch_index: Initial microbatch index offset for tracking IDs.
     """
     if batch_size <= 0:
@@ -567,12 +623,18 @@ class SequencePackedBatchAssembler:
           "max_segments_per_packed_row must be positive or None, got"
           f" {max_segments_per_packed_row}."
       )
+    if segment_alignment_boundary <= 0:
+      raise ValueError(
+          "segment_alignment_boundary must be positive, got"
+          f" {segment_alignment_boundary}."
+      )
     self.batch_size = batch_size
     self.max_packed_len = max_packed_len
     self.pad_id = pad_id
     self.num_generations = num_generations
     self.mini_batch_size = mini_batch_size
     self.max_segments_per_packed_row = max_segments_per_packed_row
+    self.segment_alignment_boundary = segment_alignment_boundary
     self._batch_counter = start_batch_index
 
     # Each entry is a `(PackItem, trajectory_id, raw_payload)` converted once at ingest.
@@ -600,17 +662,27 @@ class SequencePackedBatchAssembler:
         pack_size=self.batch_size,
         budget=self.max_packed_len,
         max_segments=max_segments,
+        segment_alignment_boundary=self.segment_alignment_boundary,
     )
     placed = []
     for bin_items in bins:
       placed.extend(bin_items)
     traj_ids = tuple(id_to_entry[id(item)][1] for item in placed)
     placed_items = [id_to_entry[id(item)][2] for item in placed]
+    num_unrouted = sum(item.routed_experts is None for item in placed)
+    if 0 < num_unrouted < len(placed):
+      logging.warning(
+          "Router replay: %d of %d packed trajectories carry no"
+          " routed_experts; their tokens use the trainer's own gate.",
+          num_unrouted,
+          len(placed),
+      )
     chunk = packing.pack_chunk(
         bins,
         budget=self.max_packed_len,
         pad_id=self.pad_id,
         carried=carried,
+        segment_alignment_boundary=self.segment_alignment_boundary,
     )
     batch_tracking_id = f"{_BATCH_ID_PREFIX}_{self._batch_counter}"
     merged_lineage = _merge_batch_lineage(
@@ -629,6 +701,10 @@ class SequencePackedBatchAssembler:
         trajectory_ids=traj_ids,
         lineage_context=merged_lineage,
     )
+    if payload.routed_experts is not None:
+      _log_router_replay_coverage(
+          payload, batch_id=batch_tracking_id, num_segments=len(placed)
+      )
     self._buffer = [id_to_entry[id(item)] for item in leftover]
     padding_stats = PaddingStats(
         row_valid_tokens=np.array(
@@ -1168,9 +1244,11 @@ def create_batch_assembler(
 
     logging.info(
         "Using SequencePackedBatchAssembler with max_seq_token_per_tpu: %d, "
-        "max_segments_per_packed_row: %s, pack_size: %d",
+        "max_segments_per_packed_row: %s, segment_alignment_boundary: %d, "
+        "pack_size: %d",
         batch_config.max_seq_token_per_tpu,
         batch_config.max_segments_per_packed_row,
+        batch_config.segment_alignment_boundary,
         pack_size,
     )
     return SequencePackedBatchAssembler(
@@ -1180,6 +1258,7 @@ def create_batch_assembler(
         max_packed_len=batch_config.max_seq_token_per_tpu,
         pad_id=batch_config.pad_id,
         max_segments_per_packed_row=batch_config.max_segments_per_packed_row,
+        segment_alignment_boundary=batch_config.segment_alignment_boundary,
     )
 
   if batch_config.max_prompt_length is not None:
@@ -1203,4 +1282,5 @@ def create_batch_assembler(
       mini_batch_size=mini_batch_size,
       pad_id=batch_config.pad_id,
       max_segments_per_packed_row=batch_config.max_segments_per_packed_row,
+      segment_alignment_boundary=batch_config.segment_alignment_boundary,
   )

@@ -39,21 +39,21 @@ UNSET_ROUTED_EXPERT = -1
 # (segments are packed back to back). Hybrid recurrent models such as Qwen3.5
 # (GatedDeltaNet `gdn_chunk_size = 64`) should use 64 so a packed segment never
 # starts mid-chunk.
-DEFAULT_SEGMENT_ALIGN_MULTIPLE = 1
+DEFAULT_SEGMENT_ALIGNMENT_BOUNDARY = 1
 
 
-def _check_segment_align_multiple(segment_align_multiple: int) -> None:
-  if segment_align_multiple <= 0:
+def _check_segment_alignment_boundary(segment_alignment_boundary: int) -> None:
+  if segment_alignment_boundary <= 0:
     raise ValueError(
-        "segment_align_multiple must be positive, got"
-        f" {segment_align_multiple}."
+        "segment_alignment_boundary must be positive, got"
+        f" {segment_alignment_boundary}."
     )
 
 
-def align_offset(offset: int, segment_align_multiple: int) -> int:
-  """Rounds `offset` up to the next multiple of `segment_align_multiple`."""
-  _check_segment_align_multiple(segment_align_multiple)
-  return -(-offset // segment_align_multiple) * segment_align_multiple
+def align_offset(offset: int, segment_alignment_boundary: int) -> int:
+  """Rounds `offset` up to the next multiple of `segment_alignment_boundary`."""
+  _check_segment_alignment_boundary(segment_alignment_boundary)
+  return -(-offset // segment_alignment_boundary) * segment_alignment_boundary
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
@@ -260,23 +260,24 @@ def fill_one_chunk(
     pack_size: int,
     budget: int,
     max_segments: int,
-    segment_align_multiple: int = DEFAULT_SEGMENT_ALIGN_MULTIPLE,
+    segment_alignment_boundary: int = DEFAULT_SEGMENT_ALIGNMENT_BOUNDARY,
 ) -> tuple[list[list[PackItem]], list[PackItem]]:
   """Fills ONE chunk of `pack_size` fixed-capacity bins, first-fit-decreasing.
 
   Sorts the items by token length descending and greedily places each into the
   first bin with room, where a bin has room only if it stays within both the
   token `budget` (after aligning the start of every segment but the first to
-  `segment_align_multiple`) AND `max_segments` sequences (so the loss's static
-  `num_segments = max_segments + 1` buckets never overflow). Items that fit no
-  bin are returned as `leftover` (in their original order) for a later chunk.
+  `segment_alignment_boundary`) AND `max_segments` sequences (so the loss's
+  static `num_segments = max_segments + 1` buckets never overflow). Items that
+  fit no bin are returned as `leftover` (in their original order) for a later
+  chunk.
 
   Args:
     items: Sequence of PackItems to pack.
     pack_size: Number of bins in the chunk.
     budget: Token capacity budget per bin.
     max_segments: Maximum number of segments allowed in a single bin.
-    segment_align_multiple: Token boundary each segment after the first in a
+    segment_alignment_boundary: Token boundary each segment after the first in a
       bin must start on. `1` packs segments back to back.
 
   Returns:
@@ -284,7 +285,7 @@ def fill_one_chunk(
     PackItems (some may be empty), and `leftover` contains the items that did
     not fit into any bin.
   """
-  _check_segment_align_multiple(segment_align_multiple)
+  _check_segment_alignment_boundary(segment_alignment_boundary)
   bins: list[list[PackItem]] = [[] for _ in range(pack_size)]
   loads = [0] * pack_size
   order = sorted(
@@ -297,7 +298,7 @@ def fill_one_chunk(
     for b in range(pack_size):
       # Must mirror the cursor arithmetic in `pack_chunk`.
       start = (
-          align_offset(loads[b], segment_align_multiple) if bins[b] else 0
+          align_offset(loads[b], segment_alignment_boundary) if bins[b] else 0
       )
       if start + n <= budget and len(bins[b]) < max_segments:
         bins[b].append(item)
@@ -314,7 +315,7 @@ def pack_bin(
     budget: int,
     pad_id: int,
     carried: Sequence[str],
-    segment_align_multiple: int = DEFAULT_SEGMENT_ALIGN_MULTIPLE,
+    segment_alignment_boundary: int = DEFAULT_SEGMENT_ALIGNMENT_BOUNDARY,
 ) -> PackedRow:
   """Packs a single bin of items into a single `[budget]` PackedRow."""
   return pack_chunk(
@@ -322,7 +323,7 @@ def pack_bin(
       budget=budget,
       pad_id=pad_id,
       carried=carried,
-      segment_align_multiple=segment_align_multiple,
+      segment_alignment_boundary=segment_alignment_boundary,
   )[0]
 
 
@@ -332,7 +333,7 @@ def pack_chunk(
     budget: int,
     pad_id: int,
     carried: Sequence[str],
-    segment_align_multiple: int = DEFAULT_SEGMENT_ALIGN_MULTIPLE,
+    segment_alignment_boundary: int = DEFAULT_SEGMENT_ALIGNMENT_BOUNDARY,
 ) -> PackedChunk:
   """Packs a sequence of bins of one chunk into a contiguous `[n_bins, budget]` PackedChunk.
 
@@ -341,7 +342,7 @@ def pack_chunk(
     budget: Row length in tokens.
     pad_id: Token id written to padding and alignment-gap positions.
     carried: Per-token fields to pack (see `carried_per_token_fields`).
-    segment_align_multiple: Token boundary each segment after the first in a
+    segment_alignment_boundary: Token boundary each segment after the first in a
       row must start on. Gaps are padding (`segment_ids == 0`, masks 0,
       `pad_id`, unset routing).
 
@@ -351,7 +352,7 @@ def pack_chunk(
     top_k]` int16 `routed_experts` buffer, `UNSET_ROUTED_EXPERT` wherever no
     routing was captured, so every row has the same structure.
   """
-  _check_segment_align_multiple(segment_align_multiple)
+  _check_segment_alignment_boundary(segment_alignment_boundary)
   n_bins = len(bins)
   ids = np.full((n_bins, budget), pad_id, dtype=np.int32)
   prompt_mask = np.zeros((n_bins, budget), dtype=np.float32)
@@ -381,7 +382,7 @@ def pack_chunk(
       c = item.completion_ids.shape[0]
       n = p + c
       if seg > 1:
-        cursor = align_offset(cursor, segment_align_multiple)
+        cursor = align_offset(cursor, segment_alignment_boundary)
       if cursor + n > budget:
         raise ValueError(
             f"pack_bin: bin size {cursor + n} exceeds budget {budget}."
@@ -448,7 +449,7 @@ def pack_core(
     pack_size: int = 1,
     max_segments_per_packed_row: int | None = None,
     pad_id: int = 0,
-    segment_align_multiple: int = DEFAULT_SEGMENT_ALIGN_MULTIPLE,
+    segment_alignment_boundary: int = DEFAULT_SEGMENT_ALIGNMENT_BOUNDARY,
 ) -> list[PackedChunk]:
   """Packs `items` into a sequence of chunks, each containing `pack_size` PackedRows with `budget` tokens."""
   if budget <= 0:
@@ -463,7 +464,7 @@ def pack_core(
         "Max segments per packed row must be positive or None, got"
         f" {max_segments_per_packed_row}."
     )
-  _check_segment_align_multiple(segment_align_multiple)
+  _check_segment_alignment_boundary(segment_alignment_boundary)
   if not items:
     return []
 
@@ -479,7 +480,7 @@ def pack_core(
         pack_size=pack_size,
         budget=budget,
         max_segments=max_segments,
-        segment_align_multiple=segment_align_multiple,
+        segment_alignment_boundary=segment_alignment_boundary,
     )
     if not any(bins):
       raise ValueError("pack_core: no items placed in any bin.")
@@ -489,7 +490,7 @@ def pack_core(
             budget=budget,
             pad_id=pad_id,
             carried=carried,
-            segment_align_multiple=segment_align_multiple,
+            segment_alignment_boundary=segment_alignment_boundary,
         )
     )
   return chunks

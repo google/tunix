@@ -303,11 +303,13 @@ class PackCoreTest(absltest.TestCase):
     self.assertIs(rows[0].per_token["returns"].base, returns_base)
     self.assertIs(rows[1].per_token["returns"].base, returns_base)
 
-  def test_invalid_segment_align_multiple_raises(self):
+  def test_invalid_segment_alignment_boundary_raises(self):
     with self.assertRaisesRegex(
-        ValueError, "segment_align_multiple must be positive"
+        ValueError, "segment_alignment_boundary must be positive"
     ):
-      packing.pack_core([_item([1], [2])], budget=10, segment_align_multiple=0)
+      packing.pack_core(
+          [_item([1], [2])], budget=10, segment_alignment_boundary=0
+      )
 
 
 class PackRoutedExpertsTest(absltest.TestCase):
@@ -382,7 +384,7 @@ class PackSegmentAlignmentTest(absltest.TestCase):
     self.assertEqual(packing.align_offset(7, 1), 7)
 
   def test_default_is_unaligned(self):
-    self.assertEqual(packing.DEFAULT_SEGMENT_ALIGN_MULTIPLE, 1)
+    self.assertEqual(packing.DEFAULT_SEGMENT_ALIGNMENT_BOUNDARY, 1)
 
   def test_segments_start_on_alignment_boundary_with_padded_gaps(self):
     # FFD sorts descending by length:
@@ -400,7 +402,7 @@ class PackSegmentAlignmentTest(absltest.TestCase):
         budget=256,
         pack_size=1,
         pad_id=pad_id,
-        segment_align_multiple=64,
+        segment_alignment_boundary=64,
     )
     self.assertEqual(row.num_real_segments, 3)
     for seg_id, start, length, routed_value in (
@@ -431,7 +433,7 @@ class PackSegmentAlignmentTest(absltest.TestCase):
         _item(np.ones(10), np.ones(20)),  # 30 tokens.
     ]
     [[row]] = packing.pack_core(
-        items, budget=128, pack_size=1, segment_align_multiple=64
+        items, budget=128, pack_size=1, segment_alignment_boundary=64
     )
     np.testing.assert_array_equal(row.segment_ids[:64], 1)
     np.testing.assert_array_equal(row.segment_ids[64:94], 2)
@@ -443,7 +445,7 @@ class PackSegmentAlignmentTest(absltest.TestCase):
     items = [_item(np.ones(4), np.ones(6)), _item(np.ones(4), np.ones(6))]
     self.assertLen(packing.pack_core(items, budget=64, pack_size=1), 1)
     chunks = packing.pack_core(
-        items, budget=64, pack_size=1, segment_align_multiple=64
+        items, budget=64, pack_size=1, segment_alignment_boundary=64
     )
     self.assertLen(chunks, 2)
     for [row] in chunks:
@@ -453,7 +455,7 @@ class PackSegmentAlignmentTest(absltest.TestCase):
     [[row]] = packing.pack_core(
         [_item(np.ones(100), np.ones(156))],
         budget=256,
-        segment_align_multiple=64,
+        segment_alignment_boundary=64,
     )
     np.testing.assert_array_equal(row.segment_ids, 1)
 
@@ -467,7 +469,7 @@ class PackSegmentAlignmentTest(absltest.TestCase):
         for _ in range(37)
     ]
     chunks = packing.pack_core(
-        items, budget=256, pack_size=2, segment_align_multiple=16
+        items, budget=256, pack_size=2, segment_alignment_boundary=16
     )
     self.assertEqual(
         sum(r.num_real_segments for c in chunks for r in c), len(items)
@@ -486,7 +488,7 @@ class PackSegmentAlignmentTest(absltest.TestCase):
     items = [_item(np.ones(4), np.ones(6)), _item(np.ones(4), np.ones(6))]
     with self.assertRaisesRegex(ValueError, "exceeds budget"):
       packing.pack_bin(
-          items, budget=64, pad_id=0, carried=(), segment_align_multiple=64
+          items, budget=64, pad_id=0, carried=(), segment_alignment_boundary=64
       )
 
 
