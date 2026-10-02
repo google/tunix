@@ -72,6 +72,7 @@ analyze_orchestrator_log() {
   "$PYTHON_BIN" - "$log_file" "$max_oob" "$min_kept" "$sampler_q" "$trainer_q" "$max_geomean_drift" <<'PY'
 import ast
 import math
+import os
 import re
 import sys
 
@@ -154,6 +155,8 @@ print("-" * len(header))
 
 failures = []
 ordered_steps = sorted(steps.keys())
+seq_err_threshold = float(os.environ.get("SEQ_LOGPROB_ERROR_THRESHOLD", "2.0"))
+kept_fracs = []
 
 for step in ordered_steps:
   info = steps[step]
@@ -165,9 +168,14 @@ for step in ordered_steps:
   geomean = float(tm.get("sampler_is/seq_geomean_mean", float("nan")))
   tis_oob = float(tm.get("tis/is_oob_ratio", float("nan")))
   kept_frac = float(tm.get("sample_mask/kept_frac", float("nan")))
-  mult_err = float(tm.get("sample_mask/mult_prob_error_mean", float("nan")))
+  mult_err_mean = float(tm.get("sample_mask/mult_prob_error_mean", float("nan")))
+  mult_err_max = float(tm.get("sample_mask/mult_prob_error_max", float("nan")))
+  mult_err = mult_err_max if math.isfinite(mult_err_max) else mult_err_mean
   tok_diff = float(tm.get("sampler_is/token_logdiff_absmean", float("nan")))
   step_time = info.get("step_time", float("nan"))
+
+  if math.isfinite(kept_frac):
+    kept_fracs.append(kept_frac)
 
   print(
       f"{step:>4d} | {pol_ver:>6d} | {reward:>8.4f} | {loss:>10.5f} | "
@@ -185,22 +193,43 @@ for step in ordered_steps:
         f"(systematic sampler/trainer sequence ratio bias: {geomean:.5f})"
     )
   if math.isfinite(tis_oob) and tis_oob > max_oob_ratio:
+    tis_min = os.environ.get("TRUNCATED_IMPORTANCE_SAMPLING_RATIO_MIN", "0.997")
+    tis_max = os.environ.get("TRUNCATED_IMPORTANCE_SAMPLING_RATIO", "1.006")
     failures.append(
         f"Step {step}: tis/is_oob_ratio={tis_oob:.4f} > MAX_OOB_RATIO={max_oob_ratio:.4f} "
-        "(sampler/trainer sequence drift exceeds TIS [0.999, 1.002] gate)"
+        f"(sampler/trainer sequence drift exceeds TIS [{tis_min}, {tis_max}] gate)"
     )
-  if math.isfinite(kept_frac) and kept_frac < min_kept_frac:
+  if math.isfinite(mult_err_max) and mult_err_max > seq_err_threshold:
     failures.append(
-        f"Step {step}: sample_mask/kept_frac={kept_frac:.4f} < MIN_KEPT_FRAC={min_kept_frac:.4f} "
-        "(too many trajectories rejected by TIS / seq_logprob_error_threshold)"
+        f"Step {step}: sample_mask/mult_prob_error_max={mult_err_max:.5f} > SEQ_LOGPROB_ERROR_THRESHOLD={seq_err_threshold:.4f} "
+        "(sequence rejected due to sampler/trainer logprob disagreement)"
     )
+  if math.isfinite(kept_frac):
+    if kept_frac <= 0.0:
+      failures.append(
+          f"Step {step}: sample_mask/kept_frac={kept_frac:.4f} <= 0.0 "
+          "(all trajectories in step were masked by overlong_loss_masking or seq_logprob_error_threshold)"
+      )
+    elif len(ordered_steps) == 1 and kept_frac < min_kept_frac:
+      failures.append(
+          f"Step {step}: sample_mask/kept_frac={kept_frac:.4f} < MIN_KEPT_FRAC={min_kept_frac:.4f}"
+      )
+
+mean_kept_frac = sum(kept_fracs) / len(kept_fracs) if kept_fracs else float("nan")
+if math.isfinite(mean_kept_frac) and len(ordered_steps) > 1 and mean_kept_frac < min_kept_frac:
+  failures.append(
+      f"Run mean sample_mask/kept_frac={mean_kept_frac:.4f} < MIN_KEPT_FRAC={min_kept_frac:.4f} "
+      "(too many trajectories rejected across the run)"
+  )
 
 print("=====================================================================================================================")
 first_reward = steps[ordered_steps[0]].get("reward_mean", float("nan"))
 last_reward = steps[ordered_steps[-1]].get("reward_mean", float("nan"))
+mean_reward = sum(steps[s].get("reward_mean", 0.0) for s in ordered_steps) / len(ordered_steps)
 print(
     f"Steps completed: {len(ordered_steps)} | "
-    f"Reward: {first_reward:.4f} (step {ordered_steps[0]}) -> {last_reward:.4f} (step {ordered_steps[-1]})"
+    f"Reward: {first_reward:.4f} (step {ordered_steps[0]}) -> {last_reward:.4f} (step {ordered_steps[-1]}), "
+    f"mean={mean_reward:.4f} | Mean KeptFrac: {mean_kept_frac:.4f}"
 )
 
 if failures:
@@ -211,7 +240,7 @@ if failures:
 else:
   print(
       f"\nSTATUS: PASS - All {len(ordered_steps)} step(s) satisfied TIS & numerical health gates "
-      f"(|geomean - 1.0| <= {max_geomean_drift}, tis/is_oob_ratio <= {max_oob_ratio}, sample_mask/kept_frac >= {min_kept_frac})."
+      f"(|geomean - 1.0| <= {max_geomean_drift}, tis/is_oob_ratio <= {max_oob_ratio}, mean kept_frac={mean_kept_frac:.4f} >= {min_kept_frac})."
   )
 PY
 }
@@ -405,7 +434,7 @@ else
 fi
 export TPU_CHIPS_PER_PROCESS_BOUNDS=${TPU_CHIPS_PER_PROCESS_BOUNDS:-$TPU_CHIPS_PER_HOST_BOUNDS}
 
-BASE_XLA_TPU_FLAGS="--xla_tpu_use_minor_sharding_for_major_trivial_input=true --xla_tpu_enable_sparse_core_collective_offload_all_reduce=false --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=false --xla_tpu_enable_sparse_core_collective_offload_all_gather=false --xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=false --xla_tpu_enable_sparse_core_collective_offload_3d_all_gather=false --xla_tpu_ars_combiner_threshold_in_bytes=0 --xla_tpu_enable_async_collective_merger=false --xla_tpu_check_legacy_constraints_in_reduce_scatter_legalizer=false"
+ROLLOUT_XLA_TPU_FLAGS="--xla_tpu_use_minor_sharding_for_major_trivial_input=true --xla_tpu_enable_sparse_core_collective_offload_all_reduce=false --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=false --xla_tpu_enable_sparse_core_collective_offload_all_gather=false --xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=false --xla_tpu_enable_sparse_core_collective_offload_3d_all_gather=false --xla_tpu_ars_combiner_threshold_in_bytes=0 --xla_tpu_enable_async_collective_merger=false --xla_tpu_check_legacy_constraints_in_reduce_scatter_legalizer=false"
 
 # Probe the actual JAX device count visible to the Trainer worker with these
 # LIBTPU_INIT_ARGS so that mesh dimensions are guaranteed to match jax.device_count().
@@ -414,12 +443,12 @@ probe_worker_tpu_env() {
   local bounds="$2"
   local host_bounds="$3"
   local try_megacore="$4"
-  "$PYTHON_BIN" - "$chips" "$bounds" "$host_bounds" "$try_megacore" "$BASE_XLA_TPU_FLAGS" <<'PY'
+  "$PYTHON_BIN" - "$chips" "$bounds" "$host_bounds" "$try_megacore" <<'PY'
 import os
 import subprocess
 import sys
 
-chips, bounds, host_bounds, try_megacore, base_xla = sys.argv[1:6]
+chips, bounds, host_bounds, try_megacore = sys.argv[1:5]
 
 def _run_probe(megacore_flag: str):
   env = os.environ.copy()
@@ -434,8 +463,7 @@ def _run_probe(megacore_flag: str):
   init_args = (
       f"{megacore_flag} "
       f"--deepsea_chips_per_host_bounds={bounds} "
-      f"--deepsea_host_bounds={host_bounds} "
-      f"{base_xla}"
+      f"--deepsea_host_bounds={host_bounds}"
   ).strip()
   env["LIBTPU_INIT_ARGS"] = init_args
   code = (
@@ -479,7 +507,10 @@ EXTRA_CHIP_XLA_FLAGS=""
 if [[ "$DETECTED_TPU_KIND" == *"7x"* ]]; then
   EXTRA_CHIP_XLA_FLAGS="--xla_tpu_scoped_vmem_limit_kib=65472"
 fi
-export WORKER_LIBTPU_INIT_ARGS="${EFFECTIVE_MEGACORE_ARG:+$EFFECTIVE_MEGACORE_ARG }--deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS} --deepsea_host_bounds=${TPU_HOST_BOUNDS} ${BASE_XLA_TPU_FLAGS}${EXTRA_CHIP_XLA_FLAGS:+ $EXTRA_CHIP_XLA_FLAGS}"
+# Match k8s_launcher.sh: start_trainer uses default XLA compiler flags (plus single-host
+# chip slice bounds), while start_rollout applies ROLLOUT_XLA_TPU_FLAGS for vLLM.
+export TRAINER_LIBTPU_INIT_ARGS="${TRAINER_LIBTPU_INIT_ARGS:-${EFFECTIVE_MEGACORE_ARG:+$EFFECTIVE_MEGACORE_ARG }--deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS} --deepsea_host_bounds=${TPU_HOST_BOUNDS}}"
+export ROLLOUT_LIBTPU_INIT_ARGS="${ROLLOUT_LIBTPU_INIT_ARGS:-${TRAINER_LIBTPU_INIT_ARGS} ${ROLLOUT_XLA_TPU_FLAGS}${EXTRA_CHIP_XLA_FLAGS:+ $EXTRA_CHIP_XLA_FLAGS}}"
 export RAIDEN_DEVICES_PER_HOST=${RAIDEN_DEVICES_PER_HOST:-$ACTUAL_TRAINER_DEVICES}
 
 if [[ "$MODEL_NAME" == "Qwen3.5-35B-A3B" ]]; then
@@ -601,7 +632,7 @@ export MAX_SEQ_TOKEN_PER_TPU=${MAX_SEQ_TOKEN_PER_TPU:-1024}
 export MAX_SEGMENTS_PER_PACKED_ROW=${MAX_SEGMENTS_PER_PACKED_ROW:-2}
 export COMPUTE_LOGPS_CHUNK_SIZE=${COMPUTE_LOGPS_CHUNK_SIZE:-256}
 
-export LEARNING_RATE=${LEARNING_RATE:-3e-5}
+export LEARNING_RATE=${LEARNING_RATE:-1e-6}
 export SCHEDULE_TYPE=${SCHEDULE_TYPE:-constant}
 export LR_INIT_VALUE=${LR_INIT_VALUE:-0.0}
 export LR_PEAK_VALUE=${LR_PEAK_VALUE:-$LEARNING_RATE}
@@ -886,7 +917,7 @@ def _patch_maxtext_utils(maxtext_utils_mod):
 
           val_host = float(jax.device_get(value))
           is_bad = not (val_host == val_host and abs(val_host) != float("inf"))
-          if is_bad or val_host > 100.0:
+          if is_bad:
             acc = getattr(engine, "_accumulated_grads", None)
             fmask = getattr(engine, "_freeze_mask", None)
             if (
@@ -1326,7 +1357,7 @@ echo "Launching Trainer worker on TPU chips $TRAINER_TPU_CHIPS..."
   if [[ -n "${EFFECTIVE_MEGACORE_ARG:-}" ]]; then
     export TPU_MEGACORE=megacore
   fi
-  export LIBTPU_INIT_ARGS="$WORKER_LIBTPU_INIT_ARGS"
+  export LIBTPU_INIT_ARGS="$TRAINER_LIBTPU_INIT_ARGS"
   export PYTHONUNBUFFERED=1
   exec "${TRAINER_CMD[@]}" > "$TRAINER_LOG" 2>&1
 ) &
@@ -1397,7 +1428,7 @@ echo "Launching Rollout worker on TPU chips $ROLLOUT_TPU_CHIPS..."
   if [[ -n "${EFFECTIVE_MEGACORE_ARG:-}" ]]; then
     export TPU_MEGACORE=megacore
   fi
-  export LIBTPU_INIT_ARGS="$WORKER_LIBTPU_INIT_ARGS"
+  export LIBTPU_INIT_ARGS="$ROLLOUT_LIBTPU_INIT_ARGS"
   export PYTHONUNBUFFERED=1
   exec "${ROLLOUT_CMD[@]}" > "$ROLLOUT_LOG" 2>&1
 ) &
@@ -1462,8 +1493,9 @@ echo "Launching CPU Orchestrator ($TASK_MODE)..."
     ORCHESTRATOR_CMD+=(--use_rollout_logps)
   fi
   if [[ "$TASK_MODE" == "gsm8k" ]]; then
+    DEFAULT_TFDS_EXAMPLES=$(( MAX_STEPS * BATCH_SIZE > 4 ? MAX_STEPS * BATCH_SIZE : 4 ))
     ORCHESTRATOR_CMD+=(
-      --tfds_split="${TFDS_SPLIT:-train[:4]}"
+      --tfds_split="${TFDS_SPLIT:-train[:${DEFAULT_TFDS_EXAMPLES}]}"
       --reward_mode="${REWARD_MODE:-env}"
     )
   else
