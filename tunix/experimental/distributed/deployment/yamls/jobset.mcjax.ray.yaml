@@ -87,7 +87,7 @@ ${FAIL_FAST_WRAPPER_PRE}                  (
                     if [ "$${POD_INDEX}" = "0" ]; then
                       echo "Starting Ray head..."
                       ray start --head --port=6379
-                      sleep 5; until ray status; do sleep 5; done
+                      sleep 5; until ray status 2>/dev/null | grep -E -q "8(\.0)? TPU"; do sleep 2; done
 
                       ${STARTUP_COMMAND}
                     else
