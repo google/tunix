@@ -305,6 +305,9 @@ class StandardRLProgram(RLProgram):
     self.sampler_is_threshold = getattr(
         self.algo.algo_config, "sampler_is_threshold", 2.0
     )
+    self.sampler_rs = getattr(self.algo.algo_config, "sampler_rs", None)
+    self.sampler_rs_min = getattr(self.algo.algo_config, "sampler_rs_min", None)
+    self.sampler_rs_max = getattr(self.algo.algo_config, "sampler_rs_max", None)
     raw_seq_err_thresh = getattr(
         self.algo.algo_config, "seq_logprob_error_threshold", None
     )
@@ -989,15 +992,19 @@ class StandardRLProgram(RLProgram):
           clean_key = (
               k.removeprefix("trainer/").removeprefix("actor/")
           )
-          if clean_key.startswith(("sampler_trainer/", "sampler_is/")):
+          if clean_key.startswith((
+              "sampler_trainer/",
+              "sampler_is/",
+              "sampler_rs/",
+          )):
             self._log_metric(clean_key, val, log_step)
           else:
             self._log_metric(clean_key, val, log_step, prefix="actor")
 
     # --- 5. Sampler/Trainer Agreement Metrics ---
-    # Names are already namespaced (``sampler_trainer/*``, ``sampler_is/*``) by
-    # the shared helper; reduce each metric's per-microbatch values with the
-    # aggregation fn the helper paired with it.
+    # Names are already namespaced (``sampler_trainer/*``, ``sampler_is/*``,
+    # ``sampler_rs/*``) by the shared helper; reduce each metric's
+    # per-microbatch values with the aggregation fn the helper paired with it.
     if sampler_agreement:
       for name, (agg_fn, values) in sampler_agreement.items():
         if not values:
@@ -1018,23 +1025,24 @@ class StandardRLProgram(RLProgram):
       batch: datatypes.RLTrainerPayload,
       accumulator: dict[str, tuple[Any, list[Any]]],
   ) -> datatypes.RLTrainerPayload:
-    """Records sampler-vs-trainer agreement and feeds TIS weights into a batch.
+    """Records sampler-vs-trainer agreement and feeds IS/RS weights into a batch.
 
     Recomputes per-token log-probs under the trainer's live (actor) weights and
     compares them against the sampler's recorded ``old_per_token_logps`` to
     quantify sampler-vs-trainer drift, appending the resulting metrics to
     ``accumulator`` (keyed by the shared helper's already-namespaced names).
-    When ``sampler_is == "token"`` it also writes truncated importance-sampling
-    weights and overwrites ``old_per_token_logps`` with the trainer logps so the
-    policy loss can correct for off-policy drift, matching the agentic learner.
+    When ``sampler_is == "token"`` or ``sampler_rs is not None`` it also writes
+    importance-sampling / rejection-sampling weights and overwrites
+    ``old_per_token_logps`` with the trainer logps so the policy loss can
+    correct for off-policy drift, matching the agentic learner.
 
     Args:
       batch: The microbatch to score; must carry ``old_per_token_logps``.
       accumulator: Per-step map of metric name -> (agg_fn, values) to extend.
 
     Returns:
-      The batch, updated with TIS weights / trainer logps when
-      ``sampler_is == "token"``; otherwise returned unchanged.
+      The batch, marked with ``sampler_agreement_applied=True`` and updated with
+      IS/RS weights and trainer logps when configured.
     """
     assert self.engine is not None
     gen_temp = getattr(self.generation_args, "temperature", None)
@@ -1059,6 +1067,9 @@ class StandardRLProgram(RLProgram):
             batch.completion_mask,
             sampler_is=self.sampler_is,
             sampler_is_threshold=self.sampler_is_threshold,
+            sampler_rs=self.sampler_rs,
+            sampler_rs_min=self.sampler_rs_min,
+            sampler_rs_max=self.sampler_rs_max,
             seq_logprob_error_threshold=self.seq_logprob_error_threshold,
             segment_ids=batch.segment_ids,
         )
@@ -1066,19 +1077,18 @@ class StandardRLProgram(RLProgram):
     for name, (value, agg_fn) in sa_metrics.items():
       accumulator.setdefault(name, (agg_fn, []))[1].append(value)
 
-    updates: dict[str, Any] = {}
+    updates: dict[str, Any] = {"sampler_agreement_applied": True}
     if self.seq_logprob_error_threshold is not None:
       updates["completion_mask"] = filtered_completion_mask
     if sampler_is_weights is not None:
       updates["sampler_is_weights"] = sampler_is_weights
     if (
         self.sampler_is == "token"
+        or self.sampler_rs is not None
         or self.seq_logprob_error_threshold is not None
     ):
       updates["old_per_token_logps"] = trainer_logps
-    if updates:
-      updates["sampler_agreement_applied"] = True
-      batch = dataclasses.replace(batch, **updates)
+    batch = dataclasses.replace(batch, **updates)
     return batch
 
   def _log_consumed_trajectories(

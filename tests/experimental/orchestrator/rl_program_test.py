@@ -3328,8 +3328,9 @@ class RLProgramTest(absltest.TestCase):
           float(diff_mean_fn(diff_mean_vals)), 0.4 / 3, places=5
       )
       self.assertIn("sampler_trainer/probs_pearson_corr", acc)
-      # sampler_is is None -> no batch mutation, no TIS weights.
-      self.assertIs(out, batch)
+      # sampler_is is None -> marks agreement applied without mutating logps/weights.
+      self.assertTrue(out.sampler_agreement_applied)
+      self.assertIs(out.old_per_token_logps, batch.old_per_token_logps)
       self.assertIsNone(out.sampler_is_weights)
 
     asyncio.run(_run())
@@ -3361,13 +3362,64 @@ class RLProgramTest(absltest.TestCase):
       acc: dict[str, Any] = {}
       out = await program._apply_sampler_trainer_agreement(batch, acc)
 
+      self.assertTrue(out.sampler_agreement_applied)
       self.assertIsNotNone(out.sampler_is_weights)
       # old_per_token_logps is overwritten with the trainer logps.
       np.testing.assert_allclose(
           np.asarray(out.old_per_token_logps), trainer_logps
       )
       self.assertIn("sampler_is/weight_mean", acc)
+      self.assertIn("sampler_is/weight_max", acc)
       self.assertIn("sampler_is/frac_clipped_at_threshold", acc)
+
+    asyncio.run(_run())
+
+  def test_apply_sampler_trainer_agreement_sampler_rs_feeds_weights(self):
+    """With sampler_rs='geometric' the helper feeds RS weights and trainer logps."""
+
+    async def _run():
+      self.mock_algo.algo_config.sampler_is = None
+      self.mock_algo.algo_config.sampler_rs = "geometric"
+      self.mock_algo.algo_config.sampler_rs_min = 0.8
+      self.mock_algo.algo_config.sampler_rs_max = 1.25
+      program = self._create_program()
+      self.assertEqual(program.sampler_rs, "geometric")
+      self.assertEqual(program.sampler_rs_min, 0.8)
+      self.assertEqual(program.sampler_rs_max, 1.25)
+      trainer_logps = np.array(
+          [[-0.5, -0.5, -0.5], [-2.0, -2.0, -2.0]], dtype=np.float32
+      )
+      program.engine = mock.MagicMock()
+      program.engine.per_token_logps = mock.AsyncMock(
+          return_value=datatypes.LogprobsResponse(
+              per_token_logps=trainer_logps, model_version=1
+          )
+      )
+      batch = datatypes.RLTrainerPayload(
+          prompt_ids=np.array([[1, 2], [1, 2]], dtype=np.int32),
+          prompt_mask=np.array([[1, 1], [1, 1]], dtype=np.float32),
+          completion_ids=np.array([[3, 4, 5], [3, 4, 5]], dtype=np.int32),
+          completion_mask=np.array([[1, 1, 1], [1, 1, 1]], dtype=np.float32),
+          advantages=np.array(
+              [[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]], dtype=np.float32
+          ),
+          old_per_token_logps=np.array(
+              [[-0.5, -0.5, -0.5], [-0.5, -0.5, -0.5]], dtype=np.float32
+          ),
+      )
+      acc: dict[str, Any] = {}
+      out = await program._apply_sampler_trainer_agreement(batch, acc)
+
+      self.assertTrue(out.sampler_agreement_applied)
+      self.assertIsNotNone(out.sampler_is_weights)
+      np.testing.assert_allclose(
+          np.asarray(out.sampler_is_weights),
+          np.array([[1.0, 1.0, 1.0], [0.0, 0.0, 0.0]], dtype=np.float32),
+      )
+      np.testing.assert_allclose(
+          np.asarray(out.old_per_token_logps), trainer_logps
+      )
+      self.assertIn("sampler_rs/rejected_fraction", acc)
 
     asyncio.run(_run())
 

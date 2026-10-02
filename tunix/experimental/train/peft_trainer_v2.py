@@ -904,7 +904,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
           perplexity,
       )
     for k, v in (additional_metrics or {}).items():
-      if k.startswith(("sampler_trainer/", "sampler_is/")):
+      if k.startswith(("sampler_trainer/", "sampler_is/", "sampler_rs/")):
         prefix, metric_name = k.split("/", maxsplit=1)
         self.metrics_logger.log(prefix, metric_name, v, self._mode, step)  # pyrefly: ignore[missing-attribute]
       else:

@@ -476,6 +476,14 @@ class AlgoCoreTest(absltest.TestCase):
           kl_loss_mode='low_var_kl',
           kl_clamp_value=None,
           force_compute_kl=False,
+          sampler_is=None,
+          sampler_is_threshold=2.0,
+          sampler_rs=None,
+          sampler_rs_min=None,
+          sampler_rs_max=None,
+          seq_logprob_error_threshold=None,
+          use_rollout_logps=True,
+          force_on_policy_ratio=False,
       )
       lp = float(
           algo_core.grpo_loss_fn(
@@ -492,7 +500,7 @@ class AlgoCoreTest(absltest.TestCase):
         np.testing.assert_allclose(lp, -2.25, rtol=1e-4, atol=1e-4)
 
   def test_fused_sampler_trainer_agreement_matches_two_pass_reference(self):
-    """Fused in-loss agreement/TIS/masking produces identical loss, grads, and metrics to 2-pass."""
+    """Fused in-loss agreement/IS/RS/masking produces identical loss, grads, and metrics to 2-pass."""
     from types import SimpleNamespace  # pylint: disable=g-import-not-at-top
     from flax import nnx  # pylint: disable=g-import-not-at-top
     from tunix.rl import common  # pylint: disable=g-import-not-at-top
@@ -536,13 +544,24 @@ class AlgoCoreTest(absltest.TestCase):
         return_entropy=False,
     )
 
-    for sampler_is, seq_err_thresh in [
-        (None, None),
-        ('token', None),
-        (None, 2.0),
-        ('token', 2.0),
+    for sampler_is, is_thresh, sampler_rs, seq_err_thresh in [
+        (None, 2.0, None, None),
+        ('token', 2.0, None, None),
+        ('token', None, 'geometric', None),
+        ('token', 2.0, 'geometric', None),
+        (None, 2.0, 'geometric', None),
+        ('token', None, 'token', None),
+        (None, 2.0, None, 2.0),
+        ('token', 2.0, None, 2.0),
     ]:
-      with self.subTest(sampler_is=sampler_is, seq_err_thresh=seq_err_thresh):
+      rs_min = 0.5 if sampler_rs is not None else None
+      rs_max = 2.0 if sampler_rs is not None else None
+      with self.subTest(
+          sampler_is=sampler_is,
+          is_thresh=is_thresh,
+          sampler_rs=sampler_rs,
+          seq_err_thresh=seq_err_thresh,
+      ):
         cfg = SimpleNamespace(
             beta=0.0,
             epsilon=0.2,
@@ -555,8 +574,12 @@ class AlgoCoreTest(absltest.TestCase):
             kl_clamp_value=None,
             force_compute_kl=False,
             use_rollout_logps=True,
+            force_on_policy_ratio=False,
             sampler_is=sampler_is,
-            sampler_is_threshold=2.0,
+            sampler_is_threshold=is_thresh,
+            sampler_rs=sampler_rs,
+            sampler_rs_min=rs_min,
+            sampler_rs_max=rs_max,
             seq_logprob_error_threshold=seq_err_thresh,
         )
         # 1. Fused single-pass example (raw rollout_logps)
@@ -576,13 +599,20 @@ class AlgoCoreTest(absltest.TestCase):
                 trainer_logps,
                 completion_mask,
                 sampler_is=sampler_is,
-                sampler_is_threshold=2.0,
+                sampler_is_threshold=is_thresh,
+                sampler_rs=sampler_rs,
+                sampler_rs_min=rs_min,
+                sampler_rs_max=rs_max,
                 seq_logprob_error_threshold=seq_err_thresh,
             )
         )
         ref_old_logps = (
             trainer_logps
-            if (sampler_is == 'token' or seq_err_thresh is not None)
+            if (
+                sampler_is is not None
+                or sampler_rs is not None
+                or seq_err_thresh is not None
+            )
             else rollout_logps
         )
         ex_ref = common.TrainExample(
@@ -633,5 +663,318 @@ class AlgoCoreTest(absltest.TestCase):
           )
 
 
+class GrpoLossSequenceLevelControlsTest(absltest.TestCase):
+  """Tests for seq logp error gate and orthogonal sampler_is + sampler_rs."""
+
+  def setUp(self):
+    super().setUp()
+    from flax import nnx  # pylint: disable=g-import-not-at-top
+
+    class _ZeroLogitModel(nnx.Module):
+      """Model whose logits are identically 0 -> logp = -log(vocab) everywhere."""
+
+      def __init__(self, vocab: int, rngs: nnx.Rngs):
+        self.vocab = vocab
+        self.bias = nnx.Param(jnp.zeros((vocab,), dtype=jnp.float32))
+
+      def __call__(
+          self,
+          x,
+          segment_ids=None,
+          positions=None,
+          cache=None,
+          attention_mask=None,
+      ):
+        del segment_ids, positions, attention_mask
+        logits = jnp.broadcast_to(self.bias[...], x.shape + (self.vocab,))
+        return logits, cache
+
+    self.vocab = 8
+    self.trainer_logp = float(-np.log(self.vocab))  # -log(8) ~= -2.0794415
+    self.model = _ZeroLogitModel(self.vocab, nnx.Rngs(0))
+
+  def _config(self, **overrides):
+    from types import SimpleNamespace  # pylint: disable=g-import-not-at-top
+
+    defaults = dict(
+        beta=0.0,
+        epsilon=0.2,
+        epsilon_high=0.2,
+        epsilon_c=None,
+        loss_algo='grpo',
+        loss_agg_mode='sequence-mean-token-mean',
+        temperature=1.0,
+        kl_loss_mode='low_var_kl',
+        kl_clamp_value=None,
+        force_compute_kl=False,
+        sampler_is=None,
+        sampler_is_threshold=2.0,
+        sampler_rs=None,
+        sampler_rs_min=None,
+        sampler_rs_max=None,
+        seq_logprob_error_threshold=None,
+        use_rollout_logps=True,
+        force_on_policy_ratio=False,
+    )
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
+
+  def _example(self, **overrides):
+    from tunix.rl import common  # pylint: disable=g-import-not-at-top
+
+    defaults = dict(
+        prompt_ids=jnp.array([[1, 2], [1, 2]], jnp.int32),
+        prompt_mask=jnp.array([[1, 1], [1, 1]], jnp.int32),
+        completion_ids=jnp.array([[3, 4, 5], [6, 7, 3]], jnp.int32),
+        completion_mask=jnp.array([[1.0, 1.0, 1.0], [1.0, 1.0, 0.0]], jnp.float32),
+        advantages=jnp.array([2.0, 4.0], jnp.float32),
+        ref_per_token_logps=None,
+        old_per_token_logps=None,
+    )
+    defaults.update(overrides)
+    return common.TrainExample(**defaults)
+
+  def test_seq_logprob_error_threshold_masks_drifted_sequence_in_loss(self):
+    lp = self.trainer_logp
+    rollout = jnp.array(
+        [
+            [lp, lp, lp],
+            [lp - 2.0, lp - 2.0, lp],
+        ],
+        dtype=jnp.float32,
+    )
+    ex = self._example(old_per_token_logps=rollout)
+    out = algo_core.grpo_loss_fn(
+        self.model,
+        ex,
+        self._config(seq_logprob_error_threshold=2.0),
+        pad_id=0,
+        eos_id=-1,
+    )
+    np.testing.assert_allclose(
+        float(out.primary_loss.compute()), -2.0, rtol=1e-5
+    )
+    np.testing.assert_allclose(
+        float(
+            out.aux_metrics['sampler_trainer/seq_error_masked_frac'].compute()
+        ),
+        0.5,
+        rtol=1e-5,
+    )
+    self.assertEqual(
+        float(out.aux_metrics['sampler_trainer/seq_error_masked_count']), 1.0
+    )
+
+  def test_uncapped_token_is_with_geometric_rs(self):
+    lp = self.trainer_logp
+    delta0 = float(np.log(1.5))
+    delta1 = float(np.log(3.0))
+    rollout = jnp.array(
+        [
+            [lp - delta0, lp - delta0, lp - delta0],
+            [lp - delta1, lp - delta1, lp],
+        ],
+        dtype=jnp.float32,
+    )
+    ex = self._example(old_per_token_logps=rollout)
+    cfg = self._config(
+        sampler_is='token',
+        sampler_is_threshold=None,
+        sampler_rs='geometric',
+        sampler_rs_min=0.5,
+        sampler_rs_max=2.0,
+    )
+    out = algo_core.grpo_loss_fn(self.model, ex, cfg, pad_id=0, eos_id=-1)
+    # Seq 0 has geo_ratio=1.5 (in [0.5, 2.0]), adv=2.0 -> per-token loss = -2.0 * 1.5 = -3.0.
+    # Seq 1 has geo_ratio=3.0 (> 2.0) -> rejected (weights=0.0, completion_mask unchanged).
+    # sequence-mean-token-mean over 2 active sequences: (-3.0 + 0.0) / 2 = -1.5.
+    np.testing.assert_allclose(
+        float(out.primary_loss.compute()), -1.5, rtol=1e-5
+    )
+    np.testing.assert_allclose(
+        float(out.aux_metrics['sampler_rs/rejected_fraction'].compute()),
+        0.5,
+        rtol=1e-5,
+    )
+
+  def test_capped_token_is_with_geometric_rs(self):
+    lp = self.trainer_logp
+    delta0 = float(np.log(1.5))
+    delta1 = float(np.log(3.0))
+    rollout = jnp.array(
+        [
+            [lp - delta0, lp - delta0, lp - delta0],
+            [lp - delta1, lp - delta1, lp],
+        ],
+        dtype=jnp.float32,
+    )
+    ex = self._example(old_per_token_logps=rollout)
+    cfg = self._config(
+        sampler_is='token',
+        sampler_is_threshold=1.2,
+        sampler_rs='geometric',
+        sampler_rs_min=0.5,
+        sampler_rs_max=2.0,
+    )
+    out = algo_core.grpo_loss_fn(self.model, ex, cfg, pad_id=0, eos_id=-1)
+    # Seq 0 has geo_ratio=1.5 (in [0.5, 2.0]), token weight capped at 1.2 -> -2.0 * 1.2 = -2.4.
+    # Seq 1 is rejected (weights=0.0). Mean over 2 sequences = -1.2.
+    np.testing.assert_allclose(
+        float(out.primary_loss.compute()), -1.2, rtol=1e-5
+    )
+
+  def test_pure_geometric_rs_without_is(self):
+    lp = self.trainer_logp
+    delta0 = float(np.log(1.5))
+    delta1 = float(np.log(3.0))
+    rollout = jnp.array(
+        [
+            [lp - delta0, lp - delta0, lp - delta0],
+            [lp - delta1, lp - delta1, lp],
+        ],
+        dtype=jnp.float32,
+    )
+    ex = self._example(old_per_token_logps=rollout)
+    cfg = self._config(
+        sampler_is=None,
+        sampler_rs='geometric',
+        sampler_rs_min=0.5,
+        sampler_rs_max=2.0,
+    )
+    out = algo_core.grpo_loss_fn(self.model, ex, cfg, pad_id=0, eos_id=-1)
+    # Seq 0 has geo_ratio=1.5 (in [0.5, 2.0]), weight=1.0 -> -2.0 * 1.0 = -2.0.
+    # Seq 1 is rejected (weights=0.0). Mean over 2 sequences = -1.0.
+    np.testing.assert_allclose(
+        float(out.primary_loss.compute()), -1.0, rtol=1e-5
+    )
+    np.testing.assert_allclose(
+        float(out.aux_metrics['sampler_rs/rejected_fraction'].compute()),
+        0.5,
+        rtol=1e-5,
+    )
+
+  def test_token_rs_with_token_is(self):
+    lp = self.trainer_logp
+    d_in = float(np.log(1.5))
+    d_out = float(np.log(3.0))
+    rollout = jnp.array(
+        [
+            [lp - d_in, lp - d_out, lp - d_in],
+            [lp - d_in, lp - d_in, 0.0],
+        ],
+        dtype=jnp.float32,
+    )
+    ex = self._example(old_per_token_logps=rollout)
+    cfg = self._config(
+        sampler_is='token',
+        sampler_is_threshold=None,
+        sampler_rs='token',
+        sampler_rs_min=0.5,
+        sampler_rs_max=2.0,
+    )
+    out = algo_core.grpo_loss_fn(self.model, ex, cfg, pad_id=0, eos_id=-1)
+    # Seq 0 has 3 valid tokens: weights [1.5, 0.0, 1.5], adv=2.0 -> token mean = (-3.0 + 0 + -3.0) / 3 = -2.0.
+    # Seq 1 has 2 valid tokens: weights [1.5, 1.5], adv=4.0 -> token mean = -6.0.
+    # Sequence mean = (-2.0 + -6.0) / 2 = -4.0.
+    np.testing.assert_allclose(
+        float(out.primary_loss.compute()), -4.0, rtol=1e-5
+    )
+    # 1 out of 5 valid tokens was rejected -> 0.2
+    np.testing.assert_allclose(
+        float(out.aux_metrics['sampler_rs/rejected_fraction'].compute()),
+        0.2,
+        rtol=1e-5,
+    )
+
+  def test_sequence_is_metrics(self):
+    lp = self.trainer_logp
+    rollout = jnp.array(
+        [
+            [lp + 0.1, lp + 0.1, lp + 0.1],
+            [lp + 0.3, lp + 0.3, 0.0],
+        ],
+        dtype=jnp.float32,
+    )
+    ex = self._example(old_per_token_logps=rollout)
+    cfg = self._config()
+    out = algo_core.grpo_loss_fn(self.model, ex, cfg, pad_id=0, eos_id=-1)
+    aux = out.aux_metrics
+    np.testing.assert_allclose(
+        float(aux['sampler_is/seq_kl_mean'].compute()), 0.2, rtol=1e-5
+    )
+    expected_geo_mean = 0.5 * (np.exp(-0.1) + np.exp(-0.3))
+    np.testing.assert_allclose(
+        float(aux['sampler_is/seq_geo_ratio_mean'].compute()),
+        expected_geo_mean,
+        rtol=1e-5,
+    )
+    np.testing.assert_allclose(
+        float(aux['sampler_is/seq_geo_ratio_max']),
+        float(np.exp(-0.1)),
+        rtol=1e-5,
+    )
+
+  def test_non_finite_rollout_logps_zeroed_in_is_weights_and_dropped_by_error_gate(
+      self,
+  ):
+    lp = self.trainer_logp
+    delta0 = float(np.log(1.5))
+    # Seq 0 has 2 finite tokens (ratio 1.5) and 1 -inf token on a scored slot.
+    # Seq 1 has 2 finite tokens (ratio 1.0) and -inf only on a padded slot.
+    rollout = jnp.array(
+        [
+            [lp - delta0, lp - delta0, -jnp.inf],
+            [lp, lp, -jnp.inf],
+        ],
+        dtype=jnp.float32,
+    )
+    ex = self._example(old_per_token_logps=rollout)
+    # 1. Under seq-mask-tis equivalent (sampler_is='token', sampler_rs='geometric'):
+    # Seq 0 log_ratio is [log(1.5), log(1.5), 0.0] -> geo_ratio = exp(2/3 * log(1.5)) ~= 1.31037 (in [0.5, 2.0]).
+    # Its token weights are [1.5, 1.5, 0.0] (non-finite token gets 0.0, NOT 1.0!).
+    # With adv=2.0 and 3 scored tokens in completion_mask, Seq 0 mean token loss is (-3.0 + -3.0 + 0.0) / 3 = -2.0.
+    # Seq 1 has token weights [1.0, 1.0], adv=4.0 -> mean token loss = -4.0.
+    # Overall loss across 2 sequences = (-2.0 + -4.0) / 2 = -3.0.
+    cfg_is_rs = self._config(
+        sampler_is='token',
+        sampler_is_threshold=None,
+        sampler_rs='geometric',
+        sampler_rs_min=0.5,
+        sampler_rs_max=2.0,
+    )
+    out_is_rs = algo_core.grpo_loss_fn(
+        self.model, ex, cfg_is_rs, pad_id=0, eos_id=-1
+    )
+    np.testing.assert_allclose(
+        float(out_is_rs.primary_loss.compute()), -3.0, rtol=1e-5
+    )
+
+    # 2. Under seq_logprob_error_threshold:
+    # Seq 0 has a non-finite scored token and must be dropped (masked_count=1),
+    # leaving only Seq 1 (adv=4.0 -> loss=-4.0), while mult_prob_error_mean stays finite.
+    cfg_err = self._config(seq_logprob_error_threshold=2.0)
+    out_err = algo_core.grpo_loss_fn(
+        self.model, ex, cfg_err, pad_id=0, eos_id=-1
+    )
+    np.testing.assert_allclose(
+        float(out_err.primary_loss.compute()), -4.0, rtol=1e-5
+    )
+    self.assertEqual(
+        float(out_err.aux_metrics['sampler_trainer/seq_error_masked_count']),
+        1.0,
+    )
+    self.assertTrue(
+        np.isfinite(
+            float(
+                out_err.aux_metrics[
+                    'sampler_trainer/mult_prob_error_mean'
+                ].compute()
+            )
+        )
+    )
+
+
 if __name__ == '__main__':
   absltest.main()
+
+
