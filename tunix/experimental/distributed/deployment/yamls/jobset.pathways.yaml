@@ -47,7 +47,7 @@ ${FAIL_FAST_LINE_DISABLE}    maxRestarts: 3
             dnsPolicy: ClusterFirstWithHostNet
             hostNetwork: true
             restartPolicy: Never
-            terminationGracePeriodSeconds: 10
+            terminationGracePeriodSeconds: ${TERMINATION_GRACE_SECONDS}
             nodeSelector:
 ${HEAD_NODE_SELECTOR}
 ${HEAD_AFFINITY}${HEAD_TOLERATIONS}
@@ -112,7 +112,7 @@ ${HEAD_AFFINITY}${HEAD_TOLERATIONS}
               - --server_port=29000
               - --resource_manager_address=$$(PATHWAYS_HEAD):29001
               - --gcs_scratch_location=${GCS_SCRATCH_LOCATION}
-              - --temporary_flags_for_debugging=temporary_flag_for_debugging_test_only_hold_death_ref=false${PATHWAYS_PROXY_EXTRA_ARGS}
+              - --temporary_flags_for_debugging=temporary_flag_for_debugging_test_only_hold_death_ref=false${PATHWAYS_PROXY_EXTRA_ARGS}${COLOCATED_PYTHON_PROXY_ARGS}
               env:
               - name: RAIDEN_BROADCAST_K
                 value: "64"
@@ -212,7 +212,7 @@ ${FAIL_FAST_WRAPPER_POST}                  echo "Program End: $$(date)"
             dnsPolicy: ClusterFirstWithHostNet
             hostNetwork: true
             restartPolicy: OnFailure
-            terminationGracePeriodSeconds: 10
+            terminationGracePeriodSeconds: ${TERMINATION_GRACE_SECONDS}
             nodeSelector:
               cloud.google.com/gke-tpu-accelerator: ${TPU_TYPE}${TPU_TOPOLOGY_SELECTOR}${RESERVATION_SELECTOR}
 ${PW_NODE_AFFINITY}
@@ -234,7 +234,7 @@ ${PW_NODE_AFFINITY}
               args:
               - --server_port=29005
               - --resource_manager_address=$$(PATHWAYS_HEAD):29001
-              - --gcs_scratch_location=${GCS_SCRATCH_LOCATION}
+              - --gcs_scratch_location=${GCS_SCRATCH_LOCATION}${COLOCATED_PYTHON_WORKER_ARGS}
               env:
               - name: RAIDEN_BROADCAST_K
                 value: "64"
@@ -289,27 +289,12 @@ ${PW_NODE_AFFINITY}
                   memory: ${PATHWAYS_WORKER_MEMORY}
               volumeMounts:
               - mountPath: /tmp
-                name: shared-tmp
-            # initContainers:
-            # - name: colocated-python-sidecar
-            #   image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways-colocated-python/sidecar:2026_03_16-python_3.12-jax_0.9.1
-            #   imagePullPolicy: Always
-            #   env:
-            #   - name: GRPC_SERVER_ADDRESS
-            #     value: "'0.0.0.0:50051'"
-            #   ports:
-            #   - containerPort: 50051
-            #     protocol: TCP
-            #   resources: {}
-            #   restartPolicy: Always
-            #   volumeMounts:
-            #   - mountPath: /tmp
-            #     name: shared-tmp
+                name: shared-tmp${COLOCATED_PYTHON_SIDECAR_BLOCK}
             volumes:
             - name: shared-tmp
               hostPath:
                 path: /tmp
-                type: DirectoryOrCreate
+                type: DirectoryOrCreate${COLOCATED_PYTHON_SIDECAR_VOLUME}
   startupPolicy:
     startupPolicyOrder: AnyOrder
   successPolicy:

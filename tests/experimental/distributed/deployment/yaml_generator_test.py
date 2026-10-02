@@ -316,6 +316,8 @@ class YamlGeneratorTest(parameterized.TestCase):
           rendered = mock_stdout.getvalue()
     self.assertNotIn("initContainers", rendered)
     self.assertNotIn("colocated-python-sidecar", rendered)
+    self.assertNotIn("--sidecar_name=external", rendered)
+    self.assertNotIn("sidecar-shared-memory", rendered)
     # The worker volumeMount the sidecar block is appended to must survive intact.
     self.assertIn("name: shared-tmp", rendered)
 
@@ -344,32 +346,192 @@ class YamlGeneratorTest(parameterized.TestCase):
     self.assertIn("initContainers:", rendered)
     self.assertIn("name: colocated-python-sidecar", rendered)
     self.assertIn(f"image: {image}", rendered)
-    # Native-sidecar pattern: without this the worker never starts.
     self.assertIn("restartPolicy: Always", rendered)
     self.assertIn("containerPort: 50051", rendered)
-    # The scaffold shipped `resources: {}`; on a node budgeted this tightly the
-    # sidecar must declare memory, and request == limit pins it to Guaranteed.
-    self.assertEqual(rendered.count("memory: 24Gi"), 2)
+    self.assertIn("--sidecar_name=external", rendered)
+    self.assertIn("--cloud_pathways_sidecar_shm_directory=/tmp/sidecar", rendered)
+    self.assertIn("CLOUD_PATHWAYS_SIDECAR_SHM_DIRECTORY", rendered)
+    self.assertIn("medium: Memory", rendered)
+    self.assertEqual(rendered.count("memory: 24Gi"), 1)
     self.assertNotIn("resources: {}", rendered)
-    # Must be valid YAML with the sidecar attached to the worker pod spec.
+    self.assertEqual(
+        self._get_sidecar_mounts(rendered),
+        {"sidecar-shared-memory": "/tmp/sidecar"},
+    )
+
+  def _get_sidecar_mounts(self, rendered: str) -> dict[str, str]:
     import yaml  # pylint: disable=g-import-not-at-top
 
     docs = [d for d in yaml.safe_load_all(rendered) if d]
     self.assertLen(docs, 1)
-    jobs = docs[0]["spec"]["replicatedJobs"]
     specs = [
         j["template"]["spec"]["template"]["spec"]
-        for j in jobs
+        for j in docs[0]["spec"]["replicatedJobs"]
     ]
     with_sidecar = [
-        s for s in specs
-        if any(c["name"] == "colocated-python-sidecar" for c in s.get("initContainers", []))
+        s
+        for s in specs
+        if any(
+            c["name"] == "colocated-python-sidecar"
+            for c in s.get("initContainers", [])
+        )
     ]
     self.assertLen(with_sidecar, 1)
     self.assertTrue(
         any(c["name"] == "pathways-worker" for c in with_sidecar[0]["containers"]),
         "sidecar must be attached to the pathways-worker pod, not another job",
     )
+    sidecar_c = next(
+        c
+        for c in with_sidecar[0]["initContainers"]
+        if c["name"] == "colocated-python-sidecar"
+    )
+    return {m["name"]: m["mountPath"] for m in sidecar_c["volumeMounts"]}
+
+  def test_397b_sidecar_shm_disabled_renders_step2_form(self):
+    template_file = _get_template_path("jobset.pathways.qwen3.5-397b.yaml")
+    image = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways-colocated-python/sidecar:tag"
+    argv = [
+        "yaml_generator.py",
+        template_file,
+        "--jobset_name=test-397b-shm0",
+        "--tpu_slice=tpuv5p:8x16x16",
+    ]
+    with mock.patch.dict(
+        os.environ,
+        {
+            "COLOCATED_PYTHON_SIDECAR_IMAGE": image,
+            "COLOCATED_PYTHON_SIDECAR_SHM": "0",
+        },
+        clear=False,
+    ):
+      with mock.patch.object(sys, "argv", argv):
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+          yaml_generator.main()
+          rendered = mock_stdout.getvalue()
+
+    self.assertIn("name: colocated-python-sidecar", rendered)
+    self.assertIn("--sidecar_name=external", rendered)
+    self.assertNotIn("sidecar-shared-memory", rendered)
+    self.assertNotIn("/tmp/sidecar", rendered)
+    self.assertNotIn("--cloud_pathways_sidecar_shm_directory", rendered)
+    self.assertNotIn("CLOUD_PATHWAYS_SIDECAR_SHM_DIRECTORY", rendered)
+    self.assertEqual(
+        self._get_sidecar_mounts(rendered), {"shared-tmp": "/tmp"}
+    )
+
+  def test_sidecar_guard_raises_when_template_lacks_placeholders(self):
+    template_file = _get_template_path("jobset.pathways.yaml")
+    with open(template_file, "r") as f:
+      mutated = f.read().replace("${COLOCATED_PYTHON_SIDECAR_BLOCK}", "")
+    argv = [
+        "yaml_generator.py",
+        template_file,
+        "--jobset_name=test-guard",
+        "--tpu_slice=tpuv5p:8x16x16",
+    ]
+    with (
+        mock.patch.dict(
+            os.environ,
+            {"COLOCATED_PYTHON_SIDECAR_IMAGE": "sidecar:latest"},
+            clear=False,
+        ),
+        mock.patch.object(sys, "argv", argv),
+        mock.patch("builtins.open", mock.mock_open(read_data=mutated)),
+    ):
+      with self.assertRaises(SystemExit) as cm:
+        yaml_generator.main()
+    self.assertIn(template_file, str(cm.exception))
+    self.assertIn("COLOCATED_PYTHON_SIDECAR_BLOCK", str(cm.exception))
+
+  @parameterized.named_parameters(
+      (
+          "cpu",
+          "jobset.cpu.yaml",
+          ["--jobset_name=test-cpu", "--cpu_machine=n2-standard-64"],
+      ),
+      (
+          "mcjax_ray",
+          "jobset.mcjax.ray.yaml",
+          ["--jobset_name=test-ray", "--tpu_slice=tpuv5p:2x2x2"],
+      ),
+      (
+          "tpu",
+          "jobset.tpu.yaml",
+          ["--jobset_name=test-tpu", "--tpu_slice=tpuv5p:2x2x2"],
+      ),
+  )
+  def test_non_pathways_templates_ignore_colocated_sidecar_image(
+      self, template_name, extra_args
+  ):
+    template_file = _get_template_path(template_name)
+    argv = ["yaml_generator.py", template_file] + extra_args
+    with mock.patch.dict(
+        os.environ,
+        {"COLOCATED_PYTHON_SIDECAR_IMAGE": "sidecar:latest"},
+        clear=False,
+    ):
+      with mock.patch.object(sys, "argv", argv):
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+          yaml_generator.main()
+          rendered = mock_stdout.getvalue()
+    self.assertNotIn("colocated-python-sidecar", rendered)
+    self.assertNotIn("sidecar-shared-memory", rendered)
+
+  def test_pathways_default_template_renders_sidecar(self):
+    template_file = _get_template_path("jobset.pathways.yaml")
+    image = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways-colocated-python/sidecar:tag"
+    argv = [
+        "yaml_generator.py",
+        template_file,
+        "--jobset_name=test-pw-sidecar",
+        "--tpu_slice=tpuv5p:8x16x16",
+    ]
+    with mock.patch.dict(
+        os.environ,
+        {"COLOCATED_PYTHON_SIDECAR_IMAGE": image},
+        clear=False,
+    ):
+      with mock.patch.object(sys, "argv", argv):
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+          yaml_generator.main()
+          rendered = mock_stdout.getvalue()
+
+    self.assertIn("--sidecar_name=external", rendered)
+    self.assertIn("--cloud_pathways_sidecar_shm_directory=/tmp/sidecar", rendered)
+    self.assertEqual(
+        self._get_sidecar_mounts(rendered),
+        {"sidecar-shared-memory": "/tmp/sidecar"},
+    )
+
+  def test_397b_termination_grace_period_default_and_override(self):
+    for template_name in ("jobset.pathways.yaml", "jobset.pathways.qwen3.5-397b.yaml"):
+      with self.subTest(template_name=template_name):
+        template_file = _get_template_path(template_name)
+        argv = [
+            "yaml_generator.py",
+            template_file,
+            "--jobset_name=test-grace",
+            "--tpu_slice=tpuv5p:8x16x16",
+        ]
+        with mock.patch.dict(os.environ, {}, clear=False):
+          os.environ.pop("TERMINATION_GRACE_SECONDS", None)
+          with mock.patch.object(sys, "argv", argv):
+            with mock.patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+              yaml_generator.main()
+              rendered_default = mock_stdout.getvalue()
+        self.assertEqual(
+            rendered_default.count("terminationGracePeriodSeconds: 360"), 2
+        )
+        self.assertNotIn("terminationGracePeriodSeconds: 10", rendered_default)
+
+        with mock.patch.object(sys, "argv", argv + ["--termination_grace_seconds=120"]):
+          with mock.patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+            yaml_generator.main()
+            rendered_override = mock_stdout.getvalue()
+        self.assertEqual(
+            rendered_override.count("terminationGracePeriodSeconds: 120"), 2
+        )
 
   @parameterized.named_parameters(
       ("flag_only", ["--preemptible"], {}, {"scheduling.x-k8s.io/preemptible": "true"}),

@@ -141,7 +141,6 @@ context_parallel_strategy=ring context_parallel_load_balance=false allow_split_p
 context_parallel_attention_load_balance=true \
 num_vocab_tiling=16 use_iota_embed=false mu_dtype=float32 grad_dtype=float32 \
 checkpoint_storage_concurrent_gb=96 \
-checkpoint_storage_use_ocdbt=false checkpoint_storage_use_zarr3=false \
 packing=True optimizer_memory_host_offload=true}"
 export DEBUG=${DEBUG:-0}
 

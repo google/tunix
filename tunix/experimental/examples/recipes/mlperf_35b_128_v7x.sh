@@ -76,7 +76,6 @@ sa_fuse_reciprocal=false sa_use_base2_exp=true dq_reduction_steps=3 \
 context_parallel_strategy=ring context_parallel_load_balance=false allow_split_physical_axes=false \
 num_vocab_tiling=16 use_iota_embed=false mu_dtype=float32 grad_dtype=float32 \
 checkpoint_storage_concurrent_gb=96 \
-checkpoint_storage_use_ocdbt=false checkpoint_storage_use_zarr3=false \
 packing=True}"
 
 # Sandbox
