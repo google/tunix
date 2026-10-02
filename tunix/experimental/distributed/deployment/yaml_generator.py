@@ -232,6 +232,16 @@ def main() -> None:
       help="CPU machine type (e.g. n2-standard-64)",
   )
   parser.add_argument(
+      "--cpu_nodepool",
+      default=os.environ.get("CPU_NODEPOOL", "cpu-np"),
+      help="GKE nodepool for CPU jobs (e.g. cpu-np, cpu-highmem-np).",
+  )
+  parser.add_argument(
+      "--cpu_memory",
+      default=os.environ.get("CPU_MEMORY", "240G"),
+      help="Memory request for CPU jobs (e.g. 240G, 300Gi).",
+  )
+  parser.add_argument(
       "--namespace",
       default=os.environ.get("K8S_NAMESPACE", "default"),
       help="Kubernetes namespace to deploy into.",
@@ -708,6 +718,8 @@ def main() -> None:
         USER_CONTAINER_MEMORY_LIMIT=args.user_container_memory_limit,
         PATHWAYS_WORKER_MEMORY=args.pathways_worker_memory,
         CPU_MACHINE=args.cpu_machine,
+        CPU_NODEPOOL=args.cpu_nodepool,
+        CPU_MEMORY=args.cpu_memory,
         TPU_MACHINE=tpu_machine,
         TPU_TYPE=tpu_type,
         TPU_TOPOLOGY=tpu_topology,

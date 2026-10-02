@@ -213,6 +213,8 @@ export TRAINER_ID=${TRAINER_ID:-$JOB_PREFIX-train}
 export TRAINER_PORT=${TRAINER_PORT:-20002}
 
 export CPU_MACHINE=${CPU_MACHINE:-n2-standard-64}
+export CPU_NODEPOOL=${CPU_NODEPOOL:-cpu-np}
+export CPU_MEMORY=${CPU_MEMORY:-240G}
 export GCS_SCRATCH_LOCATION=${GCS_SCRATCH_LOCATION:-gs://cloud-pathways-staging/tmp}
 export PATHWAYS_SERVER_IMAGE=${PATHWAYS_SERVER_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_server:raiden_20260908}
 export PATHWAYS_PROXY_IMAGE=${PATHWAYS_PROXY_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_proxy_server:raiden_20260908}
@@ -363,6 +365,8 @@ start_orchestrator() {
     ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
     ${GANG_ID:+--gang_id="${GANG_ID}"} \
     --cpu_machine=${CPU_MACHINE} \
+    --cpu_nodepool="${CPU_NODEPOOL}" \
+    --cpu_memory="${CPU_MEMORY}" \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ORCHESTRATOR_PORT}" \
     --worker_startup_command=" \
@@ -838,6 +842,8 @@ start_mock_trainer() {
     ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
     ${GANG_ID:+--gang_id="${GANG_ID}"} \
     --cpu_machine="${CPU_MACHINE}" \
+    --cpu_nodepool="${CPU_NODEPOOL}" \
+    --cpu_memory="${CPU_MEMORY}" \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${TRAINER_PORT}" \
     --worker_startup_command=" \
@@ -860,6 +866,8 @@ start_mock_rollout() {
     ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
     ${GANG_ID:+--gang_id="${GANG_ID}"} \
     --cpu_machine="${CPU_MACHINE}" \
+    --cpu_nodepool="${CPU_NODEPOOL}" \
+    --cpu_memory="${CPU_MEMORY}" \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ROLLOUT_PORT}" \
     --worker_startup_command=" \

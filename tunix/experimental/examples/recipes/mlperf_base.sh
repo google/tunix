@@ -85,6 +85,8 @@ export PRIORITY_CLASS="${PRIORITY_CLASS:-medium}"
 export KUEUE_PRIORITY_CLASS="${KUEUE_PRIORITY_CLASS:-${PRIORITY_CLASS}}"
 export SERVICE_ACCOUNT="${SERVICE_ACCOUNT:-xpk-sa}"
 export CPU_MACHINE="${CPU_MACHINE:-n2d-standard-64}"
+export CPU_NODEPOOL="${CPU_NODEPOOL:-cpu-highmem-np}"
+export CPU_MEMORY="${CPU_MEMORY:-300Gi}"
 
 # ==============================================================================
 # Fail-fast (see k8s_launcher.sh). `true`: a trainer/rollout worker dying
