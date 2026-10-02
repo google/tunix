@@ -440,56 +440,48 @@ def grpo_loss_fn(
   # TODO(tsbao): We should handle token level advantages.
   advantages = jnp.astype(train_example.advantages, jnp.float32)
 
-  sampler_is_weights = train_example.sampler_is_weights
+  sampler_is_weights = getattr(train_example, "sampler_is_weights", None)
   sa_metrics = {}
-  should_fuse_sampler_agreement = (
-      algo_config.use_rollout_logps
+  if (
+      getattr(algo_config, "use_rollout_logps", False)
       and train_example.old_per_token_logps is not None
       and sampler_is_weights is None
-      and not train_example.sampler_agreement_applied
-  )
-  if should_fuse_sampler_agreement:
-    rollout_per_token_logps = jnp.astype(
-        train_example.old_per_token_logps, jnp.float32
-    )
+      and not getattr(train_example, "sampler_agreement_applied", False)
+  ):
     trainer_per_token_logps = jax.lax.stop_gradient(per_token_logps)
     sa_metrics, computed_is_weights, filtered_completion_mask = (
         common.compute_sampler_trainer_agreement_jax(
-            rollout_per_token_logps,
+            train_example.old_per_token_logps,
             trainer_per_token_logps,
             completion_mask,
-            sampler_is=algo_config.sampler_is,
-            sampler_is_threshold=algo_config.sampler_is_threshold,
-            sampler_rs=algo_config.sampler_rs,
-            sampler_rs_min=algo_config.sampler_rs_min,
-            sampler_rs_max=algo_config.sampler_rs_max,
-            seq_logprob_error_threshold=algo_config.seq_logprob_error_threshold,
+            sampler_is=getattr(algo_config, "sampler_is", None),
+            sampler_is_threshold=getattr(
+                algo_config, "sampler_is_threshold", 2.0
+            ),
+            seq_logprob_error_threshold=getattr(
+                algo_config, "seq_logprob_error_threshold", None
+            ),
             segment_ids=segment_ids,
             num_segments=num_segments,
         )
     )
-    if algo_config.seq_logprob_error_threshold is not None:
+    if getattr(algo_config, "seq_logprob_error_threshold", None) is not None:
       completion_mask = filtered_completion_mask
     if computed_is_weights is not None:
       sampler_is_weights = computed_is_weights
-
-  # Use on-policy stop_gradient(per_token_logps) as the PPO ratio baseline when:
-  # 1. No rollout/old logps were provided, or force_on_policy_ratio=True, or
-  # 2. Fused in-loss IS/RS/error-masking is active (since sampler_is_weights
-  #    already corrects for trainer-vs-sampler divergence outside the PPO clip).
-  use_on_policy_old_logps = (
-      train_example.old_per_token_logps is None
-      or algo_config.force_on_policy_ratio
-      or (
-          should_fuse_sampler_agreement
-          and (
-              algo_config.sampler_is is not None
-              or algo_config.sampler_rs is not None
-              or algo_config.seq_logprob_error_threshold is not None
-          )
+    if (
+        getattr(algo_config, "sampler_is", None) == "token"
+        or getattr(algo_config, "seq_logprob_error_threshold", None) is not None
+        or getattr(algo_config, "force_on_policy_ratio", False)
+    ):
+      old_per_token_logps = trainer_per_token_logps
+    else:
+      old_per_token_logps = jnp.astype(
+          train_example.old_per_token_logps, jnp.float32
       )
-  )
-  if use_on_policy_old_logps:
+  elif train_example.old_per_token_logps is None or getattr(
+      algo_config, "force_on_policy_ratio", False
+  ):
     old_per_token_logps = jax.lax.stop_gradient(per_token_logps)
   else:
     old_per_token_logps = jnp.astype(
@@ -574,10 +566,10 @@ def grpo_loss_fn(
   pg_loss_clipped_dual = jnp.minimum(pg_loss_3, per_token_loss)
   per_token_loss = jnp.where(adv < 0.0, pg_loss_clipped_dual, per_token_loss)
 
-  # Optional truncated importance-sampling (TIS) and/or rejection-sampling (RS)
-  # correction for the residual sampler-vs-trainer log-probability mismatch.
-  # The weights are precomputed upstream or computed in-loss above (detached)
-  # and applied per token BEFORE loss aggregation so they affect the gradient
+  # Optional truncated importance-sampling (TIS) correction for the residual
+  # sampler-vs-trainer log-probability mismatch. The weights are precomputed
+  # upstream or computed in-loss above (detached and threshold-clipped) and
+  # applied per token BEFORE loss aggregation so they affect the gradient
   # through the loss magnitude only, not as a stop-gradient bias on the ratio.
   if sampler_is_weights is not None:
     per_token_loss = per_token_loss * sampler_is_weights.astype(jnp.float32)
@@ -631,7 +623,7 @@ def grpo_loss_fn(
   nonzero_adv_frac = masked_mean(
       (jnp.abs(adv_broadcast) > 1e-8).astype(jnp.float32), completion_mask
   )
-  aux: dict[str, jax.Array | sft_utils.WeightedMetric] = {
+  aux = {
       "kl": sft_utils.WeightedMetric(jnp.array(0.0), jnp.array(1.0)),
       "kl_loss": sft_utils.WeightedMetric(jnp.array(0.0), jnp.array(1.0)),
       "reduced_pg_loss": reduced_pg_loss,

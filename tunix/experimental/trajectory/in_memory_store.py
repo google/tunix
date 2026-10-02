@@ -114,7 +114,12 @@ class InMemoryTrajectoryStore(
           s.model_copy(deep=True)
           for s in self._steps_by_trajectory_id.get(traj_id, [])
       ]
-      result.append(meta.create_trajectory(steps=steps))
+      traj_data = meta.model_dump()
+      traj_data["steps"] = steps
+      if isinstance(meta, trajectory_lib.TunixTrajectoryMetadata):
+        result.append(trajectory_lib.TunixTrajectory(**traj_data))  # pyrefly: ignore[bad-argument-type]
+      else:
+        result.append(trajectory_lib.Trajectory(**traj_data))
     return result
 
   def add_step(

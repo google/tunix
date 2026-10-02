@@ -40,6 +40,7 @@ import numpy as np
 import optax
 from tunix.common import configs
 from tunix.common import datatypes
+from tunix.experimental.rollout import vanilla_rollout as vanilla_rollout_v2
 from tunix.generate import tokenizer_adapter
 from tunix.generate import utils as generate_utils
 # Internal placeholder for sglang_jax rollout worker stub, don't change this line.
@@ -293,12 +294,13 @@ class RLEngine:
         self.cluster_config.rollout_engine, str
     ) and self.cluster_config.rollout_engine not in [
         "vanilla",
+        "vanillav2",
         "vllm",
         "sglang_jax",
     ]:
       raise ValueError(
           "`cluster_config.rollout_engine` should be one of `'vanilla'`, "
-          "`'vllm'`, or `'sglang_jax'`. Received:"
+          "`'vanillav2'`, `'vllm'`, or `'sglang_jax'`. Received:"
           f" '{self.cluster_config.rollout_engine}'."
       )
 
@@ -330,6 +332,30 @@ class RLEngine:
           ),
       )
       self._maybe_offload_model_to_cpu(self._rollout.model(), Role.ROLLOUT)
+    elif self.cluster_config.rollout_engine == "vanillav2":
+      if not hasattr(self.rollout_actor, "config"):
+        raise ValueError("`self.rollout_actor` must have a config attribute.")
+      # The engine compiles its programs for the devices the model is on.
+      self._maybe_load_model_from_cpu(self.rollout_actor, Role.ROLLOUT)
+      if isinstance(self.cluster_config.rollout_config, dict):
+        train_cfg = self.cluster_config.rollout_config[Mode.TRAIN]
+        all_cfgs = self.cluster_config.rollout_config.values()
+      else:
+        train_cfg = self.cluster_config.rollout_config
+        all_cfgs = [train_cfg]
+      # The engine is built once, from the train config. Configs passed to
+      # `generate` only set per-request parameters, so sequences must fit the
+      # longest prompt plus generation of any mode.
+      self._rollout = vanilla_rollout_v2.VanillaRollout(
+          self.rollout_actor,
+          self.tokenizer,
+          rollout_config=train_cfg,
+          mesh=self.r2m[Role.ROLLOUT],
+          max_model_len=max(
+              cfg.max_prompt_length + cfg.max_tokens_to_generate
+              for cfg in all_cfgs
+          ),
+      )
     elif self.cluster_config.rollout_engine == "vllm":
       # OSS Placeholder for vllm rollout worker, don't change this line.
 

@@ -5,7 +5,6 @@ import os
 from absl.testing import absltest
 from absl.testing import parameterized
 import numpy as np
-import pydantic
 from tunix.experimental.trajectory import converter
 from tunix.experimental.trajectory import trajectory
 from tunix.experimental.trajectory import trajectory_testing
@@ -368,259 +367,6 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
     self.assertEqual(meta.trajectory_id, "traj-456")
     self.assertFalse(hasattr(meta, "steps"))
     self.assertFalse(hasattr(meta, "subagent_trajectories"))
-
-  def test_create_trajectory_with_steps_and_subagent_trajectories(self):
-    meta = trajectory.TrajectoryMetadata(
-        trajectory_id="traj_parent",
-        session_id="session_1",
-        agent=trajectory.Agent(name="agent_test", version="1.0"),
-        notes="parent notes",
-        extra={"custom": "field"},
-    )
-    steps = [
-        trajectory.Step(
-            step_id=1, source=trajectory.Source.USER, message="Start"
-        ),
-        trajectory.Step(
-            step_id=2, source=trajectory.Source.AGENT, message="Respond"
-        ),
-    ]
-    subagents = [
-        trajectory.Trajectory(
-            trajectory_id="sub_1",
-            agent=trajectory.Agent(name="sub_agent", version="1.0"),
-            steps=[
-                trajectory.Step(
-                    step_id=1, source=trajectory.Source.AGENT, message="Sub"
-                )
-            ],
-        )
-    ]
-
-    traj = meta.create_trajectory(steps=steps, subagent_trajectories=subagents)
-
-    self.assertIsInstance(traj, trajectory.Trajectory)
-    self.assertEqual(traj.trajectory_id, "traj_parent")
-    self.assertEqual(traj.session_id, "session_1")
-    self.assertEqual(traj.notes, "parent notes")
-    self.assertEqual(traj.extra, {"custom": "field"})
-    self.assertLen(traj.steps, 2)
-    self.assertLen(traj.subagent_trajectories, 1)
-    self.assertEqual(traj.subagent_trajectories[0].trajectory_id, "sub_1")
-    self.assertTrajectoryEqual(traj.subagent_trajectories[0], subagents[0])
-    # The input sequences are copied, not aliased.
-    self.assertIsNot(traj.steps, steps)
-    self.assertIsNot(traj.subagent_trajectories, subagents)
-
-  def test_create_trajectory_without_steps_or_subagent_trajectories(self):
-    meta = trajectory.TrajectoryMetadata(
-        trajectory_id="traj_empty",
-        agent=trajectory.Agent(name="agent_test", version="1.0"),
-    )
-
-    traj = meta.create_trajectory()
-
-    self.assertIsInstance(traj, trajectory.Trajectory)
-    self.assertEqual(traj.trajectory_id, "traj_empty")
-    self.assertEmpty(traj.steps)
-    self.assertIsNone(traj.subagent_trajectories)
-
-  def test_tunix_create_trajectory_with_subagent_trajectories(self):
-    meta = trajectory.TunixTrajectoryMetadata(
-        trajectory_id="tunix_parent",
-        agent=trajectory.Agent(name="agent_test", version="1.0"),
-        prompt_id="prompt_abc",
-        group_index=3,
-        status="COMPLETED",
-        total_reward=1.5,
-        hyperparams={"temperature": 0.7},
-    )
-    steps = [
-        trajectory.TunixAgentStep(
-            step_id=0, source=trajectory.Source.AGENT, message="Act"
-        )
-    ]
-    subagents = [
-        trajectory.TunixTrajectory(
-            trajectory_id="tunix_sub_1",
-            agent=trajectory.Agent(name="sub_agent", version="1.0"),
-        )
-    ]
-
-    traj = meta.create_trajectory(steps=steps, subagent_trajectories=subagents)
-
-    self.assertIsInstance(traj, trajectory.TunixTrajectory)
-    self.assertEqual(traj.trajectory_id, "tunix_parent")
-    self.assertEqual(traj.prompt_id, "prompt_abc")
-    self.assertEqual(traj.group_index, 3)
-    self.assertEqual(traj.status, "COMPLETED")
-    self.assertEqual(traj.total_reward, 1.5)
-    self.assertEqual(traj.hyperparams, {"temperature": 0.7})
-    self.assertLen(traj.steps, 1)
-    self.assertLen(traj.subagent_trajectories, 1)
-    self.assertEqual(traj.subagent_trajectories[0].trajectory_id, "tunix_sub_1")
-    self.assertIsNot(traj.subagent_trajectories, subagents)
-
-  def test_tunix_create_trajectory_rehydrates_atif_subagent_trajectories(self):
-    meta = trajectory.TunixTrajectoryMetadata(
-        trajectory_id="tunix_parent",
-        agent=trajectory.Agent(name="agent_test", version="1.0"),
-    )
-    atif_subagent = trajectory.Trajectory(
-        trajectory_id="atif_sub",
-        agent=trajectory.Agent(name="sub_agent", version="1.0"),
-        steps=[
-            trajectory.Step(
-                step_id=1, source=trajectory.Source.USER, message="Sub prompt"
-            ),
-            trajectory.Step(
-                step_id=2, source=trajectory.Source.AGENT, message="Sub reply"
-            ),
-        ],
-    )
-
-    traj = meta.create_trajectory(subagent_trajectories=[atif_subagent])
-
-    self.assertLen(traj.subagent_trajectories, 1)
-    subagent = traj.subagent_trajectories[0]
-    self.assertIsInstance(subagent, trajectory.TunixTrajectory)
-    self.assertEqual(subagent.trajectory_id, "atif_sub")
-    self.assertLen(subagent.steps, 2)
-    self.assertIsInstance(subagent.steps[0], trajectory.TunixEnvStep)
-    self.assertEqual(subagent.steps[0].step_id, 0)
-    self.assertEqual(subagent.steps[0].message, "Sub prompt")
-    self.assertIsInstance(subagent.steps[1], trajectory.TunixAgentStep)
-    self.assertEqual(subagent.steps[1].step_id, 1)
-    self.assertEqual(subagent.steps[1].message, "Sub reply")
-
-  def test_tunix_create_trajectory_without_subagent_trajectories(self):
-    meta = trajectory.TunixTrajectoryMetadata(
-        trajectory_id="tunix_empty",
-        agent=trajectory.Agent(name="agent_test", version="1.0"),
-    )
-
-    traj = meta.create_trajectory()
-
-    self.assertIsInstance(traj, trajectory.TunixTrajectory)
-    self.assertEmpty(traj.steps)
-    self.assertIsNone(traj.subagent_trajectories)
-
-  def test_tunix_create_trajectory_promotes_plain_atif_steps(self):
-    meta = trajectory.TunixTrajectoryMetadata(
-        trajectory_id="tunix_promote",
-        agent=trajectory.Agent(name="agent_test", version="1.0"),
-    )
-    plain_steps = [
-        trajectory.Step(
-            step_id=1, source=trajectory.Source.USER, message="User prompt"
-        ),
-        trajectory.Step(
-            step_id=2, source=trajectory.Source.AGENT, message="Agent response"
-        ),
-        trajectory.Step.model_validate(
-            {"step_id": 3, "source": "agent", "message": "Dict agent step"}
-        ),
-        trajectory.Step.model_validate(
-            {"step_id": 4, "source": "user", "message": "Dict user step"}
-        ),
-    ]
-
-    traj = meta.create_trajectory(steps=plain_steps)
-
-    self.assertIsInstance(traj, trajectory.TunixTrajectory)
-    self.assertLen(traj.steps, 4)
-    self.assertIsInstance(traj.steps[0], trajectory.TunixEnvStep)
-    self.assertEqual(traj.steps[0].step_id, 0)
-    self.assertEqual(traj.steps[0].message, "User prompt")
-    self.assertIsInstance(traj.steps[1], trajectory.TunixAgentStep)
-    self.assertEqual(traj.steps[1].step_id, 1)
-    self.assertEqual(traj.steps[1].message, "Agent response")
-    self.assertIsInstance(traj.steps[2], trajectory.TunixAgentStep)
-    self.assertEqual(traj.steps[2].step_id, 2)
-    self.assertEqual(traj.steps[2].message, "Dict agent step")
-    self.assertIsInstance(traj.steps[3], trajectory.TunixEnvStep)
-    self.assertEqual(traj.steps[3].step_id, 3)
-    self.assertEqual(traj.steps[3].message, "Dict user step")
-
-  def test_tunix_create_trajectory_rejects_non_step_inputs(self):
-    # Only typed `Step` instances are accepted; raw dicts are not silently
-    # reinterpreted as either ATIF or Tunix steps.
-    meta = trajectory.TunixTrajectoryMetadata(
-        trajectory_id="tunix_promote_err",
-        agent=trajectory.Agent(name="agent_test", version="1.0"),
-    )
-    tunix_shaped_dict = {
-        "step_id": 1,
-        "source": "user",
-        "message": "m",
-        "reward": 1.0,
-    }
-    for non_step in ({"invalid": "data"}, tunix_shaped_dict, "not_a_step"):
-      with self.subTest(non_step=non_step):
-        with self.assertRaises(AttributeError):
-          meta.create_trajectory(steps=[non_step])  # pytype: disable=wrong-arg-types
-
-  def test_tunix_create_trajectory_propagates_step_rehydration_errors(self):
-    # Rehydration failures surface as-is instead of falling back to treating
-    # the input as an already-Tunix step.
-    meta = trajectory.TunixTrajectoryMetadata(
-        trajectory_id="tunix_promote_err",
-        agent=trajectory.Agent(name="agent_test", version="1.0"),
-    )
-    bad_ext_step = trajectory.Step(
-        step_id=1,
-        source=trajectory.Source.USER,
-        message="m",
-        extra={trajectory.TUNIX_EXTENSIONS_KEY: {"reward": "not_a_float"}},
-    )
-
-    with self.assertRaisesRegex(pydantic.ValidationError, "reward"):
-      meta.create_trajectory(steps=[bad_ext_step])
-
-  def test_tunix_create_trajectory_rejects_unknown_source(self):
-    meta = trajectory.TunixTrajectoryMetadata(
-        trajectory_id="tunix_unknown_source",
-        agent=trajectory.Agent(name="agent_test", version="1.0"),
-    )
-    unknown_source_step = trajectory.Step.model_construct(
-        step_id=1, source="bogus", message="m"
-    )
-
-    with self.assertRaisesRegex(ValueError, "Unsupported step source"):
-      meta.create_trajectory(steps=[unknown_source_step])
-
-  def test_create_trajectory_rejects_unpaired_subclass_without_fields(self):
-    """Without the check this would silently yield a plain Trajectory."""
-
-    class _NoNewFields(trajectory.TrajectoryMetadata):
-      """Adds behavior but no fields, and forgets to override."""
-
-      def is_interesting(self) -> bool:
-        return self.notes is not None
-
-    meta = _NoNewFields(agent=trajectory.Agent(name="a", version="1.0"))
-
-    with self.assertRaisesRegex(
-        TypeError,
-        "Expected trajectory_cls to be a subclass of _NoNewFields"
-    ):
-      meta.create_trajectory()
-
-  def test_create_trajectory_rejects_unpaired_subclass_with_fields(self):
-    """A subclass adding fields reports the pairing, not the rejected field."""
-
-    class _NewField(trajectory.TrajectoryMetadata):
-      custom_tag: str = ""
-
-    meta = _NewField(
-        agent=trajectory.Agent(name="a", version="1.0"),
-        custom_tag="experiment_42",
-    )
-
-    with self.assertRaisesRegex(
-        TypeError, "Expected trajectory_cls to be a subclass of _NewField"
-    ):
-      meta.create_trajectory()
 
   def test_step_initialization_with_rl_fields(self):
     step = trajectory.TunixAgentStep(
@@ -1127,6 +873,7 @@ class AtifProjectionTest(trajectory_testing.TrajectoryTestCase):
         update={
             "extra": {
                 "user_key": "val",
+                trajectory.TUNIX_EXTENSIONS_KEY: {"existing_key": 99},
             }
         }
     )
@@ -1140,6 +887,7 @@ class AtifProjectionTest(trajectory_testing.TrajectoryTestCase):
         {
             "user_key": "val",
             trajectory.TUNIX_EXTENSIONS_KEY: {
+                "existing_key": 99,
                 "mc_return": 2.5,
                 "assistant_tokens": [10, 20],
                 "assistant_masks": [1, 1],
@@ -1519,19 +1267,6 @@ class AtifRehydrationTest(trajectory_testing.TrajectoryTestCase):
     )
     self.assertIsNone(rehydrated_metadata.prompt_id)
     self.assertIsNone(rehydrated_metadata.extra)
-
-  def test_base_trajectory_metadata_from_atif_metadata(self):
-    base_meta = trajectory_testing.METADATA_1
-    self.assertIs(
-        trajectory.TrajectoryMetadata.from_atif_metadata(base_meta), base_meta
-    )
-
-    class CustomMetadata(trajectory.TrajectoryMetadata):
-      tag: str = "default_tag"
-
-    rehydrated_subclass = CustomMetadata.from_atif_metadata(base_meta)
-    self.assertIsInstance(rehydrated_subclass, CustomMetadata)
-    self.assertEqual(rehydrated_subclass.tag, "default_tag")
 
   @parameterized.named_parameters(
       dict(

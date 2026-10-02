@@ -29,6 +29,7 @@ from jax.sharding import PartitionSpec as P
 import jaxtyping
 import numpy as np
 from tunix.models import cache_utils
+from tunix.models import paged_attention
 from tunix.models.gemma4.config import AttentionType
 from tunix.models.gemma4.config import K_MASK
 from tunix.models.gemma4.config import LayerCache
@@ -824,6 +825,77 @@ class Attention(nnx.Module):
   @property
   def use_gqa(self) -> bool:
     return self.num_kv_heads != self.config.num_heads
+
+  @jax.named_scope('ragged_paged_attention')
+  def paged_block(
+      self,
+      x: jaxtyping.Array,
+      segment_pos: jaxtyping.Array,
+      kv_cache: jax.Array,
+      metadata: paged_attention.RPAMetadata,
+      *,
+      cache_name: str,
+      update_kv_cache: bool,
+      mesh: MeshType | None,
+  ) -> tuple[jax.Array, jaxtyping.Array]:
+    """Attends a ragged batch through the paged KV cache.
+
+    Args:
+      x: `[1, num_tokens, embed_dim]` the batch's tokens, back to back.
+      segment_pos: `[1, num_tokens]` each token's position in its sequence.
+      kv_cache: this layer's paged KV cache, in `paged_attention`'s layout.
+      metadata: the batch's ragged layout and page tables.
+      cache_name: the key of `kv_cache` in `metadata.page_indices`.
+      update_kv_cache: whether to write this layer's K/V into `kv_cache`.
+        KV-shared layers pass False: their lender already wrote this step's
+        K/V into the shared cache, and the kernel reads it from there.
+      mesh: the mesh to shard the kernel over, by KV head.
+
+    Returns:
+      A tuple of (updated `kv_cache`, `[1, num_tokens, embed_dim]` output).
+    """
+    x = x.astype(self.config.dtype)
+    queries = self._query_norm(self.q_einsum(x))
+    queries = apply_rope(
+        queries,
+        segment_pos,
+        base_frequency=self.rope_base_frequency,
+        scale_factor=self.rope_scale_factor,
+        rope_proportion=self.rope_proportion,
+    )[0]
+    if update_kv_cache:
+      keys, values, _ = self._compute_kv_projections(x, segment_pos, None)
+      keys, values = keys[0], values[0]
+    else:
+      # The kernel reads every K/V from the shared cache and ignores these,
+      # but its signature still takes them.
+      keys = jnp.zeros(
+          (queries.shape[0], self.num_kv_heads, self.head_dim), queries.dtype
+      )
+      values = keys
+
+    attn_output, kv_cache = paged_attention.ragged_paged_attention(
+        queries,
+        keys,
+        values,
+        kv_cache,
+        metadata,
+        cache_name=cache_name,
+        mesh=mesh,
+        tp_axis=tuple(self.config.shd_config.act_btnh)[2],
+        sliding_window=(
+            self.config.sliding_window_size
+            if self.attn_type == AttentionType.LOCAL_SLIDING
+            else None
+        ),
+        update_kv_cache=update_kv_cache,
+        # Q and K are RMS-normalized, so scores are not scaled.
+        sm_scale=1.0,
+    )
+
+    attn_output = self.attn_vec_einsum(attn_output[None])
+    attn_output = shard(attn_output, self.config.shd_config.act_btd)
+    return kv_cache, attn_output
 
   @jax.named_scope('attention')
   def __call__(

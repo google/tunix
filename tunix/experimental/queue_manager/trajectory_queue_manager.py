@@ -34,9 +34,6 @@ class TrajectoryQueueManager(group_queue_manager.GroupQueueManager):
       group_fn: Optional[GroupFn] = None,
       filter_fn: Optional[FilterFn] = None,
       key_fn: Optional[Callable[[datatypes.TrajectoryItem], Hashable]] = None,
-      on_group_filtered: (
-          Callable[[list[datatypes.TrajectoryItem]], None] | None
-      ) = None,
   ):
     """Initializes TrajectoryQueueManager.
 
@@ -48,8 +45,6 @@ class TrajectoryQueueManager(group_queue_manager.GroupQueueManager):
       filter_fn: Optional pluggable function to filter candidate groups.
       key_fn: Optional function to extract grouping key. Defaults to prompt_id
         fallback.
-      on_group_filtered: Optional callback invoked when a candidate group is
-        completely filtered out (e.g., due to staleness).
     """
     if key_fn is None and group_fn is None:
 
@@ -66,7 +61,6 @@ class TrajectoryQueueManager(group_queue_manager.GroupQueueManager):
         group_fn=group_fn,
         filter_fn=filter_fn,
         key_fn=key_fn,
-        on_group_filtered=on_group_filtered,
     )
 
   @classmethod
@@ -75,38 +69,37 @@ class TrajectoryQueueManager(group_queue_manager.GroupQueueManager):
       num_generations: int = 1,
       max_staleness: int = 0,
       current_policy_version: Callable[[], int] | None = None,
-      filter_fn: FilterFn | None = None,
-      on_group_filtered: (
-          Callable[[list[datatypes.TrajectoryItem]], None] | None
-      ) = None,
+      filter_fn: Any | None = None,
   ) -> "TrajectoryQueueManager":
     """Creates a grouped trajectory queue with optional policy staleness filtering."""
     assert max_staleness >= 0, "max_staleness must be non-negative."
-    combined_filter: FilterFn | None = filter_fn
+    combined_filter = filter_fn
     if max_staleness > 0 and current_policy_version is not None:
 
-      def _staleness_filter(
-          group: list[datatypes.TrajectoryItem],
-      ) -> tuple[
-          list[datatypes.TrajectoryItem], list[datatypes.TrajectoryItem]
-      ]:
+      def _staleness_filter(group: Sequence[Any]) -> Any:
         min_allowed = current_policy_version() - max_staleness
-        if any(item.policy_version < min_allowed for item in group):
-          return [], list(group)
+        valid = [
+            item
+            for item in group
+            if getattr(item, "policy_version", 0) >= min_allowed
+        ]
+        filtered = [
+            item
+            for item in group
+            if getattr(item, "policy_version", 0) < min_allowed
+        ]
         if filter_fn is not None:
-          res = filter_fn(group)
+          res = filter_fn(valid)
           if isinstance(res, tuple):
-            return res[0], list(res[1])
-          valid_ids = {id(x) for x in res}
-          return res, [x for x in group if id(x) not in valid_ids]
-        return list(group), []
+            return res[0], list(res[1]) + filtered
+          return res, filtered
+        return valid, filtered
 
       combined_filter = _staleness_filter
 
     return cls(
         num_generations=num_generations,
-        filter_fn=combined_filter,
-        on_group_filtered=on_group_filtered,
+        filter_fn=combined_filter,  # pyrefly: ignore[bad-argument-type]
     )
 
   def __aiter__(self) -> "TrajectoryQueueManager":
@@ -158,11 +151,6 @@ class TrajectoryQueueManager(group_queue_manager.GroupQueueManager):
   def incomplete_buckets_count(self) -> int:
     """Returns the count of incomplete buckets currently buffering items."""
     return len(self._buckets)
-
-  @property
-  def filtered_groups_count(self) -> int:
-    """Returns the count of filtered-out groups recorded by the queue."""
-    return len(self._filtered_groups)
 
   async def abort(self, exc: BaseException) -> None:
     """Aborts queue and unblocks all waiting consumers with the given exception."""

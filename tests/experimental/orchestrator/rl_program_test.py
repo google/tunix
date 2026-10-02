@@ -18,7 +18,6 @@ from collections.abc import Sequence
 import types
 from typing import Any
 from unittest import mock
-import weakref
 
 from absl.testing import absltest
 import metrax.logging as metrax_logging
@@ -33,19 +32,6 @@ from tunix.experimental.trajectory import in_memory_store
 from tunix.experimental.worker import remote_execution
 from tunix.sft import metrics_logger as metrics_logger_lib
 from tunix.sft import utils as sft_utils
-
-
-def _padding_stats(
-    row_valid_tokens: Sequence[int] = (3, 1),
-    row_capacity: int = 4,
-) -> batch_assembly.PaddingStats:
-  """Returns a valid `PaddingStats` for hand-built `AssembledBatch` fakes."""
-  valid = np.asarray(row_valid_tokens, dtype=np.int64)
-  return batch_assembly.PaddingStats(
-      row_valid_tokens=valid,
-      row_num_sequences=(valid > 0).astype(np.int64),
-      row_capacity=row_capacity,
-  )
 
 
 class _MockWorkerHandle(mock.MagicMock):
@@ -748,14 +734,10 @@ class RLProgramTest(absltest.TestCase):
         del items
         return [
             batch_assembly.AssembledBatch(
-                payload="microbatch_0",
-                is_final_batch=False,
-                padding_stats=_padding_stats(),
+                payload="microbatch_0", is_final_batch=False
             ),
             batch_assembly.AssembledBatch(
-                payload="microbatch_1",
-                is_final_batch=True,
-                padding_stats=_padding_stats(),
+                payload="microbatch_1", is_final_batch=True
             ),
         ]
 
@@ -1389,13 +1371,11 @@ class RLProgramTest(absltest.TestCase):
             batch_assembly.AssembledBatch(
                 payload="microbatch_0",
                 is_final_batch=False,
-                padding_stats=_padding_stats(),
                 trajectory_ids=("traj_prompt_0_g0",),
             ),
             batch_assembly.AssembledBatch(
                 payload="microbatch_1",
                 is_final_batch=True,
-                padding_stats=_padding_stats(),
                 trajectory_ids=("traj_prompt_0_g1",),
             ),
         ]
@@ -1782,7 +1762,6 @@ class RLProgramTest(absltest.TestCase):
               batch_assembly.AssembledBatch(
                   payload=mock_payload,
                   is_final_batch=True,
-                  padding_stats=_padding_stats(),
                   trajectory_ids=(),
               )
           ]
@@ -1812,7 +1791,6 @@ class RLProgramTest(absltest.TestCase):
               batch_assembly.AssembledBatch(
                   payload={"raw": "batch"},  # pyrefly: ignore[bad-argument-type]
                   is_final_batch=True,
-                  padding_stats=_padding_stats(),
                   trajectory_ids=(),
               )
           ]
@@ -3329,9 +3307,8 @@ class RLProgramTest(absltest.TestCase):
           float(diff_mean_fn(diff_mean_vals)), 0.4 / 3, places=5
       )
       self.assertIn("sampler_trainer/probs_pearson_corr", acc)
-      # sampler_is is None -> marks agreement applied without mutating logps/weights.
-      self.assertTrue(out.sampler_agreement_applied)
-      self.assertIs(out.old_per_token_logps, batch.old_per_token_logps)
+      # sampler_is is None -> no batch mutation, no TIS weights.
+      self.assertIs(out, batch)
       self.assertIsNone(out.sampler_is_weights)
 
     asyncio.run(_run())
@@ -3363,64 +3340,13 @@ class RLProgramTest(absltest.TestCase):
       acc: dict[str, Any] = {}
       out = await program._apply_sampler_trainer_agreement(batch, acc)
 
-      self.assertTrue(out.sampler_agreement_applied)
       self.assertIsNotNone(out.sampler_is_weights)
       # old_per_token_logps is overwritten with the trainer logps.
       np.testing.assert_allclose(
           np.asarray(out.old_per_token_logps), trainer_logps
       )
       self.assertIn("sampler_is/weight_mean", acc)
-      self.assertIn("sampler_is/weight_max", acc)
       self.assertIn("sampler_is/frac_clipped_at_threshold", acc)
-
-    asyncio.run(_run())
-
-  def test_apply_sampler_trainer_agreement_sampler_rs_feeds_weights(self):
-    """With sampler_rs='geometric' the helper feeds RS weights and trainer logps."""
-
-    async def _run():
-      self.mock_algo.algo_config.sampler_is = None
-      self.mock_algo.algo_config.sampler_rs = "geometric"
-      self.mock_algo.algo_config.sampler_rs_min = 0.8
-      self.mock_algo.algo_config.sampler_rs_max = 1.25
-      program = self._create_program()
-      self.assertEqual(program.sampler_rs, "geometric")
-      self.assertEqual(program.sampler_rs_min, 0.8)
-      self.assertEqual(program.sampler_rs_max, 1.25)
-      trainer_logps = np.array(
-          [[-0.5, -0.5, -0.5], [-2.0, -2.0, -2.0]], dtype=np.float32
-      )
-      program.engine = mock.MagicMock()
-      program.engine.per_token_logps = mock.AsyncMock(
-          return_value=datatypes.LogprobsResponse(
-              per_token_logps=trainer_logps, model_version=1
-          )
-      )
-      batch = datatypes.RLTrainerPayload(
-          prompt_ids=np.array([[1, 2], [1, 2]], dtype=np.int32),
-          prompt_mask=np.array([[1, 1], [1, 1]], dtype=np.float32),
-          completion_ids=np.array([[3, 4, 5], [3, 4, 5]], dtype=np.int32),
-          completion_mask=np.array([[1, 1, 1], [1, 1, 1]], dtype=np.float32),
-          advantages=np.array(
-              [[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]], dtype=np.float32
-          ),
-          old_per_token_logps=np.array(
-              [[-0.5, -0.5, -0.5], [-0.5, -0.5, -0.5]], dtype=np.float32
-          ),
-      )
-      acc: dict[str, Any] = {}
-      out = await program._apply_sampler_trainer_agreement(batch, acc)
-
-      self.assertTrue(out.sampler_agreement_applied)
-      self.assertIsNotNone(out.sampler_is_weights)
-      np.testing.assert_allclose(
-          np.asarray(out.sampler_is_weights),
-          np.array([[1.0, 1.0, 1.0], [0.0, 0.0, 0.0]], dtype=np.float32),
-      )
-      np.testing.assert_allclose(
-          np.asarray(out.old_per_token_logps), trainer_logps
-      )
-      self.assertIn("sampler_rs/rejected_fraction", acc)
 
     asyncio.run(_run())
 
@@ -3538,8 +3464,6 @@ class RLProgramTest(absltest.TestCase):
           trainer_metrics=None,
           num_rollouts=2,
           num_microbatches=2,
-          padding_stats=[],
-          packing_time_sec=0.0,
           step_time_sec=1.0,
           consumed_policy_version=1,
           log_step=0,
@@ -3580,8 +3504,6 @@ class RLProgramTest(absltest.TestCase):
         trainer_metrics=None,
         num_rollouts=0,
         num_microbatches=0,
-        padding_stats=[],
-        packing_time_sec=0.0,
         step_time_sec=0.0,
         consumed_policy_version=0,
         log_step=0,
@@ -3789,8 +3711,6 @@ class RLProgramTest(absltest.TestCase):
         trainer_metrics=None,
         num_rollouts=2,
         num_microbatches=1,
-        padding_stats=[],
-        packing_time_sec=0.0,
         step_time_sec=0.0,
         consumed_policy_version=0,
         log_step=0,
@@ -3820,8 +3740,6 @@ class RLProgramTest(absltest.TestCase):
         trainer_metrics=None,
         num_rollouts=2,
         num_microbatches=1,
-        padding_stats=[],
-        packing_time_sec=0.0,
         step_time_sec=0.0,
         consumed_policy_version=0,
         log_step=0,
@@ -3833,92 +3751,6 @@ class RLProgramTest(absltest.TestCase):
     )
     self.assertFalse(logger.metric_exists("rewards", "mean", "train"))
     program.close()
-
-  def test_collect_and_log_step_metrics_logs_filtered_groups_metrics(self):
-    program = self._create_program()
-
-    filtered_groups = [
-        [self._scoring_item(0), self._scoring_item(1)],
-        [self._scoring_item(2)],
-    ]
-
-    metrics_summary = program._collect_and_log_step_metrics(
-        all_step_items=[],
-        step_rewards=[],
-        step_advantages=[],
-        step_result=None,
-        trainer_metrics=None,
-        num_rollouts=0,
-        num_microbatches=1,
-        padding_stats=[],
-        packing_time_sec=0.0,
-        step_time_sec=0.0,
-        consumed_policy_version=0,
-        log_step=0,
-        filtered_groups=filtered_groups,
-    )
-
-    logger = program.metrics_logger
-    self.assertEqual(
-        logger.get_metric("rollout", "filtered_groups_count", "train"), 2.0
-    )
-    self.assertEqual(
-        logger.get_metric("rollout", "filtered_trajectories_count", "train"),
-        3.0,
-    )
-    self.assertEqual(metrics_summary["filtered_groups_count"], 2)
-    self.assertEqual(metrics_summary["filtered_trajectories_count"], 3)
-    program.close()
-
-  def test_drain_filtered_groups_drains_both_queues(self):
-    program = self._create_program()
-
-    item0 = self._scoring_item(0)
-    item1 = self._scoring_item(1)
-
-    async def _test():
-      program.raw_q._filtered_groups.append([item0])
-      program.scored_q._filtered_groups.append([item1])
-
-      drained = await program._drain_filtered_groups()
-      self.assertEqual(drained, [[item0], [item1]])
-
-      # Subsequent drain should be empty
-      drained_again = await program._drain_filtered_groups()
-      self.assertEqual(drained_again, [])
-
-    asyncio.run(_test())
-    program.close()
-
-  def test_train_loop_drains_and_logs_filtered_groups(self):
-    async def _run():
-      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group(), [])
-      program = self._create_program(
-          dataset=["prompt_data_0"],
-          max_steps=1,
-      )
-
-      # Inject a filtered group into raw_q
-      filtered_item = self._scoring_item(99)
-      program.raw_q._filtered_groups.append([filtered_item])
-
-      await program.run_async(self.mock_engine)
-
-      # Verify that raw_q._filtered_groups was drained
-      self.assertEqual(len(program.raw_q._filtered_groups), 0)
-
-      # Verify metric was logged
-      logger = program.metrics_logger
-      self.assertEqual(
-          logger.get_metric("rollout", "filtered_groups_count", "train"), 1.0
-      )
-      self.assertEqual(
-          logger.get_metric("rollout", "filtered_trajectories_count", "train"),
-          1.0,
-      )
-      program.close()
-
-    asyncio.run(_run())
 
   def test_critique_stage_preserves_is_valid_for_degenerate_group_survivor(
       self,
@@ -3957,8 +3789,6 @@ class RLProgramTest(absltest.TestCase):
           trainer_metrics=None,
           num_rollouts=2,
           num_microbatches=1,
-          padding_stats=[],
-          packing_time_sec=0.0,
           step_time_sec=0.0,
           consumed_policy_version=0,
           log_step=0,
@@ -4206,79 +4036,6 @@ class RLProgramTest(absltest.TestCase):
         {"gold_answer": "4", "prompt_id": "p_math", "group_index": 3},
     )
 
-  def test_staleness_filtered_groups_release_dispatch_capacity_and_avoid_deadlock(
-      self,
-  ):
-    async def _run():
-      # Configure batch_size=1, max_staleness=1 -> max_groups_ahead = 2.
-      # With 3 prompts in dataset, prompts 0 and 1 saturate _dispatch_capacity.
-      # When prompts 0 and 1 return stale trajectories (policy_version=0 while
-      # program.policy_version=5), raw_q filters both groups out and releases
-      # their 2 tokens so prompt_2 can be dispatched to complete step 0.
-      program = self._create_program(
-          dataset=["prompt_0", "prompt_1", "prompt_2"],
-          reward_fns=[],
-          batch_size=1,
-          max_staleness=1,
-          max_steps=1,
-      )
-      program.policy_version = 5
-
-      pending_responses: list[datatypes.TrajectoryItem] = []
-
-      async def _mock_dispatch(prompts, **kwargs):
-        del kwargs
-        prompt_id = prompts[0]["prompt_id"]
-        ver = 0 if prompt_id in ("prompt_0", "prompt_1") else 5
-        for g_idx in range(2):
-          resp = _create_rollout_response(
-              f"{prompt_id}_{g_idx}",
-              prompt_id,
-              group_index=g_idx,
-              policy_version=ver,
-          )
-          pending_responses.append(
-              distributed_rl_engine._response_to_trajectory_item(resp)
-          )
-
-      async def _mock_poll():
-        if pending_responses:
-          batch = list(pending_responses)
-          pending_responses.clear()
-          return batch
-        await asyncio.sleep(0.005)
-        return []
-
-      self.mock_engine.dispatch_rollouts.side_effect = _mock_dispatch
-      self.mock_engine.poll_rollouts.side_effect = _mock_poll
-
-      await asyncio.wait_for(program.run_async(self.mock_engine), timeout=5.0)
-
-      self.assertEqual(self.mock_engine.dispatch_rollouts.call_count, 3)
-      self.assertEqual(program.raw_q.filtered_groups_count, 0)
-      self.assertEqual(
-          program.metrics_logger.get_metric(
-              "rollout", "filtered_groups_count", "train"
-          ),
-          2.0,
-      )
-      self.assertEqual(
-          program.metrics_logger.get_metric(
-              "rollout", "filtered_trajectories_count", "train"
-          ),
-          4.0,
-      )
-      self.assertIsNotNone(program._dispatch_capacity)
-      # Initial capacity is 1 * (1 + 1) = 2; all 3 dispatched prompts (2
-      # filtered + 1 trained) must have released their tokens back to 2.
-      self.assertEqual(program._dispatch_capacity._value, 2)
-      self.assertIsNotNone(program.last_step_result)
-      self.assertEqual(program.last_step_result.step, 0)
-      self.assertEqual(program.last_step_result.num_rollouts, 2)
-      program.close()
-
-    asyncio.run(_run())
-
 
 def _traj_item(tokens, clipped=None, raw_length=None):
   """Builds a TrajectoryItem, optionally with collector annotations."""
@@ -4445,8 +4202,6 @@ class GenerationMetricsLoggingTest(absltest.TestCase):
         generation_metrics=metrics,
         num_rollouts=0,
         num_microbatches=0,
-        padding_stats=[],
-        packing_time_sec=0.0,
         step_time_sec=0.0,
         consumed_policy_version=0,
         log_step=0,
@@ -4474,76 +4229,6 @@ class GenerationMetricsLoggingTest(absltest.TestCase):
     self.assertEmpty(
         [k for k in logged if k.startswith("rollout/completions/")]
     )
-
-
-class EfficiencyMetricsLoggingTest(absltest.TestCase):
-  """Covers `efficiency/padding/*` and `efficiency/packing/*` step metrics."""
-
-  def _log_padding(self, padding_stats, packing_time_sec=0.0):
-    algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
-    algo.num_generations = 2
-    algo.mini_batch_size = 1
-    algo.max_turns = 1
-    algo.max_packed_len = 16
-    algo.max_response_length = 1024
-    algo.requires_reference_kl = False
-    algo.algo_config = types.SimpleNamespace(
-        temperature=None,
-        use_rollout_logps=True,
-    )
-    program = rl_program.StandardRLProgram(
-        dataset=["prompt_0"],
-        max_steps=1,
-        algo=algo,
-        reward_fns=[lambda *_: 1.0],
-    )
-    program.metrics_logger = mock.MagicMock()
-    program._collect_and_log_step_metrics(
-        all_step_items=[],
-        step_rewards=[],
-        num_rollouts=0,
-        num_microbatches=len(padding_stats),
-        padding_stats=padding_stats,
-        packing_time_sec=packing_time_sec,
-        step_time_sec=0.0,
-        consumed_policy_version=0,
-        log_step=0,
-    )
-    return {
-        f"{call.args[0]}/{call.args[1]}": call.args[2]
-        for call in program.metrics_logger.log.call_args_list
-    }
-
-  def test_logs_step_padding_summary(self):
-    stats = [
-        _padding_stats(row_valid_tokens=(4, 4), row_capacity=4),
-        _padding_stats(row_valid_tokens=(3, 1), row_capacity=4),
-    ]
-
-    logged = self._log_padding(stats)
-
-    self.assertAlmostEqual(logged["efficiency/padding/ratio"], 0.25)
-    self.assertAlmostEqual(
-        logged["efficiency/padding/microbatch_ratio_max"], 0.5
-    )
-    self.assertAlmostEqual(logged["efficiency/padding/row_imbalance_max"], 1.5)
-    self.assertEqual(logged["efficiency/padding/valid_tokens"], 12.0)
-
-  def test_logs_step_packing_time(self):
-    stats = [
-        _padding_stats(row_valid_tokens=(4, 4), row_capacity=4),
-        _padding_stats(row_valid_tokens=(3, 1), row_capacity=4),
-    ]
-
-    logged = self._log_padding(stats, packing_time_sec=0.5)
-
-    self.assertAlmostEqual(logged["efficiency/packing/time_sec_total"], 0.5)
-    self.assertAlmostEqual(logged["efficiency/packing/time_sec_mean"], 0.25)
-
-  def test_no_padding_stats_logs_no_efficiency_metrics(self):
-    logged = self._log_padding([])
-
-    self.assertEmpty([k for k in logged if k.startswith("efficiency/")])
 
 
 class StandardRLProgramTrajectoryStoreTest(absltest.TestCase):
@@ -4593,215 +4278,5 @@ class StandardRLProgramTrajectoryStoreTest(absltest.TestCase):
     program.close()
 
 
-class StandardRLProgramAsyncDatasetTest(absltest.TestCase):
-  """Tests rollout_dispatch_stage with generator datasets and checkpoint resume."""
-
-  def setUp(self):
-    super().setUp()
-    self.mock_algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
-    self.mock_algo.num_generations = 2
-    self.mock_algo.mini_batch_size = 2
-    self.mock_algo.train_micro_batch_size = 2
-    self.mock_algo.max_turns = 1
-    self.mock_algo.max_packed_len = 16
-    self.mock_algo.max_response_length = 16
-    self.mock_algo.requires_reference_kl = False
-    self.mock_algo.use_rollout_logps = True
-    self.mock_algo.algo_config = types.SimpleNamespace(
-        temperature=None,
-        use_rollout_logps=True,
-    )
-
-  def test_rollout_dispatch_stage_with_generator_and_checkpoint_resume(self):
-    closed = False
-
-    def _gen_dataset():
-      nonlocal closed
-      try:
-        for i in range(4):
-          yield f"prompt_{i}"
-      finally:
-        closed = True
-
-    async def _run():
-      program = rl_program.StandardRLProgram(
-          dataset=_gen_dataset(),
-          max_steps=2,
-          batch_size=2,
-          algo=self.mock_algo,
-          reward_fns=[lambda *_: 1.0],
-      )
-      mock_engine = mock.MagicMock(
-          spec=distributed_rl_engine.DistributedRLEngine
-      )
-      mock_engine.dispatch_rollouts = mock.AsyncMock()
-      program.engine = mock_engine
-      # Simulate resuming at step 1 (first 2 prompts already consumed).
-      program._step = 1
-      program._dispatch_capacity = asyncio.Semaphore(4)
-
-      await program.rollout_dispatch_stage()
-
-      self.assertEqual(mock_engine.dispatch_rollouts.call_count, 2)
-      dispatched_ids = [
-          call.args[0][0]["prompt_id"]
-          for call in mock_engine.dispatch_rollouts.call_args_list
-      ]
-      dispatched_prompts = [
-          call.args[0][0]["prompt"]
-          for call in mock_engine.dispatch_rollouts.call_args_list
-      ]
-      self.assertEqual(dispatched_ids, ["prompt_2", "prompt_3"])
-      self.assertEqual(dispatched_prompts, ["prompt_2", "prompt_3"])
-      program.close()
-
-    asyncio.run(_run())
-    self.assertTrue(closed)
-
-
-class StandardRLProgramRoutedExpertsCleanupTest(absltest.TestCase):
-
-  def test_critique_and_train_stages_drop_unbatched_routed_experts_duplicates(
-      self,
-  ):
-    async def _run():
-      mock_algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
-      mock_algo.num_generations = 1
-      mock_algo.mini_batch_size = 1
-      mock_algo.max_packed_len = 8
-      mock_algo.max_response_length = 8
-      mock_algo.requires_reference_kl = False
-      mock_algo.algo_config = mock.MagicMock(
-          temperature=None, use_rollout_logps=False
-      )
-
-      routed = np.full((4, 2, 2), 3, dtype=np.int16)
-      routed_ref = weakref.ref(routed)
-      payload = datatypes.RLTrainerPayload(
-          prompt_ids=np.array([10, 11], dtype=np.int32),
-          prompt_mask=np.ones((2,), dtype=np.float32),
-          completion_ids=np.array([20, 21], dtype=np.int32),
-          completion_mask=np.ones((2,), dtype=np.float32),
-          advantages=np.ones((2,), dtype=np.float32),
-          routed_experts=routed,
-      )
-      mock_algo.create_trainer_payloads.return_value = [payload]
-
-      assembler = batch_assembly.PaddedBatchAssembler(
-          batch_size=1,
-          max_prompt_length=2,
-          max_response_length=2,
-          pad_id=0,
-          num_generations=1,
-          mini_batch_size=1,
-      )
-      program = rl_program.StandardRLProgram(
-          dataset=[],
-          max_steps=1,
-          algo=mock_algo,
-          reward_fns=[lambda *_: 1.0],
-          assembler=assembler,
-          sync_weights=True,
-      )
-      mock_engine = mock.MagicMock()
-      trained_routed_copy: list[np.ndarray] = []
-      batched_routed_refs: list[weakref.ReferenceType[np.ndarray]] = []
-
-      async def _fake_train_step(batch, **_):
-        self.assertIsNotNone(batch.routed_experts)
-        batched_routed_refs.append(weakref.ref(batch.routed_experts))
-        trained_routed_copy.append(np.array(batch.routed_experts, copy=True))
-        return {"updated": True}
-
-      routed_alive_during_ckpt: list[bool] = []
-      batched_alive_during_ckpt: list[bool] = []
-      routed_alive_during_sync: list[bool] = []
-      batched_alive_during_sync: list[bool] = []
-
-      async def _fake_save_checkpoint(**_):
-        routed_alive_during_ckpt.append(routed_ref() is not None)
-        batched_alive_during_ckpt.append(
-            any(ref() is not None for ref in batched_routed_refs)
-        )
-
-      async def _fake_sync_weights(**_):
-        routed_alive_during_sync.append(routed_ref() is not None)
-        batched_alive_during_sync.append(
-            any(ref() is not None for ref in batched_routed_refs)
-        )
-        return 1
-
-      mock_engine.train_step = _fake_train_step
-      mock_engine.get_metrics = mock.AsyncMock(return_value=None)
-      mock_engine.save_checkpoint = mock.AsyncMock(
-          side_effect=_fake_save_checkpoint
-      )
-      mock_engine.sync_weights = mock.AsyncMock(side_effect=_fake_sync_weights)
-      program.engine = mock_engine
-      program._dispatch_capacity = asyncio.Semaphore(2)
-      await program._dispatch_capacity.acquire()
-      program.trajectory_logger = mock.MagicMock()
-
-      src_item = datatypes.TrajectoryItem(
-          prompt_id="p0",
-          group_index=0,
-          start_step=0,
-          traj={"routed_experts": routed},
-          prompt_tokens=np.array([10, 11], dtype=np.int32),
-          completion_tokens=np.array([20, 21], dtype=np.int32),
-          action_mask=np.array([1, 1], dtype=np.int32),
-          routed_experts=routed,
-          metadata={"routed_experts": routed, "question": "q0"},
-      )
-      await program.raw_q.put(src_item)
-      del routed, payload
-
-      # Run critique_stage concurrently with raw_q kept open so its coroutine
-      # frame stays suspended at `await self.raw_q.get_group()` during training.
-      critique_task = asyncio.create_task(program.critique_stage())
-      scored_batch = await program.scored_q.get_batch(num_groups=1)
-      mock_algo.create_trainer_payloads.return_value = None
-      mock_algo.create_trainer_payloads.reset_mock()
-      self.assertNotIn("routed_experts", src_item.traj)
-      self.assertNotIn("routed_experts", src_item.metadata)
-
-      self.assertLen(scored_batch, 1)
-      scored_item = scored_batch[0]
-      self.assertIsNone(getattr(scored_item, "routed_experts", None))
-      self.assertNotIn("routed_experts", scored_item.metadata)
-      self.assertNotIn("routed_experts", scored_item.traj)
-      self.assertIsNotNone(scored_item.payload.routed_experts)
-      self.assertIsNotNone(routed_ref())
-
-      # Re-enqueue for train_stage consumption while critique_task remains
-      # suspended on raw_q.
-      await program.scored_q.put(scored_item)
-
-      await program.train_stage()
-      await program.raw_q.close()
-      await critique_task
-
-      self.assertLen(trained_routed_copy, 1)
-      np.testing.assert_array_equal(
-          trained_routed_copy[0][0], np.full((4, 2, 2), 3, dtype=np.int16)
-      )
-      # Both unbatched and assembled microbatch routed_experts must be released
-      # before save_checkpoint() and sync_weights() run, even with critique_stage
-      # suspended concurrently on raw_q.
-      self.assertEqual(routed_alive_during_ckpt, [False])
-      self.assertEqual(batched_alive_during_ckpt, [False])
-      self.assertEqual(routed_alive_during_sync, [False])
-      self.assertEqual(batched_alive_during_sync, [False])
-      self.assertIsNone(scored_item.payload.routed_experts)
-      self.assertIsNone(routed_ref())
-      logged_row = program.trajectory_logger.log_item_async.call_args.args[0]
-      self.assertNotIn("routed_experts", logged_row["metadata"])
-      self.assertNotIn("routed_experts", logged_row["trajectory"])
-
-    asyncio.run(_run())
-
-
 if __name__ == "__main__":
   absltest.main()
-
-

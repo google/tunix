@@ -27,7 +27,6 @@ def _create_item(
     group_index: int = 0,
     task_id: str = "",
     reward: float = 1.0,
-    policy_version: int = 0,
 ) -> datatypes.TrajectoryItem:
   """Helper to create a TrajectoryItem for testing."""
   traj = datatypes.Trajectory(reward=reward)
@@ -37,7 +36,6 @@ def _create_item(
       start_step=0,
       traj=traj,
       metadata={"task_id": task_id},
-      policy_version=policy_version,
   )
 
 
@@ -192,67 +190,6 @@ class QueueManagerTest(absltest.TestCase):
 
       with self.assertRaises(ValueError):
         await manager.get_batch(1)
-
-    asyncio.run(_run_test())
-
-  def test_staleness_filter_drops_stale_group_and_invokes_on_group_filtered(
-      self,
-  ):
-    """Tests create() drops stale groups and notifies on_group_filtered."""
-
-    async def _run_test():
-      current_version = 5
-      dropped_groups = []
-      manager = trajectory_queue_manager.TrajectoryQueueManager.create(
-          num_generations=2,
-          max_staleness=1,
-          current_policy_version=lambda: current_version,
-          on_group_filtered=dropped_groups.append,
-      )
-
-      stale0 = _create_item("g_stale", group_index=0, policy_version=3)
-      stale1 = _create_item("g_stale", group_index=1, policy_version=3)
-      fresh0 = _create_item("g_fresh", group_index=0, policy_version=4)
-      fresh1 = _create_item("g_fresh", group_index=1, policy_version=5)
-
-      await manager.put(stale0)
-      await manager.put(stale1)
-      self.assertEqual(manager.ready_groups_count, 0)
-      self.assertEqual(manager.filtered_groups_count, 1)
-      self.assertEqual(dropped_groups, [[stale0, stale1]])
-
-      await manager.put(fresh0)
-      await manager.put(fresh1)
-      self.assertEqual(manager.ready_groups_count, 1)
-      self.assertEqual(manager.filtered_groups_count, 1)
-      self.assertLen(dropped_groups, 1)
-
-      batch = await manager.get_batch(2)
-      self.assertEqual(batch, [fresh0, fresh1])
-
-    asyncio.run(_run_test())
-
-  def test_staleness_filter_drops_partially_stale_group(self):
-    """Tests a group with mixed stale and fresh items is dropped as a whole."""
-
-    async def _run_test():
-      dropped_groups = []
-      manager = trajectory_queue_manager.TrajectoryQueueManager.create(
-          num_generations=2,
-          max_staleness=1,
-          current_policy_version=lambda: 5,
-          on_group_filtered=dropped_groups.append,
-      )
-
-      stale_item = _create_item("g_mixed", group_index=0, policy_version=2)
-      fresh_item = _create_item("g_mixed", group_index=1, policy_version=5)
-
-      await manager.put(stale_item)
-      await manager.put(fresh_item)
-
-      self.assertEqual(manager.ready_groups_count, 0)
-      self.assertEqual(manager.filtered_groups_count, 1)
-      self.assertEqual(dropped_groups, [[stale_item, fresh_item]])
 
     asyncio.run(_run_test())
 

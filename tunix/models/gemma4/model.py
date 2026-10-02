@@ -17,11 +17,14 @@
 import dataclasses
 from functools import partial
 import itertools
+import typing
 from flax import nnx
 import jax
 from jax import numpy as jnp
 import jaxtyping
+from tunix.experimental.generate import kv_cache_manager
 from tunix.generate.mappings import BackendMappingMixin
+from tunix.models import paged_attention
 from tunix.utils import compat
 
 # Re-export symbols to preserve public API paths after module decomposition.
@@ -59,9 +62,13 @@ from tunix.models.gemma4.layers import (
     apply_rope,
     merge_flat_embeddings,
 )
-from tunix.models.gemma4.attention import Attention
+from tunix.models.gemma4.attention import Attention, MeshType
 
 # pylint: enable=g-multiple-import,unused-import
+
+# Paged KV caches in `paged_attention`'s layout, keyed by
+# cache name (see `Gemma4.init_kv_cache`).
+PagedCache = dict[str, jax.Array]
 
 
 class FeedForward(nnx.Module):
@@ -277,6 +284,39 @@ class DecoderLayer(nnx.Module):
         input_mask=input_mask,
         force_eager=force_eager,
     )
+    return cache, self._post_attention(x, attn, per_layer_input), kv
+
+  def paged_block(
+      self,
+      x: jaxtyping.Array,
+      segment_pos: jaxtyping.Array,
+      kv_cache: jax.Array,
+      metadata: paged_attention.RPAMetadata,
+      per_layer_input: jaxtyping.Array | None,
+      *,
+      cache_name: str,
+      update_kv_cache: bool,
+      mesh: MeshType | None,
+  ) -> tuple[jax.Array, jaxtyping.Array]:
+    """Runs the layer over a ragged batch; see `Attention.paged_block`."""
+    kv_cache, attn = self.attn.paged_block(
+        self.pre_attention_norm(x),
+        segment_pos,
+        kv_cache,
+        metadata,
+        cache_name=cache_name,
+        update_kv_cache=update_kv_cache,
+        mesh=mesh,
+    )
+    return kv_cache, self._post_attention(x, attn, per_layer_input)
+
+  def _post_attention(
+      self,
+      x: jaxtyping.Array,
+      attn: jaxtyping.Array,
+      per_layer_input: jaxtyping.Array | None,
+  ) -> jaxtyping.Array:
+    """Applies the residuals, FFW and per-layer input after attention."""
     attn = self.post_attention_norm(attn)
     attn += x
 
@@ -300,8 +340,7 @@ class DecoderLayer(nnx.Module):
       mapped = self.post_per_layer_input_norm(mapped)
       ffw += mapped
 
-    ffw = ffw * self.skip_scale.value
-    return cache, ffw, kv
+    return ffw * self.skip_scale.value
 
   def __call__(
       self,
@@ -473,7 +512,7 @@ class Gemma4(BackendMappingMixin, nnx.Module):
       self,
       tokens: jaxtyping.Array,
       positions: jaxtyping.Array | None = None,
-      cache: Cache | None = None,
+      cache: Cache | PagedCache | None = None,
       attention_mask: jaxtyping.Array | None = None,
       segment_ids: jaxtyping.Array | None = None,
       decode_only_last_token: bool = False,
@@ -483,7 +522,15 @@ class Gemma4(BackendMappingMixin, nnx.Module):
       is_chunked_prefill: bool = False,
       prefix_length: int = 0,
       input_mask: jaxtyping.Array | None = None,
-  ) -> tuple[jaxtyping.Array, Cache | None]:
+      metadata: paged_attention.RPAMetadata | None = None,
+      mesh: MeshType | None = None,
+  ) -> tuple[jaxtyping.Array, Cache | PagedCache | None]:
+    if metadata is not None:
+      if cache is None or positions is None:
+        raise ValueError('`metadata` requires `cache` and `positions`.')
+      # With `metadata`, the cache is always the paged cache.
+      paged_cache = typing.cast(PagedCache, cache)
+      return self._paged_call(tokens, positions, paged_cache, metadata, mesh)
     if prefix_length < 0:
       raise ValueError(
           f'`prefix_length` must be non-negative, got {prefix_length}.'
@@ -621,6 +668,84 @@ class Gemma4(BackendMappingMixin, nnx.Module):
     logits = self.compute_final_logits(x)
 
     return logits, (new_cache if return_cache else None)
+
+  def _paged_call(
+      self,
+      tokens: jaxtyping.Array,
+      positions: jaxtyping.Array,
+      cache: PagedCache,
+      metadata: paged_attention.RPAMetadata,
+      mesh: MeshType | None,
+  ) -> tuple[jaxtyping.Array, PagedCache]:
+    """Runs a ragged batch through the paged KV cache.
+
+    Args:
+      tokens: `[num_tokens]` the batch's tokens, back to back.
+      positions: `[num_tokens]` each token's position in its sequence.
+      cache: the paged KV caches, keyed by `init_kv_cache` name.
+      metadata: the batch's ragged layout and page tables.
+      mesh: the mesh to shard attention over.
+
+    Returns:
+      A tuple of (`[num_tokens, vocab_size]` logits, updated cache).
+    """
+    # The ragged tokens run as one sequence of batch 1, so every layer keeps its
+    # `[B, T, ...]` shapes; only attention sees the ragged layout.
+    tokens, positions = tokens[None], positions[None]
+    x = self.embedder.encode(tokens)
+    per_layer_inputs = None
+    if self.config.per_layer_input_dim > 0:
+      per_layer_inputs = self.embedder.encode_per_layer_input(x, tokens)
+
+    cache = dict(cache)
+    for i, layer in enumerate(self.layers):
+      lender = self.kv_cache_sharing_patterns[i]
+      cache_name = f'layer_{lender}'
+      cache[cache_name], x = layer.paged_block(
+          x,
+          positions,
+          cache[cache_name],
+          metadata,
+          per_layer_inputs[:, :, i, :] if per_layer_inputs is not None else None,
+          cache_name=cache_name,
+          update_kv_cache=lender == i,
+          mesh=mesh,
+      )
+
+    logits = self.compute_final_logits(self.final_norm(x))
+    return logits[0], cache
+
+  def init_kv_cache(
+      self, cache_config: kv_cache_manager.CacheConfig
+  ) -> kv_cache_manager.KVCacheManager:
+    """Builds the paged KV caches `_paged_call` reads.
+
+    Gemma 4's global layers project a different number of KV heads at a
+    different head dim than its local ones, so caches differ in geometry.
+    KV-shared layers get no cache of their own; they read their lender's.
+
+    Args:
+      cache_config: Capacity, page geometry and sharding, owned by the caller.
+
+    Returns:
+      A manager holding one cache per unshared layer, named `layer_{i}`.
+    """
+    cache_geometries = {}
+    for i, layer in enumerate(self.layers):
+      if self.kv_cache_sharing_patterns[i] != i:
+        continue
+      # `attn.num_kv_heads` / `attn.head_dim` are already resolved per
+      # attention type; the raw config values are the local-layer ones.
+      cache_geometries[f'layer_{i}'] = kv_cache_manager.CacheGeometry(
+          num_kv_heads=layer.attn.num_kv_heads,
+          head_dim=layer.attn.head_dim,
+          window_size=(
+              self.config.sliding_window_size
+              if layer.attn.attn_type == AttentionType.LOCAL_SLIDING
+              else None
+          ),
+      )
+    return kv_cache_manager.KVCacheManager(cache_config, cache_geometries)
 
   def _encode_vision(self, vision_input: PreprocessedVisionInput):
     """Encode images into the same space as the text embeddings."""
