@@ -14,7 +14,9 @@
 
 """Unit tests for ClusterOrchestrator."""
 
+import os
 import pickle
+import signal
 import tempfile
 import threading
 import time
@@ -427,6 +429,69 @@ class ClusterOrchestratorTest(absltest.TestCase):
     mock_program.run.assert_called_once_with(
         engine=mock_engine,
     )
+
+  @mock.patch.object(orchestrator.threading, "Thread")
+  @mock.patch.object(orchestrator.os, "kill")
+  def test_registration_after_wait_for_workers_terminates(
+      self, mock_kill, mock_thread
+  ):
+    orch = orchestrator.ClusterOrchestrator()
+    first = mock.MagicMock(spec=remote_execution.ActorHandle)
+    orch.register_worker_handle("rollout-0", [datatypes.Role.ROLLOUT], first)
+    orch.wait_for_workers({datatypes.Role.ROLLOUT: 1}, timeout=1.0)
+    mock_kill.assert_not_called()
+
+    # Re-admitted workers come back under their original worker_ids.
+    for worker_id in ("rollout-0", "rollout-1"):
+      with self.assertRaisesRegex(
+          RuntimeError, f"'{worker_id}'.*cannot rejoin"
+      ):
+        orch.register_worker_handle(
+            worker_id,
+            [datatypes.Role.ROLLOUT],
+            mock.MagicMock(spec=remote_execution.ActorHandle),
+        )
+
+    # Only the first late registration terminates (a second SIGTERM would
+    # interrupt the cleanup), and it starts the hard-exit backstop.
+    mock_kill.assert_called_once_with(os.getpid(), signal.SIGTERM)
+    mock_thread.return_value.start.assert_called_once()
+    self.assertEqual(orch.worker_handles(datatypes.Role.ROLLOUT), [first])
+
+  @mock.patch.object(orchestrator.os, "kill")
+  def test_registration_before_wait_for_workers_succeeds(self, mock_kill):
+    orch = orchestrator.ClusterOrchestrator()
+    with self.assertRaises(TimeoutError):
+      orch.wait_for_workers({datatypes.Role.ACTOR: 1}, timeout=0.01)
+    orch.register_worker_handle(
+        "actor-0",
+        [datatypes.Role.ACTOR],
+        mock.MagicMock(spec=remote_execution.ActorHandle),
+    )
+
+    mock_kill.assert_not_called()
+    self.assertLen(orch.worker_handles(datatypes.Role.ACTOR), 1)
+
+  @mock.patch.object(orchestrator.threading, "Thread")
+  @mock.patch.object(orchestrator.os, "kill")
+  def test_duplicate_registration_before_wait_for_workers_terminates(
+      self, mock_kill, mock_thread
+  ):
+    del mock_thread
+    orch = orchestrator.ClusterOrchestrator()
+    first = mock.MagicMock(spec=remote_execution.ActorHandle)
+    orch.register_worker_handle("rollout-0", [datatypes.Role.ROLLOUT], first)
+
+    # rollout-0 restarted while other workers are still registering.
+    with self.assertRaisesRegex(RuntimeError, "'rollout-0'.*cannot rejoin"):
+      orch.register_worker_handle(
+          "rollout-0",
+          [datatypes.Role.ROLLOUT],
+          mock.MagicMock(spec=remote_execution.ActorHandle),
+      )
+
+    mock_kill.assert_called_once_with(os.getpid(), signal.SIGTERM)
+    self.assertEqual(orch.worker_handles(datatypes.Role.ROLLOUT), [first])
 
 
 def _trajectory_store_orchestrator(
