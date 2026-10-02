@@ -20,6 +20,7 @@ import dataclasses
 from typing import Iterable, Mapping, Sequence, overload
 
 import numpy as np
+from tunix.rl.agentic.agents import agent_types
 
 # Optional per-token fields tracked in a PackItem.
 PER_TOKEN_FIELDS: tuple[str, ...] = (
@@ -29,11 +30,6 @@ PER_TOKEN_FIELDS: tuple[str, ...] = (
     "old_values",
     "sampler_is_weights",
 )
-
-# Marks a router-replay slot the trainer must leave to the model's own router.
-# Kept local (rather than imported from `rl.common`) so this module stays
-# numpy-only; the value must match `rl.common.UNSET_ROUTED_EXPERT`.
-UNSET_ROUTED_EXPERT = -1
 
 # Default token boundary alignment for packed segments. `1` disables alignment
 # (segments are packed back to back). Hybrid recurrent models such as Qwen3.5
@@ -370,7 +366,9 @@ def pack_chunk(
       None
       if routed_shape is None
       else np.full(
-          (n_bins, budget, *routed_shape), UNSET_ROUTED_EXPERT, dtype=np.int16
+          (n_bins, budget, *routed_shape),
+          agent_types.UNSET_ROUTED_EXPERT,
+          dtype=np.int16,
       )
   )
   policy_versions: list[np.ndarray | None] = []

@@ -17,6 +17,7 @@
 from absl.testing import absltest
 import numpy as np
 from tunix.rl import packing
+from tunix.rl.agentic.agents import agent_types
 
 
 def _item(
@@ -333,12 +334,12 @@ class PackRoutedExpertsTest(absltest.TestCase):
     np.testing.assert_array_equal(row0.routed_experts[:3], experts1)
     np.testing.assert_array_equal(row0.routed_experts[3:5], experts2)
     np.testing.assert_array_equal(
-        row0.routed_experts[5:], packing.UNSET_ROUTED_EXPERT
+        row0.routed_experts[5:], agent_types.UNSET_ROUTED_EXPERT
     )
     # The dummy row in the same chunk keeps the same structure, all unset.
     self.assertEqual(row1.routed_experts.shape, (6, 2, 2))
     np.testing.assert_array_equal(
-        row1.routed_experts, packing.UNSET_ROUTED_EXPERT
+        row1.routed_experts, agent_types.UNSET_ROUTED_EXPERT
     )
     # Rows are views into one contiguous `[n_bins, budget, L, K]` buffer.
     self.assertEqual(rows.routed_experts.shape, (2, 6, 2, 2))
@@ -353,7 +354,7 @@ class PackRoutedExpertsTest(absltest.TestCase):
     [[row]] = packing.pack_core(items, budget=6, pack_size=1)
     np.testing.assert_array_equal(row.routed_experts[:3], 7)
     np.testing.assert_array_equal(
-        row.routed_experts[3:], packing.UNSET_ROUTED_EXPERT
+        row.routed_experts[3:], agent_types.UNSET_ROUTED_EXPERT
     )
 
   def test_mismatched_routing_shapes_raise(self):
@@ -424,7 +425,7 @@ class PackSegmentAlignmentTest(absltest.TestCase):
       np.testing.assert_array_equal(row.advantages[lo:hi], 0)
       np.testing.assert_array_equal(row.ids[lo:hi], pad_id)
       np.testing.assert_array_equal(
-          row.routed_experts[lo:hi], packing.UNSET_ROUTED_EXPERT
+          row.routed_experts[lo:hi], agent_types.UNSET_ROUTED_EXPERT
       )
 
   def test_exact_multiple_leaves_no_gap(self):
