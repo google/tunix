@@ -315,7 +315,11 @@ class TrainerWorker(abstract_worker.Worker):
           if getattr(items, "routed_experts", None) is None
           else np.asarray(items.routed_experts, dtype=np.int16)
       )
-      micro_batch_size = self._logps_micro_batch_size or batch_size
+      micro_batch_size = (
+          getattr(items, "micro_batch_size", None)
+          or self._logps_micro_batch_size
+          or batch_size
+      )
       outs = []
       for start in range(0, batch_size, micro_batch_size):
         sl = slice(start, start + micro_batch_size)
