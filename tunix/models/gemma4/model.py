@@ -747,13 +747,17 @@ class Gemma4(BackendMappingMixin, nnx.Module):
       cache[f'layer_{i}'] = layer.init_cache(batch_size, max_seq_len, dtype)
     return cache
 
-  def get_model_input(self):
-    """Returns a dummy model input for the transformer.
+  def get_model_input(self, batch_size: int | None = None):
+    """Returns a dummy model input for the transformer."""
+    dummy_batch_size = 2 if batch_size is None else batch_size
+    try:
+      from jax.interpreters import pxla  # pylint: disable=g-import-not-at-top
 
-    This dummy input has a batch size compatible with FSDP sharding on a
-    2-device axis.
-    """
-    dummy_batch_size = 2
+      mesh = pxla.thread_resources.env.physical_mesh
+      if mesh and not mesh.empty and 'fsdp' in mesh.shape:
+        dummy_batch_size = max(dummy_batch_size, mesh.shape['fsdp'])
+    except Exception:  # pylint: disable=broad-except
+      pass
     dummy_seq_len = 2
     return {
         'tokens': jnp.ones((dummy_batch_size, dummy_seq_len), dtype=jnp.int32),
