@@ -56,11 +56,20 @@ class BaseChatTemplateParser(ABC):
     self.generation_prompt = self._init_generation_prompt()
     # message_separator is a per-turn formatting hint (e.g. "\n"), not a
     # control token; including it would strip every newline from message
-    # content.
+    # content. Similarly, tool_start_token and tool_end_token (e.g.
+    # "\n<tool_call>\n" and "\n</tool_call>") legitimately appear inside
+    # tool-use system prompts and assistant tool-call turns.
     self._tokens_to_sanitize = {
         v
         for k, v in dataclasses.asdict(self.tokens).items()
-        if k != "message_separator" and isinstance(v, str) and v
+        if k
+        not in (
+            "message_separator",
+            "tool_start_token",
+            "tool_end_token",
+        )
+        and isinstance(v, str)
+        and v
     }
 
   @abstractmethod
