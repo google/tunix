@@ -58,6 +58,7 @@ ${QUEUE_LABEL}spec:
             # exit still ends the pod immediately.
             terminationGracePeriodSeconds: 60
             nodeSelector:
+              cloud.google.com/gke-nodepool: cpu-np
               node.kubernetes.io/instance-type: ${CPU_MACHINE}
             tolerations:
             - key: "cloud.google.com/gke-nodepool"
