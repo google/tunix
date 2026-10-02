@@ -1066,7 +1066,11 @@ def get_openhands_pod_template(
       os.getenv("OPENHANDS_SERVER_IMAGE")
       or os.getenv("SANDBOX_RUNTIME_CONTAINER_IMAGE")
       or os.getenv("AGENT_SERVER_IMAGE")
-      or "docker.openhands.dev/openhands/runtime:0.62-nikolaik"
+      or (
+          f"{os.environ['IMAGE_REWRITE_PREFIX'].rstrip('/')}/openhands-runtime:0.62-nikolaik"
+          if os.getenv("IMAGE_REWRITE_PREFIX")
+          else "us-east1-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/openhands-runtime:0.62-nikolaik"
+      )
   )
 
   extra_pod_spec = {

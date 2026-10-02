@@ -19,7 +19,7 @@ set -euo pipefail
 TUNIX_IMAGE=${TUNIX_IMAGE:-"us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/yangmu/tunix/tunix_base_image:trellis-demo-0813"}
 NAMESPACE=${NAMESPACE:-"trellis"}
 SERVICE_ACCOUNT=${SERVICE_ACCOUNT:-"xpk-sa"}
-IMAGE_REWRITE_PREFIX=${IMAGE_REWRITE_PREFIX:-"europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/tunix"}
+IMAGE_REWRITE_PREFIX=${IMAGE_REWRITE_PREFIX:-"us-east1-docker.pkg.dev/cloud-tpu-multipod-dev/tunix"}
 DATASET_NAME=${DATASET_NAME:-"R2E-Gym/R2E-Gym-Subset"}
 BATCH_SIZE=${BATCH_SIZE:-1}
 NUM_GENERATIONS=${NUM_GENERATIONS:-2}
