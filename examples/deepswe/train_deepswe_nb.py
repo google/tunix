@@ -70,6 +70,15 @@ parser.add_argument("--dataset_name", type=str, default="R2E-Gym/R2E-Gym-Subset"
 parser.add_argument("--dataset_revision", type=str, default="2e8108ff942f24fcb5686badfaf7f9a8808566d5")
 parser.add_argument("--dataset_split", type=str, default="train")
 parser.add_argument("--gold_whitelist", type=str, default=None)
+parser.add_argument(
+    "--shuffle",
+    type=_parse_bool,
+    default=True,
+    help=(
+        "Shuffle the task list (seeded by --seed). Set false to keep an"
+        " ordered curriculum such as the MLPerf easy-curriculum dataset."
+    ),
+)
 
 parser.add_argument("--tpu_topology", type=str, default=None)
 
@@ -649,6 +658,7 @@ dataset = deepswe_data.load_clean_dataset(
     dataset_path=args.dataset_path or "",
     gold_whitelist=args.gold_whitelist or "",
     cache_dir=DATASET_CACHE,
+    shuffle=args.shuffle,
     seed=SEED,
 )
 if len(dataset) * NUM_EPOCHS < MAX_STEPS * BATCH_SIZE:

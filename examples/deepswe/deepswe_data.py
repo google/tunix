@@ -79,12 +79,16 @@ def load_clean_dataset(
   if cache_dir is None:
     cache_dir = os.path.join(os.getcwd(), "dataset_cache")
   os.makedirs(cache_dir, exist_ok=True)
+  if not gold_whitelist and not dataset_path:
+    # A prebuilt dataset_path is already the task selection; only the HF
+    # source gets the default clean whitelist.
+    gold_whitelist = deepswe.DEFAULT_GOLD_WHITELIST
   return deepswe.load_deepswe_dataset(
       dataset_name=dataset_name,
       dataset_revision=dataset_revision,
       dataset_split=dataset_split,
       dataset_path=dataset_path,
-      gold_whitelist=gold_whitelist or deepswe.DEFAULT_GOLD_WHITELIST,
+      gold_whitelist=gold_whitelist,
       cache_dir=cache_dir,
       shuffle=shuffle,
       seed=seed,
