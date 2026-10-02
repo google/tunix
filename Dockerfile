@@ -71,6 +71,7 @@ RUN if [ "$INSTALL_DEEPSWE_DEPS" = "true" ]; then \
       uv pip install --no-deps git+https://github.com/kubernetes-sigs/agent-sandbox.git#subdirectory=examples/agent-sandbox-rl && \
       uv pip install --no-deps git+https://github.com/kubernetes-sigs/agent-sandbox.git#subdirectory=clients/integrations/openhands && \
       uv pip install --no-deps git+https://github.com/r2e-gym/r2e-gym.git@0d94c4eb9431cd195c55a7ea3abd54006c9a1735 && \
+      SKIP_VSCODE_BUILD=true uv pip install --no-deps git+https://github.com/sdevare-nv/nv-OpenHands.git@0d766ad06b2be64a42e6f0175b9ebcc4a06599d9 && \
       sed -i 's/create_repo, upload_folder, HfFolder/create_repo, upload_folder/' /opt/venv/lib/python3.12/site-packages/r2egym/agenthub/utils/utils.py && \
       sed -i 's/self.commit = ParsedCommit(\*\*json.loads(self.commit_json))/self.commit = ParsedCommit(\*\*(json.loads(self.commit_json) if isinstance(self.commit_json, str) else self.commit_json))/' /opt/venv/lib/python3.12/site-packages/r2egym/agenthub/runtime/docker.py && \
       sed -i 's/sel = c.resources.managed_selector()/sel = self.run_selector()/' /opt/venv/lib/python3.12/site-packages/agent_sandbox_rl/fleet.py; \

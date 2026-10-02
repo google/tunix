@@ -135,6 +135,17 @@ if [[ "${DRY_RUN}" == "1" || "${DRY_RUN}" == "true" ]]; then
       --sampling_rate="${SAMPLING_RATE}" \
       --shuffle="${SHUFFLE}" \
       --seed="${SEED}"
+  elif [[ -f "${SCRIPT_DIR}/sandbox_k8s_e2e_test.py" ]]; then
+    python3 "${SCRIPT_DIR}/sandbox_k8s_e2e_test.py" \
+      --dry_run \
+      --scaffold="${SCAFFOLD}" \
+      --batch_size="${BATCH_SIZE}" \
+      --num_generations="${NUM_GENERATIONS}" \
+      --max_steps="${MAX_STEPS}" \
+      --minimum_step_time_in_second="${MINIMUM_STEP_TIME_IN_SECOND}" \
+      --sampling_rate="${SAMPLING_RATE}" \
+      --shuffle="${SHUFFLE}" \
+      --seed="${SEED}"
   else
     python3 -m tunix.experimental.examples.deepswe_dist.sandbox_k8s_e2e_test \
       --dry_run \
@@ -159,15 +170,32 @@ RANDOM_SUFFIX=$(head /dev/urandom | tr -dc a-z0-9 | head -c 6 ; echo '')
 JOB_NAME="deepswe-e2e-${USER:-wuhao}-${RANDOM_SUFFIX}"
 CONFIGMAP_NAME="code-${JOB_NAME}"
 
+find_code_file() {
+  local target_name="$1"
+  shift
+  for p in "$@"; do
+    if [[ -f "$p" ]]; then
+      echo "--from-file=${target_name}=${p}"
+      return 0
+    fi
+  done
+  echo "Error: Could not locate ${target_name} among: $*" >&2
+  exit 1
+}
+
+CONFIGMAP_FILES=(
+  "$(find_code_file sandbox_utils.py "${REPO_ROOT}/examples/deepswe/sandbox_utils.py" "${SCRIPT_DIR}/../../../oss/examples/deepswe/sandbox_utils.py")"
+  "$(find_code_file swe_env.py "${REPO_ROOT}/examples/deepswe/swe_env.py" "${SCRIPT_DIR}/../../../oss/examples/deepswe/swe_env.py")"
+  "$(find_code_file openhands_utils.py "${REPO_ROOT}/examples/deepswe/openhands_utils.py" "${SCRIPT_DIR}/../../../oss/examples/deepswe/openhands_utils.py")"
+  "$(find_code_file template.py "${REPO_ROOT}/examples/deepswe/template.py" "${SCRIPT_DIR}/../../../oss/examples/deepswe/template.py")"
+  "$(find_code_file deepswe.py "${REPO_ROOT}/tunix/experimental/examples/deepswe_dist/deepswe.py" "${SCRIPT_DIR}/deepswe.py")"
+  "$(find_code_file sandbox_k8s_e2e_test.py "${SCRIPT_DIR}/sandbox_k8s_e2e_test.py")"
+)
+
 echo "=== Creating ConfigMap ${CONFIGMAP_NAME} with local patched files in namespace ${NAMESPACE} ==="
 kubectl create configmap "${CONFIGMAP_NAME}" \
   --namespace="${NAMESPACE}" \
-  --from-file=sandbox_utils.py="${SCRIPT_DIR}/../../../oss/examples/deepswe/sandbox_utils.py" \
-  --from-file=swe_env.py="${SCRIPT_DIR}/../../../oss/examples/deepswe/swe_env.py" \
-  --from-file=openhands_utils.py="${SCRIPT_DIR}/../../../oss/examples/deepswe/openhands_utils.py" \
-  --from-file=template.py="${SCRIPT_DIR}/../../../oss/examples/deepswe/template.py" \
-  --from-file=deepswe.py="${SCRIPT_DIR}/deepswe.py" \
-  --from-file=sandbox_k8s_e2e_test.py="${SCRIPT_DIR}/sandbox_k8s_e2e_test.py"
+  "${CONFIGMAP_FILES[@]}"
 
 echo "=== Submitting Dedicated Kubernetes Job: ${JOB_NAME} in namespace ${NAMESPACE} ==="
 
@@ -230,6 +258,7 @@ spec:
           mkdir -p /opt/venv/lib/python3.12/site-packages
           cp -r /tmp/agent-sandbox/clients/integrations/openhands/openhands_k8s_agent_sandbox /opt/venv/lib/python3.12/site-packages/ 2>/dev/null || true
           pip install -q --no-deps 'git+https://github.com/r2e-gym/r2e-gym.git@0d94c4eb9431cd195c55a7ea3abd54006c9a1735'
+          SKIP_VSCODE_BUILD=true pip install -q --no-deps 'git+https://github.com/sdevare-nv/nv-OpenHands.git@0d766ad06b2be64a42e6f0175b9ebcc4a06599d9'
           sed -i 's/create_repo, upload_folder, HfFolder/create_repo, upload_folder/' /opt/venv/lib/python3.12/site-packages/r2egym/agenthub/utils/utils.py 2>/dev/null || true
           sed -i 's/self.commit = ParsedCommit(\*\*json.loads(self.commit_json))/self.commit = ParsedCommit(\*\*(json.loads(self.commit_json) if isinstance(self.commit_json, str) else self.commit_json))/' /opt/venv/lib/python3.12/site-packages/r2egym/agenthub/runtime/docker.py 2>/dev/null || true
 

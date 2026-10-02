@@ -16,6 +16,8 @@ set -euo pipefail
   docker kubernetes gym swebench==3.0.2 fire simple-parsing unidiff
 "${PYTHON:-python}" -m pip install --no-deps qwix==0.1.8 \
   'git+https://github.com/r2e-gym/r2e-gym.git@0d94c4eb9431cd195c55a7ea3abd54006c9a1735'
+SKIP_VSCODE_BUILD=true "${PYTHON:-python}" -m pip install --no-deps \
+  'git+https://github.com/sdevare-nv/nv-OpenHands.git@0d766ad06b2be64a42e6f0175b9ebcc4a06599d9'
 
 # Same compatibility fixes as the repository's INSTALL_DEEPSWE_DEPS image.
 # --no-deps above avoids R2E-Gym's old datasets pin replacing the Tunix stack.
