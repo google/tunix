@@ -371,6 +371,54 @@ def patch_kubernetes_runtime():
 
 patch_kubernetes_runtime()
 
+
+# Orbax (0.12.x) calls storage.buckets.get to detect hierarchical-namespace
+# (HNS) buckets when it lists checkpoint steps (i.e. on resume) and after it
+# deletes old checkpoints (max_to_keep rotation). Service accounts with only
+# object-level access (e.g. roles/storage.objectAdmin) get a 403 there, which
+# makes every resume fail. Treat a failed probe as "not HNS": the flat-namespace
+# code path only needs object list/get/delete.
+def patch_orbax_gcs_hns_probe():
+  try:
+    from orbax.checkpoint._src.path import gcs_utils as ocp_gcs_utils
+
+    original_is_hns = ocp_gcs_utils.is_hierarchical_namespace_enabled
+    if getattr(original_is_hns, "_deepswe_patched", False):
+      return
+    failed_buckets = set()
+
+    def safe_is_hns(path):
+      bucket = None
+      if str(path).startswith("gs://"):
+        try:
+          bucket = ocp_gcs_utils.parse_gcs_path(path)[0]
+        except Exception:  # pylint: disable=broad-exception-caught
+          bucket = None
+      if bucket is not None and bucket in failed_buckets:
+        return False
+      try:
+        return original_is_hns(path)
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        if bucket is not None:
+          failed_buckets.add(bucket)
+        print(
+            f"[Monkeypatch] orbax HNS probe failed for bucket {bucket!r}"
+            f" ({type(e).__name__}: {str(e)[:160]}); assuming a"
+            " flat-namespace bucket"
+        )
+        return False
+
+    safe_is_hns._deepswe_patched = True
+    ocp_gcs_utils.is_hierarchical_namespace_enabled = safe_is_hns
+    print(
+        "[Monkeypatch] Patched orbax gcs_utils.is_hierarchical_namespace_enabled"
+    )
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    print(f"[Monkeypatch] Failed to patch orbax HNS probe: {e}")
+
+
+patch_orbax_gcs_hns_probe()
+
 # ====== Logging Configuration ======
 # 1. Force absl to use python logging
 absl_logging.use_python_logging()
