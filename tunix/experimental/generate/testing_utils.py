@@ -15,6 +15,7 @@
 """Test helpers that build an `LLMEngine` around a toy transformer."""
 
 from collections.abc import Mapping
+import dataclasses
 
 from flax import nnx
 import jax
@@ -40,6 +41,11 @@ def mesh() -> jax.sharding.Mesh:
   return jax.sharding.Mesh(np.array(jax.devices()[:1]), ('x',))
 
 
+@dataclasses.dataclass(frozen=True)
+class PagedSumConfig:
+  dtype: jax.typing.DTypeLike = jnp.float32
+
+
 class PagedSumTransformer(nnx.Module):
   """A stand-in transformer that reads and writes the paged KV cache.
 
@@ -56,6 +62,7 @@ class PagedSumTransformer(nnx.Module):
       dtype: jax.typing.DTypeLike = jnp.float32,
       geometries: Mapping[str, kv_cache_manager_lib.CacheGeometry] = GEOMETRIES,
   ):
+    self.config = PagedSumConfig(dtype=dtype)
     self.offset = nnx.Param(jnp.asarray(offset, dtype=dtype))
     self.geometries = dict(geometries)
 

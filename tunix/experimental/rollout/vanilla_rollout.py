@@ -61,10 +61,6 @@ def _build_engine(
         "rollout_engine='vanillav2' requires"
         ' rollout_config.kv_cache_max_device_bytes.'
     )
-  kv_dtype = (
-      rollout_config.data_type
-      or jax.tree.leaves(nnx.state(model, nnx.Param))[0].dtype
-  )
   if rollout_config.eos_tokens:
     eos_token_ids = frozenset(rollout_config.eos_tokens)
   else:
@@ -76,7 +72,7 @@ def _build_engine(
           max_device_bytes=rollout_config.kv_cache_max_device_bytes,
           page_size=rollout_config.kv_cache_page_size,
           enable_prefix_caching=rollout_config.enable_prefix_caching,
-          dtype=kv_dtype,
+          dtype=model.config.dtype,
       ),
       scheduler_config=scheduler_lib.SchedulerConfig(
           max_num_batched_tokens=rollout_config.max_num_batched_tokens,
