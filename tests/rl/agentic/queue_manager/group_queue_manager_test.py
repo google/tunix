@@ -260,6 +260,43 @@ class GroupQueueManagerTest(absltest.TestCase):
 
     asyncio.run(_run_test())
 
+  def test_on_group_filtered_callback(self):
+    """Tests that on_group_filtered fires only when a whole group is dropped."""
+
+    async def _run_test():
+      dropped_callbacks = []
+
+      def filter_fn(group):
+        valid = [x for x in group if x.group_index >= 0]
+        filtered = [x for x in group if x.group_index < 0]
+        return valid, filtered
+
+      manager = group_queue_manager.GroupQueueManager(
+          num_generations=2,
+          key_fn=lambda x: x.prompt_id,
+          filter_fn=filter_fn,
+          on_group_filtered=dropped_callbacks.append,
+      )
+
+      # Group 1: both items filtered out -> on_group_filtered called once.
+      drop1 = _create_item("g_drop", -1)
+      drop2 = _create_item("g_drop", -2)
+      await manager.put(drop1)
+      self.assertEmpty(dropped_callbacks)
+      await manager.put(drop2)
+      self.assertEqual(dropped_callbacks, [[drop1, drop2]])
+      self.assertEmpty(manager._ready_groups)
+
+      # Group 2: 1 valid, 1 filtered out -> callback not called.
+      keep1 = _create_item("g_partial", 0)
+      drop3 = _create_item("g_partial", -1)
+      await manager.put(keep1)
+      await manager.put(drop3)
+      self.assertLen(dropped_callbacks, 1)
+      self.assertLen(manager._ready_groups, 1)
+
+    asyncio.run(_run_test())
+
 
 if __name__ == "__main__":
   absltest.main()

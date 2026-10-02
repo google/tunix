@@ -388,10 +388,19 @@ class StandardRLProgram(RLProgram):
         num_generations=self.num_generations,
         max_staleness=max_staleness,
         current_policy_version=lambda: self.policy_version,
+        on_group_filtered=self._on_raw_group_filtered,
     )
     self.scored_q = trajectory_queue_manager.TrajectoryQueueManager.create(
         num_generations=self.num_generations
     )
+
+  def _on_raw_group_filtered(
+      self, filtered_group: list[datatypes.TrajectoryItem]
+  ) -> None:
+    """Releases a dispatch capacity token when a stale group is dropped."""
+    del filtered_group
+    if self._dispatch_capacity is not None:
+      self._dispatch_capacity.release()
 
   @property
   def trajectory_store(self) -> trajectory_store_lib.TrajectoryStore | None:

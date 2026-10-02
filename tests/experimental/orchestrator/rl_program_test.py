@@ -4067,6 +4067,66 @@ class RLProgramTest(absltest.TestCase):
         {"gold_answer": "4", "prompt_id": "p_math", "group_index": 3},
     )
 
+  def test_staleness_filtered_groups_release_dispatch_capacity_and_avoid_deadlock(
+      self,
+  ):
+    async def _run():
+      # Configure batch_size=1, max_staleness=1 -> max_groups_ahead = 2.
+      # With 3 prompts in dataset, prompts 0 and 1 saturate _dispatch_capacity.
+      # When prompts 0 and 1 return stale trajectories (policy_version=0 while
+      # program.policy_version=5), raw_q filters both groups out and releases
+      # their 2 tokens so prompt_2 can be dispatched to complete step 0.
+      program = self._create_program(
+          dataset=["prompt_0", "prompt_1", "prompt_2"],
+          reward_fns=[],
+          batch_size=1,
+          max_staleness=1,
+          max_steps=1,
+      )
+      program.policy_version = 5
+
+      pending_responses: list[datatypes.TrajectoryItem] = []
+
+      async def _mock_dispatch(prompts, **kwargs):
+        del kwargs
+        prompt_id = prompts[0]["prompt_id"]
+        ver = 0 if prompt_id in ("prompt_0", "prompt_1") else 5
+        for g_idx in range(2):
+          resp = _create_rollout_response(
+              f"{prompt_id}_{g_idx}",
+              prompt_id,
+              group_index=g_idx,
+              policy_version=ver,
+          )
+          pending_responses.append(
+              distributed_rl_engine._response_to_trajectory_item(resp)
+          )
+
+      async def _mock_poll():
+        if pending_responses:
+          batch = list(pending_responses)
+          pending_responses.clear()
+          return batch
+        await asyncio.sleep(0.005)
+        return []
+
+      self.mock_engine.dispatch_rollouts.side_effect = _mock_dispatch
+      self.mock_engine.poll_rollouts.side_effect = _mock_poll
+
+      await asyncio.wait_for(program.run_async(self.mock_engine), timeout=5.0)
+
+      self.assertEqual(self.mock_engine.dispatch_rollouts.call_count, 3)
+      self.assertEqual(program.raw_q.filtered_groups_count, 2)
+      self.assertIsNotNone(program._dispatch_capacity)
+      # Initial capacity is 1 * (1 + 1) = 2; all 3 dispatched prompts (2
+      # filtered + 1 trained) must have released their tokens back to 2.
+      self.assertEqual(program._dispatch_capacity._value, 2)
+      self.assertIsNotNone(program.last_step_result)
+      self.assertEqual(program.last_step_result.step, 0)
+      self.assertEqual(program.last_step_result.num_rollouts, 2)
+
+    asyncio.run(_run())
+
 
 def _traj_item(tokens, clipped=None, raw_length=None):
   """Builds a TrajectoryItem, optionally with collector annotations."""
