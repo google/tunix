@@ -31,7 +31,7 @@ SEED=${SEED:-42}
 CPU_MACHINE=${CPU_MACHINE:-"n2-standard-64"}
 NODE_SELECTOR_KEY=${NODE_SELECTOR_KEY:-"cloud.google.com/gke-nodepool"}
 NODE_SELECTOR_VAL=${NODE_SELECTOR_VAL:-"sandbox-cpu-pool"}
-JOB_NODEPOOL=${JOB_NODEPOOL:-"default-pool"}
+JOB_NODEPOOL=${JOB_NODEPOOL:-"sandbox-cpu-pool"}
 SCAFFOLD=${SCAFFOLD:-"r2egym"}
 DRY_RUN=${DRY_RUN:-0}
 KUEUE_QUEUE=${KUEUE_QUEUE:-""}
@@ -291,12 +291,13 @@ spec:
           git clone --depth 1 https://github.com/kubernetes-sigs/agent-sandbox.git /tmp/agent-sandbox
           pip install -q --no-cache-dir /tmp/agent-sandbox/examples/agent-sandbox-rl
           SETUPTOOLS_SCM_PRETEND_VERSION=0.1.0 pip install -q --no-cache-dir /tmp/agent-sandbox/clients/integrations/openhands 2>/dev/null || true
-          mkdir -p /opt/venv/lib/python3.12/site-packages
-          cp -r /tmp/agent-sandbox/clients/integrations/openhands/openhands_k8s_agent_sandbox /opt/venv/lib/python3.12/site-packages/ 2>/dev/null || true
+          SITE_PKG=\$(python3 -c "import site; print(site.getsitepackages()[0])" 2>/dev/null || echo "/opt/venv/lib/python3.12/site-packages")
+          mkdir -p "\${SITE_PKG}"
+          cp -r /tmp/agent-sandbox/clients/integrations/openhands/openhands_k8s_agent_sandbox "\${SITE_PKG}/" 2>/dev/null || true
           pip install -q --no-deps 'git+https://github.com/r2e-gym/r2e-gym.git@0d94c4eb9431cd195c55a7ea3abd54006c9a1735'
           SKIP_VSCODE_BUILD=true pip install -q --no-deps 'git+https://github.com/sdevare-nv/nv-OpenHands.git@0d766ad06b2be64a42e6f0175b9ebcc4a06599d9'
-          sed -i 's/create_repo, upload_folder, HfFolder/create_repo, upload_folder/' /opt/venv/lib/python3.12/site-packages/r2egym/agenthub/utils/utils.py 2>/dev/null || true
-          sed -i 's/self.commit = ParsedCommit(\*\*json.loads(self.commit_json))/self.commit = ParsedCommit(\*\*(json.loads(self.commit_json) if isinstance(self.commit_json, str) else self.commit_json))/' /opt/venv/lib/python3.12/site-packages/r2egym/agenthub/runtime/docker.py 2>/dev/null || true
+          find / -name utils.py -path "*/r2egym/agenthub/utils/*" -exec sed -i 's/create_repo, upload_folder, HfFolder/create_repo, upload_folder/' {} + 2>/dev/null || true
+          find / -name docker.py -path "*/r2egym/agenthub/runtime/*" -exec sed -i 's/self.commit = ParsedCommit(\*\*json.loads(self.commit_json))/self.commit = ParsedCommit(\*\*(json.loads(self.commit_json) if isinstance(self.commit_json, str) else self.commit_json))/' {} + 2>/dev/null || true
 
           mkdir -p /app/examples/deepswe
           mkdir -p /app/tunix/oss/examples/deepswe
@@ -340,10 +341,17 @@ spec:
 EOF
 
 echo "Job ${JOB_NAME} created. Waiting for pod startup..."
-kubectl wait --namespace="${NAMESPACE}" --for=condition=Ready pod -l job-name="${JOB_NAME}" --timeout=120s || true
+kubectl wait --namespace="${NAMESPACE}" --for=condition=Ready pod -l job-name="${JOB_NAME}" --timeout=600s || true
 
 echo "Streaming logs for ${JOB_NAME}:"
-kubectl logs --namespace="${NAMESPACE}" -f "job/${JOB_NAME}" || true
+until kubectl logs --namespace="${NAMESPACE}" -f "job/${JOB_NAME}" 2>/dev/null; do
+  STATUS=$(kubectl get pod --namespace="${NAMESPACE}" -l job-name="${JOB_NAME}" -o jsonpath='{.items[0].status.phase}' 2>/dev/null || echo "Unknown")
+  if [[ "${STATUS}" == "Failed" || "${STATUS}" == "Succeeded" ]]; then
+    kubectl logs --namespace="${NAMESPACE}" "job/${JOB_NAME}" || true
+    break
+  fi
+  sleep 5
+done
 
 echo "Waiting for Job completion..."
 if kubectl wait --namespace="${NAMESPACE}" --for=condition=complete --timeout=15m "job/${JOB_NAME}"; then
