@@ -319,6 +319,9 @@ export STEP_TIMEOUT_SECS="${STEP_TIMEOUT_SECS:-60}"
 export REWARD_TIMEOUT_SECS="${REWARD_TIMEOUT_SECS:-60}"
 export FLUSH_EVERY_N_STEPS=1
 export MAX_TURNS=30
+# The reference OpenHands harness appends no step countdown, max-steps message
+# or token warning to observations (RULES:684), so turn them off here.
+export DEEPSWE_TURN_HINTS="${DEEPSWE_TURN_HINTS:-0}"
 export MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-4096}"
 export MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-61440}"
 
