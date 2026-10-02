@@ -68,6 +68,7 @@ class MockActorHandle(mock.MagicMock):
     self.get_metrics = mock.AsyncMock(return_value={})
     self.get_target_state = mock.AsyncMock(return_value={"params": 1})
     self.set_target_state = mock.AsyncMock()
+    self.cancel_by_prompt_id = mock.AsyncMock(return_value=0)
     self.with_loss_fn = mock.MagicMock()
     self.with_gen_model_input_fn = mock.MagicMock()
 
@@ -791,7 +792,6 @@ class DistributedRLEngineTest(absltest.TestCase):
         )
 
     asyncio.run(_run())
-
 
   def test_sync_weights_requires_a_coordinator(self):
     async def _run():
@@ -1768,6 +1768,23 @@ class DistributedRLEngineTest(absltest.TestCase):
       self.assertGreaterEqual(len(results), 1)
       self.assertEqual(results[0].prompt_id, "p1")
       self.assertLess(elapsed, 1.0)
+
+    asyncio.run(_run())
+
+  def test_cancel_rollouts_fans_out_to_all_rollout_workers(self):
+    async def _run():
+      self.mock_rollout_1.cancel_by_prompt_id.return_value = 2
+      self.mock_rollout_2.cancel_by_prompt_id.return_value = 1
+
+      cancelled = await self.engine.cancel_rollouts("prompt_42")
+
+      self.assertEqual(cancelled, 3)
+      self.mock_rollout_1.cancel_by_prompt_id.assert_called_once_with(
+          prompt_id="prompt_42"
+      )
+      self.mock_rollout_2.cancel_by_prompt_id.assert_called_once_with(
+          prompt_id="prompt_42"
+      )
 
     asyncio.run(_run())
 

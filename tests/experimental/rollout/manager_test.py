@@ -717,5 +717,126 @@ class WeightSyncModeTest(absltest.TestCase):
     )
 
 
+class CancelByPromptIdTest(unittest.IsolatedAsyncioTestCase):
+
+  async def test_cancel_by_prompt_id_resolves_inflight_and_unblocks_drain(self):
+    started_events: dict[str, asyncio.Event] = {}
+    release_events: dict[str, asyncio.Event] = {}
+    cancelled_trajs: list[str] = []
+
+    class _BlockingCollector:
+
+      def __init__(
+          self,
+          traj_id,
+          request,
+          sampler,
+          env_client,
+          agent,
+          tokenizer,
+          chat_parser,
+          eos_ids=None,
+          **kwargs,
+      ):
+        del sampler, agent, tokenizer, chat_parser, eos_ids, kwargs
+        self.traj_id = traj_id
+        self.request = request
+        self.env = env_client
+        self._cancelled = False
+        started_events[traj_id] = asyncio.Event()
+        release_events[traj_id] = asyncio.Event()
+
+      def cancel(self):
+        self._cancelled = True
+        cancelled_trajs.append(self.traj_id)
+
+      async def run_episode(self):
+        started_events[self.traj_id].set()
+        await release_events[self.traj_id].wait()
+        return datatypes.TrajectoryItem(
+            prompt_id=self.request.prompt_id,
+            group_index=self.request.group_index,
+            traj={},
+        )
+
+    manager = manager_lib.RolloutManager(
+        sampler=_FakeSyncSampler([]),
+        tokenizer="mock",
+        chat_parser="mock",
+    )
+    req_p0_0 = datatypes.RolloutRequest(
+        request_id="req_p0_0", prompt="p0", prompt_id="p0", group_index=0
+    )
+    req_p0_1 = datatypes.RolloutRequest(
+        request_id="req_p0_1", prompt="p0", prompt_id="p0", group_index=1
+    )
+    req_p1_0 = datatypes.RolloutRequest(
+        request_id="req_p1_0", prompt="p1", prompt_id="p1", group_index=0
+    )
+
+    with mock.patch.object(
+        manager_lib.collector_lib,
+        "TrajectoryCollectorEngine",
+        _BlockingCollector,
+    ):
+      t0 = asyncio.create_task(manager._generate_one(req_p0_0))
+      t1 = asyncio.create_task(manager._generate_one(req_p0_1))
+      t2 = asyncio.create_task(manager._generate_one(req_p1_0))
+
+      for traj_id in (req_p0_0.traj_id, req_p0_1.traj_id, req_p1_0.traj_id):
+        while traj_id not in started_events:
+          await asyncio.sleep(0.005)
+        await started_events[traj_id].wait()
+
+      cancelled_count = await manager.cancel_by_prompt_id("p0")
+      self.assertEqual(cancelled_count, 2)
+      self.assertCountEqual(
+          cancelled_trajs, [req_p0_0.traj_id, req_p0_1.traj_id]
+      )
+
+      res0, res1 = await asyncio.gather(t0, t1)
+      self.assertEqual(res0.error_type, "CancelledError")
+      self.assertEqual(res0.prompt_id, "p0")
+      self.assertEqual(res1.error_type, "CancelledError")
+      self.assertEqual(res1.prompt_id, "p0")
+      self.assertFalse(t2.done())
+
+      release_events[req_p1_0.traj_id].set()
+      res2 = await t2
+      self.assertIsInstance(res2, datatypes.TrajectoryItem)
+      self.assertEqual(res2.prompt_id, "p1")
+
+      # Verify pre_weight_sync drains immediately with no lingering tasks.
+      await asyncio.wait_for(manager.pre_weight_sync(), timeout=0.5)
+
+  async def test_cancel_by_prompt_id_short_circuits_late_request(self):
+    manager = manager_lib.RolloutManager(
+        sampler=_FakeSyncSampler([]),
+        tokenizer="mock",
+        chat_parser="mock",
+    )
+    cancelled_count = await manager.cancel_by_prompt_id("p_cancelled")
+    self.assertEqual(cancelled_count, 0)
+
+    req_late = datatypes.RolloutRequest(
+        request_id="req_late",
+        prompt="late prompt",
+        prompt_id="p_cancelled",
+        group_index=2,
+    )
+    with mock.patch.object(
+        manager_lib.collector_lib, "TrajectoryCollectorEngine"
+    ) as collector_cls:
+      res = await manager._generate_one(req_late)
+      collector_cls.assert_not_called()
+
+    self.assertEqual(res.error_type, "CancelledError")
+    self.assertEqual(res.prompt_id, "p_cancelled")
+
+    # After weight sync completes, the same prompt_id is no longer blocked.
+    await manager.post_weight_sync()
+    self.assertEqual(len(manager._cancelled_prompt_ids), 0)
+
+
 if __name__ == "__main__":
   absltest.main()

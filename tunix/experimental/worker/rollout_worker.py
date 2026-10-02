@@ -435,6 +435,10 @@ class RolloutWorker(abstract_worker.Worker):
         f"Unsupported item type for RolloutResponse conversion: {type(item)}"
     )
 
+  async def cancel_by_prompt_id(self, prompt_id: str) -> int:
+    """Cancels all active trajectories on this worker matching `prompt_id`."""
+    return await self.manager.cancel_by_prompt_id(prompt_id)
+
   async def generate(
       self,
       requests: (

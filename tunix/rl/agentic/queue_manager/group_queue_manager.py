@@ -125,11 +125,15 @@ class GroupQueueManager(Generic[_T]):
       self._filtered_groups.clear()
       return filtered
 
-  async def put(self, item: _T):
+  async def put(self, item: _T) -> bool:
     """Adds an item, executing pluggable grouping and filtering.
 
     Args:
       item: The item to add.
+
+    Returns:
+      True if adding this item completed and emitted a candidate group; False
+      otherwise.
 
     Raises:
       Exception: If an exception has been set via `put_exception`.
@@ -137,7 +141,7 @@ class GroupQueueManager(Generic[_T]):
     if self._closed:
       raise RuntimeError("Cannot put into a closed GroupQueueManager.")
     if self._clearing:
-      return
+      return False
     if self._exc:
       raise self._exc
 
@@ -145,7 +149,7 @@ class GroupQueueManager(Generic[_T]):
       if self._closed:
         raise RuntimeError("Cannot put into a closed GroupQueueManager.")
       if self._clearing:
-        return
+        return False
       if self._exc:
         raise self._exc
 
@@ -167,6 +171,8 @@ class GroupQueueManager(Generic[_T]):
             ]
 
         self._on_candidate_group(valid_group, filtered_out)
+        return True
+      return False
 
   def _on_candidate_group(
       self, valid_group: List[_T], filtered_out: List[_T]

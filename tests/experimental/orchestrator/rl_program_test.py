@@ -255,6 +255,7 @@ class RLProgramTest(absltest.TestCase):
     self.mock_engine.sync_weights = mock.AsyncMock(return_value=1)
     self.mock_engine.get_metrics = mock.AsyncMock(return_value=None)
     self.mock_engine.poll_rollouts = mock.AsyncMock(side_effect=_mock_poll)
+    self.mock_engine.cancel_rollouts = mock.AsyncMock(return_value=0)
     self.mock_algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
     self.mock_algo.num_generations = 2
     self.mock_algo.mini_batch_size = 1
@@ -5275,6 +5276,39 @@ class RLProgramTest(absltest.TestCase):
         captured["metadata"],
         {"gold_answer": "4", "prompt_id": "p_math", "group_index": 3},
     )
+
+  def test_overgeneration_dispatches_extra_and_cancels_stragglers(self):
+    self.mock_algo.num_generations = 2
+    self.mock_algo.mini_batch_size = 1
+
+    group_items = _make_trajectory_group("prompt_0", num_generations=2)
+    cancelled_straggler = datatypes.TrajectoryItem(
+        prompt_id="prompt_0",
+        group_index=2,
+        start_step=0,
+        traj={"status": datatypes.TrajectoryStatus.FAILED},
+        is_valid=False,
+    )
+    _set_mock_poll_batches(
+        self.mock_engine,
+        group_items,
+        [cancelled_straggler],
+    )
+
+    program = rl_program.StandardRLProgram(
+        algo=self.mock_algo,
+        dataset=[{"prompt": "p0", "prompt_id": "prompt_0"}],
+        max_steps=1,
+        num_generations_to_dispatch=3,
+        prefer_valid_rollouts=True,
+    )
+    program.run(self.mock_engine)
+
+    self.mock_engine.dispatch_rollouts.assert_awaited_once()
+    dispatch_kwargs = self.mock_engine.dispatch_rollouts.call_args.kwargs
+    self.assertEqual(dispatch_kwargs["num_generations"], 3)
+    self.mock_engine.cancel_rollouts.assert_awaited_once_with("prompt_0")
+    self.assertEqual(self.mock_engine.train_step.await_count, 1)
 
 
 def _traj_item(tokens, clipped=None, raw_length=None):

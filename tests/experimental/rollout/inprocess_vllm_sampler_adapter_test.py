@@ -309,6 +309,46 @@ class InprocessVllmSamplerAdapterTest(absltest.TestCase):
     with self.assertRaises(ValueError):
       asyncio.run(self.sampler_adapter.sample(None))
 
+  def test_sample_cancellation_aborts_vllm_requests(self):
+    import threading  # pylint: disable=g-import-not-at-top
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def _blocking_sampler(**kwargs):
+      request_ids_out = kwargs["request_ids_out"]
+      cancel_event = kwargs["cancel_event"]
+      request_ids_out.append("vllm_req_cancel_1")
+      entered.set()
+      release.wait(timeout=2.0)
+      self.assertTrue(cancel_event.is_set())
+      return base_sampler.SamplerOutput(
+          text=["cancelled"],
+          logits=None,
+          tokens=[np.array([10], dtype=np.int32)],
+          padded_prompt_tokens=np.array([[1, 2]], dtype=np.int32),
+          logprobs=None,
+      )
+
+    self.mock_vllm_sampler.side_effect = _blocking_sampler
+
+    async def _run():
+      req = base_sampler_lib.SamplingRequest(
+          request_id="req_cancel",
+          prompt="slow prompt",
+      )
+      task = asyncio.create_task(self.sampler_adapter.sample(req))
+      await asyncio.to_thread(entered.wait, 2.0)
+      task.cancel()
+      with self.assertRaises(asyncio.CancelledError):
+        await task
+      release.set()
+
+    asyncio.run(_run())
+    self.mock_vllm_sampler.cancel_requests.assert_called_once_with(
+        ["vllm_req_cancel_1"]
+    )
+
 
 class RoutedExpertsTest(absltest.TestCase):
   """Captured MoE routing must reach the matching response."""

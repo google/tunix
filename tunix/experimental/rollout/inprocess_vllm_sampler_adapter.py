@@ -18,6 +18,7 @@ import abc
 import asyncio
 from concurrent import futures
 import functools
+import threading
 from typing import Any, List, Sequence
 from absl import logging
 from flax import nnx
@@ -328,10 +329,19 @@ class InprocessVllmSamplerAdapter(
     else:
       sampler_call_kwargs["input_strings"] = prompts
 
-    sampler_output = await loop.run_in_executor(
-        self._executor,
-        functools.partial(self.vllm_sampler, **sampler_call_kwargs),
-    )
+    cancel_event = threading.Event()
+    submitted_request_ids: list[str] = []
+    sampler_call_kwargs["cancel_event"] = cancel_event
+    sampler_call_kwargs["request_ids_out"] = submitted_request_ids
+    try:
+      sampler_output = await loop.run_in_executor(
+          self._executor,
+          functools.partial(self.vllm_sampler, **sampler_call_kwargs),
+      )
+    except asyncio.CancelledError:
+      cancel_event.set()
+      self.vllm_sampler.cancel_requests(submitted_request_ids)
+      raise
 
     prompt_lengths = getattr(sampler_output, "prompt_lengths", None)
     responses = []
