@@ -15,6 +15,7 @@
 """Unit tests for Universal BatchAssembler (SequencePacked, GRPO, & Padded)."""
 
 import dataclasses
+from unittest import mock
 
 from absl.testing import absltest
 import jax
@@ -905,6 +906,7 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
         pad_id=0,
         num_generations=2,
         mini_batch_size=1,
+        segment_align_multiple=1,
     )
     res = assembler.feed([
         self._make_streaming_payload(
@@ -2356,6 +2358,83 @@ class CreateBatchAssemblerTest(absltest.TestCase):
     np.testing.assert_array_equal(
         batches[0].payload.segment_ids[0], [1, 1, 1, 2, 2, 2, 0, 0]
     )
+
+  def test_sequence_packed_assembler_drops_duplicate_routed_experts_from_buffered_payload(
+      self,
+  ):
+    assembler = batch_assembly.SequencePackedBatchAssembler(
+        batch_size=2,
+        num_generations=2,
+        mini_batch_size=1,
+        max_packed_len=8,
+        pad_id=0,
+        segment_align_multiple=1,
+    )
+    re1 = np.ones((2, 2, 2), dtype=np.int16) * 3
+    p1 = datatypes.RLTrainerPayload(
+        prompt_ids=np.array([10], dtype=np.int32),
+        prompt_mask=np.array([1.0], dtype=np.float32),
+        completion_ids=np.array([11, 12], dtype=np.int32),
+        completion_mask=np.array([1.0, 1.0], dtype=np.float32),
+        advantages=np.array([1.0, 1.0], dtype=np.float32),
+        routed_experts=re1,
+        metadata={"traj_id": "t1"},
+    )
+    self.assertEmpty(assembler.feed([p1]))
+    self.assertLen(assembler._buffer, 1)
+    pack_item, _, raw_payload = assembler._buffer[0]
+    self.assertIsNotNone(pack_item.routed_experts)
+    self.assertIsNone(raw_payload.routed_experts)
+
+  def test_padded_pack_does_not_double_allocate_routed_experts_buffer(self):
+    routed_shape = (48, 8)
+    item0 = _make_payload(2, 3).replace(
+        routed_experts=np.arange(5 * 48 * 8, dtype=np.int16).reshape(
+            5, *routed_shape
+        )
+    )
+    item1 = _make_payload(3, 2).replace(
+        routed_experts=np.arange(5 * 48 * 8, dtype=np.int16).reshape(
+            5, *routed_shape
+        )
+    )
+    assembler = batch_assembly.PaddedBatchAssembler(
+        batch_size=4,
+        max_prompt_length=4,
+        max_response_length=5,
+        pad_id=0,
+        num_generations=1,
+        mini_batch_size=1,
+    )
+
+    real_full = np.full
+    real_stack = np.stack
+    full_routed_shapes = []
+    stack_routed_shapes = []
+
+    def tracking_full(shape, fill_value, *args, **kwargs):
+      arr = real_full(shape, fill_value, *args, **kwargs)
+      if arr.ndim >= 3 and arr.shape[-2:] == routed_shape:
+        full_routed_shapes.append(arr.shape)
+      return arr
+
+    def tracking_stack(arrays, *args, **kwargs):
+      arr = real_stack(arrays, *args, **kwargs)
+      if arr.ndim >= 3 and arr.shape[-2:] == routed_shape:
+        stack_routed_shapes.append(arr.shape)
+      return arr
+
+    with (
+        mock.patch.object(batch_assembly.np, "full", side_effect=tracking_full),
+        mock.patch.object(
+            batch_assembly.np, "stack", side_effect=tracking_stack
+        ),
+    ):
+      payload = assembler.pack([item0, item1])[0]
+
+    self.assertEqual(payload.routed_experts.shape, (4, 9, 48, 8))
+    self.assertEqual(full_routed_shapes, [(4, 9, 48, 8)])
+    self.assertEqual(stack_routed_shapes, [])
 
 
 if __name__ == "__main__":

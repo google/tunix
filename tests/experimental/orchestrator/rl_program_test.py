@@ -4755,6 +4755,90 @@ class RLProgramTest(absltest.TestCase):
     self.assertFalse(logger.metric_exists("", "rewards/mean", "train"))
     program.close()
 
+  def test_collect_and_log_step_metrics_logs_filtered_groups_metrics(self):
+    program = self._create_program()
+
+    filtered_groups = [
+        [self._scoring_item(0), self._scoring_item(1)],
+        [self._scoring_item(2)],
+    ]
+
+    metrics_summary = program._collect_and_log_step_metrics(
+        all_step_items=[],
+        step_rewards=[],
+        step_advantages=[],
+        step_result=None,
+        trainer_metrics=None,
+        num_rollouts=0,
+        num_microbatches=1,
+        padding_stats=[],
+        packing_time_sec=0.0,
+        step_time_sec=0.0,
+        consumed_policy_version=0,
+        log_step=0,
+        filtered_groups=filtered_groups,
+    )
+
+    logger = program.metrics_logger
+    self.assertEqual(
+        logger.get_metric("", "rollout/filtered_groups_count", "train"), 2
+    )
+    self.assertEqual(
+        logger.get_metric("", "rollout/filtered_trajectories_count", "train"), 3
+    )
+    self.assertEqual(metrics_summary["filtered_groups_count"], 2)
+    self.assertEqual(metrics_summary["filtered_trajectories_count"], 3)
+    program.close()
+
+  def test_drain_filtered_groups_drains_both_queues(self):
+    program = self._create_program()
+
+    item0 = self._scoring_item(0)
+    item1 = self._scoring_item(1)
+
+    async def _test():
+      program.raw_q._filtered_groups.append([item0])
+      program.scored_q._filtered_groups.append([item1])
+
+      drained = await program._drain_filtered_groups()
+      self.assertEqual(drained, [[item0], [item1]])
+
+      # Subsequent drain should be empty
+      drained_again = await program._drain_filtered_groups()
+      self.assertEqual(drained_again, [])
+
+    asyncio.run(_test())
+    program.close()
+
+  def test_train_loop_drains_and_logs_filtered_groups(self):
+    async def _run():
+      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group(), [])
+      program = self._create_program(
+          dataset=["prompt_data_0"],
+          max_steps=1,
+      )
+
+      # Inject a filtered group into raw_q
+      filtered_item = self._scoring_item(99)
+      program.raw_q._filtered_groups.append([filtered_item])
+
+      await program.run_async(self.mock_engine)
+
+      # Verify that raw_q._filtered_groups was drained
+      self.assertEqual(len(program.raw_q._filtered_groups), 0)
+
+      # Verify metric was logged
+      logger = program.metrics_logger
+      self.assertEqual(
+          logger.get_metric("", "rollout/filtered_groups_count", "train"), 1
+      )
+      self.assertEqual(
+          logger.get_metric("", "rollout/filtered_trajectories_count", "train"), 1
+      )
+      program.close()
+
+    asyncio.run(_run())
+
   def test_critique_stage_preserves_is_valid_for_degenerate_group_survivor(
       self,
   ):
@@ -5806,6 +5890,77 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
       ]
       self.assertEqual(checkpoint_metadata["global_step"], 1)
       self.assertEqual(checkpoint_metadata["next_batch_idx"], 3)
+      program.close()
+
+    asyncio.run(_run())
+
+  def test_critique_and_train_stage_release_per_trajectory_routed_experts(self):
+    async def _run():
+      routed = np.ones((4, 2, 2), dtype=np.int16) * 7
+      payload = datatypes.RLTrainerPayload(
+          prompt_ids=np.array([1, 2], dtype=np.int32),
+          prompt_mask=np.array([1, 1], dtype=np.float32),
+          completion_ids=np.array([3, 4], dtype=np.int32),
+          completion_mask=np.array([1, 1], dtype=np.float32),
+          advantages=np.array([1.0, 1.0], dtype=np.float32),
+          routed_experts=routed,
+      )
+      self.mock_algo.num_generations = 1
+      self.mock_algo.mini_batch_size = 1
+      self.mock_algo.create_trainer_payloads.return_value = [payload]
+
+      assembler = batch_assembly.SequencePackedBatchAssembler(
+          batch_size=1,
+          num_generations=1,
+          mini_batch_size=1,
+          max_packed_len=8,
+          pad_id=0,
+          segment_align_multiple=1,
+      )
+      program = rl_program.StandardRLProgram(
+          algo=self.mock_algo,
+          dataset=["p0"],
+          batch_size=1,
+          assembler=assembler,
+      )
+      program.engine = self.mock_engine
+
+      src_item = datatypes.TrajectoryItem(
+          prompt_id="p0",
+          group_index=0,
+          start_step=0,
+          traj={"trajectory_reward": 1.0, "routed_experts": routed},
+          prompt_tokens=np.array([1, 2], dtype=np.int32),
+          completion_tokens=np.array([3, 4], dtype=np.int32),
+          routed_experts=routed,
+          metadata={"batch_idx": 0, "intra_batch_idx": 0, "prompt_idx": 0},
+      )
+      await program.raw_q.put(src_item)
+      await program.raw_q.close()
+      await program.critique_stage()
+
+      scored_group = await program.scored_q.get_batch(1)
+      self.assertLen(scored_group, 1)
+      scored_item = scored_group[0]
+      # Post-critique TrajectoryItem must only hold routed_experts on
+      # item.payload, not duplicated on item.routed_experts or item.traj.
+      self.assertIsNone(getattr(scored_item, "routed_experts", None))
+      self.assertNotIn("routed_experts", scored_item.metadata)
+      self.assertNotIn("routed_experts", scored_item.traj)
+      self.assertIsNotNone(scored_item.payload.routed_experts)
+
+      # Re-enqueue for train_stage and verify item.payload.routed_experts is
+      # cleared once assembler.feed has packed the batch.
+      program.scored_q = (
+          rl_program.trajectory_queue_manager.TrajectoryQueueManager.create(
+              num_generations=1
+          )
+      )
+      await program.scored_q.put(scored_item)
+      await program.scored_q.close()
+      await program.train_stage()
+
+      self.assertIsNone(scored_item.payload.routed_experts)
       program.close()
 
     asyncio.run(_run())

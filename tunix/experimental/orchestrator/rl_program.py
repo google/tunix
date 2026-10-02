@@ -22,7 +22,9 @@ import abc
 import asyncio
 from collections.abc import Callable, Iterable, Mapping, Sequence, Sized
 import copy
+import ctypes
 import dataclasses
+import gc
 import os
 import threading
 import time
@@ -48,6 +50,16 @@ BatchConfig = batch_assembly.BatchConfig
 
 
 _EXHAUSTED = object()
+
+
+def _release_host_memory() -> None:
+  """Forces Python GC and returns freed glibc heap pages to the OS."""
+  gc.collect()
+  try:
+    libc = ctypes.CDLL("libc.so.6")
+    libc.malloc_trim(0)
+  except (OSError, AttributeError):
+    pass
 
 
 def _next_or_exhausted(iterator: Any) -> Any:
@@ -937,11 +949,23 @@ class StandardRLProgram(RLProgram):
             status = datatypes.TrajectoryStatus.RUNNING
           steps = raw_steps if isinstance(raw_steps, list) else []
           src_metadata = getattr(src_item, "metadata", None)
+          if isinstance(src_metadata, dict):
+            src_metadata.pop("routed_experts", None)
           metadata = dict(src_metadata) if src_metadata else {}
+          metadata.pop("routed_experts", None)
           traj_dict["trajectory_reward"] = reward_val
           traj_dict["status"] = status
           traj_dict["steps"] = steps
           traj_dict["conversation_masks"] = payload.completion_mask
+          # `payload.routed_experts` now holds the sequence-aligned routing
+          # array; drop the raw rollout reference from `traj_dict`, `metadata`,
+          # and the post-critique `TrajectoryItem` so we do not retain two
+          # copies per trajectory across `scored_q` and `all_step_items`.
+          traj_dict.pop("routed_experts", None)
+          if isinstance(src_traj, dict):
+            src_traj.pop("routed_experts", None)
+          if src_item is not None:
+            src_item.routed_experts = None
           item = datatypes.TrajectoryItem(
               prompt_id=getattr(src_item, "prompt_id", ""),
               group_index=getattr(src_item, "group_index", 0),
@@ -951,7 +975,7 @@ class StandardRLProgram(RLProgram):
               prompt_tokens=getattr(src_item, "prompt_tokens", None),
               completion_tokens=getattr(src_item, "completion_tokens", None),
               action_mask=getattr(src_item, "action_mask", None),
-              routed_experts=getattr(src_item, "routed_experts", None),
+              routed_experts=None,
               policy_version=getattr(src_item, "policy_version", 0),
               metadata=metadata,
               # TODO: b/552087289 - Stream RLTrainerPayload directly instead of
@@ -970,6 +994,11 @@ class StandardRLProgram(RLProgram):
               first_meta.get("intra_batch_idx"),
               getattr(group[0], "policy_version", 0),
           )
+        group = None
+        trainer_payloads = None
+        src_item = None
+        payload = None
+        item = None
     finally:
       await self.scored_q.close()
 
@@ -995,6 +1024,17 @@ class StandardRLProgram(RLProgram):
       )
     self.metrics_logger.log(prefix, metric_name, scalar_value, self.mode, step)
 
+  async def _drain_filtered_groups(
+      self,
+  ) -> list[list[datatypes.TrajectoryItem]]:
+    """Drains and returns all filtered groups across raw and scored queues."""
+    filtered: list[list[datatypes.TrajectoryItem]] = []
+    if hasattr(self.raw_q, "get_filtered_groups"):
+      filtered.extend(await self.raw_q.get_filtered_groups())
+    if hasattr(self.scored_q, "get_filtered_groups"):
+      filtered.extend(await self.scored_q.get_filtered_groups())
+    return filtered
+
   def _collect_and_log_step_metrics(
       self,
       *,
@@ -1015,6 +1055,7 @@ class StandardRLProgram(RLProgram):
       policy_training_time: float = 0.0,
       exposed_generation_time: float = 0.0,
       weight_sync_time: float = 0.0,
+      filtered_groups: Sequence[Sequence[datatypes.TrajectoryItem]] = (),
   ) -> dict[str, Any]:
     """Logs rollout, reward, trainer, and orchestrator metrics.
 
@@ -1212,6 +1253,21 @@ class StandardRLProgram(RLProgram):
             self.mode,
             log_step,
         )
+
+    self.metrics_logger.log(
+        self.metrics_prefix,
+        "rollout/filtered_groups_count",
+        len(filtered_groups),
+        self.mode,
+        log_step,
+    )
+    self.metrics_logger.log(
+        self.metrics_prefix,
+        "rollout/filtered_trajectories_count",
+        sum(len(g) for g in filtered_groups),
+        self.mode,
+        log_step,
+    )
 
     # --- 2. Reward Metrics ---
     rewards_to_log = step_rewards
@@ -1464,6 +1520,8 @@ class StandardRLProgram(RLProgram):
         "loss_val": loss_val,
         "perplexity_val": perplexity_val,
         "grad_norm_val": grad_norm_val,
+        "filtered_groups_count": len(filtered_groups),
+        "filtered_trajectories_count": sum(len(g) for g in filtered_groups),
     }
 
   async def _apply_sampler_trainer_agreement(
@@ -1844,7 +1902,7 @@ class StandardRLProgram(RLProgram):
         exposed_generation_time += time.monotonic() - _t_gen
         if not scored_items:
           packing_start_time = time.perf_counter()
-          assembled_batches = await self._assemble(self.assembler.flush)
+          assembled_batches = list(await self._assemble(self.assembler.flush))
           step_packing_time_sec += time.perf_counter() - packing_start_time
         else:
           if groups_consumed == 0 and self.on_step_begin:
@@ -1878,12 +1936,38 @@ class StandardRLProgram(RLProgram):
               )
             payloads.append(payload)
           packing_start_time = time.perf_counter()
-          assembled_batches = await self._assemble(
-              self.assembler.feed, payloads  # pyrefly: ignore[bad-argument-type]
+          assembled_batches = list(
+              await self._assemble(
+                  self.assembler.feed,
+                  payloads,  # pyrefly: ignore[bad-argument-type]
+              )
           )
           step_packing_time_sec += time.perf_counter() - packing_start_time
+          # `self.assembler` has now copied or packed `routed_experts`; release
+          # the per-trajectory references on `payloads` and `scored_items`
+          # (which remain in `all_step_items` until step-end metric logging) so
+          # unbatched routing arrays do not coexist with packed microbatches and
+          # weight sync. Lightweight 1D mask fields on `item.payload` are kept
+          # for `_collect_and_log_step_metrics`.
+          payloads.clear()
+          for item in scored_items:
+            item.routed_experts = None
+            if item.metadata is not None:
+              item.metadata.pop("routed_experts", None)
+            if isinstance(item.traj, dict):
+              item.traj.pop("routed_experts", None)
+            item_payload = getattr(item, "payload", None)
+            if (
+                isinstance(item_payload, datatypes.RLTrainerPayload)
+                and item_payload.routed_experts is not None
+            ):
+              item.payload = dataclasses.replace(
+                  item_payload, routed_experts=None
+              )
 
-        for mb in assembled_batches:
+        while assembled_batches:
+          mb = assembled_batches.pop(0)
+          is_final_batch = mb.is_final_batch
           batch = mb.payload
           if getattr(self.algo, "requires_reference_kl", False):
             if not isinstance(batch, datatypes.RLTrainerPayload):
@@ -1927,16 +2011,18 @@ class StandardRLProgram(RLProgram):
                 len(mb.trajectory_ids),
                 logging_utils.summarize_list(list(mb.trajectory_ids)),
             )
+          mb = None
           await _await_pending_train()
           train_step = self._timed_train_step(
-              batch, apply_optimizer=mb.is_final_batch
+              batch, apply_optimizer=is_final_batch
           )
-          if self.pipeline_train_microbatches and not mb.is_final_batch:
+          batch = None
+          if self.pipeline_train_microbatches and not is_final_batch:
             self._pending_train = asyncio.create_task(train_step)
             continue
           step_result, elapsed = await train_step
           policy_training_time += elapsed
-          if mb.is_final_batch:
+          if is_final_batch:
             _t_metrics = time.monotonic()
             trainer_metrics = await self.engine.get_metrics(
                 role=datatypes.Role.ACTOR
@@ -2017,6 +2103,8 @@ class StandardRLProgram(RLProgram):
 
       step_time_sec = time.monotonic() - step_start_time
 
+      filtered_groups = await self._drain_filtered_groups()
+
       metrics_summary = self._collect_and_log_step_metrics(
           all_step_items=all_step_items,
           step_rewards=step_rewards,
@@ -2035,12 +2123,17 @@ class StandardRLProgram(RLProgram):
           policy_training_time=policy_training_time,
           exposed_generation_time=exposed_generation_time,
           weight_sync_time=weight_sync_time,
+          filtered_groups=filtered_groups,
       )
       self._log_consumed_trajectories(
           all_step_items,
           log_step=current_step,
           consumed_policy_version=consumed_policy_version,
       )
+      filtered_groups.clear()
+      all_step_items.clear()
+      uncommitted_groups.clear()
+      scored_items.clear()
 
       self.last_step_result = RLStepResult(
           step=current_step,
@@ -2077,6 +2170,7 @@ class StandardRLProgram(RLProgram):
       # waking, and waking it on the old value would park it again with no one
       # left to set the event.
       self._release_window()
+      _release_host_memory()
 
   async def run_async(
       self,
