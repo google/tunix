@@ -212,13 +212,18 @@ def iter_prompt_items(
     episode_timeout_secs: int | None = None,
     overlong_filter: bool = False,
     exact_token_continuity: bool = True,
+    max_staleness: int = 0,
 ) -> Iterator[dict[str, Any]]:
-  """Yields exactly the prompt groups needed for the requested training run."""
+  """Yields prompt groups needed for training, including max_staleness lookahead."""
   dataset_size = len(dataset)
   if dataset_size <= 0:
     raise ValueError("DeepSWE dataset is empty.")
 
-  for prompt_idx in range(max_steps * batch_size):
+  # To avoid artificial tapering of generation workload near max_steps (MLPerf
+  # training_rules.adoc:678), generate prompts for (max_steps + max_staleness)
+  # steps so rollout workers continue at full capacity through the final step.
+  total_prompts = (max_steps + max(0, max_staleness)) * batch_size
+  for prompt_idx in range(total_prompts):
     yield build_prompt_item(
         entry=_entry_at(dataset, prompt_idx % dataset_size),
         prompt_idx=prompt_idx,

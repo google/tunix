@@ -744,10 +744,6 @@ def check_eval(
             getattr(constants, "SAMPLES_COUNT", "samples_count"): current_samples,
         },
     )
-    mllogger.event(
-        key=getattr(constants, "TRAIN_SAMPLES", "train_samples"),
-        value=current_samples,
-    )
   else:
     mllogger.start(
         key=getattr(constants, "BLOCK_START", "block_start"),
@@ -1327,6 +1323,12 @@ def init_print(
   )
 
   # 2. Hyperparameters & Training Configuration
+  is_fp8 = "fp8" in os.environ.get(
+      "ROLLOUT_QUANTIZATION", ""
+  ).strip().lower() or any(
+      os.environ.get(k, "").strip().lower() in ("true", "1")
+      for k in ("ROLLOUT_FP8", "TRAINER_FP8")
+  )
   logging_configs = {
       getattr(constants, "SEED", "seed"): getattr(args, "seed", 42),
       getattr(constants, "MAX_STEPS", "max_steps"): max_steps,
@@ -1340,10 +1342,10 @@ def init_print(
       getattr(constants, "OPT_BASE_LR", "opt_base_learning_rate"): getattr(args, "learning_rate", 1e-6),
       getattr(constants, "OPT_END_LR", "opt_end_learning_rate"): getattr(args, "learning_rate", 1e-6),
       getattr(constants, "OPT_ADAMW_BETA_1", "opt_adamw_beta_1"): getattr(args, "b1", 0.9),
-      getattr(constants, "OPT_ADAMW_BETA_2", "opt_adamw_beta_2"): getattr(args, "b2", 0.99),
+      getattr(constants, "OPT_ADAMW_BETA_2", "opt_adamw_beta_2"): getattr(args, "b2", 0.999),
       getattr(constants, "OPT_ADAMW_EPSILON", "opt_adamw_epsilon"): 1e-8,
-      getattr(constants, "OPT_ADAMW_WEIGHT_DECAY", "opt_adamw_weight_decay"): getattr(args, "weight_decay", 0.01),
-      getattr(constants, "OPT_GRADIENT_CLIP_NORM", "opt_gradient_clip_norm"): getattr(args, "max_grad_norm", 1.0),
+      getattr(constants, "OPT_ADAMW_WEIGHT_DECAY", "opt_adamw_weight_decay"): getattr(args, "weight_decay", 0.0),
+      getattr(constants, "OPT_GRADIENT_CLIP_NORM", "opt_gradient_clip_norm"): getattr(args, "max_grad_norm", 0.125),
       getattr(constants, "OPT_LR_WARMUP_STEPS", "opt_learning_rate_warmup_steps"): getattr(args, "warmup_steps", 0),
       getattr(constants, "OPT_LR_DECAY_STEPS", "opt_learning_rate_decay_steps"): getattr(args, "lr_decay_steps", max_steps),
       getattr(constants, "OPT_LR_DECAY_SCHEDULE", "opt_learning_rate_decay_schedule"): getattr(args, "schedule_type", "constant") or "constant",
@@ -1352,7 +1354,7 @@ def init_print(
       getattr(constants, "CONTEXT_PARALLELISM", "context_parallelism"): train_sp,
       getattr(constants, "EXPERT_PARALLELISM", "expert_parallelism"): getattr(args, "train_mesh_expert", 1),
       # Mandatory v6.1 precision and run-config disclosures.
-      "lowest_numerical_precision_in_linear": "bfloat16",
+      "lowest_numerical_precision_in_linear": "fp8" if is_fp8 else "bfloat16",
       "lowest_numerical_precision_in_attn": "bfloat16",
       "lowest_numerical_precision_in_comm": "bfloat16",
       "config_filename": args.model_id or "qwen35_397b_grpo",
