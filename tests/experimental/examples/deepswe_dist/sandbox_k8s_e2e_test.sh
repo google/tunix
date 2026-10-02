@@ -19,7 +19,8 @@ set -euo pipefail
 TUNIX_IMAGE=${TUNIX_IMAGE:-"us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/yangmu/tunix/tunix_base_image:trellis-demo-0813"}
 NAMESPACE=${NAMESPACE:-"trellis"}
 SERVICE_ACCOUNT=${SERVICE_ACCOUNT:-"xpk-sa"}
-IMAGE_REWRITE_PREFIX=${IMAGE_REWRITE_PREFIX:-"us-east1-docker.pkg.dev/cloud-tpu-multipod-dev/tunix"}
+IMAGE_REWRITE_PREFIX=${IMAGE_REWRITE_PREFIX:-"europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/tunix"}
+OPENHANDS_SERVER_IMAGE=${OPENHANDS_SERVER_IMAGE:-"us-east1-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/openhands-agent-server:0.62"}
 DATASET_NAME=${DATASET_NAME:-"R2E-Gym/R2E-Gym-Subset"}
 BATCH_SIZE=${BATCH_SIZE:-1}
 NUM_GENERATIONS=${NUM_GENERATIONS:-2}
@@ -48,6 +49,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --scaffold=*)
       SCAFFOLD="${1#*=}"
+      shift
+      ;;
+    --openhands_server_image=*)
+      OPENHANDS_SERVER_IMAGE="${1#*=}"
       shift
       ;;
     --image=*)
@@ -279,6 +284,8 @@ spec:
           value: "${NODE_SELECTOR_VAL}"
         - name: IMAGE_REWRITE_PREFIX
           value: "${IMAGE_REWRITE_PREFIX}"
+        - name: OPENHANDS_SERVER_IMAGE
+          value: "${OPENHANDS_SERVER_IMAGE}"
         - name: OPENHANDS_SUPPRESS_BANNER
           value: "1"
         command:

@@ -1017,7 +1017,7 @@ DEFAULT_OPENHANDS_KEEPALIVE_CMD = [
     "sh",
     "-c",
     (
-        "chmod +x /oh/openhands-agent-server 2>/dev/null || true; ([ -d"
+        "chmod +x /oh/openhands-agent-server 2>/dev/null || true; ([ -d /oh/glibc236 ] && export LD_LIBRARY_PATH=\"/oh/glibc236:${LD_LIBRARY_PATH:-}\"); ([ -d"
         " /testbed ] && [ ! -e /workspace ] && ln -s /testbed /workspace"
         " 2>/dev/null || true); ([ -d /workspace ] && [ ! -e /testbed ] && ln"
         " -s /workspace /testbed 2>/dev/null || true); git config --global"
@@ -1067,9 +1067,9 @@ def get_openhands_pod_template(
       or os.getenv("SANDBOX_RUNTIME_CONTAINER_IMAGE")
       or os.getenv("AGENT_SERVER_IMAGE")
       or (
-          f"{os.environ['IMAGE_REWRITE_PREFIX'].rstrip('/')}/openhands-runtime:0.62-nikolaik"
+          f"{os.environ['IMAGE_REWRITE_PREFIX'].rstrip('/')}/openhands-agent-server:0.62"
           if os.getenv("IMAGE_REWRITE_PREFIX")
-          else "us-east1-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/openhands-runtime:0.62-nikolaik"
+          else "us-east1-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/openhands-agent-server:0.62"
       )
   )
 
