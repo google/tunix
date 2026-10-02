@@ -353,6 +353,84 @@ class TrainerWorkerTest(absltest.TestCase):
         atol=1e-4,
     )
 
+  def _compact_routing(self):
+    # Row 1's last slot is padding, so it must come back unset.
+    return datatypes.CompactRoutedExperts(
+        values=np.arange(5 * 2 * 2, dtype=np.int16).reshape(5, 2, 2),
+        valid=np.array([[1, 1, 1], [1, 1, 0]], dtype=np.bool_),
+    )
+
+  def test_fwd_bwd_materializes_compact_routing(self):
+    compact = self._compact_routing()
+    payload = datatypes.RLTrainerPayload(
+        prompt_ids=np.zeros((2, 0), dtype=np.int32),
+        prompt_mask=np.zeros((2, 0), dtype=np.float32),
+        completion_ids=np.array([[3, 4, 5], [3, 4, 0]], dtype=np.int32),
+        completion_mask=np.array([[1, 1, 1], [1, 1, 0]], dtype=np.float32),
+        advantages=np.ones((2, 3), dtype=np.float32),
+        segment_ids=np.array([[1, 1, 1], [1, 1, 0]], dtype=np.int32),
+        routed_experts=compact,
+    )
+
+    self.worker.fwd_bwd(request=datatypes.TrainRequest(payload=payload))
+
+    seen = self.fake_trainer.fwd_bwd_calls[0][0]
+    self.assertIsInstance(seen.routed_experts, np.ndarray)
+    self.assertEqual(seen.routed_experts.shape, (2, 3, 2, 2))
+    np.testing.assert_array_equal(seen.routed_experts, compact.materialize())
+    np.testing.assert_array_equal(
+        seen.routed_experts[1, 2], datatypes.UNSET_ROUTED_EXPERT
+    )
+    # Only the routing is rebuilt; everything else is passed through.
+    self.assertIs(seen.completion_ids, payload.completion_ids)
+
+  def test_eval_step_materializes_compact_routing(self):
+    compact = self._compact_routing()
+    payload = datatypes.RLTrainerPayload(
+        prompt_ids=np.zeros((2, 0), dtype=np.int32),
+        prompt_mask=np.zeros((2, 0), dtype=np.float32),
+        completion_ids=np.array([[3, 4, 5], [3, 4, 0]], dtype=np.int32),
+        completion_mask=np.array([[1, 1, 1], [1, 1, 0]], dtype=np.float32),
+        advantages=np.ones((2, 3), dtype=np.float32),
+        routed_experts=compact,
+    )
+
+    self.worker.eval_step(request=datatypes.TrainRequest(payload=payload))
+
+    np.testing.assert_array_equal(
+        self.fake_trainer.eval_step_calls[0][0].routed_experts,
+        compact.materialize(),
+    )
+
+  def test_per_token_logps_materializes_compact_routing(self):
+    routed_seen = []
+
+    @contextlib.contextmanager
+    def recording_scope(*args, **kwargs):
+      # The toy model has no router; record the routing and drop it.
+      routed_seen.append(kwargs.pop("routed_experts"))
+      yield self.fake_trainer.model, args, kwargs
+
+    self.fake_trainer.model_scope = recording_scope
+    compact = self._compact_routing()
+    request = datatypes.LogprobsRequest(
+        prompt_tokens=np.zeros((2, 0), dtype=np.int32),
+        completion_tokens=np.array([[3, 4, 5], [3, 4, 0]], dtype=np.int32),
+        temperature=1.0,
+        pad_id=0,
+        eos_id=0,
+        segment_ids=np.array([[1, 1, 1], [1, 1, 0]], dtype=np.int32),
+        segment_positions=np.array([[0, 1, 2], [0, 1, 0]], dtype=np.int32),
+        routed_experts=compact,
+    )
+
+    result = self.worker.per_token_logps(items=request)
+
+    self.assertEqual(result.per_token_logps.shape, (2, 3))
+    self.assertLen(routed_seen, 1)
+    self.assertEqual(routed_seen[0].dtype, np.int16)
+    np.testing.assert_array_equal(routed_seen[0], compact.materialize())
+
   def test_per_token_logps_empty_batch_raises(self):
     request = datatypes.LogprobsRequest(
         prompt_tokens=np.zeros((0, 3), dtype=np.int32),

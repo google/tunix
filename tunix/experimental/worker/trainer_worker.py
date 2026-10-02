@@ -16,6 +16,7 @@
 
 from collections.abc import Mapping
 import contextlib
+import dataclasses
 from typing import Any, Callable, ContextManager, cast
 
 from absl import logging
@@ -30,6 +31,28 @@ from tunix.experimental.worker import abstract_worker
 from tunix.rl import common as rl_common
 
 WorkerState = datatypes.WorkerState
+
+
+def _with_dense_routing(payload: datatypes.TrainerPayload) -> datatypes.TrainerPayload:
+  """Returns `payload` with any `CompactRoutedExperts` materialized to dense.
+
+  Batch assemblers ship routing compactly so its padding never crosses the RPC;
+  this is the single point that rebuilds it, so trainers and models only ever
+  see the dense `[B, T, num_layers, top_k]` tensor.
+
+  Args:
+    payload: The trainer payload received over RPC.
+
+  Returns:
+    The payload, with dense routing if it carried compact routing.
+  """
+  if isinstance(payload, datatypes.RLTrainerPayload) and isinstance(
+      payload.routed_experts, datatypes.CompactRoutedExperts
+  ):
+    return dataclasses.replace(
+        payload, routed_experts=payload.routed_experts.materialize()
+    )
+  return payload
 
 
 class TrainerWorker(abstract_worker.Worker):
@@ -197,7 +220,7 @@ class TrainerWorker(abstract_worker.Worker):
     req_metadata = dict(request.metadata) if request.metadata else {}
     kwargs.pop("skip_jit", None)
     try:
-      self._trainer.fwd_bwd(request.payload, **kwargs)
+      self._trainer.fwd_bwd(_with_dense_routing(request.payload), **kwargs)
       self._last_error = None
       resp = self._response(queued=True, **req_metadata)
       resp.request_id = request.request_id
@@ -228,7 +251,7 @@ class TrainerWorker(abstract_worker.Worker):
     self._ensure_ready()
     req_metadata = dict(request.metadata) if request.metadata else {}
     try:
-      self._trainer.eval_step(request.payload, **kwargs)
+      self._trainer.eval_step(_with_dense_routing(request.payload), **kwargs)
       self._last_error = None
       resp = self._response(evaluated=True, **req_metadata)
       resp.request_id = request.request_id
@@ -312,11 +335,12 @@ class TrainerWorker(abstract_worker.Worker):
           if items.segment_positions is None
           else np.asarray(items.segment_positions, dtype=np.int32)
       )
-      routed = (
-          None
-          if getattr(items, "routed_experts", None) is None
-          else np.asarray(items.routed_experts, dtype=np.int16)
-      )
+      if isinstance(items.routed_experts, datatypes.CompactRoutedExperts):
+        routed = items.routed_experts.materialize()
+      elif items.routed_experts is not None:
+        routed = np.asarray(items.routed_experts, dtype=np.int16)
+      else:
+        routed = None
       micro_batch_size = self._logps_micro_batch_size or batch_size
       outs = []
       for start in range(0, batch_size, micro_batch_size):

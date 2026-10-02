@@ -45,6 +45,79 @@ Role = common_datatypes.Role
 UNSET_ROUTED_EXPERT = -1
 
 
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class CompactRoutedExperts:
+  """A batch's router-replay routing, stored only at its real-token positions.
+
+  A batched `[B, T, num_layers, top_k]` int16 routing tensor is mostly padding
+  (~75% for packed 397B DeepSWE microbatches), yet it dominates the payload that
+  crosses the orchestrator -> trainer RPC. This keeps just the rows of the
+  tensor at `valid` positions and rebuilds the dense tensor on the receiving
+  side with `materialize()`.
+
+  `valid` is the contract between producer and consumer: which `[B, T]` slots
+  hold a real token. Producers set it from their own layout (segment ids for
+  packed rows, prompt/completion spans for padded rows), so consumers need not
+  know which batch assembler built the batch. A valid position whose token has
+  no captured routing simply carries `UNSET_ROUTED_EXPERT` in `values`.
+
+  Attributes:
+    values: `[N, num_layers, top_k]` int16 routing of the valid positions, in
+      row-major (`valid.nonzero()`) order.
+    valid: `[B, T]` bool mask of the positions `values` covers; `N ==
+      valid.sum()`. Every other position materializes as `UNSET_ROUTED_EXPERT`.
+  """
+
+  values: np.ndarray
+  valid: np.ndarray
+
+  def __post_init__(self):
+    if not isinstance(self.values, np.ndarray) or self.values.dtype != np.int16:
+      raise TypeError(
+          "CompactRoutedExperts.values must be an int16 numpy array; got"
+          f" {type(self.values).__name__} of dtype"
+          f" {getattr(self.values, 'dtype', None)}."
+      )
+    if self.values.ndim != 3:
+      raise ValueError(
+          "CompactRoutedExperts.values must be [N, num_layers, top_k]; got"
+          f" shape {self.values.shape}."
+      )
+    if not isinstance(self.valid, np.ndarray) or self.valid.dtype != np.bool_:
+      raise TypeError(
+          "CompactRoutedExperts.valid must be a bool numpy array; got"
+          f" {type(self.valid).__name__} of dtype"
+          f" {getattr(self.valid, 'dtype', None)}."
+      )
+    if self.valid.ndim != 2:
+      raise ValueError(
+          f"CompactRoutedExperts.valid must be [B, T]; got {self.valid.shape}."
+      )
+    num_valid = int(np.count_nonzero(self.valid))
+    if self.values.shape[0] != num_valid:
+      raise ValueError(
+          f"CompactRoutedExperts has {self.values.shape[0]} routing rows but"
+          f" valid marks {num_valid} positions."
+      )
+
+  @property
+  def shape(self) -> tuple[int, int, int, int]:
+    """Shape of the dense `[B, T, num_layers, top_k]` tensor it represents."""
+    b, t = self.valid.shape
+    _, num_layers, top_k = self.values.shape
+    return (b, t, num_layers, top_k)
+
+  @property
+  def nbytes(self) -> int:
+    return self.values.nbytes + self.valid.nbytes
+
+  def materialize(self) -> np.ndarray:
+    """Returns the dense `[B, T, num_layers, top_k]` int16 routing tensor."""
+    dense = np.full(self.shape, UNSET_ROUTED_EXPERT, dtype=np.int16)
+    dense[self.valid] = self.values
+    return dense
+
+
 # Re-export assistant_text from canonical agent_types module.
 assistant_text = agent_types.assistant_text
 
@@ -470,11 +543,15 @@ class RLTrainerPayload(TrainerPayload):
     ref_per_token_logps: Optional [B, C] reference model log-probabilities.
     old_per_token_logps: Optional [B, C] behavior policy log-probabilities.
     sampler_is_weights: Optional [B, C] importance sampling weights.
-    routed_experts: Optional `[B, T, num_layers, top_k]` MoE expert ids captured
-      during rollout. When set, a training engine that supports router replay
-      forces these experts instead of re-running its own gate, so the training
-      forward pass matches the routing the rollout actually used. `-1` marks a
-      padded or unused slot.
+    routed_experts: Optional MoE expert ids captured during rollout. When set,
+      a training engine that supports router replay forces these experts
+      instead of re-running its own gate, so the training forward pass matches
+      the routing the rollout actually used. `-1` marks a padded or unused
+      slot. An unbatched payload carries a dense `[p + c, num_layers, top_k]`
+      array; a batch assembler emits `CompactRoutedExperts` for the batched
+      `[B, T, num_layers, top_k]` routing so the padding never crosses the RPC,
+      and `TrainerWorker` materializes it before handing the payload to its
+      trainer.
     returns: Optional [B, C] value baseline returns (for PPO / Critic).
     old_values: Optional [B, C] critic value estimates (for PPO / Critic).
     num_segments: Optional static upper bound on number of segments in packed
@@ -502,7 +579,7 @@ class RLTrainerPayload(TrainerPayload):
   # runs with those features disabled.
   rollout_per_token_logps: ArrayLike | None = None
   overlong: ArrayLike | None = None
-  routed_experts: ArrayLike | None = None
+  routed_experts: ArrayLike | CompactRoutedExperts | None = None
   returns: ArrayLike | None = None
   old_values: ArrayLike | None = None
   num_segments: int | None = flax.struct.field(default=None, pytree_node=False)
@@ -544,7 +621,8 @@ class LogprobsRequest(Request):
     segment_positions: Optional packing local position indices (sequence
       packing); trainer path only.
     routed_experts: Optional `[B, T, num_layers, top_k]` MoE expert routing
-      captured during rollout for router replay.
+      captured during rollout for router replay, dense or as the batch's
+      `CompactRoutedExperts` (the scorer materializes it).
   """
 
   prompt_tokens: ArrayLike
@@ -555,7 +633,7 @@ class LogprobsRequest(Request):
   eos_id: int | None = None
   segment_ids: ArrayLike | None = None
   segment_positions: ArrayLike | None = None
-  routed_experts: ArrayLike | None = None
+  routed_experts: ArrayLike | CompactRoutedExperts | None = None
 
 
 ##### Inference DTOs #####

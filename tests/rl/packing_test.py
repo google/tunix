@@ -461,6 +461,275 @@ class PackCoreTest(absltest.TestCase):
     )
 
 
+def _routed_item(prompt_len, completion_len, *, base, routed=True):
+  n = prompt_len + completion_len
+  return packing.PackItem(
+      prompt_ids=np.full(prompt_len, 1, dtype=np.int32),
+      completion_ids=np.full(completion_len, 2, dtype=np.int32),
+      completion_mask=np.ones(completion_len, dtype=np.float32),
+      advantages=np.ones(completion_len, dtype=np.float32),
+      routed_experts=(
+          np.arange(base, base + n * 3 * 2, dtype=np.int16).reshape(n, 3, 2)
+          if routed
+          else None
+      ),
+  )
+
+
+class PackChunkContiguousTest(absltest.TestCase):
+
+  def _bins(self):
+    # Row 0: two routed segments. Row 1: one routed and one routing-less
+    # segment. Row 2: empty (dummy) row.
+    return [
+        [_routed_item(1, 2, base=0), _routed_item(2, 1, base=100)],
+        [
+            _routed_item(1, 1, base=200),
+            _routed_item(1, 2, base=0, routed=False),
+        ],
+        [],
+    ]
+
+  def test_routing_is_one_contiguous_int16_buffer_viewed_by_rows(self):
+    chunk = packing.pack_chunk_contiguous(
+        self._bins(),
+        budget=8,
+        pad_id=0,
+        carried=(),
+        segment_align_multiple=1,
+    )
+    self.assertLen(chunk.rows, 3)
+    self.assertIsNotNone(chunk.routed_experts)
+    self.assertEqual(chunk.routed_experts.shape, (3, 8, 3, 2))
+    self.assertEqual(chunk.routed_experts.dtype, np.int16)
+    self.assertTrue(chunk.routed_experts.flags["C_CONTIGUOUS"])
+    for i, row in enumerate(chunk.rows):
+      # Each row's routing is a view of its slice of the chunk buffer, not a
+      # separate allocation that would need stacking.
+      self.assertIs(row.routed_experts.base, chunk.routed_experts)
+      np.testing.assert_array_equal(row.routed_experts, chunk.routed_experts[i])
+
+  def test_matches_per_row_packing(self):
+    bins = self._bins()
+    chunk = packing.pack_chunk_contiguous(
+        bins, budget=8, pad_id=0, carried=(), segment_align_multiple=1
+    )
+    for bin_items, row in zip(bins, chunk.rows):
+      expected = packing.pack_bin(
+          bin_items,
+          budget=8,
+          pad_id=0,
+          carried=(),
+          routed_shape=(3, 2),
+          segment_align_multiple=1,
+      )
+      np.testing.assert_array_equal(row.ids, expected.ids)
+      np.testing.assert_array_equal(row.segment_ids, expected.segment_ids)
+      np.testing.assert_array_equal(row.routed_experts, expected.routed_experts)
+
+  def test_routing_values_and_unset_padding(self):
+    chunk = packing.pack_chunk_contiguous(
+        self._bins(), budget=8, pad_id=0, carried=(), segment_align_multiple=1
+    )
+    unset = packing.UNSET_ROUTED_EXPERT
+    routed = chunk.routed_experts
+    np.testing.assert_array_equal(
+        routed[0, :3], np.arange(0, 18, dtype=np.int16).reshape(3, 3, 2)
+    )
+    np.testing.assert_array_equal(
+        routed[0, 3:6], np.arange(100, 118, dtype=np.int16).reshape(3, 3, 2)
+    )
+    np.testing.assert_array_equal(routed[0, 6:], np.full((2, 3, 2), unset))
+    np.testing.assert_array_equal(
+        routed[1, :2], np.arange(200, 212, dtype=np.int16).reshape(2, 3, 2)
+    )
+    # The routing-less item and the trailing padding stay unset.
+    np.testing.assert_array_equal(routed[1, 2:], np.full((6, 3, 2), unset))
+    np.testing.assert_array_equal(routed[2], np.full((8, 3, 2), unset))
+
+  def test_no_routing_yields_none(self):
+    bins = [[_item([1], [2, 3])], []]
+    chunk = packing.pack_chunk_contiguous(
+        bins, budget=4, pad_id=0, carried=(), segment_align_multiple=1
+    )
+    self.assertIsNone(chunk.routed_experts)
+    self.assertTrue(all(row.routed_experts is None for row in chunk.rows))
+
+  def test_pack_chunk_returns_contiguous_rows(self):
+    rows = packing.pack_chunk(
+        self._bins(), budget=8, pad_id=0, carried=(), segment_align_multiple=1
+    )
+    self.assertLen(rows, 3)
+    np.testing.assert_array_equal(
+        np.stack([row.routed_experts for row in rows]),
+        packing.pack_chunk_contiguous(
+            self._bins(),
+            budget=8,
+            pad_id=0,
+            carried=(),
+            segment_align_multiple=1,
+        ).routed_experts,
+    )
+
+
+class PackBinRoutedOutTest(absltest.TestCase):
+
+  def _pack(self, routed_out, routed_shape=(3, 2)):
+    return packing.pack_bin(
+        [_routed_item(1, 2, base=0)],
+        budget=4,
+        pad_id=0,
+        carried=(),
+        routed_shape=routed_shape,
+        segment_align_multiple=1,
+        routed_out=routed_out,
+    )
+
+  def test_writes_into_and_returns_routed_out(self):
+    out = np.full((4, 3, 2), packing.UNSET_ROUTED_EXPERT, dtype=np.int16)
+    row = self._pack(out)
+    self.assertIs(row.routed_experts, out)
+    np.testing.assert_array_equal(
+        out[:3], np.arange(18, dtype=np.int16).reshape(3, 3, 2)
+    )
+    np.testing.assert_array_equal(
+        out[3], np.full((3, 2), packing.UNSET_ROUTED_EXPERT)
+    )
+
+  def test_empty_bin_returns_routed_out(self):
+    out = np.full((4, 3, 2), packing.UNSET_ROUTED_EXPERT, dtype=np.int16)
+    row = packing.pack_bin(
+        [],
+        budget=4,
+        pad_id=0,
+        carried=(),
+        routed_shape=(3, 2),
+        routed_out=out,
+    )
+    self.assertIs(row.routed_experts, out)
+
+  def test_rejects_wrong_shape(self):
+    with self.assertRaisesRegex(ValueError, "routed_out must be int16"):
+      self._pack(np.full((5, 3, 2), -1, dtype=np.int16))
+
+  def test_rejects_wrong_dtype(self):
+    with self.assertRaisesRegex(ValueError, "routed_out must be int16"):
+      self._pack(np.full((4, 3, 2), -1, dtype=np.int32))
+
+  def test_rejects_missing_routed_shape(self):
+    with self.assertRaisesRegex(ValueError, "requires routed_shape"):
+      packing.pack_bin(
+          [],
+          budget=4,
+          pad_id=0,
+          carried=(),
+          routed_out=np.full((4, 3, 2), -1, dtype=np.int16),
+      )
+
+
+class PackChunkCompactTest(absltest.TestCase):
+
+  def _bins(self):
+    # Row 0: two routed segments. Row 1: one routed segment, a zero-token item
+    # and a routing-less segment. Row 2: empty (dummy) row.
+    return [
+        [_routed_item(1, 2, base=0), _routed_item(2, 1, base=100)],
+        [
+            _routed_item(1, 1, base=200),
+            _routed_item(0, 0, base=0),
+            _routed_item(1, 2, base=0, routed=False),
+        ],
+        [],
+    ]
+
+  def _dense_and_compact(self, align):
+    kwargs = dict(
+        budget=12, pad_id=0, carried=(), segment_align_multiple=align
+    )
+    dense = packing.pack_chunk_contiguous(self._bins(), **kwargs)
+    compact = packing.pack_chunk_compact(self._bins(), **kwargs)
+    return dense, compact
+
+  def test_values_are_the_dense_routing_at_real_token_positions(self):
+    for align in (1, 4):
+      with self.subTest(align=align):
+        dense, compact = self._dense_and_compact(align)
+        valid = np.stack([row.segment_ids for row in compact.rows]) > 0
+        self.assertEqual(compact.routed_values.dtype, np.int16)
+        np.testing.assert_array_equal(
+            compact.routed_values, dense.routed_experts[valid]
+        )
+        # Everything outside the real tokens is padding the compact form
+        # drops.
+        np.testing.assert_array_equal(
+            dense.routed_experts[~valid], packing.UNSET_ROUTED_EXPERT
+        )
+
+  def test_rows_match_dense_packing_but_carry_no_routing(self):
+    dense, compact = self._dense_and_compact(4)
+    for dense_row, row in zip(dense.rows, compact.rows):
+      self.assertIsNone(row.routed_experts)
+      np.testing.assert_array_equal(row.ids, dense_row.ids)
+      np.testing.assert_array_equal(row.segment_ids, dense_row.segment_ids)
+      np.testing.assert_array_equal(
+          row.segment_positions, dense_row.segment_positions
+      )
+
+  def test_routing_less_item_is_unset(self):
+    _, compact = self._dense_and_compact(1)
+    # Row 0 holds 6 tokens, row 1's routed item 2, then the routing-less 3.
+    self.assertEqual(compact.routed_values.shape, (11, 3, 2))
+    np.testing.assert_array_equal(
+        compact.routed_values[8:], packing.UNSET_ROUTED_EXPERT
+    )
+
+  def test_no_routing_yields_none(self):
+    compact = packing.pack_chunk_compact(
+        [[_item([1], [2, 3])], []],
+        budget=4,
+        pad_id=0,
+        carried=(),
+        segment_align_multiple=1,
+    )
+    self.assertIsNone(compact.routed_values)
+    self.assertTrue(all(row.routed_experts is None for row in compact.rows))
+
+  def test_all_empty_bins_with_routed_shape_yield_empty_values(self):
+    compact = packing.pack_chunk_compact(
+        [[], []], budget=4, pad_id=0, carried=(), routed_shape=(3, 2)
+    )
+    self.assertEqual(compact.routed_values.shape, (0, 3, 2))
+    self.assertEqual(compact.routed_values.dtype, np.int16)
+
+
+class PackBinWithoutRoutingTest(absltest.TestCase):
+
+  def test_drops_item_routing(self):
+    row = packing.pack_bin(
+        [_routed_item(1, 2, base=0)],
+        budget=4,
+        pad_id=0,
+        carried=(),
+        routed_shape=(3, 2),
+        segment_align_multiple=1,
+        with_routing=False,
+    )
+    self.assertIsNone(row.routed_experts)
+    np.testing.assert_array_equal(row.segment_ids, [1, 1, 1, 0])
+
+  def test_rejects_routed_out(self):
+    with self.assertRaisesRegex(ValueError, "requires with_routing=True"):
+      packing.pack_bin(
+          [],
+          budget=4,
+          pad_id=0,
+          carried=(),
+          routed_shape=(3, 2),
+          routed_out=np.full((4, 3, 2), -1, dtype=np.int16),
+          with_routing=False,
+      )
+
+
 if __name__ == "__main__":
   absltest.main()
 
