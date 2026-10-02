@@ -695,22 +695,25 @@ async def run_controller(a):
     target_reached = bool(eval_ok and eval_accuracy >= target_acc)
     rcp_logged = False
     if a.rcp_logging and eval_ok:
-      mllog_utils.start_eval(
-          step=int(a.checkpoint_step),
-          samples_count=int(a.samples_count),
-          time_ms=eval_start_time_ms,
-      )
-      target_reached = mllog_utils.log_offline_eval_step(
-          step=int(a.checkpoint_step),
-          samples_count=int(a.samples_count),
-          eval_accuracy=eval_accuracy,
-          target_accuracy=target_acc,
-          checkpoint_timestamp_ms=a.checkpoint_timestamp_ms,
-          is_last_checkpoint=bool(a.is_last_checkpoint),
-          validation_time=validation_time,
-          emit_start_eval=False,
-      )
-      rcp_logged = True
+      try:
+        mllog_utils.start_eval(
+            step=int(a.checkpoint_step),
+            samples_count=int(a.samples_count),
+            time_ms=eval_start_time_ms,
+        )
+        target_reached = mllog_utils.log_offline_eval_step(
+            step=int(a.checkpoint_step),
+            samples_count=int(a.samples_count),
+            eval_accuracy=eval_accuracy,
+            target_accuracy=target_acc,
+            checkpoint_timestamp_ms=a.checkpoint_timestamp_ms,
+            is_last_checkpoint=bool(a.is_last_checkpoint),
+            validation_time=validation_time,
+            emit_start_eval=False,
+        )
+        rcp_logged = True
+      except Exception as exc:  # pylint: disable=broad-exception-caught
+        logging.warning("Failed to log RCP offline eval step: %s", exc)
     summary["rcp_logged"] = rcp_logged
     summary["target_accuracy"] = target_acc
     summary["target_reached"] = bool(target_reached)

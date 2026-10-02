@@ -627,7 +627,10 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
 
   args = _parse_args(argv)
   if args.rcp_logging:
-    mllog_utils.init_start(args)
+    try:
+      mllog_utils.init_start(args)
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      logging.warning("RCP logging init_start failed: %s", e)
   logging.basicConfig(
       level=logging.DEBUG if args.debug else logging.INFO,
       format="%(asctime)s - [DeepSWEOrchestrator] %(message)s",
@@ -638,15 +641,18 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   def _finish_training(status: str) -> None:
     if not args.rcp_logging:
       return
-    last = program.last_step_result if program is not None else None
-    mllog_utils.finish_training(
-        args,
-        status=status,
-        completed_steps=last.step + 1 if last is not None else None,
-        last_step_time_ms=(
-            program.last_step_timestamp_ms if program is not None else None
-        ),
-    )
+    try:
+      last = program.last_step_result if program is not None else None
+      mllog_utils.finish_training(
+          args,
+          status=status,
+          completed_steps=last.step + 1 if last is not None else None,
+          last_step_time_ms=(
+              program.last_step_timestamp_ms if program is not None else None
+          ),
+      )
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      logging.warning("RCP logging finish_training failed: %s", e)
 
   _register_signal_handlers(
       on_exit_signal=lambda _sig: _finish_training("aborted")
@@ -835,40 +841,69 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
     def _on_checkpoint_saved(ckpt_info: dict[str, Any]) -> None:
       if not manifest_file:
         return
-      step_num = int(ckpt_info["step"])
-      samples_count = step_num * global_batch_size
-      ts_ms = int(ckpt_info["timestamp_ms"])
-      ckpt_path = str(ckpt_info["checkpoint_path"])
-      if not ckpt_path:
-        raise ValueError(
-            f"save_checkpoint for step {step_num} returned no checkpoint_path;"
-            " cannot write the eval manifest entry."
+      try:
+        step_num = int(ckpt_info["step"])
+        samples_count = step_num * global_batch_size
+        ts_ms = int(ckpt_info["timestamp_ms"])
+        ckpt_path = str(ckpt_info.get("checkpoint_path") or "")
+        if not ckpt_path:
+          logging.warning(
+              "save_checkpoint for step %d returned no checkpoint_path;"
+              " skipping eval manifest entry.",
+              step_num,
+          )
+          return
+        record = {
+            "step": step_num,
+            "checkpoint_path": ckpt_path,
+            "timestamp_ms": ts_ms,
+            "samples_count": samples_count,
+            "global_batch_size": global_batch_size,
+            "batch_size": int(args.batch_size),
+            "num_generations": int(args.num_generations),
+            "val_start_at": int(val_start_step or 1),
+            "max_steps": int(args.max_steps),
+            "target_accuracy": float(args.target_accuracy),
+            "seed": int(args.seed),
+            "mllog_file": (
+                mllog_utils.get_mllog_file_path(
+                    metric_logger_dir=args.metric_logger_dir, seed=args.seed
+                )
+                or ""
+            ),
+        }
+        mllog_utils.append_checkpoint_manifest(manifest_file, record)
+        logging.info(
+            "Appended checkpoint manifest entry for step=%d to %s",
+            step_num,
+            manifest_file,
         )
-      record = {
-          "step": step_num,
-          "checkpoint_path": ckpt_path,
-          "timestamp_ms": ts_ms,
-          "samples_count": samples_count,
-          "global_batch_size": global_batch_size,
-          "batch_size": int(args.batch_size),
-          "num_generations": int(args.num_generations),
-          "val_start_at": int(val_start_step or 1),
-          "max_steps": int(args.max_steps),
-          "target_accuracy": float(args.target_accuracy),
-          "seed": int(args.seed),
-          "mllog_file": (
-              mllog_utils.get_mllog_file_path(
-                  metric_logger_dir=args.metric_logger_dir, seed=args.seed
-              )
-              or ""
-          ),
-      }
-      mllog_utils.append_checkpoint_manifest(manifest_file, record)
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        logging.warning(
+            "Failed to record checkpoint manifest entry for %s: %s",
+            ckpt_info,
+            e,
+        )
+
+    def _on_step_end(step: int, result: Any) -> None:
       logging.info(
-          "Appended checkpoint manifest entry for step=%d to %s",
-          step_num,
-          manifest_file,
+          "<<< DeepSWE step %d finished | train_result=%s",
+          step,
+          result,
       )
+      if args.rcp_logging:
+        try:
+          mllog_utils.log_rcp_step_stats(
+              program.metrics_logger,
+              args=args,
+              step=step + 1,
+          )
+        except Exception as e:  # pylint: disable=broad-exception-caught
+          logging.warning(
+              "RCP logging log_rcp_step_stats failed at step %d: %s",
+              step + 1,
+              e,
+          )
 
     program = rl_program.StandardRLProgram(
         algo=algo,
@@ -911,34 +946,27 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
             step,
             step,
         ),
-        on_step_end=lambda step, result: (
-            logging.info(
-                "<<< DeepSWE step %d finished | train_result=%s",
-                step,
-                result,
-            ),
-            mllog_utils.log_rcp_step_stats(
-                program.metrics_logger,
-                args=args,
-                step=step + 1,
-            )
-            if args.rcp_logging
-            else None,
-        ),
+        on_step_end=_on_step_end,
         val_start_step=val_start_step,
         on_checkpoint_saved=_on_checkpoint_saved if manifest_file else None,
     )
 
     if args.rcp_logging:
-      mllog_utils.init_print(
-          args,
-          train_dataset=dataset,
-      )
+      try:
+        mllog_utils.init_print(
+            args,
+            train_dataset=dataset,
+        )
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        logging.warning("RCP logging init_print failed: %s", e)
 
     logging.info("Bringing up remote workers through ClusterOrchestrator...")
     cluster.bring_up_workers(dummy_data=None)
     if args.rcp_logging:
-      mllog_utils.train_start(args, step=0)
+      try:
+        mllog_utils.train_start(args, step=0)
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        logging.warning("RCP logging train_start failed: %s", e)
     logging.info("Starting DeepSWE StandardRLProgram execution...")
     cluster.run(
         program=program,
