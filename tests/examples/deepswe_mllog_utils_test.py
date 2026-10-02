@@ -20,6 +20,8 @@ import json
 import logging
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
 import types
 from typing import Any
@@ -194,7 +196,6 @@ class MllogUtilsTest(absltest.TestCase):
     self.assertIn('"key": "eval_stop"', content)
     self.assertIn('"key": "run_stop"', content)
     self.assertIn('"status": "success"', content)
-    self.assertIn('"key": "train_samples"', content)
 
   def test_end_to_end_mlperf_logging_with_train_configs(self):
     args = types.SimpleNamespace(
@@ -235,7 +236,7 @@ class MllogUtilsTest(absltest.TestCase):
         model_id="",
     )
 
-    mock_train_dataset = [None] * 5480
+    mock_train_dataset = [None] * 685
     rollout_mesh = mock.MagicMock()
     rollout_mesh.shape = {"fsdp": 8, "tp": 4}
     train_mesh = mock.MagicMock()
@@ -321,7 +322,8 @@ class MllogUtilsTest(absltest.TestCase):
     self.assertEqual(event_map["global_batch_size"]["value"], 128)
     self.assertEqual(event_map["micro_batch_size"]["value"], 16)
     self.assertEqual(event_map["max_sequence_length"]["value"], 12288)
-    self.assertEqual(event_map["train_samples"]["value"], 640)
+    self.assertEqual(event_map["train_samples"]["value"], 1370)
+    self.assertLen([e for e in events if e["key"] == "train_samples"], 1)
     self.assertEqual(event_map["tensor_parallelism"]["value"], 2)
     self.assertEqual(event_map["generation_tensor_parallelism"]["value"], 4)
     self.assertEqual(
@@ -760,6 +762,9 @@ class MllogUtilsTest(absltest.TestCase):
     }
     self.assertEqual(emitted["eval_samples"], 251)
     self.assertEqual(emitted["max_sequence_length"], 65536)
+    self.assertEqual(emitted["opt_adamw_beta_2"], 0.999)
+    self.assertEqual(emitted["opt_adamw_weight_decay"], 0.0)
+    self.assertEqual(emitted["opt_gradient_clip_norm"], 0.125)
     for key in (
         "lowest_numerical_precision_in_linear",
         "lowest_numerical_precision_in_attn",
@@ -767,6 +772,35 @@ class MllogUtilsTest(absltest.TestCase):
     ):
       self.assertEqual(emitted[key], "bfloat16")
     self.assertEqual(emitted["config_filename"], "qwen35_397b_grpo")
+
+    for env_override in (
+        {"ROLLOUT_FP8": "true"},
+        {"TRAINER_FP8": "1"},
+        {"ROLLOUT_QUANTIZATION": "fp8"},
+    ):
+      fake_mllogger.reset_mock()
+      with (
+          mock.patch.object(mllog_utils, "mllogger", fake_mllogger),
+          mock.patch.object(mllog_utils, "_is_master_process", return_value=True),
+          mock.patch.object(mllog_utils, "_flush_to_gcs_if_needed"),
+          mock.patch.dict(os.environ, env_override, clear=False),
+      ):
+        mllog_utils.init_print(args)
+      fp8_emitted = {
+          c.kwargs["key"]: c.kwargs["value"]
+          for c in fake_mllogger.event.call_args_list
+      }
+      self.assertEqual(
+          fp8_emitted["lowest_numerical_precision_in_linear"],
+          "fp8",
+          msg=f"Failed for {env_override}",
+      )
+      self.assertEqual(
+          fp8_emitted["lowest_numerical_precision_in_attn"], "bfloat16"
+      )
+      self.assertEqual(
+          fp8_emitted["lowest_numerical_precision_in_comm"], "bfloat16"
+      )
 
   def _finish_training_args(self):
     return types.SimpleNamespace(
@@ -1015,6 +1049,133 @@ class MllogUtilsTest(absltest.TestCase):
     )
     self.assertEqual(block_stop["metadata"]["step"], 5)
     self.assertEqual(block_stop["metadata"]["samples_count"], 1280)
+
+  def test_mlperf_6_1_0_compliance_checker_end_to_end(self):
+    args = types.SimpleNamespace(
+        seed=42,
+        metric_logger_dir=self.test_dir,
+        batch_size=16,
+        mini_batch_size=16,
+        train_micro_batch_size=1,
+        num_generations=16,
+        max_steps=20,
+        max_prompt_length=4096,
+        max_response_length=61440,
+        learning_rate=1e-6,
+        b1=0.9,
+        b2=0.999,
+        weight_decay=0.0,
+        max_grad_norm=0.125,
+        warmup_steps=0,
+        schedule_type="constant",
+        temperature=1.0,
+        top_p=1.0,
+        target_accuracy=0.69,
+        tpu_topology="tpu7x:4x4x4+tpu7x:2x2x4",
+        rollout_replicas=6,
+        train_mesh_tp=2,
+        train_mesh_expert=1,
+        rollout_mesh_tp=8,
+        rollout_mesh_expert=1,
+        rollout_engine="vllm",
+        model_id="Qwen/Qwen3.5-397B-A17B",
+    )
+    train_dataset = [None] * 685
+    val_dataset = [None] * 251
+
+    with mock.patch.dict(
+        os.environ, {"ROLLOUT_QUANTIZATION": " fp8_e4m3 "}, clear=False
+    ):
+      mllog_utils.init_start(args)
+      mllog_utils.init_print(
+          args, train_dataset=train_dataset, val_dataset=val_dataset
+      )
+      mllog_utils.train_start(args, step=0)
+      for s in range(1, 21):
+        mllog_utils.log_tracked_stats(
+            {"reduced_train_loss": 0.1, "reward": 0.5},
+            step=s,
+            samples_count=s * 256,
+        )
+      mllog_utils.finish_training(
+          args, status="success", completed_steps=20, last_step_time_ms=None
+      )
+      mllog_utils.start_eval(step=18, samples_count=18 * 256)
+      mllog_utils.log_offline_eval_step(
+          step=18,
+          samples_count=18 * 256,
+          eval_accuracy=0.70,
+          target_accuracy=0.69,
+          checkpoint_timestamp_ms=int(mllog_utils._last_block_time_ms or 0),
+          is_last_checkpoint=False,
+          validation_time=120.0,
+          emit_start_eval=False,
+      )
+
+    log_path = os.path.join(self.test_dir, "seed_42.out")
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "mlperf_logging.compliance_checker",
+            "--ruleset",
+            "6.1.0",
+            log_path,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    self.assertEqual(
+        proc.returncode,
+        0,
+        f"Compliance checker failed:\n{proc.stdout}\n{proc.stderr}",
+    )
+
+  def test_iter_prompt_items_max_staleness(self):
+    stub_modules = {}
+    for mod_name in (
+        "r2egym",
+        "r2egym.agenthub",
+        "r2egym.agenthub.action",
+        "r2egym.agenthub.environment",
+        "r2egym.agenthub.environment.env",
+    ):
+      if mod_name not in sys.modules:
+        m = mock.MagicMock()
+        m.__file__ = "/tmp/r2egym/__init__.py"
+        stub_modules[mod_name] = m
+
+    with mock.patch.dict(sys.modules, stub_modules):
+      from tunix.experimental.examples.deepswe_dist import deepswe  # pylint: disable=g-import-not-at-top
+
+      dataset = [
+          {"instance_id": f"inst_{i}", "problem_statement": "fix"}
+          for i in range(10)
+      ]
+      common_kwargs = dict(
+          dataset=dataset,
+          max_steps=5,
+          batch_size=2,
+          max_turns=4,
+          max_response_length=1024,
+          temperature=1.0,
+          top_p=1.0,
+          top_k=None,
+          step_timeout_secs=60,
+          reward_timeout_secs=60,
+          env_backend="kubernetes",
+          use_agent_sandbox=False,
+          scaffold="openhands",
+          env_verbose=False,
+      )
+      items_default = list(deepswe.iter_prompt_items(**common_kwargs))
+      self.assertLen(items_default, 10)
+
+      items_stale_1 = list(
+          deepswe.iter_prompt_items(**common_kwargs, max_staleness=1)
+      )
+      self.assertLen(items_stale_1, 12)
 
 
 if __name__ == "__main__":

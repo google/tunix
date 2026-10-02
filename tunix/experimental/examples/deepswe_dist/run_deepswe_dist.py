@@ -804,6 +804,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         episode_timeout_secs=args.episode_timeout_secs,
         overlong_filter=args.overlong_filter,
         exact_token_continuity=args.exact_token_continuity,
+        max_staleness=args.max_staleness,
     )
     if args.use_agent_sandbox:
       prompt_stream = swe_env.PrewarmDatasetIterator(
