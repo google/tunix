@@ -109,6 +109,27 @@ kubectl logs -f -n trellis -l jobset.sigs.k8s.io/jobset-name=${USER}-train -c ma
 bash tunix/experimental/examples/recipes/mlperf_35b_128_v5p.sh stop
 ```
 
+### 4. Reporting the Run to uBench
+
+uBench can add the run to its dashboard after the run finishes. uBench doesn't launch, monitor, or stop the run. Only the tpu7x recipes are supported. Reporting is off by default; set `UBENCH_REPORTING=true` to turn it on.
+
+1. Launch with a new `JOB_PREFIX` for each run, `UBENCH_REPORTING=true`, and MLPerf logging on. A short name with the date and time works well. Set `JOB_PREFIX` with `export`, so that `stop` later uses the same value:
+   ```bash
+   # <user>-<model>-<MMDDHHMM>, for example alice-35b-09281430
+   export JOB_PREFIX="${USER}-35b-$(date +%m%d%H%M)"
+   UBENCH_REPORTING=true RCP_LOGGING=true bash tunix/experimental/examples/recipes/mlperf_35b_128_v7x.sh start
+   ```
+   Keep `JOB_PREFIX` short: Kubernetes builds longer names from it, such as `<JOB_PREFIX>-train-pw-node-0-0`, and they must fit in 63 characters. Don't reuse a `JOB_PREFIX`: the new run overwrites the earlier run's MLPerf log if `SEED` is the same.
+
+   On `start`, [`ubench_reporting.sh`](ubench_reporting.sh) writes three small files for uBench to `MAXTEXT_OUTPUT_DIR`, which must end with `/${JOB_PREFIX}` (the recipe default does). It doesn't change any recipe variable. If something is wrong, for example no access to the bucket, it prints a warning and the launch continues.
+2. After the run finishes, report it with the command that the launch printed, for example:
+   ```bash
+   ubench benchmark report --run-name alice-35b-09281430 --gcs-root-path gs://atwigg-trellis-us-central1/maxtext
+   ```
+   uBench also writes its result files to `MAXTEXT_OUTPUT_DIR`, so the person who runs this command needs read and write access to that bucket.
+
+uBench reads the MLPerf log from `${MAXTEXT_OUTPUT_DIR}/mllog` (the default `METRIC_LOGGER_DIR`). It reads the step metrics from Cloud Logging, or from TensorBoard if you set `LOG_DIR` to `${MAXTEXT_OUTPUT_DIR}/tensorboard`.
+
 ---
 
 ## Raiden wheel and pathways images
