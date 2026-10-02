@@ -322,9 +322,9 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="Free the KV cache during weight sync.",
   )
   parser.add_argument(
-      "--partial_rollout",
+      "--in_flight_weight_updates",
       type=_str2bool,
-      default=_str2bool(os.getenv("PARTIAL_ROLLOUT", "false")),
+      default=_str2bool(os.getenv("IN_FLIGHT_WEIGHT_UPDATES", "false")),
       nargs="?",
       const=True,
       help=(
@@ -482,7 +482,7 @@ def _rollout_config_kwargs(
       "env_name": args.env_name,
       "agent_name": args.agent_name,
       "agent_config": _agent_config(args),
-      "partial_rollout": bool(getattr(args, "partial_rollout", False)),
+      "partial_rollout": bool(getattr(args, "in_flight_weight_updates", False)),
   }
 
 
@@ -909,7 +909,7 @@ def _create_vllm_sampler(args, tokenizer):
       model_name=vllm_model,
       weight_sync_mode=args.weight_sync_mode,
       free_kv_cache_during_weight_sync=args.free_kv_cache_during_weight_sync,
-      partial_rollout=args.partial_rollout,
+      partial_rollout=args.in_flight_weight_updates,
   )
   config = rollout_worker.RolloutConfig(
       sampler_type="vllm",

@@ -195,7 +195,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
-      "--partial_rollout",
+      "--in_flight_weight_updates",
       action=argparse.BooleanOptionalAction,
       default=False,
       help=(
@@ -904,7 +904,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         ),
         async_weight_sync=args.async_weight_sync,
         pipeline_train_microbatches=args.pipeline_train_microbatches,
-        partial_rollout=args.partial_rollout,
+        partial_rollout=args.in_flight_weight_updates,
         rollout_priority_scheduling=args.rollout_priority_scheduling,
         on_step_begin=lambda step: logging.info(
             ">>> DeepSWE step %d starting | policy_version=%d",

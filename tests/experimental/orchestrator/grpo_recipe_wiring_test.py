@@ -571,6 +571,25 @@ class DeepSWEExampleCommandLineTest(absltest.TestCase):
         parse(["--no-rollout_priority_scheduling"]).rollout_priority_scheduling
     )
 
+  def test_launchers_pass_in_flight_weight_updates_to_both_sides(self):
+    self.assertIn(
+        "--in_flight_weight_updates", _deepswe_k8s_orchestrator_block()
+    )
+    self.assertIn(
+        "--in_flight_weight_updates=${IN_FLIGHT_WEIGHT_UPDATES}",
+        _deepswe_k8s_rollout_cmd(),
+    )
+
+  def test_in_flight_weight_updates_flag(self):
+    parse = run_deepswe_dist._parse_args  # pylint: disable=protected-access
+    self.assertFalse(parse([]).in_flight_weight_updates)
+    self.assertTrue(
+        parse(["--in_flight_weight_updates"]).in_flight_weight_updates
+    )
+    self.assertFalse(
+        parse(["--no-in_flight_weight_updates"]).in_flight_weight_updates
+    )
+
 
 class AuxMetricForwardingTest(absltest.TestCase):
   """Tests for converting a loss function's aux metrics for the buffer."""

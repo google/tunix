@@ -68,7 +68,7 @@ BETA=${BETA:-0.0}
 EPSILON=${EPSILON:-0.2}
 SAMPLER=${SAMPLER:-inprocess_vllm}
 WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
-PARTIAL_ROLLOUT=${PARTIAL_ROLLOUT:-false}
+IN_FLIGHT_WEIGHT_UPDATES=${IN_FLIGHT_WEIGHT_UPDATES:-false}
 # Rollouts serve the oldest in-flight prompt batch first (vLLM priority
 # scheduling, priority = batch index). Needs SAMPLER=vllm.
 ROLLOUT_PRIORITY_SCHEDULING=${ROLLOUT_PRIORITY_SCHEDULING:-false}
@@ -428,7 +428,7 @@ echo "Launching DeepSWE rollout node..."
     --lora_rank="$LORA_RANK"
     --lora_alpha="$LORA_ALPHA"
     --weight_sync_mode="$WEIGHT_SYNC_MODE"
-    --partial_rollout="$PARTIAL_ROLLOUT"
+    --in_flight_weight_updates="$IN_FLIGHT_WEIGHT_UPDATES"
     --priority_scheduling="$ROLLOUT_PRIORITY_SCHEDULING"
     --registry_module=tunix.experimental.examples.deepswe_dist.deepswe
     --env_name=deepswe_env

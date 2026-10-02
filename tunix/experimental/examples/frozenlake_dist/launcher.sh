@@ -76,7 +76,7 @@ SAMPLER_IS_THRESHOLD=${SAMPLER_IS_THRESHOLD:-2.0}
 ROLLOUT_MAX_CONCURRENCY=${ROLLOUT_MAX_CONCURRENCY:-256}
 SAMPLER=${SAMPLER:-inprocess_vllm}
 WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-raiden}
-PARTIAL_ROLLOUT=${PARTIAL_ROLLOUT:-false}
+IN_FLIGHT_WEIGHT_UPDATES=${IN_FLIGHT_WEIGHT_UPDATES:-false}
 # Rollouts serve the oldest in-flight prompt batch first (vLLM priority
 # scheduling, priority = batch index). Needs SAMPLER=vllm.
 ROLLOUT_PRIORITY_SCHEDULING=${ROLLOUT_PRIORITY_SCHEDULING:-false}
@@ -292,7 +292,7 @@ TRAINER_PID=$!
     --max_prompt_length="$MAX_PROMPT_LENGTH"
     --max_response_length="$MAX_RESPONSE_LENGTH"
     --weight_sync_mode="$WEIGHT_SYNC_MODE"
-    --partial_rollout="$PARTIAL_ROLLOUT"
+    --in_flight_weight_updates="$IN_FLIGHT_WEIGHT_UPDATES"
     --priority_scheduling="$ROLLOUT_PRIORITY_SCHEDULING"
     --registry_module=tunix.experimental.examples.frozenlake_dist.frozenlake
     --env_name=frozenlake_env
