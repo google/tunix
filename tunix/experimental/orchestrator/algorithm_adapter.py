@@ -97,12 +97,13 @@ def _routed_experts_for(
     )
   if routed_arr.shape[0] >= seq_len:
     return routed_arr[:seq_len]
-  pad = np.full(
-      (seq_len - routed_arr.shape[0],) + routed_arr.shape[1:],
+  out = np.full(
+      (seq_len,) + routed_arr.shape[1:],
       datatypes.UNSET_ROUTED_EXPERT,
       dtype=np.int16,
   )
-  return np.concatenate([routed_arr, pad], axis=0)
+  out[: routed_arr.shape[0]] = routed_arr
+  return out
 
 
 def _extract_overlong(item: datatypes.TrajectoryItem) -> np.ndarray | None:
@@ -342,11 +343,7 @@ class GRPOAdapter(AlgorithmAdapter):
         # inflating the `token-mean` loss denominator or contributing KL loss.
         act_arr = np.zeros_like(act_arr)
 
-      seq_tokens = (
-          np.concatenate([p_arr, c_arr])
-          if (len(p_arr) > 0 or len(c_arr) > 0)
-          else np.zeros(0, dtype=np.int32)
-      )
+      seq_len = len(p_arr) + len(c_arr)
       seq_adv = np.full(len(c_arr), adv_val, dtype=np.float32)
       # The rollout's log-probabilities are carried in two separate fields
       # because they serve two purposes that recipes configure independently.
@@ -369,7 +366,7 @@ class GRPOAdapter(AlgorithmAdapter):
           ref_per_token_logps=np.asarray(ref_lp, dtype=np.float32)
           if ref_lp is not None
           else None,
-          routed_experts=_routed_experts_for(item, len(seq_tokens)),
+          routed_experts=_routed_experts_for(item, seq_len),
       )
       payloads.append(payload)
     return payloads
@@ -491,11 +488,7 @@ class PPOAdapter(AlgorithmAdapter):
       if old_lp is None and self.use_rollout_logps:
         old_lp = _extract_old_logps(item, len(c_arr))
 
-      seq_tokens = (
-          np.concatenate([p_arr, c_arr])
-          if (len(p_arr) > 0 or len(c_arr) > 0)
-          else np.zeros(0, dtype=np.int32)
-      )
+      seq_len = len(p_arr) + len(c_arr)
       seq_adv = np.full(len(c_arr), adv_val, dtype=np.float32)
 
       payload = datatypes.RLTrainerPayload(
@@ -510,7 +503,7 @@ class PPOAdapter(AlgorithmAdapter):
           ref_per_token_logps=np.asarray(ref_lp, dtype=np.float32)
           if ref_lp is not None
           else None,
-          returns=np.full(len(seq_tokens), vt_val, dtype=np.float32),
+          returns=np.full(seq_len, vt_val, dtype=np.float32),
       )
       payloads.append(payload)
     return payloads
