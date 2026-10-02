@@ -20,6 +20,7 @@ pipelines.
 
 import abc
 import asyncio
+import collections
 from collections.abc import Callable, Iterable, Mapping, Sequence
 import contextlib
 import dataclasses
@@ -555,11 +556,13 @@ class StandardRLProgram(RLProgram):
           else:
             r = _extract_reward(item)
           rewards.append(float(r))
+          del item
 
-        trainer_payloads = self.algo.create_trainer_payloads(
-            group, rewards=rewards
+        trainer_payloads = collections.deque(
+            self.algo.create_trainer_payloads(group, rewards=rewards)
         )
-        for idx, payload in enumerate(trainer_payloads):
+        for idx in range(len(trainer_payloads)):
+          payload = trainer_payloads.popleft()
           reward_val = rewards[idx] if idx < len(rewards) else 0.0
           src_item = group[idx] if idx < len(group) else None
           src_traj = getattr(src_item, "traj", None)
@@ -596,6 +599,12 @@ class StandardRLProgram(RLProgram):
           steps = raw_steps if isinstance(raw_steps, list) else []
           src_metadata = getattr(src_item, "metadata", None)
           metadata = dict(src_metadata) if src_metadata else {}
+          metadata.pop("routed_experts", None)
+          traj_dict.pop("routed_experts", None)
+          if isinstance(src_traj, dict):
+            src_traj.pop("routed_experts", None)
+          if isinstance(src_metadata, dict):
+            src_metadata.pop("routed_experts", None)
           traj_dict["trajectory_reward"] = reward_val
           traj_dict["status"] = status
           traj_dict["steps"] = steps
@@ -609,14 +618,17 @@ class StandardRLProgram(RLProgram):
               prompt_tokens=getattr(src_item, "prompt_tokens", None),
               completion_tokens=getattr(src_item, "completion_tokens", None),
               action_mask=getattr(src_item, "action_mask", None),
-              routed_experts=getattr(src_item, "routed_experts", None),
+              routed_experts=None,
               policy_version=getattr(src_item, "policy_version", 0),
               metadata=metadata,
               # TODO: b/552087289 - Stream RLTrainerPayload directly instead of
               # re-wrapping in TrajectoryItem.
           )
           item.payload = payload  # pyrefly: ignore[missing-attribute]
+          del payload, src_item, src_traj, src_metadata, traj_dict, metadata
           await self.scored_q.put(item)
+          del item
+        del group, rewards, trainer_payloads
     finally:
       await self.scored_q.close()
 
@@ -642,6 +654,15 @@ class StandardRLProgram(RLProgram):
       )
     self.metrics_logger.log(prefix, metric_name, scalar_value, self.mode, step)
 
+  async def _drain_filtered_groups(
+      self,
+  ) -> list[list[datatypes.TrajectoryItem]]:
+    """Drains and returns all filtered groups across raw and scored queues."""
+    filtered: list[list[datatypes.TrajectoryItem]] = []
+    filtered.extend(await self.raw_q.get_filtered_groups())
+    filtered.extend(await self.scored_q.get_filtered_groups())
+    return filtered
+
   def _collect_and_log_step_metrics(
       self,
       *,
@@ -659,6 +680,7 @@ class StandardRLProgram(RLProgram):
       consumed_policy_version: int,
       log_step: int,
       sampler_agreement: dict[str, tuple[Any, list[Any]]] | None = None,
+      filtered_groups: Sequence[Sequence[datatypes.TrajectoryItem]] = (),
   ) -> dict[str, Any]:
     """Logs rollout, reward, trainer, and orchestrator metrics.
 
@@ -819,6 +841,19 @@ class StandardRLProgram(RLProgram):
         if tag.startswith("generation/"):
           tag = "rollout/" + tag.removeprefix("generation/")
         self._log_metric(tag, val, log_step)
+
+    filtered_groups_count = len(filtered_groups)
+    filtered_trajectories_count = sum(len(g) for g in filtered_groups)
+    self._log_metric(
+        "rollout/filtered_groups_count",
+        float(filtered_groups_count),
+        log_step,
+    )
+    self._log_metric(
+        "rollout/filtered_trajectories_count",
+        float(filtered_trajectories_count),
+        log_step,
+    )
 
     # --- 2. Reward Metrics ---
     rewards_to_log = step_rewards
@@ -1018,6 +1053,8 @@ class StandardRLProgram(RLProgram):
         "advantage_std": advantage_std,
         "loss_val": loss_val,
         "perplexity_val": perplexity_val,
+        "filtered_groups_count": filtered_groups_count,
+        "filtered_trajectories_count": filtered_trajectories_count,
     }
 
   async def _apply_sampler_trainer_agreement(
@@ -1103,12 +1140,14 @@ class StandardRLProgram(RLProgram):
       return
     for item in all_step_items:
       metadata = dict(getattr(item, "metadata", None) or {})
+      metadata.pop("routed_experts", None)
       env_config = metadata.get("env_config")
       if not isinstance(env_config, dict):
         env_config = {}
       # Logging must never take down a training step, so read defensively
       # rather than reusing the strict `_extract_reward` above.
-      traj = getattr(item, "traj", None) or {}
+      traj = dict(getattr(item, "traj", None) or {})
+      traj.pop("routed_experts", None)
       status = traj.get("status", None)
       reward = traj.get("trajectory_reward", None)
       if isinstance(status, datatypes.TrajectoryStatus):
@@ -1206,6 +1245,10 @@ class StandardRLProgram(RLProgram):
           for item in scored_items:
             payload = getattr(item, "payload", None)
             if isinstance(payload, datatypes.RLTrainerPayload):
+              if payload.routed_experts is not None:
+                item.payload = dataclasses.replace(  # pyrefly: ignore[missing-attribute]
+                    payload, routed_experts=None
+                )
               payload = dataclasses.replace(
                   payload,
                   metadata={
@@ -1214,11 +1257,16 @@ class StandardRLProgram(RLProgram):
                   },
               )
             payloads.append(payload)
+            del payload
           packing_start_time = time.perf_counter()
           assembled_batches = self.assembler.feed(payloads)  # pyrefly: ignore[bad-argument-type]
           step_packing_time_sec += time.perf_counter() - packing_start_time
+          del payloads
 
-        for mb in assembled_batches:
+        assembled_queue = collections.deque(assembled_batches)
+        del assembled_batches
+        while assembled_queue:
+          mb = assembled_queue.popleft()
           batch = mb.payload
           if getattr(self.algo, "requires_reference_kl", False):
             if not isinstance(batch, datatypes.RLTrainerPayload):
@@ -1262,13 +1310,15 @@ class StandardRLProgram(RLProgram):
               mb.padding_stats.padding_ratio,
               mb.padding_stats.row_imbalance,
           )
+          is_final_batch = mb.is_final_batch
           step_result = await self.engine.train_step(
               batch,
               role=datatypes.Role.ACTOR,
               accumulate_gradients=True,
-              apply_optimizer=mb.is_final_batch,
+              apply_optimizer=is_final_batch,
           )
-          if mb.is_final_batch:
+          del batch, mb
+          if is_final_batch:
             trainer_metrics = await self.engine.get_metrics(
                 role=datatypes.Role.ACTOR
             )
@@ -1316,6 +1366,8 @@ class StandardRLProgram(RLProgram):
 
       step_time_sec = time.monotonic() - step_start_time
 
+      filtered_groups = await self._drain_filtered_groups()
+
       metrics_summary = self._collect_and_log_step_metrics(
           all_step_items=all_step_items,
           step_rewards=step_rewards,
@@ -1331,7 +1383,9 @@ class StandardRLProgram(RLProgram):
           consumed_policy_version=consumed_policy_version,
           log_step=current_step,
           sampler_agreement=step_sampler_agreement,
+          filtered_groups=filtered_groups,
       )
+      del filtered_groups
       self._log_consumed_trajectories(
           all_step_items,
           log_step=current_step,

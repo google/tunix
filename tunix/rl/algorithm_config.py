@@ -235,24 +235,23 @@ class GRPOConfig(AlgorithmConfig):
       `sampler_is="token"`. Set to `None` for unclipped token ratios (capped
       only at `exp(20)` for numerical safety). Default: `2.0`.
     sampler_rs: Optional rejection-sampling gate between the rollout sampler and
-      trainer actor. Orthogonal to `sampler_is`:
-      - `"geometric"`: sequence-level gate that zeroes weights on sequences
-        whose geometric-mean sampler/trainer ratio
-        `exp(mean_t(log p_trainer_t - log q_sampler_t))` falls outside
-        `[sampler_rs_min, sampler_rs_max]`. Pairing `sampler_is="token"` with
-        `sampler_rs="geometric"` implements sequence-masked TIS (`seq-mask-tis`).
-      - `"token"`: token-level gate (IcePop) that zeroes weights on tokens whose
-        ratio `exp(log p_trainer_t - log q_sampler_t)` falls outside
-        `[sampler_rs_min, sampler_rs_max]`.
-      - `None`: disables rejection sampling.
+      trainer actor (orthogonal to `sampler_is`). Supported values are
+      `"geometric"` (sequence-level gate that zeroes weights on sequences whose
+      geometric-mean sampler/trainer ratio `exp(mean_t(log p_trainer_t - log
+      q_sampler_t))` falls outside `[sampler_rs_min, sampler_rs_max]`; pairing
+      `sampler_is="token"` with `sampler_rs="geometric"` implements
+      sequence-masked TIS `seq-mask-tis`), `"token"` (token-level IcePop gate
+      that zeroes weights on tokens whose ratio `exp(log p_trainer_t - log
+      q_sampler_t)` falls outside `[sampler_rs_min, sampler_rs_max]`), or `None`
+      (disables rejection sampling).
     sampler_rs_min: Lower edge of the `[sampler_rs_min, sampler_rs_max]`
       rejection-sampling keep-band.
     sampler_rs_max: Upper edge of the `[sampler_rs_min, sampler_rs_max]`
       rejection-sampling keep-band.
     seq_logprob_error_threshold: Drop a sequence when the sampler and the
-      trainer disagree about its tokens by more than this, measured as
-      `mean_t exp|log p_trainer - log q_sampler|`. `None` disables the gate.
-      Requires rollout log-probabilities.
+      trainer disagree about its tokens by more than this, measured as `mean_t
+      exp|log p_trainer - log q_sampler|`. `None` disables the gate. Requires
+      rollout log-probabilities.
 
   References:
     - GRPO: https://arxiv.org/abs/2402.03300

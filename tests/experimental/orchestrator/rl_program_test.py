@@ -18,6 +18,7 @@ from collections.abc import Sequence
 import types
 from typing import Any
 from unittest import mock
+import weakref
 
 from absl.testing import absltest
 import metrax.logging as metrax_logging
@@ -3833,6 +3834,92 @@ class RLProgramTest(absltest.TestCase):
     self.assertFalse(logger.metric_exists("rewards", "mean", "train"))
     program.close()
 
+  def test_collect_and_log_step_metrics_logs_filtered_groups_metrics(self):
+    program = self._create_program()
+
+    filtered_groups = [
+        [self._scoring_item(0), self._scoring_item(1)],
+        [self._scoring_item(2)],
+    ]
+
+    metrics_summary = program._collect_and_log_step_metrics(
+        all_step_items=[],
+        step_rewards=[],
+        step_advantages=[],
+        step_result=None,
+        trainer_metrics=None,
+        num_rollouts=0,
+        num_microbatches=1,
+        padding_stats=[],
+        packing_time_sec=0.0,
+        step_time_sec=0.0,
+        consumed_policy_version=0,
+        log_step=0,
+        filtered_groups=filtered_groups,
+    )
+
+    logger = program.metrics_logger
+    self.assertEqual(
+        logger.get_metric("rollout", "filtered_groups_count", "train"), 2.0
+    )
+    self.assertEqual(
+        logger.get_metric("rollout", "filtered_trajectories_count", "train"),
+        3.0,
+    )
+    self.assertEqual(metrics_summary["filtered_groups_count"], 2)
+    self.assertEqual(metrics_summary["filtered_trajectories_count"], 3)
+    program.close()
+
+  def test_drain_filtered_groups_drains_both_queues(self):
+    program = self._create_program()
+
+    item0 = self._scoring_item(0)
+    item1 = self._scoring_item(1)
+
+    async def _test():
+      program.raw_q._filtered_groups.append([item0])
+      program.scored_q._filtered_groups.append([item1])
+
+      drained = await program._drain_filtered_groups()
+      self.assertEqual(drained, [[item0], [item1]])
+
+      # Subsequent drain should be empty
+      drained_again = await program._drain_filtered_groups()
+      self.assertEqual(drained_again, [])
+
+    asyncio.run(_test())
+    program.close()
+
+  def test_train_loop_drains_and_logs_filtered_groups(self):
+    async def _run():
+      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group(), [])
+      program = self._create_program(
+          dataset=["prompt_data_0"],
+          max_steps=1,
+      )
+
+      # Inject a filtered group into raw_q
+      filtered_item = self._scoring_item(99)
+      program.raw_q._filtered_groups.append([filtered_item])
+
+      await program.run_async(self.mock_engine)
+
+      # Verify that raw_q._filtered_groups was drained
+      self.assertEqual(len(program.raw_q._filtered_groups), 0)
+
+      # Verify metric was logged
+      logger = program.metrics_logger
+      self.assertEqual(
+          logger.get_metric("rollout", "filtered_groups_count", "train"), 1.0
+      )
+      self.assertEqual(
+          logger.get_metric("rollout", "filtered_trajectories_count", "train"),
+          1.0,
+      )
+      program.close()
+
+    asyncio.run(_run())
+
   def test_critique_stage_preserves_is_valid_for_degenerate_group_survivor(
       self,
   ):
@@ -4168,7 +4255,19 @@ class RLProgramTest(absltest.TestCase):
       await asyncio.wait_for(program.run_async(self.mock_engine), timeout=5.0)
 
       self.assertEqual(self.mock_engine.dispatch_rollouts.call_count, 3)
-      self.assertEqual(program.raw_q.filtered_groups_count, 2)
+      self.assertEqual(program.raw_q.filtered_groups_count, 0)
+      self.assertEqual(
+          program.metrics_logger.get_metric(
+              "rollout", "filtered_groups_count", "train"
+          ),
+          2.0,
+      )
+      self.assertEqual(
+          program.metrics_logger.get_metric(
+              "rollout", "filtered_trajectories_count", "train"
+          ),
+          4.0,
+      )
       self.assertIsNotNone(program._dispatch_capacity)
       # Initial capacity is 1 * (1 + 1) = 2; all 3 dispatched prompts (2
       # filtered + 1 trained) must have released their tokens back to 2.
@@ -4176,6 +4275,7 @@ class RLProgramTest(absltest.TestCase):
       self.assertIsNotNone(program.last_step_result)
       self.assertEqual(program.last_step_result.step, 0)
       self.assertEqual(program.last_step_result.num_rollouts, 2)
+      program.close()
 
     asyncio.run(_run())
 
@@ -4557,6 +4657,148 @@ class StandardRLProgramAsyncDatasetTest(absltest.TestCase):
 
     asyncio.run(_run())
     self.assertTrue(closed)
+
+
+class StandardRLProgramRoutedExpertsCleanupTest(absltest.TestCase):
+
+  def test_critique_and_train_stages_drop_unbatched_routed_experts_duplicates(
+      self,
+  ):
+    async def _run():
+      mock_algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
+      mock_algo.num_generations = 1
+      mock_algo.mini_batch_size = 1
+      mock_algo.max_packed_len = 8
+      mock_algo.max_response_length = 8
+      mock_algo.requires_reference_kl = False
+      mock_algo.algo_config = mock.MagicMock(
+          temperature=None, use_rollout_logps=False
+      )
+
+      routed = np.full((4, 2, 2), 3, dtype=np.int16)
+      routed_ref = weakref.ref(routed)
+      payload = datatypes.RLTrainerPayload(
+          prompt_ids=np.array([10, 11], dtype=np.int32),
+          prompt_mask=np.ones((2,), dtype=np.float32),
+          completion_ids=np.array([20, 21], dtype=np.int32),
+          completion_mask=np.ones((2,), dtype=np.float32),
+          advantages=np.ones((2,), dtype=np.float32),
+          routed_experts=routed,
+      )
+      mock_algo.create_trainer_payloads.return_value = [payload]
+
+      assembler = batch_assembly.PaddedBatchAssembler(
+          batch_size=1,
+          max_prompt_length=2,
+          max_response_length=2,
+          pad_id=0,
+          num_generations=1,
+          mini_batch_size=1,
+      )
+      program = rl_program.StandardRLProgram(
+          dataset=[],
+          max_steps=1,
+          algo=mock_algo,
+          reward_fns=[lambda *_: 1.0],
+          assembler=assembler,
+          sync_weights=True,
+      )
+      mock_engine = mock.MagicMock()
+      trained_routed_copy: list[np.ndarray] = []
+      batched_routed_refs: list[weakref.ReferenceType[np.ndarray]] = []
+
+      async def _fake_train_step(batch, **_):
+        self.assertIsNotNone(batch.routed_experts)
+        batched_routed_refs.append(weakref.ref(batch.routed_experts))
+        trained_routed_copy.append(np.array(batch.routed_experts, copy=True))
+        return {"updated": True}
+
+      routed_alive_during_ckpt: list[bool] = []
+      batched_alive_during_ckpt: list[bool] = []
+      routed_alive_during_sync: list[bool] = []
+      batched_alive_during_sync: list[bool] = []
+
+      async def _fake_save_checkpoint(**_):
+        routed_alive_during_ckpt.append(routed_ref() is not None)
+        batched_alive_during_ckpt.append(
+            any(ref() is not None for ref in batched_routed_refs)
+        )
+
+      async def _fake_sync_weights(**_):
+        routed_alive_during_sync.append(routed_ref() is not None)
+        batched_alive_during_sync.append(
+            any(ref() is not None for ref in batched_routed_refs)
+        )
+        return 1
+
+      mock_engine.train_step = _fake_train_step
+      mock_engine.get_metrics = mock.AsyncMock(return_value=None)
+      mock_engine.save_checkpoint = mock.AsyncMock(
+          side_effect=_fake_save_checkpoint
+      )
+      mock_engine.sync_weights = mock.AsyncMock(side_effect=_fake_sync_weights)
+      program.engine = mock_engine
+      program._dispatch_capacity = asyncio.Semaphore(2)
+      await program._dispatch_capacity.acquire()
+      program.trajectory_logger = mock.MagicMock()
+
+      src_item = datatypes.TrajectoryItem(
+          prompt_id="p0",
+          group_index=0,
+          start_step=0,
+          traj={"routed_experts": routed},
+          prompt_tokens=np.array([10, 11], dtype=np.int32),
+          completion_tokens=np.array([20, 21], dtype=np.int32),
+          action_mask=np.array([1, 1], dtype=np.int32),
+          routed_experts=routed,
+          metadata={"routed_experts": routed, "question": "q0"},
+      )
+      await program.raw_q.put(src_item)
+      del routed, payload
+
+      # Run critique_stage concurrently with raw_q kept open so its coroutine
+      # frame stays suspended at `await self.raw_q.get_group()` during training.
+      critique_task = asyncio.create_task(program.critique_stage())
+      scored_batch = await program.scored_q.get_batch(num_groups=1)
+      mock_algo.create_trainer_payloads.return_value = None
+      mock_algo.create_trainer_payloads.reset_mock()
+      self.assertNotIn("routed_experts", src_item.traj)
+      self.assertNotIn("routed_experts", src_item.metadata)
+
+      self.assertLen(scored_batch, 1)
+      scored_item = scored_batch[0]
+      self.assertIsNone(getattr(scored_item, "routed_experts", None))
+      self.assertNotIn("routed_experts", scored_item.metadata)
+      self.assertNotIn("routed_experts", scored_item.traj)
+      self.assertIsNotNone(scored_item.payload.routed_experts)
+      self.assertIsNotNone(routed_ref())
+
+      # Re-enqueue for train_stage consumption while critique_task remains
+      # suspended on raw_q.
+      await program.scored_q.put(scored_item)
+
+      await program.train_stage()
+      await program.raw_q.close()
+      await critique_task
+
+      self.assertLen(trained_routed_copy, 1)
+      np.testing.assert_array_equal(
+          trained_routed_copy[0][0], np.full((4, 2, 2), 3, dtype=np.int16)
+      )
+      # Both unbatched and assembled microbatch routed_experts must be released
+      # before save_checkpoint() and sync_weights() run, even with critique_stage
+      # suspended concurrently on raw_q.
+      self.assertEqual(routed_alive_during_ckpt, [False])
+      self.assertEqual(batched_alive_during_ckpt, [False])
+      self.assertEqual(routed_alive_during_sync, [False])
+      self.assertEqual(batched_alive_during_sync, [False])
+      self.assertIsNone(scored_item.payload.routed_experts)
+      self.assertIsNone(routed_ref())
+      logged_row = program.trajectory_logger.log_item_async.call_args.args[0]
+      self.assertNotIn("routed_experts", logged_row["metadata"])
+      self.assertNotIn("routed_experts", logged_row["trajectory"])
+
+    asyncio.run(_run())
 
 
 if __name__ == "__main__":
