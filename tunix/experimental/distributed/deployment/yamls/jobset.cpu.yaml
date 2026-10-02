@@ -73,7 +73,7 @@ ${QUEUE_LABEL}spec:
               resources:
                 requests:
                   cpu: "24"
-                  memory: 100G
+                  memory: 240G
                   ephemeral-storage: 20Gi
               command:
                 - bash
