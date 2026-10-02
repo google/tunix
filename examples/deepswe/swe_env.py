@@ -25,8 +25,32 @@ from typing import Any, Optional, cast
 import numpy as np
 from examples.deepswe import openhands_utils
 from examples.deepswe import sandbox_utils
-from tunix.rl.agentic.environments.base_environment import BaseTaskEnv
-from tunix.rl.agentic.environments.base_environment import EnvStepResult
+try:
+  from tunix.rl.agentic.environments.base_environment import BaseTaskEnv
+  from tunix.rl.agentic.environments.base_environment import EnvStepResult
+except ImportError:
+  import dataclasses
+
+  @dataclasses.dataclass
+  class EnvStepResult:
+    observation: Any
+    reward: float
+    done: bool
+    info: dict[str, Any]
+
+  class BaseTaskEnv:
+
+    def __init__(self, max_steps: int = 1):
+      self.max_steps = max_steps
+
+    def reset(self) -> Any:
+      return self._initial_observation()
+
+    def step(self, action: Any) -> EnvStepResult:
+      return self._step_impl(action)
+
+    def close(self) -> None:
+      pass
 
 # Re-exports for backward compatibility
 PrewarmDatasetIterator = sandbox_utils.PrewarmDatasetIterator
@@ -87,6 +111,112 @@ def _unpack_entry(entry: dict) -> dict:
       unpacked_entry[k] = v
   return unpacked_entry
 
+def configure_claim_lifecycle(handle: Any, ttl_seconds: int | None = None) -> None:
+  """Defensively sets shutdownPolicy: Delete and ttlSecondsAfterFinished on the SandboxClaim.
+
+  This ensures that even if the Python process is abruptly terminated or OOM-killed,
+  the Kubernetes agent-sandbox controller will automatically garbage collect the
+  SandboxClaim and Sandbox once the backing pod completes or fails.
+  """
+  cluster = getattr(handle, "_cluster", None)
+  claim_name = getattr(handle, "claim_name", None)
+  if cluster is None or not claim_name:
+    return
+
+  custom_api = getattr(cluster, "custom_api", None)
+  namespace = getattr(cluster, "namespace", None) or "default"
+  if custom_api is None:
+    return
+
+  if ttl_seconds is None:
+    try:
+      ttl_seconds = int(os.getenv("SANDBOX_TTL_SECONDS_AFTER_FINISHED", "60"))
+    except ValueError:
+      ttl_seconds = 60
+
+  try:
+    custom_api.patch_namespaced_custom_object(
+        group="extensions.agents.x-k8s.io",
+        version="v1beta1",
+        namespace=namespace,
+        plural="sandboxclaims",
+        name=claim_name,
+        body={
+            "spec": {
+                "lifecycle": {
+                    "shutdownPolicy": "Delete",
+                    "ttlSecondsAfterFinished": ttl_seconds,
+                }
+            }
+        },
+    )
+    logging.debug(
+        "[SWEEnv] Configured SandboxClaim '%s' lifecycle: shutdownPolicy=Delete, ttlSecondsAfterFinished=%d",
+        claim_name,
+        ttl_seconds,
+    )
+  except Exception as e:
+    logging.debug("[SWEEnv] Note configuring claim lifecycle: %s", e)
+
+
+def cleanup_k8s_sandbox_handle(handle: Any) -> None:
+  """Defensively ensure SandboxClaim and Sandbox CRDs are deleted from the cluster."""
+  # 1. Direct call on handle's internal sandbox instance if available
+  sb = getattr(handle, "sandbox", None)
+  if sb is not None and hasattr(sb, "terminate"):
+    try:
+      sb.terminate()
+    except Exception as e:
+      logging.debug("[SWEEnv] sandbox.terminate note: %s", e)
+
+  # 2. Delete via handle._cluster resources
+  cluster = getattr(handle, "_cluster", None)
+  claim_name = getattr(handle, "claim_name", None)
+  sandbox_id = getattr(handle, "sandbox_id", None) or getattr(handle, "sandbox_name", None)
+
+  if cluster is not None:
+    resources = getattr(cluster, "resources", None)
+    if resources is not None:
+      if claim_name and hasattr(resources, "delete_claim"):
+        try:
+          resources.delete_claim(claim_name)
+        except Exception as e:
+          logging.debug("[SWEEnv] resources.delete_claim note: %s", e)
+      if sandbox_id and hasattr(resources, "delete_sandbox"):
+        try:
+          resources.delete_sandbox(sandbox_id)
+        except Exception as e:
+          logging.debug("[SWEEnv] resources.delete_sandbox note: %s", e)
+
+    # 3. Direct CustomObjectsApi deletion if resources call didn't delete
+    custom_api = getattr(cluster, "custom_api", None)
+    namespace = getattr(cluster, "namespace", None) or "default"
+    if custom_api is not None and namespace:
+      if claim_name:
+        try:
+          custom_api.delete_namespaced_custom_object(
+              group="extensions.agents.x-k8s.io",
+              version="v1beta1",
+              namespace=namespace,
+              plural="sandboxclaims",
+              name=claim_name,
+          )
+        except Exception as e:
+          if getattr(e, "status", None) != 404:
+            logging.debug("[SWEEnv] custom_api delete_claim note: %s", e)
+      if sandbox_id:
+        try:
+          custom_api.delete_namespaced_custom_object(
+              group="agents.x-k8s.io",
+              version="v1beta1",
+              namespace=namespace,
+              plural="sandboxes",
+              name=sandbox_id,
+          )
+        except Exception as e:
+          if getattr(e, "status", None) != 404:
+            logging.debug("[SWEEnv] custom_api delete_sandbox note: %s", e)
+
 
 class SWEEnv(BaseTaskEnv):
   """Software Engineering Environment for code-related tasks."""
@@ -134,6 +264,10 @@ class SWEEnv(BaseTaskEnv):
     self.handle: Any = None
     self.verbose = verbose
     self.scaffold = scaffold
+    if not use_agent_sandbox:
+      env_flag = os.getenv("USE_AGENT_SANDBOX", "").lower() in ("true", "1")
+      if env_flag:
+        use_agent_sandbox = True
     self.use_agent_sandbox = use_agent_sandbox
     self.fleet = fleet
 
@@ -199,31 +333,37 @@ class SWEEnv(BaseTaskEnv):
           time.sleep(5 * (attempt + 1))
         else:
           raise
-    if self.scaffold == "openhands":
-      from agent_sandbox_rl.adapters.openhands import make_handle_workspace  # pytype: disable=import-error
+    configure_claim_lifecycle(self.handle)
 
-      ws_kwargs = {}
-      if os.getenv("SANDBOX_SESSION_KEY"):
-        ws_kwargs["api_key"] = os.getenv("SANDBOX_SESSION_KEY")
-      if os.getenv("ROUTER_URL"):
-        ws_kwargs["router_url"] = os.getenv("ROUTER_URL")
-      if os.getenv("ROUTER_AUTH_TOKEN"):
-        ws_kwargs["router_auth_token"] = os.getenv("ROUTER_AUTH_TOKEN")
-      ws_kwargs["working_dir"] = os.getenv("OPENHANDS_WORKING_DIR", "/testbed")
-      self.workspace = make_handle_workspace(self.handle, **ws_kwargs)
     try:
-      cmd_files = r2egym_command_files()
-    except Exception:  # pylint: disable=broad-exception-caught
-      cmd_files = None
-    self.env = make_fleet_repo_env(
-        self.handle,
-        command_files=cmd_files,
-        step_timeout=self.step_timeout,
-        reward_timeout=self.reward_timeout,
-        verbose=self.verbose,
-    )
-    if self.scaffold == "openhands":
-      openhands_utils.setup_openhands_workspace(self.workspace, self.entry)
+      if self.scaffold == "openhands":
+        from agent_sandbox_rl.adapters.openhands import make_handle_workspace  # pytype: disable=import-error
+
+        ws_kwargs = {}
+        if os.getenv("SANDBOX_SESSION_KEY"):
+          ws_kwargs["api_key"] = os.getenv("SANDBOX_SESSION_KEY")
+        if os.getenv("ROUTER_URL"):
+          ws_kwargs["router_url"] = os.getenv("ROUTER_URL")
+        if os.getenv("ROUTER_AUTH_TOKEN"):
+          ws_kwargs["router_auth_token"] = os.getenv("ROUTER_AUTH_TOKEN")
+        ws_kwargs["working_dir"] = os.getenv("OPENHANDS_WORKING_DIR", "/testbed")
+        self.workspace = make_handle_workspace(self.handle, **ws_kwargs)
+      try:
+        cmd_files = r2egym_command_files()
+      except Exception:  # pylint: disable=broad-exception-caught
+        cmd_files = None
+      self.env = make_fleet_repo_env(
+          self.handle,
+          command_files=cmd_files,
+          step_timeout=self.step_timeout,
+          reward_timeout=self.reward_timeout,
+          verbose=self.verbose,
+      )
+      if self.scaffold == "openhands":
+        openhands_utils.setup_openhands_workspace(self.workspace, self.entry)
+    except Exception:
+      self.close()
+      raise
 
   def _init_local_repo_env(self) -> None:
     # Initialize standard local Docker RepoEnv
@@ -299,8 +439,22 @@ class SWEEnv(BaseTaskEnv):
 
   def close(self) -> None:
     """Close the environment and clean up resources."""
+    if (
+        self.delete_image
+        and not self.use_agent_sandbox
+        and getattr(self, "env", None) is not None
+        and hasattr(self.env, "runtime")
+    ):
+      docker_image = getattr(self.env.runtime, "docker_image", None)
+      if docker_image:
+        os.system(f"docker rmi {docker_image}")
+
     if self.env is not None:
-      self.env.close()
+      try:
+        self.env.close()
+      except Exception as e:
+        logging.warning("[SWEEnv] Error closing underlying env: %s", e)
+      self.env = None
 
     if getattr(self, "workspace", None) is not None:
       try:
@@ -309,26 +463,39 @@ class SWEEnv(BaseTaskEnv):
         logging.warning("[SWEEnv] Workspace cleanup note: %s", e)
       self.workspace = None
 
+    handle = getattr(self, "handle", None)
     fleet = self.fleet or getattr(sandbox_utils, "_GLOBAL_FLEET", None)
-    if (
-        hasattr(self, "handle")
-        and self.handle is not None
-        and fleet is not None
-    ):
-      msg = "[SWEEnv] Releasing SandboxHandle back to SandboxFleet."
-      logging.info(msg)
-      fleet.release(self.handle)
+    if handle is not None:
+      if fleet is not None:
+        try:
+          logging.info("[SWEEnv] Releasing SandboxHandle back to SandboxFleet.")
+          fleet.release(handle)
+        except Exception as e:
+          logging.warning("[SWEEnv] Error releasing handle back to fleet: %s", e)
+      elif hasattr(handle, "release"):
+        try:
+          handle.release()
+        except Exception as e:
+          logging.warning("[SWEEnv] Error calling handle.release(): %s", e)
+
+      try:
+        cleanup_k8s_sandbox_handle(handle)
+      except Exception as e:
+        logging.warning("[SWEEnv] Error during defensive k8s sandbox cleanup: %s", e)
+
       self.handle = None
 
-    if (
-        self.delete_image
-        and not self.use_agent_sandbox
-        and self.env
-        and hasattr(self.env, "runtime")
-    ):
-      docker_image = getattr(self.env.runtime, "docker_image", None)
-      if docker_image:
-        os.system(f"docker rmi {docker_image}")
+  def __enter__(self) -> "SWEEnv":
+    return self
+
+  def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+    self.close()
+
+  def __del__(self) -> None:
+    try:
+      self.close()
+    except Exception:
+      pass
 
   @staticmethod
   def from_dict(extra_info: dict | str) -> "SWEEnv":  # pyrefly: ignore[bad-override]

@@ -14,10 +14,13 @@
 
 """Unit tests for tunix.oss.examples.deepswe.sandbox_utils."""
 
+import os
 from unittest import mock
 from absl.testing import absltest
 import numpy as np
 from examples.deepswe import sandbox_utils
+from examples.deepswe import swe_env
+from examples.deepswe import template
 
 
 class FakeFleet:
@@ -299,6 +302,236 @@ class SandboxUtilsTest(absltest.TestCase):
             replicas_override=4,
             wait=False,
         )
+
+
+
+class TemplateAndLifecycleTest(absltest.TestCase):
+
+  def test_parse_cpu_to_millicores(self):
+    self.assertEqual(template.parse_cpu_to_millicores("2"), 2000)
+    self.assertEqual(template.parse_cpu_to_millicores("2.5"), 2500)
+    self.assertEqual(template.parse_cpu_to_millicores("2500m"), 2500)
+    self.assertEqual(template.parse_cpu_to_millicores("500m"), 500)
+    self.assertEqual(template.parse_cpu_to_millicores("invalid"), 0)
+
+  def test_parse_memory_to_bytes(self):
+    self.assertEqual(template.parse_memory_to_bytes("4Gi"), 4 * 1024**3)
+    self.assertEqual(template.parse_memory_to_bytes("512Mi"), 512 * 1024**2)
+    self.assertEqual(template.parse_memory_to_bytes("2G"), 2 * 10**9)
+    self.assertEqual(template.parse_memory_to_bytes("1000M"), 1000 * 10**6)
+    self.assertEqual(template.parse_memory_to_bytes("1024"), 1024)
+    self.assertEqual(template.parse_memory_to_bytes("invalid"), 0)
+
+  def test_template_cpu_limits_exceed_requests(self):
+    with mock.patch.dict(
+        os.environ,
+        {
+            "SANDBOX_CPU": "4000m",
+            "SANDBOX_CPU_LIMIT": "2",
+            "SANDBOX_MEMORY": "16Gi",
+            "SANDBOX_MEMORY_LIMIT": "8Gi",
+            "SANDBOX_ACTIVE_DEADLINE_SECONDS": "3600",
+        },
+    ):
+      tmpl = template.get_openhands_pod_template()
+      self.assertEqual(tmpl.extra_pod_spec["activeDeadlineSeconds"], 3600)
+      container = tmpl.extra_pod_spec["containers"][0]
+      # Limits must be adjusted so limits >= requests
+      self.assertEqual(container["resources"]["limits"]["cpu"], "4000m")
+      self.assertEqual(tmpl.resources.cpu, "4000m")
+      self.assertEqual(container["resources"]["limits"]["memory"], "16Gi")
+      self.assertEqual(tmpl.resources.memory, "16Gi")
+
+  def test_r2egym_template(self):
+    with mock.patch.dict(
+        os.environ,
+        {
+            "SANDBOX_CPU": "1000m",
+            "SANDBOX_CPU_LIMIT": "2",
+            "SANDBOX_ACTIVE_DEADLINE_SECONDS": "1800",
+        },
+    ):
+      tmpl = template.get_r2egym_pod_template()
+      self.assertEqual(tmpl.extra_pod_spec["activeDeadlineSeconds"], 1800)
+      container = tmpl.extra_pod_spec["containers"][0]
+      self.assertEqual(container["resources"]["limits"]["cpu"], "2")
+      self.assertEqual(tmpl.resources.cpu, "1000m")
+
+  def test_get_template(self):
+    t_openhands = template.get_template("openhands")
+    self.assertIsNotNone(t_openhands)
+    self.assertIsNotNone(t_openhands.keepalive_command)
+    t_r2egym = template.get_template("r2egym")
+    self.assertIsNotNone(t_r2egym)
+    t_sweagent = template.get_template("sweagent")
+    self.assertIsNotNone(t_sweagent)
+
+  def test_configure_claim_lifecycle(self):
+    mock_handle = mock.MagicMock()
+    mock_handle.claim_name = "claim-123"
+    mock_cluster = mock.MagicMock()
+    mock_cluster.namespace = "test-ns"
+    mock_handle._cluster = mock_cluster
+
+    swe_env.configure_claim_lifecycle(mock_handle, ttl_seconds=120)
+
+    mock_cluster.custom_api.patch_namespaced_custom_object.assert_called_once_with(
+        group="extensions.agents.x-k8s.io",
+        version="v1beta1",
+        namespace="test-ns",
+        plural="sandboxclaims",
+        name="claim-123",
+        body={
+            "spec": {
+                "lifecycle": {
+                    "shutdownPolicy": "Delete",
+                    "ttlSecondsAfterFinished": 120,
+                }
+            }
+        },
+    )
+
+  def test_cleanup_k8s_sandbox_handle(self):
+    mock_handle = mock.MagicMock()
+    mock_handle.claim_name = "claim-abc"
+    mock_handle.sandbox_id = "sandbox-xyz"
+    mock_cluster = mock.MagicMock()
+    mock_cluster.namespace = "test-ns"
+    mock_handle._cluster = mock_cluster
+
+    swe_env.cleanup_k8s_sandbox_handle(mock_handle)
+
+    mock_handle.sandbox.terminate.assert_called_once()
+    mock_cluster.resources.delete_claim.assert_called_once_with("claim-abc")
+    mock_cluster.resources.delete_sandbox.assert_called_once_with("sandbox-xyz")
+    self.assertEqual(
+        mock_cluster.custom_api.delete_namespaced_custom_object.call_count, 2
+    )
+
+  def test_swe_env_close_resilient_to_underlying_env_exception(self):
+    mock_fleet = mock.MagicMock()
+    mock_handle = mock.MagicMock()
+    mock_handle.claim_name = "claim-fail"
+    mock_handle.sandbox_id = "sandbox-fail"
+
+    mock_env = mock.MagicMock()
+    mock_env.close.side_effect = RuntimeError("Failed closing container")
+
+    env = swe_env.SWEEnv(
+        entry={"instance_id": "test__inst-1", "docker_image": "test:img"},
+        use_agent_sandbox=False,
+    )
+    env.env = mock_env
+    env.handle = mock_handle
+    env.fleet = mock_fleet
+
+    # close() must not raise and must execute fleet and handle cleanup
+    env.close()
+
+    mock_env.close.assert_called_once()
+    mock_fleet.release.assert_called_once_with(mock_handle)
+    mock_handle.sandbox.terminate.assert_called_once()
+    self.assertIsNone(env.handle)
+    self.assertIsNone(env.env)
+
+  def test_swe_env_context_manager(self):
+    mock_fleet = mock.MagicMock()
+    mock_handle = mock.MagicMock()
+    with swe_env.SWEEnv(
+        entry={"instance_id": "test__inst-2", "docker_image": "test:img"},
+        use_agent_sandbox=False,
+    ) as env:
+      env.handle = mock_handle
+      env.fleet = mock_fleet
+
+    mock_fleet.release.assert_called_once_with(mock_handle)
+    self.assertIsNone(env.handle)
+
+
+class TrajectoryCollectEngineLifecycleTest(absltest.TestCase):
+
+  def test_collect_closes_env_on_reset_error(self):
+    import asyncio
+    import types
+
+    class MockPackage(mock.MagicMock):
+      __path__ = []
+      __spec__ = mock.MagicMock()
+
+    tunix_mod = types.ModuleType("tunix")
+    tunix_mod.__path__ = ["/usr/local/google/home/atwigg/work/tunix/tunix"]
+    mock_modules = {
+        "tunix": tunix_mod,
+        "flax": MockPackage(),
+        "jax": MockPackage(),
+        "jax.numpy": MockPackage(),
+        "jax.lax": MockPackage(),
+        "jax.sharding": MockPackage(),
+        "optax": MockPackage(),
+        "jaxtyping": MockPackage(),
+        "etils": MockPackage(),
+        "etils.epath": MockPackage(),
+        "sentencepiece": MockPackage(),
+        "orbax": MockPackage(),
+        "orbax.checkpoint": MockPackage(),
+        "metrax": MockPackage(),
+        "metrax.logging": MockPackage(),
+    }
+    with mock.patch.dict("sys.modules", mock_modules):
+      from tunix.rl.agentic.trajectory.trajectory_collect_engine import TrajectoryCollectEngine
+
+      mock_agent = mock.MagicMock()
+      mock_env = mock.MagicMock()
+      mock_env.max_steps = 1
+      mock_env.reset.side_effect = RuntimeError("reset failed!")
+      engine = TrajectoryCollectEngine(
+          mock_agent, mock_env, model_call=mock.MagicMock()
+      )
+      with self.assertRaises(RuntimeError):
+        asyncio.run(engine.collect())
+      mock_env.close.assert_called_once()
+
+  def test_collect_closes_env_on_step_error(self):
+    import asyncio
+    import types
+
+    class MockPackage(mock.MagicMock):
+      __path__ = []
+      __spec__ = mock.MagicMock()
+
+    tunix_mod = types.ModuleType("tunix")
+    tunix_mod.__path__ = ["/usr/local/google/home/atwigg/work/tunix/tunix"]
+    mock_modules = {
+        "tunix": tunix_mod,
+        "flax": MockPackage(),
+        "jax": MockPackage(),
+        "jax.numpy": MockPackage(),
+        "jax.lax": MockPackage(),
+        "jax.sharding": MockPackage(),
+        "optax": MockPackage(),
+        "jaxtyping": MockPackage(),
+        "etils": MockPackage(),
+        "etils.epath": MockPackage(),
+        "sentencepiece": MockPackage(),
+        "orbax": MockPackage(),
+        "orbax.checkpoint": MockPackage(),
+        "metrax": MockPackage(),
+        "metrax.logging": MockPackage(),
+    }
+    with mock.patch.dict("sys.modules", mock_modules):
+      from tunix.rl.agentic.trajectory.trajectory_collect_engine import TrajectoryCollectEngine
+
+      mock_agent = mock.MagicMock()
+      mock_env = mock.MagicMock()
+      mock_env.max_steps = 5
+      mock_env.reset.return_value = ("initial_obs", {})
+      mock_env.step.side_effect = RuntimeError("step failed!")
+      engine = TrajectoryCollectEngine(
+          mock_agent, mock_env, model_call=mock.MagicMock()
+      )
+      with self.assertRaises(RuntimeError):
+        asyncio.run(engine.collect())
+      mock_env.close.assert_called_once()
 
 
 if __name__ == "__main__":
