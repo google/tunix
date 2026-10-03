@@ -76,9 +76,16 @@ class SandboxUtilsTest(absltest.TestCase):
     # current_batch has p0, p1 (img_A: 2).
     # Dict maintains samples of both queues:
     # img_A: 2 (8 reps), img_B: 2 (8 reps).
-    # Fleet warms both with wait=True (synchronous initial priming barrier).
-    self.assertEqual(
-        fleet.warm_calls, [("img_A", 8, True), ("img_B", 8, True)]
+    # Fleet warms both: create the pool (wait=False), then run the initial
+    # priming barrier (wait=True) on the pool that now exists.
+    self.assertCountEqual(
+        fleet.warm_calls,
+        [
+            ("img_A", 8, False),
+            ("img_A", 8, True),
+            ("img_B", 8, False),
+            ("img_B", 8, True),
+        ],
     )
     self.assertEqual(fleet.active_pools, {"img_A": 8, "img_B": 8})
     self.assertLen(iterator.current_batch, 2)
@@ -664,11 +671,25 @@ class _FakeFleetError(Exception):
 
 
 class _FailingWarmFleet(FakeFleet):
+  """Pool creation itself fails (e.g. name collision with another run)."""
 
   def warm_image(
       self, image: str, replicas_override: int | None = None, wait: bool = False
   ) -> None:
-    raise _FakeFleetError(f"pool for {image} never became ready")
+    raise _FakeFleetError(f"pool for {image} belongs to another run")
+
+
+class _SlowReadyWarmFleet(FakeFleet):
+  """Pool creation succeeds but the readiness barrier times out."""
+
+  def warm_image(
+      self, image: str, replicas_override: int | None = None, wait: bool = False
+  ) -> None:
+    super().warm_image(image, replicas_override=replicas_override, wait=wait)
+    if wait:
+      raise _FakeFleetError(
+          f"warm pool for {image} did not become ready within 600s"
+      )
 
 
 class SandboxFailFastTest(absltest.TestCase):
@@ -725,14 +746,38 @@ class SandboxFailFastTest(absltest.TestCase):
     self.assertNotIn("ready_timeout", sdk.FleetConfig.call_args[1])
     sdk.SandboxFleet.return_value.preflight.assert_not_called()
 
-  def test_prewarm_fail_fast_raises_fleet_error(self):
+  def test_prewarm_fail_fast_raises_on_pool_creation_error(self):
     dataset = [{"prompt": "p0", "docker_image": "img_A"}]
     with mock.patch.dict("sys.modules", {"agent_sandbox_rl": self._fake_sdk()}):
       with mock.patch.dict(os.environ, _FAIL_FAST_ENV):
-        with self.assertRaisesRegex(_FakeFleetError, "never became ready"):
+        with self.assertRaisesRegex(_FakeFleetError, "belongs to another run"):
           sandbox_utils.PrewarmDatasetIterator(
               dataset, fleet=_FailingWarmFleet(), num_generations=2, batch_size=1
           )
+
+  def test_prewarm_fail_fast_tolerates_readiness_timeout(self):
+    # A pool that exists but is slow to fill must not end the run: the
+    # orchestrator keeps the pool as active (so it is still scaled/unwarmed
+    # later) and proceeds; rollout workers degrade per trajectory.
+    dataset = [{"prompt": "p0", "docker_image": "img_A"}]
+    fleet = _SlowReadyWarmFleet()
+    with mock.patch.dict("sys.modules", {"agent_sandbox_rl": self._fake_sdk()}):
+      with mock.patch.dict(os.environ, _FAIL_FAST_ENV):
+        with self.assertLogs(level="WARNING") as logs:
+          iterator = sandbox_utils.PrewarmDatasetIterator(
+              dataset, fleet=fleet, num_generations=2, batch_size=1
+          )
+    self.assertEqual(
+        fleet.warm_calls, [("img_A", 2, False), ("img_A", 2, True)]
+    )
+    self.assertEqual(fleet.active_pools, {"img_A": 2})
+    self.assertEqual(iterator._active_replicas, {"img_A": 2})  # pylint: disable=protected-access
+    self.assertTrue(
+        any("not fully ready yet" in line for line in logs.output), logs.output
+    )
+    self.assertEqual(next(iterator), dataset[0])
+    iterator.close()
+    self.assertEqual(fleet.unwarm_calls, ["img_A"])
 
   def test_prewarm_off_logs_fleet_error(self):
     dataset = [{"prompt": "p0", "docker_image": "img_A"}]
