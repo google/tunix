@@ -466,18 +466,52 @@ class RpcTest(unittest.IsolatedAsyncioTestCase):
 
   async def test_missing_reply_has_deadline(self):
     a = eval_lib.parse_args(["--model_absolute_path", "gs://models/0/items"])
-    fields = eval_lib.request_fields(
+    fields0 = eval_lib.request_fields(
         a, {"instance_id": "a", "problem_statement": "p"}, 0, 0
     )
-    handle = types.SimpleNamespace(
-        dispatch_task=mock.AsyncMock(return_value=fields["request_id"]),
-        poll_responses=mock.AsyncMock(return_value=None),
+    fields1 = eval_lib.request_fields(
+        a, {"instance_id": "b", "problem_statement": "p"}, 1, 0
     )
-    with mock.patch.object(eval_lib.time, "monotonic", side_effect=[0, 20]):
-      with self.assertRaises(TimeoutError):
-        await eval_lib.evaluate_worker(
-            handle, iter([fields]), 1, 10, lambda r: None
-        )
+    late_reply = types.SimpleNamespace(
+        request_id=fields0["request_id"],
+        unwrap=lambda: dict(reward=1.0, resolved=True, status="SUCCEEDED", error=None),
+    )
+    ok_reply = types.SimpleNamespace(
+        request_id=fields1["request_id"],
+        unwrap=lambda: dict(reward=1.0, resolved=True, status="SUCCEEDED", error=None),
+    )
+    handle = types.SimpleNamespace(
+        dispatch_task=mock.AsyncMock(
+            side_effect=[fields0["request_id"], fields1["request_id"]]
+        ),
+        poll_responses=mock.AsyncMock(
+            side_effect=[None, late_reply, ok_reply]
+        ),
+    )
+    written = []
+    real_monotonic = eval_lib.time.monotonic
+    calls = 0
+
+    def fake_monotonic():
+      nonlocal calls
+      calls += 1
+      if calls == 1:
+        return 0.0
+      return 20.0 + real_monotonic()
+
+    with mock.patch.object(eval_lib.time, "monotonic", side_effect=fake_monotonic):
+      rows = await eval_lib.evaluate_worker(
+          handle, iter([fields0, fields1]), 1, 10, written.append
+      )
+    self.assertEqual(len(rows), 2)
+    self.assertEqual(rows[0]["request_id"], fields0["request_id"])
+    self.assertEqual(rows[0]["status"], "TIMEOUT")
+    self.assertEqual(rows[0]["reward"], 0.0)
+    self.assertFalse(rows[0]["resolved"])
+    self.assertIsNone(rows[0]["error"])
+    self.assertEqual(rows[1]["request_id"], fields1["request_id"])
+    self.assertEqual(rows[1]["status"], "SUCCEEDED")
+    self.assertTrue(rows[1]["resolved"])
 
 
 if __name__ == "__main__":

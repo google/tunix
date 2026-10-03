@@ -666,7 +666,9 @@ class TrajectoryCollectEngine:
     state, and optionally tokenizing the initial prompt messages.
     """
     logging.debug("%s env.reset starting", self._debug_prefix)
-    (obs, info), wall_time = await self._run_with_timing(self.env.reset)
+    (obs, info), wall_time = await self._run_with_timing(
+        self.env.reset, timeout=self.timeout
+    )
     logging.debug(
         "%s env.reset done in %.1fs",
         self._debug_prefix,
@@ -680,7 +682,7 @@ class TrajectoryCollectEngine:
         else None
     )
     self.agent.reset()
-    self._start_ts = time.perf_counter()
+    self._start_ts = time.perf_counter() - wall_time
     self._response_token_count = 0
     self._cumulative_prompt_tokens = 0
     self._current_step_initial_routed_experts = None
@@ -822,35 +824,77 @@ class TrajectoryCollectEngine:
       )
 
     model_start = time.perf_counter()
-    if is_async:
-      try:
-        rollout_output = await model_call_fn(  # pytype: disable=bad-return-type
-            chat_input,
-            self.env,
-            max_generation_steps=max_generation_steps,
-            **call_kwargs,
-        )
-      except Exception as e:
-        logging.exception("Caught exception inside async model_call: %s", e)
-        raise
-    else:
-
-      def _safe_model_call():
-        try:
-          return model_call_fn(
-              chat_input,
-              self.env,
-              max_generation_steps=max_generation_steps,
-              **call_kwargs,
-          )
-        except Exception as e:
-          logging.exception("Caught exception inside model_call: %s", e)
-          raise
-
-      rollout_output = await asyncio.get_running_loop().run_in_executor(
-          None,
-          _safe_model_call,
+    remaining_time = self.timeout - (model_start - self._start_ts)
+    if remaining_time <= 0:
+      self.agent.trajectory.status = agent_types.TrajectoryStatus.TIMEOUT
+      logging.warning(
+          "%s Episode timed out before model_call after %.1f seconds"
+          " (timeout=%ds).",
+          self._debug_prefix,
+          model_start - self._start_ts,
+          self.timeout,
       )
+      self._log_trajectory_clip("TIMEOUT")
+      cur_step = self.agent.get_current_step()
+      if cur_step is not None:
+        cur_step.done = True
+      return True
+
+    try:
+      if is_async:
+        try:
+          rollout_output = await asyncio.wait_for(
+              model_call_fn(  # pytype: disable=bad-return-type
+                  chat_input,
+                  self.env,
+                  max_generation_steps=max_generation_steps,
+                  **call_kwargs,
+              ),
+              timeout=remaining_time,
+          )
+        except asyncio.TimeoutError:
+          raise
+        except Exception as e:
+          logging.exception("Caught exception inside async model_call: %s", e)
+          raise
+      else:
+
+        def _safe_model_call():
+          try:
+            return model_call_fn(
+                chat_input,
+                self.env,
+                max_generation_steps=max_generation_steps,
+                **call_kwargs,
+            )
+          except Exception as e:
+            logging.exception("Caught exception inside model_call: %s", e)
+            raise
+
+        rollout_output = await asyncio.wait_for(
+            asyncio.get_running_loop().run_in_executor(
+                None,
+                _safe_model_call,
+            ),
+            timeout=remaining_time,
+        )
+    except asyncio.TimeoutError:
+      step_latency = time.perf_counter() - model_start
+      self.model_time["step_latency"].append(step_latency)
+      self.agent.trajectory.status = agent_types.TrajectoryStatus.TIMEOUT
+      logging.warning(
+          "%s model_call timed out after %.1f seconds (remaining_time=%.1fs,"
+          " episode timeout=%ds).",
+          self._debug_prefix,
+          step_latency,
+          remaining_time,
+          self.timeout,
+      )
+      self._log_trajectory_clip("TIMEOUT")
+      cur_step = self.agent.get_current_step()
+      if cur_step is not None:
+        cur_step.done = True
+      return True
     step_latency = time.perf_counter() - model_start
     self.model_time["step_latency"].append(step_latency)
     prompt_len = (
@@ -1216,7 +1260,21 @@ class TrajectoryCollectEngine:
       # is provided or no step is taken.
       logging.debug("%s Final reward function is skipped", self._debug_prefix)
       return
-    final_reward, wall_time = await self._run_with_timing(self.final_reward_fn)
+    reward_timeout = (
+        float(getattr(self.env, "reward_timeout", None) or 120.0) + 60.0
+    )
+    try:
+      final_reward, wall_time = await self._run_with_timing(
+          self.final_reward_fn, timeout=reward_timeout
+      )
+    except asyncio.TimeoutError:
+      logging.error(
+          "%s final_reward_fn timed out after %.1fs; defaulting final_reward"
+          " to 0.0.",
+          self._debug_prefix,
+          reward_timeout,
+      )
+      final_reward, wall_time = 0.0, reward_timeout
 
     self.reward_time["reward_latency"] += wall_time
     last_step.reward += final_reward

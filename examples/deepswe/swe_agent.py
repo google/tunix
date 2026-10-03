@@ -14,6 +14,9 @@ except ImportError:
 
 OPENHANDS_SCAFFOLDS = template.OPENHANDS_SCAFFOLDS
 OPENHANDS_SYSTEM_PROMPT = template.OPENHANDS_SYSTEM_PROMPT
+OPENHANDS_USER_PROMPT = template.OPENHANDS_USER_PROMPT
+OPENHANDS_FAKE_USER_RESPONSE = template.OPENHANDS_FAKE_USER_RESPONSE
+OPENHANDS_TOOLS = template.OPENHANDS_TOOLS
 SWE_SYSTEM_PROMPT = template.SWE_SYSTEM_PROMPT
 SWE_SYSTEM_PROMPT_FN_CALL = template.SWE_SYSTEM_PROMPT_FN_CALL
 SWE_USER_PROMPT = template.SWE_USER_PROMPT
@@ -22,6 +25,7 @@ SWEAGENT_SYSTEM_PROMPT = template.SWEAGENT_SYSTEM_PROMPT
 SWEAGENT_USER_PROMPT = template.SWEAGENT_USER_PROMPT
 get_system_prompt = template.get_system_prompt
 get_user_prompt_template = template.get_user_prompt_template
+format_openhands_user_prompt = template.format_openhands_user_prompt
 
 
 
@@ -34,10 +38,47 @@ from tunix.rl.agentic.agents.base_agent import ConversationAgentBase
 try:
   from r2egym.agenthub.action import Action as SWEAction  # pytype: disable=import-error
 except ImportError:
-  logging.error(
-      "Failed to load SWEAction. Please ensure 'r2egym' is installed properly."
-  )
-  raise  # This halts execution and preserves the original traceback
+
+  class SWEAction:  # type: ignore[no-redef]
+    """Fallback Action representation when r2egym is not installed."""
+
+    def __init__(
+        self,
+        function_name: str = "",
+        parameters: Optional[dict[str, Any]] = None,
+    ):
+      self.function_name = function_name
+      self.parameters = parameters if parameters is not None else {}
+
+    @classmethod
+    def from_string(cls, action_str: str) -> "SWEAction":
+      if not action_str or not action_str.strip():
+        return cls("", {})
+      fn_match = re.search(r"<function\s*=\s*([^>]+)>", action_str)
+      if not fn_match:
+        return cls("", {})
+      fn_name = fn_match.group(1).strip()
+      params = {}
+      for k, v in re.findall(
+          r"<parameter\s*=\s*([^>]+)>(.*?)</parameter>",
+          action_str,
+          flags=re.DOTALL,
+      ):
+        params[k.strip()] = v.strip()
+      return cls(fn_name, params)
+
+    def to_xml_string(self) -> str:
+      if not self.function_name:
+        return ""
+      parts = [f"<function={self.function_name}>"]
+      for k, v in self.parameters.items():
+        parts.append(f"<parameter={k}>{v}</parameter>")
+      parts.append("</function>")
+      return "\n".join(parts)
+
+    def __str__(self) -> str:
+      return self.to_xml_string()
+
 
 TOKEN_WARNING_THRESHOLD = 28000
 
@@ -86,14 +127,45 @@ def parse_xml_response(response_text: str) -> tuple[str, Any]:
   return thought, action
 
 
+def parse_openhands_xml_action(action_str: str) -> SWEAction:
+  """Parses an XML function call while preserving multiline code indentation.
+
+  Matches Qwen3XMLToolParser behavior by stripping only a single leading and
+  single trailing newline from parameter values rather than calling .strip(),
+  which would strip leading indentation from str_replace_editor's old_str /
+  new_str parameters.
+  """
+  fn_match = re.search(r"<function\s*=\s*([^>]+)>", action_str)
+  function_name = fn_match.group(1).strip() if fn_match else ""
+
+  pattern = r"<parameter\s*=\s*([^>]+)>(.*?)</parameter>"
+  param_matches = re.findall(pattern, action_str, flags=re.DOTALL)
+
+  params: dict[str, str] = {}
+  for param_key, param_value in param_matches:
+    param_key = param_key.strip()
+    if param_value.startswith("\r\n"):
+      param_value = param_value[2:]
+    elif param_value.startswith("\n"):
+      param_value = param_value[1:]
+    if param_value.endswith("\r\n"):
+      param_value = param_value[:-2]
+    elif param_value.endswith("\n"):
+      param_value = param_value[:-1]
+    params[param_key] = param_value
+
+  return SWEAction(function_name, params)
+
+
 def parse_codeact_response(response_text: str) -> tuple[str, Any]:
   """Parses a model response in CodeAct / OpenHands format.
 
   Supports:
-  1. XML function blocks: <function=...></function>
-  2. Tool calls: <tool_call>...</tool_call> or ```json ... ``` with tool call schema
-  3. Markdown code blocks: ```(bash|sh|shell|python|py|ipython) ... ```
-  4. Task completion indicators: COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+  1. Qwen3/Qwen3.5 XML tool calls: <tool_call><function=...>...</function></tool_call>
+  2. Bare XML function blocks: <function=...></function>
+  3. JSON tool calls: <tool_call>{...}</tool_call> or ```json ... ```
+  4. Markdown code blocks: ```(bash|sh|shell|python|py|ipython) ... ```
+  5. Task completion indicators: COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
 
   Returns:
     (thought, action): Tuple of reasoning string and SWEAction instance.
@@ -113,13 +185,17 @@ def parse_codeact_response(response_text: str) -> tuple[str, Any]:
 
   def _collect_candidates(text_slice: str, offset: int):
     found = []
-    xml_match = xml_pattern.search(text_slice)
-    if xml_match:
-      found.append((0, offset + xml_match.start(), "xml", xml_match))
-
     tc_match = tc_pattern.search(text_slice)
     if tc_match:
       found.append((0, offset + tc_match.start(), "tool_call", tc_match))
+
+    xml_match = xml_pattern.search(text_slice)
+    if xml_match:
+      # Only add bare xml candidate if it is not already inside tc_match.
+      if not tc_match or not (
+          tc_match.start() <= xml_match.start() <= tc_match.end()
+      ):
+        found.append((0, offset + xml_match.start(), "xml", xml_match))
 
     json_match = json_cb_pattern.search(text_slice)
     if json_match:
@@ -166,13 +242,20 @@ def parse_codeact_response(response_text: str) -> tuple[str, Any]:
       xml_str = payload.group(1).strip()
       if not xml_str.endswith("</function>"):
         xml_str += "\n</function>"
-      action = SWEAction.from_string(xml_str)
+      action = parse_openhands_xml_action(xml_str)
       return thought, action
 
     elif match_type in ("tool_call", "json_block"):
       thought = response_text[:match_start].strip()
       if match_type == "tool_call":
         raw_payload = payload.group(1).strip()
+        xml_in_tc = xml_pattern.search(raw_payload)
+        if xml_in_tc:
+          xml_str = xml_in_tc.group(1).strip()
+          if not xml_str.endswith("</function>"):
+            xml_str += "\n</function>"
+          action = parse_openhands_xml_action(xml_str)
+          return thought, action
         try:
           data = json.loads(raw_payload)
         except Exception:
@@ -196,7 +279,13 @@ def parse_codeact_response(response_text: str) -> tuple[str, Any]:
             args = {"command": args}
         if not isinstance(args, dict):
           args = {"command": str(args)}
-        action = SWEAction(fn_name, {str(k): str(v) for k, v in args.items()})
+        normalized_args = {}
+        for k, v in args.items():
+          if isinstance(v, (dict, list)):
+            normalized_args[str(k)] = json.dumps(v, ensure_ascii=False)
+          else:
+            normalized_args[str(k)] = str(v)
+        action = SWEAction(fn_name, normalized_args)
         return thought, action
 
     elif match_type == "code_block":
@@ -306,10 +395,15 @@ class SWEAgent(ConversationAgentBase):
         observation += (
             "\nYou are running out of tokens. Stop exploring now. Do not call"
             " file_editor, str_replace_editor, or execute_bash again. You must"
-            " immediately submit using the submit tool. Output exactly this XML"
+            " immediately submit using the finish tool. Output exactly this XML"
             " and nothing else:\n"
-            "<function=submit>\n"
+            "<tool_call>\n"
+            "<function=finish>\n"
+            "<parameter=message>\n"
+            "Task completed.\n"
+            "</parameter>\n"
             "</function>\n"
+            "</tool_call>\n"
         )
       else:
         observation += (
@@ -380,10 +474,12 @@ class SWEAgent(ConversationAgentBase):
 
 
 class CodeActAgent(SWEAgent):
-  """CodeActAgent for OpenHands.
+  """CodeActAgent for OpenHands matching nv-OpenHands@0d766ad0.
 
-  Executes code (Bash and Python/IPython) directly as its primary action space,
-  supporting markdown code blocks, JSON tool calls, and XML function calls.
+  Uses the OpenHands 5-tool action space (`execute_bash`, `think`, `finish`,
+  `task_tracker`, `str_replace_editor`), Qwen3/Qwen3.5 XML native tool-calling
+  format, `swe_default.j2` user prompt, and `role="tool"` (`<tool_response>`)
+  observations.
   """
 
   name = "codeact_agent"
@@ -402,6 +498,47 @@ class CodeActAgent(SWEAgent):
         scaffold=scaffold,
     )
 
+  def update_from_env(
+      self,
+      observation: Any,
+      reward: float,
+      done: bool,
+      info: Optional[dict[str, Any]] = None,
+      **kwargs,
+  ) -> None:
+    observation = str(observation)
+    if info is None:
+      info = {}
+    if len(self._trajectory.steps) == 0:
+      if self.user_prompt_template == OPENHANDS_USER_PROMPT:
+        observation = format_openhands_user_prompt(
+            problem_statement=observation,
+            workspace_path=str(info.get("workspace_path") or "/testbed"),
+            repo_language=str(info.get("repo_language") or "python"),
+            base_commit=str(info.get("base_commit") or ""),
+        )
+      else:
+        observation = self.user_prompt_template.format(
+            problem_statement=observation
+        )
+    elif not observation and not self._trajectory.steps[-1].action:
+      observation = OPENHANDS_FAKE_USER_RESPONSE
+
+    ConversationAgentBase.update_from_env(self, observation, reward, done, info)
+    self.cur_step = Step(observation=observation)
+
+  def _observation_to_messages(
+      self, observation: Any, reward: float, done: bool, info: dict[str, Any]
+  ) -> None:
+    if len(self._trajectory.steps) == 0:
+      self._messages.append({"role": "user", "content": str(observation)})
+      return
+    last_step = self._trajectory.steps[-1]
+    if (info and info.get("is_fake_user_response")) or not last_step.action:
+      self._messages.append({"role": "user", "content": str(observation)})
+    else:
+      self._messages.append({"role": "tool", "content": str(observation)})
+
   def _parse_model_response(
       self, response: str | Any
   ) -> tuple[str, SWEAction]:
@@ -415,6 +552,7 @@ __all__ = [
     "SWEAgent",
     "parse_codeact_response",
     "parse_oai_response",
+    "parse_openhands_xml_action",
     "parse_xml_response",
 ]
 
