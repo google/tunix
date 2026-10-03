@@ -15,11 +15,67 @@
 """Utility functions for OpenHands workspace and environment setup."""
 
 import base64
+import json
 import logging
 import os
+import re
 from typing import Any, Optional
 
 from tunix.rl.agentic.environments.base_environment import EnvStepResult
+
+
+def _get_swe_action_cls() -> Any:
+  try:
+    from r2egym.agenthub.action import Action as SWEAction  # pytype: disable=import-error
+    return SWEAction
+  except ImportError:
+    from examples.deepswe import swe_agent
+    return swe_agent.SWEAction
+
+
+def parse_openhands_action_str(action_str: str) -> Any:
+  """Parses an XML action string into an Action object without stripping indentation."""
+  swe_action_cls = _get_swe_action_cls()
+
+  fn_match = re.search(r"<function\s*=\s*([^>]+)>", action_str)
+  function_name = fn_match.group(1).strip() if fn_match else ""
+
+  pattern = r"<parameter\s*=\s*([^>]+)>(.*?)</parameter>"
+  param_matches = re.findall(pattern, action_str, flags=re.DOTALL)
+
+  params: dict[str, str] = {}
+  for param_key, param_value in param_matches:
+    param_key = param_key.strip()
+    if param_value.startswith("\r\n"):
+      param_value = param_value[2:]
+    elif param_value.startswith("\n"):
+      param_value = param_value[1:]
+    if param_value.endswith("\r\n"):
+      param_value = param_value[:-2]
+    elif param_value.endswith("\n"):
+      param_value = param_value[:-1]
+    params[param_key] = param_value
+
+  return swe_action_cls(function_name, params)
+
+
+def resolve_base_commit(entry: Optional[dict[str, Any]]) -> str:
+  """Resolves base_commit from dataset entry metadata if available."""
+  if not isinstance(entry, dict):
+    return ""
+  base_commit = entry.get("base_commit")
+  if base_commit:
+    return str(base_commit).strip()
+  parsed_commit = entry.get("parsed_commit_content")
+  if parsed_commit:
+    if isinstance(parsed_commit, str):
+      try:
+        parsed_commit = json.loads(parsed_commit)
+      except Exception:  # pylint: disable=broad-exception-caught
+        parsed_commit = None
+    if isinstance(parsed_commit, dict) and parsed_commit.get("old_commit_hash"):
+      return str(parsed_commit["old_commit_hash"]).strip()
+  return ""
 
 
 def get_image_rewrite_fn(image_rewrite: Any | None = None) -> Any | None:
@@ -162,9 +218,9 @@ def step_openhands(
 ) -> EnvStepResult:
   """Execute an action in an OpenHands-backed environment.
 
-  Handles OpenHands-specific tool dispatch ('finish'/'submit',
-  'str_replace_editor'/'file_editor', 'execute_ipython_cell', and
-  'execute_bash') using the environment's workspace and bound grading
+  Handles OpenHands-specific tool dispatch ('finish'/'submit', 'think',
+  'task_tracker', 'str_replace_editor'/'file_editor', 'execute_ipython_cell',
+  and 'execute_bash') using the environment's workspace and bound grading
   environment.
 
   Args:
@@ -176,20 +232,91 @@ def step_openhands(
     EnvStepResult: Result of executing the action.
   """
   max_steps = getattr(env, "max_steps", None)
+  params = getattr(action_obj, "parameters", None) or {}
 
   if action_obj.function_name in ("finish", "submit"):
+    msg = params.get("message") or params.get("result") or "Task submitted."
     return EnvStepResult(
-        observation="Task submitted.",
+        observation=str(msg),
         reward=0,
         done=True,
+        info={"max_steps": max_steps},
+    )
+
+  if action_obj.function_name == "think":
+    if hasattr(env, "total_steps"):
+      env.total_steps += 1
+    return EnvStepResult(
+        observation="Your thought has been logged.",
+        reward=0,
+        done=False,
+        info={"max_steps": max_steps},
+    )
+
+  if action_obj.function_name == "task_tracker":
+    cmd = params.get("command", "view")
+    if hasattr(env, "total_steps"):
+      env.total_steps += 1
+    if cmd == "view":
+      content = getattr(env, "_task_list_content", None)
+      obs = (
+          content
+          if isinstance(content, str) and content
+          else 'No task list found. Use the "plan" command to create one.'
+      )
+      return EnvStepResult(
+          observation=obs, reward=0, done=False, info={"max_steps": max_steps}
+      )
+    if cmd == "plan":
+      raw_list = params.get("task_list", "[]")
+      if isinstance(raw_list, str):
+        try:
+          task_list = json.loads(raw_list)
+        except Exception as e:  # pylint: disable=broad-exception-caught
+          return EnvStepResult(
+              observation=f"Error: Failed to parse task_list JSON: {e}",
+              reward=0,
+              done=False,
+              info={"max_steps": max_steps},
+          )
+      elif isinstance(raw_list, list):
+        task_list = raw_list
+      else:
+        task_list = []
+      status_icons = {"todo": "⏳", "in_progress": "🔄", "done": "✅"}
+      content = "# Task List\n\n"
+      for i, item in enumerate(task_list, 1):
+        if isinstance(item, dict):
+          icon = status_icons.get(str(item.get("status", "todo")), "⏳")
+          content += f"{i}. {icon} {item.get('title', '')}\n{item.get('notes', '')}\n"
+      env._task_list = task_list
+      env._task_list_content = content
+      return EnvStepResult(
+          observation=(
+              f"Task list has been updated with {len(task_list)} items."
+              " Stored in session directory: /workspace/.openhands/TASKS.md"
+          ),
+          reward=0,
+          done=False,
+          info={"max_steps": max_steps},
+      )
+    return EnvStepResult(
+        observation=(
+            f"Error: Invalid task_tracker command '{cmd}'. Must be 'view' or"
+            " 'plan'."
+        ),
+        reward=0,
+        done=False,
         info={"max_steps": max_steps},
     )
 
   if action_obj.function_name in ("str_replace_editor", "file_editor") and env.env is not None:
     # R2E registers this editor as `file_editor` and `RepoEnv.run_action`
     # asserts the tool name is in its registered command list, so translate
-    # before delegating. The parameter schemas are identical.
+    # before delegating.
     action_obj.function_name = "file_editor"
+    if isinstance(getattr(action_obj, "parameters", None), dict):
+      action_obj.parameters.pop("security_risk", None)
     try:
       obs, _, done, _ = env.env.step(action_obj)
       obs_str = str(obs)
@@ -221,7 +348,7 @@ def step_openhands(
           info={"max_steps": max_steps},
       )
 
-    step_timeout = getattr(env, "step_timeout", 30.0)
+    step_timeout = getattr(env, "step_timeout", 60.0)
     b64_code = base64.b64encode(code.encode("utf-8")).decode("ascii")
     wrapped_cmd = (
         "(cd /testbed 2>/dev/null || cd /workspace) && "
@@ -254,8 +381,8 @@ def step_openhands(
           info={"max_steps": max_steps},
       )
     elif getattr(env, "env", None) is not None:
-      from r2egym.agenthub.action.action import Action as SWEAction  # pytype: disable=import-error
-      bash_action = SWEAction("execute_bash", {"command": wrapped_cmd})
+      swe_action_cls = _get_swe_action_cls()
+      bash_action = swe_action_cls("execute_bash", {"command": wrapped_cmd})
       try:
         obs, reward, done, info = env.env.step(bash_action)
         obs_str = str(obs)
@@ -284,7 +411,15 @@ def step_openhands(
           info={"max_steps": max_steps},
       )
 
-    step_timeout = getattr(env, "step_timeout", 30.0)
+    step_timeout = float(getattr(env, "step_timeout", 60.0))
+    raw_timeout = params.get("timeout")
+    if raw_timeout is not None:
+      try:
+        req_timeout = float(raw_timeout)
+        if req_timeout > 0:
+          step_timeout = min(req_timeout, step_timeout)
+      except (ValueError, TypeError):
+        pass
     wrapped_cmd = f"(cd /testbed 2>/dev/null || cd /workspace) && {cmd}"
 
     if getattr(env, "workspace", None) is not None:
@@ -313,6 +448,10 @@ def step_openhands(
           info={"max_steps": max_steps},
       )
     elif getattr(env, "env", None) is not None:
+      if isinstance(getattr(action_obj, "parameters", None), dict):
+        action_obj.parameters.pop("security_risk", None)
+        action_obj.parameters.pop("timeout", None)
+        action_obj.parameters.pop("is_input", None)
       try:
         obs, reward, done, info = env.env.step(action_obj)
         obs_str = str(obs)
@@ -330,8 +469,9 @@ def step_openhands(
   return EnvStepResult(
       observation=(
           f"ERROR: Tool '{action_obj.function_name}' is not recognized. "
-          "Only 'execute_bash', 'execute_ipython_cell', 'str_replace_editor', "
-          "and 'submit' are available."
+          "Only 'execute_bash', 'think', 'finish', 'task_tracker', "
+          "'str_replace_editor', 'execute_ipython_cell', and 'submit' are"
+          " available."
       ),
       reward=0,
       done=False,

@@ -17,11 +17,12 @@
 import os
 from unittest import mock
 from absl.testing import absltest
-from r2egym.agenthub.action.action import Action as SWEAction
 from examples.deepswe import openhands_utils
 from examples.deepswe import swe_agent
 from examples.deepswe import swe_env
 from examples.deepswe import template
+
+SWEAction = swe_agent.SWEAction
 
 
 class SweAgentTest(absltest.TestCase):
@@ -297,16 +298,173 @@ class SweAgentTest(absltest.TestCase):
     self.assertEqual(action.function_name, "execute_bash")
     self.assertEqual(action.parameters.get("command"), "pwd")
 
-  def test_codeact_agent_token_warning(self):
+  def test_codeact_agent_no_synthetic_token_or_step_warning(self):
     agent = swe_agent.CodeActAgent()
     agent.update_from_env(
-        observation="Init",
+        observation="Fix the bug in foo.py",
         reward=0.0,
         done=False,
-        info={"cur_tokens": 30000},
+        info={
+            "cur_tokens": 30000,
+            "max_steps": 50,
+            "base_commit": "abc1234",
+            "workspace_path": "/workspace",
+            "repo_language": "python",
+        },
     )
-    self.assertIn("You are running out of tokens", agent.cur_step.observation)
-    self.assertIn("<function=submit>", agent.cur_step.observation)
+    self.assertNotIn("You are running out of tokens", agent.cur_step.observation)
+    self.assertNotIn("Steps Remaining", agent.cur_step.observation)
+    self.assertIn("<uploaded_files>\n/workspace\n</uploaded_files>", agent.cur_step.observation)
+    self.assertIn(
+        "compare your changes with the base commit abc1234.",
+        agent.cur_step.observation,
+    )
+    self.assertEqual(agent.chat_completions[1]["role"], "user")
+
+  def test_parse_codeact_qwen35_xml_tool_call_and_preserve_indentation(self):
+    response = (
+        "<think>\nLet's replace the indented block in foo.py.\n</think>\n\n"
+        "<tool_call>\n"
+        "<function=str_replace_editor>\n"
+        "<parameter=command>\nstr_replace\n</parameter>\n"
+        "<parameter=path>\n/workspace/foo.py\n</parameter>\n"
+        "<parameter=old_str>\n    if x:\n        return 1\n</parameter>\n"
+        "<parameter=new_str>\n    if x:\n        return 2\n</parameter>\n"
+        "<parameter=security_risk>\nLOW\n</parameter>\n"
+        "</function>\n"
+        "</tool_call>"
+    )
+    thought, action = swe_agent.parse_codeact_response(response)
+    self.assertIn("</think>", thought)
+    self.assertEqual(action.function_name, "str_replace_editor")
+    self.assertEqual(action.parameters["command"], "str_replace")
+    self.assertEqual(action.parameters["path"], "/workspace/foo.py")
+    self.assertEqual(action.parameters["old_str"], "    if x:\n        return 1")
+    self.assertEqual(action.parameters["new_str"], "    if x:\n        return 2")
+    self.assertEqual(action.parameters["security_risk"], "LOW")
+
+    reparsed = openhands_utils.parse_openhands_action_str(action.to_xml_string())
+    self.assertEqual(reparsed.function_name, "str_replace_editor")
+    self.assertEqual(reparsed.parameters["old_str"], "    if x:\n        return 1")
+    self.assertEqual(reparsed.parameters["new_str"], "    if x:\n        return 2")
+
+  def test_codeact_agent_tool_role_and_fake_user_response(self):
+    agent = swe_agent.CodeActAgent()
+    agent.update_from_env(
+        observation="Fix issue",
+        reward=0.0,
+        done=False,
+        info={"base_commit": "deadbeef"},
+    )
+    self.assertEqual(agent.chat_completions[1]["role"], "user")
+
+    # Turn 1: model emits a tool call -> next observation has role="tool"
+    agent.update_from_model(
+        "<think>\nCheck status\n</think>\n\n"
+        "<tool_call>\n<function=execute_bash>\n"
+        "<parameter=command>\ngit status\n</parameter>\n"
+        "<parameter=security_risk>\nLOW\n</parameter>\n"
+        "</function>\n</tool_call>"
+    )
+    agent.update_from_env(
+        observation="On branch main",
+        reward=0.0,
+        done=False,
+        info={},
+    )
+    self.assertEqual(agent.chat_completions[-1]["role"], "tool")
+    self.assertEqual(agent.chat_completions[-1]["content"], "On branch main")
+
+    # Turn 2: model emits no tool call -> next observation uses fake user response with role="user"
+    agent.update_from_model("<think>\nI am thinking without calling a tool.\n</think>\nJust text.")
+    agent.update_from_env(
+        observation="",
+        reward=0.0,
+        done=False,
+        info={},
+    )
+    self.assertEqual(agent.chat_completions[-1]["role"], "user")
+    self.assertEqual(
+        agent.chat_completions[-1]["content"],
+        template.OPENHANDS_FAKE_USER_RESPONSE,
+    )
+
+  def test_step_openhands_think_task_tracker_and_finish(self):
+    mock_env = mock.MagicMock()
+    mock_env.max_steps = 10
+    mock_env.total_steps = 0
+
+    think_res = openhands_utils.step_openhands(
+        mock_env, SWEAction("think", {"thought": "Analyzing root cause"})
+    )
+    self.assertFalse(think_res.done)
+    self.assertEqual(think_res.observation, "Your thought has been logged.")
+
+    view_empty_res = openhands_utils.step_openhands(
+        mock_env, SWEAction("task_tracker", {"command": "view"})
+    )
+    self.assertFalse(view_empty_res.done)
+    self.assertIn("No task list found", view_empty_res.observation)
+
+    plan_res = openhands_utils.step_openhands(
+        mock_env,
+        SWEAction(
+            "task_tracker",
+            {
+                "command": "plan",
+                "task_list": '[{"id": "1", "title": "Fix bug", "status": "in_progress"}]',
+            },
+        ),
+    )
+    self.assertFalse(plan_res.done)
+    self.assertIn("Task list has been updated with 1 items.", plan_res.observation)
+
+    view_after_plan_res = openhands_utils.step_openhands(
+        mock_env, SWEAction("task_tracker", {"command": "view"})
+    )
+    self.assertIn("Fix bug", view_after_plan_res.observation)
+
+    finish_res = openhands_utils.step_openhands(
+        mock_env,
+        SWEAction("finish", {"message": "Fixed the issue and verified tests."}),
+    )
+    self.assertTrue(finish_res.done)
+    self.assertEqual(
+        finish_res.observation, "Fixed the issue and verified tests."
+    )
+
+  def test_openhands_system_prompt_and_tools_schema(self):
+    tool_names = [t["function"]["name"] for t in template.OPENHANDS_TOOLS]
+    self.assertEqual(
+        tool_names,
+        [
+            "execute_bash",
+            "think",
+            "finish",
+            "task_tracker",
+            "str_replace_editor",
+        ],
+    )
+    tools_by_name = {t["function"]["name"]: t["function"] for t in template.OPENHANDS_TOOLS}
+    self.assertEqual(
+        tools_by_name["execute_bash"]["parameters"]["required"],
+        ["command"],
+    )
+    self.assertIn(
+        "security_risk",
+        tools_by_name["execute_bash"]["parameters"]["properties"],
+    )
+    self.assertEqual(
+        tools_by_name["str_replace_editor"]["parameters"]["required"],
+        ["command", "path"],
+    )
+    self.assertIn(
+        "security_risk",
+        tools_by_name["str_replace_editor"]["parameters"]["properties"],
+    )
+    self.assertIn("# Tools\n\nYou have access to the following functions:\n\n<tools>", template.OPENHANDS_SYSTEM_PROMPT)
+    self.assertIn("<SECURITY_RISK_ASSESSMENT>", template.OPENHANDS_SYSTEM_PROMPT)
+    self.assertIn("60 seconds", template.OPENHANDS_SYSTEM_PROMPT)
 
   def test_sweagent_token_warning(self):
     agent = swe_agent.SWEAgent(scaffold="sweagent")
@@ -486,4 +644,3 @@ class SweAgentTest(absltest.TestCase):
 
 if __name__ == "__main__":
   absltest.main()
-
