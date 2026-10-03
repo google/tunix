@@ -101,33 +101,6 @@ class QwenChatTemplateParserTest(absltest.TestCase):
     )
     self.assertEqual(result, expected)
 
-  def test_parse_preserves_tool_call_tags_in_system_and_assistant(self):
-    p = parser.QwenChatTemplateParser(self.mock_tokenizer)
-    messages = [
-        {
-            'role': 'system',
-            'content': (
-                'Use\n<tool_call>\n<function=execute_bash>\n'
-                '<parameter=command>\npwd\n</parameter>\n'
-                '</function>\n</tool_call>'
-            ),
-        },
-        {'role': 'user', 'content': 'Run pwd'},
-        {
-            'role': 'assistant',
-            'content': (
-                '<think>\nChecking pwd.\n</think>\n\n'
-                '<tool_call>\n<function=execute_bash>\n'
-                '<parameter=command>\npwd\n</parameter>\n'
-                '</function>\n</tool_call>'
-            ),
-        },
-    ]
-    result = p.parse(messages, is_first_msg=True)
-    self.assertIn('\n<tool_call>\n<function=execute_bash>', result)
-    self.assertIn('</function>\n</tool_call><|im_end|>', result)
-
-
 
 class LlamaChatTemplateParserTest(absltest.TestCase):
 

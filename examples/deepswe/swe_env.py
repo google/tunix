@@ -291,40 +291,16 @@ class SWEEnv(BaseTaskEnv):
     # Polls docker runtime to get task instruction.
     return self.env.get_task_instruction()  # pytype: disable=attribute-error
 
-  def reset(self) -> tuple[Any, dict[str, Any]]:
-    obs, info = super().reset()
-    if self.scaffold in template_mod.OPENHANDS_SCAFFOLDS:
-      base_commit = openhands_utils.resolve_base_commit(self.entry)
-      if base_commit:
-        info["base_commit"] = base_commit
-      if self.entry.get("repo_language"):
-        info["repo_language"] = str(self.entry["repo_language"])
-      info["workspace_path"] = os.getenv("OPENHANDS_WORKING_DIR", "/testbed")
-    return obs, info
-
   def _step_impl(self, action: Any) -> EnvStepResult:
     global Action
     if Action is None:
       from r2egym.agenthub.action import Action  # pytype: disable=import-error
     if isinstance(action, str):
-      if self.scaffold in template_mod.OPENHANDS_SCAFFOLDS:
-        action_obj = openhands_utils.parse_openhands_action_str(action)
-      else:
-        action_obj = Action.from_string(action)
+      action_obj = Action.from_string(action)
     else:
       action_obj = action
 
     if not action_obj.function_name:
-      if self.scaffold in template_mod.OPENHANDS_SCAFFOLDS:
-        return EnvStepResult(
-            observation=template_mod.OPENHANDS_FAKE_USER_RESPONSE,
-            reward=0,
-            done=False,
-            info={
-                "max_steps": self.max_steps,
-                "is_fake_user_response": True,
-            },
-        )
       return EnvStepResult(
           observation="",
           reward=0,

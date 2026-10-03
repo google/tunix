@@ -341,23 +341,13 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument(
       "--shuffle", action=argparse.BooleanOptionalAction, default=True
   )
-  parser.add_argument(
-      "--max_turns", type=int, default=int(os.getenv("MAX_TURNS", "30"))
-  )
-  parser.add_argument(
-      "--step_timeout_secs",
-      type=int,
-      default=int(os.getenv("STEP_TIMEOUT_SECS", "60")),
-  )
-  parser.add_argument(
-      "--reward_timeout_secs",
-      type=int,
-      default=int(os.getenv("REWARD_TIMEOUT_SECS", "60")),
-  )
+  parser.add_argument("--max_turns", type=int, default=50)
+  parser.add_argument("--step_timeout_secs", type=int, default=30 * 60)
+  parser.add_argument("--reward_timeout_secs", type=int, default=30 * 60)
   parser.add_argument(
       "--episode_timeout_secs",
       type=int,
-      default=int(os.getenv("EPISODE_TIMEOUT_SECS", "1800")),
+      default=int(os.getenv("EPISODE_TIMEOUT_SECS", "5400")),
       help="Maximum episode duration in seconds before timeout termination.",
   )
   parser.add_argument("--env_backend", type=str, default="kubernetes")
