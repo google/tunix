@@ -267,8 +267,8 @@ export DRY_RUN=${DRY_RUN:-false}
 # With `true` the sandbox side fails fast too (examples/deepswe/sandbox_utils.py
 # SandboxFailFastConfig): sandbox readiness waits are capped at
 # FT_SANDBOX_READY_TIMEOUT_S, SWEEnv tries fleet.acquire FT_SANDBOX_ACQUIRE_RETRIES
-# times, and a warm-pool *creation* error (name collision with another run,
-# capacity, preflight) ends the run. A warm pool that exists but is slow to
+# times, and a warm-pool *creation* error (template/pool name owned by another
+# run, run-namespace setup) ends the run. A warm pool that exists but is slow to
 # become ready does NOT end the run: the orchestrator logs it and continues,
 # and a rollout whose claim still cannot be served after the retries fails
 # only that trajectory.

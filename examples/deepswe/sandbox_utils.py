@@ -210,9 +210,9 @@ class SandboxFailFastConfig:
   launcher.
 
   Attributes:
-    enabled: Warm-pool *creation* errors (template/pool name collision with
-      another run, capacity, preflight) are fatal instead of logged. A pool that
-      exists but is slow to become ready is never fatal: the orchestrator
+    enabled: Warm-pool *creation* errors (template/pool name owned by another
+      run, run-namespace/placement setup) are fatal instead of logged. A pool
+      that exists but is slow to become ready is never fatal: the orchestrator
       continues and rollout workers degrade per trajectory (see
       `PrewarmDatasetIterator._interact_fleet`).
     ready_timeout_s: SDK `FleetConfig.ready_timeout` (claim and warm-pool
@@ -799,11 +799,12 @@ class PrewarmDatasetIterator:
 
     def _warm(img: str, target_reps: int) -> None:
       # Phase 1: create the template + pool without blocking on readiness.
-      # The SDK raises FleetError here only for unrecoverable conditions --
-      # a name collision with another run's template/pool
-      # (OwnedByAnotherRunError), capacity, preflight -- and writes nothing in
-      # that case, so the image would stay cold for the whole run. That is the
-      # one class of warm error that is still fatal under fail-fast.
+      # The SDK raises FleetError here only for deterministic setup problems --
+      # the image-derived template/pool name belongs to another run (the SDK
+      # wraps OwnedByAnotherRunError in a plain FleetError), or run-namespace /
+      # placement setup failed while lazily building the plan -- and writes
+      # nothing in that case, so the image would stay cold for the whole run.
+      # That is the one class of warm error that is still fatal under fail-fast.
       try:
         self.fleet.warm_image(img, replicas_override=target_reps, wait=False)
       except Exception as e:  # pylint: disable=broad-exception-caught
