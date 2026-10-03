@@ -108,6 +108,7 @@ rollout_config:
   max_num_batched_tokens: 2048
   chunked_prefill_length: 512
   enable_prefix_caching: False
+  eos_tokens: [1, 106]
 
 rollout_engine: "vanillav2"
 
