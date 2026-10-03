@@ -534,7 +534,7 @@ class CodeActAgent(SWEAgent):
       self._messages.append({"role": "user", "content": str(observation)})
       return
     last_step = self._trajectory.steps[-1]
-    if info.get("is_fake_user_response") or not last_step.action:
+    if (info and info.get("is_fake_user_response")) or not last_step.action:
       self._messages.append({"role": "user", "content": str(observation)})
     else:
       self._messages.append({"role": "tool", "content": str(observation)})
