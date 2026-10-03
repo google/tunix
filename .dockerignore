@@ -1,0 +1,17 @@
+.git
+.github
+.gemini
+.pytest_cache
+.mypy_cache
+.ruff_cache
+__pycache__
+*.pyc
+.venv
+venv
+build
+dist
+*.egg-info
+artifacts
+docs
+wandb
+*.safetensors
