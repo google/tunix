@@ -3333,6 +3333,39 @@ class RLProgramTest(absltest.TestCase):
       self.assertTrue(out.sampler_agreement_applied)
       self.assertIs(out.old_per_token_logps, batch.old_per_token_logps)
       self.assertIsNone(out.sampler_is_weights)
+      self.assertIsNone(req.routed_experts)
+
+    asyncio.run(_run())
+
+  def test_apply_sampler_trainer_agreement_forwards_routed_experts(self):
+    """Actor re-scoring must replay the same routing the loss will use."""
+
+    async def _run():
+      self.mock_algo.algo_config.use_rollout_logps = True
+      self.mock_algo.algo_config.sampler_is = None
+      self.mock_algo.algo_config.sampler_is_threshold = 2.0
+      program = self._create_program()
+      program.engine = mock.MagicMock()
+      program.engine.per_token_logps = mock.AsyncMock(
+          return_value=datatypes.LogprobsResponse(
+              per_token_logps=np.array([[-0.5, -1.0, -0.2]], dtype=np.float32),
+              model_version=1,
+          )
+      )
+      routed = np.arange(5 * 2 * 2, dtype=np.int16).reshape(1, 5, 2, 2)
+      batch = datatypes.RLTrainerPayload(
+          prompt_ids=np.array([[1, 2]], dtype=np.int32),
+          prompt_mask=np.array([[1, 1]], dtype=np.float32),
+          completion_ids=np.array([[3, 4, 5]], dtype=np.int32),
+          completion_mask=np.array([[1, 1, 1]], dtype=np.float32),
+          advantages=np.array([[1.0, 1.0, 1.0]], dtype=np.float32),
+          old_per_token_logps=np.array([[-0.4, -1.2, -0.1]], dtype=np.float32),
+          routed_experts=routed,
+      )
+      await program._apply_sampler_trainer_agreement(batch, {})
+
+      req = program.engine.per_token_logps.await_args.kwargs["items"]
+      np.testing.assert_array_equal(req.routed_experts, routed)
 
     asyncio.run(_run())
 

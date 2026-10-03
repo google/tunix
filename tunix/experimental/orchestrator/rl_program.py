@@ -1092,6 +1092,10 @@ class StandardRLProgram(RLProgram):
         eos_id=getattr(self.assembler, "eos_id", self.batch_config.pad_id),
         segment_ids=batch.segment_ids,
         segment_positions=batch.segment_positions,
+        # Score under the same replayed routing the loss will use, so the
+        # agreement / TIS check compares the sampler against the trainer's
+        # actual training forward rather than a freshly re-gated one.
+        routed_experts=batch.routed_experts,
     )
     trainer_logps = await self.engine.per_token_logps(
         datatypes.Role.ACTOR, items=logps_req

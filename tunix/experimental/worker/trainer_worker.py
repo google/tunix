@@ -341,6 +341,11 @@ class TrainerWorker(abstract_worker.Worker):
           if items.segment_positions is None
           else np.asarray(items.segment_positions, dtype=np.int32)
       )
+      routed = (
+          None
+          if items.routed_experts is None
+          else np.asarray(items.routed_experts, dtype=np.int16)
+      )
       micro_batch_size = self._logps_micro_batch_size or batch_size
       outs = []
       for start in range(0, batch_size, micro_batch_size):
@@ -356,6 +361,7 @@ class TrainerWorker(abstract_worker.Worker):
                 chunk_size=self._logps_chunk_size,
                 segment_ids=None if seg_ids is None else seg_ids[sl],
                 segment_positions=None if seg_pos is None else seg_pos[sl],
+                routed_experts=None if routed is None else routed[sl],
             )
         )
       result = np.asarray(jnp.concatenate(outs, axis=0), dtype=np.float32)

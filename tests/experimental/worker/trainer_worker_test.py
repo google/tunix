@@ -19,6 +19,7 @@ AbstractTrainer (fwd_bwd, eval_step, update), response metadata stamping, and
 per-token log-prob scorer run through AbstractTrainer.fwd_only.
 """
 
+import dataclasses
 from typing import Any
 
 from absl.testing import absltest
@@ -381,6 +382,44 @@ class TrainerWorkerTest(absltest.TestCase):
     with self.assertRaises(ValueError):
       self.worker.per_token_logps(items=request)
     self.assertEmpty(self.fake_trainer.fwd_only_calls)
+
+  def test_per_token_logps_without_routing_passes_none(self):
+    self.worker.per_token_logps(items=self._unpacked_request())
+    _, kwargs = self.fake_trainer.fwd_only_calls[0]
+    self.assertIsNone(kwargs["routed_experts"])
+
+  def test_per_token_logps_forwards_routed_experts_per_micro_batch(self):
+    worker = trainer_worker.TrainerWorker(
+        trainer_factory=lambda: self.fake_trainer,
+        worker_id="trainer_3",
+        logps_micro_batch_size=2,
+    )
+    worker.initialize()
+    request = self._unpacked_request()
+    batch, seq_len = 3, 3 + 4
+    # Row i routes every token to expert i, so a mis-sliced row is visible.
+    routed = np.broadcast_to(
+        np.arange(batch, dtype=np.int32).reshape(batch, 1, 1, 1),
+        (batch, seq_len, 2, 2),
+    )
+    request = dataclasses.replace(request, routed_experts=routed)
+
+    result = worker.per_token_logps(items=request)
+
+    self.assertLen(self.fake_trainer.fwd_only_calls, 2)
+    _, first_kwargs = self.fake_trainer.fwd_only_calls[0]
+    _, second_kwargs = self.fake_trainer.fwd_only_calls[1]
+    self.assertEqual(first_kwargs["routed_experts"].dtype, np.int16)
+    np.testing.assert_array_equal(first_kwargs["routed_experts"], routed[:2])
+    np.testing.assert_array_equal(second_kwargs["routed_experts"], routed[2:])
+    # The fake model does not accept `forced_routed_experts`, so scoring is
+    # unchanged; the routing is only forwarded.
+    np.testing.assert_allclose(
+        result.per_token_logps,
+        self._expected_logps(request),
+        rtol=1e-4,
+        atol=1e-4,
+    )
 
 
 class TrainerWorkerExecutionContextTest(absltest.TestCase):
