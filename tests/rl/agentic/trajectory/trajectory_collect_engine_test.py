@@ -1709,6 +1709,60 @@ class ExactTokenContinuityCollectTest(absltest.TestCase):
     env.close.assert_called_once()
     self._assert_training_consumer(result)
 
+  def test_model_call_timeout_clips_episode_with_timeout_status(self):
+    for asynchronous in (False, True):
+      agent, env = self._frozenlake()
+      env.max_steps = 3
+
+      def slow_sync_model_call(*args, **kwargs):
+        del args, kwargs
+        time.sleep(0.15)
+        raise AssertionError("should have timed out")
+
+      async def slow_async_model_call(*args, **kwargs):
+        del args, kwargs
+        await asyncio.sleep(0.15)
+        raise AssertionError("should have timed out")
+
+      engine = trajectory_collect_engine.TrajectoryCollectEngine(
+          agent=agent,
+          env=env,
+          model_call=slow_async_model_call if asynchronous else slow_sync_model_call,
+          tokenizer=_FreshTextTokenizer([]),
+          chat_parser=_FreshTextParser([90]),
+          max_response_length=64,
+          timeout=0.03,
+          exact_token_continuity=True,
+      )
+      result = asyncio.run(engine.collect(mode='Token'))
+      self.assertEqual(result['status'], agent_types.TrajectoryStatus.TIMEOUT.name)
+      self.assertEqual(result['trajectory_reward'], 0.0)
+      env.close.assert_called_once()
+
+  def test_final_reward_timeout_defaults_to_zero(self):
+    agent, env = self._frozenlake()
+    env.max_steps = 1
+    env.reward_timeout = 0.01
+
+    def hung_reward():
+      time.sleep(0.2)
+      return 1.0
+
+    env.final_reward_fn = hung_reward
+    engine, _, _ = self._collector(agent, env)
+    orig_run_with_timing = engine._run_with_timing
+
+    async def fast_reward_timeout(func, *args, timeout=None):
+      if func is hung_reward:
+        return await orig_run_with_timing(func, *args, timeout=0.02)
+      return await orig_run_with_timing(func, *args, timeout=timeout)
+
+    engine._run_with_timing = fast_reward_timeout
+    result = asyncio.run(engine.collect(mode='Token'))
+    self.assertEqual(result['status'], agent_types.TrajectoryStatus.SUCCEEDED.name)
+    self.assertEqual(result['trajectory_reward'], 1.0)
+    env.close.assert_called_once()
+
   def test_exact_token_continuity_prompt_routed_experts_uses_prompt_length(
       self,
   ):

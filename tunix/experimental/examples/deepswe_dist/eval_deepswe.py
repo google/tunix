@@ -416,6 +416,7 @@ def compact_result(response):
 async def evaluate_worker(handle, jobs, limit, timeout, write_record):
   """Bounded dispatch with short RPCs; episode duration is not an RPC deadline."""
   pending = {}
+  timed_out = set()
   rows = []
   exhausted = False
   while pending or not exhausted:
@@ -434,6 +435,9 @@ async def evaluate_worker(handle, jobs, limit, timeout, write_record):
       break
     reply = await handle.poll_responses(timeout_s=5)
     if reply is not None:
+      if reply.request_id in timed_out:
+        timed_out.discard(reply.request_id)
+        continue
       if reply.request_id not in pending:
         raise RuntimeError(f"Unrecognized/duplicate result: {reply.request_id}")
       fields, start = pending.pop(reply.request_id)
@@ -459,8 +463,38 @@ async def evaluate_worker(handle, jobs, limit, timeout, write_record):
       )
       await asyncio.to_thread(write_record, row)
       rows.append(row)
-    if any(time.monotonic() - start > timeout for _, start in pending.values()):
-      raise TimeoutError("Worker exceeded collection and cleanup deadline")
+    now = time.monotonic()
+    expired = [
+        req_id
+        for req_id, (_, start) in pending.items()
+        if now - start > timeout
+    ]
+    for req_id in expired:
+      fields, start = pending.pop(req_id)
+      timed_out.add(req_id)
+      logging.warning(
+          "Request %s (instance_id=%s) exceeded controller deadline"
+          " (%.1fs > %.1fs); recording TIMEOUT.",
+          req_id,
+          fields["metadata"]["instance_id"],
+          now - start,
+          timeout,
+      )
+      row = {
+          "reward": 0.0,
+          "resolved": False,
+          "status": "TIMEOUT",
+          "error": None,
+          "instance_id": fields["metadata"]["instance_id"],
+          "attempt": fields["group_index"],
+          "request_id": req_id,
+          "wall_seconds": now - start,
+      }
+      requested_agent = fields["metadata"].get("agent_name")
+      if requested_agent:
+        row["agent_name"] = requested_agent
+      await asyncio.to_thread(write_record, row)
+      rows.append(row)
   return rows
 
 
@@ -645,7 +679,7 @@ async def run_controller(a):
           len(handles),
           min(a.max_concurrent, a.batch_size * a.num_rollouts_per_instance),
       )
-    deadline = a.timeout + a.reward_timeout + 360
+    deadline = a.timeout + a.reward_timeout + 600
     for index, handle in enumerate(handles):
       limit = effective_concurrency // len(handles) + (
           index < effective_concurrency % len(handles)
