@@ -890,6 +890,60 @@ class TrajectoryLoggerTest(absltest.TestCase):
     finally:
       signal.signal(signal.SIGTERM, orig_handler)
 
+  def test_log_trajectory_json_debug_inference_logs(self):
+    """Tests that DEBUG_INFERENCE_LOGS controls plain logging of turn & trajectory metrics."""
+    temp_dir = self.create_tempdir().full_path
+    item = {
+        'global_step': 10,
+        'prompt_id': 'issue_test',
+        'group_index': 0,
+        'worker_id': 'worker_0',
+        'traj_id': 'traj_test_debug',
+        'status': 'RESOLVED',
+        'reward': 1.0,
+        'trajectory': {
+            'status': 'RESOLVED',
+            'conversation_text': [
+                {'role': 'system', 'content': 'Sys'},
+                {'role': 'user', 'content': 'User'},
+                {'role': 'assistant', 'content': 'Step 0'},
+            ],
+            'model_time': {
+                'step_latency': [1.5],
+                'prompt_tokens': [50],
+                'completion_tokens': [20],
+                'num_preemptions': [0],
+            },
+            'env_time': {
+                'step_latency': [0.5],
+            },
+        },
+    }
+
+    # When DEBUG_INFERENCE_LOGS is disabled, no [DEBUG_INFERENCE] messages logged
+    with mock.patch.dict(os.environ, {'DEBUG_INFERENCE_LOGS': '0'}, clear=True):
+      with mock.patch.object(trajectory_logger.logging, 'info') as mock_info:
+        trajectory_logger.log_trajectory_json(temp_dir, item)
+        debug_calls = [
+            call for call in mock_info.call_args_list
+            if any('[DEBUG_INFERENCE]' in str(arg) for arg in call.args)
+        ]
+        self.assertEmpty(debug_calls)
+
+    # When DEBUG_INFERENCE_LOGS is enabled, [DEBUG_INFERENCE][Turn] and [Trajectory] logged
+    with mock.patch.dict(os.environ, {'DEBUG_INFERENCE_LOGS': '1'}, clear=True):
+      with mock.patch.object(trajectory_logger.logging, 'info') as mock_info:
+        trajectory_logger.log_trajectory_json(temp_dir, item)
+        debug_calls = [
+            call for call in mock_info.call_args_list
+            if any('[DEBUG_INFERENCE]' in str(arg) for arg in call.args)
+        ]
+        self.assertNotEmpty(debug_calls)
+        logged_text = ' '.join(str(c) for c in debug_calls)
+        self.assertIn('[DEBUG_INFERENCE][Turn]', logged_text)
+        self.assertIn('[DEBUG_INFERENCE][Trajectory]', logged_text)
+
 
 if __name__ == '__main__':
+
   absltest.main()

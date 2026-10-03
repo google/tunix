@@ -34,6 +34,7 @@ from typing import Any
 import numpy as np
 from vllm import envs
 from tunix.generate import utils as generate_utils
+from tunix.utils import env_utils
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.sampling_params import SamplingParams as VllmSamplingParams
@@ -387,6 +388,12 @@ class RLVllmSampler:
         ):
           routed_experts = np.array(routed_experts)
 
+        num_preemptions = (
+            getattr(final_output.metrics, 'num_preemptions', 0)
+            if getattr(final_output, 'metrics', None) is not None
+            else 0
+        )
+
         return SimpleNamespace(
             request_id=req_id,
             text=text,
@@ -398,6 +405,7 @@ class RLVllmSampler:
             finish_reason=getattr(output_choice, "finish_reason", "stop")
             or "stop",
             policy_version=policy_version,
+            num_preemptions=num_preemptions,
             error=None,
         )
 
@@ -416,6 +424,7 @@ class RLVllmSampler:
           routed_experts=None,
           finish_reason="stop",
           policy_version=policy_version,
+          num_preemptions=0,
           error=err_obj,
       )
     except Exception as e:
@@ -435,6 +444,7 @@ class RLVllmSampler:
           routed_experts=None,
           finish_reason="stop",
           policy_version=policy_version,
+          num_preemptions=0,
           error=err_obj,
       )
 
@@ -459,6 +469,7 @@ class RLVllmSampler:
       await self.start()
 
     raw_input_mode = False
+    sample_start_time = time.perf_counter()
     if isinstance(sampling_requests, (str, list)) and (
         isinstance(sampling_requests, str)
         or not sampling_requests
@@ -576,9 +587,38 @@ class RLVllmSampler:
           for req_id, task_gen, expected_ids in pending_tasks
       ])
 
+    sample_duration = time.perf_counter() - sample_start_time
+    if env_utils.is_debug_inference_logs_enabled():
+      tot_prompt_toks = 0
+      tot_comp_toks = 0
+      tot_preempts = 0
+      for r in results:
+        tot_prompt_toks += len(r.prompt_token_ids)
+        tot_comp_toks += len(r.token_ids)
+        tot_preempts += r.num_preemptions
+      s_tps = tot_comp_toks / sample_duration if sample_duration > 0 else 0.0
+      s_tpot_ms = (
+          (sample_duration / tot_comp_toks) * 1000.0
+          if tot_comp_toks > 0
+          else 0.0
+      )
+      logger.info(
+          '[DEBUG_INFERENCE][Sampler] requests=%d, duration=%.3fs, '
+          'prompt_tokens=%d, completion_tokens=%d, preemptions=%d, '
+          'tps=%.2f, tpot=%.2fms',
+          len(results),
+          sample_duration,
+          tot_prompt_toks,
+          tot_comp_toks,
+          tot_preempts,
+          s_tps,
+          s_tpot_ms,
+      )
+
     if raw_input_mode:
       return [r.text for r in results]
     return list(results)
+
 
   # ----------------------------------------------------------------------------
   # Cache Management
