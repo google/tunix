@@ -22,6 +22,7 @@ import gc
 from itertools import count
 import os
 import threading
+import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union, cast
 
 from absl import logging
@@ -35,6 +36,7 @@ from tunix.generate import utils
 from tunix.generate.mappings import MappingConfig
 from tunix.generate.vllm_async_driver import VLLMInProcessDriver
 from tunix.rl import reshard
+from tunix.utils import env_utils
 from vllm import LLM
 from vllm.engine.arg_utils import EngineArgs
 from vllm.inputs import TokensPrompt
@@ -901,12 +903,14 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         prompt_params_list.append(p)
       target_sampling_params = prompt_params_list
 
+    sample_start_time = time.perf_counter()
     if self._driver is not None:
       outputs = self._generate_server_mode(
           prompt_objects, target_sampling_params
       )
     else:
       outputs = self._generate_offline(prompt_objects, target_sampling_params)
+    sample_duration = time.perf_counter() - sample_start_time
     if exact_input:
       self._check_prompt_echo(prompt_ids, outputs)
     decoded_outputs, out_logprobs, out_tokens, out_routed_experts = (
@@ -938,6 +942,36 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         else 0
         for ro in outputs
     ]
+
+    if env_utils.is_debug_inference_logs_enabled():
+      total_prompt_tokens = sum(len(x) for x in prompt_ids)
+      total_comp_tokens = (
+          sum(len(t) for sample in out_tokens for t in sample)
+          if out_tokens
+          else 0
+      )
+      total_preemptions = sum(num_preemptions)
+      tps = (
+          total_comp_tokens / sample_duration if sample_duration > 0 else 0.0
+      )
+      tpot_ms = (
+          (sample_duration / total_comp_tokens) * 1000.0
+          if total_comp_tokens > 0
+          else 0.0
+      )
+      logging.info(
+          '[DEBUG_INFERENCE][Sampler] requests=%d, duration=%.3fs, '
+          'prompt_tokens=%d, completion_tokens=%d, preemptions=%d, '
+          'tps=%.2f, tpot=%.2fms',
+          len(prompt_ids),
+          sample_duration,
+          total_prompt_tokens,
+          total_comp_tokens,
+          total_preemptions,
+          tps,
+          tpot_ms,
+      )
+
     # To support multisampling, just return the whole list of SamplerOutput
     return base_sampler.SamplerOutput(
         text=decoded_outputs[0],
@@ -953,3 +987,4 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         ),
         num_preemptions=num_preemptions,
     )
+

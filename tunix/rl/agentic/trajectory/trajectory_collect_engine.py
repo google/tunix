@@ -40,8 +40,10 @@ from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.agents import base_agent
 from tunix.rl.agentic.environments import base_environment
 from tunix.rl.rollout import base_rollout
+from tunix.utils import env_utils
 
 BaseTaskEnv = base_environment.BaseTaskEnv
+
 ConversationAgentBase = base_agent.ConversationAgentBase
 
 
@@ -397,6 +399,46 @@ class TrajectoryCollectEngine:
         self.model_time["total_latency"] + total_env_time + total_reward_time
     )
     self.agent.trajectory.total_time = total_time
+
+    if env_utils.is_debug_inference_logs_enabled():
+      num_steps = len(self.model_time['step_latency'])
+      m_lat = self.model_time['total_latency']
+      comp_toks = self.model_time['total_completion_tokens']
+      p_cnt = self.model_time['total_preemptions']
+      tps = comp_toks / m_lat if m_lat > 0 else 0.0
+      tpot_ms = (m_lat / comp_toks) * 1000.0 if comp_toks > 0 else 0.0
+      mean_step_lat = (m_lat / num_steps) if num_steps > 0 else 0.0
+      traj_id = (
+          getattr(self.metadata, 'traj_id', None)
+          or getattr(self.agent.trajectory, 'traj_id', None)
+          or self._debug_prefix
+      )
+      status_str = (
+          self.agent.trajectory.status.name
+          if hasattr(self.agent.trajectory.status, 'name')
+          else str(self.agent.trajectory.status)
+      )
+      logging.info(
+          '[DEBUG_INFERENCE][Trajectory] traj_id=%s, global_step=%s, '
+          'status=%s, reward=%s, steps=%d, total_time=%.3fs, '
+          'model_time=%.3fs, env_time=%.3fs, reward_time=%.3fs, '
+          'mean_step_latency=%.3fs, '
+          'completion_tokens=%d, preemptions=%d, tps=%.2f, tpot=%.2fms',
+          traj_id,
+          self.policy_version,
+          status_str,
+          self.agent.trajectory.reward,
+          num_steps,
+          total_time,
+          m_lat,
+          total_env_time,
+          total_reward_time,
+          mean_step_lat,
+          comp_toks,
+          p_cnt,
+          tps,
+          tpot_ms,
+      )
 
     if mode not in ["Trajectory", "Steps", "Token", "Conversation"]:
       raise ValueError(
@@ -1234,6 +1276,35 @@ class TrajectoryCollectEngine:
         self.sync_trajectory_metadata()
         self.trajectory_store.add_step(env_step, self.metadata)
 
+    if env_utils.is_debug_inference_logs_enabled():
+      turn_idx = max(0, len(self.model_time['step_latency']) - 1)
+      turn_tps = comp_len / step_latency if step_latency > 0 else 0.0
+      turn_tpot_ms = (
+          (step_latency / comp_len) * 1000.0 if comp_len > 0 else 0.0
+      )
+      traj_id = (
+          getattr(self.metadata, 'traj_id', None)
+          or getattr(self.agent.trajectory, 'traj_id', None)
+          or self._debug_prefix
+      )
+      env_lat = wall_time if env_step_executed else 0.0
+      turn_total = step_latency + env_lat
+      logging.info(
+          '[DEBUG_INFERENCE][Turn] traj_id=%s, turn=%d, model_time=%.3fs, '
+          'env_time=%.3fs, total_time=%.3fs, prompt_tokens=%d, '
+          'completion_tokens=%d, preemptions=%d, tps=%.2f, tpot=%.2fms',
+          traj_id,
+          turn_idx,
+          step_latency,
+          env_lat,
+          turn_total,
+          prompt_len,
+          comp_len,
+          preempt,
+          turn_tps,
+          turn_tpot_ms,
+      )
+
     if step_timed_out:
       self.agent.trajectory.status = agent_types.TrajectoryStatus.TIMEOUT
       logging.warning("Episode timed out after %d seconds.", self.timeout)
@@ -1242,6 +1313,7 @@ class TrajectoryCollectEngine:
       return True
 
     return done
+
 
   async def _append_final_reward(self):
     """Compute and add final reward to the last step of the episode.

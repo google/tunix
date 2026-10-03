@@ -34,6 +34,7 @@ from typing import Any
 import numpy as np
 from vllm import envs
 from tunix.generate import utils as generate_utils
+from tunix.utils import env_utils
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.sampling_params import SamplingParams as VllmSamplingParams
@@ -459,6 +460,7 @@ class RLVllmSampler:
       await self.start()
 
     raw_input_mode = False
+    sample_start_time = time.perf_counter()
     if isinstance(sampling_requests, (str, list)) and (
         isinstance(sampling_requests, str)
         or not sampling_requests
@@ -576,9 +578,43 @@ class RLVllmSampler:
           for req_id, task_gen, expected_ids in pending_tasks
       ])
 
+    sample_duration = time.perf_counter() - sample_start_time
+    if env_utils.is_debug_inference_logs_enabled():
+      tot_prompt_toks = 0
+      tot_comp_toks = 0
+      tot_preempts = 0
+      for r in results:
+        tot_prompt_toks += len(getattr(r, 'prompt_token_ids', None) or [])
+        tot_comp_toks += len(getattr(r, 'token_ids', None) or [])
+        m = getattr(r, 'metrics', None)
+        tot_preempts += (
+            getattr(m, 'num_preemptions', 0)
+            if m
+            else getattr(r, 'num_preemptions', 0)
+        )
+      s_tps = tot_comp_toks / sample_duration if sample_duration > 0 else 0.0
+      s_tpot_ms = (
+          (sample_duration / tot_comp_toks) * 1000.0
+          if tot_comp_toks > 0
+          else 0.0
+      )
+      logger.info(
+          '[DEBUG_INFERENCE][Sampler] requests=%d, duration=%.3fs, '
+          'prompt_tokens=%d, completion_tokens=%d, preemptions=%d, '
+          'tps=%.2f, tpot=%.2fms',
+          len(results),
+          sample_duration,
+          tot_prompt_toks,
+          tot_comp_toks,
+          tot_preempts,
+          s_tps,
+          s_tpot_ms,
+      )
+
     if raw_input_mode:
       return [r.text for r in results]
     return list(results)
+
 
   # ----------------------------------------------------------------------------
   # Cache Management

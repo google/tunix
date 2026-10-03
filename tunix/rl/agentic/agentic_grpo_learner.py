@@ -51,7 +51,9 @@ from tunix.rl.agentic.agents import model_agent
 from tunix.rl.agentic.environments import base_environment
 from tunix.rl.agentic.environments import task_environment
 from tunix.utils import compat
+from tunix.utils import env_utils
 from tunix.utils import trajectory_logger
+
 
 TrainingInputT = agentic_rl_learner.TrainingInputT
 RewardFn = agentic_rl_learner.RewardFn
@@ -955,54 +957,85 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       total_preemptions = int(sum(all_traj_preemptions))
       total_time = float(sum(all_traj_total_times))
 
-      metrics_to_log.update({
-          "inference/step_latency_sec/mean": (
-              np.mean(all_model_latencies),
-              np.mean,
-          ),
-          "inference/step_latency_sec/max": (
-              np.max(all_model_latencies),
-              np.max,
-          ),
-          "inference/step_latency_sec/min": (
-              np.min(all_model_latencies),
-              np.min,
-          ),
-          "inference/total_completion_tokens": (total_comp_tokens, np.mean),
-          "inference/total_model_time_sec": (total_model_time, np.mean),
-          "inference/total_time_sec": (total_time, np.mean),
-          "inference/total_preemptions": (float(total_preemptions), np.mean),
-          "inference/tokens_per_second": (tokens_per_sec, np.mean),
-          "inference/tpot_ms": (tpot_ms, np.mean),
-          "trajectory/total_time_sec/mean": (np.mean(all_traj_total_times), np.mean),
-          "trajectory/total_time_sec/max": (np.max(all_traj_total_times), np.max),
-          "trajectory/total_time_sec/min": (np.min(all_traj_total_times), np.min),
-          "trajectory/preemptions/mean": (np.mean(all_traj_preemptions), np.mean),
-          "trajectory/preemptions/max": (np.max(all_traj_preemptions), np.max),
-          "trajectory/preemptions/sum": (float(total_preemptions), np.mean),
-      })
-
-    # Extract time metrics (env_time, reward_time, and model_time)
-    for time_key in ["env_time", "reward_time", "model_time"]:
-      prefix = f"trajectory/{time_key}"
-      time_dicts = [item.traj.get(time_key, {}) for item in trajectories]
-
-      # Safely gather all unique sub-keys (e.g., 'reset_latency') across all trajectories
-      for sub_key in {k for d in time_dicts for k in d.keys()}:
-        vals = [d.get(sub_key, 0.0) for d in time_dicts]
-        flat_vals = []
-        for v in vals:
-          if isinstance(v, (list, tuple, np.ndarray)):
-            flat_vals.extend(v)
-          elif v is not None:
-            flat_vals.append(v)
-        if not flat_vals:
-          flat_vals = [0.0]
+      if env_utils.is_debug_inference_logs_enabled():
+        logging.info(
+            '[DEBUG_INFERENCE][Batch] step=%s, trajectories=%d, '
+            'total_model_time=%.3fs, total_time=%.3fs, completion_tokens=%d, '
+            'preemptions=%d, tps=%.2f, tpot=%.2fms, mean_step_latency=%.3fs',
+            expected_step,
+            len(trajectories),
+            total_model_time,
+            total_time,
+            int(total_comp_tokens),
+            total_preemptions,
+            tokens_per_sec,
+            tpot_ms,
+            float(np.mean(all_model_latencies)),
+        )
         metrics_to_log.update({
-            f"{prefix}/{sub_key}/mean": (np.mean(flat_vals), np.mean),
-            f"{prefix}/{sub_key}/max": (np.max(flat_vals), np.max),
-            f"{prefix}/{sub_key}/min": (np.min(flat_vals), np.min),
+            'inference/step_latency_sec/mean': (
+                np.mean(all_model_latencies),
+                np.mean,
+            ),
+            'inference/step_latency_sec/max': (
+                np.max(all_model_latencies),
+                np.max,
+            ),
+            'inference/step_latency_sec/min': (
+                np.min(all_model_latencies),
+                np.min,
+            ),
+            'inference/total_completion_tokens': (total_comp_tokens, np.mean),
+            'inference/total_model_time_sec': (total_model_time, np.mean),
+            'inference/total_time_sec': (total_time, np.mean),
+            'inference/total_preemptions': (float(total_preemptions), np.mean),
+            'inference/tokens_per_second': (tokens_per_sec, np.mean),
+            'inference/tpot_ms': (tpot_ms, np.mean),
+            'trajectory/total_time_sec/mean': (
+                np.mean(all_traj_total_times),
+                np.mean,
+            ),
+            'trajectory/total_time_sec/max': (
+                np.max(all_traj_total_times),
+                np.max,
+            ),
+            'trajectory/total_time_sec/min': (
+                np.min(all_traj_total_times),
+                np.min,
+            ),
+            'trajectory/preemptions/mean': (
+                np.mean(all_traj_preemptions),
+                np.mean,
+            ),
+            'trajectory/preemptions/max': (
+                np.max(all_traj_preemptions),
+                np.max,
+            ),
+            'trajectory/preemptions/sum': (float(total_preemptions), np.mean),
         })
+
+    if env_utils.is_debug_inference_logs_enabled():
+      # Extract time metrics (env_time, reward_time, and model_time)
+      for time_key in ['env_time', 'reward_time', 'model_time']:
+        prefix = f'trajectory/{time_key}'
+        time_dicts = [item.traj.get(time_key, {}) for item in trajectories]
+
+        # Safely gather all unique sub-keys across all trajectories
+        for sub_key in {k for d in time_dicts for k in d.keys()}:
+          vals = [d.get(sub_key, 0.0) for d in time_dicts]
+          flat_vals = []
+          for v in vals:
+            if isinstance(v, (list, tuple, np.ndarray)):
+              flat_vals.extend(v)
+            elif v is not None:
+              flat_vals.append(v)
+          if not flat_vals:
+            flat_vals = [0.0]
+          metrics_to_log.update({
+              f'{prefix}/{sub_key}/mean': (np.mean(flat_vals), np.mean),
+              f'{prefix}/{sub_key}/max': (np.max(flat_vals), np.max),
+              f'{prefix}/{sub_key}/min': (np.min(flat_vals), np.min),
+          })
 
     self.rl_engine.buffer_metrics_async(
         metrics_to_log,  # pyrefly: ignore[bad-argument-type]
