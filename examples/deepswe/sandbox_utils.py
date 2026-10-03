@@ -872,8 +872,6 @@ class PrewarmDatasetIterator:
   def __next__(self):
     if not self.current_batch:
       if not self.next_batch:
-        if self.unwarm_on_exhaustion:
-          self.close()
         raise StopIteration
 
       # The previous current_batch is now in-flight/running on the cluster.

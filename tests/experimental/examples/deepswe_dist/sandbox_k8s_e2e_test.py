@@ -178,7 +178,7 @@ def run_pipeline_e2e(
       fleet=fleet,
       num_generations=num_generations,
       batch_size=batch_size,
-      unwarm_on_exhaustion=True,
+      unwarm_on_exhaustion=False,
       scaffold=scaffold,
   )
   logging.info(
