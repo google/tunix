@@ -146,7 +146,7 @@ EOF
   exit 1
 fi
 
-#echo "${RAIDEN_WHEEL_SHA256}  ${DEST}" | sha256sum -c -
+echo "${RAIDEN_WHEEL_SHA256}  ${DEST}" | sha256sum -c -
 
 "${PIP_INSTALL[@]}" "${DEST}"
 verify_install
