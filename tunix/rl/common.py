@@ -157,6 +157,8 @@ def compute_kl_divergence(
     `0.5 * (logp - ref_logp)^2`.
   - "low_var_kl": Unbiased, low-variance estimator. J. Schulman low-variance
     approx: `(r - 1) - log r`, where `r = q/p = exp(ref_logp - logp)`.
+    Computed as `expm1(log r) - log r` so float32 cancellation near `r = 1`
+    cannot return a negative value.
 
   Args:
     per_token_logps: Per token log probabilities from the trained policy.
@@ -181,8 +183,10 @@ def compute_kl_divergence(
   elif method == "mse_kl":
     kl = 0.5 * jnp.square(per_token_logps - ref_per_token_logps)
   elif method == "low_var_kl":
+    # exp(d) - d - 1 cancels in float32 near d = 0 and can go negative.
+    # expm1(d) - d is the same K3 estimator without that cancellation.
     diff = ref_per_token_logps - per_token_logps
-    kl = jnp.exp(diff) - diff - 1
+    kl = jnp.expm1(diff) - diff
   else:
     raise ValueError(
         "`method` must be one of 'kl', 'mse_kl', 'low_var_kl'. Received:"
