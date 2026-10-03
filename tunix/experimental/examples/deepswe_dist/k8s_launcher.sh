@@ -198,6 +198,7 @@ export WANDB_ENTITY=${WANDB_ENTITY:-}
 export LOG_DIR=${LOG_DIR:-}
 export TRAJECTORY_LOG_DIR=${TRAJECTORY_LOG_DIR:-}
 export RCP_LOGGING=${RCP_LOGGING:-false}
+export ALLOW_CHECKPOINT_RESUME=${ALLOW_CHECKPOINT_RESUME:-false}
 export VAL_START_AT=${VAL_START_AT:-}
 export CHECKPOINT_STEP=${CHECKPOINT_STEP:-0}
 export CHECKPOINT_TIMESTAMP_MS=${CHECKPOINT_TIMESTAMP_MS:-}
@@ -377,6 +378,10 @@ start_orchestrator() {
   if [[ "${RCP_LOGGING}" == "1" || "${RCP_LOGGING}" == "true" || "${RCP_LOGGING}" == "True" ]]; then
     rcp_arg="--rcp_logging"
   fi
+  local allow_resume_arg=""
+  if [[ "${ALLOW_CHECKPOINT_RESUME}" == "1" || "${ALLOW_CHECKPOINT_RESUME}" == "true" || "${ALLOW_CHECKPOINT_RESUME}" == "True" ]]; then
+    allow_resume_arg="--allow_checkpoint_resume"
+  fi
   local disable_ws_timeouts_arg=""
   if [[ "${WEIGHT_SYNC_DISABLE_TIMEOUTS}" == "1" || "${WEIGHT_SYNC_DISABLE_TIMEOUTS}" == "true" || "${WEIGHT_SYNC_DISABLE_TIMEOUTS}" == "True" ]]; then
     disable_ws_timeouts_arg="--disable_weight_sync_timeouts"
@@ -500,6 +505,7 @@ start_orchestrator() {
         ${METRIC_LOGGER_DIR:+--metric_logger_dir="${METRIC_LOGGER_DIR}"} \
         ${VAL_START_AT:+--val_start_at=${VAL_START_AT}} \
         ${rcp_arg} \
+        ${allow_resume_arg} \
         ${debug_arg} \
     " \
     | apply_manifest

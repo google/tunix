@@ -1228,6 +1228,7 @@ def init_print(
     rollout_mesh: Any = None,
     train_mesh: Any = None,
     total_devices: Optional[int] = None,
+    init_checkpoint_step: int = 0,
 ):
   """Logs initial MLPerf submission metadata and hyperparameters for compliance."""
   if not (_is_master_process() and mllogger is not None):
@@ -1337,7 +1338,7 @@ def init_print(
       getattr(constants, "MAX_SEQUENCE_LENGTH", "max_sequence_length"): max_seq_len,
       getattr(constants, "TRAIN_SAMPLES", "train_samples"): train_samples,
       getattr(constants, "EVAL_SAMPLES", "eval_samples"): eval_samples,
-      getattr(constants, "INIT_CHECKPOINT_STEP", "init_checkpoint_step"): 0,
+      getattr(constants, "INIT_CHECKPOINT_STEP", "init_checkpoint_step"): init_checkpoint_step,
       getattr(constants, "OPT_NAME", "opt_name"): getattr(constants, "ADAMW", "adamw"),
       getattr(constants, "OPT_BASE_LR", "opt_base_learning_rate"): getattr(args, "learning_rate", 1e-6),
       getattr(constants, "OPT_END_LR", "opt_end_learning_rate"): getattr(args, "learning_rate", 1e-6),

@@ -2264,6 +2264,40 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_resume_from_checkpoint_invokes_callback_and_disallows_nonzero(self):
+    async def _run():
+      restored_steps = []
+      self.mock_engine.resume_from_checkpoint.return_value = 0
+      program_ok = self._create_program(
+          on_checkpoint_restored=restored_steps.append,
+          disallow_checkpoint_resume=True,
+          sync_weights=True,
+      )
+      program_ok.engine = self.mock_engine
+      await program_ok._resume_from_checkpoint()
+      self.assertEqual(restored_steps, [0])
+      self.mock_engine.resume_from_checkpoint.assert_awaited_once_with(
+          role=datatypes.Role.ACTOR,
+          resync_rollout_weights=False,
+      )
+
+      restored_steps.clear()
+      self.mock_engine.resume_from_checkpoint.reset_mock()
+      self.mock_engine.resume_from_checkpoint.return_value = 18
+      program_fail = self._create_program(
+          on_checkpoint_restored=restored_steps.append,
+          disallow_checkpoint_resume=True,
+          sync_weights=True,
+      )
+      program_fail.engine = self.mock_engine
+      with self.assertRaisesRegex(
+          RuntimeError, "Restored checkpoint step 18 != 0"
+      ):
+        await program_fail._resume_from_checkpoint()
+      self.assertEqual(restored_steps, [18])
+
+    asyncio.run(_run())
+
   def test_train_stage_sequence_packed_final_batch_broken_down_into_multiple_microbatches(
       self,
   ):

@@ -1177,6 +1177,24 @@ class MllogUtilsTest(absltest.TestCase):
       )
       self.assertLen(items_stale_1, 12)
 
+  def test_init_print_logs_actual_init_checkpoint_step(self):
+    args = types.SimpleNamespace(
+        seed=42,
+        metric_logger_dir=self.test_dir,
+        batch_size=16,
+        num_generations=16,
+        max_steps=20,
+        model_id="Qwen/Qwen3.5-397B-A17B",
+    )
+    mllog_utils.init_start(args)
+    mllog_utils.init_print(args, init_checkpoint_step=18)
+    events = _read_mllog_events(os.path.join(self.test_dir, "seed_42.out"))
+    init_step_events = [
+        e for e in events if e["key"] == "init_checkpoint_step"
+    ]
+    self.assertLen(init_step_events, 1)
+    self.assertEqual(init_step_events[0]["value"], 18)
+
 
 if __name__ == "__main__":
   absltest.main()
