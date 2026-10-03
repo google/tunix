@@ -301,9 +301,8 @@ def run_oh_editor_locally(
       return "Error: Parameter `new_str` is required for command: insert."
     new_str = str(new_str).expandtabs()
     try:
-    try:
       with open(path, "r", encoding="utf-8", errors="replace") as f:
-        file_content = f.read()
+        file_content = f.read().expandtabs()
     except Exception as e:  # pylint: disable=broad-exception-caught
       return f"Error reading {path}: {e}"
 
