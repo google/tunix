@@ -210,9 +210,15 @@ class SandboxFailFastConfig:
   launcher.
 
   Attributes:
-    enabled: Warm-pool errors are fatal instead of logged.
+    enabled: Warm-pool *creation* errors (template/pool name collision with
+      another run, capacity, preflight) are fatal instead of logged. A pool that
+      exists but is slow to become ready is never fatal: the orchestrator
+      continues and rollout workers degrade per trajectory (see
+      `PrewarmDatasetIterator._interact_fleet`).
     ready_timeout_s: SDK `FleetConfig.ready_timeout` (claim and warm-pool
-      readiness). None keeps the SDK default (900s).
+      readiness). None keeps the SDK default (900s). Bounds how long the
+      orchestrator's initial readiness barrier and each rollout `fleet.acquire`
+      wait; it does not decide whether the run survives.
     acquire_retries: `fleet.acquire` attempts per episode in SWEEnv.
   """
 
@@ -792,23 +798,47 @@ class PrewarmDatasetIterator:
     fleet_error_cls = _fleet_error_cls() if self._fail_fast else None
 
     def _warm(img: str, target_reps: int) -> None:
+      # Phase 1: create the template + pool without blocking on readiness.
+      # The SDK raises FleetError here only for unrecoverable conditions --
+      # a name collision with another run's template/pool
+      # (OwnedByAnotherRunError), capacity, preflight -- and writes nothing in
+      # that case, so the image would stay cold for the whole run. That is the
+      # one class of warm error that is still fatal under fail-fast.
       try:
-        self.fleet.warm_image(img, replicas_override=target_reps, wait=wait)
-        with self._lock:
-          self._active_replicas[img] = target_reps
-        logging.info(
-            "[PrewarmDatasetIterator] Warmed new pool on K8s: %s"
-            " (replicas=%d, wait=%s)",
-            img,
-            target_reps,
-            wait,
-        )
+        self.fleet.warm_image(img, replicas_override=target_reps, wait=False)
       except Exception as e:  # pylint: disable=broad-exception-caught
         if self._fail_fast and isinstance(e, fleet_error_cls):
-          # A pool that never gets ready or whose name collides with another
-          # run's leaves this image cold for the rest of the run. Fail loud.
           raise
         logging.warning("[PrewarmDatasetIterator] Warm note for %s: %s", img, e)
+        return
+      with self._lock:
+        self._active_replicas[img] = target_reps
+      logging.info(
+          "[PrewarmDatasetIterator] Warmed new pool on K8s: %s"
+          " (replicas=%d, wait=%s)",
+          img,
+          target_reps,
+          wait,
+      )
+      if not wait:
+        return
+      # Phase 2: readiness barrier. The pool now exists and the controller
+      # keeps reconciling it regardless of whether we wait, so a pool that is
+      # slow to fill (image pulls, CNI endpoint rate limiting under a crowded
+      # namespace, node scale-up) is a degraded start, not a broken run: rollout
+      # workers claim whatever replicas are ready, and a claim that still cannot
+      # be served after FT_SANDBOX_ACQUIRE_RETRIES fails only that trajectory
+      # (RolloutManager turns it into a FAILED TrajectoryError). Never fatal.
+      try:
+        self.fleet.warm_image(img, replicas_override=target_reps, wait=True)
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        logging.warning(
+            "[PrewarmDatasetIterator] Warm pool for %s is not fully ready yet;"
+            " continuing without the readiness barrier (replicas=%d): %s",
+            img,
+            target_reps,
+            e,
+        )
 
     def _scale(img: str, target_reps: int) -> None:
       try:
