@@ -26,25 +26,24 @@ class EnvUtilsTest(absltest.TestCase):
     with mock.patch.dict(os.environ, {}, clear=True):
       self.assertFalse(env_utils.is_debug_inference_logs_enabled())
 
-  def test_is_debug_inference_logs_enabled_debug_flag(self):
+  def test_is_debug_inference_logs_enabled_tunix_flag(self):
     for val in ("1", "true", "True", "yes", "YES"):
       with mock.patch.dict(
-          os.environ, {"DEBUG_INFERENCE_LOGS": val}, clear=True
+          os.environ, {"TUNIX_DEBUG_INFERENCE_LOGS": val}, clear=True
       ):
         self.assertTrue(env_utils.is_debug_inference_logs_enabled())
 
     for val in ("0", "false", "no", "", "2"):
       with mock.patch.dict(
-          os.environ, {"DEBUG_INFERENCE_LOGS": val}, clear=True
+          os.environ, {"TUNIX_DEBUG_INFERENCE_LOGS": val}, clear=True
       ):
         self.assertFalse(env_utils.is_debug_inference_logs_enabled())
 
-  def test_is_debug_inference_logs_enabled_tunix_prefix_flag(self):
-    for val in ("1", "true", "True", "yes"):
-      with mock.patch.dict(
-          os.environ, {"TUNIX_DEBUG_INFERENCE_LOGS": val}, clear=True
-      ):
-        self.assertTrue(env_utils.is_debug_inference_logs_enabled())
+  def test_is_debug_inference_logs_unprefixed_flag_ignored(self):
+    with mock.patch.dict(
+        os.environ, {"DEBUG_INFERENCE_LOGS": "1"}, clear=True
+    ):
+      self.assertFalse(env_utils.is_debug_inference_logs_enabled())
 
 
 if __name__ == "__main__":
