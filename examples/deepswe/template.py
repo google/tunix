@@ -457,17 +457,20 @@ DEFAULT_OPENHANDS_KEEPALIVE_CMD = [
     "sh",
     "-c",
     (
-        "chmod +x /oh/openhands-agent-server 2>/dev/null || true; ([ -d"
+        "chmod +x /oh/openhands-agent-server 2>/dev/null || true; ([ -d /oh/glibc236 ] && export LD_LIBRARY_PATH=\"/oh/glibc236:${LD_LIBRARY_PATH:-}\"); ([ -d"
         " /testbed ] && [ ! -e /workspace ] && ln -s /testbed /workspace"
         " 2>/dev/null || true); ([ -d /workspace ] && [ ! -e /testbed ] && ln"
         " -s /workspace /testbed 2>/dev/null || true); git config --global"
-        " --add safe.directory '*' 2>/dev/null || true; [ -d /testbed ] && cd"
-        " /testbed; if [ -x /oh/openhands-agent-server ]; then exec"
+        " --add safe.directory '*' 2>/dev/null || true; cd /; if [ -x"
+        " /oh/openhands-agent-server ]; then exec"
         " /oh/openhands-agent-server --host 0.0.0.0 --port 8000; elif [ -x"
-        " /usr/local/bin/openhands-agent-server ]; then exec tini --"
+        " /usr/local/bin/openhands-agent-server ]; then [ -d /testbed ] && cd"
+        " /testbed; exec tini --"
         " /usr/local/bin/openhands-agent-server --host 0.0.0.0 --port 8000;"
-        " else exec tini -- /agent-server/.venv/bin/python -m"
-        " openhands.agent_server --host 0.0.0.0 --port 8000; fi"
+        " elif [ -x /openhands/poetry/openhands-ai-5O4_aCHf-py3.12/bin/agent-server ]; then"
+        " [ -d /testbed ] && cd /testbed; exec"
+        " /openhands/poetry/openhands-ai-5O4_aCHf-py3.12/bin/agent-server --host 0.0.0.0 --port 8000;"
+        " fi"
     ),
 ]
 
@@ -499,7 +502,7 @@ def get_openhands_pod_template(
 
   server_image = os.getenv(
       "OPENHANDS_SERVER_IMAGE",
-      "gcr.io/cloud-tpu-multipod-dev/sanbao/openhands-agent-server:1.44.1",
+      "gcr.io/cloud-tpu-multipod-dev/tunix/openhands-agent-server:0.62",
   )
 
   extra_pod_spec = {
@@ -511,7 +514,8 @@ def get_openhands_pod_template(
               "-c",
               (
                   "cp -a /opt/oh/. /oh/ 2>/dev/null || cp -a"
-                  " /usr/local/bin/openhands-agent-server /oh/"
+                  " /usr/local/bin/openhands-agent-server /oh/ 2>/dev/null ||"
+                  " cp -a /openhands/poetry/*/bin/agent-server /oh/openhands-agent-server 2>/dev/null || true"
               ),
           ],
           "volumeMounts": [{"name": "oh", "mountPath": "/oh"}],
