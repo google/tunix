@@ -85,11 +85,10 @@ For TPU users integrating `vllm` and `tpu-inference`, there are two supported
 setup paths:
 
 - Docker image builds use [Dockerfile](https://github.com/google/tunix/blob/main/Dockerfile) and install
-    the pinned dependencies directly from `requirements/requirements.txt` and
-    `requirements/special_requirements.txt`.
+    the pinned dependencies directly from `pyproject.toml`.
 - Local TPU VM or developer-machine installs can use
     [scripts/install_tunix_vllm_requirement.sh](https://github.com/google/tunix/blob/main/scripts/install_tunix_vllm_requirement.sh),
-    which installs the same requirement files outside Docker.
+    which installs the same `pyproject.toml` dependency groups outside Docker.
 
 These are separate entry points. If you are building the Docker image, you do
 not need to run the install script inside the container build.

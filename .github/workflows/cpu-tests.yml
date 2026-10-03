@@ -42,6 +42,8 @@ jobs:
       - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
         with:
           python-version: '3.11'
+      - name: Set up uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
 
       - name: Download the tunix wheel
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
@@ -50,23 +52,12 @@ jobs:
 
       - name: Install the tunix wheel
         run: |
-          python -m pip install --upgrade pip
           WHEEL=$(ls -1 google_tunix-*-py3-none-any.whl | head -n1)
-          python -m pip install "${WHEEL}[prod,test,experimental]"
+          uv pip install --system "${WHEEL}[prod,test,experimental]"
 
       - name: Verify Tunix imports from installed package
         run: |
-          python3 -c "
-          import tunix
-          import tunix.models
-          import tunix.generate
-          import tunix.sft
-          import tunix.distillation
-          import tunix.rl
-
-          assert tunix.__version__ != '0.0.0.dev0', 'Tunix version not set correctly'
-          print('All tunix modules imported successfully and version is', tunix.__version__)
-          "
+          python3 scripts/verify_package_install.py
       - name: Run agentic RL tests
         run: |
           python -m pytest tests/rl/agentic/ -v --tb=short
@@ -94,7 +85,6 @@ jobs:
 
       - name: Compile gRPC Protobuf definitions
         run: |
-          python -m pip install grpcio-tools
           find tunix/experimental/distributed -name "*.proto" -exec \
             python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. {} +
 
@@ -110,10 +100,14 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: vllm/vllm-tpu:nightly-20260911-4b80060-51da0ca # zizmor: ignore[unpinned-images]
+      env:
+        UV_SYSTEM_PYTHON: "1"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+      - name: Set up uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
 
       - name: Download the tunix wheel
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
@@ -122,11 +116,8 @@ jobs:
 
       - name: Install the tunix wheel
         run: |
-          python3 -m pip install --upgrade pip setuptools wheel
           WHEEL=$(ls -1 google_tunix-*-py3-none-any.whl | head -n1)
-          python3 -m pip install "${WHEEL}[prod,test,experimental]"
-          # tpu-inference/Numba needs NumPy 2.3 or less.
-          python3 -m pip install numpy==2.3.5 --force-reinstall
+          uv pip install "${WHEEL}[dev]" "numpy==2.3.5"
 
       - name: Run vllm driver tests
         run: |
@@ -153,13 +144,15 @@ jobs:
       - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
         with:
           python-version: '3.11'
+      - name: Set up uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
 
       # Cache Hugging Face hub
       - name: Cache HF hub
         uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: ~/.cache/huggingface
-          key: hf-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements*.txt', 'constraints*.txt') }}
+          key: hf-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'constraints*.txt') }}
           restore-keys: |
             hf-${{ runner.os }}-
 
@@ -170,10 +163,9 @@ jobs:
 
       - name: Install the tunix wheel and dependencies
         run: |
-          python -m pip install --upgrade pip
           WHEEL=$(ls -1 google_tunix-*-py3-none-any.whl | head -n1)
-          python -m pip install "${WHEEL}[prod,test,experimental]"
-          python -m pip install --upgrade kagglehub kagglesdk torch
+          uv pip install --system "${WHEEL}[dev]"
+          uv pip install --system torch --index-url https://download.pytorch.org/whl/cpu
 
       - name: Run Smoke tests (model creation)
         env:

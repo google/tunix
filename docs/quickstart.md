@@ -113,23 +113,9 @@ These need to be installed manually.
 
 The TPU-inference supported version of `vllm` is not always available as a
 single PyPI release, and installing the TPU build sometimes requires extra pip flags
-so that `libtpu` wheels (hosted by the JAX project) can be resolved. You can
-install the pinned vLLM + TPU requirements from this repository using one of
-the raw requirement-file URLs below.
-
-Install from remote:
-
-```sh
-pip install -r https://github.com/google/tunix/raw/main/requirements/requirements.txt
-pip install -r https://github.com/google/tunix/raw/main/requirements/special_requirements.txt
-```
-
-Or (direct raw.githubusercontent URL):
-
-```sh
-pip install -r https://raw.githubusercontent.com/google/tunix/main/requirements/requirements.txt
-pip install -r https://raw.githubusercontent.com/google/tunix/main/requirements/special_requirements.txt
-```
+so that `libtpu` wheels (hosted by the JAX project) can be resolved. The pinned
+`vllm` and `tpu-inference` commits are declared in `pyproject.toml` under
+`[dependency-groups]` (`vllm-tpu` and `tpu-inference`).
 
 If you prefer a single-line install that directly overrides `tpu-inference`, you can also run:
 

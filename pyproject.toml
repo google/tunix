@@ -18,7 +18,7 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-  "datasets",
+  "datasets>=3.0.0",
   "flax>=0.12.5",
   "fsspec",  # notebook dependency
   "google-metrax>=0.2.3",
@@ -65,7 +65,7 @@ docs = [
 prod = [
 ]
 dev = [
-  # Manully install vLLM & tpu-inferece, which depends on jax[tpu]==0.7.2
+  "google-tunix[test,experimental]",
 ]
 test = [
   "pytest",
@@ -75,8 +75,11 @@ test = [
   "opentelemetry-sdk>=1.25.0",
   "wandb",  # Offline end-to-end test for the OpenTelemetry W&B exporter
   "mlperf-logging",
+  "kagglesdk",
 ]
 cli = [
+  "array_record",
+  "gcsfs",
   "tensorflow",
 ]
 otel = [
@@ -96,6 +99,46 @@ experimental = [
   "pydantic",  # data modeling and serialization for agent trajectories
   "simple_parsing",  # Argument parsing for CLI
   "termcolor",  # terminal formatting for CLI subcommands
+]
+maxtext = [
+  "aqtp>=0.9.0",
+  "cheroot",
+  "cloud-accelerator-diagnostics",
+  "cloud-tpu-diagnostics",
+  "drjax>=0.1.4",
+  "einshape",
+  "google-cloud-mldiagnostics>=0.5.10",
+  "google-cloud-monitoring",
+  "jsonlines",
+  "ml-collections",
+  "ml-goodput-measurement",
+  "optax",
+  "pathwaysutils",
+  "tensorboard-plugin-profile",
+  "tensorboardx",
+  "tiktoken",
+  "tokamax>=0.0.4",
+  "typeguard",
+  "xprof",
+]
+
+[dependency-groups]
+vllm-tpu = [
+  "vllm @ git+https://github.com/vllm-project/vllm.git@51da0ca66c8065619c79e35dff97aa99aeaf5644",
+]
+tpu-inference = [
+  "tpu-inference @ git+https://github.com/vllm-project/tpu-inference.git@6f913c734cb47a1125a817e37cc418c5960675d0",
+]
+maxtext-git = [
+  "maxtext @ git+https://github.com/AI-Hypercomputer/maxtext.git@63d5db085447274e9cd8769334866fe5268459a9",
+  "maxtext-vllm-adapter @ git+https://github.com/AI-Hypercomputer/maxtext.git@63d5db085447274e9cd8769334866fe5268459a9#subdirectory=src/maxtext/integration/vllm",
+  # Installed with --no-deps after [maxtext] because google-cloud-monitoring and
+  # tensorflow cap protobuf<7.0.0 in their PyPI metadata, whereas MaxText's
+  # generated protos require protobuf>=7.35.1 at runtime.
+  "protobuf>=7.35.1",
+]
+sglang-jax = [
+  "sglang-jax @ git+https://github.com/sgl-project/sglang-jax.git@1bdbc6747939c0e600622fc7f812151d76321080#subdirectory=python",
 ]
 
 [project.urls]
@@ -136,3 +179,13 @@ known_third_party = ["tunix"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+
+[tool.uv]
+# Prevent transitive dependencies (`tensorflow`, `aqtp`, `vllm`) from
+# downgrading `flax`/`protobuf` or upgrading `numpy` past `2.3.5` when
+# `uv` resolves from `pyproject.toml`.
+override-dependencies = [
+  "flax>=0.12.5",
+  "numpy==2.3.5",
+  "protobuf>=7.35.1",
+]

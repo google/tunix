@@ -38,6 +38,7 @@ concurrency:
 env:
   HF_HOME: ~/.cache/huggingface
   HF_HUB_ENABLE_HF_TRANSFER: "1"
+  UV_SYSTEM_PYTHON: "1"
 
 jobs:
   run_prod:
@@ -56,7 +57,7 @@ jobs:
       uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
       with:
         path: ~/.cache/huggingface
-        key: hf-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements*.txt', 'constraints*.txt') }}
+        key: hf-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'constraints*.txt') }}
         restore-keys: |
           hf-${{ runner.os }}-
 
@@ -66,15 +67,13 @@ jobs:
         fetch-depth: 0
         persist-credentials: false
 
+    - name: Set up uv
+      uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+
     - name: Install tunix dependencies
       run: |
-        python3 -m pip install --upgrade pip setuptools wheel
-
         # Install Tunix with dev and test dependencies without overwriting the vLLM dependencies.
-        python3 -m pip install -e .[dev,test,cli]
-
-        # tpu-inference/Numba needs NumPy 2.3 or less.
-        python3 -m pip install numpy==2.3.5 --force-reinstall
+        uv pip install -e ".[dev,test,cli]" "numpy==2.3.5"
 
     - name: Verify TPU availability
       run: |
@@ -274,7 +273,7 @@ jobs:
         run_and_log "grpo_demo_llama3_qwen2.py (disaggregated-2-way)" python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --cluster-setup=disaggregated-2-way
         run_and_log "grpo_demo_llama3_qwen2.py (disaggregated-3-way)" python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --cluster-setup=disaggregated-3-way
 
-        pip install 'jax[tpu]<0.11.0'
+        uv pip install 'jax[tpu]<0.11.0'
         run_and_log "math_eval_nb.py" bash -c "NUM_BATCHES=1 python examples/deepscaler/math_eval_nb.py"
 
         # TODO(b/508252632): Re-enable once the bug is fixed.
@@ -294,15 +293,10 @@ jobs:
         # SGLang Tests
         echo "::group::📦 Setting up SGLang"
         unset JAX_PLATFORMS
-        unset PIP_NO_CACHE_DIR
-        export PIP_NO_BUILD_ISOLATION=1
-        python3 -m pip list | egrep 'jax|flax|libtpu'
+        uv pip list | egrep 'jax|flax|libtpu'
         printf "jax<0.11.0\njaxlib<0.11.0\n" > /tmp/sglang_constraints.txt
-        export PIP_CONSTRAINT=/tmp/sglang_constraints.txt
-        cd ..
-        git clone https://github.com/sgl-project/sglang-jax.git && cd sglang-jax && git checkout 1bdbc6747939c0e600622fc7f812151d76321080 && cd python && python3 -m pip install -e . && cd ../..
-        python3 -m pip list | egrep 'jax|flax|libtpu'
-        cd tunix
+        uv pip install -c /tmp/sglang_constraints.txt --group sglang-jax
+        uv pip list | egrep 'jax|flax|libtpu'
         echo "::endgroup::"
 
         run_and_log "sglang_jax colocated" bash -c "unset JAX_PLATFORMS && python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --rollout-engine=sglang_jax"
@@ -336,7 +330,7 @@ jobs:
       uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
       with:
         path: ~/.cache/huggingface
-        key: hf-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements*.txt', 'constraints*.txt') }}
+        key: hf-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'constraints*.txt') }}
         restore-keys: |
           hf-${{ runner.os }}-
 
@@ -346,15 +340,18 @@ jobs:
         fetch-depth: 0
         persist-credentials: false
 
+    - name: Set up uv
+      uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+
     - name: Install tunix dependencies and latest LKG vLLM
       run: |
         # Install compiler and build dependencies for compiling vLLM from source
         apt-get update && apt-get install -y build-essential cmake ninja-build
 
         # Ensure build requirements are upgraded and present
-        pip install packaging setuptools wheel setuptools-rust kagglehub kagglesdk --upgrade
+        uv pip install packaging setuptools wheel setuptools-rust kagglehub kagglesdk --upgrade
 
-        pip install -e .[prod,test,cli]
+        uv pip install -e ".[prod,test,cli]"
 
         # Fetch latest vllm lkg commit hash from tpu-inference repo
         echo "Fetching latest vLLM LKG version..."
@@ -367,13 +364,13 @@ jobs:
 
         # Install vllm from lkg commit with no build isolation
         export VLLM_TARGET_DEVICE=tpu
-        pip install --no-build-isolation "vllm @ git+https://github.com/vllm-project/vllm.git@${VLLM_COMMIT}"
+        uv pip install --no-build-isolation "vllm @ git+https://github.com/vllm-project/vllm.git@${VLLM_COMMIT}"
 
         # Install tpu-inference from main with no build isolation
-        pip install --no-build-isolation "tpu-inference @ git+https://github.com/vllm-project/tpu-inference.git@main"
+        uv pip install --no-build-isolation "tpu-inference @ git+https://github.com/vllm-project/tpu-inference.git@main"
 
         # reinstall qwix==0.1.6 after tpu-inference is installed
-        pip install --no-deps "qwix==0.1.6" "flax>=0.12.5"
+        uv pip install --no-deps "qwix==0.1.6" "flax>=0.12.5"
 
 
     - name: Verify TPU availability
@@ -438,10 +435,10 @@ jobs:
     #     HF_TOKEN: ${{ secrets.HF_TOKEN }}
     #   run: |
     #     # Install MaxText if not present
-    #     python3 -c "import maxtext" 2>/dev/null || python3 -m pip install git+https://github.com/AI-Hypercomputer/maxtext.git
+    #     python3 -c "import maxtext" 2>/dev/null || uv pip install --no-deps --group maxtext-git
 
     #     # Install necessary dependencies for MaxText
-    #     python3 -m pip install aqtp tokamax
+    #     uv pip install -e ".[maxtext]" --torch-backend=cpu
 
     #     pkill -9 -f "vllm" || true
     #     sleep 5
