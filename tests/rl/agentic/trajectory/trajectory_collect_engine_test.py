@@ -1122,6 +1122,31 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     self.assertEqual(routed.shape, (1, num_layers, top_k))
     np.testing.assert_array_equal(routed[0], 3)
 
+  def test_step_idx_and_close_on_exception_and_cancel(self):
+    self.assertEqual(self.trajectory.step_idx, -1)
+    self.mock_env.step.side_effect = RuntimeError('env boom')
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+    )
+    with self.assertRaisesRegex(RuntimeError, 'env boom'):
+      asyncio.run(self._run_collect(engine, mode='Trajectory'))
+    self.mock_env.close.assert_called_once()
+    self.assertEqual(
+        self.trajectory.status, agent_types.TrajectoryStatus.FAILED
+    )
+    self.assertEqual(self.trajectory.step_idx, 0)
+
+    # Next episode on the same engine resets step_idx and succeeds over 2 turns.
+    self.mock_env.step.side_effect = [
+        ('obs1', 1.0, False, {}),
+        ('obs2', 2.0, True, {}),
+    ]
+    traj = asyncio.run(self._run_collect(engine, mode='Trajectory'))
+    self.assertEqual(traj.status, agent_types.TrajectoryStatus.SUCCEEDED)
+    self.assertEqual(traj.step_idx, 1)
+
 
 class _FreshTextTokenizer:
   """Only freshly formatted observations are allowed into this encoder."""

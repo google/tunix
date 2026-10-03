@@ -107,9 +107,10 @@ class TrajectoryStatus(Enum):
   )  # response token budget exhausted; corresponds to `max_response_length`
   TIMEOUT = auto()  # corresponds to `timeout`
 
-  # System Errors
+  # System Errors & Lifecycle Aborts
   ENV_TIMEOUT = auto()  # env.step hang and is killed by asyncio.wait_for
-  FAILED = auto()
+  FAILED = auto()  # unhandled exception in model_call, env, or reward_fn
+  CANCELLED = auto()  # episode aborted via CancelledError or collector.cancel()
 
 
 INVALID_TRAJECTORY_STATUSES: frozenset[TrajectoryStatus] = frozenset({
@@ -148,6 +149,12 @@ class Trajectory:
   Attributes:
     task: Task description, initial prompt, or episode specification.
     steps: Chronologically ordered sequence of interaction steps.
+    step_idx: 0-based logical turn counter (-1 before the first turn starts),
+      incremented at the entry of each `_one_step()`. Tracked separately from
+      `len(steps)` because `agent.update_from_model()` appends the new `Step`
+      mid-turn (causing `len(steps)` to shift from `t` during `model_call` to `t
+      + 1` during `env.step` and store recording), and bound to `Trajectory` so
+      failed episodes cannot leak step indices across trajectories.
     reward: Total episode reward (cumulative or final environment score).
     status: Status of the trajectory (e.g., "success", "truncated").
     env_time: Dictionary of environment latency metrics (reset_latency: float,
@@ -156,6 +163,9 @@ class Trajectory:
 
   task: Any = None
   steps: list[Step] = dataclasses.field(default_factory=list)
+  # Separate logical turn counter; `len(steps)` cannot be used because
+  # `update_from_model()` mutates `steps` mid-turn inside `_one_step()`.
+  step_idx: int = -1
   reward: float = 0.0
   status: TrajectoryStatus = TrajectoryStatus.RUNNING
   env_time: dict[str, float] = dataclasses.field(default_factory=dict)
