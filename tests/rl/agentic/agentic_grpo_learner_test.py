@@ -910,6 +910,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             beta=0.1,
             epsilon=0.2,
             num_generations=2,
+            num_iterations=2,
             loss_algo="grpo",
             max_response_length=8,
             use_rollout_logps=False,
@@ -955,7 +956,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     self.assertIsNotNone(out.ref_per_token_logps)
 
   def test_rollout_logps_trainer_recompute_is_packed_too(self):
-    """With rollout logps, the trainer recompute must use the packed row too."""
+    """With rollout logps and num_iterations > 1, the trainer recompute must use the packed row too."""
     mesh = pxla.thread_resources.env.physical_mesh
     model = test_common.ToyTransformer(
         config=test_common.ModelConfig(vocab_size=32), rngs=nnx.Rngs(0)
@@ -989,6 +990,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             beta=0.0,
             epsilon=0.2,
             num_generations=2,
+            num_iterations=2,
             loss_algo="grpo",
             max_response_length=8,
             use_rollout_logps=True,
@@ -1562,17 +1564,30 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
           testcase_name="use_rollout_logps_true",
           use_rollout_logps=True,
           return_logprobs=True,
+          num_iterations=1,
           expect_get_actor_logps=False,
       ),
       dict(
-          testcase_name="use_rollout_logps_false",
+          testcase_name="use_rollout_logps_false_single_iter_fuses_in_loss",
           use_rollout_logps=False,
           return_logprobs=False,
+          num_iterations=1,
+          expect_get_actor_logps=False,
+      ),
+      dict(
+          testcase_name="use_rollout_logps_false_multi_iter_recomputes",
+          use_rollout_logps=False,
+          return_logprobs=False,
+          num_iterations=2,
           expect_get_actor_logps=True,
       ),
   )
   def test_use_rollout_logps(
-      self, use_rollout_logps, return_logprobs, expect_get_actor_logps
+      self,
+      use_rollout_logps,
+      return_logprobs,
+      num_iterations,
+      expect_get_actor_logps,
   ):
     vocab = _mock_vocab()
     tokenizer = tokenizer_adapter.TokenizerAdapter(vocab)
@@ -1616,7 +1631,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         force_compute_kl=False,
         max_response_length=10,
         num_generations=2,
-        num_iterations=1,
+        num_iterations=num_iterations,
         use_rollout_logps=use_rollout_logps,
         exact_token_continuity=False,
     )
@@ -2082,12 +2097,13 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             kv_cache_size=1024,
         ),
     )
-    rl_engine = rl_engine_lib.RLEngine(
-        actor=model,
-        reference=ref_model,
-        tokenizer=tokenizer,
-        cluster_config=cluster_config,
-    )
+    with mock.patch.object(jax.monitoring, "register_scalar_listener"):
+      rl_engine = rl_engine_lib.RLEngine(
+          actor=model,
+          reference=ref_model,
+          tokenizer=tokenizer,
+          cluster_config=cluster_config,
+      )
 
     grpo_config = agentic_grpo_learner.GRPOConfig(
         num_generations=2,
@@ -2388,8 +2404,8 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         decoded_completion.count("Assistant:"), 2
     )  # 3 turns but terminal env obs does not append generation msg
 
-  def test_force_on_policy_ratio_bypasses_actor_recompute(self):
-    """Verifies force_on_policy_ratio=True sets old_logps to None with 0 extra passes."""
+  def test_single_iteration_fuses_agreement_and_bypasses_actor_recompute(self):
+    """Verifies single-iteration GRPO fuses agreement/TIS into grpo_loss_fn with 0 extra passes."""
     vocab = _mock_vocab()
     tokenizer = tokenizer_adapter.TokenizerAdapter(vocab)
     model = test_common.ToyTransformer(
@@ -2433,7 +2449,8 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         num_generations=2,
         num_iterations=1,
         use_rollout_logps=True,
-        force_on_policy_ratio=True,
+        sampler_is="token",
+        seq_logprob_error_threshold=2.0,
     )
     learner = agentic_grpo_learner.GRPOLearner(
         rl_engine=rl_engine,
@@ -2451,7 +2468,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
             ],
             "conversation_tokens": np.array([1, 2, 3]),
             "conversation_masks": np.array([1, 1, 1]),
-            "old_logprobs": np.full(3, 1.0, dtype=np.float32),
+            "old_logprobs": np.full(3, -0.5, dtype=np.float32),
             "policy_version": 0,
             "trajectory_reward": 1.0,
             "prompt_tokens": np.array([4, 5]),
@@ -2474,35 +2491,11 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       # 1. Asserts 0 extra trainer forward passes!
       mock_get_actor_logps.assert_not_called()
 
-      # 2. Asserts old_per_token_logps is None (forces ratio to 1.0 via stop_gradient in loss)
-      self.assertIsNone(train_example.old_per_token_logps)
-
-  def test_force_on_policy_ratio_config_validation(self):
-    """force_on_policy_ratio rejects multi-iteration, allows stale trajectories."""
-    # num_iterations > 1 raises ValueError: old_logp is re-derived from the current
-    # policy on every inner epoch, so the trust region vanishes after the first.
-    with self.assertRaisesRegex(
-        ValueError, "can only be True when num_iterations == 1"
-    ):
-      agentic_grpo_learner.GRPOConfig(
-          num_generations=2,
-          num_iterations=2,
-          force_on_policy_ratio=True,
-      )
-
-    # off_policy_steps > 0 is a supported trade-off (near-on-policy training on
-    # slightly stale trajectories), so it warns rather than raising.
-    with mock.patch.object(
-        agentic_grpo_learner.logging, "warning"
-    ) as mock_warn:
-      config = agentic_grpo_learner.GRPOConfig(
-          num_generations=2,
-          num_iterations=1,
-          off_policy_steps=1,
-          force_on_policy_ratio=True,
-      )
-    mock_warn.assert_called_once()
-    self.assertIn("off_policy_steps", mock_warn.call_args[0][0])
+      # 2. Preserves rollout logps with sampler_agreement_applied=False so
+      # grpo_loss_fn fuses agreement, TIS, and on-policy ratio in the loss step.
+      self.assertIsNotNone(train_example.old_per_token_logps)
+      self.assertFalse(train_example.sampler_agreement_applied)
+      self.assertIsNone(train_example.sampler_is_weights)
 
 
 class ExactTokenContinuityBatchTest(absltest.TestCase):
@@ -2541,6 +2534,7 @@ class ExactTokenContinuityBatchTest(absltest.TestCase):
         use_rollout_logps=True,
     )
     obj._trajectory_logger = None
+    obj._full_batch_size = 0
     obj.metric_fns = []
     obj._compute_rewards = lambda **kw: jnp.array([0.0, 1.0])
     obj.rl_engine = types.SimpleNamespace(
@@ -2553,6 +2547,7 @@ class ExactTokenContinuityBatchTest(absltest.TestCase):
             training_config=types.SimpleNamespace(
                 max_seq_token_per_tpu=32 if packed else None,
                 compute_logps_micro_batch_size=1,
+                mini_batch_size=None,
             ),
         ),
     )

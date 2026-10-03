@@ -483,7 +483,6 @@ class AlgoCoreTest(absltest.TestCase):
           sampler_rs_max=None,
           seq_logprob_error_threshold=None,
           use_rollout_logps=True,
-          force_on_policy_ratio=False,
       )
       lp = float(
           algo_core.grpo_loss_fn(
@@ -574,7 +573,6 @@ class AlgoCoreTest(absltest.TestCase):
             kl_clamp_value=None,
             force_compute_kl=False,
             use_rollout_logps=True,
-            force_on_policy_ratio=False,
             sampler_is=sampler_is,
             sampler_is_threshold=is_thresh,
             sampler_rs=sampler_rs,
@@ -714,7 +712,6 @@ class GrpoLossSequenceLevelControlsTest(absltest.TestCase):
         sampler_rs_max=None,
         seq_logprob_error_threshold=None,
         use_rollout_logps=True,
-        force_on_policy_ratio=False,
     )
     defaults.update(overrides)
     return SimpleNamespace(**defaults)

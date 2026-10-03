@@ -3244,11 +3244,11 @@ class RLProgramTest(absltest.TestCase):
     asyncio.run(_run())
 
   def test_sampler_trainer_agreement_triggered_in_train_stage(self):
-    """When use_rollout_logps and log_sampler_trainer_agreement are True, pre-step agreement runs."""
+    """When use_rollout_logps is True and num_iterations > 1, pre-step agreement runs."""
 
     async def _run():
       self.mock_algo.algo_config.use_rollout_logps = True
-      self.mock_algo.algo_config.log_sampler_trainer_agreement = True
+      self.mock_algo.algo_config.num_iterations = 2
       payload_with_old_logps = datatypes.RLTrainerPayload(
           prompt_ids=np.array([1, 2], dtype=np.int32),
           prompt_mask=np.array([1, 1], dtype=np.float32),
@@ -4803,5 +4803,3 @@ class StandardRLProgramRoutedExpertsCleanupTest(absltest.TestCase):
 
 if __name__ == "__main__":
   absltest.main()
-
-

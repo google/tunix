@@ -66,12 +66,6 @@ class AlgorithmConfig:
   # probabilities. If False, recompute old-policy log probabilities on the
   # trainer actor.
   use_rollout_logps: bool = True
-  # Pin the surrogate ratio to 1.0 (old_logp := stop_gradient(current_logp)).
-  # Valid for single-iteration on-policy training only.
-  force_on_policy_ratio: bool = False
-  # Costs one trainer forward pass; keeps the sampler/trainer agreement metrics
-  # alive when force_on_policy_ratio would otherwise leave nothing to compare.
-  log_sampler_trainer_agreement: bool = False
   # Whether to preserve exact token IDs across multi-turn rollout steps
   # without detokenizing and re-tokenizing intermediate turns (TITO).
   exact_token_continuity: bool = True

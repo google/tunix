@@ -474,12 +474,11 @@ def grpo_loss_fn(
       sampler_is_weights = computed_is_weights
 
   # Use on-policy stop_gradient(per_token_logps) as the PPO ratio baseline when:
-  # 1. No rollout/old logps were provided, or force_on_policy_ratio=True, or
+  # 1. No rollout/old logps were provided, or
   # 2. Fused in-loss IS/RS/error-masking is active (since sampler_is_weights
   #    already corrects for trainer-vs-sampler divergence outside the PPO clip).
   use_on_policy_old_logps = (
       train_example.old_per_token_logps is None
-      or algo_config.force_on_policy_ratio
       or (
           should_fuse_sampler_agreement
           and (

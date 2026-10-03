@@ -1283,9 +1283,6 @@ class StandardRLProgram(RLProgram):
           can_fuse_agreement_in_loss = (
               algo_config is not None
               and getattr(algo_config, "policy_loss_fn", "grpo") == "grpo"
-              and not getattr(
-                  algo_config, "log_sampler_trainer_agreement", False
-              )
               and getattr(algo_config, "num_iterations", 1) == 1
               and self.mini_batch_size >= self.full_batch_size
           )
