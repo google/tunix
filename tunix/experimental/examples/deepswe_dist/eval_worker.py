@@ -243,6 +243,13 @@ def create_worker(a):
     except Exception:
       pass
 
+  from examples.deepswe import template as deepswe_template
+
+  sampling_kwargs = {"skip_special_tokens": False}
+  if a.scaffold not in deepswe_template.OPENHANDS_SCAFFOLDS:
+    sampling_kwargs["stop"] = ["</function>"]
+    sampling_kwargs["include_stop_str_in_output"] = True
+
   config = vllm_sampler.VllmConfig(
       server_mode=True,
       mesh=mesh,
@@ -255,11 +262,7 @@ def create_worker(a):
       additional_config=additional_config,
       engine_kwargs=engine_kwargs,
       eos_tokens=eos_ids,
-      sampling_kwargs={
-          "stop": ["</function>"],
-          "include_stop_str_in_output": True,
-          "skip_special_tokens": False,
-      },
+      sampling_kwargs=sampling_kwargs,
   )
   sampler = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
       server_id="deepswe-eval",
