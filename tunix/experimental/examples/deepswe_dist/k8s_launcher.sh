@@ -451,7 +451,7 @@ start_orchestrator() {
         ${MAX_WARMPOOL_REPLICAS:+--max_warmpool_replicas=${MAX_WARMPOOL_REPLICAS}} \
         ${MAX_CONCURRENCY:+--max_concurrency=${MAX_CONCURRENCY}} \
         ${MAX_STALENESS:+--max_staleness=${MAX_STALENESS}} \
-        $([[ -n "${CHECKPOINT_OPTIMIZER_INTERVAL_STEPS}" && "${CHECKPOINT_OPTIMIZER_INTERVAL_STEPS}" -gt 0 ]] && echo "--checkpoint_optimizer_interval_steps=${CHECKPOINT_OPTIMIZER_INTERVAL_STEPS}") \
+        $([[ -n "${CHECKPOINT_OPTIMIZER_INTERVAL_STEPS}" && "${CHECKPOINT_OPTIMIZER_INTERVAL_STEPS}" -ge 0 ]] && echo "--checkpoint_optimizer_interval_steps=${CHECKPOINT_OPTIMIZER_INTERVAL_STEPS}") \
         ${TRAJECTORY_GROUP_ORDER:+--trajectory_group_order=${TRAJECTORY_GROUP_ORDER}} \
         $([[ "${USE_ROLLOUT_LOGPS}" == "false" || "${USE_ROLLOUT_LOGPS}" == "False" || "${USE_ROLLOUT_LOGPS}" == "0" ]] && echo --no-use_rollout_logps || echo --use_rollout_logps) \
         $([[ "${EXACT_TOKEN_CONTINUITY}" == "false" || "${EXACT_TOKEN_CONTINUITY}" == "False" || "${EXACT_TOKEN_CONTINUITY}" == "0" ]] && echo --no-exact_token_continuity || echo --exact_token_continuity) \
