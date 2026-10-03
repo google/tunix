@@ -520,9 +520,6 @@ def main(argv: list[str]) -> None:
       "--dry_run", action="store_true", help="Run with mock fleet."
   )
   parser.add_argument(
-      "--run_as_job", action="store_true", help="Run as live K8s Job."
-  )
-  parser.add_argument(
       "--synthetic_dataset",
       action="store_true",
       help="Use synthetic samples.",

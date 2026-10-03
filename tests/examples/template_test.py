@@ -37,7 +37,6 @@ def test_prompt_constants_exist():
   assert template.SWE_USER_PROMPT_FN_CALL
   assert template.SWE_USER_PROMPT
   assert template.SWEAGENT_USER_PROMPT
-  assert template.OPENHANDS_USER_PROMPT
 
 
 def test_get_system_prompt():
@@ -84,11 +83,7 @@ def test_get_user_prompt_template():
   )
   assert (
       template.get_user_prompt_template("openhands", use_fn_calling=False)
-      == template.OPENHANDS_USER_PROMPT
-  )
-  assert (
-      template.get_user_prompt_template("openhands", use_fn_calling=True)
-      == template.OPENHANDS_USER_PROMPT
+      == template.SWE_USER_PROMPT
   )
 
 
