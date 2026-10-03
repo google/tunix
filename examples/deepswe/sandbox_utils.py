@@ -102,6 +102,44 @@ def patch_r2egym_for_agent_sandbox() -> None:
   except Exception as e:  # pylint: disable=broad-exception-caught
     logging.debug("[SandboxFleet] r2egym in-memory patch note: %s", e)
 
+  patch_agent_sandbox_rl_templates()
+
+
+def patch_agent_sandbox_rl_templates() -> None:
+  """Sets spec.networkPolicyManagement='Unmanaged' on generated SandboxTemplates.
+
+  By default, SandboxTemplate defaults networkPolicyManagement to 'Managed',
+  causing agent-sandbox-controller to create/delete a dedicated NetworkPolicy
+  per template (matching `sandbox: <template_name>`). On large GKE Dataplane V2
+  clusters, per-template NetworkPolicy churn triggers policy-watcher
+  reconciliations across all anetd pods and prevents safely excluding the
+  high-cardinality `sandbox` pod label from Cilium identity calculation.
+  """
+  try:
+    from agent_sandbox_rl import resources as asrl_resources  # pyrefly: ignore[missing-import]
+
+    orig_manifest = getattr(
+        asrl_resources.Resources, "_orig_template_manifest", None
+    )
+    if orig_manifest is None and hasattr(
+        asrl_resources.Resources, "_template_manifest"
+    ):
+      asrl_resources.Resources._orig_template_manifest = (
+          asrl_resources.Resources._template_manifest
+      )
+
+      def _patched_template_manifest(self, image, template_name, template):
+        manifest = self._orig_template_manifest(image, template_name, template)
+        if isinstance(manifest, dict):
+          spec = manifest.setdefault("spec", {})
+          if isinstance(spec, dict):
+            spec.setdefault("networkPolicyManagement", "Unmanaged")
+        return manifest
+
+      asrl_resources.Resources._template_manifest = _patched_template_manifest
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    logging.debug("[SandboxFleet] template_manifest patch note: %s", e)
+
 
 def get_image_rewrite_fn(
     image_rewrite: Callable[[str], str] | None = None,
@@ -339,6 +377,7 @@ def init_global_fleet(
       return _GLOBAL_FLEET
 
     patch_r2egym_for_agent_sandbox()
+    patch_agent_sandbox_rl_templates()
 
     try:
       from agent_sandbox_rl import ClusterConfig  # pyrefly: ignore[missing-import]
