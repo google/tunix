@@ -235,8 +235,9 @@ def run_oh_editor_locally(
           " be different."
       )
     try:
+    try:
       with open(path, "r", encoding="utf-8", errors="replace") as f:
-        file_content = f.read().expandtabs()
+        file_content = f.read()
     except Exception as e:  # pylint: disable=broad-exception-caught
       return f"Error reading {path}: {e}"
 
