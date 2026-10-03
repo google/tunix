@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Callable
+from collections.abc import Callable, Sized
 import functools
 import logging
 import os
@@ -648,7 +648,7 @@ def _disallow_checkpoint_resume(args: argparse.Namespace) -> bool:
 
 
 def _emit_rcp_restore_events(
-    args: argparse.Namespace, dataset: Any, restored_step: int
+    args: argparse.Namespace, dataset: Sized, restored_step: int
 ) -> None:
   """Logs MLPerf config events and ``run_start`` for the restored step.
 
@@ -659,7 +659,7 @@ def _emit_rcp_restore_events(
 
   Args:
     args: Parsed command-line arguments.
-    dataset: Training dataset used to derive the logged dataset size.
+    dataset: Training dataset; only its length is logged (``train_samples``).
     restored_step: Step restored by the trainer; 0 for a fresh run.
   """
   if not args.rcp_logging:

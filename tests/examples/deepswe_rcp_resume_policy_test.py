@@ -60,7 +60,7 @@ class EmitRcpRestoreEventsTest(absltest.TestCase):
     self.train_start = self.enter_context(
         mock.patch.object(mllog_utils, "train_start", autospec=True)
     )
-    self.dataset = object()
+    self.dataset = ["task-0", "task-1"]
 
   def test_no_events_without_rcp_logging(self):
     run_deepswe_dist._emit_rcp_restore_events(
