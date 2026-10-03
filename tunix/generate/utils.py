@@ -91,6 +91,11 @@ def next_power_of_2(x: int) -> int:
   return int(2 ** int(jnp.ceil(jnp.log2(x))))
 
 
+def cdiv(a: int, b: int) -> int:
+  """Returns the ceiling of `a / b` for integers."""
+  return -(-a // b)
+
+
 def pad_to_length(
     x: np.ndarray,
     target_length: int,
