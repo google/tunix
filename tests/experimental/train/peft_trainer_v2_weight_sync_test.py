@@ -135,6 +135,33 @@ class WeightSyncStagingTest(absltest.TestCase):
         fake._weight_sync_worker.bound_state, mock.sentinel.converted_state
     )
 
+  def test_prepare_passes_rollout_tp_to_preprocessor(self):
+    fake = self._fake_trainer()
+    fake._target_state = mock.sentinel.target_state
+    fake._rollout_tp_size = 2
+    observed = []
+
+    def preprocess(state, tp_size):
+      observed.append((state, tp_size))
+      return mock.sentinel.preprocessed_state
+
+    fake.config = types.SimpleNamespace(
+        mapping_config=mappings_lib.MappingConfig(
+            to_hf_mappings={"w": ("weight", (None, None))},
+            preprocess_src_state=preprocess,
+        ),
+    )
+    with mock.patch.object(
+        raiden_synchronizer, "RaidenSynchronizer", _FakeSynchronizer
+    ), mock.patch(
+        "tunix.generate.utils.transfer_state_with_mappings",
+        return_value=mock.sentinel.converted_state,
+    ):
+      peft_trainer_v2.PeftTrainer.prepare_weight_sync(fake)
+
+    self.assertEqual(len(observed), 1)
+    self.assertEqual(observed[0][1], 2)
+
   def test_release_without_prepare_is_a_no_op(self):
     fake = self._fake_trainer()
     self.assertTrue(peft_trainer_v2.PeftTrainer.release_weight_sync(fake))
