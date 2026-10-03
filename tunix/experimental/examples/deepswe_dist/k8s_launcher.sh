@@ -113,6 +113,7 @@ else
   export PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR=${PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR:-}
   export PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP=${PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP:-}
 fi
+export TUNIX_DEBUG_INFERENCE_LOGS=${TUNIX_DEBUG_INFERENCE_LOGS:-false}
 export ROLLOUT_FREE_KV_CACHE=${ROLLOUT_FREE_KV_CACHE:-false}
 export IN_FLIGHT_WEIGHT_UPDATES=${IN_FLIGHT_WEIGHT_UPDATES:-false}
 # Serve the oldest in-flight prompt batch first: the orchestrator stamps each
@@ -414,6 +415,7 @@ start_orchestrator() {
       MALLOC_MMAP_THRESHOLD_=\"${MALLOC_MMAP_THRESHOLD_:-131072}\" \
       PYTHONUNBUFFERED=1 \
       TUNIX_IS_INTERNAL_ENV=false \
+      ${TUNIX_DEBUG_INFERENCE_LOGS:+TUNIX_DEBUG_INFERENCE_LOGS=\"${TUNIX_DEBUG_INFERENCE_LOGS}\"} \
       ${BOOTSTRAP_CMD} \
       ${ORCHESTRATOR_EXTRA_ENV:+${ORCHESTRATOR_EXTRA_ENV} }python -m tunix.experimental.distributed.runtime.main \
         --discovery_id=${ORCHESTRATOR_ID} \
@@ -766,6 +768,7 @@ if cfg:
       --worker_startup_command=" \
         PYTHONUNBUFFERED=1 \
         TUNIX_IS_INTERNAL_ENV=false \
+        ${TUNIX_DEBUG_INFERENCE_LOGS:+TUNIX_DEBUG_INFERENCE_LOGS=\"${TUNIX_DEBUG_INFERENCE_LOGS}\"} \
         EPISODE_TIMEOUT_SECS="${EPISODE_TIMEOUT_SECS:-5400}" \
         WEIGHT_SYNC_DISABLE_TIMEOUTS=\"${WEIGHT_SYNC_DISABLE_TIMEOUTS}\" \
         ${SCAFFOLD:+SCAFFOLD=\"${SCAFFOLD}\"} \
@@ -1102,6 +1105,7 @@ start_eval() {
       --worker_startup_command=" \
         PYTHONUNBUFFERED=1 \
         TUNIX_IS_INTERNAL_ENV=false \
+        ${TUNIX_DEBUG_INFERENCE_LOGS:+TUNIX_DEBUG_INFERENCE_LOGS=\"${TUNIX_DEBUG_INFERENCE_LOGS}\"} \
         VLLM_TPU_USING_PATHWAYS=1 \
         ${sandbox_env} \
         ${SCAFFOLD:+SCAFFOLD=\"${SCAFFOLD}\"} \

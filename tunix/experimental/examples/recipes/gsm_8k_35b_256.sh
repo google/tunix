@@ -256,6 +256,7 @@ export COMPUTE_LOGPS_CHUNK_SIZE="${COMPUTE_LOGPS_CHUNK_SIZE:-512}"
 
 export EPISODE_TIMEOUT_SECS="${EPISODE_TIMEOUT_SECS:-1800}"
 export DEBUG="${DEBUG:-1}"
+export TUNIX_DEBUG_INFERENCE_LOGS="${TUNIX_DEBUG_INFERENCE_LOGS:-false}"
 
 # ==============================================================================
 # GSM8K Dataset & Sequence Parameters (No Sandboxing)
