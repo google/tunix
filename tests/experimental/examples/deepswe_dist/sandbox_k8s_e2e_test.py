@@ -501,18 +501,27 @@ def str_to_bool(v: Any) -> bool:
 def main(argv: list[str]) -> None:
   parser = argparse.ArgumentParser(description="DeepSWE Sandbox K8s E2E Test.")
   parser.add_argument(
-      "--dataset_name", type=str, default="R2E-Gym/R2E-Gym-Subset"
+      "--dataset_name", type=str, default=""
   )
   parser.add_argument("--dataset_split", type=str, default="train")
-  parser.add_argument("--dataset_path", type=str, default="")
-  parser.add_argument("--batch_size", type=int, default=1)
-  parser.add_argument("--num_generations", type=int, default=2)
-  parser.add_argument("--max_steps", type=int, default=3)
-  parser.add_argument("--namespace", type=str, default="rl-tunix-swebench")
+  parser.add_argument(
+      "--dataset_path",
+      type=str,
+      default="gs://mlperf_dataset/benchmark-r2e-gym-easy",
+  )
+  parser.add_argument("--batch_size", type=int, default=32)
+  parser.add_argument("--num_generations", type=int, default=1)
+  parser.add_argument(
+      "--max_steps",
+      type=int,
+      default=-1,
+      help="Maximum steps to run (-1 means run through all items in the dataset).",
+  )
+  parser.add_argument("--namespace", type=str, default="trellis")
   parser.add_argument(
       "--scaffold",
       type=str,
-      default="r2egym",
+      default="openhands",
       choices=["r2egym", "sweagent", "openhands"],
       help="Scaffold harness to test ('r2egym', 'sweagent', 'openhands').",
   )
@@ -566,8 +575,8 @@ def main(argv: list[str]) -> None:
       type=str_to_bool,
       nargs="?",
       const=True,
-      default=True,
-      help="Whether to shuffle the dataset (default: True).",
+      default=False,
+      help="Whether to shuffle the dataset (default: False).",
   )
   parser.add_argument(
       "--seed",
@@ -592,21 +601,27 @@ def main(argv: list[str]) -> None:
   if not args.synthetic_dataset and not args.dry_run and deepswe is not None:
     try:
       logging.info(
-          "Loading dataset %s (split=%s, shuffle=%s, seed=%d)...",
+          "Loading dataset (name=%r, path=%r, split=%s, shuffle=%s, seed=%d)...",
           args.dataset_name,
+          args.dataset_path,
           args.dataset_split,
           args.shuffle,
           args.seed,
       )
       dataset = deepswe.load_deepswe_dataset(
-          dataset_name=args.dataset_name,
+          dataset_name=args.dataset_name or deepswe.DEFAULT_DATASET_NAME,
           dataset_split=args.dataset_split,
-          dataset_path=args.dataset_path or None,
+          dataset_path=args.dataset_path or "",
           shuffle=args.shuffle,
           seed=args.seed,
       )
       logging.info("Loaded %d dataset samples.", len(dataset))
     except Exception as e:  # pylint: disable=broad-exception-caught
+      if args.dataset_path:
+        logging.error(
+            "Failed to load dataset from path %s: %s", args.dataset_path, e
+        )
+        raise
       logging.warning(
           "Dataset load note (%s), falling back to synthetic dataset.", e
       )
@@ -615,7 +630,7 @@ def main(argv: list[str]) -> None:
   if dataset is None:
     logging.info("Creating synthetic dataset samples for E2E test...")
     dataset = create_synthetic_dataset(
-        num_samples=max(6, args.max_steps * args.batch_size * 2)
+        num_samples=max(6, (args.max_steps if args.max_steps > 0 else 3) * args.batch_size * 2)
     )
     if args.shuffle:
       random.Random(args.seed).shuffle(dataset)
@@ -645,22 +660,29 @@ def main(argv: list[str]) -> None:
     )
     is_mock = False
 
+  if args.max_steps <= 0:
+    effective_max_steps = (len(dataset) + args.batch_size - 1) // args.batch_size
+  else:
+    effective_max_steps = args.max_steps
+
   stats = run_pipeline_e2e(
       dataset=dataset,
       fleet=fleet,
       batch_size=args.batch_size,
       num_generations=args.num_generations,
-      max_steps=args.max_steps,
+      max_steps=effective_max_steps,
       is_mock=is_mock,
       scaffold=args.scaffold,
       minimum_step_time_in_second=args.minimum_step_time_in_second,
       sampling_rate=args.sampling_rate,
   )
 
-  expected_sandboxes = args.max_steps * args.batch_size * args.num_generations
+  expected_items = min(len(dataset), effective_max_steps * args.batch_size)
+  expected_steps = (expected_items + args.batch_size - 1) // args.batch_size
+  expected_sandboxes = expected_items * args.num_generations
   assert (
-      stats["steps_executed"] == args.max_steps
-  ), f"Executed {stats['steps_executed']} steps, expected {args.max_steps}"
+      stats["steps_executed"] == expected_steps
+  ), f"Executed {stats['steps_executed']} steps, expected {expected_steps}"
   if args.sampling_rate >= 1.0:
     assert stats["sandboxes_acquired"] == expected_sandboxes, (
         f"Acquired {stats['sandboxes_acquired']} sandboxes, expected"

@@ -16,24 +16,26 @@
 set -euo pipefail
 
 # DeepSWE Kubernetes Job E2E Launcher
-TUNIX_IMAGE=${TUNIX_IMAGE:-"us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/yangmu/tunix/tunix_base_image:trellis-demo-0813"}
+TUNIX_IMAGE=${TUNIX_IMAGE:-"europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/tunix_base_image:deepswe-mlperf"}
 NAMESPACE=${NAMESPACE:-"trellis"}
 SERVICE_ACCOUNT=${SERVICE_ACCOUNT:-"xpk-sa"}
 IMAGE_REWRITE_PREFIX=${IMAGE_REWRITE_PREFIX:-"europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/tunix"}
 OPENHANDS_SERVER_IMAGE=${OPENHANDS_SERVER_IMAGE:-"gcr.io/cloud-tpu-multipod-dev/tunix/openhands-agent-server:0.62"}
-DATASET_NAME=${DATASET_NAME:-"R2E-Gym/R2E-Gym-Subset"}
-BATCH_SIZE=${BATCH_SIZE:-1}
-NUM_GENERATIONS=${NUM_GENERATIONS:-2}
-MAX_STEPS=${MAX_STEPS:-3}
+DATASET_PATH=${DATASET_PATH:-"gs://mlperf_dataset/benchmark-r2e-gym-easy"}
+DATASET_NAME=${DATASET_NAME:-""}
+DATASET_SPLIT=${DATASET_SPLIT:-"train"}
+BATCH_SIZE=${BATCH_SIZE:-32}
+NUM_GENERATIONS=${NUM_GENERATIONS:-1}
+MAX_STEPS=${MAX_STEPS:--1}
 MINIMUM_STEP_TIME_IN_SECOND=${MINIMUM_STEP_TIME_IN_SECOND:-0}
 SAMPLING_RATE=${SAMPLING_RATE:-1.0}
-SHUFFLE=${SHUFFLE:-true}
+SHUFFLE=${SHUFFLE:-false}
 SEED=${SEED:-42}
 CPU_MACHINE=${CPU_MACHINE:-"n2-standard-64"}
 NODE_SELECTOR_KEY=${NODE_SELECTOR_KEY:-"cloud.google.com/gke-nodepool"}
 NODE_SELECTOR_VAL=${NODE_SELECTOR_VAL:-"sandbox-cpu-pool"}
 JOB_NODEPOOL=${JOB_NODEPOOL:-"sandbox-cpu-pool"}
-SCAFFOLD=${SCAFFOLD:-"r2egym"}
+SCAFFOLD=${SCAFFOLD:-"openhands"}
 DRY_RUN=${DRY_RUN:-0}
 KUEUE_QUEUE=${KUEUE_QUEUE:-""}
 
@@ -41,6 +43,18 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry_run)
       DRY_RUN=1
+      shift
+      ;;
+    --dataset_path=*)
+      DATASET_PATH="${1#*=}"
+      shift
+      ;;
+    --dataset_split=*)
+      DATASET_SPLIT="${1#*=}"
+      shift
+      ;;
+    --dataset_name=*)
+      DATASET_NAME="${1#*=}"
       shift
       ;;
     --kueue_queue=*)
@@ -122,10 +136,21 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 if [[ "${DRY_RUN}" == "1" || "${DRY_RUN}" == "true" ]]; then
   echo "=== Running DeepSWE E2E Test locally (Dry Run / Mock Mode) ==="
+  DATASET_CMD_ARGS=()
+  if [[ -n "${DATASET_PATH}" ]]; then
+    DATASET_CMD_ARGS+=(--dataset_path="${DATASET_PATH}")
+  fi
+  if [[ -n "${DATASET_NAME}" ]]; then
+    DATASET_CMD_ARGS+=(--dataset_name="${DATASET_NAME}")
+  fi
+  if [[ -n "${DATASET_SPLIT}" ]]; then
+    DATASET_CMD_ARGS+=(--dataset_split="${DATASET_SPLIT}")
+  fi
   COMPILED_BIN=$(ls "${SCRIPT_DIR}"/../../../../../../*-bin/third_party/py/tunix/experimental/examples/deepswe_dist/sandbox_k8s_e2e_test 2>/dev/null | head -n 1 || true)
   if [[ -n "${PYTHON_BIN:-}" ]]; then
     ${PYTHON_BIN} -m tunix.experimental.examples.deepswe_dist.sandbox_k8s_e2e_test \
       --dry_run \
+      "${DATASET_CMD_ARGS[@]}" \
       --scaffold="${SCAFFOLD}" \
       --batch_size="${BATCH_SIZE}" \
       --num_generations="${NUM_GENERATIONS}" \
@@ -137,6 +162,7 @@ if [[ "${DRY_RUN}" == "1" || "${DRY_RUN}" == "true" ]]; then
   elif [[ -n "${COMPILED_BIN}" && -x "${COMPILED_BIN}" ]]; then
     "${COMPILED_BIN}" \
       --dry_run \
+      "${DATASET_CMD_ARGS[@]}" \
       --scaffold="${SCAFFOLD}" \
       --batch_size="${BATCH_SIZE}" \
       --num_generations="${NUM_GENERATIONS}" \
@@ -148,6 +174,7 @@ if [[ "${DRY_RUN}" == "1" || "${DRY_RUN}" == "true" ]]; then
   elif [[ -f "${SCRIPT_DIR}/sandbox_k8s_e2e_test.py" ]]; then
     python3 "${SCRIPT_DIR}/sandbox_k8s_e2e_test.py" \
       --dry_run \
+      "${DATASET_CMD_ARGS[@]}" \
       --scaffold="${SCAFFOLD}" \
       --batch_size="${BATCH_SIZE}" \
       --num_generations="${NUM_GENERATIONS}" \
@@ -159,6 +186,7 @@ if [[ "${DRY_RUN}" == "1" || "${DRY_RUN}" == "true" ]]; then
   else
     python3 -m tunix.experimental.examples.deepswe_dist.sandbox_k8s_e2e_test \
       --dry_run \
+      "${DATASET_CMD_ARGS[@]}" \
       --scaffold="${SCAFFOLD}" \
       --batch_size="${BATCH_SIZE}" \
       --num_generations="${NUM_GENERATIONS}" \
@@ -241,6 +269,7 @@ metadata:
     ${JOB_LABELS}
 spec:
   backoffLimit: 0
+  activeDeadlineSeconds: 7200
   ttlSecondsAfterFinished: 600
   template:
     metadata:
@@ -293,17 +322,27 @@ spec:
         - -c
         - |
           echo "=== DeepSWE Sandbox E2E Job Started at \$(date) ==="
-          pip install -q --no-cache-dir gym docker 'swebench==3.0.2' 'k8s-agent-sandbox>=0.5.1' httpx
-          rm -rf /tmp/agent-sandbox
-          git clone --depth 1 https://github.com/kubernetes-sigs/agent-sandbox.git /tmp/agent-sandbox
-          pip install -q --no-cache-dir /tmp/agent-sandbox/examples/agent-sandbox-rl
-          SETUPTOOLS_SCM_PRETEND_VERSION=0.1.0 pip install -q --no-cache-dir /tmp/agent-sandbox/clients/integrations/openhands 2>/dev/null || true
-          SITE_PKG=\$(python3 -c "import site; print(site.getsitepackages()[0])" 2>/dev/null || echo "/opt/venv/lib/python3.12/site-packages")
-          mkdir -p "\${SITE_PKG}"
-          cp -r /tmp/agent-sandbox/clients/integrations/openhands/openhands_k8s_agent_sandbox "\${SITE_PKG}/" 2>/dev/null || true
-          pip install -q --no-deps 'git+https://github.com/r2e-gym/r2e-gym.git@0d94c4eb9431cd195c55a7ea3abd54006c9a1735'
-          find / -name utils.py -path "*/r2egym/agenthub/utils/*" -exec sed -i 's/create_repo, upload_folder, HfFolder/create_repo, upload_folder/' {} + 2>/dev/null || true
-          find / -name docker.py -path "*/r2egym/agenthub/runtime/*" -exec sed -i 's/self.commit = ParsedCommit(\*\*json.loads(self.commit_json))/self.commit = ParsedCommit(\*\*(json.loads(self.commit_json) if isinstance(self.commit_json, str) else self.commit_json))/' {} + 2>/dev/null || true
+          if ! python3 -c "import r2egym, agent_sandbox_rl, openhands_k8s_agent_sandbox" 2>/dev/null; then
+            echo "=== Installing DeepSWE dependencies at runtime ==="
+            pip install -q --no-cache-dir gym docker 'swebench==3.0.2' 'k8s-agent-sandbox>=0.5.1' httpx
+            rm -rf /tmp/agent-sandbox
+            git clone --depth 1 https://github.com/kubernetes-sigs/agent-sandbox.git /tmp/agent-sandbox
+            pip install -q --no-cache-dir /tmp/agent-sandbox/examples/agent-sandbox-rl
+            SETUPTOOLS_SCM_PRETEND_VERSION=0.1.0 pip install -q --no-cache-dir /tmp/agent-sandbox/clients/integrations/openhands 2>/dev/null || true
+            SITE_PKG=\$(python3 -c "import site; print(site.getsitepackages()[0])" 2>/dev/null || echo "/opt/venv/lib/python3.12/site-packages")
+            mkdir -p "\${SITE_PKG}"
+            cp -r /tmp/agent-sandbox/clients/integrations/openhands/openhands_k8s_agent_sandbox "\${SITE_PKG}/" 2>/dev/null || true
+            pip install -q --no-deps 'git+https://github.com/r2e-gym/r2e-gym.git@0d94c4eb9431cd195c55a7ea3abd54006c9a1735'
+            find / -name utils.py -path "*/r2egym/agenthub/utils/*" -exec sed -i 's/create_repo, upload_folder, HfFolder/create_repo, upload_folder/' {} + 2>/dev/null || true
+            find / -name docker.py -path "*/r2egym/agenthub/runtime/*" -exec sed -i 's/self.commit = ParsedCommit(\*\*json.loads(self.commit_json))/self.commit = ParsedCommit(\*\*(json.loads(self.commit_json) if isinstance(self.commit_json, str) else self.commit_json))/' {} + 2>/dev/null || true
+          else
+            echo "=== DeepSWE dependencies already present in image ==="
+          fi
+
+          if ! python3 -c "import datasets, gcsfs" 2>/dev/null; then
+            echo "=== Installing datasets and gcsfs at runtime ==="
+            pip install -q --no-cache-dir datasets gcsfs
+          fi
 
           mkdir -p /app/examples/deepswe
           mkdir -p /app/tunix/oss/examples/deepswe
@@ -327,9 +366,20 @@ spec:
 
           export PYTHONPATH="/app:/e2e_code:\${PYTHONPATH:-}"
 
+          DATASET_ARGS=()
+          if [[ -n "${DATASET_PATH}" ]]; then
+            DATASET_ARGS+=(--dataset_path="${DATASET_PATH}")
+          fi
+          if [[ -n "${DATASET_NAME}" ]]; then
+            DATASET_ARGS+=(--dataset_name="${DATASET_NAME}")
+          fi
+          if [[ -n "${DATASET_SPLIT}" ]]; then
+            DATASET_ARGS+=(--dataset_split="${DATASET_SPLIT}")
+          fi
+
           python3 /app/tunix/experimental/examples/deepswe_dist/sandbox_k8s_e2e_test.py \
             --run_as_job \
-            --dataset_name="${DATASET_NAME}" \
+            "\${DATASET_ARGS[@]}" \
             --scaffold="${SCAFFOLD}" \
             --batch_size=${BATCH_SIZE} \
             --num_generations=${NUM_GENERATIONS} \
@@ -360,7 +410,7 @@ until kubectl logs --namespace="${NAMESPACE}" -f "job/${JOB_NAME}" 2>/dev/null; 
 done
 
 echo "Waiting for Job completion..."
-if kubectl wait --namespace="${NAMESPACE}" --for=condition=complete --timeout=15m "job/${JOB_NAME}"; then
+if kubectl wait --namespace="${NAMESPACE}" --for=condition=complete --timeout=${JOB_TIMEOUT:-120m} "job/${JOB_NAME}"; then
   echo "🎉 Job ${JOB_NAME} completed successfully!"
   kubectl delete job "${JOB_NAME}" --namespace="${NAMESPACE}" || true
   kubectl delete configmap "${CONFIGMAP_NAME}" --namespace="${NAMESPACE}" || true
