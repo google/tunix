@@ -19,7 +19,9 @@ import numpy as np
 from tunix.rl import packing
 
 
-def _item(prompt, completion, *, mask=None, adv=0.0, per_token=None):
+def _item(
+    prompt, completion, *, mask=None, adv=0.0, per_token=None, routed=None
+):
   completion = np.asarray(completion, dtype=np.int32)
   return packing.PackItem(
       prompt_ids=np.asarray(prompt, dtype=np.int32),
@@ -31,7 +33,12 @@ def _item(prompt, completion, *, mask=None, adv=0.0, per_token=None):
       ),
       advantages=np.full(completion.shape[0], adv, dtype=np.float32),
       per_token=per_token or {},
+      routed_experts=routed,
   )
+
+
+def _routed(num_tokens, value, *, num_layers=2, top_k=2):
+  return np.full((num_tokens, num_layers, top_k), value, dtype=np.int16)
 
 
 class PackItemInvariantTest(absltest.TestCase):
@@ -76,6 +83,28 @@ class PackItemInvariantTest(absltest.TestCase):
         ValueError, "must be a 1D numpy array or shape"
     ):
       _item([1, 2], [3, 4], per_token={"returns": np.zeros(5, np.float32)})
+
+  def test_rejects_routed_experts_shorter_than_sequence_minus_one(self):
+    # Routing is sequence-aligned (p + c - 1 or p + c), not completion-aligned
+    # (c).
+    with self.assertRaisesRegex(
+        ValueError, r"\(p \+ c - 1 or p \+ c, num_layers, top_k\)"
+    ):
+      _item([1, 2], [3, 4], routed=_routed(2, 0))
+
+  def test_rejects_routed_experts_exceeding_sequence_length(self):
+    with self.assertRaisesRegex(
+        ValueError, r"\(p \+ c - 1 or p \+ c, num_layers, top_k\)"
+    ):
+      _item([1, 2], [3, 4], routed=_routed(5, 0))
+
+  def test_accepts_prefix_routed_experts(self):
+    item = _item([1, 2], [3, 4], routed=_routed(3, 0))
+    self.assertEqual(item.routed_experts.shape, (3, 2, 2))
+
+  def test_rejects_routed_experts_of_wrong_rank(self):
+    with self.assertRaisesRegex(ValueError, "routed_experts"):
+      _item([1], [2], routed=np.zeros((2, 4), dtype=np.int16))
 
 
 class PackCarriedFieldsTest(absltest.TestCase):
@@ -460,29 +489,62 @@ class PackCoreTest(absltest.TestCase):
         row.per_token["returns"], [0.0, 1.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0]
     )
 
-  def test_pack_chunk_returns_packed_chunk_sharing_underlying_buffers(self):
-    item = packing.PackItem(
-        prompt_ids=np.array([1], dtype=np.int32),
-        completion_ids=np.array([2, 3], dtype=np.int32),
-        completion_mask=np.ones(2, dtype=np.float32),
-        advantages=np.ones(2, dtype=np.float32),
-        per_token={"returns": np.array([1.0, 2.0], dtype=np.float32)},
-        routed_experts=np.ones((3, 2, 2), dtype=np.int16) * 4,
+
+  def test_pack_chunk_rows_share_contiguous_base_buffers(self):
+    items = [
+        _item(
+            [1, 2],
+            [3, 4],
+            adv=1.0,
+            per_token={"returns": np.array([2.0, 3.0], dtype=np.float32)},
+        ),
+        _item(
+            [5, 6],
+            [7, 8],
+            adv=0.5,
+            per_token={"returns": np.array([4.0, 5.0], dtype=np.float32)},
+        ),
+    ]
+    [rows] = packing.pack_core(
+        items, budget=4, pack_size=2, segment_align_multiple=1
     )
-    chunk = packing.pack_chunk(
-        [[item], []],
-        budget=8,
-        pad_id=0,
-        carried=("returns",),
+    self.assertIsInstance(rows, packing.PackedChunk)
+    self.assertLen(rows, 2)
+    for attr in (
+        "ids",
+        "prompt_mask",
+        "completion_mask",
+        "advantages",
+        "segment_ids",
+        "segment_positions",
+    ):
+      base = getattr(rows, attr)
+      self.assertEqual(base.shape, (2, 4))
+      self.assertIs(getattr(rows[0], attr).base, base)
+      self.assertIs(getattr(rows[1], attr).base, base)
+    returns_base = rows.per_token["returns"]
+    self.assertEqual(returns_base.shape, (2, 4))
+    self.assertIs(rows[0].per_token["returns"].base, returns_base)
+    self.assertIs(rows[1].per_token["returns"].base, returns_base)
+
+  def test_prefix_routed_experts_leaves_trailing_segment_tokens_unset(self):
+    experts1 = np.arange(3 * 2 * 2, dtype=np.int16).reshape(3, 2, 2)
+    experts2 = np.arange(100, 100 + 2 * 2 * 2, dtype=np.int16).reshape(2, 2, 2)
+    items = [
+        _item([1, 2], [3, 4], routed=experts1),
+        _item([5], [6, 7], routed=experts2),
+    ]
+    [[row]] = packing.pack_core(
+        items, budget=8, pack_size=1, segment_align_multiple=1
     )
-    self.assertIsInstance(chunk, packing.PackedChunk)
-    self.assertLen(chunk, 2)
-    self.assertEqual(chunk.ids.shape, (2, 8))
-    self.assertIsNotNone(chunk.routed_experts)
-    self.assertEqual(chunk.routed_experts.shape, (2, 8, 2, 2))
-    row0 = chunk[0]
-    self.assertTrue(np.shares_memory(row0.ids, chunk.ids))
-    self.assertTrue(np.shares_memory(row0.routed_experts, chunk.routed_experts))
+    np.testing.assert_array_equal(row.routed_experts[:3], experts1)
+    np.testing.assert_array_equal(
+        row.routed_experts[3:4], packing.UNSET_ROUTED_EXPERT
+    )
+    np.testing.assert_array_equal(row.routed_experts[4:6], experts2)
+    np.testing.assert_array_equal(
+        row.routed_experts[6:], packing.UNSET_ROUTED_EXPERT
+    )
 
 
 if __name__ == "__main__":

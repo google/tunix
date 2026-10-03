@@ -290,7 +290,7 @@ def _routed_experts_aligned(
     max_prompt_length: int,
     max_response_length: int,
     *,
-    out: np.ndarray | None = None,
+    out: np.ndarray,
 ) -> np.ndarray:
   """Lays one row of routing out over the padded `[prompt | completion]`.
 
@@ -300,37 +300,43 @@ def _routed_experts_aligned(
   the token it was captured for. Everything else is left unset.
 
   Args:
-    routed: `[prompt_len + completion_len, num_layers, top_k]` for one
-      generation. Only axis 0 (the per-token axis) is ever sliced below; the
-      trailing `[num_layers, top_k]` axes are carried through untouched.
+    routed: `[prompt_len + completion_len - 1 or prompt_len + completion_len,
+      num_layers, top_k]` routing for one generation. Only axis 0 (the per-token
+      axis) is ever sliced below; the trailing `[num_layers, top_k]` axes are
+      carried through untouched.
     prompt_len: Unpadded prompt length, i.e. where the completion starts.
     completion_len: Unpadded completion length.
     max_prompt_length: Padded prompt width.
     max_response_length: Padded completion width.
-    out: Optional pre-allocated `[max_prompt_length + max_response_length,
-      num_layers, top_k]` destination buffer pre-filled with
-      `UNSET_ROUTED_EXPERT`.
+    out: Pre-allocated `[max_prompt_length + max_response_length, num_layers,
+      top_k]` int16 destination slice pre-filled with `UNSET_ROUTED_EXPERT`.
 
   Returns:
     `[max_prompt_length + max_response_length, num_layers, top_k]`.
   """
   routed = np.asarray(routed, dtype=np.int16)
+  min_len = max(prompt_len + completion_len - 1, 0)
+  if routed.shape[0] < min_len:
+    raise ValueError(
+        f"routed_experts length must be >= {min_len} (prompt_len +"
+        f" completion_len - 1 for prompt_len={prompt_len},"
+        f" completion_len={completion_len}); got shape {routed.shape}"
+    )
   # Prompts are left-padded, so an over-long one keeps its tail; completions are
   # right-padded, so an over-long one keeps its head.
   kept_prompt_start = max(prompt_len - max_prompt_length, 0)
+  kept_prompt_len = prompt_len - kept_prompt_start
   kept_completion_end = prompt_len + min(completion_len, max_response_length)
   prompt_part = routed[kept_prompt_start:prompt_len]
   completion_part = routed[prompt_len:kept_completion_end]
 
-  if out is None:
-    out = np.full(
-        (max_prompt_length + max_response_length,) + routed.shape[1:],
-        datatypes.UNSET_ROUTED_EXPERT,
-        dtype=np.int16,
-    )
-  prompt_end = max_prompt_length
-  out[prompt_end - len(prompt_part) : prompt_end] = prompt_part
-  out[prompt_end : prompt_end + len(completion_part)] = completion_part
+  prompt_start_in_out = max_prompt_length - kept_prompt_len
+  out[prompt_start_in_out : prompt_start_in_out + len(prompt_part)] = (
+      prompt_part
+  )
+  out[max_prompt_length : max_prompt_length + len(completion_part)] = (
+      completion_part
+  )
   return out
 
 
@@ -478,23 +484,18 @@ def to_pack_item(item: datatypes.RLTrainerPayload) -> packing.PackItem:
     routed = np.asarray(item.routed_experts, dtype=np.int16)
     if routed.ndim != 3:
       raise ValueError(
-          "RLTrainerPayload.routed_experts must be [p + c, num_layers, top_k]"
+          "RLTrainerPayload.routed_experts must be"
+          " [p + c - 1 or p + c, num_layers, top_k]"
           f" for sequence packing; got shape {routed.shape}."
       )
-    # Sequence-aligned over `[prompt | completion]`, like the ids `pack_bin`
-    # writes. Rows the rollout never reported stay unset so the trainer's own
-    # gate routes them rather than replaying a wrong expert.
     n = p_len + c_len
-    if routed.shape[0] >= n:
-      routed = routed[:n]
-    else:
-      padded_routed = np.full(
-          (n,) + routed.shape[1:],
-          datatypes.UNSET_ROUTED_EXPERT,
-          dtype=np.int16,
+    min_len = max(n - 1, 0)
+    if routed.shape[0] < min_len:
+      raise ValueError(
+          f"RLTrainerPayload.routed_experts length must be >= {min_len}"
+          f" (p + c - 1 for p={p_len}, c={c_len}); got shape {routed.shape}."
       )
-      padded_routed[: routed.shape[0]] = routed
-      routed = padded_routed
+    routed = routed[:n]
 
   return packing.PackItem(
       prompt_ids=prompt,
@@ -507,52 +508,29 @@ def to_pack_item(item: datatypes.RLTrainerPayload) -> packing.PackItem:
 
 
 def to_rl_trainer_payload(
-    rows: packing.PackedChunk | Sequence[packing.PackedRow],
+    chunk: packing.PackedChunk,
     *,
     max_segments: int,
     trajectory_ids: tuple[str, ...] = (),
     lineage_context: lineage.LineageContext | None = None,
 ) -> datatypes.RLTrainerPayload:
-  """Converts a PackedChunk or sequence of PackedRows to an RLTrainerPayload."""
+  """Converts a packing.PackedChunk to an RLTrainerPayload."""
+  n_rows = chunk.ids.shape[0]
   metadata: dict[str, Any] = {"trajectory_ids": trajectory_ids}
   if lineage_context is not None:
     metadata["lineage"] = lineage_context
-  if isinstance(rows, packing.PackedChunk):
-    return datatypes.RLTrainerPayload(
-        prompt_ids=np.zeros((len(rows), 0), dtype=np.int32),
-        prompt_mask=np.zeros((len(rows), 0), dtype=np.float32),
-        completion_ids=rows.ids,
-        completion_mask=rows.completion_mask,
-        advantages=rows.advantages,
-        segment_ids=rows.segment_ids,
-        segment_positions=rows.segment_positions,
-        num_segments=max_segments + 1,
-        routed_experts=rows.routed_experts,
-        metadata=metadata,
-        **rows.per_token,  # pyrefly: ignore[bad-argument-type]
-    )
-  stack = lambda attr: np.stack([getattr(r, attr) for r in rows])
-  per_token_kwargs = {
-      name: np.stack([r.per_token[name] for r in rows])
-      for name in rows[0].per_token
-  }
-  routed_experts = (
-      np.stack([r.routed_experts for r in rows])
-      if all(r.routed_experts is not None for r in rows)
-      else None
-  )
   return datatypes.RLTrainerPayload(
-      prompt_ids=np.zeros((len(rows), 0), dtype=np.int32),
-      prompt_mask=np.zeros((len(rows), 0), dtype=np.float32),
-      completion_ids=stack("ids"),
-      completion_mask=stack("completion_mask"),
-      advantages=stack("advantages"),
-      segment_ids=stack("segment_ids"),
-      segment_positions=stack("segment_positions"),
+      prompt_ids=np.zeros((n_rows, 0), dtype=np.int32),
+      prompt_mask=np.zeros((n_rows, 0), dtype=np.float32),
+      completion_ids=chunk.ids,
+      completion_mask=chunk.completion_mask,
+      advantages=chunk.advantages,
+      segment_ids=chunk.segment_ids,
+      segment_positions=chunk.segment_positions,
       num_segments=max_segments + 1,
-      routed_experts=routed_experts,
+      routed_experts=chunk.routed_experts,
       metadata=metadata,
-      **per_token_kwargs,  # pyrefly: ignore[bad-argument-type]
+      **chunk.per_token,  # pyrefly: ignore[bad-argument-type]
   )
 
 
@@ -565,23 +543,19 @@ def _merge_batch_lineage(
   """Extracts and merges lineage contexts from a sequence of batch items.
 
   Args:
-    items: Sequence of items (or direct LineageContext instances) that may carry
-      lineage context in their metadata.
+    items: Sequence of items that may carry lineage context in their metadata.
     batch_id: Tracking ID to assign to the merged batch context.
     attributes: Optional key-value metadata attached to the merge event.
 
   Returns:
     The merged LineageContext, or None if no upstream lineage contexts exist.
   """
-  lineages = []
-  for it in items:
-    if isinstance(it, lineage.LineageContext):
-      lineages.append(it)
-    elif (
-        isinstance(getattr(it, "metadata", None), Mapping)
-        and it.metadata.get("lineage") is not None
-    ):
-      lineages.append(it.metadata["lineage"])
+  lineages = [
+      it.metadata["lineage"]
+      for it in items
+      if isinstance(getattr(it, "metadata", None), Mapping)
+      and it.metadata.get("lineage") is not None
+  ]
   if not lineages:
     return None
 
@@ -655,8 +629,7 @@ class SequencePackedBatchAssembler:
     self.segment_align_multiple = segment_align_multiple
     self._batch_counter = start_batch_index
 
-    # Each entry is a `(PackItem, trajectory_id, raw_payload)` converted once at
-    # ingest so `pack_core` never sees `RLTrainerPayload` directly.
+    # Each entry is a `(PackItem, trajectory_id, raw_payload)` converted once at ingest.
     self._buffer: list[
         tuple[packing.PackItem, str, datatypes.RLTrainerPayload]
     ] = []
@@ -688,7 +661,7 @@ class SequencePackedBatchAssembler:
       placed.extend(bin_items)
     real_placed = [item for item in placed if item.num_tokens > 0]
     traj_ids = tuple(id_to_entry[id(item)][1] for item in placed)
-    placed_payloads = [id_to_entry[id(item)][2] for item in placed]
+    placed_items = [id_to_entry[id(item)][2] for item in placed]
     routed_shape = packing.routed_experts_shape(real_placed)
     num_unrouted = sum(item.routed_experts is None for item in real_placed)
     if routed_shape is not None and num_unrouted:
@@ -698,7 +671,7 @@ class SequencePackedBatchAssembler:
           num_unrouted,
           len(real_placed),
       )
-    rows = packing.pack_chunk(
+    chunk = packing.pack_chunk(
         bins,
         budget=self.max_packed_len,
         pad_id=self.pad_id,
@@ -708,17 +681,17 @@ class SequencePackedBatchAssembler:
     )
     batch_tracking_id = f"{_BATCH_ID_PREFIX}_{self._batch_counter}"
     merged_lineage = _merge_batch_lineage(
-        placed_payloads,
+        placed_items,
         batch_id=batch_tracking_id,
         attributes={
             "packing_type": "sequence_packed",
-            "num_items": len(placed_payloads),
+            "num_items": len(placed_items),
             "packed_len": self.max_packed_len,
         },
     )
     self._batch_counter += 1
     payload = to_rl_trainer_payload(
-        rows,
+        chunk,
         max_segments=max_segments,
         trajectory_ids=traj_ids,
         lineage_context=merged_lineage,
@@ -770,18 +743,7 @@ class SequencePackedBatchAssembler:
     for item in items:
       pack_item = to_pack_item(item)
       packing.validate_items([pack_item], self.max_packed_len)
-      # `pack_item` now owns the sequence-aligned `routed_experts` array; the
-      # buffered `raw_payload` is only consulted for `metadata["lineage"]` in
-      # `_merge_batch_lineage`, so drop its reference to avoid keeping a second
-      # copy when `to_pack_item` sliced or padded `routed_experts`.
-      raw_payload = (
-          dataclasses.replace(item, routed_experts=None)
-          if item.routed_experts is not None
-          else item
-      )
-      self._buffer.append(
-          (pack_item, _extract_trajectory_id(item), raw_payload)
-      )
+      self._buffer.append((pack_item, _extract_trajectory_id(item), item))
     self._rollouts_since_update += len(items)
     is_update_done = (
         self._rollouts_since_update >= self.rollouts_per_optimizer_update
@@ -1049,13 +1011,14 @@ class PaddedBatchAssembler:
     }
     # Router replay is all-or-nothing per batch: a partially replayed batch
     # would silently mix replayed and freshly routed rows.
-    replay_routing = all(it.routed_experts is not None for it in chunk)
+    replay_routing = bool(chunk) and all(
+        it.routed_experts is not None for it in chunk
+    )
     batched_routed_experts: np.ndarray | None = None
     # `overlong` is one scalar per sequence rather than one value per token, so
-    # it is stacked into `[B]` here instead of going through `optional_fields`,
+    # it is stored into `[B]` here instead of going through `optional_fields`,
     # whose members are all completion-aligned and right-padded to `[B, C]`.
-    # A trailing row holds no sequence, so it is not a truncated one (0.0).
-    carry_overlong = all(it.overlong is not None for it in chunk)
+    carry_overlong = bool(chunk) and all(it.overlong is not None for it in chunk)
     batched_overlong = (
         np.zeros(self.batch_size, dtype=np.float32) if carry_overlong else None
     )
@@ -1146,8 +1109,6 @@ class PaddedBatchAssembler:
       # also narrows the optional field for the type checker.
       routed = item.routed_experts
       if replay_routing and routed is not None:
-        # `routed_experts` is declared ArrayLike, which admits jax arrays and
-        # scalars; concretise it here as the sibling fields above do.
         routed_arr = np.asarray(routed, dtype=np.int16)
         if batched_routed_experts is None:
           batched_routed_experts = np.full(
