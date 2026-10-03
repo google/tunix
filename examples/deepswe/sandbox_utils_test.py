@@ -616,6 +616,41 @@ class SandboxUtilsTest(absltest.TestCase):
     iterator.close()
     self.assertEqual(fleet.active_pools, {})
 
+  def test_patch_agent_sandbox_rl_templates_sets_unmanaged_network_policy(self):
+    class _FakeResources:
+
+      def _template_manifest(self, image, template_name, template):
+        del template
+        return {
+            "apiVersion": "extensions.agents.x-k8s.io/v1beta1",
+            "kind": "SandboxTemplate",
+            "metadata": {"name": template_name},
+            "spec": {
+                "podTemplate": {
+                    "metadata": {"labels": {"sandbox": template_name}},
+                    "spec": {"containers": [{"image": image}]},
+                }
+            },
+        }
+
+    fake_resources_mod = mock.MagicMock()
+    fake_resources_mod.Resources = _FakeResources
+    fake_asrl = mock.MagicMock()
+    fake_asrl.resources = fake_resources_mod
+    with mock.patch.dict(
+        "sys.modules",
+        {
+            "agent_sandbox_rl": fake_asrl,
+            "agent_sandbox_rl.resources": fake_resources_mod,
+        },
+    ):
+      sandbox_utils.patch_agent_sandbox_rl_templates()
+      res = _FakeResources()
+      manifest = res._template_manifest("img:v1", "oh-test-123", None)
+      self.assertEqual(
+          manifest["spec"]["networkPolicyManagement"], "Unmanaged"
+      )
+
 
 _FAIL_FAST_ENV = {
     "FT_SANDBOX_FAIL_FAST": "true",
