@@ -185,6 +185,19 @@ export DP_SCHED_BATCH_PREFILL="${DP_SCHED_BATCH_PREFILL:-false}"
 export LIBTPU_INIT_ARGS="${LIBTPU_INIT_ARGS:- --xla_tpu_use_minor_sharding_for_major_trivial_input=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=false --xla_tpu_ars_combiner_threshold_in_bytes=0 --xla_tpu_enable_async_collective_merger=false --xla_tpu_check_legacy_constraints_in_reduce_scatter_legalizer=false}"
 export VLLM_ENABLE_V1_MULTIPROCESSING="${VLLM_ENABLE_V1_MULTIPROCESSING:-0}"
 
+# Phased inference profiling (vLLM / tpu-inference)
+# Disabled by default (PHASED_PROFILING_DIR="" in tpu-inference). Only active when PROFILE_SAMPLER=true.
+export PROFILE_SAMPLER="${PROFILE_SAMPLER:-false}"
+if [[ "${PROFILE_SAMPLER}" == "true" || "${PROFILE_SAMPLER}" == "True" || "${PROFILE_SAMPLER}" == "1" ]]; then
+  export PHASED_PROFILING_DIR="${PHASED_PROFILING_DIR:-${MAXTEXT_OUTPUT_DIR:+${MAXTEXT_OUTPUT_DIR}/inference_profiles}}"
+  export PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR="${PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR:-3}"
+  export PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP="${PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP:-10}"
+else
+  export PHASED_PROFILING_DIR="${PHASED_PROFILING_DIR:-}"
+  export PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR="${PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR:-}"
+  export PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP="${PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP:-}"
+fi
+
 # ==============================================================================
 # Hyperparameters & Loss Configuration
 # ==============================================================================

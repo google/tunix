@@ -96,6 +96,19 @@ export COLOCATED_PYTHON_SIDECAR_MEMORY=${COLOCATED_PYTHON_SIDECAR_MEMORY:-16Gi}
 # Optional: enable experimental batched-RPA attention kernel for rollout.
 export ROLLOUT_USE_BATCHED_RPA=${ROLLOUT_USE_BATCHED_RPA:-}
 
+# Phased inference profiling (vLLM / tpu-inference)
+# Disabled by default (PHASED_PROFILING_DIR="" in tpu-inference). Only active when PROFILE_SAMPLER=true.
+export PROFILE_SAMPLER=${PROFILE_SAMPLER:-false}
+if [[ "${PROFILE_SAMPLER}" == "true" || "${PROFILE_SAMPLER}" == "True" || "${PROFILE_SAMPLER}" == "1" ]]; then
+  export PHASED_PROFILING_DIR=${PHASED_PROFILING_DIR:-${MAXTEXT_OUTPUT_DIR:+${MAXTEXT_OUTPUT_DIR}/inference_profiles}}
+  export PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR=${PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR:-3}
+  export PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP=${PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP:-10}
+else
+  export PHASED_PROFILING_DIR=${PHASED_PROFILING_DIR:-}
+  export PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR=${PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR:-}
+  export PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP=${PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP:-}
+fi
+
 # MaxText configuration: only consulted when TRAINER_BACKEND=maxtext.
 source "${LAUNCHER_DIR}/../common/maxtext_config.sh"
 
@@ -568,7 +581,7 @@ if cfg:
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ROLLOUT_PORT}" \
     --worker_startup_command=" \
-      ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} SKIP_JAX_PRECOMPILE=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS}${raiden_env}${ROLLOUT_EXTRA_ENV:+ ${ROLLOUT_EXTRA_ENV}} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} python -m tunix.experimental.distributed.runtime.main \
+      ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} SKIP_JAX_PRECOMPILE=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS}${raiden_env}${ROLLOUT_EXTRA_ENV:+ ${ROLLOUT_EXTRA_ENV}} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} ${PHASED_PROFILING_DIR:+PHASED_PROFILING_DIR=\"${PHASED_PROFILING_DIR}\"} ${PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR:+PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR=${PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR}} ${PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP:+PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP=${PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP}} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
         --process_main=tunix.experimental.examples.common.run_rollout_node.main \
