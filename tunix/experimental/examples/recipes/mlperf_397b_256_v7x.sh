@@ -17,13 +17,23 @@ export JOB_PREFIX="${JOB_PREFIX:-$USER}"
 export WANDB_RUN_NAME="${WANDB_RUN_NAME:-${JOB_PREFIX}-mlperf-397b-v7x}"
 
 # Select pod: pod1 (bodaborg-tpu7x-gsc, us-central1) or pod2 (bodaborg-tpu7x-gsc-elm, us-east1).
-export POD="${POD:-pod2}"
+export POD="${POD:-pod1}"
 
-export REGION="${REGION:-us-east1}"
-export CLUSTER="${CLUSTER:-bodaborg-tpu7x-gsc-elm}"
-export BUCKET="${BUCKET:-gs://atwigg-trellis-us-east1-fast-dev}"
-export TPU_RESERVATION="${TPU_RESERVATION:-ghostfish-ev7rs12wndvw5}"
-export MAXTEXT_CKPT="${MAXTEXT_CKPT:-gs://mlperf-6-submission-us-east1/ckpt/qwen35_397b/scanned_reshard_fsdp32_tp2/0/items}"
+if [[ "${POD}" == "pod2" || "${POD}" == "2" || "${POD}" == "elm" ]]; then
+  export REGION="${REGION:-us-east1}"
+  export CLUSTER="${CLUSTER:-bodaborg-tpu7x-gsc-elm}"
+  export BUCKET="${BUCKET:-gs://atwigg-trellis-us-east1-fast-dev}"
+  export TPU_RESERVATION="${TPU_RESERVATION:-ghostfish-ev7rs12wndvw5}"
+  export MAXTEXT_CKPT="${MAXTEXT_CKPT:-gs://mlperf-6-submission-us-east1/ckpt/qwen35_397b/scanned_reshard_fsdp32_tp2/0/items}"
+  export IMAGE_REWRITE_PREFIX="${IMAGE_REWRITE_PREFIX:-us-east1-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/}"
+else
+  export REGION="${REGION:-us-central1}"
+  export CLUSTER="${CLUSTER:-bodaborg-tpu7x-gsc}"
+  export BUCKET="${BUCKET:-gs://atwigg-trellis-us-central1}"
+  export TPU_RESERVATION="${TPU_RESERVATION:-ghostfish-pogoag4tylwed}"
+  export MAXTEXT_CKPT="${MAXTEXT_CKPT:-gs://mlperf-6-1-submission/ckpt/qwen35_397b/scanned_reshard_fsdp32_tp2/0/items}"
+  export IMAGE_REWRITE_PREFIX="${IMAGE_REWRITE_PREFIX:-us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/}"
+fi
 
 export MAXTEXT_OUTPUT_DIR="${MAXTEXT_OUTPUT_DIR:-${BUCKET}/maxtext/${JOB_PREFIX}}"
 export TRAJECTORY_LOG_DIR="${TRAJECTORY_LOG_DIR:-${BUCKET}/trajectories/${JOB_PREFIX}/logger}"
@@ -146,6 +156,6 @@ export DEBUG=${DEBUG:-0}
 
 # DeepSWE Environment & Agent Sandbox
 export SANDBOX_TOLERATIONS='[{"key":"workload","operator":"Equal","value":"sandbox","effect":"NoSchedule"}]'
-export IMAGE_REWRITE_PREFIX="${IMAGE_REWRITE_PREFIX:-us-east1-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/}"
+export IMAGE_REWRITE_PREFIX="${IMAGE_REWRITE_PREFIX}"
 
 source "${DIR}/mlperf_base.sh" "$@"

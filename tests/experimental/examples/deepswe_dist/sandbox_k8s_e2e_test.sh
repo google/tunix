@@ -33,7 +33,7 @@ CPU_MACHINE=${CPU_MACHINE:-"n2-standard-64"}
 NODE_SELECTOR_KEY=${NODE_SELECTOR_KEY:-"cloud.google.com/gke-nodepool"}
 NODE_SELECTOR_VAL=${NODE_SELECTOR_VAL:-"sandbox-cpu-pool"}
 JOB_NODEPOOL=${JOB_NODEPOOL:-"sandbox-cpu-pool"}
-SCAFFOLD=${SCAFFOLD:-"r2egym"}
+SCAFFOLD=${SCAFFOLD:-"openhands"}
 DRY_RUN=${DRY_RUN:-0}
 KUEUE_QUEUE=${KUEUE_QUEUE:-""}
 
