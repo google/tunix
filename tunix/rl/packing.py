@@ -62,10 +62,10 @@ class PackItem:
   advantages: np.ndarray
   per_token: Mapping[str, np.ndarray] = dataclasses.field(default_factory=dict)
   policy_version: np.ndarray | None = None
-  # Router replay: `[p + c, num_layers, top_k]` expert ids, aligned to the
-  # WHOLE sequence (prompt then completion), not just the completion like the
-  # `per_token` fields. `UNSET_ROUTED_EXPERT` marks tokens the trainer should
-  # route with its own gate.
+  # Router replay: `[p + c - 1 or p + c, num_layers, top_k]` expert ids,
+  # sequence-aligned (prompt then completion), not completion-aligned like the
+  # `per_token` fields. Autoregressive rollouts may omit the final sampled token
+  # (`p + c - 1`), which remains `UNSET_ROUTED_EXPERT` in the packed output.
   routed_experts: np.ndarray | None = None
 
   def __post_init__(self):
@@ -104,16 +104,18 @@ class PackItem:
         )
     if self.routed_experts is not None:
       n = self.prompt_ids.shape[0] + c
+      min_len = max(n - 1, 0)
       routed = self.routed_experts
       if (
           not isinstance(routed, np.ndarray)
           or routed.ndim != 3
-          or routed.shape[0] != n
+          or routed.shape[0] < min_len
+          or routed.shape[0] > n
       ):
         raise ValueError(
             "PackItem.routed_experts must be a numpy array of shape"
-            f" (p + c, num_layers, top_k) = ({n}, L, K), got"
-            f" {type(routed).__name__} with shape"
+            " (p + c - 1 or p + c, num_layers, top_k) with length in"
+            f" [{min_len}, {n}], got {type(routed).__name__} with shape"
             f" {getattr(routed, 'shape', None)}."
         )
 
@@ -399,9 +401,11 @@ def pack_chunk(
       for name in carried:
         per_token[name][b, comp] = item.per_token[name]
       if routed is not None and item.routed_experts is not None:
-        # Same `seq` slice as `ids`: routing is sequence-aligned, so a token's
-        # captured experts land on exactly the position the token itself does.
-        routed[b, seq] = item.routed_experts
+        # Prefix-aligned to `seq`: a token's captured experts land on the
+        # position the token itself does, and any uncaptured trailing tokens in
+        # the segment remain `UNSET_ROUTED_EXPERT`.
+        m = item.routed_experts.shape[0]
+        routed[b, cursor : cursor + m] = item.routed_experts
       cursor += n
 
     policy_versions.append(bin_items[0].policy_version if bin_items else None)

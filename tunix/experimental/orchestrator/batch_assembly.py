@@ -294,9 +294,10 @@ def _routed_experts_aligned(
   the token it was captured for. Everything else is left unset.
 
   Args:
-    routed: `[prompt_len + completion_len, num_layers, top_k]` for one
-      generation. Only axis 0 (the per-token axis) is ever sliced below; the
-      trailing `[num_layers, top_k]` axes are carried through untouched.
+    routed: `[prompt_len + completion_len - 1 or prompt_len + completion_len,
+      num_layers, top_k]` routing for one generation. Only axis 0 (the per-token
+      axis) is ever sliced below; the trailing `[num_layers, top_k]` axes are
+      carried through untouched.
     prompt_len: Unpadded prompt length, i.e. where the completion starts.
     completion_len: Unpadded completion length.
     max_prompt_length: Padded prompt width.
@@ -308,16 +309,28 @@ def _routed_experts_aligned(
     `[max_prompt_length + max_response_length, num_layers, top_k]`.
   """
   routed = np.asarray(routed, dtype=np.int16)
+  min_len = max(prompt_len + completion_len - 1, 0)
+  if routed.shape[0] < min_len:
+    raise ValueError(
+        f"routed_experts length must be >= {min_len} (prompt_len +"
+        f" completion_len - 1 for prompt_len={prompt_len},"
+        f" completion_len={completion_len}); got shape {routed.shape}"
+    )
   # Prompts are left-padded, so an over-long one keeps its tail; completions are
   # right-padded, so an over-long one keeps its head.
   kept_prompt_start = max(prompt_len - max_prompt_length, 0)
+  kept_prompt_len = prompt_len - kept_prompt_start
   kept_completion_end = prompt_len + min(completion_len, max_response_length)
   prompt_part = routed[kept_prompt_start:prompt_len]
   completion_part = routed[prompt_len:kept_completion_end]
 
-  prompt_end = max_prompt_length
-  out[prompt_end - len(prompt_part) : prompt_end] = prompt_part
-  out[prompt_end : prompt_end + len(completion_part)] = completion_part
+  prompt_start_in_out = max_prompt_length - kept_prompt_len
+  out[prompt_start_in_out : prompt_start_in_out + len(prompt_part)] = (
+      prompt_part
+  )
+  out[max_prompt_length : max_prompt_length + len(completion_part)] = (
+      completion_part
+  )
   return out
 
 
@@ -462,9 +475,9 @@ def to_pack_item(item: datatypes.RLTrainerPayload) -> packing.PackItem:
 
   routed = None
   if item.routed_experts is not None:
-    # The adapter aligns routing to the whole `[prompt | completion]` sequence
+    # The adapter aligns routing to the `[prompt | completion]` sequence
     # (see `algorithm_adapter._routed_experts_for`); `PackItem` re-validates
-    # the `(p + c, num_layers, top_k)` shape.
+    # the `(p + c - 1 or p + c, num_layers, top_k)` shape.
     routed = np.asarray(item.routed_experts, dtype=np.int16)
 
   return packing.PackItem(

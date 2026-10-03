@@ -1910,6 +1910,70 @@ class RoutedExpertsAlignmentTest(absltest.TestCase):
     np.testing.assert_array_equal(out[0], 2)
     np.testing.assert_array_equal(out[1], 3)
 
+  def test_prefix_capture_ending_in_completion_leaves_tail_unset(self):
+    """Prefix routing of length `p + c - 1` leaves the final completion token unset."""
+    prompt_len, completion_len = 3, 4
+    max_prompt, max_response = 5, 6
+    # Capture covers 3 prompt tokens + 3 of the 4 completion tokens.
+    routed = np.concatenate(
+        [_routing(prompt_len, 7), _routing(completion_len - 1, 9)], axis=0
+    )
+    out = np.full(
+        (max_prompt + max_response, _ROUTING_LAYERS, _ROUTING_TOP_K),
+        _UNSET,
+        dtype=np.int16,
+    )
+    batch_assembly._routed_experts_aligned(  # pylint: disable=protected-access
+        routed, prompt_len, completion_len, max_prompt, max_response, out=out
+    )
+    np.testing.assert_array_equal(out[: max_prompt - prompt_len], _UNSET)
+    np.testing.assert_array_equal(out[max_prompt - prompt_len : max_prompt], 7)
+    np.testing.assert_array_equal(
+        out[max_prompt : max_prompt + completion_len - 1], 9
+    )
+    np.testing.assert_array_equal(
+        out[max_prompt + completion_len - 1 :], _UNSET
+    )
+
+  def test_prefix_capture_single_token_completion_leaves_response_unset(self):
+    """When `completion_len == 1`, a `p + c - 1 == p` capture aligns prompt and leaves response unset."""
+    prompt_len, completion_len = 3, 1
+    max_prompt, max_response = 5, 4
+    routed = _routing(prompt_len, 7)
+    out = np.full(
+        (max_prompt + max_response, _ROUTING_LAYERS, _ROUTING_TOP_K),
+        _UNSET,
+        dtype=np.int16,
+    )
+    batch_assembly._routed_experts_aligned(  # pylint: disable=protected-access
+        routed, prompt_len, completion_len, max_prompt, max_response, out=out
+    )
+    prompt_start = max_prompt - prompt_len
+    np.testing.assert_array_equal(out[:prompt_start], _UNSET)
+    np.testing.assert_array_equal(out[prompt_start:max_prompt], 7)
+    np.testing.assert_array_equal(out[max_prompt:], _UNSET)
+
+  def test_rejects_capture_shorter_than_sequence_minus_one(self):
+    """Completion-only or truncated captures (`< p + c - 1`) are rejected."""
+    prompt_len, completion_len = 3, 4
+    max_prompt, max_response = 5, 6
+    out = np.full(
+        (max_prompt + max_response, _ROUTING_LAYERS, _ROUTING_TOP_K),
+        _UNSET,
+        dtype=np.int16,
+    )
+    with self.assertRaisesRegex(
+        ValueError, "routed_experts length must be >= 6"
+    ):
+      batch_assembly._routed_experts_aligned(  # pylint: disable=protected-access
+          _routing(completion_len, 9),
+          prompt_len,
+          completion_len,
+          max_prompt,
+          max_response,
+          out=out,
+      )
+
 
 class PaddedBatchAssemblerRoutingTest(absltest.TestCase):
   """The assembler must emit `[B, P + C, num_layers, top_k]`, or nothing."""
@@ -2335,7 +2399,7 @@ class SequencePackedRoutingTest(absltest.TestCase):
 
   def test_to_pack_item_rejects_completion_only_routing(self):
     payload = dataclasses.replace(
-        _make_payload(1, 2), routed_experts=_routing(2, 3)
+        _make_payload(2, 2), routed_experts=_routing(2, 3)
     )
     with self.assertRaisesRegex(ValueError, "routed_experts"):
       batch_assembly.to_pack_item(payload)
