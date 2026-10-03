@@ -170,6 +170,54 @@ class TrainerWorkerTest(absltest.TestCase):
         "gs://bucket/checkpoints/5/model_params",
     )
 
+  def test_save_checkpoint_reports_false_when_trainer_skips_step(self):
+    self.fake_trainer._checkpoint_dir = "gs://bucket/checkpoints"
+    self.fake_trainer.save_checkpoint = (
+        lambda metadata, **kwargs: metadata["step"] % 2 == 0
+    )
+
+    resp_odd = self.worker.save_checkpoint(metadata={"step": 21})
+    self.assertFalse(resp_odd.metadata["checkpoint_saved"])
+    self.assertEqual(resp_odd.metadata["checkpoint_path"], "")
+
+    resp_even = self.worker.save_checkpoint(metadata={"step": 22})
+    self.assertTrue(resp_even.metadata["checkpoint_saved"])
+    self.assertEqual(
+        resp_even.metadata["checkpoint_path"],
+        "gs://bucket/checkpoints/22/model_params",
+    )
+
+  def test_save_checkpoint_captures_maxtext_checkpoint_manager_bool(self):
+    class FakeMaxTextCheckpointManager:
+
+      def save_checkpoint(self, *, step, **kwargs):
+        del kwargs
+        return step % 2 == 0
+
+    mgr = FakeMaxTextCheckpointManager()
+    self.fake_trainer._checkpoint_dir = "gs://bucket/checkpoints"
+    self.fake_trainer._checkpoint_manager = mgr
+
+    def _maxtext_save(metadata, **kwargs):
+      mgr.save_checkpoint(step=metadata["step"], **kwargs)
+      # MaxTextTrainingEngine.save_checkpoint returns None.
+      return None
+
+    self.fake_trainer.save_checkpoint = _maxtext_save
+
+    resp_odd = self.worker.save_checkpoint(metadata={"step": 21})
+    self.assertFalse(resp_odd.metadata["checkpoint_saved"])
+    self.assertEqual(resp_odd.metadata["checkpoint_path"], "")
+    self.assertNotIn("save_checkpoint", mgr.__dict__)
+
+    resp_even = self.worker.save_checkpoint(metadata={"step": 22})
+    self.assertTrue(resp_even.metadata["checkpoint_saved"])
+    self.assertEqual(
+        resp_even.metadata["checkpoint_path"],
+        "gs://bucket/checkpoints/22/model_params",
+    )
+    self.assertNotIn("save_checkpoint", mgr.__dict__)
+
   def test_restore_checkpoint_transitions_to_error_state_on_failure(self):
     def _failing_restore(**kwargs):
       del kwargs

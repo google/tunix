@@ -170,13 +170,17 @@ class AbstractTrainer(abc.ABC):
     return None
 
   @abc.abstractmethod
-  def save_checkpoint(self, metadata: Any, **kwargs) -> None:
+  def save_checkpoint(self, metadata: Any, **kwargs) -> bool | None:
     """Force the trainer to serialize its state (model + optimizer).
 
     Checkpoint cadence/policy is the caller's responsibility.
     Args:
       metadata: The metadata pytree to save alongside the checkpoint.
       **kwargs: Implementation-specific options.
+
+    Returns:
+      Whether a checkpoint was saved, or None if the implementation does not
+      report save status.
     """
     raise NotImplementedError(
         f"{type(self).__name__} does not implement save_checkpoint."

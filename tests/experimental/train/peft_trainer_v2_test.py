@@ -713,7 +713,9 @@ class PeftTrainerTest(parameterized.TestCase):
     trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
 
     custom_metadata = {'step': 10, 'global_step': 42, 'role': 'actor'}
-    trainer.save_checkpoint(metadata=custom_metadata, force=True)
+    self.assertTrue(
+        trainer.save_checkpoint(metadata=custom_metadata, force=True)
+    )
 
     mock_cm.save.assert_called_once_with(
         10,
@@ -723,6 +725,8 @@ class PeftTrainerTest(parameterized.TestCase):
         custom_metadata=custom_metadata,
         force=True,
     )
+    mock_cm.save.return_value = False
+    self.assertFalse(trainer.save_checkpoint(metadata={'step': 11}))
 
   @mock.patch.object(checkpoint_manager, 'CheckpointManager')
   def test_save_checkpoint_default_step_from_train_steps(

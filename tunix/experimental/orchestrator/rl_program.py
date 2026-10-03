@@ -1872,15 +1872,25 @@ class StandardRLProgram(RLProgram):
             **save_kwargs,
         )
         checkpoint_saved = True
-        if self.on_checkpoint_saved is not None:
-          # `TrainerWorker.save_checkpoint` always returns the saved path in
-          # `Response.metadata["checkpoint_path"]`. The callback runs in a
-          # worker thread (it may do blocking file/GCS I/O) and is awaited, so
-          # calls never overlap and its exceptions still propagate.
+        save_meta = (
+            save_resp.metadata
+            if isinstance(save_resp, datatypes.Response)
+            else (save_resp if isinstance(save_resp, Mapping) else {})
+        )
+        if self.on_checkpoint_saved is not None and save_meta.get(
+            "checkpoint_saved", True
+        ):
+          # `TrainerWorker.save_checkpoint` sets `checkpoint_saved=False` when
+          # the trainer's checkpoint policy skips this step (e.g.
+          # `checkpoint_save_interval_steps > 1` or
+          # `skip_checkpoint_save_if_in_progress`). Only invoke the callback when
+          # a checkpoint was actually saved. The callback runs in a worker thread
+          # (it may do blocking file/GCS I/O) and is awaited, so calls never
+          # overlap and its exceptions still propagate.
           ckpt_info: dict[str, Any] = {
               "step": optimizer_step,
               "timestamp_ms": ckpt_ts_ms,
-              "checkpoint_path": save_resp.metadata["checkpoint_path"],
+              "checkpoint_path": save_meta.get("checkpoint_path", ""),
           }
           await asyncio.to_thread(self.on_checkpoint_saved, ckpt_info)
 

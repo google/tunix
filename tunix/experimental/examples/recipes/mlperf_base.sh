@@ -355,7 +355,7 @@ if [[ "${MLPERF_NO_LAUNCH:-0}" != "1" ]]; then
     echo "Running sequential offline evaluation from manifest: ${CHECKPOINT_MANIFEST_FILE}"
     # Stdlib-only (the launcher host has no JAX/tunix install). Prints one
     # "step, samples_count, timestamp_ms, checkpoint_path, is_last, mllog_file"
-    # TSV row per checkpoint; a missing, empty or non-contiguous manifest aborts
+    # TSV row per checkpoint; a missing, empty or out-of-order manifest aborts
     # (set -e).
     MANIFEST_ROWS_TSV="$(python3 -c '
 import json, subprocess, sys
@@ -373,8 +373,8 @@ if not records:
     sys.exit(f"Checkpoint manifest is empty: {path}")
 steps = [int(r["step"]) for r in records]
 first = int(records[0].get("val_start_at", steps[0]))
-if steps != list(range(first, first + len(steps))):
-    sys.exit(f"Manifest steps must be contiguous from val_start_at={first}: {steps}")
+if steps[0] < first or steps != sorted(set(steps)):
+    sys.exit(f"Manifest steps must be strictly increasing from >= val_start_at={first}: {steps}")
 for i, r in enumerate(records):
     print("\t".join([
         str(int(r["step"])),
@@ -390,6 +390,13 @@ for i, r in enumerate(records):
     EVAL_JOBSET_NAME="${EVAL_JOBSET_NAME:-${JOB_PREFIX}-eval}"
     for row in "${MANIFEST_ROWS[@]}"; do
       IFS=$'\t' read -r STEP SAMPLES TS_MS CKPT_PATH IS_LAST MLLOG_FILE <<< "${row}"
+
+      if [[ "${DRY_RUN:-false}" != "true" && "${CKPT_PATH}" == gs://* ]]; then
+        if ! gsutil ls "${CKPT_PATH}" >/dev/null 2>&1; then
+          echo "WARNING: Checkpoint path ${CKPT_PATH} for step=${STEP} not found in GCS; skipping." >&2
+          continue
+        fi
+      fi
 
       echo "=== Evaluating checkpoint step=${STEP} samples=${SAMPLES} is_last=${IS_LAST} path=${CKPT_PATH} ==="
       export MAXTEXT_CKPT="${CKPT_PATH}"

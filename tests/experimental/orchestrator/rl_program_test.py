@@ -2264,6 +2264,47 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_train_stage_on_checkpoint_saved_skipped_when_checkpoint_not_saved(
+      self,
+  ):
+    async def _run():
+      self.mock_algo.num_generations = 1
+      self.mock_algo.mini_batch_size = 1
+      self.mock_engine.save_checkpoint.return_value = datatypes.Response(
+          metadata={
+              "checkpoint_saved": False,
+              "checkpoint_path": "",
+          }
+      )
+      saved = []
+      program = self._create_program(
+          batch_size=1, on_checkpoint_saved=saved.append
+      )
+      program.engine = self.mock_engine
+
+      payload = datatypes.RLTrainerPayload(
+          prompt_ids=np.array([1, 2], dtype=np.int32),
+          prompt_mask=np.array([1.0, 1.0], dtype=np.float32),
+          completion_ids=np.array([3, 4], dtype=np.int32),
+          completion_mask=np.array([1.0, 1.0], dtype=np.float32),
+          advantages=np.array([1.0, 1.0], dtype=np.float32),
+      )
+      item = datatypes.TrajectoryItem(
+          group_index=0,
+          prompt_id="prompt_0",
+          start_step=0,
+          traj={"trajectory_reward": 1.0},
+      )
+      item.payload = payload
+      await program.scored_q.put(item)
+      await program.scored_q.close()
+
+      await program.train_stage()
+
+      self.assertEmpty(saved)
+
+    asyncio.run(_run())
+
   def test_train_stage_sequence_packed_final_batch_broken_down_into_multiple_microbatches(
       self,
   ):

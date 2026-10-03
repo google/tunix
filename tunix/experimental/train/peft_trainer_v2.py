@@ -1293,7 +1293,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     return self.config.checkpoint_root_directory
 
   @override
-  def save_checkpoint(self, metadata: Any = None, **kwargs) -> None:
+  def save_checkpoint(self, metadata: Any = None, **kwargs) -> bool:
     """Saves a checkpoint of the trainer state (model + optimizer).
 
     Vanilla implementation of save_checkpoint on a train_steps. Sub-batch
@@ -1313,7 +1313,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
         "save_only_lora_params", self._lora_enabled
     )
     save_optimizer_state = kwargs.pop("save_optimizer_state", True)
-    self.checkpoint_manager.save(
+    return self.checkpoint_manager.save(
         step,
         self.model,
         self.optimizer if save_optimizer_state else None,

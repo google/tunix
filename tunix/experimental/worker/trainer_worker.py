@@ -363,19 +363,64 @@ class TrainerWorker(abstract_worker.Worker):
   def _resolve_checkpoint_path(self, metadata: Mapping[str, Any]) -> str:
     """Resolves the saved Orbax model_params directory from the underlying trainer."""
     ckpt_dir = self._trainer.checkpoint_dir
-    step = metadata.get("step")
+    step = metadata.get("step") if isinstance(metadata, Mapping) else None
     if ckpt_dir and step is not None:
       return f"{str(ckpt_dir).rstrip('/')}/{int(step)}/model_params"
     return ""
+
+  def _run_trainer_save_checkpoint(self, metadata: Any, **kwargs) -> bool:
+    """Runs the trainer's save_checkpoint and returns whether a checkpoint was saved."""
+    ckpt_mgr = getattr(self._trainer, "_checkpoint_manager", None)
+    orig_mgr_save = getattr(ckpt_mgr, "save_checkpoint", None)
+    mgr_dict = getattr(ckpt_mgr, "__dict__", None)
+    had_instance_attr = (
+        isinstance(mgr_dict, dict) and "save_checkpoint" in mgr_dict
+    )
+    mgr_saved: list[bool] = []
+    if callable(orig_mgr_save):
+      # MaxTextTrainingEngine.save_checkpoint delegates to
+      # self._checkpoint_manager.save_checkpoint(...) -> bool, but does not
+      # return that boolean. Capture it here so skipped saves (e.g.
+      # checkpoint_period > 1 or skip_checkpoint_save_if_in_progress) are
+      # reported accurately in Response.metadata["checkpoint_saved"].
+      def _capturing_save_checkpoint(*a: Any, **kw: Any) -> Any:
+        res = orig_mgr_save(*a, **kw)
+        if isinstance(res, bool):
+          mgr_saved.append(res)
+        return res
+
+      ckpt_mgr.save_checkpoint = _capturing_save_checkpoint
+    try:
+      result = self._trainer.save_checkpoint(metadata, **kwargs)
+    finally:
+      if callable(orig_mgr_save):
+        if had_instance_attr or not isinstance(mgr_dict, dict):
+          ckpt_mgr.save_checkpoint = orig_mgr_save
+        else:
+          mgr_dict.pop("save_checkpoint", None)
+    if isinstance(result, bool):
+      return result
+    if mgr_saved:
+      return mgr_saved[-1]
+    if (
+        getattr(
+            getattr(self._trainer, "_config", None),
+            "enable_checkpointing",
+            True,
+        )
+        is False
+    ):
+      return False
+    return True
 
   def save_checkpoint(self, metadata: Any, **kwargs) -> datatypes.Response:
     """Force the trainer to serialize its state (model + optimizer)."""
     self._ensure_ready()
     try:
-      self._trainer.save_checkpoint(metadata, **kwargs)
-      ckpt_path = self._resolve_checkpoint_path(metadata)
+      saved = self._run_trainer_save_checkpoint(metadata, **kwargs)
+      ckpt_path = self._resolve_checkpoint_path(metadata) if saved else ""
       self._last_error = None
-      return self._response(checkpoint_saved=True, checkpoint_path=ckpt_path)
+      return self._response(checkpoint_saved=saved, checkpoint_path=ckpt_path)
     except Exception as exc:
       self._last_error = str(exc)
       self.state = WorkerState.ERROR
