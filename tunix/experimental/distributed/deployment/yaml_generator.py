@@ -568,16 +568,26 @@ def main() -> None:
     tpu_annotations = ""
 
   if use_dynamic_slicing:
+    match_expressions = []
     if slice_size and slice_size > 1:
+      match_expressions.append(
+          f"                    - key: cloud.google.com/gke-tpu-partition-{slice_topology}-state\n"
+          "                      operator: In\n"
+          "                      values: [\"HEALTHY\", \"DEGRADED\"]\n"
+      )
+    if tpu_type in ("tpu7x", "tpu-v7x-slice"):
+      match_expressions.append(
+          "                    - key: scheduling.tpu.google.com/partial-cube\n"
+          "                      operator: DoesNotExist\n"
+      )
+    if match_expressions:
       pw_node_affinity = (
           "            affinity:\n"
           "              nodeAffinity:\n"
           "                requiredDuringSchedulingIgnoredDuringExecution:\n"
           "                  nodeSelectorTerms:\n"
           "                  - matchExpressions:\n"
-          f"                    - key: cloud.google.com/gke-tpu-partition-{slice_topology}-state\n"
-          "                      operator: In\n"
-          "                      values: [\"HEALTHY\", \"DEGRADED\"]\n"
+          + "".join(match_expressions)
       )
       tpu_affinity = pw_node_affinity
     else:
