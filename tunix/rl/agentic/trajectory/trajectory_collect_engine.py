@@ -409,9 +409,9 @@ class TrajectoryCollectEngine:
       tpot_ms = (m_lat / comp_toks) * 1000.0 if comp_toks > 0 else 0.0
       mean_step_lat = (m_lat / num_steps) if num_steps > 0 else 0.0
       traj_id = (
-          getattr(self.metadata, 'traj_id', None)
-          or getattr(self.agent.trajectory, 'traj_id', None)
-          or self._debug_prefix
+          self.metadata.traj_id
+          if self.metadata is not None
+          else (self.agent.trajectory.traj_id or self._debug_prefix)
       )
       status_str = (
           self.agent.trajectory.status.name
@@ -1283,9 +1283,9 @@ class TrajectoryCollectEngine:
           (step_latency / comp_len) * 1000.0 if comp_len > 0 else 0.0
       )
       traj_id = (
-          getattr(self.metadata, 'traj_id', None)
-          or getattr(self.agent.trajectory, 'traj_id', None)
-          or self._debug_prefix
+          self.metadata.traj_id
+          if self.metadata is not None
+          else (self.agent.trajectory.traj_id or self._debug_prefix)
       )
       env_lat = wall_time if env_step_executed else 0.0
       turn_total = step_latency + env_lat

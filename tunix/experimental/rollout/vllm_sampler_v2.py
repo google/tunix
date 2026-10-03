@@ -388,6 +388,12 @@ class RLVllmSampler:
         ):
           routed_experts = np.array(routed_experts)
 
+        num_preemptions = (
+            getattr(final_output.metrics, 'num_preemptions', 0)
+            if getattr(final_output, 'metrics', None) is not None
+            else 0
+        )
+
         return SimpleNamespace(
             request_id=req_id,
             text=text,
@@ -399,6 +405,7 @@ class RLVllmSampler:
             finish_reason=getattr(output_choice, "finish_reason", "stop")
             or "stop",
             policy_version=policy_version,
+            num_preemptions=num_preemptions,
             error=None,
         )
 
@@ -417,6 +424,7 @@ class RLVllmSampler:
           routed_experts=None,
           finish_reason="stop",
           policy_version=policy_version,
+          num_preemptions=0,
           error=err_obj,
       )
     except Exception as e:
@@ -436,6 +444,7 @@ class RLVllmSampler:
           routed_experts=None,
           finish_reason="stop",
           policy_version=policy_version,
+          num_preemptions=0,
           error=err_obj,
       )
 
@@ -584,14 +593,9 @@ class RLVllmSampler:
       tot_comp_toks = 0
       tot_preempts = 0
       for r in results:
-        tot_prompt_toks += len(getattr(r, 'prompt_token_ids', None) or [])
-        tot_comp_toks += len(getattr(r, 'token_ids', None) or [])
-        m = getattr(r, 'metrics', None)
-        tot_preempts += (
-            getattr(m, 'num_preemptions', 0)
-            if m
-            else getattr(r, 'num_preemptions', 0)
-        )
+        tot_prompt_toks += len(r.prompt_token_ids)
+        tot_comp_toks += len(r.token_ids)
+        tot_preempts += r.num_preemptions
       s_tps = tot_comp_toks / sample_duration if sample_duration > 0 else 0.0
       s_tpot_ms = (
           (sample_duration / tot_comp_toks) * 1000.0
