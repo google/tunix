@@ -28,6 +28,7 @@ from tunix.experimental.weight_sync import weight_sync
 from tunix.generate import sampler as generate_sampler_lib
 from tunix.generate import tokenizer_adapter as tok_adapter
 from tunix.generate import utils as generate_utils
+from tunix.rl.rollout import base_rollout
 
 Sampler = base_sampler_lib.Sampler
 
@@ -53,17 +54,25 @@ class VanillaSamplerAdapter(RaidenDestinationWeightSyncMixin, Sampler, abc.ABC):
   def __init__(
       self,
       server_id: str,
+      config: base_rollout.RolloutConfig,
       transformer: Any = None,
       tokenizer: Any = None,
       cache_config: generate_sampler_lib.CacheConfig | int | None = None,
+      sampler: Any = None,
       image_processor: Any = None,
-      model: Any = None,
-      config: Any = None,
       raiden_sync_delegate: Any = None,
-      **kwargs,
+      weight_sync_mode: weight_sync.WeightSyncMode | str = (
+          weight_sync.DEFAULT_WEIGHT_SYNC_MODE
+      ),
   ):
+    if not isinstance(config, base_rollout.RolloutConfig):
+      raise TypeError(
+          "VanillaSamplerAdapter expected config to be an instance of"
+          f" RolloutConfig, got {type(config).__name__}."
+      )
     self.server_id = server_id
-    self.transformer = transformer if transformer is not None else model
+    self.config: base_rollout.RolloutConfig = config
+    self.transformer = transformer
     if tokenizer is not None and not isinstance(
         tokenizer, tok_adapter.TokenizerAdapter
     ):
@@ -73,11 +82,16 @@ class VanillaSamplerAdapter(RaidenDestinationWeightSyncMixin, Sampler, abc.ABC):
         pass
     self.tokenizer: Any = tokenizer
     self.image_processor = image_processor
-    self.config = config
     self.raiden_sync_delegate = raiden_sync_delegate
-    self.weight_sync_mode = getattr(
-        config, "weight_sync_mode", weight_sync.DEFAULT_WEIGHT_SYNC_MODE
-    )
+    if isinstance(weight_sync_mode, weight_sync.WeightSyncMode):
+      self.weight_sync_mode = weight_sync_mode
+    elif isinstance(weight_sync_mode, str):
+      self.weight_sync_mode = weight_sync.WeightSyncMode(weight_sync_mode)
+    else:
+      raise TypeError(
+          "VanillaSamplerAdapter expected weight_sync_mode to be"
+          f" WeightSyncMode or str, got {type(weight_sync_mode).__name__}."
+      )
     self.enable_raiden = (
         self.weight_sync_mode == weight_sync.WeightSyncMode.RAIDEN
     )
@@ -98,7 +112,9 @@ class VanillaSamplerAdapter(RaidenDestinationWeightSyncMixin, Sampler, abc.ABC):
           self.server_id,
       )
 
-    if self.transformer is not None and self.tokenizer is not None:
+    if sampler is not None:
+      self.sampler = sampler
+    elif self.transformer is not None and self.tokenizer is not None:
       self.sampler = self._build_generate_sampler(cache_config)
     else:
       self.sampler = None
@@ -176,7 +192,7 @@ class VanillaSamplerAdapter(RaidenDestinationWeightSyncMixin, Sampler, abc.ABC):
   async def get_mesh(self, **kwargs) -> Any:
     """Returns the underlying device mesh topology."""
     del kwargs
-    if hasattr(self.sampler, "get_mesh"):
+    if self.sampler and hasattr(self.sampler, "get_mesh"):
       return self.sampler.get_mesh()
     return None
 
@@ -186,14 +202,11 @@ class VanillaSamplerAdapter(RaidenDestinationWeightSyncMixin, Sampler, abc.ABC):
       sampling_requests: (
           base_sampler_lib.SamplingRequest
           | Sequence[base_sampler_lib.SamplingRequest]
-          | Any
-          | Sequence[Any]
       ),
       **kwargs,
   ) -> (
       base_sampler_lib.SamplingResponse
       | List[base_sampler_lib.SamplingResponse]
-      | Any
   ):
     """Standard completion call using external Tunix JAX Sampler model."""
     if not self.sampler:
@@ -206,14 +219,23 @@ class VanillaSamplerAdapter(RaidenDestinationWeightSyncMixin, Sampler, abc.ABC):
       raise ValueError("sampling_requests cannot be None.")
 
     if isinstance(sampling_requests, base_sampler_lib.SamplingRequest):
-      requests: List[Any] = [sampling_requests]
+      requests: List[base_sampler_lib.SamplingRequest] = [sampling_requests]
       is_sequence = False
-    elif isinstance(sampling_requests, (list, tuple)):
+    elif (
+        isinstance(sampling_requests, Sequence)
+        and not isinstance(sampling_requests, (str, bytes))
+        and all(
+            isinstance(req, base_sampler_lib.SamplingRequest)
+            for req in sampling_requests
+        )
+    ):
       requests = list(sampling_requests)
       is_sequence = True
     else:
-      requests = [sampling_requests]
-      is_sequence = False
+      raise TypeError(
+          "sample expected SamplingRequest or Sequence[SamplingRequest], got"
+          f" {type(sampling_requests).__name__}."
+      )
 
     prompts = []
     prompt_token_ids_batch = []
@@ -227,8 +249,13 @@ class VanillaSamplerAdapter(RaidenDestinationWeightSyncMixin, Sampler, abc.ABC):
     return_logits_list = []
     beam_sizes = []
 
+    cfg = self.config
+    default_max_tokens = cfg.max_tokens_to_generate
+    default_temp = cfg.temperature
+    default_seed = int(cfg.seed) if cfg.seed is not None else None
+
     for req in requests:
-      prompt = req.prompt if hasattr(req, "prompt") else req
+      prompt = req.prompt
       if generate_utils.is_token_id_sequence(prompt):
         has_token_prompts = True
         prompt_token_ids_batch.append(
@@ -236,29 +263,33 @@ class VanillaSamplerAdapter(RaidenDestinationWeightSyncMixin, Sampler, abc.ABC):
         )
       else:
         prompts.append(prompt)
-      sp = (
-          req.sampling_params
-          if hasattr(req, "sampling_params") and req.sampling_params is not None
-          else base_sampler_lib.SamplingParams()
-      )
-      if sp is None:
-        raise ValueError("SamplingParams cannot be None")
+      sp = req.sampling_params
+      if sp is not None:
+        max_gen_steps_list.append(sp.max_tokens)
+        temps.append(sp.temperature)
+        top_ps.append(sp.top_p)
+        top_ks.append(sp.top_k)
+        seeds.append(sp.seed)
+        return_logprobs_list.append(sp.return_logprobs)
+        return_logits_list.append(sp.return_logits)
+        if sp.beam_size is not None:
+          beam_sizes.append(sp.beam_size)
+      else:
+        max_gen_steps_list.append(default_max_tokens)
+        temps.append(default_temp)
+        top_ps.append(cfg.top_p)
+        top_ks.append(cfg.top_k)
+        seeds.append(default_seed)
+        return_logprobs_list.append(bool(cfg.return_logprobs))
+        return_logits_list.append(False)
 
-      max_gen_steps_list.append(sp.max_tokens)
-      temps.append(sp.temperature)
-      top_ps.append(sp.top_p)
-      top_ks.append(sp.top_k)
-      seeds.append(sp.seed)
-      return_logprobs_list.append(sp.return_logprobs)
-      return_logits_list.append(sp.return_logits)
-      if sp.beam_size is not None:
-        beam_sizes.append(sp.beam_size)
-
-    max_generation_steps = max(max_gen_steps_list) if max_gen_steps_list else 64
-    temperature = temps[0] if temps else 0.0
-    top_p = top_ps[0] if top_ps else None
-    top_k = top_ks[0] if top_ks else None
-    seed = seeds[0] if seeds else None
+    max_generation_steps = (
+        max(max_gen_steps_list) if max_gen_steps_list else default_max_tokens
+    )
+    temperature = temps[0] if temps else default_temp
+    top_p = top_ps[0] if top_ps else cfg.top_p
+    top_k = top_ks[0] if top_ks else cfg.top_k
+    seed = seeds[0] if seeds else default_seed
     return_logprobs = any(return_logprobs_list) or kwargs.get(
         "return_logprobs", False
     )
@@ -277,6 +308,8 @@ class VanillaSamplerAdapter(RaidenDestinationWeightSyncMixin, Sampler, abc.ABC):
         return_logits=return_logits,
         return_logprobs=return_logprobs,
     )
+    if cfg.eos_tokens is not None:
+      sampler_call_kwargs["eos_tokens"] = cfg.eos_tokens
     if has_token_prompts:
       sampler_call_kwargs["input_strings"] = None
       sampler_call_kwargs["prompt_token_ids"] = prompt_token_ids_batch
@@ -288,7 +321,7 @@ class VanillaSamplerAdapter(RaidenDestinationWeightSyncMixin, Sampler, abc.ABC):
     prompt_lengths = getattr(sampler_output, "prompt_lengths", None)
     responses = []
     for i, req in enumerate(requests):
-      req_id = getattr(req, "request_id", "")
+      req_id = req.request_id
 
       txt = (
           sampler_output.text[i]

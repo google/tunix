@@ -278,6 +278,9 @@ def _rollout_process_fn(
 ):
   model_config = test_common.ModelConfig(**model_config_kwargs)
   sampler_type = adapter_config_kwargs.get("sampler_type", "inprocess_vllm")
+  weight_sync_mode = adapter_config_kwargs.get(
+      "weight_sync_mode", WeightSyncMode.RAIDEN
+  )
   delegate = raiden_weight_sync_delegate.RaidenWeightSyncDelegate()
   adapter_config = RolloutConfig(**adapter_config_kwargs)
 
@@ -286,12 +289,7 @@ def _rollout_process_fn(
     vanilla_model(
         jnp.zeros((1, 4), dtype=jnp.int32), jnp.zeros((1, 4), dtype=jnp.int32)
     )
-    adapter = vanilla_sampler_adapter.VanillaSamplerAdapter(
-        server_id="vanilla_sampler_coord_0",
-        config=adapter_config,
-        raiden_sync_delegate=delegate,
-    )
-    adapter.sampler = vanilla_sampler_lib.Sampler(
+    sampler = vanilla_sampler_lib.Sampler(
         transformer=vanilla_model,
         tokenizer=test_common.MockVocab(),
         cache_config=vanilla_sampler_lib.CacheConfig(
@@ -301,14 +299,22 @@ def _rollout_process_fn(
             head_dim=model_config.head_dim,
         ),
     )
+    adapter = vanilla_sampler_adapter.VanillaSamplerAdapter(
+        server_id="vanilla_sampler_coord_0",
+        config=adapter_config,
+        sampler=sampler,
+        raiden_sync_delegate=delegate,
+        weight_sync_mode=weight_sync_mode,
+    )
   else:
     mock_vllm_sampler = MockVllmSampler(model_config, rngs=nnx.Rngs(1))
     adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
         server_id="vllm_sampler_coord_0",
         config=adapter_config,
+        vllm_sampler=mock_vllm_sampler,
         raiden_sync_delegate=delegate,
+        weight_sync_mode=weight_sync_mode,
     )
-    adapter.vllm_sampler = mock_vllm_sampler
 
   while True:
     try:
@@ -481,11 +487,7 @@ class WeightSyncE2ETest(absltest.TestCase):
     vanilla_model = test_common.ToyTransformer(
         self.model_config, rngs=nnx.Rngs(2)
     )
-    adapter = vanilla_sampler_adapter.VanillaSamplerAdapter(
-        server_id="vanilla_sampler_fallback_0",
-        config=adapter_config,
-    )
-    adapter.sampler = vanilla_sampler_lib.Sampler(
+    sampler = vanilla_sampler_lib.Sampler(
         transformer=vanilla_model,
         tokenizer=test_common.MockVocab(),
         cache_config=vanilla_sampler_lib.CacheConfig(
@@ -494,6 +496,12 @@ class WeightSyncE2ETest(absltest.TestCase):
             num_kv_heads=self.model_config.num_kv_heads,
             head_dim=self.model_config.head_dim,
         ),
+    )
+    adapter = vanilla_sampler_adapter.VanillaSamplerAdapter(
+        server_id="vanilla_sampler_fallback_0",
+        config=adapter_config,
+        sampler=sampler,
+        weight_sync_mode=WeightSyncMode.FALLBACK,
     )
 
     trainer_config = TrainingConfig(
@@ -534,8 +542,9 @@ class WeightSyncE2ETest(absltest.TestCase):
     adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
         server_id="vllm_sampler_fallback_0",
         config=adapter_config,
+        vllm_sampler=self.mock_vllm_sampler,
+        weight_sync_mode=WeightSyncMode.FALLBACK,
     )
-    adapter.vllm_sampler = self.mock_vllm_sampler
 
     trainer_config = TrainingConfig(
         eval_every_n_steps=2,

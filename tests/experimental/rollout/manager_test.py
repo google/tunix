@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import asyncio
-import types
 import unittest
 from unittest import mock
 
@@ -30,6 +29,7 @@ class _FakeSampler(sampler_lib.Sampler):
   def __init__(self, metadata):
     self._metadata = metadata
     self.calls = []
+    self.config = manager_lib.RolloutConfig()
 
   async def get_weight_sync_metadata(self, **kwargs):
     self.calls.append(kwargs)
@@ -48,7 +48,10 @@ class GetWeightSyncMetadataTest(unittest.IsolatedAsyncioTestCase):
   async def test_delegates_to_sampler(self):
     sampler = _FakeSampler([{"unit": "sampler0"}])
     manager = manager_lib.RolloutManager(
-        sampler=sampler, tokenizer="mock", chat_parser="mock"
+        config=manager_lib.RolloutConfig(),
+        sampler=sampler,
+        tokenizer="mock",
+        chat_parser="mock",
     )
     result = await manager.get_weight_sync_metadata()
     self.assertEqual(result, [{"unit": "sampler0"}])
@@ -56,13 +59,20 @@ class GetWeightSyncMetadataTest(unittest.IsolatedAsyncioTestCase):
   async def test_forwards_kwargs(self):
     sampler = _FakeSampler([])
     manager = manager_lib.RolloutManager(
-        sampler=sampler, tokenizer="mock", chat_parser="mock"
+        config=manager_lib.RolloutConfig(),
+        sampler=sampler,
+        tokenizer="mock",
+        chat_parser="mock",
     )
     await manager.get_weight_sync_metadata(timeout_s=5)
     self.assertEqual(sampler.calls, [{"timeout_s": 5}])
 
   async def test_default_sampler_raises_not_implemented(self):
-    manager = manager_lib.RolloutManager(tokenizer="mock", chat_parser="mock")
+    manager = manager_lib.RolloutManager(
+        config=manager_lib.RolloutConfig(),
+        tokenizer="mock",
+        chat_parser="mock",
+    )
     with self.assertRaises(NotImplementedError):
       await manager.get_weight_sync_metadata()
 
@@ -119,7 +129,7 @@ class RegisteredEnvMetadataTest(unittest.IsolatedAsyncioTestCase):
   async def test_generate_forwards_request_metadata_to_registered_env(self):
     _CaptureEnv.last_init_kwargs = None
     manager = manager_lib.RolloutManager(
-        config=types.SimpleNamespace(env_name="manager_capture_env"),
+        config=manager_lib.RolloutConfig(env_name="manager_capture_env"),
         sampler=_FakeSyncSampler([]),
         agent_factory=lambda: object(),
         tokenizer="mock",
@@ -168,6 +178,7 @@ class AdmissionGateTest(unittest.IsolatedAsyncioTestCase):
 
   def _manager(self, **kwargs):
     return manager_lib.RolloutManager(
+        config=manager_lib.RolloutConfig(),
         sampler=_FakeSyncSampler([]),
         tokenizer="mock",
         chat_parser="mock",
@@ -194,14 +205,22 @@ class AdmissionGateTest(unittest.IsolatedAsyncioTestCase):
   async def test_bind_delegates_to_sampler(self):
     sampler = _FakeSyncSampler([])
     manager = manager_lib.RolloutManager(
-        sampler=sampler, tokenizer="mock", chat_parser="mock")
+        config=manager_lib.RolloutConfig(),
+        sampler=sampler,
+        tokenizer="mock",
+        chat_parser="mock",
+    )
     await manager.bind_weight_sync()
 
   async def test_abort_weight_sync_delegates_and_reopens_admission(self):
     sampler = mock.AsyncMock(spec=sampler_lib.Sampler)
+    sampler.config = manager_lib.RolloutConfig()
     sampler.abort_weight_sync.return_value = "aborted"
     manager = manager_lib.RolloutManager(
-        sampler=sampler, tokenizer="mock", chat_parser="mock"
+        config=manager_lib.RolloutConfig(),
+        sampler=sampler,
+        tokenizer="mock",
+        chat_parser="mock",
     )
     manager._traffic.transition_to_syncing()
     res = await manager.abort_weight_sync()
@@ -258,7 +277,7 @@ class AgentConfigTest(unittest.IsolatedAsyncioTestCase):
       def __init__(self, **kwargs):
         del kwargs
 
-    config = types.SimpleNamespace(
+    config = manager_lib.RolloutConfig(
         agent_name="fake_agent_for_manager_test",
         agent_config={"source": "worker"},
         env_name="fake_env_for_manager_test",
@@ -314,7 +333,7 @@ class AgentConfigTest(unittest.IsolatedAsyncioTestCase):
       def __init__(self, **kwargs):
         del kwargs
 
-    config = types.SimpleNamespace(
+    config = manager_lib.RolloutConfig(
         agent_name="fake_agent_for_manager_test",
         agent_config={"source": "worker"},
         env_name="fake_env_for_manager_test",
@@ -353,7 +372,7 @@ class AgentConfigTest(unittest.IsolatedAsyncioTestCase):
     # The collector scores truncation against this set. If it stops arriving,
     # the collector silently falls back to the tokenizer's own EOS and
     # clip_ratio starts counting normal terminations as truncations.
-    config = types.SimpleNamespace(eos_tokens=[151643, 151645])
+    config = manager_lib.RolloutConfig(eos_tokens=[151643, 151645])
     manager = manager_lib.RolloutManager(
         config=config,
         sampler=_FakeSyncSampler([]),
@@ -378,7 +397,7 @@ class AgentConfigTest(unittest.IsolatedAsyncioTestCase):
 
   async def test_unset_eos_tokens_leave_the_collector_on_its_default(self):
     manager = manager_lib.RolloutManager(
-        config=types.SimpleNamespace(),
+        config=manager_lib.RolloutConfig(),
         sampler=_FakeSyncSampler([]),
         tokenizer="mock",
         chat_parser="mock",
@@ -404,28 +423,27 @@ class WeightSyncModeTest(absltest.TestCase):
       "tunix.experimental.weight_sync.raiden_weight_sync_delegate.RaidenWeightSyncDelegate"
   )
   def test_config_weight_sync_mode_raiden(self, mock_delegate_cls):
-    config = types.SimpleNamespace(
+    config = manager_lib.RolloutConfig(
         sampler_type="vanilla",
         weight_sync_mode=weight_sync.WeightSyncMode.RAIDEN,
     )
     manager = manager_lib.RolloutManager(
         config=config, tokenizer="mock", chat_parser="mock"
     )
-    self.assertTrue(getattr(manager.sampler, "enable_raiden", False))
-    delegate = getattr(manager.sampler, "raiden_sync_delegate", None)
-    self.assertIsNotNone(delegate)
+    self.assertTrue(manager.sampler.enable_raiden)  # pyrefly: ignore[missing-attribute]
+    self.assertIsNotNone(manager.sampler.raiden_sync_delegate)  # pyrefly: ignore[missing-attribute]
     mock_delegate_cls.assert_called_once_with(server_id="vanilla_sampler")
 
   def test_config_weight_sync_mode_fallback(self):
-    config = types.SimpleNamespace(
+    config = manager_lib.RolloutConfig(
         sampler_type="vanilla",
         weight_sync_mode=weight_sync.WeightSyncMode.FALLBACK,
     )
     manager = manager_lib.RolloutManager(
         config=config, tokenizer="mock", chat_parser="mock"
     )
-    self.assertFalse(getattr(manager.sampler, "enable_raiden", False))
-    self.assertIsNone(getattr(manager.sampler, "raiden_sync_delegate", None))
+    self.assertFalse(manager.sampler.enable_raiden)  # pyrefly: ignore[missing-attribute]
+    self.assertIsNone(manager.sampler.raiden_sync_delegate)  # pyrefly: ignore[missing-attribute]
 
   @mock.patch(
       "tunix.experimental.weight_sync.raiden_weight_sync_delegate.RaidenWeightSyncDelegate"
@@ -439,18 +457,50 @@ class WeightSyncModeTest(absltest.TestCase):
     mock_lib = mock.MagicMock()
     mock_lib.VllmSampler.return_value = mock.MagicMock()
     mock_get_vllm.return_value = mock_lib
-    config = types.SimpleNamespace(
+    config = manager_lib.RolloutConfig(
         sampler_type="inprocess_vllm",
         weight_sync_mode=weight_sync.WeightSyncMode.RAIDEN,
     )
     manager = manager_lib.RolloutManager(
         config=config, tokenizer="mock", chat_parser="mock"
     )
-    self.assertTrue(getattr(manager.sampler, "enable_raiden", False))
-    delegate = getattr(manager.sampler, "raiden_sync_delegate", None)
-    self.assertIsNotNone(delegate)
+    self.assertTrue(manager.sampler.enable_raiden)  # pyrefly: ignore[missing-attribute]
+    self.assertIsNotNone(manager.sampler.raiden_sync_delegate)  # pyrefly: ignore[missing-attribute]
     mock_delegate_cls.assert_called_once_with(
         server_id="inprocess_vllm_sampler"
+    )
+
+
+class ConstructorValidationTest(absltest.TestCase):
+
+  def test_invalid_config_raises_type_error(self):
+    with self.assertRaises(TypeError):
+      manager_lib.RolloutManager(
+          config=None,  # pyrefly: ignore[bad-argument-type]
+          sampler=_FakeSyncSampler([]),
+          tokenizer="mock",
+          chat_parser="mock",
+      )
+
+  def test_invalid_sampler_raises_type_error(self):
+    with self.assertRaises(TypeError):
+      manager_lib.RolloutManager(
+          config=manager_lib.RolloutConfig(),
+          sampler="not_a_sampler",  # pyrefly: ignore[bad-argument-type]
+          tokenizer="mock",
+          chat_parser="mock",
+      )
+
+  def test_rollout_config_reexported_consistently(self):
+    from tunix.experimental.worker import rollout_worker  # pylint: disable=g-import-not-at-top
+
+    self.assertIs(
+        manager_lib.RolloutConfig,
+        sampler_lib.RolloutConfig,
+    )
+    self.assertIs(
+        rollout_worker.RolloutConfig,
+        sampler_lib.RolloutConfig,
     )
 
 

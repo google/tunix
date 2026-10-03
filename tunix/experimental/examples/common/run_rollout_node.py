@@ -475,6 +475,7 @@ def _create_vanilla_worker(args, tokenizer):
       tokenizer=tokenizer,
       cache_config=args.max_prompt_length + args.max_response_length,
       config=config,
+      weight_sync_mode=args.weight_sync_mode,
   )
 
   rollout_tokenizer = tokenizer_adapter_lib.TokenizerAdapter(tokenizer)
@@ -644,17 +645,18 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
       engine_kwargs=engine_kwargs,
       eos_tokens=_eos_token_ids(args, tokenizer),
   )
-  sampler_adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
-      server_id=args.worker_id,
-      tokenizer=tokenizer,
-      config=vllm_config,
-      weight_sync_mode=args.weight_sync_mode,
-      max_concurrency=args.max_concurrency,
-  )
   config = rollout_worker.RolloutConfig(
       sampler_type="inprocess_vllm",
       rollout_vllm_model_version=vllm_model,
       **_rollout_config_kwargs(args, tokenizer),
+  )
+  sampler_adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
+      server_id=args.worker_id,
+      tokenizer=tokenizer,
+      config=config,
+      vllm_config=vllm_config,
+      weight_sync_mode=args.weight_sync_mode,
+      max_concurrency=args.max_concurrency,
   )
   return sampler_adapter, config
 
@@ -738,16 +740,16 @@ def _create_vllm_sampler(args, tokenizer):
         )
     )
   engine_args = AsyncEngineArgs(**engine_kwargs)  # pytype: disable=bad-argument-type  # type: ignore[arg-type]
-  sampler_adapter = vllm_sampler_adapter.VllmSamplerAdapter(  # pytype: disable=bad-instantiation  # type: ignore[abstract]
-      server_id=args.worker_id,
-      engine_args=engine_args,
-      model_name=vllm_model,
-      weight_sync_mode=args.weight_sync_mode,
-  )
   config = rollout_worker.RolloutConfig(
       sampler_type="vllm",
       rollout_vllm_model_version=vllm_model,
       **_rollout_config_kwargs(args, tokenizer),
+  )
+  sampler_adapter = vllm_sampler_adapter.VllmSamplerAdapter(  # pytype: disable=bad-instantiation  # type: ignore[abstract]
+      server_id=args.worker_id,
+      config=config,
+      engine_args=engine_args,
+      weight_sync_mode=args.weight_sync_mode,
   )
   return sampler_adapter, config
 

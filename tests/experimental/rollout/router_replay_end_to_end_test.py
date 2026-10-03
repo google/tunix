@@ -176,9 +176,10 @@ class SamplerToPayloadTest(absltest.TestCase):
     )
 
     adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
-        server_id="rollout"
+        server_id="rollout",
+        config=base_rollout.RolloutConfig(),
+        vllm_sampler=stub,
     )
-    adapter.vllm_sampler = stub
     request = base_sampler_lib.SamplingRequest(
         request_id="req-0",
         prompt=np.arange(10, 10 + PROMPT_LEN, dtype=np.int32),
@@ -248,9 +249,10 @@ class SamplerToPayloadTest(absltest.TestCase):
     ]
 
     adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
-        server_id="rollout"
+        server_id="rollout",
+        config=base_rollout.RolloutConfig(),
+        vllm_sampler=stub,
     )
-    adapter.vllm_sampler = stub
 
     req0 = base_sampler_lib.SamplingRequest(
         request_id="req-0",
@@ -342,9 +344,10 @@ class SamplerToPayloadTest(absltest.TestCase):
     )
 
     adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
-        server_id="rollout"
+        server_id="rollout",
+        config=base_rollout.RolloutConfig(),
+        vllm_sampler=stub,
     )
-    adapter.vllm_sampler = stub
 
     req_a = base_sampler_lib.SamplingRequest(
         request_id="req-a",
@@ -463,9 +466,10 @@ class SamplerToPayloadTest(absltest.TestCase):
       )
 
     adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
-        server_id="rollout"
+        server_id="rollout",
+        config=base_rollout.RolloutConfig(),
+        vllm_sampler=sampler,
     )
-    adapter.vllm_sampler = sampler
 
     mock_agent = mock.MagicMock()
     mock_agent.trajectory = agent_types.Trajectory()

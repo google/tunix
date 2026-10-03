@@ -19,6 +19,8 @@ Exposes OpenAI-compatible /v1/chat/completions and /v1/completions endpoints
 powered directly by VllmSampler in tpu-inference.
 """
 
+# pylint: disable=bad-indentation
+
 import argparse
 import json
 import logging
@@ -36,6 +38,7 @@ from pydantic import BaseModel
 from vllm.engine.arg_utils import AsyncEngineArgs
 
 from tunix.experimental.rollout.vllm_sampler_v2 import RLVllmSampler
+from tunix.rl.rollout import base_rollout
 
 logging.basicConfig(
     level=logging.INFO,
@@ -421,7 +424,10 @@ def main() -> None:
     )
 
     logger.info("Initializing RLVllmSampler for server deployment...")
-    sampler_instance = RLVllmSampler(engine_args=engine_args)
+    sampler_instance = RLVllmSampler(
+        engine_args=engine_args,
+        config=base_rollout.RolloutConfig(),
+    )
 
     @app.on_event("startup")
     async def startup_event():

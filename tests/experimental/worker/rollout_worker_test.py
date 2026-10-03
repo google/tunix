@@ -44,6 +44,7 @@ class RolloutWorkerTest(absltest.TestCase):
     self.env_pool = mocks.MockEnvironmentPool(pool_size=5, default_delay=0.0)
     self.worker = rollout_worker.RolloutWorker(
         worker_id="rollout_worker_42",
+        config=rollout_worker.RolloutConfig(),
         sampler=self.sampler,
         env_pool=self.env_pool,
         agent_factory=mocks.MockAgent,
@@ -195,7 +196,7 @@ class RolloutWorkerTest(absltest.TestCase):
 def _worker(config=None):
   return rollout_worker.RolloutWorker(
       worker_id="w0",
-      config=config,
+      config=config if config is not None else rollout_worker.RolloutConfig(),
       sampler=mocks.MockBaseSamplerImpl(sampler_name="mock_sampler"),
       tokenizer="mock",
       chat_parser="mock",
@@ -204,9 +205,15 @@ def _worker(config=None):
 
 class RolloutWorkerTrajectoryStoreTest(absltest.TestCase):
 
-  def test_no_config_means_no_store(self):
-    worker = _worker()
-    self.assertIsNone(worker.trajectory_store)
+  def test_no_config_raises_type_error(self):
+    with self.assertRaises(TypeError):
+      rollout_worker.RolloutWorker(
+          worker_id="w0",
+          config=None,  # pyrefly: ignore[bad-argument-type]
+          sampler=mocks.MockBaseSamplerImpl(sampler_name="mock_sampler"),
+          tokenizer="mock",
+          chat_parser="mock",
+      )
 
   def test_config_without_trajectory_store_config_means_no_store(self):
     worker = _worker(config=rollout_worker.RolloutConfig())

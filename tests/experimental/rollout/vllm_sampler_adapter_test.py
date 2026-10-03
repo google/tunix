@@ -22,6 +22,7 @@ from absl.testing import absltest
 import numpy as np
 from tunix.experimental.rollout import sampler as base_sampler_lib
 from tunix.experimental.rollout import vllm_sampler_adapter
+from tunix.rl.rollout import base_rollout
 
 
 class VllmSamplerAdapterTest(absltest.TestCase):
@@ -31,6 +32,7 @@ class VllmSamplerAdapterTest(absltest.TestCase):
     self.mock_sampler_instance = mock.AsyncMock()
     self.sampler_adapter = vllm_sampler_adapter.VllmSamplerAdapter(
         server_id="vllm_slice_01",
+        config=base_rollout.RolloutConfig(),
         sampler_instance=self.mock_sampler_instance,
     )
 
@@ -210,34 +212,16 @@ class VllmSamplerAdapterTest(absltest.TestCase):
     )
 
   def test_uninitialized_raises(self):
-    uninit = vllm_sampler_adapter.VllmSamplerAdapter(server_id="empty")
-    with self.assertRaises(RuntimeError):
-      asyncio.run(uninit.sample(base_sampler_lib.SamplingRequest(prompt="hi")))
-    with self.assertRaises(RuntimeError):
-      asyncio.run(uninit.stop())
-    with self.assertRaises(RuntimeError):
-      asyncio.run(uninit.pause())
-    with self.assertRaises(RuntimeError):
-      asyncio.run(uninit.resume())
-    with self.assertRaises(RuntimeError):
-      asyncio.run(uninit.get_mesh())
-    with self.assertRaises(RuntimeError):
-      asyncio.run(uninit.get_weight_sync_metadata())
-    with self.assertRaises(RuntimeError):
-      asyncio.run(uninit.pre_weight_sync(None))
-    with self.assertRaises(RuntimeError):
-      asyncio.run(uninit.weight_sync(None))
-    with self.assertRaises(RuntimeError):
-      asyncio.run(uninit.post_weight_sync(None))
-    with self.assertRaises(RuntimeError):
-      asyncio.run(uninit.get_transfer_status("req"))
-    with self.assertRaises(RuntimeError):
-      asyncio.run(uninit.get_load_info())
-    with self.assertRaises(RuntimeError):
-      asyncio.run(
-          uninit.migrate_kv_cache(
-              source_server_id="s", target_server_id="t", token_ids=[1]
-          )
+    with self.assertRaises(TypeError):
+      vllm_sampler_adapter.VllmSamplerAdapter(
+          server_id="empty",
+          config=None,  # pyrefly: ignore[bad-argument-type]
+          sampler_instance=self.mock_sampler_instance,
+      )
+    with self.assertRaises(ValueError):
+      vllm_sampler_adapter.VllmSamplerAdapter(
+          server_id="empty",
+          config=base_rollout.RolloutConfig(),
       )
 
   def test_sample_none_requests_raises(self):
@@ -249,7 +233,9 @@ class VllmSamplerAdapterTest(absltest.TestCase):
     incomplete = mock.AsyncMock(spec=["start", "stop", "sample"])
     with self.assertRaises(RuntimeError) as ctx:
       vllm_sampler_adapter.VllmSamplerAdapter(
-          server_id="vllm_slice_01", sampler_instance=incomplete
+          server_id="vllm_slice_01",
+          config=base_rollout.RolloutConfig(),
+          sampler_instance=incomplete,
       )
     message = str(ctx.exception)
     for name in vllm_sampler_adapter._REQUIRED_RAIDEN_METHODS:  # pylint: disable=protected-access
@@ -260,6 +246,7 @@ class VllmSamplerAdapterTest(absltest.TestCase):
     incomplete = mock.AsyncMock(spec=["start", "stop", "sample"])
     adapter = vllm_sampler_adapter.VllmSamplerAdapter(
         server_id="vllm_slice_01",
+        config=base_rollout.RolloutConfig(),
         sampler_instance=incomplete,
         weight_sync_mode="none",
     )
@@ -281,22 +268,10 @@ class VllmSamplerAdapterTest(absltest.TestCase):
     asyncio.run(self.sampler_adapter.get_weight_sync_metadata())
     self.mock_sampler_instance.start.assert_awaited_once()  # not started twice
 
-  def test_weight_sync_apis_fail_when_uninitialized(self):
-    """Weight sync entry points fail instead of silently initializing."""
-    uninit = vllm_sampler_adapter.VllmSamplerAdapter(server_id="vllm_slice_01")
-    for coro in (
-        uninit.bind_weight_sync(),
-        uninit.pre_weight_sync(None),
-        uninit.weight_sync(None),
-        uninit.post_weight_sync(None),
-        uninit.abort_weight_sync(None),
-    ):
-      with self.assertRaises(RuntimeError):
-        asyncio.run(coro)
-
   def test_raiden_job_name_derived_from_server_id(self):
     adapter = vllm_sampler_adapter.VllmSamplerAdapter(
         server_id="worker-42",
+        config=base_rollout.RolloutConfig(),
         sampler_instance=self.mock_sampler_instance,
     )
     self.assertEqual(adapter.raiden_job_name, "replica_worker-42")
