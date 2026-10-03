@@ -424,6 +424,8 @@ start_orchestrator() {
         --batch_size=${BATCH_SIZE} \
         --mini_batch_size=${MINI_BATCH_SIZE} \
         --num_generations=${NUM_GENERATIONS} \
+        ${NUM_GENERATIONS_TO_DISPATCH:+--num_generations_to_dispatch=${NUM_GENERATIONS_TO_DISPATCH}} \
+        $([[ "${PREFER_VALID_ROLLOUTS}" == "false" || "${PREFER_VALID_ROLLOUTS}" == "False" || "${PREFER_VALID_ROLLOUTS}" == "0" ]] && echo --no-prefer_valid_rollouts || echo --prefer_valid_rollouts) \
         --rollout_replicas=${ROLLOUT_WORKERS:-${ROLLOUT_REPLICAS:-1}} \
         --temperature=${TEMPERATURE} \
         --top_p=${TOP_P} \

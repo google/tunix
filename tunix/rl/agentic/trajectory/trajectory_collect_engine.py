@@ -312,44 +312,43 @@ class TrajectoryCollectEngine:
     """  # fmt: skip
     try:
       await self._reset()
-
-      self.agent.trajectory.status = agent_types.TrajectoryStatus.RUNNING
-      self._logged_clip_reasons.clear()
-
-      if self.trajectory_store is not None and self.metadata is not None:
-        self.sync_trajectory_metadata(policy_version=self.policy_version)
-        task = self.agent.trajectory.task or getattr(self.env, "task", None)
-        task_step = converter_lib.create_task_step(task)
-        if task_step is not None:
-          self.trajectory_store.add_step(task_step, self.metadata)
-
-      while True:
-        if len(self.agent.trajectory.steps) >= self.max_steps:
-          self.agent.trajectory.status = (
-              agent_types.TrajectoryStatus.MAX_STEPS_REACHED
-          )
-          self._log_trajectory_clip("MAX_STEPS_REACHED")
-          break
-
-        done = await self._one_step()
-
-        if done:
-          if (
-              self.agent.trajectory.status
-              == agent_types.TrajectoryStatus.RUNNING
-          ):
-            self.agent.trajectory.status = (
-                agent_types.TrajectoryStatus.SUCCEEDED
-            )
-          break
-
-      self._finalize_terminal_step_routing()
-
-      masked_out = (
-          self.overlong_filter
-          and self.agent.trajectory.status in self.filter_statuses
-      )
       try:
+        self.agent.trajectory.status = agent_types.TrajectoryStatus.RUNNING
+        self._logged_clip_reasons.clear()
+
+        if self.trajectory_store is not None and self.metadata is not None:
+          self.sync_trajectory_metadata(policy_version=self.policy_version)
+          task = self.agent.trajectory.task or getattr(self.env, "task", None)
+          task_step = converter_lib.create_task_step(task)
+          if task_step is not None:
+            self.trajectory_store.add_step(task_step, self.metadata)
+
+        while True:
+          if len(self.agent.trajectory.steps) >= self.max_steps:
+            self.agent.trajectory.status = (
+                agent_types.TrajectoryStatus.MAX_STEPS_REACHED
+            )
+            self._log_trajectory_clip("MAX_STEPS_REACHED")
+            break
+
+          done = await self._one_step()
+
+          if done:
+            if (
+                self.agent.trajectory.status
+                == agent_types.TrajectoryStatus.RUNNING
+            ):
+              self.agent.trajectory.status = (
+                  agent_types.TrajectoryStatus.SUCCEEDED
+              )
+            break
+
+        self._finalize_terminal_step_routing()
+
+        masked_out = (
+            self.overlong_filter
+            and self.agent.trajectory.status in self.filter_statuses
+        )
         if not masked_out:
           await self._append_final_reward()
         self.compute_mc_reward()

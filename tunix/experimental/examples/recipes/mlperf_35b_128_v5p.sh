@@ -59,7 +59,7 @@ export ROLLOUT_MESH_EXPERT="${ROLLOUT_MESH_EXPERT:-$(( ${_rollout_dims//x/*} / $
 export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-16}"
 
 # Sandbox Concurrency
-export MAX_WARMPOOL_REPLICAS="${MAX_WARMPOOL_REPLICAS:-16}"
+export MAX_WARMPOOL_REPLICAS="${MAX_WARMPOOL_REPLICAS:-${NUM_GENERATIONS_TO_DISPATCH:-16}}"
 export MAX_CONCURRENCY="${MAX_CONCURRENCY:-1024}"
 
 # MLPerf RCP logging with deferred offline eval: from VAL_START_AT (default
@@ -102,12 +102,12 @@ export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS:-use_gdn_kernel=true gdn_cp_mo
 decoder_layer_input=offload context=remat gdn=remat gdn_conv=remat gdn_states=remat \
 megablox=true sparse_matmul=true use_tokamax_gmm=true use_gmm_v2=true \
 use_gmm_v2_heuristic_tiling=true merge_gating_gmm=false \
-use_ragged_sort=true use_custom_sort_vjp=false ragged_buffer_factor=2.0 \
+use_ragged_sort=false use_custom_sort_vjp=false ragged_buffer_factor=-1.0 \
 use_tokamax_splash=true use_splash_scheduler=true \
 sa_block_q=1024 sa_block_kv=4096 sa_block_kv_compute=512 \
 sa_block_q_dkv=2048 sa_block_kv_dkv=2048 sa_block_kv_dkv_compute=512 \
 sa_fuse_reciprocal=false sa_use_base2_exp=true dq_reduction_steps=3 \
-context_parallel_strategy=ring context_parallel_load_balance=false allow_split_physical_axes=false \
+context_parallel_strategy=ring context_parallel_load_balance=false allow_split_physical_axes=true \
 context_parallel_attention_load_balance=true \
 num_vocab_tiling=16 use_iota_embed=false mu_dtype=float32 grad_dtype=float32 \
 checkpoint_storage_concurrent_gb=96 \

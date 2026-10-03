@@ -359,6 +359,17 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         completed.append(traj_item)
     return completed
 
+  async def cancel_rollouts(self, prompt_id: str) -> int:
+    """Cancels in-flight rollout trajectories matching `prompt_id` across all rollout workers."""
+    if not self._rollout_workers or not prompt_id:
+      return 0
+    tasks = [
+        self._invoke_worker(w, "cancel_by_prompt_id", prompt_id=prompt_id)
+        for w in self._rollout_workers
+    ]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    return sum(r for r in results if isinstance(r, int))
+
   async def generate(
       self,
       prompts: Sequence[Any],

@@ -399,6 +399,8 @@ class StandardRLProgram(RLProgram):
       checkpoint_optimizer_interval_steps: int = 1,
       pipeline_train_microbatches: bool = False,
       rollout_priority_scheduling: bool = False,
+      num_generations_to_dispatch: int | None = None,
+      prefer_valid_rollouts: bool = True,
   ):
     super().__init__()
     self.engine: rl_engine_interface.AbstractRLEngine | None = None
@@ -459,6 +461,36 @@ class StandardRLProgram(RLProgram):
     self.mini_batch_size = algo.mini_batch_size
     if self.mini_batch_size <= 0 or self.num_generations <= 0:
       raise ValueError("mini_batch_size and num_generations must be positive.")
+    if (
+        num_generations_to_dispatch is not None
+        and num_generations_to_dispatch < self.num_generations
+    ):
+      raise ValueError(
+          f"num_generations_to_dispatch ({num_generations_to_dispatch}) must be"
+          f" >= num_generations ({self.num_generations})."
+      )
+    self.num_generations_to_dispatch = num_generations_to_dispatch
+    self.prefer_valid_rollouts = prefer_valid_rollouts
+    self._effective_generations_to_dispatch = (
+        self.num_generations_to_dispatch
+        if self.num_generations_to_dispatch is not None
+        else self.num_generations
+    )
+    if (
+        num_generations_to_dispatch is not None
+        and num_generations_to_dispatch < self.num_generations
+    ):
+      raise ValueError(
+          f"num_generations_to_dispatch ({num_generations_to_dispatch}) must be"
+          f" >= num_generations ({self.num_generations})."
+      )
+    self.num_generations_to_dispatch = num_generations_to_dispatch
+    self.prefer_valid_rollouts = prefer_valid_rollouts
+    self._effective_generations_to_dispatch = (
+        self.num_generations_to_dispatch
+        if self.num_generations_to_dispatch is not None
+        else self.num_generations
+    )
     self.full_batch_size = (
         self.mini_batch_size if batch_size is None else batch_size
     )
@@ -575,6 +607,7 @@ class StandardRLProgram(RLProgram):
     )
     self.last_step_timestamp_ms: int | None = None
     self._in_flight_rollouts = 0
+    self._pending_cancel_tasks: set[asyncio.Task[int]] = set()
     self._window_release = asyncio.Event()
     self._dispatch_done = asyncio.Event()
 
@@ -601,6 +634,8 @@ class StandardRLProgram(RLProgram):
       )
     self.raw_q = trajectory_queue_manager.TrajectoryQueueManager.create(
         num_generations=self.num_generations,
+        num_generations_to_dispatch=self._effective_generations_to_dispatch,
+        prefer_valid_rollouts=self.prefer_valid_rollouts,
         max_staleness=max_staleness,
         current_policy_version=lambda: self.policy_version,
         on_drop=on_drop,
@@ -828,9 +863,9 @@ class StandardRLProgram(RLProgram):
             rollout_policy_version,
             self._next_batch,
         )
-        self._in_flight_rollouts += self.num_generations
+        self._in_flight_rollouts += self._effective_generations_to_dispatch
         dispatch_kwargs: dict[str, Any] = {
-            "num_generations": self.num_generations,
+            "num_generations": self._effective_generations_to_dispatch,
             "policy_version": rollout_policy_version,
             # Lower is served first, so with `max_staleness > 0` the oldest
             # in-flight batch (the window's lower edge) keeps its sampler
@@ -878,11 +913,28 @@ class StandardRLProgram(RLProgram):
             # `_in_flight_rollouts` to never reach 0, hanging the EOF cascade.
             self._in_flight_rollouts -= len(completed)
             for item in completed:
-              await self.raw_q.put(item)
+              group_completed = await self.raw_q.put(item)
+              if (
+                  group_completed
+                  and self._effective_generations_to_dispatch
+                  > self.num_generations
+                  and item.prompt_id
+              ):
+                cancel_task = asyncio.create_task(
+                    self.engine.cancel_rollouts(str(item.prompt_id))
+                )
+                self._pending_cancel_tasks.add(cancel_task)
+                cancel_task.add_done_callback(
+                    self._pending_cancel_tasks.discard
+                )
         except Exception as exc:  # pylint: disable=broad-exception-caught
           logging.warning("Error in polling_stage: %s", exc)
           await asyncio.sleep(0.01)
     finally:
+      if self._pending_cancel_tasks:
+        await asyncio.gather(
+            *list(self._pending_cancel_tasks), return_exceptions=True
+        )
       # NB: We currently assume it's safe to silently drop partial groups upon EOF.
       await self.raw_q.close()
 
@@ -2061,6 +2113,10 @@ class StandardRLProgram(RLProgram):
         )
         break
 
+      if self.sync_weights and self._pending_cancel_tasks:
+        await asyncio.gather(
+            *list(self._pending_cancel_tasks), return_exceptions=True
+        )
       if self.sync_weights and self.async_weight_sync:
         # Only the time the trainer is actually held: the previous round, if
         # it outlived this step, plus this round's source snapshot.

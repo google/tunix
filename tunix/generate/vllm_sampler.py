@@ -639,12 +639,21 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     # vLLM's LLM.generate returns outputs sorted by request id as well.
     return sorted(outputs, key=lambda o: int(o.request_id))
 
+  def cancel_requests(self, request_ids: Sequence[str]) -> None:
+    """Aborts in-flight server-mode requests on the underlying vLLM driver."""
+    if self._driver is None:
+      return
+    for rid in request_ids:
+      self._driver.cancel(rid)
+
   def _generate_server_mode(
       self,
       prompts: List[TokensPrompt],
       sampling_params: Union[
           SamplingParams, BeamSearchParams, List[SamplingParams]
       ],
+      cancel_event: Optional[threading.Event] = None,
+      request_ids_out: Optional[List[str]] = None,
   ) -> List[RequestOutput]:
     """Generate the response in server mode."""
     if self._driver is None:
@@ -653,6 +662,8 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     requests = []
     for idx, prompt in enumerate(prompts):
       request_id = str(next(self._request_counter))
+      if request_ids_out is not None:
+        request_ids_out.append(request_id)
       if isinstance(sampling_params, list):
         params = sampling_params[idx]
       else:
@@ -665,7 +676,13 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           "params": params,
       })
 
+    if cancel_event is not None and cancel_event.is_set():
+      raise concurrent.futures.CancelledError("vLLM request cancelled.")
+
     futures = self._driver.submit_requests(requests)
+    if cancel_event is not None and cancel_event.is_set():
+      self.cancel_requests([r["request_id"] for r in requests])
+      raise concurrent.futures.CancelledError("vLLM request cancelled.")
     if self.config.overlap_postprocessing:
       self._postprocess_as_completed(futures)
 
@@ -723,6 +740,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     if self.tokenizer is not None and self.tokenizer.eos_id() is not None:
       eos_ids.add(self.tokenizer.eos_id())
     return list(eos_ids)
+
   def __call__(
       self,
       input_strings: str | List[str] | None = None,
@@ -741,6 +759,8 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       pad_output: bool = False,
       *,
       prompt_token_ids: Sequence[Sequence[int] | np.ndarray] | None = None,
+      cancel_event: Optional[threading.Event] = None,
+      request_ids_out: Optional[List[str]] = None,
       **kwargs,
   ) -> base_sampler.SamplerOutput:
     """The entry point API for vLLM Sampler"""
@@ -903,7 +923,10 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
 
     if self._driver is not None:
       outputs = self._generate_server_mode(
-          prompt_objects, target_sampling_params
+          prompt_objects,
+          target_sampling_params,
+          cancel_event=cancel_event,
+          request_ids_out=request_ids_out,
       )
     else:
       outputs = self._generate_offline(prompt_objects, target_sampling_params)

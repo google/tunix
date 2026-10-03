@@ -1240,6 +1240,32 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     # Prompt (len 1, carrying prompt_routing 3) and conversation (len 0)
     self.assertEqual(routed.shape, (1, num_layers, top_k))
     np.testing.assert_array_equal(routed[0], 3)
+
+  def test_collect_cancelled_closes_env(self):
+    started = asyncio.Event()
+
+    async def _slow_model_call(chat_input, env_arg, **kwargs):
+      del chat_input, env_arg, kwargs
+      started.set()
+      await asyncio.sleep(10.0)
+
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=_slow_model_call,
+    )
+
+    async def _run():
+      task = asyncio.create_task(engine.collect(mode='Token'))
+      await asyncio.wait_for(started.wait(), timeout=2.0)
+      task.cancel()
+      with self.assertRaises(asyncio.CancelledError):
+        await task
+
+    asyncio.run(_run())
+    self.mock_env.reset.assert_called_once()
+    self.mock_env.close.assert_called_once()
+
   def test_on_rollout_output_callback(self):
     outputs = []
 

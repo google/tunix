@@ -28,6 +28,7 @@ def _create_item(
     task_id: str = "",
     reward: float = 1.0,
     batch_idx: int | None = None,
+    is_valid: bool = True,
 ) -> datatypes.TrajectoryItem:
   """Helper to create a TrajectoryItem for testing."""
   traj = datatypes.Trajectory(reward=reward)
@@ -40,6 +41,7 @@ def _create_item(
       start_step=0,
       traj=traj,
       metadata=metadata,
+      is_valid=is_valid,
   )
 
 
@@ -55,10 +57,12 @@ class QueueManagerTest(absltest.TestCase):
       item1 = _create_item("g1", group_index=0)
       item2 = _create_item("g1", group_index=1)
 
-      await manager.put(item1)
+      completed_first = await manager.put(item1)
+      self.assertFalse(completed_first)
       self.assertEmpty(manager._ready_groups)
 
-      await manager.put(item2)
+      completed_second = await manager.put(item2)
+      self.assertTrue(completed_second)
       self.assertLen(manager._ready_groups, 1)
 
       batch = await manager.get_batch(2)
@@ -739,6 +743,270 @@ class BatchOrderedQueueManagerTest(absltest.TestCase):
       self.assertCountEqual(filtered[0], [stale_valid, stale_error])
 
     asyncio.run(_run_test())
+
+
+  def test_overgeneration_prefer_valid_rollouts_true_waits_for_valid(self):
+    """When prefer_valid_rollouts=True, waits for G valid items and drops stragglers."""
+
+    async def _run_test():
+      manager = trajectory_queue_manager.TrajectoryQueueManager.create(
+          num_generations=2,
+          num_generations_to_dispatch=4,
+          prefer_valid_rollouts=True,
+      )
+      valid_0 = _create_item("p1", group_index=0, is_valid=True)
+      invalid_1 = _create_item("p1", group_index=1, is_valid=False)
+      valid_2 = _create_item("p1", group_index=2, is_valid=True)
+      straggler_3 = _create_item("p1", group_index=3, is_valid=True)
+
+      self.assertFalse(await manager.put(valid_0))
+      # Second item is invalid, so group of 2 valid items is not yet ready.
+      self.assertFalse(await manager.put(invalid_1))
+      self.assertEqual(manager.ready_groups_count, 0)
+
+      # Third item is valid -> 2 valid items accumulated -> group emitted!
+      self.assertTrue(await manager.put(valid_2))
+      self.assertEqual(manager.ready_groups_count, 1)
+
+      # Fourth straggler arrives after group completion -> silently dropped.
+      self.assertFalse(await manager.put(straggler_3))
+      self.assertEqual(manager.ready_groups_count, 1)
+      self.assertEqual(manager.incomplete_buckets_count, 0)
+
+      group = await manager.get_group()
+      self.assertEqual(group, [valid_0, valid_2])
+
+    asyncio.run(_run_test())
+
+  def test_overgeneration_prefer_valid_rollouts_fallback_when_budget_exhausted(
+      self,
+  ):
+    """When > G_dispatch - G items fail, emits group padded with invalid items at G_dispatch."""
+
+    async def _run_test():
+      manager = trajectory_queue_manager.TrajectoryQueueManager.create(
+          num_generations=2,
+          num_generations_to_dispatch=3,
+          prefer_valid_rollouts=True,
+      )
+      invalid_0 = _create_item("p1", group_index=0, is_valid=False)
+      valid_1 = _create_item("p1", group_index=1, is_valid=True)
+      invalid_2 = _create_item("p1", group_index=2, is_valid=False)
+
+      self.assertFalse(await manager.put(invalid_0))
+      self.assertFalse(await manager.put(valid_1))
+      # 3rd arrival exhausts num_generations_to_dispatch=3 with only 1 valid item.
+      self.assertTrue(await manager.put(invalid_2))
+
+      group = await manager.get_group()
+      self.assertEqual(group, [valid_1, invalid_0])
+
+    asyncio.run(_run_test())
+
+  def test_overgeneration_prefer_valid_rollouts_false_takes_first_g(self):
+    """When prefer_valid_rollouts=False, emits the first G arrivals regardless of validity."""
+
+    async def _run_test():
+      manager = trajectory_queue_manager.TrajectoryQueueManager.create(
+          num_generations=2,
+          num_generations_to_dispatch=4,
+          prefer_valid_rollouts=False,
+      )
+      valid_0 = _create_item("p1", group_index=0, is_valid=True)
+      invalid_1 = _create_item("p1", group_index=1, is_valid=False)
+      valid_2 = _create_item("p1", group_index=2, is_valid=True)
+
+      self.assertFalse(await manager.put(valid_0))
+      self.assertTrue(await manager.put(invalid_1))
+      self.assertFalse(await manager.put(valid_2))
+
+      group = await manager.get_group()
+      self.assertEqual(group, [valid_0, invalid_1])
+
+    asyncio.run(_run_test())
+
+  def test_overgeneration_invalid_dispatch_count_raises(self):
+    with self.assertRaises(ValueError):
+      trajectory_queue_manager.TrajectoryQueueManager.create(
+          num_generations=4,
+          num_generations_to_dispatch=2,
+      )
+
+
+  def test_overgeneration_prefer_valid_rollouts_true_waits_for_valid(self):
+    """When prefer_valid_rollouts=True, waits for G valid items and drops stragglers."""
+
+    async def _run_test():
+      manager = trajectory_queue_manager.TrajectoryQueueManager.create(
+          num_generations=2,
+          num_generations_to_dispatch=4,
+          prefer_valid_rollouts=True,
+      )
+      valid_0 = _create_item("p1", group_index=0, is_valid=True)
+      invalid_1 = _create_item("p1", group_index=1, is_valid=False)
+      valid_2 = _create_item("p1", group_index=2, is_valid=True)
+      straggler_3 = _create_item("p1", group_index=3, is_valid=True)
+
+      self.assertFalse(await manager.put(valid_0))
+      # Second item is invalid, so group of 2 valid items is not yet ready.
+      self.assertFalse(await manager.put(invalid_1))
+      self.assertEqual(manager.ready_groups_count, 0)
+
+      # Third item is valid -> 2 valid items accumulated -> group emitted!
+      self.assertTrue(await manager.put(valid_2))
+      self.assertEqual(manager.ready_groups_count, 1)
+
+      # Fourth straggler arrives after group completion -> silently dropped.
+      self.assertFalse(await manager.put(straggler_3))
+      self.assertEqual(manager.ready_groups_count, 1)
+      self.assertEqual(manager.incomplete_buckets_count, 0)
+
+      group = await manager.get_group()
+      self.assertEqual(group, [valid_0, valid_2])
+
+    asyncio.run(_run_test())
+
+  def test_overgeneration_prefer_valid_rollouts_fallback_when_budget_exhausted(
+      self,
+  ):
+    """When > G_dispatch - G items fail, emits group padded with invalid items at G_dispatch."""
+
+    async def _run_test():
+      manager = trajectory_queue_manager.TrajectoryQueueManager.create(
+          num_generations=2,
+          num_generations_to_dispatch=3,
+          prefer_valid_rollouts=True,
+      )
+      invalid_0 = _create_item("p1", group_index=0, is_valid=False)
+      valid_1 = _create_item("p1", group_index=1, is_valid=True)
+      invalid_2 = _create_item("p1", group_index=2, is_valid=False)
+
+      self.assertFalse(await manager.put(invalid_0))
+      self.assertFalse(await manager.put(valid_1))
+      # 3rd arrival exhausts num_generations_to_dispatch=3 with only 1 valid item.
+      self.assertTrue(await manager.put(invalid_2))
+
+      group = await manager.get_group()
+      self.assertEqual(group, [valid_1, invalid_0])
+
+    asyncio.run(_run_test())
+
+  def test_overgeneration_prefer_valid_rollouts_false_takes_first_g(self):
+    """When prefer_valid_rollouts=False, emits the first G arrivals regardless of validity."""
+
+    async def _run_test():
+      manager = trajectory_queue_manager.TrajectoryQueueManager.create(
+          num_generations=2,
+          num_generations_to_dispatch=4,
+          prefer_valid_rollouts=False,
+      )
+      valid_0 = _create_item("p1", group_index=0, is_valid=True)
+      invalid_1 = _create_item("p1", group_index=1, is_valid=False)
+      valid_2 = _create_item("p1", group_index=2, is_valid=True)
+
+      self.assertFalse(await manager.put(valid_0))
+      self.assertTrue(await manager.put(invalid_1))
+      self.assertFalse(await manager.put(valid_2))
+
+      group = await manager.get_group()
+      self.assertEqual(group, [valid_0, invalid_1])
+
+    asyncio.run(_run_test())
+
+  def test_overgeneration_invalid_dispatch_count_raises(self):
+    with self.assertRaises(ValueError):
+      trajectory_queue_manager.TrajectoryQueueManager.create(
+          num_generations=4,
+          num_generations_to_dispatch=2,
+      )
+
+
+  def test_overgeneration_prefer_valid_rollouts_true_waits_for_valid(self):
+    """When prefer_valid_rollouts=True, waits for G valid items and drops stragglers."""
+
+    async def _run_test():
+      manager = trajectory_queue_manager.TrajectoryQueueManager.create(
+          num_generations=2,
+          num_generations_to_dispatch=4,
+          prefer_valid_rollouts=True,
+      )
+      valid_0 = _create_item("p1", group_index=0, is_valid=True)
+      invalid_1 = _create_item("p1", group_index=1, is_valid=False)
+      valid_2 = _create_item("p1", group_index=2, is_valid=True)
+      straggler_3 = _create_item("p1", group_index=3, is_valid=True)
+
+      self.assertFalse(await manager.put(valid_0))
+      # Second item is invalid, so group of 2 valid items is not yet ready.
+      self.assertFalse(await manager.put(invalid_1))
+      self.assertEqual(manager.ready_groups_count, 0)
+
+      # Third item is valid -> 2 valid items accumulated -> group emitted!
+      self.assertTrue(await manager.put(valid_2))
+      self.assertEqual(manager.ready_groups_count, 1)
+
+      # Fourth straggler arrives after group completion -> silently dropped.
+      self.assertFalse(await manager.put(straggler_3))
+      self.assertEqual(manager.ready_groups_count, 1)
+      self.assertEqual(manager.incomplete_buckets_count, 0)
+
+      group = await manager.get_group()
+      self.assertEqual(group, [valid_0, valid_2])
+
+    asyncio.run(_run_test())
+
+  def test_overgeneration_prefer_valid_rollouts_fallback_when_budget_exhausted(
+      self,
+  ):
+    """When > G_dispatch - G items fail, emits group padded with invalid items at G_dispatch."""
+
+    async def _run_test():
+      manager = trajectory_queue_manager.TrajectoryQueueManager.create(
+          num_generations=2,
+          num_generations_to_dispatch=3,
+          prefer_valid_rollouts=True,
+      )
+      invalid_0 = _create_item("p1", group_index=0, is_valid=False)
+      valid_1 = _create_item("p1", group_index=1, is_valid=True)
+      invalid_2 = _create_item("p1", group_index=2, is_valid=False)
+
+      self.assertFalse(await manager.put(invalid_0))
+      self.assertFalse(await manager.put(valid_1))
+      # 3rd arrival exhausts num_generations_to_dispatch=3 with only 1 valid item.
+      self.assertTrue(await manager.put(invalid_2))
+
+      group = await manager.get_group()
+      self.assertEqual(group, [valid_1, invalid_0])
+
+    asyncio.run(_run_test())
+
+  def test_overgeneration_prefer_valid_rollouts_false_takes_first_g(self):
+    """When prefer_valid_rollouts=False, emits the first G arrivals regardless of validity."""
+
+    async def _run_test():
+      manager = trajectory_queue_manager.TrajectoryQueueManager.create(
+          num_generations=2,
+          num_generations_to_dispatch=4,
+          prefer_valid_rollouts=False,
+      )
+      valid_0 = _create_item("p1", group_index=0, is_valid=True)
+      invalid_1 = _create_item("p1", group_index=1, is_valid=False)
+      valid_2 = _create_item("p1", group_index=2, is_valid=True)
+
+      self.assertFalse(await manager.put(valid_0))
+      self.assertTrue(await manager.put(invalid_1))
+      self.assertFalse(await manager.put(valid_2))
+
+      group = await manager.get_group()
+      self.assertEqual(group, [valid_0, invalid_1])
+
+    asyncio.run(_run_test())
+
+  def test_overgeneration_invalid_dispatch_count_raises(self):
+    with self.assertRaises(ValueError):
+      trajectory_queue_manager.TrajectoryQueueManager.create(
+          num_generations=4,
+          num_generations_to_dispatch=2,
+      )
 
 
 if __name__ == "__main__":

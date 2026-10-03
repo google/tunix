@@ -15,6 +15,7 @@
 """Rollout Manager concurrency controller and Raiden KV migration orchestrator."""
 
 import asyncio
+import collections
 import math
 import os
 import time
@@ -182,6 +183,9 @@ class RolloutManager:
         str, collector_lib.TrajectoryCollectorEngine
     ] = {}
     self._active_tasks: Dict[str, asyncio.Task[Any]] = {}
+    self._cancelled_prompt_ids: collections.OrderedDict[str, None] = (
+        collections.OrderedDict()
+    )
     self._completed_queue: asyncio.Queue[TrajectoryOrError] = asyncio.Queue()
     self._traffic_inst = None
     self._episode_timeout_s = _env_float(
@@ -237,11 +241,47 @@ class RolloutManager:
       raise traffic_controller_lib.AdmissionClosedError(
           "rollout worker is stopped"
       )
+    if request.prompt_id and request.prompt_id in self._cancelled_prompt_ids:
+      error_metadata = dict(request.metadata or {})
+      error_metadata["prompt_id"] = request.prompt_id
+      error_metadata["group_index"] = request.group_index
+      error_metadata["policy_version"] = int(
+          getattr(request, "target_policy_version", 0) or 0
+      )
+      cancelled_err = trajectory_lib.TrajectoryError(
+          trajectory_id=request.traj_id,
+          prompt_id=request.prompt_id,
+          error_message="Trajectory cancelled before execution.",
+          error_type="CancelledError",
+          metadata=error_metadata,
+      )
+      await self._completed_queue.put(cancelled_err)
+      if on_complete:
+        on_complete(cancelled_err)
+      return cancelled_err
     await self._traffic.wait_for_admission()
     if self._traffic.state == datatypes.WorkerState.STOPPED:
       raise traffic_controller_lib.AdmissionClosedError(
           "rollout worker is stopped"
       )
+    if request.prompt_id and request.prompt_id in self._cancelled_prompt_ids:
+      error_metadata = dict(request.metadata or {})
+      error_metadata["prompt_id"] = request.prompt_id
+      error_metadata["group_index"] = request.group_index
+      error_metadata["policy_version"] = int(
+          getattr(request, "target_policy_version", 0) or 0
+      )
+      cancelled_err = trajectory_lib.TrajectoryError(
+          trajectory_id=request.traj_id,
+          prompt_id=request.prompt_id,
+          error_message="Trajectory cancelled before execution.",
+          error_type="CancelledError",
+          metadata=error_metadata,
+      )
+      await self._completed_queue.put(cancelled_err)
+      if on_complete:
+        on_complete(cancelled_err)
+      return cancelled_err
     if partial:
       if self.sampler is not None:
         sampler_version = self.sampler._policy_version
@@ -363,6 +403,20 @@ class RolloutManager:
     """Runs episode loop, removes active tracking, and resolves callbacks/streams."""
     try:
       trajectory: TrajectoryOrError = await collector.run_episode()
+    except asyncio.CancelledError:
+      error_metadata = dict(request.metadata or {})
+      error_metadata["prompt_id"] = request.prompt_id
+      error_metadata["group_index"] = request.group_index
+      error_metadata["policy_version"] = int(
+          getattr(request, "target_policy_version", 0) or 0
+      )
+      trajectory = trajectory_lib.TrajectoryError(
+          trajectory_id=collector.traj_id,
+          prompt_id=request.prompt_id,
+          error_message="Trajectory cancelled.",
+          error_type="CancelledError",
+          metadata=error_metadata,
+      )
     except Exception as e:  # pylint: disable=broad-exception-caught
       error_metadata = dict(request.metadata or {})
       error_metadata["prompt_id"] = request.prompt_id
@@ -439,6 +493,27 @@ class RolloutManager:
       collector.cancel()
     for task in self._active_tasks.values():
       task.cancel()
+
+  async def cancel_by_prompt_id(self, prompt_id: str) -> int:
+    """Cancels all active trajectories matching `prompt_id` and awaits cleanup."""
+    if not prompt_id:
+      return 0
+    self._cancelled_prompt_ids[prompt_id] = None
+    self._cancelled_prompt_ids.move_to_end(prompt_id)
+    while len(self._cancelled_prompt_ids) > 10000:
+      self._cancelled_prompt_ids.popitem(last=False)
+
+    cancelled_tasks: list[asyncio.Task[None]] = []
+    for traj_id, collector in list(self._active_collectors.items()):
+      if collector.request.prompt_id == prompt_id:
+        collector.cancel()
+        task = self._active_tasks.get(traj_id)
+        if task is not None and not task.done():
+          task.cancel()
+          cancelled_tasks.append(task)
+    if cancelled_tasks:
+      await asyncio.gather(*cancelled_tasks, return_exceptions=True)
+    return len(cancelled_tasks)
 
   async def pre_weight_sync(
       self, sync_request: sampler_lib.WeightSyncRequest | Any = None, **kwargs
@@ -562,6 +637,7 @@ class RolloutManager:
     res = None
     if self.sampler:
       res = await self.sampler.post_weight_sync(sync_request, **kwargs)
+    self._cancelled_prompt_ids.clear()
     self.resume_all()
     self._traffic.reopen()
     logging.info(
@@ -591,6 +667,7 @@ class RolloutManager:
 
   def reopen_admission(self) -> bool:
     """Reopens rollout admission after an aborted round."""
+    self._cancelled_prompt_ids.clear()
     return self._traffic.reopen()
 
   async def bind_weight_sync(self, **kwargs) -> Any:
