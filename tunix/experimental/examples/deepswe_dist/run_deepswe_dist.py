@@ -440,6 +440,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="Enable MLPerf RCP (mllog) compliance logging.",
   )
   parser.add_argument(
+      "--allow_checkpoint_resume",
+      action="store_true",
+      default=False,
+      help=(
+          "Development only. Let an --rcp_logging run resume from a non-zero"
+          " checkpoint instead of failing fast. The mllog still records the"
+          " real init_checkpoint_step, so the resulting log is NOT"
+          " submission-compliant (MLPerf requires init_checkpoint_step == 0)."
+      ),
+  )
+  parser.add_argument(
       "--val_start_at",
       type=int,
       default=(
@@ -629,6 +640,59 @@ def _register_signal_handlers(
       signal.signal(sig, _handle_exit_signal)
     except (ValueError, OSError):
       pass
+
+
+def _disallow_checkpoint_resume(args: argparse.Namespace) -> bool:
+  """RCP logging runs must start from step 0 unless explicitly opted out."""
+  return bool(args.rcp_logging) and not bool(args.allow_checkpoint_resume)
+
+
+def _emit_rcp_restore_events(
+    args: argparse.Namespace, dataset: Any, restored_step: int
+) -> None:
+  """Logs MLPerf config events and ``run_start`` for the restored step.
+
+  Invoked by ``StandardRLProgram._resume_from_checkpoint`` exactly once per
+  process, before any stage starts. ``init_print`` (config events) must precede
+  ``train_start`` so the log records the step the trainer actually restored;
+  ``train_start`` is emitted only for a run that is allowed to proceed.
+
+  Args:
+    args: Parsed command-line arguments.
+    dataset: Training dataset used to derive the logged dataset size.
+    restored_step: Step restored by the trainer; 0 for a fresh run.
+  """
+  if not args.rcp_logging:
+    return
+  mllog_utils.init_print(
+      args,
+      train_dataset=dataset,
+      init_checkpoint_step=restored_step,
+  )
+  if restored_step == 0:
+    mllog_utils.train_start(args, step=0)
+    return
+  if _disallow_checkpoint_resume(args):
+    # StandardRLProgram raises as soon as this callback returns. Say why and
+    # what to do: the usual cause is a reused JOB_PREFIX (recipes default
+    # MAXTEXT_OUTPUT_DIR to ${BUCKET}/maxtext/${JOB_PREFIX}).
+    logging.error(
+        "RCP logging run restored checkpoint step %d, but MLPerf submission"
+        " runs must start from step 0. Launch with a fresh JOB_PREFIX /"
+        " MAXTEXT_OUTPUT_DIR, or set ALLOW_CHECKPOINT_RESUME=true"
+        " (--allow_checkpoint_resume) for a non-submission development"
+        " resume.",
+        restored_step,
+    )
+    return
+  logging.warning(
+      "ALLOW_CHECKPOINT_RESUME: resuming RCP logging run from checkpoint step"
+      " %d. The mllog records init_checkpoint_step=%d and is NOT"
+      " submission-compliant.",
+      restored_step,
+      restored_step,
+  )
+  mllog_utils.train_start(args, step=restored_step)
 
 
 def main(argv: list[str], context: ProcessContext | None = None) -> None:
@@ -882,21 +946,6 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           manifest_file,
       )
 
-    def _on_checkpoint_restored(restored_step: int) -> None:
-      if not args.rcp_logging:
-        return
-      mllog_utils.init_print(
-          args,
-          train_dataset=dataset,
-          init_checkpoint_step=restored_step,
-      )
-      # StandardRLProgram raises on a non-zero restore when
-      # disallow_checkpoint_resume is set, so the run is only opened for
-      # step 0 (recipes default MAXTEXT_OUTPUT_DIR to ${BUCKET}/maxtext/
-      # ${JOB_PREFIX}; a reused prefix is the usual cause).
-      if restored_step == 0:
-        mllog_utils.train_start(args, step=0)
-
     program = rl_program.StandardRLProgram(
         algo=algo,
         dataset=prompt_stream,
@@ -954,8 +1003,10 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         ),
         val_start_step=val_start_step,
         on_checkpoint_saved=_on_checkpoint_saved if manifest_file else None,
-        on_checkpoint_restored=_on_checkpoint_restored,
-        disallow_checkpoint_resume=args.rcp_logging,
+        on_checkpoint_restored=functools.partial(
+            _emit_rcp_restore_events, args, dataset
+        ),
+        disallow_checkpoint_resume=_disallow_checkpoint_resume(args),
     )
 
     logging.info("Bringing up remote workers through ClusterOrchestrator...")
