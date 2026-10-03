@@ -405,13 +405,26 @@ class MaxTextUtilsTest(absltest.TestCase):
     )
     self.assertIn("max_target_length=4096", argv)
 
-  def test_max_seq_token_per_tpu_below_floor_is_ignored(self):
+  def test_max_seq_token_per_tpu_equal_to_floor_is_legal(self):
+    # One maximal trajectory per row is the smallest legal packing budget.
     argv = self._build_config_argv(
         max_prompt_length=512,
         max_response_length=1024,
-        max_seq_token_per_tpu=1024,
+        max_seq_token_per_tpu=1536,
     )
     self.assertIn("max_target_length=1536", argv)
+
+  def test_max_seq_token_per_tpu_below_floor_raises(self):
+    # rl_utils.validate_packing_budget rejects this when the learner builds its
+    # assembler. Fail here instead, before the mesh and the model are built.
+    with self.assertRaisesRegex(
+        ValueError, "max_seq_token_per_tpu=1024 is smaller than the longest"
+    ):
+      self._build_config_argv(
+          max_prompt_length=512,
+          max_response_length=1024,
+          max_seq_token_per_tpu=1024,
+      )
 
   def test_max_seq_token_per_tpu_unset_keeps_default(self):
     argv = self._build_config_argv(
