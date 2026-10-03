@@ -190,3 +190,22 @@ class Worker(abc.ABC):
   def heartbeat(self) -> datatypes.HealthReport:
     """Returns the current health status of the worker."""
     pass
+
+  def upload_jax_cache(
+      self,
+      gcs_uri: str | None = None,
+      local_dir: str | None = None,
+      role: str | None = None,
+  ) -> bool:
+    """Persists JAX compilation cache from local_dir to GCS."""
+    from tunix.experimental.common import gcs_cache  # pylint: disable=g-import-not-at-top
+    if role is None:
+      roles = getattr(self, "roles", ())
+      if roles:
+        first_role = next(iter(roles), None)
+        if hasattr(first_role, "value"):
+          role = first_role.value
+        elif isinstance(first_role, str):
+          role = first_role
+    return gcs_cache.save_jax_cache(gcs_uri=gcs_uri, local_dir=local_dir, role=role)
+

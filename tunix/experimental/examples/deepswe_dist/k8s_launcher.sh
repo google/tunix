@@ -130,6 +130,14 @@ case "${ROLLOUT_PRIORITY_SCHEDULING}" in
     ;;
 esac
 
+# JAX compilation cache configuration
+export LOCAL_JAX_CACHE_DIR=${LOCAL_JAX_CACHE_DIR:-${JAX_CACHE_DIR:-/tmp/jax_cache}}
+export JAX_CACHE_GCS_DIR=${JAX_CACHE_GCS_DIR:-}
+export ROLLOUT_JAX_CACHE_GCS_DIR=${ROLLOUT_JAX_CACHE_GCS_DIR:-${JAX_CACHE_GCS_DIR:+${JAX_CACHE_GCS_DIR}/rollout}}
+export EVAL_JAX_CACHE_GCS_DIR=${EVAL_JAX_CACHE_GCS_DIR:-${ROLLOUT_JAX_CACHE_GCS_DIR}}
+export SAVE_JAX_CACHE=${SAVE_JAX_CACHE:-true}
+export SKIP_JAX_PRECOMPILE=${SKIP_JAX_PRECOMPILE:-1}
+
 # DeepSWE dataset and environment configuration
 export DATASET_NAME=${DATASET_NAME:-R2E-Gym/R2E-Gym-Subset}
 export DATASET_PATH=${DATASET_PATH:-}
@@ -385,6 +393,19 @@ start_orchestrator() {
     disable_ws_timeouts_arg="--disable_weight_sync_timeouts"
   fi
 
+  local jax_cache_env=""
+  if [[ "${DISABLE_JAX_CACHE:-0}" != "1" && "${DISABLE_JAX_CACHE:-false}" != "true" ]]; then
+    if [[ -n "${JAX_CACHE_GCS_DIR}" ]]; then
+      jax_cache_env+=" JAX_CACHE_GCS_DIR=\"${JAX_CACHE_GCS_DIR}\""
+    fi
+    if [[ -n "${ROLLOUT_JAX_CACHE_GCS_DIR}" ]]; then
+      jax_cache_env+=" ROLLOUT_JAX_CACHE_GCS_DIR=\"${ROLLOUT_JAX_CACHE_GCS_DIR}\""
+    fi
+    if [[ -n "${SAVE_JAX_CACHE}" ]]; then
+      jax_cache_env+=" SAVE_JAX_CACHE=\"${SAVE_JAX_CACHE}\""
+    fi
+  fi
+
   "$PYTHON_BIN" "$YAML_GENERATOR" \
     "${YAML_DIR}/jobset.cpu.yaml" \
     --jobset_name="${ORCHESTRATOR_ID}" \
@@ -419,7 +440,7 @@ start_orchestrator() {
       TUNIX_IS_INTERNAL_ENV=false \
       ${TUNIX_DEBUG_INFERENCE_LOGS:+TUNIX_DEBUG_INFERENCE_LOGS=\"${TUNIX_DEBUG_INFERENCE_LOGS}\"} \
       ${BOOTSTRAP_CMD} \
-      ${ORCHESTRATOR_EXTRA_ENV:+${ORCHESTRATOR_EXTRA_ENV} }python -m tunix.experimental.distributed.runtime.main \
+      ${ORCHESTRATOR_EXTRA_ENV:+${ORCHESTRATOR_EXTRA_ENV} }${jax_cache_env} python -m tunix.experimental.distributed.runtime.main \
         --discovery_id=${ORCHESTRATOR_ID} \
         --discovery_port=${ORCHESTRATOR_PORT} \
         --process_main=tunix.experimental.examples.deepswe_dist.run_deepswe_dist.main \
@@ -756,6 +777,20 @@ if cfg:
       extra_generator_flags+=(--omit_slice_topology)
     fi
 
+    if [[ "$i" -eq "${ROLLOUT_START_INDEX:-0}" && -n "${ROLLOUT_JAX_CACHE_GCS_DIR}" && "${DISABLE_JAX_CACHE:-false}" != "true" && "${DISABLE_JAX_CACHE:-0}" != "1" ]]; then
+      echo "[launcher] Rollout JAX cache GCS: ${ROLLOUT_JAX_CACHE_GCS_DIR} (save=${SAVE_JAX_CACHE:-true})" >&2
+    fi
+
+    local jax_cache_env=""
+    if [[ "${DISABLE_JAX_CACHE:-0}" != "1" && "${DISABLE_JAX_CACHE:-false}" != "true" ]]; then
+      if [[ -n "${ROLLOUT_JAX_CACHE_GCS_DIR}" ]]; then
+        jax_cache_env+=" JAX_CACHE_GCS_DIR=\"${ROLLOUT_JAX_CACHE_GCS_DIR}\""
+      fi
+      if [[ -n "${SAVE_JAX_CACHE}" ]]; then
+        jax_cache_env+=" SAVE_JAX_CACHE=\"${SAVE_JAX_CACHE}\""
+      fi
+    fi
+
     COLOCATED_PYTHON_SIDECAR_IMAGE="" "$PYTHON_BIN" "$YAML_GENERATOR" \
       "${YAML_DIR}/${ROLLOUT_JOBSET_YAML}" \
       --jobset_name="${replica_id}" \
@@ -807,7 +842,7 @@ if cfg:
         ${VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY:+VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY=\"${VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY}\"} \
         ${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY:+VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=\"${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY}\"} \
         ${ROLLOUT_EXTRA_ENV} \
-        SKIP_JAX_PRECOMPILE=${ROLLOUT_SKIP_JAX_PRECOMPILE} VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ${sandbox_env} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} python -m tunix.experimental.distributed.runtime.main \
+        SKIP_JAX_PRECOMPILE=${ROLLOUT_SKIP_JAX_PRECOMPILE} VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ${sandbox_env} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1}${jax_cache_env} python -m tunix.experimental.distributed.runtime.main \
           --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
           --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
           --process_main=tunix.experimental.examples.common.run_rollout_node.main \
@@ -1085,6 +1120,11 @@ start_eval() {
       role_arg="--role=worker"
     fi
 
+    local eval_cache_dir="${EVAL_JAX_CACHE_GCS_DIR:-${ROLLOUT_JAX_CACHE_GCS_DIR}}"
+    if [[ "$i" -eq "${ROLLOUT_START_INDEX:-0}" && -n "${eval_cache_dir}" && "${DISABLE_JAX_CACHE:-false}" != "true" && "${DISABLE_JAX_CACHE:-0}" != "1" ]]; then
+      echo "[launcher] Eval JAX cache GCS: ${eval_cache_dir} (save=${SAVE_JAX_CACHE:-true})" >&2
+    fi
+
     COLOCATED_PYTHON_SIDECAR_IMAGE="" "$PYTHON_BIN" "$YAML_GENERATOR" \
       "${YAML_DIR}/${ROLLOUT_JOBSET_YAML:-jobset.pathways.yaml}" \
       --jobset_name="${replica_id}" \
@@ -1106,6 +1146,9 @@ start_eval() {
       --worker_container_port="${eval_port}" \
       --worker_startup_command=" \
         PYTHONUNBUFFERED=1 \
+        ${eval_cache_dir:+JAX_CACHE_GCS_DIR=\"${eval_cache_dir}\"} \
+        ${eval_cache_dir:+ROLLOUT_JAX_CACHE_GCS_DIR=\"${eval_cache_dir}\"} \
+        SAVE_JAX_CACHE=\"${SAVE_JAX_CACHE:-true}\" \
         TUNIX_IS_INTERNAL_ENV=false \
         ${TUNIX_DEBUG_INFERENCE_LOGS:+TUNIX_DEBUG_INFERENCE_LOGS=\"${TUNIX_DEBUG_INFERENCE_LOGS}\"} \
         VLLM_TPU_USING_PATHWAYS=1 \

@@ -22,6 +22,7 @@ import collections
 from collections.abc import Sequence
 from concurrent import futures
 import contextlib
+import os
 import pickle
 import time
 from typing import Any, Mapping
@@ -54,6 +55,7 @@ class ClusterOrchestrator:
       monitor: health_monitor.HealthMonitor | None = None,
       weight_sync_mode: str | None = None,
       trajectory_store_config: Mapping[str, Any] | None = None,
+      jax_cache_config: Mapping[str, Any] | None = None,
       run_id: str | None = None,
       disable_weight_sync_timeouts: bool | None = None,
   ):
@@ -93,6 +95,11 @@ class ClusterOrchestrator:
     mode = getattr(weight_sync_mode, "value", weight_sync_mode)
     self._weight_sync_mode = str(mode).lower() if mode is not None else None
     self._disable_weight_sync_timeouts = disable_weight_sync_timeouts
+    self.jax_cache_config = dict(jax_cache_config or {})
+    self._save_jax_cache = self.jax_cache_config.get(
+        "save_jax_cache",
+        os.getenv("SAVE_JAX_CACHE", "true").strip().lower() in ("1", "true", "yes"),
+    )
     cfg_run_id = (
         trajectory_store_config.get("run_id")
         if trajectory_store_config is not None
@@ -306,6 +313,60 @@ class ClusterOrchestrator:
     """Returns handles for all workers (remote and local) registered under the given role."""
     return self._get_actor_handles(role)
 
+  def sync_jax_cache(self) -> None:
+    """Synchronizes JAX compilation cache across all workers to GCS."""
+    if not self._save_jax_cache:
+      return
+
+    rollout_gcs_uri = (
+        self.jax_cache_config.get("rollout_jax_cache_gcs_dir")
+        or os.getenv("ROLLOUT_JAX_CACHE_GCS_DIR")
+        or os.getenv("JAX_CACHE_GCS_DIR")
+    )
+    if not rollout_gcs_uri:
+      return
+
+    logging.info("Triggering JAX compilation cache synchronization to GCS...")
+    worker_ids = sorted(self._remote_worker_infos)
+    local_workers = self.registry.workers()
+    if not worker_ids:
+      for worker in local_workers:
+        try:
+          worker.upload_jax_cache(gcs_uri=rollout_gcs_uri)
+        except Exception as err:  # pylint: disable=broad-except
+          logging.warning("Failed to sync JAX cache on local worker: %r", err)
+      return
+
+    rollout_worker_ids = [
+        w_id
+        for w_id in worker_ids
+        if datatypes.Role.ROLLOUT.value
+        in (
+            self._remote_worker_infos.get(w_id).roles
+            if self._remote_worker_infos.get(w_id)
+            else ()
+        )
+    ]
+    if not rollout_worker_ids:
+      return
+
+    def _sync_worker(worker_id: str):
+      handle = self._remote_worker_handles_by_id[worker_id]
+      return handle.submit("upload_jax_cache", gcs_uri=rollout_gcs_uri)
+
+    pool = futures.ThreadPoolExecutor(max_workers=min(len(rollout_worker_ids), 16))
+    uploads = {
+        worker_id: pool.submit(_sync_worker, worker_id)
+        for worker_id in rollout_worker_ids
+    }
+    for worker_id, fut in uploads.items():
+      try:
+        res = fut.result(timeout=180.0)
+        logging.info("Worker %s JAX cache upload finished: %s", worker_id, res)
+      except Exception as err:  # pylint: disable=broad-except
+        logging.warning("Failed to sync JAX cache on worker %s: %r", worker_id, err)
+    pool.shutdown(wait=False)
+
   def bring_up_workers(self, dummy_data: Any = None) -> None:
     """Brings up all registered workers through lifecycle initialization."""
     logging.info(
@@ -318,6 +379,7 @@ class ClusterOrchestrator:
           worker.with_trajectory_store_config(self.trajectory_store_config)
     self.lifecycle_driver.bring_up(dummy_data)
     self._bring_up_remote_workers(dummy_data)
+    self.sync_jax_cache()
     self.engine = self._create_engine()
     logging.info("All workers brought up successfully.")
 
@@ -331,6 +393,7 @@ class ClusterOrchestrator:
         stack.callback(self.trajectory_store.close)
       stack.callback(self.lifecycle_driver.shutdown)
       stack.callback(self._shutdown_remote_workers)
+      stack.callback(self.sync_jax_cache)
       stack.callback(self.monitor.close)
     logging.info("Shutdown complete.")
 
@@ -478,9 +541,11 @@ class ClusterOrchestrator:
     self.monitor.poll()
     logging.info("Executing program %s...", type(program).__name__)
     engine = self.engine or self._create_engine()
-
-    program.run(
-        engine=engine,
-        **kwargs,
-    )
+    try:
+      program.run(
+          engine=engine,
+          **kwargs,
+      )
+    finally:
+      self.sync_jax_cache()
     logging.info("Program %s finished.", type(program).__name__)
