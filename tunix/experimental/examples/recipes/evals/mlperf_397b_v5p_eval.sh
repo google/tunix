@@ -25,6 +25,7 @@ export TRAJECTORY_STORE_ROOT_DIR="${TRAJECTORY_STORE_ROOT_DIR:-${TRAJECTORY_STOR
 export REGION="${REGION:-europe-west4}"
 export CLUSTER="${CLUSTER:-bodaborg-v5p-nap}"
 export K8S_NAMESPACE="${K8S_NAMESPACE:-trellis}"
+export BOOTSTRAP_CMD="${BOOTSTRAP_CMD:-git -C /app/tunix fetch https://github.com/google/tunix.git lewu/auto-rcp-eval-pipeline && git -C /app/tunix checkout -f FETCH_HEAD}"
 
 # Model configuration
 export MODEL_NAME="Qwen3.5-397B-A17B"

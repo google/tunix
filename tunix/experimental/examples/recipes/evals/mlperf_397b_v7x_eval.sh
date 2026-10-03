@@ -43,6 +43,7 @@ export TRAJECTORY_STORE_ROOT_DIR="${TRAJECTORY_STORE_ROOT_DIR:-${TRAJECTORY_STOR
 
 export K8S_NAMESPACE="${K8S_NAMESPACE:-priority-dev}"
 export USE_DYNAMIC_SLICING="true"
+export BOOTSTRAP_CMD="${BOOTSTRAP_CMD:-git -C /app/tunix fetch https://github.com/google/tunix.git lewu/auto-rcp-eval-pipeline && git -C /app/tunix checkout -f FETCH_HEAD}"
 
 export ENABLE_MULTI_NUMA="${ENABLE_MULTI_NUMA:-0}"
 export USER_CONTAINER_MEMORY="${USER_CONTAINER_MEMORY:-48G}"
