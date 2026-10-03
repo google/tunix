@@ -882,6 +882,21 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           manifest_file,
       )
 
+    def _on_checkpoint_restored(restored_step: int) -> None:
+      if not args.rcp_logging:
+        return
+      mllog_utils.init_print(
+          args,
+          train_dataset=dataset,
+          init_checkpoint_step=restored_step,
+      )
+      # StandardRLProgram raises on a non-zero restore when
+      # disallow_checkpoint_resume is set, so the run is only opened for
+      # step 0 (recipes default MAXTEXT_OUTPUT_DIR to ${BUCKET}/maxtext/
+      # ${JOB_PREFIX}; a reused prefix is the usual cause).
+      if restored_step == 0:
+        mllog_utils.train_start(args, step=0)
+
     program = rl_program.StandardRLProgram(
         algo=algo,
         dataset=prompt_stream,
@@ -939,18 +954,12 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         ),
         val_start_step=val_start_step,
         on_checkpoint_saved=_on_checkpoint_saved if manifest_file else None,
+        on_checkpoint_restored=_on_checkpoint_restored,
+        disallow_checkpoint_resume=args.rcp_logging,
     )
-
-    if args.rcp_logging:
-      mllog_utils.init_print(
-          args,
-          train_dataset=dataset,
-      )
 
     logging.info("Bringing up remote workers through ClusterOrchestrator...")
     cluster.bring_up_workers(dummy_data=None)
-    if args.rcp_logging:
-      mllog_utils.train_start(args, step=0)
     logging.info("Starting DeepSWE StandardRLProgram execution...")
     cluster.run(
         program=program,
