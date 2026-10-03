@@ -19,6 +19,7 @@ import dataclasses
 import pathlib
 import threading
 import types
+import weakref
 from typing import Any
 from unittest import mock
 
@@ -5944,77 +5945,6 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
 
     asyncio.run(_run())
 
-  def test_critique_and_train_stage_release_per_trajectory_routed_experts(self):
-    async def _run():
-      routed = np.ones((4, 2, 2), dtype=np.int16) * 7
-      payload = datatypes.RLTrainerPayload(
-          prompt_ids=np.array([1, 2], dtype=np.int32),
-          prompt_mask=np.array([1, 1], dtype=np.float32),
-          completion_ids=np.array([3, 4], dtype=np.int32),
-          completion_mask=np.array([1, 1], dtype=np.float32),
-          advantages=np.array([1.0, 1.0], dtype=np.float32),
-          routed_experts=routed,
-      )
-      self.mock_algo.num_generations = 1
-      self.mock_algo.mini_batch_size = 1
-      self.mock_algo.create_trainer_payloads.return_value = [payload]
-
-      assembler = batch_assembly.SequencePackedBatchAssembler(
-          batch_size=1,
-          num_generations=1,
-          mini_batch_size=1,
-          max_packed_len=8,
-          pad_id=0,
-          segment_align_multiple=1,
-      )
-      program = rl_program.StandardRLProgram(
-          algo=self.mock_algo,
-          dataset=["p0"],
-          batch_size=1,
-          assembler=assembler,
-      )
-      program.engine = self.mock_engine
-
-      src_item = datatypes.TrajectoryItem(
-          prompt_id="p0",
-          group_index=0,
-          start_step=0,
-          traj={"trajectory_reward": 1.0, "routed_experts": routed},
-          prompt_tokens=np.array([1, 2], dtype=np.int32),
-          completion_tokens=np.array([3, 4], dtype=np.int32),
-          routed_experts=routed,
-          metadata={"batch_idx": 0, "intra_batch_idx": 0, "prompt_idx": 0},
-      )
-      await program.raw_q.put(src_item)
-      await program.raw_q.close()
-      await program.critique_stage()
-
-      scored_group = await program.scored_q.get_batch(1)
-      self.assertLen(scored_group, 1)
-      scored_item = scored_group[0]
-      # Post-critique TrajectoryItem must only hold routed_experts on
-      # item.payload, not duplicated on item.routed_experts or item.traj.
-      self.assertIsNone(getattr(scored_item, "routed_experts", None))
-      self.assertNotIn("routed_experts", scored_item.metadata)
-      self.assertNotIn("routed_experts", scored_item.traj)
-      self.assertIsNotNone(scored_item.payload.routed_experts)
-
-      # Re-enqueue for train_stage and verify item.payload.routed_experts is
-      # cleared once assembler.feed has packed the batch.
-      program.scored_q = (
-          rl_program.trajectory_queue_manager.TrajectoryQueueManager.create(
-              num_generations=1
-          )
-      )
-      await program.scored_q.put(scored_item)
-      await program.scored_q.close()
-      await program.train_stage()
-
-      self.assertIsNone(scored_item.payload.routed_experts)
-      program.close()
-
-    asyncio.run(_run())
-
 
 class NextOrExhaustedTest(absltest.TestCase):
 
@@ -6071,6 +6001,154 @@ class ExtractScalarTest(absltest.TestCase):
         rl_program._extract_scalar(3.14), 3.14
     )
 
+
+
+class StandardRLProgramRoutedExpertsCleanupTest(absltest.TestCase):
+
+  def test_critique_and_train_stages_drop_unbatched_routed_experts_duplicates(
+      self,
+  ):
+    async def _run():
+      mock_algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
+      mock_algo.num_generations = 1
+      mock_algo.mini_batch_size = 1
+      mock_algo.max_packed_len = 8
+      mock_algo.max_response_length = 8
+      mock_algo.requires_reference_kl = False
+      mock_algo.algo_config = mock.MagicMock(
+          temperature=None,
+          use_rollout_logps=False,
+          truncated_importance_sampling_type=None,
+          seq_logprob_error_threshold=None,
+          sampler_is_length_buckets=None,
+          sampler_is=None,
+          sampler_is_threshold=2.0,
+      )
+
+      routed = np.full((4, 2, 2), 3, dtype=np.int16)
+      routed_ref = weakref.ref(routed)
+      payload = datatypes.RLTrainerPayload(
+          prompt_ids=np.array([10, 11], dtype=np.int32),
+          prompt_mask=np.ones((2,), dtype=np.float32),
+          completion_ids=np.array([20, 21], dtype=np.int32),
+          completion_mask=np.ones((2,), dtype=np.float32),
+          advantages=np.ones((2,), dtype=np.float32),
+          routed_experts=routed,
+      )
+      mock_algo.create_trainer_payloads.return_value = [payload]
+
+      assembler = batch_assembly.PaddedBatchAssembler(
+          batch_size=1,
+          max_prompt_length=2,
+          max_response_length=2,
+          pad_id=0,
+          num_generations=1,
+          mini_batch_size=1,
+      )
+      program = rl_program.StandardRLProgram(
+          dataset=[],
+          max_steps=1,
+          algo=mock_algo,
+          reward_fns=[lambda *_: 1.0],
+          assembler=assembler,
+          sync_weights=True,
+      )
+      mock_engine = mock.MagicMock()
+      trained_routed_copy: list[np.ndarray] = []
+      batched_routed_refs: list[weakref.ReferenceType[np.ndarray]] = []
+
+      async def _fake_train_step(batch, **_):
+        self.assertIsNotNone(batch.routed_experts)
+        batched_routed_refs.append(weakref.ref(batch.routed_experts))
+        trained_routed_copy.append(np.array(batch.routed_experts, copy=True))
+        return {"updated": True}
+
+      routed_alive_during_ckpt: list[bool] = []
+      batched_alive_during_ckpt: list[bool] = []
+      routed_alive_during_sync: list[bool] = []
+      batched_alive_during_sync: list[bool] = []
+
+      async def _fake_save_checkpoint(**_):
+        routed_alive_during_ckpt.append(routed_ref() is not None)
+        batched_alive_during_ckpt.append(
+            any(ref() is not None for ref in batched_routed_refs)
+        )
+        return mock.MagicMock(metadata={"checkpoint_path": "/tmp/ckpt"})
+
+      async def _fake_sync_weights(**_):
+        routed_alive_during_sync.append(routed_ref() is not None)
+        batched_alive_during_sync.append(
+            any(ref() is not None for ref in batched_routed_refs)
+        )
+        return 1
+
+      mock_engine.train_step = _fake_train_step
+      mock_engine.get_metrics = mock.AsyncMock(return_value=None)
+      mock_engine.save_checkpoint = mock.AsyncMock(
+          side_effect=_fake_save_checkpoint
+      )
+      mock_engine.sync_weights = mock.AsyncMock(side_effect=_fake_sync_weights)
+      program.engine = mock_engine
+      program.trajectory_logger = mock.MagicMock()
+
+      src_item = datatypes.TrajectoryItem(
+          prompt_id="p0",
+          group_index=0,
+          start_step=0,
+          traj={"routed_experts": routed},
+          prompt_tokens=np.array([10, 11], dtype=np.int32),
+          completion_tokens=np.array([20, 21], dtype=np.int32),
+          action_mask=np.array([1, 1], dtype=np.int32),
+          routed_experts=routed,
+          metadata={"routed_experts": routed, "question": "q0"},
+      )
+      await program.raw_q.put(src_item)
+      del routed, payload
+
+      # Run critique_stage concurrently with raw_q kept open so its coroutine
+      # frame stays suspended at `await self.raw_q.get_group()` during training.
+      critique_task = asyncio.create_task(program.critique_stage())
+      scored_batch = await program.scored_q.get_group_batch(num_groups=1)
+      mock_algo.create_trainer_payloads.return_value = None
+      mock_algo.create_trainer_payloads.reset_mock()
+      self.assertNotIn("routed_experts", src_item.traj)
+      self.assertNotIn("routed_experts", src_item.metadata)
+
+      self.assertLen(scored_batch, 1)
+      scored_item = scored_batch[0]
+      self.assertIsNone(getattr(scored_item, "routed_experts", None))
+      self.assertNotIn("routed_experts", scored_item.metadata)
+      self.assertNotIn("routed_experts", scored_item.traj)
+      self.assertIsNotNone(scored_item.payload.routed_experts)
+      self.assertIsNotNone(routed_ref())
+
+      # Re-enqueue for train_stage consumption while critique_task remains
+      # suspended on raw_q.
+      await program.scored_q.put(scored_item)
+
+      await program.train_stage()
+      await program.raw_q.close()
+      await critique_task
+
+      self.assertLen(trained_routed_copy, 1)
+      np.testing.assert_array_equal(
+          trained_routed_copy[0][0], np.full((4, 2, 2), 3, dtype=np.int16)
+      )
+      # Both unbatched and assembled microbatch routed_experts must be released
+      # before save_checkpoint() and sync_weights() run, even with critique_stage
+      # suspended concurrently on raw_q.
+      self.assertEqual(routed_alive_during_ckpt, [False])
+      self.assertEqual(batched_alive_during_ckpt, [False])
+      self.assertEqual(routed_alive_during_sync, [False])
+      self.assertEqual(batched_alive_during_sync, [False])
+      self.assertIsNone(scored_item.payload.routed_experts)
+      self.assertIsNone(routed_ref())
+      logged_row = program.trajectory_logger.log_item_async.call_args.args[0]
+      self.assertNotIn("routed_experts", logged_row["metadata"])
+      self.assertNotIn("routed_experts", logged_row["trajectory"])
+      program.close()
+
+    asyncio.run(_run())
 
 
 if __name__ == "__main__":
