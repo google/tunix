@@ -891,7 +891,7 @@ class TrajectoryLoggerTest(absltest.TestCase):
       signal.signal(signal.SIGTERM, orig_handler)
 
   def test_log_trajectory_json_debug_inference_logs(self):
-    """Tests that DEBUG_INFERENCE_LOGS controls plain logging of turn & trajectory metrics."""
+    """Tests that TUNIX_DEBUG_INFERENCE_LOGS controls plain logging of turn & trajectory metrics."""
     temp_dir = self.create_tempdir().full_path
     item = {
         'global_step': 10,
@@ -920,8 +920,10 @@ class TrajectoryLoggerTest(absltest.TestCase):
         },
     }
 
-    # When DEBUG_INFERENCE_LOGS is disabled, no [DEBUG_INFERENCE] messages logged
-    with mock.patch.dict(os.environ, {'DEBUG_INFERENCE_LOGS': '0'}, clear=True):
+    # When TUNIX_DEBUG_INFERENCE_LOGS is disabled, no [DEBUG_INFERENCE] messages logged
+    with mock.patch.dict(
+        os.environ, {'TUNIX_DEBUG_INFERENCE_LOGS': '0'}, clear=True
+    ):
       with mock.patch.object(trajectory_logger.logging, 'info') as mock_info:
         trajectory_logger.log_trajectory_json(temp_dir, item)
         debug_calls = [
@@ -930,8 +932,10 @@ class TrajectoryLoggerTest(absltest.TestCase):
         ]
         self.assertEmpty(debug_calls)
 
-    # When DEBUG_INFERENCE_LOGS is enabled, [DEBUG_INFERENCE][Turn] and [Trajectory] logged
-    with mock.patch.dict(os.environ, {'DEBUG_INFERENCE_LOGS': '1'}, clear=True):
+    # When TUNIX_DEBUG_INFERENCE_LOGS is enabled, [DEBUG_INFERENCE][Turn] and [Trajectory] logged
+    with mock.patch.dict(
+        os.environ, {'TUNIX_DEBUG_INFERENCE_LOGS': '1'}, clear=True
+    ):
       with mock.patch.object(trajectory_logger.logging, 'info') as mock_info:
         trajectory_logger.log_trajectory_json(temp_dir, item)
         debug_calls = [

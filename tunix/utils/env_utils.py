@@ -47,11 +47,10 @@ SGLANG_JAX_TP_AXIS_NAME = os.getenv('SGLANG_JAX_TP_AXIS_NAME', 'tensor')
 
 
 def is_debug_inference_logs_enabled() -> bool:
-  """Checks if DEBUG_INFERENCE_LOGS is enabled via environment variables."""
-  return (
-      os.getenv("DEBUG_INFERENCE_LOGS", "0").strip().lower()
-      in ("1", "true", "yes")
-      or os.getenv("TUNIX_DEBUG_INFERENCE_LOGS", "0").strip().lower()
-      in ("1", "true", "yes")
+  """Checks if TUNIX_DEBUG_INFERENCE_LOGS is enabled via environment variables."""
+  return os.getenv('TUNIX_DEBUG_INFERENCE_LOGS', '0').strip().lower() in (
+      '1',
+      'true',
+      'yes',
   )
 
