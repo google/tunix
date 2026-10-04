@@ -415,11 +415,7 @@ class TrajectoryCollectEngine:
       tps = comp_toks / m_lat if m_lat > 0 else 0.0
       tpot_ms = (m_lat / comp_toks) * 1000.0 if comp_toks > 0 else 0.0
       mean_step_lat = (m_lat / num_steps) if num_steps > 0 else 0.0
-      traj_id = (
-          self.metadata.traj_id
-          if self.metadata is not None
-          else (self.agent.trajectory.traj_id or self._debug_prefix)
-      )
+      traj_id = self._debug_traj_id
       status_str = (
           self.agent.trajectory.status.name
           if hasattr(self.agent.trajectory.status, 'name')
@@ -791,6 +787,22 @@ class TrajectoryCollectEngine:
     if pair_index is not None:
       return f"[step_idx={step_idx}, pair_index={pair_index}]"
     return f"[step_idx={step_idx}]"
+
+  @property
+  def _debug_traj_id(self) -> str:
+    """Returns a trajectory identifier for debug inference logging."""
+    if self.metadata is not None:
+      traj_id = getattr(self.metadata, "trajectory_id", None) or getattr(
+          self.metadata, "traj_id", None
+      )
+      if traj_id:
+        return str(traj_id)
+    traj_id = getattr(self.agent.trajectory, "trajectory_id", None) or getattr(
+        self.agent.trajectory, "traj_id", None
+    )
+    if traj_id:
+      return str(traj_id)
+    return self._debug_prefix
 
   def _rollout_state_info(
       self, info: Optional[Dict[str, Any]] = None
@@ -1295,11 +1307,7 @@ class TrajectoryCollectEngine:
       turn_tpot_ms = (
           (step_latency / comp_len) * 1000.0 if comp_len > 0 else 0.0
       )
-      traj_id = (
-          self.metadata.traj_id
-          if self.metadata is not None
-          else (self.agent.trajectory.traj_id or self._debug_prefix)
-      )
+      traj_id = self._debug_traj_id
       env_lat = wall_time if env_step_executed else 0.0
       turn_total = step_latency + env_lat
       logging.info(
