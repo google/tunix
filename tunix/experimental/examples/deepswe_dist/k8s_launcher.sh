@@ -766,36 +766,45 @@ if cfg:
     fi
   fi
 
-  for i in $(seq ${ROLLOUT_START_INDEX:-0} $((ROLLOUT_REPLICAS - 1))); do
+  local start_index=${ROLLOUT_START_INDEX:-0}
+  local replicas=${ROLLOUT_REPLICAS:-1}
+  local replica_ids=()
+  for ((i = start_index; i < replicas; i++)); do
     local replica_id="${ROLLOUT_ID}"
-    local worker_id="${ROLLOUT_ID}"
-    if [[ ${ROLLOUT_REPLICAS} -gt 1 ]]; then
+    if [[ ${replicas} -gt 1 ]]; then
       replica_id="${ROLLOUT_ID}-${i}"
-      worker_id="${ROLLOUT_ID}-${i}"
     fi
+    replica_ids+=("${replica_id}")
+  done
+  if [[ ${#replica_ids[@]} -eq 0 ]]; then
+    return 0
+  fi
 
-    local extra_generator_flags=()
-    if [[ "$dynamic_slicing_single_host" == "true" ]]; then
-      extra_generator_flags+=(--omit_slice_topology)
+  local extra_generator_flags=()
+  if [[ "$dynamic_slicing_single_host" == "true" ]]; then
+    extra_generator_flags+=(--omit_slice_topology)
+  fi
+
+  if [[ -n "${ROLLOUT_JAX_CACHE_GCS_DIR}" && "${DISABLE_JAX_CACHE:-false}" != "true" && "${DISABLE_JAX_CACHE:-0}" != "1" ]]; then
+    echo "[launcher] Rollout JAX cache GCS: ${ROLLOUT_JAX_CACHE_GCS_DIR} (save=${SAVE_JAX_CACHE:-true})" >&2
+  fi
+
+  local jax_cache_env=""
+  if [[ "${DISABLE_JAX_CACHE:-0}" != "1" && "${DISABLE_JAX_CACHE:-false}" != "true" ]]; then
+    if [[ -n "${ROLLOUT_JAX_CACHE_GCS_DIR}" ]]; then
+      jax_cache_env+=" JAX_CACHE_GCS_DIR=\"${ROLLOUT_JAX_CACHE_GCS_DIR}\""
     fi
-
-    if [[ "$i" -eq "${ROLLOUT_START_INDEX:-0}" && -n "${ROLLOUT_JAX_CACHE_GCS_DIR}" && "${DISABLE_JAX_CACHE:-false}" != "true" && "${DISABLE_JAX_CACHE:-0}" != "1" ]]; then
-      echo "[launcher] Rollout JAX cache GCS: ${ROLLOUT_JAX_CACHE_GCS_DIR} (save=${SAVE_JAX_CACHE:-true})" >&2
+    if [[ -n "${SAVE_JAX_CACHE}" ]]; then
+      jax_cache_env+=" SAVE_JAX_CACHE=\"${SAVE_JAX_CACHE}\""
     fi
+  fi
 
-    local jax_cache_env=""
-    if [[ "${DISABLE_JAX_CACHE:-0}" != "1" && "${DISABLE_JAX_CACHE:-false}" != "true" ]]; then
-      if [[ -n "${ROLLOUT_JAX_CACHE_GCS_DIR}" ]]; then
-        jax_cache_env+=" JAX_CACHE_GCS_DIR=\"${ROLLOUT_JAX_CACHE_GCS_DIR}\""
-      fi
-      if [[ -n "${SAVE_JAX_CACHE}" ]]; then
-        jax_cache_env+=" SAVE_JAX_CACHE=\"${SAVE_JAX_CACHE}\""
-      fi
-    fi
-
+  local placeholder="__TUNIX_REPLICA_ID__"
+  local manifest_template
+  manifest_template=$(
     COLOCATED_PYTHON_SIDECAR_IMAGE="" "$PYTHON_BIN" "$YAML_GENERATOR" \
       "${YAML_DIR}/${ROLLOUT_JOBSET_YAML}" \
-      --jobset_name="${replica_id}" \
+      --jobset_name="${placeholder}" \
       --namespace="${K8S_NAMESPACE}" \
       "${FAIL_FAST_GENERATOR_FLAGS[@]}" \
       ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
@@ -849,7 +858,7 @@ if cfg:
           --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
           --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
           --process_main=tunix.experimental.examples.common.run_rollout_node.main \
-          --worker_id=${worker_id} \
+          --worker_id=${placeholder} \
           --port=${ROLLOUT_PORT} \
           --model_id=${MODEL_ID} \
           --model_dir=${MODEL_DIR} \
@@ -878,37 +887,53 @@ if cfg:
           ${maxtext_args} \
           ${vllm_args} \
           ${DEBUG:+--debug} \
-      " \
-      | apply_manifest
+      "
+  ) || return $?
 
-    if [[ "$dynamic_slicing_single_host" == "true" && "$DRY_RUN" != "true" ]]; then
-      local slice_topo="${ROLLOUT_TPU_SLICE#*:}"
-      echo "Applying single-host dynamic slicing patch for ${replica_id} (${slice_topo})..."
-      kubectl patch jobset "${replica_id}" -n "${K8S_NAMESPACE}" --type='json' \
-        -p="[{\"op\": \"add\", \"path\": \"/spec/replicatedJobs/0/template/spec/template/metadata/annotations/cloud.google.com~1gke-tpu-slice-topology\", \"value\": \"${slice_topo}\"}]"
+  local idx=0
+  for replica_id in "${replica_ids[@]}"; do
+    if [[ ${idx} -gt 0 ]]; then
+      echo "---"
     fi
-  done
+    printf '%s\n' "${manifest_template//${placeholder}/${replica_id}}"
+    ((idx++))
+  done | apply_manifest
 
   if [[ "$dynamic_slicing_single_host" == "true" && "$DRY_RUN" != "true" ]]; then
-    local replicas=${ROLLOUT_WORKERS:-${ROLLOUT_REPLICAS:-1}}
+    local slice_topo="${ROLLOUT_TPU_SLICE#*:}"
+    echo "Applying single-host dynamic slicing patch for ${#replica_ids[@]} rollout JobSet(s) (${slice_topo})..."
+    for replica_id in "${replica_ids[@]}"; do
+      printf -- "---\napiVersion: jobset.x-k8s.io/v1alpha2\nkind: JobSet\nmetadata:\n  name: %s\n" "${replica_id}"
+    done | kubectl patch -n "${K8S_NAMESPACE}" -f - --type='json' \
+      -p="[{\"op\": \"add\", \"path\": \"/spec/replicatedJobs/0/template/spec/template/metadata/annotations/cloud.google.com~1gke-tpu-slice-topology\", \"value\": \"${slice_topo}\"}]"
+
     echo "Waiting for Kueue to create initial workloads before recycling..."
     sleep 3
-    for ((i=0; i<replicas; i++)); do
-      local replica_id="${ROLLOUT_ID}"
-      if [[ ${replicas} -gt 1 ]]; then
-        replica_id="${ROLLOUT_ID}-${i}"
-      fi
-      local wl_name
-      wl_name=$(kubectl get workload -n "${K8S_NAMESPACE}" -o name 2>/dev/null | grep -E "jobset-${replica_id}-[a-f0-9]+" | head -n 1 | sed 's|^workload.*/||' || true)
-      if [[ -n "${wl_name}" ]]; then
-        local has_topo
-        has_topo=$(kubectl get workload "${wl_name}" -n "${K8S_NAMESPACE}" -o jsonpath='{.spec.podSets[0].template.metadata.annotations.cloud\.google\.com/gke-tpu-slice-topology}' 2>/dev/null || true)
-        if [[ -z "${has_topo}" ]]; then
-          echo "Recycling workload ${wl_name} for ${replica_id} to apply dynamic slicing..."
-          kubectl delete workload "${wl_name}" -n "${K8S_NAMESPACE}" --ignore-not-found=true --wait=false 2>/dev/null || true
-        fi
-      fi
-    done
+    local workloads_to_recycle=()
+    mapfile -t workloads_to_recycle < <(
+      kubectl get workload -n "${K8S_NAMESPACE}" -o json 2>/dev/null | "$PYTHON_BIN" -c '
+import json, re, sys
+targets = set(sys.argv[1:])
+pattern = re.compile(r"^jobset-(.+)-[a-f0-9]+$")
+try:
+  data = json.load(sys.stdin)
+except Exception:
+  sys.exit(0)
+for item in data.get("items", []):
+  name = item.get("metadata", {}).get("name", "")
+  m = pattern.match(name)
+  if not m or m.group(1) not in targets:
+    continue
+  pod_sets = item.get("spec", {}).get("podSets") or [{}]
+  annos = (pod_sets[0].get("template", {}).get("metadata", {}).get("annotations")) or {}
+  if not annos.get("cloud.google.com/gke-tpu-slice-topology"):
+    print(name)
+' "${replica_ids[@]}" || true
+    )
+    if [[ ${#workloads_to_recycle[@]} -gt 0 ]]; then
+      echo "Recycling ${#workloads_to_recycle[@]} workload(s) to apply dynamic slicing..."
+      kubectl delete workload "${workloads_to_recycle[@]}" -n "${K8S_NAMESPACE}" --ignore-not-found=true --wait=false 2>/dev/null || true
+    fi
   fi
 }
 
@@ -1093,10 +1118,11 @@ start_eval() {
   local max_model_len="${VLLM_MAX_MODEL_LEN:-65536}"
   local max_context_limit="${MAX_CONTEXT_LIMIT:-$((max_model_len - ${MAX_PROMPT_LENGTH:-4096}))}"
   local output_dir="${EVAL_OUTPUT_DIR:-${TRAJECTORY_LOG_DIR:-eval_results}}"
+  local replicas=${ROLLOUT_REPLICAS:-1}
   local sandbox_env=""
   if [[ "${USE_AGENT_SANDBOX}" == "1" || "${USE_AGENT_SANDBOX}" == "true" || "${USE_AGENT_SANDBOX}" == "True" ]]; then
     local eval_job_prefix="${eval_name}"
-    if [[ ${ROLLOUT_REPLICAS} -gt 1 ]]; then
+    if [[ ${replicas} -gt 1 ]]; then
       eval_job_prefix="${eval_name}-0"
     fi
     sandbox_env="NAMESPACE=\"${SANDBOX_NAMESPACE}\" ${SANDBOX_NODE_SELECTOR_KEY:+NODE_SELECTOR_KEY=\"${SANDBOX_NODE_SELECTOR_KEY}\"} ${SANDBOX_NODE_SELECTOR_VAL:+NODE_SELECTOR_VAL=\"${SANDBOX_NODE_SELECTOR_VAL}\"} ${SANDBOX_TOLERATIONS:+SANDBOX_TOLERATIONS=\"${SANDBOX_TOLERATIONS}\"} ${IMAGE_REWRITE_PREFIX:+IMAGE_REWRITE_PREFIX=\"${IMAGE_REWRITE_PREFIX}\"} ${OPENHANDS_SERVER_IMAGE:+OPENHANDS_SERVER_IMAGE=\"${OPENHANDS_SERVER_IMAGE}\"} ORCHESTRATOR_ID=\"${JOB_PREFIX}\" JOB_PREFIX=\"${eval_job_prefix}\" ${POOL_NAME_FORMAT:+POOL_NAME_FORMAT=\"${POOL_NAME_FORMAT}\"} ${TEMPLATE_NAME_PREFIX:+TEMPLATE_NAME_PREFIX=\"${TEMPLATE_NAME_PREFIX}\"}"
@@ -1105,15 +1131,22 @@ start_eval() {
   fi
 
   local worker_addrs="localhost:${eval_port}"
-  if [[ ${ROLLOUT_REPLICAS} -gt 1 ]]; then
-    for ((j=1; j<ROLLOUT_REPLICAS; j++)); do
+  if [[ ${replicas} -gt 1 ]]; then
+    for ((j=1; j<replicas; j++)); do
       worker_addrs="${worker_addrs} ${eval_name}-${j}-proc-0-0.${eval_name}-${j}:${eval_port}"
     done
   fi
 
-  for i in $(seq ${ROLLOUT_START_INDEX:-0} $((ROLLOUT_REPLICAS - 1))); do
+  local start_index=${ROLLOUT_START_INDEX:-0}
+  local eval_cache_dir="${EVAL_JAX_CACHE_GCS_DIR:-${ROLLOUT_JAX_CACHE_GCS_DIR}}"
+  if [[ -n "${eval_cache_dir}" && "${DISABLE_JAX_CACHE:-false}" != "true" && "${DISABLE_JAX_CACHE:-0}" != "1" ]]; then
+    echo "[launcher] Eval JAX cache GCS: ${eval_cache_dir} (save=${SAVE_JAX_CACHE:-true})" >&2
+  fi
+
+  local idx=0
+  for ((i = start_index; i < replicas; i++)); do
     local replica_id="${eval_name}"
-    if [[ ${ROLLOUT_REPLICAS} -gt 1 ]]; then
+    if [[ ${replicas} -gt 1 ]]; then
       replica_id="${eval_name}-${i}"
     fi
     local eval_cmd="tunix/experimental/examples/deepswe_dist/eval_launcher.py"
@@ -1123,11 +1156,9 @@ start_eval() {
       role_arg="--role=worker"
     fi
 
-    local eval_cache_dir="${EVAL_JAX_CACHE_GCS_DIR:-${ROLLOUT_JAX_CACHE_GCS_DIR}}"
-    if [[ "$i" -eq "${ROLLOUT_START_INDEX:-0}" && -n "${eval_cache_dir}" && "${DISABLE_JAX_CACHE:-false}" != "true" && "${DISABLE_JAX_CACHE:-0}" != "1" ]]; then
-      echo "[launcher] Eval JAX cache GCS: ${eval_cache_dir} (save=${SAVE_JAX_CACHE:-true})" >&2
+    if [[ ${idx} -gt 0 ]]; then
+      echo "---"
     fi
-
     COLOCATED_PYTHON_SIDECAR_IMAGE="" "$PYTHON_BIN" "$YAML_GENERATOR" \
       "${YAML_DIR}/${ROLLOUT_JOBSET_YAML:-jobset.pathways.yaml}" \
       --jobset_name="${replica_id}" \
@@ -1246,21 +1277,22 @@ start_eval() {
           ${CHECKPOINT_TIMESTAMP_MS:+--checkpoint_timestamp_ms=${CHECKPOINT_TIMESTAMP_MS}} \
           --samples_count=${SAMPLES_COUNT:-0} \
           --is_last_checkpoint=${IS_LAST_CHECKPOINT:-false} \
-      " \
-      | apply_manifest
-  done
+      "
+    ((idx++))
+  done | apply_manifest
 }
 
 stop_eval() {
   local eval_name="${EVAL_JOBSET_NAME:-${JOB_PREFIX}-eval}"
   local eval_ns="${EVAL_NAMESPACE:-${K8S_NAMESPACE:-trellis}}"
+  local replicas=${ROLLOUT_REPLICAS:-1}
   if [[ "$DRY_RUN" == "true" ]]; then
     echo "[DRY RUN] Would delete jobset ${eval_name} in namespace ${eval_ns}"
-    if [[ ${ROLLOUT_REPLICAS} -gt 1 ]]; then
-      echo "kubectl delete jobset $(seq -f "${eval_name}-%g" 0 $((ROLLOUT_REPLICAS - 1))) -n ${eval_ns}"
-      for ((i=0; i<ROLLOUT_REPLICAS; i++)); do
-        echo "kubectl delete workload -l jobset.sigs.k8s.io/jobset-name=${eval_name}-${i} -n ${eval_ns}"
-      done
+    if [[ ${replicas} -gt 1 ]]; then
+      local selector_list
+      selector_list=$(seq -s, -f "${eval_name}-%g" 0 $((replicas - 1)))
+      echo "kubectl delete jobset $(seq -f "${eval_name}-%g" 0 $((replicas - 1))) -n ${eval_ns}"
+      echo "kubectl delete workload -l \"jobset.sigs.k8s.io/jobset-name in (${selector_list})\" -n ${eval_ns} --ignore-not-found=true --wait=false"
     fi
     if [[ "${USE_AGENT_SANDBOX}" == "1" || "${USE_AGENT_SANDBOX}" == "true" || "${USE_AGENT_SANDBOX}" == "True" ]]; then
       echo "kubectl delete sandboxwarmpools -n ${SANDBOX_NAMESPACE} -l app.kubernetes.io/created-by=${JOB_PREFIX} --ignore-not-found=true"
@@ -1271,11 +1303,11 @@ stop_eval() {
   else
     kubectl delete jobset "${eval_name}" -n "${eval_ns}" --ignore-not-found=true || true
     kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name=${eval_name}" -n "${eval_ns}" --ignore-not-found=true 2>/dev/null || true
-    if [[ ${ROLLOUT_REPLICAS} -gt 1 ]]; then
-      kubectl delete jobset $(seq -f "${eval_name}-%g" 0 $((ROLLOUT_REPLICAS - 1))) -n "${eval_ns}" --ignore-not-found=true 2>/dev/null || true
-      for ((i=0; i<ROLLOUT_REPLICAS; i++)); do
-        kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name=${eval_name}-${i}" -n "${eval_ns}" --ignore-not-found=true 2>/dev/null || true
-      done
+    if [[ ${replicas} -gt 1 ]]; then
+      local selector_list
+      selector_list=$(seq -s, -f "${eval_name}-%g" 0 $((replicas - 1)))
+      kubectl delete jobset $(seq -f "${eval_name}-%g" 0 $((replicas - 1))) -n "${eval_ns}" --ignore-not-found=true 2>/dev/null || true
+      kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name in (${selector_list})" -n "${eval_ns}" --ignore-not-found=true --wait=false 2>/dev/null || true
     fi
     if [[ "${USE_AGENT_SANDBOX}" == "1" || "${USE_AGENT_SANDBOX}" == "true" || "${USE_AGENT_SANDBOX}" == "True" ]]; then
       echo "Cleaning up sandboxes and warmpools for ${JOB_PREFIX} in ${SANDBOX_NAMESPACE}..."
@@ -1312,7 +1344,7 @@ if [[ "$COMMAND" != "eval" && "$COMMAND" != "stop_eval" && -z "$TUNIX_IMAGE" ]];
 fi
 
 if [[ "$COMMAND" == "start" ]]; then
-  if [[ "${USE_AGENT_SANDBOX}" == "1" || "${USE_AGENT_SANDBOX}" == "true" || "${USE_AGENT_SANDBOX}" == "True" ]]; then
+  if [[ "$DRY_RUN" != "true" ]] && [[ "${USE_AGENT_SANDBOX}" == "1" || "${USE_AGENT_SANDBOX}" == "true" || "${USE_AGENT_SANDBOX}" == "True" ]]; then
     echo "Ensuring RBAC permissions for default:xpk-sa in namespace '${SANDBOX_NAMESPACE:-trellis}'..."
     kubectl create rolebinding xpk-sa-default-pod-exec -n "${SANDBOX_NAMESPACE:-trellis}" --role=pod-exec --serviceaccount=default:xpk-sa --dry-run=client -o yaml | kubectl apply -f - || true
     kubectl create rolebinding xpk-sa-default-power-users -n "${SANDBOX_NAMESPACE:-trellis}" --clusterrole=power-users --serviceaccount=default:xpk-sa --dry-run=client -o yaml | kubectl apply -f - || true
