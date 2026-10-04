@@ -2436,6 +2436,50 @@ class CreateBatchAssemblerTest(absltest.TestCase):
     self.assertEqual(full_routed_shapes, [(4, 9, 48, 8)])
     self.assertEqual(stack_routed_shapes, [])
 
+  def test_eos_id_preserved_across_batch_assemblers(self):
+    packed_cfg = batch_assembly.BatchConfig(
+        max_seq_token_per_tpu=64,
+        max_prompt_length=16,
+        max_response_length=32,
+        pad_id=0,
+        eos_id=248046,
+    )
+    packed_asm = batch_assembly.create_batch_assembler(
+        num_generations=4,
+        mini_batch_size=4,
+        train_micro_batch_size=2,
+        batch_config=packed_cfg,
+    )
+    self.assertEqual(packed_asm.pad_id, 0)
+    self.assertEqual(packed_asm.eos_id, 248046)
+
+    padded_cfg = batch_assembly.BatchConfig(
+        max_prompt_length=16,
+        max_response_length=32,
+        pad_id=7,
+        eos_id=248044,
+    )
+    padded_asm = batch_assembly.create_batch_assembler(
+        num_generations=4,
+        mini_batch_size=4,
+        train_micro_batch_size=2,
+        batch_config=padded_cfg,
+    )
+    self.assertEqual(padded_asm.pad_id, 7)
+    self.assertEqual(padded_asm.eos_id, 248044)
+
+    default_asm = batch_assembly.create_batch_assembler(
+        num_generations=4,
+        mini_batch_size=4,
+        train_micro_batch_size=2,
+        batch_config=batch_assembly.BatchConfig(
+            max_prompt_length=16,
+            max_response_length=32,
+            pad_id=42,
+        ),
+    )
+    self.assertEqual(default_asm.eos_id, 42)
+
 
 if __name__ == "__main__":
   absltest.main()

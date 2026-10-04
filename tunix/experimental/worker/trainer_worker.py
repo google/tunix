@@ -16,10 +16,12 @@
 
 from collections.abc import Mapping
 import contextlib
+import dataclasses
 from typing import Any, Callable, ContextManager, cast
 
 from absl import logging
 from flax import nnx
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -100,13 +102,52 @@ class TrainerWorker(abstract_worker.Worker):
     finally:
       self.state = WorkerState.READY
 
+  def _resolve_compile_payload(self, dummy_data: Any) -> Any:
+    """Resolves model-dependent MoE routing dimensions on a compile payload."""
+    if (
+        not isinstance(dummy_data, datatypes.RLTrainerPayload)
+        or dummy_data.routed_experts is None
+    ):
+      return dummy_data
+    cfg = getattr(self._trainer, "_config", None) or getattr(
+        self._trainer, "config", None
+    )
+    num_layers = int(getattr(cfg, "base_num_decoder_layers", 0) or 0)
+    top_k = int(getattr(cfg, "num_experts_per_tok", 0) or 0)
+    re_shape = tuple(jnp.shape(dummy_data.routed_experts))
+    if (
+        num_layers > 0
+        and top_k > 0
+        and len(re_shape) == 4
+        and re_shape[2:] != (num_layers, top_k)
+    ):
+      return dataclasses.replace(
+          dummy_data,
+          routed_experts=jax.ShapeDtypeStruct(
+              re_shape[:2] + (num_layers, top_k), jnp.int16
+          ),
+      )
+    return dummy_data
+
   def compile(self, dummy_data: Any = None) -> datatypes.Response:
     """Triggers JIT compilation using the provided dummy_data."""
     if self.state == WorkerState.PENDING:
       self.initialize()
     self.state = WorkerState.COMPILING
     try:
-      self._trainer.compile(dummy_data)
+      dummy_data = self._resolve_compile_payload(dummy_data)
+      has_compile_kernels = (
+          "compile_kernels" in vars(self._trainer)
+          or getattr(type(self._trainer), "compile_kernels", None) is not None
+      )
+      if dummy_data is not None and has_compile_kernels:
+        self._trainer.compile(None)
+        compiled = self._trainer.compile_kernels(dummy_data)  # pytype: disable=attribute-error
+        self._trainer._compiled_fwd_bwd = compiled["fwd_bwd"]  # pylint: disable=protected-access
+        self._trainer._compiled_fwd_bwd_accum = compiled["fwd_bwd_accum"]  # pylint: disable=protected-access
+        self._trainer._compiled_update = compiled["update"]  # pylint: disable=protected-access
+      else:
+        self._trainer.compile(dummy_data)
       return self._response(compiled=True)
     except Exception as exc:
       self._last_error = str(exc)

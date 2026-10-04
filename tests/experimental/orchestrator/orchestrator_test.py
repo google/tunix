@@ -204,6 +204,53 @@ class ClusterOrchestratorTest(absltest.TestCase):
 
     healthy.submit.assert_any_call("stop")
 
+  def test_bring_up_remote_workers_parallelizes_within_stages(self):
+    from tunix.experimental.worker import remote_execution
+
+    barrier = threading.Barrier(2, timeout=2.0)
+    stage_order = []
+    lock = threading.Lock()
+
+    def _make_handle(name: str):
+      handle = mock.MagicMock(spec=remote_execution.ActorHandle)
+
+      def _submit(method, *args):
+        del args
+        if method in ("initialize", "compile", "start"):
+          barrier.wait()
+        with lock:
+          stage_order.append((method, name))
+
+      handle.submit.side_effect = _submit
+      return handle
+
+    registry = worker_registry.WorkerRegistry()
+    orch = orchestrator.ClusterOrchestrator(
+        registry=registry,
+        lifecycle_driver=self.mock_lifecycle,
+        monitor=self.mock_monitor,
+    )
+    orch.register_worker_handle(
+        "rollout-0", [datatypes.Role.ROLLOUT], _make_handle("rollout-0")
+    )
+    orch.register_worker_handle(
+        "actor-0", [datatypes.Role.ACTOR], _make_handle("actor-0")
+    )
+
+    orch.bring_up_workers(dummy_data="dummy")
+    methods = [m for m, _ in stage_order]
+    self.assertEqual(
+        methods,
+        [
+            "initialize",
+            "initialize",
+            "compile",
+            "compile",
+            "start",
+            "start",
+        ],
+    )
+
   def test_create_engine_wraps_local_workers_as_in_process_handles(self):
     from tunix.experimental.worker import remote_execution
 

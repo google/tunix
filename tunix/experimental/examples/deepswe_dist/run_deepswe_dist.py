@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Callable
+import dataclasses
 import functools
 import logging
 import os
@@ -28,6 +29,7 @@ from typing import Any
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import jax  # pylint: disable=g-import-not-at-top
+import numpy as np  # pylint: disable=g-import-not-at-top
 from transformers import AutoTokenizer  # pylint: disable=g-import-not-at-top
 
 REPO_ROOT = os.path.abspath(
@@ -532,6 +534,13 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       default="",
       help="Root directory for the file-backed TrajectoryStore.",
   )
+  parser.add_argument(
+      "--return_routed_experts",
+      action=argparse.BooleanOptionalAction,
+      default=os.getenv("RETURN_ROUTED_EXPERTS", "false").lower()
+      in ("1", "true", "yes"),
+      help="Whether rollout workers capture MoE routed experts for router replay.",
+  )
   return parser.parse_args(argv)
 
 
@@ -607,6 +616,71 @@ def _configure_trainer_loss(
   )
 
 
+def _build_dummy_train_payload(
+    args: argparse.Namespace,
+    *,
+    algo: algorithm_adapter.GRPOAdapter,
+    assembler: batch_assembly.BatchAssembler[Any],
+) -> datatypes.RLTrainerPayload:
+  """Builds a shape-matching abstract RLTrainerPayload for ahead-of-time Trainer compilation."""
+  prompt_len = 8
+  completion_len = 8
+  seq_len = prompt_len + completion_len
+  routed = (
+      np.full(
+          (seq_len, 1, 1),
+          datatypes.UNSET_ROUTED_EXPERT,
+          dtype=np.int16,
+      )
+      if getattr(args, "return_routed_experts", False)
+      else None
+  )
+  group = [
+      datatypes.TrajectoryItem(
+          traj={
+              "prompt_tokens": np.zeros(prompt_len, dtype=np.int32),
+              "prompt_length": prompt_len,
+              "conversation_tokens": np.zeros(completion_len, dtype=np.int32),
+              "conversation_masks": np.ones(completion_len, dtype=np.float32),
+              "old_logprobs": np.zeros(completion_len, dtype=np.float32),
+              "status": datatypes.TrajectoryStatus.SUCCEEDED.name,
+          },
+          routed_experts=routed,
+          is_valid=True,
+      )
+      for _ in range(args.num_generations)
+  ]
+  rewards = [1.0] + [0.0] * (args.num_generations - 1)
+  payloads = algo.create_trainer_payloads(group, rewards)
+  assembled = list(assembler.feed(payloads))
+  if not assembled:
+    assembled = list(assembler.flush())
+  assembler.reset(start_batch_index=0)
+  batch = assembled[0].payload
+  if getattr(algo, "requires_reference_kl", False):
+    batch = batch_assembly.with_ref_per_token_logps(
+        batch, np.zeros_like(batch.completion_ids, dtype=np.float32)
+    )
+  if (
+      batch.old_per_token_logps is not None
+      and getattr(algo.algo_config, "use_rollout_logps", False)
+      and getattr(algo.algo_config, "sampler_is", None) == "token"
+  ):
+    batch = dataclasses.replace(
+        batch,
+        sampler_is_weights=np.ones_like(
+            batch.completion_mask, dtype=np.float32
+        ),
+    )
+  batch = dataclasses.replace(batch, metadata={})
+  return jax.tree.map(
+      lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype)
+      if hasattr(x, "shape") and hasattr(x, "dtype")
+      else x,
+      batch,
+  )
+
+
 def _register_signal_handlers(
     on_exit_signal: Callable[[int], None] | None = None,
 ) -> None:
@@ -637,8 +711,6 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   ), "Require discovery API, but process context doesn't support."
 
   args = _parse_args(argv)
-  if args.rcp_logging:
-    mllog_utils.init_start(args)
   logging.basicConfig(
       level=logging.DEBUG if args.debug else logging.INFO,
       format="%(asctime)s - [DeepSWEOrchestrator] %(message)s",
@@ -756,43 +828,13 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       )
   )
 
-  cluster.wait_for_workers(
-      min_workers={
-          datatypes.Role.ACTOR: 1,
-          datatypes.Role.ROLLOUT: args.rollout_replicas,
-          datatypes.Role.REFERENCE: 1 if args.beta != 0.0 else 0,
-      },
-      timeout=args.init_timeout_s,
-      poll_interval_s=1.0,
-  )
-  logging.info("Registered workers: %s", cluster.worker_infos())
-
-  algo = _build_algo(args)
-  trainer_handles = cluster.worker_handles(datatypes.Role.ACTOR)
-  if len(trainer_handles) != 1:
-    raise ValueError(f"Expected 1 trainer worker, got {len(trainer_handles)}.")
-  _configure_trainer_loss(
-      trainer_handles[0],
-      algo=algo,
-      pad_id=pad_id,
-      eos_id=eos_id,
-  )
-
-  metrics_logging_options = metrics_logger_lib.MetricsLoggerOptions(
-      log_dir=args.log_dir,
-      project_name=args.wandb_project,
-      run_name=args.wandb_run_name,
-      flush_every_n_steps=args.flush_every_n_steps,
-      backend_kwargs={"wandb": {"config": vars(args)}},
-  )
-
   fleet = None
   prompt_stream = None
   try:
     if args.use_agent_sandbox:
-      # Initialize fleet plan from dataset. Eager warmpools are skipped;
-      # dynamic sliding-window prewarming with initial barrier is handled by
-      # PrewarmDatasetIterator below.
+      # Start warming initial K8s sandbox warmpools asynchronously BEFORE
+      # waiting on worker registration so warmpool spin-up overlaps with TPU
+      # slice scheduling and worker registration.
       fleet = swe_env._init_global_fleet(  # pylint: disable=protected-access
           tasks=dataset,
           max_concurrency=args.max_concurrency,
@@ -835,6 +877,45 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           async_initial=True,
           max_staleness=args.max_staleness,
       )
+
+    cluster.wait_for_workers(
+        min_workers={
+            datatypes.Role.ACTOR: 1,
+            datatypes.Role.ROLLOUT: args.rollout_replicas,
+            datatypes.Role.REFERENCE: 1 if args.beta != 0.0 else 0,
+        },
+        timeout=args.init_timeout_s,
+        poll_interval_s=1.0,
+    )
+    logging.info("Registered workers: %s", cluster.worker_infos())
+
+    if args.rcp_logging:
+      mllog_utils.init_start(args)
+      mllog_utils.init_print(
+          args,
+          train_dataset=dataset,
+      )
+
+    algo = _build_algo(args)
+    trainer_handles = cluster.worker_handles(datatypes.Role.ACTOR)
+    if len(trainer_handles) != 1:
+      raise ValueError(
+          f"Expected 1 trainer worker, got {len(trainer_handles)}."
+      )
+    _configure_trainer_loss(
+        trainer_handles[0],
+        algo=algo,
+        pad_id=pad_id,
+        eos_id=eos_id,
+    )
+
+    metrics_logging_options = metrics_logger_lib.MetricsLoggerOptions(
+        log_dir=args.log_dir,
+        project_name=args.wandb_project,
+        run_name=args.wandb_run_name,
+        flush_every_n_steps=args.flush_every_n_steps,
+        backend_kwargs={"wandb": {"config": vars(args)}},
+    )
 
     global_batch_size = int(args.batch_size) * int(args.num_generations)
     val_start_step = (
@@ -904,11 +985,13 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
             top_p=args.top_p,
             top_k=None if args.top_k < 0 else args.top_k,
             return_logprobs=True,
+            return_routed_experts=args.return_routed_experts,
         ),
         reward_fns=[],
         batch_size=args.batch_size,
         batch_config=batch_assembly.BatchConfig(
             pad_id=pad_id,
+            eos_id=eos_id,
             max_prompt_length=args.max_prompt_length,
             max_response_length=args.max_response_length,
             max_seq_token_per_tpu=args.max_seq_token_per_tpu,
@@ -954,14 +1037,13 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         on_checkpoint_saved=_on_checkpoint_saved if manifest_file else None,
     )
 
-    if args.rcp_logging:
-      mllog_utils.init_print(
-          args,
-          train_dataset=dataset,
-      )
-
+    dummy_data = _build_dummy_train_payload(
+        args,
+        algo=algo,
+        assembler=program.assembler,
+    )
     logging.info("Bringing up remote workers through ClusterOrchestrator...")
-    cluster.bring_up_workers(dummy_data=None)
+    cluster.bring_up_workers(dummy_data=dummy_data)
     logging.info("Starting DeepSWE StandardRLProgram execution...")
     cluster.run(
         program=program,
