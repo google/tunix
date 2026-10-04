@@ -116,6 +116,8 @@ export IMAGE_REWRITE_PREFIX="${IMAGE_REWRITE_PREFIX:-us-central1-docker.pkg.dev/
 export ENABLE_THINKING="${ENABLE_THINKING:-false}"
 export STEP_TIMEOUT_SECS=60
 export REWARD_TIMEOUT_SECS=60
-export MAX_CONTEXT_LIMIT="${MAX_CONTEXT_LIMIT:-61440}"
+# MAX_CONTEXT_LIMIT is left to k8s_launcher.sh, which defaults it to
+# VLLM_MAX_MODEL_LEN - MAX_PROMPT_LENGTH so that every turn's request fits
+# in max_model_len. A fixed 61440 assumed MAX_PROMPT_LENGTH=4096.
 
 source "${DIR}/mlperf_base.sh" "${1:-eval}" "${@:2}"

@@ -15,25 +15,26 @@
 """Utility functions for OpenHands workspace and environment setup."""
 
 import base64
+import hashlib
 import json
 import logging
 import os
 import re
 import subprocess
 import time
+import uuid
 from typing import Any, Optional
 
+from examples.deepswe.opencode_fuzzy import fuzzy_find_match
 from tunix.rl.agentic.environments.base_environment import EnvStepResult
 
 MAX_RESPONSE_LEN_CHAR = 16000
-MAX_LINES_TO_VIEW = 600
-SNIPPET_LINES = 4
 CLIPPED_NOTICE = "<response clipped>"
 FILE_CLIPPED_NOTICE = (
     "<response clipped><NOTE>Due to the max output limit, only part of this"
     " file has been shown to you. You should retry this tool after you have"
-    " searched inside the file with grep in order to find the line numbers of"
-    " what you are looking for.</NOTE>"
+    " searched inside the file with `grep -n` in order to find the line"
+    " numbers of what you are looking for.</NOTE>"
 )
 
 
@@ -52,17 +53,111 @@ def run_oh_editor_locally(
     params: dict[str, Any],
     history_file: str = "/var/tmp/.oh_editor_history.json",
 ) -> str:
-  """Executes str_replace_editor matching OpenHands OHEditor semantics."""
-  cmd = str(params.get("command") or "")
-  path = str(params.get("path") or "")
+  """Executes str_replace_editor with openhands-aci 0.3.2 OHEditor semantics.
 
-  if not path.startswith("/"):
-    return (
-        f"Error: The path {path} is not an absolute path, it should start"
-        " with '/'."
+  The reference harness (OpenHands 0d766ad06) runs OHEditor in its server
+  process and shows the model `result.output`, or "ERROR:\n" + the error
+  message. This port reproduces that text byte for byte for UTF-8 text files.
+  It is shipped into the sandbox and run there by python3, so it must stay
+  self-contained and Python 3.7 compatible. Edit history lives in
+  `history_file` because every call is a fresh process.
+  """
+  import pathlib  # pylint: disable=g-import-not-at-top
+  import re as _re  # pylint: disable=g-import-not-at-top
+
+  max_chars = 16000  # openhands_aci.editor.config.MAX_RESPONSE_LEN_CHAR
+  context_window = 4  # SNIPPET_CONTEXT_WINDOW
+  max_file_bytes = 10 * 1024 * 1024  # OHEditor.MAX_FILE_SIZE_MB
+  max_history = 10  # FileHistoryManager(max_history_per_file=10)
+  text_notice = (
+      "<response clipped><NOTE>Due to the max output limit, only part of this"
+      " file has been shown to you. You should retry this tool after you have"
+      " searched inside the file with `grep -n` in order to find the line"
+      " numbers of what you are looking for.</NOTE>"
+  )
+  dir_notice = (
+      "<response clipped><NOTE>Due to the max output limit, only part of this"
+      " directory has been shown to you. You should use `ls -la` instead to"
+      " view large directories incrementally.</NOTE>"
+  )
+
+  class _ToolError(Exception):
+    pass
+
+  def _invalid(parameter, value, hint=None):
+    if hint:
+      return _ToolError(f"Invalid `{parameter}` parameter: {value}. {hint}")
+    return _ToolError(f"Invalid `{parameter}` parameter: {value}.")
+
+  def _missing(command, parameter):
+    return _ToolError(
+        f"Parameter `{parameter}` is required for command: {command}."
     )
 
-  def _load_history() -> dict[str, list[str]]:
+  def _truncate(content, notice):
+    if len(content) <= max_chars:
+      return content
+    return content[:max_chars] + notice
+
+  def _make_output(snippet, description, start_line=1):
+    snippet = _truncate(snippet, text_notice)
+    numbered = "\n".join(
+        f"{i + start_line:6}\t{line}"
+        for i, line in enumerate(snippet.split("\n"))
+    )
+    return (
+        f"Here's the result of running `cat -n` on {description}:\n"
+        + numbered
+        + "\n"
+    )
+
+  def _read(file_path, start_line=None, end_line=None):
+    _validate_file(file_path)
+    try:
+      with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+        if start_line is not None and end_line is not None:
+          lines = []
+          for i, line in enumerate(f, 1):
+            if i > end_line:
+              break
+            if i >= start_line:
+              lines.append(line)
+          return "".join(lines)
+        return "".join(f)
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      raise _ToolError(f"Ran into {e} while trying to read {file_path}")
+
+  def _write(file_path, text):
+    _validate_file(file_path)
+    try:
+      with open(file_path, "w", encoding="utf-8") as f:
+        f.write(text)
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      raise _ToolError(f"Ran into {e} while trying to write to {file_path}")
+
+  def _count_lines(file_path):
+    with open(file_path, encoding="utf-8", errors="replace") as f:
+      return sum(1 for _ in f)
+
+  def _validate_file(file_path):
+    if not file_path.exists() or not file_path.is_file():
+      return
+    file_size = os.path.getsize(file_path)
+    if file_size > max_file_bytes:
+      raise _ToolError(
+          f"File validation failed for {file_path}: File is too large"
+          f" ({file_size / 1024 / 1024:.1f}MB). Maximum allowed size is"
+          f" {int(max_file_bytes / 1024 / 1024)}MB."
+      )
+    with open(file_path, "rb") as f:
+      head = f.read(8192)
+    if b"\x00" in head:
+      raise _ToolError(
+          f"File validation failed for {file_path}: File appears to be binary"
+          " and this file type cannot be read or edited by this tool."
+      )
+
+  def _load_history():
     if os.path.exists(history_file):
       try:
         with open(history_file, "r", encoding="utf-8") as f:
@@ -73,7 +168,7 @@ def run_oh_editor_locally(
         pass
     return {}
 
-  def _save_history(hist: dict[str, list[str]]) -> None:
+  def _save_history(hist):
     try:
       os.makedirs(os.path.dirname(history_file), exist_ok=True)
       with open(history_file, "w", encoding="utf-8") as f:
@@ -81,303 +176,343 @@ def run_oh_editor_locally(
     except Exception:  # pylint: disable=broad-exception-caught
       pass
 
-  def _push_history(file_path: str, old_content: str) -> None:
+  def _add_history(file_path, content):
     hist = _load_history()
-    hist.setdefault(file_path, []).append(old_content)
+    entries = hist.setdefault(str(file_path), [])
+    entries.append(content)
+    del entries[:-max_history]
     _save_history(hist)
 
-  def _pop_history(file_path: str) -> Optional[str]:
+  def _pop_history(file_path):
     hist = _load_history()
-    entries = hist.get(file_path) or []
+    entries = hist.get(str(file_path)) or []
     if not entries:
       return None
-    val = entries.pop()
+    content = entries.pop()
     _save_history(hist)
-    return val
+    return content
 
-  def _format_cat_n(
-      lines: list[str], start_line: int = 1, path_label: str = path
-  ) -> str:
-    numbered = "\n".join(
-        f"{i + start_line:6}\t{line}" for i, line in enumerate(lines)
+  def _run_shell(cmd_str, notice):
+    proc = subprocess.run(
+        cmd_str,
+        shell=True,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=120,
     )
-    return f"Here's the result of running `cat -n` on {path_label}:\n{numbered}\n"
+    return _truncate(proc.stdout, notice), _truncate(proc.stderr, notice)
 
-  if cmd == "view":
-    if os.path.isdir(path):
-      if params.get("view_range") is not None:
-        return (
-            "Error: The `view_range` parameter is not allowed when `path`"
-            " points to a directory."
+  def _view(file_path, view_range):
+    if file_path.is_dir():
+      if view_range:
+        raise _invalid(
+            "view_range",
+            view_range,
+            "The `view_range` parameter is not allowed when `path` points to"
+            " a directory.",
         )
-      try:
-        proc = subprocess.run(
-            ["find", "-L", path, "-maxdepth", "2", "-not", "-path", "*/.*"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=30,
-        )
-        stdout = proc.stdout.strip()
-      except Exception as e:  # pylint: disable=broad-exception-caught
-        return f"Error listing directory {path}: {e}"
-      out = (
-          "Here's the files and directories up to 2 levels deep in"
-          f" {path}, excluding hidden items:\n{stdout}\n"
+      hidden_stdout, _ = _run_shell(
+          f"find -L {file_path} -mindepth 1 -maxdepth 1 -name '.*'",
+          "<response clipped><NOTE>Due to the max output limit, only part of"
+          " the full response has been shown to you.</NOTE>",
       )
-      return _maybe_clip_response(out, MAX_RESPONSE_LEN_CHAR, FILE_CLIPPED_NOTICE)
-
-    if not os.path.exists(path):
-      return (
-          f"Error: Invalid `path` parameter: {path}. The path {path} does"
-          " not exist. Please provide a valid path."
+      hidden_count = (
+          len(hidden_stdout.strip().split("\n")) if hidden_stdout.strip() else 0
       )
-    try:
-      with open(path, "r", encoding="utf-8", errors="replace") as f:
-        file_content = f.read()
-    except Exception as e:  # pylint: disable=broad-exception-caught
-      return f"Error reading {path}: {e}"
-
-    file_lines = file_content.expandtabs().split("\n")
-    n_lines = len(file_lines)
-    init_line = 1
-    raw_range = params.get("view_range")
-    clipped_by_line_limit = False
-
-    if raw_range is not None and raw_range != "":
-      if isinstance(raw_range, str):
-        try:
-          view_range = json.loads(raw_range)
-        except Exception:  # pylint: disable=broad-exception-caught
-          return (
-              f"Error: Invalid `view_range` parameter: {raw_range}. It"
-              " should be a list of two integers."
-          )
-      else:
-        view_range = raw_range
-      if (
-          not isinstance(view_range, list)
-          or len(view_range) != 2
-          or not all(isinstance(x, int) for x in view_range)
-      ):
-        return (
-            f"Error: Invalid `view_range` parameter: {raw_range}. It should"
-            " be a list of two integers."
-        )
-      init_line, final_line = view_range[0], view_range[1]
-      if init_line < 1 or init_line > n_lines:
-        return (
-            f"Error: Invalid `view_range` {view_range}. Its first element"
-            f" `{init_line}` should be within the range of lines of the"
-            f" file: {[1, n_lines]}."
-        )
-      if final_line > n_lines:
-        return (
-            f"Error: Invalid `view_range` {view_range}. Its second element"
-            f" `{final_line}` should be smaller than the number of lines in"
-            f" the file: `{n_lines}`."
-        )
-      if final_line != -1 and final_line < init_line:
-        return (
-            f"Error: Invalid `view_range` {view_range}. Its second element"
-            f" `{final_line}` should be larger or equal than its first"
-            f" `{init_line}`."
-        )
-      if final_line == -1:
-        selected = file_lines[init_line - 1 :]
-      else:
-        selected = file_lines[init_line - 1 : final_line]
-    else:
-      selected = file_lines
-      if len(selected) > MAX_LINES_TO_VIEW:
-        selected = selected[:MAX_LINES_TO_VIEW]
-        clipped_by_line_limit = True
-
-    out = _format_cat_n(selected, start_line=init_line, path_label=path)
-    if clipped_by_line_limit:
-      out += FILE_CLIPPED_NOTICE
-    return _maybe_clip_response(out, MAX_RESPONSE_LEN_CHAR, FILE_CLIPPED_NOTICE)
-
-  elif cmd == "create":
-    if os.path.exists(path):
-      return (
-          f"Error: File already exists at: {path}. Cannot overwrite files"
-          " using command `create`."
+      stdout, stderr = _run_shell(
+          f"find -L {file_path} -maxdepth 2 -not \\( -path"
+          f" '{file_path}/\\.*' -o -path '{file_path}/*/\\.*' \\) | sort",
+          dir_notice,
       )
-    file_text = params.get("file_text")
-    if file_text is None:
-      return "Error: Parameter `file_text` is required for command: create."
-    try:
-      with open(path, "w", encoding="utf-8") as f:
-        f.write(str(file_text))
-    except Exception as e:  # pylint: disable=broad-exception-caught
-      return f"Error creating file {path}: {e}"
-    return f"File created successfully at: {path}"
-
-  elif cmd == "str_replace":
-    if not os.path.isfile(path):
-      return (
-          f"Error: Invalid `path` parameter: {path}. The path {path} does"
-          " not exist. Please provide a valid file path."
-      )
-    old_str = params.get("old_str")
-    if old_str is None:
-      return "Error: Parameter `old_str` is required for command: str_replace."
-    old_str = str(old_str).expandtabs()
-    new_str = (
-        str(params.get("new_str")).expandtabs()
-        if params.get("new_str") is not None
-        else ""
-    )
-    if old_str == new_str:
-      return (
-          "Error: No replacement was performed. `new_str` and `old_str` must"
-          " be different."
-      )
-    try:
-      with open(path, "r", encoding="utf-8", errors="replace") as f:
-        file_content = f.read().expandtabs()
-    except Exception as e:  # pylint: disable=broad-exception-caught
-      return f"Error reading {path}: {e}"
-
-    occurrences = file_content.count(old_str)
-    if occurrences == 0:
-      return (
-          f"Error: No replacement was performed, old_str `{old_str}` did not"
-          f" appear verbatim in {path}."
-      )
-    if occurrences > 1:
-      file_lines = file_content.split("\n")
-      lines = [
-          idx + 1
-          for idx, line in enumerate(file_lines)
-          if old_str in line
+      if stderr:
+        raise _ToolError(stderr)
+      paths = stdout.strip().split("\n") if stdout.strip() else []
+      formatted = [
+          f"{entry}/" if pathlib.Path(entry).is_dir() else entry
+          for entry in paths
       ]
-      return (
-          "Error: No replacement was performed. Multiple occurrences of"
-          f" old_str `{old_str}` in lines {lines}. Please ensure it is"
-          " unique."
+      msg = [
+          "Here's the files and directories up to 2 levels deep in"
+          f" {file_path}, excluding hidden items:\n"
+          + "\n".join(formatted)
+      ]
+      if hidden_count > 0:
+        msg.append(
+            f"\n{hidden_count} hidden files/directories in this directory are"
+            f" excluded. You can use 'ls -la {file_path}' to see them."
+        )
+      return "\n".join(msg)
+
+    _validate_file(file_path)
+    num_lines = _count_lines(file_path)
+    if not view_range:
+      return _make_output(_read(file_path), str(file_path), 1)
+    if len(view_range) != 2 or not all(isinstance(i, int) for i in view_range):
+      raise _invalid(
+          "view_range", view_range, "It should be a list of two integers."
       )
-
-    _push_history(path, file_content)
-    new_file_content = file_content.replace(old_str, new_str, 1)
-    try:
-      with open(path, "w", encoding="utf-8") as f:
-        f.write(new_file_content)
-    except Exception as e:  # pylint: disable=broad-exception-caught
-      return f"Error writing {path}: {e}"
-
-    replacement_line = file_content.split(old_str)[0].count("\n")
-    start_line = max(0, replacement_line - SNIPPET_LINES)
-    end_line = replacement_line + SNIPPET_LINES + new_str.count("\n")
-    snippet_lines = new_file_content.split("\n")[start_line : end_line + 1]
-    snippet_out = _format_cat_n(
-        snippet_lines, start_line=start_line + 1, path_label=f"a snippet of {path}"
+    start_line, end_line = view_range
+    if start_line < 1 or start_line > num_lines:
+      raise _invalid(
+          "view_range",
+          view_range,
+          f"Its first element `{start_line}` should be within the range of"
+          f" lines of the file: {[1, num_lines]}.",
+      )
+    warning_message = None
+    if end_line == -1:
+      end_line = num_lines
+    elif end_line > num_lines:
+      warning_message = (
+          f"We only show up to {num_lines} since there're only {num_lines}"
+          " lines in this file."
+      )
+      end_line = num_lines
+    if end_line < start_line:
+      raise _invalid(
+          "view_range",
+          view_range,
+          f"Its second element `{end_line}` should be greater than or equal to"
+          f" the first element `{start_line}`.",
+      )
+    content = _read(file_path, start_line=start_line, end_line=end_line)
+    output = _make_output(
+        "\n".join(content.splitlines()), str(file_path), start_line
     )
+    if warning_message:
+      output = f"NOTE: {warning_message}\n{output}"
+    return output
+
+  def _str_replace(file_path, old_str, new_str):
+    # OpenCodeEditor.str_replace (OpenHands 0d766ad06), which the reference
+    # runtime uses in place of OHEditor: exact match, then strip(), then the
+    # OpenCode fuzzy replacers. Errors quote the original old_str.
+    _validate_file(file_path)
+    new_str = new_str or ""
+    file_content = _read(file_path)
+
+    def _find(needle):
+      return [
+          (file_content.count("\n", 0, m.start()) + 1, m.group(), m.start())
+          for m in _re.finditer(_re.escape(needle), file_content)
+      ]
+
+    occurrences = _find(old_str)
+    actual_new_str = new_str
+    if not occurrences:
+      old_str_stripped = old_str.strip()
+      occurrences = _find(old_str_stripped)
+      if occurrences:
+        actual_new_str = new_str.strip()
+    if not occurrences:
+      fuzzy_match = fuzzy_find_match(file_content, old_str)
+      if fuzzy_match:
+        idx = file_content.find(fuzzy_match)
+        if idx != -1:
+          line_num = file_content.count("\n", 0, idx) + 1
+          occurrences = [(line_num, fuzzy_match, idx)]
+    if not occurrences:
+      raise _ToolError(
+          f"No replacement was performed, old_str `{old_str}` did not appear"
+          f" verbatim in {file_path}."
+      )
+    if len(occurrences) > 1:
+      line_numbers = sorted(set(line for line, _, _ in occurrences))
+      raise _ToolError(
+          "No replacement was performed. Multiple occurrences of old_str"
+          f" `{old_str}` in lines {line_numbers}. Please ensure it is unique."
+      )
+    replacement_line, matched_text, idx = occurrences[0]
+    new_file_content = (
+        file_content[:idx]
+        + actual_new_str
+        + file_content[idx + len(matched_text) :]
+    )
+    _write(file_path, new_file_content)
+    _add_history(file_path, file_content)
+    start_line = max(0, replacement_line - context_window)
+    end_line = (
+        replacement_line + context_window + actual_new_str.count("\n")
+    )
+    snippet = _read(file_path, start_line=start_line + 1, end_line=end_line)
     return (
-        f"The file {path} has been edited. {snippet_out}Review the changes"
-        " and make sure they are as expected. Edit the file again if"
+        f"The file {file_path} has been edited. "
+        + _make_output(snippet, f"a snippet of {file_path}", start_line + 1)
+        + "Review the changes and make sure they are as expected. Edit the"
+        " file again if necessary."
+    )
+
+  def _insert(file_path, insert_line, new_str):
+    _validate_file(file_path)
+    num_lines = _count_lines(file_path)
+    if insert_line < 0 or insert_line > num_lines:
+      raise _invalid(
+          "insert_line",
+          insert_line,
+          "It should be within the range of allowed values:"
+          f" {[0, num_lines]}",
+      )
+    new_str_lines = new_str.split("\n")
+    with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+      old_lines = list(f)
+    history_text = "".join(old_lines)
+    new_text = (
+        "".join(old_lines[:insert_line])
+        + "".join(line + "\n" for line in new_str_lines)
+        + "".join(old_lines[insert_line:])
+    )
+    _write(file_path, new_text)
+    start_line = max(0, insert_line - context_window)
+    end_line = min(
+        num_lines + len(new_str_lines),
+        insert_line + context_window + len(new_str_lines),
+    )
+    snippet = _read(file_path, start_line=start_line + 1, end_line=end_line)
+    _add_history(file_path, history_text)
+    return (
+        f"The file {file_path} has been edited. "
+        + _make_output(
+            snippet,
+            "a snippet of the edited file",
+            max(1, insert_line - context_window + 1),
+        )
+        + "Review the changes and make sure they are as expected (correct"
+        " indentation, no duplicate lines, etc). Edit the file again if"
         " necessary."
     )
 
-  elif cmd == "insert":
-    if not os.path.isfile(path):
-      return (
-          f"Error: Invalid `path` parameter: {path}. The path {path} does"
-          " not exist."
-      )
-    raw_insert_line = params.get("insert_line")
-    if raw_insert_line is None:
-      return "Error: Parameter `insert_line` is required for command: insert."
-    try:
-      insert_line = int(raw_insert_line)
-    except (ValueError, TypeError):
-      return (
-          f"Error: Invalid `insert_line` parameter: {raw_insert_line}. It"
-          " should be an integer."
-      )
-    new_str = params.get("new_str")
-    if new_str is None:
-      return "Error: Parameter `new_str` is required for command: insert."
-    new_str = str(new_str).expandtabs()
-    try:
-      with open(path, "r", encoding="utf-8", errors="replace") as f:
-        file_content = f.read().expandtabs()
-    except Exception as e:  # pylint: disable=broad-exception-caught
-      return f"Error reading {path}: {e}"
-
-    file_lines = file_content.split("\n")
-    n_lines = len(file_lines)
-    if insert_line < 0 or insert_line > n_lines:
-      return (
-          f"Error: Invalid `insert_line` parameter: {insert_line}. It should"
-          f" be within the range of lines of the file: {[0, n_lines]}."
-      )
-
-    _push_history(path, file_content)
-    new_str_lines = new_str.split("\n")
-    new_file_lines = (
-        file_lines[:insert_line] + new_str_lines + file_lines[insert_line:]
-    )
-    new_file_content = "\n".join(new_file_lines)
-    try:
-      with open(path, "w", encoding="utf-8") as f:
-        f.write(new_file_content)
-    except Exception as e:  # pylint: disable=broad-exception-caught
-      return f"Error writing {path}: {e}"
-
-    start_line = max(0, insert_line - SNIPPET_LINES)
-    end_line = insert_line + len(new_str_lines) + SNIPPET_LINES
-    snippet_lines = new_file_lines[start_line:end_line]
-    snippet_out = _format_cat_n(
-        snippet_lines,
-        start_line=start_line + 1,
-        path_label="a snippet of the edited file",
-    )
+  def _undo_edit(file_path):
+    _read(file_path)
+    old_text = _pop_history(file_path)
+    if old_text is None:
+      raise _ToolError(f"No edit history found for {file_path}.")
+    _write(file_path, old_text)
     return (
-        f"The file {path} has been edited. {snippet_out}Review the changes"
-        " and make sure they are as expected (correct indentation, no"
-        " duplicate lines, etc). Edit the file again if necessary."
+        f"Last edit to {file_path} undone successfully."
+        f" {_make_output(old_text, str(file_path))}"
     )
 
-  elif cmd == "undo_edit":
-    old_content = _pop_history(path)
-    if old_content is None:
-      return f"Error: No edit history found for {path}."
-    try:
-      with open(path, "w", encoding="utf-8") as f:
-        f.write(old_content)
-    except Exception as e:  # pylint: disable=broad-exception-caught
-      return f"Error restoring {path}: {e}"
-    lines = old_content.split("\n")
-    if len(lines) > MAX_LINES_TO_VIEW:
-      lines = lines[:MAX_LINES_TO_VIEW]
-    cat_out = _format_cat_n(lines, start_line=1, path_label=path)
-    out = f"Last edit to {path} undone successfully. {cat_out}"
-    return _maybe_clip_response(out, MAX_RESPONSE_LEN_CHAR, FILE_CLIPPED_NOTICE)
+  def _dispatch():
+    command = params.get("command")
+    path = pathlib.Path(str(params.get("path") or ""))
+    view_range = params.get("view_range")
+    if isinstance(view_range, str):
+      try:
+        view_range = json.loads(view_range)
+      except ValueError:
+        pass
+    insert_line = params.get("insert_line")
+    if insert_line is not None and isinstance(insert_line, str):
+      try:
+        insert_line = int(insert_line)
+      except ValueError:
+        return (
+            f"ERROR:\nInvalid insert_line value: '{insert_line}'. Expected an"
+            " integer."
+        )
+    old_str = params.get("old_str")
+    new_str = params.get("new_str")
+    file_text = params.get("file_text")
 
-  return (
-      f"Error: Unrecognized command {cmd}. The allowed commands for"
-      " str_replace_editor are: `view`, `create`, `str_replace`, `insert`,"
-      " `undo_edit`."
-  )
+    if not path.is_absolute():
+      raise _invalid(
+          "path",
+          path,
+          "The path should be an absolute path, starting with `/`.",
+      )
+    if command == "create" and path.exists():
+      raise _invalid(
+          "path",
+          path,
+          f"File already exists at: {path}. Cannot overwrite files using"
+          " command `create`.",
+      )
+    if command != "create" and not path.exists():
+      raise _invalid(
+          "path",
+          path,
+          f"The path {path} does not exist. Please provide a valid path.",
+      )
+    if command != "view" and path.is_dir():
+      raise _invalid(
+          "path",
+          path,
+          f"The path {path} is a directory and only the `view` command can be"
+          " used on directories.",
+      )
+
+    if command == "view":
+      return _view(path, view_range)
+    if command == "create":
+      if file_text is None:
+        raise _missing(command, "file_text")
+      _write(path, file_text)
+      _add_history(path, file_text)
+      return f"File created successfully at: {path}"
+    if command == "str_replace":
+      if old_str is None:
+        raise _missing(command, "old_str")
+      if new_str == old_str:
+        raise _invalid(
+            "new_str",
+            new_str,
+            "No replacement was performed. `new_str` and `old_str` must be"
+            " different.",
+        )
+      return _str_replace(path, old_str, new_str)
+    if command == "insert":
+      if insert_line is None:
+        raise _missing(command, "insert_line")
+      if new_str is None:
+        raise _missing(command, "new_str")
+      return _insert(path, insert_line, new_str)
+    if command == "undo_edit":
+      return _undo_edit(path)
+    raise _ToolError(
+        f"Unrecognized command {command}. The allowed commands for the"
+        " oh_editor tool are: view, create, str_replace, insert, undo_edit"
+    )
+
+  try:
+    return _dispatch()
+  except _ToolError as e:
+    return f"ERROR:\n{e}"
+
+# The agent-server is a PyInstaller onefile binary. Its bootloader prepends its
+# bundle directory (/tmp/_MEI*) to LD_LIBRARY_PATH, and commands it spawns
+# inherit that, so binaries in older task images load the bundle's newer
+# libstdc++ and fail with "GLIBC_2.36 not found". Strip that entry before
+# running anything. Prints nothing and is a no-op when the entry is absent.
+_STRIP_PYINSTALLER_LD_PATH = (
+    'case "${LD_LIBRARY_PATH-}" in'
+    " /tmp/_MEI*:*) LD_LIBRARY_PATH=${LD_LIBRARY_PATH#*:};"
+    " export LD_LIBRARY_PATH;;"
+    " /tmp/_MEI*) unset LD_LIBRARY_PATH;;"
+    " esac; "
+)
 
 
 def _build_oh_editor_remote_cmd(params: dict[str, Any]) -> str:
-  """Builds a self-contained python3 command to run OHEditor inside the sandbox."""
+  """Builds a self-contained python3 command that runs the sandbox editor."""
   import inspect  # pylint: disable=g-import-not-at-top
 
-  src_clip = inspect.getsource(_maybe_clip_response)
+  # pylint: disable-next=g-import-not-at-top
+  from examples.deepswe import opencode_fuzzy
+
+  src_fuzzy = inspect.getsource(opencode_fuzzy).replace(
+      "from __future__ import annotations\n", ""
+  )
   src_editor = inspect.getsource(run_oh_editor_locally)
+  # The driver runs under the sandbox's own python3 (3.7 for numpy and pandas,
+  # 3.8 for pyramid), where the PEP 585 annotations in the copied source
+  # (`dict[str, Any]`) raise TypeError at def time. Postponed evaluation keeps
+  # them unevaluated.
   driver = (
+      "from __future__ import annotations\n"
       "import base64, json, os, subprocess, sys\n"
-      f"MAX_RESPONSE_LEN_CHAR = {MAX_RESPONSE_LEN_CHAR}\n"
-      f"MAX_LINES_TO_VIEW = {MAX_LINES_TO_VIEW}\n"
-      f"SNIPPET_LINES = {SNIPPET_LINES}\n"
-      f"CLIPPED_NOTICE = {CLIPPED_NOTICE!r}\n"
-      f"FILE_CLIPPED_NOTICE = {FILE_CLIPPED_NOTICE!r}\n"
       "from typing import Any, Optional\n\n"
-      f"{src_clip}\n\n"
+      f"{src_fuzzy}\n\n"
       f"{src_editor}\n\n"
       "payload = json.loads(base64.b64decode(sys.argv[1]).decode('utf-8'))\n"
       "sys.stdout.write(run_oh_editor_locally(payload))\n"
@@ -387,10 +522,10 @@ def _build_oh_editor_remote_cmd(params: dict[str, Any]) -> str:
       json.dumps(params, ensure_ascii=False).encode("utf-8")
   ).decode("ascii")
   return (
-      "python3 -c \"import base64; exec(base64.b64decode('"
+      _STRIP_PYINSTALLER_LD_PATH
+      + "python3 -c \"import base64; exec(base64.b64decode('"
       f"{b64_driver}').decode('utf-8'))\" '{b64_params}'"
   )
-
 
 def _get_swe_action_cls() -> Any:
   try:
@@ -608,29 +743,107 @@ def _timeout_notice(timeout: float) -> str:
   )
 
 
-def _format_command_result(
-    result: Any, timeout: float, elapsed: float
-) -> tuple[str, bool]:
-  """Formats an OpenHands CommandResult into (observation, timed_out)."""
-  if getattr(result, "stdout", None) is not None:
-    obs = (
-        str(result.stdout)
-        if getattr(result, "exit_code", 0) == 0
-        else f"{result.stdout}\n{getattr(result, 'stderr', '')}"
-    )
-  elif getattr(result, "output", None) is not None:
-    obs = str(result.output)
-  else:
-    obs = str(result)
-  timed_out = _command_timed_out(result, timeout, elapsed)
-  if timed_out:
-    obs = f"{obs.rstrip()}\n{_timeout_notice(timeout)}".lstrip("\n")
-  obs = _maybe_clip_response(obs)
-  return obs, timed_out
+# Reference observation rendering (OpenHands 0d766ad06): commands.py
+# CmdOutputObservation truncates content to 30000 chars at creation, and
+# conversation_memory.py truncate_content applies max_message_chars=30000 to
+# every rendered observation; both keep the head and tail halves.
+_MAX_OBSERVATION_CHARS = 30000
+_OBSERVATION_TRUNCATED_MARKER = (
+    "\n[... Observation truncated due to length ...]\n"
+)
+# runtime/utils/bash_constants.py TIMEOUT_MESSAGE_TEMPLATE.
+_BASH_TIMEOUT_MESSAGE = (
+    "You may wait longer to see additional output by sending empty command '',"
+    " send other commands to interact with the current process, send keys"
+    ' ("C-c", "C-z", "C-d") to interrupt/kill the previous command before'
+    " sending your new command, or use the timeout parameter in execute_bash"
+    " for future commands."
+)
+# The execute_bash wrapper prints this marker, the final working directory
+# and `which python` on exit, standing in for the reference's PS1 metadata.
+_BASH_META_SENTINEL = "__OH_BASH_META__"
 
+
+def _truncate_observation(content: str) -> str:
+  if len(content) <= _MAX_OBSERVATION_CHARS:
+    return content
+  half = _MAX_OBSERVATION_CHARS // 2
+  return content[:half] + _OBSERVATION_TRUNCATED_MARKER + content[-half:]
+
+
+def _format_command_result(
+    result: Any, timeout: float, elapsed: float, bash_observation: bool = False
+) -> tuple[str, bool]:
+  """Formats an OpenHands CommandResult into (observation, timed_out).
+
+  With bash_observation=True the text matches the reference
+  CmdOutputObservation.to_agent_observation(): the output stripped, then
+  "[The command completed with exit code N.]", the working directory, the
+  Python interpreter and "[Command finished with exit code N]"; a command
+  killed at its timeout gets the reference hard-timeout suffix instead.
+  """
+  if getattr(result, "stdout", None) is not None:
+    stdout = str(result.stdout)
+  elif getattr(result, "output", None) is not None:
+    stdout = str(result.output)
+  else:
+    stdout = str(result)
+  stderr = str(getattr(result, "stderr", "") or "")
+  exit_code = getattr(result, "exit_code", None)
+  timed_out = _command_timed_out(result, timeout, elapsed)
+
+  if not bash_observation:
+    obs = stdout
+    if stderr and exit_code not in (0, None):
+      obs = f"{stdout}\n{stderr}"
+    if timed_out:
+      obs = f"{obs.rstrip()}\n{_timeout_notice(timeout)}".lstrip("\n")
+    return _truncate_observation(obs), timed_out
+
+  working_dir = python_path = ""
+  marker = stdout.rfind(_BASH_META_SENTINEL)
+  if marker != -1:
+    meta = stdout[marker + len(_BASH_META_SENTINEL) :].strip("\n")
+    working_dir, _, python_path = meta.partition("\t")
+    stdout = stdout[:marker]
+    if stdout.endswith("\n"):
+      stdout = stdout[:-1]
+  if timed_out:
+    # Drop the SDK client's own deadline note; the reference renders a timed
+    # out command as its partial output plus the timeout suffix below.
+    stderr = re.sub(
+        r"\n?Command timed out after [0-9.]+ seconds\.?\s*$", "", stderr
+    )
+  # The reference shell is a PTY, so stderr is part of the output. Without a
+  # PTY, stdout and stderr come back separately; stdout first, then stderr.
+  merged = stdout
+  if stderr:
+    if merged and not merged.endswith("\n"):
+      merged += "\n"
+    merged += stderr
+  content = _truncate_observation(merged.strip())
+  if timed_out:
+    rendered = (
+        f"{content}\n[The command timed out after {float(timeout)} seconds."
+        f" {_BASH_TIMEOUT_MESSAGE}]"
+    )
+  else:
+    code = int(exit_code) if exit_code is not None else -1
+    rendered = f"{content}\n[The command completed with exit code {code}.]"
+    if working_dir:
+      rendered += f"\n[Current working directory: {working_dir}]"
+    if python_path:
+      rendered += f"\n[Python interpreter: {python_path}]"
+    if code != -1:
+      rendered += f"\n[Command finished with exit code {code}]"
+  return _truncate_observation(rendered), timed_out
 
 def _execute_in_workspace(
-    env: Any, wrapped_cmd: str, step_timeout: float, failure_prefix: str
+    env: Any,
+    wrapped_cmd: str,
+    step_timeout: float,
+    failure_prefix: str,
+    bash_observation: bool = False,
 ) -> EnvStepResult:
   """Runs `wrapped_cmd` in env.workspace; never raises, never ends the episode."""
   max_steps = getattr(env, "max_steps", None)
@@ -641,7 +854,7 @@ def _execute_in_workspace(
         wrapped_cmd, timeout=float(step_timeout)
     )
     obs, timed_out = _format_command_result(
-        result, step_timeout, time.monotonic() - start
+        result, step_timeout, time.monotonic() - start, bash_observation
     )
     if timed_out:
       info["command_timed_out"] = True
@@ -657,6 +870,20 @@ def _execute_in_workspace(
   if hasattr(env, "total_steps"):
     env.total_steps += 1
   return EnvStepResult(observation=obs, reward=0, done=False, info=info)
+
+
+def _openhands_session_id(env: Any) -> str:
+  """Per-trajectory id in the format of OpenHands generate_sid (setup.py)."""
+  sid = getattr(env, "_oh_session_id", None)
+  if not isinstance(sid, str) or not sid:
+    session_name = str(uuid.uuid4())
+    hash_str = hashlib.sha256(session_name.encode("utf-8")).hexdigest()
+    sid = f"{session_name[:16]}-{hash_str[:15]}"
+    try:
+      env._oh_session_id = sid
+    except AttributeError:
+      pass
+  return sid
 
 
 def step_openhands(
@@ -749,7 +976,7 @@ def step_openhands(
           content += f"{i}. {status_icon} {title}\n{notes}\n"
       env._task_list = task_list
       env._task_list_content = content
-      task_file_path = "/workspace/.openhands/TASKS.md"
+      task_file_path = f"sessions/{_openhands_session_id(env)}/TASKS.md"
       obs = (
           f"Task list has been updated with {len(task_list)} items."
           f" Stored in session directory: {task_file_path}"
@@ -820,7 +1047,8 @@ def step_openhands(
     step_timeout = getattr(env, "step_timeout", 60.0)
     b64_code = base64.b64encode(code.encode("utf-8")).decode("ascii")
     wrapped_cmd = (
-        "(cd /testbed 2>/dev/null || cd /workspace) && "
+        _STRIP_PYINSTALLER_LD_PATH
+        + "(cd /testbed 2>/dev/null || cd /workspace) && "
         f"python3 -c \"import base64; exec(base64.b64decode('{b64_code}').decode('utf-8'))\""
     )
 
@@ -850,9 +1078,17 @@ def step_openhands(
     if cmd is None:
       cmd = params.get("cmd")
     is_input = str(params.get("is_input", "false")).lower() == "true"
-    if not cmd and not is_input:
+    cmd = str(cmd or "").strip()
+    # Each command here runs to completion (or is killed at its timeout), so
+    # there is never a previous command to read from or send keys to. These
+    # are the reference BashSession replies for that state, without metadata.
+    if not cmd or is_input:
       return EnvStepResult(
-          observation="ERROR: No command specified for execute_bash.",
+          observation=(
+              "ERROR: No previous running command to retrieve logs from."
+              if not cmd
+              else "ERROR: No previous running command to interact with."
+          ),
           reward=0,
           done=False,
           info={"max_steps": max_steps},
@@ -872,19 +1108,31 @@ def step_openhands(
       except (ValueError, TypeError):
         step_timeout = default_timeout
 
+    # The closing parenthesis goes on its own line. Appended to the command's
+    # last line, it would be swallowed by a heredoc terminator (`EOF)`) or a
+    # trailing `# comment`, and the shell fails with a syntax error.
+    # The EXIT trap persists the working directory for the next command and
+    # prints the metadata that _format_command_result renders like the
+    # reference PS1 block (cwd and `which python`), keeping the exit code.
     wrapped_cmd = (
-        "(__oh_cwd=$(cat /var/tmp/.oh_cwd 2>/dev/null); "
+        "("
+        + _STRIP_PYINSTALLER_LD_PATH
+        + "__oh_cwd=$(cat /var/tmp/.oh_cwd 2>/dev/null); "
         'if [ -n "$__oh_cwd" ] && [ -d "$__oh_cwd" ]; then cd "$__oh_cwd"; '
         "elif [ -d /testbed ]; then cd /testbed; else cd /workspace; fi; "
-        "trap 'pwd > /var/tmp/.oh_cwd 2>/dev/null || true' EXIT; "
-        f"{cmd})"
-        if cmd
-        else "true"
+        "trap '__oh_rc=$?; pwd > /var/tmp/.oh_cwd 2>/dev/null; "
+        f'printf "\\n{_BASH_META_SENTINEL}%s\\t%s\\n" "$(pwd)"'
+        ' "$(which python 2>/dev/null || echo "")"; exit $__oh_rc\' EXIT; '
+        f"{cmd}\n)"
     )
 
     if getattr(env, "workspace", None) is not None:
       return _execute_in_workspace(
-          env, wrapped_cmd, step_timeout, "Command execution failed"
+          env,
+          wrapped_cmd,
+          step_timeout,
+          "Command execution failed",
+          bash_observation=True,
       )
     elif getattr(env, "env", None) is not None:
       if isinstance(getattr(action_obj, "parameters", None), dict):
