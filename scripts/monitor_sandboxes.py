@@ -125,12 +125,25 @@ def fetch_cluster_data(namespace: str, job_filter: str):
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
     )
 
-    out_claims, _ = p_claims.communicate()
-    out_pools, _ = p_pools.communicate()
-    out_pods, _ = p_pods.communicate()
-    out_nodes, _ = p_nodes.communicate()
-    out_tmpl, _ = p_tmpl.communicate()
-    out_all_pools, _ = p_all_pools.communicate()
+    out_claims, err_claims = p_claims.communicate()
+    out_pools, err_pools = p_pools.communicate()
+    out_pods, err_pods = p_pods.communicate()
+    out_nodes, err_nodes = p_nodes.communicate()
+    out_tmpl, err_tmpl = p_tmpl.communicate()
+    out_all_pools, err_all_pools = p_all_pools.communicate()
+
+    for name, p, err in [
+        ("sandboxclaims", p_claims, err_claims),
+        ("sandboxwarmpools", p_pools, err_pools),
+        ("pods", p_pods, err_pods),
+        ("nodes", p_nodes, err_nodes),
+        ("sandboxtemplates", p_tmpl, err_tmpl),
+        ("all_pools", p_all_pools, err_all_pools),
+    ]:
+        if p.returncode != 0:
+            raise RuntimeError(
+                f"kubectl query for {name} failed with exit code {p.returncode}: {err.strip()}"
+            )
 
     return {
         "claims_raw": out_claims,
@@ -200,20 +213,37 @@ def parse_metrics(data: dict, namespace: str, job_filter: str):
     # 4. Parse Node Allocatable
     node_allocs = re.findall(r"\{.*?\}", data["nodes_raw"])
     num_c3d_nodes = len(node_allocs)
-    alloc_json = json.loads(node_allocs[0]) if node_allocs else {}
-    cpu_node = alloc_json.get("cpu", "59380m")
-    mem_node = alloc_json.get("memory", "477357992Ki")
-    pods_per_node = int(alloc_json.get("pods", "128"))
+    if node_allocs:
+        alloc_json = json.loads(node_allocs[0])
+        cpu_node = alloc_json["cpu"]
+        mem_node = alloc_json["memory"]
+        pods_per_node = int(alloc_json["pods"])
+    else:
+        cpu_node = "0m"
+        mem_node = "0Ki"
+        pods_per_node = 0
 
     # Convert memory to GiB
-    mem_node_gib = 0
     if mem_node.endswith("Ki"):
         mem_node_gib = int(mem_node[:-2]) / (1024 * 1024)
+    elif mem_node.endswith("Mi"):
+        mem_node_gib = int(mem_node[:-2]) / 1024
+    elif mem_node.endswith("Gi"):
+        mem_node_gib = float(mem_node[:-2])
+    else:
+        try:
+            mem_node_gib = float(mem_node) / (1024 * 1024 * 1024)
+        except ValueError:
+            mem_node_gib = 0.0
 
     # Convert CPU to cores
-    cpu_node_cores = 0.0
     if cpu_node.endswith("m"):
         cpu_node_cores = int(cpu_node[:-1]) / 1000.0
+    else:
+        try:
+            cpu_node_cores = float(cpu_node)
+        except ValueError:
+            cpu_node_cores = 0.0
 
     total_pod_capacity = num_c3d_nodes * pods_per_node
     # System DaemonSets take ~9 pods per node (calico, gmp, fluentbit, gke agents)
@@ -305,7 +335,7 @@ def print_dashboard(metrics: dict, cluster: str, region: str, namespace: str, jo
             total_pods = sum(pod_statuses.values())
 
             # Recipe cap: MAX_CONCURRENCY = 4096
-            claims_pct = (claims / 4096.0) * 100.0 if 4096 else 0.0
+            claims_pct = (claims / 4096.0) * 100.0
 
             print(f"  • Creator: {BOLD}{creator}{RESET}")
             print(f"    - In-flight Claims (Episodes): {GREEN}{claims:,}{RESET} / 4,096 max concurrency ({claims_pct:.1f}% of claim cap)")
