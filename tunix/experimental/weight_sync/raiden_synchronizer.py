@@ -24,6 +24,7 @@ import ipaddress
 import os
 import re
 import socket
+import time
 from typing import Any, List, Optional, Sequence, Tuple
 
 from absl import logging
@@ -32,6 +33,29 @@ from jax.experimental import compute_on
 import jax.numpy as jnp
 from tunix.experimental.weight_sync import weight_sync
 from tunix.utils import mesh
+
+
+def _get_host_rss_gb() -> tuple[float, float]:
+  """Returns (current_rss_gb, peak_rss_gb) for the current process."""
+  peak_rss_gb = 0.0
+  try:
+    import resource  # pylint: disable=g-import-not-at-top
+
+    peak_rss_gb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6
+  except Exception:  # pylint: disable=broad-exception-caught
+    pass
+  current_rss_gb = peak_rss_gb
+  try:
+    with open("/proc/self/status", "r", encoding="utf-8") as f:
+      for line in f:
+        if line.startswith("VmRSS:"):
+          parts = line.split()
+          if len(parts) >= 2:
+            current_rss_gb = int(parts[1]) / 1e6
+          break
+  except Exception:  # pylint: disable=broad-exception-caught
+    pass
+  return round(current_rss_gb, 3), round(peak_rss_gb, 3)
 
 
 def _log_rss(tag: str) -> None:
@@ -44,9 +68,7 @@ def _log_rss(tag: str) -> None:
   """
   if not logging.vlog_is_on(1):
     return
-  import resource  # pylint: disable=g-import-not-at-top
-
-  rss_gb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6
+  _, rss_gb = _get_host_rss_gb()
   logging.vlog(
       1, "raiden bind rss checkpoint [%s]: %.1f GB (peak)", tag, rss_gb
   )
@@ -902,12 +924,25 @@ class RaidenSynchronizer(weight_sync.WeightSynchronizer):
     del sync_request, kwargs
     if not self.bound:
       raise RuntimeError(f"{self.job_name}: bind() must run before h2d()")
+    t_start = time.monotonic()
+    rss_before_gb, _ = _get_host_rss_gb()
     if self._is_proxy:
       self._ffi_h2d()
-      return
-    if self._sync is not None:
+    elif self._sync is not None:
       self._sync.h2d()
       jax.block_until_ready(self.arrays)
+    h2d_s = time.monotonic() - t_start
+    rss_after_gb, peak_rss_gb = _get_host_rss_gb()
+    logging.info(
+        "RAIDEN_H2D_STATS job=%s auto_h2d=%s h2d_s=%.3f rss_before_gb=%.2f"
+        " rss_after_gb=%.2f peak_rss_gb=%.2f",
+        self.job_name,
+        self._auto_h2d,
+        h2d_s,
+        rss_before_gb,
+        rss_after_gb,
+        peak_rss_gb,
+    )
 
   # TODO(tunix-dev): drop this once bind() records the runner's leaf identity so
   # h2d() writes back in place, making the name matching below unnecessary.
@@ -1110,7 +1145,7 @@ class RaidenSynchronizer(weight_sync.WeightSynchronizer):
 
 RaidenWeightSync = RaidenSynchronizer
 
-_TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes"})
+_TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "y", "t", "on"})
 
 
 def is_parallel_h2h_enabled() -> bool:
@@ -1179,6 +1214,7 @@ def patch_raiden_worker_sync() -> None:
     orig_bind = getattr(rws.RaidenWorkerSync, "bind", None)
     orig_h2d = getattr(rws.RaidenWorkerSync, "h2d", None)
     orig_metadata_dict = getattr(rws.RaidenWorkerSync, "metadata_dict", None)
+    orig_metrics = getattr(rws.RaidenWorkerSync, "metrics", None)
     orig_apply = getattr(rws.RaidenWorkerSync, "apply_to_runner", None)
     orig_checksums = getattr(rws.RaidenWorkerSync, "checksums", None)
 
@@ -1197,6 +1233,7 @@ def patch_raiden_worker_sync() -> None:
         auto_h2d = not is_parallel_h2h_enabled()
       self._auto_h2d = auto_h2d
       was_unbound = getattr(self, "_sync", None) is None
+      rss_before_gb, _ = _get_host_rss_gb()
       ws_lib = getattr(rws, "_ws_lib", None)
       orig_ws_cls = (
           getattr(ws_lib, "WeightSynchronizer", None)
@@ -1234,16 +1271,42 @@ def patch_raiden_worker_sync() -> None:
                 " _ws_lib.WeightSynchronizer; effective auto_h2d remains"
                 " True."
             )
+        if was_unbound:
+          rss_after_gb, peak_rss_gb = _get_host_rss_gb()
+          logging.info(
+              "RAIDEN_BIND_RSS job=%s auto_h2d=%s rss_before_gb=%.2f"
+              " rss_after_gb=%.2f peak_rss_gb=%.2f",
+              getattr(self, "job_name", "rollout"),
+              getattr(self, "_effective_auto_h2d", True),
+              rss_before_gb,
+              rss_after_gb,
+              peak_rss_gb,
+          )
 
     def _patched_h2d(self, uuid: Optional[int] = None) -> None:
       sync = self._require_sync("h2d()")
       effective_auto_h2d = getattr(
           self, "_effective_auto_h2d", getattr(self, "_auto_h2d", True)
       )
+      t_start = time.monotonic()
+      rss_before_gb, _ = _get_host_rss_gb()
       if hasattr(sync, "wait_for_transfer_completion"):
         sync.wait_for_transfer_completion(uuid)
         if effective_auto_h2d:
           jax.block_until_ready(self.arrays)
+          h2d_s = time.monotonic() - t_start
+          rss_after_gb, peak_rss_gb = _get_host_rss_gb()
+          self._last_h2d_s = round(h2d_s, 3)
+          logging.info(
+              "RAIDEN_H2D_STATS job=%s auto_h2d=%s h2d_s=%.3f"
+              " rss_before_gb=%.2f rss_after_gb=%.2f peak_rss_gb=%.2f",
+              getattr(self, "job_name", "rollout"),
+              effective_auto_h2d,
+              h2d_s,
+              rss_before_gb,
+              rss_after_gb,
+              peak_rss_gb,
+          )
           return
       sync.h2d()
       jax.block_until_ready(self.arrays)
@@ -1254,6 +1317,19 @@ def patch_raiden_worker_sync() -> None:
           and hasattr(self, "_wait_until_settled")
       ):
         self._wait_until_settled()
+      h2d_s = time.monotonic() - t_start
+      rss_after_gb, peak_rss_gb = _get_host_rss_gb()
+      self._last_h2d_s = round(h2d_s, 3)
+      logging.info(
+          "RAIDEN_H2D_STATS job=%s auto_h2d=%s h2d_s=%.3f rss_before_gb=%.2f"
+          " rss_after_gb=%.2f peak_rss_gb=%.2f",
+          getattr(self, "job_name", "rollout"),
+          effective_auto_h2d,
+          h2d_s,
+          rss_before_gb,
+          rss_after_gb,
+          peak_rss_gb,
+      )
 
     def _patched_metadata_dict(
         self, *args: Any, **kwargs: Any
@@ -1266,6 +1342,19 @@ def patch_raiden_worker_sync() -> None:
       if hasattr(self, "_effective_auto_h2d"):
         md["auto_h2d"] = bool(self._effective_auto_h2d)
       return md
+
+    def _patched_metrics(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+      m = (
+          dict(orig_metrics(self, *args, **kwargs))
+          if orig_metrics is not None
+          else {}
+      )
+      rss_gb, peak_rss_gb = _get_host_rss_gb()
+      m["host_rss_gb"] = rss_gb
+      m["host_peak_rss_gb"] = peak_rss_gb
+      if hasattr(self, "_last_h2d_s"):
+        m["last_h2d_s"] = self._last_h2d_s
+      return m
 
     def _patched_apply_to_runner(self, runner: Any) -> None:
       if self._sync is not None and hasattr(self._sync, "apply_to_runner"):
@@ -1290,12 +1379,13 @@ def patch_raiden_worker_sync() -> None:
       rws.RaidenWorkerSync.h2d = _patched_h2d
     if orig_metadata_dict is not None:
       rws.RaidenWorkerSync.metadata_dict = _patched_metadata_dict
+    rws.RaidenWorkerSync.metrics = _patched_metrics
     rws.RaidenWorkerSync.apply_to_runner = _patched_apply_to_runner
     rws.RaidenWorkerSync.checksums = _patched_checksums
     rws.RaidenWorkerSync._patched_by_tunix = True
     logging.info(
         "Successfully patched RaidenWorkerSync (bind, h2d, metadata_dict,"
-        " apply_to_runner, checksums) with Tunix delegation."
+        " metrics, apply_to_runner, checksums) with Tunix delegation."
     )
   except AttributeError as e:
     if parallel_h2h:
