@@ -24,6 +24,7 @@ from concurrent import futures
 import contextlib
 import os
 import pickle
+import threading
 import time
 from typing import Any, Mapping
 import uuid
@@ -42,6 +43,7 @@ from tunix.experimental.worker import remote_execution
 
 
 _STOP_TIMEOUT_S = 60.0  # Timeout for stopping remote workers. 60 should not be touched for any healthy stop.
+_JAX_CACHE_UPLOAD_TIMEOUT_S = 180.0  # Per-worker bound on a JAX cache upload RPC.
 
 
 class ClusterOrchestrator:
@@ -357,44 +359,48 @@ class ClusterOrchestrator:
         primary_worker_id,
     )
 
-    def _sync_worker(worker_id: str):
-      handle = self._remote_worker_handles_by_id[worker_id]
-      return handle.submit("upload_jax_cache", gcs_uri=rollout_gcs_uri)
+    handle = self._remote_worker_handles_by_id[primary_worker_id]
+    outcome: futures.Future[bool] = futures.Future()
 
-    pool = futures.ThreadPoolExecutor(max_workers=1)
-    upload = pool.submit(_sync_worker, primary_worker_id)
-    primary_failed = False
+    def _run() -> None:
+      try:
+        outcome.set_result(
+            handle.submit("upload_jax_cache", gcs_uri=rollout_gcs_uri)
+        )
+      except Exception as err:  # pylint: disable=broad-except
+        outcome.set_exception(err)
+
+    sync_timeout_s = float(
+        self.jax_cache_config.get("sync_timeout_s", _JAX_CACHE_UPLOAD_TIMEOUT_S)
+    )
+    # Daemon thread: unlike ThreadPoolExecutor workers it is not joined at
+    # interpreter exit, so an abandoned hung RPC (bounded only by the RPC
+    # deadline, which can be hours) cannot block process exit.
+    threading.Thread(
+        target=_run,
+        name=f"jax-cache-upload-{primary_worker_id}",
+        daemon=True,
+    ).start()
     try:
-      res = upload.result(timeout=180.0)
-      logging.info(
-          "Worker %s JAX cache upload finished: %s", primary_worker_id, res
+      uploaded = outcome.result(timeout=sync_timeout_s)
+    except futures.TimeoutError:
+      logging.warning(
+          "JAX cache upload on worker %s timed out after %.0fs; abandoning it.",
+          primary_worker_id,
+          sync_timeout_s,
       )
+      return
     except Exception as err:  # pylint: disable=broad-except
       logging.warning(
           "Failed to sync JAX cache on worker %s: %r", primary_worker_id, err
       )
-      primary_failed = True
-    pool.shutdown(wait=False)
-
-    if primary_failed and len(rollout_worker_ids) > 1:
-      fallback_id = rollout_worker_ids[1]
-      logging.info(
-          "Primary rollout worker cache upload failed. Attempting fallback upload from %s...",
-          fallback_id,
+      return
+    if uploaded is False:
+      logging.warning(
+          "Worker %s reported a failed JAX cache upload.", primary_worker_id
       )
-      try:
-        fb_res = self._remote_worker_handles_by_id[fallback_id].submit(
-            "upload_jax_cache", gcs_uri=rollout_gcs_uri
-        )
-        logging.info(
-            "Fallback worker %s JAX cache upload finished: %s",
-            fallback_id,
-            fb_res,
-        )
-      except Exception as err:  # pylint: disable=broad-except
-        logging.warning(
-            "Failed fallback JAX cache upload on worker %s: %r", fallback_id, err
-        )
+      return
+    logging.info("Worker %s JAX cache upload finished.", primary_worker_id)
 
   def bring_up_workers(self, dummy_data: Any = None) -> None:
     """Brings up all registered workers through lifecycle initialization."""
@@ -422,7 +428,6 @@ class ClusterOrchestrator:
         stack.callback(self.trajectory_store.close)
       stack.callback(self.lifecycle_driver.shutdown)
       stack.callback(self._shutdown_remote_workers)
-      stack.callback(self.sync_jax_cache)
       stack.callback(self.monitor.close)
     logging.info("Shutdown complete.")
 
@@ -570,11 +575,8 @@ class ClusterOrchestrator:
     self.monitor.poll()
     logging.info("Executing program %s...", type(program).__name__)
     engine = self.engine or self._create_engine()
-    try:
-      program.run(
-          engine=engine,
-          **kwargs,
-      )
-    finally:
-      self.sync_jax_cache()
+    program.run(
+        engine=engine,
+        **kwargs,
+    )
     logging.info("Program %s finished.", type(program).__name__)

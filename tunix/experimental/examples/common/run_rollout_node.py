@@ -1031,10 +1031,6 @@ def main(argv: list[str], context: Any = None) -> None:
         logging.info("Rollout worker drained.")
       except Exception:
         logging.exception("Failed to drain rollout worker cleanly.")
-      try:
-        gcs_cache.save_jax_cache(role="rollout")
-      except Exception:
-        logging.exception("Failed to upload JAX cache on rollout drain.")
       await server.stop_serving()
 
   asyncio.run(grpc_server_main())
