@@ -471,6 +471,62 @@ class TrainerWorkerExecutionContextTest(absltest.TestCase):
 
     self.assertEqual(self.events, ["enter_ctx", "save_failed", "exit_ctx"])
 
+  def test_compile_expands_placeholder_routed_experts_and_binds_maxtext_kernels(
+      self,
+  ):
+    import jax
+    import types as pytypes
+
+    self.worker.initialize()
+    compiled_payloads = []
+    compile_calls = []
+
+    self.fake_trainer._config = pytypes.SimpleNamespace(
+        base_num_decoder_layers=60,
+        num_experts_per_tok=8,
+    )
+    self.fake_trainer._compiled_fwd_bwd = None
+    self.fake_trainer._compiled_fwd_bwd_accum = None
+    self.fake_trainer._compiled_update = None
+    self.fake_trainer._compiled_eval = None
+
+    def _compile(dummy):
+      compile_calls.append(dummy)
+
+    def _compile_kernels(payload):
+      compiled_payloads.append(payload)
+      return {
+          "fwd_bwd": "fn_fwd_bwd",
+          "fwd_bwd_accum": "fn_fwd_bwd_accum",
+          "update": "fn_update",
+      }
+
+    self.fake_trainer.compile = _compile
+    self.fake_trainer.compile_kernels = _compile_kernels
+
+    dummy = datatypes.RLTrainerPayload(
+        prompt_ids=jax.ShapeDtypeStruct((2, 0), jnp.int32),
+        prompt_mask=jax.ShapeDtypeStruct((2, 0), jnp.float32),
+        completion_ids=jax.ShapeDtypeStruct((2, 16), jnp.int32),
+        completion_mask=jax.ShapeDtypeStruct((2, 16), jnp.float32),
+        advantages=jax.ShapeDtypeStruct((2, 16), jnp.float32),
+        routed_experts=jax.ShapeDtypeStruct((2, 16, 1, 1), jnp.int16),
+    )
+    self.worker.compile(dummy_data=dummy)
+
+    self.assertEqual(compile_calls, [None])
+    self.assertLen(compiled_payloads, 1)
+    self.assertEqual(
+        compiled_payloads[0].routed_experts.shape, (2, 16, 60, 8)
+    )
+    self.assertEqual(compiled_payloads[0].routed_experts.dtype, jnp.int16)
+    self.assertEqual(self.fake_trainer._compiled_fwd_bwd, "fn_fwd_bwd")
+    self.assertEqual(
+        self.fake_trainer._compiled_fwd_bwd_accum, "fn_fwd_bwd_accum"
+    )
+    self.assertEqual(self.fake_trainer._compiled_update, "fn_update")
+    self.assertIsNone(self.fake_trainer._compiled_eval)
+
 
 if __name__ == "__main__":
   absltest.main()

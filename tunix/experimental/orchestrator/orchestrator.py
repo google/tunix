@@ -462,28 +462,42 @@ class ClusterOrchestrator:
   def _bring_up_remote_workers(self, dummy_data: Any = None) -> None:
     """Runs lifecycle hooks on remote worker handles registered directly."""
     worker_ids = sorted(self._remote_worker_infos)
+    if not worker_ids:
+      return
+
+    def _run_stage(
+        target_ids: list[str], method: str, *args: Any, stage_label: str
+    ) -> None:
+      if not target_ids:
+        return
+      with futures.ThreadPoolExecutor(max_workers=len(target_ids)) as pool:
+        futs = {}
+        for worker_id in target_ids:
+          logging.info("%s remote worker %s.", stage_label, worker_id)
+          futs[worker_id] = pool.submit(
+              self._remote_worker_handles_by_id[worker_id].submit,
+              method,
+              *args,
+          )
+        for worker_id in target_ids:
+          futs[worker_id].result()
+
     if self.trajectory_store_config is not None:
-      for worker_id in worker_ids:
-        if (
-            datatypes.Role.ROLLOUT.value
-            in self._remote_worker_infos[worker_id].roles
-        ):
-          logging.info(
-              "Configuring TrajectoryStore on remote rollout worker %s.",
-              worker_id,
-          )
-          self._remote_worker_handles_by_id[worker_id].submit(
-              "with_trajectory_store_config", self.trajectory_store_config
-          )
-    for worker_id in worker_ids:
-      logging.info("Initializing remote worker %s.", worker_id)
-      self._remote_worker_handles_by_id[worker_id].submit("initialize")
-    for worker_id in worker_ids:
-      logging.info("Compiling remote worker %s.", worker_id)
-      self._remote_worker_handles_by_id[worker_id].submit("compile", dummy_data)
-    for worker_id in worker_ids:
-      logging.info("Starting remote worker %s.", worker_id)
-      self._remote_worker_handles_by_id[worker_id].submit("start")
+      rollout_ids = [
+          worker_id
+          for worker_id in worker_ids
+          if datatypes.Role.ROLLOUT.value
+          in self._remote_worker_infos[worker_id].roles
+      ]
+      _run_stage(
+          rollout_ids,
+          "with_trajectory_store_config",
+          self.trajectory_store_config,
+          stage_label="Configuring TrajectoryStore on",
+      )
+    _run_stage(worker_ids, "initialize", stage_label="Initializing")
+    _run_stage(worker_ids, "compile", dummy_data, stage_label="Compiling")
+    _run_stage(worker_ids, "start", stage_label="Starting")
 
   def _shutdown_remote_workers(self) -> None:
     """Stops remote worker handles best-effort, with a hard timeout."""

@@ -106,6 +106,9 @@ export FT_SANDBOX_ACQUIRE_RETRIES="${FT_SANDBOX_ACQUIRE_RETRIES:-2}"
 # Pathways & Raiden Weight Sync Defaults
 # ==============================================================================
 source "${DIR}/mlperf_pathways_config.sh"
+if [[ -n "${BUCKET:-}" ]]; then
+  export GCS_SCRATCH_LOCATION="${GCS_SCRATCH_LOCATION:-${BUCKET}/pathways_scratch}"
+fi
 
 export USE_WEIGHT_CONVERTER="true"
 export PREFUSE_MOE_WEIGHTS="true"

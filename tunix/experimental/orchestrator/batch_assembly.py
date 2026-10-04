@@ -199,6 +199,7 @@ class BatchConfig:
   """
 
   pad_id: int = 0
+  eos_id: int | None = None
   max_prompt_length: int | None = None
   max_response_length: int | None = None
   max_seq_token_per_tpu: int | None = None
@@ -605,6 +606,7 @@ class SequencePackedBatchAssembler:
       mini_batch_size: int,
       max_packed_len: int = 8192,
       pad_id: int = 0,
+      eos_id: int | None = None,
       max_segments_per_packed_row: int | None = None,
       segment_align_multiple: int = packing.DEFAULT_SEGMENT_ALIGN_MULTIPLE,
       start_batch_index: int = 0,
@@ -617,6 +619,7 @@ class SequencePackedBatchAssembler:
       mini_batch_size: Number of prompt groups per model update.
       max_packed_len: Maximum packed sequence length per row.
       pad_id: Token ID used for padding.
+      eos_id: End-of-sequence token ID. Defaults to `pad_id` when None.
       max_segments_per_packed_row: Upper bound on the number of real segments
         that may be packed into a single row.
       segment_align_multiple: Token boundary alignment multiple for the start of
@@ -649,6 +652,7 @@ class SequencePackedBatchAssembler:
     self.batch_size = batch_size
     self.max_packed_len = max_packed_len
     self.pad_id = pad_id
+    self.eos_id = pad_id if eos_id is None else eos_id
     self.num_generations = num_generations
     self.mini_batch_size = mini_batch_size
     self.max_segments_per_packed_row = max_segments_per_packed_row
@@ -835,6 +839,7 @@ class PaddedBatchAssembler:
       pad_id: int,
       num_generations: int,
       mini_batch_size: int,
+      eos_id: int | None = None,
       start_batch_index: int = 0,
   ):
     """Initializes PaddedBatchAssembler.
@@ -847,6 +852,7 @@ class PaddedBatchAssembler:
       pad_id: Token ID used for padding prompts and completions.
       num_generations: Number of rollout generations per prompt group (G).
       mini_batch_size: Number of prompt groups per optimizer update.
+      eos_id: End-of-sequence token ID. Defaults to `pad_id` when None.
       start_batch_index: Initial microbatch index offset for tracking IDs.
     """
     if batch_size <= 0:
@@ -869,6 +875,7 @@ class PaddedBatchAssembler:
     self.max_prompt_length = max_prompt_length
     self.max_response_length = max_response_length
     self.pad_id = pad_id
+    self.eos_id = pad_id if eos_id is None else eos_id
     self.num_generations = num_generations
     self.mini_batch_size = mini_batch_size
     self._batch_counter = start_batch_index
@@ -1315,6 +1322,7 @@ def create_batch_assembler(
         mini_batch_size=mini_batch_size,
         max_packed_len=batch_config.max_seq_token_per_tpu,
         pad_id=batch_config.pad_id,
+        eos_id=batch_config.eos_id,
         max_segments_per_packed_row=batch_config.max_segments_per_packed_row,
         segment_align_multiple=batch_config.segment_align_multiple,
     )
@@ -1330,6 +1338,7 @@ def create_batch_assembler(
         max_prompt_length=batch_config.max_prompt_length,
         max_response_length=batch_config.max_response_length,
         pad_id=batch_config.pad_id,
+        eos_id=batch_config.eos_id,
         num_generations=num_generations,
         mini_batch_size=mini_batch_size,
     )
@@ -1339,6 +1348,7 @@ def create_batch_assembler(
       num_generations=num_generations,
       mini_batch_size=mini_batch_size,
       pad_id=batch_config.pad_id,
+      eos_id=batch_config.eos_id,
       max_segments_per_packed_row=batch_config.max_segments_per_packed_row,
       segment_align_multiple=batch_config.segment_align_multiple,
   )

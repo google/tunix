@@ -629,6 +629,41 @@ class DeepSWEExampleCommandLineTest(absltest.TestCase):
         mlperf_base,
     )
 
+  def test_return_routed_experts_wired_to_orchestrator_and_dummy_payload(self):
+    self.assertIn(
+        "--return_routed_experts", _deepswe_k8s_orchestrator_block()
+    )
+    parse = run_deepswe_dist._parse_args  # pylint: disable=protected-access
+    args_packed = parse([
+        "--return_routed_experts",
+        "--train_micro_batch_size=4",
+        "--max_prompt_length=16",
+        "--max_response_length=32",
+        "--max_seq_token_per_tpu=64",
+        "--max_segments_per_packed_row=8",
+    ])
+    self.assertTrue(args_packed.return_routed_experts)
+    algo = run_deepswe_dist._build_algo(args_packed)  # pylint: disable=protected-access
+    packed_asm = batch_assembly.SequencePackedBatchAssembler(
+        batch_size=4,
+        num_generations=4,
+        mini_batch_size=4,
+        max_packed_len=64,
+        pad_id=0,
+        eos_id=248046,
+        max_segments_per_packed_row=8,
+    )
+    dummy = run_deepswe_dist._build_dummy_train_payload(  # pylint: disable=protected-access
+        args_packed, algo=algo, assembler=packed_asm
+    )
+    self.assertEqual(dummy.prompt_ids.shape, (4, 0))
+    self.assertEqual(dummy.completion_ids.shape, (4, 64))
+    self.assertEqual(dummy.segment_ids.shape, (4, 64))
+    self.assertEqual(dummy.segment_positions.shape, (4, 64))
+    self.assertEqual(dummy.overlong.shape, (4, 64))
+    self.assertEqual(dummy.routed_experts.shape, (4, 64, 1, 1))
+    self.assertEqual(dummy.num_segments, 9)
+
 
 class AuxMetricForwardingTest(absltest.TestCase):
   """Tests for converting a loss function's aux metrics for the buffer."""
