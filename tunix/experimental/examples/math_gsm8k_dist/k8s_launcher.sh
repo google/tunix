@@ -445,53 +445,37 @@ start_trainer() {
     | apply_manifest
 }
 
-stop_rollout_instance() {
-  local target_id="$1"
+stop_rollout() {
+  local target_ids=("${ROLLOUT_ID}")
+  if [[ $ROLLOUT_REPLICAS -gt 1 ]]; then
+    for ((i = 0; i < ROLLOUT_REPLICAS; i++)); do
+      target_ids+=("${ROLLOUT_ID}-${i}")
+    done
+  fi
+
   if [[ "$ROLLOUT_JOBSET_YAML" =~ ^leaderworkerset ]]; then
     if [[ "$DRY_RUN" == "true" ]]; then
-      echo "kubectl delete leaderworkerset ${target_id} -n ${K8S_NAMESPACE}"
+      echo "kubectl delete leaderworkerset ${target_ids[*]} -n ${K8S_NAMESPACE}"
     else
-      kubectl delete leaderworkerset "${target_id}" -n "${K8S_NAMESPACE}" --ignore-not-found --wait=true
-      while kubectl get leaderworkerset "${target_id}" -n "${K8S_NAMESPACE}" &>/dev/null; do
-        sleep 2
-      done
+      kubectl delete leaderworkerset "${target_ids[@]}" -n "${K8S_NAMESPACE}" --ignore-not-found --wait=true
     fi
   else
     if [[ "$DRY_RUN" == "true" ]]; then
-      echo "kubectl delete jobset ${target_id} -n ${K8S_NAMESPACE}"
-      echo "kubectl delete workload -l jobset.sigs.k8s.io/jobset-name=${target_id} -n ${K8S_NAMESPACE}"
+      echo "kubectl delete jobset ${target_ids[*]} -n ${K8S_NAMESPACE}"
+      kubectl get workload -n "${K8S_NAMESPACE}" -o name 2>/dev/null | grep -E "jobset-${ROLLOUT_ID}(-[0-9]+)?-[a-f0-9]+" | xargs -r echo kubectl delete -n "${K8S_NAMESPACE}"
     else
-      kubectl delete jobset "${target_id}" -n "${K8S_NAMESPACE}" --ignore-not-found --wait=true
-      kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name=${target_id}" -n "${K8S_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
-      while kubectl get jobset "${target_id}" -n "${K8S_NAMESPACE}" &>/dev/null; do
-        sleep 2
-      done
+      kubectl delete jobset "${target_ids[@]}" -n "${K8S_NAMESPACE}" --ignore-not-found --wait=true
+      kubectl get workload -n "${K8S_NAMESPACE}" -o name 2>/dev/null | grep -E "jobset-${ROLLOUT_ID}(-[0-9]+)?-[a-f0-9]+" | xargs -r kubectl delete -n "${K8S_NAMESPACE}" --ignore-not-found=true --wait=false 2>/dev/null || true
     fi
   fi
 }
 
-stop_rollout() {
-  if [[ $ROLLOUT_REPLICAS -gt 1 ]]; then
-    stop_rollout_instance "${ROLLOUT_ID}"
-  fi
-  for ((i = 0; i < ROLLOUT_REPLICAS; i++)); do
-    local target_id="${ROLLOUT_ID}"
-    if [[ $ROLLOUT_REPLICAS -gt 1 ]]; then
-      target_id="${ROLLOUT_ID}-${i}"
-    fi
-    stop_rollout_instance "${target_id}"
-  done
-}
-
-start_rollout_instance() {
+render_rollout_instance() {
   local target_id="$1"
   local debug_flag=""
+  local extra_flags=""
   if [[ "${DEBUG}" == "1" || "${DEBUG}" == "true" || "${DEBUG}" == "True" ]]; then
     debug_flag="--debug"
-  fi
-
-  if [[ "${ROLLOUT_JOBSET_YAML}" == "jobset.pathways.yaml" ]]; then
-    echo "Rollout Pathways images: server=${PATHWAYS_SERVER_IMAGE} proxy=${PATHWAYS_PROXY_IMAGE}"
   fi
 
   local maxtext_args
@@ -637,21 +621,34 @@ if cfg:
         ${maxtext_args} \
         ${vllm_args} \
         ${ROLLOUT_EXTRA_ARGS:+${ROLLOUT_EXTRA_ARGS} }${debug_flag} \
-    " \
-    | apply_manifest
+    "
 }
 
 start_rollout() {
+  if [[ ${ROLLOUT_REPLICAS} -le 0 ]]; then
+    return 0
+  fi
+  if [[ "${ROLLOUT_JOBSET_YAML}" == "jobset.pathways.yaml" ]]; then
+    echo "Rollout Pathways images: server=${PATHWAYS_SERVER_IMAGE} proxy=${PATHWAYS_PROXY_IMAGE}" >&2
+  fi
   if [[ -n "${ROLLOUT_JAX_CACHE_GCS_DIR}" && "${DISABLE_JAX_CACHE:-false}" != "true" && "${DISABLE_JAX_CACHE:-0}" != "1" ]]; then
     echo "[launcher] Rollout JAX cache GCS: ${ROLLOUT_JAX_CACHE_GCS_DIR} (save=${SAVE_JAX_CACHE:-true})" >&2
   fi
+
+  local placeholder="__TUNIX_REPLICA_ID__"
+  local manifest_template
+  manifest_template="$(render_rollout_instance "${placeholder}")" || return $?
+
   for ((i = 0; i < ROLLOUT_REPLICAS; i++)); do
     local target_id="${ROLLOUT_ID}"
     if [[ $ROLLOUT_REPLICAS -gt 1 ]]; then
       target_id="${ROLLOUT_ID}-${i}"
     fi
-    start_rollout_instance "${target_id}"
-  done
+    if [[ ${i} -gt 0 ]]; then
+      echo "---"
+    fi
+    printf '%s\n' "${manifest_template//${placeholder}/${target_id}}"
+  done | apply_manifest
 }
 
 while [[ $# -gt 0 ]]; do

@@ -14,8 +14,11 @@
 
 """Unit tests for Kubernetes deployment YAML manifest generator."""
 
+import importlib.util
 import io
 import os
+import pathlib
+import stat
 import subprocess
 import sys
 from typing import Any
@@ -23,7 +26,24 @@ from unittest import mock
 
 from absl.testing import absltest
 from absl.testing import parameterized
-from tunix.experimental.distributed.deployment import yaml_generator
+import yaml
+
+try:
+  from tunix.experimental.distributed.deployment import yaml_generator
+except (ImportError, ModuleNotFoundError):
+  _MODULE_PATH = (
+      pathlib.Path(__file__).resolve().parents[4]
+      / "tunix"
+      / "experimental"
+      / "distributed"
+      / "deployment"
+      / "yaml_generator.py"
+  )
+  _SPEC = importlib.util.spec_from_file_location("yaml_generator", _MODULE_PATH)
+  assert _SPEC is not None and _SPEC.loader is not None
+  yaml_generator = importlib.util.module_from_spec(_SPEC)
+  sys.modules["yaml_generator"] = yaml_generator
+  _SPEC.loader.exec_module(yaml_generator)
 
 
 def _get_template_path(filename: str) -> str:
@@ -816,6 +836,157 @@ class FailFastRenderTest(parameterized.TestCase):
         check=False,
     )
     self.assertEqual(result.returncode, expected, result.stdout)
+
+  @parameterized.named_parameters(
+      ("deepswe_dist", "deepswe_dist", "deepswe"),
+      ("math_gsm8k_dist", "math_gsm8k_dist", "math"),
+  )
+  def test_k8s_launcher_rollout_batches_manifests_into_single_kubectl_apply(
+      self, example_dir, job_prefix
+  ):
+    repo_root = pathlib.Path(__file__).resolve().parents[4]
+    launcher = (
+        repo_root
+        / "tunix"
+        / "experimental"
+        / "examples"
+        / example_dir
+        / "k8s_launcher.sh"
+    )
+
+    tempdir = self.create_tempdir().full_path
+    kubectl_log = os.path.join(tempdir, "kubectl_calls.log")
+    applied_manifest = os.path.join(tempdir, "applied.yaml")
+    kubectl_bin = os.path.join(tempdir, "kubectl")
+    with open(kubectl_bin, "w") as f:
+      f.write(
+          "#!/bin/bash\n"
+          f'echo "$*" >> "{kubectl_log}"\n'
+          'if [[ "$*" == *"apply -f -"* ]]; then\n'
+          f'  cat > "{applied_manifest}"\n'
+          "fi\n"
+      )
+    os.chmod(kubectl_bin, stat.S_IRWXU)
+
+    env = dict(
+        os.environ,
+        PATH=f"{tempdir}:{os.environ.get('PATH', '')}",
+        ENTER_KUBE_CONTEXT="/dev/null",
+        ROLLOUT_REPLICAS="4",
+        JOB_PREFIX=job_prefix,
+        TUNIX_IMAGE="test-image:latest",
+    )
+    result = subprocess.run(
+        ["bash", str(launcher), "rollout"],
+        cwd=str(repo_root),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    self.assertEqual(result.returncode, 0, result.stderr)
+
+    with open(kubectl_log) as f:
+      calls = [line.strip() for line in f if line.strip()]
+    replica_delete_calls = [
+        c for c in calls if f"{job_prefix}-roll-0" in c and "delete" in c
+    ]
+    self.assertLen(
+        replica_delete_calls,
+        1,
+        f"Expected 1 batched replica delete call, got: {calls}",
+    )
+    for i in range(4):
+      self.assertIn(f"{job_prefix}-roll-{i}", replica_delete_calls[0])
+
+    apply_calls = [c for c in calls if "apply -f -" in c]
+    self.assertLen(apply_calls, 1, f"Expected 1 batched apply, got: {calls}")
+
+    with open(applied_manifest) as f:
+      docs = list(yaml.safe_load_all(f.read()))
+    self.assertLen(docs, 4)
+    self.assertEqual(
+        [doc["metadata"]["name"] for doc in docs],
+        [f"{job_prefix}-roll-{i}" for i in range(4)],
+    )
+
+  def test_k8s_launcher_single_host_dynamic_slicing_batches_patch_and_recycle(
+      self,
+  ):
+    repo_root = pathlib.Path(__file__).resolve().parents[4]
+    launcher = (
+        repo_root
+        / "tunix"
+        / "experimental"
+        / "examples"
+        / "deepswe_dist"
+        / "k8s_launcher.sh"
+    )
+
+    tempdir = self.create_tempdir().full_path
+    kubectl_log = os.path.join(tempdir, "kubectl_calls.log")
+    patched_manifest = os.path.join(tempdir, "patched.yaml")
+    kubectl_bin = os.path.join(tempdir, "kubectl")
+    with open(kubectl_bin, "w") as f:
+      f.write(
+          "#!/bin/bash\n"
+          f'echo "$*" >> "{kubectl_log}"\n'
+          'if [[ "$*" == *"apply -f -"* ]]; then\n'
+          "  cat > /dev/null\n"
+          'elif [[ "$*" == *"patch"* && "$*" == *"-f -"* ]]; then\n'
+          f'  cat > "{patched_manifest}"\n'
+          'elif [[ "$*" == *"get workload"* && "$*" == *"-o json"* ]]; then\n'
+          "  cat <<'EOF'\n"
+          '{"items": [\n'
+          '  {"metadata": {"name": "jobset-deepswe-roll-0-a1b2c"},'
+          '   "spec": {"podSets": [{"template": {"metadata": {}}}]}},\n'
+          '  {"metadata": {"name": "jobset-deepswe-roll-1-d3e4f"},'
+          '   "spec": {"podSets": [{"template": {"metadata": {"annotations":'
+          ' {"cloud.google.com/gke-tpu-slice-topology": "2x2x1"}}}}]}},\n'
+          '  {"metadata": {"name": "jobset-deepswe-roll-2-98765"},'
+          '   "spec": {"podSets": [{"template": {"metadata": {}}}]}}\n'
+          "]}\n"
+          "EOF\n"
+          "fi\n"
+      )
+    os.chmod(kubectl_bin, stat.S_IRWXU)
+
+    env = dict(
+        os.environ,
+        PATH=f"{tempdir}:{os.environ.get('PATH', '')}",
+        ENTER_KUBE_CONTEXT="/dev/null",
+        ROLLOUT_REPLICAS="3",
+        ROLLOUT_TPU_SLICE="tpu7x:2x2x1",
+        JOB_PREFIX="deepswe",
+    )
+    result = subprocess.run(
+        ["bash", str(launcher), "start_rollout_only"],
+        cwd=str(repo_root),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    self.assertEqual(result.returncode, 0, result.stderr)
+
+    with open(kubectl_log) as f:
+      calls = [line.strip() for line in f if line.strip()]
+    self.assertLen([c for c in calls if "apply -f -" in c], 1)
+    self.assertLen([c for c in calls if "patch" in c], 1)
+    delete_calls = [c for c in calls if "delete workload" in c]
+    self.assertLen(delete_calls, 1)
+    self.assertIn("jobset-deepswe-roll-0-a1b2c", delete_calls[0])
+    self.assertIn("jobset-deepswe-roll-2-98765", delete_calls[0])
+    self.assertNotIn("jobset-deepswe-roll-1-d3e4f", delete_calls[0])
+
+    with open(patched_manifest) as f:
+      patch_docs = list(yaml.safe_load_all(f.read()))
+    self.assertEqual(
+        [doc["metadata"]["name"] for doc in patch_docs],
+        ["deepswe-roll-0", "deepswe-roll-1", "deepswe-roll-2"],
+    )
 
 
 if __name__ == "__main__":
