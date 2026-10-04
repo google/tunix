@@ -1144,7 +1144,7 @@ def _compute_checksums(
 
 
 def patch_raiden_worker_sync() -> None:
-  """Monkey-patches tpu_inference.rl.raiden_worker_sync.RaidenWorkerSync to delegate apply_to_runner."""
+  """Monkey-patches tpu_inference.rl.raiden_worker_sync.RaidenWorkerSync."""
   if os.environ.get("JAX_PLATFORMS") == "cpu":
     return
   # Resolved through importlib, like the other optional deps in this module, so
@@ -1157,8 +1157,48 @@ def patch_raiden_worker_sync() -> None:
   try:
     if getattr(rws.RaidenWorkerSync, "_patched_by_tunix", False):
       return
+    orig_bind = getattr(rws.RaidenWorkerSync, "bind", None)
+    orig_h2d = getattr(rws.RaidenWorkerSync, "h2d", None)
     orig_apply = getattr(rws.RaidenWorkerSync, "apply_to_runner", None)
     orig_checksums = getattr(rws.RaidenWorkerSync, "checksums", None)
+
+    def _patched_bind(self, *args: Any, **kwargs: Any) -> Any:
+      auto_h2d = getattr(self, "_auto_h2d", False)
+      self._auto_h2d = auto_h2d
+      ws_lib = getattr(rws, "_ws_lib", None)
+      orig_ws_cls = (
+          getattr(ws_lib, "WeightSynchronizer", None)
+          if ws_lib is not None
+          else None
+      )
+      if ws_lib is not None and orig_ws_cls is not None:
+
+        def _ws_factory(*ws_args: Any, **ws_kwargs: Any) -> Any:
+          ws_kwargs["auto_h2d"] = auto_h2d
+          return orig_ws_cls(*ws_args, **ws_kwargs)
+
+        ws_lib.WeightSynchronizer = _ws_factory
+      try:
+        if orig_bind is not None:
+          return orig_bind(self, *args, **kwargs)
+      finally:
+        if ws_lib is not None and orig_ws_cls is not None:
+          ws_lib.WeightSynchronizer = orig_ws_cls
+
+    def _patched_h2d(self, uuid: Optional[int] = None) -> None:
+      sync = self._require_sync("h2d()")
+      if hasattr(sync, "wait_for_transfer_completion"):
+        sync.wait_for_transfer_completion(uuid)
+        if getattr(self, "_auto_h2d", False):
+          jax.block_until_ready(self.arrays)
+          return
+      sync.h2d()
+      jax.block_until_ready(self.arrays)
+      envs_mod = getattr(rws, "envs", None)
+      if getattr(envs_mod, "RAIDEN_H2D_SETTLE", False) and hasattr(
+          self, "_wait_until_settled"
+      ):
+        self._wait_until_settled()
 
     def _patched_apply_to_runner(self, runner: Any) -> None:
       if self._sync is not None and hasattr(self._sync, "apply_to_runner"):
@@ -1177,12 +1217,17 @@ def patch_raiden_worker_sync() -> None:
         return orig_checksums(self, sample=sample)
       return {}
 
+    if orig_bind is not None:
+      rws.RaidenWorkerSync.bind = _patched_bind
+    if orig_h2d is not None:
+      rws.RaidenWorkerSync.h2d = _patched_h2d
     rws.RaidenWorkerSync.apply_to_runner = _patched_apply_to_runner
     rws.RaidenWorkerSync.checksums = _patched_checksums
     rws.RaidenWorkerSync._patched_by_tunix = True
     logging.info(
-        "Successfully patched RaidenWorkerSync.apply_to_runner with Tunix"
-        " delegation."
+        "Successfully patched RaidenWorkerSync (bind, h2d, apply_to_runner,"
+        " checksums) with Tunix delegation."
     )
   except AttributeError as e:
     logging.debug("tpu_inference not available to patch: %s", e)
+

@@ -696,6 +696,9 @@ class RLVllmSampler:
     happen in the worker subprocess instead -- see
     `tpu_worker.TPUWorker.bind_raiden_sync`.
     """
+    from tunix.experimental.weight_sync import raiden_synchronizer  # pylint: disable=g-import-not-at-top
+
+    raiden_synchronizer.patch_raiden_worker_sync()
     await self._call_worker_method(
         "bind_raiden_sync", worker_index, parallelism, job_name
     )

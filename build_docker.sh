@@ -13,16 +13,20 @@ INSTALL_MAXTEXT=false
 INSTALL_RAIDEN=false
 RAIDEN_WHEEL_DIR=/app/raiden_wheels
 INSTALL_DEEPSWE_DEPS=false
+NO_CACHE=false
+LOCAL_IMAGE_NAME="${LOCAL_IMAGE_NAME:-tunix_base_image}"
 
 usage() {
     cat <<'MSG'
-Usage: bash build_docker.sh [--maxtext] [--raiden] [--raiden-wheel-dir PATH] [--deepswe]
+Usage: bash build_docker.sh [--maxtext] [--raiden] [--raiden-wheel-dir PATH] [--deepswe] [--no-cache] [--image-name NAME]
 
 Options:
   --maxtext               Install MaxText-specific dependencies.
   --raiden                Install Raiden-specific dependencies.
   --raiden-wheel-dir PATH Use prebuilt Raiden wheels from PATH inside the Docker build context.
   --deepswe               Install DeepSWE evaluation dependencies.
+  --no-cache              Do not use cache when building the image.
+  --image-name, --tag NAME Tag the built image with NAME (default: tunix_base_image).
 MSG
 }
 
@@ -40,6 +44,16 @@ while [[ "$#" -gt 0 ]]; do
             shift 2
             ;;
         --deepswe) INSTALL_DEEPSWE_DEPS=true; shift ;;
+        --no-cache) NO_CACHE=true; shift ;;
+        --image-name|--tag)
+            if [[ -z "$2" ]]; then
+                echo "Error: $1 requires an argument"
+                usage
+                exit 1
+            fi
+            LOCAL_IMAGE_NAME="$2"
+            shift 2
+            ;;
         --help|-h)
             usage
             exit 0
@@ -55,7 +69,7 @@ if [ ! -f "$DOCKERFILE" ]; then
     exit 1
 fi
 
-export LOCAL_IMAGE_NAME=tunix_base_image
+export LOCAL_IMAGE_NAME
 echo "Building base image: $LOCAL_IMAGE_NAME"
 
 echo "Using Dockerfile: $DOCKERFILE"
@@ -90,7 +104,15 @@ MSG
         fi
     fi
 
+    BUILD_ARGS=()
+    if [ "$NO_CACHE" = "true" ]; then
+        BUILD_ARGS+=(--no-cache)
+    fi
+
+    export HF_TOKEN="${HF_TOKEN:-}"
+
     $DOCKER_COMMAND build \
+        "${BUILD_ARGS[@]}" \
         --network=host \
         --build-arg INSTALL_MAXTEXT=${INSTALL_MAXTEXT} \
         --build-arg INSTALL_RAIDEN=${INSTALL_RAIDEN} \
