@@ -222,10 +222,12 @@ class SWEEnv(BaseTaskEnv):
         ws_kwargs["router_auth_token"] = os.getenv("ROUTER_AUTH_TOKEN")
       ws_kwargs["working_dir"] = os.getenv("OPENHANDS_WORKING_DIR", "/testbed")
       self.workspace = make_handle_workspace(self.handle, **ws_kwargs)
-    try:
-      cmd_files = r2egym_command_files()
-    except Exception:  # pylint: disable=broad-exception-caught
-      cmd_files = None
+    cmd_files = None
+    if self.scaffold not in template_mod.OPENHANDS_SCAFFOLDS:
+      try:
+        cmd_files = r2egym_command_files()
+      except Exception:  # pylint: disable=broad-exception-caught
+        cmd_files = None
     self.env = make_fleet_repo_env(
         self.handle,
         command_files=cmd_files,

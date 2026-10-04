@@ -117,23 +117,30 @@ class FakeFleet:
 
 def create_synthetic_dataset(
     num_samples: int = 12,
-    default_image: str = "numpy_final:25010c16edbe54ac9449ccac9d8f1da0c2d97cb0",
+    default_image: str = "numpy_final:141d3a954b955b7f0821574e03b693ec4078640b",
 ) -> list[dict[str, Any]]:
   """Creates synthetic DeepSWE task records for testing."""
   test_images = [
       default_image,
-      "pandas_final:82a102b393f0b9c6c1f19e1f89fc23544c22f2ba",
+      "pandas_final:6b575b4644bd1808808ce0270413c6e75ff7427c",
+      "pyramid_final:f3bffdfc35a5ecbb45b5f63bdb08bdc41553b63d",
       "sympy_final:b39e65839b1a5ef8c8db182239d22c95e54d7e97",
-      "scikit-learn_final:c6e5e8e4a9e224e75d691e843c9ba811b7a2bb03",
   ]
   samples = []
+  synthetic_commit = (
+      '{"file_diffs": [], "old_commit_hash": "0000000", "new_commit_hash":'
+      ' "1111111", "commit_message": "synthetic test", "commit_date":'
+      ' "2026-01-01T00:00:00"}'
+  )
   for i in range(num_samples):
     img = test_images[i % len(test_images)]
     samples.append({
         "instance_id": f"task-sample-{i}",
         "docker_image": img,
-        "repo_name": f"test/repo-{i}",
+        "repo_name": img.split("_")[0],
         "prompt": f"Fix issue #{i} in repository",
+        "parsed_commit_content": synthetic_commit,
+        "expected_output_json": "{}",
         "metadata": {
             "env_config": {
                 "entry": {
@@ -143,6 +150,221 @@ def create_synthetic_dataset(
         },
     })
   return samples
+
+
+def _verify_openhands_harness_in_sandbox(env: Any) -> None:
+  """Verifies OpenHands tools (editor, bash heredocs/comments, LD_LIBRARY_PATH, think, task_tracker, finish, reward) on a live sandbox."""
+
+  def _obs(step_res: Any) -> str:
+    if isinstance(step_res, tuple):
+      return str(step_res[0])
+    return str(getattr(step_res, "observation", step_res))
+
+  img = str(getattr(env, "entry", {}).get("docker_image", ""))
+
+  # 1. execute_bash: heredoc, python heredoc, trailing comment, clean LD_LIBRARY_PATH, and R2E test hiding
+  bash_obs = _obs(
+      env.step(
+          "<function=execute_bash>\n"
+          "<parameter=command>\n"
+          "cat << 'EOF'\n"
+          "heredoc_ok\n"
+          "EOF\n"
+          "python << 'PYEOF'\n"
+          "import sys\n"
+          "print('py_heredoc_ok', sys.version_info[:2])\n"
+          "PYEOF\n"
+          'echo "ld=${LD_LIBRARY_PATH-unset}"\n'
+          'if [ -e /r2e_tests ] || [ -e /root/run_tests.sh ]; then echo "r2e_leaked"; else echo "r2e_hidden"; fi  # trailing comment\n'
+          "</parameter>\n"
+          "</function>"
+      )
+  )
+  assert "heredoc_ok" in bash_obs, f"Heredoc failed: {bash_obs!r}"
+  assert "py_heredoc_ok" in bash_obs, f"Python heredoc failed: {bash_obs!r}"
+  assert "/tmp/_MEI" not in bash_obs, f"PyInstaller LD_LIBRARY_PATH leaked: {bash_obs!r}"
+  assert "/oh/glibc236" not in bash_obs, f"glibc236 LD_LIBRARY_PATH leaked: {bash_obs!r}"
+  assert "r2e_hidden" in bash_obs, f"R2E grading tests not hidden during rollout: {bash_obs!r}"
+  assert "[Command finished with exit code 0]" in bash_obs, f"Unexpected bash suffix: {bash_obs!r}"
+
+  # 2. execute_bash: working directory persistence across turns & repo import (C/C++ extensions)
+  _ = env.step(
+      "<function=execute_bash>\n"
+      "<parameter=command>cd /tmp</parameter>\n"
+      "</function>"
+  )
+  cwd_obs = _obs(
+      env.step(
+          "<function=execute_bash>\n"
+          "<parameter=command>pwd && cd /testbed</parameter>\n"
+          "</function>"
+      )
+  )
+  assert cwd_obs.startswith("/tmp\n"), f"CWD did not persist across steps: {cwd_obs!r}"
+  assert "[Current working directory: /testbed]" in cwd_obs, f"CWD metadata mismatch: {cwd_obs!r}"
+
+  for pkg in ("pandas", "numpy", "pyramid", "sympy", "tornado", "PIL"):
+    if pkg.lower() in img.lower() or (pkg == "PIL" and "pillow" in img.lower()):
+      imp_obs = _obs(
+          env.step(
+              "<function=execute_bash>\n"
+              f"<parameter=command>python -c 'import {pkg}; print(\"{pkg}_import_ok\")' && pytest --version</parameter>\n"
+              "</function>"
+          )
+      )
+      assert f"{pkg}_import_ok" in imp_obs, (
+          f"Failed to import {pkg} in sandbox ({img}): {imp_obs!r}"
+      )
+      ipy_obs = _obs(
+          env.step(
+              "<function=execute_ipython_cell>\n"
+              f"<parameter=code>import {pkg}; print('{pkg}_ipython_ok')</parameter>\n"
+              "</function>"
+          )
+      )
+      assert f"{pkg}_ipython_ok" in ipy_obs, (
+          f"Failed to import {pkg} via execute_ipython_cell ({img}): {ipy_obs!r}"
+      )
+
+  # 3. str_replace_editor: create, view, str_replace (fuzzy), insert, undo_edit, binary view
+  probe_path = "/tmp/_e2e_oh_editor_probe.py"
+  pyc_path = "/tmp/_e2e_oh_editor_probe.pyc"
+  create_obs = _obs(
+      env.step(
+          "<function=str_replace_editor>\n"
+          "<parameter=command>create</parameter>\n"
+          f"<parameter=path>{probe_path}</parameter>\n"
+          "<parameter=file_text>def calc(x):\n    return x + 1\n</parameter>\n"
+          "</function>"
+      )
+  )
+  assert "File created successfully" in create_obs, f"Editor create failed: {create_obs!r}"
+
+  view_obs = _obs(
+      env.step(
+          "<function=str_replace_editor>\n"
+          "<parameter=command>view</parameter>\n"
+          f"<parameter=path>{probe_path}</parameter>\n"
+          "<parameter=view_range>[1, 2]</parameter>\n"
+          "</function>"
+      )
+  )
+  assert "return x + 1" in view_obs, f"Editor view failed: {view_obs!r}"
+
+  replace_obs = _obs(
+      env.step(
+          "<function=str_replace_editor>\n"
+          "<parameter=command>str_replace</parameter>\n"
+          f"<parameter=path>{probe_path}</parameter>\n"
+          "<parameter=old_str>  return x + 1</parameter>\n"
+          "<parameter=new_str>  return x + 2</parameter>\n"
+          "</function>"
+      )
+  )
+  assert "has been edited" in replace_obs and "return x + 2" in replace_obs, (
+      f"Editor fuzzy str_replace failed: {replace_obs!r}"
+  )
+
+  insert_obs = _obs(
+      env.step(
+          "<function=str_replace_editor>\n"
+          "<parameter=command>insert</parameter>\n"
+          f"<parameter=path>{probe_path}</parameter>\n"
+          "<parameter=insert_line>1</parameter>\n"
+          "<parameter=new_str>    # inserted line</parameter>\n"
+          "</function>"
+      )
+  )
+  assert "has been edited" in insert_obs and "# inserted line" in insert_obs, (
+      f"Editor insert failed: {insert_obs!r}"
+  )
+
+  undo_obs = _obs(
+      env.step(
+          "<function=str_replace_editor>\n"
+          "<parameter=command>undo_edit</parameter>\n"
+          f"<parameter=path>{probe_path}</parameter>\n"
+          "</function>"
+      )
+  )
+  assert "undone successfully" in undo_obs and "# inserted line" not in undo_obs, (
+      f"Editor undo_edit failed: {undo_obs!r}"
+  )
+
+  _ = env.step(
+      "<function=execute_bash>\n"
+      f"<parameter=command>cp {probe_path} {pyc_path} && rm -f {probe_path}</parameter>\n"
+      "</function>"
+  )
+  bin_obs = _obs(
+      env.step(
+          "<function=str_replace_editor>\n"
+          "<parameter=command>view</parameter>\n"
+          f"<parameter=path>{pyc_path}</parameter>\n"
+          "</function>"
+      )
+  )
+  assert bin_obs.startswith("ERROR_BINARY_FILE"), f"Binary view check failed: {bin_obs!r}"
+  _ = env.step(
+      "<function=execute_bash>\n"
+      f"<parameter=command>rm -f {pyc_path}</parameter>\n"
+      "</function>"
+  )
+
+  # 4. think + task_tracker + finish
+  think_obs = _obs(
+      env.step(
+          "<function=think>\n"
+          "<parameter=thought>Verifying think tool</parameter>\n"
+          "</function>"
+      )
+  )
+  assert think_obs == "Your thought has been logged.", f"Think failed: {think_obs!r}"
+
+  plan_obs = _obs(
+      env.step(
+          "<function=task_tracker>\n"
+          "<parameter=command>plan</parameter>\n"
+          '<parameter=task_list>[{"title": "Verify harness", "status": "done", "notes": "ok"}]</parameter>\n'
+          "</function>"
+      )
+  )
+  assert "Task list has been updated with 1 items." in plan_obs, (
+      f"task_tracker plan failed: {plan_obs!r}"
+  )
+
+  finish_res = env.step(
+      "<function=finish>\n"
+      "<parameter=message>Verification complete</parameter>\n"
+      "</function>"
+  )
+  finish_done = (
+      finish_res[2]
+      if isinstance(finish_res, tuple)
+      else getattr(finish_res, "done", False)
+  )
+  assert finish_done is True, f"finish tool did not mark done=True: {finish_res!r}"
+
+  # 5. Verify R2E test restoration and reward computation
+  if getattr(env, "final_reward_fn", None) is not None and env.entry.get("parsed_commit_content"):
+    reward = env.final_reward_fn()
+    assert reward in (0.0, 1.0), f"Unexpected reward value: {reward!r}"
+  else:
+    from examples.deepswe import openhands_utils as oh_utils
+    oh_utils.restore_r2e_tests_for_reward(getattr(env, "workspace", None) or env.env)
+
+  restore_obs = _obs(
+      env.step(
+          "<function=execute_bash>\n"
+          '<parameter=command>if [ -e /r2e_tests ] && [ -e /root/run_tests.sh ]; then echo "r2e_restored"; else echo "r2e_missing"; fi</parameter>\n'
+          "</function>"
+      )
+  )
+  assert "r2e_restored" in restore_obs, (
+      f"R2E grading tests were not restored for reward computation: {restore_obs!r}"
+  )
+
+  logging.info("      [OK] OpenHands full tool suite verified on %s", img)
 
 
 def run_pipeline_e2e(
@@ -234,7 +456,7 @@ def run_pipeline_e2e(
             fleet=fleet,
             use_agent_sandbox=True,
             scaffold=scaffold,
-            max_steps=1,
+            max_steps=30,
         )
         _ = env.reset()
         t_acq = time.perf_counter() - t_acq_start
@@ -248,6 +470,9 @@ def run_pipeline_e2e(
         )
         step_res = env.step(action)
         t_exec = time.perf_counter() - t_exec_start
+
+        if scaffold == "openhands" and gen_idx == 0:
+          _verify_openhands_harness_in_sandbox(env)
 
         env.close()
 
