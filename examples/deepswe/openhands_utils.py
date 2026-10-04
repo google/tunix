@@ -139,6 +139,19 @@ def run_oh_editor_locally(
     with open(file_path, encoding="utf-8", errors="replace") as f:
       return sum(1 for _ in f)
 
+  def _is_binary(file_path):
+    # binaryornot.check.is_binary without chardet: the `.pyc` rule, then a NUL
+    # byte in the first 1024 bytes.
+    if str(file_path).endswith(".pyc"):
+      return True
+    try:
+      if not file_path.is_file():
+        return False
+      with open(file_path, "rb") as f:
+        return b"\x00" in f.read(1024)
+    except (OSError, ValueError):
+      return False
+
   def _validate_file(file_path):
     if not file_path.exists() or not file_path.is_file():
       return
@@ -149,9 +162,7 @@ def run_oh_editor_locally(
           f" ({file_size / 1024 / 1024:.1f}MB). Maximum allowed size is"
           f" {int(max_file_bytes / 1024 / 1024)}MB."
       )
-    with open(file_path, "rb") as f:
-      head = f.read(8192)
-    if b"\x00" in head:
+    if _is_binary(file_path):
       raise _ToolError(
           f"File validation failed for {file_path}: File appears to be binary"
           " and this file type cannot be read or edited by this tool."
@@ -415,6 +426,10 @@ def run_oh_editor_locally(
     new_str = params.get("new_str")
     file_text = params.get("file_text")
 
+    if command == "view" and _is_binary(path):
+      # The reference runtime refuses binary files before the editor runs
+      # (action_execution_server.read) and renders an ErrorObservation.
+      return "ERROR_BINARY_FILE\n[Error occurred in processing last action]"
     if not path.is_absolute():
       raise _invalid(
           "path",
@@ -772,7 +787,12 @@ def _truncate_observation(content: str) -> str:
 
 
 def _format_command_result(
-    result: Any, timeout: float, elapsed: float, bash_observation: bool = False
+    result: Any,
+    timeout: float,
+    elapsed: float,
+    bash_observation: bool = False,
+    truncate: bool = True,
+    command_echo: str = "",
 ) -> tuple[str, bool]:
   """Formats an OpenHands CommandResult into (observation, timed_out).
 
@@ -781,6 +801,8 @@ def _format_command_result(
   "[The command completed with exit code N.]", the working directory, the
   Python interpreter and "[Command finished with exit code N]"; a command
   killed at its timeout gets the reference hard-timeout suffix instead.
+  Like the reference tmux capture, every output line is rstripped, and
+  `command_echo` (the command as the pane echoes it) leads the output.
   """
   if getattr(result, "stdout", None) is not None:
     stdout = str(result.stdout)
@@ -798,7 +820,7 @@ def _format_command_result(
       obs = f"{stdout}\n{stderr}"
     if timed_out:
       obs = f"{obs.rstrip()}\n{_timeout_notice(timeout)}".lstrip("\n")
-    return _truncate_observation(obs), timed_out
+    return (_truncate_observation(obs) if truncate else obs), timed_out
 
   working_dir = python_path = ""
   marker = stdout.rfind(_BASH_META_SENTINEL)
@@ -821,6 +843,9 @@ def _format_command_result(
     if merged and not merged.endswith("\n"):
       merged += "\n"
     merged += stderr
+  merged = "\n".join(line.rstrip() for line in merged.split("\n"))
+  if command_echo:
+    merged = f"{command_echo}\n{merged}"
   content = _truncate_observation(merged.strip())
   if timed_out:
     rendered = (
@@ -844,6 +869,8 @@ def _execute_in_workspace(
     step_timeout: float,
     failure_prefix: str,
     bash_observation: bool = False,
+    truncate: bool = True,
+    command_echo: str = "",
 ) -> EnvStepResult:
   """Runs `wrapped_cmd` in env.workspace; never raises, never ends the episode."""
   max_steps = getattr(env, "max_steps", None)
@@ -854,7 +881,12 @@ def _execute_in_workspace(
         wrapped_cmd, timeout=float(step_timeout)
     )
     obs, timed_out = _format_command_result(
-        result, step_timeout, time.monotonic() - start, bash_observation
+        result,
+        step_timeout,
+        time.monotonic() - start,
+        bash_observation,
+        truncate,
+        command_echo,
     )
     if timed_out:
       info["command_timed_out"] = True
@@ -1002,8 +1034,15 @@ def step_openhands(
     if getattr(env, "workspace", None) is not None:
       step_timeout = float(getattr(env, "step_timeout", 60.0))
       remote_cmd = _build_oh_editor_remote_cmd(params)
+      # The reference passes file views to the model whole and truncates only
+      # edit results (conversation_memory FileReadObservation vs
+      # FileEditObservation).
       return _execute_in_workspace(
-          env, remote_cmd, step_timeout, "Command execution failed"
+          env,
+          remote_cmd,
+          step_timeout,
+          "Command execution failed",
+          truncate=params.get("command") != "view",
       )
     elif getattr(env, "env", None) is not None:
       # Fallback when running against a local RepoEnv without an OpenHands
@@ -1078,6 +1117,8 @@ def step_openhands(
     if cmd is None:
       cmd = params.get("cmd")
     is_input = str(params.get("is_input", "false")).lower() == "true"
+    # Stripped like the reference (bash.py `action.command.strip()`); the
+    # echo rule below depends on it.
     cmd = str(cmd or "").strip()
     # Each command here runs to completion (or is killed at its timeout), so
     # there is never a previous command to read from or send keys to. These
@@ -1126,6 +1167,13 @@ def step_openhands(
         f"{cmd}\n)"
     )
 
+    # The reference strips the echoed command from the tmux pane only when the
+    # pane shows it verbatim. The pane drops empty lines and trailing spaces,
+    # so a command with either keeps its echo at the top of the output.
+    pane_echo = "\n".join(
+        line.rstrip() for line in cmd.split("\n") if line != ""
+    )
+
     if getattr(env, "workspace", None) is not None:
       return _execute_in_workspace(
           env,
@@ -1133,6 +1181,7 @@ def step_openhands(
           step_timeout,
           "Command execution failed",
           bash_observation=True,
+          command_echo=pane_echo if pane_echo != cmd else "",
       )
     elif getattr(env, "env", None) is not None:
       if isinstance(getattr(action_obj, "parameters", None), dict):

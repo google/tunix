@@ -205,6 +205,7 @@ CONFIGMAP_FILES=(
   "$(find_code_file swe_env.py "${REPO_ROOT}/examples/deepswe/swe_env.py" "${SCRIPT_DIR}/../../../oss/examples/deepswe/swe_env.py")"
   "$(find_code_file swe_agent.py "${REPO_ROOT}/examples/deepswe/swe_agent.py" "${SCRIPT_DIR}/../../../oss/examples/deepswe/swe_agent.py")"
   "$(find_code_file openhands_utils.py "${REPO_ROOT}/examples/deepswe/openhands_utils.py" "${SCRIPT_DIR}/../../../oss/examples/deepswe/openhands_utils.py")"
+  "$(find_code_file opencode_fuzzy.py "${REPO_ROOT}/examples/deepswe/opencode_fuzzy.py" "${SCRIPT_DIR}/../../../oss/examples/deepswe/opencode_fuzzy.py")"
   "$(find_code_file template.py "${REPO_ROOT}/examples/deepswe/template.py" "${SCRIPT_DIR}/../../../oss/examples/deepswe/template.py")"
   "$(find_code_file deepswe.py "${REPO_ROOT}/tunix/experimental/examples/deepswe_dist/deepswe.py" "${SCRIPT_DIR}/deepswe.py")"
   "$(find_code_file sandbox_k8s_e2e_test.py "${SCRIPT_DIR}/sandbox_k8s_e2e_test.py")"
@@ -319,6 +320,8 @@ spec:
           cp /e2e_code/swe_agent.py /app/tunix/oss/examples/deepswe/ 2>/dev/null || true
           cp /e2e_code/openhands_utils.py /app/examples/deepswe/ 2>/dev/null || true
           cp /e2e_code/openhands_utils.py /app/tunix/oss/examples/deepswe/ 2>/dev/null || true
+          cp /e2e_code/opencode_fuzzy.py /app/examples/deepswe/ 2>/dev/null || true
+          cp /e2e_code/opencode_fuzzy.py /app/tunix/oss/examples/deepswe/ 2>/dev/null || true
           cp /e2e_code/template.py /app/examples/deepswe/ 2>/dev/null || true
           cp /e2e_code/template.py /app/tunix/oss/examples/deepswe/ 2>/dev/null || true
           cp /e2e_code/deepswe.py /app/tunix/experimental/examples/deepswe_dist/

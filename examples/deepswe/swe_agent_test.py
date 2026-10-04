@@ -727,9 +727,31 @@ class SweAgentTest(absltest.TestCase):
       )
       self.assertEqual(
           binary_view,
+          "ERROR_BINARY_FILE\n[Error occurred in processing last action]",
+      )
+      binary_edit = openhands_utils.run_oh_editor_locally(
+          {
+              "command": "str_replace",
+              "path": binary_path,
+              "old_str": "abc",
+              "new_str": "x",
+          },
+          history_file=hist_file,
+      )
+      self.assertEqual(
+          binary_edit,
           f"ERROR:\nFile validation failed for {binary_path}: File appears"
           " to be binary and this file type cannot be read or edited by this"
           " tool.",
+      )
+      pyc_path = os.path.join(tmpdir, "mod.pyc")
+      with open(pyc_path, "w", encoding="utf-8") as f:
+        f.write("text\n")
+      self.assertEqual(
+          openhands_utils.run_oh_editor_locally(
+              {"command": "view", "path": pyc_path}, history_file=hist_file
+          ),
+          "ERROR_BINARY_FILE\n[Error occurred in processing last action]",
       )
 
       # 7. remote command serialization round-trip
@@ -867,6 +889,72 @@ class SweAgentTest(absltest.TestCase):
         obs.startswith("a" * 15000 + "\n[... Observation truncated")
     )
     self.assertTrue(obs.endswith("[Command finished with exit code 0]"))
+    # Every line is rstripped, like the reference tmux capture.
+    res.stdout = f"diff\n \n+x  \n{meta}/testbed\t\n"
+    obs, _ = openhands_utils._format_command_result(
+        res, 60.0, 0.1, bash_observation=True
+    )
+    self.assertTrue(obs.startswith("diff\n\n+x\n[The command completed"))
+
+  def test_step_openhands_bash_echoes_commands_the_pane_rewrites(self):
+    meta = openhands_utils._BASH_META_SENTINEL
+    mock_env = mock.MagicMock()
+    mock_env.max_steps = 10
+    mock_env.step_timeout = 60.0
+    res = mock.MagicMock(spec=["stdout", "stderr", "exit_code"])
+    res.stdout = f"1\n2\n{meta}/testbed\t/testbed/.venv/bin/python\n"
+    res.stderr = ""
+    res.exit_code = 0
+    mock_env.workspace.execute_command.return_value = res
+    suffix = (
+        "[The command completed with exit code 0.]\n"
+        "[Current working directory: /testbed]\n"
+        "[Python interpreter: /testbed/.venv/bin/python]\n"
+        "[Command finished with exit code 0]"
+    )
+    # An empty line, or a whitespace-only one, keeps the echo; the pane shows
+    # the command without empty lines and with each line rstripped.
+    result = openhands_utils.step_openhands(
+        mock_env,
+        SWEAction(
+            "execute_bash",
+            {"command": 'python3 -c "\nprint(1)\n\nprint(2)\n  \n"'},
+        ),
+    )
+    self.assertEqual(
+        result.observation,
+        'python3 -c "\nprint(1)\nprint(2)\n\n"\n1\n2\n' + suffix,
+    )
+    # A command the pane shows verbatim is not echoed.
+    result = openhands_utils.step_openhands(
+        mock_env,
+        SWEAction("execute_bash", {"command": 'python3 -c "\nprint(1)\n"'}),
+    )
+    self.assertEqual(result.observation, "1\n2\n" + suffix)
+
+  def test_step_openhands_editor_view_is_not_truncated(self):
+    mock_env = mock.MagicMock()
+    mock_env.max_steps = 10
+    mock_env.step_timeout = 60.0
+    res = mock.MagicMock(spec=["stdout", "stderr", "exit_code"])
+    res.stdout = "v" * 40000
+    res.stderr = ""
+    res.exit_code = 0
+    mock_env.workspace.execute_command.return_value = res
+    view = openhands_utils.step_openhands(
+        mock_env,
+        SWEAction("str_replace_editor", {"command": "view", "path": "/a"}),
+    )
+    self.assertEqual(view.observation, "v" * 40000)
+    edit = openhands_utils.step_openhands(
+        mock_env,
+        SWEAction(
+            "str_replace_editor",
+            {"command": "str_replace", "path": "/a", "old_str": "x",
+             "new_str": "y"},
+        ),
+    )
+    self.assertEqual(len(edit.observation), 30047)
 
   def test_step_openhands_bash_send_keys_without_running_command(self):
     mock_env = mock.MagicMock()
