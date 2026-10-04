@@ -14,6 +14,7 @@
 
 """Tests for RaidenSynchronizer."""
 
+import types
 from unittest import mock
 
 import numpy as np
@@ -822,6 +823,73 @@ class RaidenSynchronizerTest(absltest.TestCase):
         ),
     )
 
+  def test_patch_raiden_worker_sync_disables_auto_h2d_and_runs_h2d(self):
+    call_order = []
+
+    class _FakeSync:
+
+      def __init__(self, arrays, **kwargs):
+        self.arrays = arrays
+        self.kwargs = kwargs
+
+      def wait_for_transfer_completion(self, uuid=None):
+        call_order.append(("wait_for_transfer_completion", uuid))
+
+      def h2d(self):
+        call_order.append(("h2d",))
+
+    class _FakeWsLib:
+      WeightSynchronizer = _FakeSync
+
+    class _FakeRaidenWorkerSync:
+
+      def __init__(self):
+        self.arrays = [jnp.ones((2,), jnp.float32)]
+        self._sync = None
+
+      def _require_sync(self, op):
+        del op
+        return self._sync
+
+      def bind(self, state):
+        del state
+        self._sync = _FakeWsLib.WeightSynchronizer(
+            self.arrays,
+            local_port=0,
+            auto_h2d=True,
+        )
+
+      def h2d(self, uuid=None):
+        sync = self._require_sync("h2d()")
+        if hasattr(sync, "wait_for_transfer_completion"):
+          sync.wait_for_transfer_completion(uuid)
+          return
+        sync.h2d()
+
+    fake_rws_mod = types.SimpleNamespace(
+        _ws_lib=_FakeWsLib,
+        RaidenWorkerSync=_FakeRaidenWorkerSync,
+        envs=types.SimpleNamespace(RAIDEN_H2D_SETTLE=False),
+    )
+    with mock.patch.dict("os.environ", {"JAX_PLATFORMS": "tpu"}):
+      with mock.patch.dict(
+          raiden_synchronizer._lazy_modules,
+          {"tpu_inference.rl.raiden_worker_sync": fake_rws_mod},
+      ):
+        raiden_synchronizer.patch_raiden_worker_sync()
+
+    worker_sync = _FakeRaidenWorkerSync()
+    worker_sync.bind({"w": worker_sync.arrays[0]})
+    self.assertFalse(worker_sync._sync.kwargs["auto_h2d"])
+    self.assertIs(_FakeWsLib.WeightSynchronizer, _FakeSync)
+
+    worker_sync.h2d(uuid=7)
+    self.assertEqual(
+        call_order,
+        [("wait_for_transfer_completion", 7), ("h2d",)],
+    )
+
 
 if __name__ == "__main__":
   absltest.main()
+
