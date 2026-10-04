@@ -944,7 +944,13 @@ class TrajectoryCollectEngine:
         if rollout_output.prompt_lengths is not None
         and len(rollout_output.prompt_lengths) > 0
         else (
-            len(rollout_output.left_padded_prompt_tokens[0])
+            (
+                len(rollout_output.left_padded_prompt_tokens[0])
+                if hasattr(
+                    rollout_output.left_padded_prompt_tokens[0], "__len__"
+                )
+                else len(rollout_output.left_padded_prompt_tokens)
+            )
             if rollout_output.left_padded_prompt_tokens is not None
             and len(rollout_output.left_padded_prompt_tokens) > 0
             else 0
@@ -1223,6 +1229,11 @@ class TrajectoryCollectEngine:
           json.dumps(info, default=str, indent=2),
       )
       self.agent.update_from_env(obs, rew, done, self._rollout_state_info(info))
+      if isinstance(info, dict) and info.get("max_steps_reached", False):
+        self.agent.trajectory.status = (
+            agent_types.TrajectoryStatus.MAX_STEPS_REACHED
+        )
+        self._log_trajectory_clip("MAX_STEPS_REACHED")
       env_step_executed = True
     else:
       env_step_executed = False

@@ -185,15 +185,14 @@ def parse_codeact_response(response_text: str) -> tuple[str, Any]:
 
   def _collect_candidates(text_slice: str, offset: int):
     found = []
-    tc_match = tc_pattern.search(text_slice)
-    if tc_match:
+    tc_matches = list(tc_pattern.finditer(text_slice))
+    for tc_match in tc_matches:
       found.append((0, offset + tc_match.start(), "tool_call", tc_match))
 
-    xml_match = xml_pattern.search(text_slice)
-    if xml_match:
-      # Only add bare xml candidate if it is not already inside tc_match.
-      if not tc_match or not (
-          tc_match.start() <= xml_match.start() <= tc_match.end()
+    for xml_match in xml_pattern.finditer(text_slice):
+      # Only add bare xml candidate if it is not already inside a tc_match.
+      if not any(
+          tc_m.start() <= xml_match.start() <= tc_m.end() for tc_m in tc_matches
       ):
         found.append((0, offset + xml_match.start(), "xml", xml_match))
 
@@ -218,35 +217,14 @@ def parse_codeact_response(response_text: str) -> tuple[str, Any]:
       found.append((1, offset + cb_match.start(), "code_block", cb_match))
     return found
 
-  # Prefer tool calls emitted after </think> so illustrative code fences or
-  # snippets inside reasoning blocks do not shadow the actual tool invocation.
-  think_end = response_text.rfind("</think>")
-  if think_end != -1:
-    post_think_offset = think_end + len("</think>")
-    candidates = _collect_candidates(
-        response_text[post_think_offset:], post_think_offset
-    )
-    if not candidates:
-      candidates = _collect_candidates(response_text, 0)
-  else:
-    candidates = _collect_candidates(response_text, 0)
-
-  if candidates:
-    # Prefer structured tool invocations (priority 0) over generic markdown
-    # code fences (priority 1), then earliest position in the response.
-    candidates.sort(key=lambda x: (x[0], x[1]))
-    _, match_start, match_type, payload = candidates[0]
-
+  def _parse_candidate_action(match_type: str, payload: Any) -> SWEAction:
     if match_type == "xml":
-      thought = response_text[:match_start].strip()
       xml_str = payload.group(1).strip()
       if not xml_str.endswith("</function>"):
         xml_str += "\n</function>"
-      action = parse_openhands_xml_action(xml_str)
-      return thought, action
+      return parse_openhands_xml_action(xml_str)
 
-    elif match_type in ("tool_call", "json_block"):
-      thought = response_text[:match_start].strip()
+    if match_type in ("tool_call", "json_block"):
       if match_type == "tool_call":
         raw_payload = payload.group(1).strip()
         xml_in_tc = xml_pattern.search(raw_payload)
@@ -254,8 +232,7 @@ def parse_codeact_response(response_text: str) -> tuple[str, Any]:
           xml_str = xml_in_tc.group(1).strip()
           if not xml_str.endswith("</function>"):
             xml_str += "\n</function>"
-          action = parse_openhands_xml_action(xml_str)
-          return thought, action
+          return parse_openhands_xml_action(xml_str)
         try:
           data = json.loads(raw_payload)
         except Exception:
@@ -285,21 +262,57 @@ def parse_codeact_response(response_text: str) -> tuple[str, Any]:
             normalized_args[str(k)] = json.dumps(v, ensure_ascii=False)
           else:
             normalized_args[str(k)] = str(v)
-        action = SWEAction(fn_name, normalized_args)
-        return thought, action
+        return SWEAction(fn_name, normalized_args)
+      return SWEAction(function_name="", parameters={})
 
-    elif match_type == "code_block":
-      thought = response_text[:match_start].strip()
+    if match_type == "code_block":
       lang = payload.group(1).lower()
       code = payload.group(2).strip()
       if lang in ("bash", "sh", "shell"):
         if "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" in code:
-          action = SWEAction("submit", {})
-        else:
-          action = SWEAction("execute_bash", {"command": code})
-      else:  # python, py, ipython
-        action = SWEAction("execute_ipython_cell", {"code": code})
-      return thought, action
+          return SWEAction("submit", {})
+        return SWEAction("execute_bash", {"command": code})
+      return SWEAction("execute_ipython_cell", {"code": code})
+
+    return SWEAction(function_name="", parameters={})
+
+  # Prefer tool calls emitted after </think> so illustrative code fences or
+  # snippets inside reasoning blocks do not shadow the actual tool invocation.
+  think_end = response_text.rfind("</think>")
+  if think_end != -1:
+    post_think_offset = think_end + len("</think>")
+    candidates = _collect_candidates(
+        response_text[post_think_offset:], post_think_offset
+    )
+    if not candidates:
+      candidates = _collect_candidates(response_text, 0)
+  else:
+    candidates = _collect_candidates(response_text, 0)
+
+  if candidates:
+    # Prefer structured tool invocations (priority 0) over generic markdown
+    # code fences (priority 1), then earliest position in the response.
+    candidates.sort(key=lambda x: (x[0], x[1]))
+    first_priority, first_match_start, first_type, first_payload = candidates[0]
+    thought = response_text[:first_match_start].strip()
+    action = _parse_candidate_action(first_type, first_payload)
+
+    # If the model emitted a bookkeeping tool call (think or task_tracker)
+    # followed by an actionable tool call in the same turn, execute the
+    # actionable tool call rather than dropping it.
+    if first_priority == 0 and action.function_name in ("think", "task_tracker"):
+      for cand_prio, _, cand_type, cand_payload in candidates[1:]:
+        if cand_prio != 0:
+          break
+        next_action = _parse_candidate_action(cand_type, cand_payload)
+        if next_action.function_name and next_action.function_name not in (
+            "think",
+            "task_tracker",
+        ):
+          action = next_action
+          break
+
+    return thought, action
 
   # Fallback: check for completion trigger in plain text
   if "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" in response_text:
@@ -362,6 +375,12 @@ class SWEAgent(ConversationAgentBase):
           *agent_key,
       )
 
+  def _format_initial_observation(
+      self, observation: str, info: dict[str, Any]
+  ) -> str:
+    del info  # Unused in default implementation.
+    return self.user_prompt_template.format(problem_statement=observation)
+
   def update_from_env(
       self,
       observation: Any,
@@ -375,9 +394,7 @@ class SWEAgent(ConversationAgentBase):
       info = {}
     # If it's the first step in environment, let's apply user prompt template
     if len(self._trajectory.steps) == 0:
-      observation = self.user_prompt_template.format(
-          problem_statement=observation
-      )
+      observation = self._format_initial_observation(observation, info)
 
     max_steps = info.get("max_steps", None)
     if max_steps:
@@ -454,7 +471,9 @@ class SWEAgent(ConversationAgentBase):
     """
     self._trajectory.steps.append(self.cur_step)
     thought, action = self._parse_model_response(response)
-    action_str = action.to_xml_string() if action.function_name else ""
+    action_str = (
+        action.to_xml_string() if getattr(action, "function_name", True) else ""
+    )
 
     # Update Trajectory
     cur_step = self._trajectory.steps[-1]
@@ -498,6 +517,18 @@ class CodeActAgent(SWEAgent):
         scaffold=scaffold,
     )
 
+  def _format_initial_observation(
+      self, observation: str, info: dict[str, Any]
+  ) -> str:
+    if self.user_prompt_template == OPENHANDS_USER_PROMPT:
+      return format_openhands_user_prompt(
+          problem_statement=observation,
+          workspace_path=str(info.get("workspace_path") or "/testbed"),
+          repo_language=str(info.get("repo_language") or "python"),
+          base_commit=str(info.get("base_commit") or ""),
+      )
+    return super()._format_initial_observation(observation, info)
+
   def update_from_env(
       self,
       observation: Any,
@@ -506,26 +537,16 @@ class CodeActAgent(SWEAgent):
       info: Optional[dict[str, Any]] = None,
       **kwargs,
   ) -> None:
-    observation = str(observation)
     if info is None:
       info = {}
-    if len(self._trajectory.steps) == 0:
-      if self.user_prompt_template == OPENHANDS_USER_PROMPT:
-        observation = format_openhands_user_prompt(
-            problem_statement=observation,
-            workspace_path=str(info.get("workspace_path") or "/testbed"),
-            repo_language=str(info.get("repo_language") or "python"),
-            base_commit=str(info.get("base_commit") or ""),
-        )
-      else:
-        observation = self.user_prompt_template.format(
-            problem_statement=observation
-        )
-    elif not observation and not self._trajectory.steps[-1].action:
+    if (
+        len(self._trajectory.steps) > 0
+        and not observation
+        and not self._trajectory.steps[-1].action
+    ):
       observation = OPENHANDS_FAKE_USER_RESPONSE
 
-    ConversationAgentBase.update_from_env(self, observation, reward, done, info)
-    self.cur_step = Step(observation=observation)
+    super().update_from_env(observation, reward, done, info, **kwargs)
 
   def _observation_to_messages(
       self, observation: Any, reward: float, done: bool, info: dict[str, Any]

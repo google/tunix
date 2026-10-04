@@ -115,7 +115,7 @@ def parse_args(argv=None):
   p.add_argument("--vllm_max_num_seqs", type=int, default=128)
   p.add_argument("--vllm_max_num_batched_tokens", type=int, default=32768)
   p.add_argument("--timeout", type=float, default=1800)
-  p.add_argument("--reward_timeout", type=int, default=60)
+  p.add_argument("--reward_timeout", type=int, default=120)
   p.add_argument("--step_timeout", type=int, default=60)
   p.add_argument("--startup_timeout", type=float, default=7200)
   p.add_argument("--temperature", type=float, default=0.7)

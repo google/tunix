@@ -282,11 +282,15 @@ class SWEEnv(BaseTaskEnv):
     self.total_steps = 0
 
     if self.workspace is not None:
-      return str(
+      raw_inst = str(
           self.entry.get("problem_statement")
           or self.entry.get("instruction")
           or ""
       )
+      stripped = raw_inst.strip()
+      if stripped.startswith("[ISSUE]") and stripped.endswith("[/ISSUE]"):
+        raw_inst = stripped[len("[ISSUE]") : -len("[/ISSUE]")].strip()
+      return raw_inst
 
     # Polls docker runtime to get task instruction.
     return self.env.get_task_instruction()  # pytype: disable=attribute-error

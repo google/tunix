@@ -298,7 +298,7 @@ class SweAgentTest(absltest.TestCase):
     self.assertEqual(action.function_name, "execute_bash")
     self.assertEqual(action.parameters.get("command"), "pwd")
 
-  def test_codeact_agent_no_synthetic_token_or_step_warning(self):
+  def test_codeact_agent_step_and_token_warning(self):
     agent = swe_agent.CodeActAgent()
     agent.update_from_env(
         observation="Fix the bug in foo.py",
@@ -312,9 +312,13 @@ class SweAgentTest(absltest.TestCase):
             "repo_language": "python",
         },
     )
-    self.assertNotIn("You are running out of tokens", agent.cur_step.observation)
-    self.assertNotIn("Steps Remaining", agent.cur_step.observation)
-    self.assertIn("<uploaded_files>\n/workspace\n</uploaded_files>", agent.cur_step.observation)
+    self.assertIn("You are running out of tokens", agent.cur_step.observation)
+    self.assertIn("<function=finish>", agent.cur_step.observation)
+    self.assertIn("Steps Remaining: 49", agent.cur_step.observation)
+    self.assertIn(
+        "<uploaded_files>\n/workspace\n</uploaded_files>",
+        agent.cur_step.observation,
+    )
     self.assertIn(
         "compare your changes with the base commit abc1234.",
         agent.cur_step.observation,
@@ -735,12 +739,117 @@ class SweAgentTest(absltest.TestCase):
     self.assertIn("Command timed out after 45 seconds", result.observation)
     called_cmd = mock_workspace.execute_command.call_args[0][0]
     self.assertIn("/var/tmp/.oh_cwd", called_cmd)
+    self.assertTrue(called_cmd.endswith("\n)"))
+    self.assertIn("/opt/miniconda3/envs/testbed/bin", called_cmd)
     self.assertEqual(
         mock_workspace.execute_command.call_args.kwargs["timeout"], 45.0
     )
 
+  def test_oh_editor_preserves_tabs_clamps_view_range_and_strip_fallback(self):
+    import tempfile  # pylint: disable=g-import-not-at-top
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+      hist_file = os.path.join(tmpdir, "history.json")
+      tab_path = os.path.join(tmpdir, "tabbed.py")
+      with open(tab_path, "w", encoding="utf-8") as f:
+        f.write("def f():\n\tx = 1\n\ty = 2\n\treturn x + y\n")
+
+      # 1. view preserves tabs and clamps view_range upper bound > n_lines
+      view_out = openhands_utils.run_oh_editor_locally(
+          {"command": "view", "path": tab_path, "view_range": [1, 999]},
+          history_file=hist_file,
+      )
+      self.assertIn("\t\tx = 1", view_out)
+      self.assertNotIn("Error: Invalid `view_range`", view_out)
+
+      # 2. str_replace preserves tabs in file and supports stripped fallback
+      replace_out = openhands_utils.run_oh_editor_locally(
+          {
+              "command": "str_replace",
+              "path": tab_path,
+              "old_str": "\n\tx = 1\n",
+              "new_str": "\n\tx = 10\n",
+          },
+          history_file=hist_file,
+      )
+      self.assertIn("has been edited", replace_out)
+      with open(tab_path, "r", encoding="utf-8") as f:
+        updated_content = f.read()
+      self.assertIn("\tx = 10\n\ty = 2\n", updated_content)
+
+      # 3. FILE_CLIPPED_NOTICE is not stripped by _format_command_result
+      huge_path = os.path.join(tmpdir, "huge.py")
+      with open(huge_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(f"line_{i}_" + ("x" * 40) for i in range(1, 500)))
+      clipped_view = openhands_utils.run_oh_editor_locally(
+          {"command": "view", "path": huge_path},
+          history_file=hist_file,
+      )
+      self.assertTrue(
+          clipped_view.endswith(openhands_utils.FILE_CLIPPED_NOTICE)
+      )
+      mock_res = mock.MagicMock(
+          spec=["stdout", "stderr", "exit_code", "timeout_occurred"]
+      )
+      mock_res.stdout = clipped_view
+      mock_res.stderr = ""
+      mock_res.exit_code = 0
+      mock_res.timeout_occurred = False
+      formatted_obs, _ = openhands_utils._format_command_result(
+          mock_res, 60.0, 0.1
+      )
+      self.assertTrue(
+          formatted_obs.endswith(openhands_utils.FILE_CLIPPED_NOTICE)
+      )
+
+  def test_format_command_result_preserves_stderr_on_zero_exit(self):
+    mock_res = mock.MagicMock(
+        spec=["stdout", "stderr", "exit_code", "timeout_occurred"]
+    )
+    mock_res.exit_code = 0
+    mock_res.stdout = ""
+    mock_res.stderr = "Ran 3 tests in 0.01s\n\nOK\n"
+    mock_res.timeout_occurred = False
+    obs, timed_out = openhands_utils._format_command_result(
+        mock_res, 60.0, 0.05
+    )
+    self.assertFalse(timed_out)
+    self.assertIn("Ran 3 tests in 0.01s", obs)
+
+  def test_parse_codeact_multiple_tool_calls_prefers_actionable(self):
+    response = (
+        "<think>Update task list and run pytest.</think>\n"
+        "<tool_call>\n"
+        "<function=task_tracker>\n"
+        "<parameter=command>plan</parameter>\n"
+        "<parameter=task_list>[]</parameter>\n"
+        "</function>\n"
+        "</tool_call>\n"
+        "<tool_call>\n"
+        "<function=execute_bash>\n"
+        "<parameter=command>pytest -q</parameter>\n"
+        "</function>\n"
+        "</tool_call>"
+    )
+    thought, action = swe_agent.parse_codeact_response(response)
+    self.assertEqual(action.function_name, "execute_bash")
+    self.assertEqual(action.parameters["command"], "pytest -q")
+    self.assertIn("</think>", thought)
+
+  def test_resolve_base_commit_and_strip_issue_tags(self):
+    self.assertEqual(
+        openhands_utils.resolve_base_commit({"commit_hash": "deadbeef123"}),
+        "deadbeef123",
+    )
+    env = swe_env.SWEEnv(
+        entry={"instance_id": "t1", "problem_statement": "[ISSUE]\nFix bug\n[/ISSUE]"},
+        scaffold="openhands",
+    )
+    env.workspace = mock.MagicMock()
+    env.env = mock.MagicMock()
+    obs = env._initial_observation()
+    self.assertEqual(obs, "Fix bug")
+
 
 if __name__ == "__main__":
   absltest.main()
-
-

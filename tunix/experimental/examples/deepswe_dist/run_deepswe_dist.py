@@ -352,7 +352,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument(
       "--reward_timeout_secs",
       type=int,
-      default=int(os.getenv("REWARD_TIMEOUT_SECS", "60")),
+      default=int(os.getenv("REWARD_TIMEOUT_SECS", "120")),
   )
   parser.add_argument(
       "--episode_timeout_secs",
