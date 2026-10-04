@@ -1104,10 +1104,21 @@ class RaidenSynchronizer(weight_sync.WeightSynchronizer):
         transport_mode="ffi" if self._is_proxy else "tcp",
         use_ffi=self._is_proxy,
         host_subgrid=self._host_subgrid,
+        auto_h2d=bool(self._auto_h2d),
     )
 
 
 RaidenWeightSync = RaidenSynchronizer
+
+_TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes"})
+
+
+def is_parallel_h2h_enabled() -> bool:
+  """Returns whether parallel H2H weight sync (deferred H2D) is enabled."""
+  return (
+      os.environ.get("WEIGHT_SYNC_PARALLEL_H2H", "false").strip().lower()
+      in _TRUTHY_ENV_VALUES
+  )
 
 
 @functools.lru_cache(maxsize=4)
@@ -1147,49 +1158,91 @@ def patch_raiden_worker_sync() -> None:
   """Monkey-patches tpu_inference.rl.raiden_worker_sync.RaidenWorkerSync."""
   if os.environ.get("JAX_PLATFORMS") == "cpu":
     return
+  parallel_h2h = is_parallel_h2h_enabled()
   # Resolved through importlib, like the other optional deps in this module, so
   # static dependency analysis does not try to follow tpu-inference -- it is not
   # a declared dependency and is absent in many environments.
   rws = _lazy_import_module("tpu_inference.rl.raiden_worker_sync")
   if rws is None:
-    logging.debug("tpu_inference not available to patch")
+    if parallel_h2h:
+      logging.warning(
+          "WEIGHT_SYNC_PARALLEL_H2H is enabled, but"
+          " tpu_inference.rl.raiden_worker_sync could not be imported to"
+          " patch auto_h2d=False."
+      )
+    else:
+      logging.debug("tpu_inference not available to patch")
     return
   try:
     if getattr(rws.RaidenWorkerSync, "_patched_by_tunix", False):
       return
     orig_bind = getattr(rws.RaidenWorkerSync, "bind", None)
     orig_h2d = getattr(rws.RaidenWorkerSync, "h2d", None)
+    orig_metadata_dict = getattr(rws.RaidenWorkerSync, "metadata_dict", None)
     orig_apply = getattr(rws.RaidenWorkerSync, "apply_to_runner", None)
     orig_checksums = getattr(rws.RaidenWorkerSync, "checksums", None)
 
+    if parallel_h2h and (orig_bind is None or orig_h2d is None):
+      logging.warning(
+          "WEIGHT_SYNC_PARALLEL_H2H is enabled, but RaidenWorkerSync is"
+          " missing bind (%s) or h2d (%s); cannot override auto_h2d=False.",
+          orig_bind,
+          orig_h2d,
+      )
+
     def _patched_bind(self, *args: Any, **kwargs: Any) -> Any:
-      auto_h2d = getattr(self, "_auto_h2d", False)
+      if hasattr(self, "_auto_h2d"):
+        auto_h2d = bool(self._auto_h2d)
+      else:
+        auto_h2d = not is_parallel_h2h_enabled()
       self._auto_h2d = auto_h2d
+      was_unbound = getattr(self, "_sync", None) is None
       ws_lib = getattr(rws, "_ws_lib", None)
       orig_ws_cls = (
           getattr(ws_lib, "WeightSynchronizer", None)
           if ws_lib is not None
           else None
       )
+      factory_called = False
       if ws_lib is not None and orig_ws_cls is not None:
 
         def _ws_factory(*ws_args: Any, **ws_kwargs: Any) -> Any:
+          nonlocal factory_called
+          factory_called = True
           ws_kwargs["auto_h2d"] = auto_h2d
+          self._effective_auto_h2d = auto_h2d
           return orig_ws_cls(*ws_args, **ws_kwargs)
 
         ws_lib.WeightSynchronizer = _ws_factory
+      elif was_unbound and not auto_h2d:
+        logging.warning(
+            "RaidenWorkerSync.bind could not locate"
+            " _ws_lib.WeightSynchronizer to set auto_h2d=False; falling back"
+            " to default auto_h2d=True."
+        )
       try:
         if orig_bind is not None:
           return orig_bind(self, *args, **kwargs)
       finally:
         if ws_lib is not None and orig_ws_cls is not None:
           ws_lib.WeightSynchronizer = orig_ws_cls
+        if was_unbound and not factory_called:
+          self._effective_auto_h2d = True
+          if not auto_h2d:
+            logging.warning(
+                "RaidenWorkerSync.bind did not invoke patched"
+                " _ws_lib.WeightSynchronizer; effective auto_h2d remains"
+                " True."
+            )
 
     def _patched_h2d(self, uuid: Optional[int] = None) -> None:
       sync = self._require_sync("h2d()")
+      effective_auto_h2d = getattr(
+          self, "_effective_auto_h2d", getattr(self, "_auto_h2d", True)
+      )
       if hasattr(sync, "wait_for_transfer_completion"):
         sync.wait_for_transfer_completion(uuid)
-        if getattr(self, "_auto_h2d", False):
+        if effective_auto_h2d:
           jax.block_until_ready(self.arrays)
           return
       sync.h2d()
@@ -1199,6 +1252,18 @@ def patch_raiden_worker_sync() -> None:
           self, "_wait_until_settled"
       ):
         self._wait_until_settled()
+
+    def _patched_metadata_dict(
+        self, *args: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+      md = (
+          dict(orig_metadata_dict(self, *args, **kwargs))
+          if orig_metadata_dict is not None
+          else {}
+      )
+      if hasattr(self, "_effective_auto_h2d"):
+        md["auto_h2d"] = bool(self._effective_auto_h2d)
+      return md
 
     def _patched_apply_to_runner(self, runner: Any) -> None:
       if self._sync is not None and hasattr(self._sync, "apply_to_runner"):
@@ -1221,13 +1286,22 @@ def patch_raiden_worker_sync() -> None:
       rws.RaidenWorkerSync.bind = _patched_bind
     if orig_h2d is not None:
       rws.RaidenWorkerSync.h2d = _patched_h2d
+    if orig_metadata_dict is not None:
+      rws.RaidenWorkerSync.metadata_dict = _patched_metadata_dict
     rws.RaidenWorkerSync.apply_to_runner = _patched_apply_to_runner
     rws.RaidenWorkerSync.checksums = _patched_checksums
     rws.RaidenWorkerSync._patched_by_tunix = True
     logging.info(
-        "Successfully patched RaidenWorkerSync (bind, h2d, apply_to_runner,"
-        " checksums) with Tunix delegation."
+        "Successfully patched RaidenWorkerSync (bind, h2d, metadata_dict,"
+        " apply_to_runner, checksums) with Tunix delegation."
     )
   except AttributeError as e:
-    logging.debug("tpu_inference not available to patch: %s", e)
+    if parallel_h2h:
+      logging.warning(
+          "WEIGHT_SYNC_PARALLEL_H2H is enabled, but patching"
+          " RaidenWorkerSync failed: %s",
+          e,
+      )
+    else:
+      logging.debug("tpu_inference not available to patch: %s", e)
 

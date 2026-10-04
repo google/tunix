@@ -169,6 +169,7 @@ class FakeDestination:
       raise_after_complete_once: Optional[str] = None,
       status_unreachable: bool = False,
       transport_mode: Optional[str] = None,
+      auto_h2d: Optional[bool] = False,
   ):
     self._info = datatypes.WorkerInfo(
         worker_id=worker_id, roles=frozenset({datatypes.Role.ROLLOUT.value})
@@ -178,6 +179,7 @@ class FakeDestination:
     self._global_shape = global_shape
     self._item_size = item_size
     self._transport_mode = transport_mode
+    self._auto_h2d = auto_h2d
     self._fail_on = fail_on
     self._fail_persistently = fail_persistently
     self._failed_once: set[str] = set()
@@ -260,6 +262,7 @@ class FakeDestination:
               control_plane_rpc_address=f"10.0.0.2:{self.port + 500}",
               variables=self._variables,
               transport_mode=self._transport_mode,
+              auto_h2d=self._auto_h2d,
           )
       ]
     return [
@@ -272,6 +275,7 @@ class FakeDestination:
             layout=(0,),
             item_size=self._item_size,
             transport_mode=self._transport_mode,
+            auto_h2d=self._auto_h2d,
         )
     ]
 
@@ -2088,6 +2092,20 @@ class ParallelH2HTest(CoordinatorTestBase):
     self.assertIs(ctx.exception.result.state, RoundState.ABORTED)
     self.assertIn("abort", self.phases("sampler"))
     self.assertTrue(dest.admitting)
+
+  def test_parallel_h2h_falls_back_to_sequential_when_dest_auto_h2d_not_false(
+      self,
+  ):
+    for unsafe_auto_h2d in (True, None):
+      with self.subTest(auto_h2d=unsafe_auto_h2d):
+        dest = FakeDestination("sampler", [], auto_h2d=unsafe_auto_h2d)
+        self.make(dest, parallel_h2h=True)
+        self.sync()
+        # Because auto_h2d was not False, coordinator must quiesce (pre) BEFORE
+        # transfer to avoid writing into live HBM during serving.
+        self.assertLess(
+            self.log.index("sampler:pre"), self.log.index("transfer")
+        )
 
 
 if __name__ == "__main__":

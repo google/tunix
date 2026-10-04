@@ -1530,8 +1530,13 @@ class WeightSyncCoordinator:
           await record_workers("transfer raised")
           raise fail("transfer raised") from e
 
-        if not transfer.success:
-          failures.append(f"transfer: {transfer.message}")
+        if transfer is None or not transfer.success:
+          msg = (
+              transfer.message
+              if transfer is not None
+              else "TransferResult is None"
+          )
+          failures.append(f"transfer: {msg}")
           if quiesce_attempted:
             state = await self._rollback(
                 destinations, prepared_request, failures
@@ -1572,7 +1577,27 @@ class WeightSyncCoordinator:
           raise fail("pre_weight_sync failed")
         state = RoundState.PREPARED
 
-      if self._parallel_h2h:
+      run_parallel_h2h = self._parallel_h2h
+      if run_parallel_h2h:
+        unsafe_units = [
+            f"{m.unit.job_name}:{m.unit.job_replica_id}(auto_h2d={m.auto_h2d!r})"
+            for m in dst_metadata
+            if m.auto_h2d is not False
+        ]
+        if unsafe_units:
+          logging.warning(
+              "WEIGHT_SYNC_PHASE round=%d req_id=%s parallel_h2h=True"
+              " requested, but destination unit(s) did not confirm"
+              " auto_h2d=False (%s); falling back to sequential"
+              " quiesce-before-transfer order to avoid writing into live HBM"
+              " during serving.",
+              round_index,
+              req_id,
+              ", ".join(unsafe_units),
+          )
+          run_parallel_h2h = False
+
+      if run_parallel_h2h:
         # In parallel H2H mode: transfer runs while destinations are still
         # active and serving.
         await _exec_transfer()

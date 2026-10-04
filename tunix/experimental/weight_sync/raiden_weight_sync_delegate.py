@@ -53,18 +53,20 @@ class RaidenWeightSyncDelegate:
       *args,
       worker_index: int = 0,
       server_id: str = "rollout",
-      auto_h2d: bool = False,
+      auto_h2d: bool | None = None,
       **kwargs,
   ):
     del args, kwargs
     # TODO(tunix-dev): add a lock when enabling multiple samplers in one worker.
     self._sampler = None
+    if auto_h2d is None:
+      auto_h2d = not raiden_synchronizer.is_parallel_h2h_enabled()
 
     self._synchronizers: List[Any] = [
         raiden_synchronizer.RaidenSynchronizer(
             job_name=server_id,
             worker_index=worker_index,
-            auto_h2d=auto_h2d,
+            auto_h2d=bool(auto_h2d),
         )
     ]
     self._version = 0
