@@ -639,6 +639,7 @@ class PrewarmDatasetIterator:
       scaffold: str = "r2egym",
       image_rewrite: Any | None = None,
       wait_initial: bool = True,
+      async_initial: bool = False,
       max_staleness: int = 0,
       max_workers: int = 16,
   ):
@@ -675,6 +676,8 @@ class PrewarmDatasetIterator:
     self._active_replicas: dict[str, int] = {}
     self.unwarm_calls: list[str] = []
     self._exhausted = False
+    self._initial_warm_thread: threading.Thread | None = None
+    self._initial_warm_error: BaseException | None = None
 
     # 1. Fill current_batch queue up to batch_size
     self._fill_batch(self.current_batch, self._current_batch_counts)
@@ -688,10 +691,35 @@ class PrewarmDatasetIterator:
     # 4. After the dict updated, we interact the fleet
     if self._image_counts:
       logging.info(
-          "[PrewarmDatasetIterator] Priming initial sandboxes on K8s (wait=%s)...",
+          "[PrewarmDatasetIterator] Priming initial sandboxes on K8s"
+          " (wait=%s, async_initial=%s)...",
           self.wait_initial,
+          async_initial,
       )
-      self._interact_fleet(wait=self.wait_initial)
+      if async_initial:
+        def _run_initial_warm() -> None:
+          try:
+            self._interact_fleet(wait=self.wait_initial)
+          except BaseException as exc:  # pylint: disable=broad-exception-caught
+            self._initial_warm_error = exc
+
+        self._initial_warm_thread = threading.Thread(
+            target=_run_initial_warm,
+            name="prewarm-initial-sandboxes",
+            daemon=True,
+        )
+        self._initial_warm_thread.start()
+      else:
+        self._interact_fleet(wait=self.wait_initial)
+
+  def wait_for_initial(self) -> None:
+    """Blocks until background initial sandbox priming completes."""
+    if self._initial_warm_thread is not None:
+      self._initial_warm_thread.join()
+      self._initial_warm_thread = None
+    if self._initial_warm_error is not None:
+      err, self._initial_warm_error = self._initial_warm_error, None
+      raise err
 
   def _extract_item_image_counts(self, item: Any) -> dict[str, int]:
     """Extracts a dict mapping docker_image -> count for a dataset item."""
@@ -940,6 +968,7 @@ class PrewarmDatasetIterator:
     return self
 
   def __next__(self):
+    self.wait_for_initial()
     if not self.current_batch:
       if not self.next_batch:
         if self.unwarm_on_exhaustion:
@@ -979,6 +1008,9 @@ class PrewarmDatasetIterator:
 
   def close(self) -> None:
     """Explicitly tears down active warm pools managed by this iterator."""
+    if self._initial_warm_thread is not None:
+      self._initial_warm_thread.join()
+      self._initial_warm_thread = None
     for img in list(self._active_replicas):
       if self.fleet:
         try:

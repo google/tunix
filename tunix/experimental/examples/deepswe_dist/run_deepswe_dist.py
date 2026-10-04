@@ -827,6 +827,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           unwarm_on_exhaustion=True,
           scaffold=args.scaffold,
           wait_initial=True,
+          async_initial=True,
           max_staleness=args.max_staleness,
       )
 
@@ -882,6 +883,12 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           manifest_file,
       )
 
+    def _on_train_start(step: int) -> None:
+      if hasattr(prompt_stream, "wait_for_initial"):
+        prompt_stream.wait_for_initial()
+      if args.rcp_logging:
+        mllog_utils.train_start(args, step=step)
+
     program = rl_program.StandardRLProgram(
         algo=algo,
         dataset=prompt_stream,
@@ -918,11 +925,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         pipeline_train_microbatches=args.pipeline_train_microbatches,
         partial_rollout=args.in_flight_weight_updates,
         rollout_priority_scheduling=args.rollout_priority_scheduling,
-        on_train_start=(
-            lambda step: mllog_utils.train_start(args, step=step)
-            if args.rcp_logging
-            else None
-        ),
+        on_train_start=_on_train_start,
         on_step_begin=lambda step: logging.info(
             ">>> DeepSWE step %d starting | policy_version=%d",
             step,

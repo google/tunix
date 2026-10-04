@@ -192,6 +192,42 @@ class SandboxUtilsTest(absltest.TestCase):
     )
     self.assertEqual(fleet.warm_calls, [("img_A", 2, False)])
 
+  def test_async_initial_runs_in_background_until_wait_for_initial(self):
+    warm_started = threading.Event()
+    allow_warm_finish = threading.Event()
+    fleet = FakeFleet()
+    orig_warm = fleet.warm_image
+
+    def _blocking_warm(
+        image: str, replicas_override: int | None = None, wait: bool = False
+    ) -> None:
+      orig_warm(image, replicas_override=replicas_override, wait=wait)
+      if wait:
+        warm_started.set()
+        allow_warm_finish.wait(timeout=5.0)
+
+    fleet.warm_image = _blocking_warm
+    dataset = [{"prompt": "p0", "docker_image": "img_A"}]
+    iterator = sandbox_utils.PrewarmDatasetIterator(
+        dataset,
+        fleet=fleet,
+        num_generations=2,
+        batch_size=1,
+        wait_initial=True,
+        async_initial=True,
+    )
+    self.assertTrue(warm_started.wait(timeout=5.0))
+    self.assertIsNotNone(iterator._initial_warm_thread)
+    self.assertTrue(iterator._initial_warm_thread.is_alive())
+
+    allow_warm_finish.set()
+    iterator.wait_for_initial()
+    self.assertIsNone(iterator._initial_warm_thread)
+    self.assertEqual(
+        fleet.warm_calls, [("img_A", 2, False), ("img_A", 2, True)]
+    )
+    self.assertEqual(next(iterator)["prompt"], "p0")
+
   def test_batched_items_format_preserved(self):
     fleet = FakeFleet()
     dataset = [
