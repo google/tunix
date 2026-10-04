@@ -27,53 +27,70 @@ SWEAction = swe_agent.SWEAction
 
 class SweAgentTest(absltest.TestCase):
 
-  def test_parse_codeact_bash_markdown(self):
+  def test_parse_codeact_markdown_fences_are_not_tool_calls(self):
+    # The reference parser (vLLM qwen3_xml) reads only <tool_call>/<function=>
+    # XML; a turn with just a code fence gets no action (the fake-user reply).
+    for response in (
+        "I need to list the files.\n```bash\ngit status\nls -la\n```\nDone.",
+        "```sh\npytest tests/test_core.py\n```",
+        "Let's test it.\n```python\nimport sympy\n"
+        "print(sympy.__version__)\n```",
+        "```ipython\n%run reproduce_issue.py\n```",
+        "Executing long command:\n```bash\ngit log -n 5",
+        'Via json.\n```json\n{"name": "execute_bash", "arguments": {"command":'
+        ' "pwd"}}\n```',
+    ):
+      with self.subTest(response=response[:30]):
+        thought, action = swe_agent.parse_codeact_response(response)
+        self.assertEqual(action.function_name, "")
+        self.assertEqual(thought, response.strip())
+
+  def test_parse_codeact_fence_and_garbled_call_get_no_action(self):
+    # A fence plus a tool call missing its <tool_call>/<function=> opener: no
+    # call for qwen3_xml, so none here (it used to run execute_ipython_cell).
     response = (
-        "I need to inspect the git diff and list the files.\n"
-        "```bash\n"
-        "git status\n"
-        "ls -la\n"
-        "```\n"
-        "This will help us understand the current workspace."
+        "The regex is:\n```python\nm = re.match(r\"hsl\\(\\s*("
+        "\\parameter=command>\nview\n</parameter>\n"
+        "<parameter=path>\n/testbed/a.py\n</parameter>\n"
+        "</function>\n</tool_call>"
     )
-    thought, action = swe_agent.parse_codeact_response(response)
-    self.assertEqual(
-        thought, "I need to inspect the git diff and list the files."
-    )
-    self.assertEqual(action.function_name, "execute_bash")
-    self.assertEqual(action.parameters.get("command"), "git status\nls -la")
+    _, action = swe_agent.parse_codeact_response(response)
+    self.assertEqual(action.function_name, "")
 
-  def test_parse_codeact_sh_markdown(self):
-    response = "```sh\npytest tests/test_core.py\n```"
-    thought, action = swe_agent.parse_codeact_response(response)
-    self.assertEqual(thought, "")
-    self.assertEqual(action.function_name, "execute_bash")
-    self.assertEqual(action.parameters.get("command"), "pytest tests/test_core.py")
-
-  def test_parse_codeact_python_markdown(self):
+  def test_parse_codeact_skips_empty_tool_call_block(self):
+    # An empty <tool_call> block before a valid one: qwen3_xml returns the
+    # valid call, so the empty block must not hide it.
     response = (
-        "Let's write a small script to test reproduction.\n"
-        "```python\n"
-        "import sympy\n"
-        "print(sympy.__version__)\n"
-        "```"
+        "Now let's search:\n\n<tool_call>\n</function>\n</tool_call>\n\n"
+        "<tool_call>\n<function=str_replace_editor>\n<parameter=command>\n"
+        "view\n</parameter>\n<parameter=path>\n/testbed/Tests\n</parameter>\n"
+        "</function>\n</tool_call>"
     )
-    thought, action = swe_agent.parse_codeact_response(response)
+    _, action = swe_agent.parse_codeact_response(response)
+    self.assertEqual(action.function_name, "str_replace_editor")
     self.assertEqual(
-        thought, "Let's write a small script to test reproduction."
-    )
-    self.assertEqual(action.function_name, "execute_ipython_cell")
-    self.assertEqual(
-        action.parameters.get("code"),
-        "import sympy\nprint(sympy.__version__)",
+        action.parameters, {"command": "view", "path": "/testbed/Tests"}
     )
 
-  def test_parse_codeact_ipython_markdown(self):
-    response = "```ipython\n%run reproduce_issue.py\n```"
-    thought, action = swe_agent.parse_codeact_response(response)
-    self.assertEqual(thought, "")
-    self.assertEqual(action.function_name, "execute_ipython_cell")
-    self.assertEqual(action.parameters.get("code"), "%run reproduce_issue.py")
+  def test_create_file_text_keeps_final_newline_through_env_round_trip(self):
+    # The model writes "<content>\n\n</parameter>". qwen3_xml (and our model
+    # parser) drop one newline; SWEEnv re-parses to_xml_string() output, which
+    # must not drop the file's own final newline as well.
+    response = (
+        "<tool_call>\n<function=str_replace_editor>\n<parameter=command>\n"
+        "create\n</parameter>\n<parameter=path>\n/testbed/t.py\n</parameter>\n"
+        "<parameter=file_text>\n\n    indented = 1\nprint(indented)\n\n"
+        "</parameter>\n</function>\n</tool_call>"
+    )
+    _, action = swe_agent.parse_codeact_response(response)
+    self.assertEqual(
+        action.parameters["file_text"], "\n    indented = 1\nprint(indented)\n"
+    )
+    executed = openhands_utils.parse_openhands_action_str(
+        action.to_xml_string()
+    )
+    self.assertEqual(executed.function_name, "str_replace_editor")
+    self.assertEqual(executed.parameters, action.parameters)
 
   def test_parse_codeact_xml_function(self):
     response = (
@@ -91,7 +108,8 @@ class SweAgentTest(absltest.TestCase):
     self.assertEqual(action.parameters.get("command"), "view")
     self.assertEqual(action.parameters.get("path"), "/testbed/foo.py")
 
-  def test_parse_codeact_json_tool_call(self):
+  def test_parse_codeact_json_tool_call_is_not_a_call(self):
+    # qwen3_xml returns no call for a JSON body in <tool_call>.
     response = (
         "Running command via tool call.\n"
         "<tool_call>\n"
@@ -99,9 +117,26 @@ class SweAgentTest(absltest.TestCase):
         "</tool_call>"
     )
     thought, action = swe_agent.parse_codeact_response(response)
-    self.assertEqual(thought, "Running command via tool call.")
-    self.assertEqual(action.function_name, "execute_bash")
-    self.assertEqual(action.parameters.get("command"), "git diff")
+    self.assertEqual(thought, response.strip())
+    self.assertEqual(action.function_name, "")
+
+  def test_parse_codeact_skips_non_xml_tool_call_blocks(self):
+    # A JSON or plain-text <tool_call> block before an XML one: qwen3_xml
+    # returns the XML call.
+    xml_call = (
+        "<tool_call>\n<function=execute_bash>\n<parameter=command>\nls\n"
+        "</parameter>\n</function>\n</tool_call>"
+    )
+    for first_block in (
+        '{"name": "think", "arguments": {"thought": "x"}}',
+        "[draft]",
+        "{not json",
+    ):
+      with self.subTest(first_block=first_block):
+        response = f"<tool_call>\n{first_block}\n</tool_call>\n{xml_call}"
+        _, action = swe_agent.parse_codeact_response(response)
+        self.assertEqual(action.function_name, "execute_bash")
+        self.assertEqual(action.parameters, {"command": "ls"})
 
   def test_parse_codeact_completion_trigger(self):
     response = (
@@ -112,18 +147,6 @@ class SweAgentTest(absltest.TestCase):
     self.assertIn("I have resolved the issue", thought)
     self.assertEqual(action.function_name, "submit")
 
-  def test_parse_codeact_unclosed_block(self):
-    # Simulates response truncated by max tokens
-    response = (
-        "Executing long command:\n"
-        "```bash\n"
-        "git log -n 5"
-    )
-    thought, action = swe_agent.parse_codeact_response(response)
-    self.assertEqual(thought, "Executing long command:")
-    self.assertEqual(action.function_name, "execute_bash")
-    self.assertEqual(action.parameters.get("command"), "git log -n 5")
-
   def test_codeact_agent_initialization(self):
     agent = swe_agent.CodeActAgent()
     self.assertEqual(agent.scaffold, "openhands")
@@ -133,7 +156,8 @@ class SweAgentTest(absltest.TestCase):
     agent = swe_agent.CodeActAgent()
     agent.update_from_env(observation="Problem statement", reward=0.0, done=False)
     action_res = agent.update_from_model(
-        "I will run pytest:\n```bash\npytest\n```"
+        "I will run pytest:\n<tool_call>\n<function=execute_bash>\n"
+        "<parameter=command>\npytest\n</parameter>\n</function>\n</tool_call>"
     )
     self.assertIn("<function=execute_bash>", action_res.action)
     self.assertIn("<parameter=command>pytest</parameter>", action_res.action)
@@ -290,18 +314,6 @@ class SweAgentTest(absltest.TestCase):
     self.assertEqual(result.observation, "output_val")
     self.assertEqual(mock_env.total_steps, 1)
     mock_local_env.step.assert_called_once()
-
-  def test_parse_codeact_markdown_json_tool_call(self):
-    response = (
-        "Running command via markdown json.\n"
-        "```json\n"
-        '{"name": "execute_bash", "arguments": {"command": "pwd"}}\n'
-        "```"
-    )
-    thought, action = swe_agent.parse_codeact_response(response)
-    self.assertEqual(thought, "Running command via markdown json.")
-    self.assertEqual(action.function_name, "execute_bash")
-    self.assertEqual(action.parameters.get("command"), "pwd")
 
   def test_codeact_agent_no_synthetic_token_or_step_warning(self):
     agent = swe_agent.CodeActAgent()
