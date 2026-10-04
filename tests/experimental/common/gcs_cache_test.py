@@ -19,6 +19,9 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
+import time
+from typing import Any
 from unittest import mock
 
 from absl.testing import absltest
@@ -29,7 +32,28 @@ from tunix.experimental.worker import abstract_worker
 from tunix.experimental.worker import remote_execution
 
 
+def _blob(name: str) -> mock.Mock:
+  blob = mock.Mock()
+  blob.name = name
+  return blob
+
+
 class GcsCacheTest(absltest.TestCase):
+
+  def _gcs_modules(
+      self, mock_storage: mock.MagicMock, mock_tm: mock.MagicMock
+  ) -> dict[str, Any]:
+    mock_storage.transfer_manager = mock_tm
+    mock_cloud = mock.MagicMock()
+    mock_cloud.storage = mock_storage
+    mock_api_core = mock.MagicMock()
+    return {
+        "google.cloud": mock_cloud,
+        "google.cloud.storage": mock_storage,
+        "google.cloud.storage.transfer_manager": mock_tm,
+        "google.api_core": mock_api_core,
+        "google.api_core.exceptions": mock_api_core.exceptions,
+    }
 
   def test_parse_gcs_uri(self):
     bucket, prefix = gcs_cache._parse_gcs_uri("gs://my-bucket/path/to/cache")
@@ -145,78 +169,72 @@ class GcsCacheTest(absltest.TestCase):
             source_directory=str(cache_dir),
             blob_name_prefix="prefix/",
             skip_if_exists=True,
-            max_workers=mock.ANY,
             worker_type=mock_tm.THREAD,
+            max_workers=mock.ANY,
         )
 
-  def test_download_cache_uses_thread_worker_type(self) -> None:
+  def test_upload_cache_skips_transfer_when_all_in_gcs(self) -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
       cache_dir = Path(tmpdir) / "cache"
+      (cache_dir / "sub").mkdir(parents=True)
+      (cache_dir / "obj1").write_text("dummy")
+      (cache_dir / "sub" / "obj2").write_text("dummy")
 
       mock_storage = mock.MagicMock()
       mock_tm = mock.MagicMock()
-      mock_storage.transfer_manager = mock_tm
-      mock_cloud = mock.MagicMock()
-      mock_cloud.storage = mock_storage
-
-      mock_blob = mock.MagicMock()
-      mock_blob.name = "prefix/obj1"
-      mock_storage.Client.return_value.list_blobs.return_value = [mock_blob]
-      mock_tm.download_many_to_path.return_value = [None]
-
+      client = mock_storage.Client.return_value
+      client.list_blobs.return_value = [
+          _blob("prefix/obj1"),
+          _blob("prefix/sub/obj2"),
+      ]
       with mock.patch.dict(
-          sys.modules,
-          {
-              "google.cloud": mock_cloud,
-              "google.cloud.storage": mock_storage,
-              "google.cloud.storage.transfer_manager": mock_tm,
-          },
+          sys.modules, self._gcs_modules(mock_storage, mock_tm)
       ):
-        success = gcs_cache.download_cache(cache_dir, "gs://test-bucket/prefix")
-        self.assertTrue(success)
-        mock_tm.download_many_to_path.assert_called_once_with(
-            mock.ANY,
-            ["obj1"],
-            destination_directory=str(cache_dir),
-            blob_name_prefix="prefix/",
-            max_workers=mock.ANY,
-            worker_type=mock_tm.THREAD,
-        )
+        self.assertTrue(gcs_cache.upload_cache(cache_dir, "gs://b/prefix"))
+      mock_tm.upload_many_from_filenames.assert_not_called()
 
-  def test_upload_cache_skips_when_already_restored(self) -> None:
+  def test_upload_cache_uploads_only_missing_with_threads(self) -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
       cache_dir = Path(tmpdir) / "cache"
       cache_dir.mkdir()
       (cache_dir / "obj1").write_text("dummy")
+      (cache_dir / "obj2").write_text("dummy")
 
       mock_storage = mock.MagicMock()
       mock_tm = mock.MagicMock()
-      mock_storage.transfer_manager = mock_tm
-      mock_cloud = mock.MagicMock()
-      mock_cloud.storage = mock_storage
-
-      mock_blob = mock.MagicMock()
-      mock_blob.name = "prefix/obj1"
-      mock_storage.Client.return_value.list_blobs.return_value = [mock_blob]
-      mock_tm.download_many_to_path.return_value = [None]
-
+      client = mock_storage.Client.return_value
+      client.list_blobs.return_value = [_blob("prefix/obj1")]
+      mock_tm.upload_many_from_filenames.return_value = [None]
       with mock.patch.dict(
-          sys.modules,
-          {
-              "google.cloud": mock_cloud,
-              "google.cloud.storage": mock_storage,
-              "google.cloud.storage.transfer_manager": mock_tm,
-          },
+          sys.modules, self._gcs_modules(mock_storage, mock_tm)
+      ):
+        self.assertTrue(gcs_cache.upload_cache(cache_dir, "gs://b/prefix"))
+      args, kwargs = mock_tm.upload_many_from_filenames.call_args
+      self.assertEqual(args[1], ["obj2"])
+      self.assertIs(kwargs["worker_type"], mock_tm.THREAD)
+
+  def test_download_cache_uses_thread_worker_type(self) -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+      cache_dir = Path(tmpdir) / "cache"
+      mock_storage = mock.MagicMock()
+      mock_tm = mock.MagicMock()
+      client = mock_storage.Client.return_value
+      client.list_blobs.return_value = [_blob("prefix/obj1")]
+      mock_tm.download_many_to_path.return_value = [None]
+      with mock.patch.dict(
+          sys.modules, self._gcs_modules(mock_storage, mock_tm)
       ):
         self.assertTrue(
             gcs_cache.download_cache(cache_dir, "gs://test-bucket/prefix")
         )
-        mock_storage.Client.reset_mock()
-        self.assertTrue(
-            gcs_cache.upload_cache(cache_dir, "gs://test-bucket/prefix")
-        )
-        mock_tm.upload_many_from_filenames.assert_not_called()
-        mock_storage.Client.assert_not_called()
+      mock_tm.download_many_to_path.assert_called_once_with(
+          mock.ANY,
+          ["obj1"],
+          destination_directory=str(cache_dir),
+          blob_name_prefix="prefix/",
+          worker_type=mock_tm.THREAD,
+          max_workers=mock.ANY,
+      )
 
   def test_orchestrator_sync_jax_cache(self) -> None:
     orch = orchestrator.ClusterOrchestrator(
@@ -315,6 +333,37 @@ class GcsCacheTest(absltest.TestCase):
     mock_rollout_0.submit.assert_called_once_with(
         "upload_jax_cache", gcs_uri="gs://bucket/orch_rollout"
     )
+    mock_rollout_1.submit.assert_not_called()
+
+  def test_orchestrator_sync_jax_cache_bounds_hung_upload(self) -> None:
+    orch = orchestrator.ClusterOrchestrator(
+        jax_cache_config={
+            "save_jax_cache": True,
+            "rollout_jax_cache_gcs_dir": "gs://bucket/orch_rollout",
+            "sync_timeout_s": 0.2,
+        }
+    )
+    release = threading.Event()
+    hung = lambda *a, **k: release.wait()
+    mock_rollout_0 = mock.MagicMock(spec=remote_execution.ActorHandle)
+    mock_rollout_0.submit.side_effect = hung
+    mock_rollout_1 = mock.MagicMock(spec=remote_execution.ActorHandle)
+    orch.register_worker_handle(
+        "rollout-0", roles=[datatypes.Role.ROLLOUT], handle=mock_rollout_0
+    )
+    orch.register_worker_handle(
+        "rollout-1", roles=[datatypes.Role.ROLLOUT], handle=mock_rollout_1
+    )
+    try:
+      start = time.monotonic()
+      orch.sync_jax_cache()
+      self.assertLess(time.monotonic() - start, 5.0)
+      # Abandoned uploads must not block interpreter exit.
+      threads = {t.name: t for t in threading.enumerate()}
+      self.assertTrue(threads["jax-cache-upload-rollout-0"].daemon)
+    finally:
+      release.set()
+    mock_rollout_0.submit.assert_called_once()
     mock_rollout_1.submit.assert_not_called()
 
   def test_jax_cache_config_shell_hash(self):

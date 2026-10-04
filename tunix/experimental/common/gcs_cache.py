@@ -28,16 +28,6 @@ import sys
 logger = logging.getLogger(__name__)
 
 
-# Tracks (resolved_local_dir, normalized_gcs_uri) pairs whose compilation cache
-# was already restored from (or uploaded to) GCS in this process, so workers
-# skip uploading when the cache was already warm.
-_RESTORED_CACHES: set[tuple[str, str]] = set()
-
-
-def _cache_key(local_path: Path, gcs_uri: str) -> tuple[str, str]:
-  return (str(local_path.resolve()), gcs_uri.rstrip("/"))
-
-
 def _parse_gcs_uri(gcs_uri: str) -> tuple[str, str]:
   """Parses a gs://bucket/prefix URI into (bucket_name, prefix)."""
   m = re.match(r"^gs://([^/]+)(?:/(.*))?$", gcs_uri)
@@ -117,8 +107,10 @@ def download_cache(local_dir: str | Path, gcs_uri: str, max_workers: int = 8) ->
         blob_names,
         destination_directory=str(local_path),
         blob_name_prefix=prefix,
-        max_workers=max_workers,
+        # Never fork: the caller holds live TPU/gRPC state, and forked children
+        # of such a process can segfault or deadlock (default is PROCESS).
         worker_type=transfer_manager.THREAD,
+        max_workers=max_workers,
     )
     any_failed = False
     for name, result in zip(blob_names, results):
@@ -127,7 +119,6 @@ def download_cache(local_dir: str | Path, gcs_uri: str, max_workers: int = 8) ->
         any_failed = True
     if any_failed:
       raise RuntimeError("Some artifacts failed to download.")
-    _RESTORED_CACHES.add(_cache_key(local_path, gcs_uri))
     _log_local_cache_status(local_path)
     return True
   except ImportError:
@@ -141,8 +132,7 @@ def download_cache(local_dir: str | Path, gcs_uri: str, max_workers: int = 8) ->
         ["gsutil", "-m", "rsync", "-r", gcs_uri, str(local_path)], check=False
     )
     if res.returncode == 0:
-      if _log_local_cache_status(local_path) > 0:
-        _RESTORED_CACHES.add(_cache_key(local_path, gcs_uri))
+      _log_local_cache_status(local_path)
       return True
     return False
   if shutil.which("gcloud"):
@@ -151,8 +141,7 @@ def download_cache(local_dir: str | Path, gcs_uri: str, max_workers: int = 8) ->
         check=False,
     )
     if res.returncode == 0:
-      if _log_local_cache_status(local_path) > 0:
-        _RESTORED_CACHES.add(_cache_key(local_path, gcs_uri))
+      _log_local_cache_status(local_path)
       return True
     return False
 
@@ -167,21 +156,6 @@ def upload_cache(local_dir: str | Path, gcs_uri: str, max_workers: int = 8) -> b
     logger.warning(
         "[jax_cache] 0 cache objects detected (local cache directory %s does not exist); skipping upload.",
         local_path,
-    )
-    return True
-
-  try:
-    bucket_name, prefix = _parse_gcs_uri(gcs_uri)
-  except ValueError as e:
-    logger.error("Skipping upload: %s", e)
-    return False
-
-  cache_key = _cache_key(local_path, gcs_uri)
-  if cache_key in _RESTORED_CACHES:
-    logger.info(
-        "[jax_cache] Cache in %s was already restored from %s; skipping upload.",
-        local_path,
-        gcs_uri,
     )
     return True
 
@@ -200,6 +174,12 @@ def upload_cache(local_dir: str | Path, gcs_uri: str, max_workers: int = 8) -> b
       gcs_uri,
   )
 
+  try:
+    bucket_name, prefix = _parse_gcs_uri(gcs_uri)
+  except ValueError as e:
+    logger.error("Skipping upload: %s", e)
+    return False
+
   # Try python google-cloud-storage transfer_manager first
   try:
     from google.api_core import exceptions as google_exceptions
@@ -210,25 +190,42 @@ def upload_cache(local_dir: str | Path, gcs_uri: str, max_workers: int = 8) -> b
     client = storage.Client(project=project) if project else storage.Client()
     bucket = client.bucket(bucket_name)
 
+    existing = {
+        b.name[len(prefix):] for b in client.list_blobs(bucket, prefix=prefix)
+    }
+    missing = [f for f in files if f not in existing]
+    already_in_gcs = len(files) - len(missing)
+    if not missing:
+      logger.info(
+          "[jax_cache] All %d local cache objects already in %s; nothing to upload.",
+          already_in_gcs,
+          gcs_uri,
+      )
+      return True
+
     logger.info(
-        "[jax_cache] Uploading %d artifacts from %s to %s...",
-        len(files),
+        "[jax_cache] Uploading %d artifacts from %s to %s (%d already in GCS)...",
+        len(missing),
         local_path,
         gcs_uri,
+        already_in_gcs,
     )
     results = transfer_manager.upload_many_from_filenames(
         bucket,
-        files,
+        missing,
         source_directory=str(local_path),
         blob_name_prefix=prefix,
+        # Guards against concurrent writers racing on the same object.
         skip_if_exists=True,
-        max_workers=max_workers,
+        # Never fork: the caller holds live TPU/gRPC state, and forked children
+        # of such a process can segfault or deadlock (default is PROCESS).
         worker_type=transfer_manager.THREAD,
+        max_workers=max_workers,
     )
     any_failed = False
-    skipped = 0
+    skipped = already_in_gcs
     uploaded = 0
-    for name, result in zip(files, results):
+    for name, result in zip(missing, results):
       if isinstance(result, Exception):
         is_precondition_failed = (
             getattr(result, "code", None) == 412
@@ -247,7 +244,6 @@ def upload_cache(local_dir: str | Path, gcs_uri: str, max_workers: int = 8) -> b
         uploaded += 1
     if any_failed:
       raise RuntimeError("Some artifacts failed to upload.")
-    _RESTORED_CACHES.add(cache_key)
     logger.info(
         "[jax_cache] Cache upload completed successfully (%d uploaded, %d skipped already in GCS).",
         uploaded,
@@ -265,7 +261,6 @@ def upload_cache(local_dir: str | Path, gcs_uri: str, max_workers: int = 8) -> b
         ["gsutil", "-m", "rsync", "-r", str(local_path), gcs_uri], check=False
     )
     if res.returncode == 0:
-      _RESTORED_CACHES.add(cache_key)
       logger.info(
           "[jax_cache] Cache upload completed successfully (%d cache objects uploaded to %s).",
           len(files),
@@ -279,7 +274,6 @@ def upload_cache(local_dir: str | Path, gcs_uri: str, max_workers: int = 8) -> b
         check=False,
     )
     if res.returncode == 0:
-      _RESTORED_CACHES.add(cache_key)
       logger.info(
           "[jax_cache] Cache upload completed successfully (%d cache objects uploaded to %s).",
           len(files),
