@@ -664,19 +664,105 @@ stop_rollout() {
   local replicas=${ROLLOUT_WORKERS:-${ROLLOUT_REPLICAS:-1}}
   if [[ "$DRY_RUN" == "true" ]]; then
     echo "kubectl delete jobset ${ROLLOUT_ID} -n ${K8S_NAMESPACE}"
-    kubectl get workload -n "${K8S_NAMESPACE}" -o name 2>/dev/null | grep -E "jobset-${ROLLOUT_ID}-[a-f0-9]+" | xargs -r echo kubectl delete -n "${K8S_NAMESPACE}"
     if [[ ${replicas} -gt 1 ]]; then
       echo "kubectl delete jobset $(seq -f "${ROLLOUT_ID}-%g" 0 $((replicas - 1))) -n ${K8S_NAMESPACE}"
-      kubectl get workload -n "${K8S_NAMESPACE}" -o name 2>/dev/null | grep -E "jobset-${ROLLOUT_ID}-[0-9]+-[a-f0-9]+" | xargs -r echo kubectl delete -n "${K8S_NAMESPACE}"
     fi
   else
     kubectl delete jobset "${ROLLOUT_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found=true
-    kubectl get workload -n "${K8S_NAMESPACE}" -o name 2>/dev/null | grep -E "jobset-${ROLLOUT_ID}-[a-f0-9]+" | xargs -r kubectl delete -n "${K8S_NAMESPACE}" --ignore-not-found=true --wait=false 2>/dev/null || true
     if [[ ${replicas} -gt 1 ]]; then
       kubectl delete jobset $(seq -f "${ROLLOUT_ID}-%g" 0 $((replicas - 1))) -n "${K8S_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
-      kubectl get workload -n "${K8S_NAMESPACE}" -o name 2>/dev/null | grep -E "jobset-${ROLLOUT_ID}-[0-9]+-[a-f0-9]+" | xargs -r kubectl delete -n "${K8S_NAMESPACE}" --ignore-not-found=true --wait=false 2>/dev/null || true
     fi
   fi
+}
+
+apply_rollout_manifests() {
+  local manifest_template="$1"
+  local placeholder="$2"
+  shift 2
+  local ids=("$@")
+  local total=${#ids[@]}
+  if [[ ${total} -eq 0 ]]; then
+    return 0
+  fi
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    local idx=0
+    for replica_id in "${ids[@]}"; do
+      if [[ ${idx} -gt 0 ]]; then
+        echo "---"
+      fi
+      printf '%s\n' "${manifest_template//${placeholder}/${replica_id}}"
+      ((idx++))
+    done | apply_manifest
+    return $?
+  fi
+
+  local batch_size=${ROLLOUT_APPLY_BATCH_SIZE:-8}
+  local max_parallel=${ROLLOUT_APPLY_PARALLELISM:-16}
+  local wave_size=${ROLLOUT_LAUNCH_WAVE_SIZE:-128}
+  local wave_delay=${ROLLOUT_LAUNCH_WAVE_DELAY_S:-0}
+  if [[ ${batch_size} -le 0 ]]; then batch_size=8; fi
+  if [[ ${max_parallel} -le 0 ]]; then max_parallel=16; fi
+  if [[ ${wave_size} -le 0 ]]; then wave_size=128; fi
+
+  if [[ ${total} -le ${batch_size} || ${max_parallel} -eq 1 ]]; then
+    local idx=0
+    for replica_id in "${ids[@]}"; do
+      if [[ ${idx} -gt 0 ]]; then
+        echo "---"
+      fi
+      printf '%s\n' "${manifest_template//${placeholder}/${replica_id}}"
+      ((idx++))
+    done | apply_manifest
+    return $?
+  fi
+
+  local wave_start=0
+  local pids=()
+  local failed=0
+  while [[ ${wave_start} -lt ${total} ]]; do
+    local wave_end=$((wave_start + wave_size))
+    if [[ ${wave_end} -gt ${total} ]]; then
+      wave_end=${total}
+    fi
+    pids=()
+    local start=${wave_start}
+    while [[ ${start} -lt ${wave_end} ]]; do
+      local count=$((wave_end - start))
+      if [[ ${count} -gt ${batch_size} ]]; then
+        count=${batch_size}
+      fi
+      local batch_ids=("${ids[@]:start:count}")
+      (
+        local b_idx=0
+        for replica_id in "${batch_ids[@]}"; do
+          if [[ ${b_idx} -gt 0 ]]; then
+            echo "---"
+          fi
+          printf '%s\n' "${manifest_template//${placeholder}/${replica_id}}"
+          ((b_idx++))
+        done | apply_manifest
+      ) &
+      pids+=($!)
+      if [[ ${#pids[@]} -ge ${max_parallel} ]]; then
+        for pid in "${pids[@]}"; do
+          wait "${pid}" || failed=1
+        done
+        pids=()
+      fi
+      start=$((start + count))
+    done
+    for pid in "${pids[@]}"; do
+      wait "${pid}" || failed=1
+    done
+    if [[ ${failed} -ne 0 ]]; then
+      return 1
+    fi
+    wave_start=${wave_end}
+    if [[ ${wave_start} -lt ${total} && ${wave_delay} -gt 0 ]]; then
+      sleep "${wave_delay}"
+    fi
+  done
 }
 
 start_rollout() {
@@ -757,30 +843,33 @@ if cfg:
   elif [[ -n "${IMAGE_REWRITE_PREFIX}" ]]; then
     sandbox_env="IMAGE_REWRITE_PREFIX=\"${IMAGE_REWRITE_PREFIX}\" ${JOB_PREFIX:+JOB_PREFIX=\"${JOB_PREFIX}\"} ${POOL_NAME_FORMAT:+POOL_NAME_FORMAT=\"${POOL_NAME_FORMAT}\"} ${TEMPLATE_NAME_PREFIX:+TEMPLATE_NAME_PREFIX=\"${TEMPLATE_NAME_PREFIX}\"}"
   fi
-  local dynamic_slicing_single_host=false
-  if [[ "${ROLLOUT_TPU_SLICE}" =~ ^(tpu7x|tpu-v7x-slice):2x2x1 ]]; then
-    if [[ "${USE_DYNAMIC_SLICING}" == "true" || "${USE_DYNAMIC_SLICING}" == "1" || -z "${USE_DYNAMIC_SLICING}" ]]; then
-      dynamic_slicing_single_host=true
-    fi
-  fi
 
   local start_index=${ROLLOUT_START_INDEX:-0}
   local replicas=${ROLLOUT_REPLICAS:-1}
-  local replica_ids=()
-  for ((i = start_index; i < replicas; i++)); do
-    local replica_id="${ROLLOUT_ID}"
-    if [[ ${replicas} -gt 1 ]]; then
-      replica_id="${ROLLOUT_ID}-${i}"
+  local single_jobset=false
+  if [[ ${start_index} -eq 0 && ( "${ROLLOUT_SINGLE_JOBSET:-true}" == "true" || "${ROLLOUT_SINGLE_JOBSET:-true}" == "True" || "${ROLLOUT_SINGLE_JOBSET:-1}" == "1" ) ]]; then
+    if [[ "${ROLLOUT_JOBSET_YAML}" == "jobset.tpu.yaml" || "${ROLLOUT_JOBSET_YAML}" == "jobset.mcjax.ray.yaml" ]]; then
+      single_jobset=true
     fi
-    replica_ids+=("${replica_id}")
-  done
-  if [[ ${#replica_ids[@]} -eq 0 ]]; then
-    return 0
   fi
 
-  local extra_generator_flags=()
-  if [[ "$dynamic_slicing_single_host" == "true" ]]; then
-    extra_generator_flags+=(--omit_slice_topology)
+  local replica_ids=()
+  if [[ "${single_jobset}" == "true" ]]; then
+    if [[ ${replicas} -le 0 ]]; then
+      return 0
+    fi
+    replica_ids=("${ROLLOUT_ID}")
+  else
+    for ((i = start_index; i < replicas; i++)); do
+      local replica_id="${ROLLOUT_ID}"
+      if [[ ${replicas} -gt 1 ]]; then
+        replica_id="${ROLLOUT_ID}-${i}"
+      fi
+      replica_ids+=("${replica_id}")
+    done
+    if [[ ${#replica_ids[@]} -eq 0 ]]; then
+      return 0
+    fi
   fi
 
   if [[ -n "${ROLLOUT_JAX_CACHE_GCS_DIR}" && "${DISABLE_JAX_CACHE:-false}" != "true" && "${DISABLE_JAX_CACHE:-0}" != "1" ]]; then
@@ -798,6 +887,17 @@ if cfg:
   fi
 
   local placeholder="__TUNIX_REPLICA_ID__"
+  local worker_id_arg="${placeholder}"
+  local extra_generator_flags=()
+  local single_jobset_env=""
+  if [[ "${single_jobset}" == "true" ]]; then
+    extra_generator_flags+=(--replicas="${replicas}")
+    if [[ ${replicas} -gt 1 ]]; then
+      worker_id_arg="${placeholder}-\${JOB_INDEX}"
+      single_jobset_env="ROLLOUT_SINGLE_JOBSET=true "
+    fi
+  fi
+
   local manifest_template
   manifest_template=$(
     COLOCATED_PYTHON_SIDECAR_IMAGE="" "$PYTHON_BIN" "$YAML_GENERATOR" \
@@ -814,7 +914,7 @@ if cfg:
       --worker_startup_command=" \
         PYTHONUNBUFFERED=1 \
         TUNIX_IS_INTERNAL_ENV=false \
-        ${TUNIX_DEBUG_INFERENCE_LOGS:+TUNIX_DEBUG_INFERENCE_LOGS=\"${TUNIX_DEBUG_INFERENCE_LOGS}\"} \
+        ${single_jobset_env}${TUNIX_DEBUG_INFERENCE_LOGS:+TUNIX_DEBUG_INFERENCE_LOGS=\"${TUNIX_DEBUG_INFERENCE_LOGS}\"} \
         EPISODE_TIMEOUT_SECS="${EPISODE_TIMEOUT_SECS:-5400}" \
         WEIGHT_SYNC_DISABLE_TIMEOUTS=\"${WEIGHT_SYNC_DISABLE_TIMEOUTS}\" \
         ${SCAFFOLD:+SCAFFOLD=\"${SCAFFOLD}\"} \
@@ -855,7 +955,7 @@ if cfg:
           --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
           --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
           --process_main=tunix.experimental.examples.common.run_rollout_node.main \
-          --worker_id=${placeholder} \
+          --worker_id=${worker_id_arg} \
           --port=${ROLLOUT_PORT} \
           --model_id=${MODEL_ID} \
           --model_dir=${MODEL_DIR} \
@@ -887,51 +987,7 @@ if cfg:
       "
   ) || return $?
 
-  local idx=0
-  for replica_id in "${replica_ids[@]}"; do
-    if [[ ${idx} -gt 0 ]]; then
-      echo "---"
-    fi
-    printf '%s\n' "${manifest_template//${placeholder}/${replica_id}}"
-    ((idx++))
-  done | apply_manifest
-
-  if [[ "$dynamic_slicing_single_host" == "true" && "$DRY_RUN" != "true" ]]; then
-    local slice_topo="${ROLLOUT_TPU_SLICE#*:}"
-    echo "Applying single-host dynamic slicing patch for ${#replica_ids[@]} rollout JobSet(s) (${slice_topo})..."
-    for replica_id in "${replica_ids[@]}"; do
-      printf -- "---\napiVersion: jobset.x-k8s.io/v1alpha2\nkind: JobSet\nmetadata:\n  name: %s\n" "${replica_id}"
-    done | kubectl patch -n "${K8S_NAMESPACE}" -f - --type='json' \
-      -p="[{\"op\": \"add\", \"path\": \"/spec/replicatedJobs/0/template/spec/template/metadata/annotations/cloud.google.com~1gke-tpu-slice-topology\", \"value\": \"${slice_topo}\"}]"
-
-    echo "Waiting for Kueue to create initial workloads before recycling..."
-    sleep 3
-    local workloads_to_recycle=()
-    mapfile -t workloads_to_recycle < <(
-      kubectl get workload -n "${K8S_NAMESPACE}" -o json 2>/dev/null | "$PYTHON_BIN" -c '
-import json, re, sys
-targets = set(sys.argv[1:])
-pattern = re.compile(r"^jobset-(.+)-[a-f0-9]+$")
-try:
-  data = json.load(sys.stdin)
-except Exception:
-  sys.exit(0)
-for item in data.get("items", []):
-  name = item.get("metadata", {}).get("name", "")
-  m = pattern.match(name)
-  if not m or m.group(1) not in targets:
-    continue
-  pod_sets = item.get("spec", {}).get("podSets") or [{}]
-  annos = (pod_sets[0].get("template", {}).get("metadata", {}).get("annotations")) or {}
-  if not annos.get("cloud.google.com/gke-tpu-slice-topology"):
-    print(name)
-' "${replica_ids[@]}" || true
-    )
-    if [[ ${#workloads_to_recycle[@]} -gt 0 ]]; then
-      echo "Recycling ${#workloads_to_recycle[@]} workload(s) to apply dynamic slicing..."
-      kubectl delete workload "${workloads_to_recycle[@]}" -n "${K8S_NAMESPACE}" --ignore-not-found=true --wait=false 2>/dev/null || true
-    fi
-  fi
+  apply_rollout_manifests "${manifest_template}" "${placeholder}" "${replica_ids[@]}"
 }
 
 start_mock_trainer() {

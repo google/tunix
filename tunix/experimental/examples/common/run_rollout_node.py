@@ -365,6 +365,15 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   )
 
   args = parser.parse_args(argv)
+  job_index = os.environ.get("JOB_INDEX") or os.environ.get(
+      "JOBSET_REPLICA_INDEX"
+  )
+  if (
+      os.environ.get("ROLLOUT_SINGLE_JOBSET", "").lower() in ("true", "1")
+      and job_index is not None
+      and not args.worker_id.endswith(f"-{job_index}")
+  ):
+    args.worker_id = f"{args.worker_id}-{job_index}"
   if args.priority_scheduling and args.sampler != "vllm":
     raise ValueError(
         "--priority_scheduling is honored only by --sampler=vllm, got"

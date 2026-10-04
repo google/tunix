@@ -662,10 +662,10 @@ class YamlGeneratorTest(parameterized.TestCase):
         [
             "atwigg-256-prof-orch",
             "atwigg-256-prof-train",
-            "atwigg-256-prof-roll-0",
-            "atwigg-256-prof-roll-1",
+            "atwigg-256-prof-roll",
         ],
     )
+    self.assertEqual(docs[2]["spec"]["replicatedJobs"][0]["replicas"], 2)
     for doc in docs:
       self.assertEqual(
           doc["metadata"]["labels"],
@@ -800,6 +800,19 @@ class FailFastRenderTest(parameterized.TestCase):
       ]
       self.assertEqual(pw_node["template"]["spec"]["backoffLimit"], 2048000)
 
+  def test_fail_fast_multi_replica_retries_per_child_job(self):
+    rendered = _render(
+        "jobset.tpu.yaml",
+        "tpu7x:2x2x1",
+        "--fail_fast",
+        "--startup_retries=3",
+        "--replicas=128",
+    )
+    jobset = yaml.safe_load(rendered)
+    self.assertEqual(jobset["spec"]["failurePolicy"]["maxRestarts"], 0)
+    job = _proc_job_spec(rendered)
+    self.assertEqual(job["backoffLimit"], 3)
+
   def test_negative_startup_retries_raises(self):
     with self.assertRaises(ValueError):
       _render(
@@ -873,6 +886,7 @@ class FailFastRenderTest(parameterized.TestCase):
         PATH=f"{tempdir}:{os.environ.get('PATH', '')}",
         ENTER_KUBE_CONTEXT="/dev/null",
         ROLLOUT_REPLICAS="4",
+        ROLLOUT_SINGLE_JOBSET="false",
         JOB_PREFIX=job_prefix,
         TUNIX_IMAGE="test-image:latest",
     )
@@ -911,7 +925,7 @@ class FailFastRenderTest(parameterized.TestCase):
         [f"{job_prefix}-roll-{i}" for i in range(4)],
     )
 
-  def test_k8s_launcher_single_host_dynamic_slicing_batches_patch_and_recycle(
+  def test_k8s_launcher_single_host_dynamic_slicing_single_pass_annotations(
       self,
   ):
     repo_root = pathlib.Path(__file__).resolve().parents[4]
@@ -926,28 +940,14 @@ class FailFastRenderTest(parameterized.TestCase):
 
     tempdir = self.create_tempdir().full_path
     kubectl_log = os.path.join(tempdir, "kubectl_calls.log")
-    patched_manifest = os.path.join(tempdir, "patched.yaml")
+    applied_manifest = os.path.join(tempdir, "applied.yaml")
     kubectl_bin = os.path.join(tempdir, "kubectl")
     with open(kubectl_bin, "w") as f:
       f.write(
           "#!/bin/bash\n"
           f'echo "$*" >> "{kubectl_log}"\n'
           'if [[ "$*" == *"apply -f -"* ]]; then\n'
-          "  cat > /dev/null\n"
-          'elif [[ "$*" == *"patch"* && "$*" == *"-f -"* ]]; then\n'
-          f'  cat > "{patched_manifest}"\n'
-          'elif [[ "$*" == *"get workload"* && "$*" == *"-o json"* ]]; then\n'
-          "  cat <<'EOF'\n"
-          '{"items": [\n'
-          '  {"metadata": {"name": "jobset-deepswe-roll-0-a1b2c"},'
-          '   "spec": {"podSets": [{"template": {"metadata": {}}}]}},\n'
-          '  {"metadata": {"name": "jobset-deepswe-roll-1-d3e4f"},'
-          '   "spec": {"podSets": [{"template": {"metadata": {"annotations":'
-          ' {"cloud.google.com/gke-tpu-slice-topology": "2x2x1"}}}}]}},\n'
-          '  {"metadata": {"name": "jobset-deepswe-roll-2-98765"},'
-          '   "spec": {"podSets": [{"template": {"metadata": {}}}]}}\n'
-          "]}\n"
-          "EOF\n"
+          f'  cat > "{applied_manifest}"\n'
           "fi\n"
       )
     os.chmod(kubectl_bin, stat.S_IRWXU)
@@ -974,19 +974,152 @@ class FailFastRenderTest(parameterized.TestCase):
     with open(kubectl_log) as f:
       calls = [line.strip() for line in f if line.strip()]
     self.assertLen([c for c in calls if "apply -f -" in c], 1)
-    self.assertLen([c for c in calls if "patch" in c], 1)
-    delete_calls = [c for c in calls if "delete workload" in c]
-    self.assertLen(delete_calls, 1)
-    self.assertIn("jobset-deepswe-roll-0-a1b2c", delete_calls[0])
-    self.assertIn("jobset-deepswe-roll-2-98765", delete_calls[0])
-    self.assertNotIn("jobset-deepswe-roll-1-d3e4f", delete_calls[0])
+    self.assertEmpty([c for c in calls if "patch" in c])
+    self.assertEmpty([c for c in calls if "delete workload" in c])
 
-    with open(patched_manifest) as f:
-      patch_docs = list(yaml.safe_load_all(f.read()))
+    with open(applied_manifest) as f:
+      applied_docs = list(yaml.safe_load_all(f.read()))
     self.assertEqual(
-        [doc["metadata"]["name"] for doc in patch_docs],
-        ["deepswe-roll-0", "deepswe-roll-1", "deepswe-roll-2"],
+        [doc["metadata"]["name"] for doc in applied_docs],
+        ["deepswe-roll"],
     )
+    doc = applied_docs[0]
+    self.assertEqual(doc["spec"]["replicatedJobs"][0]["replicas"], 3)
+    pod_tmpl = doc["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]
+    annos = pod_tmpl["metadata"]["annotations"]
+    self.assertEqual(
+        annos["cloud.google.com/gke-tpu-slice-topology"], "2x2x1"
+    )
+    self.assertEqual(
+        annos["cloud.google.com/skip-tpu-webhook-check"], "true"
+    )
+    self.assertEqual(
+        annos["kueue.x-k8s.io/podset-required-topology"],
+        "cloud.google.com/gce-topology-block",
+    )
+    self.assertEqual(
+        annos["kueue.x-k8s.io/podset-slice-required-topology"],
+        "cloud.google.com/gke-tpu-partition-2x2x1-id",
+    )
+    self.assertEqual(annos["kueue.x-k8s.io/podset-slice-size"], "1")
+    affinity_terms = pod_tmpl["spec"]["affinity"]["nodeAffinity"][
+        "requiredDuringSchedulingIgnoredDuringExecution"
+    ]["nodeSelectorTerms"]
+    self.assertEqual(
+        affinity_terms,
+        [{
+            "matchExpressions": [{
+                "key": "cloud.google.com/gke-tpu-partition-2x2x1-state",
+                "operator": "In",
+                "values": ["HEALTHY", "DEGRADED"],
+            }]
+        }],
+    )
+
+  def test_k8s_launcher_rollout_parallel_batches(self):
+    repo_root = pathlib.Path(__file__).resolve().parents[4]
+    launcher = (
+        repo_root
+        / "tunix"
+        / "experimental"
+        / "examples"
+        / "deepswe_dist"
+        / "k8s_launcher.sh"
+    )
+
+    tempdir = self.create_tempdir().full_path
+    kubectl_log = os.path.join(tempdir, "kubectl_calls.log")
+    applied_dir = os.path.join(tempdir, "applied")
+    os.makedirs(applied_dir, exist_ok=True)
+    kubectl_bin = os.path.join(tempdir, "kubectl")
+    with open(kubectl_bin, "w") as f:
+      f.write(
+          "#!/bin/bash\n"
+          f'echo "$*" >> "{kubectl_log}"\n'
+          'if [[ "$*" == *"apply -f -"* ]]; then\n'
+          f'  cat > "{applied_dir}/batch_$$.yaml"\n'
+          "fi\n"
+      )
+    os.chmod(kubectl_bin, stat.S_IRWXU)
+
+    env = dict(
+        os.environ,
+        PATH=f"{tempdir}:{os.environ.get('PATH', '')}",
+        ENTER_KUBE_CONTEXT="/dev/null",
+        ROLLOUT_REPLICAS="6",
+        ROLLOUT_SINGLE_JOBSET="false",
+        ROLLOUT_APPLY_BATCH_SIZE="2",
+        ROLLOUT_APPLY_PARALLELISM="3",
+        ROLLOUT_TPU_SLICE="tpu7x:2x2x1",
+        JOB_PREFIX="deepswe",
+    )
+    result = subprocess.run(
+        ["bash", str(launcher), "start_rollout_only"],
+        cwd=str(repo_root),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    self.assertEqual(result.returncode, 0, result.stderr)
+
+    batch_files = sorted(os.listdir(applied_dir))
+    self.assertLen(batch_files, 3)
+    names = []
+    for bf in batch_files:
+      with open(os.path.join(applied_dir, bf)) as f:
+        docs = list(yaml.safe_load_all(f.read()))
+      self.assertLen(docs, 2)
+      names.extend(doc["metadata"]["name"] for doc in docs)
+    self.assertCountEqual(
+        names, [f"deepswe-roll-{i}" for i in range(6)]
+    )
+
+  def test_k8s_launcher_rollout_single_jobset_mode(self):
+    repo_root = pathlib.Path(__file__).resolve().parents[4]
+    launcher = (
+        repo_root
+        / "tunix"
+        / "experimental"
+        / "examples"
+        / "deepswe_dist"
+        / "k8s_launcher.sh"
+    )
+    env = dict(
+        os.environ,
+        JOB_PREFIX="deepswe",
+        ROLLOUT_REPLICAS="128",
+        ROLLOUT_TPU_SLICE="tpu7x:2x2x1",
+        ROLLOUT_JOBSET_YAML="jobset.tpu.yaml",
+        USE_AGENT_SANDBOX="0",
+        PYTHON_BIN=sys.executable,
+    )
+    env.pop("ROLLOUT_SINGLE_JOBSET", None)
+    result = subprocess.run(
+        ["bash", str(launcher), "start_rollout_only", "--dry-run"],
+        cwd=str(repo_root),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=True,
+    )
+    docs = [
+        d
+        for d in yaml.safe_load_all(result.stdout)
+        if isinstance(d, dict) and d.get("kind") == "JobSet"
+    ]
+    self.assertLen(docs, 1)
+    doc = docs[0]
+    self.assertEqual(doc["metadata"]["name"], "deepswe-roll")
+    proc = doc["spec"]["replicatedJobs"][0]
+    self.assertEqual(proc["replicas"], 128)
+    cmd = proc["template"]["spec"]["template"]["spec"]["containers"][0][
+        "command"
+    ][2]
+    self.assertIn("--worker_id=deepswe-roll-${JOB_INDEX}", cmd)
+    self.assertIn("ROLLOUT_SINGLE_JOBSET=true", cmd)
 
 
 if __name__ == "__main__":

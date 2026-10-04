@@ -26,6 +26,7 @@ ${FAIL_FAST_LINE_DISABLE}    maxRestarts: 3
     publishNotReadyAddresses: true
   replicatedJobs:
   - name: proc
+    replicas: ${REPLICAS}
     template:
       spec:
         backoffLimit: ${FAIL_FAST_WORKER_BACKOFF_LIMIT}${FAIL_FAST_POD_FAILURE_POLICY}

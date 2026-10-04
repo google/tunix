@@ -117,7 +117,10 @@ def _wrapper_post(retry_only_on_pod_zero: bool) -> str:
 
 
 def render_fail_fast(
-    enabled: bool, startup_retries: int, user_container: str
+    enabled: bool,
+    startup_retries: int,
+    user_container: str,
+    replicas: int = 1,
 ) -> FailFastPlaceholders:
   """Returns template placeholder values for worker fail-fast.
 
@@ -127,15 +130,22 @@ def render_fail_fast(
 
   * The PID-1 wrapper exits STARTUP_RETRY_EXIT_CODE if the workload stopped
     before registering, and non-zero for any stop after registering.
-  * The Job's podFailurePolicy counts the startup exit code (backoffLimit 0 ->
-    the Job fails -> JobSet restarts, bounded by maxRestarts=startup_retries)
-    and fails the Job with reason PodFailurePolicy for anything else.
+  * When replicas == 1, the Job's podFailurePolicy counts the startup exit code
+    (backoffLimit 0 -> the Job fails -> JobSet restarts, bounded by
+    maxRestarts=startup_retries) and fails the Job with reason PodFailurePolicy
+    for anything else.
+  * When replicas > 1 (single-JobSet rollout with N child Jobs), pre-registration
+    failures and transient kubelet admission errors are retried within the
+    individual replica's child Job (backoffLimit=startup_retries, JobSet
+    maxRestarts=0) so one replica's startup retry never tears down the other
+    N-1 already-registered replicas.
   * The JobSet fails immediately on a PodFailurePolicy Job failure.
 
   Args:
     enabled: Whether to render fail-fast.
-    startup_retries: JobSet maxRestarts for pre-registration failures.
+    startup_retries: Pre-registration retry limit.
     user_container: Name of the worker container running the wrapper.
+    replicas: Number of replicatedJob replicas in the JobSet.
 
   Returns:
     Placeholder values for string.Template substitution.
@@ -154,8 +164,11 @@ def render_fail_fast(
         FAIL_FAST_PROC_MAIN_CONTAINERS="",
     )
 
+  jobset_max_restarts = 0 if replicas > 1 else startup_retries
+  worker_backoff_limit = str(startup_retries) if replicas > 1 else "0"
+
   jobset_failure_policy = (
-      f"\n    maxRestarts: {startup_retries}"
+      f"\n    maxRestarts: {jobset_max_restarts}"
       "\n    rules:"
       "\n    - name: failJobSetOnPodFailurePolicy"
       "\n      action: FailJobSet"
@@ -196,7 +209,7 @@ def render_fail_fast(
   return FailFastPlaceholders(
       FAIL_FAST_LINE_DISABLE="# overridden by fail-fast: ",
       FAIL_FAST_JOBSET_FAILURE_POLICY=jobset_failure_policy,
-      FAIL_FAST_WORKER_BACKOFF_LIMIT="0",
+      FAIL_FAST_WORKER_BACKOFF_LIMIT=worker_backoff_limit,
       FAIL_FAST_WORKER_RESTART_POLICY="Never",
       FAIL_FAST_POD_FAILURE_POLICY=pod_failure_policy,
       FAIL_FAST_WRAPPER_PRE=wrapper_pre,
@@ -216,6 +229,12 @@ def main() -> None:
   parser.add_argument("template_file", help="Path to the template file")
 
   parser.add_argument("--jobset_name", default=None, help="Name of the jobset")
+  parser.add_argument(
+      "--replicas",
+      default=1,
+      type=int,
+      help="Number of replicatedJob replicas for worker JobSets.",
+  )
 
   parser.add_argument(
       "--tpu_slice",
@@ -410,6 +429,7 @@ def main() -> None:
       enabled=args.fail_fast,
       startup_retries=args.startup_retries,
       user_container=args.worker_container_name,
+      replicas=args.replicas,
   )
 
   tpu_type = None
@@ -560,31 +580,29 @@ def main() -> None:
     )
 
   if use_dynamic_slicing and slice_topology:
-    if slice_size and slice_size > 1:
-      # The slice-topology annotation must be the job's FULL shape: the
-      # mjobset webhook checks the requested TPU count against it, so a
-      # 4x4x8 job annotated 4x4x4 is refused ("128 TPUs requested, but must
-      # be exactly 64"). The partition levels below stay at the 4x4x4 unit.
-      anno_lines = [
-          f'cloud.google.com/gke-tpu-slice-topology: "{tpu_topology}"',
-          'cloud.google.com/skip-tpu-webhook-check: "true"',
-          "kueue.x-k8s.io/podset-required-topology: cloud.google.com/gce-topology-block",
-          f"kueue.x-k8s.io/podset-slice-required-topology: cloud.google.com/gke-tpu-partition-{slice_topology}-id",
-          f'kueue.x-k8s.io/podset-slice-size: "{slice_size}"',
-      ]
-    else:
-      anno_lines = [
-          'cloud.google.com/skip-tpu-webhook-check: "true"',
-          'kueue.x-k8s.io/podset-required-topology: cloud.google.com/gke-tpu-partition-4x4x4-id',
-      ]
-      if not args.omit_slice_topology:
-        anno_lines.insert(0, f'cloud.google.com/gke-tpu-slice-topology: "{slice_topology}"')
+    # The slice-topology annotation must be the job's FULL shape: the
+    # mjobset webhook checks the requested TPU count against it, so a
+    # 4x4x8 job annotated 4x4x4 is refused ("128 TPUs requested, but must
+    # be exactly 64"). For sub-slices (including 2x2x1 with slice_size=1),
+    # tpu7x-flavor-v2 exposes cloud.google.com/gke-tpu-partition-<topo>-id
+    # so Kueue TAS and slice-controller provision the sub-slice on initial
+    # Workload creation without a two-pass patch/delete loop.
+    anno_lines = [
+        'cloud.google.com/skip-tpu-webhook-check: "true"',
+        "kueue.x-k8s.io/podset-required-topology: cloud.google.com/gce-topology-block",
+        f"kueue.x-k8s.io/podset-slice-required-topology: cloud.google.com/gke-tpu-partition-{slice_topology}-id",
+        f'kueue.x-k8s.io/podset-slice-size: "{slice_size}"',
+    ]
+    if not args.omit_slice_topology:
+      anno_lines.insert(
+          0, f'cloud.google.com/gke-tpu-slice-topology: "{tpu_topology}"'
+      )
     tpu_annotations = "\n" + "\n".join(f"              {line}" for line in anno_lines)
   else:
     tpu_annotations = ""
 
   if use_dynamic_slicing:
-    if slice_size and slice_size > 1:
+    if slice_size and slice_size >= 1:
       pw_node_affinity = (
           "            affinity:\n"
           "              nodeAffinity:\n"
@@ -795,7 +813,7 @@ def main() -> None:
         COLOCATED_PYTHON_PROXY_ARGS=colocated_python_proxy_args,
         TERMINATION_GRACE_SECONDS=args.termination_grace_seconds,
         PW_INSTANCE_TYPE=pw_instance_type,
-        REPLICAS=1,
+        REPLICAS=args.replicas,
         COMPLETIONS=num_chips // 4 if num_chips else None,
         PARALLELISM=num_chips // 4 if num_chips else None,
         PODSET_SLICE_TOPOLOGY=slice_topology,

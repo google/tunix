@@ -584,6 +584,24 @@ if cfg:
     fi
   fi
 
+  local replicas=${ROLLOUT_REPLICAS:-1}
+  local single_jobset=false
+  if [[ "${ROLLOUT_SINGLE_JOBSET:-true}" == "true" || "${ROLLOUT_SINGLE_JOBSET:-true}" == "True" || "${ROLLOUT_SINGLE_JOBSET:-1}" == "1" ]]; then
+    if [[ "${ROLLOUT_JOBSET_YAML}" == "jobset.tpu.yaml" || "${ROLLOUT_JOBSET_YAML}" == "jobset.mcjax.ray.yaml" ]]; then
+      single_jobset=true
+    fi
+  fi
+  local worker_id_arg="${target_id}"
+  local extra_generator_flags=()
+  local single_jobset_env=""
+  if [[ "${single_jobset}" == "true" ]]; then
+    extra_generator_flags+=(--replicas="${replicas}")
+    if [[ ${replicas} -gt 1 ]]; then
+      worker_id_arg="${target_id}-\${JOB_INDEX}"
+      single_jobset_env="ROLLOUT_SINGLE_JOBSET=true "
+    fi
+  fi
+
   "$PYTHON" "$YAML_GEN" \
     "$YAML_DIR/${ROLLOUT_JOBSET_YAML}" \
     --jobset_name="${target_id}" \
@@ -596,13 +614,14 @@ if cfg:
     --pathways_gcs_scratch_location=${GCS_SCRATCH_LOCATION} \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ROLLOUT_PORT}" \
+    "${extra_generator_flags[@]}" \
     --worker_startup_command=" \
-      ${TUNIX_DEBUG_INFERENCE_LOGS:+TUNIX_DEBUG_INFERENCE_LOGS=\"${TUNIX_DEBUG_INFERENCE_LOGS}\"} \
+      ${single_jobset_env}${TUNIX_DEBUG_INFERENCE_LOGS:+TUNIX_DEBUG_INFERENCE_LOGS=\"${TUNIX_DEBUG_INFERENCE_LOGS}\"} \
       ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} SKIP_JAX_PRECOMPILE=${ROLLOUT_SKIP_JAX_PRECOMPILE} VERIFY_WEIGHTS=${VERIFY_WEIGHTS}${raiden_env}${ROLLOUT_EXTRA_ENV:+ ${ROLLOUT_EXTRA_ENV}} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} ${PHASED_PROFILING_DIR:+PHASED_PROFILING_DIR=\"${PHASED_PROFILING_DIR}\"} ${PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR:+PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR=${PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR}} ${PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP:+PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP=${PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP}}${jax_cache_env} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
         --process_main=tunix.experimental.examples.common.run_rollout_node.main \
-        --worker_id=${target_id} \
+        --worker_id=${worker_id_arg} \
         --port=${ROLLOUT_PORT} \
         --mesh_fsdp=${ROLLOUT_MESH_FSDP} \
         --mesh_tp=${ROLLOUT_MESH_TP} \
@@ -627,6 +646,96 @@ if cfg:
     "
 }
 
+apply_rollout_manifests() {
+  local manifest_template="$1"
+  local placeholder="$2"
+  shift 2
+  local ids=("$@")
+  local total=${#ids[@]}
+  if [[ ${total} -eq 0 ]]; then
+    return 0
+  fi
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    local idx=0
+    for replica_id in "${ids[@]}"; do
+      if [[ ${idx} -gt 0 ]]; then
+        echo "---"
+      fi
+      printf '%s\n' "${manifest_template//${placeholder}/${replica_id}}"
+      ((idx++))
+    done | apply_manifest
+    return $?
+  fi
+
+  local batch_size=${ROLLOUT_APPLY_BATCH_SIZE:-8}
+  local max_parallel=${ROLLOUT_APPLY_PARALLELISM:-16}
+  local wave_size=${ROLLOUT_LAUNCH_WAVE_SIZE:-128}
+  local wave_delay=${ROLLOUT_LAUNCH_WAVE_DELAY_S:-0}
+  if [[ ${batch_size} -le 0 ]]; then batch_size=8; fi
+  if [[ ${max_parallel} -le 0 ]]; then max_parallel=16; fi
+  if [[ ${wave_size} -le 0 ]]; then wave_size=128; fi
+
+  if [[ ${total} -le ${batch_size} || ${max_parallel} -eq 1 ]]; then
+    local idx=0
+    for replica_id in "${ids[@]}"; do
+      if [[ ${idx} -gt 0 ]]; then
+        echo "---"
+      fi
+      printf '%s\n' "${manifest_template//${placeholder}/${replica_id}}"
+      ((idx++))
+    done | apply_manifest
+    return $?
+  fi
+
+  local wave_start=0
+  local pids=()
+  local failed=0
+  while [[ ${wave_start} -lt ${total} ]]; do
+    local wave_end=$((wave_start + wave_size))
+    if [[ ${wave_end} -gt ${total} ]]; then
+      wave_end=${total}
+    fi
+    pids=()
+    local start=${wave_start}
+    while [[ ${start} -lt ${wave_end} ]]; do
+      local count=$((wave_end - start))
+      if [[ ${count} -gt ${batch_size} ]]; then
+        count=${batch_size}
+      fi
+      local batch_ids=("${ids[@]:start:count}")
+      (
+        local b_idx=0
+        for replica_id in "${batch_ids[@]}"; do
+          if [[ ${b_idx} -gt 0 ]]; then
+            echo "---"
+          fi
+          printf '%s\n' "${manifest_template//${placeholder}/${replica_id}}"
+          ((b_idx++))
+        done | apply_manifest
+      ) &
+      pids+=($!)
+      if [[ ${#pids[@]} -ge ${max_parallel} ]]; then
+        for pid in "${pids[@]}"; do
+          wait "${pid}" || failed=1
+        done
+        pids=()
+      fi
+      start=$((start + count))
+    done
+    for pid in "${pids[@]}"; do
+      wait "${pid}" || failed=1
+    done
+    if [[ ${failed} -ne 0 ]]; then
+      return 1
+    fi
+    wave_start=${wave_end}
+    if [[ ${wave_start} -lt ${total} && ${wave_delay} -gt 0 ]]; then
+      sleep "${wave_delay}"
+    fi
+  done
+}
+
 start_rollout() {
   local replicas=${ROLLOUT_REPLICAS:-1}
   if [[ ${replicas} -le 0 ]]; then
@@ -643,16 +752,27 @@ start_rollout() {
   local manifest_template
   manifest_template="$(render_rollout_instance "${placeholder}")" || return $?
 
-  for ((i = 0; i < replicas; i++)); do
-    local target_id="${ROLLOUT_ID}"
-    if [[ ${replicas} -gt 1 ]]; then
-      target_id="${ROLLOUT_ID}-${i}"
+  local single_jobset=false
+  if [[ "${ROLLOUT_SINGLE_JOBSET:-true}" == "true" || "${ROLLOUT_SINGLE_JOBSET:-true}" == "True" || "${ROLLOUT_SINGLE_JOBSET:-1}" == "1" ]]; then
+    if [[ "${ROLLOUT_JOBSET_YAML}" == "jobset.tpu.yaml" || "${ROLLOUT_JOBSET_YAML}" == "jobset.mcjax.ray.yaml" ]]; then
+      single_jobset=true
     fi
-    if [[ ${i} -gt 0 ]]; then
-      echo "---"
-    fi
-    printf '%s\n' "${manifest_template//${placeholder}/${target_id}}"
-  done | apply_manifest
+  fi
+
+  local replica_ids=()
+  if [[ "${single_jobset}" == "true" ]]; then
+    replica_ids=("${ROLLOUT_ID}")
+  else
+    for ((i = 0; i < replicas; i++)); do
+      local target_id="${ROLLOUT_ID}"
+      if [[ ${replicas} -gt 1 ]]; then
+        target_id="${ROLLOUT_ID}-${i}"
+      fi
+      replica_ids+=("${target_id}")
+    done
+  fi
+
+  apply_rollout_manifests "${manifest_template}" "${placeholder}" "${replica_ids[@]}"
 }
 
 while [[ $# -gt 0 ]]; do

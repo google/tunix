@@ -25,6 +25,7 @@ ${QUEUE_LABEL}spec:
     publishNotReadyAddresses: true
   replicatedJobs:
   - name: proc
+    replicas: ${REPLICAS}
     template:
       spec:
         backoffLimit: ${FAIL_FAST_WORKER_BACKOFF_LIMIT}${FAIL_FAST_POD_FAILURE_POLICY}
@@ -87,7 +88,7 @@ ${FAIL_FAST_WRAPPER_PRE}                  (
                     if [ "$${POD_INDEX}" = "0" ]; then
                       echo "Starting Ray head..."
                       ray start --head --port=6379
-                      sleep 5; until ray status 2>/dev/null | grep -E -q "8(\.0)? TPU"; do sleep 2; done
+                      sleep 5; until [ "$$(ray status 2>/dev/null | sed -n '/Active:/,/Pending:/p' | grep -c 'node_')" -ge "${COMPLETIONS}" ]; do sleep 2; done
 
                       ${STARTUP_COMMAND}
                     else
