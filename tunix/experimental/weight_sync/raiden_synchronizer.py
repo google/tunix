@@ -42,7 +42,7 @@ def _get_host_rss_gb() -> tuple[float, float]:
     import resource  # pylint: disable=g-import-not-at-top
 
     peak_rss_gb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6
-  except Exception:  # pylint: disable=broad-exception-caught
+  except ImportError:
     pass
   current_rss_gb = peak_rss_gb
   try:
@@ -53,7 +53,7 @@ def _get_host_rss_gb() -> tuple[float, float]:
           if len(parts) >= 2:
             current_rss_gb = int(parts[1]) / 1e6
           break
-  except Exception:  # pylint: disable=broad-exception-caught
+  except OSError:
     pass
   return round(current_rss_gb, 3), round(peak_rss_gb, 3)
 
@@ -1233,6 +1233,7 @@ def patch_raiden_worker_sync() -> None:
         auto_h2d = not is_parallel_h2h_enabled()
       self._auto_h2d = auto_h2d
       was_unbound = getattr(self, "_sync", None) is None
+      self._last_h2d_s = None
       rss_before_gb, _ = _get_host_rss_gb()
       ws_lib = getattr(rws, "_ws_lib", None)
       orig_ws_cls = (
@@ -1276,8 +1277,8 @@ def patch_raiden_worker_sync() -> None:
           logging.info(
               "RAIDEN_BIND_RSS job=%s auto_h2d=%s rss_before_gb=%.2f"
               " rss_after_gb=%.2f peak_rss_gb=%.2f",
-              getattr(self, "job_name", "rollout"),
-              getattr(self, "_effective_auto_h2d", True),
+              self.job_name,
+              self._effective_auto_h2d,
               rss_before_gb,
               rss_after_gb,
               peak_rss_gb,
@@ -1300,7 +1301,7 @@ def patch_raiden_worker_sync() -> None:
           logging.info(
               "RAIDEN_H2D_STATS job=%s auto_h2d=%s h2d_s=%.3f"
               " rss_before_gb=%.2f rss_after_gb=%.2f peak_rss_gb=%.2f",
-              getattr(self, "job_name", "rollout"),
+              self.job_name,
               effective_auto_h2d,
               h2d_s,
               rss_before_gb,
@@ -1323,7 +1324,7 @@ def patch_raiden_worker_sync() -> None:
       logging.info(
           "RAIDEN_H2D_STATS job=%s auto_h2d=%s h2d_s=%.3f rss_before_gb=%.2f"
           " rss_after_gb=%.2f peak_rss_gb=%.2f",
-          getattr(self, "job_name", "rollout"),
+          self.job_name,
           effective_auto_h2d,
           h2d_s,
           rss_before_gb,
@@ -1352,7 +1353,7 @@ def patch_raiden_worker_sync() -> None:
       rss_gb, peak_rss_gb = _get_host_rss_gb()
       m["host_rss_gb"] = rss_gb
       m["host_peak_rss_gb"] = peak_rss_gb
-      if hasattr(self, "_last_h2d_s"):
+      if self._last_h2d_s is not None:
         m["last_h2d_s"] = self._last_h2d_s
       return m
 
