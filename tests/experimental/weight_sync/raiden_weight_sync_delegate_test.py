@@ -84,9 +84,24 @@ class RaidenWeightSyncDelegateTest(unittest.IsolatedAsyncioTestCase):
     self.assertIs(worker.bound_state, fake_state)
 
   async def test_worker_uses_the_validated_config(self):
-    delegate = self._delegate()
-    self.assertIs(delegate._synchronizers[0].kwargs["auto_h2d"], True)
-    self.assertEqual(delegate._synchronizers[0].kwargs, {"auto_h2d": True})
+    with mock.patch.dict("os.environ", {"WEIGHT_SYNC_PARALLEL_H2H": "false"}):
+      delegate = self._delegate()
+      self.assertIs(delegate._synchronizers[0].kwargs["auto_h2d"], True)
+      self.assertEqual(delegate._synchronizers[0].kwargs, {"auto_h2d": True})
+
+    with mock.patch.dict("os.environ", {"WEIGHT_SYNC_PARALLEL_H2H": "true"}):
+      parallel_delegate = self._delegate()
+      self.assertIs(
+          parallel_delegate._synchronizers[0].kwargs["auto_h2d"], False
+      )
+      self.assertEqual(
+          parallel_delegate._synchronizers[0].kwargs, {"auto_h2d": False}
+      )
+
+    custom_delegate = raiden_weight_sync_delegate.RaidenWeightSyncDelegate(
+        auto_h2d=False
+    )
+    self.assertIs(custom_delegate._synchronizers[0].kwargs["auto_h2d"], False)
 
   async def test_repeat_phases_bind_exactly_once(self):
     delegate = self._delegate()

@@ -14,6 +14,7 @@
 
 """Tests for RaidenSynchronizer."""
 
+import types
 from unittest import mock
 
 import numpy as np
@@ -822,6 +823,101 @@ class RaidenSynchronizerTest(absltest.TestCase):
         ),
     )
 
+  def test_patch_raiden_worker_sync_disables_auto_h2d_and_runs_h2d(self):
+    call_order = []
+
+    class _FakeSync:
+
+      def __init__(self, arrays, **kwargs):
+        self.arrays = arrays
+        self.kwargs = kwargs
+
+      def wait_for_transfer_completion(self, uuid=None):
+        call_order.append(("wait_for_transfer_completion", uuid))
+
+      def h2d(self):
+        call_order.append(("h2d",))
+
+    class _FakeWsLib:
+      WeightSynchronizer = _FakeSync
+
+    class _FakeRaidenWorkerSync:
+
+      def __init__(self):
+        self.arrays = [jnp.ones((2,), jnp.float32)]
+        self._sync = None
+
+      def _require_sync(self, op):
+        del op
+        return self._sync
+
+      def bind(self, state):
+        del state
+        self._sync = _FakeWsLib.WeightSynchronizer(
+            self.arrays,
+            local_port=0,
+            auto_h2d=True,
+        )
+
+      def h2d(self, uuid=None):
+        sync = self._require_sync("h2d()")
+        if hasattr(sync, "wait_for_transfer_completion"):
+          sync.wait_for_transfer_completion(uuid)
+          return
+        sync.h2d()
+
+      def metadata_dict(self):
+        return {"unit": {"job_name": "rollout"}}
+
+    fake_rws_mod = types.SimpleNamespace(
+        _ws_lib=_FakeWsLib,
+        RaidenWorkerSync=_FakeRaidenWorkerSync,
+        envs=types.SimpleNamespace(RAIDEN_H2D_SETTLE=False),
+    )
+    with mock.patch.dict(
+        "os.environ",
+        {"JAX_PLATFORMS": "tpu", "WEIGHT_SYNC_PARALLEL_H2H": "1"},
+    ):
+      with mock.patch.dict(
+          raiden_synchronizer._lazy_modules,
+          {"tpu_inference.rl.raiden_worker_sync": fake_rws_mod},
+      ):
+        raiden_synchronizer.patch_raiden_worker_sync()
+
+      worker_sync = _FakeRaidenWorkerSync()
+      worker_sync.bind({"w": worker_sync.arrays[0]})
+      self.assertFalse(worker_sync._sync.kwargs["auto_h2d"])
+      self.assertIs(_FakeWsLib.WeightSynchronizer, _FakeSync)
+      self.assertEqual(
+          worker_sync.metadata_dict(),
+          {"unit": {"job_name": "rollout"}, "auto_h2d": False},
+      )
+
+      worker_sync.h2d(uuid=7)
+      self.assertEqual(
+          call_order,
+          [("wait_for_transfer_completion", 7), ("h2d",)],
+      )
+
+    # When WEIGHT_SYNC_PARALLEL_H2H is disabled, auto_h2d stays True and h2d()
+    # returns after wait_for_transfer_completion without calling sync.h2d().
+    call_order.clear()
+    with mock.patch.dict(
+        "os.environ",
+        {"JAX_PLATFORMS": "tpu", "WEIGHT_SYNC_PARALLEL_H2H": "0"},
+    ):
+      worker_sync_default = _FakeRaidenWorkerSync()
+      worker_sync_default.bind({"w": worker_sync_default.arrays[0]})
+      self.assertTrue(worker_sync_default._sync.kwargs["auto_h2d"])
+      self.assertEqual(
+          worker_sync_default.metadata_dict(),
+          {"unit": {"job_name": "rollout"}, "auto_h2d": True},
+      )
+
+      worker_sync_default.h2d(uuid=9)
+      self.assertEqual(call_order, [("wait_for_transfer_completion", 9)])
+
 
 if __name__ == "__main__":
   absltest.main()
+
