@@ -351,9 +351,12 @@ class TrajectoryCollectEngine:
       masked_out = self.overlong_filter and status in self.filter_statuses
       # An episode that exhausted its wall-clock budget scores 0 by
       # definition; grading its unfinished state would waste sandbox time and
-      # could reward an incomplete trajectory.
-      skip_final_reward = (
-          masked_out or status == agent_types.TrajectoryStatus.TIMEOUT
+      # could reward an incomplete trajectory. Invalid trajectories (e.g.
+      # ENV_TIMEOUT after a hung env.step) are dropped from training, so their
+      # grade would be discarded and the env may be unresponsive.
+      skip_final_reward = masked_out or status in (
+          agent_types.INVALID_TRAJECTORY_STATUSES
+          | {agent_types.TrajectoryStatus.TIMEOUT}
       )
       try:
         if not skip_final_reward:

@@ -1767,6 +1767,27 @@ class ExactTokenContinuityCollectTest(absltest.TestCase):
     self.assertEqual(result['trajectory_reward'], 0.0)
     env.close.assert_called_once()
 
+  def test_env_timeout_skips_final_reward(self):
+    agent, env = self._frozenlake()
+    final_reward_fn = mock.MagicMock(return_value=1.0)
+    env.final_reward_fn = final_reward_fn
+    engine, _, _ = self._collector(agent, env)
+    orig_run_with_timing = engine._run_with_timing
+
+    async def hung_env_step(func, *args, timeout=None):
+      if func == env.step:
+        raise asyncio.TimeoutError()
+      return await orig_run_with_timing(func, *args, timeout=timeout)
+
+    engine._run_with_timing = hung_env_step
+    result = asyncio.run(engine.collect(mode='Token'))
+    self.assertEqual(
+        result['status'], agent_types.TrajectoryStatus.ENV_TIMEOUT.name
+    )
+    final_reward_fn.assert_not_called()
+    self.assertEqual(result['trajectory_reward'], 0.0)
+    env.close.assert_called_once()
+
   def test_final_reward_timeout_defaults_to_zero(self):
     agent, env = self._frozenlake()
     env.max_steps = 1
