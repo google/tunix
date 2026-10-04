@@ -350,22 +350,51 @@ class ClusterOrchestrator:
     if not rollout_worker_ids:
       return
 
+    primary_worker_id = rollout_worker_ids[0]
+    logging.info(
+        "Triggering JAX compilation cache synchronization to GCS (%s) from rollout worker %s...",
+        rollout_gcs_uri,
+        primary_worker_id,
+    )
+
     def _sync_worker(worker_id: str):
       handle = self._remote_worker_handles_by_id[worker_id]
       return handle.submit("upload_jax_cache", gcs_uri=rollout_gcs_uri)
 
-    pool = futures.ThreadPoolExecutor(max_workers=min(len(rollout_worker_ids), 16))
-    uploads = {
-        worker_id: pool.submit(_sync_worker, worker_id)
-        for worker_id in rollout_worker_ids
-    }
-    for worker_id, fut in uploads.items():
-      try:
-        res = fut.result(timeout=180.0)
-        logging.info("Worker %s JAX cache upload finished: %s", worker_id, res)
-      except Exception as err:  # pylint: disable=broad-except
-        logging.warning("Failed to sync JAX cache on worker %s: %r", worker_id, err)
+    pool = futures.ThreadPoolExecutor(max_workers=1)
+    upload = pool.submit(_sync_worker, primary_worker_id)
+    primary_failed = False
+    try:
+      res = upload.result(timeout=180.0)
+      logging.info(
+          "Worker %s JAX cache upload finished: %s", primary_worker_id, res
+      )
+    except Exception as err:  # pylint: disable=broad-except
+      logging.warning(
+          "Failed to sync JAX cache on worker %s: %r", primary_worker_id, err
+      )
+      primary_failed = True
     pool.shutdown(wait=False)
+
+    if primary_failed and len(rollout_worker_ids) > 1:
+      fallback_id = rollout_worker_ids[1]
+      logging.info(
+          "Primary rollout worker cache upload failed. Attempting fallback upload from %s...",
+          fallback_id,
+      )
+      try:
+        fb_res = self._remote_worker_handles_by_id[fallback_id].submit(
+            "upload_jax_cache", gcs_uri=rollout_gcs_uri
+        )
+        logging.info(
+            "Fallback worker %s JAX cache upload finished: %s",
+            fallback_id,
+            fb_res,
+        )
+      except Exception as err:  # pylint: disable=broad-except
+        logging.warning(
+            "Failed fallback JAX cache upload on worker %s: %r", fallback_id, err
+        )
 
   def bring_up_workers(self, dummy_data: Any = None) -> None:
     """Brings up all registered workers through lifecycle initialization."""

@@ -191,6 +191,62 @@ class GcsCacheTest(absltest.TestCase):
     )
     mock_trainer.submit.assert_not_called()
 
+  def test_orchestrator_sync_jax_cache_single_worker(self):
+    orch = orchestrator.ClusterOrchestrator(
+        jax_cache_config={
+            "save_jax_cache": True,
+            "rollout_jax_cache_gcs_dir": "gs://bucket/orch_rollout",
+        }
+    )
+    mock_rollout_0 = mock.MagicMock(spec=remote_execution.ActorHandle)
+    mock_rollout_1 = mock.MagicMock(spec=remote_execution.ActorHandle)
+    orch.register_worker_handle(
+        "rollout-0",
+        roles=[datatypes.Role.ROLLOUT],
+        handle=mock_rollout_0,
+    )
+    orch.register_worker_handle(
+        "rollout-1",
+        roles=[datatypes.Role.ROLLOUT],
+        handle=mock_rollout_1,
+    )
+    orch.sync_jax_cache()
+    mock_rollout_0.submit.assert_called_once_with(
+        "upload_jax_cache", gcs_uri="gs://bucket/orch_rollout"
+    )
+    mock_rollout_1.submit.assert_not_called()
+
+  def test_orchestrator_sync_jax_cache_fallback(self):
+    orch = orchestrator.ClusterOrchestrator(
+        jax_cache_config={
+            "save_jax_cache": True,
+            "rollout_jax_cache_gcs_dir": "gs://bucket/orch_rollout",
+        }
+    )
+    mock_rollout_0 = mock.MagicMock(spec=remote_execution.ActorHandle)
+    mock_rollout_0.submit.side_effect = RuntimeError("GCS upload failed")
+
+    mock_rollout_1 = mock.MagicMock(spec=remote_execution.ActorHandle)
+    mock_rollout_1.submit.return_value = 5
+
+    orch.register_worker_handle(
+        "rollout-0",
+        roles=[datatypes.Role.ROLLOUT],
+        handle=mock_rollout_0,
+    )
+    orch.register_worker_handle(
+        "rollout-1",
+        roles=[datatypes.Role.ROLLOUT],
+        handle=mock_rollout_1,
+    )
+    orch.sync_jax_cache()
+    mock_rollout_0.submit.assert_called_once_with(
+        "upload_jax_cache", gcs_uri="gs://bucket/orch_rollout"
+    )
+    mock_rollout_1.submit.assert_called_once_with(
+        "upload_jax_cache", gcs_uri="gs://bucket/orch_rollout"
+    )
+
   def test_jax_cache_config_shell_hash(self):
     script = Path(__file__).resolve().parents[3] / "tunix/experimental/examples/common/jax_cache_config.sh"
     cmd = (
