@@ -77,6 +77,15 @@ export TUNIX_IMAGE="gcr.io/cloud-tpu-multipod-dev/${USER}/trellis:latest"
 SEED=42 bash tunix/experimental/examples/recipes/mlperf_35b_128_v5p.sh start
 ```
 
+> **RCP logging runs must start from step 0.** With `RCP_LOGGING=true` the
+> orchestrator fails fast when the trainer restores a checkpoint with
+> `step != 0`. That happens when a launch reuses a `JOB_PREFIX` (the recipes
+> derive `MAXTEXT_OUTPUT_DIR` from it) whose earlier run already saved
+> checkpoints, and it would otherwise silently resume mid-run. Use a fresh
+> `JOB_PREFIX` for every submission run. For a non-submission development
+> resume set `ALLOW_CHECKPOINT_RESUME=true`; the mllog then records the real
+> `init_checkpoint_step` and will not pass the compliance checker.
+
 #### FP8 MoE
 
 Every recipe can run its routed experts in FP8 (see `fp8_moe.sh`):

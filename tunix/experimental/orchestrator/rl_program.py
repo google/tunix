@@ -397,6 +397,8 @@ class StandardRLProgram(RLProgram):
       on_step_end: Callable[[int, Any], None] | None = None,
       val_start_step: int | None = None,
       on_checkpoint_saved: Callable[[dict[str, Any]], None] | None = None,
+      on_checkpoint_restored: Callable[[int], None] | None = None,
+      disallow_checkpoint_resume: bool = False,
       checkpoint_optimizer_interval_steps: int = 1,
       pipeline_train_microbatches: bool = False,
       rollout_priority_scheduling: bool = False,
@@ -567,6 +569,8 @@ class StandardRLProgram(RLProgram):
     self.on_step_end = on_step_end
     self.val_start_step = val_start_step
     self.on_checkpoint_saved = on_checkpoint_saved
+    self.on_checkpoint_restored = on_checkpoint_restored
+    self.disallow_checkpoint_resume = disallow_checkpoint_resume
     # Checkpoints carry the optimizer state only every this many optimizer
     # steps, and on the last step; the rest hold just the model params, which
     # is all eval reads. The optimizer state can be several times the params'
@@ -712,7 +716,9 @@ class StandardRLProgram(RLProgram):
     assert self.engine is not None
     restored = await self.engine.resume_from_checkpoint(
         role=datatypes.Role.ACTOR,
-        resync_rollout_weights=self.sync_weights,
+        resync_rollout_weights=(
+            self.sync_weights and not self.disallow_checkpoint_resume
+        ),
     )
     if isinstance(restored, tuple):
       restored_step, restored_next_batch_idx = restored
@@ -725,8 +731,16 @@ class StandardRLProgram(RLProgram):
           and not isinstance(engine_next_batch, bool)
           else restored_step
       )
+    if self.on_checkpoint_restored is not None:
+      self.on_checkpoint_restored(restored_step)
     if restored_step <= 0:
       return
+    if self.disallow_checkpoint_resume:
+      raise RuntimeError(
+          f"Restored checkpoint step {restored_step} != 0, but "
+          "disallow_checkpoint_resume is True (MLPerf RCP runs must start "
+          "from step 0). Point the trainer at a fresh checkpoint directory."
+      )
     restored_next_batch_idx = max(restored_step, restored_next_batch_idx)
     self._step = restored_step
     self.policy_version = restored_step
