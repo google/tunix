@@ -392,6 +392,7 @@ class StandardRLProgram(RLProgram):
       group_order: (
           trajectory_queue_manager.GroupOrder | str
       ) = trajectory_queue_manager.GroupOrder.ARRIVAL,
+      on_train_start: Callable[[int], None] | None = None,
       on_step_begin: Callable[[int], None] | None = None,
       on_step_end: Callable[[int, Any], None] | None = None,
       val_start_step: int | None = None,
@@ -561,6 +562,7 @@ class StandardRLProgram(RLProgram):
         if isinstance(group_order, trajectory_queue_manager.GroupOrder)
         else trajectory_queue_manager.GroupOrder(group_order)
     )
+    self.on_train_start = on_train_start
     self.on_step_begin = on_step_begin
     self.on_step_end = on_step_end
     self.val_start_step = val_start_step
@@ -2202,6 +2204,9 @@ class StandardRLProgram(RLProgram):
           sync_weights=True,
           policy_version=self.policy_version,
       )
+
+    if self.on_train_start is not None:
+      self.on_train_start(self._step)
 
     train_task = asyncio.create_task(self.train_stage())
     tasks = [
