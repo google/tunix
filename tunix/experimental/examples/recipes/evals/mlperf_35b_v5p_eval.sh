@@ -7,8 +7,9 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # k8s has a 63 char limit on total label name, so keep job_prefix unique to your job and short
 export JOB_PREFIX="${JOB_PREFIX:-${USER}}"
 export EVAL_JOBSET_NAME="${EVAL_JOBSET_NAME:-${JOB_PREFIX}-eval}"
-export EVAL_OUTPUT_DIR="${EVAL_OUTPUT_DIR:-gs://atwigg-trellis-europe-west4-dev/eval_results/${JOB_PREFIX}}"
-export TRAJECTORY_LOG_DIR="${TRAJECTORY_LOG_DIR:-gs://atwigg-trellis-europe-west4-dev/trajectories/${JOB_PREFIX}}"
+export BUCKET="${BUCKET:-gs://atwigg-trellis-europe-west4-dev}"
+export EVAL_OUTPUT_DIR="${EVAL_OUTPUT_DIR:-${BUCKET}/eval_results/${JOB_PREFIX}}"
+export TRAJECTORY_LOG_DIR="${TRAJECTORY_LOG_DIR:-${BUCKET}/trajectories/${JOB_PREFIX}}"
 export TUNIX_IMAGE="${TUNIX_IMAGE:-gcr.io/cloud-tpu-multipod-dev/sanbao/tunix_stack:eval}"
 
 export REGION="europe-west4"

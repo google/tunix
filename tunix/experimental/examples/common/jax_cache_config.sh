@@ -19,30 +19,15 @@
 
 export LOCAL_JAX_CACHE_DIR=${LOCAL_JAX_CACHE_DIR:-${JAX_CACHE_DIR:-/tmp/jax_cache}}
 export JAX_CACHE_GCS_DIR=${JAX_CACHE_GCS_DIR:-}
+# The cache lives under the recipe's BUCKET (already region-specific), so there
+# is a single source of truth for region -> bucket. Set JAX_CACHE_BUCKET to
+# share a cache from a different bucket.
 export JAX_CACHE_BUCKET="${JAX_CACHE_BUCKET:-${BUCKET:-}}"
 
 if [[ -z "${JAX_CACHE_GCS_DIR}" && -z "${ROLLOUT_JAX_CACHE_GCS_DIR:-}" ]]; then
-  _cache_bucket="${JAX_CACHE_BUCKET}"
-  if [[ -z "${_cache_bucket}" ]]; then
-    case "${REGION:-}" in
-      europe-west4)
-        _cache_bucket="gs://atwigg-trellis-europe-west4-dev"
-        ;;
-      us-central1)
-        _cache_bucket="gs://atwigg-trellis-us-central1"
-        ;;
-      us-east1)
-        _cache_bucket="gs://atwigg-trellis-us-east1-fast-dev"
-        ;;
-      *)
-        if [[ -n "${MAXTEXT_OUTPUT_DIR:-}" ]]; then
-          _cache_bucket="$(echo "${MAXTEXT_OUTPUT_DIR}" | grep -o '^gs://[^/]*' || true)"
-        fi
-        ;;
-    esac
-  fi
-
-  if [[ -n "${_cache_bucket}" ]]; then
+  if [[ -z "${JAX_CACHE_BUCKET}" ]]; then
+    echo "[jax_cache] Neither BUCKET nor JAX_CACHE_BUCKET is set; rollout JAX compilation cache is disabled." >&2
+  else
     _hw="unknown"
     if [[ "${ROLLOUT_TPU_SLICE:-}" == tpuv5* ]]; then
       _hw="v5p"
@@ -58,7 +43,7 @@ if [[ -z "${JAX_CACHE_GCS_DIR}" && -z "${ROLLOUT_JAX_CACHE_GCS_DIR:-}" ]]; then
     fi
     _rollout_tp="${ROLLOUT_MESH_TP:-1}"
 
-    export ROLLOUT_JAX_CACHE_GCS_DIR="${_cache_bucket}/jax_cache/${_hw}/${_model_slug}/rollout_${_rollout_topo}_ep${_rollout_ep}_tp${_rollout_tp}"
+    export ROLLOUT_JAX_CACHE_GCS_DIR="${JAX_CACHE_BUCKET}/jax_cache/${_hw}/${_model_slug}/rollout_${_rollout_topo}_ep${_rollout_ep}_tp${_rollout_tp}"
   fi
 fi
 
