@@ -146,6 +146,41 @@ class GcsCacheTest(absltest.TestCase):
             blob_name_prefix="prefix/",
             skip_if_exists=True,
             max_workers=mock.ANY,
+            worker_type=mock_tm.THREAD,
+        )
+
+  def test_download_cache_uses_thread_worker_type(self):
+    with tempfile.TemporaryDirectory() as tmpdir:
+      cache_dir = Path(tmpdir) / "cache"
+
+      mock_storage = mock.MagicMock()
+      mock_tm = mock.MagicMock()
+      mock_storage.transfer_manager = mock_tm
+      mock_cloud = mock.MagicMock()
+      mock_cloud.storage = mock_storage
+
+      mock_blob = mock.MagicMock()
+      mock_blob.name = "prefix/obj1"
+      mock_storage.Client.return_value.list_blobs.return_value = [mock_blob]
+      mock_tm.download_many_to_path.return_value = [None]
+
+      with mock.patch.dict(
+          sys.modules,
+          {
+              "google.cloud": mock_cloud,
+              "google.cloud.storage": mock_storage,
+              "google.cloud.storage.transfer_manager": mock_tm,
+          },
+      ):
+        success = gcs_cache.download_cache(cache_dir, "gs://test-bucket/prefix")
+        self.assertTrue(success)
+        mock_tm.download_many_to_path.assert_called_once_with(
+            mock.ANY,
+            ["obj1"],
+            destination_directory=str(cache_dir),
+            blob_name_prefix="prefix/",
+            max_workers=mock.ANY,
+            worker_type=mock_tm.THREAD,
         )
 
   def test_orchestrator_sync_jax_cache(self):

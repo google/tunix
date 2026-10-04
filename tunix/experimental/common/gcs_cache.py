@@ -108,6 +108,7 @@ def download_cache(local_dir: str | Path, gcs_uri: str, max_workers: int = 8) ->
         destination_directory=str(local_path),
         blob_name_prefix=prefix,
         max_workers=max_workers,
+        worker_type=transfer_manager.THREAD,
     )
     any_failed = False
     for name, result in zip(blob_names, results):
@@ -200,6 +201,7 @@ def upload_cache(local_dir: str | Path, gcs_uri: str, max_workers: int = 8) -> b
         blob_name_prefix=prefix,
         skip_if_exists=True,
         max_workers=max_workers,
+        worker_type=transfer_manager.THREAD,
     )
     any_failed = False
     skipped = 0

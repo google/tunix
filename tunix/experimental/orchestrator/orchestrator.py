@@ -361,11 +361,17 @@ class ClusterOrchestrator:
       handle = self._remote_worker_handles_by_id[worker_id]
       return handle.submit("upload_jax_cache", gcs_uri=rollout_gcs_uri)
 
-    pool = futures.ThreadPoolExecutor(max_workers=1)
-    upload = pool.submit(_sync_worker, primary_worker_id)
+    def _sync_worker_with_timeout(worker_id: str, timeout_s: float = 180.0):
+      pool = futures.ThreadPoolExecutor(max_workers=1)
+      try:
+        upload = pool.submit(_sync_worker, worker_id)
+        return upload.result(timeout=timeout_s)
+      finally:
+        pool.shutdown(wait=False)
+
     primary_failed = False
     try:
-      res = upload.result(timeout=180.0)
+      res = _sync_worker_with_timeout(primary_worker_id)
       logging.info(
           "Worker %s JAX cache upload finished: %s", primary_worker_id, res
       )
@@ -374,7 +380,6 @@ class ClusterOrchestrator:
           "Failed to sync JAX cache on worker %s: %r", primary_worker_id, err
       )
       primary_failed = True
-    pool.shutdown(wait=False)
 
     if primary_failed and len(rollout_worker_ids) > 1:
       fallback_id = rollout_worker_ids[1]
@@ -383,9 +388,7 @@ class ClusterOrchestrator:
           fallback_id,
       )
       try:
-        fb_res = self._remote_worker_handles_by_id[fallback_id].submit(
-            "upload_jax_cache", gcs_uri=rollout_gcs_uri
-        )
+        fb_res = _sync_worker_with_timeout(fallback_id)
         logging.info(
             "Fallback worker %s JAX cache upload finished: %s",
             fallback_id,
