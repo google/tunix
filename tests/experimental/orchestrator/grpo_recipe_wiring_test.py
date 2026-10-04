@@ -590,6 +590,45 @@ class DeepSWEExampleCommandLineTest(absltest.TestCase):
         parse(["--no-in_flight_weight_updates"]).in_flight_weight_updates
     )
 
+  def test_launchers_wire_rollout_skip_jax_precompile(self):
+    root = os.path.join(
+        os.path.dirname(os.path.abspath(tunix.__file__)),
+        "experimental",
+        "examples",
+    )
+    with open(os.path.join(root, "deepswe_dist", "k8s_launcher.sh")) as f:
+      deepswe_k8s = f.read()
+    self.assertIn(
+        "export ROLLOUT_SKIP_JAX_PRECOMPILE=${ROLLOUT_SKIP_JAX_PRECOMPILE:-0}",
+        deepswe_k8s,
+    )
+    self.assertIn(
+        "export EVAL_SKIP_JAX_PRECOMPILE=${EVAL_SKIP_JAX_PRECOMPILE:-1}",
+        deepswe_k8s,
+    )
+    self.assertIn(
+        "SKIP_JAX_PRECOMPILE=${ROLLOUT_SKIP_JAX_PRECOMPILE}",
+        deepswe_k8s,
+    )
+    self.assertIn(
+        "SKIP_JAX_PRECOMPILE=${EVAL_SKIP_JAX_PRECOMPILE}",
+        deepswe_k8s,
+    )
+
+    with open(os.path.join(root, "deepswe_dist", "launcher.sh")) as f:
+      deepswe_local = f.read()
+    self.assertIn(
+        'SKIP_JAX_PRECOMPILE="${ROLLOUT_SKIP_JAX_PRECOMPILE:-0}"',
+        deepswe_local,
+    )
+
+    with open(os.path.join(root, "recipes", "mlperf_base.sh")) as f:
+      mlperf_base = f.read()
+    self.assertIn(
+        'ROLLOUT_SKIP_JAX_PRECOMPILE="${ROLLOUT_SKIP_JAX_PRECOMPILE:-0}"',
+        mlperf_base,
+    )
+
 
 class AuxMetricForwardingTest(absltest.TestCase):
   """Tests for converting a loss function's aux metrics for the buffer."""
