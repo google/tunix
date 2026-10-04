@@ -439,6 +439,7 @@ class SweAgentTest(absltest.TestCase):
         tool_names,
         [
             "execute_bash",
+            "think",
             "finish",
             "task_tracker",
             "str_replace_editor",
@@ -739,6 +740,100 @@ class SweAgentTest(absltest.TestCase):
         mock_workspace.execute_command.call_args.kwargs["timeout"], 45.0
     )
 
+  def test_step_openhands_bash_wrapper_keeps_heredoc_and_comment_valid(self):
+    import subprocess  # pylint: disable=g-import-not-at-top
+    import tempfile  # pylint: disable=g-import-not-at-top
+
+    mock_workspace = mock.MagicMock()
+    mock_res = mock.MagicMock(spec=["stdout", "stderr", "exit_code"])
+    mock_res.exit_code = 0
+    mock_res.stdout = ""
+    mock_res.stderr = ""
+    mock_workspace.execute_command.return_value = mock_res
+
+    mock_env = mock.MagicMock()
+    mock_env.workspace = mock_workspace
+    mock_env.max_steps = 10
+    mock_env.step_timeout = 60.0
+    mock_env.total_steps = 0
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+      for command, expected in (
+          ("cat <<'EOF'\nhello from heredoc\nEOF", "hello from heredoc\n"),
+          ("cat << 'END'\nline1\nline2\nEND", "line1\nline2\n"),
+          ("echo ok  # trailing comment", "ok\n"),
+      ):
+        openhands_utils.step_openhands(
+            mock_env, SWEAction("execute_bash", {"command": command})
+        )
+        wrapped = mock_workspace.execute_command.call_args[0][0]
+        # Run the wrapped command for real, with its cwd state file moved
+        # into the temp dir so nothing is written outside it.
+        wrapped = wrapped.replace(
+            "/var/tmp/.oh_cwd", os.path.join(tmpdir, ".oh_cwd")
+        )
+        res = subprocess.run(
+            ["sh", "-c", wrapped], capture_output=True, text=True, cwd=tmpdir
+        )
+        self.assertEqual(res.returncode, 0, msg=f"{command!r}: {res.stderr}")
+        self.assertEqual(res.stdout, expected, msg=repr(command))
+
+  def test_oh_editor_remote_driver_postpones_annotations(self):
+    import __future__  # pylint: disable=g-import-not-at-top
+    import ast  # pylint: disable=g-import-not-at-top
+    import base64  # pylint: disable=g-import-not-at-top
+    import re  # pylint: disable=g-import-not-at-top
+    import shlex  # pylint: disable=g-import-not-at-top
+    import subprocess  # pylint: disable=g-import-not-at-top
+    import sys  # pylint: disable=g-import-not-at-top
+    import tempfile  # pylint: disable=g-import-not-at-top
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+      file_path = os.path.join(tmpdir, "sample.py")
+      with open(file_path, "w", encoding="utf-8") as f:
+        f.write("def foo():\n    return 1\n")
+      cmd = openhands_utils._build_oh_editor_remote_cmd(
+          {"command": "view", "path": file_path}
+      )
+      argv = shlex.split(cmd)
+      self.assertEqual(argv[0], "python3")
+      driver = base64.b64decode(
+          re.search(r"b64decode\('([^']+)'\)", cmd).group(1)
+      ).decode("utf-8")
+      # Sandboxes run python 3.7/3.8, where `dict[str, Any]` annotations fail
+      # unless their evaluation is postponed.
+      self.assertTrue(
+          driver.startswith("from __future__ import annotations\n")
+      )
+      code = compile(driver, "<driver>", "exec", dont_inherit=True)
+      self.assertTrue(code.co_flags & __future__.annotations.compiler_flag)
+      ast.parse(driver, feature_version=(3, 7))
+
+      # Run the shipped driver with its history file moved into the temp dir.
+      driver = driver.replace(
+          "/var/tmp/.oh_editor_history.json",
+          os.path.join(tmpdir, ".oh_editor_history.json"),
+      )
+      out = subprocess.run(
+          [sys.executable, "-c", driver, argv[-1]],
+          capture_output=True,
+          text=True,
+      )
+      self.assertEqual(out.returncode, 0, msg=out.stderr)
+      self.assertIn("cat -n", out.stdout)
+      self.assertIn("def foo():", out.stdout)
+
+  def test_openhands_editor_path_description_matches_reference(self):
+    tools = {
+        t["function"]["name"]: t["function"] for t in template.OPENHANDS_TOOLS
+    }
+    path_param = tools["str_replace_editor"]["parameters"]["properties"]["path"]
+    self.assertEqual(
+        path_param["description"],
+        "Absolute path to file or directory, e.g."
+        " `/openhands_setup/OpenHands/file.py` or"
+        " `/openhands_setup/OpenHands`.",
+    )
 
 if __name__ == "__main__":
   absltest.main()

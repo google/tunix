@@ -369,7 +369,12 @@ def _build_oh_editor_remote_cmd(params: dict[str, Any]) -> str:
 
   src_clip = inspect.getsource(_maybe_clip_response)
   src_editor = inspect.getsource(run_oh_editor_locally)
+  # The driver runs under the sandbox's own python3 (3.7 for numpy and pandas,
+  # 3.8 for pyramid), where the PEP 585 annotations in the copied source
+  # (`dict[str, Any]`) raise TypeError at def time. Postponed evaluation keeps
+  # them unevaluated.
   driver = (
+      "from __future__ import annotations\n"
       "import base64, json, os, subprocess, sys\n"
       f"MAX_RESPONSE_LEN_CHAR = {MAX_RESPONSE_LEN_CHAR}\n"
       f"MAX_LINES_TO_VIEW = {MAX_LINES_TO_VIEW}\n"
@@ -872,12 +877,15 @@ def step_openhands(
       except (ValueError, TypeError):
         step_timeout = default_timeout
 
+    # The closing parenthesis goes on its own line. Appended to the command's
+    # last line, it would be swallowed by a heredoc terminator (`EOF)`) or a
+    # trailing `# comment`, and the shell fails with a syntax error.
     wrapped_cmd = (
         "(__oh_cwd=$(cat /var/tmp/.oh_cwd 2>/dev/null); "
         'if [ -n "$__oh_cwd" ] && [ -d "$__oh_cwd" ]; then cd "$__oh_cwd"; '
         "elif [ -d /testbed ]; then cd /testbed; else cd /workspace; fi; "
         "trap 'pwd > /var/tmp/.oh_cwd 2>/dev/null || true' EXIT; "
-        f"{cmd})"
+        f"{cmd}\n)"
         if cmd
         else "true"
     )
