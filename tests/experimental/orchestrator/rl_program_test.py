@@ -4723,7 +4723,7 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
-  def test_critique_stage_evaluates_unmasked_max_steps_and_skips_timeout(
+  def test_critique_stage_evaluates_unmasked_max_steps_and_timeout(
       self,
   ):
     async def _run():
@@ -4764,13 +4764,13 @@ class RLProgramTest(absltest.TestCase):
 
       await program.critique_stage()
 
-      # MAX_STEPS_REACHED with non-zero masks (overlong_filter=False) is valid
-      # and scored, whereas TIMEOUT is always invalid and skipped.
-      self.assertEqual(reward_fn.call_count, 1)
+      # MAX_STEPS_REACHED with non-zero masks (overlong_filter=False) and an
+      # episode TIMEOUT are both valid samples and are scored.
+      self.assertEqual(reward_fn.call_count, 2)
       rewards = self.mock_algo.create_trainer_payloads.call_args.kwargs[
           "rewards"
       ]
-      self.assertEqual(rewards, [0.75, 0.0])
+      self.assertEqual(rewards, [0.75, 0.75])
       program.close()
 
     asyncio.run(_run())

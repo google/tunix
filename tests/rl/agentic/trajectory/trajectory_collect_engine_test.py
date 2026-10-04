@@ -1739,6 +1739,34 @@ class ExactTokenContinuityCollectTest(absltest.TestCase):
       self.assertEqual(result['trajectory_reward'], 0.0)
       env.close.assert_called_once()
 
+  def test_timeout_skips_final_reward(self):
+    agent, env = self._frozenlake()
+    env.max_steps = 3
+    final_reward_fn = mock.MagicMock(return_value=1.0)
+    env.final_reward_fn = final_reward_fn
+
+    async def slow_async_model_call(*args, **kwargs):
+      del args, kwargs
+      await asyncio.sleep(0.15)
+      raise AssertionError("should have timed out")
+
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=agent,
+        env=env,
+        model_call=slow_async_model_call,
+        tokenizer=_FreshTextTokenizer([]),
+        chat_parser=_FreshTextParser([90]),
+        max_response_length=64,
+        timeout=0.03,
+        exact_token_continuity=True,
+        overlong_filter=False,
+    )
+    result = asyncio.run(engine.collect(mode='Token'))
+    self.assertEqual(result['status'], agent_types.TrajectoryStatus.TIMEOUT.name)
+    final_reward_fn.assert_not_called()
+    self.assertEqual(result['trajectory_reward'], 0.0)
+    env.close.assert_called_once()
+
   def test_final_reward_timeout_defaults_to_zero(self):
     agent, env = self._frozenlake()
     env.max_steps = 1

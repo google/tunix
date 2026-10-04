@@ -347,12 +347,16 @@ class TrajectoryCollectEngine:
 
       self._finalize_terminal_step_routing()
 
-      masked_out = (
-          self.overlong_filter
-          and self.agent.trajectory.status in self.filter_statuses
+      status = self.agent.trajectory.status
+      masked_out = self.overlong_filter and status in self.filter_statuses
+      # An episode that exhausted its wall-clock budget scores 0 by
+      # definition; grading its unfinished state would waste sandbox time and
+      # could reward an incomplete trajectory.
+      skip_final_reward = (
+          masked_out or status == agent_types.TrajectoryStatus.TIMEOUT
       )
       try:
-        if not masked_out:
+        if not skip_final_reward:
           await self._append_final_reward()
         self.compute_mc_reward()
         self.compute_trajectory_reward()
