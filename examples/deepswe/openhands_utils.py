@@ -21,7 +21,7 @@ import os
 import re
 import subprocess
 import time
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional
 
 from tunix.rl.agentic.environments.base_environment import EnvStepResult
 
@@ -45,11 +45,19 @@ def _maybe_clip_response(
   """Clips overly long tool outputs matching OpenHands observation truncation."""
   if not text or max_len <= 0 or len(text) <= max_len:
     return text
+  if (
+      text.endswith(FILE_CLIPPED_NOTICE)
+      and len(text) <= max_len + len(FILE_CLIPPED_NOTICE) + 2
+  ) or (
+      text.endswith(CLIPPED_NOTICE)
+      and len(text) <= max_len + len(CLIPPED_NOTICE) + 2
+  ):
+    return text
   return text[:max_len] + f"\n{notice}"
 
 
 def run_oh_editor_locally(
-    params: dict[str, Any],
+    params: Dict[str, Any],
     history_file: str = "/var/tmp/.oh_editor_history.json",
 ) -> str:
   """Executes str_replace_editor matching OpenHands OHEditor semantics."""
@@ -62,7 +70,7 @@ def run_oh_editor_locally(
         " with '/'."
     )
 
-  def _load_history() -> dict[str, list[str]]:
+  def _load_history() -> Dict[str, List[str]]:
     if os.path.exists(history_file):
       try:
         with open(history_file, "r", encoding="utf-8") as f:
@@ -73,7 +81,7 @@ def run_oh_editor_locally(
         pass
     return {}
 
-  def _save_history(hist: dict[str, list[str]]) -> None:
+  def _save_history(hist: Dict[str, List[str]]) -> None:
     try:
       os.makedirs(os.path.dirname(history_file), exist_ok=True)
       with open(history_file, "w", encoding="utf-8") as f:
@@ -96,7 +104,7 @@ def run_oh_editor_locally(
     return val
 
   def _format_cat_n(
-      lines: list[str], start_line: int = 1, path_label: str = path
+      lines: List[str], start_line: int = 1, path_label: str = path
   ) -> str:
     numbered = "\n".join(
         f"{i + start_line:6}\t{line}" for i, line in enumerate(lines)
@@ -138,7 +146,7 @@ def run_oh_editor_locally(
     except Exception as e:  # pylint: disable=broad-exception-caught
       return f"Error reading {path}: {e}"
 
-    file_lines = file_content.expandtabs().split("\n")
+    file_lines = file_content.split("\n")
     n_lines = len(file_lines)
     init_line = 1
     raw_range = params.get("view_range")
@@ -172,11 +180,7 @@ def run_oh_editor_locally(
             f" file: {[1, n_lines]}."
         )
       if final_line > n_lines:
-        return (
-            f"Error: Invalid `view_range` {view_range}. Its second element"
-            f" `{final_line}` should be smaller than the number of lines in"
-            f" the file: `{n_lines}`."
-        )
+        final_line = n_lines
       if final_line != -1 and final_line < init_line:
         return (
             f"Error: Invalid `view_range` {view_range}. Its second element"
@@ -208,6 +212,7 @@ def run_oh_editor_locally(
     if file_text is None:
       return "Error: Parameter `file_text` is required for command: create."
     try:
+      os.makedirs(os.path.dirname(path) or "/", exist_ok=True)
       with open(path, "w", encoding="utf-8") as f:
         f.write(str(file_text))
     except Exception as e:  # pylint: disable=broad-exception-caught
@@ -223,9 +228,9 @@ def run_oh_editor_locally(
     old_str = params.get("old_str")
     if old_str is None:
       return "Error: Parameter `old_str` is required for command: str_replace."
-    old_str = str(old_str).expandtabs()
+    old_str = str(old_str)
     new_str = (
-        str(params.get("new_str")).expandtabs()
+        str(params.get("new_str"))
         if params.get("new_str") is not None
         else ""
     )
@@ -236,11 +241,25 @@ def run_oh_editor_locally(
       )
     try:
       with open(path, "r", encoding="utf-8", errors="replace") as f:
-        file_content = f.read().expandtabs()
+        file_content = f.read()
     except Exception as e:  # pylint: disable=broad-exception-caught
       return f"Error reading {path}: {e}"
 
     occurrences = file_content.count(old_str)
+    if occurrences == 0:
+      for candidate_old, candidate_new in (
+          (old_str.strip("\r\n"), new_str.strip("\r\n")),
+          (old_str.strip(), new_str.strip()),
+      ):
+        if (
+            candidate_old
+            and candidate_old != candidate_new
+            and file_content.count(candidate_old) == 1
+        ):
+          old_str = candidate_old
+          new_str = candidate_new
+          occurrences = 1
+          break
     if occurrences == 0:
       return (
           f"Error: No replacement was performed, old_str `{old_str}` did not"
@@ -299,10 +318,10 @@ def run_oh_editor_locally(
     new_str = params.get("new_str")
     if new_str is None:
       return "Error: Parameter `new_str` is required for command: insert."
-    new_str = str(new_str).expandtabs()
+    new_str = str(new_str)
     try:
       with open(path, "r", encoding="utf-8", errors="replace") as f:
-        file_content = f.read().expandtabs()
+        file_content = f.read()
     except Exception as e:  # pylint: disable=broad-exception-caught
       return f"Error reading {path}: {e}"
 
@@ -370,13 +389,14 @@ def _build_oh_editor_remote_cmd(params: dict[str, Any]) -> str:
   src_clip = inspect.getsource(_maybe_clip_response)
   src_editor = inspect.getsource(run_oh_editor_locally)
   driver = (
+      "from __future__ import annotations\n"
       "import base64, json, os, subprocess, sys\n"
       f"MAX_RESPONSE_LEN_CHAR = {MAX_RESPONSE_LEN_CHAR}\n"
       f"MAX_LINES_TO_VIEW = {MAX_LINES_TO_VIEW}\n"
       f"SNIPPET_LINES = {SNIPPET_LINES}\n"
       f"CLIPPED_NOTICE = {CLIPPED_NOTICE!r}\n"
       f"FILE_CLIPPED_NOTICE = {FILE_CLIPPED_NOTICE!r}\n"
-      "from typing import Any, Optional\n\n"
+      "from typing import Any, Dict, List, Optional\n\n"
       f"{src_clip}\n\n"
       f"{src_editor}\n\n"
       "payload = json.loads(base64.b64decode(sys.argv[1]).decode('utf-8'))\n"
@@ -443,6 +463,9 @@ def resolve_base_commit(entry: Optional[dict[str, Any]]) -> str:
         parsed_commit = None
     if isinstance(parsed_commit, dict) and parsed_commit.get("old_commit_hash"):
       return str(parsed_commit["old_commit_hash"]).strip()
+  commit_hash = entry.get("commit_hash")
+  if commit_hash:
+    return str(commit_hash).strip()
   return ""
 
 
@@ -613,11 +636,12 @@ def _format_command_result(
 ) -> tuple[str, bool]:
   """Formats an OpenHands CommandResult into (observation, timed_out)."""
   if getattr(result, "stdout", None) is not None:
-    obs = (
-        str(result.stdout)
-        if getattr(result, "exit_code", 0) == 0
-        else f"{result.stdout}\n{getattr(result, 'stderr', '')}"
-    )
+    stdout_str = str(result.stdout)
+    stderr_str = str(getattr(result, "stderr", "") or "")
+    if stderr_str:
+      obs = f"{stdout_str}\n{stderr_str}" if stdout_str else stderr_str
+    else:
+      obs = stdout_str
   elif getattr(result, "output", None) is not None:
     obs = str(result.output)
   else:
@@ -820,8 +844,10 @@ def step_openhands(
     step_timeout = getattr(env, "step_timeout", 60.0)
     b64_code = base64.b64encode(code.encode("utf-8")).decode("ascii")
     wrapped_cmd = (
-        "(cd /testbed 2>/dev/null || cd /workspace) && "
-        f"python3 -c \"import base64; exec(base64.b64decode('{b64_code}').decode('utf-8'))\""
+        "(for __p in /opt/miniconda3/envs/testbed/bin /root/.venv/bin"
+        ' /testbed/.venv/bin; do [ -d "$__p" ] && PATH="$__p:$PATH"; done;'
+        " export PATH; (cd /testbed 2>/dev/null || cd /workspace) && "
+        f"python3 -c \"import base64; exec(base64.b64decode('{b64_code}').decode('utf-8'))\")"
     )
 
     if getattr(env, "workspace", None) is not None:
@@ -873,11 +899,14 @@ def step_openhands(
         step_timeout = default_timeout
 
     wrapped_cmd = (
-        "(__oh_cwd=$(cat /var/tmp/.oh_cwd 2>/dev/null); "
+        "(for __p in /opt/miniconda3/envs/testbed/bin /root/.venv/bin"
+        ' /testbed/.venv/bin; do [ -d "$__p" ] && PATH="$__p:$PATH"; done;'
+        " export PATH; "
+        "__oh_cwd=$(cat /var/tmp/.oh_cwd 2>/dev/null); "
         'if [ -n "$__oh_cwd" ] && [ -d "$__oh_cwd" ]; then cd "$__oh_cwd"; '
         "elif [ -d /testbed ]; then cd /testbed; else cd /workspace; fi; "
         "trap 'pwd > /var/tmp/.oh_cwd 2>/dev/null || true' EXIT; "
-        f"{cmd})"
+        f"{cmd}\n)"
         if cmd
         else "true"
     )

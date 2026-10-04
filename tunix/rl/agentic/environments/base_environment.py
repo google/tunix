@@ -319,8 +319,15 @@ class BaseTaskEnv(BaseEnv):
 
     # Enforce maximum episode length; if _step_impl has already finished
     # the episode, keep done=True.
-    done = result.done or (self.step_count >= self.max_steps)
-    return result.observation, result.reward, done, result.info
+    max_steps_reached = (not result.done) and (
+        self.step_count >= self.max_steps
+    )
+    done = result.done or max_steps_reached
+    info = result.info
+    if max_steps_reached:
+      info = dict(info) if isinstance(info, dict) else {}
+      info["max_steps_reached"] = True
+    return result.observation, result.reward, done, info
 
   @classmethod
   def from_dict(cls, env_args: Dict[str, Any]) -> "BaseTaskEnv":
