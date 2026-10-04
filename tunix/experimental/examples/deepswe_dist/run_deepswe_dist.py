@@ -884,7 +884,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       )
 
     def _on_train_start(step: int) -> None:
-      if hasattr(prompt_stream, "wait_for_initial"):
+      if isinstance(prompt_stream, swe_env.PrewarmDatasetIterator):
         prompt_stream.wait_for_initial()
       if args.rcp_logging:
         mllog_utils.train_start(args, step=step)
