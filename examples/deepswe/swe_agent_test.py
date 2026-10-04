@@ -979,6 +979,15 @@ class SweAgentTest(absltest.TestCase):
     for value, expected in (
         ("/tmp/_MEIabc:/opt/a:/opt/b", "/opt/a:/opt/b"),
         ("/tmp/_MEIabc", "unset"),
+        ("/tmp/_MEIabc:", "unset"),
+        ("/oh/glibc236", "unset"),
+        ("/oh/glibc236:", "unset"),
+        ("/tmp/_MEIabc:/oh/glibc236", "unset"),
+        ("/tmp/_MEIabc:/oh/glibc236:", "unset"),
+        ("/tmp/_MEIabc:/oh/glibc236:/opt/a:", "/opt/a"),
+        ("/tmp/_MEIx::/usr/lib", "/usr/lib"),
+        (":/usr/lib", "/usr/lib"),
+        ("", "unset"),
         ("/usr/lib", "/usr/lib"),
     ):
       out = subprocess.run(
@@ -988,6 +997,14 @@ class SweAgentTest(absltest.TestCase):
           env={"PATH": os.environ.get("PATH", ""), "LD_LIBRARY_PATH": value},
       ).stdout.strip()
       self.assertEqual(out, expected, msg=value)
+
+    out_unset = subprocess.run(
+        ["sh", "-c", probe],
+        capture_output=True,
+        text=True,
+        env={"PATH": os.environ.get("PATH", "")},
+    ).stdout.strip()
+    self.assertEqual(out_unset, "unset")
 
   def test_oh_editor_remote_driver_postpones_annotations(self):
     import __future__  # pylint: disable=g-import-not-at-top
@@ -1049,7 +1066,50 @@ class SweAgentTest(absltest.TestCase):
         " `/openhands_setup/OpenHands`.",
     )
 
+  def test_execute_ipython_cell_uses_testbed_cwd_and_venv_python(self):
+    import subprocess  # pylint: disable=g-import-not-at-top
+    import tempfile  # pylint: disable=g-import-not-at-top
+
+    mock_workspace = mock.MagicMock()
+    mock_res = mock.MagicMock(spec=["stdout", "stderr", "exit_code"])
+    mock_res.exit_code = 0
+    mock_res.stdout = "ok\n"
+    mock_res.stderr = ""
+    mock_workspace.execute_command.return_value = mock_res
+
+    mock_env = mock.MagicMock()
+    mock_env.workspace = mock_workspace
+    mock_env.max_steps = 10
+    mock_env.step_timeout = 60.0
+    mock_env.total_steps = 0
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+      fake_testbed = os.path.join(tmpdir, "testbed")
+      os.makedirs(fake_testbed)
+      openhands_utils.step_openhands(
+          mock_env,
+          SWEAction(
+              "execute_ipython_cell",
+              {"code": "import os; print(os.getcwd())"},
+          ),
+      )
+      wrapped = mock_workspace.execute_command.call_args[0][0]
+      self.assertTrue(
+          wrapped.startswith(openhands_utils._STRIP_PYINSTALLER_LD_PATH)
+      )
+      # Execute the wrapped command pointing /testbed to fake_testbed and verify
+      # the cd persists into the Python process.
+      proc = subprocess.run(
+          ["sh", "-c", wrapped.replace("/testbed", fake_testbed)],
+          capture_output=True,
+          text=True,
+          check=True,
+      )
+      self.assertEqual(proc.stdout.strip(), os.path.realpath(fake_testbed))
+
+
 if __name__ == "__main__":
   absltest.main()
+
 
 

@@ -259,7 +259,11 @@ def run_oh_editor_locally(
     num_lines = _count_lines(file_path)
     if not view_range:
       return _make_output(_read(file_path), str(file_path), 1)
-    if len(view_range) != 2 or not all(isinstance(i, int) for i in view_range):
+    if (
+        not isinstance(view_range, (list, tuple))
+        or len(view_range) != 2
+        or not all(isinstance(i, int) for i in view_range)
+    ):
       raise _invalid(
           "view_range", view_range, "It should be a list of two integers."
       )
@@ -494,17 +498,20 @@ def run_oh_editor_locally(
   except _ToolError as e:
     return f"ERROR:\n{e}"
 
-# The agent-server is a PyInstaller onefile binary. Its bootloader prepends its
-# bundle directory (/tmp/_MEI*) to LD_LIBRARY_PATH, and commands it spawns
-# inherit that, so binaries in older task images load the bundle's newer
-# libstdc++ and fail with "GLIBC_2.36 not found". Strip that entry before
-# running anything. Prints nothing and is a no-op when the entry is absent.
+# The agent-server is a PyInstaller onefile binary launched with /oh/glibc236
+# in LD_LIBRARY_PATH. Its bootloader prepends its bundle directory (/tmp/_MEI*)
+# to LD_LIBRARY_PATH, and commands it spawns inherit that (often with a
+# trailing colon from "${LD_LIBRARY_PATH:-}"), so binaries in older task images
+# load the bundle's newer libstdc++/libc and fail with "GLIBC_2.36 not found".
+# Strip any /tmp/_MEI* and /oh/glibc236 entries and trailing colons before
+# running anything, and unset LD_LIBRARY_PATH when empty.
 _STRIP_PYINSTALLER_LD_PATH = (
-    'case "${LD_LIBRARY_PATH-}" in'
-    " /tmp/_MEI*:*) LD_LIBRARY_PATH=${LD_LIBRARY_PATH#*:};"
-    " export LD_LIBRARY_PATH;;"
-    " /tmp/_MEI*) unset LD_LIBRARY_PATH;;"
-    " esac; "
+    'while :; do case "${LD_LIBRARY_PATH-}" in'
+    " /tmp/_MEI*:*|/oh/glibc236:*|:*) LD_LIBRARY_PATH=${LD_LIBRARY_PATH#*:};;"
+    " /tmp/_MEI*|/oh/glibc236|'') unset LD_LIBRARY_PATH; break;;"
+    " *:) LD_LIBRARY_PATH=${LD_LIBRARY_PATH%:};;"
+    " *) export LD_LIBRARY_PATH; break;;"
+    " esac; done; "
 )
 
 
@@ -646,7 +653,9 @@ def _exec_in_sandbox(target: Any, cmd: str, timeout: float = 60.0) -> Any:
   if ws is not None and not hasattr(target, "execute_command"):
     target = ws
   if hasattr(target, "execute_command"):
-    return target.execute_command(cmd, timeout=timeout)
+    return target.execute_command(
+        _STRIP_PYINSTALLER_LD_PATH + cmd, timeout=timeout
+    )
   runtime = getattr(target, "runtime", None)
   if runtime is None and getattr(target, "env", None) is not None:
     runtime = getattr(target.env, "runtime", None)
@@ -709,7 +718,7 @@ def setup_openhands_workspace(
       "git -C /testbed rev-parse HEAD 2>/dev/null || true",
   ]
 
-  full_setup_cmd = " && ".join(setup_cmds)
+  full_setup_cmd = _STRIP_PYINSTALLER_LD_PATH + " && ".join(setup_cmds)
   try:
     logging.info("[SWEEnv] Configuring OpenHands workspace...")
     res = workspace.execute_command(full_setup_cmd, timeout=180.0)
@@ -1085,10 +1094,18 @@ def step_openhands(
 
     step_timeout = getattr(env, "step_timeout", 60.0)
     b64_code = base64.b64encode(code.encode("utf-8")).decode("ascii")
+    py_cmd = (
+        f"import base64; exec(base64.b64decode('{b64_code}').decode('utf-8'))"
+    )
     wrapped_cmd = (
         _STRIP_PYINSTALLER_LD_PATH
-        + "(cd /testbed 2>/dev/null || cd /workspace) && "
-        f"python3 -c \"import base64; exec(base64.b64decode('{b64_code}').decode('utf-8'))\""
+        + "if [ -d /testbed/.venv/bin ]; then export"
+        ' PATH="/testbed/.venv/bin:${PATH}"; fi; '
+        + "if [ -d /testbed ]; then cd /testbed; elif [ -d /workspace ]; then"
+        " cd /workspace; fi; "
+        + "if [ -x /testbed/.venv/bin/python ]; then"
+        f' /testbed/.venv/bin/python -c "{py_cmd}";'
+        f' else python3 -c "{py_cmd}"; fi'
     )
 
     if getattr(env, "workspace", None) is not None:
@@ -1158,6 +1175,8 @@ def step_openhands(
     wrapped_cmd = (
         "("
         + _STRIP_PYINSTALLER_LD_PATH
+        + "if [ -d /testbed/.venv/bin ]; then export"
+        ' PATH="/testbed/.venv/bin:${PATH}"; fi; '
         + "__oh_cwd=$(cat /var/tmp/.oh_cwd 2>/dev/null); "
         'if [ -n "$__oh_cwd" ] && [ -d "$__oh_cwd" ]; then cd "$__oh_cwd"; '
         "elif [ -d /testbed ]; then cd /testbed; else cd /workspace; fi; "
