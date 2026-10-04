@@ -145,7 +145,7 @@ class SandboxUtilsTest(absltest.TestCase):
         max_staleness=1,
     )
     self.assertTrue(iterator.has_next())
-    # Lookahead window = max_staleness + 1 = 2 batches past current.
+    # Start-up window = max_staleness + 1 = 2 undispatched batches past current.
     self.assertEqual(
         fleet.active_pools, {"img_A": 4, "img_B": 4, "img_C": 4}
     )
@@ -156,15 +156,16 @@ class SandboxUtilsTest(absltest.TestCase):
         fleet.active_pools, {"img_A": 4, "img_B": 4, "img_C": 4}
     )
 
-    # Batch 1 (p1 / img_B): img_A retained in _previous_batches (1/2); the
-    # window slides to [img_C, img_D].
+    # Batch 1 (p1 / img_B): img_A retained in _previous_batches (1/2). The
+    # window still holds img_C (>= lookahead_steps), so nothing new is warmed.
     self.assertEqual(next(iterator)["prompt"], "p1")
     self.assertNotIn("img_A", fleet.unwarm_calls)
     self.assertEqual(
-        fleet.active_pools, {"img_A": 4, "img_B": 4, "img_C": 4, "img_D": 4}
+        fleet.active_pools, {"img_A": 4, "img_B": 4, "img_C": 4}
     )
 
-    # Batch 2 (p2 / img_C): both img_A and img_B retained in _previous_batches (2/2)
+    # Batch 2 (p2 / img_C): both img_A and img_B retained in _previous_batches
+    # (2/2); the window slides by one and img_D is prewarmed.
     self.assertEqual(next(iterator)["prompt"], "p2")
     self.assertNotIn("img_A", fleet.unwarm_calls)
     self.assertNotIn("img_B", fleet.unwarm_calls)
@@ -186,13 +187,12 @@ class SandboxUtilsTest(absltest.TestCase):
     iterator.close()
     self.assertEqual(fleet.active_pools, {})
 
-  def test_lookahead_covers_staleness_window_waits_only_current(self):
-    # max_staleness=2: batches 0..2 are dispatched together at start-up, so
-    # the window must hold current + 3 lookahead batches (2 in flight + 1
-    # prefetch). Only the current batch is waited on.
+  def test_sliding_window_startup_then_one_batch_ahead(self):
+    # max_staleness=2 mimics the orchestrator: batches 0..2 are pulled
+    # back-to-back at start-up, then one batch per committed step.
     fleet = FakeFleet()
     dataset = [
-        {"prompt": f"p{i}", "docker_image": f"img_{i}"} for i in range(6)
+        {"prompt": f"p{i}", "docker_image": f"img_{i}"} for i in range(8)
     ]
     iterator = sandbox_utils.PrewarmDatasetIterator(
         dataset,
@@ -201,20 +201,33 @@ class SandboxUtilsTest(absltest.TestCase):
         batch_size=1,
         max_staleness=2,
     )
-    self.assertEqual(iterator.lookahead_batches, 3)
-    self.assertEqual(
-        fleet.active_pools, {f"img_{i}": 4 for i in range(4)}
-    )
+    self.assertEqual(iterator.initial_lookahead_batches, 3)
+    self.assertEqual(iterator.lookahead_batches, 1)
+    # Before the first pull: batches 0..2 (dispatched at start-up) and the
+    # prefetch batch 3 all have pools; only batch 0 is waited on.
+    self.assertEqual(set(fleet.active_pools), {f"img_{i}" for i in range(4)})
     self.assertCountEqual(
         [call for call in fleet.warm_calls if call[2]], [("img_0", 4, True)]
     )
 
-    self.assertEqual(next(iterator)["prompt"], "p0")
-    # Shift: window slides to img_2..img_4; img_0 retained as previous.
-    self.assertEqual(next(iterator)["prompt"], "p1")
-    self.assertEqual(
-        fleet.active_pools, {f"img_{i}": 4 for i in range(5)}
-    )
+    # Start-up dispatch of batches 0..2: no new pools, the window drains to
+    # exactly the prefetch batch.
+    for i in range(3):
+      self.assertEqual(next(iterator)["prompt"], f"p{i}")
+    self.assertEqual(set(fleet.active_pools), {f"img_{i}" for i in range(4)})
+    self.assertLen(iterator._lookahead, 1)  # pylint: disable=protected-access
+
+    # Each later dispatch (one committed step) slides the window by one: the
+    # batch after the one just dispatched is prewarmed, never more.
+    self.assertEqual(next(iterator)["prompt"], "p3")
+    self.assertIn("img_4", fleet.active_pools)
+    self.assertNotIn("img_5", fleet.active_pools)
+    self.assertEqual(next(iterator)["prompt"], "p4")
+    self.assertIn("img_5", fleet.active_pools)
+    self.assertNotIn("img_6", fleet.active_pools)
+    # Previous window (S + 1 = 3 batches: img_1..img_3) slid past img_0.
+    self.assertNotIn("img_0", fleet.active_pools)
+    self.assertIn("img_1", fleet.active_pools)
     # Pools created after start-up never block.
     self.assertCountEqual(
         [call for call in fleet.warm_calls if call[2]], [("img_0", 4, True)]
@@ -235,6 +248,7 @@ class SandboxUtilsTest(absltest.TestCase):
         max_staleness=0,
     )
     self.assertEqual(iterator.lookahead_batches, 3)
+    self.assertEqual(iterator.initial_lookahead_batches, 3)
     self.assertLen(fleet.active_pools, 4)
     iterator.close()
 

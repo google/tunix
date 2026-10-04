@@ -624,13 +624,23 @@ class _PendingBatch:
 class PrewarmDatasetIterator:
   """Lookahead dataset iterator: pre-warms Agent Sandboxes on Kubernetes.
 
+  A sliding window over the prompt stream. `current_batch` is the batch the
+  orchestrator is pulling (i.e. dispatching) now; pulling the first item of a
+  batch shifts the window. Under `max_staleness = S` the orchestrator
+  dispatches batch k when step k-S-1 commits, so each shift is "one batch
+  completed, the staleness window moved by one".
+
   Maintains:
-    - current_batch: samples for the batch currently being dispatched.
-    - a lookahead window of the next `max(lookahead_steps, max_staleness + 1)`
-      batches. Under `max_staleness = S` the orchestrator dispatches batches
-      0..S together at start-up, so the window must reach S batches past the
-      current one (plus one prefetch batch) or batch S claims land on pools
-      created seconds earlier and start cold.
+    - current_batch: samples of the batch being dispatched.
+    - a lookahead window of not-yet-dispatched batches:
+        * at construction, `max(lookahead_steps, S + 1)` batches. Batches 0..S
+          are all dispatched back-to-back at start-up, so all of them (plus
+          one prefetch batch) need pools before the first pull, or batch S
+          claims land on pools created seconds earlier and start cold;
+        * afterwards, topped up to `lookahead_steps` (default 1) batches on
+          every shift. Once batches 0..S have been pulled, that one batch is
+          the next to be dispatched, and its pool gets about one full step to
+          warm before its claims arrive.
     - up to `max_staleness + 1` previous (already dispatched) batches, whose
       pools stay alive while their trajectories are still claiming.
   A dictionary maintains the sample counts of all of them.
@@ -669,7 +679,12 @@ class PrewarmDatasetIterator:
     self.unwarm_on_exhaustion = unwarm_on_exhaustion
     self.wait_initial = wait_initial
     self.max_staleness = max(0, int(max_staleness))
-    self.lookahead_batches = max(1, int(lookahead_steps), self.max_staleness + 1)
+    # Steady-state window of undispatched batches, and the deeper start-up
+    # window that covers batches 0..S (dispatched back-to-back) + 1 prefetch.
+    self.lookahead_batches = max(1, int(lookahead_steps))
+    self.initial_lookahead_batches = max(
+        self.lookahead_batches, self.max_staleness + 1
+    )
     self.max_workers = max(1, int(max_workers))
     self._fail_fast = SandboxFailFastConfig.from_env().enabled
     self._lock = threading.Lock()
@@ -696,8 +711,8 @@ class PrewarmDatasetIterator:
     # 1. Fill current_batch queue up to batch_size
     self._fill_batch(self.current_batch, self._current_batch_counts)
 
-    # 2. Fill the lookahead window (lookahead_batches batches of batch_size)
-    self._refill_lookahead()
+    # 2. Fill the start-up lookahead window (batches 0..S + 1 prefetch)
+    self._refill_lookahead(self.initial_lookahead_batches)
 
     # 3. Dict maintains the samples of active batches
     self._update_image_counts()
@@ -713,12 +728,13 @@ class PrewarmDatasetIterator:
       )
       logging.info(
           "[PrewarmDatasetIterator] Priming initial sandboxes on K8s"
-          " (wait=%s, async_initial=%s, lookahead_batches=%d): creating %d"
+          " (wait=%s, async_initial=%s, initial_lookahead_batches=%d):"
+          " creating %d"
           " pool(s), readiness barrier on the %d pool(s) of the current"
           " batch...",
           self.wait_initial,
           async_initial,
-          self.lookahead_batches,
+          self.initial_lookahead_batches,
           len(self._image_counts),
           len(wait_images),
       )
@@ -745,9 +761,9 @@ class PrewarmDatasetIterator:
       return collections.deque()
     return self._lookahead[0].items
 
-  def _refill_lookahead(self) -> None:
-    """Tops the lookahead window up to `lookahead_batches` non-empty batches."""
-    while len(self._lookahead) < self.lookahead_batches and not self._exhausted:
+  def _refill_lookahead(self, target: int) -> None:
+    """Tops the lookahead window up to `target` non-empty batches."""
+    while len(self._lookahead) < target and not self._exhausted:
       batch = _PendingBatch(items=collections.deque(), counts={})
       self._fill_batch(batch.items, batch.counts)
       if not batch.items:
@@ -1062,8 +1078,11 @@ class PrewarmDatasetIterator:
       self.current_batch = head.items
       self._current_batch_counts = head.counts
 
-      # Top the lookahead window back up from the dataset
-      self._refill_lookahead()
+      # Slide the window: top the undispatched batches back up to
+      # lookahead_steps. While the start-up batches 0..S are being pulled the
+      # window is still deeper than that, so nothing new is fetched until
+      # batch S+1 (the start-up prefetch) is dispatched.
+      self._refill_lookahead(self.lookahead_batches)
 
       # Dict maintains the samples of active batches
       self._update_image_counts()
