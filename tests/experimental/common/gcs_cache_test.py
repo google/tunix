@@ -183,6 +183,124 @@ class GcsCacheTest(absltest.TestCase):
             worker_type=mock_tm.THREAD,
         )
 
+  def test_upload_cache_skips_downloaded_files(self):
+    with tempfile.TemporaryDirectory() as tmpdir:
+      cache_dir = Path(tmpdir) / "cache"
+      cache_dir.mkdir()
+      (cache_dir / "obj1").write_text("dummy")
+
+      mock_storage = mock.MagicMock()
+      mock_tm = mock.MagicMock()
+      mock_storage.transfer_manager = mock_tm
+      mock_cloud = mock.MagicMock()
+      mock_cloud.storage = mock_storage
+
+      mock_blob = mock.MagicMock()
+      mock_blob.name = "prefix/obj1"
+      mock_storage.Client.return_value.list_blobs.return_value = [mock_blob]
+      mock_tm.download_many_to_path.return_value = [None]
+
+      with mock.patch.dict(
+          sys.modules,
+          {
+              "google.cloud": mock_cloud,
+              "google.cloud.storage": mock_storage,
+              "google.cloud.storage.transfer_manager": mock_tm,
+          },
+      ):
+        self.assertTrue(
+            gcs_cache.download_cache(cache_dir, "gs://test-bucket/prefix")
+        )
+        mock_storage.Client.reset_mock()
+        self.assertTrue(
+            gcs_cache.upload_cache(cache_dir, "gs://test-bucket/prefix")
+        )
+        mock_tm.upload_many_from_filenames.assert_not_called()
+        mock_storage.Client.assert_not_called()
+
+  def test_upload_cache_uploads_only_new_files_after_download(self):
+    with tempfile.TemporaryDirectory() as tmpdir:
+      cache_dir = Path(tmpdir) / "cache"
+      cache_dir.mkdir()
+      (cache_dir / "obj1").write_text("cached")
+
+      mock_storage = mock.MagicMock()
+      mock_tm = mock.MagicMock()
+      mock_storage.transfer_manager = mock_tm
+      mock_exceptions = mock.MagicMock()
+      mock_cloud = mock.MagicMock()
+      mock_cloud.storage = mock_storage
+      mock_api_core = mock.MagicMock()
+      mock_api_core.exceptions = mock_exceptions
+
+      mock_blob = mock.MagicMock()
+      mock_blob.name = "prefix/obj1"
+      mock_storage.Client.return_value.list_blobs.return_value = [mock_blob]
+      mock_tm.download_many_to_path.return_value = [None]
+      mock_tm.upload_many_from_filenames.return_value = [None]
+
+      with mock.patch.dict(
+          sys.modules,
+          {
+              "google.cloud": mock_cloud,
+              "google.cloud.storage": mock_storage,
+              "google.cloud.storage.transfer_manager": mock_tm,
+              "google.api_core": mock_api_core,
+              "google.api_core.exceptions": mock_exceptions,
+          },
+      ):
+        self.assertTrue(
+            gcs_cache.download_cache(cache_dir, "gs://test-bucket/prefix")
+        )
+        # Simulate a newly compiled artifact written after cache restore.
+        (cache_dir / "obj2").write_text("newly_compiled")
+        self.assertTrue(
+            gcs_cache.upload_cache(cache_dir, "gs://test-bucket/prefix")
+        )
+        mock_tm.upload_many_from_filenames.assert_called_once_with(
+            mock.ANY,
+            ["obj2"],
+            source_directory=str(cache_dir),
+            blob_name_prefix="prefix/",
+            skip_if_exists=True,
+            max_workers=mock.ANY,
+            worker_type=mock_tm.THREAD,
+        )
+
+  def test_upload_cache_skips_files_already_in_gcs(self):
+    with tempfile.TemporaryDirectory() as tmpdir:
+      cache_dir = Path(tmpdir) / "cache"
+      cache_dir.mkdir()
+      (cache_dir / "obj1").write_text("dummy")
+
+      mock_storage = mock.MagicMock()
+      mock_tm = mock.MagicMock()
+      mock_storage.transfer_manager = mock_tm
+      mock_exceptions = mock.MagicMock()
+      mock_cloud = mock.MagicMock()
+      mock_cloud.storage = mock_storage
+      mock_api_core = mock.MagicMock()
+      mock_api_core.exceptions = mock_exceptions
+
+      mock_blob = mock.MagicMock()
+      mock_blob.name = "prefix/obj1"
+      mock_storage.Client.return_value.list_blobs.return_value = [mock_blob]
+
+      with mock.patch.dict(
+          sys.modules,
+          {
+              "google.cloud": mock_cloud,
+              "google.cloud.storage": mock_storage,
+              "google.cloud.storage.transfer_manager": mock_tm,
+              "google.api_core": mock_api_core,
+              "google.api_core.exceptions": mock_exceptions,
+          },
+      ):
+        self.assertTrue(
+            gcs_cache.upload_cache(cache_dir, "gs://test-bucket/prefix")
+        )
+        mock_tm.upload_many_from_filenames.assert_not_called()
+
   def test_orchestrator_sync_jax_cache(self):
     orch = orchestrator.ClusterOrchestrator(
         jax_cache_config={
