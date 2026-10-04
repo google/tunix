@@ -756,43 +756,13 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       )
   )
 
-  cluster.wait_for_workers(
-      min_workers={
-          datatypes.Role.ACTOR: 1,
-          datatypes.Role.ROLLOUT: args.rollout_replicas,
-          datatypes.Role.REFERENCE: 1 if args.beta != 0.0 else 0,
-      },
-      timeout=args.init_timeout_s,
-      poll_interval_s=1.0,
-  )
-  logging.info("Registered workers: %s", cluster.worker_infos())
-
-  algo = _build_algo(args)
-  trainer_handles = cluster.worker_handles(datatypes.Role.ACTOR)
-  if len(trainer_handles) != 1:
-    raise ValueError(f"Expected 1 trainer worker, got {len(trainer_handles)}.")
-  _configure_trainer_loss(
-      trainer_handles[0],
-      algo=algo,
-      pad_id=pad_id,
-      eos_id=eos_id,
-  )
-
-  metrics_logging_options = metrics_logger_lib.MetricsLoggerOptions(
-      log_dir=args.log_dir,
-      project_name=args.wandb_project,
-      run_name=args.wandb_run_name,
-      flush_every_n_steps=args.flush_every_n_steps,
-      backend_kwargs={"wandb": {"config": vars(args)}},
-  )
-
+  program = None
   fleet = None
   prompt_stream = None
   try:
     if args.use_agent_sandbox:
-      # Initialize fleet plan from dataset. Eager warmpools are skipped;
-      # dynamic sliding-window prewarming with initial barrier is handled by
-      # PrewarmDatasetIterator below.
+      # Initialize fleet plan from dataset and kick off background initial
+      # warmpool prewarming while waiting for TPU workers to register.
       fleet = swe_env._init_global_fleet(  # pylint: disable=protected-access
           tasks=dataset,
           max_concurrency=args.max_concurrency,
@@ -835,6 +805,38 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           async_initial=True,
           max_staleness=args.max_staleness,
       )
+
+    cluster.wait_for_workers(
+        min_workers={
+            datatypes.Role.ACTOR: 1,
+            datatypes.Role.ROLLOUT: args.rollout_replicas,
+            datatypes.Role.REFERENCE: 1 if args.beta != 0.0 else 0,
+        },
+        timeout=args.init_timeout_s,
+        poll_interval_s=1.0,
+    )
+    logging.info("Registered workers: %s", cluster.worker_infos())
+
+    algo = _build_algo(args)
+    trainer_handles = cluster.worker_handles(datatypes.Role.ACTOR)
+    if len(trainer_handles) != 1:
+      raise ValueError(
+          f"Expected 1 trainer worker, got {len(trainer_handles)}."
+      )
+    _configure_trainer_loss(
+        trainer_handles[0],
+        algo=algo,
+        pad_id=pad_id,
+        eos_id=eos_id,
+    )
+
+    metrics_logging_options = metrics_logger_lib.MetricsLoggerOptions(
+        log_dir=args.log_dir,
+        project_name=args.wandb_project,
+        run_name=args.wandb_run_name,
+        flush_every_n_steps=args.flush_every_n_steps,
+        backend_kwargs={"wandb": {"config": vars(args)}},
+    )
 
     global_batch_size = int(args.batch_size) * int(args.num_generations)
     val_start_step = (
