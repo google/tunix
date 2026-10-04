@@ -1248,8 +1248,10 @@ def patch_raiden_worker_sync() -> None:
       sync.h2d()
       jax.block_until_ready(self.arrays)
       envs_mod = getattr(rws, "envs", None)
-      if getattr(envs_mod, "RAIDEN_H2D_SETTLE", False) and hasattr(
-          self, "_wait_until_settled"
+      if (
+          envs_mod is not None
+          and getattr(envs_mod, "RAIDEN_H2D_SETTLE", False)
+          and hasattr(self, "_wait_until_settled")
       ):
         self._wait_until_settled()
 
