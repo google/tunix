@@ -342,10 +342,36 @@ class GcsCacheTest(absltest.TestCase):
         start = time.monotonic()
         orch.sync_jax_cache()
         self.assertLess(time.monotonic() - start, 5.0)
+      # Abandoned uploads must not block interpreter exit.
+      threads = {t.name: t for t in threading.enumerate()}
+      for worker_id in ("rollout-0", "rollout-1"):
+        self.assertTrue(threads[f"jax-cache-upload-{worker_id}"].daemon)
     finally:
       release.set()
     mock_rollout_0.submit.assert_called_once()
     mock_rollout_1.submit.assert_called_once()
+
+  def test_orchestrator_sync_jax_cache_falls_back_on_reported_failure(self):
+    orch = orchestrator.ClusterOrchestrator(
+        jax_cache_config={
+            "save_jax_cache": True,
+            "rollout_jax_cache_gcs_dir": "gs://bucket/orch_rollout",
+        }
+    )
+    mock_rollout_0 = mock.MagicMock(spec=remote_execution.ActorHandle)
+    mock_rollout_0.submit.return_value = False
+    mock_rollout_1 = mock.MagicMock(spec=remote_execution.ActorHandle)
+    mock_rollout_1.submit.return_value = True
+    orch.register_worker_handle(
+        "rollout-0", roles=[datatypes.Role.ROLLOUT], handle=mock_rollout_0
+    )
+    orch.register_worker_handle(
+        "rollout-1", roles=[datatypes.Role.ROLLOUT], handle=mock_rollout_1
+    )
+    orch.sync_jax_cache()
+    mock_rollout_1.submit.assert_called_once_with(
+        "upload_jax_cache", gcs_uri="gs://bucket/orch_rollout"
+    )
 
   def test_jax_cache_config_shell_hash(self):
     script = Path(__file__).resolve().parents[3] / "tunix/experimental/examples/common/jax_cache_config.sh"

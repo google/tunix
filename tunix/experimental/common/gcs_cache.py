@@ -193,10 +193,9 @@ def upload_cache(local_dir: str | Path, gcs_uri: str, max_workers: int = 8) -> b
     existing = {
         b.name[len(prefix):] for b in client.list_blobs(bucket, prefix=prefix)
     }
-    already_in_gcs = len(files)
-    files = [f for f in files if f not in existing]
-    already_in_gcs -= len(files)
-    if not files:
+    missing = [f for f in files if f not in existing]
+    already_in_gcs = len(files) - len(missing)
+    if not missing:
       logger.info(
           "[jax_cache] All %d local cache objects already in %s; nothing to upload.",
           already_in_gcs,
@@ -206,14 +205,14 @@ def upload_cache(local_dir: str | Path, gcs_uri: str, max_workers: int = 8) -> b
 
     logger.info(
         "[jax_cache] Uploading %d artifacts from %s to %s (%d already in GCS)...",
-        len(files),
+        len(missing),
         local_path,
         gcs_uri,
         already_in_gcs,
     )
     results = transfer_manager.upload_many_from_filenames(
         bucket,
-        files,
+        missing,
         source_directory=str(local_path),
         blob_name_prefix=prefix,
         # Guards against concurrent writers racing on the same object.
@@ -226,7 +225,7 @@ def upload_cache(local_dir: str | Path, gcs_uri: str, max_workers: int = 8) -> b
     any_failed = False
     skipped = already_in_gcs
     uploaded = 0
-    for name, result in zip(files, results):
+    for name, result in zip(missing, results):
       if isinstance(result, Exception):
         is_precondition_failed = (
             getattr(result, "code", None) == 412

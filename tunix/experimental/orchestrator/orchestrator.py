@@ -24,6 +24,7 @@ from concurrent import futures
 import contextlib
 import os
 import pickle
+import threading
 import time
 from typing import Any, Mapping
 import uuid
@@ -361,22 +362,43 @@ class ClusterOrchestrator:
     def _upload_from(worker_id: str) -> bool:
       """Runs the upload on one worker, bounded so a hang can't block us."""
       handle = self._remote_worker_handles_by_id[worker_id]
-      pool = futures.ThreadPoolExecutor(max_workers=1)
-      upload = pool.submit(
-          handle.submit, "upload_jax_cache", gcs_uri=rollout_gcs_uri
-      )
+      outcome: futures.Future[bool] = futures.Future()
+
+      def _run() -> None:
+        try:
+          outcome.set_result(
+              handle.submit("upload_jax_cache", gcs_uri=rollout_gcs_uri)
+          )
+        except Exception as err:  # pylint: disable=broad-except
+          outcome.set_exception(err)
+
+      # Daemon thread: unlike ThreadPoolExecutor workers it is not joined at
+      # interpreter exit, so an abandoned hung RPC (bounded only by the RPC
+      # deadline, which can be hours) cannot block process exit.
+      threading.Thread(
+          target=_run, name=f"jax-cache-upload-{worker_id}", daemon=True
+      ).start()
       try:
-        res = upload.result(timeout=_JAX_CACHE_UPLOAD_TIMEOUT_S)
-        logging.info("Worker %s JAX cache upload finished: %s", worker_id, res)
-        return True
+        uploaded = outcome.result(timeout=_JAX_CACHE_UPLOAD_TIMEOUT_S)
+      except futures.TimeoutError:
+        logging.warning(
+            "JAX cache upload on worker %s timed out after %.0fs; abandoning it.",
+            worker_id,
+            _JAX_CACHE_UPLOAD_TIMEOUT_S,
+        )
+        return False
       except Exception as err:  # pylint: disable=broad-except
         logging.warning(
             "Failed to sync JAX cache on worker %s: %r", worker_id, err
         )
         return False
-      finally:
-        # Don't wait on a hung RPC; the thread is abandoned.
-        pool.shutdown(wait=False)
+      if not uploaded:
+        logging.warning(
+            "Worker %s reported a failed JAX cache upload.", worker_id
+        )
+        return False
+      logging.info("Worker %s JAX cache upload finished.", worker_id)
+      return True
 
     if not _upload_from(primary_worker_id) and len(rollout_worker_ids) > 1:
       fallback_id = rollout_worker_ids[1]
