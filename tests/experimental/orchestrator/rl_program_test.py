@@ -501,6 +501,47 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_on_train_start_called_after_prepare_rollout_policy_and_before_rollouts(
+      self,
+  ):
+    async def _run():
+      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group(), [])
+      events = []
+
+      async def _prepare_rollout_policy(**kwargs):
+        del kwargs
+        events.append("prepare_rollout_policy")
+
+      async def _dispatch_rollouts(*args, **kwargs):
+        del args, kwargs
+        events.append("dispatch_rollouts")
+
+      self.mock_engine.prepare_rollout_policy.side_effect = (
+          _prepare_rollout_policy
+      )
+      self.mock_engine.dispatch_rollouts.side_effect = _dispatch_rollouts
+
+      program = self._create_program(
+          dataset=["prompt_data_0"],
+          max_steps=1,
+          on_train_start=lambda step: events.append(("on_train_start", step)),
+          on_step_begin=lambda step: events.append(("on_step_begin", step)),
+      )
+
+      await program.run_async(self.mock_engine)
+
+      self.assertEqual(
+          events,
+          [
+              "prepare_rollout_policy",
+              ("on_train_start", 0),
+              "dispatch_rollouts",
+              ("on_step_begin", 0),
+          ],
+      )
+
+    asyncio.run(_run())
+
   def test_step_can_skip_weight_sync(self):
     async def _run():
       _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
@@ -4682,7 +4723,7 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
-  def test_critique_stage_evaluates_unmasked_max_steps_and_skips_timeout(
+  def test_critique_stage_evaluates_unmasked_max_steps_and_timeout(
       self,
   ):
     async def _run():
@@ -4723,13 +4764,13 @@ class RLProgramTest(absltest.TestCase):
 
       await program.critique_stage()
 
-      # MAX_STEPS_REACHED with non-zero masks (overlong_filter=False) is valid
-      # and scored, whereas TIMEOUT is always invalid and skipped.
-      self.assertEqual(reward_fn.call_count, 1)
+      # MAX_STEPS_REACHED with non-zero masks (overlong_filter=False) and an
+      # episode TIMEOUT are both valid samples and are scored.
+      self.assertEqual(reward_fn.call_count, 2)
       rewards = self.mock_algo.create_trainer_payloads.call_args.kwargs[
           "rewards"
       ]
-      self.assertEqual(rewards, [0.75, 0.0])
+      self.assertEqual(rewards, [0.75, 0.75])
       program.close()
 
     asyncio.run(_run())

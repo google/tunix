@@ -22,6 +22,8 @@ SERVICE_ACCOUNT=${SERVICE_ACCOUNT:-"xpk-sa"}
 IMAGE_REWRITE_PREFIX=${IMAGE_REWRITE_PREFIX:-"europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/tunix"}
 OPENHANDS_SERVER_IMAGE=${OPENHANDS_SERVER_IMAGE:-"gcr.io/cloud-tpu-multipod-dev/tunix/openhands-agent-server:0.62"}
 DATASET_NAME=${DATASET_NAME:-"R2E-Gym/R2E-Gym-Subset"}
+DATASET_PATH=${DATASET_PATH:-""}
+SYNTHETIC_DATASET=${SYNTHETIC_DATASET:-0}
 BATCH_SIZE=${BATCH_SIZE:-1}
 NUM_GENERATIONS=${NUM_GENERATIONS:-2}
 MAX_STEPS=${MAX_STEPS:-3}
@@ -41,6 +43,14 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry_run)
       DRY_RUN=1
+      shift
+      ;;
+    --synthetic_dataset)
+      SYNTHETIC_DATASET=1
+      shift
+      ;;
+    --dataset_path=*)
+      DATASET_PATH="${1#*=}"
       shift
       ;;
     --kueue_queue=*)
@@ -205,6 +215,7 @@ CONFIGMAP_FILES=(
   "$(find_code_file swe_env.py "${REPO_ROOT}/examples/deepswe/swe_env.py" "${SCRIPT_DIR}/../../../oss/examples/deepswe/swe_env.py")"
   "$(find_code_file swe_agent.py "${REPO_ROOT}/examples/deepswe/swe_agent.py" "${SCRIPT_DIR}/../../../oss/examples/deepswe/swe_agent.py")"
   "$(find_code_file openhands_utils.py "${REPO_ROOT}/examples/deepswe/openhands_utils.py" "${SCRIPT_DIR}/../../../oss/examples/deepswe/openhands_utils.py")"
+  "$(find_code_file opencode_fuzzy.py "${REPO_ROOT}/examples/deepswe/opencode_fuzzy.py" "${SCRIPT_DIR}/../../../oss/examples/deepswe/opencode_fuzzy.py")"
   "$(find_code_file template.py "${REPO_ROOT}/examples/deepswe/template.py" "${SCRIPT_DIR}/../../../oss/examples/deepswe/template.py")"
   "$(find_code_file deepswe.py "${REPO_ROOT}/tunix/experimental/examples/deepswe_dist/deepswe.py" "${SCRIPT_DIR}/deepswe.py")"
   "$(find_code_file sandbox_k8s_e2e_test.py "${SCRIPT_DIR}/sandbox_k8s_e2e_test.py")"
@@ -247,6 +258,8 @@ spec:
       labels:
         app: deepswe-e2e-test
     spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
       restartPolicy: Never
       serviceAccountName: ${SERVICE_ACCOUNT}
       nodeSelector:
@@ -319,6 +332,8 @@ spec:
           cp /e2e_code/swe_agent.py /app/tunix/oss/examples/deepswe/ 2>/dev/null || true
           cp /e2e_code/openhands_utils.py /app/examples/deepswe/ 2>/dev/null || true
           cp /e2e_code/openhands_utils.py /app/tunix/oss/examples/deepswe/ 2>/dev/null || true
+          cp /e2e_code/opencode_fuzzy.py /app/examples/deepswe/ 2>/dev/null || true
+          cp /e2e_code/opencode_fuzzy.py /app/tunix/oss/examples/deepswe/ 2>/dev/null || true
           cp /e2e_code/template.py /app/examples/deepswe/ 2>/dev/null || true
           cp /e2e_code/template.py /app/tunix/oss/examples/deepswe/ 2>/dev/null || true
           cp /e2e_code/deepswe.py /app/tunix/experimental/examples/deepswe_dist/
@@ -327,9 +342,14 @@ spec:
 
           export PYTHONPATH="/app:/e2e_code:\${PYTHONPATH:-}"
 
+          EXTRA_E2E_ARGS=()
+          if [[ "${SYNTHETIC_DATASET}" == "1" || "${SYNTHETIC_DATASET}" == "true" ]]; then
+            EXTRA_E2E_ARGS+=("--synthetic_dataset")
+          fi
           python3 /app/tunix/experimental/examples/deepswe_dist/sandbox_k8s_e2e_test.py \
             --run_as_job \
             --dataset_name="${DATASET_NAME}" \
+            --dataset_path="${DATASET_PATH}" \
             --scaffold="${SCAFFOLD}" \
             --batch_size=${BATCH_SIZE} \
             --num_generations=${NUM_GENERATIONS} \
@@ -340,7 +360,8 @@ spec:
             --seed=${SEED} \
             --namespace="${NAMESPACE}" \
             --node_selector_key="${NODE_SELECTOR_KEY}" \
-            --node_selector_val="${NODE_SELECTOR_VAL}"
+            --node_selector_val="${NODE_SELECTOR_VAL}" \
+            "\${EXTRA_E2E_ARGS[@]}"
           EXIT_CODE=\$?
           echo "=== DeepSWE Sandbox E2E Job Finished at \$(date) with code \${EXIT_CODE} ==="
           exit \${EXIT_CODE}

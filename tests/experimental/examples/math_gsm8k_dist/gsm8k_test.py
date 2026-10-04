@@ -254,6 +254,22 @@ class GSM8KTest(absltest.TestCase):
     self.assertIn("export CHAT_PARSER=${CHAT_PARSER:-raw}", k8s_launcher)
     self.assertIn("--chat_parser=${CHAT_PARSER}", k8s_launcher)
 
+  def test_launchers_wire_rollout_skip_jax_precompile(self):
+    base_dir = pathlib.Path(gsm8k.__file__).parent
+    launcher = (base_dir / "launcher.sh").read_text(encoding="utf-8")
+    self.assertIn(
+        'SKIP_JAX_PRECOMPILE="${ROLLOUT_SKIP_JAX_PRECOMPILE:-0}"', launcher
+    )
+
+    k8s_launcher = (base_dir / "k8s_launcher.sh").read_text(encoding="utf-8")
+    self.assertIn(
+        "export ROLLOUT_SKIP_JAX_PRECOMPILE=${ROLLOUT_SKIP_JAX_PRECOMPILE:-0}",
+        k8s_launcher,
+    )
+    self.assertIn(
+        "SKIP_JAX_PRECOMPILE=${ROLLOUT_SKIP_JAX_PRECOMPILE}", k8s_launcher
+    )
+
 
 if __name__ == "__main__":
   absltest.main()

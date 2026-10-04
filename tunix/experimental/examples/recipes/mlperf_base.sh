@@ -197,6 +197,7 @@ export VLLM_LIMIT_MM_PER_PROMPT='{"image": 0, "video": 0}'
 # ==============================================================================
 # Rollout Worker Environment Flags (Optimizations & Runtime Settings)
 # ==============================================================================
+export ROLLOUT_SKIP_JAX_PRECOMPILE="${ROLLOUT_SKIP_JAX_PRECOMPILE:-0}"
 export NUM_PRECOMPILE_WORKERS=8
 export NEW_MODEL_DESIGN=1
 export ATTN_BUCKETIZED_NUM_REQS=true
@@ -220,6 +221,13 @@ else
   export PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR="${PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR:-}"
   export PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP="${PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP:-}"
 fi
+
+# ==============================================================================
+# JAX Compilation Cache (GCS Persist & Restore)
+# ==============================================================================
+# Decouples GCS persistent storage from local XLA compilation execution.
+# Persists and restores rollout worker compilation cache across cluster runs.
+source "${DIR}/../common/jax_cache_config.sh"
 
 # ==============================================================================
 # Hyperparameters & DeepSWE Pipeline Configuration

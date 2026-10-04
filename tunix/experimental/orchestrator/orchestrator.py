@@ -22,7 +22,9 @@ import collections
 from collections.abc import Sequence
 from concurrent import futures
 import contextlib
+import os
 import pickle
+import threading
 import time
 from typing import Any, Mapping
 import uuid
@@ -41,6 +43,7 @@ from tunix.experimental.worker import remote_execution
 
 
 _STOP_TIMEOUT_S = 60.0  # Timeout for stopping remote workers. 60 should not be touched for any healthy stop.
+_JAX_CACHE_UPLOAD_TIMEOUT_S = 180.0  # Per-worker bound on a JAX cache upload RPC.
 
 
 class ClusterOrchestrator:
@@ -54,6 +57,7 @@ class ClusterOrchestrator:
       monitor: health_monitor.HealthMonitor | None = None,
       weight_sync_mode: str | None = None,
       trajectory_store_config: Mapping[str, Any] | None = None,
+      jax_cache_config: Mapping[str, Any] | None = None,
       run_id: str | None = None,
       disable_weight_sync_timeouts: bool | None = None,
   ):
@@ -93,6 +97,11 @@ class ClusterOrchestrator:
     mode = getattr(weight_sync_mode, "value", weight_sync_mode)
     self._weight_sync_mode = str(mode).lower() if mode is not None else None
     self._disable_weight_sync_timeouts = disable_weight_sync_timeouts
+    self.jax_cache_config = dict(jax_cache_config or {})
+    self._save_jax_cache = self.jax_cache_config.get(
+        "save_jax_cache",
+        os.getenv("SAVE_JAX_CACHE", "true").strip().lower() in ("1", "true", "yes"),
+    )
     cfg_run_id = (
         trajectory_store_config.get("run_id")
         if trajectory_store_config is not None
@@ -306,6 +315,93 @@ class ClusterOrchestrator:
     """Returns handles for all workers (remote and local) registered under the given role."""
     return self._get_actor_handles(role)
 
+  def sync_jax_cache(self) -> None:
+    """Synchronizes JAX compilation cache across all workers to GCS."""
+    if not self._save_jax_cache:
+      return
+
+    rollout_gcs_uri = (
+        self.jax_cache_config.get("rollout_jax_cache_gcs_dir")
+        or os.getenv("ROLLOUT_JAX_CACHE_GCS_DIR")
+        or os.getenv("JAX_CACHE_GCS_DIR")
+    )
+    if not rollout_gcs_uri:
+      return
+
+    logging.info("Triggering JAX compilation cache synchronization to GCS...")
+    worker_ids = sorted(self._remote_worker_infos)
+    local_workers = self.registry.workers()
+    if not worker_ids:
+      for worker in local_workers:
+        try:
+          worker.upload_jax_cache(gcs_uri=rollout_gcs_uri)
+        except Exception as err:  # pylint: disable=broad-except
+          logging.warning("Failed to sync JAX cache on local worker: %r", err)
+      return
+
+    rollout_worker_ids = [
+        w_id
+        for w_id in worker_ids
+        if datatypes.Role.ROLLOUT.value
+        in (
+            self._remote_worker_infos.get(w_id).roles
+            if self._remote_worker_infos.get(w_id)
+            else ()
+        )
+    ]
+    if not rollout_worker_ids:
+      return
+
+    primary_worker_id = rollout_worker_ids[0]
+    logging.info(
+        "Triggering JAX compilation cache synchronization to GCS (%s) from rollout worker %s...",
+        rollout_gcs_uri,
+        primary_worker_id,
+    )
+
+    handle = self._remote_worker_handles_by_id[primary_worker_id]
+    outcome: futures.Future[bool] = futures.Future()
+
+    def _run() -> None:
+      try:
+        outcome.set_result(
+            handle.submit("upload_jax_cache", gcs_uri=rollout_gcs_uri)
+        )
+      except Exception as err:  # pylint: disable=broad-except
+        outcome.set_exception(err)
+
+    sync_timeout_s = float(
+        self.jax_cache_config.get("sync_timeout_s", _JAX_CACHE_UPLOAD_TIMEOUT_S)
+    )
+    # Daemon thread: unlike ThreadPoolExecutor workers it is not joined at
+    # interpreter exit, so an abandoned hung RPC (bounded only by the RPC
+    # deadline, which can be hours) cannot block process exit.
+    threading.Thread(
+        target=_run,
+        name=f"jax-cache-upload-{primary_worker_id}",
+        daemon=True,
+    ).start()
+    try:
+      uploaded = outcome.result(timeout=sync_timeout_s)
+    except futures.TimeoutError:
+      logging.warning(
+          "JAX cache upload on worker %s timed out after %.0fs; abandoning it.",
+          primary_worker_id,
+          sync_timeout_s,
+      )
+      return
+    except Exception as err:  # pylint: disable=broad-except
+      logging.warning(
+          "Failed to sync JAX cache on worker %s: %r", primary_worker_id, err
+      )
+      return
+    if uploaded is False:
+      logging.warning(
+          "Worker %s reported a failed JAX cache upload.", primary_worker_id
+      )
+      return
+    logging.info("Worker %s JAX cache upload finished.", primary_worker_id)
+
   def bring_up_workers(self, dummy_data: Any = None) -> None:
     """Brings up all registered workers through lifecycle initialization."""
     logging.info(
@@ -318,6 +414,7 @@ class ClusterOrchestrator:
           worker.with_trajectory_store_config(self.trajectory_store_config)
     self.lifecycle_driver.bring_up(dummy_data)
     self._bring_up_remote_workers(dummy_data)
+    self.sync_jax_cache()
     self.engine = self._create_engine()
     logging.info("All workers brought up successfully.")
 
@@ -478,7 +575,6 @@ class ClusterOrchestrator:
     self.monitor.poll()
     logging.info("Executing program %s...", type(program).__name__)
     engine = self.engine or self._create_engine()
-
     program.run(
         engine=engine,
         **kwargs,

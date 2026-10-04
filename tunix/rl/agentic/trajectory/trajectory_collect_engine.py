@@ -347,12 +347,19 @@ class TrajectoryCollectEngine:
 
       self._finalize_terminal_step_routing()
 
-      masked_out = (
-          self.overlong_filter
-          and self.agent.trajectory.status in self.filter_statuses
+      status = self.agent.trajectory.status
+      masked_out = self.overlong_filter and status in self.filter_statuses
+      # An episode that exhausted its wall-clock budget scores 0 by
+      # definition; grading its unfinished state would waste sandbox time and
+      # could reward an incomplete trajectory. Invalid trajectories (e.g.
+      # ENV_TIMEOUT after a hung env.step) are dropped from training, so their
+      # grade would be discarded and the env may be unresponsive.
+      skip_final_reward = masked_out or status in (
+          agent_types.INVALID_TRAJECTORY_STATUSES
+          | {agent_types.TrajectoryStatus.TIMEOUT}
       )
       try:
-        if not masked_out:
+        if not skip_final_reward:
           await self._append_final_reward()
         self.compute_mc_reward()
         self.compute_trajectory_reward()
@@ -408,11 +415,7 @@ class TrajectoryCollectEngine:
       tps = comp_toks / m_lat if m_lat > 0 else 0.0
       tpot_ms = (m_lat / comp_toks) * 1000.0 if comp_toks > 0 else 0.0
       mean_step_lat = (m_lat / num_steps) if num_steps > 0 else 0.0
-      traj_id = (
-          self.metadata.traj_id
-          if self.metadata is not None
-          else (self.agent.trajectory.traj_id or self._debug_prefix)
-      )
+      traj_id = self._debug_traj_id
       status_str = (
           self.agent.trajectory.status.name
           if hasattr(self.agent.trajectory.status, 'name')
@@ -785,6 +788,22 @@ class TrajectoryCollectEngine:
       return f"[step_idx={step_idx}, pair_index={pair_index}]"
     return f"[step_idx={step_idx}]"
 
+  @property
+  def _debug_traj_id(self) -> str:
+    """Returns a trajectory identifier for debug inference logging."""
+    if self.metadata is not None:
+      traj_id = getattr(self.metadata, "trajectory_id", None) or getattr(
+          self.metadata, "traj_id", None
+      )
+      if traj_id:
+        return str(traj_id)
+    traj_id = getattr(self.agent.trajectory, "trajectory_id", None) or getattr(
+        self.agent.trajectory, "traj_id", None
+    )
+    if traj_id:
+      return str(traj_id)
+    return self._debug_prefix
+
   def _rollout_state_info(
       self, info: Optional[Dict[str, Any]] = None
   ) -> Dict[str, Any]:
@@ -944,7 +963,13 @@ class TrajectoryCollectEngine:
         if rollout_output.prompt_lengths is not None
         and len(rollout_output.prompt_lengths) > 0
         else (
-            len(rollout_output.left_padded_prompt_tokens[0])
+            (
+                len(rollout_output.left_padded_prompt_tokens[0])
+                if hasattr(
+                    rollout_output.left_padded_prompt_tokens[0], "__len__"
+                )
+                else len(rollout_output.left_padded_prompt_tokens)
+            )
             if rollout_output.left_padded_prompt_tokens is not None
             and len(rollout_output.left_padded_prompt_tokens) > 0
             else 0
@@ -1282,11 +1307,7 @@ class TrajectoryCollectEngine:
       turn_tpot_ms = (
           (step_latency / comp_len) * 1000.0 if comp_len > 0 else 0.0
       )
-      traj_id = (
-          self.metadata.traj_id
-          if self.metadata is not None
-          else (self.agent.trajectory.traj_id or self._debug_prefix)
-      )
+      traj_id = self._debug_traj_id
       env_lat = wall_time if env_step_executed else 0.0
       turn_total = step_latency + env_lat
       logging.info(

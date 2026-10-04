@@ -954,6 +954,10 @@ def main(argv: list[str], context: Any = None) -> None:
   logging.info("Importing rollout registry module: %s", args.registry_module)
   importlib.import_module(args.registry_module)
 
+  from tunix.experimental.common import gcs_cache  # pylint: disable=g-import-not-at-top
+
+  gcs_cache.restore_jax_cache(role="rollout")
+
   if context and args.sampler == "vanilla":
     context.jax.initialize()
   os.environ.setdefault("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")

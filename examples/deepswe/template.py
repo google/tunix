@@ -441,8 +441,12 @@ Remember: when making multiple file edits in a row to the same file, you should 
 
 def get_openhands_tools(
     max_timeout: int | None = None,
-    workspace_mount_path_in_sandbox: str = "/workspace",
-    enable_think: bool = False,
+    # Only feeds the example paths in the str_replace_editor `path`
+    # description. The reference (Gym 610a08ab) starts OpenHands with
+    # RUNTIME=local from /openhands_setup/OpenHands, and OpenHands' local
+    # runtime uses the working directory there, so this is the rendered value.
+    workspace_mount_path_in_sandbox: str = "/openhands_setup/OpenHands",
+    enable_think: bool = True,
     enable_task_tracker: bool = True,
 ) -> list[dict[str, Any]]:
   """Returns the OpenHands CodeActAgent tool schemas matching nv-OpenHands@0d766ad0."""
@@ -1184,12 +1188,13 @@ DEFAULT_OPENHANDS_KEEPALIVE_CMD = [
     "sh",
     "-c",
     (
-        "chmod +x /oh/openhands-agent-server 2>/dev/null || true; ([ -d /oh/glibc236 ] && export LD_LIBRARY_PATH=\"/oh/glibc236:${LD_LIBRARY_PATH:-}\"); ([ -d"
-        " /testbed ] && [ ! -e /workspace ] && ln -s /testbed /workspace"
-        " 2>/dev/null || true); ([ -d /workspace ] && [ ! -e /testbed ] && ln"
-        " -s /workspace /testbed 2>/dev/null || true); git config --global"
-        " --add safe.directory '*' 2>/dev/null || true; cd /; if [ -x"
-        " /oh/openhands-agent-server ]; then exec"
+        "chmod +x /oh/openhands-agent-server 2>/dev/null || true; if [ -d"
+        ' /testbed/.venv/bin ]; then export PATH="/testbed/.venv/bin:${PATH}";'
+        " fi; ([ -d /testbed ] && [ ! -e /workspace ] && ln -s /testbed"
+        " /workspace 2>/dev/null || true); ([ -d /workspace ] && [ ! -e"
+        " /testbed ] && ln -s /workspace /testbed 2>/dev/null || true); git"
+        " config --global --add safe.directory '*' 2>/dev/null || true; cd /;"
+        " if [ -x /oh/openhands-agent-server ]; then exec"
         " /oh/openhands-agent-server --host 0.0.0.0 --port 8000; elif [ -x"
         " /usr/local/bin/openhands-agent-server ]; then [ -d /testbed ] && cd"
         " /testbed; exec tini --"

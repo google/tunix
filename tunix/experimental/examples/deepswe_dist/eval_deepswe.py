@@ -784,6 +784,12 @@ def main(argv=None):
   )
   sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
   if a.role == "worker":
+    try:
+      from tunix.experimental.common import gcs_cache  # pylint: disable=g-import-not-at-top
+      gcs_cache.restore_jax_cache(role="rollout")
+    except Exception as e:  # pylint: disable=broad-except
+      logging.warning("[jax_cache] Failed to restore JAX cache: %s", e)
+
     # Run this file directly so Pathways initializes before tunix.__init__
     # imports JAX and the model stack.
     if "proxy" in os.environ.get("JAX_PLATFORMS", "").split(","):
@@ -792,7 +798,14 @@ def main(argv=None):
       pathwaysutils.initialize()
     from tunix.experimental.examples.deepswe_dist import eval_worker
 
-    asyncio.run(eval_worker.serve(a))
+    try:
+      asyncio.run(eval_worker.serve(a))
+    finally:
+      try:
+        from tunix.experimental.common import gcs_cache  # pylint: disable=g-import-not-at-top
+        gcs_cache.save_jax_cache(role="rollout")
+      except Exception as e:  # pylint: disable=broad-except
+        logging.warning("[jax_cache] Failed to save JAX cache: %s", e)
   else:
     # Must precede importing the DTOs, registry, or dataset wrapper.
     os.environ["JAX_PLATFORMS"] = "cpu"

@@ -163,9 +163,11 @@ def parse_codeact_response(response_text: str) -> tuple[str, Any]:
   Supports:
   1. Qwen3/Qwen3.5 XML tool calls: <tool_call><function=...>...</function></tool_call>
   2. Bare XML function blocks: <function=...></function>
-  3. JSON tool calls: <tool_call>{...}</tool_call> or ```json ... ```
-  4. Markdown code blocks: ```(bash|sh|shell|python|py|ipython) ... ```
-  5. Task completion indicators: COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+  3. Task completion indicators: COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+
+  Like the reference parser (vLLM qwen3_xml), only <function=> XML is a tool
+  call: markdown code fences (```bash, ```python, ```json) and JSON bodies in
+  <tool_call> blocks are not, so such a turn gets no action.
 
   Returns:
     (thought, action): Tuple of reasoning string and SWEAction instance.
@@ -176,16 +178,18 @@ def parse_codeact_response(response_text: str) -> tuple[str, Any]:
   tc_pattern = re.compile(
       r"(?s)<tool_call>\s*(.*?)\s*(?:</tool_call>|$)"
   )
-  cb_pattern = re.compile(
-      r"(?s)```(bash|sh|shell|python|py|ipython)\s*\n(.*?)(?:```|$)"
-  )
-  json_cb_pattern = re.compile(
-      r"(?s)```json\s*\n(.*?)(?:```|$)"
-  )
+
+  def _first_tool_call(text_slice: str) -> Optional[re.Match]:
+    # Like qwen3_xml, skip <tool_call> blocks without a <function=> (empty,
+    # JSON or other text) and use the first one that has one.
+    for m in tc_pattern.finditer(text_slice):
+      if xml_pattern.search(m.group(1)):
+        return m
+    return None
 
   def _collect_candidates(text_slice: str, offset: int):
     found = []
-    tc_match = tc_pattern.search(text_slice)
+    tc_match = _first_tool_call(text_slice)
     if tc_match:
       found.append((0, offset + tc_match.start(), "tool_call", tc_match))
 
@@ -196,26 +200,6 @@ def parse_codeact_response(response_text: str) -> tuple[str, Any]:
           tc_match.start() <= xml_match.start() <= tc_match.end()
       ):
         found.append((0, offset + xml_match.start(), "xml", xml_match))
-
-    json_match = json_cb_pattern.search(text_slice)
-    if json_match:
-      try:
-        parsed_json = json.loads(json_match.group(1).strip())
-        if isinstance(parsed_json, dict) and (
-            "name" in parsed_json or "function" in parsed_json
-        ):
-          found.append((
-              0,
-              offset + json_match.start(),
-              "json_block",
-              (json_match, parsed_json),
-          ))
-      except Exception:
-        pass
-
-    cb_match = cb_pattern.search(text_slice)
-    if cb_match:
-      found.append((1, offset + cb_match.start(), "code_block", cb_match))
     return found
 
   # Prefer tool calls emitted after </think> so illustrative code fences or
@@ -232,8 +216,7 @@ def parse_codeact_response(response_text: str) -> tuple[str, Any]:
     candidates = _collect_candidates(response_text, 0)
 
   if candidates:
-    # Prefer structured tool invocations (priority 0) over generic markdown
-    # code fences (priority 1), then earliest position in the response.
+    # Earliest structured tool invocation in the response.
     candidates.sort(key=lambda x: (x[0], x[1]))
     _, match_start, match_type, payload = candidates[0]
 
@@ -245,60 +228,12 @@ def parse_codeact_response(response_text: str) -> tuple[str, Any]:
       action = parse_openhands_xml_action(xml_str)
       return thought, action
 
-    elif match_type in ("tool_call", "json_block"):
+    elif match_type == "tool_call":
       thought = response_text[:match_start].strip()
-      if match_type == "tool_call":
-        raw_payload = payload.group(1).strip()
-        xml_in_tc = xml_pattern.search(raw_payload)
-        if xml_in_tc:
-          xml_str = xml_in_tc.group(1).strip()
-          if not xml_str.endswith("</function>"):
-            xml_str += "\n</function>"
-          action = parse_openhands_xml_action(xml_str)
-          return thought, action
-        try:
-          data = json.loads(raw_payload)
-        except Exception:
-          data = {}
-      else:
-        _, data = payload
-
-      if isinstance(data, list) and data:
-        data = data[0]
-      if isinstance(data, dict):
-        if "function" in data and isinstance(data["function"], dict):
-          fn_name = data["function"].get("name", "")
-          args = data["function"].get("arguments", {})
-        else:
-          fn_name = data.get("name", "")
-          args = data.get("arguments", data.get("parameters", {}))
-        if isinstance(args, str):
-          try:
-            args = json.loads(args)
-          except Exception:
-            args = {"command": args}
-        if not isinstance(args, dict):
-          args = {"command": str(args)}
-        normalized_args = {}
-        for k, v in args.items():
-          if isinstance(v, (dict, list)):
-            normalized_args[str(k)] = json.dumps(v, ensure_ascii=False)
-          else:
-            normalized_args[str(k)] = str(v)
-        action = SWEAction(fn_name, normalized_args)
-        return thought, action
-
-    elif match_type == "code_block":
-      thought = response_text[:match_start].strip()
-      lang = payload.group(1).lower()
-      code = payload.group(2).strip()
-      if lang in ("bash", "sh", "shell"):
-        if "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" in code:
-          action = SWEAction("submit", {})
-        else:
-          action = SWEAction("execute_bash", {"command": code})
-      else:  # python, py, ipython
-        action = SWEAction("execute_ipython_cell", {"code": code})
+      xml_str = xml_pattern.search(payload.group(1).strip()).group(1).strip()
+      if not xml_str.endswith("</function>"):
+        xml_str += "\n</function>"
+      action = parse_openhands_xml_action(xml_str)
       return thought, action
 
   # Fallback: check for completion trigger in plain text
@@ -454,7 +389,9 @@ class SWEAgent(ConversationAgentBase):
     """
     self._trajectory.steps.append(self.cur_step)
     thought, action = self._parse_model_response(response)
-    action_str = action.to_xml_string() if action.function_name else ""
+    action_str = (
+        action.to_xml_string() if getattr(action, "function_name", True) else ""
+    )
 
     # Update Trajectory
     cur_step = self._trajectory.steps[-1]

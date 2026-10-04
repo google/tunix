@@ -27,53 +27,70 @@ SWEAction = swe_agent.SWEAction
 
 class SweAgentTest(absltest.TestCase):
 
-  def test_parse_codeact_bash_markdown(self):
+  def test_parse_codeact_markdown_fences_are_not_tool_calls(self):
+    # The reference parser (vLLM qwen3_xml) reads only <tool_call>/<function=>
+    # XML; a turn with just a code fence gets no action (the fake-user reply).
+    for response in (
+        "I need to list the files.\n```bash\ngit status\nls -la\n```\nDone.",
+        "```sh\npytest tests/test_core.py\n```",
+        "Let's test it.\n```python\nimport sympy\n"
+        "print(sympy.__version__)\n```",
+        "```ipython\n%run reproduce_issue.py\n```",
+        "Executing long command:\n```bash\ngit log -n 5",
+        'Via json.\n```json\n{"name": "execute_bash", "arguments": {"command":'
+        ' "pwd"}}\n```',
+    ):
+      with self.subTest(response=response[:30]):
+        thought, action = swe_agent.parse_codeact_response(response)
+        self.assertEqual(action.function_name, "")
+        self.assertEqual(thought, response.strip())
+
+  def test_parse_codeact_fence_and_garbled_call_get_no_action(self):
+    # A fence plus a tool call missing its <tool_call>/<function=> opener: no
+    # call for qwen3_xml, so none here (it used to run execute_ipython_cell).
     response = (
-        "I need to inspect the git diff and list the files.\n"
-        "```bash\n"
-        "git status\n"
-        "ls -la\n"
-        "```\n"
-        "This will help us understand the current workspace."
+        "The regex is:\n```python\nm = re.match(r\"hsl\\(\\s*("
+        "\\parameter=command>\nview\n</parameter>\n"
+        "<parameter=path>\n/testbed/a.py\n</parameter>\n"
+        "</function>\n</tool_call>"
     )
-    thought, action = swe_agent.parse_codeact_response(response)
-    self.assertEqual(
-        thought, "I need to inspect the git diff and list the files."
-    )
-    self.assertEqual(action.function_name, "execute_bash")
-    self.assertEqual(action.parameters.get("command"), "git status\nls -la")
+    _, action = swe_agent.parse_codeact_response(response)
+    self.assertEqual(action.function_name, "")
 
-  def test_parse_codeact_sh_markdown(self):
-    response = "```sh\npytest tests/test_core.py\n```"
-    thought, action = swe_agent.parse_codeact_response(response)
-    self.assertEqual(thought, "")
-    self.assertEqual(action.function_name, "execute_bash")
-    self.assertEqual(action.parameters.get("command"), "pytest tests/test_core.py")
-
-  def test_parse_codeact_python_markdown(self):
+  def test_parse_codeact_skips_empty_tool_call_block(self):
+    # An empty <tool_call> block before a valid one: qwen3_xml returns the
+    # valid call, so the empty block must not hide it.
     response = (
-        "Let's write a small script to test reproduction.\n"
-        "```python\n"
-        "import sympy\n"
-        "print(sympy.__version__)\n"
-        "```"
+        "Now let's search:\n\n<tool_call>\n</function>\n</tool_call>\n\n"
+        "<tool_call>\n<function=str_replace_editor>\n<parameter=command>\n"
+        "view\n</parameter>\n<parameter=path>\n/testbed/Tests\n</parameter>\n"
+        "</function>\n</tool_call>"
     )
-    thought, action = swe_agent.parse_codeact_response(response)
+    _, action = swe_agent.parse_codeact_response(response)
+    self.assertEqual(action.function_name, "str_replace_editor")
     self.assertEqual(
-        thought, "Let's write a small script to test reproduction."
-    )
-    self.assertEqual(action.function_name, "execute_ipython_cell")
-    self.assertEqual(
-        action.parameters.get("code"),
-        "import sympy\nprint(sympy.__version__)",
+        action.parameters, {"command": "view", "path": "/testbed/Tests"}
     )
 
-  def test_parse_codeact_ipython_markdown(self):
-    response = "```ipython\n%run reproduce_issue.py\n```"
-    thought, action = swe_agent.parse_codeact_response(response)
-    self.assertEqual(thought, "")
-    self.assertEqual(action.function_name, "execute_ipython_cell")
-    self.assertEqual(action.parameters.get("code"), "%run reproduce_issue.py")
+  def test_create_file_text_keeps_final_newline_through_env_round_trip(self):
+    # The model writes "<content>\n\n</parameter>". qwen3_xml (and our model
+    # parser) drop one newline; SWEEnv re-parses to_xml_string() output, which
+    # must not drop the file's own final newline as well.
+    response = (
+        "<tool_call>\n<function=str_replace_editor>\n<parameter=command>\n"
+        "create\n</parameter>\n<parameter=path>\n/testbed/t.py\n</parameter>\n"
+        "<parameter=file_text>\n\n    indented = 1\nprint(indented)\n\n"
+        "</parameter>\n</function>\n</tool_call>"
+    )
+    _, action = swe_agent.parse_codeact_response(response)
+    self.assertEqual(
+        action.parameters["file_text"], "\n    indented = 1\nprint(indented)\n"
+    )
+    executed = openhands_utils.parse_openhands_action_str(
+        action.to_xml_string()
+    )
+    self.assertEqual(executed.function_name, "str_replace_editor")
+    self.assertEqual(executed.parameters, action.parameters)
 
   def test_parse_codeact_xml_function(self):
     response = (
@@ -91,7 +108,8 @@ class SweAgentTest(absltest.TestCase):
     self.assertEqual(action.parameters.get("command"), "view")
     self.assertEqual(action.parameters.get("path"), "/testbed/foo.py")
 
-  def test_parse_codeact_json_tool_call(self):
+  def test_parse_codeact_json_tool_call_is_not_a_call(self):
+    # qwen3_xml returns no call for a JSON body in <tool_call>.
     response = (
         "Running command via tool call.\n"
         "<tool_call>\n"
@@ -99,9 +117,26 @@ class SweAgentTest(absltest.TestCase):
         "</tool_call>"
     )
     thought, action = swe_agent.parse_codeact_response(response)
-    self.assertEqual(thought, "Running command via tool call.")
-    self.assertEqual(action.function_name, "execute_bash")
-    self.assertEqual(action.parameters.get("command"), "git diff")
+    self.assertEqual(thought, response.strip())
+    self.assertEqual(action.function_name, "")
+
+  def test_parse_codeact_skips_non_xml_tool_call_blocks(self):
+    # A JSON or plain-text <tool_call> block before an XML one: qwen3_xml
+    # returns the XML call.
+    xml_call = (
+        "<tool_call>\n<function=execute_bash>\n<parameter=command>\nls\n"
+        "</parameter>\n</function>\n</tool_call>"
+    )
+    for first_block in (
+        '{"name": "think", "arguments": {"thought": "x"}}',
+        "[draft]",
+        "{not json",
+    ):
+      with self.subTest(first_block=first_block):
+        response = f"<tool_call>\n{first_block}\n</tool_call>\n{xml_call}"
+        _, action = swe_agent.parse_codeact_response(response)
+        self.assertEqual(action.function_name, "execute_bash")
+        self.assertEqual(action.parameters, {"command": "ls"})
 
   def test_parse_codeact_completion_trigger(self):
     response = (
@@ -112,18 +147,6 @@ class SweAgentTest(absltest.TestCase):
     self.assertIn("I have resolved the issue", thought)
     self.assertEqual(action.function_name, "submit")
 
-  def test_parse_codeact_unclosed_block(self):
-    # Simulates response truncated by max tokens
-    response = (
-        "Executing long command:\n"
-        "```bash\n"
-        "git log -n 5"
-    )
-    thought, action = swe_agent.parse_codeact_response(response)
-    self.assertEqual(thought, "Executing long command:")
-    self.assertEqual(action.function_name, "execute_bash")
-    self.assertEqual(action.parameters.get("command"), "git log -n 5")
-
   def test_codeact_agent_initialization(self):
     agent = swe_agent.CodeActAgent()
     self.assertEqual(agent.scaffold, "openhands")
@@ -133,7 +156,8 @@ class SweAgentTest(absltest.TestCase):
     agent = swe_agent.CodeActAgent()
     agent.update_from_env(observation="Problem statement", reward=0.0, done=False)
     action_res = agent.update_from_model(
-        "I will run pytest:\n```bash\npytest\n```"
+        "I will run pytest:\n<tool_call>\n<function=execute_bash>\n"
+        "<parameter=command>\npytest\n</parameter>\n</function>\n</tool_call>"
     )
     self.assertIn("<function=execute_bash>", action_res.action)
     self.assertIn("<parameter=command>pytest</parameter>", action_res.action)
@@ -176,7 +200,11 @@ class SweAgentTest(absltest.TestCase):
     action = SWEAction("execute_bash", {"cmd": "pwd"})
     result = openhands_utils.step_openhands(mock_env, action)
     self.assertFalse(result.done)
-    self.assertEqual(result.observation, "/workspace\n")
+    self.assertEqual(
+        result.observation,
+        "/workspace\n[The command completed with exit code 0.]\n[Command"
+        " finished with exit code 0]",
+    )
     self.assertEqual(mock_env.total_steps, 1)
 
   def test_step_openhands_execute_bash_missing_command(self):
@@ -186,7 +214,8 @@ class SweAgentTest(absltest.TestCase):
     result = openhands_utils.step_openhands(mock_env, action)
     self.assertFalse(result.done)
     self.assertEqual(
-        result.observation, "ERROR: No command specified for execute_bash."
+        result.observation,
+        "ERROR: No previous running command to retrieve logs from.",
     )
 
   def test_step_openhands_execute_ipython_cell(self):
@@ -285,18 +314,6 @@ class SweAgentTest(absltest.TestCase):
     self.assertEqual(result.observation, "output_val")
     self.assertEqual(mock_env.total_steps, 1)
     mock_local_env.step.assert_called_once()
-
-  def test_parse_codeact_markdown_json_tool_call(self):
-    response = (
-        "Running command via markdown json.\n"
-        "```json\n"
-        '{"name": "execute_bash", "arguments": {"command": "pwd"}}\n'
-        "```"
-    )
-    thought, action = swe_agent.parse_codeact_response(response)
-    self.assertEqual(thought, "Running command via markdown json.")
-    self.assertEqual(action.function_name, "execute_bash")
-    self.assertEqual(action.parameters.get("command"), "pwd")
 
   def test_codeact_agent_no_synthetic_token_or_step_warning(self):
     agent = swe_agent.CodeActAgent()
@@ -417,7 +434,12 @@ class SweAgentTest(absltest.TestCase):
         ),
     )
     self.assertFalse(plan_res.done)
-    self.assertIn("Task list has been updated with 1 items.", plan_res.observation)
+    self.assertRegex(
+        plan_res.observation,
+        r"^Task list has been updated with 1 items\. Stored in session"
+        r" directory: sessions/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{2}-"
+        r"[0-9a-f]{15}/TASKS\.md$",
+    )
 
     view_after_plan_res = openhands_utils.step_openhands(
         mock_env, SWEAction("task_tracker", {"command": "view"})
@@ -439,6 +461,7 @@ class SweAgentTest(absltest.TestCase):
         tool_names,
         [
             "execute_bash",
+            "think",
             "finish",
             "task_tracker",
             "str_replace_editor",
@@ -623,7 +646,7 @@ class SweAgentTest(absltest.TestCase):
         prompt_item["metadata"]["agent_config"], {"scaffold": "openhands"}
     )
 
-  def test_oh_editor_create_view_str_replace_insert_undo_and_600_line_limit(self):
+  def test_oh_editor_create_view_str_replace_insert_undo_and_clip(self):
     import tempfile  # pylint: disable=g-import-not-at-top
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -685,7 +708,8 @@ class SweAgentTest(absltest.TestCase):
       self.assertNotIn("# comment", undo_out)
       self.assertIn("return 2", undo_out)
 
-      # 6. 600-line view limit clipping
+      # 6. no line cap; long files are clipped by characters, before the
+      # line numbers are added, with the reference notice.
       long_path = os.path.join(tmpdir, "long.py")
       with open(long_path, "w", encoding="utf-8") as f:
         f.write("\n".join(f"line_{i}" for i in range(1, 701)))
@@ -693,9 +717,54 @@ class SweAgentTest(absltest.TestCase):
           {"command": "view", "path": long_path},
           history_file=hist_file,
       )
-      self.assertIn("line_600", long_view)
-      self.assertNotIn("line_601", long_view)
-      self.assertIn(openhands_utils.FILE_CLIPPED_NOTICE, long_view)
+      self.assertIn("   700\tline_700", long_view)
+      self.assertNotIn("<response clipped>", long_view)
+      huge_path = os.path.join(tmpdir, "huge.py")
+      with open(huge_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(f"value_{i} = {'x' * 40}" for i in range(1, 2001)))
+      huge_view = openhands_utils.run_oh_editor_locally(
+          {"command": "view", "path": huge_path},
+          history_file=hist_file,
+      )
+      self.assertTrue(
+          huge_view.endswith(openhands_utils.FILE_CLIPPED_NOTICE + "\n")
+      )
+      self.assertIn("`grep -n`", huge_view)
+      binary_path = os.path.join(tmpdir, "blob.bin")
+      with open(binary_path, "wb") as f:
+        f.write(b"abc\x00def\n")
+      binary_view = openhands_utils.run_oh_editor_locally(
+          {"command": "view", "path": binary_path},
+          history_file=hist_file,
+      )
+      self.assertEqual(
+          binary_view,
+          "ERROR_BINARY_FILE\n[Error occurred in processing last action]",
+      )
+      binary_edit = openhands_utils.run_oh_editor_locally(
+          {
+              "command": "str_replace",
+              "path": binary_path,
+              "old_str": "abc",
+              "new_str": "x",
+          },
+          history_file=hist_file,
+      )
+      self.assertEqual(
+          binary_edit,
+          f"ERROR:\nFile validation failed for {binary_path}: File appears"
+          " to be binary and this file type cannot be read or edited by this"
+          " tool.",
+      )
+      pyc_path = os.path.join(tmpdir, "mod.pyc")
+      with open(pyc_path, "w", encoding="utf-8") as f:
+        f.write("text\n")
+      self.assertEqual(
+          openhands_utils.run_oh_editor_locally(
+              {"command": "view", "path": pyc_path}, history_file=hist_file
+          ),
+          "ERROR_BINARY_FILE\n[Error occurred in processing last action]",
+      )
 
       # 7. remote command serialization round-trip
       import subprocess  # pylint: disable=g-import-not-at-top
@@ -732,15 +801,327 @@ class SweAgentTest(absltest.TestCase):
     result = openhands_utils.step_openhands(mock_env, action)
     self.assertFalse(result.done)
     self.assertTrue(result.info.get("command_timed_out"))
-    self.assertIn("Command timed out after 45 seconds", result.observation)
+    self.assertEqual(
+        result.observation,
+        "collected 10 items\n[The command timed out after 45.0 seconds. You"
+        " may wait longer to see additional output by sending empty command"
+        " '', send other commands to interact with the current process, send"
+        ' keys ("C-c", "C-z", "C-d") to interrupt/kill the previous command'
+        " before sending your new command, or use the timeout parameter in"
+        " execute_bash for future commands.]",
+    )
     called_cmd = mock_workspace.execute_command.call_args[0][0]
     self.assertIn("/var/tmp/.oh_cwd", called_cmd)
     self.assertEqual(
         mock_workspace.execute_command.call_args.kwargs["timeout"], 45.0
     )
 
+  def test_step_openhands_bash_wrapper_keeps_heredoc_and_comment_valid(self):
+    import subprocess  # pylint: disable=g-import-not-at-top
+    import tempfile  # pylint: disable=g-import-not-at-top
+
+    mock_workspace = mock.MagicMock()
+    mock_res = mock.MagicMock(spec=["stdout", "stderr", "exit_code"])
+    mock_res.exit_code = 0
+    mock_res.stdout = ""
+    mock_res.stderr = ""
+    mock_workspace.execute_command.return_value = mock_res
+
+    mock_env = mock.MagicMock()
+    mock_env.workspace = mock_workspace
+    mock_env.max_steps = 10
+    mock_env.step_timeout = 60.0
+    mock_env.total_steps = 0
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+      tmpdir = os.path.realpath(tmpdir)
+      cwd_file = os.path.join(tmpdir, ".oh_cwd")
+      for command, expected in (
+          ("cat <<'EOF'\nhello from heredoc\nEOF", "hello from heredoc"),
+          ("cat << 'END'\nline1\nline2\nEND", "line1\nline2"),
+          ("echo ok  # trailing comment", "ok"),
+      ):
+        with open(cwd_file, "w", encoding="utf-8") as f:
+          f.write(tmpdir)
+        openhands_utils.step_openhands(
+            mock_env, SWEAction("execute_bash", {"command": command})
+        )
+        wrapped = mock_workspace.execute_command.call_args[0][0]
+        # Run the wrapped command for real, with its cwd state file moved
+        # into the temp dir so nothing is written outside it.
+        proc = subprocess.run(
+            ["sh", "-c", wrapped.replace("/var/tmp/.oh_cwd", cwd_file)],
+            capture_output=True,
+            text=True,
+        )
+        res = mock.MagicMock(spec=["stdout", "stderr", "exit_code"])
+        res.stdout, res.stderr, res.exit_code = (
+            proc.stdout,
+            proc.stderr,
+            proc.returncode,
+        )
+        obs, timed_out = openhands_utils._format_command_result(
+            res, 60.0, 0.1, bash_observation=True
+        )
+        self.assertFalse(timed_out)
+        self.assertTrue(
+            obs.startswith(
+                f"{expected}\n[The command completed with exit code 0.]\n"
+                f"[Current working directory: {tmpdir}]\n"
+            ),
+            msg=f"{command!r}: {obs!r}",
+        )
+        self.assertTrue(obs.endswith("\n[Command finished with exit code 0]"))
+
+  def test_bash_observation_matches_reference_rendering(self):
+    meta = openhands_utils._BASH_META_SENTINEL
+    res = mock.MagicMock(spec=["stdout", "stderr", "exit_code"])
+    res.stdout = f"  out line\n\n{meta}/testbed\t/testbed/.venv/bin/python\n"
+    res.stderr = "warn line\n"
+    res.exit_code = 2
+    obs, _ = openhands_utils._format_command_result(
+        res, 60.0, 0.1, bash_observation=True
+    )
+    self.assertEqual(
+        obs,
+        "out line\nwarn line\n[The command completed with exit code 2.]\n"
+        "[Current working directory: /testbed]\n"
+        "[Python interpreter: /testbed/.venv/bin/python]\n"
+        "[Command finished with exit code 2]",
+    )
+    # Long output keeps the head and tail halves, with the suffix in the tail.
+    res.stdout = "a" * 20000 + "b" * 20000 + f"\n{meta}/testbed\t\n"
+    res.stderr = ""
+    res.exit_code = 0
+    obs, _ = openhands_utils._format_command_result(
+        res, 60.0, 0.1, bash_observation=True
+    )
+    self.assertEqual(len(obs), 30047)
+    self.assertTrue(
+        obs.startswith("a" * 15000 + "\n[... Observation truncated")
+    )
+    self.assertTrue(obs.endswith("[Command finished with exit code 0]"))
+    # Every line is rstripped, like the reference tmux capture.
+    res.stdout = f"diff\n \n+x  \n{meta}/testbed\t\n"
+    obs, _ = openhands_utils._format_command_result(
+        res, 60.0, 0.1, bash_observation=True
+    )
+    self.assertTrue(obs.startswith("diff\n\n+x\n[The command completed"))
+
+  def test_step_openhands_bash_echoes_commands_the_pane_rewrites(self):
+    meta = openhands_utils._BASH_META_SENTINEL
+    mock_env = mock.MagicMock()
+    mock_env.max_steps = 10
+    mock_env.step_timeout = 60.0
+    res = mock.MagicMock(spec=["stdout", "stderr", "exit_code"])
+    res.stdout = f"1\n2\n{meta}/testbed\t/testbed/.venv/bin/python\n"
+    res.stderr = ""
+    res.exit_code = 0
+    mock_env.workspace.execute_command.return_value = res
+    suffix = (
+        "[The command completed with exit code 0.]\n"
+        "[Current working directory: /testbed]\n"
+        "[Python interpreter: /testbed/.venv/bin/python]\n"
+        "[Command finished with exit code 0]"
+    )
+    # An empty line, or a whitespace-only one, keeps the echo; the pane shows
+    # the command without empty lines and with each line rstripped.
+    result = openhands_utils.step_openhands(
+        mock_env,
+        SWEAction(
+            "execute_bash",
+            {"command": 'python3 -c "\nprint(1)\n\nprint(2)\n  \n"'},
+        ),
+    )
+    self.assertEqual(
+        result.observation,
+        'python3 -c "\nprint(1)\nprint(2)\n\n"\n1\n2\n' + suffix,
+    )
+    # A command the pane shows verbatim is not echoed.
+    result = openhands_utils.step_openhands(
+        mock_env,
+        SWEAction("execute_bash", {"command": 'python3 -c "\nprint(1)\n"'}),
+    )
+    self.assertEqual(result.observation, "1\n2\n" + suffix)
+
+  def test_step_openhands_editor_view_is_not_truncated(self):
+    mock_env = mock.MagicMock()
+    mock_env.max_steps = 10
+    mock_env.step_timeout = 60.0
+    res = mock.MagicMock(spec=["stdout", "stderr", "exit_code"])
+    res.stdout = "v" * 40000
+    res.stderr = ""
+    res.exit_code = 0
+    mock_env.workspace.execute_command.return_value = res
+    view = openhands_utils.step_openhands(
+        mock_env,
+        SWEAction("str_replace_editor", {"command": "view", "path": "/a"}),
+    )
+    self.assertEqual(view.observation, "v" * 40000)
+    edit = openhands_utils.step_openhands(
+        mock_env,
+        SWEAction(
+            "str_replace_editor",
+            {"command": "str_replace", "path": "/a", "old_str": "x",
+             "new_str": "y"},
+        ),
+    )
+    self.assertEqual(len(edit.observation), 30047)
+
+  def test_step_openhands_bash_send_keys_without_running_command(self):
+    mock_env = mock.MagicMock()
+    mock_env.max_steps = 10
+    result = openhands_utils.step_openhands(
+        mock_env,
+        SWEAction("execute_bash", {"command": "C-c", "is_input": "true"}),
+    )
+    self.assertEqual(
+        result.observation,
+        "ERROR: No previous running command to interact with.",
+    )
+    mock_env.workspace.execute_command.assert_not_called()
+
+  def test_wrapper_strips_pyinstaller_library_path(self):
+    import subprocess  # pylint: disable=g-import-not-at-top
+
+    probe = (
+        openhands_utils._STRIP_PYINSTALLER_LD_PATH
+        + 'echo "${LD_LIBRARY_PATH-unset}"'
+    )
+    for value, expected in (
+        ("/tmp/_MEIabc:/opt/a:/opt/b", "/opt/a:/opt/b"),
+        ("/tmp/_MEIabc", "unset"),
+        ("/tmp/_MEIabc:", "unset"),
+        ("/oh/glibc236", "unset"),
+        ("/oh/glibc236:", "unset"),
+        ("/tmp/_MEIabc:/oh/glibc236", "unset"),
+        ("/tmp/_MEIabc:/oh/glibc236:", "unset"),
+        ("/tmp/_MEIabc:/oh/glibc236:/opt/a:", "/opt/a"),
+        ("/tmp/_MEIx::/usr/lib", "/usr/lib"),
+        (":/usr/lib", "/usr/lib"),
+        ("", "unset"),
+        ("/usr/lib", "/usr/lib"),
+    ):
+      out = subprocess.run(
+          ["sh", "-c", probe],
+          capture_output=True,
+          text=True,
+          env={"PATH": os.environ.get("PATH", ""), "LD_LIBRARY_PATH": value},
+      ).stdout.strip()
+      self.assertEqual(out, expected, msg=value)
+
+    out_unset = subprocess.run(
+        ["sh", "-c", probe],
+        capture_output=True,
+        text=True,
+        env={"PATH": os.environ.get("PATH", "")},
+    ).stdout.strip()
+    self.assertEqual(out_unset, "unset")
+
+  def test_oh_editor_remote_driver_postpones_annotations(self):
+    import __future__  # pylint: disable=g-import-not-at-top
+    import ast  # pylint: disable=g-import-not-at-top
+    import base64  # pylint: disable=g-import-not-at-top
+    import re  # pylint: disable=g-import-not-at-top
+    import shlex  # pylint: disable=g-import-not-at-top
+    import subprocess  # pylint: disable=g-import-not-at-top
+    import sys  # pylint: disable=g-import-not-at-top
+    import tempfile  # pylint: disable=g-import-not-at-top
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+      file_path = os.path.join(tmpdir, "sample.py")
+      with open(file_path, "w", encoding="utf-8") as f:
+        f.write("def foo():\n    return 1\n")
+      cmd = openhands_utils._build_oh_editor_remote_cmd(
+          {"command": "view", "path": file_path}
+      )
+      self.assertTrue(
+          cmd.startswith(openhands_utils._STRIP_PYINSTALLER_LD_PATH)
+      )
+      argv = shlex.split(cmd[len(openhands_utils._STRIP_PYINSTALLER_LD_PATH) :])
+      self.assertEqual(argv[0], "python3")
+      driver = base64.b64decode(
+          re.search(r"b64decode\('([^']+)'\)", cmd).group(1)
+      ).decode("utf-8")
+      # Sandboxes run python 3.7/3.8, where `dict[str, Any]` annotations fail
+      # unless their evaluation is postponed.
+      self.assertTrue(
+          driver.startswith("from __future__ import annotations\n")
+      )
+      code = compile(driver, "<driver>", "exec", dont_inherit=True)
+      self.assertTrue(code.co_flags & __future__.annotations.compiler_flag)
+      ast.parse(driver, feature_version=(3, 7))
+
+      # Run the shipped driver with its history file moved into the temp dir.
+      driver = driver.replace(
+          "/var/tmp/.oh_editor_history.json",
+          os.path.join(tmpdir, ".oh_editor_history.json"),
+      )
+      out = subprocess.run(
+          [sys.executable, "-c", driver, argv[-1]],
+          capture_output=True,
+          text=True,
+      )
+      self.assertEqual(out.returncode, 0, msg=out.stderr)
+      self.assertIn("cat -n", out.stdout)
+      self.assertIn("def foo():", out.stdout)
+
+  def test_openhands_editor_path_description_matches_reference(self):
+    tools = {
+        t["function"]["name"]: t["function"] for t in template.OPENHANDS_TOOLS
+    }
+    path_param = tools["str_replace_editor"]["parameters"]["properties"]["path"]
+    self.assertEqual(
+        path_param["description"],
+        "Absolute path to file or directory, e.g."
+        " `/openhands_setup/OpenHands/file.py` or"
+        " `/openhands_setup/OpenHands`.",
+    )
+
+  def test_execute_ipython_cell_uses_testbed_cwd_and_venv_python(self):
+    import subprocess  # pylint: disable=g-import-not-at-top
+    import tempfile  # pylint: disable=g-import-not-at-top
+
+    mock_workspace = mock.MagicMock()
+    mock_res = mock.MagicMock(spec=["stdout", "stderr", "exit_code"])
+    mock_res.exit_code = 0
+    mock_res.stdout = "ok\n"
+    mock_res.stderr = ""
+    mock_workspace.execute_command.return_value = mock_res
+
+    mock_env = mock.MagicMock()
+    mock_env.workspace = mock_workspace
+    mock_env.max_steps = 10
+    mock_env.step_timeout = 60.0
+    mock_env.total_steps = 0
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+      fake_testbed = os.path.join(tmpdir, "testbed")
+      os.makedirs(fake_testbed)
+      openhands_utils.step_openhands(
+          mock_env,
+          SWEAction(
+              "execute_ipython_cell",
+              {"code": "import os; print(os.getcwd())"},
+          ),
+      )
+      wrapped = mock_workspace.execute_command.call_args[0][0]
+      self.assertTrue(
+          wrapped.startswith(openhands_utils._STRIP_PYINSTALLER_LD_PATH)
+      )
+      # Execute the wrapped command pointing /testbed to fake_testbed and verify
+      # the cd persists into the Python process.
+      proc = subprocess.run(
+          ["sh", "-c", wrapped.replace("/testbed", fake_testbed)],
+          capture_output=True,
+          text=True,
+          check=True,
+      )
+      self.assertEqual(proc.stdout.strip(), os.path.realpath(fake_testbed))
+
 
 if __name__ == "__main__":
   absltest.main()
+
 
 

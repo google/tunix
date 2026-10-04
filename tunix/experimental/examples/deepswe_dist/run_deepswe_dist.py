@@ -743,6 +743,11 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       weight_sync_mode=args.weight_sync_mode,
       trajectory_store_config=_build_trajectory_store_config(args),
       disable_weight_sync_timeouts=args.disable_weight_sync_timeouts,
+      jax_cache_config={
+          "save_jax_cache": os.getenv("SAVE_JAX_CACHE", "true").lower() in ("1", "true", "yes"),
+          "jax_cache_gcs_dir": os.getenv("JAX_CACHE_GCS_DIR"),
+          "rollout_jax_cache_gcs_dir": os.getenv("ROLLOUT_JAX_CACHE_GCS_DIR"),
+      },
   )
   context.ipc.discovery.on_register(
       functools.partial(
@@ -827,6 +832,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           unwarm_on_exhaustion=True,
           scaffold=args.scaffold,
           wait_initial=True,
+          async_initial=True,
           max_staleness=args.max_staleness,
       )
 
@@ -882,6 +888,12 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           manifest_file,
       )
 
+    def _on_train_start(step: int) -> None:
+      if isinstance(prompt_stream, swe_env.PrewarmDatasetIterator):
+        prompt_stream.wait_for_initial()
+      if args.rcp_logging:
+        mllog_utils.train_start(args, step=step)
+
     program = rl_program.StandardRLProgram(
         algo=algo,
         dataset=prompt_stream,
@@ -918,6 +930,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         pipeline_train_microbatches=args.pipeline_train_microbatches,
         partial_rollout=args.in_flight_weight_updates,
         rollout_priority_scheduling=args.rollout_priority_scheduling,
+        on_train_start=_on_train_start,
         on_step_begin=lambda step: logging.info(
             ">>> DeepSWE step %d starting | policy_version=%d",
             step,
@@ -949,8 +962,6 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
 
     logging.info("Bringing up remote workers through ClusterOrchestrator...")
     cluster.bring_up_workers(dummy_data=None)
-    if args.rcp_logging:
-      mllog_utils.train_start(args, step=0)
     logging.info("Starting DeepSWE StandardRLProgram execution...")
     cluster.run(
         program=program,

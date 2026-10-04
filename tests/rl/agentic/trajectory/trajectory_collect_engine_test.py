@@ -1314,6 +1314,54 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     self.assertEqual(metas[0].status, 'SUCCEEDED')
     self.assertEqual(metas[0].target_policy_versions, [42])
 
+  def test_debug_inference_logs_with_and_without_metadata(self):
+    store = in_memory_store.InMemoryTrajectoryStore()
+    metadata = converter_lib.create_trajectory_metadata(
+        traj_id='traj_debug_123',
+    )
+    self.mock_agent.trajectory.task = {'prompts': ['Solve math']}
+    with mock.patch.dict(
+        'os.environ', {'TUNIX_DEBUG_INFERENCE_LOGS': 'true'}, clear=False
+    ):
+      with mock.patch.object(
+          trajectory_collect_engine.logging, 'info'
+      ) as mock_info:
+        engine_with_meta = trajectory_collect_engine.TrajectoryCollectEngine(
+            agent=self.mock_agent,
+            env=self.mock_env,
+            model_call=self.mock_model_call,
+            trajectory_store=store,
+            metadata=metadata,
+            policy_version=7,
+        )
+        traj = asyncio.run(self._run_collect(engine_with_meta, mode='Trajectory'))
+        self.assertEqual(traj.status, agent_types.TrajectoryStatus.SUCCEEDED)
+        logged = ' '.join(str(c) for c in mock_info.call_args_list)
+        self.assertIn('[DEBUG_INFERENCE][Turn]', logged)
+        self.assertIn('[DEBUG_INFERENCE][Trajectory]', logged)
+        self.assertIn('traj_debug_123', logged)
+
+      self.setUp()
+      with mock.patch.object(
+          trajectory_collect_engine.logging, 'info'
+      ) as mock_info_no_meta:
+        engine_no_meta = trajectory_collect_engine.TrajectoryCollectEngine(
+            agent=self.mock_agent,
+            env=self.mock_env,
+            model_call=self.mock_model_call,
+        )
+        traj_no_meta = asyncio.run(
+            self._run_collect(engine_no_meta, mode='Trajectory')
+        )
+        self.assertEqual(
+            traj_no_meta.status, agent_types.TrajectoryStatus.SUCCEEDED
+        )
+        logged_no_meta = ' '.join(
+            str(c) for c in mock_info_no_meta.call_args_list
+        )
+        self.assertIn('[DEBUG_INFERENCE][Turn]', logged_no_meta)
+        self.assertIn('[DEBUG_INFERENCE][Trajectory]', logged_no_meta)
+
   @mock.patch.object(utils, 'tokenize_and_generate_masks')
   def test_on_model_and_env_step_callbacks(self, mock_convert):
     mock_convert.side_effect = [
@@ -1738,6 +1786,55 @@ class ExactTokenContinuityCollectTest(absltest.TestCase):
       self.assertEqual(result['status'], agent_types.TrajectoryStatus.TIMEOUT.name)
       self.assertEqual(result['trajectory_reward'], 0.0)
       env.close.assert_called_once()
+
+  def test_timeout_skips_final_reward(self):
+    agent, env = self._frozenlake()
+    env.max_steps = 3
+    final_reward_fn = mock.MagicMock(return_value=1.0)
+    env.final_reward_fn = final_reward_fn
+
+    async def slow_async_model_call(*args, **kwargs):
+      del args, kwargs
+      await asyncio.sleep(0.15)
+      raise AssertionError("should have timed out")
+
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=agent,
+        env=env,
+        model_call=slow_async_model_call,
+        tokenizer=_FreshTextTokenizer([]),
+        chat_parser=_FreshTextParser([90]),
+        max_response_length=64,
+        timeout=0.03,
+        exact_token_continuity=True,
+        overlong_filter=False,
+    )
+    result = asyncio.run(engine.collect(mode='Token'))
+    self.assertEqual(result['status'], agent_types.TrajectoryStatus.TIMEOUT.name)
+    final_reward_fn.assert_not_called()
+    self.assertEqual(result['trajectory_reward'], 0.0)
+    env.close.assert_called_once()
+
+  def test_env_timeout_skips_final_reward(self):
+    agent, env = self._frozenlake()
+    final_reward_fn = mock.MagicMock(return_value=1.0)
+    env.final_reward_fn = final_reward_fn
+    engine, _, _ = self._collector(agent, env)
+    orig_run_with_timing = engine._run_with_timing
+
+    async def hung_env_step(func, *args, timeout=None):
+      if func == env.step:
+        raise asyncio.TimeoutError()
+      return await orig_run_with_timing(func, *args, timeout=timeout)
+
+    engine._run_with_timing = hung_env_step
+    result = asyncio.run(engine.collect(mode='Token'))
+    self.assertEqual(
+        result['status'], agent_types.TrajectoryStatus.ENV_TIMEOUT.name
+    )
+    final_reward_fn.assert_not_called()
+    self.assertEqual(result['trajectory_reward'], 0.0)
+    env.close.assert_called_once()
 
   def test_final_reward_timeout_defaults_to_zero(self):
     agent, env = self._frozenlake()
