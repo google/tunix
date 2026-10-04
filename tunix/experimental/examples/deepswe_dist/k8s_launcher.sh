@@ -765,10 +765,11 @@ if cfg:
   fi
 
   local start_index=${ROLLOUT_START_INDEX:-0}
+  local replicas=${ROLLOUT_REPLICAS:-1}
   local replica_ids=()
-  for ((i = start_index; i < ROLLOUT_REPLICAS; i++)); do
+  for ((i = start_index; i < replicas; i++)); do
     local replica_id="${ROLLOUT_ID}"
-    if [[ ${ROLLOUT_REPLICAS} -gt 1 ]]; then
+    if [[ ${replicas} -gt 1 ]]; then
       replica_id="${ROLLOUT_ID}-${i}"
     fi
     replica_ids+=("${replica_id}")
@@ -1114,10 +1115,11 @@ start_eval() {
   local max_model_len="${VLLM_MAX_MODEL_LEN:-65536}"
   local max_context_limit="${MAX_CONTEXT_LIMIT:-$((max_model_len - ${MAX_PROMPT_LENGTH:-4096}))}"
   local output_dir="${EVAL_OUTPUT_DIR:-${TRAJECTORY_LOG_DIR:-eval_results}}"
+  local replicas=${ROLLOUT_REPLICAS:-1}
   local sandbox_env=""
   if [[ "${USE_AGENT_SANDBOX}" == "1" || "${USE_AGENT_SANDBOX}" == "true" || "${USE_AGENT_SANDBOX}" == "True" ]]; then
     local eval_job_prefix="${eval_name}"
-    if [[ ${ROLLOUT_REPLICAS} -gt 1 ]]; then
+    if [[ ${replicas} -gt 1 ]]; then
       eval_job_prefix="${eval_name}-0"
     fi
     sandbox_env="NAMESPACE=\"${SANDBOX_NAMESPACE}\" ${SANDBOX_NODE_SELECTOR_KEY:+NODE_SELECTOR_KEY=\"${SANDBOX_NODE_SELECTOR_KEY}\"} ${SANDBOX_NODE_SELECTOR_VAL:+NODE_SELECTOR_VAL=\"${SANDBOX_NODE_SELECTOR_VAL}\"} ${SANDBOX_TOLERATIONS:+SANDBOX_TOLERATIONS=\"${SANDBOX_TOLERATIONS}\"} ${IMAGE_REWRITE_PREFIX:+IMAGE_REWRITE_PREFIX=\"${IMAGE_REWRITE_PREFIX}\"} ${OPENHANDS_SERVER_IMAGE:+OPENHANDS_SERVER_IMAGE=\"${OPENHANDS_SERVER_IMAGE}\"} ORCHESTRATOR_ID=\"${JOB_PREFIX}\" JOB_PREFIX=\"${eval_job_prefix}\" ${POOL_NAME_FORMAT:+POOL_NAME_FORMAT=\"${POOL_NAME_FORMAT}\"} ${TEMPLATE_NAME_PREFIX:+TEMPLATE_NAME_PREFIX=\"${TEMPLATE_NAME_PREFIX}\"}"
@@ -1126,8 +1128,8 @@ start_eval() {
   fi
 
   local worker_addrs="localhost:${eval_port}"
-  if [[ ${ROLLOUT_REPLICAS} -gt 1 ]]; then
-    for ((j=1; j<ROLLOUT_REPLICAS; j++)); do
+  if [[ ${replicas} -gt 1 ]]; then
+    for ((j=1; j<replicas; j++)); do
       worker_addrs="${worker_addrs} ${eval_name}-${j}-proc-0-0.${eval_name}-${j}:${eval_port}"
     done
   fi
@@ -1139,9 +1141,9 @@ start_eval() {
   fi
 
   local idx=0
-  for ((i = start_index; i < ROLLOUT_REPLICAS; i++)); do
+  for ((i = start_index; i < replicas; i++)); do
     local replica_id="${eval_name}"
-    if [[ ${ROLLOUT_REPLICAS} -gt 1 ]]; then
+    if [[ ${replicas} -gt 1 ]]; then
       replica_id="${eval_name}-${i}"
     fi
     local eval_cmd="tunix/experimental/examples/deepswe_dist/eval_launcher.py"
@@ -1280,11 +1282,14 @@ start_eval() {
 stop_eval() {
   local eval_name="${EVAL_JOBSET_NAME:-${JOB_PREFIX}-eval}"
   local eval_ns="${EVAL_NAMESPACE:-${K8S_NAMESPACE:-trellis}}"
+  local replicas=${ROLLOUT_REPLICAS:-1}
   if [[ "$DRY_RUN" == "true" ]]; then
     echo "[DRY RUN] Would delete jobset ${eval_name} in namespace ${eval_ns}"
-    if [[ ${ROLLOUT_REPLICAS} -gt 1 ]]; then
-      echo "kubectl delete jobset $(seq -f "${eval_name}-%g" 0 $((ROLLOUT_REPLICAS - 1))) -n ${eval_ns}"
-      kubectl get workload -n "${eval_ns}" -o name 2>/dev/null | grep -E "jobset-${eval_name}-[0-9]+-[a-f0-9]+" | xargs -r echo kubectl delete -n "${eval_ns}"
+    if [[ ${replicas} -gt 1 ]]; then
+      local selector_list
+      selector_list=$(seq -s, -f "${eval_name}-%g" 0 $((replicas - 1)))
+      echo "kubectl delete jobset $(seq -f "${eval_name}-%g" 0 $((replicas - 1))) -n ${eval_ns}"
+      echo "kubectl delete workload -l \"jobset.sigs.k8s.io/jobset-name in (${selector_list})\" -n ${eval_ns} --ignore-not-found=true --wait=false"
     fi
     if [[ "${USE_AGENT_SANDBOX}" == "1" || "${USE_AGENT_SANDBOX}" == "true" || "${USE_AGENT_SANDBOX}" == "True" ]]; then
       echo "kubectl delete sandboxwarmpools -n ${SANDBOX_NAMESPACE} -l app.kubernetes.io/created-by=${JOB_PREFIX} --ignore-not-found=true"
@@ -1295,9 +1300,11 @@ stop_eval() {
   else
     kubectl delete jobset "${eval_name}" -n "${eval_ns}" --ignore-not-found=true || true
     kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name=${eval_name}" -n "${eval_ns}" --ignore-not-found=true 2>/dev/null || true
-    if [[ ${ROLLOUT_REPLICAS} -gt 1 ]]; then
-      kubectl delete jobset $(seq -f "${eval_name}-%g" 0 $((ROLLOUT_REPLICAS - 1))) -n "${eval_ns}" --ignore-not-found=true 2>/dev/null || true
-      kubectl get workload -n "${eval_ns}" -o name 2>/dev/null | grep -E "jobset-${eval_name}-[0-9]+-[a-f0-9]+" | xargs -r kubectl delete -n "${eval_ns}" --ignore-not-found=true --wait=false 2>/dev/null || true
+    if [[ ${replicas} -gt 1 ]]; then
+      local selector_list
+      selector_list=$(seq -s, -f "${eval_name}-%g" 0 $((replicas - 1)))
+      kubectl delete jobset $(seq -f "${eval_name}-%g" 0 $((replicas - 1))) -n "${eval_ns}" --ignore-not-found=true 2>/dev/null || true
+      kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name in (${selector_list})" -n "${eval_ns}" --ignore-not-found=true --wait=false 2>/dev/null || true
     fi
     if [[ "${USE_AGENT_SANDBOX}" == "1" || "${USE_AGENT_SANDBOX}" == "true" || "${USE_AGENT_SANDBOX}" == "True" ]]; then
       echo "Cleaning up sandboxes and warmpools for ${JOB_PREFIX} in ${SANDBOX_NAMESPACE}..."

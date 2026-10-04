@@ -446,9 +446,10 @@ start_trainer() {
 }
 
 stop_rollout() {
+  local replicas=${ROLLOUT_REPLICAS:-1}
   local target_ids=("${ROLLOUT_ID}")
-  if [[ $ROLLOUT_REPLICAS -gt 1 ]]; then
-    for ((i = 0; i < ROLLOUT_REPLICAS; i++)); do
+  if [[ ${replicas} -gt 1 ]]; then
+    for ((i = 0; i < replicas; i++)); do
       target_ids+=("${ROLLOUT_ID}-${i}")
     done
   fi
@@ -460,12 +461,14 @@ stop_rollout() {
       kubectl delete leaderworkerset "${target_ids[@]}" -n "${K8S_NAMESPACE}" --ignore-not-found --wait=true
     fi
   else
+    local selector_list
+    selector_list=$(IFS=,; echo "${target_ids[*]}")
     if [[ "$DRY_RUN" == "true" ]]; then
       echo "kubectl delete jobset ${target_ids[*]} -n ${K8S_NAMESPACE}"
-      kubectl get workload -n "${K8S_NAMESPACE}" -o name 2>/dev/null | grep -E "jobset-${ROLLOUT_ID}(-[0-9]+)?-[a-f0-9]+" | xargs -r echo kubectl delete -n "${K8S_NAMESPACE}"
+      echo "kubectl delete workload -l \"jobset.sigs.k8s.io/jobset-name in (${selector_list})\" -n ${K8S_NAMESPACE} --ignore-not-found=true --wait=false"
     else
       kubectl delete jobset "${target_ids[@]}" -n "${K8S_NAMESPACE}" --ignore-not-found --wait=true
-      kubectl get workload -n "${K8S_NAMESPACE}" -o name 2>/dev/null | grep -E "jobset-${ROLLOUT_ID}(-[0-9]+)?-[a-f0-9]+" | xargs -r kubectl delete -n "${K8S_NAMESPACE}" --ignore-not-found=true --wait=false 2>/dev/null || true
+      kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name in (${selector_list})" -n "${K8S_NAMESPACE}" --ignore-not-found=true --wait=false 2>/dev/null || true
     fi
   fi
 }
@@ -625,7 +628,8 @@ if cfg:
 }
 
 start_rollout() {
-  if [[ ${ROLLOUT_REPLICAS} -le 0 ]]; then
+  local replicas=${ROLLOUT_REPLICAS:-1}
+  if [[ ${replicas} -le 0 ]]; then
     return 0
   fi
   if [[ "${ROLLOUT_JOBSET_YAML}" == "jobset.pathways.yaml" ]]; then
@@ -639,9 +643,9 @@ start_rollout() {
   local manifest_template
   manifest_template="$(render_rollout_instance "${placeholder}")" || return $?
 
-  for ((i = 0; i < ROLLOUT_REPLICAS; i++)); do
+  for ((i = 0; i < replicas; i++)); do
     local target_id="${ROLLOUT_ID}"
-    if [[ $ROLLOUT_REPLICAS -gt 1 ]]; then
+    if [[ ${replicas} -gt 1 ]]; then
       target_id="${ROLLOUT_ID}-${i}"
     fi
     if [[ ${i} -gt 0 ]]; then
