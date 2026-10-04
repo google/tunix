@@ -395,7 +395,7 @@ class ClusterOrchestrator:
           "Failed to sync JAX cache on worker %s: %r", primary_worker_id, err
       )
       return
-    if not uploaded:
+    if uploaded is False:
       logging.warning(
           "Worker %s reported a failed JAX cache upload.", primary_worker_id
       )
