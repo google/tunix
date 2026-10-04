@@ -76,15 +76,15 @@ class SandboxUtilsTest(absltest.TestCase):
     # current_batch has p0, p1 (img_A: 2).
     # Dict maintains samples of both queues:
     # img_A: 2 (8 reps), img_B: 2 (8 reps).
-    # Fleet warms both: create the pool (wait=False), then run the initial
-    # priming barrier (wait=True) on the pool that now exists.
+    # Fleet creates both pools (wait=False); only the current batch's pool
+    # (img_A) gets the initial priming barrier (wait=True). The next batch's
+    # pool warms in the background.
     self.assertCountEqual(
         fleet.warm_calls,
         [
             ("img_A", 8, False),
             ("img_A", 8, True),
             ("img_B", 8, False),
-            ("img_B", 8, True),
         ],
     )
     self.assertEqual(fleet.active_pools, {"img_A": 8, "img_B": 8})
@@ -145,17 +145,23 @@ class SandboxUtilsTest(absltest.TestCase):
         max_staleness=1,
     )
     self.assertTrue(iterator.has_next())
-    self.assertEqual(fleet.active_pools, {"img_A": 4, "img_B": 4})
+    # Lookahead window = max_staleness + 1 = 2 batches past current.
+    self.assertEqual(
+        fleet.active_pools, {"img_A": 4, "img_B": 4, "img_C": 4}
+    )
 
     # Batch 0 (p0 / img_A)
     self.assertEqual(next(iterator)["prompt"], "p0")
-    self.assertEqual(fleet.active_pools, {"img_A": 4, "img_B": 4})
+    self.assertEqual(
+        fleet.active_pools, {"img_A": 4, "img_B": 4, "img_C": 4}
+    )
 
-    # Batch 1 (p1 / img_B): img_A retained in _previous_batches (1/2)
+    # Batch 1 (p1 / img_B): img_A retained in _previous_batches (1/2); the
+    # window slides to [img_C, img_D].
     self.assertEqual(next(iterator)["prompt"], "p1")
     self.assertNotIn("img_A", fleet.unwarm_calls)
     self.assertEqual(
-        fleet.active_pools, {"img_A": 4, "img_B": 4, "img_C": 4}
+        fleet.active_pools, {"img_A": 4, "img_B": 4, "img_C": 4, "img_D": 4}
     )
 
     # Batch 2 (p2 / img_C): both img_A and img_B retained in _previous_batches (2/2)
@@ -179,6 +185,86 @@ class SandboxUtilsTest(absltest.TestCase):
       next(iterator)
     iterator.close()
     self.assertEqual(fleet.active_pools, {})
+
+  def test_lookahead_covers_staleness_window_waits_only_current(self):
+    # max_staleness=2: batches 0..2 are dispatched together at start-up, so
+    # the window must hold current + 3 lookahead batches (2 in flight + 1
+    # prefetch). Only the current batch is waited on.
+    fleet = FakeFleet()
+    dataset = [
+        {"prompt": f"p{i}", "docker_image": f"img_{i}"} for i in range(6)
+    ]
+    iterator = sandbox_utils.PrewarmDatasetIterator(
+        dataset,
+        fleet=fleet,
+        num_generations=4,
+        batch_size=1,
+        max_staleness=2,
+    )
+    self.assertEqual(iterator.lookahead_batches, 3)
+    self.assertEqual(
+        fleet.active_pools, {f"img_{i}": 4 for i in range(4)}
+    )
+    self.assertCountEqual(
+        [call for call in fleet.warm_calls if call[2]], [("img_0", 4, True)]
+    )
+
+    self.assertEqual(next(iterator)["prompt"], "p0")
+    # Shift: window slides to img_2..img_4; img_0 retained as previous.
+    self.assertEqual(next(iterator)["prompt"], "p1")
+    self.assertEqual(
+        fleet.active_pools, {f"img_{i}": 4 for i in range(5)}
+    )
+    # Pools created after start-up never block.
+    self.assertCountEqual(
+        [call for call in fleet.warm_calls if call[2]], [("img_0", 4, True)]
+    )
+    iterator.close()
+
+  def test_lookahead_steps_overrides_when_larger(self):
+    fleet = FakeFleet()
+    dataset = [
+        {"prompt": f"p{i}", "docker_image": f"img_{i}"} for i in range(5)
+    ]
+    iterator = sandbox_utils.PrewarmDatasetIterator(
+        dataset,
+        fleet=fleet,
+        num_generations=2,
+        batch_size=1,
+        lookahead_steps=3,
+        max_staleness=0,
+    )
+    self.assertEqual(iterator.lookahead_batches, 3)
+    self.assertLen(fleet.active_pools, 4)
+    iterator.close()
+
+  def test_all_pools_created_before_readiness_barrier(self):
+    # With one worker thread, the old single-phase flow created and waited on
+    # each pool in turn, so lookahead pools waited behind the barrier. Now
+    # every pool is created first and only then is the barrier run.
+    fleet = FakeFleet()
+    dataset = [
+        {"prompt": f"p{i}", "docker_image": f"img_{i}"} for i in range(4)
+    ]
+    iterator = sandbox_utils.PrewarmDatasetIterator(
+        dataset,
+        fleet=fleet,
+        num_generations=2,
+        batch_size=1,
+        max_staleness=2,
+        max_workers=1,
+    )
+    self.assertEqual(
+        fleet.warm_calls,
+        [
+            ("img_0", 2, False),
+            ("img_1", 2, False),
+            ("img_2", 2, False),
+            ("img_3", 2, False),
+            ("img_0", 2, True),
+        ],
+    )
+    iterator.close()
 
   def test_wait_initial_configurable(self):
     fleet = FakeFleet()
