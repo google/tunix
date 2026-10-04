@@ -35,10 +35,11 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # --- Job Identification & Cloud Storage ---
 export JOB_PREFIX="${JOB_PREFIX:-${USER}-$(date +%Y%m%d-%H%M%S)}"
+export BUCKET="${BUCKET:-gs://atwigg-trellis-europe-west4-dev}"
 export WANDB_API_KEY="${WANDB_API_KEY:-}"
 export WANDB_RUN_NAME="${WANDB_RUN_NAME:-${JOB_PREFIX}-gsm8k-35b-256}"
-export MAXTEXT_OUTPUT_DIR="${MAXTEXT_OUTPUT_DIR:-gs://atwigg-trellis-europe-west4-dev/maxtext/${JOB_PREFIX}}"
-export TRAJECTORY_LOG_DIR="${TRAJECTORY_LOG_DIR:-gs://atwigg-trellis-europe-west4-dev/trajectories/${JOB_PREFIX}}"
+export MAXTEXT_OUTPUT_DIR="${MAXTEXT_OUTPUT_DIR:-${BUCKET}/maxtext/${JOB_PREFIX}}"
+export TRAJECTORY_LOG_DIR="${TRAJECTORY_LOG_DIR:-${BUCKET}/trajectories/${JOB_PREFIX}}"
 export ORCHESTRATOR_PORT="${ORCHESTRATOR_PORT:-20000}"
 export ROLLOUT_PORT="${ROLLOUT_PORT:-20001}"
 export TRAINER_PORT="${TRAINER_PORT:-20002}"
@@ -50,12 +51,11 @@ export TUNIX_IMAGE="${TUNIX_IMAGE:-gcr.io/cloud-tpu-multipod-dev/atwigg/trellis-
 export PROJECT="${PROJECT:-cloud-tpu-shared-capacity}"
 export REGION="${REGION:-europe-west4}"
 export CLUSTER="${CLUSTER:-bodaborg-v5p-nap}"
+export K8S_NAMESPACE="${K8S_NAMESPACE:-trellis}"
 if [[ "${DRY_RUN:-false}" != "true" ]]; then
   kubectl config use-context "gke_${PROJECT}_${REGION}_${CLUSTER}" || true
-  kubectl config set-context --current --namespace=trellis || true
+  kubectl config set-context --current --namespace="${K8S_NAMESPACE}" || true
 fi
-
-export K8S_NAMESPACE="${K8S_NAMESPACE:-trellis}"
 export KUEUE_QUEUE="${KUEUE_QUEUE:-multislice-queue}"
 export KUEUE_QUEUE_NAME="${KUEUE_QUEUE_NAME:-${KUEUE_QUEUE}}"
 export PRIORITY_CLASS="${PRIORITY_CLASS:-medium}"
@@ -175,6 +175,8 @@ fi
 # Rollout Worker Environment Flags (Optimizations & Runtime Settings)
 # ==============================================================================
 export NUM_PRECOMPILE_WORKERS="${NUM_PRECOMPILE_WORKERS:-8}"
+export SKIP_JAX_PRECOMPILE="${SKIP_JAX_PRECOMPILE:-1}"
+export SAVE_JAX_CACHE="${SAVE_JAX_CACHE:-true}"
 export NEW_MODEL_DESIGN="${NEW_MODEL_DESIGN:-1}"
 export ATTN_BUCKETIZED_NUM_REQS="${ATTN_BUCKETIZED_NUM_REQS:-true}"
 export ATTN_CUSTOM_NUM_REQS_BUCKETS="${ATTN_CUSTOM_NUM_REQS_BUCKETS:-4}"

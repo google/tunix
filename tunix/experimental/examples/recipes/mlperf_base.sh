@@ -222,6 +222,13 @@ else
 fi
 
 # ==============================================================================
+# JAX Compilation Cache (GCS Persist & Restore)
+# ==============================================================================
+# Decouples GCS persistent storage from local XLA compilation execution.
+# Persists and restores rollout worker compilation cache across cluster runs.
+source "${DIR}/../common/jax_cache_config.sh"
+
+# ==============================================================================
 # Hyperparameters & DeepSWE Pipeline Configuration
 # ==============================================================================
 export MAX_STEPS=${MAX_STEPS:-50}

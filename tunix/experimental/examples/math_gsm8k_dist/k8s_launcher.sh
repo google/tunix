@@ -78,6 +78,9 @@ export TRAJECTORY_GROUP_ORDER=${TRAJECTORY_GROUP_ORDER:-arrival}
 export DEBUG=${DEBUG:-0}
 export SAMPLER=${SAMPLER:-inprocess_vllm}
 export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
+
+# JAX compilation cache configuration
+source "${LAUNCHER_DIR}/../common/jax_cache_config.sh"
 export USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
 export CHAT_PARSER=${CHAT_PARSER:-raw}
 export CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-1}
@@ -242,6 +245,19 @@ start_orchestrator() {
     shuffle_arg="--shuffle"
   fi
 
+  local jax_cache_env=""
+  if [[ "${DISABLE_JAX_CACHE:-0}" != "1" && "${DISABLE_JAX_CACHE:-false}" != "true" ]]; then
+    if [[ -n "${JAX_CACHE_GCS_DIR}" ]]; then
+      jax_cache_env+=" JAX_CACHE_GCS_DIR=\"${JAX_CACHE_GCS_DIR}\""
+    fi
+    if [[ -n "${ROLLOUT_JAX_CACHE_GCS_DIR}" ]]; then
+      jax_cache_env+=" ROLLOUT_JAX_CACHE_GCS_DIR=\"${ROLLOUT_JAX_CACHE_GCS_DIR}\""
+    fi
+    if [[ -n "${SAVE_JAX_CACHE}" ]]; then
+      jax_cache_env+=" SAVE_JAX_CACHE=\"${SAVE_JAX_CACHE}\""
+    fi
+  fi
+
   "$PYTHON" "$YAML_GEN" \
     "$YAML_DIR/jobset.cpu.yaml" \
     --jobset_name="${ORCHESTRATOR_ID}" \
@@ -260,7 +276,7 @@ start_orchestrator() {
       ${TUNIX_DEBUG_INFERENCE_LOGS:+TUNIX_DEBUG_INFERENCE_LOGS=\"${TUNIX_DEBUG_INFERENCE_LOGS}\"} \
       WANDB_PROJECT=\"${WANDB_PROJECT}\" \
       WANDB_RUN_NAME=\"${WANDB_RUN_NAME}\" \
-      ${ORCHESTRATOR_EXTRA_ENV:+${ORCHESTRATOR_EXTRA_ENV} }python -m tunix.experimental.distributed.runtime.main \
+      ${ORCHESTRATOR_EXTRA_ENV:+${ORCHESTRATOR_EXTRA_ENV} }${jax_cache_env} python -m tunix.experimental.distributed.runtime.main \
         --discovery_id=${ORCHESTRATOR_ID} \
         --discovery_port=${ORCHESTRATOR_PORT} \
         --process_main=tunix.experimental.examples.math_gsm8k_dist.run_gsm8k_dist_grpo.main \
@@ -571,6 +587,16 @@ if cfg:
     raiden_env+=" RAIDEN_USE_FFI=0"
   fi
 
+  local jax_cache_env=""
+  if [[ "${DISABLE_JAX_CACHE:-0}" != "1" && "${DISABLE_JAX_CACHE:-false}" != "true" ]]; then
+    if [[ -n "${ROLLOUT_JAX_CACHE_GCS_DIR}" ]]; then
+      jax_cache_env+=" JAX_CACHE_GCS_DIR=\"${ROLLOUT_JAX_CACHE_GCS_DIR}\""
+    fi
+    if [[ -n "${SAVE_JAX_CACHE}" ]]; then
+      jax_cache_env+=" SAVE_JAX_CACHE=\"${SAVE_JAX_CACHE}\""
+    fi
+  fi
+
   "$PYTHON" "$YAML_GEN" \
     "$YAML_DIR/${ROLLOUT_JOBSET_YAML}" \
     --jobset_name="${target_id}" \
@@ -585,7 +611,7 @@ if cfg:
     --worker_container_port="${ROLLOUT_PORT}" \
     --worker_startup_command=" \
       ${TUNIX_DEBUG_INFERENCE_LOGS:+TUNIX_DEBUG_INFERENCE_LOGS=\"${TUNIX_DEBUG_INFERENCE_LOGS}\"} \
-      ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} SKIP_JAX_PRECOMPILE=${ROLLOUT_SKIP_JAX_PRECOMPILE} VERIFY_WEIGHTS=${VERIFY_WEIGHTS}${raiden_env}${ROLLOUT_EXTRA_ENV:+ ${ROLLOUT_EXTRA_ENV}} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} ${PHASED_PROFILING_DIR:+PHASED_PROFILING_DIR=\"${PHASED_PROFILING_DIR}\"} ${PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR:+PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR=${PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR}} ${PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP:+PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP=${PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP}} python -m tunix.experimental.distributed.runtime.main \
+      ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} SKIP_JAX_PRECOMPILE=${ROLLOUT_SKIP_JAX_PRECOMPILE} VERIFY_WEIGHTS=${VERIFY_WEIGHTS}${raiden_env}${ROLLOUT_EXTRA_ENV:+ ${ROLLOUT_EXTRA_ENV}} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} ${PHASED_PROFILING_DIR:+PHASED_PROFILING_DIR=\"${PHASED_PROFILING_DIR}\"} ${PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR:+PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR=${PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR}} ${PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP:+PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP=${PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP}}${jax_cache_env} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
         --process_main=tunix.experimental.examples.common.run_rollout_node.main \
@@ -616,6 +642,9 @@ if cfg:
 }
 
 start_rollout() {
+  if [[ -n "${ROLLOUT_JAX_CACHE_GCS_DIR}" && "${DISABLE_JAX_CACHE:-false}" != "true" && "${DISABLE_JAX_CACHE:-0}" != "1" ]]; then
+    echo "[launcher] Rollout JAX cache GCS: ${ROLLOUT_JAX_CACHE_GCS_DIR} (save=${SAVE_JAX_CACHE:-true})" >&2
+  fi
   for ((i = 0; i < ROLLOUT_REPLICAS; i++)); do
     local target_id="${ROLLOUT_ID}"
     if [[ $ROLLOUT_REPLICAS -gt 1 ]]; then
