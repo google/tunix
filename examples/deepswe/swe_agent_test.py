@@ -176,7 +176,11 @@ class SweAgentTest(absltest.TestCase):
     action = SWEAction("execute_bash", {"cmd": "pwd"})
     result = openhands_utils.step_openhands(mock_env, action)
     self.assertFalse(result.done)
-    self.assertEqual(result.observation, "/workspace\n")
+    self.assertEqual(
+        result.observation,
+        "/workspace\n[The command completed with exit code 0.]\n[Command"
+        " finished with exit code 0]",
+    )
     self.assertEqual(mock_env.total_steps, 1)
 
   def test_step_openhands_execute_bash_missing_command(self):
@@ -186,7 +190,8 @@ class SweAgentTest(absltest.TestCase):
     result = openhands_utils.step_openhands(mock_env, action)
     self.assertFalse(result.done)
     self.assertEqual(
-        result.observation, "ERROR: No command specified for execute_bash."
+        result.observation,
+        "ERROR: No previous running command to retrieve logs from.",
     )
 
   def test_step_openhands_execute_ipython_cell(self):
@@ -417,7 +422,12 @@ class SweAgentTest(absltest.TestCase):
         ),
     )
     self.assertFalse(plan_res.done)
-    self.assertIn("Task list has been updated with 1 items.", plan_res.observation)
+    self.assertRegex(
+        plan_res.observation,
+        r"^Task list has been updated with 1 items\. Stored in session"
+        r" directory: sessions/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{2}-"
+        r"[0-9a-f]{15}/TASKS\.md$",
+    )
 
     view_after_plan_res = openhands_utils.step_openhands(
         mock_env, SWEAction("task_tracker", {"command": "view"})
@@ -624,7 +634,7 @@ class SweAgentTest(absltest.TestCase):
         prompt_item["metadata"]["agent_config"], {"scaffold": "openhands"}
     )
 
-  def test_oh_editor_create_view_str_replace_insert_undo_and_600_line_limit(self):
+  def test_oh_editor_create_view_str_replace_insert_undo_and_clip(self):
     import tempfile  # pylint: disable=g-import-not-at-top
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -686,7 +696,8 @@ class SweAgentTest(absltest.TestCase):
       self.assertNotIn("# comment", undo_out)
       self.assertIn("return 2", undo_out)
 
-      # 6. 600-line view limit clipping
+      # 6. no line cap; long files are clipped by characters, before the
+      # line numbers are added, with the reference notice.
       long_path = os.path.join(tmpdir, "long.py")
       with open(long_path, "w", encoding="utf-8") as f:
         f.write("\n".join(f"line_{i}" for i in range(1, 701)))
@@ -694,9 +705,32 @@ class SweAgentTest(absltest.TestCase):
           {"command": "view", "path": long_path},
           history_file=hist_file,
       )
-      self.assertIn("line_600", long_view)
-      self.assertNotIn("line_601", long_view)
-      self.assertIn(openhands_utils.FILE_CLIPPED_NOTICE, long_view)
+      self.assertIn("   700\tline_700", long_view)
+      self.assertNotIn("<response clipped>", long_view)
+      huge_path = os.path.join(tmpdir, "huge.py")
+      with open(huge_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(f"value_{i} = {'x' * 40}" for i in range(1, 2001)))
+      huge_view = openhands_utils.run_oh_editor_locally(
+          {"command": "view", "path": huge_path},
+          history_file=hist_file,
+      )
+      self.assertTrue(
+          huge_view.endswith(openhands_utils.FILE_CLIPPED_NOTICE + "\n")
+      )
+      self.assertIn("`grep -n`", huge_view)
+      binary_path = os.path.join(tmpdir, "blob.bin")
+      with open(binary_path, "wb") as f:
+        f.write(b"abc\x00def\n")
+      binary_view = openhands_utils.run_oh_editor_locally(
+          {"command": "view", "path": binary_path},
+          history_file=hist_file,
+      )
+      self.assertEqual(
+          binary_view,
+          f"ERROR:\nFile validation failed for {binary_path}: File appears"
+          " to be binary and this file type cannot be read or edited by this"
+          " tool.",
+      )
 
       # 7. remote command serialization round-trip
       import subprocess  # pylint: disable=g-import-not-at-top
@@ -733,7 +767,15 @@ class SweAgentTest(absltest.TestCase):
     result = openhands_utils.step_openhands(mock_env, action)
     self.assertFalse(result.done)
     self.assertTrue(result.info.get("command_timed_out"))
-    self.assertIn("Command timed out after 45 seconds", result.observation)
+    self.assertEqual(
+        result.observation,
+        "collected 10 items\n[The command timed out after 45.0 seconds. You"
+        " may wait longer to see additional output by sending empty command"
+        " '', send other commands to interact with the current process, send"
+        ' keys ("C-c", "C-z", "C-d") to interrupt/kill the previous command'
+        " before sending your new command, or use the timeout parameter in"
+        " execute_bash for future commands.]",
+    )
     called_cmd = mock_workspace.execute_command.call_args[0][0]
     self.assertIn("/var/tmp/.oh_cwd", called_cmd)
     self.assertEqual(
@@ -758,25 +800,106 @@ class SweAgentTest(absltest.TestCase):
     mock_env.total_steps = 0
 
     with tempfile.TemporaryDirectory() as tmpdir:
+      tmpdir = os.path.realpath(tmpdir)
+      cwd_file = os.path.join(tmpdir, ".oh_cwd")
       for command, expected in (
-          ("cat <<'EOF'\nhello from heredoc\nEOF", "hello from heredoc\n"),
-          ("cat << 'END'\nline1\nline2\nEND", "line1\nline2\n"),
-          ("echo ok  # trailing comment", "ok\n"),
+          ("cat <<'EOF'\nhello from heredoc\nEOF", "hello from heredoc"),
+          ("cat << 'END'\nline1\nline2\nEND", "line1\nline2"),
+          ("echo ok  # trailing comment", "ok"),
       ):
+        with open(cwd_file, "w", encoding="utf-8") as f:
+          f.write(tmpdir)
         openhands_utils.step_openhands(
             mock_env, SWEAction("execute_bash", {"command": command})
         )
         wrapped = mock_workspace.execute_command.call_args[0][0]
         # Run the wrapped command for real, with its cwd state file moved
         # into the temp dir so nothing is written outside it.
-        wrapped = wrapped.replace(
-            "/var/tmp/.oh_cwd", os.path.join(tmpdir, ".oh_cwd")
+        proc = subprocess.run(
+            ["sh", "-c", wrapped.replace("/var/tmp/.oh_cwd", cwd_file)],
+            capture_output=True,
+            text=True,
         )
-        res = subprocess.run(
-            ["sh", "-c", wrapped], capture_output=True, text=True, cwd=tmpdir
+        res = mock.MagicMock(spec=["stdout", "stderr", "exit_code"])
+        res.stdout, res.stderr, res.exit_code = (
+            proc.stdout,
+            proc.stderr,
+            proc.returncode,
         )
-        self.assertEqual(res.returncode, 0, msg=f"{command!r}: {res.stderr}")
-        self.assertEqual(res.stdout, expected, msg=repr(command))
+        obs, timed_out = openhands_utils._format_command_result(
+            res, 60.0, 0.1, bash_observation=True
+        )
+        self.assertFalse(timed_out)
+        self.assertTrue(
+            obs.startswith(
+                f"{expected}\n[The command completed with exit code 0.]\n"
+                f"[Current working directory: {tmpdir}]\n"
+            ),
+            msg=f"{command!r}: {obs!r}",
+        )
+        self.assertTrue(obs.endswith("\n[Command finished with exit code 0]"))
+
+  def test_bash_observation_matches_reference_rendering(self):
+    meta = openhands_utils._BASH_META_SENTINEL
+    res = mock.MagicMock(spec=["stdout", "stderr", "exit_code"])
+    res.stdout = f"  out line\n\n{meta}/testbed\t/testbed/.venv/bin/python\n"
+    res.stderr = "warn line\n"
+    res.exit_code = 2
+    obs, _ = openhands_utils._format_command_result(
+        res, 60.0, 0.1, bash_observation=True
+    )
+    self.assertEqual(
+        obs,
+        "out line\nwarn line\n[The command completed with exit code 2.]\n"
+        "[Current working directory: /testbed]\n"
+        "[Python interpreter: /testbed/.venv/bin/python]\n"
+        "[Command finished with exit code 2]",
+    )
+    # Long output keeps the head and tail halves, with the suffix in the tail.
+    res.stdout = "a" * 20000 + "b" * 20000 + f"\n{meta}/testbed\t\n"
+    res.stderr = ""
+    res.exit_code = 0
+    obs, _ = openhands_utils._format_command_result(
+        res, 60.0, 0.1, bash_observation=True
+    )
+    self.assertEqual(len(obs), 30047)
+    self.assertTrue(
+        obs.startswith("a" * 15000 + "\n[... Observation truncated")
+    )
+    self.assertTrue(obs.endswith("[Command finished with exit code 0]"))
+
+  def test_step_openhands_bash_send_keys_without_running_command(self):
+    mock_env = mock.MagicMock()
+    mock_env.max_steps = 10
+    result = openhands_utils.step_openhands(
+        mock_env,
+        SWEAction("execute_bash", {"command": "C-c", "is_input": "true"}),
+    )
+    self.assertEqual(
+        result.observation,
+        "ERROR: No previous running command to interact with.",
+    )
+    mock_env.workspace.execute_command.assert_not_called()
+
+  def test_wrapper_strips_pyinstaller_library_path(self):
+    import subprocess  # pylint: disable=g-import-not-at-top
+
+    probe = (
+        openhands_utils._STRIP_PYINSTALLER_LD_PATH
+        + 'echo "${LD_LIBRARY_PATH-unset}"'
+    )
+    for value, expected in (
+        ("/tmp/_MEIabc:/opt/a:/opt/b", "/opt/a:/opt/b"),
+        ("/tmp/_MEIabc", "unset"),
+        ("/usr/lib", "/usr/lib"),
+    ):
+      out = subprocess.run(
+          ["sh", "-c", probe],
+          capture_output=True,
+          text=True,
+          env={"PATH": os.environ.get("PATH", ""), "LD_LIBRARY_PATH": value},
+      ).stdout.strip()
+      self.assertEqual(out, expected, msg=value)
 
   def test_oh_editor_remote_driver_postpones_annotations(self):
     import __future__  # pylint: disable=g-import-not-at-top
@@ -795,7 +918,10 @@ class SweAgentTest(absltest.TestCase):
       cmd = openhands_utils._build_oh_editor_remote_cmd(
           {"command": "view", "path": file_path}
       )
-      argv = shlex.split(cmd)
+      self.assertTrue(
+          cmd.startswith(openhands_utils._STRIP_PYINSTALLER_LD_PATH)
+      )
+      argv = shlex.split(cmd[len(openhands_utils._STRIP_PYINSTALLER_LD_PATH) :])
       self.assertEqual(argv[0], "python3")
       driver = base64.b64decode(
           re.search(r"b64decode\('([^']+)'\)", cmd).group(1)
