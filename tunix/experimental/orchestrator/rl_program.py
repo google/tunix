@@ -902,11 +902,12 @@ class StandardRLProgram(RLProgram):
 
         rewards = []
         for item in group:
-          # Skip reward evaluation or extraction for failed, timed-out, or
+          # Skip reward evaluation or extraction for failed, env-timed-out, or
           # masked-out trajectories (`not item.is_valid`): although the payload
           # still goes through trainer fwd/bwd to keep static batch shapes, its
           # advantage and completion_mask are zeroed out, so scoring it is
           # wasted work (and an aborted trajectory may lack trajectory_reward).
+          # Episode-budget timeouts are valid and arrive with reward 0.
           if not item.is_valid:
             r = 0.0
           elif self.reward_fns:

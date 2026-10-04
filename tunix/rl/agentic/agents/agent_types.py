@@ -112,9 +112,13 @@ class TrajectoryStatus(Enum):
   FAILED = auto()
 
 
+# Runtime/system failures carry no usable learning signal and are excluded
+# from advantage baselines and the policy loss. An episode that exhausts its
+# wall-clock budget (`TIMEOUT`) is deliberately not listed: it is a normal
+# unsolved rollout that scores 0 (see `TrajectoryCollectEngine.collect`), which
+# matches the reference harness.
 INVALID_TRAJECTORY_STATUSES: frozenset[TrajectoryStatus] = frozenset({
     TrajectoryStatus.FAILED,
-    TrajectoryStatus.TIMEOUT,
     TrajectoryStatus.ENV_TIMEOUT,
 })
 
