@@ -918,6 +918,11 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         pipeline_train_microbatches=args.pipeline_train_microbatches,
         partial_rollout=args.in_flight_weight_updates,
         rollout_priority_scheduling=args.rollout_priority_scheduling,
+        on_train_start=(
+            lambda step: mllog_utils.train_start(args, step=step)
+            if args.rcp_logging
+            else None
+        ),
         on_step_begin=lambda step: logging.info(
             ">>> DeepSWE step %d starting | policy_version=%d",
             step,
@@ -949,8 +954,6 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
 
     logging.info("Bringing up remote workers through ClusterOrchestrator...")
     cluster.bring_up_workers(dummy_data=None)
-    if args.rcp_logging:
-      mllog_utils.train_start(args, step=0)
     logging.info("Starting DeepSWE StandardRLProgram execution...")
     cluster.run(
         program=program,
