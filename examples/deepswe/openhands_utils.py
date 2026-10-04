@@ -559,7 +559,14 @@ def _get_swe_action_cls() -> Any:
 
 
 def parse_openhands_action_str(action_str: str) -> Any:
-  """Parses an XML action string into an Action object without stripping indentation."""
+  """Parses SWEAction.to_xml_string() output back into an Action, losslessly.
+
+  to_xml_string() writes each value as `<parameter=k>{v}</parameter>` with no
+  padding, so the value is taken verbatim. The model-text parser
+  (parse_openhands_xml_action) already removed the newline after the opening
+  tag and before the closing one; removing another here dropped real edge
+  newlines, e.g. the final newline of every `create` file_text.
+  """
   swe_action_cls = _get_swe_action_cls()
 
   fn_match = re.search(r"<function\s*=\s*([^>]+)>", action_str)
@@ -570,16 +577,7 @@ def parse_openhands_action_str(action_str: str) -> Any:
 
   params: dict[str, str] = {}
   for param_key, param_value in param_matches:
-    param_key = param_key.strip()
-    if param_value.startswith("\r\n"):
-      param_value = param_value[2:]
-    elif param_value.startswith("\n"):
-      param_value = param_value[1:]
-    if param_value.endswith("\r\n"):
-      param_value = param_value[:-2]
-    elif param_value.endswith("\n"):
-      param_value = param_value[:-1]
-    params[param_key] = param_value
+    params[param_key.strip()] = param_value
 
   return swe_action_cls(function_name, params)
 
