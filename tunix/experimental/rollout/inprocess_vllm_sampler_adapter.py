@@ -30,6 +30,7 @@ from tunix.experimental.rollout.raiden_weight_sync_mixin import (
 from tunix.experimental.weight_sync import weight_sync
 from tunix.generate import tokenizer_adapter as tok_adapter
 from tunix.generate import utils as generate_utils
+from tunix.rl.rollout import base_rollout
 
 Sampler = base_sampler_lib.Sampler
 
@@ -49,15 +50,23 @@ class InprocessVllmSamplerAdapter(
   def __init__(
       self,
       server_id: str,
+      config: base_rollout.RolloutConfig,
       tokenizer: Any = None,
-      config: Any = None,
-      model_name: str = "",
+      vllm_config: Any = None,
+      vllm_sampler: Any = None,
       raiden_sync_delegate: Any = None,
-      weight_sync_mode: weight_sync.WeightSyncMode | str | None = None,
+      weight_sync_mode: weight_sync.WeightSyncMode | str = (
+          weight_sync.DEFAULT_WEIGHT_SYNC_MODE
+      ),
       max_concurrency: int = 256,
-      **kwargs,
   ):
+    if not isinstance(config, base_rollout.RolloutConfig):
+      raise TypeError(
+          "InprocessVllmSamplerAdapter expected config to be an instance of"
+          f" RolloutConfig, got {type(config).__name__}."
+      )
     self.server_id = server_id
+    self.config: base_rollout.RolloutConfig = config
     if tokenizer is not None and not isinstance(
         tokenizer, tok_adapter.TokenizerAdapter
     ):
@@ -66,23 +75,22 @@ class InprocessVllmSamplerAdapter(
       except ValueError:
         pass
     self.tokenizer: Any = tokenizer
-    self.config = config
-    self.model_name = model_name or kwargs.get("model", "")
-    self.vllm_sampler = None
+    self.vllm_config = vllm_config
     self.raiden_sync_delegate = raiden_sync_delegate
     self.max_concurrency = max_concurrency
     self._executor = futures.ThreadPoolExecutor(
         max_workers=self.max_concurrency,
         thread_name_prefix=f"{self.server_id}_vllm_worker",
     )
-    if weight_sync_mode is None:
-      weight_sync_mode = getattr(config, "weight_sync_mode", None)
     if isinstance(weight_sync_mode, weight_sync.WeightSyncMode):
       self.weight_sync_mode = weight_sync_mode
     elif isinstance(weight_sync_mode, str):
       self.weight_sync_mode = weight_sync.WeightSyncMode(weight_sync_mode)
     else:
-      self.weight_sync_mode = weight_sync.DEFAULT_WEIGHT_SYNC_MODE
+      raise TypeError(
+          "InprocessVllmSamplerAdapter expected weight_sync_mode to be"
+          f" WeightSyncMode or str, got {type(weight_sync_mode).__name__}."
+      )
     self.enable_raiden = (
         self.weight_sync_mode == weight_sync.WeightSyncMode.RAIDEN
     )
@@ -110,7 +118,12 @@ class InprocessVllmSamplerAdapter(
           self.server_id,
       )
 
-    if self.tokenizer is not None and self.config is not None:
+    self.vllm_sampler = vllm_sampler
+    if (
+        self.vllm_sampler is None
+        and self.tokenizer is not None
+        and self.vllm_config is not None
+    ):
       # `sample()` dispatches concurrent requests across `self._executor` worker
       # threads. Force `server_mode=True` so `VllmSampler` uses
       # `VLLMInProcessDriver` (where a single background engine thread drains a
@@ -118,47 +131,51 @@ class InprocessVllmSamplerAdapter(
       # `_generate_offline()`, which calls `engine.step()` directly from caller
       # threads and races on donated JAX KV-cache buffers (`Array has been
       # deleted`).
-      self.config.server_mode = True
+      self.vllm_config.server_mode = True
       vllm_lib = _get_vllm_sampler_cls()
       self.vllm_sampler = vllm_lib.VllmSampler(
-          tokenizer=self.tokenizer, config=self.config
+          tokenizer=self.tokenizer, config=self.vllm_config
       )
 
   def initialize(self) -> None:
     """Initializes vLLM sampler if needed."""
-    if self.tokenizer is None and self.model_name:
+    model_version = self.config.rollout_vllm_model_version
+    if self.tokenizer is None and model_version:
       from transformers import AutoTokenizer  # pylint: disable=g-import-not-at-top
-      from tunix.generate import vllm_sampler as tunix_vllm_sampler  # pylint: disable=g-import-not-at-top
 
       self.tokenizer = tok_adapter.TokenizerAdapter(
-          AutoTokenizer.from_pretrained(self.model_name)
+          AutoTokenizer.from_pretrained(model_version)
       )
-      self.config = tunix_vllm_sampler.VllmConfig(
+
+    if self.vllm_config is None and model_version:
+      from tunix.generate import vllm_sampler as tunix_vllm_sampler  # pylint: disable=g-import-not-at-top
+
+      self.vllm_config = tunix_vllm_sampler.VllmConfig(
           server_mode=True,
-          engine_kwargs={"model": self.model_name},
+          engine_kwargs={"model": model_version},
       )
 
     if (
         self.vllm_sampler is None
         and self.tokenizer is not None
-        and self.config is not None
+        and self.vllm_config is not None
     ):
       # Required for thread-safe continuous batching across `self._executor`
       # worker threads; see comment in `__init__`.
-      self.config.server_mode = True
+      self.vllm_config.server_mode = True
       vllm_lib = _get_vllm_sampler_cls()
       self.vllm_sampler = vllm_lib.VllmSampler(
-          tokenizer=self.tokenizer, config=self.config
+          tokenizer=self.tokenizer, config=self.vllm_config
       )
 
   def _prompt_tokens_from_request(
       self,
-      req: Any,
+      req: base_sampler_lib.SamplingRequest,
       fallback_padded_tokens: Any,
       prompt_length: int | None = None,
   ) -> np.ndarray:
     """Returns request token ids directly when available, else sampler output."""
-    prompt = req.prompt if hasattr(req, "prompt") else req
+    prompt = req.prompt
     if generate_utils.is_token_id_sequence(prompt):
       return np.asarray(prompt, dtype=np.int32).reshape(-1)
     return generate_utils.unpad_prompt_tokens(
@@ -219,14 +236,11 @@ class InprocessVllmSamplerAdapter(
       sampling_requests: (
           base_sampler_lib.SamplingRequest
           | Sequence[base_sampler_lib.SamplingRequest]
-          | Any
-          | Sequence[Any]
       ),
       **kwargs,
   ) -> (
       base_sampler_lib.SamplingResponse
       | List[base_sampler_lib.SamplingResponse]
-      | Any
   ):
     """Generates completions using underlying Tunix VllmSampler."""
     if not self.vllm_sampler:
@@ -239,14 +253,23 @@ class InprocessVllmSamplerAdapter(
       raise ValueError("sampling_requests cannot be None.")
 
     if isinstance(sampling_requests, base_sampler_lib.SamplingRequest):
-      requests: List[Any] = [sampling_requests]
+      requests: List[base_sampler_lib.SamplingRequest] = [sampling_requests]
       is_sequence = False
-    elif isinstance(sampling_requests, (list, tuple)):
+    elif (
+        isinstance(sampling_requests, Sequence)
+        and not isinstance(sampling_requests, (str, bytes))
+        and all(
+            isinstance(req, base_sampler_lib.SamplingRequest)
+            for req in sampling_requests
+        )
+    ):
       requests = list(sampling_requests)
       is_sequence = True
     else:
-      requests = [sampling_requests]
-      is_sequence = False
+      raise TypeError(
+          "sample expected SamplingRequest or Sequence[SamplingRequest], got"
+          f" {type(sampling_requests).__name__}."
+      )
 
     prompts = []
     prompt_token_ids_batch = []
@@ -260,8 +283,13 @@ class InprocessVllmSamplerAdapter(
     return_routed_experts_list = []
     routed_experts_prompt_start_list = []
 
+    cfg = self.config
+    default_max_tokens = cfg.max_tokens_to_generate
+    default_temp = cfg.temperature
+    default_seed = int(cfg.seed) if cfg.seed is not None else None
+
     for req in requests:
-      prompt = req.prompt if hasattr(req, "prompt") else req
+      prompt = req.prompt
       if generate_utils.is_token_id_sequence(prompt):
         has_token_prompts = True
         prompt_token_ids_batch.append(
@@ -269,29 +297,33 @@ class InprocessVllmSamplerAdapter(
         )
       else:
         prompts.append(self._prompt_to_input_string(prompt))
-      sp = (
-          req.sampling_params
-          if hasattr(req, "sampling_params") and req.sampling_params is not None
-          else base_sampler_lib.SamplingParams()
-      )
-      assert sp is not None
+      sp = req.sampling_params
+      if sp is not None:
+        max_gen_steps_list.append(sp.max_tokens)
+        temps.append(sp.temperature)
+        top_ps.append(sp.top_p)
+        top_ks.append(sp.top_k)
+        seeds.append(sp.seed)
+        return_logprobs_list.append(sp.return_logprobs)
+        return_routed_experts_list.append(sp.return_routed_experts)
+        routed_experts_prompt_start_list.append(sp.routed_experts_prompt_start)
+      else:
+        max_gen_steps_list.append(default_max_tokens)
+        temps.append(default_temp)
+        top_ps.append(cfg.top_p)
+        top_ks.append(cfg.top_k)
+        seeds.append(default_seed)
+        return_logprobs_list.append(bool(cfg.return_logprobs))
+        return_routed_experts_list.append(bool(cfg.return_routed_experts))
+        routed_experts_prompt_start_list.append(0)
 
-      max_gen_steps_list.append(sp.max_tokens)
-      temps.append(sp.temperature)
-      top_ps.append(sp.top_p)
-      top_ks.append(sp.top_k)
-      seeds.append(sp.seed)
-      return_logprobs_list.append(sp.return_logprobs)
-      return_routed_experts_list.append(sp.return_routed_experts)
-      routed_experts_prompt_start_list.append(
-          getattr(sp, "routed_experts_prompt_start", 0)
-      )
-
-    max_generation_steps = max(max_gen_steps_list) if max_gen_steps_list else 64
-    temperature = temps[0] if temps else 0.0
-    top_p = top_ps[0] if top_ps else None
-    top_k = top_ks[0] if top_ks else None
-    seed = seeds[0] if seeds else None
+    max_generation_steps = (
+        max(max_gen_steps_list) if max_gen_steps_list else default_max_tokens
+    )
+    temperature = temps[0] if temps else default_temp
+    top_p = top_ps[0] if top_ps else cfg.top_p
+    top_k = top_ks[0] if top_ks else cfg.top_k
+    seed = seeds[0] if seeds else default_seed
     return_logprobs = any(return_logprobs_list) or kwargs.get(
         "return_logprobs", False
     )
@@ -324,6 +356,8 @@ class InprocessVllmSamplerAdapter(
         return_logprobs=return_logprobs,
         routed_experts_prompt_start=routed_experts_prompt_start,
     )
+    if cfg.eos_tokens is not None:
+      sampler_call_kwargs["eos_tokens"] = cfg.eos_tokens
     if has_token_prompts:
       sampler_call_kwargs["input_strings"] = None
       sampler_call_kwargs["prompt_token_ids"] = prompt_token_ids_batch
@@ -338,7 +372,7 @@ class InprocessVllmSamplerAdapter(
     prompt_lengths = getattr(sampler_output, "prompt_lengths", None)
     responses = []
     for i, req in enumerate(requests):
-      req_id = getattr(req, "request_id", "")
+      req_id = req.request_id
 
       txt = (
           sampler_output.text[i]

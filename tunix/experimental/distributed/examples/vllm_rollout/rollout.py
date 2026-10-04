@@ -63,16 +63,23 @@ def main(argv: Sequence[str], context: ProcessContext | None) -> None:
   logging.getLogger("httpx").setLevel(logging.WARNING)
 
   tokenizer = AutoTokenizer.from_pretrained(args.model_name)
-  config = vllm_sampler.VllmConfig(engine_kwargs={"model": args.model_name})
+  vllm_config = vllm_sampler.VllmConfig(
+      engine_kwargs={"model": args.model_name}
+  )
+  rollout_config = rollout_worker.RolloutConfig(
+      sampler_type="inprocess_vllm",
+      rollout_vllm_model_version=args.model_name,
+  )
   sampler_server = inprocess_sampler_lib.InprocessVllmSamplerAdapter(  # pyrefly: ignore[bad-instantiation]
       server_id="vllm-0",
+      config=rollout_config,
       tokenizer=tokenizer,
-      config=config,
+      vllm_config=vllm_config,
   )
-  sampler_server.initialize()
 
   worker_service = rollout_worker.RolloutWorker(
       worker_id=args.worker_id,
+      config=rollout_config,
       sampler=sampler_server,
       env_pool=mocks.MockEnvironmentPool(
           pool_size=1, env_factory=registry.ENV_REGISTRY.get("mock_env")

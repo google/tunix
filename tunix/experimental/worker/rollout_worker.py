@@ -14,9 +14,8 @@
 
 """Top-level RolloutWorker abstractions (Service vs Client Driver)."""
 
-import dataclasses
 import threading
-from typing import Any, AsyncIterator, Callable, List, Mapping, Optional, Sequence, Union
+from typing import Any, AsyncIterator, Callable, List, Optional, Sequence, Union
 
 from absl import logging
 import numpy as np
@@ -25,40 +24,9 @@ from tunix.experimental.rollout import manager as manager_lib
 from tunix.experimental.rollout import sampler as sampler_lib
 from tunix.experimental.trajectory import store as trajectory_store_lib
 from tunix.experimental.trajectory import trajectory as trajectory_lib
-from tunix.experimental.weight_sync import weight_sync
 from tunix.experimental.worker import abstract_worker
-from tunix.rl.rollout import base_rollout
 
-
-@dataclasses.dataclass
-class RolloutConfig(base_rollout.RolloutConfig):
-  """Rollout configuration extending base RolloutConfig with sampler choice and registry options.
-
-  Attributes:
-    sampler_type: Type of sampler adapter to construct ("vanilla",
-      "inprocess_vllm", "vllm").
-    weight_sync_mode: Mode of weight synchronization ("none", "fallback",
-      "raiden").
-    env_name: Registered name of environment class in ENV_REGISTRY.
-    agent_name: Registered name of agent class in AGENT_REGISTRY.
-    env_config: Configuration dictionary passed to environment constructor.
-    agent_config: Configuration dictionary passed to agent constructor.
-    trajectory_store_config: Trajectory Store configuration for this worker
-      process, or None to run without a store. See
-      `store.TrajectoryStore.from_config`. Must match what the orchestrator
-      was given: for the file backend it is the shared root_dir and run_id
-      that will make these writes visible to the orchestrator's reads once
-      rollout step logging is wired.
-  """
-
-  sampler_type: str = "vanilla"
-  weight_sync_mode: weight_sync.WeightSyncMode = weight_sync.WeightSyncMode.NONE
-  env_name: str = ""
-  agent_name: str = ""
-  env_config: dict[str, Any] = dataclasses.field(default_factory=dict)
-  agent_config: dict[str, Any] = dataclasses.field(default_factory=dict)
-  trajectory_store_config: Mapping[str, Any] | None = None
-
+RolloutConfig = sampler_lib.RolloutConfig
 
 TrajectoryOrError = Union[
     trajectory_lib.Trajectory, trajectory_lib.TrajectoryError
@@ -77,7 +45,7 @@ class RolloutWorker(abstract_worker.Worker):
   def __init__(
       self,
       worker_id: str,
-      config: Optional[RolloutConfig] = None,
+      config: RolloutConfig,
       sampler: Optional[sampler_lib.Sampler] = None,
       env_pool: Any = None,
       agent_factory: Optional[Callable[[], Any]] = None,
@@ -86,8 +54,13 @@ class RolloutWorker(abstract_worker.Worker):
       chat_parser: Any = None,
   ):
     super().__init__()
+    if not isinstance(config, RolloutConfig):
+      raise TypeError(
+          "RolloutWorker requires config to be a RolloutConfig, got"
+          f" {type(config).__name__}."
+      )
     self.worker_id = worker_id
-    self.config = config
+    self.config: RolloutConfig = config
     self._policy_version = 0
     self._state = datatypes.WorkerState.PENDING
     self._init_lock = threading.Lock()
@@ -98,7 +71,7 @@ class RolloutWorker(abstract_worker.Worker):
           " (none can be None)."
       )
     self.manager = manager_lib.RolloutManager(
-        config=config,
+        config=self.config,
         sampler=sampler,
         env_pool=env_pool,
         agent_factory=agent_factory,
@@ -112,7 +85,7 @@ class RolloutWorker(abstract_worker.Worker):
     # TODO(sizhi): Pass self._trajectory_store into RolloutManager / collector
     # to log rollout steps in follow-up CLs.
     self._trajectory_store = trajectory_store_lib.TrajectoryStore.from_config(
-        config.trajectory_store_config if config is not None else None
+        self.config.trajectory_store_config
     )
     if self._trajectory_store is not None:
       # Several workers can share one log stream, and absl log lines carry no

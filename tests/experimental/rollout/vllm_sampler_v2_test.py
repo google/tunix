@@ -42,31 +42,27 @@ if "openai_harmony" not in sys.modules:
 
 from vllm.engine.arg_utils import AsyncEngineArgs
 
+from tunix.experimental.rollout import sampler as base_sampler_lib
 from tunix.experimental.rollout.vllm_sampler_v2 import RLVllmSampler
+from tunix.rl.rollout import base_rollout
+
+# pylint: disable=bad-indentation
 
 
 class TestRLVllmSamplerDuckTyping(unittest.TestCase):
-    """Tests dynamic attribute handling of arbitrary request objects and dicts."""
+    """Tests construction and config validation of RLVllmSampler."""
 
     def test_duck_typed_request_processing(self):
-        """Verifies that sample() handles raw objects with attributes or dicts."""
-        SimpleNamespace(
-            prompt="Solve 2+2",
-            request_id="req_attr_1",
-            sampling_params=SimpleNamespace(
-                max_tokens=64,
-                temperature=0.5,
-                top_p=0.9,
-                top_k=-1,
-                stop_sequences=[],
-                return_logprobs=True,
-            ),
-        )
-
+        """Verifies that RLVllmSampler requires a valid RolloutConfig."""
         args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B")
-        sampler = RLVllmSampler(engine_args=args)
+        sampler = RLVllmSampler(
+            engine_args=args,
+            config=base_rollout.RolloutConfig(),
+        )
         self.assertIsNotNone(sampler)
         self.assertEqual(sampler.engine_args.model, "Qwen/Qwen2.5-1.5B")
+        with self.assertRaises(TypeError):
+            RLVllmSampler(engine_args=args, config=None)  # pyrefly: ignore[bad-argument-type]
 
 
 class TestRLVllmSamplerInference(unittest.TestCase):
@@ -75,7 +71,10 @@ class TestRLVllmSamplerInference(unittest.TestCase):
     def test_sample_with_mocked_engine(self):
         """Verifies full sample() execution flow with a mocked AsyncLLMEngine."""
         args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B")
-        sampler = RLVllmSampler(engine_args=args)
+        sampler = RLVllmSampler(
+            engine_args=args,
+            config=base_rollout.RolloutConfig(),
+        )
 
         # Construct mock AsyncLLMEngine
         mock_engine = MagicMock()
@@ -103,13 +102,15 @@ class TestRLVllmSamplerInference(unittest.TestCase):
 
         async def run_sample_test():
             reqs = [
-                SimpleNamespace(
+                base_sampler_lib.SamplingRequest(
                     prompt="What is GRPO?",
                     request_id="req_001",
-                    sampling_params=SimpleNamespace(max_tokens=64,
-                                                    temperature=0.7,
-                                                    top_p=0.9,
-                                                    return_logprobs=True),
+                    sampling_params=base_sampler_lib.SamplingParams(
+                        max_tokens=64,
+                        temperature=0.7,
+                        top_p=0.9,
+                        return_logprobs=True,
+                    ),
                 )
             ]
             results = await sampler.sample(reqs)
@@ -130,7 +131,10 @@ class TestRLVllmSamplerInference(unittest.TestCase):
     def test_sample_raw_string_mode(self):
         """Verifies sampling when prompt lists are raw strings."""
         args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B")
-        sampler = RLVllmSampler(engine_args=args)
+        sampler = RLVllmSampler(
+            engine_args=args,
+            config=base_rollout.RolloutConfig(),
+        )
 
         mock_engine = MagicMock()
 
@@ -159,7 +163,10 @@ class TestRLVllmSamplerInference(unittest.TestCase):
     def test_sample_error_resilience(self):
         """Verifies error isolation when an individual generator stream raises an exception."""
         args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B")
-        sampler = RLVllmSampler(engine_args=args)
+        sampler = RLVllmSampler(
+            engine_args=args,
+            config=base_rollout.RolloutConfig(),
+        )
 
         mock_engine = MagicMock()
 
@@ -173,9 +180,11 @@ class TestRLVllmSamplerInference(unittest.TestCase):
 
         async def run_err_test():
             reqs = [
-                SimpleNamespace(prompt="Test error prompt",
-                                request_id="err_req",
-                                sampling_params=None)
+                base_sampler_lib.SamplingRequest(
+                    prompt="Test error prompt",
+                    request_id="err_req",
+                    sampling_params=None,
+                )
             ]
             results = await sampler.sample(reqs)
             self.assertEqual(len(results), 1)
@@ -200,7 +209,10 @@ class TestRLVllmSamplerWeightSync(unittest.TestCase):
 
         args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B",
                                tensor_parallel_size=2)
-        sampler = RLVllmSampler(engine_args=args)
+        sampler = RLVllmSampler(
+            engine_args=args,
+            config=base_rollout.RolloutConfig(),
+        )
 
         mock_engine = MagicMock()
         mock_engine.pause_background_loop = AsyncMock()
@@ -255,7 +267,10 @@ class TestRLVllmSamplerWeightSync(unittest.TestCase):
         async def run_test():
             args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B",
                                    tensor_parallel_size=4)
-            sampler = RLVllmSampler(engine_args=args)
+            sampler = RLVllmSampler(
+                engine_args=args,
+                config=base_rollout.RolloutConfig(),
+            )
 
             metadata = await sampler.get_weight_sync_metadata()
             expected_sharding = {
@@ -272,7 +287,10 @@ class TestRLVllmSamplerWeightSync(unittest.TestCase):
     def test_pause_resume_and_clear_cache(self):
         """Verifies engine background loop control and prefix cache clearing."""
         args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B")
-        sampler = RLVllmSampler(engine_args=args)
+        sampler = RLVllmSampler(
+            engine_args=args,
+            config=base_rollout.RolloutConfig(),
+        )
         mock_engine = MagicMock()
         mock_engine.pause_background_loop = AsyncMock()
         mock_engine.resume_background_loop = AsyncMock()
@@ -299,7 +317,10 @@ class TestRLVllmSamplerWeightSync(unittest.TestCase):
         """Verifies raiden_h2d threads the transfer generation to the worker."""
         mock_call_worker_method.return_value = []
         args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B")
-        sampler = RLVllmSampler(engine_args=args)
+        sampler = RLVllmSampler(
+            engine_args=args,
+            config=base_rollout.RolloutConfig(),
+        )
 
         async def run_test():
             await sampler.raiden_h2d(uuid=123)
@@ -314,7 +335,10 @@ class TestRLVllmSamplerWeightSync(unittest.TestCase):
         """Omitting uuid still reaches the worker, which waits untargeted."""
         mock_call_worker_method.return_value = []
         args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B")
-        sampler = RLVllmSampler(engine_args=args)
+        sampler = RLVllmSampler(
+            engine_args=args,
+            config=base_rollout.RolloutConfig(),
+        )
 
         async def run_test():
             await sampler.raiden_h2d()

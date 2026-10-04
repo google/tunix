@@ -38,6 +38,7 @@ class RolloutWorkerTest(parameterized.TestCase):
     self.sampler = mocks.MockBaseSamplerImpl(default_delay=0.05)
     self.service = worker.RolloutWorker(
         worker_id="test_worker_01",
+        config=worker.RolloutConfig(),
         sampler=self.sampler,
         env_pool=self.env_pool,
         agent_factory=registry.AGENT_REGISTRY.get("mock_agent"),
@@ -54,12 +55,23 @@ class RolloutWorkerTest(parameterized.TestCase):
     self.service.stop()
 
   def test_sampler_config_types(self):
-    """Verifies unknown sampler_type raises ValueError."""
+    """Verifies invalid sampler or config raises TypeError."""
     from tunix.experimental.rollout import manager as manager_lib  # pylint: disable=g-import-not-at-top
 
-    config_invalid = worker.RolloutConfig(sampler_type="unknown")
-    with self.assertRaises(ValueError):
-      manager_lib.RolloutManager(config=config_invalid)
+    with self.assertRaises(TypeError):
+      manager_lib.RolloutManager(
+          config=None,  # pyrefly: ignore[bad-argument-type]
+          sampler=self.sampler,
+          tokenizer=mocks.MockTokenizer(),
+          chat_parser=mocks.MockChatParser(),
+      )
+    with self.assertRaises(TypeError):
+      manager_lib.RolloutManager(
+          config=worker.RolloutConfig(),
+          sampler="invalid_sampler",  # pyrefly: ignore[bad-argument-type]
+          tokenizer=mocks.MockTokenizer(),
+          chat_parser=mocks.MockChatParser(),
+      )
 
   def test_single_trajectory_generation(self):
     """Verifies single multi-turn episode execution."""
@@ -165,6 +177,7 @@ class RolloutWorkerTest(parameterized.TestCase):
     async def _run_test():
       service_1 = worker.RolloutWorker(
           worker_id="slice_01",
+          config=worker.RolloutConfig(),
           sampler=mocks.MockBaseSamplerImpl(
               sampler_name="sampler_slice_1", default_delay=0.02
           ),
@@ -180,6 +193,7 @@ class RolloutWorkerTest(parameterized.TestCase):
 
       service_2 = worker.RolloutWorker(
           worker_id="slice_02",
+          config=worker.RolloutConfig(),
           sampler=mocks.MockBaseSamplerImpl(
               sampler_name="sampler_slice_2", default_delay=0.04
           ),
