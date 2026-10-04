@@ -357,14 +357,17 @@ class ClusterOrchestrator:
         primary_worker_id,
     )
 
-    def _sync_worker(worker_id: str):
+    def _sync_worker(worker_id: str) -> bool:
       handle = self._remote_worker_handles_by_id[worker_id]
       return handle.submit("upload_jax_cache", gcs_uri=rollout_gcs_uri)
 
-    pool = futures.ThreadPoolExecutor(max_workers=1)
+    sync_timeout_s = float(self.jax_cache_config.get("sync_timeout_s", 180.0))
+    pool = futures.ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix="jax-cache-sync"
+    )
     upload = pool.submit(_sync_worker, primary_worker_id)
     try:
-      res = upload.result(timeout=180.0)
+      res = upload.result(timeout=sync_timeout_s)
       logging.info(
           "Worker %s JAX cache upload finished: %s", primary_worker_id, res
       )

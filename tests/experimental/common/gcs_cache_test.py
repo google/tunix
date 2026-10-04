@@ -149,7 +149,7 @@ class GcsCacheTest(absltest.TestCase):
             worker_type=mock_tm.THREAD,
         )
 
-  def test_download_cache_uses_thread_worker_type(self):
+  def test_download_cache_uses_thread_worker_type(self) -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
       cache_dir = Path(tmpdir) / "cache"
 
@@ -183,7 +183,7 @@ class GcsCacheTest(absltest.TestCase):
             worker_type=mock_tm.THREAD,
         )
 
-  def test_upload_cache_skips_when_already_restored(self):
+  def test_upload_cache_skips_when_already_restored(self) -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
       cache_dir = Path(tmpdir) / "cache"
       cache_dir.mkdir()
@@ -218,7 +218,7 @@ class GcsCacheTest(absltest.TestCase):
         mock_tm.upload_many_from_filenames.assert_not_called()
         mock_storage.Client.assert_not_called()
 
-  def test_orchestrator_sync_jax_cache(self):
+  def test_orchestrator_sync_jax_cache(self) -> None:
     orch = orchestrator.ClusterOrchestrator(
         jax_cache_config={
             "save_jax_cache": True,
@@ -236,7 +236,7 @@ class GcsCacheTest(absltest.TestCase):
         "upload_jax_cache", gcs_uri="gs://bucket/orch_rollout"
     )
 
-  def test_orchestrator_sync_jax_cache_rollout_only(self):
+  def test_orchestrator_sync_jax_cache_rollout_only(self) -> None:
     orch = orchestrator.ClusterOrchestrator(
         jax_cache_config={
             "save_jax_cache": True,
@@ -261,7 +261,7 @@ class GcsCacheTest(absltest.TestCase):
     )
     mock_trainer.submit.assert_not_called()
 
-  def test_orchestrator_sync_jax_cache_single_worker(self):
+  def test_orchestrator_sync_jax_cache_single_worker(self) -> None:
     orch = orchestrator.ClusterOrchestrator(
         jax_cache_config={
             "save_jax_cache": True,
@@ -286,11 +286,14 @@ class GcsCacheTest(absltest.TestCase):
     )
     mock_rollout_1.submit.assert_not_called()
 
-  def test_orchestrator_sync_jax_cache_primary_failure_does_not_fallback(self):
+  def test_orchestrator_sync_jax_cache_primary_failure_does_not_fallback(
+      self,
+  ) -> None:
     orch = orchestrator.ClusterOrchestrator(
         jax_cache_config={
             "save_jax_cache": True,
             "rollout_jax_cache_gcs_dir": "gs://bucket/orch_rollout",
+            "sync_timeout_s": 45.0,
         }
     )
     mock_rollout_0 = mock.MagicMock(spec=remote_execution.ActorHandle)
