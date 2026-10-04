@@ -650,6 +650,44 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     )
 
   @mock.patch.object(utils, 'tokenize_and_generate_masks')
+  def test_base_task_env_max_steps_truncation_sets_max_steps_reached_status(
+      self, mock_convert
+  ):
+    class _DummyTaskEnv(base_environment.BaseTaskEnv):
+
+      def _initial_observation(self):
+        return 'initial_obs'
+
+      def _step_impl(self, action):
+        del action
+        return base_environment.EnvStepResult(
+            observation='step_obs', reward=0.0, done=False, info={}
+        )
+
+    env = _DummyTaskEnv(max_steps=1)
+    env.final_reward_fn = self.mock_final_reward_fn
+    mock_convert.side_effect = [
+        ([101], [1]),  # prompt tokens
+    ]
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=env,
+        model_call=self.mock_model_call,
+        tokenizer=self.mock_tokenizer,
+        chat_parser=self.mock_chat_parser,
+        overlong_filter=True,
+    )
+    token_data = asyncio.run(self._run_collect(engine, mode='Token'))
+    self.assertEqual(
+        token_data['status'],
+        agent_types.TrajectoryStatus.MAX_STEPS_REACHED.name,
+    )
+    self.mock_final_reward_fn.assert_not_called()
+    np.testing.assert_array_equal(
+        token_data['conversation_masks'], np.array([0, 0])
+    )
+
+  @mock.patch.object(utils, 'tokenize_and_generate_masks')
   def test_overlong_filter_disabled_does_not_mask_out(self, mock_convert):
     # Setup for MAX_STEPS_REACHED but with overlong_filter=False
     self.mock_env.max_steps = 1
