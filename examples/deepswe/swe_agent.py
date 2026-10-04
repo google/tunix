@@ -179,7 +179,7 @@ def parse_codeact_response(response_text: str) -> tuple[str, Any]:
       r"(?s)<tool_call>\s*(.*?)\s*(?:</tool_call>|$)"
   )
 
-  def _first_tool_call(text_slice: str):
+  def _first_tool_call(text_slice: str) -> Optional[re.Match]:
     # Like qwen3_xml, skip <tool_call> blocks without a <function=> (empty,
     # JSON or other text) and use the first one that has one.
     for m in tc_pattern.finditer(text_slice):
