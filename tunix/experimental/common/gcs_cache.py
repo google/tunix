@@ -107,6 +107,9 @@ def download_cache(local_dir: str | Path, gcs_uri: str, max_workers: int = 8) ->
         blob_names,
         destination_directory=str(local_path),
         blob_name_prefix=prefix,
+        # Never fork: the caller holds live TPU/gRPC state, and forked children
+        # of such a process can segfault or deadlock (default is PROCESS).
+        worker_type=transfer_manager.THREAD,
         max_workers=max_workers,
     )
     any_failed = False
@@ -187,22 +190,41 @@ def upload_cache(local_dir: str | Path, gcs_uri: str, max_workers: int = 8) -> b
     client = storage.Client(project=project) if project else storage.Client()
     bucket = client.bucket(bucket_name)
 
+    existing = {
+        b.name[len(prefix):] for b in client.list_blobs(bucket, prefix=prefix)
+    }
+    already_in_gcs = len(files)
+    files = [f for f in files if f not in existing]
+    already_in_gcs -= len(files)
+    if not files:
+      logger.info(
+          "[jax_cache] All %d local cache objects already in %s; nothing to upload.",
+          already_in_gcs,
+          gcs_uri,
+      )
+      return True
+
     logger.info(
-        "[jax_cache] Uploading %d artifacts from %s to %s...",
+        "[jax_cache] Uploading %d artifacts from %s to %s (%d already in GCS)...",
         len(files),
         local_path,
         gcs_uri,
+        already_in_gcs,
     )
     results = transfer_manager.upload_many_from_filenames(
         bucket,
         files,
         source_directory=str(local_path),
         blob_name_prefix=prefix,
+        # Guards against concurrent writers racing on the same object.
         skip_if_exists=True,
+        # Never fork: the caller holds live TPU/gRPC state, and forked children
+        # of such a process can segfault or deadlock (default is PROCESS).
+        worker_type=transfer_manager.THREAD,
         max_workers=max_workers,
     )
     any_failed = False
-    skipped = 0
+    skipped = already_in_gcs
     uploaded = 0
     for name, result in zip(files, results):
       if isinstance(result, Exception):

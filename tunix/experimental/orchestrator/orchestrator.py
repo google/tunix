@@ -42,6 +42,7 @@ from tunix.experimental.worker import remote_execution
 
 
 _STOP_TIMEOUT_S = 60.0  # Timeout for stopping remote workers. 60 should not be touched for any healthy stop.
+_JAX_CACHE_UPLOAD_TIMEOUT_S = 180.0  # Per-worker bound on a JAX cache upload RPC.
 
 
 class ClusterOrchestrator:
@@ -357,44 +358,34 @@ class ClusterOrchestrator:
         primary_worker_id,
     )
 
-    def _sync_worker(worker_id: str):
+    def _upload_from(worker_id: str) -> bool:
+      """Runs the upload on one worker, bounded so a hang can't block us."""
       handle = self._remote_worker_handles_by_id[worker_id]
-      return handle.submit("upload_jax_cache", gcs_uri=rollout_gcs_uri)
-
-    pool = futures.ThreadPoolExecutor(max_workers=1)
-    upload = pool.submit(_sync_worker, primary_worker_id)
-    primary_failed = False
-    try:
-      res = upload.result(timeout=180.0)
-      logging.info(
-          "Worker %s JAX cache upload finished: %s", primary_worker_id, res
-      )
-    except Exception as err:  # pylint: disable=broad-except
-      logging.warning(
-          "Failed to sync JAX cache on worker %s: %r", primary_worker_id, err
-      )
-      primary_failed = True
-    pool.shutdown(wait=False)
-
-    if primary_failed and len(rollout_worker_ids) > 1:
-      fallback_id = rollout_worker_ids[1]
-      logging.info(
-          "Primary rollout worker cache upload failed. Attempting fallback upload from %s...",
-          fallback_id,
+      pool = futures.ThreadPoolExecutor(max_workers=1)
+      upload = pool.submit(
+          handle.submit, "upload_jax_cache", gcs_uri=rollout_gcs_uri
       )
       try:
-        fb_res = self._remote_worker_handles_by_id[fallback_id].submit(
-            "upload_jax_cache", gcs_uri=rollout_gcs_uri
-        )
-        logging.info(
-            "Fallback worker %s JAX cache upload finished: %s",
-            fallback_id,
-            fb_res,
-        )
+        res = upload.result(timeout=_JAX_CACHE_UPLOAD_TIMEOUT_S)
+        logging.info("Worker %s JAX cache upload finished: %s", worker_id, res)
+        return True
       except Exception as err:  # pylint: disable=broad-except
         logging.warning(
-            "Failed fallback JAX cache upload on worker %s: %r", fallback_id, err
+            "Failed to sync JAX cache on worker %s: %r", worker_id, err
         )
+        return False
+      finally:
+        # Don't wait on a hung RPC; the thread is abandoned.
+        pool.shutdown(wait=False)
+
+    if not _upload_from(primary_worker_id) and len(rollout_worker_ids) > 1:
+      fallback_id = rollout_worker_ids[1]
+      logging.info(
+          "Primary rollout worker cache upload failed. Attempting fallback"
+          " upload from %s...",
+          fallback_id,
+      )
+      _upload_from(fallback_id)
 
   def bring_up_workers(self, dummy_data: Any = None) -> None:
     """Brings up all registered workers through lifecycle initialization."""
