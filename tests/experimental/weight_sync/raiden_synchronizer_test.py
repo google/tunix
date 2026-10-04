@@ -844,6 +844,7 @@ class RaidenSynchronizerTest(absltest.TestCase):
     class _FakeRaidenWorkerSync:
 
       def __init__(self):
+        self.job_name = "rollout"
         self.arrays = [jnp.ones((2,), jnp.float32)]
         self._sync = None
 
@@ -869,6 +870,9 @@ class RaidenSynchronizerTest(absltest.TestCase):
       def metadata_dict(self):
         return {"unit": {"job_name": "rollout"}}
 
+      def metrics(self):
+        return {"transferred_bytes": 1024}
+
     fake_rws_mod = types.SimpleNamespace(
         _ws_lib=_FakeWsLib,
         RaidenWorkerSync=_FakeRaidenWorkerSync,
@@ -892,12 +896,18 @@ class RaidenSynchronizerTest(absltest.TestCase):
           worker_sync.metadata_dict(),
           {"unit": {"job_name": "rollout"}, "auto_h2d": False},
       )
+      metrics_before_h2d = worker_sync.metrics()
+      self.assertIn("host_rss_gb", metrics_before_h2d)
+      self.assertIn("host_peak_rss_gb", metrics_before_h2d)
+      self.assertNotIn("last_h2d_s", metrics_before_h2d)
 
       worker_sync.h2d(uuid=7)
       self.assertEqual(
           call_order,
           [("wait_for_transfer_completion", 7), ("h2d",)],
       )
+      metrics_after_h2d = worker_sync.metrics()
+      self.assertIn("last_h2d_s", metrics_after_h2d)
 
     # When WEIGHT_SYNC_PARALLEL_H2H is disabled, auto_h2d stays True and h2d()
     # returns after wait_for_transfer_completion without calling sync.h2d().
