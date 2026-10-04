@@ -24,6 +24,7 @@ from concurrent import futures
 import contextlib
 import os
 import pickle
+import threading
 import time
 from typing import Any, Mapping
 import uuid
@@ -42,6 +43,7 @@ from tunix.experimental.worker import remote_execution
 
 
 _STOP_TIMEOUT_S = 60.0  # Timeout for stopping remote workers. 60 should not be touched for any healthy stop.
+_JAX_CACHE_UPLOAD_TIMEOUT_S = 180.0  # Per-worker bound on a JAX cache upload RPC.
 
 
 class ClusterOrchestrator:
@@ -357,44 +359,55 @@ class ClusterOrchestrator:
         primary_worker_id,
     )
 
-    def _sync_worker(worker_id: str):
+    def _upload_from(worker_id: str) -> bool:
+      """Runs the upload on one worker, bounded so a hang can't block us."""
       handle = self._remote_worker_handles_by_id[worker_id]
-      return handle.submit("upload_jax_cache", gcs_uri=rollout_gcs_uri)
+      outcome: futures.Future[bool] = futures.Future()
 
-    pool = futures.ThreadPoolExecutor(max_workers=1)
-    upload = pool.submit(_sync_worker, primary_worker_id)
-    primary_failed = False
-    try:
-      res = upload.result(timeout=180.0)
-      logging.info(
-          "Worker %s JAX cache upload finished: %s", primary_worker_id, res
-      )
-    except Exception as err:  # pylint: disable=broad-except
-      logging.warning(
-          "Failed to sync JAX cache on worker %s: %r", primary_worker_id, err
-      )
-      primary_failed = True
-    pool.shutdown(wait=False)
+      def _run() -> None:
+        try:
+          outcome.set_result(
+              handle.submit("upload_jax_cache", gcs_uri=rollout_gcs_uri)
+          )
+        except Exception as err:  # pylint: disable=broad-except
+          outcome.set_exception(err)
 
-    if primary_failed and len(rollout_worker_ids) > 1:
-      fallback_id = rollout_worker_ids[1]
-      logging.info(
-          "Primary rollout worker cache upload failed. Attempting fallback upload from %s...",
-          fallback_id,
-      )
+      # Daemon thread: unlike ThreadPoolExecutor workers it is not joined at
+      # interpreter exit, so an abandoned hung RPC (bounded only by the RPC
+      # deadline, which can be hours) cannot block process exit.
+      threading.Thread(
+          target=_run, name=f"jax-cache-upload-{worker_id}", daemon=True
+      ).start()
       try:
-        fb_res = self._remote_worker_handles_by_id[fallback_id].submit(
-            "upload_jax_cache", gcs_uri=rollout_gcs_uri
+        uploaded = outcome.result(timeout=_JAX_CACHE_UPLOAD_TIMEOUT_S)
+      except futures.TimeoutError:
+        logging.warning(
+            "JAX cache upload on worker %s timed out after %.0fs; abandoning it.",
+            worker_id,
+            _JAX_CACHE_UPLOAD_TIMEOUT_S,
         )
-        logging.info(
-            "Fallback worker %s JAX cache upload finished: %s",
-            fallback_id,
-            fb_res,
-        )
+        return False
       except Exception as err:  # pylint: disable=broad-except
         logging.warning(
-            "Failed fallback JAX cache upload on worker %s: %r", fallback_id, err
+            "Failed to sync JAX cache on worker %s: %r", worker_id, err
         )
+        return False
+      if not uploaded:
+        logging.warning(
+            "Worker %s reported a failed JAX cache upload.", worker_id
+        )
+        return False
+      logging.info("Worker %s JAX cache upload finished.", worker_id)
+      return True
+
+    if not _upload_from(primary_worker_id) and len(rollout_worker_ids) > 1:
+      fallback_id = rollout_worker_ids[1]
+      logging.info(
+          "Primary rollout worker cache upload failed. Attempting fallback"
+          " upload from %s...",
+          fallback_id,
+      )
+      _upload_from(fallback_id)
 
   def bring_up_workers(self, dummy_data: Any = None) -> None:
     """Brings up all registered workers through lifecycle initialization."""

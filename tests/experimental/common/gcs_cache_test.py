@@ -19,6 +19,8 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from unittest import mock
 
 from absl.testing import absltest
@@ -27,6 +29,12 @@ from tunix.experimental.common import gcs_cache
 from tunix.experimental.orchestrator import orchestrator
 from tunix.experimental.worker import abstract_worker
 from tunix.experimental.worker import remote_execution
+
+
+def _blob(name: str) -> mock.Mock:
+  blob = mock.Mock()
+  blob.name = name
+  return blob
 
 
 class GcsCacheTest(absltest.TestCase):
@@ -145,8 +153,71 @@ class GcsCacheTest(absltest.TestCase):
             source_directory=str(cache_dir),
             blob_name_prefix="prefix/",
             skip_if_exists=True,
+            worker_type=mock_tm.THREAD,
             max_workers=mock.ANY,
         )
+
+  def _gcs_modules(self, mock_storage, mock_tm):
+    mock_storage.transfer_manager = mock_tm
+    mock_cloud = mock.MagicMock()
+    mock_cloud.storage = mock_storage
+    mock_api_core = mock.MagicMock()
+    return {
+        "google.cloud": mock_cloud,
+        "google.cloud.storage": mock_storage,
+        "google.cloud.storage.transfer_manager": mock_tm,
+        "google.api_core": mock_api_core,
+        "google.api_core.exceptions": mock_api_core.exceptions,
+    }
+
+  def test_upload_cache_skips_transfer_when_all_in_gcs(self):
+    with tempfile.TemporaryDirectory() as tmpdir:
+      cache_dir = Path(tmpdir) / "cache"
+      (cache_dir / "sub").mkdir(parents=True)
+      (cache_dir / "obj1").write_text("dummy")
+      (cache_dir / "sub" / "obj2").write_text("dummy")
+
+      mock_storage = mock.MagicMock()
+      mock_tm = mock.MagicMock()
+      client = mock_storage.Client.return_value
+      client.list_blobs.return_value = [
+          _blob("prefix/obj1"),
+          _blob("prefix/sub/obj2"),
+      ]
+      with mock.patch.dict(sys.modules, self._gcs_modules(mock_storage, mock_tm)):
+        self.assertTrue(gcs_cache.upload_cache(cache_dir, "gs://b/prefix"))
+      mock_tm.upload_many_from_filenames.assert_not_called()
+
+  def test_upload_cache_uploads_only_missing_with_threads(self):
+    with tempfile.TemporaryDirectory() as tmpdir:
+      cache_dir = Path(tmpdir) / "cache"
+      cache_dir.mkdir()
+      (cache_dir / "obj1").write_text("dummy")
+      (cache_dir / "obj2").write_text("dummy")
+
+      mock_storage = mock.MagicMock()
+      mock_tm = mock.MagicMock()
+      client = mock_storage.Client.return_value
+      client.list_blobs.return_value = [_blob("prefix/obj1")]
+      mock_tm.upload_many_from_filenames.return_value = [None]
+      with mock.patch.dict(sys.modules, self._gcs_modules(mock_storage, mock_tm)):
+        self.assertTrue(gcs_cache.upload_cache(cache_dir, "gs://b/prefix"))
+      args, kwargs = mock_tm.upload_many_from_filenames.call_args
+      self.assertEqual(args[1], ["obj2"])
+      self.assertIs(kwargs["worker_type"], mock_tm.THREAD)
+
+  def test_download_cache_uses_threads(self):
+    with tempfile.TemporaryDirectory() as tmpdir:
+      cache_dir = Path(tmpdir) / "cache"
+      mock_storage = mock.MagicMock()
+      mock_tm = mock.MagicMock()
+      client = mock_storage.Client.return_value
+      client.list_blobs.return_value = [_blob("prefix/obj1")]
+      mock_tm.download_many_to_path.return_value = [None]
+      with mock.patch.dict(sys.modules, self._gcs_modules(mock_storage, mock_tm)):
+        self.assertTrue(gcs_cache.download_cache(cache_dir, "gs://b/prefix"))
+      _, kwargs = mock_tm.download_many_to_path.call_args
+      self.assertIs(kwargs["worker_type"], mock_tm.THREAD)
 
   def test_orchestrator_sync_jax_cache(self):
     orch = orchestrator.ClusterOrchestrator(
@@ -243,6 +314,61 @@ class GcsCacheTest(absltest.TestCase):
     mock_rollout_0.submit.assert_called_once_with(
         "upload_jax_cache", gcs_uri="gs://bucket/orch_rollout"
     )
+    mock_rollout_1.submit.assert_called_once_with(
+        "upload_jax_cache", gcs_uri="gs://bucket/orch_rollout"
+    )
+
+  def test_orchestrator_sync_jax_cache_bounds_hung_fallback(self):
+    orch = orchestrator.ClusterOrchestrator(
+        jax_cache_config={
+            "save_jax_cache": True,
+            "rollout_jax_cache_gcs_dir": "gs://bucket/orch_rollout",
+        }
+    )
+    release = threading.Event()
+    hung = lambda *a, **k: release.wait()
+    mock_rollout_0 = mock.MagicMock(spec=remote_execution.ActorHandle)
+    mock_rollout_0.submit.side_effect = hung
+    mock_rollout_1 = mock.MagicMock(spec=remote_execution.ActorHandle)
+    mock_rollout_1.submit.side_effect = hung
+    orch.register_worker_handle(
+        "rollout-0", roles=[datatypes.Role.ROLLOUT], handle=mock_rollout_0
+    )
+    orch.register_worker_handle(
+        "rollout-1", roles=[datatypes.Role.ROLLOUT], handle=mock_rollout_1
+    )
+    try:
+      with mock.patch.object(orchestrator, "_JAX_CACHE_UPLOAD_TIMEOUT_S", 0.2):
+        start = time.monotonic()
+        orch.sync_jax_cache()
+        self.assertLess(time.monotonic() - start, 5.0)
+      # Abandoned uploads must not block interpreter exit.
+      threads = {t.name: t for t in threading.enumerate()}
+      for worker_id in ("rollout-0", "rollout-1"):
+        self.assertTrue(threads[f"jax-cache-upload-{worker_id}"].daemon)
+    finally:
+      release.set()
+    mock_rollout_0.submit.assert_called_once()
+    mock_rollout_1.submit.assert_called_once()
+
+  def test_orchestrator_sync_jax_cache_falls_back_on_reported_failure(self):
+    orch = orchestrator.ClusterOrchestrator(
+        jax_cache_config={
+            "save_jax_cache": True,
+            "rollout_jax_cache_gcs_dir": "gs://bucket/orch_rollout",
+        }
+    )
+    mock_rollout_0 = mock.MagicMock(spec=remote_execution.ActorHandle)
+    mock_rollout_0.submit.return_value = False
+    mock_rollout_1 = mock.MagicMock(spec=remote_execution.ActorHandle)
+    mock_rollout_1.submit.return_value = True
+    orch.register_worker_handle(
+        "rollout-0", roles=[datatypes.Role.ROLLOUT], handle=mock_rollout_0
+    )
+    orch.register_worker_handle(
+        "rollout-1", roles=[datatypes.Role.ROLLOUT], handle=mock_rollout_1
+    )
+    orch.sync_jax_cache()
     mock_rollout_1.submit.assert_called_once_with(
         "upload_jax_cache", gcs_uri="gs://bucket/orch_rollout"
     )
