@@ -40,6 +40,7 @@ from tunix.experimental.orchestrator import rl_engine_interface
 from tunix.experimental.queue_manager import trajectory_queue_manager
 from tunix.experimental.trajectory import store as trajectory_store_lib
 from tunix.rl import common as rl_common
+from tunix.rl import packing
 from tunix.sft import metrics_logger as metrics_logger_lib
 from tunix.utils import trajectory_logger
 
@@ -399,6 +400,7 @@ class StandardRLProgram(RLProgram):
       checkpoint_optimizer_interval_steps: int = 1,
       pipeline_train_microbatches: bool = False,
       rollout_priority_scheduling: bool = False,
+      warm_compile: bool = True,
   ):
     super().__init__()
     self.engine: rl_engine_interface.AbstractRLEngine | None = None
@@ -508,6 +510,12 @@ class StandardRLProgram(RLProgram):
     # trainer compute. At most one train_step is ever outstanding, so the
     # gradient-accumulation order is unchanged.
     self.pipeline_train_microbatches = pipeline_train_microbatches
+    # The trainer otherwise compiles inside its first train_step, which runs
+    # after the first rollouts are generated; compiling against a synthetic
+    # microbatch instead overlaps that compile with generation. See
+    # `_build_warm_compile_payload` for what it costs when the shapes are
+    # wrong.
+    self.warm_compile = warm_compile
     self._pending_train: asyncio.Task[tuple[Any, float]] | None = None
     # A cancelled asyncio.to_thread leaves its worker running, so the error
     # path's reset() must wait for any in-flight feed/flush to finish.
@@ -1595,6 +1603,155 @@ class StandardRLProgram(RLProgram):
       batch = dataclasses.replace(batch, **updates)
     return batch
 
+  def _build_warm_compile_payload(self) -> datatypes.RLTrainerPayload | None:
+    """Returns one synthetic microbatch shaped like the ones `train_stage` feeds.
+
+    Assembled by the same `batch_assembly` code the real microbatches go
+    through, from rollouts of the longest allowed length, so the layout is the
+    trainer's by construction and only the token values are invented. A
+    separate assembler instance is used because feeding the live one would
+    consume its state.
+
+    Returns None when the shape cannot be known before the first rollout
+    arrives, in which case the trainer compiles on its first real batch as it
+    does today. Getting the shape *wrong* is worse than returning None: the
+    trainer would compile twice, so every field the trainer sees must be
+    reproduced here, including the ones the critique and agreement steps add.
+    """
+    cfg = self.batch_config
+    prompt_length = cfg.max_prompt_length
+    completion_length = cfg.max_response_length
+    if not prompt_length or not completion_length:
+      logging.info(
+          "Skipping trainer warm compile: batch_config has no prompt/response"
+          " length to build a synthetic rollout from."
+      )
+      return None
+    if self.generation_args.return_routed_experts:
+      # The routing arrays are shaped by the model's layer count and top-k,
+      # which the orchestrator does not know. A guess would compile a kernel
+      # the first real batch then recompiles.
+      logging.info(
+          "Skipping trainer warm compile: return_routed_experts is set and the"
+          " routing shape is not known orchestrator-side."
+      )
+      return None
+
+    # A private instance with the live settings: feeding `self.assembler`
+    # would consume state the real rollouts need, and any setting that differs
+    # from the live one changes the microbatch's shape.
+    assembler = batch_assembly.create_batch_assembler(
+        num_generations=self.num_generations,
+        mini_batch_size=self.mini_batch_size,
+        train_micro_batch_size=getattr(self.algo, "train_micro_batch_size", 1),
+        batch_config=cfg,
+    )
+    rollout_length = prompt_length + completion_length
+    if isinstance(assembler, batch_assembly.SequencePackedBatchAssembler):
+      max_segments = packing.effective_max_segments(
+          assembler.max_packed_len, assembler.max_segments_per_packed_row
+      )
+      if min(assembler.max_packed_len // rollout_length, max_segments) < 1:
+        logging.info(
+            "Skipping trainer warm compile: a %d-token rollout does not fit a"
+            " %d-token packed row.",
+            rollout_length,
+            assembler.max_packed_len,
+        )
+        return None
+    # One mini-batch, the unit the real path feeds between flushes. Fewer
+    # rollouts than that could leave a microbatch short of the rows a real one
+    # carries; more would assemble a mini-batch the trainer never sees.
+    group_size = self.num_generations
+    num_rollouts = self.mini_batch_size * group_size
+
+    # Any id but the pad id, so that every token reads as a real one.
+    token = (cfg.pad_id or 0) + 1
+    rollout = {
+        "prompt_tokens": np.full(prompt_length, token, np.int32),
+        "conversation_tokens": np.full(completion_length, token, np.int32),
+        "conversation_masks": np.ones(completion_length, np.float32),
+        "old_logprobs": np.zeros(completion_length, np.float32),
+        "status": "SUCCEEDED",
+    }
+    payloads = []
+    for prompt_index in range(-(-num_rollouts // group_size)):
+      group = [
+          datatypes.TrajectoryItem(
+              prompt_id=f"warm_compile_{prompt_index}",
+              group_index=index,
+              traj=dict(rollout),
+          )
+          for index in range(group_size)
+      ]
+      payloads.extend(
+          self.algo.create_trainer_payloads(
+              group,
+              # Not all equal, so group-relative advantages are not degenerate.
+              rewards=[float(index % 2) for index in range(group_size)],
+          )
+      )
+    batches = assembler.feed(payloads[:num_rollouts]) + assembler.flush()
+    if not batches:
+      logging.warning(
+          "Skipping trainer warm compile: %s assembled %d synthetic rollouts"
+          " into no microbatch.",
+          type(assembler).__name__,
+          num_rollouts,
+      )
+      return None
+    # A mini-batch can span several microbatches; they are shaped alike, and
+    # the trainer compiles once for all of them.
+    batch = batches[0].payload
+
+    # The fields the critique and agreement steps add before the trainer sees
+    # a batch; see `train_stage`.
+    if self.algo.requires_reference_kl:
+      batch = batch_assembly.with_ref_per_token_logps(
+          batch, np.zeros(np.shape(batch.completion_ids), np.float32)
+      )
+    if (
+        batch.old_per_token_logps is not None
+        and self.algo.algo_config.use_rollout_logps
+        and self.sampler_is == "token"
+    ):
+      batch = dataclasses.replace(
+          batch,
+          sampler_is_weights=np.ones(
+              np.shape(batch.completion_mask), np.float32
+          ),
+      )
+    return batch
+
+  async def _warm_compile(self) -> None:
+    """Compiles the trainer's kernels while the first rollouts are generating.
+
+    Never fatal: the run is correct without it, the first `train_step` simply
+    compiles as it does today.
+    """
+    try:
+      payload = await asyncio.to_thread(self._build_warm_compile_payload)
+      if payload is None:
+        return
+      assert self.engine is not None
+      if not hasattr(self.engine, "warm_compile"):
+        logging.info(
+            "Skipping trainer warm compile: %s does not implement it.",
+            type(self.engine).__name__,
+        )
+        return
+      started = time.monotonic()
+      await self.engine.warm_compile(payload)
+      logging.info(
+          "Trainer warm compile finished in %.1fs.", time.monotonic() - started
+      )
+    except asyncio.CancelledError:
+      raise
+    except Exception as exc:  # pylint: disable=broad-except
+      logging.warning(
+          "Trainer warm compile failed, continuing without it: %s", exc
+      )
+
   def _log_consumed_trajectories(
       self,
       all_step_items: Sequence[datatypes.TrajectoryItem],
@@ -2203,6 +2360,13 @@ class StandardRLProgram(RLProgram):
           policy_version=self.policy_version,
       )
 
+    # After the initial weight sync, which the rollouts wait on, and before the
+    # stages start, so the compile overlaps the first generation wave instead
+    # of landing after it.
+    warm_compile_task: asyncio.Task[None] | None = None
+    if self.warm_compile:
+      warm_compile_task = asyncio.create_task(self._warm_compile())
+
     train_task = asyncio.create_task(self.train_stage())
     tasks = [
         asyncio.create_task(self.rollout_dispatch_stage()),
@@ -2234,6 +2398,10 @@ class StandardRLProgram(RLProgram):
           task.cancel()
       if self._pending_train is not None and not self._pending_train.done():
         self._pending_train.cancel()
+      # Cancelling only drops the local await; a compile already dispatched to
+      # the trainer runs to completion there, as any in-flight RPC would.
+      if warm_compile_task is not None and not warm_compile_task.done():
+        warm_compile_task.cancel()
 
   def run(
       self,

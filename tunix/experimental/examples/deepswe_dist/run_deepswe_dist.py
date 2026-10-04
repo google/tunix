@@ -196,6 +196,16 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
+      "--warm_compile",
+      action=argparse.BooleanOptionalAction,
+      default=True,
+      help=(
+          "Compile the trainer's kernels against a synthetic microbatch right"
+          " after weight sync 0, so the compile overlaps the first generation"
+          " wave instead of running inside the first train_step."
+      ),
+  )
+  parser.add_argument(
       "--in_flight_weight_updates",
       action=argparse.BooleanOptionalAction,
       default=False,
@@ -916,6 +926,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         ),
         async_weight_sync=args.async_weight_sync,
         pipeline_train_microbatches=args.pipeline_train_microbatches,
+        warm_compile=args.warm_compile,
         partial_rollout=args.in_flight_weight_updates,
         rollout_priority_scheduling=args.rollout_priority_scheduling,
         on_step_begin=lambda step: logging.info(
