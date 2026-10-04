@@ -766,31 +766,32 @@ if cfg:
     fi
   fi
 
-  for i in $(seq ${ROLLOUT_START_INDEX:-0} $((ROLLOUT_REPLICAS - 1))); do
+  local jax_cache_env=""
+  if [[ "${DISABLE_JAX_CACHE:-0}" != "1" && "${DISABLE_JAX_CACHE:-false}" != "true" ]]; then
+    if [[ -n "${ROLLOUT_JAX_CACHE_GCS_DIR}" ]]; then
+      jax_cache_env+=" JAX_CACHE_GCS_DIR=\"${ROLLOUT_JAX_CACHE_GCS_DIR}\""
+    fi
+    if [[ -n "${SAVE_JAX_CACHE}" ]]; then
+      jax_cache_env+=" SAVE_JAX_CACHE=\"${SAVE_JAX_CACHE}\""
+    fi
+  fi
+
+  local extra_generator_flags=()
+  if [[ "$dynamic_slicing_single_host" == "true" ]]; then
+    extra_generator_flags+=(--omit_slice_topology)
+  fi
+
+  if [[ -n "${ROLLOUT_JAX_CACHE_GCS_DIR}" && "${DISABLE_JAX_CACHE:-false}" != "true" && "${DISABLE_JAX_CACHE:-0}" != "1" ]]; then
+    echo "[launcher] Rollout JAX cache GCS: ${ROLLOUT_JAX_CACHE_GCS_DIR} (save=${SAVE_JAX_CACHE:-true})" >&2
+  fi
+
+  _apply_rollout_replica() {
+    local i="$1"
     local replica_id="${ROLLOUT_ID}"
     local worker_id="${ROLLOUT_ID}"
     if [[ ${ROLLOUT_REPLICAS} -gt 1 ]]; then
       replica_id="${ROLLOUT_ID}-${i}"
       worker_id="${ROLLOUT_ID}-${i}"
-    fi
-
-    local extra_generator_flags=()
-    if [[ "$dynamic_slicing_single_host" == "true" ]]; then
-      extra_generator_flags+=(--omit_slice_topology)
-    fi
-
-    if [[ "$i" -eq "${ROLLOUT_START_INDEX:-0}" && -n "${ROLLOUT_JAX_CACHE_GCS_DIR}" && "${DISABLE_JAX_CACHE:-false}" != "true" && "${DISABLE_JAX_CACHE:-0}" != "1" ]]; then
-      echo "[launcher] Rollout JAX cache GCS: ${ROLLOUT_JAX_CACHE_GCS_DIR} (save=${SAVE_JAX_CACHE:-true})" >&2
-    fi
-
-    local jax_cache_env=""
-    if [[ "${DISABLE_JAX_CACHE:-0}" != "1" && "${DISABLE_JAX_CACHE:-false}" != "true" ]]; then
-      if [[ -n "${ROLLOUT_JAX_CACHE_GCS_DIR}" ]]; then
-        jax_cache_env+=" JAX_CACHE_GCS_DIR=\"${ROLLOUT_JAX_CACHE_GCS_DIR}\""
-      fi
-      if [[ -n "${SAVE_JAX_CACHE}" ]]; then
-        jax_cache_env+=" SAVE_JAX_CACHE=\"${SAVE_JAX_CACHE}\""
-      fi
     fi
 
     COLOCATED_PYTHON_SIDECAR_IMAGE="" "$PYTHON_BIN" "$YAML_GENERATOR" \
@@ -887,26 +888,58 @@ if cfg:
       kubectl patch jobset "${replica_id}" -n "${K8S_NAMESPACE}" --type='json' \
         -p="[{\"op\": \"add\", \"path\": \"/spec/replicatedJobs/0/template/spec/template/metadata/annotations/cloud.google.com~1gke-tpu-slice-topology\", \"value\": \"${slice_topo}\"}]"
     fi
+  }
+
+  local max_parallel="${ROLLOUT_LAUNCH_PARALLELISM:-32}"
+  local active_jobs=0
+  for i in $(seq ${ROLLOUT_START_INDEX:-0} $((ROLLOUT_REPLICAS - 1))); do
+    if [[ "$DRY_RUN" == "true" || "${max_parallel}" -le 1 ]]; then
+      _apply_rollout_replica "$i"
+    else
+      _apply_rollout_replica "$i" &
+      active_jobs=$((active_jobs + 1))
+      if (( active_jobs >= max_parallel )); then
+        wait -n 2>/dev/null || wait
+        active_jobs=$((active_jobs - 1))
+      fi
+    fi
   done
+  if (( active_jobs > 0 )); then
+    wait
+  fi
 
   if [[ "$dynamic_slicing_single_host" == "true" && "$DRY_RUN" != "true" ]]; then
     local replicas=${ROLLOUT_WORKERS:-${ROLLOUT_REPLICAS:-1}}
     echo "Waiting for Kueue to create initial workloads before recycling..."
-    sleep 3
-    for ((i=0; i<replicas; i++)); do
-      local replica_id="${ROLLOUT_ID}"
-      if [[ ${replicas} -gt 1 ]]; then
-        replica_id="${ROLLOUT_ID}-${i}"
-      fi
-      local wl_name
-      wl_name=$(kubectl get workload -n "${K8S_NAMESPACE}" -o name 2>/dev/null | grep -E "jobset-${replica_id}-[a-f0-9]+" | head -n 1 | sed 's|^workload.*/||' || true)
-      if [[ -n "${wl_name}" ]]; then
-        local has_topo
-        has_topo=$(kubectl get workload "${wl_name}" -n "${K8S_NAMESPACE}" -o jsonpath='{.spec.podSets[0].template.metadata.annotations.cloud\.google\.com/gke-tpu-slice-topology}' 2>/dev/null || true)
-        if [[ -z "${has_topo}" ]]; then
-          echo "Recycling workload ${wl_name} for ${replica_id} to apply dynamic slicing..."
-          kubectl delete workload "${wl_name}" -n "${K8S_NAMESPACE}" --ignore-not-found=true --wait=false 2>/dev/null || true
-        fi
+    for _pass in 1 2; do
+      sleep 3
+      local stale_wls=()
+      mapfile -t stale_wls < <(
+        kubectl get workload -n "${K8S_NAMESPACE}" -o json 2>/dev/null \
+          | "$PYTHON_BIN" -c '
+import json, re, sys
+rollout_id = sys.argv[1]
+replicas = int(sys.argv[2])
+if replicas > 1:
+  pat = re.compile(r"^jobset-" + re.escape(rollout_id) + r"-[0-9]+-[a-f0-9]+$")
+else:
+  pat = re.compile(r"^jobset-" + re.escape(rollout_id) + r"-[a-f0-9]+$")
+data = json.load(sys.stdin)
+for item in data.get("items", []):
+  name = item.get("metadata", {}).get("name", "")
+  if not pat.match(name):
+    continue
+  pod_sets = item.get("spec", {}).get("podSets") or [{}]
+  ann = (pod_sets[0].get("template", {}).get("metadata", {}).get("annotations") or {})
+  if not ann.get("cloud.google.com/gke-tpu-slice-topology"):
+    print(name)
+' "${ROLLOUT_ID}" "${replicas}" 2>/dev/null || true
+      )
+      if (( ${#stale_wls[@]} > 0 )); then
+        echo "Recycling ${#stale_wls[@]} workload(s) for ${ROLLOUT_ID} to apply dynamic slicing..."
+        kubectl delete workload "${stale_wls[@]}" -n "${K8S_NAMESPACE}" --ignore-not-found=true --wait=false 2>/dev/null || true
+      elif (( _pass == 1 )); then
+        break
       fi
     done
   fi
