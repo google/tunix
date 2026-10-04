@@ -454,7 +454,9 @@ class SWEAgent(ConversationAgentBase):
     """
     self._trajectory.steps.append(self.cur_step)
     thought, action = self._parse_model_response(response)
-    action_str = action.to_xml_string() if action.function_name else ""
+    action_str = (
+        action.to_xml_string() if getattr(action, "function_name", True) else ""
+    )
 
     # Update Trajectory
     cur_step = self._trajectory.steps[-1]

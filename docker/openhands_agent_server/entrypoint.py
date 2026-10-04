@@ -2,13 +2,24 @@ import os
 import re
 import sys
 
-# Strip /oh/glibc236 from LD_LIBRARY_PATH so child processes use task container's glibc:
-if "LD_LIBRARY_PATH" in os.environ:
-    paths = [p for p in os.environ["LD_LIBRARY_PATH"].split(":") if p != "/oh/glibc236"]
-    if paths:
-        os.environ["LD_LIBRARY_PATH"] = ":".join(paths)
-    else:
-        del os.environ["LD_LIBRARY_PATH"]
+# Strip /oh/glibc236 and PyInstaller's temporary bundle directory (_MEIPASS)
+# from LD_LIBRARY_PATH so child processes use the task container's native libs:
+_orig_ld = os.environ.get(
+    "LD_LIBRARY_PATH_ORIG", os.environ.get("LD_LIBRARY_PATH", "")
+)
+_meipass = getattr(sys, "_MEIPASS", "")
+_clean_ld_paths = [
+    p
+    for p in _orig_ld.split(":")
+    if p
+    and p != "/oh/glibc236"
+    and (not _meipass or p != _meipass)
+    and not p.startswith("/tmp/_MEI")
+]
+if _clean_ld_paths:
+    os.environ["LD_LIBRARY_PATH"] = ":".join(_clean_ld_paths)
+else:
+    os.environ.pop("LD_LIBRARY_PATH", None)
 # Ensure the agent server only imports from its own packaged bundle/runtime,
 # never from the user repository or current working directory in the sandbox:
 cwd = os.path.abspath(os.getcwd())

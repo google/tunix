@@ -951,7 +951,13 @@ class TrajectoryCollectEngine:
         if rollout_output.prompt_lengths is not None
         and len(rollout_output.prompt_lengths) > 0
         else (
-            len(rollout_output.left_padded_prompt_tokens[0])
+            (
+                len(rollout_output.left_padded_prompt_tokens[0])
+                if hasattr(
+                    rollout_output.left_padded_prompt_tokens[0], "__len__"
+                )
+                else len(rollout_output.left_padded_prompt_tokens)
+            )
             if rollout_output.left_padded_prompt_tokens is not None
             and len(rollout_output.left_padded_prompt_tokens) > 0
             else 0

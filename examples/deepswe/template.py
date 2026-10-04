@@ -441,8 +441,12 @@ Remember: when making multiple file edits in a row to the same file, you should 
 
 def get_openhands_tools(
     max_timeout: int | None = None,
-    workspace_mount_path_in_sandbox: str = "/workspace",
-    enable_think: bool = False,
+    # Only feeds the example paths in the str_replace_editor `path`
+    # description. The reference (Gym 610a08ab) starts OpenHands with
+    # RUNTIME=local from /openhands_setup/OpenHands, and OpenHands' local
+    # runtime uses the working directory there, so this is the rendered value.
+    workspace_mount_path_in_sandbox: str = "/openhands_setup/OpenHands",
+    enable_think: bool = True,
     enable_task_tracker: bool = True,
 ) -> list[dict[str, Any]]:
   """Returns the OpenHands CodeActAgent tool schemas matching nv-OpenHands@0d766ad0."""
