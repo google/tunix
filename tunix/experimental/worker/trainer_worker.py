@@ -71,6 +71,10 @@ class TrainerWorker(abstract_worker.Worker):
     self._state = WorkerState.PENDING
     self._last_error: str | None = None
 
+  @property
+  def worker_id(self) -> str:
+    return self._worker_id
+
   def _policy_version(self) -> int:
     return int(getattr(self._trainer, "policy_version", 0))
 

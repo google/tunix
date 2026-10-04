@@ -20,9 +20,10 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export TUNIX_IMAGE="${TUNIX_IMAGE:-gcr.io/cloud-tpu-multipod-dev/atwigg/trellis:latest}"
 export JOB_PREFIX="${JOB_PREFIX:-${USER}}"
 export WANDB_API_KEY="${WANDB_API_KEY:-}"
-export ORCHESTRATOR_PORT="${ORCHESTRATOR_PORT:-20000}"
-export ROLLOUT_PORT="${ROLLOUT_PORT:-20001}"
-export TRAINER_PORT="${TRAINER_PORT:-20002}"
+_JOB_PORT_OFFSET=$(( ($(printf '%s' "${JOB_PREFIX}" | cksum | awk '{print $1}') % 1000) * 10 ))
+export ORCHESTRATOR_PORT="${ORCHESTRATOR_PORT:-$(( 20000 + _JOB_PORT_OFFSET ))}"
+export ROLLOUT_PORT="${ROLLOUT_PORT:-$(( 20001 + _JOB_PORT_OFFSET ))}"
+export TRAINER_PORT="${TRAINER_PORT:-$(( 20002 + _JOB_PORT_OFFSET ))}"
 export PROFILER_STEPS=${PROFILER_STEPS:-0}
 export SKIP_FIRST_N_PROFILER_STEPS=${SKIP_FIRST_N_PROFILER_STEPS:--1}
 
