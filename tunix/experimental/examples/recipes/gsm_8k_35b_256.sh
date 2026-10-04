@@ -35,10 +35,11 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # --- Job Identification & Cloud Storage ---
 export JOB_PREFIX="${JOB_PREFIX:-${USER}-$(date +%Y%m%d-%H%M%S)}"
+export BUCKET="${BUCKET:-gs://atwigg-trellis-europe-west4-dev}"
 export WANDB_API_KEY="${WANDB_API_KEY:-}"
 export WANDB_RUN_NAME="${WANDB_RUN_NAME:-${JOB_PREFIX}-gsm8k-35b-256}"
-export MAXTEXT_OUTPUT_DIR="${MAXTEXT_OUTPUT_DIR:-gs://atwigg-trellis-europe-west4-dev/maxtext/${JOB_PREFIX}}"
-export TRAJECTORY_LOG_DIR="${TRAJECTORY_LOG_DIR:-gs://atwigg-trellis-europe-west4-dev/trajectories/${JOB_PREFIX}}"
+export MAXTEXT_OUTPUT_DIR="${MAXTEXT_OUTPUT_DIR:-${BUCKET}/maxtext/${JOB_PREFIX}}"
+export TRAJECTORY_LOG_DIR="${TRAJECTORY_LOG_DIR:-${BUCKET}/trajectories/${JOB_PREFIX}}"
 export ORCHESTRATOR_PORT="${ORCHESTRATOR_PORT:-20000}"
 export ROLLOUT_PORT="${ROLLOUT_PORT:-20001}"
 export TRAINER_PORT="${TRAINER_PORT:-20002}"

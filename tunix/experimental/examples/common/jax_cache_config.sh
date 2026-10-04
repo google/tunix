@@ -22,24 +22,9 @@ export JAX_CACHE_GCS_DIR=${JAX_CACHE_GCS_DIR:-}
 export JAX_CACHE_BUCKET="${JAX_CACHE_BUCKET:-${BUCKET:-}}"
 
 if [[ -z "${JAX_CACHE_GCS_DIR}" && -z "${ROLLOUT_JAX_CACHE_GCS_DIR:-}" ]]; then
-  _cache_bucket="${JAX_CACHE_BUCKET}"
-  if [[ -z "${_cache_bucket}" ]]; then
-    case "${REGION:-}" in
-      europe-west4)
-        _cache_bucket="gs://atwigg-trellis-europe-west4-dev"
-        ;;
-      us-central1)
-        _cache_bucket="gs://atwigg-trellis-us-central1"
-        ;;
-      us-east1)
-        _cache_bucket="gs://atwigg-trellis-us-east1-fast-dev"
-        ;;
-      *)
-        if [[ -n "${MAXTEXT_OUTPUT_DIR:-}" ]]; then
-          _cache_bucket="$(echo "${MAXTEXT_OUTPUT_DIR}" | grep -o '^gs://[^/]*' || true)"
-        fi
-        ;;
-    esac
+  _cache_bucket="${JAX_CACHE_BUCKET:-${BUCKET:-}}"
+  if [[ -z "${_cache_bucket}" && -n "${MAXTEXT_OUTPUT_DIR:-}" ]]; then
+    _cache_bucket="$(echo "${MAXTEXT_OUTPUT_DIR}" | grep -o '^gs://[^/]*' || true)"
   fi
 
   if [[ -n "${_cache_bucket}" ]]; then
@@ -57,8 +42,33 @@ if [[ -z "${JAX_CACHE_GCS_DIR}" && -z "${ROLLOUT_JAX_CACHE_GCS_DIR:-}" ]]; then
       _rollout_ep="${BASH_REMATCH[1]}"
     fi
     _rollout_tp="${ROLLOUT_MESH_TP:-1}"
+    _use_batched_rpa="${USE_BATCHED_RPA_KERNEL:-${ROLLOUT_USE_BATCHED_RPA:-0}}"
 
-    export ROLLOUT_JAX_CACHE_GCS_DIR="${_cache_bucket}/jax_cache/${_hw}/${_model_slug}/rollout_${_rollout_topo}_ep${_rollout_ep}_tp${_rollout_tp}"
+    _setup_payload=$(cat <<EOF
+MODEL_NAME=${MODEL_NAME:-${MAXTEXT_MODEL_NAME:-model}}
+ROLLOUT_FP8=${ROLLOUT_FP8:-false}
+ROLLOUT_QUANTIZATION=${ROLLOUT_QUANTIZATION:-none}
+FLOAT32_LOGITS=${FLOAT32_LOGITS:-true}
+ROLLOUT_TPU_SLICE=${ROLLOUT_TPU_SLICE:-}
+ROLLOUT_MESH_EXPERT=${_rollout_ep}
+ROLLOUT_MESH_TP=${_rollout_tp}
+VLLM_DATA_PARALLEL_SIZE=${VLLM_DATA_PARALLEL_SIZE:-1}
+LIBTPU_INIT_ARGS=${LIBTPU_INIT_ARGS:-}
+VLLM_MOE_CHUNK_SIZE=${VLLM_MOE_CHUNK_SIZE:-}
+ONEHOT_MOE_PERMUTE_THRESHOLD=${ONEHOT_MOE_PERMUTE_THRESHOLD:-}
+ATTN_CUSTOM_NUM_REQS_BUCKETS=${ATTN_CUSTOM_NUM_REQS_BUCKETS:-}
+USE_BATCHED_RPA_KERNEL=${_use_batched_rpa}
+EOF
+)
+    if command -v sha256sum >/dev/null 2>&1; then
+      _setup_hash=$(printf '%s' "${_setup_payload}" | sha256sum | cut -c1-10)
+    elif command -v shasum >/dev/null 2>&1; then
+      _setup_hash=$(printf '%s' "${_setup_payload}" | shasum -a 256 | cut -c1-10)
+    else
+      _setup_hash=$(echo -n "${_setup_payload}" | cksum | awk '{print $1}')
+    fi
+
+    export ROLLOUT_JAX_CACHE_GCS_DIR="${_cache_bucket}/jax_cache/${_hw}/${_model_slug}/rollout_${_rollout_topo}_ep${_rollout_ep}_tp${_rollout_tp}_${_setup_hash}"
   fi
 fi
 

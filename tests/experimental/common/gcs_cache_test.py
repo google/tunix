@@ -16,6 +16,7 @@
 
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 from unittest import mock
@@ -189,6 +190,25 @@ class GcsCacheTest(absltest.TestCase):
         "upload_jax_cache", gcs_uri="gs://bucket/orch_rollout"
     )
     mock_trainer.submit.assert_not_called()
+
+  def test_jax_cache_config_shell_hash(self):
+    script = Path(__file__).resolve().parents[3] / "tunix/experimental/examples/common/jax_cache_config.sh"
+    cmd = (
+        'export BUCKET="gs://test-bucket"; '
+        'export ROLLOUT_TPU_SLICE="tpuv5:2x2x1"; '
+        'export ROLLOUT_MESH_EXPERT=8; '
+        'export ROLLOUT_MESH_TP=1; '
+        'export MODEL_NAME="qwen3.5-35b-a3b"; '
+        f'source "{script}" && echo "$ROLLOUT_JAX_CACHE_GCS_DIR"'
+    )
+    res1 = subprocess.check_output(["bash", "-c", cmd], text=True).strip()
+    self.assertTrue(res1.startswith("gs://test-bucket/jax_cache/v5p/qwen3.5-35b-a3b/rollout_2x2x1_ep8_tp1_"))
+
+    # Verify that changing quantization changes the fingerprint hash
+    cmd_fp8 = f"export ROLLOUT_FP8=true; {cmd}"
+    res2 = subprocess.check_output(["bash", "-c", cmd_fp8], text=True).strip()
+    self.assertTrue(res2.startswith("gs://test-bucket/jax_cache/v5p/qwen3.5-35b-a3b/rollout_2x2x1_ep8_tp1_"))
+    self.assertNotEqual(res1, res2)
 
 
 if __name__ == "__main__":
