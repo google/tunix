@@ -316,11 +316,26 @@ class InprocessVllmSamplerAdapterTest(absltest.TestCase):
         tokenizer=self.mock_tokenizer,
         config=self.mock_config,
     )
+    self.assertFalse(adapter.is_initialized)
     self.assertIsNone(adapter.vllm_sampler)
     self.mock_vllm_lib.VllmSampler.assert_not_called()
 
     adapter.initialize()
+    self.assertTrue(adapter.is_initialized)
     self.assertIsNotNone(adapter.vllm_sampler)
+    self.mock_vllm_lib.VllmSampler.assert_called_once()
+
+  def test_get_underlying_sampler_lazily_initializes(self):
+    self.mock_vllm_lib.VllmSampler.reset_mock()
+    adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
+        server_id="lazy_slice",
+        tokenizer=self.mock_tokenizer,
+        config=self.mock_config,
+    )
+    self.assertFalse(adapter.is_initialized)
+    underlying = adapter._get_underlying_sampler()
+    self.assertTrue(adapter.is_initialized)
+    self.assertEqual(underlying, self.mock_vllm_sampler)
     self.mock_vllm_lib.VllmSampler.assert_called_once()
 
 
