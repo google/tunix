@@ -689,7 +689,9 @@ def check_eval(
   """Logs an evaluation block completion, checks for early stopping, and handles next block."""
   global _block_open, _train_stopped
   target_acc = target_accuracy if target_accuracy is not None else getattr(args, "target_accuracy", 0.69)
-  is_early_stop = (target_acc is not None) and (eval_accuracy > target_acc)
+  is_early_stop = (target_acc is not None) and (
+      float(eval_accuracy) > float(target_acc)
+  )
 
   if not (_is_master_process() and mllogger is not None):
     return is_early_stop
