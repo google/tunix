@@ -465,8 +465,7 @@ class ClusterOrchestrator:
     if not worker_ids:
       return
 
-    max_workers = min(len(worker_ids), 64)
-    with futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+    with futures.ThreadPoolExecutor(max_workers=len(worker_ids)) as pool:
       if self.trajectory_store_config is not None:
         def _cfg_store(wid: str) -> None:
           if (
