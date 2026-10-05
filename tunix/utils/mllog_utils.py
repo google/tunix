@@ -548,7 +548,7 @@ def log_offline_eval_step(
 ) -> bool:
   """Logs offline eval events for one checkpoint and a backdated run_stop.
 
-  run_stop(status="success") is emitted when eval_accuracy reaches
+  run_stop(status="success") is emitted when eval_accuracy exceeds
   target_accuracy; run_stop(status="aborted") is emitted when the final
   checkpoint misses it. Both use checkpoint_timestamp_ms as time_ms so
   checkpoint serialization and offline eval are excluded from time-to-train.
@@ -566,9 +566,9 @@ def log_offline_eval_step(
       already emitted it when eval began).
 
   Returns:
-    True if target_accuracy was reached.
+    True if target_accuracy was exceeded.
   """
-  passed = float(eval_accuracy) >= float(target_accuracy)
+  passed = float(eval_accuracy) > float(target_accuracy)
   if not (_is_master_process() and mllogger is not None):
     return passed
 
@@ -689,7 +689,7 @@ def check_eval(
   """Logs an evaluation block completion, checks for early stopping, and handles next block."""
   global _block_open, _train_stopped
   target_acc = target_accuracy if target_accuracy is not None else getattr(args, "target_accuracy", 0.69)
-  is_early_stop = (target_acc is not None) and (eval_accuracy >= target_acc)
+  is_early_stop = (target_acc is not None) and (eval_accuracy > target_acc)
 
   if not (_is_master_process() and mllogger is not None):
     return is_early_stop

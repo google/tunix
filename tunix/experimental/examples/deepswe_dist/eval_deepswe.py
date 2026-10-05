@@ -726,7 +726,7 @@ async def run_controller(a):
         else pass_at_k[str(a.num_rollouts_per_instance)]
     )
     target_acc = float(a.target_accuracy)
-    target_reached = bool(eval_ok and eval_accuracy >= target_acc)
+    target_reached = bool(eval_ok and eval_accuracy > target_acc)
     rcp_logged = False
     if a.rcp_logging and eval_ok:
       mllog_utils.start_eval(

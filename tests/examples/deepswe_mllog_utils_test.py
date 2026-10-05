@@ -691,7 +691,7 @@ class MllogUtilsTest(absltest.TestCase):
         mllog_utils.log_offline_eval_step(
             step=18,
             samples_count=4608,
-            eval_accuracy=0.65,
+            eval_accuracy=0.69,
             checkpoint_timestamp_ms=1000,
         )
     )
@@ -713,7 +713,7 @@ class MllogUtilsTest(absltest.TestCase):
     )
     self.assertEqual(events[0]["time_ms"], 2000)
     self.assertEqual(events[0]["metadata"]["step"], 19)
-    self.assertEqual([events[2]["value"], events[5]["value"]], [0.65, 0.70])
+    self.assertEqual([events[2]["value"], events[5]["value"]], [0.69, 0.70])
     run_stop = events[-1]
     self.assertEqual(run_stop["time_ms"], 2000)
     self.assertEqual(run_stop["metadata"]["status"], "success")
