@@ -993,6 +993,17 @@ def main(argv: list[str], context: Any = None) -> None:
     await server.start_serving_async(args.port)
     logging.info("Serving vLLM rollout worker on port %d.", args.port)
 
+    if args.sampler != "vanilla":
+      # Eagerly start the sampler engine so all pods in a multihost rollout
+      # jobset join the JAX distributed group at startup rather than lazily.
+      logging.info("Eagerly starting sampler engine...")
+      await worker_service.sampler.start()
+      logging.info("Sampler engine started.")
+      if hasattr(worker_service.sampler, "bind_weight_sync"):
+        logging.info("Eagerly warming up Raiden weight sync...")
+        await worker_service.sampler.bind_weight_sync()
+        logging.info("Raiden weight sync warmed up.")
+
     context.ipc.discovery.register(
         metadata=pickle.dumps({
             "service_type": "rollout",
@@ -1000,10 +1011,7 @@ def main(argv: list[str], context: Any = None) -> None:
             "worker_id": args.worker_id,
         })
     )
-    logging.info(
-        "Rollout worker is registered (sampler engine will start on"
-        " orchestrator bring_up_workers)."
-    )
+    logging.info("Rollout worker is registered.")
 
     # Shut down gracefully on SIGTERM/SIGINT.
     stop_event = asyncio.Event()

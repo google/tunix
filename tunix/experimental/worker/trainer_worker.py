@@ -16,7 +16,6 @@
 
 from collections.abc import Mapping
 import contextlib
-import threading
 from typing import Any, Callable, ContextManager, cast
 
 from absl import logging
@@ -49,7 +48,6 @@ class TrainerWorker(abstract_worker.Worker):
       logps_chunk_size: int = 0,
       logps_micro_batch_size: int | None = None,
       execution_context: Any = None,
-      lazy_init: bool = False,
   ):
     """Initializes the TrainerWorker.
 
@@ -62,52 +60,19 @@ class TrainerWorker(abstract_worker.Worker):
       logps_chunk_size: Optionally chunk the vocab (final-logits) computation.
       logps_micro_batch_size: Row chunk size for `per_token_logps`.
         If `None`, the whole request is scored in one forward.
-      lazy_init: If True, defer calling `trainer_factory()` until `initialize()`
-        (or first access to `_trainer`), allowing the worker to register with
-        service discovery before loading weights or constructing the engine.
     """
     self._execution_context = execution_context
-    self._trainer_factory = trainer_factory
-    self._trainer_instance: abstract_trainer.AbstractTrainer | None = None
-    self._init_lock = threading.Lock()
-    self._pending_loss_fn: tuple[Callable[..., Any], bool] | None = None
-    self._pending_gen_model_input_fn: (
-        Callable[[Any], dict[str, Any]] | None
-    ) = None
+    with self.execution_context():
+      self._trainer = trainer_factory()
     self._logps_chunk_size = logps_chunk_size
     self._logps_micro_batch_size = logps_micro_batch_size
     self._is_running = False
     self._worker_id = worker_id
     self._state = WorkerState.PENDING
     self._last_error: str | None = None
-    if not lazy_init:
-      _ = self._trainer
-
-  @property
-  def _trainer(self) -> abstract_trainer.AbstractTrainer:
-    if self._trainer_instance is None:
-      with self._init_lock:
-        if self._trainer_instance is None:
-          with self.execution_context():
-            trainer = self._trainer_factory()
-            if self._pending_loss_fn is not None:
-              loss_fn, has_aux = self._pending_loss_fn
-              trainer.with_loss_fn(loss_fn, has_aux)
-              self._pending_loss_fn = None
-            if self._pending_gen_model_input_fn is not None:
-              trainer.with_gen_model_input_fn(self._pending_gen_model_input_fn)
-              self._pending_gen_model_input_fn = None
-            self._trainer_instance = trainer
-    return self._trainer_instance
-
-  @_trainer.setter
-  def _trainer(self, value: abstract_trainer.AbstractTrainer) -> None:
-    self._trainer_instance = value
 
   def _policy_version(self) -> int:
-    if self._trainer_instance is None:
-      return 0
-    return int(getattr(self._trainer_instance, "policy_version", 0))
+    return int(getattr(self._trainer, "policy_version", 0))
 
   def _response(self, **metadata: Any) -> datatypes.Response:
     return datatypes.Response(
@@ -131,7 +96,6 @@ class TrainerWorker(abstract_worker.Worker):
       return self._response(initialized=True, ready=True)
     self.state = WorkerState.INITIALIZING
     try:
-      _ = self._trainer
       return self._response(initialized=True)
     finally:
       self.state = WorkerState.READY
@@ -168,8 +132,7 @@ class TrainerWorker(abstract_worker.Worker):
     self._is_running = False
     if self.state == WorkerState.READY:
       self.state = WorkerState.DRAINING
-    if self._trainer_instance is not None:
-      self._trainer_instance.close()
+    self._trainer.close()
     self.state = WorkerState.STOPPED
     return self._response(stopped=True)
 
@@ -194,11 +157,7 @@ class TrainerWorker(abstract_worker.Worker):
       self, loss_fn: Callable[..., Any], has_aux: bool = False
   ) -> datatypes.Response:
     """Sets the loss function used by `fwd_bwd` (and evaluation)."""
-    with self._init_lock:
-      if self._trainer_instance is None:
-        self._pending_loss_fn = (loss_fn, has_aux)
-      else:
-        self._trainer_instance.with_loss_fn(loss_fn, has_aux)
+    self._trainer.with_loss_fn(loss_fn, has_aux)
     return self._response(loss_fn_configured=True)
 
   def with_gen_model_input_fn(
@@ -215,11 +174,7 @@ class TrainerWorker(abstract_worker.Worker):
         return out
 
       gen_model_input_fn = _wrapped_gen_model_input_fn
-    with self._init_lock:
-      if self._trainer_instance is None:
-        self._pending_gen_model_input_fn = gen_model_input_fn
-      else:
-        self._trainer_instance.with_gen_model_input_fn(gen_model_input_fn)
+    self._trainer.with_gen_model_input_fn(gen_model_input_fn)
     return self._response(gen_model_input_fn_configured=True)
 
   def set_target_state(self, target_state: Any) -> datatypes.Response:

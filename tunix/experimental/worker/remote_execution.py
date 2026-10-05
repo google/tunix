@@ -706,8 +706,6 @@ class RemoteExecutionServer(abc.ABC):
         result = await method(*request.args, **request.kwargs)
       else:
         result = method(*request.args, **request.kwargs)
-        if inspect.isawaitable(result):
-          result = await result
       return ExecutionResponse(result=result, request_id=request.request_id)
     except Exception as e:  # pylint: disable=broad-exception-caught
       return ExecutionResponse(
