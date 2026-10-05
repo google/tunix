@@ -46,15 +46,17 @@ from tunix.generate import utils
 
 Page = single_type_kv_cache_manager.Page
 
+_GIB = 1 << 30
+
 
 @dataclasses.dataclass(kw_only=True)
 class CacheConfig:
   """Raw configuration parameters for KV Cache allocation and sharding."""
 
-  # The maximum number of bytes to allocate on each device.
-  max_device_bytes: int
-  # The maximum number of bytes to allocate on the host.
-  max_host_bytes: int = 0
+  # The maximum number of GiB to allocate on each device.
+  max_device_size_gib: float
+  # The maximum number of GiB to allocate on the host.
+  max_host_size_gib: float = 0.0
   # The number of tokens per page.
   page_size: int = 16
   # Whether pages may be shared between requests with a common prefix.
@@ -74,15 +76,15 @@ class CacheConfig:
   def __post_init__(self):
     positive_checks = {
         "page_size": self.page_size,
-        "max_device_bytes": self.max_device_bytes,
+        "max_device_size_gib": self.max_device_size_gib,
     }
     for field_name, value in positive_checks.items():
       if value <= 0:
         raise ValueError(f"{field_name} must be positive, got {value}.")
 
-    if self.max_host_bytes < 0:
+    if self.max_host_size_gib < 0:
       raise ValueError(
-          f"max_host_bytes cannot be negative, got {self.max_host_bytes}."
+          f"max_host_size_gib cannot be negative, got {self.max_host_size_gib}."
       )
 
     if not (self.dp_axis or self.tp_axis):
@@ -195,13 +197,14 @@ def _compute_page_limits(
       math.prod(shape) for shape in group_shapes
   )
 
-  num_groups = config.max_device_bytes // bytes_per_device_per_group
+  max_device_bytes = math.floor(config.max_device_size_gib * _GIB)
+  num_groups = max_device_bytes // bytes_per_device_per_group
   if num_groups <= 0:
     raise ValueError(
-        "Cannot allocate 0 device pages. max_device_bytes="
-        f"{config.max_device_bytes} is smaller than the "
-        f"{bytes_per_device_per_group} bytes each device needs to hold one "
-        f"page on each of {config.dp_size} DP replica(s)."
+        "Cannot allocate 0 device pages. max_device_size_gib="
+        f"{config.max_device_size_gib} ({max_device_bytes} bytes) is smaller "
+        f"than the {bytes_per_device_per_group} bytes each device needs to "
+        f"hold one page on each of {config.dp_size} DP replica(s)."
     )
   num_device_pages = num_groups * config.dp_size
 
@@ -211,7 +214,8 @@ def _compute_page_limits(
       * config.page_size
       * sum(math.prod(shape) for shape in element_shapes)
   )
-  num_host_pages = config.max_host_bytes // bytes_per_page
+  max_host_bytes = math.floor(config.max_host_size_gib * _GIB)
+  num_host_pages = max_host_bytes // bytes_per_page
   return num_device_pages, num_host_pages
 
 

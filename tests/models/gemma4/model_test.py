@@ -235,7 +235,9 @@ class ModelTest(parameterized.TestCase):
 
     manager = model.init_kv_cache(
         kv_cache_manager.CacheConfig(
-            max_device_bytes=1 << 20, page_size=4, dtype=jnp.float32
+            max_device_size_gib=(1 << 20) / (1 << 30),
+            page_size=4,
+            dtype=jnp.float32,
         )
     )
     geometries = manager.cache_geometries

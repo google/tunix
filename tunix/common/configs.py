@@ -140,8 +140,8 @@ class RolloutConfig:
   # mode only.
   server_mode_submission_timeout_s: float = 0.0
 
-  # The number of bytes of KV cache to allocate on each device.
-  kv_cache_max_device_bytes: int | None = None
+  # Allocated HBM fraction for the rollout engine, in (0, 1].
+  rollout_hbm_utilization: float = 0.2
 
   # The number of tokens per KV cache page.
   kv_cache_page_size: int = 16

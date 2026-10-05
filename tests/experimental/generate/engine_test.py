@@ -44,7 +44,7 @@ class LLMEngineTest(absltest.TestCase):
               testing_utils.WhitespaceTokenizer()
           ),
           cache_config=kv_cache_manager_lib.CacheConfig(
-              max_device_bytes=64 * testing_utils.BYTES_PER_PAGE,
+              max_device_size_gib=64 * testing_utils.GIB_PER_PAGE,
               page_size=testing_utils.PAGE_SIZE,
               dtype=jnp.float32,
           ),
@@ -409,7 +409,7 @@ class StepTest(parameterized.TestCase):
   def test_preempted_requests_resume(self):
     # Eight pages hold every request's prompt, but not what they generate.
     engine = testing_utils.make_engine(
-        max_device_bytes=8 * testing_utils.BYTES_PER_PAGE
+        max_device_size_gib=8 * testing_utils.GIB_PER_PAGE
     )
     preempt_spy = mock.patch.object(
         engine._scheduler,  # pylint: disable=protected-access
@@ -429,7 +429,7 @@ class StepTest(parameterized.TestCase):
     # preempts request '1'. Request '1' must still process its generated token
     # from step 1 and finish in that single step.
     engine = testing_utils.make_engine(
-        max_device_bytes=2 * testing_utils.BYTES_PER_PAGE
+        max_device_size_gib=2 * testing_utils.GIB_PER_PAGE
     )
     preempt_spy = mock.patch.object(
         engine._scheduler,  # pylint: disable=protected-access

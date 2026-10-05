@@ -38,9 +38,11 @@ def _create_cache_config(
   bytes_per_layer_page = page_size * (2 * num_kv_heads) * head_dim * 4
   total_device_bytes_per_page = bytes_per_layer_page * num_layers
   total_host_bytes_per_page = bytes_per_layer_page * num_layers
+  gib = 1 << 30
   return kv_cache_manager.CacheConfig(
-      max_device_bytes=total_device_bytes_per_page * num_device_pages,
-      max_host_bytes=total_host_bytes_per_page * num_host_pages,
+      max_device_size_gib=(total_device_bytes_per_page * num_device_pages)
+      / gib,
+      max_host_size_gib=(total_host_bytes_per_page * num_host_pages) / gib,
       page_size=page_size,
       dtype=jnp.float32,
   )

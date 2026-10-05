@@ -32,6 +32,8 @@ from tunix.experimental.rollout import sampler as sampler_lib
 # Sharding tests need up to 4 devices.
 os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=4"
 
+_GIB = 1 << 30
+
 
 def _create_mesh() -> jax.sharding.Mesh:
   return jax.sharding.Mesh(
@@ -57,8 +59,8 @@ def _create_cache_config(
   if mesh is None and (dp_axis or tp_axis):
     mesh = _create_mesh()
   return kv_cache_manager.CacheConfig(
-      max_device_bytes=total_bytes_per_page * num_device_pages,
-      max_host_bytes=total_bytes_per_page * num_host_pages,
+      max_device_size_gib=(total_bytes_per_page * num_device_pages) / _GIB,
+      max_host_size_gib=(total_bytes_per_page * num_host_pages) / _GIB,
       page_size=page_size,
       enable_prefix_caching=enable_prefix_caching,
       dtype=jnp.float32,
@@ -204,8 +206,8 @@ class CacheConfigTest(parameterized.TestCase):
 
   def test_valid_config(self):
     cfg = kv_cache_manager.CacheConfig(
-        max_device_bytes=1024 * 1024,
-        max_host_bytes=512 * 1024,
+        max_device_size_gib=1.0,
+        max_host_size_gib=0.5,
         page_size=16,
         dtype=jnp.float32,
         dp_axis="dp",
@@ -220,7 +222,7 @@ class CacheConfigTest(parameterized.TestCase):
 
   def test_dp_size_is_one_without_dp_axis(self):
     cfg = kv_cache_manager.CacheConfig(
-        max_device_bytes=1024 * 1024,
+        max_device_size_gib=1.0,
         dtype=jnp.float32,
         tp_axis="tp",
         mesh=_create_mesh(),
@@ -230,7 +232,7 @@ class CacheConfigTest(parameterized.TestCase):
   def test_sharding_axes_without_mesh_raises(self):
     with self.assertRaisesRegex(ValueError, r"mesh is required"):
       kv_cache_manager.CacheConfig(
-          max_device_bytes=1024 * 1024,
+          max_device_size_gib=1.0,
           page_size=16,
           dtype=jnp.float32,
           dp_axis="dp",
@@ -243,7 +245,7 @@ class CacheConfigTest(parameterized.TestCase):
   def test_axis_not_in_mesh_raises(self, dp_axis, tp_axis):
     with self.assertRaisesRegex(ValueError, r"is not in the mesh axes"):
       kv_cache_manager.CacheConfig(
-          max_device_bytes=1024 * 1024,
+          max_device_size_gib=1.0,
           dtype=jnp.float32,
           dp_axis=dp_axis,
           tp_axis=tp_axis,
@@ -254,36 +256,36 @@ class CacheConfigTest(parameterized.TestCase):
     with self.assertRaisesRegex(ValueError, r"page_size must be positive"):
       kv_cache_manager.CacheConfig(
           page_size=0,
-          max_device_bytes=1024,
+          max_device_size_gib=1.0,
           dtype=jnp.float32,
       )
 
-  def test_invalid_negative_bytes_raises(self):
+  def test_invalid_negative_size_raises(self):
     with self.assertRaisesRegex(
-        ValueError, r"max_device_bytes must be positive"
+        ValueError, r"max_device_size_gib must be positive"
     ):
       kv_cache_manager.CacheConfig(
           page_size=16,
-          max_device_bytes=-100,
+          max_device_size_gib=-1.0,
           dtype=jnp.float32,
       )
     with self.assertRaisesRegex(
-        ValueError, r"max_host_bytes cannot be negative"
+        ValueError, r"max_host_size_gib cannot be negative"
     ):
       kv_cache_manager.CacheConfig(
           page_size=16,
-          max_device_bytes=1024,
-          max_host_bytes=-100,
+          max_device_size_gib=1.0,
+          max_host_size_gib=-1.0,
           dtype=jnp.float32,
       )
 
-  def test_zero_device_bytes_raises(self):
+  def test_zero_device_size_raises(self):
     with self.assertRaisesRegex(
-        ValueError, r"max_device_bytes must be positive"
+        ValueError, r"max_device_size_gib must be positive"
     ):
       kv_cache_manager.CacheConfig(
           page_size=16,
-          max_device_bytes=0,
+          max_device_size_gib=0.0,
           dtype=jnp.float32,
       )
 
@@ -309,7 +311,7 @@ class CacheSizingTest(parameterized.TestCase):
 
   def test_derive_kv_geometry(self):
     cfg = kv_cache_manager.CacheConfig(
-        max_device_bytes=1024 * 1024,
+        max_device_size_gib=1.0,
         dtype=jnp.bfloat16,
         page_size=16,
     )
@@ -326,7 +328,7 @@ class CacheSizingTest(parameterized.TestCase):
   def test_derive_cache_sharding(self, dp_axis, tp_axis):
     mesh = _create_mesh()
     cfg = kv_cache_manager.CacheConfig(
-        max_device_bytes=1024 * 1024,
+        max_device_size_gib=1.0,
         dtype=jnp.bfloat16,
         page_size=16,
         dp_axis=dp_axis,
@@ -343,7 +345,7 @@ class CacheSizingTest(parameterized.TestCase):
 
   def test_derive_cache_sharding_no_sharding(self):
     cfg = kv_cache_manager.CacheConfig(
-        max_device_bytes=1024 * 1024,
+        max_device_size_gib=1.0,
         dtype=jnp.bfloat16,
         page_size=16,
     )
@@ -351,8 +353,8 @@ class CacheSizingTest(parameterized.TestCase):
 
   def test_compute_page_limits(self):
     cfg = kv_cache_manager.CacheConfig(
-        max_device_bytes=1024 * 1024,
-        max_host_bytes=512 * 1024,
+        max_device_size_gib=(1024 * 1024) / _GIB,
+        max_host_size_gib=(512 * 1024) / _GIB,
         dtype=jnp.bfloat16,
         page_size=16,
     )
@@ -411,11 +413,12 @@ class CacheSizingTest(parameterized.TestCase):
     for budget_offset, expected_device, expected_host in (
         (0, expected_device_pages, 3),
         (-1, expected_device_pages_one_byte_short, 2),
+        (-0.2, expected_device_pages_one_byte_short, 2),
     ):
       with self.subTest(budget_offset=budget_offset):
         cfg = kv_cache_manager.CacheConfig(
-            max_device_bytes=8 * page_bytes + budget_offset,
-            max_host_bytes=3 * page_bytes + budget_offset,
+            max_device_size_gib=(8 * page_bytes + budget_offset) / _GIB,
+            max_host_size_gib=(3 * page_bytes + budget_offset) / _GIB,
             dtype=jnp.bfloat16,
             page_size=16,
             dp_axis=dp_axis,
@@ -439,7 +442,7 @@ class CacheSizingTest(parameterized.TestCase):
     # Weighting each group's byte budget by its own per-page cost makes the
     # weight cancel, so both groups end up with the same page count.
     cfg = kv_cache_manager.CacheConfig(
-        max_device_bytes=3 * (65536 + 16384),
+        max_device_size_gib=(3 * (65536 + 16384)) / _GIB,
         dtype=jnp.bfloat16,
         page_size=16,
     )
@@ -472,7 +475,7 @@ class CacheSizingTest(parameterized.TestCase):
     # Axis 0 of the pool is partitioned over dp, so a count that isn't a
     # multiple of dp_size would fail allocation with IndivisibleError.
     cfg = kv_cache_manager.CacheConfig(
-        max_device_bytes=37 * 1024,
+        max_device_size_gib=(37 * 1024) / _GIB,
         dtype=jnp.bfloat16,
         page_size=16,
         dp_axis="dp",
@@ -524,7 +527,7 @@ class KVCacheManagerInitTest(parameterized.TestCase):
     # Gemma 4's global layers project fewer, wider KV heads than its local
     # ones, so each group's pool must carry its own element shape.
     cfg = kv_cache_manager.CacheConfig(
-        max_device_bytes=4 * (4 * 4 * 8 * 4 + 4 * 1 * 16 * 4),
+        max_device_size_gib=(4 * (4 * 4 * 8 * 4 + 4 * 1 * 16 * 4)) / _GIB,
         page_size=4,
         dtype=jnp.float32,
     )
@@ -574,7 +577,7 @@ class KVCacheManagerInitTest(parameterized.TestCase):
     cfg = kv_cache_manager.CacheConfig(
         page_size=4,
         dtype=jnp.float32,
-        max_device_bytes=10,
+        max_device_size_gib=10 / _GIB,
     )
     with self.assertRaisesRegex(ValueError, r"Cannot allocate 0 device pages"):
       kv_cache_manager.KVCacheManager(

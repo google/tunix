@@ -34,6 +34,64 @@ from tunix.rl import common
 from tunix.rl.rollout import base_rollout
 
 
+_GIB = 1 << 30
+
+
+def _resolve_max_device_size_gib(
+    hbm_utilization: float,
+    mesh: jax.sharding.Mesh,
+) -> float:
+  """Computes available per-device KV cache GiB from an HBM utilization cap.
+
+  Matches vLLM's `determine_available_memory`: budgets `int(bytes_limit *
+  hbm_utilization)` total HBM per device and subtracts `bytes_in_use` (e.g.
+  already-allocated model weights), returning the minimum across local devices
+  in GiB.
+
+  Args:
+    hbm_utilization: Fraction of total device HBM (`bytes_limit`) to budget, in
+      `(0, 1]`.
+    mesh: The JAX mesh whose local devices are queried.
+
+  Returns:
+    The minimum available GiB per device across queried devices.
+
+  Raises:
+    ValueError: If `hbm_utilization` is out of `(0, 1]`, no local devices are
+      available, `memory_stats()` does not report `bytes_limit` /
+      `bytes_in_use`, or `bytes_in_use` already exceeds the utilization cap.
+  """
+  if not 0.0 < hbm_utilization <= 1.0:
+    raise ValueError(
+        f'rollout_hbm_utilization must be in (0, 1], got {hbm_utilization}.'
+    )
+  devices = list(mesh.local_devices)
+  if not devices:
+    raise ValueError('No addressable JAX devices found to query HBM stats.')
+
+  available_per_device: list[int] = []
+  for device in devices:
+    stats = device.memory_stats()
+    if not stats or 'bytes_limit' not in stats or 'bytes_in_use' not in stats:
+      raise ValueError(
+          f'Device {device} does not report HBM memory_stats() '
+          '(bytes_limit / bytes_in_use).'
+      )
+    limit = int(stats['bytes_limit'])
+    used = int(stats['bytes_in_use'])
+    limit_cap = int(limit * hbm_utilization)
+    avail = limit_cap - used
+    if avail <= 0:
+      raise ValueError(
+          f'Insufficient HBM on device {device} for rollout_hbm_utilization='
+          f'{hbm_utilization}: bytes_in_use ({used}) >= '
+          f'int(bytes_limit ({limit}) * {hbm_utilization}) ({limit_cap}).'
+      )
+    available_per_device.append(avail)
+
+  return min(available_per_device) / _GIB
+
+
 def _build_engine(
     model: nnx.Module,
     tokenizer: tokenizer_adapter.TokenizerAdapter,
@@ -51,13 +109,12 @@ def _build_engine(
     max_model_len: The maximum number of tokens a sequence may hold.
 
   Raises:
-    ValueError: If `rollout_config.kv_cache_max_device_bytes` is not set.
+    ValueError: If `rollout_config.rollout_hbm_utilization` is invalid or device
+      HBM is insufficient.
   """
-  if rollout_config.kv_cache_max_device_bytes is None:
-    raise ValueError(
-        "rollout_engine='vanillav2' requires"
-        ' rollout_config.kv_cache_max_device_bytes.'
-    )
+  max_device_size_gib = _resolve_max_device_size_gib(
+      rollout_config.rollout_hbm_utilization, mesh
+  )
   if rollout_config.eos_tokens:
     eos_token_ids = frozenset(rollout_config.eos_tokens)
   else:
@@ -66,7 +123,7 @@ def _build_engine(
       model,
       tokenizer=tokenizer,
       cache_config=kv_cache_manager_lib.CacheConfig(
-          max_device_bytes=rollout_config.kv_cache_max_device_bytes,
+          max_device_size_gib=max_device_size_gib,
           page_size=rollout_config.kv_cache_page_size,
           enable_prefix_caching=rollout_config.enable_prefix_caching,
           dtype=model.config.dtype,  # pyrefly: ignore[missing-attribute]

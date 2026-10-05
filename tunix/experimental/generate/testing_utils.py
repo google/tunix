@@ -35,6 +35,7 @@ GEOMETRIES = {
 }
 # One page of one cache: `page_size` slots of a packed K and V float32 value.
 BYTES_PER_PAGE = PAGE_SIZE * 2 * 4
+GIB_PER_PAGE = BYTES_PER_PAGE / (1 << 30)
 
 
 def mesh() -> jax.sharding.Mesh:
@@ -135,7 +136,7 @@ def make_engine(
     transformer: nnx.Module | None = None,
     *,
     max_model_len: int = 24,
-    max_device_bytes: int = 64 * BYTES_PER_PAGE,
+    max_device_size_gib: float = 64 * GIB_PER_PAGE,
     max_num_batched_tokens: int = 32,
     chunked_prefill_length: int = 32,
     num_scheduler_steps: int = 1,
@@ -149,7 +150,7 @@ def make_engine(
       transformer if transformer is not None else PagedSumTransformer(),
       tokenizer=tokenizer_adapter.TokenizerAdapter(WhitespaceTokenizer()),
       cache_config=kv_cache_manager_lib.CacheConfig(
-          max_device_bytes=max_device_bytes,
+          max_device_size_gib=max_device_size_gib,
           page_size=PAGE_SIZE,
           dtype=jnp.float32,
       ),

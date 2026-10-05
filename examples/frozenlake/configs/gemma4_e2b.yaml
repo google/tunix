@@ -103,7 +103,7 @@ rollout_config:
   top_k: null
   return_logprobs: True
   server_mode: True
-  kv_cache_max_device_bytes: 2147483648
+  rollout_hbm_utilization: 0.2
   max_num_seqs: 32
   max_num_batched_tokens: 2048
   chunked_prefill_length: 512
