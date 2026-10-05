@@ -194,10 +194,11 @@ class TrainerWorker(abstract_worker.Worker):
       self, loss_fn: Callable[..., Any], has_aux: bool = False
   ) -> datatypes.Response:
     """Sets the loss function used by `fwd_bwd` (and evaluation)."""
-    if self._trainer_instance is None:
-      self._pending_loss_fn = (loss_fn, has_aux)
-    else:
-      self._trainer_instance.with_loss_fn(loss_fn, has_aux)
+    with self._init_lock:
+      if self._trainer_instance is None:
+        self._pending_loss_fn = (loss_fn, has_aux)
+      else:
+        self._trainer_instance.with_loss_fn(loss_fn, has_aux)
     return self._response(loss_fn_configured=True)
 
   def with_gen_model_input_fn(
@@ -214,10 +215,11 @@ class TrainerWorker(abstract_worker.Worker):
         return out
 
       gen_model_input_fn = _wrapped_gen_model_input_fn
-    if self._trainer_instance is None:
-      self._pending_gen_model_input_fn = gen_model_input_fn
-    else:
-      self._trainer_instance.with_gen_model_input_fn(gen_model_input_fn)
+    with self._init_lock:
+      if self._trainer_instance is None:
+        self._pending_gen_model_input_fn = gen_model_input_fn
+      else:
+        self._trainer_instance.with_gen_model_input_fn(gen_model_input_fn)
     return self._response(gen_model_input_fn_configured=True)
 
   def set_target_state(self, target_state: Any) -> datatypes.Response:

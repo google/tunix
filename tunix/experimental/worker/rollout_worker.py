@@ -208,7 +208,9 @@ class RolloutWorker(abstract_worker.Worker):
     finally:
       self.state = WorkerState.READY
 
-  async def _start_async(self) -> datatypes.Response:
+  async def start(self) -> datatypes.Response:
+    if self.state == WorkerState.PENDING:
+      self.initialize()
     if inspect.iscoroutinefunction(getattr(self.sampler, "start", None)):
       logging.info(
           "Starting sampler engine on rollout worker %s...", self.worker_id
@@ -227,29 +229,6 @@ class RolloutWorker(abstract_worker.Worker):
       logging.info(
           "Weight sync warmed up on rollout worker %s.", self.worker_id
       )
-    return datatypes.Response(
-        metadata={
-            "worker_id": self.worker_id,
-            "state": self.state.value,
-            "policy_version": self._policy_version,
-        }
-    )
-
-  def start(self) -> Any:
-    if self.state == WorkerState.PENDING:
-      self.initialize()
-    if inspect.iscoroutinefunction(
-        getattr(self.sampler, "start", None)
-    ) or inspect.iscoroutinefunction(
-        getattr(self.sampler, "bind_weight_sync", None)
-    ):
-      try:
-        loop = asyncio.get_running_loop()
-      except RuntimeError:
-        loop = None
-      if loop is not None and loop.is_running():
-        return self._start_async()
-      return asyncio.run(self._start_async())
     return datatypes.Response(
         metadata={
             "worker_id": self.worker_id,

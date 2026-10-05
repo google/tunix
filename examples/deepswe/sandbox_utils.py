@@ -720,7 +720,6 @@ class PrewarmDatasetIterator:
     with self._init_lock:
       if self._initial_primed:
         return
-      self._initial_primed = True
 
       # 1. Fill current_batch queue up to batch_size
       self._fill_batch(self.current_batch, self._current_batch_counts)
@@ -767,6 +766,7 @@ class PrewarmDatasetIterator:
           self._initial_warm_thread.start()
         else:
           self._interact_fleet(wait_images)
+      self._initial_primed = True
 
   @property
   def next_batch(self) -> collections.deque[tuple[Any, dict[str, int], int]]:

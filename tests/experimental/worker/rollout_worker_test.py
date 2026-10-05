@@ -212,6 +212,36 @@ class RolloutWorkerTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_start_async_starts_sampler_and_binds_weight_sync(self):
+    class _AsyncSampler(mocks.MockBaseSamplerImpl):
+
+      def __init__(self):
+        super().__init__(sampler_name="async_sampler")
+        self.started = False
+        self.warmed = False
+
+      async def start(self):
+        self.started = True
+
+      async def bind_weight_sync(self):
+        self.warmed = True
+
+    async_sampler = _AsyncSampler()
+    worker = rollout_worker.RolloutWorker(
+        worker_id="rollout_async",
+        sampler=async_sampler,
+        tokenizer=self.tokenizer,
+        chat_parser=self.chat_parser,
+    )
+
+    async def _run():
+      resp = await worker.start()
+      self.assertEqual(resp.metadata["worker_id"], "rollout_async")
+      self.assertTrue(async_sampler.started)
+      self.assertTrue(async_sampler.warmed)
+
+    asyncio.run(_run())
+
 
 def _worker(config=None):
   return rollout_worker.RolloutWorker(
