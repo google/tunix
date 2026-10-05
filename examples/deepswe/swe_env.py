@@ -16,9 +16,11 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import logging
 import os
+import threading
 import time
 from typing import Any, Optional, cast
 
@@ -44,6 +46,22 @@ _normalize_tasks_for_fleet = sandbox_utils.normalize_tasks_for_fleet
 _get_image_rewrite_fn = openhands_utils.get_image_rewrite_fn
 _MAX_IN_FLIGHT_BATCHES = 2
 _GLOBAL_FLEET = None
+
+_PREWARM_EXECUTOR: concurrent.futures.ThreadPoolExecutor | None = None
+_PREWARM_EXECUTOR_LOCK = threading.Lock()
+
+
+def get_prewarm_executor() -> concurrent.futures.ThreadPoolExecutor:
+  """Returns a process-wide thread pool executor for background sandbox prewarming."""
+  global _PREWARM_EXECUTOR
+  with _PREWARM_EXECUTOR_LOCK:
+    if _PREWARM_EXECUTOR is None:
+      max_workers = int(os.getenv("TUNIX_PREWARM_MAX_WORKERS", "32"))
+      _PREWARM_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+          max_workers=max_workers,
+          thread_name_prefix="sweenv-prewarm",
+      )
+    return _PREWARM_EXECUTOR
 
 
 # pylint: disable=g-import-not-at-top,g-blanket-type-suppression,g-multiple-import
@@ -111,6 +129,7 @@ class SWEEnv(BaseTaskEnv):
       max_steps: int = 1,
       use_agent_sandbox: bool = False,
       fleet: Any | None = None,
+      prewarm: bool = False,
   ):
     """Initialize the SWE environment.
 
@@ -128,6 +147,7 @@ class SWEEnv(BaseTaskEnv):
         use_agent_sandbox: If True, strictly forces SandboxFleet and
           AgentSandboxRuntime.
         fleet: Optional SandboxFleet instance to use.
+        prewarm: Whether to pre-warm the sandbox environment in the background.
     """
     self.entry = _unpack_entry(entry)
     self.step_timeout = step_timeout
@@ -158,6 +178,44 @@ class SWEEnv(BaseTaskEnv):
 
     self.extra_kwargs["group_id"] = group_id
     self.extra_kwargs["pair_index"] = pair_index
+
+    self.prewarm_requested = prewarm or (
+        os.getenv("TUNIX_PREWARM_SANDBOX", "0").lower() in ("1", "true")
+    )
+    self._prewarm_future: concurrent.futures.Future | None = None
+    self._prewarm_lock = threading.Lock()
+
+    if self.prewarm_requested:
+      self.prewarm()
+
+  def prewarm(self) -> None:
+    """Asynchronously pre-warms the sandbox environment and workspace.
+
+    Acquires the sandbox claim from SandboxFleet and runs workspace
+    initialization (e.g. OpenHands setup, test hiding) in a background thread
+    so that when `reset()` is subsequently called, the environment is already
+    bound, warmed, and ready.
+    """
+    if not self.use_agent_sandbox:
+      return
+
+    with self._prewarm_lock:
+      if (
+          self._prewarm_future is not None
+          or self.env is not None
+          or self.workspace is not None
+      ):
+        return
+
+      task_id = str(
+          self.entry.get("instance_id", self.entry.get("docker_image", "default"))
+      )
+      logging.info(
+          "[SWEEnv] Triggering background pre-warming for task %s",
+          task_id,
+      )
+      executor = get_prewarm_executor()
+      self._prewarm_future = executor.submit(self._init_agent_sandbox_env)
 
   def _init_agent_sandbox_env(self) -> None:
     sandbox_utils.patch_r2egym_for_agent_sandbox()
@@ -272,6 +330,32 @@ class SWEEnv(BaseTaskEnv):
       self.env.add_commands(SWEAGENT_COMMAND_FILES)
 
   def _initial_observation(self) -> Any:
+    if self._prewarm_future is not None:
+      task_id = str(
+          self.entry.get("instance_id", self.entry.get("docker_image", "default"))
+      )
+      logging.info(
+          "[SWEEnv] Awaiting background pre-warming for task %s...",
+          task_id,
+      )
+      t0 = time.time()
+      try:
+        self._prewarm_future.result()
+      except Exception as e:
+        logging.error(
+            "[SWEEnv] Background prewarm failed for task %s: %s",
+            task_id,
+            e,
+        )
+        raise
+      finally:
+        self._prewarm_future = None
+      logging.info(
+          "[SWEEnv] Background prewarm ready for task %s (waited %.2fs)",
+          task_id,
+          time.time() - t0,
+      )
+
     if not self.env and not self.workspace:
       if self.use_agent_sandbox:
         self._init_agent_sandbox_env()
@@ -350,6 +434,13 @@ class SWEEnv(BaseTaskEnv):
 
   def close(self) -> None:
     """Close the environment and clean up resources."""
+    if self._prewarm_future is not None:
+      try:
+        self._prewarm_future.result()
+      except Exception as e:
+        logging.warning("[SWEEnv] Error waiting for prewarm during close: %s", e)
+      self._prewarm_future = None
+
     if self.workspace is not None:
       if hasattr(self.workspace, "close"):
         try:

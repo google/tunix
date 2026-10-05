@@ -437,6 +437,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         single_example,
         **{"group_id": group_id, "pair_index": pair_index, **self.env_kwargs},  # pyrefly: ignore[bad-argument-type]
     )
+    if hasattr(env, "prewarm") and callable(env.prewarm):
+      env.prewarm()
 
     return agent, env
 

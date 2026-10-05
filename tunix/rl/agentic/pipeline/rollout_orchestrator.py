@@ -284,6 +284,8 @@ class RolloutOrchestrator:
               agent, env = await anext(pairs_iterator)  # pytype: disable=name-error
             else:
               agent, env = next(pairs_iterator)  # pyrefly: ignore[bad-argument-type]
+            if hasattr(env, "prewarm") and callable(env.prewarm):
+              env.prewarm()
             task = asyncio.create_task(
                 self._runner(
                     agent=agent,

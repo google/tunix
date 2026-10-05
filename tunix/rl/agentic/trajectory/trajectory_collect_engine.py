@@ -699,6 +699,11 @@ class TrajectoryCollectEngine:
       traj = await engine.collect(mode=mode)
       return i, traj
 
+    # Trigger prewarm on all environments ahead of time if supported
+    for _, env in pairs:
+      if hasattr(env, "prewarm") and callable(env.prewarm):
+        env.prewarm()
+
     # Launch all pairs concurrently and yield results as they complete
     tasks = [_run_one(i, agent, env) for i, (agent, env) in enumerate(pairs)]
     for coro in asyncio.as_completed(tasks):
