@@ -59,6 +59,7 @@ class InprocessVllmSamplerAdapterTest(absltest.TestCase):
             config=self.mock_config,
         )
     )
+    self.sampler_adapter.initialize()
 
   def tearDown(self):
     self.patcher.stop()
@@ -66,6 +67,24 @@ class InprocessVllmSamplerAdapterTest(absltest.TestCase):
 
   def test_implements_sampler_protocol(self):
     self.assertIsInstance(self.sampler_adapter, base_sampler_lib.Sampler)
+
+  def test_engine_built_in_initialize_not_constructor(self):
+    self.mock_vllm_lib.VllmSampler.reset_mock()
+    config = mock.MagicMock()
+    config.server_mode = False
+    adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
+        server_id="lazy_slice",
+        tokenizer=self.mock_tokenizer,
+        config=config,
+    )
+    self.assertIsNone(adapter.vllm_sampler)
+    self.mock_vllm_lib.VllmSampler.assert_not_called()
+
+    adapter.initialize()
+    adapter.initialize()
+    self.assertIs(adapter.vllm_sampler, self.mock_vllm_sampler)
+    self.assertTrue(config.server_mode)
+    self.mock_vllm_lib.VllmSampler.assert_called_once()
 
   def test_explicit_weight_sync_mode_overrides_config(self):
     fallback_config = mock.MagicMock()
@@ -203,6 +222,7 @@ class InprocessVllmSamplerAdapterTest(absltest.TestCase):
         config=raiden_config,
         raiden_sync_delegate=mock_delegate,
     )
+    raiden_adapter.initialize()
 
     sync_req = base_sampler_lib.WeightSyncRequest(policy_version=5)
 
@@ -253,6 +273,7 @@ class InprocessVllmSamplerAdapterTest(absltest.TestCase):
         config=raiden_config,
         raiden_sync_delegate=mock_delegate,
     )
+    raiden_adapter.initialize()
 
     self.assertTrue(asyncio.run(raiden_adapter.bind_weight_sync()))
     mock_delegate.bind_weight_sync.assert_not_awaited()
@@ -275,6 +296,7 @@ class InprocessVllmSamplerAdapterTest(absltest.TestCase):
         config=raiden_config,
         raiden_sync_delegate=mock_delegate,
     )
+    raiden_adapter.initialize()
 
     with self.assertRaisesRegex(RuntimeError, "transformer_state"):
       asyncio.run(raiden_adapter.bind_weight_sync())

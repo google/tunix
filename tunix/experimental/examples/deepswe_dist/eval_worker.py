@@ -271,6 +271,9 @@ def create_worker(a):
       weight_sync_mode="none",
       max_concurrency=a.max_concurrent,
   )
+  # The adapter builds its vLLM engine lazily, and the in-memory checkpoint
+  # conversion below writes into the engine's weights, so build it now.
+  sampler.initialize()
   if convert_in_memory:
     maxtext_utils.load_and_convert_scanned_checkpoint(
         path=path,
