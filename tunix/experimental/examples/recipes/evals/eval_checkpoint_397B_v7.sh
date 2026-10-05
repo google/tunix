@@ -16,16 +16,16 @@
 set -e
 
 # ==============================================================================
-# Single-checkpoint MLPerf DeepSWE evaluation on 512 TPU v7x chips (397B)
+# Single-checkpoint MLPerf DeepSWE evaluation on TPU v7x (397B)
 # ==============================================================================
 # Usage:
 #   ./eval_checkpoint_397B_v7.sh gs://path_to_checkpoint [--dry-run] [--require-target]
 #   ./eval_checkpoint_397B_v7.sh stop_eval
 #
 # Behavior:
-# - Scales Qwen3.5-397B-A17B rollout evaluation to 512 TPU v7x chips by default
-#   (32 replicas x 16 chips tpu7x:2x2x4, BATCH_SIZE=128, MAX_CONCURRENCY=512,
-#   MAX_WARMPOOL_REPLICAS=32).
+# - Evaluates Qwen3.5-397B-A17B on 256 TPU v7x chips by default
+#   (16 replicas x 16 chips tpu7x:2x2x4, BATCH_SIZE=64, MAX_CONCURRENCY=256,
+#   MAX_WARMPOOL_REPLICAS=4, HEAD_NODEPOOL=sandbox-np so 0 cpu-np nodes are used).
 # - Auto-detects cluster/pod (us-east1 -> pod2, us-central1 -> pod1).
 # - Auto-discovers <run>/mllog/eval_checkpoints.jsonl when present so
 #   eval_start, eval_accuracy, eval_stop, and run_stop are appended to the
@@ -135,14 +135,15 @@ if [[ "${POD:-pod2}" == "pod2" || "${POD:-}" == "2" || "${POD:-}" == "elm" || "$
 fi
 
 # ==============================================================================
-# 512 TPU v7x Chip Defaults (32 replicas x 16 chips tpu7x:2x2x4 = 512 chips)
+# 256 TPU v7x Chip Defaults (16 replicas x 16 chips tpu7x:2x2x4 = 256 chips)
 # ==============================================================================
 export ROLLOUT_TPU_SLICE="${ROLLOUT_TPU_SLICE:-tpu7x:2x2x4}"
-export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-32}"
+export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-16}"
 export NUM_GENERATIONS="${NUM_GENERATIONS:-4}"
-export BATCH_SIZE="${BATCH_SIZE:-128}"
-export MAX_CONCURRENCY="${MAX_CONCURRENCY:-512}"
-export MAX_WARMPOOL_REPLICAS="${MAX_WARMPOOL_REPLICAS:-32}"
+export BATCH_SIZE="${BATCH_SIZE:-64}"
+export MAX_CONCURRENCY="${MAX_CONCURRENCY:-$(( ROLLOUT_REPLICAS * 16 ))}"
+export MAX_WARMPOOL_REPLICAS="${MAX_WARMPOOL_REPLICAS:-${NUM_GENERATIONS}}"
+export HEAD_NODEPOOL="${HEAD_NODEPOOL:-sandbox-np}"
 
 # ==============================================================================
 # Auto-discover Manifest Metadata (<run>/mllog/eval_checkpoints.jsonl)
@@ -288,9 +289,13 @@ if [[ -z "${USER_EVAL_OUTPUT_DIR}" ]]; then
   export EVAL_OUTPUT_DIR="${BUCKET}/eval_results/${JOB_PREFIX}/${CKPT_RUN_TAG}/step_${CHECKPOINT_STEP:-0}"
 fi
 
+_slice_dims="${ROLLOUT_TPU_SLICE#*:}"
+_chips_per_replica=$(( ${_slice_dims//x/*} ))
+_total_chips=$(( ROLLOUT_REPLICAS * _chips_per_replica ))
+
 echo "[eval_checkpoint_397B_v7] Checkpoint:      ${MAXTEXT_CKPT}" >&2
 echo "[eval_checkpoint_397B_v7] Cluster / Pod:   ${CLUSTER} (${REGION}, ${POD})" >&2
-echo "[eval_checkpoint_397B_v7] Topology:        ${ROLLOUT_REPLICAS}x ${ROLLOUT_TPU_SLICE} (512 v7x chips), batch_size=${BATCH_SIZE}, max_concurrency=${MAX_CONCURRENCY}" >&2
+echo "[eval_checkpoint_397B_v7] Topology:        ${ROLLOUT_REPLICAS}x ${ROLLOUT_TPU_SLICE} (${_total_chips} v7x chips, head_nodepool=${HEAD_NODEPOOL}), batch_size=${BATCH_SIZE}, max_concurrency=${MAX_CONCURRENCY}, max_warmpool_replicas=${MAX_WARMPOOL_REPLICAS}" >&2
 echo "[eval_checkpoint_397B_v7] Output Dir:      ${EVAL_OUTPUT_DIR}" >&2
 
 if [[ "${DRY_RUN_MODE}" == "true" || "${DRY_RUN:-false}" == "true" ]]; then
