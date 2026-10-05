@@ -407,9 +407,6 @@ except ImportError:
   from examples.deepswe import swe_env  # pytype: disable=import-error
   from examples.deepswe import template  # pytype: disable=import-error
 
-if args.rcp_logging:
-  mllog_utils.init_start(args)
-
 # %%
 # ==========================================
 # 3. Environment Configuration
@@ -1061,13 +1058,6 @@ if RCP_LOGGING:
   rl_engine.with_external_metrics_logger(
       mllog_utils.create_rcp_metrics_logger(args, rl_engine=rl_engine)
   )
-  mllog_utils.init_print(
-      args,
-      train_dataset=dataset,
-      rollout_mesh=rollout_mesh,
-      train_mesh=train_mesh,
-      total_devices=total_devices,
-  )
 
 # %%
 # ==========================================
@@ -1154,6 +1144,14 @@ except Exception as e:
 
 
 if RCP_LOGGING:
+  mllog_utils.init_start(args)
+  mllog_utils.init_print(
+      args,
+      train_dataset=dataset,
+      rollout_mesh=rollout_mesh,
+      train_mesh=train_mesh,
+      total_devices=total_devices,
+  )
   mllog_utils.train_start(args)
 
 print("Starting training...", flush=True)

@@ -103,7 +103,7 @@ RUN if [ "$INSTALL_RAIDEN" = "true" ]; then \
 
 # Force install numpy, jax, and flax versions to avoid version conflicts and API breakage.
 RUN uv pip install numpy==2.3.5 'jax==0.11.0' 'flax==0.12.7'
-RUN uv pip install "git+https://github.com/mlcommons/logging.git@6.1.0-rc1"
+RUN uv pip install "git+https://github.com/mlcommons/logging.git@6.1.0-rc2"
 
 # Pre-cache HuggingFace tokenizers and model configs (excluding weight shards)
 # so distributed workers and Ray pods never hit HuggingFace rate limits.

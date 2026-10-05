@@ -1178,5 +1178,60 @@ class MllogUtilsTest(absltest.TestCase):
       self.assertLen(items_stale_1, 12)
 
 
+class DeepSWERcpWiringTest(absltest.TestCase):
+
+  def test_run_deepswe_dist_defers_init_start_until_on_train_start(self):
+    repo_root = os.path.abspath(
+        os.path.join(
+            os.path.dirname(os.path.abspath(mllog_utils.__file__)), "..", ".."
+        )
+    )
+    run_deepswe_dist_path = os.path.join(
+        repo_root,
+        "tunix",
+        "experimental",
+        "examples",
+        "deepswe_dist",
+        "run_deepswe_dist.py",
+    )
+    with open(run_deepswe_dist_path, "r", encoding="utf-8") as f:
+      source = f.read()
+
+    on_train_start_idx = source.index("def _on_train_start(step: int) -> None:")
+    program_idx = source.index(
+        "program = rl_program.StandardRLProgram(", on_train_start_idx
+    )
+    before_on_train_start = source[:on_train_start_idx]
+    on_train_start_block = source[on_train_start_idx:program_idx]
+
+    # No init_start, init_print, or dataset load before _on_train_start.
+    self.assertNotIn("mllog_utils.init_start(", before_on_train_start)
+    self.assertNotIn("mllog_utils.init_print(", before_on_train_start)
+    self.assertNotIn("deepswe.load_deepswe_dataset(", before_on_train_start)
+    self.assertIn("tasks=None,", before_on_train_start)
+    self.assertIn("lazy_initial=True,", before_on_train_start)
+
+    # Inside _on_train_start: init_start -> init_print -> train_start ->
+    # load_deepswe_dataset -> ensure_tasks_in_fleet_plan -> prime_initial ->
+    # wait_for_initial.
+    init_start_idx = on_train_start_block.index("mllog_utils.init_start(args)")
+    init_print_idx = on_train_start_block.index("mllog_utils.init_print(")
+    train_start_idx = on_train_start_block.index(
+        "mllog_utils.train_start(args, step=step)"
+    )
+    load_ds_idx = on_train_start_block.index("deepswe.load_deepswe_dataset(")
+    ensure_tasks_idx = on_train_start_block.index(
+        "sandbox_utils.ensure_tasks_in_fleet_plan("
+    )
+    prime_idx = on_train_start_block.index("prompt_stream.prime_initial()")
+    wait_idx = on_train_start_block.index("prompt_stream.wait_for_initial()")
+    self.assertLess(init_start_idx, init_print_idx)
+    self.assertLess(init_print_idx, train_start_idx)
+    self.assertLess(train_start_idx, load_ds_idx)
+    self.assertLess(load_ds_idx, ensure_tasks_idx)
+    self.assertLess(ensure_tasks_idx, prime_idx)
+    self.assertLess(prime_idx, wait_idx)
+
+
 if __name__ == "__main__":
   absltest.main()

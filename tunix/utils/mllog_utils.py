@@ -1254,7 +1254,8 @@ def init_print(
   train_samples = None
   if train_dataset is not None:
     try:
-      train_samples = len(train_dataset) * num_generations
+      if len(train_dataset) > 0:
+        train_samples = len(train_dataset) * num_generations
     except (TypeError, AttributeError):
       pass
   if train_samples is None:
