@@ -64,8 +64,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # mlperf_397b_v7x_eval.sh hardcodes K8S_NAMESPACE=priority-dev. Remember a
 # caller-provided namespace (e.g. a calendar reservation namespace such as
-# res-trellis-1k-1005-pm-elm, whose multislice-queue maps to the reserved
+# res-trellis-partial, whose multislice-queue maps to the reserved
 # ClusterQueue) so it can be re-applied after the recipe is sourced.
+#
+# The kubeconfig context namespace is deliberately left alone: the generated
+# JobSet manifests carry metadata.namespace and every kubectl call on the eval
+# path (launcher stop_eval, the polling loop below) passes -n explicitly.
 USER_K8S_NAMESPACE="${K8S_NAMESPACE:-}"
 USER_SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-}"
 
@@ -73,7 +77,6 @@ apply_namespace_override() {
   if [[ -n "${USER_K8S_NAMESPACE}" ]]; then
     export K8S_NAMESPACE="${USER_K8S_NAMESPACE}"
     export SANDBOX_NAMESPACE="${USER_SANDBOX_NAMESPACE:-${USER_K8S_NAMESPACE}}"
-    kubectl config set-context --current --namespace="${K8S_NAMESPACE}" >&2 || true
   fi
 }
 
@@ -171,6 +174,15 @@ fi
 # ==============================================================================
 export ROLLOUT_TPU_SLICE="${ROLLOUT_TPU_SLICE:-tpu7x:2x2x4}"
 export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-16}"
+
+# yaml_generator.py splits the slice on ':' into <type>:<topology>; validate
+# here so a malformed override fails with a clear message instead of a bash
+# arithmetic error below.
+if [[ ! "${ROLLOUT_TPU_SLICE}" =~ ^[A-Za-z0-9._-]+:[0-9]+(x[0-9]+)*$ ]]; then
+  echo "[eval_checkpoint_397B_v7] ERROR: ROLLOUT_TPU_SLICE='${ROLLOUT_TPU_SLICE}' must be" \
+    "<type>:<topology> (e.g. tpu7x:2x2x4)." >&2
+  exit 1
+fi
 
 _slice_dims="${ROLLOUT_TPU_SLICE#*:}"
 _chips_per_replica=$(( ${_slice_dims//x/*} ))
