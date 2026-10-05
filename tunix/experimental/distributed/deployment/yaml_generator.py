@@ -519,7 +519,7 @@ def main() -> None:
         + (f"              value: \"{head_nodepool}\"\n" if head_nodepool else "")
         + "              effect: \"NoSchedule\""
     )
-    if head_nodepool and "sandbox" in head_nodepool:
+    if head_nodepool and "sandbox" in head_nodepool.lower():
       head_tolerations += (
           "\n            - key: \"workload\"\n"
           "              operator: \"Equal\"\n"

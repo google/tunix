@@ -139,9 +139,14 @@ fi
 # ==============================================================================
 export ROLLOUT_TPU_SLICE="${ROLLOUT_TPU_SLICE:-tpu7x:2x2x4}"
 export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-16}"
+
+_slice_dims="${ROLLOUT_TPU_SLICE#*:}"
+_chips_per_replica=$(( ${_slice_dims//x/*} ))
+_total_chips=$(( ROLLOUT_REPLICAS * _chips_per_replica ))
+
 export NUM_GENERATIONS="${NUM_GENERATIONS:-4}"
 export BATCH_SIZE="${BATCH_SIZE:-64}"
-export MAX_CONCURRENCY="${MAX_CONCURRENCY:-$(( ROLLOUT_REPLICAS * 16 ))}"
+export MAX_CONCURRENCY="${MAX_CONCURRENCY:-$(( ROLLOUT_REPLICAS * _chips_per_replica ))}"
 export MAX_WARMPOOL_REPLICAS="${MAX_WARMPOOL_REPLICAS:-${NUM_GENERATIONS}}"
 export HEAD_NODEPOOL="${HEAD_NODEPOOL:-sandbox-np}"
 
@@ -288,10 +293,6 @@ export ROLLOUT_JOBSET_YAML="${USER_ROLLOUT_JOBSET_YAML:-jobset.pathways.yaml}"
 if [[ -z "${USER_EVAL_OUTPUT_DIR}" ]]; then
   export EVAL_OUTPUT_DIR="${BUCKET}/eval_results/${JOB_PREFIX}/${CKPT_RUN_TAG}/step_${CHECKPOINT_STEP:-0}"
 fi
-
-_slice_dims="${ROLLOUT_TPU_SLICE#*:}"
-_chips_per_replica=$(( ${_slice_dims//x/*} ))
-_total_chips=$(( ROLLOUT_REPLICAS * _chips_per_replica ))
 
 echo "[eval_checkpoint_397B_v7] Checkpoint:      ${MAXTEXT_CKPT}" >&2
 echo "[eval_checkpoint_397B_v7] Cluster / Pod:   ${CLUSTER} (${REGION}, ${POD})" >&2
