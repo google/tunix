@@ -409,12 +409,13 @@ class TrainerWorkerExecutionContextTest(absltest.TestCase):
     )
 
   def test_trainer_factory_runs_within_execution_context(self):
+    self.assertEqual(self.events, [])
+    self.worker.initialize()
     self.assertEqual(self.events, ["enter_ctx", "create_trainer", "exit_ctx"])
 
   def test_all_worker_operations_run_within_execution_context(self):
-    self.events.clear()
     self.worker.initialize()
-    self.assertEqual(self.events, ["enter_ctx", "exit_ctx"])
+    self.events.clear()
 
     # Verify per_token_logps runs inside execution_context.
     self.events.clear()
