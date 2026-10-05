@@ -1026,6 +1026,74 @@ class MaxTextUtilsTest(absltest.TestCase):
         converted_inner
     )
 
+  def test_load_and_convert_scanned_checkpoint_with_deferred_sampler(self):
+    scanned_cfg = mock.sentinel.scanned_cfg
+    scanned_model = mock.sentinel.scanned_model
+    scanned_state = mock.sentinel.scanned_state
+    target_state = mock.sentinel.target_state
+    converted_inner = {"decoder": {"layers_0": "weights"}}
+
+    pyconfig_mod = mock.MagicMock(initialize=mock.Mock(return_value=scanned_cfg))
+    model_creation_mod = mock.MagicMock(
+        from_pretrained=mock.Mock(
+            return_value=(scanned_model, mock.sentinel.mesh)
+        )
+    )
+    converter_inst = mock.MagicMock(
+        convert=mock.Mock(return_value={"model": converted_inner})
+    )
+    converter_cls = mock.Mock(return_value=converter_inst)
+    nnx_mod = mock.MagicMock(
+        Param=mock.sentinel.Param,
+        state=mock.Mock(return_value=scanned_state),
+    )
+    jax_mod = mock.MagicMock(
+        devices=mock.Mock(return_value=["d0", "d1"]),
+        clear_caches=mock.Mock(),
+    )
+    inner_vllm = mock.MagicMock()
+    inner_vllm.transformer_state = target_state
+
+    # Sampler adapter where vllm_sampler is initially None and initialized via initialize()
+    mock_sampler = mock.MagicMock()
+    mock_sampler.vllm_sampler = None
+    del mock_sampler._get_underlying_sampler
+    def _init():
+      mock_sampler.vllm_sampler = inner_vllm
+    mock_sampler.initialize.side_effect = _init
+
+    with mock.patch.dict(
+        "sys.modules",
+        {
+            "flax": mock.MagicMock(nnx=nnx_mod),
+            "flax.nnx": nnx_mod,
+            "jax": jax_mod,
+            "maxtext.common.common_types": mock.MagicMock(
+                MODEL_MODE_AUTOREGRESSIVE="autoregressive"
+            ),
+            "maxtext.configs": mock.MagicMock(pyconfig=pyconfig_mod),
+            "maxtext.integration.vllm.weight_converter": mock.MagicMock(
+                MaxTextToMaxTextConverter=converter_cls
+            ),
+            "maxtext.utils": mock.MagicMock(
+                model_creation_utils=model_creation_mod
+            ),
+            "maxtext.utils.globals": mock.MagicMock(
+                MAXTEXT_CONFIGS_DIR="/maxtext/configs"
+            ),
+        },
+    ):
+      maxtext_utils.load_and_convert_scanned_checkpoint(
+          path="/ckpt/0/items",
+          sampler=mock_sampler,
+          mesh_tp=2,
+          ckpt_prefuse_moe=False,
+          maxtext_config_overrides={"model_name": "qwen3.5-35b-a3b"},
+      )
+
+    mock_sampler.initialize.assert_called_once()
+    inner_vllm.update_params.assert_called_once_with(converted_inner)
+
   def test_load_and_convert_scanned_checkpoint_exec_moe_keeps_prefused_wi_alive(
       self,
   ):

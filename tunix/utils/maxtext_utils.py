@@ -921,6 +921,14 @@ def load_and_convert_scanned_checkpoint(
       path,
   )
   vllm_sampler = getattr(sampler, "vllm_sampler", sampler)
+  if vllm_sampler is None:
+    if hasattr(sampler, "_get_underlying_sampler"):
+      vllm_sampler = sampler._get_underlying_sampler()
+    elif hasattr(sampler, "initialize"):
+      sampler.initialize()
+      vllm_sampler = getattr(sampler, "vllm_sampler", sampler)
+  if vllm_sampler is None:
+    vllm_sampler = sampler
   reinit_needed = False
   if hasattr(vllm_sampler, "delete_cache"):
     vllm_sampler.delete_cache()

@@ -272,6 +272,7 @@ def create_worker(a):
       max_concurrency=a.max_concurrent,
   )
   if convert_in_memory:
+    sampler.initialize()
     maxtext_utils.load_and_convert_scanned_checkpoint(
         path=path,
         sampler=sampler,
