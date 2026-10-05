@@ -1275,10 +1275,17 @@ def init_print(
   train_sp = 1
   if train_mesh is not None and hasattr(train_mesh, "shape"):
     train_tp = train_mesh.shape.get("tp", train_mesh.shape.get("tensor", 1))
-    train_sp = train_mesh.shape.get("sp", 1)
-  elif getattr(args, "train_mesh_tp", None) is not None:
-    train_tp = args.train_mesh_tp
-    train_sp = getattr(args, "train_mesh_sp", 1) or 1
+    train_sp = train_mesh.shape.get(
+        "sp", train_mesh.shape.get("context", 1)
+    )
+  else:
+    if getattr(args, "train_mesh_tp", None) is not None:
+      train_tp = args.train_mesh_tp
+    train_sp = (
+        getattr(args, "train_mesh_context", None)
+        or getattr(args, "train_mesh_sp", None)
+        or 1
+    )
 
   rollout_tp = 1
   if rollout_mesh is not None and hasattr(rollout_mesh, "shape"):

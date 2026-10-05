@@ -500,6 +500,13 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       default=int(os.getenv("TRAINER_MESH_TP", "1")),
   )
   parser.add_argument(
+      "--train_mesh_context",
+      "--train_mesh_sp",
+      dest="train_mesh_context",
+      type=int,
+      default=int(os.getenv("TRAINER_MESH_CONTEXT", "1")),
+  )
+  parser.add_argument(
       "--train_mesh_expert",
       type=int,
       default=int(os.getenv("TRAINER_MESH_EXPERT", "1")),
