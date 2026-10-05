@@ -55,7 +55,7 @@ def patch_r2egym_for_agent_sandbox() -> None:
           def get_token():
             return None
 
-        huggingface_hub.HfFolder = DummyHfFolder  # pyrefly: ignore[bad-assignment]
+        huggingface_hub.HfFolder = DummyHfFolder
   except Exception as e:  # pylint: disable=broad-exception-caught
     logging.debug("[SandboxFleet] HfFolder patch note: %s", e)
 
@@ -263,7 +263,7 @@ def init_global_fleet(
     }
 
     try:
-      from examples.deepswe import template as template_mod  # pyrefly: ignore[missing-import]
+      from examples.deepswe import template as template_mod
 
       template = template_mod.get_template(scaffold, node_sel)
       if template is not None:

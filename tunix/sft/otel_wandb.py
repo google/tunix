@@ -121,7 +121,7 @@ class WandbMetricsExporter(otel_export.MetricExporter):
   def _resolve_run(self) -> Any:
     if self._run is not None:
       return self._run
-    import wandb  # pytype: disable=import-error # pylint: disable=g-import-not-at-top
+    import wandb  # pylint: disable=g-import-not-at-top  # pyrefly: ignore[missing-import]
 
     if wandb.run is None:
       raise RuntimeError(

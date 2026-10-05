@@ -117,7 +117,7 @@ class Profiler:
   ) -> None:
     """Starts JAX trace, conditionally passing max_num_hosts if supported."""
     if self._check_if_max_num_hosts_supported():
-      jax.profiler.start_trace(  # pytype: disable=wrong-keyword-args
+      jax.profiler.start_trace(
           log_dir=log_dir,
           profiler_options=profiler_options,
           max_num_hosts=self._profiler_options.max_num_hosts,  # pyrefly: ignore[unexpected-keyword]
