@@ -32,7 +32,7 @@ class _MegabloxCalled(Exception):
 
 class MoEDispatchTest(parameterized.TestCase):
 
-  def _layer(self):
+  def _layer(self) -> qwen3_model.MoELayer:
     config = qwen3_model.ModelConfig(
         num_layers=1,
         vocab_size=32,
@@ -48,7 +48,7 @@ class MoEDispatchTest(parameterized.TestCase):
     )
     return qwen3_model.MoELayer(config, rngs=nnx.Rngs(0))
 
-  def _run(self, platform):
+  def _run(self, platform: str) -> jax.Array:
     layer = self._layer()
     x = jnp.ones((1, 4, 16), dtype=jnp.float32)
     mesh = jax.sharding.Mesh(
@@ -63,11 +63,11 @@ class MoEDispatchTest(parameterized.TestCase):
       return layer(x)
 
   @parameterized.parameters('gpu', 'cpu')
-  def test_non_tpu_uses_dense_fallback(self, platform):
+  def test_non_tpu_uses_dense_fallback(self, platform: str) -> None:
     out = self._run(platform)
     self.assertEqual(out.shape, (1, 4, 16))
 
-  def test_tpu_uses_megablox(self):
+  def test_tpu_uses_megablox(self) -> None:
     with self.assertRaises(_MegabloxCalled):
       self._run('tpu')
 
