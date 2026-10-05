@@ -637,8 +637,6 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   ), "Require discovery API, but process context doesn't support."
 
   args = _parse_args(argv)
-  if args.rcp_logging:
-    mllog_utils.init_start(args)
   logging.basicConfig(
       level=logging.DEBUG if args.debug else logging.INFO,
       format="%(asctime)s - [DeepSWEOrchestrator] %(message)s",
@@ -721,23 +719,11 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       eos_id,
   )
 
+  from examples.deepswe import sandbox_utils  # pylint: disable=g-import-not-at-top
   from examples.deepswe import swe_env  # pylint: disable=g-import-not-at-top
   from tunix.experimental.examples.deepswe_dist import deepswe  # pylint: disable=g-import-not-at-top
 
-  dataset = deepswe.load_deepswe_dataset(
-      dataset_name=args.dataset_name,
-      dataset_split=args.dataset_split,
-      dataset_path=args.dataset_path,
-      cache_dir=args.dataset_cache_dir or None,
-      shuffle=args.shuffle,
-      seed=args.seed,
-  )
-  logging.info(
-      "Loaded DeepSWE dataset: source=%s split=%s size=%d.",
-      args.dataset_path or args.dataset_name,
-      args.dataset_split,
-      len(dataset),
-  )
+  dataset: list[dict[str, Any]] = []
 
   cluster = orchestrator.ClusterOrchestrator(
       weight_sync_mode=args.weight_sync_mode,
@@ -790,11 +776,11 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   prompt_stream = None
   try:
     if args.use_agent_sandbox:
-      # Initialize fleet plan from dataset. Eager warmpools are skipped;
-      # dynamic sliding-window prewarming with initial barrier is handled by
-      # PrewarmDatasetIterator below.
+      # Initialize fleet without tasks upfront; dataset loading, task planning,
+      # and dynamic sliding-window prewarming with initial barrier are deferred
+      # until _on_train_start (after MLPerf init_stop / run_start).
       fleet = swe_env._init_global_fleet(  # pylint: disable=protected-access
-          tasks=dataset,
+          tasks=None,
           max_concurrency=args.max_concurrency,
           num_generations=args.num_generations,
           batch_size=args.batch_size,
@@ -833,6 +819,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           scaffold=args.scaffold,
           wait_initial=True,
           async_initial=True,
+          lazy_initial=True,
           max_staleness=args.max_staleness,
       )
 
@@ -889,10 +876,37 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       )
 
     def _on_train_start(step: int) -> None:
-      if isinstance(prompt_stream, swe_env.PrewarmDatasetIterator):
-        prompt_stream.wait_for_initial()
       if args.rcp_logging:
+        mllog_utils.init_start(args)
+        mllog_utils.init_print(
+            args,
+            train_dataset=dataset or None,
+        )
         mllog_utils.train_start(args, step=step)
+      if not dataset:
+        dataset.extend(
+            deepswe.load_deepswe_dataset(
+                dataset_name=args.dataset_name,
+                dataset_split=args.dataset_split,
+                dataset_path=args.dataset_path,
+                cache_dir=args.dataset_cache_dir or None,
+                shuffle=args.shuffle,
+                seed=args.seed,
+            )
+        )
+        logging.info(
+            "Loaded DeepSWE dataset: source=%s split=%s size=%d.",
+            args.dataset_path or args.dataset_name,
+            args.dataset_split,
+            len(dataset),
+        )
+      if args.use_agent_sandbox and fleet is not None:
+        sandbox_utils.ensure_tasks_in_fleet_plan(
+            fleet, list(dataset), scaffold=args.scaffold
+        )
+      if isinstance(prompt_stream, swe_env.PrewarmDatasetIterator):
+        prompt_stream.prime_initial()
+        prompt_stream.wait_for_initial()
 
     program = rl_program.StandardRLProgram(
         algo=algo,
@@ -953,12 +967,6 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         val_start_step=val_start_step,
         on_checkpoint_saved=_on_checkpoint_saved if manifest_file else None,
     )
-
-    if args.rcp_logging:
-      mllog_utils.init_print(
-          args,
-          train_dataset=dataset,
-      )
 
     logging.info("Bringing up remote workers through ClusterOrchestrator...")
     cluster.bring_up_workers(dummy_data=None)
