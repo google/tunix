@@ -151,13 +151,6 @@ export MAX_WARMPOOL_REPLICAS="${MAX_WARMPOOL_REPLICAS:-32}"
 # (.../checkpoints/<step>/model_params) use scanned layers (SCAN_LAYERS=true).
 export SCAN_LAYERS="${SCAN_LAYERS:-true}"
 
-# Normalize trailing slash and optional missing /model_params suffix
-# (e.g. gs://.../checkpoints/10/ -> gs://.../checkpoints/10/model_params).
-export MAXTEXT_CKPT="${MAXTEXT_CKPT%/}"
-if [[ "${MAXTEXT_CKPT}" =~ ^(.*)/([0-9]+)$ ]]; then
-  export MAXTEXT_CKPT="${MAXTEXT_CKPT}/model_params"
-fi
-
 CKPT_RUN_TAG="single_ckpt"
 if [[ "${MAXTEXT_CKPT}" =~ ^(.*)/([0-9]+)/model_params$ ]]; then
   CKPT_ROOT="${BASH_REMATCH[1]}"
@@ -168,7 +161,7 @@ if [[ "${MAXTEXT_CKPT}" =~ ^(.*)/([0-9]+)/model_params$ ]]; then
   CKPT_RUN_TAG="${CKPT_RUN_TAG%-train}"
   export CHECKPOINT_STEP="${CHECKPOINT_STEP:-${DETECTED_STEP}}"
 
-  if MANIFEST_META="$(python3 - "${CHECKPOINT_MANIFEST_FILE:-}" "${CKPT_ROOT}" "${CHECKPOINT_STEP}" "${MAXTEXT_CKPT}" <<'PY' 2>/dev/null
+  if MANIFEST_META="$(python3 - "${CHECKPOINT_MANIFEST_FILE:-}" "${CKPT_ROOT}" "${CHECKPOINT_STEP}" "${MAXTEXT_CKPT}" <<'PY'
 import json
 import os
 import subprocess
@@ -227,15 +220,15 @@ if not records:
 max_step = max(int(r["step"]) for r in records)
 matched = None
 for r in records:
-  if int(r["step"]) == target_step or str(r.get("checkpoint_path") or "").rstrip("/") == ckpt_path.rstrip("/"):
+  if int(r["step"]) == target_step or str(r["checkpoint_path"]).rstrip("/") == ckpt_path.rstrip("/"):
     matched = r
     break
 
 if matched is None:
   sys.exit(1)
 
-mllog_file = str(matched.get("mllog_file") or "")
-canonical_ckpt = str(matched.get("checkpoint_path") or "")
+mllog_file = str(matched["mllog_file"]) if "mllog_file" in matched else ""
+canonical_ckpt = str(matched["checkpoint_path"])
 is_last = "true" if int(matched["step"]) == max_step else "false"
 print("|".join([
     used_manifest,
@@ -272,6 +265,7 @@ if [[ "${RCP_LOGGING:-auto}" == "auto" ]]; then
 fi
 
 USER_EVAL_OUTPUT_DIR="${EVAL_OUTPUT_DIR:-}"
+USER_ROLLOUT_JOBSET_YAML="${ROLLOUT_JOBSET_YAML:-}"
 
 # Unset CHECKPOINT_MANIFEST_FILE before sourcing mlperf_397b_v7x_eval.sh so
 # mlperf_base.sh does not enter the multi-checkpoint manifest loop.
@@ -281,6 +275,12 @@ unset CHECKPOINT_MANIFEST_FILE
 # Redirect stdout to stderr so `kubectl config use-context` messages do not
 # pollute stdout metrics/YAML output.
 MLPERF_NO_LAUNCH=1 source "${SCRIPT_DIR}/mlperf_397b_v7x_eval.sh" >&2
+
+# eval_worker.py uses Pathways (JAX_PLATFORMS=proxy, VLLM_TPU_USING_PATHWAYS=1)
+# to expose all 32 devices across the 4-host tpu7x:2x2x4 slice; override
+# mlperf_397b_v7x_eval.sh's unconditional jobset.mcjax.ray.yaml unless the caller
+# explicitly set ROLLOUT_JOBSET_YAML.
+export ROLLOUT_JOBSET_YAML="${USER_ROLLOUT_JOBSET_YAML:-jobset.pathways.yaml}"
 
 # Default EVAL_OUTPUT_DIR to a checkpoint-specific subpath so summary.json files
 # from different runs/steps are cleanly isolated.
@@ -355,8 +355,7 @@ while true; do
   sleep 10
 done
 
-cleanup_eval
-trap - EXIT
+# Let the EXIT trap handle cleanup on exit.
 
 AFTER_SUMMARIES="$(list_summaries)"
 
