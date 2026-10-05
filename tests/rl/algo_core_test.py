@@ -697,8 +697,10 @@ class GrpoLossSequenceLevelControlsTest(absltest.TestCase):
     defaults = dict(
         beta=0.0,
         epsilon=0.2,
+        epsilon_low=0.2,
         epsilon_high=0.2,
         epsilon_c=None,
+        entropy_coef=0.0,
         loss_algo='grpo',
         loss_agg_mode='sequence-mean-token-mean',
         temperature=1.0,
@@ -969,6 +971,225 @@ class GrpoLossSequenceLevelControlsTest(absltest.TestCase):
             )
         )
     )
+
+  def test_sampler_agreement_handles_non_finite_logps_on_masked_tokens(self):
+    from tunix.rl import common  # pylint: disable=g-import-not-at-top
+
+    mask = jnp.array([[1.0, 1.0, 0.0, 0.0]], dtype=jnp.float32)
+    per_token_logps = jnp.array(
+        [[-1.0, -1.0, -jnp.inf, jnp.nan]], dtype=jnp.float32
+    )
+    rollout_logps = jnp.array(
+        [[-1.0, -21.0, -jnp.inf, jnp.nan]], dtype=jnp.float32
+    )
+    metrics, weights, _ = common.compute_sampler_trainer_agreement_jax(
+        rollout_logps,
+        per_token_logps,
+        mask,
+        sampler_is='token',
+        sampler_is_threshold=None,
+        sampler_rs='geometric',
+        sampler_rs_min=0.0,
+        sampler_rs_max=1e12,
+        segment_ids=None,
+        num_segments=None,
+    )
+    self.assertTrue(bool(jnp.all(jnp.isfinite(weights))))
+    self.assertTrue(bool(jnp.all(jnp.isfinite(jnp.square(weights)))))
+    self.assertAlmostEqual(float(weights[0, 0]), 1.0, places=5)
+    self.assertAlmostEqual(float(weights[0, 1]), float(jnp.exp(20.0)), places=1)
+    self.assertEqual(float(weights[0, 2]), 0.0)
+    self.assertEqual(float(weights[0, 3]), 0.0)
+    self.assertEqual(
+        float(metrics['sampler_rs/rejected_fraction'][0].compute()), 0.0
+    )
+
+    # Fused agreement / IS / RS path in grpo_loss_fn with non-finite logps on
+    # masked padding positions must also stay finite.
+    lp = self.trainer_logp
+    ex_masked_nan = self._example(
+        old_per_token_logps=jnp.array(
+            [[lp, lp, lp], [lp, lp, -jnp.inf]], dtype=jnp.float32
+        ),
+    )
+    cfg_fused = self._config(
+        sampler_is='token',
+        sampler_is_threshold=None,
+        sampler_rs='geometric',
+        sampler_rs_min=0.5,
+        sampler_rs_max=2.0,
+        seq_logprob_error_threshold=2.0,
+    )
+    out_fused = algo_core.grpo_loss_fn(
+        self.model, ex_masked_nan, cfg_fused, pad_id=0, eos_id=-1
+    )
+    self.assertTrue(bool(jnp.isfinite(out_fused.primary_loss.compute())))
+    for k, v in out_fused.aux_metrics.items():
+      self.assertTrue(
+          bool(jnp.all(jnp.isfinite(common._metric_scalar(v)))),
+          msg=f'Metric {k} is non-finite',
+      )
+
+  def test_dropped_sequence_severs_backward_gradient_under_extreme_drift(self):
+    from flax import nnx  # pylint: disable=g-import-not-at-top
+
+    example = self._example(
+        old_per_token_logps=jnp.array(
+            [[-1.0, -1.0, -1.0], [-1e9, -1e9, -1e9]], jnp.float32
+        ),
+        ref_per_token_logps=jnp.array(
+            [[-1.0, -1.0, -1.0], [1e9, 1e9, 1e9]], jnp.float32
+        ),
+    )
+    for loss_algo in ('grpo', 'gspo-token'):
+      with self.subTest(loss_algo=loss_algo):
+        config = self._config(
+            loss_algo=loss_algo,
+            beta=0.01,
+            seq_logprob_error_threshold=2.0,
+        )
+        loss_scalar_fn = lambda model, cfg=config: algo_core.grpo_loss_fn(
+            model, example, cfg, pad_id=0, eos_id=-1
+        ).primary_loss.compute()
+        loss_val, grads = nnx.value_and_grad(loss_scalar_fn)(self.model)
+        self.assertTrue(bool(jnp.isfinite(loss_val)))
+        grad_leaves = jax.tree_util.tree_leaves(grads)
+        for g in grad_leaves:
+          self.assertTrue(bool(jnp.all(jnp.isfinite(g))))
+
+  def test_grpo_loss_fn_ignores_non_finite_advantages_on_masked_rows(self):
+    from flax import nnx  # pylint: disable=g-import-not-at-top
+
+    example = self._example(
+        completion_mask=jnp.array(
+            [[1.0, 1.0, 1.0], [0.0, 0.0, 0.0]], jnp.float32
+        ),
+        advantages=jnp.array([1.5, jnp.nan], jnp.float32),
+    )
+    config = self._config(beta=0.0)
+    out = algo_core.grpo_loss_fn(
+        self.model, example, config, pad_id=0, eos_id=-1
+    )
+    self.assertTrue(bool(jnp.isfinite(out.primary_loss.compute())))
+    self.assertTrue(bool(jnp.isfinite(out.aux_metrics['entropy'].compute())))
+    loss_scalar_fn = lambda model: algo_core.grpo_loss_fn(
+        model, example, config, pad_id=0, eos_id=-1
+    ).primary_loss.compute()
+    loss_val, grads = nnx.value_and_grad(loss_scalar_fn)(self.model)
+    self.assertTrue(bool(jnp.isfinite(loss_val)))
+    for g in jax.tree_util.tree_leaves(grads):
+      self.assertTrue(bool(jnp.all(jnp.isfinite(g))))
+
+  def test_ppo_policy_loss_fn_1d_advantages_and_non_finite_masks(self):
+    import types  # pylint: disable=g-import-not-at-top
+    from flax import nnx  # pylint: disable=g-import-not-at-top
+
+    example = self._example(
+        advantages=jnp.array([1.5, -2.0], dtype=jnp.float32),  # 1D [B]
+        old_per_token_logps=jnp.array(
+            [[-2.0, -2.0, -2.0], [-2.0, -2.0, -jnp.inf]], dtype=jnp.float32
+        ),
+        ref_per_token_logps=jnp.array(
+            [[-2.0, -2.0, -2.0], [-2.0, -2.0, jnp.nan]], dtype=jnp.float32
+        ),
+    )
+    config = types.SimpleNamespace(
+        epsilon_low=0.2,
+        epsilon_high=0.2,
+        entropy_coef=0.01,
+        kl_coef=0.01,
+        kl_loss_mode='kl',
+        kl_clamp_value=None,
+        temperature=1.0,
+    )
+    loss_val, grads = nnx.value_and_grad(
+        lambda m: algo_core.ppo_policy_loss_fn(
+            m, example, config, pad_id=0, eos_id=-1
+        ).primary_loss.compute()
+    )(self.model)
+    self.assertTrue(bool(jnp.isfinite(loss_val)))
+    for g in jax.tree_util.tree_leaves(grads):
+      self.assertTrue(bool(jnp.all(jnp.isfinite(g))))
+
+  def test_ppo_value_loss_fn_nan_and_inf_safe(self):
+    import types  # pylint: disable=g-import-not-at-top
+    from flax import nnx  # pylint: disable=g-import-not-at-top
+
+    class _CriticModel(nnx.Module):
+
+      def __init__(self, rngs: nnx.Rngs):
+        self.w = nnx.Param(jnp.ones((8,), dtype=jnp.float32))
+
+      def __call__(self, x, **kwargs):
+        del kwargs
+        # Returns [B, T, 1]
+        return jnp.ones(x.shape + (1,), dtype=jnp.float32)
+
+    critic = _CriticModel(nnx.Rngs(0))
+    example = types.SimpleNamespace(
+        prompt_ids=jnp.array([[1, 2], [1, 2]], dtype=jnp.int32),
+        completion_ids=jnp.array([[3, 4, 5], [6, 7, 8]], dtype=jnp.int32),
+        completion_mask=jnp.array(
+            [[1.0, 1.0, 1.0], [1.0, 1.0, 0.0]], dtype=jnp.float32
+        ),
+        old_values=jnp.array(
+            [[1.0, 1.0, 1.0], [1.0, 1.0, jnp.nan]], dtype=jnp.float32
+        ),
+        returns=jnp.array(
+            [[2.0, 2.0, 2.0], [2.0, 2.0, -jnp.inf]], dtype=jnp.float32
+        ),
+    )
+    out = algo_core.ppo_value_loss_fn(
+        critic, example, clip_range_value=0.2, pad_id=0, eos_id=-1
+    )
+    self.assertTrue(bool(jnp.isfinite(out.primary_loss.compute())))
+    self.assertTrue(bool(jnp.isfinite(out.aux_metrics['vf_loss'].compute())))
+    self.assertTrue(bool(jnp.isfinite(out.aux_metrics['vpred_mean'].compute())))
+
+  def test_masked_mean_and_var_stability(self):
+    x = jnp.array([1.0, 2.0, jnp.nan, -jnp.inf], dtype=jnp.float32)
+    mask = jnp.array([1.0, 1.0, 0.0, 0.0], dtype=jnp.float32)
+    m = algo_core.masked_mean(x, mask)
+    self.assertAlmostEqual(float(m), 1.5, places=5)
+    v = algo_core.masked_var(x, mask)
+    self.assertTrue(bool(jnp.isfinite(v)))
+
+    # Test single-token mask (mask_sum == 1) does not divide by zero in Bessel
+    # correction.
+    single_mask = jnp.array([1.0, 0.0, 0.0, 0.0], dtype=jnp.float32)
+    single_v = algo_core.masked_var(x, single_mask)
+    self.assertTrue(bool(jnp.isfinite(single_v)))
+
+  def test_grouped_valid_stats_non_finite_rewards(self):
+    rewards = np.array([1.0, np.nan, 3.0, 4.0], dtype=np.float32)
+    valid_mask = np.array([True, True, True, True], dtype=bool)
+    adv = algo_core.compute_grpo_loo_advantages(
+        rewards, num_generations=4, valid_mask=valid_mask
+    )
+    self.assertTrue(bool(np.all(np.isfinite(adv))))
+    # The NaN trajectory must receive 0.0 advantage and not poison the valid
+    # peers.
+    self.assertEqual(float(adv[1]), 0.0)
+    self.assertNotEqual(float(adv[0]), 0.0)
+
+  def test_policy_loss_non_finite_logps_excluded_from_loss(self):
+    cfg = self._config(use_rollout_logps=True)
+    ex = algo_core.common.TrainExample(
+        prompt_ids=jnp.array([[1, 2]], dtype=jnp.int32),
+        prompt_mask=jnp.array([[1.0, 1.0]], dtype=jnp.float32),
+        completion_ids=jnp.array([[3, 4]], dtype=jnp.int32),
+        completion_mask=jnp.array([[1.0, 1.0]], dtype=jnp.float32),
+        advantages=jnp.array([[1.0, 1.0]], dtype=jnp.float32),
+        ref_per_token_logps=None,
+        old_per_token_logps=jnp.array([[-2.0, -jnp.inf]], dtype=jnp.float32),
+    )
+    out_grpo = algo_core.grpo_loss_fn(self.model, ex, cfg, pad_id=0, eos_id=-1)
+    self.assertTrue(bool(jnp.isfinite(out_grpo.primary_loss.compute())))
+
+    out_ppo = algo_core.ppo_policy_loss_fn(
+        self.model, ex, cfg, epsilon=0.2, pad_id=0, eos_id=-1
+    )
+    self.assertTrue(bool(jnp.isfinite(out_ppo.primary_loss.compute())))
 
 
 if __name__ == '__main__':

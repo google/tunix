@@ -175,13 +175,23 @@ def compute_kl_divergence(
   per_token_logps = per_token_logps.astype(jnp.float32)
   if ref_per_token_logps is not None:
     ref_per_token_logps = ref_per_token_logps.astype(jnp.float32)
+    per_token_logps = jnp.where(
+        jnp.isnan(per_token_logps),
+        -100.0,
+        jnp.clip(per_token_logps, min=-100.0, max=100.0),
+    )
+    ref_per_token_logps = jnp.where(
+        jnp.isnan(ref_per_token_logps),
+        -100.0,
+        jnp.clip(ref_per_token_logps, min=-100.0, max=100.0),
+    )
 
   if method == "kl":
     kl = per_token_logps - ref_per_token_logps
   elif method == "mse_kl":
     kl = 0.5 * jnp.square(per_token_logps - ref_per_token_logps)
   elif method == "low_var_kl":
-    diff = ref_per_token_logps - per_token_logps
+    diff = jnp.clip(ref_per_token_logps - per_token_logps, -20.0, 20.0)
     kl = jnp.exp(diff) - diff - 1
   else:
     raise ValueError(
@@ -204,12 +214,15 @@ def selective_log_softmax(logits: jax.Array, input_ids: jax.Array) -> jax.Array:
   Returns:
     Selected log probabilities.
   """
-  target_logits = (
-      jnp.take_along_axis(logits, input_ids[..., None], axis=-1)
-      .squeeze(-1)
-      .astype(jnp.float32)
+  logits_f32 = jnp.where(
+      jnp.isnan(logits),
+      -1e9,
+      jnp.clip(logits.astype(jnp.float32), min=-1e9, max=1e9),
   )
-  normalizer = jax.nn.logsumexp(logits.astype(jnp.float32), axis=-1)
+  target_logits = jnp.take_along_axis(
+      logits_f32, input_ids[..., None], axis=-1
+  ).squeeze(-1)
+  normalizer = jax.nn.logsumexp(logits_f32, axis=-1)
   return target_logits - normalizer
 
 
@@ -501,10 +514,17 @@ def compute_per_token_logps(
   # ``process_ids`` so flash-attention variants that lack a separate
   # padding-mask input still skip pad positions.
   if model_call_contains(model, "segment_ids"):
-    if segment_ids is not None:
-      model_kwargs["segment_ids"] = segment_ids
-    elif input_seg_ids is not None:
-      model_kwargs["segment_ids"] = input_seg_ids
+    seg_to_pass = segment_ids if segment_ids is not None else input_seg_ids
+    if seg_to_pass is not None:
+      # Guard all-zero dummy padding rows (from batch-level padding) so
+      # flash-attention and GDN kernels never encounter a completely empty row.
+      seg_arr = jnp.asarray(seg_to_pass)
+      if seg_arr.ndim >= 1 and seg_arr.shape[-1] > 0:
+        row_all_zero = jnp.all(seg_arr == 0, axis=-1)
+        seg_arr = seg_arr.at[..., 0].set(
+            jnp.where(row_all_zero, 1, seg_arr[..., 0])
+        )
+      model_kwargs["segment_ids"] = seg_arr
   if images is not None:
     model_kwargs["images"] = images
   # Router replay. `forced_routed_experts` is the model-side name (MaxText's
@@ -1029,7 +1049,7 @@ def compute_sampler_trainer_agreement_jax(
   safe_rollout_logps = jnp.where(valid_tok, rollout_logps, 0.0)
   safe_trainer_logps = jnp.where(valid_tok, trainer_logps, 0.0)
   token_mult_err, tok_metrics = _token_agreement_metrics(
-      safe_rollout_logps, safe_trainer_logps, mask
+      safe_rollout_logps, safe_trainer_logps, valid_tok
   )
   metrics.update(tok_metrics)
 
@@ -1234,6 +1254,7 @@ def compute_chunked_logps(
   @nnx.remat
   def logp_step(carry, xs):
     hs_chunk, ids_chunk = xs
+    hs_chunk = jnp.where(jnp.isfinite(hs_chunk), hs_chunk, 0.0)
 
     # Project to vocabulary for just this chunk
     # Peak memory: [Batch, ChunkSize, VocabSize]
@@ -1494,7 +1515,11 @@ def aggregate_loss(
       Aggregated loss.
   """
 
-  per_token_loss = per_token_loss.astype(jnp.float32)
+  # Sever forward and reverse-mode autodiff paths on masked tokens before any
+  # multiplicative reduction so 0.0 * Inf = NaN cannot propagate from padding.
+  per_token_loss = jnp.where(
+      completion_mask > 0, per_token_loss.astype(jnp.float32), 0.0
+  )
 
   if segment_ids is not None:
     return _aggregate_loss_segmented(
@@ -1509,12 +1534,12 @@ def aggregate_loss(
   if loss_agg_mode == "token-mean":
     # sum all the token loss, and average by total number of completion tokens
     # in the batch
-    unreduced_sum = (per_token_loss * completion_mask).sum()
+    unreduced_sum = per_token_loss.sum()
     denominator = completion_mask.sum()
     min_denom = 1.0
   elif loss_agg_mode == "sequence-mean-token-mean":
     seq_mask = completion_mask.sum(axis=-1)  # per-sequence token count
-    seq_loss = ((per_token_loss * completion_mask).sum(axis=-1)) / jnp.clip(
+    seq_loss = per_token_loss.sum(axis=-1) / jnp.clip(
         seq_mask, min=1.0
     )
     unreduced_sum = seq_loss.sum()
@@ -1528,7 +1553,7 @@ def aggregate_loss(
     norm = _check_get_norm(kwargs, per_token_loss.shape[-1])
 
     # Scale by maximum response length instead of actual response length.
-    seq_loss = (per_token_loss * completion_mask).sum(axis=-1) / jnp.clip(
+    seq_loss = per_token_loss.sum(axis=-1) / jnp.clip(
         norm, min=1e-6
     )
     unreduced_sum = seq_loss.sum()
@@ -1537,15 +1562,13 @@ def aggregate_loss(
   elif loss_agg_mode == "seq-mean-token-sum":
     # 1) sum token losses within each sequence
     # 2) average only across sequences that have at least one valid token
-    seq_loss = (per_token_loss * completion_mask).sum(axis=-1)
-    seq_mask = (completion_mask.sum(axis=-1) > 0).astype(jnp.float32)
-    unreduced_sum = (seq_loss * seq_mask).sum()
-    denominator = seq_mask.sum()
+    unreduced_sum = per_token_loss.sum()
+    denominator = (completion_mask.sum(axis=-1) > 0).sum()
     min_denom = 1e-6
   elif loss_agg_mode == "sequence-mean-token-sum-norm":
     # Get custom normalization factor from kwargs, default to batch size.
     norm = _check_get_norm(kwargs, per_token_loss.shape[0])
-    unreduced_sum = (per_token_loss * completion_mask).sum()
+    unreduced_sum = per_token_loss.sum()
     denominator = norm
     min_denom = 1e-6
   else:
@@ -1598,24 +1621,24 @@ def _aggregate_loss_segmented(
         "num_segments must be provided when segment_ids is not None."
     )
 
-  masked_loss = per_token_loss * completion_mask
   # [B, S]: per-segment loss sum and scored-token count.
-  l_seg = segmented_sum(masked_loss, segment_ids, num_segments)
+  l_seg = segmented_sum(per_token_loss, segment_ids, num_segments)
   c_seg = segmented_count(segment_ids, num_segments, mask=completion_mask)
   # Active = segments with >=1 scored token; zero the padding bucket (seg 0) so
   # dummy/padding never dilutes numerator or denominator (denom = n_act).
   a_seg = (c_seg > 0).astype(jnp.float32)
   a_seg = a_seg.at[:, 0].set(0.0)
+  l_seg = jnp.where(a_seg > 0, l_seg, 0.0)
   n_act = a_seg.sum()
 
   if loss_agg_mode == "token-mean":
     # Segment-agnostic: the completion mask already handles everything.
-    unreduced_sum = masked_loss.sum()
+    unreduced_sum = per_token_loss.sum()
     denominator = completion_mask.sum()
     min_denom = 1.0
   elif loss_agg_mode == "sequence-mean-token-mean":
     per_seg_mean = l_seg / jnp.clip(c_seg, min=1.0)
-    unreduced_sum = (per_seg_mean * a_seg).sum()
+    unreduced_sum = per_seg_mean.sum()
     denominator = n_act
     min_denom = 1.0
   elif loss_agg_mode == "sequence-mean-token-scale":
@@ -1629,17 +1652,17 @@ def _aggregate_loss_segmented(
       )
     norm = _check_get_norm(kwargs, per_token_loss.shape[-1])
     per_seg_scaled = l_seg / jnp.clip(norm, min=1e-6)
-    unreduced_sum = (per_seg_scaled * a_seg).sum()
+    unreduced_sum = per_seg_scaled.sum()
     denominator = n_act
     min_denom = 1.0
   elif loss_agg_mode == "seq-mean-token-sum":
-    unreduced_sum = (l_seg * a_seg).sum()
+    unreduced_sum = l_seg.sum()
     denominator = n_act
     min_denom = 1e-6
   elif loss_agg_mode == "sequence-mean-token-sum-norm":
     # Default norm = active segment count (per-segment analog of row count).
     norm = _check_get_norm(kwargs, n_act)
-    unreduced_sum = masked_loss.sum()
+    unreduced_sum = per_token_loss.sum()
     denominator = norm
     min_denom = 1e-6
   else:
@@ -1692,7 +1715,9 @@ def reduced_loss_agg(
   Returns:
     A scalar reduced loss.
   """
-  per_token_loss = per_token_loss.astype(jnp.float32)
+  per_token_loss = jnp.where(
+      completion_mask > 0, per_token_loss.astype(jnp.float32), 0.0
+  )
 
   if segment_ids is not None:
     return _reduced_loss_agg_segmented(
@@ -1705,28 +1730,29 @@ def reduced_loss_agg(
     )
 
   if loss_agg_mode == "token-mean":
-    return (per_token_loss * completion_mask).sum() / jnp.clip(
+    return per_token_loss.sum() / jnp.clip(
         completion_mask.sum(), min=1.0
     )
   elif loss_agg_mode == "sequence-mean-token-mean":
     seq_mask = completion_mask.sum(axis=-1)
-    seq_loss = (per_token_loss * completion_mask).sum(axis=-1) / jnp.clip(
+    seq_loss = per_token_loss.sum(axis=-1) / jnp.clip(
         seq_mask, min=1.0
     )
-    return seq_loss.mean()
+    n_act = (seq_mask > 0).sum()
+    return seq_loss.sum() / jnp.clip(n_act, min=1.0)
   elif loss_agg_mode == "sequence-mean-token-scale":
     norm = _check_get_norm(kwargs, per_token_loss.shape[-1])
-    seq_loss = (per_token_loss * completion_mask).sum(axis=-1) / jnp.clip(
+    seq_loss = per_token_loss.sum(axis=-1) / jnp.clip(
         norm, min=1e-6
     )
-    return seq_loss.mean()
+    n_act = (completion_mask.sum(axis=-1) > 0).sum()
+    return seq_loss.sum() / jnp.clip(n_act, min=1.0)
   elif loss_agg_mode == "seq-mean-token-sum":
-    seq_loss = (per_token_loss * completion_mask).sum(axis=-1)
-    seq_mask = (completion_mask.sum(axis=-1) > 0).astype(jnp.float32)
-    return (seq_loss * seq_mask).sum() / jnp.clip(seq_mask.sum(), min=1e-6)
+    n_act = (completion_mask.sum(axis=-1) > 0).sum()
+    return per_token_loss.sum() / jnp.clip(n_act, min=1e-6)
   elif loss_agg_mode == "sequence-mean-token-sum-norm":
     norm = _check_get_norm(kwargs, per_token_loss.shape[0])
-    return (per_token_loss * completion_mask).sum() / jnp.clip(norm, min=1e-6)
+    return per_token_loss.sum() / jnp.clip(norm, min=1e-6)
   else:
     raise ValueError(
         f"Unsupported loss aggregation mode: {loss_agg_mode}. Supported modes:"
@@ -1773,18 +1799,18 @@ def _reduced_loss_agg_segmented(
         "num_segments must be provided when segment_ids is not None."
     )
 
-  masked = per_token_loss * completion_mask
-  l_seg = segmented_sum(masked, segment_ids, num_segments)
+  l_seg = segmented_sum(per_token_loss, segment_ids, num_segments)
   c_seg = segmented_count(segment_ids, num_segments, mask=completion_mask)
   a_seg = (c_seg > 0).astype(jnp.float32)
   a_seg = a_seg.at[:, 0].set(0.0)
+  l_seg = jnp.where(a_seg > 0, l_seg, 0.0)
   n_act = a_seg.sum()
 
   if loss_agg_mode == "token-mean":
-    return masked.sum() / jnp.clip(completion_mask.sum(), min=1.0)
+    return per_token_loss.sum() / jnp.clip(completion_mask.sum(), min=1.0)
   elif loss_agg_mode == "sequence-mean-token-mean":
     per_seg_mean = l_seg / jnp.clip(c_seg, min=1.0)
-    return (per_seg_mean * a_seg).sum() / jnp.clip(n_act, min=1.0)
+    return per_seg_mean.sum() / jnp.clip(n_act, min=1.0)
   elif loss_agg_mode == "sequence-mean-token-scale":
     if "norm" not in kwargs:
       raise ValueError(
@@ -1794,12 +1820,12 @@ def _reduced_loss_agg_segmented(
       )
     norm = _check_get_norm(kwargs, per_token_loss.shape[-1])
     per_seg_scaled = l_seg / jnp.clip(norm, min=1e-6)
-    return (per_seg_scaled * a_seg).sum() / jnp.clip(n_act, min=1.0)
+    return per_seg_scaled.sum() / jnp.clip(n_act, min=1.0)
   elif loss_agg_mode == "seq-mean-token-sum":
-    return (l_seg * a_seg).sum() / jnp.clip(n_act, min=1e-6)
+    return l_seg.sum() / jnp.clip(n_act, min=1e-6)
   elif loss_agg_mode == "sequence-mean-token-sum-norm":
     norm = _check_get_norm(kwargs, n_act)
-    return masked.sum() / jnp.clip(norm, min=1e-6)
+    return per_token_loss.sum() / jnp.clip(norm, min=1e-6)
   else:
     raise ValueError(
         f"Unsupported loss aggregation mode: {loss_agg_mode}. Supported modes:"
@@ -1850,9 +1876,13 @@ def compute_entropy_from_logits(logits: jax.Array) -> jax.Array:
   Returns:
     A JAX array of shape `[batch_size, seq_len]`, containing the entropy values.
   """
-  log_probs = jax.nn.log_softmax(logits, axis=-1)
-  probs = jax.nn.softmax(log_probs)
-  return -jnp.sum(probs * log_probs, axis=-1)
+  logits_f32 = jnp.where(
+      jnp.isnan(logits),
+      -1e9,
+      jnp.clip(logits.astype(jnp.float32), min=-1e9, max=1e9),
+  )
+  log_probs = jax.nn.log_softmax(logits_f32, axis=-1)
+  return -jnp.sum(jnp.exp(log_probs) * log_probs, axis=-1)
 
 
 def _check_get_norm(arguments: dict[str, Any], default: Any) -> Any:

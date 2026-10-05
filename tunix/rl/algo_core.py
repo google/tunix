@@ -135,7 +135,8 @@ def masked_mean(
 ) -> jax.Array:
   """Compute the mean of a masked array."""
   cast_mask = mask.astype(x.dtype)
-  return jnp.sum(x * cast_mask, axis=axis) / (
+  safe_x = jnp.where(cast_mask > 0, x, 0.0)
+  return jnp.sum(safe_x, axis=axis) / (
       jnp.sum(cast_mask, axis=axis) + 1e-8
   )
 
@@ -151,10 +152,13 @@ def masked_var(
   if mean is None:
     mean = masked_mean(x, cast_mask)
 
-  variance = masked_mean(jnp.square(x - mean), cast_mask)
+  diff = jnp.where(cast_mask > 0, x - mean, 0.0)
+  variance = masked_mean(jnp.square(diff), cast_mask)
 
   mask_sum = cast_mask.sum()
-  bessel_corr = mask_sum / (mask_sum - 1)
+  bessel_corr = jnp.where(
+      mask_sum > 1.0, mask_sum / jnp.maximum(mask_sum - 1.0, 1.0), 1.0
+  )
   return variance * bessel_corr
 
 
@@ -201,10 +205,28 @@ def ppo_policy_loss_fn(
   else:
     per_token_logps = outputs
 
-  advantages = train_example.advantages
   old_per_token_logps = train_example.old_per_token_logps
+  active_mask = (
+      (completion_mask > 0)
+      & jnp.isfinite(per_token_logps)
+      & jnp.isfinite(old_per_token_logps)
+  )
+  safe_per_token_logps = jnp.where(active_mask, per_token_logps, 0.0)
+  safe_old_per_token_logps = jnp.where(active_mask, old_per_token_logps, 0.0)
+  raw_adv = (
+      train_example.advantages
+      if train_example.advantages.ndim == 2
+      else jnp.expand_dims(train_example.advantages, -1)
+  )
+  advantages = jnp.where(
+      active_mask & jnp.isfinite(raw_adv),
+      raw_adv,
+      0.0,
+  )
 
-  seq_importance_ratio = jnp.exp(per_token_logps - old_per_token_logps)
+  seq_importance_ratio = jnp.exp(
+      jnp.clip(safe_per_token_logps - safe_old_per_token_logps, -20.0, 20.0)
+  )
 
   # Compute pg_clipfrac
   pg_losses_1 = -seq_importance_ratio * advantages
@@ -223,7 +245,6 @@ def ppo_policy_loss_fn(
     pg_loss_3 = per_token_loss
   unreduced_pg_clipfrac_lower = jnp.sum(
       ((per_token_loss > pg_loss_3) & (advantages < 0.0)).astype(jnp.float32)
-      * completion_mask
   )
 
   pg_loss_clipped_dual = jnp.minimum(pg_loss_3, per_token_loss)
@@ -232,9 +253,8 @@ def ppo_policy_loss_fn(
   denominator = jnp.sum(completion_mask)
   unreduced_pg_clipfrac = jnp.sum(
       jnp.greater(pg_losses_2, pg_losses_1).astype(jnp.float32)
-      * completion_mask
   )
-  unreduced_policy_loss = jnp.sum(pg_losses * completion_mask)
+  unreduced_policy_loss = jnp.sum(pg_losses)
 
   aux = {
       "pg_clipfrac": sft_utils.WeightedMetric(
@@ -246,7 +266,9 @@ def ppo_policy_loss_fn(
   }
 
   if return_entropy:
-    unreduced_entropy = jnp.sum(token_entropy * completion_mask)  # pyrefly: ignore[unbound-name]
+    unreduced_entropy = jnp.sum(
+        jnp.where(active_mask, token_entropy, 0.0)  # pyrefly: ignore[unbound-name]
+    )
     unreduced_policy_loss = (
         unreduced_policy_loss - entropy_coef * unreduced_entropy
     )
@@ -263,7 +285,7 @@ def ppo_policy_loss_fn(
         "kl",
         clamp_value=getattr(algo_config, "kl_clamp_value", None),
     )
-    unreduced_kl = jnp.sum(kl * completion_mask)
+    unreduced_kl = jnp.sum(jnp.where(active_mask, kl, 0.0))
     unreduced_policy_loss = unreduced_policy_loss + kl_coef * unreduced_kl
     aux["kl"] = sft_utils.WeightedMetric(
         unreduced_kl, denominator, min_denom=1.0
@@ -321,21 +343,35 @@ def ppo_value_loss_fn(
   if segment_ids is not None:
     # Pad the first token's value with 0.0, since it has no preceding token to predict it.
     vpreds = jnp.pad(vpreds, ((0, 0), (1, 0)), constant_values=0.0)
-  vpred_clipped = jnp.clip(
-      vpreds, values - clip_range_value, values + clip_range_value
+  active_mask = (
+      (completion_mask > 0)
+      & jnp.isfinite(values)
+      & jnp.isfinite(returns)
+      & jnp.isfinite(vpreds)
   )
-  vf_losses1 = jnp.square(vpreds - returns)
-  vf_losses2 = jnp.square(vpred_clipped - returns)
+  safe_values = jnp.where(active_mask, values, 0.0)
+  safe_returns = jnp.where(active_mask, returns, 0.0)
+  safe_vpreds = jnp.where(active_mask, vpreds, 0.0)
+  if clip_range_value is not None:
+    vpred_clipped = jnp.clip(
+        safe_vpreds,
+        safe_values - clip_range_value,
+        safe_values + clip_range_value,
+    )
+  else:
+    vpred_clipped = safe_vpreds
+  vf_losses1 = jnp.square(safe_vpreds - safe_returns)
+  vf_losses2 = jnp.square(vpred_clipped - safe_returns)
 
   clipped_vf_losses = jnp.maximum(vf_losses1, vf_losses2)
 
   denominator = jnp.sum(completion_mask)
-  unreduced_vf_loss = 0.5 * jnp.sum(clipped_vf_losses * completion_mask)
-  unreduced_vpred_mean = jnp.sum(vpreds * completion_mask)
+  unreduced_vf_loss = 0.5 * jnp.sum(clipped_vf_losses)
+  unreduced_vpred_mean = jnp.sum(safe_vpreds)
   unreduced_vf_clipfrac = jnp.sum(
-      jnp.greater(vf_losses2, vf_losses1).astype(jnp.float32) * completion_mask
+      jnp.greater(vf_losses2, vf_losses1).astype(jnp.float32)
   )
-  unreduced_return_mean = jnp.sum(returns * completion_mask)
+  unreduced_return_mean = jnp.sum(safe_returns)
 
   primary_loss = sft_utils.WeightedMetric(
       unreduced_vf_loss, denominator, min_denom=1.0
@@ -495,10 +531,17 @@ def grpo_loss_fn(
         train_example.old_per_token_logps, jnp.float32
     )
 
-  seq_importance_ratio = per_token_logps - old_per_token_logps
+  active_mask = (
+      (completion_mask > 0)
+      & jnp.isfinite(per_token_logps)
+      & jnp.isfinite(old_per_token_logps)
+  )
+  safe_per_token_logps = jnp.where(active_mask, per_token_logps, 0.0)
+  safe_old_per_token_logps = jnp.where(active_mask, old_per_token_logps, 0.0)
+  seq_importance_ratio = safe_per_token_logps - safe_old_per_token_logps
   # Record KL divergence before clipping.
   token_denom = jnp.sum(completion_mask)
-  unreduced_ppo_kl = jnp.sum(-seq_importance_ratio * completion_mask)
+  unreduced_ppo_kl = jnp.sum(-seq_importance_ratio)
 
   seq_importance_ratio = jnp.clip(seq_importance_ratio, max=20.0, min=-20.0)
 
@@ -506,9 +549,9 @@ def grpo_loss_fn(
   if loss_algo == "gspo-token":
     if segment_ids is None:
       # Per-row mean log-ratio: each row is exactly one sequence.
-      seq_mean_ratio = (seq_importance_ratio * completion_mask).sum(
-          axis=-1
-      ) / jnp.clip(completion_mask.sum(-1), min=1)
+      seq_mean_ratio = jnp.sum(seq_importance_ratio, axis=-1) / jnp.clip(
+          completion_mask.sum(-1), min=1
+      )
       seq_mean_ratio = jnp.expand_dims(seq_mean_ratio, axis=-1)
     else:
       # Per-SEGMENT mean log-ratio: a packed row holds K sequences, so pooling
@@ -516,7 +559,9 @@ def grpo_loss_fn(
       # scatter each token its own segment's mean via take_along_axis. Padding
       # (segment 0, mask 0) yields 0 and is masked out downstream.
       per_seg_sum = common.segmented_sum(
-          seq_importance_ratio * completion_mask, segment_ids, num_segments  # pyrefly: ignore[bad-argument-type]
+          seq_importance_ratio,
+          segment_ids,
+          num_segments,  # pyrefly: ignore[bad-argument-type]
       )
       per_seg_count = common.segmented_count(
           segment_ids, num_segments, mask=completion_mask  # pyrefly: ignore[bad-argument-type]
@@ -528,18 +573,21 @@ def grpo_loss_fn(
     # Sequence-level VALUE, per-token GRADIENT (stop-gradient trick): the
     # `x - stop_grad(x)` term is 0 in value but carries d/dtheta per token.
     seq_importance_ratio = (
-        per_token_logps
-        - jax.lax.stop_gradient(per_token_logps)
+        safe_per_token_logps
+        - jax.lax.stop_gradient(safe_per_token_logps)
         + jax.lax.stop_gradient(seq_mean_ratio)
     )
-    seq_importance_ratio = jnp.clip(seq_importance_ratio, max=10.0)
+    seq_importance_ratio = jnp.clip(seq_importance_ratio, min=-10.0, max=10.0)
 
   is_ratio = jnp.exp(seq_importance_ratio)
 
   # Advantages must be broadcast against seq_length.
   # When sequence packing is used, advantages are already 2D [B, seq_length].
   # When unpacked, they are 1D [B].
-  adv = advantages if advantages.ndim == 2 else jnp.expand_dims(advantages, 1)
+  raw_adv = (
+      advantages if advantages.ndim == 2 else jnp.expand_dims(advantages, 1)
+  )
+  adv = jnp.where(active_mask & jnp.isfinite(raw_adv), raw_adv, 0.0)
 
   pg_loss_1 = -adv * is_ratio
   pg_loss_2 = -adv * jnp.clip(is_ratio, 1 - epsilon, 1 + epsilon_high)
@@ -547,7 +595,7 @@ def grpo_loss_fn(
   per_token_loss = jnp.maximum(pg_loss_1, pg_loss_2).astype(jnp.float32)
 
   unreduced_clip_frac = jnp.sum(
-      jnp.greater(pg_loss_2, pg_loss_1).astype(jnp.float32) * completion_mask
+      jnp.greater(pg_loss_2, pg_loss_1).astype(jnp.float32)
   )
 
   # dual-clip ppo loss
@@ -579,7 +627,12 @@ def grpo_loss_fn(
   # and applied per token BEFORE loss aggregation so they affect the gradient
   # through the loss magnitude only, not as a stop-gradient bias on the ratio.
   if sampler_is_weights is not None:
-    per_token_loss = per_token_loss * sampler_is_weights.astype(jnp.float32)
+    safe_sis = jnp.where(
+        active_mask & jnp.isfinite(sampler_is_weights),
+        sampler_is_weights.astype(jnp.float32),
+        0.0,
+    )
+    per_token_loss = per_token_loss * safe_sis
 
   # Two independent aggregations of the same policy loss (equal today):
   #   unreduced (sum/denom, deferred) — feeds the gradient
@@ -602,33 +655,30 @@ def grpo_loss_fn(
       unreduced_pg_loss  # KL added below when beta != 0; feeds gradient
   )
   # Per-token diagnostics — log only over assistant tokens (completion_mask).
-  has_valid = jnp.any(completion_mask > 0)
-  is_ratio_mean = masked_mean(is_ratio, completion_mask)
-  is_ratio_max = jnp.max(jnp.where(completion_mask > 0, is_ratio, 0.0))
+  has_valid = jnp.any(active_mask)
+  is_ratio_mean = masked_mean(is_ratio, active_mask)
+  is_ratio_max = jnp.max(jnp.where(active_mask, is_ratio, 0.0))
   is_ratio_min = jnp.where(
       has_valid,
-      jnp.min(jnp.where(completion_mask > 0, is_ratio, jnp.inf)),
+      jnp.min(jnp.where(active_mask, is_ratio, jnp.inf)),
       0.0,
   )
-  log_ratio_abs_mean = masked_mean(
-      jnp.abs(seq_importance_ratio), completion_mask
-  )
-  pg_loss_1_mean = masked_mean(pg_loss_1, completion_mask)
-  pg_loss_2_mean = masked_mean(pg_loss_2, completion_mask)
-  adv_broadcast = jnp.broadcast_to(adv, completion_mask.shape)
-  adv_abs_mean = masked_mean(jnp.abs(adv_broadcast), completion_mask)
+  log_ratio_abs_mean = masked_mean(jnp.abs(seq_importance_ratio), active_mask)
+  pg_loss_1_mean = masked_mean(pg_loss_1, active_mask)
+  pg_loss_2_mean = masked_mean(pg_loss_2, active_mask)
+  adv_abs_mean = masked_mean(jnp.abs(adv), active_mask)
   adv_max = jnp.where(
       has_valid,
-      jnp.max(jnp.where(completion_mask > 0, adv_broadcast, -jnp.inf)),
+      jnp.max(jnp.where(active_mask, adv, -jnp.inf)),
       0.0,
   )
   adv_min = jnp.where(
       has_valid,
-      jnp.min(jnp.where(completion_mask > 0, adv_broadcast, jnp.inf)),
+      jnp.min(jnp.where(active_mask, adv, jnp.inf)),
       0.0,
   )
   nonzero_adv_frac = masked_mean(
-      (jnp.abs(adv_broadcast) > 1e-8).astype(jnp.float32), completion_mask
+      (jnp.abs(adv) > 1e-8).astype(jnp.float32), active_mask
   )
   aux: dict[str, jax.Array | sft_utils.WeightedMetric] = {
       "kl": sft_utils.WeightedMetric(jnp.array(0.0), jnp.array(1.0)),
@@ -656,13 +706,12 @@ def grpo_loss_fn(
       "advantage/nonzero_frac": nonzero_adv_frac,
   }
   if sampler_is_weights is not None:
-    sis = sampler_is_weights.astype(jnp.float32)
     aux["sampler_is/weight_mean"] = sft_utils.WeightedMetric(
-        jnp.sum(sis * completion_mask), token_denom, min_denom=1.0
+        jnp.sum(safe_sis), token_denom, min_denom=1.0  # pyrefly: ignore[unbound-name]
     )
     aux["sampler_is/weight_min"] = jnp.where(
         has_valid,
-        jnp.min(jnp.where(completion_mask > 0, sis, jnp.inf)),
+        jnp.min(jnp.where(active_mask, safe_sis, jnp.inf)),  # pyrefly: ignore[unbound-name]
         0.0,
     )
   else:
@@ -681,7 +730,8 @@ def grpo_loss_fn(
         algo_config.kl_loss_mode,
         clamp_value=algo_config.kl_clamp_value,
     )
-    unreduced_kl = jnp.astype(jnp.sum(kl * completion_mask), jnp.float32)
+    kl = jnp.where(active_mask, kl, 0.0)
+    unreduced_kl = jnp.astype(jnp.sum(kl), jnp.float32)
     aux["kl"] = sft_utils.WeightedMetric(
         unreduced_kl, token_denom, min_denom=1.0
     )
@@ -702,7 +752,7 @@ def grpo_loss_fn(
     )
 
   entropy_loss = common.aggregate_loss(
-      token_entropy,
+      jnp.where(active_mask, token_entropy, 0.0),
       completion_mask,
       loss_aggregation_mode,
       segment_ids=segment_ids,
@@ -741,6 +791,7 @@ def _grouped_valid_stats(
   grouped_mask = (
       np.asarray(valid_mask).astype(bool).reshape(-1, num_generations)
   )
+  grouped_mask = grouped_mask & np.isfinite(grouped_rewards)
   grouped_rewards = np.where(grouped_mask, grouped_rewards, 0.0)
   valid_counts = grouped_mask.sum(axis=-1, keepdims=True)
   masked_sum = grouped_rewards.sum(axis=-1, keepdims=True)

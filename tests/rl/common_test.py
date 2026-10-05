@@ -1617,6 +1617,115 @@ class ProcessIdsTokenMaskTest(absltest.TestCase):
           segment_positions=np.arange(4)[None],
       )
 
+  def test_compute_kl_divergence_low_var_kl_extreme_diff_grad(self):
+    per_token_logps = jnp.array(
+        [-100.0, -50.0, -1.0, 50.0, -jnp.inf], dtype=jnp.float32
+    )
+    ref_per_token_logps = jnp.array(
+        [0.0, 0.0, -1.0, 0.0, -jnp.inf], dtype=jnp.float32
+    )
+    loss_fn = lambda lp: jnp.sum(
+        common.compute_kl_divergence(
+            lp, ref_per_token_logps, method="low_var_kl"
+        )
+    )
+    val, grad = jax.value_and_grad(loss_fn)(per_token_logps)
+    self.assertTrue(bool(jnp.isfinite(val)))
+    self.assertTrue(bool(jnp.all(jnp.isfinite(grad))))
+    self.assertTrue(bool(jnp.all(jnp.isfinite(jnp.square(grad)))))
+    # Outside [-20, 20], clipped_diff saturates and gradient goes to 0
+    # (never +1).
+    self.assertEqual(float(grad[0]), 0.0)
+    self.assertEqual(float(grad[1]), 0.0)
+    self.assertEqual(float(grad[3]), 0.0)
+    self.assertEqual(float(grad[4]), 0.0)
+
+    for method in ("kl", "mse_kl"):
+      with self.subTest(method=method):
+        m_val, m_grad = jax.value_and_grad(
+            lambda lp, m=method: jnp.sum(
+                common.compute_kl_divergence(lp, ref_per_token_logps, method=m)
+            )
+        )(per_token_logps)
+        self.assertTrue(bool(jnp.isfinite(m_val)))
+        self.assertTrue(bool(jnp.all(jnp.isfinite(m_grad))))
+        self.assertEqual(float(m_grad[4]), 0.0)
+
+  def test_compute_entropy_from_logits_nan_and_inf_safe(self):
+    logits = jnp.array(
+        [
+            [[1.0, 2.0, 3.0, -1e9], [0.0, 0.0, -jnp.inf, jnp.nan]],
+        ],
+        dtype=jnp.float32,
+    )
+    entropy = common.compute_entropy_from_logits(logits)
+    self.assertTrue(bool(jnp.all(jnp.isfinite(entropy))))
+    grad_fn = jax.grad(
+        lambda x: jnp.sum(common.compute_entropy_from_logits(x))
+    )
+    grads = grad_fn(logits)
+    self.assertTrue(bool(jnp.all(jnp.isfinite(grads))))
+
+  def test_selective_log_softmax_nan_and_inf_safe(self):
+    logits = jnp.array(
+        [
+            [[1.0, 2.0, -1e9], [jnp.nan, -jnp.inf, 0.5]],
+        ],
+        dtype=jnp.float32,
+    )
+    index = jnp.array([[1, 0]], dtype=jnp.int32)
+    val, grads = jax.value_and_grad(
+        lambda x: jnp.sum(common.selective_log_softmax(x, index))
+    )(logits)
+    self.assertTrue(bool(jnp.isfinite(val)))
+    self.assertTrue(bool(jnp.all(jnp.isfinite(grads))))
+
+    # Verify that -jnp.inf on an unused vocabulary token does not distort the
+    # partition function of valid tokens.
+    masked_vocab_logits = jnp.array([[1.0, 2.0, -jnp.inf]], dtype=jnp.float32)
+    target_idx = jnp.array([1], dtype=jnp.int32)
+    logp = common.selective_log_softmax(masked_vocab_logits, target_idx)
+    expected_logp = 2.0 - float(np.log(np.exp(1.0) + np.exp(2.0)))
+    self.assertAlmostEqual(float(logp[0]), expected_logp, places=5)
+
+  def test_reduced_loss_agg_matches_aggregate_loss_with_padding_rows(self):
+    loss = jnp.array([[1.0, 2.0], [0.0, 0.0]], dtype=jnp.float32)
+    mask = jnp.array([[1.0, 1.0], [0.0, 0.0]], dtype=jnp.float32)
+    for mode in ("sequence-mean-token-mean", "sequence-mean-token-scale"):
+      with self.subTest(mode=mode):
+        agg = common.aggregate_loss(loss, mask, mode)
+        reduced = common.reduced_loss_agg(loss, mask, mode)
+        self.assertAlmostEqual(float(agg.compute()), float(reduced), places=6)
+
+  def test_compute_kl_divergence_infinite_ref_penalty(self):
+    per_token_logps = jnp.array([-2.0], dtype=jnp.float32)
+    ref_per_token_logps = jnp.array([-jnp.inf], dtype=jnp.float32)
+    kl = common.compute_kl_divergence(
+        per_token_logps, ref_per_token_logps, method="kl"
+    )
+    # Ref prob is 0 (-inf), so KL penalty should be strongly positive, not 0.0.
+    self.assertGreater(float(kl[0]), 0.0)
+    self.assertTrue(bool(jnp.isfinite(kl[0])))
+
+  def test_selective_log_softmax_nan_does_not_inflate_normalizer(self):
+    logits = jnp.array([[-5.0, -10.0, jnp.nan]], dtype=jnp.float32)
+    target = jnp.array([0], dtype=jnp.int32)
+    logp = common.selective_log_softmax(logits, target)
+    expected_logp = -5.0 - float(np.log(np.exp(-5.0) + np.exp(-10.0)))
+    self.assertAlmostEqual(float(logp[0]), expected_logp, places=4)
+
+  def test_reduced_loss_agg_all_zero_mask_autodiff_safe(self):
+    loss = jnp.array([[1.0, 2.0], [3.0, 4.0]], dtype=jnp.float32)
+    all_zero_mask = jnp.zeros_like(loss)
+    for mode in ("sequence-mean-token-mean", "sequence-mean-token-scale"):
+      with self.subTest(mode=mode):
+        val, grad = jax.value_and_grad(
+            lambda l, m=mode: common.reduced_loss_agg(l, all_zero_mask, m)
+        )(loss)
+        self.assertEqual(float(val), 0.0)
+        self.assertTrue(bool(jnp.all(jnp.isfinite(grad))))
+        self.assertTrue(bool(jnp.all(grad == 0.0)))
+
 
 if __name__ == "__main__":
   absltest.main()
