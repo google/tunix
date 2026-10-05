@@ -14,6 +14,8 @@
 
 """Unit tests for examples/deepswe/template.py."""
 
+import hashlib
+import json
 import os
 import sys
 from unittest import mock
@@ -160,3 +162,53 @@ def test_get_template_scaffolds():
     assert template.get_template("openhands") is not None
     assert template.get_template("r2egym") is None
     assert template.get_template("sweagent") is None
+
+
+def test_get_openhands_tools_matches_nv_openhands_reference():
+  """Verify OpenHands tool schemas and rendered JSON match nv-OpenHands@0d766ad0."""
+  tools = template.get_openhands_tools(
+      max_timeout=60,
+      workspace_mount_path_in_sandbox="/openhands_setup/OpenHands",
+      enable_think=True,
+      enable_task_tracker=True,
+  )
+  expected_required = {
+      "execute_bash": ["command", "security_risk"],
+      "think": ["thought"],
+      "finish": ["message"],
+      "task_tracker": ["command"],
+      "str_replace_editor": ["command", "path", "security_risk"],
+  }
+  # Exact SHA-256 digests of json.dumps(tool, ensure_ascii=False) produced by
+  # nv-OpenHands@0d766ad0 tool modules (bash.py, think.py, finish.py,
+  # task_tracker.py, str_replace_editor.py) with COMMAND_EXEC_TIMEOUT=60 and
+  # DEFAULT_WORKSPACE_MOUNT_PATH_IN_SANDBOX="/openhands_setup/OpenHands".
+  expected_sha256 = {
+      "execute_bash": (
+          "641b555d0056fc5b43e55c17ffa744887835d8ee55d3598e1850a55bc7595fe1"
+      ),
+      "think": (
+          "6366dd459e63d6fa486ded5dc13307f558ecb790a4e85692815810214be1d602"
+      ),
+      "finish": (
+          "3879fd696325f68981a5fb272fcda6524ffa3b03f77fa73ede74f9426c4824d3"
+      ),
+      "task_tracker": (
+          "a01d346553a280aea7f01900ddcca7d0be2919bbc399de5e3d8afa436c2ff4a1"
+      ),
+      "str_replace_editor": (
+          "dd56a537979e413afae5c05ca772be4a907e5729edb4fd2cc4d33cf2c0ce2f85"
+      ),
+  }
+
+  assert [t["function"]["name"] for t in tools] == list(
+      expected_required.keys()
+  )
+  for tool in tools:
+    fn = tool["function"]
+    name = fn["name"]
+    assert fn["parameters"]["required"] == expected_required[name]
+    rendered = json.dumps(tool, ensure_ascii=False)
+    digest = hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+    assert digest == expected_sha256[name], f"Schema mismatch for {name}"
+

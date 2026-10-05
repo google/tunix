@@ -467,6 +467,29 @@ class SweAgentTest(absltest.TestCase):
             "str_replace_editor",
         ],
     )
+    tools_by_name = {
+        t["function"]["name"]: t["function"] for t in template.OPENHANDS_TOOLS
+    }
+    self.assertEqual(
+        tools_by_name["execute_bash"]["parameters"]["required"],
+        ["command", "security_risk"],
+    )
+    self.assertEqual(
+        tools_by_name["think"]["parameters"]["required"],
+        ["thought"],
+    )
+    self.assertEqual(
+        tools_by_name["finish"]["parameters"]["required"],
+        ["message"],
+    )
+    self.assertEqual(
+        tools_by_name["task_tracker"]["parameters"]["required"],
+        ["command"],
+    )
+    self.assertEqual(
+        tools_by_name["str_replace_editor"]["parameters"]["required"],
+        ["command", "path", "security_risk"],
+    )
     self.assertIn("# Tools\n\nYou have access to the following functions:\n\n<tools>", template.OPENHANDS_SYSTEM_PROMPT)
     self.assertIn("<SECURITY_RISK_ASSESSMENT>", template.OPENHANDS_SYSTEM_PROMPT)
     self.assertIn("60 seconds", template.OPENHANDS_SYSTEM_PROMPT)

@@ -499,7 +499,7 @@ def get_openhands_tools(
                           "enum": list(_RISK_LEVELS),
                       },
                   },
-                  "required": ["command"],
+                  "required": ["command", "security_risk"],
               },
           },
       },
@@ -678,7 +678,7 @@ def get_openhands_tools(
                       "enum": list(_RISK_LEVELS),
                   },
               },
-              "required": ["command", "path"],
+              "required": ["command", "path", "security_risk"],
           },
       },
   })
