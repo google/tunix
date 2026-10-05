@@ -759,13 +759,6 @@ if cfg:
   elif [[ -n "${IMAGE_REWRITE_PREFIX}" ]]; then
     sandbox_env="IMAGE_REWRITE_PREFIX=\"${IMAGE_REWRITE_PREFIX}\" ${JOB_PREFIX:+JOB_PREFIX=\"${JOB_PREFIX}\"} ${POOL_NAME_FORMAT:+POOL_NAME_FORMAT=\"${POOL_NAME_FORMAT}\"} ${TEMPLATE_NAME_PREFIX:+TEMPLATE_NAME_PREFIX=\"${TEMPLATE_NAME_PREFIX}\"}"
   fi
-  local dynamic_slicing_single_host=false
-  if [[ "${ROLLOUT_TPU_SLICE}" =~ ^(tpu7x|tpu-v7x-slice):2x2x1 ]]; then
-    if [[ "${USE_DYNAMIC_SLICING}" == "true" || "${USE_DYNAMIC_SLICING}" == "1" || -z "${USE_DYNAMIC_SLICING}" ]]; then
-      dynamic_slicing_single_host=true
-    fi
-  fi
-
   local start_index=${ROLLOUT_START_INDEX:-0}
   local replicas=${ROLLOUT_REPLICAS:-1}
   local replica_ids=()
@@ -778,11 +771,6 @@ if cfg:
   done
   if [[ ${#replica_ids[@]} -eq 0 ]]; then
     return 0
-  fi
-
-  local extra_generator_flags=()
-  if [[ "$dynamic_slicing_single_host" == "true" ]]; then
-    extra_generator_flags+=(--omit_slice_topology)
   fi
 
   if [[ -n "${ROLLOUT_JAX_CACHE_GCS_DIR}" && "${DISABLE_JAX_CACHE:-false}" != "true" && "${DISABLE_JAX_CACHE:-0}" != "1" ]]; then
@@ -812,7 +800,6 @@ if cfg:
       --tpu_slice=${ROLLOUT_TPU_SLICE} \
       --worker_container_image="${TUNIX_IMAGE}" \
       --worker_container_port="${ROLLOUT_PORT}" \
-      "${extra_generator_flags[@]}" \
       --worker_startup_command=" \
         PYTHONUNBUFFERED=1 \
         TUNIX_IS_INTERNAL_ENV=false \
@@ -898,43 +885,6 @@ if cfg:
     printf '%s\n' "${manifest_template//${placeholder}/${replica_id}}"
     ((idx++))
   done | apply_manifest
-
-  if [[ "$dynamic_slicing_single_host" == "true" && "$DRY_RUN" != "true" ]]; then
-    local slice_topo="${ROLLOUT_TPU_SLICE#*:}"
-    echo "Applying single-host dynamic slicing patch for ${#replica_ids[@]} rollout JobSet(s) (${slice_topo})..."
-    for replica_id in "${replica_ids[@]}"; do
-      printf -- "---\napiVersion: jobset.x-k8s.io/v1alpha2\nkind: JobSet\nmetadata:\n  name: %s\n" "${replica_id}"
-    done | kubectl patch -n "${K8S_NAMESPACE}" -f - --type='json' \
-      -p="[{\"op\": \"add\", \"path\": \"/spec/replicatedJobs/0/template/spec/template/metadata/annotations/cloud.google.com~1gke-tpu-slice-topology\", \"value\": \"${slice_topo}\"}]"
-
-    echo "Waiting for Kueue to create initial workloads before recycling..."
-    sleep 3
-    local workloads_to_recycle=()
-    mapfile -t workloads_to_recycle < <(
-      kubectl get workload -n "${K8S_NAMESPACE}" -o json 2>/dev/null | "$PYTHON_BIN" -c '
-import json, re, sys
-targets = set(sys.argv[1:])
-pattern = re.compile(r"^jobset-(.+)-[a-f0-9]+$")
-try:
-  data = json.load(sys.stdin)
-except Exception:
-  sys.exit(0)
-for item in data.get("items", []):
-  name = item.get("metadata", {}).get("name", "")
-  m = pattern.match(name)
-  if not m or m.group(1) not in targets:
-    continue
-  pod_sets = item.get("spec", {}).get("podSets") or [{}]
-  annos = (pod_sets[0].get("template", {}).get("metadata", {}).get("annotations")) or {}
-  if not annos.get("cloud.google.com/gke-tpu-slice-topology"):
-    print(name)
-' "${replica_ids[@]}" || true
-    )
-    if [[ ${#workloads_to_recycle[@]} -gt 0 ]]; then
-      echo "Recycling ${#workloads_to_recycle[@]} workload(s) to apply dynamic slicing..."
-      kubectl delete workload "${workloads_to_recycle[@]}" -n "${K8S_NAMESPACE}" --ignore-not-found=true --wait=false 2>/dev/null || true
-    fi
-  fi
 }
 
 start_mock_trainer() {

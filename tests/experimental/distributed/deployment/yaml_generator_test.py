@@ -911,7 +911,7 @@ class FailFastRenderTest(parameterized.TestCase):
         [f"{job_prefix}-roll-{i}" for i in range(4)],
     )
 
-  def test_k8s_launcher_single_host_dynamic_slicing_batches_patch_and_recycle(
+  def test_k8s_launcher_single_host_dynamic_slicing_direct_apply(
       self,
   ):
     repo_root = pathlib.Path(__file__).resolve().parents[4]
@@ -926,28 +926,14 @@ class FailFastRenderTest(parameterized.TestCase):
 
     tempdir = self.create_tempdir().full_path
     kubectl_log = os.path.join(tempdir, "kubectl_calls.log")
-    patched_manifest = os.path.join(tempdir, "patched.yaml")
+    applied_manifest = os.path.join(tempdir, "applied.yaml")
     kubectl_bin = os.path.join(tempdir, "kubectl")
     with open(kubectl_bin, "w") as f:
       f.write(
           "#!/bin/bash\n"
           f'echo "$*" >> "{kubectl_log}"\n'
           'if [[ "$*" == *"apply -f -"* ]]; then\n'
-          "  cat > /dev/null\n"
-          'elif [[ "$*" == *"patch"* && "$*" == *"-f -"* ]]; then\n'
-          f'  cat > "{patched_manifest}"\n'
-          'elif [[ "$*" == *"get workload"* && "$*" == *"-o json"* ]]; then\n'
-          "  cat <<'EOF'\n"
-          '{"items": [\n'
-          '  {"metadata": {"name": "jobset-deepswe-roll-0-a1b2c"},'
-          '   "spec": {"podSets": [{"template": {"metadata": {}}}]}},\n'
-          '  {"metadata": {"name": "jobset-deepswe-roll-1-d3e4f"},'
-          '   "spec": {"podSets": [{"template": {"metadata": {"annotations":'
-          ' {"cloud.google.com/gke-tpu-slice-topology": "2x2x1"}}}}]}},\n'
-          '  {"metadata": {"name": "jobset-deepswe-roll-2-98765"},'
-          '   "spec": {"podSets": [{"template": {"metadata": {}}}]}}\n'
-          "]}\n"
-          "EOF\n"
+          f'  cat > "{applied_manifest}"\n'
           "fi\n"
       )
     os.chmod(kubectl_bin, stat.S_IRWXU)
@@ -974,19 +960,28 @@ class FailFastRenderTest(parameterized.TestCase):
     with open(kubectl_log) as f:
       calls = [line.strip() for line in f if line.strip()]
     self.assertLen([c for c in calls if "apply -f -" in c], 1)
-    self.assertLen([c for c in calls if "patch" in c], 1)
-    delete_calls = [c for c in calls if "delete workload" in c]
-    self.assertLen(delete_calls, 1)
-    self.assertIn("jobset-deepswe-roll-0-a1b2c", delete_calls[0])
-    self.assertIn("jobset-deepswe-roll-2-98765", delete_calls[0])
-    self.assertNotIn("jobset-deepswe-roll-1-d3e4f", delete_calls[0])
+    self.assertEmpty([c for c in calls if "patch" in c])
+    self.assertEmpty([c for c in calls if "delete workload" in c])
 
-    with open(patched_manifest) as f:
-      patch_docs = list(yaml.safe_load_all(f.read()))
+    with open(applied_manifest) as f:
+      docs = list(yaml.safe_load_all(f.read()))
     self.assertEqual(
-        [doc["metadata"]["name"] for doc in patch_docs],
+        [doc["metadata"]["name"] for doc in docs],
         ["deepswe-roll-0", "deepswe-roll-1", "deepswe-roll-2"],
     )
+    for doc in docs:
+      annos = (
+          doc["spec"]["replicatedJobs"][0]["template"]["spec"]["template"][
+              "metadata"
+          ]["annotations"]
+      )
+      self.assertEqual(
+          annos.get("cloud.google.com/gke-tpu-slice-topology"), "2x2x1"
+      )
+      self.assertEqual(
+          annos.get("cloud.google.com/skip-tpu-webhook-check"), "true"
+      )
+      self.assertNotIn("kueue.x-k8s.io/podset-required-topology", annos)
 
 
 if __name__ == "__main__":
