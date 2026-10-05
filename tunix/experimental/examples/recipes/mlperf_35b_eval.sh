@@ -9,7 +9,7 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # MLPerf RCP: point CHECKPOINT_MANIFEST_FILE at a training run's
 # ${METRIC_LOGGER_DIR}/eval_checkpoints.jsonl (written by mlperf_35b_128_v5p.sh).
 # Checkpoints are evaluated in step order and eval_* events are appended to the
-# training MLLOG until pass@4 >= TARGET_ACCURACY; run_stop is backdated to that
+# training MLLOG until pass@4 > TARGET_ACCURACY; run_stop is backdated to that
 # checkpoint's weight-update timestamp (status=aborted if none converges).
 #
 # Without a manifest, MAXTEXT_CKPT is evaluated once. Set RCP_LOGGING=true to
