@@ -637,8 +637,6 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   ), "Require discovery API, but process context doesn't support."
 
   args = _parse_args(argv)
-  if args.rcp_logging:
-    mllog_utils.init_start(args)
   logging.basicConfig(
       level=logging.DEBUG if args.debug else logging.INFO,
       format="%(asctime)s - [DeepSWEOrchestrator] %(message)s",
@@ -701,6 +699,40 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   )
   logging.info("Control-plane JAX backend: %s", jax.default_backend())
 
+  cluster = orchestrator.ClusterOrchestrator(
+      weight_sync_mode=args.weight_sync_mode,
+      trajectory_store_config=_build_trajectory_store_config(args),
+      disable_weight_sync_timeouts=args.disable_weight_sync_timeouts,
+      jax_cache_config={
+          "save_jax_cache": os.getenv("SAVE_JAX_CACHE", "true").lower() in ("1", "true", "yes"),
+          "jax_cache_gcs_dir": os.getenv("JAX_CACHE_GCS_DIR"),
+          "rollout_jax_cache_gcs_dir": os.getenv("ROLLOUT_JAX_CACHE_GCS_DIR"),
+      },
+  )
+  context.ipc.discovery.on_register(
+      functools.partial(
+          cluster.register_worker_from_hostname,
+          rpc_timeout_s=args.rpc_timeout_s,
+      )
+  )
+
+  logging.info(
+      "Waiting for workers to register (before MLPerf init_start)..."
+  )
+  cluster.wait_for_workers(
+      min_workers={
+          datatypes.Role.ACTOR: 1,
+          datatypes.Role.ROLLOUT: args.rollout_replicas,
+          datatypes.Role.REFERENCE: 1 if args.beta != 0.0 else 0,
+      },
+      timeout=args.init_timeout_s,
+      poll_interval_s=1.0,
+  )
+  logging.info("Registered workers: %s", cluster.worker_infos())
+
+  if args.rcp_logging:
+    mllog_utils.init_start(args)
+
   tokenizer_path = (
       args.tokenizer_path or os.getenv("MODEL_DIR") or args.model_id
   )
@@ -721,51 +753,35 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       eos_id,
   )
 
+  from examples.deepswe import sandbox_utils  # pylint: disable=g-import-not-at-top
   from examples.deepswe import swe_env  # pylint: disable=g-import-not-at-top
   from tunix.experimental.examples.deepswe_dist import deepswe  # pylint: disable=g-import-not-at-top
 
-  dataset = deepswe.load_deepswe_dataset(
-      dataset_name=args.dataset_name,
-      dataset_split=args.dataset_split,
-      dataset_path=args.dataset_path,
-      cache_dir=args.dataset_cache_dir or None,
-      shuffle=args.shuffle,
-      seed=args.seed,
-  )
-  logging.info(
-      "Loaded DeepSWE dataset: source=%s split=%s size=%d.",
-      args.dataset_path or args.dataset_name,
-      args.dataset_split,
-      len(dataset),
-  )
+  dataset_holder: list[Any] = []
 
-  cluster = orchestrator.ClusterOrchestrator(
-      weight_sync_mode=args.weight_sync_mode,
-      trajectory_store_config=_build_trajectory_store_config(args),
-      disable_weight_sync_timeouts=args.disable_weight_sync_timeouts,
-      jax_cache_config={
-          "save_jax_cache": os.getenv("SAVE_JAX_CACHE", "true").lower() in ("1", "true", "yes"),
-          "jax_cache_gcs_dir": os.getenv("JAX_CACHE_GCS_DIR"),
-          "rollout_jax_cache_gcs_dir": os.getenv("ROLLOUT_JAX_CACHE_GCS_DIR"),
-      },
-  )
-  context.ipc.discovery.on_register(
-      functools.partial(
-          cluster.register_worker_from_hostname,
-          rpc_timeout_s=args.rpc_timeout_s,
+  def _get_or_load_dataset() -> Any:
+    if not dataset_holder:
+      logging.info(
+          "Loading DeepSWE dataset after train_start: source=%s split=%s.",
+          args.dataset_path or args.dataset_name,
+          args.dataset_split,
       )
-  )
-
-  cluster.wait_for_workers(
-      min_workers={
-          datatypes.Role.ACTOR: 1,
-          datatypes.Role.ROLLOUT: args.rollout_replicas,
-          datatypes.Role.REFERENCE: 1 if args.beta != 0.0 else 0,
-      },
-      timeout=args.init_timeout_s,
-      poll_interval_s=1.0,
-  )
-  logging.info("Registered workers: %s", cluster.worker_infos())
+      loaded = deepswe.load_deepswe_dataset(
+          dataset_name=args.dataset_name,
+          dataset_split=args.dataset_split,
+          dataset_path=args.dataset_path,
+          cache_dir=args.dataset_cache_dir or None,
+          shuffle=args.shuffle,
+          seed=args.seed,
+      )
+      dataset_holder.append(loaded)
+      logging.info(
+          "Loaded DeepSWE dataset: source=%s split=%s size=%d.",
+          args.dataset_path or args.dataset_name,
+          args.dataset_split,
+          len(loaded),
+      )
+    return dataset_holder[0]
 
   algo = _build_algo(args)
   trainer_handles = cluster.worker_handles(datatypes.Role.ACTOR)
@@ -790,11 +806,11 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   prompt_stream = None
   try:
     if args.use_agent_sandbox:
-      # Initialize fleet plan from dataset. Eager warmpools are skipped;
-      # dynamic sliding-window prewarming with initial barrier is handled by
-      # PrewarmDatasetIterator below.
+      # Initialize fleet without tasks upfront; task planning and dynamic
+      # sliding-window prewarming with initial barrier are deferred until
+      # _on_train_start (after MLPerf init_stop / run_start).
       fleet = swe_env._init_global_fleet(  # pylint: disable=protected-access
-          tasks=dataset,
+          tasks=None,
           max_concurrency=args.max_concurrency,
           num_generations=args.num_generations,
           batch_size=args.batch_size,
@@ -802,29 +818,32 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           scaffold=args.scaffold,
       )
 
-    prompt_stream = deepswe.iter_prompt_items(
-        dataset=dataset,
-        max_steps=args.max_steps,
-        batch_size=args.batch_size,
-        max_turns=args.max_turns,
-        max_response_length=args.max_response_length,
-        temperature=args.temperature,
-        top_p=args.top_p,
-        top_k=None if args.top_k < 0 else args.top_k,
-        step_timeout_secs=args.step_timeout_secs,
-        reward_timeout_secs=args.reward_timeout_secs,
-        env_backend=args.env_backend,
-        use_agent_sandbox=args.use_agent_sandbox,
-        scaffold=args.scaffold,
-        env_verbose=args.env_verbose,
-        episode_timeout_secs=args.episode_timeout_secs,
-        overlong_filter=args.overlong_filter,
-        exact_token_continuity=args.exact_token_continuity,
-        max_staleness=args.max_staleness,
-    )
+    def _create_prompt_stream():
+      dataset = _get_or_load_dataset()
+      yield from deepswe.iter_prompt_items(
+          dataset=dataset,
+          max_steps=args.max_steps,
+          batch_size=args.batch_size,
+          max_turns=args.max_turns,
+          max_response_length=args.max_response_length,
+          temperature=args.temperature,
+          top_p=args.top_p,
+          top_k=None if args.top_k < 0 else args.top_k,
+          step_timeout_secs=args.step_timeout_secs,
+          reward_timeout_secs=args.reward_timeout_secs,
+          env_backend=args.env_backend,
+          use_agent_sandbox=args.use_agent_sandbox,
+          scaffold=args.scaffold,
+          env_verbose=args.env_verbose,
+          episode_timeout_secs=args.episode_timeout_secs,
+          overlong_filter=args.overlong_filter,
+          exact_token_continuity=args.exact_token_continuity,
+          max_staleness=args.max_staleness,
+      )
+
     if args.use_agent_sandbox:
       prompt_stream = swe_env.PrewarmDatasetIterator(
-          prompt_stream,
+          _create_prompt_stream(),
           fleet=fleet,
           num_generations=args.num_generations,
           batch_size=args.batch_size,
@@ -833,8 +852,11 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           scaffold=args.scaffold,
           wait_initial=True,
           async_initial=True,
+          lazy_initial=True,
           max_staleness=args.max_staleness,
       )
+    else:
+      prompt_stream = _create_prompt_stream()
 
     global_batch_size = int(args.batch_size) * int(args.num_generations)
     val_start_step = (
@@ -889,10 +911,16 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       )
 
     def _on_train_start(step: int) -> None:
-      if isinstance(prompt_stream, swe_env.PrewarmDatasetIterator):
-        prompt_stream.wait_for_initial()
       if args.rcp_logging:
         mllog_utils.train_start(args, step=step)
+      if args.use_agent_sandbox and fleet is not None:
+        dataset = _get_or_load_dataset()
+        sandbox_utils.ensure_tasks_in_fleet_plan(
+            fleet, list(dataset), scaffold=args.scaffold
+        )
+      if isinstance(prompt_stream, swe_env.PrewarmDatasetIterator):
+        prompt_stream.prime_initial()
+        prompt_stream.wait_for_initial()
 
     program = rl_program.StandardRLProgram(
         algo=algo,
@@ -957,7 +985,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
     if args.rcp_logging:
       mllog_utils.init_print(
           args,
-          train_dataset=dataset,
+          train_dataset=None,
       )
 
     logging.info("Bringing up remote workers through ClusterOrchestrator...")

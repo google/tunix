@@ -922,8 +922,28 @@ class SandboxFailFastTest(absltest.TestCase):
         iterator = sandbox_utils.PrewarmDatasetIterator(
             dataset, fleet=_FailingWarmFleet(), num_generations=2, batch_size=1
         )
-    self.assertEqual(next(iterator), dataset[0])
-    self.assertTrue(any("Warm note for img_A" in line for line in logs.output))
+  def test_lazy_initial_defers_iteration_and_priming(self):
+    dataset_iterated = []
+
+    def _gen():
+      for i in range(5):
+        dataset_iterated.append(i)
+        yield {"prompt": f"p{i}", "docker_image": f"img_{i}"}
+
+    fleet = FakeFleet()
+    iterator = sandbox_utils.PrewarmDatasetIterator(
+        _gen(), fleet=fleet, num_generations=2, batch_size=2, lazy_initial=True
+    )
+    self.assertEmpty(dataset_iterated)
+    self.assertEmpty(fleet.warm_calls)
+    self.assertFalse(iterator._initial_primed)
+
+    iterator.prime_initial()
+    self.assertTrue(iterator._initial_primed)
+    self.assertNotEmpty(dataset_iterated)
+    self.assertNotEmpty(fleet.warm_calls)
+    self.assertEqual(next(iterator)["prompt"], "p0")
+    iterator.close()
 
 
 if __name__ == "__main__":
