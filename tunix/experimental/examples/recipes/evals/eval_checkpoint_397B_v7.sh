@@ -32,6 +32,10 @@ set -e
 #   training run's MLLOG file (seed_<seed>.out).
 # - Blocks until the evaluation JobSet completes, tears down the JobSets and
 #   sandboxes, and prints the evaluation metrics to stdout.
+# - K8S_NAMESPACE=<ns> (and optionally SANDBOX_NAMESPACE=<ns>) overrides the
+#   recipe's priority-dev namespace, e.g. to run on a calendar reservation
+#   namespace (res-trellis-1k-...) whose multislice-queue has reserved capacity.
+#   The same override must be passed to `stop_eval`.
 # ==============================================================================
 
 usage() {
@@ -45,10 +49,33 @@ Arguments:
   --dry-run, --render        Render K8s JobSet YAML without submitting to the cluster
   --require-target           Exit with code 2 if evaluation completes with target_reached=false
   stop, stop_eval            Tear down running evaluation JobSets and sandboxes
+
+Environment overrides (common):
+  K8S_NAMESPACE, SANDBOX_NAMESPACE   Target namespace(s) instead of priority-dev
+                                     (e.g. a calendar reservation namespace)
+  ROLLOUT_REPLICAS, TASKS_LIMIT      Scale down for smoke tests (e.g. 1 and 4)
+  RCP_LOGGING=false                  Do not append eval records to the MLLOG file
+  EVAL_OUTPUT_DIR                    Where summary.json is written
+  HEAD_NODEPOOL_CHECK=false          Skip the head-nodepool capacity guard
 EOF
 }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# mlperf_397b_v7x_eval.sh hardcodes K8S_NAMESPACE=priority-dev. Remember a
+# caller-provided namespace (e.g. a calendar reservation namespace such as
+# res-trellis-1k-1005-pm-elm, whose multislice-queue maps to the reserved
+# ClusterQueue) so it can be re-applied after the recipe is sourced.
+USER_K8S_NAMESPACE="${K8S_NAMESPACE:-}"
+USER_SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-}"
+
+apply_namespace_override() {
+  if [[ -n "${USER_K8S_NAMESPACE}" ]]; then
+    export K8S_NAMESPACE="${USER_K8S_NAMESPACE}"
+    export SANDBOX_NAMESPACE="${USER_SANDBOX_NAMESPACE:-${USER_K8S_NAMESPACE}}"
+    kubectl config set-context --current --namespace="${K8S_NAMESPACE}" >&2 || true
+  fi
+}
 
 if [[ "${1:-}" == "stop" || "${1:-}" == "stop_eval" ]]; then
   if [[ -z "${POD:-}" && -z "${REGION:-}" ]]; then
@@ -63,7 +90,9 @@ if [[ "${1:-}" == "stop" || "${1:-}" == "stop_eval" ]]; then
   # ${EVAL_JOBSET_NAME}-0..N-1 with --ignore-not-found, so 32 also cleans up
   # runs that were launched with a larger ROLLOUT_REPLICAS override.
   export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-32}"
-  exec bash "${SCRIPT_DIR}/mlperf_397b_v7x_eval.sh" stop_eval "${@:2}"
+  MLPERF_NO_LAUNCH=1 source "${SCRIPT_DIR}/mlperf_397b_v7x_eval.sh" >&2
+  apply_namespace_override
+  exec "${LAUNCHER}" --command stop_eval --image "${TUNIX_IMAGE}" "${@:2}"
 fi
 
 CKPT_ARG=""
@@ -284,6 +313,7 @@ unset CHECKPOINT_MANIFEST_FILE
 # Redirect stdout to stderr so `kubectl config use-context` messages do not
 # pollute stdout metrics/YAML output.
 MLPERF_NO_LAUNCH=1 source "${SCRIPT_DIR}/mlperf_397b_v7x_eval.sh" >&2
+apply_namespace_override
 
 # eval_worker.py uses Pathways (JAX_PLATFORMS=proxy, VLLM_TPU_USING_PATHWAYS=1)
 # to expose all 32 devices across the 4-host tpu7x:2x2x4 slice; override
