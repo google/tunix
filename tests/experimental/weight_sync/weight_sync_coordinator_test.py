@@ -169,7 +169,6 @@ class FakeDestination:
       raise_after_complete_once: Optional[str] = None,
       status_unreachable: bool = False,
       transport_mode: Optional[str] = None,
-      auto_h2d: Optional[bool] = False,
   ):
     self._info = datatypes.WorkerInfo(
         worker_id=worker_id, roles=frozenset({datatypes.Role.ROLLOUT.value})
@@ -179,7 +178,6 @@ class FakeDestination:
     self._global_shape = global_shape
     self._item_size = item_size
     self._transport_mode = transport_mode
-    self._auto_h2d = auto_h2d
     self._fail_on = fail_on
     self._fail_persistently = fail_persistently
     self._failed_once: set[str] = set()
@@ -262,7 +260,6 @@ class FakeDestination:
               control_plane_rpc_address=f"10.0.0.2:{self.port + 500}",
               variables=self._variables,
               transport_mode=self._transport_mode,
-              auto_h2d=self._auto_h2d,
           )
       ]
     return [
@@ -275,7 +272,6 @@ class FakeDestination:
             layout=(0,),
             item_size=self._item_size,
             transport_mode=self._transport_mode,
-            auto_h2d=self._auto_h2d,
         )
     ]
 
@@ -416,7 +412,6 @@ class CoordinatorTestBase(absltest.TestCase):
       *destinations: FakeDestination,
       sources=None,
       timeouts=None,
-      parallel_h2h: Optional[bool] = None,
   ):
     self.log: list[str] = []
     self.wire = Wire()
@@ -440,7 +435,6 @@ class CoordinatorTestBase(absltest.TestCase):
         handler=self.handler,
         controller_id="test-controller",
         timeouts=timeouts or FAST_TIMEOUTS,
-        parallel_h2h=parallel_h2h,
     )
     return self.coordinator
 
@@ -2015,97 +2009,6 @@ class PhaseTimingsAndDisabledTimeoutsRoundTest(CoordinatorTestBase):
     result = self.sync(policy_version=1)
     self.assertTrue(result.success)
     self.assertTrue(math.isinf(self.coordinator._timeouts.h2d))
-
-
-class ParallelH2HTest(CoordinatorTestBase):
-  """Tests verifying parallel H2H weight transfer in _run_round."""
-
-  def test_parallel_h2h_defaults_to_false_and_respects_env(self):
-    dest = FakeDestination("sampler", [])
-    with mock.patch.dict(os.environ, {}, clear=False):
-      os.environ.pop("WEIGHT_SYNC_PARALLEL_H2H", None)
-      self.make(dest)
-      self.assertFalse(self.coordinator.parallel_h2h)
-
-    with mock.patch.dict(os.environ, {"WEIGHT_SYNC_PARALLEL_H2H": "true"}):
-      self.make(dest)
-      self.assertTrue(self.coordinator.parallel_h2h)
-
-  def test_phase_order_in_parallel_h2h(self):
-    dest = FakeDestination("sampler", [])
-    self.make(dest, parallel_h2h=True)
-
-    self.sync()
-
-    self.assertEqual(
-        self.phases("sampler"),
-        ["bind", "metadata", "pre", "sync", "post"],
-    )
-    # With parallel H2H, transfer happens BEFORE destination is drained/pre'd.
-    self.assertLess(self.log.index("transfer"), self.log.index("sampler:pre"))
-    self.assertLess(
-        self.log.index("sampler:pre"), self.log.index("sampler:sync")
-    )
-
-  def test_destinations_admit_and_serve_during_transfer(self):
-    dest = FakeDestination("sampler", [])
-    self.make(dest, parallel_h2h=True)
-
-    admitting_during_transfer = None
-
-    original_transfer = self.handler.transfer
-
-    def transfer_hook(*args, **kwargs):
-      nonlocal admitting_during_transfer
-      admitting_during_transfer = dest.admitting
-      return original_transfer(*args, **kwargs)
-
-    self.handler.transfer = transfer_hook
-    self.sync()
-
-    self.assertTrue(admitting_during_transfer)
-    self.assertTrue(dest.admitting)
-
-  def test_transfer_failure_before_quiesce_needs_no_dest_abort(self):
-    dest = FakeDestination("sampler", [])
-    self.make(dest, parallel_h2h=True)
-    self.handler.result_success = False
-    self.handler.result_message = "network connection dropped"
-
-    with self.assertRaises(weight_sync_coordinator.WeightSyncError) as ctx:
-      self.sync()
-
-    self.assertIs(ctx.exception.result.state, RoundState.ABORTED)
-    # Because transfer ran before pre, the destination was NEVER quiesced.
-    # Therefore, no abort was called on the destination, and it kept admitting.
-    self.assertNotIn("abort", self.phases("sampler"))
-    self.assertTrue(dest.admitting)
-    self.assertTrue(dest.kv_cache)
-
-  def test_pre_failure_after_parallel_transfer_rolls_back_destinations(self):
-    dest = FakeDestination("sampler", [], fail_on="pre")
-    self.make(dest, parallel_h2h=True)
-
-    with self.assertRaises(weight_sync_coordinator.WeightSyncError) as ctx:
-      self.sync()
-
-    self.assertIs(ctx.exception.result.state, RoundState.ABORTED)
-    self.assertIn("abort", self.phases("sampler"))
-    self.assertTrue(dest.admitting)
-
-  def test_parallel_h2h_falls_back_to_sequential_when_dest_auto_h2d_not_false(
-      self,
-  ):
-    for unsafe_auto_h2d in (True, None):
-      with self.subTest(auto_h2d=unsafe_auto_h2d):
-        dest = FakeDestination("sampler", [], auto_h2d=unsafe_auto_h2d)
-        self.make(dest, parallel_h2h=True)
-        self.sync()
-        # Because auto_h2d was not False, coordinator must quiesce (pre) BEFORE
-        # transfer to avoid writing into live HBM during serving.
-        self.assertLess(
-            self.log.index("sampler:pre"), self.log.index("transfer")
-        )
 
 
 if __name__ == "__main__":

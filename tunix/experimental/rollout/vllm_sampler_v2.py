@@ -152,13 +152,6 @@ class RLVllmSampler:
         self.engine_args.scheduling_policy,
     )
 
-    if os.environ.get("WEIGHT_SYNC_PARALLEL_H2H"):
-      extra_vars = os.environ.get("VLLM_RAY_EXTRA_ENV_VARS_TO_COPY", "")
-      existing = [v.strip() for v in extra_vars.split(",") if v.strip()]
-      if "WEIGHT_SYNC_PARALLEL_H2H" not in existing:
-        existing.append("WEIGHT_SYNC_PARALLEL_H2H")
-        os.environ["VLLM_RAY_EXTRA_ENV_VARS_TO_COPY"] = ",".join(existing)
-
     self._engine = AsyncLLMEngine.from_engine_args(self.engine_args)
     self._is_running = True
     self._log_stats_task = asyncio.create_task(self._log_stats_loop())
@@ -703,9 +696,6 @@ class RLVllmSampler:
     happen in the worker subprocess instead -- see
     `tpu_worker.TPUWorker.bind_raiden_sync`.
     """
-    from tunix.experimental.weight_sync import raiden_synchronizer  # pylint: disable=g-import-not-at-top
-
-    raiden_synchronizer.patch_raiden_worker_sync()
     await self._call_worker_method(
         "bind_raiden_sync", worker_index, parallelism, job_name
     )
