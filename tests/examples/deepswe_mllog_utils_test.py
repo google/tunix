@@ -1132,6 +1132,28 @@ class MllogUtilsTest(absltest.TestCase):
         f"Compliance checker failed:\n{proc.stdout}\n{proc.stderr}",
     )
 
+  def test_init_print_logs_train_mesh_context(self):
+    args = types.SimpleNamespace(
+        seed=42,
+        metric_logger_dir=self.test_dir,
+        batch_size=32,
+        num_generations=8,
+        max_steps=85,
+        train_mesh_tp=1,
+        train_mesh_context=4,
+        train_mesh_expert=16,
+        rollout_mesh_tp=1,
+        rollout_mesh_expert=16,
+        model_id="Qwen/Qwen3.5-397B-A17B",
+    )
+    mllog_utils.init_start(args)
+    mllog_utils.init_print(args)
+    events = _read_mllog_events(os.path.join(self.test_dir, "seed_42.out"))
+    by_key = {e["key"]: e["value"] for e in events}
+    self.assertEqual(by_key.get("context_parallelism"), 4)
+    self.assertEqual(by_key.get("expert_parallelism"), 16)
+    self.assertEqual(by_key.get("tensor_parallelism"), 1)
+
   def test_iter_prompt_items_max_staleness(self):
     stub_modules = {}
     for mod_name in (

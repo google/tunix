@@ -516,6 +516,7 @@ start_orchestrator() {
         --weight_decay=${WEIGHT_DECAY} \
         --max_grad_norm=${MAX_GRAD_NORM} \
         --train_mesh_tp=${TRAINER_MESH_TP} \
+        --train_mesh_context=${TRAINER_MESH_CONTEXT:-1} \
         --train_mesh_expert=${TRAINER_MESH_EXPERT} \
         --rollout_mesh_tp=${ROLLOUT_MESH_TP} \
         --rollout_mesh_expert=${ROLLOUT_MESH_EXPERT:-1} \
