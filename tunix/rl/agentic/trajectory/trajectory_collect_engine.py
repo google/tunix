@@ -714,7 +714,7 @@ class TrajectoryCollectEngine:
     (obs, info), wall_time = await self._run_with_timing(
         self.env.reset, timeout=self.timeout
     )
-    logging.debug(
+    logging.info(
         "%s env.reset done in %.1fs",
         self._debug_prefix,
         wall_time,
