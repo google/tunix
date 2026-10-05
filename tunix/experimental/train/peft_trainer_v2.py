@@ -1250,7 +1250,9 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
 
       src_state = nnx.state(self.model)
       if mapping_config.preprocess_src_state is not None:
-        src_state = mapping_config.preprocess_src_state(src_state)
+        src_state = mapping_config.preprocess_src_state(
+            src_state, tp_size=self._rollout_tp_size
+        )
       converted_state = gen_utils.transfer_state_with_mappings(
           src_state=src_state,
           dst_state=self._target_state,

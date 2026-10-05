@@ -120,7 +120,9 @@ class WeightSyncStagingTest(absltest.TestCase):
     ) as transfer:
       peft_trainer_v2.PeftTrainer.prepare_weight_sync(fake)
 
-    fake.config.mapping_config.preprocess_src_state.assert_called_once()
+    fake.config.mapping_config.preprocess_src_state.assert_called_once_with(
+        mock.ANY, tp_size=4
+    )
     transfer.assert_called_once_with(
         src_state=mock.sentinel.preprocessed_state,
         dst_state=mock.sentinel.target_state,

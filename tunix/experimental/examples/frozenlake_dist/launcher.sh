@@ -25,6 +25,10 @@ ORCHESTRATOR_ID=${ORCHESTRATOR_ID:-orchestrator}
 ORCHESTRATOR_PORT=${ORCHESTRATOR_PORT:-30000}
 TRAINER_PORT=${TRAINER_PORT:-20000}
 ROLLOUT_PORT=${ROLLOUT_PORT:-20001}
+# Entry points for each process; wrappers may add instrumentation around them.
+TRAINER_PROCESS_MAIN=${TRAINER_PROCESS_MAIN:-tunix.experimental.examples.common.run_trainer_node.main}
+ROLLOUT_PROCESS_MAIN=${ROLLOUT_PROCESS_MAIN:-tunix.experimental.examples.common.run_rollout_node.main}
+ORCHESTRATOR_PROCESS_MAIN=${ORCHESTRATOR_PROCESS_MAIN:-tunix.experimental.examples.frozenlake_dist.run_frozenlake_dist.main}
 
 MODEL_NAME=${MODEL_NAME:-Qwen3-8B}
 MODEL_ID=${MODEL_ID:-Qwen/Qwen3-8B}
@@ -221,7 +225,7 @@ echo "Starting distributed FrozenLake with ${MODEL_ID}: full batch ${BATCH_SIZE}
   cmd=(
     "$PYTHON_BIN" -m tunix.experimental.distributed.runtime.main
     --discovery_addrs="${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT}"
-    --process_main=tunix.experimental.examples.common.run_trainer_node.main
+    --process_main="$TRAINER_PROCESS_MAIN"
     --port="$TRAINER_PORT"
     --mesh_fsdp="$TRAINER_FSDP"
     --mesh_tp="$TRAINER_TP"
@@ -273,7 +277,7 @@ TRAINER_PID=$!
   cmd=(
     "$PYTHON_BIN" -m tunix.experimental.distributed.runtime.main
     --discovery_addrs="${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT}"
-    --process_main=tunix.experimental.examples.common.run_rollout_node.main
+    --process_main="$ROLLOUT_PROCESS_MAIN"
     --port="$ROLLOUT_PORT"
     --model_id="$MODEL_ID"
     --model_dir="$MODEL_DIR"
@@ -323,7 +327,7 @@ cmd=(
   "$PYTHON_BIN" -m tunix.experimental.distributed.runtime.main
   --discovery_id="$ORCHESTRATOR_ID"
   --discovery_port="$ORCHESTRATOR_PORT"
-  --process_main=tunix.experimental.examples.frozenlake_dist.run_frozenlake_dist.main
+  --process_main="$ORCHESTRATOR_PROCESS_MAIN"
   --model_id="$MODEL_ID"
   --tokenizer_path="$TOKENIZER_PATH"
   --batch_size="$BATCH_SIZE"
