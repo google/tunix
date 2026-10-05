@@ -151,6 +151,13 @@ export MAX_WARMPOOL_REPLICAS="${MAX_WARMPOOL_REPLICAS:-32}"
 # (.../checkpoints/<step>/model_params) use scanned layers (SCAN_LAYERS=true).
 export SCAN_LAYERS="${SCAN_LAYERS:-true}"
 
+# Normalize trailing slash and optional missing /model_params suffix
+# (e.g. gs://.../checkpoints/10/ -> gs://.../checkpoints/10/model_params).
+export MAXTEXT_CKPT="${MAXTEXT_CKPT%/}"
+if [[ "${MAXTEXT_CKPT}" =~ ^(.*)/([0-9]+)$ ]]; then
+  export MAXTEXT_CKPT="${MAXTEXT_CKPT}/model_params"
+fi
+
 CKPT_RUN_TAG="single_ckpt"
 if [[ "${MAXTEXT_CKPT}" =~ ^(.*)/([0-9]+)/model_params$ ]]; then
   CKPT_ROOT="${BASH_REMATCH[1]}"
@@ -161,8 +168,7 @@ if [[ "${MAXTEXT_CKPT}" =~ ^(.*)/([0-9]+)/model_params$ ]]; then
   CKPT_RUN_TAG="${CKPT_RUN_TAG%-train}"
   export CHECKPOINT_STEP="${CHECKPOINT_STEP:-${DETECTED_STEP}}"
 
-  if [[ "${RCP_LOGGING:-auto}" != "false" ]]; then
-    if MANIFEST_META="$(python3 - "${CHECKPOINT_MANIFEST_FILE:-}" "${CKPT_ROOT}" "${CHECKPOINT_STEP}" "${MAXTEXT_CKPT}" <<'PY' 2>/dev/null
+  if MANIFEST_META="$(python3 - "${CHECKPOINT_MANIFEST_FILE:-}" "${CKPT_ROOT}" "${CHECKPOINT_STEP}" "${MAXTEXT_CKPT}" <<'PY' 2>/dev/null
 import json
 import os
 import subprocess
@@ -229,6 +235,7 @@ if matched is None:
   sys.exit(1)
 
 mllog_file = str(matched.get("mllog_file") or "")
+canonical_ckpt = str(matched.get("checkpoint_path") or "")
 is_last = "true" if int(matched["step"]) == max_step else "false"
 print("\t".join([
     used_manifest,
@@ -237,20 +244,26 @@ print("\t".join([
     str(int(matched["timestamp_ms"])),
     is_last,
     mllog_file,
+    canonical_ckpt,
 ]))
 PY
-    )"; then
-      IFS=$'\t' read -r _M_PATH _M_STEP _M_SAMPLES _M_TS_MS _M_IS_LAST _M_MLLOG <<< "${MANIFEST_META}"
-      export CHECKPOINT_STEP="${_M_STEP}"
-      export SAMPLES_COUNT="${SAMPLES_COUNT:-${_M_SAMPLES}}"
-      export CHECKPOINT_TIMESTAMP_MS="${CHECKPOINT_TIMESTAMP_MS:-${_M_TS_MS}}"
-      export IS_LAST_CHECKPOINT="${IS_LAST_CHECKPOINT:-${_M_IS_LAST}}"
+  )"; then
+    IFS=$'\t' read -r _M_PATH _M_STEP _M_SAMPLES _M_TS_MS _M_IS_LAST _M_MLLOG _M_CKPT <<< "${MANIFEST_META}"
+    if [[ -n "${_M_CKPT}" && "${_M_CKPT}" != "${MAXTEXT_CKPT}" ]]; then
+      echo "[eval_checkpoint_397B_v7] Resolved canonical checkpoint path from manifest: ${_M_CKPT}" >&2
+      export MAXTEXT_CKPT="${_M_CKPT}"
+    fi
+    export CHECKPOINT_STEP="${_M_STEP}"
+    export SAMPLES_COUNT="${SAMPLES_COUNT:-${_M_SAMPLES}}"
+    export CHECKPOINT_TIMESTAMP_MS="${_M_TS_MS}"
+    export IS_LAST_CHECKPOINT="${IS_LAST_CHECKPOINT:-${_M_IS_LAST}}"
+    if [[ "${RCP_LOGGING:-auto}" != "false" ]]; then
       if [[ -n "${_M_MLLOG}" ]]; then
         export METRIC_LOGGER_DIR="${METRIC_LOGGER_DIR:-${_M_MLLOG}}"
       fi
       export RCP_LOGGING="${RCP_LOGGING:-true}"
-      echo "[eval_checkpoint_397B_v7] Loaded manifest metadata from ${_M_PATH}: step=${CHECKPOINT_STEP} samples_count=${SAMPLES_COUNT} timestamp_ms=${CHECKPOINT_TIMESTAMP_MS} is_last=${IS_LAST_CHECKPOINT} mllog=${METRIC_LOGGER_DIR:-none}" >&2
     fi
+    echo "[eval_checkpoint_397B_v7] Loaded manifest metadata from ${_M_PATH}: step=${CHECKPOINT_STEP} samples_count=${SAMPLES_COUNT} timestamp_ms=${CHECKPOINT_TIMESTAMP_MS} is_last=${IS_LAST_CHECKPOINT} mllog=${METRIC_LOGGER_DIR:-none}" >&2
   fi
 fi
 
