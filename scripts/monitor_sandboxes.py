@@ -114,8 +114,7 @@ def fetch_cluster_data(namespace: str, job_filter: str):
 
     # 5. SandboxTemplate resource requests and limits
     p_tmpl = subprocess.Popen(
-        ["kubectl", "get", "sandboxtemplates", "-n", namespace,
-         "-o", "jsonpath={.items[0].spec.podTemplate.spec.containers[0].resources}"],
+        ["kubectl", "get", "sandboxtemplates", "-n", namespace, "-o", "json"],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
     )
 
@@ -137,7 +136,6 @@ def fetch_cluster_data(namespace: str, job_filter: str):
         ("sandboxwarmpools", p_pools, err_pools),
         ("pods", p_pods, err_pods),
         ("nodes", p_nodes, err_nodes),
-        ("sandboxtemplates", p_tmpl, err_tmpl),
         ("all_pools", p_all_pools, err_all_pools),
     ]:
         if p.returncode != 0:
@@ -150,7 +148,7 @@ def fetch_cluster_data(namespace: str, job_filter: str):
         "pools_raw": out_pools,
         "pods_raw": out_pods,
         "nodes_raw": out_nodes,
-        "tmpl_raw": out_tmpl,
+        "tmpl_raw": out_tmpl if p_tmpl.returncode == 0 else "",
         "all_pools_raw": out_all_pools,
     }
 
@@ -251,7 +249,22 @@ def parse_metrics(data: dict, namespace: str, job_filter: str):
     net_usable_pod_capacity = num_c3d_nodes * (pods_per_node - system_pods_per_node)
 
     # 5. Parse SandboxTemplate Resources
-    tmpl_res = json.loads(data["tmpl_raw"]) if data["tmpl_raw"] else {}
+    tmpl_res = {}
+    if data["tmpl_raw"]:
+        try:
+            tmpl_data = json.loads(data["tmpl_raw"])
+            items = tmpl_data.get("items", [])
+            if items:
+                tmpl_res = (
+                    items[0]
+                    .get("spec", {})
+                    .get("podTemplate", {})
+                    .get("spec", {})
+                    .get("containers", [{}])[0]
+                    .get("resources", {})
+                )
+        except Exception:
+            tmpl_res = {}
     req_cpu = tmpl_res.get("requests", {}).get("cpu", "500m")
     req_mem = tmpl_res.get("requests", {}).get("memory", "1Gi")
     lim_cpu = tmpl_res.get("limits", {}).get("cpu", "2")
