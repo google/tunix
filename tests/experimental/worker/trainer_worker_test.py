@@ -376,6 +376,26 @@ class TrainerWorkerTest(absltest.TestCase):
       self.worker.per_token_logps(items=request)
     self.assertEmpty(self.fake_trainer.model_scope_calls)
 
+  def test_lazy_init_defers_trainer_creation(self):
+    created = []
+
+    def _factory():
+      created.append(True)
+      return self.fake_trainer
+
+    worker = trainer_worker.TrainerWorker(
+        trainer_factory=_factory,
+        worker_id="trainer_lazy",
+        lazy_init=True,
+    )
+    self.assertEmpty(created)
+    self.assertEqual(worker.state, datatypes.WorkerState.PENDING)
+    worker.with_loss_fn(lambda: None)
+    self.assertEmpty(created)
+    worker.initialize()
+    self.assertEqual(len(created), 1)
+    self.assertEqual(worker.state, datatypes.WorkerState.READY)
+
 
 class TrainerWorkerExecutionContextTest(absltest.TestCase):
 

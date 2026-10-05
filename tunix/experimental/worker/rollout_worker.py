@@ -14,7 +14,9 @@
 
 """Top-level RolloutWorker abstractions (Service vs Client Driver)."""
 
+import asyncio
 import dataclasses
+import inspect
 import threading
 from typing import Any, AsyncIterator, Callable, List, Mapping, Optional, Sequence, Union
 
@@ -206,9 +208,48 @@ class RolloutWorker(abstract_worker.Worker):
     finally:
       self.state = WorkerState.READY
 
-  def start(self) -> datatypes.Response:
+  async def _start_async(self) -> datatypes.Response:
+    if inspect.iscoroutinefunction(getattr(self.sampler, "start", None)):
+      logging.info(
+          "Starting sampler engine on rollout worker %s...", self.worker_id
+      )
+      await self.sampler.start()
+      logging.info(
+          "Sampler engine started on rollout worker %s.", self.worker_id
+      )
+    if inspect.iscoroutinefunction(
+        getattr(self.sampler, "bind_weight_sync", None)
+    ):
+      logging.info(
+          "Warming up weight sync on rollout worker %s...", self.worker_id
+      )
+      await self.sampler.bind_weight_sync()
+      logging.info(
+          "Weight sync warmed up on rollout worker %s.", self.worker_id
+      )
+    return datatypes.Response(
+        metadata={
+            "worker_id": self.worker_id,
+            "state": self.state.value,
+            "policy_version": self._policy_version,
+        }
+    )
+
+  def start(self) -> Any:
     if self.state == WorkerState.PENDING:
       self.initialize()
+    if inspect.iscoroutinefunction(
+        getattr(self.sampler, "start", None)
+    ) or inspect.iscoroutinefunction(
+        getattr(self.sampler, "bind_weight_sync", None)
+    ):
+      try:
+        loop = asyncio.get_running_loop()
+      except RuntimeError:
+        loop = None
+      if loop is not None and loop.is_running():
+        return self._start_async()
+      return asyncio.run(self._start_async())
     return datatypes.Response(
         metadata={
             "worker_id": self.worker_id,
