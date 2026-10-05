@@ -110,19 +110,16 @@ class InprocessVllmSamplerAdapter(
           self.server_id,
       )
 
-    if self.tokenizer is not None and self.config is not None:
-      # `sample()` dispatches concurrent requests across `self._executor` worker
-      # threads. Force `server_mode=True` so `VllmSampler` uses
-      # `VLLMInProcessDriver` (where a single background engine thread drains a
-      # thread-safe request queue for continuous batching) instead of
-      # `_generate_offline()`, which calls `engine.step()` directly from caller
-      # threads and races on donated JAX KV-cache buffers (`Array has been
-      # deleted`).
-      self.config.server_mode = True
-      vllm_lib = _get_vllm_sampler_cls()
-      self.vllm_sampler = vllm_lib.VllmSampler(
-          tokenizer=self.tokenizer, config=self.config
-      )
+    # NOTE: Instantiation of self.vllm_sampler is deferred to initialize()
+    # to ensure model graph compilation, KV cache allocation, and precompile
+    # warm-up occur strictly within the MLPerf [init_start, init_stop] window.
+
+  def _get_underlying_sampler(self) -> Any:
+    if self.vllm_sampler is None and (
+        self.tokenizer is not None or self.model_name
+    ):
+      self.initialize()
+    return self.vllm_sampler
 
   def initialize(self) -> None:
     """Initializes vLLM sampler if needed."""
@@ -183,6 +180,8 @@ class InprocessVllmSamplerAdapter(
   async def start(self, **kwargs) -> str | None | Any:
     """Starts the sampling engine or local loop."""
     del kwargs
+    if self.vllm_sampler is None:
+      self.initialize()
     return True
 
   async def stop(self, **kwargs) -> str | None | Any:
@@ -228,10 +227,13 @@ class InprocessVllmSamplerAdapter(
   ):
     """Generates completions using underlying Tunix VllmSampler."""
     if not self.vllm_sampler:
-      raise RuntimeError(
-          f"InprocessVllmSamplerAdapter [{self.server_id}] vllm_sampler is not"
-          " initialized."
-      )
+      if self.tokenizer is not None or self.model_name:
+        self.initialize()
+      if not self.vllm_sampler:
+        raise RuntimeError(
+            f"InprocessVllmSamplerAdapter [{self.server_id}] vllm_sampler is not"
+            " initialized."
+        )
 
     if sampling_requests is None:
       raise ValueError("sampling_requests cannot be None.")
