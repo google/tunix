@@ -227,7 +227,7 @@ if not records:
 max_step = max(int(r["step"]) for r in records)
 matched = None
 for r in records:
-  if int(r["step"]) == target_step or r.get("checkpoint_path", "").rstrip("/") == ckpt_path.rstrip("/"):
+  if int(r["step"]) == target_step or str(r.get("checkpoint_path") or "").rstrip("/") == ckpt_path.rstrip("/"):
     matched = r
     break
 
@@ -237,7 +237,7 @@ if matched is None:
 mllog_file = str(matched.get("mllog_file") or "")
 canonical_ckpt = str(matched.get("checkpoint_path") or "")
 is_last = "true" if int(matched["step"]) == max_step else "false"
-print("\t".join([
+print("|".join([
     used_manifest,
     str(int(matched["step"])),
     str(int(matched["samples_count"])),
@@ -248,7 +248,7 @@ print("\t".join([
 ]))
 PY
   )"; then
-    IFS=$'\t' read -r _M_PATH _M_STEP _M_SAMPLES _M_TS_MS _M_IS_LAST _M_MLLOG _M_CKPT <<< "${MANIFEST_META}"
+    IFS='|' read -r _M_PATH _M_STEP _M_SAMPLES _M_TS_MS _M_IS_LAST _M_MLLOG _M_CKPT <<< "${MANIFEST_META}"
     if [[ -n "${_M_CKPT}" && "${_M_CKPT}" != "${MAXTEXT_CKPT}" ]]; then
       echo "[eval_checkpoint_397B_v7] Resolved canonical checkpoint path from manifest: ${_M_CKPT}" >&2
       export MAXTEXT_CKPT="${_M_CKPT}"
@@ -327,9 +327,9 @@ if [[ "${ROLLOUT_REPLICAS:-1}" -gt 1 ]]; then
 fi
 PROC_SELECTOR="jobset.sigs.k8s.io/jobset-name=${HEAD_JOBSET},jobset.sigs.k8s.io/replicatedjob-name=proc,batch.kubernetes.io/job-completion-index=0"
 
-echo "[eval_checkpoint_397B_v7] Waiting for ${HEAD_JOBSET} (pod 0 main container) in namespace ${K8S_NAMESPACE}..." >&2
+echo "[eval_checkpoint_397B_v7] Waiting for ${HEAD_JOBSET} (pod 0 main container) in namespace ${K8S_NAMESPACE:-default}..." >&2
 while true; do
-  if ! JS_COND="$(kubectl get jobset "${HEAD_JOBSET}" -n "${K8S_NAMESPACE}" -o jsonpath='{.status.conditions[?(@.status=="True")].type}' 2>&1)"; then
+  if ! JS_COND="$(kubectl get jobset "${HEAD_JOBSET}" ${K8S_NAMESPACE:+-n "${K8S_NAMESPACE}"} -o jsonpath='{.status.conditions[?(@.status=="True")].type}' 2>&1)"; then
     if [[ "${JS_COND}" == *NotFound* ]]; then
       echo "[eval_checkpoint_397B_v7] JobSet ${HEAD_JOBSET} no longer exists." >&2
       break
@@ -341,9 +341,9 @@ while true; do
     echo "[eval_checkpoint_397B_v7] JobSet ${HEAD_JOBSET} reached terminal condition: ${JS_COND}." >&2
     break
   fi
-  POD_STATUS="$(kubectl get pods -n "${K8S_NAMESPACE}" -l "${PROC_SELECTOR}" \
-    -o jsonpath='{.items[0].status.containerStatuses[?(@.name=="main")].state.terminated.exitCode}{"\t"}{.items[0].status.containerStatuses[?(@.name=="main")].state.waiting.reason}{"\t"}{.items[0].status.containerStatuses[?(@.name=="main")].restartCount}{"\t"}{.items[0].status.containerStatuses[?(@.name=="main")].lastState.terminated.exitCode}' 2>/dev/null || true)"
-  IFS=$'\t' read -r MAIN_EXIT WAIT_REASON RESTARTS LAST_EXIT <<< "${POD_STATUS}"
+  POD_STATUS="$(kubectl get pods ${K8S_NAMESPACE:+-n "${K8S_NAMESPACE}"} -l "${PROC_SELECTOR}" \
+    -o jsonpath='{.items[0].status.containerStatuses[?(@.name=="main")].state.terminated.exitCode}{"|"}{.items[0].status.containerStatuses[?(@.name=="main")].state.waiting.reason}{"|"}{.items[0].status.containerStatuses[?(@.name=="main")].restartCount}{"|"}{.items[0].status.containerStatuses[?(@.name=="main")].lastState.terminated.exitCode}' 2>/dev/null || true)"
+  IFS='|' read -r MAIN_EXIT WAIT_REASON RESTARTS LAST_EXIT <<< "${POD_STATUS}"
   if [[ -n "${MAIN_EXIT}" ]]; then
     echo "[eval_checkpoint_397B_v7] Main evaluation container finished with exit code ${MAIN_EXIT}." >&2
     break
@@ -385,20 +385,28 @@ else:
     text = f.read()
 
 summary = json.loads(text)
-pass_at_k = summary.get("pass_at_k") or {}
-pass_at_1 = float(pass_at_k.get("1", summary.get("avg_at_k", 0.0)))
-pass_at_4 = float(pass_at_k.get("4", pass_at_1))
-instances = int(summary.get("instances", 0))
+pass_at_k = summary["pass_at_k"]
+pass_at_1 = pass_at_k.get("1")
+if pass_at_1 is None:
+  pass_at_1 = summary["avg_at_k"]
+pass_at_1 = float(pass_at_1)
+
+pass_at_4 = pass_at_k.get("4")
+if pass_at_4 is None:
+  pass_at_4 = pass_at_1
+pass_at_4 = float(pass_at_4)
+
+instances = int(summary["instances"])
 resolved_instances = int(round(pass_at_4 * instances))
-resolved_attempts = int(summary.get("resolved_attempts", 0))
-completed_att = int(summary.get("completed_attempts", 0))
-expected_att = int(summary.get("expected_attempts", 0))
-error_att = int(summary.get("error_attempts", 0))
-complete = bool(summary.get("complete", False))
-target_acc = float(summary.get("target_accuracy", 0.69))
-target_reached = bool(summary.get("target_reached", False))
-step = int(summary.get("checkpoint_step", 0))
-samples_count = int(summary.get("samples_count", 0))
+resolved_attempts = int(summary["resolved_attempts"])
+completed_att = int(summary["completed_attempts"])
+expected_att = int(summary["expected_attempts"])
+error_att = int(summary["error_attempts"])
+complete = bool(summary["complete"])
+target_acc = float(summary["target_accuracy"])
+target_reached = bool(summary["target_reached"])
+step = int(summary["checkpoint_step"])
+samples_count = int(summary["samples_count"])
 
 output_metrics = {
     "checkpoint": ckpt_path,
