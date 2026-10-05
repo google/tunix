@@ -143,7 +143,7 @@ export ROLLOUT_MESH_TP="${ROLLOUT_MESH_TP:-1}"
 # ==============================================================================
 # MLPerf RCP Logging
 # ==============================================================================
-export RCP_LOGGING="${RCP_LOGGING:-true}"
+export RCP_LOGGING="${RCP_LOGGING:-false}"
 if [[ -n "${MAXTEXT_OUTPUT_DIR:-}" ]]; then
   export METRIC_LOGGER_DIR="${METRIC_LOGGER_DIR:-${MAXTEXT_OUTPUT_DIR}/mllog}"
 fi
