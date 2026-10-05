@@ -757,32 +757,6 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   from examples.deepswe import swe_env  # pylint: disable=g-import-not-at-top
   from tunix.experimental.examples.deepswe_dist import deepswe  # pylint: disable=g-import-not-at-top
 
-  dataset_holder: list[Any] = []
-
-  def _get_or_load_dataset() -> Any:
-    if not dataset_holder:
-      logging.info(
-          "Loading DeepSWE dataset after train_start: source=%s split=%s.",
-          args.dataset_path or args.dataset_name,
-          args.dataset_split,
-      )
-      loaded = deepswe.load_deepswe_dataset(
-          dataset_name=args.dataset_name,
-          dataset_split=args.dataset_split,
-          dataset_path=args.dataset_path,
-          cache_dir=args.dataset_cache_dir or None,
-          shuffle=args.shuffle,
-          seed=args.seed,
-      )
-      dataset_holder.append(loaded)
-      logging.info(
-          "Loaded DeepSWE dataset: source=%s split=%s size=%d.",
-          args.dataset_path or args.dataset_name,
-          args.dataset_split,
-          len(loaded),
-      )
-    return dataset_holder[0]
-
   algo = _build_algo(args)
   trainer_handles = cluster.worker_handles(datatypes.Role.ACTOR)
   if len(trainer_handles) != 1:
@@ -804,60 +778,8 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
 
   fleet = None
   prompt_stream = None
+  program = None
   try:
-    if args.use_agent_sandbox:
-      # Initialize fleet without tasks upfront; task planning and dynamic
-      # sliding-window prewarming with initial barrier are deferred until
-      # _on_train_start (after MLPerf init_stop / run_start).
-      fleet = swe_env._init_global_fleet(  # pylint: disable=protected-access
-          tasks=None,
-          max_concurrency=args.max_concurrency,
-          num_generations=args.num_generations,
-          batch_size=args.batch_size,
-          max_warmpool_replicas=args.max_warmpool_replicas,
-          scaffold=args.scaffold,
-      )
-
-    def _create_prompt_stream():
-      dataset = _get_or_load_dataset()
-      yield from deepswe.iter_prompt_items(
-          dataset=dataset,
-          max_steps=args.max_steps,
-          batch_size=args.batch_size,
-          max_turns=args.max_turns,
-          max_response_length=args.max_response_length,
-          temperature=args.temperature,
-          top_p=args.top_p,
-          top_k=None if args.top_k < 0 else args.top_k,
-          step_timeout_secs=args.step_timeout_secs,
-          reward_timeout_secs=args.reward_timeout_secs,
-          env_backend=args.env_backend,
-          use_agent_sandbox=args.use_agent_sandbox,
-          scaffold=args.scaffold,
-          env_verbose=args.env_verbose,
-          episode_timeout_secs=args.episode_timeout_secs,
-          overlong_filter=args.overlong_filter,
-          exact_token_continuity=args.exact_token_continuity,
-          max_staleness=args.max_staleness,
-      )
-
-    if args.use_agent_sandbox:
-      prompt_stream = swe_env.PrewarmDatasetIterator(
-          _create_prompt_stream(),
-          fleet=fleet,
-          num_generations=args.num_generations,
-          batch_size=args.batch_size,
-          max_warmpool_replicas=args.max_warmpool_replicas,
-          unwarm_on_exhaustion=True,
-          scaffold=args.scaffold,
-          wait_initial=True,
-          async_initial=True,
-          lazy_initial=True,
-          max_staleness=args.max_staleness,
-      )
-    else:
-      prompt_stream = _create_prompt_stream()
-
     global_batch_size = int(args.batch_size) * int(args.num_generations)
     val_start_step = (
         mllog_utils.compute_val_start_step(global_batch_size, args.val_start_at)
@@ -911,20 +833,79 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       )
 
     def _on_train_start(step: int) -> None:
+      nonlocal fleet, prompt_stream
       if args.rcp_logging:
         mllog_utils.train_start(args, step=step)
-      if args.use_agent_sandbox and fleet is not None:
-        dataset = _get_or_load_dataset()
-        sandbox_utils.ensure_tasks_in_fleet_plan(
-            fleet, list(dataset), scaffold=args.scaffold
+
+      logging.info(
+          "Loading DeepSWE dataset after train_start: source=%s split=%s.",
+          args.dataset_path or args.dataset_name,
+          args.dataset_split,
+      )
+      dataset = deepswe.load_deepswe_dataset(
+          dataset_name=args.dataset_name,
+          dataset_split=args.dataset_split,
+          dataset_path=args.dataset_path,
+          cache_dir=args.dataset_cache_dir or None,
+          shuffle=args.shuffle,
+          seed=args.seed,
+      )
+      logging.info(
+          "Loaded DeepSWE dataset: source=%s split=%s size=%d.",
+          args.dataset_path or args.dataset_name,
+          args.dataset_split,
+          len(dataset),
+      )
+
+      if args.use_agent_sandbox:
+        fleet = sandbox_utils.init_global_fleet(
+            tasks=dataset,
+            max_concurrency=args.max_concurrency,
+            num_generations=args.num_generations,
+            batch_size=args.batch_size,
+            max_warmpool_replicas=args.max_warmpool_replicas,
+            scaffold=args.scaffold,
         )
-      if isinstance(prompt_stream, swe_env.PrewarmDatasetIterator):
-        prompt_stream.prime_initial()
-        prompt_stream.wait_for_initial()
+
+      raw_prompt_stream = deepswe.iter_prompt_items(
+          dataset=dataset,
+          max_steps=args.max_steps,
+          batch_size=args.batch_size,
+          max_turns=args.max_turns,
+          max_response_length=args.max_response_length,
+          temperature=args.temperature,
+          top_p=args.top_p,
+          top_k=None if args.top_k < 0 else args.top_k,
+          step_timeout_secs=args.step_timeout_secs,
+          reward_timeout_secs=args.reward_timeout_secs,
+          env_backend=args.env_backend,
+          use_agent_sandbox=args.use_agent_sandbox,
+          scaffold=args.scaffold,
+          env_verbose=args.env_verbose,
+          episode_timeout_secs=args.episode_timeout_secs,
+          overlong_filter=args.overlong_filter,
+          exact_token_continuity=args.exact_token_continuity,
+          max_staleness=args.max_staleness,
+      )
+      if args.use_agent_sandbox:
+        prompt_stream = swe_env.PrewarmDatasetIterator(
+            raw_prompt_stream,
+            fleet=fleet,
+            num_generations=args.num_generations,
+            batch_size=args.batch_size,
+            max_warmpool_replicas=args.max_warmpool_replicas,
+            unwarm_on_exhaustion=True,
+            scaffold=args.scaffold,
+            wait_initial=True,
+            max_staleness=args.max_staleness,
+        )
+      else:
+        prompt_stream = raw_prompt_stream
+      program.dataset = prompt_stream
 
     program = rl_program.StandardRLProgram(
         algo=algo,
-        dataset=prompt_stream,
+        dataset=None,
         max_steps=args.max_steps,
         generation_args=datatypes.GenerationArgs(
             max_generation_steps=args.max_response_length,

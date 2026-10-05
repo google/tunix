@@ -648,8 +648,9 @@ class PrewarmDatasetIterator:
     * New image key: fleet.warm_image(img, replicas, wait=False)
     * Changed count: fleet.set_pool_replicas(img, replicas)
     * Deleted image key (count 0): fleet.unwarm_image(img)
-  Every new pool is created up front; only the current batch's pools get the
-  initial readiness barrier (`wait_initial`). Lookahead batches are lower
+  Every new pool is created up front; the start-up batches `0..S` (which
+  are dispatched back-to-back immediately at step 0) get the initial readiness
+  barrier (`wait_initial`). Prefetch lookahead batches (`> S`) are lower
   priority, so their pools warm in the background without blocking.
   Cleans up all warm pools upon iteration completion or close().
   """
@@ -667,7 +668,6 @@ class PrewarmDatasetIterator:
       image_rewrite: Any | None = None,
       wait_initial: bool = True,
       async_initial: bool = False,
-      lazy_initial: bool = False,
       max_staleness: int = 0,
       max_workers: int = 16,
   ):
@@ -679,7 +679,6 @@ class PrewarmDatasetIterator:
     self.max_warmpool_replicas = max_warmpool_replicas
     self.unwarm_on_exhaustion = unwarm_on_exhaustion
     self.wait_initial = wait_initial
-    self.async_initial = async_initial
     self.max_staleness = max(0, int(max_staleness))
     # Steady-state window of undispatched batches, and the deeper start-up
     # window that covers batches 0..S (dispatched back-to-back) + 1 prefetch.
@@ -690,7 +689,6 @@ class PrewarmDatasetIterator:
     self.max_workers = max(1, int(max_workers))
     self._fail_fast = SandboxFailFastConfig.from_env().enabled
     self._lock = threading.Lock()
-    self._init_lock = threading.Lock()
     self.image_rewrite = get_image_rewrite_fn(
         image_rewrite or getattr(self.fleet, "_image_rewrite_fn", None)
     )
@@ -708,65 +706,58 @@ class PrewarmDatasetIterator:
     self._active_replicas: dict[str, int] = {}
     self.unwarm_calls: list[str] = []
     self._exhausted = False
-    self._initial_primed = False
     self._initial_warm_thread: threading.Thread | None = None
     self._initial_warm_error: BaseException | None = None
 
-    if not lazy_initial:
-      self.prime_initial()
+    # 1. Fill current_batch queue up to batch_size
+    self._fill_batch(self.current_batch, self._current_batch_counts)
 
-  def prime_initial(self) -> None:
-    """Reads initial batch + lookahead window and starts K8s warmpool priming."""
-    with self._init_lock:
-      if self._initial_primed:
-        return
+    # 2. Fill the start-up lookahead window (batches 0..S + 1 prefetch)
+    self._refill_lookahead(self.initial_lookahead_batches)
 
-      # 1. Fill current_batch queue up to batch_size
-      self._fill_batch(self.current_batch, self._current_batch_counts)
+    # 3. Dict maintains the samples of active batches
+    self._update_image_counts()
 
-      # 2. Fill the start-up lookahead window (batches 0..S + 1 prefetch)
-      self._refill_lookahead(self.initial_lookahead_batches)
+    # 4. After the dict updated, we interact the fleet. Batches 0..S are
+    # dispatched back-to-back immediately when step 0 starts, so all of their
+    # pools are waited on; prefetch batch(es) (> S) warm in the background.
+    if self._image_counts:
+      startup_wait_images = set(self._current_batch_counts)
+      for batch in list(self._lookahead)[: self.max_staleness]:
+        startup_wait_images.update(batch.counts)
+      wait_images = (
+          frozenset(startup_wait_images)
+          if self.wait_initial
+          else frozenset()
+      )
+      logging.info(
+          "[PrewarmDatasetIterator] Priming initial sandboxes on K8s"
+          " (wait=%s, async_initial=%s, initial_lookahead_batches=%d):"
+          " creating %d"
+          " pool(s), readiness barrier on the %d pool(s) of start-up"
+          " batches 0..%d...",
+          self.wait_initial,
+          async_initial,
+          self.initial_lookahead_batches,
+          len(self._image_counts),
+          len(wait_images),
+          self.max_staleness,
+      )
+      if async_initial:
+        def _run_initial_warm() -> None:
+          try:
+            self._interact_fleet(wait_images)
+          except BaseException as exc:  # pylint: disable=broad-exception-caught
+            self._initial_warm_error = exc
 
-      # 3. Dict maintains the samples of active batches
-      self._update_image_counts()
-
-      # 4. After the dict updated, we interact the fleet. Only the current
-      # batch's pools are waited on; lookahead pools are created now and warm in
-      # the background.
-      if self._image_counts:
-        wait_images = (
-            frozenset(self._current_batch_counts)
-            if self.wait_initial
-            else frozenset()
+        self._initial_warm_thread = threading.Thread(
+            target=_run_initial_warm,
+            name="prewarm-initial-sandboxes",
+            daemon=True,
         )
-        logging.info(
-            "[PrewarmDatasetIterator] Priming initial sandboxes on K8s"
-            " (wait=%s, async_initial=%s, initial_lookahead_batches=%d):"
-            " creating %d"
-            " pool(s), readiness barrier on the %d pool(s) of the current"
-            " batch...",
-            self.wait_initial,
-            self.async_initial,
-            self.initial_lookahead_batches,
-            len(self._image_counts),
-            len(wait_images),
-        )
-        if self.async_initial:
-          def _run_initial_warm() -> None:
-            try:
-              self._interact_fleet(wait_images)
-            except BaseException as exc:  # pylint: disable=broad-exception-caught
-              self._initial_warm_error = exc
-
-          self._initial_warm_thread = threading.Thread(
-              target=_run_initial_warm,
-              name="prewarm-initial-sandboxes",
-              daemon=True,
-          )
-          self._initial_warm_thread.start()
-        else:
-          self._interact_fleet(wait_images)
-      self._initial_primed = True
+        self._initial_warm_thread.start()
+      else:
+        self._interact_fleet(wait_images)
 
   @property
   def next_batch(self) -> collections.deque[tuple[Any, dict[str, int], int]]:
@@ -786,8 +777,6 @@ class PrewarmDatasetIterator:
 
   def wait_for_initial(self) -> None:
     """Blocks until background initial sandbox priming completes."""
-    if not self._initial_primed:
-      self.prime_initial()
     if self._initial_warm_thread is not None:
       self._initial_warm_thread.join()
       self._initial_warm_thread = None
@@ -1063,8 +1052,6 @@ class PrewarmDatasetIterator:
 
   def has_next(self) -> bool:
     """Returns True if at least one more item can be yielded without exhaustion."""
-    if not self._initial_primed:
-      self.prime_initial()
     return bool(self.current_batch or self._lookahead)
 
   def __iter__(self):
