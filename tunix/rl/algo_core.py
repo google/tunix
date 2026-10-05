@@ -692,7 +692,7 @@ def grpo_loss_fn(
         segment_ids=segment_ids,
         num_segments=num_segments,
     )
-    aux["kl_loss"] = kl_loss  # pyrefly: ignore[bad-assignment]
+    aux["kl_loss"] = kl_loss
   if beta is not None and beta != 0.0:
     total_loss = sft_utils.WeightedMetric(
         unreduced_pg_loss.unreduced_sum + beta * kl_loss.unreduced_sum,  # pyrefly: ignore[unbound-name]
@@ -710,7 +710,7 @@ def grpo_loss_fn(
   )
   aux["entropy"] = entropy_loss
 
-  return sft_utils.LossOutput(primary_loss=total_loss, aux_metrics=aux)  # pyrefly: ignore[bad-argument-type]
+  return sft_utils.LossOutput(primary_loss=total_loss, aux_metrics=aux)
 
 
 MIN_VALID_TRAJECTORIES_FOR_ADVANTAGE: int = 2

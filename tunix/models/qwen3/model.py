@@ -469,7 +469,7 @@ class RMSNorm(nnx.Module):
     self.w = nnx.Param(
         nnx.initializers.ones_init()(
             rngs.params(), dim, param_dtype  # pyrefly: ignore[bad-argument-type]
-        ),  # pyrefly: ignore[bad-argument-type]
+        ),
         sharding=shd_config.rms_norm_weight,
     )
     self.norm_eps = norm_eps
@@ -562,13 +562,13 @@ class Attention(nnx.Module):
 
     query_proj = shard(
         query_proj, self.shd_config.act_btnh  # pyrefly: ignore[bad-argument-type]
-    )  # pyrefly: ignore[bad-argument-type]
+    )
     key_proj = shard(
         key_proj, self.shd_config.act_btnh  # pyrefly: ignore[bad-argument-type]
-    )  # pyrefly: ignore[bad-argument-type]
+    )
     value_proj = shard(
         value_proj, self.shd_config.act_btnh  # pyrefly: ignore[bad-argument-type]
-    )  # pyrefly: ignore[bad-argument-type]
+    )
 
     query_proj = apply_rope(
         query_proj,
@@ -793,7 +793,7 @@ class Attention(nnx.Module):
     outputs = self.o_proj(qkv)
     outputs = shard(
         outputs, self.shd_config.act_btd  # pyrefly: ignore[bad-argument-type]
-    )  # pyrefly: ignore[bad-argument-type]
+    )
 
     if cache is not None:
       new_cache = {
@@ -910,7 +910,7 @@ class MoELayer(nnx.Module):
       dispatch_mask = jax.nn.one_hot(
           routing_idx,
           num_classes=self.num_experts,  # pyrefly: ignore[bad-argument-type]
-          dtype=self.dtype,  # pyrefly: ignore[bad-argument-type]
+          dtype=self.dtype,
       )  # [B, T, K, E]
       dispatch_mask = jnp.swapaxes(dispatch_mask, -1, -2)  # [B, T, E, K]
       dispatched_input = jnp.einsum(
@@ -985,12 +985,12 @@ class MoELayer(nnx.Module):
 
       num_local_experts = (
           self.num_experts // num_ep  # pyrefly: ignore[unsupported-operation]
-      )  # pyrefly: ignore[unsupported-operation]
+      )
 
       flat_repeated_inputs = jnp.repeat(
           inputs.reshape(B * T, D_global),
           self.experts_per_tok,  # pyrefly: ignore[bad-argument-type]
-          axis=0,  # pyrefly: ignore[bad-argument-type]
+          axis=0,
       )
       flat_selected_indices = indices.reshape(-1)
 
@@ -1026,7 +1026,7 @@ class MoELayer(nnx.Module):
             min(self.experts_per_tok, num_local_experts)  # pyrefly: ignore[bad-specialization]
             * B
             * T
-            * num_ep  # pyrefly: ignore[bad-specialization]
+            * num_ep
         )
         output_buffer = jax.lax.empty(
             shape=(output_buffer_size, D_global), dtype=inputs.dtype
@@ -1201,7 +1201,7 @@ class MLP(nnx.Module):
     activations = nnx.silu(self.gate_proj(x)) * self.up_proj(x)
     activations = shard(
         activations, self.shd_config.act_btf  # pyrefly: ignore[bad-argument-type]
-    )  # pyrefly: ignore[bad-argument-type]
+    )
     outputs = self.down_proj(activations)
     return outputs
 
@@ -1415,7 +1415,7 @@ class Qwen3(BackendMappingMixin, nnx.Module):
           segment_ids=segment_ids,
       )
       if cache is not None:
-        new_cache[layer_name] = layer_cache  # pytype: disable=container-type-mismatch
+        new_cache[layer_name] = layer_cache  # pyrefly: ignore[unsupported-operation]
 
     x = self.final_norm(x)
     if output_hidden_states:
@@ -1426,7 +1426,7 @@ class Qwen3(BackendMappingMixin, nnx.Module):
 
     logits = self.compute_final_logits(x)
 
-    return logits, new_cache  # pytype: disable=bad-return-type
+    return logits, new_cache
 
   def compute_final_logits(
       self,

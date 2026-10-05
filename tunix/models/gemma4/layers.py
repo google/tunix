@@ -115,7 +115,7 @@ class Embedder(nnx.Module):
     x = self.input_embedding[(x,)]
     x *= jnp.sqrt(x.shape[-1]).astype(x.dtype)  # pyrefly: ignore[missing-attribute]
     x = jnp.astype(x, self.config.dtype)
-    x = shard(x, self.config.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
+    x = shard(x, self.config.shd_config.act_btd)
     return x
 
   def encode_vision(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:

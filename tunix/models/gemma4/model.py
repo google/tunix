@@ -664,7 +664,7 @@ class Gemma4(BackendMappingMixin, nnx.Module):
         idx = b * max_n_images + i
         expected_count = counts[i]  # pyrefly: ignore[bad-index]
         if mask is not None:
-          valid_indices = jnp.nonzero(mask[idx], size=expected_count)[0]  # pyrefly: ignore[bad-argument-type]
+          valid_indices = jnp.nonzero(mask[idx], size=expected_count)[0]
           real_tokens = embeddings[idx][valid_indices]
         else:
           real_tokens = embeddings[idx][:expected_count]

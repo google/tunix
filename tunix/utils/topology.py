@@ -243,7 +243,7 @@ def _is_pathways_backend_used() -> bool:
   if "proxy" in os.environ.get("JAX_PLATFORMS", ""):
     return True
   try:
-    import pathwaysutils  # pylint: disable=g-import-not-at-top # pytype: disable=import-error
+    import pathwaysutils  # pylint: disable=g-import-not-at-top  # pyrefly: ignore[missing-import]
 
     return bool(pathwaysutils.is_pathways_backend_used())
   except ImportError:

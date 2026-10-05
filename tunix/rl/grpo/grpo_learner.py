@@ -97,7 +97,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         data_shuffle_seed=data_shuffle_seed,
     )
 
-    self.algo_config.temperature = self.rl_engine.get_rollout_config(  # pyrefly: ignore[missing-attribute]
+    self.algo_config.temperature = self.rl_engine.get_rollout_config(
         mode=rl_engine_lib.Mode.TRAIN
     ).temperature
 
@@ -121,7 +121,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         has_aux=True,
     )
     self.rl_engine.actor_trainer.with_gen_model_input_fn(
-        lambda x: {  # pyrefly: ignore[bad-argument-type]
+        lambda x: {
             "train_example": x,
             "algo_config": self.algo_config,  # pyrefly: ignore[bad-assignment]
         }

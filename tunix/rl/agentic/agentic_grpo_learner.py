@@ -218,7 +218,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     else:
       logging.warning("Metrics log dir is None, skipping trajectory logging.")
 
-    self.algo_config.temperature = (  # pyrefly: ignore[missing-attribute]
+    self.algo_config.temperature = (
         self.rl_engine.get_rollout_config(
             mode=rl_engine_lib.Mode.TRAIN
         ).temperature
@@ -242,12 +242,12 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         has_aux=True,
     )
     self.rl_engine.actor_trainer.with_gen_model_input_fn(
-        lambda x: {  # pyrefly: ignore[bad-argument-type]
+        lambda x: {
             "train_example": x,
             "algo_config": self.algo_config,  # pyrefly: ignore[bad-assignment]
         }
     )
-    self.rl_engine.actor_trainer.with_rl_metrics_to_log({  # pyrefly: ignore[bad-argument-type]
+    self.rl_engine.actor_trainer.with_rl_metrics_to_log({
         "kl": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
         "entropy": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
         "reduced_pg_loss": common.mean_of_means,  # pyrefly: ignore[bad-assignment]

@@ -469,7 +469,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             is_first_msg=True,  # no op if system msg is populated in reset
         )
       return self.rl_engine.generate(
-          prompts=[chat_lists],  # pytype: disable=wrong-arg-types
+          prompts=[chat_lists],  # pyrefly: ignore[bad-argument-type]
           apply_chat_template=not self.chat_parser,
           mode=rl_engine_lib.Mode.TRAIN,
           trace_tags=tags,
@@ -934,7 +934,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             jnp.array(float((seg == 0).sum())), jnp.array(float(seg.size))
         )
         self.rl_engine.buffer_metrics_async(
-            {  # pyrefly: ignore[bad-argument-type]
+            {
                 "packing/dummy_ratio": (  # pyrefly: ignore[bad-assignment]
                     dummy_ratio,
                     common.global_weighted_mean,
