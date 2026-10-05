@@ -412,8 +412,30 @@ for i, r in enumerate(records):
     EVAL_JOBSET_NAME="${EVAL_JOBSET_NAME:-${JOB_PREFIX}-eval}"
     for row in "${MANIFEST_ROWS[@]}"; do
       IFS=$'\t' read -r STEP SAMPLES TS_MS CKPT_PATH IS_LAST MLLOG_FILE <<< "${row}"
+      # Resume after a failed step without re-logging the steps before it.
+      if [[ -n "${EVAL_START_STEP:-}" ]] && (( STEP < EVAL_START_STEP )); then
+        echo "Skipping step ${STEP} (EVAL_START_STEP=${EVAL_START_STEP})."
+        continue
+      fi
 
       echo "=== Evaluating checkpoint step=${STEP} samples=${SAMPLES} is_last=${IS_LAST} path=${CKPT_PATH} ==="
+      # The trainer adds a manifest row when an async save starts, not when it
+      # commits. Evaluating an uncommitted step, or skipping it, would leave a
+      # gap in the MLLOG evals, so wait for the commit marker or stop.
+      STEP_DIR="${CKPT_PATH%/}"
+      STEP_DIR="${STEP_DIR%/model_params}"
+      if [[ "${STEP_DIR}" == gs://* && "${DRY_RUN:-false}" != "true" ]]; then
+        COMMIT_WAIT_SECS="${CKPT_COMMIT_WAIT_SECS:-900}"
+        COMMIT_DEADLINE=$(( SECONDS + COMMIT_WAIT_SECS ))
+        until gsutil -q stat "${STEP_DIR}/commit_success.txt"; do
+          if (( SECONDS >= COMMIT_DEADLINE )); then
+            echo "ERROR: ${STEP_DIR}/commit_success.txt is missing after ${COMMIT_WAIT_SECS}s; checkpoint step ${STEP} never committed. Stopping so the MLLOG evals stay contiguous." >&2
+            exit 1
+          fi
+          echo "Waiting for checkpoint step ${STEP} to commit (${STEP_DIR}/commit_success.txt)..."
+          sleep 30
+        done
+      fi
       export MAXTEXT_CKPT="${CKPT_PATH}"
       export CHECKPOINT_STEP="${STEP}"
       export SAMPLES_COUNT="${SAMPLES}"
@@ -430,6 +452,7 @@ for i, r in enumerate(records):
           HEAD_JOBSET="${EVAL_JOBSET_NAME}-0"
         fi
         echo "Waiting for evaluation JobSet ${HEAD_JOBSET} (main container) in namespace ${K8S_NAMESPACE}..."
+        MAIN_EXIT=""
         while true; do
           if ! kubectl get jobset "${HEAD_JOBSET}" -n "${K8S_NAMESPACE}" &>/dev/null; then
             echo "JobSet ${HEAD_JOBSET} no longer exists."
@@ -444,33 +467,53 @@ for i, r in enumerate(records):
         done
         "${LAUNCHER}" --command stop_eval --image "${TUNIX_IMAGE}" || true
 
-        TARGET_REACHED="$(
+        # Prints "target", "logged", "unlogged" (summary written but the eval
+        # was not logged to the MLLOG) or "missing" (no summary at all).
+        EVAL_STATUS="$(
           python3 -c '
-import glob, json, os, subprocess, sys
+import glob, json, os, subprocess
 out_dir = os.environ["EVAL_OUTPUT_DIR"].rstrip("/")
+data = None
 if out_dir.startswith("gs://"):
     res = subprocess.run(["gsutil", "ls", f"{out_dir}/*/summary.json"], capture_output=True, text=True, check=False)
-    if res.returncode == 0 and res.stdout.strip():
-        matches = sorted(line.strip() for line in res.stdout.splitlines() if line.strip())
-        if matches:
-            res_cat = subprocess.run(["gsutil", "cat", matches[-1]], capture_output=True, text=True, check=False)
-            if res_cat.returncode == 0 and res_cat.stdout.strip():
-                data = json.loads(res_cat.stdout)
-                print("true" if data.get("target_reached") else "false")
-                sys.exit(0)
+    matches = sorted(line.strip() for line in res.stdout.splitlines() if line.strip()) if res.returncode == 0 else []
+    if matches:
+        res_cat = subprocess.run(["gsutil", "cat", matches[-1]], capture_output=True, text=True, check=False)
+        if res_cat.returncode == 0 and res_cat.stdout.strip():
+            data = json.loads(res_cat.stdout)
 else:
     matches = sorted(glob.glob(f"{out_dir}/*/summary.json"))
     if matches:
         with open(matches[-1], "r", encoding="utf-8") as f:
             data = json.load(f)
-        print("true" if data.get("target_reached") else "false")
-        sys.exit(0)
-print("false")
+if data is None:
+    print("missing")
+elif data.get("target_reached"):
+    print("target")
+else:
+    print("logged" if data.get("rcp_logged") else "unlogged")
 '
         )"
-        if [[ "${TARGET_REACHED}" == "true" ]]; then
-          echo "Target accuracy ${TARGET_ACCURACY} reached at step ${STEP}. Stopping offline evaluation loop."
-          break
+        # A step whose eval never reached the MLLOG leaves a samples_count gap
+        # that fails the compliance checker, so stop instead of moving on.
+        case "${EVAL_STATUS}" in
+          target)
+            echo "Target accuracy ${TARGET_ACCURACY} reached at step ${STEP}. Stopping offline evaluation loop."
+            break
+            ;;
+          missing)
+            echo "ERROR: no summary.json for step ${STEP} under ${EVAL_OUTPUT_DIR} (eval exit code: ${MAIN_EXIT:-unknown}). Fix the eval and re-run with EVAL_START_STEP=${STEP}." >&2
+            exit 1
+            ;;
+          unlogged)
+            if [[ "${RCP_LOGGING}" == "1" || "${RCP_LOGGING}" == "true" || "${RCP_LOGGING}" == "True" ]]; then
+              echo "ERROR: the step ${STEP} eval was not logged to the MLLOG (eval exit code: ${MAIN_EXIT:-unknown}); see ${EVAL_OUTPUT_DIR}. Fix the eval and re-run with EVAL_START_STEP=${STEP}." >&2
+              exit 1
+            fi
+            ;;
+        esac
+        if [[ -n "${MAIN_EXIT}" && "${MAIN_EXIT}" != "0" ]]; then
+          echo "WARNING: the step ${STEP} eval exited ${MAIN_EXIT}, but its result was logged; errored attempts count as failures. See ${EVAL_OUTPUT_DIR}." >&2
         fi
       fi
     done

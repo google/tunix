@@ -297,6 +297,14 @@ if [[ "${DRY_RUN_MODE}" == "true" || "${DRY_RUN:-false}" == "true" ]]; then
   exec "${LAUNCHER}" --command eval --image "${TUNIX_IMAGE}" "${EXTRA_ARGS[@]}"
 fi
 
+# Async saves can be listed in the manifest before they commit; refuse to
+# evaluate a step directory without Orbax's commit marker.
+CKPT_STEP_DIR="${MAXTEXT_CKPT%/model_params}"
+if [[ "${CKPT_STEP_DIR}" == gs://* ]] && ! gsutil -q stat "${CKPT_STEP_DIR}/commit_success.txt"; then
+  echo "Error: ${CKPT_STEP_DIR}/commit_success.txt is missing; the checkpoint never committed." >&2
+  exit 1
+fi
+
 list_summaries() {
   local out_dir="${EVAL_OUTPUT_DIR%/}"
   if [[ "${out_dir}" == gs://* ]]; then
