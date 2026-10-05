@@ -923,6 +923,29 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
 
     mock_dispose.assert_called_once()
 
+  def test_to_redacted_config_with_password_in_db_url_masks_password(
+      self,
+  ) -> None:
+    self._patch_create_engine(schema_testing.create_sqlite_memory_engine())
+    db_url = "postgresql+psycopg2://user:s3cret@host/db"
+    store_inst = sql_store.SqlTrajectoryStore(
+        db_url=db_url, run_id="redact_run", auto_init=False
+    )
+    self.addCleanup(store_inst.close)
+
+    redacted_config = store_inst.to_redacted_config()
+
+    self.assertEqual(
+        redacted_config,
+        {
+            "enabled": True,
+            "backend": "sql",
+            "db_url": "postgresql+psycopg2://user:***@host/db",
+            "run_id": "redact_run",
+        },
+    )
+    self.assertEqual(store_inst.to_config()["db_url"], db_url)
+
   def test_file_based_sqlite_persistence(self) -> None:
     first_store = sql_store.SqlTrajectoryStore(
         run_id="persisted_run", db_url=self.db_url
@@ -1059,6 +1082,33 @@ class SqlTrajectoryWriterContractTest(store_testing.TrajectoryWriterTestCase):
     )
     self.addCleanup(sql_s.close)
     return sql_s, sql_s
+
+
+class SqlTrajectoryStoreConfigTest(store_testing.TrajectoryStoreConfigTestCase):
+  """Config contract tests for SqlTrajectoryStore."""
+
+  def _create_config(self) -> dict[str, Any]:
+    db_path = os.path.join(self.create_tempdir().full_path, "store.db")
+    return {
+        "enabled": True,
+        "backend": "sql",
+        "db_url": f"sqlite:///{db_path}",
+        "run_id": "run_1",
+    }
+
+  def test_from_config_round_trip_reads_the_same_data(self) -> None:
+    original = self._build_store(self._create_config())
+    rebuilt = self._build_store(original.to_config())
+
+    original.add_step(
+        trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1
+    )
+    original.flush()
+
+    self.assertEqual(
+        [m.trajectory_id for m in rebuilt.get_trajectories_metadata()],
+        [trajectory_testing.METADATA_1.trajectory_id],
+    )
 
 
 if __name__ == "__main__":

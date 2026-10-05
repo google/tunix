@@ -1,6 +1,7 @@
 """Abstract test cases defining contract tests for TrajectoryStore implementations."""
 
 import abc
+from typing import Any
 
 from absl.testing import parameterized
 from tunix.experimental.trajectory import store
@@ -187,9 +188,7 @@ class TrajectoryReaderTestCase(
           [trajectory_testing.TRAJECTORY_ID_1, "non_existent_id"],
       ),
   )
-  def test_get_trajectories_not_found(
-      self, trajectory_ids: list[str]
-  ) -> None:
+  def test_get_trajectories_not_found(self, trajectory_ids: list[str]) -> None:
     """Tests that loading a non-existent trajectory ID raises TrajectoryNotFoundError."""
     with self.assertRaisesRegex(
         store.TrajectoryNotFoundError,
@@ -463,3 +462,46 @@ class TrajectoryWriterTestCase(
     )
     with self.assertRaises(ValueError):
       self.writer.update_metadata(meta)
+
+
+class TrajectoryStoreConfigTestCase(
+    parameterized.TestCase, metaclass=ParameterizedABCMeta
+):
+  """Abstract test case defining contract tests for TrajectoryStore configs.
+
+  Subclasses must implement `_create_config` to return a config dict, without
+  secrets, that `TrajectoryStore.from_config` accepts for their backend.
+  """
+
+  @abc.abstractmethod
+  def _create_config(self) -> dict[str, Any]:
+    """Returns a secret-free config dict that selects this backend."""
+
+  def _build_store(self, config: dict[str, Any]) -> store.TrajectoryStore:
+    built = store.TrajectoryStore.from_config(config)
+    if built is None:
+      self.fail("from_config returned None for an enabled config.")
+    self.addCleanup(built.close)
+    return built
+
+  def test_to_config_returns_the_config_it_was_built_from(self) -> None:
+    config = self._create_config()
+
+    built = self._build_store(config)
+
+    self.assertEqual(built.to_config(), config)
+
+  def test_from_config_round_trips_through_to_config(self) -> None:
+    original = self._build_store(self._create_config())
+
+    rebuilt = self._build_store(original.to_config())
+
+    self.assertIsInstance(rebuilt, type(original))
+    self.assertEqual(rebuilt.to_config(), original.to_config())
+
+  def test_to_redacted_config_without_secrets_equals_to_config(self) -> None:
+    built = self._build_store(self._create_config())
+
+    redacted_config = built.to_redacted_config()
+
+    self.assertEqual(redacted_config, built.to_config())

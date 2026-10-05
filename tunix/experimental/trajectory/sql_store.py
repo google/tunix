@@ -1,10 +1,10 @@
 """SQL-backed implementation for Trajectory Store."""
 
 import collections
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 import datetime
 import threading
-from typing import Any, Final
+from typing import Any, ClassVar, Final, Self
 
 from absl import logging
 import sqlalchemy as sa
@@ -400,7 +400,7 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
     )
 
 
-class SqlTrajectoryStore(store.TrajectoryReader, store.TrajectoryWriter):
+class SqlTrajectoryStore(store.TrajectoryStore):
   """SQL-backed implementation of TrajectoryReader and TrajectoryWriter.
 
   `SqlTrajectoryStore` manages the persistence and retrieval of reinforcement
@@ -424,6 +424,8 @@ class SqlTrajectoryStore(store.TrajectoryReader, store.TrajectoryWriter):
     suppression for rollout resilience, and database transactions are handled
     by `_AsyncSqlWriter`.
   """
+
+  BACKEND: ClassVar[str] = "sql"
 
   def __init__(
       self,
@@ -454,6 +456,7 @@ class SqlTrajectoryStore(store.TrajectoryReader, store.TrajectoryWriter):
     if not db_url or not db_url.strip():
       raise ValueError("SqlTrajectoryStore requires a non-empty db_url.")
 
+    self._db_url = db_url
     self._run_id = run_id.strip()
     self._engine_handle = db_engine.acquire_engine(
         db_engine.EngineConfig(url=db_url)
@@ -472,6 +475,44 @@ class SqlTrajectoryStore(store.TrajectoryReader, store.TrajectoryWriter):
         # drain with a disposed engine.
         self.close()
         raise
+
+  @classmethod
+  def _from_config(cls, config: Mapping[str, Any]) -> Self:
+    """Builds a SQL-backed store from `config`.
+
+    Args:
+      config: Requires "db_url" and "run_id".
+
+    Returns:
+      A new SqlTrajectoryStore.
+
+    Raises:
+      ValueError: If "db_url" or "run_id" is missing or empty.
+    """
+    return cls(
+        run_id=config.get("run_id", ""),
+        db_url=config.get("db_url", ""),
+    )
+
+  def to_config(self) -> dict[str, Any]:
+    """Returns the config dict that rebuilds an equivalent store.
+
+    The returned "db_url" is the literal URL this store was built with,
+    including any password it embeds. Do not log it; log
+    `to_redacted_config()` instead.
+    """
+    return {
+        "enabled": True,
+        "backend": self.BACKEND,
+        "db_url": self._db_url,
+        "run_id": self._run_id,
+    }
+
+  def to_redacted_config(self) -> dict[str, Any]:
+    """Returns `to_config()` with any password in "db_url" masked."""
+    config = self.to_config()
+    config["db_url"] = db_engine.redact_url(self._db_url)
+    return config
 
   def _has_all_schema_tables(self, conn: sa.Connection) -> bool:
     """Returns True if all Trajectory Store tables exist in the database."""

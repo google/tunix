@@ -2,6 +2,7 @@
 
 import tempfile
 import threading
+from typing import Any
 from unittest import mock
 
 from absl import logging
@@ -694,6 +695,43 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
     nonexistent_root = self.tmp_dir / "does_not_exist"
     store_instance = file_store.FileTrajectoryStore(root_dir=nonexistent_root)
     self.assertEmpty(store_instance.get_trajectories_metadata())
+
+
+class FileTrajectoryStoreConfigTest(
+    store_testing.TrajectoryStoreConfigTestCase
+):
+  """Config contract tests for FileTrajectoryStore."""
+
+  def _create_config(self) -> dict[str, Any]:
+    return {
+        "enabled": True,
+        "backend": "file",
+        "root_dir": self.create_tempdir().full_path,
+        "run_id": "run_1",
+    }
+
+  def test_from_config_round_trip_reads_the_same_data(self) -> None:
+    original = self._build_store(self._create_config())
+    rebuilt = self._build_store(original.to_config())
+
+    original.add_step(
+        trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1
+    )
+    original.flush()
+
+    self.assertEqual(
+        [m.trajectory_id for m in rebuilt.get_trajectories_metadata()],
+        [trajectory_testing.METADATA_1.trajectory_id],
+    )
+
+  def test_to_config_without_run_id_raises_value_error(self) -> None:
+    file_s = file_store.FileTrajectoryStore(
+        root_dir=self.create_tempdir().full_path
+    )
+    self.addCleanup(file_s.close)
+
+    with self.assertRaisesRegex(ValueError, "run_id"):
+      file_s.to_config()
 
 
 if __name__ == "__main__":

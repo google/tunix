@@ -1,3 +1,5 @@
+from typing import Any
+
 from absl.testing import absltest
 from tunix.experimental.trajectory import in_memory_store
 from tunix.experimental.trajectory import store
@@ -101,6 +103,15 @@ class InMemoryTrajectoryWriterTest(store_testing.TrajectoryWriterTestCase):
     stored_meta = mem_store.get_trajectories_metadata()[0]
     self.assertEqual(stored_meta.notes, "initial notes")
     self.assertEqual(stored_meta.extra["count"], 1)
+
+
+class InMemoryTrajectoryStoreConfigTest(
+    store_testing.TrajectoryStoreConfigTestCase
+):
+  """Config contract tests for InMemoryTrajectoryStore."""
+
+  def _create_config(self) -> dict[str, Any]:
+    return {"enabled": True, "backend": "memory"}
 
 
 if __name__ == "__main__":
