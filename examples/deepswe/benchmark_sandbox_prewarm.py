@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import json
 import logging
 import os
 import sys
@@ -39,24 +40,54 @@ logging.basicConfig(
 
 BENCHMARK_TASKS: List[Dict[str, Any]] = [
     {
-        "instance_id": "astropy__astropy-12907",
-        "docker_image": "docker.io/swebench/sweb.eval.x86_64.astropy_12907:v1",
-        "problem_statement": "Fix astropy coordinate transform bug.",
+        "instance_id": "numpy-05aa44d53f4f",
+        "repo": "numpy/numpy",
+        "repo_name": "numpy/numpy",
+        "docker_image": "europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/numpy_final:05aa44d53f4f9528847a0c014fe4bda5caa5fd3d",
+        "problem_statement": "Fix numpy array scalar indexing bug.",
+        "base_commit": "05aa44d53f4f9528847a0c014fe4bda5caa5fd3d",
+        "commit_hash": "05aa44d53f4f9528847a0c014fe4bda5caa5fd3d",
+        "parsed_commit": json.dumps({
+            "file_diffs": [],
+            "old_commit_hash": "05aa44d53f4f9528847a0c014fe4bda5caa5fd3d",
+            "new_commit_hash": "05aa44d53f4f9528847a0c014fe4bda5caa5fd3d",
+            "commit_message": "benchmark stub",
+        }),
+        "parsed_commit_content": json.dumps({
+            "file_diffs": [],
+            "old_commit_hash": "05aa44d53f4f9528847a0c014fe4bda5caa5fd3d",
+            "new_commit_hash": "05aa44d53f4f9528847a0c014fe4bda5caa5fd3d",
+            "commit_message": "benchmark stub",
+        }),
+        "execution_result_content": "{}",
+        "FAIL_TO_PASS": "[]",
+        "PASS_TO_PASS": "[]",
+        "version": "1.26",
     },
     {
-        "instance_id": "sympy__sympy-12419",
-        "docker_image": "docker.io/swebench/sweb.eval.x86_64.sympy_12419:v1",
-        "problem_statement": "Fix sympy matrix multiplication identity.",
-    },
-    {
-        "instance_id": "django__django-11039",
-        "docker_image": "docker.io/swebench/sweb.eval.x86_64.django_11039:v1",
-        "problem_statement": "Fix django migration rollback SQL output.",
-    },
-    {
-        "instance_id": "pytest-dev__pytest-5221",
-        "docker_image": "docker.io/swebench/sweb.eval.x86_64.pytest-dev_5221:v1",
-        "problem_statement": "Fix fixture scope evaluation in pytest.",
+        "instance_id": "aiohttp-07429ed0084b",
+        "repo": "aio-libs/aiohttp",
+        "repo_name": "aio-libs/aiohttp",
+        "docker_image": "europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/aiohttp_final:07429ed0084b3cdd636b178d4eda6944a1809069",
+        "problem_statement": "Fix aiohttp client payload handler.",
+        "base_commit": "07429ed0084b3cdd636b178d4eda6944a1809069",
+        "commit_hash": "07429ed0084b3cdd636b178d4eda6944a1809069",
+        "parsed_commit": json.dumps({
+            "file_diffs": [],
+            "old_commit_hash": "07429ed0084b3cdd636b178d4eda6944a1809069",
+            "new_commit_hash": "07429ed0084b3cdd636b178d4eda6944a1809069",
+            "commit_message": "benchmark stub",
+        }),
+        "parsed_commit_content": json.dumps({
+            "file_diffs": [],
+            "old_commit_hash": "07429ed0084b3cdd636b178d4eda6944a1809069",
+            "new_commit_hash": "07429ed0084b3cdd636b178d4eda6944a1809069",
+            "commit_message": "benchmark stub",
+        }),
+        "execution_result_content": "{}",
+        "FAIL_TO_PASS": "[]",
+        "PASS_TO_PASS": "[]",
+        "version": "3.8",
     },
 ]
 
@@ -75,12 +106,12 @@ def run_benchmark():
       "--num_tasks",
       type=int,
       default=2,
-      help="Number of tasks to evaluate (max 4)",
+      help="Number of tasks to evaluate",
   )
   parser.add_argument(
       "--simulated_overlap_sec",
       type=float,
-      default=60.0,
+      default=30.0,
       help="Simulated inter-step training / rollout overlap time in seconds",
   )
   parser.add_argument(
@@ -111,6 +142,16 @@ def run_benchmark():
       namespace=args.namespace,
   )
 
+  # Prime warm pools with 2 replicas so both Baseline and Pre-warm have ready sandboxes
+  images = [task["docker_image"] for task in tasks]
+  logging.info(
+      "Priming SandboxWarmPools for %d image(s) (%s) with 2 replicas...",
+      len(images),
+      images,
+  )
+  fleet.warm_images(images, replicas_override=2, wait=True)
+  logging.info("SandboxWarmPools successfully primed and ready!")
+
   results: List[Dict[str, Any]] = []
 
   # =========================================================================
@@ -120,6 +161,10 @@ def run_benchmark():
   logging.info("PHASE 1: Synchronous Baseline (Status Quo)")
   logging.info("fleet.acquire() and OpenHands workspace setup happen on Turn 0")
   logging.info("=" * 80)
+
+  # For Baseline, disable automatic pre-warming during __init__ so it measures synchronous reset
+  old_prewarm_env = os.environ.get("TUNIX_PREWARM_SANDBOX", "1")
+  os.environ["TUNIX_PREWARM_SANDBOX"] = "0"
 
   for task in tasks:
     task_id = task["instance_id"]
@@ -152,7 +197,10 @@ def run_benchmark():
 
     logging.info(">>> [Baseline] Closing environment and releasing sandbox...")
     env.close()
-    time.sleep(3)
+    time.sleep(2)
+
+  # Restore pre-warm environment
+  os.environ["TUNIX_PREWARM_SANDBOX"] = old_prewarm_env
 
   # =========================================================================
   # Phase 2: Asynchronous Background Pre-warming
@@ -161,8 +209,6 @@ def run_benchmark():
   logging.info("PHASE 2: Asynchronous Background Pre-warming")
   logging.info("Sandboxes and workspaces are pre-acquired in background thread")
   logging.info("=" * 80)
-
-  prewarm_executor = concurrent.futures.ThreadPoolExecutor(max_workers=len(tasks))
 
   for task in tasks:
     task_id = task["instance_id"]
@@ -175,14 +221,10 @@ def run_benchmark():
         fleet=fleet,
     )
 
-    # Dispatch pre-warming in background
-    if hasattr(env, "prewarm") and callable(env.prewarm):
+    # env.prewarm() was dispatched automatically or natively
+    if not getattr(env, "_prewarm_future", None):
       logging.info(">>> [Prewarm] Calling native env.prewarm()...")
       env.prewarm()
-      prewarm_fut = getattr(env, "_prewarm_future", None)
-    else:
-      logging.info(">>> [Prewarm] Dispatched background _init_agent_sandbox_env...")
-      prewarm_fut = prewarm_executor.submit(env._init_agent_sandbox_env)
 
     logging.info(
         ">>> [Prewarm] Simulating %.1fs of inter-step model inference / training...",
@@ -192,8 +234,6 @@ def run_benchmark():
 
     logging.info(">>> [Prewarm] Invoking env.reset() (Turn 0 dispatch)...")
     t0 = time.perf_counter()
-    if prewarm_fut is not None and not hasattr(env, "prewarm"):
-      prewarm_fut.result()
     obs, info = env.reset()
     turn0_latency = time.perf_counter() - t0
     total_setup_sec = time.perf_counter() - t_start
@@ -215,9 +255,7 @@ def run_benchmark():
 
     logging.info(">>> [Prewarm] Closing environment and releasing sandbox...")
     env.close()
-    time.sleep(3)
-
-  prewarm_executor.shutdown(wait=True)
+    time.sleep(2)
 
   # =========================================================================
   # Benchmark Summary Table
