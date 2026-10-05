@@ -16,7 +16,7 @@
 
 import abc
 import dataclasses
-from typing import Any, List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple
 
 import jax
 from jax import numpy as jnp
@@ -110,3 +110,19 @@ class BaseRollout(ABC):
   @abstractmethod
   def model(self) -> Any:
     """Returns the rollout model."""
+
+  def get_perf_metrics(
+      self,
+  ) -> dict[
+      str,
+      tuple[
+          jax.typing.ArrayLike | str,
+          Callable[[jax.typing.ArrayLike], jax.typing.ArrayLike] | None,
+      ],
+  ]:
+    """Returns per-step rollout performance metrics for logging."""
+    return {}
+
+  def record_batch_completion(self, duration_s: float) -> None:
+    """Records the wall-clock completion duration of a rollout batch."""
+    del duration_s

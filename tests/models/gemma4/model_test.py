@@ -25,7 +25,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import qwix
+from tunix.experimental.generate import kv_cache_manager
 from tunix.models import cache_utils
+from tunix.models import paged_attention
 from tunix.models.gemma4 import attention as attention_lib
 from tunix.models.gemma4 import model as model_lib
 
@@ -181,6 +183,87 @@ class ModelTest(parameterized.TestCase):
     self.assertNotIn('layer_3', final_cache)
     self.assertEqual(int(final_cache['layer_0']['end_index'][0]), 5)
     self.assertEqual(int(final_cache['layer_1']['end_index'][0]), 5)
+
+  def test_paged_forward_matches_dense(self):
+    config = model_lib.ModelConfig.gemma4_e2b()
+    config.num_layers = 4
+    config.num_embed = 128
+    config.embed_dim = 256
+    config.hidden_dim = 512
+    config.num_heads = 4
+    config.head_dim = 64
+    config.num_kv_heads = 2
+    config.num_global_kv_heads = 2
+    config.global_key_size = 64
+    config.sliding_window_size = 4
+    config.frac_shared_layers = 0.5
+    config.use_flash_attention = False
+    config.attention_pattern = (
+        model_lib.AttentionType.LOCAL_SLIDING,
+        model_lib.AttentionType.GLOBAL,
+    )
+    model = model_lib.Gemma4(config, rngs=nnx.Rngs(0))
+    # Many weights start at zero; randomize them so every layer matters.
+    state = nnx.state(model, nnx.Param)
+    leaves, treedef = jax.tree.flatten(state)
+    keys = jax.random.split(jax.random.PRNGKey(1), len(leaves))
+    nnx.update(
+        model,
+        jax.tree.unflatten(
+            treedef,
+            [
+                0.1 * jax.random.normal(k, x.shape, x.dtype)
+                for k, x in zip(keys, leaves)
+            ],
+        ),
+    )
+
+    lens = [7, 3]
+    seqs = [
+        jax.random.randint(jax.random.PRNGKey(2 + i), (n,), 0, config.num_embed)
+        for i, n in enumerate(lens)
+    ]
+    dense_logits = []
+    for seq in seqs:
+      n = seq.shape[0]
+      logits, _ = model(
+          seq[None],
+          positions=jnp.arange(n)[None],
+          attention_mask=jnp.tril(jnp.ones((n, n), dtype=jnp.bool_))[None],
+      )
+      dense_logits.append(logits[0])
+
+    manager = model.init_kv_cache(
+        kv_cache_manager.CacheConfig(
+            max_device_bytes=1 << 20, page_size=4, dtype=jnp.float32
+        )
+    )
+    geometries = manager.cache_geometries
+    self.assertEqual(set(geometries), {'layer_0', 'layer_1'})
+    self.assertEqual(geometries['layer_0'].window_size, 4)
+    self.assertIsNone(geometries['layer_1'].window_size)
+    cache = manager.get_physical_pages()
+    pages = np.array([[0, 1], [2, 3]], dtype=np.int32)
+    metadata = paged_attention.RPAMetadata(
+        page_indices={name: pages for name in cache},
+        kv_lens=np.array(lens, dtype=np.int32),
+        query_lens=np.array(lens, dtype=np.int32),
+        distribution=np.array([0, 0, 2], dtype=np.int32),
+    )
+    paged_logits, new_cache = model(
+        jnp.concatenate(seqs),
+        positions=jnp.concatenate([jnp.arange(n) for n in lens]),
+        cache=cache,
+        metadata=metadata,
+    )
+
+    self.assertEqual(set(new_cache), set(cache))
+    np.testing.assert_allclose(
+        paged_logits,
+        jnp.concatenate(dense_logits),
+        rtol=1e-4,
+        atol=1e-4,
+    )
 
   def test_forward_pass_dense(self):
     config = model_lib.ModelConfig.gemma4_e2b()

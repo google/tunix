@@ -64,7 +64,7 @@ class ToolManager:
             f"Cannot instantiate abstract tool class '{name}': {cls.__name__}. "
             "Please provide concrete implementations of BaseTool."
         )
-      self._tool_dict[name] = cls(
+      self._tool_dict[name] = cls(  # pytype: disable=not-instantiable
           name=name, description=(cls.__doc__ or desc_fallback)
       )
 

@@ -50,7 +50,6 @@ class GroupQueueManager(Generic[_T]):
       key_fn: Optional[Callable[[_T], Hashable]] = None,
       group_fn: Optional[GroupFn[_T]] = None,
       filter_fn: Optional[FilterFn[_T]] = None,
-      on_group_filtered: Optional[Callable[[List[_T]], None]] = None,
   ):
     """Initializes GroupQueueManager.
 
@@ -61,9 +60,6 @@ class GroupQueueManager(Generic[_T]):
         Optional[List[_T]]]`. If None, `num_generations` must be provided.
       filter_fn: Optional filtering function `Callable[[candidate_group],
         valid_items]`.
-      on_group_filtered: Optional callback invoked with the filtered-out items
-        whenever a completed candidate group is completely rejected by
-        `filter_fn` (i.e., produces an empty `valid_group`).
     """
     if group_fn is None:
       if num_generations is None:
@@ -92,7 +88,6 @@ class GroupQueueManager(Generic[_T]):
     self.num_generations = num_generations
     self.group_fn = group_fn
     self.filter_fn = filter_fn
-    self.on_group_filtered = on_group_filtered
 
     self._buckets: Dict[Hashable, List[_T]] = collections.defaultdict(list)
     self._ready_groups: Deque[List[_T]] = collections.deque()
@@ -146,7 +141,6 @@ class GroupQueueManager(Generic[_T]):
     if self._exc:
       raise self._exc
 
-    dropped_group: Optional[List[_T]] = None
     async with self._lock:
       if self._closed:
         raise RuntimeError("Cannot put into a closed GroupQueueManager.")
@@ -178,11 +172,6 @@ class GroupQueueManager(Generic[_T]):
         if valid_group:
           self._ready_groups.append(valid_group)
           self._have_ready.set()
-        else:
-          dropped_group = filtered_out
-
-    if dropped_group is not None and self.on_group_filtered is not None:
-      self.on_group_filtered(dropped_group)
 
   async def close(self):
     """Gracefully marks the queue as closed (EOF)."""

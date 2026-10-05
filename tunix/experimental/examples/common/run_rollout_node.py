@@ -737,8 +737,8 @@ def _create_vllm_sampler(args, tokenizer):
             prefuse_moe_weights=args.prefuse_moe_weights,
         )
     )
-  engine_args = AsyncEngineArgs(**engine_kwargs)  # type: ignore[arg-type]
-  sampler_adapter = vllm_sampler_adapter.VllmSamplerAdapter(  # type: ignore[abstract]
+  engine_args = AsyncEngineArgs(**engine_kwargs)  # pytype: disable=bad-argument-type  # type: ignore[arg-type]
+  sampler_adapter = vllm_sampler_adapter.VllmSamplerAdapter(  # pytype: disable=bad-instantiation  # type: ignore[abstract]
       server_id=args.worker_id,
       engine_args=engine_args,
       model_name=vllm_model,

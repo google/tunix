@@ -15,7 +15,7 @@
 
 import functools
 import inspect
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Iterable, Sequence
 
 from absl import logging
 import flax
@@ -660,111 +660,83 @@ def make_pearson_metric(
   )
 
 
-_AgreementMetricValue = jax.Array | utils.WeightedMetric | PearsonMetric
-_AgreementMetricEntry = tuple[
-    _AgreementMetricValue,
-    Callable[..., float | np.ndarray | jax.Array],
-]
-_AgreementMetrics = dict[str, _AgreementMetricEntry]
+def compute_sampler_trainer_agreement_jax(
+    rollout_per_token_logps: ArrayLike | None,
+    trainer_per_token_logps: ArrayLike | None,
+    completion_mask: ArrayLike | None,
+    sampler_is: str | None = None,
+    sampler_is_threshold: float = 2.0,
+    seq_logprob_error_threshold: float | None = None,
+    segment_ids: ArrayLike | None = None,
+    num_segments: int | None = None,
+):
+  """JIT-safe pure-JAX sampler-vs-trainer agreement metrics, masking, and TIS weights."""
+  metrics: dict[str, tuple[jax.Array | utils.WeightedMetric, Any]] = {}
+  sampler_is_weights = None
+  filtered_completion_mask = completion_mask
+  if rollout_per_token_logps is None or trainer_per_token_logps is None:
+    return metrics, sampler_is_weights, filtered_completion_mask
 
-
-def _resolve_segment_ids(
-    segment_ids: ArrayLike | None,
-    comp_mask_shape: tuple[int, ...],
-    num_segments: int | None,
-) -> tuple[jax.Array | None, int]:
-  """Validates optional packing `segment_ids` and resolves `num_segments`."""
-  if segment_ids is None:
-    return None, 0
-  seg_ids_jnp = jnp.maximum(jnp.asarray(segment_ids, dtype=jnp.int32), 0)
-  if seg_ids_jnp.shape != comp_mask_shape:
+  if completion_mask is None:
     raise ValueError(
-        f"Shape mismatch: `segment_ids` ({seg_ids_jnp.shape}) must match "
-        f"`completion_mask` ({comp_mask_shape})."
+        "Completion mask is required for sampler-trainer agreement metrics."
     )
-  if num_segments is not None:
-    resolved_num_segments = num_segments
-  elif isinstance(seg_ids_jnp, jax.core.Tracer):
-    resolved_num_segments = seg_ids_jnp.shape[-1] + 1
-  else:
-    resolved_num_segments = int(jnp.max(seg_ids_jnp)) + 1
-  return seg_ids_jnp, resolved_num_segments
 
+  orig_mask_dtype = jnp.asarray(completion_mask).dtype
+  rollout_logps = jnp.asarray(rollout_per_token_logps, dtype=jnp.float32)
+  trainer_logps = jnp.asarray(trainer_per_token_logps, dtype=jnp.float32)
+  comp_mask = jnp.asarray(completion_mask)
 
-def _seq_stats(
-    values: jax.Array,
-    mask_f: jax.Array,
-    seg_ids_jnp: jax.Array | None,
-    num_segments: int,
-) -> tuple[jax.Array, jax.Array]:
-  """Pools masked token values into per-sequence (or per-segment) `(mean, active)`."""
-  if seg_ids_jnp is None:
-    seq_cnt = jnp.sum(mask_f, axis=-1, keepdims=True)
-    seq_sum = jnp.sum(values * mask_f, axis=-1, keepdims=True)
-    active_seq = seq_cnt > 0
-  else:
-    seq_cnt = segmented_count(seg_ids_jnp, num_segments, mask=mask_f)
-    seq_sum = segmented_sum(values * mask_f, seg_ids_jnp, num_segments)
-    active_seq = (seq_cnt > 0).at[:, 0].set(False)
-  seq_mean = seq_sum / jnp.maximum(seq_cnt, 1.0)
-  return seq_mean, active_seq
-
-
-def _seq_to_tokens(
-    seq_mask: jax.Array, seg_ids_jnp: jax.Array | None
-) -> jax.Array:
-  """Broadcasts a `[B, 1]` row mask or scatters a `[B, S]` segment mask to `[B, L]`."""
-  if seg_ids_jnp is None:
-    return seq_mask
-  return jnp.take_along_axis(seq_mask, seg_ids_jnp, axis=1)
-
-
-def _token_agreement_metrics(
-    safe_rollout_logps: jax.Array,
-    safe_trainer_logps: jax.Array,
-    mask: jax.Array,
-) -> tuple[jax.Array, _AgreementMetrics]:
-  """Computes token-level `sampler_trainer/*` logp/prob diff and Pearson metrics."""
+  if (
+      rollout_logps.shape != trainer_logps.shape
+      or rollout_logps.shape != comp_mask.shape
+  ):
+    raise ValueError(
+        "Shape mismatch: `rollout_per_token_logps`"
+        f" ({rollout_logps.shape}), `trainer_per_token_logps`"
+        f" ({trainer_logps.shape}), and `completion_mask`"
+        f" ({comp_mask.shape}) must all have the same shape."
+    )
+  mask = jnp.asarray(comp_mask, dtype=jnp.bool_)
   mask_f = mask.astype(jnp.float32)
   raw_mask_sum = mask_f.sum()
   mask_sum = jnp.maximum(raw_mask_sum, 1.0)
-
-  diff = jnp.abs(safe_rollout_logps - safe_trainer_logps)
+  diff = jnp.abs(rollout_logps - trainer_logps)
   diff_mean = utils.WeightedMetric(
       (diff * mask_f).sum(), raw_mask_sum, min_denom=1.0
   )
   diff_max = jnp.where(mask, diff, 0.0).max()
-
   # Multiplicative probability error: exp(min(|trainer_logp - rollout_logp|, 20))
   token_mult_err = jnp.exp(jnp.minimum(diff, 20.0))
   mult_err_mean = utils.WeightedMetric(
       (token_mult_err * mask_f).sum(), raw_mask_sum, min_denom=1.0
   )
   mult_err_max = jnp.where(mask, token_mult_err, 0.0).max()
-
-  rp = jnp.exp(safe_rollout_logps)
-  tp = jnp.exp(safe_trainer_logps)
+  rp = jnp.exp(rollout_logps)
+  tp = jnp.exp(trainer_logps)
   prob_diff = jnp.abs(rp - tp)
   prob_diff_mean = utils.WeightedMetric(
       (prob_diff * mask_f).sum(), raw_mask_sum, min_denom=1.0
   )
   prob_diff_max = jnp.where(mask, prob_diff, 0.0).max()
-
   rp_flat, tp_flat, mf = rp.reshape(-1), tp.reshape(-1), mask_f.reshape(-1)
   rp_mean = (rp_flat * mf).sum() / mask_sum
   tp_mean = (tp_flat * mf).sum() / mask_sum
   rp_d = (rp_flat - rp_mean) * mf
   tp_d = (tp_flat - tp_mean) * mf
+  c_xy = (rp_d * tp_d).sum()
+  c_xx = (rp_d * rp_d).sum()
+  c_yy = (tp_d * tp_d).sum()
   pearson = make_pearson_metric(
-      c_xy=(rp_d * tp_d).sum(),
-      c_xx=(rp_d * rp_d).sum(),
-      c_yy=(tp_d * tp_d).sum(),
+      c_xy=c_xy,
+      c_xx=c_xx,
+      c_yy=c_yy,
       count=raw_mask_sum,
       mean_x=rp_mean,
       mean_y=tp_mean,
       min_denom=1e-12,
   )
-  metrics: _AgreementMetrics = {
+  metrics.update({
       "sampler_trainer/logp_diff_mean": (diff_mean, utils.weighted_metric_mean),
       "sampler_trainer/logp_diff_max": (diff_max, np.max),
       "sampler_trainer/mult_prob_error_mean": (
@@ -781,304 +753,94 @@ def _token_agreement_metrics(
           pearson,
           utils.weighted_metric_mean,
       ),
-  }
-  return token_mult_err, metrics
+  })
 
-
-def _apply_seq_error_threshold(
-    comp_mask: jax.Array,
-    orig_mask_dtype: jnp.dtype,
-    token_mult_err: jax.Array,
-    invalid_scored_tok: jax.Array,
-    threshold: float,
-    seg_ids_jnp: jax.Array | None,
-    num_segments: int,
-) -> tuple[jax.Array, _AgreementMetrics]:
-  """Masks out sequences/segments exceeding `seq_logprob_error_threshold`."""
-  mask_f = jnp.asarray(comp_mask, dtype=jnp.bool_).astype(jnp.float32)
-  seq_mult_err, active_seq = _seq_stats(
-      token_mult_err, mask_f, seg_ids_jnp, num_segments
-  )
-  _, seq_has_invalid = _seq_stats(
-      jnp.ones_like(mask_f),
-      invalid_scored_tok.astype(jnp.float32),
-      seg_ids_jnp,
-      num_segments,
-  )
-  keep_seq = (seq_mult_err <= threshold) & active_seq & (~seq_has_invalid)
-  keep_token_mask = _seq_to_tokens(keep_seq, seg_ids_jnp)
-  filtered_mask = jnp.where(keep_token_mask, comp_mask, 0).astype(
-      orig_mask_dtype
-  )
-
-  raw_num_active = jnp.sum(active_seq.astype(jnp.float32))
-  num_masked = jnp.sum((~keep_seq & active_seq).astype(jnp.float32))
-  metrics: _AgreementMetrics = {
-      "sampler_trainer/seq_error_masked_frac": (
-          utils.WeightedMetric(num_masked, raw_num_active, min_denom=1.0),
-          utils.weighted_metric_mean,
-      ),
-      "sampler_trainer/seq_error_masked_count": (num_masked, np.sum),
-  }
-  return filtered_mask, metrics
-
-
-def _seq_is_diagnostics(
-    log_ratio: jax.Array,
-    asst_mask_f: jax.Array,
-    seg_ids_jnp: jax.Array | None,
-    num_segments: int,
-) -> tuple[jax.Array, jax.Array, _AgreementMetrics]:
-  """Computes sequence-level geometric-mean ratio and KL(sampler || trainer)."""
-  seq_mean_log_ratio, active_seq = _seq_stats(
-      log_ratio, asst_mask_f, seg_ids_jnp, num_segments
-  )
-  seq_kl = -seq_mean_log_ratio
-  seq_geo_ratio = jnp.exp(jnp.clip(seq_mean_log_ratio, min=-20.0, max=20.0))
-  active_seq_f = active_seq.astype(jnp.float32)
-  n_active_seq = jnp.sum(active_seq_f)
-
-  metrics: _AgreementMetrics = {
-      "sampler_is/seq_kl_mean": (
-          utils.WeightedMetric(
-              jnp.sum(seq_kl * active_seq_f), n_active_seq, min_denom=1.0
-          ),
-          utils.weighted_metric_mean,
-      ),
-      "sampler_is/seq_geo_ratio_mean": (
-          utils.WeightedMetric(
-              jnp.sum(seq_geo_ratio * active_seq_f),
-              n_active_seq,
-              min_denom=1.0,
-          ),
-          utils.weighted_metric_mean,
-      ),
-      "sampler_is/seq_geo_ratio_max": (
-          jnp.where(
-              jnp.any(active_seq),
-              jnp.max(jnp.where(active_seq, seq_geo_ratio, 0.0)),
-              0.0,
-          ),
-          np.max,
-      ),
-  }
-  return seq_geo_ratio, active_seq, metrics
-
-
-def _compute_is_rs_weights(
-    token_ratio: jax.Array,
-    valid_tok: jax.Array,
-    asst_mask: jax.Array,
-    seq_geo_ratio: jax.Array,
-    active_seq: jax.Array,
-    seg_ids_jnp: jax.Array | None,
-    sampler_is: str | None,
-    sampler_is_threshold: float | None,
-    sampler_rs: str | None,
-    sampler_rs_min: float | None,
-    sampler_rs_max: float | None,
-) -> tuple[jax.Array, _AgreementMetrics]:
-  """Computes composed per-token IS (`sampler_is`) and RS (`sampler_rs`) weights."""
-  if sampler_is not in (None, "token"):
-    raise ValueError(
-        f"sampler_is should be None or 'token'. Received: {sampler_is!r}"
-    )
-  if sampler_rs not in (None, "geometric", "token"):
-    raise ValueError(
-        "sampler_rs should be None, 'geometric', or 'token'. Received:"
-        f" {sampler_rs!r}"
-    )
-
-  asst_mask_f = asst_mask.astype(jnp.float32)
-  raw_is_mask_sum = asst_mask_f.sum()
-  n_active_seq = jnp.sum(active_seq.astype(jnp.float32))
-  metrics: _AgreementMetrics = {}
-
-  if sampler_is == "token":
-    w_is = (
-        jnp.minimum(token_ratio, sampler_is_threshold)
-        if sampler_is_threshold is not None
-        else token_ratio
-    )
-  else:
-    w_is = jnp.ones_like(token_ratio)
-
-  if sampler_rs == "geometric":
-    if sampler_rs_min is None or sampler_rs_max is None:
-      raise ValueError(
-          "sampler_rs='geometric' requires both sampler_rs_min and"
-          " sampler_rs_max."
-      )
-    in_band_seq = (
-        (seq_geo_ratio >= sampler_rs_min)
-        & (seq_geo_ratio <= sampler_rs_max)
-        & active_seq
-    )
-    rejected_seq = (~in_band_seq) & active_seq
-    rs_keep_tok = _seq_to_tokens(in_band_seq, seg_ids_jnp)
-    metrics["sampler_rs/rejected_fraction"] = (
-        utils.WeightedMetric(
-            jnp.sum(rejected_seq.astype(jnp.float32)),
-            n_active_seq,
-            min_denom=1.0,
-        ),
-        utils.weighted_metric_mean,
-    )
-  elif sampler_rs == "token":
-    if sampler_rs_min is None or sampler_rs_max is None:
-      raise ValueError(
-          "sampler_rs='token' requires both sampler_rs_min and"
-          " sampler_rs_max."
-      )
-    rs_keep_tok = (
-        (token_ratio >= sampler_rs_min)
-        & (token_ratio <= sampler_rs_max)
-        & valid_tok
-    )
-    rejected_tok = (~rs_keep_tok) & asst_mask
-    metrics["sampler_rs/rejected_fraction"] = (
-        utils.WeightedMetric(
-            jnp.sum(rejected_tok.astype(jnp.float32)),
-            raw_is_mask_sum,
-            min_denom=1.0,
-        ),
-        utils.weighted_metric_mean,
-    )
-  else:
-    rs_keep_tok = valid_tok
-
-  sampler_is_weights = jax.lax.stop_gradient(
-      jnp.where(valid_tok & rs_keep_tok, w_is, 0.0).astype(jnp.float32)
-  )
-  metrics["sampler_is/weight_mean"] = (
-      utils.WeightedMetric(
-          (sampler_is_weights * asst_mask_f).sum(),
-          raw_is_mask_sum,
-          min_denom=1.0,
-      ),
-      utils.weighted_metric_mean,
-  )
-  metrics["sampler_is/weight_max"] = (
-      jnp.where(asst_mask, sampler_is_weights, 0.0).max(),
-      np.max,
-  )
-  if sampler_is == "token":
-    clipped_mask = (
-        (token_ratio > sampler_is_threshold) & valid_tok
-        if sampler_is_threshold is not None
-        else jnp.zeros_like(asst_mask)
-    )
-    metrics["sampler_is/frac_clipped_at_threshold"] = (
-        utils.WeightedMetric(
-            clipped_mask.astype(jnp.float32).sum(),
-            raw_is_mask_sum,
-            min_denom=1.0,
-        ),
-        utils.weighted_metric_mean,
-    )
-  return sampler_is_weights, metrics
-
-
-def compute_sampler_trainer_agreement_jax(
-    rollout_per_token_logps: ArrayLike | None,
-    trainer_per_token_logps: ArrayLike | None,
-    completion_mask: ArrayLike | None,
-    sampler_is: str | None = None,
-    sampler_is_threshold: float | None = 2.0,
-    sampler_rs: str | None = None,
-    sampler_rs_min: float | None = None,
-    sampler_rs_max: float | None = None,
-    seq_logprob_error_threshold: float | None = None,
-    segment_ids: ArrayLike | None = None,
-    num_segments: int | None = None,
-) -> tuple[_AgreementMetrics, jax.Array | None, ArrayLike | None]:
-  """JIT-safe pure-JAX sampler-vs-trainer agreement metrics, RS gating, and IS weights."""
-  metrics: _AgreementMetrics = {}
-  sampler_is_weights = None
-  filtered_completion_mask = completion_mask
-  if rollout_per_token_logps is None or trainer_per_token_logps is None:
-    return metrics, sampler_is_weights, filtered_completion_mask
-  if completion_mask is None:
-    raise ValueError(
-        "Completion mask is required for sampler-trainer agreement metrics."
-    )
-
-  orig_mask_dtype = jnp.asarray(completion_mask).dtype
-  rollout_logps = jnp.asarray(rollout_per_token_logps, dtype=jnp.float32)
-  trainer_logps = jnp.asarray(trainer_per_token_logps, dtype=jnp.float32)
-  comp_mask = jnp.asarray(completion_mask)
-  if (
-      rollout_logps.shape != trainer_logps.shape
-      or rollout_logps.shape != comp_mask.shape
-  ):
-    raise ValueError(
-        "Shape mismatch: `rollout_per_token_logps`"
-        f" ({rollout_logps.shape}), `trainer_per_token_logps`"
-        f" ({trainer_logps.shape}), and `completion_mask`"
-        f" ({comp_mask.shape}) must all have the same shape."
-    )
-  seg_ids_jnp, resolved_num_segments = _resolve_segment_ids(
-      segment_ids, comp_mask.shape, num_segments
-  )
-
-  # 1. Sanitize non-finite logps and compute token-level agreement metrics.
-  mask = jnp.asarray(comp_mask, dtype=jnp.bool_)
-  finite_logps = jnp.isfinite(rollout_logps) & jnp.isfinite(trainer_logps)
-  valid_tok = mask & finite_logps
-  invalid_scored_tok = mask & (~finite_logps)
-  safe_rollout_logps = jnp.where(valid_tok, rollout_logps, 0.0)
-  safe_trainer_logps = jnp.where(valid_tok, trainer_logps, 0.0)
-  token_mult_err, tok_metrics = _token_agreement_metrics(
-      safe_rollout_logps, safe_trainer_logps, mask
-  )
-  metrics.update(tok_metrics)
-
-  # 2. Optional sequence-level logprob error masking.
   if seq_logprob_error_threshold is not None:
-    filtered_completion_mask, seq_err_metrics = _apply_seq_error_threshold(
-        comp_mask,
-        orig_mask_dtype,
-        token_mult_err,
-        invalid_scored_tok,
-        seq_logprob_error_threshold,
-        seg_ids_jnp,
-        resolved_num_segments,
-    )
+    if segment_ids is None:
+      seq_tok_cnt = jnp.sum(mask_f, axis=-1, keepdims=True)
+      seq_mult_err = jnp.sum(
+          token_mult_err * mask_f, axis=-1, keepdims=True
+      ) / jnp.maximum(seq_tok_cnt, 1.0)
+      active_seq = seq_tok_cnt > 0
+      keep_seq = (seq_mult_err <= seq_logprob_error_threshold) & active_seq
+      raw_num_active = jnp.sum(active_seq.astype(jnp.float32))
+      num_masked = jnp.sum((~keep_seq & active_seq).astype(jnp.float32))
+      keep_token_mask = keep_seq
+    else:
+      seg_ids_jnp = jnp.maximum(
+          jnp.asarray(segment_ids, dtype=jnp.int32), 0
+      )
+      if seg_ids_jnp.shape != comp_mask.shape:
+        raise ValueError(
+            f"Shape mismatch: `segment_ids` ({seg_ids_jnp.shape}) must match "
+            f"`completion_mask` ({comp_mask.shape})."
+        )
+      if num_segments is None:
+        if isinstance(seg_ids_jnp, jax.core.Tracer):
+          num_segments = seg_ids_jnp.shape[-1] + 1
+        else:
+          num_segments = int(jnp.max(seg_ids_jnp)) + 1
+      seg_err_sum = segmented_sum(
+          token_mult_err * mask_f,
+          seg_ids_jnp,
+          num_segments,
+      )
+      seg_tok_cnt = segmented_count(seg_ids_jnp, num_segments, mask=mask_f)
+      seg_mult_err = seg_err_sum / jnp.maximum(seg_tok_cnt, 1.0)
+      active_seg = (seg_tok_cnt > 0).at[:, 0].set(False)
+      keep_seg = (seg_mult_err <= seq_logprob_error_threshold) & active_seg
+      raw_num_active = jnp.sum(active_seg.astype(jnp.float32))
+      num_masked = jnp.sum((~keep_seg & active_seg).astype(jnp.float32))
+      keep_token_mask = jnp.take_along_axis(keep_seg, seg_ids_jnp, axis=1)
+
+    filtered_completion_mask = jnp.where(
+        keep_token_mask, comp_mask, 0
+    ).astype(orig_mask_dtype)
     comp_mask = filtered_completion_mask
-    metrics.update(seq_err_metrics)
-
-  # 3. Sequence-level geometric-mean ratio and KL(sampler || trainer) diagnostics.
-  asst_mask = jnp.asarray(comp_mask, dtype=jnp.bool_)
-  asst_mask_f = asst_mask.astype(jnp.float32)
-  valid_tok = asst_mask & finite_logps
-  log_ratio = jnp.where(
-      valid_tok, safe_trainer_logps - safe_rollout_logps, 0.0
-  )
-  token_ratio = jnp.where(
-      valid_tok, jnp.exp(jnp.clip(log_ratio, min=-20.0, max=20.0)), 0.0
-  )
-  seq_geo_ratio, active_seq, seq_is_metrics = _seq_is_diagnostics(
-      log_ratio, asst_mask_f, seg_ids_jnp, resolved_num_segments
-  )
-  metrics.update(seq_is_metrics)
-
-  # 4. Optional importance-sampling (sampler_is) & rejection-sampling (sampler_rs).
-  if sampler_is is not None or sampler_rs is not None:
-    sampler_is_weights, is_rs_metrics = _compute_is_rs_weights(
-        token_ratio=token_ratio,
-        valid_tok=valid_tok,
-        asst_mask=asst_mask,
-        seq_geo_ratio=seq_geo_ratio,
-        active_seq=active_seq,
-        seg_ids_jnp=seg_ids_jnp,
-        sampler_is=sampler_is,
-        sampler_is_threshold=sampler_is_threshold,
-        sampler_rs=sampler_rs,
-        sampler_rs_min=sampler_rs_min,
-        sampler_rs_max=sampler_rs_max,
+    masked_frac = utils.WeightedMetric(
+        num_masked, raw_num_active, min_denom=1.0
     )
-    metrics.update(is_rs_metrics)
+    masked_count = num_masked
+    metrics.update({
+        "sampler_trainer/seq_error_masked_frac": (
+            masked_frac,
+            utils.weighted_metric_mean,
+        ),
+        "sampler_trainer/seq_error_masked_count": (masked_count, np.sum),
+    })
 
+  if sampler_is == "token":
+    asst_mask_f = jnp.asarray(comp_mask, dtype=jnp.float32)
+    log_ratio = trainer_logps - rollout_logps
+    log_ratio = jnp.clip(log_ratio, min=-20.0, max=20.0)
+    sampler_is_weights = jax.lax.stop_gradient(
+        jnp.minimum(jnp.exp(log_ratio), sampler_is_threshold) * asst_mask_f
+    )
+    raw_is_mask_sum = asst_mask_f.sum()
+    is_mean = utils.WeightedMetric(
+        (sampler_is_weights * asst_mask_f).sum(),
+        raw_is_mask_sum,
+        min_denom=1.0,
+    )
+    is_max = jnp.where(asst_mask_f > 0, sampler_is_weights, 0.0).max()
+    frac_clipped = utils.WeightedMetric(
+        (
+            (jnp.exp(log_ratio) > sampler_is_threshold)
+            & (asst_mask_f > 0)
+        )
+        .astype(jnp.float32)
+        .sum(),
+        raw_is_mask_sum,
+        min_denom=1.0,
+    )
+    metrics.update({
+        "sampler_is/weight_mean": (is_mean, utils.weighted_metric_mean),
+        "sampler_is/weight_max": (is_max, np.max),
+        "sampler_is/frac_clipped_at_threshold": (
+            frac_clipped,
+            utils.weighted_metric_mean,
+        ),
+    })
   return metrics, sampler_is_weights, filtered_completion_mask
 
 
@@ -1087,14 +849,11 @@ def sampler_trainer_agreement(
     trainer_per_token_logps: ArrayLike | None,
     completion_mask: ArrayLike | None,
     sampler_is: str | None = None,
-    sampler_is_threshold: float | None = 2.0,
-    sampler_rs: str | None = None,
-    sampler_rs_min: float | None = None,
-    sampler_rs_max: float | None = None,
+    sampler_is_threshold: float = 2.0,
     seq_logprob_error_threshold: float | None = None,
     segment_ids: ArrayLike | None = None,
 ):
-  """Sampler-vs-trainer agreement metrics, sequence error masking, RS gating, and IS weights.
+  """Sampler-vs-trainer agreement metrics, sequence error masking, and TIS weights.
 
   Shared by the RL orchestrator (``rl_program``), the agentic GRPO learner, and
   the standard GRPO learner. The unpacked and packed paths differ only in
@@ -1107,15 +866,9 @@ def sampler_trainer_agreement(
       (actor) weights, or None.
     completion_mask: assistant-vs-env mask (1 for assistant-generated tokens, 0
       for env-injected tokens) scoping the comparison to model-emitted positions.
-    sampler_is: if ``"token"``, builds per-token importance-sampling weights
-      ``p_trainer_t / q_sampler_t``.
-    sampler_is_threshold: optional upper clamp applied to per-token IS weights
-      (``None`` leaves token ratios unclipped beyond ``exp(20)``).
-    sampler_rs: optional rejection-sampling mode (``"geometric"`` for
-      sequence-level geometric-mean gating or ``"token"`` for token-level
-      IcePop gating).
-    sampler_rs_min: lower keep-band edge for ``sampler_rs``.
-    sampler_rs_max: upper keep-band edge for ``sampler_rs``.
+    sampler_is: if ``"token"``, also builds truncated per-token
+      importance-sampling weights; otherwise no weights are returned.
+    sampler_is_threshold: clamp applied to the importance-sampling weights.
     seq_logprob_error_threshold: if set, sequences (or packed segments) whose
       mean multiplicative probability error ``exp(|trainer_logp - rollout_logp|)``
       exceeds this threshold are masked out in ``filtered_completion_mask`` (and
@@ -1137,9 +890,6 @@ def sampler_trainer_agreement(
           completion_mask=completion_mask,
           sampler_is=sampler_is,
           sampler_is_threshold=sampler_is_threshold,
-          sampler_rs=sampler_rs,
-          sampler_rs_min=sampler_rs_min,
-          sampler_rs_max=sampler_rs_max,
           seq_logprob_error_threshold=seq_logprob_error_threshold,
           segment_ids=segment_ids,
       )

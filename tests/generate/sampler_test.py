@@ -172,7 +172,7 @@ class SamplerTest(parameterized.TestCase):
             num_kv_heads=4,
             head_dim=16,
         ),
-        image_processor=image_processor,  # pyrefly: ignore[bad-argument-type]
+        image_processor=image_processor,  # pytype: disable=wrong-arg-types
     )
 
     max_generation_steps = 8
@@ -386,12 +386,12 @@ class SamplerTest(parameterized.TestCase):
             head_dim=16,
         ),
     )
-    self.assertEqual(sampler._compiled_prefill_fn._cache_size(), 0)  # pyrefly: ignore[missing-attribute]
+    self.assertEqual(sampler._compiled_prefill_fn._cache_size(), 0)  # pytype: disable=attribute-error
     sampler(
         ['input', 'hello'],
         max_generation_steps=10,
     )
-    self.assertEqual(sampler._compiled_prefill_fn._cache_size(), 1)  # pyrefly: ignore[missing-attribute]
+    self.assertEqual(sampler._compiled_prefill_fn._cache_size(), 1)  # pytype: disable=attribute-error
 
     sampler(
         ['input input input input input', 'hello hello'],
@@ -402,7 +402,7 @@ class SamplerTest(parameterized.TestCase):
         ['input input input input input input', 'hello hello'],
         max_generation_steps=10,
     )
-    self.assertEqual(sampler._compiled_prefill_fn._cache_size(), 2)  # pyrefly: ignore[missing-attribute]
+    self.assertEqual(sampler._compiled_prefill_fn._cache_size(), 2)  # pytype: disable=attribute-error
 
   def test_decode_stops_after_prefill_for_single_generation_step(self):
     vocab = tc.MockVocab()

@@ -604,7 +604,7 @@ class PeftTrainer:
       self,
   ) -> Callable[..., ArrayLike | Tuple[ArrayLike, Any]]:
     """Creates the eval step function."""
-    return self._eval_step
+    return self._eval_step  # pyrefly: ignore[bad-return]
 
   def _shard_optimizer(self, mesh: shd.Mesh) -> None:
     """Optimizer states should be sharded before calling the jit function.
@@ -739,7 +739,7 @@ class PeftTrainer:
           perplexity,
       )
     for k, v in (additional_metrics or {}).items():
-      if k.startswith(("sampler_trainer/", "sampler_is/", "sampler_rs/")):
+      if k.startswith(("sampler_trainer/", "sampler_is/")):
         prefix, metric_name = k.split("/", maxsplit=1)
         self.metrics_logger.log(prefix, metric_name, v, self._mode, step)  # pyrefly: ignore[missing-attribute]
       else:
@@ -880,7 +880,7 @@ class PeftTrainer:
         skip_jit, cache_nnx_graph
     )
     if not skip_jit:
-      cache_size = train_step.func.jitted_fn._cache_size()
+      cache_size = train_step.func.jitted_fn._cache_size()  # pytype: disable=attribute-error
       logging.log_if(
           logging.INFO,
           f"Compiled train_step cache size: {cache_size}",

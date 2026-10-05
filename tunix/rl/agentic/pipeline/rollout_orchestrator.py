@@ -259,7 +259,7 @@ class RolloutOrchestrator:
 
     is_async_stream = hasattr(pairs_stream, "__aiter__")
     if is_async_stream:
-      pairs_iterator = aiter(pairs_stream)  # pyrefly: ignore[bad-argument-type]
+      pairs_iterator = aiter(pairs_stream)  # pytype: disable=wrong-arg-types
     else:
       pairs_iterator = iter(pairs_stream)  # pyrefly: ignore[no-matching-overload]
     active_tasks: set[asyncio.Task] = set()
@@ -281,7 +281,7 @@ class RolloutOrchestrator:
         ):
           try:
             if is_async_stream:
-              agent, env = await anext(pairs_iterator)
+              agent, env = await anext(pairs_iterator)  # pytype: disable=name-error
             else:
               agent, env = next(pairs_iterator)  # pyrefly: ignore[bad-argument-type]
             task = asyncio.create_task(

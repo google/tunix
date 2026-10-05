@@ -37,8 +37,7 @@ class InMemoryTrajectoryWriterTest(store_testing.TrajectoryWriterTestCase):
     mem_store = in_memory_store.InMemoryTrajectoryStore()
     return mem_store, mem_store
 
-  def test_update_metadata(self) -> None:
-    """Verifies that updating metadata in-memory updates the stored metadata."""
+  def test_update_metadata(self):
     mem_store = in_memory_store.InMemoryTrajectoryStore()
     meta = trajectory_lib.TrajectoryMetadata(
         trajectory_id="t1",
@@ -54,8 +53,7 @@ class InMemoryTrajectoryWriterTest(store_testing.TrajectoryWriterTestCase):
     read_meta = mem_store.get_trajectories_metadata()[0]
     self.assertEqual(read_meta.extra["status"], "SUCCEEDED")
 
-  def test_tunix_trajectory_with_step_zero(self) -> None:
-    """Verifies storing and retrieving TunixTrajectoryMetadata and TunixTrajectory with step_id=0."""
+  def test_tunix_trajectory_with_step_zero(self):
     mem_store = in_memory_store.InMemoryTrajectoryStore()
     meta = trajectory_lib.TunixTrajectoryMetadata(
         trajectory_id="tunix_1",
@@ -75,11 +73,8 @@ class InMemoryTrajectoryWriterTest(store_testing.TrajectoryWriterTestCase):
     self.assertIsInstance(trajs[0], trajectory_lib.TunixTrajectory)
     self.assertEqual(trajs[0].steps[0].step_id, 0)
     self.assertEqual(trajs[0].steps[1].step_id, 1)
-    self.assertIsInstance(trajs[0].steps[0], trajectory_lib.TunixEnvStep)
-    self.assertIsInstance(trajs[0].steps[1], trajectory_lib.TunixAgentStep)
 
-  def test_metadata_mutation_isolation(self) -> None:
-    """Verifies that mutating returned metadata does not alter internal store state."""
+  def test_metadata_mutation_isolation(self):
     mem_store = in_memory_store.InMemoryTrajectoryStore()
     meta = trajectory_lib.TrajectoryMetadata(
         trajectory_id="iso_1",

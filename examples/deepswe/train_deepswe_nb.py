@@ -28,7 +28,7 @@ from transformers import AutoTokenizer
 from tunix.cli.utils import data as data_lib
 from tunix.rl.agentic.agents import agent_types
 from tunix.utils import compat
-import vllm
+import vllm  # pytype: disable=import-error
 
 faulthandler.register(signal.SIGINT, all_threads=True)
 
@@ -268,7 +268,7 @@ args, _ = parser.parse_known_args()
 # Register MaxText vLLM adapter if using a MaxText model
 if args.model_source == "maxtext":
   try:
-    from maxtext.integration.vllm import maxtext_vllm_adapter  # pylint: disable=g-import-not-at-top  # pyrefly: ignore[missing-import]
+    from maxtext.integration.vllm import maxtext_vllm_adapter  # pylint: disable=g-import-not-at-top  # pytype: disable=import-error
     maxtext_vllm_adapter.register()
     logging.info("Successfully registered MaxTextForCausalLM model with vLLM.")
   except ImportError as e:
@@ -365,7 +365,7 @@ for root in [workdir, pathways_root, r2egym_root]:
 try:
   import tunix
   import pathwaysutils
-  import r2egym
+  import r2egym  # pytype: disable=import-error
 
   print("✅ tunix pathways-utils, r2egym are successfully mapped.")
 except ImportError as e:
@@ -390,13 +390,13 @@ from tunix.rl.agentic.parser.chat_template_parser import parser as template_pars
 from tunix import PerfMetricsConfig
 from tunix.perf.experimental.export import PerfMetricsExport
 from tunix.rl.agentic.rewards.reward_types import RewardOutput
-from tunix.utils import mllog_utils  # pyrefly: ignore[missing-module-attribute]
+from tunix.utils import mllog_utils  # pytype: disable=missing-module-attribute,import-error
 try:
   from examples.deepswe import swe_agent
   from examples.deepswe import swe_env
 except ImportError:
-  from examples.deepswe import swe_agent  # pyrefly: ignore[missing-import]
-  from examples.deepswe import swe_env  # pyrefly: ignore[missing-import]
+  from examples.deepswe import swe_agent  # pytype: disable=import-error
+  from examples.deepswe import swe_env  # pytype: disable=import-error
 
 if args.rcp_logging:
   mllog_utils.init_start(args)
@@ -621,11 +621,11 @@ def transform(entry):
 
 dataset = dataset.map(
     transform,
-    keep_in_memory=True,
+    keep_in_memory=True,  # pyrefly: ignore[unexpected-keyword]
 )
 
 dataset = dataset.shuffle(seed=SEED)
-grain_dataset = grain.MapDataset.source(dataset)
+grain_dataset = grain.MapDataset.source(dataset)  # pyrefly: ignore[bad-argument-type]
 
 
 def mixed_type_batch_fn(elements):
@@ -1039,7 +1039,7 @@ sft_utils.show_hbm_usage()
 RLClusterCls = getattr(
     rl_engine_lib, "RLCluster", getattr(rl_engine_lib, "RLEngine", None)
 )
-rl_engine = RLClusterCls(  # pyrefly: ignore[not-callable]
+rl_engine = RLClusterCls(  # pytype: disable=not-callable
     actor=qwen_actor,
     reference=qwen_reference,
     tokenizer=tokenizer,
@@ -1103,7 +1103,7 @@ agentic_grpo_learner = agentic_grpo_learner.GRPOLearner(
 
 try:
   import datetime
-  import wandb  # pyrefly: ignore[missing-import]
+  import wandb # pytype: disable=import-error
 
   settings = wandb.Settings(console="off")
   run_name = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")

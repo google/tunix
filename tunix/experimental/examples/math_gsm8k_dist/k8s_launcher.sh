@@ -46,7 +46,6 @@ export MAX_STEPS=${MAX_STEPS:-1}
 export TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-1}
 export MAX_SEQ_TOKEN_PER_TPU=${MAX_SEQ_TOKEN_PER_TPU:-}
 export MAX_SEGMENTS_PER_PACKED_ROW=${MAX_SEGMENTS_PER_PACKED_ROW:-}
-export SEGMENT_ALIGNMENT_BOUNDARY=${SEGMENT_ALIGNMENT_BOUNDARY:-}
 
 # Set to tunix to run Tunix's PeftTrainer, and maxtext to run MaxText's MaxTextTrainingEngine
 export TRAINER_BACKEND=${TRAINER_BACKEND:-tunix}
@@ -222,7 +221,6 @@ start_orchestrator() {
         ${TRAJECTORY_LOG_DIR:+--trajectory_log_dir=\"${TRAJECTORY_LOG_DIR}\"} \
         ${MAX_SEQ_TOKEN_PER_TPU:+--max_seq_token_per_tpu=${MAX_SEQ_TOKEN_PER_TPU}} \
         ${MAX_SEGMENTS_PER_PACKED_ROW:+--max_segments_per_packed_row=${MAX_SEGMENTS_PER_PACKED_ROW}} \
-        ${SEGMENT_ALIGNMENT_BOUNDARY:+--segment_alignment_boundary=${SEGMENT_ALIGNMENT_BOUNDARY}} \
         ${TRAINER_MESH_FSDP:+--trainer_fsdp=${TRAINER_MESH_FSDP}} \
         ${debug_flag} \
     " \

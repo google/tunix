@@ -690,7 +690,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       self,
   ) -> Callable[..., ArrayLike | Tuple[ArrayLike, Any]]:
     """Creates the eval step function."""
-    return self._eval_step
+    return self._eval_step  # pyrefly: ignore[bad-return]
 
   def _shard_optimizer(self, mesh: shd.Mesh) -> None:
     """Optimizer states should be sharded before calling the jit function.
@@ -904,7 +904,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
           perplexity,
       )
     for k, v in (additional_metrics or {}).items():
-      if k.startswith(("sampler_trainer/", "sampler_is/", "sampler_rs/")):
+      if k.startswith(("sampler_trainer/", "sampler_is/")):
         prefix, metric_name = k.split("/", maxsplit=1)
         self.metrics_logger.log(prefix, metric_name, v, self._mode, step)  # pyrefly: ignore[missing-attribute]
       else:
@@ -1314,7 +1314,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       # regime `fwd_bwd_step`'s executable is never compiled, so its cache size
       # would stay at zero and the log would say nothing.
       traced_step = self._jitted_train_step_fn or fwd_bwd_step
-      cache_size = traced_step.func.jitted_fn._cache_size()
+      cache_size = traced_step.func.jitted_fn._cache_size()  # pytype: disable=attribute-error
       logging.log_if(
           logging.INFO,
           f"Compiled fwd_bwd_step cache size: {cache_size}",

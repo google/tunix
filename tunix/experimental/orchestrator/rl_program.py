@@ -20,9 +20,7 @@ pipelines.
 
 import abc
 import asyncio
-import collections
 from collections.abc import Callable, Iterable, Mapping, Sequence
-import contextlib
 import dataclasses
 import os
 import time
@@ -34,7 +32,6 @@ from tunix.experimental.common import datatypes
 from tunix.experimental.common import logging_utils
 from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
-from tunix.experimental.orchestrator import dataset_utils
 from tunix.experimental.orchestrator import rl_engine_interface
 from tunix.experimental.queue_manager import trajectory_queue_manager
 from tunix.experimental.trajectory import store as trajectory_store_lib
@@ -306,9 +303,6 @@ class StandardRLProgram(RLProgram):
     self.sampler_is_threshold = getattr(
         self.algo.algo_config, "sampler_is_threshold", 2.0
     )
-    self.sampler_rs = getattr(self.algo.algo_config, "sampler_rs", None)
-    self.sampler_rs_min = getattr(self.algo.algo_config, "sampler_rs_min", None)
-    self.sampler_rs_max = getattr(self.algo.algo_config, "sampler_rs_max", None)
     raw_seq_err_thresh = getattr(
         self.algo.algo_config, "seq_logprob_error_threshold", None
     )
@@ -392,19 +386,10 @@ class StandardRLProgram(RLProgram):
         num_generations=self.num_generations,
         max_staleness=max_staleness,
         current_policy_version=lambda: self.policy_version,
-        on_group_filtered=self._on_raw_group_filtered,
     )
     self.scored_q = trajectory_queue_manager.TrajectoryQueueManager.create(
         num_generations=self.num_generations
     )
-
-  def _on_raw_group_filtered(
-      self, filtered_group: list[datatypes.TrajectoryItem]
-  ) -> None:
-    """Releases a dispatch capacity token when a stale group is dropped."""
-    del filtered_group
-    if self._dispatch_capacity is not None:
-      self._dispatch_capacity.release()
 
   @property
   def trajectory_store(self) -> trajectory_store_lib.TrajectoryStore | None:
@@ -470,11 +455,9 @@ class StandardRLProgram(RLProgram):
     already_consumed = self._step * self.full_batch_size
 
     try:
-      async for prompt_idx, prompt_item in dataset_utils.iter_dataset_async(
-          self.dataset,
-          skip_count=already_consumed,
-          prefetch_size=max(1, self.full_batch_size),
-      ):
+      for prompt_idx, prompt_item in enumerate(self.dataset):
+        if prompt_idx < already_consumed:
+          continue
         await self._wait_for_dispatch_window()
         if isinstance(prompt_item, dict):
           prompt_item = dict(prompt_item)
@@ -556,13 +539,11 @@ class StandardRLProgram(RLProgram):
           else:
             r = _extract_reward(item)
           rewards.append(float(r))
-          del item
 
-        trainer_payloads = collections.deque(
-            self.algo.create_trainer_payloads(group, rewards=rewards)
+        trainer_payloads = self.algo.create_trainer_payloads(
+            group, rewards=rewards
         )
-        for idx in range(len(trainer_payloads)):
-          payload = trainer_payloads.popleft()
+        for idx, payload in enumerate(trainer_payloads):
           reward_val = rewards[idx] if idx < len(rewards) else 0.0
           src_item = group[idx] if idx < len(group) else None
           src_traj = getattr(src_item, "traj", None)
@@ -599,12 +580,6 @@ class StandardRLProgram(RLProgram):
           steps = raw_steps if isinstance(raw_steps, list) else []
           src_metadata = getattr(src_item, "metadata", None)
           metadata = dict(src_metadata) if src_metadata else {}
-          metadata.pop("routed_experts", None)
-          traj_dict.pop("routed_experts", None)
-          if isinstance(src_traj, dict):
-            src_traj.pop("routed_experts", None)
-          if isinstance(src_metadata, dict):
-            src_metadata.pop("routed_experts", None)
           traj_dict["trajectory_reward"] = reward_val
           traj_dict["status"] = status
           traj_dict["steps"] = steps
@@ -618,17 +593,14 @@ class StandardRLProgram(RLProgram):
               prompt_tokens=getattr(src_item, "prompt_tokens", None),
               completion_tokens=getattr(src_item, "completion_tokens", None),
               action_mask=getattr(src_item, "action_mask", None),
-              routed_experts=None,
+              routed_experts=getattr(src_item, "routed_experts", None),
               policy_version=getattr(src_item, "policy_version", 0),
               metadata=metadata,
               # TODO: b/552087289 - Stream RLTrainerPayload directly instead of
               # re-wrapping in TrajectoryItem.
           )
           item.payload = payload  # pyrefly: ignore[missing-attribute]
-          del payload, src_item, src_traj, src_metadata, traj_dict, metadata
           await self.scored_q.put(item)
-          del item
-        del group, rewards, trainer_payloads
     finally:
       await self.scored_q.close()
 
@@ -654,15 +626,6 @@ class StandardRLProgram(RLProgram):
       )
     self.metrics_logger.log(prefix, metric_name, scalar_value, self.mode, step)
 
-  async def _drain_filtered_groups(
-      self,
-  ) -> list[list[datatypes.TrajectoryItem]]:
-    """Drains and returns all filtered groups across raw and scored queues."""
-    filtered: list[list[datatypes.TrajectoryItem]] = []
-    filtered.extend(await self.raw_q.get_filtered_groups())
-    filtered.extend(await self.scored_q.get_filtered_groups())
-    return filtered
-
   def _collect_and_log_step_metrics(
       self,
       *,
@@ -674,13 +637,10 @@ class StandardRLProgram(RLProgram):
       trainer_metrics: Any = None,
       num_rollouts: int,
       num_microbatches: int,
-      padding_stats: Sequence[batch_assembly.PaddingStats],
-      packing_time_sec: float,
       step_time_sec: float,
       consumed_policy_version: int,
       log_step: int,
       sampler_agreement: dict[str, tuple[Any, list[Any]]] | None = None,
-      filtered_groups: Sequence[Sequence[datatypes.TrajectoryItem]] = (),
   ) -> dict[str, Any]:
     """Logs rollout, reward, trainer, and orchestrator metrics.
 
@@ -842,19 +802,6 @@ class StandardRLProgram(RLProgram):
           tag = "rollout/" + tag.removeprefix("generation/")
         self._log_metric(tag, val, log_step)
 
-    filtered_groups_count = len(filtered_groups)
-    filtered_trajectories_count = sum(len(g) for g in filtered_groups)
-    self._log_metric(
-        "rollout/filtered_groups_count",
-        float(filtered_groups_count),
-        log_step,
-    )
-    self._log_metric(
-        "rollout/filtered_trajectories_count",
-        float(filtered_trajectories_count),
-        log_step,
-    )
-
     # --- 2. Reward Metrics ---
     rewards_to_log = step_rewards
     if all_step_items:
@@ -921,17 +868,6 @@ class StandardRLProgram(RLProgram):
     }
     for tag, val in orchestrator_stats.items():
       self._log_metric(f"orchestrator/{tag}", val, log_step)
-    if padding_stats:
-      for tag, val in batch_assembly.summarize_padding_stats(
-          padding_stats
-      ).items():
-        self._log_metric(f"efficiency/padding/{tag}", val, log_step)
-      packing_stats = {
-          "time_sec_total": float(packing_time_sec),
-          "time_sec_mean": float(packing_time_sec) / len(padding_stats),
-      }
-      for tag, val in packing_stats.items():
-        self._log_metric(f"efficiency/packing/{tag}", val, log_step)
 
     # --- 4. Actor Trainer Metrics ---
     loss_val = None
@@ -1027,19 +963,15 @@ class StandardRLProgram(RLProgram):
           clean_key = (
               k.removeprefix("trainer/").removeprefix("actor/")
           )
-          if clean_key.startswith((
-              "sampler_trainer/",
-              "sampler_is/",
-              "sampler_rs/",
-          )):
+          if clean_key.startswith(("sampler_trainer/", "sampler_is/")):
             self._log_metric(clean_key, val, log_step)
           else:
             self._log_metric(clean_key, val, log_step, prefix="actor")
 
     # --- 5. Sampler/Trainer Agreement Metrics ---
-    # Names are already namespaced (``sampler_trainer/*``, ``sampler_is/*``,
-    # ``sampler_rs/*``) by the shared helper; reduce each metric's
-    # per-microbatch values with the aggregation fn the helper paired with it.
+    # Names are already namespaced (``sampler_trainer/*``, ``sampler_is/*``) by
+    # the shared helper; reduce each metric's per-microbatch values with the
+    # aggregation fn the helper paired with it.
     if sampler_agreement:
       for name, (agg_fn, values) in sampler_agreement.items():
         if not values:
@@ -1053,8 +985,6 @@ class StandardRLProgram(RLProgram):
         "advantage_std": advantage_std,
         "loss_val": loss_val,
         "perplexity_val": perplexity_val,
-        "filtered_groups_count": filtered_groups_count,
-        "filtered_trajectories_count": filtered_trajectories_count,
     }
 
   async def _apply_sampler_trainer_agreement(
@@ -1062,24 +992,23 @@ class StandardRLProgram(RLProgram):
       batch: datatypes.RLTrainerPayload,
       accumulator: dict[str, tuple[Any, list[Any]]],
   ) -> datatypes.RLTrainerPayload:
-    """Records sampler-vs-trainer agreement and feeds IS/RS weights into a batch.
+    """Records sampler-vs-trainer agreement and feeds TIS weights into a batch.
 
     Recomputes per-token log-probs under the trainer's live (actor) weights and
     compares them against the sampler's recorded ``old_per_token_logps`` to
     quantify sampler-vs-trainer drift, appending the resulting metrics to
     ``accumulator`` (keyed by the shared helper's already-namespaced names).
-    When ``sampler_is == "token"`` or ``sampler_rs is not None`` it also writes
-    importance-sampling / rejection-sampling weights and overwrites
-    ``old_per_token_logps`` with the trainer logps so the policy loss can
-    correct for off-policy drift, matching the agentic learner.
+    When ``sampler_is == "token"`` it also writes truncated importance-sampling
+    weights and overwrites ``old_per_token_logps`` with the trainer logps so the
+    policy loss can correct for off-policy drift, matching the agentic learner.
 
     Args:
       batch: The microbatch to score; must carry ``old_per_token_logps``.
       accumulator: Per-step map of metric name -> (agg_fn, values) to extend.
 
     Returns:
-      The batch, marked with ``sampler_agreement_applied=True`` and updated with
-      IS/RS weights and trainer logps when configured.
+      The batch, updated with TIS weights / trainer logps when
+      ``sampler_is == "token"``; otherwise returned unchanged.
     """
     assert self.engine is not None
     gen_temp = getattr(self.generation_args, "temperature", None)
@@ -1092,10 +1021,6 @@ class StandardRLProgram(RLProgram):
         eos_id=getattr(self.assembler, "eos_id", self.batch_config.pad_id),
         segment_ids=batch.segment_ids,
         segment_positions=batch.segment_positions,
-        # Score under the same replayed routing the loss will use, so the
-        # agreement / TIS check compares the sampler against the trainer's
-        # actual training forward rather than a freshly re-gated one.
-        routed_experts=batch.routed_experts,
     )
     trainer_logps = await self.engine.per_token_logps(
         datatypes.Role.ACTOR, items=logps_req
@@ -1108,9 +1033,6 @@ class StandardRLProgram(RLProgram):
             batch.completion_mask,
             sampler_is=self.sampler_is,
             sampler_is_threshold=self.sampler_is_threshold,
-            sampler_rs=self.sampler_rs,
-            sampler_rs_min=self.sampler_rs_min,
-            sampler_rs_max=self.sampler_rs_max,
             seq_logprob_error_threshold=self.seq_logprob_error_threshold,
             segment_ids=batch.segment_ids,
         )
@@ -1118,18 +1040,19 @@ class StandardRLProgram(RLProgram):
     for name, (value, agg_fn) in sa_metrics.items():
       accumulator.setdefault(name, (agg_fn, []))[1].append(value)
 
-    updates: dict[str, Any] = {"sampler_agreement_applied": True}
+    updates: dict[str, Any] = {}
     if self.seq_logprob_error_threshold is not None:
       updates["completion_mask"] = filtered_completion_mask
     if sampler_is_weights is not None:
       updates["sampler_is_weights"] = sampler_is_weights
     if (
         self.sampler_is == "token"
-        or self.sampler_rs is not None
         or self.seq_logprob_error_threshold is not None
     ):
       updates["old_per_token_logps"] = trainer_logps
-    batch = dataclasses.replace(batch, **updates)
+    if updates:
+      updates["sampler_agreement_applied"] = True
+      batch = dataclasses.replace(batch, **updates)
     return batch
 
   def _log_consumed_trajectories(
@@ -1144,14 +1067,12 @@ class StandardRLProgram(RLProgram):
       return
     for item in all_step_items:
       metadata = dict(getattr(item, "metadata", None) or {})
-      metadata.pop("routed_experts", None)
       env_config = metadata.get("env_config")
       if not isinstance(env_config, dict):
         env_config = {}
       # Logging must never take down a training step, so read defensively
       # rather than reusing the strict `_extract_reward` above.
-      traj = dict(getattr(item, "traj", None) or {})
-      traj.pop("routed_experts", None)
+      traj = getattr(item, "traj", None) or {}
       status = traj.get("status", None)
       reward = traj.get("trajectory_reward", None)
       if isinstance(status, datatypes.TrajectoryStatus):
@@ -1196,8 +1117,6 @@ class StandardRLProgram(RLProgram):
       step_rewards = []
       step_advantages = []
       num_microbatches = 0
-      step_padding_stats: list[batch_assembly.PaddingStats] = []
-      step_packing_time_sec = 0.0
       num_rollouts = 0
       all_step_items = []
       scored_items = []
@@ -1228,9 +1147,7 @@ class StandardRLProgram(RLProgram):
       while groups_consumed < self.full_batch_size:
         scored_items = await self.scored_q.get_batch(num_groups=1)
         if not scored_items:
-          packing_start_time = time.perf_counter()
           assembled_batches = self.assembler.flush()
-          step_packing_time_sec += time.perf_counter() - packing_start_time
         else:
           if groups_consumed == 0 and self.on_step_begin:
             self.on_step_begin(current_step)
@@ -1249,10 +1166,6 @@ class StandardRLProgram(RLProgram):
           for item in scored_items:
             payload = getattr(item, "payload", None)
             if isinstance(payload, datatypes.RLTrainerPayload):
-              if payload.routed_experts is not None:
-                item.payload = dataclasses.replace(  # pyrefly: ignore[missing-attribute]
-                    payload, routed_experts=None
-                )
               payload = dataclasses.replace(
                   payload,
                   metadata={
@@ -1261,16 +1174,9 @@ class StandardRLProgram(RLProgram):
                   },
               )
             payloads.append(payload)
-            del payload
-          packing_start_time = time.perf_counter()
-          assembled_batches = self.assembler.feed(payloads)
-          step_packing_time_sec += time.perf_counter() - packing_start_time
-          del payloads
+          assembled_batches = self.assembler.feed(payloads)  # pyrefly: ignore[bad-argument-type]
 
-        assembled_queue = collections.deque(assembled_batches)
-        del assembled_batches
-        while assembled_queue:
-          mb = assembled_queue.popleft()
+        for mb in assembled_batches:
           batch = mb.payload
           if getattr(self.algo, "requires_reference_kl", False):
             if not isinstance(batch, datatypes.RLTrainerPayload):
@@ -1287,6 +1193,9 @@ class StandardRLProgram(RLProgram):
           can_fuse_agreement_in_loss = (
               algo_config is not None
               and getattr(algo_config, "policy_loss_fn", "grpo") == "grpo"
+              and not getattr(
+                  algo_config, "log_sampler_trainer_agreement", False
+              )
               and getattr(algo_config, "num_iterations", 1) == 1
               and self.mini_batch_size >= self.full_batch_size
           )
@@ -1302,24 +1211,18 @@ class StandardRLProgram(RLProgram):
             )
 
           num_microbatches += 1
-          step_padding_stats.append(mb.padding_stats)
           logging.info(
-              "Packed %d trajectories into microbatch: %s (padding_ratio=%.3f,"
-              " row_imbalance=%.3f)",
+              "Packed %d trajectories into microbatch: %s",
               len(mb.trajectory_ids),
               logging_utils.summarize_list(list(mb.trajectory_ids)),
-              mb.padding_stats.padding_ratio,
-              mb.padding_stats.row_imbalance,
           )
-          is_final_batch = mb.is_final_batch
           step_result = await self.engine.train_step(
               batch,
               role=datatypes.Role.ACTOR,
               accumulate_gradients=True,
-              apply_optimizer=is_final_batch,
+              apply_optimizer=mb.is_final_batch,
           )
-          del batch, mb
-          if is_final_batch:
+          if mb.is_final_batch:
             trainer_metrics = await self.engine.get_metrics(
                 role=datatypes.Role.ACTOR
             )
@@ -1367,8 +1270,6 @@ class StandardRLProgram(RLProgram):
 
       step_time_sec = time.monotonic() - step_start_time
 
-      filtered_groups = await self._drain_filtered_groups()
-
       metrics_summary = self._collect_and_log_step_metrics(
           all_step_items=all_step_items,
           step_rewards=step_rewards,
@@ -1378,15 +1279,11 @@ class StandardRLProgram(RLProgram):
           trainer_metrics=trainer_metrics,
           num_rollouts=num_rollouts,
           num_microbatches=num_microbatches,
-          padding_stats=step_padding_stats,
-          packing_time_sec=step_packing_time_sec,
           step_time_sec=step_time_sec,
           consumed_policy_version=consumed_policy_version,
           log_step=current_step,
           sampler_agreement=step_sampler_agreement,
-          filtered_groups=filtered_groups,
       )
-      del filtered_groups
       self._log_consumed_trajectories(
           all_step_items,
           log_step=current_step,

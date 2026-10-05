@@ -101,16 +101,6 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       default=None,
       help="Maximum segments per packed row when sequence packing is enabled.",
   )
-  parser.add_argument(
-      "--segment_alignment_boundary",
-      type=int,
-      default=1,
-      help=(
-          "Token boundary every packed segment after the first in a row starts"
-          " on when sequence packing is enabled. 1 packs segments back to"
-          " back; use 64 for Qwen3.5 GatedDeltaNet (gdn_chunk_size=64)."
-      ),
-  )
   # TODO(tunix-dev): Clean up worker specific configuration to orchestrator.
   parser.add_argument(
       "--trainer_fsdp",
@@ -449,7 +439,6 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           max_response_length=args.max_response_length,
           max_seq_token_per_tpu=args.max_seq_token_per_tpu,
           max_segments_per_packed_row=args.max_segments_per_packed_row,
-          segment_alignment_boundary=args.segment_alignment_boundary,
           trainer_fsdp=args.trainer_fsdp,
           trainer_dp=args.trainer_dp,
       ),

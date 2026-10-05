@@ -270,7 +270,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         _summarize_list(prompt_ids),
     )
     for req in rollout_reqs:
-      if req.metadata is None:
+      if req.metadata is None:  # pyrefly: ignore[comparison-with-never]
         req.metadata = {}  # pyrefly: ignore[bad-assignment]
       if req.metadata.get("lineage") is None:
         lineage_ctx = lineage.LineageContext(
@@ -555,8 +555,8 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         pad_id = getattr(assembler, "pad_id", kwargs.get("pad_id", 0))
         eos_id = getattr(assembler, "eos_id", kwargs.get("eos_id", pad_id))
         gen_fn = algo.build_gen_model_input_fn(
-            pad_id=pad_id,
-            eos_id=eos_id,
+            pad_id=pad_id,  # pyrefly: ignore[bad-argument-type]
+            eos_id=eos_id,  # pyrefly: ignore[bad-argument-type]
         )
 
         def _configure():

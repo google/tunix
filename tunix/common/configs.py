@@ -32,7 +32,7 @@ from tunix.sft import metrics_logger as sft_metrics_logger
 from tunix.sft import profiler
 
 if TYPE_CHECKING:
-  from tunix.rl.rollout import base_rollout  # pyrefly: ignore[missing-import]
+  from tunix.rl.rollout import base_rollout  # pytype: disable=import-error
 
 # For rl_utils calls inside RLTrainingConfig
 # For base_rollout typing inside ClusterConfig
@@ -124,6 +124,47 @@ class RolloutConfig:
   # trainer can replay them instead of re-running its own router. MoE models on
   # a backend that supports capture only; a no-op otherwise.
   return_routed_experts: bool = False
+
+  # Continuous batching engine configs (`rollout_engine='vanillav2'`).
+
+  # Whether to run the engine on a background loop, so that prompts submitted
+  # by separate callers share a continuous batch.
+  server_mode: bool = False
+
+  # Only hand queued requests to the engine once at least this many have
+  # accumulated. 0 disables the threshold. Server mode only.
+  server_mode_submission_threshold: int = 0
+
+  # Hand a partial batch to the engine anyway once this many seconds have
+  # elapsed since its first request arrived. 0 disables the timeout. Server
+  # mode only.
+  server_mode_submission_timeout_s: float = 0.0
+
+  # The number of bytes of KV cache to allocate on each device.
+  kv_cache_max_device_bytes: int | None = None
+
+  # The number of tokens per KV cache page.
+  kv_cache_page_size: int = 16
+
+  # Whether requests with a common prefix may share KV cache pages.
+  enable_prefix_caching: bool = True
+
+  # The maximum number of sequences in a batch.
+  max_num_seqs: int = 32
+
+  # The maximum number of tokens in a batch.
+  max_num_batched_tokens: int = 2048
+
+  # The number of prompt tokens prefilled per chunk. Must be a power of 2, at
+  # most `max_num_batched_tokens`.
+  chunked_prefill_length: int = 512
+
+  # The number of model forward passes per engine step.
+  num_scheduler_steps: int = 1
+
+  # Periodic interval in seconds for vLLM-style console status logging in the
+  # continuous batching engine. Set <= 0 to disable periodic console logging.
+  log_stats_interval_s: float = 10.0
 
   # vLLM specific rollout configs.
 

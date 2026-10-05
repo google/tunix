@@ -10,7 +10,7 @@ from absl import logging
 try:
   from examples.deepswe import template
 except ImportError:
-  import template  # pyrefly: ignore[missing-import]
+  import template  # pytype: disable=import-error
 
 OPENHANDS_SYSTEM_PROMPT = template.OPENHANDS_SYSTEM_PROMPT
 SWE_SYSTEM_PROMPT = template.SWE_SYSTEM_PROMPT
@@ -30,7 +30,7 @@ from tunix.rl.agentic.agents.base_agent import ConversationAgentBase
 
 
 try:
-  from r2egym.agenthub.action import Action as SWEAction  # pyrefly: ignore[missing-import]
+  from r2egym.agenthub.action import Action as SWEAction  # pytype: disable=import-error
 except ImportError:
   logging.error(
       "Failed to load SWEAction. Please ensure 'r2egym' is installed properly."

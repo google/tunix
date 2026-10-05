@@ -85,8 +85,16 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
     off_policy_steps: Number of off-policy steps can be accepted before a policy
       update.
     use_rollout_logps: Use the rollout engine's log-probabilities as
-      old_per_token_logps. False makes the trainer recompute them (or fuse
-      stop_gradient(per_token_logps) when single-iteration on-policy).
+      old_per_token_logps. False makes the trainer recompute them.
+    force_on_policy_ratio: When num_iterations == 1, use
+      stop_gradients(current_logp) as old_per_token_logps instead of recomputing
+      or using rollout logps. Pins the surrogate ratio to 1.0, so clipping never
+      fires and sampler-vs-trainer numerical noise is removed from the ratio.
+    log_sampler_trainer_agreement: Optionally spend one extra trainer forward
+      pass per step to log sampler-vs-trainer log-probability agreement metrics.
+      Without force_on_policy_ratio these metrics come for free from the logps
+      already being computed; with it, no trainer logps exist, so this flag pays
+      for them explicitly. Default False
     degenerate_group_masking: Whether to mask out degenerate groups with all-0
       advantages. Deprecated. Will remove in the next release.
   """
@@ -115,8 +123,39 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
   degenerate_group_masking: bool = (
       False  # Whether to mask out degenerate groups with all-0 advantages.
   )
+  use_rollout_logps: bool = True
+  # Pin the surrogate ratio to 1.0 (old_logp := stop_gradient(current_logp)).
+  # Valid for single-iteration on-policy training only.
+  force_on_policy_ratio: bool = False
+  # Costs one trainer forward pass; keeps the sampler/trainer agreement metrics
+  # alive when force_on_policy_ratio would otherwise leave nothing to compare.
+  log_sampler_trainer_agreement: bool = False
+  # Truncated importance-sampling (TIS) correction for the residual mismatch
+  # between the rollout sampler and the trainer's recomputed log-probabilities.
+  # Set to ``"token"`` to enable per-token TIS weights. When enabled, the loss
+  # path uses the trainer's start-of-step recomputed logp as
+  # ``old_per_token_logps`` (so the PPO ratio is taken against the trainer's
+  # own policy at step start, rather than directly against the sampler's logp)
+  # and multiplies each per-token pg-loss term by a detached weight
+  #   w_t = clip(exp(clip(trainer_logp_t - sampler_logp_t, ±20)), max=threshold)
+  # dampening positions where the trainer's recomputed probability disagrees
+  # significantly with the rollout sampler. Without this correction, importance
+  # ratios computed directly against the sampler's logp can spike on outlier
+  # tokens, producing large-variance gradient updates.
+  sampler_is: str | None = None  # None | "token"
+  sampler_is_threshold: float = 2.0
+  seq_logprob_error_threshold: float | None = None
 
   def __post_init__(self):
+    if (
+        self.seq_logprob_error_threshold is not None
+        and self.seq_logprob_error_threshold < 1.0
+    ):
+      raise ValueError(
+          "seq_logprob_error_threshold must be >= 1.0 when set (since "
+          "exp(|logp_diff|) >= 1.0). Received: "
+          f"{self.seq_logprob_error_threshold}"
+      )
     if self.num_generations <= 1:
       raise ValueError(
           "num_generations must be greater than 1. Received: "
@@ -129,7 +168,28 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
           "loss_algo should be either grpo or gspo-token. Received: "
           f"{self.loss_algo}"
       )
-    self._validate_sampler_is_and_rs_options()
+    if self.force_on_policy_ratio:
+      if self.num_iterations > 1:
+        raise ValueError(
+            "force_on_policy_ratio can only be True when num_iterations == 1."
+            " With num_iterations > 1 the policy is updated several times on"
+            " the same batch, so the surrogate ratio is genuinely != 1 after"
+            " the first inner epoch; pinning it to 1 removes the trust region"
+            " for every subsequent epoch. Got"
+            f" num_iterations={self.num_iterations}"
+        )
+
+      if self.off_policy_steps > 0:
+        logging.warning(
+            "force_on_policy_ratio=True with off_policy_steps=%d: trajectories "
+            "may be up to %d policy updates stale, but the surrogate ratio is "
+            "pinned to 1.0, so the off-policy correction is discarded. This is "
+            "a deliberate trade for near-on-policy training; pair it with an "
+            "importance-sampling correction if the behavior and target "
+            "policies can drift apart.",
+            self.off_policy_steps,
+            self.off_policy_steps,
+        )
 
 
 TGrpoConfig = TypeVar("TGrpoConfig", bound=GRPOConfig)
@@ -218,7 +278,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     else:
       logging.warning("Metrics log dir is None, skipping trajectory logging.")
 
-    self.algo_config.temperature = (
+    self.algo_config.temperature = (  # pyrefly: ignore[missing-attribute]
         self.rl_engine.get_rollout_config(
             mode=rl_engine_lib.Mode.TRAIN
         ).temperature
@@ -242,12 +302,12 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         has_aux=True,
     )
     self.rl_engine.actor_trainer.with_gen_model_input_fn(
-        lambda x: {
+        lambda x: {  # pyrefly: ignore[bad-argument-type]
             "train_example": x,
             "algo_config": self.algo_config,  # pyrefly: ignore[bad-assignment]
         }
     )
-    self.rl_engine.actor_trainer.with_rl_metrics_to_log({
+    self.rl_engine.actor_trainer.with_rl_metrics_to_log({  # pyrefly: ignore[bad-argument-type]
         "kl": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
         "entropy": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
         "reduced_pg_loss": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
@@ -269,10 +329,6 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         "sampler_is/weight_min": np.min,
         "sampler_is/weight_max": np.max,
         "sampler_is/frac_clipped_at_threshold": common.global_weighted_mean,  # pyrefly: ignore[bad-assignment]
-        "sampler_is/seq_kl_mean": common.global_weighted_mean,  # pyrefly: ignore[bad-assignment]
-        "sampler_is/seq_geo_ratio_mean": common.global_weighted_mean,  # pyrefly: ignore[bad-assignment]
-        "sampler_is/seq_geo_ratio_max": np.max,
-        "sampler_rs/rejected_fraction": common.global_weighted_mean,  # pyrefly: ignore[bad-assignment]
         "sampler_trainer/logp_diff_mean": common.global_weighted_mean,  # pyrefly: ignore[bad-assignment]
         "sampler_trainer/logp_diff_max": np.max,
         "sampler_trainer/mult_prob_error_mean": common.global_weighted_mean,  # pyrefly: ignore[bad-assignment]
@@ -294,20 +350,6 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     actor_mesh = self.rl_engine.r2m[rl_engine_lib.Role.ACTOR]
     return actor_mesh is not None and not actor_mesh.empty
 
-  def _can_fuse_agreement_in_loss(self) -> bool:
-    """Whether sampler-trainer agreement and on-policy ratio can fuse into grpo_loss_fn."""
-    mini_batch_size = (
-        self.rl_engine.cluster_config.training_config.mini_batch_size
-    )
-    single_minibatch = mini_batch_size is None or (
-        self._full_batch_size > 0 and mini_batch_size >= self._full_batch_size
-    )
-    return (
-        self.algo_config.policy_loss_fn == "grpo"
-        and self.algo_config.num_iterations == 1
-        and single_minibatch
-    )
-
   def _sampler_trainer_agreement(
       self,
       rollout_per_token_logps,
@@ -315,12 +357,12 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       completion_mask,
       segment_ids=None,
   ):
-    """Sampler-vs-trainer agreement metrics and the IS/RS weights built from them.
+    """Sampler-vs-trainer agreement metrics and the TIS weights built from them.
 
     Thin wrapper around ``common.sampler_trainer_agreement`` that supplies the
-    importance-sampling and rejection-sampling knobs from ``self.algo_config``.
-    Shared by the unpacked and packed paths, which differ only in which
-    representation the two logp tensors come from.
+    importance-sampling knobs from ``self.algo_config``. Shared by the unpacked
+    and packed paths, which differ only in which representation the two logp
+    tensors come from.
     """
     return common.sampler_trainer_agreement(
         rollout_per_token_logps,
@@ -328,9 +370,6 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         completion_mask,
         sampler_is=self.algo_config.sampler_is,
         sampler_is_threshold=self.algo_config.sampler_is_threshold,
-        sampler_rs=self.algo_config.sampler_rs,
-        sampler_rs_min=self.algo_config.sampler_rs_min,
-        sampler_rs_max=self.algo_config.sampler_rs_max,
         seq_logprob_error_threshold=self.algo_config.seq_logprob_error_threshold,
         segment_ids=segment_ids,
     )
@@ -357,12 +396,11 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         else None
     )
 
-    can_fuse_in_loss = self._can_fuse_agreement_in_loss()
     updates = {}
     if (
         example.old_per_token_logps is None
         and not self.algo_config.use_rollout_logps
-        and not can_fuse_in_loss
+        and not self.algo_config.force_on_policy_ratio
     ):
       updates["old_per_token_logps"] = self.rl_engine.get_actor_per_token_logps(
           prompt_tokens=prompt_tokens,
@@ -385,18 +423,20 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           segment_ids=segment_ids,
           segment_positions=segment_positions,
       )
-    # When single-iteration on-policy GRPO is used (`can_fuse_in_loss`),
-    # `grpo_loss_fn` computes sampler-trainer agreement, IS/RS weights, and
-    # sequence error masking inside the training forward pass. Only run an
-    # explicit pre-step trainer forward pass when multi-iteration / multi-minibatch.
+    # The rollout-logps path defers its trainer recompute here too. Not just
+    # diagnostics: sampler_is="token" consumes it as old_per_token_logps, and
+    # seq_logprob_error_threshold masks divergent segments.
     need_trainer_logps = (
-        not can_fuse_in_loss
+        (
+            not self.algo_config.force_on_policy_ratio
+            or self.algo_config.log_sampler_trainer_agreement
+            or self.algo_config.seq_logprob_error_threshold is not None
+        )
         and self.algo_config.use_rollout_logps
         and example.old_per_token_logps is not None
         and (
             self._have_actor_mesh()
-            or self.algo_config.sampler_is is not None
-            or self.algo_config.sampler_rs is not None
+            or self.algo_config.sampler_is == "token"
             or self.algo_config.seq_logprob_error_threshold is not None
         )
     )
@@ -431,11 +471,16 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       if sampler_is_weights is not None:
         updates["sampler_is_weights"] = sampler_is_weights
       if (
-          self.algo_config.sampler_is is not None
-          or self.algo_config.sampler_rs is not None
+          self.algo_config.sampler_is == "token"
           or self.algo_config.seq_logprob_error_threshold is not None
-      ):
+      ) and not self.algo_config.force_on_policy_ratio:
         updates["old_per_token_logps"] = trainer_logps
+
+    if (
+        self.algo_config.force_on_policy_ratio
+        and example.old_per_token_logps is not None
+    ):
+      updates["old_per_token_logps"] = None
 
     if updates:
       example = example.replace(**updates)  # pyrefly: ignore[missing-attribute]
@@ -662,20 +707,42 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         else len(trajectories)
     )
 
-    can_fuse_in_loss = self._can_fuse_agreement_in_loss()
     rollout_per_token_logps = None
     trainer_per_token_logps = None
-    if self.algo_config.use_rollout_logps and padded_old_logprobs:
+    if self.algo_config.force_on_policy_ratio:
+      # The loss derives old_per_token_logps from the actor's own forward pass.
+      old_per_token_logps = None
+      if padded_old_logprobs:
+        rollout_per_token_logps = jnp.asarray(padded_old_logprobs)
+        want_agreement = (
+            self.algo_config.log_sampler_trainer_agreement
+            or self.algo_config.seq_logprob_error_threshold is not None
+        )
+        if want_agreement and is_packed:
+          # Preserve rollout logps across packing so _compute_packed_logps can
+          # score agreement/error masking before clearing old_per_token_logps.
+          old_per_token_logps = rollout_per_token_logps
+        elif want_agreement and (
+            have_actor_mesh
+            or self.algo_config.seq_logprob_error_threshold is not None
+        ):
+          trainer_per_token_logps = self.rl_engine.get_actor_per_token_logps(
+              prompt_tokens=prompt_ids,
+              completion_tokens=completion_ids,
+              pad_id=pad_value,
+              eos_id=eos_value,
+              micro_batch_size=compute_logps_micro_batch_size,
+              token_mask=token_mask,
+          )
+    elif self.algo_config.use_rollout_logps and padded_old_logprobs:
       rollout_per_token_logps = jnp.asarray(padded_old_logprobs)
       old_per_token_logps = rollout_per_token_logps
-      # When single-iteration on-policy GRPO is used (`can_fuse_in_loss`),
-      # `grpo_loss_fn` computes sampler-trainer agreement, IS/RS weights, and
-      # sequence error masking inside the training forward pass. Only run an
-      # explicit pre-step trainer forward pass when multi-iteration / multi-minibatch.
-      need_trainer_logps = not can_fuse_in_loss and (
+      # The diagnostic pass (and the sampler-IS ``token`` path, which needs the
+      # trainer's recomputed logp as ``old_per_token_logps``) requires a real
+      # actor mesh; skip when not available.
+      need_trainer_logps = (
           have_actor_mesh
-          or self.algo_config.sampler_is is not None
-          or self.algo_config.sampler_rs is not None
+          or self.algo_config.sampler_is == "token"
           or self.algo_config.seq_logprob_error_threshold is not None
       )
       # Deferred to _compute_packed_logps under packing: here it would run on
@@ -689,18 +756,19 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             micro_batch_size=compute_logps_micro_batch_size,
             token_mask=token_mask,
         )
-      # When sampler-IS / RS correction is enabled, use the trainer's recomputed
+      # When sampler-IS correction is enabled, use the trainer's recomputed
       # logp as ``old_per_token_logps`` so the PPO ratio is
       # ``exp(current_logp - trainer_logp)`` rather than against the rollout
-      # sampler's logp directly. The IS/RS weight computed below corrects for
+      # sampler's logp directly. The IS weight computed below corrects for
       # the trainer-vs-sampler divergence.
       if (
-          self.algo_config.sampler_is is not None
-          or self.algo_config.sampler_rs is not None
+          self.algo_config.sampler_is == "token"
           or self.algo_config.seq_logprob_error_threshold is not None
       ) and trainer_per_token_logps is not None:
         old_per_token_logps = trainer_per_token_logps
-    elif self.algo_config.use_rollout_logps or is_packed or can_fuse_in_loss:
+    elif self.algo_config.use_rollout_logps:
+      old_per_token_logps = None
+    elif is_packed:
       old_per_token_logps = None
     else:
       trainer_per_token_logps = self.rl_engine.get_actor_per_token_logps(

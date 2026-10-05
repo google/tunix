@@ -194,7 +194,7 @@ def create_dataset():
 
     first, second = data_lib.post_init_dataset(
         dataset,
-        tokenizer=tokenizer,  # pyrefly: ignore[bad-argument-type]
+        tokenizer=tokenizer,  # pytype: disable=wrong-arg-types
         batch_size=2,
         num_batches=None,
         max_prompt_length=2,  # only the first record should remain
@@ -217,7 +217,7 @@ def create_dataset():
     ):
       data_lib.post_init_dataset(
           dataset,
-          tokenizer=tokenizer,  # pyrefly: ignore[bad-argument-type]
+          tokenizer=tokenizer,  # pytype: disable=wrong-arg-types
           batch_size=2,
           num_batches=None,
           max_prompt_length=2,
@@ -232,7 +232,7 @@ def create_dataset():
     with self.assertRaisesRegex(ValueError, "empty after post_init_dataset split"):
       data_lib.post_init_dataset(
           dataset,
-          tokenizer=tokenizer,  # pyrefly: ignore[bad-argument-type]
+          tokenizer=tokenizer,  # pytype: disable=wrong-arg-types
           batch_size=1,
           num_batches=None,
           max_prompt_length=None,
@@ -247,7 +247,7 @@ def create_dataset():
 
     first, _ = data_lib.post_init_dataset(
         dataset,
-        tokenizer=tokenizer,  # pyrefly: ignore[bad-argument-type]
+        tokenizer=tokenizer,  # pytype: disable=wrong-arg-types
         batch_size=3,
         num_batches=2,  # keep at most 2 batches * 3 = 6 examples
         max_prompt_length=None,
@@ -267,7 +267,7 @@ def create_dataset():
 
     first, second = data_lib.post_init_dataset(
         dataset,
-        tokenizer=tokenizer,  # pyrefly: ignore[bad-argument-type]
+        tokenizer=tokenizer,  # pytype: disable=wrong-arg-types
         batch_size=2,
         num_batches=None,
         max_prompt_length=None,
@@ -292,7 +292,7 @@ def create_dataset():
 
     first, second = data_lib.post_init_dataset(
         dataset,
-        tokenizer=tokenizer,  # pyrefly: ignore[bad-argument-type]
+        tokenizer=tokenizer,  # pytype: disable=wrong-arg-types
         batch_size=2,
         num_batches=None,
         max_prompt_length=None,
@@ -318,7 +318,7 @@ def create_dataset():
 
       first, second = data_lib.post_init_dataset(
         dataset,
-        tokenizer=tokenizer,  # pyrefly: ignore[bad-argument-type]
+        tokenizer=tokenizer,  # pytype: disable=wrong-arg-types
         batch_size=2,
         num_batches=None,
         max_prompt_length=None,
@@ -351,7 +351,7 @@ def create_dataset():
 
     first, second = data_lib.post_init_dataset(
         dataset,
-        tokenizer=tokenizer,  # pyrefly: ignore[bad-argument-type]
+        tokenizer=tokenizer,  # pytype: disable=wrong-arg-types
         batch_size=1,
         num_batches=None,
         max_prompt_length=None,

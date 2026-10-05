@@ -63,7 +63,7 @@ def sanitize_control_tokens(
       content = str(content)
 
   if not content:
-    return content
+    return content  # pytype: disable=bad-return-type
 
   if include_default and not extra_tokens:
     regex = _CONTROL_TOKENS_RE

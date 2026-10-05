@@ -338,11 +338,11 @@ class CheckpointManager:
         ) from e
       raise e
 
-    if optimizer is not None and 'optimizer_state' in restored_checkpointables:
-      nnx.update(optimizer, restored_checkpointables['optimizer_state'])
+    if optimizer is not None and 'optimizer_state' in restored_checkpointables:  # pyrefly: ignore[not-iterable]
+      nnx.update(optimizer, restored_checkpointables['optimizer_state'])  # pyrefly: ignore[missing-attribute]
 
     # Update the model state with params from the restored checkpoint.
-    nnx.update(model, restored_checkpointables['model_params'])
+    nnx.update(model, restored_checkpointables['model_params'])  # pyrefly: ignore[missing-attribute]
     logging.info(
         'Restored params from step: %d in %.3f seconds',
         step,

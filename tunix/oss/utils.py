@@ -26,7 +26,7 @@ def pathways_available() -> bool:
   if 'proxy' not in os.getenv('JAX_PLATFORMS', ''):
     return False
   try:
-    import pathwaysutils  # pylint: disable=g-import-not-at-top, unused-import  # pyrefly: ignore[missing-import]
+    import pathwaysutils  # pylint: disable=g-import-not-at-top, unused-import # pytype: disable=import-error
 
     return True
   except ImportError:
@@ -59,7 +59,7 @@ def load_file_from_gcs(file_dir: str, target_dir: str | None = None) -> str:
 def kaggle_pipeline(model_id: str, model_download_path: str):
   """Download model from Kaggle."""
   try:
-    import kagglesdk.kaggle_env  # pylint: disable=g-import-not-at-top
+    import kagglesdk.kaggle_env  # pylint: disable=g-import-not-at-top # pytype: disable=import-error
     if not hasattr(kagglesdk.kaggle_env, 'get_web_endpoint') and hasattr(kagglesdk.kaggle_env, 'get_endpoint'):
       kagglesdk.kaggle_env.get_web_endpoint = kagglesdk.kaggle_env.get_endpoint
   except Exception:  # pylint: disable=broad-exception-caught

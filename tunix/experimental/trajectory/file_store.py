@@ -204,7 +204,9 @@ class _AsyncFileWriter(async_writer.AsyncWriter[_FileWriteTask]):
     )
 
 
-class FileTrajectoryStore(store.TrajectoryStore):
+class FileTrajectoryStore(
+    store.TrajectoryStore, store.TrajectoryReader, store.TrajectoryWriter
+):
   """File-based implementation satisfying TrajectoryReader and TrajectoryWriter.
 
   Architectural Separation of Responsibilities:
@@ -417,7 +419,9 @@ class FileTrajectoryStore(store.TrajectoryStore):
         step = trajectory_lib.Step.model_validate_json(file_entry.read_text())
         steps.append(step)
 
-      trajs.append(meta.create_trajectory(steps=steps))
+      traj_data = meta.model_dump()
+      traj_data["steps"] = steps
+      trajs.append(trajectory_lib.Trajectory(**traj_data))
 
     return trajs
 

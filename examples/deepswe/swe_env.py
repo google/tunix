@@ -42,9 +42,9 @@ _GLOBAL_FLEET = None
 
 # pylint: disable=g-import-not-at-top,g-blanket-type-suppression,g-multiple-import
 try:
-  import r2egym
-  from r2egym.agenthub.action import Action
-  from r2egym.agenthub.environment.env import EnvArgs, RepoEnv
+  import r2egym  # pytype: disable=import-error
+  from r2egym.agenthub.action import Action  # pytype: disable=import-error
+  from r2egym.agenthub.environment.env import EnvArgs, RepoEnv  # pytype: disable=import-error
 except ImportError:
   r2egym = cast(Any, None)
   EnvArgs = cast(Any, None)
@@ -155,8 +155,8 @@ class SWEEnv(BaseTaskEnv):
 
   def _init_agent_sandbox_env(self) -> None:
     sandbox_utils.patch_r2egym_for_agent_sandbox()
-    from agent_sandbox_rl import Task  # pyrefly: ignore[missing-import]
-    from agent_sandbox_rl.adapters.r2egym import (  # pyrefly: ignore[missing-import]
+    from agent_sandbox_rl import Task  # pytype: disable=import-error
+    from agent_sandbox_rl.adapters.r2egym import (  # pytype: disable=import-error
         make_fleet_repo_env,
         r2egym_command_files,
     )
@@ -200,7 +200,7 @@ class SWEEnv(BaseTaskEnv):
         else:
           raise
     if self.scaffold == "openhands":
-      from agent_sandbox_rl.adapters.openhands import make_handle_workspace  # pyrefly: ignore[missing-import]
+      from agent_sandbox_rl.adapters.openhands import make_handle_workspace  # pytype: disable=import-error
 
       ws_kwargs = {}
       if os.getenv("SANDBOX_SESSION_KEY"):
@@ -229,8 +229,8 @@ class SWEEnv(BaseTaskEnv):
     # Initialize standard local Docker RepoEnv
     global EnvArgs, RepoEnv, Action
     if EnvArgs is None:
-      from r2egym.agenthub.action import Action
-      from r2egym.agenthub.environment.env import EnvArgs, RepoEnv
+      from r2egym.agenthub.action import Action  # pytype: disable=import-error
+      from r2egym.agenthub.environment.env import EnvArgs, RepoEnv  # pytype: disable=import-error
     env_args = EnvArgs(ds=self.entry)
     self.env = RepoEnv(
         env_args,
@@ -253,7 +253,7 @@ class SWEEnv(BaseTaskEnv):
     elif self.env is not None:
       self.env.reset()
 
-    self.final_reward_fn = self.env.compute_reward  # pyrefly: ignore[missing-attribute]
+    self.final_reward_fn = self.env.compute_reward  # pytype: disable=attribute-error
     self.total_steps = 0
 
     if self.workspace is not None:
@@ -264,12 +264,12 @@ class SWEEnv(BaseTaskEnv):
       )
 
     # Polls docker runtime to get task instruction.
-    return self.env.get_task_instruction()  # pyrefly: ignore[missing-attribute]
+    return self.env.get_task_instruction()  # pytype: disable=attribute-error
 
   def _step_impl(self, action: Any) -> EnvStepResult:
     global Action
     if Action is None:
-      from r2egym.agenthub.action import Action
+      from r2egym.agenthub.action import Action  # pytype: disable=import-error
     if isinstance(action, str):
       action_obj = Action.from_string(action)
     else:
@@ -304,7 +304,7 @@ class SWEEnv(BaseTaskEnv):
 
     if getattr(self, "workspace", None) is not None:
       try:
-        self.workspace.cleanup()
+        self.workspace.cleanup()  # pytype: disable=attribute-error
       except Exception as e:
         logging.warning("[SWEEnv] Workspace cleanup note: %s", e)
       self.workspace = None

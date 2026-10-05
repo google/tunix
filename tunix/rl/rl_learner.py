@@ -623,6 +623,12 @@ class RLLearner(abc.ABC, Generic[TConfig]):
                 eval_ds,
                 skip_jit,
             )
+            rollout_perf_metrics = self.rl_engine.rollout.get_perf_metrics()
+            if rollout_perf_metrics:
+              self.rl_engine.buffer_metrics(
+                  rollout_perf_metrics,
+                  mode=rl_engine_lib.Mode.TRAIN,
+              )
 
             if self.should_sync_weights:
               logging.debug(

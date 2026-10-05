@@ -434,7 +434,7 @@ def remove_boxed(s):
 def extract_boxed_answer(solution: str):
   """Extract the answer from inside a LaTeX \\boxed{} command"""
   solution = last_boxed_only_string(solution)
-  solution = remove_boxed(solution) if solution is not None else solution
+  solution = remove_boxed(solution) if solution is not None else solution  # pyrefly: ignore[bad-assignment]
   logging.vlog(4, f"{solution=} in extracted_boxed_answer")
   return solution
 

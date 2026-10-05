@@ -229,8 +229,8 @@ class RemoteWorkerShim:
     return await self._handle.asubmit("get_weight_sync_status", *args, **kwargs)
 
 
-weight_sync.WeightSyncSource.register(RemoteWorkerShim)
-weight_sync.WeightSyncDestination.register(RemoteWorkerShim)
+weight_sync.WeightSyncSource.register(RemoteWorkerShim)  # pyrefly: ignore[missing-attribute]
+weight_sync.WeightSyncDestination.register(RemoteWorkerShim)  # pyrefly: ignore[missing-attribute]
 
 
 # The worker-report phases a failed RPC may be reconciled against, per

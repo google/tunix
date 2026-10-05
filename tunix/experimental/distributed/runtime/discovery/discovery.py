@@ -117,7 +117,7 @@ def register(
         stub.Register(request)
         break
       except grpc.RpcError as e:
-        if e.code() == grpc.StatusCode.UNAVAILABLE:  # pyrefly: ignore[missing-attribute]
+        if e.code() == grpc.StatusCode.UNAVAILABLE:  # pytype: disable=attribute-error
           time.sleep(delay)
           count += 1
           if count >= 60:
@@ -126,5 +126,5 @@ def register(
           continue
         else:
           raise RuntimeError(
-              f"discovery register failed: {e.code()} - {e.details()}"  # pyrefly: ignore[missing-attribute]
+              f"discovery register failed: {e.code()} - {e.details()}"  # pytype: disable=attribute-error
           )

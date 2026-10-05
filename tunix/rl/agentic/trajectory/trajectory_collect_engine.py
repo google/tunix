@@ -568,7 +568,7 @@ class TrajectoryCollectEngine:
           contains_first_msg=True,
           contains_generation_msg=True,
       )
-      self.agent.trajectory.prompt_tokens = prompt_tokens
+      self.agent.trajectory.prompt_tokens = prompt_tokens  # pyrefly: ignore[missing-attribute]
     if self.exact_token_continuity:
       self._exact_chat_history = copy.deepcopy(self.agent.chat_completions)
 
@@ -667,7 +667,7 @@ class TrajectoryCollectEngine:
     model_call_fn = self.model_call
     is_async = inspect.iscoroutinefunction(model_call_fn) or (
         hasattr(model_call_fn, "__call__")
-        and inspect.iscoroutinefunction(
+        and inspect.iscoroutinefunction(  # pytype: disable=not-supported-yet
             getattr(model_call_fn, "__call__")
         )
     )
@@ -678,7 +678,7 @@ class TrajectoryCollectEngine:
 
     if is_async:
       try:
-        rollout_output = await model_call_fn(  # pyrefly: ignore[not-async]
+        rollout_output = await model_call_fn(  # pytype: disable=bad-return-type
             chat_input,
             self.env,
             max_generation_steps=max_generation_steps,
@@ -710,7 +710,7 @@ class TrajectoryCollectEngine:
     if self.exact_token_continuity:
       if not self.agent.trajectory.steps:
         # The owned first-turn prompt; later turns replay exactly these ids.
-        self.agent.trajectory.prompt_tokens = (
+        self.agent.trajectory.prompt_tokens = (  # pyrefly: ignore[missing-attribute]
             rollout_output.left_padded_prompt_tokens[0]
         )
         self.agent.trajectory.prompt_length = int(

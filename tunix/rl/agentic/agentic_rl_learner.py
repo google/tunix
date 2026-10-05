@@ -259,6 +259,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     self._train_rewards_window: List[float] = []
     self._eval_rewards_window: List[float] = []
     self._rewards_window_lock = threading.Lock()
+    self._weight_sync_paused_time_s: float = 0.0
 
   def _validate_rollout_config(self):
     """Validates that the rollout config is properly aligned with the algo config."""
@@ -469,7 +470,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             is_first_msg=True,  # no op if system msg is populated in reset
         )
       return self.rl_engine.generate(
-          prompts=[chat_lists],  # pyrefly: ignore[bad-argument-type]
+          prompts=[chat_lists],  # pytype: disable=wrong-arg-types
           apply_chat_template=not self.chat_parser,
           mode=rl_engine_lib.Mode.TRAIN,
           trace_tags=tags,
@@ -524,6 +525,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       A list of trajectories for a group.
     """
     is_async_iterator = hasattr(prompt_iterator, "__aiter__")
+    batch_start_info: dict[int, tuple[float, float]] = {}
+    batch_completed_groups: dict[int, int] = {}
 
     async def pairs_stream_generator():
       """Yield (agent, env) pairs with unique group_id per original prompt."""
@@ -532,6 +535,13 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       group_id = self.rl_engine.global_steps * self._full_batch_size
       if is_async_iterator:
         async for single_example in prompt_iterator:  # pyrefly: ignore[not-iterable]
+          if self._full_batch_size > 0:
+            batch_idx = group_id // self._full_batch_size
+            if batch_idx not in batch_start_info:
+              batch_start_info[batch_idx] = (
+                  time.perf_counter(),
+                  self._weight_sync_paused_time_s,
+              )
           # Create agent-env pairs in parallel for a group to handle potential
           # cold start latency on env creation.
           agent_env_pairs = await asyncio.gather(*[
@@ -584,6 +594,30 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       async with contextlib.aclosing(async_generator) as stream:
         async for group in stream:
           if group:
+            if (
+                is_async_iterator
+                and self._full_batch_size > 0
+                and hasattr(group[0], "group_id")
+                and group[0].group_id is not None
+            ):
+              batch_idx = group[0].group_id // self._full_batch_size
+              completed = batch_completed_groups.get(batch_idx, 0) + 1
+              batch_completed_groups[batch_idx] = completed
+              if (
+                  completed == self._full_batch_size
+                  and batch_idx in batch_start_info
+              ):
+                start_t, start_paused_t = batch_start_info.pop(batch_idx)
+                batch_completed_groups.pop(batch_idx, None)
+                paused_delta = max(
+                    0.0, self._weight_sync_paused_time_s - start_paused_t
+                )
+                active_batch_time = max(
+                    0.0, (time.perf_counter() - start_t) - paused_delta
+                )
+                self.rl_engine.rollout.record_batch_completion(
+                    active_batch_time
+                )
             # Retrieve the original input embedded in the task.
             yield group
     except (GeneratorExit, asyncio.CancelledError):
@@ -934,7 +968,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             jnp.array(float((seg == 0).sum())), jnp.array(float(seg.size))
         )
         self.rl_engine.buffer_metrics_async(
-            {
+            {  # pyrefly: ignore[bad-argument-type]
                 "packing/dummy_ratio": (  # pyrefly: ignore[bad-assignment]
                     dummy_ratio,
                     common.global_weighted_mean,
@@ -1163,8 +1197,16 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             mode=rl_engine_lib.Mode.TRAIN,
             step=self.rl_engine.global_steps,
         )
+        rollout_perf_metrics = self.rl_engine.rollout.get_perf_metrics()
+        if rollout_perf_metrics:
+          self.rl_engine.buffer_metrics_async(
+              rollout_perf_metrics,
+              mode=rl_engine_lib.Mode.TRAIN,
+              step=self.rl_engine.global_steps,
+          )
         if self.should_sync_weights:
           logging.info("Requesting sync lock to sync weights...")
+          sync_pause_start = time.perf_counter()
           self._rollout_sync_lock.acquire_weight_sync()
           try:
             logging.info("Sync lock acquired. Syncing weights.")
@@ -1194,6 +1236,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
               prompt_queue.put(None)
           finally:
             self._rollout_sync_lock.release_weight_sync()
+            self._weight_sync_paused_time_s += (
+                time.perf_counter() - sync_pause_start
+            )
             logging.info("Sync lock released.")
         else:
           self.rl_engine.global_steps += 1

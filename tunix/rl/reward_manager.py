@@ -378,7 +378,7 @@ class SequenceRewardManager(AbstractRewardManager):
 
 
 @function_registry.register_reward_manager("agentic-sequence-level")
-class AgenticSequenceRewardManager(SequenceRewardManager):
+class AgenticSequenceRewardManager(SequenceRewardManager):  # pytype: disable=base-class-error
   """Reward manager for agentic settings.
 
   Supports two reward sources:
@@ -400,7 +400,7 @@ class AgenticSequenceRewardManager(SequenceRewardManager):
       self.reward_fns = []
       self.algo_config = algo_config
     else:
-      super().__init__(reward_fns, algo_config)
+      super().__init__(reward_fns, algo_config)  # pytype: disable=attribute-error
 
   def __call__(
       self,

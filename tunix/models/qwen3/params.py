@@ -25,12 +25,12 @@ from tunix.models.qwen3 import model as model_lib
 
 def _stack_experts(params: dict[str, jax.Array]):
   """Stack experts in the loaded pytorch params."""
-  key_fn = lambda x: int(re.match(r"(.*?)experts\.([0-9]+)\..*", x).group(2))  # pyrefly: ignore[missing-attribute]
+  key_fn = lambda x: int(re.match(r"(.*?)experts\.([0-9]+)\..*", x).group(2))  # pytype: disable=attribute-error
   updated_dict = dict(params).copy()
   for kw in ["gate", "up", "down"]:
     pattern = r"(.*?)experts\.(.*?)\.{}_proj\.(.*)".format(kw)
     keys = [k for k in params.keys() if re.match(pattern, k)]
-    prefix_groups = set([re.match(pattern, k).group(1) for k in keys])  # pyrefly: ignore[missing-attribute]
+    prefix_groups = set([re.match(pattern, k).group(1) for k in keys])  # pytype: disable=attribute-error
     for prefix in prefix_groups:
       keys_to_merge = list(
           sorted([k for k in keys if k.startswith(prefix)], key=key_fn)

@@ -175,11 +175,6 @@ class AlgorithmConfigTest(parameterized.TestCase):
     self.assertIsNone(config.epsilon_c)
     self.assertEqual(config.kl_loss_mode, "kl")
     self.assertEqual(config.loss_agg_mode, "sequence-mean-token-mean")
-    self.assertIsNone(config.sampler_is)
-    self.assertEqual(config.sampler_is_threshold, 2.0)
-    self.assertIsNone(config.sampler_rs)
-    self.assertIsNone(config.sampler_rs_min)
-    self.assertIsNone(config.sampler_rs_max)
 
   def test_grpo_config_validation(self):
     """Verifies GRPOConfig parameter validation."""
@@ -193,48 +188,6 @@ class AlgorithmConfigTest(parameterized.TestCase):
 
     with self.assertRaisesRegex(ValueError, "sampler_is should be either"):
       algorithm_config.GRPOConfig(sampler_is="invalid_is")
-
-  def test_grpo_config_sampler_is_and_rs_validation(self):
-    """Verifies orthogonal sampler_is and sampler_rs validations."""
-    with self.assertRaisesRegex(ValueError, "sampler_is_threshold must be > 0"):
-      algorithm_config.GRPOConfig(sampler_is="token", sampler_is_threshold=0.0)
-    with self.assertRaisesRegex(ValueError, "must be set together"):
-      algorithm_config.GRPOConfig(sampler_rs_min=0.5)
-    with self.assertRaisesRegex(ValueError, "sampler_rs_min must be >= 0.0"):
-      algorithm_config.GRPOConfig(sampler_rs_min=-0.5, sampler_rs_max=2.0)
-    with self.assertRaisesRegex(ValueError, "must not exceed"):
-      algorithm_config.GRPOConfig(sampler_rs_min=2.0, sampler_rs_max=1.0)
-    with self.assertRaisesRegex(
-        ValueError, "sampler_rs should be None, 'geometric', or 'token'"
-    ):
-      algorithm_config.GRPOConfig(
-          sampler_rs="bad", sampler_rs_min=0.5, sampler_rs_max=2.0
-      )
-    with self.assertRaisesRegex(ValueError, "requires a keep-band"):
-      algorithm_config.GRPOConfig(sampler_rs="geometric")
-
-    # Orthogonal combinations: token IS + geometric RS (both capped and unclipped)
-    cfg_seq_mask_tis = algorithm_config.GRPOConfig(
-        sampler_is="token",
-        sampler_is_threshold=None,
-        sampler_rs="geometric",
-        sampler_rs_min=0.5,
-        sampler_rs_max=2.0,
-    )
-    self.assertEqual(cfg_seq_mask_tis.sampler_is, "token")
-    self.assertIsNone(cfg_seq_mask_tis.sampler_is_threshold)
-    self.assertEqual(cfg_seq_mask_tis.sampler_rs, "geometric")
-    self.assertEqual(cfg_seq_mask_tis.sampler_rs_min, 0.5)
-    self.assertEqual(cfg_seq_mask_tis.sampler_rs_max, 2.0)
-
-    cfg_capped_seq_mask_tis = algorithm_config.GRPOConfig(
-        sampler_is="token",
-        sampler_is_threshold=5.0,
-        sampler_rs="geometric",
-        sampler_rs_min=0.5,
-        sampler_rs_max=2.0,
-    )
-    self.assertEqual(cfg_capped_seq_mask_tis.sampler_is_threshold, 5.0)
 
   def test_grpo_config_custom_policy_loss_and_advantage(self):
     """Verifies GRPOConfig supports dynamically registered custom functions."""

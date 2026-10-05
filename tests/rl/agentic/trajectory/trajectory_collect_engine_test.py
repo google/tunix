@@ -1300,7 +1300,6 @@ class ExactTokenContinuityCollectTest(absltest.TestCase):
         use_rollout_logps=True,
     )
     learner._trajectory_logger = None
-    learner._full_batch_size = 0
     learner.metric_fns = []
     learner._compute_rewards = lambda **kw: np.array([0.0, 1.0])
     learner.rl_engine = SimpleNamespace(
@@ -1311,9 +1310,7 @@ class ExactTokenContinuityCollectTest(absltest.TestCase):
         cluster_config=SimpleNamespace(
             rollout_config=base_rollout.RolloutConfig(max_prompt_length=5),
             training_config=SimpleNamespace(
-                max_seq_token_per_tpu=64,
-                compute_logps_micro_batch_size=1,
-                mini_batch_size=None,
+                max_seq_token_per_tpu=64, compute_logps_micro_batch_size=1
             ),
         ),
     )
