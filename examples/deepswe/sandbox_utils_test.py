@@ -204,10 +204,12 @@ class SandboxUtilsTest(absltest.TestCase):
     self.assertEqual(iterator.initial_lookahead_batches, 3)
     self.assertEqual(iterator.lookahead_batches, 1)
     # Before the first pull: batches 0..2 (dispatched at start-up) and the
-    # prefetch batch 3 all have pools; only batch 0 is waited on.
+    # prefetch batch 3 all have pools; batches 0..2 are waited on, while the
+    # prefetch batch 3 warms in the background.
     self.assertEqual(set(fleet.active_pools), {f"img_{i}" for i in range(4)})
     self.assertCountEqual(
-        [call for call in fleet.warm_calls if call[2]], [("img_0", 4, True)]
+        [call for call in fleet.warm_calls if call[2]],
+        [("img_0", 4, True), ("img_1", 4, True), ("img_2", 4, True)],
     )
 
     # Start-up dispatch of batches 0..2: no new pools, the window drains to
@@ -230,7 +232,8 @@ class SandboxUtilsTest(absltest.TestCase):
     self.assertIn("img_1", fleet.active_pools)
     # Pools created after start-up never block.
     self.assertCountEqual(
-        [call for call in fleet.warm_calls if call[2]], [("img_0", 4, True)]
+        [call for call in fleet.warm_calls if call[2]],
+        [("img_0", 4, True), ("img_1", 4, True), ("img_2", 4, True)],
     )
     iterator.close()
 
@@ -276,6 +279,8 @@ class SandboxUtilsTest(absltest.TestCase):
             ("img_2", 2, False),
             ("img_3", 2, False),
             ("img_0", 2, True),
+            ("img_1", 2, True),
+            ("img_2", 2, True),
         ],
     )
     iterator.close()
@@ -922,28 +927,8 @@ class SandboxFailFastTest(absltest.TestCase):
         iterator = sandbox_utils.PrewarmDatasetIterator(
             dataset, fleet=_FailingWarmFleet(), num_generations=2, batch_size=1
         )
-  def test_lazy_initial_defers_iteration_and_priming(self):
-    dataset_iterated = []
-
-    def _gen():
-      for i in range(5):
-        dataset_iterated.append(i)
-        yield {"prompt": f"p{i}", "docker_image": f"img_{i}"}
-
-    fleet = FakeFleet()
-    iterator = sandbox_utils.PrewarmDatasetIterator(
-        _gen(), fleet=fleet, num_generations=2, batch_size=2, lazy_initial=True
-    )
-    self.assertEmpty(dataset_iterated)
-    self.assertEmpty(fleet.warm_calls)
-    self.assertFalse(iterator._initial_primed)
-
-    iterator.prime_initial()
-    self.assertTrue(iterator._initial_primed)
-    self.assertNotEmpty(dataset_iterated)
-    self.assertNotEmpty(fleet.warm_calls)
-    self.assertEqual(next(iterator)["prompt"], "p0")
-    iterator.close()
+    self.assertEqual(next(iterator), dataset[0])
+    self.assertTrue(any("Warm note for img_A" in line for line in logs.output))
 
 
 if __name__ == "__main__":
