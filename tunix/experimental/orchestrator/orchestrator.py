@@ -102,7 +102,7 @@ class ClusterOrchestrator:
       # grep away.
       logging.info(
           "[trajectory-store] orchestrator built %s",
-          self.trajectory_store.to_config(),
+          self.trajectory_store.to_redacted_config(),
       )
 
   def __enter__(self) -> "ClusterOrchestrator":

@@ -121,7 +121,7 @@ class RolloutWorker(abstract_worker.Worker):
       logging.info(
           "[trajectory-store] worker %s built %s",
           worker_id,
-          self._trajectory_store.to_config(),
+          self._trajectory_store.to_redacted_config(),
       )
 
   @property
