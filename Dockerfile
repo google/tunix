@@ -38,14 +38,22 @@ COPY requirements/ requirements/
 
 RUN bash scripts/install_tunix_vllm_requirement.sh
 
+# The PJRT plugin and the Raiden wheel are compiled against the exact jax,
+# jaxlib and libtpu that tpu-inference pins. Freeze what it resolved and
+# constrain every later install to it, so the pin keeps following tpu-inference
+# instead of being restated here.
+ARG ABI_CONSTRAINTS=/opt/abi_constraints.txt
+RUN uv pip freeze | grep -E '^(jax|jaxlib|libtpu)==' > "${ABI_CONSTRAINTS}" && \
+    cat "${ABI_CONSTRAINTS}"
+
 # Copy pyproject.toml and README.md to install dependencies first
 COPY pyproject.toml README.md /app/
 RUN mkdir /app/tunix && touch /app/tunix/__init__.py
-RUN uv pip install .
+RUN uv pip install . --constraint "${ABI_CONSTRAINTS}"
 
 # Install SFT/MaxText dependencies (unconditional)
-RUN uv pip install --upgrade flax && \
-    uv pip install torchax aqtp tokamax math_verify drjax && \
+RUN uv pip install --upgrade flax --constraint "${ABI_CONSTRAINTS}" && \
+    uv pip install torchax aqtp tokamax math_verify drjax --constraint "${ABI_CONSTRAINTS}" && \
     uv pip install --no-deps git+https://github.com/google/maxtext.git
 
 # Build argument to conditionally install Kubernetes tools
@@ -67,7 +75,7 @@ ARG INSTALL_DEEPSWE_DEPS=false
 
 # Install DeepSWE specific dependencies and apply runtime patches conditionally
 RUN if [ "$INSTALL_DEEPSWE_DEPS" = "true" ]; then \
-      uv pip install kubernetes gym swebench==3.0.2 && \
+      uv pip install kubernetes gym swebench==3.0.2 --constraint "${ABI_CONSTRAINTS}" && \
       uv pip install --no-deps git+https://github.com/kubernetes-sigs/agent-sandbox.git#subdirectory=clients/python/agentic-sandbox-client && \
       uv pip install --no-deps git+https://github.com/kubernetes-sigs/agent-sandbox.git#subdirectory=examples/agent-sandbox-rl && \
       uv pip install --no-deps git+https://github.com/r2e-gym/r2e-gym.git@0d94c4eb9431cd195c55a7ea3abd54006c9a1735 && \
@@ -80,7 +88,8 @@ ARG INSTALL_MAXTEXT=false
 
 # Install MaxText specific dependencies conditionally
 RUN if [ "$INSTALL_MAXTEXT" = "true" ]; then \
-      uv pip install -r /app/requirements/maxtext_requirements.txt --torch-backend=cpu; \
+      uv pip install -r /app/requirements/maxtext_requirements.txt --torch-backend=cpu \
+        --constraint "${ABI_CONSTRAINTS}"; \
 fi
 
 # Build argument to conditionally install Raiden weight sync dependencies
@@ -98,7 +107,16 @@ RUN if [ "$INSTALL_RAIDEN" = "true" ]; then \
     fi
 
 # Force install numpy version to avoid version conflicts.
-RUN uv pip install numpy==2.3.5
+RUN uv pip install numpy==2.3.5 --constraint "${ABI_CONSTRAINTS}"
+
+# Drift here surfaces at runtime as a std::bad_alloc from a nanobind
+# constructor, which reads as an OOM and is expensive to trace back. Fail the
+# build instead.
+RUN uv pip freeze | grep -E '^(jax|jaxlib|libtpu)==' > /tmp/abi_actual.txt && \
+    if ! diff -u "${ABI_CONSTRAINTS}" /tmp/abi_actual.txt; then \
+      echo "ERROR: jax/jaxlib/libtpu drifted from the tpu-inference pin." >&2; \
+      exit 1; \
+    fi
 
 # Copy the rest of the project files
 COPY . .
