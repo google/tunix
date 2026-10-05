@@ -114,6 +114,11 @@ class InprocessVllmSamplerAdapter(
     # to ensure model graph compilation, KV cache allocation, and precompile
     # warm-up occur strictly within the MLPerf [init_start, init_stop] window.
 
+  @property
+  def is_initialized(self) -> bool:
+    """Returns True if the underlying vLLM sampler engine has been initialized."""
+    return self.vllm_sampler is not None
+
   def _get_underlying_sampler(self) -> Any:
     if self.vllm_sampler is None and (
         self.tokenizer is not None or self.model_name
