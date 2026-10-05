@@ -15,6 +15,7 @@
 """Top-level RolloutWorker abstractions (Service vs Client Driver)."""
 
 import dataclasses
+import inspect
 import threading
 from typing import Any, AsyncIterator, Callable, List, Mapping, Optional, Sequence, Union
 
@@ -206,9 +207,17 @@ class RolloutWorker(abstract_worker.Worker):
     finally:
       self.state = WorkerState.READY
 
-  def start(self) -> datatypes.Response:
+  async def start(self) -> datatypes.Response:
     if self.state == WorkerState.PENDING:
       self.initialize()
+    if hasattr(self.sampler, "start"):
+      res = self.sampler.start()
+      if inspect.isawaitable(res):
+        await res
+    if hasattr(self.sampler, "bind_weight_sync"):
+      res = self.sampler.bind_weight_sync()
+      if inspect.isawaitable(res):
+        await res
     return datatypes.Response(
         metadata={
             "worker_id": self.worker_id,
