@@ -224,7 +224,7 @@ PY
       if [[ -n "${_M_MLLOG}" ]]; then
         export METRIC_LOGGER_DIR="${METRIC_LOGGER_DIR:-${_M_MLLOG}}"
       fi
-      export RCP_LOGGING="${RCP_LOGGING:-true}"
+      export RCP_LOGGING="true"
     fi
     echo "[eval_checkpoint_397B_v5p] Loaded manifest metadata from ${_M_PATH}: step=${CHECKPOINT_STEP} samples_count=${SAMPLES_COUNT} timestamp_ms=${CHECKPOINT_TIMESTAMP_MS} is_last=${IS_LAST_CHECKPOINT} mllog=${METRIC_LOGGER_DIR:-none}" >&2
   fi
@@ -235,7 +235,6 @@ if [[ "${RCP_LOGGING:-auto}" == "auto" ]]; then
 fi
 
 USER_EVAL_OUTPUT_DIR="${EVAL_OUTPUT_DIR:-}"
-USER_ROLLOUT_JOBSET_YAML="${ROLLOUT_JOBSET_YAML:-}"
 
 # Unset CHECKPOINT_MANIFEST_FILE before sourcing mlperf_397b_v5p_eval.sh so
 # mlperf_base.sh does not enter the multi-checkpoint manifest loop.
@@ -246,8 +245,6 @@ unset CHECKPOINT_MANIFEST_FILE
 # pollute stdout metrics/YAML output.
 MLPERF_NO_LAUNCH=1 source "${SCRIPT_DIR}/mlperf_397b_v5p_eval.sh" >&2
 
-export ROLLOUT_JOBSET_YAML="${USER_ROLLOUT_JOBSET_YAML:-jobset.pathways.yaml}"
-
 # Default EVAL_OUTPUT_DIR to a checkpoint-specific subpath so summary.json files
 # from different runs/steps are cleanly isolated.
 if [[ -z "${USER_EVAL_OUTPUT_DIR}" ]]; then
@@ -256,7 +253,7 @@ fi
 
 echo "[eval_checkpoint_397B_v5p] Checkpoint:      ${MAXTEXT_CKPT}" >&2
 echo "[eval_checkpoint_397B_v5p] Cluster:         ${CLUSTER} (${REGION}, namespace=${K8S_NAMESPACE})" >&2
-echo "[eval_checkpoint_397B_v5p] Topology:        ${ROLLOUT_REPLICAS}x ${ROLLOUT_TPU_SLICE} ($(( 16 * ROLLOUT_REPLICAS )) v5p chips), batch_size=${BATCH_SIZE}, max_concurrency=${MAX_CONCURRENCY}" >&2
+echo "[eval_checkpoint_397B_v5p] Topology:        ${ROLLOUT_REPLICAS}x ${ROLLOUT_TPU_SLICE} ($(( ROLLOUT_REPLICAS * (${_rollout_dims//x/*}) )) v5p chips), batch_size=${BATCH_SIZE}, max_concurrency=${MAX_CONCURRENCY}" >&2
 echo "[eval_checkpoint_397B_v5p] Output Dir:      ${EVAL_OUTPUT_DIR}" >&2
 
 if [[ "${DRY_RUN_MODE}" == "true" || "${DRY_RUN:-false}" == "true" ]]; then
