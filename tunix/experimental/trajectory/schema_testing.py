@@ -2,11 +2,11 @@
 
 import abc
 import datetime
-import sqlite3
 from typing import Any
 
 from absl.testing import parameterized
 import sqlalchemy as sa
+from tunix.experimental.trajectory import db_engine
 from tunix.experimental.trajectory import schema
 
 
@@ -14,53 +14,32 @@ class ParameterizedABCMeta(type(parameterized.TestCase), abc.ABCMeta):
   """Combined metaclass resolving parameterized.TestCase and abc.ABCMeta."""
 
 
-def _set_sqlite_pragma(
-    dbapi_connection: sqlite3.Connection,
-    connection_record: sa.pool.ConnectionPoolEntry,
-) -> None:
-  """Enables foreign key constraint enforcement on SQLite connections."""
-  del connection_record
-  cursor = dbapi_connection.cursor()
-  cursor.execute("PRAGMA foreign_keys=ON")
-  cursor.close()
+def create_sqlite_memory_engine() -> sa.Engine:
+  """Creates an in-memory SQLite engine via `create_trajectory_engine`.
 
-
-def create_sqlite_memory_engine(shared_pool: bool = False) -> sa.Engine:
-  """Creates an in-memory SQLite engine with foreign key enforcement enabled.
-
-  Args:
-    shared_pool: If True, uses StaticPool and check_same_thread=False so that
-      the in-memory database is shared across multiple concurrent threads (e.g.
-      for asynchronous background worker threads).
+  The engine uses `StaticPool` with `check_same_thread=False`, so one in-memory
+  database is shared across threads, and it enables foreign key enforcement.
 
   Returns:
     A configured SQLAlchemy Engine.
   """
-  kwargs: dict[str, Any] = {}
-  if shared_pool:
-    kwargs["poolclass"] = sa.pool.StaticPool
-    kwargs["connect_args"] = {"check_same_thread": False}
-  engine = sa.create_engine("sqlite:///:memory:", **kwargs)
-  sa.event.listen(engine, "connect", _set_sqlite_pragma)
-  return engine
+  return db_engine.create_trajectory_engine(
+      db_engine.EngineConfig(url="sqlite:///:memory:")
+  )
 
 
-def create_sqlite_file_engine(db_path: str, timeout: float = 30.0) -> sa.Engine:
-  """Creates a file-backed SQLite engine with foreign key enforcement enabled.
+def create_sqlite_file_engine(db_path: str) -> sa.Engine:
+  """Creates a file-backed SQLite engine via `create_trajectory_engine`.
 
   Args:
     db_path: Filesystem path to the SQLite database file.
-    timeout: Busy timeout in seconds when waiting for SQLite file locks.
 
   Returns:
     A configured SQLAlchemy Engine.
   """
-  engine = sa.create_engine(
-      f"sqlite:///{db_path}",
-      connect_args={"check_same_thread": False, "timeout": timeout},
+  return db_engine.create_trajectory_engine(
+      db_engine.EngineConfig(url=f"sqlite:///{db_path}")
   )
-  sa.event.listen(engine, "connect", _set_sqlite_pragma)
-  return engine
 
 
 def fetch_all(
