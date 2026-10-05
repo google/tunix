@@ -59,6 +59,9 @@ if [[ "${1:-}" == "stop" || "${1:-}" == "stop_eval" ]]; then
       export POD="pod2"
     fi
   fi
+  # Superset of the 16-replica launch default: stop_eval deletes
+  # ${EVAL_JOBSET_NAME}-0..N-1 with --ignore-not-found, so 32 also cleans up
+  # runs that were launched with a larger ROLLOUT_REPLICAS override.
   export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-32}"
   exec bash "${SCRIPT_DIR}/mlperf_397b_v7x_eval.sh" stop_eval "${@:2}"
 fi
@@ -301,6 +304,27 @@ echo "[eval_checkpoint_397B_v7] Output Dir:      ${EVAL_OUTPUT_DIR}" >&2
 
 if [[ "${DRY_RUN_MODE}" == "true" || "${DRY_RUN:-false}" == "true" ]]; then
   exec "${LAUNCHER}" --command eval --image "${TUNIX_IMAGE}" "${EXTRA_ARGS[@]}"
+fi
+
+# Each replica's Pathways head pod (proc-0-0) runs with hostNetwork and fixed
+# ports 29000-29002, so no two head pods can share a node: ROLLOUT_REPLICAS
+# needs at least that many ${HEAD_NODEPOOL} nodes (sandbox-np is 400 autoscaled
+# nodes on pod2 but 19 fixed nodes on pod1). Fail fast instead of leaving
+# Pending head pods behind admitted, idle TPU slices. HEAD_NODEPOOL_CHECK=false
+# skips the guard (e.g. nodepools that autoscale from zero).
+if [[ "${HEAD_NODEPOOL_CHECK:-true}" == "true" && -n "${HEAD_NODEPOOL:-}" ]]; then
+  if _head_nodes="$(kubectl get nodes -l "cloud.google.com/gke-nodepool=${HEAD_NODEPOOL}" -o name 2>/dev/null)"; then
+    _head_node_count="$(printf '%s\n' "${_head_nodes}" | sed '/^$/d' | wc -l | tr -d ' ')"
+    if [[ "${_head_node_count}" -lt "${ROLLOUT_REPLICAS}" ]]; then
+      echo "[eval_checkpoint_397B_v7] ERROR: ROLLOUT_REPLICAS=${ROLLOUT_REPLICAS} needs one" \
+        "${HEAD_NODEPOOL} node per Pathways head pod, but ${CLUSTER} has only" \
+        "${_head_node_count}. Lower ROLLOUT_REPLICAS, set HEAD_NODEPOOL to a larger" \
+        "nodepool, or set HEAD_NODEPOOL_CHECK=false to launch anyway." >&2
+      exit 1
+    fi
+  else
+    echo "[eval_checkpoint_397B_v7] WARNING: could not list ${HEAD_NODEPOOL} nodes; skipping head nodepool capacity check." >&2
+  fi
 fi
 
 list_summaries() {
