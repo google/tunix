@@ -124,7 +124,7 @@ def _ensure_ffi_compute_on_compat() -> None:
   # two-arg version and the decorator dies with
   #   TypeError: compute_on() got an unexpected keyword argument 'out_memory_spaces'
   try:
-    from jax.experimental import compute_on as _public_compute_on  # pytype: disable=import-error  pylint: disable=g-import-not-at-top
+    from jax.experimental import compute_on as _public_compute_on
 
     _public_compute_on.compute_on = compute_on2
   except ImportError:

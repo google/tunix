@@ -32,7 +32,7 @@ from tunix.sft import metrics_logger as sft_metrics_logger
 from tunix.sft import profiler
 
 if TYPE_CHECKING:
-  from tunix.rl.rollout import base_rollout  # pytype: disable=import-error
+  from tunix.rl.rollout import base_rollout  # pyrefly: ignore[missing-import]
 
 # For rl_utils calls inside RLTrainingConfig
 # For base_rollout typing inside ClusterConfig

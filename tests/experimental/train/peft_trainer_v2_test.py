@@ -197,7 +197,7 @@ class PeftTrainerTest(parameterized.TestCase):
     np.testing.assert_array_equal(np.asarray(fn_x), tokens)
     self.assertIsInstance(fn_x.sharding, shd.NamedSharding)
     self.assertEqual(
-        fn_x.sharding.spec,  # pyrefly: ignore[missing-attribute]
+        fn_x.sharding.spec,
         shd.PartitionSpec(config.data_sharding_axis),
     )
     self.assertEqual(fn_y.shape, (2, 0))
@@ -1219,7 +1219,7 @@ class OptimizerMemoryTest(parameterized.TestCase):
         )
     )
     self.assertEqual(
-        trainer._last_update_grad_norm.dtype,  # pylint: disable=protected-access # pyrefly: ignore[missing-attribute,union-attr]
+        trainer._last_update_grad_norm.dtype,  # pylint: disable=protected-access # pyrefly: ignore[missing-attribute]
         jnp.float32,
     )
     self.assertEqual(float(trainer.grad_accumulator.denom[...]), 0.0)

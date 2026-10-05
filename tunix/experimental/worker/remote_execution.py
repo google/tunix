@@ -1357,7 +1357,7 @@ class RoutingActorPool(ActorPool):
       ):
         return getattr(self.router, method_name)(self._actors, args, kwargs)
       elif callable(self.router):
-        return self.router(self._actors, method_name, args, kwargs)  # pyrefly: ignore[bad-return]
+        return self.router(self._actors, method_name, args, kwargs)
       else:
         raise TypeError(
             f"Router object {type(self.router)} must provide a method matching "

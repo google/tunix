@@ -1263,7 +1263,7 @@ class StandardRLProgram(RLProgram):
             payloads.append(payload)
             del payload
           packing_start_time = time.perf_counter()
-          assembled_batches = self.assembler.feed(payloads)  # pyrefly: ignore[bad-argument-type]
+          assembled_batches = self.assembler.feed(payloads)
           step_packing_time_sec += time.perf_counter() - packing_start_time
           del payloads
 

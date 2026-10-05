@@ -386,7 +386,7 @@ class BasePipeline(abc.ABC, config.HyperParameters):
           "rollout_vllm_max_num_batched_tokens",
           vllm.get(
               "max_num_batched_tokens",
-              (max_num_seqs * kv_cache_size) // 4,  # pyrefly: ignore[unsupported-operation]
+              (max_num_seqs * kv_cache_size) // 4,
           ),
       )
       submission_threshold = rollout_cfg.get(
@@ -779,7 +779,7 @@ class BasePipeline(abc.ABC, config.HyperParameters):
           data_source=self.config["data_source"],
           dataset=self.config["dataset_name"],
           tfds_download=self.config["tfds_download"],
-          split=self.config.get(  # pyrefly: ignore[bad-argument-type]
+          split=self.config.get(
               "train_split", self.config.get("split", "train")
           ),
           apply_chat_template_to_dataset=apply_chat_template_to_dataset,
@@ -789,7 +789,7 @@ class BasePipeline(abc.ABC, config.HyperParameters):
           data_source=self.config["data_source"],
           dataset=self.config["dataset_name"],
           tokenizer=tokenizer,
-          split=self.config.get(  # pyrefly: ignore[bad-argument-type]
+          split=self.config.get(
               "train_split", self.config.get("split", "train")
           ),
           apply_chat_template_to_dataset=apply_chat_template_to_dataset,
@@ -883,7 +883,7 @@ class BasePipeline(abc.ABC, config.HyperParameters):
   def run_trainer(self):
     """Dispatch to standard or agentic trainer based on training_mode."""
     mode = self.config.get("training_mode", self._default_training_mode)
-    self._run(mode=mode)  # pyrefly: ignore[bad-argument-type]
+    self._run(mode=mode)
 
 
 def setup_jax_pathways(pathways_bns: str):
@@ -894,6 +894,6 @@ def setup_jax_pathways(pathways_bns: str):
 
 
 def setup_pathways_on_cloud():
-  import pathwaysutils  # type: ignore[import-not-found,import-untyped]  # pytype: disable=import-error  # pyright: ignore[reportMissingImports]  # pylint: disable=g-import-not-at-top
+  import pathwaysutils  # type: ignore[import-not-found,import-untyped]  # pyright: ignore[reportMissingImports]  # pylint: disable=g-import-not-at-top
 
   pathwaysutils.initialize()
