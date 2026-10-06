@@ -129,6 +129,14 @@ class RLLearner(abc.ABC, Generic[TConfig]):
           getattr(algo_config, "max_response_length", None)
           or r_config.max_tokens_to_generate,
       )
+      # Packed batches are rebuilt from unpadded sequences that do not carry
+      # `routed_experts`, so router replay would be silently skipped.
+      if getattr(r_config, "return_routed_experts", False):
+        raise ValueError(
+            "return_routed_experts (router replay) is not supported with"
+            " sequence packing (max_seq_token_per_tpu): packed batches do not"
+            " carry routed experts."
+        )
 
     self.rl_engine.global_steps = (
         self.rl_engine.actor_trainer.restored_global_step()
