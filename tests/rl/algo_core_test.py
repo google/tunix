@@ -1625,6 +1625,55 @@ class GrpoLossSequenceMaskingTest(absltest.TestCase):
     for g in jax.tree_util.tree_leaves(grads):
       self.assertTrue(bool(jnp.all(jnp.isfinite(g))))
 
+  def test_moe_overflow_flag_reaches_loss_aux(self):
+    from flax import nnx  # pylint: disable=g-import-not-at-top
+    from tunix.rl import common  # pylint: disable=g-import-not-at-top
+
+    class _SowingToy(nnx.Module):
+      """Sows `moe_has_overflow` like MaxText's RoutedMoE, from two layers."""
+
+      def __init__(self, *, overflow, rngs):
+        self.overflow = overflow
+        self.emb = nnx.Embed(16, 8, rngs=rngs)
+        self.head = nnx.Linear(8, 16, rngs=rngs)
+
+      def __call__(self, x, skip_lm_head=False, **kwargs):
+        del kwargs
+        # A stacked flag, as scanned layers produce, and a scalar one.
+        self.emb.sow(nnx.Intermediate, 'moe_has_overflow', jnp.zeros(3, bool))
+        self.head.sow(
+            nnx.Intermediate, 'moe_has_overflow', jnp.array(self.overflow)
+        )
+        hidden = self.emb(x)
+        return (hidden if skip_lm_head else self.head(hidden)), None
+
+      def compute_final_logits(self, hidden):
+        return self.head(hidden)
+
+    example = self._example()
+    for overflow in (False, True):
+      model = _SowingToy(overflow=overflow, rngs=nnx.Rngs(0))
+      graphdef, state = nnx.split(model)
+      for chunk_size in (0, 2):
+        _, flag = common.compute_per_token_logps(
+            graphdef,
+            state,
+            example.prompt_ids,
+            example.completion_ids,
+            pad_id=0,
+            eos_id=-1,
+            chunk_size=chunk_size,
+            return_moe_overflow=True,
+        )
+        self.assertEqual(flag.shape, ())
+        self.assertEqual(bool(flag), overflow)
+      out = algo_core.grpo_loss_fn(
+          model, example, self._config(), pad_id=0, eos_id=-1
+      )
+      self.assertEqual(bool(out.aux_metrics['has_moe_overflow']), overflow)
+      # Popped inside the jit: nothing leaks onto the caller's model.
+      self.assertEmpty(nnx.state(model, nnx.Intermediate))
+
 
 if __name__ == '__main__':
   absltest.main()
