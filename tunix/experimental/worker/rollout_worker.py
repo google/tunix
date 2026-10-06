@@ -143,6 +143,7 @@ class RolloutWorker(abstract_worker.Worker):
         resources={
             "sampler": type(self.sampler).__name__,
             "policy_version": self._policy_version,
+            "max_concurrency": self.manager.max_concurrency,
         },
     )
 
