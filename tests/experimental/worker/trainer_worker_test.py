@@ -218,6 +218,18 @@ class TrainerWorkerTest(absltest.TestCase):
     self.assertIsNone(t["update"]["ready_ago_s"])
     self.assertIsNone(t["prepare"])
 
+  def test_missing_timing_tokens_warn_once_per_token(self):
+    with self.assertLogs(level="WARNING") as logs:
+      self.worker.fwd_bwd(request=self._train_request("r0"))
+      self.worker.fwd_bwd(request=self._train_request("r1"))
+      self.worker.update()
+      self.worker.fwd_bwd(request=self._train_request("r2"))
+      self.worker.update()
+    warnings = [m for m in logs.output if "TRAINER_STEP_TIMING" in m]
+    self.assertLen(warnings, 2)
+    self.assertTrue(any("`last_fwd_bwd_token`" in m for m in warnings))
+    self.assertTrue(any("`last_update_token`" in m for m in warnings))
+
   def test_get_step_timing_resets_on_first_fwd_bwd_after_update(self):
     self.worker.fwd_bwd(request=self._train_request("r0"))
     self.worker.update()

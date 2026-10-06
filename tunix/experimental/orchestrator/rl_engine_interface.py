@@ -141,6 +141,17 @@ class AbstractRLEngine(Protocol):
     """Retrieves step metrics from the worker for the specified role."""
     ...
 
+  async def get_step_timing(
+      self,
+      role: datatypes.Role = datatypes.Role.ACTOR,
+  ) -> tuple[dict[str, Any] | None, float]:
+    """Returns the trainer's timeline of its last optimizer step and the RTT.
+
+    `(timing, rtt_s)`, where `timing` is None when the worker cannot report
+    one. See `TrainerWorker.get_step_timing` for the schema.
+    """
+    ...
+
   def configure_worker(
       self,
       role: datatypes.Role = datatypes.Role.ACTOR,

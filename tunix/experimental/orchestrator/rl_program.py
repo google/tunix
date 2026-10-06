@@ -1715,18 +1715,12 @@ class StandardRLProgram(RLProgram):
     the request, measured on the trainer's monotonic clock. On this log's
     clock an instant is `t(line) - rtt_s / 2 - ago_s`. `ready` is when the
     device finished the work (None if not yet observed); `dispatch_*` bracket
-    the RPC handler, which returns at dispatch. Never raises: a worker without
-    the RPC logs nothing.
+    the RPC handler, which returns at dispatch. A worker that cannot answer
+    logs nothing here (the engine logs why).
     """
     assert self.engine is not None
-    get_timing = getattr(self.engine, "get_step_timing", None)
-    if get_timing is None:
-      return
-    try:
-      timing, rtt_s = await get_timing(role=datatypes.Role.ACTOR)
-    except Exception as exc:  # pylint: disable=broad-except
-      logging.warning("TRAINER_STEP_TIMING step=%d unavailable: %s", step, exc)
-      return
+    # `get_step_timing` logs and returns None when the worker cannot answer.
+    timing, rtt_s = await self.engine.get_step_timing(role=datatypes.Role.ACTOR)
     if timing is None:
       return
     logging.info(
