@@ -123,9 +123,12 @@ export RPC_TIMEOUT_S="${RPC_TIMEOUT_S:-10800}"
 # (mlperf_base.sh defaults REMAT_POLICY to full).
 export REMAT_POLICY="${REMAT_POLICY:-custom}"
 export RAGGED_BUFFER_FACTOR="${RAGGED_BUFFER_FACTOR:-2.0}"
+export CONTEXT_REMAT_POLICY="${CONTEXT_REMAT_POLICY:-remat}"
+export GDN_REMAT_POLICY="${GDN_REMAT_POLICY:-remat}"
+export NUM_MOE_TOKEN_CHUNKS="${NUM_MOE_TOKEN_CHUNKS:-2}"
 export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS:-custom_mesh_and_rule=cp-as-ep \
 use_gdn_kernel=true gdn_cp_mode=head gdn_chunk_size=64 \
-decoder_layer_input=offload context=remat gdn=remat gdn_conv=remat gdn_states=remat \
+decoder_layer_input=offload context=${CONTEXT_REMAT_POLICY} gdn=${GDN_REMAT_POLICY} gdn_conv=remat gdn_states=remat \
 megablox=true sparse_matmul=true use_tokamax_gmm=true use_gmm_v2=true \
 use_gmm_v2_heuristic_tiling=false merge_gating_gmm=false \
 wi_tile_fwd_batch_seq=256 wi_tile_fwd_embed_dim=4096 wi_tile_fwd_mlp_dim=1024 \
@@ -134,7 +137,7 @@ wi_tile_drhs_batch_seq=256 wi_tile_drhs_embed_dim=4096 wi_tile_drhs_mlp_dim=1024
 wo_tile_fwd_batch_seq=256 wo_tile_fwd_embed_dim=4096 wo_tile_fwd_mlp_dim=1024 \
 wo_tile_dlhs_batch_seq=256 wo_tile_dlhs_embed_dim=4096 wo_tile_dlhs_mlp_dim=1024 \
 wo_tile_drhs_batch_seq=256 wo_tile_drhs_embed_dim=4096 wo_tile_drhs_mlp_dim=1024 \
-use_ring_of_experts=true num_moe_token_chunks=2 moe_chunk_barrier=false \
+use_ring_of_experts=true num_moe_token_chunks=${NUM_MOE_TOKEN_CHUNKS} moe_chunk_barrier=false \
 ring_of_experts_local_routing=true moe_expert_weight_prefetch=forward \
 moe_chunk_pipeline=true ring_of_experts_row_major_reduce_scatter=true \
 use_ragged_sort=true use_custom_sort_vjp=false ragged_buffer_factor=${RAGGED_BUFFER_FACTOR} \
@@ -147,6 +150,9 @@ context_parallel_attention_load_balance=true \
 num_vocab_tiling=16 use_iota_embed=false mu_dtype=float32 grad_dtype=float32 \
 checkpoint_storage_concurrent_gb=96 \
 packing=True optimizer_memory_host_offload=true}"
+if [[ -n "${MAXTEXT_USER_EXTRA_FLAGS:-}" ]]; then
+  export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} ${MAXTEXT_USER_EXTRA_FLAGS}"
+fi
 export DEBUG=${DEBUG:-0}
 
 # DeepSWE Environment & Agent Sandbox
