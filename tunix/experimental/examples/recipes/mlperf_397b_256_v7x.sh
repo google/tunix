@@ -122,6 +122,7 @@ export RPC_TIMEOUT_S="${RPC_TIMEOUT_S:-10800}"
 # Architecture & Rematerialization: custom remat with per-tensor policies below
 # (mlperf_base.sh defaults REMAT_POLICY to full).
 export REMAT_POLICY="${REMAT_POLICY:-custom}"
+export RAGGED_BUFFER_FACTOR="${RAGGED_BUFFER_FACTOR:-2.0}"
 export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS:-custom_mesh_and_rule=cp-as-ep \
 use_gdn_kernel=true gdn_cp_mode=head gdn_chunk_size=64 \
 decoder_layer_input=offload context=remat gdn=remat gdn_conv=remat gdn_states=remat \
@@ -136,7 +137,7 @@ wo_tile_drhs_batch_seq=256 wo_tile_drhs_embed_dim=4096 wo_tile_drhs_mlp_dim=1024
 use_ring_of_experts=true num_moe_token_chunks=2 moe_chunk_barrier=false \
 ring_of_experts_local_routing=true moe_expert_weight_prefetch=forward \
 moe_chunk_pipeline=true ring_of_experts_row_major_reduce_scatter=true \
-use_ragged_sort=true use_custom_sort_vjp=false ragged_buffer_factor=2.0 \
+use_ragged_sort=true use_custom_sort_vjp=false ragged_buffer_factor=${RAGGED_BUFFER_FACTOR} \
 use_tokamax_splash=true use_splash_scheduler=true \
 sa_block_q=1024 sa_block_kv=4096 sa_block_kv_compute=512 \
 sa_block_q_dkv=2048 sa_block_kv_dkv=2048 sa_block_kv_dkv_compute=512 \
