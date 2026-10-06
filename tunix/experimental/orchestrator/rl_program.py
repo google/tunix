@@ -21,10 +21,11 @@ pipelines.
 import abc
 import asyncio
 import collections
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 import contextlib
 import dataclasses
 import os
+import threading
 import time
 from typing import Any
 
@@ -47,6 +48,15 @@ MetricsLoggerOptions = metrics_logger_lib.MetricsLoggerOptions
 Mode = metrics_logger_lib.Mode
 _extract_scalar = metrics_logger_lib.extract_scalar
 BatchConfig = batch_assembly.BatchConfig
+
+
+def _next_microbatch(
+    batch_iter: Iterator[batch_assembly.AssembledBatch],
+    lock: threading.Lock,
+) -> list[batch_assembly.AssembledBatch | None]:
+  """Advances `batch_iter` in a 1-element list so `.pop()` frees thread refs."""
+  with lock:
+    return [next(batch_iter, None)]
 
 
 def _generation_metrics(
@@ -387,6 +397,7 @@ class StandardRLProgram(RLProgram):
     self._in_flight_rollouts = 0
     self._dispatch_capacity: asyncio.Semaphore | None = None
     self._dispatch_done = asyncio.Event()
+    self._assembler_lock = threading.Lock()
 
     self.raw_q = trajectory_queue_manager.TrajectoryQueueManager.create(
         num_generations=self.num_generations,
@@ -1184,244 +1195,273 @@ class StandardRLProgram(RLProgram):
     """Stage 3: Streaming gradient accumulation with RLTrainerPayloads."""
     assert self.engine is not None
 
-    while self.max_steps is None or self._step < self.max_steps:
-      current_step = self._step
-      step_start_time = time.monotonic()
-      consumed_policy_version = self.policy_version
+    pending_train: asyncio.Task[Any] | None = None
+    step_result: Any = None
 
-      uncommitted_groups = []
-      step_result = None
-      trainer_metrics = None
-      step_sampler_agreement: dict[str, tuple[Any, list[Any]]] = {}
-      step_rewards = []
-      step_advantages = []
-      num_microbatches = 0
-      step_padding_stats: list[batch_assembly.PaddingStats] = []
-      step_packing_time_sec = 0.0
-      num_rollouts = 0
-      all_step_items = []
-      scored_items = []
-      groups_consumed = 0
-      checkpoint_saved = False
-      final_minibatch_completed = False
+    async def _await_pending_train() -> None:
+      nonlocal pending_train, step_result
+      task, pending_train = pending_train, None
+      if task is not None:
+        step_result = await task
 
-      async def _maybe_save_checkpoint() -> None:
-        nonlocal checkpoint_saved
-        optimizer_step = self.step + 1
-        if (
-            isinstance(step_result, dict)
-            and step_result.get("train_step") is not None
-        ):
-          optimizer_step = int(step_result["train_step"])
-        await self.engine.save_checkpoint(
-            role=datatypes.Role.ACTOR,
-            metadata={
-                "step": optimizer_step,
-                "global_step": self.step + 1,
-                "policy_version": self.policy_version + 1,
-                "num_rollouts": num_rollouts,
-                "num_microbatches": num_microbatches,
-            },
-        )
-        checkpoint_saved = True
+    try:
+      while self.max_steps is None or self._step < self.max_steps:
+        current_step = self._step
+        step_start_time = time.monotonic()
+        consumed_policy_version = self.policy_version
 
-      while groups_consumed < self.full_batch_size:
-        scored_items = await self.scored_q.get_batch(num_groups=1)
-        if not scored_items:
-          packing_start_time = time.perf_counter()
-          assembled_batches = self.assembler.flush()
-          step_packing_time_sec += time.perf_counter() - packing_start_time
-        else:
-          if groups_consumed == 0 and self.on_step_begin:
-            self.on_step_begin(current_step)
+        uncommitted_groups = []
+        step_result = None
+        trainer_metrics = None
+        step_sampler_agreement: dict[str, tuple[Any, list[Any]]] = {}
+        step_rewards = []
+        step_advantages = []
+        num_microbatches = 0
+        step_padding_stats: list[batch_assembly.PaddingStats] = []
+        step_packing_time_sec = 0.0
+        num_rollouts = 0
+        all_step_items = []
+        scored_items = []
+        groups_consumed = 0
+        checkpoint_saved = False
+        final_minibatch_completed = False
 
-          groups_consumed += 1
-          uncommitted_groups.append(scored_items)
-          all_step_items.extend(scored_items)
-          num_rollouts += len(scored_items)
-          for item in scored_items:
-            step_rewards.append(_extract_reward(item))
-            payload = getattr(item, "payload", None)
-            if payload is not None and payload.advantages is not None:
-              step_advantages.append(float(np.mean(payload.advantages)))
-
-          payloads = []
-          for item in scored_items:
-            payload = getattr(item, "payload", None)
-            if isinstance(payload, datatypes.RLTrainerPayload):
-              if payload.routed_experts is not None:
-                item.payload = dataclasses.replace(  # pyrefly: ignore[missing-attribute]
-                    payload, routed_experts=None
-                )
-              payload = dataclasses.replace(
-                  payload,
-                  metadata={
-                      **payload.metadata,
-                      "traj_id": item.traj_id,
-                  },
-              )
-            payloads.append(payload)
-            del payload
-          packing_start_time = time.perf_counter()
-          assembled_batches = self.assembler.feed(payloads)
-          step_packing_time_sec += time.perf_counter() - packing_start_time
-          del payloads
-
-        assembled_queue = collections.deque(assembled_batches)
-        del assembled_batches
-        while assembled_queue:
-          mb = assembled_queue.popleft()
-          batch = mb.payload
-          if getattr(self.algo, "requires_reference_kl", False):
-            if not isinstance(batch, datatypes.RLTrainerPayload):
-              raise TypeError(
-                  "Reference KL requires an assembler that returns "
-                  "datatypes.RLTrainerPayload microbatches; got "
-                  f"{type(batch).__name__}."
-              )
-            ref_logps = await self.engine.per_token_logps(
-                datatypes.Role.REFERENCE, items=batch
-            )
-            batch = batch_assembly.with_ref_per_token_logps(batch, ref_logps)
-          algo_config = getattr(self.algo, "algo_config", None)
-          can_fuse_agreement_in_loss = (
-              algo_config is not None
-              and getattr(algo_config, "policy_loss_fn", "grpo") == "grpo"
-              and getattr(algo_config, "num_iterations", 1) == 1
-              and self.mini_batch_size >= self.full_batch_size
-          )
+        async def _maybe_save_checkpoint() -> None:
+          nonlocal checkpoint_saved
+          optimizer_step = self.step + 1
           if (
-              isinstance(batch, datatypes.RLTrainerPayload)
-              and batch.old_per_token_logps is not None
-              and algo_config is not None
-              and algo_config.use_rollout_logps
-              and not can_fuse_agreement_in_loss
+              isinstance(step_result, dict)
+              and step_result.get("train_step") is not None
           ):
-            batch = await self._apply_sampler_trainer_agreement(
-                batch, step_sampler_agreement
-            )
-
-          num_microbatches += 1
-          step_padding_stats.append(mb.padding_stats)
-          logging.info(
-              "Packed %d trajectories into microbatch: %s (padding_ratio=%.3f,"
-              " row_imbalance=%.3f)",
-              len(mb.trajectory_ids),
-              logging_utils.summarize_list(list(mb.trajectory_ids)),
-              mb.padding_stats.padding_ratio,
-              mb.padding_stats.row_imbalance,
-          )
-          is_final_batch = mb.is_final_batch
-          step_result = await self.engine.train_step(
-              batch,
+            optimizer_step = int(step_result["train_step"])
+          await self.engine.save_checkpoint(
               role=datatypes.Role.ACTOR,
-              accumulate_gradients=True,
-              apply_optimizer=is_final_batch,
+              metadata={
+                  "step": optimizer_step,
+                  "global_step": self.step + 1,
+                  "policy_version": self.policy_version + 1,
+                  "num_rollouts": num_rollouts,
+                  "num_microbatches": num_microbatches,
+              },
           )
-          del batch, mb
-          if is_final_batch:
-            trainer_metrics = await self.engine.get_metrics(
-                role=datatypes.Role.ACTOR
-            )
-            final_minibatch_completed = True
-            # TODO(tunix-dev): Configurable checkpointing frequency. Today we
-            # checkpoint at the same frequency as the weight update.
-            # Save only at a resumable full-batch boundary. An optimizer step
-            # can occur earlier when a full batch contains multiple mini
-            # batches, but the dataset resume cursor advances in full batches.
-            # TODO(tunix-dev): For now any failures in save_checkpoint will
-            # abort the entire program. Make it configurable on whether to fail
-            # or continue.
-            full_batch_complete = (
-                groups_consumed >= self.full_batch_size or not scored_items
-            )
-            if full_batch_complete:
-              await _maybe_save_checkpoint()
+          checkpoint_saved = True
 
-        if not scored_items:
-          if not checkpoint_saved and final_minibatch_completed:
-            await _maybe_save_checkpoint()
+        while groups_consumed < self.full_batch_size:
+          scored_items = await self.scored_q.get_batch(num_groups=1)
+          if not scored_items:
+            batch_iter = iter(self.assembler.flush())
+          else:
+            if groups_consumed == 0 and self.on_step_begin:
+              self.on_step_begin(current_step)
+
+            groups_consumed += 1
+            uncommitted_groups.append(scored_items)
+            all_step_items.extend(scored_items)
+            num_rollouts += len(scored_items)
+            for item in scored_items:
+              step_rewards.append(_extract_reward(item))
+              payload = getattr(item, "payload", None)
+              if payload is not None and payload.advantages is not None:
+                step_advantages.append(float(np.mean(payload.advantages)))
+
+            payloads = []
+            for item in scored_items:
+              payload = getattr(item, "payload", None)
+              if isinstance(payload, datatypes.RLTrainerPayload):
+                if payload.routed_experts is not None:
+                  item.payload = dataclasses.replace(  # pyrefly: ignore[missing-attribute]
+                      payload, routed_experts=None
+                  )
+                payload = dataclasses.replace(
+                    payload,
+                    metadata={
+                        **payload.metadata,
+                        "traj_id": item.traj_id,
+                    },
+                )
+              payloads.append(payload)
+              del payload
+            batch_iter = iter(self.assembler.feed(payloads))
+            del payloads
+
+          while True:
+            packing_start_time = time.perf_counter()
+            mb = (
+                await asyncio.to_thread(
+                    _next_microbatch, batch_iter, self._assembler_lock
+                )
+            ).pop()
+            step_packing_time_sec += time.perf_counter() - packing_start_time
+            if mb is None:
+              break
+            batch = mb.payload
+            if getattr(self.algo, "requires_reference_kl", False):
+              if not isinstance(batch, datatypes.RLTrainerPayload):
+                raise TypeError(
+                    "Reference KL requires an assembler that returns "
+                    "datatypes.RLTrainerPayload microbatches; got "
+                    f"{type(batch).__name__}."
+                )
+              ref_logps = await self.engine.per_token_logps(
+                  datatypes.Role.REFERENCE, items=batch
+              )
+              batch = batch_assembly.with_ref_per_token_logps(batch, ref_logps)
+            algo_config = getattr(self.algo, "algo_config", None)
+            can_fuse_agreement_in_loss = (
+                algo_config is not None
+                and getattr(algo_config, "policy_loss_fn", "grpo") == "grpo"
+                and getattr(algo_config, "num_iterations", 1) == 1
+                and self.mini_batch_size >= self.full_batch_size
+            )
+            if (
+                isinstance(batch, datatypes.RLTrainerPayload)
+                and batch.old_per_token_logps is not None
+                and algo_config is not None
+                and algo_config.use_rollout_logps
+                and not can_fuse_agreement_in_loss
+            ):
+              await _await_pending_train()
+              batch = await self._apply_sampler_trainer_agreement(
+                  batch, step_sampler_agreement
+              )
+
+            num_microbatches += 1
+            step_padding_stats.append(mb.padding_stats)
+            logging.info(
+                "Packed %d trajectories into microbatch: %s"
+                " (padding_ratio=%.3f, row_imbalance=%.3f)",
+                len(mb.trajectory_ids),
+                logging_utils.summarize_list(list(mb.trajectory_ids)),
+                mb.padding_stats.padding_ratio,
+                mb.padding_stats.row_imbalance,
+            )
+            is_final_batch = mb.is_final_batch
+            await _await_pending_train()
+            pending_train = asyncio.create_task(
+                self.engine.train_step(
+                    batch,
+                    role=datatypes.Role.ACTOR,
+                    accumulate_gradients=True,
+                    apply_optimizer=is_final_batch,
+                )
+            )
+            del batch, mb
+            if is_final_batch:
+              await _await_pending_train()
+              trainer_metrics = await self.engine.get_metrics(
+                  role=datatypes.Role.ACTOR
+              )
+              final_minibatch_completed = True
+              # TODO(tunix-dev): Configurable checkpointing frequency. Today we
+              # checkpoint at the same frequency as the weight update.
+              # Save only at a resumable full-batch boundary. An optimizer step
+              # can occur earlier when a full batch contains multiple mini
+              # batches, but the dataset resume cursor advances in full batches.
+              # TODO(tunix-dev): For now any failures in save_checkpoint will
+              # abort the entire program. Make it configurable on whether to
+              # fail or continue.
+              full_batch_complete = (
+                  groups_consumed >= self.full_batch_size or not scored_items
+              )
+              if full_batch_complete:
+                await _maybe_save_checkpoint()
+          del batch_iter
+
+          if not scored_items:
+            if not checkpoint_saved and final_minibatch_completed:
+              await _maybe_save_checkpoint()
+            break
+
+        await _await_pending_train()
+
+        if not all_step_items:
+          logging.info(
+              "Dataset exhausted at step %d before max_steps.", current_step
+          )
           break
 
-      if not all_step_items:
-        logging.info(
-            "Dataset exhausted at step %d before max_steps.", current_step
+        if self.sync_weights:
+          new_version = await self.engine.sync_weights(
+              role=datatypes.Role.ACTOR
+          )
+          self.policy_version = (
+              new_version
+              if new_version is not None
+              else self.policy_version + 1
+          )
+
+        # Before `commit()`, which will eventually take ownership of the groups.
+        generation_metrics = _generation_metrics(uncommitted_groups)
+        self.scored_q.commit(current_step, groups=uncommitted_groups)
+
+        assert (
+            self._dispatch_capacity is not None
+        ), "run_async must initialize capacity."
+        for _ in range(groups_consumed):
+          self._dispatch_capacity.release()
+
+        step_time_sec = time.monotonic() - step_start_time
+
+        filtered_groups = await self._drain_filtered_groups()
+
+        metrics_summary = self._collect_and_log_step_metrics(
+            all_step_items=all_step_items,
+            step_rewards=step_rewards,
+            step_advantages=step_advantages,
+            generation_metrics=generation_metrics,
+            step_result=step_result,
+            trainer_metrics=trainer_metrics,
+            num_rollouts=num_rollouts,
+            num_microbatches=num_microbatches,
+            padding_stats=step_padding_stats,
+            packing_time_sec=step_packing_time_sec,
+            step_time_sec=step_time_sec,
+            consumed_policy_version=consumed_policy_version,
+            log_step=current_step,
+            sampler_agreement=step_sampler_agreement,
+            filtered_groups=filtered_groups,
         )
-        break
-
-      if self.sync_weights:
-        new_version = await self.engine.sync_weights(role=datatypes.Role.ACTOR)
-        self.policy_version = (
-            new_version if new_version is not None else self.policy_version + 1
-        )
-
-      # Before `commit()`, which will eventually take ownership of the groups.
-      generation_metrics = _generation_metrics(uncommitted_groups)
-      self.scored_q.commit(current_step, groups=uncommitted_groups)
-
-      assert (
-          self._dispatch_capacity is not None
-      ), "run_async must initialize capacity."
-      for _ in range(groups_consumed):
-        self._dispatch_capacity.release()
-
-      step_time_sec = time.monotonic() - step_start_time
-
-      filtered_groups = await self._drain_filtered_groups()
-
-      metrics_summary = self._collect_and_log_step_metrics(
-          all_step_items=all_step_items,
-          step_rewards=step_rewards,
-          step_advantages=step_advantages,
-          generation_metrics=generation_metrics,
-          step_result=step_result,
-          trainer_metrics=trainer_metrics,
-          num_rollouts=num_rollouts,
-          num_microbatches=num_microbatches,
-          padding_stats=step_padding_stats,
-          packing_time_sec=step_packing_time_sec,
-          step_time_sec=step_time_sec,
-          consumed_policy_version=consumed_policy_version,
-          log_step=current_step,
-          sampler_agreement=step_sampler_agreement,
-          filtered_groups=filtered_groups,
-      )
-      del filtered_groups
-      self._log_consumed_trajectories(
-          all_step_items,
-          log_step=current_step,
-          consumed_policy_version=consumed_policy_version,
-      )
-
-      self.last_step_result = RLStepResult(
-          step=current_step,
-          policy_version=self.policy_version,
-          num_rollouts=num_rollouts,
-          num_microbatches=num_microbatches,
-          reward_mean=metrics_summary["reward_mean"],
-          reward_std=metrics_summary["reward_std"],
-          advantage_mean=metrics_summary["advantage_mean"],
-          advantage_std=metrics_summary["advantage_std"],
-          train_result=step_result,
-      )
-
-      loss_val = metrics_summary["loss_val"]
-      perplexity_val = metrics_summary["perplexity_val"]
-      if self.mode == Mode.TRAIN:
-        logging.info(
-            "Train step %d - loss: %s - reward_mean: %.4f - advantage_mean:"
-            " %.4f - perplexity: %s - step_time: %.2fs",
-            current_step,
-            f"{loss_val:.4f}" if loss_val is not None else "N/A",
-            metrics_summary["reward_mean"],
-            metrics_summary["advantage_mean"],
-            f"{perplexity_val:.4f}" if perplexity_val is not None else "N/A",
-            step_time_sec,
+        del filtered_groups
+        self._log_consumed_trajectories(
+            all_step_items,
+            log_step=current_step,
+            consumed_policy_version=consumed_policy_version,
         )
 
-      if self.on_step_end:
-        self.on_step_end(current_step, step_result)
-      self._step += 1
+        self.last_step_result = RLStepResult(
+            step=current_step,
+            policy_version=self.policy_version,
+            num_rollouts=num_rollouts,
+            num_microbatches=num_microbatches,
+            reward_mean=metrics_summary["reward_mean"],
+            reward_std=metrics_summary["reward_std"],
+            advantage_mean=metrics_summary["advantage_mean"],
+            advantage_std=metrics_summary["advantage_std"],
+            train_result=step_result,
+        )
+
+        loss_val = metrics_summary["loss_val"]
+        perplexity_val = metrics_summary["perplexity_val"]
+        if self.mode == Mode.TRAIN:
+          logging.info(
+              "Train step %d - loss: %s - reward_mean: %.4f - advantage_mean:"
+              " %.4f - perplexity: %s - step_time: %.2fs",
+              current_step,
+              f"{loss_val:.4f}" if loss_val is not None else "N/A",
+              metrics_summary["reward_mean"],
+              metrics_summary["advantage_mean"],
+              f"{perplexity_val:.4f}" if perplexity_val is not None else "N/A",
+              step_time_sec,
+          )
+
+        if self.on_step_end:
+          self.on_step_end(current_step, step_result)
+        self._step += 1
+    finally:
+      if pending_train is not None:
+        pending_train.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+          await _await_pending_train()
 
   async def run_async(
       self,
@@ -1474,9 +1514,15 @@ class StandardRLProgram(RLProgram):
         raise train_task.exception()  # pyrefly: ignore[bad-raise]
     except Exception as exc:
       logging.error("Exception in StandardRLProgram execution: %s", exc)
+      for task in tasks:
+        if not task.done():
+          task.cancel()
       await self.raw_q.abort(exc)
       await self.scored_q.abort(exc)
-      self.assembler.reset()
+      with contextlib.suppress(asyncio.CancelledError, Exception):
+        await train_task
+      with self._assembler_lock:
+        self.assembler.reset()
       raise
     finally:
       for task in tasks:

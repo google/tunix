@@ -15,6 +15,7 @@
 import asyncio
 import builtins
 from collections.abc import Sequence
+import threading
 import types
 from typing import Any
 from unittest import mock
@@ -746,7 +747,7 @@ class RLProgramTest(absltest.TestCase):
 
       def feed(self, items):
         del items
-        return [
+        return iter([
             batch_assembly.AssembledBatch(
                 payload="microbatch_0",
                 is_final_batch=False,
@@ -757,10 +758,10 @@ class RLProgramTest(absltest.TestCase):
                 is_final_batch=True,
                 padding_stats=_padding_stats(),
             ),
-        ]
+        ])
 
       def flush(self):
-        return []
+        return iter(())
 
       def reset(self):
         pass
@@ -804,6 +805,347 @@ class RLProgramTest(absltest.TestCase):
           [False, True],
       )
       self.mock_engine.sync_weights.assert_not_called()
+
+    asyncio.run(_run())
+
+  def test_train_stage_pipelines_non_final_microbatch_with_next_packing_and_ref_kl(
+      self,
+  ):
+    events: list[str] = []
+    pack_threads: list[int] = []
+    in_flight_train_steps = 0
+    max_in_flight_train_steps = 0
+    mb0_started = asyncio.Event()
+    mb1_ref_scored = asyncio.Event()
+
+    def _make_mb_payload(val: int) -> datatypes.RLTrainerPayload:
+      return datatypes.RLTrainerPayload(
+          prompt_ids=np.array([[val, val]], dtype=np.int32),
+          prompt_mask=np.ones((1, 2), dtype=np.float32),
+          completion_ids=np.array([[val + 10, val + 20]], dtype=np.int32),
+          completion_mask=np.ones((1, 2), dtype=np.float32),
+          advantages=np.ones((1, 2), dtype=np.float32),
+      )
+
+    class LazyPipelinedAssembler:
+      num_generations: int = 2
+      mini_batch_size: int = 1
+      groups_per_assembly_batch: int = 1
+
+      @property
+      def assembly_batch_size(self) -> int:
+        return self.groups_per_assembly_batch * self.num_generations
+
+      def feed(self, items):
+        del items
+        pack_threads.append(threading.get_ident())
+        events.append("pack_mb0")
+        yield batch_assembly.AssembledBatch(
+            payload=_make_mb_payload(1),
+            is_final_batch=False,
+            padding_stats=_padding_stats(),
+        )
+        pack_threads.append(threading.get_ident())
+        events.append("pack_mb1")
+        yield batch_assembly.AssembledBatch(
+            payload=_make_mb_payload(2),
+            is_final_batch=True,
+            padding_stats=_padding_stats(),
+        )
+
+      def flush(self):
+        return iter(())
+
+      def reset(self):
+        pass
+
+    async def _run():
+      nonlocal in_flight_train_steps, max_in_flight_train_steps
+      self.mock_algo.requires_reference_kl = True
+      program = rl_program.StandardRLProgram(
+          dataset=[],
+          max_steps=1,
+          algo=self.mock_algo,
+          reward_fns=[lambda *_: 1.0],
+          assembler=LazyPipelinedAssembler(),
+          sync_weights=False,
+      )
+
+      async def _fake_per_token_logps(role, items):
+        del role
+        mb_id = int(items.prompt_ids[0, 0])
+        if mb_id == 2:
+          # mb0 train_step must already be in flight when mb1 is packed &
+          # ref-scored!
+          await asyncio.wait_for(mb0_started.wait(), timeout=2.0)
+          self.assertEqual(in_flight_train_steps, 1)
+          events.append("ref_mb1_during_train_mb0")
+          mb1_ref_scored.set()
+        else:
+          events.append("ref_mb0")
+        return np.array([[-0.1, -0.2]], dtype=np.float32)
+
+      async def _fake_train_step(batch, *, apply_optimizer=True, **_):
+        nonlocal in_flight_train_steps, max_in_flight_train_steps
+        mb_id = int(batch.prompt_ids[0, 0])
+        in_flight_train_steps += 1
+        max_in_flight_train_steps = max(
+            max_in_flight_train_steps, in_flight_train_steps
+        )
+        try:
+          if mb_id == 1:
+            self.assertFalse(apply_optimizer)
+            events.append("train_mb0_start")
+            mb0_started.set()
+            await asyncio.wait_for(mb1_ref_scored.wait(), timeout=2.0)
+            events.append("train_mb0_end")
+            return None
+          self.assertTrue(apply_optimizer)
+          events.append("train_mb1")
+          return {"updated": True}
+        finally:
+          in_flight_train_steps -= 1
+
+      self.mock_engine.per_token_logps = mock.AsyncMock(
+          side_effect=_fake_per_token_logps
+      )
+      self.mock_engine.train_step = mock.AsyncMock(side_effect=_fake_train_step)
+      program.engine = self.mock_engine
+
+      for group_index in range(2):
+        item = datatypes.TrajectoryItem(
+            group_index=group_index,
+            prompt_id="prompt_0",
+            start_step=0,
+            traj={"trajectory_reward": 1.0},
+        )
+        item.payload = self.mock_algo.create_trainer_payloads.return_value[
+            group_index
+        ]
+        await program.scored_q.put(item)
+
+      program._dispatch_capacity = asyncio.Semaphore(1)
+      main_tid = threading.get_ident()
+      await program.train_stage()
+
+      # Both microbatch pack calls ran on worker threads (not the event loop
+      # thread).
+      self.assertLen(pack_threads, 2)
+      for tid in pack_threads:
+        self.assertNotEqual(tid, main_tid)
+      # Strict 1-deep bound: at most 1 train_step in flight at any time.
+      self.assertEqual(max_in_flight_train_steps, 1)
+      # Verify mb1 packing (on worker thread) and reference scoring overlapped
+      # with mb0 train_step (on event loop).
+      self.assertEqual(events[:2], ["pack_mb0", "ref_mb0"])
+      self.assertCountEqual(events[2:4], ["train_mb0_start", "pack_mb1"])
+      self.assertEqual(
+          events[4:],
+          [
+              "ref_mb1_during_train_mb0",
+              "train_mb0_end",
+              "train_mb1",
+          ],
+      )
+
+    asyncio.run(_run())
+
+  def test_train_stage_awaits_pending_train_before_sampler_trainer_agreement(
+      self,
+  ):
+    events: list[str] = []
+    mb0_started = asyncio.Event()
+
+    def _make_agreement_payload(mb_idx: int) -> datatypes.RLTrainerPayload:
+      return datatypes.RLTrainerPayload(
+          prompt_ids=np.array([[mb_idx, mb_idx]], dtype=np.int32),
+          prompt_mask=np.ones((1, 2), dtype=np.float32),
+          completion_ids=np.array([[3, 4]], dtype=np.int32),
+          completion_mask=np.ones((1, 2), dtype=np.float32),
+          advantages=np.ones((1, 2), dtype=np.float32),
+          old_per_token_logps=np.array([[-0.5, -0.2]], dtype=np.float32),
+      )
+
+    class TwoGroupPipelinedAssembler:
+      num_generations: int = 2
+      mini_batch_size: int = 2
+      groups_per_assembly_batch: int = 1
+      _calls: int = 0
+
+      @property
+      def assembly_batch_size(self) -> int:
+        return self.groups_per_assembly_batch * self.num_generations
+
+      def feed(self, items):
+        del items
+        mb_idx = self._calls
+        self._calls += 1
+        is_final = self._calls == 2
+        yield batch_assembly.AssembledBatch(
+            payload=_make_agreement_payload(mb_idx),
+            is_final_batch=is_final,
+            padding_stats=_padding_stats(),
+        )
+
+      def flush(self):
+        return iter(())
+
+      def reset(self):
+        pass
+
+    async def _run():
+      self.mock_algo.mini_batch_size = 2
+      self.mock_algo.algo_config.use_rollout_logps = True
+      self.mock_algo.algo_config.num_iterations = 2
+      program = rl_program.StandardRLProgram(
+          dataset=[],
+          max_steps=1,
+          algo=self.mock_algo,
+          reward_fns=[lambda *_: 1.0],
+          assembler=TwoGroupPipelinedAssembler(),
+          sync_weights=False,
+      )
+
+      async def _fake_train_step(batch, *, apply_optimizer=True, **_):
+        del apply_optimizer
+        mb_idx = int(batch.prompt_ids[0, 0])
+        events.append(f"train_mb_{mb_idx}_start")
+        if mb_idx == 0:
+          mb0_started.set()
+          await asyncio.sleep(0.02)
+        events.append(f"train_mb_{mb_idx}_end")
+        return {"updated": mb_idx == 1}
+
+      async def _fake_per_token_logps(role, *, items, **kwargs):
+        del kwargs
+        self.assertEqual(role, datatypes.Role.ACTOR)
+        events.append("actor_logps")
+        return datatypes.LogprobsResponse(
+            per_token_logps=np.full_like(
+                items.completion_tokens, -0.5, dtype=np.float32
+            ),
+            model_version=1,
+        )
+
+      self.mock_engine.train_step = mock.AsyncMock(side_effect=_fake_train_step)
+      self.mock_engine.per_token_logps = mock.AsyncMock(
+          side_effect=_fake_per_token_logps
+      )
+      program.engine = self.mock_engine
+
+      for prompt_idx in range(2):
+        for group_index in range(2):
+          item = datatypes.TrajectoryItem(
+              group_index=group_index,
+              prompt_id=f"prompt_{prompt_idx}",
+              start_step=0,
+              traj={
+                  "trajectory_reward": 1.0,
+                  "logprobs": np.array([-0.1, -0.2], dtype=np.float32),
+              },
+              prompt_tokens=np.array([1, 2], dtype=np.int32),
+              completion_tokens=np.array([3, 4], dtype=np.int32),
+          )
+          item.payload = datatypes.RLTrainerPayload(
+              prompt_ids=np.array([1, 2], dtype=np.int32),
+              prompt_mask=np.ones(2, dtype=np.float32),
+              completion_ids=np.array([3, 4], dtype=np.int32),
+              completion_mask=np.ones(2, dtype=np.float32),
+              advantages=np.ones(2, dtype=np.float32),
+              old_per_token_logps=np.array([-0.1, -0.2], dtype=np.float32),
+          )
+          await program.scored_q.put(item)
+      await program.scored_q.close()
+
+      program._dispatch_capacity = asyncio.Semaphore(2)
+      await program.train_stage()
+
+      # Group 1's actor_logps must wait for Group 0's pending_train (mb_0) to
+      # finish.
+      self.assertEqual(
+          events,
+          [
+              "actor_logps",
+              "train_mb_0_start",
+              "train_mb_0_end",
+              "actor_logps",
+              "train_mb_1_start",
+              "train_mb_1_end",
+          ],
+      )
+
+    asyncio.run(_run())
+
+  def test_train_stage_cancels_pending_train_on_exception(self):
+    mb0_started = threading.Event()
+    mb0_cancelled = False
+
+    class FailingSecondMicrobatchAssembler:
+      num_generations: int = 2
+      mini_batch_size: int = 1
+      groups_per_assembly_batch: int = 1
+
+      @property
+      def assembly_batch_size(self) -> int:
+        return self.groups_per_assembly_batch * self.num_generations
+
+      def feed(self, items):
+        del items
+        yield batch_assembly.AssembledBatch(
+            payload="mb_0",
+            is_final_batch=False,
+            padding_stats=_padding_stats(),
+        )
+        if not mb0_started.wait(timeout=2.0):
+          raise TimeoutError("mb0 train_step did not start in time")
+        raise RuntimeError("packing failed on mb_1")
+
+      def flush(self):
+        return iter(())
+
+      def reset(self):
+        pass
+
+    async def _run():
+      nonlocal mb0_cancelled
+      program = rl_program.StandardRLProgram(
+          dataset=[],
+          max_steps=1,
+          algo=self.mock_algo,
+          reward_fns=[lambda *_: 1.0],
+          assembler=FailingSecondMicrobatchAssembler(),
+          sync_weights=False,
+      )
+
+      async def _slow_train_step(batch, *, apply_optimizer=True, **_):
+        nonlocal mb0_cancelled
+        del batch, apply_optimizer
+        try:
+          mb0_started.set()
+          await asyncio.sleep(10.0)
+        except asyncio.CancelledError:
+          mb0_cancelled = True
+          raise
+
+      self.mock_engine.train_step = mock.AsyncMock(side_effect=_slow_train_step)
+      program.engine = self.mock_engine
+
+      for group_index in range(2):
+        item = datatypes.TrajectoryItem(
+            group_index=group_index,
+            prompt_id="prompt_0",
+            start_step=0,
+            traj={"trajectory_reward": 1.0},
+        )
+        item.payload = self.mock_algo.create_trainer_payloads.return_value[
+            group_index
+        ]
+        await program.scored_q.put(item)
+
+      program._dispatch_capacity = asyncio.Semaphore(1)
+      with self.assertRaisesRegex(RuntimeError, "packing failed on mb_1"):
+        await program.train_stage()
+      self.assertTrue(mb0_cancelled)
 
     asyncio.run(_run())
 
@@ -1385,7 +1727,7 @@ class RLProgramTest(absltest.TestCase):
 
       def feed(self, items):
         del items
-        return [
+        return iter([
             batch_assembly.AssembledBatch(
                 payload="microbatch_0",
                 is_final_batch=False,
@@ -1398,10 +1740,10 @@ class RLProgramTest(absltest.TestCase):
                 padding_stats=_padding_stats(),
                 trajectory_ids=("traj_prompt_0_g1",),
             ),
-        ]
+        ])
 
       def flush(self):
-        return []
+        return iter(())
 
       def reset(self):
         pass
@@ -1778,14 +2120,14 @@ class RLProgramTest(absltest.TestCase):
           old_per_token_logps=None,
       )
       self.assembler.feed = mock.MagicMock(
-          return_value=[
+          side_effect=lambda _: iter([
               batch_assembly.AssembledBatch(
                   payload=mock_payload,
                   is_final_batch=True,
                   padding_stats=_padding_stats(),
                   trajectory_ids=(),
               )
-          ]
+          ])
       )
       self.mock_engine.per_token_logps = mock.AsyncMock(
           return_value=np.array([[-0.1, -0.2]], dtype=np.float32)
@@ -1808,14 +2150,14 @@ class RLProgramTest(absltest.TestCase):
       self.mock_algo.requires_reference_kl = True
       # Returning a raw dict instead of RLTrainerPayload
       self.assembler.feed = mock.MagicMock(
-          return_value=[
+          side_effect=lambda _: iter([
               batch_assembly.AssembledBatch(
                   payload={"raw": "batch"},  # pyrefly: ignore[bad-argument-type]
                   is_final_batch=True,
                   padding_stats=_padding_stats(),
                   trajectory_ids=(),
               )
-          ]
+          ])
       )
       _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
       program = self._create_program(dataset=["prompt_0"])

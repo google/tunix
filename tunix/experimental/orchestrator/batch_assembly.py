@@ -25,7 +25,7 @@ potentially move to a common library.
 """
 
 import collections
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 import dataclasses
 from typing import Any, Generic, NamedTuple, Protocol, TypeVar
 from absl import logging
@@ -229,13 +229,13 @@ class BatchAssembler(Generic[T], Protocol):
   def feed(
       self,
       items: Sequence[T],
-  ) -> list[AssembledBatch]:
-    """Ingests rollouts and flushes at the optimizer-update boundary."""
+  ) -> Iterator[AssembledBatch]:
+    """Ingests rollouts and yields microbatches, flushing at the update boundary."""
     ...
 
   def flush(
       self,
-  ) -> list[AssembledBatch]:
+  ) -> Iterator[AssembledBatch]:
     """Drains remaining buffered items, padding to the required static tensor shape."""
     ...
 
@@ -733,7 +733,7 @@ class SequencePackedBatchAssembler:
         trajectory_ids=traj_ids,
     )
 
-  def _drain_buffer(self, *, drain_all: bool) -> list[AssembledBatch]:
+  def _drain_buffer(self, *, drain_all: bool) -> Iterator[AssembledBatch]:
     """Drains buffered items into microbatches using FFD packing.
 
     When `drain_all` is False, only whole chunks whose token mass can fill a
@@ -741,8 +741,14 @@ class SequencePackedBatchAssembler:
     rollouts arrive. When `drain_all` is True (optimizer-update boundary or
     `flush`), the buffer is drained completely and the last chunk is marked
     final.
+
+    Args:
+      drain_all: Whether to flush all buffered items regardless of chunk
+        capacity.
+
+    Yields:
+      Assembled microbatches packed one chunk at a time.
     """
-    out: list[AssembledBatch] = []
     max_segments = packing.effective_max_segments(
         self.max_packed_len, self.max_segments_per_packed_row
     )
@@ -752,16 +758,13 @@ class SequencePackedBatchAssembler:
         buffered_tokens = sum(item[0].num_tokens for item in self._buffer)
         if buffered_tokens < chunk_capacity:
           break
-      out.append(
-          self._emit_one_chunk(max_segments=max_segments, drain_all=drain_all)
-      )
-    return out
+      yield self._emit_one_chunk(max_segments=max_segments, drain_all=drain_all)
 
   def feed(
       self,
       items: Sequence[datatypes.RLTrainerPayload],
-  ) -> list[AssembledBatch]:
-    """Ingests items and flushes at the optimizer-update boundary."""
+  ) -> Iterator[AssembledBatch]:
+    """Ingests items and yields microbatches, flushing at the update boundary."""
     for item in items:
       pack_item = to_pack_item(item)
       packing.validate_items([pack_item], self.max_packed_len)
@@ -770,14 +773,13 @@ class SequencePackedBatchAssembler:
     is_update_done = (
         self._rollouts_since_update >= self.rollouts_per_optimizer_update
     )
-    out = self._drain_buffer(drain_all=is_update_done)
     if is_update_done:
       self._rollouts_since_update %= self.rollouts_per_optimizer_update
-    return out
+    return self._drain_buffer(drain_all=is_update_done)
 
   def flush(
       self,
-  ) -> list[AssembledBatch]:
+  ) -> Iterator[AssembledBatch]:
     """Flushes any remaining buffered items, marking the last chunk final."""
     self._rollouts_since_update = 0
     return self._drain_buffer(drain_all=True)
@@ -871,62 +873,45 @@ class PaddedBatchAssembler:
   def max_seq_len(self) -> int:
     return self.max_prompt_length + self.max_response_length
 
-  def _assemble(
-      self,
-      chunk: Sequence[datatypes.RLTrainerPayload],
-      *,
-      is_final_batch: bool,
-  ) -> AssembledBatch:
-    """Pads one `<= batch_size` chunk into an `AssembledBatch`."""
+  def _emit_one_chunk(self, *, drain_all: bool) -> AssembledBatch:
+    """Pops up to `batch_size` items from the buffer and pads one microbatch."""
+    chunk = [
+        self._buffer.popleft()
+        for _ in range(min(self.batch_size, len(self._buffer)))
+    ]
     payload, padding_stats = self._pack_chunk(chunk)
     return AssembledBatch(
         payload=payload,
-        is_final_batch=is_final_batch,
+        is_final_batch=drain_all and not self._buffer,
         padding_stats=padding_stats,
         trajectory_ids=tuple(_extract_trajectory_id(it) for it in chunk),
     )
 
+  def _drain_buffer(self, *, drain_all: bool) -> Iterator[AssembledBatch]:
+    """Drains buffered items into padded microbatches one chunk at a time."""
+    while len(self._buffer) >= self.batch_size or (drain_all and self._buffer):
+      yield self._emit_one_chunk(drain_all=drain_all)
+
   def feed(
       self,
       items: Sequence[datatypes.RLTrainerPayload],
-  ) -> list[AssembledBatch]:
-    """Ingests items and flushes at the optimizer-update boundary."""
+  ) -> Iterator[AssembledBatch]:
+    """Ingests items and yields microbatches, flushing at the update boundary."""
     self._buffer.extend(items)
     self._rollouts_since_update += len(items)
-
-    out: list[AssembledBatch] = []
-
-    while len(self._buffer) >= self.batch_size:
-      is_update_done = (
-          self._rollouts_since_update >= self.rollouts_per_optimizer_update
-      )
-      will_be_empty = len(self._buffer) == self.batch_size
-      is_final = is_update_done and will_be_empty
-
-      chunk = [self._buffer.popleft() for _ in range(self.batch_size)]
-      out.append(self._assemble(chunk, is_final_batch=is_final))
-
-    if self._rollouts_since_update >= self.rollouts_per_optimizer_update:
-      if self._buffer:
-        remainder = list(self._buffer)
-        self._buffer.clear()
-        out.append(self._assemble(remainder, is_final_batch=True))
-      elif out:
-        out[-1] = out[-1]._replace(is_final_batch=True)
+    is_update_done = (
+        self._rollouts_since_update >= self.rollouts_per_optimizer_update
+    )
+    if is_update_done:
       self._rollouts_since_update %= self.rollouts_per_optimizer_update
-
-    return out
+    return self._drain_buffer(drain_all=is_update_done)
 
   def flush(
       self,
-  ) -> list[AssembledBatch]:
+  ) -> Iterator[AssembledBatch]:
     """Flushes any remaining items padded to batch_size."""
-    if not self._buffer:
-      return []
-    remainder = list(self._buffer)
-    self._buffer.clear()
     self._rollouts_since_update = 0
-    return [self._assemble(remainder, is_final_batch=True)]
+    return self._drain_buffer(drain_all=True)
 
   def reset(self, *, start_batch_index: int | None = None) -> None:
     """Resets internal buffering state, discarding all pending rollouts.
