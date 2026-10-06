@@ -147,6 +147,11 @@ ${FAIL_FAST_PROC_MAIN_CONTAINERS}            - name: ${USER_CONTAINER}
                   _sigterm() (kill -SIGTERM $$! 2>/dev/null)
                   trap _sigterm SIGTERM
 
+                  # Disable core dumps and remove stale core files from host /tmp
+                  # (which is a tmpfs in RAM on TPU nodes).
+                  ulimit -c 0
+                  rm -f /tmp/core*
+
 ${FAIL_FAST_WRAPPER_PRE}                  (
                     ${STARTUP_COMMAND}
                   ) & PID=$$!
