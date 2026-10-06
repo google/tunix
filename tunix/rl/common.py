@@ -411,6 +411,22 @@ def model_call_contains(model, target_arg: str) -> bool:
   return _call_contains_by_type(type(target_obj), target_arg)
 
 
+def pop_moe_overflow(model: nnx.Module) -> jax.Array:
+  """Pops the `moe_has_overflow` intermediates MoE layers sowed on `model`.
+
+  Args:
+    model: The model after a forward pass.
+
+  Returns:
+    Scalar bool, True if any sowed flag (scanned layers stack them) is True.
+  """
+  flags = nnx.pop(
+      model, nnx.All(nnx.Intermediate, nnx.PathContains("moe_has_overflow"))
+  ).to_pure_dict()
+  leaves = [jnp.any(f) for f in jax.tree.leaves(flags)]
+  return jnp.any(jnp.stack(leaves)) if leaves else jnp.array(False)
+
+
 @functools.partial(
     jax.jit,
     static_argnames=(
@@ -420,6 +436,7 @@ def model_call_contains(model, target_arg: str) -> bool:
         "return_entropy",
         "temperature",
         "chunk_size",
+        "return_moe_overflow",
     ),
 )
 def compute_per_token_logps(
@@ -438,7 +455,8 @@ def compute_per_token_logps(
     chunk_size: int = 0,
     routed_experts: jax.Array | None = None,
     token_mask: jax.Array | None = None,
-) -> jax.Array | tuple[jax.Array, jax.Array]:
+    return_moe_overflow: bool = False,
+) -> jax.Array | tuple[jax.Array, ...]:
   """Computes the per-token log probabilities.
 
   Args:
@@ -466,6 +484,10 @@ def compute_per_token_logps(
       name MaxText's adapter uses -- so it replays this routing instead of
       re-running its router. Ignored by models that do not accept the kwarg.
     token_mask: Optional explicit valid positions for prompt plus completion.
+    return_moe_overflow: whether to also return a scalar bool that is True if
+      any MoE layer sowed a True `moe_has_overflow` intermediate (MaxText's
+      RoutedMoE dropped tokens) during the forward pass. The model is merged
+      inside this jit, so these intermediates are otherwise lost.
 
   Returns:
     per_token_logps: jax.Array token-level logarithmic values.
@@ -477,6 +499,8 @@ def compute_per_token_logps(
     entropy: optional per-token entropy jax.Array of shape matches
     per_token_logps,
       returned if return_entropy is True.
+    moe_overflow: optional scalar bool, returned last if return_moe_overflow
+      is True; False for models that sow no `moe_has_overflow`.
   """
   model = nnx.merge(graphdef, state)
 
@@ -535,6 +559,12 @@ def compute_per_token_logps(
     )
 
   outputs, _ = model(input_tokens, **model_kwargs)
+  moe_overflow = pop_moe_overflow(model) if return_moe_overflow else None
+
+  def _result(*outs):
+    if return_moe_overflow:
+      outs += (moe_overflow,)
+    return outs if len(outs) > 1 else outs[0]
 
   if segment_ids is not None:
     # Packed Mode: Evaluate the full sequence (mixed prompts + completions).
@@ -576,8 +606,8 @@ def compute_per_token_logps(
         per_token_entropy = jax.lax.stop_gradient(per_token_entropy)  # pyrefly: ignore[unbound-name]
 
     if return_entropy:
-      return per_token_logps, per_token_entropy  # pyrefly: ignore[unbound-name]
-    return per_token_logps
+      return _result(per_token_logps, per_token_entropy)  # pyrefly: ignore[unbound-name]
+    return _result(per_token_logps)
   else:
     logits = outputs[:, -logits_to_keep - 1 : -1, :]
     if temperature != 0.0 and temperature != 1.0:
@@ -599,8 +629,8 @@ def compute_per_token_logps(
 
     if return_entropy:
       entropy = compute_entropy_from_logits(logits)
-      return per_token_logps, entropy
-    return per_token_logps
+      return _result(per_token_logps, entropy)
+    return _result(per_token_logps)
 
 
 def sampler_trainer_agreement(
