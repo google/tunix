@@ -315,6 +315,38 @@ class UtilsTest(absltest.TestCase):
     np.testing.assert_array_equal(item['completion_ids'], [10, 0, 20, 21])
     np.testing.assert_array_equal(item['completion_mask'], [1, 1, 0, 0])
 
+  def test_unpad_train_example_uses_each_row_length(self):
+    example = common.TrainExample(
+        prompt_ids=np.array(
+            [[0, 0, 1, 2], [0, 3, 4, 5], [6, 7, 8, 9]], dtype=np.int32
+        ),
+        prompt_mask=np.array(
+            [[0, 0, 1, 1], [0, 1, 1, 1], [1, 1, 1, 1]], dtype=np.int32
+        ),
+        completion_ids=np.array(
+            [[10, 0, 0], [11, 12, 0], [13, 14, 15]], dtype=np.int32
+        ),
+        completion_mask=np.array(
+            [[1, 0, 0], [1, 1, 0], [1, 1, 1]], dtype=np.int32
+        ),
+        advantages=np.array([0.5, -0.5, 1.0], dtype=np.float32),
+        ref_per_token_logps=None,
+        old_per_token_logps=np.array(
+            [[-1, 0, 0], [-2, -3, 0], [-4, -5, -6]], dtype=np.float32
+        ),
+    )
+    items = utils.unpad_train_example(example)
+    self.assertLen(items, 3)
+    expected = [
+        ([1, 2], [10], [-1]),
+        ([3, 4, 5], [11, 12], [-2, -3]),
+        ([6, 7, 8, 9], [13, 14, 15], [-4, -5, -6]),
+    ]
+    for item, (prompt, completion, old_logps) in zip(items, expected):
+      np.testing.assert_array_equal(item['prompt_ids'], prompt)
+      np.testing.assert_array_equal(item['completion_ids'], completion)
+      np.testing.assert_array_equal(item['old_per_token_logps'], old_logps)
+
   def test_pack_sequences_token_only_produces_none_logps(self):
     # pack-first groundwork: packing TrainExamples that carry no logps must
     # still pack tokens/segment_ids and leave the packed logps as None, so logp

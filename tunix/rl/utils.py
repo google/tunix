@@ -371,11 +371,14 @@ def unpad_train_example(example: common.TrainExample) -> list[dict[str, Any]]:
   if has_policy_version:
     policy_version_np = np.asarray(policy_version_val)
 
+  # One reduction per mask instead of two small numpy calls per row.
+  p_lens = np.sum(p_mask, axis=1).tolist()
+  c_lens = np.sum(
+      c_mask if completion_valid is None else completion_valid, axis=1
+  ).tolist()
   for i in range(batch_size):
-    p_len = int(np.sum(p_mask[i]))
-    c_len = int(
-        np.sum(c_mask[i] if completion_valid is None else completion_valid[i])
-    )
+    p_len = int(p_lens[i])
+    c_len = int(c_lens[i])
 
     # `policy_version` is per-row: row `i` of the input maps to scalar
     # `policy_version_np[i]`. We slice with `i:i+1` to keep a 1-D shape so that
