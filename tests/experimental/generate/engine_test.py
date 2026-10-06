@@ -490,7 +490,7 @@ class StepTest(parameterized.TestCase):
 
     orig_execute = engine._model_runner.execute_step  # pylint: disable=protected-access
     orig_schedule = engine._scheduler.schedule_step  # pylint: disable=protected-access
-    orig_update = engine._scheduler.update_from_output  # pylint: disable=protected-access
+    orig_update = engine._update_from_output  # pylint: disable=protected-access
 
     def record_execute(*args, **kwargs):
       events.append('execute')
@@ -511,19 +511,19 @@ class StepTest(parameterized.TestCase):
         engine._scheduler, 'schedule_step', side_effect=record_schedule  # pylint: disable=protected-access
     ).start()
     mock.patch.object(
-        engine._scheduler, 'update_from_output', side_effect=record_update  # pylint: disable=protected-access
+        engine, '_update_from_output', side_effect=record_update
     ).start()
 
     engine.add_request(testing_utils.make_request('0', [1, 2], max_tokens=2))
     engine.step()
     engine.step()
 
-    # Step 1 schedules the initial batch, launches `execute`, schedules Step 2
-    # while Step 1 is in flight, then updates from Step 1's output. Step 2
-    # reuses the pre-scheduled batch directly.
+    # Step 1 schedules and launches the initial batch, then schedules and
+    # launches Step 2 while Step 1 is in flight, before updating from Step 1's
+    # output. Step 2 finishes the already-launched second batch.
     self.assertEqual(
         events,
-        ['schedule', 'execute', 'schedule', 'update', 'execute', 'schedule', 'update'],
+        ['schedule', 'execute', 'schedule', 'execute', 'update', 'schedule', 'update'],
     )
 
   def test_returns_logits_and_logprobs(self):

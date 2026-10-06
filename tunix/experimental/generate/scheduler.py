@@ -21,7 +21,6 @@ import functools
 import itertools
 import time
 
-import numpy as np
 from tunix.experimental.generate import kv_cache_manager as kv_cache_manager_lib
 from tunix.experimental.generate import request as request_lib
 
@@ -41,8 +40,6 @@ class SchedulerConfig:
   max_chunked_prefill_length: int
   # The number of model forward passes to execute per engine step.
   num_scheduler_steps: int = 1
-  # A request finishes once it samples any of these tokens.
-  eos_token_ids: frozenset[int] = frozenset()
 
   def __post_init__(self):
     if self.max_chunked_prefill_length <= 0:
@@ -64,8 +61,7 @@ class Scheduler:
 
   On each engine step, the scheduler picks which requests to run, subject to
   arrival order, the token budget, and KV cache availability, and fetches the
-  pages those requests need onto the device. After the step, it updates the
-  state of each scheduled request.
+  pages those requests need onto the device.
   """
 
   def __init__(
@@ -85,7 +81,6 @@ class Scheduler:
         collections.deque()
     )
     self._token_budget: int = 0
-    self._last_num_generated_tokens: int = 0
     self._num_preemptions_since_pop: int = 0
 
     self._kv_cache_manager = kv_cache_manager
@@ -102,10 +97,6 @@ class Scheduler:
   @property
   def num_pending_requests(self) -> int:
     return sum(not req.is_done for req in self._pending_requests)
-
-  @property
-  def last_num_generated_tokens(self) -> int:
-    return self._last_num_generated_tokens
 
   def pop_num_preemptions(self) -> int:
     count = self._num_preemptions_since_pop
@@ -161,116 +152,6 @@ class Scheduler:
 
     # The RPA kernel expects [decodes, chunked, prefills] ordering.
     return tuple(decodes + chunked + prefills), (i, j, k)
-
-  def update_from_output(
-      self,
-      requests: Sequence[request_lib.RequestState],
-      generated_tokens: np.ndarray,
-      logits: np.ndarray | None = None,
-      logprobs: np.ndarray | None = None,
-  ) -> list[request_lib.RequestState]:
-    """Updates request state based on a sampler output.
-
-    A request finishes when it samples one of the configured EOS tokens or
-    reaches its `max_tokens`.
-
-    Args:
-      requests: The requests to update. Row `i` of each output belongs to
-        `requests[i]`.
-      generated_tokens: Sampled tokens, one row per request.
-      logits: Optional logits, one row per request.
-      logprobs: Optional logprobs, one row per request.
-
-    Returns:
-      The requests that finished this step.
-    """
-    for name, rows in (
-        ("generated_tokens", generated_tokens),
-        ("logits", logits),
-        ("logprobs", logprobs),
-    ):
-      if rows is not None and len(rows) != len(requests):
-        raise ValueError(
-            f"{name} has {len(rows)} rows for {len(requests)} requests."
-        )
-
-    now = time.perf_counter()
-    completed_reqs = []
-    num_generated_tokens = 0
-    for i, req in enumerate(requests):
-      if req.is_done:
-        req.num_in_flight_tokens = 0
-        continue
-
-      num_generated_tokens += self._update_req_from_output(
-          req,
-          generated_tokens[i],
-          logits[i] if logits is not None else None,
-          logprobs[i] if logprobs is not None else None,
-          now=now,
-      )
-
-      if req.is_done:
-        req.finished_time = now
-        completed_reqs.append(req)
-
-    self._last_num_generated_tokens = num_generated_tokens
-    return completed_reqs
-
-  def _update_req_from_output(
-      self,
-      req: request_lib.RequestState,
-      generated_tokens: np.ndarray,
-      logits: np.ndarray | None = None,
-      logprobs: np.ndarray | None = None,
-      *,
-      now: float | None = None,
-  ) -> int:
-    """Updates request state based on a sampler output."""
-    in_flight = req.num_in_flight_tokens
-    req.num_in_flight_tokens = 0
-    was_preempted = req.status == request_lib.RequestStatus.PENDING
-    if (
-        req.is_done
-        or in_flight == 0
-        or (not was_preempted and req.num_computed_tokens < len(req.token_ids))
-    ):
-      return 0
-
-    # Gather the new tokens generated for this request.
-    new_tokens = []
-    for new_token in generated_tokens:
-      token_id = int(new_token)
-      new_tokens.append(token_id)
-      if token_id in self._config.eos_token_ids:
-        req.status = request_lib.RequestStatus.FINISHED_EOS
-        break
-
-    # Truncate the new tokens if the request has reached its max length.
-    n_generated = (
-        len(req.token_ids) + len(new_tokens) - req.prompt_length
-    )
-    n_overflow = n_generated - req.sampling_params.max_tokens
-    if n_overflow > 0:
-      new_tokens = new_tokens[:-n_overflow]
-      req.status = request_lib.RequestStatus.FINISHED_LENGTH
-    elif n_overflow == 0 and not req.is_done:
-      req.status = request_lib.RequestStatus.FINISHED_LENGTH
-
-    # Add the new tokens to the request.
-    num_added = len(new_tokens)
-    if num_added > 0 and req.first_token_time is None:
-      req.first_token_time = time.perf_counter() if now is None else now
-    req.token_ids.extend(new_tokens)
-    if logprobs is not None:
-      req.logprobs.extend(logprobs[:num_added])
-    if logits is not None:
-      req.logits.extend(logits[:num_added])
-
-    if req.is_done and not was_preempted:
-      req.num_computed_tokens = len(req.token_ids) - 1
-
-    return num_added
 
   def drop_completed(
       self,
@@ -449,9 +330,8 @@ class Scheduler:
     req = self._running_requests.pop()
     self._kv_cache_manager.release_request(req)
 
-    if req.num_computed_tokens < len(req.token_ids):
-      req.num_in_flight_tokens = 0
     req.num_computed_tokens = 0
+    req.num_in_flight_tokens = 0
     req.is_decode = False
     req.is_chunked_prefill = False
     req.status = request_lib.RequestStatus.PENDING

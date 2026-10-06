@@ -20,6 +20,7 @@ batch of requests, the `KVCacheManager` maps them onto KV cache pages, and the
 """
 
 import dataclasses
+import itertools
 import time
 from typing import Any
 
@@ -44,6 +45,30 @@ _FINISH_REASONS: dict[request_lib.RequestStatus, request_lib.FinishReason] = {
     request_lib.RequestStatus.FINISHED_EOS: 'stop',
     request_lib.RequestStatus.FINISHED_LENGTH: 'length',
 }
+
+
+@dataclasses.dataclass(frozen=True)
+class _InFlightStep:
+  """A model runner step currently executing on the device."""
+
+  scheduled: tuple[request_lib.RequestState, ...]
+  distribution: tuple[int, int, int]
+  num_prompt_tokens: int
+  generated_tokens: jax.Array
+  logits: jax.Array | None
+  logprobs: jax.Array | None
+
+
+@jax.jit
+def _write_decode_tokens(
+    tokens: jax.Array,
+    prev_generated_tokens: jax.Array,
+    target_idxs: jax.Array,
+) -> jax.Array:
+  """Writes the last token sampled by each surviving row into `tokens`."""
+  return tokens.at[target_idxs].set(
+      prev_generated_tokens[:, -1], mode='drop'
+  )
 
 
 def _instantiate_components(
@@ -119,6 +144,7 @@ class LLMEngine:
       scheduler_config: scheduler_lib.SchedulerConfig,
       model_runner_config: model_runner_lib.ModelRunnerConfig,
       max_model_len: int,
+      eos_token_ids: frozenset[int] = frozenset(),
       *,
       log_stats_interval_s: float = 10.0,
   ):
@@ -133,6 +159,7 @@ class LLMEngine:
       model_runner_config: The model runner config.
       max_model_len: The maximum number of tokens a sequence may hold (prompt +
         generated).
+      eos_token_ids: Token ids that finish a request once sampled.
       log_stats_interval_s: Interval in seconds between periodic vLLM-style
         stats log lines. 0 disables periodic logging.
 
@@ -154,6 +181,10 @@ class LLMEngine:
     self._tokenizer = tokenizer
     self._scheduler_config = scheduler_config
     self._model_runner_config = model_runner_config
+    self._eos_token_ids = eos_token_ids
+    self._replicated_sharding = jax.sharding.NamedSharding(
+        model_runner_config.mesh, jax.sharding.PartitionSpec()
+    )
 
     # The maximum number of tokens a sequence may hold (prompt + generated).
     self._max_model_len = max_model_len
@@ -167,10 +198,8 @@ class LLMEngine:
     self._new_requests: list[request_lib.RequestState] = []
     # Requests that are neither finished nor aborted, by request id.
     self._requests: dict[str, request_lib.RequestState] = {}
-    # The batch scheduled during the previous step's forward pass, ready to run.
-    self._scheduled_batch: (
-        tuple[tuple[request_lib.RequestState, ...], tuple[int, int, int]] | None
-    ) = None
+    # The step launched during the previous step's forward pass.
+    self._in_flight_step: _InFlightStep | None = None
     self._metrics = metrics_lib.MetricsCollector(
         log_stats_interval_s=log_stats_interval_s
     )
@@ -259,7 +288,7 @@ class LLMEngine:
     Every in-flight request is preempted, and re-prefills its prompt and the
     tokens sampled so far. The prefix cache is cleared.
     """
-    self._scheduled_batch = None
+    self._in_flight_step = None
     # Preempting releases every request's pages first, so that the reset
     # frees every page, including the ones the prefix cache holds.
     self._scheduler.preempt_all()
@@ -425,15 +454,13 @@ class LLMEngine:
     new_requests = [req for req in self._new_requests if not req.is_done]
     self._new_requests = []
 
-    if self._scheduled_batch is not None:
-      scheduled, distribution = self._scheduler.drop_completed(
-          *self._scheduled_batch
-      )
-      self._scheduled_batch = None
+    if self._in_flight_step is not None and any(
+        not req.is_done for req in self._in_flight_step.scheduled
+    ):
+      in_flight = self._in_flight_step
+      self._in_flight_step = None
     else:
-      scheduled, distribution = (), (0, 0, 0)
-
-    if not scheduled:
+      self._in_flight_step = None
       sched_start = time.perf_counter()
       scheduled, distribution = self._scheduler.schedule_step(new_requests)
       sched_duration_s = time.perf_counter() - sched_start
@@ -444,56 +471,62 @@ class LLMEngine:
           sched_duration_s,
           num_preemptions=self._scheduler.pop_num_preemptions(),
       )
+      tokens, target_idxs, metadata = self._prepare_batch(
+          scheduled, distribution
+      )
+      in_flight = self._execute_batch(
+          scheduled, distribution, tokens, target_idxs, metadata
+      )
 
-    tokens, metadata = self._prepare_batch(scheduled, distribution)
-    i, _, k = distribution
-    num_prompt_tokens = int(np.sum(metadata.query_lens[i:k]))
-
-    generated_tokens, logits, logprobs, pages = (
-        self._model_runner.execute_step(
-            cache=self._kv_cache_manager.get_physical_pages(),
-            tokens=tokens,
-            metadata=metadata,
-            sampling_params=tuple(req.sampling_params for req in scheduled),
-        )
-    )
-
-    # JAX functions cannot have side effects, so the model runner returns the
-    # updated pages rather than writing them in place. They must be written back
-    # to the KV cache manager here.
-    self._kv_cache_manager.update_device_pool(pages)
-
-    # Schedule the next step while the current forward pass runs on device.
+    # Schedule the next step, load its prefill token buffer onto the device,
+    # write its decode tokens from `in_flight.generated_tokens`, and launch it
+    # while the current forward pass runs on device.
     coloc_sched_start = time.perf_counter()
     next_scheduled, next_distribution = self._scheduler.schedule_step(
         new_requests
     )
-    coloc_sched_duration_s = time.perf_counter() - coloc_sched_start
-
-    generated_tokens, logits, logprobs = jax.device_get(
-        (generated_tokens, logits, logprobs)
-    )
-
-    # The runner pads its outputs to `max_num_seqs` rows. Drop the
-    # padding.
-    n = len(scheduled)
-    finished = self._scheduler.update_from_output(
-        scheduled,
-        generated_tokens[:n],
-        None if logits is None else logits[:n],
-        None if logprobs is None else logprobs[:n],
-    )
-    drop_start = time.perf_counter()
-    next_scheduled, next_distribution = self._scheduler.drop_completed(
+    next_scheduled, next_distribution = self._drop_completed(
         next_scheduled, next_distribution
     )
-    coloc_sched_duration_s += time.perf_counter() - drop_start
+    coloc_sched_duration_s = time.perf_counter() - coloc_sched_start
     if next_scheduled:
-      self._scheduled_batch = (next_scheduled, next_distribution)
       self._metrics.record_schedule(
           coloc_sched_duration_s,
           num_preemptions=self._scheduler.pop_num_preemptions(),
       )
+      next_tokens, target_idxs, next_metadata = self._prepare_batch(
+          next_scheduled,
+          next_distribution,
+          prev_scheduled=in_flight.scheduled,
+      )
+      self._in_flight_step = self._execute_batch(
+          next_scheduled,
+          next_distribution,
+          next_tokens,
+          target_idxs,
+          next_metadata,
+          prev_generated_tokens=in_flight.generated_tokens,
+      )
+
+    generated_tokens, logits, logprobs = jax.device_get(
+        (in_flight.generated_tokens, in_flight.logits, in_flight.logprobs)
+    )
+
+    # The runner pads its outputs to `max_num_seqs` rows. Drop the
+    # padding.
+    n = len(in_flight.scheduled)
+    finished, num_generated_tokens = self._update_from_output(
+        in_flight.scheduled,
+        in_flight.distribution,
+        generated_tokens[:n],
+        None if logits is None else logits[:n],
+        None if logprobs is None else logprobs[:n],
+    )
+    self._scheduler.drop_completed((), (0, 0, 0))
+    if self._in_flight_step is not None and all(
+        req.is_done for req in self._in_flight_step.scheduled
+    ):
+      self._in_flight_step = None
 
     step_duration_s = time.perf_counter() - step_start
     prefix_queries, prefix_hits = (
@@ -501,8 +534,8 @@ class LLMEngine:
     )
     self._metrics.record_step(
         step_duration_s=step_duration_s,
-        num_prompt_tokens=num_prompt_tokens,
-        num_generation_tokens=self._scheduler.last_num_generated_tokens,
+        num_prompt_tokens=in_flight.num_prompt_tokens,
+        num_generation_tokens=num_generated_tokens,
         finished_requests=finished,
         prefix_cache_queries=prefix_queries,
         prefix_cache_hits=prefix_hits,
@@ -512,6 +545,153 @@ class LLMEngine:
     for req in finished:
       del self._requests[req.request_id]
     return [self._make_output(req) for req in finished]
+
+  def _drop_completed(
+      self,
+      scheduled: tuple[request_lib.RequestState, ...],
+      distribution: tuple[int, int, int],
+  ) -> tuple[tuple[request_lib.RequestState, ...], tuple[int, int, int]]:
+    """Drops finished, aborted, or max-length-in-flight requests."""
+    scheduled, distribution = self._scheduler.drop_completed(
+        scheduled, distribution
+    )
+    i, j, k = distribution
+    keep = (
+        lambda r: r.num_total_tokens - r.prompt_length
+        < r.sampling_params.max_tokens
+    )
+    decodes = [r for r in scheduled[:i] if keep(r)]
+    chunked = [r for r in scheduled[i:j] if keep(r)]
+    prefills = [r for r in scheduled[j:k] if keep(r)]
+
+    new_i = len(decodes)
+    new_j = new_i + len(chunked)
+    new_k = new_j + len(prefills)
+    return tuple(decodes + chunked + prefills), (new_i, new_j, new_k)
+
+  def _execute_batch(
+      self,
+      scheduled: tuple[request_lib.RequestState, ...],
+      distribution: tuple[int, int, int],
+      tokens: jax.Array,
+      target_idxs: jax.Array,
+      metadata: paged_attention.RPAMetadata,
+      prev_generated_tokens: jax.Array | None = None,
+  ) -> _InFlightStep:
+    """Writes any in-flight decode tokens on device and launches the runner."""
+    i, _, k = distribution
+    num_prompt_tokens = int(np.sum(metadata.query_lens[i:k]))
+    if prev_generated_tokens is not None:
+      tokens = _write_decode_tokens(tokens, prev_generated_tokens, target_idxs)
+    generated_tokens, logits, logprobs, pages = (
+        self._model_runner.execute_step(
+            cache=self._kv_cache_manager.get_physical_pages(),
+            tokens=tokens,
+            metadata=metadata,
+            sampling_params=tuple(req.sampling_params for req in scheduled),
+        )
+    )
+    # JAX functions cannot have side effects, so the model runner returns the
+    # updated pages rather than writing them in place. They must be written back
+    # to the KV cache manager here.
+    self._kv_cache_manager.update_device_pool(pages)
+    return _InFlightStep(
+        scheduled=scheduled,
+        distribution=distribution,
+        num_prompt_tokens=num_prompt_tokens,
+        generated_tokens=generated_tokens,
+        logits=logits,
+        logprobs=logprobs,
+    )
+
+  def _update_from_output(
+      self,
+      scheduled: tuple[request_lib.RequestState, ...],
+      distribution: tuple[int, int, int],
+      generated_tokens: np.ndarray,
+      logits: np.ndarray | None = None,
+      logprobs: np.ndarray | None = None,
+  ) -> tuple[list[request_lib.RequestState], int]:
+    """Updates request state based on a sampler output."""
+    i, j, k = distribution
+    now = time.perf_counter()
+    completed_reqs = []
+    num_generated_tokens = 0
+    for row in itertools.chain(range(i), range(j, k)):
+      req = scheduled[row]
+      if req.is_done:
+        req.num_in_flight_tokens = 0
+        continue
+
+      num_generated_tokens += self._update_req_from_output(
+          req,
+          generated_tokens[row],
+          logits[row] if logits is not None else None,
+          logprobs[row] if logprobs is not None else None,
+          now=now,
+      )
+
+      if req.is_done:
+        req.finished_time = now
+        completed_reqs.append(req)
+
+    return completed_reqs, num_generated_tokens
+
+  def _update_req_from_output(
+      self,
+      req: request_lib.RequestState,
+      generated_tokens: np.ndarray,
+      logits: np.ndarray | None = None,
+      logprobs: np.ndarray | None = None,
+      *,
+      now: float | None = None,
+  ) -> int:
+    """Updates request state based on a sampler output."""
+    req.num_in_flight_tokens = max(
+        0, req.num_in_flight_tokens - self._scheduler_config.num_scheduler_steps
+    )
+    if req.is_done:
+      return 0
+
+    was_running = req.status == request_lib.RequestStatus.RUNNING
+
+    # Gather the new tokens generated for this request. The model runner
+    # does not check for EOS and may produce garbage tokens.
+    new_tokens = []
+    for new_token in generated_tokens:
+      token_id = int(new_token)
+      new_tokens.append(token_id)
+      if token_id in self._eos_token_ids:
+        req.status = request_lib.RequestStatus.FINISHED_EOS
+        break
+
+    # Truncate the new tokens if the request has reached its max length.
+    n_generated = (
+        len(req.token_ids) + len(new_tokens) - req.prompt_length
+    )
+    n_overflow = n_generated - req.sampling_params.max_tokens
+    if n_overflow > 0:
+      new_tokens = new_tokens[:-n_overflow]
+      req.status = request_lib.RequestStatus.FINISHED_LENGTH
+    elif n_overflow == 0 and not req.is_done:
+      req.status = request_lib.RequestStatus.FINISHED_LENGTH
+
+    # Add the new tokens to the request.
+    num_added = len(new_tokens)
+    if num_added > 0 and req.first_token_time is None:
+      req.first_token_time = time.perf_counter() if now is None else now
+    req.token_ids.extend(new_tokens)
+    if logprobs is not None:
+      req.logprobs.extend(logprobs[:num_added])
+    if logits is not None:
+      req.logits.extend(logits[:num_added])
+
+    if req.is_done:
+      req.num_in_flight_tokens = 0
+      if was_running:
+        req.num_computed_tokens = len(req.token_ids) - 1
+
+    return num_added
 
   def _make_output(
       self, req: request_lib.RequestState
@@ -542,7 +722,8 @@ class LLMEngine:
       self,
       scheduled: tuple[request_lib.RequestState, ...],
       distribution: tuple[int, int, int],
-  ) -> tuple[np.ndarray, paged_attention.RPAMetadata]:
+      prev_scheduled: tuple[request_lib.RequestState, ...] = (),
+  ) -> tuple[jax.Array, jax.Array, paged_attention.RPAMetadata]:
     """Packs the scheduled requests into the model runner's inputs.
 
     Every row buffer spans `max_num_seqs` rows and every page table
@@ -552,10 +733,13 @@ class LLMEngine:
       scheduled: The scheduled requests, ordered as decodes, chunked prefills
         and full prefills.
       distribution: The row layout returned by the scheduler.
+      prev_scheduled: The requests running in the in-flight step, if any.
 
     Returns:
-      A tuple of (the packed tokens each row runs this step, the ragged
-      execution metadata).
+      A tuple of (the device token buffer with prefill tokens loaded and blank
+      slots for in-flight decodes, the target indices mapping each row of the
+      previous step to its decode slot or out of bounds, the ragged execution
+      metadata).
     """
     num_rows = self._scheduler_config.max_num_seqs
     query_lens = np.zeros((num_rows,), dtype=np.int32)
@@ -567,23 +751,32 @@ class LLMEngine:
         for cache_name in self._kv_cache_manager.cache_names
     }
 
+    prev_row_by_id = {
+        req.request_id: prev_row for prev_row, req in enumerate(prev_scheduled)
+    }
+    prev_to_decode_row: dict[int, int] = {}
+
     batch_tokens: list[int] = []
     for row, req in enumerate(scheduled):
-      start = req.num_computed_tokens - req.num_in_flight_tokens
+      start = req.num_computed_tokens
 
       if req.is_chunked_prefill:
-        end = min(
-            len(req.token_ids), start + self._scheduler.chunked_prefill_length
-        )
+        end = start + self._scheduler.chunked_prefill_length
         req.num_computed_tokens = end
+        req.num_in_flight_tokens = 0
+        batch_tokens.extend(req.token_ids[start:end])
       else:
-        end = len(req.token_ids)
+        end = req.num_total_tokens
+        if req.num_in_flight_tokens > 0:
+          batch_tokens.append(0)
+          prev_to_decode_row[prev_row_by_id[req.request_id]] = row
+        else:
+          batch_tokens.extend(req.token_ids[start:end])
+        req.num_in_flight_tokens += self._scheduler_config.num_scheduler_steps
         req.num_computed_tokens = (
             end + self._scheduler_config.num_scheduler_steps - 1
         )
-      req.num_in_flight_tokens = req.num_computed_tokens - start
 
-      batch_tokens.extend(req.token_ids[start:end])
       query_lens[row] = end - start
       kv_lens[row] = end
       for cache_name, idxs in self._kv_cache_manager.get_page_idxs(req).items():
@@ -598,6 +791,10 @@ class LLMEngine:
     tokens = np.zeros((num_tokens,), dtype=np.int32)
     tokens[: len(batch_tokens)] = batch_tokens
 
+    target_idxs = np.full((num_rows,), num_tokens, dtype=np.int32)
+    for prev_row, decode_row in prev_to_decode_row.items():
+      target_idxs[prev_row] = decode_row
+
     metadata = paged_attention.RPAMetadata(
         page_indices={
             cache_name: idxs for cache_name, idxs in page_indices.items()
@@ -607,4 +804,7 @@ class LLMEngine:
         distribution=np.asarray(distribution, dtype=np.int32),
         chunk_prefill_size=self._scheduler.chunked_prefill_length,
     )
-    return tokens, metadata
+    device_tokens, device_target_idxs = jax.device_put(
+        (tokens, target_idxs), self._replicated_sharding
+    )
+    return device_tokens, device_target_idxs, metadata

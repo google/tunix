@@ -19,7 +19,6 @@ import dataclasses
 from absl.testing import absltest
 from absl.testing import parameterized
 import jax.numpy as jnp
-import numpy as np
 
 from tunix.experimental.generate import kv_cache_manager
 from tunix.experimental.generate import request as request_lib
@@ -108,16 +107,25 @@ def _advance_in_flight(
 ) -> None:
   """Simulates the engine dispatching `scheduled` to the model runner."""
   for req in scheduled:
-    start = req.num_computed_tokens - req.num_in_flight_tokens
     if req.is_chunked_prefill:
-      req.num_computed_tokens = min(
-          len(req.token_ids), start + sched.chunked_prefill_length
-      )
+      req.num_computed_tokens += sched.chunked_prefill_length
+      req.num_in_flight_tokens = 0
     else:
+      # Assume that all speculatively scheduled tokens were generated.
+      req.num_in_flight_tokens = sched._config.num_scheduler_steps
       req.num_computed_tokens = (
-          len(req.token_ids) + sched._config.num_scheduler_steps - 1
+          len(req.token_ids) + req.num_in_flight_tokens - 1
       )
-    req.num_in_flight_tokens = req.num_computed_tokens - start
+
+
+def _complete_in_flight(
+    req: request_lib.RequestState,
+    token: int | None = None,
+) -> None:
+  """Simulates the engine completing an in-flight step for `req`."""
+  req.num_in_flight_tokens = 0
+  if token is not None and not req.is_done:
+    req.token_ids.append(token)
 
 
 class SchedulerConfigTest(parameterized.TestCase):
@@ -623,31 +631,6 @@ class ScheduleStepTest(parameterized.TestCase):
 
     self.assertEqual(req.status, request_lib.RequestStatus.FINISHED_EOS)
 
-
-class UpdateFromOutputTest(parameterized.TestCase):
-
-  def setUp(self):
-    super().setUp()
-    self.kv_mgr = _create_kv_cache_manager(page_size=4, num_device_pages=20)
-    self.config = scheduler.SchedulerConfig(
-        max_num_batched_tokens=64,
-        max_num_seqs=4,
-        max_chunked_prefill_length=16,
-        num_scheduler_steps=1,
-    )
-    self.sched = scheduler.Scheduler(
-        config=self.config,
-        kv_cache_manager=self.kv_mgr,
-    )
-
-  def _scheduler_with_eos(
-      self, eos_token_ids: frozenset[int]
-  ) -> scheduler.Scheduler:
-    return scheduler.Scheduler(
-        config=dataclasses.replace(self.config, eos_token_ids=eos_token_ids),
-        kv_cache_manager=self.kv_mgr,
-    )
-
   def test_continuation_of_chunked_prefill(self):
     small_config = scheduler.SchedulerConfig(
         max_num_batched_tokens=16,
@@ -668,9 +651,9 @@ class UpdateFromOutputTest(parameterized.TestCase):
     self.assertTrue(req.is_chunked_prefill)
     self.assertFalse(req.is_decode)
 
-    # Engine step executes: update from output for chunk 1
+    # Engine step executes chunk 1
     _advance_in_flight(sched, scheduled1)
-    sched.update_from_output(scheduled1, generated_tokens=np.array([[0]]))
+    _complete_in_flight(req)
     self.assertEqual(req.num_computed_tokens, 16)
 
     # Step 2: schedules second chunk of 16 tokens as full prefill
@@ -688,7 +671,7 @@ class UpdateFromOutputTest(parameterized.TestCase):
 
     # Complete prefill + first decode token
     _advance_in_flight(self.sched, scheduled)
-    self.sched.update_from_output(scheduled, generated_tokens=np.array([[99]]))
+    _complete_in_flight(req, 99)
     self.assertIn(99, req.token_ids)
 
     # Next step: should schedule as decode request
@@ -699,30 +682,12 @@ class UpdateFromOutputTest(parameterized.TestCase):
     self.assertTrue(req.is_decode)
     self.assertFalse(req.is_chunked_prefill)
 
-  def test_request_aborted_mid_step_is_discarded(self):
-    req = _create_request(req_id="r1", prompt_token_ids=[10, 20, 30, 40])
-    scheduled, _ = self.sched.schedule_step([req])
-    _advance_in_flight(self.sched, scheduled)
-
-    self.sched.abort_request(req)
-    completed = self.sched.update_from_output(
-        scheduled, generated_tokens=np.array([[99]])
-    )
-
-    self.assertEmpty(completed)
-    self.assertNotIn(99, req.token_ids)
-    self.assertEqual(self.sched.num_active_requests, 0)
-
-    # Pages are released when the request is dropped at the next step.
-    self.sched.schedule_step([])
-    self.assertEqual(self.kv_mgr.get_page_idxs(req), {"cache_0": ()})
-
   def test_schedule_ordering_and_distribution(self):
     # Enqueue req1 and step to make it decode
     req1 = _create_request(req_id="r1", prompt_token_ids=[10, 20])
     scheduled, _ = self.sched.schedule_step([req1])
     _advance_in_flight(self.sched, scheduled)
-    self.sched.update_from_output(scheduled, generated_tokens=np.array([[99]]))
+    _complete_in_flight(req1, 99)
 
     # Now enqueue req2 (full prefill)
     req2 = _create_request(req_id="r2", prompt_token_ids=[30, 40])
@@ -734,133 +699,6 @@ class UpdateFromOutputTest(parameterized.TestCase):
     self.assertFalse(req2.is_decode)
     # 1 decode, 0 chunked, 1 full prefill -> (1, 1, 2)
     self.assertEqual(dist, (1, 1, 2))
-
-  def test_update_from_output_eos_termination(self):
-    sched = self._scheduler_with_eos(frozenset({1}))
-    req = _create_request(req_id="r1", prompt_token_ids=[10, 20])
-    scheduled, _ = sched.schedule_step([req])
-    _advance_in_flight(sched, scheduled)
-
-    completed = sched.update_from_output(
-        scheduled,
-        generated_tokens=np.array([[1, 7]]),
-        logprobs=np.array([[-0.5, -0.25]]),
-    )
-
-    self.assertEqual(completed, [req])
-    self.assertEqual(req.status, request_lib.RequestStatus.FINISHED_EOS)
-    # The EOS token is kept. Tokens sampled after it are dropped.
-    self.assertEqual(req.token_ids, [10, 20, 1])
-    self.assertEqual(req.logprobs, [-0.5])
-    self.assertEqual(sched.num_active_requests, 0)
-
-    # Pages are released when the request is dropped at the next step.
-    self.assertNotEqual(self.kv_mgr.get_page_idxs(req), {"cache_0": ()})
-    sched.schedule_step([])
-    self.assertEmpty(sched._running_requests)
-    self.assertEqual(self.kv_mgr.get_page_idxs(req), {"cache_0": ()})
-
-  def test_update_from_output_truncation(self):
-    req = _create_request(req_id="r1", prompt_token_ids=[10, 20], max_tokens=2)
-    scheduled, _ = self.sched.schedule_step([req])
-    _advance_in_flight(self.sched, scheduled)
-
-    # Step 1: 1 generated token
-    completed = self.sched.update_from_output(
-        scheduled, generated_tokens=np.array([[5]])
-    )
-    self.assertEmpty(completed)
-
-    # Step 2: 1 generated token reaches max_tokens (2)
-    scheduled, _ = self.sched.schedule_step([])
-    _advance_in_flight(self.sched, scheduled)
-    completed = self.sched.update_from_output(
-        scheduled, generated_tokens=np.array([[6]])
-    )
-    self.assertEqual(completed, [req])
-    self.assertEqual(req.status, request_lib.RequestStatus.FINISHED_LENGTH)
-    self.assertEqual(self.sched.num_active_requests, 0)
-    self.assertEqual(len(req.token_ids), 4)  # 2 prompt + 2 generated
-
-    self.sched.schedule_step([])
-    self.assertEqual(self.kv_mgr.get_page_idxs(req), {"cache_0": ()})
-
-  def test_length_limit_takes_precedence_over_later_eos(self):
-    sched = self._scheduler_with_eos(frozenset({1}))
-    req = _create_request(req_id="r1", prompt_token_ids=[10], max_tokens=1)
-    scheduled, _ = sched.schedule_step([req])
-    _advance_in_flight(sched, scheduled)
-
-    # The EOS token is sampled after the length limit has been reached.
-    completed = sched.update_from_output(
-        scheduled, generated_tokens=np.array([[5, 1]])
-    )
-
-    self.assertEqual(completed, [req])
-    self.assertEqual(req.status, request_lib.RequestStatus.FINISHED_LENGTH)
-    self.assertEqual(req.token_ids, [10, 5])
-
-  def test_eos_at_length_limit_finishes_as_eos(self):
-    sched = self._scheduler_with_eos(frozenset({1}))
-    req = _create_request(req_id="r1", prompt_token_ids=[10], max_tokens=2)
-    scheduled, _ = sched.schedule_step([req])
-    _advance_in_flight(sched, scheduled)
-
-    completed = sched.update_from_output(
-        scheduled, generated_tokens=np.array([[5, 1]])
-    )
-
-    self.assertEqual(completed, [req])
-    self.assertEqual(req.status, request_lib.RequestStatus.FINISHED_EOS)
-    self.assertEqual(req.token_ids, [10, 5, 1])
-
-  def test_update_from_output_applies_rows_in_given_order(self):
-    r1 = _create_request(req_id="r1", prompt_token_ids=[10, 20])
-    r2 = _create_request(req_id="r2", prompt_token_ids=[30, 40])
-    scheduled, _ = self.sched.schedule_step([r1, r2])
-    _advance_in_flight(self.sched, scheduled)
-
-    # Rows follow the order of `requests`, not the order they were scheduled.
-    self.sched.update_from_output(
-        [r2, r1], generated_tokens=np.array([[200], [100]])
-    )
-
-    self.assertEqual(r1.token_ids, [10, 20, 100])
-    self.assertEqual(r2.token_ids, [30, 40, 200])
-
-  @parameterized.named_parameters(
-      dict(
-          testcase_name="generated_tokens",
-          generated_tokens=np.array([[1], [2]]),
-          logits=None,
-          logprobs=None,
-      ),
-      dict(
-          testcase_name="logits",
-          generated_tokens=np.array([[1]]),
-          logits=np.zeros((2, 1, 2)),
-          logprobs=None,
-      ),
-      dict(
-          testcase_name="logprobs",
-          generated_tokens=np.array([[1]]),
-          logits=None,
-          logprobs=np.zeros((2, 1)),
-      ),
-  )
-  def test_update_from_output_row_mismatch_raises(
-      self, generated_tokens, logits, logprobs
-  ):
-    req = _create_request(req_id="r1", prompt_token_ids=[10, 20])
-    scheduled, _ = self.sched.schedule_step([req])
-
-    with self.assertRaisesRegex(ValueError, "rows for 1 requests"):
-      self.sched.update_from_output(
-          scheduled,
-          generated_tokens=generated_tokens,
-          logits=logits,
-          logprobs=logprobs,
-      )
 
   def test_preemption_on_cache_exhaustion(self):
     tiny_kv_mgr = _create_kv_cache_manager(page_size=4, num_device_pages=2)
@@ -877,7 +715,8 @@ class UpdateFromOutputTest(parameterized.TestCase):
     req2 = _create_request(req_id="r2", prompt_token_ids=list(range(4)))
     scheduled, _ = sched.schedule_step([req1, req2])
     _advance_in_flight(sched, scheduled)
-    sched.update_from_output(scheduled, generated_tokens=np.array([[90], [91]]))
+    _complete_in_flight(req1, 90)
+    _complete_in_flight(req2, 91)
 
     # Now in next step, both req1 and req2 want to decode (+1 token each).
     # Since pages are full, req2 (newest) must be preempted to free up space!
@@ -896,7 +735,7 @@ class UpdateFromOutputTest(parameterized.TestCase):
     self.assertFalse(req.is_decode)
     self.assertFalse(req.is_chunked_prefill)
     _advance_in_flight(self.sched, scheduled)
-    self.sched.update_from_output(scheduled, generated_tokens=np.array([[90]]))
+    _complete_in_flight(req, 90)
     self.assertEqual(req.num_computed_tokens, 4)
 
     # Step 2: decode step 1
@@ -905,7 +744,7 @@ class UpdateFromOutputTest(parameterized.TestCase):
     self.assertTrue(req.is_decode)
     self.assertFalse(req.is_chunked_prefill)
     _advance_in_flight(self.sched, scheduled)
-    self.sched.update_from_output(scheduled, generated_tokens=np.array([[91]]))
+    _complete_in_flight(req, 91)
     self.assertEqual(req.num_computed_tokens, 5)
 
     # Step 3: decode step 2
@@ -914,7 +753,7 @@ class UpdateFromOutputTest(parameterized.TestCase):
     self.assertTrue(req.is_decode)
     self.assertFalse(req.is_chunked_prefill)
     _advance_in_flight(self.sched, scheduled)
-    self.sched.update_from_output(scheduled, generated_tokens=np.array([[92]]))
+    _complete_in_flight(req, 92)
     self.assertEqual(req.num_computed_tokens, 6)
     self.assertEqual(req.token_ids, [10, 20, 30, 40, 90, 91, 92])
 
@@ -923,7 +762,7 @@ class UpdateFromOutputTest(parameterized.TestCase):
     req1 = _create_request(req_id="r1", prompt_token_ids=list(range(12)))
     scheduled, _ = self.sched.schedule_step([req1])
     _advance_in_flight(self.sched, scheduled)
-    self.sched.update_from_output(scheduled, generated_tokens=np.array([[90]]))
+    _complete_in_flight(req1, 90)
 
     # Second request shares the exact same prefix tokens
     req2 = _create_request(req_id="r2", prompt_token_ids=list(range(14)))
@@ -939,35 +778,16 @@ class UpdateFromOutputTest(parameterized.TestCase):
     self.assertFalse(req2.is_decode)
     self.assertFalse(req2.is_chunked_prefill)
 
-  def test_update_from_output_with_logits_and_logprobs(self):
-    req = _create_request(req_id="r1", prompt_token_ids=[10, 20])
-    scheduled, _ = self.sched.schedule_step([req])
-    _advance_in_flight(self.sched, scheduled)
-
-    logits = np.array([[[0.1, 0.9]]])
-    logprobs = np.array([[-0.1]])
-
-    self.sched.update_from_output(
-        scheduled,
-        generated_tokens=np.array([[90]]),
-        logits=logits,
-        logprobs=logprobs,
-    )
-
-    self.assertLen(req.token_ids, 3)
-    self.assertLen(req.logprobs, 1)
-    self.assertLen(req.logits, 1)
-
   def test_preempted_resumed_request_requires_prefill(self):
     req = _create_request(req_id="r1", prompt_token_ids=[10, 20, 30, 40])
     # Step 1: prefill (4 tokens)
     scheduled, _ = self.sched.schedule_step([req])
     _advance_in_flight(self.sched, scheduled)
-    self.sched.update_from_output(scheduled, generated_tokens=np.array([[90]]))
+    _complete_in_flight(req, 90)
     # Step 2: decode step 1 (1 token)
     scheduled, _ = self.sched.schedule_step([])
     _advance_in_flight(self.sched, scheduled)
-    self.sched.update_from_output(scheduled, generated_tokens=np.array([[91]]))
+    _complete_in_flight(req, 91)
     self.assertEqual(req.num_computed_tokens, 5)
     self.assertLen(req.token_ids, 6)
 
@@ -992,7 +812,7 @@ class UpdateFromOutputTest(parameterized.TestCase):
     req1 = _create_request(req_id="r1", prompt_token_ids=list(range(9)))
     scheduled, _ = self.sched.schedule_step([req1])
     _advance_in_flight(self.sched, scheduled)
-    self.sched.update_from_output(scheduled, generated_tokens=np.array([[99]]))
+    _complete_in_flight(req1, 99)
     self.kv_mgr.sync_request_state(req1)
 
     # req2 has the exact same 9 tokens: 8 tokens hit prefix cache, leaving 1 unprocessed token.
@@ -1005,76 +825,6 @@ class UpdateFromOutputTest(parameterized.TestCase):
     self.assertTrue(req2.is_decode)
     self.assertFalse(req2.is_chunked_prefill)
     self.assertEqual(req2.num_computed_tokens, 8)
-
-  def test_per_request_max_tokens(self):
-    req1 = _create_request(req_id="r1", prompt_token_ids=[10], max_tokens=2)
-    req2 = _create_request(req_id="r2", prompt_token_ids=[20], max_tokens=4)
-    scheduled, _ = self.sched.schedule_step([req1, req2])
-    _advance_in_flight(self.sched, scheduled)
-    # Step 1
-    completed = self.sched.update_from_output(
-        scheduled, generated_tokens=np.array([[101], [201]])
-    )
-    self.assertEmpty(completed)
-
-    # Step 2: req1 completes after 2 generated tokens
-    scheduled, _ = self.sched.schedule_step([])
-    _advance_in_flight(self.sched, scheduled)
-    completed = self.sched.update_from_output(
-        scheduled, generated_tokens=np.array([[102], [202]])
-    )
-    self.assertLen(completed, 1)
-    self.assertEqual(completed[0].request_id, "r1")
-    self.assertEqual(completed[0].token_ids, [10, 101, 102])
-
-    # Step 3: req2 continues
-    scheduled, _ = self.sched.schedule_step([])
-    _advance_in_flight(self.sched, scheduled)
-    completed = self.sched.update_from_output(
-        scheduled, generated_tokens=np.array([[203]])
-    )
-    self.assertEmpty(completed)
-
-    # Step 4: req2 completes after 4 generated tokens
-    scheduled, _ = self.sched.schedule_step([])
-    _advance_in_flight(self.sched, scheduled)
-    completed = self.sched.update_from_output(
-        scheduled, generated_tokens=np.array([[204]])
-    )
-    self.assertLen(completed, 1)
-    self.assertEqual(completed[0].request_id, "r2")
-    self.assertEqual(completed[0].token_ids, [20, 201, 202, 203, 204])
-
-  def test_any_configured_eos_token_terminates(self):
-    sched = self._scheduler_with_eos(frozenset({1, 99}))
-    req1 = _create_request(req_id="r1", prompt_token_ids=[10])
-    req2 = _create_request(req_id="r2", prompt_token_ids=[20])
-    scheduled, _ = sched.schedule_step([req1, req2])
-    _advance_in_flight(sched, scheduled)
-
-    completed = sched.update_from_output(
-        scheduled, generated_tokens=np.array([[5], [1]])
-    )
-    self.assertEqual(completed, [req2])
-
-    scheduled, _ = sched.schedule_step([])
-    _advance_in_flight(sched, scheduled)
-    completed = sched.update_from_output(
-        scheduled, generated_tokens=np.array([[99]])
-    )
-    self.assertEqual(completed, [req1])
-
-  def test_request_without_eos_never_terminates_on_a_token(self):
-    req = _create_request(req_id="r1", prompt_token_ids=[10])
-    scheduled, _ = self.sched.schedule_step([req])
-    _advance_in_flight(self.sched, scheduled)
-
-    completed = self.sched.update_from_output(
-        scheduled, generated_tokens=np.array([[1]])
-    )
-
-    self.assertEmpty(completed)
-    self.assertEqual(req.token_ids, [10, 1])
 
 
 class PreemptAllTest(parameterized.TestCase):
@@ -1098,42 +848,26 @@ class PreemptAllTest(parameterized.TestCase):
     """Schedules `reqs` and steps once so each is mid-decode."""
     scheduled, _ = self.sched.schedule_step(reqs)
     _advance_in_flight(self.sched, scheduled)
-    self.sched.update_from_output(
-        scheduled,
-        generated_tokens=np.array([[100 + i] for i in range(len(reqs))]),
-    )
+    for i, req in enumerate(scheduled):
+      _complete_in_flight(req, 100 + i)
     self.sched.schedule_step([])
 
-  def test_preempted_request_stays_logprob_aligned(self):
+  def test_preempted_request_reuses_prefix_cache(self):
     req = _create_request(req_id="r1", prompt_token_ids=[10, 20, 30, 40])
     scheduled, _ = self.sched.schedule_step([req])
     _advance_in_flight(self.sched, scheduled)
-    self.sched.update_from_output(
-        scheduled,
-        generated_tokens=np.array([[101]]),
-        logprobs=np.array([[-0.5]]),
-    )
+    _complete_in_flight(req, 101)
     self.sched.schedule_step([])
-    self.assertLen(req.logprobs, 1)
 
     self.sched.preempt_all()
 
     # Rescheduling must re-cover the whole context. The prefix cache serves the
-    # first full page (4 tokens) back, and the step yields one new token.
+    # first full page (4 tokens) back, leaving 1 unprocessed token (decode).
     scheduled, dist = self.sched.schedule_step([])
     self.assertLen(scheduled, 1)
     self.assertEqual(req.num_computed_tokens, 4)
     self.assertTrue(req.is_decode)
     self.assertEqual(dist, (1, 1, 1))
-
-    _advance_in_flight(self.sched, scheduled)
-    self.sched.update_from_output(
-        scheduled,
-        generated_tokens=np.array([[102]]),
-        logprobs=np.array([[-0.25]]),
-    )
-    self.assertEqual(req.token_ids, [10, 20, 30, 40, 101, 102])
-    self.assertLen(req.logprobs, 2)
 
   def test_preempt_all_with_cache_reset_forces_full_prefill(self):
     req = _create_request(req_id="r1", prompt_token_ids=[10, 20, 30, 40])
@@ -1151,25 +885,6 @@ class PreemptAllTest(parameterized.TestCase):
     self.assertEqual(dist, (0, 0, 1))
     self.assertEqual(req.num_computed_tokens, 0)
 
-  def test_preempt_all_respects_max_tokens_accounting(self):
-    req = _create_request(req_id="r1", prompt_token_ids=[10, 20], max_tokens=2)
-    scheduled, _ = self.sched.schedule_step([req])
-    _advance_in_flight(self.sched, scheduled)
-    self.sched.update_from_output(scheduled, generated_tokens=np.array([[101]]))
-    self.sched.schedule_step([])
-
-    self.sched.preempt_all()
-
-    # One token of the 2-token budget is already spent, so the re-prefilled
-    # request must finish after exactly one more.
-    scheduled, _ = self.sched.schedule_step([])
-    _advance_in_flight(self.sched, scheduled)
-    finished = self.sched.update_from_output(
-        scheduled, generated_tokens=np.array([[102]])
-    )
-    self.assertLen(finished, 1)
-    self.assertEqual(req.token_ids, [10, 20, 101, 102])
-
 
 class ColocatedSchedulingTest(parameterized.TestCase):
   """Tests scheduling the next step while the current step is in flight."""
@@ -1182,7 +897,6 @@ class ColocatedSchedulingTest(parameterized.TestCase):
         max_num_seqs=4,
         max_chunked_prefill_length=16,
         num_scheduler_steps=1,
-        eos_token_ids=frozenset({999}),
     )
     self.sched = scheduler.Scheduler(
         config=self.config,
@@ -1202,10 +916,7 @@ class ColocatedSchedulingTest(parameterized.TestCase):
     self.assertFalse(req.is_chunked_prefill)
     self.assertEqual(req.num_computed_tokens, 4)
 
-    finished = self.sched.update_from_output(
-        scheduled1, generated_tokens=np.array([[101]])
-    )
-    self.assertEmpty(finished)
+    _complete_in_flight(req, 101)
     self.assertEqual(req.token_ids, [10, 20, 30, 40, 101])
     self.assertEqual(req.num_computed_tokens, 4)
 
@@ -1228,8 +939,7 @@ class ColocatedSchedulingTest(parameterized.TestCase):
     self.assertFalse(req.is_decode)
     self.assertEqual(req.num_computed_tokens, 16)
 
-    # Chunk 1's output arrives and must not overwrite chunk 2's schedule.
-    sched.update_from_output(scheduled1, generated_tokens=np.array([[0]]))
+    _complete_in_flight(req)
     self.assertEqual(req.num_computed_tokens, 16)
     self.assertLen(req.token_ids, 24)
 
@@ -1247,11 +957,9 @@ class ColocatedSchedulingTest(parameterized.TestCase):
     self.assertEqual(scheduled2, (r1, r2, r3))
     self.assertEqual(dist2, (1, 2, 3))
 
-    # r1 samples EOS in step 1.
-    finished = self.sched.update_from_output(
-        scheduled1, generated_tokens=np.array([[999]])
-    )
-    self.assertEqual(finished, [r1])
+    # r1 finishes in step 1.
+    _complete_in_flight(r1, 999)
+    r1.status = request_lib.RequestStatus.FINISHED_EOS
 
     scheduled2, dist2 = self.sched.drop_completed(scheduled2, dist2)
     self.assertEqual(scheduled2, (r2, r3))
@@ -1278,16 +986,16 @@ class ColocatedSchedulingTest(parameterized.TestCase):
 
     # Step 1 finishes: r2 still receives the token it sampled in step 1, while
     # staying pending with 0 computed KV tokens.
-    sched.update_from_output(
-        scheduled1, generated_tokens=np.array([[101], [201]])
-    )
+    _complete_in_flight(r1, 101)
+    _complete_in_flight(r2, 201)
     self.assertEqual(r2.token_ids, [5, 6, 7, 8, 201])
     self.assertEqual(r2.num_computed_tokens, 0)
 
     # Step 2 finishes r1, freeing the cache so r2 can re-prefill [5, 6, 7, 8, 201].
     _advance_in_flight(sched, scheduled2)
     sched.schedule_step([])
-    sched.update_from_output(scheduled2, generated_tokens=np.array([[102]]))
+    _complete_in_flight(r1, 102)
+    r1.status = request_lib.RequestStatus.FINISHED_LENGTH
     sched.drop_completed((), (0, 0, 0))
 
     scheduled3, dist3 = sched.schedule_step([])
@@ -1295,65 +1003,6 @@ class ColocatedSchedulingTest(parameterized.TestCase):
     self.assertEqual(dist3, (0, 0, 1))
     self.assertFalse(r2.is_decode)
     self.assertFalse(r2.is_chunked_prefill)
-
-  def test_preemption_while_in_flight_completes_if_sampled_token_finishes_request(
-      self,
-  ):
-    tiny_kv_mgr = _create_kv_cache_manager(page_size=4, num_device_pages=2)
-    sched = scheduler.Scheduler(config=self.config, kv_cache_manager=tiny_kv_mgr)
-    r1 = _create_request(
-        req_id="r1", prompt_token_ids=[1, 2, 3, 4], max_tokens=2
-    )
-    r2 = _create_request(
-        req_id="r2", prompt_token_ids=[5, 6, 7, 8], max_tokens=1
-    )
-
-    scheduled1, _ = sched.schedule_step([r1, r2])
-    _advance_in_flight(sched, scheduled1)
-    # Step 2 needs a second page for r1, which preempts r2 while step 1 is still
-    # in flight.
-    scheduled2, _ = sched.schedule_step([])
-    self.assertEqual(scheduled2, (r1,))
-    self.assertEqual(r2.status, request_lib.RequestStatus.PENDING)
-
-    # Step 1 finishes: r2 processes its generated token and finishes immediately.
-    finished = sched.update_from_output(
-        scheduled1, generated_tokens=np.array([[101], [201]])
-    )
-    self.assertEqual(finished, [r2])
-    self.assertEqual(r2.status, request_lib.RequestStatus.FINISHED_LENGTH)
-    self.assertEqual(r2.token_ids, [5, 6, 7, 8, 201])
-    self.assertEqual(r2.num_computed_tokens, 0)
-
-  def test_chunked_prefill_preempted_while_in_flight_discards_output(self):
-    tiny_kv_mgr = _create_kv_cache_manager(page_size=4, num_device_pages=5)
-    sched = scheduler.Scheduler(config=self.config, kv_cache_manager=tiny_kv_mgr)
-    # r1 uses 1 page (4 tokens); r2's first chunk of 16 tokens uses 4 pages -> all 5 pages full.
-    r1 = _create_request(
-        req_id="r1", prompt_token_ids=[1, 2, 3, 4], max_tokens=2
-    )
-    r2 = _create_request(
-        req_id="r2", prompt_token_ids=list(range(10, 34)), max_tokens=2
-    )
-
-    scheduled1, dist1 = sched.schedule_step([r1, r2])
-    self.assertEqual(dist1, (0, 1, 2))
-    _advance_in_flight(sched, scheduled1)
-
-    # Step 2 needs a second page for r1, which preempts r2 while r2's chunked
-    # prefill is still in flight.
-    scheduled2, _ = sched.schedule_step([])
-    self.assertEqual(scheduled2, (r1,))
-    self.assertEqual(r2.status, request_lib.RequestStatus.PENDING)
-
-    # Step 1 finishes: r2 was a chunked prefill so it must not append the dummy
-    # output token.
-    sched.update_from_output(
-        scheduled1, generated_tokens=np.array([[201], [101]])
-    )
-    self.assertEqual(r1.token_ids, [1, 2, 3, 4, 101])
-    self.assertEqual(r2.token_ids, list(range(10, 34)))
-    self.assertEqual(r2.num_computed_tokens, 0)
 
 
 if __name__ == "__main__":

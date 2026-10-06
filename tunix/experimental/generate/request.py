@@ -40,7 +40,7 @@ class RequestStatus(enum.Enum):
   PENDING = enum.auto()
   # Scheduled, and holds KV cache pages.
   RUNNING = enum.auto()
-  # Sampled one of the scheduler's EOS tokens.
+  # Sampled one of the engine's EOS tokens.
   FINISHED_EOS = enum.auto()
   # Generated `max_tokens` tokens.
   FINISHED_LENGTH = enum.auto()
@@ -104,8 +104,8 @@ class RequestState:
     # Token logits, if requested.
     self.logits: list[SupportsFloat] = []
 
-    # Number of tokens whose KV values are computed, or are outside the
-    # sliding window.
+    # Number of tokens whose KV cache is computed. This includes tokens that
+    # were speculatively scheduled and are in flight.
     self.num_computed_tokens = 0
     # Number of tokens being sampled by an in-flight model runner step.
     self.num_in_flight_tokens = 0
@@ -133,9 +133,7 @@ class RequestState:
   @property
   def num_total_tokens(self) -> int:
     """Total tokens including any tokens being sampled in flight."""
-    if self.num_in_flight_tokens > 0:
-      return max(len(self.token_ids), self.num_computed_tokens + 1)
-    return len(self.token_ids)
+    return len(self.token_ids) + self.num_in_flight_tokens
 
   @property
   def request_id(self) -> str:

@@ -159,7 +159,6 @@ def make_engine(
           max_num_seqs=4,
           max_chunked_prefill_length=chunked_prefill_length,
           num_scheduler_steps=num_scheduler_steps,
-          eos_token_ids=eos_token_ids,
       ),
       model_runner_config=model_runner_lib.ModelRunnerConfig(
           max_top_k=max_top_k,
@@ -169,6 +168,7 @@ def make_engine(
           num_scheduler_steps=num_scheduler_steps,
       ),
       max_model_len=max_model_len,
+      eos_token_ids=eos_token_ids,
   )
 
 

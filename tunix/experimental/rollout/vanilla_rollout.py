@@ -133,7 +133,6 @@ def _build_engine(
           max_num_seqs=rollout_config.max_num_seqs,
           max_chunked_prefill_length=rollout_config.chunked_prefill_length,
           num_scheduler_steps=rollout_config.num_scheduler_steps,
-          eos_token_ids=eos_token_ids,
       ),
       model_runner_config=model_runner_lib.ModelRunnerConfig(
           max_top_k=(
@@ -145,6 +144,7 @@ def _build_engine(
           seed=0 if rollout_config.seed is None else int(rollout_config.seed),
       ),
       max_model_len=max_model_len,
+      eos_token_ids=eos_token_ids,
       log_stats_interval_s=rollout_config.log_stats_interval_s,
   )
 
