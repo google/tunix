@@ -2,13 +2,15 @@
 # (examples/deepswe/train_deepswe_nb.py) on one v5p-128 slice (4x4x4 = 64
 # chips, 16 hosts) with Pathways, namespace trellis. vLLM rollout runs on half
 # of the chips (fsdp 16 x tp 2), the actor on the other half (fsdp 8 x tp 4).
-# Tasks: the 1,012 stage-2 tasks of canon-zero-tim/clean_data/p46_q4_learnable/.
+# Tasks: the 1,012 stage-2 tasks of canon-zero-tim/clean_data/p46_q4_learnable/
+# (examples/deepswe/data_clean/ on google/tunix main).
 # Algorithm: the toksc arm of README.md (Score Centering and token-level
-# importance sampling). README.md is the recipe README in google3:
-# experimental/users/haoyugao/deepswe_k8s/README.md.
+# importance sampling). README.md is the recipe README on google/tunix main:
+# examples/deepswe/README.md.
 #
-# TUNIX_REF must name a google/tunix ref that has the DeepSWE changes listed in
-# README.md. Pin a commit so that a restarted run resumes on the same code.
+# TUNIX_REF must name a google/tunix commit that contains that README; older
+# commits lack the DeepSWE changes that the recipe needs. Pin a commit so that a
+# restarted run resumes on the same code.
 #
 # Prerequisites (once per namespace; paths are relative to the repository root):
 #   kubectl -n trellis create secret generic haoyugao-wandb \
