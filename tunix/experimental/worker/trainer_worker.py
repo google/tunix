@@ -20,6 +20,7 @@ from typing import Any, Callable, ContextManager, cast
 
 from absl import logging
 from flax import nnx
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -228,11 +229,34 @@ class TrainerWorker(abstract_worker.Worker):
     req_metadata = dict(request.metadata) if request.metadata else {}
     req_metadata.pop("updated", None)
     req_metadata.pop("train_step", None)
+    req_metadata.pop("update_ready", None)
     kwargs.pop("skip_jit", None)
     try:
       self._trainer.fwd_bwd(request.payload, **kwargs)
       if apply_optimizer:
-        train_step = self._trainer.update()
+        try:
+          # Through this worker's update(), not the trainer's, so a fused step
+          # gets the same bookkeeping (state on failure, step timing) as an
+          # update RPC.
+          train_step = self.update()
+          # update() returns at dispatch. When the trainer exposes an output of
+          # the update executable, return only once it is ready and say so: the
+          # caller stamps the checkpoint as soon as this call returns, and with
+          # `update_ready` it no longer needs get_metrics() to wait for the
+          # update before the checkpoint save and weight sync.
+          update_token = getattr(self._trainer, "last_update_token", None)
+          if update_token is not None:
+            jax.block_until_ready(update_token)
+            req_metadata["update_ready"] = True
+        except Exception as exc:
+          # The caller sees this on a fwd_bwd response; say it was the
+          # optimizer step, run after this microbatch's gradients were
+          # already accumulated.
+          raise RuntimeError(
+              "optimizer update() failed inside fwd_bwd(apply_optimizer=True),"
+              " after this microbatch's gradients were accumulated:"
+              f" {type(exc).__name__}: {exc}"
+          ) from exc
         req_metadata["updated"] = True
         req_metadata["train_step"] = train_step
       self._last_error = None

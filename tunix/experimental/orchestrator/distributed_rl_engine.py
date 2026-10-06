@@ -25,6 +25,7 @@ import collections
 from collections.abc import Mapping, Sequence
 import concurrent.futures
 import inspect
+import time
 from typing import Any
 import uuid
 
@@ -500,6 +501,9 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     )
     fwd_bwd_kwargs = dict(kwargs)
     if apply_optimizer:
+      # The worker runs update() inside this fwd_bwd RPC. That makes the call
+      # non-idempotent: a retried request would re-run the microbatch AND
+      # apply a second optimizer step, so it must never be retried blindly.
       fwd_bwd_kwargs["apply_optimizer"] = True
     fwd_bwd_result = await self._invoke_worker(
         worker,
@@ -512,16 +516,23 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       return fwd_bwd_result
     # A worker that ran the optimizer inside the fwd_bwd RPC reports
     # `updated=True` (TrainerWorker strips any caller-supplied copy of the key
-    # before echoing request metadata, so only the worker can set it). Workers
-    # that predate `apply_optimizer` ignore the kwarg and never set it; they
-    # take the explicit update() below. Keyed on `updated` alone: a missing
-    # `train_step` must never trigger a second optimizer step.
+    # before echoing request metadata, so only the worker can set it). A worker
+    # that predates `apply_optimizer` never sets it and takes the explicit
+    # update() below, but it forwards the unknown kwarg to its trainer's
+    # fwd_bwd(): harmless for a backend that accepts and ignores extra kwargs
+    # (MaxText's engine does), a TypeError for one with a strict signature. So
+    # run the orchestrator and its workers from the same Tunix version. Keyed
+    # on `updated` alone: a missing `train_step` must never trigger a second
+    # optimizer step.
+    update_ready = False
     if (
         isinstance(fwd_bwd_result, datatypes.Response)
         and isinstance(fwd_bwd_result.metadata, Mapping)
         and bool(fwd_bwd_result.metadata.get("updated"))
     ):
       train_step = fwd_bwd_result.metadata.get("train_step")
+      # Set only by a worker that waited for the update to land on device.
+      update_ready = bool(fwd_bwd_result.metadata.get("update_ready"))
     else:
       train_step = await self._invoke_worker(worker, "update")
     return {
@@ -529,6 +540,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         "updated": True,
         "train_step": train_step,
         "accumulated": accumulate_gradients,
+        "update_ready": update_ready,
     }
 
   async def get_metrics(
@@ -559,7 +571,16 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       )
       if worker is None:
         raise ValueError(f"No worker registered for role {role}")
-      return await self._invoke_worker(worker, "get_metrics", **kwargs)
+      start = time.monotonic()
+      metrics = await self._invoke_worker(worker, "get_metrics", **kwargs)
+      # Logged so step timelines built from this log can place and size the
+      # fetch: before the checkpoint save it also waits for the update.
+      logging.info(
+          "get_metrics RPC returned on %s worker in %.3fs",
+          role.value if isinstance(role, datatypes.Role) else str(role),
+          time.monotonic() - start,
+      )
+      return metrics
 
   def configure_worker(
       self,

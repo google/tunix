@@ -351,6 +351,7 @@ class DistributedRLEngineTest(absltest.TestCase):
               "updated": True,
               "train_step": 3,
               "accumulated": True,
+              "update_ready": False,
           },
       )
 
@@ -401,6 +402,7 @@ class DistributedRLEngineTest(absltest.TestCase):
               "updated": True,
               "train_step": 4,
               "accumulated": True,
+              "update_ready": False,
           },
       )
 
@@ -441,6 +443,30 @@ class DistributedRLEngineTest(absltest.TestCase):
       self.assertTrue(res_no_step["updated"])
       self.assertIsNone(res_no_step["train_step"])
       self.mock_actor.update.assert_not_called()
+
+      # `update_ready` is passed on only from a worker that ran the update
+      # itself; on the explicit update() path nothing has waited for it.
+      self.mock_actor.fwd_bwd.return_value = datatypes.Response(
+          metadata={"queued": True, "updated": True, "update_ready": True}
+      )
+      res_ready = await self.engine.train_step(
+          mock_payload,
+          role=datatypes.Role.ACTOR,
+          accumulate_gradients=True,
+          apply_optimizer=True,
+      )
+      self.assertTrue(res_ready["update_ready"])
+      self.mock_actor.fwd_bwd.return_value = datatypes.Response(
+          metadata={"queued": True, "update_ready": True}
+      )
+      res_unfused = await self.engine.train_step(
+          mock_payload,
+          role=datatypes.Role.ACTOR,
+          accumulate_gradients=True,
+          apply_optimizer=True,
+      )
+      self.assertFalse(res_unfused["update_ready"])
+      self.mock_actor.update.assert_called_once_with()
 
     asyncio.run(_run())
 

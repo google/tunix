@@ -18,6 +18,7 @@ from collections.abc import Sequence
 import dataclasses
 import pathlib
 import threading
+import time
 import types
 from typing import Any
 from unittest import mock
@@ -937,7 +938,7 @@ class RLProgramTest(absltest.TestCase):
       async def mock_train_step(*args, **kwargs):
         del args, kwargs
         call_order.append("train_step")
-        return {"train_step": 1}
+        return {"train_step": 1, "update_ready": True}
 
       async def mock_save_checkpoint(*args, **kwargs):
         del args, kwargs
@@ -995,7 +996,7 @@ class RLProgramTest(absltest.TestCase):
       async def mock_train_step(*args, **kwargs):
         del args, kwargs
         call_order.append("train_step")
-        return {"train_step": 1}
+        return {"train_step": 1, "update_ready": True}
 
       async def mock_save_checkpoint(*args, **kwargs):
         del args, kwargs
@@ -1059,7 +1060,11 @@ class RLProgramTest(absltest.TestCase):
       async def mock_train_step(*args, apply_optimizer=False, **kwargs):
         del args, kwargs
         call_order.append(f"train_step(opt={apply_optimizer})")
-        return {"train_step": 1} if apply_optimizer else "queued"
+        return (
+            {"train_step": 1, "update_ready": True}
+            if apply_optimizer
+            else "queued"
+        )
 
       async def mock_save_checkpoint(*args, **kwargs):
         del args, kwargs
@@ -1131,6 +1136,301 @@ class RLProgramTest(absltest.TestCase):
               "train_step(opt=True)",
               "save_checkpoint",
               "sync_weights",
+              "get_metrics",
+          ],
+      )
+
+    asyncio.run(_run())
+
+  def test_get_metrics_time_is_reported_apart_from_policy_training_time(self):
+    async def _run():
+      async def mock_get_metrics(*args, **kwargs):
+        del args, kwargs
+        await asyncio.sleep(0.2)
+        return None
+
+      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
+      program = self._create_program(sync_weights=True)
+      self.mock_engine.train_step.return_value = {
+          "train_step": 1,
+          "update_ready": True,
+      }
+      self.mock_engine.get_metrics.side_effect = mock_get_metrics
+
+      await program.run_async(self.mock_engine)
+
+      # The fetch now runs after the weight sync and commit, so booking it as
+      # policy training time would misplace it on any step timeline.
+      logger = program.metrics_logger
+      self.assertGreaterEqual(
+          logger.get_metric("", "orchestrator/metrics_fetch_time", "train"),
+          0.2,
+      )
+      self.assertLess(
+          logger.get_metric("", "orchestrator/policy_training_time", "train"),
+          0.2,
+      )
+
+    asyncio.run(_run())
+
+  def test_get_metrics_stays_ahead_of_the_checkpoint_without_update_ready(self):
+    """A trainer that cannot say its update landed keeps the fetch-first order."""
+
+    async def _run():
+      call_order = []
+
+      async def mock_train_step(*args, **kwargs):
+        del args, kwargs
+        call_order.append("train_step")
+        return {"train_step": 1}
+
+      async def mock_save_checkpoint(*args, **kwargs):
+        del args, kwargs
+        call_order.append("save_checkpoint")
+        return {"checkpoint_saved": True}
+
+      async def mock_sync_weights(*args, **kwargs):
+        del args, kwargs
+        call_order.append("sync_weights")
+        return 1
+
+      async def mock_get_metrics(*args, **kwargs):
+        del args, kwargs
+        call_order.append("get_metrics")
+        await asyncio.sleep(0.2)
+        return None
+
+      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
+      program = self._create_program(sync_weights=True)
+      original_commit = program.scored_q.commit
+
+      def _recording_commit(*args, **kwargs):
+        call_order.append("commit")
+        return original_commit(*args, **kwargs)
+
+      program.scored_q.commit = _recording_commit
+      self.mock_engine.train_step.side_effect = mock_train_step
+      self.mock_engine.save_checkpoint.side_effect = mock_save_checkpoint
+      self.mock_engine.sync_weights.side_effect = mock_sync_weights
+      self.mock_engine.get_metrics.side_effect = mock_get_metrics
+
+      await program.run_async(self.mock_engine)
+
+      self.assertEqual(
+          call_order,
+          [
+              "train_step",
+              "get_metrics",
+              "save_checkpoint",
+              "sync_weights",
+              "commit",
+          ],
+      )
+      # It waits for the update, as an update RPC would: training time.
+      logger = program.metrics_logger
+      self.assertGreaterEqual(
+          logger.get_metric("", "orchestrator/policy_training_time", "train"),
+          0.2,
+      )
+      self.assertEqual(
+          logger.get_metric("", "orchestrator/metrics_fetch_time", "train"),
+          0.0,
+      )
+
+    asyncio.run(_run())
+
+  def test_round_stays_open_during_the_fetch_without_update_ready(self):
+    """With async sync, the fetch-first order still runs before the round is marked due."""
+
+    async def _run():
+      round_due_during_fetch = []
+
+      async def mock_sync_weights(
+          *args, policy_version=None, source_staged=None, **kwargs
+      ):
+        del args, kwargs
+        if source_staged is not None:
+          source_staged.set()
+        return policy_version or 1
+
+      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
+      program = self._create_program(sync_weights=True, async_weight_sync=True)
+
+      async def mock_get_metrics(*args, **kwargs):
+        del args, kwargs
+        round_due_during_fetch.append(program._round_due)
+        return None
+
+      self.mock_engine.train_step.return_value = {"train_step": 1}
+      self.mock_engine.sync_weights.side_effect = mock_sync_weights
+      self.mock_engine.get_metrics.side_effect = mock_get_metrics
+
+      await asyncio.wait_for(program.run_async(self.mock_engine), timeout=10)
+
+      # Marking it due closes the rollout dispatch window, which a separate
+      # update RPC also left open until the fetch returned.
+      self.assertEqual(round_due_during_fetch, [False])
+
+    asyncio.run(_run())
+
+  def test_checkpoint_timestamp_is_taken_after_the_update_landed(self):
+    """The weight-update timestamp never precedes the call that waited for the update."""
+
+    async def _run(update_ready):
+      waited_until_ms = []
+
+      async def mock_train_step(*args, **kwargs):
+        del args, kwargs
+        await asyncio.sleep(0.05)
+        if update_ready:
+          waited_until_ms.append(time.time_ns() // 1_000_000)
+        return {"train_step": 1, "update_ready": update_ready}
+
+      async def mock_get_metrics(*args, **kwargs):
+        del args, kwargs
+        await asyncio.sleep(0.05)
+        if not update_ready:
+          waited_until_ms.append(time.time_ns() // 1_000_000)
+        return None
+
+      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
+      program = self._create_program(sync_weights=True)
+      self.mock_engine.train_step.side_effect = mock_train_step
+      self.mock_engine.get_metrics.side_effect = mock_get_metrics
+
+      await program.run_async(self.mock_engine)
+
+      self.assertLen(waited_until_ms, 1)
+      self.assertGreaterEqual(
+          program.last_step_timestamp_ms, waited_until_ms[0]
+      )
+
+    for update_ready in (False, True):
+      with self.subTest(update_ready=update_ready):
+        asyncio.run(_run(update_ready))
+
+  def test_metrics_fetch_time_counts_only_the_deferred_fetch(self):
+    """In a two-minibatch step the mid-step fetch is training time, the deferred one is not."""
+
+    async def _run():
+      self.mock_algo.num_generations = 2
+      self.mock_algo.mini_batch_size = 2
+      fetch_delay_s = 0.2
+
+      async def mock_train_step(*args, apply_optimizer=False, **kwargs):
+        del args, kwargs
+        if apply_optimizer:
+          return {"train_step": 1, "update_ready": True}
+        return "queued"
+
+      async def mock_get_metrics(*args, **kwargs):
+        del args, kwargs
+        await asyncio.sleep(fetch_delay_s)
+        return None
+
+      self.mock_engine.train_step.side_effect = mock_train_step
+      self.mock_engine.get_metrics.side_effect = mock_get_metrics
+
+      assembler = batch_assembly.PaddedBatchAssembler(
+          batch_size=2,
+          max_prompt_length=4,
+          max_response_length=4,
+          pad_id=0,
+          num_generations=2,
+          mini_batch_size=2,
+      )
+      program = rl_program.StandardRLProgram(
+          dataset=[],
+          max_steps=1,
+          algo=self.mock_algo,
+          batch_size=4,
+          reward_fns=[lambda *_: 1.0],
+          assembler=assembler,
+          sync_weights=True,
+          async_weight_sync=False,
+      )
+      program.engine = self.mock_engine
+      for group_idx in range(4):
+        for item_idx in range(2):
+          item = datatypes.TrajectoryItem(
+              group_index=item_idx,
+              prompt_id=f"prompt_{group_idx}",
+              start_step=0,
+              traj={"trajectory_reward": 1.0},
+          )
+          item.payload = datatypes.RLTrainerPayload(
+              prompt_ids=np.array([1, 2], dtype=np.int32),
+              prompt_mask=np.ones(2, dtype=np.float32),
+              completion_ids=np.array([3, 4], dtype=np.int32),
+              completion_mask=np.ones(2, dtype=np.float32),
+              advantages=np.ones(2, dtype=np.float32),
+          )
+          await program.scored_q.put(item)
+
+      await program.train_stage()
+
+      self.assertEqual(self.mock_engine.get_metrics.await_count, 2)
+      logger = program.metrics_logger
+      for name in ("policy_training_time", "metrics_fetch_time"):
+        value = logger.get_metric("", f"orchestrator/{name}", "train")
+        self.assertGreaterEqual(value, fetch_delay_s, name)
+        self.assertLess(value, 2 * fetch_delay_s, name)
+
+    asyncio.run(_run())
+
+  def test_get_metrics_deferred_after_commit_with_async_weight_sync(self):
+    """With async weight sync too, the deferred fetch runs only after the commit."""
+
+    async def _run():
+      call_order = []
+
+      async def mock_train_step(*args, **kwargs):
+        del args, kwargs
+        call_order.append("train_step")
+        return {"train_step": 1, "update_ready": True}
+
+      async def mock_save_checkpoint(*args, **kwargs):
+        del args, kwargs
+        call_order.append("save_checkpoint")
+        return {"checkpoint_saved": True}
+
+      async def mock_sync_weights(
+          *args, policy_version=None, source_staged=None, **kwargs
+      ):
+        del args, kwargs
+        call_order.append("sync_start")
+        if source_staged is not None:
+          source_staged.set()
+        return policy_version or 1
+
+      async def mock_get_metrics(*args, **kwargs):
+        del args, kwargs
+        call_order.append("get_metrics")
+        return None
+
+      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
+      program = self._create_program(sync_weights=True, async_weight_sync=True)
+      original_commit = program.scored_q.commit
+
+      def _recording_commit(*args, **kwargs):
+        call_order.append("commit")
+        return original_commit(*args, **kwargs)
+
+      program.scored_q.commit = _recording_commit
+      self.mock_engine.train_step.side_effect = mock_train_step
+      self.mock_engine.save_checkpoint.side_effect = mock_save_checkpoint
+      self.mock_engine.sync_weights.side_effect = mock_sync_weights
+      self.mock_engine.get_metrics.side_effect = mock_get_metrics
+
+      await asyncio.wait_for(program.run_async(self.mock_engine), timeout=10)
+
+      self.assertEqual(
+          call_order,
+          [
+              "train_step",
+              "save_checkpoint",
+              "sync_start",
+              "commit",
               "get_metrics",
           ],
       )

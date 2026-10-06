@@ -21,6 +21,7 @@ per-token log-prob scorer run through AbstractTrainer.model_scope.
 
 import contextlib
 from typing import Any
+from unittest import mock
 
 from absl.testing import absltest
 from flax import nnx
@@ -174,11 +175,11 @@ class TrainerWorkerTest(absltest.TestCase):
   def test_fwd_bwd_with_apply_optimizer_update_failure_marks_worker_error(
       self,
   ):
-    """A failing fused update() puts the worker in ERROR; later calls fail."""
+    """A failing fused update() is reported as such and puts the worker in ERROR."""
 
     def _failing_update(**kwargs):
       del kwargs
-      raise RuntimeError("optimizer exploded")
+      raise ValueError("optimizer exploded")
 
     self.fake_trainer.update = _failing_update
     payload = datatypes.RLTrainerPayload(
@@ -194,16 +195,55 @@ class TrainerWorkerTest(absltest.TestCase):
         metadata={"batch_id": "b2"},
     )
 
-    with self.assertRaisesRegex(RuntimeError, "optimizer exploded"):
+    # The error comes back on a fwd_bwd call, so it must name the optimizer
+    # step and keep the original exception type and message.
+    with self.assertRaisesRegex(
+        RuntimeError,
+        r"optimizer update\(\) failed inside fwd_bwd\(apply_optimizer=True\)"
+        r".*ValueError: optimizer exploded",
+    ) as cm:
       self.worker.fwd_bwd(request=request, apply_optimizer=True)
+    self.assertIsInstance(cm.exception.__cause__, ValueError)
 
     # fwd_bwd ran; update failed after it.
     self.assertLen(self.fake_trainer.fwd_bwd_calls, 1)
     self.assertEqual(self.worker.state, datatypes.WorkerState.ERROR)
-    self.assertEqual(self.worker.heartbeat().last_error, "optimizer exploded")
+    self.assertEqual(self.worker.heartbeat().last_error, str(cm.exception))
     with self.assertRaisesRegex(RuntimeError, "not ready"):
       self.worker.fwd_bwd(request=request, apply_optimizer=False)
     self.assertLen(self.fake_trainer.fwd_bwd_calls, 1)
+
+  def test_fwd_bwd_failure_with_apply_optimizer_is_not_blamed_on_update(self):
+    """A failing forward/backward is re-raised unchanged; update() never runs."""
+    update_calls = []
+
+    def _failing_fwd_bwd(payload, **kwargs):
+      del payload, kwargs
+      raise ValueError("bad microbatch")
+
+    def _recording_update(**kwargs):
+      update_calls.append(kwargs)
+      return 0
+
+    self.fake_trainer.fwd_bwd = _failing_fwd_bwd
+    self.fake_trainer.update = _recording_update
+    payload = datatypes.RLTrainerPayload(
+        prompt_ids=np.array([[1, 2]], dtype=np.int32),
+        prompt_mask=np.ones((1, 2), dtype=np.float32),
+        completion_ids=np.array([[3, 4]], dtype=np.int32),
+        completion_mask=np.ones((1, 2), dtype=np.float32),
+        advantages=np.array([1.0], dtype=np.float32),
+    )
+    request = datatypes.TrainRequest(
+        request_id="req-fwd-err", payload=payload, metadata={}
+    )
+
+    with self.assertRaisesRegex(ValueError, "^bad microbatch$"):
+      self.worker.fwd_bwd(request=request, apply_optimizer=True)
+
+    self.assertEmpty(update_calls)
+    self.assertEqual(self.worker.state, datatypes.WorkerState.ERROR)
+    self.assertEqual(self.worker.heartbeat().last_error, "bad microbatch")
 
   def test_fwd_bwd_does_not_leak_control_kwargs_to_trainer(self):
     """`apply_optimizer`/`skip_jit` stay in the worker; update runs after fwd_bwd."""
@@ -240,6 +280,150 @@ class TrainerWorkerTest(absltest.TestCase):
     )
     # update() ran exactly once, after the second fwd_bwd.
     self.assertEqual(update_seen_fwd_bwd_calls, [2])
+
+  def test_fwd_bwd_with_apply_optimizer_goes_through_worker_update(self):
+    """The fused update is this worker's update(), not a bare trainer call.
+
+    Anything the worker does around an update RPC (error state, step
+    instrumentation) must apply to the fused optimizer step as well.
+    """
+    worker_update_calls = []
+    original_worker_update = self.worker.update
+
+    def _recording_worker_update(**kwargs):
+      worker_update_calls.append(
+          (len(self.fake_trainer.fwd_bwd_calls), dict(kwargs))
+      )
+      return original_worker_update(**kwargs)
+
+    # An instance attribute shadows the method, so self.update() resolves here.
+    self.worker.update = _recording_worker_update
+    payload = datatypes.RLTrainerPayload(
+        prompt_ids=np.array([[1, 2]], dtype=np.int32),
+        prompt_mask=np.ones((1, 2), dtype=np.float32),
+        completion_ids=np.array([[3, 4]], dtype=np.int32),
+        completion_mask=np.ones((1, 2), dtype=np.float32),
+        advantages=np.array([1.0], dtype=np.float32),
+    )
+    request = datatypes.TrainRequest(
+        request_id="req-via-worker", payload=payload, metadata={}
+    )
+
+    self.worker.fwd_bwd(request=request, apply_optimizer=False)
+    self.assertEmpty(worker_update_calls)
+    resp = self.worker.fwd_bwd(request=request, apply_optimizer=True)
+
+    # Once, with no kwargs, after this RPC's fwd_bwd.
+    self.assertEqual(worker_update_calls, [(2, {})])
+    self.assertEqual(resp.metadata["train_step"], 11)
+    self.assertEqual(self.fake_trainer.step_count, 11)
+
+  def test_fused_update_waits_for_the_update_token_and_reports_update_ready(
+      self,
+  ):
+    """With an update output to wait on, the fused call returns once it is ready."""
+    payload = datatypes.RLTrainerPayload(
+        prompt_ids=np.array([[1, 2]], dtype=np.int32),
+        prompt_mask=np.ones((1, 2), dtype=np.float32),
+        completion_ids=np.array([[3, 4]], dtype=np.int32),
+        completion_mask=np.ones((1, 2), dtype=np.float32),
+        advantages=np.array([1.0], dtype=np.float32),
+    )
+    # A caller-supplied `update_ready` must never be echoed back as the
+    # worker's own claim.
+    request = datatypes.TrainRequest(
+        request_id="req-token", payload=payload, metadata={"update_ready": True}
+    )
+    events = []
+    real_block_until_ready = trainer_worker.jax.block_until_ready
+
+    def _recording_block_until_ready(x):
+      events.append(("block_until_ready", x))
+      return real_block_until_ready(x)
+
+    with mock.patch.object(
+        trainer_worker.jax,
+        "block_until_ready",
+        side_effect=_recording_block_until_ready,
+    ):
+      # A trainer without a token: nothing to wait on, so no claim.
+      resp = self.worker.fwd_bwd(request=request, apply_optimizer=True)
+      self.assertNotIn("update_ready", resp.metadata)
+      self.assertEmpty(events)
+
+      # A trainer whose update publishes a token: waited on after the update.
+      original_update = self.fake_trainer.update
+      token = jnp.array(1.0)
+
+      def _update_with_token(**kwargs):
+        events.append("update")
+        self.fake_trainer.last_update_token = token
+        return original_update(**kwargs)
+
+      self.fake_trainer.update = _update_with_token
+      resp = self.worker.fwd_bwd(request=request, apply_optimizer=True)
+
+    self.assertEqual(events, ["update", ("block_until_ready", token)])
+    self.assertTrue(resp.metadata["update_ready"])
+    self.assertTrue(resp.metadata["updated"])
+
+  def test_fused_update_token_failure_is_reported_as_the_optimizer_step(self):
+    """An update that fails on device surfaces through the token wait as the optimizer step."""
+    self.fake_trainer.last_update_token = jnp.array(1.0)
+    payload = datatypes.RLTrainerPayload(
+        prompt_ids=np.array([[1, 2]], dtype=np.int32),
+        prompt_mask=np.ones((1, 2), dtype=np.float32),
+        completion_ids=np.array([[3, 4]], dtype=np.int32),
+        completion_mask=np.ones((1, 2), dtype=np.float32),
+        advantages=np.array([1.0], dtype=np.float32),
+    )
+    request = datatypes.TrainRequest(
+        request_id="req-token-err", payload=payload, metadata={}
+    )
+
+    with mock.patch.object(
+        trainer_worker.jax,
+        "block_until_ready",
+        side_effect=ValueError("device lost"),
+    ):
+      with self.assertRaisesRegex(
+          RuntimeError,
+          r"optimizer update\(\) failed inside fwd_bwd\(apply_optimizer=True\)"
+          r".*ValueError: device lost",
+      ):
+        self.worker.fwd_bwd(request=request, apply_optimizer=True)
+
+    self.assertEqual(self.worker.state, datatypes.WorkerState.ERROR)
+
+  def test_fused_update_is_called_without_the_fwd_bwd_kwargs(self):
+    """Per-call kwargs are for the trainer's fwd_bwd only; the fused update() is called bare."""
+    update_kwargs = []
+    original_update = self.fake_trainer.update
+
+    def _recording_update(**kwargs):
+      update_kwargs.append(kwargs)
+      return original_update()
+
+    self.fake_trainer.update = _recording_update
+    payload = datatypes.RLTrainerPayload(
+        prompt_ids=np.array([[1, 2]], dtype=np.int32),
+        prompt_mask=np.ones((1, 2), dtype=np.float32),
+        completion_ids=np.array([[3, 4]], dtype=np.int32),
+        completion_mask=np.ones((1, 2), dtype=np.float32),
+        advantages=np.array([1.0], dtype=np.float32),
+    )
+    request = datatypes.TrainRequest(
+        request_id="req-kw-update", payload=payload, metadata={}
+    )
+
+    self.worker.fwd_bwd(
+        request=request, apply_optimizer=True, cache_nnx_graph=False
+    )
+
+    self.assertEqual(
+        self.fake_trainer.fwd_bwd_calls[-1][1], {"cache_nnx_graph": False}
+    )
+    self.assertEqual(update_kwargs, [{}])
 
   def test_eval_step_with_train_request(self):
     payload = datatypes.RLTrainerPayload(
