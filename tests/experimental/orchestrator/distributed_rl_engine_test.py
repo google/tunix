@@ -357,10 +357,90 @@ class DistributedRLEngineTest(absltest.TestCase):
       self.mock_actor.fwd_bwd.assert_called_once()
       call_kwargs = self.mock_actor.fwd_bwd.call_args.kwargs
       self.assertIn("request", call_kwargs)
+      self.assertTrue(call_kwargs["apply_optimizer"])
       req = call_kwargs["request"]
       self.assertIsInstance(req, datatypes.TrainRequest)
       self.assertIs(req.payload, mock_payload)
       self.mock_actor.update.assert_called_once_with()
+
+    asyncio.run(_run())
+
+  def test_train_step_fuses_fwd_bwd_and_update_into_single_rpc(self):
+    async def _run():
+      accum_resp = datatypes.Response(metadata={"queued": True})
+      fused_resp = datatypes.Response(
+          metadata={"queued": True, "updated": True, "train_step": 4}
+      )
+      self.mock_actor.fwd_bwd.side_effect = [accum_resp, fused_resp]
+      mock_payload = mock.MagicMock(spec=datatypes.RLTrainerPayload)
+      mock_payload.metadata = {}
+
+      # Microbatch 0: accumulate only (apply_optimizer=False).
+      res_0 = await self.engine.train_step(
+          mock_payload,
+          role=datatypes.Role.ACTOR,
+          accumulate_gradients=True,
+          apply_optimizer=False,
+      )
+      self.assertEqual(res_0, accum_resp)
+      self.assertNotIn(
+          "apply_optimizer", self.mock_actor.fwd_bwd.call_args.kwargs
+      )
+
+      # Microbatch 1: fused fwd_bwd + update (apply_optimizer=True).
+      res = await self.engine.train_step(
+          mock_payload,
+          role=datatypes.Role.ACTOR,
+          accumulate_gradients=True,
+          apply_optimizer=True,
+      )
+      self.assertEqual(
+          res,
+          {
+              "fwd_bwd": fused_resp,
+              "updated": True,
+              "train_step": 4,
+              "accumulated": True,
+          },
+      )
+
+      self.assertEqual(self.mock_actor.fwd_bwd.call_count, 2)
+      call_kwargs = self.mock_actor.fwd_bwd.call_args.kwargs
+      self.assertTrue(call_kwargs["apply_optimizer"])
+      self.mock_actor.update.assert_not_called()
+
+      # If a worker echoes a user-supplied "train_step" metadata key without
+      # setting "updated": True, train_step must still call worker.update().
+      self.mock_actor.fwd_bwd.side_effect = None
+      self.mock_actor.fwd_bwd.return_value = datatypes.Response(
+          metadata={"queued": True, "train_step": 999}
+      )
+      self.mock_actor.update.return_value = 5
+      res_fallback = await self.engine.train_step(
+          mock_payload,
+          role=datatypes.Role.ACTOR,
+          accumulate_gradients=True,
+          apply_optimizer=True,
+      )
+      self.assertEqual(res_fallback["train_step"], 5)
+      self.mock_actor.update.assert_called_once_with()
+
+      # Conversely, once a worker reports "updated": True it has already run
+      # the optimizer; a missing "train_step" must never cause a second
+      # update() (double optimizer step).
+      self.mock_actor.update.reset_mock()
+      self.mock_actor.fwd_bwd.return_value = datatypes.Response(
+          metadata={"queued": True, "updated": True}
+      )
+      res_no_step = await self.engine.train_step(
+          mock_payload,
+          role=datatypes.Role.ACTOR,
+          accumulate_gradients=True,
+          apply_optimizer=True,
+      )
+      self.assertTrue(res_no_step["updated"])
+      self.assertIsNone(res_no_step["train_step"])
+      self.mock_actor.update.assert_not_called()
 
     asyncio.run(_run())
 

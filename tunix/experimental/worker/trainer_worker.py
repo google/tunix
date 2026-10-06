@@ -220,14 +220,21 @@ class TrainerWorker(abstract_worker.Worker):
   def fwd_bwd(
       self,
       request: datatypes.TrainRequest,
+      apply_optimizer: bool = False,
       **kwargs: Any,
   ) -> datatypes.Response:
-    """Executes one forward/backward pass."""
+    """Executes one forward/backward pass, optionally applying the optimizer."""
     self._ensure_ready()
     req_metadata = dict(request.metadata) if request.metadata else {}
+    req_metadata.pop("updated", None)
+    req_metadata.pop("train_step", None)
     kwargs.pop("skip_jit", None)
     try:
       self._trainer.fwd_bwd(request.payload, **kwargs)
+      if apply_optimizer:
+        train_step = self._trainer.update()
+        req_metadata["updated"] = True
+        req_metadata["train_step"] = train_step
       self._last_error = None
       resp = self._response(queued=True, **req_metadata)
       resp.request_id = request.request_id

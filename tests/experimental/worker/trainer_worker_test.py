@@ -127,8 +127,119 @@ class TrainerWorkerTest(absltest.TestCase):
     self.assertEqual(resp.metadata["batch_id"], "b0")
     self.assertEqual(resp.metadata["policy_version"], 3)
     self.assertTrue(resp.metadata["queued"])
+    self.assertNotIn("updated", resp.metadata)
     self.assertLen(self.fake_trainer.fwd_bwd_calls, 1)
     self.assertIs(self.fake_trainer.fwd_bwd_calls[0][0], payload)
+
+  def test_fwd_bwd_with_apply_optimizer_runs_update_in_same_call(self):
+    payload = datatypes.RLTrainerPayload(
+        prompt_ids=np.array([[1, 2]], dtype=np.int32),
+        prompt_mask=np.ones((1, 2), dtype=np.float32),
+        completion_ids=np.array([[3, 4]], dtype=np.int32),
+        completion_mask=np.ones((1, 2), dtype=np.float32),
+        advantages=np.array([1.0], dtype=np.float32),
+    )
+    # First microbatch (apply_optimizer=False): strips caller-supplied
+    # updated/train_step keys and does not advance step_count.
+    req_0 = datatypes.TrainRequest(
+        request_id="req-accum-0",
+        payload=payload,
+        metadata={"batch_id": "b0", "updated": True, "train_step": 999},
+    )
+    resp_0 = self.worker.fwd_bwd(request=req_0, apply_optimizer=False)
+    self.assertEqual(resp_0.request_id, "req-accum-0")
+    self.assertNotIn("updated", resp_0.metadata)
+    self.assertNotIn("train_step", resp_0.metadata)
+    self.assertEqual(self.fake_trainer.step_count, 10)
+
+    # Final microbatch (apply_optimizer=True): runs fwd_bwd + update in one RPC.
+    request = datatypes.TrainRequest(
+        request_id="req-fused-1",
+        payload=payload,
+        metadata={"batch_id": "b1"},
+    )
+    resp = self.worker.fwd_bwd(request=request, apply_optimizer=True)
+
+    self.assertIsInstance(resp, datatypes.Response)
+    self.assertEqual(resp.request_id, "req-fused-1")
+    self.assertEqual(resp.metadata["worker_id"], "trainer_0")
+    self.assertEqual(resp.metadata["batch_id"], "b1")
+    self.assertTrue(resp.metadata["queued"])
+    self.assertTrue(resp.metadata["updated"])
+    self.assertEqual(resp.metadata["train_step"], 11)
+    self.assertEqual(self.fake_trainer.step_count, 11)
+    self.assertLen(self.fake_trainer.fwd_bwd_calls, 2)
+    self.assertIs(self.fake_trainer.fwd_bwd_calls[1][0], payload)
+
+  def test_fwd_bwd_with_apply_optimizer_update_failure_marks_worker_error(
+      self,
+  ):
+    """A failing fused update() puts the worker in ERROR; later calls fail."""
+
+    def _failing_update(**kwargs):
+      del kwargs
+      raise RuntimeError("optimizer exploded")
+
+    self.fake_trainer.update = _failing_update
+    payload = datatypes.RLTrainerPayload(
+        prompt_ids=np.array([[1, 2]], dtype=np.int32),
+        prompt_mask=np.ones((1, 2), dtype=np.float32),
+        completion_ids=np.array([[3, 4]], dtype=np.int32),
+        completion_mask=np.ones((1, 2), dtype=np.float32),
+        advantages=np.array([1.0], dtype=np.float32),
+    )
+    request = datatypes.TrainRequest(
+        request_id="req-fused-err",
+        payload=payload,
+        metadata={"batch_id": "b2"},
+    )
+
+    with self.assertRaisesRegex(RuntimeError, "optimizer exploded"):
+      self.worker.fwd_bwd(request=request, apply_optimizer=True)
+
+    # fwd_bwd ran; update failed after it.
+    self.assertLen(self.fake_trainer.fwd_bwd_calls, 1)
+    self.assertEqual(self.worker.state, datatypes.WorkerState.ERROR)
+    self.assertEqual(self.worker.heartbeat().last_error, "optimizer exploded")
+    with self.assertRaisesRegex(RuntimeError, "not ready"):
+      self.worker.fwd_bwd(request=request, apply_optimizer=False)
+    self.assertLen(self.fake_trainer.fwd_bwd_calls, 1)
+
+  def test_fwd_bwd_does_not_leak_control_kwargs_to_trainer(self):
+    """`apply_optimizer`/`skip_jit` stay in the worker; update runs after fwd_bwd."""
+    update_seen_fwd_bwd_calls = []
+    original_update = self.fake_trainer.update
+
+    def _recording_update(**kwargs):
+      update_seen_fwd_bwd_calls.append(len(self.fake_trainer.fwd_bwd_calls))
+      return original_update(**kwargs)
+
+    self.fake_trainer.update = _recording_update
+    payload = datatypes.RLTrainerPayload(
+        prompt_ids=np.array([[1, 2]], dtype=np.int32),
+        prompt_mask=np.ones((1, 2), dtype=np.float32),
+        completion_ids=np.array([[3, 4]], dtype=np.int32),
+        completion_mask=np.ones((1, 2), dtype=np.float32),
+        advantages=np.array([1.0], dtype=np.float32),
+    )
+    request = datatypes.TrainRequest(
+        request_id="req-kw", payload=payload, metadata={}
+    )
+
+    self.worker.fwd_bwd(request=request, apply_optimizer=False, skip_jit=True)
+    self.worker.fwd_bwd(
+        request=request,
+        apply_optimizer=True,
+        skip_jit=True,
+        cache_nnx_graph=False,
+    )
+
+    self.assertEqual(self.fake_trainer.fwd_bwd_calls[0][1], {})
+    self.assertEqual(
+        self.fake_trainer.fwd_bwd_calls[1][1], {"cache_nnx_graph": False}
+    )
+    # update() ran exactly once, after the second fwd_bwd.
+    self.assertEqual(update_seen_fwd_bwd_calls, [2])
 
   def test_eval_step_with_train_request(self):
     payload = datatypes.RLTrainerPayload(

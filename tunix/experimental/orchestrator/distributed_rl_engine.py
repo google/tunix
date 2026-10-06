@@ -498,16 +498,32 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         payload=payload,
         metadata=metadata,
     )
+    fwd_bwd_kwargs = dict(kwargs)
+    if apply_optimizer:
+      fwd_bwd_kwargs["apply_optimizer"] = True
     fwd_bwd_result = await self._invoke_worker(
         worker,
         "fwd_bwd",
         request=request,
         skip_jit=skip_jit,
-        **kwargs,
+        **fwd_bwd_kwargs,
     )
     if not apply_optimizer:
       return fwd_bwd_result
-    train_step = await self._invoke_worker(worker, "update")
+    # A worker that ran the optimizer inside the fwd_bwd RPC reports
+    # `updated=True` (TrainerWorker strips any caller-supplied copy of the key
+    # before echoing request metadata, so only the worker can set it). Workers
+    # that predate `apply_optimizer` ignore the kwarg and never set it; they
+    # take the explicit update() below. Keyed on `updated` alone: a missing
+    # `train_step` must never trigger a second optimizer step.
+    if (
+        isinstance(fwd_bwd_result, datatypes.Response)
+        and isinstance(fwd_bwd_result.metadata, Mapping)
+        and bool(fwd_bwd_result.metadata.get("updated"))
+    ):
+      train_step = fwd_bwd_result.metadata.get("train_step")
+    else:
+      train_step = await self._invoke_worker(worker, "update")
     return {
         "fwd_bwd": fwd_bwd_result,
         "updated": True,

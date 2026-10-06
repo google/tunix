@@ -112,6 +112,16 @@ class _MockWorkerHandle(mock.MagicMock):
       self, method_name: str | None = None, *args: Any, **kwargs: Any
   ) -> Any:
     if method_name == "fwd_bwd":
+      if kwargs.get("apply_optimizer", False):
+        self.train_step_count += 1
+        return datatypes.Response(
+            request_id="step",
+            metadata={
+                "loss": 0.5,
+                "updated": True,
+                "train_step": self.train_step_count,
+            },
+        )
       return datatypes.Response(request_id="step", metadata={"loss": 0.5})
     elif method_name == "update":
       self.train_step_count += 1
@@ -916,6 +926,214 @@ class RLProgramTest(absltest.TestCase):
       await program.run_async(self.mock_engine, num_steps=1)
 
       self.assertEqual(call_order, ["save_checkpoint", "sync_weights"])
+
+    asyncio.run(_run())
+
+  def test_get_metrics_deferred_after_checkpoint_sync_weights_and_commit(self):
+    async def _run():
+      call_order = []
+      policy_version_at_metrics = []
+
+      async def mock_train_step(*args, **kwargs):
+        del args, kwargs
+        call_order.append("train_step")
+        return {"train_step": 1}
+
+      async def mock_save_checkpoint(*args, **kwargs):
+        del args, kwargs
+        call_order.append("save_checkpoint")
+        return {"checkpoint_saved": True}
+
+      async def mock_sync_weights(*args, **kwargs):
+        del args, kwargs
+        call_order.append("sync_weights")
+        return 1
+
+      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
+      program = self._create_program(sync_weights=True)
+
+      async def mock_get_metrics(*args, **kwargs):
+        del args, kwargs
+        call_order.append("get_metrics")
+        policy_version_at_metrics.append(program.policy_version)
+        return None
+
+      original_commit = program.scored_q.commit
+
+      def _recording_commit(*args, **kwargs):
+        call_order.append("commit")
+        return original_commit(*args, **kwargs)
+
+      program.scored_q.commit = _recording_commit
+      self.mock_engine.train_step.side_effect = mock_train_step
+      self.mock_engine.save_checkpoint.side_effect = mock_save_checkpoint
+      self.mock_engine.sync_weights.side_effect = mock_sync_weights
+      self.mock_engine.get_metrics.side_effect = mock_get_metrics
+
+      await program.run_async(self.mock_engine, num_steps=1)
+
+      self.assertEqual(
+          call_order,
+          [
+              "train_step",
+              "save_checkpoint",
+              "sync_weights",
+              "commit",
+              "get_metrics",
+          ],
+      )
+      self.assertEqual(policy_version_at_metrics, [1])
+
+    asyncio.run(_run())
+
+  def test_get_metrics_deferred_after_async_weight_sync_start_and_commit(self):
+    async def _run():
+      call_order = []
+      pending_sync_at_metrics = []
+      transfer_gate = asyncio.Event()
+
+      async def mock_train_step(*args, **kwargs):
+        del args, kwargs
+        call_order.append("train_step")
+        return {"train_step": 1}
+
+      async def mock_save_checkpoint(*args, **kwargs):
+        del args, kwargs
+        call_order.append("save_checkpoint")
+        return {"checkpoint_saved": True}
+
+      async def mock_sync_weights(
+          *args, policy_version=None, source_staged=None, **kwargs
+      ):
+        del args, kwargs
+        call_order.append("sync_start")
+        if source_staged is not None:
+          source_staged.set()
+        await transfer_gate.wait()
+        call_order.append("sync_done")
+        return policy_version or 1
+
+      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
+      program = self._create_program(
+          sync_weights=True, async_weight_sync=True
+      )
+
+      async def mock_get_metrics(*args, **kwargs):
+        del args, kwargs
+        call_order.append("get_metrics")
+        pending_sync_at_metrics.append(program._pending_sync is not None)
+        transfer_gate.set()
+        return None
+
+      self.mock_engine.train_step.side_effect = mock_train_step
+      self.mock_engine.save_checkpoint.side_effect = mock_save_checkpoint
+      self.mock_engine.sync_weights.side_effect = mock_sync_weights
+      self.mock_engine.get_metrics.side_effect = mock_get_metrics
+
+      # The transfer gate only opens from the deferred fetch: if the fetch
+      # were never issued this would hang, so bound it and fail instead.
+      await asyncio.wait_for(
+          program.run_async(self.mock_engine, num_steps=1), timeout=10
+      )
+
+      self.assertEqual(
+          call_order,
+          [
+              "train_step",
+              "save_checkpoint",
+              "sync_start",
+              "get_metrics",
+              "sync_done",
+          ],
+      )
+      self.assertEqual(pending_sync_at_metrics, [True])
+
+    asyncio.run(_run())
+
+  def test_get_metrics_multi_minibatch_defers_only_final_minibatch(self):
+    async def _run():
+      call_order = []
+      self.mock_algo.num_generations = 2
+      self.mock_algo.mini_batch_size = 2
+
+      async def mock_train_step(*args, apply_optimizer=False, **kwargs):
+        del args, kwargs
+        call_order.append(f"train_step(opt={apply_optimizer})")
+        return {"train_step": 1} if apply_optimizer else "queued"
+
+      async def mock_save_checkpoint(*args, **kwargs):
+        del args, kwargs
+        call_order.append("save_checkpoint")
+        return {"checkpoint_saved": True}
+
+      async def mock_sync_weights(*args, **kwargs):
+        del args, kwargs
+        call_order.append("sync_weights")
+        return 1
+
+      async def mock_get_metrics(*args, **kwargs):
+        del args, kwargs
+        call_order.append("get_metrics")
+        return None
+
+      self.mock_engine.train_step.side_effect = mock_train_step
+      self.mock_engine.save_checkpoint.side_effect = mock_save_checkpoint
+      self.mock_engine.sync_weights.side_effect = mock_sync_weights
+      self.mock_engine.get_metrics.side_effect = mock_get_metrics
+
+      assembler = batch_assembly.PaddedBatchAssembler(
+          batch_size=2,
+          max_prompt_length=4,
+          max_response_length=4,
+          pad_id=0,
+          num_generations=2,
+          mini_batch_size=2,
+      )
+      program = rl_program.StandardRLProgram(
+          dataset=[],
+          max_steps=1,
+          algo=self.mock_algo,
+          batch_size=4,
+          reward_fns=[lambda *_: 1.0],
+          assembler=assembler,
+          sync_weights=True,
+          async_weight_sync=False,
+      )
+      program.engine = self.mock_engine
+
+      for group_idx in range(4):
+        for item_idx in range(2):
+          payload = datatypes.RLTrainerPayload(
+              prompt_ids=np.array([1, 2], dtype=np.int32),
+              prompt_mask=np.ones(2, dtype=np.float32),
+              completion_ids=np.array([3, 4], dtype=np.int32),
+              completion_mask=np.ones(2, dtype=np.float32),
+              advantages=np.ones(2, dtype=np.float32),
+          )
+          item = datatypes.TrajectoryItem(
+              group_index=item_idx,
+              prompt_id=f"prompt_{group_idx}",
+              start_step=0,
+              traj={"trajectory_reward": 1.0},
+          )
+          item.payload = payload
+          await program.scored_q.put(item)
+
+      await program.train_stage()
+
+      self.assertEqual(
+          call_order,
+          [
+              "train_step(opt=False)",
+              "train_step(opt=True)",
+              "get_metrics",
+              "train_step(opt=False)",
+              "train_step(opt=True)",
+              "save_checkpoint",
+              "sync_weights",
+              "get_metrics",
+          ],
+      )
 
     asyncio.run(_run())
 

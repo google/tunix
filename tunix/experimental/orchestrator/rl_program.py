@@ -1813,6 +1813,7 @@ class StandardRLProgram(RLProgram):
       groups_consumed = 0
       checkpoint_saved = False
       final_minibatch_completed = False
+      pending_metrics_fetch = False
       policy_training_time = 0.0
       exposed_generation_time = 0.0
       weight_sync_time = 0.0
@@ -2030,11 +2031,6 @@ class StandardRLProgram(RLProgram):
           step_result, elapsed = await train_step
           policy_training_time += elapsed
           if is_final_batch:
-            _t_metrics = time.monotonic()
-            trainer_metrics = await self.engine.get_metrics(
-                role=datatypes.Role.ACTOR
-            )
-            policy_training_time += time.monotonic() - _t_metrics
             final_minibatch_completed = True
             if self.sync_weights and self.async_weight_sync:
               self._round_due = True
@@ -2050,7 +2046,14 @@ class StandardRLProgram(RLProgram):
                 groups_consumed >= self.full_batch_size or not scored_items
             )
             if full_batch_complete:
+              pending_metrics_fetch = True
               await _maybe_save_checkpoint()
+            else:
+              _t_metrics = time.monotonic()
+              trainer_metrics = await self.engine.get_metrics(
+                  role=datatypes.Role.ACTOR
+              )
+              policy_training_time += time.monotonic() - _t_metrics
 
         if not scored_items:
           if not checkpoint_saved and final_minibatch_completed:
@@ -2107,6 +2110,13 @@ class StandardRLProgram(RLProgram):
       # dispatcher refills the just-synced rollout workers now, rather than
       # after this step's bookkeeping and the next step's first packing.
       await asyncio.sleep(0)
+
+      if pending_metrics_fetch:
+        _t_metrics = time.monotonic()
+        trainer_metrics = await self.engine.get_metrics(
+            role=datatypes.Role.ACTOR
+        )
+        policy_training_time += time.monotonic() - _t_metrics
 
       step_time_sec = time.monotonic() - step_start_time
 
