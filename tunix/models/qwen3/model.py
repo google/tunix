@@ -574,11 +574,13 @@ class Attention(nnx.Module):
         query_proj,
         segment_pos,
         head_dim=self.head_dim,
+        rope_theta=self.config.rope_theta,
     )
     key_proj = apply_rope(
         key_proj,
         segment_pos,
         head_dim=self.head_dim,
+        rope_theta=self.config.rope_theta,
     )
 
     if cache is not None:
