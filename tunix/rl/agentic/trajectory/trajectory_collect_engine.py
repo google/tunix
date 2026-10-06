@@ -239,37 +239,51 @@ class TrajectoryCollectEngine:
     Returns:
         Trajectory | dict | list: Depending on mode.
     """  # fmt: skip
-    await self._reset()
-
-    self.agent.trajectory.status = agent_types.TrajectoryStatus.RUNNING
-    self._logged_clip_reasons.clear()
-
-    while True:
-      if len(self.agent.trajectory.steps) >= self.max_steps:
-        self.agent.trajectory.status = (
-            agent_types.TrajectoryStatus.MAX_STEPS_REACHED
-        )
-        self._log_trajectory_clip("MAX_STEPS_REACHED")
-        break
-
-      done = await self._one_step()
-
-      if done:
-        if self.agent.trajectory.status == agent_types.TrajectoryStatus.RUNNING:
-          self.agent.trajectory.status = agent_types.TrajectoryStatus.SUCCEEDED
-        break
-
-    self._finalize_terminal_step_routing()
-
-    masked_out = (
-        self.overlong_filter
-        and self.agent.trajectory.status in self.filter_statuses
-    )
     try:
+      await self._reset()
+
+      self.agent.trajectory.status = agent_types.TrajectoryStatus.RUNNING
+      self._logged_clip_reasons.clear()
+
+      while True:
+        if len(self.agent.trajectory.steps) >= self.max_steps:
+          self.agent.trajectory.status = (
+              agent_types.TrajectoryStatus.MAX_STEPS_REACHED
+          )
+          self._log_trajectory_clip("MAX_STEPS_REACHED")
+          break
+
+        done = await self._one_step()
+
+        if done:
+          if (
+              self.agent.trajectory.status
+              == agent_types.TrajectoryStatus.RUNNING
+          ):
+            self.agent.trajectory.status = (
+                agent_types.TrajectoryStatus.SUCCEEDED
+            )
+          break
+
+      self._finalize_terminal_step_routing()
+
+      masked_out = (
+          self.overlong_filter
+          and self.agent.trajectory.status in self.filter_statuses
+      )
       if not masked_out:
         await self._append_final_reward()
       self.compute_mc_reward()
       self.compute_trajectory_reward()
+    except asyncio.TimeoutError:
+      self.agent.trajectory.status = agent_types.TrajectoryStatus.TIMEOUT
+      raise
+    except asyncio.CancelledError:
+      self.agent.trajectory.status = agent_types.TrajectoryStatus.CANCELLED
+      raise
+    except Exception:
+      self.agent.trajectory.status = agent_types.TrajectoryStatus.FAILED
+      raise
     finally:
       await self._close()
 
@@ -528,6 +542,20 @@ class TrajectoryCollectEngine:
     This involves calling the environment's reset method, updating the agent's
     state, and optionally tokenizing the initial prompt messages.
     """
+    self.agent.reset()
+    self.agent.trajectory.step_idx = -1
+    self._response_token_count = 0
+    self._cumulative_prompt_tokens = 0
+    self._current_step_initial_routed_experts = None
+    self.env_time = {
+        "reset_latency": 0.0,
+        "step_latency": [],
+        "close_latency": 0.0,
+    }
+    self.reward_time = {
+        "reward_latency": 0.0,
+    }
+
     logging.debug("%s env.reset starting", self._debug_prefix)
     (obs, info), wall_time = await self._run_with_timing(self.env.reset)
     logging.debug(
@@ -542,11 +570,7 @@ class TrajectoryCollectEngine:
         if hasattr(self.env, "final_reward_fn")
         else None
     )
-    self.agent.reset()
     self._start_ts = time.perf_counter()
-    self._response_token_count = 0
-    self._cumulative_prompt_tokens = 0
-    self._current_step_initial_routed_experts = None
     self.agent.update_from_env(
         observation=obs,
         reward=0.0,
@@ -572,7 +596,9 @@ class TrajectoryCollectEngine:
     if self.exact_token_continuity:
       self._exact_chat_history = copy.deepcopy(self.agent.chat_completions)
 
-  def _record_exact_turn(self, cur_step, *, terminal: bool) -> None:
+  def _record_exact_turn(
+      self, cur_step: agent_types.Step, *, terminal: bool
+  ) -> None:
     """Closes the recorded turn and checks the agent only appended messages.
 
     Raises:
@@ -583,7 +609,7 @@ class TrajectoryCollectEngine:
     previous = self._exact_chat_history
     if previous is not None and messages[: len(previous)] != previous:
       raise ValueError("agent rewrote previously recorded chat history")
-    if terminal and cur_step is not None:
+    if terminal:
       cur_step.done = True
     self._exact_chat_history = copy.deepcopy(messages)
 
@@ -591,11 +617,11 @@ class TrajectoryCollectEngine:
   def _debug_prefix(self) -> str:
     """Returns a consistent log prefix with step_idx, pair_index, and group_id."""
     extra = getattr(self.env, "extra_kwargs", {}) or {}
-    step_idx = len(self.agent.trajectory.steps)
     pair_index = extra.get("pair_index")
     group_id = extra.get("group_id")
     return (
-        f"[step_idx={step_idx}, pair_index={pair_index}, group_id={group_id}]"
+        f"[step_idx={self.agent.trajectory.step_idx},"
+        f" pair_index={pair_index}, group_id={group_id}]"
     )
 
   def _rollout_state_info(
@@ -649,6 +675,16 @@ class TrajectoryCollectEngine:
     """
     if self._check_and_set_context_limit_reached():
       return True
+    # `step_idx` is bound to `_one_step()` (starts at -1 on reset; first turn is 0)
+    # rather than `len(steps)` so it is available before `update_from_model()`.
+    self.agent.trajectory.step_idx += 1
+    action, cur_step = await self._on_model_interact()
+    return await self._on_env_interact(action, cur_step)
+
+  async def _on_model_interact(
+      self,
+  ) -> Tuple[Any, agent_types.Step]:
+    """Executes model call, updates agent, and populates model-side step fields."""
     max_generation_steps = (
         self.max_response_length - self._response_token_count
         if self.max_response_length is not None
@@ -798,92 +834,27 @@ class TrajectoryCollectEngine:
       self._response_token_count += len(rollout_output.tokens[0])
 
     action = self.agent.update_from_model(rollout_output.text[0]).action
-    logging.debug(
-        "%s Agent Action:\n%s",
-        self._debug_prefix,
-        json.dumps(action, default=str, indent=2),
-    )
-    if action is None:
-      logging.warning(
-          "Agent returned None action, using empty action list as fallback"
+    # `step_idx` is tracked separately from `len(steps)`, so verify that
+    # `update_from_model()` appended exactly one step, at `steps[step_idx]`.
+    step_idx = self.agent.trajectory.step_idx
+    num_steps = len(self.agent.trajectory.steps)
+    if num_steps != step_idx + 1:
+      raise ValueError(
+          f"step_idx={step_idx} is inconsistent with"
+          f" len(trajectory.steps)={num_steps} after update_from_model(); the"
+          " agent must append exactly one Step per turn."
       )
-      action = []
-
-    step_idx = len(self.agent.trajectory.steps)
-    remaining_time = self.timeout - (time.perf_counter() - self._start_ts)
-
-    tags = self._get_perf_tags()
-    if not self._check_and_set_context_limit_reached():
-      try:
-        with self.perf_v2.span(
-            perf_constants.ENVIRONMENT,
-            tags=tags,
-        ):
-          (obs, rew, done, info), wall_time = await self._run_with_timing(
-              self.env.step, action, timeout=remaining_time
-          )
-      except asyncio.TimeoutError:
-        self.agent.trajectory.status = agent_types.TrajectoryStatus.ENV_TIMEOUT
-        self._log_trajectory_clip("ENV_TIMEOUT")
-        if step_idx == 0:
-          logging.error(
-              "%s env.step hung at step 0 (first action) and was killed after"
-              " %.1f s remaining timeout. This trajectory produced no usable"
-              " data. Consider investigating the environment.",
-              self._debug_prefix,
-              remaining_time,
-          )
-        else:
-          logging.error(
-              "%s env.step hung at step %d and was killed after %.1f s"
-              " remaining timeout.",
-              self._debug_prefix,
-              step_idx,
-              remaining_time,
-          )
-        cur_step = self.agent.get_current_step()
-        if cur_step is not None:
-          cur_step.done = True
-        return True
-
-      self.env_time["step_latency"].append(wall_time)
-
-      logging.debug(
-          "%s Env Observation (Rew: %s, Done: %s):\n%s",
-          self._debug_prefix,
-          rew,
-          done,
-          json.dumps(obs, default=str, indent=2),
-      )
-      logging.debug(
-          "%s Env Info:\n%s",
-          self._debug_prefix,
-          json.dumps(info, default=str, indent=2),
-      )
-      self.agent.update_from_env(obs, rew, done, self._rollout_state_info(info))
-    else:
-      done = True
-
-    cur_step = self.agent.get_current_step()
-
-    if cur_step is not None and rollout_output.logprobs is not None:
+    cur_step = self.agent.trajectory.steps[step_idx]
+    if rollout_output.logprobs is not None:
       cur_step.logprobs = rollout_output.logprobs[0]
-
-    if (
-        cur_step is not None
-        and self._current_step_initial_routed_experts is not None
-    ):
+    if self._current_step_initial_routed_experts is not None:
       cur_step.assistant_routed_experts = (
           self._current_step_initial_routed_experts
       )
-
-    step_timed_out = time.perf_counter() - self._start_ts > self.timeout
-    if cur_step is not None and self.tokenizer and self.chat_parser:
-      assistant_message, env_messages = (
-          utils.get_recent_assistant_user_messages(self.agent.chat_completions)
+    if self.tokenizer and self.chat_parser and rollout_output.tokens:
+      assistant_message = utils.get_recent_assistant_message(
+          self.agent.chat_completions
       )
-
-      # Assistant tokens/masks
       if assistant_message:
         cur_step.assistant_tokens, n_append = (
             self.chat_parser.update_assistant_end_tokens(
@@ -903,10 +874,84 @@ class TrajectoryCollectEngine:
         )
         if cur_step.logprobs is not None:
           cur_step.logprobs = np.concatenate(
-              [cur_step.logprobs, np.zeros(n_append, dtype=np.float32)], axis=0
+              [cur_step.logprobs, np.zeros(n_append, dtype=np.float32)],
+              axis=0,
           )
 
-      # Environment tokens/masks
+    logging.debug(
+        "%s Agent Action:\n%s",
+        self._debug_prefix,
+        json.dumps(action, default=str, indent=2),
+    )
+    if action is None:
+      logging.warning(
+          "Agent returned None action, using empty action list as fallback"
+      )
+      action = []
+    return action, cur_step
+
+  async def _on_env_interact(
+      self, action: Any, cur_step: agent_types.Step
+  ) -> bool:
+    """Executes environment step and populates environment-side step fields."""
+    remaining_time = self.timeout - (time.perf_counter() - self._start_ts)
+    tags = self._get_perf_tags()
+    if not self._check_and_set_context_limit_reached():
+      try:
+        with self.perf_v2.span(
+            perf_constants.ENVIRONMENT,
+            tags=tags,
+        ):
+          (obs, rew, done, info), wall_time = await self._run_with_timing(
+              self.env.step, action, timeout=remaining_time
+          )
+      except asyncio.TimeoutError:
+        self.agent.trajectory.status = agent_types.TrajectoryStatus.ENV_TIMEOUT
+        self._log_trajectory_clip("ENV_TIMEOUT")
+        if self.agent.trajectory.step_idx == 0:
+          logging.error(
+              "%s env.step hung at step 0 (first action) and was killed after"
+              " %.1f s remaining timeout. This trajectory produced no usable"
+              " data. Consider investigating the environment.",
+              self._debug_prefix,
+              remaining_time,
+          )
+        else:
+          logging.error(
+              "%s env.step hung at step %d and was killed after %.1f s"
+              " remaining timeout.",
+              self._debug_prefix,
+              self.agent.trajectory.step_idx,
+              remaining_time,
+          )
+        cur_step.done = True
+        return True
+      except (Exception, asyncio.CancelledError):
+        # `asyncio.CancelledError` is a `BaseException`, not an `Exception`.
+        cur_step.done = True
+        raise
+
+      self.env_time["step_latency"].append(wall_time)
+
+      logging.debug(
+          "%s Env Observation (Rew: %s, Done: %s):\n%s",
+          self._debug_prefix,
+          rew,
+          done,
+          json.dumps(obs, default=str, indent=2),
+      )
+      logging.debug(
+          "%s Env Info:\n%s",
+          self._debug_prefix,
+          json.dumps(info, default=str, indent=2),
+      )
+      self.agent.update_from_env(obs, rew, done, self._rollout_state_info(info))
+    else:
+      done = True
+
+    step_timed_out = time.perf_counter() - self._start_ts > self.timeout
+    if self.tokenizer and self.chat_parser:
+      env_messages = utils.get_recent_env_messages(self.agent.chat_completions)
       # Terminal-step environment messages are not appended to the response
       # token stream when the step ends the trajectory.
       if env_messages and not done and not step_timed_out:
@@ -928,7 +973,7 @@ class TrajectoryCollectEngine:
       self.agent.trajectory.status = agent_types.TrajectoryStatus.TIMEOUT
       logging.warning("Episode timed out after %d seconds.", self.timeout)
       self._log_trajectory_clip("TIMEOUT")
-      self.agent.get_current_step().done = True  # pyrefly: ignore[missing-attribute]
+      cur_step.done = True
       return True
 
     return done

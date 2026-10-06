@@ -94,6 +94,12 @@ class RecentMessagesTest(parameterized.TestCase):
     self.assertEqual(
         utils.get_recent_assistant_user_messages(messages), expected_output
     )
+    self.assertEqual(
+        utils.get_recent_assistant_message(messages), expected_output[0]
+    )
+    self.assertEqual(
+        utils.get_recent_env_messages(messages), expected_output[1]
+    )
 
 
 class ConvertMessagesToStringTest(parameterized.TestCase):

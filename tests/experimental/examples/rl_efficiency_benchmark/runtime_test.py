@@ -26,6 +26,7 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 from tunix.experimental.examples.rl_efficiency_benchmark import runtime
+from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.trajectory import trajectory_collect_engine
 
 
@@ -104,7 +105,7 @@ class RuntimeTest(unittest.TestCase):
     )
     engine = cls(
         types.SimpleNamespace(
-            trajectory=types.SimpleNamespace(steps=[], reward=1)
+            trajectory=agent_types.Trajectory(steps=[], reward=1)
         ),
         env,
         model_call=model_call,

@@ -1122,6 +1122,82 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     self.assertEqual(routed.shape, (1, num_layers, top_k))
     np.testing.assert_array_equal(routed[0], 3)
 
+  def test_step_idx_and_close_on_exception_and_cancel(self):
+    self.assertEqual(self.trajectory.step_idx, -1)
+    self.mock_env.step.side_effect = RuntimeError('env boom')
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+    )
+    with self.assertRaisesRegex(RuntimeError, 'env boom'):
+      asyncio.run(self._run_collect(engine, mode='Trajectory'))
+    self.mock_env.close.assert_called_once()
+    self.assertEqual(
+        self.trajectory.status, agent_types.TrajectoryStatus.FAILED
+    )
+    self.assertEqual(self.trajectory.step_idx, 0)
+
+    # Next episode on the same engine resets step_idx and succeeds over 2 turns.
+    self.mock_env.step.side_effect = [
+        ('obs1', 1.0, False, {}),
+        ('obs2', 2.0, True, {}),
+    ]
+    traj = asyncio.run(self._run_collect(engine, mode='Trajectory'))
+    self.assertEqual(traj.status, agent_types.TrajectoryStatus.SUCCEEDED)
+    self.assertEqual(traj.step_idx, 1)
+
+    # Cancelling `env.step` marks the trajectory CANCELLED, marks the current
+    # step done, and still closes the env.
+    self.mock_env.close.reset_mock()
+    run_with_timing = engine._run_with_timing
+
+    async def _cancel_env_step(func, *args, timeout=None):
+      if func is self.mock_env.step:
+        raise asyncio.CancelledError()
+      return await run_with_timing(func, *args, timeout=timeout)
+
+    with mock.patch.object(engine, '_run_with_timing', _cancel_env_step):
+      with self.assertRaises(asyncio.CancelledError):
+        asyncio.run(self._run_collect(engine, mode='Trajectory'))
+    self.mock_env.close.assert_called_once()
+    self.assertEqual(
+        self.trajectory.status, agent_types.TrajectoryStatus.CANCELLED
+    )
+    self.assertEqual(self.trajectory.step_idx, 0)
+    self.assertTrue(self.trajectory.steps[-1].done)
+
+  def test_update_from_model_must_append_exactly_one_step(self):
+    def _update_from_model_appending(num_steps):
+      def _update_from_model(resp):
+        for _ in range(num_steps):
+          self.trajectory.steps.append(agent_types.Step(model_response=resp))
+        return agent_types.Action(action=['action'])
+
+      return _update_from_model
+
+    for num_appended in (0, 2):
+      with self.subTest(num_appended=num_appended):
+        self.mock_agent.update_from_model.side_effect = (
+            _update_from_model_appending(num_appended)
+        )
+        engine = trajectory_collect_engine.TrajectoryCollectEngine(
+            agent=self.mock_agent,
+            env=self.mock_env,
+            model_call=self.mock_model_call,
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            r'step_idx=0 is inconsistent with'
+            rf' len\(trajectory\.steps\)={num_appended}',
+        ):
+          asyncio.run(self._run_collect(engine, mode='Trajectory'))
+        self.assertEqual(
+            self.trajectory.status, agent_types.TrajectoryStatus.FAILED
+        )
+    # The check fires before the offending turn reaches `env.step`.
+    self.mock_env.step.assert_not_called()
+
 
 class _FreshTextTokenizer:
   """Only freshly formatted observations are allowed into this encoder."""
