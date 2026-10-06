@@ -435,7 +435,9 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   )
 
   algo = _build_algo(args)
-  trainer_handles = cluster.registry.handles(datatypes.Role.ACTOR)
+  trainer_handles = cluster.registry.handles(
+      datatypes.Role.ACTOR, statuses=None
+  )
   if len(trainer_handles) != 1:
     raise ValueError(f"Expected 1 trainer worker, got {len(trainer_handles)}.")
 

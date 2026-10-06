@@ -424,10 +424,16 @@ class CoordinatorTestBase(absltest.TestCase):
         s._log = self.log  # pylint: disable=protected-access
     self.sources = sources
     for source in sources:
-      self.registry.register(source)
+      info = self.registry.register(source)
+      self.registry.set_status(
+          info.worker_id, worker_registry.AdmissionStatus.ACTIVE
+      )
     for destination in destinations:
       destination._log = self.log  # pylint: disable=protected-access
-      self.registry.register(destination)
+      info = self.registry.register(destination)
+      self.registry.set_status(
+          info.worker_id, worker_registry.AdmissionStatus.ACTIVE
+      )
     self.coordinator = weight_sync_coordinator.WeightSyncCoordinator(
         registry=self.registry,
         handler=self.handler,
@@ -1010,6 +1016,8 @@ class ProtocolRejectionTest(CoordinatorTestBase):
     registry = worker_registry.WorkerRegistry()
     registry.register(Bare())
     registry.register(dest)
+    for wid in registry.worker_ids():
+      registry.set_status(wid, worker_registry.AdmissionStatus.ACTIVE)
     coordinator = weight_sync_coordinator.WeightSyncCoordinator(
         registry=registry, handler=FakeHandler(Wire(), []),
         timeouts=FAST_TIMEOUTS,
@@ -1036,6 +1044,8 @@ class ProtocolRejectionTest(CoordinatorTestBase):
     registry = worker_registry.WorkerRegistry()
     registry.register(FakeSource("trainer", wire, []))
     registry.register(MetadataOnly())
+    for wid in registry.worker_ids():
+      registry.set_status(wid, worker_registry.AdmissionStatus.ACTIVE)
     coordinator = weight_sync_coordinator.WeightSyncCoordinator(
         registry=registry, handler=FakeHandler(wire, []),
         timeouts=FAST_TIMEOUTS,
@@ -1052,6 +1062,7 @@ class ProtocolRejectionTest(CoordinatorTestBase):
     wire = Wire()
     registry = worker_registry.WorkerRegistry()
     registry.register(FakeSource("trainer", wire, []))
+    registry.set_status("trainer", worker_registry.AdmissionStatus.ACTIVE)
     coordinator = weight_sync_coordinator.WeightSyncCoordinator(
         registry=registry, handler=FakeHandler(wire, []),
         timeouts=FAST_TIMEOUTS,
@@ -1928,6 +1939,638 @@ class PhaseTimeoutsTest(absltest.TestCase):
 
     with self.assertRaises(ValueError):
       PhaseTimeouts.for_drain_timeout(0.0)
+
+
+class DestinationStatusFilterTest(CoordinatorTestBase):
+
+  def test_destination_statuses_filters_pending_weight_sync_workers(self):
+    d_active = FakeDestination("s-active", [])
+    d_pending = FakeDestination("s-pending", [])
+    self.make(d_active, d_pending)
+    self.registry.set_status(
+        "s-pending", worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC
+    )
+
+    # Default sync only targets ACTIVE destinations.
+    result_1 = self.sync(policy_version=1)
+    self.assertTrue(result_1.success)
+    self.assertEqual(d_active.serving, expected_pattern(1))
+    self.assertEqual(d_pending.serving, [0.0] * 4)
+    self.assertEqual([w.worker_id for w in result_1.workers], ["s-active"])
+
+    # Passing destination_statuses=(ACTIVE, PENDING_WEIGHT_SYNC) syncs both.
+    result_2 = asyncio.run(
+        self.coordinator.sync(
+            2,
+            destination_statuses=(
+                worker_registry.AdmissionStatus.ACTIVE,
+                worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC,
+            ),
+        )
+    )
+    self.assertTrue(result_2.success)
+    self.assertEqual(d_active.serving, expected_pattern(2))
+    self.assertEqual(d_pending.serving, expected_pattern(2))
+    self.assertEqual(
+        {w.worker_id: w.phase for w in result_2.workers},
+        {"s-active": "committed", "s-pending": "committed"},
+    )
+    self.assertEqual(
+        {w.worker_id: w.handle for w in result_2.workers},
+        {
+            "s-active": self.registry.handle("s-active"),
+            "s-pending": self.registry.handle("s-pending"),
+        },
+    )
+
+
+class DestinationFaultAttributionTest(CoordinatorTestBase):
+
+  def test_pre_quiesce_bind_failure_attributes_faulty_destination(self):
+    d1 = FakeDestination("s1", [])
+    d2 = FakeDestination("s2", [])
+
+    async def broken_bind():
+      raise ConnectionError("s2 unreachable on bind")
+
+    d2.bind_weight_sync = broken_bind
+    self.make(d1, d2)
+
+    with self.assertRaises(WeightSyncError) as ctx:
+      self.sync()
+
+    reports = {w.worker_id: w for w in ctx.exception.result.workers}
+    self.assertEqual(set(reports), {"s2"})
+    self.assertEqual(reports["s2"].phase, "preparing")
+    self.assertIn("s2 unreachable on bind", reports["s2"].error)
+    self.assertFalse(reports["s2"].needs_restart)
+
+  def test_pre_quiesce_metadata_failure_and_empty_metadata_attribute_destination(
+      self,
+  ):
+    d1 = FakeDestination("s1", [])
+    d2 = FakeDestination("s2", [])
+
+    async def broken_metadata():
+      raise ConnectionError("s2 unreachable on metadata")
+
+    d2.get_weight_sync_metadata = broken_metadata
+    self.make(d1, d2)
+
+    with self.assertRaises(WeightSyncError) as ctx:
+      self.sync()
+
+    reports = {w.worker_id: w for w in ctx.exception.result.workers}
+    self.assertEqual(set(reports), {"s2"})
+    self.assertIn("s2 unreachable on metadata", reports["s2"].error)
+    self.assertFalse(reports["s2"].needs_restart)
+
+    d3 = FakeDestination("s3", [])
+
+    async def empty_metadata():
+      return []
+
+    d3.get_weight_sync_metadata = empty_metadata
+    self.make(d1, d3)
+
+    with self.assertRaises(WeightSyncError) as ctx_empty:
+      self.sync()
+
+    empty_reports = {w.worker_id: w for w in ctx_empty.exception.result.workers}
+    self.assertEqual(set(empty_reports), {"s3"})
+    self.assertIn("empty destination metadata", empty_reports["s3"].error)
+    self.assertFalse(empty_reports["s3"].needs_restart)
+
+  def test_pre_quiesce_register_work_unit_failure_attributes_destination(self):
+    d1 = FakeDestination("s1", [])
+    d2 = FakeDestination("s2", [])
+    self.make(d1, d2)
+    orig_register = self.handler.register_work_unit
+
+    def fail_on_s2(metadata):
+      if metadata.unit.job_name == "s2":
+        raise RuntimeError("s2 control plane port unreachable")
+      return orig_register(metadata)
+
+    self.handler.register_work_unit = fail_on_s2
+
+    with self.assertRaises(WeightSyncError) as ctx:
+      self.sync()
+
+    reports = {w.worker_id: w for w in ctx.exception.result.workers}
+    self.assertEqual(set(reports), {"s2"})
+    self.assertEqual(reports["s2"].phase, "preparing")
+    self.assertIn("s2 control plane port unreachable", reports["s2"].error)
+    self.assertFalse(reports["s2"].needs_restart)
+
+  def test_pre_and_h2d_failures_preserve_per_worker_error_in_report(self):
+    d1 = FakeDestination("s1", [])
+    d2 = FakeDestination("s2", [], fail_on="pre", fail_persistently=True)
+    self.make(d1, d2)
+
+    with self.assertRaises(WeightSyncError) as pre_ctx:
+      self.sync(policy_version=1)
+
+    pre_reports = {w.worker_id: w for w in pre_ctx.exception.result.workers}
+    self.assertEqual(pre_reports["s1"].error, "")
+    self.assertIn("s2 failed at pre", pre_reports["s2"].error)
+
+    d3 = FakeDestination("s3", [])
+    d4 = FakeDestination(
+        "s4", [], fail_on="weight_sync", fail_persistently=True
+    )
+    self.make(d3, d4)
+
+    with self.assertRaises(WeightSyncError) as h2d_ctx:
+      self.sync(policy_version=1)
+
+    h2d_reports = {w.worker_id: w for w in h2d_ctx.exception.result.workers}
+    self.assertEqual(h2d_reports["s3"].error, "")
+    self.assertIn("s4 failed at weight_sync", h2d_reports["s4"].error)
+
+  def test_rollback_over_late_commit_updates_worker_reports(self):
+    key = {"req_id": "wsync-v1-r0", "uuid": 1, "policy_version": 1}
+    dest_a = FakeDestination(
+        "sampler-a",
+        [],
+        fail_on="post",
+        fail_persistently=True,
+        round_report_sequence=[
+            dict(key, phase="h2d_done"),
+            dict(key, phase="h2d_done"),
+            dict(key, phase="h2d_done"),
+            dict(key, phase="h2d_done"),
+            dict(key, phase="committed"),
+        ],
+    )
+    dest_b = FakeDestination(
+        "sampler-b", [], fail_on="post", fail_persistently=True
+    )
+    self.make(dest_a, dest_b)
+
+    with self.assertRaises(WeightSyncError) as ctx:
+      self.sync(policy_version=1)
+
+    result = ctx.exception.result
+    self.assertIs(result.state, RoundState.PARTIALLY_COMMITTED)
+    reports = {w.worker_id: w for w in result.workers}
+    self.assertEqual(reports["sampler-a"].phase, "committed")
+    self.assertEqual(reports["sampler-a"].error, "")
+    self.assertFalse(reports["sampler-a"].needs_restart)
+    self.assertEqual(reports["sampler-b"].phase, "aborted")
+    self.assertNotEqual(reports["sampler-b"].error, "")
+    self.assertFalse(reports["sampler-b"].needs_restart)
+
+  def test_abort_failure_marks_only_failed_worker_needs_restart(self):
+    d1 = FakeDestination("s1", [])
+    d2 = FakeDestination("s2", [], fail_on="abort", fail_persistently=True)
+    self.make(d1, d2)
+    self.handler.result_success = False
+
+    with self.assertRaises(WeightSyncError) as ctx:
+      self.sync(policy_version=1)
+
+    result = ctx.exception.result
+    self.assertIs(result.state, RoundState.FAILED_NEEDS_RESTART)
+    reports = {w.worker_id: w for w in result.workers}
+    self.assertEqual(reports["s1"].phase, "aborted")
+    self.assertEqual(reports["s1"].error, "")
+    self.assertFalse(reports["s1"].needs_restart)
+    self.assertEqual(reports["s2"].phase, "prepared")
+    self.assertEqual(reports["s2"].error, "transfer failed")
+    self.assertTrue(reports["s2"].needs_restart)
+
+  def _make_evict_callback(self, evicted: list[str]):
+    def _evict(handle, exc):
+      del exc
+      worker_id = self.registry.unregister_handle(handle)
+      if worker_id is not None:
+        evicted.append(worker_id)
+
+    return _evict
+
+  def test_sync_evicts_failed_destination_and_retries_on_survivor(self):
+    d1 = FakeDestination("s1", [])
+    d2 = FakeDestination("s2", [], fail_on="pre", fail_persistently=True)
+    self.make(d1, d2)
+    evicted: list[str] = []
+
+    self.coordinator.configure_fault_tolerance(
+        max_retries=1,
+        on_worker_unreachable=self._make_evict_callback(evicted),
+    )
+    result = self.sync(policy_version=3)
+
+    self.assertIs(result.state, RoundState.COMMITTED)
+    self.assertEqual(self.coordinator.last_committed_version, 3)
+    self.assertEqual(evicted, ["s2"])
+    self.assertIn("s1", self.registry)
+    self.assertNotIn("s2", self.registry)
+    self.assertEqual(d1.serving, expected_pattern(3))
+
+  def test_sync_with_pending_weight_sync_evicts_failed_pending_worker_and_retries(
+      self,
+  ):
+    d_active = FakeDestination("s-active", [])
+    d_pending = FakeDestination(
+        "s-pending", [], fail_on="pre", fail_persistently=True
+    )
+    self.make(d_active, d_pending)
+    self.registry.set_status(
+        "s-pending", worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC
+    )
+    evicted: list[str] = []
+
+    self.coordinator.configure_fault_tolerance(
+        max_retries=1,
+        on_worker_unreachable=self._make_evict_callback(evicted),
+    )
+    result = asyncio.run(
+        self.coordinator.sync(
+            5,
+            destination_statuses=(
+                worker_registry.AdmissionStatus.ACTIVE,
+                worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC,
+            ),
+        )
+    )
+
+    self.assertIs(result.state, RoundState.COMMITTED)
+    self.assertEqual(self.coordinator.last_committed_version, 5)
+    self.assertEqual(evicted, ["s-pending"])
+    self.assertIn("s-active", self.registry)
+    self.assertNotIn("s-pending", self.registry)
+    self.assertEqual(d_active.serving, expected_pattern(5))
+
+  def test_sync_post_commit_failure_fast_forwards_when_survivors_committed(
+      self,
+  ):
+    d1 = FakeDestination("s1", [])
+    d2 = FakeDestination("s2", [], fail_on="post", fail_persistently=True)
+    self.make(d1, d2)
+    evicted: list[str] = []
+
+    self.coordinator.configure_fault_tolerance(
+        max_retries=1,
+        on_worker_unreachable=self._make_evict_callback(evicted),
+    )
+    result = self.sync(policy_version=4)
+
+    self.assertIs(result.state, RoundState.COMMITTED)
+    self.assertEqual(self.coordinator.last_committed_version, 4)
+    self.assertIsNone(self.coordinator.poisoned)
+    self.assertEqual(evicted, ["s2"])
+    self.assertEmpty(result.failures)
+    self.assertEqual([w.worker_id for w in result.workers], ["s1"])
+    # Fast-forwards on attempt 0 without running a second transfer round.
+    self.assertEqual(result.round_index, 0)
+    self.assertEqual(d1.serving, expected_pattern(4))
+
+  def test_evictable_statuses_isolates_pending_weight_sync_failures_from_active(
+      self,
+  ):
+    all_statuses = (
+        worker_registry.AdmissionStatus.ACTIVE,
+        worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC,
+    )
+
+    # 1. PENDING_WEIGHT_SYNC newcomer fails in pre -> evicted and retried on
+    #    surviving ACTIVE worker.
+    d_active = FakeDestination("s1", [])
+    d_pending = FakeDestination(
+        "s-pending", [], fail_on="pre", fail_persistently=True
+    )
+    self.make(d_active, d_pending)
+    self.registry.set_status(
+        "s-pending", worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC
+    )
+    evicted: list[str] = []
+    self.coordinator.configure_fault_tolerance(
+        max_retries=1,
+        on_worker_unreachable=self._make_evict_callback(evicted),
+        evictable_statuses=(
+            worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC,
+        ),
+    )
+    result_pre = asyncio.run(
+        self.coordinator.sync(1, destination_statuses=all_statuses)
+    )
+    self.assertIs(result_pre.state, RoundState.COMMITTED)
+    self.assertEqual(evicted, ["s-pending"])
+    self.assertIn("s1", self.registry)
+    self.assertNotIn("s-pending", self.registry)
+    self.assertEqual(d_active.serving, expected_pattern(1))
+
+    # 2. PENDING_WEIGHT_SYNC newcomer fails in post after ACTIVE committed ->
+    #    evicted and fast-forwards to COMMITTED with clean result.
+    d_active_post = FakeDestination("s1", [])
+    d_pending_post = FakeDestination(
+        "s-pending", [], fail_on="post", fail_persistently=True
+    )
+    self.make(d_active_post, d_pending_post)
+    self.registry.set_status(
+        "s-pending", worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC
+    )
+    evicted.clear()
+    self.coordinator.configure_fault_tolerance(
+        max_retries=1,
+        on_worker_unreachable=self._make_evict_callback(evicted),
+        evictable_statuses=(
+            worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC,
+        ),
+    )
+    result_post = asyncio.run(
+        self.coordinator.sync(2, destination_statuses=all_statuses)
+    )
+    self.assertIs(result_post.state, RoundState.COMMITTED)
+    self.assertIsNone(self.coordinator.poisoned)
+    self.assertEqual(evicted, ["s-pending"])
+    self.assertEqual([w.worker_id for w in result_post.workers], ["s1"])
+    self.assertEmpty(result_post.failures)
+    self.assertEqual(result_post.round_index, 0)
+    self.assertEqual(d_active_post.serving, expected_pattern(2))
+
+    # 3. ACTIVE worker fails alone -> raises immediately on attempt 0, zero
+    #    workers evicted, poison preserved.
+    d_active_fail = FakeDestination(
+        "s1", [], fail_on="post", fail_persistently=True
+    )
+    d_pending_ok = FakeDestination("s-pending", [])
+    self.make(d_active_fail, d_pending_ok)
+    self.registry.set_status(
+        "s-pending", worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC
+    )
+    evicted.clear()
+    self.coordinator.configure_fault_tolerance(
+        max_retries=2,
+        on_worker_unreachable=self._make_evict_callback(evicted),
+        evictable_statuses=(
+            worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC,
+        ),
+    )
+    with self.assertRaises(WeightSyncError) as ctx_active:
+      asyncio.run(self.coordinator.sync(3, destination_statuses=all_statuses))
+    self.assertEqual(ctx_active.exception.result.round_index, 0)
+    self.assertEmpty(evicted)
+    self.assertIn("s1", self.registry)
+    self.assertIn("s-pending", self.registry)
+    self.assertIsNotNone(self.coordinator.poisoned)
+
+    # 4. ACTIVE worker fails simultaneously alongside a PENDING_WEIGHT_SYNC
+    #    failure -> raises immediately on attempt 0, zero workers evicted.
+    d_active_both = FakeDestination(
+        "s1", [], fail_on="pre", fail_persistently=True
+    )
+    d_pending_both = FakeDestination(
+        "s-pending", [], fail_on="pre", fail_persistently=True
+    )
+    self.make(d_active_both, d_pending_both)
+    self.registry.set_status(
+        "s-pending", worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC
+    )
+    evicted.clear()
+    self.coordinator.configure_fault_tolerance(
+        max_retries=2,
+        on_worker_unreachable=self._make_evict_callback(evicted),
+        evictable_statuses=(
+            worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC,
+        ),
+    )
+    with self.assertRaises(WeightSyncError) as ctx_both:
+      asyncio.run(self.coordinator.sync(4, destination_statuses=all_statuses))
+    self.assertEqual(ctx_both.exception.result.round_index, 0)
+    self.assertEmpty(evicted)
+    self.assertIn("s1", self.registry)
+    self.assertIn("s-pending", self.registry)
+
+  def test_sync_unknown_transfer_state_does_not_evict_or_retry(self):
+    d1 = FakeDestination("s1", [])
+    d2 = FakeDestination("s2", [])
+    self.make(d1, d2)
+    self.handler.raise_on_transfer = weight_sync.TransferOutcomeUnknownError(
+        "transfer timed out"
+    )
+    evicted: list[str] = []
+
+    self.coordinator.configure_fault_tolerance(
+        max_retries=2,
+        on_worker_unreachable=lambda h, exc: evicted.append(repr(h)),
+    )
+    with self.assertRaises(WeightSyncError) as ctx:
+      self.sync(policy_version=1)
+
+    self.assertIs(ctx.exception.result.state, RoundState.UNKNOWN_TRANSFER_STATE)
+    self.assertEmpty(evicted)
+    self.assertEqual(ctx.exception.result.round_index, 0)
+    self.assertIn("s1", self.registry)
+    self.assertIn("s2", self.registry)
+
+  def test_sync_exhausts_retries_after_evicting_failed_destination(self):
+    d1 = FakeDestination("s1", [])
+    d2 = FakeDestination("s2", [], fail_on="pre", fail_persistently=True)
+    self.make(d1, d2)
+    evicted: list[str] = []
+
+    self.coordinator.configure_fault_tolerance(
+        max_retries=0,
+        on_worker_unreachable=self._make_evict_callback(evicted),
+    )
+    with self.assertRaises(WeightSyncError) as ctx:
+      self.sync(policy_version=1)
+
+    self.assertEqual(ctx.exception.result.round_index, 0)
+    self.assertEqual(evicted, ["s2"])
+    self.assertIn("s1", self.registry)
+
+  def test_sync_does_not_evict_when_every_destination_failed(self):
+    d1 = FakeDestination("s1", [], fail_on="pre", fail_persistently=True)
+    d2 = FakeDestination("s2", [], fail_on="pre", fail_persistently=True)
+    self.make(d1, d2)
+    evicted: list[str] = []
+
+    self.coordinator.configure_fault_tolerance(
+        max_retries=1,
+        on_worker_unreachable=self._make_evict_callback(evicted),
+    )
+    with self.assertRaises(WeightSyncError) as ctx:
+      self.sync(policy_version=1)
+
+    self.assertEqual(ctx.exception.result.round_index, 0)
+    self.assertEmpty(evicted)
+    self.assertIn("s1", self.registry)
+    self.assertIn("s2", self.registry)
+
+  def test_fast_forward_ignores_destination_that_turned_pending_mid_round(
+      self,
+  ):
+    d1 = FakeDestination("s1", [])
+    d2 = FakeDestination("s2", [], fail_on="post", fail_persistently=True)
+    self.make(d1, d2)
+    newcomer = FakeDestination("s-new", [])
+    evicted: list[str] = []
+    evict = self._make_evict_callback(evicted)
+
+    def evict_while_newcomer_turns_pending(handle, exc):
+      # The lifecycle reconciler brings up a late worker while the round fails.
+      info = self.registry.register(newcomer)
+      self.registry.set_status(
+          info.worker_id, worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC
+      )
+      evict(handle, exc)
+
+    self.coordinator.configure_fault_tolerance(
+        max_retries=0,
+        on_worker_unreachable=evict_while_newcomer_turns_pending,
+    )
+    result = asyncio.run(
+        self.coordinator.sync(
+            4,
+            destination_statuses=(
+                worker_registry.AdmissionStatus.ACTIVE,
+                worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC,
+            ),
+        )
+    )
+
+    self.assertIs(result.state, RoundState.COMMITTED)
+    self.assertEqual(result.round_index, 0)
+    self.assertEqual(evicted, ["s2"])
+    self.assertEqual([w.worker_id for w in result.workers], ["s1"])
+    self.assertIn("s-new", self.registry)
+    self.assertEqual(d1.serving, expected_pattern(4))
+
+  def test_unblamed_failure_retries_without_pending_destinations(self):
+    d_active = FakeDestination("s1", [])
+    d_pending = FakeDestination("s-pending", [])
+    self.make(d_active, d_pending)
+    self.registry.set_status(
+        "s-pending", worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC
+    )
+    transfer = self.handler.transfer
+
+    def transfer_failing_into_pending(src_units, dst_units, **kwargs):
+      if d_pending.unit in dst_units:
+        raise RuntimeError("newcomer transfer path is down")
+      return transfer(src_units, dst_units, **kwargs)
+
+    self.handler.transfer = transfer_failing_into_pending
+    evicted: list[str] = []
+    self.coordinator.configure_fault_tolerance(
+        max_retries=1,
+        on_worker_unreachable=self._make_evict_callback(evicted),
+        evictable_statuses=(
+            worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC,
+        ),
+    )
+    result = asyncio.run(
+        self.coordinator.sync(
+            1,
+            destination_statuses=(
+                worker_registry.AdmissionStatus.ACTIVE,
+                worker_registry.AdmissionStatus.PENDING_WEIGHT_SYNC,
+            ),
+        )
+    )
+
+    self.assertIs(result.state, RoundState.COMMITTED)
+    self.assertEqual(result.round_index, 1)
+    self.assertEqual([w.worker_id for w in result.workers], ["s1"])
+    self.assertEmpty(evicted)
+    self.assertIn("s-pending", self.registry)
+    self.assertEqual(d_active.serving, expected_pattern(1))
+
+  def test_sync_source_failure_does_not_evict_or_retry(self):
+    d1 = FakeDestination("s1", [])
+    d2 = FakeDestination("s2", [])
+    self.make(d1, d2)
+
+    async def broken_prepare(sync_request=None):
+      del sync_request
+      raise RuntimeError("trainer prepare failed")
+
+    self.sources[0].prepare_weight_sync = broken_prepare
+    evicted: list[str] = []
+
+    self.coordinator.configure_fault_tolerance(
+        max_retries=2,
+        on_worker_unreachable=self._make_evict_callback(evicted),
+    )
+    with self.assertRaises(WeightSyncError) as ctx:
+      self.sync(policy_version=1)
+
+    self.assertIs(ctx.exception.result.state, RoundState.PREPARING)
+    self.assertEmpty(ctx.exception.result.workers)
+    self.assertEmpty(evicted)
+    self.assertEqual(ctx.exception.result.round_index, 0)
+    self.assertIn("s1", self.registry)
+    self.assertIn("s2", self.registry)
+
+  def test_transport_initiated_cancelled_error_attributes_and_recovers(self):
+    # Models concurrent `h_old.sync_close()` (which cancels an in-flight
+    # `grpc.aio` unary call with `asyncio.CancelledError` while the caller
+    # task's `cancelling() == 0`) during preparing, pre_weight_sync, and
+    # post_weight_sync.
+    async def _raise_transport_cancel(*args, **kwargs):
+      del args, kwargs
+      fut = asyncio.get_running_loop().create_future()
+      fut.cancel()
+      return await fut
+
+    # 1. Transport cancel during `preparing` (`bind_weight_sync`).
+    d1_prep = FakeDestination("s1", [])
+    d2_prep = FakeDestination("s2", [])
+    d2_prep.bind_weight_sync = _raise_transport_cancel
+    self.make(d1_prep, d2_prep)
+    evicted: list[str] = []
+    self.coordinator.configure_fault_tolerance(
+        max_retries=1,
+        on_worker_unreachable=self._make_evict_callback(evicted),
+    )
+    res_prep = self.sync(policy_version=1)
+    self.assertIs(res_prep.state, RoundState.COMMITTED)
+    self.assertEqual(evicted, ["s2"])
+    self.assertIn("s1", self.registry)
+    self.assertNotIn("s2", self.registry)
+    self.assertEqual(d1_prep.serving, expected_pattern(1))
+
+    # 2. Transport cancel during `pre_weight_sync` (+ status poll).
+    d1_pre = FakeDestination("s1", [])
+    d2_pre = FakeDestination("s2", [])
+    d2_pre.pre_weight_sync = _raise_transport_cancel
+    d2_pre.get_weight_sync_status = _raise_transport_cancel
+    self.make(d1_pre, d2_pre)
+    evicted.clear()
+    self.coordinator.configure_fault_tolerance(
+        max_retries=1,
+        on_worker_unreachable=self._make_evict_callback(evicted),
+    )
+    res_pre = self.sync(policy_version=2)
+    self.assertIs(res_pre.state, RoundState.COMMITTED)
+    self.assertEqual(evicted, ["s2"])
+    self.assertIn("s1", self.registry)
+    self.assertNotIn("s2", self.registry)
+    self.assertEqual(d1_pre.serving, expected_pattern(2))
+
+    # 3. Transport cancel during `post_weight_sync` (+ status poll) after
+    #    surviving worker already committed -> fast-forwards to COMMITTED!
+    d1_post = FakeDestination("s1", [])
+    d2_post = FakeDestination("s2", [])
+    d2_post.post_weight_sync = _raise_transport_cancel
+    d2_post.get_weight_sync_status = _raise_transport_cancel
+    self.make(d1_post, d2_post)
+    evicted.clear()
+    self.coordinator.configure_fault_tolerance(
+        max_retries=1,
+        on_worker_unreachable=self._make_evict_callback(evicted),
+    )
+    res_post = self.sync(policy_version=3)
+    self.assertIs(res_post.state, RoundState.COMMITTED)
+    self.assertIsNone(self.coordinator.poisoned)
+    self.assertEqual(evicted, ["s2"])
+    self.assertEqual([w.worker_id for w in res_post.workers], ["s1"])
+    self.assertEmpty(res_post.failures)
+    self.assertEqual(res_post.round_index, 0)
+    self.assertEqual(d1_post.serving, expected_pattern(3))
 
 
 if __name__ == "__main__":

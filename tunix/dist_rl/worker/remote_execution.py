@@ -716,7 +716,7 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
     self._stopped = False
     # pylint: disable=protected-access
     self._server = _grpc_aio_lib.server(
-        options=network._grpc_options(self._max_message_bytes)
+        options=network._grpc_server_options(self._max_message_bytes)
     )
     # pylint: enable=protected-access
     handler = _grpc_lib.method_handlers_generic_handler(

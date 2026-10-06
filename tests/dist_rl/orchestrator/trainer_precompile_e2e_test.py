@@ -327,6 +327,7 @@ class TrainerPrecompileE2ETest(parameterized.TestCase):
     )
     registry = worker_registry.WorkerRegistry()
     registry.register_handle("trainer-0", [datatypes.Role.ACTOR], handle)
+    registry.set_status("trainer-0", worker_registry.AdmissionStatus.ACTIVE)
     engine = distributed_rl_engine.DistributedRLEngine(registry=registry)
     handle.submit("initialize")
     handle.submit("compile", None)

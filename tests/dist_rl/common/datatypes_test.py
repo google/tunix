@@ -245,6 +245,7 @@ class WireSerializationTest(absltest.TestCase):
     self.assertFalse(cfg.enabled)
     self.assertEqual(cfg.max_task_retries, 1)
     self.assertIsNone(cfg.poll_retry_budget_s)
+    self.assertEqual(cfg.max_weight_sync_retries, 1)
     self.assertEqual(cfg.effective_max_task_retries, 0)
     self.assertEqual(cfg.effective_poll_retry_budget_s, 300.0)
 
@@ -258,7 +259,10 @@ class WireSerializationTest(absltest.TestCase):
     self.assertEqual(re_enabled.effective_poll_retry_budget_s, 60.0)
 
     disabled_cfg = datatypes.FaultToleranceConfig(
-        enabled=False, max_task_retries=5, poll_retry_budget_s=15.0
+        enabled=False,
+        max_task_retries=5,
+        poll_retry_budget_s=15.0,
+        max_weight_sync_retries=4,
     )
     self.assertFalse(disabled_cfg.enabled)
     self.assertEqual(disabled_cfg.effective_max_task_retries, 0)
@@ -272,6 +276,11 @@ class WireSerializationTest(absltest.TestCase):
 
     with self.assertRaisesRegex(ValueError, "poll_retry_budget_s must be >= 0"):
       datatypes.FaultToleranceConfig(poll_retry_budget_s=-5.0)
+
+    with self.assertRaisesRegex(
+        ValueError, "max_weight_sync_retries must be >= 0"
+    ):
+      datatypes.FaultToleranceConfig(max_weight_sync_retries=-1)
 
 
 class RLTrainerPayloadTest(absltest.TestCase):

@@ -842,6 +842,8 @@ class WeightSyncE2ETest(absltest.TestCase):
     self.addCleanup(registry.close)
     registry.register(trainer_worker_proxy)
     registry.register(rollout_worker_proxy)
+    for wid in registry.worker_ids():
+      registry.set_status(wid, worker_registry.AdmissionStatus.ACTIVE)
 
     # 4. Run real RaidenHandler and WeightSyncCoordinator in main process
     handler = raiden_handler.RaidenHandler(port=0)
@@ -901,6 +903,8 @@ class WeightSyncE2ETest(absltest.TestCase):
     self.addCleanup(registry.close)
     registry.register(trainer_worker_proxy)
     registry.register(rollout_worker_proxy)
+    for wid in registry.worker_ids():
+      registry.set_status(wid, worker_registry.AdmissionStatus.ACTIVE)
 
     # 4. Run real RaidenHandler and WeightSyncCoordinator in main process
     handler = raiden_handler.RaidenHandler(port=0)
