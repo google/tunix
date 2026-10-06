@@ -768,8 +768,9 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
 
     if getattr(self, "_jitted_fwd_bwd_step_fn", None) is None:
       self._shard_optimizer(pxla.thread_resources.env.physical_mesh)
-      if self._is_single_microstep():
-        # No grad_accumulator is created in this case.
+      if not self.grad_accumulator.persistent:
+        # No grad_accumulator buffer is allocated on the fused single-microstep
+        # path.
         donate_argnames = ("model",)
       else:
         donate_argnames = ("model", "grad_accumulator")
@@ -1043,9 +1044,32 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self._write_train_metrics()
     return self._train_steps
 
+  def _ensure_persistent_grad_accumulator(self) -> None:
+    """Allocates a persistent gradient buffer when split fwd_bwd/update is used.
+
+    Non-persistent mode (`allocate_grads=False`) leaves `grad_accumulator.grads`
+    as `{}` so the fused `train_step()` executable can keep gradients as an
+    internal XLA temporary. Split `fwd_bwd()` + `update()` executables, however,
+    must hand accumulated gradients across a JIT boundary; under
+    `nnx.cached_partial` (`cache_nnx_graph=True`) the bound accumulator's
+    pytree structure is frozen, and dynamic sequence packing may also invoke
+    `fwd_bwd()` multiple times before `update()` even when
+    `gradient_accumulation_steps == 1`. Promoting the accumulator on first
+    `fwd_bwd()` preserves the zero-allocation fused path for `train()` /
+    `train_step()` while ensuring split `fwd_bwd()` + `update()` always works.
+    """
+    if self.grad_accumulator.persistent:
+      return
+    wrt_target = nnx.LoRAParam if self._lora_enabled else nnx.Param
+    self.grad_accumulator = GradientAccumulator(
+        self.model, wrt_target, allocate_grads=True
+    )
+    self.clear_jit_cache()
+
   @override
   def fwd_bwd(self, payload: datatypes.TrainerPayload | Any, **kwargs) -> None:
     """Executes forward and backward passes."""
+    self._ensure_persistent_grad_accumulator()
     cache_nnx_graph = kwargs.pop("cache_nnx_graph", True)
     skip_jit = kwargs.pop("skip_jit", False)
     fwd_bwd_step, _, _ = self.jit_fwd_bwd_update_and_eval_step(
@@ -1434,7 +1458,11 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
             pxla.thread_resources.env.physical_mesh.devices,
             tags=tags,
         ) as span_v2:
-          if self._jitted_train_step_fn is not None and is_update_step_val:
+          if (
+              self._jitted_train_step_fn is not None
+              and not self.grad_accumulator.persistent
+              and is_update_step_val
+          ):
             self.train_step(
                 train_example,
                 skip_jit=skip_jit,

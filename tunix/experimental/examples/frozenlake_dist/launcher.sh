@@ -36,6 +36,8 @@ ARTIFACT_ROOT=${ARTIFACT_ROOT:-"${REPO_ROOT}/artifacts/qwen3_dist_frozenlake"}
 MODEL_DIR=${MODEL_DIR:-"${ARTIFACT_ROOT}/models/${MODEL_NAME}"}
 TOKENIZER_PATH=${TOKENIZER_PATH:-"${MODEL_DIR}"}
 
+MAX_SEQ_TOKEN_PER_TPU=${MAX_SEQ_TOKEN_PER_TPU:-}
+
 BATCH_SIZE=${BATCH_SIZE:-64}
 MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-64}
 NUM_GENERATIONS=${NUM_GENERATIONS:-8}
@@ -208,7 +210,7 @@ if (( BATCH_SIZE % MINI_BATCH_SIZE != 0 )); then
   echo "Error: BATCH_SIZE must be divisible by MINI_BATCH_SIZE."
   exit 1
 fi
-if (( (MINI_BATCH_SIZE * NUM_GENERATIONS) % TRAIN_MICRO_BATCH_SIZE != 0 )); then
+if [[ -z "$MAX_SEQ_TOKEN_PER_TPU" || "$MAX_SEQ_TOKEN_PER_TPU" == "0" ]] && (( (MINI_BATCH_SIZE * NUM_GENERATIONS) % TRAIN_MICRO_BATCH_SIZE != 0 )); then
   echo "Error: MINI_BATCH_SIZE * NUM_GENERATIONS must be divisible by TRAIN_MICRO_BATCH_SIZE."
   exit 1
 fi
@@ -255,6 +257,9 @@ echo "Starting distributed FrozenLake with ${MODEL_ID}: full batch ${BATCH_SIZE}
     --checkpoint_max_to_keep="$CHECKPOINT_MAX_TO_KEEP"
     --checkpoint_root_directory="$CHECKPOINT_ROOT_DIRECTORY"
   )
+  if [[ -n "$MAX_SEQ_TOKEN_PER_TPU" && "$MAX_SEQ_TOKEN_PER_TPU" != "0" ]]; then
+    cmd+=(--max_seq_token_per_tpu="$MAX_SEQ_TOKEN_PER_TPU")
+  fi
   if [[ -n "$OPT_CHAIN_TYPE" ]]; then
     cmd+=(
       --optimizer_opt_chain_type="$OPT_CHAIN_TYPE"
@@ -362,6 +367,9 @@ cmd=(
   --grid_size_range $GRID_SIZE_RANGE
   --stop_workers_on_exit
 )
+if [[ -n "$MAX_SEQ_TOKEN_PER_TPU" && "$MAX_SEQ_TOKEN_PER_TPU" != "0" ]]; then
+  cmd+=(--max_seq_token_per_tpu="$MAX_SEQ_TOKEN_PER_TPU")
+fi
 is_true "$SHUFFLE" && cmd+=(--shuffle) || cmd+=(--no-shuffle)
 is_true "$IS_SLIPPERY" && cmd+=(--is_slippery) || cmd+=(--no-is_slippery)
 is_true "$USE_MULTISTEP_PROMPT" && cmd+=(--use_multistep_prompt) || cmd+=(--no-use_multistep_prompt)

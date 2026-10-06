@@ -786,8 +786,8 @@ class PeftTrainerTest(parameterized.TestCase):
     trainer = self._external_resume_trainer(
         root, implicit_resume=implicit_resume
     )
-    trainer.fwd_bwd(self.train_ds[0], cache_nnx_graph=False)
-    train_steps = trainer.update(cache_nnx_graph=False)
+    trainer.fwd_bwd(self.train_ds[0])
+    train_steps = trainer.update()
     trainer.save_checkpoint(
         metadata={
             'step': train_steps,
@@ -865,8 +865,8 @@ class PeftTrainerTest(parameterized.TestCase):
     trainer = self._external_resume_trainer(root, implicit_resume=True)
     states = {}
     for _ in range(2):
-      trainer.fwd_bwd(self.train_ds[0], cache_nnx_graph=False)
-      step = trainer.update(cache_nnx_graph=False)
+      trainer.fwd_bwd(self.train_ds[0])
+      step = trainer.update()
       trainer.save_checkpoint(metadata={'step': step, 'marker': step})
       states[step] = jax.tree.map(jnp.copy, nnx.state(trainer.model, nnx.Param))
     trainer.close()
@@ -1434,6 +1434,59 @@ class V1ParityTest(parameterized.TestCase):
       trainer.train(dummy_datasets(batch_size=4))
     self.assertGreater(fused.call_count, 0)
     split.assert_not_called()
+    self.assertFalse(trainer.grad_accumulator.persistent)
+
+  def test_split_fwd_bwd_and_update_at_depth1_with_cached_nnx_graph(self):
+    """Split fwd_bwd() + update() works at depth 1 with cache_nnx_graph=True."""
+    model_fused, model_split = self._two_identical_models()
+    trainer_fused = self._make_trainer_v2(model_fused, max_steps=2)
+    trainer_split = self._make_trainer_v2(model_split, max_steps=2)
+    batches = dummy_datasets(batch_size=4)[:2]
+
+    self.assertFalse(trainer_split.grad_accumulator.persistent)
+    for batch in batches:
+      trainer_fused.train_step(batch)
+      trainer_split.fwd_bwd(batch)
+      trainer_split.update()
+
+    self.assertTrue(trainer_split.grad_accumulator.persistent)
+    self.assertEqual(trainer_fused.train_steps, 2)
+    self.assertEqual(trainer_split.train_steps, 2)
+    self.assertEqual(float(trainer_split.grad_accumulator.denom[...]), 0.0)
+    self._assert_fp32_weights_close(
+        nnx.state(model_fused, nnx.Param),
+        nnx.state(model_split, nnx.Param),
+    )
+
+  def test_split_fwd_bwd_dynamic_microsteps_at_depth1_with_cached_nnx_graph(
+      self,
+  ):
+    """Dynamic sequence-packing microsteps work when grad_accum_steps == 1."""
+    model_accum, model_dynamic = self._two_identical_models()
+    trainer_accum = self._make_trainer_v2(
+        model_accum, accum_steps=2, max_steps=1
+    )
+    # Distributed RL with sequence packing sets gradient_accumulation_steps=1
+    # and max_seq_token_per_tpu=None on TrainingConfig while invoking fwd_bwd()
+    # a dynamic number of times per update().
+    trainer_dynamic = self._make_trainer_v2(
+        model_dynamic, accum_steps=1, max_steps=1
+    )
+    batches = dummy_datasets(batch_size=4)[:2]
+
+    for batch in batches:
+      trainer_accum.fwd_bwd(batch)
+      trainer_dynamic.fwd_bwd(batch)
+    trainer_accum.update()
+    trainer_dynamic.update()
+
+    self.assertTrue(trainer_dynamic.grad_accumulator.persistent)
+    self.assertEqual(trainer_dynamic.train_steps, 1)
+    self.assertEqual(float(trainer_dynamic.grad_accumulator.denom[...]), 0.0)
+    self._assert_fp32_weights_close(
+        nnx.state(model_accum, nnx.Param),
+        nnx.state(model_dynamic, nnx.Param),
+    )
 
 
 class GradientAccumulatorTest(parameterized.TestCase):
