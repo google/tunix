@@ -1,0 +1,482 @@
+# DeepSWE recipe: Qwen3-4B-Instruct-2507, tunix agentic GRPO on R2E-Gym
+# (examples/deepswe/train_deepswe_nb.py) on one v5p-128 slice (4x4x4 = 64
+# chips, 16 hosts) with Pathways, namespace trellis. vLLM rollout runs on half
+# of the chips (fsdp 16 x tp 2), the actor on the other half (fsdp 8 x tp 4).
+# Tasks: the 1,012 stage-2 tasks of canon-zero-tim/clean_data/p46_q4_learnable/.
+# Algorithm: the toksc arm of README.md (Score Centering and token-level
+# importance sampling). README.md is the recipe README in google3:
+# experimental/users/haoyugao/deepswe_k8s/README.md.
+#
+# TUNIX_REF must name a google/tunix ref that has the DeepSWE changes listed in
+# README.md. Pin a commit so that a restarted run resumes on the same code.
+#
+# Prerequisites (once per namespace; paths are relative to the repository root):
+#   kubectl -n trellis create secret generic haoyugao-wandb \
+#     --from-literal=WANDB_API_KEY=<key>
+#   kubectl -n trellis create configmap hy-deepswe-q4-learnable-tasks \
+#     --from-file=canon-zero-tim/clean_data/p46_q4_learnable/p46q4census02_qwen3_4b_instruct_2507_n16_learnable_tasks.jsonl
+# Apply:   kubectl apply -f examples/deepswe/deepswe_qwen3_4b_v5p128_trellis.yaml
+# W&B:     https://wandb.ai/linchai-google/haoyu-deepswe/runs/haoyugao-dswe-qwen3-4b
+# Logs:    kubectl -n trellis logs -f -c main \
+#            -l jobset.sigs.k8s.io/jobset-name=hy-dswe-4b,jobset.sigs.k8s.io/replicatedjob-name=proc
+# Cleanup: kubectl -n trellis delete jobset hy-dswe-4b
+#          (README.md: sandboxes left behind by a deleted run)
+#
+# To launch another run, change the JobSet name (metadata.name, the affinity
+# rules and --gcs_scratch_location) and RUN_NAME.
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: hy-dswe-4b
+  namespace: trellis
+  labels:
+    kueue.x-k8s.io/queue-name: multislice-queue
+spec:
+  coordinator:
+    replicatedJob: proc
+  # A failed trainer exits non-zero; the JobSet then recreates all pods and the
+  # trainer resumes from the latest checkpoint (saved every step).
+  failurePolicy:
+    maxRestarts: 5
+    restartStrategy: Recreate
+  network:
+    enableDNSHostnames: true
+    publishNotReadyAddresses: true
+  startupPolicy:
+    startupPolicyOrder: AnyOrder
+  successPolicy:
+    operator: All
+    targetReplicatedJobs:
+    - proc
+  suspend: false
+  replicatedJobs:
+  # The trainer process with the Pathways resource manager and proxy as
+  # sidecars. It runs on one of the slice's hosts, next to a TPU worker.
+  - name: proc
+    replicas: 1
+    template:
+      spec:
+        backoffLimit: 0
+        completionMode: Indexed
+        completions: 1
+        parallelism: 1
+        template:
+          metadata:
+            annotations:
+              cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+          spec:
+            restartPolicy: Never
+            # trellis:xpk-sa can manage the agent-sandbox resources of the
+            # sandbox fleet in namespace trellis.
+            serviceAccountName: xpk-sa
+            # Kyverno on this cluster only admits medium / low / very-low.
+            priorityClassName: medium
+            terminationGracePeriodSeconds: 10
+            hostNetwork: true
+            dnsPolicy: ClusterFirstWithHostNet
+            affinity:
+              podAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchExpressions:
+                    - key: jobset.sigs.k8s.io/jobset-name
+                      operator: In
+                      values:
+                      - hy-dswe-4b
+                    - key: jobset.sigs.k8s.io/replicatedjob-name
+                      operator: In
+                      values:
+                      - pw-node
+                  topologyKey: kubernetes.io/hostname
+            nodeSelector:
+              cloud.google.com/gke-tpu-accelerator: tpu-v5p-slice
+              cloud.google.com/gke-tpu-topology: 4x4x4
+              cloud.google.com/reservation-name: cloudtpu-20260902214500-1810493672
+            tolerations:
+            - key: cloud.google.com/reservation-name
+              operator: Equal
+              value: cloudtpu-20260902214500-1810493672
+              effect: NoSchedule
+            - key: google.com/tpu
+              operator: Exists
+              effect: NoSchedule
+            initContainers:
+            - name: pathways-rm
+              image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_server:raiden_20260929200000
+              imagePullPolicy: IfNotPresent
+              restartPolicy: Always
+              args:
+              - --server_port=29001
+              - --gcs_scratch_location=gs://cloud-pathways-staging/tmp/hy-dswe-4b
+              - --node_type=resource_manager
+              - --instance_count=1
+              - --instance_type=tpuv5:4x4x4
+              env:
+              - name: RAIDEN_BROADCAST_K
+                value: "64"
+              - name: TPU_RAIDEN_DATA_NICS
+                value: eth0
+              - name: REPLICATED_JOB_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.annotations['jobset.sigs.k8s.io/replicatedjob-name']
+              - name: JOBSET_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.annotations['jobset.sigs.k8s.io/jobset-name']
+              - name: HOST_ADDRESS
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+              - name: TPU_SKIP_MDS_QUERY
+                value: "true"
+              - name: ENABLE_PATHWAYS_PERSISTENCE
+                value: "1"
+              ports:
+              - containerPort: 29001
+                protocol: TCP
+              - containerPort: 29002
+                protocol: TCP
+              resources:
+                requests:
+                  cpu: "2"
+                  memory: 4G
+                limits:
+                  cpu: "24"
+                  memory: 32G
+            - name: pathways-proxy
+              image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_proxy_server:raiden_20260929200000
+              imagePullPolicy: IfNotPresent
+              restartPolicy: Always
+              args:
+              - --server_port=29000
+              - --resource_manager_address=$(PATHWAYS_HEAD):29001
+              - --gcs_scratch_location=gs://cloud-pathways-staging/tmp/hy-dswe-4b
+              - --temporary_flags_for_debugging=temporary_flag_for_debugging_test_only_hold_death_ref=false
+              env:
+              - name: RAIDEN_BROADCAST_K
+                value: "64"
+              - name: TPU_RAIDEN_DATA_NICS
+                value: eth0
+              - name: PATHWAYS_HEAD
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+              - name: ENABLE_PATHWAYS_PERSISTENCE
+                value: "1"
+              ports:
+              - containerPort: 29000
+                protocol: TCP
+              resources:
+                requests:
+                  cpu: "4"
+                  memory: 16G
+                limits:
+                  cpu: "16"
+                  memory: 160G
+            containers:
+            - name: main
+              image: gcr.io/cloud-tpu-multipod-dev/mohitkhatwani-runner:all-fixes-1005
+              imagePullPolicy: Always
+              securityContext:
+                privileged: true
+              env:
+              - name: TUNIX_REF
+                value: main
+              - name: RUN_NAME
+                value: haoyugao-dswe-qwen3-4b
+              # JAX talks to the TPUs through the Pathways proxy sidecar.
+              - name: JAX_PLATFORMS
+                value: proxy,cpu
+              - name: JAX_BACKEND_TARGET
+                value: grpc://localhost:29000
+              - name: ENABLE_PATHWAYS_PERSISTENCE
+                value: "1"
+              - name: RAIDEN_BROADCAST_K
+                value: "64"
+              - name: TPU_RAIDEN_DATA_NICS
+                value: eth0
+              # vLLM (tpu-inference) on Pathways.
+              - name: VLLM_ENABLE_V1_MULTIPROCESSING
+                value: "0"
+              - name: VLLM_TPU_USING_PATHWAYS
+                value: "1"
+              - name: NEW_MODEL_DESIGN
+                value: "1"
+              - name: SKIP_JAX_PRECOMPILE
+                value: "1"
+              - name: TOKENIZERS_PARALLELISM
+                value: "false"
+              - name: TUNIX_IS_INTERNAL_ENV
+                value: "false"
+              - name: PYTHONPATH
+                value: /app
+              - name: PYTHONUNBUFFERED
+                value: "1"
+              # The image runs Hugging Face offline by default; the model and
+              # the dataset are downloaded at startup.
+              - name: HF_HOME
+                value: /tmp/hf
+              - name: HF_HUB_OFFLINE
+                value: "0"
+              - name: TRANSFORMERS_OFFLINE
+                value: "0"
+              - name: HF_DATASETS_OFFLINE
+                value: "0"
+              - name: HF_HUB_DISABLE_PROGRESS_BARS
+                value: "1"
+              # Sandbox fleet: namespace and the mirror of the R2E-Gym images.
+              - name: NAMESPACE
+                value: trellis
+              - name: IMAGE_REWRITE_PREFIX
+                value: europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/
+              # W&B: a restarted run continues the same W&B run.
+              - name: WANDB_ENTITY
+                value: linchai-google
+              - name: WANDB_RUN_ID
+                value: $(RUN_NAME)
+              - name: WANDB_RESUME
+                value: allow
+              - name: WANDB_API_KEY
+                valueFrom:
+                  secretKeyRef:
+                    name: haoyugao-wandb
+                    key: WANDB_API_KEY
+              command:
+              - bash
+              - -c
+              - |
+                set -euo pipefail
+                # On failure, keep the pod for two minutes so that its logs can
+                # be read before the JobSet recreates it.
+                trap 'rc=$?; if [ "$rc" -ne 0 ]; then echo "[deepswe] exit $rc"; sleep 120; fi' EXIT
+                cd /app
+                fetch() {
+                  timeout 300 git fetch --depth=1 https://github.com/google/tunix.git "${TUNIX_REF}"
+                }
+                fetch || { sleep 30; fetch; }
+                git checkout -f FETCH_HEAD
+                echo "[deepswe] tunix ${TUNIX_REF} at $(git rev-parse HEAD)"
+                python3 -u examples/deepswe/train_deepswe_nb.py \
+                  --model_version=Qwen/Qwen3-4B-Instruct-2507 \
+                  --models_base_dir=/tmp/models \
+                  --dtype=float32 \
+                  --param_dtype=float32 \
+                  --dataset_name=R2E-Gym/R2E-Gym-Subset \
+                  --dataset_revision=2e8108ff942f24fcb5686badfaf7f9a8808566d5 \
+                  --dataset_split=train \
+                  --gold_whitelist=/data/p46q4census02_qwen3_4b_instruct_2507_n16_learnable_tasks.jsonl \
+                  --seed=42 \
+                  --batch_size=16 \
+                  --mini_batch_size=16 \
+                  --num_generations=16 \
+                  --num_epochs=4 \
+                  --max_steps=200 \
+                  --max_prompt_length=4096 \
+                  --max_response_length=16384 \
+                  --max_turns=50 \
+                  --temperature=1.0 \
+                  --top_p=1.0 \
+                  --top_k=0 \
+                  --rollout_engine=vllm \
+                  --vllm_utilization=0.6 \
+                  --max_num_batched_tokens=20480 \
+                  --vllm_max_num_seqs=256 \
+                  --vllm_enable_prefix_caching=false \
+                  --vllm_seed=42 \
+                  --max_concurrency=256 \
+                  --rollout_micro_batch_size=1 \
+                  --train_micro_batch_size=8 \
+                  --compute_logps_micro_batch_size=8 \
+                  --train_trajectory_micro_batch_size=8 \
+                  --compute_logps_trajectory_micro_batch_size=8 \
+                  --rollout_mesh_fsdp=16 \
+                  --rollout_mesh_tp=2 \
+                  --train_mesh_fsdp=8 \
+                  --train_mesh_tp=4 \
+                  --learning_rate=1e-6 \
+                  --b1=0.9 \
+                  --b2=0.99 \
+                  --weight_decay=0.01 \
+                  --max_grad_norm=1.0 \
+                  --beta=0.0 \
+                  --epsilon=0.2 \
+                  --epsilon_high=0.28 \
+                  --advantage_estimator=rloo \
+                  --loss_agg_mode=sequence-mean-token-scale \
+                  --exact_token_continuity=true \
+                  --use_rollout_logps=true \
+                  --overlong_filter=false \
+                  --score_centering=true \
+                  --score_centering_top_k=32 \
+                  --score_centering_eps=1e-6 \
+                  --sampler_is=token \
+                  --sampler_is_threshold=2.0 \
+                  --env_backend=kubernetes \
+                  --use_agent_sandbox \
+                  --node_selector_val=sandbox-cpu-pool \
+                  --scaffold=r2egym \
+                  --action_compat_mode=q4_r2egym_xml_v2 \
+                  --episode_timeout_secs=4800 \
+                  --step_timeout_secs=1800 \
+                  --reward_timeout_secs=1800 \
+                  --sandbox_job_name=hy-dswe-4b \
+                  --sandbox_ready_timeout_secs=3600 \
+                  --sandbox_acquire_retries=3 \
+                  --sandbox_priority_class=low \
+                  --prewarm_wait_initial=false \
+                  --prewarm_scale_on_hold=true \
+                  --prewarm_early_note_secs=180 \
+                  --prewarm_max_replicas=1 \
+                  --eval_every_n_steps=1000000 \
+                  --ckpt_dir="gs://haoyu-deepswe-bucket/${RUN_NAME}/checkpoints" \
+                  --save_interval_steps=1 \
+                  --max_to_keep=2 \
+                  --metric_logger_dir="/tmp/deepswe-logs/${RUN_NAME}" \
+                  --wandb_project=haoyu-deepswe \
+                  --wandb_run_name="${RUN_NAME}" \
+                  --exit_timeout_secs=900 \
+                  --logging_level=INFO
+              resources:
+                requests:
+                  memory: 260G
+                limits:
+                  memory: 260G
+              volumeMounts:
+              - name: shared-tmp
+                mountPath: /tmp
+              - name: tasks
+                mountPath: /data
+                readOnly: true
+            volumes:
+            - name: shared-tmp
+              hostPath:
+                path: /tmp
+                type: DirectoryOrCreate
+            - name: tasks
+              configMap:
+                name: hy-deepswe-q4-learnable-tasks
+  # The 16 Pathways TPU workers of the slice, 4 chips each.
+  - name: pw-node
+    replicas: 1
+    template:
+      spec:
+        backoffLimit: 2048000
+        completionMode: Indexed
+        completions: 16
+        parallelism: 16
+        template:
+          metadata:
+            annotations:
+              cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+          spec:
+            restartPolicy: OnFailure
+            serviceAccountName: xpk-sa
+            priorityClassName: medium
+            terminationGracePeriodSeconds: 10
+            hostNetwork: true
+            dnsPolicy: ClusterFirstWithHostNet
+            # The whole node pool (slice) for this JobSet alone.
+            affinity:
+              podAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchExpressions:
+                    - key: jobset.sigs.k8s.io/jobset-name
+                      operator: In
+                      values:
+                      - hy-dswe-4b
+                  topologyKey: cloud.google.com/gke-nodepool
+              podAntiAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchExpressions:
+                    - key: jobset.sigs.k8s.io/jobset-name
+                      operator: Exists
+                    - key: jobset.sigs.k8s.io/jobset-name
+                      operator: NotIn
+                      values:
+                      - hy-dswe-4b
+                  topologyKey: cloud.google.com/gke-nodepool
+            nodeSelector:
+              cloud.google.com/gke-tpu-accelerator: tpu-v5p-slice
+              cloud.google.com/gke-tpu-topology: 4x4x4
+              cloud.google.com/reservation-name: cloudtpu-20260902214500-1810493672
+            tolerations:
+            - key: cloud.google.com/reservation-name
+              operator: Equal
+              value: cloudtpu-20260902214500-1810493672
+              effect: NoSchedule
+            - key: google.com/tpu
+              operator: Exists
+              effect: NoSchedule
+            containers:
+            - name: pathways-worker
+              image: us-docker.pkg.dev/cloud-tpu-v2-images-dev/pathways/gke/datenglin/unsanitized_server:raiden_20260929200000
+              imagePullPolicy: Always
+              args:
+              - --server_port=29005
+              - --resource_manager_address=$(PATHWAYS_HEAD):29001
+              - --gcs_scratch_location=gs://cloud-pathways-staging/tmp/hy-dswe-4b
+              env:
+              - name: RAIDEN_BROADCAST_K
+                value: "64"
+              - name: TPU_RAIDEN_DATA_NICS
+                value: eth0
+              - name: TPU_MIN_LOG_LEVEL
+                value: "0"
+              - name: TF_CPP_MIN_LOG_LEVEL
+                value: "0"
+              - name: XCLOUD_ENVIRONMENT
+                value: GCP
+              - name: MEGASCALE_GRPC_ENABLE_XOR_TRACER
+                value: "false"
+              - name: MEGASCALE_NUM_SLICES
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/replicatedjob-replicas']
+              - name: JOBSET_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.annotations['jobset.sigs.k8s.io/jobset-name']
+              - name: REPLICATED_JOB_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.annotations['jobset.sigs.k8s.io/replicatedjob-name']
+              - name: MEGASCALE_SLICE_ID
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/job-index']
+              - name: PATHWAYS_HEAD
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+              - name: MEGASCALE_COORDINATOR_ADDRESS
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+              - name: ENABLE_PATHWAYS_PERSISTENCE
+                value: "1"
+              ports:
+              - containerPort: 29005
+                protocol: TCP
+              - containerPort: 29006
+                protocol: TCP
+              - containerPort: 8471
+                protocol: TCP
+              - containerPort: 8080
+                protocol: TCP
+              resources:
+                requests:
+                  google.com/tpu: "4"
+                  memory: 100G
+                limits:
+                  google.com/tpu: "4"
+              volumeMounts:
+              - name: shared-tmp
+                mountPath: /tmp
+            volumes:
+            - name: shared-tmp
+              hostPath:
+                path: /tmp
+                type: DirectoryOrCreate
