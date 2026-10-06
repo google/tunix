@@ -839,30 +839,47 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           manifest_file,
       )
 
+    logging.info(
+        "Loading DeepSWE dataset: source=%s split=%s.",
+        args.dataset_path or args.dataset_name,
+        args.dataset_split,
+    )
+    dataset = deepswe.load_deepswe_dataset(
+        dataset_name=args.dataset_name,
+        dataset_split=args.dataset_split,
+        dataset_path=args.dataset_path,
+        cache_dir=args.dataset_cache_dir or None,
+        shuffle=args.shuffle,
+        seed=args.seed,
+    )
+    logging.info(
+        "Loaded DeepSWE dataset: source=%s split=%s size=%d.",
+        args.dataset_path or args.dataset_name,
+        args.dataset_split,
+        len(dataset),
+    )
+
+    val_dataset = None
+    if args.rcp_logging:
+      val_dataset = deepswe.load_deepswe_dataset(
+          dataset_name=args.dataset_name,
+          dataset_split="validation",
+          dataset_path=args.dataset_path,
+          cache_dir=args.dataset_cache_dir or None,
+          shuffle=False,
+          seed=args.seed,
+      )
+      logging.info(
+          "Loaded DeepSWE validation dataset: source=%s split=validation"
+          " size=%d.",
+          args.dataset_path or args.dataset_name,
+          len(val_dataset),
+      )
+
     def _on_train_start(step: int) -> None:
       nonlocal fleet, prompt_stream
       if args.rcp_logging:
         mllog_utils.train_start(args, step=step)
-
-      logging.info(
-          "Loading DeepSWE dataset after train_start: source=%s split=%s.",
-          args.dataset_path or args.dataset_name,
-          args.dataset_split,
-      )
-      dataset = deepswe.load_deepswe_dataset(
-          dataset_name=args.dataset_name,
-          dataset_split=args.dataset_split,
-          dataset_path=args.dataset_path,
-          cache_dir=args.dataset_cache_dir or None,
-          shuffle=args.shuffle,
-          seed=args.seed,
-      )
-      logging.info(
-          "Loaded DeepSWE dataset: source=%s split=%s size=%d.",
-          args.dataset_path or args.dataset_name,
-          args.dataset_split,
-          len(dataset),
-      )
 
       if args.use_agent_sandbox:
         fleet = sandbox_utils.init_global_fleet(
@@ -973,7 +990,8 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
     if args.rcp_logging:
       mllog_utils.init_print(
           args,
-          train_dataset=None,
+          train_dataset=dataset,
+          val_dataset=val_dataset,
       )
 
     logging.info("Bringing up remote workers through ClusterOrchestrator...")
