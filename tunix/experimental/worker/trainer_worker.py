@@ -242,6 +242,7 @@ class TrainerWorker(abstract_worker.Worker):
           " apply_deferred_update() first."
       )
     self._step_timer = StepTimer()
+    self._missing_timing_tokens: set[str] = set()
 
   def _policy_version(self) -> int:
     if self._trainer is None:
@@ -432,6 +433,25 @@ class TrainerWorker(abstract_worker.Worker):
     setter(target_state)
     return self._response(target_state_configured=True)
 
+  def _timing_token(self, name: str) -> Any:
+    """Returns the trainer's readiness token `name` for the step timer.
+
+    Trainers set `last_fwd_bwd_token` / `last_update_token` to an array that
+    becomes ready when that work finishes on device. A trainer that does not
+    set them still trains, but `TRAINER_STEP_TIMING` then carries dispatch
+    times only, so warn once per token rather than leave `ready` silently None.
+    """
+    token = getattr(self._trainer, name, None)
+    if token is None and name not in self._missing_timing_tokens:
+      self._missing_timing_tokens.add(name)
+      logging.warning(
+          "TRAINER_STEP_TIMING: %s does not set `%s`; device `ready` times"
+          " will be missing from the timeline (dispatch times only).",
+          type(self._trainer).__name__,
+          name,
+      )
+    return token
+
   def fwd_bwd(
       self,
       request: datatypes.TrainRequest,
@@ -487,7 +507,7 @@ class TrainerWorker(abstract_worker.Worker):
           request.payload, apply_optimizer=apply_optimizer, **kwargs
       )
       self._step_timer.fwd_bwd_dispatched(
-          mb_idx, getattr(self._trainer, "last_fwd_bwd_token", None)
+          mb_idx, self._timing_token("last_fwd_bwd_token")
       )
       if apply_optimizer and defer_update:
         self._deferred_update = str(request.request_id)
@@ -766,7 +786,7 @@ class TrainerWorker(abstract_worker.Worker):
     try:
       train_step = self._trainer.update(**kwargs)
       self._step_timer.update_dispatched(
-          train_step, getattr(self._trainer, "last_update_token", None)
+          train_step, self._timing_token("last_update_token")
       )
       self._last_error = None
       return train_step
