@@ -503,6 +503,88 @@ class TestRLVllmSamplerWeightSync(unittest.TestCase):
 
         asyncio.run(run_test())
 
+    @patch("tunix.experimental.rollout.vllm_sampler_v2.asyncio.sleep", new_callable=AsyncMock)
+    @patch("tunix.experimental.rollout.vllm_sampler_v2.AsyncLLMEngine.from_engine_args")
+    def test_start_retries_on_engine_core_init_failure(
+        self, mock_from_engine_args, mock_sleep
+    ):
+        """Verifies start() retries when EngineCore child initialization fails transiently."""
+        mock_engine = MagicMock()
+        mock_from_engine_args.side_effect = [
+            RuntimeError(
+                "Engine core initialization failed. See root cause above. "
+                "Failed core proc(s): {}"
+            ),
+            mock_engine,
+        ]
+        args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B")
+        sampler = RLVllmSampler(engine_args=args)
+
+        async def run_test():
+            await sampler.start()
+            self.assertTrue(sampler._is_running)
+            self.assertIs(sampler._engine, mock_engine)
+            self.assertEqual(mock_from_engine_args.call_count, 2)
+            mock_sleep.assert_awaited_once_with(
+                RLVllmSampler._START_RETRY_DELAY_SECONDS
+            )
+            await sampler.stop()
+
+        asyncio.run(run_test())
+
+    @patch("tunix.experimental.rollout.vllm_sampler_v2.asyncio.sleep", new_callable=AsyncMock)
+    @patch("tunix.experimental.rollout.vllm_sampler_v2.AsyncLLMEngine.from_engine_args")
+    def test_start_raises_after_exhausting_retries(
+        self, mock_from_engine_args, mock_sleep
+    ):
+        """Verifies start() re-raises after exhausting _START_MAX_ATTEMPTS."""
+        mock_from_engine_args.side_effect = RuntimeError(
+            "Engine core initialization failed. See root cause above. "
+            "Failed core proc(s): {}"
+        )
+        args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B")
+        sampler = RLVllmSampler(engine_args=args)
+
+        async def run_test():
+            with self.assertRaisesRegex(
+                RuntimeError, "Engine core initialization failed"
+            ):
+                await sampler.start()
+            self.assertFalse(sampler._is_running)
+            self.assertEqual(
+                mock_from_engine_args.call_count,
+                RLVllmSampler._START_MAX_ATTEMPTS,
+            )
+            self.assertEqual(
+                mock_sleep.await_count,
+                RLVllmSampler._START_MAX_ATTEMPTS - 1,
+            )
+
+        asyncio.run(run_test())
+
+    @patch("tunix.experimental.rollout.vllm_sampler_v2.asyncio.sleep", new_callable=AsyncMock)
+    @patch("tunix.experimental.rollout.vllm_sampler_v2.AsyncLLMEngine.from_engine_args")
+    def test_start_does_not_retry_unrelated_runtime_error(
+        self, mock_from_engine_args, mock_sleep
+    ):
+        """Verifies start() fails fast on unrelated RuntimeErrors."""
+        mock_from_engine_args.side_effect = RuntimeError(
+            "Invalid model configuration"
+        )
+        args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B")
+        sampler = RLVllmSampler(engine_args=args)
+
+        async def run_test():
+            with self.assertRaisesRegex(
+                RuntimeError, "Invalid model configuration"
+            ):
+                await sampler.start()
+            self.assertFalse(sampler._is_running)
+            self.assertEqual(mock_from_engine_args.call_count, 1)
+            mock_sleep.assert_not_awaited()
+
+        asyncio.run(run_test())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -140,8 +140,12 @@ class RLVllmSampler:
     driver_worker = getattr(model_executor, "driver_worker", None)
     return [driver_worker] if driver_worker else []
 
+  _START_MAX_ATTEMPTS: int = 3
+  _START_RETRY_DELAY_SECONDS: float = 2.0
+
   async def start(self, **kwargs: Any) -> None:
     """Initializes the vLLM engine and execution environment."""
+    del kwargs
     if self._is_running:
       logger.warning("RLVllmSampler is already running.")
       return
@@ -152,7 +156,26 @@ class RLVllmSampler:
         self.engine_args.scheduling_policy,
     )
 
-    self._engine = AsyncLLMEngine.from_engine_args(self.engine_args)
+    for attempt in range(1, self._START_MAX_ATTEMPTS + 1):
+      try:
+        self._engine = AsyncLLMEngine.from_engine_args(self.engine_args)
+        break
+      except RuntimeError as e:
+        if (
+            "Engine core initialization failed" not in str(e)
+            or attempt >= self._START_MAX_ATTEMPTS
+        ):
+          raise
+        logger.warning(
+            "AsyncLLMEngine initialization failed on attempt %d/%d (%s); "
+            "retrying in %.1fs...",
+            attempt,
+            self._START_MAX_ATTEMPTS,
+            e,
+            self._START_RETRY_DELAY_SECONDS,
+        )
+        await asyncio.sleep(self._START_RETRY_DELAY_SECONDS)
+
     self._is_running = True
     self._log_stats_task = asyncio.create_task(self._log_stats_loop())
 
