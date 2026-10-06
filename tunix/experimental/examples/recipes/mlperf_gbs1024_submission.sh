@@ -31,4 +31,6 @@ export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-128}"
 export VLLM_DATA_PARALLEL_SIZE="${VLLM_DATA_PARALLEL_SIZE:-1}"
 export ROLLOUT_TPU_SLICE="${ROLLOUT_TPU_SLICE:-tpu7x:2x2x1}"
 export ROLLOUT_JOBSET_YAML="${ROLLOUT_JOBSET_YAML:-jobset.tpu.yaml}"
-bash tunix/experimental/examples/recipes/mlperf_397b_1024_v7x.sh start
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+bash "${DIR}/mlperf_397b_1024_v7x.sh" start
