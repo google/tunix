@@ -48,7 +48,7 @@ def _tiny_model(family: str) -> nnx.Module:
 class QwenQLoraTest(parameterized.TestCase):
 
   @parameterized.parameters('qwen2', 'qwen3')
-  def test_nf4_lora_train_step(self, family: str):
+  def test_nf4_lora_train_step(self, family: str) -> None:
     model = _tiny_model(family)
     provider = qwix.LoraProvider(
         module_path='.*q_proj|.*k_proj|.*v_proj|.*o_proj|.*gate_proj|.*up_proj|.*down_proj',
@@ -62,7 +62,7 @@ class QwenQLoraTest(parameterized.TestCase):
         model, provider, rngs=nnx.Rngs(params=0), **model_input
     )
 
-    def loss_fn(m):
+    def loss_fn(m: nnx.Module) -> jax.Array:
       logits, _ = m(**model_input)
       return jnp.mean(logits.astype(jnp.float32))
 
@@ -73,7 +73,9 @@ class QwenQLoraTest(parameterized.TestCase):
     self.assertTrue(jnp.isfinite(loss))
     grad_leaves = jax.tree.leaves(grads)
     self.assertNotEmpty(grad_leaves)
-    self.assertTrue(all(jnp.all(jnp.isfinite(g)) for g in grad_leaves))
+    self.assertTrue(
+        jnp.all(jnp.array([jnp.all(jnp.isfinite(g)) for g in grad_leaves]))
+    )
 
 
 if __name__ == '__main__':
