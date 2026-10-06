@@ -7,6 +7,7 @@
 
 1. **Strict Read-Only Protocol Boundary (`TrajectoryReader`)**
    The CLI parses backend store flags (`--store`, `--root_dir`, `--run_id`) via `simple_parsing.subgroups`, builds the store config dict via `build_store_config()`, constructs the selected backend through `store.TrajectoryStore.from_config()`, and passes it to subcommands as a `store.TrajectoryReader`. Subcommands only ever receive a `TrajectoryReader`, guaranteeing that inspection tools cannot mutate or corrupt rollout data or couple to backend-specific storage internals.
+   The global `--metadata_type` flag (default `base`; any registered `TrajectoryMetadata.METADATA_TYPE`, e.g. `tunix`) selects the `TrajectoryMetadata` subclass the store reads trajectories back as. Reading a Tunix run with `--metadata_type tunix` yields `TunixTrajectory` objects whose first-class fields (`total_reward`, `status`, per-step rewards) the commands report; with `base` those fields stay packed in `extra`, and the stats log a warning that suggests the `--metadata_type` to re-run with instead of silently reporting their reward and status as missing.
 
 2. **Dual Output Contract (Human & `--json`)**
    Every subcommand implements `execute(self, reader: store.TrajectoryReader, output_json: bool = False) -> int`.
@@ -20,13 +21,24 @@
 
 ## Usage
 
+### Subcommands
+
+| Subcommand | What it reports |
+| :--- | :--- |
+| `ping` | Store connectivity and the number of trajectories it holds. |
+| `summary [--max_tools N]` | Run totals (steps, tokens, mean final reward, tool call counts) and one row per trajectory: status, final reward, step counts by originator, prompt/completion/total tokens, and the tool call sequence (truncated to `N` calls, default 5; `0` shows all). |
+| `show --trajectory_id ID [--max_message_chars N]` | One trajectory's stats header followed by each step: originator, message (collapsed to one line and truncated to `N` characters, default 120; `0` shows all), tool calls, tokens, and per-step reward for Tunix environment steps. An unknown ID is a usage error (stderr, exit code `2`). |
+
+Quantities a trajectory does not report render as `-` (and `null` in `--json`) rather than `0`.
+
 ### Human-Readable Output
 ```bash
 python3 -m tunix.experimental.trajectory.explorer.run_explorer \
   --store file \
   --root_dir /tmp/tx_smoke \
   --run_id run_95d297b1 \
-  ping
+  --metadata_type tunix \
+  summary
 ```
 
 ### Machine-Readable JSON Output
@@ -35,8 +47,8 @@ python3 -m tunix.experimental.trajectory.explorer.run_explorer \
   --store file \
   --root_dir /tmp/tx_smoke \
   --run_id run_95d297b1 \
-  --json ping
-# {"status": "ok", "trajectories_count": 4}
+  --json show --trajectory_id traj_1001
+# {"trajectory": {...stats...}, "steps": [{"step_id": 1, ...}, ...]}
 ```
 
 ---

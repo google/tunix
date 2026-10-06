@@ -47,8 +47,12 @@ class FileTrajectoryStoreConfig:
       help="Run to read. Required by the 'file' backend.",
   )
 
-  def build_store_config(self) -> dict[str, Any]:
+  def build_store_config(self, metadata_type: str) -> dict[str, Any]:
     """Validates the run directory and returns the `from_config` dict.
+
+    Args:
+      metadata_type: Registered `TrajectoryMetadata.METADATA_TYPE` the store
+        reads metadata back as.
 
     Returns:
       A `TrajectoryStore.from_config` dict for the file backend.
@@ -65,7 +69,7 @@ class FileTrajectoryStoreConfig:
         "backend": "file",
         "root_dir": self.root_dir,
         "run_id": self.run_id,
-        "metadata_type": trajectory_lib.TrajectoryMetadata.METADATA_TYPE,
+        "metadata_type": metadata_type,
     }
 
 
@@ -73,16 +77,30 @@ class FileTrajectoryStoreConfig:
 class InMemoryTrajectoryStoreConfig:
   """Configuration for the in-memory TrajectoryStore."""
 
-  def build_store_config(self) -> dict[str, Any]:
-    """Returns the `from_config` dict for the in-memory backend."""
+  def build_store_config(self, metadata_type: str) -> dict[str, Any]:
+    """Returns the `from_config` dict for the in-memory backend.
+
+    Args:
+      metadata_type: Registered `TrajectoryMetadata.METADATA_TYPE` the store
+        reads metadata back as.
+
+    Returns:
+      A `TrajectoryStore.from_config` dict for the in-memory backend.
+    """
     return {
         "enabled": True,
         "backend": "memory",
-        "metadata_type": trajectory_lib.TrajectoryMetadata.METADATA_TYPE,
+        "metadata_type": metadata_type,
     }
 
 
 StoreConfig = FileTrajectoryStoreConfig | InMemoryTrajectoryStoreConfig
+
+# Every registered TrajectoryMetadata subclass; trajectory.py registers both
+# base and Tunix metadata on import.
+_METADATA_TYPES: tuple[str, ...] = tuple(
+    sorted(trajectory_lib.TrajectoryMetadata._REGISTRY)  # pylint: disable=protected-access
+)
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
@@ -96,6 +114,15 @@ class ExplorerConfig:
       },
       default="memory",
       help="Trajectory Store backend to read from.",
+  )
+  metadata_type: str = simple_parsing.choice(
+      *_METADATA_TYPES,
+      default=trajectory_lib.TrajectoryMetadata.METADATA_TYPE,
+      help=(
+          "TrajectoryMetadata type the store reads trajectories back as, e.g."
+          " 'tunix' to read Tunix rollouts with their first-class reward and"
+          " status."
+      ),
   )
   json: bool = simple_parsing.field(
       default=False,
@@ -148,7 +175,7 @@ def get_reader(config: ExplorerConfig) -> store.TrajectoryStore[Any]:
     ValueError: If the selected backend is missing a flag it requires or the
       target run directory does not exist.
   """
-  backend_config = config.store.build_store_config()
+  backend_config = config.store.build_store_config(config.metadata_type)
   trajectory_store = store.TrajectoryStore.from_config(backend_config)
   if trajectory_store is None:
     raise ValueError(f"Store config {backend_config} built no store.")

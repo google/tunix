@@ -21,8 +21,11 @@ from absl.testing import absltest
 from etils import epath
 from tunix.experimental.trajectory import file_store
 from tunix.experimental.trajectory import in_memory_store
+from tunix.experimental.trajectory import trajectory as trajectory_lib
 from tunix.experimental.trajectory.explorer import run_explorer
 from tunix.experimental.trajectory.explorer.commands import ping
+from tunix.experimental.trajectory.explorer.commands import show
+from tunix.experimental.trajectory.explorer.commands import summary
 
 
 def _parse_cmd(cmd: str = "") -> run_explorer.ExplorerConfig:
@@ -63,12 +66,45 @@ class ParseArgsTest(absltest.TestCase):
     config = _parse_cmd("ping")
     self.assertIsInstance(config.cmd, ping.PingCommand)
 
+  def test_subcommand_summary(self) -> None:
+    config = _parse_cmd("summary --max_tools 3")
+    self.assertIsInstance(config.cmd, summary.SummaryCommand)
+    assert isinstance(config.cmd, summary.SummaryCommand)
+    self.assertEqual(config.cmd.max_tools, 3)
+
+  def test_subcommand_show(self) -> None:
+    config = _parse_cmd("show --trajectory_id traj_1001")
+    self.assertIsInstance(config.cmd, show.ShowCommand)
+    assert isinstance(config.cmd, show.ShowCommand)
+    self.assertEqual(config.cmd.trajectory_id, "traj_1001")
+
   def test_global_flags_compose_with_a_subcommand(self) -> None:
     config = _parse_cmd("--store file --root_dir /tmp/t --run_id r ping")
     self.assertIsInstance(config.store, run_explorer.FileTrajectoryStoreConfig)
     assert isinstance(config.store, run_explorer.FileTrajectoryStoreConfig)
     self.assertEqual(config.store.run_id, "r")
     self.assertIsInstance(config.cmd, ping.PingCommand)
+
+  def test_metadata_type_defaults_to_base(self) -> None:
+    config = _parse_cmd()
+    self.assertEqual(
+        config.metadata_type, trajectory_lib.TrajectoryMetadata.METADATA_TYPE
+    )
+
+  def test_metadata_type_flag(self) -> None:
+    config = _parse_cmd("--metadata_type tunix")
+    self.assertEqual(
+        config.metadata_type,
+        trajectory_lib.TunixTrajectoryMetadata.METADATA_TYPE,
+    )
+
+  def test_unknown_metadata_type_is_a_usage_error(self) -> None:
+    with (
+        contextlib.redirect_stderr(io.StringIO()),
+        self.assertRaises(SystemExit) as raised,
+    ):
+      _parse_cmd("--metadata_type nonexistent")
+    self.assertEqual(raised.exception.code, 2)
 
 
 class GetReaderTest(absltest.TestCase):
@@ -78,6 +114,16 @@ class GetReaderTest(absltest.TestCase):
 
     self.assertIsInstance(reader, in_memory_store.InMemoryTrajectoryStore)
     self.assertEmpty(reader.get_trajectories_metadata())
+
+  def test_store_reads_back_the_selected_metadata_type(self) -> None:
+    reader = run_explorer.get_reader(
+        _parse_cmd("--metadata_type tunix --store memory")
+    )
+
+    self.assertEqual(
+        reader.to_config()["metadata_type"],
+        trajectory_lib.TunixTrajectoryMetadata.METADATA_TYPE,
+    )
 
   def test_file_store_opens_the_named_run(self) -> None:
     root_dir = self.create_tempdir().full_path
