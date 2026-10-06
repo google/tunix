@@ -20,6 +20,8 @@ per-token log-prob scorer run through AbstractTrainer.model_scope.
 """
 
 import contextlib
+import json
+import time
 from typing import Any
 
 from absl.testing import absltest
@@ -156,6 +158,85 @@ class TrainerWorkerTest(absltest.TestCase):
   def test_update_returns_step_count(self):
     step = self.worker.update()
     self.assertEqual(step, 11)
+
+  def _train_request(self, rid):
+    payload = datatypes.RLTrainerPayload(
+        prompt_ids=np.array([[1, 2]], dtype=np.int32),
+        prompt_mask=np.ones((1, 2), dtype=np.float32),
+        completion_ids=np.array([[3, 4]], dtype=np.int32),
+        completion_mask=np.ones((1, 2), dtype=np.float32),
+        advantages=np.array([1.0], dtype=np.float32),
+        metadata={},
+    )
+    return datatypes.TrainRequest(request_id=rid, payload=payload, metadata={})
+
+  def test_get_step_timing_records_microbatches_update_and_prepare(self):
+    # Tokens make the timer observe device readiness off the serving thread.
+    self.fake_trainer.last_fwd_bwd_token = jnp.asarray(1.0)
+    self.fake_trainer.last_update_token = jnp.asarray(2.0)
+    self.fake_trainer.prepare_weight_sync = lambda **kw: None
+
+    self.worker.fwd_bwd(request=self._train_request("r0"))
+    self.worker.fwd_bwd(request=self._train_request("r1"))
+    train_step = self.worker.update()
+    self.worker.prepare_weight_sync()
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+      t = self.worker.get_step_timing()
+      if t["update"]["ready_ago_s"] is not None and all(
+          m["ready_ago_s"] is not None for m in t["mb"]
+      ):
+        break
+      time.sleep(0.01)
+
+    self.assertEqual(t["v"], trainer_worker.STEP_TIMING_SCHEMA_VERSION)
+    self.assertEqual(t["train_step"], train_step)
+    self.assertEqual([m["i"] for m in t["mb"]], [0, 1])
+    for m in t["mb"]:
+      # dispatch_begin precedes dispatch_end precedes now: ago values descend.
+      self.assertGreaterEqual(m["dispatch_begin_ago_s"], m["dispatch_end_ago_s"])
+      self.assertGreaterEqual(m["dispatch_end_ago_s"], 0.0)
+      self.assertIsNotNone(m["ready_ago_s"])
+    self.assertGreaterEqual(
+        t["update"]["dispatch_begin_ago_s"], t["update"]["dispatch_end_ago_s"]
+    )
+    self.assertIsNotNone(t["update"]["ready_ago_s"])
+    self.assertGreaterEqual(t["prepare"]["recv_ago_s"], t["prepare"]["done_ago_s"])
+    # The update happened after the last microbatch was dispatched.
+    self.assertLessEqual(
+        t["update"]["dispatch_begin_ago_s"], t["mb"][-1]["dispatch_end_ago_s"]
+    )
+    # Wire-safe: plain JSON.
+    json.dumps(t)
+
+  def test_get_step_timing_without_tokens_has_no_ready_instants(self):
+    self.worker.fwd_bwd(request=self._train_request("r0"))
+    self.worker.update()
+    t = self.worker.get_step_timing()
+    self.assertLen(t["mb"], 1)
+    self.assertIsNone(t["mb"][0]["ready_ago_s"])
+    self.assertIsNone(t["update"]["ready_ago_s"])
+    self.assertIsNone(t["prepare"])
+
+  def test_missing_timing_tokens_warn_once_per_token(self):
+    with self.assertLogs(level="WARNING") as logs:
+      self.worker.fwd_bwd(request=self._train_request("r0"))
+      self.worker.fwd_bwd(request=self._train_request("r1"))
+      self.worker.update()
+      self.worker.fwd_bwd(request=self._train_request("r2"))
+      self.worker.update()
+    warnings = [m for m in logs.output if "TRAINER_STEP_TIMING" in m]
+    self.assertLen(warnings, 2)
+    self.assertTrue(any("`last_fwd_bwd_token`" in m for m in warnings))
+    self.assertTrue(any("`last_update_token`" in m for m in warnings))
+
+  def test_get_step_timing_resets_on_first_fwd_bwd_after_update(self):
+    self.worker.fwd_bwd(request=self._train_request("r0"))
+    self.worker.update()
+    self.worker.fwd_bwd(request=self._train_request("r1"))
+    t = self.worker.get_step_timing()
+    self.assertLen(t["mb"], 1)
+    self.assertIsNone(t["update"])
 
   def test_save_checkpoint_returns_checkpoint_path_from_checkpoint_dir(self):
     resp_empty = self.worker.save_checkpoint(metadata={"step": 5})

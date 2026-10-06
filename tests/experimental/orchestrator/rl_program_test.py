@@ -254,6 +254,7 @@ class RLProgramTest(absltest.TestCase):
     self.mock_engine.prepare_rollout_policy = mock.AsyncMock(return_value=0)
     self.mock_engine.sync_weights = mock.AsyncMock(return_value=1)
     self.mock_engine.get_metrics = mock.AsyncMock(return_value=None)
+    self.mock_engine.get_step_timing = mock.AsyncMock(return_value=(None, 0.0))
     self.mock_engine.poll_rollouts = mock.AsyncMock(side_effect=_mock_poll)
     self.mock_algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
     self.mock_algo.num_generations = 2
@@ -5654,6 +5655,7 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
     self.mock_engine.train_step.return_value = {"loss": 0.1}
     self.mock_engine.get_metrics.return_value = {"loss": 0.1}
     self.mock_engine.sync_weights.return_value = None
+    self.mock_engine.get_step_timing.return_value = (None, 0.0)
 
   def _make_scored_item(
       self,

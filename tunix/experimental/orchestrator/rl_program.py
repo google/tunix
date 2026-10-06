@@ -27,6 +27,7 @@ import dataclasses
 import gc
 import os
 import threading
+import json
 import time
 from typing import Any
 
@@ -1700,6 +1701,36 @@ class StandardRLProgram(RLProgram):
     )
     return result, time.monotonic() - start
 
+  async def _log_trainer_step_timing(self, step: int) -> None:
+    """Logs `TRAINER_STEP_TIMING` for `step` (one line, machine-readable).
+
+    Format::
+
+      TRAINER_STEP_TIMING step=<N> policy_version=<v> rtt_s=<r> timing=<json>
+
+    `timing` is the trainer worker's step snapshot (schema `v`): per
+    microbatch `mb[i].{dispatch_begin,dispatch_end,ready}_ago_s`, the same for
+    `update`, and `prepare.{recv,done}_ago_s` for this round's
+    `prepare_weight_sync`. Every `*_ago_s` is seconds before the worker handled
+    the request, measured on the trainer's monotonic clock. On this log's
+    clock an instant is `t(line) - rtt_s / 2 - ago_s`. `ready` is when the
+    device finished the work (None if not yet observed); `dispatch_*` bracket
+    the RPC handler, which returns at dispatch. A worker that cannot answer
+    logs nothing here (the engine logs why).
+    """
+    assert self.engine is not None
+    # `get_step_timing` logs and returns None when the worker cannot answer.
+    timing, rtt_s = await self.engine.get_step_timing(role=datatypes.Role.ACTOR)
+    if timing is None:
+      return
+    logging.info(
+        "TRAINER_STEP_TIMING step=%d policy_version=%d rtt_s=%.3f timing=%s",
+        step,
+        self.policy_version,
+        rtt_s,
+        json.dumps(timing, separators=(",", ":")),
+    )
+
   async def _await_pending_sync(self) -> None:
     """Waits for the background weight sync, if any; raises if it failed."""
     task, self._pending_sync = self._pending_sync, None
@@ -2077,6 +2108,9 @@ class StandardRLProgram(RLProgram):
         self.policy_version = (
             new_version if new_version is not None else self.policy_version + 1
         )
+      # The source has staged (or the round ran), so the trainer's update is
+      # complete: fetch and log its device-side timeline for this step.
+      await self._log_trainer_step_timing(current_step)
 
       # Before `commit()`, which will eventually take ownership of the groups.
       generation_metrics = _generation_metrics(uncommitted_groups)

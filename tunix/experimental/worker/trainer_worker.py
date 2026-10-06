@@ -16,10 +16,13 @@
 
 from collections.abc import Mapping
 import contextlib
+import threading
+import time
 from typing import Any, Callable, ContextManager, cast
 
 from absl import logging
 from flax import nnx
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -30,6 +33,151 @@ from tunix.experimental.worker import abstract_worker
 from tunix.rl import common as rl_common
 
 WorkerState = datatypes.WorkerState
+
+
+STEP_TIMING_SCHEMA_VERSION = 1
+
+
+class StepTimer:
+  """Trainer-side timeline of one optimizer step, for the orchestrator log.
+
+  The orchestrator only sees RPC boundaries, and `fwd_bwd` / `update` return
+  at JAX dispatch, before the device work completes. This records, per step:
+
+    * per microbatch: when the `fwd_bwd` RPC started and finished dispatching,
+      and when its outputs became ready on device;
+    * the same three instants for the `update` RPC;
+    * when `prepare_weight_sync` was received and finished (it reads the
+      updated weights, so it cannot complete before the update has).
+
+  Device readiness is observed off the serving thread: a daemon thread blocks
+  on a token array (the loss / grad norm the trainer already produced) and
+  stamps the time; the main path never waits.
+
+  All times are `time.monotonic()` on the trainer host. `snapshot()` converts
+  them to "seconds ago" relative to the moment it is called, so the consumer
+  can anchor them on its own clock without any cross-host clock agreement:
+  for a snapshot returned by an RPC that took `rtc` seconds round trip,
+  `t_event ~= t_rpc_return - rtt/2 - ago_s`.
+  """
+
+  def __init__(self):
+    self._lock = threading.Lock()
+    self._reset_locked()
+
+  def _reset_locked(self) -> None:
+    self._mb: list[dict[str, float | None]] = []
+    self._update: dict[str, float | None] | None = None
+    self._prepare: dict[str, float | None] | None = None
+    self._train_step: int | None = None
+
+  def reset(self) -> None:
+    with self._lock:
+      self._reset_locked()
+
+  # -- microbatches --------------------------------------------------------
+  def fwd_bwd_begin(self) -> int:
+    with self._lock:
+      if self._update is not None:  # first microbatch after an update
+        self._reset_locked()
+      self._mb.append(
+          {"dispatch_begin": time.monotonic(), "dispatch_end": None, "ready": None}
+      )
+      return len(self._mb) - 1
+
+  def fwd_bwd_dispatched(self, idx: int, token: Any = None) -> None:
+    with self._lock:
+      self._mb[idx]["dispatch_end"] = time.monotonic()
+    self._watch_ready(token, lambda t, i=idx: self._set_mb_ready(i, t))
+
+  def _set_mb_ready(self, idx: int, t: float) -> None:
+    with self._lock:
+      if idx < len(self._mb) and self._mb[idx]["ready"] is None:
+        self._mb[idx]["ready"] = t
+
+  # -- update ----------------------------------------------------------------
+  def update_begin(self) -> None:
+    with self._lock:
+      self._update = {
+          "dispatch_begin": time.monotonic(), "dispatch_end": None, "ready": None
+      }
+
+  def update_dispatched(self, train_step: int | None, token: Any = None) -> None:
+    with self._lock:
+      if self._update is not None:
+        self._update["dispatch_end"] = time.monotonic()
+      self._train_step = train_step
+    self._watch_ready(token, self._set_update_ready)
+
+  def _set_update_ready(self, t: float) -> None:
+    with self._lock:
+      if self._update is not None and self._update["ready"] is None:
+        self._update["ready"] = t
+
+  # -- prepare_weight_sync ---------------------------------------------------
+  def prepare_begin(self) -> None:
+    with self._lock:
+      self._prepare = {"recv": time.monotonic(), "done": None}
+
+  def prepare_end(self) -> None:
+    with self._lock:
+      if self._prepare is not None:
+        self._prepare["done"] = time.monotonic()
+
+  # -- readiness watcher -----------------------------------------------------
+  @staticmethod
+  def _watch_ready(token: Any, on_ready: Callable[[float], None]) -> None:
+    """Stamps `on_ready(t)` when `token` (a JAX array) is ready on device."""
+    if token is None or not hasattr(token, "block_until_ready"):
+      return
+
+    def _wait():
+      try:
+        jax.block_until_ready(token)
+      except Exception:  # pylint: disable=broad-except
+        return  # a failed step surfaces through the RPC that ran it
+      on_ready(time.monotonic())
+
+    threading.Thread(target=_wait, name="step-timer-ready", daemon=True).start()
+
+  # -- export ------------------------------------------------------------------
+  def snapshot(self) -> dict[str, Any]:
+    """Wire-safe copy with every instant as seconds before now (`*_ago_s`)."""
+    now = time.monotonic()
+
+    def ago(t: float | None) -> float | None:
+      return None if t is None else round(now - t, 3)
+
+    with self._lock:
+      mb = [
+          {
+              "i": i,
+              "dispatch_begin_ago_s": ago(m["dispatch_begin"]),
+              "dispatch_end_ago_s": ago(m["dispatch_end"]),
+              "ready_ago_s": ago(m["ready"]),
+          }
+          for i, m in enumerate(self._mb)
+      ]
+      upd = None
+      if self._update is not None:
+        upd = {
+            "dispatch_begin_ago_s": ago(self._update["dispatch_begin"]),
+            "dispatch_end_ago_s": ago(self._update["dispatch_end"]),
+            "ready_ago_s": ago(self._update["ready"]),
+        }
+      prep = None
+      if self._prepare is not None:
+        prep = {
+            "recv_ago_s": ago(self._prepare["recv"]),
+            "done_ago_s": ago(self._prepare["done"]),
+        }
+      return {
+          "v": STEP_TIMING_SCHEMA_VERSION,
+          "train_step": self._train_step,
+          "mb": mb,
+          "update": upd,
+          "prepare": prep,
+      }
 
 
 class TrainerWorker(abstract_worker.Worker):
@@ -74,6 +222,8 @@ class TrainerWorker(abstract_worker.Worker):
     self._worker_id = worker_id
     self._state = WorkerState.PENDING
     self._last_error: str | None = None
+    self._step_timer = StepTimer()
+    self._missing_timing_tokens: set[str] = set()
 
   def _policy_version(self) -> int:
     if self._trainer is None:
@@ -217,6 +367,25 @@ class TrainerWorker(abstract_worker.Worker):
     setter(target_state)
     return self._response(target_state_configured=True)
 
+  def _timing_token(self, name: str) -> Any:
+    """Returns the trainer's readiness token `name` for the step timer.
+
+    Trainers set `last_fwd_bwd_token` / `last_update_token` to an array that
+    becomes ready when that work finishes on device. A trainer that does not
+    set them still trains, but `TRAINER_STEP_TIMING` then carries dispatch
+    times only, so warn once per token rather than leave `ready` silently None.
+    """
+    token = getattr(self._trainer, name, None)
+    if token is None and name not in self._missing_timing_tokens:
+      self._missing_timing_tokens.add(name)
+      logging.warning(
+          "TRAINER_STEP_TIMING: %s does not set `%s`; device `ready` times"
+          " will be missing from the timeline (dispatch times only).",
+          type(self._trainer).__name__,
+          name,
+      )
+    return token
+
   def fwd_bwd(
       self,
       request: datatypes.TrainRequest,
@@ -226,8 +395,12 @@ class TrainerWorker(abstract_worker.Worker):
     self._ensure_ready()
     req_metadata = dict(request.metadata) if request.metadata else {}
     kwargs.pop("skip_jit", None)
+    mb_idx = self._step_timer.fwd_bwd_begin()
     try:
       self._trainer.fwd_bwd(request.payload, **kwargs)
+      self._step_timer.fwd_bwd_dispatched(
+          mb_idx, self._timing_token("last_fwd_bwd_token")
+      )
       self._last_error = None
       resp = self._response(queued=True, **req_metadata)
       resp.request_id = request.request_id
@@ -240,8 +413,12 @@ class TrainerWorker(abstract_worker.Worker):
   def update(self, **kwargs) -> int:
     """Applies the accumulated (mean) gradients as one optimizer update."""
     self._ensure_ready()
+    self._step_timer.update_begin()
     try:
       train_step = self._trainer.update(**kwargs)
+      self._step_timer.update_dispatched(
+          train_step, self._timing_token("last_update_token")
+      )
       self._last_error = None
       return train_step
     except Exception as exc:
@@ -427,10 +604,12 @@ class TrainerWorker(abstract_worker.Worker):
     """Stages weights for transfer and returns their metadata."""
     self._ensure_ready()
     self.state = WorkerState.SYNCING
+    self._step_timer.prepare_begin()
     try:
       if sync_request is not None:
         kwargs["sync_request"] = sync_request
       metadata = self._trainer.prepare_weight_sync(**kwargs)
+      self._step_timer.prepare_end()
       self._last_error = None
       self._maybe_release_after_stage(sync_request)
       if metadata is not None:
@@ -493,3 +672,12 @@ class TrainerWorker(abstract_worker.Worker):
   def get_metrics(self) -> Any:
     """Returns and clears the recently collected step metric records."""
     return self._trainer.get_metrics()
+
+  def get_step_timing(self) -> dict[str, Any]:
+    """Returns the trainer-side timeline of the current / last optimizer step.
+
+    See `StepTimer`. Instants are seconds before this call was handled, so the
+    caller anchors them on its own clock from the RPC's return time. The record
+    is not cleared here; it is replaced by the first `fwd_bwd` after an update.
+    """
+    return self._step_timer.snapshot()
