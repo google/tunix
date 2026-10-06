@@ -90,6 +90,58 @@ ROLLOUT_FP8=true TRAINER_FP8=true bash tunix/experimental/examples/recipes/mlper
 
 Both need an image whose MaxText has the `rollout_fp8_moe` and `fp8_moe_fake_quant` flags.
 
+#### Dropless MoE (`ragged_buffer_factor=-1`)
+
+The trainer's default `ragged_buffer_factor=2.0` caps each expert's receive buffer, so a skewed routing batch can
+drop tokens silently. [`mlperf_gbs1024_dropless.sh`](mlperf_gbs1024_dropless.sh) runs the gbs1024 submission
+setup with worst-case buffers instead. It sets the following (each can be overridden from the environment) and then
+calls `mlperf_gbs1024_submission.sh`:
+
+| Variable | Value | Why |
+|---|---|---|
+| `RAGGED_BUFFER_FACTOR` | `-1.0` | worst-case (dropless) ring-of-experts buffers |
+| `NUM_MOE_TOKEN_CHUNKS` | `4` | smaller per-chunk dispatch buffers |
+| `CONTEXT_REMAT_POLICY` | `offload` | attention output saved to host |
+| `TRAINER_EXTRA_LIBTPU_INIT_ARGS` | `--xla_tpu_max_hbm_size_mib=84992` | about 14.5 GiB of HBM is resident when `fwd_bwd` loads; without the cap XLA schedules against all 94.74 GiB and the program does not fit |
+| `TUNIX_IMAGE` | `gcr.io/cloud-tpu-multipod-dev/atwigg/trellis-experimental:1005` | retries vLLM engine start (see below) |
+
+Run it from the repo root with `MAXTEXT_EXTRA_FLAGS` unset (it replaces the recipe's MaxText flag list, and the
+script refuses to start when it is set; use `MAXTEXT_USER_EXTRA_FLAGS` to append overrides):
+
+```bash
+unset MAXTEXT_EXTRA_FLAGS
+export K8S_NAMESPACE=<namespace> JOB_PREFIX=<short-prefix> SEED=<seed>
+export WANDB_API_KEY=<your key>          # optional; W&B is skipped without it
+
+DRY_RUN=true bash tunix/experimental/examples/recipes/mlperf_gbs1024_dropless.sh   # render only
+bash tunix/experimental/examples/recipes/mlperf_gbs1024_dropless.sh                # launch
+```
+
+Check the trainer at start-up and at the first step:
+
+```bash
+# Resolved MaxText config: expect -1.0, 4, OFFLOAD and True
+kubectl logs -n ${K8S_NAMESPACE} -l jobset.sigs.k8s.io/jobset-name=${JOB_PREFIX}-train,jobset.sigs.k8s.io/replicatedjob-name=proc -c main \
+  | grep -E "Config param (ragged_buffer_factor|num_moe_token_chunks|context|use_gdn_kernel):"
+# fwd_bwd program size from the runtime compile (about 72 GiB with the cap, about 82 GiB without)
+kubectl logs -n ${K8S_NAMESPACE} -l jobset.sigs.k8s.io/jobset-name=${JOB_PREFIX}-train,jobset.sigs.k8s.io/replicatedjob-name=proc --all-containers \
+  | grep -E "XLA::TPU program HBM usage: [0-9.]+G"
+# Steps, or a runtime HBM failure (RuntimeProgramAllocationFailure means the cap is too high)
+kubectl logs -f -n ${K8S_NAMESPACE} -l jobset.sigs.k8s.io/jobset-name=${JOB_PREFIX}-orch \
+  | grep -E "Train step [0-9]+ - |RESOURCE_EXHAUSTED"
+```
+
+Tear it down with the same script, which stops the orchestrator, the trainer and all 128 rollout replicas:
+
+```bash
+bash tunix/experimental/examples/recipes/mlperf_gbs1024_dropless.sh stop
+```
+
+Use an image whose `vllm_sampler_v2` retries engine start (`_START_MAX_ATTEMPTS`). Rollout engine cores
+occasionally segfault right after `Enabled custom fusions`; with the retry they recover, and without it the first one
+stops the run under fail-fast. On bodaborg-tpu7x-gsc-elm (2026-10-06, 10 steps) this recipe cost roughly 6-9% of
+trainer time per microbatch against the production flags, and pathways workers used about 315 GiB of host memory.
+
 ### 3. Monitoring and Managing the Run
 
 ```bash

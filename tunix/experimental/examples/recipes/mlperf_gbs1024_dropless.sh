@@ -17,6 +17,21 @@ set -e
 # on the first unrecovered one.
 # MAXTEXT_EXTRA_FLAGS replaces the recipe's MaxText flag list, so it must be unset;
 # use MAXTEXT_USER_EXTRA_FLAGS to append overrides.
+#
+# Usage: mlperf_gbs1024_dropless.sh [start|stop]   (default: start)
+
+COMMAND="${1:-start}"
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if [[ "${COMMAND}" == "stop" ]]; then
+  # mlperf_gbs1024_submission.sh always starts; stop through the 1024 recipe with
+  # the submission's replica count (its own default is 64).
+  export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-128}"
+  exec bash "${DIR}/mlperf_397b_1024_v7x.sh" stop
+elif [[ "${COMMAND}" != "start" ]]; then
+  echo "ERROR: unknown command '${COMMAND}'; use start or stop." >&2
+  exit 1
+fi
 
 if [[ -n "${MAXTEXT_EXTRA_FLAGS:-}" ]]; then
   echo "ERROR: unset MAXTEXT_EXTRA_FLAGS (it replaces the recipe's MaxText flags);" \
@@ -30,5 +45,4 @@ export NUM_MOE_TOKEN_CHUNKS="${NUM_MOE_TOKEN_CHUNKS:-4}"
 export CONTEXT_REMAT_POLICY="${CONTEXT_REMAT_POLICY:-offload}"
 export TRAINER_EXTRA_LIBTPU_INIT_ARGS="${TRAINER_EXTRA_LIBTPU_INIT_ARGS:---xla_tpu_max_hbm_size_mib=84992}"
 
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 bash "${DIR}/mlperf_gbs1024_submission.sh"
