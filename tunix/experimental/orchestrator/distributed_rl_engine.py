@@ -26,6 +26,7 @@ from collections.abc import Mapping, Sequence
 import concurrent.futures
 import inspect
 from typing import Any
+import time
 import uuid
 
 from absl import logging
@@ -498,6 +499,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         payload=payload,
         metadata=metadata,
     )
+    t_rpc = time.monotonic()
     fwd_bwd_result = await self._invoke_worker(
         worker,
         "fwd_bwd",
@@ -505,15 +507,52 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         skip_jit=skip_jit,
         **kwargs,
     )
+    # The RPC returns when the worker has dispatched the step, not when the
+    # device finished it; TRAINER_STEP_TIMING carries the device-side instants.
+    logging.info(
+        "train_step fwd_bwd RPC returned on %s worker in %.3fs"
+        " (request_id=%s)",
+        role_name,
+        time.monotonic() - t_rpc,
+        request.request_id,
+    )
     if not apply_optimizer:
       return fwd_bwd_result
+    t_rpc = time.monotonic()
     train_step = await self._invoke_worker(worker, "update")
+    logging.info(
+        "train_step update RPC returned on %s worker in %.3fs (train_step=%s)",
+        role_name,
+        time.monotonic() - t_rpc,
+        train_step,
+    )
     return {
         "fwd_bwd": fwd_bwd_result,
         "updated": True,
         "train_step": train_step,
         "accumulated": accumulate_gradients,
     }
+
+  async def get_step_timing(
+      self, role: datatypes.Role = datatypes.Role.ACTOR
+  ) -> tuple[dict[str, Any] | None, float]:
+    """Trainer-side timeline of the last optimizer step, plus the RPC's RTT.
+
+    Returns `(timing, rtt_s)`; `timing` is `TrainerWorker.get_step_timing()`'s
+    snapshot (instants as seconds before the worker handled the call), or None
+    when the worker predates it. Anchor an instant on the orchestrator clock as
+    `t_return - rtt_s / 2 - ago_s`.
+    """
+    worker = self._trainer_workers.get(role)
+    if worker is None:
+      raise ValueError(f"No trainer worker registered for role {role}")
+    t0 = time.monotonic()
+    try:
+      timing = await self._invoke_worker(worker, "get_step_timing")
+    except Exception as exc:  # pylint: disable=broad-except
+      logging.warning("get_step_timing unavailable on %s worker: %s", role, exc)
+      return None, time.monotonic() - t0
+    return timing, time.monotonic() - t0
 
   async def get_metrics(
       self,
