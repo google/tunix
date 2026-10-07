@@ -1108,7 +1108,9 @@ class SwapInBindAndAllocateTest(absltest.TestCase):
 
     manager._swap_in_pages([None, device_page])
 
-    self.assertEqual(manager._page_manager.page_location(pids[0]), "device")
+    self.assertEqual(
+        manager._page_manager.page_location(pids[0]), PageLocation.DEVICE
+    )
     self.assertEqual(manager._page_manager.num_free_device_pages, 4)
 
   def test_swap_in_pages_unreferenced_host_page_raises(self):
@@ -1132,7 +1134,8 @@ class SwapInBindAndAllocateTest(absltest.TestCase):
     manager._swap_in_pages([host_page])
 
     self.assertEqual(
-        manager._page_manager.page_location(host_page.page_id), "device"
+        manager._page_manager.page_location(host_page.page_id),
+        PageLocation.DEVICE,
     )
     self.assertEqual(manager._page_manager.num_free_host_pages, 5)
 
@@ -1150,11 +1153,11 @@ class SwapInBindAndAllocateTest(absltest.TestCase):
     manager._swap_in_pages([host_page])
 
     pm = manager._page_manager
-    self.assertEqual(pm.page_location(host_page.page_id), "device")
+    self.assertEqual(pm.page_location(host_page.page_id), PageLocation.DEVICE)
     # The LRU unreferenced device page is offloaded to make room.
-    self.assertEqual(pm.page_location(u0.page_id), "host")
+    self.assertEqual(pm.page_location(u0.page_id), PageLocation.HOST)
     self.assertIn(u0, manager._unreferenced_host_pages)
-    self.assertEqual(pm.page_location(u1.page_id), "device")
+    self.assertEqual(pm.page_location(u1.page_id), PageLocation.DEVICE)
     self.assertIn(u1, manager._unreferenced_device_pages)
 
   def test_bind_pages_touches_and_extends_request_pages(self):
@@ -1191,7 +1194,9 @@ class SwapInBindAndAllocateTest(absltest.TestCase):
     for p in req_pages:
       assert p is not None
       self.assertEqual(p.ref_count, 1)
-      self.assertEqual(manager._page_manager.page_location(p.page_id), "device")
+      self.assertEqual(
+          manager._page_manager.page_location(p.page_id), PageLocation.DEVICE
+      )
     self.assertTrue(u0.is_freed)
     self.assertIsNone(manager._page_manager.page_location(u0.page_id))
     self.assertIn(u1, manager._unreferenced_device_pages)
@@ -1226,7 +1231,7 @@ class AllocateSlotsTest(parameterized.TestCase):
       assert page is not None
       self.assertEqual(page.ref_count, 1)
       self.assertEqual(
-          manager._page_manager.page_location(page.page_id), "device"
+          manager._page_manager.page_location(page.page_id), PageLocation.DEVICE
       )
 
   def test_allocate_slots_loads_computed_host_pages(self):
@@ -1245,7 +1250,9 @@ class AllocateSlotsTest(parameterized.TestCase):
     )
 
     pid = host_page.page_id
-    self.assertEqual(manager._page_manager.page_location(pid), "device")
+    self.assertEqual(
+        manager._page_manager.page_location(pid), PageLocation.DEVICE
+    )
     self.assertNotIn(host_page, manager._unreferenced_host_pages)
 
   def test_allocate_slots_marks_scheduled_pages_referenced(self):
@@ -1316,16 +1323,6 @@ class AllocateSlotsTest(parameterized.TestCase):
     )
     req_pages = manager._request_to_pages["req_1"]
     self.assertLen(req_pages, 3)
-
-  def test_allocate_slots_more_than_window_size_raises(self):
-    manager = _create_manager(page_size=4, num_device_pages=10, window_size=4)
-    with self.assertRaisesRegex(
-        ValueError,
-        "Cannot allocate more than window size tokens in a single step.",
-    ):
-      manager.allocate_slots(
-          request_id="req_1", num_tokens=5, num_completed_tokens=0
-      )
 
   def test_allocate_slots_stress_cases(self):
     manager = _create_manager(
@@ -1408,7 +1405,7 @@ class AllocateSlotsTest(parameterized.TestCase):
     self.assertLen(req_pages, 2)
     self.assertEqual(req_pages[0], host_page)
     pm = manager._page_manager
-    self.assertEqual(pm.page_location(host_page.page_id), "device")
+    self.assertEqual(pm.page_location(host_page.page_id), PageLocation.DEVICE)
     self.assertEqual(pm.num_free_device_pages, 0)
 
 

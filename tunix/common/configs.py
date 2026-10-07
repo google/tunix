@@ -143,6 +143,12 @@ class RolloutConfig:
   # Allocated HBM fraction for the rollout engine, in (0, 1].
   rollout_hbm_utilization: float = 0.2
 
+  # The maximum number of GiB of KV cache to allocate on the host.
+  host_size_gib: float = 0.0
+
+  # Whether to use tpu-raiden for KV cache host-device page transfers.
+  use_raiden: bool = False
+
   # The number of tokens per KV cache page.
   kv_cache_page_size: int = 16
 

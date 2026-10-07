@@ -403,6 +403,11 @@ class KVCacheManager:
         page_idxs[cache] = group_page_idxs
     return page_idxs
 
+  def wait_for_transfers(self) -> None:
+    """Blocks until all in-flight host-device page transfers complete."""
+    for manager in self._kv_cache_group_managers:
+      manager.wait_for_transfers()
+
   def get_physical_pages(self) -> dict[str, jax.Array]:
     """Returns a mapping of cache name to physical device pages."""
     physical_pages: dict[str, jax.Array] = {}

@@ -125,9 +125,11 @@ def _build_engine(
       tokenizer=tokenizer,
       cache_config=kv_cache_manager_lib.CacheConfig(
           max_device_size_gib=max_device_size_gib,
+          max_host_size_gib=rollout_config.host_size_gib,
           page_size=rollout_config.kv_cache_page_size,
           enable_prefix_caching=rollout_config.enable_prefix_caching,
           dtype=model.config.dtype,  # pyrefly: ignore[missing-attribute]
+          use_raiden=rollout_config.use_raiden,
       ),
       scheduler_config=scheduler_lib.SchedulerConfig(
           max_num_batched_tokens=rollout_config.max_num_batched_tokens,

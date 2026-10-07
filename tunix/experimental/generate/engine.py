@@ -594,6 +594,7 @@ class LLMEngine:
     num_prompt_tokens = int(np.sum(metadata.query_lens[i:k]))
     if prev_generated_tokens is not None:
       tokens = _write_decode_tokens(tokens, prev_generated_tokens, target_idxs)
+    self._kv_cache_manager.wait_for_transfers()
     generated_tokens, logits, logprobs, pages = (
         self._model_runner.execute_step(
             cache=self._kv_cache_manager.get_physical_pages(),

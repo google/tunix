@@ -113,6 +113,10 @@ class SingleTypeKVCacheManager:
     active = max(0, total_device_pages - freeable)
     return active / total_device_pages
 
+  def wait_for_transfers(self) -> None:
+    """Blocks until all in-flight host-device page transfers complete."""
+    self._page_manager.wait_for_transfers()
+
   def get_physical_pages(self) -> dict[str, jax.Array]:
     """Returns a mapping of cache ID to physical page arrays."""
     return self._page_manager.physical_device_pages

@@ -1,4 +1,5 @@
 import os
+import threading
 from unittest import mock
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -564,7 +565,7 @@ class TieredPagePoolManagerTest(parameterized.TestCase):
 
       manager.offload(device_pids)
       for pid in device_pids:
-        self.assertEqual(manager.page_location(pid), "host")
+        self.assertEqual(manager.page_location(pid), PageLocation.HOST)
       self.assertEqual(manager.num_free_host_pages, prev_host_free - num_pages)
       self.assertEqual(
           manager.num_free_device_pages, prev_device_free + num_pages
@@ -579,7 +580,7 @@ class TieredPagePoolManagerTest(parameterized.TestCase):
 
       manager.load(device_pids)
       for pid in device_pids:
-        self.assertEqual(manager.page_location(pid), "device")
+        self.assertEqual(manager.page_location(pid), PageLocation.DEVICE)
       self.assertEqual(manager.num_free_host_pages, prev_host_free)
 
       for l_idx, layer in enumerate(config.partition_keys):
@@ -591,6 +592,77 @@ class TieredPagePoolManagerTest(parameterized.TestCase):
           self.assertNotEqual(new_device_idx, orig_idx)
           expected_val = (l_idx + 1) * 100.0 + orig_idx
           np.testing.assert_allclose(hbm_pages[new_device_idx], expected_val)
+
+  def test_raiden_load_offload_non_blocking_until_wait_for_transfers(self):
+    d2h_gate = threading.Event()
+    h2d_gate = threading.Event()
+    d2h_started = threading.Event()
+    h2d_started = threading.Event()
+    events: list[str] = []
+
+    class _FakeFuture:
+
+      def __init__(self, name: str, gate: threading.Event):
+        self._name = name
+        self._gate = gate
+
+      def Await(self) -> None:  # pylint: disable=invalid-name
+        self._gate.wait(timeout=5.0)
+        events.append(f"{self._name}_awaited")
+
+    class _FakeRaidenMgr:
+
+      def d2h(self, src_offsets, dst_offsets, copy_sizes=None):
+        del src_offsets, dst_offsets, copy_sizes
+        events.append("d2h_dispatched")
+        d2h_started.set()
+        return _FakeFuture("d2h", d2h_gate)
+
+      def h2d(self, src_offsets, dst_offsets, copy_sizes=None):
+        del src_offsets, dst_offsets, copy_sizes
+        events.append("h2d_dispatched")
+        h2d_started.set()
+        return _FakeFuture("h2d", h2d_gate)
+
+    with mock.patch.object(
+        tiered_page_pool,
+        "_create_raiden_kv_cache_manager",
+        return_value=_FakeRaidenMgr(),
+    ):
+      config = tiered_page_pool.TieredPagePoolConfig(
+          page_size=4,
+          element_shape=(2, 2, 4),
+          dtype=jnp.float32,
+          partition_keys=("layer_0",),
+          num_device_pages=4,
+          num_host_pages=4,
+          use_raiden=True,
+      )
+      manager = config.create_manager()
+
+    pids = manager.allocate_device_pages(2)
+    # offload() and load() should return immediately on the caller thread
+    # even while d2h_gate and h2d_gate are unset.
+    manager.offload(pids)
+    self.assertEqual(manager.page_location(pids[0]), PageLocation.HOST)
+    self.assertTrue(d2h_started.wait(timeout=5.0))
+
+    manager.load(pids)
+    self.assertEqual(manager.page_location(pids[0]), PageLocation.DEVICE)
+    # Because load() switches direction from d2h to h2d, h2d must not be
+    # dispatched until d2h has been awaited.
+    self.assertEqual(events, ["d2h_dispatched"])
+
+    d2h_gate.set()
+    self.assertTrue(h2d_started.wait(timeout=5.0))
+    self.assertEqual(events, ["d2h_dispatched", "d2h_awaited", "h2d_dispatched"])
+
+    h2d_gate.set()
+    manager.wait_for_transfers()
+    self.assertEqual(
+        events,
+        ["d2h_dispatched", "d2h_awaited", "h2d_dispatched", "h2d_awaited"],
+    )
 
   def test_empty_load_offload(self):
     config = self.get_config("no device sharding", has_subshape=False)

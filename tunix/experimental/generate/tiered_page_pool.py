@@ -15,6 +15,7 @@ cache mapping to a dedicated partition within the underlying pools.
 """
 
 from collections.abc import Mapping, Sequence
+from concurrent import futures
 import dataclasses
 import enum
 import functools
@@ -382,6 +383,75 @@ class TieredPagePoolManager:
         if use_raiden and self._host_pool is not None
         else None
     )
+    self._transfer_executor: futures.ThreadPoolExecutor | None = (
+        futures.ThreadPoolExecutor(max_workers=1)
+        if self._raiden_mgr is not None
+        else None
+    )
+    self._pending_transfers: list[futures.Future[None]] = []
+    # Accessed only from the single worker thread in `_transfer_executor`.
+    self._active_raiden_direction: PageLocation | None = None
+    self._active_raiden_futures: list[_RaidenFuture] = []
+    self._active_raiden_device_offsets: set[int] = set()
+    self._active_raiden_host_offsets: set[int] = set()
+
+  def _flush_raiden_futures(self) -> None:
+    """Awaits all active Raiden DMA futures on the transfer worker thread."""
+    futures_to_await = self._active_raiden_futures
+    self._active_raiden_futures = []
+    self._active_raiden_direction = None
+    self._active_raiden_device_offsets.clear()
+    self._active_raiden_host_offsets.clear()
+    for fut in futures_to_await:
+      fut.Await()
+
+  def _run_raiden_transfer(
+      self,
+      direction: PageLocation,
+      src_offsets: list[int],
+      dst_offsets: list[int],
+  ) -> None:
+    """Dispatches a Raiden H2D or D2H transfer on the background worker thread."""
+    assert self._raiden_mgr is not None
+    if direction == PageLocation.DEVICE:
+      host_offsets = set(src_offsets)
+      device_offsets = set(dst_offsets)
+    else:
+      device_offsets = set(src_offsets)
+      host_offsets = set(dst_offsets)
+
+    if self._active_raiden_direction is not None and (
+        self._active_raiden_direction != direction
+        or bool(self._active_raiden_device_offsets & device_offsets)
+        or bool(self._active_raiden_host_offsets & host_offsets)
+    ):
+      self._flush_raiden_futures()
+
+    self._active_raiden_direction = direction
+    self._active_raiden_device_offsets.update(device_offsets)
+    self._active_raiden_host_offsets.update(host_offsets)
+    if direction == PageLocation.DEVICE:
+      fut = self._raiden_mgr.h2d(
+          src_offsets=src_offsets,
+          dst_offsets=dst_offsets,
+      )
+    else:
+      fut = self._raiden_mgr.d2h(
+          src_offsets=src_offsets,
+          dst_offsets=dst_offsets,
+      )
+    self._active_raiden_futures.append(fut)
+
+  def wait_for_transfers(self) -> None:
+    """Blocks until all in-flight host-device page transfers complete."""
+    if self._transfer_executor is None or not self._pending_transfers:
+      return
+    pending = self._pending_transfers
+    self._pending_transfers = []
+    flush_future = self._transfer_executor.submit(self._flush_raiden_futures)
+    for fut in pending:
+      fut.result()
+    flush_future.result()
 
   @property
   def num_device_pages(self) -> int:
@@ -400,6 +470,7 @@ class TieredPagePoolManager:
   @property
   def physical_device_pages(self) -> dict[str, jax.Array]:
     """Returns the underlying device page arrays."""
+    self.wait_for_transfers()
     return self._device_pool.partition_pages
 
   def page_location(self, page_id: int) -> PageLocation | None:
@@ -437,6 +508,7 @@ class TieredPagePoolManager:
 
   def update_device_pool(self, new_pages: Mapping[str, jax.Array]) -> None:
     """Updates the underlying device pool partition pages with new pages."""
+    self.wait_for_transfers()
     self._device_pool.update_pages(new_pages)
 
   @property
@@ -488,11 +560,15 @@ class TieredPagePoolManager:
     host_idxs = [self._page_id_to_idx[pid] for pid in page_ids]
     device_idxs = self._device_pool.allocate(len(page_ids))
 
-    if self._raiden_mgr is not None:
-      self._raiden_mgr.h2d(
-          src_offsets=host_idxs,
-          dst_offsets=device_idxs,
-      ).Await()
+    if self._transfer_executor is not None:
+      self._pending_transfers.append(
+          self._transfer_executor.submit(
+              self._run_raiden_transfer,
+              PageLocation.DEVICE,
+              host_idxs,
+              device_idxs,
+          )
+      )
     else:
       max_length = self._device_pool.num_pages
       padded_host_idxs = _pad_indices(host_idxs, max_length)
@@ -553,11 +629,15 @@ class TieredPagePoolManager:
     physical_device_idxs = [self._page_id_to_idx[pid] for pid in page_ids]
     physical_host_idxs = self._host_pool.allocate(len(page_ids))
 
-    if self._raiden_mgr is not None:
-      self._raiden_mgr.d2h(
-          src_offsets=physical_device_idxs,
-          dst_offsets=physical_host_idxs,
-      ).Await()
+    if self._transfer_executor is not None:
+      self._pending_transfers.append(
+          self._transfer_executor.submit(
+              self._run_raiden_transfer,
+              PageLocation.HOST,
+              physical_device_idxs,
+              physical_host_idxs,
+          )
+      )
     else:
       padded_device_idxs = _pad_indices(
           physical_device_idxs, self._device_pool.num_pages

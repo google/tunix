@@ -191,6 +191,12 @@ class VanillaRolloutTest(parameterized.TestCase):
 
     self.assertEqual(output.tokens[0].tolist(), unbounded[:2])
 
+  def test_wires_host_size_gib_to_cache_config(self):
+    host_size_gib = (16 * testing_utils.BYTES_PER_PAGE) / (1 << 30)
+    rollout = self.make_rollout(False, host_size_gib=host_size_gib)
+    group_mgr = rollout._sampler._engine._kv_cache_manager._kv_cache_group_managers[0]
+    self.assertEqual(group_mgr._page_manager.num_free_host_pages, 16)
+
 
 if __name__ == '__main__':
   absltest.main()
