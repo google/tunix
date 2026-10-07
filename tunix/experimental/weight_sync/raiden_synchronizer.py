@@ -23,7 +23,7 @@ import ipaddress
 import os
 import re
 import socket
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional, Sequence, Tuple
 
 from absl import logging
 import jax
@@ -279,7 +279,9 @@ def _filter_bindable(
     )
   if dropped:
     logging.warning(
-        "raiden bind dropped %d unbindable leaves: %s", len(dropped), dropped[:5]
+        "raiden bind dropped %d unbindable leaves: %s",
+        len(dropped),
+        dropped[:5],
     )
   return keep_names, keep_arrays
 
@@ -332,14 +334,85 @@ def _devices_per_host(devices: List[Any]) -> int:
   return counts.pop()
 
 
-def _tensor_metadata(name: str, arr: Any, layer_idx: int):
+def _global_shard_index(
+    name: str,
+    slices: tuple[slice, ...],
+    shape: tuple[int, ...],
+    mesh_shape: tuple[int, ...],
+) -> int:
+  """Row-major index of a device's slice in the variable's shard grid.
+
+  The controller enumerates a variable's slices in row-major order over
+  `mesh_shape` with tile `shape[i] // mesh_shape[i]` along each dimension
+  (`nd_slice_math.compute_nd_shard_slices`); this returns the position of
+  `slices` in that enumeration. A replicated dimension has mesh size 1 and
+  coordinate 0, so replicated devices share an index.
+
+  Args:
+    name: Variable name, for error messages.
+    slices: The device's slice per tensor dimension, as returned by
+      `Sharding.devices_indices_map`. `start=None` means 0.
+    shape: Global tensor shape.
+    mesh_shape: The variable's logical mesh shape (shards per dimension).
+
+  Returns:
+    The flat row-major shard index in `[0, prod(mesh_shape))`.
+
+  Raises:
+    ValueError: If the ranks disagree, or a slice does not start on a tile
+      boundary inside the grid (ragged shardings are not representable).
+  """
+  if not len(slices) == len(shape) == len(mesh_shape):
+    raise ValueError(
+        f"variable {name!r}: slices {slices}, shape {shape} and mesh_shape"
+        f" {mesh_shape} must have the same rank"
+    )
+  flat_index = 0
+  for dim_slice, dim_size, dim_shards in zip(slices, shape, mesh_shape):
+    tile = dim_size // dim_shards
+    if tile == 0:
+      raise ValueError(
+          f"variable {name!r}: mesh_shape {mesh_shape} splits shape {shape}"
+          " into more shards than elements"
+      )
+    start = 0 if dim_slice.start is None else int(dim_slice.start)
+    coord = start // tile
+    if start % tile != 0 or not 0 <= coord < dim_shards:
+      raise ValueError(
+          f"variable {name!r}: slice {slices} is not a tile of shape {shape}"
+          f" sharded as mesh_shape {mesh_shape}; shard start {start} must be"
+          f" a multiple of tile {tile} below {dim_shards} tiles"
+      )
+    flat_index = flat_index * dim_shards + coord
+  return flat_index
+
+
+def _tensor_metadata(
+    name: str, arr: Any, layer_idx: int, shard_devices: Sequence[jax.Device]
+) -> weight_sync.TensorMetadata:
+  """Describes `arr` for registration.
+
+  Args:
+    name: Canonical variable name.
+    arr: The bound array.
+    layer_idx: Stable batching ordinal.
+    shard_devices: The devices behind the work unit's `shards`, in `shards`
+      order; `global_shard_indices[j]` describes `shard_devices[j]`. Empty when
+      the unit publishes no shards.
+
+  Returns:
+    The variable's metadata. `global_shard_indices` is populated only when
+    `arr` carries a real sharding; otherwise it is left empty.
+  """
   sharding: Any = getattr(arr, "sharding", None)
   spec = tuple(getattr(sharding, "spec", ()) or ())
   spec = (spec + (None,) * arr.ndim)[: arr.ndim]
+  shape = tuple(arr.shape)
+  global_shard_indices: tuple[int, ...] = ()
   if sharding is not None and hasattr(sharding, "shard_shape"):
     try:
-      local = sharding.shard_shape(tuple(arr.shape))
-      mesh_shape = tuple(g // l for g, l in zip(arr.shape, local))
+      local = sharding.shard_shape(shape)
+      mesh_shape = tuple(g // l for g, l in zip(shape, local))
     except Exception as e:  # pylint: disable=broad-exception-caught
       logging.warning(
           "Could not compute mesh_shape for %s from sharding: %s, falling back"
@@ -348,47 +421,24 @@ def _tensor_metadata(name: str, arr: Any, layer_idx: int):
           e,
       )
       mesh_shape = (1,) * arr.ndim
+    else:
+      devices_indices_map = sharding.devices_indices_map(shape)
+      global_shard_indices = tuple(
+          _global_shard_index(name, devices_indices_map[d], shape, mesh_shape)
+          for d in shard_devices
+      )
   else:
     mesh_shape = (1,) * arr.ndim
   return weight_sync.TensorMetadata(
       name=name,
-      shape=tuple(arr.shape),
+      shape=shape,
       mesh_shape=mesh_shape,
       layout=tuple(reversed(range(arr.ndim))),
       item_size=arr.dtype.itemsize,
       layer_idx=layer_idx,
       sharding_spec=tuple(_axis_name(a) for a in spec),
+      global_shard_indices=global_shard_indices,
   )
-
-
-def _compute_host_subgrid(
-    array_mesh: Optional[Any],
-) -> Optional[Tuple[int, ...]]:
-  """Extracts host_subgrid from environment or the local JAX mesh devices.
-
-  Args:
-    array_mesh: Optional JAX Mesh associated with the bound arrays.
-
-  Returns:
-    A tuple of integers representing the host subgrid shape, or None.
-  """
-  host_subgrid_env = os.environ.get("RAIDEN_HOST_SUBGRID")
-  if host_subgrid_env:
-    try:
-      return tuple(int(x.strip()) for x in host_subgrid_env.split(","))
-    except ValueError:
-      pass
-  if array_mesh is not None:
-    try:
-      if (
-          hasattr(array_mesh, "local_mesh")
-          and array_mesh.local_mesh is not None
-          and hasattr(array_mesh.local_mesh, "devices")
-      ):
-        return tuple(array_mesh.local_mesh.devices.shape)
-    except (AttributeError, ValueError, TypeError):
-      pass
-  return None
 
 
 class RaidenSynchronizer:
@@ -425,7 +475,6 @@ class RaidenSynchronizer:
     self._listeners: List[str] = []
     self._ffi_mesh: Any = None
     self._ffi_shard_idx: Any = None
-    self._host_subgrid: Optional[Tuple[int, ...]] = None
     if state is not None:
       self.bind(state)
 
@@ -472,11 +521,12 @@ class RaidenSynchronizer:
     )
 
     task_mesh_shape = tuple(mesh.shape[a] for a in mesh.axis_names)
-    # Mesh POSITION, not device id. The controller indexes a source shard by
-    # its position in the mesh (`_get_global_indices` walks
-    # physical_mesh_shape), while the native layer keys staging off whatever we
-    # pass here -- slot = shard_idx % num_shards, submanager = shard_idx /
-    # num_shards, and SetGlobalShardIndices records it as the global index.
+    # Mesh POSITION, not device id. `work_unit_metadata()` publishes shards in
+    # mesh-flat order and tells the controller each shard's slice through the
+    # per-variable `global_shard_indices`, while the native layer keys staging
+    # off whatever we pass here -- slot = shard_idx % num_shards, submanager =
+    # shard_idx / num_shards, and SetGlobalShardIndices records it as the
+    # global index.
     # create_device_mesh reorders devices for topology (a 2x2x2 v5p slice comes
     # back as ids [0,1,3,2,6,7,5,4]), so keying off d.id labels each slice with
     # the wrong global index. A 2x2x1 slice happens to be identity-ordered,
@@ -636,12 +686,6 @@ class RaidenSynchronizer:
     )
     del state
     _log_rss("bind:after_flatten")
-    array_mesh = None
-    for arr in self.arrays:
-      array_mesh = getattr(getattr(arr, "sharding", None), "mesh", None)
-      if array_mesh is not None:
-        break
-    self._host_subgrid = _compute_host_subgrid(array_mesh)
     logging.info(
         "%s bind prepared %d arrays (proxy_runtime=%s)",
         self.job_name,
@@ -852,6 +896,37 @@ class RaidenSynchronizer:
     head["__element_count__"] = int(sum(a.size for a in self.arrays))
     return head
 
+  def _shard_devices(self) -> List[jax.Device]:
+    """Devices behind `shards`, in the order `work_unit_metadata` lists them.
+
+    Empty when the unit publishes no shards (nothing bound, or the transport
+    is not up yet), so the variables' `global_shard_indices` stay empty too.
+
+    Raises:
+      RuntimeError: In native TCP mode, if the local shard count disagrees with
+        the native synchronizer's `num_shards`.
+    """
+    if not self.arrays:
+      return []
+    if self._is_proxy:
+      if not self._ips:
+        return []
+      # `_init_ffi_transport` gathers one endpoint row per mesh device along
+      # `mesh.axis_names`, so `_ips[j]` is `mesh.devices.flat[j]`.
+      return list(self.arrays[0].sharding.mesh.devices.flat)
+    if self._sync is None:
+      return []
+    # The native layer stages local shard j from `addressable_shards[j]`, and
+    # `shards` repeats this host's data address once per such shard.
+    devices = [shard.device for shard in self.arrays[0].addressable_shards]
+    if len(devices) != self._sync.num_shards:
+      raise RuntimeError(
+          f"{self.job_name}: {len(devices)} addressable shard(s) on"
+          f" {self.names[0]!r} but the native synchronizer reports"
+          f" num_shards={self._sync.num_shards}"
+      )
+    return devices
+
   def work_unit_metadata(self) -> weight_sync.WorkUnitMetadata:
     mesh = None
     for arr in self.arrays:
@@ -864,13 +939,14 @@ class RaidenSynchronizer:
       # Advertise the same mesh the shards were built on.
       mesh_axes = tuple(mesh.axis_names)
       mesh_shape = tuple(int(mesh.shape[a]) for a in mesh.axis_names)
+    shard_devices = self._shard_devices()
     # Publish the canonical key, not the raw keystr: the controller pairs
     # variables by EXACT name, and the two sides root the same tree
     # differently (trainer `['base'][...]` vs rollout `['model'][...]`, plus
     # the nnx `.value` leaf). `_param_key` already normalises both away, so
     # canonicalising here is what makes the manifests line up.
     variables = tuple(
-        _tensor_metadata(_param_key(name), arr, idx)
+        _tensor_metadata(_param_key(name), arr, idx, shard_devices)
         for idx, (name, arr) in enumerate(zip(self.names, self.arrays))
     )
     if self._is_proxy:
@@ -887,6 +963,16 @@ class RaidenSynchronizer:
       )
       num_shards = self._sync.num_shards if self._sync else 1
       shards = (data_addr,) * num_shards if data_addr else ()
+    # The controller reads `global_shard_indices[j]` as the slice behind
+    # `shards[j]`; a length mismatch would silently misplace every shard.
+    if shards:
+      for variable in variables:
+        if len(variable.global_shard_indices) != len(shards):
+          raise RuntimeError(
+              f"{self.job_name}: variable {variable.name!r} publishes"
+              f" {len(variable.global_shard_indices)} global_shard_indices"
+              f" for {len(shards)} shards"
+          )
     # Index 0 keeps the default replica id "": transfer callers construct
     # WorkUnitId(job_name=...) without a replica, and registration lookups
     # must match it for single-replica units.
@@ -903,7 +989,6 @@ class RaidenSynchronizer:
         mesh_axes=mesh_axes or None,
         transport_mode="ffi" if self._is_proxy else "tcp",
         use_ffi=self._is_proxy,
-        host_subgrid=self._host_subgrid,
     )
 
 

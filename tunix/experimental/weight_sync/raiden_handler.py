@@ -77,32 +77,32 @@ class RaidenTransferOptions:
 
 
 def make_host_staged_transfer_options(
-      parallelism: int = 16,
-      group_size: int = 128,
-      max_layers: int = 512,
-  ) -> RaidenTransferOptions:
-    """Transfer options for host-staged (CPU) weight sources.
+    parallelism: int = 16,
+    group_size: int = 128,
+    max_layers: int = 512,
+) -> RaidenTransferOptions:
+  """Transfer options for host-staged (CPU) weight sources.
 
-    The controller derives skip_tiling from slice geometry when none is
-    given, marking aligned tensors as pre-tiled — but a host-staged source
-    can only stage logical bytes, so the derived plan installs permuted
-    data. An explicit all-False map keeps every tensor on the logical path.
+  The controller derives skip_tiling from slice geometry when none is
+  given, marking aligned tensors as pre-tiled — but a host-staged source
+  can only stage logical bytes, so the derived plan installs permuted
+  data. An explicit all-False map keeps every tensor on the logical path.
 
-    Args:
-     parallelism: Number of concurrent transfer streams.
-     group_size: Number of tensors the controller moves per group.
-     max_layers: Upper bound for the skip_tiling map. The receiver drops
-      indices past its own layer count, so a generous value is safe.
+  Args:
+   parallelism: Number of concurrent transfer streams.
+   group_size: Number of tensors the controller moves per group.
+   max_layers: Upper bound for the skip_tiling map. The receiver drops indices
+     past its own layer count, so a generous value is safe.
 
-    Returns:
-     Options matching the validated e2e run and the pathways benchmark
-     client.
-    """
-    return RaidenTransferOptions(
-        parallelism=parallelism,
-        group_size=group_size,
-        skip_tiling={i: False for i in range(max_layers)},
-    )
+  Returns:
+   Options matching the validated e2e run and the pathways benchmark
+   client.
+  """
+  return RaidenTransferOptions(
+      parallelism=parallelism,
+      group_size=group_size,
+      skip_tiling={i: False for i in range(max_layers)},
+  )
 
 
 class _RaidenTransport:
@@ -124,8 +124,8 @@ class _RaidenTransport:
       port: TCP port for the controller. Zero lets the kernel choose one.
       advertised_address: Address remote clients or a peer controller dial.
       loopback_address: This controller's same-host spelling, used to reject a
-        self-addressed peer. Defaults to IPv6 loopback because a listener may
-        be IPv6-only.
+        self-addressed peer. Defaults to IPv6 loopback because a listener may be
+        IPv6-only.
       name_resolver: Resolver for outbound worker control-plane calls.
       transfer_parallelism: Convenience default for transport parallelism.
       transfer_uuid: Default transfer generation.
@@ -151,9 +151,7 @@ class _RaidenTransport:
     )
     self._server = raiden_controller.RaidenControllerServer(self._controller)
     self._port = self._server.start()
-    self._loopback_address = (
-        loopback_address or f"[::1]:{self._port}"
-    )
+    self._loopback_address = loopback_address or f"[::1]:{self._port}"
     self._advertised_address = advertised_address or self._loopback_address
     self._transfer_options = transfer_options or RaidenTransferOptions(
         parallelism=transfer_parallelism
@@ -205,6 +203,7 @@ class _RaidenTransport:
         item_size=tensor.item_size,
         layer_idx=tensor.layer_idx,
         sharding_spec=list(tensor.sharding_spec),
+        global_shard_indices=list(tensor.global_shard_indices),
     )
 
   def register_work_unit(self, metadata: weight_sync.WorkUnitMetadata) -> None:
@@ -228,9 +227,6 @@ class _RaidenTransport:
             [self._to_variable_proto(tensor) for tensor in metadata.variables]
             if metadata.variables
             else None
-        ),
-        host_subgrid=(
-            list(metadata.host_subgrid) if metadata.host_subgrid else None
         ),
     )
     with self._registered_lock:
@@ -466,8 +462,8 @@ class RaidenHandler(weight_sync.WeightSyncHandler):
       port: TCP port for the controller. Zero lets the kernel choose one.
       advertised_address: Address remote clients or a peer controller dial.
       loopback_address: This controller's same-host spelling, used to reject a
-        self-addressed peer. Defaults to IPv6 loopback because a listener may
-        be IPv6-only.
+        self-addressed peer. Defaults to IPv6 loopback because a listener may be
+        IPv6-only.
       name_resolver: Resolver for outbound worker control-plane calls.
       transfer_parallelism: Convenience default for transport parallelism.
       transfer_uuid: Default transfer generation.
