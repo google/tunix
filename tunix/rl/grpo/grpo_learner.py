@@ -175,7 +175,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
     if isinstance(rollout_config, dict):
       rollout_config = rollout_config[mode]
 
-    training_input["prompts"] = list(training_input["prompts"])  # pyrefly: ignore[bad-argument-type]
+    training_input["prompts"] = list(training_input["prompts"])  # pyrefly: ignore[bad-argument-type, unsupported-operation]
     pad_value = self.rl_engine.rollout.pad_id()
     eos_value = self.rl_engine.rollout.eos_id()
 
@@ -185,7 +185,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
     }
 
     rollout_output = self.rl_engine.generate(
-        prompts=training_input["prompts"],
+        prompts=training_input["prompts"],  # pyrefly: ignore[bad-argument-type]
         mode=mode,
         micro_batch_size=(
             self._rollout_micro_batch_size * self.algo_config.num_generations  # pyrefly: ignore[unsupported-operation]
@@ -311,7 +311,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
     ):
       # Compute rewards and advantages
       rewards = self._compute_rewards(
-          prompts=training_input["prompts"],
+          prompts=training_input["prompts"],  # pyrefly: ignore[bad-argument-type]
           completions=rollout_output.text,
           mode=mode,
           **{k: v for k, v in training_input.items() if k != "prompts"},  # pyrefly: ignore[bad-argument-type]
