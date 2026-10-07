@@ -15,6 +15,8 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export JOB_PREFIX="${JOB_PREFIX:-${USER}}"
 export EVAL_JOBSET_NAME="${EVAL_JOBSET_NAME:-${JOB_PREFIX}-eval}"
 export TUNIX_IMAGE="${TUNIX_IMAGE:-gcr.io/cloud-tpu-multipod-dev/sanbao/trellis:latest}"
+export BUCKET="${BUCKET:-gs://atwigg-trellis-us-east1-fast-dev}"
+export EVAL_OUTPUT_DIR="${EVAL_OUTPUT_DIR:-${BUCKET}/eval_results/${JOB_PREFIX}}"
 
 # Eval checkpoint & rollout overrides (post-training eval: no Trainer or Raiden)
 export WEIGHT_SYNC_MODE="${WEIGHT_SYNC_MODE:-none}"
@@ -33,34 +35,4 @@ export TOP_P="${TOP_P:-0.95}"
 export MAX_CONCURRENCY="${MAX_CONCURRENCY:-256}"
 export ENABLE_THINKING="${ENABLE_THINKING:-false}"
 
-# Preserve caller/cluster settings and strip Trainer/Raiden env vars populated by mlperf_397b_256_v7x.sh
-_eval_no_launch="${MLPERF_NO_LAUNCH:-0}"
-_eval_has_tpu_reservation="${TPU_RESERVATION+1}"
-_eval_tpu_reservation="${TPU_RESERVATION-}"
-_eval_use_dynamic_slicing="${USE_DYNAMIC_SLICING:-true}"
-_eval_libtpu_init_args="${LIBTPU_INIT_ARGS:-}"
-_eval_rollout_extra_env="${ROLLOUT_EXTRA_ENV:-}"
-_eval_pw_worker_extra_env="${PATHWAYS_WORKER_EXTRA_ENV:-}"
-_eval_pw_proxy_extra_args="${PATHWAYS_PROXY_EXTRA_ARGS:-}"
-_eval_maxtext_output_dir="${MAXTEXT_OUTPUT_DIR:-}"
-_eval_metric_logger_dir="${METRIC_LOGGER_DIR:-}"
-_eval_jax_cache_gcs_dir="${ROLLOUT_JAX_CACHE_GCS_DIR:-}"
-
-MLPERF_NO_LAUNCH=1 source "${DIR}/mlperf_397b_256_v7x.sh"
-
-export MLPERF_NO_LAUNCH="${_eval_no_launch}"
-if [[ -n "${_eval_has_tpu_reservation}" ]]; then
-  export TPU_RESERVATION="${_eval_tpu_reservation}"
-fi
-export USE_DYNAMIC_SLICING="${_eval_use_dynamic_slicing}"
-export EVAL_OUTPUT_DIR="${EVAL_OUTPUT_DIR:-${BUCKET}/eval_results/${JOB_PREFIX}}"
-export LIBTPU_INIT_ARGS="${_eval_libtpu_init_args}"
-export ROLLOUT_EXTRA_ENV="${_eval_rollout_extra_env}"
-export PATHWAYS_WORKER_EXTRA_ENV="${_eval_pw_worker_extra_env}"
-export PATHWAYS_PROXY_EXTRA_ARGS="${_eval_pw_proxy_extra_args}"
-export MAXTEXT_OUTPUT_DIR="${_eval_maxtext_output_dir}"
-export METRIC_LOGGER_DIR="${_eval_metric_logger_dir}"
-export ROLLOUT_JAX_CACHE_GCS_DIR="${_eval_jax_cache_gcs_dir}"
-unset ORCHESTRATOR_EXTRA_ENV TRAINER_EXTRA_ENV
-
-source "${DIR}/mlperf_base.sh" "${1:-eval}" "${@:2}"
+source "${DIR}/mlperf_397b_256_v7x.sh" "${1:-eval}" "${@:2}"
