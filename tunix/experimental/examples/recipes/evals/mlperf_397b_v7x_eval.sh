@@ -20,6 +20,7 @@ export EVAL_OUTPUT_DIR="${EVAL_OUTPUT_DIR:-${BUCKET}/eval_results/${JOB_PREFIX}}
 
 # Eval checkpoint & rollout overrides (post-training eval: no Trainer or Raiden)
 export WEIGHT_SYNC_MODE="${WEIGHT_SYNC_MODE:-none}"
+export ROLLOUT_JOBSET_YAML="${ROLLOUT_JOBSET_YAML:-jobset.pathways.yaml}"
 export SCAN_LAYERS="${SCAN_LAYERS:-true}"
 export CHECKPOINT_STORAGE_USE_OCDBT="${CHECKPOINT_STORAGE_USE_OCDBT:-false}"
 export CHECKPOINT_STORAGE_USE_ZARR3="${CHECKPOINT_STORAGE_USE_ZARR3:-false}"
@@ -35,4 +36,18 @@ export TOP_P="${TOP_P:-0.95}"
 export MAX_CONCURRENCY="${MAX_CONCURRENCY:-256}"
 export ENABLE_THINKING="${ENABLE_THINKING:-false}"
 
-source "${DIR}/mlperf_397b_256_v7x.sh" "${1:-eval}" "${@:2}"
+_eval_no_launch="${MLPERF_NO_LAUNCH:-0}"
+_eval_pw_worker_extra_env="${PATHWAYS_WORKER_EXTRA_ENV:-}"
+_eval_pw_proxy_extra_args="${PATHWAYS_PROXY_EXTRA_ARGS:-}"
+
+MLPERF_NO_LAUNCH=1 source "${DIR}/mlperf_397b_256_v7x.sh"
+
+# Eval runs rollout on Pathways (no Trainer): use rollout LIBTPU_INIT_ARGS for Pathways worker/proxy
+export PATHWAYS_WORKER_EXTRA_ENV="${_eval_pw_worker_extra_env:-LIBTPU_INIT_ARGS=${LIBTPU_INIT_ARGS} --megascale_port=-1 --xprof_compress_jftrace=true
+SKIP_MEGASCALE_PJRT_CLIENT=true}"
+_rollout_xla_flags=""
+for _f in ${LIBTPU_INIT_ARGS}; do [[ "${_f}" == --xla_* ]] && _rollout_xla_flags+="${_f} "; done
+export PATHWAYS_PROXY_EXTRA_ARGS="${_eval_pw_proxy_extra_args:-${_rollout_xla_flags% }}"
+
+export MLPERF_NO_LAUNCH="${_eval_no_launch}"
+source "${DIR}/mlperf_base.sh" "${1:-eval}" "${@:2}"

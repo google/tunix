@@ -21,7 +21,6 @@ export K8S_NAMESPACE="${K8S_NAMESPACE:-trellis}"
 export BUCKET="${BUCKET:-gs://atwigg-trellis-europe-west4-dev}"
 
 # v5p Rollout Topology (16 chips = 16 devices = 4 hosts per replica, DP=1, EP=16, TP=1)
-export ROLLOUT_JOBSET_YAML="${ROLLOUT_JOBSET_YAML:-jobset.pathways.yaml}"
 export ROLLOUT_TPU_SLICE="${ROLLOUT_TPU_SLICE:-tpuv5p:2x2x4}"
 export VLLM_DATA_PARALLEL_SIZE="${VLLM_DATA_PARALLEL_SIZE:-1}"
 _rollout_dims="${ROLLOUT_TPU_SLICE#*:}"
