@@ -1191,6 +1191,62 @@ class RlEngineTest(parameterized.TestCase):
     rl_engine.close()
     rl_engine.profiler.close.assert_called_once()
 
+  def test_buffer_metrics_async_interleaved_steps_preserves_monotonic_order(
+      self,
+  ):
+    rl_engine = self._create_test_rl_engine(
+        'vanilla',
+        base_rollout.RolloutConfig(
+            max_tokens_to_generate=10,
+            kv_cache_size=1024,
+            data_type=jnp.bfloat16,
+        ),
+    )
+    logged_buffers = []
+    rl_engine.with_external_metrics_logger(logged_buffers.append)
+
+    # Producer buffers step 0 and then races ahead to step 1 while consumer is
+    # still finishing step 0.
+    rl_engine.buffer_metrics_async(
+        {'rewards/mean': (1.0, np.mean)},
+        mode=rl_engine_lib.Mode.TRAIN,
+        step=0,
+    )
+    rl_engine.buffer_metrics_async(
+        {'rewards/mean': (2.0, np.mean)},
+        mode=rl_engine_lib.Mode.TRAIN,
+        step=1,
+    )
+    # Consumer finishes step 0 and buffers rollout perf metrics for step 0.
+    rl_engine.buffer_metrics_async(
+        {'rollout/generation_tokens_per_s': (100.0, None)},
+        mode=rl_engine_lib.Mode.TRAIN,
+        step=0,
+    )
+
+    # Step 0 completes and global_steps advances to 1.
+    rl_engine.global_steps = 1
+    rl_engine.buffer_metrics({}, mode=rl_engine_lib.Mode.TRAIN)
+
+    self.assertLen(logged_buffers, 1)
+    self.assertEqual(logged_buffers[0].global_steps, 0)
+    self.assertIn('rewards/mean', logged_buffers[0].metrics)
+    self.assertIn('rollout/generation_tokens_per_s', logged_buffers[0].metrics)
+    self.assertEqual(
+        rl_engine._rl_metrics_logger.get_metric(
+            'rollout', 'generation_tokens_per_s', 'train'
+        ),
+        100.0,
+    )
+
+    # Step 1 completes and global_steps advances to 2.
+    rl_engine.global_steps = 2
+    rl_engine.buffer_metrics({}, mode=rl_engine_lib.Mode.TRAIN)
+
+    self.assertLen(logged_buffers, 2)
+    self.assertEqual([b.global_steps for b in logged_buffers], [0, 1])
+    rl_engine.close()
+
 
 class RlEngineTokenInputTest(parameterized.TestCase):
   """Explicit token rows through RLEngine.generate and VllmRollout.generate."""
