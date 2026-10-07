@@ -54,7 +54,11 @@ verify_install() {
 
 compile_protos() {
   echo "Compiling distributed runtime gRPC protobuf definitions..."
-  python3 -m pip install grpcio-tools
+  if command -v uv &> /dev/null; then
+    uv pip install grpcio-tools
+  else
+    python3 -m pip install grpcio-tools
+  fi
 
   local proto_dir="${ROOT_DIR}/tunix/experimental/distributed"
   if [[ ! -d "${proto_dir}" ]]; then
