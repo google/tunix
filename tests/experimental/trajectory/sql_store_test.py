@@ -110,23 +110,24 @@ class SqlStoreWriterTest(parameterized.TestCase):
     ):
       sql_store._AsyncSqlWriter(engine=self.engine, max_cached_trajectories=-1)
 
-  def test_resolve_status_with_stated_status_returns_schema_status(
+  def test_resolve_status_with_stated_status_returns_status_as_is(
       self,
   ) -> None:
     atif_metadata = trajectory_testing.TUNIX_METADATA_1.to_atif_metadata()
     self.assertEqual(
         sql_store._resolve_status(atif_metadata),
-        schema.Status.COMPLETED,
+        "SUCCEEDED",
     )
 
   @parameterized.named_parameters(
-      ("lowercase", "completed", schema.Status.COMPLETED),
-      ("uppercase_with_whitespace", "  FAILED  ", schema.Status.FAILED),
-      ("unrecognized_string", "not_a_status", schema.Status.UNKNOWN),
+      ("tunix_status", "MAX_STEPS_REACHED", "MAX_STEPS_REACHED"),
+      ("padded_status", "  FAILED  ", "FAILED"),
+      ("empty_string", "", schema.Status.UNKNOWN),
+      ("whitespace_only", "   ", schema.Status.UNKNOWN),
       ("non_string", 123, schema.Status.UNKNOWN),
   )
-  def test_resolve_status_normalizes_case_and_ignores_invalid_values(
-      self, raw_status: Any, expected: schema.Status
+  def test_resolve_status_strips_whitespace_and_ignores_blank_or_non_string_values(
+      self, raw_status: Any, expected: str
   ) -> None:
     metadata = trajectory_testing.TUNIX_METADATA_1.model_copy(
         update={"status": raw_status}
@@ -329,12 +330,12 @@ class SqlStoreWriterTest(parameterized.TestCase):
     original = trajectory_lib.TunixTrajectoryMetadata(
         trajectory_id="traj_up",
         agent=trajectory_testing.METADATA_1.agent,
-        status="PENDING",
+        status="RUNNING",
     )
     updated = trajectory_lib.TunixTrajectoryMetadata(
         trajectory_id="traj_up",
         agent=trajectory_testing.METADATA_1.agent,
-        status="COMPLETED",
+        status="SUCCEEDED",
     )
 
     writer.enqueue_write(run_id="conflict_run", metadata=original)
@@ -344,7 +345,7 @@ class SqlStoreWriterTest(parameterized.TestCase):
 
     trajectories = self._fetch_trajectories()
     self.assertLen(trajectories, 1)
-    self.assertEqual(trajectories[0]["status"], "COMPLETED")
+    self.assertEqual(trajectories[0]["status"], "SUCCEEDED")
 
   def test_enqueue_write_for_existing_trajectory_preserves_created_at(
       self,
@@ -384,7 +385,7 @@ class SqlStoreWriterTest(parameterized.TestCase):
         metadata=trajectory_lib.TunixTrajectoryMetadata(
             trajectory_id="traj_preserve",
             agent=trajectory_testing.METADATA_1.agent,
-            status="COMPLETED",
+            status="SUCCEEDED",
         ),
     )
     writer.flush()
@@ -402,7 +403,7 @@ class SqlStoreWriterTest(parameterized.TestCase):
 
     trajectories = self._fetch_trajectories()
     self.assertLen(trajectories, 1)
-    self.assertEqual(trajectories[0]["status"], "COMPLETED")
+    self.assertEqual(trajectories[0]["status"], "SUCCEEDED")
     self.assertEqual(
         trajectories[0]["trajectory_metadata"]["notes"], "new notes"
     )
@@ -450,7 +451,7 @@ class SqlStoreWriterTest(parameterized.TestCase):
         status="RUNNING",
     )
     completed_metadata = running_metadata.model_copy(
-        update={"status": "COMPLETED"}
+        update={"status": "SUCCEEDED"}
     )
 
     writer.enqueue_write(
@@ -475,7 +476,7 @@ class SqlStoreWriterTest(parameterized.TestCase):
     self.assertEqual(self._count_sql("INSERT INTO steps"), 3)
     trajectories = self._fetch_trajectories()
     self.assertLen(trajectories, 1)
-    self.assertEqual(trajectories[0]["status"], "COMPLETED")
+    self.assertEqual(trajectories[0]["status"], "SUCCEEDED")
 
   def test_enqueue_write_after_step_failure_retries_trajectory_upsert_on_next_step(
       self,

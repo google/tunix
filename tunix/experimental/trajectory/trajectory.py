@@ -880,7 +880,10 @@ class TunixTrajectoryMetadata(TrajectoryMetadata):
   )
   status: str | None = pydantic.Field(
       default=None,
-      description='Run status ("RUNNING", "COMPLETED", "FAILED", etc.).',
+      description=(
+          "Trajectory status as an `agent_types.TrajectoryStatus` name (e.g."
+          ' "RUNNING", "SUCCEEDED", "FAILED"), or None if not stated.'
+      ),
   )
   total_reward: float | None = pydantic.Field(
       default=None,

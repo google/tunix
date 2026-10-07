@@ -354,6 +354,10 @@ def to_tunix_trajectory(
 
   Returns:
     A reconstructed Tunix agent_types.Trajectory instance.
+
+  Raises:
+    ValueError: If the trajectory states a status that is not an
+      `agent_types.TrajectoryStatus` name.
   """
   if isinstance(traj, dict):
     if (
@@ -416,13 +420,17 @@ def to_tunix_trajectory(
       else 0.0
   )
 
+  # A record without a status defaults to RUNNING, matching the
+  # `agent_types.Trajectory` default.
   status_enum = agent_types.TrajectoryStatus.RUNNING
-  if metadata_obj.status is not None and hasattr(
-      agent_types.TrajectoryStatus, str(metadata_obj.status)
-  ):
-    status_enum = getattr(
-        agent_types.TrajectoryStatus, str(metadata_obj.status)
-    )
+  if metadata_obj.status is not None:
+    try:
+      status_enum = agent_types.TrajectoryStatus[metadata_obj.status]
+    except KeyError:
+      raise ValueError(
+          f"Unrecognized trajectory status {metadata_obj.status!r}; expected"
+          f" one of {[status.name for status in agent_types.TrajectoryStatus]}."
+      ) from None
 
   env_time = metadata_obj.env_time or {}
   reward_time = metadata_obj.reward_time or {}

@@ -55,25 +55,22 @@ def _to_utc_timestamp(dt: datetime.datetime | None) -> datetime.datetime:
 
 def _resolve_status(
     metadata: trajectory_lib.TrajectoryMetadata,
-) -> schema.Status:
+) -> str:
   """Returns the status of the trajectory as stated by the caller.
 
   Only the caller knows what state a trajectory is in, so the status is read
-  from `metadata.get_extensions()` and normalized to `schema.Status`. The
+  from `metadata.get_extensions()` and written as-is when non-empty. The
   absence of a valid status returns `schema.Status.UNKNOWN`.
 
   Args:
     metadata: TrajectoryMetadata instance.
 
   Returns:
-    The stated `schema.Status`, or `schema.Status.UNKNOWN` if absent/invalid.
+    The stated status string, or `schema.Status.UNKNOWN` if absent or blank.
   """
   raw_status = metadata.get_extensions().get("status")
-  if isinstance(raw_status, str):
-    try:
-      return schema.Status(raw_status.strip().upper())
-    except ValueError:
-      pass
+  if isinstance(raw_status, str) and raw_status.strip():
+    return raw_status.strip()
   return schema.Status.UNKNOWN
 
 
