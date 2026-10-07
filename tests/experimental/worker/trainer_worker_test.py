@@ -207,7 +207,8 @@ class TrainerWorkerTest(absltest.TestCase):
         completion_mask=np.ones((batch, completion_len), dtype=np.int32),
         advantages=np.array([1.0, -1.0], dtype=np.float32),
     )
-    algo_config = algorithm_config.GRPOConfig(beta=0.0, temperature=1.0)
+    algo_config = algorithm_config.GRPOConfig(beta=0.0)
+    algo_config.temperature = 1.0
 
     worker = trainer_worker.TrainerWorker(
         trainer_factory=lambda: self.fake_trainer, logps_chunk_size=3

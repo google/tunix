@@ -226,7 +226,6 @@ def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
       num_generations=args.num_generations,
       epsilon=args.epsilon,
       beta=args.beta,
-      temperature=args.temperature,
       use_rollout_logps=args.use_rollout_logps,
   )
   return algorithm_adapter.GRPOAdapter(
@@ -364,12 +363,6 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   trainer_handles = cluster.worker_handles(datatypes.Role.ACTOR)
   if len(trainer_handles) != 1:
     raise ValueError(f"Expected 1 trainer worker, got {len(trainer_handles)}.")
-  _configure_trainer_loss(
-      trainer_handles[0],
-      algo=algo,
-      pad_id=pad_id,
-      eos_id=eos_id,
-  )
 
   metrics_logging_options = metrics_logger_lib.MetricsLoggerOptions(
       log_dir=args.log_dir,
@@ -431,6 +424,12 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           step,
           result,
       ),
+  )
+  _configure_trainer_loss(
+      trainer_handles[0],
+      algo=algo,
+      pad_id=pad_id,
+      eos_id=eos_id,
   )
 
   try:

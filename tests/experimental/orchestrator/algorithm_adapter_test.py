@@ -237,11 +237,11 @@ class AlgorithmAdapterTest(absltest.TestCase):
         num_generations=4,
         epsilon=0.25,
         beta=0.05,
-        temperature=0.8,
         loss_agg_mode="token-mean",
         kl_loss_mode="kld",
         kl_clamp_value=1.5,
     )
+    algo_config.temperature = 0.8
     adapter = algorithm_adapter.GRPOAdapter(algo_config=algo_config)
     gen_fn = adapter.build_gen_model_input_fn(pad_id=10, eos_id=20)
     self.assertTrue(callable(gen_fn))
@@ -263,13 +263,20 @@ class AlgorithmAdapterTest(absltest.TestCase):
     self.assertEqual(cfg.kl_loss_mode, "kld")
     self.assertEqual(cfg.kl_clamp_value, 1.5)
 
+  def test_grpo_config_rejects_temperature_init_kwarg(self):
+    with self.assertRaises(TypeError):
+      algorithm_config.GRPOConfig(  # pyrefly: ignore[unexpected-keyword]
+          num_generations=2,
+          temperature=0.8,
+      )
+
   def test_grpo_build_gen_model_input_fn_fails_without_temperature(self):
     """Verifies build_gen_model_input_fn raises ValueError if temperature is unset."""
     adapter = algorithm_adapter.GRPOAdapter(
         algo_config=algorithm_config.GRPOConfig(num_generations=2)
     )
     with self.assertRaisesRegex(
-        ValueError, "Trainer temperature must be explicitly set"
+        ValueError, "Trainer temperature is unset on algo_config"
     ):
       adapter.build_gen_model_input_fn(pad_id=0, eos_id=1)
 
@@ -278,12 +285,12 @@ class AlgorithmAdapterTest(absltest.TestCase):
         num_generations=4,
         epsilon=0.2,
         epsilon_high=0.3,
-        temperature=1.0,
         loss_algo="gspo-token",
         policy_loss_fn="grpo",
         advantage_estimator="drgrpo",
         kl_loss_mode="mse_kl",
     )
+    config.temperature = 1.0
     adapter = algorithm_adapter.GRPOAdapter(algo_config=config)
     self.assertEqual(adapter.algo_config.kl_loss_mode, "mse_kl")
     self.assertEqual(adapter.algo_config.epsilon_high, 0.3)
@@ -519,11 +526,11 @@ class AlgorithmAdapterTest(absltest.TestCase):
         num_generations=4,
         beta=0.03,
         epsilon=0.15,
-        temperature=1.0,
         loss_agg_mode="token-mean",
         kl_loss_mode="low_var_kl",
         kl_clamp_value=10.0,
     )
+    canonical_config.temperature = 1.0
     adapter = algorithm_adapter.GRPOAdapter(
         algo_config=canonical_config,
     )
@@ -558,8 +565,8 @@ class AlgorithmAdapterTest(absltest.TestCase):
         epsilon=0.2,
         epsilon_high=0.28,
         epsilon_c=0.1,
-        temperature=1.0,
     )
+    config.temperature = 1.0
     adapter = algorithm_adapter.GRPOAdapter(algo_config=config)
     self.assertEqual(adapter.algo_config.epsilon, 0.2)
     self.assertEqual(adapter.algo_config.epsilon_high, 0.28)
@@ -575,9 +582,9 @@ class AlgorithmAdapterTest(absltest.TestCase):
     """Verifies algo_config carries temperature/use_rollout_logps unmodified."""
     config = algorithm_config.GRPOConfig(
         num_generations=2,
-        temperature=0.8,
         use_rollout_logps=False,
     )
+    config.temperature = 0.8
     adapter = algorithm_adapter.GRPOAdapter(algo_config=config)
     # The adapter wraps the caller's config as-is, without copying or mutating.
     self.assertIs(adapter.algo_config, config)

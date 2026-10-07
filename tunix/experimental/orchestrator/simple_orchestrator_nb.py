@@ -151,7 +151,6 @@ def main():
 
   algo_config = algorithm_config.GRPOConfig(
       num_generations=2,
-      temperature=1.0,
   )
   algo = algorithm_adapter.GRPOAdapter(
       algo_config=algo_config,
@@ -173,6 +172,7 @@ def main():
       dataset=train_dataset,
       reward_fns=[lambda x: 1.0],
       assembler=assembler,
+      generation_args=datatypes.GenerationArgs(temperature=1.0),
       max_steps=2,
   )
   orch.run(program=program)

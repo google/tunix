@@ -252,7 +252,6 @@ def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
       num_generations=args.num_generations,
       epsilon=args.epsilon,
       beta=args.beta,
-      temperature=args.temperature,
       use_rollout_logps=args.use_rollout_logps,
   )
   return algorithm_adapter.GRPOAdapter(

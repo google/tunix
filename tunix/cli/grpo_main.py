@@ -93,7 +93,7 @@ class GrpoPipeline(base_rl_pipeline.BasePipeline):
       )
 
     # Strip helper keys that are not GRPOConfig fields
-    valid = {f.name for f in dataclasses.fields(GRPOConfig)}
+    valid = {f.name for f in dataclasses.fields(GRPOConfig) if f.init}
     cfg.pop("max_turns", None)
     return GRPOConfig(**{k: v for k, v in cfg.items() if k in valid})
 

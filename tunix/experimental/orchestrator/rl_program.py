@@ -304,6 +304,11 @@ class StandardRLProgram(RLProgram):
     self.max_response_length = algo_max_response_length
     self.generation_args = generation_args or datatypes.GenerationArgs()
 
+    if self.algo.algo_config.temperature is not None:
+      raise ValueError(
+          "Do not set temperature on AlgorithmConfig; configure it via"
+          " generation_args on StandardRLProgram."
+      )
     gen_temp = self.generation_args.temperature
     if gen_temp is not None:
       self.algo.algo_config.temperature = gen_temp
@@ -1093,7 +1098,7 @@ class StandardRLProgram(RLProgram):
       IS/RS weights and trainer logps when configured.
     """
     assert self.engine is not None
-    gen_temp = getattr(self.generation_args, "temperature", None)
+    gen_temp = self.generation_args.temperature
     logps_req = datatypes.LogprobsRequest(
         prompt_tokens=batch.prompt_ids,
         completion_tokens=batch.completion_ids,
@@ -1303,7 +1308,9 @@ class StandardRLProgram(RLProgram):
                     f"{type(batch).__name__}."
                 )
               ref_logps = await self.engine.per_token_logps(
-                  datatypes.Role.REFERENCE, items=batch
+                  datatypes.Role.REFERENCE,
+                  items=batch,
+                  temperature=self.generation_args.temperature,
               )
               batch = batch_assembly.with_ref_per_token_logps(batch, ref_logps)
             algo_config = getattr(self.algo, "algo_config", None)
