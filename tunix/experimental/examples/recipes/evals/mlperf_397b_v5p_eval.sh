@@ -21,7 +21,6 @@ export K8S_NAMESPACE="${K8S_NAMESPACE:-trellis}"
 export BUCKET="${BUCKET:-gs://atwigg-trellis-europe-west4-dev}"
 export TPU_RESERVATION="${TPU_RESERVATION-}"
 export USE_DYNAMIC_SLICING="${USE_DYNAMIC_SLICING:-false}"
-export MAXTEXT_CKPT="${MAXTEXT_CKPT:-gs://sanbao-europe/qwen35_397b/scanned_reshard_fsdp32_tp2/0/items}"
 
 # v5p Rollout Topology (16 chips = 16 devices = 4 hosts per replica, DP=1, EP=16, TP=1)
 export ROLLOUT_JOBSET_YAML="${ROLLOUT_JOBSET_YAML:-jobset.pathways.yaml}"
@@ -32,7 +31,6 @@ export ROLLOUT_MESH_EXPERT="${ROLLOUT_MESH_EXPERT:-$(( ${_rollout_dims//x/*} / $
 
 # v5p Sandbox
 export SANDBOX_NODE_SELECTOR_VAL="${SANDBOX_NODE_SELECTOR_VAL:-sandbox-cpu-pool}"
-export SANDBOX_TOLERATIONS="${SANDBOX_TOLERATIONS-}"
 export IMAGE_REWRITE_PREFIX="${IMAGE_REWRITE_PREFIX:-europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/}"
 
 source "${SCRIPT_DIR}/mlperf_397b_v7x_eval.sh" "$@"
