@@ -472,6 +472,21 @@ class Agent(pydantic.BaseModel):
 class TrajectoryMetadata(pydantic.BaseModel):
   """Metadata for a trajectory (excluding steps and subagents)."""
 
+  METADATA_TYPE: ClassVar[str] = "base"
+  _REGISTRY: ClassVar[dict[str, type[TrajectoryMetadata]]] = {}
+
+  def __init_subclass__(cls, **kwargs: Any) -> None:
+    super().__init_subclass__(**kwargs)
+    meta_type = cls.__dict__.get("METADATA_TYPE")
+    if meta_type:
+      if meta_type in cls._REGISTRY:
+        raise ValueError(
+            f"METADATA_TYPE {meta_type} is already registered to"
+            f" {cls._REGISTRY[meta_type].__qualname__}; cannot register"
+            f" {cls.__qualname__}."
+        )
+      cls._REGISTRY[meta_type] = cls
+
   model_config = pydantic.ConfigDict(extra="forbid")
 
   schema_version: str = pydantic.Field(
@@ -524,9 +539,7 @@ class TrajectoryMetadata(pydantic.BaseModel):
     return self.extra.get(TUNIX_EXTENSIONS_KEY) or {}
 
   @classmethod
-  def from_atif_metadata(
-      cls: type[Self], metadata: TrajectoryMetadata
-  ) -> Self:
+  def from_atif_metadata(cls: type[Self], metadata: TrajectoryMetadata) -> Self:
     """Rehydrates base ATIF TrajectoryMetadata into this metadata subclass."""
     if isinstance(metadata, cls):
       return metadata
@@ -595,6 +608,12 @@ class TrajectoryMetadata(pydantic.BaseModel):
     return self._create_paired_trajectory(
         Trajectory, steps, subagent_trajectories
     )
+
+
+# TrajectoryMetadata is the base class, so __init_subclass__ does not run on it.
+TrajectoryMetadata._REGISTRY[TrajectoryMetadata.METADATA_TYPE] = (  # pylint: disable=protected-access
+    TrajectoryMetadata
+)
 
 
 StepT = TypeVar("StepT", bound=Step)
@@ -865,6 +884,8 @@ def _upcast_atif_step(step: Step) -> TunixAgentStep | TunixEnvStep:
 
 class TunixTrajectoryMetadata(TrajectoryMetadata):
   """Tunix-specific trajectory metadata extending base ATIF TrajectoryMetadata."""
+
+  METADATA_TYPE: ClassVar[str] = "tunix"
 
   prompt_id: str | None = pydantic.Field(
       default=None,

@@ -306,6 +306,10 @@ class RolloutWorkerTrajectoryStoreTest(absltest.TestCase):
     self.assertIsInstance(
         worker.trajectory_store, file_store.FileTrajectoryStore
     )
+    self.assertEqual(
+        worker.trajectory_store.to_config()["metadata_type"],
+        trajectory_lib.TunixTrajectoryMetadata.METADATA_TYPE,
+    )
     worker.stop()
 
   def test_two_workers_get_two_independent_store_instances(self):
@@ -346,7 +350,10 @@ class RolloutWorkerTrajectoryStoreTest(absltest.TestCase):
     assert store is not None
     worker.stop()
     with self.assertRaises(RuntimeError):
-      store.add_step(trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1)
+      store.add_step(
+          trajectory_testing.TUNIX_ENV_STEP_0,
+          trajectory_testing.TUNIX_METADATA_1,
+      )
 
   def test_stop_closes_the_store_even_when_cancel_all_raises(self):
     worker = _worker()

@@ -622,6 +622,65 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
     ):
       meta.create_trajectory()
 
+  def test_metadata_registry_contains_base_and_tunix(self):
+    self.assertIs(
+        trajectory.TrajectoryMetadata._REGISTRY.get("base"),
+        trajectory.TrajectoryMetadata,
+    )
+    self.assertIs(
+        trajectory.TrajectoryMetadata._REGISTRY.get("tunix"),
+        trajectory.TunixTrajectoryMetadata,
+    )
+
+  def test_custom_metadata_registers_via_init_subclass(self):
+    class _CustomMetadata(trajectory.TrajectoryMetadata):
+      METADATA_TYPE = "custom_test_meta"
+
+    try:
+      self.assertIs(
+          trajectory.TrajectoryMetadata._REGISTRY.get("custom_test_meta"),
+          _CustomMetadata,
+      )
+    finally:
+      trajectory.TrajectoryMetadata._REGISTRY.pop("custom_test_meta", None)
+
+  def test_duplicate_metadata_type_raises(self):
+    with self.assertRaisesRegex(
+        ValueError,
+        "METADATA_TYPE tunix is already registered to TunixTrajectoryMetadata",
+    ):
+
+      class _DuplicateMetadata(trajectory.TrajectoryMetadata):  # pylint: disable=unused-variable
+        METADATA_TYPE = "tunix"
+
+    self.assertIs(
+        trajectory.TrajectoryMetadata._REGISTRY["tunix"],
+        trajectory.TunixTrajectoryMetadata,
+    )
+
+  def test_duplicate_metadata_type_on_trajectory_subclass_raises(self):
+    with self.assertRaisesRegex(
+        ValueError,
+        "METADATA_TYPE base is already registered to TrajectoryMetadata",
+    ):
+
+      class _DuplicateTrajectory(trajectory.Trajectory):  # pylint: disable=unused-variable
+        METADATA_TYPE = "base"
+
+    self.assertIs(
+        trajectory.TrajectoryMetadata._REGISTRY["base"],
+        trajectory.TrajectoryMetadata,
+    )
+
+  def test_subclass_inheriting_metadata_type_does_not_reregister(self):
+    # `TunixTrajectory` inherits METADATA_TYPE "tunix" without declaring it,
+    # so it neither raises nor takes over the registry entry.
+    self.assertEqual(trajectory.TunixTrajectory.METADATA_TYPE, "tunix")
+    self.assertIs(
+        trajectory.TrajectoryMetadata._REGISTRY["tunix"],
+        trajectory.TunixTrajectoryMetadata,
+    )
+
   def test_step_initialization_with_rl_fields(self):
     step = trajectory.TunixAgentStep(
         step_id=1,
