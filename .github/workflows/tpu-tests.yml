@@ -121,7 +121,8 @@ jobs:
         run: |
           unset PIP_NO_CACHE_DIR
           export PIP_NO_BUILD_ISOLATION=1
-          pip install -e ".[test]"
+          python3 -m pip install "scikit-build-core>=0.10" "nanobind>=2.5.0" cmake ninja
+          python3 -m pip install -e ".[test]"
 
       - name: Verify TPU availability
         run: |
@@ -299,6 +300,7 @@ jobs:
           pwd
 
           # Install Tunix with dev and test dependencies without overwriting the vLLM dependencies.
+          python3 -m pip install "scikit-build-core>=0.10" "nanobind>=2.5.0" cmake ninja
           python3 -m pip install -e .[test]
           python3 -m pip install --no-deps --no-build-isolation -r requirements/special_requirements.txt
           # tpu-inference/Numba needs NumPy 2.3 or less.

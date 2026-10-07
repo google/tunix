@@ -326,8 +326,7 @@ class PackCoreTest(absltest.TestCase):
       )
 
   def test_cpp_extension_and_python_fallback_produce_identical_chunks(self):
-    if packing._packing_ext is None:
-      self.skipTest("_packing_ext C++ extension is not available in OSS.")
+    self.assertIsNotNone(packing._packing_ext)
     rng = np.random.default_rng(123)
     valid_items = [
         _item(
@@ -573,8 +572,7 @@ class PackSegmentAlignmentTest(absltest.TestCase):
       )
 
   def test_invalid_inputs_raise_value_error_in_cpp_extension(self):
-    if packing._packing_ext is None:
-      self.skipTest("_packing_ext C++ extension is not available in OSS.")
+    self.assertIsNotNone(packing._packing_ext)
     bad_mask = _item([1, 2], [3, 4, 5])
     object.__setattr__(
         bad_mask, "completion_mask", np.array([1.0], dtype=np.float32)
