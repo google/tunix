@@ -127,6 +127,92 @@ class TensorMetadataTest(absltest.TestCase):
     with self.assertRaisesRegex(ValueError, "may not shard two"):
       _tensor(sharding_spec=("tp", "tp"))
 
+  def test_accepts_global_shard_indices_within_the_mesh_grid(self):
+    # mesh_shape (1, 2) has two slices; replicated shards may repeat one.
+    tensor = _tensor(global_shard_indices=(0, 1, 1, 0))
+
+    self.assertEqual(tensor.global_shard_indices, (0, 1, 1, 0))
+
+  def test_defaults_to_no_global_shard_indices(self):
+    self.assertEqual(_tensor().global_shard_indices, ())
+
+  def test_rejects_global_shard_indices_outside_the_mesh_grid(self):
+    with self.assertRaisesRegex(ValueError, r"global_shard_indices.*\[0, 2\)"):
+      _tensor(global_shard_indices=(0, 2))
+    with self.assertRaisesRegex(ValueError, "global_shard_indices"):
+      _tensor(global_shard_indices=(-1,))
+
+
+class WorkUnitMetadataFromDictTest(absltest.TestCase):
+
+  def test_dict_variables_preserve_global_shard_indices(self):
+    metadata = weight_sync.WorkUnitMetadata.from_dict({
+        "unit": {"job_name": "trainer"},
+        "variables": [{
+            "name": "w",
+            "shape": [8, 4],
+            "mesh_shape": [1, 2],
+            "layout": [1, 0],
+            "item_size": 4,
+            "sharding_spec": ["", "tp"],
+            "global_shard_indices": [1, 0],
+        }],
+    })
+
+    self.assertEqual(metadata.variables[0].global_shard_indices, (1, 0))
+
+  def test_dict_variables_without_the_key_publish_no_indices(self):
+    metadata = weight_sync.WorkUnitMetadata.from_dict({
+        "unit": {"job_name": "trainer"},
+        "variables": [{
+            "name": "w",
+            "shape": [8, 4],
+            "mesh_shape": [1, 2],
+            "layout": [1, 0],
+            "item_size": 4,
+        }],
+    })
+
+    self.assertEqual(metadata.variables[0].global_shard_indices, ())
+
+  def test_object_variables_preserve_global_shard_indices(self):
+    @dataclasses.dataclass(frozen=True)
+    class _ForeignVariable:
+      name: str
+      shape: tuple[int, ...]
+      mesh_shape: tuple[int, ...]
+      layout: tuple[int, ...]
+      item_size: int
+      layer_idx: int
+      sharding_spec: tuple[str, ...]
+      global_shard_indices: tuple[int, ...]
+
+    metadata = weight_sync.WorkUnitMetadata.from_dict({
+        "unit": {"job_name": "trainer"},
+        "variables": [
+            _ForeignVariable(
+                name="w",
+                shape=(8, 4),
+                mesh_shape=(1, 2),
+                layout=(1, 0),
+                item_size=4,
+                layer_idx=3,
+                sharding_spec=("", "tp"),
+                global_shard_indices=(1, 1),
+            )
+        ],
+    })
+
+    self.assertEqual(metadata.variables[0].global_shard_indices, (1, 1))
+    self.assertEqual(metadata.variables[0].layer_idx, 3)
+
+  def test_host_subgrid_is_not_part_of_the_contract(self):
+    field_names = {
+        f.name for f in dataclasses.fields(weight_sync.WorkUnitMetadata)
+    }
+
+    self.assertNotIn("host_subgrid", field_names)
+
 
 class NeutralContractTest(absltest.TestCase):
 
@@ -219,7 +305,9 @@ class MockVllmSampler(base_sampler.BaseSampler):
 
 def _to_flat_dict(state: Any) -> dict[str, Any]:
   if hasattr(state, "flat_state"):
-    return {".".join(str(p) for p in path): var for path, var in state.flat_state()}
+    return {
+        ".".join(str(p) for p in path): var for path, var in state.flat_state()
+    }
   return dict(state)
 
 
@@ -230,9 +318,7 @@ def _trainer_process_fn(
     target_state: Any,
 ):
   model_config = test_common.ModelConfig(**model_config_kwargs)
-  toy_trainer_model = test_common.ToyTransformer(
-      model_config, rngs=nnx.Rngs(0)
-  )
+  toy_trainer_model = test_common.ToyTransformer(model_config, rngs=nnx.Rngs(0))
   # Initialize any lazy module parameters
   toy_trainer_model(
       jnp.zeros((1, 4), dtype=jnp.int32), jnp.zeros((1, 4), dtype=jnp.int32)
@@ -508,7 +594,9 @@ class WeightSyncE2ETest(absltest.TestCase):
     )
 
     # Mutate trainer model weights
-    new_embedding = jnp.ones_like(self.toy_trainer_model.emb.embedding.value) * 99.0
+    new_embedding = (
+        jnp.ones_like(self.toy_trainer_model.emb.embedding.value) * 99.0
+    )
     self.toy_trainer_model.emb.embedding.value = new_embedding
 
     # Execute weight sync in fallback mode
@@ -549,7 +637,9 @@ class WeightSyncE2ETest(absltest.TestCase):
     )
 
     # Mutate trainer model weights
-    new_embedding = jnp.ones_like(self.toy_trainer_model.emb.embedding.value) * 42.0
+    new_embedding = (
+        jnp.ones_like(self.toy_trainer_model.emb.embedding.value) * 42.0
+    )
     self.toy_trainer_model.emb.embedding.value = new_embedding
 
     # Execute weight sync in fallback mode

@@ -34,15 +34,18 @@ from absl.testing import absltest
 from tunix.experimental.weight_sync import raiden_handler
 from tunix.experimental.weight_sync import weight_sync
 
-
 WorkUnitId = weight_sync.WorkUnitId
 
 SRC = WorkUnitId(
-    job_name="trainer", job_replica_id="0", data_name="weights",
+    job_name="trainer",
+    job_replica_id="0",
+    data_name="weights",
     data_replica_idx=3,
 )
 DST = WorkUnitId(
-    job_name="sampler", job_replica_id="0", data_name="weights",
+    job_name="sampler",
+    job_replica_id="0",
+    data_name="weights",
     data_replica_idx=4,
 )
 RAIDEN_SRC = raiden_handler.raiden_controller.RaidenId(
@@ -115,7 +118,9 @@ class RaidenHandlerTest(absltest.TestCase):
         raiden_handler.raiden_controller, "RaidenController", autospec=True
     )
     server_patch = mock.patch.object(
-        raiden_handler.raiden_controller, "RaidenControllerServer", autospec=True
+        raiden_handler.raiden_controller,
+        "RaidenControllerServer",
+        autospec=True,
     )
     rpc_client_patch = mock.patch.object(
         raiden_handler.raiden_controller,
@@ -168,9 +173,7 @@ class RaidenHandlerTest(absltest.TestCase):
     )
     # Remote controller callers use the advertised name; the loopback spelling
     # stays as a second alias for the self-peer check.
-    self.assertEqual(
-        handler.advertised_address, "controller-a.example:10019"
-    )
+    self.assertEqual(handler.advertised_address, "controller-a.example:10019")
     self.assertEqual(handler.loopback_address, "[::1]:15000")
 
   def test_no_client_stub_is_constructed(self):
@@ -269,9 +272,7 @@ class RaidenHandlerTest(absltest.TestCase):
     )
 
   def test_no_resolver_means_no_worker_rpc_client_override(self):
-    self.assertIsNone(
-        self.controller_cls.call_args.kwargs["worker_rpc_client"]
-    )
+    self.assertIsNone(self.controller_cls.call_args.kwargs["worker_rpc_client"])
 
   # ---------------------------------------------------------- registration
 
@@ -295,12 +296,23 @@ class RaidenHandlerTest(absltest.TestCase):
     self.assertEqual(kwargs["itemsize"], 4)
     self.assertIn(SRC, self.handler.registered_units)
 
-  def test_register_forwards_host_subgrid(self):
-    self.handler.register_work_unit(make_metadata(SRC, host_subgrid=(1, 4)))
+  def test_register_forwards_global_shard_indices(self):
+    variables = (
+        weight_sync.TensorMetadata(
+            name="w",
+            shape=(8, 4),
+            mesh_shape=(4, 1),
+            layout=(1, 0),
+            item_size=4,
+            sharding_spec=("x", ""),
+            global_shard_indices=(0, 2),
+        ),
+    )
+    self.handler.register_work_unit(make_metadata(SRC, variables=variables))
 
     self.controller.register_work_unit.assert_called_once()
-    kwargs = self.controller.register_work_unit.call_args.kwargs
-    self.assertEqual(kwargs["host_subgrid"], [1, 4])
+    sent = self.controller.register_work_unit.call_args.kwargs["variables"]
+    self.assertEqual(list(sent[0].global_shard_indices), [0, 2])
 
   def test_register_rejects_a_unit_without_a_data_address(self):
     # The synchronizer assigns ports on construction; registering beforehand
@@ -319,12 +331,22 @@ class RaidenHandlerTest(absltest.TestCase):
   def test_variables_manifest_is_converted_to_protos(self):
     variables = (
         weight_sync.TensorMetadata(
-            name="layer_0", shape=(8, 4), mesh_shape=(1, 1), layout=(1, 0),
-            item_size=4, layer_idx=0, sharding_spec=("", ""),
+            name="layer_0",
+            shape=(8, 4),
+            mesh_shape=(1, 1),
+            layout=(1, 0),
+            item_size=4,
+            layer_idx=0,
+            sharding_spec=("", ""),
         ),
         weight_sync.TensorMetadata(
-            name="layer_1", shape=(8, 4), mesh_shape=(1, 1), layout=(1, 0),
-            item_size=4, layer_idx=1, sharding_spec=("", ""),
+            name="layer_1",
+            shape=(8, 4),
+            mesh_shape=(1, 1),
+            layout=(1, 0),
+            item_size=4,
+            layer_idx=1,
+            sharding_spec=("", ""),
         ),
     )
     self.handler.register_work_unit(make_metadata(SRC, variables=variables))
@@ -373,8 +395,12 @@ class RaidenHandlerTest(absltest.TestCase):
         weight_sync.TensorMetadata(
             # Raiden uses -1 for a replicated layout dimension; this is a
             # supported partial layout, not an invalid permutation.
-            name="w", shape=(8, 4), mesh_shape=(1, 1), layout=(-1, 0),
-            item_size=4, sharding_spec=("", "y"),
+            name="w",
+            shape=(8, 4),
+            mesh_shape=(1, 1),
+            layout=(-1, 0),
+            item_size=4,
+            sharding_spec=("", "y"),
         ),
     )
     self.handler.register_work_unit(make_metadata(SRC, variables=variables))
@@ -385,7 +411,10 @@ class RaidenHandlerTest(absltest.TestCase):
 
   def test_variables_require_explicit_mesh_axes_and_sharding_spec(self):
     variable = weight_sync.TensorMetadata(
-        name="w", shape=(8, 4), mesh_shape=(1, 1), layout=(1, 0),
+        name="w",
+        shape=(8, 4),
+        mesh_shape=(1, 1),
+        layout=(1, 0),
         item_size=4,
     )
 
@@ -394,20 +423,20 @@ class RaidenHandlerTest(absltest.TestCase):
           make_metadata(SRC, variables=(variable,), mesh_axes=None)
       )
     with self.assertRaisesRegex(ValueError, "provide sharding_spec"):
-      self.handler.register_work_unit(
-          make_metadata(SRC, variables=(variable,))
-      )
+      self.handler.register_work_unit(make_metadata(SRC, variables=(variable,)))
 
   def test_variable_axis_sizes_must_match_physical_mesh(self):
     variable = weight_sync.TensorMetadata(
-        name="w", shape=(8, 4), mesh_shape=(1, 2), layout=(1, 0),
-        item_size=4, sharding_spec=("", "y"),
+        name="w",
+        shape=(8, 4),
+        mesh_shape=(1, 2),
+        layout=(1, 0),
+        item_size=4,
+        sharding_spec=("", "y"),
     )
 
     with self.assertRaisesRegex(ValueError, "physical mesh has size 1"):
-      self.handler.register_work_unit(
-          make_metadata(SRC, variables=(variable,))
-      )
+      self.handler.register_work_unit(make_metadata(SRC, variables=(variable,)))
 
   def test_variable_composite_product_mesh_axes_validation(self):
     # Physical mesh: fsdp=2, tp=2 (total product 4)
@@ -556,7 +585,9 @@ class RaidenHandlerTest(absltest.TestCase):
     self._register_both()
 
     result = self.handler.transfer(
-        src_units=[SRC], dst_units=[DST], req_id="step-7",
+        src_units=[SRC],
+        dst_units=[DST],
+        req_id="step-7",
         expected_block_count=4,
     )
 
@@ -565,20 +596,28 @@ class RaidenHandlerTest(absltest.TestCase):
   def test_req_id_cannot_be_reused_with_a_different_uuid(self):
     self._register_both()
     self.handler.transfer(
-        src_units=[SRC], dst_units=[DST], req_id="step-7", generation=7,
+        src_units=[SRC],
+        dst_units=[DST],
+        req_id="step-7",
+        generation=7,
         expected_block_count=4,
     )
 
     with self.assertRaisesRegex(ValueError, "already bound to uuid 7"):
       self.handler.transfer(
-          src_units=[SRC], dst_units=[DST], req_id="step-7", generation=8,
+          src_units=[SRC],
+          dst_units=[DST],
+          req_id="step-7",
+          generation=8,
           expected_block_count=4,
       )
 
   def test_auto_req_id_skips_a_caller_reserved_name(self):
     self._register_both()
     self.handler.transfer(
-        src_units=[SRC], dst_units=[DST], req_id="wsync-1",
+        src_units=[SRC],
+        dst_units=[DST],
+        req_id="wsync-1",
         expected_block_count=4,
     )
 
@@ -686,9 +725,7 @@ class RaidenHandlerTest(absltest.TestCase):
     handler.register_work_unit(make_metadata(SRC))
     handler.register_work_unit(make_metadata(DST))
 
-    handler.transfer(
-        src_units=[SRC], dst_units=[DST], expected_block_count=4
-    )
+    handler.transfer(src_units=[SRC], dst_units=[DST], expected_block_count=4)
 
     self.assertEqual(
         self.controller.start_transfer.call_args.kwargs["parallelism"], 8
@@ -723,7 +760,9 @@ class RaidenHandlerTest(absltest.TestCase):
     handler.register_work_unit(make_metadata(DST))
 
     handler.transfer(
-        src_units=[SRC], dst_units=[DST], expected_block_count=4,
+        src_units=[SRC],
+        dst_units=[DST],
+        expected_block_count=4,
         parallelism=3,
     )
 
@@ -758,9 +797,7 @@ class RaidenHandlerTest(absltest.TestCase):
         skip_tiling={0: True},
     )
 
-    self.assertTrue(
-        self.controller.start_transfer.call_args.kwargs["skip_d2h"]
-    )
+    self.assertTrue(self.controller.start_transfer.call_args.kwargs["skip_d2h"])
     self.assertEqual(
         self.controller.start_transfer.call_args.kwargs["skip_tiling"],
         {0: True},
@@ -771,7 +808,9 @@ class RaidenHandlerTest(absltest.TestCase):
 
     with self.assertRaisesRegex(ValueError, "explicit skip_tiling"):
       self.handler.transfer(
-          src_units=[SRC], dst_units=[DST], expected_block_count=4,
+          src_units=[SRC],
+          dst_units=[DST],
+          expected_block_count=4,
           skip_d2h=True,
       )
 
@@ -781,7 +820,9 @@ class RaidenHandlerTest(absltest.TestCase):
     self._register_both()
 
     self.handler.transfer(
-        src_units=[SRC], dst_units=[DST], expected_block_count=4,
+        src_units=[SRC],
+        dst_units=[DST],
+        expected_block_count=4,
         skip_tiling={},
     )
 

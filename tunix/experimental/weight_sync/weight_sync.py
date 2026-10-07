@@ -28,6 +28,7 @@ from __future__ import annotations
 import abc
 import dataclasses
 import enum
+import math
 from typing import Any, Mapping, Optional, Protocol, Sequence, runtime_checkable
 
 
@@ -92,6 +93,13 @@ class TensorMetadata:
       e.g. `((), ("tp",), ("attention_dp", "tp"))`. The string form makes every
       consumer re-parse it and reserves the comma. Needs the Raiden handler and
       the MaxText adapter migrated together.
+    global_shard_indices: For each local shard, in the owning work unit's
+      `shards` order, the index of the slice that shard holds within this
+      variable's shard grid: the row-major enumeration of `mesh_shape` with tile
+      `shape[i] // mesh_shape[i]` along each dimension. Replicated shards
+      legitimately repeat an index. Empty only when the producer cannot compute
+      it (no real sharding information), in which case a transport must fall
+      back to its own placement inference.
   """
 
   name: str
@@ -101,6 +109,7 @@ class TensorMetadata:
   item_size: int
   layer_idx: int = 0
   sharding_spec: tuple[str, ...] = ()
+  global_shard_indices: tuple[int, ...] = ()
 
   def __post_init__(self) -> None:
     rank = len(self.shape)
@@ -108,9 +117,7 @@ class TensorMetadata:
       raise ValueError("variable name must not be empty")
     if not self.shape or any(dim <= 0 for dim in self.shape):
       raise ValueError(f"variable {self.name!r} has invalid shape {self.shape}")
-    if len(self.mesh_shape) != rank or any(
-        dim <= 0 for dim in self.mesh_shape
-    ):
+    if len(self.mesh_shape) != rank or any(dim <= 0 for dim in self.mesh_shape):
       raise ValueError(
           f"variable {self.name!r}: mesh_shape {self.mesh_shape} must have"
           f" rank {rank} and positive dimensions"
@@ -122,8 +129,7 @@ class TensorMetadata:
     # layout forms its transport can encode.
     if len(self.layout) != rank:
       raise ValueError(
-          f"variable {self.name!r}: layout {self.layout} must have rank"
-          f" {rank}"
+          f"variable {self.name!r}: layout {self.layout} must have rank {rank}"
       )
     if self.item_size <= 0:
       raise ValueError(
@@ -147,6 +153,14 @@ class TensorMetadata:
           f"variable {self.name!r}: a mesh axis may not shard two tensor"
           f" dimensions: {self.sharding_spec}"
       )
+    num_slices = math.prod(self.mesh_shape)
+    for index in self.global_shard_indices:
+      if not isinstance(index, int) or not 0 <= index < num_slices:
+        raise ValueError(
+            f"variable {self.name!r}: global_shard_indices"
+            f" {self.global_shard_indices} must be ints in [0, {num_slices})"
+            f" for mesh_shape {self.mesh_shape}"
+        )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -191,8 +205,6 @@ class WorkUnitMetadata:
       unreported, not a default. Source and destination need not match.
     use_ffi: `transport_mode == "ffi"` as a bool, for consumers that would
       otherwise compare strings. None when unreported.
-    host_subgrid: Optional local host subgrid shape (e.g. from
-      `mesh.local_mesh.devices.shape`) for decomposing physical mesh slices.
   """
 
   unit: WorkUnitId
@@ -206,7 +218,6 @@ class WorkUnitMetadata:
   mesh_axes: Optional[tuple[str, ...]] = None
   transport_mode: Optional[str] = None
   use_ffi: Optional[bool] = None
-  host_subgrid: Optional[tuple[int, ...]] = None
 
   @classmethod
   def from_dict(cls, d: Any) -> WorkUnitMetadata:
@@ -239,6 +250,12 @@ class WorkUnitMetadata:
                 item_size=int(v["item_size"]),
                 layer_idx=int(v.get("layer_idx", 0)),
                 sharding_spec=tuple(v.get("sharding_spec", ())),
+                # Wire boundary: producers predating the field omit the key.
+                global_shard_indices=(
+                    tuple(int(i) for i in v["global_shard_indices"])
+                    if "global_shard_indices" in v
+                    else ()
+                ),
             )
         )
       elif hasattr(v, "name"):
@@ -251,6 +268,9 @@ class WorkUnitMetadata:
                 item_size=int(v.item_size),
                 layer_idx=int(getattr(v, "layer_idx", 0)),
                 sharding_spec=tuple(getattr(v, "sharding_spec", ())),
+                global_shard_indices=tuple(
+                    int(i) for i in v.global_shard_indices
+                ),
             )
         )
 
@@ -276,11 +296,6 @@ class WorkUnitMetadata:
         ),
         transport_mode=d.get("transport_mode"),
         use_ffi=d.get("use_ffi"),
-        host_subgrid=(
-            tuple(d["host_subgrid"])
-            if d.get("host_subgrid") is not None
-            else None
-        ),
     )
 
 
