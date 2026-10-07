@@ -51,7 +51,14 @@ set -Eeuo pipefail
 
 RECIPE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${RECIPE_DIR}/../../../.." && pwd)"
-PYTHON_BIN=${PYTHON_BIN:-python3}
+if [[ -z "${PYTHON_BIN:-}" ]]; then
+  if [[ -x "/opt/venv/bin/python3" ]]; then
+    PYTHON_BIN="/opt/venv/bin/python3"
+  else
+    PYTHON_BIN="python3"
+  fi
+fi
+export PATH="$(dirname "$PYTHON_BIN"):${PATH}"
 export HF_TOKEN=${HF_TOKEN:-${HUGGING_FACE_HUB_TOKEN:-}}
 
 MAX_OOB_RATIO=${MAX_OOB_RATIO:-0.50}
@@ -140,9 +147,10 @@ if not steps:
   print(f"ERROR: No training steps found in {log_path}", file=sys.stderr)
   sys.exit(2)
 
+kv_cache_dtype = os.environ.get("VLLM_KV_CACHE_DTYPE", "bfloat16")
 print()
 print("=====================================================================================================================")
-print(f" MLPerf RL Quantization & Convergence Summary (SAMPLER_QUANT={sampler_quant}, TRAINER_QUANT={trainer_quant})")
+print(f" MLPerf RL Quantization & Convergence Summary (SAMPLER_QUANT={sampler_quant}, TRAINER_QUANT={trainer_quant}, KV_CACHE={kv_cache_dtype})")
 print(f" Log: {log_path}")
 print("=====================================================================================================================")
 header = (
@@ -532,6 +540,18 @@ if [[ "$MODEL_NAME" == "Qwen3.5-35B-A3B" ]]; then
   export TRAINER_PREFUSE_MOE_WEIGHTS=${TRAINER_PREFUSE_MOE_WEIGHTS:-true}
   export EOS_TOKENS=${EOS_TOKENS:-248046,248044}
 
+  export GSM8K_TURNS=${GSM8K_TURNS:-1}
+  export GSM8K_MAX_TOKENS_PER_TURN=${GSM8K_MAX_TOKENS_PER_TURN:-512}
+  export MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-512}
+  if (( GSM8K_TURNS >= 8 )); then
+    export MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-7680}
+  elif (( GSM8K_TURNS > 1 )); then
+    export MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-3584}
+  else
+    export MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-512}
+  fi
+  export MAX_SEQ_TOKEN_PER_TPU=${MAX_SEQ_TOKEN_PER_TPU:-$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH))}
+
   # Match Rollout EP mesh to ACTUAL_ROLLOUT_DEVICES (matching mlperf_35b_128_v5p.sh's EP-only rollout)
   export ROLLOUT_FSDP=${ROLLOUT_FSDP:-1}
   export ROLLOUT_TP=${ROLLOUT_TP:-1}
@@ -539,7 +559,11 @@ if [[ "$MODEL_NAME" == "Qwen3.5-35B-A3B" ]]; then
   export ROLLOUT_EXPERT=${ROLLOUT_EXPERT:-$ACTUAL_ROLLOUT_DEVICES}
   export VLLM_ENABLE_EXPERT_PARALLEL=${VLLM_ENABLE_EXPERT_PARALLEL:-true}
   export VLLM_DATA_PARALLEL_SIZE=${VLLM_DATA_PARALLEL_SIZE:-1}
-  export MAMBA_CACHE_SPLIT=${MAMBA_CACHE_SPLIT:-2}
+  if (( GSM8K_TURNS > 1 )); then
+    export MAMBA_CACHE_SPLIT=${MAMBA_CACHE_SPLIT:-16}
+  else
+    export MAMBA_CACHE_SPLIT=${MAMBA_CACHE_SPLIT:-2}
+  fi
   export ROLLOUT_SHARDING_JSON=${ROLLOUT_SHARDING_JSON:-"{\"additional_config\":{\"sharding\":{\"sharding_strategy\":{\"expert_parallelism\":${ROLLOUT_EXPERT},\"tensor_parallelism\":1,\"enable_dp_attention\":true}},\"custom_mamba_cache_multiplier\":${MAMBA_CACHE_SPLIT},\"maxtext_config\":{\"scan_layers\":false,\"attention\":\"vllm_rpa\",\"allow_split_physical_axes\":true,\"use_multimodal\":false,\"prefuse_moe_weights\":true}}}"}
   export ROLLOUT_PREFUSE_MOE_WEIGHTS=${ROLLOUT_PREFUSE_MOE_WEIGHTS:-true}
   export RETURN_ROUTED_EXPERTS=${RETURN_ROUTED_EXPERTS:-true}
@@ -557,14 +581,10 @@ if [[ "$MODEL_NAME" == "Qwen3.5-35B-A3B" ]]; then
     LOW_MEM_TRAINER_FLAGS=""
   fi
 
-  EFFECTIVE_SEQ_LEN=${MAX_SEQ_TOKEN_PER_TPU:-1024}
-  SA_BLOCK_KV=$(( EFFECTIVE_SEQ_LEN < 4096 ? EFFECTIVE_SEQ_LEN : 4096 ))
-  SA_BLOCK_Q=$(( SA_BLOCK_KV < 1024 ? SA_BLOCK_KV / 2 : 1024 ))
-  SA_BLOCK_COMPUTE=$(( SA_BLOCK_Q < 512 ? SA_BLOCK_Q : 512 ))
-
-  # Qwen3.5 GDN & Tokamax Splash Attention numerical stability flags (with use_gdn_kernel=false so remat_policy=full rematerializes GDN intermediates on single host)
-  BASE_MAXTEXT_FLAGS="float32_gate_logits=true float32_logits=true use_gdn_kernel=false megablox=true sparse_matmul=true use_tokamax_gmm=true use_gmm_v2=true use_gmm_v2_heuristic_tiling=true merge_gating_gmm=false use_custom_sort_vjp=false use_tokamax_splash=true use_splash_scheduler=true sa_block_q=${SA_BLOCK_Q} sa_block_kv=${SA_BLOCK_KV} sa_block_kv_compute=${SA_BLOCK_COMPUTE} sa_block_q_dkv=${SA_BLOCK_Q} sa_block_kv_dkv=${SA_BLOCK_KV} sa_block_kv_dkv_compute=${SA_BLOCK_COMPUTE} sa_fuse_reciprocal=false sa_use_base2_exp=true dq_reduction_steps=3 allow_split_physical_axes=false num_vocab_tiling=8 use_iota_embed=false${LOW_MEM_TRAINER_FLAGS:+ $LOW_MEM_TRAINER_FLAGS}"
-  ROLLOUT_BASE_MAXTEXT_FLAGS="float32_gate_logits=true float32_logits=true megablox=False sparse_matmul=False"
+  export FLOAT32_GATE_LOGITS=${FLOAT32_GATE_LOGITS:-true}
+  export FLOAT32_LOGITS=${FLOAT32_LOGITS:-true}
+  BASE_MAXTEXT_FLAGS="float32_gate_logits=true float32_logits=true${LOW_MEM_TRAINER_FLAGS:+ $LOW_MEM_TRAINER_FLAGS}"
+  ROLLOUT_BASE_MAXTEXT_FLAGS="float32_gate_logits=true float32_logits=true enable_dp_attention=true"
 else
   # Dense proxy model (e.g. MODEL_NAME=Qwen3-0.6B or Qwen3-4B)
   export SAMPLER=${SAMPLER:-inprocess_vllm}
@@ -620,11 +640,19 @@ export MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-$BATCH_SIZE}
 export TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-$TRAINER_FSDP}
 export MAX_STEPS=${MAX_STEPS:-${NUM_STEPS:-5}}
 
+export GSM8K_TURNS=${GSM8K_TURNS:-1}
+export GSM8K_MAX_TOKENS_PER_TURN=${GSM8K_MAX_TOKENS_PER_TURN:-512}
 export MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-512}
-export MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-512}
-export MAX_SEQ_TOKEN_PER_TPU=${MAX_SEQ_TOKEN_PER_TPU:-1024}
-export MAX_SEGMENTS_PER_PACKED_ROW=${MAX_SEGMENTS_PER_PACKED_ROW:-2}
-export COMPUTE_LOGPS_CHUNK_SIZE=${COMPUTE_LOGPS_CHUNK_SIZE:-256}
+if (( GSM8K_TURNS >= 8 )); then
+  export MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-7680}
+elif (( GSM8K_TURNS > 1 )); then
+  export MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-3584}
+else
+  export MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-512}
+fi
+export MAX_SEQ_TOKEN_PER_TPU=${MAX_SEQ_TOKEN_PER_TPU:-$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH))}
+export MAX_SEGMENTS_PER_PACKED_ROW=${MAX_SEGMENTS_PER_PACKED_ROW:-16}
+export COMPUTE_LOGPS_CHUNK_SIZE=${COMPUTE_LOGPS_CHUNK_SIZE:-512}
 
 export LEARNING_RATE=${LEARNING_RATE:-1e-6}
 export SCHEDULE_TYPE=${SCHEDULE_TYPE:-constant}
@@ -664,16 +692,29 @@ else
   export TRUNCATED_IMPORTANCE_SAMPLING_RATIO_MIN=${TRUNCATED_IMPORTANCE_SAMPLING_RATIO_MIN:-0.999}
   export TRUNCATED_IMPORTANCE_SAMPLING_RATIO=${TRUNCATED_IMPORTANCE_SAMPLING_RATIO:-1.002}
 fi
-export SAMPLER_IS_LENGTH_BUCKETS=${SAMPLER_IS_LENGTH_BUCKETS:-512,1024}
+if (( MAX_RESPONSE_LENGTH > 1024 )); then
+  export SAMPLER_IS_LENGTH_BUCKETS=${SAMPLER_IS_LENGTH_BUCKETS:-1024,2048,4096}
+else
+  export SAMPLER_IS_LENGTH_BUCKETS=${SAMPLER_IS_LENGTH_BUCKETS:-512,1024}
+fi
 
 # vLLM Rollout Engine settings (matched to mlperf_base.sh, scaled to smoke seq len)
-export ENABLE_PREFIX_CACHING=${ENABLE_PREFIX_CACHING:-false}
+if (( GSM8K_TURNS > 1 )); then
+  export ENABLE_PREFIX_CACHING=${ENABLE_PREFIX_CACHING:-true}
+  export VLLM_MAX_NUM_SEQS=${VLLM_MAX_NUM_SEQS:-16}
+else
+  export ENABLE_PREFIX_CACHING=${ENABLE_PREFIX_CACHING:-false}
+  export VLLM_MAX_NUM_SEQS=${VLLM_MAX_NUM_SEQS:-4}
+fi
 export ROLLOUT_FREE_KV_CACHE=${ROLLOUT_FREE_KV_CACHE:-false}
 export VLLM_MAX_MODEL_LEN=${VLLM_MAX_MODEL_LEN:-$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH))}
-export VLLM_MAX_NUM_BATCHED_TOKENS=${VLLM_MAX_NUM_BATCHED_TOKENS:-$VLLM_MAX_MODEL_LEN}
-export VLLM_MAX_NUM_SEQS=${VLLM_MAX_NUM_SEQS:-4}
-export VLLM_GPU_MEMORY_UTILIZATION=${VLLM_GPU_MEMORY_UTILIZATION:-0.75}
-export VLLM_MAMBA_CACHE_MODE=${VLLM_MAMBA_CACHE_MODE:-none}
+export VLLM_MAX_NUM_BATCHED_TOKENS=${VLLM_MAX_NUM_BATCHED_TOKENS:-$(( VLLM_MAX_MODEL_LEN < 2048 ? VLLM_MAX_MODEL_LEN : 2048 ))}
+export VLLM_GPU_MEMORY_UTILIZATION=${VLLM_GPU_MEMORY_UTILIZATION:-0.9}
+if [[ "${ENABLE_PREFIX_CACHING}" == "true" ]]; then
+  export VLLM_MAMBA_CACHE_MODE=${VLLM_MAMBA_CACHE_MODE:-align}
+else
+  export VLLM_MAMBA_CACHE_MODE=${VLLM_MAMBA_CACHE_MODE:-none}
+fi
 export VLLM_KV_CACHE_DTYPE=${VLLM_KV_CACHE_DTYPE:-bfloat16}
 export VLLM_BLOCK_SIZE=${VLLM_BLOCK_SIZE:-256}
 export VLLM_ASYNC_SCHEDULING=${VLLM_ASYNC_SCHEDULING:-true}
@@ -688,7 +729,15 @@ export EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-100000}
 export WAIT_TIMEOUT_SECS=${WAIT_TIMEOUT_SECS:-1800}
 export WAIT_POLL_SECS=${WAIT_POLL_SECS:-5}
 
-RUN_TAG="smoke_${MODEL_NAME}_sq-${SAMPLER_QUANT}_tq-${TRAINER_QUANT}_$(date +%Y%m%d_%H%M%S)"
+KV_TAG=""
+if [[ "${VLLM_KV_CACHE_DTYPE:-bfloat16}" != "bfloat16" ]]; then
+  KV_TAG="_kv-${VLLM_KV_CACHE_DTYPE}"
+fi
+TURNS_TAG=""
+if (( GSM8K_TURNS > 1 )); then
+  TURNS_TAG="_t${GSM8K_TURNS}"
+fi
+RUN_TAG="smoke_${MODEL_NAME}_sq-${SAMPLER_QUANT}_tq-${TRAINER_QUANT}${KV_TAG}${TURNS_TAG}_$(date +%Y%m%d_%H%M%S)"
 export LOG_ROOT=${LOG_ROOT:-/tmp/mlperf_quant_smoke/${RUN_TAG}}
 export LOG_DIR=${LOG_ROOT}/tb
 export MAXTEXT_OUTPUT_DIR=${MAXTEXT_OUTPUT_DIR:-${LOG_ROOT}/maxtext_out}
@@ -1020,6 +1069,118 @@ def _patch_maxtext_utils(maxtext_utils_mod):
   maxtext_utils_mod.create_maxtext_engine = _wrapped_create_maxtext_engine
 
 
+def _patch_gsm8k(gsm8k_mod):
+  env_cls = gsm8k_mod.GSM8KEnv
+  orig_init = env_cls.__init__
+  orig_initial_obs = env_cls._initial_observation
+  orig_step_impl = env_cls._step_impl
+
+  def _multi_turn_init(self, *args, followup_turns=None, **kwargs):
+    orig_init(self, *args, **kwargs)
+    self._followup_turns = list(followup_turns or [])
+    self._init_task_snapshot = dict(self.task)
+    self._turn_idx = 0
+
+  def _multi_turn_initial_observation(self):
+    if getattr(self, "_init_task_snapshot", None):
+      self.task.update(self._init_task_snapshot)
+    self._turn_idx = 0
+    return orig_initial_obs(self)
+
+  def _multi_turn_step_impl(self, action):
+    followups = getattr(self, "_followup_turns", None)
+    if not followups:
+      return orig_step_impl(self, action)
+
+    total_turns = 1 + len(followups)
+    reward, info = gsm8k_mod.gsm8k_env_reward(self.task, action)
+    info["correct"] = bool(info["answer_correct"])
+    info["turn_idx"] = self._turn_idx
+    scaled_reward = float(reward) / float(total_turns)
+
+    if self._turn_idx < len(followups):
+      next_turn = followups[self._turn_idx]
+      self._turn_idx += 1
+      next_prompt = str(next_turn.get("prompts", ""))
+      next_question = str(next_turn.get("question", next_prompt))
+      next_answer = str(next_turn.get("answer", ""))
+      self.task["prompts"] = next_prompt
+      self.task["question"] = next_question
+      self.task["answer"] = next_answer
+      self.task["gold_answer"] = next_answer
+      return gsm8k_mod.base_environment.EnvStepResult(
+          observation={"prompts": next_prompt},
+          reward=scaled_reward,
+          done=False,
+          info=info,
+      )
+
+    self._turn_idx += 1
+    completion = action.action if hasattr(action, "action") else str(action)
+    return gsm8k_mod.base_environment.EnvStepResult(
+        observation={
+            "answer": str(completion),
+            "gold_answer": str(self.task.get("gold_answer", "")),
+        },
+        reward=scaled_reward,
+        done=True,
+        info=info,
+    )
+
+  env_cls.__init__ = _multi_turn_init
+  env_cls._initial_observation = _multi_turn_initial_observation
+  env_cls._step_impl = _multi_turn_step_impl
+
+
+def _patch_gsm8k_runner(runner_mod):
+  orig_iter_prompt_items = runner_mod._iter_prompt_items
+  orig_build_prompt_item = runner_mod._build_prompt_item
+
+  def _multi_turn_iter_prompt_items(args):
+    num_turns = int(os.environ.get("GSM8K_TURNS", "1") or "1")
+    if num_turns <= 1:
+      yield from orig_iter_prompt_items(args)
+      return
+
+    max_tokens_per_turn = int(
+        os.environ.get("GSM8K_MAX_TOKENS_PER_TURN", "512") or "512"
+    )
+    gsm8k_mod = runner_mod.gsm8k
+    dataset = gsm8k_mod.load_gsm8k_dataset(
+        split=args.tfds_split,
+        data_dir=args.tfds_data_dir,
+        shuffle=args.shuffle,
+        seed=args.seed,
+    )
+    dataset_size = len(dataset)
+    if dataset_size == 0:
+      raise ValueError("GSM8K dataset is empty.")
+
+    for prompt_idx in range(args.max_steps * args.batch_size):
+      first_ex = dataset[(prompt_idx * num_turns) % dataset_size]
+      item = orig_build_prompt_item(example=first_ex, prompt_idx=prompt_idx)
+      followups = []
+      for t in range(1, num_turns):
+        ex = dataset[(prompt_idx * num_turns + t) % dataset_size]
+        p_txt = gsm8k_mod.as_text(ex["prompts"])
+        q_txt = gsm8k_mod.as_text(ex["question"])
+        a_txt = gsm8k_mod.normalize_example_value(ex["answer"])
+        followups.append({
+            "prompts": p_txt,
+            "question": q_txt,
+            "answer": a_txt,
+            "gold_answer": a_txt,
+        })
+      item["max_turns"] = num_turns
+      item["generation_kwargs"] = {"max_tokens": max_tokens_per_turn}
+      env_cfg = item["metadata"]["env_config"]
+      env_cfg["max_steps"] = num_turns
+      env_cfg["followup_turns"] = followups
+      yield item
+
+  runner_mod._iter_prompt_items = _multi_turn_iter_prompt_items
+
+
 class _SmokeTestPatchFinder(importlib.abc.MetaPathFinder):
 
   def __init__(self):
@@ -1029,6 +1190,8 @@ class _SmokeTestPatchFinder(importlib.abc.MetaPathFinder):
     if fullname not in (
         "maxtext.layers.quantizations",
         "tunix.utils.maxtext_utils",
+        "tunix.experimental.examples.math_gsm8k_dist.gsm8k",
+        "tunix.experimental.examples.math_gsm8k_dist.run_gsm8k_dist_grpo",
     ):
       return None
     if fullname in self._active:
@@ -1055,6 +1218,13 @@ class _SmokeTestPatchFinder(importlib.abc.MetaPathFinder):
           _patch_quantizations(module)
         elif fullname == "tunix.utils.maxtext_utils":
           _patch_maxtext_utils(module)
+        elif fullname == "tunix.experimental.examples.math_gsm8k_dist.gsm8k":
+          _patch_gsm8k(module)
+        elif (
+            fullname
+            == "tunix.experimental.examples.math_gsm8k_dist.run_gsm8k_dist_grpo"
+        ):
+          _patch_gsm8k_runner(module)
 
     spec.loader = _Loader()
     return spec
@@ -1312,10 +1482,10 @@ ensure_protos_compiled() {
 
 echo "=========================================================================="
 echo "MLPerf Single-Host Quantization & Convergence Smoke Test"
-echo "  Task mode:                  $TASK_MODE"
+echo "  Task mode:                  $TASK_MODE (gsm8k_turns=$GSM8K_TURNS, max_prompt=$MAX_PROMPT_LENGTH, max_resp=$MAX_RESPONSE_LENGTH, seq_len=$MAX_SEQ_TOKEN_PER_TPU)"
 echo "  Model:                      $MODEL_NAME ($MAXTEXT_MODEL_NAME)"
 echo "  Host TPU topology:          ${HOST_PHYSICAL_TPU_CHIPS} physical chips (${DETECTED_TPU_KIND}), ${ACTUAL_TRAINER_DEVICES} JAX devices/worker (${EFFECTIVE_MEGACORE_ARG:-default})"
-echo "  Sampler quantization:       $SAMPLER_QUANT (qwix_moe_only=${ROLLOUT_QWIX_MOE_ONLY_QTYPE:-off})"
+echo "  Sampler quantization:       $SAMPLER_QUANT (qwix_moe_only=${ROLLOUT_QWIX_MOE_ONLY_QTYPE:-off}, kv_cache=${VLLM_KV_CACHE_DTYPE}, prefix_cache=${ENABLE_PREFIX_CACHING}, mamba_cache=${VLLM_MAMBA_CACHE_MODE})"
 echo "  Trainer quantization:       $TRAINER_QUANT (qwix_moe_only=${TRAINER_QWIX_MOE_ONLY_QTYPE:-off})"
 echo "  ROLLOUT_MAXTEXT_EXTRA_FLAGS: $ROLLOUT_MAXTEXT_EXTRA_FLAGS"
 echo "  MAXTEXT_EXTRA_FLAGS:         $MAXTEXT_EXTRA_FLAGS"
@@ -1540,7 +1710,7 @@ echo "Launching CPU Orchestrator ($TASK_MODE)..."
     ORCHESTRATOR_CMD+=(--use_rollout_logps)
   fi
   if [[ "$TASK_MODE" == "gsm8k" ]]; then
-    DEFAULT_TFDS_EXAMPLES=$(( MAX_STEPS * BATCH_SIZE > 4 ? MAX_STEPS * BATCH_SIZE : 4 ))
+    DEFAULT_TFDS_EXAMPLES=$(( MAX_STEPS * BATCH_SIZE * GSM8K_TURNS > 4 ? MAX_STEPS * BATCH_SIZE * GSM8K_TURNS : 4 ))
     ORCHESTRATOR_CMD+=(
       --tfds_split="${TFDS_SPLIT:-train[:${DEFAULT_TFDS_EXAMPLES}]}"
       --reward_mode="${REWARD_MODE:-env}"
@@ -1552,7 +1722,7 @@ echo "Launching CPU Orchestrator ($TASK_MODE)..."
     )
   fi
 
-  export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
+  export PYTHONPATH="${PY_HOOKS_DIR}:${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
   export JAX_PLATFORMS=cpu
   export PYTHONUNBUFFERED=1
   "${ORCHESTRATOR_CMD[@]}" > "$ORCHESTRATOR_LOG" 2>&1
