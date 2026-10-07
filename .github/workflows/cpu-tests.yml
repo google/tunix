@@ -52,7 +52,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install --find-links=. "google-tunix[prod,test,experimental]"
-          python -c "import pathlib, shutil, sysconfig; src = pathlib.Path(sysconfig.get_paths()['platlib']) / 'tunix/rl'; exts = list(src.glob('_packing_ext*')); assert exts, f'No _packing_ext in {src}'; [shutil.copy2(p, 'tunix/rl/') for p in exts]"
+          python -c "import pathlib, shutil, sysconfig; root = pathlib.Path(sysconfig.get_paths()['platlib']) / 'tunix'; exts = {ext: list(root.glob(f'{ext}*.so')) for ext in ('rl/_packing_ext', 'utils/_trajectory_logger_ext')}; assert all(exts.values()), f'Missing nanobind extensions in {root}: {exts}'; [shutil.copy2(p, pathlib.Path('tunix') / p.relative_to(root)) for paths in exts.values() for p in paths]"
 
       - name: Verify Tunix imports from installed package
         run: |
@@ -64,6 +64,7 @@ jobs:
           import tunix.distillation
           import tunix.rl
           from tunix.rl import _packing_ext
+          from tunix.utils import _trajectory_logger_ext
 
           assert tunix.__version__ != '0.0.0.dev0', 'Tunix version not set correctly'
           print('All tunix modules imported successfully and version is', tunix.__version__)
@@ -125,7 +126,7 @@ jobs:
         run: |
           python3 -m pip install --upgrade pip setuptools wheel
           python3 -m pip install --find-links=. "google-tunix[prod,test,experimental]"
-          python3 -c "import pathlib, shutil, sysconfig; src = pathlib.Path(sysconfig.get_paths()['platlib']) / 'tunix/rl'; exts = list(src.glob('_packing_ext*')); assert exts, f'No _packing_ext in {src}'; [shutil.copy2(p, 'tunix/rl/') for p in exts]"
+          python3 -c "import pathlib, shutil, sysconfig; root = pathlib.Path(sysconfig.get_paths()['platlib']) / 'tunix'; exts = {ext: list(root.glob(f'{ext}*.so')) for ext in ('rl/_packing_ext', 'utils/_trajectory_logger_ext')}; assert all(exts.values()), f'Missing nanobind extensions in {root}: {exts}'; [shutil.copy2(p, pathlib.Path('tunix') / p.relative_to(root)) for paths in exts.values() for p in paths]"
           # tpu-inference/Numba needs NumPy 2.3 or less.
           python3 -m pip install numpy==2.3.5 --force-reinstall
 
@@ -173,7 +174,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install --find-links=. "google-tunix[prod,test,experimental]"
-          python -c "import pathlib, shutil, sysconfig; src = pathlib.Path(sysconfig.get_paths()['platlib']) / 'tunix/rl'; exts = list(src.glob('_packing_ext*')); assert exts, f'No _packing_ext in {src}'; [shutil.copy2(p, 'tunix/rl/') for p in exts]"
+          python -c "import pathlib, shutil, sysconfig; root = pathlib.Path(sysconfig.get_paths()['platlib']) / 'tunix'; exts = {ext: list(root.glob(f'{ext}*.so')) for ext in ('rl/_packing_ext', 'utils/_trajectory_logger_ext')}; assert all(exts.values()), f'Missing nanobind extensions in {root}: {exts}'; [shutil.copy2(p, pathlib.Path('tunix') / p.relative_to(root)) for paths in exts.values() for p in paths]"
           python -m pip install --upgrade kagglehub kagglesdk torch
 
       - name: Run Smoke tests (model creation)

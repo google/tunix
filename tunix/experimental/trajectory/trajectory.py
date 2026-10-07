@@ -37,21 +37,35 @@ def _serialize_array(value: list[Any] | np.ndarray | None) -> list[Any] | None:
   return list(value)
 
 
+# Sequences whose elements all have one of these exact types are copied without
+# per-element recursion: one C-level scan of `map(type, ...)` vets the whole
+# sequence. Any other element type, including subclasses such as `StrEnum` and
+# NumPy scalars, takes the recursive path, which also returns it unchanged.
+_JSON_SCALAR_TYPES: Final[frozenset[type[object]]] = frozenset(
+    {bool, float, int, str, type(None)}
+)
+
+
+def _to_json_compatible(value: Any) -> Any:
+  """Recursively converts NumPy arrays and tuples nested in `value` to lists."""
+  if isinstance(value, np.ndarray):
+    return value.tolist()
+  if isinstance(value, dict):
+    return {k: _to_json_compatible(v) for k, v in value.items()}
+  if isinstance(value, (list, tuple)):
+    # `to_atif_step()` packs long token, mask, and logprob lists into `extra`;
+    # copy scalar-only sequences without a Python call per element.
+    if _JSON_SCALAR_TYPES.issuperset(map(type, value)):
+      return list(value)
+    return [_to_json_compatible(v) for v in value]
+  return value
+
+
 def _serialize_dict(value: dict[str, Any] | None) -> dict[str, Any] | None:
   """Recursively converts any nested NumPy arrays within a dictionary to lists."""
   if value is None:
     return None
-
-  def _convert(v: Any) -> Any:
-    if isinstance(v, np.ndarray):
-      return v.tolist()
-    if isinstance(v, dict):
-      return {k: _convert(val) for k, val in v.items()}
-    if isinstance(v, (list, tuple)):
-      return [_convert(x) for x in v]
-    return v
-
-  return _convert(value)
+  return _to_json_compatible(value)
 
 
 TUNIX_EXTENSIONS_KEY: Final[str] = "_tunix_extensions"
@@ -472,6 +486,21 @@ class Agent(pydantic.BaseModel):
 class TrajectoryMetadata(pydantic.BaseModel):
   """Metadata for a trajectory (excluding steps and subagents)."""
 
+  METADATA_TYPE: ClassVar[str] = "base"
+  _REGISTRY: ClassVar[dict[str, type[TrajectoryMetadata]]] = {}
+
+  def __init_subclass__(cls, **kwargs: Any) -> None:
+    super().__init_subclass__(**kwargs)
+    meta_type = cls.__dict__.get("METADATA_TYPE")
+    if meta_type:
+      if meta_type in cls._REGISTRY:
+        raise ValueError(
+            f"METADATA_TYPE {meta_type} is already registered to"
+            f" {cls._REGISTRY[meta_type].__qualname__}; cannot register"
+            f" {cls.__qualname__}."
+        )
+      cls._REGISTRY[meta_type] = cls
+
   model_config = pydantic.ConfigDict(extra="forbid")
 
   schema_version: str = pydantic.Field(
@@ -524,9 +553,7 @@ class TrajectoryMetadata(pydantic.BaseModel):
     return self.extra.get(TUNIX_EXTENSIONS_KEY) or {}
 
   @classmethod
-  def from_atif_metadata(
-      cls: type[Self], metadata: TrajectoryMetadata
-  ) -> Self:
+  def from_atif_metadata(cls: type[Self], metadata: TrajectoryMetadata) -> Self:
     """Rehydrates base ATIF TrajectoryMetadata into this metadata subclass."""
     if isinstance(metadata, cls):
       return metadata
@@ -595,6 +622,12 @@ class TrajectoryMetadata(pydantic.BaseModel):
     return self._create_paired_trajectory(
         Trajectory, steps, subagent_trajectories
     )
+
+
+# TrajectoryMetadata is the base class, so __init_subclass__ does not run on it.
+TrajectoryMetadata._REGISTRY[TrajectoryMetadata.METADATA_TYPE] = (  # pylint: disable=protected-access
+    TrajectoryMetadata
+)
 
 
 StepT = TypeVar("StepT", bound=Step)
@@ -866,6 +899,8 @@ def _upcast_atif_step(step: Step) -> TunixAgentStep | TunixEnvStep:
 class TunixTrajectoryMetadata(TrajectoryMetadata):
   """Tunix-specific trajectory metadata extending base ATIF TrajectoryMetadata."""
 
+  METADATA_TYPE: ClassVar[str] = "tunix"
+
   prompt_id: str | None = pydantic.Field(
       default=None,
       description="Identifier for the initial prompt/task.",
@@ -880,7 +915,10 @@ class TunixTrajectoryMetadata(TrajectoryMetadata):
   )
   status: str | None = pydantic.Field(
       default=None,
-      description='Run status ("RUNNING", "COMPLETED", "FAILED", etc.).',
+      description=(
+          "Trajectory status as an `agent_types.TrajectoryStatus` name (e.g."
+          ' "RUNNING", "SUCCEEDED", "FAILED"), or None if not stated.'
+      ),
   )
   total_reward: float | None = pydantic.Field(
       default=None,

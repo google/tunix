@@ -19,6 +19,8 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "Choose the type of build." FORCE)
 endif()
 
+# C++ sources are absent when only the build metadata is copied (e.g. the
+# Dockerfile dependency-caching layer), in which case no extension is built.
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tunix/rl/_packing_ext.cc")
   find_package(
     Python 3.12
@@ -35,16 +37,22 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tunix/rl/_packing_ext.cc")
   )
   find_package(nanobind CONFIG REQUIRED)
 
-  nanobind_add_module(
-    _packing_ext
-    STABLE_ABI
-    NB_STATIC
-    tunix/rl/_packing_ext.cc
-  )
-  target_compile_features(_packing_ext PRIVATE cxx_std_17)
-  set_target_properties(
-    _packing_ext
-    PROPERTIES LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tunix/rl"
-  )
-  install(TARGETS _packing_ext LIBRARY DESTINATION tunix/rl)
+  # Builds `tunix/<package>/<name>.cc` into the `tunix.<package>` module.
+  function(tunix_add_nanobind_extension package name)
+    nanobind_add_module(
+      ${name}
+      STABLE_ABI
+      NB_STATIC
+      tunix/${package}/${name}.cc
+    )
+    target_compile_features(${name} PRIVATE cxx_std_17)
+    set_target_properties(
+      ${name}
+      PROPERTIES LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tunix/${package}"
+    )
+    install(TARGETS ${name} LIBRARY DESTINATION tunix/${package})
+  endfunction()
+
+  tunix_add_nanobind_extension(rl _packing_ext)
+  tunix_add_nanobind_extension(utils _trajectory_logger_ext)
 endif()

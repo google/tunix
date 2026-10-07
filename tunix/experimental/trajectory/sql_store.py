@@ -4,7 +4,7 @@ import collections
 from collections.abc import Callable, Mapping, Sequence
 import datetime
 import threading
-from typing import Any, ClassVar, Final, Self
+from typing import Any, ClassVar, Final, TypeVar
 
 from absl import logging
 import sqlalchemy as sa
@@ -15,6 +15,8 @@ from tunix.experimental.trajectory import db_engine
 from tunix.experimental.trajectory import schema
 from tunix.experimental.trajectory import store
 from tunix.experimental.trajectory import trajectory as trajectory_lib
+
+MetadataT = TypeVar("MetadataT", bound=trajectory_lib.TrajectoryMetadata)
 
 # Maximum number of trajectory metadata entries retained per run in the worker's
 # bounded LRU cache to skip redundant trajectory table upserts across multi-step
@@ -55,25 +57,22 @@ def _to_utc_timestamp(dt: datetime.datetime | None) -> datetime.datetime:
 
 def _resolve_status(
     metadata: trajectory_lib.TrajectoryMetadata,
-) -> schema.Status:
+) -> str:
   """Returns the status of the trajectory as stated by the caller.
 
   Only the caller knows what state a trajectory is in, so the status is read
-  from `metadata.get_extensions()` and normalized to `schema.Status`. The
+  from `metadata.get_extensions()` and written as-is when non-empty. The
   absence of a valid status returns `schema.Status.UNKNOWN`.
 
   Args:
     metadata: TrajectoryMetadata instance.
 
   Returns:
-    The stated `schema.Status`, or `schema.Status.UNKNOWN` if absent/invalid.
+    The stated status string, or `schema.Status.UNKNOWN` if absent or blank.
   """
   raw_status = metadata.get_extensions().get("status")
-  if isinstance(raw_status, str):
-    try:
-      return schema.Status(raw_status.strip().upper())
-    except ValueError:
-      pass
+  if isinstance(raw_status, str) and raw_status.strip():
+    return raw_status.strip()
   return schema.Status.UNKNOWN
 
 
@@ -400,7 +399,7 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
     )
 
 
-class SqlTrajectoryStore(store.TrajectoryStore):
+class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
   """SQL-backed implementation of TrajectoryReader and TrajectoryWriter.
 
   `SqlTrajectoryStore` manages the persistence and retrieval of reinforcement
@@ -433,6 +432,7 @@ class SqlTrajectoryStore(store.TrajectoryStore):
       run_id: str,
       db_url: str,
       auto_init: bool = True,
+      metadata_cls: type[MetadataT],
   ) -> None:
     """Initializes SqlTrajectoryStore.
 
@@ -446,11 +446,17 @@ class SqlTrajectoryStore(store.TrajectoryStore):
         omit the password; libpq then reads `PGPASSWORD` or `~/.pgpass`.
       auto_init: If True, automatically creates database tables and indexes on
         startup via `_initialize_schema`.
+      metadata_cls: The TrajectoryMetadata subclass to read stored metadata back
+        as; the type checker infers `MetadataT` from it. See
+        `store.TrajectoryStore`.
 
     Raises:
-      ValueError: If `run_id` or `db_url` is empty, None, or whitespace, or if
-        `db_url` uses an unsupported database dialect.
+      TypeError: If metadata_cls is not a TrajectoryMetadata subclass.
+      ValueError: If metadata_cls is not registered in
+        TrajectoryMetadata._REGISTRY, if `run_id` or `db_url` is empty, None,
+        or whitespace, or if `db_url` uses an unsupported database dialect.
     """
+    super().__init__(metadata_cls=metadata_cls)
     if not run_id or not run_id.strip():
       raise ValueError("SqlTrajectoryStore requires a non-empty run_id.")
     if not db_url or not db_url.strip():
@@ -477,11 +483,18 @@ class SqlTrajectoryStore(store.TrajectoryStore):
         raise
 
   @classmethod
-  def _from_config(cls, config: Mapping[str, Any]) -> Self:
+  def _from_config(
+      cls,
+      config: Mapping[str, Any],
+      *,
+      metadata_cls: type[trajectory_lib.TrajectoryMetadata],
+  ) -> "SqlTrajectoryStore[Any]":
     """Builds a SQL-backed store from `config`.
 
     Args:
       config: Requires "db_url" and "run_id".
+      metadata_cls: The TrajectoryMetadata subclass resolved from the config's
+        "metadata_type".
 
     Returns:
       A new SqlTrajectoryStore.
@@ -492,6 +505,7 @@ class SqlTrajectoryStore(store.TrajectoryStore):
     return cls(
         run_id=config.get("run_id", ""),
         db_url=config.get("db_url", ""),
+        metadata_cls=metadata_cls,
     )
 
   def to_config(self) -> dict[str, Any]:
@@ -506,6 +520,7 @@ class SqlTrajectoryStore(store.TrajectoryStore):
         "backend": self.BACKEND,
         "db_url": self._db_url,
         "run_id": self._run_id,
+        "metadata_type": self._metadata_type,
     }
 
   def to_redacted_config(self) -> dict[str, Any]:
@@ -573,7 +588,7 @@ class SqlTrajectoryStore(store.TrajectoryStore):
   def add_step(
       self,
       step: trajectory_lib.Step,
-      metadata: trajectory_lib.TrajectoryMetadata,
+      metadata: MetadataT,
   ) -> None:
     """Asynchronously logs a turn step and its trajectory metadata.
 
@@ -595,7 +610,7 @@ class SqlTrajectoryStore(store.TrajectoryStore):
 
   def update_metadata(
       self,
-      metadata: trajectory_lib.TrajectoryMetadata,
+      metadata: MetadataT,
   ) -> None:
     """Updates or creates trajectory metadata asynchronously.
 
@@ -644,7 +659,7 @@ class SqlTrajectoryStore(store.TrajectoryStore):
 
   def get_trajectories_metadata(
       self, trajectory_ids: Sequence[str] | None = None
-  ) -> list[trajectory_lib.TrajectoryMetadata]:
+  ) -> list[MetadataT]:
     """Retrieves metadata for trajectories in the run.
 
     Args:
@@ -672,8 +687,7 @@ class SqlTrajectoryStore(store.TrajectoryStore):
       with self._engine.connect() as conn:
         metadata_rows = conn.execute(statement)
         return [
-            trajectory_lib.TrajectoryMetadata.model_validate(row)
-            for row in metadata_rows.scalars()
+            self._load_metadata(row) for row in metadata_rows.scalars()
         ]
 
     # Query only the requested trajectory IDs when a sequence is provided.
@@ -690,9 +704,7 @@ class SqlTrajectoryStore(store.TrajectoryStore):
     with self._engine.connect() as conn:
       metadata_rows = conn.execute(statement)
       metadata_by_trajectory_id = {
-          row.trajectory_id: trajectory_lib.TrajectoryMetadata.model_validate(
-              row.trajectory_metadata
-          )
+          row.trajectory_id: self._load_metadata(row.trajectory_metadata)
           for row in metadata_rows
       }
     metadata_list = []
@@ -704,7 +716,7 @@ class SqlTrajectoryStore(store.TrajectoryStore):
 
   def get_trajectories(
       self, trajectory_ids: Sequence[str]
-  ) -> list[trajectory_lib.Trajectory]:
+  ) -> list[trajectory_lib.Trajectory[Any]]:
     """Retrieves full trajectories for a sequence of trajectory IDs.
 
     Args:
@@ -754,19 +766,20 @@ class SqlTrajectoryStore(store.TrajectoryStore):
       for trajectory_id, payload in step_rows:
         steps_by_trajectory_id[trajectory_id].append(payload)
 
-    trajectories = []
+    trajectories: list[trajectory_lib.Trajectory[Any]] = []
     for trajectory_id in trajectory_ids:
       if trajectory_id not in metadata_by_trajectory_id:
         raise store.TrajectoryNotFoundError(trajectory_id)
-      meta = trajectory_lib.TrajectoryMetadata.model_validate(
-          metadata_by_trajectory_id[trajectory_id]
-      )
+      meta = self._load_metadata(metadata_by_trajectory_id[trajectory_id])
       steps = [
           trajectory_lib.Step.model_validate(step_payload)
           for step_payload in steps_by_trajectory_id.get(trajectory_id, [])
       ]
-      trajectories.append(
-          trajectory_lib.Trajectory(**meta.model_dump(), steps=steps)
-      )
+      trajectories.append(meta.create_trajectory(steps=steps))
 
     return trajectories
+
+  def _load_metadata(self, payload: dict[str, Any]) -> MetadataT:
+    """Rehydrates a stored base-ATIF metadata payload as `metadata_cls`."""
+    base_meta = trajectory_lib.TrajectoryMetadata.model_validate(payload)
+    return self._metadata_cls.from_atif_metadata(base_meta)

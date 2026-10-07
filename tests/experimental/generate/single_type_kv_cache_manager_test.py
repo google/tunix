@@ -1108,9 +1108,7 @@ class SwapInBindAndAllocateTest(absltest.TestCase):
 
     manager._swap_in_pages([None, device_page])
 
-    self.assertEqual(
-        manager._page_manager.page_location(pids[0]), PageLocation.DEVICE
-    )
+    self.assertEqual(manager._page_manager.page_location(pids[0]), PageLocation.DEVICE)
     self.assertEqual(manager._page_manager.num_free_device_pages, 4)
 
   def test_swap_in_pages_unreferenced_host_page_raises(self):
@@ -1134,8 +1132,7 @@ class SwapInBindAndAllocateTest(absltest.TestCase):
     manager._swap_in_pages([host_page])
 
     self.assertEqual(
-        manager._page_manager.page_location(host_page.page_id),
-        PageLocation.DEVICE,
+        manager._page_manager.page_location(host_page.page_id), PageLocation.DEVICE
     )
     self.assertEqual(manager._page_manager.num_free_host_pages, 5)
 
@@ -1154,9 +1151,12 @@ class SwapInBindAndAllocateTest(absltest.TestCase):
 
     pm = manager._page_manager
     self.assertEqual(pm.page_location(host_page.page_id), PageLocation.DEVICE)
+    self.assertEqual(pm.page_location(host_page.page_id), PageLocation.DEVICE)
     # The LRU unreferenced device page is offloaded to make room.
     self.assertEqual(pm.page_location(u0.page_id), PageLocation.HOST)
+    self.assertEqual(pm.page_location(u0.page_id), PageLocation.HOST)
     self.assertIn(u0, manager._unreferenced_host_pages)
+    self.assertEqual(pm.page_location(u1.page_id), PageLocation.DEVICE)
     self.assertEqual(pm.page_location(u1.page_id), PageLocation.DEVICE)
     self.assertIn(u1, manager._unreferenced_device_pages)
 
@@ -1194,9 +1194,7 @@ class SwapInBindAndAllocateTest(absltest.TestCase):
     for p in req_pages:
       assert p is not None
       self.assertEqual(p.ref_count, 1)
-      self.assertEqual(
-          manager._page_manager.page_location(p.page_id), PageLocation.DEVICE
-      )
+      self.assertEqual(manager._page_manager.page_location(p.page_id), PageLocation.DEVICE)
     self.assertTrue(u0.is_freed)
     self.assertIsNone(manager._page_manager.page_location(u0.page_id))
     self.assertIn(u1, manager._unreferenced_device_pages)
@@ -1232,6 +1230,7 @@ class AllocateSlotsTest(parameterized.TestCase):
       self.assertEqual(page.ref_count, 1)
       self.assertEqual(
           manager._page_manager.page_location(page.page_id), PageLocation.DEVICE
+          manager._page_manager.page_location(page.page_id), PageLocation.DEVICE
       )
 
   def test_allocate_slots_loads_computed_host_pages(self):
@@ -1250,9 +1249,7 @@ class AllocateSlotsTest(parameterized.TestCase):
     )
 
     pid = host_page.page_id
-    self.assertEqual(
-        manager._page_manager.page_location(pid), PageLocation.DEVICE
-    )
+    self.assertEqual(manager._page_manager.page_location(pid), PageLocation.DEVICE)
     self.assertNotIn(host_page, manager._unreferenced_host_pages)
 
   def test_allocate_slots_marks_scheduled_pages_referenced(self):
@@ -1405,6 +1402,7 @@ class AllocateSlotsTest(parameterized.TestCase):
     self.assertLen(req_pages, 2)
     self.assertEqual(req_pages[0], host_page)
     pm = manager._page_manager
+    self.assertEqual(pm.page_location(host_page.page_id), PageLocation.DEVICE)
     self.assertEqual(pm.page_location(host_page.page_id), PageLocation.DEVICE)
     self.assertEqual(pm.num_free_device_pages, 0)
 

@@ -144,6 +144,9 @@ def _build_engine(
           mesh=mesh,
           return_logprobs=rollout_config.return_logprobs,
           num_scheduler_steps=rollout_config.num_scheduler_steps,
+          # Seeds the keys the engine draws for every request. `generate`
+          # never sets a per-request seed, so the generations of a GRPO group,
+          # which share a prompt, still sample independently.
           seed=0 if rollout_config.seed is None else int(rollout_config.seed),
       ),
       max_model_len=max_model_len,
@@ -169,7 +172,8 @@ class VanillaRollout(base_rollout.BaseRollout):
       model: The model to sample from.
       tokenizer: The tokenizer prompts are encoded with.
       rollout_config: Configures the engine, which is built once. `generate`
-        only reads its per-request settings from the config it is given.
+        only reads its per-request settings from the config it is given. Its
+        `seed` seeds the engine's sampling keys.
       mesh: The mesh the model runs on.
       max_model_len: The maximum number of tokens a sequence may hold, prompt
         and generated.
@@ -197,7 +201,8 @@ class VanillaRollout(base_rollout.BaseRollout):
 
     Args:
       prompts: The text prompts, or None if `prompt_token_ids` is given.
-      rollout_config: The sampling settings for this call.
+      rollout_config: The sampling settings for this call. Its `seed` is not
+        used: the engine was seeded once, when it was built.
       prompt_token_ids: The prompts as token ids, used instead of `prompts`.
       **kwargs: Ignored.
 
@@ -213,11 +218,10 @@ class VanillaRollout(base_rollout.BaseRollout):
         temperature=rollout_config.temperature,
         top_p=rollout_config.top_p,
         top_k=rollout_config.top_k,
-        seed=(
-            None
-            if rollout_config.seed is None
-            else int(rollout_config.seed)
-        ),
+        # A request seed pins the sample, so every generation of a GRPO group,
+        # which shares a prompt, would sample the same tokens. Unseeded
+        # requests draw fresh keys from the seeded engine instead.
+        seed=None,
         pad_output=False,
         return_logprobs=rollout_config.return_logprobs,
         prompt_token_ids=prompt_token_ids,

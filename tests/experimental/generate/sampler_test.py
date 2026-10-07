@@ -202,6 +202,37 @@ class _SamplerTests(absltest.TestCase):
 
     self.assertEqual(sampler.tokenize('2 2 1 3'), [2, 1, 3])
 
+  def _sample_group(
+      self, num_generations: int, **kwargs
+  ) -> set[tuple[int, ...]]:
+    """Samples one prompt `num_generations` times, one call each, like GRPO."""
+    sampler = self.make_sampler(
+        testing_utils.make_engine(
+            testing_utils.UniformTransformer(), max_top_k=-1
+        )
+    )
+
+    def sample(_):
+      return sampler(
+          '1 2 3',
+          max_generation_steps=8,
+          temperature=0.7,
+          top_p=1.0,
+          **kwargs,
+      )
+
+    with futures.ThreadPoolExecutor(max_workers=num_generations) as pool:
+      outputs = list(pool.map(sample, range(num_generations)))
+    return {tuple(output.tokens[0].tolist()) for output in outputs}
+
+  def test_unseeded_calls_on_the_same_prompt_sample_independently(self):
+    self.assertLen(self._sample_group(8), 8)
+
+  def test_seeded_calls_on_the_same_prompt_sample_the_same_tokens(self):
+    # A request seed pins the sample, so it must not be shared by the
+    # generations of a GRPO group.
+    self.assertLen(self._sample_group(8, seed=7), 1)
+
 
 class OfflineSamplerTest(_SamplerTests):
 

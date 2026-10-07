@@ -87,9 +87,16 @@ class VanillaRolloutTest(parameterized.TestCase):
         )
     )
 
-  def make_rollout(self, server_mode: bool, **overrides):
+  def make_rollout(
+      self,
+      server_mode: bool,
+      transformer: nnx.Module | None = None,
+      **overrides,
+  ):
     rollout = vanilla_rollout.VanillaRollout(
-        testing_utils.PagedSumTransformer(),
+        transformer
+        if transformer is not None
+        else testing_utils.PagedSumTransformer(),
         testing_utils.WhitespaceTokenizer(),
         rollout_config=_rollout_config(server_mode=server_mode, **overrides),
         mesh=testing_utils.mesh(),
@@ -196,6 +203,58 @@ class VanillaRolloutTest(parameterized.TestCase):
     rollout = self.make_rollout(False, host_size_gib=host_size_gib)
     group_mgr = rollout._sampler._engine._kv_cache_manager._kv_cache_group_managers[0]
     self.assertEqual(group_mgr._page_manager.num_free_host_pages, 16)
+
+  def test_seed_seeds_the_engine(self):
+    rollout = self.make_rollout(False, seed=7)
+
+    self.assertEqual(rollout._sampler._engine._model_runner.config.seed, 7)
+
+  @parameterized.product(
+      server_mode=(False, True), one_call_per_generation=(False, True)
+  )
+  def test_seeded_group_samples_each_generation_independently(
+      self, server_mode, one_call_per_generation
+  ):
+    # Agentic GRPO makes one call per generation, and GRPO repeats the prompt
+    # within one call. Either way, a shared request seed gave every generation
+    # of the group the same tokens, so every advantage was zero.
+    config = _rollout_config(temperature=0.7, seed=7)
+    rollout = self.make_rollout(
+        server_mode,
+        transformer=testing_utils.UniformTransformer(),
+        temperature=0.7,
+        seed=7,
+    )
+    num_generations = 8
+
+    if one_call_per_generation:
+      tokens = [
+          rollout.generate(['1 2 3'], config).tokens[0]
+          for _ in range(num_generations)
+      ]
+    else:
+      tokens = rollout.generate(['1 2 3'] * num_generations, config).tokens
+
+    # Any two samples may still match by chance, since each can stop early on
+    # EOS, but a whole group of identical samples cannot.
+    self.assertGreater(len({tuple(t.tolist()) for t in tokens}), 1)
+
+  def test_seed_makes_sampling_reproducible(self):
+    config = _rollout_config(temperature=0.7, seed=7)
+
+    def sample() -> list[list[int]]:
+      rollout = self.make_rollout(
+          False,
+          transformer=testing_utils.UniformTransformer(),
+          temperature=0.7,
+          seed=7,
+      )
+      return [
+          rollout.generate(['1 2 3'], config).tokens[0].tolist()
+          for _ in range(3)
+      ]
+
+    self.assertEqual(sample(), sample())
 
 
 if __name__ == '__main__':
