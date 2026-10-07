@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import Iterable, Mapping, Sequence
+from typing import Iterable, Mapping, Sequence, overload
 
 import numpy as np
 
@@ -64,10 +64,10 @@ class PackItem:
   advantages: np.ndarray
   per_token: Mapping[str, np.ndarray] = dataclasses.field(default_factory=dict)
   policy_version: np.ndarray | None = None
-  # Router replay: `[p + c, num_layers, top_k]` expert ids, aligned to the
-  # WHOLE sequence (prompt then completion), not just the completion like the
-  # `per_token` fields. `UNSET_ROUTED_EXPERT` (-1) marks tokens the trainer
-  # should route with its own gate.
+  # Router replay: `[p + c - 1 or p + c, num_layers, top_k]` expert ids,
+  # sequence-aligned (prompt then completion), not completion-aligned like the
+  # `per_token` fields. Autoregressive rollouts may omit the final sampled token
+  # (`p + c - 1`), which remains `UNSET_ROUTED_EXPERT` in the packed output.
   routed_experts: np.ndarray | None = None
 
   def __post_init__(self):
@@ -105,18 +105,20 @@ class PackItem:
             f" {getattr(arr, 'shape', None)}."
         )
     if self.routed_experts is not None:
-      re_arr = self.routed_experts
       n = self.prompt_ids.shape[0] + c
+      min_len = max(n - 1, 0)
+      routed = self.routed_experts
       if (
-          not isinstance(re_arr, np.ndarray)
-          or re_arr.ndim != 3
-          or re_arr.shape[0] != n
+          not isinstance(routed, np.ndarray)
+          or routed.ndim != 3
+          or routed.shape[0] < min_len
+          or routed.shape[0] > n
       ):
         raise ValueError(
             "PackItem.routed_experts must be a numpy array of shape"
-            f" (p + c, num_layers, top_k) = ({n}, L, K), got"
-            f" {type(re_arr).__name__} with shape"
-            f" {getattr(re_arr, 'shape', None)}."
+            " (p + c - 1 or p + c, num_layers, top_k) with length in"
+            f" [{min_len}, {n}], got {type(routed).__name__} with shape"
+            f" {getattr(routed, 'shape', None)}."
         )
 
   @property
@@ -144,7 +146,7 @@ class PackedRow:
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class PackedChunk(Sequence[PackedRow]):
-  """A chunk of `n_bins` packed rows sharing contiguous `[n_bins, budget, ...]` arrays."""
+  """A packed chunk of `n_bins` rows with contiguous `[n_bins, budget]` arrays."""
 
   ids: np.ndarray
   prompt_mask: np.ndarray
@@ -155,32 +157,47 @@ class PackedChunk(Sequence[PackedRow]):
   per_token: Mapping[str, np.ndarray] = dataclasses.field(default_factory=dict)
   policy_versions: tuple[np.ndarray | None, ...] = ()
   num_real_segments: tuple[int, ...] = ()
+  # `[n_bins, budget, num_layers, top_k]` int16; see `PackedRow.routed_experts`.
   routed_experts: np.ndarray | None = None
 
   def __len__(self) -> int:
-    return self.ids.shape[0]
+    return int(self.ids.shape[0])
 
-  def __getitem__(
-      self, idx: int | slice
-  ) -> PackedRow | list[PackedRow]:  # pytype: disable=signature-mismatch
-    if isinstance(idx, slice):
-      return [self[i] for i in range(*idx.indices(len(self)))]
-    if idx < 0:
-      idx += len(self)
-    if idx < 0 or idx >= len(self):
-      raise IndexError(f"PackedChunk index {idx} out of range {len(self)}.")
+  @overload
+  def __getitem__(self, index: int) -> PackedRow:
+    ...
+
+  @overload
+  def __getitem__(self, index: slice) -> list[PackedRow]:
+    ...
+
+  def __getitem__(self, index: int | slice) -> PackedRow | list[PackedRow]:
+    if isinstance(index, slice):
+      return [self[i] for i in range(*index.indices(len(self)))]
+    if index < 0:
+      index += len(self)
+    if index < 0 or index >= len(self):
+      raise IndexError(f"PackedChunk index {index} out of range.")
     return PackedRow(
-        ids=self.ids[idx],
-        prompt_mask=self.prompt_mask[idx],
-        completion_mask=self.completion_mask[idx],
-        advantages=self.advantages[idx],
-        segment_ids=self.segment_ids[idx],
-        segment_positions=self.segment_positions[idx],
-        per_token={name: arr[idx] for name, arr in self.per_token.items()},
-        policy_version=self.policy_versions[idx],
-        num_real_segments=self.num_real_segments[idx],
+        ids=self.ids[index],
+        prompt_mask=self.prompt_mask[index],
+        completion_mask=self.completion_mask[index],
+        advantages=self.advantages[index],
+        segment_ids=self.segment_ids[index],
+        segment_positions=self.segment_positions[index],
+        per_token={name: arr[index] for name, arr in self.per_token.items()},
+        policy_version=(
+            self.policy_versions[index]
+            if index < len(self.policy_versions)
+            else None
+        ),
+        num_real_segments=(
+            self.num_real_segments[index]
+            if index < len(self.num_real_segments)
+            else 0
+        ),
         routed_experts=(
-            None if self.routed_experts is None else self.routed_experts[idx]
+            None if self.routed_experts is None else self.routed_experts[index]
         ),
     )
 
@@ -327,7 +344,7 @@ def pack_bin(
       carried=carried,
       routed_shape=routed_shape,
       segment_align_multiple=segment_align_multiple,
-  )[0]  # pytype: disable=bad-return-type
+  )[0]
 
 
 def pack_chunk(
@@ -339,48 +356,50 @@ def pack_chunk(
     routed_shape: tuple[int, ...] | None = None,
     segment_align_multiple: int = DEFAULT_SEGMENT_ALIGN_MULTIPLE,
 ) -> PackedChunk:
-  """Packs a sequence of bins of one chunk into a contiguous `PackedChunk`."""
+  """Packs a sequence of bins of one chunk into a contiguous `[n_bins, budget]` PackedChunk."""
   if segment_align_multiple <= 0:
     raise ValueError(
         "segment_align_multiple must be positive, got"
         f" {segment_align_multiple}."
     )
-  if routed_shape is None:
-    placed = [item for bin_items in bins for item in bin_items]
-    routed_shape = routed_experts_shape(placed)
-
   n_bins = len(bins)
-  shape = (n_bins, budget)
-  ids = np.full(shape, pad_id, dtype=np.int32)
-  prompt_mask = np.zeros(shape, dtype=np.float32)
-  completion_mask = np.zeros(shape, dtype=np.float32)
-  advantages = np.zeros(shape, dtype=np.float32)
-  segment_ids = np.zeros(shape, dtype=np.int32)
-  segment_positions = np.zeros(shape, dtype=np.int32)
-  per_token = {name: np.zeros(shape, dtype=np.float32) for name in carried}
+  ids = np.full((n_bins, budget), pad_id, dtype=np.int32)
+  prompt_mask = np.zeros((n_bins, budget), dtype=np.float32)
+  completion_mask = np.zeros((n_bins, budget), dtype=np.float32)
+  advantages = np.zeros((n_bins, budget), dtype=np.float32)
+  segment_ids = np.zeros((n_bins, budget), dtype=np.int32)
+  segment_positions = np.zeros((n_bins, budget), dtype=np.int32)
+  per_token = {
+      name: np.zeros((n_bins, budget), dtype=np.float32) for name in carried
+  }
+  if routed_shape is None:
+    placed = [
+        item
+        for bin_items in bins
+        for item in bin_items
+        if item.num_tokens > 0
+    ]
+    routed_shape = routed_experts_shape(placed)
   routed = (
       None
       if routed_shape is None
       else np.full(
-          shape + tuple(routed_shape), UNSET_ROUTED_EXPERT, dtype=np.int16
+          (n_bins, budget, *routed_shape), UNSET_ROUTED_EXPERT, dtype=np.int16
       )
   )
-  policy_versions: list[np.ndarray | None] = [None] * n_bins
-  num_real_segments: list[int] = [0] * n_bins
-
+  policy_versions: list[np.ndarray | None] = []
+  num_real_segments_list: list[int] = []
   for b, bin_items in enumerate(bins):
-    if not bin_items:
-      continue
     cursor = 0
-    real_seg = 0
+    num_real_segments = 0
     for item in bin_items:
       p = item.prompt_ids.shape[0]
       c = item.completion_ids.shape[0]
       n = p + c
       if n == 0:
         continue
-      real_seg += 1
-      seg = real_seg
+      num_real_segments += 1
+      seg = num_real_segments
       if seg > 1:
         cursor = align_offset(cursor, segment_align_multiple)
       if cursor + n > budget:
@@ -402,14 +421,15 @@ def pack_chunk(
         if name in item.per_token:
           per_token[name][b, comp] = item.per_token[name]
       if routed is not None and item.routed_experts is not None:
-        # Same `seq` slice as `ids`: routing is sequence-aligned, so a token's
-        # captured experts land on exactly the position the token itself does.
-        routed[b, seq] = item.routed_experts
+        # Prefix-aligned to `seq`: a token's captured experts land on the
+        # position the token itself does, and any uncaptured trailing tokens in
+        # the segment remain `UNSET_ROUTED_EXPERT`.
+        m = item.routed_experts.shape[0]
+        routed[b, cursor : cursor + m] = item.routed_experts
       cursor += n
 
-    policy_versions[b] = bin_items[0].policy_version
-    num_real_segments[b] = real_seg
-
+    policy_versions.append(bin_items[0].policy_version if bin_items else None)
+    num_real_segments_list.append(num_real_segments)
   return PackedChunk(
       ids=ids,
       prompt_mask=prompt_mask,
@@ -419,7 +439,7 @@ def pack_chunk(
       segment_positions=segment_positions,
       per_token=per_token,
       policy_versions=tuple(policy_versions),
-      num_real_segments=tuple(num_real_segments),
+      num_real_segments=tuple(num_real_segments_list),
       routed_experts=routed,
   )
 
