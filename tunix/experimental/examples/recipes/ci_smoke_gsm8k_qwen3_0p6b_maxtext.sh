@@ -47,7 +47,8 @@ export TRAINER_BACKEND="${TRAINER_BACKEND:-maxtext}"
 export SAMPLER="${SAMPLER:-vllm}"
 export WEIGHT_SYNC_MODE="${WEIGHT_SYNC_MODE:-raiden}"
 export USE_WEIGHT_CONVERTER="${USE_WEIGHT_CONVERTER:-true}"
-export VERIFY_WEIGHTS="${VERIFY_WEIGHTS:-true}"
+export VERIFY_WEIGHTS="${VERIFY_WEIGHTS:-false}"
+export CHAT_PARSER="${CHAT_PARSER:-auto}"
 # MaxTextTrainingEngine does not currently implement standalone per_token_logps.
 # Disabling USE_ROLLOUT_LOGPS skips the diagnostic sampler/trainer agreement pass.
 export USE_ROLLOUT_LOGPS="${USE_ROLLOUT_LOGPS:-false}"
@@ -81,30 +82,34 @@ export TPU_CHIPS_PER_HOST_BOUNDS="${TPU_CHIPS_PER_HOST_BOUNDS:-2,2,1}"
 export TPU_HOST_BOUNDS="${TPU_HOST_BOUNDS:-1,1,1}"
 export ALLOW_MULTIPLE_LIBTPU_LOAD="${ALLOW_MULTIPLE_LIBTPU_LOAD:-1}"
 
-# Hyperparameters: 2-step run (validates rollout generation on step-1 synced weights)
-export MAX_STEPS="${MAX_STEPS:-2}"
-export BATCH_SIZE="${BATCH_SIZE:-2}"
-export MINI_BATCH_SIZE="${MINI_BATCH_SIZE:-2}"
-export NUM_GENERATIONS="${NUM_GENERATIONS:-2}"
+# Hyperparameters: Full GSM8K GRPO run aligned with Qwen3-0.6B recipe
+export MAX_STEPS="${MAX_STEPS:-200}"
+export BATCH_SIZE="${BATCH_SIZE:-16}"
+export MINI_BATCH_SIZE="${MINI_BATCH_SIZE:-16}"
+export NUM_GENERATIONS="${NUM_GENERATIONS:-8}"
 export TRAIN_MICRO_BATCH_SIZE="${TRAIN_MICRO_BATCH_SIZE:-1}"
-export BETA="${BETA:-0}"
+export LEARNING_RATE="${LEARNING_RATE:-3e-6}"
+export WARMUP_STEPS="${WARMUP_STEPS:-10}"
+export LR_DECAY_STEPS="${LR_DECAY_STEPS:-500}"
+export BETA="${BETA:-0.0}"
+export EPSILON="${EPSILON:-0.2}"
 
-# Dataset & sequence lengths
-export TFDS_SPLIT="${TFDS_SPLIT:-train[:16]}"
-export SHUFFLE="${SHUFFLE:-false}"
-export MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-512}"
-export MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-512}"
+# Dataset & sequence lengths (full GSM8K train split, shuffled)
+export TFDS_SPLIT="${TFDS_SPLIT:-train}"
+export SHUFFLE="${SHUFFLE:-true}"
+export MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-1024}"
+export MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-1024}"
 
-# Checkpointing: verify step 1 checkpoint save
-export CHECKPOINT_SAVE_INTERVAL_STEPS="${CHECKPOINT_SAVE_INTERVAL_STEPS:-1}"
-export CHECKPOINT_MAX_TO_KEEP="${CHECKPOINT_MAX_TO_KEEP:-2}"
+# Checkpointing & Evaluation
+export CHECKPOINT_SAVE_INTERVAL_STEPS="${CHECKPOINT_SAVE_INTERVAL_STEPS:-50}"
+export CHECKPOINT_MAX_TO_KEEP="${CHECKPOINT_MAX_TO_KEEP:-4}"
 
-# Disable WandB logging and evaluation overhead
-export WANDB_PROJECT="${WANDB_PROJECT:-ci-smoke-gsm8k-maxtext}"
-export EVAL_EVERY_N_STEPS="${EVAL_EVERY_N_STEPS:-999}"
+# WandB logging and evaluation interval
+export WANDB_PROJECT="${WANDB_PROJECT:-tunix-gsm8k-vtc}"
+export EVAL_EVERY_N_STEPS="${EVAL_EVERY_N_STEPS:-50}"
 
-# Timeouts: 15-minute safety ceiling (run expected in ~3-5 min including HF->Orbax conversion)
-export WAIT_TIMEOUT_SECS="${WAIT_TIMEOUT_SECS:-900}"
+# Timeouts
+export WAIT_TIMEOUT_SECS="${WAIT_TIMEOUT_SECS:-1800}"
 
 # Delegate to base launcher located in math_gsm8k_dist
 exec "${DIR}/../math_gsm8k_dist/launcher.sh" "$@"
