@@ -72,7 +72,7 @@ export LORA_RANK=${LORA_RANK:-16}
 export LORA_ALPHA=${LORA_ALPHA:-16.0}
 export MODEL_DTYPE=${MODEL_DTYPE:-float32}
 export USE_LORA=${USE_LORA:-0}
-export REWARD_MODE=${REWARD_MODE:-env}
+export REWARD_MANAGER=${REWARD_MANAGER:-agentic-sequence-level}
 export BETA=${BETA:-0}
 export EPSILON=${EPSILON:-0.2}
 export MAX_STALENESS=${MAX_STALENESS:-0}
@@ -247,6 +247,7 @@ start_orchestrator() {
         --wandb_run_name=\"${WANDB_RUN_NAME}\" \
         --flush_metrics_every_n_steps=${FLUSH_METRICS_EVERY_N_STEPS} \
         --max_staleness=${MAX_STALENESS} \
+        --reward_manager=${REWARD_MANAGER} \
         --trajectory_group_order=${TRAJECTORY_GROUP_ORDER} \
         --weight_sync_mode=${WEIGHT_SYNC_MODE} \
         --trainer_precompile=${TRAINER_PRECOMPILE} \

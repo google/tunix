@@ -170,6 +170,41 @@ class RLLearnerTest(parameterized.TestCase):
 
     mock_engine.close.assert_called_once()
 
+  def test_reward_fns_none_skips_sequence_reward_manager_and_fails_on_compute(
+      self,
+  ):
+    config = rl_engine_lib.RLTrainingConfig(
+        actor_optimizer=optax.sgd(1e-3),
+        eval_every_n_steps=1,
+        max_steps=1,
+    )
+    mock_engine = mock.MagicMock()
+    mock_engine.actor_trainer.model = DummyModel()
+    mock_engine.rollout.model.return_value = DummyModel()
+    mock_engine.cluster_config.training_config = config
+
+    learner = DummyLearner(
+        rl_engine=mock_engine,
+        algo_config=DummyConfig(),
+        reward_fns=None,
+    )
+    self.assertIsNone(learner.reward_manager)
+    with self.assertRaisesRegex(
+        ValueError, 'reward_manager is not initialized'
+    ):
+      learner._compute_rewards(
+          prompts=['p'],
+          completions=['c'],
+          mode=rl_engine_lib.Mode.TRAIN,
+      )
+
+    with self.assertRaisesRegex(ValueError, 'reward_fns cannot be empty'):
+      DummyLearner(
+          rl_engine=mock_engine,
+          algo_config=DummyConfig(),
+          reward_fns=[],
+      )
+
 
 if __name__ == '__main__':
   absltest.main()

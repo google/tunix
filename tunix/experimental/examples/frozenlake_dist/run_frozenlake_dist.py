@@ -332,6 +332,7 @@ def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
       use_rollout_logps=args.use_rollout_logps,
       sampler_is=None if args.sampler_is == "none" else args.sampler_is,
       sampler_is_threshold=args.sampler_is_threshold,
+      reward_manager="agentic-sequence-level",
   )
   return algorithm_adapter.GRPOAdapter(
       algo_config=algo_config,

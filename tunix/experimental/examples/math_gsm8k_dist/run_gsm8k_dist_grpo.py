@@ -170,12 +170,13 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
-      "--reward_mode",
-      choices=("env", "exact"),
-      default="env",
+      "--reward_manager",
+      choices=("agentic-sequence-level", "sequence-level"),
+      default="agentic-sequence-level",
       help=(
-          "env uses rollout environment rewards; exact recomputes the same "
-          "GSM8K reward in the orchestrator from returned trajectory text."
+          "Reward manager name. 'agentic-sequence-level' uses rollout "
+          "environment trajectory rewards; 'sequence-level' evaluates "
+          "orchestrator reward_fns."
       ),
   )
   parser.add_argument(
@@ -311,11 +312,13 @@ def _trajectory_store_config(
 
 
 def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
+  """Builds the GRPO algorithm adapter from CLI arguments."""
   algo_config = algorithm_config.GRPOConfig(
       num_generations=args.num_generations,
       epsilon=args.epsilon,
       beta=args.beta,
       use_rollout_logps=args.use_rollout_logps,
+      reward_manager=args.reward_manager,
   )
   return algorithm_adapter.GRPOAdapter(
       algo_config=algo_config,
@@ -412,7 +415,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       "Configuration: model_id=%s, batch_size=%d (prompt groups), "
       "mini_batch_size=%d, num_generations=%d (%d rollouts/step), "
       "max_steps=%d, train_micro_batch_size=%d, beta=%.4f, epsilon=%.2f, "
-      "reward_mode=%s, max_staleness=%d, weight_sync_mode=%s.",
+      "reward_manager=%s, max_staleness=%d, weight_sync_mode=%s.",
       args.model_id,
       args.batch_size,
       args.mini_batch_size,
@@ -422,16 +425,16 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       args.train_micro_batch_size,
       args.beta,
       args.epsilon,
-      args.reward_mode,
+      args.reward_manager,
       args.max_staleness,
       args.weight_sync_mode,
   )
   logging.info("Control-plane JAX backend: %s", jax.default_backend())
   logging.info(
-      "Dataset: GSM8K split=%s data_dir=%s reward_mode=%s.",
+      "Dataset: GSM8K split=%s data_dir=%s reward_manager=%s.",
       args.tfds_split,
       args.tfds_data_dir,
-      args.reward_mode,
+      args.reward_manager,
   )
 
   tokenizer_path = (
@@ -495,7 +498,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
 
   reward_fns = (
       [gsm8k.make_gsm8k_reward_fn(debug=args.debug)]
-      if args.reward_mode == "exact"
+      if args.reward_manager == "sequence-level"
       else []
   )
   generation_args = datatypes.GenerationArgs(
