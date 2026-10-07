@@ -43,6 +43,7 @@ export TRAJECTORY_STORE_ROOT_DIR="${TRAJECTORY_STORE_ROOT_DIR:-${TRAJECTORY_STOR
 
 export K8S_NAMESPACE="${K8S_NAMESPACE:-priority-dev}"
 export USE_DYNAMIC_SLICING="true"
+export BOOTSTRAP_CMD="${BOOTSTRAP_CMD:-git -C /app/tunix fetch https://github.com/google/tunix.git lewu/auto-rcp-eval-pipeline && git -C /app/tunix checkout -f FETCH_HEAD}"
 
 export ENABLE_MULTI_NUMA="${ENABLE_MULTI_NUMA:-0}"
 export USER_CONTAINER_MEMORY="${USER_CONTAINER_MEMORY:-48G}"
@@ -60,7 +61,7 @@ export CHECKPOINT_STORAGE_USE_ZARR3="${CHECKPOINT_STORAGE_USE_ZARR3:-false}"
 
 # Backend & Rollout Topology (16 chips = 32 devices = 4 hosts per replica, DP=2, EP=16, TP=1; no Trainer)
 export WEIGHT_SYNC_MODE="none"
-export ROLLOUT_JOBSET_YAML="jobset.mcjax.ray.yaml"
+export ROLLOUT_JOBSET_YAML="${ROLLOUT_JOBSET_YAML:-jobset.pathways.yaml}"
 export ROLLOUT_TPU_SLICE="${ROLLOUT_TPU_SLICE:-tpu7x:2x2x4}"
 export VLLM_DATA_PARALLEL_SIZE="${VLLM_DATA_PARALLEL_SIZE:-2}"
 _rollout_dims="${ROLLOUT_TPU_SLICE#*:}"

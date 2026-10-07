@@ -573,16 +573,26 @@ def main() -> None:
     tpu_annotations = ""
 
   if use_dynamic_slicing:
+    match_expressions = []
     if slice_size and slice_size > 1:
+      match_expressions.append(
+          f"                    - key: cloud.google.com/gke-tpu-partition-{slice_topology}-state\n"
+          "                      operator: In\n"
+          "                      values: [\"HEALTHY\", \"DEGRADED\"]\n"
+      )
+    if tpu_type in ("tpu7x", "tpu-v7x-slice"):
+      match_expressions.append(
+          "                    - key: scheduling.tpu.google.com/partial-cube\n"
+          "                      operator: DoesNotExist\n"
+      )
+    if match_expressions:
       pw_node_affinity = (
           "            affinity:\n"
           "              nodeAffinity:\n"
           "                requiredDuringSchedulingIgnoredDuringExecution:\n"
           "                  nodeSelectorTerms:\n"
           "                  - matchExpressions:\n"
-          f"                    - key: cloud.google.com/gke-tpu-partition-{slice_topology}-state\n"
-          "                      operator: In\n"
-          "                      values: [\"HEALTHY\", \"DEGRADED\"]\n"
+          + "".join(match_expressions)
       )
       tpu_affinity = pw_node_affinity
     else:
@@ -718,6 +728,11 @@ def main() -> None:
       for flag in os.environ.get("PATHWAYS_PROXY_EXTRA_ARGS", "").split()
   )
 
+  ray_bootstrap_cmd = os.environ.get("BOOTSTRAP_CMD", "").strip()
+  ray_bootstrap_cmd_block = (
+      f"                  {ray_bootstrap_cmd}\n" if ray_bootstrap_cmd else ""
+  )
+
   with open(args.template_file, "r") as f:
     template_text = f.read()
     if args.fail_fast and "${FAIL_FAST_POD_FAILURE_POLICY}" not in template_text:
@@ -793,6 +808,7 @@ def main() -> None:
         USER_CONTAINER_IMAGE=args.worker_container_image,
         USER_CONTAINER_PORT=args.worker_container_port,
         STARTUP_COMMAND=args.worker_startup_command,
+        RAY_BOOTSTRAP_COMMAND_BLOCK=ray_bootstrap_cmd_block,
         PATHWAYS_WORKER_EXTRA_ENV=pathways_worker_extra_env,
         PATHWAYS_PROXY_EXTRA_ARGS=pathways_proxy_extra_args,
         **dataclasses.asdict(fail_fast),
