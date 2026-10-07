@@ -362,7 +362,13 @@ class RaidenSynchronizerTest(absltest.TestCase):
     self.assertEqual(ready.ready_calls, 1)
 
   def test_ffi_source_routes_through_d2h_init(self):
-    with mock.patch.dict("os.environ", {"JAX_PLATFORMS": "proxy,cpu"}):
+    with mock.patch.dict(
+        "os.environ",
+        {
+            "JAX_PLATFORMS": "proxy,cpu",
+            "RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFER": "0",
+        },
+    ):
       sync = raiden_synchronizer.RaidenSynchronizer("trainer")
       with mock.patch.object(
           sync, "_init_ffi_transport", autospec=True
@@ -371,6 +377,71 @@ class RaidenSynchronizerTest(absltest.TestCase):
         init_ffi.assert_not_called()
         sync.d2h()
     init_ffi.assert_called_once_with(is_d2h=True)
+
+  def test_ffi_source_direct_device_buffer_inits_at_bind_and_skips_d2h(self):
+    with mock.patch.dict(
+        "os.environ",
+        {
+            "JAX_PLATFORMS": "proxy,cpu",
+            "RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFER": "1",
+        },
+    ):
+      sync = raiden_synchronizer.RaidenSynchronizer("trainer")
+      with mock.patch.object(
+          sync, "_init_ffi_transport", autospec=True
+      ) as init_ffi:
+        sync.bind(self._state())
+        init_ffi.assert_called_once_with(is_d2h=False)
+        init_ffi.reset_mock()
+        sync.d2h()
+        init_ffi.assert_not_called()
+
+  def test_ffi_source_direct_device_buffer_d2h_before_bind_raises(self):
+    with mock.patch.dict(
+        "os.environ",
+        {
+            "JAX_PLATFORMS": "proxy,cpu",
+            "RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFER": "1",
+        },
+    ):
+      sync = raiden_synchronizer.RaidenSynchronizer("trainer")
+      with self.assertRaisesRegex(RuntimeError, "bind"):
+        sync.d2h()
+
+  def test_ffi_source_direct_device_buffer_calls_init_weight_synchronizer(self):
+    with mock.patch.dict(
+        "os.environ",
+        {
+            "JAX_PLATFORMS": "proxy,cpu",
+            "RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFER": "1",
+        },
+    ):
+      sync = raiden_synchronizer.RaidenSynchronizer("trainer")
+      mesh = jax.sharding.Mesh(np.array(jax.devices()[:1]), ("data",))
+      sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+      arr1 = jax.device_put(jnp.ones((2, 4), jnp.float32), sharding)
+      arr2 = jax.device_put(jnp.ones((4,), jnp.float32), sharding)
+      sync.arrays = [arr1, arr2]
+      sync._host_subgrid = (1,)
+
+      fake_info = np.zeros((1, 6), dtype=np.int32)
+      with mock.patch.object(
+          raiden_synchronizer, "_raiden_ffi", autospec=True
+      ) as ffi, mock.patch(
+          "jax.experimental.multihost_utils.global_array_to_host_local_array",
+          return_value=fake_info,
+      ), mock.patch(
+          "jax.experimental.multihost_utils.process_allgather",
+          return_value=fake_info,
+      ):
+        sync._init_ffi_transport(is_d2h=False)
+        ffi.init_weight_synchronizer.assert_called_once()
+        call_kwargs = ffi.init_weight_synchronizer.call_args.kwargs
+        self.assertEqual(call_kwargs["device_arrays"], [arr1, arr2])
+        self.assertEqual(call_kwargs["num_layers"], 2)
+        self.assertEqual(call_kwargs["num_shards"], 1)
+        self.assertEqual(call_kwargs["host_subgrid"], [1])
+        ffi.init_weight_synchronizer_and_d2h.assert_not_called()
 
   def test_ffi_destination_init_runs_at_bind(self):
     with mock.patch.dict("os.environ", {"JAX_PLATFORMS": "proxy,cpu"}):
