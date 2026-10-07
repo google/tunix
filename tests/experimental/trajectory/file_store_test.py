@@ -301,6 +301,31 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
       self.assertEqual(saved_step.step_id, step.step_id + 1)
       self.assertEqual(saved_step.message, step.message)
 
+  def test_writes_compact_json_files(self) -> None:
+    """Verifies metadata and step files hold compact, unindented JSON."""
+    step = trajectory_lib.TunixAgentStep(
+        step_id=0,
+        source=trajectory_lib.Source.AGENT,
+        message="agent turn",
+        assistant_tokens=[11, 12, 13],
+        assistant_masks=[1, 1, 1],
+        logprobs=[-0.5, -0.25, -0.125],
+    )
+    self.file_s.add_step(step, trajectory_testing.METADATA_1)
+    self.file_s.flush()
+
+    traj_id = trajectory_testing.TRAJECTORY_ID_1
+    self.assertEqual(
+        self.file_s.get_trajectory_metadata_path(traj_id).read_text(),
+        trajectory_testing.METADATA_1.to_atif_metadata().model_dump_json(
+            exclude_none=True
+        ),
+    )
+    self.assertEqual(
+        self.file_s.get_step_path(traj_id, step_id=1).read_text(),
+        step.to_atif_step().model_dump_json(exclude_none=True),
+    )
+
   def test_add_step_is_non_blocking(self) -> None:
     """Verifies that add_step returns immediately without waiting for disk I/O."""
     block_event = threading.Event()

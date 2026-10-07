@@ -56,8 +56,18 @@ def _validate_trajectory_id(trajectory_id: str | None) -> str:
 
 
 def _dump_json(model: pydantic.BaseModel) -> str:
-  """Serializes a Pydantic model to indented JSON excluding None values."""
-  return model.model_dump_json(indent=2, exclude_none=True)
+  """Serializes a Pydantic model to compact JSON excluding None values.
+
+  Indentation would put every element of the token, mask, and logprob arrays on
+  its own line behind a newline and leading spaces, nearly doubling step files.
+
+  Args:
+    model: The Pydantic model to serialize.
+
+  Returns:
+    The compact JSON string representation of `model`.
+  """
+  return model.model_dump_json(exclude_none=True)
 
 
 def _get_step_path(traj_dir: epath.Path, atif_step_id: int) -> epath.Path:
