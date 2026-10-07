@@ -35,21 +35,11 @@ export IMAGE_REWRITE_PREFIX="${IMAGE_REWRITE_PREFIX:-europe-west4-docker.pkg.dev
 _v5p_no_launch="${MLPERF_NO_LAUNCH:-0}"
 _v5p_tpu_reservation="${TPU_RESERVATION-}"
 _v5p_use_dynamic_slicing="${USE_DYNAMIC_SLICING:-false}"
-_v5p_libtpu_init_args="${LIBTPU_INIT_ARGS:-}"
-_v5p_rollout_extra_env="${ROLLOUT_EXTRA_ENV:-}"
-_v5p_pw_worker_extra_env="${PATHWAYS_WORKER_EXTRA_ENV:-}"
-_v5p_pw_proxy_extra_args="${PATHWAYS_PROXY_EXTRA_ARGS:-}"
-_v5p_jax_cache_gcs_dir="${ROLLOUT_JAX_CACHE_GCS_DIR:-}"
 
 MLPERF_NO_LAUNCH=1 source "${SCRIPT_DIR}/mlperf_397b_v7x_eval.sh"
 
 export MLPERF_NO_LAUNCH="${_v5p_no_launch}"
 export TPU_RESERVATION="${_v5p_tpu_reservation}"
 export USE_DYNAMIC_SLICING="${_v5p_use_dynamic_slicing}"
-export LIBTPU_INIT_ARGS="${_v5p_libtpu_init_args}"
-export ROLLOUT_EXTRA_ENV="${_v5p_rollout_extra_env}"
-export PATHWAYS_WORKER_EXTRA_ENV="${_v5p_pw_worker_extra_env}"
-export PATHWAYS_PROXY_EXTRA_ARGS="${_v5p_pw_proxy_extra_args}"
-export ROLLOUT_JAX_CACHE_GCS_DIR="${_v5p_jax_cache_gcs_dir}"
 
 source "${SCRIPT_DIR}/../mlperf_base.sh" "${1:-eval}" "${@:2}"
