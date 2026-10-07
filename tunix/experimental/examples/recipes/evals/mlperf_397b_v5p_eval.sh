@@ -19,8 +19,6 @@ export REGION="${REGION:-europe-west4}"
 export CLUSTER="${CLUSTER:-bodaborg-v5p-nap}"
 export K8S_NAMESPACE="${K8S_NAMESPACE:-trellis}"
 export BUCKET="${BUCKET:-gs://atwigg-trellis-europe-west4-dev}"
-export TPU_RESERVATION="${TPU_RESERVATION-}"
-export USE_DYNAMIC_SLICING="${USE_DYNAMIC_SLICING:-false}"
 
 # v5p Rollout Topology (16 chips = 16 devices = 4 hosts per replica, DP=1, EP=16, TP=1)
 export ROLLOUT_JOBSET_YAML="${ROLLOUT_JOBSET_YAML:-jobset.pathways.yaml}"
@@ -33,4 +31,25 @@ export ROLLOUT_MESH_EXPERT="${ROLLOUT_MESH_EXPERT:-$(( ${_rollout_dims//x/*} / $
 export SANDBOX_NODE_SELECTOR_VAL="${SANDBOX_NODE_SELECTOR_VAL:-sandbox-cpu-pool}"
 export IMAGE_REWRITE_PREFIX="${IMAGE_REWRITE_PREFIX:-europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/}"
 
-source "${SCRIPT_DIR}/mlperf_397b_v7x_eval.sh" "$@"
+# Preserve v5p/caller settings that mlperf_397b_256_v7x.sh sets for v7x
+_v5p_no_launch="${MLPERF_NO_LAUNCH:-0}"
+_v5p_tpu_reservation="${TPU_RESERVATION-}"
+_v5p_use_dynamic_slicing="${USE_DYNAMIC_SLICING:-false}"
+_v5p_libtpu_init_args="${LIBTPU_INIT_ARGS:-}"
+_v5p_rollout_extra_env="${ROLLOUT_EXTRA_ENV:-}"
+_v5p_pw_worker_extra_env="${PATHWAYS_WORKER_EXTRA_ENV:-}"
+_v5p_pw_proxy_extra_args="${PATHWAYS_PROXY_EXTRA_ARGS:-}"
+_v5p_jax_cache_gcs_dir="${ROLLOUT_JAX_CACHE_GCS_DIR:-}"
+
+MLPERF_NO_LAUNCH=1 source "${SCRIPT_DIR}/mlperf_397b_v7x_eval.sh"
+
+export MLPERF_NO_LAUNCH="${_v5p_no_launch}"
+export TPU_RESERVATION="${_v5p_tpu_reservation}"
+export USE_DYNAMIC_SLICING="${_v5p_use_dynamic_slicing}"
+export LIBTPU_INIT_ARGS="${_v5p_libtpu_init_args}"
+export ROLLOUT_EXTRA_ENV="${_v5p_rollout_extra_env}"
+export PATHWAYS_WORKER_EXTRA_ENV="${_v5p_pw_worker_extra_env}"
+export PATHWAYS_PROXY_EXTRA_ARGS="${_v5p_pw_proxy_extra_args}"
+export ROLLOUT_JAX_CACHE_GCS_DIR="${_v5p_jax_cache_gcs_dir}"
+
+source "${SCRIPT_DIR}/../mlperf_base.sh" "${1:-eval}" "${@:2}"
