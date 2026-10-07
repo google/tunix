@@ -187,9 +187,9 @@ class SingleTypeKVCacheManager:
       # If a page was never hashed, it cannot be reused and should be freed
       # immediately.
       self._free_pages([page])
-    elif location == "device":
+    elif location == page_pool_lib.PageLocation.DEVICE:
       self._unreferenced_device_pages[page] = None
-    elif location == "host":
+    elif location == page_pool_lib.PageLocation.HOST:
       self._unreferenced_host_pages[page] = None
     else:
       raise ValueError(f"Unknown page location: {location}")
@@ -313,7 +313,10 @@ class SingleTypeKVCacheManager:
       pages[i] = None
 
   def _cache_full_pages(
-      self, request_id: str, page_hashes: Sequence[int]
+      self,
+      request_id: str,
+      page_hashes: Sequence[int],
+      num_completed_tokens: int,
   ):
     """Caches newly completed full pages."""
 
@@ -321,13 +324,15 @@ class SingleTypeKVCacheManager:
     if not pages:
       return
 
-    n_hashed = min(len(page_hashes), len(pages))
+    n_complete_pages = num_completed_tokens // self._page_size
+    n_hashed = min(len(page_hashes), len(pages), n_complete_pages)
     for i in range(n_hashed - 1, -1, -1):
       page = pages[i]
       prefix_hash = page_hashes[i]
 
-      if page is None:
-        # If this page is released, all previous pages must also be released.
+      if page is None or page.prefix_hash is not None:
+        # If this page is released or already cached,
+        # so are all previous pages.
         break
 
       cached_page = self._prefix_hash_to_page.get(prefix_hash)
@@ -340,18 +345,14 @@ class SingleTypeKVCacheManager:
       if cached_page is None:
         page.prefix_hash = prefix_hash
         self._prefix_hash_to_page[prefix_hash] = page
-      elif cached_page == page:
-        # If this page is already cached, so are all
-        # previous pages.
-        break
-      elif cached_location == "device":
+      elif cached_location == page_pool_lib.PageLocation.DEVICE:
         # On a device hit, the cached page cannot be freed as it may be
         # referenced. Reuse the cached page instead. `page` is never hashed,
         # so releasing it frees it immediately.
         pages[i] = cached_page
         self._release_page(page)
         self._touch_page(cached_page)
-      elif cached_location == "host":
+      elif cached_location == page_pool_lib.PageLocation.HOST:
         # On a host hit, the cached page must be unreferenced.
         # To avoid an unnecessary transfer, free the cached page,
         # and rebind the hash to `page`.
@@ -373,11 +374,17 @@ class SingleTypeKVCacheManager:
       page_hashes: Sequence[int],
       num_completed_tokens: int,
   ):
-    """Syncs the request state for the given request."""
+    """Syncs the request state for the given request.
+
+    Args:
+      request_id: The ID of the request to sync.
+      page_hashes: The hashes of the request's pages in order.
+      num_completed_tokens: The number of tokens completed by the request.
+    """
     # Pages must be cached before release, since uncached pages are freed
     # upon release.
 
-    self._cache_full_pages(request_id, page_hashes)
+    self._cache_full_pages(request_id, page_hashes, num_completed_tokens)
     self._release_out_of_window(request_id, num_completed_tokens)
 
   def _longest_cache_hit_full_attention(
@@ -470,13 +477,14 @@ class SingleTypeKVCacheManager:
     matched_host = [
         p
         for p in computed_pages
-        if p is not None and pm.page_location(p.page_id) == "host"
+        if p is not None
+        and pm.page_location(p.page_id) == page_pool_lib.PageLocation.HOST
     ]
 
     def is_device_unreferenced(p: Page | None) -> bool:
       return (
           p is not None
-          and pm.page_location(p.page_id) == "device"
+          and pm.page_location(p.page_id) == page_pool_lib.PageLocation.DEVICE
           and p.ref_count == 0
       )
 
@@ -551,7 +559,8 @@ class SingleTypeKVCacheManager:
     pages_to_swap_in = [
         p
         for p in pages
-        if p is not None and pm.page_location(p.page_id) == "host"
+        if p is not None
+        and pm.page_location(p.page_id) == page_pool_lib.PageLocation.HOST
     ]
 
     if not pages_to_swap_in:
@@ -633,16 +642,6 @@ class SingleTypeKVCacheManager:
       raise ValueError(
           f"Cannot allocate {num_tokens} slots for request {request_id}. "
           "Insufficient space."
-      )
-
-    # `cache_full_pages` assumes that all computed tokens have their KV values
-    # written to pages. When the length of a prefill exceeds the window size,
-    # kvs are only written for the last `window_size` tokens. To maintain
-    # simple bookkeeping, disallow computing more than the window size of tokens
-    # in a single step.
-    if self._window_size is not None and num_tokens > self._window_size:
-      raise ValueError(
-          "Cannot allocate more than window size tokens in a single step."
       )
 
     # Pages must be referenced before they are swapped in from host to device.

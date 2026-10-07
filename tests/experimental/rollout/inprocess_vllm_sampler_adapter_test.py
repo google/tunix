@@ -59,6 +59,7 @@ class InprocessVllmSamplerAdapterTest(absltest.TestCase):
             config=self.mock_config,
         )
     )
+    self.sampler_adapter.initialize()
 
   def tearDown(self):
     self.patcher.stop()
@@ -203,6 +204,7 @@ class InprocessVllmSamplerAdapterTest(absltest.TestCase):
         config=raiden_config,
         raiden_sync_delegate=mock_delegate,
     )
+    raiden_adapter.initialize()
 
     sync_req = base_sampler_lib.WeightSyncRequest(policy_version=5)
 
@@ -253,6 +255,7 @@ class InprocessVllmSamplerAdapterTest(absltest.TestCase):
         config=raiden_config,
         raiden_sync_delegate=mock_delegate,
     )
+    raiden_adapter.initialize()
 
     self.assertTrue(asyncio.run(raiden_adapter.bind_weight_sync()))
     mock_delegate.bind_weight_sync.assert_not_awaited()
@@ -275,6 +278,7 @@ class InprocessVllmSamplerAdapterTest(absltest.TestCase):
         config=raiden_config,
         raiden_sync_delegate=mock_delegate,
     )
+    raiden_adapter.initialize()
 
     with self.assertRaisesRegex(RuntimeError, "transformer_state"):
       asyncio.run(raiden_adapter.bind_weight_sync())
@@ -308,6 +312,20 @@ class InprocessVllmSamplerAdapterTest(absltest.TestCase):
   def test_sample_none_requests_raises(self):
     with self.assertRaises(ValueError):
       asyncio.run(self.sampler_adapter.sample(None))
+
+  def test_vllm_sampler_deferred_to_initialize(self):
+    self.mock_vllm_lib.VllmSampler.reset_mock()
+    adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
+        server_id="deferred_slice",
+        tokenizer=self.mock_tokenizer,
+        config=self.mock_config,
+    )
+    self.assertIsNone(adapter.vllm_sampler)
+    self.mock_vllm_lib.VllmSampler.assert_not_called()
+
+    adapter.initialize()
+    self.assertIsNotNone(adapter.vllm_sampler)
+    self.mock_vllm_lib.VllmSampler.assert_called_once()
 
 
 class RoutedExpertsTest(absltest.TestCase):

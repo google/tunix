@@ -59,6 +59,30 @@ def pad_prompt_and_completion(
   return left_padded_prompt_tokens, right_padded_completion_tokens, tokens
 
 
+def get_recent_assistant_message(
+    chat_completions_messages: list[dict[str, Any]],
+) -> Optional[dict[str, Any]]:
+  """Extracts the most recent assistant message from a chat completions list."""
+  for message in reversed(chat_completions_messages):
+    if message.get("role", None) == "assistant":
+      return message
+  return None
+
+
+def get_recent_env_messages(
+    chat_completions_messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+  """Extracts environment messages (user/tool) after the last assistant message."""
+  env_messages = []
+  for message in reversed(chat_completions_messages):
+    role = message.get("role", None)
+    if role == "assistant":
+      break
+    elif role in ["user", "tool"]:
+      env_messages.append(message)
+  return list(reversed(env_messages))
+
+
 def get_recent_assistant_user_messages(
     chat_completions_messages: list[dict[str, Any]],
 ) -> tuple[Optional[dict[str, Any]], list[dict[str, Any]]]:
@@ -74,20 +98,10 @@ def get_recent_assistant_user_messages(
           - A list of environment messages (user/tool) that occurred after the
           last assistant message, in chronological order.
   """
-  # Loop backwards to get the last assistant message and environment messages
-  env_messages = []
-  assistant_message = None
-  for message in reversed(chat_completions_messages):
-    role = message.get("role", None)
-    if role == "assistant":
-      assistant_message = message
-      break
-    elif role in ["user", "tool"] and assistant_message is None:
-      env_messages.append(message)
-  # Reverse the env_messages to maintain chronological order
-  env_messages = list(reversed(env_messages))
-
-  return assistant_message, env_messages
+  return (
+      get_recent_assistant_message(chat_completions_messages),
+      get_recent_env_messages(chat_completions_messages),
+  )
 
 
 def convert_messages_to_string(

@@ -191,7 +191,7 @@ class ToyTransformer(nnx.Module):
           shape=(
               x.shape[0],
               num_images,
-              self.config.vision_config.num_mm_tokens_per_image,  # pytype: disable=attribute-error
+              self.config.vision_config.num_mm_tokens_per_image,  # pyrefly: ignore[missing-attribute]
               x.shape[-1],
           ),
           dtype=x.dtype,
@@ -200,7 +200,7 @@ class ToyTransformer(nnx.Module):
       x = merge_embeddings_lib.merge_embeddings(
           text_embeddings=x,
           vision_embeddings=vision_embs,
-          mask=tokens == self.config.vision_config.soft_token_placeholder,  # pytype: disable=attribute-error
+          mask=tokens == self.config.vision_config.soft_token_placeholder,  # pyrefly: ignore[missing-attribute]
       )
 
     for layer in self.layers:

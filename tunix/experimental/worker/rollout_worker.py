@@ -121,7 +121,7 @@ class RolloutWorker(abstract_worker.Worker):
       logging.info(
           "[trajectory-store] worker %s built %s",
           worker_id,
-          self._trajectory_store.to_config(),
+          self._trajectory_store.to_redacted_config(),
       )
 
   @property
@@ -146,50 +146,52 @@ class RolloutWorker(abstract_worker.Worker):
         },
     )
 
+  def _response(self, **metadata: Any) -> datatypes.Response:
+    return datatypes.Response(
+        metadata={
+            "worker_id": self.worker_id,
+            "state": self.state.value,
+            "policy_version": self._policy_version,
+            **metadata,
+        }
+    )
+
+  def _ensure_initialized(self) -> None:
+    if self.state == WorkerState.PENDING:
+      self.initialize()
+
   def initialize(self) -> datatypes.Response:
     with self._init_lock:
       if self.state == WorkerState.READY:
-        return datatypes.Response(
-            metadata={
-                "worker_id": self.worker_id,
-                "state": self.state.value,
-                "policy_version": self._policy_version,
-                "initialized": True,
-                "ready": True,
-            }
-        )
+        return self._response(initialized=True, ready=True)
       self.state = WorkerState.INITIALIZING
-      self.sampler.initialize()
       try:
-        return datatypes.Response(
-            metadata={
-                "worker_id": self.worker_id,
-                "state": self.state.value,
-                "policy_version": self._policy_version,
-            }
-        )
+        self.sampler.initialize()
+        return self._response()
+      except Exception:
+        self.state = WorkerState.ERROR
+        raise
       finally:
-        self.state = WorkerState.READY
+        if self.state == WorkerState.INITIALIZING:
+          self.state = WorkerState.READY
 
   def compile(self, dummy_data: Any) -> datatypes.Response:
-    if self.state == WorkerState.PENDING:
-      self.initialize()
+    self._ensure_initialized()
     self.state = WorkerState.COMPILING
     try:
       return datatypes.Response()
     finally:
       self.state = WorkerState.READY
 
-  def start(self) -> datatypes.Response:
-    if self.state == WorkerState.PENDING:
-      self.initialize()
-    return datatypes.Response(
-        metadata={
-            "worker_id": self.worker_id,
-            "state": self.state.value,
-            "policy_version": self._policy_version,
-        }
-    )
+  async def start(self) -> datatypes.Response:
+    self._ensure_initialized()
+    try:
+      await self.sampler.start()
+      await self.manager.bind_weight_sync()
+      return self._response(started=True)
+    except Exception:
+      self.state = WorkerState.ERROR
+      raise
 
   def stop(self) -> datatypes.Response:
     self.state = WorkerState.STOPPED
@@ -226,8 +228,7 @@ class RolloutWorker(abstract_worker.Worker):
 
   def get_target_state(self) -> Any:
     """Returns rollout-side target-state skeleton for trainer-side conversion."""
-    if self.state == WorkerState.PENDING:
-      self.initialize()
+    self._ensure_initialized()
     return self.manager.get_target_state()
 
   def _stamp_worker_lineage(self, metadata: dict[str, Any] | None) -> None:
@@ -285,6 +286,7 @@ class RolloutWorker(abstract_worker.Worker):
       on_complete: Optional[Callable[[datatypes.RolloutResponse], None]] = None,
   ) -> datatypes.RolloutResponse | List[datatypes.RolloutResponse]:
     """Coroutine method for single or batched generate requests."""
+    self._ensure_initialized()
     if isinstance(requests, datatypes.RolloutRequest):
       pass
     elif isinstance(requests, Sequence) and not isinstance(
@@ -323,8 +325,7 @@ class RolloutWorker(abstract_worker.Worker):
 
   async def pre_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
     """Quiesces the worker; it stays SYNCING until post or abort."""
-    if self.state == WorkerState.PENDING:
-      self.initialize()
+    self._ensure_initialized()
     self.state = WorkerState.SYNCING
     self._record_round(sync_request, "idle")
     result = await self.manager.pre_weight_sync(sync_request, **kwargs)
@@ -333,8 +334,7 @@ class RolloutWorker(abstract_worker.Worker):
 
   async def weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
     """Materializes the received weights; the worker stays SYNCING."""
-    if self.state == WorkerState.PENDING:
-      self.initialize()
+    self._ensure_initialized()
     self.state = WorkerState.SYNCING
     metadata = kwargs.pop("metadata", None)
     request = sync_request if sync_request is not None else metadata
@@ -359,10 +359,12 @@ class RolloutWorker(abstract_worker.Worker):
 
   async def bind_weight_sync(self, **kwargs) -> Any:
     """Binds the destination-side transport via the manager."""
+    self._ensure_initialized()
     return await self.manager.bind_weight_sync(**kwargs)
 
   async def get_weight_sync_metadata(self, **kwargs) -> Any:
     """Returns the sampler's transport metadata via the manager."""
+    self._ensure_initialized()
     return await self.manager.get_weight_sync_metadata(**kwargs)
 
   async def abort_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:

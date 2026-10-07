@@ -1,3 +1,5 @@
+from typing import Any
+
 from absl.testing import absltest
 from tunix.experimental.trajectory import in_memory_store
 from tunix.experimental.trajectory import store
@@ -37,7 +39,8 @@ class InMemoryTrajectoryWriterTest(store_testing.TrajectoryWriterTestCase):
     mem_store = in_memory_store.InMemoryTrajectoryStore()
     return mem_store, mem_store
 
-  def test_update_metadata(self):
+  def test_update_metadata(self) -> None:
+    """Verifies that updating metadata in-memory updates the stored metadata."""
     mem_store = in_memory_store.InMemoryTrajectoryStore()
     meta = trajectory_lib.TrajectoryMetadata(
         trajectory_id="t1",
@@ -53,7 +56,8 @@ class InMemoryTrajectoryWriterTest(store_testing.TrajectoryWriterTestCase):
     read_meta = mem_store.get_trajectories_metadata()[0]
     self.assertEqual(read_meta.extra["status"], "SUCCEEDED")
 
-  def test_tunix_trajectory_with_step_zero(self):
+  def test_tunix_trajectory_with_step_zero(self) -> None:
+    """Verifies storing and retrieving TunixTrajectoryMetadata and TunixTrajectory with step_id=0."""
     mem_store = in_memory_store.InMemoryTrajectoryStore()
     meta = trajectory_lib.TunixTrajectoryMetadata(
         trajectory_id="tunix_1",
@@ -73,8 +77,11 @@ class InMemoryTrajectoryWriterTest(store_testing.TrajectoryWriterTestCase):
     self.assertIsInstance(trajs[0], trajectory_lib.TunixTrajectory)
     self.assertEqual(trajs[0].steps[0].step_id, 0)
     self.assertEqual(trajs[0].steps[1].step_id, 1)
+    self.assertIsInstance(trajs[0].steps[0], trajectory_lib.TunixEnvStep)
+    self.assertIsInstance(trajs[0].steps[1], trajectory_lib.TunixAgentStep)
 
-  def test_metadata_mutation_isolation(self):
+  def test_metadata_mutation_isolation(self) -> None:
+    """Verifies that mutating returned metadata does not alter internal store state."""
     mem_store = in_memory_store.InMemoryTrajectoryStore()
     meta = trajectory_lib.TrajectoryMetadata(
         trajectory_id="iso_1",
@@ -96,6 +103,15 @@ class InMemoryTrajectoryWriterTest(store_testing.TrajectoryWriterTestCase):
     stored_meta = mem_store.get_trajectories_metadata()[0]
     self.assertEqual(stored_meta.notes, "initial notes")
     self.assertEqual(stored_meta.extra["count"], 1)
+
+
+class InMemoryTrajectoryStoreConfigTest(
+    store_testing.TrajectoryStoreConfigTestCase
+):
+  """Config contract tests for InMemoryTrajectoryStore."""
+
+  def _create_config(self) -> dict[str, Any]:
+    return {"enabled": True, "backend": "memory"}
 
 
 if __name__ == "__main__":

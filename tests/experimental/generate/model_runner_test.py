@@ -602,64 +602,59 @@ class ExecuteStepTest(absltest.TestCase):
 
     np.testing.assert_array_equal(tokens[:2], [[5], [10]])
 
+  def test_single_step_avoids_stack_steps_and_batches_metadata_transfer(self):
+    runner = _runner(
+        _NextTokenTransformer(), return_logits=True, return_logprobs=True
+    )
+    with (
+        mock.patch.object(
+            model_runner_lib,
+            '_stack_steps',
+            wraps=model_runner_lib._stack_steps,
+        ) as mock_stack,
+        mock.patch.object(
+            runner, '_to_device', wraps=runner._to_device
+        ) as mock_to_device,
+    ):
+      tokens, logits, logp, _ = self._execute(runner)
+
+    mock_stack.assert_not_called()
+    # Both `metadata` and `sampling_metadata` are transferred in one call.
+    mock_to_device.assert_called_once()
+    self.assertEqual(tokens.shape, (3, 1))
+    self.assertEqual(logits.shape, (3, 1, _VOCAB_SIZE))
+    self.assertEqual(logp.shape, (3, 1))
+
   def test_sampling_params_must_match_the_scheduled_requests(self):
     runner = _runner(_NextTokenTransformer())
 
     with self.assertRaisesRegex(ValueError, 'sampling params'):
       self._execute(runner, (_params(),))
 
-  def test_rejects_malformed_metadata(self):
+  def test_to_device_deduplicates_shared_page_indices(self):
     runner = _runner(_NextTokenTransformer())
-    cases = {
-        'mismatched_lens': dict(
-            kv_lens=[6, 3], query_lens=[1, 3, 0], distribution=[1, 1, 2]
-        ),
-        'decreasing_distribution': dict(
-            kv_lens=[6, 3, 0], query_lens=[1, 3, 0], distribution=[1, 2, 1]
-        ),
-        'distribution_past_rows': dict(
-            kv_lens=[6, 3, 0], query_lens=[1, 3, 0], distribution=[1, 1, 4]
-        ),
-        'idle_scheduled_row': dict(
-            kv_lens=[6, 3, 0], query_lens=[1, 0, 0], distribution=[1, 1, 2]
-        ),
-        'multi_token_decode': dict(
-            kv_lens=[6, 3, 0], query_lens=[2, 2, 0], distribution=[1, 1, 2]
-        ),
-        'query_past_kv': dict(
-            kv_lens=[6, 2, 0], query_lens=[1, 3, 0], distribution=[1, 1, 2]
-        ),
-        'live_padding_row': dict(
-            kv_lens=[6, 3, 1], query_lens=[1, 3, 0], distribution=[1, 1, 2]
-        ),
-        'too_many_tokens': dict(
-            kv_lens=[6, 4, 0], query_lens=[1, 4, 0], distribution=[1, 1, 2]
-        ),
-    }
-    for name, kwargs in cases.items():
-      with self.subTest(name):
-        with self.assertRaises(ValueError):
-          runner.execute_step(
-              cache=_positions_cache(4),
-              tokens=self.tokens,
-              metadata=_rpa_metadata(**kwargs),
-              sampling_params=self.greedy,
-          )
-
-  def test_rejects_page_indices_with_the_wrong_rows(self):
-    runner = _runner(_NextTokenTransformer())
+    shared_pages = self.metadata.page_indices['layer_0']
     metadata = dataclasses.replace(
         self.metadata,
-        page_indices={'layer_0': np.zeros((2, 2), dtype=np.int32)},
+        page_indices={
+            'layer_0': shared_pages,
+            'layer_1': shared_pages,
+        },
     )
 
-    with self.assertRaisesRegex(ValueError, 'page_indices'):
-      runner.execute_step(
-          cache=_positions_cache(4),
-          tokens=self.tokens,
-          metadata=metadata,
-          sampling_params=self.greedy,
-      )
+    with mock.patch.object(
+        jax, 'device_put', wraps=jax.device_put
+    ) as mock_device_put:
+      device_metadata = runner._to_device(metadata)
+
+    mock_device_put.assert_called_once()
+    put_leaves = mock_device_put.call_args.args[0]
+    # 1 shared page table + kv_lens + query_lens + distribution.
+    self.assertLen(put_leaves, 4)
+    self.assertIs(
+        device_metadata.page_indices['layer_0'],
+        device_metadata.page_indices['layer_1'],
+    )
 
 
 class ExecuteStepSeedTest(absltest.TestCase):

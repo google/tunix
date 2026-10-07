@@ -195,6 +195,13 @@ class _SamplerTests(absltest.TestCase):
     assert output.prompt_lengths is not None
     self.assertEqual(output.prompt_lengths.tolist(), [3, 3, 2, 2])
 
+  def test_tokenize_deduplicates_leading_bos_tokens(self):
+    engine = testing_utils.make_engine()
+    engine._tokenizer._tokenizer.bos_id = lambda: 2  # pylint: disable=protected-access
+    sampler = self.make_sampler(engine)
+
+    self.assertEqual(sampler.tokenize('2 2 1 3'), [2, 1, 3])
+
 
 class OfflineSamplerTest(_SamplerTests):
 

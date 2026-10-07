@@ -16,18 +16,18 @@ from tunix.sft import metrics_logger
 from tunix.sft import otel_wandb
 
 try:
-  import wandb  # pytype: disable=import-error # pylint: disable=g-import-not-at-top
+  import wandb  # pylint: disable=g-import-not-at-top  # pyrefly: ignore[missing-import]
 except ImportError:
   wandb = None
 
 try:
-  from wandb.proto import wandb_internal_pb2  # pytype: disable=import-error # pylint: disable=g-import-not-at-top
+  from wandb.proto import wandb_internal_pb2  # pylint: disable=g-import-not-at-top  # pyrefly: ignore[missing-import]
 
   try:
-    from wandb.sdk.internal.datastore import DataStore  # pytype: disable=import-error # pylint: disable=g-import-not-at-top
+    from wandb.sdk.internal.datastore import DataStore  # pylint: disable=g-import-not-at-top  # pyrefly: ignore[missing-import]
   except (ImportError, AttributeError):
     try:
-      from wandb.sdk.internal import datastore  # pytype: disable=import-error # pylint: disable=g-import-not-at-top
+      from wandb.sdk.internal import datastore  # pylint: disable=g-import-not-at-top  # pyrefly: ignore[missing-import]
 
       DataStore = getattr(datastore, "DataStore", None)
     except (ImportError, AttributeError):

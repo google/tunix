@@ -447,7 +447,7 @@ def get_openhands_pod_template(
 ) -> Any:
   """Builds and returns the TemplateSpec for OpenHands agent sandbox."""
   try:
-    from agent_sandbox_rl import (  # pytype: disable=import-error
+    from agent_sandbox_rl import (  # pyrefly: ignore[missing-import]
         ResourceSpec,
         TemplateSpec,
     )

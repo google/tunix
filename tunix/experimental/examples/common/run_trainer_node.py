@@ -729,9 +729,6 @@ def _create_tunix_trainer_factory(args) -> tuple[Any, Mesh]:
   mesh = _create_mesh(args)
   logging.info("Trainer mesh: %s", mesh)
 
-  logging.info("Loading actor model with use_lora=%s...", args.use_lora)
-  actor_model = _load_actor_model(args, mesh, lora=args.use_lora)
-
   logging.info("Building PeftTrainer v2 config...")
   checkpointing_options = _checkpointing_options(args)
   training_config = peft_trainer_v2.TrainingConfig(
@@ -776,6 +773,8 @@ def _create_tunix_trainer_factory(args) -> tuple[Any, Mesh]:
     )
 
   def _factory():
+    logging.info("Loading actor model with use_lora=%s...", args.use_lora)
+    actor_model = _load_actor_model(args, mesh, lora=args.use_lora)
     # `sampler_type` and `rollout_tp_size` describe the weight-sync
     # destination, not the training recipe, so they ride on the trainer's
     # weight-sync surface rather than on TrainingConfig.

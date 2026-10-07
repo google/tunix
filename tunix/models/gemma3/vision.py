@@ -185,9 +185,9 @@ class VisionAttention(nnx.Module):
     k = self.key_proj(x)
     v = self.value_proj(x)
     if self.shd_config:
-      q = sharding_utils.shard(q, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
-      k = sharding_utils.shard(k, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
-      v = sharding_utils.shard(v, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
+      q = sharding_utils.shard(q, self.shd_config.act_btd)
+      k = sharding_utils.shard(k, self.shd_config.act_btd)
+      v = sharding_utils.shard(v, self.shd_config.act_btd)
 
     q = q.reshape(desired_shape)
     k = k.reshape(desired_shape)
@@ -195,7 +195,7 @@ class VisionAttention(nnx.Module):
 
     logits = jnp.einsum("BTNH,BSNH->BNTS", q, k)
     if self.shd_config:
-      logits = sharding_utils.shard(logits, self.shd_config.act_bnts)  # pyrefly: ignore[bad-argument-type]
+      logits = sharding_utils.shard(logits, self.shd_config.act_bnts)
 
     logits = logits / jnp.sqrt(self.head_dim).astype(logits.dtype)
 
@@ -206,12 +206,12 @@ class VisionAttention(nnx.Module):
         batch_size, seq_length, self.hidden_dim
     )
     if self.shd_config:
-      out = sharding_utils.shard(out, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
+      out = sharding_utils.shard(out, self.shd_config.act_btd)
 
     # 5. Final Output Projection
     out = self.out_proj(out)
     if self.shd_config:
-      out = sharding_utils.shard(out, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
+      out = sharding_utils.shard(out, self.shd_config.act_btd)
     return out
 
 
@@ -284,15 +284,15 @@ class MlpBlock(nnx.Module):
     x = nnx.gelu(x, approximate=True)
 
     if self.shd_config:
-      x = sharding_utils.shard(x, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
+      x = sharding_utils.shard(x, self.shd_config.act_btd)
 
     x = self.dropout(x, deterministic=deterministic)
     if self.shd_config:
-      x = sharding_utils.shard(x, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
+      x = sharding_utils.shard(x, self.shd_config.act_btd)
 
     x = self.fc2(x)
     if self.shd_config:
-      x = sharding_utils.shard(x, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
+      x = sharding_utils.shard(x, self.shd_config.act_btd)
     return x
 
 
@@ -558,7 +558,7 @@ class ViTModel(nnx.Module):
     # Patch extraction
     x = self.embedding(image)
     if self.shd_config:
-      x = sharding_utils.shard(x, self.shd_config.act_bhwd)  # pyrefly: ignore[bad-argument-type]
+      x = sharding_utils.shard(x, self.shd_config.act_bhwd)
 
     n, h, w, c = x.shape
     x = jnp.reshape(x, [n, h * w, c])
@@ -597,7 +597,7 @@ class VisionExit(nnx.Module):
     Returns:
       The output tensor.
     """
-    cur_length = x.shape[1]  # pytype: disable=attribute-error  # jax-arraylike
+    cur_length = x.shape[1]  # pyrefly: ignore[missing-attribute]
     if cur_length == self.output_length:
       return x
 
@@ -660,7 +660,7 @@ class SigLiP(nnx.Module):
     Returns:
       The output tensor.
     """
-    b, n, _, _, _ = images.shape  # pytype: disable=attribute-error  # jax-arraylike
+    b, n, _, _, _ = images.shape  # pyrefly: ignore[missing-attribute]
 
     flattened_images = einops.rearrange(images, "b n h w c -> (b n) h w c")
     soft_tokens = self.siglip_encoder(flattened_images)
@@ -670,7 +670,7 @@ class SigLiP(nnx.Module):
         != self.config.num_mm_tokens_per_image
     ):
       soft_tokens = self.siglip_exit(soft_tokens)
-      assert soft_tokens.shape[-2] == self.siglip_exit.output_length  # pytype: disable=attribute-error  # jax-arraylike
+      assert soft_tokens.shape[-2] == self.siglip_exit.output_length  # pyrefly: ignore[missing-attribute]
 
     soft_tokens = einops.rearrange(
         soft_tokens, "(b n) ... -> b n ...", b=b, n=n

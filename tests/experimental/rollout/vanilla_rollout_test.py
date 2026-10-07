@@ -181,6 +181,16 @@ class VanillaRolloutTest(parameterized.TestCase):
     self.assertIn('rollout/last_batch_completion_time_s', perf_metrics)
     self.assertIn('rollout/avg_batch_completion_time_s', perf_metrics)
 
+  @parameterized.parameters(False, True)
+  def test_combines_tokenizer_eos_and_configured_eos_tokens(self, server_mode):
+    unbounded = _expected_tokens([1, 2, 3])
+    custom_eos = unbounded[1]
+    rollout = self.make_rollout(server_mode, eos_tokens=[custom_eos])
+
+    output = rollout.generate(['1 2 3'], _rollout_config(eos_tokens=[custom_eos]))
+
+    self.assertEqual(output.tokens[0].tolist(), unbounded[:2])
+
 
 if __name__ == '__main__':
   absltest.main()

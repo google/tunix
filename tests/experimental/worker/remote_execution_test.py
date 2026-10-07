@@ -1659,6 +1659,27 @@ class RemoteExecutionTest(absltest.TestCase):
       self.assertIn("multi_loop_worker", res2)
       asyncio.run(handle.close())
 
- 
+  def test_iter_async_from_sync_chunks_closes_sync_iter_on_early_exit(self):
+    closed = False
+
+    def _sync_gen():
+      nonlocal closed
+      try:
+        yield b"chunk_0"
+        yield b"chunk_1"
+        yield b"chunk_2"
+      finally:
+        closed = True
+
+    async def _run():
+      ait = remote_lib._iter_async_from_sync_chunks(_sync_gen())
+      first = await ait.__anext__()
+      self.assertEqual(first, b"chunk_0")
+      await ait.aclose()
+      self.assertTrue(closed)
+
+    asyncio.run(_run())
+
+
 if __name__ == "__main__":
   absltest.main()

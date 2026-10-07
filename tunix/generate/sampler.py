@@ -893,7 +893,7 @@ class Sampler(base_sampler.BaseSampler):
       assert self.transformer.vision_encoder is not None
       processed_images, tokens = image_processor.process_gemma4_inputs(
           images,
-          tokens,  # pyrefly: ignore[bad-argument-type]
+          tokens,
           self.transformer.vision_encoder,
           self.tokenizer.pad_id(),
       )
@@ -909,7 +909,7 @@ class Sampler(base_sampler.BaseSampler):
         assert self.transformer.audio_encoder is not None
         processed_audios, tokens = audio_processor.process_gemma4_inputs(
             audios=audios,  # pyrefly: ignore[bad-argument-type]
-            tokens=tokens,  # pyrefly: ignore[bad-argument-type]
+            tokens=tokens,
             audio_encoder=self.transformer.audio_encoder,
             max_audio_length=max_audio_length,
             max_audio_clips=max_audio_clips,

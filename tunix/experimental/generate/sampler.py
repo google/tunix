@@ -107,7 +107,9 @@ class Sampler(base_sampler.BaseSampler):
     return self._engine.mesh
 
   def tokenize(self, input_string: str) -> list[int]:
-    return self._tokenizer.encode(input_string)
+    input_ids = self._tokenizer.encode(input_string)
+    bos_tok = [self._tokenizer.bos_id()] if self._tokenizer.bos_id() else []
+    return self._tokenizer.dedup_bos_ids(bos_tok + input_ids)
 
   def stop(self) -> None:
     """Stops the engine loop."""
@@ -171,10 +173,12 @@ class Sampler(base_sampler.BaseSampler):
       raise ValueError(
           'Cannot specify both input_strings and prompt_token_ids.'
       )
+    expected_prompt_ids: list[np.ndarray] | None = None
     if prompt_token_ids is not None:
-      prompts: list[str | np.ndarray] = [
+      expected_prompt_ids = [
           np.asarray(ids, dtype=np.int32) for ids in prompt_token_ids
       ]
+      prompts: list[str | np.ndarray] = list(expected_prompt_ids)
     elif input_strings is not None:
       prompts = (
           [input_strings]
@@ -218,6 +222,13 @@ class Sampler(base_sampler.BaseSampler):
       outputs = self._generate_offline(requests)
       if requests:
         self.record_batch_completion(time.perf_counter() - start_time)
+
+    if expected_prompt_ids is not None:
+      utils.check_prompt_echo(
+          [p for p in expected_prompt_ids for _ in range(multi_sampling)],
+          outputs,
+          backend_name='LLMEngine',
+      )
 
     padded_prompt_tokens, prompt_lengths, padded_prompt_len = (
         utils.left_pad_prompt_tokens(

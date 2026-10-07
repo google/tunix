@@ -531,8 +531,10 @@ class RunTrainerNodeMainAndShutdownTest(absltest.TestCase):
     ])
     factory, _ = run_trainer_node._create_tunix_trainer_factory(args)
     self.assertNotIn("rollout_tp_size", mock_training_config.call_args.kwargs)
+    mock_load_model.assert_not_called()
 
     factory()
+    mock_load_model.assert_called_once()
     self.assertEqual(
         mock_peft_trainer.call_args.kwargs["rollout_tp_size"], 4
     )

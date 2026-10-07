@@ -1,23 +1,20 @@
 """SQL-backed implementation for Trajectory Store."""
 
 import collections
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 import datetime
 import threading
-import types
-from typing import Any, Final, Self
+from typing import Any, ClassVar, Final, Self
 
 from absl import logging
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.dialects import sqlite
 from tunix.experimental.trajectory import async_writer
+from tunix.experimental.trajectory import db_engine
 from tunix.experimental.trajectory import schema
 from tunix.experimental.trajectory import store
 from tunix.experimental.trajectory import trajectory as trajectory_lib
-
-_POSTGRESQL_DIALECT: Final[str] = "postgresql"
-_SQLITE_DIALECT: Final[str] = "sqlite"
 
 # Maximum number of trajectory metadata entries retained per run in the worker's
 # bounded LRU cache to skip redundant trajectory table upserts across multi-step
@@ -138,15 +135,14 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
 
     # Dialect-specific insert statement constructor for ON CONFLICT DO UPDATE.
     self._insert_fn: Callable[..., Any]
-    if engine.dialect.name == _POSTGRESQL_DIALECT:
+    if engine.dialect.name == db_engine.Dialect.POSTGRESQL:
       self._insert_fn = postgresql.insert
-    elif engine.dialect.name == _SQLITE_DIALECT:
+    elif engine.dialect.name == db_engine.Dialect.SQLITE:
       self._insert_fn = sqlite.insert
     else:
       raise ValueError(
           f"Unsupported database dialect: {engine.dialect.name}. "
-          f"Supported dialects are {_POSTGRESQL_DIALECT!r} and"
-          f" {_SQLITE_DIALECT!r}."
+          f"Supported dialects are {', '.join(db_engine.Dialect)}."
       )
 
   def enqueue_write(
@@ -404,7 +400,7 @@ class _AsyncSqlWriter(async_writer.AsyncWriter[async_writer.WriteTask]):
     )
 
 
-class SqlTrajectoryStore(store.TrajectoryReader, store.TrajectoryWriter):
+class SqlTrajectoryStore(store.TrajectoryStore):
   """SQL-backed implementation of TrajectoryReader and TrajectoryWriter.
 
   `SqlTrajectoryStore` manages the persistence and retrieval of reinforcement
@@ -420,50 +416,103 @@ class SqlTrajectoryStore(store.TrajectoryReader, store.TrajectoryWriter):
     4. Synchronous read queries (`get_trajectories()` and
        `get_trajectories_metadata()`) via `self._engine.connect()`.
 
+    The store owns an engine handle, which wraps the engine. The handle is
+    acquired from `db_engine` on construction and released on `close()`;
+    `db_engine` manages disposing the engine once its handles are released.
+
     All asynchronous queuing, background worker thread lifecycle, error
     suppression for rollout resilience, and database transactions are handled
     by `_AsyncSqlWriter`.
   """
 
+  BACKEND: ClassVar[str] = "sql"
+
   def __init__(
       self,
-      engine: sa.Engine,
-      run_id: str,
       *,
+      run_id: str,
+      db_url: str,
       auto_init: bool = True,
-      owns_engine: bool = True,
   ) -> None:
     """Initializes SqlTrajectoryStore.
 
     Args:
-      engine: Configured SQLAlchemy Engine providing database connectivity.
       run_id: Run identifier used to scope trajectories and steps. Lazily
         registered in `RUNS_TABLE` on the first write task once
         `TrajectoryMetadata` (e.g. `agent_name`) is provided.
+      db_url: Database connection URL, e.g. 'sqlite:///traj.db' or
+        'postgresql+psycopg2://user@host/db'. Callers resolve any credentials
+        (e.g. from a secret manager) before passing it. A PostgreSQL URL may
+        omit the password; libpq then reads `PGPASSWORD` or `~/.pgpass`.
       auto_init: If True, automatically creates database tables and indexes on
         startup via `_initialize_schema`.
-      owns_engine: If True, `close()` disposes `engine` after draining pending
-        writes (used when the store creates its own engine via config). If
-        False, the caller retains ownership of `engine` and is responsible for
-        calling `engine.dispose()` when the connection pool is no longer needed.
 
     Raises:
-      ValueError: If run_id is empty, None, or whitespace, or if the engine uses
-        an unsupported database dialect.
+      ValueError: If `run_id` or `db_url` is empty, None, or whitespace, or if
+        `db_url` uses an unsupported database dialect.
     """
-    self._engine = engine
-    self._owns_engine = owns_engine
+    if not run_id or not run_id.strip():
+      raise ValueError("SqlTrajectoryStore requires a non-empty run_id.")
+    if not db_url or not db_url.strip():
+      raise ValueError("SqlTrajectoryStore requires a non-empty db_url.")
+
+    self._db_url = db_url
+    self._run_id = run_id.strip()
+    self._engine_handle = db_engine.acquire_engine(
+        db_engine.EngineConfig(url=db_url)
+    )
+    self._engine = self._engine_handle.engine
     try:
-      if not run_id or not run_id.strip():
-        raise ValueError("SqlTrajectoryStore requires a non-empty run_id.")
-      self._run_id = run_id.strip()
-      self._writer = _AsyncSqlWriter(engine=engine)
-      if auto_init:
-        self._initialize_schema()
+      self._writer = _AsyncSqlWriter(engine=self._engine)
     except Exception:
-      if self._owns_engine:
-        self._engine.dispose()
+      self._engine_handle.release()
       raise
+    if auto_init:
+      try:
+        self._initialize_schema()
+      except Exception:
+        # Also closes the writer, so it is not left in the interpreter-exit
+        # drain with a disposed engine.
+        self.close()
+        raise
+
+  @classmethod
+  def _from_config(cls, config: Mapping[str, Any]) -> Self:
+    """Builds a SQL-backed store from `config`.
+
+    Args:
+      config: Requires "db_url" and "run_id".
+
+    Returns:
+      A new SqlTrajectoryStore.
+
+    Raises:
+      ValueError: If "db_url" or "run_id" is missing or empty.
+    """
+    return cls(
+        run_id=config.get("run_id", ""),
+        db_url=config.get("db_url", ""),
+    )
+
+  def to_config(self) -> dict[str, Any]:
+    """Returns the config dict that rebuilds an equivalent store.
+
+    The returned "db_url" is the literal URL this store was built with,
+    including any password it embeds. Do not log it; log
+    `to_redacted_config()` instead.
+    """
+    return {
+        "enabled": True,
+        "backend": self.BACKEND,
+        "db_url": self._db_url,
+        "run_id": self._run_id,
+    }
+
+  def to_redacted_config(self) -> dict[str, Any]:
+    """Returns `to_config()` with any password in "db_url" masked."""
+    config = self.to_config()
+    config["db_url"] = db_engine.redact_url(self._db_url)
+    return config
 
   def _has_all_schema_tables(self, conn: sa.Connection) -> bool:
     """Returns True if all Trajectory Store tables exist in the database."""
@@ -473,13 +522,13 @@ class SqlTrajectoryStore(store.TrajectoryReader, store.TrajectoryWriter):
   def _acquire_schema_init_lock(self, conn: sa.Connection) -> None:
     """Acquires a dialect-specific transaction lock before running schema DDL."""
     dialect_name = self._engine.dialect.name
-    if dialect_name == _POSTGRESQL_DIALECT:
+    if dialect_name == db_engine.Dialect.POSTGRESQL:
       conn.execute(
           sa.select(
               sa.func.pg_advisory_xact_lock(_POSTGRES_SCHEMA_INIT_LOCK_ID)
           )
       )
-    elif dialect_name == _SQLITE_DIALECT:
+    elif dialect_name == db_engine.Dialect.SQLITE:
       conn.exec_driver_sql("BEGIN IMMEDIATE")
 
   def _initialize_schema(self) -> None:
@@ -513,7 +562,7 @@ class SqlTrajectoryStore(store.TrajectoryReader, store.TrajectoryWriter):
 
   @property
   def engine(self) -> sa.Engine:
-    """Returns the underlying SQLAlchemy engine."""
+    """Returns the store's SQLAlchemy engine."""
     return self._engine
 
   @property
@@ -577,21 +626,21 @@ class SqlTrajectoryStore(store.TrajectoryReader, store.TrajectoryWriter):
     self._writer.flush()
 
   def close(self) -> None:
-    """Flushes pending writes and shuts down the background writer thread.
+    """Flushes pending writes, stops the writer thread, and releases the engine.
 
-    Calling `close()` is optional: the underlying `_AsyncSqlWriter` also drains
-    itself at interpreter exit. It is worth calling explicitly for a store that
-    becomes garbage well before the process ends, so its worker thread is
-    released promptly. Closing is idempotent, but the store must not be written
-    to afterwards; reads remain available. When `owns_engine` is True, also
-    calls `self._engine.dispose()` to release the database connection pool;
-    otherwise `self._engine` is left open for shared callers to dispose.
+    Calling `close()` is optional because the writer also drains at interpreter
+    exit. Call it explicitly to free the writer thread for a store that is
+    discarded long before the process ends.
+
+    Closing is idempotent. Do not write to the store afterwards. After closing,
+    reads still work on file SQLite or PostgreSQL, since the data lives outside
+    the connection pool. With in-memory SQLite the data is lost, because
+    closing currently disposes the only connection holding it.
     """
     try:
       self._writer.close()
     finally:
-      if self._owns_engine:
-        self._engine.dispose()
+      self._engine_handle.release()
 
   def get_trajectories_metadata(
       self, trajectory_ids: Sequence[str] | None = None
@@ -721,17 +770,3 @@ class SqlTrajectoryStore(store.TrajectoryReader, store.TrajectoryWriter):
       )
 
     return trajectories
-
-  def __enter__(self) -> Self:
-    """Returns this store, for use as a context manager."""
-    return self
-
-  def __exit__(
-      self,
-      exc_type: type[BaseException] | None,
-      exc_value: BaseException | None,
-      traceback: types.TracebackType | None,
-  ) -> None:
-    """Closes the store on exiting the context manager."""
-    del exc_type, exc_value, traceback
-    self.close()

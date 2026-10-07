@@ -243,9 +243,6 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
     self._policy_version = 0
     self._kv_cache_freed = False
 
-    if self.sampler is None and self.engine_args is not None:
-      sampler_cls = _get_rl_vllm_sampler_cls()
-      self.sampler = sampler_cls(engine_args=self.engine_args)
     self._verify_sampler_protocol()
 
   def initialize(self) -> None:

@@ -24,6 +24,7 @@ from tunix.experimental.generate import single_type_kv_cache_manager
 from tunix.experimental.generate import tiered_page_pool
 
 Page = single_type_kv_cache_manager.Page
+PageLocation = tiered_page_pool.PageLocation
 
 
 def _create_manager(
@@ -323,7 +324,9 @@ class EvictionAndOffloadTest(parameterized.TestCase):
     ):
       manager._offload_pages([page])
 
-    self.assertEqual(manager._page_manager.page_location(pids[0]), "device")
+    self.assertEqual(
+        manager._page_manager.page_location(pids[0]), PageLocation.DEVICE
+    )
     self.assertEmpty(manager._unreferenced_host_pages)
 
   @parameterized.parameters(0, -1)
@@ -360,8 +363,8 @@ class EvictionAndOffloadTest(parameterized.TestCase):
 
     p0_location = manager._page_manager.page_location(p0.page_id)
     p1_location = manager._page_manager.page_location(p1.page_id)
-    self.assertEqual(p0_location, "host")
-    self.assertEqual(p1_location, "host")
+    self.assertEqual(p0_location, PageLocation.HOST)
+    self.assertEqual(p1_location, PageLocation.HOST)
 
     self.assertIn(p0, manager._unreferenced_host_pages)
     self.assertIn(p1, manager._unreferenced_host_pages)
@@ -392,8 +395,8 @@ class EvictionAndOffloadTest(parameterized.TestCase):
 
     p0_location = manager._page_manager.page_location(device_p0.page_id)
     p1_location = manager._page_manager.page_location(device_p1.page_id)
-    self.assertEqual(p0_location, "host")
-    self.assertEqual(p1_location, "host")
+    self.assertEqual(p0_location, PageLocation.HOST)
+    self.assertEqual(p1_location, PageLocation.HOST)
     self.assertNotIn(10, manager._prefix_hash_to_page)
     self.assertNotIn(11, manager._prefix_hash_to_page)
 
@@ -418,7 +421,7 @@ class EvictionAndOffloadTest(parameterized.TestCase):
     self.assertTrue(host_p0.is_freed)
     self.assertNotIn(10, manager._prefix_hash_to_page)
     self.assertTrue(device_p0.is_freed)
-    self.assertEqual(pm.page_location(device_p1.page_id), "host")
+    self.assertEqual(pm.page_location(device_p1.page_id), PageLocation.HOST)
     self.assertEqual(list(manager._unreferenced_host_pages), [device_p1])
     self.assertEmpty(manager._unreferenced_device_pages)
     self.assertEqual(pm.num_free_host_pages, 0)
@@ -459,7 +462,7 @@ class EvictionAndOffloadTest(parameterized.TestCase):
     self.assertEmpty(manager._unreferenced_device_pages)
     self.assertTrue(p0.is_freed)
     self.assertIsNone(pm.page_location(p0.page_id))
-    self.assertEqual(pm.page_location(p1.page_id), "host")
+    self.assertEqual(pm.page_location(p1.page_id), PageLocation.HOST)
     self.assertEqual(list(manager._unreferenced_host_pages), [p1])
     self.assertEqual(pm.num_free_device_pages, 5)
     self.assertEqual(pm.num_free_host_pages, 0)
@@ -617,15 +620,16 @@ class CacheFullPagesTest(absltest.TestCase):
     req_id = "req_1"
     _assign_request_pages(manager, req_id, num_pages=2)
 
-    manager._cache_full_pages(req_id, page_hashes=[])
+    manager._cache_full_pages(req_id, [], 0)
     self.assertEmpty(manager._prefix_hash_to_page)
 
   def test_cache_full_pages_registers_new_pages(self):
     manager = _create_manager(page_size=4)
     req_id = "req_1"
     pages = _assign_request_pages(manager, req_id, num_pages=2)
+    n_tokens = 2 * 4
 
-    manager._cache_full_pages(req_id, [100, 200])
+    manager._cache_full_pages(req_id, [100, 200], n_tokens)
 
     self.assertLen(manager._prefix_hash_to_page, 2)
     self.assertEqual(pages[0].prefix_hash, 100)
@@ -637,8 +641,9 @@ class CacheFullPagesTest(absltest.TestCase):
     manager = _create_manager(page_size=4)
     req_id = "req_1"
     pages = _assign_request_pages(manager, req_id, num_pages=2)
+    n_tokens = 2 * 4
 
-    manager._cache_full_pages(req_id, [100, 200, 300])
+    manager._cache_full_pages(req_id, [100, 200, 300], n_tokens)
 
     self.assertEqual(
         manager._prefix_hash_to_page, {100: pages[0], 200: pages[1]}
@@ -649,8 +654,9 @@ class CacheFullPagesTest(absltest.TestCase):
     req_id = "req_1"
     pages = _assign_request_pages(manager, req_id, num_pages=2)
     manager._request_to_pages[req_id] = [None, *pages]
+    n_tokens = 3 * 4
 
-    manager._cache_full_pages(req_id, [100, 200, 300])
+    manager._cache_full_pages(req_id, [100, 200, 300], n_tokens)
 
     self.assertEqual(
         manager._prefix_hash_to_page, {200: pages[0], 300: pages[1]}
@@ -661,29 +667,44 @@ class CacheFullPagesTest(absltest.TestCase):
     req_id = "req_1"
     _assign_request_pages(manager, req_id, num_pages=2)
 
-    manager._cache_full_pages(req_id, [100])
+    n_tokens = 4
+    manager._cache_full_pages(req_id, [100], n_tokens)
     self.assertLen(manager._prefix_hash_to_page, 1)
     first_page = manager._prefix_hash_to_page[100]
 
-    manager._cache_full_pages(req_id, [100, 200])
+    n_tokens = 8
+    manager._cache_full_pages(req_id, [100, 200], n_tokens)
     self.assertLen(manager._prefix_hash_to_page, 2)
     self.assertEqual(manager._prefix_hash_to_page[100], first_page)
 
-    manager._cache_full_pages(req_id, [100, 200])
+    manager._cache_full_pages(req_id, [100, 200], n_tokens)
     self.assertLen(manager._prefix_hash_to_page, 2)
     self.assertEqual(manager._prefix_hash_to_page[100], first_page)
+
+  def test_cache_full_pages_truncates_hashes_to_completed_pages(self):
+    manager = _create_manager(page_size=4)
+    req_id = "req_1"
+    pages = _assign_request_pages(manager, req_id, num_pages=3)
+
+    n_complete_tokens = 8  # 2 full pages, 1 partial page
+    manager._cache_full_pages(req_id, [100, 200, 300], n_complete_tokens)
+    self.assertLen(manager._prefix_hash_to_page, 2)
+    self.assertEqual(manager._prefix_hash_to_page[100], pages[0])
+    self.assertEqual(manager._prefix_hash_to_page[200], pages[1])
+    self.assertIsNone(pages[2].prefix_hash)
 
   def test_cache_full_pages_collision_cached_on_device(self):
     manager = _create_manager(page_size=4, num_device_pages=10)
     req1_id = "req_1"
     p1 = _assign_request_pages(manager, req1_id, num_pages=1)[0]
-    manager._cache_full_pages(req1_id, [100])
+    n_tokens = 4
+    manager._cache_full_pages(req1_id, [100], n_tokens)
 
     req2_id = "req_2"
     p2 = _assign_request_pages(manager, req2_id, num_pages=1)[0]
     req2_pages = manager._request_to_pages[req2_id]
 
-    manager._cache_full_pages(req2_id, [100])
+    manager._cache_full_pages(req2_id, [100], n_tokens)
 
     self.assertEqual(req2_pages[0], p1)
     self.assertEqual(p1.ref_count, 2)
@@ -702,13 +723,14 @@ class CacheFullPagesTest(absltest.TestCase):
     )
     req1_id = "req_1"
     p1 = _assign_request_pages(manager, req1_id, num_pages=1)[0]
-    manager._cache_full_pages(req1_id, [100])
+    n_tokens = 4
+    manager._cache_full_pages(req1_id, [100], n_tokens)
 
     manager._release_page(p1)
     del manager._request_to_pages[req1_id]
     manager._free_unreferenced_device_pages(1)
     p1_location = manager._page_manager.page_location(p1.page_id)
-    self.assertEqual(p1_location, "host")
+    self.assertEqual(p1_location, PageLocation.HOST)
     self.assertEqual(p1.ref_count, 0)
     self.assertEqual(manager._prefix_hash_to_page[100], p1)
 
@@ -716,7 +738,7 @@ class CacheFullPagesTest(absltest.TestCase):
     p2 = _assign_request_pages(manager, req2_id, num_pages=1)[0]
     req2_pages = manager._request_to_pages[req2_id]
 
-    manager._cache_full_pages(req2_id, [100])
+    manager._cache_full_pages(req2_id, [100], n_tokens)
 
     self.assertEqual(manager._prefix_hash_to_page[100], p2)
     self.assertEqual(p2.prefix_hash, 100)

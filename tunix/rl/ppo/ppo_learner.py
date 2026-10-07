@@ -161,7 +161,7 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
     super().__init__(
         rl_engine=rl_engine,
         algo_config=algo_config,
-        reward_fns=reward_fns,  # pyrefly: ignore[bad-argument-type]
+        reward_fns=reward_fns,
         metric_fns=metric_fns,
         data_shuffle_seed=data_shuffle_seed,
     )
@@ -185,7 +185,7 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
         self.rl_engine.inference_worker._models.get("reward", None)
     )
 
-    self.algo_config.temperature = self.rl_engine.get_rollout_config(  # pyrefly: ignore[missing-attribute]
+    self.algo_config.temperature = self.rl_engine.get_rollout_config(
         mode=rl_engine_lib.Mode.TRAIN
     ).temperature
 
@@ -204,7 +204,7 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
     )
     self.rl_engine.actor_trainer.with_loss_fn(loss_fn, has_aux=True)
     self.rl_engine.actor_trainer.with_gen_model_input_fn(
-        lambda x: {  # pyrefly: ignore[bad-argument-type]
+        lambda x: {
             "train_example": x,
             "algo_config": self.algo_config,  # pyrefly: ignore[bad-assignment]
         }
@@ -239,7 +239,7 @@ class PPOLearner(rl_learner.RLLearner[PPOConfig]):
         actor_rl_metrics_to_log  # pyrefly: ignore[bad-argument-type]
     )
 
-    self.rl_engine.critic_trainer.with_rl_metrics_to_log({  # pyrefly: ignore[bad-argument-type]
+    self.rl_engine.critic_trainer.with_rl_metrics_to_log({
         "vpred_mean": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
         "vf_clipfrac": common.mean_of_means,  # pyrefly: ignore[bad-assignment]
     })

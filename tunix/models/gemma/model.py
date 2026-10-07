@@ -953,7 +953,7 @@ class Gemma(BackendMappingMixin, nnx.Module):
           attention_mask,
       )
       if cache is not None:
-        new_cache[layer_name] = layer_cache  # pytype: disable=container-type-mismatch
+        new_cache[layer_name] = layer_cache  # pyrefly: ignore[unsupported-operation]
 
     x = self.final_norm(x)
     if output_hidden_states:
@@ -963,7 +963,7 @@ class Gemma(BackendMappingMixin, nnx.Module):
       return x, new_cache
 
     logits = self.compute_final_logits(x)
-    return logits, new_cache  # pytype: disable=bad-return-type
+    return logits, new_cache
 
   def compute_final_logits(
       self,

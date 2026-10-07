@@ -443,7 +443,7 @@ def add_variable_extra_tokens_for_images(
         count = counts[image_idx]  # pyrefly: ignore[bad-index]
         expanded.append(double_new_line_token)
         expanded.append(start_token)
-        expanded.extend([soft_token_placeholder] * count)  # pyrefly: ignore[unsupported-operation]
+        expanded.extend([soft_token_placeholder] * count)
         expanded.append(end_token)
         expanded.append(double_new_line_token)
         image_idx += 1

@@ -414,7 +414,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
 
     if config.mesh:
       tp, dp, ep = utils.resolve_parallelism_sizes(
-          mesh=config.mesh,  # pyrefly: ignore[bad-argument-type]
+          mesh=config.mesh,
           tensor_parallel_size=config.tensor_parallel_size,
           data_parallel_size=config.data_parallel_size,
           expert_parallel_size=config.expert_parallel_size,
@@ -556,9 +556,9 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       self, single_output: Any
   ) -> Tuple[str, List[float] | None]:
     """Text and per-token logprobs of one sampled completion."""
-    text = self.tokenizer.decode(single_output.token_ids)  # pyrefly: ignore[bad-argument-type]
+    text = self.tokenizer.decode(single_output.token_ids)
     logprobs = utils.get_logprobs_from_vllm_output(
-        list(single_output.token_ids), single_output.logprobs  # pyrefly: ignore[bad-argument-type]
+        list(single_output.token_ids), single_output.logprobs
     )
     return text, logprobs
 

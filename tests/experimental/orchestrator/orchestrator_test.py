@@ -183,6 +183,88 @@ class ClusterOrchestratorTest(absltest.TestCase):
     mock_rollout.submit.assert_any_call("stop")
     mock_actor.submit.assert_any_call("stop")
 
+  def test_bring_up_remote_workers_overlaps_trainer_compile_and_rollout_start(
+      self,
+  ):
+    barrier = threading.Barrier(3, timeout=2.0)
+    per_worker_calls: dict[str, list[str]] = {
+        "actor-0": [],
+        "rollout-0": [],
+        "rollout-1": [],
+    }
+
+    def _make_handle(wid: str, barrier_phase: str):
+      handle = mock.MagicMock(spec=remote_execution.ActorHandle)
+
+      def _submit(phase: str, *args):
+        del args
+        per_worker_calls[wid].append(phase)
+        if phase == barrier_phase:
+          barrier.wait()
+        return datatypes.Response()
+
+      handle.submit.side_effect = _submit
+      return handle
+
+    orch = orchestrator.ClusterOrchestrator(
+        registry=worker_registry.WorkerRegistry(),
+        lifecycle_driver=self.mock_lifecycle,
+        monitor=self.mock_monitor,
+    )
+    orch.register_worker_handle(
+        "actor-0",
+        [datatypes.Role.ACTOR],
+        _make_handle("actor-0", "compile"),
+    )
+    orch.register_worker_handle(
+        "rollout-0",
+        [datatypes.Role.ROLLOUT],
+        _make_handle("rollout-0", "start"),
+    )
+    orch.register_worker_handle(
+        "rollout-1",
+        [datatypes.Role.ROLLOUT],
+        _make_handle("rollout-1", "start"),
+    )
+
+    orch.bring_up_workers(dummy_data="dummy")
+
+    for wid, calls in per_worker_calls.items():
+      self.assertEqual(
+          calls, ["initialize", "compile", "start"], msg=f"worker {wid}"
+      )
+
+  def test_bring_up_remote_workers_aggregates_failures(self):
+    bad_rollout = mock.MagicMock(spec=remote_execution.ActorHandle)
+    bad_rollout.submit.side_effect = RuntimeError("vllm oom")
+    bad_actor = mock.MagicMock(spec=remote_execution.ActorHandle)
+
+    def _actor_submit(phase: str, *args):
+      del args
+      if phase == "compile":
+        raise ValueError("compile boom")
+      return datatypes.Response()
+
+    bad_actor.submit.side_effect = _actor_submit
+    healthy = mock.MagicMock(spec=remote_execution.ActorHandle)
+
+    orch = orchestrator.ClusterOrchestrator(
+        registry=worker_registry.WorkerRegistry(),
+        lifecycle_driver=self.mock_lifecycle,
+        monitor=self.mock_monitor,
+    )
+    orch.register_worker_handle(
+        "rollout-0", [datatypes.Role.ROLLOUT], bad_rollout
+    )
+    orch.register_worker_handle("actor-0", [datatypes.Role.ACTOR], bad_actor)
+    orch.register_worker_handle("rollout-1", [datatypes.Role.ROLLOUT], healthy)
+
+    with self.assertRaises(orchestrator.lifecycle.LifecycleError) as ctx:
+      orch._bring_up_remote_workers(dummy_data="dummy")
+
+    failed_ids = [wid for wid, _ in ctx.exception.failures]
+    self.assertEqual(failed_ids, ["actor-0", "rollout-0"])
+
   def test_shutdown_survives_a_wedged_worker(self):
     from tunix.experimental.worker import remote_execution
 

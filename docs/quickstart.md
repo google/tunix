@@ -9,7 +9,7 @@ Additionally, it shows how to enable to multi-node training.
 
 ## Installation
 
-Tunix is written in Python and **requires Python 3.11** or later. We recommend
+Tunix is written in Python and **requires Python 3.12** or later. We recommend
 installing Tunix in a Python virtual environment.
 
 1.  Create a project specific environment.

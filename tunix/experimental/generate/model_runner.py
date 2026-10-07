@@ -280,64 +280,6 @@ def _stack_steps(
   return out.at[:, 0].set(first_step)
 
 
-def _verify_metadata(metadata: paged_attention.RPAMetadata, num_tokens: int) -> None:
-  """Checks that `metadata` describes a well-formed batch of `num_tokens`.
-
-  Args:
-    metadata: The execution metadata to check.
-    num_tokens: The capacity of the ragged token buffer.
-
-  Raises:
-    ValueError: If the metadata is malformed.
-  """
-  kv_lens = np.asarray(metadata.kv_lens)
-  query_lens = np.asarray(metadata.query_lens)
-  distribution = np.asarray(metadata.distribution)
-  if kv_lens.ndim != 1 or kv_lens.shape != query_lens.shape:
-    raise ValueError(
-        'kv_lens and query_lens must be 1-D with one entry per row, got shapes'
-        f' {kv_lens.shape} and {query_lens.shape}.'
-    )
-  num_rows = query_lens.shape[0]
-  for name, pages in metadata.page_indices.items():
-    if np.ndim(pages) != 2 or np.shape(pages)[0] != num_rows:
-      raise ValueError(
-          f'page_indices[{name!r}] must be [{num_rows}, max_pages_per_seq],'
-          f' got shape {np.shape(pages)}.'
-      )
-  if distribution.shape != (3,):
-    raise ValueError(
-        f'distribution must have shape (3,), got {distribution.shape}.'
-    )
-  num_decodes, num_chunked_end, num_seqs = (int(d) for d in distribution)
-  if not 0 <= num_decodes <= num_chunked_end <= num_seqs <= num_rows:
-    raise ValueError(
-        f'distribution {distribution.tolist()} must be non-decreasing and'
-        f' within [0, {num_rows}].'
-    )
-  scheduled = query_lens[:num_seqs]
-  if np.any(scheduled < 1):
-    raise ValueError(
-        f'Every scheduled row must run a token, got query_lens {scheduled}.'
-    )
-  if np.any(query_lens[:num_decodes] != 1):
-    raise ValueError(
-        'Every decode row must run exactly one token, got query_lens'
-        f' {query_lens[:num_decodes]}.'
-    )
-  if np.any(query_lens > kv_lens):
-    raise ValueError(
-        f'Query_lens {query_lens} must not exceed kv_lens {kv_lens}.'
-    )
-  if np.any(query_lens[num_seqs:] != 0) or np.any(kv_lens[num_seqs:] != 0):
-    raise ValueError('Padding rows must have zero query_lens and kv_lens.')
-  if int(query_lens.sum()) > num_tokens:
-    raise ValueError(
-        f'The rows run {int(query_lens.sum())} tokens, more than the'
-        f' {num_tokens} in the token buffer.'
-    )
-
-
 class ModelRunner:
   """Runs the transformer forward pass and samples tokens."""
 
@@ -369,7 +311,10 @@ class ModelRunner:
     self._rng = np.random.default_rng(config.seed)
 
     self._compiled_model_step_fn = jax.jit(
-        self._model_step_fn, donate_argnames=['cache']
+        self._single_step_fn
+        if config.num_scheduler_steps == 1
+        else self._model_step_fn,
+        donate_argnames=['cache'],
     )
     self._compiled_decode_loop_fn = jax.jit(
         self._decode_loop_fn,
@@ -596,6 +541,25 @@ class ModelRunner:
     res_logits = logits if config.return_logits else None
     return next_tokens, res_logits, logp, updated_cache
 
+  def _single_step_fn(
+      self,
+      params: list[nnx.Variable],
+      cache: Cache,
+      tokens: jax.Array,
+      metadata: Any,
+      sampling_metadata: SamplingMetadata,
+  ) -> tuple[jax.Array, jax.Array | None, jax.Array | None, Cache]:
+    """Runs one model step and expands the step axis in the same XLA program."""
+    next_tokens, logits, logp, cache = self._model_step_fn(
+        params, cache, tokens, metadata, sampling_metadata
+    )
+    return (
+        next_tokens[:, None],
+        logits[:, None] if logits is not None else None,
+        logp[:, None] if logp is not None else None,
+        cache,
+    )
+
   def _decode_loop_fn(
       self,
       params: list[nnx.Variable],
@@ -644,9 +608,13 @@ class ModelRunner:
         jnp.where(rows < num_surviving, jnp.asarray(metadata.kv_lens)[order], 0)
         + query_lens
     )
+    compacted_pages = {
+        id(idxs): jnp.asarray(idxs)[order]
+        for idxs in metadata.page_indices.values()
+    }
     decode_metadata = paged_attention.RPAMetadata(
         page_indices={
-            cache_name: jnp.asarray(idxs)[order]
+            cache_name: compacted_pages[id(idxs)]
             for cache_name, idxs in metadata.page_indices.items()
         },
         kv_lens=kv_lens,
@@ -705,11 +673,16 @@ class ModelRunner:
 
   def _to_device(self, tree: _PyTree) -> _PyTree:
     """Moves host arrays onto the device, replicated across the mesh."""
-    return jax.device_put(
-        tree,
+    leaves, treedef = jax.tree.flatten(tree)
+    unique_leaves = {id(leaf): leaf for leaf in leaves}
+    device_leaves = jax.device_put(
+        unique_leaves,
         jax.sharding.NamedSharding(
             self._config.mesh, jax.sharding.PartitionSpec()
         ),
+    )
+    return jax.tree.unflatten(
+        treedef, [device_leaves[id(leaf)] for leaf in leaves]
     )
 
   def execute_step(
@@ -739,11 +712,10 @@ class ModelRunner:
         - updated cache: The updated KV cache pages.
 
     Raises:
-      ValueError: If the metadata is malformed, or `sampling_params` does
-        not hold one entry per scheduled request.
+      ValueError: If `sampling_params` does not hold one entry per scheduled
+        request.
     """
     config = self._config
-    _verify_metadata(metadata, tokens.shape[0])
     num_rows = metadata.query_lens.shape[0]
     num_scheduled = int(metadata.distribution[2])
     if len(sampling_params) != num_scheduled:
@@ -752,12 +724,12 @@ class ModelRunner:
           ' scheduled requests.'
       )
 
-    device_metadata = self._to_device(metadata)
-    sampling_metadata = self._to_device(
+    device_metadata, sampling_metadata = self._to_device((
+        metadata,
         SamplingMetadata.from_sampling_params(
             sampling_params, num_rows, self._config.max_top_k, self._rng
-        )
-    )
+        ),
+    ))
 
     next_tokens, logits, logp, cache = self._compiled_model_step_fn(
         self._flattened_transformer_state,
@@ -766,6 +738,10 @@ class ModelRunner:
         device_metadata,
         sampling_metadata,
     )
+
+    num_steps = config.num_scheduler_steps
+    if num_steps == 1:
+      return next_tokens, logits, logp, cache
 
     # Chunked prefills drop out, but the rest of the batch carries on.
     distribution = metadata.distribution
@@ -777,7 +753,6 @@ class ModelRunner:
     # num_surviving: num decodes + num full prefills = i + k - j
     num_surviving = distribution[0] + distribution[2] - distribution[1]
 
-    num_steps = config.num_scheduler_steps
     num_decode_steps = num_steps - 1 if num_surviving else 0
 
     decode_tokens = decode_logits = decode_logp = None

@@ -25,12 +25,18 @@ ORCHESTRATOR_ID=${ORCHESTRATOR_ID:-orchestrator}
 ORCHESTRATOR_PORT=${ORCHESTRATOR_PORT:-30000}
 TRAINER_PORT=${TRAINER_PORT:-20000}
 ROLLOUT_PORT=${ROLLOUT_PORT:-20001}
+# Entry points for each process; wrappers may add instrumentation around them.
+TRAINER_PROCESS_MAIN=${TRAINER_PROCESS_MAIN:-tunix.experimental.examples.common.run_trainer_node.main}
+ROLLOUT_PROCESS_MAIN=${ROLLOUT_PROCESS_MAIN:-tunix.experimental.examples.common.run_rollout_node.main}
+ORCHESTRATOR_PROCESS_MAIN=${ORCHESTRATOR_PROCESS_MAIN:-tunix.experimental.examples.frozenlake_dist.run_frozenlake_dist.main}
 
 MODEL_NAME=${MODEL_NAME:-Qwen3-8B}
 MODEL_ID=${MODEL_ID:-Qwen/Qwen3-8B}
 ARTIFACT_ROOT=${ARTIFACT_ROOT:-"${REPO_ROOT}/artifacts/qwen3_dist_frozenlake"}
 MODEL_DIR=${MODEL_DIR:-"${ARTIFACT_ROOT}/models/${MODEL_NAME}"}
 TOKENIZER_PATH=${TOKENIZER_PATH:-"${MODEL_DIR}"}
+
+MAX_SEQ_TOKEN_PER_TPU=${MAX_SEQ_TOKEN_PER_TPU:-}
 
 BATCH_SIZE=${BATCH_SIZE:-64}
 MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-64}
@@ -204,7 +210,7 @@ if (( BATCH_SIZE % MINI_BATCH_SIZE != 0 )); then
   echo "Error: BATCH_SIZE must be divisible by MINI_BATCH_SIZE."
   exit 1
 fi
-if (( (MINI_BATCH_SIZE * NUM_GENERATIONS) % TRAIN_MICRO_BATCH_SIZE != 0 )); then
+if [[ -z "$MAX_SEQ_TOKEN_PER_TPU" || "$MAX_SEQ_TOKEN_PER_TPU" == "0" ]] && (( (MINI_BATCH_SIZE * NUM_GENERATIONS) % TRAIN_MICRO_BATCH_SIZE != 0 )); then
   echo "Error: MINI_BATCH_SIZE * NUM_GENERATIONS must be divisible by TRAIN_MICRO_BATCH_SIZE."
   exit 1
 fi
@@ -221,7 +227,7 @@ echo "Starting distributed FrozenLake with ${MODEL_ID}: full batch ${BATCH_SIZE}
   cmd=(
     "$PYTHON_BIN" -m tunix.experimental.distributed.runtime.main
     --discovery_addrs="${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT}"
-    --process_main=tunix.experimental.examples.common.run_trainer_node.main
+    --process_main="$TRAINER_PROCESS_MAIN"
     --port="$TRAINER_PORT"
     --mesh_fsdp="$TRAINER_FSDP"
     --mesh_tp="$TRAINER_TP"
@@ -251,6 +257,9 @@ echo "Starting distributed FrozenLake with ${MODEL_ID}: full batch ${BATCH_SIZE}
     --checkpoint_max_to_keep="$CHECKPOINT_MAX_TO_KEEP"
     --checkpoint_root_directory="$CHECKPOINT_ROOT_DIRECTORY"
   )
+  if [[ -n "$MAX_SEQ_TOKEN_PER_TPU" && "$MAX_SEQ_TOKEN_PER_TPU" != "0" ]]; then
+    cmd+=(--max_seq_token_per_tpu="$MAX_SEQ_TOKEN_PER_TPU")
+  fi
   if [[ -n "$OPT_CHAIN_TYPE" ]]; then
     cmd+=(
       --optimizer_opt_chain_type="$OPT_CHAIN_TYPE"
@@ -273,7 +282,7 @@ TRAINER_PID=$!
   cmd=(
     "$PYTHON_BIN" -m tunix.experimental.distributed.runtime.main
     --discovery_addrs="${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT}"
-    --process_main=tunix.experimental.examples.common.run_rollout_node.main
+    --process_main="$ROLLOUT_PROCESS_MAIN"
     --port="$ROLLOUT_PORT"
     --model_id="$MODEL_ID"
     --model_dir="$MODEL_DIR"
@@ -323,7 +332,7 @@ cmd=(
   "$PYTHON_BIN" -m tunix.experimental.distributed.runtime.main
   --discovery_id="$ORCHESTRATOR_ID"
   --discovery_port="$ORCHESTRATOR_PORT"
-  --process_main=tunix.experimental.examples.frozenlake_dist.run_frozenlake_dist.main
+  --process_main="$ORCHESTRATOR_PROCESS_MAIN"
   --model_id="$MODEL_ID"
   --tokenizer_path="$TOKENIZER_PATH"
   --batch_size="$BATCH_SIZE"
@@ -358,6 +367,9 @@ cmd=(
   --grid_size_range $GRID_SIZE_RANGE
   --stop_workers_on_exit
 )
+if [[ -n "$MAX_SEQ_TOKEN_PER_TPU" && "$MAX_SEQ_TOKEN_PER_TPU" != "0" ]]; then
+  cmd+=(--max_seq_token_per_tpu="$MAX_SEQ_TOKEN_PER_TPU")
+fi
 is_true "$SHUFFLE" && cmd+=(--shuffle) || cmd+=(--no-shuffle)
 is_true "$IS_SLIPPERY" && cmd+=(--is_slippery) || cmd+=(--no-is_slippery)
 is_true "$USE_MULTISTEP_PROMPT" && cmd+=(--use_multistep_prompt) || cmd+=(--no-use_multistep_prompt)

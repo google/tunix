@@ -92,6 +92,26 @@ class LifecycleDriverTest(absltest.TestCase):
     self.assertEqual(sorted(log), ["a:stop", "b:stop", "c:stop"])
     self.assertEqual([wid for wid, _ in ctx.exception.failures], ["b"])
 
+  def test_bring_up_awaits_async_start_coroutine(self):
+    class _AsyncStartWorker(mock_worker.MockWorker):
+
+      def __init__(self, worker_id: str):
+        super().__init__(worker_id=worker_id, roles={"rollout"})
+        self.async_started = False
+
+      async def start(self) -> datatypes.Response:
+        self.async_started = True
+        return super().start()
+
+    registry = worker_registry.WorkerRegistry()
+    worker = _AsyncStartWorker("r_async")
+    registry.register(worker)
+
+    lifecycle.LifecycleDriver(registry).bring_up(_DUMMY_DATA)
+
+    self.assertTrue(worker.async_started)
+    self.assertEqual(worker.state, WorkerState.READY)
+
 
 if __name__ == "__main__":
   absltest.main()

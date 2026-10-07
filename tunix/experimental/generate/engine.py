@@ -133,6 +133,15 @@ def _instantiate_components(
   return model_runner, kv_cache_manager, scheduler
 
 
+def _next_power_of_2(x: int) -> int:
+    """Returns the next power of 2 that is not smaller than x."""
+
+    x = int(x)
+    if x <= 1:
+      return 1
+    return 1 << (x - 1).bit_length()
+
+
 class LLMEngine:
   """A continuous batching engine."""
 
@@ -349,7 +358,9 @@ class LLMEngine:
   def _tokenize(self, request_id: str, prompt: object) -> list[int]:
     """Returns the token ids of `prompt`, text or a 1-D integer array."""
     if isinstance(prompt, str):
-      return self._tokenizer.encode(prompt)
+      input_ids = self._tokenizer.encode(prompt)
+      bos_tok = [self._tokenizer.bos_id()] if self._tokenizer.bos_id() else []
+      return self._tokenizer.dedup_bos_ids(bos_tok + input_ids)
     if (
         isinstance(prompt, np.ndarray)
         and prompt.ndim == 1
@@ -595,6 +606,11 @@ class LLMEngine:
     # updated pages rather than writing them in place. They must be written back
     # to the KV cache manager here.
     self._kv_cache_manager.update_device_pool(pages)
+    generated_tokens.copy_to_host_async()
+    if logits is not None:
+      logits.copy_to_host_async()
+    if logprobs is not None:
+      logprobs.copy_to_host_async()
     return _InFlightStep(
         scheduled=scheduled,
         distribution=distribution,
@@ -744,12 +760,7 @@ class LLMEngine:
     num_rows = self._scheduler_config.max_num_seqs
     query_lens = np.zeros((num_rows,), dtype=np.int32)
     kv_lens = np.zeros((num_rows,), dtype=np.int32)
-    page_indices = {
-        cache_name: np.full(
-            (num_rows, self._max_pages_per_seq), -1, dtype=np.int32
-        )
-        for cache_name in self._kv_cache_manager.cache_names
-    }
+    page_indices: dict[str, np.ndarray] = {}
 
     prev_row_by_id = {
         req.request_id: prev_row for prev_row, req in enumerate(prev_scheduled)
@@ -779,13 +790,32 @@ class LLMEngine:
 
       query_lens[row] = end - start
       kv_lens[row] = end
+      row_groups: dict[int, np.ndarray] = {}
       for cache_name, idxs in self._kv_cache_manager.get_page_idxs(req).items():
-        page_indices[cache_name][row, : len(idxs)] = idxs
+        group_table = row_groups.get(id(idxs))
+        if group_table is None:
+          group_table = page_indices.get(cache_name)
+          if group_table is None:
+            group_table = np.full(
+                (num_rows, self._max_pages_per_seq), -1, dtype=np.int32
+            )
+          group_table[row, : len(idxs)] = idxs
+          row_groups[id(idxs)] = group_table
+        page_indices[cache_name] = group_table
+
+    if not page_indices:
+      empty_table = np.full(
+          (num_rows, self._max_pages_per_seq), -1, dtype=np.int32
+      )
+      page_indices = {
+          cache_name: empty_table
+          for cache_name in self._kv_cache_manager.cache_names
+      }
 
     # Pad the tokens to a power of 2 to limit jax recompilation in the model
     # runner.
     num_tokens = min(
-        utils.next_power_of_2(len(batch_tokens)),
+        _next_power_of_2(len(batch_tokens)),
         self._scheduler_config.max_num_batched_tokens,
     )
     tokens = np.zeros((num_tokens,), dtype=np.int32)
@@ -797,7 +827,7 @@ class LLMEngine:
 
     metadata = paged_attention.RPAMetadata(
         page_indices={
-            cache_name: idxs for cache_name, idxs in page_indices.items()
+            cache_name: table for cache_name, table in page_indices.items()
         },
         kv_lens=kv_lens,
         query_lens=query_lens,

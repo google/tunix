@@ -191,6 +191,79 @@ class RolloutWorkerTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_start_async_starts_sampler_and_binds_weight_sync(self):
+    class _AsyncSampler(mocks.MockBaseSamplerImpl):
+
+      def __init__(self):
+        super().__init__(sampler_name="async_sampler")
+        self.started = False
+        self.warmed = False
+
+      async def start(self):
+        self.started = True
+
+      async def bind_weight_sync(self):
+        self.warmed = True
+
+    async_sampler = _AsyncSampler()
+    worker = rollout_worker.RolloutWorker(
+        worker_id="rollout_async",
+        sampler=async_sampler,
+        tokenizer=self.tokenizer,
+        chat_parser=self.chat_parser,
+    )
+
+    async def _run():
+      resp = await worker.start()
+      self.assertEqual(resp.metadata["worker_id"], "rollout_async")
+      self.assertTrue(resp.metadata["started"])
+      self.assertTrue(async_sampler.started)
+      self.assertTrue(async_sampler.warmed)
+
+    asyncio.run(_run())
+
+  def test_initialize_failure_sets_error_state(self):
+    with mock.patch.object(
+        self.sampler, "initialize", side_effect=RuntimeError("vllm init boom")
+    ):
+      with self.assertRaisesRegex(RuntimeError, "vllm init boom"):
+        self.worker.initialize()
+    self.assertEqual(self.worker.state, datatypes.WorkerState.ERROR)
+
+  def test_start_failure_sets_error_state(self):
+    with mock.patch.object(
+        self.sampler, "start", side_effect=RuntimeError("vllm start boom")
+    ):
+      with self.assertRaisesRegex(RuntimeError, "vllm start boom"):
+        asyncio.run(self.worker.start())
+    self.assertEqual(self.worker.state, datatypes.WorkerState.ERROR)
+
+  def test_bind_and_get_weight_sync_metadata_auto_initialize_from_pending(self):
+    worker = rollout_worker.RolloutWorker(
+        worker_id="rollout_pending_sync",
+        sampler=self.sampler,
+        tokenizer=self.tokenizer,
+        chat_parser=self.chat_parser,
+    )
+    self.assertEqual(worker.state, datatypes.WorkerState.PENDING)
+    asyncio.run(worker.bind_weight_sync())
+    self.assertEqual(worker.state, datatypes.WorkerState.READY)
+
+    worker2 = rollout_worker.RolloutWorker(
+        worker_id="rollout_pending_meta",
+        sampler=self.sampler,
+        tokenizer=self.tokenizer,
+        chat_parser=self.chat_parser,
+    )
+    self.assertEqual(worker2.state, datatypes.WorkerState.PENDING)
+    with mock.patch.object(
+        self.sampler,
+        "get_weight_sync_metadata",
+        new=mock.AsyncMock(return_value=[]),
+    ):
+      asyncio.run(worker2.get_weight_sync_metadata())
+    self.assertEqual(worker2.state, datatypes.WorkerState.READY)
+
 
 def _worker(config=None):
   return rollout_worker.RolloutWorker(

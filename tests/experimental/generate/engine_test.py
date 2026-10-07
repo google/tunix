@@ -348,6 +348,23 @@ class StepTest(parameterized.TestCase):
     )
     self.assertEqual(output.finish_reason, 'stop')
 
+  def test_deduplicates_leading_bos_tokens_when_tokenizing_text(self):
+    engine = testing_utils.make_engine()
+    engine._tokenizer._tokenizer.bos_id = lambda: 2  # pylint: disable=protected-access
+    engine.add_request(
+        sampler_lib.SamplingRequest(
+            request_id='0',
+            prompt='2 2 1 3',
+            sampling_params=sampler_lib.SamplingParams(
+                max_tokens=2, temperature=0.0
+            ),
+        )
+    )
+
+    output = drive(engine)['0']
+
+    np.testing.assert_array_equal(output.prompt_token_ids, [2, 1, 3])
+
   def test_chunked_prefill(self):
     engine = testing_utils.make_engine(
         max_num_batched_tokens=8, chunked_prefill_length=4
@@ -370,6 +387,41 @@ class StepTest(parameterized.TestCase):
     # 15 tokens plus 2 decode steps span 5 pages of 4 slots.
     metadata = spy.call_args_list[0].kwargs['metadata']
     self.assertEqual(metadata.page_indices['layer_0'].shape, (4, 5))
+
+  def test_caches_in_same_group_share_page_indices_array(self):
+    geometries = {
+        'full_0': kv_cache_manager_lib.CacheGeometry(
+            num_kv_heads=1, head_dim=1
+        ),
+        'full_1': kv_cache_manager_lib.CacheGeometry(
+            num_kv_heads=1, head_dim=1
+        ),
+        'sliding_0': kv_cache_manager_lib.CacheGeometry(
+            num_kv_heads=1, head_dim=1, window_size=8
+        ),
+        'sliding_1': kv_cache_manager_lib.CacheGeometry(
+            num_kv_heads=1, head_dim=1, window_size=8
+        ),
+    }
+    engine = testing_utils.make_engine(
+        testing_utils.PagedSumTransformer(geometries=geometries),
+        max_device_size_gib=256 * testing_utils.GIB_PER_PAGE,
+    )
+    spy = spy_on_execute_step(engine)
+    engine.add_request(testing_utils.make_request('0', [1, 2, 3]))
+
+    engine.step()
+
+    metadata = spy.call_args_list[0].kwargs['metadata']
+    self.assertIs(
+        metadata.page_indices['full_0'], metadata.page_indices['full_1']
+    )
+    self.assertIs(
+        metadata.page_indices['sliding_0'], metadata.page_indices['sliding_1']
+    )
+    self.assertIsNot(
+        metadata.page_indices['full_0'], metadata.page_indices['sliding_0']
+    )
 
   @parameterized.named_parameters(
       ('within_the_window', 16, 16),

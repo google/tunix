@@ -16,6 +16,7 @@ cache mapping to a dedicated partition within the underlying pools.
 
 from collections.abc import Mapping, Sequence
 import dataclasses
+import enum
 import functools
 import importlib
 from typing import Generic, Protocol, TypeVar
@@ -27,6 +28,13 @@ import numpy as np
 
 # The array type of a pool's pages: `jax.Array` on device, `np.ndarray` on host.
 _ArrayT = TypeVar("_ArrayT", jax.Array, np.ndarray)
+
+
+class PageLocation(enum.Enum):
+  """The memory tier where a page resides."""
+
+  DEVICE = enum.auto()
+  HOST = enum.auto()
 
 
 class _RaidenFuture(Protocol):
@@ -350,7 +358,7 @@ class TieredPagePoolManager:
 
     self._next_page_id: int = 0
     self._page_id_to_idx: dict[int, int] = {}
-    self._page_location: dict[int, str] = {}
+    self._page_location: dict[int, PageLocation] = {}
 
     # The type parameters are not checked at runtime, so check the arrays.
     for k, arr in self._device_pool.partition_pages.items():
@@ -394,7 +402,7 @@ class TieredPagePoolManager:
     """Returns the underlying device page arrays."""
     return self._device_pool.partition_pages
 
-  def page_location(self, page_id: int) -> str | None:
+  def page_location(self, page_id: int) -> PageLocation | None:
     return self._page_location.get(page_id)
 
   def page_idx(self, page_id: int) -> int | None:
@@ -421,7 +429,7 @@ class TieredPagePoolManager:
       pid = self._next_page_id
       self._next_page_id += 1
       self._page_id_to_idx[pid] = phys_idx
-      self._page_location[pid] = "device"
+      self._page_location[pid] = PageLocation.DEVICE
 
       allocated_ids.append(pid)
 
@@ -471,7 +479,7 @@ class TieredPagePoolManager:
       raise ValueError("Cannot load duplicate pages.")
 
     for pid in page_ids:
-      if self._page_location.get(pid) != "host":
+      if self._page_location.get(pid) != PageLocation.HOST:
         raise ValueError(
             f"Page ID {pid} is not on host "
             f"(location: {self._page_location.get(pid)})."
@@ -514,7 +522,7 @@ class TieredPagePoolManager:
     self._host_pool.free(host_idxs)
     for pid, p_idx in zip(page_ids, device_idxs):
       self._page_id_to_idx[pid] = p_idx
-      self._page_location[pid] = "device"
+      self._page_location[pid] = PageLocation.DEVICE
 
   def offload(self, page_ids: Sequence[int]) -> None:
     """Moves logical pages from device to host transferring only active ones."""
@@ -536,7 +544,7 @@ class TieredPagePoolManager:
       raise ValueError("Cannot offload duplicate pages.")
 
     for pid in page_ids:
-      if self._page_location.get(pid) != "device":
+      if self._page_location.get(pid) != PageLocation.DEVICE:
         raise ValueError(
             f"Page ID {pid} is not on device "
             f"(location: {self._page_location.get(pid)})."
@@ -572,7 +580,7 @@ class TieredPagePoolManager:
     self._device_pool.free(physical_device_idxs)
     for pid, p_idx in zip(page_ids, physical_host_idxs):
       self._page_id_to_idx[pid] = p_idx
-      self._page_location[pid] = "host"
+      self._page_location[pid] = PageLocation.HOST
 
   def free(self, page_ids: Sequence[int]) -> None:
     """Releases physical allocations in device_pool or host_pool and removes logical IDs."""
@@ -591,9 +599,9 @@ class TieredPagePoolManager:
 
     for pid in page_ids:
       loc = self._page_location[pid]
-      if loc == "host":
+      if loc == PageLocation.HOST:
         host_idxs_to_free.append(self._page_id_to_idx[pid])
-      elif loc == "device":
+      elif loc == PageLocation.DEVICE:
         device_idxs_to_free.append(self._page_id_to_idx[pid])
 
     if host_idxs_to_free and self._host_pool:

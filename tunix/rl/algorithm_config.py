@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from collections.abc import Sequence
 import dataclasses
 from absl import logging
 from tunix.rl import function_registry
@@ -68,6 +69,14 @@ class AlgorithmConfig:
   # Whether to preserve exact token IDs across multi-turn rollout steps
   # without detokenizing and re-tokenizing intermediate turns (TITO).
   exact_token_continuity: bool = True
+  # Optional importance-sampling and rejection-sampling controls between the
+  # rollout sampler and trainer actor.
+  sampler_is: str | None = None
+  sampler_is_threshold: float | None = 2.0
+  sampler_rs: str | None = None
+  sampler_rs_min: float | None = None
+  sampler_rs_max: float | None = None
+  seq_logprob_error_threshold: float | None = None
 
   def __post_init__(self):
     valid_algo_variants = [
@@ -77,13 +86,7 @@ class AlgorithmConfig:
         "ppo",
         "dapo",
     ]
-    valid_advantage_estimators = [
-        "grpo",
-        "grpo-loo",
-        "gae",
-        "drgrpo",
-        "rloo",
-    ]
+    valid_advantage_estimators = ["grpo", "gae", "drgrpo", "rloo", "grpo-loo"]
     valid_policy_loss_fns = ["grpo", "ppo"]
     if self.algo_variant not in valid_algo_variants:
       raise ValueError(
@@ -118,9 +121,66 @@ class AlgorithmConfig:
           "reward_worker_timeout_seconds must be > 0."
           f" Received: {self.reward_worker_timeout_seconds}"
       )
+    self._validate_sampler_is_and_rs_options()
 
     # Automatically prints configuration upon initialization.
     self.print_config()
+
+  def _validate_sampler_is_and_rs_options(self):
+    """Checks sampler-vs-trainer error masking, IS, and RS options.
+
+    Raises:
+      ValueError: If an option is unsupported, incomplete, or out of order.
+    """
+    if (
+        self.seq_logprob_error_threshold is not None
+        and self.seq_logprob_error_threshold < 1.0
+    ):
+      raise ValueError(
+          "seq_logprob_error_threshold must be >= 1.0 when set (since "
+          "exp(|logp_diff|) >= 1.0). Received: "
+          f"{self.seq_logprob_error_threshold}"
+      )
+    if self.sampler_is not in (None, "token"):
+      raise ValueError(
+          "sampler_is should be either None or 'token'. Received: "
+          f"{self.sampler_is}"
+      )
+    if (
+        self.sampler_is_threshold is not None
+        and self.sampler_is_threshold <= 0.0
+    ):
+      raise ValueError(
+          "sampler_is_threshold must be > 0 when set, or None for unclipped"
+          f" token IS ratios. Received: {self.sampler_is_threshold}"
+      )
+    if self.sampler_rs not in (None, "geometric", "token"):
+      raise ValueError(
+          "sampler_rs should be None, 'geometric', or 'token'. Received: "
+          f"{self.sampler_rs}"
+      )
+    lo = self.sampler_rs_min
+    hi = self.sampler_rs_max
+    if (lo is None) != (hi is None):
+      raise ValueError(
+          "sampler_rs_min and sampler_rs_max must be set together, since a"
+          f" keep-band needs both ends. Received: min={lo}, max={hi}"
+      )
+    if lo is not None and hi is not None:
+      if lo < 0.0:
+        raise ValueError(
+            f"sampler_rs_min must be >= 0.0. Received: {lo}"
+        )
+      if lo > hi:
+        raise ValueError(
+            "sampler_rs_min must not exceed sampler_rs_max. Received:"
+            f" min={lo}, max={hi}"
+        )
+    if self.sampler_rs is not None and lo is None:
+      raise ValueError(
+          "sampler_rs requires a keep-band. Set sampler_rs_min and"
+          " sampler_rs_max."
+      )
 
   def print_config(self):
     """Prints all configuration fields, working dynamically for child classes."""
@@ -161,14 +221,31 @@ class GRPOConfig(AlgorithmConfig):
     epsilon_high: Epsilon value for upper bound clipping.
     epsilon_c: Dual-clip PPO/GRPO lower bound for clipping when advantages are
       negative.
-    sampler_is: Optional truncated importance-sampling correction between the
-      rollout sampler and trainer actor. Set to "token" to use trainer
-      recomputed logps as old-policy logps and multiply the policy loss by
-      detached per-token sampler/trainer correction weights.
-    sampler_is_threshold: Maximum per-token TIS correction weight.
-    seq_logprob_error_threshold: Optional sequence-level multiplicative
-      log-probability error threshold. Sequences exceeding this threshold are
-      masked out of the loss.
+    sampler_is: Optional importance-sampling reweighting between the rollout
+      sampler and trainer actor. Set to `"token"` to use trainer recomputed
+      logps as old-policy logps and multiply the policy loss by detached
+      per-token sampler/trainer correction weights `p_trainer_t / q_sampler_t`.
+    sampler_is_threshold: Optional upper bound on per-token IS weights when
+      `sampler_is="token"`. Set to `None` for unclipped token ratios (capped
+      only at `exp(20)` for numerical safety). Default: `2.0`.
+    sampler_rs: Optional rejection-sampling gate between the rollout sampler and
+      trainer actor (orthogonal to `sampler_is`). Supported values are
+      `"geometric"` (sequence-level gate that zeroes weights on sequences whose
+      geometric-mean sampler/trainer ratio `exp(mean_t(log p_trainer_t - log
+      q_sampler_t))` falls outside `[sampler_rs_min, sampler_rs_max]`; pairing
+      `sampler_is="token"` with `sampler_rs="geometric"` implements
+      sequence-masked TIS `seq-mask-tis`), `"token"` (token-level IcePop gate
+      that zeroes weights on tokens whose ratio `exp(log p_trainer_t - log
+      q_sampler_t)` falls outside `[sampler_rs_min, sampler_rs_max]`), or `None`
+      (disables rejection sampling).
+    sampler_rs_min: Lower edge of the `[sampler_rs_min, sampler_rs_max]`
+      rejection-sampling keep-band.
+    sampler_rs_max: Upper edge of the `[sampler_rs_min, sampler_rs_max]`
+      rejection-sampling keep-band.
+    seq_logprob_error_threshold: Drop a sequence when the sampler and the
+      trainer disagree about its tokens by more than this, measured as `mean_t
+      exp|log p_trainer - log q_sampler|`. `None` disables the gate. Requires
+      rollout log-probabilities.
 
   References:
     - GRPO: https://arxiv.org/abs/2402.03300
@@ -188,25 +265,12 @@ class GRPOConfig(AlgorithmConfig):
   epsilon: float = 0.2
   epsilon_high: float | None = None
   epsilon_c: float | None = None
-  sampler_is: str | None = None
-  sampler_is_threshold: float = 2.0
-  seq_logprob_error_threshold: float | None = None
 
   def __post_init__(self):
     if self.epsilon_high is None:
       self.epsilon_high = self.epsilon
 
     super().__post_init__()
-
-    if (
-        self.seq_logprob_error_threshold is not None
-        and self.seq_logprob_error_threshold < 1.0
-    ):
-      raise ValueError(
-          "seq_logprob_error_threshold must be >= 1.0 when set (since "
-          "exp(|logp_diff|) >= 1.0). Received: "
-          f"{self.seq_logprob_error_threshold}"
-      )
 
     if self.num_generations <= 1:
       raise ValueError(
@@ -218,9 +282,4 @@ class GRPOConfig(AlgorithmConfig):
       raise ValueError(
           "loss_algo should be either grpo or gspo-token. Received: "
           f"{self.loss_algo}"
-      )
-    if self.sampler_is not in (None, "token"):
-      raise ValueError(
-          "sampler_is should be either None or 'token'. Received: "
-          f"{self.sampler_is}"
       )

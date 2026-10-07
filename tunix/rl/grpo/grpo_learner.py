@@ -97,7 +97,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         data_shuffle_seed=data_shuffle_seed,
     )
 
-    self.algo_config.temperature = self.rl_engine.get_rollout_config(  # pyrefly: ignore[missing-attribute]
+    self.algo_config.temperature = self.rl_engine.get_rollout_config(
         mode=rl_engine_lib.Mode.TRAIN
     ).temperature
 
@@ -121,7 +121,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         has_aux=True,
     )
     self.rl_engine.actor_trainer.with_gen_model_input_fn(
-        lambda x: {  # pyrefly: ignore[bad-argument-type]
+        lambda x: {
             "train_example": x,
             "algo_config": self.algo_config,  # pyrefly: ignore[bad-assignment]
         }
@@ -129,8 +129,23 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
     self.rl_engine.actor_trainer.with_rl_metrics_to_log({
         "kl": np.mean,
         "pg_clipfrac": np.mean,
-        "sampler_is/weight_mean": np.mean,
+        "sampler_is/weight_mean": common.global_weighted_mean,  # pyrefly: ignore[bad-assignment]
         "sampler_is/weight_min": np.min,
+        "sampler_is/weight_max": np.max,
+        "sampler_is/frac_clipped_at_threshold": common.global_weighted_mean,  # pyrefly: ignore[bad-assignment]
+        "sampler_is/seq_kl_mean": common.global_weighted_mean,  # pyrefly: ignore[bad-assignment]
+        "sampler_is/seq_geo_ratio_mean": common.global_weighted_mean,  # pyrefly: ignore[bad-assignment]
+        "sampler_is/seq_geo_ratio_max": np.max,
+        "sampler_rs/rejected_fraction": common.global_weighted_mean,  # pyrefly: ignore[bad-assignment]
+        "sampler_trainer/logp_diff_mean": common.global_weighted_mean,  # pyrefly: ignore[bad-assignment]
+        "sampler_trainer/logp_diff_max": np.max,
+        "sampler_trainer/mult_prob_error_mean": common.global_weighted_mean,  # pyrefly: ignore[bad-assignment]
+        "sampler_trainer/mult_prob_error_max": np.max,
+        "sampler_trainer/prob_diff_mean": common.global_weighted_mean,  # pyrefly: ignore[bad-assignment]
+        "sampler_trainer/prob_diff_max": np.max,
+        "sampler_trainer/probs_pearson_corr": common.global_weighted_mean,  # pyrefly: ignore[bad-assignment]
+        "sampler_trainer/seq_error_masked_frac": common.global_weighted_mean,  # pyrefly: ignore[bad-assignment]
+        "sampler_trainer/seq_error_masked_count": np.sum,
     })
     self.rl_engine.actor_trainer.with_tqdm_metrics_to_display([  # pyrefly: ignore[bad-argument-type]
         lambda: "kl" if self.algo_config.beta != 0.0 else None,
@@ -160,7 +175,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
     if isinstance(rollout_config, dict):
       rollout_config = rollout_config[mode]
 
-    training_input["prompts"] = list(training_input["prompts"])  # pyrefly: ignore[bad-argument-type]
+    training_input["prompts"] = list(training_input["prompts"])  # pyrefly: ignore[bad-argument-type, unsupported-operation]
     pad_value = self.rl_engine.rollout.pad_id()
     eos_value = self.rl_engine.rollout.eos_id()
 
@@ -170,7 +185,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
     }
 
     rollout_output = self.rl_engine.generate(
-        prompts=training_input["prompts"],
+        prompts=training_input["prompts"],  # pyrefly: ignore[bad-argument-type]
         mode=mode,
         micro_batch_size=(
             self._rollout_micro_batch_size * self.algo_config.num_generations  # pyrefly: ignore[unsupported-operation]
@@ -250,7 +265,8 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
     needs_trainer_logps = not self.algo_config.use_rollout_logps or (
         rollout_per_token_logps is not None
         and (
-            self.algo_config.sampler_is == "token"
+            self.algo_config.sampler_is is not None
+            or self.algo_config.sampler_rs is not None
             or self.algo_config.seq_logprob_error_threshold is not None
         )
     )
@@ -274,7 +290,8 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
       old_per_token_logps = trainer_per_token_logps
     elif (
         (
-            self.algo_config.sampler_is == "token"
+            self.algo_config.sampler_is is not None
+            or self.algo_config.sampler_rs is not None
             or self.algo_config.seq_logprob_error_threshold is not None
         )
         and rollout_per_token_logps is not None
@@ -294,7 +311,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
     ):
       # Compute rewards and advantages
       rewards = self._compute_rewards(
-          prompts=training_input["prompts"],
+          prompts=training_input["prompts"],  # pyrefly: ignore[bad-argument-type]
           completions=rollout_output.text,
           mode=mode,
           **{k: v for k, v in training_input.items() if k != "prompts"},  # pyrefly: ignore[bad-argument-type]
@@ -343,6 +360,9 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
             jax_completion_mask,
             sampler_is=self.algo_config.sampler_is,
             sampler_is_threshold=self.algo_config.sampler_is_threshold,
+            sampler_rs=self.algo_config.sampler_rs,
+            sampler_rs_min=self.algo_config.sampler_rs_min,
+            sampler_rs_max=self.algo_config.sampler_rs_max,
             seq_logprob_error_threshold=self.algo_config.seq_logprob_error_threshold,
         )
     )

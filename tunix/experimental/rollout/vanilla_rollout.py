@@ -115,10 +115,11 @@ def _build_engine(
   max_device_size_gib = _resolve_max_device_size_gib(
       rollout_config.rollout_hbm_utilization, mesh
   )
+  eos_token_ids: set[int] = set()
+  if tokenizer.eos_id() is not None:
+    eos_token_ids.add(tokenizer.eos_id())
   if rollout_config.eos_tokens:
-    eos_token_ids = frozenset(rollout_config.eos_tokens)
-  else:
-    eos_token_ids = frozenset([tokenizer.eos_id()])
+    eos_token_ids.update(rollout_config.eos_tokens)
   return engine_lib.LLMEngine(
       model,
       tokenizer=tokenizer,
@@ -144,7 +145,7 @@ def _build_engine(
           seed=0 if rollout_config.seed is None else int(rollout_config.seed),
       ),
       max_model_len=max_model_len,
-      eos_token_ids=eos_token_ids,
+      eos_token_ids=frozenset(eos_token_ids),
       log_stats_interval_s=rollout_config.log_stats_interval_s,
   )
 

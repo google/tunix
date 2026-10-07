@@ -514,7 +514,6 @@ class TrainRequest(Request):
 
 @dataclasses.dataclass(kw_only=True)
 class LogprobsRequest(Request):
-  # TODO(tunix-dev): add router replay support to LogprobsRequest.
   """Request to score per-token log-probabilities under a frozen model.
 
   Attributes:
@@ -531,6 +530,11 @@ class LogprobsRequest(Request):
       only.
     segment_positions: Optional packing local position indices (sequence
       packing); trainer path only.
+    routed_experts: Optional `[B, P + C, num_layers, top_k]` MoE expert ids
+      captured during rollout (`UNSET_ROUTED_EXPERT` where unset), laid out
+      like `RLTrainerPayload.routed_experts`. When set, the scorer replays this
+      routing so its log-probs match the training forward pass; trainer path
+      only.
   """
 
   prompt_tokens: ArrayLike
@@ -541,6 +545,7 @@ class LogprobsRequest(Request):
   eos_id: int | None = None
   segment_ids: ArrayLike | None = None
   segment_positions: ArrayLike | None = None
+  routed_experts: ArrayLike | None = None
 
 
 ##### Inference DTOs #####

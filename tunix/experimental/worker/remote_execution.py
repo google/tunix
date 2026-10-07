@@ -35,6 +35,7 @@ Security Notes / Trust Boundaries:
 
 import abc
 import asyncio
+import concurrent.futures
 import contextlib
 import hashlib
 import inspect
@@ -58,6 +59,7 @@ from typing import (
 
 from absl import logging
 import cloudpickle
+import numpy as np
 
 try:
   import grpc as _grpc_lib
@@ -84,9 +86,23 @@ LONG_POLL_TIMEOUT_S = RPC_TIMEOUT_S - 10.0
 # Pickle Protocol 5 out-of-band buffers.
 _MAX_MESSAGE_BYTES = 128 * 1024 * 1024
 
-# Default slice size (8 MiB) per frame on streaming gRPC calls. Must remain
+# Default slice size (16 MiB) per frame on streaming gRPC calls. Must remain
 # strictly smaller than _MAX_MESSAGE_BYTES.
-_STREAM_CHUNK_BYTES = 8 * 1024 * 1024
+_STREAM_CHUNK_BYTES = 16 * 1024 * 1024
+
+# Buffers smaller than this threshold are coalesced via a single b"".join()
+# pass; buffers at or above this threshold are emitted directly as standalone
+# frames (or chunk_size slices) to avoid intermediate coalescing copies.
+_COALESCE_THRESHOLD_BYTES = 256 * 1024
+
+# Payloads at or above this byte threshold offload chunk reassembly and
+# unpickling to _SERDE_EXECUTOR so multi-megabyte buffer operations do not
+# block the asyncio event loop.
+_ASYNC_OFFLOAD_THRESHOLD_BYTES = 512 * 1024
+
+_SERDE_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=8, thread_name_prefix="tunix-rpc-serde"
+)
 
 
 def _grpc_options(
@@ -125,6 +141,16 @@ def _validate_stream_config(
     )
 
 
+def _flush_pending_views(pending_views: List[memoryview]) -> bytes:
+  """Materializes coalesced small views in a single allocation and copy."""
+  if len(pending_views) == 1:
+    data = pending_views[0].tobytes()
+  else:
+    data = b"".join(pending_views)
+  pending_views.clear()
+  return data
+
+
 def _iter_serialized_chunks(
     obj: Any,
     chunk_size: int = _STREAM_CHUNK_BYTES,
@@ -151,7 +177,7 @@ def _iter_serialized_chunks(
   header_bytes = cloudpickle.dumps(
       obj, protocol=5, buffer_callback=raw_buffers.append
   )
-  views: List[Any] = [memoryview(header_bytes)]
+  views: List[memoryview] = [memoryview(header_bytes)]  # pylint: disable=g-bare-generic
   try:
     for pb in raw_buffers:
       try:
@@ -172,21 +198,30 @@ def _iter_serialized_chunks(
   def _gen() -> Iterator[bytes]:
     try:
       yield manifest
-      pending = bytearray()
+      coalesce_limit = min(chunk_size, _COALESCE_THRESHOLD_BYTES)
+      pending_views: List[memoryview] = []
+      pending_bytes = 0
       for mv in views:
-        if len(mv) >= chunk_size:
-          if pending:
-            yield bytes(pending)
-            pending.clear()
-          for offset in range(0, len(mv), chunk_size):
-            yield bytes(mv[offset : offset + chunk_size])
+        mv_len = len(mv)
+        if mv_len == 0:
+          continue
+        if mv_len >= coalesce_limit:
+          if pending_views:
+            yield _flush_pending_views(pending_views)
+            pending_bytes = 0
+          if mv_len <= chunk_size:
+            yield mv.tobytes()
+          else:
+            for offset in range(0, mv_len, chunk_size):
+              yield mv[offset : offset + chunk_size].tobytes()
         else:
-          if len(pending) + len(mv) > chunk_size:
-            yield bytes(pending)
-            pending.clear()
-          pending.extend(mv)
-      if pending:
-        yield bytes(pending)
+          if pending_bytes + mv_len > chunk_size and pending_views:
+            yield _flush_pending_views(pending_views)
+            pending_bytes = 0
+          pending_views.append(mv)
+          pending_bytes += mv_len
+      if pending_views:
+        yield _flush_pending_views(pending_views)
     finally:
       for mv in views:
         mv.release()
@@ -194,6 +229,42 @@ def _iter_serialized_chunks(
         pb.release()
 
   return _gen()
+
+
+def _next_chunk_or_end(it: Iterator[bytes]) -> Optional[bytes]:
+  return next(it, None)
+
+
+async def _iter_async_from_sync_chunks(
+    sync_iter: Iterator[bytes],
+) -> AsyncIterator[bytes]:
+  """Adapts a synchronous chunk iterator into a pipelined async iterator."""
+  loop = asyncio.get_running_loop()
+  first = next(sync_iter, None)
+  if first is None:
+    return
+  next_fut: Optional[asyncio.Future[Optional[bytes]]] = loop.run_in_executor(
+      _SERDE_EXECUTOR, _next_chunk_or_end, sync_iter
+  )
+  try:
+    yield first
+    while next_fut is not None:
+      chunk = await next_fut
+      if chunk is None:
+        next_fut = None
+        break
+      next_fut = loop.run_in_executor(
+          _SERDE_EXECUTOR, _next_chunk_or_end, sync_iter
+      )
+      yield chunk
+  finally:
+    if next_fut is not None:
+      try:
+        await next_fut
+      except Exception:  # pylint: disable=broad-exception-caught
+        pass
+    if hasattr(sync_iter, "close"):
+      sync_iter.close()
 
 
 class _ChunkReassembler:
@@ -219,55 +290,67 @@ class _ChunkReassembler:
           f" {buffer_lengths!r}."
       )
 
-    self._header_buf = bytearray(header_len)
-    self._buffers: List[bytearray] = [
-        bytearray(length) for length in buffer_lengths
+    self._target_lengths: List[int] = [header_len, *buffer_lengths]
+    self.total_bytes: int = sum(self._target_lengths)
+    # Lazily allocate uninitialized uint8 NumPy arrays on first write to avoid
+    # upfront memset(0) across multi-gigabyte buffers and release the GIL
+    # during memcpy.
+    self._targets: List[Optional[np.ndarray]] = [
+        np.empty(0, dtype=np.uint8) if length == 0 else None
+        for length in self._target_lengths
     ]
-    self._targets: List[bytearray] = [self._header_buf, *self._buffers]
     self._target_idx = 0
     self._target_offset = 0
     self._advance_empty_targets()
 
   def _advance_empty_targets(self) -> None:
     while (
-        self._target_idx < len(self._targets)
-        and not self._targets[self._target_idx]
+        self._target_idx < len(self._target_lengths)
+        and self._target_lengths[self._target_idx] == 0
     ):
       self._target_idx += 1
 
   def feed(self, chunk: bytes) -> None:
-    """Writes a chunk into pre-allocated target buffers."""
+    """Writes a chunk into lazily allocated uninitialized target buffers."""
     if not chunk:
       return
-    with memoryview(chunk) as chunk_view:
-      chunk_pos = 0
-      while chunk_pos < len(chunk_view):
-        if self._target_idx >= len(self._targets):
-          raise ValueError(
-              "Received more chunk bytes than declared in stream manifest."
-          )
-        target_buf = self._targets[self._target_idx]
-        remaining = len(target_buf) - self._target_offset
-        take = min(len(chunk_view) - chunk_pos, remaining)
-        with memoryview(target_buf) as target_mv:
-          target_mv[self._target_offset : self._target_offset + take] = (
-              chunk_view[chunk_pos : chunk_pos + take]
-          )
-        self._target_offset += take
-        chunk_pos += take
-        if self._target_offset == len(target_buf):
-          self._target_idx += 1
-          self._target_offset = 0
-          self._advance_empty_targets()
+    chunk_len = len(chunk)
+    chunk_pos = 0
+    while chunk_pos < chunk_len:
+      if self._target_idx >= len(self._target_lengths):
+        raise ValueError(
+            "Received more chunk bytes than declared in stream manifest."
+        )
+      target_len = self._target_lengths[self._target_idx]
+      remaining = target_len - self._target_offset
+      take = min(chunk_len - chunk_pos, remaining)
+      target_buf = self._targets[self._target_idx]
+      if target_buf is None:
+        target_buf = np.empty(target_len, dtype=np.uint8)
+        self._targets[self._target_idx] = target_buf
+      # NumPy slice assignment releases the GIL (NPY_BEGIN_ALLOW_THREADS).
+      target_buf[self._target_offset : self._target_offset + take] = (
+          np.frombuffer(chunk, dtype=np.uint8, count=take, offset=chunk_pos)
+      )
+      self._target_offset += take
+      chunk_pos += take
+      if self._target_offset == target_len:
+        self._target_idx += 1
+        self._target_offset = 0
+        self._advance_empty_targets()
 
   def finish(self) -> Any:
     """Validates completion and unpickles the object from reassembled buffers."""
-    if self._target_idx < len(self._targets):
+    if self._target_idx < len(self._target_lengths):
       raise ValueError(
           "Stream ended before all declared buffer bytes were received."
       )
+    completed_buffers: List[np.ndarray] = []
+    for buf in self._targets:
+      assert buf is not None
+      completed_buffers.append(buf)
     return cloudpickle.loads(  # pylint: disable=g-unsafe-pickle-load
-        self._header_buf, buffers=self._buffers
+        completed_buffers[0], buffers=completed_buffers[1:]
     )
 
 
@@ -291,17 +374,42 @@ async def _deserialize_from_async_chunks(
 ) -> Any:
   """Deserializes an object from an async iterable of chunks."""
   reassembler: Optional[_ChunkReassembler] = None
-  async for chunk in chunks:
-    if reassembler is None:
-      if not chunk and allow_empty:
-        return None
-      reassembler = _ChunkReassembler(chunk)
-    else:
-      reassembler.feed(chunk)
+  offload = False
+  loop: Optional[asyncio.AbstractEventLoop] = None
+  pending_feed: Optional[asyncio.Future[None]] = None
+  try:
+    async for chunk in chunks:
+      if reassembler is None:
+        if not chunk and allow_empty:
+          return None
+        reassembler = _ChunkReassembler(chunk)
+        if reassembler.total_bytes >= _ASYNC_OFFLOAD_THRESHOLD_BYTES:
+          offload = True
+          loop = asyncio.get_running_loop()
+      else:
+        if offload and loop is not None:
+          if pending_feed is not None:
+            await pending_feed
+          pending_feed = loop.run_in_executor(
+              _SERDE_EXECUTOR, reassembler.feed, chunk
+          )
+        else:
+          reassembler.feed(chunk)
+    if pending_feed is not None:
+      await pending_feed
+      pending_feed = None
+  finally:
+    if pending_feed is not None:
+      try:
+        await pending_feed
+      except Exception:  # pylint: disable=broad-exception-caught
+        pass
   if reassembler is None:
     if allow_empty:
       return None
     raise ValueError("Cannot deserialize from an empty chunk stream.")
+  if offload and loop is not None:
+    return await loop.run_in_executor(_SERDE_EXECUTOR, reassembler.finish)
   return reassembler.finish()
 
 
@@ -341,6 +449,13 @@ class ExecutionRequest:
         (self.request_id, self.method_name, self.args, self.kwargs),
         chunk_size=chunk_size,
     )
+
+  def serialize_async_chunks(
+      self, chunk_size: int = _STREAM_CHUNK_BYTES
+  ) -> AsyncIterator[bytes]:
+    """Serializes request into an async stream of Pickle Protocol 5 chunks."""
+    sync_iter = self.serialize_chunks(chunk_size=chunk_size)
+    return _iter_async_from_sync_chunks(sync_iter)
 
   @classmethod
   def deserialize_chunks(cls, chunks: Iterable[bytes]) -> "ExecutionRequest":
@@ -409,6 +524,13 @@ class ExecutionResponse:
     except Exception as e:  # pylint: disable=broad-exception-caught
       self._record_serialization_error(e)
       return _iter_serialized_chunks(self._as_tuple(), chunk_size=chunk_size)
+
+  def serialize_async_chunks(
+      self, chunk_size: int = _STREAM_CHUNK_BYTES
+  ) -> AsyncIterator[bytes]:
+    """Serializes response into an async stream of Pickle Protocol 5 chunks."""
+    sync_iter = self.serialize_chunks(chunk_size=chunk_size)
+    return _iter_async_from_sync_chunks(sync_iter)
 
   @classmethod
   def deserialize_chunks(cls, chunks: Iterable[bytes]) -> "ExecutionResponse":
@@ -631,7 +753,7 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
           error_type=type(e).__name__,
           traceback=traceback_lib.format_exc(),
       )
-    for chunk in response.serialize_chunks(
+    async for chunk in response.serialize_async_chunks(
         chunk_size=self._stream_chunk_bytes
     ):
       yield chunk
@@ -659,7 +781,7 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
       return
     completed = False
     try:
-      for chunk in response.serialize_chunks(
+      async for chunk in response.serialize_async_chunks(
           chunk_size=self._stream_chunk_bytes
       ):
         yield chunk
@@ -849,7 +971,7 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     self.target_address = target_address
     self._host_port = target_address.replace("grpc://", "")
     self._channel: Optional[Any] = None
-    self._channel_loop: Optional[Any] = None
+    self._channel_loop: Optional[asyncio.AbstractEventLoop] = None
     self._rpc: Optional[Any] = None
     self._dispatch_rpc: Optional[Any] = None
     self._poll_rpc: Optional[Any] = None
@@ -873,7 +995,7 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
         response_deserializer=lambda b: b,
     )
 
-  def _ensure_async_channel(self) -> Any:
+  async def _ensure_async_channel(self) -> Any:
     """Ensures the async gRPC channel and stubs are bound to the active loop."""
     assert _grpc_aio_lib is not None
     current_loop = _running_loop()
@@ -882,6 +1004,7 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
         or self._channel_loop is not current_loop
         or (self._channel_loop is not None and self._channel_loop.is_closed())
     ):
+      old_channel = self._channel
       self._channel = _grpc_aio_lib.insecure_channel(
           self._host_port, options=_grpc_options(self._max_message_bytes)
       )
@@ -897,6 +1020,11 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
           request_serializer=cloudpickle.dumps,
           response_deserializer=lambda b: b,
       )
+      if old_channel is not None:
+        try:
+          await old_channel.close()
+        except Exception:  # pylint: disable=broad-exception-caught
+          pass
     return self._channel
 
   async def _execute_rpc(
@@ -910,7 +1038,7 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     request = ExecutionRequest(
         method_name=method_name, args=args, kwargs=kwargs
     )
-    chunks = request.serialize_chunks(chunk_size=self._stream_chunk_bytes)
+    chunks = request.serialize_async_chunks(chunk_size=self._stream_chunk_bytes)
     call = rpc(chunks, timeout=self._rpc_timeout_s)
     response = await ExecutionResponse.deserialize_async_chunks(call)
     assert response is not None
@@ -965,7 +1093,7 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
       self, method_name: Optional[str] = None, *args, **kwargs
   ) -> Any:
     """Asynchronously invokes remote method over gRPC."""
-    self._ensure_async_channel()
+    await self._ensure_async_channel()
     return await self._execute_rpc(self._rpc, method_name, args, kwargs)
 
   async def dispatch_task(
@@ -976,19 +1104,19 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
       **kwargs,
   ) -> str:
     """Asynchronously dispatches task request on remote server, returning task ACK ID."""
-    self._ensure_async_channel()
+    await self._ensure_async_channel()
     assert self._dispatch_rpc is not None
     request = ExecutionRequest(
         request_id=request_id, method_name=method_name, args=args, kwargs=kwargs
     )
-    chunks = request.serialize_chunks(chunk_size=self._stream_chunk_bytes)
+    chunks = request.serialize_async_chunks(chunk_size=self._stream_chunk_bytes)
     return await self._dispatch_rpc(chunks, timeout=self._rpc_timeout_s)
 
   async def poll_responses(
       self, timeout_s: float = LONG_POLL_TIMEOUT_S
   ) -> Optional[ExecutionResponse]:
     """Long-polls remote server response queue for completed task results."""
-    self._ensure_async_channel()
+    await self._ensure_async_channel()
     assert self._poll_rpc is not None
     call = self._poll_rpc(timeout_s, timeout=self._rpc_timeout_s)
     return await ExecutionResponse.deserialize_async_chunks(
@@ -1229,7 +1357,7 @@ class RoutingActorPool(ActorPool):
       ):
         return getattr(self.router, method_name)(self._actors, args, kwargs)
       elif callable(self.router):
-        return self.router(self._actors, method_name, args, kwargs)  # pyrefly: ignore[bad-return]
+        return self.router(self._actors, method_name, args, kwargs)
       else:
         raise TypeError(
             f"Router object {type(self.router)} must provide a method matching "

@@ -17,9 +17,12 @@
 from absl.testing import absltest
 import numpy as np
 from tunix.rl import packing
+from tunix.rl.agentic.agents import agent_types
 
 
-def _item(prompt, completion, *, mask=None, adv=0.0, per_token=None):
+def _item(
+    prompt, completion, *, mask=None, adv=0.0, per_token=None, routed=None
+):
   completion = np.asarray(completion, dtype=np.int32)
   return packing.PackItem(
       prompt_ids=np.asarray(prompt, dtype=np.int32),
@@ -31,7 +34,12 @@ def _item(prompt, completion, *, mask=None, adv=0.0, per_token=None):
       ),
       advantages=np.full(completion.shape[0], adv, dtype=np.float32),
       per_token=per_token or {},
+      routed_experts=routed,
   )
+
+
+def _routed(num_tokens, value, *, num_layers=2, top_k=2):
+  return np.full((num_tokens, num_layers, top_k), value, dtype=np.int16)
 
 
 class PackItemInvariantTest(absltest.TestCase):
@@ -76,6 +84,28 @@ class PackItemInvariantTest(absltest.TestCase):
         ValueError, "must be a 1D numpy array or shape"
     ):
       _item([1, 2], [3, 4], per_token={"returns": np.zeros(5, np.float32)})
+
+  def test_rejects_routed_experts_shorter_than_sequence_minus_one(self):
+    # Routing is sequence-aligned (p + c - 1 or p + c), not completion-aligned
+    # (c).
+    with self.assertRaisesRegex(
+        ValueError, r"\(p \+ c - 1 or p \+ c, num_layers, top_k\)"
+    ):
+      _item([1, 2], [3, 4], routed=_routed(2, 0))
+
+  def test_rejects_routed_experts_exceeding_sequence_length(self):
+    with self.assertRaisesRegex(
+        ValueError, r"\(p \+ c - 1 or p \+ c, num_layers, top_k\)"
+    ):
+      _item([1, 2], [3, 4], routed=_routed(5, 0))
+
+  def test_accepts_prefix_routed_experts(self):
+    item = _item([1, 2], [3, 4], routed=_routed(3, 0))
+    self.assertEqual(item.routed_experts.shape, (3, 2, 2))
+
+  def test_rejects_routed_experts_of_wrong_rank(self):
+    with self.assertRaisesRegex(ValueError, "routed_experts"):
+      _item([1], [2], routed=np.zeros((2, 4), dtype=np.int16))
 
 
 class PackCarriedFieldsTest(absltest.TestCase):
@@ -286,6 +316,288 @@ class PackCoreTest(absltest.TestCase):
     self.assertEqual(returns_base.shape, (2, 4))
     self.assertIs(rows[0].per_token["returns"].base, returns_base)
     self.assertIs(rows[1].per_token["returns"].base, returns_base)
+
+  def test_invalid_segment_alignment_boundary_raises(self):
+    with self.assertRaisesRegex(
+        ValueError, "segment_alignment_boundary must be positive"
+    ):
+      packing.pack_core(
+          [_item([1], [2])], budget=10, segment_alignment_boundary=0
+      )
+
+  def test_cpp_extension_and_python_fallback_produce_identical_chunks(self):
+    self.assertIsNotNone(packing._packing_ext)
+    rng = np.random.default_rng(123)
+    valid_items = [
+        _item(
+            np.arange(p_len := int(rng.integers(1, 25)), dtype=np.int32),
+            np.arange(c_len := int(rng.integers(1, 35)), dtype=np.int32),
+            adv=float(rng.uniform(-1.0, 1.0)),
+            per_token={"returns": np.ones(c_len, dtype=np.float32) * 0.5},
+            routed=_routed(p_len + c_len - 1, idx % 7),
+        )
+        for idx in range(24)
+    ]
+    cpp_chunks = packing.pack_core(
+        valid_items, budget=128, pack_size=3, segment_alignment_boundary=16
+    )
+    orig_ext = packing._packing_ext
+    try:
+      packing._packing_ext = None
+      py_chunks = packing.pack_core(
+          valid_items, budget=128, pack_size=3, segment_alignment_boundary=16
+      )
+    finally:
+      packing._packing_ext = orig_ext
+
+    self.assertEqual(len(cpp_chunks), len(py_chunks))
+    for c_chunk, p_chunk in zip(cpp_chunks, py_chunks):
+      np.testing.assert_array_equal(c_chunk.ids, p_chunk.ids)
+      np.testing.assert_array_equal(c_chunk.prompt_mask, p_chunk.prompt_mask)
+      np.testing.assert_array_equal(
+          c_chunk.completion_mask, p_chunk.completion_mask
+      )
+      np.testing.assert_allclose(c_chunk.advantages, p_chunk.advantages)
+      np.testing.assert_array_equal(c_chunk.segment_ids, p_chunk.segment_ids)
+      np.testing.assert_array_equal(
+          c_chunk.segment_positions, p_chunk.segment_positions
+      )
+      np.testing.assert_allclose(
+          c_chunk.per_token["returns"], p_chunk.per_token["returns"]
+      )
+      np.testing.assert_array_equal(
+          c_chunk.routed_experts, p_chunk.routed_experts
+      )
+      self.assertEqual(c_chunk.num_real_segments, p_chunk.num_real_segments)
+
+
+class PackRoutedExpertsTest(absltest.TestCase):
+
+  def test_no_routing_leaves_rows_without_routed_experts(self):
+    [rows] = packing.pack_core([_item([1], [2])], budget=4, pack_size=2)
+    for row in rows:
+      self.assertIsNone(row.routed_experts)
+
+  def test_routing_is_sequence_aligned_and_dummy_rows_unset(self):
+    experts1 = np.arange(3 * 2 * 2, dtype=np.int16).reshape(3, 2, 2)
+    experts2 = np.arange(100, 100 + 2 * 2 * 2, dtype=np.int16).reshape(2, 2, 2)
+    items = [
+        _item([1], [2, 3], routed=experts1),
+        _item([4], [5], routed=experts2),
+    ]
+    [rows] = packing.pack_core(items, budget=6, pack_size=2)
+    row0, row1 = rows
+    self.assertEqual(row0.routed_experts.shape, (6, 2, 2))
+    self.assertEqual(row0.routed_experts.dtype, np.int16)
+    np.testing.assert_array_equal(row0.routed_experts[:3], experts1)
+    np.testing.assert_array_equal(row0.routed_experts[3:5], experts2)
+    np.testing.assert_array_equal(
+        row0.routed_experts[5:], agent_types.UNSET_ROUTED_EXPERT
+    )
+    # The dummy row in the same chunk keeps the same structure, all unset.
+    self.assertEqual(row1.routed_experts.shape, (6, 2, 2))
+    np.testing.assert_array_equal(
+        row1.routed_experts, agent_types.UNSET_ROUTED_EXPERT
+    )
+    # Rows are views into one contiguous `[n_bins, budget, L, K]` buffer.
+    self.assertEqual(rows.routed_experts.shape, (2, 6, 2, 2))
+    self.assertIs(row0.routed_experts.base, rows.routed_experts)
+    self.assertIs(row1.routed_experts.base, rows.routed_experts)
+
+  def test_routing_less_item_is_unset_without_dropping_chunk_routing(self):
+    items = [
+        _item([1], [2, 3], routed=_routed(3, 7)),
+        _item([4], [5]),
+    ]
+    [[row]] = packing.pack_core(items, budget=6, pack_size=1)
+    np.testing.assert_array_equal(row.routed_experts[:3], 7)
+    np.testing.assert_array_equal(
+        row.routed_experts[3:], agent_types.UNSET_ROUTED_EXPERT
+    )
+
+  def test_prefix_routed_experts_leaves_trailing_segment_tokens_unset(self):
+    experts1 = np.arange(3 * 2 * 2, dtype=np.int16).reshape(3, 2, 2)
+    experts2 = np.arange(100, 100 + 2 * 2 * 2, dtype=np.int16).reshape(2, 2, 2)
+    items = [
+        _item([1, 2], [3, 4], routed=experts1),
+        _item([5], [6, 7], routed=experts2),
+    ]
+    [[row]] = packing.pack_core(items, budget=8, pack_size=1)
+    np.testing.assert_array_equal(row.routed_experts[:3], experts1)
+    np.testing.assert_array_equal(
+        row.routed_experts[3:4], agent_types.UNSET_ROUTED_EXPERT
+    )
+    np.testing.assert_array_equal(row.routed_experts[4:6], experts2)
+    np.testing.assert_array_equal(
+        row.routed_experts[6:], agent_types.UNSET_ROUTED_EXPERT
+    )
+
+  def test_mismatched_routing_shapes_raise(self):
+    items = [
+        _item([1], [2], routed=_routed(2, 0, top_k=2)),
+        _item([3], [4], routed=_routed(2, 0, top_k=4)),
+    ]
+    with self.assertRaisesRegex(ValueError, "disagree on routed_experts"):
+      packing.pack_core(items, budget=8)
+
+  def test_routed_experts_shape(self):
+    self.assertIsNone(packing.routed_experts_shape([_item([1], [2])]))
+    self.assertEqual(
+        packing.routed_experts_shape(
+            [_item([1], [2]), _item([3], [4], routed=_routed(2, 0, top_k=8))]
+        ),
+        (2, 8),
+    )
+
+
+class PackSegmentAlignmentTest(absltest.TestCase):
+
+  def test_align_offset(self):
+    self.assertEqual(packing.align_offset(0, 64), 0)
+    self.assertEqual(packing.align_offset(1, 64), 64)
+    self.assertEqual(packing.align_offset(64, 64), 64)
+    self.assertEqual(packing.align_offset(65, 64), 128)
+    self.assertEqual(packing.align_offset(7, 1), 7)
+
+  def test_default_is_unaligned(self):
+    self.assertEqual(packing.DEFAULT_SEGMENT_ALIGNMENT_BOUNDARY, 1)
+
+  def test_segments_start_on_alignment_boundary_with_padded_gaps(self):
+    # FFD sorts descending by length:
+    #   seg 1 (70 = 20p + 50c): [0:70],    gap [70:128]
+    #   seg 2 (50 = 10p + 40c): [128:178], gap [178:192]
+    #   seg 3 (20 =  5p + 15c): [192:212], trailing pad [212:256]
+    pad_id = 77
+    items = [
+        _item([11] * 10, [12] * 40, adv=1.5, routed=_routed(50, 1)),
+        _item([21] * 20, [22] * 50, adv=2.5, routed=_routed(70, 2)),
+        _item([31] * 5, [32] * 15, adv=3.5, routed=_routed(20, 3)),
+    ]
+    [[row]] = packing.pack_core(
+        items,
+        budget=256,
+        pack_size=1,
+        pad_id=pad_id,
+        segment_alignment_boundary=64,
+    )
+    self.assertEqual(row.num_real_segments, 3)
+    for seg_id, start, length, routed_value in (
+        (1, 0, 70, 2),
+        (2, 128, 50, 1),
+        (3, 192, 20, 3),
+    ):
+      idx = np.flatnonzero(row.segment_ids == seg_id)
+      np.testing.assert_array_equal(idx, np.arange(start, start + length))
+      np.testing.assert_array_equal(
+          row.segment_positions[idx], np.arange(length)
+      )
+      np.testing.assert_array_equal(row.routed_experts[idx], routed_value)
+    for lo, hi in ((70, 128), (178, 192), (212, 256)):
+      np.testing.assert_array_equal(row.segment_ids[lo:hi], 0)
+      np.testing.assert_array_equal(row.segment_positions[lo:hi], 0)
+      np.testing.assert_array_equal(row.completion_mask[lo:hi], 0)
+      np.testing.assert_array_equal(row.prompt_mask[lo:hi], 0)
+      np.testing.assert_array_equal(row.advantages[lo:hi], 0)
+      np.testing.assert_array_equal(row.ids[lo:hi], pad_id)
+      np.testing.assert_array_equal(
+          row.routed_experts[lo:hi], agent_types.UNSET_ROUTED_EXPERT
+      )
+
+  def test_exact_multiple_leaves_no_gap(self):
+    items = [
+        _item(np.ones(24), np.ones(40)),  # 64 tokens.
+        _item(np.ones(10), np.ones(20)),  # 30 tokens.
+    ]
+    [[row]] = packing.pack_core(
+        items, budget=128, pack_size=1, segment_alignment_boundary=64
+    )
+    np.testing.assert_array_equal(row.segment_ids[:64], 1)
+    np.testing.assert_array_equal(row.segment_ids[64:94], 2)
+    np.testing.assert_array_equal(row.segment_ids[94:], 0)
+
+  def test_alignment_counts_against_budget(self):
+    # 10 + 10 tokens fit a 64-token row unaligned, but aligned the second
+    # segment would need [64:74], so it spills to the next chunk.
+    items = [_item(np.ones(4), np.ones(6)), _item(np.ones(4), np.ones(6))]
+    self.assertLen(packing.pack_core(items, budget=64, pack_size=1), 1)
+    chunks = packing.pack_core(
+        items, budget=64, pack_size=1, segment_alignment_boundary=64
+    )
+    self.assertLen(chunks, 2)
+    for [row] in chunks:
+      self.assertEqual(row.num_real_segments, 1)
+
+  def test_full_budget_first_segment_needs_no_alignment(self):
+    [[row]] = packing.pack_core(
+        [_item(np.ones(100), np.ones(156))],
+        budget=256,
+        segment_alignment_boundary=64,
+    )
+    np.testing.assert_array_equal(row.segment_ids, 1)
+
+  def test_every_item_is_packed_only_once_with_alignment(self):
+    rng = np.random.default_rng(0)
+    items = [
+        _item(
+            np.arange(int(rng.integers(1, 40))),
+            np.arange(int(rng.integers(1, 40))),
+        )
+        for _ in range(37)
+    ]
+    chunks = packing.pack_core(
+        items, budget=256, pack_size=2, segment_alignment_boundary=16
+    )
+    self.assertEqual(
+        sum(r.num_real_segments for c in chunks for r in c), len(items)
+    )
+    self.assertEqual(
+        sum(int((r.segment_ids > 0).sum()) for c in chunks for r in c),
+        sum(i.num_tokens for i in items),
+    )
+    for c in chunks:
+      for r in c:
+        starts = np.flatnonzero(r.segment_positions == 0)
+        starts = starts[r.segment_ids[starts] > 0]
+        np.testing.assert_array_equal(starts % 16, 0)
+
+  def test_pack_bin_rejects_bin_that_overflows_once_aligned(self):
+    items = [_item(np.ones(4), np.ones(6)), _item(np.ones(4), np.ones(6))]
+    with self.assertRaisesRegex(ValueError, "exceeds budget"):
+      packing.pack_bin(
+          items, budget=64, pad_id=0, carried=(), segment_alignment_boundary=64
+      )
+    with self.assertRaisesRegex(ValueError, "exceeds budget"):
+      packing.pack_bin(
+          items, budget=16, pad_id=0, carried=(), segment_alignment_boundary=64
+      )
+
+  def test_invalid_inputs_raise_value_error_in_cpp_extension(self):
+    self.assertIsNotNone(packing._packing_ext)
+    bad_mask = _item([1, 2], [3, 4, 5])
+    object.__setattr__(
+        bad_mask, "completion_mask", np.array([1.0], dtype=np.float32)
+    )
+    with self.assertRaisesRegex(ValueError, "completion_mask and advantages"):
+      packing.pack_chunk([[bad_mask]], budget=8, pad_id=0, carried=())
+
+    bad_pt = _item([1, 2], [3, 4, 5])
+    bad_pt.per_token["logps"] = np.array([0.1], dtype=np.float32)
+    with self.assertRaisesRegex(ValueError, "per_token array length"):
+      packing.pack_chunk([[bad_pt]], budget=8, pad_id=0, carried=("logps",))
+
+    bad_routed = _item([1, 2], [3, 4])
+    object.__setattr__(
+        bad_routed, "routed_experts", np.zeros((4, 2), dtype=np.int16)
+    )
+    with self.assertRaisesRegex(ValueError, "at least 3 dimensions"):
+      packing._packing_ext.pack_chunk_fast(
+          [[bad_routed]], [], 8, 0, 1, (2, 2)
+      )
+
+    with self.assertRaisesRegex(ValueError, "pack_size must be positive"):
+      packing._packing_ext.pack_sequence_chunks_fast(
+          [_item([1], [2])], [], 8, 0, 4, 0, 1, 0
+      )
 
 
 if __name__ == "__main__":
