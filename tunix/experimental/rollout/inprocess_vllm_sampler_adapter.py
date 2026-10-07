@@ -110,20 +110,6 @@ class InprocessVllmSamplerAdapter(
           self.server_id,
       )
 
-    if self.tokenizer is not None and self.config is not None:
-      # `sample()` dispatches concurrent requests across `self._executor` worker
-      # threads. Force `server_mode=True` so `VllmSampler` uses
-      # `VLLMInProcessDriver` (where a single background engine thread drains a
-      # thread-safe request queue for continuous batching) instead of
-      # `_generate_offline()`, which calls `engine.step()` directly from caller
-      # threads and races on donated JAX KV-cache buffers (`Array has been
-      # deleted`).
-      self.config.server_mode = True
-      vllm_lib = _get_vllm_sampler_cls()
-      self.vllm_sampler = vllm_lib.VllmSampler(
-          tokenizer=self.tokenizer, config=self.config
-      )
-
   def initialize(self) -> None:
     """Initializes vLLM sampler if needed."""
     if self.tokenizer is None and self.model_name:
@@ -143,8 +129,13 @@ class InprocessVllmSamplerAdapter(
         and self.tokenizer is not None
         and self.config is not None
     ):
-      # Required for thread-safe continuous batching across `self._executor`
-      # worker threads; see comment in `__init__`.
+      # `sample()` dispatches concurrent requests across `self._executor` worker
+      # threads. Force `server_mode=True` so `VllmSampler` uses
+      # `VLLMInProcessDriver` (where a single background engine thread drains a
+      # thread-safe request queue for continuous batching) instead of
+      # `_generate_offline()`, which calls `engine.step()` directly from caller
+      # threads and races on donated JAX KV-cache buffers (`Array has been
+      # deleted`).
       self.config.server_mode = True
       vllm_lib = _get_vllm_sampler_cls()
       self.vllm_sampler = vllm_lib.VllmSampler(

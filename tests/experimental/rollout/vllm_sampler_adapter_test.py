@@ -265,6 +265,25 @@ class VllmSamplerAdapterTest(absltest.TestCase):
     )
     self.assertFalse(adapter.enable_raiden)
 
+  def test_engine_args_deferred_to_initialize(self):
+    mock_sampler_cls = mock.MagicMock(return_value=self.mock_sampler_instance)
+    engine_args = SimpleNamespace(model="Qwen/Qwen3-8B")
+    with mock.patch.object(
+        vllm_sampler_adapter,
+        "_get_rl_vllm_sampler_cls",
+        return_value=mock_sampler_cls,
+    ):
+      adapter = vllm_sampler_adapter.VllmSamplerAdapter(
+          server_id="deferred_vllm",
+          engine_args=engine_args,
+      )
+      self.assertIsNone(adapter.sampler)
+      mock_sampler_cls.assert_not_called()
+
+      adapter.initialize()
+      self.assertIs(adapter.sampler, self.mock_sampler_instance)
+      mock_sampler_cls.assert_called_once_with(engine_args=engine_args)
+
   def test_weight_sync_starts_an_idle_engine(self):
     """RLVllmSampler builds its AsyncLLM lazily and only `sample()` starts it.
 

@@ -45,6 +45,7 @@ class FakeTrainer(abstract_trainer.AbstractTrainer):
     self.policy_version = 3
     self.step_count = 10
     self.target_state = None
+    self.gen_model_input_fn = None
 
   def compile(self, dummy_data=None):
     pass
@@ -54,7 +55,7 @@ class FakeTrainer(abstract_trainer.AbstractTrainer):
     self.has_aux = has_aux
 
   def with_gen_model_input_fn(self, gen_model_input_fn):
-    pass
+    self.gen_model_input_fn = gen_model_input_fn
 
   def fwd_bwd(self, payload, **kwargs):
     self.fwd_bwd_calls.append((payload, kwargs))
@@ -100,11 +101,75 @@ class TrainerWorkerTest(absltest.TestCase):
     )
     self.worker.initialize()
 
+  def test_trainer_factory_deferred_until_initialize(self):
+    calls = []
+
+    def _factory():
+      calls.append("called")
+      return self.fake_trainer
+
+    worker = trainer_worker.TrainerWorker(
+        trainer_factory=_factory, worker_id="lazy_trainer"
+    )
+    gen_fn = lambda x: {"input": x}
+    worker.with_gen_model_input_fn(gen_fn)
+    self.assertEmpty(calls)
+    self.assertEqual(worker.state, datatypes.WorkerState.PENDING)
+    self.assertEqual(worker.heartbeat().policy_version, 0)
+    self.assertEqual(worker.info().resources["trainer"], "UninitializedTrainer")
+
+    worker.initialize()
+    self.assertEqual(calls, ["called"])
+    self.assertEqual(worker.state, datatypes.WorkerState.READY)
+    self.assertEqual(worker.heartbeat().policy_version, 3)
+    self.assertEqual(worker.info().resources["trainer"], "FakeTrainer")
+    self.assertIs(self.fake_trainer.gen_model_input_fn, gen_fn)
+
+  def test_initialize_failure_sets_error_state(self):
+    def _failing_factory():
+      raise RuntimeError("weight load failed")
+
+    worker = trainer_worker.TrainerWorker(
+        trainer_factory=_failing_factory, worker_id="bad_trainer"
+    )
+    with self.assertRaisesRegex(RuntimeError, "weight load failed"):
+      worker.initialize()
+    self.assertEqual(worker.state, datatypes.WorkerState.ERROR)
+    self.assertEqual(worker.heartbeat().last_error, "weight load failed")
+
+    # Verify a failure in a pending hook leaves _trainer as None so a retry
+    # re-runs initialization cleanly.
+    should_fail = True
+    orig_with_loss_fn = self.fake_trainer.with_loss_fn
+
+    def _flaky_with_loss_fn(loss_fn, has_aux=False):
+      if should_fail:
+        raise RuntimeError("loss hook failed")
+      orig_with_loss_fn(loss_fn, has_aux)
+
+    self.fake_trainer.with_loss_fn = _flaky_with_loss_fn
+    retry_worker = trainer_worker.TrainerWorker(
+        trainer_factory=lambda: self.fake_trainer, worker_id="retry_trainer"
+    )
+    retry_worker.with_loss_fn(lambda m, **kw: kw)
+    with self.assertRaisesRegex(RuntimeError, "loss hook failed"):
+      retry_worker.initialize()
+    self.assertIsNone(retry_worker._trainer)
+    self.assertEqual(retry_worker.state, datatypes.WorkerState.ERROR)
+
+    should_fail = False
+    retry_worker._state = datatypes.WorkerState.PENDING
+    retry_worker.initialize()
+    self.assertIs(retry_worker._trainer, self.fake_trainer)
+    self.assertEqual(retry_worker.state, datatypes.WorkerState.READY)
+    self.assertIsNotNone(self.fake_trainer.loss_fn)
+
   def test_with_loss_fn_binds_logps_chunk_size(self):
     worker = trainer_worker.TrainerWorker(
         trainer_factory=lambda: self.fake_trainer, logps_chunk_size=2048
     )
     worker.with_loss_fn(lambda model, **kwargs: kwargs, has_aux=True)
+    worker.initialize()
 
     self.assertTrue(self.fake_trainer.has_aux)
     self.assertEqual(
@@ -117,6 +182,7 @@ class TrainerWorkerTest(absltest.TestCase):
         trainer_factory=lambda: self.fake_trainer, logps_chunk_size=2048
     )
     worker.with_loss_fn(lambda model, **kwargs: kwargs)
+    worker.initialize()
 
     kwargs = self.fake_trainer.loss_fn(None, compute_logps_chunk_size=512)
 
@@ -147,6 +213,7 @@ class TrainerWorkerTest(absltest.TestCase):
         trainer_factory=lambda: self.fake_trainer, logps_chunk_size=3
     )
     worker.with_loss_fn(algo_core.grpo_loss_fn)
+    worker.initialize()
     chunked_fn = self.fake_trainer.loss_fn
     self.assertEqual(chunked_fn.keywords, {"compute_logps_chunk_size": 3})
 
@@ -453,13 +520,15 @@ class TrainerWorkerExecutionContextTest(absltest.TestCase):
         execution_context=self.ctx,
     )
 
-  def test_trainer_factory_runs_within_execution_context(self):
+  def test_trainer_factory_runs_within_execution_context_on_initialize(self):
+    self.assertEmpty(self.events)
+    self.worker.initialize()
     self.assertEqual(self.events, ["enter_ctx", "create_trainer", "exit_ctx"])
 
   def test_all_worker_operations_run_within_execution_context(self):
     self.events.clear()
     self.worker.initialize()
-    self.assertEqual(self.events, ["enter_ctx", "exit_ctx"])
+    self.assertEqual(self.events, ["enter_ctx", "create_trainer", "exit_ctx"])
 
     # Verify per_token_logps runs inside execution_context.
     self.events.clear()

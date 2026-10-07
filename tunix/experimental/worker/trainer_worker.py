@@ -22,7 +22,6 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
-
 from tunix.experimental.common import datatypes
 from tunix.experimental.train import abstract_trainer
 from tunix.experimental.worker import abstract_worker
@@ -82,8 +81,12 @@ class TrainerWorker(abstract_worker.Worker):
         If `None`, the whole request is scored in one forward.
     """
     self._execution_context = execution_context
-    with self.execution_context():
-      self._trainer = trainer_factory()
+    self._trainer_factory = trainer_factory
+    self._trainer: abstract_trainer.AbstractTrainer | None = None
+    self._pending_loss_fn: tuple[Callable[..., Any], bool] | None = None
+    self._pending_gen_model_input_fn: Callable[[Any], dict[str, Any]] | None = (
+        None
+    )
     self._logps_chunk_size = logps_chunk_size
     self._logps_micro_batch_size = logps_micro_batch_size
     self._is_running = False
@@ -92,6 +95,8 @@ class TrainerWorker(abstract_worker.Worker):
     self._last_error: str | None = None
 
   def _policy_version(self) -> int:
+    if self._trainer is None:
+      return 0
     return int(getattr(self._trainer, "policy_version", 0))
 
   def _response(self, **metadata: Any) -> datatypes.Response:
@@ -104,11 +109,12 @@ class TrainerWorker(abstract_worker.Worker):
         }
     )
 
-  def _ensure_ready(self) -> None:
+  def _ensure_ready(self) -> abstract_trainer.AbstractTrainer:
     if self.state == WorkerState.PENDING:
       self.initialize()
-    if self.state != WorkerState.READY:
+    if self.state != WorkerState.READY or self._trainer is None:
       raise RuntimeError(f"TrainerWorker is not ready: {self.state.value}.")
+    return self._trainer
 
   def initialize(self) -> datatypes.Response:
     """Initializes the worker and the underlying trainer."""
@@ -116,17 +122,34 @@ class TrainerWorker(abstract_worker.Worker):
       return self._response(initialized=True, ready=True)
     self.state = WorkerState.INITIALIZING
     try:
+      if self._trainer is None:
+        with self.execution_context():
+          trainer = self._trainer_factory()
+          if self._pending_loss_fn is not None:
+            trainer.with_loss_fn(*self._pending_loss_fn)
+            self._pending_loss_fn = None
+          if self._pending_gen_model_input_fn is not None:
+            trainer.with_gen_model_input_fn(
+                self._pending_gen_model_input_fn
+            )
+            self._pending_gen_model_input_fn = None
+          self._trainer = trainer
+      self._last_error = None
       return self._response(initialized=True)
+    except Exception as exc:
+      self._last_error = str(exc)
+      self.state = WorkerState.ERROR
+      raise
     finally:
-      self.state = WorkerState.READY
+      if self.state == WorkerState.INITIALIZING:
+        self.state = WorkerState.READY
 
   def compile(self, dummy_data: Any = None) -> datatypes.Response:
     """Triggers JIT compilation using the provided dummy_data."""
-    if self.state == WorkerState.PENDING:
-      self.initialize()
+    trainer = self._ensure_ready()
     self.state = WorkerState.COMPILING
     try:
-      self._trainer.compile(dummy_data)
+      trainer.compile(dummy_data)
       return self._response(compiled=True)
     except Exception as exc:
       self._last_error = str(exc)
@@ -138,10 +161,7 @@ class TrainerWorker(abstract_worker.Worker):
 
   def start(self) -> datatypes.Response:
     """Starts the worker's main loop."""
-    if self.state == WorkerState.PENDING:
-      self.initialize()
-    if self.state != WorkerState.READY:
-      raise RuntimeError(f"Cannot start TrainerWorker from {self.state.value}.")
+    self._ensure_ready()
     self._is_running = True
     return self._response(started=True)
 
@@ -152,7 +172,8 @@ class TrainerWorker(abstract_worker.Worker):
     self._is_running = False
     if self.state == WorkerState.READY:
       self.state = WorkerState.DRAINING
-    self._trainer.close()
+    if self._trainer is not None:
+      self._trainer.close()
     self.state = WorkerState.STOPPED
     return self._response(stopped=True)
 
@@ -161,7 +182,11 @@ class TrainerWorker(abstract_worker.Worker):
         worker_id=self._worker_id,
         roles=frozenset({"trainer", "weight_sync"}),
         resources={
-            "trainer": type(self._trainer).__name__,
+            "trainer": (
+                type(self._trainer).__name__
+                if self._trainer is not None
+                else "UninitializedTrainer"
+            ),
             "policy_version": self._policy_version(),
         },
     )
@@ -196,22 +221,29 @@ class TrainerWorker(abstract_worker.Worker):
       loss_fn = functools.partial(
           loss_fn, compute_logps_chunk_size=self._logps_chunk_size
       )
-    self._trainer.with_loss_fn(loss_fn, has_aux)
+    if self._trainer is None:
+      self._pending_loss_fn = (loss_fn, has_aux)
+    else:
+      self._trainer.with_loss_fn(loss_fn, has_aux)
     return self._response(loss_fn_configured=True)
 
   def with_gen_model_input_fn(
       self, gen_model_input_fn: Callable[[Any], dict[str, Any]]
   ) -> datatypes.Response:
     """Sets the last-mile adapter mapping a payload to the loss fn's kwargs."""
-    self._trainer.with_gen_model_input_fn(gen_model_input_fn)
+    if self._trainer is None:
+      self._pending_gen_model_input_fn = gen_model_input_fn
+    else:
+      self._trainer.with_gen_model_input_fn(gen_model_input_fn)
     return self._response(gen_model_input_fn_configured=True)
 
   def set_target_state(self, target_state: Any) -> datatypes.Response:
     """Stores rollout target_state so trainer-side weight sync can convert."""
-    setter = getattr(self._trainer, "set_target_state", None)
+    trainer = self._ensure_ready()
+    setter = getattr(trainer, "set_target_state", None)
     if not callable(setter):
       raise AttributeError(
-          f"{type(self._trainer).__name__} does not support set_target_state"
+          f"{type(trainer).__name__} does not support set_target_state"
       )
     setter(target_state)
     return self._response(target_state_configured=True)
@@ -222,11 +254,11 @@ class TrainerWorker(abstract_worker.Worker):
       **kwargs: Any,
   ) -> datatypes.Response:
     """Executes one forward/backward pass."""
-    self._ensure_ready()
+    trainer = self._ensure_ready()
     req_metadata = dict(request.metadata) if request.metadata else {}
     kwargs.pop("skip_jit", None)
     try:
-      self._trainer.fwd_bwd(request.payload, **kwargs)
+      trainer.fwd_bwd(request.payload, **kwargs)
       self._last_error = None
       resp = self._response(queued=True, **req_metadata)
       resp.request_id = request.request_id
@@ -238,9 +270,9 @@ class TrainerWorker(abstract_worker.Worker):
 
   def update(self, **kwargs) -> int:
     """Applies the accumulated (mean) gradients as one optimizer update."""
-    self._ensure_ready()
+    trainer = self._ensure_ready()
     try:
-      train_step = self._trainer.update(**kwargs)
+      train_step = trainer.update(**kwargs)
       self._last_error = None
       return train_step
     except Exception as exc:
@@ -254,10 +286,10 @@ class TrainerWorker(abstract_worker.Worker):
       **kwargs: Any,
   ) -> datatypes.Response:
     """Executes one evaluation step on the given payload."""
-    self._ensure_ready()
+    trainer = self._ensure_ready()
     req_metadata = dict(request.metadata) if request.metadata else {}
     try:
-      self._trainer.eval_step(request.payload, **kwargs)
+      trainer.eval_step(request.payload, **kwargs)
       self._last_error = None
       resp = self._response(evaluated=True, **req_metadata)
       resp.request_id = request.request_id
@@ -269,17 +301,17 @@ class TrainerWorker(abstract_worker.Worker):
 
   def run_eval(self, eval_ds: Any, **kwargs) -> datatypes.Response:
     """Runs an explicit evaluation phase over eval micro-batches."""
-    self._ensure_ready()
+    trainer = self._ensure_ready()
     if eval_ds is None:
       return self._response(evaluated=True, eval_batches=0)
     try:
-      run_eval = getattr(self._trainer, "run_eval", None)
+      run_eval = getattr(trainer, "run_eval", None)
       if callable(run_eval):
         run_eval(eval_ds, **kwargs)
         self._last_error = None
         return self._response(evaluated=True)
 
-      eval_context = getattr(self._trainer, "eval_context", None)
+      eval_context = getattr(trainer, "eval_context", None)
       context = (
           cast(ContextManager[Any], eval_context())
           if callable(eval_context)
@@ -288,7 +320,7 @@ class TrainerWorker(abstract_worker.Worker):
       eval_batches = 0
       with context:
         for payload in eval_ds:
-          self._trainer.eval_step(payload, **kwargs)
+          trainer.eval_step(payload, **kwargs)
           eval_batches += 1
       self._last_error = None
       return self._response(evaluated=True, eval_batches=eval_batches)
@@ -316,7 +348,7 @@ class TrainerWorker(abstract_worker.Worker):
       version.
     """
     del kwargs  # Accepted for engine-forwarding parity; unused.
-    self._ensure_ready()
+    trainer = self._ensure_ready()
     if items.pad_id is None or items.eos_id is None:
       raise ValueError(
           "TrainerWorker.per_token_logps requires pad_id and eos_id to be set "
@@ -351,7 +383,7 @@ class TrainerWorker(abstract_worker.Worker):
       for start in range(0, batch_size, micro_batch_size):
         sl = slice(start, start + micro_batch_size)
         outs.append(
-            self._trainer.fwd_only(
+            trainer.fwd_only(
                 _compute_per_token_logps,
                 prompt[sl],
                 completion[sl],
@@ -378,9 +410,9 @@ class TrainerWorker(abstract_worker.Worker):
 
   def save_checkpoint(self, metadata: Any, **kwargs) -> datatypes.Response:
     """Force the trainer to serialize its state (model + optimizer)."""
-    self._ensure_ready()
+    trainer = self._ensure_ready()
     try:
-      self._trainer.save_checkpoint(metadata, **kwargs)
+      trainer.save_checkpoint(metadata, **kwargs)
       self._last_error = None
       return self._response(checkpoint_saved=True)
     except Exception as exc:
@@ -390,16 +422,16 @@ class TrainerWorker(abstract_worker.Worker):
 
   def restore_checkpoint(self, **kwargs) -> Any:
     """Restore state from latest checkpoint and return the metadata pytree."""
-    return self._trainer.restore_checkpoint(**kwargs)
+    return self._ensure_ready().restore_checkpoint(**kwargs)
 
   def prepare_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
     """Stages weights for transfer and returns their metadata."""
-    self._ensure_ready()
+    trainer = self._ensure_ready()
     self.state = WorkerState.SYNCING
     try:
       if sync_request is not None:
         kwargs["sync_request"] = sync_request
-      metadata = self._trainer.prepare_weight_sync(**kwargs)
+      metadata = trainer.prepare_weight_sync(**kwargs)
       self._last_error = None
       if metadata is not None:
         return metadata
@@ -419,4 +451,4 @@ class TrainerWorker(abstract_worker.Worker):
 
   def get_metrics(self) -> Any:
     """Returns and clears the recently collected step metric records."""
-    return self._trainer.get_metrics()
+    return self._ensure_ready().get_metrics()

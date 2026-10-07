@@ -331,21 +331,44 @@ class ClusterOrchestrator:
     return handles
 
   def _bring_up_remote_workers(self, dummy_data: Any = None) -> None:
-    """Runs lifecycle hooks on remote worker handles registered directly."""
+    """Runs lifecycle hooks concurrently across remote worker handles."""
     worker_ids = sorted(self._remote_worker_infos)
-    for worker_id in worker_ids:
+    if not worker_ids:
+      return
+
+    # Each worker_id is an independent slice/replica; cross-worker weight-sync
+    # pairing runs via WeightSyncCoordinator after bring_up_workers() returns.
+    def _bring_up_worker(worker_id: str) -> None:
+      handle = self._remote_worker_handles_by_id[worker_id]
       logging.info("Initializing remote worker %s.", worker_id)
-      self._remote_worker_handles_by_id[worker_id].submit("initialize")
-    for worker_id in worker_ids:
+      handle.submit("initialize")
       logging.info("Compiling remote worker %s.", worker_id)
-      self._remote_worker_handles_by_id[worker_id].submit("compile", dummy_data)
-    for worker_id in worker_ids:
+      handle.submit("compile", dummy_data)
       logging.info("Starting remote worker %s.", worker_id)
-      self._remote_worker_handles_by_id[worker_id].submit("start")
+      handle.submit("start")
+
+    failures: list[tuple[str, BaseException]] = []
+    with futures.ThreadPoolExecutor(max_workers=len(worker_ids)) as pool:
+      fut_to_wid = {
+          pool.submit(_bring_up_worker, wid): wid for wid in worker_ids
+      }
+      for fut in futures.as_completed(fut_to_wid):
+        wid = fut_to_wid[fut]
+        try:
+          fut.result()
+        except Exception as err:  # pylint: disable=broad-except
+          logging.error("Remote worker %s failed bring-up: %r", wid, err)
+          failures.append((wid, err))
+
+    if failures:
+      failures.sort(key=lambda item: item[0])
+      raise lifecycle.LifecycleError("bring_up", failures) from failures[0][1]
 
   def _shutdown_remote_workers(self) -> None:
     """Stops remote worker handles best-effort, with a hard timeout."""
-    pool = futures.ThreadPoolExecutor(max_workers=4)
+    pool = futures.ThreadPoolExecutor(
+        max_workers=max(1, len(self._remote_worker_infos))
+    )
     stops = {
         worker_id: pool.submit(
             self._remote_worker_handles_by_id[worker_id].submit, "stop"

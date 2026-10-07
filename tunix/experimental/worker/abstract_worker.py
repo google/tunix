@@ -20,7 +20,7 @@ pipeline (e.g. TrainerWorker is a wrapper around the Trainer).
 """
 
 import abc
-from collections.abc import Iterator
+from collections.abc import Awaitable, Iterator
 import contextlib
 import contextvars
 import functools
@@ -172,7 +172,7 @@ class Worker(abc.ABC):
     pass
 
   @abc.abstractmethod
-  def start(self) -> datatypes.Response:
+  def start(self) -> datatypes.Response | Awaitable[datatypes.Response]:
     """Starts the worker's main loop."""
     pass
 
