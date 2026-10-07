@@ -1,6 +1,7 @@
 import copy
 import json
 import os
+from unittest import mock
 
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -100,6 +101,85 @@ class StepTest(trajectory_testing.TrajectoryTestCase):
     self.assertEqual(step_dict["policy_version"], 42)
     restored_step = trajectory.TunixAgentStep(**step_dict)
     self.assertEqual(restored_step, step)
+
+
+class MetadataDictSerializationTest(parameterized.TestCase):
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="primitive_list",
+          extra={"tokens": [1, 2, 3]},
+          expected={"tokens": [1, 2, 3]},
+      ),
+      dict(
+          testcase_name="mixed_primitive_list",
+          extra={"values": [True, 1, 2.5, "a", None]},
+          expected={"values": [True, 1, 2.5, "a", None]},
+      ),
+      dict(
+          testcase_name="empty_list",
+          extra={"values": []},
+          expected={"values": []},
+      ),
+      dict(
+          testcase_name="primitive_tuple",
+          extra={"pair": (1, 2)},
+          expected={"pair": [1, 2]},
+      ),
+      dict(
+          testcase_name="ndarray",
+          extra={"arr": np.array([1, 2])},
+          expected={"arr": [1, 2]},
+      ),
+      dict(
+          testcase_name="ndarray_in_list",
+          extra={"values": [1, np.array([2, 3])]},
+          expected={"values": [1, [2, 3]]},
+      ),
+      dict(
+          testcase_name="nested_sequences",
+          extra={"rows": [[1, 2], (3, 4)]},
+          expected={"rows": [[1, 2], [3, 4]]},
+      ),
+      dict(
+          testcase_name="dict_in_list",
+          extra={"items": [{"arr": np.array([1])}]},
+          expected={"items": [{"arr": [1]}]},
+      ),
+      dict(
+          testcase_name="non_primitive_scalars",
+          extra={"values": [trajectory.Source.AGENT, np.int64(7)]},
+          expected={"values": [trajectory.Source.AGENT, np.int64(7)]},
+      ),
+  )
+  def test_model_dump_converts_nested_arrays_and_tuples_to_lists(
+      self, extra, expected
+  ):
+    step = trajectory.Step(
+        step_id=1, source=trajectory.Source.AGENT, message="msg", extra=extra
+    )
+
+    self.assertEqual(step.model_dump()["extra"], expected)
+
+  def test_model_dump_does_not_recurse_into_primitive_list_elements(self):
+    tokens = list(range(1000))
+    step = trajectory.Step(
+        step_id=1,
+        source=trajectory.Source.AGENT,
+        message="msg",
+        extra={"tokens": tokens},
+    )
+
+    with mock.patch.object(
+        trajectory,
+        "_to_json_compatible",
+        wraps=trajectory._to_json_compatible,
+    ) as mock_to_json_compatible:
+      dumped_extra = step.model_dump()["extra"]
+
+    self.assertEqual(dumped_extra, {"tokens": tokens})
+    # One call for the `extra` dict and one for the list, none per element.
+    self.assertEqual(mock_to_json_compatible.call_count, 2)
 
 
 class TrajectoryTest(trajectory_testing.TrajectoryTestCase):

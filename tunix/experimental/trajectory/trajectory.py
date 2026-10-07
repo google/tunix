@@ -37,21 +37,35 @@ def _serialize_array(value: list[Any] | np.ndarray | None) -> list[Any] | None:
   return list(value)
 
 
+# Sequences whose elements all have one of these exact types are copied without
+# per-element recursion: one C-level scan of `map(type, ...)` vets the whole
+# sequence. Any other element type, including subclasses such as `StrEnum` and
+# NumPy scalars, takes the recursive path, which also returns it unchanged.
+_JSON_SCALAR_TYPES: Final[frozenset[type[object]]] = frozenset(
+    {bool, float, int, str, type(None)}
+)
+
+
+def _to_json_compatible(value: Any) -> Any:
+  """Recursively converts NumPy arrays and tuples nested in `value` to lists."""
+  if isinstance(value, np.ndarray):
+    return value.tolist()
+  if isinstance(value, dict):
+    return {k: _to_json_compatible(v) for k, v in value.items()}
+  if isinstance(value, (list, tuple)):
+    # `to_atif_step()` packs long token, mask, and logprob lists into `extra`;
+    # copy scalar-only sequences without a Python call per element.
+    if _JSON_SCALAR_TYPES.issuperset(map(type, value)):
+      return list(value)
+    return [_to_json_compatible(v) for v in value]
+  return value
+
+
 def _serialize_dict(value: dict[str, Any] | None) -> dict[str, Any] | None:
   """Recursively converts any nested NumPy arrays within a dictionary to lists."""
   if value is None:
     return None
-
-  def _convert(v: Any) -> Any:
-    if isinstance(v, np.ndarray):
-      return v.tolist()
-    if isinstance(v, dict):
-      return {k: _convert(val) for k, val in v.items()}
-    if isinstance(v, (list, tuple)):
-      return [_convert(x) for x in v]
-    return v
-
-  return _convert(value)
+  return _to_json_compatible(value)
 
 
 TUNIX_EXTENSIONS_KEY: Final[str] = "_tunix_extensions"
