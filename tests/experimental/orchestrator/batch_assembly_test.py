@@ -2694,6 +2694,188 @@ class SequencePackedRoutingTest(absltest.TestCase):
     ):
       self._assembler(segment_alignment_boundary=0)
 
+  def test_router_replay_coverage_logs_for_top_k_1_2_and_4(self):
+    for top_k in (1, 2, 4):
+      routed = np.zeros((1, 4, 2, top_k), dtype=np.int16)
+      routed[0, :3] = np.arange(top_k, dtype=np.int16)
+      routed[0, 3:] = _UNSET
+      # Token 1 has duplicate expert ID when top_k >= 2.
+      if top_k >= 2:
+        routed[0, 1, 0, 1] = routed[0, 1, 0, 0]
+      seg_ids = np.array([[1, 1, 1, 0]], dtype=np.int32)
+      payload = datatypes.RLTrainerPayload(
+          prompt_ids=np.zeros((1, 0), dtype=np.int32),
+          prompt_mask=np.zeros((1, 0), dtype=np.float32),
+          completion_ids=np.ones((1, 4), dtype=np.int32),
+          completion_mask=np.ones((1, 4), dtype=np.float32),
+          advantages=np.zeros((1, 4), dtype=np.float32),
+          segment_ids=seg_ids,
+          routed_experts=routed,
+      )
+      with self.assertLogs(level="INFO") as logs:
+        batch_assembly._log_router_replay_coverage(
+            payload, batch_id="test_b0", num_segments=1
+        )
+      expected = (
+          "3/3 real tokens forced" if top_k == 1 else "2/3 real tokens forced"
+      )
+      self.assertTrue(
+          any(expected in msg for msg in logs.output),
+          f"Expected {expected!r} in {logs.output}",
+      )
+
+  def _assert_batches_identical(
+      self,
+      cpp_batches: list[batch_assembly.AssembledBatch],
+      py_batches: list[batch_assembly.AssembledBatch],
+  ) -> None:
+    self.assertEqual(len(cpp_batches), len(py_batches))
+    for cb, pb in zip(cpp_batches, py_batches):
+      self.assertEqual(cb.is_final_batch, pb.is_final_batch)
+      self.assertEqual(cb.trajectory_ids, pb.trajectory_ids)
+      self.assertEqual(
+          cb.padding_stats.row_capacity, pb.padding_stats.row_capacity
+      )
+      np.testing.assert_array_equal(
+          cb.padding_stats.row_valid_tokens, pb.padding_stats.row_valid_tokens
+      )
+      np.testing.assert_array_equal(
+          cb.padding_stats.row_num_sequences, pb.padding_stats.row_num_sequences
+      )
+      cp, pp = cb.payload, pb.payload
+      for name in (
+          "prompt_ids",
+          "prompt_mask",
+          "completion_ids",
+          "completion_mask",
+          "advantages",
+          "segment_ids",
+          "segment_positions",
+          "ref_per_token_logps",
+          "old_per_token_logps",
+          "returns",
+          "old_values",
+          "sampler_is_weights",
+          "routed_experts",
+      ):
+        ca, pa = getattr(cp, name), getattr(pp, name)
+        if pa is None:
+          self.assertIsNone(ca, f"Field {name} expected None")
+        else:
+          self.assertIsNotNone(ca, f"Field {name} unexpectedly None")
+          self.assertEqual(ca.dtype, pa.dtype, f"Dtype mismatch on {name}")
+          np.testing.assert_array_equal(ca, pa, err_msg=f"Mismatch on {name}")
+
+  def test_cpp_and_python_parity_for_to_pack_item_and_assemblers(self):
+    if packing._packing_ext is None:
+      self.skipTest("_packing_ext C++ extension is not available in OSS.")
+
+    rng = np.random.default_rng(77)
+    payloads = []
+    for i in range(18):
+      p_len = int(rng.integers(3, 28))
+      c_len = int(rng.integers(4, 36))
+      full_len = p_len + c_len
+      routed_len = full_len - (i % 2)
+      routed_dtype = np.int32 if i % 3 == 0 else np.int16
+      payloads.append(
+          datatypes.RLTrainerPayload(
+              prompt_ids=rng.integers(1, 500, size=p_len, dtype=np.int32),
+              prompt_mask=(
+                  np.ones(p_len, dtype=np.float32) if i % 2 == 0 else None
+              ),
+              completion_ids=rng.integers(1, 500, size=c_len, dtype=np.int32),
+              completion_mask=(
+                  rng.integers(0, 2, size=full_len).astype(np.float32)
+                  if i % 3 == 0
+                  else np.ones(c_len, dtype=np.float32)
+              ),
+              advantages=(
+                  np.array([float(i) * 0.25], dtype=np.float32)
+                  if i % 4 == 0
+                  else rng.standard_normal(full_len).astype(np.float32)
+              ),
+              old_per_token_logps=rng.standard_normal(c_len).astype(np.float32),
+              returns=rng.standard_normal(full_len).astype(np.float32),
+              routed_experts=rng.integers(
+                  0,
+                  16,
+                  size=(routed_len, _ROUTING_LAYERS, _ROUTING_TOP_K),
+                  dtype=routed_dtype,
+              ),
+              metadata={"traj_id": f"traj_{i}"},
+          )
+      )
+
+    orig_ext = packing._packing_ext
+    # 1. Verify `to_pack_item` bit-for-bit parity.
+    cpp_items = [batch_assembly.to_pack_item(p) for p in payloads]
+    try:
+      packing._packing_ext = None
+      py_items = [batch_assembly.to_pack_item(p) for p in payloads]
+    finally:
+      packing._packing_ext = orig_ext
+    for ci, pi in zip(cpp_items, py_items):
+      np.testing.assert_array_equal(ci.prompt_ids, pi.prompt_ids)
+      np.testing.assert_array_equal(ci.completion_ids, pi.completion_ids)
+      np.testing.assert_array_equal(ci.completion_mask, pi.completion_mask)
+      np.testing.assert_array_equal(ci.advantages, pi.advantages)
+      self.assertEqual(set(ci.per_token.keys()), set(pi.per_token.keys()))
+      for k in pi.per_token:
+        np.testing.assert_array_equal(ci.per_token[k], pi.per_token[k])
+      np.testing.assert_array_equal(ci.routed_experts, pi.routed_experts)
+
+    # 2. Verify `SequencePackedBatchAssembler` bit-for-bit parity.
+    for boundary in (1, 64):
+      def _run_seq_packed(bd: int) -> list[batch_assembly.AssembledBatch]:
+        asm = batch_assembly.SequencePackedBatchAssembler(
+            batch_size=2,
+            num_generations=4,
+            mini_batch_size=2,
+            max_packed_len=128,
+            pad_id=9,
+            segment_alignment_boundary=bd,
+        )
+        out = []
+        out.extend(asm.feed(payloads[:5]))
+        out.extend(asm.feed(payloads[5:13]))
+        out.extend(asm.feed(payloads[13:]))
+        out.extend(asm.flush())
+        return out
+
+      cpp_seq = _run_seq_packed(boundary)
+      try:
+        packing._packing_ext = None
+        py_seq = _run_seq_packed(boundary)
+      finally:
+        packing._packing_ext = orig_ext
+      self._assert_batches_identical(cpp_seq, py_seq)
+
+    # 3. Verify `PaddedBatchAssembler` bit-for-bit parity.
+    def _run_padded() -> list[batch_assembly.AssembledBatch]:
+      asm = batch_assembly.PaddedBatchAssembler(
+          batch_size=4,
+          max_prompt_length=16,
+          max_response_length=20,
+          pad_id=7,
+          num_generations=4,
+          mini_batch_size=2,
+      )
+      out = []
+      out.extend(asm.feed(payloads[:6]))
+      out.extend(asm.feed(payloads[6:14]))
+      out.extend(asm.feed(payloads[14:]))
+      out.extend(asm.flush())
+      return out
+
+    cpp_padded = _run_padded()
+    try:
+      packing._packing_ext = None
+      py_padded = _run_padded()
+    finally:
+      packing._packing_ext = orig_ext
+    self._assert_batches_identical(cpp_padded, py_padded)
+
 
 if __name__ == "__main__":
   absltest.main()

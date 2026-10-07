@@ -22,6 +22,11 @@ from typing import Iterable, Mapping, Sequence, overload
 import numpy as np
 from tunix.rl.agentic.agents import agent_types
 
+try:
+  from tunix.rl import _packing_ext  # pylint: disable=g-import-not-at-top
+except ImportError:
+  _packing_ext = None
+
 # Optional per-token fields tracked in a PackItem.
 PER_TOKEN_FIELDS: tuple[str, ...] = (
     "ref_per_token_logps",
@@ -69,11 +74,11 @@ class PackItem:
   routed_experts: np.ndarray | None = None
 
   def __post_init__(self):
-    for name in (
-        "prompt_ids",
-        "completion_ids",
-        "completion_mask",
-        "advantages",
+    for name, expected_dtype in (
+        ("prompt_ids", np.int32),
+        ("completion_ids", np.int32),
+        ("completion_mask", np.float32),
+        ("advantages", np.float32),
     ):
       arr = getattr(self, name)
       if not isinstance(arr, np.ndarray) or arr.ndim != 1:
@@ -81,6 +86,10 @@ class PackItem:
             f"PackItem.{name} must be a 1D numpy array, got"
             f" {type(arr).__name__} with shape {getattr(arr, 'shape', None)}."
             " Unpad and flatten before packing."
+        )
+      if arr.dtype != expected_dtype or not arr.flags.c_contiguous:
+        object.__setattr__(
+            self, name, np.ascontiguousarray(arr, dtype=expected_dtype)
         )
     c = self.completion_ids.shape[0]
     for name in ("completion_mask", "advantages"):
@@ -90,6 +99,7 @@ class PackItem:
             f"PackItem.{name} must have length matching completion_ids length;"
             f" got {dim}, expected {c}."
         )
+    normalized_pt: dict[str, np.ndarray] | None = None
     for key, arr in self.per_token.items():
       if key not in PER_TOKEN_FIELDS:
         raise ValueError(
@@ -102,6 +112,12 @@ class PackItem:
             f" (c,), got {type(arr).__name__} with shape"
             f" {getattr(arr, 'shape', None)}."
         )
+      if arr.dtype != np.float32 or not arr.flags.c_contiguous:
+        if normalized_pt is None:
+          normalized_pt = dict(self.per_token)
+        normalized_pt[key] = np.ascontiguousarray(arr, dtype=np.float32)
+    if normalized_pt is not None:
+      object.__setattr__(self, "per_token", normalized_pt)
     if self.routed_experts is not None:
       n = self.prompt_ids.shape[0] + c
       min_len = max(n - 1, 0)
@@ -117,6 +133,12 @@ class PackItem:
             " (p + c - 1 or p + c, num_layers, top_k) with length in"
             f" [{min_len}, {n}], got {type(routed).__name__} with shape"
             f" {getattr(routed, 'shape', None)}."
+        )
+      if routed.dtype != np.int16 or not routed.flags.c_contiguous:
+        object.__setattr__(
+            self,
+            "routed_experts",
+            np.ascontiguousarray(routed, dtype=np.int16),
         )
 
   @property
@@ -284,6 +306,18 @@ def fill_one_chunk(
     not fit into any bin.
   """
   _check_segment_alignment_boundary(segment_alignment_boundary)
+  if _packing_ext is not None and items and pack_size > 0 and max_segments > 0:
+    bin_indices, leftover_indices = _packing_ext.fill_one_chunk_fast(
+        [item.num_tokens for item in items],
+        budget,
+        pack_size,
+        max_segments,
+        segment_alignment_boundary,
+    )
+    return (
+        [[items[i] for i in b_idxs] for b_idxs in bin_indices],
+        [items[i] for i in leftover_indices],
+    )
   bins: list[list[PackItem]] = [[] for _ in range(pack_size)]
   loads = [0] * pack_size
   order = sorted(
@@ -352,6 +386,43 @@ def pack_chunk(
   """
   _check_segment_alignment_boundary(segment_alignment_boundary)
   n_bins = len(bins)
+  routed_shape = routed_experts_shape(
+      [item for bin_items in bins for item in bin_items]
+  )
+  if _packing_ext is not None:
+    (
+        ids,
+        prompt_mask,
+        completion_mask,
+        advantages,
+        segment_ids,
+        segment_positions,
+        per_token,
+        routed,
+    ) = _packing_ext.pack_chunk_fast(
+        bins,
+        list(carried),
+        budget,
+        pad_id,
+        segment_alignment_boundary,
+        routed_shape,
+    )
+    return PackedChunk(
+        ids=ids,
+        prompt_mask=prompt_mask,
+        completion_mask=completion_mask,
+        advantages=advantages,
+        segment_ids=segment_ids,
+        segment_positions=segment_positions,
+        per_token=per_token,
+        policy_versions=tuple(
+            bin_items[0].policy_version if bin_items else None
+            for bin_items in bins
+        ),
+        num_real_segments=tuple(len(bin_items) for bin_items in bins),
+        routed_experts=routed,
+    )
+
   ids = np.full((n_bins, budget), pad_id, dtype=np.int32)
   prompt_mask = np.zeros((n_bins, budget), dtype=np.float32)
   completion_mask = np.zeros((n_bins, budget), dtype=np.float32)
@@ -361,9 +432,6 @@ def pack_chunk(
   per_token = {
       name: np.zeros((n_bins, budget), dtype=np.float32) for name in carried
   }
-  routed_shape = routed_experts_shape(
-      [item for bin_items in bins for item in bin_items]
-  )
   routed = (
       None
       if routed_shape is None
@@ -444,6 +512,60 @@ def validate_items(items: Iterable[PackItem], budget: int) -> None:
       )
 
 
+def pack_chunks_with_bins_fast(
+    items: Sequence[PackItem],
+    *,
+    carried: Sequence[str],
+    budget: int,
+    pack_size: int,
+    max_segments: int,
+    pad_id: int,
+    segment_alignment_boundary: int,
+    min_buffered_tokens: int = 0,
+) -> tuple[list[tuple[PackedChunk, list[list[int]]]], list[int]]:
+  """Packs chunks via `_packing_ext`, returning `(chunks_with_bins, leftover)`."""
+  assert _packing_ext is not None
+  raw_chunks, leftover_indices = _packing_ext.pack_sequence_chunks_fast(
+      items,
+      list(carried),
+      budget,
+      pack_size,
+      max_segments,
+      pad_id,
+      segment_alignment_boundary,
+      min_buffered_tokens,
+  )
+  out: list[tuple[PackedChunk, list[list[int]]]] = []
+  for (
+      ids,
+      prompt_mask,
+      completion_mask,
+      advantages,
+      segment_ids,
+      segment_positions,
+      per_token,
+      routed,
+      bin_indices,
+  ) in raw_chunks:
+    chunk = PackedChunk(
+        ids=ids,
+        prompt_mask=prompt_mask,
+        completion_mask=completion_mask,
+        advantages=advantages,
+        segment_ids=segment_ids,
+        segment_positions=segment_positions,
+        per_token=per_token,
+        policy_versions=tuple(
+            items[b_idxs[0]].policy_version if b_idxs else None
+            for b_idxs in bin_indices
+        ),
+        num_real_segments=tuple(len(b_idxs) for b_idxs in bin_indices),
+        routed_experts=routed,
+    )
+    out.append((chunk, bin_indices))
+  return out, leftover_indices
+
+
 def pack_core(
     items: Sequence[PackItem],
     *,
@@ -474,7 +596,19 @@ def pack_core(
   max_segments = effective_max_segments(budget, max_segments_per_packed_row)
   carried = carried_per_token_fields(items)
 
-  chunks: list[PackedChunk] = []
+  if _packing_ext is not None:
+    chunks_with_bins, _ = pack_chunks_with_bins_fast(
+        items,
+        carried=carried,
+        budget=budget,
+        pack_size=pack_size,
+        max_segments=max_segments,
+        pad_id=pad_id,
+        segment_alignment_boundary=segment_alignment_boundary,
+    )
+    return [chunk for chunk, _ in chunks_with_bins]
+
+  chunks = []
   remaining = list(items)
   while remaining:
     bins, remaining = fill_one_chunk(

@@ -437,6 +437,9 @@ def _require_unbatched(item: datatypes.RLTrainerPayload) -> None:
 
 def to_pack_item(item: datatypes.RLTrainerPayload) -> packing.PackItem:
   """Converts an RLTrainerPayload to a packing.PackItem."""
+  ext = packing._packing_ext  # pylint: disable=protected-access
+  if ext is not None:
+    return ext.to_pack_item_fast(item, packing.PackItem)
   _require_unbatched(item)
   prompt = (
       np.zeros(0, dtype=np.int32)
@@ -535,16 +538,32 @@ def _log_router_replay_coverage(
     batch_id: Microbatch tracking id for the log line.
     num_segments: Number of trajectories packed into the payload.
   """
-  real = np.asarray(payload.segment_ids) > 0
-  layer0 = np.sort(np.asarray(payload.routed_experts)[..., 0, :], axis=-1)
-  forced = np.all(layer0 >= 0, axis=-1) & ~np.any(
-      layer0[..., 1:] == layer0[..., :-1], axis=-1
-  )
+  ext = packing._packing_ext  # pylint: disable=protected-access
+  routed_arr = np.asarray(payload.routed_experts, dtype=np.int16)
+  seg_arr = np.asarray(payload.segment_ids, dtype=np.int32)
+  if (
+      ext is not None
+      and routed_arr.ndim == 4
+      and seg_arr.ndim == 2
+      and routed_arr.flags.c_contiguous
+      and seg_arr.flags.c_contiguous
+  ):
+    num_forced, num_real = ext.count_router_replay_forced_tokens(
+        routed_arr, seg_arr
+    )
+  else:
+    real = seg_arr > 0
+    layer0 = np.sort(routed_arr[..., 0, :], axis=-1)
+    forced = np.all(layer0 >= 0, axis=-1) & ~np.any(
+        layer0[..., 1:] == layer0[..., :-1], axis=-1
+    )
+    num_forced = int(np.count_nonzero(forced & real))
+    num_real = int(np.count_nonzero(real))
   logging.info(
       "Router replay: %d/%d real tokens forced in %s (%d segments; aligned"
       " routing forces real - segments).",
-      int(np.count_nonzero(forced & real)),
-      int(np.count_nonzero(real)),
+      num_forced,
+      num_real,
       batch_id,
       num_segments,
   )
@@ -661,27 +680,19 @@ class SequencePackedBatchAssembler:
     """Total number of rollouts expected per optimizer update."""
     return self.mini_batch_size * self.num_generations
 
-  def _emit_one_chunk(
-      self, *, max_segments: int, drain_all: bool
+  def _build_assembled_batch(
+      self,
+      chunk: packing.PackedChunk,
+      *,
+      placed: Sequence[packing.PackItem],
+      traj_ids: tuple[str, ...],
+      placed_items: Sequence[datatypes.RLTrainerPayload],
+      row_valid_tokens: np.ndarray,
+      row_num_sequences: np.ndarray,
+      max_segments: int,
+      is_final_batch: bool,
   ) -> AssembledBatch:
-    """Packs the head of the buffer into one microbatch, keeping leftovers."""
-    pack_items = [item for item, _, _ in self._buffer]
-    carried = packing.carried_per_token_fields(pack_items)
-    id_to_entry = {
-        id(item): entry for entry, item in zip(self._buffer, pack_items)
-    }
-    bins, leftover = packing.fill_one_chunk(
-        pack_items,
-        pack_size=self.batch_size,
-        budget=self.max_packed_len,
-        max_segments=max_segments,
-        segment_alignment_boundary=self.segment_alignment_boundary,
-    )
-    placed = []
-    for bin_items in bins:
-      placed.extend(bin_items)
-    traj_ids = tuple(id_to_entry[id(item)][1] for item in placed)
-    placed_items = [id_to_entry[id(item)][2] for item in placed]
+    """Wraps a PackedChunk and its placement metadata into an AssembledBatch."""
     num_unrouted = sum(item.routed_experts is None for item in placed)
     if 0 < num_unrouted < len(placed):
       logging.warning(
@@ -690,13 +701,6 @@ class SequencePackedBatchAssembler:
           num_unrouted,
           len(placed),
       )
-    chunk = packing.pack_chunk(
-        bins,
-        budget=self.max_packed_len,
-        pad_id=self.pad_id,
-        carried=carried,
-        segment_alignment_boundary=self.segment_alignment_boundary,
-    )
     batch_tracking_id = f"{_BATCH_ID_PREFIX}_{self._batch_counter}"
     merged_lineage = _merge_batch_lineage(
         placed_items,
@@ -718,19 +722,57 @@ class SequencePackedBatchAssembler:
       _log_router_replay_coverage(
           payload, batch_id=batch_tracking_id, num_segments=len(placed)
       )
+    return AssembledBatch(
+        payload=payload,
+        is_final_batch=is_final_batch,
+        padding_stats=PaddingStats(
+            row_valid_tokens=row_valid_tokens,
+            row_num_sequences=row_num_sequences,
+            row_capacity=self.max_packed_len,
+        ),
+        trajectory_ids=traj_ids,
+    )
+
+  def _emit_one_chunk(
+      self, *, max_segments: int, drain_all: bool
+  ) -> AssembledBatch:
+    """Packs the head of the buffer into one microbatch, keeping leftovers."""
+    pack_items = [item for item, _, _ in self._buffer]
+    carried = packing.carried_per_token_fields(pack_items)
+    id_to_entry = {
+        id(item): entry for entry, item in zip(self._buffer, pack_items)
+    }
+    bins, leftover = packing.fill_one_chunk(
+        pack_items,
+        pack_size=self.batch_size,
+        budget=self.max_packed_len,
+        max_segments=max_segments,
+        segment_alignment_boundary=self.segment_alignment_boundary,
+    )
+    placed: list[packing.PackItem] = []
+    for bin_items in bins:
+      placed.extend(bin_items)
+    traj_ids = tuple(id_to_entry[id(item)][1] for item in placed)
+    placed_items = [id_to_entry[id(item)][2] for item in placed]
     self._buffer = [id_to_entry[id(item)] for item in leftover]
-    padding_stats = PaddingStats(
+    chunk = packing.pack_chunk(
+        bins,
+        budget=self.max_packed_len,
+        pad_id=self.pad_id,
+        carried=carried,
+        segment_alignment_boundary=self.segment_alignment_boundary,
+    )
+    return self._build_assembled_batch(
+        chunk,
+        placed=placed,
+        traj_ids=traj_ids,
+        placed_items=placed_items,
         row_valid_tokens=np.array(
             [sum(item.num_tokens for item in b) for b in bins], dtype=np.int64
         ),
         row_num_sequences=np.array([len(b) for b in bins], dtype=np.int64),
-        row_capacity=self.max_packed_len,
-    )
-    return AssembledBatch(
-        payload=payload,
+        max_segments=max_segments,
         is_final_batch=drain_all and not self._buffer,
-        padding_stats=padding_stats,
-        trajectory_ids=traj_ids,
     )
 
   def _drain_buffer(self, *, drain_all: bool) -> Iterator[AssembledBatch]:
@@ -749,10 +791,65 @@ class SequencePackedBatchAssembler:
     Yields:
       Assembled microbatches packed one chunk at a time.
     """
+    if not self._buffer:
+      return
     max_segments = packing.effective_max_segments(
         self.max_packed_len, self.max_segments_per_packed_row
     )
     chunk_capacity = self.batch_size * self.max_packed_len
+    ext = packing._packing_ext  # pylint: disable=protected-access
+    if (
+        ext is not None
+        and "_emit_one_chunk" not in self.__dict__
+        and self.batch_size > 0
+        and max_segments > 0
+    ):
+      min_tokens = 0 if drain_all else chunk_capacity
+      if (
+          min_tokens > 0
+          and sum(entry[0].num_tokens for entry in self._buffer) < min_tokens
+      ):
+        return
+      pack_items = [entry[0] for entry in self._buffer]
+      chunks_with_bins, _ = packing.pack_chunks_with_bins_fast(
+          pack_items,
+          carried=packing.carried_per_token_fields(pack_items),
+          budget=self.max_packed_len,
+          pack_size=self.batch_size,
+          max_segments=max_segments,
+          pad_id=self.pad_id,
+          segment_alignment_boundary=self.segment_alignment_boundary,
+          min_buffered_tokens=min_tokens,
+      )
+      orig_buffer = self._buffer
+      remaining_mask = [True] * len(orig_buffer)
+      for chunk, bin_indices in chunks_with_bins:
+        placed_indices: list[int] = []
+        for b_idxs in bin_indices:
+          placed_indices.extend(b_idxs)
+        for i in placed_indices:
+          remaining_mask[i] = False
+        self._buffer = [
+            entry for entry, keep in zip(orig_buffer, remaining_mask) if keep
+        ]
+        yield self._build_assembled_batch(
+            chunk,
+            placed=[pack_items[i] for i in placed_indices],
+            traj_ids=tuple(orig_buffer[i][1] for i in placed_indices),
+            placed_items=[orig_buffer[i][2] for i in placed_indices],
+            row_valid_tokens=np.array(
+                [
+                    sum(pack_items[i].num_tokens for i in b_idxs)
+                    for b_idxs in bin_indices
+                ],
+                dtype=np.int64,
+            ),
+            row_num_sequences=np.array(chunk.num_real_segments, dtype=np.int64),
+            max_segments=max_segments,
+            is_final_batch=drain_all and not self._buffer,
+        )
+      return
+
     while self._buffer:
       if not drain_all:
         buffered_tokens = sum(item[0].num_tokens for item in self._buffer)
@@ -765,10 +862,16 @@ class SequencePackedBatchAssembler:
       items: Sequence[datatypes.RLTrainerPayload],
   ) -> Iterator[AssembledBatch]:
     """Ingests items and yields microbatches, flushing at the update boundary."""
-    for item in items:
-      pack_item = to_pack_item(item)
-      packing.validate_items([pack_item], self.max_packed_len)
-      self._buffer.append((pack_item, _extract_trajectory_id(item), item))
+    ext = packing._packing_ext  # pylint: disable=protected-access
+    if ext is not None:
+      ext.ingest_payloads_fast(
+          items, self.max_packed_len, packing.PackItem, self._buffer
+      )
+    else:
+      for item in items:
+        pack_item = to_pack_item(item)
+        packing.validate_items([pack_item], self.max_packed_len)
+        self._buffer.append((pack_item, _extract_trajectory_id(item), item))
     self._rollouts_since_update += len(items)
     is_update_done = (
         self._rollouts_since_update >= self.rollouts_per_optimizer_update
@@ -994,96 +1097,112 @@ class PaddedBatchAssembler:
           partially_present_fields,
       )
 
-    batched_prompt_ids = np.full(
-        (self.batch_size, self.max_prompt_length), self.pad_id, dtype=np.int32
-    )
-    batched_prompt_mask = np.zeros(
-        (self.batch_size, self.max_prompt_length), dtype=np.float32
-    )
-    batched_completion_ids = np.full(
-        (self.batch_size, self.max_response_length), self.pad_id, dtype=np.int32
-    )
-    batched_completion_mask = np.zeros(
-        (self.batch_size, self.max_response_length), dtype=np.float32
-    )
-    batched_advantages = np.zeros(
-        (self.batch_size, self.max_response_length), dtype=np.float32
-    )
-    stacked_optional: dict[str, np.ndarray] = {
-        name: np.zeros(
-            (self.batch_size, self.max_response_length), dtype=np.float32
-        )
-        for name in present_fields
-    }
     # Router replay is all-or-nothing per batch: a partially replayed batch
     # would silently mix replayed and freshly routed rows.
     replay_routing = bool(chunk) and all(
         it.routed_experts is not None for it in chunk
     )
-    batched_routed_experts: np.ndarray | None = None
-    truncated_prompts = truncated_completions = 0
-    row_valid_tokens = np.zeros(self.batch_size, dtype=np.int64)
-    row_num_sequences = np.zeros(self.batch_size, dtype=np.int64)
-
-    for row_idx, item in enumerate(chunk):
-      p_full = np.asarray(item.prompt_ids, dtype=np.int32).reshape(-1)
-      c_full = np.asarray(item.completion_ids, dtype=np.int32).reshape(-1)
-      truncated_prompts += p_full.size > self.max_prompt_length
-      truncated_completions += c_full.size > self.max_response_length
-      c = c_full[: self.max_response_length]
-      row_valid_tokens[row_idx] = (
-          min(p_full.size, self.max_prompt_length) + c.size
-      )
-      row_num_sequences[row_idx] = 1
-
-      p_ids, p_default_mask = _left_pad(
-          p_full, self.max_prompt_length, pad_id=self.pad_id
-      )
-      c_ids, c_valid = _right_pad(
-          c, self.max_response_length, pad_value=self.pad_id, dtype=np.int32
-      )
-      batched_prompt_ids[row_idx] = p_ids
-      batched_completion_ids[row_idx] = c_ids
-
-      # A caller-supplied prompt mask is prompt-aligned, so it must be
-      # left-padded exactly like the prompt ids to stay in register. If its
-      # length disagrees with the prompt the alignment is undefined, so fall
-      # back to the validity mask derived from the ids themselves.
-      p_mask = p_default_mask
-      if item.prompt_mask is not None:
-        src = np.asarray(item.prompt_mask, dtype=np.float32).reshape(-1)
-        if src.size == p_full.size:
-          src = src[-self.max_prompt_length :]
-          p_mask = np.zeros(self.max_prompt_length, dtype=np.float32)
-          if src.size:
-            p_mask[-src.size :] = src
-      batched_prompt_mask[row_idx] = p_mask
-
-      action_source = item.completion_mask
-      if action_source is None:
-        c_mask = c_valid
-      else:
-        c_mask = _completion_aligned(
-            action_source,
-            c.size,
-            self.max_response_length,
-            prompt_len=p_full.size,
-            full_completion_len=c_full.size,
-        )
-      batched_completion_mask[row_idx] = c_mask
-
-      batched_advantages[row_idx] = _completion_aligned(
-          item.advantages,
-          c.size,
+    ext = packing._packing_ext  # pylint: disable=protected-access
+    if ext is not None:
+      (
+          batched_prompt_ids,
+          batched_prompt_mask,
+          batched_completion_ids,
+          batched_completion_mask,
+          batched_advantages,
+          stacked_optional,
+          batched_routed_experts,
+          row_valid_tokens,
+          row_num_sequences,
+          truncated_prompts,
+          truncated_completions,
+      ) = ext.assemble_padded_chunk_fast(
+          chunk,
+          present_fields,
+          self.batch_size,
+          self.max_prompt_length,
           self.max_response_length,
-          fill_value=0.0,
-          prompt_len=p_full.size,
-          full_completion_len=c_full.size,
+          self.pad_id,
+          replay_routing,
       )
+    else:
+      batched_prompt_ids = np.full(
+          (self.batch_size, self.max_prompt_length), self.pad_id, dtype=np.int32
+      )
+      batched_prompt_mask = np.zeros(
+          (self.batch_size, self.max_prompt_length), dtype=np.float32
+      )
+      batched_completion_ids = np.full(
+          (self.batch_size, self.max_response_length),
+          self.pad_id,
+          dtype=np.int32,
+      )
+      batched_completion_mask = np.zeros(
+          (self.batch_size, self.max_response_length), dtype=np.float32
+      )
+      batched_advantages = np.zeros(
+          (self.batch_size, self.max_response_length), dtype=np.float32
+      )
+      stacked_optional: dict[str, np.ndarray] = {
+          name: np.zeros(
+              (self.batch_size, self.max_response_length), dtype=np.float32
+          )
+          for name in present_fields
+      }
+      batched_routed_experts: np.ndarray | None = None
+      truncated_prompts = truncated_completions = 0
+      row_valid_tokens = np.zeros(self.batch_size, dtype=np.int64)
+      row_num_sequences = np.zeros(self.batch_size, dtype=np.int64)
 
-      for name, batch_arr in stacked_optional.items():
-        batch_arr[row_idx] = _completion_aligned(
-            getattr(item, name),
+      for row_idx, item in enumerate(chunk):
+        p_full = np.asarray(item.prompt_ids, dtype=np.int32).reshape(-1)
+        c_full = np.asarray(item.completion_ids, dtype=np.int32).reshape(-1)
+        truncated_prompts += p_full.size > self.max_prompt_length
+        truncated_completions += c_full.size > self.max_response_length
+        c = c_full[: self.max_response_length]
+        row_valid_tokens[row_idx] = (
+            min(p_full.size, self.max_prompt_length) + c.size
+        )
+        row_num_sequences[row_idx] = 1
+
+        p_ids, p_default_mask = _left_pad(
+            p_full, self.max_prompt_length, pad_id=self.pad_id
+        )
+        c_ids, c_valid = _right_pad(
+            c, self.max_response_length, pad_value=self.pad_id, dtype=np.int32
+        )
+        batched_prompt_ids[row_idx] = p_ids
+        batched_completion_ids[row_idx] = c_ids
+
+        # A caller-supplied prompt mask is prompt-aligned, so it must be
+        # left-padded exactly like the prompt ids to stay in register. If its
+        # length disagrees with the prompt the alignment is undefined, so fall
+        # back to the validity mask derived from the ids themselves.
+        p_mask = p_default_mask
+        if item.prompt_mask is not None:
+          src = np.asarray(item.prompt_mask, dtype=np.float32).reshape(-1)
+          if src.size == p_full.size:
+            src = src[-self.max_prompt_length :]
+            p_mask = np.zeros(self.max_prompt_length, dtype=np.float32)
+            if src.size:
+              p_mask[-src.size :] = src
+        batched_prompt_mask[row_idx] = p_mask
+
+        action_source = item.completion_mask
+        if action_source is None:
+          c_mask = c_valid
+        else:
+          c_mask = _completion_aligned(
+              action_source,
+              c.size,
+              self.max_response_length,
+              prompt_len=p_full.size,
+              full_completion_len=c_full.size,
+          )
+        batched_completion_mask[row_idx] = c_mask
+
+        batched_advantages[row_idx] = _completion_aligned(
+            item.advantages,
             c.size,
             self.max_response_length,
             fill_value=0.0,
@@ -1091,29 +1210,39 @@ class PaddedBatchAssembler:
             full_completion_len=c_full.size,
         )
 
-      # `replay_routing` already guarantees this is set; binding it locally
-      # also narrows the optional field for the type checker.
-      routed = item.routed_experts
-      if replay_routing and routed is not None:
-        routed_arr = np.asarray(routed, dtype=np.int16)
-        if batched_routed_experts is None:
-          batched_routed_experts = np.full(
-              (
-                  self.batch_size,
-                  self.max_prompt_length + self.max_response_length,
-              )
-              + routed_arr.shape[1:],
-              datatypes.UNSET_ROUTED_EXPERT,
-              dtype=np.int16,
+        for name, batch_arr in stacked_optional.items():
+          batch_arr[row_idx] = _completion_aligned(
+              getattr(item, name),
+              c.size,
+              self.max_response_length,
+              fill_value=0.0,
+              prompt_len=p_full.size,
+              full_completion_len=c_full.size,
           )
-        _routed_experts_aligned(
-            routed_arr,
-            p_full.size,
-            c.size,
-            self.max_prompt_length,
-            self.max_response_length,
-            out=batched_routed_experts[row_idx],
-        )
+
+        # `replay_routing` already guarantees this is set; binding it locally
+        # also narrows the optional field for the type checker.
+        routed = item.routed_experts
+        if replay_routing and routed is not None:
+          routed_arr = np.asarray(routed, dtype=np.int16)
+          if batched_routed_experts is None:
+            batched_routed_experts = np.full(
+                (
+                    self.batch_size,
+                    self.max_prompt_length + self.max_response_length,
+                )
+                + routed_arr.shape[1:],
+                datatypes.UNSET_ROUTED_EXPERT,
+                dtype=np.int16,
+            )
+          _routed_experts_aligned(
+              routed_arr,
+              p_full.size,
+              c.size,
+              self.max_prompt_length,
+              self.max_response_length,
+              out=batched_routed_experts[row_idx],
+          )
 
     if truncated_prompts or truncated_completions:
       logging.warning(

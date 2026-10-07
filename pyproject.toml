@@ -136,3 +136,4 @@ known_third_party = ["tunix"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+addopts = ["--import-mode=importlib"]
