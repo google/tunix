@@ -261,17 +261,18 @@ class RolloutWorker(abstract_worker.Worker):
   ) -> datatypes.RolloutResponse:
     """Converts internal Trajectory or TrajectoryError to wire-safe RolloutResponse."""
     if isinstance(item, trajectory_lib.TrajectoryError):
+      metadata = dict(item.metadata or {})
+      metadata["prompt_id"] = item.prompt_id
+      self._stamp_worker_lineage(metadata)
       return datatypes.RolloutResponse(
-          request_id=request_id
-          or getattr(item, "trajectory_id", "")
-          or getattr(item, "prompt_id", ""),
+          request_id=request_id or item.trajectory_id or item.prompt_id,
           status="ERROR",
           error=datatypes.ErrorInfo(
               error_type="TrajectoryError",
               message=str(item.error_message),
           ),
           payload=None,
-          metadata={"prompt_id": getattr(item, "prompt_id", "")},
+          metadata=metadata,
       )
     if isinstance(item, datatypes.RolloutResponse):
       return item

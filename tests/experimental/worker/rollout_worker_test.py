@@ -125,11 +125,23 @@ class RolloutWorkerTest(absltest.TestCase):
     self.assertEqual(sum(bool(r.metadata.get("ready")) for r in responses), 1)
 
   def test_to_rollout_response_trajectory_error(self):
+    ctx = lineage.LineageContext(
+        tracking_id="traj_p1_3",
+        parent_tracking_ids=["p1"],
+    )
     err = trajectory_lib.TrajectoryError(
         trajectory_id="err_traj_1",
         prompt_id="p1",
         error_message="episode failed",
         error_type="RuntimeError",
+        metadata={
+            "batch_idx": 2,
+            "prompt_idx": 9,
+            "intra_batch_idx": 1,
+            "group_index": 3,
+            "policy_version": 4,
+            "lineage": ctx,
+        },
     )
     resp = self.worker._to_rollout_response(err)
     self.assertEqual(resp.status, "ERROR")
@@ -138,6 +150,23 @@ class RolloutWorkerTest(absltest.TestCase):
     self.assertIsNotNone(resp.error)
     self.assertEqual(resp.error.message, "episode failed")
     self.assertEqual(resp.error.error_type, "TrajectoryError")
+    self.assertEqual(
+        resp.metadata,
+        {
+            "prompt_id": "p1",
+            "batch_idx": 2,
+            "prompt_idx": 9,
+            "intra_batch_idx": 1,
+            "group_index": 3,
+            "policy_version": 4,
+            "lineage": ctx,
+        },
+    )
+    self.assertLen(ctx.events, 1)
+    self.assertEqual(ctx.events[0].component, "worker.rollout")
+    self.assertEqual(
+        ctx.events[0].attributes.get("worker_id"), "rollout_worker_42"
+    )
 
   def test_to_rollout_response_trajectory_item(self):
     item = datatypes.TrajectoryItem(

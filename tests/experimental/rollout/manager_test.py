@@ -397,6 +397,52 @@ class AgentConfigTest(unittest.IsolatedAsyncioTestCase):
 
     self.assertIsNone(collector_cls.call_args.kwargs["eos_ids"])
 
+  async def test_generate_stamps_request_metadata_on_trajectory_error(self):
+    manager = manager_lib.RolloutManager(
+        config=types.SimpleNamespace(),
+        sampler=_FakeSyncSampler([]),
+        tokenizer="mock",
+        chat_parser="mock",
+    )
+    request = datatypes.RolloutRequest(
+        prompt="prompt",
+        prompt_id="prompt_7",
+        group_index=3,
+        target_policy_version=5,
+        metadata={
+            "batch_idx": 1,
+            "prompt_idx": 7,
+            "intra_batch_idx": 3,
+        },
+    )
+
+    with mock.patch.object(
+        manager_lib.collector_lib, "TrajectoryCollectorEngine"
+    ) as collector_cls:
+      collector = collector_cls.return_value
+      collector.traj_id = request.traj_id
+      collector.env = None
+      collector.run_episode = mock.AsyncMock(
+          side_effect=RuntimeError("sandbox crashed")
+      )
+
+      result = await manager._generate_one(request)
+
+    self.assertEqual(result.prompt_id, "prompt_7")
+    self.assertEqual(result.error_message, "sandbox crashed")
+    self.assertEqual(result.error_type, "RuntimeError")
+    self.assertEqual(
+        result.metadata,
+        {
+            "batch_idx": 1,
+            "prompt_idx": 7,
+            "intra_batch_idx": 3,
+            "prompt_id": "prompt_7",
+            "group_index": 3,
+            "policy_version": 5,
+        },
+    )
+
 
 class WeightSyncModeTest(absltest.TestCase):
 

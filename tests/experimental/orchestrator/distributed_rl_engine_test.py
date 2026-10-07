@@ -1771,6 +1771,36 @@ class DistributedRLEngineTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_response_to_trajectory_item_error_preserves_metadata_and_policy_version(
+      self,
+  ):
+    resp = datatypes.RolloutResponse(
+        request_id="req_p1_g2",
+        status="ERROR",
+        error=datatypes.ErrorInfo(
+            error_type="TrajectoryError",
+            message="episode crashed",
+        ),
+        payload=None,
+        metadata={
+            "prompt_id": "p1",
+            "group_index": 2,
+            "batch_idx": 3,
+            "prompt_idx": 7,
+            "intra_batch_idx": 1,
+            "policy_version": 5,
+        },
+    )
+    item = distributed_rl_engine._response_to_trajectory_item(resp)
+    self.assertEqual(item.prompt_id, "p1")
+    self.assertEqual(item.group_index, 2)
+    self.assertFalse(item.is_valid)
+    self.assertEqual(item.policy_version, 5)
+    self.assertEqual(item.metadata["batch_idx"], 3)
+    self.assertEqual(item.metadata["prompt_idx"], 7)
+    self.assertEqual(item.metadata["intra_batch_idx"], 1)
+    self.assertIn("old_logprobs", item.traj)
+
 
 if __name__ == "__main__":
   absltest.main()
