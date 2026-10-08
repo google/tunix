@@ -781,6 +781,10 @@ class ClusterOrchestrator:
           handler=handler,
           controller_id="auto-coordinator",
           disable_timeouts=self._disable_weight_sync_timeouts,
+          evict_failed_destinations=(
+              self._fault_tolerance_config.enabled
+              and self._fault_tolerance_config.retry_weight_sync_on_eviction
+          ),
       )
 
     rollout_worker_capacities: dict[remote_execution.ActorHandle, int] = {}

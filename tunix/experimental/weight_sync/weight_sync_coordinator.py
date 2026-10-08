@@ -379,6 +379,21 @@ def _worker_id(member: object) -> str:
   return repr(member)
 
 
+def _reraise_if_not_phase_failure(exc: BaseException) -> None:
+  """Re-raises `exc` if it is a control-flow signal rather than a failure.
+
+  `asyncio.CancelledError` is the awaiting caller withdrawing (a `wait_for`
+  deadline, task cancellation) and `KeyboardInterrupt` / `SystemExit` are
+  interpreter shutdown. None of them says anything about the worker, so they
+  must propagate untouched instead of being reconciled, recorded, or wrapped
+  into a `WeightSyncError` like a real phase failure. Needed wherever a failure
+  arrives as a VALUE -- `gather(return_exceptions=True)` hands these back as
+  results -- or where a `BaseException` handler would otherwise swallow them.
+  """
+  if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
+    raise exc
+
+
 class StaleRoundError(RuntimeError):
   """A phase call carried a round key the worker cannot honor.
 
@@ -789,6 +804,7 @@ class WeightSyncCoordinator:
       first_uuid: int = 1,
       timeouts: Optional[PhaseTimeouts] = None,
       disable_timeouts: Optional[bool] = None,
+      evict_failed_destinations: bool = False,
   ):
     self._registry = registry
     self._handler = handler
@@ -800,6 +816,7 @@ class WeightSyncCoordinator:
       self._timeouts = PhaseTimeouts.disabled()
     else:
       self._timeouts = timeouts or PhaseTimeouts()
+    self._evict_failed_destinations = evict_failed_destinations
     logging.info(
         "WeightSyncCoordinator initialized with timeouts (disabled=%s): %s",
         disable_timeouts or is_weight_sync_timeouts_disabled(),
@@ -823,9 +840,21 @@ class WeightSyncCoordinator:
     return self._last_committed_version
 
   @property
+  def in_flight(self) -> bool:
+    """Whether a weight sync round is currently running."""
+    return self._in_flight
+
+  @property
   def poisoned(self) -> Optional[str]:
     """Why the coordinator refuses new rounds, or None."""
     return self._poisoned
+
+  def has_pending_destinations(self) -> bool:
+    """Returns True if any destination worker is waiting in PENDING_WEIGHT_SYNC."""
+    return not self._registry.group(
+        self._destination_role,
+        states=(worker_registry.MembershipState.PENDING_WEIGHT_SYNC,),
+    ).is_empty()
 
   def reset_after_recovery(self) -> None:
     """Clears the poison after the operator restored the fleet.
@@ -838,9 +867,17 @@ class WeightSyncCoordinator:
 
   # ---------------------------------------------------------------- lookup
 
-  def _members(self, role: str) -> list[Any]:
-    group = self._registry.group(role)
+  def _members(
+      self,
+      role: str,
+      *,
+      states: Optional[Sequence[worker_registry.MembershipState]] = None,
+      allow_empty: bool = False,
+  ) -> list[Any]:
+    group = self._registry.group(role, states=states)
     if group.is_empty():
+      if allow_empty:
+        return []
       raise ValueError(f"no workers registered for role {role!r}")
     return list(group)
 
@@ -855,8 +892,22 @@ class WeightSyncCoordinator:
         )
     return members
 
-  def _destinations(self) -> list[WeightSyncDestination]:
-    members = self._members(self._destination_role)
+  def _destinations(
+      self, *, only_pending: bool = False
+  ) -> list[WeightSyncDestination]:
+    """Returns registered destination workers eligible for weight sync."""
+    if only_pending:
+      target_states = (worker_registry.MembershipState.PENDING_WEIGHT_SYNC,)
+    else:
+      target_states = (
+          worker_registry.MembershipState.ACTIVE,
+          worker_registry.MembershipState.PENDING_WEIGHT_SYNC,
+      )
+    members = self._members(
+        self._destination_role,
+        states=target_states,
+        allow_empty=only_pending,
+    )
     for member in members:
       if not isinstance(member, WeightSyncDestination):
         raise TypeError(
@@ -943,11 +994,8 @@ class WeightSyncCoordinator:
     try:
       await _wait_for(method(request), timeout)
       return None
-    except asyncio.CancelledError:
-      raise
-    except (KeyboardInterrupt, SystemExit):
-      raise  # interpreter shutdown is not a phase failure to reconcile
     except BaseException as e:  # pylint: disable=broad-except
+      _reraise_if_not_phase_failure(e)
       if accepts is not None:
         phase = await self._worker_phase(destination, request)
         if phase is not None and phase in accepts:
@@ -1027,6 +1075,7 @@ class WeightSyncCoordinator:
       policy_version: int = 0,
       *,
       source_staged: Optional[asyncio.Event] = None,
+      only_pending: bool = False,
       **extra_config,
   ) -> WeightSyncResult:
     """Runs one full round; returns only if it committed.
@@ -1044,6 +1093,9 @@ class WeightSyncCoordinator:
         its live weights again without affecting what this round pushes. Only
         true when the source transfers from a host snapshot rather than
         straight out of device buffers.
+      only_pending: When True, only targets destinations in
+        `PENDING_WEIGHT_SYNC` without quiescing or interrupting `ACTIVE`
+        destinations.
       **extra_config: Carried to the workers in the request.
     """
     if self._poisoned:
@@ -1067,7 +1119,121 @@ class WeightSyncCoordinator:
     self._in_flight = True
     start_time = time.monotonic()
     try:
-      return await self._run_round(policy_version, extra_config, source_staged)
+      try:
+        try:
+          return await self._run_round(
+              policy_version,
+              extra_config,
+              source_staged=source_staged,
+              only_pending=only_pending,
+          )
+        except WeightSyncError as err:
+          res = err.result
+          if (
+              not self._evict_failed_destinations
+              or res is None
+              or res.state
+              in (
+                  RoundState.UNKNOWN_TRANSFER_STATE,
+                  RoundState.PARTIALLY_COMMITTED,
+              )
+          ):
+            raise
+          failed_worker_ids = [
+              w.worker_id
+              for w in res.workers
+              if w.phase != "committed"
+              and (
+                  w.needs_restart
+                  or w.phase == "unknown"
+                  or (w.error and w.phase != "aborted")
+              )
+          ]
+          evicted_any = False
+          for wid in failed_worker_ids:
+            if self._registry.evict(wid):
+              evicted_any = True
+          if only_pending:
+            target_states = (
+                worker_registry.MembershipState.PENDING_WEIGHT_SYNC,
+            )
+          else:
+            target_states = (
+                worker_registry.MembershipState.ACTIVE,
+                worker_registry.MembershipState.PENDING_WEIGHT_SYNC,
+            )
+          if (
+              self._registry.group(
+                  self._destination_role, states=target_states
+              ).is_empty()
+              or not evicted_any
+          ):
+            raise
+          logging.warning(
+              "Weight sync failed on destination worker(s) %s; evicted failed"
+              " worker(s) and retrying sync (policy_version=%d).",
+              failed_worker_ids,
+              policy_version,
+          )
+          if self._poisoned is not None:
+            self.reset_after_recovery()
+          return await self._run_round(
+              policy_version,
+              extra_config,
+              source_staged=source_staged,
+              only_pending=only_pending,
+          )
+      except WeightSyncError as err:
+        res = err.result
+        failed_worker_ids = (
+            [
+                w.worker_id
+                for w in res.workers
+                if w.phase != "committed"
+                and (
+                    w.needs_restart
+                    or w.phase == "unknown"
+                    or (w.error and w.phase != "aborted")
+                )
+            ]
+            if res is not None
+            else []
+        )
+        if (
+            self._evict_failed_destinations
+            and res is not None
+            and res.state
+            not in (
+                RoundState.UNKNOWN_TRANSFER_STATE,
+                RoundState.PARTIALLY_COMMITTED,
+            )
+        ):
+          for wid in failed_worker_ids:
+            self._registry.evict(wid)
+        if (
+            only_pending
+            and (
+                res is None
+                or res.state is not RoundState.UNKNOWN_TRANSFER_STATE
+            )
+            and not self._registry.group(
+                self._destination_role,
+                states=(worker_registry.MembershipState.ACTIVE,),
+            ).is_empty()
+        ):
+          # Every PENDING_WEIGHT_SYNC destination of this catch-up round was
+          # evicted (or failed without touching ACTIVE destinations): the
+          # failure is contained to pending worker(s), so the coordinator must
+          # stay usable for the next regular round rather than stay poisoned.
+          logging.warning(
+              "[rollout-ft] action=pending_sync_abandoned policy_version=%d"
+              " evicted=%s; ACTIVE rollout workers keep serving.",
+              policy_version,
+              failed_worker_ids,
+          )
+          if self._poisoned is not None:
+            self.reset_after_recovery()
+        raise
     finally:
       elapsed_time = time.monotonic() - start_time
       logging.info("Weight sync finished in %.2f seconds.", elapsed_time)
@@ -1078,6 +1244,8 @@ class WeightSyncCoordinator:
       policy_version: int,
       extra_config: dict[str, Any],
       source_staged: Optional[asyncio.Event] = None,
+      *,
+      only_pending: bool = False,
   ) -> WeightSyncResult:
     round_index = self._round_index
     self._round_index += 1
@@ -1086,7 +1254,7 @@ class WeightSyncCoordinator:
     req_id = f"{self._req_id_prefix}-v{policy_version}-r{round_index}"
 
     sources = self._sources()
-    destinations = self._destinations()
+    destinations = self._destinations(only_pending=only_pending)
 
     state = RoundState.PREPARING
     transfer: Optional[weight_sync.TransferResult] = None
@@ -1150,6 +1318,9 @@ class WeightSyncCoordinator:
           result(),
       )
 
+    if not destinations:
+      raise fail("no pending destination workers remaining")
+
     def poison_if_needed() -> None:
       if state in _POISONING_STATES and not self._poisoned:
         self._poisoned = (
@@ -1194,10 +1365,13 @@ class WeightSyncCoordinator:
       try:
         t_phase = time.monotonic()
         try:
-          await asyncio.gather(*[
-              _wait_for(d.bind_weight_sync(), self._timeouts.bind)
-              for d in destinations
-          ])
+          bind_results = await asyncio.gather(
+              *[
+                  _wait_for(d.bind_weight_sync(), self._timeouts.bind)
+                  for d in destinations
+              ],
+              return_exceptions=True,
+          )
         finally:
           t_bind_s = time.monotonic() - t_phase
           t_prepare_s = t_bind_s
@@ -1210,15 +1384,33 @@ class WeightSyncCoordinator:
               _format_timeout(self._timeouts.bind),
               len(destinations),
           )
+        first_bind_err: Optional[BaseException] = None
+        for d, res in zip(destinations, bind_results):
+          if isinstance(res, BaseException):
+            _reraise_if_not_phase_failure(res)
+            wid = _worker_id(d)
+            worker_reports[wid] = WorkerRoundReport(
+                worker_id=wid,
+                phase="unknown",
+                error=repr(res),
+                needs_restart=True,
+            )
+            if first_bind_err is None:
+              first_bind_err = res
+        if first_bind_err is not None:
+          raise first_bind_err
 
         t_phase = time.monotonic()
         try:
-          dst_meta_lists = await asyncio.gather(*[
-              _wait_for(
-                  d.get_weight_sync_metadata(), self._timeouts.metadata
-              )
-              for d in destinations
-          ])
+          dst_meta_results = await asyncio.gather(
+              *[
+                  _wait_for(
+                      d.get_weight_sync_metadata(), self._timeouts.metadata
+                  )
+                  for d in destinations
+              ],
+              return_exceptions=True,
+          )
         finally:
           t_metadata_s = time.monotonic() - t_phase
           t_prepare_s = t_bind_s + t_metadata_s
@@ -1231,6 +1423,26 @@ class WeightSyncCoordinator:
               _format_timeout(self._timeouts.metadata),
               len(destinations),
           )
+        first_meta_err: Optional[BaseException] = None
+        for d, res in zip(destinations, dst_meta_results):
+          if isinstance(res, BaseException):
+            _reraise_if_not_phase_failure(res)
+            wid = _worker_id(d)
+            worker_reports[wid] = WorkerRoundReport(
+                worker_id=wid,
+                phase="unknown",
+                error=repr(res),
+                needs_restart=True,
+            )
+            if first_meta_err is None:
+              first_meta_err = res
+        if first_meta_err is not None:
+          raise first_meta_err
+        dst_meta_lists = [
+            res
+            for res in dst_meta_results
+            if not isinstance(res, BaseException)
+        ]
 
         # Metadata is collected exactly once and the same objects flow to both
         # registration and the request. Collecting twice would hand the
@@ -1393,9 +1605,8 @@ class WeightSyncCoordinator:
       for metadata, result_or_error in zip(
           registration_metadata, registrations
       ):
-        if isinstance(result_or_error, asyncio.CancelledError):
-          raise result_or_error  # cancellation is never a phase failure
         if isinstance(result_or_error, BaseException):
+          _reraise_if_not_phase_failure(result_or_error)
           registration_errors.append(result_or_error)
           # `WeightSyncError` carries these failures structurally, but an
           # uncaught exception renderer normally prints only its outer
@@ -1612,6 +1823,16 @@ class WeightSyncCoordinator:
         worker_reports.setdefault(
             wid, WorkerRoundReport(worker_id=wid, phase="committed")
         )
+        try:
+          self._registry.set_state(
+              wid,
+              worker_registry.MembershipState.ACTIVE,
+              expected_state=worker_registry.MembershipState.PENDING_WEIGHT_SYNC,
+          )
+        except KeyError:
+          logging.warning(
+              "Worker %r unregistered before weight sync promotion.", wid
+          )
       return result()
 
     except asyncio.CancelledError:

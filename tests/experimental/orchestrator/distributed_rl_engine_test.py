@@ -23,6 +23,7 @@ from tunix.experimental.common import datatypes
 from tunix.experimental.common import lineage
 from tunix.experimental.orchestrator import distributed_rl_engine
 from tunix.experimental.orchestrator import rl_engine_interface
+from tunix.experimental.weight_sync import weight_sync_coordinator as weight_sync_coordinator_lib
 from tunix.experimental.worker import remote_execution
 
 
@@ -1853,6 +1854,52 @@ class DistributedRLEngineTest(absltest.TestCase):
       self.assertIn("down", results[0].metadata.get("error", ""))
       self.assertEmpty(self.engine._rollout_workers)
       await self.engine.close()
+
+    asyncio.run(_run())
+
+  def test_poll_rollouts_returns_empty_when_no_active_workers_but_pending_destinations_exist(
+      self,
+  ):
+    async def _run():
+      coordinator = _FakeWeightSyncCoordinator()
+      coordinator.has_pending_destinations = lambda: True
+      engine = distributed_rl_engine.DistributedRLEngine(
+          rollout_workers=[],
+          trainer_workers={datatypes.Role.ACTOR: self.mock_actor},
+          weight_sync_coordinator=coordinator,
+      )
+      results = await engine.poll_rollouts(timeout_s=0.1)
+      self.assertEqual(results, [])
+      await engine.close()
+
+    asyncio.run(_run())
+
+  def test_sync_pending_weights_defers_failed_catch_up_round(self):
+    async def _run():
+      coordinator = _FakeWeightSyncCoordinator()
+      coordinator.has_pending_destinations = lambda: True
+
+      async def _failing_sync(policy_version: int = 0, **kwargs):
+        del kwargs
+        coordinator.calls.append(policy_version)
+        raise weight_sync_coordinator_lib.WeightSyncError(
+            "trainer busy", result=None
+        )
+
+      coordinator.sync = _failing_sync
+      engine = distributed_rl_engine.DistributedRLEngine(
+          rollout_workers=[self.mock_rollout_1],
+          trainer_workers={datatypes.Role.ACTOR: self.mock_actor},
+          weight_sync_coordinator=coordinator,
+      )
+      engine._policy_version = 4
+
+      # The failed catch-up round is deferred to the next end-of-step sync
+      # instead of interrupting the step.
+      self.assertIsNone(await engine.sync_pending_weights())
+      self.assertEqual(coordinator.calls, [4])
+      self.assertEqual(engine.policy_version, 4)
+      await engine.close()
 
     asyncio.run(_run())
 
