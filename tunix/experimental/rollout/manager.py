@@ -15,6 +15,7 @@
 """Rollout Manager concurrency controller and Raiden KV migration orchestrator."""
 
 import asyncio
+import contextlib
 import math
 import os
 import time
@@ -76,7 +77,7 @@ class RolloutManager:
       sampler: Optional[sampler_lib.Sampler] = None,
       env_pool: Any = None,
       agent_factory: Optional[Callable[[], Any]] = None,
-      max_concurrency: int = 64,
+      max_concurrency: Optional[int] = 64,
       tokenizer: Any = None,
       chat_parser: Any = None,
       drain_timeout_s: float | None = None,
@@ -89,7 +90,8 @@ class RolloutManager:
       sampler: Optional pre-constructed Sampler instance.
       env_pool: Environment pool for rollout execution.
       agent_factory: Factory callable producing agent instances.
-      max_concurrency: Maximum number of concurrent episodes.
+      max_concurrency: Maximum number of concurrent episodes; values <= 0
+        disable the cap.
       tokenizer: Tokenizer for prompt/response encoding.
       chat_parser: Chat parser for conversation templating.
       drain_timeout_s: How long pre_weight_sync waits for in-flight trajectories
@@ -98,6 +100,7 @@ class RolloutManager:
         and episode metadata.
     """
     self.config = config
+    max_concurrency = 0 if max_concurrency is None else int(max_concurrency)
     if sampler is None:
       sampler_type = getattr(config, "sampler_type", "vanilla")
       weight_sync_mode = getattr(
@@ -161,7 +164,7 @@ class RolloutManager:
     self.sampler = sampler
     self.env_pool = env_pool
     self.agent_factory = agent_factory
-    self.max_concurrency = max_concurrency
+    self._max_concurrency = max_concurrency
     self.tokenizer = tokenizer
     self.chat_parser = chat_parser
     self.trajectory_store = trajectory_store
@@ -184,6 +187,8 @@ class RolloutManager:
     self._active_tasks: Dict[str, asyncio.Task[Any]] = {}
     self._completed_queue: asyncio.Queue[TrajectoryOrError] = asyncio.Queue()
     self._traffic_inst = None
+    self._concurrency_sem: Optional[asyncio.Semaphore] = None
+    self._concurrency_sem_loop: Optional[asyncio.AbstractEventLoop] = None
     self._episode_timeout_s = _env_float(
         "EPISODE_TIMEOUT_SECS",
         collector_lib.DEFAULT_EPISODE_TIMEOUT_SECS,
@@ -214,6 +219,29 @@ class RolloutManager:
     return bool(
         getattr(self.config, "partial_rollout", False) or self.partial_rollout
     )
+
+  @property
+  def max_concurrency(self) -> int:
+    """Maximum number of concurrent episodes; None or <= 0 means uncapped."""
+    return self._max_concurrency
+
+  def _get_concurrency_semaphore(
+      self,
+  ) -> contextlib.AbstractAsyncContextManager[Any]:
+    """Returns the concurrency semaphore bound to the running event loop.
+
+    The semaphore is created lazily because `__init__` runs before the serving
+    loop exists, and rebuilt whenever the running loop changes (e.g. per-call
+    `asyncio.run` in the in-process actor path) since asyncio primitives bind
+    to the loop they are first awaited on.
+    """
+    if self._max_concurrency is None or self._max_concurrency <= 0:
+      return contextlib.nullcontext()
+    loop = asyncio.get_running_loop()
+    if self._concurrency_sem is None or self._concurrency_sem_loop is not loop:
+      self._concurrency_sem = asyncio.Semaphore(self._max_concurrency)
+      self._concurrency_sem_loop = loop
+    return self._concurrency_sem
 
   @property
   def _traffic(self) -> traffic_controller_lib.TrafficController:
@@ -362,7 +390,8 @@ class RolloutManager:
   ) -> None:
     """Runs episode loop, removes active tracking, and resolves callbacks/streams."""
     try:
-      trajectory: TrajectoryOrError = await collector.run_episode()
+      async with self._get_concurrency_semaphore():
+        trajectory: TrajectoryOrError = await collector.run_episode()
     except Exception as e:  # pylint: disable=broad-exception-caught
       error_metadata = dict(request.metadata or {})
       error_metadata["prompt_id"] = request.prompt_id
