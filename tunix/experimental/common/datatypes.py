@@ -220,6 +220,9 @@ class RolloutFaultToleranceConfig:
       before synthesizing a terminal FAILED placeholder trajectory.
     max_in_flight_per_worker: Optional default cap on concurrent in-flight
       rollouts dispatched to any single rollout worker.
+    retry_weight_sync_on_eviction: Whether `WeightSyncCoordinator.sync()`
+      automatically evicts failed destination workers and retries the round once
+      on surviving workers.
   """
 
   enabled: bool = True
@@ -227,6 +230,7 @@ class RolloutFaultToleranceConfig:
   retry_on_worker_failure: bool = True
   max_task_retries: int = 3
   max_in_flight_per_worker: int | None = None
+  retry_weight_sync_on_eviction: bool = True
 
   def __post_init__(self):
     if self.max_task_retries < 0:

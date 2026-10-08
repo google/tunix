@@ -347,6 +347,7 @@ class RolloutFaultToleranceConfigTest(absltest.TestCase):
     self.assertTrue(cfg.retry_on_worker_failure)
     self.assertEqual(cfg.max_task_retries, 3)
     self.assertIsNone(cfg.max_in_flight_per_worker)
+    self.assertTrue(cfg.retry_weight_sync_on_eviction)
 
   def test_with_overrides_without_arguments_returns_same_config(self):
     cfg = datatypes.RolloutFaultToleranceConfig(max_in_flight_per_worker=4)

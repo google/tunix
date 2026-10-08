@@ -37,6 +37,7 @@ from tunix.experimental.metrics import metrics as exp_metrics
 from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import rl_engine_interface
+from tunix.experimental.weight_sync import weight_sync_coordinator as weight_sync_coordinator_lib
 from tunix.experimental.worker import remote_execution
 
 _summarize_list = logging_utils.summarize_list
@@ -123,9 +124,15 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
             on_worker_evicted=on_worker_evicted,
             max_in_flight_per_worker=ft_cfg.max_in_flight_per_worker,
             worker_max_in_flight=rollout_worker_capacities,
+            has_pending_workers_fn=self._has_pending_rollout_workers,
         ),
         least_loaded=True,
     )
+
+  def _has_pending_rollout_workers(self) -> bool:
+    if self._weight_sync_coordinator is None:
+      return False
+    return bool(self._weight_sync_coordinator.has_pending_destinations())
 
   @property
   def _rollout_workers(self) -> list[remote_execution.ActorHandle]:
@@ -210,6 +217,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       requests: Sequence[datatypes.RolloutRequest],
   ) -> list[str]:
     """Dispatches pre-formed RolloutRequests across rollout workers."""
+    await self.sync_pending_weights()
     requests = self._build_rollout_requests(requests)
     logging.info(
         "Dispatching %d rollout request(s) across %d worker(s).",
@@ -401,6 +409,8 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       self, timeout_s: float = remote_execution.LONG_POLL_TIMEOUT_S
   ) -> list[datatypes.TrajectoryItem]:
     """Concurrently long-polls completed rollout responses across all workers."""
+    await self.sync_pending_weights()
+
     if (
         not self._rollout_workers
         and not self._rollout_session.has_pending_or_completed_work()
@@ -410,6 +420,15 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     raw_completions = await self._rollout_session.poll_completed(
         timeout_s=timeout_s
     )
+    if (
+        not raw_completions
+        and self._rollout_session.pending_count > 0
+        and self._has_pending_rollout_workers()
+    ):
+      await self.sync_pending_weights()
+      raw_completions = await self._rollout_session.poll_completed(
+          timeout_s=timeout_s
+      )
 
     completed: list[datatypes.TrajectoryItem] = []
     for res, exc in raw_completions:
@@ -459,6 +478,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       **kwargs: Any,
   ) -> list[datatypes.TrajectoryItem]:
     """Blocking rollout generation: load-balances prompts across workers and awaits completion."""
+    await self.sync_pending_weights()
     if not self._rollout_workers:
       raise ValueError("DistributedRLEngine has no registered rollout workers.")
 
@@ -768,6 +788,66 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         "Weight synchronization complete (policy_version=%d).",
         self._policy_version,
     )
+    return result.policy_version
+
+  async def sync_pending_weights(
+      self,
+      policy_version: int | None = None,
+  ) -> int | None:
+    """Proactively syncs weights to any `PENDING_WEIGHT_SYNC` rollout workers.
+
+    Targets only `PENDING_WEIGHT_SYNC` rollout workers so `ACTIVE` rollout
+    workers currently generating trajectories are not quiesced or interrupted.
+
+    Args:
+      policy_version: Optional policy version to push. Defaults to the current
+        `self.policy_version`.
+
+    Returns:
+      The synced policy version if pending workers were synced, or None if no
+      rollout workers were waiting in `PENDING_WEIGHT_SYNC`.
+    """
+    if (
+        self._weight_sync_coordinator is None
+        or not self._weight_sync_coordinator.has_pending_destinations()
+        or self._weight_sync_coordinator.in_flight
+        or self._weight_sync_coordinator.poisoned is not None
+    ):
+      return None
+    target_policy_version = (
+        self._policy_version if policy_version is None else policy_version
+    )
+    logging.info(
+        "Proactively synchronizing weights to pending rollout worker(s)"
+        " (policy_version=%d)...",
+        target_policy_version,
+    )
+    try:
+      result = await self._weight_sync_coordinator.sync(
+          policy_version=target_policy_version,
+          only_pending=True,
+      )
+    except (weight_sync_coordinator_lib.WeightSyncError, ValueError) as exc:
+      if (
+          isinstance(exc, weight_sync_coordinator_lib.WeightSyncError)
+          and exc.result is not None
+          and exc.result.state
+          == weight_sync_coordinator_lib.RoundState.UNKNOWN_TRANSFER_STATE
+      ):
+        raise
+      if self._weight_sync_coordinator.poisoned is not None:
+        self._weight_sync_coordinator.reset_after_recovery()
+      # A failed catch-up round (e.g. the trainer is busy in fwd_bwd/update, or
+      # the pending worker died mid-sync and was evicted) must not interrupt
+      # the step: the next end-of-step sync_weights() targets ACTIVE and
+      # PENDING_WEIGHT_SYNC workers alike and brings any survivor up to date.
+      logging.warning(
+          "[rollout-ft] action=pending_sync_deferred policy_version=%d"
+          " error=%r; falling back to the next end-of-step sync_weights().",
+          target_policy_version,
+          exc,
+      )
+      return None
     return result.policy_version
 
   async def save_checkpoint(
