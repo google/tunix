@@ -462,14 +462,28 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         tags[perf_constants.PAIR_INDEX] = env.extra_kwargs["pair_index"]
 
     if prompt_token_ids is None:
+      if chat_lists is None:
+        raise ValueError(
+            "chat_lists is required when prompt_token_ids is None."
+        )
+      # `_create_micro_batch_iterator` leaves task fields as 1-element arrays
+      # and agents copy them into messages as is. Unwrap them as
+      # `tokenize_and_generate_masks` does, so that the sampled and the trained
+      # prompts are built from the same strings.
+      messages = [
+          agentic_utils.convert_messages_to_string(message)
+          for message in chat_lists
+      ]
       if self.chat_parser:
-        chat_lists = self.chat_parser.parse(
-            messages=chat_lists,
+        prompt = self.chat_parser.parse(
+            messages=messages,
             add_generation_prompt=True,
             is_first_msg=True,  # no op if system msg is populated in reset
         )
+      else:
+        prompt = messages
       return self.rl_engine.generate(
-          prompts=[chat_lists],  # pyrefly: ignore[bad-argument-type]
+          prompts=[prompt],  # pyrefly: ignore[bad-argument-type]
           apply_chat_template=not self.chat_parser,
           mode=rl_engine_lib.Mode.TRAIN,
           trace_tags=tags,

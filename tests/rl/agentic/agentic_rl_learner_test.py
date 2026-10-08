@@ -15,14 +15,17 @@
 """Tests for agentic_rl_learner."""
 
 import asyncio
+import types
 from typing import Any
 from unittest import mock
 
 from absl import logging
 from absl.testing import absltest
 from absl.testing import parameterized
+import numpy as np
 from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl import utils as rl_utils
+from tunix.rl.agentic import agentic_grpo_learner
 from tunix.rl.agentic import agentic_rl_learner
 from tunix.rl.rollout import base_rollout
 
@@ -241,9 +244,6 @@ class AgenticRLLearnerTest(parameterized.TestCase):
 class ExactTokenContinuityConfigTest(absltest.TestCase):
 
   def test_default_exact_token_continuity_reaches_the_collector(self):
-    import types  # pylint: disable=g-import-not-at-top
-    from tunix.rl.agentic import agentic_grpo_learner  # pylint: disable=g-import-not-at-top
-
     config = base_rollout.RolloutConfig(
         max_tokens_to_generate=1024, return_logprobs=True
     )
@@ -283,9 +283,6 @@ class ExactTokenContinuityConfigTest(absltest.TestCase):
   def test_exact_mode_rejects_rollout_configs_it_cannot_honor(
       self,
   ):
-    import types  # pylint: disable=g-import-not-at-top
-    from tunix.rl.agentic import agentic_grpo_learner  # pylint: disable=g-import-not-at-top
-
     for option, value, max_seq_token, message in (
         ("return_logprobs", False, None, "sampled logprobs"),
         ("return_routed_experts", True, 1024, "expert routing"),
@@ -314,9 +311,6 @@ class ExactTokenContinuityConfigTest(absltest.TestCase):
         )
 
   def test_model_call_forwards_token_ids_without_parsing(self):
-    import types  # pylint: disable=g-import-not-at-top
-    import numpy as np  # pylint: disable=g-import-not-at-top
-
     obj = types.SimpleNamespace(
         algo_config=agentic_rl_learner.AgenticRLConfig(
             exact_token_continuity=True
@@ -335,6 +329,87 @@ class ExactTokenContinuityConfigTest(absltest.TestCase):
     self.assertIsNone(sent["prompts"])
     self.assertFalse(sent["apply_chat_template"])
     np.testing.assert_array_equal(sent["prompt_token_ids"], [[0, 3]])
+
+  def test_model_call_parses_messages_with_numpy_task_fields_as_strings(self):
+    qwen_parser = agentic_rl_learner.agentic_utils.chat_template_parser.QwenChatTemplateParser(
+        types.SimpleNamespace(bos_token="", eos_token="<|im_end|>")
+    )
+    # Micro-batching leaves each task field as a 1-element array, and the
+    # default agent copies the "prompts" field into the user message as is.
+    raw_messages = [
+        {"role": "system", "content": ""},
+        {"role": "user", "content": np.array(["What is 1 + 1?"])},
+    ]
+    # Without unwrapping before `parse()`, BaseChatTemplateParser stringifies
+    # the 1-element array as `"['What is 1 + 1?']"` in the rendered prompt.
+    self.assertEqual(
+        qwen_parser.parse(
+            messages=raw_messages,
+            add_generation_prompt=True,
+            is_first_msg=True,
+        ),
+        "<|im_start|>system\n<|im_end|>\n"
+        "<|im_start|>user\n['What is 1 + 1?']<|im_end|>\n"
+        "<|im_start|>assistant\n",
+    )
+
+    obj = types.SimpleNamespace(
+        chat_parser=qwen_parser,
+        rl_engine=types.SimpleNamespace(generate=mock.Mock()),
+        policy_version=7,
+    )
+    agentic_rl_learner.AgenticRLLearner._model_call(obj, raw_messages)
+    self.assertEqual(
+        obj.rl_engine.generate.call_args.kwargs["prompts"],
+        [
+            "<|im_start|>system\n<|im_end|>\n"
+            "<|im_start|>user\nWhat is 1 + 1?<|im_end|>\n"
+            "<|im_start|>assistant\n"
+        ],
+    )
+
+  def test_model_call_without_messages_or_token_ids_raises(self):
+    obj = types.SimpleNamespace(
+        chat_parser=types.SimpleNamespace(parse=mock.Mock()),
+        rl_engine=types.SimpleNamespace(generate=mock.Mock()),
+        policy_version=7,
+    )
+    with self.assertRaisesRegex(ValueError, "chat_lists is required"):
+      agentic_rl_learner.AgenticRLLearner._model_call(obj, None)
+    obj.chat_parser.parse.assert_not_called()
+    obj.rl_engine.generate.assert_not_called()
+
+  def test_model_call_rejects_message_fields_that_are_not_strings(self):
+    for content, error in (
+        (np.array([1]), "must be a string"),
+        (np.array(["a", "b"]), "size 1"),
+    ):
+      with self.subTest(content=content):
+        obj = types.SimpleNamespace(
+            chat_parser=types.SimpleNamespace(parse=mock.Mock()),
+            rl_engine=types.SimpleNamespace(generate=mock.Mock()),
+            policy_version=7,
+        )
+        with self.assertRaisesRegex(ValueError, error):
+          agentic_rl_learner.AgenticRLLearner._model_call(
+              obj, [{"role": "user", "content": content}]
+          )
+        obj.chat_parser.parse.assert_not_called()
+        obj.rl_engine.generate.assert_not_called()
+
+  def test_model_call_without_chat_parser_sends_string_messages(self):
+    obj = types.SimpleNamespace(
+        chat_parser=None,
+        rl_engine=types.SimpleNamespace(generate=mock.Mock()),
+        policy_version=7,
+    )
+    agentic_rl_learner.AgenticRLLearner._model_call(
+        obj, [{"role": "user", "content": np.array(["q"])}]
+    )
+    sent = obj.rl_engine.generate.call_args.kwargs
+    self.assertTrue(sent["apply_chat_template"])
+    self.assertEqual(sent["prompts"], [[{"role": "user", "content": "q"}]])
+    self.assertEqual([type(m["content"]) for m in sent["prompts"][0]], [str])
 
 
 if __name__ == "__main__":
