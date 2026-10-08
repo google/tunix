@@ -878,8 +878,7 @@ def transfer_state_with_mappings(
       corresponding axes to transpose.
     reshard_fn: A function to shard the value.
     rollout_engine: The name of the rollout engine being used.
-    **kwargs: Additional keyword arguments. Set require_complete_mapping=True
-      to reject unmapped source or target parameters before assigning weights.
+    **kwargs: Additional keyword arguments.
 
   Returns:
     The target state with the transferred values.
@@ -906,45 +905,6 @@ def transfer_state_with_mappings(
 
   # Build source-to-target mapping
   src_to_tgt_map = build_flat_dict(tgt_flat_list, key_mappings)  # type: ignore
-
-  if kwargs.pop('require_complete_mapping', False):
-    src_items = (
-        src_state.flat_state()
-        if hasattr(src_state, 'flat_state')
-        else src_state.items()
-    )
-
-    def path_string(path):
-      return path if isinstance(path, str) else '.'.join(map(str, path))
-
-    source_keys = {
-        path_string(key)
-        for key, value in src_items
-        if not any(
-            'rng' in str(part)
-            for part in (key.split('.') if isinstance(key, str) else key)
-        )
-    }
-    missing_sources = source_keys - src_to_tgt_map.keys()
-    covered_targets = set()
-    for source_key, (_, target, _) in src_to_tgt_map.items():
-      if source_key in source_keys:
-        covered_targets.update(target if isinstance(target, list) else [target])
-    required_targets = {
-        path_string(key)
-        for key, _ in tgt_flat_list
-        if not any(
-            'rng' in str(part)
-            for part in (key.split('.') if isinstance(key, str) else key)
-        )
-    }
-    missing_targets = required_targets - covered_targets
-    if missing_sources or missing_targets:
-      raise MappingError(
-          'Incomplete weight mapping: '
-          f'unmapped source parameters={sorted(missing_sources)}; '
-          f'unmapped target parameters={sorted(missing_targets)}'
-      )
 
   # Unroll scanned layers and flatten source state
   unscanned_src_to_tgt_flat = _unroll_scanned_layers(src_state, src_to_tgt_map)

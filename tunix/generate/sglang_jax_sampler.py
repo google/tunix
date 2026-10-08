@@ -128,9 +128,6 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
     self.to_hf_transpose_keys = config.mapping_config.to_hf_transpose_keys
     self.to_hf_hook_fns = config.mapping_config.to_hf_hook_fns
     self.preprocess_src_state = config.mapping_config.preprocess_src_state
-    self.require_complete_mapping = (
-        config.mapping_config.require_complete_mapping
-    )
 
     if config.mapping_config.lora_to_hf_mappings:
       self.to_hf_key_mappings |= config.mapping_config.lora_to_hf_mappings
@@ -150,11 +147,12 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
       filter_types: Optional[Tuple[Any, ...]] = None,
   ):
     del filter_types
-    self.reset_prefix_cache()
-    jax.effects_barrier()
-    # Transform trainer arrays in their own mesh before resharding to rollout.
-    # The caller may currently have the rollout's Explicit mesh active.
-    source_mesh = rl_utils.get_pytree_mesh_info(updated_weights)
+    # Keep trainer arrays in their source mesh until the final reshard.
+    source_mesh = (
+        rl_utils.get_pytree_mesh_info(updated_weights)
+        if self.preprocess_src_state is not None
+        else None
+    )
     context = (
         jax.set_mesh(source_mesh)
         if source_mesh is not None
@@ -169,7 +167,6 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
           src_state=updated_weights,
           dst_state=self.transformer_state,
           key_mappings=self.to_hf_key_mappings,
-          require_complete_mapping=self.require_complete_mapping,
           transpose_keys=self.to_hf_transpose_keys,
           reshard_fn=reshard.reshard_pytree,
           rollout_engine="sglang_jax",
@@ -186,18 +183,6 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
       )
     new_model_state_leaves, _ = jax.tree_util.tree_flatten(new_state)
     self._model_runner.model_state_leaves = new_model_state_leaves
-
-  def reset_prefix_cache(self) -> None:
-    """Invalidate old-policy KV entries before in-process weight sync.
-
-    Like the TPU Inference adapter, callers must quiesce generation first.
-    Use the in-process scheduler that owns the runner being updated; the
-    Engine's asyncio loop may already be closed by the synchronous sampler.
-    """
-    scheduler = self.engine.scheduler_info["scheduler"]
-    success, message, _ = scheduler.flush_cache()
-    if not success:
-      raise RuntimeError(f"Cannot update weights before cache flush: {message}")
 
   def load_checkpoint(self, path_or_weights: str | jaxtyping.PyTree):
     # TODO(b/434741253): Consider support orbax checkpoint loading
@@ -218,6 +203,8 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
     args["model_path"] = config.model_version
     args["context_length"] = config.context_length
     args["mem_fraction_static"] = config.mem_fraction_static
+    if config.init_with_random_weights:
+      args["load_format"] = "dummy"
     args["disable_radix_cache"] = config.disable_radix_cache
     args["enable_deterministic_sampling"] = config.enable_deterministic_sampling
     args["enable_static_lora"] = config.enable_static_lora
@@ -235,9 +222,7 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
     args["page_size"] = config.page_size
     args["tp_size"] = self._find_tp_size(config.mesh)
     args["device_indexes"] = config.mesh.device_ids.flatten().tolist()
-    args["load_format"] = (
-        "dummy" if config.init_with_random_weights else config.load_format
-    )
+    args["load_format"] = config.load_format
     args["max_running_requests"] = config.max_running_requests
     args["enable_engine_loop_run_forever_daemon"] = True
 

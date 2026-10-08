@@ -14,9 +14,8 @@
 
 """Gemma4 dense text weights for the SGL-JAX backend.
 
-The initial integration targets the 31B text decoder. Strict coverage rejects
-unsupported MoE, per-layer-input, or multimodal states instead of leaving rollout
-parameters at their initializer values.
+Targets the 31B text decoder with a text-only actor and Gemma4ForCausalLM
+rollout model. Other variants and multimodal weights are not covered.
 """
 
 from flax import nnx
@@ -79,5 +78,4 @@ SGLANG_JAX_MAPPING = {
         for name in ('q_einsum', 'k_einsum', 'v_einsum')
     },
     'preprocess_src_state': preprocess_src_state,
-    'require_complete_mapping': True,
 }
