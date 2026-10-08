@@ -180,13 +180,50 @@ class VanillaRolloutTest(parameterized.TestCase):
     rollout.generate(['1 2 3', '5'], _rollout_config())
 
     perf_metrics = rollout.get_perf_metrics()
-    self.assertIn('rollout/avg_generation_throughput_tok_per_s', perf_metrics)
-    self.assertIn('rollout/avg_prefill_throughput_tok_per_s', perf_metrics)
-    self.assertIn('rollout/avg_schedule_duration_ms', perf_metrics)
-    self.assertIn('rollout/avg_engine_step_duration_ms', perf_metrics)
-    self.assertIn('rollout/avg_request_queue_time_s', perf_metrics)
-    self.assertIn('rollout/last_batch_completion_time_s', perf_metrics)
-    self.assertIn('rollout/avg_batch_completion_time_s', perf_metrics)
+    for name in (
+        'rollout/avg_generation_throughput_tok_per_s',
+        'rollout/avg_prefill_throughput_tok_per_s',
+        'rollout/avg_schedule_duration_ms',
+        'rollout/avg_engine_step_duration_ms',
+        'rollout/avg_num_running_reqs',
+        'rollout/max_kv_cache_usage_pct',
+        'rollout/avg_request_queue_time_s',
+        'rollout/avg_request_e2e_latency_s',
+        'rollout/max_request_e2e_latency_s',
+        'rollout/avg_request_generation_tokens',
+        'rollout/last_batch_completion_time_s',
+        'rollout/avg_batch_completion_time_s',
+        'rollout/batch_generation_throughput_tok_per_s',
+        'rollout/batch_prefill_throughput_tok_per_s',
+    ):
+      self.assertIn(name, perf_metrics)
+
+  @parameterized.parameters(False, True)
+  def test_batch_metrics_cover_the_requests_between_start_and_completion(
+      self, server_mode
+  ):
+    rollout = self.make_rollout(server_mode)
+
+    # Like an agentic learner, which samples each prompt on its own.
+    rollout.record_batch_start('step-0')
+    outputs = [
+        rollout.generate([prompt], _rollout_config())
+        for prompt in ('1 2 3', '5 6')
+    ]
+    rollout.record_batch_completion(2.0, batch_id='step-0')
+
+    perf_metrics = rollout.get_perf_metrics()
+    num_generated = sum(len(output.tokens[0]) for output in outputs)
+    self.assertEqual(perf_metrics['rollout/completed_batches'][0], 1)
+    self.assertEqual(perf_metrics['rollout/avg_batch_requests'][0], 2)
+    self.assertEqual(perf_metrics['rollout/avg_batch_prefill_tokens'][0], 5)
+    self.assertEqual(
+        perf_metrics['rollout/avg_batch_generation_tokens'][0], num_generated
+    )
+    self.assertEqual(
+        perf_metrics['rollout/batch_generation_throughput_tok_per_s'][0],
+        num_generated / 2.0,
+    )
 
   @parameterized.parameters(False, True)
   def test_combines_tokenizer_eos_and_configured_eos_tokens(self, server_mode):

@@ -19,7 +19,7 @@ requests and get a future back, while a background thread owns the engine and
 runs its continuous batching loop until each request finishes.
 """
 
-from collections.abc import Sequence
+from collections.abc import Hashable, Sequence
 from concurrent import futures
 import threading
 import time
@@ -259,9 +259,15 @@ class VanillaInProcessDriver:
     with self._engine_lock:
       return self._engine.flush_step_metrics()
 
-  def record_batch_completion(self, duration_s: float) -> None:
+  def record_batch_start(self, batch_id: Hashable | None = None) -> None:
+    """Marks the start of a rollout batch on the engine's metrics."""
+    self._engine.metrics.record_batch_start(batch_id)
+
+  def record_batch_completion(
+      self, duration_s: float, batch_id: Hashable | None = None
+  ) -> None:
     """Records a completed rollout batch duration on the engine's metrics."""
-    self._engine.metrics.record_batch_completion(duration_s)
+    self._engine.metrics.record_batch_completion(duration_s, batch_id)
 
   def stop(self) -> None:
     """Stops the loop thread, leaving pending futures untouched."""

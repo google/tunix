@@ -12,9 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 from unittest import mock
 
 from absl.testing import absltest
+import numpy as np
 from tunix.experimental.generate import metrics as metrics_lib
 from tunix.experimental.generate import request as request_lib
 from tunix.experimental.generate import sampler as sampler_lib
@@ -34,6 +36,28 @@ def _make_request_state(
       sampling_params=rollout_sampler_lib.SamplingParams(max_tokens=max_tokens),
       arrival_time=arrival_time,
   )
+
+
+def _make_finished_request_state(
+    request_id: str,
+    *,
+    prompt_len: int,
+    num_generated: int,
+    first_token_time: float,
+    finished_time: float,
+    arrival_time: float = 10.0,
+) -> request_lib.RequestState:
+  req = _make_request_state(
+      request_id,
+      prompt_len=prompt_len,
+      max_tokens=num_generated,
+      arrival_time=arrival_time,
+  )
+  req.token_ids.extend(range(num_generated))
+  req.first_scheduled_time = arrival_time
+  req.first_token_time = first_token_time
+  req.finished_time = finished_time
+  return req
 
 
 class MetricsCollectorTest(absltest.TestCase):
@@ -155,6 +179,203 @@ class MetricsCollectorTest(absltest.TestCase):
     self.assertEqual(cum_snap.completed_batches, 2)
     self.assertAlmostEqual(cum_snap.avg_batch_completion_time_s, 1.5)
 
+  def test_request_token_counts_and_time_per_output_token(self):
+    collector = metrics_lib.MetricsCollector(log_stats_interval_s=0.0)
+    # Decodes 4 tokens after its first in 0.4 s: 100 ms per output token.
+    fast = _make_finished_request_state(
+        'fast',
+        prompt_len=8,
+        num_generated=5,
+        first_token_time=10.2,
+        finished_time=10.6,
+    )
+    # Generates a single token, so has no time per output token.
+    slow = _make_finished_request_state(
+        'slow',
+        prompt_len=4,
+        num_generated=1,
+        first_token_time=11.5,
+        finished_time=11.5,
+    )
+
+    collector.record_step(
+        step_duration_s=0.1,
+        num_prompt_tokens=12,
+        num_generation_tokens=6,
+        finished_requests=[fast, slow],
+    )
+    snap = collector.snapshot()
+
+    self.assertEqual(snap.completed_requests, 2)
+    self.assertAlmostEqual(snap.avg_request_prompt_tokens, 6.0)
+    self.assertAlmostEqual(snap.avg_request_generation_tokens, 3.0)
+    self.assertAlmostEqual(snap.avg_request_time_per_output_token_ms, 100.0)
+    self.assertAlmostEqual(snap.avg_request_e2e_latency_s, 1.05)
+    self.assertAlmostEqual(snap.max_request_e2e_latency_s, 1.5)
+
+  def test_batch_throughputs_are_over_wall_clock_time_since_batch_start(self):
+    collector = metrics_lib.MetricsCollector(log_stats_interval_s=0.0)
+    # Work the engine did before the batch started is not the batch's.
+    collector.record_step(
+        step_duration_s=0.1,
+        num_prompt_tokens=50,
+        num_generation_tokens=5,
+        finished_requests=[_make_request_state('before')],
+    )
+    collector.record_batch_start('b0')
+    collector.record_step(
+        step_duration_s=0.1,
+        num_prompt_tokens=100,
+        num_generation_tokens=4,
+        finished_requests=(),
+    )
+    collector.record_step(
+        step_duration_s=0.1,
+        num_prompt_tokens=0,
+        num_generation_tokens=36,
+        finished_requests=[_make_request_state('a'), _make_request_state('b')],
+    )
+    collector.record_batch_completion(2.0, batch_id='b0')
+
+    snap = collector.snapshot()
+    self.assertEqual(snap.completed_batches, 1)
+    self.assertEqual(snap.num_timed_batches, 1)
+    self.assertAlmostEqual(snap.avg_batch_requests, 2.0)
+    self.assertAlmostEqual(snap.avg_batch_prefill_tokens, 100.0)
+    self.assertAlmostEqual(snap.avg_batch_generation_tokens, 40.0)
+    # Over the batch's 2 s of wall-clock time, not its 0.2 s of engine steps.
+    self.assertAlmostEqual(snap.batch_prefill_throughput_tok_per_s, 50.0)
+    self.assertAlmostEqual(snap.batch_generation_throughput_tok_per_s, 20.0)
+
+    perf_metrics = snap.to_perf_metrics()
+    self.assertEqual(
+        perf_metrics['rollout/batch_prefill_throughput_tok_per_s'][0], 50.0
+    )
+    self.assertEqual(
+        perf_metrics['rollout/batch_generation_throughput_tok_per_s'][0], 20.0
+    )
+    self.assertEqual(perf_metrics['rollout/avg_batch_requests'][0], 2.0)
+
+  def test_overlapping_batches_each_count_the_work_done_while_in_flight(self):
+    collector = metrics_lib.MetricsCollector(log_stats_interval_s=0.0)
+
+    def step(num_prompt_tokens: int, num_generation_tokens: int) -> None:
+      collector.record_step(
+          step_duration_s=0.1,
+          num_prompt_tokens=num_prompt_tokens,
+          num_generation_tokens=num_generation_tokens,
+          finished_requests=(),
+      )
+
+    collector.record_batch_start(0)
+    step(10, 10)
+    collector.record_batch_start(1)
+    step(20, 30)
+    collector.record_batch_completion(1.0, batch_id=0)
+    step(0, 60)
+    collector.record_batch_completion(3.0, batch_id=1)
+
+    snap = collector.snapshot()
+    self.assertEqual(snap.num_timed_batches, 2)
+    # Batch 0 counts 30 prefill and 40 generated tokens, batch 1 20 and 90.
+    self.assertAlmostEqual(snap.avg_batch_prefill_tokens, 25.0)
+    self.assertAlmostEqual(snap.avg_batch_generation_tokens, 65.0)
+    self.assertAlmostEqual(snap.batch_prefill_throughput_tok_per_s, 12.5)
+    self.assertAlmostEqual(snap.batch_generation_throughput_tok_per_s, 32.5)
+
+  def test_batch_completion_without_a_start_only_records_its_duration(self):
+    collector = metrics_lib.MetricsCollector(log_stats_interval_s=0.0)
+    collector.record_step(
+        step_duration_s=0.1,
+        num_prompt_tokens=10,
+        num_generation_tokens=10,
+        finished_requests=(),
+    )
+    collector.record_batch_completion(1.5, batch_id='never-started')
+
+    snap = collector.flush_step_snapshot()
+    self.assertEqual(snap.completed_batches, 1)
+    self.assertEqual(snap.num_timed_batches, 0)
+    perf_metrics = snap.to_perf_metrics()
+    self.assertEqual(perf_metrics['rollout/avg_batch_completion_time_s'][0], 1.5)
+    self.assertNotIn(
+        'rollout/batch_generation_throughput_tok_per_s', perf_metrics
+    )
+
+  def test_drops_the_oldest_batch_start_beyond_the_pending_limit(self):
+    collector = metrics_lib.MetricsCollector(log_stats_interval_s=0.0)
+    with mock.patch.object(metrics_lib, '_MAX_PENDING_BATCH_STARTS', 2):
+      for batch_id in range(3):
+        collector.record_batch_start(batch_id)
+    collector.record_batch_completion(1.0, batch_id=0)
+    collector.record_batch_completion(1.0, batch_id=2)
+
+    snap = collector.snapshot()
+    self.assertEqual(snap.completed_batches, 2)
+    self.assertEqual(snap.num_timed_batches, 1)
+
+  def test_batch_completion_logs_the_batch_work_and_throughputs(self):
+    collector = metrics_lib.MetricsCollector(log_stats_interval_s=0.0)
+    collector.record_batch_start(7)
+    collector.record_step(
+        step_duration_s=0.1,
+        num_prompt_tokens=30,
+        num_generation_tokens=10,
+        finished_requests=[_make_request_state()],
+    )
+
+    with mock.patch.object(metrics_lib.logging, 'info') as mock_info:
+      collector.record_batch_completion(2.0, batch_id=7)
+
+    mock_info.assert_called_once()
+    logged_msg = mock_info.call_args[0][0] % mock_info.call_args[0][1:]
+    self.assertEqual(
+        logged_msg,
+        'Engine 000: Rollout batch 7 finished in 2.00 s: 1 requests, 30'
+        ' prefill tokens (15.0 tokens/s), 10 generated tokens (5.0 tokens/s).',
+    )
+
+  def test_step_gauges_are_averaged_over_engine_steps(self):
+    collector = metrics_lib.MetricsCollector(log_stats_interval_s=0.0)
+    for num_running_reqs, kv_cache_usage_fraction in ((4, 0.25), (2, 0.75)):
+      collector.record_step(
+          step_duration_s=0.1,
+          num_prompt_tokens=0,
+          num_generation_tokens=num_running_reqs,
+          finished_requests=(),
+          num_running_reqs=num_running_reqs,
+          kv_cache_usage_fraction=kv_cache_usage_fraction,
+      )
+
+    # The KV cache is free again once the step's rollouts are done.
+    snap = collector.flush_step_snapshot(kv_cache_usage_fraction=0.0)
+    self.assertEqual(snap.avg_num_running_reqs, 3.0)
+    self.assertEqual(snap.avg_kv_cache_usage_pct, 50.0)
+    self.assertEqual(snap.max_kv_cache_usage_pct, 75.0)
+    self.assertEqual(snap.kv_cache_usage_pct, 0.0)
+
+    perf_metrics = snap.to_perf_metrics()
+    self.assertEqual(perf_metrics['rollout/avg_kv_cache_usage_pct'][0], 50.0)
+    # Repeated values aggregate to their peak.
+    self.assertEqual(
+        perf_metrics['rollout/max_kv_cache_usage_pct'], (75.0, np.max)
+    )
+
+  def test_perf_metrics_omit_request_and_batch_averages_without_any(self):
+    perf_metrics = (
+        metrics_lib.MetricsCollector().flush_step_snapshot().to_perf_metrics()
+    )
+
+    self.assertEqual(perf_metrics['rollout/completed_requests'][0], 0.0)
+    self.assertEqual(perf_metrics['rollout/completed_batches'][0], 0.0)
+    self.assertEqual(perf_metrics['rollout/generation_tokens'][0], 0.0)
+    for name in (
+        'rollout/avg_request_e2e_latency_s',
+        'rollout/avg_batch_completion_time_s',
+        'rollout/batch_generation_throughput_tok_per_s',
+    ):
+      self.assertNotIn(name, perf_metrics)
+
   def test_periodic_console_logging_emits_vllm_style_line(self):
     with mock.patch.object(metrics_lib.time, 'perf_counter', return_value=100.0):
       collector = metrics_lib.MetricsCollector(log_stats_interval_s=10.0)
@@ -228,26 +449,50 @@ class EngineAndSamplerMetricsIntegrationTest(absltest.TestCase):
     self.assertGreaterEqual(snap.avg_request_queue_time_s, 0.0)
     self.assertGreater(snap.avg_request_ttft_s, 0.0)
     self.assertGreater(snap.avg_request_e2e_latency_s, 0.0)
+    self.assertGreaterEqual(
+        snap.max_request_e2e_latency_s, snap.avg_request_e2e_latency_s
+    )
+    self.assertAlmostEqual(snap.avg_request_prompt_tokens, 4.0)
+    self.assertAlmostEqual(snap.avg_request_generation_tokens, 2.5)
+    self.assertGreater(snap.avg_request_time_per_output_token_ms, 0.0)
+    self.assertGreater(snap.avg_num_running_reqs, 0.0)
+    self.assertGreater(snap.max_kv_cache_usage_pct, 0.0)
 
-  def test_sampler_records_batch_completion_time_in_offline_and_server_modes(
-      self,
-  ):
+  def test_sampler_records_batches_in_offline_and_server_modes(self):
     for server_mode in (False, True):
-      sampler = sampler_lib.Sampler(
-          testing_utils.make_engine(), server_mode=server_mode
-      )
-      try:
-        requests = [
-            testing_utils.make_request('a', [1, 2, 3], max_tokens=2),
-            testing_utils.make_request('b', [4, 5], max_tokens=2),
-        ]
-        sampler.generate(requests)
-        snap = sampler.get_metrics()
-        self.assertEqual(snap.completed_batches, 1)
-        self.assertGreater(snap.last_batch_completion_time_s, 0.0)
-        self.assertGreater(snap.avg_batch_completion_time_s, 0.0)
-      finally:
-        sampler.stop()
+      with self.subTest(server_mode=server_mode):
+        sampler = sampler_lib.Sampler(
+            testing_utils.make_engine(), server_mode=server_mode
+        )
+        try:
+          requests = [
+              testing_utils.make_request('a', [1, 2, 3], max_tokens=2),
+              testing_utils.make_request('b', [4, 5], max_tokens=2),
+          ]
+          sampler.generate(requests)
+          # A single request is not a batch of its own.
+          sampler.generate(
+              [testing_utils.make_request('c', [6, 7], max_tokens=2)]
+          )
+          asyncio.run(
+              sampler.sample(
+                  testing_utils.make_request('d', [8, 9], max_tokens=2)
+              )
+          )
+
+          snap = sampler.get_metrics()
+          self.assertEqual(snap.completed_requests, 4)
+          self.assertEqual(snap.completed_batches, 1)
+          self.assertGreater(snap.last_batch_completion_time_s, 0.0)
+          self.assertGreater(snap.avg_batch_completion_time_s, 0.0)
+          self.assertEqual(snap.num_timed_batches, 1)
+          self.assertAlmostEqual(snap.avg_batch_requests, 2.0)
+          self.assertAlmostEqual(snap.avg_batch_prefill_tokens, 5.0)
+          self.assertAlmostEqual(snap.avg_batch_generation_tokens, 4.0)
+          self.assertGreater(snap.batch_prefill_throughput_tok_per_s, 0.0)
+          self.assertGreater(snap.batch_generation_throughput_tok_per_s, 0.0)
+        finally:
+          sampler.stop()
 
 
 if __name__ == '__main__':

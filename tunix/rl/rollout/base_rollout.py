@@ -16,7 +16,7 @@
 
 import abc
 import dataclasses
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Callable, Hashable, List, Optional, Tuple
 
 import jax
 from jax import numpy as jnp
@@ -123,6 +123,12 @@ class BaseRollout(ABC):
     """Returns per-step rollout performance metrics for logging."""
     return {}
 
-  def record_batch_completion(self, duration_s: float) -> None:
+  def record_batch_start(self, batch_id: Hashable | None = None) -> None:
+    """Marks the start of a rollout batch, for `record_batch_completion`."""
+    del batch_id
+
+  def record_batch_completion(
+      self, duration_s: float, batch_id: Hashable | None = None
+  ) -> None:
     """Records the wall-clock completion duration of a rollout batch."""
-    del duration_s
+    del duration_s, batch_id

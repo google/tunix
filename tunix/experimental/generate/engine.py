@@ -526,6 +526,7 @@ class LLMEngine:
     # The runner pads its outputs to `max_num_seqs` rows. Drop the
     # padding.
     n = len(in_flight.scheduled)
+    num_running = sum(not req.is_done for req in in_flight.scheduled)
     finished, num_generated_tokens = self._update_from_output(
         in_flight.scheduled,
         in_flight.distribution,
@@ -550,6 +551,8 @@ class LLMEngine:
         finished_requests=finished,
         prefix_cache_queries=prefix_queries,
         prefix_cache_hits=prefix_hits,
+        num_running_reqs=num_running,
+        kv_cache_usage_fraction=self._kv_cache_manager.kv_cache_usage_fraction,
     )
     self.do_log_stats()
 

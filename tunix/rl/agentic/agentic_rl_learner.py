@@ -259,7 +259,24 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     self._train_rewards_window: List[float] = []
     self._eval_rewards_window: List[float] = []
     self._rewards_window_lock = threading.Lock()
+    # Time rollouts spent paused for weight syncs that finished, and when the
+    # sync in progress started, if any. Guarded by the lock, as the producer
+    # thread reads them while the training loop updates them.
     self._weight_sync_paused_time_s: float = 0.0
+    self._weight_sync_pause_start: float | None = None
+    self._weight_sync_pause_lock = threading.Lock()
+
+  def _weight_sync_paused_time_so_far(self) -> float:
+    """Returns the time rollouts spent paused for weight syncs, until now.
+
+    The sync in progress counts up to now, so a rollout batch that starts
+    during a sync is only charged for the part of it after the batch's start.
+    """
+    with self._weight_sync_pause_lock:
+      paused_s = self._weight_sync_paused_time_s
+      if self._weight_sync_pause_start is not None:
+        paused_s += time.perf_counter() - self._weight_sync_pause_start
+      return paused_s
 
   def _validate_rollout_config(self):
     """Validates that the rollout config is properly aligned with the algo config."""
@@ -540,8 +557,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             if batch_idx not in batch_start_info:
               batch_start_info[batch_idx] = (
                   time.perf_counter(),
-                  self._weight_sync_paused_time_s,
+                  self._weight_sync_paused_time_so_far(),
               )
+              self.rl_engine.rollout.record_batch_start(batch_idx)
           # Create agent-env pairs in parallel for a group to handle potential
           # cold start latency on env creation.
           agent_env_pairs = await asyncio.gather(*[
@@ -610,13 +628,13 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
                 start_t, start_paused_t = batch_start_info.pop(batch_idx)
                 batch_completed_groups.pop(batch_idx, None)
                 paused_delta = max(
-                    0.0, self._weight_sync_paused_time_s - start_paused_t
+                    0.0, self._weight_sync_paused_time_so_far() - start_paused_t
                 )
                 active_batch_time = max(
                     0.0, (time.perf_counter() - start_t) - paused_delta
                 )
                 self.rl_engine.rollout.record_batch_completion(
-                    active_batch_time
+                    active_batch_time, batch_id=batch_idx
                 )
             # Retrieve the original input embedded in the task.
             yield group
@@ -1207,6 +1225,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         if self.should_sync_weights:
           logging.info("Requesting sync lock to sync weights...")
           sync_pause_start = time.perf_counter()
+          with self._weight_sync_pause_lock:
+            self._weight_sync_pause_start = sync_pause_start
           self._rollout_sync_lock.acquire_weight_sync()
           try:
             logging.info("Sync lock acquired. Syncing weights.")
@@ -1236,9 +1256,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
               prompt_queue.put(None)
           finally:
             self._rollout_sync_lock.release_weight_sync()
-            self._weight_sync_paused_time_s += (
-                time.perf_counter() - sync_pause_start
-            )
+            with self._weight_sync_pause_lock:
+              self._weight_sync_paused_time_s += (
+                  time.perf_counter() - sync_pause_start
+              )
+              self._weight_sync_pause_start = None
             logging.info("Sync lock released.")
         else:
           self.rl_engine.global_steps += 1

@@ -18,6 +18,7 @@ Selected with `rollout_engine='vanillav2'`, it is the successor to
 `tunix.rl.rollout.vanilla_rollout`.
 """
 
+from collections.abc import Hashable
 from typing import Any
 
 from flax import nnx
@@ -275,9 +276,15 @@ class VanillaRollout(base_rollout.BaseRollout):
     """Flushes and returns per-step rollout metrics for logging."""
     return self._sampler.flush_step_metrics().to_perf_metrics()
 
-  def record_batch_completion(self, duration_s: float) -> None:
+  def record_batch_start(self, batch_id: Hashable | None = None) -> None:
+    """Marks the start of a rollout batch on the underlying sampler."""
+    self._sampler.record_batch_start(batch_id)
+
+  def record_batch_completion(
+      self, duration_s: float, batch_id: Hashable | None = None
+  ) -> None:
     """Records a completed rollout batch duration on the underlying sampler."""
-    self._sampler.record_batch_completion(duration_s)
+    self._sampler.record_batch_completion(duration_s, batch_id)
 
   def close(self) -> None:
     """Stops the engine loop, in server mode."""

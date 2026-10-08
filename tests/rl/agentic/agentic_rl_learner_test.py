@@ -15,6 +15,7 @@
 """Tests for agentic_rl_learner."""
 
 import asyncio
+import functools
 from typing import Any
 from unittest import mock
 
@@ -335,6 +336,93 @@ class ExactTokenContinuityConfigTest(absltest.TestCase):
     self.assertIsNone(sent["prompts"])
     self.assertFalse(sent["apply_chat_template"])
     np.testing.assert_array_equal(sent["prompt_token_ids"], [[0, 3]])
+
+
+class RolloutBatchTimingTest(absltest.TestCase):
+
+  def test_weight_sync_in_progress_counts_as_paused_until_now(self):
+    import threading  # pylint: disable=g-import-not-at-top
+    import types  # pylint: disable=g-import-not-at-top
+
+    obj = types.SimpleNamespace(
+        _weight_sync_pause_lock=threading.Lock(),
+        _weight_sync_paused_time_s=3.0,
+        _weight_sync_pause_start=None,
+    )
+    paused_so_far = functools.partial(
+        agentic_rl_learner.AgenticRLLearner._weight_sync_paused_time_so_far,
+        obj,
+    )
+
+    with mock.patch.object(
+        agentic_rl_learner.time, "perf_counter", return_value=12.5
+    ):
+      self.assertEqual(paused_so_far(), 3.0)
+      obj._weight_sync_pause_start = 10.0
+      self.assertEqual(paused_so_far(), 5.5)
+
+  def test_producer_records_the_start_and_completion_of_each_batch(self):
+    import threading  # pylint: disable=g-import-not-at-top
+    import types  # pylint: disable=g-import-not-at-top
+
+    class FakeOrchestrator:
+      """Turns each agent-env pair into a group of its own."""
+
+      def __init__(self):
+        self._groups = asyncio.Queue()
+
+      async def run_producers_from_stream(self, pairs_stream, **kwargs):
+        del kwargs
+        async for _, group_id in pairs_stream:
+          await self._groups.put([types.SimpleNamespace(group_id=group_id)])
+        await self._groups.put(None)
+
+      async def yield_batches(self, batch_size):
+        del batch_size
+        while (group := await self._groups.get()) is not None:
+          yield group
+
+    async def prompts():
+      for prompt in range(4):
+        yield prompt
+
+    rollout = mock.Mock()
+    obj = types.SimpleNamespace(
+        _full_batch_size=2,
+        _weight_sync_pause_lock=threading.Lock(),
+        _weight_sync_paused_time_s=0.0,
+        _weight_sync_pause_start=None,
+        _create_agent_env_pair=lambda example, group_id, pair_index: (
+            None,
+            group_id,
+        ),
+        _background_tasks=set(),
+        algo_config=types.SimpleNamespace(num_generations=1),
+        rl_engine=types.SimpleNamespace(global_steps=0, rollout=rollout),
+    )
+    obj._weight_sync_paused_time_so_far = functools.partial(
+        agentic_rl_learner.AgenticRLLearner._weight_sync_paused_time_so_far,
+        obj,
+    )
+
+    async def collect_groups():
+      obj.loop = asyncio.get_running_loop()
+      producer = agentic_rl_learner.AgenticRLLearner._orchestrator_producer(
+          obj, FakeOrchestrator(), prompts()
+      )
+      return [group async for group in producer]
+
+    self.assertLen(asyncio.run(collect_groups()), 4)
+    self.assertEqual(
+        rollout.record_batch_start.call_args_list, [mock.call(0), mock.call(1)]
+    )
+    self.assertEqual(
+        [
+            call.kwargs["batch_id"]
+            for call in rollout.record_batch_completion.call_args_list
+        ],
+        [0, 1],
+    )
 
 
 if __name__ == "__main__":

@@ -15,7 +15,8 @@
 """Sampler backed by the continuous batching engine."""
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Hashable, Iterator, Sequence
+import contextlib
 import itertools
 import threading
 import time
@@ -88,6 +89,7 @@ class Sampler(base_sampler.BaseSampler):
     # serializes them instead.
     self._engine_lock = threading.Lock()
     self._request_counter = itertools.count()
+    self._batch_counter = itertools.count()
     self._driver: driver_lib.VanillaInProcessDriver | None = None
     if server_mode:
       self._driver = driver_lib.VanillaInProcessDriver(
@@ -213,15 +215,11 @@ class Sampler(base_sampler.BaseSampler):
         for sample_idx in range(multi_sampling)
     ]
 
-    start_time = time.perf_counter()
-    if self._driver is not None:
-      outputs = self._generate_server_mode(requests)
-      if len(requests) > 1:
-        self.record_batch_completion(time.perf_counter() - start_time)
-    else:
-      outputs = self._generate_offline(requests)
-      if requests:
-        self.record_batch_completion(time.perf_counter() - start_time)
+    with self._timed_batch(len(requests)):
+      if self._driver is not None:
+        outputs = self._generate_server_mode(requests)
+      else:
+        outputs = self._generate_offline(requests)
 
     if expected_prompt_ids is not None:
       utils.check_prompt_echo(
@@ -288,15 +286,11 @@ class Sampler(base_sampler.BaseSampler):
       The response to each request, in order.
     """
     requests = list(requests)
-    start_time = time.perf_counter()
-    if self._driver is not None:
-      outputs = self._generate_server_mode(requests)
-      if len(requests) > 1:
-        self.record_batch_completion(time.perf_counter() - start_time)
-    else:
-      outputs = self._generate_offline(requests)
-      if requests:
-        self.record_batch_completion(time.perf_counter() - start_time)
+    with self._timed_batch(len(requests)):
+      if self._driver is not None:
+        outputs = self._generate_server_mode(requests)
+      else:
+        outputs = self._generate_offline(requests)
     return [_to_response(output) for output in outputs]
 
   async def sample(
@@ -321,10 +315,8 @@ class Sampler(base_sampler.BaseSampler):
     requests = [sampling_requests] if is_single else list(sampling_requests)
 
     if self._driver is not None:
-      start_time = time.perf_counter()
-      outputs = await self._sample_on_driver(self._driver, requests)
-      if not is_single and requests:
-        self.record_batch_completion(time.perf_counter() - start_time)
+      with self._timed_batch(len(requests)):
+        outputs = await self._sample_on_driver(self._driver, requests)
       responses = [_to_response(output) for output in outputs]
     else:
       responses = await asyncio.to_thread(self.generate, requests)
@@ -369,6 +361,28 @@ class Sampler(base_sampler.BaseSampler):
 
     return [outputs[request.request_id] for request in requests]
 
+  @contextlib.contextmanager
+  def _timed_batch(self, num_requests: int) -> Iterator[None]:
+    """Records the sampling call it wraps as a rollout batch.
+
+    A call with a single request is not recorded: it is usually one of many
+    that make up a batch its caller times, like one turn of an agentic rollout.
+
+    Args:
+      num_requests: The number of requests the call samples.
+
+    Yields:
+      Nothing. The batch completes when the wrapped call returns.
+    """
+    if num_requests <= 1:
+      yield
+      return
+    batch_id = f'sampler-{next(self._batch_counter)}'
+    self.record_batch_start(batch_id)
+    start_time = time.perf_counter()
+    yield
+    self.record_batch_completion(time.perf_counter() - start_time, batch_id)
+
   # --- Metrics ---
   def get_metrics(self) -> metrics_lib.EngineMetricsSnapshot:
     """Returns a cumulative metrics snapshot from the underlying engine."""
@@ -384,12 +398,31 @@ class Sampler(base_sampler.BaseSampler):
     with self._engine_lock:
       return self._engine.flush_step_metrics()
 
-  def record_batch_completion(self, duration_s: float) -> None:
-    """Records a completed rollout batch duration on the engine's metrics."""
+  def record_batch_start(self, batch_id: Hashable | None = None) -> None:
+    """Marks the start of a rollout batch on the engine's metrics.
+
+    Args:
+      batch_id: Tells apart batches that may be in flight at the same time.
+        `record_batch_completion` takes the same id.
+    """
     if self._driver is not None:
-      self._driver.record_batch_completion(duration_s)
+      self._driver.record_batch_start(batch_id)
     else:
-      self._engine.metrics.record_batch_completion(duration_s)
+      self._engine.metrics.record_batch_start(batch_id)
+
+  def record_batch_completion(
+      self, duration_s: float, batch_id: Hashable | None = None
+  ) -> None:
+    """Records a completed rollout batch duration on the engine's metrics.
+
+    Args:
+      duration_s: How long the batch took, from its start to its completion.
+      batch_id: The id the batch's start was recorded with, if it was.
+    """
+    if self._driver is not None:
+      self._driver.record_batch_completion(duration_s, batch_id)
+    else:
+      self._engine.metrics.record_batch_completion(duration_s, batch_id)
 
   # --- Weights ---
   @property
