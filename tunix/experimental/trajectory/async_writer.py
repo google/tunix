@@ -27,9 +27,11 @@ class WriteTask:
 
   def __post_init__(self) -> None:
     """Deep copies the payload so later caller mutations cannot leak in."""
-    object.__setattr__(self, "metadata", self.metadata.model_copy(deep=True))
+    object.__setattr__(
+        self, "metadata", trajectory_lib.deep_copy(self.metadata)
+    )
     if self.step is not None:
-      object.__setattr__(self, "step", self.step.model_copy(deep=True))
+      object.__setattr__(self, "step", trajectory_lib.deep_copy(self.step))
 
   def to_atif(self) -> None:
     """Projects `metadata` and `step` to base ATIF models in-place.
