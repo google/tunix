@@ -822,6 +822,129 @@ class RaidenSynchronizerTest(absltest.TestCase):
         ),
     )
 
+  def test_work_unit_metadata_auto_h2d_round_trip(self):
+    mesh = jax.sharding.Mesh(np.array(jax.devices()[:1]), ("data",))
+    sharding = jax.sharding.NamedSharding(
+        mesh, jax.sharding.PartitionSpec("data")
+    )
+    arr = jax.device_put(jnp.ones((2, 4), jnp.float32), sharding)
+    sync = raiden_synchronizer.RaidenSynchronizer(
+        "rollout", {"w": arr}, auto_h2d=False
+    )
+    md = sync.work_unit_metadata()
+    self.assertIs(md.auto_h2d, False)
+
+    restored = raiden_synchronizer.weight_sync.WorkUnitMetadata.from_dict({
+        "unit": {"job_name": "rollout", "job_replica_id": "0"},
+        "shards": ["10.0.0.1:8000"],
+        "control_plane_rpc_address": "10.0.0.1:9000",
+        "mesh_shape": [1],
+        "variables": [
+            {
+                "name": "w",
+                "shape": [2, 4],
+                "mesh_shape": [1, 1],
+                "layout": [1, 0],
+                "item_size": 4,
+            }
+        ],
+        "auto_h2d": False,
+    })
+    self.assertIs(restored.auto_h2d, False)
+
+  def test_patch_raiden_worker_sync_deferred_h2d_and_uuid_guard(self):
+    import sys
+    import types
+
+    calls = []
+
+    class FakeSync:
+
+      def __init__(self, arrays, **kwargs):
+        self.arrays = arrays
+        self.kwargs = kwargs
+        self.local_port = 5001
+        self.listener_port = 6001
+        self.num_shards = 1
+
+      def wait_for_transfer_completion(self, uuid):
+        calls.append(("wait", uuid))
+
+      def h2d(self):
+        calls.append(("h2d", None))
+
+      def get_metrics(self):
+        return {"bytes": 128}
+
+    fake_rws_mod = types.ModuleType("tpu_inference.rl.raiden_worker_sync")
+
+    class FakeRaidenWorkerSync:
+
+      def __init__(self, job_name, *, worker_index=0, parallelism=4):
+        self.job_name = job_name
+        self.worker_index = worker_index
+        self._parallelism = parallelism
+        self.ip = "127.0.0.1"
+        self.names = ["w"]
+        self.arrays = [jnp.ones((2, 2), dtype=jnp.float32)]
+        self._sync = None
+
+      def bind(self, state):
+        del state
+        self._sync = fake_rws_mod._ws_lib.WeightSynchronizer(
+            self.arrays, auto_h2d=True
+        )
+
+      def _require_sync(self, op):
+        del op
+        return self._sync
+
+      def h2d(self, uuid=None):
+        self._sync.wait_for_transfer_completion(uuid)
+
+      def metadata_dict(self):
+        return {"unit": {"job_name": self.job_name}}
+
+      def metrics(self):
+        return self._sync.get_metrics()
+
+    fake_rws_mod.RaidenWorkerSync = FakeRaidenWorkerSync
+    fake_rws_mod._ws_lib = types.SimpleNamespace(WeightSynchronizer=FakeSync)
+    fake_rws_mod.envs = types.SimpleNamespace(RAIDEN_H2D_SETTLE=False)
+    fake_rws_mod.jax = jax
+    fake_rws_mod.logger = mock.MagicMock()
+
+    with mock.patch.dict(
+        sys.modules,
+        {
+            "tpu_inference": types.ModuleType("tpu_inference"),
+            "tpu_inference.rl": types.ModuleType("tpu_inference.rl"),
+            "tpu_inference.rl.raiden_worker_sync": fake_rws_mod,
+        },
+    ):
+      raiden_synchronizer.patch_raiden_worker_sync()
+
+      worker = FakeRaidenWorkerSync("rollout")
+      worker.bind({"w": 1}, auto_h2d=False)
+      self.assertIs(worker._sync.kwargs["auto_h2d"], False)
+      self.assertEqual(
+          worker.metadata_dict(),
+          {"unit": {"job_name": "rollout"}, "auto_h2d": False},
+      )
+
+      # Valid uuid > 0 triggers both wait_for_transfer_completion(uuid) and h2d()
+      worker.h2d(uuid=17)
+      self.assertEqual(calls, [("wait", 17), ("h2d", None)])
+
+      # Invalid or missing uuid must raise ValueError when auto_h2d=False
+      for bad_uuid in (None, 0, -3):
+        with self.assertRaises(ValueError):
+          worker.h2d(uuid=bad_uuid)
+
+      metrics = worker.metrics()
+      self.assertEqual(metrics["bytes"], 128)
+      self.assertIn("last_h2d_s", metrics)
+
 
 if __name__ == "__main__":
   absltest.main()

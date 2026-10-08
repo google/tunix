@@ -24,6 +24,7 @@ import ipaddress
 import os
 import re
 import socket
+import time
 from typing import Any, List, Optional, Sequence, Tuple
 
 from absl import logging
@@ -32,6 +33,29 @@ from jax.experimental import compute_on
 import jax.numpy as jnp
 from tunix.experimental.weight_sync import weight_sync
 from tunix.utils import mesh
+
+
+def _get_host_rss_gb() -> tuple[float, float]:
+  """Returns (current_rss_gb, peak_rss_gb) for the current process."""
+  peak_rss_gb = 0.0
+  try:
+    import resource  # pylint: disable=g-import-not-at-top
+
+    peak_rss_gb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6
+  except ImportError:
+    pass
+  current_rss_gb = peak_rss_gb
+  try:
+    with open("/proc/self/status", "r", encoding="utf-8") as f:
+      for line in f:
+        if line.startswith("VmRSS:"):
+          parts = line.split()
+          if len(parts) >= 2:
+            current_rss_gb = int(parts[1]) / 1e6
+          break
+  except OSError:
+    pass
+  return round(current_rss_gb, 3), round(peak_rss_gb, 3)
 
 
 def _log_rss(tag: str) -> None:
@@ -44,9 +68,7 @@ def _log_rss(tag: str) -> None:
   """
   if not logging.vlog_is_on(1):
     return
-  import resource  # pylint: disable=g-import-not-at-top
-
-  rss_gb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6
+  _, rss_gb = _get_host_rss_gb()
   logging.vlog(
       1, "raiden bind rss checkpoint [%s]: %.1f GB (peak)", tag, rss_gb
   )
@@ -902,12 +924,25 @@ class RaidenSynchronizer(weight_sync.WeightSynchronizer):
     del sync_request, kwargs
     if not self.bound:
       raise RuntimeError(f"{self.job_name}: bind() must run before h2d()")
+    t_start = time.monotonic()
+    rss_before_gb, _ = _get_host_rss_gb()
     if self._is_proxy:
       self._ffi_h2d()
-      return
-    if self._sync is not None:
+    elif self._sync is not None:
       self._sync.h2d()
       jax.block_until_ready(self.arrays)
+    h2d_s = time.monotonic() - t_start
+    rss_after_gb, peak_rss_gb = _get_host_rss_gb()
+    logging.info(
+        "RAIDEN_H2D_STATS job=%s auto_h2d=%s h2d_s=%.3f rss_before_gb=%.2f"
+        " rss_after_gb=%.2f peak_rss_gb=%.2f",
+        self.job_name,
+        self._auto_h2d,
+        h2d_s,
+        rss_before_gb,
+        rss_after_gb,
+        peak_rss_gb,
+    )
 
   # TODO(tunix-dev): drop this once bind() records the runner's leaf identity so
   # h2d() writes back in place, making the name matching below unnecessary.
@@ -1104,10 +1139,21 @@ class RaidenSynchronizer(weight_sync.WeightSynchronizer):
         transport_mode="ffi" if self._is_proxy else "tcp",
         use_ffi=self._is_proxy,
         host_subgrid=self._host_subgrid,
+        auto_h2d=bool(self._auto_h2d),
     )
 
 
 RaidenWeightSync = RaidenSynchronizer
+
+_TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "y", "t", "on"})
+
+
+def is_parallel_h2h_enabled() -> bool:
+  """Returns whether parallel H2H weight sync (deferred H2D) is enabled."""
+  return (
+      os.environ.get("WEIGHT_SYNC_PARALLEL_H2H", "false").strip().lower()
+      in _TRUTHY_ENV_VALUES
+  )
 
 
 @functools.lru_cache(maxsize=4)
@@ -1143,22 +1189,256 @@ def _compute_checksums(
   return head
 
 
+def _patch_tpu_worker_bind_raiden_sync() -> None:
+  """Patches TPUWorker.bind_raiden_sync to accept auto_h2d if needed."""
+  tpu_worker_mod = _lazy_import_module("tpu_inference.worker.tpu_worker")
+  if tpu_worker_mod is None or not hasattr(tpu_worker_mod, "TPUWorker"):
+    return
+  worker_cls = tpu_worker_mod.TPUWorker
+  if getattr(worker_cls, "_bind_raiden_patched_by_tunix", False):
+    return
+  orig_worker_bind = getattr(worker_cls, "bind_raiden_sync", None)
+  if orig_worker_bind is None:
+    return
+  try:
+    params = inspect.signature(orig_worker_bind).parameters
+  except (TypeError, ValueError):
+    params = {}
+  if "auto_h2d" in params:
+    worker_cls._bind_raiden_patched_by_tunix = True
+    return
+
+  def _patched_worker_bind_raiden_sync(
+      self,
+      worker_index: int = 0,
+      parallelism: int = 4,
+      job_name: str = "rollout",
+      auto_h2d: Optional[bool] = None,
+  ) -> dict[str, Any]:
+    from tpu_inference.rl import raiden_worker_sync  # pylint: disable=g-import-not-at-top
+
+    state = self.get_weights_state()
+    if self._raiden_rl_weight_sync is None:
+      self._raiden_rl_weight_sync = raiden_worker_sync.RaidenWorkerSync(
+          job_name=job_name,
+          worker_index=worker_index,
+          parallelism=parallelism,
+      )
+    else:
+      self._raiden_rl_weight_sync.job_name = job_name
+      self._raiden_rl_weight_sync.worker_index = worker_index
+    if auto_h2d is not None:
+      self._raiden_rl_weight_sync._auto_h2d = bool(auto_h2d)
+    self._raiden_rl_weight_sync.bind(state)
+    return self._raiden_rl_weight_sync.metadata_dict()
+
+  worker_cls.bind_raiden_sync = _patched_worker_bind_raiden_sync
+  worker_cls._bind_raiden_patched_by_tunix = True
+
+
 def patch_raiden_worker_sync() -> None:
-  """Monkey-patches tpu_inference.rl.raiden_worker_sync.RaidenWorkerSync to delegate apply_to_runner."""
+  """Monkey-patches tpu_inference.rl.raiden_worker_sync.RaidenWorkerSync."""
   if os.environ.get("JAX_PLATFORMS") == "cpu":
     return
+  parallel_h2h = is_parallel_h2h_enabled()
   # Resolved through importlib, like the other optional deps in this module, so
   # static dependency analysis does not try to follow tpu-inference -- it is not
   # a declared dependency and is absent in many environments.
   rws = _lazy_import_module("tpu_inference.rl.raiden_worker_sync")
   if rws is None:
-    logging.debug("tpu_inference not available to patch")
+    if parallel_h2h:
+      logging.warning(
+          "WEIGHT_SYNC_PARALLEL_H2H is enabled, but"
+          " tpu_inference.rl.raiden_worker_sync could not be imported to"
+          " patch auto_h2d=False."
+      )
+    else:
+      logging.debug("tpu_inference not available to patch")
     return
   try:
+    _patch_tpu_worker_bind_raiden_sync()
     if getattr(rws.RaidenWorkerSync, "_patched_by_tunix", False):
       return
+    orig_bind = getattr(rws.RaidenWorkerSync, "bind", None)
+    orig_h2d = getattr(rws.RaidenWorkerSync, "h2d", None)
+    orig_metadata_dict = getattr(rws.RaidenWorkerSync, "metadata_dict", None)
+    orig_metrics = getattr(rws.RaidenWorkerSync, "metrics", None)
     orig_apply = getattr(rws.RaidenWorkerSync, "apply_to_runner", None)
     orig_checksums = getattr(rws.RaidenWorkerSync, "checksums", None)
+
+    if parallel_h2h and (orig_bind is None or orig_h2d is None):
+      logging.warning(
+          "WEIGHT_SYNC_PARALLEL_H2H is enabled, but RaidenWorkerSync is"
+          " missing bind (%s) or h2d (%s); cannot override auto_h2d=False.",
+          orig_bind,
+          orig_h2d,
+      )
+
+    orig_bind_accepts_auto_h2d = False
+    if orig_bind is not None:
+      try:
+        orig_bind_accepts_auto_h2d = (
+            "auto_h2d" in inspect.signature(orig_bind).parameters
+        )
+      except (TypeError, ValueError):
+        orig_bind_accepts_auto_h2d = False
+
+    def _patched_bind(self, *args: Any, **kwargs: Any) -> Any:
+      explicit_auto_h2d = kwargs.pop("auto_h2d", None)
+      if explicit_auto_h2d is not None:
+        auto_h2d = bool(explicit_auto_h2d)
+      elif hasattr(self, "_auto_h2d") and self._auto_h2d is not None:
+        auto_h2d = bool(self._auto_h2d)
+      else:
+        auto_h2d = not is_parallel_h2h_enabled()
+      self._auto_h2d = auto_h2d
+      if orig_bind_accepts_auto_h2d:
+        kwargs["auto_h2d"] = auto_h2d
+      if auto_h2d:
+        self._effective_auto_h2d = True
+        if orig_bind is not None:
+          return orig_bind(self, *args, **kwargs)
+        return None
+      was_unbound = getattr(self, "_sync", None) is None
+      self._last_h2d_s = None
+      rss_before_gb, _ = _get_host_rss_gb()
+      ws_lib = getattr(rws, "_ws_lib", None)
+      orig_ws_cls = (
+          getattr(ws_lib, "WeightSynchronizer", None)
+          if ws_lib is not None
+          else None
+      )
+      factory_called = False
+      if ws_lib is not None and orig_ws_cls is not None:
+
+        def _ws_factory(*ws_args: Any, **ws_kwargs: Any) -> Any:
+          nonlocal factory_called
+          factory_called = True
+          ws_kwargs["auto_h2d"] = auto_h2d
+          self._effective_auto_h2d = auto_h2d
+          return orig_ws_cls(*ws_args, **ws_kwargs)
+
+        ws_lib.WeightSynchronizer = _ws_factory
+      elif was_unbound and not auto_h2d:
+        logging.warning(
+            "RaidenWorkerSync.bind could not locate"
+            " _ws_lib.WeightSynchronizer to set auto_h2d=False; falling back"
+            " to default auto_h2d=True."
+        )
+      try:
+        if orig_bind is not None:
+          return orig_bind(self, *args, **kwargs)
+      finally:
+        if ws_lib is not None and orig_ws_cls is not None:
+          ws_lib.WeightSynchronizer = orig_ws_cls
+        if was_unbound and not factory_called:
+          self._effective_auto_h2d = True
+          if not auto_h2d:
+            logging.warning(
+                "RaidenWorkerSync.bind did not invoke patched"
+                " _ws_lib.WeightSynchronizer; effective auto_h2d remains"
+                " True."
+            )
+        if was_unbound:
+          rss_after_gb, peak_rss_gb = _get_host_rss_gb()
+          logging.info(
+              "RAIDEN_BIND_RSS job=%s auto_h2d=%s rss_before_gb=%.2f"
+              " rss_after_gb=%.2f peak_rss_gb=%.2f",
+              getattr(self, "job_name", "rollout"),
+              self._effective_auto_h2d,
+              rss_before_gb,
+              rss_after_gb,
+              peak_rss_gb,
+          )
+
+    def _patched_h2d(self, uuid: Optional[int] = None) -> None:
+      effective_auto_h2d = getattr(
+          self, "_effective_auto_h2d", getattr(self, "_auto_h2d", True)
+      )
+      if effective_auto_h2d and orig_h2d is not None:
+        return orig_h2d(self, uuid=uuid)
+      sync = self._require_sync("h2d()")
+      job_name = getattr(self, "job_name", "rollout")
+      if uuid is not None and int(uuid) <= 0:
+        raise ValueError(
+            f"{job_name}: h2d() requires a positive transfer uuid, got {uuid!r}"
+        )
+      t_start = time.monotonic()
+      rss_before_gb, _ = _get_host_rss_gb()
+      if hasattr(sync, "wait_for_transfer_completion"):
+        if not effective_auto_h2d and uuid is None:
+          raise ValueError(
+              f"{job_name}: h2d() with auto_h2d=False requires a positive"
+              f" transfer uuid, got {uuid!r}"
+          )
+        sync.wait_for_transfer_completion(
+            int(uuid) if uuid is not None else None
+        )
+        if effective_auto_h2d:
+          jax.block_until_ready(self.arrays)
+          h2d_s = time.monotonic() - t_start
+          rss_after_gb, peak_rss_gb = _get_host_rss_gb()
+          self._last_h2d_s = round(h2d_s, 3)
+          logging.info(
+              "RAIDEN_H2D_STATS job=%s auto_h2d=%s h2d_s=%.3f"
+              " rss_before_gb=%.2f rss_after_gb=%.2f peak_rss_gb=%.2f",
+              job_name,
+              effective_auto_h2d,
+              h2d_s,
+              rss_before_gb,
+              rss_after_gb,
+              peak_rss_gb,
+          )
+          return
+      sync.h2d()
+      jax.block_until_ready(self.arrays)
+      envs_mod = getattr(rws, "envs", None)
+      if (
+          envs_mod is not None
+          and getattr(envs_mod, "RAIDEN_H2D_SETTLE", False)
+          and hasattr(self, "_wait_until_settled")
+      ):
+        self._wait_until_settled()
+      h2d_s = time.monotonic() - t_start
+      rss_after_gb, peak_rss_gb = _get_host_rss_gb()
+      self._last_h2d_s = round(h2d_s, 3)
+      logging.info(
+          "RAIDEN_H2D_STATS job=%s auto_h2d=%s h2d_s=%.3f rss_before_gb=%.2f"
+          " rss_after_gb=%.2f peak_rss_gb=%.2f",
+          job_name,
+          effective_auto_h2d,
+          h2d_s,
+          rss_before_gb,
+          rss_after_gb,
+          peak_rss_gb,
+      )
+
+    def _patched_metadata_dict(
+        self, *args: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+      md = (
+          dict(orig_metadata_dict(self, *args, **kwargs))
+          if orig_metadata_dict is not None
+          else {}
+      )
+      if hasattr(self, "_effective_auto_h2d"):
+        md["auto_h2d"] = bool(self._effective_auto_h2d)
+      elif hasattr(self, "_auto_h2d") and self._auto_h2d is not None:
+        md["auto_h2d"] = bool(self._auto_h2d)
+      return md
+
+    def _patched_metrics(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+      m = (
+          dict(orig_metrics(self, *args, **kwargs))
+          if orig_metrics is not None
+          else {}
+      )
+      rss_gb, peak_rss_gb = _get_host_rss_gb()
+      m["host_rss_gb"] = rss_gb
+      m["host_peak_rss_gb"] = peak_rss_gb
+      if getattr(self, "_last_h2d_s", None) is not None:
+        m["last_h2d_s"] = self._last_h2d_s
+      return m
 
     def _patched_apply_to_runner(self, runner: Any) -> None:
       if self._sync is not None and hasattr(self._sync, "apply_to_runner"):
@@ -1177,12 +1457,26 @@ def patch_raiden_worker_sync() -> None:
         return orig_checksums(self, sample=sample)
       return {}
 
+    if orig_bind is not None:
+      rws.RaidenWorkerSync.bind = _patched_bind
+    if orig_h2d is not None:
+      rws.RaidenWorkerSync.h2d = _patched_h2d
+    if orig_metadata_dict is not None:
+      rws.RaidenWorkerSync.metadata_dict = _patched_metadata_dict
+    rws.RaidenWorkerSync.metrics = _patched_metrics
     rws.RaidenWorkerSync.apply_to_runner = _patched_apply_to_runner
     rws.RaidenWorkerSync.checksums = _patched_checksums
     rws.RaidenWorkerSync._patched_by_tunix = True
     logging.info(
-        "Successfully patched RaidenWorkerSync.apply_to_runner with Tunix"
-        " delegation."
+        "Successfully patched RaidenWorkerSync (bind, h2d, metadata_dict,"
+        " metrics, apply_to_runner, checksums) with Tunix delegation."
     )
   except AttributeError as e:
-    logging.debug("tpu_inference not available to patch: %s", e)
+    if parallel_h2h:
+      logging.warning(
+          "WEIGHT_SYNC_PARALLEL_H2H is enabled, but patching"
+          " RaidenWorkerSync failed: %s",
+          e,
+      )
+    else:
+      logging.debug("tpu_inference not available to patch: %s", e)
