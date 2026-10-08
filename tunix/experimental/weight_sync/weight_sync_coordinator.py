@@ -749,6 +749,9 @@ class WeightSyncResult:
     return self.state is RoundState.COMMITTED
 
 
+NoHealthyRolloutWorkersError = datatypes.NoHealthyRolloutWorkersError
+
+
 class WeightSyncError(RuntimeError):
   """A round did not commit. Carries the round's result.
 
@@ -805,6 +808,7 @@ class WeightSyncCoordinator:
       timeouts: Optional[PhaseTimeouts] = None,
       disable_timeouts: Optional[bool] = None,
       evict_failed_destinations: bool = False,
+      recover_unknown_transfer_state: bool = False,
   ):
     self._registry = registry
     self._handler = handler
@@ -817,6 +821,7 @@ class WeightSyncCoordinator:
     else:
       self._timeouts = timeouts or PhaseTimeouts()
     self._evict_failed_destinations = evict_failed_destinations
+    self._recover_unknown_transfer_state = recover_unknown_transfer_state
     logging.info(
         "WeightSyncCoordinator initialized with timeouts (disabled=%s): %s",
         disable_timeouts or is_weight_sync_timeouts_disabled(),
@@ -865,6 +870,63 @@ class WeightSyncCoordinator:
     logging.warning("coordinator poison cleared: %s", self._poisoned)
     self._poisoned = None
 
+  async def release_after_unknown_transfer(
+      self,
+      result: Optional[WeightSyncResult] = None,
+  ) -> None:
+    """Explicitly releases source staging after an UNKNOWN_TRANSFER_STATE failure.
+
+    When a transfer times out or reports an unknown outcome, `_run_round`
+    skips `release_weight_sync` so a still-running transfer does not read freed
+    source staging buffers, leaving the source worker in `SYNCING`. Once the
+    operator or coordinator has evicted the failed destination(s), calling this
+    method releases source staging on all sources (returning the trainer to
+    `READY`) and clears the coordinator poison.
+
+    Args:
+      result: Optional `WeightSyncResult` from the failed round used to build
+        the release `WeightSyncRequest`.
+
+    Raises:
+      RuntimeError: If any source fails `release_weight_sync`.
+    """
+    sources = self._sources()
+    if result is not None:
+      release_request = self.build_request(
+          result.policy_version,
+          req_id=result.req_id,
+          uuid=result.uuid,
+          round_index=result.round_index,
+      )
+    else:
+      release_request = self.build_request(
+          self._last_committed_version or 0,
+          req_id=f"{self._req_id_prefix}-release",
+          uuid=self._next_uuid,
+          round_index=self._round_index,
+      )
+    release_errors = await asyncio.gather(
+        *[
+            asyncio.wait_for(
+                s.release_weight_sync(release_request),
+                self._timeouts.release,
+            )
+            for s in sources
+        ],
+        return_exceptions=True,
+    )
+    failed = [
+        (_worker_id(s), err)
+        for s, err in zip(sources, release_errors)
+        if isinstance(err, BaseException)
+    ]
+    if failed:
+      raise RuntimeError(
+          f"release_weight_sync failed on sources: {failed!r}"
+      ) from failed[0][1]
+    if self._poisoned is not None:
+      self.reset_after_recovery()
+
   # ---------------------------------------------------------------- lookup
 
   def _members(
@@ -874,10 +936,15 @@ class WeightSyncCoordinator:
       states: Optional[Sequence[worker_registry.MembershipState]] = None,
       allow_empty: bool = False,
   ) -> list[Any]:
+    """Returns registered workers for `role` matching `states`."""
     group = self._registry.group(role, states=states)
     if group.is_empty():
       if allow_empty:
         return []
+      if role == self._destination_role:
+        raise datatypes.NoHealthyRolloutWorkersError(
+            f"no workers registered for role {role!r}"
+        )
       raise ValueError(f"no workers registered for role {role!r}")
     return list(group)
 
@@ -1129,14 +1196,11 @@ class WeightSyncCoordinator:
           )
         except WeightSyncError as err:
           res = err.result
+          if not self._evict_failed_destinations or res is None:
+            raise
           if (
-              not self._evict_failed_destinations
-              or res is None
-              or res.state
-              in (
-                  RoundState.UNKNOWN_TRANSFER_STATE,
-                  RoundState.PARTIALLY_COMMITTED,
-              )
+              res.state is RoundState.UNKNOWN_TRANSFER_STATE
+              and not self._recover_unknown_transfer_state
           ):
             raise
           failed_worker_ids = [
@@ -1144,7 +1208,8 @@ class WeightSyncCoordinator:
               for w in res.workers
               if w.phase != "committed"
               and (
-                  w.needs_restart
+                  res.state is RoundState.PARTIALLY_COMMITTED
+                  or w.needs_restart
                   or w.phase == "unknown"
                   or (w.error and w.phase != "aborted")
               )
@@ -1162,20 +1227,32 @@ class WeightSyncCoordinator:
                 worker_registry.MembershipState.ACTIVE,
                 worker_registry.MembershipState.PENDING_WEIGHT_SYNC,
             )
-          if (
-              self._registry.group(
-                  self._destination_role, states=target_states
-              ).is_empty()
-              or not evicted_any
-          ):
+          remaining_destinations = self._registry.group(
+              self._destination_role,
+              states=target_states,
+          )
+          if remaining_destinations.is_empty():
+            raise
+          can_retry = (
+              evicted_any
+              or res.state is RoundState.PARTIALLY_COMMITTED
+              or (
+                  res.state is RoundState.UNKNOWN_TRANSFER_STATE
+                  and self._recover_unknown_transfer_state
+              )
+          )
+          if not can_retry:
             raise
           logging.warning(
-              "Weight sync failed on destination worker(s) %s; evicted failed"
-              " worker(s) and retrying sync (policy_version=%d).",
+              "Weight sync failed on destination worker(s) %s (state=%s);"
+              " recovering and retrying sync (policy_version=%d).",
               failed_worker_ids,
+              res.state.value,
               policy_version,
           )
-          if self._poisoned is not None:
+          if res.state is RoundState.UNKNOWN_TRANSFER_STATE:
+            await self.release_after_unknown_transfer(res)
+          elif self._poisoned is not None:
             self.reset_after_recovery()
           return await self._run_round(
               policy_version,
@@ -1191,7 +1268,8 @@ class WeightSyncCoordinator:
                 for w in res.workers
                 if w.phase != "committed"
                 and (
-                    w.needs_restart
+                    res.state is RoundState.PARTIALLY_COMMITTED
+                    or w.needs_restart
                     or w.phase == "unknown"
                     or (w.error and w.phase != "aborted")
                 )
@@ -1199,22 +1277,34 @@ class WeightSyncCoordinator:
             if res is not None
             else []
         )
-        if (
+        can_evict = (
             self._evict_failed_destinations
             and res is not None
-            and res.state
-            not in (
-                RoundState.UNKNOWN_TRANSFER_STATE,
-                RoundState.PARTIALLY_COMMITTED,
+            and not (
+                res.state is RoundState.UNKNOWN_TRANSFER_STATE
+                and not self._recover_unknown_transfer_state
             )
-        ):
+        )
+        if can_evict:
           for wid in failed_worker_ids:
             self._registry.evict(wid)
+        if only_pending:
+          target_states = (worker_registry.MembershipState.PENDING_WEIGHT_SYNC,)
+        else:
+          target_states = (
+              worker_registry.MembershipState.ACTIVE,
+              worker_registry.MembershipState.PENDING_WEIGHT_SYNC,
+          )
+        remaining_destinations = self._registry.group(
+            self._destination_role,
+            states=target_states,
+        )
         if (
             only_pending
             and (
                 res is None
                 or res.state is not RoundState.UNKNOWN_TRANSFER_STATE
+                or self._recover_unknown_transfer_state
             )
             and not self._registry.group(
                 self._destination_role,
@@ -1223,16 +1313,28 @@ class WeightSyncCoordinator:
         ):
           # Every PENDING_WEIGHT_SYNC destination of this catch-up round was
           # evicted (or failed without touching ACTIVE destinations): the
-          # failure is contained to pending worker(s), so the coordinator must
-          # stay usable for the next regular round rather than stay poisoned.
+          # failure is contained to pending worker(s), so release source
+          # staging / clear the poison and keep the coordinator usable for the
+          # next regular round instead of reporting the fleet as unhealthy.
           logging.warning(
               "[rollout-ft] action=pending_sync_abandoned policy_version=%d"
               " evicted=%s; ACTIVE rollout workers keep serving.",
               policy_version,
               failed_worker_ids,
           )
-          if self._poisoned is not None:
+          if (
+              res is not None
+              and res.state is RoundState.UNKNOWN_TRANSFER_STATE
+          ):
+            await self.release_after_unknown_transfer(res)
+          elif self._poisoned is not None:
             self.reset_after_recovery()
+          raise
+        if can_evict and remaining_destinations.is_empty():
+          raise datatypes.NoHealthyRolloutWorkersError(
+              "No healthy rollout destination workers remaining after weight"
+              f" sync failure (evicted: {failed_worker_ids})."
+          ) from err
         raise
     finally:
       elapsed_time = time.monotonic() - start_time

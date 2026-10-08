@@ -79,6 +79,7 @@ class LifecycleDriver:
   def shutdown(self) -> None:
     """Stops every worker best-effort, then raises if any stop() failed."""
     failures: list[tuple[str, BaseException]] = []
+    # worker_ids() omits EVICTED members, so evicted workers are never stopped.
     worker_ids = self._registry.worker_ids()
 
     def _stop_worker(wid: str) -> None:

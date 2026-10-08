@@ -2967,6 +2967,71 @@ class RemoteExecutionTest(absltest.TestCase):
     self.assertIn("p_loop_1", res1)
     self.assertIn("p_loop_2", res2)
 
+  def test_pool_execution_session_retain_pending_on_zero_workers(
+      self,
+  ):
+    class CrashingPollHandle(remote_lib.ActorHandle):
+
+      def submit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def asubmit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def dispatch_task(
+          self, request_id=None, method_name=None, *args, **kwargs
+      ) -> str:
+        del method_name, args, kwargs
+        return request_id or ""
+
+      async def poll_responses(self, timeout_s=50.0):
+        del timeout_s
+        await asyncio.sleep(0.01)
+        raise ConnectionError("last_worker_crashed")
+
+    async def _run():
+      crashing = CrashingPollHandle()
+      pool = remote_lib.RoutingActorPool([crashing])
+      session = remote_lib.PoolExecutionSession(
+          pool,
+          config=remote_lib.PoolSessionConfig(
+              evict_on_failure=True,
+              retry_on_worker_failure=True,
+              max_task_retries=3,
+              retain_pending_on_zero_workers=True,
+          ),
+      )
+
+      await session.submit(
+          "req_zero_1", "compute_trajectory", "p_zero", turns=1
+      )
+      # Poll briefly so crashing worker fails and is evicted.
+      batch = await session.poll_completed(timeout_s=0.05)
+      self.assertEmpty(batch)
+      self.assertEmpty(pool.actors)
+      self.assertEqual(session.pending_count, 1)
+      self.assertEqual(session.in_flight_count, 1)
+      self.assertEmpty(session.pop_failed_tasks())
+
+      # Dynamically add a replacement worker; the retained pending task drains
+      # onto the replacement and completes cleanly.
+      replacement = create_in_process_handle(
+          StubWorkerEngine("replacement_worker", latency=0.01)
+      )
+      session.add_actor(replacement)
+      batch2 = await session.poll_completed(timeout_s=2.0)
+      self.assertLen(batch2, 1)
+      self.assertEqual(
+          batch2[0][0],
+          "[replacement_worker] Trajectory for prompt p_zero (1 turns)",
+      )
+      self.assertIsNone(batch2[0][1])
+      self.assertEqual(session.in_flight_count, 0)
+      self.assertEqual(session.pending_count, 0)
+      await session.close()
+
+    asyncio.run(_run())
+
   def test_pool_session_config_validates_arguments(self):
     dummy_handle = create_in_process_handle(StubWorkerEngine("w", latency=0.01))
     with self.assertRaisesRegex(ValueError, "max_task_retries"):

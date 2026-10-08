@@ -2173,6 +2173,101 @@ class ElasticWorkerMembershipTest(CoordinatorTestBase):
     )
     self.assertEqual([u.job_name for u in r2.destination_units], ["roll-1"])
 
+  def test_no_destinations_raises_no_healthy_rollout_workers_error(self):
+    wire = Wire()
+    registry = worker_registry.WorkerRegistry()
+    registry.register(FakeSource("trainer", wire, []))
+    coordinator = weight_sync_coordinator.WeightSyncCoordinator(
+        registry=registry,
+        handler=FakeHandler(wire, []),
+        timeouts=FAST_TIMEOUTS,
+    )
+    with self.assertRaises(datatypes.NoHealthyRolloutWorkersError):
+      asyncio.run(coordinator.sync(1))
+
+  def test_release_after_unknown_transfer_releases_source_and_allows_retry(
+      self,
+  ):
+    d0 = FakeDestination("roll-0", [])
+    d1 = FakeDestination("roll-1", [])
+    self.make(d0, d1)
+    self.handler.raise_on_transfer = weight_sync.TransferOutcomeUnknownError(
+        "transfer timed out"
+    )
+
+    with self.assertRaises(WeightSyncError) as ctx:
+      self.sync(policy_version=1)
+
+    result = ctx.exception.result
+    self.assertIs(result.state, RoundState.UNKNOWN_TRANSFER_STATE)
+    self.assertEqual(self.sources[0].release_calls, 0)
+    self.assertIsNotNone(self.coordinator.poisoned)
+
+    # Evict roll-1, explicitly release source staging, reset poison, and retry.
+    self.registry.unregister("roll-1")
+    asyncio.run(self.coordinator.release_after_unknown_transfer(result))
+    self.assertEqual(self.sources[0].release_calls, 1)
+
+    self.handler.raise_on_transfer = None
+    self.coordinator.reset_after_recovery()
+    retry_res = self.sync(policy_version=1)
+    self.assertTrue(retry_res.success)
+    self.assertIs(retry_res.state, RoundState.COMMITTED)
+    self.assertEqual(d0.serving, expected_pattern(1))
+    self.assertEqual(self.sources[0].release_calls, 2)
+
+  def test_auto_evict_and_retry_partially_committed_and_unknown_transfer(self):
+    # 1. PARTIALLY_COMMITTED auto-evicts the failed worker, clears poison, and
+    # retries on the surviving destination when evict_failed_destinations=True.
+    d0 = FakeDestination("roll-0", [])
+    d1 = FakeDestination("roll-1", [], fail_on="post", fail_persistently=True)
+    self.make(d0, d1, evict_failed_destinations=True)
+
+    res_partial = self.sync(policy_version=1)
+    self.assertTrue(res_partial.success)
+    self.assertIs(res_partial.state, RoundState.COMMITTED)
+    self.assertEqual(d0.serving, expected_pattern(1))
+    self.assertEqual(
+        self.registry.state("roll-1"),
+        worker_registry.MembershipState.EVICTED,
+    )
+
+    # 2. UNKNOWN_TRANSFER_STATE fails loud when
+    # recover_unknown_transfer_state=False.
+    d2 = FakeDestination("roll-2", [])
+    self.handler.attach(d2)
+    self.registry.register(d2)
+    self.handler.raise_on_transfer = weight_sync.TransferOutcomeUnknownError(
+        "transfer timed out"
+    )
+    with self.assertRaises(WeightSyncError) as ctx:
+      self.sync(policy_version=2)
+    self.assertIs(ctx.exception.result.state, RoundState.UNKNOWN_TRANSFER_STATE)
+    self.assertIsNotNone(self.coordinator.poisoned)
+
+    # 3. With recover_unknown_transfer_state=True, a one-shot transfer timeout
+    # releases source staging, clears poison, and retries cleanly.
+    asyncio.run(
+        self.coordinator.release_after_unknown_transfer(ctx.exception.result)
+    )
+    self.coordinator._recover_unknown_transfer_state = True  # pylint: disable=protected-access
+    transfer_attempts = 0
+    orig_transfer = self.handler.transfer
+
+    def _fail_once_transfer(*args, **kwargs):
+      nonlocal transfer_attempts
+      transfer_attempts += 1
+      if transfer_attempts == 1:
+        raise weight_sync.TransferOutcomeUnknownError("transient timeout")
+      return orig_transfer(*args, **kwargs)
+
+    self.handler.raise_on_transfer = None
+    self.handler.transfer = _fail_once_transfer
+    res_unknown = self.sync(policy_version=2)
+    self.assertTrue(res_unknown.success)
+    self.assertIs(res_unknown.state, RoundState.COMMITTED)
+    self.assertEqual(d0.serving, expected_pattern(2))
+
   def test_only_pending_failure_evicts_worker_without_poisoning(self):
     d0 = FakeDestination("roll-0", [])
     d1 = FakeDestination(

@@ -93,16 +93,14 @@ class ClusterOrchestrator:
         configuration.
     """
     self.config = config
+    # Legacy scalar arguments take precedence over the consolidated config;
+    # `with_overrides` validates the merged result (positive caps/timeouts).
     self._fault_tolerance_config = (
         fault_tolerance_config or datatypes.RolloutFaultToleranceConfig()
     ).with_overrides(
         max_in_flight_per_worker=max_concurrent_rollouts_per_worker,
         task_timeout_s=rollout_task_timeout_s,
     )
-    self._max_concurrent_rollouts_per_worker = (
-        self._fault_tolerance_config.max_in_flight_per_worker
-    )
-    self._rollout_task_timeout_s = self._fault_tolerance_config.task_timeout_s
     self.registry = registry or worker_registry.WorkerRegistry()
     self.lifecycle_driver = lifecycle_driver or lifecycle.LifecycleDriver(
         self.registry
@@ -371,12 +369,15 @@ class ClusterOrchestrator:
             and self.engine is not None
         ):
           coordinator = self.engine.weight_sync_coordinator
-          require_sync = coordinator is not None and (
-              self.engine.policy_version > 0
-              or coordinator.last_committed_version is not None
-          )
+          require_sync = coordinator is not None
           if require_sync:
             target_state = worker_registry.MembershipState.PENDING_WEIGHT_SYNC
+          logging.info(
+              "[rollout-ft] action=rejoin worker_id=%s incarnation=%s state=%s",
+              worker_id,
+              incarnation,
+              target_state.value,
+          )
         self.registry.set_state(
             worker_id,
             target_state,
@@ -708,11 +709,21 @@ class ClusterOrchestrator:
       if datatypes.Role.ROLLOUT.value not in info.roles:
         return
       if state == worker_registry.MembershipState.ACTIVE:
+        logging.info(
+            "[rollout-ft] action=promote worker_id=%s incarnation=%s",
+            worker_id,
+            self.registry.incarnation(worker_id),
+        )
         self.engine.add_rollout_worker(
             member.handle,
             max_in_flight=self._effective_worker_capacity(info),
         )
       elif state == worker_registry.MembershipState.EVICTED:
+        logging.info(
+            "[rollout-ft] action=evict worker_id=%s incarnation=%s",
+            worker_id,
+            self.registry.incarnation(worker_id),
+        )
         self.engine.remove_rollout_worker(member.handle)
 
   def _on_engine_worker_evicted(
@@ -790,6 +801,9 @@ class ClusterOrchestrator:
           evict_failed_destinations=(
               self._fault_tolerance_config.enabled
               and self._fault_tolerance_config.retry_weight_sync_on_eviction
+          ),
+          recover_unknown_transfer_state=(
+              self._fault_tolerance_config.recover_unknown_transfer_state
           ),
       )
 

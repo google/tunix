@@ -1522,7 +1522,8 @@ class RoutingActorPool(ActorPool):
         the remote method. - kwargs: Keyword arguments dictionary passed to the
         remote method.
       config: Optional `PoolSessionConfig` governing eviction, retry,
-        concurrency caps, per-task timeout, and pending-worker hold policies.
+        concurrency caps, per-task timeout, and zero-worker / pending-worker
+        hold policies.
     """
     session = PoolExecutionSession(
         self, least_loaded=least_loaded, config=config
@@ -1563,6 +1564,9 @@ class PoolSessionConfig:
       workers temporarily drop to zero.
     task_timeout_s: Optional per-task execution timeout in seconds once a task
       is dispatched to a worker.
+    retain_pending_on_zero_workers: Whether to hold queued/retried tasks in
+      `_pending_queue` instead of failing them immediately when the active
+      worker pool temporarily drops to zero.
   """
 
   evict_on_failure: bool = False
@@ -1575,6 +1579,7 @@ class PoolSessionConfig:
   worker_max_in_flight: Optional[Mapping[ActorHandle, int]] = None
   has_pending_workers_fn: Optional[Callable[[], bool]] = None
   task_timeout_s: Optional[float] = None
+  retain_pending_on_zero_workers: bool = False
 
   def __post_init__(self) -> None:
     if self.max_task_retries < 0:
@@ -1636,6 +1641,9 @@ class PoolExecutionSession:
     self._task_timeout_s: Optional[float] = (
         float(cfg.task_timeout_s) if cfg.task_timeout_s is not None else None
     )
+    self._retain_pending_on_zero_workers = bool(
+        cfg.retain_pending_on_zero_workers
+    )
     self._response_queue: asyncio.Queue[Any] = asyncio.Queue()
     self._active_workers: set[ActorHandle] = set()
     # Actors currently considered pool members by this session. Eviction
@@ -1665,9 +1673,13 @@ class PoolExecutionSession:
     self._sentinel = object()
 
   def _can_retry_or_hold(self) -> bool:
-    return len(self._pool.actors) > 0 or (
-        self._has_pending_workers_fn is not None
-        and self._has_pending_workers_fn()
+    return (
+        len(self._pool.actors) > 0
+        or self._retain_pending_on_zero_workers
+        or (
+            self._has_pending_workers_fn is not None
+            and self._has_pending_workers_fn()
+        )
     )
 
   @property
@@ -1685,6 +1697,13 @@ class PoolExecutionSession:
     self._task_timeout_s = (
         float(task_timeout_s) if task_timeout_s is not None else None
     )
+
+  @property
+  def retain_pending_on_zero_workers(self) -> bool:
+    return self._retain_pending_on_zero_workers
+
+  def set_retain_pending_on_zero_workers(self, val: bool) -> None:
+    self._retain_pending_on_zero_workers = bool(val)
 
   @property
   def pending_count(self) -> int:
@@ -1909,6 +1928,13 @@ class PoolExecutionSession:
       ):
         if count_retry:
           self._task_retries[req_id] = retries + 1
+        logging.info(
+            "[rollout-ft] action=requeue request_id=%s retry=%d/%d reason=%r",
+            req_id,
+            self._task_retries.get(req_id, 0),
+            self._max_task_retries,
+            exc,
+        )
         self._pending_queue.appendleft(req_id)
       else:
         self._fail_task(req_id, exc)
@@ -1947,6 +1973,11 @@ class PoolExecutionSession:
       if actor not in self._known_actors and not removed_from_pool:
         return
       self._known_actors.discard(actor)
+      logging.info(
+          "[rollout-ft] action=evict worker=%s reason=%r",
+          actor,
+          exc,
+      )
       self._cancel_worker_polling(actor)
       dispatched_set = self._dispatched_tasks.pop(actor, None)
       if dispatched_set or (
@@ -2090,7 +2121,17 @@ class PoolExecutionSession:
         self._task_retries[request_id] = (
             self._task_retries.get(request_id, 0) + 1
         )
+        logging.info(
+            "[rollout-ft] action=requeue request_id=%s retry=%d/%d reason=%r",
+            request_id,
+            self._task_retries[request_id],
+            self._max_task_retries,
+            exc,
+        )
         self._pending_queue.appendleft(request_id)
+        if not self._pool.actors:
+          self._response_queue.put_nowait(self._sentinel)
+          return
         await self._drain_pending_queue()
         return
       if not was_in_dispatched and request_id in self._task_payloads:
@@ -2149,7 +2190,8 @@ class PoolExecutionSession:
         return request_id
 
     self._pending_queue.append(request_id)
-    await self._drain_pending_queue()
+    if self._pool.actors:
+      await self._drain_pending_queue()
     return request_id
 
   def _least_loaded_actor(
