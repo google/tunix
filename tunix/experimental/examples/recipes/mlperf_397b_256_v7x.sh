@@ -91,6 +91,9 @@ export LIBTPU_INIT_ARGS="${LIBTPU_INIT_ARGS:- --xla_tpu_use_minor_sharding_for_m
 # v7x caps scoped VMEM at 67043328 bytes (65472 KiB); 65536 is rejected per compile
 # (INVALID_ARGUMENT in pathways-rm) and the compiler falls back to its default.
 export TRAINER_LIBTPU_INIT_ARGS="${TRAINER_LIBTPU_INIT_ARGS:---DANGEROUS_tpu_runtime_abi_verification_disabled=true --xla_tpu_use_tc_device_shape_on_sc=true --xla_sc_disable_megacore_partitioning=true --xla_tpu_enable_offloading_gather_to_sparsecore=true --xla_tpu_enable_sparse_core_collective_offload_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true --xla_tpu_enable_sparse_core_reduce_scatter_v2=true --xla_tpu_use_single_sparse_core_for_all_gather_offload=false --xla_tpu_enable_concurrent_sparse_core_offloading=true --xla_tpu_aggressive_opt_barrier_removal=false --xla_tpu_scoped_vmem_limit_kib=65472 --xla_tpu_enable_sublane_major_scaling_bitcast_fusion=false --xla_tpu_use_single_sparse_core_for_reduce_scatter_offload=false --xla_tpu_dvfs_p_state=7}"
+# Extra trainer libtpu/XLA flags appended to the defaults above without restating
+# them, e.g. TRAINER_EXTRA_LIBTPU_INIT_ARGS=--xla_tpu_max_hbm_size_mib=84992.
+export TRAINER_LIBTPU_INIT_ARGS="${TRAINER_LIBTPU_INIT_ARGS}${TRAINER_EXTRA_LIBTPU_INIT_ARGS:+ ${TRAINER_EXTRA_LIBTPU_INIT_ARGS}}"
 export TRAINER_EXTRA_ENV="${TRAINER_EXTRA_ENV:-ONEHOT_MOE_PERMUTE_THRESHOLD=${ONEHOT_MOE_PERMUTE_THRESHOLD} RAIDEN_TRANSPORT_COALESCE_WINDOW_BYTES=67108864 RAIDEN_WEIGHT_SYNC_PIPELINE_GROUP_SIZE=16 ENABLE_MULTI_NUMA=${ENABLE_MULTI_NUMA} TPU_RAIDEN_DATA_NICS=eth0 RAIDEN_BROADCAST_HOST_RATIO=${RAIDEN_BROADCAST_HOST_RATIO} RAIDEN_BROADCAST_PIPELINE_STAGES=${RAIDEN_BROADCAST_PIPELINE_STAGES} LIBTPU_INIT_ARGS='${TRAINER_LIBTPU_INIT_ARGS}'${TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS:+ TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS=${TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS}}${TPU_RAIDEN_TCP_CONNECT_MAX_ATTEMPTS:+ TPU_RAIDEN_TCP_CONNECT_MAX_ATTEMPTS=${TPU_RAIDEN_TCP_CONNECT_MAX_ATTEMPTS}}}"
 # Under Pathways the trainer's TPU program runs in the pathways-worker container,
 # so the trainer libtpu flags must be set there (yaml_generator.py renders one
@@ -123,9 +126,12 @@ export RPC_TIMEOUT_S="${RPC_TIMEOUT_S:-10800}"
 # (mlperf_base.sh defaults REMAT_POLICY to full).
 export REMAT_POLICY="${REMAT_POLICY:-custom}"
 export RAGGED_BUFFER_FACTOR="${RAGGED_BUFFER_FACTOR:-2.0}"
+export CONTEXT_REMAT_POLICY="${CONTEXT_REMAT_POLICY:-remat}"
+export GDN_REMAT_POLICY="${GDN_REMAT_POLICY:-remat}"
+export NUM_MOE_TOKEN_CHUNKS="${NUM_MOE_TOKEN_CHUNKS:-2}"
 export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS:-custom_mesh_and_rule=cp-as-ep \
 use_gdn_kernel=true gdn_cp_mode=head gdn_chunk_size=64 \
-decoder_layer_input=offload context=remat gdn=remat gdn_conv=remat gdn_states=remat \
+decoder_layer_input=offload context=${CONTEXT_REMAT_POLICY} gdn=${GDN_REMAT_POLICY} gdn_conv=remat gdn_states=remat \
 megablox=true sparse_matmul=true use_tokamax_gmm=true use_gmm_v2=true \
 use_gmm_v2_heuristic_tiling=false merge_gating_gmm=false \
 wi_tile_fwd_batch_seq=256 wi_tile_fwd_embed_dim=4096 wi_tile_fwd_mlp_dim=1024 \
@@ -134,7 +140,7 @@ wi_tile_drhs_batch_seq=256 wi_tile_drhs_embed_dim=4096 wi_tile_drhs_mlp_dim=1024
 wo_tile_fwd_batch_seq=256 wo_tile_fwd_embed_dim=4096 wo_tile_fwd_mlp_dim=1024 \
 wo_tile_dlhs_batch_seq=256 wo_tile_dlhs_embed_dim=4096 wo_tile_dlhs_mlp_dim=1024 \
 wo_tile_drhs_batch_seq=256 wo_tile_drhs_embed_dim=4096 wo_tile_drhs_mlp_dim=1024 \
-use_ring_of_experts=true num_moe_token_chunks=2 moe_chunk_barrier=false \
+use_ring_of_experts=true num_moe_token_chunks=${NUM_MOE_TOKEN_CHUNKS} moe_chunk_barrier=false \
 ring_of_experts_local_routing=true moe_expert_weight_prefetch=forward \
 moe_chunk_pipeline=true ring_of_experts_row_major_reduce_scatter=true \
 use_ragged_sort=true use_custom_sort_vjp=false ragged_buffer_factor=${RAGGED_BUFFER_FACTOR} \
@@ -147,6 +153,9 @@ context_parallel_attention_load_balance=true \
 num_vocab_tiling=16 use_iota_embed=false mu_dtype=float32 grad_dtype=float32 \
 checkpoint_storage_concurrent_gb=96 \
 packing=True optimizer_memory_host_offload=true}"
+if [[ -n "${MAXTEXT_USER_EXTRA_FLAGS:-}" ]]; then
+  export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} ${MAXTEXT_USER_EXTRA_FLAGS}"
+fi
 export DEBUG=${DEBUG:-0}
 
 # DeepSWE Environment & Agent Sandbox
