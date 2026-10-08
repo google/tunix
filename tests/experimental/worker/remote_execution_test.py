@@ -1680,6 +1680,76 @@ class RemoteExecutionTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_iter_serialized_chunks_with_size_preserves_by_value_and_size(
+      self,
+  ):
+    arr = np.arange(128, dtype=np.int32)
+    total_bytes, chunks_it = remote_lib._iter_serialized_chunks_with_size(
+        {"tokens": arr, "step": 3}
+    )
+    chunks = list(chunks_it)
+    self.assertGreater(total_bytes, arr.nbytes)
+    restored = remote_lib._deserialize_from_chunks(chunks)
+    np.testing.assert_array_equal(restored["tokens"], arr)
+    self.assertEqual(restored["step"], 3)
+
+    # Verify both local closures and functions simulated in `__main__` are
+    # serialized by value via cloudpickle so remote workers without the caller's
+    # `__main__` attribute can deserialize and execute them.
+    multiplier = 7
+
+    def _main_fn(x: int) -> int:
+      return x * multiplier
+
+    _main_fn.__module__ = "__main__"
+    closure_payload = {
+        "arr": np.ones(16, dtype=np.float32),
+        "fn": _main_fn,
+    }
+    closure_bytes, closure_it = remote_lib._iter_serialized_chunks_with_size(
+        closure_payload
+    )
+    self.assertGreater(closure_bytes, 64)
+    restored_closure = remote_lib._deserialize_from_chunks(list(closure_it))
+    self.assertEqual(restored_closure["fn"](6), 42)
+    np.testing.assert_array_equal(
+        restored_closure["arr"], np.ones(16, dtype=np.float32)
+    )
+
+  def test_small_payload_serialize_async_chunks_runs_inline_and_closes(self):
+    closed = False
+
+    def _sync_gen():
+      nonlocal closed
+      try:
+        yield b"frame_0"
+        yield b"frame_1"
+      finally:
+        closed = True
+
+    async def _run():
+      ait = remote_lib._iter_async_from_sync_chunks(_sync_gen(), offload=False)
+      self.assertEqual(await ait.__anext__(), b"frame_0")
+      await ait.aclose()
+      self.assertTrue(closed)
+
+      req = remote_lib.ExecutionRequest(
+          request_id="req_inline",
+          method_name="compute_trajectory",
+          args=("prompt_inline",),
+          kwargs={"turns": 2},
+      )
+      restored_req = (
+          await remote_lib.ExecutionRequest.deserialize_async_chunks(
+              req.serialize_async_chunks()
+          )
+      )
+      self.assertEqual(restored_req.request_id, "req_inline")
+      self.assertEqual(restored_req.args, ("prompt_inline",))
+
+    asyncio.run(_run())
+
 
 if __name__ == "__main__":
   absltest.main()
+

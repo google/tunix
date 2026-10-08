@@ -524,6 +524,81 @@ class RemoteExecutionPerfTest(absltest.TestCase):
     self.__class__._results.append(res)
     self.assertGreater(res.throughput_gib_s, 0.0)
 
+  def test_w5_high_frequency_rollout_rpc_serde(self) -> None:
+    """Benchmarks 512 rollout request + response async chunk serde cycles."""
+    num_items = 512
+    requests = [
+        remote_execution.ExecutionRequest(
+            request_id=f"req_prompt_{i}_g{i % 16}_v5",
+            method_name="generate",
+            args=(),
+            kwargs={
+                "prompt": f"Solve math problem #{i}",
+                "prompt_id": f"prompt_{i}",
+                "group_index": i % 16,
+                "generation_kwargs": {
+                    "temperature": 0.8,
+                    "max_tokens": 2048,
+                    "return_logprobs": True,
+                },
+            },
+        )
+        for i in range(num_items)
+    ]
+    responses = [
+        remote_execution.ExecutionResponse(
+            result={
+                "prompt_id": f"prompt_{i}",
+                "group_index": i % 16,
+                "prompt_tokens": np.ones(256, dtype=np.int32),
+                "conversation_tokens": np.ones(1536, dtype=np.int32),
+                "conversation_masks": np.ones(1536, dtype=np.float32),
+                "old_per_token_logps": np.zeros(1536, dtype=np.float32),
+                "trajectory_reward": 1.0,
+            },
+            request_id=f"req_prompt_{i}_g{i % 16}_v5",
+        )
+        for i in range(num_items)
+    ]
+
+    async def _main() -> PerfResult:
+      monitor = EventLoopLagMonitor()
+      monitor.start()
+      t0 = time.perf_counter()
+      total_bytes = 0
+      chunk_count = 0
+      for req, resp in zip(requests, responses):
+        req_chunks = []
+        async for c in req.serialize_async_chunks():
+          total_bytes += len(c)
+          chunk_count += 1
+          req_chunks.append(c)
+        _ = remote_execution.ExecutionRequest.deserialize_chunks(req_chunks)
+
+        resp_chunks = []
+        async for c in resp.serialize_async_chunks():
+          total_bytes += len(c)
+          chunk_count += 1
+          resp_chunks.append(c)
+        _ = remote_execution.ExecutionResponse.deserialize_chunks(resp_chunks)
+
+      wall_ms = (time.perf_counter() - t0) * 1000.0
+      lag = await monitor.stop()
+      gib = total_bytes / (1024**3)
+      return PerfResult(
+          workload="W5_512x_Rollout_ReqResp_Serde",
+          payload_mib=total_bytes / (1024**2),
+          wall_ms=wall_ms,
+          throughput_gib_s=gib / (wall_ms / 1000.0),
+          chunk_count=chunk_count,
+          loop_lag=lag,
+      )
+
+    res = asyncio.run(_main())
+    self.__class__._results.append(res)
+    self.assertGreater(res.throughput_gib_s, 0.0)
+
 
 if __name__ == "__main__":
   absltest.main()
+
