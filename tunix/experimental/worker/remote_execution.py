@@ -1648,6 +1648,7 @@ class PoolExecutionSession:
     self._known_actors: set[ActorHandle] = set(pool.actors)
     self._dispatched_tasks: Dict[ActorHandle, set[str]] = {}
     self._task_dispatch_times: Dict[str, float] = {}
+    self._task_last_failed_actor: Dict[str, ActorHandle] = {}
     self._pending_queue: collections.deque[str] = collections.deque()
     self._task_payloads: Dict[
         str, Tuple[Optional[str], Tuple[Any, ...], Dict[str, Any]]
@@ -1794,6 +1795,8 @@ class PoolExecutionSession:
       method_name: Optional[str],
       args: Tuple[Any, ...],
       kwargs: Dict[str, Any],
+      *,
+      exclude_actor: Optional[ActorHandle] = None,
   ) -> Optional[ActorHandle]:
     """Selects an available actor with capacity for the given task."""
     pool_actors = self._pool.actors
@@ -1804,6 +1807,10 @@ class PoolExecutionSession:
     available = [a for a in pool_actors if self._worker_has_capacity(a)]
     if not available:
       return None
+    if exclude_actor is not None and len(available) > 1:
+      non_excluded = [a for a in available if a is not exclude_actor]
+      if non_excluded:
+        available = non_excluded
 
     if self._least_loaded and self._pool.router is None:
       return self._least_loaded_actor(
@@ -1813,6 +1820,7 @@ class PoolExecutionSession:
     if (
         self._max_in_flight_per_worker is None
         and not self._worker_max_in_flight
+        and preferred in available
     ):
       return preferred
 
@@ -1906,6 +1914,7 @@ class PoolExecutionSession:
     payload = self._task_payloads.pop(req_id, None)
     self._task_retries.pop(req_id, None)
     self._task_dispatch_times.pop(req_id, None)
+    self._task_last_failed_actor.pop(req_id, None)
     if payload is not None:
       self._failed_tasks.append((req_id, payload, exc))
     if enqueue_response:
@@ -2048,7 +2057,12 @@ class PoolExecutionSession:
           self._pending_queue.popleft()
           continue
         method_name, args, orig_kwargs = payload
-        actor = self._select_actor_for_task(method_name, args, orig_kwargs)
+        actor = self._select_actor_for_task(
+            method_name,
+            args,
+            orig_kwargs,
+            exclude_actor=self._task_last_failed_actor.get(req_id),
+        )
         if actor is None:
           return
         self._pending_queue.popleft()
@@ -2147,15 +2161,22 @@ class PoolExecutionSession:
         if self._pending_queue and self._pool.actors:
           await self._drain_pending_queue()
         return
+      fault_tolerance_enabled = (
+          self._evict_on_failure or self._retry_on_worker_failure
+      )
       if was_in_dispatched:
-        self._fail_task(request_id, exc, enqueue_response=from_pending)
+        self._fail_task(
+            request_id,
+            exc,
+            enqueue_response=from_pending or fault_tolerance_enabled,
+        )
         if not self._pool.actors and self._pending_queue:
           if not self._can_retry_or_hold():
             self._fail_pending_queue(exc)
           else:
             self._response_queue.put_nowait(self._sentinel)
         self._notify_if_zero_flight()
-      if not from_pending:
+      if not from_pending and not fault_tolerance_enabled:
         raise
 
   async def submit(
@@ -2263,6 +2284,30 @@ class PoolExecutionSession:
           timeout_s = self._task_timeout_s
           if timeout_s is not None:
             now = time.monotonic()
+            expired_rids = {
+                rid
+                for rid in list(dispatched_set)
+                if now - self._task_dispatch_times.get(rid, now) >= timeout_s
+            }
+            if expired_rids:
+              timeout_exc = TimeoutError(
+                  f"Task(s) {sorted(expired_rids)} on worker {actor}"
+                  f" exceeded task_timeout_s={timeout_s}s."
+              )
+              if len(expired_rids) < len(dispatched_set):
+                # Only a subset of concurrent episodes on this worker timed
+                # out while younger tasks remain in flight: re-queue or fail
+                # just the expired request_ids without evicting the worker and
+                # discarding its healthy in-flight tasks.
+                dispatched_set.difference_update(expired_rids)
+                for rid in expired_rids:
+                  self._task_last_failed_actor[rid] = actor
+                await self._handle_worker_failure_tasks(
+                    expired_rids, timeout_exc, count_retry=True
+                )
+                self._notify_if_zero_flight()
+                continue
+              raise timeout_exc
             oldest_dispatch = min(
                 (
                     self._task_dispatch_times.get(rid, now)
@@ -2271,11 +2316,6 @@ class PoolExecutionSession:
                 default=now,
             )
             remaining_s = timeout_s - (now - oldest_dispatch)
-            if remaining_s <= 0:
-              raise TimeoutError(
-                  f"Task(s) {sorted(dispatched_set)} on worker {actor}"
-                  f" exceeded task_timeout_s={timeout_s}s."
-              )
             poll_wait_s = min(LONG_POLL_TIMEOUT_S, remaining_s)
             response = await asyncio.wait_for(
                 actor.poll_responses(timeout_s=poll_wait_s),
@@ -2299,6 +2339,7 @@ class PoolExecutionSession:
               continue
             dispatched_set.remove(req_id)
             self._task_dispatch_times.pop(req_id, None)
+            self._task_last_failed_actor.pop(req_id, None)
             self._in_flight = max(0, self._in_flight - 1)
             payload = self._task_payloads.pop(req_id, None)
             self._task_retries.pop(req_id, None)
@@ -2315,6 +2356,34 @@ class PoolExecutionSession:
         except asyncio.CancelledError:
           break
         except Exception as exc:  # pylint: disable=broad-exception-caught
+          # If poll_responses timed out while younger tasks are still within
+          # their individual task_timeout_s budget, only fail/re-queue the
+          # expired task(s) unless the poll RPC itself hung past poll_wait_s.
+          if (
+              isinstance(exc, TimeoutError)
+              and self._task_timeout_s is not None
+              and len(dispatched_set) > 1
+          ):
+            now = time.monotonic()
+            expired_rids = {
+                rid
+                for rid in list(dispatched_set)
+                if now - self._task_dispatch_times.get(rid, now)
+                >= self._task_timeout_s
+            }
+            if expired_rids and len(expired_rids) < len(dispatched_set):
+              timeout_exc = TimeoutError(
+                  f"Task(s) {sorted(expired_rids)} on worker {actor}"
+                  f" exceeded task_timeout_s={self._task_timeout_s}s."
+              )
+              dispatched_set.difference_update(expired_rids)
+              for rid in expired_rids:
+                self._task_last_failed_actor[rid] = actor
+              await self._handle_worker_failure_tasks(
+                  expired_rids, timeout_exc, count_retry=True
+              )
+              self._notify_if_zero_flight()
+              continue
           # Transport, timeout, or polling failure on this worker; evict and/or
           # retry in-flight tasks.
           self._active_workers.discard(actor)
@@ -2324,6 +2393,8 @@ class PoolExecutionSession:
           if self._evict_on_failure:
             self._remove_actor(actor, exc=exc, count_retry=True)
           else:
+            for rid in dispatched_set:
+              self._task_last_failed_actor[rid] = actor
             await self._handle_worker_failure_tasks(dispatched_set, exc)
           break
     finally:

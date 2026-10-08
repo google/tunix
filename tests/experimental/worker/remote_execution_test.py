@@ -3045,5 +3045,154 @@ class RemoteExecutionTest(absltest.TestCase):
     with self.assertRaisesRegex(ValueError, "task_timeout_s"):
       remote_lib.PoolSessionConfig(task_timeout_s=0.0)
 
+  def test_pool_execution_session_initial_dispatch_failure_with_zero_retries_queues_failed_task_without_raising(
+      self,
+  ):
+    class FailingDispatchHandle(remote_lib.ActorHandle):
+
+      def submit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def asubmit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def dispatch_task(
+          self, request_id=None, method_name=None, *args, **kwargs
+      ) -> str:
+        del request_id, method_name, args, kwargs
+        raise ConnectionError("initial_dispatch_boom")
+
+      async def poll_responses(self, timeout_s=50.0):
+        await asyncio.sleep(timeout_s)
+        return None
+
+    async def _run():
+      bad = FailingDispatchHandle()
+      good = create_in_process_handle(
+          StubWorkerEngine("good_worker", latency=0.01)
+      )
+      pool = remote_lib.RoutingActorPool([bad, good])
+      session = remote_lib.PoolExecutionSession(
+          pool,
+          config=remote_lib.PoolSessionConfig(
+              evict_on_failure=True,
+              retry_on_worker_failure=True,
+              max_task_retries=0,
+          ),
+      )
+
+      # Even with max_task_retries=0, submit() must not raise out of
+      # asyncio.gather when fault tolerance is enabled; instead the failed task
+      # is recorded for poll_completed() / pop_failed_tasks() and the sibling
+      # submission on the healthy worker succeeds.
+      await asyncio.gather(
+          session.submit("req_bad", "compute_trajectory", "p_bad", turns=1),
+          session.submit("req_good", "compute_trajectory", "p_good", turns=1),
+      )
+      results = []
+      while len(results) < 2:
+        batch = await session.poll_completed(timeout_s=1.0)
+        results.extend(batch)
+
+      failed = session.pop_failed_tasks()
+      self.assertLen(failed, 1)
+      self.assertEqual(failed[0][0], "req_bad")
+      self.assertIsInstance(failed[0][2], ConnectionError)
+      oks = [res for res, exc in results if exc is None]
+      self.assertEqual(
+          oks, ["[good_worker] Trajectory for prompt p_good (1 turns)"]
+      )
+      await session.close()
+
+    asyncio.run(_run())
+
+  def test_pool_execution_session_partial_task_timeout_requeues_expired_task_without_evicting_worker(
+      self,
+  ):
+    class SelectiveSlowHandle(remote_lib.ActorHandle):
+
+      def __init__(self):
+        self._queue: asyncio.Queue[remote_lib.ExecutionResponse] = (
+            asyncio.Queue()
+        )
+
+      def submit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def asubmit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def dispatch_task(
+          self, request_id=None, method_name=None, *args, **kwargs
+      ) -> str:
+        del method_name, kwargs
+        prompt = args[0] if args else ""
+        if prompt != "p_stuck":
+
+          async def _finish():
+            await asyncio.sleep(0.12)
+            await self._queue.put(
+                remote_lib.ExecutionResponse(
+                    request_id=request_id or "",
+                    result=f"[selective] {prompt}",
+                )
+            )
+
+          asyncio.create_task(_finish())
+        return request_id or ""
+
+      async def poll_responses(self, timeout_s=50.0):
+        try:
+          return await asyncio.wait_for(self._queue.get(), timeout=timeout_s)
+        except asyncio.TimeoutError:
+          return None
+
+    async def _run():
+      selective = SelectiveSlowHandle()
+      backup = create_in_process_handle(
+          StubWorkerEngine("backup_worker", latency=0.01)
+      )
+      pool = remote_lib.RoutingActorPool([selective])
+      evicted = []
+      session = remote_lib.PoolExecutionSession(
+          pool,
+          config=remote_lib.PoolSessionConfig(
+              evict_on_failure=True,
+              retry_on_worker_failure=True,
+              on_worker_evicted=lambda actor, exc: evicted.append((actor, exc)),
+              task_timeout_s=0.15,
+          ),
+      )
+
+      # Dispatch stuck task at t=0, then healthy task at t=0.08 on the same
+      # worker, and add backup worker so the timed-out task can be re-queued.
+      await session.submit("req_stuck", "compute_trajectory", "p_stuck", turns=1)
+      await asyncio.sleep(0.08)
+      await session.submit(
+          "req_healthy", "compute_trajectory", "p_healthy", turns=1
+      )
+      session.add_actor(backup)
+
+      collected = []
+      while len(collected) < 2:
+        batch = await session.poll_completed(timeout_s=1.0)
+        collected.extend(res for res, exc in batch if exc is None)
+
+      # Both tasks succeed: req_stuck is retried on backup_worker while
+      # req_healthy completes on selective without evicting selective!
+      self.assertCountEqual(
+          collected,
+          [
+              "[backup_worker] Trajectory for prompt p_stuck (1 turns)",
+              "[selective] p_healthy",
+          ],
+      )
+      self.assertIn(selective, pool.actors)
+      self.assertEmpty(evicted)
+      await session.close()
+
+    asyncio.run(_run())
+
+
 if __name__ == "__main__":
   absltest.main()
