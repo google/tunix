@@ -70,9 +70,7 @@ class CheckpointOptionsTest(parameterized.TestCase):
         opts.save_decision_policy,
         ocp.training.save_decision_policies.ContinuousCheckpointingPolicy,
     )
-    # pytype: disable=attribute-error
     self.assertEqual(opts.save_decision_policy.minimum_interval_secs, 10)
-    # pytype: enable=attribute-error
 
   def test_resolve_checkpointing_defaults_with_async_timeout(self):
     async_opts = ocp.options.AsyncOptions(timeout_secs=5000)

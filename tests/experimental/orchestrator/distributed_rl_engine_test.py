@@ -512,6 +512,30 @@ class DistributedRLEngineTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_resume_from_checkpoint_exposes_restored_checkpoint_metadata_and_off_policy_version(
+      self,
+  ):
+    async def _run():
+      ckpt_meta = {
+          "step": 3,
+          "global_step": 3,
+          "policy_version": 5,
+          "committed_prompt_ids": ["prompt_0", "prompt_3"],
+          "skipped_prompt_ids": ["prompt_1"],
+      }
+      self.mock_actor.restore_checkpoint.return_value = ckpt_meta
+      coordinator = _FakeWeightSyncCoordinator(forced_version=5)
+      engine = self._engine_with_coordinator(coordinator)
+
+      result = await engine.resume_from_checkpoint()
+
+      self.assertEqual(result, 3)
+      self.assertEqual(engine._policy_version, 5)
+      self.assertEqual(coordinator.calls, [5])
+      self.assertEqual(engine.restored_checkpoint_metadata, ckpt_meta)
+
+    asyncio.run(_run())
+
   def test_resume_from_checkpoint_no_checkpoint_does_not_resync(self):
     async def _run():
       self.mock_actor.restore_checkpoint.return_value = {"step": 0}
@@ -1770,6 +1794,36 @@ class DistributedRLEngineTest(absltest.TestCase):
       self.assertLess(elapsed, 1.0)
 
     asyncio.run(_run())
+
+  def test_response_to_trajectory_item_error_preserves_metadata_and_policy_version(
+      self,
+  ):
+    resp = datatypes.RolloutResponse(
+        request_id="req_p1_g2",
+        status="ERROR",
+        error=datatypes.ErrorInfo(
+            error_type="TrajectoryError",
+            message="episode crashed",
+        ),
+        payload=None,
+        metadata={
+            "prompt_id": "p1",
+            "group_index": 2,
+            "batch_idx": 3,
+            "prompt_idx": 7,
+            "intra_batch_idx": 1,
+            "policy_version": 5,
+        },
+    )
+    item = distributed_rl_engine._response_to_trajectory_item(resp)
+    self.assertEqual(item.prompt_id, "p1")
+    self.assertEqual(item.group_index, 2)
+    self.assertFalse(item.is_valid)
+    self.assertEqual(item.policy_version, 5)
+    self.assertEqual(item.metadata["batch_idx"], 3)
+    self.assertEqual(item.metadata["prompt_idx"], 7)
+    self.assertEqual(item.metadata["intra_batch_idx"], 1)
+    self.assertIn("old_logprobs", item.traj)
 
 
 if __name__ == "__main__":

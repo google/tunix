@@ -80,7 +80,7 @@ def _get_reshard_fn_pathwaysutils(
   # This import is expected to fail sometimes internally if pathwaysutils is
   # not linked to the binary.
   try:
-    from pathwaysutils.experimental import reshard as experimental_reshard  # pylint: disable=g-import-not-at-top # pytype: disable=import-error
+    from pathwaysutils.experimental import reshard as experimental_reshard  # pylint: disable=g-import-not-at-top  # pyrefly: ignore[missing-import]
   except ImportError:
     logging.info(
         'Cannot import PathwaysUtils and experimental reshard API.'

@@ -348,7 +348,7 @@ class RLEngine:
         # the rollout mesh. This is important for out-of-tree models in vLLM
         # that are implemented with custom logical axis rules, like is the case
         # for MaxText models.
-        from tunix.rl.rollout import vllm_rollout  # pylint: disable=g-import-not-at-top  # pytype: disable=import-error
+        from tunix.rl.rollout import vllm_rollout  # pylint: disable=g-import-not-at-top  # pyrefly: ignore[missing-module-attribute]
 
         self._rollout = vllm_rollout.VllmRollout(
             self.rollout_actor,
@@ -872,7 +872,7 @@ class RLEngine:
         raise ValueError("Provide exactly one of prompts or prompt_token_ids.")
       prompt_rows: list[Any] = [
           generate_utils.as_token_ids(row)
-          for row in prompt_token_ids  # pytype: disable=attribute-error
+          for row in prompt_token_ids
       ]
     else:
       if prompts is None:
@@ -884,7 +884,7 @@ class RLEngine:
           )
         prompt_rows = [
             self.tokenizer.apply_chat_template(
-                prompt,  # pytype: disable=wrong-arg-types
+                prompt,  # pyrefly: ignore[bad-argument-type]
                 add_generation_prompt=True,
                 tokenize=False,
                 enable_thinking=False,

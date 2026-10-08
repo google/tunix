@@ -14,7 +14,8 @@
 
 """Trajectory Collector Engine wrapping TrajectoryCollectEngine with pause/resume/cancel control."""
 
-from typing import Any, Collection, List, Mapping, Sequence
+import asyncio
+from typing import Any, Callable, Collection, List, Mapping, Sequence
 import zlib
 from absl import logging
 import numpy as np
@@ -108,6 +109,8 @@ class TrajectoryCollectorEngine:
       tokenizer: Any,
       chat_parser: Any,
       eos_ids: Collection[int] | None = None,
+      partial_rollout: bool = False,
+      policy_version_fn: Callable[[], int] | None = None,
   ):
     if (
         sampler is None
@@ -130,6 +133,12 @@ class TrajectoryCollectorEngine:
     self.is_paused: bool = False
     self.is_cancelled: bool = False
     self.is_done: bool = False
+    self.partial_rollout: bool = bool(partial_rollout)
+    self._policy_version_fn: Callable[[], int] | None = policy_version_fn
+    self._unpaused = asyncio.Event()
+    self._unpaused.set()
+    self._episode_cache_salt: str | None = None
+    self._turn_policy_versions: list[int] = []
     self.max_response_length = request.max_response_length
     self.exact_token_continuity = request.exact_token_continuity
     # The stop set the sampler was configured with, which is what decides
@@ -157,6 +166,8 @@ class TrajectoryCollectorEngine:
 
   async def run_episode(self) -> agent_types.TrajectoryItem:
     """Executes multi-turn agentic rollout episode and returns TrajectoryItem."""
+    self._episode_cache_salt = None
+    self._turn_policy_versions = []
 
     # Note: model_call is an async coroutine callback invoked directly by
     # TrajectoryCollectEngine on the asyncio event loop without blocking
@@ -165,6 +176,7 @@ class TrajectoryCollectorEngine:
         chat_completions, env=None, max_generation_steps=None, **kwargs
     ):
       del env
+      await self._unpaused.wait()
       generation_kwargs = dict(self.request.generation_kwargs)
       # NB: extra kwargs can be passed in from trajectory_collect_engine.
       generation_kwargs.update(kwargs)
@@ -209,6 +221,21 @@ class TrajectoryCollectorEngine:
               " diverse rollouts, but got seed=None."
           )
 
+      req_policy_version = int(self.request.target_policy_version or 0)
+      turn_policy_version = (
+          max(req_policy_version, int(self._policy_version_fn()))
+          if self._policy_version_fn is not None
+          else req_policy_version
+      )
+      self._turn_policy_versions.append(turn_policy_version)
+
+      cache_salt = generation_kwargs.pop("cache_salt", None)
+      if self.partial_rollout:
+        if self._episode_cache_salt is None:
+          self._episode_cache_salt = f"policy_v{turn_policy_version}"
+        if cache_salt is None:
+          cache_salt = self._episode_cache_salt
+
       sampling_params = sampler_lib.SamplingParams(
           max_tokens=effective_max_tokens,
           temperature=generation_kwargs.get("temperature", 0.0),
@@ -222,6 +249,7 @@ class TrajectoryCollectorEngine:
           routed_experts_prompt_start=generation_kwargs.get(
               "routed_experts_prompt_start", 0
           ),
+          cache_salt=cache_salt,
       )
       prompt_payload = (
           np.asarray(prompt_token_ids, dtype=np.int32)
@@ -278,6 +306,9 @@ class TrajectoryCollectorEngine:
         exact_token_continuity=self.exact_token_continuity,
     )
     rl_traj = await inner_engine.collect(mode="Token")
+    if isinstance(rl_traj, dict) and self._turn_policy_versions:
+      rl_traj["policy_version"] = int(self._turn_policy_versions[0])
+      rl_traj["policy_versions"] = list(self._turn_policy_versions)
     self.is_done = True
     return self._convert_to_trajectory(rl_traj)
 
@@ -387,7 +418,13 @@ class TrajectoryCollectorEngine:
         "target_policy_version",
         rl_traj.get("policy_version", 0),
     )
-    metadata["policy_version"] = int(policy_version or 0)
+    if self._turn_policy_versions:
+      metadata["policy_version"] = int(self._turn_policy_versions[0])
+      metadata["policy_versions"] = list(self._turn_policy_versions)
+    else:
+      initial_version = int(policy_version or 0)
+      metadata["policy_version"] = initial_version
+      metadata["policy_versions"] = [initial_version]
 
     if metadata.pop("record_episode_summary", False):
       steps = self.agent.trajectory.steps
@@ -416,9 +453,11 @@ class TrajectoryCollectorEngine:
 
   def pause(self) -> None:
     self.is_paused = True
+    self._unpaused.clear()
 
   def resume(self) -> None:
     self.is_paused = False
+    self._unpaused.set()
 
   def cancel(self) -> None:
     self.is_cancelled = True

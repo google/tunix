@@ -5,16 +5,16 @@ authors = [
   { name = "Tunix Developers", email = "tunix-dev@google.com" },
 ]
 description = "A lightweight JAX-native LLM post-training framework."
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 readme = "README.md"
 license = { text = "Apache-2.0" }
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
   "Intended Audience :: Science/Research",
-  "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
@@ -102,11 +102,20 @@ experimental = [
 Source = "https://github.com/google/tunix"
 
 [build-system]
-requires = ["setuptools >= 77.0.3"]
-build-backend = "setuptools.build_meta"
+requires = [
+  "scikit-build-core >= 0.10",
+  "nanobind >= 2.5.0",
+  "cmake >= 3.19",
+  "ninja",
+]
+build-backend = "scikit_build_core.build"
 
-[tool.setuptools.packages.find]
-include = ["tunix*"]
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+build-dir = "build/{wheel_tag}"
+wheel.packages = ["tunix"]
+wheel.py-api = "cp312"
+editable.mode = "inplace"
 
 [tool.pyink]
 line-length = 80
@@ -136,3 +145,4 @@ known_third_party = ["tunix"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+addopts = ["--import-mode=importlib"]

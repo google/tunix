@@ -151,11 +151,17 @@ def _flush_pending_views(pending_views: List[memoryview]) -> bytes:
   return data
 
 
-def _iter_serialized_chunks(
+def _iter_serialized_chunks_with_size(
     obj: Any,
     chunk_size: int = _STREAM_CHUNK_BYTES,
-) -> Iterator[bytes]:
-  """Serializes `obj` with Pickle Protocol 5 and returns a chunk iterator.
+) -> Tuple[int, Iterator[bytes]]:
+  """Serializes `obj` with Pickle Protocol 5 and returns `(total_bytes, chunk_iter)`.
+
+  Uses `cloudpickle.dumps(..., protocol=5)` for `obj` so dynamic functions,
+  closures, and `__main__` classes/functions are always pickled by value, while
+  using `pickle.dumps` for the fixed `(header_len, buffer_lengths)` integer
+  manifest tuple and returning `total_bytes` so callers can bypass
+  `_SERDE_EXECUTOR` thread-pool hops on small payloads.
 
   Pickling and out-of-band buffer extraction (`buffer_callback`) run eagerly
   when this function is called so any serialization error (`TypeError`,
@@ -167,9 +173,10 @@ def _iter_serialized_chunks(
     chunk_size: Maximum byte length of each yielded data chunk.
 
   Returns:
-    An iterator yielding Frame 0 (pickled `(header_len, buffer_lengths)`
-    manifest), followed by `chunk_size` slices of the pickle header and each
-    out-of-band buffer.
+    A 2-tuple `(total_bytes, chunk_iter)` where `total_bytes` is the total
+    byte size across the pickle header and all out-of-band buffers, and
+    `chunk_iter` yields Frame 0 (pickled `(header_len, buffer_lengths)`
+    manifest) followed by `chunk_size` slices of the header and buffers.
   """
   if chunk_size <= 0:
     raise ValueError(f"chunk_size must be positive, got {chunk_size}.")
@@ -185,9 +192,9 @@ def _iter_serialized_chunks(
       except BufferError:
         with memoryview(pb) as view:
           views.append(memoryview(view.tobytes()))
-    manifest = cloudpickle.dumps(
-        (len(views[0]), tuple(len(v) for v in views[1:]))
-    )
+    buffer_lengths = tuple(len(v) for v in views[1:])
+    total_bytes = len(views[0]) + sum(buffer_lengths)
+    manifest = pickle.dumps((len(views[0]), buffer_lengths), protocol=5)
   except Exception:
     for mv in views:
       mv.release()
@@ -228,7 +235,16 @@ def _iter_serialized_chunks(
       for pb in raw_buffers:
         pb.release()
 
-  return _gen()
+  return total_bytes, _gen()
+
+
+def _iter_serialized_chunks(
+    obj: Any,
+    chunk_size: int = _STREAM_CHUNK_BYTES,
+) -> Iterator[bytes]:
+  """Serializes `obj` with Pickle Protocol 5 and returns a chunk iterator."""
+  _, chunk_iter = _iter_serialized_chunks_with_size(obj, chunk_size=chunk_size)
+  return chunk_iter
 
 
 def _next_chunk_or_end(it: Iterator[bytes]) -> Optional[bytes]:
@@ -237,8 +253,32 @@ def _next_chunk_or_end(it: Iterator[bytes]) -> Optional[bytes]:
 
 async def _iter_async_from_sync_chunks(
     sync_iter: Iterator[bytes],
+    *,
+    offload: bool = True,
 ) -> AsyncIterator[bytes]:
-  """Adapts a synchronous chunk iterator into a pipelined async iterator."""
+  """Adapts a synchronous chunk iterator into an async iterator.
+
+  When `offload=False` (used for payloads smaller than
+  `_ASYNC_OFFLOAD_THRESHOLD_BYTES`), yields chunks directly on the active
+  coroutine without incurring `_SERDE_EXECUTOR` thread-pool context-switch
+  overhead.
+
+  Args:
+    sync_iter: Synchronous iterator yielding serialized byte chunks.
+    offload: Whether to offload chunk iteration onto `_SERDE_EXECUTOR`.
+
+  Yields:
+    Serialized byte chunks.
+  """
+  if not offload:
+    try:
+      for chunk in sync_iter:
+        yield chunk
+    finally:
+      if hasattr(sync_iter, "close"):
+        sync_iter.close()
+    return
+
   loop = asyncio.get_running_loop()
   first = next(sync_iter, None)
   if first is None:
@@ -454,8 +494,14 @@ class ExecutionRequest:
       self, chunk_size: int = _STREAM_CHUNK_BYTES
   ) -> AsyncIterator[bytes]:
     """Serializes request into an async stream of Pickle Protocol 5 chunks."""
-    sync_iter = self.serialize_chunks(chunk_size=chunk_size)
-    return _iter_async_from_sync_chunks(sync_iter)
+    total_bytes, sync_iter = _iter_serialized_chunks_with_size(
+        (self.request_id, self.method_name, self.args, self.kwargs),
+        chunk_size=chunk_size,
+    )
+    return _iter_async_from_sync_chunks(
+        sync_iter,
+        offload=total_bytes >= _ASYNC_OFFLOAD_THRESHOLD_BYTES,
+    )
 
   @classmethod
   def deserialize_chunks(cls, chunks: Iterable[bytes]) -> "ExecutionRequest":
@@ -515,22 +561,37 @@ class ExecutionResponse:
     self.traceback = traceback_lib.format_exc()
     self.retryable = False
 
+  def _serialize_chunks_with_size(
+      self, chunk_size: int = _STREAM_CHUNK_BYTES
+  ) -> Tuple[int, Iterator[bytes]]:
+    try:
+      return _iter_serialized_chunks_with_size(
+          self._as_tuple(), chunk_size=chunk_size
+      )
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      self._record_serialization_error(e)
+      return _iter_serialized_chunks_with_size(
+          self._as_tuple(), chunk_size=chunk_size
+      )
+
   def serialize_chunks(
       self, chunk_size: int = _STREAM_CHUNK_BYTES
   ) -> Iterator[bytes]:
     """Serializes response into Pickle Protocol 5 out-of-band buffer chunks."""
-    try:
-      return _iter_serialized_chunks(self._as_tuple(), chunk_size=chunk_size)
-    except Exception as e:  # pylint: disable=broad-exception-caught
-      self._record_serialization_error(e)
-      return _iter_serialized_chunks(self._as_tuple(), chunk_size=chunk_size)
+    _, chunk_iter = self._serialize_chunks_with_size(chunk_size=chunk_size)
+    return chunk_iter
 
   def serialize_async_chunks(
       self, chunk_size: int = _STREAM_CHUNK_BYTES
   ) -> AsyncIterator[bytes]:
     """Serializes response into an async stream of Pickle Protocol 5 chunks."""
-    sync_iter = self.serialize_chunks(chunk_size=chunk_size)
-    return _iter_async_from_sync_chunks(sync_iter)
+    total_bytes, sync_iter = self._serialize_chunks_with_size(
+        chunk_size=chunk_size
+    )
+    return _iter_async_from_sync_chunks(
+        sync_iter,
+        offload=total_bytes >= _ASYNC_OFFLOAD_THRESHOLD_BYTES,
+    )
 
   @classmethod
   def deserialize_chunks(cls, chunks: Iterable[bytes]) -> "ExecutionResponse":
@@ -1357,7 +1418,7 @@ class RoutingActorPool(ActorPool):
       ):
         return getattr(self.router, method_name)(self._actors, args, kwargs)
       elif callable(self.router):
-        return self.router(self._actors, method_name, args, kwargs)  # pyrefly: ignore[bad-return]
+        return self.router(self._actors, method_name, args, kwargs)
       else:
         raise TypeError(
             f"Router object {type(self.router)} must provide a method matching "

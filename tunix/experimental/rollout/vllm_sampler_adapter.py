@@ -198,6 +198,7 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
       parallelism: int = 4,
       weight_sync_mode: weight_sync.WeightSyncMode | str | None = None,
       free_kv_cache: bool = False,
+      partial_rollout: bool = False,
       **kwargs,
   ):
     self.server_id = server_id
@@ -217,6 +218,7 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
     # invalidates the prefix cache (`reset_prefix_cache`), so deallocating and
     # reallocating the KV cache pool on every sync step is unnecessary.
     self.free_kv_cache = free_kv_cache
+    self.partial_rollout: bool = bool(partial_rollout)
 
     # Defaults to RAIDEN when unspecified: RLVllmSampler drives weight sync
     # through its own native Raiden hooks, so callers that construct the
@@ -243,9 +245,6 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
     self._policy_version = 0
     self._kv_cache_freed = False
 
-    if self.sampler is None and self.engine_args is not None:
-      sampler_cls = _get_rl_vllm_sampler_cls()
-      self.sampler = sampler_cls(engine_args=self.engine_args)
     self._verify_sampler_protocol()
 
   def initialize(self) -> None:
@@ -257,7 +256,12 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
         self.engine_args = AsyncEngineArgs(model=self.model_name)
       if self.engine_args is not None:
         sampler_cls = _get_rl_vllm_sampler_cls()
-        self.sampler = sampler_cls(engine_args=self.engine_args)
+        if self.partial_rollout:
+          self.sampler = sampler_cls(
+              engine_args=self.engine_args, partial_rollout=True
+          )
+        else:
+          self.sampler = sampler_cls(engine_args=self.engine_args)
     if self.sampler is None:
       raise RuntimeError(
           f"VllmSamplerAdapter [{self.server_id}] requires valid"
@@ -424,7 +428,13 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
       logger.info("Executing pre_weight_sync for server_id=%s", self.server_id)
 
       # delegate to RLVllmSampler's native pause + clear prefix cache (+ optional free-kv-cache)
-      await sampler.pre_weight_sync(free_kv_cache=self.free_kv_cache)
+      use_partial = bool(kwargs.get("partial_rollout", self.partial_rollout))
+      if use_partial:
+        await sampler.pre_weight_sync(
+            free_kv_cache=self.free_kv_cache, partial_rollout=True
+        )
+      else:
+        await sampler.pre_weight_sync(free_kv_cache=self.free_kv_cache)
       self._kv_cache_freed = True
 
       self._tracker.complete(sync_request, "prepared")

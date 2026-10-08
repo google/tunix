@@ -27,6 +27,7 @@ from tunix.experimental.orchestrator import orchestrator
 from tunix.experimental.orchestrator import rl_program
 from tunix.experimental.orchestrator import worker_registry
 from tunix.experimental.trajectory import file_store
+from tunix.experimental.trajectory import trajectory as trajectory_lib
 from tunix.experimental.trajectory import trajectory_testing
 from tunix.experimental.worker import abstract_worker
 from tunix.experimental.worker import remote_execution
@@ -182,6 +183,88 @@ class ClusterOrchestratorTest(absltest.TestCase):
     self.mock_lifecycle.shutdown.assert_called_once()
     mock_rollout.submit.assert_any_call("stop")
     mock_actor.submit.assert_any_call("stop")
+
+  def test_bring_up_remote_workers_overlaps_trainer_compile_and_rollout_start(
+      self,
+  ):
+    barrier = threading.Barrier(3, timeout=2.0)
+    per_worker_calls: dict[str, list[str]] = {
+        "actor-0": [],
+        "rollout-0": [],
+        "rollout-1": [],
+    }
+
+    def _make_handle(wid: str, barrier_phase: str):
+      handle = mock.MagicMock(spec=remote_execution.ActorHandle)
+
+      def _submit(phase: str, *args):
+        del args
+        per_worker_calls[wid].append(phase)
+        if phase == barrier_phase:
+          barrier.wait()
+        return datatypes.Response()
+
+      handle.submit.side_effect = _submit
+      return handle
+
+    orch = orchestrator.ClusterOrchestrator(
+        registry=worker_registry.WorkerRegistry(),
+        lifecycle_driver=self.mock_lifecycle,
+        monitor=self.mock_monitor,
+    )
+    orch.register_worker_handle(
+        "actor-0",
+        [datatypes.Role.ACTOR],
+        _make_handle("actor-0", "compile"),
+    )
+    orch.register_worker_handle(
+        "rollout-0",
+        [datatypes.Role.ROLLOUT],
+        _make_handle("rollout-0", "start"),
+    )
+    orch.register_worker_handle(
+        "rollout-1",
+        [datatypes.Role.ROLLOUT],
+        _make_handle("rollout-1", "start"),
+    )
+
+    orch.bring_up_workers(dummy_data="dummy")
+
+    for wid, calls in per_worker_calls.items():
+      self.assertEqual(
+          calls, ["initialize", "compile", "start"], msg=f"worker {wid}"
+      )
+
+  def test_bring_up_remote_workers_aggregates_failures(self):
+    bad_rollout = mock.MagicMock(spec=remote_execution.ActorHandle)
+    bad_rollout.submit.side_effect = RuntimeError("vllm oom")
+    bad_actor = mock.MagicMock(spec=remote_execution.ActorHandle)
+
+    def _actor_submit(phase: str, *args):
+      del args
+      if phase == "compile":
+        raise ValueError("compile boom")
+      return datatypes.Response()
+
+    bad_actor.submit.side_effect = _actor_submit
+    healthy = mock.MagicMock(spec=remote_execution.ActorHandle)
+
+    orch = orchestrator.ClusterOrchestrator(
+        registry=worker_registry.WorkerRegistry(),
+        lifecycle_driver=self.mock_lifecycle,
+        monitor=self.mock_monitor,
+    )
+    orch.register_worker_handle(
+        "rollout-0", [datatypes.Role.ROLLOUT], bad_rollout
+    )
+    orch.register_worker_handle("actor-0", [datatypes.Role.ACTOR], bad_actor)
+    orch.register_worker_handle("rollout-1", [datatypes.Role.ROLLOUT], healthy)
+
+    with self.assertRaises(orchestrator.lifecycle.LifecycleError) as ctx:
+      orch._bring_up_remote_workers(dummy_data="dummy")
+
+    failed_ids = [wid for wid, _ in ctx.exception.failures]
+    self.assertEqual(failed_ids, ["actor-0", "rollout-0"])
 
   def test_shutdown_survives_a_wedged_worker(self):
     from tunix.experimental.worker import remote_execution
@@ -469,6 +552,10 @@ class ClusterOrchestratorTrajectoryStoreTest(absltest.TestCase):
         }
     )
     self.assertIsInstance(orch.trajectory_store, file_store.FileTrajectoryStore)
+    self.assertEqual(
+        orch.trajectory_store.to_config()["metadata_type"],
+        trajectory_lib.TunixTrajectoryMetadata.METADATA_TYPE,
+    )
     orch.shutdown()
 
   def test_shutdown_closes_the_store(self):
@@ -484,7 +571,10 @@ class ClusterOrchestratorTrajectoryStoreTest(absltest.TestCase):
     store = orch.trajectory_store
     orch.shutdown()
     with self.assertRaises(RuntimeError):
-      store.add_step(trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1)
+      store.add_step(
+          trajectory_testing.TUNIX_ENV_STEP_0,
+          trajectory_testing.TUNIX_METADATA_1,
+      )
 
   def test_shutdown_closes_the_store_even_when_a_prior_step_raises(self):
     orch = _trajectory_store_orchestrator()

@@ -265,6 +265,25 @@ class VllmSamplerAdapterTest(absltest.TestCase):
     )
     self.assertFalse(adapter.enable_raiden)
 
+  def test_engine_args_deferred_to_initialize(self):
+    mock_sampler_cls = mock.MagicMock(return_value=self.mock_sampler_instance)
+    engine_args = SimpleNamespace(model="Qwen/Qwen3-8B")
+    with mock.patch.object(
+        vllm_sampler_adapter,
+        "_get_rl_vllm_sampler_cls",
+        return_value=mock_sampler_cls,
+    ):
+      adapter = vllm_sampler_adapter.VllmSamplerAdapter(
+          server_id="deferred_vllm",
+          engine_args=engine_args,
+      )
+      self.assertIsNone(adapter.sampler)
+      mock_sampler_cls.assert_not_called()
+
+      adapter.initialize()
+      self.assertIs(adapter.sampler, self.mock_sampler_instance)
+      mock_sampler_cls.assert_called_once_with(engine_args=engine_args)
+
   def test_weight_sync_starts_an_idle_engine(self):
     """RLVllmSampler builds its AsyncLLM lazily and only `sample()` starts it.
 
@@ -386,6 +405,23 @@ class RoundUuidTest(absltest.TestCase):
     with self.assertRaisesRegex(ValueError, "missing a usable transfer uuid"):
       vllm_sampler_adapter._round_uuid(req)
 
+  def test_partial_rollout_forwarded_to_pre_weight_sync(self):
+    mock_sampler = mock.AsyncMock()
+    adapter = vllm_sampler_adapter.VllmSamplerAdapter(
+        server_id="vllm_slice_partial",
+        sampler_instance=mock_sampler,
+        partial_rollout=True,
+    )
+    req = base_sampler_lib.WeightSyncRequest(
+        policy_version=1, extra_config={"req_id": "r1", "uuid": 1}
+    )
+    asyncio.run(adapter.pre_weight_sync(req))
+    mock_sampler.pre_weight_sync.assert_called_once_with(
+        free_kv_cache=False,
+        partial_rollout=True,
+    )
+
 
 if __name__ == "__main__":
   absltest.main()
+

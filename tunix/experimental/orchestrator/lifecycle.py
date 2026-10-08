@@ -22,11 +22,23 @@ Shutdown is best-effort: every worker gets a `stop()` even if an earlier one
 raised, and the collected failures are reported together.
 """
 
+import asyncio
 import concurrent.futures
+import inspect
 import logging
 from typing import Any
 
 from tunix.experimental.orchestrator import worker_registry
+
+
+def _start_worker(worker: Any) -> Any:
+  # Local in-process workers also use asyncio.run() per call in
+  # InProcessActorHandle.submit; remote workers run on
+  # GrpcRemoteExecutionServer's persistent loop.
+  res = worker.start()
+  if inspect.iscoroutine(res):
+    return asyncio.run(res)
+  return res
 
 
 class LifecycleError(RuntimeError):
@@ -67,7 +79,7 @@ class LifecycleDriver:
       # on the first error.
       list(pool.map(lambda w: w.initialize(), workers))
       list(pool.map(lambda w: w.compile(dummy_data), workers))
-      list(pool.map(lambda w: w.start(), workers))
+      list(pool.map(_start_worker, workers))
 
   def shutdown(self) -> None:
     """Stops every worker best-effort, then raises if any stop() failed."""

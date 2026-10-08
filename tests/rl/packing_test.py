@@ -325,6 +325,51 @@ class PackCoreTest(absltest.TestCase):
           [_item([1], [2])], budget=10, segment_alignment_boundary=0
       )
 
+  def test_cpp_extension_and_python_fallback_produce_identical_chunks(self):
+    self.assertIsNotNone(packing._packing_ext)
+    rng = np.random.default_rng(123)
+    valid_items = [
+        _item(
+            np.arange(p_len := int(rng.integers(1, 25)), dtype=np.int32),
+            np.arange(c_len := int(rng.integers(1, 35)), dtype=np.int32),
+            adv=float(rng.uniform(-1.0, 1.0)),
+            per_token={"returns": np.ones(c_len, dtype=np.float32) * 0.5},
+            routed=_routed(p_len + c_len - 1, idx % 7),
+        )
+        for idx in range(24)
+    ]
+    cpp_chunks = packing.pack_core(
+        valid_items, budget=128, pack_size=3, segment_alignment_boundary=16
+    )
+    orig_ext = packing._packing_ext
+    try:
+      packing._packing_ext = None
+      py_chunks = packing.pack_core(
+          valid_items, budget=128, pack_size=3, segment_alignment_boundary=16
+      )
+    finally:
+      packing._packing_ext = orig_ext
+
+    self.assertEqual(len(cpp_chunks), len(py_chunks))
+    for c_chunk, p_chunk in zip(cpp_chunks, py_chunks):
+      np.testing.assert_array_equal(c_chunk.ids, p_chunk.ids)
+      np.testing.assert_array_equal(c_chunk.prompt_mask, p_chunk.prompt_mask)
+      np.testing.assert_array_equal(
+          c_chunk.completion_mask, p_chunk.completion_mask
+      )
+      np.testing.assert_allclose(c_chunk.advantages, p_chunk.advantages)
+      np.testing.assert_array_equal(c_chunk.segment_ids, p_chunk.segment_ids)
+      np.testing.assert_array_equal(
+          c_chunk.segment_positions, p_chunk.segment_positions
+      )
+      np.testing.assert_allclose(
+          c_chunk.per_token["returns"], p_chunk.per_token["returns"]
+      )
+      np.testing.assert_array_equal(
+          c_chunk.routed_experts, p_chunk.routed_experts
+      )
+      self.assertEqual(c_chunk.num_real_segments, p_chunk.num_real_segments)
+
 
 class PackRoutedExpertsTest(absltest.TestCase):
 
@@ -520,6 +565,38 @@ class PackSegmentAlignmentTest(absltest.TestCase):
     with self.assertRaisesRegex(ValueError, "exceeds budget"):
       packing.pack_bin(
           items, budget=64, pad_id=0, carried=(), segment_alignment_boundary=64
+      )
+    with self.assertRaisesRegex(ValueError, "exceeds budget"):
+      packing.pack_bin(
+          items, budget=16, pad_id=0, carried=(), segment_alignment_boundary=64
+      )
+
+  def test_invalid_inputs_raise_value_error_in_cpp_extension(self):
+    self.assertIsNotNone(packing._packing_ext)
+    bad_mask = _item([1, 2], [3, 4, 5])
+    object.__setattr__(
+        bad_mask, "completion_mask", np.array([1.0], dtype=np.float32)
+    )
+    with self.assertRaisesRegex(ValueError, "completion_mask and advantages"):
+      packing.pack_chunk([[bad_mask]], budget=8, pad_id=0, carried=())
+
+    bad_pt = _item([1, 2], [3, 4, 5])
+    bad_pt.per_token["logps"] = np.array([0.1], dtype=np.float32)
+    with self.assertRaisesRegex(ValueError, "per_token array length"):
+      packing.pack_chunk([[bad_pt]], budget=8, pad_id=0, carried=("logps",))
+
+    bad_routed = _item([1, 2], [3, 4])
+    object.__setattr__(
+        bad_routed, "routed_experts", np.zeros((4, 2), dtype=np.int16)
+    )
+    with self.assertRaisesRegex(ValueError, "at least 3 dimensions"):
+      packing._packing_ext.pack_chunk_fast(
+          [[bad_routed]], [], 8, 0, 1, (2, 2)
+      )
+
+    with self.assertRaisesRegex(ValueError, "pack_size must be positive"):
+      packing._packing_ext.pack_sequence_chunks_fast(
+          [_item([1], [2])], [], 8, 0, 4, 0, 1, 0
       )
 
 

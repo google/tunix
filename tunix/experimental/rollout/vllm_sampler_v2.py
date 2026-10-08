@@ -74,11 +74,15 @@ class RLVllmSampler:
     `weight_sync`, `post_weight_sync`).
   """
 
-  def __init__(self, engine_args: AsyncEngineArgs):
+  def __init__(
+      self, engine_args: AsyncEngineArgs, partial_rollout: bool = False
+  ):
     self.engine_args = engine_args
+    self.partial_rollout: bool = bool(partial_rollout)
     self._engine: Any | None = None
     self._is_running = False
     self._is_paused = False
+    self._paused_generation = False
     self._cache_valid = True
     self._mesh: Any | None = None
     self._transfer_statuses: dict[str, str] = {}
@@ -121,27 +125,57 @@ class RLVllmSampler:
       return
     logger.info("Stopping RLVllmSampler...")
     self._is_paused = True
+    self._paused_generation = False
     self._engine = None
     self._is_running = False
     logger.info("RLVllmSampler stopped.")
 
-  async def pause(self, **kwargs: Any) -> None:
-    """Pauses request intake and drains active batch iterations during weight updates."""
+  async def pause(
+      self, partial_rollout: bool | None = None, **kwargs: Any
+  ) -> None:
+    """Pauses request intake and drains or freezes active batch iterations during weight updates."""
+    del kwargs
     if self._is_paused:
       return
     self._is_paused = True
-    # Note: vLLM's pause_background_loop stops the scheduler from taking new requests from the queue.
-    # Ongoing requests in the batch will be completed or drained depending on internal vLLM state.
-    if self._engine and hasattr(self._engine, "pause_background_loop"):
+    use_partial = (
+        self.partial_rollout
+        if partial_rollout is None
+        else bool(partial_rollout)
+    )
+    if (
+        use_partial
+        and self._engine
+        and hasattr(self._engine, "pause_generation")
+    ):
+      logger.info(
+          "Pausing RLVllmSampler generation in-place (mode='keep',"
+          " clear_cache=False)..."
+      )
+      await self._engine.pause_generation(mode="keep", clear_cache=False)
+      self._paused_generation = True
+    elif self._engine and hasattr(self._engine, "pause_background_loop"):
+      # Note: vLLM's pause_background_loop stops the scheduler from taking new
+      # requests from the queue. Ongoing requests in the batch will be
+      # completed or drained depending on internal vLLM state.
       logger.info("Pausing RLVllmSampler inference intake for weight sync...")
       await self._engine.pause_background_loop()
+      self._paused_generation = False
     await asyncio.sleep(0.01)
 
   async def resume(self, **kwargs: Any) -> None:
     """Resumes inference processing after weight sync completion."""
     if not self._is_paused:
       return
-    if self._engine and hasattr(self._engine, "resume_background_loop"):
+    if (
+        self._paused_generation
+        and self._engine
+        and hasattr(self._engine, "resume_generation")
+    ):
+      logger.info("Resuming RLVllmSampler generation...")
+      await self._engine.resume_generation()
+      self._paused_generation = False
+    elif self._engine and hasattr(self._engine, "resume_background_loop"):
       logger.info("Resuming RLVllmSampler inference serving...")
       await self._engine.resume_background_loop()
     self._is_paused = False
@@ -166,10 +200,11 @@ class RLVllmSampler:
         "stop_token_ids",
         kwargs.get("stop_token_ids") or kwargs.get("eos_tokens"),
     )
+    cache_salt = _get_val(sparams, "cache_salt", kwargs.get("cache_salt"))
     # `kwargs` goes through `_get_val` too: callers pass unset fields as
     # explicit `None`, so `.get(key, default)` returns `None` rather than
     # the default, defeating it before `_get_val` can coalesce.
-    return VllmSamplingParams(
+    vllm_kwargs: dict[str, Any] = dict(
         temperature=_get_val(
             sparams, "temperature", _get_val(kwargs, "temperature", 0.7)
         ),
@@ -204,6 +239,14 @@ class RLVllmSampler:
         )
         else None,
     )
+    if cache_salt is not None and "cache_salt" in getattr(
+        VllmSamplingParams, "__struct_fields__", ()
+    ):
+      vllm_kwargs["cache_salt"] = str(cache_salt)
+    params = VllmSamplingParams(**vllm_kwargs)
+    if cache_salt is not None:
+      setattr(params, "cache_salt", str(cache_salt))
+    return params
 
   async def _process_request_output(
       self,
@@ -363,6 +406,9 @@ class RLVllmSampler:
             np.asarray(prompt_val, dtype=np.int32).reshape(-1).tolist()
         )
         engine_prompt: Any = {"prompt_token_ids": expected_prompt_ids}
+        param_cache_salt = getattr(vllm_params, "cache_salt", None)
+        if param_cache_salt is not None:
+          engine_prompt["cache_salt"] = param_cache_salt
       else:
         expected_prompt_ids = None
         engine_prompt = (
@@ -490,6 +536,7 @@ class RLVllmSampler:
       self,
       sync_request: Any = None,
       free_kv_cache: bool = False,
+      partial_rollout: bool | None = None,
       **kwargs: Any,
   ) -> None:
     """Phase 1: Pauses intake, invalidates prefix cache, and optionally drops KV cache.
@@ -502,13 +549,20 @@ class RLVllmSampler:
     per-step latency overhead of deallocating (`delete_kv_cache`) and
     reallocating (`reinitialize_kv_cache`) the HBM KV buffer pool.
     """
+    use_partial = (
+        self.partial_rollout
+        if partial_rollout is None
+        else bool(partial_rollout)
+    )
     self._policy_version = _get_val(
         sync_request, "policy_version", self._policy_version
     )
     logger.info(
-        "Executing pre_weight_sync (policy_version=%d, free_kv_cache=%s)",
+        "Executing pre_weight_sync (policy_version=%d, free_kv_cache=%s,"
+        " partial_rollout=%s)",
         self._policy_version,
         free_kv_cache,
+        use_partial,
     )
 
     if sync_request is not None:
@@ -516,8 +570,12 @@ class RLVllmSampler:
       if rid:
         self._transfer_statuses[str(rid)] = "IN_PROGRESS"
 
-    await self.pause()
-    await self._clear_prefix_cache()
+    if use_partial:
+      await self.pause(partial_rollout=True)
+    else:
+      await self.pause()
+    if not (use_partial and not free_kv_cache):
+      await self._clear_prefix_cache()
 
     # `AsyncLLMEngine.start_weight_update()` takes no arguments, so it
     # can't forward `free_kv_cache` to the worker -- go through

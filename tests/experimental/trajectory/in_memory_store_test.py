@@ -1,3 +1,5 @@
+from typing import Any
+
 from absl.testing import absltest
 from tunix.experimental.trajectory import in_memory_store
 from tunix.experimental.trajectory import store
@@ -19,7 +21,9 @@ class InMemoryTrajectoryReaderTest(store_testing.TrajectoryReaderTestCase):
           | None
       ) = None,
   ) -> store.TrajectoryReader:
-    mem_store = in_memory_store.InMemoryTrajectoryStore()
+    mem_store = in_memory_store.InMemoryTrajectoryStore(
+        metadata_cls=trajectory_lib.TrajectoryMetadata
+    )
     if initial_data:
       for meta, steps in initial_data:
         for step in steps:
@@ -34,12 +38,16 @@ class InMemoryTrajectoryWriterTest(store_testing.TrajectoryWriterTestCase):
   def _create_reader_and_writer(
       self,
   ) -> tuple[store.TrajectoryReader, store.TrajectoryWriter]:
-    mem_store = in_memory_store.InMemoryTrajectoryStore()
+    mem_store = in_memory_store.InMemoryTrajectoryStore(
+        metadata_cls=trajectory_lib.TrajectoryMetadata
+    )
     return mem_store, mem_store
 
   def test_update_metadata(self) -> None:
     """Verifies that updating metadata in-memory updates the stored metadata."""
-    mem_store = in_memory_store.InMemoryTrajectoryStore()
+    mem_store = in_memory_store.InMemoryTrajectoryStore(
+        metadata_cls=trajectory_lib.TrajectoryMetadata
+    )
     meta = trajectory_lib.TrajectoryMetadata(
         trajectory_id="t1",
         agent=trajectory_lib.Agent(name="a1", version="1.0"),
@@ -54,33 +62,11 @@ class InMemoryTrajectoryWriterTest(store_testing.TrajectoryWriterTestCase):
     read_meta = mem_store.get_trajectories_metadata()[0]
     self.assertEqual(read_meta.extra["status"], "SUCCEEDED")
 
-  def test_tunix_trajectory_with_step_zero(self) -> None:
-    """Verifies storing and retrieving TunixTrajectoryMetadata and TunixTrajectory with step_id=0."""
-    mem_store = in_memory_store.InMemoryTrajectoryStore()
-    meta = trajectory_lib.TunixTrajectoryMetadata(
-        trajectory_id="tunix_1",
-        agent=trajectory_lib.Agent(name="a1", version="1.0"),
-        status="RUNNING",
-    )
-    step0 = trajectory_lib.TunixEnvStep(
-        step_id=0, source=trajectory_lib.Source.USER, message="prompt"
-    )
-    step1 = trajectory_lib.TunixAgentStep(
-        step_id=1, source=trajectory_lib.Source.AGENT, message="response"
-    )
-    mem_store.add_step(step0, meta)
-    mem_store.add_step(step1, meta)
-    trajs = mem_store.get_trajectories(["tunix_1"])
-    self.assertLen(trajs, 1)
-    self.assertIsInstance(trajs[0], trajectory_lib.TunixTrajectory)
-    self.assertEqual(trajs[0].steps[0].step_id, 0)
-    self.assertEqual(trajs[0].steps[1].step_id, 1)
-    self.assertIsInstance(trajs[0].steps[0], trajectory_lib.TunixEnvStep)
-    self.assertIsInstance(trajs[0].steps[1], trajectory_lib.TunixAgentStep)
-
   def test_metadata_mutation_isolation(self) -> None:
     """Verifies that mutating returned metadata does not alter internal store state."""
-    mem_store = in_memory_store.InMemoryTrajectoryStore()
+    mem_store = in_memory_store.InMemoryTrajectoryStore(
+        metadata_cls=trajectory_lib.TrajectoryMetadata
+    )
     meta = trajectory_lib.TrajectoryMetadata(
         trajectory_id="iso_1",
         agent=trajectory_lib.Agent(name="a1", version="1.0"),
@@ -101,6 +87,30 @@ class InMemoryTrajectoryWriterTest(store_testing.TrajectoryWriterTestCase):
     stored_meta = mem_store.get_trajectories_metadata()[0]
     self.assertEqual(stored_meta.notes, "initial notes")
     self.assertEqual(stored_meta.extra["count"], 1)
+
+
+class InMemoryTrajectoryStoreMetadataClsTest(
+    store_testing.TrajectoryStoreMetadataClsTestCase
+):
+  """metadata_cls contract tests for InMemoryTrajectoryStore."""
+
+  def _create_store(
+      self, metadata_cls: type[store.MetadataT]
+  ) -> store.TrajectoryStore[store.MetadataT]:
+    return in_memory_store.InMemoryTrajectoryStore(metadata_cls=metadata_cls)
+
+
+class InMemoryTrajectoryStoreConfigTest(
+    store_testing.TrajectoryStoreConfigTestCase
+):
+  """Config contract tests for InMemoryTrajectoryStore."""
+
+  def _create_config(self) -> dict[str, Any]:
+    return {
+        "enabled": True,
+        "backend": "memory",
+        "metadata_type": trajectory_lib.TrajectoryMetadata.METADATA_TYPE,
+    }
 
 
 if __name__ == "__main__":

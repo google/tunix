@@ -130,9 +130,8 @@ class AbstractWorkerTest(parameterized.TestCase):
         worker_id="w_ctx",
         execution_context=ctx,
     )
-    # Trainer instantiation in __init__ enters and exits once.
-    self.assertEqual(call_log, ["enter", "exit"])
-    call_log.clear()
+    # Trainer instantiation is deferred until initialize().
+    self.assertEqual(call_log, [])
 
     # Calling compile() while PENDING internally invokes self.initialize().
     # Because execution_context() is re-entrant per thread, CustomContext
@@ -162,6 +161,8 @@ class AbstractWorkerTest(parameterized.TestCase):
         worker_id="w_factory",
         execution_context=make_context,
     )
+    self.assertEmpty(factory_calls)
+    worker.initialize()
     self.assertLen(factory_calls, 1)
     self.assertEqual(enter_exit_log, ["enter", "exit"])
     factory_calls.clear()
@@ -175,12 +176,13 @@ class AbstractWorkerTest(parameterized.TestCase):
     self.assertEqual(enter_exit_log, ["enter", "exit"])
 
   def test_execution_context_invalid_type_raises_type_error(self):
+    worker = trainer_worker.TrainerWorker(
+        trainer_factory=DummyTrainer,
+        worker_id="w_bad",
+        execution_context=12345,
+    )
     with self.assertRaisesRegex(TypeError, "execution_context must be None"):
-      trainer_worker.TrainerWorker(
-          trainer_factory=DummyTrainer,
-          worker_id="w_bad",
-          execution_context=12345,
-      )
+      worker.initialize()
 
   def test_execution_context_asyncio_task_isolation(self):
     events = []
@@ -251,9 +253,7 @@ class AbstractWorkerTest(parameterized.TestCase):
             lambda: NamedContext("TransferGuard"),
         ],
     )
-    # __init__ enters both in order and exits in LIFO order
-    self.assertEqual(log, expected_lifo_log)
-    log.clear()
+    self.assertEqual(log, [])
 
     # Verify re-entrant entry only enters/exits the sequence once.
     with worker.execution_context():
@@ -285,8 +285,7 @@ class AbstractWorkerTest(parameterized.TestCase):
         worker_id="w_composite",
         execution_context=composite_context,
     )
-    self.assertEqual(log, ["enter_1", "enter_2", "exit_2", "exit_1"])
-    log.clear()
+    self.assertEqual(log, [])
 
     worker.compile(None)
     self.assertEqual(log, ["enter_1", "enter_2", "exit_2", "exit_1"])

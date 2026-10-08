@@ -1,9 +1,16 @@
 """Protocols defining Trajectory Store interfaces."""
 
 import abc
-from typing import Any, ClassVar, Mapping, Protocol, runtime_checkable
+from typing import Any, ClassVar, Mapping, Protocol, TypeVar, runtime_checkable
 
 from tunix.experimental.trajectory import trajectory as trajectory_lib
+
+
+MetadataT = TypeVar("MetadataT", bound=trajectory_lib.TrajectoryMetadata)
+
+# Config key naming the registered `METADATA_TYPE` of the TrajectoryMetadata
+# subclass a store reads back. Required by `TrajectoryStore.from_config`.
+METADATA_TYPE_KEY = "metadata_type"
 
 # ==============================================================================
 # Custom Exceptions
@@ -32,12 +39,12 @@ class TrajectoryMetadataNotFoundError(KeyError):
 
 
 @runtime_checkable
-class TrajectoryReader(Protocol):
+class TrajectoryReader(Protocol[MetadataT]):
   """Structural protocol defining read-only Trajectory Store operations."""
 
   def get_trajectories_metadata(
       self, trajectory_ids: list[str] | None = None
-  ) -> list[trajectory_lib.TrajectoryMetadata]:
+  ) -> list[MetadataT]:
     """Retrieves metadata for trajectories in the run.
 
     Args:
@@ -56,7 +63,7 @@ class TrajectoryReader(Protocol):
 
   def get_trajectories(
       self, trajectory_ids: list[str]
-  ) -> list[trajectory_lib.Trajectory]:
+  ) -> list[trajectory_lib.Trajectory[Any]]:
     """Retrieves full trajectories for a list of trajectory IDs.
 
     Args:
@@ -72,13 +79,13 @@ class TrajectoryReader(Protocol):
 
 
 @runtime_checkable
-class TrajectoryWriter(Protocol):
+class TrajectoryWriter(Protocol[MetadataT]):
   """Structural protocol defining write Trajectory Store operations."""
 
   def add_step(
       self,
       step: trajectory_lib.Step,
-      metadata: trajectory_lib.TrajectoryMetadata,
+      metadata: MetadataT,
   ) -> None:
     """Logs a turn step and its trajectory metadata.
 
@@ -97,7 +104,7 @@ class TrajectoryWriter(Protocol):
 
   def update_metadata(
       self,
-      metadata: trajectory_lib.TrajectoryMetadata,
+      metadata: MetadataT,
   ) -> None:
     """Updates (or creates) trajectory metadata.
 
@@ -133,66 +140,153 @@ class TrajectoryWriter(Protocol):
 # ==============================================================================
 
 
-class TrajectoryStore(TrajectoryReader, TrajectoryWriter, abc.ABC):
+class TrajectoryStore(
+    TrajectoryReader[MetadataT],
+    TrajectoryWriter[MetadataT],
+    abc.ABC,
+):
   """Base class pairing a store implementation with its own configuration.
 
   Every backend owns both directions of its configuration: `_from_config`
-  builds an instance from a plain dict, and `to_config` returns the dict that
-  would rebuild an equivalent one. Keeping the two next to the backend's
-  `__init__` means a new backend adds its own keys and its own validation in
-  one place, instead of growing a shared config object that has to know about
-  every backend's fields.
+  builds an instance from a plain dict and `to_config` rebuilds that dict, so a
+  new backend adds its own keys and its own validation in one place instead of
+  growing a shared config object that knows about every backend's fields.
 
-  `TrajectoryStore.from_config` is the single construction entry point for the
-  processes that make up a run. It doubles as the on/off gate: a config of
-  None, or one whose "enabled" is false, yields None, and every store-guarded
-  call site is then a no-op.
+  `from_config` is the single construction entry point for the processes that
+  make up a run, and doubles as the on/off gate: a config of None, or one whose
+  "enabled" is false, yields None, leaving every store-guarded call site a
+  no-op.
+
+  Every store is constructed with a required `metadata_cls`, the
+  TrajectoryMetadata subclass it reads metadata back as. The argument is typed
+  `type[MetadataT]`, so the type checker infers `MetadataT` from it and the
+  metadata type is stated exactly once:
+
+      store = FileTrajectoryStore(
+          root_dir=root, run_id=run_id, metadata_cls=TunixTrajectoryMetadata)
+      # Inferred: FileTrajectoryStore[TunixTrajectoryMetadata].
+
+  Because it is required, a store annotated with one metadata type but built
+  with another, or with none, is a static type error rather than a store that
+  silently reads a different type. A store that reads base metadata says so
+  with `metadata_cls=TrajectoryMetadata`.
   """
 
   # The value of the config's "backend" key that selects this class.
   BACKEND: ClassVar[str]
-  _REGISTRY: ClassVar[dict[str, type["TrajectoryStore"]]] = {}
+  _REGISTRY: ClassVar[dict[str, type["TrajectoryStore[Any]"]]] = {}
 
   def __init_subclass__(cls, **kwargs: Any) -> None:
     super().__init_subclass__(**kwargs)
-    backend = getattr(cls, "BACKEND", None)
+    backend = cls.__dict__.get("BACKEND")
     if backend:
       cls._REGISTRY[backend] = cls
 
+  def __init__(self, *, metadata_cls: type[MetadataT]) -> None:
+    """Records the metadata class this store reads back.
+
+    Args:
+      metadata_cls: The TrajectoryMetadata subclass to read stored metadata back
+        as. The type checker infers `MetadataT` from it. Must declare a
+        `METADATA_TYPE` registered in `TrajectoryMetadata._REGISTRY`.
+
+    Raises:
+      TypeError: If `metadata_cls` is not a TrajectoryMetadata subclass.
+      ValueError: If `metadata_cls` is not registered in
+        `TrajectoryMetadata._REGISTRY`.
+    """
+    if (
+        not isinstance(metadata_cls, type)
+        or not issubclass(metadata_cls, trajectory_lib.TrajectoryMetadata)
+        or issubclass(metadata_cls, trajectory_lib.Trajectory)
+    ):
+      raise TypeError(
+          f"{type(self).__name__} requires metadata_cls to be a"
+          f" TrajectoryMetadata subclass; got {metadata_cls}."
+      )
+    self._metadata_type: str = self._get_metadata_type_name(metadata_cls)
+    self._metadata_cls: type[MetadataT] = metadata_cls
+
+  @classmethod
+  def _resolve_metadata_type_name(
+      cls, name: str
+  ) -> type[trajectory_lib.TrajectoryMetadata]:
+    """Resolves a registered metadata_type name to its TrajectoryMetadata class."""
+    registry = (
+        trajectory_lib.TrajectoryMetadata._REGISTRY  # pylint: disable=protected-access
+    )
+    if name in registry:
+      return registry[name]
+
+    valid = sorted(registry)
+    raise ValueError(
+        f"Unknown Trajectory Store metadata_type {name}; expected one of"
+        f" {valid}."
+    )
+
+  @classmethod
+  def _get_metadata_type_name(
+      cls, metadata_cls: type[trajectory_lib.TrajectoryMetadata]
+  ) -> str:
+    """Returns the registered METADATA_TYPE name for `metadata_cls`."""
+    meta_type = metadata_cls.__dict__.get("METADATA_TYPE")
+    registry = (
+        trajectory_lib.TrajectoryMetadata._REGISTRY  # pylint: disable=protected-access
+    )
+    if (
+        not isinstance(meta_type, str)
+        or not meta_type
+        or registry.get(meta_type) is not metadata_cls
+    ):
+      raise ValueError(
+          f"{metadata_cls.__name__} must declare a registered"
+          " METADATA_TYPE in TrajectoryMetadata._REGISTRY."
+      )
+    return meta_type
+
   @classmethod
   @abc.abstractmethod
-  def _from_config(cls, config: Mapping[str, Any]) -> "TrajectoryStore":
+  def _from_config(
+      cls,
+      config: Mapping[str, Any],
+      *,
+      metadata_cls: type[trajectory_lib.TrajectoryMetadata],
+  ) -> "TrajectoryStore[Any]":
     """Builds an instance of this backend from `config`.
 
     Implementations read the keys they care about and raise ValueError for a
     config this backend cannot honour. Called only by `from_config`, which has
-    already established that `config` selects this backend.
-
-    Args:
-      config: Configuration mapping for this backend.
-
-    Returns:
-      A new store instance.
+    already established that `config` selects this backend and resolved its
+    "metadata_type" into `metadata_cls`.
     """
 
   @abc.abstractmethod
   def to_config(self) -> dict[str, Any]:
     """Returns the config dict that rebuilds an equivalent store.
 
-    For any store constructed via `from_config`,
     `type(store).from_config(store.to_config())` must produce a store reading
     and writing the same data as `store`. Use it to report what a process
     actually built — two processes in one run that log different dicts are
     reading and writing different data.
+    """
+
+  def to_redacted_config(self) -> dict[str, Any]:
+    """Returns `to_config()` with secrets masked, for logging and reporting.
+
+    `to_config()` must round-trip, so it may carry credentials (e.g. a password
+    in a database URL). Log this instead. Backends whose config holds secrets
+    override it; the default returns `to_config()` unchanged.
 
     Returns:
-      A dict accepted by `from_config`, including "backend" and "enabled".
+      A dict with the same keys as `to_config()`. It is not guaranteed to be
+      accepted by `from_config`.
     """
+    return self.to_config()
 
   @classmethod
   def from_config(
       cls, config: Mapping[str, Any] | None
-  ) -> "TrajectoryStore | None":
+  ) -> "TrajectoryStore[Any] | None":
     """Builds the store described by `config`, or None when it is disabled.
 
     Call once per process and hold onto the result: the process that built a
@@ -210,17 +304,19 @@ class TrajectoryStore(TrajectoryReader, TrajectoryWriter, abc.ABC):
       A store instance, or None if `config` is None or not enabled.
 
     Raises:
-      ValueError: If "backend" names no known implementation, or the selected
-        backend rejects the rest of the config.
+      ValueError: If "backend" names no known implementation, "metadata_type"
+        is missing or names an unknown metadata type, or the selected backend
+        rejects the rest of the config.
     """
     if config is None or not config.get("enabled", False):
       return None
 
     # Ensure built-in backends are imported so their __init_subclass__ hooks
     # have registered them in _REGISTRY before lookup. Imported here rather
-    # than at module level because both implementations import this module.
+    # than at module level because all implementations import this module.
     from tunix.experimental.trajectory import file_store  # pylint: disable=g-import-not-at-top,unused-import
     from tunix.experimental.trajectory import in_memory_store  # pylint: disable=g-import-not-at-top,unused-import
+    from tunix.experimental.trajectory import sql_store  # pylint: disable=g-import-not-at-top,unused-import
 
     backend = config.get("backend")
     if backend not in cls._REGISTRY:
@@ -228,4 +324,12 @@ class TrajectoryStore(TrajectoryReader, TrajectoryWriter, abc.ABC):
           f"Unknown Trajectory Store backend {backend!r}; expected one of"
           f" {sorted(cls._REGISTRY)}."
       )
-    return cls._REGISTRY[backend]._from_config(config)  # pylint: disable=protected-access
+    if not config.get(METADATA_TYPE_KEY):
+      raise ValueError(
+          f"Trajectory Store config requires a non-empty '{METADATA_TYPE_KEY}';"
+          " use 'base' for plain TrajectoryMetadata."
+      )
+    metadata_cls = cls._resolve_metadata_type_name(config[METADATA_TYPE_KEY])
+    return cls._REGISTRY[backend]._from_config(  # pylint: disable=protected-access
+        config, metadata_cls=metadata_cls
+    )

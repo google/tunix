@@ -32,7 +32,7 @@ from tunix.sft import metrics_logger as sft_metrics_logger
 from tunix.sft import profiler
 
 if TYPE_CHECKING:
-  from tunix.rl.rollout import base_rollout  # pytype: disable=import-error
+  from tunix.rl.rollout import base_rollout  # pyrefly: ignore[missing-import]
 
 # For rl_utils calls inside RLTrainingConfig
 # For base_rollout typing inside ClusterConfig
@@ -195,6 +195,10 @@ class RolloutConfig:
   # while resharding; keep True unless that copy fits next to the KV pool, in
   # which case False skips the two collective RPCs and the re-allocation.
   rollout_vllm_free_kv_cache_during_weight_sync: bool = True
+
+  # Whether to freeze in-flight trajectories in-place during weight
+  # synchronization instead of draining them to completion first.
+  partial_rollout: bool = False
 
   # Decode text / extract logprobs of each finished request in a thread pool
   # while vLLM keeps decoding the rest of the batch (offline and server mode).

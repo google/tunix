@@ -16,6 +16,7 @@
 
 import dataclasses
 import tracemalloc
+from unittest import mock
 
 from absl.testing import absltest
 import jax
@@ -257,8 +258,7 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
   def _drain(self, assembler, items):
     """Fully packs `items` via the streaming contract (feed then flush)."""
     return [
-        batch.payload
-        for batch in (assembler.feed(items) + assembler.flush())
+        batch.payload for batch in [*assembler.feed(items), *assembler.flush()]
     ]
 
   def test_empty_input_returns_empty_list(self):
@@ -327,14 +327,14 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
     p3 = dataclasses.replace(_make_payload(1, 2), metadata={"traj_id": "t3"})
 
     # Feed 1 (4 tokens < 10): buffers without emitting.
-    self.assertEmpty(assembler.feed([p1]))
+    self.assertEmpty(list(assembler.feed([p1])))
 
     # Feed 2 (4 + 5 = 9 tokens < 10): still held back, cannot fill a chunk yet.
-    self.assertEmpty(assembler.feed([p2]))
+    self.assertEmpty(list(assembler.feed([p2])))
 
     # Feed 3 reaches rollouts_per_optimizer_update=3 -> drains the whole buffer (12
     # tokens) into a full chunk plus a final remainder chunk.
-    batches3 = assembler.feed([p3])
+    batches3 = list(assembler.feed([p3]))
     self.assertLen(batches3, 2)
     self.assertFalse(batches3[0].is_final_batch)
     self.assertEqual(set(batches3[0].trajectory_ids), {"t1", "t2"})
@@ -343,6 +343,49 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
     )
     self.assertTrue(batches3[1].is_final_batch)
     self.assertEqual(batches3[1].trajectory_ids, ("t3",))
+
+  def test_feed_yields_microbatches_lazily_one_at_a_time(self):
+    assembler = batch_assembly.SequencePackedBatchAssembler(
+        batch_size=1,
+        num_generations=3,
+        mini_batch_size=1,
+        max_packed_len=6,
+    )
+    items = [
+        dataclasses.replace(_make_payload(2, 2), metadata={"traj_id": f"t{i}"})
+        for i in range(3)
+    ]
+    emit_calls = 0
+    orig_emit = assembler._emit_one_chunk
+
+    def counting_emit(*args, **kwargs):
+      nonlocal emit_calls
+      emit_calls += 1
+      return orig_emit(*args, **kwargs)
+
+    assembler._emit_one_chunk = counting_emit
+
+    batch_iter = assembler.feed(items)
+    # Calling feed() validates/ingests items into _buffer without packing any
+    # chunk yet.
+    self.assertEqual(emit_calls, 0)
+    self.assertLen(assembler._buffer, 3)
+
+    mb0 = next(batch_iter)
+    self.assertEqual(emit_calls, 1)
+    self.assertFalse(mb0.is_final_batch)
+    self.assertLen(assembler._buffer, 2)
+
+    mb1 = next(batch_iter)
+    self.assertEqual(emit_calls, 2)
+    self.assertFalse(mb1.is_final_batch)
+    self.assertLen(assembler._buffer, 1)
+
+    mb2 = next(batch_iter)
+    self.assertEqual(emit_calls, 3)
+    self.assertTrue(mb2.is_final_batch)
+    self.assertEmpty(assembler._buffer)
+    self.assertIsNone(next(batch_iter, None))
 
   def test_feed_merges_lineage_contexts(self):
     ctx1 = lineage.LineageContext(
@@ -363,7 +406,7 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
     assembler = batch_assembly.SequencePackedBatchAssembler(
         batch_size=1, num_generations=2, mini_batch_size=1, max_packed_len=16
     )
-    batches = assembler.feed([payload1, payload2])
+    batches = list(assembler.feed([payload1, payload2]))
 
     self.assertLen(batches, 1)
     batch_payload = batches[0].payload
@@ -396,7 +439,7 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
     assembler = batch_assembly.SequencePackedBatchAssembler(
         batch_size=1, num_generations=2, mini_batch_size=1, max_packed_len=12
     )
-    batches = assembler.feed([p1, p2])
+    batches = list(assembler.feed([p1, p2]))
 
     self.assertLen(batches, 2)
     self.assertEqual(
@@ -419,7 +462,7 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
     assembler = batch_assembly.SequencePackedBatchAssembler(
         batch_size=1, num_generations=1, mini_batch_size=1, max_packed_len=8
     )
-    batches = assembler.feed([p])
+    batches = list(assembler.feed([p]))
     self.assertLen(batches, 1)
     self.assertNotIn("lineage", batches[0].payload.metadata)
 
@@ -431,8 +474,8 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
     assembler = batch_assembly.SequencePackedBatchAssembler(
         batch_size=1, num_generations=1, mini_batch_size=1, max_packed_len=8
     )
-    out1 = assembler.feed([p])
-    out2 = assembler.feed([p])
+    out1 = list(assembler.feed([p]))
+    out2 = list(assembler.feed([p]))
     self.assertEqual(out1[0].payload.metadata["lineage"].tracking_id, "batch_0")
     self.assertEqual(out2[0].payload.metadata["lineage"].tracking_id, "batch_1")
 
@@ -448,15 +491,15 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
         max_packed_len=8,
         start_batch_index=42,
     )
-    out = assembler.feed([p])
+    out = list(assembler.feed([p]))
     self.assertEqual(out[0].payload.metadata["lineage"].tracking_id, "batch_42")
     assembler.reset(start_batch_index=100)
-    out2 = assembler.feed([p])
+    out2 = list(assembler.feed([p]))
     self.assertEqual(
         out2[0].payload.metadata["lineage"].tracking_id, "batch_100"
     )
     assembler.reset()
-    out3 = assembler.feed([p])
+    out3 = list(assembler.feed([p]))
     self.assertEqual(
         out3[0].payload.metadata["lineage"].tracking_id, "batch_101"
     )
@@ -474,17 +517,17 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
     p2 = dataclasses.replace(_make_payload(2, 2), metadata={"traj_id": "t2"})
 
     # 4 tokens < 6: buffered.
-    self.assertEmpty(assembler.feed([p1]))
+    self.assertEmpty(list(assembler.feed([p1])))
 
     # 4 + 4 = 8 >= 6: emits one full chunk mid-step (not final), holding the
     # remainder back for the next feed.
-    mid = assembler.feed([p2])
+    mid = list(assembler.feed([p2]))
     self.assertLen(mid, 1)
     self.assertFalse(mid[0].is_final_batch)
     self.assertEqual(mid[0].trajectory_ids, ("t1",))
 
     # The held-back remainder is drained (and marked final) on flush.
-    flushed = assembler.flush()
+    flushed = list(assembler.flush())
     self.assertLen(flushed, 1)
     self.assertTrue(flushed[0].is_final_batch)
     self.assertEqual(flushed[0].trajectory_ids, ("t2",))
@@ -497,18 +540,18 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
         max_packed_len=16,
     )
     p1 = dataclasses.replace(_make_payload(2, 2), metadata={"traj_id": "t1"})
-    batches = assembler.feed([p1])
+    batches = list(assembler.feed([p1]))
     self.assertEmpty(batches)
 
     # Explicit flush should emit buffered items and mark final
-    flushed = assembler.flush()
+    flushed = list(assembler.flush())
     self.assertLen(flushed, 1)
     self.assertTrue(flushed[0].is_final_batch)
     self.assertEqual(flushed[0].trajectory_ids, ("t1",))
 
     # Reset clears state
     assembler.reset()
-    self.assertEmpty(assembler.flush())
+    self.assertEmpty(list(assembler.flush()))
 
   def test_to_rl_trainer_payload_reuses_contiguous_pack_chunk_buffers(self):
     item1 = batch_assembly.to_pack_item(_make_payload(2, 2, advantage=1.0))
@@ -533,13 +576,17 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
     # 6 pre-allocated [2, 4096] 4-byte arrays = 196,608 bytes; while both
     # `chunk` and `payload` are alive, `to_rl_trainer_payload` passes `chunk`'s
     # 2D arrays directly by reference instead of allocating 163,840 extra bytes.
+    # Under `Py_LIMITED_API` (`STABLE_ABI`), `_packing_ext` uses `std::malloc`
+    # which is not tracked by `tracemalloc`, whereas non-limited-API builds use
+    # `PyMem_RawMalloc`.
     pack_allocated = after_pack_bytes - base_bytes
     to_payload_peak = peak_bytes - after_pack_bytes
-    self.assertGreater(pack_allocated, 190_000)
+    if pack_allocated > 65_536:
+      self.assertGreater(pack_allocated, 190_000)
+      self.assertLess(
+          peak_bytes - base_bytes, (retained_bytes - base_bytes) * 1.05
+      )
     self.assertLess(to_payload_peak, 4_096)
-    self.assertLess(
-        peak_bytes - base_bytes, (retained_bytes - base_bytes) * 1.05
-    )
 
     chunk = packing.pack_chunk(
         [[item1], [item2]], budget=6, pad_id=0, carried=()
@@ -581,15 +628,33 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
     )
     # 3 groups with 4 tokens each (total 12 tokens < 16)
     # Group 1: 4 tokens -> buffers
-    res1 = assembler.feed([self._make_streaming_payload(prompt_length=2, completion_length=2, val=1)])
+    res1 = list(
+        assembler.feed([
+            self._make_streaming_payload(
+                prompt_length=2, completion_length=2, val=1
+            )
+        ])
+    )
     self.assertEmpty(res1)
 
     # Group 2: 4 tokens -> buffers (8 tokens total)
-    res2 = assembler.feed([self._make_streaming_payload(prompt_length=2, completion_length=2, val=2)])
+    res2 = list(
+        assembler.feed([
+            self._make_streaming_payload(
+                prompt_length=2, completion_length=2, val=2
+            )
+        ])
+    )
     self.assertEmpty(res2)
 
     # Group 3: 4 tokens -> hits rollouts_per_optimizer_update = 3, auto-flushes!
-    res3 = assembler.feed([self._make_streaming_payload(prompt_length=2, completion_length=2, val=3)])
+    res3 = list(
+        assembler.feed([
+            self._make_streaming_payload(
+                prompt_length=2, completion_length=2, val=3
+            )
+        ])
+    )
     self.assertLen(res3, 1)
     batch = res3[0]
     self.assertTrue(batch.is_final_batch)
@@ -610,18 +675,36 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
         mini_batch_size=3,  # rollouts_per_optimizer_update = 3
     )
     # Item 1: 8 tokens -> buffers (8 < 16)
-    res1 = assembler.feed([self._make_streaming_payload(prompt_length=4, completion_length=4, val=1)])
+    res1 = list(
+        assembler.feed([
+            self._make_streaming_payload(
+                prompt_length=4, completion_length=4, val=1
+            )
+        ])
+    )
     self.assertEmpty(res1)
 
     # Item 2: 8 tokens -> 8 + 8 = 16 tokens >= 16 (chunk capacity)!
     # Emits early before the optimizer-update boundary.
-    res2 = assembler.feed([self._make_streaming_payload(prompt_length=4, completion_length=4, val=2)])
+    res2 = list(
+        assembler.feed([
+            self._make_streaming_payload(
+                prompt_length=4, completion_length=4, val=2
+            )
+        ])
+    )
     self.assertLen(res2, 1)
     self.assertFalse(res2[0].is_final_batch)
     self.assertEqual(res2[0].payload.completion_ids.shape, (1, 16))
 
     # Item 3 hits the optimizer-update boundary and auto-flushes the open bin.
-    res3 = assembler.feed([self._make_streaming_payload(prompt_length=2, completion_length=2, val=3)])
+    res3 = list(
+        assembler.feed([
+            self._make_streaming_payload(
+                prompt_length=2, completion_length=2, val=3
+            )
+        ])
+    )
     self.assertLen(res3, 1)
     self.assertTrue(res3[0].is_final_batch)
     self.assertEqual(res3[0].payload.completion_ids.shape, (1, 16))
@@ -635,14 +718,26 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
         mini_batch_size=2,
     )
     # Item 1 has 10 tokens
-    res1 = assembler.feed([self._make_streaming_payload(prompt_length=4, completion_length=6, val=1)])
+    res1 = list(
+        assembler.feed([
+            self._make_streaming_payload(
+                prompt_length=4, completion_length=6, val=1
+            )
+        ])
+    )
     self.assertEmpty(res1)
 
     # Item 2 has 8 tokens (10 + 8 = 18 > 16, cannot fit!)
     # Should place Item 1 in bin 1 and Item 2 in bin 2.
     # Reaching rollouts_per_optimizer_update = 2 auto-flushes bin 2!
     # With batch_size=2, the 2 bins form 1 microbatch of shape [2, 16]!
-    res2 = assembler.feed([self._make_streaming_payload(prompt_length=4, completion_length=4, val=2)])
+    res2 = list(
+        assembler.feed([
+            self._make_streaming_payload(
+                prompt_length=4, completion_length=4, val=2
+            )
+        ])
+    )
     self.assertLen(res2, 1)
     self.assertTrue(res2[0].is_final_batch)
     self.assertEqual(res2[0].payload.completion_ids.shape, (2, 16))
@@ -659,12 +754,18 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
         num_generations=1,
         mini_batch_size=4,
     )
-    assembler.feed([self._make_streaming_payload(prompt_length=2, completion_length=2, val=1)])
-    flushed = assembler.flush()
+    list(
+        assembler.feed([
+            self._make_streaming_payload(
+                prompt_length=2, completion_length=2, val=1
+            )
+        ])
+    )
+    flushed = list(assembler.flush())
     self.assertLen(flushed, 1)
     self.assertTrue(flushed[0].is_final_batch)
     self.assertEqual(flushed[0].payload.completion_ids.shape, (1, 16))
-    self.assertEmpty(assembler.flush())
+    self.assertEmpty(list(assembler.flush()))
 
   def test_reset_clears_state(self):
     assembler = batch_assembly.SequencePackedBatchAssembler(
@@ -674,9 +775,15 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
         num_generations=1,
         mini_batch_size=4,
     )
-    assembler.feed([self._make_streaming_payload(prompt_length=2, completion_length=2, val=1)])
+    list(
+        assembler.feed([
+            self._make_streaming_payload(
+                prompt_length=2, completion_length=2, val=1
+            )
+        ])
+    )
     assembler.reset()
-    self.assertEmpty(assembler.flush())
+    self.assertEmpty(list(assembler.flush()))
 
   def test_sequence_packed_batch_assembler_tracks_trajectory_ids(self):
     assembler = batch_assembly.SequencePackedBatchAssembler(
@@ -687,18 +794,41 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
         mini_batch_size=2,  # rollouts_per_optimizer_update = 4
     )
     # Group 1: 2 items of 4 tokens each (8 tokens total) -> buffers
-    res1 = assembler.feed([
-        self._make_streaming_payload(prompt_length=2, completion_length=2, prompt_id="p0", group_index=0),
-        self._make_streaming_payload(prompt_length=2, completion_length=2, prompt_id="p0", group_index=1),
-    ])
+    res1 = list(
+        assembler.feed([
+            self._make_streaming_payload(
+                prompt_length=2,
+                completion_length=2,
+                prompt_id="p0",
+                group_index=0,
+            ),
+            self._make_streaming_payload(
+                prompt_length=2,
+                completion_length=2,
+                prompt_id="p0",
+                group_index=1,
+            ),
+        ])
+    )
     self.assertEmpty(res1)
 
     # Group 2: 2 items of 4 tokens each (8 tokens total). Reaches the optimizer-update boundary.
-    res2 = assembler.feed([
-        self._make_streaming_payload(prompt_length=2, completion_length=2, prompt_id="p1", group_index=0),
-        self._make_streaming_payload(
-            prompt_length=2, completion_length=2, prompt_id="p1", group_index=1),
-    ])
+    res2 = list(
+        assembler.feed([
+            self._make_streaming_payload(
+                prompt_length=2,
+                completion_length=2,
+                prompt_id="p1",
+                group_index=0,
+            ),
+            self._make_streaming_payload(
+                prompt_length=2,
+                completion_length=2,
+                prompt_id="p1",
+                group_index=1,
+            ),
+        ])
+    )
     self.assertLen(res2, 1)
     self.assertTrue(res2[0].is_final_batch)
     self.assertEqual(
@@ -737,7 +867,7 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
         completion_mask=np.ones(2, dtype=np.float32),
         advantages=np.array([0.5, 0.5], dtype=np.float32),
     )
-    res1 = assembler.feed([item1, item2])
+    res1 = list(assembler.feed([item1, item2]))
     self.assertEmpty(res1)  # 4 tokens < 16, stays buffered
 
     # Feed 2 (Input batch 2): 2 items with tokens [20, 21, 22] and [23, 24, 25] (total 6 tokens)
@@ -756,7 +886,7 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
         advantages=np.array([1.5, 1.5, 1.5], dtype=np.float32),
     )
     # Total rollouts = 2 + 2 = 4 == rollouts_per_optimizer_update.
-    res2 = assembler.feed([item3, item4])
+    res2 = list(assembler.feed([item3, item4]))
     self.assertLen(res2, 1)
     batch = res2[0]
     self.assertTrue(batch.is_final_batch)
@@ -800,10 +930,14 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
 
     # Group 1 (2 items, 6 tokens each = 12 tokens): buffered (12 < 16)
     group1 = [
-        self._make_streaming_payload(prompt_length=3, completion_length=3, val=1),
-        self._make_streaming_payload(prompt_length=3, completion_length=3, val=1),
+        self._make_streaming_payload(
+            prompt_length=3, completion_length=3, val=1
+        ),
+        self._make_streaming_payload(
+            prompt_length=3, completion_length=3, val=1
+        ),
     ]
-    res1 = assembler.feed(group1)
+    res1 = list(assembler.feed(group1))
     self.assertEmpty(res1)
 
     # Group 2 (final batch, 2 items, 6 tokens each):
@@ -812,10 +946,14 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
     # Chunk 2 packs remaining 2 items (12 tokens <= 16).
     # Reaching the optimizer-update boundary drains the entire buffer.
     group2 = [
-        self._make_streaming_payload(prompt_length=3, completion_length=3, val=2),
-        self._make_streaming_payload(prompt_length=3, completion_length=3, val=2),
+        self._make_streaming_payload(
+            prompt_length=3, completion_length=3, val=2
+        ),
+        self._make_streaming_payload(
+            prompt_length=3, completion_length=3, val=2
+        ),
     ]
-    res2 = assembler.feed(group2)
+    res2 = list(assembler.feed(group2))
     self.assertLen(res2, 2)
     self.assertFalse(res2[0].is_final_batch)
     self.assertTrue(res2[1].is_final_batch)
@@ -831,9 +969,13 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
         num_generations=2,
         mini_batch_size=1,
     )
-    item1 = self._make_streaming_payload(prompt_length=3, completion_length=3, val=1)
-    item2 = self._make_streaming_payload(prompt_length=3, completion_length=3, val=2)
-    res = assembler.feed([item1, item2])
+    item1 = self._make_streaming_payload(
+        prompt_length=3, completion_length=3, val=1
+    )
+    item2 = self._make_streaming_payload(
+        prompt_length=3, completion_length=3, val=2
+    )
+    res = list(assembler.feed([item1, item2]))
     self.assertLen(res, 1)
     self.assertTrue(res[0].is_final_batch)
     self.assertEqual(res[0].payload.completion_ids.shape, (2, 16))
@@ -872,34 +1014,60 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
     )
     # chunk_capacity = batch_size * max_packed_len = 2 * 16 = 32 tokens.
     # Item 1: 16 tokens -> buffers (16 < 32)
-    res1 = assembler.feed([self._make_streaming_payload(prompt_length=8, completion_length=8, val=1)])
+    res1 = list(
+        assembler.feed([
+            self._make_streaming_payload(
+                prompt_length=8, completion_length=8, val=1
+            )
+        ])
+    )
     self.assertEmpty(res1)
 
     # Item 2: 16 tokens -> 16 + 16 = 32 tokens >= 32 (chunk capacity).
     # Emits early microbatch of shape [2, 16], is_final_batch=False
-    res2 = assembler.feed([self._make_streaming_payload(prompt_length=8, completion_length=8, val=2)])
+    res2 = list(
+        assembler.feed([
+            self._make_streaming_payload(
+                prompt_length=8, completion_length=8, val=2
+            )
+        ])
+    )
     self.assertLen(res2, 1)
     self.assertFalse(res2[0].is_final_batch)
     self.assertEqual(res2[0].payload.completion_ids.shape, (2, 16))
 
     # Item 3: 16 tokens -> buffers (16 < 32)
-    res3 = assembler.feed([self._make_streaming_payload(prompt_length=8, completion_length=8, val=3)])
+    res3 = list(
+        assembler.feed([
+            self._make_streaming_payload(
+                prompt_length=8, completion_length=8, val=3
+            )
+        ])
+    )
     self.assertEmpty(res3)
 
     # Item 4: 16 tokens -> Step done (rollouts = 4)!
     # Emits final microbatch of shape [2, 16], is_final_batch=True
-    res4 = assembler.feed([self._make_streaming_payload(prompt_length=8, completion_length=8, val=4)])
+    res4 = list(
+        assembler.feed([
+            self._make_streaming_payload(
+                prompt_length=8, completion_length=8, val=4
+            )
+        ])
+    )
     self.assertLen(res4, 1)
     self.assertTrue(res4[0].is_final_batch)
     self.assertEqual(res4[0].payload.completion_ids.shape, (2, 16))
 
     # Early EOF flush test: 1 item fed into a fresh step, flush pads to [2, 16]
-    assembler.feed([
-        self._make_streaming_payload(
-            prompt_length=3, completion_length=3, val=5
-        )
-    ])
-    flushed = assembler.flush()
+    list(
+        assembler.feed([
+            self._make_streaming_payload(
+                prompt_length=3, completion_length=3, val=5
+            )
+        ])
+    )
+    flushed = list(assembler.flush())
     self.assertLen(flushed, 1)
     self.assertTrue(flushed[0].is_final_batch)
     self.assertEqual(flushed[0].payload.completion_ids.shape, (2, 16))
@@ -915,14 +1083,16 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
         num_generations=2,
         mini_batch_size=1,
     )
-    res = assembler.feed([
-        self._make_streaming_payload(
-            prompt_length=3, completion_length=3, val=1
-        ),
-        self._make_streaming_payload(
-            prompt_length=2, completion_length=2, val=2
-        ),
-    ])
+    res = list(
+        assembler.feed([
+            self._make_streaming_payload(
+                prompt_length=3, completion_length=3, val=1
+            ),
+            self._make_streaming_payload(
+                prompt_length=2, completion_length=2, val=2
+            ),
+        ])
+    )
 
     stats = res[0].padding_stats
     # First-fit packs both items into row 0; row 1 is a filler row.
@@ -941,14 +1111,16 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
         mini_batch_size=1,
         max_segments_per_packed_row=1,
     )
-    res = assembler.feed([
-        self._make_streaming_payload(
-            prompt_length=3, completion_length=3, val=1
-        ),
-        self._make_streaming_payload(
-            prompt_length=2, completion_length=2, val=2
-        ),
-    ])
+    res = list(
+        assembler.feed([
+            self._make_streaming_payload(
+                prompt_length=3, completion_length=3, val=1
+            ),
+            self._make_streaming_payload(
+                prompt_length=2, completion_length=2, val=2
+            ),
+        ])
+    )
 
     stats = res[0].padding_stats
     np.testing.assert_array_equal(stats.row_valid_tokens, [6, 4])
@@ -1134,8 +1306,10 @@ class PaddedBatchAssemblerTest(absltest.TestCase):
 
   def test_padding_stats_count_truncated_tokens_per_row(self):
     # P=4, C=5: the second item is truncated to 4 + 5 = 9 valid tokens.
-    res = self._assembler(num_generations=1, mini_batch_size=2).feed(
-        [_make_payload(2, 3), _make_payload(6, 7)]
+    res = list(
+        self._assembler(num_generations=1, mini_batch_size=2).feed(
+            [_make_payload(2, 3), _make_payload(6, 7)]
+        )
     )
 
     self.assertLen(res, 1)
@@ -1147,8 +1321,10 @@ class PaddedBatchAssemblerTest(absltest.TestCase):
     self.assertAlmostEqual(stats.row_imbalance, 9 / 7)
 
   def test_padding_stats_mark_filler_rows_in_remainder(self):
-    res = self._assembler(num_generations=1, mini_batch_size=1).feed(
-        [_make_payload(2, 3)]
+    res = list(
+        self._assembler(num_generations=1, mini_batch_size=1).feed(
+            [_make_payload(2, 3)]
+        )
     )
 
     self.assertLen(res, 1)
@@ -1159,9 +1335,9 @@ class PaddedBatchAssemblerTest(absltest.TestCase):
 
   def test_flush_reports_padding_stats(self):
     assembler = self._assembler()
-    self.assertEmpty(assembler.feed([_make_payload(1, 1)]))
+    self.assertEmpty(list(assembler.feed([_make_payload(1, 1)])))
 
-    flushed = assembler.flush()
+    flushed = list(assembler.flush())
 
     np.testing.assert_array_equal(
         flushed[0].padding_stats.row_valid_tokens, [2, 0]
@@ -1169,9 +1345,11 @@ class PaddedBatchAssemblerTest(absltest.TestCase):
 
   def test_final_marking_preserves_padding_stats(self):
     # A full chunk lands on the update boundary, so `feed` re-marks the last
-    # batch final via `_replace`; its padding stats must survive.
-    res = self._assembler(num_generations=2, mini_batch_size=1).feed(
-        [_make_payload(1, 1), _make_payload(2, 2)]
+    # batch final; its padding stats must survive.
+    res = list(
+        self._assembler(num_generations=2, mini_batch_size=1).feed(
+            [_make_payload(1, 1), _make_payload(2, 2)]
+        )
     )
 
     self.assertLen(res, 1)
@@ -1536,15 +1714,15 @@ class PaddedBatchAssemblerTest(absltest.TestCase):
         mini_batch_size=1,
         start_batch_index=10,
     )
-    out = assembler.feed([item])
+    out = list(assembler.feed([item]))
     self.assertEqual(out[0].payload.metadata["lineage"].tracking_id, "batch_10")
     assembler.reset(start_batch_index=20)
-    out2 = assembler.feed([item])
+    out2 = list(assembler.feed([item]))
     self.assertEqual(
         out2[0].payload.metadata["lineage"].tracking_id, "batch_20"
     )
     assembler.reset()
-    out3 = assembler.feed([item])
+    out3 = list(assembler.feed([item]))
     self.assertEqual(
         out3[0].payload.metadata["lineage"].tracking_id, "batch_21"
     )
@@ -1566,8 +1744,7 @@ class SequencePackedConversionTest(absltest.TestCase):
   def _drain(self, assembler, items):
     """Fully packs `items` via the streaming contract (feed then flush)."""
     return [
-        batch.payload
-        for batch in (assembler.feed(items) + assembler.flush())
+        batch.payload for batch in [*assembler.feed(items), *assembler.flush()]
     ]
 
   def test_basic_packing(self):
@@ -2057,12 +2234,19 @@ class PaddedBatchAssemblerRoutingTest(absltest.TestCase):
         tracemalloc.stop()
 
     self.assertIsNotNone(packed.routed_experts)
+    self.assertEqual(packed.routed_experts.shape, (4, 1024, 16, 4))
     net_retained = retained_bytes - base_bytes
     net_peak = peak_bytes - base_bytes
     # Pre-allocating the batch buffer (~565 KB for [4, 1024, 16, 4] int16 +
     # token/mask arrays) avoids the ~2x np.stack peak spike (~1.09 MB).
-    self.assertGreater(net_retained, 500_000)
-    self.assertLess(net_peak, net_retained * 1.10)
+    # Under `Py_LIMITED_API` (`STABLE_ABI`), `_packing_ext` uses `std::malloc`
+    # which is not tracked by `tracemalloc`; in that case `net_peak` in the
+    # Python heap remains well below a single routed_experts buffer.
+    if net_retained > 65_536:
+      self.assertGreater(net_retained, 500_000)
+      self.assertLess(net_peak, net_retained * 1.10)
+    else:
+      self.assertLess(net_peak, 65_536)
 
   def test_partial_capture_disables_replay_for_the_batch(self):
     """A half-replayed batch would silently mix replayed and fresh routing."""
@@ -2105,12 +2289,12 @@ class PaddedBatchAssemblerRoutingTest(absltest.TestCase):
         num_generations=2,
         mini_batch_size=2,  # rollouts_per_optimizer_update = 4
     )
-    # Feed half an optimizer update: should buffer and return an empty list.
+    # Feed half an optimizer update: should buffer and return an empty iterator.
     items_group1 = [
         self._make_streaming_payload(1),
         self._make_streaming_payload(2),
     ]
-    res1 = assembler.feed(items_group1)
+    res1 = list(assembler.feed(items_group1))
     self.assertEmpty(res1)
 
     # Feed 2 items (second half): reaches rollouts_per_optimizer_update = 4.
@@ -2118,7 +2302,7 @@ class PaddedBatchAssemblerRoutingTest(absltest.TestCase):
         self._make_streaming_payload(3),
         self._make_streaming_payload(4),
     ]
-    res2 = assembler.feed(items_group2)
+    res2 = list(assembler.feed(items_group2))
     self.assertLen(res2, 1)
     batch = res2[0]
     self.assertTrue(batch.is_final_batch)
@@ -2135,18 +2319,49 @@ class PaddedBatchAssemblerRoutingTest(absltest.TestCase):
         mini_batch_size=2,  # rollouts_per_optimizer_update = 4
     )
     # Feed 2 items: reaches batch_size=2, but not the optimizer-update boundary.
-    res1 = assembler.feed(
-        [self._make_streaming_payload(1), self._make_streaming_payload(2)]
+    res1 = list(
+        assembler.feed(
+            [self._make_streaming_payload(1), self._make_streaming_payload(2)]
+        )
     )
     self.assertLen(res1, 1)
     self.assertFalse(res1[0].is_final_batch)
 
     # Feed 2 items: reaches rollouts_per_optimizer_update=4, so is_final_batch=True
-    res2 = assembler.feed(
-        [self._make_streaming_payload(3), self._make_streaming_payload(4)]
+    res2 = list(
+        assembler.feed(
+            [self._make_streaming_payload(3), self._make_streaming_payload(4)]
+        )
     )
     self.assertLen(res2, 1)
     self.assertTrue(res2[0].is_final_batch)
+
+  def test_feed_yields_microbatches_lazily_one_at_a_time(self):
+    assembler = batch_assembly.PaddedBatchAssembler(
+        batch_size=2,
+        max_prompt_length=2,
+        max_response_length=2,
+        pad_id=0,
+        num_generations=2,
+        mini_batch_size=2,  # rollouts_per_optimizer_update = 4
+    )
+    items = [self._make_streaming_payload(i) for i in range(1, 5)]
+    with mock.patch.object(
+        assembler, "_pack_chunk", wraps=assembler._pack_chunk
+    ) as spy_pack:
+      it = assembler.feed(items)
+      self.assertEqual(spy_pack.call_count, 0)
+
+      mb0 = next(it)
+      self.assertEqual(spy_pack.call_count, 1)
+      self.assertFalse(mb0.is_final_batch)
+
+      mb1 = next(it)
+      self.assertEqual(spy_pack.call_count, 2)
+      self.assertTrue(mb1.is_final_batch)
+
+      with self.assertRaises(StopIteration):
+        next(it)
 
   def test_feed_auto_flush_with_remainder(self):
     assembler = batch_assembly.PaddedBatchAssembler(
@@ -2158,11 +2373,13 @@ class PaddedBatchAssemblerRoutingTest(absltest.TestCase):
         mini_batch_size=1,  # rollouts_per_optimizer_update = 3
     )
     # Feed 3 items: hits rollouts_per_optimizer_update=3 and auto-flushes.
-    res = assembler.feed([
-        self._make_streaming_payload(1),
-        self._make_streaming_payload(2),
-        self._make_streaming_payload(3),
-    ])
+    res = list(
+        assembler.feed([
+            self._make_streaming_payload(1),
+            self._make_streaming_payload(2),
+            self._make_streaming_payload(3),
+        ])
+    )
     self.assertLen(res, 1)
     batch = res[0]
     self.assertTrue(batch.is_final_batch)
@@ -2181,18 +2398,20 @@ class PaddedBatchAssemblerRoutingTest(absltest.TestCase):
         mini_batch_size=2,  # rollouts_per_optimizer_update = 4
     )
     # Feed only 2 items mid-step
-    res1 = assembler.feed(
-        [self._make_streaming_payload(1), self._make_streaming_payload(2)]
+    res1 = list(
+        assembler.feed(
+            [self._make_streaming_payload(1), self._make_streaming_payload(2)]
+        )
     )
     self.assertEmpty(res1)
 
     # Dataset runs out: manual flush
-    flushed = assembler.flush()
+    flushed = list(assembler.flush())
     self.assertLen(flushed, 1)
     self.assertTrue(flushed[0].is_final_batch)
     self.assertEqual(flushed[0].payload.prompt_ids.shape, (4, 2))
     # Subsequent flush on empty buffer returns empty
-    self.assertEmpty(assembler.flush())
+    self.assertEmpty(list(assembler.flush()))
 
   def test_reset_clears_state(self):
     assembler = batch_assembly.PaddedBatchAssembler(
@@ -2203,11 +2422,13 @@ class PaddedBatchAssemblerRoutingTest(absltest.TestCase):
         num_generations=2,
         mini_batch_size=2,
     )
-    assembler.feed(
-        [self._make_streaming_payload(1), self._make_streaming_payload(2)]
+    list(
+        assembler.feed(
+            [self._make_streaming_payload(1), self._make_streaming_payload(2)]
+        )
     )
     assembler.reset()
-    self.assertEmpty(assembler.flush())
+    self.assertEmpty(list(assembler.flush()))
 
   def test_padded_batch_assembler_tracks_trajectory_ids(self):
     assembler = batch_assembly.PaddedBatchAssembler(
@@ -2225,7 +2446,7 @@ class PaddedBatchAssemblerRoutingTest(absltest.TestCase):
         self._make_streaming_payload(1, prompt_id="p1", group_index=1),
     ]
     # Feed 4 items: first batch gets 3 items, second auto-flushed gets 1 item + 2 padding
-    res = assembler.feed(items)
+    res = list(assembler.feed(items))
     self.assertLen(res, 2)
     self.assertEqual(
         res[0].trajectory_ids,
@@ -2483,6 +2704,187 @@ class SequencePackedRoutingTest(absltest.TestCase):
         ValueError, "segment_alignment_boundary must be positive"
     ):
       self._assembler(segment_alignment_boundary=0)
+
+  def test_router_replay_coverage_logs_for_top_k_1_2_and_4(self):
+    for top_k in (1, 2, 4):
+      routed = np.zeros((1, 4, 2, top_k), dtype=np.int16)
+      routed[0, :3] = np.arange(top_k, dtype=np.int16)
+      routed[0, 3:] = _UNSET
+      # Token 1 has duplicate expert ID when top_k >= 2.
+      if top_k >= 2:
+        routed[0, 1, 0, 1] = routed[0, 1, 0, 0]
+      seg_ids = np.array([[1, 1, 1, 0]], dtype=np.int32)
+      payload = datatypes.RLTrainerPayload(
+          prompt_ids=np.zeros((1, 0), dtype=np.int32),
+          prompt_mask=np.zeros((1, 0), dtype=np.float32),
+          completion_ids=np.ones((1, 4), dtype=np.int32),
+          completion_mask=np.ones((1, 4), dtype=np.float32),
+          advantages=np.zeros((1, 4), dtype=np.float32),
+          segment_ids=seg_ids,
+          routed_experts=routed,
+      )
+      with self.assertLogs(level="INFO") as logs:
+        batch_assembly._log_router_replay_coverage(
+            payload, batch_id="test_b0", num_segments=1
+        )
+      expected = (
+          "3/3 real tokens forced" if top_k == 1 else "2/3 real tokens forced"
+      )
+      self.assertTrue(
+          any(expected in msg for msg in logs.output),
+          f"Expected {expected!r} in {logs.output}",
+      )
+
+  def _assert_batches_identical(
+      self,
+      cpp_batches: list[batch_assembly.AssembledBatch],
+      py_batches: list[batch_assembly.AssembledBatch],
+  ) -> None:
+    self.assertEqual(len(cpp_batches), len(py_batches))
+    for cb, pb in zip(cpp_batches, py_batches):
+      self.assertEqual(cb.is_final_batch, pb.is_final_batch)
+      self.assertEqual(cb.trajectory_ids, pb.trajectory_ids)
+      self.assertEqual(
+          cb.padding_stats.row_capacity, pb.padding_stats.row_capacity
+      )
+      np.testing.assert_array_equal(
+          cb.padding_stats.row_valid_tokens, pb.padding_stats.row_valid_tokens
+      )
+      np.testing.assert_array_equal(
+          cb.padding_stats.row_num_sequences, pb.padding_stats.row_num_sequences
+      )
+      cp, pp = cb.payload, pb.payload
+      for name in (
+          "prompt_ids",
+          "prompt_mask",
+          "completion_ids",
+          "completion_mask",
+          "advantages",
+          "segment_ids",
+          "segment_positions",
+          "ref_per_token_logps",
+          "old_per_token_logps",
+          "returns",
+          "old_values",
+          "sampler_is_weights",
+          "routed_experts",
+      ):
+        ca, pa = getattr(cp, name), getattr(pp, name)
+        if pa is None:
+          self.assertIsNone(ca, f"Field {name} expected None")
+        else:
+          self.assertIsNotNone(ca, f"Field {name} unexpectedly None")
+          self.assertEqual(ca.dtype, pa.dtype, f"Dtype mismatch on {name}")
+          np.testing.assert_array_equal(ca, pa, err_msg=f"Mismatch on {name}")
+
+  def test_cpp_and_python_parity_for_to_pack_item_and_assemblers(self):
+    self.assertIsNotNone(packing._packing_ext)
+
+    rng = np.random.default_rng(77)
+    payloads = []
+    for i in range(18):
+      p_len = int(rng.integers(3, 28))
+      c_len = int(rng.integers(4, 36))
+      full_len = p_len + c_len
+      routed_len = full_len - (i % 2)
+      routed_dtype = np.int32 if i % 3 == 0 else np.int16
+      payloads.append(
+          datatypes.RLTrainerPayload(
+              prompt_ids=rng.integers(1, 500, size=p_len, dtype=np.int32),
+              prompt_mask=(
+                  np.ones(p_len, dtype=np.float32) if i % 2 == 0 else None
+              ),
+              completion_ids=rng.integers(1, 500, size=c_len, dtype=np.int32),
+              completion_mask=(
+                  rng.integers(0, 2, size=full_len).astype(np.float32)
+                  if i % 3 == 0
+                  else np.ones(c_len, dtype=np.float32)
+              ),
+              advantages=(
+                  np.array([float(i) * 0.25], dtype=np.float32)
+                  if i % 4 == 0
+                  else rng.standard_normal(full_len).astype(np.float32)
+              ),
+              old_per_token_logps=rng.standard_normal(c_len).astype(np.float32),
+              returns=rng.standard_normal(full_len).astype(np.float32),
+              routed_experts=rng.integers(
+                  0,
+                  16,
+                  size=(routed_len, _ROUTING_LAYERS, _ROUTING_TOP_K),
+                  dtype=routed_dtype,
+              ),
+              metadata={"traj_id": f"traj_{i}"},
+          )
+      )
+
+    orig_ext = packing._packing_ext
+    # 1. Verify `to_pack_item` bit-for-bit parity.
+    cpp_items = [batch_assembly.to_pack_item(p) for p in payloads]
+    try:
+      packing._packing_ext = None
+      py_items = [batch_assembly.to_pack_item(p) for p in payloads]
+    finally:
+      packing._packing_ext = orig_ext
+    for ci, pi in zip(cpp_items, py_items):
+      np.testing.assert_array_equal(ci.prompt_ids, pi.prompt_ids)
+      np.testing.assert_array_equal(ci.completion_ids, pi.completion_ids)
+      np.testing.assert_array_equal(ci.completion_mask, pi.completion_mask)
+      np.testing.assert_array_equal(ci.advantages, pi.advantages)
+      self.assertEqual(set(ci.per_token.keys()), set(pi.per_token.keys()))
+      for k in pi.per_token:
+        np.testing.assert_array_equal(ci.per_token[k], pi.per_token[k])
+      np.testing.assert_array_equal(ci.routed_experts, pi.routed_experts)
+
+    # 2. Verify `SequencePackedBatchAssembler` bit-for-bit parity.
+    for boundary in (1, 64):
+      def _run_seq_packed(bd: int) -> list[batch_assembly.AssembledBatch]:
+        asm = batch_assembly.SequencePackedBatchAssembler(
+            batch_size=2,
+            num_generations=4,
+            mini_batch_size=2,
+            max_packed_len=128,
+            pad_id=9,
+            segment_alignment_boundary=bd,
+        )
+        out = []
+        out.extend(asm.feed(payloads[:5]))
+        out.extend(asm.feed(payloads[5:13]))
+        out.extend(asm.feed(payloads[13:]))
+        out.extend(asm.flush())
+        return out
+
+      cpp_seq = _run_seq_packed(boundary)
+      try:
+        packing._packing_ext = None
+        py_seq = _run_seq_packed(boundary)
+      finally:
+        packing._packing_ext = orig_ext
+      self._assert_batches_identical(cpp_seq, py_seq)
+
+    # 3. Verify `PaddedBatchAssembler` bit-for-bit parity.
+    def _run_padded() -> list[batch_assembly.AssembledBatch]:
+      asm = batch_assembly.PaddedBatchAssembler(
+          batch_size=4,
+          max_prompt_length=16,
+          max_response_length=20,
+          pad_id=7,
+          num_generations=4,
+          mini_batch_size=2,
+      )
+      out = []
+      out.extend(asm.feed(payloads[:6]))
+      out.extend(asm.feed(payloads[6:14]))
+      out.extend(asm.feed(payloads[14:]))
+      out.extend(asm.flush())
+      return out
+
+    cpp_padded = _run_padded()
+    try:
+      packing._packing_ext = None
+      py_padded = _run_padded()
+    finally:
+      packing._packing_ext = orig_ext
+    self._assert_batches_identical(cpp_padded, py_padded)
 
 
 if __name__ == "__main__":

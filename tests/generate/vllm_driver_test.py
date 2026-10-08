@@ -12,12 +12,34 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib.metadata
+import sys
 import threading
 import time
 from typing import Iterable
+from unittest import mock
 
-from absl.testing import absltest
-from tunix.generate.vllm_async_driver import VLLMInProcessDriver
+try:
+  import transformers  # pylint: disable=g-import-not-at-top,unused-import
+except ImportError:
+  pass
+
+_orig_meta_version = importlib.metadata.version
+
+
+def _version_shim(pkg: str) -> str:
+  if pkg == "transformers":
+    return "5.0.0"
+  return _orig_meta_version(pkg)
+
+
+importlib.metadata.version = _version_shim
+
+if "openai_harmony" not in sys.modules:
+  sys.modules["openai_harmony"] = mock.MagicMock()
+
+from absl.testing import absltest  # pylint: disable=g-import-not-at-top
+from tunix.generate.vllm_async_driver import VLLMInProcessDriver  # pylint: disable=g-import-not-at-top
 
 
 # TODO(b/453660461): Add extensive concurrency tests.
@@ -47,6 +69,20 @@ class _DummyRequestOutput:
 
 class _StubEngineCore:
 
+  def __init__(self):
+    self.paused_calls = []
+    self.resumed_calls = 0
+    self.encoder_cache_resets = 0
+
+  def pause_scheduler(self, mode: str = "keep", clear_cache: bool = False):
+    self.paused_calls.append((mode, clear_cache))
+
+  def resume_scheduler(self):
+    self.resumed_calls += 1
+
+  def reset_encoder_cache(self):
+    self.encoder_cache_resets += 1
+
   def shutdown(self):
     pass
 
@@ -54,17 +90,28 @@ class _StubEngineCore:
 class _FakeLLMEngine:
   """Minimal synchronous engine that emits completions in a fixed order."""
 
-  def __init__(self, completion_order: Iterable[str]):
+  def __init__(
+      self,
+      completion_order: Iterable[str],
+      steps_per_request: dict[str, int] | None = None,
+  ):
     self._completion_order = list(completion_order)
     self._pending: list[str] = []
+    self._remaining_steps: dict[str, int] = dict(steps_per_request or {})
     self._lock = threading.Lock()
     self.engine_core = _StubEngineCore()
     self.log_called = threading.Event()
+    self.step_count = 0
+    self.aborted_requests: list[str] = []
+    self.prefix_cache_resets = 0
+    self.step_entered = threading.Event()
+    self.allow_step_proceed: threading.Event | None = None
 
   # The driver only exercises a subset of the LLMEngine surface.
   def add_request(self, request_id: str, *_, **__):
     with self._lock:
       self._pending.append(request_id)
+      self._remaining_steps.setdefault(request_id, 1)
 
   def has_unfinished_requests(self) -> bool:
     with self._lock:
@@ -75,7 +122,11 @@ class _FakeLLMEngine:
       return len(self._pending)
 
   def step(self):
+    self.step_entered.set()
+    if self.allow_step_proceed is not None:
+      self.allow_step_proceed.wait(timeout=5.0)
     with self._lock:
+      self.step_count += 1
       if not self._completion_order or not self._pending:
         return []
 
@@ -85,13 +136,30 @@ class _FakeLLMEngine:
         time.sleep(0.001)
         return []
 
+      rem = self._remaining_steps.get(next_request, 1) - 1
+      self._remaining_steps[next_request] = rem
+      if rem > 0:
+        time.sleep(0.001)
+        out = _DummyRequestOutput(next_request)
+        out.finished = False
+        return [out]
+
       self._completion_order.pop(0)
       self._pending.remove(next_request)
 
     return [_DummyRequestOutput(next_request)]
 
-  def abort_request(self, *_args, **_kwargs):
-    pass
+  def abort_request(self, request_ids, *_args, **_kwargs):
+    with self._lock:
+      for req_id in request_ids:
+        self.aborted_requests.append(req_id)
+        if req_id in self._pending:
+          self._pending.remove(req_id)
+        if req_id in self._completion_order:
+          self._completion_order.remove(req_id)
+
+  def reset_prefix_cache(self):
+    self.prefix_cache_resets += 1
 
   # Log stats API exercised by the driver's log thread.
   def do_log_stats(self):
@@ -305,6 +373,184 @@ class VllmDriverAsyncTest(absltest.TestCase):
           auto_start=False,
       )
 
+  def test_pause_and_resume_freezes_and_resumes_in_place(self):
+    engine = _FakeLLMEngine(["req-0", "req-1"])
+    driver = VLLMInProcessDriver(
+        llm_engine=engine,
+        poll_interval_s=0.001,
+        auto_start=True,
+    )
+    self.addCleanup(driver.shutdown)
+
+    driver.pause()
+    self.assertTrue(driver.is_paused)
+
+    future_0 = driver.submit_request(
+        request_id="req-0",
+        prompt={"prompt_token_ids": [1]},
+        params=object(),
+    )
+    future_1 = driver.submit_request(
+        request_id="req-1",
+        prompt={"prompt_token_ids": [1]},
+        params=object(),
+    )
+
+    time.sleep(0.03)
+    self.assertFalse(future_0.done())
+    self.assertFalse(future_1.done())
+
+    driver.resume()
+    self.assertFalse(driver.is_paused)
+
+    self.assertEqual(future_0.result(timeout=5.0).request_id, "req-0")
+    self.assertEqual(future_1.result(timeout=5.0).request_id, "req-1")
+
+  def test_pause_keep_freezes_in_flight_and_resumes_cleanly(self):
+    engine = _FakeLLMEngine(
+        ["req-0", "req-1"],
+        steps_per_request={"req-0": 3, "req-1": 1},
+    )
+    engine.allow_step_proceed = threading.Event()
+    driver = VLLMInProcessDriver(
+        llm_engine=engine, poll_interval_s=0.001, auto_start=True
+    )
+    self.addCleanup(driver.shutdown)
+
+    future_0 = driver.submit_request(
+        request_id="req-0",
+        prompt={"prompt_token_ids": [1]},
+        params=object(),
+    )
+    self.assertTrue(engine.step_entered.wait(timeout=2.0))
+
+    # Release the first step and immediately pause(mode="keep") in a thread
+    # or after letting step 1 finish.
+    pause_done = threading.Event()
+
+    def _do_pause():
+      driver.pause(mode="keep", clear_cache=False)
+      pause_done.set()
+
+    pause_thread = threading.Thread(target=_do_pause)
+    pause_thread.start()
+    time.sleep(0.01)
+    # While the first step is blocked inside engine.step(), pause must wait.
+    self.assertFalse(pause_done.is_set())
+    engine.allow_step_proceed.set()
+    pause_thread.join(timeout=2.0)
+    self.assertTrue(pause_done.is_set())
+    self.assertTrue(driver.is_paused)
+    self.assertEqual(driver.pause_mode, "keep")
+    self.assertEqual(engine.prefix_cache_resets, 0)
+    self.assertEqual(engine.engine_core.paused_calls, [("keep", False)])
+
+    # req-0 is still in-flight (took 1 of 3 steps), and step count is frozen.
+    steps_at_pause = engine.step_count
+    self.assertFalse(future_0.done())
+    self.assertIn("req-0", engine._pending)
+
+    # Submitting req-1 while paused stages it without stepping the engine.
+    future_1 = driver.submit_request(
+        request_id="req-1",
+        prompt={"prompt_token_ids": [2]},
+        params=object(),
+    )
+    time.sleep(0.02)
+    self.assertEqual(engine.step_count, steps_at_pause)
+    self.assertFalse(future_0.done())
+    self.assertFalse(future_1.done())
+
+    # Resume and verify both req-0 and req-1 complete.
+    driver.resume()
+    self.assertFalse(driver.is_paused)
+    self.assertIsNone(driver.pause_mode)
+    self.assertEqual(engine.engine_core.resumed_calls, 1)
+    self.assertEqual(future_0.result(timeout=5.0).request_id, "req-0")
+    self.assertEqual(future_1.result(timeout=5.0).request_id, "req-1")
+
+  def test_pause_wait_drains_in_flight_before_returning(self):
+    engine = _FakeLLMEngine(
+        ["req-0", "req-1"],
+        steps_per_request={"req-0": 4, "req-1": 2},
+    )
+    driver = VLLMInProcessDriver(
+        llm_engine=engine,
+        # Even below threshold, wait flushes staged requests.
+        submission_threshold=4,
+        poll_interval_s=0.001,
+        auto_start=True,
+    )
+    self.addCleanup(driver.shutdown)
+
+    future_0 = driver.submit_request(
+        request_id="req-0",
+        prompt={"prompt_token_ids": [1]},
+        params=object(),
+    )
+    future_1 = driver.submit_request(
+        request_id="req-1",
+        prompt={"prompt_token_ids": [2]},
+        params=object(),
+    )
+
+    driver.pause(mode="wait", clear_cache=True)
+    self.assertTrue(driver.is_paused)
+    self.assertEqual(driver.pause_mode, "wait")
+    self.assertTrue(future_0.done())
+    self.assertTrue(future_1.done())
+    self.assertEqual(future_0.result().request_id, "req-0")
+    self.assertEqual(future_1.result().request_id, "req-1")
+    self.assertEqual(engine.prefix_cache_resets, 1)
+    self.assertEqual(engine.engine_core.encoder_cache_resets, 1)
+
+  def test_pause_abort_cancels_in_flight_and_queued_requests(self):
+    engine = _FakeLLMEngine(
+        ["req-0", "req-1"],
+        steps_per_request={"req-0": 100, "req-1": 100},
+    )
+    driver = VLLMInProcessDriver(
+        llm_engine=engine, poll_interval_s=0.001, auto_start=True
+    )
+    self.addCleanup(driver.shutdown)
+
+    future_0 = driver.submit_request(
+        request_id="req-0",
+        prompt={"prompt_token_ids": [1]},
+        params=object(),
+    )
+    self.assertTrue(engine.step_entered.wait(timeout=2.0))
+    future_1 = driver.submit_request(
+        request_id="req-1",
+        prompt={"prompt_token_ids": [2]},
+        params=object(),
+    )
+
+    driver.pause(mode="abort", clear_cache=True)
+    self.assertTrue(driver.is_paused)
+    self.assertTrue(future_0.cancelled())
+    self.assertTrue(future_1.cancelled())
+    self.assertCountEqual(engine.aborted_requests, ["req-0", "req-1"])
+    self.assertFalse(engine.has_unfinished_requests())
+
+    # After resume(), new requests succeed normally.
+    engine._completion_order.append("req-2")
+    driver.resume()
+    future_2 = driver.submit_request(
+        request_id="req-2",
+        prompt={"prompt_token_ids": [3]},
+        params=object(),
+    )
+    self.assertEqual(future_2.result(timeout=5.0).request_id, "req-2")
+
+  def test_invalid_pause_mode_raises(self):
+    engine = _FakeLLMEngine([])
+    driver = VLLMInProcessDriver(llm_engine=engine, auto_start=False)
+    self.addCleanup(driver.shutdown)
+    with self.assertRaises(ValueError):
+      driver.pause(mode="invalid")
+
 
 if __name__ == "__main__":
   absltest.main()
+

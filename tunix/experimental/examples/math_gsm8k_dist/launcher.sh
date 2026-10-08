@@ -36,6 +36,7 @@ MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-1024}
 MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-1024}
 MAX_SEQ_TOKEN_PER_TPU=${MAX_SEQ_TOKEN_PER_TPU:-}
 MAX_SEGMENTS_PER_PACKED_ROW=${MAX_SEGMENTS_PER_PACKED_ROW:-}
+SEGMENT_ALIGNMENT_BOUNDARY=${SEGMENT_ALIGNMENT_BOUNDARY:-}
 BATCH_SIZE=${BATCH_SIZE:-4}
 NUM_GENERATIONS=${NUM_GENERATIONS:-8}
 MAX_STEPS=${MAX_STEPS:-1}
@@ -72,12 +73,15 @@ SHUFFLE=${SHUFFLE:-true}
 BETA=${BETA:-0.04}
 EPSILON=${EPSILON:-0.2}
 FLUSH_METRICS_EVERY_N_STEPS=${FLUSH_METRICS_EVERY_N_STEPS:-1}
+MAX_STALENESS=${MAX_STALENESS:-0}
+TRAJECTORY_GROUP_ORDER=${TRAJECTORY_GROUP_ORDER:-trajectory_completion}
 WANDB_PROJECT=${WANDB_PROJECT:-trellis-gsm8k}
 WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
 WANDB_API_KEY=${WANDB_API_KEY:-}
 TRAJECTORY_LOG_DIR=${TRAJECTORY_LOG_DIR:-}
 SAMPLER=${SAMPLER:-inprocess_vllm}
 WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
+IN_FLIGHT_WEIGHT_UPDATES=${IN_FLIGHT_WEIGHT_UPDATES:-false}
 USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
 CHAT_PARSER=${CHAT_PARSER:-raw}
 # Model-specific EOS token IDs (comma-separated), fetched from HuggingFace
@@ -416,11 +420,14 @@ echo "  prompt length:  $MAX_PROMPT_LENGTH"
 echo "  response len:   $MAX_RESPONSE_LENGTH"
 echo "  max seq token:  ${MAX_SEQ_TOKEN_PER_TPU:-<unset>}"
 echo "  max segments:   ${MAX_SEGMENTS_PER_PACKED_ROW:-<unset>}"
+echo "  segment align:  ${SEGMENT_ALIGNMENT_BOUNDARY:-<unset>}"
 echo "  train micro:    $TRAIN_MICRO_BATCH_SIZE"
 echo "  mini batch:     $MINI_BATCH_SIZE"
 echo "  beta:           $BETA"
 echo "  epsilon:        $EPSILON"
 echo "  reward mode:    $REWARD_MODE"
+echo "  max staleness:  $MAX_STALENESS"
+echo "  traj order:     $TRAJECTORY_GROUP_ORDER"
 echo "  tfds split:     $TFDS_SPLIT"
 echo "  tfds data dir:  $TFDS_DATA_DIR"
 echo "  shuffle:        $SHUFFLE"
@@ -611,6 +618,7 @@ echo "Launching rollout node with sampler=$SAMPLER on TPU chips $ROLLOUT_TPU_CHI
     --lora_rank="$LORA_RANK"
     --lora_alpha="$LORA_ALPHA"
     --weight_sync_mode="$WEIGHT_SYNC_MODE"
+    --in_flight_weight_updates="$IN_FLIGHT_WEIGHT_UPDATES"
     --chat_parser="$CHAT_PARSER"
   )
   if [[ -n "$MAXTEXT_MODEL_NAME" ]]; then
@@ -802,6 +810,8 @@ echo "Launching CPU orchestrator..."
     --beta="$BETA"
     --epsilon="$EPSILON"
     --reward_mode="$REWARD_MODE"
+    --max_staleness="$MAX_STALENESS"
+    --trajectory_group_order="$TRAJECTORY_GROUP_ORDER"
     --flush_metrics_every_n_steps="$FLUSH_METRICS_EVERY_N_STEPS"
     --tfds_data_dir="$TFDS_DATA_DIR"
     --tfds_split="$TFDS_SPLIT"
@@ -827,6 +837,9 @@ echo "Launching CPU orchestrator..."
   fi
   if [[ -n "$MAX_SEGMENTS_PER_PACKED_ROW" ]]; then
     ORCHESTRATOR_CMD+=(--max_segments_per_packed_row="$MAX_SEGMENTS_PER_PACKED_ROW")
+  fi
+  if [[ -n "$SEGMENT_ALIGNMENT_BOUNDARY" ]]; then
+    ORCHESTRATOR_CMD+=(--segment_alignment_boundary="$SEGMENT_ALIGNMENT_BOUNDARY")
   fi
   if [[ -n "$TRAINER_FSDP" ]]; then
     ORCHESTRATOR_CMD+=(--trainer_fsdp="$TRAINER_FSDP")

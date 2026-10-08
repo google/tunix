@@ -61,7 +61,7 @@ class AlgorithmConfig:
   # probabilities and entropy in the loss function.
   # NB: This should not be configured manually, instead it will be set by the RL
   # engine based on the rollout config.
-  temperature: float | None = None
+  temperature: float | None = dataclasses.field(default=None, init=False)
   # Whether to use rollout-side log probabilities as old-policy log
   # probabilities. If False, recompute old-policy log probabilities on the
   # trainer actor.
@@ -79,6 +79,7 @@ class AlgorithmConfig:
   seq_logprob_error_threshold: float | None = None
 
   def __post_init__(self):
+    self.temperature = None
     valid_algo_variants = [
         "grpo",
         "drgrpo",

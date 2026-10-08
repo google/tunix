@@ -88,6 +88,16 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       default=None,
       help="Maximum segments per packed row when sequence packing is enabled.",
   )
+  parser.add_argument(
+      "--segment_alignment_boundary",
+      type=int,
+      default=1,
+      help=(
+          "Token boundary every packed segment after the first in a row starts"
+          " on when sequence packing is enabled. 1 packs segments back to"
+          " back; use 64 for Qwen3.5 GatedDeltaNet (gdn_chunk_size=64)."
+      ),
+  )
   # TODO(tunix-dev): Clean up worker specific configuration to orchestrator.
   parser.add_argument(
       "--trainer_fsdp",
@@ -130,7 +140,13 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       "--max_staleness",
       dest="max_staleness",
       type=int,
-      default=0,
+      default=int(os.getenv("MAX_STALENESS", "0")),
+  )
+  parser.add_argument(
+      "--trajectory_group_order",
+      choices=("trajectory_completion", "prompt_arrival"),
+      default=os.getenv("TRAJECTORY_GROUP_ORDER", "trajectory_completion"),
+      help="Trajectory group order.",
   )
   parser.add_argument(
       "--weight_sync_mode",
@@ -216,7 +232,6 @@ def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
       num_generations=args.num_generations,
       epsilon=args.epsilon,
       beta=args.beta,
-      temperature=args.temperature,
       use_rollout_logps=args.use_rollout_logps,
   )
   return algorithm_adapter.GRPOAdapter(
@@ -354,12 +369,6 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   trainer_handles = cluster.worker_handles(datatypes.Role.ACTOR)
   if len(trainer_handles) != 1:
     raise ValueError(f"Expected 1 trainer worker, got {len(trainer_handles)}.")
-  _configure_trainer_loss(
-      trainer_handles[0],
-      algo=algo,
-      pad_id=pad_id,
-      eos_id=eos_id,
-  )
 
   metrics_logging_options = metrics_logger_lib.MetricsLoggerOptions(
       log_dir=args.log_dir,
@@ -387,6 +396,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           scaffold=args.scaffold,
           env_verbose=args.env_verbose,
           overlong_filter=args.overlong_filter,
+          max_staleness=args.max_staleness,
       ),
       max_steps=args.max_steps,
       reward_fns=[],
@@ -403,12 +413,14 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           max_response_length=args.max_response_length,
           max_seq_token_per_tpu=args.max_seq_token_per_tpu,
           max_segments_per_packed_row=args.max_segments_per_packed_row,
+          segment_alignment_boundary=args.segment_alignment_boundary,
           trainer_fsdp=args.trainer_fsdp,
           trainer_dp=args.trainer_dp,
       ),
       metrics_logging_options=metrics_logging_options,
       trajectory_log_dir=args.trajectory_log_dir,
       max_staleness=args.max_staleness,
+      group_order=args.trajectory_group_order,
       sync_weights=(args.weight_sync_mode != weight_sync.WeightSyncMode.NONE),
       on_step_begin=lambda step: logging.info(
           ">>> DeepSWE step %d starting | policy_version=%d",
@@ -420,6 +432,12 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           step,
           result,
       ),
+  )
+  _configure_trainer_loss(
+      trainer_handles[0],
+      algo=algo,
+      pad_id=pad_id,
+      eos_id=eos_id,
   )
 
   try:

@@ -125,11 +125,23 @@ class RolloutWorkerTest(absltest.TestCase):
     self.assertEqual(sum(bool(r.metadata.get("ready")) for r in responses), 1)
 
   def test_to_rollout_response_trajectory_error(self):
+    ctx = lineage.LineageContext(
+        tracking_id="traj_p1_3",
+        parent_tracking_ids=["p1"],
+    )
     err = trajectory_lib.TrajectoryError(
         trajectory_id="err_traj_1",
         prompt_id="p1",
         error_message="episode failed",
         error_type="RuntimeError",
+        metadata={
+            "batch_idx": 2,
+            "prompt_idx": 9,
+            "intra_batch_idx": 1,
+            "group_index": 3,
+            "policy_version": 4,
+            "lineage": ctx,
+        },
     )
     resp = self.worker._to_rollout_response(err)
     self.assertEqual(resp.status, "ERROR")
@@ -138,6 +150,23 @@ class RolloutWorkerTest(absltest.TestCase):
     self.assertIsNotNone(resp.error)
     self.assertEqual(resp.error.message, "episode failed")
     self.assertEqual(resp.error.error_type, "TrajectoryError")
+    self.assertEqual(
+        resp.metadata,
+        {
+            "prompt_id": "p1",
+            "batch_idx": 2,
+            "prompt_idx": 9,
+            "intra_batch_idx": 1,
+            "group_index": 3,
+            "policy_version": 4,
+            "lineage": ctx,
+        },
+    )
+    self.assertLen(ctx.events, 1)
+    self.assertEqual(ctx.events[0].component, "worker.rollout")
+    self.assertEqual(
+        ctx.events[0].attributes.get("worker_id"), "rollout_worker_42"
+    )
 
   def test_to_rollout_response_trajectory_item(self):
     item = datatypes.TrajectoryItem(
@@ -191,6 +220,79 @@ class RolloutWorkerTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_start_async_starts_sampler_and_binds_weight_sync(self):
+    class _AsyncSampler(mocks.MockBaseSamplerImpl):
+
+      def __init__(self):
+        super().__init__(sampler_name="async_sampler")
+        self.started = False
+        self.warmed = False
+
+      async def start(self):
+        self.started = True
+
+      async def bind_weight_sync(self):
+        self.warmed = True
+
+    async_sampler = _AsyncSampler()
+    worker = rollout_worker.RolloutWorker(
+        worker_id="rollout_async",
+        sampler=async_sampler,
+        tokenizer=self.tokenizer,
+        chat_parser=self.chat_parser,
+    )
+
+    async def _run():
+      resp = await worker.start()
+      self.assertEqual(resp.metadata["worker_id"], "rollout_async")
+      self.assertTrue(resp.metadata["started"])
+      self.assertTrue(async_sampler.started)
+      self.assertTrue(async_sampler.warmed)
+
+    asyncio.run(_run())
+
+  def test_initialize_failure_sets_error_state(self):
+    with mock.patch.object(
+        self.sampler, "initialize", side_effect=RuntimeError("vllm init boom")
+    ):
+      with self.assertRaisesRegex(RuntimeError, "vllm init boom"):
+        self.worker.initialize()
+    self.assertEqual(self.worker.state, datatypes.WorkerState.ERROR)
+
+  def test_start_failure_sets_error_state(self):
+    with mock.patch.object(
+        self.sampler, "start", side_effect=RuntimeError("vllm start boom")
+    ):
+      with self.assertRaisesRegex(RuntimeError, "vllm start boom"):
+        asyncio.run(self.worker.start())
+    self.assertEqual(self.worker.state, datatypes.WorkerState.ERROR)
+
+  def test_bind_and_get_weight_sync_metadata_auto_initialize_from_pending(self):
+    worker = rollout_worker.RolloutWorker(
+        worker_id="rollout_pending_sync",
+        sampler=self.sampler,
+        tokenizer=self.tokenizer,
+        chat_parser=self.chat_parser,
+    )
+    self.assertEqual(worker.state, datatypes.WorkerState.PENDING)
+    asyncio.run(worker.bind_weight_sync())
+    self.assertEqual(worker.state, datatypes.WorkerState.READY)
+
+    worker2 = rollout_worker.RolloutWorker(
+        worker_id="rollout_pending_meta",
+        sampler=self.sampler,
+        tokenizer=self.tokenizer,
+        chat_parser=self.chat_parser,
+    )
+    self.assertEqual(worker2.state, datatypes.WorkerState.PENDING)
+    with mock.patch.object(
+        self.sampler,
+        "get_weight_sync_metadata",
+        new=mock.AsyncMock(return_value=[]),
+    ):
+      asyncio.run(worker2.get_weight_sync_metadata())
+    self.assertEqual(worker2.state, datatypes.WorkerState.READY)
+
 
 def _worker(config=None):
   return rollout_worker.RolloutWorker(
@@ -233,6 +335,10 @@ class RolloutWorkerTrajectoryStoreTest(absltest.TestCase):
     self.assertIsInstance(
         worker.trajectory_store, file_store.FileTrajectoryStore
     )
+    self.assertEqual(
+        worker.trajectory_store.to_config()["metadata_type"],
+        trajectory_lib.TunixTrajectoryMetadata.METADATA_TYPE,
+    )
     worker.stop()
 
   def test_two_workers_get_two_independent_store_instances(self):
@@ -273,7 +379,10 @@ class RolloutWorkerTrajectoryStoreTest(absltest.TestCase):
     assert store is not None
     worker.stop()
     with self.assertRaises(RuntimeError):
-      store.add_step(trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1)
+      store.add_step(
+          trajectory_testing.TUNIX_ENV_STEP_0,
+          trajectory_testing.TUNIX_METADATA_1,
+      )
 
   def test_stop_closes_the_store_even_when_cancel_all_raises(self):
     worker = _worker()

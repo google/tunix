@@ -9,6 +9,8 @@ from unittest import mock
 from absl.testing import absltest
 from absl.testing import parameterized
 import sqlalchemy as sa
+from tunix.experimental.trajectory import async_writer
+from tunix.experimental.trajectory import db_engine
 from tunix.experimental.trajectory import schema
 from tunix.experimental.trajectory import schema_testing
 from tunix.experimental.trajectory import sql_store
@@ -17,13 +19,15 @@ from tunix.experimental.trajectory import store_testing
 from tunix.experimental.trajectory import trajectory as trajectory_lib
 from tunix.experimental.trajectory import trajectory_testing
 
+_POSTGRES_URL = "postgresql+psycopg2://user@host/db"
+
 
 class SqlStoreWriterTest(parameterized.TestCase):
   """Tests for the SQL behavior of _AsyncSqlWriter."""
 
   def setUp(self) -> None:
     super().setUp()
-    self.engine = schema_testing.create_sqlite_memory_engine(shared_pool=True)
+    self.engine = schema_testing.create_sqlite_memory_engine()
     self.addCleanup(self.engine.dispose)
     schema.METADATA.create_all(self.engine)
     self.executed_sql: list[str] = []
@@ -80,7 +84,7 @@ class SqlStoreWriterTest(parameterized.TestCase):
 
   def test_init_with_postgresql_engine_binds_postgresql_insert(self) -> None:
     mock_engine = mock.MagicMock()
-    mock_engine.dialect.name = sql_store._POSTGRESQL_DIALECT
+    mock_engine.dialect.name = db_engine.Dialect.POSTGRESQL
 
     writer = sql_store._AsyncSqlWriter(engine=mock_engine)
 
@@ -106,23 +110,24 @@ class SqlStoreWriterTest(parameterized.TestCase):
     ):
       sql_store._AsyncSqlWriter(engine=self.engine, max_cached_trajectories=-1)
 
-  def test_resolve_status_with_stated_status_returns_schema_status(
+  def test_resolve_status_with_stated_status_returns_status_as_is(
       self,
   ) -> None:
     atif_metadata = trajectory_testing.TUNIX_METADATA_1.to_atif_metadata()
     self.assertEqual(
         sql_store._resolve_status(atif_metadata),
-        schema.Status.COMPLETED,
+        "SUCCEEDED",
     )
 
   @parameterized.named_parameters(
-      ("lowercase", "completed", schema.Status.COMPLETED),
-      ("uppercase_with_whitespace", "  FAILED  ", schema.Status.FAILED),
-      ("unrecognized_string", "not_a_status", schema.Status.UNKNOWN),
+      ("tunix_status", "MAX_STEPS_REACHED", "MAX_STEPS_REACHED"),
+      ("padded_status", "  FAILED  ", "FAILED"),
+      ("empty_string", "", schema.Status.UNKNOWN),
+      ("whitespace_only", "   ", schema.Status.UNKNOWN),
       ("non_string", 123, schema.Status.UNKNOWN),
   )
-  def test_resolve_status_normalizes_case_and_ignores_invalid_values(
-      self, raw_status: Any, expected: schema.Status
+  def test_resolve_status_strips_whitespace_and_ignores_blank_or_non_string_values(
+      self, raw_status: Any, expected: str
   ) -> None:
     metadata = trajectory_testing.TUNIX_METADATA_1.model_copy(
         update={"status": raw_status}
@@ -325,12 +330,12 @@ class SqlStoreWriterTest(parameterized.TestCase):
     original = trajectory_lib.TunixTrajectoryMetadata(
         trajectory_id="traj_up",
         agent=trajectory_testing.METADATA_1.agent,
-        status="PENDING",
+        status="RUNNING",
     )
     updated = trajectory_lib.TunixTrajectoryMetadata(
         trajectory_id="traj_up",
         agent=trajectory_testing.METADATA_1.agent,
-        status="COMPLETED",
+        status="SUCCEEDED",
     )
 
     writer.enqueue_write(run_id="conflict_run", metadata=original)
@@ -340,7 +345,7 @@ class SqlStoreWriterTest(parameterized.TestCase):
 
     trajectories = self._fetch_trajectories()
     self.assertLen(trajectories, 1)
-    self.assertEqual(trajectories[0]["status"], "COMPLETED")
+    self.assertEqual(trajectories[0]["status"], "SUCCEEDED")
 
   def test_enqueue_write_for_existing_trajectory_preserves_created_at(
       self,
@@ -380,7 +385,7 @@ class SqlStoreWriterTest(parameterized.TestCase):
         metadata=trajectory_lib.TunixTrajectoryMetadata(
             trajectory_id="traj_preserve",
             agent=trajectory_testing.METADATA_1.agent,
-            status="COMPLETED",
+            status="SUCCEEDED",
         ),
     )
     writer.flush()
@@ -398,7 +403,7 @@ class SqlStoreWriterTest(parameterized.TestCase):
 
     trajectories = self._fetch_trajectories()
     self.assertLen(trajectories, 1)
-    self.assertEqual(trajectories[0]["status"], "COMPLETED")
+    self.assertEqual(trajectories[0]["status"], "SUCCEEDED")
     self.assertEqual(
         trajectories[0]["trajectory_metadata"]["notes"], "new notes"
     )
@@ -446,7 +451,7 @@ class SqlStoreWriterTest(parameterized.TestCase):
         status="RUNNING",
     )
     completed_metadata = running_metadata.model_copy(
-        update={"status": "COMPLETED"}
+        update={"status": "SUCCEEDED"}
     )
 
     writer.enqueue_write(
@@ -471,7 +476,7 @@ class SqlStoreWriterTest(parameterized.TestCase):
     self.assertEqual(self._count_sql("INSERT INTO steps"), 3)
     trajectories = self._fetch_trajectories()
     self.assertLen(trajectories, 1)
-    self.assertEqual(trajectories[0]["status"], "COMPLETED")
+    self.assertEqual(trajectories[0]["status"], "SUCCEEDED")
 
   def test_enqueue_write_after_step_failure_retries_trajectory_upsert_on_next_step(
       self,
@@ -586,17 +591,43 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
 
   def setUp(self) -> None:
     super().setUp()
-    self.engine = schema_testing.create_sqlite_memory_engine(shared_pool=True)
-    self.addCleanup(self.engine.dispose)
+    db_path = os.path.join(self.create_tempdir().full_path, "store.db")
+    self.db_url = f"sqlite:///{db_path}"
 
   def _create_store(
       self, run_id: str = "default_run"
   ) -> sql_store.SqlTrajectoryStore:
     store_inst = sql_store.SqlTrajectoryStore(
-        engine=self.engine, run_id=run_id, owns_engine=False
+        db_url=self.db_url,
+        run_id=run_id,
+        metadata_cls=trajectory_lib.TrajectoryMetadata,
     )
     self.addCleanup(store_inst.close)
     return store_inst
+
+  def _create_postgres_mock_engine(
+      self,
+  ) -> tuple[mock.MagicMock, mock.MagicMock, mock.MagicMock]:
+    """Returns a mock Postgres engine and its read and write connections."""
+    mock_engine = mock.MagicMock()
+    mock_engine.dialect.name = db_engine.Dialect.POSTGRESQL
+    mock_read_conn = mock.MagicMock()
+    mock_write_conn = mock.MagicMock()
+    mock_engine.connect.return_value.__enter__.return_value = mock_read_conn
+    mock_engine.begin.return_value.__enter__.return_value = mock_write_conn
+    return mock_engine, mock_read_conn, mock_write_conn
+
+  def _patch_create_engine(self, engine: Any) -> mock.MagicMock:
+    """Patches the engine factory so the store is built on `engine`."""
+    patcher = mock.patch.object(
+        db_engine,
+        "create_trajectory_engine",
+        autospec=True,
+        return_value=engine,
+    )
+    mock_create_engine = patcher.start()
+    self.addCleanup(patcher.stop)
+    return mock_create_engine
 
   @parameterized.named_parameters(
       ("none", None),
@@ -609,39 +640,81 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
     with self.assertRaisesRegex(
         ValueError, r"SqlTrajectoryStore requires a non-empty run_id"
     ):
-      sql_store.SqlTrajectoryStore(engine=self.engine, run_id=invalid_run_id)
+      sql_store.SqlTrajectoryStore(
+          db_url=self.db_url,
+          run_id=invalid_run_id,
+          metadata_cls=trajectory_lib.TrajectoryMetadata,
+      )
+
+  @parameterized.named_parameters(
+      ("none", None),
+      ("empty", ""),
+      ("whitespace", "   "),
+  )
+  def test_init_with_missing_or_blank_db_url_raises_value_error(
+      self, invalid_db_url: Any
+  ) -> None:
+    with self.assertRaisesRegex(
+        ValueError, r"SqlTrajectoryStore requires a non-empty db_url"
+    ):
+      sql_store.SqlTrajectoryStore(
+          run_id="test_run",
+          db_url=invalid_db_url,
+          metadata_cls=trajectory_lib.TrajectoryMetadata,
+      )
 
   def test_init_sets_engine_and_run_id(self) -> None:
     store_inst = sql_store.SqlTrajectoryStore(
-        engine=self.engine, run_id="  my_run  "
+        db_url=self.db_url,
+        run_id="  my_run  ",
+        metadata_cls=trajectory_lib.TrajectoryMetadata,
     )
     self.addCleanup(store_inst.close)
 
     self.assertEqual(store_inst.run_id, "my_run")
-    self.assertIs(store_inst.engine, self.engine)
+    self.assertEqual(str(store_inst.engine.url), self.db_url)
 
   def test_init_with_auto_init_false_does_not_create_tables(self) -> None:
-    uninitialized_engine = schema_testing.create_sqlite_memory_engine(
-        shared_pool=True
-    )
-    self.addCleanup(uninitialized_engine.dispose)
     store_inst = sql_store.SqlTrajectoryStore(
-        engine=uninitialized_engine, run_id="no_init_run", auto_init=False
+        db_url=self.db_url,
+        run_id="no_init_run",
+        auto_init=False,
+        metadata_cls=trajectory_lib.TrajectoryMetadata,
     )
     self.addCleanup(store_inst.close)
 
-    inspector = sa.inspect(uninitialized_engine)
+    inspector = sa.inspect(store_inst.engine)
     self.assertEmpty(inspector.get_table_names())
+
+  def test_init_when_schema_init_fails_deregisters_writer_and_raises(
+      self,
+  ) -> None:
+    live_writers_before = set(async_writer._LIVE_WRITERS)
+    self.enter_context(
+        mock.patch.object(
+            sql_store.SqlTrajectoryStore,
+            "_initialize_schema",
+            autospec=True,
+            side_effect=RuntimeError("schema init failed"),
+        )
+    )
+
+    with self.assertRaisesRegex(RuntimeError, r"schema init failed"):
+      sql_store.SqlTrajectoryStore(
+          db_url=self.db_url,
+          run_id="failing_run",
+          metadata_cls=trajectory_lib.TrajectoryMetadata,
+      )
+
+    self.assertEqual(set(async_writer._LIVE_WRITERS), live_writers_before)
 
   def test_init_on_postgresql_acquires_advisory_lock_when_cold(
       self,
   ) -> None:
-    mock_engine = mock.MagicMock()
-    mock_engine.dialect.name = sql_store._POSTGRESQL_DIALECT
-    mock_read_conn = mock.MagicMock()
-    mock_write_conn = mock.MagicMock()
-    mock_engine.connect.return_value.__enter__.return_value = mock_read_conn
-    mock_engine.begin.return_value.__enter__.return_value = mock_write_conn
+    mock_engine, mock_read_conn, mock_write_conn = (
+        self._create_postgres_mock_engine()
+    )
+    self._patch_create_engine(mock_engine)
     mock_inspector = mock.MagicMock()
     mock_inspector.get_table_names.return_value = []
 
@@ -651,10 +724,12 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
         ) as mock_inspect,
         mock.patch.object(schema.METADATA, "create_all") as mock_create_all,
     ):
-      with sql_store.SqlTrajectoryStore(
-          engine=mock_engine, run_id="test_run", auto_init=True
-      ):
-        pass
+      sql_store.SqlTrajectoryStore(
+          db_url=_POSTGRES_URL,
+          run_id="test_run",
+          auto_init=True,
+          metadata_cls=trajectory_lib.TrajectoryMetadata,
+      ).close()
 
     self.assertEqual(
         mock_inspect.call_args_list,
@@ -675,12 +750,8 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
   def test_init_skips_ddl_when_tables_created_by_peer_while_waiting_for_lock(
       self,
   ) -> None:
-    mock_engine = mock.MagicMock()
-    mock_engine.dialect.name = sql_store._POSTGRESQL_DIALECT
-    mock_read_conn = mock.MagicMock()
-    mock_write_conn = mock.MagicMock()
-    mock_engine.connect.return_value.__enter__.return_value = mock_read_conn
-    mock_engine.begin.return_value.__enter__.return_value = mock_write_conn
+    mock_engine, _, mock_write_conn = self._create_postgres_mock_engine()
+    self._patch_create_engine(mock_engine)
     cold_inspector = mock.MagicMock()
     cold_inspector.get_table_names.return_value = []
     warm_inspector = mock.MagicMock()
@@ -694,10 +765,12 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
         ),
         mock.patch.object(schema.METADATA, "create_all") as mock_create_all,
     ):
-      with sql_store.SqlTrajectoryStore(
-          engine=mock_engine, run_id="test_run", auto_init=True
-      ):
-        pass
+      sql_store.SqlTrajectoryStore(
+          db_url=_POSTGRES_URL,
+          run_id="test_run",
+          auto_init=True,
+          metadata_cls=trajectory_lib.TrajectoryMetadata,
+      ).close()
 
     mock_write_conn.execute.assert_called_once()
     mock_create_all.assert_not_called()
@@ -705,10 +778,8 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
   def test_init_when_tables_exist_skips_advisory_lock_and_ddl(
       self,
   ) -> None:
-    mock_engine = mock.MagicMock()
-    mock_engine.dialect.name = sql_store._POSTGRESQL_DIALECT
-    mock_read_conn = mock.MagicMock()
-    mock_engine.connect.return_value.__enter__.return_value = mock_read_conn
+    mock_engine, _, _ = self._create_postgres_mock_engine()
+    self._patch_create_engine(mock_engine)
     mock_inspector = mock.MagicMock()
     mock_inspector.get_table_names.return_value = list(
         schema.METADATA.tables.keys()
@@ -718,10 +789,12 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
         mock.patch.object(sa, "inspect", return_value=mock_inspector),
         mock.patch.object(schema.METADATA, "create_all") as mock_create_all,
     ):
-      with sql_store.SqlTrajectoryStore(
-          engine=mock_engine, run_id="test_run", auto_init=True
-      ):
-        pass
+      sql_store.SqlTrajectoryStore(
+          db_url=_POSTGRES_URL,
+          run_id="test_run",
+          auto_init=True,
+          metadata_cls=trajectory_lib.TrajectoryMetadata,
+      ).close()
 
     mock_engine.begin.assert_not_called()
     mock_create_all.assert_not_called()
@@ -734,22 +807,22 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
     )
 
     def _init_worker(worker_idx: int) -> None:
-      worker_engine = schema_testing.create_sqlite_file_engine(db_path)
+      barrier.wait(timeout=5.0)
+      worker_store = sql_store.SqlTrajectoryStore(
+          db_url=f"sqlite:///{db_path}",
+          run_id=f"concurrent_run_{worker_idx}",
+          auto_init=True,
+          metadata_cls=trajectory_lib.TrajectoryMetadata,
+      )
       try:
-        barrier.wait(timeout=5.0)
-        with sql_store.SqlTrajectoryStore(
-            engine=worker_engine,
-            run_id=f"concurrent_run_{worker_idx}",
-            auto_init=True,
-        ) as worker_store:
-          worker_store.add_step(
-              trajectory_testing.STEP_1_1,
-              trajectory_testing.make_metadata(
-                  trajectory_id=f"traj_{worker_idx}"
-              ),
-          )
+        worker_store.add_step(
+            trajectory_testing.STEP_1_1,
+            trajectory_testing.make_metadata(
+                trajectory_id=f"traj_{worker_idx}"
+            ),
+        )
       finally:
-        worker_engine.dispose()
+        worker_store.close()
 
     with futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
       worker_futures = [
@@ -803,88 +876,135 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
     with self.assertRaisesRegex(RuntimeError, r"Cannot write to a closed"):
       store_inst.update_metadata(trajectory_testing.METADATA_1)
 
-  def test_context_manager_lifecycle_drains_writes_on_exit(self) -> None:
-    with sql_store.SqlTrajectoryStore(
-        engine=self.engine, run_id="ctx_run", owns_engine=False
-    ) as store_ctx:
-      store_ctx.add_step(
-          trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1
-      )
+  def test_close_drains_pending_writes(self) -> None:
+    writer_store = sql_store.SqlTrajectoryStore(
+        db_url=self.db_url,
+        run_id="drain_run",
+        metadata_cls=trajectory_lib.TrajectoryMetadata,
+    )
+    writer_store.add_step(
+        trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1
+    )
 
-    with sql_store.SqlTrajectoryStore(
-        engine=self.engine, run_id="ctx_run", owns_engine=False
-    ) as ctx_reader:
-      trajs = ctx_reader.get_trajectories([trajectory_testing.TRAJECTORY_ID_1])
-      self.assertEqual(trajs, [trajectory_testing.TRAJECTORY_1])
+    writer_store.close()
 
-  def test_close_with_owns_engine_false_does_not_dispose_engine(self) -> None:
-    with mock.patch.object(
-        self.engine, "dispose", wraps=self.engine.dispose
-    ) as mock_dispose:
-      store_inst = sql_store.SqlTrajectoryStore(
-          engine=self.engine, run_id="shared_engine_run", owns_engine=False
-      )
-      store_inst.close()
+    reader_store = self._create_store(run_id="drain_run")
+    self.assertEqual(
+        reader_store.get_trajectories([trajectory_testing.TRAJECTORY_ID_1]),
+        [trajectory_testing.TRAJECTORY_1],
+    )
 
-    mock_dispose.assert_not_called()
-
-  def test_close_with_owns_engine_true_disposes_engine(self) -> None:
-    owned_engine = schema_testing.create_sqlite_memory_engine(shared_pool=True)
-    with mock.patch.object(
-        owned_engine, "dispose", wraps=owned_engine.dispose
-    ) as mock_dispose:
-      with sql_store.SqlTrajectoryStore(
-          engine=owned_engine, run_id="owned_engine_run", owns_engine=True
-      ) as store_ctx:
-        store_ctx.add_step(
-            trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1
+  def test_close_disposes_engine_built_from_db_url(self) -> None:
+    created_engine = schema_testing.create_sqlite_memory_engine()
+    mock_create_engine = self._patch_create_engine(created_engine)
+    mock_dispose = self.enter_context(
+        mock.patch.object(
+            created_engine, "dispose", wraps=created_engine.dispose
         )
+    )
+    store_inst = sql_store.SqlTrajectoryStore(
+        db_url="sqlite:///:memory:",
+        run_id="url_owned_run",
+        metadata_cls=trajectory_lib.TrajectoryMetadata,
+    )
+    store_inst.add_step(
+        trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1
+    )
+
+    store_inst.close()
+
+    self.assertIs(store_inst.engine, created_engine)
+    mock_create_engine.assert_called_once_with(
+        db_engine.EngineConfig(url="sqlite:///:memory:")
+    )
+    mock_dispose.assert_called_once()
+
+  def test_close_called_twice_disposes_engine_once(self) -> None:
+    created_engine = schema_testing.create_sqlite_memory_engine()
+    self._patch_create_engine(created_engine)
+    mock_dispose = self.enter_context(
+        mock.patch.object(
+            created_engine, "dispose", wraps=created_engine.dispose
+        )
+    )
+    store_inst = sql_store.SqlTrajectoryStore(
+        db_url="sqlite:///:memory:",
+        run_id="double_close_run",
+        metadata_cls=trajectory_lib.TrajectoryMetadata,
+    )
+
+    store_inst.close()
+    store_inst.close()
 
     mock_dispose.assert_called_once()
 
-  def test_init_schema_error_with_owns_engine_true_disposes_engine(
-      self,
-  ) -> None:
-    owned_engine = schema_testing.create_sqlite_memory_engine(shared_pool=True)
-    with (
+  def test_init_schema_error_disposes_engine(self) -> None:
+    created_engine = schema_testing.create_sqlite_memory_engine()
+    self._patch_create_engine(created_engine)
+    mock_dispose = self.enter_context(
         mock.patch.object(
-            owned_engine, "dispose", wraps=owned_engine.dispose
-        ) as mock_dispose,
+            created_engine, "dispose", wraps=created_engine.dispose
+        )
+    )
+    self.enter_context(
         mock.patch.object(
             sql_store.SqlTrajectoryStore,
             "_initialize_schema",
             side_effect=RuntimeError("DDL failure"),
-        ),
-    ):
-      with self.assertRaisesRegex(RuntimeError, "DDL failure"):
-        sql_store.SqlTrajectoryStore(
-            engine=owned_engine,
-            run_id="failed_init_run",
-            auto_init=True,
-            owns_engine=True,
         )
+    )
+
+    with self.assertRaisesRegex(RuntimeError, "DDL failure"):
+      sql_store.SqlTrajectoryStore(
+          db_url="sqlite:///:memory:",
+          run_id="failed_init_run",
+          metadata_cls=trajectory_lib.TrajectoryMetadata,
+      )
 
     mock_dispose.assert_called_once()
 
+  def test_to_redacted_config_with_password_in_db_url_masks_password(
+      self,
+  ) -> None:
+    self._patch_create_engine(schema_testing.create_sqlite_memory_engine())
+    db_url = "postgresql+psycopg2://user:s3cret@host/db"
+    store_inst = sql_store.SqlTrajectoryStore(
+        db_url=db_url,
+        run_id="redact_run",
+        auto_init=False,
+        metadata_cls=trajectory_lib.TrajectoryMetadata,
+    )
+    self.addCleanup(store_inst.close)
+
+    redacted_config = store_inst.to_redacted_config()
+
+    self.assertEqual(
+        redacted_config,
+        {
+            "enabled": True,
+            "backend": "sql",
+            "db_url": "postgresql+psycopg2://user:***@host/db",
+            "run_id": "redact_run",
+            "metadata_type": trajectory_lib.TrajectoryMetadata.METADATA_TYPE,
+        },
+    )
+    self.assertEqual(store_inst.to_config()["db_url"], db_url)
+
   def test_file_based_sqlite_persistence(self) -> None:
-    db_path = os.path.join(self.create_tempdir().full_path, "test.db")
-    engine = schema_testing.create_sqlite_file_engine(db_path)
-    self.addCleanup(engine.dispose)
+    first_store = sql_store.SqlTrajectoryStore(
+        run_id="persisted_run",
+        db_url=self.db_url,
+        metadata_cls=trajectory_lib.TrajectoryMetadata,
+    )
+    first_store.add_step(
+        trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1
+    )
+    first_store.close()
 
-    with sql_store.SqlTrajectoryStore(
-        engine=engine, run_id="persisted_run"
-    ) as store_ctx:
-      store_ctx.add_step(
-          trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1
-      )
+    second_store = self._create_store(run_id="persisted_run")
+    trajs = second_store.get_trajectories([trajectory_testing.TRAJECTORY_ID_1])
 
-    read_engine = schema_testing.create_sqlite_file_engine(db_path)
-    self.addCleanup(read_engine.dispose)
-    with sql_store.SqlTrajectoryStore(
-        engine=read_engine, run_id="persisted_run"
-    ) as read_reader:
-      trajs = read_reader.get_trajectories([trajectory_testing.TRAJECTORY_ID_1])
-      self.assertEqual(trajs, [trajectory_testing.TRAJECTORY_1])
+    self.assertEqual(trajs, [trajectory_testing.TRAJECTORY_1])
 
   def test_get_trajectories_metadata_rehydrates_tunix_metadata_and_orders_by_creation(
       self,
@@ -981,10 +1101,11 @@ class SqlTrajectoryReaderContractTest(store_testing.TrajectoryReaderTestCase):
           | None
       ) = None,
   ) -> store.TrajectoryReader:
-    engine = schema_testing.create_sqlite_memory_engine(shared_pool=True)
-    self.addCleanup(engine.dispose)
+    db_path = os.path.join(self.create_tempdir().full_path, "store.db")
     sql_s = sql_store.SqlTrajectoryStore(
-        engine=engine, run_id="test_contract_reader_run", owns_engine=False
+        db_url=f"sqlite:///{db_path}",
+        run_id="test_contract_reader_run",
+        metadata_cls=trajectory_lib.TrajectoryMetadata,
     )
     self.addCleanup(sql_s.close)
     if initial_data:
@@ -1003,13 +1124,64 @@ class SqlTrajectoryWriterContractTest(store_testing.TrajectoryWriterTestCase):
   def _create_reader_and_writer(
       self,
   ) -> tuple[store.TrajectoryReader, store.TrajectoryWriter]:
-    engine = schema_testing.create_sqlite_memory_engine(shared_pool=True)
-    self.addCleanup(engine.dispose)
+    db_path = os.path.join(self.create_tempdir().full_path, "store.db")
     sql_s = sql_store.SqlTrajectoryStore(
-        engine=engine, run_id="test_contract_writer_run", owns_engine=False
+        db_url=f"sqlite:///{db_path}",
+        run_id="test_contract_writer_run",
+        metadata_cls=trajectory_lib.TrajectoryMetadata,
     )
     self.addCleanup(sql_s.close)
     return sql_s, sql_s
+
+
+class SqlTrajectoryStoreMetadataClsTest(
+    store_testing.PersistentTrajectoryStoreMetadataClsTestCase
+):
+  """metadata_cls contract tests for SqlTrajectoryStore."""
+
+  def setUp(self) -> None:
+    super().setUp()
+    db_path = os.path.join(self.create_tempdir().full_path, "store.db")
+    self._db_url = f"sqlite:///{db_path}"
+
+  def _create_store(
+      self, metadata_cls: type[store.MetadataT]
+  ) -> store.TrajectoryStore[store.MetadataT]:
+    sql_s = sql_store.SqlTrajectoryStore(
+        db_url=self._db_url,
+        run_id="metadata_cls_run",
+        metadata_cls=metadata_cls,
+    )
+    self.addCleanup(sql_s.close)
+    return sql_s
+
+
+class SqlTrajectoryStoreConfigTest(store_testing.TrajectoryStoreConfigTestCase):
+  """Config contract tests for SqlTrajectoryStore."""
+
+  def _create_config(self) -> dict[str, Any]:
+    db_path = os.path.join(self.create_tempdir().full_path, "store.db")
+    return {
+        "enabled": True,
+        "backend": "sql",
+        "db_url": f"sqlite:///{db_path}",
+        "run_id": "run_1",
+        "metadata_type": trajectory_lib.TrajectoryMetadata.METADATA_TYPE,
+    }
+
+  def test_from_config_round_trip_reads_the_same_data(self) -> None:
+    original = self._build_store(self._create_config())
+    rebuilt = self._build_store(original.to_config())
+
+    original.add_step(
+        trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1
+    )
+    original.flush()
+
+    self.assertEqual(
+        [m.trajectory_id for m in rebuilt.get_trajectories_metadata()],
+        [trajectory_testing.METADATA_1.trajectory_id],
+    )
 
 
 if __name__ == "__main__":

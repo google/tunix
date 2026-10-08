@@ -70,7 +70,7 @@ def create_datasets(
     )
   elif dataset_name == "Helsinki-NLP/opus-100":  # Hugging Face dataloader
     train_ds, eval_ds = datasets.load_dataset(  # pyrefly: ignore[no-matching-overload]
-        dataset_name, data_dir="en-fr", split=("train", "validation")  # pyrefly: ignore[bad-argument-type]
+        dataset_name, data_dir="en-fr", split=("train", "validation")
     )
   else:
     raise ValueError(f"Unsupported dataset: {dataset_name}")
@@ -78,7 +78,7 @@ def create_datasets(
   input_template = INPUT_TEMPLATE_IT if instruct_tuned else INPUT_TEMPLATE
 
   train_loader = _build_data_loader(
-      data_source=train_ds,  # pyrefly: ignore[bad-argument-type]
+      data_source=train_ds,
       batch_size=global_batch_size,
       num_epochs=num_train_epochs,
       max_seq_len=max_target_length,
@@ -86,7 +86,7 @@ def create_datasets(
       input_template=input_template,
   )
   eval_loader = _build_data_loader(
-      data_source=eval_ds,  # pyrefly: ignore[bad-argument-type]
+      data_source=eval_ds,
       batch_size=global_batch_size,
       num_epochs=1,
       max_seq_len=max_target_length,

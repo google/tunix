@@ -336,9 +336,10 @@ class GRPOAdapter(AlgorithmAdapter):
         or self.algo_config.temperature is None
     ):
       raise ValueError(
-          "Trainer temperature must be explicitly set on algo_config to match"
-          " rollout generation temperature. Running with an unset temperature"
-          " biases policy gradient importance ratios."
+          "Trainer temperature is unset on algo_config. Configure temperature"
+          " via generation_args on StandardRLProgram (which propagates it to"
+          " algo_config.temperature) before building the trainer model input"
+          " fn."
       )
     return functools.partial(
         _algo_model_input,

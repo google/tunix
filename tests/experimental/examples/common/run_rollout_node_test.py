@@ -95,6 +95,21 @@ class RunRolloutNodeTest(absltest.TestCase):
         parser.Gemma4ChatTemplateParser,
     )
 
+  def test_in_flight_weight_updates_flag_sets_partial_rollout(self):
+    args_default = run_rollout_node._parse_args(["--model_id=Qwen/Qwen3-8B"])
+    self.assertFalse(args_default.in_flight_weight_updates)
+    kwargs_default = run_rollout_node._rollout_config_kwargs(args_default)
+    self.assertFalse(kwargs_default["partial_rollout"])
+
+    args_enabled = run_rollout_node._parse_args([
+        "--model_id=Qwen/Qwen3-8B",
+        "--in_flight_weight_updates",
+    ])
+    self.assertTrue(args_enabled.in_flight_weight_updates)
+    kwargs_enabled = run_rollout_node._rollout_config_kwargs(args_enabled)
+    self.assertTrue(kwargs_enabled["partial_rollout"])
+
 
 if __name__ == "__main__":
   absltest.main()
+

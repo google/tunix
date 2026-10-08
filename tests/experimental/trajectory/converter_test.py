@@ -15,6 +15,7 @@
 """Tests for converter module."""
 
 import dataclasses
+import re
 from typing import Any
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -846,6 +847,44 @@ class ToTunixTrajectoryTest(trajectory_testing.TrajectoryTestCase):
     self.assertEqual(tunix_traj.steps[0].model_response, "response")
     self.assertEqual(tunix_traj.reward, 1.0)
     self.assertEqual(tunix_traj.status, agent_types.TrajectoryStatus.FAILED)
+
+  @parameterized.named_parameters(
+      (status.name.lower(), status) for status in agent_types.TrajectoryStatus
+  )
+  def test_to_tunix_trajectory_restores_stated_status(
+      self, status: agent_types.TrajectoryStatus
+  ) -> None:
+    traj = trajectory_lib.TunixTrajectory(
+        trajectory_id="status_t",
+        agent=trajectory_lib.Agent(name="test_agent", version="1.0"),
+        status=status.name,
+        steps=[],
+    )
+
+    tunix_traj = converter.to_tunix_trajectory(traj)
+
+    self.assertEqual(tunix_traj.status, status)
+
+  @parameterized.named_parameters(
+      ("schema_status_name", "COMPLETED"),
+      ("lowercase_name", "succeeded"),
+      ("unknown_name", "NOT_A_STATUS"),
+      ("non_member_attribute", "mro"),
+  )
+  def test_to_tunix_trajectory_with_unrecognized_status_raises_value_error(
+      self, status: str
+  ) -> None:
+    traj = trajectory_lib.TunixTrajectory(
+        trajectory_id="bad_status_t",
+        agent=trajectory_lib.Agent(name="test_agent", version="1.0"),
+        status=status,
+        steps=[],
+    )
+
+    with self.assertRaisesRegex(
+        ValueError, f"Unrecognized trajectory status '{re.escape(status)}'"
+    ):
+      converter.to_tunix_trajectory(traj)
 
   def test_roundtrip_trajectory_full_with_json_dict_and_hybrid_action(self):
     orig_rl_step = agent_types.Step(

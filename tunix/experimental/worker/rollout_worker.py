@@ -49,6 +49,8 @@ class RolloutConfig(base_rollout.RolloutConfig):
       was given: for the file backend it is the shared root_dir and run_id
       that will make these writes visible to the orchestrator's reads once
       rollout step logging is wired.
+    partial_rollout: Whether to freeze in-flight trajectories in-place during
+      weight synchronization instead of draining them to completion first.
   """
 
   sampler_type: str = "vanilla"
@@ -58,6 +60,7 @@ class RolloutConfig(base_rollout.RolloutConfig):
   env_config: dict[str, Any] = dataclasses.field(default_factory=dict)
   agent_config: dict[str, Any] = dataclasses.field(default_factory=dict)
   trajectory_store_config: Mapping[str, Any] | None = None
+  partial_rollout: bool = False
 
 
 TrajectoryOrError = Union[
@@ -111,8 +114,18 @@ class RolloutWorker(abstract_worker.Worker):
     # constructing the store twice. See store.TrajectoryStore.from_config.
     # TODO(sizhi): Pass self._trajectory_store into RolloutManager / collector
     # to log rollout steps in follow-up CLs.
+    store_config = (
+        {
+            trajectory_store_lib.METADATA_TYPE_KEY: (
+                trajectory_lib.TunixTrajectoryMetadata.METADATA_TYPE
+            ),
+            **config.trajectory_store_config,
+        }
+        if config is not None and config.trajectory_store_config is not None
+        else None
+    )
     self._trajectory_store = trajectory_store_lib.TrajectoryStore.from_config(
-        config.trajectory_store_config if config is not None else None
+        store_config
     )
     if self._trajectory_store is not None:
       # Several workers can share one log stream, and absl log lines carry no
@@ -121,7 +134,7 @@ class RolloutWorker(abstract_worker.Worker):
       logging.info(
           "[trajectory-store] worker %s built %s",
           worker_id,
-          self._trajectory_store.to_config(),
+          self._trajectory_store.to_redacted_config(),
       )
 
   @property
@@ -146,50 +159,52 @@ class RolloutWorker(abstract_worker.Worker):
         },
     )
 
+  def _response(self, **metadata: Any) -> datatypes.Response:
+    return datatypes.Response(
+        metadata={
+            "worker_id": self.worker_id,
+            "state": self.state.value,
+            "policy_version": self._policy_version,
+            **metadata,
+        }
+    )
+
+  def _ensure_initialized(self) -> None:
+    if self.state == WorkerState.PENDING:
+      self.initialize()
+
   def initialize(self) -> datatypes.Response:
     with self._init_lock:
       if self.state == WorkerState.READY:
-        return datatypes.Response(
-            metadata={
-                "worker_id": self.worker_id,
-                "state": self.state.value,
-                "policy_version": self._policy_version,
-                "initialized": True,
-                "ready": True,
-            }
-        )
+        return self._response(initialized=True, ready=True)
       self.state = WorkerState.INITIALIZING
-      self.sampler.initialize()
       try:
-        return datatypes.Response(
-            metadata={
-                "worker_id": self.worker_id,
-                "state": self.state.value,
-                "policy_version": self._policy_version,
-            }
-        )
+        self.sampler.initialize()
+        return self._response()
+      except Exception:
+        self.state = WorkerState.ERROR
+        raise
       finally:
-        self.state = WorkerState.READY
+        if self.state == WorkerState.INITIALIZING:
+          self.state = WorkerState.READY
 
   def compile(self, dummy_data: Any) -> datatypes.Response:
-    if self.state == WorkerState.PENDING:
-      self.initialize()
+    self._ensure_initialized()
     self.state = WorkerState.COMPILING
     try:
       return datatypes.Response()
     finally:
       self.state = WorkerState.READY
 
-  def start(self) -> datatypes.Response:
-    if self.state == WorkerState.PENDING:
-      self.initialize()
-    return datatypes.Response(
-        metadata={
-            "worker_id": self.worker_id,
-            "state": self.state.value,
-            "policy_version": self._policy_version,
-        }
-    )
+  async def start(self) -> datatypes.Response:
+    self._ensure_initialized()
+    try:
+      await self.sampler.start()
+      await self.manager.bind_weight_sync()
+      return self._response(started=True)
+    except Exception:
+      self.state = WorkerState.ERROR
+      raise
 
   def stop(self) -> datatypes.Response:
     self.state = WorkerState.STOPPED
@@ -226,8 +241,7 @@ class RolloutWorker(abstract_worker.Worker):
 
   def get_target_state(self) -> Any:
     """Returns rollout-side target-state skeleton for trainer-side conversion."""
-    if self.state == WorkerState.PENDING:
-      self.initialize()
+    self._ensure_initialized()
     return self.manager.get_target_state()
 
   def _stamp_worker_lineage(self, metadata: dict[str, Any] | None) -> None:
@@ -250,17 +264,18 @@ class RolloutWorker(abstract_worker.Worker):
   ) -> datatypes.RolloutResponse:
     """Converts internal Trajectory or TrajectoryError to wire-safe RolloutResponse."""
     if isinstance(item, trajectory_lib.TrajectoryError):
+      metadata = dict(item.metadata or {})
+      metadata["prompt_id"] = item.prompt_id
+      self._stamp_worker_lineage(metadata)
       return datatypes.RolloutResponse(
-          request_id=request_id
-          or getattr(item, "trajectory_id", "")
-          or getattr(item, "prompt_id", ""),
+          request_id=request_id or item.trajectory_id or item.prompt_id,
           status="ERROR",
           error=datatypes.ErrorInfo(
               error_type="TrajectoryError",
               message=str(item.error_message),
           ),
           payload=None,
-          metadata={"prompt_id": getattr(item, "prompt_id", "")},
+          metadata=metadata,
       )
     if isinstance(item, datatypes.RolloutResponse):
       return item
@@ -285,6 +300,7 @@ class RolloutWorker(abstract_worker.Worker):
       on_complete: Optional[Callable[[datatypes.RolloutResponse], None]] = None,
   ) -> datatypes.RolloutResponse | List[datatypes.RolloutResponse]:
     """Coroutine method for single or batched generate requests."""
+    self._ensure_initialized()
     if isinstance(requests, datatypes.RolloutRequest):
       pass
     elif isinstance(requests, Sequence) and not isinstance(
@@ -323,8 +339,7 @@ class RolloutWorker(abstract_worker.Worker):
 
   async def pre_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
     """Quiesces the worker; it stays SYNCING until post or abort."""
-    if self.state == WorkerState.PENDING:
-      self.initialize()
+    self._ensure_initialized()
     self.state = WorkerState.SYNCING
     self._record_round(sync_request, "idle")
     result = await self.manager.pre_weight_sync(sync_request, **kwargs)
@@ -333,8 +348,7 @@ class RolloutWorker(abstract_worker.Worker):
 
   async def weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
     """Materializes the received weights; the worker stays SYNCING."""
-    if self.state == WorkerState.PENDING:
-      self.initialize()
+    self._ensure_initialized()
     self.state = WorkerState.SYNCING
     metadata = kwargs.pop("metadata", None)
     request = sync_request if sync_request is not None else metadata
@@ -359,10 +373,12 @@ class RolloutWorker(abstract_worker.Worker):
 
   async def bind_weight_sync(self, **kwargs) -> Any:
     """Binds the destination-side transport via the manager."""
+    self._ensure_initialized()
     return await self.manager.bind_weight_sync(**kwargs)
 
   async def get_weight_sync_metadata(self, **kwargs) -> Any:
     """Returns the sampler's transport metadata via the manager."""
+    self._ensure_initialized()
     return await self.manager.get_weight_sync_metadata(**kwargs)
 
   async def abort_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:

@@ -354,7 +354,7 @@ class Embedder(nnx.Module):
   def encode(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
     x = self.input_embedding[(x,)]
     x *= jnp.sqrt(x.shape[-1]).astype(x.dtype)  # pyrefly: ignore[missing-attribute]
-    x = sharding_utils.shard(x, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
+    x = sharding_utils.shard(x, self.shd_config.act_btd)
     return x
 
   @jax.named_scope('embedder_decode')
@@ -579,9 +579,9 @@ class Attention(nnx.Module):
       query_proj = self.q_einsum(x)
       key_proj, value_proj = self.kv_einsum(x)
 
-    query_proj = sharding_utils.shard(query_proj, self.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
-    key_proj = sharding_utils.shard(key_proj, self.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
-    value_proj = sharding_utils.shard(value_proj, self.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
+    query_proj = sharding_utils.shard(query_proj, self.shd_config.act_btnh)
+    key_proj = sharding_utils.shard(key_proj, self.shd_config.act_btnh)
+    value_proj = sharding_utils.shard(value_proj, self.shd_config.act_btnh)
 
     query_proj = self._query_norm(query_proj)
     key_proj = self._key_norm(key_proj)
@@ -660,7 +660,7 @@ class Attention(nnx.Module):
       encoded = jnp.einsum('BTNS,BSNH->BTNH', probs, value_proj)
 
     attn_output = self.attn_vec_einsum(encoded)
-    attn_output = sharding_utils.shard(attn_output, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
+    attn_output = sharding_utils.shard(attn_output, self.shd_config.act_btd)
 
     if cache is not None:
       new_cache = {
@@ -791,7 +791,7 @@ class FeedForward(nnx.Module):
     ff1 = self.up_proj(x)
     activations = gate_value * ff1
     activations = sharding_utils.shard(
-        activations, self.config.shd_config.act_btf  # pyrefly: ignore[bad-argument-type]
+        activations, self.config.shd_config.act_btf
     )
     outputs = self.down_proj(activations)
     return outputs
@@ -1047,7 +1047,7 @@ class Gemma3(BackendMappingMixin, nnx.Module):
             attention_mask,  # pyrefly: ignore[bad-argument-type]
         )
       if cache is not None:
-        new_cache[layer_name] = layer_cache  # pytype: disable=container-type-mismatch
+        new_cache[layer_name] = layer_cache  # pyrefly: ignore[unsupported-operation]
 
     x = self.final_norm(x)
     if output_hidden_states:
@@ -1063,7 +1063,7 @@ class Gemma3(BackendMappingMixin, nnx.Module):
       x = x[:, -1:, :]
 
     logits = self.compute_final_logits(x)
-    return logits, new_cache  # pytype: disable=bad-return-type
+    return logits, new_cache
 
   def compute_final_logits(
       self,
@@ -1091,7 +1091,7 @@ class Gemma3(BackendMappingMixin, nnx.Module):
     # Encode the vision tokens and merge them with the text embeddings.
     if images is not None:
       x = self._merge_mm_embeddings(tokens=tokens, embeddings=x, images=images)
-    return x  # pytype: disable=bad-return-type  # jax-arraylike
+    return x  # pyrefly: ignore[bad-return]
 
   def _assert_support_mm(self) -> None:
     if self.vision_encoder is None:

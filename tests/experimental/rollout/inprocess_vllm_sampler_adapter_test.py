@@ -59,6 +59,7 @@ class InprocessVllmSamplerAdapterTest(absltest.TestCase):
             config=self.mock_config,
         )
     )
+    self.sampler_adapter.initialize()
 
   def tearDown(self):
     self.patcher.stop()
@@ -203,6 +204,7 @@ class InprocessVllmSamplerAdapterTest(absltest.TestCase):
         config=raiden_config,
         raiden_sync_delegate=mock_delegate,
     )
+    raiden_adapter.initialize()
 
     sync_req = base_sampler_lib.WeightSyncRequest(policy_version=5)
 
@@ -253,6 +255,7 @@ class InprocessVllmSamplerAdapterTest(absltest.TestCase):
         config=raiden_config,
         raiden_sync_delegate=mock_delegate,
     )
+    raiden_adapter.initialize()
 
     self.assertTrue(asyncio.run(raiden_adapter.bind_weight_sync()))
     mock_delegate.bind_weight_sync.assert_not_awaited()
@@ -275,6 +278,7 @@ class InprocessVllmSamplerAdapterTest(absltest.TestCase):
         config=raiden_config,
         raiden_sync_delegate=mock_delegate,
     )
+    raiden_adapter.initialize()
 
     with self.assertRaisesRegex(RuntimeError, "transformer_state"):
       asyncio.run(raiden_adapter.bind_weight_sync())
@@ -308,6 +312,20 @@ class InprocessVllmSamplerAdapterTest(absltest.TestCase):
   def test_sample_none_requests_raises(self):
     with self.assertRaises(ValueError):
       asyncio.run(self.sampler_adapter.sample(None))
+
+  def test_vllm_sampler_deferred_to_initialize(self):
+    self.mock_vllm_lib.VllmSampler.reset_mock()
+    adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
+        server_id="deferred_slice",
+        tokenizer=self.mock_tokenizer,
+        config=self.mock_config,
+    )
+    self.assertIsNone(adapter.vllm_sampler)
+    self.mock_vllm_lib.VllmSampler.assert_not_called()
+
+    adapter.initialize()
+    self.assertIsNotNone(adapter.vllm_sampler)
+    self.mock_vllm_lib.VllmSampler.assert_called_once()
 
 
 class RoutedExpertsTest(absltest.TestCase):
@@ -513,6 +531,74 @@ class RoutedExpertsTest(absltest.TestCase):
     resp = asyncio.run(adapter.sample(req))
     np.testing.assert_array_equal(resp.prompt_token_ids, [10, 20])
 
+  def test_forwards_cache_salt_scalar_and_per_prompt(self):
+    adapter = self._adapter([None, None])
+    req_single = base_sampler_lib.SamplingRequest(
+        request_id="req-0",
+        prompt="prompt 0",
+        sampling_params=base_sampler_lib.SamplingParams(
+            max_tokens=3,
+            cache_salt="policy_v2",
+        ),
+    )
+    asyncio.run(adapter.sample([req_single]))
+    self.assertEqual(
+        adapter.vllm_sampler.call_args.kwargs.get("cache_salt"), "policy_v2"
+    )
+
+    req_a = base_sampler_lib.SamplingRequest(
+        request_id="req-a",
+        prompt="prompt a",
+        sampling_params=base_sampler_lib.SamplingParams(
+            max_tokens=3,
+            cache_salt="policy_v2",
+        ),
+    )
+    req_b = base_sampler_lib.SamplingRequest(
+        request_id="req-b",
+        prompt="prompt b",
+        sampling_params=base_sampler_lib.SamplingParams(
+            max_tokens=3,
+            cache_salt="policy_v3",
+        ),
+    )
+    asyncio.run(adapter.sample([req_a, req_b]))
+    self.assertEqual(
+        adapter.vllm_sampler.call_args.kwargs.get("cache_salt"),
+        ["policy_v2", "policy_v3"],
+    )
+
+  def test_weight_sync_pauses_and_resumes_vllm_sampler(self):
+    mock_delegate = mock.MagicMock(
+        spec=raiden_weight_sync_delegate.RaidenWeightSyncDelegate
+    )
+    mock_delegate.pre_weight_sync = mock.AsyncMock(return_value=True)
+    mock_delegate.post_weight_sync = mock.AsyncMock(return_value=True)
+    mock_delegate.abort_weight_sync = mock.AsyncMock(return_value=True)
+
+    sampler = mock.MagicMock()
+    adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
+        server_id="rollout",
+        raiden_sync_delegate=mock_delegate,
+        weight_sync_mode=weight_sync.WeightSyncMode.RAIDEN,
+        partial_rollout=True,
+    )
+    adapter.vllm_sampler = sampler
+    sync_req = base_sampler_lib.WeightSyncRequest(policy_version=2)
+
+    asyncio.run(adapter.pre_weight_sync(sync_req))
+    sampler.pause.assert_called_once_with(mode="keep", clear_cache=False)
+
+    asyncio.run(adapter.post_weight_sync(sync_req))
+    sampler.resume.assert_called_once()
+
+    sampler.reset_mock()
+    asyncio.run(adapter.pre_weight_sync(sync_req))
+    sampler.pause.assert_called_once_with(mode="keep", clear_cache=False)
+    asyncio.run(adapter.abort_weight_sync(sync_req))
+    sampler.resume.assert_called_once()
+
 
 if __name__ == "__main__":
   absltest.main()
+

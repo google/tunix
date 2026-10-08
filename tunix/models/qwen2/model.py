@@ -620,7 +620,7 @@ class Attention(nnx.Module):
         )
 
       # Transpose back
-      qkv = qkv.transpose(0, 2, 1, 3)  # pytype: disable=attribute-error
+      qkv = qkv.transpose(0, 2, 1, 3)
     else:
       # GQA
       query_proj = query_proj.reshape((b, t, kh, qh // kh, d))
@@ -950,7 +950,7 @@ class Qwen2(BackendMappingMixin, nnx.Module):
           segment_ids=segment_ids,
       )
       if cache is not None:
-        new_cache[layer_name] = layer_cache  # pytype: disable=container-type-mismatch
+        new_cache[layer_name] = layer_cache  # pyrefly: ignore[unsupported-operation]
 
     x = self.final_norm(x)
 
@@ -961,7 +961,7 @@ class Qwen2(BackendMappingMixin, nnx.Module):
       return x, new_cache
 
     logits = self.compute_final_logits(x)
-    return logits, new_cache  # pytype: disable=bad-return-type
+    return logits, new_cache
 
   def compute_final_logits(
       self,

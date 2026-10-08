@@ -97,17 +97,17 @@ for root in [
 
 _DISTRIBUTED_INITIALIZED = False
 try:
-  import tunix  # pytype: disable=import-error  # noqa: F401
+  import tunix  # noqa: F401
 except Exception:
   pass
 
 try:
-  import r2egym  # pytype: disable=import-error  # noqa: F401
+  import r2egym  # noqa: F401  # pyrefly: ignore[missing-import]
 except Exception:
   pass
 
 try:
-  import pathwaysutils  # pytype: disable=import-error
+  import pathwaysutils
 
   pathwaysutils.initialize()
   _DISTRIBUTED_INITIALIZED = True

@@ -51,6 +51,7 @@ from tunix.experimental.distributed.runtime import context as runtime_context  #
 from tunix.experimental.examples.math_gsm8k_dist import gsm8k  # pylint: disable=g-import-not-at-top
 from tunix.experimental.orchestrator import algorithm_adapter  # pylint: disable=g-import-not-at-top
 from tunix.experimental.orchestrator import batch_assembly  # pylint: disable=g-import-not-at-top
+from tunix.experimental.orchestrator import dataset_utils  # pylint: disable=g-import-not-at-top
 from tunix.experimental.orchestrator import orchestrator  # pylint: disable=g-import-not-at-top
 from tunix.experimental.orchestrator import rl_program  # pylint: disable=g-import-not-at-top
 from tunix.experimental.weight_sync import weight_sync  # pylint: disable=g-import-not-at-top
@@ -101,6 +102,16 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       default=None,
       help="Maximum segments per packed row when sequence packing is enabled.",
   )
+  parser.add_argument(
+      "--segment_alignment_boundary",
+      type=int,
+      default=1,
+      help=(
+          "Token boundary every packed segment after the first in a row starts"
+          " on when sequence packing is enabled. 1 packs segments back to"
+          " back; use 64 for Qwen3.5 GatedDeltaNet (gdn_chunk_size=64)."
+      ),
+  )
   # TODO(tunix-dev): Clean up worker specific configuration to orchestrator.
   parser.add_argument(
       "--trainer_fsdp",
@@ -140,11 +151,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       "--max_staleness",
       dest="max_staleness",
       type=int,
-      default=0,
+      default=int(os.getenv("MAX_STALENESS", "0")),
       help=(
           "Maximum policy-version lag accepted by the async rollout queue. "
           "0 means queue-level on-policy training."
       ),
+  )
+  parser.add_argument(
+      "--trajectory_group_order",
+      choices=("trajectory_completion", "prompt_arrival"),
+      default=os.getenv("TRAJECTORY_GROUP_ORDER", "trajectory_completion"),
+      help="Trajectory group order.",
   )
   parser.add_argument(
       "--rollout_replicas",
@@ -242,7 +259,6 @@ def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
       num_generations=args.num_generations,
       epsilon=args.epsilon,
       beta=args.beta,
-      temperature=args.temperature,
       use_rollout_logps=args.use_rollout_logps,
   )
   return algorithm_adapter.GRPOAdapter(
@@ -299,7 +315,10 @@ def _iter_prompt_items(
   dataset_size = len(dataset)
   if dataset_size == 0:
     raise ValueError("GSM8K dataset is empty.")
-  for prompt_idx in range(args.max_steps * args.batch_size):
+  total_prompts = dataset_utils.total_prompt_groups(
+      args.max_steps, args.batch_size, args.max_staleness
+  )
+  for prompt_idx in range(total_prompts):
     example = dataset[prompt_idx % dataset_size]
     assert example is not None
     yield _build_prompt_item(
@@ -439,12 +458,14 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           max_response_length=args.max_response_length,
           max_seq_token_per_tpu=args.max_seq_token_per_tpu,
           max_segments_per_packed_row=args.max_segments_per_packed_row,
+          segment_alignment_boundary=args.segment_alignment_boundary,
           trainer_fsdp=args.trainer_fsdp,
           trainer_dp=args.trainer_dp,
       ),
       metrics_logging_options=metrics_logging_options,
       trajectory_log_dir=args.trajectory_log_dir,
       max_staleness=args.max_staleness,
+      group_order=args.trajectory_group_order,
       sync_weights=(args.weight_sync_mode != "none"),
       on_step_begin=lambda step: logging.info(
           ">>> Step %d starting | Policy Version: %d",

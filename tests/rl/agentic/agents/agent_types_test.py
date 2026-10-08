@@ -187,6 +187,10 @@ class TrajectoryItemTest(absltest.TestCase):
     # In-place mutation of `traj` is dynamically reflected when not overridden.
     item.traj["status"] = agent_types.TrajectoryStatus.FAILED
     self.assertFalse(item.is_valid)
+    item.traj["status"] = agent_types.TrajectoryStatus.CANCELLED
+    self.assertFalse(item.is_valid)
+    item.traj["status"] = "CANCELLED"
+    self.assertFalse(item.is_valid)
 
     # Explicit override preserves the specified boolean even after mask zeroing.
     overridden = agent_types.TrajectoryItem(

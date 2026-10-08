@@ -95,6 +95,9 @@ export NUM_GENERATIONS="${NUM_GENERATIONS:-2}"
 # empty".
 export TRAIN_MICRO_BATCH_SIZE="${TRAIN_MICRO_BATCH_SIZE:-1}"
 export BETA="${BETA:-0}"
+export MAX_STALENESS="${MAX_STALENESS:-0}"
+export TRAJECTORY_GROUP_ORDER="${TRAJECTORY_GROUP_ORDER:-trajectory_completion}"
+export IN_FLIGHT_WEIGHT_UPDATES="${IN_FLIGHT_WEIGHT_UPDATES:-false}"
 
 # Dataset & sequence lengths
 export TFDS_SPLIT="${TFDS_SPLIT:-train[:16]}"

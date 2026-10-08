@@ -97,7 +97,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         data_shuffle_seed=data_shuffle_seed,
     )
 
-    self.algo_config.temperature = self.rl_engine.get_rollout_config(  # pyrefly: ignore[missing-attribute]
+    self.algo_config.temperature = self.rl_engine.get_rollout_config(
         mode=rl_engine_lib.Mode.TRAIN
     ).temperature
 
@@ -121,7 +121,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         has_aux=True,
     )
     self.rl_engine.actor_trainer.with_gen_model_input_fn(
-        lambda x: {  # pyrefly: ignore[bad-argument-type]
+        lambda x: {
             "train_example": x,
             "algo_config": self.algo_config,  # pyrefly: ignore[bad-assignment]
         }
@@ -175,7 +175,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
     if isinstance(rollout_config, dict):
       rollout_config = rollout_config[mode]
 
-    training_input["prompts"] = list(training_input["prompts"])  # pyrefly: ignore[bad-argument-type]
+    training_input["prompts"] = list(training_input["prompts"])  # pyrefly: ignore[bad-argument-type, unsupported-operation]
     pad_value = self.rl_engine.rollout.pad_id()
     eos_value = self.rl_engine.rollout.eos_id()
 
@@ -185,7 +185,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
     }
 
     rollout_output = self.rl_engine.generate(
-        prompts=training_input["prompts"],
+        prompts=training_input["prompts"],  # pyrefly: ignore[bad-argument-type]
         mode=mode,
         micro_batch_size=(
             self._rollout_micro_batch_size * self.algo_config.num_generations  # pyrefly: ignore[unsupported-operation]
@@ -311,7 +311,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
     ):
       # Compute rewards and advantages
       rewards = self._compute_rewards(
-          prompts=training_input["prompts"],
+          prompts=training_input["prompts"],  # pyrefly: ignore[bad-argument-type]
           completions=rollout_output.text,
           mode=mode,
           **{k: v for k, v in training_input.items() if k != "prompts"},  # pyrefly: ignore[bad-argument-type]

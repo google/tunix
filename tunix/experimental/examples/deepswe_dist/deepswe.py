@@ -22,6 +22,7 @@ import logging
 from typing import Any
 
 import numpy as np
+from tunix.experimental.orchestrator import dataset_utils
 from tunix.experimental.rl.agentic import registry
 from examples.deepswe import deepswe_data
 from examples.deepswe import sandbox_utils
@@ -191,13 +192,17 @@ def iter_prompt_items(
     scaffold: str,
     env_verbose: bool,
     overlong_filter: bool = False,
+    max_staleness: int = 0,
 ) -> Iterator[dict[str, Any]]:
-  """Yields exactly the prompt groups needed for the requested training run."""
+  """Yields one full-batch worth of prompt groups per RL step plus off-policy lookahead."""
   dataset_size = len(dataset)
   if dataset_size <= 0:
     raise ValueError("DeepSWE dataset is empty.")
 
-  for prompt_idx in range(max_steps * batch_size):
+  total_prompts = dataset_utils.total_prompt_groups(
+      max_steps, batch_size, max_staleness
+  )
+  for prompt_idx in range(total_prompts):
     yield build_prompt_item(
         entry=_entry_at(dataset, prompt_idx % dataset_size),
         prompt_idx=prompt_idx,

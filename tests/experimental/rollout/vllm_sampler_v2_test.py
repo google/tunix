@@ -323,6 +323,53 @@ class TestRLVllmSamplerWeightSync(unittest.TestCase):
 
         asyncio.run(run_test())
 
+    # pylint: disable=bad-indentation
+    @patch(
+        "tunix.experimental.rollout.vllm_sampler_v2"
+        ".RLVllmSampler._call_worker_method"
+    )
+    def test_partial_rollout_uses_pause_generation_keep_and_preserves_cache(
+        self, mock_call_worker_method
+    ):
+        mock_call_worker_method.return_value = []
+        args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B")
+        sampler = RLVllmSampler(engine_args=args, partial_rollout=True)
+
+        mock_engine = MagicMock()
+        mock_engine.pause_generation = AsyncMock()
+        mock_engine.resume_generation = AsyncMock()
+        mock_engine.reset_prefix_cache = AsyncMock()
+        sampler._engine = mock_engine
+        sampler._is_running = True
+
+        async def run_test():
+            req = SimpleNamespace(req_id="r_partial", policy_version=3)
+            await sampler.pre_weight_sync(req, free_kv_cache=False)
+            mock_engine.pause_generation.assert_awaited_once_with(
+                mode="keep", clear_cache=False
+            )
+            mock_engine.reset_prefix_cache.assert_not_awaited()
+
+            await sampler.post_weight_sync(req)
+            mock_engine.reset_prefix_cache.assert_not_awaited()
+            mock_engine.resume_generation.assert_awaited_once()
+
+        asyncio.run(run_test())
+
+    def test_build_vllm_params_forwards_cache_salt(self):
+        args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B")
+        sampler = RLVllmSampler(engine_args=args, partial_rollout=True)
+        req_params = SimpleNamespace(
+            max_tokens=32,
+            temperature=0.6,
+            cache_salt="policy_v4",
+        )
+        req = SimpleNamespace(sampling_params=req_params)
+        vllm_params = sampler._build_vllm_params(req, {})
+        self.assertEqual(getattr(vllm_params, "cache_salt", None), "policy_v4")
+    # pylint: enable=bad-indentation
+
 
 if __name__ == "__main__":
     unittest.main()
+

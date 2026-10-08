@@ -46,6 +46,7 @@ export MAX_STEPS=${MAX_STEPS:-1}
 export TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-1}
 export MAX_SEQ_TOKEN_PER_TPU=${MAX_SEQ_TOKEN_PER_TPU:-}
 export MAX_SEGMENTS_PER_PACKED_ROW=${MAX_SEGMENTS_PER_PACKED_ROW:-}
+export SEGMENT_ALIGNMENT_BOUNDARY=${SEGMENT_ALIGNMENT_BOUNDARY:-}
 
 # Set to tunix to run Tunix's PeftTrainer, and maxtext to run MaxText's MaxTextTrainingEngine
 export TRAINER_BACKEND=${TRAINER_BACKEND:-tunix}
@@ -73,9 +74,12 @@ export USE_LORA=${USE_LORA:-0}
 export REWARD_MODE=${REWARD_MODE:-env}
 export BETA=${BETA:-0}
 export EPSILON=${EPSILON:-0.2}
+export MAX_STALENESS=${MAX_STALENESS:-0}
+export TRAJECTORY_GROUP_ORDER=${TRAJECTORY_GROUP_ORDER:-trajectory_completion}
 export DEBUG=${DEBUG:-0}
 export SAMPLER=${SAMPLER:-inprocess_vllm}
 export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
+export IN_FLIGHT_WEIGHT_UPDATES=${IN_FLIGHT_WEIGHT_UPDATES:-false}
 export USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
 export CHAT_PARSER=${CHAT_PARSER:-raw}
 export CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-1}
@@ -214,6 +218,8 @@ start_orchestrator() {
         --wandb_project=\"${WANDB_PROJECT}\" \
         --wandb_run_name=\"${WANDB_RUN_NAME}\" \
         --flush_metrics_every_n_steps=${FLUSH_METRICS_EVERY_N_STEPS} \
+        --max_staleness=${MAX_STALENESS} \
+        --trajectory_group_order=${TRAJECTORY_GROUP_ORDER} \
         --weight_sync_mode=${WEIGHT_SYNC_MODE} \
         --stop_workers_on_exit \
         $([[ "${USE_ROLLOUT_LOGPS}" == "false" || "${USE_ROLLOUT_LOGPS}" == "False" || "${USE_ROLLOUT_LOGPS}" == "0" ]] && echo --no-use_rollout_logps || echo --use_rollout_logps) \
@@ -221,6 +227,7 @@ start_orchestrator() {
         ${TRAJECTORY_LOG_DIR:+--trajectory_log_dir=\"${TRAJECTORY_LOG_DIR}\"} \
         ${MAX_SEQ_TOKEN_PER_TPU:+--max_seq_token_per_tpu=${MAX_SEQ_TOKEN_PER_TPU}} \
         ${MAX_SEGMENTS_PER_PACKED_ROW:+--max_segments_per_packed_row=${MAX_SEGMENTS_PER_PACKED_ROW}} \
+        ${SEGMENT_ALIGNMENT_BOUNDARY:+--segment_alignment_boundary=${SEGMENT_ALIGNMENT_BOUNDARY}} \
         ${TRAINER_MESH_FSDP:+--trainer_fsdp=${TRAINER_MESH_FSDP}} \
         ${debug_flag} \
     " \
@@ -446,6 +453,7 @@ start_rollout_instance() {
         --lora_rank=${LORA_RANK} \
         --lora_alpha=${LORA_ALPHA} \
         --weight_sync_mode=${WEIGHT_SYNC_MODE} \
+        --in_flight_weight_updates=${IN_FLIGHT_WEIGHT_UPDATES} \
         --chat_parser=${CHAT_PARSER} \
         --prefuse_moe_weights=${PREFUSE_MOE_WEIGHTS} \
         --enable_prefix_caching=${ENABLE_PREFIX_CACHING} \

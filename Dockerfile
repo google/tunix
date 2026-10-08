@@ -7,7 +7,7 @@ ENV TZ=Etc/UTC
 
 # Install system dependencies, including Python 3 and pip
 RUN apt-get update && \
-    apt-get install -y build-essential curl git python3 python3-pip && \
+    apt-get install -y build-essential cmake curl git ninja-build python3 python3-pip && \
     rm -rf /var/lib/apt/lists/*
 
 # Upgrade pip
@@ -38,8 +38,8 @@ COPY requirements/ requirements/
 
 RUN bash scripts/install_tunix_vllm_requirement.sh
 
-# Copy pyproject.toml and README.md to install dependencies first
-COPY pyproject.toml README.md /app/
+# Copy pyproject.toml, README.md, and CMakeLists.txt to install dependencies first
+COPY pyproject.toml README.md CMakeLists.txt /app/
 RUN mkdir /app/tunix && touch /app/tunix/__init__.py
 RUN uv pip install .
 
