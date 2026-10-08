@@ -52,6 +52,7 @@ MAX_STALENESS=${MAX_STALENESS:-0}
 TRAJECTORY_GROUP_ORDER=${TRAJECTORY_GROUP_ORDER:-trajectory_completion}
 SAMPLER=${SAMPLER:-inprocess_vllm}
 WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
+IN_FLIGHT_WEIGHT_UPDATES=${IN_FLIGHT_WEIGHT_UPDATES:-false}
 USE_LORA=${USE_LORA:-0}
 LORA_RANK=${LORA_RANK:-64}
 LORA_ALPHA=${LORA_ALPHA:-64.0}
@@ -310,6 +311,7 @@ echo "Launching DeepSWE rollout node..."
     --lora_rank="$LORA_RANK"
     --lora_alpha="$LORA_ALPHA"
     --weight_sync_mode="$WEIGHT_SYNC_MODE"
+    --in_flight_weight_updates="$IN_FLIGHT_WEIGHT_UPDATES"
     --registry_module=tunix.experimental.examples.deepswe_dist.deepswe
     --env_name=deepswe_env
     --agent_name=deepswe_agent

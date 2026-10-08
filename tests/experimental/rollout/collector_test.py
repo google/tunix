@@ -1403,6 +1403,133 @@ class ResponseBudgetAnnotationTest(absltest.TestCase):
     )
     np.testing.assert_array_equal(item.traj["prompt_tokens"], [10, 11])
 
+  def test_partial_rollout_pins_turn1_cache_salt_and_tracks_policy_versions(
+      self,
+  ):
+    class _TwoTurnEnv(base_environment.BaseTaskEnv):
+
+      def __init__(self):
+        super().__init__(task={"question": "q0"}, max_steps=2)
+        self._step_idx = 0
+
+      def _initial_observation(self):
+        return "obs0"
+
+      def _step_impl(self, action):
+        self._step_idx += 1
+        return base_environment.EnvStepResult(
+            observation="obs1",
+            reward=1.0,
+            done=self._step_idx >= 2,
+            info={},
+        )
+
+    current_policy_version = [2]
+
+    class _VersionAdvancingSampler(sampler_lib.Sampler):
+
+      def __init__(self):
+        self.requests = []
+
+      async def sample(self, req, **kwargs):
+        del kwargs
+        self.requests.append(req)
+        turn = len(self.requests)
+        if turn == 1:
+          # Simulate in-flight weight sync advancing policy version between
+          # turns.
+          current_policy_version[0] = 3
+        prompt_toks = (
+            np.asarray(req.prompt, dtype=np.int32)
+            if isinstance(req.prompt, np.ndarray)
+            else np.array([10, 11], dtype=np.int32)
+        )
+        return sampler_lib.SamplingResponse(
+            request_id=req.request_id,
+            text=f"ans_{turn}",
+            token_ids=np.array([20 + turn, 21 + turn], dtype=np.int32),
+            prompt_token_ids=prompt_toks,
+            logprobs=np.array([-0.1, -0.2], dtype=np.float32),
+        )
+
+    sampler = _VersionAdvancingSampler()
+    req = datatypes.RolloutRequest(
+        prompt_id="p_partial",
+        prompt="q0",
+        target_policy_version=2,
+        max_response_length=64,
+    )
+    engine = collector.TrajectoryCollectorEngine(
+        traj_id="traj_partial",
+        request=req,
+        sampler=sampler,
+        env_client=_TwoTurnEnv(),
+        agent=model_agent.ModelAgent("sys"),
+        tokenizer=_MockTokenizer(),
+        chat_parser=_RecordingParser(),
+        partial_rollout=True,
+        policy_version_fn=lambda: current_policy_version[0],
+    )
+    item = asyncio.run(engine.run_episode())
+    self.assertLen(sampler.requests, 2)
+    # Both Turn 1 and Turn 2 must use the Turn-1 cache_salt ("policy_v2")
+    self.assertEqual(
+        sampler.requests[0].sampling_params.cache_salt, "policy_v2"
+    )
+    self.assertEqual(
+        sampler.requests[1].sampling_params.cache_salt, "policy_v2"
+    )
+    # Conservative oldest version is preserved in policy_version, while per-turn
+    # history is recorded in policy_versions.
+    self.assertEqual(item.policy_version, 2)
+    self.assertEqual(item.metadata["policy_version"], 2)
+    self.assertEqual(item.metadata["policy_versions"], [2, 3])
+    self.assertEqual(item.traj["policy_version"], 2)
+    self.assertEqual(item.traj["policy_versions"], [2, 3])
+
+  def test_pause_blocks_model_call_until_resume(self):
+    async def _run():
+      sampler = _MockVllmSampler()
+      req = datatypes.RolloutRequest(
+          prompt_id="p_pause",
+          prompt="q0",
+          generation_kwargs={"max_generation_steps": 16},
+      )
+      mock_agent = mock.MagicMock()
+      mock_agent.name = "test_agent"
+      engine = collector.TrajectoryCollectorEngine(
+          traj_id="traj_pause",
+          request=req,
+          sampler=sampler,
+          env_client=mock.MagicMock(),
+          agent=mock_agent,
+          tokenizer=mock.MagicMock(),
+          chat_parser=mock.MagicMock(),
+      )
+      with mock.patch(
+          "tunix.rl.agentic.trajectory.trajectory_collect_engine.TrajectoryCollectEngine"
+      ) as mock_engine_cls:
+        mock_instance = mock.AsyncMock()
+        mock_instance.collect.return_value = {}
+        mock_engine_cls.return_value = mock_instance
+        await engine.run_episode()
+        model_call = mock_engine_cls.call_args.kwargs["model_call"]
+
+        engine.pause()
+        self.assertTrue(engine.is_paused)
+        call_task = asyncio.create_task(model_call("prompt text"))
+        await asyncio.sleep(0.02)
+        self.assertFalse(call_task.done())
+        self.assertEmpty(sampler.calls)
+
+        engine.resume()
+        self.assertFalse(engine.is_paused)
+        await call_task
+        self.assertLen(sampler.calls, 1)
+
+    asyncio.run(_run())
+
 
 if __name__ == "__main__":
   absltest.main()
+

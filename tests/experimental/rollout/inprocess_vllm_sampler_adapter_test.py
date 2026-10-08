@@ -531,6 +531,74 @@ class RoutedExpertsTest(absltest.TestCase):
     resp = asyncio.run(adapter.sample(req))
     np.testing.assert_array_equal(resp.prompt_token_ids, [10, 20])
 
+  def test_forwards_cache_salt_scalar_and_per_prompt(self):
+    adapter = self._adapter([None, None])
+    req_single = base_sampler_lib.SamplingRequest(
+        request_id="req-0",
+        prompt="prompt 0",
+        sampling_params=base_sampler_lib.SamplingParams(
+            max_tokens=3,
+            cache_salt="policy_v2",
+        ),
+    )
+    asyncio.run(adapter.sample([req_single]))
+    self.assertEqual(
+        adapter.vllm_sampler.call_args.kwargs.get("cache_salt"), "policy_v2"
+    )
+
+    req_a = base_sampler_lib.SamplingRequest(
+        request_id="req-a",
+        prompt="prompt a",
+        sampling_params=base_sampler_lib.SamplingParams(
+            max_tokens=3,
+            cache_salt="policy_v2",
+        ),
+    )
+    req_b = base_sampler_lib.SamplingRequest(
+        request_id="req-b",
+        prompt="prompt b",
+        sampling_params=base_sampler_lib.SamplingParams(
+            max_tokens=3,
+            cache_salt="policy_v3",
+        ),
+    )
+    asyncio.run(adapter.sample([req_a, req_b]))
+    self.assertEqual(
+        adapter.vllm_sampler.call_args.kwargs.get("cache_salt"),
+        ["policy_v2", "policy_v3"],
+    )
+
+  def test_weight_sync_pauses_and_resumes_vllm_sampler(self):
+    mock_delegate = mock.MagicMock(
+        spec=raiden_weight_sync_delegate.RaidenWeightSyncDelegate
+    )
+    mock_delegate.pre_weight_sync = mock.AsyncMock(return_value=True)
+    mock_delegate.post_weight_sync = mock.AsyncMock(return_value=True)
+    mock_delegate.abort_weight_sync = mock.AsyncMock(return_value=True)
+
+    sampler = mock.MagicMock()
+    adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
+        server_id="rollout",
+        raiden_sync_delegate=mock_delegate,
+        weight_sync_mode=weight_sync.WeightSyncMode.RAIDEN,
+        partial_rollout=True,
+    )
+    adapter.vllm_sampler = sampler
+    sync_req = base_sampler_lib.WeightSyncRequest(policy_version=2)
+
+    asyncio.run(adapter.pre_weight_sync(sync_req))
+    sampler.pause.assert_called_once_with(mode="keep", clear_cache=False)
+
+    asyncio.run(adapter.post_weight_sync(sync_req))
+    sampler.resume.assert_called_once()
+
+    sampler.reset_mock()
+    asyncio.run(adapter.pre_weight_sync(sync_req))
+    sampler.pause.assert_called_once_with(mode="keep", clear_cache=False)
+    asyncio.run(adapter.abort_weight_sync(sync_req))
+    sampler.resume.assert_called_once()
+
 
 if __name__ == "__main__":
   absltest.main()
+

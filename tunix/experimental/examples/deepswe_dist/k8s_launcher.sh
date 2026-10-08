@@ -60,6 +60,7 @@ export DEBUG=${DEBUG:-0}
 export USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
 export SAMPLER=${SAMPLER:-inprocess_vllm}
 export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
+export IN_FLIGHT_WEIGHT_UPDATES=${IN_FLIGHT_WEIGHT_UPDATES:-false}
 
 # DeepSWE dataset and environment configuration
 export DATASET_NAME=${DATASET_NAME:-R2E-Gym/R2E-Gym-Subset}
@@ -375,6 +376,7 @@ start_rollout() {
         --lora_rank=${LORA_RANK} \
         --lora_alpha=${LORA_ALPHA} \
         --weight_sync_mode=${WEIGHT_SYNC_MODE} \
+        --in_flight_weight_updates=${IN_FLIGHT_WEIGHT_UPDATES} \
         --registry_module=tunix.experimental.examples.deepswe_dist.deepswe \
         --env_name=deepswe_env \
         --agent_name=deepswe_agent \

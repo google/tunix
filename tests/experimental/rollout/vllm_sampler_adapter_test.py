@@ -405,6 +405,23 @@ class RoundUuidTest(absltest.TestCase):
     with self.assertRaisesRegex(ValueError, "missing a usable transfer uuid"):
       vllm_sampler_adapter._round_uuid(req)
 
+  def test_partial_rollout_forwarded_to_pre_weight_sync(self):
+    mock_sampler = mock.AsyncMock()
+    adapter = vllm_sampler_adapter.VllmSamplerAdapter(
+        server_id="vllm_slice_partial",
+        sampler_instance=mock_sampler,
+        partial_rollout=True,
+    )
+    req = base_sampler_lib.WeightSyncRequest(
+        policy_version=1, extra_config={"req_id": "r1", "uuid": 1}
+    )
+    asyncio.run(adapter.pre_weight_sync(req))
+    mock_sampler.pre_weight_sync.assert_called_once_with(
+        free_kv_cache=False,
+        partial_rollout=True,
+    )
+
 
 if __name__ == "__main__":
   absltest.main()
+

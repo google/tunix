@@ -43,6 +43,7 @@ export MAX_STEPS=2
 export TRAIN_MICRO_BATCH_SIZE=8  # Must be a multiple of TRAINER_MESH_FSDP (4)
 export MAX_STALENESS="${MAX_STALENESS:-0}"
 export TRAJECTORY_GROUP_ORDER="${TRAJECTORY_GROUP_ORDER:-trajectory_completion}"
+export IN_FLIGHT_WEIGHT_UPDATES="${IN_FLIGHT_WEIGHT_UPDATES:-false}"
 
 # Weight Sync & MoE Settings
 export PREFUSE_MOE_WEIGHTS="true"

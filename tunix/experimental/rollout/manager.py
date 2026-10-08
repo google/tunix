@@ -15,6 +15,8 @@
 """Rollout Manager concurrency controller and Raiden KV migration orchestrator."""
 
 import asyncio
+import logging
+import time
 from typing import Any, AsyncIterator, Callable, Dict, Optional, Sequence, Union
 from tunix.experimental.common import datatypes
 from tunix.experimental.rl.agentic import registry
@@ -64,6 +66,12 @@ class RolloutManager:
         before pausing the stragglers, roughly one worst-case trajectory.
     """
     self.config = config
+    self._partial_rollout: bool = (
+        bool(getattr(config, "partial_rollout", False))
+        if config is not None
+        else False
+    )
+    self._policy_version: int = 0
     if sampler is None:
       sampler_type = getattr(config, "sampler_type", "vanilla")
       weight_sync_mode = getattr(
@@ -73,11 +81,14 @@ class RolloutManager:
       if sampler_type == "vllm":
         from tunix.experimental.rollout import vllm_sampler_adapter  # pylint: disable=g-import-not-at-top
 
-        sampler = vllm_sampler_adapter.VllmSamplerAdapter(
-            server_id="vllm_sampler",
-            model_name=getattr(config, "rollout_vllm_model_version", ""),
-            weight_sync_mode=weight_sync_mode,
-        )
+        adapter_kwargs: dict[str, Any] = {
+            "server_id": "vllm_sampler",
+            "model_name": getattr(config, "rollout_vllm_model_version", ""),
+            "weight_sync_mode": weight_sync_mode,
+        }
+        if self._partial_rollout:
+          adapter_kwargs["partial_rollout"] = True
+        sampler = vllm_sampler_adapter.VllmSamplerAdapter(**adapter_kwargs)
       elif "inprocess_vllm" in sampler_type:
         from tunix.experimental.rollout import inprocess_vllm_sampler_adapter  # pylint: disable=g-import-not-at-top
 
@@ -85,19 +96,29 @@ class RolloutManager:
         if weight_sync_mode == weight_sync.WeightSyncMode.RAIDEN:
           from tunix.experimental.weight_sync import raiden_weight_sync_delegate  # pylint: disable=g-import-not-at-top
 
+          delegate_kwargs: dict[str, Any] = {
+              "server_id": "inprocess_vllm_sampler"
+          }
+          if self._partial_rollout:
+            delegate_kwargs["partial_rollout"] = True
           raiden_delegate = (
               raiden_weight_sync_delegate.RaidenWeightSyncDelegate(
-                  server_id="inprocess_vllm_sampler"
+                  **delegate_kwargs
               )
           )
 
+        adapter_kwargs = {
+            "server_id": "inprocess_vllm_sampler",
+            "tokenizer": tokenizer,
+            "config": config,
+            "raiden_sync_delegate": raiden_delegate,
+            "weight_sync_mode": weight_sync_mode,
+            "max_concurrency": max_concurrency,
+        }
+        if self._partial_rollout:
+          adapter_kwargs["partial_rollout"] = True
         sampler = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(  # pyrefly: ignore[bad-instantiation]
-            server_id="inprocess_vllm_sampler",
-            tokenizer=tokenizer,
-            config=config,
-            raiden_sync_delegate=raiden_delegate,
-            weight_sync_mode=weight_sync_mode,
-            max_concurrency=max_concurrency,
+            **adapter_kwargs
         )
       elif "vanilla" in sampler_type:
         raiden_delegate = None
@@ -160,10 +181,21 @@ class RolloutManager:
       on_complete: Optional[Callable[[TrajectoryOrError], None]] = None,
   ) -> TrajectoryOrError:
     """Spawns an async task running the multi-turn episode loop concurrently."""
-    if not self._traffic.is_admission_open():
+    if self._traffic.state == datatypes.WorkerState.STOPPED:
       raise traffic_controller_lib.AdmissionClosedError(
-          "rollout admission is closed during weight sync"
+          "rollout worker is stopped"
       )
+    await self._traffic.wait_for_admission()
+    if self._traffic.state == datatypes.WorkerState.STOPPED:
+      raise traffic_controller_lib.AdmissionClosedError(
+          "rollout worker is stopped"
+      )
+    sampler_version = getattr(self.sampler, "policy_version", None)
+    effective_version = self._policy_version
+    if isinstance(sampler_version, int) and sampler_version > effective_version:
+      effective_version = sampler_version
+    if effective_version > int(request.target_policy_version or 0):
+      request.target_policy_version = effective_version
     loop = asyncio.get_running_loop()
     future: asyncio.Future[TrajectoryOrError] = loop.create_future()
 
@@ -212,6 +244,8 @@ class RolloutManager:
         tokenizer=self.tokenizer,
         chat_parser=self.chat_parser,
         eos_ids=self.eos_ids,
+        partial_rollout=self._partial_rollout,
+        policy_version_fn=lambda: self._policy_version,
     )
 
     self._active_collectors[traj_id] = collector
@@ -324,34 +358,70 @@ class RolloutManager:
   async def pre_weight_sync(
       self, sync_request: sampler_lib.WeightSyncRequest | Any = None, **kwargs
   ) -> Any:
-    """Phase 3 Barrier 1: Closes admission and drains in-flight work."""
+    """Phase 3 Barrier 1: Closes admission and drains or pauses in-flight work."""
+    t0 = time.monotonic()
     self._traffic.transition_to_syncing()
-    await self._traffic.drain(self._drain_timeout_s)
+    in_flight_before = len(self._active_collectors)
+    if not self._partial_rollout:
+      await self._traffic.drain(self._drain_timeout_s)
     self.pause_all()
+    res = None
     if self.sampler:
-      return await self.sampler.pre_weight_sync(sync_request, **kwargs)
-    return None
+      if self._partial_rollout:
+        res = await self.sampler.pre_weight_sync(
+            sync_request, partial_rollout=True, **kwargs
+        )
+      else:
+        res = await self.sampler.pre_weight_sync(sync_request, **kwargs)
+    elapsed_ms = (time.monotonic() - t0) * 1000.0
+    logging.info(
+        "[RolloutManager] pre_weight_sync(partial_rollout=%s,"
+        " in_flight_before=%d, in_flight_after=%d) completed in %.2f ms",
+        self._partial_rollout,
+        in_flight_before,
+        len(self._active_collectors),
+        elapsed_ms,
+    )
+    return res
 
   async def weight_sync(
       self, sync_request: sampler_lib.WeightSyncRequest | Any = None, **kwargs
   ) -> Any:
-    """Phase 3 Barrier 2: Executes weight synchronization and resumes collectors."""
-    completed_version = getattr(sync_request, "policy_version", 0)
+    """Phase 3 Barrier 2: Executes weight synchronization and updates policy version."""
+    req_version = getattr(sync_request, "policy_version", None)
+    if req_version is None:
+      req_version = getattr(sync_request, "version", None)
+    completed_version = int(req_version) if req_version is not None else 0
     if self.sampler:
       res = await self.sampler.weight_sync(sync_request, **kwargs)
       if res is not None:
         completed_version = res
+    if isinstance(completed_version, int):
+      self._policy_version = completed_version
+    elif req_version is not None:
+      self._policy_version = int(req_version)
     return completed_version
 
   async def post_weight_sync(
       self, sync_request: sampler_lib.WeightSyncRequest | Any = None, **kwargs
   ) -> Any:
     """Phase 3 Barrier 3: Finalizes policy weight update and resumes collectors."""
+    req_version = getattr(sync_request, "policy_version", None)
+    if req_version is None:
+      req_version = getattr(sync_request, "version", None)
+    if req_version is not None:
+      self._policy_version = int(req_version)
     res = None
     if self.sampler:
       res = await self.sampler.post_weight_sync(sync_request, **kwargs)
     self.resume_all()
     self._traffic.reopen()
+    logging.info(
+        "[RolloutManager] post_weight_sync(partial_rollout=%s,"
+        " resumed_collectors=%d) completed",
+        self._partial_rollout,
+        len(self._active_collectors),
+    )
     return res
 
   async def abort_weight_sync(

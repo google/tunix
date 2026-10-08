@@ -49,6 +49,8 @@ class RolloutConfig(base_rollout.RolloutConfig):
       was given: for the file backend it is the shared root_dir and run_id
       that will make these writes visible to the orchestrator's reads once
       rollout step logging is wired.
+    partial_rollout: Whether to freeze in-flight trajectories in-place during
+      weight synchronization instead of draining them to completion first.
   """
 
   sampler_type: str = "vanilla"
@@ -58,6 +60,7 @@ class RolloutConfig(base_rollout.RolloutConfig):
   env_config: dict[str, Any] = dataclasses.field(default_factory=dict)
   agent_config: dict[str, Any] = dataclasses.field(default_factory=dict)
   trajectory_store_config: Mapping[str, Any] | None = None
+  partial_rollout: bool = False
 
 
 TrajectoryOrError = Union[

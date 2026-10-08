@@ -55,6 +55,7 @@ class InprocessVllmSamplerAdapter(
       raiden_sync_delegate: Any = None,
       weight_sync_mode: weight_sync.WeightSyncMode | str | None = None,
       max_concurrency: int = 256,
+      partial_rollout: bool = False,
       **kwargs,
   ):
     self.server_id = server_id
@@ -71,6 +72,10 @@ class InprocessVllmSamplerAdapter(
     self.vllm_sampler = None
     self.raiden_sync_delegate = raiden_sync_delegate
     self.max_concurrency = max_concurrency
+    cfg_partial = getattr(config, "partial_rollout", False)
+    self.partial_rollout: bool = bool(
+        partial_rollout or (isinstance(cfg_partial, bool) and cfg_partial)
+    )
     self._executor = futures.ThreadPoolExecutor(
         max_workers=self.max_concurrency,
         thread_name_prefix=f"{self.server_id}_vllm_worker",
@@ -97,9 +102,12 @@ class InprocessVllmSamplerAdapter(
       if self.raiden_sync_delegate is None:
         from tunix.experimental.weight_sync import raiden_weight_sync_delegate  # pylint: disable=g-import-not-at-top
 
+        delegate_kwargs: dict[str, Any] = {"server_id": self.server_id}
+        if self.partial_rollout:
+          delegate_kwargs["partial_rollout"] = True
         self.raiden_sync_delegate = (
             raiden_weight_sync_delegate.RaidenWeightSyncDelegate(
-                server_id=self.server_id
+                **delegate_kwargs
             )
         )
 
@@ -187,15 +195,69 @@ class InprocessVllmSamplerAdapter(
       self.vllm_sampler.stop()
     return True
 
-  async def pause(self, **kwargs) -> str | None | Any:
+  async def pause(
+      self,
+      mode: str = "keep",
+      *,
+      clear_cache: bool = False,
+      **kwargs,
+  ) -> str | None | Any:
     """Pauses inference processing on this worker slice."""
     del kwargs
+    if self.vllm_sampler and hasattr(self.vllm_sampler, "pause"):
+      try:
+        await asyncio.to_thread(
+            self.vllm_sampler.pause, mode=mode, clear_cache=clear_cache
+        )
+      except TypeError:
+        await asyncio.to_thread(self.vllm_sampler.pause)
     return True
 
   async def resume(self, **kwargs) -> str | None | Any:
     """Resumes inference processing on this worker slice."""
     del kwargs
+    if self.vllm_sampler and hasattr(self.vllm_sampler, "resume"):
+      await asyncio.to_thread(self.vllm_sampler.resume)
     return True
+
+  async def pre_weight_sync(
+      self,
+      sync_request: base_sampler_lib.WeightSyncRequest | Any = None,
+      **kwargs,
+  ) -> str | None | Any:
+    """Pauses the in-process driver and prepares staging prior to weight update."""
+    use_partial = bool(kwargs.get("partial_rollout", self.partial_rollout))
+    await self.pause(
+        mode="keep" if use_partial else "wait",
+        clear_cache=not use_partial,
+    )
+    if self.partial_rollout:
+      kwargs.setdefault("partial_rollout", True)
+    return await super().pre_weight_sync(sync_request=sync_request, **kwargs)
+
+  async def post_weight_sync(
+      self,
+      sync_request: base_sampler_lib.WeightSyncRequest | Any = None,
+      **kwargs,
+  ) -> str | None | Any:
+    """Finalizes weight update and resumes the in-process driver."""
+    try:
+      return await super().post_weight_sync(sync_request=sync_request, **kwargs)
+    finally:
+      await self.resume()
+
+  async def abort_weight_sync(
+      self,
+      sync_request: base_sampler_lib.WeightSyncRequest | Any = None,
+      **kwargs,
+  ) -> str | None | Any:
+    """Safely aborts weight sync round and resumes the in-process driver."""
+    try:
+      return await super().abort_weight_sync(
+          sync_request=sync_request, **kwargs
+      )
+    finally:
+      await self.resume()
 
   async def get_mesh(self, **kwargs) -> Any:
     """Returns the underlying device mesh topology."""
@@ -250,6 +312,7 @@ class InprocessVllmSamplerAdapter(
     return_logprobs_list = []
     return_routed_experts_list = []
     routed_experts_prompt_start_list = []
+    cache_salt_list = []
 
     for req in requests:
       prompt = req.prompt if hasattr(req, "prompt") else req
@@ -277,6 +340,7 @@ class InprocessVllmSamplerAdapter(
       routed_experts_prompt_start_list.append(
           getattr(sp, "routed_experts_prompt_start", 0)
       )
+      cache_salt_list.append(getattr(sp, "cache_salt", None))
 
     max_generation_steps = max(max_gen_steps_list) if max_gen_steps_list else 64
     temperature = temps[0] if temps else 0.0
@@ -315,6 +379,12 @@ class InprocessVllmSamplerAdapter(
         return_logprobs=return_logprobs,
         routed_experts_prompt_start=routed_experts_prompt_start,
     )
+    if any(s is not None for s in cache_salt_list):
+      sampler_call_kwargs["cache_salt"] = (
+          cache_salt_list[0] if len(cache_salt_list) == 1 else cache_salt_list
+      )
+    elif kwargs.get("cache_salt") is not None:
+      sampler_call_kwargs["cache_salt"] = kwargs["cache_salt"]
     if has_token_prompts:
       sampler_call_kwargs["input_strings"] = None
       sampler_call_kwargs["prompt_token_ids"] = prompt_token_ids_batch

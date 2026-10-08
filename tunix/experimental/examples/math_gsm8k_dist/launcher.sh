@@ -81,6 +81,7 @@ WANDB_API_KEY=${WANDB_API_KEY:-}
 TRAJECTORY_LOG_DIR=${TRAJECTORY_LOG_DIR:-}
 SAMPLER=${SAMPLER:-inprocess_vllm}
 WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
+IN_FLIGHT_WEIGHT_UPDATES=${IN_FLIGHT_WEIGHT_UPDATES:-false}
 USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
 CHAT_PARSER=${CHAT_PARSER:-raw}
 # Model-specific EOS token IDs (comma-separated), fetched from HuggingFace
@@ -617,6 +618,7 @@ echo "Launching rollout node with sampler=$SAMPLER on TPU chips $ROLLOUT_TPU_CHI
     --lora_rank="$LORA_RANK"
     --lora_alpha="$LORA_ALPHA"
     --weight_sync_mode="$WEIGHT_SYNC_MODE"
+    --in_flight_weight_updates="$IN_FLIGHT_WEIGHT_UPDATES"
     --chat_parser="$CHAT_PARSER"
   )
   if [[ -n "$MAXTEXT_MODEL_NAME" ]]; then

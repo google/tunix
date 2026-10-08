@@ -115,10 +115,10 @@ class RaidenWeightSyncDelegateTest(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(await delegate.weight_sync(), 1)
     self.assertEqual(await delegate.weight_sync(), 2)
 
-  async def test_weight_sync_with_zero_version_bumps(self):
+  async def test_weight_sync_with_zero_version_preserves_zero(self):
     delegate = self._delegate()
     await delegate.bind_weight_sync(state={"w": 1})
-    self.assertEqual(await delegate.weight_sync(_Request(policy_version=0)), 1)
+    self.assertEqual(await delegate.weight_sync(_Request(policy_version=0)), 0)
 
   async def test_weight_sync_before_bind_raises(self):
     delegate = self._delegate()
@@ -195,6 +195,22 @@ class RaidenWeightSyncDelegateTest(unittest.IsolatedAsyncioTestCase):
     sampler.reset_prefix_cache.assert_called_once()
     sampler.refresh_state_leaves.assert_called_once()
 
+  async def test_partial_rollout_preserves_kv_and_prefix_cache(self):
+    sampler = mock.MagicMock()
+    sampler.config.free_kv_cache_during_weight_sync = True
+    sampler.config.partial_rollout = False
+    delegate = raiden_weight_sync_delegate.RaidenWeightSyncDelegate(
+        partial_rollout=True
+    )
+    await delegate.bind_weight_sync(sampler=sampler, state={"w": 1})
+    req = _Request(policy_version=1, req_id="req-1")
+    await delegate.pre_weight_sync(sync_request=req)
+    await delegate.post_weight_sync(sync_request=req)
+    sampler.delete_cache.assert_not_called()
+    sampler.reinitialize_cache.assert_not_called()
+    sampler.reset_prefix_cache.assert_not_called()
+    sampler.refresh_state_leaves.assert_called_once()
+
   async def test_round_tracker_lifecycle_and_status(self):
     delegate = self._delegate()
     await delegate.bind_weight_sync(state={"w": 1}, sampler=mock.MagicMock())
@@ -214,3 +230,4 @@ class RaidenWeightSyncDelegateTest(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
   absltest.main()
+

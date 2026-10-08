@@ -88,6 +88,7 @@ class VllmConfig:
   # model, large pool) set False to skip the two collective RPCs and the
   # re-allocation (~2 s per RL step on Qwen3-0.6B with a 57 GB pool).
   free_kv_cache_during_weight_sync: bool = True
+  partial_rollout: bool = False
   # Decode the text and extract the logprobs of each request as soon as it
   # finishes, in a thread pool, while the engine keeps decoding the rest of
   # the batch. Otherwise all of that runs serially after the last request
@@ -226,6 +227,28 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           " jax.sharding.Mesh."
       )
 
+  def pause(
+      self,
+      mode: str = "keep",
+      *,
+      clear_cache: bool = False,
+      timeout_s: float = 300.0,
+  ) -> None:
+    """Pauses the in-process driver loop (no-op in offline LLM mode)."""
+    if self._driver is not None:
+      self._driver.pause(
+          mode=mode, clear_cache=clear_cache, timeout_s=timeout_s
+      )
+
+  def resume(self) -> None:
+    """Resumes the in-process driver loop (no-op in offline LLM mode)."""
+    if self._driver is not None:
+      self._driver.resume()
+
+  @property
+  def is_paused(self) -> bool:
+    return bool(self._driver is not None and self._driver.is_paused)
+
   def delete_cache(self) -> None:
     if self.llm is not None:
       self.llm.reset_prefix_cache()
@@ -259,10 +282,23 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       self,
       updated_weights: jaxtyping.PyTree,
       filter_types: Optional[Tuple[Any, ...]] = None,
+      *,
+      preserve_active_kv_cache: Optional[bool] = None,
   ):
     del filter_types
+    cfg_partial = getattr(self.config, "partial_rollout", False)
+    keep_active_kv = (
+        bool(isinstance(cfg_partial, bool) and cfg_partial)
+        if preserve_active_kv_cache is None
+        else bool(preserve_active_kv_cache)
+    )
 
-    if self.config.free_kv_cache_during_weight_sync:
+    if keep_active_kv:
+      # Partial-rollout mode: keep active KV cache blocks intact for in-flight
+      # requests; prefix cache isolation across policy versions is enforced via
+      # per-request cache_salt.
+      pass
+    elif self.config.free_kv_cache_during_weight_sync:
       self.delete_cache()
     else:
       # Keep the KV pool allocated; only its (stale) prefix entries go.
@@ -312,7 +348,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           reshard_chunk_size=self.config.reshard_chunk_size,
       )
 
-    if self.config.free_kv_cache_during_weight_sync:
+    if self.config.free_kv_cache_during_weight_sync and not keep_active_kv:
       self.reinitialize_cache()
     else:
       self.refresh_state_leaves()
@@ -757,6 +793,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           f"{self.args['max_model_len']}."
       )
     raw_prompt_start = None
+    raw_cache_salt = None
     if beam_size is not None:
       sampling_params = BeamSearchParams(
           beam_width=beam_size,
@@ -816,6 +853,12 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         )
         raw_prompt_start = None
 
+      raw_cache_salt = sampling_kwargs.pop("cache_salt", None)
+      if raw_cache_salt is not None and not isinstance(
+          raw_cache_salt, (list, tuple)
+      ):
+        setattr(sampling_params, "cache_salt", raw_cache_salt)
+
       if sampling_kwargs:
         try:
           logging.log_first_n(
@@ -856,25 +899,52 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         List[TokensPrompt],
         [{"prompt_token_ids": list(ids)} for ids in prompt_ids],
     )
+    if (
+        raw_cache_salt is not None
+        and not isinstance(raw_cache_salt, (list, tuple))
+        and str(raw_cache_salt)
+    ):
+      for prompt_obj in prompt_objects:
+        prompt_obj["cache_salt"] = str(raw_cache_salt)
     target_sampling_params: Union[
         SamplingParams, BeamSearchParams, List[SamplingParams]
     ] = sampling_params
-    if raw_prompt_start is not None and isinstance(
-        raw_prompt_start, (list, tuple)
-    ):
-      assert len(raw_prompt_start) == len(prompt_objects), (
-          f"Length of routed_experts_prompt_start ({len(raw_prompt_start)}) "
-          f"does not match number of prompts ({len(prompt_objects)})."
-      )
+    per_prompt_starts = (
+        raw_prompt_start
+        if isinstance(raw_prompt_start, (list, tuple))
+        else None
+    )
+    per_prompt_salts = (
+        raw_cache_salt
+        if isinstance(raw_cache_salt, (list, tuple))
+        else None
+    )
+    if per_prompt_starts is not None or per_prompt_salts is not None:
+      if per_prompt_starts is not None:
+        assert len(per_prompt_starts) == len(prompt_objects), (
+            f"Length of routed_experts_prompt_start ({len(per_prompt_starts)}) "
+            f"does not match number of prompts ({len(prompt_objects)})."
+        )
+      if per_prompt_salts is not None and len(per_prompt_salts) != len(
+          prompt_objects
+      ):
+        raise ValueError(
+            f"Length of cache_salt ({len(per_prompt_salts)}) does not match"
+            f" number of prompts ({len(prompt_objects)})."
+        )
       prompt_params_list: List[SamplingParams] = []
-      for offset in raw_prompt_start:
+      for idx in range(len(prompt_objects)):
         p = cast(
             SamplingParams,
             sampling_params.clone()
             if hasattr(sampling_params, "clone")
             else copy.deepcopy(sampling_params),
         )
-        setattr(p, "routed_experts_prompt_start", offset)
+        if per_prompt_starts is not None:
+          setattr(p, "routed_experts_prompt_start", per_prompt_starts[idx])
+        if per_prompt_salts is not None and per_prompt_salts[idx]:
+          setattr(p, "cache_salt", per_prompt_salts[idx])
+          prompt_objects[idx]["cache_salt"] = str(per_prompt_salts[idx])
         prompt_params_list.append(p)
       target_sampling_params = prompt_params_list
 

@@ -47,6 +47,8 @@ class SamplingParams:
       length of previously processed tokens to return only newly prefilled
       environment tokens and completion.
     beam_size: Beam width for beam search decoding.
+    cache_salt: Optional salt string for isolating KV prefix cache entries
+      (e.g., pinned to Turn-1 policy version during partial rollout).
   """
 
   max_tokens: int = 64
@@ -59,6 +61,7 @@ class SamplingParams:
   return_routed_experts: bool = False
   routed_experts_prompt_start: int = 0
   beam_size: int | None = None
+  cache_salt: str | None = None
 
 
 @dataclasses.dataclass(kw_only=True)

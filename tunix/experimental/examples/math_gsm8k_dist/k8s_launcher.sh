@@ -79,6 +79,7 @@ export TRAJECTORY_GROUP_ORDER=${TRAJECTORY_GROUP_ORDER:-trajectory_completion}
 export DEBUG=${DEBUG:-0}
 export SAMPLER=${SAMPLER:-inprocess_vllm}
 export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
+export IN_FLIGHT_WEIGHT_UPDATES=${IN_FLIGHT_WEIGHT_UPDATES:-false}
 export USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
 export CHAT_PARSER=${CHAT_PARSER:-raw}
 export CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-1}
@@ -452,6 +453,7 @@ start_rollout_instance() {
         --lora_rank=${LORA_RANK} \
         --lora_alpha=${LORA_ALPHA} \
         --weight_sync_mode=${WEIGHT_SYNC_MODE} \
+        --in_flight_weight_updates=${IN_FLIGHT_WEIGHT_UPDATES} \
         --chat_parser=${CHAT_PARSER} \
         --prefuse_moe_weights=${PREFUSE_MOE_WEIGHTS} \
         --enable_prefix_caching=${ENABLE_PREFIX_CACHING} \

@@ -313,6 +313,18 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       const=True,
       help="Enable KV prefix caching in vLLM sampler.",
   )
+  parser.add_argument(
+      "--in_flight_weight_updates",
+      type=_str2bool,
+      default=_str2bool(os.getenv("IN_FLIGHT_WEIGHT_UPDATES", "false")),
+      nargs="?",
+      const=True,
+      help=(
+          "Enable partial-rollout (in-flight weight updates): pause/resume"
+          " sampler generation in-place during weight sync without draining"
+          " active multi-turn episodes."
+      ),
+  )
   parser.add_argument("--vllm_hbm_utilization", type=float, default=0.5)
   parser.add_argument(
       "--vllm_init_with_random_weights",
@@ -421,6 +433,9 @@ def _rollout_config_kwargs(
       "env_name": args.env_name,
       "agent_name": args.agent_name,
       "agent_config": _agent_config(args),
+      "partial_rollout": bool(
+          getattr(args, "in_flight_weight_updates", False)
+      ),
   }
 
 
@@ -563,10 +578,14 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
         multihost_backend != "ray" or args.mesh_tp is not None
     ), "Must set --mesh_tp when using Ray backend."
 
+  partial_rollout = bool(getattr(args, "in_flight_weight_updates", False))
+  enable_prefix_caching = bool(
+      args.enable_prefix_caching or partial_rollout
+  )
   engine_kwargs = {
       "model": vllm_model,
       "max_model_len": max_model_len,
-      "enable_prefix_caching": args.enable_prefix_caching,
+      "enable_prefix_caching": enable_prefix_caching,
       "async_scheduling": args.vllm_async_scheduling,
       "dtype": args.vllm_dtype,
       "max_logprobs": 1,
@@ -643,6 +662,7 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
       sampling_kwargs={"skip_special_tokens": False} if is_gemma4 else {},
       engine_kwargs=engine_kwargs,
       eos_tokens=_eos_token_ids(args, tokenizer),
+      partial_rollout=partial_rollout,
   )
   sampler_adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
       server_id=args.worker_id,
@@ -650,6 +670,7 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
       config=vllm_config,
       weight_sync_mode=args.weight_sync_mode,
       max_concurrency=args.max_concurrency,
+      partial_rollout=partial_rollout,
   )
   config = rollout_worker.RolloutConfig(
       sampler_type="inprocess_vllm",
@@ -700,6 +721,10 @@ def _create_vllm_sampler(args, tokenizer):
         f" --mesh_fsdp={dp_size} with --use_lora. Set --mesh_fsdp=1 or drop"
         " LoRA."
     )
+  partial_rollout = bool(getattr(args, "in_flight_weight_updates", False))
+  enable_prefix_caching = bool(
+      args.enable_prefix_caching or partial_rollout
+  )
   engine_kwargs = dict(
       model=vllm_model,
       tokenizer=args.tokenizer_path or vllm_model,
@@ -711,7 +736,7 @@ def _create_vllm_sampler(args, tokenizer):
       enable_lora=args.use_lora,
       max_lora_rank=args.lora_rank if args.use_lora else None,
       max_loras=1 if args.use_lora else None,
-      enable_prefix_caching=args.enable_prefix_caching,
+      enable_prefix_caching=enable_prefix_caching,
       async_scheduling=args.vllm_async_scheduling,
       max_logprobs=1,
       logprobs_mode="processed_logprobs",
@@ -743,6 +768,7 @@ def _create_vllm_sampler(args, tokenizer):
       engine_args=engine_args,
       model_name=vllm_model,
       weight_sync_mode=args.weight_sync_mode,
+      partial_rollout=partial_rollout,
   )
   config = rollout_worker.RolloutConfig(
       sampler_type="vllm",

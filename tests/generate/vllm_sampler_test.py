@@ -1021,6 +1021,54 @@ class VllmSamplerTokenInputTest(absltest.TestCase):
     obj.tokenizer.encode.assert_called_once_with("ordinary text")
     np.testing.assert_array_equal(out.prompt_lengths, [3])
 
+  def test_cache_salt_forwarded_in_tokens_prompt(self):
+    obj = self._sampler()
+    obj(
+        None,
+        4,
+        prompt_token_ids=[[1, 2], [3, 4]],
+        cache_salt="policy-v7",
+    )
+    submitted = obj.llm.generate.call_args.kwargs
+    self.assertEqual(
+        submitted["prompts"],
+        [
+            {"prompt_token_ids": [1, 2], "cache_salt": "policy-v7"},
+            {"prompt_token_ids": [3, 4], "cache_salt": "policy-v7"},
+        ],
+    )
+
+  def test_per_prompt_cache_salt_list_forwarded(self):
+    obj = self._sampler()
+    obj(
+        None,
+        4,
+        prompt_token_ids=[[1, 2], [3, 4]],
+        cache_salt=["policy-v1", "policy-v2"],
+    )
+    submitted = obj.llm.generate.call_args.kwargs
+    self.assertEqual(
+        submitted["prompts"],
+        [
+            {"prompt_token_ids": [1, 2], "cache_salt": "policy-v1"},
+            {"prompt_token_ids": [3, 4], "cache_salt": "policy-v2"},
+        ],
+    )
+
+  def test_pause_resume_and_update_params_preserve_active_kv_cache(self):
+    obj = self._sampler()
+    obj._driver = mock.MagicMock()
+    obj._driver.is_paused = False
+    obj._driver.pause_mode = None
+
+    obj.pause(mode="keep", clear_cache=False)
+    obj._driver.pause.assert_called_once_with(
+        mode="keep", clear_cache=False, timeout_s=300.0
+    )
+
+    obj.resume()
+    obj._driver.resume.assert_called_once()
+
 
 if __name__ == "__main__":
   absltest.main()

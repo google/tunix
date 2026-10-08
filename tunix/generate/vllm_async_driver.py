@@ -90,6 +90,14 @@ class VLLMInProcessDriver:
     self._submission_window_start: Optional[float] = None
     self._last_error: Optional[Exception] = None
 
+    self._pause_mode: Optional[str] = None
+    self._unpaused_event = threading.Event()
+    self._unpaused_event.set()
+    self._step_idle_event = threading.Event()
+    self._step_idle_event.set()
+    self._drained_event = threading.Event()
+    self._drained_event.set()
+
     if auto_start:
       self.start()
 
@@ -233,8 +241,11 @@ class VLLMInProcessDriver:
     )
     return future
 
-  def _drain_submission_queue_locked(self) -> None:
-    if not self._submission_queue_ready_locked():
+  def _drain_submission_queue_locked(self, *, force: bool = False) -> None:
+    """Submits queued requests to the underlying vLLM engine under lock."""
+    if not self._submission_queue:
+      return
+    if not force and not self._submission_queue_ready_locked():
       return
 
     queued_requests = self._submission_queue
@@ -303,6 +314,8 @@ class VLLMInProcessDriver:
 
   def stop(self) -> None:
     self._stop_event.set()
+    self._unpaused_event.set()
+    self._drained_event.set()
     self._work_event.set()
     if self._loop_thread is not None:
       self._loop_thread.join()
@@ -311,38 +324,197 @@ class VLLMInProcessDriver:
       self._log_thread.join()
       self._log_thread = None
 
-  def pause(self) -> None:
-    raise RuntimeError("Pause feature WIP")
+  @property
+  def is_paused(self) -> bool:
+    with self._engine_lock:
+      return self._pause_mode is not None
+
+  @property
+  def pause_mode(self) -> Optional[str]:
+    with self._engine_lock:
+      return self._pause_mode
+
+  def _apply_pause_engine_effects_locked(
+      self, mode: str, clear_cache: bool
+  ) -> None:
+    """Applies scheduler pause and optional cache resets on the engine."""
+    engine_core = getattr(self._llm_engine, "engine_core", None)
+    if engine_core is not None and hasattr(engine_core, "pause_scheduler"):
+      try:
+        engine_core.pause_scheduler(mode=mode, clear_cache=clear_cache)
+      except TypeError:
+        engine_core.pause_scheduler()
+    if clear_cache:
+      if hasattr(self._llm_engine, "reset_prefix_cache"):
+        self._llm_engine.reset_prefix_cache()
+      if engine_core is not None and hasattr(
+          engine_core, "reset_encoder_cache"
+      ):
+        engine_core.reset_encoder_cache()
+
+  def pause(
+      self,
+      mode: str = "keep",
+      *,
+      clear_cache: bool = False,
+      timeout_s: float = 300.0,
+  ) -> None:
+    """Pauses the in-process vLLM loop.
+
+    Args:
+      mode: Pause mode:
+        - "keep": Freeze scheduling at the next step boundary while keeping
+          in-flight requests and their KV blocks resident in the engine.
+        - "wait": Flush staged submissions and wait for all in-flight requests
+          to complete before freezing the loop.
+        - "abort": Freeze the loop and abort all queued and in-flight requests.
+      clear_cache: Whether to clear the engine prefix/encoder caches once
+        paused. Defaults to False so active KV blocks remain valid in "keep"
+        mode.
+      timeout_s: Maximum seconds to wait for in-flight step / drain completion.
+
+    Raises:
+      ValueError: If `mode` is not one of "keep", "wait", or "abort".
+      TimeoutError: If waiting for the active step or drain exceeds `timeout_s`.
+    """
+    if mode not in ("keep", "wait", "abort"):
+      raise ValueError(
+          f"Unsupported pause mode: {mode!r}. Expected 'keep', 'wait', or"
+          " 'abort'."
+      )
+
+    if mode == "keep":
+      with self._engine_lock:
+        self._pause_mode = "keep"
+        self._unpaused_event.clear()
+        self._work_event.set()
+      if not self._step_idle_event.wait(timeout=timeout_s):
+        raise TimeoutError(
+            "Timed out waiting for in-flight vLLM step to complete during"
+            " pause(mode='keep')."
+        )
+      with self._engine_lock:
+        self._apply_pause_engine_effects_locked(mode, clear_cache)
+      return
+
+    if mode == "wait":
+      with self._engine_lock:
+        self._drain_submission_queue_locked(force=True)
+        self._pause_mode = "wait"
+        if self._llm_engine.has_unfinished_requests():
+          self._drained_event.clear()
+          self._unpaused_event.set()
+          self._work_event.set()
+        else:
+          self._drained_event.set()
+          self._unpaused_event.clear()
+          self._work_event.set()
+      if not self._drained_event.wait(timeout=timeout_s):
+        raise TimeoutError(
+            "Timed out waiting for in-flight vLLM requests to drain during"
+            " pause(mode='wait')."
+        )
+      if not self._step_idle_event.wait(timeout=timeout_s):
+        raise TimeoutError(
+            "Timed out waiting for vLLM loop step to become idle during"
+            " pause(mode='wait')."
+        )
+      with self._engine_lock:
+        self._apply_pause_engine_effects_locked(mode, clear_cache)
+      return
+
+    # mode == "abort"
+    with self._engine_lock:
+      self._pause_mode = "abort"
+      self._unpaused_event.clear()
+      self._work_event.set()
+    if not self._step_idle_event.wait(timeout=timeout_s):
+      raise TimeoutError(
+          "Timed out waiting for in-flight vLLM step to complete during"
+          " pause(mode='abort')."
+      )
+    with self._engine_lock:
+      aborted_ids = list(self._pending.keys())
+      pending_futures = list(self._pending.values())
+      self._submission_queue.clear()
+      self._submission_window_start = None
+      self._pending.clear()
+      if aborted_ids:
+        self._llm_engine.abort_request(aborted_ids)
+      self._work_event.clear()
+      self._apply_pause_engine_effects_locked(mode, clear_cache)
+    for future in pending_futures:
+      if not future.done():
+        future.cancel()
 
   def resume(self) -> None:
-    raise RuntimeError("Resume feature WIP")
+    """Resumes the in-process vLLM loop after a pause."""
+    with self._engine_lock:
+      engine_core = getattr(self._llm_engine, "engine_core", None)
+      if engine_core is not None and hasattr(engine_core, "resume_scheduler"):
+        engine_core.resume_scheduler()
+      self._pause_mode = None
+      self._drained_event.set()
+      self._unpaused_event.set()
+      if self._submission_queue or self._llm_engine.has_unfinished_requests():
+        self._work_event.set()
 
   def _loop(self) -> None:
     try:
       while not self._stop_event.is_set():
+        if not self._unpaused_event.is_set():
+          self._unpaused_event.wait(timeout=self._poll_interval_s)
+          continue
         if not self._wait_for_work():
           continue
-        outputs = self._step_engine()
-        logging.log_every_n(
-            logging.DEBUG,
-            "VLLMInProcessDriver loop step outputs:"
-            f" {[output.request_id for output in outputs]}",
-            40,
-        )
-        if outputs:
-          for output in outputs:
-            self._handle_output(output)
-        else:
+        with self._engine_lock:
+          if not self._unpaused_event.is_set():
+            continue
+          self._step_idle_event.clear()
+        outputs = []
+        try:
+          outputs = self._step_engine()
+          logging.log_every_n(
+              logging.DEBUG,
+              "VLLMInProcessDriver loop step outputs:"
+              f" {[output.request_id for output in outputs]}",
+              40,
+          )
+          if outputs:
+            for output in outputs:
+              self._handle_output(output)
+          with self._engine_lock:
+            if (
+                self._pause_mode == "wait"
+                and not self._llm_engine.has_unfinished_requests()
+            ):
+              self._unpaused_event.clear()
+              self._drained_event.set()
+        finally:
+          self._step_idle_event.set()
+        if not outputs:
           time.sleep(self._poll_interval_s)
     except Exception as exc:  # pylint: disable=broad-exception-caught
       self._record_error(exc)
 
   def _wait_for_work(self) -> bool:
+    """Waits until there is engine work to process or the driver is paused/stopped."""
     while not self._stop_event.is_set():
+      if not self._unpaused_event.is_set():
+        return False
       with self._engine_lock:
-        has_work = self._submission_queue_ready_locked()
-        if not has_work:
+        if not self._unpaused_event.is_set():
+          return False
+        if self._pause_mode == "wait":
           has_work = self._llm_engine.has_unfinished_requests()
+          if not has_work:
+            self._unpaused_event.clear()
+            self._drained_event.set()
+            return False
+        else:
+          has_work = self._submission_queue_ready_locked()
+          if not has_work:
+            has_work = self._llm_engine.has_unfinished_requests()
         if has_work:
           return True
         self._work_event.clear()
@@ -359,7 +531,8 @@ class VLLMInProcessDriver:
         100,
     )
     with self._engine_lock:
-      self._drain_submission_queue_locked()
+      if self._pause_mode != "wait":
+        self._drain_submission_queue_locked()
       logging.log_every_n(
           logging.DEBUG,
           "VLLMInProcessDriver has"
