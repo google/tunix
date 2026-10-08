@@ -406,6 +406,10 @@ class YamlGeneratorTest(parameterized.TestCase):
         for c in with_sidecar[0]["initContainers"]
         if c["name"] == "colocated-python-sidecar"
     )
+    self.assertEqual(
+        sidecar_c.get("lifecycle"),
+        {"preStop": {"exec": {"command": ["sh", "-c", "kill -KILL 1"]}}},
+    )
     return {m["name"]: m["mountPath"] for m in sidecar_c["volumeMounts"]}
 
   def test_397b_sidecar_shm_disabled_renders_step2_form(self):
@@ -651,6 +655,11 @@ class YamlGeneratorTest(parameterized.TestCase):
         text=True,
         timeout=60,
         check=True,
+    )
+    self.assertIn(
+        "kubectl wait --for=delete pod -l"
+        " jobset.sigs.k8s.io/jobset-name=atwigg-256-prof-train -n default",
+        result.stdout,
     )
     docs = [
         d

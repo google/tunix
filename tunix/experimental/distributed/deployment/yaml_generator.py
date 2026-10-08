@@ -663,6 +663,10 @@ def main() -> None:
                   cpu: "4"
                   memory: {sidecar_memory}
               restartPolicy: Always
+              lifecycle:
+                preStop:
+                  exec:
+                    command: ["sh", "-c", "kill -KILL 1"]
               volumeMounts:
               {sidecar_volume_mount}"""
       if sidecar_image
