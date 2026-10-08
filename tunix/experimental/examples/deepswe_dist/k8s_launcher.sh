@@ -1234,7 +1234,18 @@ stop_eval() {
   local eval_name="${EVAL_JOBSET_NAME:-${JOB_PREFIX}-eval}"
   local eval_ns="${EVAL_NAMESPACE:-${K8S_NAMESPACE:-trellis}}"
   local replicas=${ROLLOUT_REPLICAS:-1}
-  local sandbox_selector="app.kubernetes.io/created-by in (${JOB_PREFIX},${eval_name},${eval_name}-0)"
+  local selector_list=""
+  if [[ -n "${JOB_PREFIX}" ]]; then
+    selector_list="${JOB_PREFIX}"
+  fi
+  if [[ -n "${eval_name}" ]]; then
+    if [[ -n "${selector_list}" ]]; then
+      selector_list="${selector_list},${eval_name},${eval_name}-0"
+    else
+      selector_list="${eval_name},${eval_name}-0"
+    fi
+  fi
+  local sandbox_selector="app.kubernetes.io/created-by in (${selector_list})"
   if [[ "$DRY_RUN" == "true" ]]; then
     echo "[DRY RUN] Would delete jobset ${eval_name} in namespace ${eval_ns}"
     if [[ ${replicas} -gt 1 ]]; then
