@@ -489,32 +489,34 @@ def pack_rows_to_train_examples(
     mask_dtype: Any,
     num_segments: int,
     is_update_step: bool,
+    return_host_arrays: bool = False,
 ) -> Any:
   """Converts a PackedChunk to a TrainExample."""
   n = len(chunk)
+  xp = np if return_host_arrays else jnp
   kwargs: dict[str, Any] = dict(
-      prompt_ids=jnp.zeros((n, 0), dtype=np.int32),
-      prompt_mask=jnp.zeros((n, 0), dtype=mask_dtype),
-      completion_ids=jnp.asarray(chunk.ids),
-      completion_mask=jnp.asarray(chunk.completion_mask, dtype=mask_dtype),
-      advantages=jnp.asarray(chunk.advantages),
-      segment_ids=jnp.asarray(chunk.segment_ids),
-      segment_positions=jnp.asarray(chunk.segment_positions),
+      prompt_ids=xp.zeros((n, 0), dtype=np.int32),
+      prompt_mask=xp.zeros((n, 0), dtype=mask_dtype),
+      completion_ids=xp.asarray(chunk.ids),
+      completion_mask=xp.asarray(chunk.completion_mask, dtype=mask_dtype),
+      advantages=xp.asarray(chunk.advantages),
+      segment_ids=xp.asarray(chunk.segment_ids),
+      segment_positions=xp.asarray(chunk.segment_positions),
       ref_per_token_logps=None,
       old_per_token_logps=None,
   )
   for name, val in chunk.per_token.items():
-    kwargs[name] = jnp.asarray(val)
+    kwargs[name] = xp.asarray(val)
   versions = chunk.policy_versions
   if any(v is not None for v in versions):
     fallback = next(v for v in versions if v is not None)
-    kwargs["policy_version"] = jnp.concatenate([
-        jnp.asarray(v if v is not None else fallback).reshape(-1)
+    kwargs["policy_version"] = xp.concatenate([
+        xp.asarray(v if v is not None else fallback).reshape(-1)
         for v in versions
     ])
   example = example_cls(**kwargs)
   replacements: dict[str, Any] = {
-      "is_update_step": jnp.array([is_update_step], dtype=jnp.bool_)
+      "is_update_step": xp.array([is_update_step], dtype=np.bool_)
   }
   if hasattr(example, "num_segments"):
     replacements["num_segments"] = num_segments
@@ -528,6 +530,7 @@ def pack_sequences(
     pad_id: int = 0,
     pack_size: int = 1,
     max_segments_per_packed_row: int | None = None,
+    return_host_arrays: bool = False,
 ) -> Iterator[list[common.TrainExample]]:
   """FFD-packs sequences into [pack_size, max_token_budget] chunks, streaming.
 
@@ -548,6 +551,9 @@ def pack_sequences(
     pad_id: Padding vocabulary id.
     pack_size: Rows per chunk (= fsdp * dp); each chunk is [pack_size,
       max_token_budget].
+    return_host_arrays: Build each chunk from numpy arrays instead of device
+      arrays, for a consumer that copies them to its devices itself (e.g. the
+      trainer's `shard_input`).
 
   Yields:
     Single-element lists, each one [pack_size, max_token_budget] TrainExample.
@@ -589,6 +595,7 @@ def pack_sequences(
             mask_dtype=mask_dtype,
             num_segments=num_segments,
             is_update_step=is_update,
+            return_host_arrays=return_host_arrays,
         )
     ]
 

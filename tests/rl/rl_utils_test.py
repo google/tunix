@@ -513,6 +513,48 @@ class UtilsTest(absltest.TestCase):
       )
       self.assertTrue(bool(np.asarray(pack2.is_update_step)[0]))
 
+  def test_pack_sequences_host_arrays_match_device_arrays(self):
+    # `return_host_arrays=True` builds the same chunks as the default, only in
+    # numpy, for a consumer that copies them to its devices itself.
+    examples = [
+        self._create_mock_train_example(
+            2, 3, old_per_token_logps=jnp.full((1, 3), -0.5)
+        ),
+        self._create_mock_train_example(
+            1, 2, old_per_token_logps=jnp.full((1, 2), -1.0)
+        ),
+        self._create_mock_train_example(
+            3, 4, old_per_token_logps=jnp.full((1, 4), -2.0)
+        ),
+    ]
+
+    def pack(return_host_arrays):
+      return [
+          chunk
+          for [chunk] in utils.pack_sequences(
+              iter([examples]),
+              max_token_budget=10,
+              sequences_per_update=3,
+              return_host_arrays=return_host_arrays,
+          )
+      ]
+
+    device_chunks = pack(return_host_arrays=False)
+    host_chunks = pack(return_host_arrays=True)
+    self.assertLen(device_chunks, 2)
+    self.assertLen(host_chunks, 2)
+    for host_chunk, device_chunk in zip(host_chunks, device_chunks):
+      self.assertEqual(host_chunk.num_segments, device_chunk.num_segments)
+      self.assertIsNotNone(host_chunk.old_per_token_logps)
+      host_leaves = jax.tree.leaves(host_chunk)
+      device_leaves = jax.tree.leaves(device_chunk)
+      self.assertLen(host_leaves, len(device_leaves))
+      for host_leaf, device_leaf in zip(host_leaves, device_leaves):
+        self.assertIsInstance(host_leaf, np.ndarray)
+        self.assertIsInstance(device_leaf, jax.Array)
+        self.assertEqual(host_leaf.dtype, device_leaf.dtype)
+        np.testing.assert_array_equal(host_leaf, np.asarray(device_leaf))
+
   def test_pack_sequences_sets_num_segments_to_budget_plus_one(self):
     # num_segments is the static (pytree_node=False) segment-bucket upper bound.
     # It must equal budget + 1 (a pack of `budget` tokens holds at most `budget`

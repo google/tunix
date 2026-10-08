@@ -271,6 +271,17 @@ class RLLearner(abc.ABC, Generic[TConfig]):
 
     combined_batch = self._generate_and_compute_advantage(merged, mode)
 
+    # With sequence packing, `pack_sequences` unpads every train example and
+    # re-chunks the sequences, so splitting into micro-batches here only adds
+    # slicing work. Eval batches are not packed and keep the split, and a
+    # shuffle seed needs the micro-batches to shuffle.
+    if (
+        mode == rl_engine_lib.Mode.TRAIN
+        and self._packing_enabled
+        and self._data_shuffle_seed is None
+    ):
+      return [combined_batch]
+
     # Split back to original training micro size
     produced: list[common.TrainExample] = []
     offset = 0
@@ -364,6 +375,11 @@ class RLLearner(abc.ABC, Generic[TConfig]):
           shuffled_indices = jax.random.permutation(shuffle_seed, len(examples))
           for i in shuffled_indices:
             data_queue.put([examples[i]])
+        elif self._packing_enabled and mode == rl_engine_lib.Mode.TRAIN:
+          # One queue item per call: `pack_sequences` then sees the whole
+          # (mini-)batch at once and packs it globally, as its docstring
+          # intends. Eval data is not packed and keeps one item per example.
+          data_queue.put(list(examples))
         else:
           for example in examples:
             data_queue.put([example])
@@ -792,10 +808,15 @@ class RLLearner(abc.ABC, Generic[TConfig]):
           max_segments_per_packed_row=getattr(
               self._training_config, "max_segments_per_packed_row", None
           ),
+          # On a mesh, `shard_input` copies each chunk to the devices, so build
+          # it in numpy and copy it once. Without a mesh, `shard_input` is a
+          # no-op, so keep device arrays as before.
+          return_host_arrays=not mesh.empty,
       )
 
-    curr_eval_ds = None
-    with jax.profiler.StepTraceAnnotation("trainer", step_num=initial_steps):
+    # A chained `update_actor` call pulls the packed chunks itself, so time the
+    # wait for each item here to keep `actor_dequeue_time` per chunk.
+    def timed_batches():
       while True:
         with sft_utils.time_measure(suppress_logging=True) as timer:
           try:
@@ -814,6 +835,21 @@ class RLLearner(abc.ABC, Generic[TConfig]):
               mode=rl_engine_lib.Mode.TRAIN,
           )
 
+        yield curr_train_ds
+
+    # With packing, the remaining packed chunks go to one `update_actor` call.
+    # The trainer then dispatches each train step while the previous one still
+    # runs, instead of waiting for the device at the end of a call per chunk.
+    # PPO is excluded: its critic update needs the same chunks again. The
+    # trainer runs eval at the start of every call that gets eval data, so eval
+    # now runs once per call instead of once per chunk.
+    chain_updates = self._packing_enabled and not hasattr(
+        self.rl_engine, "critic_trainer"
+    )
+    batches = timed_batches()
+    curr_eval_ds = None
+    with jax.profiler.StepTraceAnnotation("trainer", step_num=initial_steps):
+      for curr_train_ds in batches:
         if (
             eval_ds
             and not curr_eval_ds
@@ -833,6 +869,10 @@ class RLLearner(abc.ABC, Generic[TConfig]):
               mode=rl_engine_lib.Mode.EVAL,
           )
           curr_eval_ds = eval_data_queue.get(block=True)
+        if chain_updates:
+          curr_train_ds = itertools.chain(
+              curr_train_ds, itertools.chain.from_iterable(batches)
+          )
         self.rl_engine.update_actor(
             curr_train_ds,
             curr_eval_ds,
