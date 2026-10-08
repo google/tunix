@@ -15,16 +15,20 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # k8s has a 63 char limit on total label name, so keep job_prefix unique to your job and short
 export JOB_PREFIX="${JOB_PREFIX:-${USER}}"
 export EVAL_JOBSET_NAME="${EVAL_JOBSET_NAME:-${JOB_PREFIX}-eval}"
-export TUNIX_IMAGE="${TUNIX_IMAGE:-gcr.io/cloud-tpu-multipod-dev/sanbao/tunix_stack:eval}"
+export TUNIX_IMAGE="${TUNIX_IMAGE:-gcr.io/cloud-tpu-multipod-dev/atwigg/trellis-experimental:1005}"
 
 export BUCKET="${BUCKET:-gs://atwigg-trellis-europe-west4-dev}"
 export EVAL_OUTPUT_DIR="${EVAL_OUTPUT_DIR:-${BUCKET}/eval_results/${JOB_PREFIX}}"
 export TRAJECTORY_LOG_DIR="${TRAJECTORY_LOG_DIR:-${BUCKET}/trajectories/${JOB_PREFIX}/logger}"
 export TRAJECTORY_STORE_ROOT_DIR="${TRAJECTORY_STORE_ROOT_DIR:-${TRAJECTORY_STORE_ROOT:-${BUCKET}/trajectories/${JOB_PREFIX}/store}}"
 
+export PROJECT="${PROJECT:-cloud-tpu-shared-capacity}"
 export REGION="${REGION:-europe-west4}"
 export CLUSTER="${CLUSTER:-bodaborg-v5p-nap}"
 export K8S_NAMESPACE="${K8S_NAMESPACE:-trellis}"
+export SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-${K8S_NAMESPACE}}"
+export KUEUE_QUEUE="${KUEUE_QUEUE:-multislice-queue}"
+export PREEMPTIBLE="${PREEMPTIBLE:-false}"
 
 # Model configuration
 export MODEL_NAME="Qwen3.5-397B-A17B"
@@ -72,7 +76,7 @@ export PATHWAYS_PROXY_EXTRA_ARGS="${PATHWAYS_PROXY_EXTRA_ARGS:-${_rollout_xla_fl
 # Evaluation & DeepSWE Pipeline Configuration
 # ==============================================================================
 export NUM_GENERATIONS="${NUM_GENERATIONS:-4}"
-export BATCH_SIZE="${BATCH_SIZE:-64}"
+export BATCH_SIZE="${BATCH_SIZE:-$(( 4 * ROLLOUT_REPLICAS ))}"
 export DATASET_SPLIT="${DATASET_SPLIT:-validation}"
 export TASKS_LIMIT="${TASKS_LIMIT:-0}"
 
@@ -85,7 +89,7 @@ export DEBUG=${DEBUG:-0}
 # DeepSWE Environment & Agent Sandbox
 export DATASET_PATH="${DATASET_PATH:-gs://mlperf_dataset/benchmark-r2e-gym-easy}"
 export MAX_WARMPOOL_REPLICAS="${MAX_WARMPOOL_REPLICAS:-16}"
-export MAX_CONCURRENCY="${MAX_CONCURRENCY:-256}"
+export MAX_CONCURRENCY="${MAX_CONCURRENCY:-$(( 16 * ROLLOUT_REPLICAS ))}"
 export SANDBOX_NODE_SELECTOR_VAL="${SANDBOX_NODE_SELECTOR_VAL:-sandbox-cpu-pool}"
 export IMAGE_REWRITE_PREFIX="${IMAGE_REWRITE_PREFIX:-europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/}"
 export ENABLE_THINKING="${ENABLE_THINKING:-false}"
