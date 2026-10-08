@@ -220,6 +220,8 @@ class RolloutFaultToleranceConfig:
       before synthesizing a terminal FAILED placeholder trajectory.
     max_in_flight_per_worker: Optional default cap on concurrent in-flight
       rollouts dispatched to any single rollout worker.
+    task_timeout_s: Optional per-task execution timeout in seconds once a
+      rollout request is dispatched to a worker.
     retry_weight_sync_on_eviction: Whether `WeightSyncCoordinator.sync()`
       automatically evicts failed destination workers and retries the round once
       on surviving workers.
@@ -230,6 +232,7 @@ class RolloutFaultToleranceConfig:
   retry_on_worker_failure: bool = True
   max_task_retries: int = 3
   max_in_flight_per_worker: int | None = None
+  task_timeout_s: float | None = None
   retry_weight_sync_on_eviction: bool = True
 
   def __post_init__(self):
@@ -240,11 +243,14 @@ class RolloutFaultToleranceConfig:
         and self.max_in_flight_per_worker <= 0
     ):
       raise ValueError("max_in_flight_per_worker must be positive")
+    if self.task_timeout_s is not None and self.task_timeout_s <= 0:
+      raise ValueError("task_timeout_s must be positive")
 
   def with_overrides(
       self,
       *,
       max_in_flight_per_worker: int | None = None,
+      task_timeout_s: float | None = None,
   ) -> "RolloutFaultToleranceConfig":
     """Returns a copy where each non-None argument replaces the stored value.
 
@@ -255,6 +261,7 @@ class RolloutFaultToleranceConfig:
     """
     overrides = {
         "max_in_flight_per_worker": max_in_flight_per_worker,
+        "task_timeout_s": task_timeout_s,
     }
     overrides = {k: v for k, v in overrides.items() if v is not None}
     return dataclasses.replace(self, **overrides) if overrides else self

@@ -25,6 +25,7 @@ import asyncio
 import contextlib
 import functools
 import logging
+import signal
 import socket
 import time
 from types import SimpleNamespace
@@ -1092,10 +1093,15 @@ class CpuDistributedRLIntegrationTest(parameterized.TestCase):
           r1_proc.kill()
           r1_proc.join(timeout=5.0)
 
-          async def _dispatch_and_drain():
+          async def _dispatch_and_drain(
+              policy_version: int = 0,
+              prompts: list[dict[str, Any]] | None = None,
+          ):
             assert cluster.engine is not None
             await cluster.engine.dispatch_rollouts(
-                prompt_items, num_generations=2, policy_version=0
+                prompts if prompts is not None else prompt_items,
+                num_generations=2,
+                policy_version=policy_version,
             )
             collected = []
             deadline = time.monotonic() + 30.0
@@ -1104,7 +1110,7 @@ class CpuDistributedRLIntegrationTest(parameterized.TestCase):
               collected.extend(batch)
             return collected
 
-          items = asyncio.run(_dispatch_and_drain())
+          items = asyncio.run(_dispatch_and_drain(policy_version=0))
           self.assertLen(items, 4)
           for item in items:
             self.assertIn(
@@ -1127,7 +1133,7 @@ class CpuDistributedRLIntegrationTest(parameterized.TestCase):
           # it.
           with running_multiprocess_worker(
               _run_rollout_worker_process, "rollout-1"
-          ) as (r1_new_handle, _, _, _):
+          ) as (r1_new_handle, _, r1_new_proc, _):
             cluster.register_worker_handle(
                 worker_id="rollout-1",
                 roles=[datatypes.Role.ROLLOUT],
@@ -1186,6 +1192,53 @@ class CpuDistributedRLIntegrationTest(parameterized.TestCase):
                         " Raiden sync."
                     ),
                 )
+
+            # 5. Simulate a silent TPU/vLLM wedge on rollout-1 via SIGSTOP
+            # (process stays alive and TCP socket stays open, but stops
+            # responding) and verify rollout_task_timeout_s evicts rollout-1
+            # and retries its in-flight rollouts on rollout-0.
+            wedge_prompts = [
+                {
+                    "prompt": "prompt_alpha",
+                    "prompt_id": "prompt_w0",
+                    "max_turns": 1,
+                    "generation_kwargs": {"max_tokens": 4, "temperature": 1.0},
+                },
+                {
+                    "prompt": "prompt_beta",
+                    "prompt_id": "prompt_w1",
+                    "max_turns": 1,
+                    "generation_kwargs": {"max_tokens": 4, "temperature": 1.0},
+                },
+            ]
+            cluster.engine.set_rollout_task_timeout_s(5.0)
+            os.kill(r1_new_proc.pid, signal.SIGSTOP)
+            try:
+              wedge_items = asyncio.run(
+                  _dispatch_and_drain(
+                      policy_version=cluster.engine.policy_version,
+                      prompts=wedge_prompts,
+                  )
+              )
+              self.assertLen(wedge_items, 4)
+              for item in wedge_items:
+                self.assertIn(
+                    item.status,
+                    (datatypes.TrajectoryStatus.SUCCEEDED, "SUCCEEDED"),
+                )
+              self.assertEqual(
+                  cluster.registry.state("rollout-1"),
+                  worker_registry.MembershipState.EVICTED,
+              )
+              self.assertEqual(
+                  cluster.registry.state("rollout-0"),
+                  worker_registry.MembershipState.ACTIVE,
+              )
+              self.assertEqual(
+                  cluster.worker_handles(datatypes.Role.ROLLOUT), [r0_handle]
+              )
+            finally:
+              os.kill(r1_new_proc.pid, signal.SIGCONT)
 
             program.close()
             cluster.shutdown()
