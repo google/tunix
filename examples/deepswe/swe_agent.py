@@ -12,7 +12,6 @@ try:
 except ImportError:
   import template  # pyrefly: ignore[missing-import]
 
-OPENHANDS_SYSTEM_PROMPT = template.OPENHANDS_SYSTEM_PROMPT
 SWE_SYSTEM_PROMPT = template.SWE_SYSTEM_PROMPT
 SWE_SYSTEM_PROMPT_FN_CALL = template.SWE_SYSTEM_PROMPT_FN_CALL
 SWE_USER_PROMPT = template.SWE_USER_PROMPT
@@ -98,11 +97,7 @@ class SWEAgent(ConversationAgentBase):
     assert scaffold in [
         "r2egym",
         "sweagent",
-        "openhands",
-    ], (
-        f"Invalid scaffold: {scaffold}, must be one of ['r2egym', 'sweagent',"
-        " 'openhands']"
-    )
+    ], f"Invalid scaffold: {scaffold}, must be one of ['r2egym', 'sweagent']"
     if system_prompt is None:
       system_prompt = get_system_prompt(
           scaffold=scaffold, use_fn_calling=use_fn_calling

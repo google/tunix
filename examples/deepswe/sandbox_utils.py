@@ -262,17 +262,6 @@ def init_global_fleet(
         "warm_per_task": True,
     }
 
-    try:
-      from examples.deepswe import template as template_mod
-
-      template = template_mod.get_template(scaffold, node_sel)
-      if template is not None:
-        fleet_kwargs["template"] = template
-      if scaffold == "openhands":
-        fleet_kwargs["template_name_prefix"] = "oh-img-"
-    except (ImportError, AttributeError):
-      pass
-
     fleet_cfg = FleetConfig(**fleet_kwargs)
     fleet_inst = SandboxFleet(fleet_cfg)
 

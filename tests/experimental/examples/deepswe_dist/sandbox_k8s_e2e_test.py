@@ -240,10 +240,9 @@ def run_pipeline_e2e(
         t_acq = time.perf_counter() - t_acq_start
 
         t_exec_start = time.perf_counter()
-        param_name = "command" if scaffold == "openhands" else "cmd"
         action = (
             "<function=execute_bash>\n"
-            f"<parameter={param_name}>ls</parameter>\n"
+            "<parameter=cmd>ls</parameter>\n"
             "</function>"
         )
         step_res = env.step(action)
@@ -513,8 +512,8 @@ def main(argv: list[str]) -> None:
       "--scaffold",
       type=str,
       default="r2egym",
-      choices=["r2egym", "sweagent", "openhands"],
-      help="Scaffold harness to test ('r2egym', 'sweagent', 'openhands').",
+      choices=["r2egym", "sweagent"],
+      help="Scaffold harness to test ('r2egym' or 'sweagent').",
   )
   parser.add_argument(
       "--dry_run", action="store_true", help="Run with mock fleet."
@@ -576,8 +575,6 @@ def main(argv: list[str]) -> None:
 
   if args.seed is not None:
     random.seed(args.seed)
-
-  os.environ["OPENHANDS_SUPPRESS_BANNER"] = "1"
 
   logging.basicConfig(
       level=logging.INFO,
@@ -698,30 +695,6 @@ class DeepSWESandboxE2ETest(absltest.TestCase):
         max_steps=max_steps,
         is_mock=True,
         scaffold="r2egym",
-    )
-    expected_sandboxes = max_steps * batch_size * num_generations
-    self.assertEqual(stats["steps_executed"], max_steps)
-    self.assertEqual(stats["sandboxes_acquired"], expected_sandboxes)
-    self.assertEqual(stats["sandboxes_released"], expected_sandboxes)
-    self.assertGreater(stats["pools_unwarmed"], 0)
-    self.assertIn("avg_acquire_time_sec", stats)
-    self.assertIn("avg_exec_time_sec", stats)
-    self.assertEqual(fleet.active_pools, {})
-
-  def test_e2e_pipeline_lifecycle_mock_openhands(self):
-    batch_size = 1
-    num_generations = 2
-    max_steps = 3
-    dataset = create_synthetic_dataset(num_samples=12)
-    fleet = FakeFleet()
-    stats = run_pipeline_e2e(
-        dataset=dataset,
-        fleet=fleet,
-        batch_size=batch_size,
-        num_generations=num_generations,
-        max_steps=max_steps,
-        is_mock=True,
-        scaffold="openhands",
     )
     expected_sandboxes = max_steps * batch_size * num_generations
     self.assertEqual(stats["steps_executed"], max_steps)

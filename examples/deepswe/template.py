@@ -12,11 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Templates and specifications for DeepSWE agents and environments."""
-
-import json
-import os
-from typing import Any, Optional
+"""Prompt templates for DeepSWE agents."""
 
 # ==============================================================================
 # Agent System Prompts
@@ -198,67 +194,6 @@ Reminder:
 - Always provide reasoning for your function call in natural language BEFORE the function call (not after)
 </IMPORTANT>"""
 
-
-OPENHANDS_SYSTEM_PROMPT = """You are OpenHands agent, a helpful AI assistant that can interact with a computer to solve tasks.
-You are provided a github issue and repository bash environment and is tasked to solve certain tasks (e.g., file localization, testcase generation, code repair and editing etc) to resolve the issue.
-
-We have access to the following functions:
-
-–– BEGIN FUNCTION #1: execute_bash ––
-Description:
-Execute a bash command in the terminal.
-Parameters:
-  1. command (string, required)
-The bash command to execute. For example: `python my_script.py`. If not provided, will show help.
-–– END FUNCTION #1 ––
-
-–– BEGIN FUNCTION #2: str_replace_editor ––
-Description:
-Custom editing tool for viewing, creating and editing files
-* State is persistent across command calls and discussions with the user
-* If `path` is a file, `view` displays the result of applying `cat -n`. If `path` is a directory, `view` lists non-hidden files and directories up to 2 levels deep
-* The `create` command cannot be used if the specified `path` already exists as a file
-* If a `command` generates a long output, it will be truncated and marked with `<response clipped>`
-Notes for using the `str_replace` command:
-* The `old_str` parameter should match EXACTLY one or more consecutive lines from the original file. Be mindful of whitespaces!
-* If the `old_str` parameter is not unique in the file, the replacement will not be performed. Make sure to include enough context in `old_str` to make it unique
-* The `new_str` parameter should contain the edited lines that should replace the `old_str`
-Parameters:
-  1. command (string, required): The commands to run. Allowed options are: `view`, `create`, `str_replace`, `insert`.
-  2. path (string, required): Absolute path to file or directory, e.g. `/testbed/file.py` or `/testbed`.
-  3. file_text (string, optional): Required parameter of `create` command, with the content of the file to be created.
-  4. old_str (string, optional): Required parameter of `str_replace` command containing the string in `path` to replace.
-  5. new_str (string, optional): Optional parameter of `str_replace` command containing the new string (if not given, no string will be added). Required parameter of `insert` command containing the string to insert.
-  6. insert_line (integer, optional): Required parameter of `insert` command. The `new_str` will be inserted AFTER the line `insert_line` of `path`.
-  7. view_range (array, optional): Optional parameter of `view` command when `path` points to a file. If none is given, the full file is shown. If provided, the file will be shown in the indicated line number range, e.g. [11, 12] will show lines 11 and 12. Indexing at 1 to start. Setting `[start_line, -1]` shows all lines from `start_line` to the end of the file.
-–– END FUNCTION #2 ––
-
-–– BEGIN FUNCTION #3: submit ––
-Description:
-Finish the interaction when the task is complete OR if the assistant cannot proceed further with the task.
-No parameters are required for this function.
-–– END FUNCTION #3 ––
-
-If you choose to call a function ONLY reply in the following format with NO suffix:
-
-<function=example_function_name>
-<parameter=example_parameter_1>value_1</parameter>
-<parameter=example_parameter_2>
-This is the value for the second parameter
-that can span
-multiple lines
-</parameter>
-</function>
-
-<IMPORTANT>
-Reminder:
-- Function calls MUST follow the specified format, start with <function= and end with </function>
-- Required parameters MUST be specified
-- Only call one function at a time
-- VERY IMPORTANT: Each response must include both reasoning (as natural text) and function call (in above format) to solve the task.
-</IMPORTANT>
-"""
-
 # ==============================================================================
 # Agent User Prompts
 # ==============================================================================
@@ -404,8 +339,6 @@ def get_system_prompt(
   """Get system prompt for the given scaffold and function calling mode."""
   if scaffold == "sweagent":
     return SWEAGENT_SYSTEM_PROMPT
-  elif scaffold == "openhands":
-    return OPENHANDS_SYSTEM_PROMPT
   return SWE_SYSTEM_PROMPT_FN_CALL if use_fn_calling else SWE_SYSTEM_PROMPT
 
 
@@ -417,114 +350,3 @@ def get_user_prompt_template(
   if scaffold == "sweagent":
     return SWEAGENT_USER_PROMPT
   return SWE_USER_PROMPT_FN_CALL if use_fn_calling else SWE_USER_PROMPT
-
-
-# ==============================================================================
-# Environment Sandbox Fleet Pod Templates
-# ==============================================================================
-
-DEFAULT_OPENHANDS_KEEPALIVE_CMD = [
-    "sh",
-    "-c",
-    (
-        "chmod +x /oh/openhands-agent-server 2>/dev/null || true; ([ -d"
-        " /testbed ] && [ ! -e /workspace ] && ln -s /testbed /workspace"
-        " 2>/dev/null || true); ([ -d /workspace ] && [ ! -e /testbed ] && ln"
-        " -s /workspace /testbed 2>/dev/null || true); git config --global"
-        " --add safe.directory '*' 2>/dev/null || true; [ -d /testbed ] && cd"
-        " /testbed; if [ -x /oh/openhands-agent-server ]; then exec"
-        " /oh/openhands-agent-server --host 0.0.0.0 --port 8000; elif [ -x"
-        " /usr/local/bin/openhands-agent-server ]; then exec tini --"
-        " /usr/local/bin/openhands-agent-server --host 0.0.0.0 --port 8000;"
-        " else exec tini -- /agent-server/.venv/bin/python -m"
-        " openhands.agent_server --host 0.0.0.0 --port 8000; fi"
-    ),
-]
-
-
-def get_openhands_pod_template(
-    node_selector: Optional[dict[str, str]] = None,
-) -> Any:
-  """Builds and returns the TemplateSpec for OpenHands agent sandbox."""
-  try:
-    from agent_sandbox_rl import (  # pyrefly: ignore[missing-import]
-        ResourceSpec,
-        TemplateSpec,
-    )
-  except ImportError as e:
-    raise ImportError(
-        "use_agent_sandbox=True strictly requires the 'agent_sandbox_rl'"
-        " package. Install via: pip install"
-        " git+https://github.com/kubernetes-sigs/agent-sandbox.git#subdirectory=examples/agent-sandbox-rl"
-    ) from e
-
-  session_key = os.getenv("SANDBOX_SESSION_KEY", "")
-  if os.getenv("AGENT_SERVER_COMMAND"):
-    try:
-      keepalive_cmd = json.loads(os.environ["AGENT_SERVER_COMMAND"])
-    except Exception:
-      keepalive_cmd = os.environ["AGENT_SERVER_COMMAND"].split()
-  else:
-    keepalive_cmd = list(DEFAULT_OPENHANDS_KEEPALIVE_CMD)
-
-  server_image = os.getenv(
-      "OPENHANDS_SERVER_IMAGE",
-      "gcr.io/cloud-tpu-multipod-dev/sanbao/openhands-agent-server:1.44.1",
-  )
-
-  extra_pod_spec = {
-      "initContainers": [{
-          "name": "oh-server",
-          "image": server_image,
-          "command": [
-              "sh",
-              "-c",
-              (
-                  "cp -a /opt/oh/. /oh/ 2>/dev/null || cp -a"
-                  " /usr/local/bin/openhands-agent-server /oh/"
-              ),
-          ],
-          "volumeMounts": [{"name": "oh", "mountPath": "/oh"}],
-      }],
-      "volumes": [{"name": "oh", "emptyDir": {}}],
-      "containers": [{
-          "ports": [{"containerPort": 8000}],
-          "volumeMounts": [{"name": "oh", "mountPath": "/oh"}],
-          "readinessProbe": {
-              "httpGet": {"path": "/health", "port": 8000},
-              "periodSeconds": 2,
-              "failureThreshold": 150,
-          },
-          "resources": {
-              "limits": {
-                  "cpu": os.getenv("SANDBOX_CPU_LIMIT", "2"),
-                  "memory": os.getenv("SANDBOX_MEM_LIMIT", "4Gi"),
-              }
-          },
-          "env": (
-              [{"name": "OH_SESSION_API_KEYS_0", "value": session_key}]
-              if session_key
-              else []
-          ),
-      }],
-  }
-
-  return TemplateSpec(
-      keepalive_command=keepalive_cmd,
-      resources=ResourceSpec(
-          cpu=os.getenv("SANDBOX_CPU", "500m"),
-          memory=os.getenv("SANDBOX_MEM", "1Gi"),
-      ),
-      extra_pod_spec=extra_pod_spec,
-      node_selector=node_selector,
-  )
-
-
-def get_template(
-    scaffold: str,
-    node_selector: Optional[dict[str, str]] = None,
-) -> Any:
-  """Returns the fleet TemplateSpec for the given scaffold, or None."""
-  if scaffold == "openhands":
-    return get_openhands_pod_template(node_selector=node_selector)
-  return None

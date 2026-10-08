@@ -353,11 +353,8 @@ parser.add_argument(
     "--scaffold",
     type=str,
     default="r2egym",
-    choices=["r2egym", "sweagent", "openhands"],
-    help=(
-        "Agent scaffold/sandbox toolset to use ('r2egym', 'sweagent', or"
-        " 'openhands')."
-    ),
+    choices=["r2egym", "sweagent"],
+    help="Agent scaffold/sandbox toolset to use ('r2egym' or 'sweagent').",
 )
 
 args, _ = parser.parse_known_args()

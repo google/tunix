@@ -164,8 +164,8 @@ kubectl create configmap "${CONFIGMAP_NAME}" \
   --namespace="${NAMESPACE}" \
   --from-file=sandbox_utils.py="${SCRIPT_DIR}/../../../oss/examples/deepswe/sandbox_utils.py" \
   --from-file=swe_env.py="${SCRIPT_DIR}/../../../oss/examples/deepswe/swe_env.py" \
-  --from-file=openhands_utils.py="${SCRIPT_DIR}/../../../oss/examples/deepswe/openhands_utils.py" \
   --from-file=template.py="${SCRIPT_DIR}/../../../oss/examples/deepswe/template.py" \
+  --from-file=swe_agent.py="${SCRIPT_DIR}/../../../oss/examples/deepswe/swe_agent.py" \
   --from-file=deepswe.py="${SCRIPT_DIR}/deepswe.py" \
   --from-file=sandbox_k8s_e2e_test.py="${SCRIPT_DIR}/sandbox_k8s_e2e_test.py"
 
@@ -215,20 +215,16 @@ spec:
           value: "${NODE_SELECTOR_VAL}"
         - name: IMAGE_REWRITE_PREFIX
           value: "${IMAGE_REWRITE_PREFIX}"
-        - name: OPENHANDS_SUPPRESS_BANNER
-          value: "1"
         command:
         - bash
         - -c
         - |
           echo "=== DeepSWE Sandbox E2E Job Started at \$(date) ==="
-          pip install -q --no-cache-dir gym docker 'swebench==3.0.2' 'openhands-sdk>=1.44.1' 'k8s-agent-sandbox>=0.5.1' httpx
+          # openai: r2egym.agenthub.utils imports it, but r2egym is installed with --no-deps below.
+          pip install -q --no-cache-dir gym docker openai 'swebench==3.0.2' 'k8s-agent-sandbox>=0.5.1' httpx
           rm -rf /tmp/agent-sandbox
           git clone --depth 1 https://github.com/kubernetes-sigs/agent-sandbox.git /tmp/agent-sandbox
           pip install -q --no-cache-dir /tmp/agent-sandbox/examples/agent-sandbox-rl
-          SETUPTOOLS_SCM_PRETEND_VERSION=0.1.0 pip install -q --no-cache-dir /tmp/agent-sandbox/clients/integrations/openhands 2>/dev/null || true
-          mkdir -p /opt/venv/lib/python3.12/site-packages
-          cp -r /tmp/agent-sandbox/clients/integrations/openhands/openhands_k8s_agent_sandbox /opt/venv/lib/python3.12/site-packages/ 2>/dev/null || true
           pip install -q --no-deps 'git+https://github.com/r2e-gym/r2e-gym.git@0d94c4eb9431cd195c55a7ea3abd54006c9a1735'
           sed -i 's/create_repo, upload_folder, HfFolder/create_repo, upload_folder/' /opt/venv/lib/python3.12/site-packages/r2egym/agenthub/utils/utils.py 2>/dev/null || true
           sed -i 's/self.commit = ParsedCommit(\*\*json.loads(self.commit_json))/self.commit = ParsedCommit(\*\*(json.loads(self.commit_json) if isinstance(self.commit_json, str) else self.commit_json))/' /opt/venv/lib/python3.12/site-packages/r2egym/agenthub/runtime/docker.py 2>/dev/null || true
@@ -236,17 +232,16 @@ spec:
           mkdir -p /app/examples/deepswe
           mkdir -p /app/tunix/oss/examples/deepswe
           mkdir -p /app/tunix/experimental/examples/deepswe_dist
-          cp -r /tmp/agent-sandbox/clients/integrations/openhands/openhands_k8s_agent_sandbox /app/ 2>/dev/null || true
 
           cp /e2e_code/sandbox_utils.py /app/examples/deepswe/
           cp /e2e_code/sandbox_utils.py /app/tunix/oss/examples/deepswe/
           cp /e2e_code/swe_env.py /app/examples/deepswe/
           cp -r /app/examples/deepswe/* /app/tunix/oss/examples/deepswe/ 2>/dev/null || true
           cp /e2e_code/swe_env.py /app/tunix/oss/examples/deepswe/
-          cp /e2e_code/openhands_utils.py /app/examples/deepswe/ 2>/dev/null || true
-          cp /e2e_code/openhands_utils.py /app/tunix/oss/examples/deepswe/ 2>/dev/null || true
           cp /e2e_code/template.py /app/examples/deepswe/ 2>/dev/null || true
           cp /e2e_code/template.py /app/tunix/oss/examples/deepswe/ 2>/dev/null || true
+          cp /e2e_code/swe_agent.py /app/examples/deepswe/
+          cp /e2e_code/swe_agent.py /app/tunix/oss/examples/deepswe/
           cp /e2e_code/deepswe.py /app/tunix/experimental/examples/deepswe_dist/
           cp /e2e_code/sandbox_k8s_e2e_test.py /app/tunix/experimental/examples/deepswe_dist/
           cp /e2e_code/*.py /app/

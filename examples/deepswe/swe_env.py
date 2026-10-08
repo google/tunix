@@ -23,7 +23,6 @@ import time
 from typing import Any, Optional, cast
 
 import numpy as np
-from examples.deepswe import openhands_utils
 from examples.deepswe import sandbox_utils
 from tunix.rl.agentic.environments.base_environment import BaseTaskEnv
 from tunix.rl.agentic.environments.base_environment import EnvStepResult
@@ -35,7 +34,7 @@ _get_global_fleet = sandbox_utils.get_global_fleet
 _teardown_global_fleet = sandbox_utils.teardown_global_fleet
 _patch_r2egym_for_agent_sandbox = sandbox_utils.patch_r2egym_for_agent_sandbox
 _normalize_tasks_for_fleet = sandbox_utils.normalize_tasks_for_fleet
-_get_image_rewrite_fn = openhands_utils.get_image_rewrite_fn
+_get_image_rewrite_fn = sandbox_utils.get_image_rewrite_fn
 _MAX_IN_FLIGHT_BATCHES = 2
 _GLOBAL_FLEET = None
 
@@ -117,7 +116,7 @@ class SWEEnv(BaseTaskEnv):
         backend: Backend to use for the environment.
         delete_image: Whether to delete the Docker image after closing.
         verbose: Verbose output toggle.
-        scaffold: Scaffold tool set ('r2egym', 'sweagent', or 'openhands').
+        scaffold: Scaffold tool set ('r2egym' or 'sweagent').
         max_steps: Maximum interaction steps.
         use_agent_sandbox: If True, strictly forces SandboxFleet and
           AgentSandboxRuntime.
@@ -130,7 +129,6 @@ class SWEEnv(BaseTaskEnv):
     self.delete_image = delete_image
     self.backend = backend
     self.env: Any = None
-    self.workspace: Any = None
     self.handle: Any = None
     self.verbose = verbose
     self.scaffold = scaffold
@@ -140,11 +138,7 @@ class SWEEnv(BaseTaskEnv):
     assert scaffold in [
         "r2egym",
         "sweagent",
-        "openhands",
-    ], (
-        f"Invalid scaffold: {scaffold}, must be one of ['r2egym', 'sweagent',"
-        " 'openhands']"
-    )
+    ], f"Invalid scaffold: {scaffold}, must be one of ['r2egym', 'sweagent']"
     super().__init__(max_steps=max_steps)
 
     if not hasattr(self, "extra_kwargs"):
@@ -199,18 +193,6 @@ class SWEEnv(BaseTaskEnv):
           time.sleep(5 * (attempt + 1))
         else:
           raise
-    if self.scaffold == "openhands":
-      from agent_sandbox_rl.adapters.openhands import make_handle_workspace  # pyrefly: ignore[missing-import]
-
-      ws_kwargs = {}
-      if os.getenv("SANDBOX_SESSION_KEY"):
-        ws_kwargs["api_key"] = os.getenv("SANDBOX_SESSION_KEY")
-      if os.getenv("ROUTER_URL"):
-        ws_kwargs["router_url"] = os.getenv("ROUTER_URL")
-      if os.getenv("ROUTER_AUTH_TOKEN"):
-        ws_kwargs["router_auth_token"] = os.getenv("ROUTER_AUTH_TOKEN")
-      ws_kwargs["working_dir"] = os.getenv("OPENHANDS_WORKING_DIR", "/testbed")
-      self.workspace = make_handle_workspace(self.handle, **ws_kwargs)
     try:
       cmd_files = r2egym_command_files()
     except Exception:  # pylint: disable=broad-exception-caught
@@ -222,8 +204,6 @@ class SWEEnv(BaseTaskEnv):
         reward_timeout=self.reward_timeout,
         verbose=self.verbose,
     )
-    if self.scaffold == "openhands":
-      openhands_utils.setup_openhands_workspace(self.workspace, self.entry)
 
   def _init_local_repo_env(self) -> None:
     # Initialize standard local Docker RepoEnv
@@ -245,23 +225,16 @@ class SWEEnv(BaseTaskEnv):
       self.env.add_commands(SWEAGENT_COMMAND_FILES)
 
   def _initial_observation(self) -> Any:
-    if not self.env and not self.workspace:
+    if not self.env:
       if self.use_agent_sandbox:
         self._init_agent_sandbox_env()
       else:
         self._init_local_repo_env()
-    elif self.env is not None:
+    else:
       self.env.reset()
 
     self.final_reward_fn = self.env.compute_reward  # pyrefly: ignore[missing-attribute]
     self.total_steps = 0
-
-    if self.workspace is not None:
-      return str(
-          self.entry.get("problem_statement")
-          or self.entry.get("instruction")
-          or ""
-      )
 
     # Polls docker runtime to get task instruction.
     return self.env.get_task_instruction()  # pyrefly: ignore[missing-attribute]
@@ -283,9 +256,6 @@ class SWEEnv(BaseTaskEnv):
           info={"max_steps": self.max_steps},
       )
 
-    if self.scaffold == "openhands" and self.workspace is not None:
-      return openhands_utils.step_openhands(self, action_obj)
-
     # RepoEnv always returns 0 reward, must be evaluated by DockerRuntime.
     if not self.env:
       raise ValueError("Environment not initialized")
@@ -301,13 +271,6 @@ class SWEEnv(BaseTaskEnv):
     """Close the environment and clean up resources."""
     if self.env is not None:
       self.env.close()
-
-    if getattr(self, "workspace", None) is not None:
-      try:
-        self.workspace.cleanup()
-      except Exception as e:
-        logging.warning("[SWEEnv] Workspace cleanup note: %s", e)
-      self.workspace = None
 
     fleet = self.fleet or getattr(sandbox_utils, "_GLOBAL_FLEET", None)
     if (
