@@ -1302,6 +1302,12 @@ class CpuDistributedRLIntegrationTest(parameterized.TestCase):
                 failed_items[0].policy_version, cluster.engine.policy_version
             )
             self.assertFalse(failed_items[0].is_valid)
+            self.assertGreaterEqual(
+                cluster.engine.fault_tolerance_metrics[
+                    "terminal_failed_trajectories_total"
+                ],
+                1,
+            )
             self.assertEqual(
                 cluster.registry.state("rollout-0"),
                 worker_registry.MembershipState.ACTIVE,
@@ -1319,6 +1325,10 @@ class CpuDistributedRLIntegrationTest(parameterized.TestCase):
                       prompts=wedge_prompts,
                   )
               )
+            self.assertGreater(
+                cluster.engine.fault_tolerance_metrics["zero_worker_seconds"],
+                0.0,
+            )
 
             program.close()
             cluster.shutdown()

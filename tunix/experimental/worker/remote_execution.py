@@ -1348,10 +1348,7 @@ class RoutingActorPool(ActorPool):
   def actors(self) -> List[ActorHandle]:
     return list(self._actors)
 
-  def add_actor(
-      self,
-      actor: Union[str, ActorHandle],
-  ) -> ActorHandle:
+  def add_actor(self, actor: Union[str, ActorHandle]) -> ActorHandle:
     if isinstance(actor, str):
       handle = ActorHandle.from_address(actor)
     elif isinstance(actor, ActorHandle):
@@ -1362,10 +1359,7 @@ class RoutingActorPool(ActorPool):
       self._actors.append(handle)
     return handle
 
-  def remove_actor(
-      self,
-      actor: ActorHandle,
-  ) -> bool:
+  def remove_actor(self, actor: ActorHandle) -> bool:
     if actor in self._actors:
       self._actors.remove(actor)
       return True
@@ -1645,11 +1639,14 @@ class PoolExecutionSession:
     self._retain_pending_on_zero_workers = bool(
         cfg.retain_pending_on_zero_workers
     )
+    self._evictions_total = 0
+    self._retries_total = 0
     self._response_queue: asyncio.Queue[Any] = asyncio.Queue()
     self._active_workers: set[ActorHandle] = set()
     # Actors currently considered pool members by this session. Eviction
     # removes an actor from this set so `on_worker_evicted` fires at most once
     # per membership, without retaining dead handles after they leave.
+    self._membership_lock = threading.Lock()
     self._known_actors: set[ActorHandle] = set(pool.actors)
     self._dispatched_tasks: Dict[ActorHandle, set[str]] = {}
     self._task_dispatch_times: Dict[str, float] = {}
@@ -1705,6 +1702,16 @@ class PoolExecutionSession:
 
   def set_retain_pending_on_zero_workers(self, val: bool) -> None:
     self._retain_pending_on_zero_workers = bool(val)
+
+  @property
+  def evictions_total(self) -> int:
+    """Total number of worker evictions observed by this session."""
+    return self._evictions_total
+
+  @property
+  def retries_total(self) -> int:
+    """Total number of task retries triggered by worker failures."""
+    return self._retries_total
 
   @property
   def pending_count(self) -> int:
@@ -1872,10 +1879,11 @@ class PoolExecutionSession:
     if max_in_flight is not None and max_in_flight <= 0:
       raise ValueError("max_in_flight must be positive")
     cap = int(max_in_flight) if max_in_flight is not None else None
-    self._pool.add_actor(actor)
+    with self._membership_lock:
+      self._pool.add_actor(actor)
+      self._known_actors.add(actor)
 
     def _apply() -> None:
-      self._known_actors.add(actor)
       if cap is not None:
         self._worker_max_in_flight[actor] = cap
       self._schedule_drain_pending()
@@ -1929,6 +1937,7 @@ class PoolExecutionSession:
       ):
         if count_retry:
           self._task_retries[req_id] = retries + 1
+        self._retries_total += 1
         logging.info(
             "[rollout-ft] action=requeue request_id=%s retry=%d/%d reason=%r",
             req_id,
@@ -1958,8 +1967,11 @@ class PoolExecutionSession:
       count_retry: bool = False,
   ) -> bool:
     """Removes `actor` from the pool, cancels polling, and re-queues tasks (thread-safe)."""
-    removed_from_pool = self._pool.remove_actor(actor)
-    was_tracked = removed_from_pool or (actor in self._known_actors)
+    with self._membership_lock:
+      removed_from_pool = self._pool.remove_actor(actor)
+      was_known = actor in self._known_actors
+      self._known_actors.discard(actor)
+    was_tracked = removed_from_pool or was_known
     if not was_tracked:
       return False
 
@@ -1971,9 +1983,7 @@ class PoolExecutionSession:
 
     def _apply() -> None:
       self._worker_max_in_flight.pop(actor, None)
-      if actor not in self._known_actors and not removed_from_pool:
-        return
-      self._known_actors.discard(actor)
+      self._evictions_total += 1
       logging.info(
           "[rollout-ft] action=evict worker=%s reason=%r",
           actor,
@@ -2122,6 +2132,7 @@ class PoolExecutionSession:
         self._task_retries[request_id] = (
             self._task_retries.get(request_id, 0) + 1
         )
+        self._retries_total += 1
         logging.info(
             "[rollout-ft] action=requeue request_id=%s retry=%d/%d reason=%r",
             request_id,

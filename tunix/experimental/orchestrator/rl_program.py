@@ -1001,12 +1001,13 @@ class StandardRLProgram(RLProgram):
           first_meta = getattr(group[0], "metadata", None) or {}
           logging.info(
               "[pipeline] ARRIVE prompt_id=%s prompt_idx=%s batch_idx=%s"
-              " intra_batch_idx=%s policy_version=%d",
+              " intra_batch_idx=%s policy_version=%d worker_id=%s",
               getattr(group[0], "prompt_id", ""),
               first_meta.get("prompt_idx"),
               first_meta.get("batch_idx"),
               first_meta.get("intra_batch_idx"),
               getattr(group[0], "policy_version", 0),
+              first_meta.get("worker_id"),
           )
         group = None
         trainer_payloads = None

@@ -1873,6 +1873,12 @@ class DistributedRLEngineTest(absltest.TestCase):
         self.assertEqual(item.status, datatypes.TrajectoryStatus.FAILED)
         self.assertIn("down", item.metadata.get("error", ""))
       self.assertEmpty(self.engine._rollout_workers)
+      self.assertEqual(
+          self.engine.fault_tolerance_metrics[
+              "terminal_failed_trajectories_total"
+          ],
+          2,
+      )
       await self.engine.close()
 
     asyncio.run(_run())
@@ -1901,6 +1907,9 @@ class DistributedRLEngineTest(absltest.TestCase):
       with self.assertRaises(datatypes.NoHealthyRolloutWorkersError):
         await engine.poll_rollouts(timeout_s=0.05)
 
+      self.assertGreater(
+          engine.fault_tolerance_metrics["zero_worker_seconds"], 0.0
+      )
       await engine.close()
 
     asyncio.run(_run())
@@ -1960,6 +1969,12 @@ class DistributedRLEngineTest(absltest.TestCase):
       self.assertEqual(results[0].prompt_id, "p_evict")
       self.assertEqual(results[0].status, datatypes.TrajectoryStatus.SUCCEEDED)
       self.assertEqual(engine._rollout_workers, [self.mock_rollout_2])
+      self.assertEqual(
+          engine.fault_tolerance_metrics["rollout_worker_evictions_total"], 1
+      )
+      self.assertEqual(
+          engine.fault_tolerance_metrics["rollout_retries_total"], 1
+      )
       await engine.close()
 
     asyncio.run(_run())

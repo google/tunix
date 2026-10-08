@@ -2469,7 +2469,7 @@ class RemoteExecutionTest(absltest.TestCase):
       self.assertEqual(session.pending_count, 1)
       self.assertEqual(session.in_flight_count, 1)
 
-      # Now add replacement worker on `session`.
+      # Now add replacement worker via `session.add_actor`.
       h_new = create_in_process_handle(
           StubWorkerEngine("recovered_worker", latency=0.01)
       )
@@ -2791,7 +2791,7 @@ class RemoteExecutionTest(absltest.TestCase):
 
     asyncio.run(_run())
 
-  def test_pool_execution_session_cross_thread_add_and_evict_actor(self):
+  def test_pool_execution_session_cross_thread_add_and_remove_actor(self):
     class HangingHandle(remote_lib.ActorHandle):
 
       def __init__(self):
@@ -2833,9 +2833,16 @@ class RemoteExecutionTest(absltest.TestCase):
       )
       self.assertTrue(wedged.dispatched.wait(timeout=2.0))
 
+      remove_results = []
+
       def _bg_thread_mutation():
         session.add_actor(healthy, max_in_flight=2)
-        session.remove_actor(wedged, RuntimeError("cross_thread_evict"))
+        remove_results.append(
+            session.remove_actor(wedged, RuntimeError("cross_thread_evict"))
+        )
+        remove_results.append(
+            session.remove_actor(wedged, RuntimeError("cross_thread_evict_dup"))
+        )
 
       t = threading.Thread(target=_bg_thread_mutation)
       t.start()
@@ -2843,6 +2850,8 @@ class RemoteExecutionTest(absltest.TestCase):
       batch = await session.poll_completed(timeout_s=2.0)
       t.join(timeout=2.0)
 
+      self.assertEqual(remove_results, [True, False])
+      self.assertEqual(session.evictions_total, 1)
       self.assertLen(batch, 1)
       self.assertEqual(
           batch[0][0],
@@ -2967,7 +2976,7 @@ class RemoteExecutionTest(absltest.TestCase):
     self.assertIn("p_loop_1", res1)
     self.assertIn("p_loop_2", res2)
 
-  def test_pool_execution_session_retain_pending_on_zero_workers(
+  def test_pool_execution_session_retain_pending_on_zero_workers_and_counters(
       self,
   ):
     class CrashingPollHandle(remote_lib.ActorHandle):
@@ -3011,6 +3020,8 @@ class RemoteExecutionTest(absltest.TestCase):
       self.assertEmpty(pool.actors)
       self.assertEqual(session.pending_count, 1)
       self.assertEqual(session.in_flight_count, 1)
+      self.assertEqual(session.evictions_total, 1)
+      self.assertEqual(session.retries_total, 1)
       self.assertEmpty(session.pop_failed_tasks())
 
       # Dynamically add a replacement worker; the retained pending task drains
