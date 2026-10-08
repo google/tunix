@@ -51,12 +51,160 @@ fi
 export PATH="$(dirname "$PYTHON_BIN"):${PATH}"
 export HF_TOKEN=${HF_TOKEN:-${HUGGING_FACE_HUB_TOKEN:-}}
 
-MAX_OOB_RATIO=${MAX_OOB_RATIO:-0.50}
-MIN_KEPT_FRAC=${MIN_KEPT_FRAC:-0.50}
-MAX_GEOMEAN_DRIFT=${MAX_GEOMEAN_DRIFT:-0.005}
+# ==============================================================================
+# 1. User-Configurable Parameters
+# ==============================================================================
+
+# --- 1a. Quantization & KV Cache ---
+export SAMPLER_QUANT=${SAMPLER_QUANT:-bf16}
+export TRAINER_QUANT=${TRAINER_QUANT:-bf16}
+export VLLM_KV_CACHE_DTYPE=${VLLM_KV_CACHE_DTYPE:-bfloat16}
+export QWIX_SKIP_GDN_PROJ=${QWIX_SKIP_GDN_PROJ:-0}
+
+# --- 1b. Task, Model & Sequence Lengths ---
+export TASK_MODE=${TASK_MODE:-gsm8k}
+export MODEL_NAME=${MODEL_NAME:-Qwen3.5-35B-A3B}
+export TRAINER_BACKEND=${TRAINER_BACKEND:-maxtext}
+export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-raiden}
+export MAX_STEPS=${MAX_STEPS:-${NUM_STEPS:-5}}
+export GSM8K_TURNS=${GSM8K_TURNS:-1}
+export GSM8K_MAX_TOKENS_PER_TURN=${GSM8K_MAX_TOKENS_PER_TURN:-512}
+export MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-512}
+if (( GSM8K_TURNS >= 8 )); then
+  export MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-7680}
+elif (( GSM8K_TURNS > 1 )); then
+  export MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-3584}
+else
+  export MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-512}
+fi
+export MAX_SEQ_TOKEN_PER_TPU=${MAX_SEQ_TOKEN_PER_TPU:-$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH))}
+export MAX_SEGMENTS_PER_PACKED_ROW=${MAX_SEGMENTS_PER_PACKED_ROW:-16}
+export COMPUTE_LOGPS_CHUNK_SIZE=${COMPUTE_LOGPS_CHUNK_SIZE:-512}
+
+# --- 1c. Convergence & TIS Numerical Stability Gates ---
+export MAX_OOB_RATIO=${MAX_OOB_RATIO:-0.50}
+export MIN_KEPT_FRAC=${MIN_KEPT_FRAC:-0.50}
+export MAX_GEOMEAN_DRIFT=${MAX_GEOMEAN_DRIFT:-0.005}
+export SEQ_LOGPROB_ERROR_THRESHOLD=${SEQ_LOGPROB_ERROR_THRESHOLD:-2.0}
+export TRUNCATED_IMPORTANCE_SAMPLING_TYPE=${TRUNCATED_IMPORTANCE_SAMPLING_TYPE:-seq-mask-tis}
+if (( MAX_RESPONSE_LENGTH <= 1024 )); then
+  export TRUNCATED_IMPORTANCE_SAMPLING_RATIO_MIN=${TRUNCATED_IMPORTANCE_SAMPLING_RATIO_MIN:-0.997}
+  export TRUNCATED_IMPORTANCE_SAMPLING_RATIO=${TRUNCATED_IMPORTANCE_SAMPLING_RATIO:-1.006}
+  export SAMPLER_IS_LENGTH_BUCKETS=${SAMPLER_IS_LENGTH_BUCKETS:-512,1024}
+else
+  export TRUNCATED_IMPORTANCE_SAMPLING_RATIO_MIN=${TRUNCATED_IMPORTANCE_SAMPLING_RATIO_MIN:-0.999}
+  export TRUNCATED_IMPORTANCE_SAMPLING_RATIO=${TRUNCATED_IMPORTANCE_SAMPLING_RATIO:-1.002}
+  export SAMPLER_IS_LENGTH_BUCKETS=${SAMPLER_IS_LENGTH_BUCKETS:-1024,2048,4096}
+fi
+
+# --- 1d. GRPO & Optimizer Hyperparameters ---
+export BATCH_SIZE=${BATCH_SIZE:-}
+export MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-}
+export NUM_GENERATIONS=${NUM_GENERATIONS:-}
+export TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-}
+export LEARNING_RATE=${LEARNING_RATE:-1e-6}
+export SCHEDULE_TYPE=${SCHEDULE_TYPE:-constant}
+export LR_INIT_VALUE=${LR_INIT_VALUE:-0.0}
+export LR_PEAK_VALUE=${LR_PEAK_VALUE:-$LEARNING_RATE}
+export LR_END_VALUE=${LR_END_VALUE:-$LEARNING_RATE}
+export WARMUP_STEPS=${WARMUP_STEPS:-0}
+export LR_DECAY_STEPS=${LR_DECAY_STEPS:-100}
+export ADAM_B1=${ADAM_B1:-0.9}
+export ADAM_B2=${ADAM_B2:-0.999}
+export ADAM_EPS=${ADAM_EPS:-1e-8}
+export WEIGHT_DECAY=${WEIGHT_DECAY:-0.0}
+export OPT_CHAIN_TYPE=${OPT_CHAIN_TYPE:-clip_by_global_norm}
+export MAX_GRAD_NORM=${MAX_GRAD_NORM:-0.125}
+export BETA=${BETA:-0.0}
+export EPSILON=${EPSILON:-0.2}
+export EPSILON_HIGH=${EPSILON_HIGH:-0.28}
+export TEMPERATURE=${TEMPERATURE:-1.0}
+export TOP_P=${TOP_P:-1.0}
+export TOP_K=${TOP_K:--1}
+export LOSS_AGG_MODE=${LOSS_AGG_MODE:-token-mean}
+export ADVANTAGE_ESTIMATOR=${ADVANTAGE_ESTIMATOR:-grpo-loo}
+export OVERLONG_LOSS_MASKING=${OVERLONG_LOSS_MASKING:-1}
+export USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-false}
+
+# --- 1e. vLLM Rollout Engine Settings ---
+if (( GSM8K_TURNS > 1 )); then
+  export ENABLE_PREFIX_CACHING=${ENABLE_PREFIX_CACHING:-true}
+  export VLLM_MAX_NUM_SEQS=${VLLM_MAX_NUM_SEQS:-16}
+else
+  export ENABLE_PREFIX_CACHING=${ENABLE_PREFIX_CACHING:-false}
+  export VLLM_MAX_NUM_SEQS=${VLLM_MAX_NUM_SEQS:-4}
+fi
+if [[ "${ENABLE_PREFIX_CACHING}" == "true" ]]; then
+  export VLLM_MAMBA_CACHE_MODE=${VLLM_MAMBA_CACHE_MODE:-align}
+else
+  export VLLM_MAMBA_CACHE_MODE=${VLLM_MAMBA_CACHE_MODE:-none}
+fi
+export ROLLOUT_FREE_KV_CACHE=${ROLLOUT_FREE_KV_CACHE:-false}
+export VLLM_MAX_MODEL_LEN=${VLLM_MAX_MODEL_LEN:-$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH))}
+export VLLM_MAX_NUM_BATCHED_TOKENS=${VLLM_MAX_NUM_BATCHED_TOKENS:-$(( VLLM_MAX_MODEL_LEN < 2048 ? VLLM_MAX_MODEL_LEN : 2048 ))}
+export VLLM_GPU_MEMORY_UTILIZATION=${VLLM_GPU_MEMORY_UTILIZATION:-0.9}
+export VLLM_BLOCK_SIZE=${VLLM_BLOCK_SIZE:-256}
+export VLLM_ASYNC_SCHEDULING=${VLLM_ASYNC_SCHEDULING:-true}
+export VLLM_ENABLE_CHUNKED_PREFILL=${VLLM_ENABLE_CHUNKED_PREFILL:-true}
+export VLLM_LANGUAGE_MODEL_ONLY=${VLLM_LANGUAGE_MODEL_ONLY:-true}
+export VLLM_REASONING_PARSER=${VLLM_REASONING_PARSER:-qwen3}
+export VLLM_LIMIT_MM_PER_PROMPT=${VLLM_LIMIT_MM_PER_PROMPT:-'{"image": 0, "video": 0}'}
+
+# --- 1f. TPU Slice, Mesh & Checkpoint Overrides (auto-detected if empty) ---
+export TRAINER_TPU_CHIPS=${TRAINER_TPU_CHIPS:-}
+export ROLLOUT_TPU_CHIPS=${ROLLOUT_TPU_CHIPS:-}
+export TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS:-}
+export TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS:-1,1,1}
+export TRAINER_FSDP=${TRAINER_FSDP:-}
+export TRAINER_TP=${TRAINER_TP:-}
+export TRAINER_EXPERT=${TRAINER_EXPERT:-1}
+export TRAINER_CONTEXT=${TRAINER_CONTEXT:-1}
+export REMAT_POLICY=${REMAT_POLICY:-full}
+export ROLLOUT_FSDP=${ROLLOUT_FSDP:-1}
+export ROLLOUT_TP=${ROLLOUT_TP:-}
+export ROLLOUT_MESH_TP=${ROLLOUT_MESH_TP:-}
+export ROLLOUT_EXPERT=${ROLLOUT_EXPERT:-}
+export MODEL_ID=${MODEL_ID:-}
+export MODEL_DIR=${MODEL_DIR:-}
+export MAXTEXT_MODEL_NAME=${MAXTEXT_MODEL_NAME:-}
+export MAXTEXT_CKPT=${MAXTEXT_CKPT:-}
+export SAMPLER=${SAMPLER:-}
+export TRAINABLE_PARAMETERS_MASK=${TRAINABLE_PARAMETERS_MASK:-}
+export MAXTEXT_EXTRA_FLAGS=${MAXTEXT_EXTRA_FLAGS:-}
+export ROLLOUT_MAXTEXT_EXTRA_FLAGS=${ROLLOUT_MAXTEXT_EXTRA_FLAGS:-}
+
+# --- 1g. Ports, Timeouts & Logging ---
+export ORCHESTRATOR_ID=${ORCHESTRATOR_ID:-orchestrator}
+export ORCHESTRATOR_PORT=${ORCHESTRATOR_PORT:-30000}
+export TRAINER_PORT=${TRAINER_PORT:-20000}
+export ROLLOUT_PORT=${ROLLOUT_PORT:-20001}
+export CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-0}
+export CHECKPOINT_MAX_TO_KEEP=${CHECKPOINT_MAX_TO_KEEP:-1}
+export EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-100000}
+export WAIT_TIMEOUT_SECS=${WAIT_TIMEOUT_SECS:-1800}
+export WAIT_POLL_SECS=${WAIT_POLL_SECS:-5}
+
+if [[ "${VLLM_KV_CACHE_DTYPE:-bfloat16}" != "bfloat16" ]]; then
+  KV_TAG="_kv-${VLLM_KV_CACHE_DTYPE}"
+else
+  KV_TAG=""
+fi
+if (( GSM8K_TURNS > 1 )); then
+  TURNS_TAG="_t${GSM8K_TURNS}"
+else
+  TURNS_TAG=""
+fi
+RUN_TAG="smoke_${MODEL_NAME}_sq-${SAMPLER_QUANT}_tq-${TRAINER_QUANT}${KV_TAG}${TURNS_TAG}_$(date +%Y%m%d_%H%M%S)"
+export LOG_ROOT=${LOG_ROOT:-/tmp/mlperf_quant_smoke/${RUN_TAG}}
+export LOG_DIR=${LOG_ROOT}/tb
+export MAXTEXT_OUTPUT_DIR=${MAXTEXT_OUTPUT_DIR:-${LOG_ROOT}/maxtext_out}
+export CHECKPOINT_ROOT_DIRECTORY=${CHECKPOINT_ROOT_DIRECTORY:-${LOG_ROOT}/checkpoints}
+TRAINER_LOG="${LOG_ROOT}/trainer.log"
+ROLLOUT_LOG="${LOG_ROOT}/rollout.log"
+ORCHESTRATOR_LOG="${LOG_ROOT}/orchestrator.log"
 
 # ==============================================================================
-# Built-in Log Analyzer
+# 2. Built-in Log Analyzer
 # ==============================================================================
 analyze_orchestrator_log() {
   "$PYTHON_BIN" - "$@" <<'PY'
@@ -189,21 +337,20 @@ if [[ "${1:-}" == "--analyze-only" ]]; then
     "$2" \
     "$MAX_OOB_RATIO" \
     "$MIN_KEPT_FRAC" \
-    "${SAMPLER_QUANT:-unknown}" \
-    "${TRAINER_QUANT:-unknown}" \
+    "$SAMPLER_QUANT" \
+    "$TRAINER_QUANT" \
     "$MAX_GEOMEAN_DRIFT"
   exit 0
 fi
 
-# ==============================================================================
-# 1. Quantization Configuration (SAMPLER_QUANT / TRAINER_QUANT)
-# ==============================================================================
-export SAMPLER_QUANT=${SAMPLER_QUANT:-bf16}
-export TRAINER_QUANT=${TRAINER_QUANT:-bf16}
+mkdir -p "$LOG_ROOT"
 
+# ==============================================================================
+# 3. Quantization Flag Resolution & Hardware Topology Auto-Detection
+# ==============================================================================
 ROLLOUT_QUANT_FLAGS=""
 ROLLOUT_QWIX_MOE_ONLY_QTYPE=""
-ROLLOUT_QWIX_SKIP_GDN_PROJ="${QWIX_SKIP_GDN_PROJ:-0}"
+ROLLOUT_QWIX_SKIP_GDN_PROJ="$QWIX_SKIP_GDN_PROJ"
 case "$SAMPLER_QUANT" in
   bf16|none)
     ROLLOUT_QUANT_FLAGS="quantization= use_qwix_quantization=false"
@@ -234,7 +381,7 @@ esac
 
 TRAINER_QUANT_FLAGS=""
 TRAINER_QWIX_MOE_ONLY_QTYPE=""
-TRAINER_QWIX_SKIP_GDN_PROJ="${QWIX_SKIP_GDN_PROJ:-0}"
+TRAINER_QWIX_SKIP_GDN_PROJ="$QWIX_SKIP_GDN_PROJ"
 case "$TRAINER_QUANT" in
   bf16|none)
     TRAINER_QUANT_FLAGS="quantization= use_qwix_quantization=false"
@@ -271,19 +418,6 @@ case "$TRAINER_QUANT" in
     exit 1
     ;;
 esac
-
-# ==============================================================================
-# 2. Single-Host TPU Topology Auto-Detection & Model Preset
-# ==============================================================================
-export TASK_MODE=${TASK_MODE:-gsm8k}
-export MODEL_NAME=${MODEL_NAME:-Qwen3.5-35B-A3B}
-export TRAINER_BACKEND=${TRAINER_BACKEND:-maxtext}
-export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-raiden}
-
-ORCHESTRATOR_ID=${ORCHESTRATOR_ID:-orchestrator}
-ORCHESTRATOR_PORT=${ORCHESTRATOR_PORT:-30000}
-TRAINER_PORT=${TRAINER_PORT:-20000}
-ROLLOUT_PORT=${ROLLOUT_PORT:-20001}
 
 rm -f /tmp/libtpu_lockfile 2>/dev/null || true
 
@@ -381,7 +515,6 @@ PY
 export TRAINER_TPU_CHIPS
 export ROLLOUT_TPU_CHIPS
 export TPU_CHIPS_PER_HOST_BOUNDS
-export TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS:-1,1,1}
 export TPU_CHIPS_PER_PROCESS_BOUNDS=${TPU_CHIPS_PER_PROCESS_BOUNDS:-$TPU_CHIPS_PER_HOST_BOUNDS}
 ACTUAL_ROLLOUT_DEVICES=${ACTUAL_ROLLOUT_DEVICES:-$ACTUAL_TRAINER_DEVICES}
 
@@ -395,11 +528,6 @@ fi
 export TRAINER_LIBTPU_INIT_ARGS="${TRAINER_LIBTPU_INIT_ARGS:-${EFFECTIVE_MEGACORE_ARG:+$EFFECTIVE_MEGACORE_ARG }--deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS} --deepsea_host_bounds=${TPU_HOST_BOUNDS}}"
 export ROLLOUT_LIBTPU_INIT_ARGS="${ROLLOUT_LIBTPU_INIT_ARGS:-${TRAINER_LIBTPU_INIT_ARGS} ${ROLLOUT_XLA_TPU_FLAGS}${EXTRA_CHIP_XLA_FLAGS:+ $EXTRA_CHIP_XLA_FLAGS}}"
 export RAIDEN_DEVICES_PER_HOST=${RAIDEN_DEVICES_PER_HOST:-$ACTUAL_TRAINER_DEVICES}
-
-export TRAINER_EXPERT=${TRAINER_EXPERT:-1}
-export TRAINER_CONTEXT=${TRAINER_CONTEXT:-1}
-export REMAT_POLICY=${REMAT_POLICY:-full}
-export ROLLOUT_FSDP=${ROLLOUT_FSDP:-1}
 
 if [[ "$MODEL_NAME" == "Qwen3.5-35B-A3B" ]]; then
   export SAMPLER=${SAMPLER:-vllm}
@@ -431,6 +559,8 @@ if [[ "$MODEL_NAME" == "Qwen3.5-35B-A3B" ]]; then
   fi
   BASE_MAXTEXT_FLAGS="float32_gate_logits=true float32_logits=true${LOW_MEM_FLAGS:+ $LOW_MEM_FLAGS}"
   ROLLOUT_BASE_MAXTEXT_FLAGS="float32_gate_logits=true float32_logits=true enable_dp_attention=true"
+  export MAMBA_CACHE_SPLIT=${MAMBA_CACHE_SPLIT:-$(( GSM8K_TURNS > 1 ? 16 : 2 ))}
+  export ROLLOUT_SHARDING_JSON=${ROLLOUT_SHARDING_JSON:-"{\"additional_config\":{\"sharding\":{\"sharding_strategy\":{\"expert_parallelism\":${ROLLOUT_EXPERT},\"tensor_parallelism\":1,\"enable_dp_attention\":true}},\"custom_mamba_cache_multiplier\":${MAMBA_CACHE_SPLIT},\"maxtext_config\":{\"scan_layers\":false,\"attention\":\"vllm_rpa\",\"allow_split_physical_axes\":true,\"use_multimodal\":false,\"prefuse_moe_weights\":true}}}"}
 else
   export SAMPLER=${SAMPLER:-inprocess_vllm}
   export MODEL_ID=${MODEL_ID:-Qwen/${MODEL_NAME}}
@@ -452,14 +582,12 @@ else
   export TRAINABLE_PARAMETERS_MASK=${TRAINABLE_PARAMETERS_MASK:-}
   BASE_MAXTEXT_FLAGS="float32_logits=true"
   ROLLOUT_BASE_MAXTEXT_FLAGS="float32_logits=true"
+  export ROLLOUT_SHARDING_JSON=${ROLLOUT_SHARDING_JSON:-"{}"}
 fi
 export TOKENIZER_PATH=${TOKENIZER_PATH:-$MODEL_DIR}
 export MAXTEXT_EXTRA_FLAGS="${BASE_MAXTEXT_FLAGS} ${TRAINER_QUANT_FLAGS}${MAXTEXT_EXTRA_FLAGS:+ ${MAXTEXT_EXTRA_FLAGS}}"
 export ROLLOUT_MAXTEXT_EXTRA_FLAGS="${ROLLOUT_BASE_MAXTEXT_FLAGS} ${ROLLOUT_QUANT_FLAGS}${ROLLOUT_MAXTEXT_EXTRA_FLAGS:+ ${ROLLOUT_MAXTEXT_EXTRA_FLAGS}}"
 
-# ==============================================================================
-# 3. MLPerf GRPO + TIS + vLLM Rollout Hyperparameters
-# ==============================================================================
 if (( ACTUAL_TRAINER_DEVICES <= 2 )) && [[ "$MODEL_NAME" == "Qwen3.5-35B-A3B" ]]; then
   export BATCH_SIZE=${BATCH_SIZE:-1}
   export NUM_GENERATIONS=${NUM_GENERATIONS:-2}
@@ -469,120 +597,6 @@ else
 fi
 export MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-$BATCH_SIZE}
 export TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-$TRAINER_FSDP}
-export MAX_STEPS=${MAX_STEPS:-${NUM_STEPS:-5}}
-
-export GSM8K_TURNS=${GSM8K_TURNS:-1}
-export GSM8K_MAX_TOKENS_PER_TURN=${GSM8K_MAX_TOKENS_PER_TURN:-512}
-export MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-512}
-if (( GSM8K_TURNS >= 8 )); then
-  export MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-7680}
-elif (( GSM8K_TURNS > 1 )); then
-  export MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-3584}
-else
-  export MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-512}
-fi
-export MAX_SEQ_TOKEN_PER_TPU=${MAX_SEQ_TOKEN_PER_TPU:-$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH))}
-export MAX_SEGMENTS_PER_PACKED_ROW=${MAX_SEGMENTS_PER_PACKED_ROW:-16}
-export COMPUTE_LOGPS_CHUNK_SIZE=${COMPUTE_LOGPS_CHUNK_SIZE:-512}
-
-if [[ "$MODEL_NAME" == "Qwen3.5-35B-A3B" ]]; then
-  export MAMBA_CACHE_SPLIT=${MAMBA_CACHE_SPLIT:-$(( GSM8K_TURNS > 1 ? 16 : 2 ))}
-  export ROLLOUT_SHARDING_JSON=${ROLLOUT_SHARDING_JSON:-"{\"additional_config\":{\"sharding\":{\"sharding_strategy\":{\"expert_parallelism\":${ROLLOUT_EXPERT},\"tensor_parallelism\":1,\"enable_dp_attention\":true}},\"custom_mamba_cache_multiplier\":${MAMBA_CACHE_SPLIT},\"maxtext_config\":{\"scan_layers\":false,\"attention\":\"vllm_rpa\",\"allow_split_physical_axes\":true,\"use_multimodal\":false,\"prefuse_moe_weights\":true}}}"}
-else
-  export ROLLOUT_SHARDING_JSON=${ROLLOUT_SHARDING_JSON:-"{}"}
-fi
-
-# Optimizer & GRPO hyperparameters
-export LEARNING_RATE=${LEARNING_RATE:-1e-6}
-export SCHEDULE_TYPE=${SCHEDULE_TYPE:-constant}
-export LR_INIT_VALUE=${LR_INIT_VALUE:-0.0}
-export LR_PEAK_VALUE=${LR_PEAK_VALUE:-$LEARNING_RATE}
-export LR_END_VALUE=${LR_END_VALUE:-$LEARNING_RATE}
-export WARMUP_STEPS=${WARMUP_STEPS:-0}
-export LR_DECAY_STEPS=${LR_DECAY_STEPS:-100}
-export ADAM_B1=${ADAM_B1:-0.9}
-export ADAM_B2=${ADAM_B2:-0.999}
-export ADAM_EPS=${ADAM_EPS:-1e-8}
-export WEIGHT_DECAY=${WEIGHT_DECAY:-0.0}
-export OPT_CHAIN_TYPE=${OPT_CHAIN_TYPE:-clip_by_global_norm}
-export MAX_GRAD_NORM=${MAX_GRAD_NORM:-0.125}
-
-export BETA=${BETA:-0.0}
-export EPSILON=${EPSILON:-0.2}
-export EPSILON_HIGH=${EPSILON_HIGH:-0.28}
-export TEMPERATURE=${TEMPERATURE:-1.0}
-export TOP_P=${TOP_P:-1.0}
-export TOP_K=${TOP_K:--1}
-
-export LOSS_AGG_MODE=${LOSS_AGG_MODE:-token-mean}
-export ADVANTAGE_ESTIMATOR=${ADVANTAGE_ESTIMATOR:-grpo-loo}
-export OVERLONG_LOSS_MASKING=${OVERLONG_LOSS_MASKING:-1}
-export USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-false}
-
-# TIS & numerical stability gates
-export SEQ_LOGPROB_ERROR_THRESHOLD=${SEQ_LOGPROB_ERROR_THRESHOLD:-2.0}
-export TRUNCATED_IMPORTANCE_SAMPLING_TYPE=${TRUNCATED_IMPORTANCE_SAMPLING_TYPE:-seq-mask-tis}
-if (( MAX_RESPONSE_LENGTH <= 1024 )); then
-  export TRUNCATED_IMPORTANCE_SAMPLING_RATIO_MIN=${TRUNCATED_IMPORTANCE_SAMPLING_RATIO_MIN:-0.997}
-  export TRUNCATED_IMPORTANCE_SAMPLING_RATIO=${TRUNCATED_IMPORTANCE_SAMPLING_RATIO:-1.006}
-  export SAMPLER_IS_LENGTH_BUCKETS=${SAMPLER_IS_LENGTH_BUCKETS:-512,1024}
-else
-  export TRUNCATED_IMPORTANCE_SAMPLING_RATIO_MIN=${TRUNCATED_IMPORTANCE_SAMPLING_RATIO_MIN:-0.999}
-  export TRUNCATED_IMPORTANCE_SAMPLING_RATIO=${TRUNCATED_IMPORTANCE_SAMPLING_RATIO:-1.002}
-  export SAMPLER_IS_LENGTH_BUCKETS=${SAMPLER_IS_LENGTH_BUCKETS:-1024,2048,4096}
-fi
-
-# vLLM Rollout engine settings
-if (( GSM8K_TURNS > 1 )); then
-  export ENABLE_PREFIX_CACHING=${ENABLE_PREFIX_CACHING:-true}
-  export VLLM_MAX_NUM_SEQS=${VLLM_MAX_NUM_SEQS:-16}
-else
-  export ENABLE_PREFIX_CACHING=${ENABLE_PREFIX_CACHING:-false}
-  export VLLM_MAX_NUM_SEQS=${VLLM_MAX_NUM_SEQS:-4}
-fi
-export ROLLOUT_FREE_KV_CACHE=${ROLLOUT_FREE_KV_CACHE:-false}
-export VLLM_MAX_MODEL_LEN=${VLLM_MAX_MODEL_LEN:-$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH))}
-export VLLM_MAX_NUM_BATCHED_TOKENS=${VLLM_MAX_NUM_BATCHED_TOKENS:-$(( VLLM_MAX_MODEL_LEN < 2048 ? VLLM_MAX_MODEL_LEN : 2048 ))}
-export VLLM_GPU_MEMORY_UTILIZATION=${VLLM_GPU_MEMORY_UTILIZATION:-0.9}
-if [[ "${ENABLE_PREFIX_CACHING}" == "true" ]]; then
-  export VLLM_MAMBA_CACHE_MODE=${VLLM_MAMBA_CACHE_MODE:-align}
-else
-  export VLLM_MAMBA_CACHE_MODE=${VLLM_MAMBA_CACHE_MODE:-none}
-fi
-export VLLM_KV_CACHE_DTYPE=${VLLM_KV_CACHE_DTYPE:-bfloat16}
-export VLLM_BLOCK_SIZE=${VLLM_BLOCK_SIZE:-256}
-export VLLM_ASYNC_SCHEDULING=${VLLM_ASYNC_SCHEDULING:-true}
-export VLLM_ENABLE_CHUNKED_PREFILL=${VLLM_ENABLE_CHUNKED_PREFILL:-true}
-export VLLM_LANGUAGE_MODEL_ONLY=${VLLM_LANGUAGE_MODEL_ONLY:-true}
-export VLLM_REASONING_PARSER=${VLLM_REASONING_PARSER:-qwen3}
-export VLLM_LIMIT_MM_PER_PROMPT=${VLLM_LIMIT_MM_PER_PROMPT:-'{"image": 0, "video": 0}'}
-
-export CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-0}
-export CHECKPOINT_MAX_TO_KEEP=${CHECKPOINT_MAX_TO_KEEP:-1}
-export EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-100000}
-export WAIT_TIMEOUT_SECS=${WAIT_TIMEOUT_SECS:-1800}
-export WAIT_POLL_SECS=${WAIT_POLL_SECS:-5}
-
-if [[ "${VLLM_KV_CACHE_DTYPE:-bfloat16}" != "bfloat16" ]]; then
-  KV_TAG="_kv-${VLLM_KV_CACHE_DTYPE}"
-else
-  KV_TAG=""
-fi
-if (( GSM8K_TURNS > 1 )); then
-  TURNS_TAG="_t${GSM8K_TURNS}"
-else
-  TURNS_TAG=""
-fi
-RUN_TAG="smoke_${MODEL_NAME}_sq-${SAMPLER_QUANT}_tq-${TRAINER_QUANT}${KV_TAG}${TURNS_TAG}_$(date +%Y%m%d_%H%M%S)"
-export LOG_ROOT=${LOG_ROOT:-/tmp/mlperf_quant_smoke/${RUN_TAG}}
-export LOG_DIR=${LOG_ROOT}/tb
-export MAXTEXT_OUTPUT_DIR=${MAXTEXT_OUTPUT_DIR:-${LOG_ROOT}/maxtext_out}
-export CHECKPOINT_ROOT_DIRECTORY=${CHECKPOINT_ROOT_DIRECTORY:-${LOG_ROOT}/checkpoints}
-mkdir -p "$LOG_ROOT"
-
-TRAINER_LOG="${LOG_ROOT}/trainer.log"
-ROLLOUT_LOG="${LOG_ROOT}/rollout.log"
-ORCHESTRATOR_LOG="${LOG_ROOT}/orchestrator.log"
 
 # ==============================================================================
 # 4. Runtime Hook (sitecustomize.py) & vLLM Config JSON Builder
