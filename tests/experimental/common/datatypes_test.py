@@ -348,7 +348,9 @@ class RolloutFaultToleranceConfigTest(absltest.TestCase):
     self.assertEqual(cfg.max_task_retries, 3)
     self.assertIsNone(cfg.max_in_flight_per_worker)
     self.assertIsNone(cfg.task_timeout_s)
+    self.assertEqual(cfg.max_zero_worker_wait_s, 600.0)
     self.assertTrue(cfg.retry_weight_sync_on_eviction)
+    self.assertFalse(cfg.recover_unknown_transfer_state)
 
   def test_with_overrides_without_arguments_returns_same_config(self):
     cfg = datatypes.RolloutFaultToleranceConfig(max_in_flight_per_worker=4)
@@ -358,14 +360,14 @@ class RolloutFaultToleranceConfigTest(absltest.TestCase):
     cfg = datatypes.RolloutFaultToleranceConfig(
         max_in_flight_per_worker=4,
         task_timeout_s=30.0,
+        max_zero_worker_wait_s=10.0,
         max_task_retries=2,
-        evict_on_failure=False,
     )
     merged = cfg.with_overrides(max_in_flight_per_worker=8, task_timeout_s=45.0)
     self.assertEqual(merged.max_in_flight_per_worker, 8)
     self.assertEqual(merged.task_timeout_s, 45.0)
+    self.assertEqual(merged.max_zero_worker_wait_s, 10.0)
     self.assertEqual(merged.max_task_retries, 2)
-    self.assertFalse(merged.evict_on_failure)
     # The original config is left untouched.
     self.assertEqual(cfg.max_in_flight_per_worker, 4)
     self.assertEqual(cfg.task_timeout_s, 30.0)

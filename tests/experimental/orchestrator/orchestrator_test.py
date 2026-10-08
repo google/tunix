@@ -485,7 +485,8 @@ class ClusterOrchestratorTest(absltest.TestCase):
     ])
     self.assertEqual(orch.engine._rollout_workers, [h_r0_v2])
 
-    # Re-register rollout-0 after bring_up_workers (initial weights -> ACTIVE)
+    # Re-register rollout-0 after bring_up_workers with coordinator present ->
+    # staged as PENDING_WEIGHT_SYNC until next weight sync promotes it.
     orch.register_worker_handle("rollout-0", [datatypes.Role.ROLLOUT], h_r0_v3)
     orch.wait_for_pending_bring_ups(timeout=5.0)
     h_r0_v3.submit.assert_has_calls([
@@ -493,12 +494,15 @@ class ClusterOrchestratorTest(absltest.TestCase):
         mock.call("compile", "warmup_batch"),
         mock.call("start"),
     ])
-    self.assertEqual(orch.worker_handles(datatypes.Role.ROLLOUT), [h_r0_v3])
-    self.assertEqual(orch.engine._rollout_workers, [h_r0_v3])
+    self.assertEqual(orch.worker_handles(datatypes.Role.ROLLOUT), [])
+    self.assertEqual(orch.engine._rollout_workers, [])
     self.assertEqual(
         orch.registry.state("rollout-0"),
-        worker_registry.MembershipState.ACTIVE,
+        worker_registry.MembershipState.PENDING_WEIGHT_SYNC,
     )
+    orch.registry.set_state("rollout-0", worker_registry.MembershipState.ACTIVE)
+    self.assertEqual(orch.worker_handles(datatypes.Role.ROLLOUT), [h_r0_v3])
+    self.assertEqual(orch.engine._rollout_workers, [h_r0_v3])
     orch.shutdown()
 
   def test_dynamic_worker_arrival_and_weight_sync_promotion(self):
@@ -670,12 +674,12 @@ class ClusterOrchestratorTest(absltest.TestCase):
     orch.wait_for_pending_bring_ups(timeout=5.0)
     self.assertEqual(
         orch.registry.state("rollout-0"),
-        worker_registry.MembershipState.ACTIVE,
+        worker_registry.MembershipState.PENDING_WEIGHT_SYNC,
     )
     orch._on_engine_worker_evicted(h_r0, ConnectionError("stale callback"))
     self.assertEqual(
         orch.registry.state("rollout-0"),
-        worker_registry.MembershipState.ACTIVE,
+        worker_registry.MembershipState.PENDING_WEIGHT_SYNC,
     )
     orch.shutdown()
 
@@ -975,29 +979,43 @@ class ClusterOrchestratorTest(absltest.TestCase):
     self.assertNotIn("rollout-1", orch.registry)
     orch.shutdown()
 
-  def test_orchestrator_plumbs_fault_tolerance_config(self):
+  def test_late_rollout_worker_at_step_zero_is_staged_as_pending_weight_sync(
+      self,
+  ):
     h_actor = mock.MagicMock(spec=remote_execution.ActorHandle)
     h_r0 = mock.MagicMock(spec=remote_execution.ActorHandle)
+    h_r1 = mock.MagicMock(spec=remote_execution.ActorHandle)
+
     ft_cfg = datatypes.RolloutFaultToleranceConfig(
-        evict_on_failure=True,
-        retry_on_worker_failure=True,
         max_task_retries=2,
-        max_in_flight_per_worker=6,
-        task_timeout_s=30.0,
+        max_zero_worker_wait_s=15.0,
+        recover_unknown_transfer_state=True,
     )
     orch = orchestrator.ClusterOrchestrator(
         lifecycle_driver=mock.MagicMock(),
         monitor=mock.MagicMock(),
+        weight_sync_mode="fallback",
         fault_tolerance_config=ft_cfg,
     )
     orch.register_worker_handle("actor-0", [datatypes.Role.ACTOR], h_actor)
     orch.register_worker_handle("rollout-0", [datatypes.Role.ROLLOUT], h_r0)
     orch.bring_up_workers()
-    assert orch.engine is not None
-    self.assertEqual(orch.fault_tolerance_config, ft_cfg)
+
+    # Even at policy_version == 0 (step-0 race window before initial weight
+    # sync completes), a late-arriving rollout worker must be staged as
+    # PENDING_WEIGHT_SYNC and excluded from active dispatch until a committed
+    # weight sync round includes it.
+    self.assertEqual(orch.engine.policy_version, 0)
     self.assertEqual(orch.engine.fault_tolerance_config, ft_cfg)
-    self.assertEqual(orch.engine.max_concurrent_rollouts_per_worker, 6)
-    self.assertEqual(orch.engine.rollout_task_timeout_s, 30.0)
+    self.assertEqual(orch.engine.max_zero_worker_wait_s, 15.0)
+    orch.register_worker_handle("rollout-1", [datatypes.Role.ROLLOUT], h_r1)
+    orch.wait_for_pending_bring_ups(timeout=5.0)
+
+    self.assertEqual(
+        orch.registry.state("rollout-1"),
+        worker_registry.MembershipState.PENDING_WEIGHT_SYNC,
+    )
+    self.assertEqual(orch.engine._rollout_workers, [h_r0])
     orch.shutdown()
 
 

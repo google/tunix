@@ -92,6 +92,20 @@ class LifecycleDriverTest(absltest.TestCase):
     self.assertEqual(sorted(log), ["a:stop", "b:stop", "c:stop"])
     self.assertEqual([wid for wid, _ in ctx.exception.failures], ["b"])
 
+  def test_shutdown_skips_evicted_worker(self):
+    registry = worker_registry.WorkerRegistry()
+    log: list[str] = []
+    registry.register(mock_worker.MockWorker("a", roles={"trainer"}, log=log))
+    registry.register(
+        mock_worker.MockWorker("b", roles={"rollout"}, log=log, fail_stop=True)
+    )
+    registry.evict("b")
+    driver = lifecycle.LifecycleDriver(registry)
+
+    driver.shutdown()
+
+    self.assertEqual(log, ["a:stop"])
+
 
 if __name__ == "__main__":
   absltest.main()

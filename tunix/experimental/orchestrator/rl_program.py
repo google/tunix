@@ -852,10 +852,16 @@ class StandardRLProgram(RLProgram):
         }
         if self.generation_args is not None:
           dispatch_kwargs["generation_args"] = self.generation_args
-        await self.engine.dispatch_rollouts(
-            [prompt_item],
-            **dispatch_kwargs,
-        )
+        try:
+          await self.engine.dispatch_rollouts(
+              [prompt_item],
+              **dispatch_kwargs,
+          )
+        except Exception:
+          self._in_flight_rollouts = max(
+              0, self._in_flight_rollouts - self.num_generations
+          )
+          raise
       if last_coordinates is not None and isinstance(
           self.scored_q, trajectory_queue_manager.BatchOrderedQueueManager
       ):
@@ -881,6 +887,8 @@ class StandardRLProgram(RLProgram):
             self._in_flight_rollouts -= len(completed)
             for item in completed:
               await self.raw_q.put(item)
+        except datatypes.NoHealthyRolloutWorkersError:
+          raise
         except Exception as exc:  # pylint: disable=broad-exception-caught
           logging.warning("Error in polling_stage: %s", exc)
           await asyncio.sleep(0.01)

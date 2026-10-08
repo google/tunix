@@ -84,10 +84,21 @@ class ToyEnv(base_environment.BaseTaskEnv):
   """Deterministic, single-turn toy environment for testing."""
 
   def __init__(self, task: dict[str, Any] | None = None, **kwargs: Any):
+    self.poison = bool(kwargs.pop("poison", False))
+    self.poison_group_index = kwargs.pop("poison_group_index", None)
     super().__init__(task=task or {"prompt": "hello"}, max_steps=1, **kwargs)
     self.step_count = 0
     self.final_reward_fn = None
     self.group_index = kwargs.get("group_index", 0)
+
+  def _maybe_raise_poison(self) -> None:
+    if self.poison or (
+        self.poison_group_index is not None
+        and self.group_index == self.poison_group_index
+    ):
+      raise RuntimeError(
+          f"Poison prompt failure for group_index={self.group_index}"
+      )
 
   def _reward(self) -> float:
     return 1.0 if self.group_index % 2 == 0 else -1.0
@@ -96,19 +107,23 @@ class ToyEnv(base_environment.BaseTaskEnv):
       self, seed: int | None = None, options: dict[str, Any] | None = None
   ) -> tuple[str, dict[str, Any]]:
     del seed, options
+    self._maybe_raise_poison()
     self.step_count = 0
     return "hello", {}
 
   def step(self, action: Any) -> tuple[str, float, bool, dict[str, Any]]:
     del action
+    self._maybe_raise_poison()
     self.step_count += 1
     return "world", self._reward(), True, {"step": self.step_count}
 
   def _initial_observation(self) -> str:
+    self._maybe_raise_poison()
     return "hello"
 
   def _step_impl(self, action: Any) -> base_environment.EnvStepResult:
     del action
+    self._maybe_raise_poison()
     return base_environment.EnvStepResult(
         observation="world",
         reward=self._reward(),
@@ -1019,7 +1034,7 @@ class CpuDistributedRLIntegrationTest(parameterized.TestCase):
     ):
       with running_multiprocess_worker(
           _run_rollout_worker_process, "rollout-0"
-      ) as (r0_handle, _, _, _):
+      ) as (r0_handle, _, r0_proc, _):
         with running_multiprocess_worker(
             _run_rollout_worker_process, "rollout-1"
         ) as (r1_handle, _, r1_proc, _):
@@ -1239,6 +1254,71 @@ class CpuDistributedRLIntegrationTest(parameterized.TestCase):
               )
             finally:
               os.kill(r1_new_proc.pid, signal.SIGCONT)
+
+            # 6. S5: Poison prompt / trajectory failure isolation.
+            # Dispatch a prompt whose group_index=1 triggers an environment
+            # failure alongside a healthy prompt, and verify that the failed
+            # trajectory returns as a FAILED placeholder with preserved
+            # prompt_id/group_index/policy_version while healthy trajectories
+            # succeed and rollout-0 stays ACTIVE.
+            poison_prompts = [
+                {
+                    "prompt": "prompt_alpha",
+                    "prompt_id": "prompt_poison",
+                    "max_turns": 1,
+                    "generation_kwargs": {"max_tokens": 4, "temperature": 1.0},
+                    "metadata": {"env_config": {"poison_group_index": 1}},
+                },
+                {
+                    "prompt": "prompt_beta",
+                    "prompt_id": "prompt_clean",
+                    "max_turns": 1,
+                    "generation_kwargs": {"max_tokens": 4, "temperature": 1.0},
+                },
+            ]
+            s5_items = asyncio.run(
+                _dispatch_and_drain(
+                    policy_version=cluster.engine.policy_version,
+                    prompts=poison_prompts,
+                )
+            )
+            self.assertLen(s5_items, 4)
+            failed_items = [
+                it
+                for it in s5_items
+                if it.status in (datatypes.TrajectoryStatus.FAILED, "FAILED")
+            ]
+            succeeded_items = [
+                it
+                for it in s5_items
+                if it.status
+                in (datatypes.TrajectoryStatus.SUCCEEDED, "SUCCEEDED")
+            ]
+            self.assertLen(failed_items, 1)
+            self.assertLen(succeeded_items, 3)
+            self.assertEqual(failed_items[0].prompt_id, "prompt_poison")
+            self.assertEqual(failed_items[0].group_index, 1)
+            self.assertEqual(
+                failed_items[0].policy_version, cluster.engine.policy_version
+            )
+            self.assertFalse(failed_items[0].is_valid)
+            self.assertEqual(
+                cluster.registry.state("rollout-0"),
+                worker_registry.MembershipState.ACTIVE,
+            )
+
+            # 7. S6: Total rollout worker loss -> bounded wait ->
+            # NoHealthyRolloutWorkersError without hanging.
+            cluster.engine.set_max_zero_worker_wait_s(0.2)
+            r0_proc.kill()
+            r0_proc.join(timeout=5.0)
+            with self.assertRaises(datatypes.NoHealthyRolloutWorkersError):
+              asyncio.run(
+                  _dispatch_and_drain(
+                      policy_version=cluster.engine.policy_version,
+                      prompts=wedge_prompts,
+                  )
+              )
 
             program.close()
             cluster.shutdown()

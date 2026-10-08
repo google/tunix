@@ -205,6 +205,10 @@ class WorkerInfo:
 ##### Rollout DTOs #####
 
 
+class NoHealthyRolloutWorkersError(RuntimeError, ValueError):
+  """Raised when no active rollout workers remain available to serve or sync."""
+
+
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class RolloutFaultToleranceConfig:
   """Configuration for rollout worker fault tolerance (V1).
@@ -212,19 +216,27 @@ class RolloutFaultToleranceConfig:
   Attributes:
     enabled: Whether rollout worker fault tolerance (eviction, retry, and
       dynamic rejoin) is enabled.
-    evict_on_failure: Whether failed rollout workers are evicted from the active
-      pool upon transport/execution errors. Defaults to True.
-    retry_on_worker_failure: Whether in-flight rollout requests on an evicted
-      worker are automatically re-queued for retry. Defaults to True.
+    evict_on_failure: Whether `PoolExecutionSession` automatically evicts a
+      rollout worker from the pool when a dispatch or poll RPC fails.
+    retry_on_worker_failure: Whether `PoolExecutionSession` automatically
+      re-queues in-flight rollout tasks from a failed worker onto healthy
+      workers.
     max_task_retries: Maximum number of retry attempts per rollout request_id
       before synthesizing a terminal FAILED placeholder trajectory.
     max_in_flight_per_worker: Optional default cap on concurrent in-flight
       rollouts dispatched to any single rollout worker.
     task_timeout_s: Optional per-task execution timeout in seconds once a
       rollout request is dispatched to a worker.
+    max_zero_worker_wait_s: Maximum duration in seconds to wait when zero active
+      rollout workers remain before raising `NoHealthyRolloutWorkersError`.
     retry_weight_sync_on_eviction: Whether `WeightSyncCoordinator.sync()`
       automatically evicts failed destination workers and retries the round once
       on surviving workers.
+    recover_unknown_transfer_state: Whether `WeightSyncCoordinator.sync()`
+      attempts recovery from `RoundState.UNKNOWN_TRANSFER_STATE` by evicting
+      uncommitted workers, explicitly releasing source staging via
+      `release_after_unknown_transfer()`, resetting poison, and retrying once.
+      Defaults to False.
   """
 
   enabled: bool = True
@@ -233,7 +245,9 @@ class RolloutFaultToleranceConfig:
   max_task_retries: int = 3
   max_in_flight_per_worker: int | None = None
   task_timeout_s: float | None = None
+  max_zero_worker_wait_s: float = 600.0
   retry_weight_sync_on_eviction: bool = True
+  recover_unknown_transfer_state: bool = False
 
   def __post_init__(self):
     if self.max_task_retries < 0:
@@ -245,12 +259,15 @@ class RolloutFaultToleranceConfig:
       raise ValueError("max_in_flight_per_worker must be positive")
     if self.task_timeout_s is not None and self.task_timeout_s <= 0:
       raise ValueError("task_timeout_s must be positive")
+    if self.max_zero_worker_wait_s < 0:
+      raise ValueError("max_zero_worker_wait_s must be non-negative")
 
   def with_overrides(
       self,
       *,
       max_in_flight_per_worker: int | None = None,
       task_timeout_s: float | None = None,
+      max_zero_worker_wait_s: float | None = None,
   ) -> "RolloutFaultToleranceConfig":
     """Returns a copy where each non-None argument replaces the stored value.
 
@@ -262,6 +279,7 @@ class RolloutFaultToleranceConfig:
     overrides = {
         "max_in_flight_per_worker": max_in_flight_per_worker,
         "task_timeout_s": task_timeout_s,
+        "max_zero_worker_wait_s": max_zero_worker_wait_s,
     }
     overrides = {k: v for k, v in overrides.items() if v is not None}
     return dataclasses.replace(self, **overrides) if overrides else self
