@@ -1743,13 +1743,13 @@ class DistributedRLEngineTest(absltest.TestCase):
   def test_poll_rollouts_does_not_block_on_slow_or_idle_worker(self):
     async def _run():
       resp1 = remote_execution.ExecutionResponse(
-          request_id="req_p1_g1_v0",
+          request_id="req_p1_g0_v0",
           result=datatypes.RolloutResponse(
-              request_id="req_p1_g1_v0",
+              request_id="req_p1_g0_v0",
               status="COMPLETED",
               payload=datatypes.TrajectoryItem(
                   prompt_id="p1",
-                  group_index=1,
+                  group_index=0,
                   traj={
                       "trajectory_reward": 1.0,
                       "status": datatypes.TrajectoryStatus.SUCCEEDED,
@@ -2256,6 +2256,160 @@ class DistributedRLEngineTest(absltest.TestCase):
       self.assertLen(evicted_handles, 1)
       self.assertIs(evicted_handles[0][0], self.mock_rollout_1)
       self.assertIsInstance(evicted_handles[0][1], TimeoutError)
+      await engine.close()
+
+    asyncio.run(_run())
+
+  def test_sync_pending_weights_defers_while_actor_busy_or_weights_dirty(self):
+    async def _run():
+      coordinator = _FakeWeightSyncCoordinator()
+      coordinator.has_pending_destinations = lambda: True
+      engine = distributed_rl_engine.DistributedRLEngine(
+          rollout_workers=[self.mock_rollout_1],
+          trainer_workers={datatypes.Role.ACTOR: self.mock_actor},
+          weight_sync_coordinator=coordinator,
+      )
+
+      fwd_bwd_entered = asyncio.Event()
+      release_fwd_bwd = asyncio.Event()
+
+      async def _slow_asubmit(method_name, **kwargs):
+        del kwargs
+        if method_name == "fwd_bwd":
+          fwd_bwd_entered.set()
+          await release_fwd_bwd.wait()
+          return {"loss": 0.5}
+        if method_name == "update":
+          return 1
+        return None
+
+      self.mock_actor.asubmit = mock.AsyncMock(side_effect=_slow_asubmit)
+      dummy_payload = mock.MagicMock(spec=datatypes.RLTrainerPayload)
+      dummy_payload.metadata = {}
+
+      train_task = asyncio.create_task(
+          engine.train_step(dummy_payload, apply_optimizer=True)
+      )
+      await fwd_bwd_entered.wait()
+
+      # 1. While train_step is in flight (_actor_busy_count > 0),
+      # sync_pending_weights must defer immediately without calling sync().
+      self.assertIsNone(await engine.sync_pending_weights())
+      self.assertEmpty(coordinator.calls)
+
+      release_fwd_bwd.set()
+      await train_task
+
+      # 2. After train_step mutates weights but before sync_weights() commits
+      # (_actor_weights_dirty == True), sync_pending_weights must still defer so
+      # step k+1 weights are not pushed with policy_version=k.
+      self.assertTrue(engine._actor_weights_dirty)
+      self.assertIsNone(await engine.sync_pending_weights())
+      self.assertEmpty(coordinator.calls)
+
+      # 3. End-of-step sync_weights() commits step 1 and clears dirty state.
+      v = await engine.sync_weights(policy_version=1)
+      self.assertEqual(v, 1)
+      self.assertFalse(engine._actor_weights_dirty)
+      self.assertEqual(coordinator.calls, [1])
+
+      # 4. Now that trainer is idle and clean, sync_pending_weights() runs.
+      self.assertEqual(await engine.sync_pending_weights(), 1)
+      self.assertEqual(coordinator.calls, [1, 1])
+      await engine.close()
+
+    asyncio.run(_run())
+
+  def test_actor_operations_wait_for_in_flight_sync_pending_weights(self):
+    async def _run():
+      coordinator = _FakeWeightSyncCoordinator()
+      coordinator.has_pending_destinations = lambda: True
+      sync_entered = asyncio.Event()
+      release_sync = asyncio.Event()
+      events = []
+
+      async def _slow_pending_sync(policy_version: int = 0, **kwargs):
+        if kwargs.get("only_pending"):
+          events.append("pending_sync_start")
+          sync_entered.set()
+          await release_sync.wait()
+          events.append("pending_sync_end")
+        else:
+          events.append("full_sync")
+        coordinator.calls.append(policy_version)
+        return _FakeSyncResult(policy_version=policy_version)
+
+      coordinator.sync = _slow_pending_sync
+
+      async def _actor_asubmit(method_name, **kwargs):
+        del kwargs
+        events.append(f"actor_{method_name}")
+        return {"ok": True}
+
+      self.mock_actor.asubmit = mock.AsyncMock(side_effect=_actor_asubmit)
+      engine = distributed_rl_engine.DistributedRLEngine(
+          rollout_workers=[self.mock_rollout_1],
+          trainer_workers={datatypes.Role.ACTOR: self.mock_actor},
+          weight_sync_coordinator=coordinator,
+      )
+
+      pending_task = asyncio.create_task(engine.sync_pending_weights())
+      await sync_entered.wait()
+
+      # Launch per_token_logps(Role.ACTOR) and sync_weights() while
+      # sync_pending_weights() is in flight; both must wait for pending_sync_end.
+      logps_task = asyncio.create_task(
+          engine.per_token_logps(datatypes.Role.ACTOR, items=[1, 2])
+      )
+      await asyncio.sleep(0.01)
+      self.assertEqual(events, ["pending_sync_start"])
+
+      release_sync.set()
+      await asyncio.gather(pending_task, logps_task)
+      self.assertEqual(
+          events,
+          ["pending_sync_start", "pending_sync_end", "actor_per_token_logps"],
+      )
+      await engine.close()
+
+    asyncio.run(_run())
+
+  def test_concurrent_dispatch_rollouts_succeeds_during_in_flight_sync_weights(
+      self,
+  ):
+    async def _run():
+      coordinator = _FakeWeightSyncCoordinator()
+      sync_entered = asyncio.Event()
+      release_sync = asyncio.Event()
+
+      async def _slow_sync(policy_version: int = 0, **kwargs):
+        del kwargs
+        sync_entered.set()
+        await release_sync.wait()
+        coordinator.calls.append(policy_version)
+        return _FakeSyncResult(policy_version=policy_version)
+
+      coordinator.sync = _slow_sync
+      engine = distributed_rl_engine.DistributedRLEngine(
+          rollout_workers=[self.mock_rollout_1],
+          trainer_workers={datatypes.Role.ACTOR: self.mock_actor},
+          weight_sync_coordinator=coordinator,
+      )
+
+      sync_task = asyncio.create_task(engine.sync_weights(policy_version=2))
+      await sync_entered.wait()
+
+      # Concurrent rollout dispatch while a healthy sync_weights() round is in
+      # flight must NOT raise "rollout policy weights are inconsistent".
+      req_ids = await engine.dispatch_rollouts(
+          [{"prompt": "p_concurrent", "prompt_id": "p_concurrent"}],
+          num_generations=1,
+          policy_version=1,
+      )
+      self.assertLen(req_ids, 1)
+
+      release_sync.set()
+      self.assertEqual(await sync_task, 2)
       await engine.close()
 
     asyncio.run(_run())

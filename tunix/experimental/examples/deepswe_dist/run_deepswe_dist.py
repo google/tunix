@@ -88,6 +88,37 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " starting training."
       ),
   )
+  parser.add_argument(
+      "--max_concurrent_rollouts_per_worker",
+      type=int,
+      default=(
+          int(os.getenv("MAX_CONCURRENT_ROLLOUTS_PER_WORKER", "0")) or None
+      ),
+      help=(
+          "Optional cap on concurrent in-flight rollouts dispatched to any "
+          "single rollout worker."
+      ),
+  )
+  parser.add_argument(
+      "--rollout_task_timeout_s",
+      type=float,
+      default=(
+          float(os.getenv("ROLLOUT_TASK_TIMEOUT_S", "0")) or None
+      ),
+      help=(
+          "Optional per-task execution timeout in seconds once a rollout "
+          "request is dispatched to a worker."
+      ),
+  )
+  parser.add_argument(
+      "--max_zero_worker_wait_s",
+      type=float,
+      default=float(os.getenv("MAX_ZERO_WORKER_WAIT_S", "600.0")),
+      help=(
+          "Maximum duration in seconds to wait when zero active rollout "
+          "workers remain before raising NoHealthyRolloutWorkersError."
+      ),
+  )
   parser.add_argument("--max_steps", type=int, default=1)
   parser.add_argument("--max_prompt_length", type=int, default=1024)
   parser.add_argument("--max_response_length", type=int, default=1024)
@@ -715,6 +746,11 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           "jax_cache_gcs_dir": os.getenv("JAX_CACHE_GCS_DIR"),
           "rollout_jax_cache_gcs_dir": os.getenv("ROLLOUT_JAX_CACHE_GCS_DIR"),
       },
+      fault_tolerance_config=datatypes.RolloutFaultToleranceConfig(
+          max_in_flight_per_worker=args.max_concurrent_rollouts_per_worker,
+          task_timeout_s=args.rollout_task_timeout_s,
+          max_zero_worker_wait_s=args.max_zero_worker_wait_s,
+      ),
   )
   context.ipc.discovery.on_register(
       functools.partial(

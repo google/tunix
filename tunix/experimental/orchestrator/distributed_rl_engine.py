@@ -116,6 +116,9 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     self._zero_worker_seconds_total: float = 0.0
     self._terminal_failed_trajectories_total: int = 0
     self._weights_consistent: bool = True
+    self._pending_sync_lock: asyncio.Lock = asyncio.Lock()
+    self._actor_busy_count: int = 0
+    self._actor_weights_dirty: bool = False
 
     self._trainer_workers = dict(trainer_workers)
     self._inference_workers = dict(inference_workers or {})
@@ -741,6 +744,12 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     )
     return await self._invoke_worker(worker, "score", items=items, **kwargs)
 
+  async def _await_pending_weight_sync(self) -> None:
+    """Waits if a mid-step `sync_pending_weights` round is currently in flight."""
+    if self._pending_sync_lock.locked():
+      async with self._pending_sync_lock:
+        pass
+
   async def per_token_logps(
       self,
       role: datatypes.Role,
@@ -760,9 +769,21 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         "Evaluating per-token log probabilities on %s worker...",
         role_name,
     )
-    return await self._invoke_worker(
-        worker, "per_token_logps", items=items, **kwargs
+    is_actor_trainer = (
+        role == datatypes.Role.ACTOR
+        and role not in self._inference_workers
+        and role in self._trainer_workers
     )
+    if is_actor_trainer:
+      await self._await_pending_weight_sync()
+      self._actor_busy_count += 1
+    try:
+      return await self._invoke_worker(
+          worker, "per_token_logps", items=items, **kwargs
+      )
+    finally:
+      if is_actor_trainer:
+        self._actor_busy_count -= 1
 
   async def train_step(
       self,
@@ -791,22 +812,32 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         payload=payload,
         metadata=metadata,
     )
-    fwd_bwd_result = await self._invoke_worker(
-        worker,
-        "fwd_bwd",
-        request=request,
-        skip_jit=skip_jit,
-        **kwargs,
-    )
-    if not apply_optimizer:
-      return fwd_bwd_result
-    train_step = await self._invoke_worker(worker, "update")
-    return {
-        "fwd_bwd": fwd_bwd_result,
-        "updated": True,
-        "train_step": train_step,
-        "accumulated": accumulate_gradients,
-    }
+    is_actor = role == datatypes.Role.ACTOR
+    if is_actor:
+      await self._await_pending_weight_sync()
+      self._actor_busy_count += 1
+    try:
+      fwd_bwd_result = await self._invoke_worker(
+          worker,
+          "fwd_bwd",
+          request=request,
+          skip_jit=skip_jit,
+          **kwargs,
+      )
+      if is_actor:
+        self._actor_weights_dirty = True
+      if not apply_optimizer:
+        return fwd_bwd_result
+      train_step = await self._invoke_worker(worker, "update")
+      return {
+          "fwd_bwd": fwd_bwd_result,
+          "updated": True,
+          "train_step": train_step,
+          "accumulated": accumulate_gradients,
+      }
+    finally:
+      if is_actor:
+        self._actor_busy_count -= 1
 
   async def get_metrics(
       self,
@@ -955,6 +986,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           "sync_weights needs a coordinator; construct the engine with"
           " weight_sync_coordinator."
       )
+    await self._await_pending_weight_sync()
     next_policy_version = (
         self._policy_version + 1 if policy_version is None else policy_version
     )
@@ -965,10 +997,17 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     sync_kwargs = {}
     if source_staged is not None:
       sync_kwargs["source_staged"] = source_staged
-    self._weights_consistent = False
-    result = await self._weight_sync_coordinator.sync(
-        policy_version=next_policy_version, **sync_kwargs
-    )
+    self._actor_busy_count += 1
+    try:
+      result = await self._weight_sync_coordinator.sync(
+          policy_version=next_policy_version, **sync_kwargs
+      )
+    except Exception:
+      self._weights_consistent = False
+      raise
+    finally:
+      self._actor_busy_count -= 1
+    self._actor_weights_dirty = False
     self._weights_consistent = True
     self._policy_version = result.policy_version
     logging.info(
@@ -985,6 +1024,9 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
 
     Targets only `PENDING_WEIGHT_SYNC` rollout workers so `ACTIVE` rollout
     workers currently generating trajectories are not quiesced or interrupted.
+    If the actor trainer worker is currently executing an operation or holds
+    uncommitted mid-step weight updates, the catch-up sync is deferred to the
+    next step boundary.
 
     Args:
       policy_version: Optional policy version to push. Defaults to the current
@@ -992,52 +1034,67 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
 
     Returns:
       The synced policy version if pending workers were synced, or None if no
-      rollout workers were waiting in `PENDING_WEIGHT_SYNC`.
+      rollout workers were waiting in `PENDING_WEIGHT_SYNC` or the trainer was
+      busy.
     """
     if (
         not self._weights_consistent
+        or self._actor_busy_count > 0
+        or self._actor_weights_dirty
+        or self._pending_sync_lock.locked()
         or self._weight_sync_coordinator is None
         or not self._weight_sync_coordinator.has_pending_destinations()
         or self._weight_sync_coordinator.in_flight
         or self._weight_sync_coordinator.poisoned is not None
     ):
       return None
-    target_policy_version = (
-        self._policy_version if policy_version is None else policy_version
-    )
-    logging.info(
-        "Proactively synchronizing weights to pending rollout worker(s)"
-        " (policy_version=%d)...",
-        target_policy_version,
-    )
-    try:
-      result = await self._weight_sync_coordinator.sync(
-          policy_version=target_policy_version,
-          only_pending=True,
-      )
-    except (weight_sync_coordinator_lib.WeightSyncError, ValueError) as exc:
+    async with self._pending_sync_lock:
       if (
-          isinstance(exc, weight_sync_coordinator_lib.WeightSyncError)
-          and exc.result is not None
-          and exc.result.state
-          == weight_sync_coordinator_lib.RoundState.UNKNOWN_TRANSFER_STATE
-          and self._weight_sync_coordinator.poisoned is not None
+          not self._weights_consistent
+          or self._actor_busy_count > 0
+          or self._actor_weights_dirty
+          or self._weight_sync_coordinator is None
+          or not self._weight_sync_coordinator.has_pending_destinations()
+          or self._weight_sync_coordinator.in_flight
+          or self._weight_sync_coordinator.poisoned is not None
       ):
-        raise
-      if self._weight_sync_coordinator.poisoned is not None:
-        self._weight_sync_coordinator.reset_after_recovery()
-      # A failed catch-up round (e.g. the trainer is busy in fwd_bwd/update, or
-      # the pending worker died mid-sync and was evicted) must not interrupt
-      # the step: the next end-of-step sync_weights() targets ACTIVE and
-      # PENDING_WEIGHT_SYNC workers alike and brings any survivor up to date.
-      logging.warning(
-          "[rollout-ft] action=pending_sync_deferred policy_version=%d"
-          " error=%r; falling back to the next end-of-step sync_weights().",
-          target_policy_version,
-          exc,
+        return None
+      target_policy_version = (
+          self._policy_version if policy_version is None else policy_version
       )
-      return None
-    return result.policy_version
+      logging.info(
+          "Proactively synchronizing weights to pending rollout worker(s)"
+          " (policy_version=%d)...",
+          target_policy_version,
+      )
+      try:
+        result = await self._weight_sync_coordinator.sync(
+            policy_version=target_policy_version,
+            only_pending=True,
+        )
+      except (weight_sync_coordinator_lib.WeightSyncError, ValueError) as exc:
+        if (
+            isinstance(exc, weight_sync_coordinator_lib.WeightSyncError)
+            and exc.result is not None
+            and exc.result.state
+            == weight_sync_coordinator_lib.RoundState.UNKNOWN_TRANSFER_STATE
+            and self._weight_sync_coordinator.poisoned is not None
+        ):
+          raise
+        if self._weight_sync_coordinator.poisoned is not None:
+          self._weight_sync_coordinator.reset_after_recovery()
+        # A failed catch-up round (e.g. the pending worker died mid-sync and
+        # was evicted) must not interrupt the step: the next end-of-step
+        # sync_weights() targets ACTIVE and PENDING_WEIGHT_SYNC workers alike
+        # and brings any survivor up to date.
+        logging.warning(
+            "[rollout-ft] action=pending_sync_deferred policy_version=%d"
+            " error=%r; falling back to the next end-of-step sync_weights().",
+            target_policy_version,
+            exc,
+        )
+        return None
+      return result.policy_version
 
   async def save_checkpoint(
       self,
@@ -1054,9 +1111,17 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         "Saving checkpoint on %s worker...",
         role_name,
     )
-    return await self._invoke_worker(
-        worker, "save_checkpoint", metadata=metadata, **kwargs
-    )
+    is_actor = role == datatypes.Role.ACTOR
+    if is_actor:
+      await self._await_pending_weight_sync()
+      self._actor_busy_count += 1
+    try:
+      return await self._invoke_worker(
+          worker, "save_checkpoint", metadata=metadata, **kwargs
+      )
+    finally:
+      if is_actor:
+        self._actor_busy_count -= 1
 
   async def _restore_checkpoint(
       self,
