@@ -102,14 +102,21 @@ class _FakeSyncResult:
 
   def __init__(self, policy_version: int):
     self.policy_version = policy_version
+    self.workers = ()
 
 
 class _FakeWeightSyncCoordinator:
   """Records sync calls and echoes (or forces) the resulting policy version."""
 
+  in_flight: bool = False
+
   def __init__(self, forced_version: int | None = None):
     self.calls: list[int] = []
     self._forced_version = forced_version
+    self.poisoned: str | None = None
+
+  def has_pending_destinations(self) -> bool:
+    return False
 
   async def sync(self, policy_version: int = 0, **kwargs):
     del kwargs
@@ -791,7 +798,6 @@ class DistributedRLEngineTest(absltest.TestCase):
         )
 
     asyncio.run(_run())
-
 
   def test_sync_weights_requires_a_coordinator(self):
     async def _run():
@@ -1768,6 +1774,219 @@ class DistributedRLEngineTest(absltest.TestCase):
       self.assertGreaterEqual(len(results), 1)
       self.assertEqual(results[0].prompt_id, "p1")
       self.assertLess(elapsed, 1.0)
+
+    asyncio.run(_run())
+
+  def test_poll_rollouts_evicts_failed_worker_and_redispatches_to_survivor(
+      self,
+  ):
+    async def _run():
+      evicted_handles = []
+      engine = distributed_rl_engine.DistributedRLEngine(
+          rollout_workers=[self.mock_rollout_1, self.mock_rollout_2],
+          trainer_workers={datatypes.Role.ACTOR: self.mock_actor},
+          on_worker_evicted=lambda h, exc: evicted_handles.append((h, exc)),
+      )
+      # Force initial dispatch to the first actor in the pool (mock_rollout_1).
+      engine._rollout_pool.router = lambda actors, *a, **kw: actors[0]
+
+      resp_ok = remote_execution.ExecutionResponse(
+          request_id="req_p1_g0_v0",
+          result=[
+              datatypes.RolloutResponse(
+                  request_id="req_p1_g0_v0",
+                  status="COMPLETED",
+                  payload=datatypes.TrajectoryItem(
+                      prompt_id="p1",
+                      group_index=0,
+                      traj={
+                          "trajectory_reward": 1.0,
+                          "status": datatypes.TrajectoryStatus.SUCCEEDED,
+                      },
+                  ),
+              )
+          ],
+      )
+      self.mock_rollout_1.poll_responses.side_effect = ConnectionError(
+          "rollout-0 crashed"
+      )
+      self.mock_rollout_2.poll_responses.return_value = resp_ok
+
+      await engine.dispatch_rollouts(
+          [{"prompt": "p1", "prompt_id": "p1"}],
+          num_generations=1,
+          policy_version=0,
+      )
+      results = await engine.poll_rollouts(timeout_s=2.0)
+
+      self.assertLen(results, 1)
+      self.assertEqual(results[0].prompt_id, "p1")
+      self.assertEqual(results[0].status, datatypes.TrajectoryStatus.SUCCEEDED)
+      self.assertEqual(engine._rollout_workers, [self.mock_rollout_2])
+      self.assertLen(evicted_handles, 1)
+      self.assertIs(evicted_handles[0][0], self.mock_rollout_1)
+      await engine.close()
+
+    asyncio.run(_run())
+
+  def test_poll_rollouts_returns_failed_trajectory_item_when_all_workers_fail(
+      self,
+  ):
+    async def _run():
+      self.mock_rollout_1.poll_responses.side_effect = ConnectionError(
+          "rollout-0 down"
+      )
+      self.mock_rollout_2.poll_responses.side_effect = ConnectionError(
+          "rollout-1 down"
+      )
+
+      await self.engine.dispatch_rollouts(
+          [{"prompt": "p_fail", "prompt_id": "p_fail"}],
+          num_generations=1,
+          policy_version=0,
+      )
+      results = await self.engine.poll_rollouts(timeout_s=2.0)
+
+      self.assertLen(results, 1)
+      self.assertEqual(results[0].prompt_id, "p_fail")
+      self.assertEqual(results[0].status, datatypes.TrajectoryStatus.FAILED)
+      self.assertIn("down", results[0].metadata.get("error", ""))
+      self.assertEmpty(self.engine._rollout_workers)
+      await self.engine.close()
+
+    asyncio.run(_run())
+
+  def test_max_concurrent_rollouts_per_worker_caps_in_flight_and_drains(self):
+    async def _run():
+      q1: asyncio.Queue[remote_execution.ExecutionResponse] = asyncio.Queue()
+      q2: asyncio.Queue[remote_execution.ExecutionResponse] = asyncio.Queue()
+
+      async def _dispatch_1(request_id, method_name, *args, **kwargs):
+        del method_name, args
+        req = kwargs["requests"][0]
+        await q1.put(
+            remote_execution.ExecutionResponse(
+                request_id=request_id,
+                result=[
+                    datatypes.RolloutResponse(
+                        request_id=request_id,
+                        status="COMPLETED",
+                        payload=datatypes.TrajectoryItem(
+                            prompt_id=req.prompt_id,
+                            group_index=req.group_index,
+                            traj={
+                                "trajectory_reward": 1.0,
+                                "status": datatypes.TrajectoryStatus.SUCCEEDED,
+                            },
+                        ),
+                    )
+                ],
+            )
+        )
+        return request_id
+
+      async def _dispatch_2(request_id, method_name, *args, **kwargs):
+        del method_name, args
+        req = kwargs["requests"][0]
+        await q2.put(
+            remote_execution.ExecutionResponse(
+                request_id=request_id,
+                result=[
+                    datatypes.RolloutResponse(
+                        request_id=request_id,
+                        status="COMPLETED",
+                        payload=datatypes.TrajectoryItem(
+                            prompt_id=req.prompt_id,
+                            group_index=req.group_index,
+                            traj={
+                                "trajectory_reward": 1.0,
+                                "status": datatypes.TrajectoryStatus.SUCCEEDED,
+                            },
+                        ),
+                    )
+                ],
+            )
+        )
+        return request_id
+
+      gate = asyncio.Event()
+
+      async def _poll_1(timeout_s=50.0):
+        await gate.wait()
+        return await asyncio.wait_for(q1.get(), timeout=timeout_s)
+
+      async def _poll_2(timeout_s=50.0):
+        await gate.wait()
+        return await asyncio.wait_for(q2.get(), timeout=timeout_s)
+
+      self.mock_rollout_1.dispatch_task = mock.AsyncMock(
+          side_effect=_dispatch_1
+      )
+      self.mock_rollout_2.dispatch_task = mock.AsyncMock(
+          side_effect=_dispatch_2
+      )
+      self.mock_rollout_1.poll_responses.side_effect = _poll_1
+      self.mock_rollout_2.poll_responses.side_effect = _poll_2
+
+      engine = distributed_rl_engine.DistributedRLEngine(
+          rollout_workers=[self.mock_rollout_1, self.mock_rollout_2],
+          trainer_workers={datatypes.Role.ACTOR: self.mock_actor},
+          max_concurrent_rollouts_per_worker=1,
+      )
+      self.assertEqual(engine.max_concurrent_rollouts_per_worker, 1)
+
+      # Dispatch 4 rollouts across 2 workers with per-worker cap = 1.
+      await engine.dispatch_rollouts(
+          [
+              {"prompt": "p0", "prompt_id": "p0"},
+              {"prompt": "p1", "prompt_id": "p1"},
+          ],
+          num_generations=2,
+          policy_version=0,
+      )
+
+      # Exactly 1 task per worker is dispatched; 2 remain queued in session.
+      self.assertEqual(
+          engine._rollout_session._worker_load(self.mock_rollout_1), 1
+      )
+      self.assertEqual(
+          engine._rollout_session._worker_load(self.mock_rollout_2), 1
+      )
+      self.assertEqual(engine._rollout_session.pending_count, 2)
+
+      # Release gate and collect all 4 completions.
+      gate.set()
+      collected = []
+      while len(collected) < 4:
+        batch = await engine.poll_rollouts(timeout_s=2.0)
+        collected.extend(batch)
+
+      self.assertLen(collected, 4)
+      self.assertEqual(engine._rollout_session.pending_count, 0)
+      self.assertEqual(engine._rollout_session.in_flight_count, 0)
+      await engine.close()
+
+    asyncio.run(_run())
+
+  def test_fault_tolerance_config_plumbing_in_engine(self):
+    async def _run():
+      ft_cfg = datatypes.RolloutFaultToleranceConfig(
+          evict_on_failure=False,
+          retry_on_worker_failure=False,
+          max_task_retries=1,
+          max_in_flight_per_worker=2,
+      )
+      engine = distributed_rl_engine.DistributedRLEngine(
+          rollout_workers=[self.mock_rollout_1],
+          trainer_workers={datatypes.Role.ACTOR: self.mock_actor},
+          fault_tolerance_config=ft_cfg,
+      )
+      self.assertEqual(engine.fault_tolerance_config, ft_cfg)
+      self.assertEqual(engine.max_concurrent_rollouts_per_worker, 2)
+      self.assertFalse(engine._rollout_session._evict_on_failure)
+      self.assertFalse(engine._rollout_session._retry_on_worker_failure)
+      self.assertEqual(engine._rollout_session._max_task_retries, 1)
+      await engine.close()
 
     asyncio.run(_run())
 

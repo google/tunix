@@ -201,6 +201,14 @@ class RemoteWorkerShim:
   def __init__(self, handle: Any, info: datatypes.WorkerInfo):
     self._handle = handle
     self._info = info
+    try:
+      handle.worker_id = info.worker_id
+    except AttributeError:
+      pass
+
+  @property
+  def handle(self) -> Any:
+    return self._handle
 
   def info(self) -> datatypes.WorkerInfo:
     return self._info

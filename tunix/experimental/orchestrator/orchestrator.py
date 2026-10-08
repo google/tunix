@@ -18,7 +18,6 @@ Supervises WorkerRegistry, LifecycleDriver, HealthMonitor, and StartupValidator.
 Provides supervised RL program execution (`run`).
 """
 
-import collections
 from collections.abc import Sequence
 from concurrent import futures
 import contextlib
@@ -38,6 +37,7 @@ from tunix.experimental.orchestrator import rl_program
 from tunix.experimental.orchestrator import startup_validation
 from tunix.experimental.orchestrator import worker_registry
 from tunix.experimental.trajectory import store as trajectory_store_lib
+from tunix.experimental.weight_sync import weight_sync_coordinator
 from tunix.experimental.worker import abstract_worker
 from tunix.experimental.worker import remote_execution
 
@@ -60,6 +60,10 @@ class ClusterOrchestrator:
       jax_cache_config: Mapping[str, Any] | None = None,
       run_id: str | None = None,
       disable_weight_sync_timeouts: bool | None = None,
+      max_concurrent_rollouts_per_worker: int | None = None,
+      fault_tolerance_config: datatypes.RolloutFaultToleranceConfig | None = (
+          None
+      ),
   ):
     """Initializes ClusterOrchestrator.
 
@@ -69,31 +73,44 @@ class ClusterOrchestrator:
       lifecycle_driver: Lifecycle driver to use; one is created if omitted.
       monitor: Health monitor to use; one is created if omitted.
       weight_sync_mode: Weight sync mode, if any.
-      trajectory_store_config: Trajectory Store configuration for this
-        process, or None to run without a store. See
-        `store.TrajectoryStore.from_config`. Pass the same config to every
-        process in the run: for the file backend it is the shared root_dir
-        and run_id that will make the workers' writes visible to this
-        process's reads once read/write wiring is connected.
+      trajectory_store_config: Trajectory Store configuration for this process,
+        or None to run without a store. See `store.TrajectoryStore.from_config`.
+        Pass the same config to every process in the run: for the file backend
+        it is the shared root_dir and run_id that will make the workers' writes
+        visible to this process's reads once read/write wiring is connected.
+      jax_cache_config: Optional JAX compilation cache synchronization config.
       run_id: Optional unique identifier for this orchestrator run. Generated
         automatically if omitted.
       disable_weight_sync_timeouts: When True, sets all weight-sync phase
         deadlines to infinity.
+      max_concurrent_rollouts_per_worker: Optional cap on concurrent in-flight
+        rollouts dispatched to any single rollout worker.
+      fault_tolerance_config: Optional consolidated rollout fault-tolerance
+        configuration.
     """
     self.config = config
+    self._fault_tolerance_config = (
+        fault_tolerance_config or datatypes.RolloutFaultToleranceConfig()
+    ).with_overrides(
+        max_in_flight_per_worker=max_concurrent_rollouts_per_worker,
+    )
+    self._max_concurrent_rollouts_per_worker = (
+        self._fault_tolerance_config.max_in_flight_per_worker
+    )
     self.registry = registry or worker_registry.WorkerRegistry()
     self.lifecycle_driver = lifecycle_driver or lifecycle.LifecycleDriver(
         self.registry
     )
     self.monitor = monitor or health_monitor.HealthMonitor(self.registry)
-    self._remote_worker_handles: dict[
-        str, list[remote_execution.ActorHandle]
-    ] = collections.defaultdict(list)
-    self._remote_worker_handles_by_id: dict[
-        str, remote_execution.ActorHandle
-    ] = {}
-    self._remote_worker_infos: dict[str, datatypes.WorkerInfo] = {}
+    self._lock = threading.RLock()
+    self._brought_up = False
+    self._warmup_data: Any = None
+    self._bring_up_executor = futures.ThreadPoolExecutor(
+        max_workers=4, thread_name_prefix="worker_bringup"
+    )
+    self._pending_bring_up_futures: set[futures.Future[Any]] = set()
     self.engine: distributed_rl_engine.DistributedRLEngine | None = None
+    self.registry.add_state_listener(self._on_registry_state_changed)
     mode = getattr(weight_sync_mode, "value", weight_sync_mode)
     self._weight_sync_mode = str(mode).lower() if mode is not None else None
     self._disable_weight_sync_timeouts = disable_weight_sync_timeouts
@@ -142,6 +159,40 @@ class ClusterOrchestrator:
           self.trajectory_store_config,
       )
 
+  @property
+  def fault_tolerance_config(self) -> datatypes.RolloutFaultToleranceConfig:
+    return self._fault_tolerance_config
+
+  def _effective_worker_capacity(
+      self, info: datatypes.WorkerInfo | None
+  ) -> int | None:
+    """Computes effective max concurrent rollouts for a worker."""
+    worker_cap = None
+    if info is not None and info.resources:
+      raw_cap = info.resources.get("max_concurrency")
+      if raw_cap is not None and int(raw_cap) > 0:
+        worker_cap = int(raw_cap)
+    default_cap = self._fault_tolerance_config.max_in_flight_per_worker
+    if default_cap is not None and worker_cap is not None:
+      return min(default_cap, worker_cap)
+    if worker_cap is not None:
+      return worker_cap
+    return default_cap
+
+  def _remote_shims(
+      self, *, include_evicted: bool = False
+  ) -> dict[str, weight_sync_coordinator.RemoteWorkerShim]:
+    """Returns registered RemoteWorkerShims keyed by worker_id."""
+    shims: dict[str, weight_sync_coordinator.RemoteWorkerShim] = {}
+    for worker_id in self.registry.worker_ids(include_evicted=include_evicted):
+      try:
+        member = self.registry.get(worker_id)
+      except KeyError:
+        continue  # Unregistered concurrently.
+      if isinstance(member, weight_sync_coordinator.RemoteWorkerShim):
+        shims[worker_id] = member
+    return shims
+
   def __enter__(self) -> "ClusterOrchestrator":
     """Interactive context manager bring-up."""
     self.bring_up_workers()
@@ -182,6 +233,9 @@ class ClusterOrchestrator:
       case _:
         raise RuntimeError(f"unknown service type {service_type}")
 
+    resources: dict[str, Any] = {"address": service_address}
+    if md.get("max_concurrency") is not None:
+      resources["max_concurrency"] = int(md["max_concurrency"])
     self.register_worker_handle(
         worker_id=worker_id,
         roles=[role],
@@ -189,7 +243,7 @@ class ClusterOrchestrator:
             f"grpc://{service_address}",
             rpc_timeout_s=rpc_timeout_s,
         ),
-        resources={"address": service_address},
+        resources=resources,
     )
 
   def register_worker(
@@ -204,8 +258,10 @@ class ClusterOrchestrator:
       roles: Sequence[datatypes.Role | str],
       handle: remote_execution.ActorHandle,
       resources: dict[str, Any] | None = None,
+      *,
+      override: bool = True,
   ) -> datatypes.WorkerInfo:
-    """Registers a remote worker handle used directly by DistributedRLEngine."""
+    """Registers a remote worker handle in the WorkerRegistry."""
     if not roles:
       raise ValueError(f"worker {worker_id!r} declares no roles")
     if not isinstance(handle, remote_execution.ActorHandle):
@@ -213,11 +269,6 @@ class ClusterOrchestrator:
           "register_worker_handle expects a remote_execution.ActorHandle, got "
           f"{type(handle)}"
       )
-    if (
-        worker_id in self._remote_worker_infos
-        or worker_id in self.registry.worker_ids()
-    ):
-      raise ValueError(f"duplicate worker_id: {worker_id!r}")
     role_names = frozenset(
         role.value if isinstance(role, datatypes.Role) else role
         for role in roles
@@ -227,32 +278,136 @@ class ClusterOrchestrator:
         roles=role_names,
         resources={"remote": True, **dict(resources or {})},
     )
-    for role in role_names:
-      self._remote_worker_handles[role].append(handle)
-    self._remote_worker_handles_by_id[worker_id] = handle
-    self._remote_worker_infos[worker_id] = info
-    logging.info(
-        "Registered remote worker %r with roles %s.",
-        worker_id,
-        sorted(role_names),
-    )
+    shim = weight_sync_coordinator.RemoteWorkerShim(handle, info)
+    with self._lock:
+      if not override and worker_id in self.registry:
+        raise ValueError(f"duplicate worker_id: {worker_id!r}")
+
+      if worker_id in self.registry:
+        old_member = self.registry.get(worker_id)
+        if (
+            isinstance(old_member, weight_sync_coordinator.RemoteWorkerShim)
+            and self.engine is not None
+            and datatypes.Role.ROLLOUT.value in old_member.info().roles
+        ):
+          self.engine.remove_rollout_worker(old_member.handle)
+
+      initial_state = (
+          worker_registry.MembershipState.INITIALIZING
+          if self._brought_up
+          else worker_registry.MembershipState.ACTIVE
+      )
+      self.registry.register(
+          shim,  # pyrefly: ignore[bad-argument-type]
+          override=override,
+          state=initial_state,
+      )
+      logging.info(
+          "Registered remote worker %r with roles %s.",
+          worker_id,
+          sorted(role_names),
+      )
+
+      if self._brought_up:
+        incarnation = self.registry.incarnation(worker_id)
+        fut = self._bring_up_executor.submit(
+            self._bring_up_single_remote_worker,
+            worker_id,
+            info,
+            handle,
+            incarnation,
+        )
+
+        def _on_bring_up_done(done_fut: futures.Future[Any]) -> None:
+          with self._lock:
+            self._pending_bring_up_futures.discard(done_fut)
+
+        self._pending_bring_up_futures.add(fut)
+        fut.add_done_callback(_on_bring_up_done)
     return info
+
+  def _bring_up_single_remote_worker(
+      self,
+      worker_id: str,
+      info: datatypes.WorkerInfo,
+      handle: remote_execution.ActorHandle,
+      incarnation: int | None,
+  ) -> None:
+    """Brings up a single dynamically registered remote worker."""
+    try:
+      if (
+          self.trajectory_store_config is not None
+          and datatypes.Role.ROLLOUT.value in info.roles
+      ):
+        logging.info(
+            "Configuring TrajectoryStore on dynamic remote rollout worker %s.",
+            worker_id,
+        )
+        handle.submit(
+            "with_trajectory_store_config", self.trajectory_store_config
+        )
+      logging.info("Initializing dynamic remote worker %s.", worker_id)
+      handle.submit("initialize")
+      logging.info("Compiling dynamic remote worker %s.", worker_id)
+      handle.submit("compile", self._warmup_data)
+      logging.info("Starting dynamic remote worker %s.", worker_id)
+      handle.submit("start")
+
+      with self._lock:
+        if (
+            worker_id not in self.registry
+            or self.registry.incarnation(worker_id) != incarnation
+        ):
+          return
+        target_state = worker_registry.MembershipState.ACTIVE
+        if (
+            datatypes.Role.ROLLOUT.value in info.roles
+            and self.engine is not None
+        ):
+          coordinator = self.engine.weight_sync_coordinator
+          require_sync = coordinator is not None and (
+              self.engine.policy_version > 0
+              or coordinator.last_committed_version is not None
+          )
+          if require_sync:
+            target_state = worker_registry.MembershipState.PENDING_WEIGHT_SYNC
+        self.registry.set_state(
+            worker_id,
+            target_state,
+            expected_incarnation=incarnation,
+        )
+    except Exception as err:  # pylint: disable=broad-exception-caught
+      logging.error(
+          "Failed to bring up dynamic remote worker %s: %r", worker_id, err
+      )
+      with self._lock:
+        if incarnation is not None and worker_id in self.registry:
+          self.registry.evict(worker_id, expected_incarnation=incarnation)
+
+  def wait_for_pending_bring_ups(self, timeout: float | None = None) -> None:
+    """Waits for all in-flight dynamic worker bring-up tasks to complete."""
+    with self._lock:
+      futs = list(self._pending_bring_up_futures)
+    if not futs:
+      return
+    _, not_done = futures.wait(futs, timeout=timeout)
+    if not_done:
+      raise TimeoutError(
+          f"Timed out after {timeout}s waiting for {len(not_done)} worker"
+          " bring-up(s)."
+      )
 
   def unregister_worker(self, worker_id: str) -> None:
     """Unregisters a worker by its id."""
-    if worker_id in self._remote_worker_infos:
-      info = self._remote_worker_infos.pop(worker_id)
-      handle = self._remote_worker_handles_by_id.pop(worker_id)
-      for role in info.roles:
-        handles = self._remote_worker_handles.get(role)
-        if handles is not None:
-          self._remote_worker_handles[role] = [
-              h for h in handles if h is not handle
-          ]
-          if not self._remote_worker_handles[role]:
-            del self._remote_worker_handles[role]
-      return
-    self.registry.unregister(worker_id)
+    with self._lock:
+      if self.engine is not None and worker_id in self.registry:
+        member = self.registry.get(worker_id)
+        if (
+            isinstance(member, weight_sync_coordinator.RemoteWorkerShim)
+            and datatypes.Role.ROLLOUT.value in member.info().roles
+        ):
+          self.engine.remove_rollout_worker(member.handle)
+      self.registry.unregister(worker_id)
 
   def wait_for_workers(
       self,
@@ -302,17 +457,12 @@ class ClusterOrchestrator:
 
   def worker_infos(self) -> list[datatypes.WorkerInfo]:
     """Returns local and remote worker metadata registered with the orchestrator."""
-    registry_ids = self.registry.worker_ids()
-    return self.registry.infos() + [
-        self._remote_worker_infos[worker_id]
-        for worker_id in sorted(self._remote_worker_infos)
-        if worker_id not in registry_ids
-    ]
+    return self.registry.infos()
 
   def worker_handles(
       self, role: datatypes.Role | str
   ) -> list[remote_execution.ActorHandle]:
-    """Returns handles for all workers (remote and local) registered under the given role."""
+    """Returns handles for all active workers (remote and local) under the given role."""
     return self._get_actor_handles(role)
 
   def sync_jax_cache(self) -> None:
@@ -329,8 +479,13 @@ class ClusterOrchestrator:
       return
 
     logging.info("Triggering JAX compilation cache synchronization to GCS...")
-    worker_ids = sorted(self._remote_worker_infos)
-    local_workers = self.registry.workers()
+    shims = self._remote_shims()
+    worker_ids = sorted(shims)
+    local_workers = [
+        w
+        for w in self.registry.workers()
+        if not isinstance(w, weight_sync_coordinator.RemoteWorkerShim)
+    ]
     if not worker_ids:
       for worker in local_workers:
         try:
@@ -342,12 +497,7 @@ class ClusterOrchestrator:
     rollout_worker_ids = [
         w_id
         for w_id in worker_ids
-        if datatypes.Role.ROLLOUT.value
-        in (
-            self._remote_worker_infos.get(w_id).roles
-            if self._remote_worker_infos.get(w_id)
-            else ()
-        )
+        if datatypes.Role.ROLLOUT.value in shims[w_id].info().roles
     ]
     if not rollout_worker_ids:
       return
@@ -359,7 +509,7 @@ class ClusterOrchestrator:
         primary_worker_id,
     )
 
-    handle = self._remote_worker_handles_by_id[primary_worker_id]
+    handle = shims[primary_worker_id].handle
     outcome: futures.Future[bool] = futures.Future()
 
     def _run() -> None:
@@ -408,14 +558,19 @@ class ClusterOrchestrator:
         "Bringing up %d registered worker(s)...",
         len(self.worker_infos()),
     )
+    self._warmup_data = dummy_data
     if self.trajectory_store_config is not None:
       for worker in self._get_role_members(datatypes.Role.ROLLOUT):
-        if hasattr(worker, "with_trajectory_store_config"):
+        if not isinstance(
+            worker, weight_sync_coordinator.RemoteWorkerShim
+        ) and hasattr(worker, "with_trajectory_store_config"):
           worker.with_trajectory_store_config(self.trajectory_store_config)
     self.lifecycle_driver.bring_up(dummy_data)
     self._bring_up_remote_workers(dummy_data)
     self.sync_jax_cache()
-    self.engine = self._create_engine()
+    with self._lock:
+      self.engine = self._create_engine()
+      self._brought_up = True
     logging.info("All workers brought up successfully.")
 
   def shutdown(self) -> None:
@@ -424,6 +579,7 @@ class ClusterOrchestrator:
     with contextlib.ExitStack() as stack:
       # Registered in reverse order of execution (LIFO) so that every stage
       # runs even if a preceding stage raises an exception.
+      stack.callback(self._bring_up_executor.shutdown, wait=False)
       if self.trajectory_store is not None:
         stack.callback(self.trajectory_store.close)
       stack.callback(self.lifecycle_driver.shutdown)
@@ -444,70 +600,79 @@ class ClusterOrchestrator:
     # Fallback in case workers were registered with the enum object directly
     if not members and isinstance(role, datatypes.Role):
       members = self.registry.group(role).members()
-    return members
+    return list(members)
 
   def _get_actor_handles(
       self, role: datatypes.Role | str
   ) -> list[remote_execution.ActorHandle]:
-    role_key = role.value if isinstance(role, datatypes.Role) else role
-    handles = list(self._remote_worker_handles.get(role_key, ()))
-    handles.extend(
-        remote_execution.InProcessActorHandle(
-            remote_execution.InProcessRemoteExecutionServer(worker)
+    """Returns ActorHandles for all active workers serving `role`."""
+    remote_handles: list[remote_execution.ActorHandle] = []
+    local_handles: list[remote_execution.ActorHandle] = []
+    for member in self._get_role_members(role):
+      if isinstance(member, weight_sync_coordinator.RemoteWorkerShim):
+        remote_handles.append(member.handle)
+      else:
+        local_handles.append(
+            remote_execution.InProcessActorHandle(
+                remote_execution.InProcessRemoteExecutionServer(member)
+            )
         )
-        for worker in self._get_role_members(role)
-    )
-    return handles
+    return remote_handles + local_handles
 
   def _bring_up_remote_workers(self, dummy_data: Any = None) -> None:
     """Runs lifecycle hooks on remote worker handles registered directly."""
-    worker_ids = sorted(self._remote_worker_infos)
+    with self._lock:
+      shims = self._remote_shims()
+      self._brought_up = True
+    worker_ids = sorted(shims)
     if not worker_ids:
       return
+    try:
+      with futures.ThreadPoolExecutor(max_workers=len(worker_ids)) as pool:
+        if self.trajectory_store_config is not None:
+          def _cfg_store(wid: str) -> None:
+            if datatypes.Role.ROLLOUT.value in shims[wid].info().roles:
+              logging.info(
+                  "Configuring TrajectoryStore on remote rollout worker %s.",
+                  wid,
+              )
+              shims[wid].handle.submit(
+                  "with_trajectory_store_config", self.trajectory_store_config
+              )
 
-    with futures.ThreadPoolExecutor(max_workers=len(worker_ids)) as pool:
-      if self.trajectory_store_config is not None:
-        def _cfg_store(wid: str) -> None:
-          if (
-              datatypes.Role.ROLLOUT.value
-              in self._remote_worker_infos[wid].roles
-          ):
-            logging.info(
-                "Configuring TrajectoryStore on remote rollout worker %s.",
-                wid,
-            )
-            self._remote_worker_handles_by_id[wid].submit(
-                "with_trajectory_store_config", self.trajectory_store_config
-            )
+          list(pool.map(_cfg_store, worker_ids))
 
-        list(pool.map(_cfg_store, worker_ids))
+        def _init_worker(wid: str) -> None:
+          logging.info("Initializing remote worker %s.", wid)
+          shims[wid].handle.submit("initialize")
 
-      def _init_worker(wid: str) -> None:
-        logging.info("Initializing remote worker %s.", wid)
-        self._remote_worker_handles_by_id[wid].submit("initialize")
+        list(pool.map(_init_worker, worker_ids))
 
-      list(pool.map(_init_worker, worker_ids))
+        def _compile_worker(wid: str) -> None:
+          logging.info("Compiling remote worker %s.", wid)
+          shims[wid].handle.submit("compile", dummy_data)
 
-      def _compile_worker(wid: str) -> None:
-        logging.info("Compiling remote worker %s.", wid)
-        self._remote_worker_handles_by_id[wid].submit("compile", dummy_data)
+        list(pool.map(_compile_worker, worker_ids))
 
-      list(pool.map(_compile_worker, worker_ids))
+        def _start_worker(wid: str) -> None:
+          logging.info("Starting remote worker %s.", wid)
+          shims[wid].handle.submit("start")
 
-      def _start_worker(wid: str) -> None:
-        logging.info("Starting remote worker %s.", wid)
-        self._remote_worker_handles_by_id[wid].submit("start")
-
-      list(pool.map(_start_worker, worker_ids))
+        list(pool.map(_start_worker, worker_ids))
+    except BaseException:
+      with self._lock:
+        self._brought_up = False
+      raise
 
   def _shutdown_remote_workers(self) -> None:
     """Stops remote worker handles best-effort, with a hard timeout."""
+    shims = self._remote_shims(include_evicted=True)
+    if not shims:
+      return
     pool = futures.ThreadPoolExecutor(max_workers=4)
     stops = {
-        worker_id: pool.submit(
-            self._remote_worker_handles_by_id[worker_id].submit, "stop"
-        )
-        for worker_id in sorted(self._remote_worker_infos)
+        worker_id: pool.submit(shims[worker_id].handle.submit, "stop")
+        for worker_id in sorted(shims)
     }
     for worker_id, fut in stops.items():
       try:
@@ -515,6 +680,59 @@ class ClusterOrchestrator:
       except Exception as err:  # pylint: disable=broad-except
         logging.warning("Failed to stop remote worker %s: %r", worker_id, err)
     pool.shutdown(wait=False)
+
+  def _on_registry_state_changed(
+      self,
+      worker_id: str,
+      state: worker_registry.MembershipState,
+  ) -> None:
+    """Syncs WorkerRegistry state transitions to DistributedRLEngine."""
+    with self._lock:
+      if (
+          not self._brought_up
+          or self.engine is None
+          or worker_id not in self.registry
+          or self.registry.state(worker_id) != state
+      ):
+        return
+      member = self.registry.get(worker_id)
+      if not isinstance(member, weight_sync_coordinator.RemoteWorkerShim):
+        return
+      info = member.info()
+      if datatypes.Role.ROLLOUT.value not in info.roles:
+        return
+      if state == worker_registry.MembershipState.ACTIVE:
+        self.engine.add_rollout_worker(
+            member.handle,
+            max_in_flight=self._effective_worker_capacity(info),
+        )
+      elif state == worker_registry.MembershipState.EVICTED:
+        self.engine.remove_rollout_worker(member.handle)
+
+  def _on_engine_worker_evicted(
+      self,
+      handle: remote_execution.ActorHandle,
+      exc: BaseException | None = None,
+  ) -> None:
+    """Callback invoked when DistributedRLEngine evicts a failed worker."""
+    del exc
+    with self._lock:
+      wid = getattr(handle, "worker_id", None)
+      if wid is not None and wid in self.registry:
+        member = self.registry.get(wid)
+        if (
+            isinstance(member, weight_sync_coordinator.RemoteWorkerShim)
+            and member.handle is handle
+        ):
+          if (
+              self.registry.state(wid)
+              != worker_registry.MembershipState.EVICTED
+          ):
+            self.registry.evict(wid)
+          return
+      for wid, shim in self._remote_shims().items():
+        if shim.handle is handle:
+          self.registry.evict(wid)
 
   def _create_engine(self) -> distributed_rl_engine.DistributedRLEngine:
     """Constructs a DistributedRLEngine from the registered role groups."""
@@ -535,25 +753,28 @@ class ClusterOrchestrator:
 
     coordinator = None
     if self._weight_sync_mode not in (None, "none"):
-      from tunix.experimental.weight_sync import weight_sync_coordinator
-
       handler = weight_sync_coordinator.create_default_handler(
           mode=self._weight_sync_mode
       )
 
-      handle_to_id = {
-          v: k for k, v in self._remote_worker_handles_by_id.items()
+      existing_handles = {
+          shim.handle
+          for shim in self._remote_shims(include_evicted=True).values()
       }
       for role, handles in [
           (datatypes.Role.ACTOR, actor_workers),
           (datatypes.Role.ROLLOUT, rollout_workers),
       ]:
         for h in handles:
-          w_id = handle_to_id.get(h, f"local-{role.value}-{id(h)}")
-          info = self._remote_worker_infos.get(w_id) or datatypes.WorkerInfo(
-              worker_id=w_id, roles=frozenset({role.value})
-          )
-          self.registry.register(weight_sync_coordinator.RemoteWorkerShim(h, info), override=True)  # pyrefly: ignore[bad-argument-type]
+          if h not in existing_handles:
+            w_id = f"local-{role.value}-{id(h)}"
+            info = datatypes.WorkerInfo(
+                worker_id=w_id, roles=frozenset({role.value})
+            )
+            self.registry.register(
+                weight_sync_coordinator.RemoteWorkerShim(h, info),  # pyrefly: ignore[bad-argument-type]
+                override=True,
+            )
 
       coordinator = weight_sync_coordinator.WeightSyncCoordinator(
           registry=self.registry,
@@ -562,11 +783,22 @@ class ClusterOrchestrator:
           disable_timeouts=self._disable_weight_sync_timeouts,
       )
 
+    rollout_worker_capacities: dict[remote_execution.ActorHandle, int] = {}
+    for shim in self._remote_shims().values():
+      info = shim.info()
+      if datatypes.Role.ROLLOUT.value in info.roles:
+        cap = self._effective_worker_capacity(info)
+        if cap is not None:
+          rollout_worker_capacities[shim.handle] = cap
+
     return distributed_rl_engine.DistributedRLEngine(
         rollout_workers=rollout_workers,
         trainer_workers=trainer_workers,
         inference_workers=inference_workers,
         weight_sync_coordinator=coordinator,
+        on_worker_evicted=self._on_engine_worker_evicted,
+        rollout_worker_capacities=rollout_worker_capacities or None,
+        fault_tolerance_config=self._fault_tolerance_config,
     )
 
   def run(

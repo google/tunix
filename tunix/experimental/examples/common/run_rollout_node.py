@@ -991,6 +991,7 @@ def main(argv: list[str], context: Any = None) -> None:
             "service_type": "rollout",
             "service_port": args.port,
             "worker_id": args.worker_id,
+            "max_concurrency": args.max_concurrency,
         })
     )
     logging.info("Rollout worker is registered.")
