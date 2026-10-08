@@ -57,10 +57,12 @@ class _MockWorkerHandle(mock.MagicMock):
 
   Simulates remote ActorHandle execution:
   - Rollout responses: `responses` is a FIFO queue of batches
-    (`list[list[RolloutResponse]]`). `poll_responses()` pops and returns the
-    next batch inside an `ExecutionResponse`. When `responses` is empty (all
-    queued rollouts consumed), it returns `None` to emulate an idle long-polling
-    worker awaiting new dispatch requests.
+    (`list[list[RolloutResponse]]`). `poll_responses()` pops the next batch and
+    returns it inside an `ExecutionResponse` tagged with the `request_id` of the
+    oldest still-pending `dispatch_task()` call, i.e. tasks complete in dispatch
+    order. When `responses` is empty (all queued rollouts consumed), it returns
+    `None` to emulate an idle long-polling worker awaiting new dispatch
+    requests.
   - Trainer execution: `fwd_bwd`, `update`, and `get_metrics` are handled via
     `asubmit()`.
   """
@@ -69,6 +71,7 @@ class _MockWorkerHandle(mock.MagicMock):
     super().__init__(spec=remote_execution.ActorHandle, *args, **kwargs)
     self.role = role
     self.responses: list[list[datatypes.RolloutResponse]] = []
+    self.pending_request_ids: list[str] = []
     self.metrics_buffer: exp_metrics.MetricsBuffer | None = None
     self.train_step_count: int = 0
     self.dispatched_requests: list[Any] = []
@@ -95,16 +98,23 @@ class _MockWorkerHandle(mock.MagicMock):
             for req in reqs
         ]
         self.responses.append(resps)
-    return request_id or "task_ack"
+    task_id = request_id or "task_ack"
+    self.pending_request_ids.append(task_id)
+    return task_id
 
   async def poll_responses(
       self, timeout_s: float = remote_execution.LONG_POLL_TIMEOUT_S
   ) -> Any:
-    """Pops queued rollout responses, or returns None if no responses are ready."""
+    """Pops the next queued batch as the completion of the oldest dispatched task."""
     del timeout_s
     if self.responses:
       items = self.responses.pop(0)
-      return remote_execution.ExecutionResponse(request_id="poll", result=items)
+      request_id = (
+          self.pending_request_ids.pop(0) if self.pending_request_ids else ""
+      )
+      return remote_execution.ExecutionResponse(
+          request_id=request_id, result=items
+      )
     await asyncio.sleep(0.01)
     return None
 

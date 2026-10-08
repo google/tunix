@@ -934,6 +934,47 @@ class ClusterOrchestratorTest(absltest.TestCase):
     )
     orch.shutdown()
 
+  def test_orchestrator_plumbs_rollout_task_timeout_and_live_session_eviction(
+      self,
+  ):
+    with self.assertRaisesRegex(ValueError, "must be positive"):
+      orchestrator.ClusterOrchestrator(
+          lifecycle_driver=mock.MagicMock(),
+          monitor=mock.MagicMock(),
+          rollout_task_timeout_s=-1.0,
+      )
+
+    h_actor = mock.MagicMock(spec=remote_execution.ActorHandle)
+    h_r0 = mock.MagicMock(spec=remote_execution.ActorHandle)
+    h_r1 = mock.MagicMock(spec=remote_execution.ActorHandle)
+    h_r2 = mock.MagicMock(spec=remote_execution.ActorHandle)
+
+    orch = orchestrator.ClusterOrchestrator(
+        lifecycle_driver=mock.MagicMock(),
+        monitor=mock.MagicMock(),
+        weight_sync_mode="fallback",
+        rollout_task_timeout_s=45.0,
+    )
+    orch.register_worker_handle("actor-0", [datatypes.Role.ACTOR], h_actor)
+    orch.register_worker_handle("rollout-0", [datatypes.Role.ROLLOUT], h_r0)
+    orch.register_worker_handle("rollout-1", [datatypes.Role.ROLLOUT], h_r1)
+    orch.register_worker_handle("rollout-2", [datatypes.Role.ROLLOUT], h_r2)
+    orch.bring_up_workers()
+
+    assert orch.engine is not None
+    self.assertEqual(orch.engine.rollout_task_timeout_s, 45.0)
+    self.assertEqual(orch.engine._rollout_session.task_timeout_s, 45.0)
+
+    # 1. Evicting rollout-0 via WorkerRegistry removes h_r0 from live session
+    orch.registry.evict("rollout-0")
+    self.assertEqual(orch.engine._rollout_workers, [h_r1, h_r2])
+
+    # 2. Unregistering rollout-1 removes h_r1 from live session and registry
+    orch.unregister_worker("rollout-1")
+    self.assertEqual(orch.engine._rollout_workers, [h_r2])
+    self.assertNotIn("rollout-1", orch.registry)
+    orch.shutdown()
+
   def test_orchestrator_plumbs_fault_tolerance_config(self):
     h_actor = mock.MagicMock(spec=remote_execution.ActorHandle)
     h_r0 = mock.MagicMock(spec=remote_execution.ActorHandle)
@@ -942,6 +983,7 @@ class ClusterOrchestratorTest(absltest.TestCase):
         retry_on_worker_failure=True,
         max_task_retries=2,
         max_in_flight_per_worker=6,
+        task_timeout_s=30.0,
     )
     orch = orchestrator.ClusterOrchestrator(
         lifecycle_driver=mock.MagicMock(),
@@ -955,6 +997,7 @@ class ClusterOrchestratorTest(absltest.TestCase):
     self.assertEqual(orch.fault_tolerance_config, ft_cfg)
     self.assertEqual(orch.engine.fault_tolerance_config, ft_cfg)
     self.assertEqual(orch.engine.max_concurrent_rollouts_per_worker, 6)
+    self.assertEqual(orch.engine.rollout_task_timeout_s, 30.0)
     orch.shutdown()
 
 

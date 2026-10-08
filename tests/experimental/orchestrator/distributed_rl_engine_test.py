@@ -37,6 +37,9 @@ class MockActorHandle(mock.MagicMock):
 
   def __init__(self, *args, **kwargs):
     super().__init__(spec=remote_execution.ActorHandle, *args, **kwargs)
+    # request_ids of dispatched tasks awaiting completion, in dispatch order.
+    self.pending_request_ids: list[str] = []
+
     # Ensure all mocked methods return awaitables by default
     async def _poll_impl(
         timeout_s: float = remote_execution.LONG_POLL_TIMEOUT_S,
@@ -48,7 +51,14 @@ class MockActorHandle(mock.MagicMock):
       self.poll_responses.return_value = None
       if isinstance(val, remote_execution.ExecutionResponse):
         return val
-      return remote_execution.ExecutionResponse(result=val)
+      # A canned payload completes the oldest dispatched task, like a worker
+      # finishing tasks in dispatch order.
+      request_id = (
+          self.pending_request_ids.pop(0) if self.pending_request_ids else ""
+      )
+      return remote_execution.ExecutionResponse(
+          request_id=request_id, result=val
+      )
 
     self.generate = mock.AsyncMock()
     self.poll_responses = mock.AsyncMock(
@@ -95,6 +105,8 @@ class MockActorHandle(mock.MagicMock):
       method_name = request_id
     method = getattr(self, method_name)
     await method(*args, **kwargs)
+    if request_id is not None:
+      self.pending_request_ids.append(request_id)
     return request_id
 
 
@@ -1731,13 +1743,13 @@ class DistributedRLEngineTest(absltest.TestCase):
   def test_poll_rollouts_does_not_block_on_slow_or_idle_worker(self):
     async def _run():
       resp1 = remote_execution.ExecutionResponse(
-          request_id="req_p1_g0_v0",
+          request_id="req_p1_g1_v0",
           result=datatypes.RolloutResponse(
-              request_id="req_p1_g0_v0",
+              request_id="req_p1_g1_v0",
               status="COMPLETED",
               payload=datatypes.TrajectoryItem(
                   prompt_id="p1",
-                  group_index=0,
+                  group_index=1,
                   traj={
                       "trajectory_reward": 1.0,
                       "status": datatypes.TrajectoryStatus.SUCCEEDED,
@@ -2015,6 +2027,74 @@ class DistributedRLEngineTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_rollout_task_timeout_s_plumbing_and_wedged_worker_recovery(self):
+    with self.assertRaisesRegex(ValueError, "must be positive"):
+      distributed_rl_engine.DistributedRLEngine(
+          rollout_workers=[self.mock_rollout_1],
+          trainer_workers={datatypes.Role.ACTOR: self.mock_actor},
+          rollout_task_timeout_s=0.0,
+      )
+
+    async def _run():
+      evicted_handles = []
+      engine = distributed_rl_engine.DistributedRLEngine(
+          rollout_workers=[self.mock_rollout_1, self.mock_rollout_2],
+          trainer_workers={datatypes.Role.ACTOR: self.mock_actor},
+          on_worker_evicted=lambda h, exc: evicted_handles.append((h, exc)),
+          rollout_task_timeout_s=0.15,
+      )
+      self.assertEqual(engine.rollout_task_timeout_s, 0.15)
+      self.assertEqual(engine._rollout_session.task_timeout_s, 0.15)
+      engine.set_rollout_task_timeout_s(0.12)
+      self.assertEqual(engine.rollout_task_timeout_s, 0.12)
+
+      # Route first attempt to mock_rollout_1 (wedged), which hangs in
+      # poll_responses.
+      engine._rollout_pool.router = lambda actors, *a, **kw: actors[0]
+
+      async def _wedged_poll(timeout_s=50.0):
+        del timeout_s
+        await asyncio.sleep(3600.0)
+        return None
+
+      resp_ok = remote_execution.ExecutionResponse(
+          request_id="req_p_wedge_g0_v0",
+          result=[
+              datatypes.RolloutResponse(
+                  request_id="req_p_wedge_g0_v0",
+                  status="COMPLETED",
+                  payload=datatypes.TrajectoryItem(
+                      prompt_id="p_wedge",
+                      group_index=0,
+                      traj={
+                          "trajectory_reward": 1.0,
+                          "status": datatypes.TrajectoryStatus.SUCCEEDED,
+                      },
+                  ),
+              )
+          ],
+      )
+      self.mock_rollout_1.poll_responses.side_effect = _wedged_poll
+      self.mock_rollout_2.poll_responses.return_value = resp_ok
+
+      await engine.dispatch_rollouts(
+          [{"prompt": "p_wedge", "prompt_id": "p_wedge"}],
+          num_generations=1,
+          policy_version=0,
+      )
+      results = await engine.poll_rollouts(timeout_s=2.0)
+
+      self.assertLen(results, 1)
+      self.assertEqual(results[0].prompt_id, "p_wedge")
+      self.assertEqual(results[0].status, datatypes.TrajectoryStatus.SUCCEEDED)
+      self.assertEqual(engine._rollout_workers, [self.mock_rollout_2])
+      self.assertLen(evicted_handles, 1)
+      self.assertIs(evicted_handles[0][0], self.mock_rollout_1)
+      self.assertIsInstance(evicted_handles[0][1], TimeoutError)
+      await engine.close()
+
+    asyncio.run(_run())
+
   def test_fault_tolerance_config_plumbing_in_engine(self):
     async def _run():
       ft_cfg = datatypes.RolloutFaultToleranceConfig(
@@ -2022,6 +2102,7 @@ class DistributedRLEngineTest(absltest.TestCase):
           retry_on_worker_failure=False,
           max_task_retries=1,
           max_in_flight_per_worker=2,
+          task_timeout_s=12.5,
       )
       engine = distributed_rl_engine.DistributedRLEngine(
           rollout_workers=[self.mock_rollout_1],
@@ -2030,6 +2111,7 @@ class DistributedRLEngineTest(absltest.TestCase):
       )
       self.assertEqual(engine.fault_tolerance_config, ft_cfg)
       self.assertEqual(engine.max_concurrent_rollouts_per_worker, 2)
+      self.assertEqual(engine.rollout_task_timeout_s, 12.5)
       self.assertFalse(engine._rollout_session._evict_on_failure)
       self.assertFalse(engine._rollout_session._retry_on_worker_failure)
       self.assertEqual(engine._rollout_session._max_task_retries, 1)

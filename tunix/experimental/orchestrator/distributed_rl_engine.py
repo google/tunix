@@ -92,6 +92,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       rollout_worker_capacities: (
           Mapping[remote_execution.ActorHandle, int] | None
       ) = None,
+      rollout_task_timeout_s: float | None = None,
       fault_tolerance_config: datatypes.RolloutFaultToleranceConfig | None = (
           None
       ),
@@ -100,6 +101,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         fault_tolerance_config or datatypes.RolloutFaultToleranceConfig()
     ).with_overrides(
         max_in_flight_per_worker=max_concurrent_rollouts_per_worker,
+        task_timeout_s=rollout_task_timeout_s,
     )
     self._fault_tolerance_config = ft_cfg
     self._trainer_workers = dict(trainer_workers)
@@ -125,6 +127,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
             max_in_flight_per_worker=ft_cfg.max_in_flight_per_worker,
             worker_max_in_flight=rollout_worker_capacities,
             has_pending_workers_fn=self._has_pending_rollout_workers,
+            task_timeout_s=ft_cfg.task_timeout_s,
         ),
         least_loaded=True,
     )
@@ -154,6 +157,16 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
   def max_concurrent_rollouts_per_worker(self) -> int | None:
     return self._rollout_session.max_in_flight_per_worker
 
+  @property
+  def rollout_task_timeout_s(self) -> float | None:
+    return self._rollout_session.task_timeout_s
+
+  def set_rollout_task_timeout_s(
+      self, rollout_task_timeout_s: float | None
+  ) -> None:
+    """Updates the per-task execution timeout for in-flight rollout requests."""
+    self._rollout_session.set_task_timeout_s(rollout_task_timeout_s)
+
   def add_rollout_worker(
       self,
       handle: remote_execution.ActorHandle,
@@ -168,11 +181,10 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       handle: remote_execution.ActorHandle,
       exc: BaseException | None = None,
   ) -> bool:
-    """Evicts a rollout worker handle and re-queues any in-flight tasks.
+    """Removes a rollout worker handle and re-queues any in-flight tasks.
 
     Returns:
-      True if `handle` was an active pool member and has been evicted, False if
-      it was already absent (e.g. evicted earlier by a transport failure).
+      True if `handle` was a pool member and has been removed, False otherwise.
     """
     return self._rollout_session.remove_actor(handle, exc=exc)
 
@@ -464,6 +476,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
                 **(dict(req.metadata) if req.metadata is not None else {}),
                 "prompt_id": req.prompt_id,
                 "group_index": req.group_index,
+                "policy_version": req.target_policy_version,
             },
         )
         completed.append(_response_to_trajectory_item(err_resp))

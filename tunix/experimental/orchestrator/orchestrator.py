@@ -61,6 +61,7 @@ class ClusterOrchestrator:
       run_id: str | None = None,
       disable_weight_sync_timeouts: bool | None = None,
       max_concurrent_rollouts_per_worker: int | None = None,
+      rollout_task_timeout_s: float | None = None,
       fault_tolerance_config: datatypes.RolloutFaultToleranceConfig | None = (
           None
       ),
@@ -85,6 +86,9 @@ class ClusterOrchestrator:
         deadlines to infinity.
       max_concurrent_rollouts_per_worker: Optional cap on concurrent in-flight
         rollouts dispatched to any single rollout worker.
+      rollout_task_timeout_s: Optional maximum execution time in seconds for a
+        single rollout task once dispatched to a worker before the worker is
+        evicted and its in-flight tasks are re-queued.
       fault_tolerance_config: Optional consolidated rollout fault-tolerance
         configuration.
     """
@@ -93,10 +97,12 @@ class ClusterOrchestrator:
         fault_tolerance_config or datatypes.RolloutFaultToleranceConfig()
     ).with_overrides(
         max_in_flight_per_worker=max_concurrent_rollouts_per_worker,
+        task_timeout_s=rollout_task_timeout_s,
     )
     self._max_concurrent_rollouts_per_worker = (
         self._fault_tolerance_config.max_in_flight_per_worker
     )
+    self._rollout_task_timeout_s = self._fault_tolerance_config.task_timeout_s
     self.registry = registry or worker_registry.WorkerRegistry()
     self.lifecycle_driver = lifecycle_driver or lifecycle.LifecycleDriver(
         self.registry

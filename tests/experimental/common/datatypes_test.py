@@ -347,6 +347,7 @@ class RolloutFaultToleranceConfigTest(absltest.TestCase):
     self.assertTrue(cfg.retry_on_worker_failure)
     self.assertEqual(cfg.max_task_retries, 3)
     self.assertIsNone(cfg.max_in_flight_per_worker)
+    self.assertIsNone(cfg.task_timeout_s)
     self.assertTrue(cfg.retry_weight_sync_on_eviction)
 
   def test_with_overrides_without_arguments_returns_same_config(self):
@@ -356,22 +357,25 @@ class RolloutFaultToleranceConfigTest(absltest.TestCase):
   def test_with_overrides_replaces_only_given_fields(self):
     cfg = datatypes.RolloutFaultToleranceConfig(
         max_in_flight_per_worker=4,
+        task_timeout_s=30.0,
         max_task_retries=2,
         evict_on_failure=False,
     )
-    merged = cfg.with_overrides(max_in_flight_per_worker=8)
+    merged = cfg.with_overrides(max_in_flight_per_worker=8, task_timeout_s=45.0)
     self.assertEqual(merged.max_in_flight_per_worker, 8)
+    self.assertEqual(merged.task_timeout_s, 45.0)
     self.assertEqual(merged.max_task_retries, 2)
     self.assertFalse(merged.evict_on_failure)
     # The original config is left untouched.
     self.assertEqual(cfg.max_in_flight_per_worker, 4)
+    self.assertEqual(cfg.task_timeout_s, 30.0)
 
   def test_with_overrides_validates_merged_config(self):
     cfg = datatypes.RolloutFaultToleranceConfig()
     with self.assertRaisesRegex(ValueError, "must be positive"):
       cfg.with_overrides(max_in_flight_per_worker=0)
-    with self.assertRaisesRegex(ValueError, "must be non-negative"):
-      datatypes.RolloutFaultToleranceConfig(max_task_retries=-1)
+    with self.assertRaisesRegex(ValueError, "must be positive"):
+      cfg.with_overrides(task_timeout_s=-1.0)
 
 
 if __name__ == "__main__":
