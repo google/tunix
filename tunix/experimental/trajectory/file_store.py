@@ -1,5 +1,7 @@
 """File-based implementation for Trajectory Store."""
 
+import collections
+from concurrent import futures
 import dataclasses
 import functools
 import re
@@ -30,6 +32,16 @@ _TRAJECTORY_DIR_REGEX: Final[re.Pattern[str]] = re.compile(
 )
 _STEP_FILENAME_TEMPLATE: Final[str] = "step_{step_id:06d}.json"
 _STEP_FILENAME_REGEX: Final[re.Pattern[str]] = re.compile(r"^step_\d+\.json$")
+# Maximum number of threads that each read call uses to access files in
+# parallel, which hides the per-file latency of remote filesystems such as GCS.
+# Only file access runs on these threads: parsing holds the GIL, so the calling
+# thread parses the files in order while later files are still being read. On a
+# local disk, where file access is fast, starting the threads and handing the
+# GIL between them and the calling thread make reads somewhat slower than
+# reading the files one by one.
+_MAX_READ_WORKERS: Final[int] = 16
+# Name prefix of the threads that read files.
+_READ_THREAD_NAME_PREFIX: Final[str] = "FileTrajectoryStoreReader"
 
 
 def _validate_trajectory_id(trajectory_id: str | None) -> str:
@@ -73,6 +85,13 @@ def _dump_json(model: pydantic.BaseModel) -> str:
 def _get_step_path(traj_dir: epath.Path, atif_step_id: int) -> epath.Path:
   """Returns the step file path for a 1-indexed ATIF step_id under traj_dir."""
   return traj_dir / _STEP_FILENAME_TEMPLATE.format(step_id=atif_step_id)
+
+
+def _read_text_or_none(path: epath.Path) -> str | None:
+  """Returns the contents of the file at `path`, or None if it is missing."""
+  if not path.exists():
+    return None
+  return path.read_text()
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
@@ -378,6 +397,10 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
   ) -> list[MetadataT]:
     """Retrieves metadata for trajectories in the run.
 
+    Files are read in parallel to hide the latency of remote filesystems such
+    as GCS. Errors are raised for the first failing trajectory in order, as if
+    the files were read one by one.
+
     Args:
       trajectory_ids: Optional list of unique trajectory identifiers. If
         specified, only metadata for these IDs is returned. If None, metadata
@@ -389,35 +412,53 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
     Raises:
       store.TrajectoryMetadataNotFoundError: If any requested trajectory ID does
         not exist.
+      RuntimeError: If the reader threads cannot be started, e.g. during
+        interpreter shutdown.
     """
-    metas: list[MetadataT] = []
-    if trajectory_ids is None:
-      if not self.root_dir.exists():
-        return metas
-      trajectory_ids = []
-      for entry in self.root_dir.iterdir():
-        if not entry.is_dir():
-          continue
-        if not (match := _TRAJECTORY_DIR_REGEX.match(entry.name)):
-          continue
-        trajectory_ids.append(match.group("trajectory_id"))
-
-    for traj_id in trajectory_ids:
-      meta_path = self.get_trajectory_metadata_path(traj_id)
-      if not meta_path.exists():
-        raise store.TrajectoryMetadataNotFoundError(traj_id)
-      base_meta = trajectory_lib.TrajectoryMetadata.model_validate_json(
-          meta_path.read_text()
+    if trajectory_ids is None and not self.root_dir.exists():
+      return []
+    executor = futures.ThreadPoolExecutor(
+        max_workers=_MAX_READ_WORKERS,
+        thread_name_prefix=_READ_THREAD_NAME_PREFIX,
+    )
+    try:
+      if trajectory_ids is None:
+        trajectory_ids = self._list_trajectory_ids(executor)
+      # Iterates over `trajectory_ids` only once, as reading the files one by
+      # one did, so that any iterable of IDs still works. Each entry pairs an ID
+      # with the future of its metadata file contents. Entries are popped as
+      # they are consumed, so that each file's contents can be freed once
+      # parsed.
+      pending_reads = collections.deque(
+          (
+              traj_id,
+              executor.submit(
+                  _read_text_or_none, self.get_trajectory_metadata_path(traj_id)
+              ),
+          )
+          for traj_id in trajectory_ids
       )
-      meta = self._metadata_cls.from_atif_metadata(base_meta)
-      metas.append(meta)
-
-    return metas
+      metas: list[MetadataT] = []
+      while pending_reads:
+        traj_id, meta_text_future = pending_reads.popleft()
+        meta_text = meta_text_future.result()
+        if meta_text is None:
+          raise store.TrajectoryMetadataNotFoundError(traj_id)
+        metas.append(self._parse_metadata(meta_text))
+      return metas
+    finally:
+      # Skips the reads that have not started and waits for the running ones,
+      # so that no reader thread outlives the call.
+      executor.shutdown(cancel_futures=True)
 
   def get_trajectories(
       self, trajectory_ids: list[str]
   ) -> list[trajectory_lib.Trajectory[Any]]:
     """Retrieves full trajectories for a list of trajectory IDs.
+
+    Files are read in parallel to hide the latency of remote filesystems such
+    as GCS. Errors are raised for the first failing trajectory in order, as if
+    the files were read one by one.
 
     Args:
       trajectory_ids: List of unique trajectory identifiers to load.
@@ -428,30 +469,97 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
     Raises:
       store.TrajectoryNotFoundError: If any requested trajectory ID does not
       exist.
+      RuntimeError: If the reader threads cannot be started, e.g. during
+        interpreter shutdown.
     """
-    trajs: list[trajectory_lib.Trajectory[Any]] = []
-
-    for traj_id in trajectory_ids:
-      traj_dir = self.get_trajectory_dir(traj_id)
-      meta_path = self.get_trajectory_metadata_path(traj_id)
-      if not meta_path.exists():
-        raise store.TrajectoryNotFoundError(traj_id)
-
-      base_meta = trajectory_lib.TrajectoryMetadata.model_validate_json(
-          meta_path.read_text()
+    executor = futures.ThreadPoolExecutor(
+        max_workers=_MAX_READ_WORKERS,
+        thread_name_prefix=_READ_THREAD_NAME_PREFIX,
+    )
+    try:
+      # Iterates over `trajectory_ids` only once, as reading the files one by
+      # one did, so that any iterable of IDs still works. Each entry holds an
+      # ID, the future of its metadata file contents, and a future that
+      # resolves to the futures of its step file contents. Entries and step
+      # futures are popped as they are consumed, so that each file's contents
+      # can be freed once parsed.
+      pending_reads = collections.deque(
+          (
+              traj_id,
+              executor.submit(
+                  _read_text_or_none, self.get_trajectory_metadata_path(traj_id)
+              ),
+              executor.submit(self._submit_step_reads, traj_id, executor),
+          )
+          for traj_id in trajectory_ids
       )
-      meta = self._metadata_cls.from_atif_metadata(base_meta)
-      steps: list[trajectory_lib.Step] = []
+      trajs: list[trajectory_lib.Trajectory[Any]] = []
+      while pending_reads:
+        traj_id, meta_text_future, step_reads_future = pending_reads.popleft()
+        meta_text = meta_text_future.result()
+        if meta_text is None:
+          raise store.TrajectoryNotFoundError(traj_id)
+        meta = self._parse_metadata(meta_text)
+        step_text_futures = step_reads_future.result()
+        steps: list[trajectory_lib.Step] = []
+        while step_text_futures:
+          steps.append(
+              trajectory_lib.Step.model_validate_json(
+                  step_text_futures.popleft().result()
+              )
+          )
+        trajs.append(meta.create_trajectory(steps=steps))
+      return trajs
+    finally:
+      # Skips the reads that have not started and waits for the running ones,
+      # so that no reader thread outlives the call.
+      executor.shutdown(cancel_futures=True)
 
-      for file_entry in traj_dir.iterdir():
-        if not _STEP_FILENAME_REGEX.match(file_entry.name):
-          continue
-        step = trajectory_lib.Step.model_validate_json(file_entry.read_text())
-        steps.append(step)
+  def _list_trajectory_ids(self, executor: futures.Executor) -> list[str]:
+    """Returns the IDs of the trajectory directories in `root_dir`.
 
-      trajs.append(meta.create_trajectory(steps=steps))
+    Args:
+      executor: The executor to check on, in parallel, whether each entry of
+        `root_dir` is a directory.
 
-    return trajs
+    Returns:
+      The trajectory IDs, in the order that `root_dir.iterdir()` lists them.
+    """
+    entries = list(self.root_dir.iterdir())
+    is_dir_futures = [executor.submit(entry.is_dir) for entry in entries]
+    return [
+        match.group("trajectory_id")
+        for entry, is_dir_future in zip(entries, is_dir_futures, strict=True)
+        if is_dir_future.result()
+        and (match := _TRAJECTORY_DIR_REGEX.match(entry.name))
+    ]
+
+  def _parse_metadata(self, meta_text: str) -> MetadataT:
+    """Parses the contents of a metadata file as `metadata_cls`."""
+    base_meta = trajectory_lib.TrajectoryMetadata.model_validate_json(meta_text)
+    return self._metadata_cls.from_atif_metadata(base_meta)
+
+  def _submit_step_reads(
+      self, trajectory_id: str, executor: futures.Executor
+  ) -> collections.deque[futures.Future[str]]:
+    """Lists a trajectory's step files and submits their reads to `executor`.
+
+    Returns without waiting for the reads, so that no task on `executor` waits
+    for another one.
+
+    Args:
+      trajectory_id: The trajectory identifier.
+      executor: The executor to read the step files on.
+
+    Returns:
+      Futures of the contents of the step files, in the order that `iterdir()`
+      lists the files.
+    """
+    return collections.deque(
+        executor.submit(entry.read_text)
+        for entry in self.get_trajectory_dir(trajectory_id).iterdir()
+        if _STEP_FILENAME_REGEX.match(entry.name)
+    )
 
   def add_step(
       self,
