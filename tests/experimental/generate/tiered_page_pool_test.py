@@ -10,6 +10,8 @@ from tunix.experimental.generate import tiered_page_pool
 
 os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=4"
 
+PageLocation = tiered_page_pool.PageLocation
+
 
 class PagePoolTest(parameterized.TestCase):
 
@@ -371,7 +373,7 @@ class TieredPagePoolManagerTest(parameterized.TestCase):
 
     self.assertLen(set(allocated), num_pages)
     for pid in allocated:
-      self.assertEqual(manager.page_location(pid), "device")
+      self.assertEqual(manager.page_location(pid), PageLocation.DEVICE)
       phys_idx = manager.page_idx(pid)
       self.assertNotIn(phys_idx, manager._device_pool._available_page_indices)
 
@@ -447,7 +449,7 @@ class TieredPagePoolManagerTest(parameterized.TestCase):
       manager.offload(device_pids)
 
       for pid in device_pids:
-        self.assertEqual(manager.page_location(pid), "host")
+        self.assertEqual(manager.page_location(pid), PageLocation.HOST)
 
       self.assertEqual(manager.num_free_host_pages, prev_host_free - num_pages)
       self.assertEqual(
@@ -483,7 +485,7 @@ class TieredPagePoolManagerTest(parameterized.TestCase):
 
       manager.load(device_pids)
       for pid in device_pids:
-        self.assertEqual(manager.page_location(pid), "device")
+        self.assertEqual(manager.page_location(pid), PageLocation.DEVICE)
 
       self.assertEqual(manager.num_free_host_pages, prev_host_free)
       self.assertEqual(manager.num_free_device_pages, prev_device_free)
@@ -600,7 +602,8 @@ class TieredPagePoolManagerTest(parameterized.TestCase):
 
     # Attempting to load a page that is already on device
     with self.assertRaisesRegex(
-        ValueError, r"Page ID \d+ is not on host \(location: device\)\."
+        ValueError,
+        r"Page ID \d+ is not on host \(location: PageLocation\.DEVICE\)\.",
     ):
       manager.load(device_pids)
 
@@ -608,7 +611,8 @@ class TieredPagePoolManagerTest(parameterized.TestCase):
 
     # Attempting to offload a page that is already on host
     with self.assertRaisesRegex(
-        ValueError, r"Page ID \d+ is not on device \(location: host\)\."
+        ValueError,
+        r"Page ID \d+ is not on device \(location: PageLocation\.HOST\)\.",
     ):
       manager.offload(device_pids)
 
@@ -646,8 +650,8 @@ class TieredPagePoolManagerTest(parameterized.TestCase):
     # Offload 2 pages to host
     manager.offload(device_pids[:2])
 
-    self.assertEqual(manager.page_location(device_pids[0]), "host")
-    self.assertEqual(manager.page_location(device_pids[2]), "device")
+    self.assertEqual(manager.page_location(device_pids[0]), PageLocation.HOST)
+    self.assertEqual(manager.page_location(device_pids[2]), PageLocation.DEVICE)
 
     prev_device_free = manager.num_free_device_pages
     prev_host_free = manager.num_free_host_pages
