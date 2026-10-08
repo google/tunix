@@ -113,7 +113,7 @@ class CommonTest(parameterized.TestCase):
     reported = float(kl[0])
     self.assertGreater(reported, 0.0)
     expected = float(np.expm1(np.float64(1e-6)) - np.float64(1e-6))
-    self.assertAlmostEqual(reported, expected, delta=1e-12)
+    self.assertAlmostEqual(reported, expected, delta=1e-13)
 
     jitted = jax.jit(
         lambda p, r: common.compute_kl_divergence(p, r, method="low_var_kl")
