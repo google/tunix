@@ -36,6 +36,7 @@ import dataclasses
 from typing import Any
 
 import tunix.experimental.generate.tiered_page_pool as page_pool_lib
+from tunix.generate import utils
 
 
 @dataclasses.dataclass
@@ -88,6 +89,13 @@ class SingleTypeKVCacheManager:
     self._unreferenced_host_pages: collections.OrderedDict[Page, None] = (
         collections.OrderedDict()
     )
+
+  @property
+  def _num_pages_in_window(self) -> int:
+    if self._window_size is None:
+      return 0
+    # Add 1 to account for the window sliding and leaking into the next page.
+    return utils.cdiv(self._window_size - 1, self._page_size) + 1
 
   def _touch_page(self, page: Page | None) -> None:
     """Increments a page's reference count."""
@@ -321,3 +329,67 @@ class SingleTypeKVCacheManager:
 
     self._cache_full_pages(request_id, page_hashes, num_completed_tokens)
     self._release_out_of_window(request_id, num_completed_tokens)
+
+  def _longest_cache_hit_full_attention(
+      self,
+      page_hashes: Sequence[int]
+  ) -> list[Page | None]:
+    """Finds the longest kv cache hit for a group of full attention layers."""
+    cache_hits: list[Page | None] = []
+    for h in page_hashes:
+      page = self._prefix_hash_to_page.get(h)
+      if page is None:
+        break
+
+      cache_hits.append(page)
+
+    return cache_hits
+
+  def _longest_cache_hit_local_attention(
+      self,
+      page_hashes: Sequence[int]
+  ) -> list[Page | None]:
+    """Finds the longest kv cache hit for a group of local attention layers."""
+    # Entries for pages outside the window should be `None`. Otherwise,
+    # they will be unnecessarily loaded and referenced.
+    cache_hits: list[Page | None] = [None] * len(page_hashes)
+
+    def find_miss(w_start: int, w_end: int) -> int:
+      """Scans right to left for a page miss in the window."""
+      for i in range(w_end, w_start - 1, -1):
+        h = page_hashes[i]
+        page = self._prefix_hash_to_page.get(h)
+        if page is None:
+          return i
+      return -1
+
+    w_end = len(cache_hits) - 1
+    w_start = 0
+    while w_end >= 0:
+      w_start = max(0, w_end - self._num_pages_in_window + 1)
+
+      miss_idx = find_miss(w_start, w_end)
+      if miss_idx >= 0:
+        w_end = miss_idx - 1
+        continue
+
+      break
+
+    for i in range(w_start, w_end + 1):
+      cache_hits[i] = self._prefix_hash_to_page[page_hashes[i]]
+
+    return cache_hits[:w_end + 1]
+
+  def find_longest_cache_hit(
+      self,
+      page_hashes: Sequence[int]
+  ) -> list[Page | None]:
+    """Queries the prefix cache for pages matching page_hashes."""
+    if self._window_size is None:
+      return self._longest_cache_hit_full_attention(
+          page_hashes
+      )
+
+    return self._longest_cache_hit_local_attention(
+        page_hashes
+    )

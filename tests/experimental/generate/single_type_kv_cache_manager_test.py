@@ -800,5 +800,99 @@ class SyncRequestStateTest(parameterized.TestCase):
     )
 
 
+class PrefixMatchingTest(parameterized.TestCase):
+
+  def test_find_longest_cache_hit_empty_cache(self):
+    manager = _create_manager(page_size=4, window_size=None)
+    self.assertEmpty(manager.find_longest_cache_hit([1, 2, 3]))
+
+  def test_find_longest_cache_hit_full_attention(self):
+    manager = _create_manager(page_size=4, window_size=None)
+    p0 = Page(page_id=0, prefix_hash=10)
+    p1 = Page(page_id=1, prefix_hash=20)
+    manager._prefix_hash_to_page[10] = p0
+    manager._prefix_hash_to_page[20] = p1
+
+    matched = manager.find_longest_cache_hit([10, 20, 30])
+    self.assertEqual(matched, [p0, p1])
+
+  def test_find_longest_cache_hit_full_attention_stops_at_miss(self):
+    manager = _create_manager(page_size=4, window_size=None)
+    p0 = Page(page_id=0, prefix_hash=10)
+    p2 = Page(page_id=2, prefix_hash=30)
+    manager._prefix_hash_to_page[10] = p0
+    manager._prefix_hash_to_page[30] = p2
+
+    matched = manager.find_longest_cache_hit([10, 20, 30])
+    self.assertEqual(matched, [p0])
+
+  def test_find_longest_cache_hit_local_attention_full_prefix(self):
+    manager = _create_manager(page_size=4, window_size=8)
+    p0 = Page(page_id=0, prefix_hash=10)
+    p1 = Page(page_id=1, prefix_hash=20)
+    manager._prefix_hash_to_page[10] = p0
+    manager._prefix_hash_to_page[20] = p1
+
+    matched = manager.find_longest_cache_hit([10, 20])
+    self.assertEqual(matched, [p0, p1])
+
+  def test_find_longest_cache_hit_local_attention_suffix(self):
+    manager = _create_manager(page_size=4, window_size=4)
+    p2 = Page(page_id=2, prefix_hash=30)
+    p3 = Page(page_id=3, prefix_hash=40)
+    manager._prefix_hash_to_page[30] = p2
+    manager._prefix_hash_to_page[40] = p3
+
+    matched = manager.find_longest_cache_hit([10, 20, 30, 40])
+    self.assertEqual(matched, [None, None, p2, p3])
+
+  def test_find_longest_cache_hit_local_attention_incomplete_window(self):
+    manager = _create_manager(page_size=4, window_size=8)
+    p3 = Page(page_id=3, prefix_hash=40)
+    manager._prefix_hash_to_page[40] = p3
+
+    matched = manager.find_longest_cache_hit([10, 20, 30, 40])
+    self.assertEmpty(matched)
+
+  def test_find_longest_cache_hit_local_attention_falls_back_past_miss(self):
+    # window_size=4 spans 2 pages. The miss at hash 40 breaks the rightmost
+    # window, so the lookup falls back to the next full window to the left.
+    manager = _create_manager(page_size=4, window_size=4)
+    pages = {
+        h: Page(page_id=i, prefix_hash=h)
+        for i, h in enumerate([10, 20, 30, 50])
+    }
+    manager._prefix_hash_to_page.update(pages)
+
+    matched = manager.find_longest_cache_hit([10, 20, 30, 40, 50])
+    self.assertEqual(matched, [None, pages[20], pages[30]])
+
+  def test_find_longest_cache_hit_local_attention_unaligned_window(self):
+    # window_size=6 spans 3 pages, not 2, since the window can straddle pages.
+    manager = _create_manager(page_size=4, window_size=6)
+    pages = {
+        h: Page(page_id=i, prefix_hash=h)
+        for i, h in enumerate([20, 30, 40])
+    }
+    manager._prefix_hash_to_page.update(pages)
+
+    matched = manager.find_longest_cache_hit([10, 20, 30, 40])
+    self.assertEqual(matched, [None, pages[20], pages[30], pages[40]])
+
+  @parameterized.parameters(
+      (None, 0),
+      (4, 2),
+      (5, 2),
+      (6, 3),
+      (8, 3),
+      (1, 1),
+  )
+  def test_num_pages_in_window(
+      self, window_size: int | None, expected_num_pages: int
+  ):
+    manager = _create_manager(page_size=4, window_size=window_size)
+    self.assertEqual(manager._num_pages_in_window, expected_num_pages)
+
+
 if __name__ == "__main__":
   absltest.main()
