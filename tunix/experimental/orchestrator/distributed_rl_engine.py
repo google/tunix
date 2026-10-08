@@ -112,6 +112,9 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     )
     self._fault_tolerance_config = ft_cfg
     self._max_zero_worker_wait_s = ft_cfg.max_zero_worker_wait_s
+    self._zero_worker_since: float | None = None
+    self._zero_worker_seconds_total: float = 0.0
+    self._terminal_failed_trajectories_total: int = 0
     self._weights_consistent: bool = True
 
     self._trainer_workers = dict(trainer_workers)
@@ -184,6 +187,24 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         and self._max_zero_worker_wait_s > 0
     )
 
+  def _current_zero_worker_seconds(self) -> float:
+    total = self._zero_worker_seconds_total
+    if self._zero_worker_since is not None:
+      total += max(0.0, time.monotonic() - self._zero_worker_since)
+    return total
+
+  @property
+  def fault_tolerance_metrics(self) -> dict[str, int | float]:
+    """Returns minimal fault-tolerance observability counters and gauges."""
+    return {
+        "rollout_worker_evictions_total": self._rollout_session.evictions_total,
+        "rollout_retries_total": self._rollout_session.retries_total,
+        "terminal_failed_trajectories_total": (
+            self._terminal_failed_trajectories_total
+        ),
+        "zero_worker_seconds": self._current_zero_worker_seconds(),
+    }
+
   def add_rollout_worker(
       self,
       handle: remote_execution.ActorHandle,
@@ -198,11 +219,11 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       handle: remote_execution.ActorHandle,
       exc: BaseException | None = None,
   ) -> bool:
-    """Removes a rollout worker handle and re-queues any in-flight tasks.
+    """Evicts a rollout worker handle and re-queues any in-flight tasks.
 
     Returns:
       True if `handle` was still a member of the rollout pool, False if it had
-      already been removed (the call is then a no-op).
+      already been evicted (the call is then a no-op).
     """
     return self._rollout_session.remove_actor(handle, exc=exc)
 
@@ -250,6 +271,11 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     self._assert_weights_consistent()
     await self.sync_pending_weights()
     if self._rollout_workers:
+      if self._zero_worker_since is not None:
+        self._zero_worker_seconds_total += max(
+            0.0, time.monotonic() - self._zero_worker_since
+        )
+        self._zero_worker_since = None
       return
 
     if not self._fault_tolerance_config.enabled:
@@ -258,27 +284,36 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       )
 
     wait_start = time.monotonic()
-    logging.warning(
-        "[rollout-ft] action=zero_workers_wait max_zero_worker_wait_s=%.2f",
-        self._max_zero_worker_wait_s,
-    )
-
-    while not self._rollout_workers:
-      self._assert_weights_consistent()
-      await self.sync_pending_weights()
-      if self._rollout_workers:
-        break
-      elapsed = time.monotonic() - wait_start
-      if elapsed >= self._max_zero_worker_wait_s:
-        raise datatypes.NoHealthyRolloutWorkersError(
-            "No healthy rollout workers available after waiting"
-            f" {elapsed:.2f}s"
-            f" (max_zero_worker_wait_s={self._max_zero_worker_wait_s}s)."
-        )
-      sleep_s = min(
-          poll_interval_s, max(0.001, self._max_zero_worker_wait_s - elapsed)
+    if self._zero_worker_since is None:
+      self._zero_worker_since = wait_start
+      logging.warning(
+          "[rollout-ft] action=zero_workers_wait max_zero_worker_wait_s=%.2f",
+          self._max_zero_worker_wait_s,
       )
-      await asyncio.sleep(sleep_s)
+
+    try:
+      while not self._rollout_workers:
+        self._assert_weights_consistent()
+        await self.sync_pending_weights()
+        if self._rollout_workers:
+          break
+        elapsed = time.monotonic() - wait_start
+        if elapsed >= self._max_zero_worker_wait_s:
+          raise datatypes.NoHealthyRolloutWorkersError(
+              "No healthy rollout workers available after waiting"
+              f" {elapsed:.2f}s"
+              f" (max_zero_worker_wait_s={self._max_zero_worker_wait_s}s)."
+          )
+        sleep_s = min(
+            poll_interval_s, max(0.001, self._max_zero_worker_wait_s - elapsed)
+        )
+        await asyncio.sleep(sleep_s)
+    finally:
+      if self._zero_worker_since is not None:
+        self._zero_worker_seconds_total += max(
+            0.0, time.monotonic() - self._zero_worker_since
+        )
+        self._zero_worker_since = None
 
   async def _maybe_configure_trainer_target_state(
       self,
@@ -521,6 +556,16 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         if isinstance(it, dict):
           it = datatypes.RolloutResponse(**it)
         traj_item = _response_to_trajectory_item(it)
+        traj_status = (
+            traj_item.traj.get("status")
+            if isinstance(traj_item.traj, Mapping)
+            else None
+        )
+        if traj_status in (
+            datatypes.TrajectoryStatus.FAILED,
+            "FAILED",
+        ):
+          self._terminal_failed_trajectories_total += 1
         logging.debug(
             "Received rollout response (prompt_id=%s, group_index=%d).",
             traj_item.prompt_id,
@@ -532,6 +577,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       # Rollout tasks are always submitted as generate(requests=[req]).
       _, _, orig_kwargs = payload
       for req in orig_kwargs["requests"]:
+        self._terminal_failed_trajectories_total += 1
         logging.warning(
             "[rollout-ft] action=terminal_fail request_id=%s prompt_id=%s"
             " group_index=%d policy_version=%d reason=%r",
@@ -593,6 +639,12 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           timeout_s=timeout_s
       )
       completed = self._drain_completed_and_failed(raw_completed)
+
+    if self._rollout_workers and self._zero_worker_since is not None:
+      self._zero_worker_seconds_total += max(
+          0.0, time.monotonic() - self._zero_worker_since
+      )
+      self._zero_worker_since = None
 
     return completed
 

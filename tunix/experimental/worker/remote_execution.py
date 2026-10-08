@@ -1347,10 +1347,7 @@ class RoutingActorPool(ActorPool):
   def actors(self) -> List[ActorHandle]:
     return list(self._actors)
 
-  def add_actor(
-      self,
-      actor: Union[str, ActorHandle],
-  ) -> ActorHandle:
+  def add_actor(self, actor: Union[str, ActorHandle]) -> ActorHandle:
     if isinstance(actor, str):
       handle = ActorHandle.from_address(actor)
     elif isinstance(actor, ActorHandle):
@@ -1361,10 +1358,7 @@ class RoutingActorPool(ActorPool):
       self._actors.append(handle)
     return handle
 
-  def remove_actor(
-      self,
-      actor: ActorHandle,
-  ) -> bool:
+  def remove_actor(self, actor: ActorHandle) -> bool:
     if actor in self._actors:
       self._actors.remove(actor)
       return True
@@ -1644,6 +1638,8 @@ class PoolExecutionSession:
     self._retain_pending_on_zero_workers = bool(
         cfg.retain_pending_on_zero_workers
     )
+    self._evictions_total = 0
+    self._retries_total = 0
     self._response_queue: asyncio.Queue[Any] = asyncio.Queue()
     self._active_workers: set[ActorHandle] = set()
     # Actors currently considered pool members by this session. Eviction
@@ -1704,6 +1700,16 @@ class PoolExecutionSession:
 
   def set_retain_pending_on_zero_workers(self, val: bool) -> None:
     self._retain_pending_on_zero_workers = bool(val)
+
+  @property
+  def evictions_total(self) -> int:
+    """Total number of worker evictions observed by this session."""
+    return self._evictions_total
+
+  @property
+  def retries_total(self) -> int:
+    """Total number of task retries triggered by worker failures."""
+    return self._retries_total
 
   @property
   def pending_count(self) -> int:
@@ -1928,6 +1934,7 @@ class PoolExecutionSession:
       ):
         if count_retry:
           self._task_retries[req_id] = retries + 1
+        self._retries_total += 1
         logging.info(
             "[rollout-ft] action=requeue request_id=%s retry=%d/%d reason=%r",
             req_id,
@@ -1973,6 +1980,7 @@ class PoolExecutionSession:
       if actor not in self._known_actors and not removed_from_pool:
         return
       self._known_actors.discard(actor)
+      self._evictions_total += 1
       logging.info(
           "[rollout-ft] action=evict worker=%s reason=%r",
           actor,
@@ -2121,6 +2129,7 @@ class PoolExecutionSession:
         self._task_retries[request_id] = (
             self._task_retries.get(request_id, 0) + 1
         )
+        self._retries_total += 1
         logging.info(
             "[rollout-ft] action=requeue request_id=%s retry=%d/%d reason=%r",
             request_id,

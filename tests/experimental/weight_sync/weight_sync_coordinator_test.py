@@ -2185,6 +2185,15 @@ class ElasticWorkerMembershipTest(CoordinatorTestBase):
     with self.assertRaises(datatypes.NoHealthyRolloutWorkersError):
       asyncio.run(coordinator.sync(1))
 
+  def test_last_sync_duration_s_recorded(self):
+    dest = FakeDestination("sampler", [])
+    self.make(dest)
+    self.assertIsNone(self.coordinator.last_sync_duration_s)
+
+    self.sync(policy_version=1)
+    self.assertIsNotNone(self.coordinator.last_sync_duration_s)
+    self.assertGreaterEqual(self.coordinator.last_sync_duration_s, 0.0)
+
   def test_release_after_unknown_transfer_releases_source_and_allows_retry(
       self,
   ):

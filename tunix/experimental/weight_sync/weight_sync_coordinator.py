@@ -834,6 +834,7 @@ class WeightSyncCoordinator:
     self._poisoned: Optional[str] = None
     self._last_committed_version: Optional[int] = None
     self._current_round_abort_s: float = 0.0
+    self._last_sync_duration_s: Optional[float] = None
 
   @property
   def round_index(self) -> int:
@@ -843,6 +844,11 @@ class WeightSyncCoordinator:
   @property
   def last_committed_version(self) -> Optional[int]:
     return self._last_committed_version
+
+  @property
+  def last_sync_duration_s(self) -> Optional[float]:
+    """Duration in seconds of the most recently completed `sync()` call."""
+    return self._last_sync_duration_s
 
   @property
   def in_flight(self) -> bool:
@@ -1338,6 +1344,7 @@ class WeightSyncCoordinator:
         raise
     finally:
       elapsed_time = time.monotonic() - start_time
+      self._last_sync_duration_s = elapsed_time
       logging.info("Weight sync finished in %.2f seconds.", elapsed_time)
       self._in_flight = False
 
