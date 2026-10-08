@@ -140,7 +140,13 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       "--max_staleness",
       dest="max_staleness",
       type=int,
-      default=0,
+      default=int(os.getenv("MAX_STALENESS", "0")),
+  )
+  parser.add_argument(
+      "--trajectory_group_order",
+      choices=("trajectory_completion", "prompt_arrival"),
+      default=os.getenv("TRAJECTORY_GROUP_ORDER", "trajectory_completion"),
+      help="Trajectory group order.",
   )
   parser.add_argument(
       "--weight_sync_mode",
@@ -390,6 +396,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           scaffold=args.scaffold,
           env_verbose=args.env_verbose,
           overlong_filter=args.overlong_filter,
+          max_staleness=args.max_staleness,
       ),
       max_steps=args.max_steps,
       reward_fns=[],
@@ -413,6 +420,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       metrics_logging_options=metrics_logging_options,
       trajectory_log_dir=args.trajectory_log_dir,
       max_staleness=args.max_staleness,
+      group_order=args.trajectory_group_order,
       sync_weights=(args.weight_sync_mode != weight_sync.WeightSyncMode.NONE),
       on_step_begin=lambda step: logging.info(
           ">>> DeepSWE step %d starting | policy_version=%d",

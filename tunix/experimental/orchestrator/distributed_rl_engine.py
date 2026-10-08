@@ -95,6 +95,12 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     self._inference_workers = dict(inference_workers or {})
     self._policy_version = 0
     self._weight_sync_coordinator = weight_sync_coordinator
+    self._restored_checkpoint_metadata: dict[str, Any] | None = None
+
+  @property
+  def restored_checkpoint_metadata(self) -> dict[str, Any] | None:
+    """Returns the metadata dict from the most recent checkpoint restoration."""
+    return self._restored_checkpoint_metadata
 
   async def _maybe_configure_trainer_target_state(
       self,
@@ -685,6 +691,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
 
     See `rl_engine_interface.AbstractRLEngine.resume_from_checkpoint`.
     """
+    self._restored_checkpoint_metadata = None
     metadata = await self._restore_checkpoint(role=role)
     if not isinstance(metadata, Mapping):
       if metadata is not None:
@@ -711,20 +718,26 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       logging.info("No checkpoint to resume from; starting from step 0.")
       return 0
 
-    # Resume at the step boundary; the policy version tracks the restored step.
-    # New checkpoints record optimizer and global steps separately. Legacy
-    # checkpoints have only `step`, for which both values are identical.
-    restored_policy_version = restored_step
+    self._restored_checkpoint_metadata = dict(metadata)
     recorded_version = metadata.get("policy_version")
-    # TODO(tunix-dev): this is a force-fit for fully on-policy RL. Remove when
-    # async off-policy is supported.
-    if recorded_version is not None and recorded_version != restored_step:
-      logging.warning(
-          "Checkpoint recorded mid-step policy_version=%s; resuming at the"
-          " step-boundary value %d",
-          recorded_version,
-          restored_step,
-      )
+    has_off_policy_state = (
+        "committed_prompt_ids" in metadata or "skipped_prompt_ids" in metadata
+    )
+    if has_off_policy_state and recorded_version is not None:
+      restored_policy_version = int(recorded_version)
+    else:
+      # Resume at the step boundary; the policy version tracks the restored
+      # step. New checkpoints record optimizer and global steps separately.
+      # Legacy checkpoints have only `step`, for which both values are
+      # identical.
+      restored_policy_version = restored_step
+      if recorded_version is not None and recorded_version != restored_step:
+        logging.warning(
+            "Checkpoint recorded mid-step policy_version=%s; resuming at the"
+            " step-boundary value %d",
+            recorded_version,
+            restored_step,
+        )
     self._policy_version = restored_policy_version
     logging.info(
         "Resuming from checkpoint: global_step=%d optimizer_step=%d "

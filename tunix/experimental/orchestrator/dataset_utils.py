@@ -32,6 +32,18 @@ _DATASET_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
 _DATASET_END = object()
 
 
+def total_prompt_groups(
+    max_steps: int,
+    batch_size: int,
+    max_staleness: int = 0,
+) -> int:
+  """Returns total prompt groups to yield, including off-policy lookahead."""
+  extra_steps = (
+      max(max_staleness * 4, 6, max_steps // 4) if max_staleness > 0 else 0
+  )
+  return (max_steps + extra_steps) * batch_size
+
+
 async def iter_dataset_async(
     dataset: Iterable[_T],
     *,

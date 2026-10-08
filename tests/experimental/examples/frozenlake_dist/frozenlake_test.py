@@ -192,6 +192,25 @@ class FrozenLakeDistTest(absltest.TestCase):
     self.assertLen(items, 6)
     self.assertLen({item["prompt_id"] for item in items}, 6)
 
+    offpolicy_items = list(
+        frozenlake.iter_prompt_items(
+            dataset=[{"seed": 1, "size": 2, "p": 0.8}],
+            max_steps=2,
+            batch_size=3,
+            max_turns=4,
+            max_response_length=64,
+            episode_timeout_secs=30,
+            temperature=0.7,
+            top_p=1.0,
+            top_k=0,
+            is_slippery=False,
+            use_multistep_prompt=True,
+            max_staleness=2,
+        )
+    )
+    # max_steps=2 + extra_steps=max(8, 6, 0)=8 => 10 * 3 = 30 prompts
+    self.assertLen(offpolicy_items, 30)
+
   def test_recipe_defaults_match_reference(self):
     args = run_frozenlake_dist._parse_args([])
     self.assertEqual(args.model_id, "Qwen/Qwen3-8B")

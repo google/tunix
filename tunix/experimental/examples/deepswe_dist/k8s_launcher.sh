@@ -50,6 +50,8 @@ export OPT_CHAIN_TYPE=${OPT_CHAIN_TYPE-clip_by_global_norm}
 export MAX_GRAD_NORM=${MAX_GRAD_NORM:-1.0}
 export BETA=${BETA:-0.0}
 export EPSILON=${EPSILON:-0.2}
+export MAX_STALENESS=${MAX_STALENESS:-0}
+export TRAJECTORY_GROUP_ORDER=${TRAJECTORY_GROUP_ORDER:-trajectory_completion}
 export LORA_RANK=${LORA_RANK:-64}
 export LORA_ALPHA=${LORA_ALPHA:-64.0}
 export MODEL_DTYPE=${MODEL_DTYPE:-float32}
@@ -197,6 +199,8 @@ start_orchestrator() {
         --train_micro_batch_size=${TRAIN_MICRO_BATCH_SIZE} \
         --beta=${BETA} \
         --epsilon=${EPSILON} \
+        --max_staleness=${MAX_STALENESS} \
+        --trajectory_group_order=${TRAJECTORY_GROUP_ORDER} \
         --dataset_name=${DATASET_NAME} \
         --dataset_split=${DATASET_SPLIT} \
         ${DATASET_CACHE_DIR:+--dataset_cache_dir=${DATASET_CACHE_DIR}} \

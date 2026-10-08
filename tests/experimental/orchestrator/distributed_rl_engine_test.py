@@ -512,6 +512,30 @@ class DistributedRLEngineTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_resume_from_checkpoint_exposes_restored_checkpoint_metadata_and_off_policy_version(
+      self,
+  ):
+    async def _run():
+      ckpt_meta = {
+          "step": 3,
+          "global_step": 3,
+          "policy_version": 5,
+          "committed_prompt_ids": ["prompt_0", "prompt_3"],
+          "skipped_prompt_ids": ["prompt_1"],
+      }
+      self.mock_actor.restore_checkpoint.return_value = ckpt_meta
+      coordinator = _FakeWeightSyncCoordinator(forced_version=5)
+      engine = self._engine_with_coordinator(coordinator)
+
+      result = await engine.resume_from_checkpoint()
+
+      self.assertEqual(result, 3)
+      self.assertEqual(engine._policy_version, 5)
+      self.assertEqual(coordinator.calls, [5])
+      self.assertEqual(engine.restored_checkpoint_metadata, ckpt_meta)
+
+    asyncio.run(_run())
+
   def test_resume_from_checkpoint_no_checkpoint_does_not_resync(self):
     async def _run():
       self.mock_actor.restore_checkpoint.return_value = {"step": 0}

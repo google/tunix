@@ -140,6 +140,20 @@ class DatasetUtilsTest(absltest.TestCase):
     asyncio.run(_run())
     self.assertTrue(closed)
 
+  def test_total_prompt_groups(self):
+    self.assertEqual(
+        dataset_utils.total_prompt_groups(
+            max_steps=2, batch_size=3, max_staleness=0
+        ),
+        6,
+    )
+    self.assertEqual(
+        dataset_utils.total_prompt_groups(
+            max_steps=2, batch_size=3, max_staleness=2
+        ),
+        30,
+    )
+
 
 if __name__ == "__main__":
   absltest.main()

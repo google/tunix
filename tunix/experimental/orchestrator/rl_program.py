@@ -32,7 +32,9 @@ from typing import Any
 from absl import logging
 import numpy as np
 from tunix.experimental.common import datatypes
+from tunix.experimental.common import dispatch_window
 from tunix.experimental.common import logging_utils
+from tunix.experimental.common import tagging
 from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import dataset_utils
@@ -48,6 +50,9 @@ MetricsLoggerOptions = metrics_logger_lib.MetricsLoggerOptions
 Mode = metrics_logger_lib.Mode
 _extract_scalar = metrics_logger_lib.extract_scalar
 BatchConfig = batch_assembly.BatchConfig
+GroupOrder = trajectory_queue_manager.GroupOrder
+TrajectoryQueueManager = trajectory_queue_manager.TrajectoryQueueManager
+BatchOrderedQueueManager = trajectory_queue_manager.BatchOrderedQueueManager
 
 
 def _next_microbatch(
@@ -285,6 +290,7 @@ class StandardRLProgram(RLProgram):
       trajectory_store: trajectory_store_lib.TrajectoryStore | None = None,
       metrics_prefix: str = "",
       mode: Mode | str = Mode.TRAIN,
+      group_order: GroupOrder | str = GroupOrder.TRAJECTORY_COMPLETION,
       on_step_begin: Callable[[int], None] | None = None,
       on_step_end: Callable[[int, Any], None] | None = None,
   ):
@@ -397,30 +403,46 @@ class StandardRLProgram(RLProgram):
     self._trajectory_store = trajectory_store
     self.metrics_prefix = metrics_prefix
     self.mode = mode if isinstance(mode, Mode) else Mode(mode)
+    self.group_order = (
+        group_order
+        if isinstance(group_order, GroupOrder)
+        else GroupOrder(group_order)
+    )
     self.on_step_begin = on_step_begin
     self.on_step_end = on_step_end
     self._in_flight_rollouts = 0
-    self._dispatch_capacity: asyncio.Semaphore | None = None
     self._dispatch_done = asyncio.Event()
     self._assembler_lock = threading.Lock()
-
-    self.raw_q = trajectory_queue_manager.TrajectoryQueueManager.create(
-        num_generations=self.num_generations,
-        max_staleness=max_staleness,
-        current_policy_version=lambda: self.policy_version,
-        on_group_filtered=self._on_raw_group_filtered,
-    )
-    self.scored_q = trajectory_queue_manager.TrajectoryQueueManager.create(
-        num_generations=self.num_generations
-    )
-
-  def _on_raw_group_filtered(
-      self, filtered_group: list[datatypes.TrajectoryItem]
-  ) -> None:
-    """Releases a dispatch capacity token when a stale group is dropped."""
-    del filtered_group
-    if self._dispatch_capacity is not None:
-      self._dispatch_capacity.release()
+    self.scored_q: TrajectoryQueueManager | BatchOrderedQueueManager
+    if self.group_order == GroupOrder.PROMPT_ARRIVAL:
+      self.scored_q = BatchOrderedQueueManager.create(
+          num_generations=self.num_generations,
+          full_batch_size=self.full_batch_size,
+      )
+      self.raw_q = TrajectoryQueueManager.create(
+          num_generations=self.num_generations,
+      )
+      self.dispatch_window = dispatch_window.DispatchWindow(
+          max_staleness=max_staleness,
+          next_batch_fn=lambda: self.scored_q.next_batch_idx,  # pyrefly: ignore[missing-attribute]
+          full_batch_size=self.full_batch_size,
+      )
+    else:
+      self.scored_q = TrajectoryQueueManager.create(
+          num_generations=self.num_generations,
+      )
+      self.dispatch_window = dispatch_window.DispatchWindow(
+          max_staleness=max_staleness,
+          next_batch_fn=lambda: self._step,
+          full_batch_size=self.full_batch_size,
+          out_of_order_resume=True,
+      )
+      self.raw_q = TrajectoryQueueManager.create(
+          num_generations=self.num_generations,
+          max_staleness=max_staleness,
+          current_policy_version=lambda: self.policy_version,
+          on_group_filtered=self.dispatch_window.on_group_filtered,
+      )
 
   @property
   def trajectory_store(self) -> trajectory_store_lib.TrajectoryStore | None:
@@ -438,37 +460,50 @@ class StandardRLProgram(RLProgram):
     if self.metrics_logger is not None:
       self.metrics_logger.close()
 
-  async def _wait_for_dispatch_window(self) -> None:
-    """Applies policy-staleness backpressure utilizing token buckets."""
-    assert (
-        self._dispatch_capacity is not None
-    ), "run_async must initialize capacity."
-    await self._dispatch_capacity.acquire()
-
   async def _resume_from_checkpoint(self) -> None:
     """Realigns program orchestration state with the engine's restored checkpoint.
 
     Delegates the mesh-level work (restoring the trainer checkpoint and, when
     `sync_weights` is enabled, resyncing rollout worker weights to the restored
     policy) to the engine, then translates the restored step into program
-    orchestration state: the train-loop bound (`_step`) and the dataset prefix
-    to skip (resumed `_step` if any).
+    orchestration state: the train-loop bound (`_step`), the exact set of
+    committed and skipped `prompt_id`s (when off-policy state was persisted),
+    or the dataset prefix to skip (resumed `_step` if any).
     """
     assert self.engine is not None
-    restored_step = await self.engine.resume_from_checkpoint(
+    restored = await self.engine.resume_from_checkpoint(
         role=datatypes.Role.ACTOR,
         resync_rollout_weights=self.sync_weights,
     )
+    restored_step = restored[0] if isinstance(restored, tuple) else restored
     if restored_step <= 0:
       return
     self._step = restored_step
     self.policy_version = restored_step
+    if self.group_order == GroupOrder.PROMPT_ARRIVAL:
+      self.scored_q.skip(0, restored_step)  # pyrefly: ignore[missing-attribute]
+    ckpt_meta = self.engine.restored_checkpoint_metadata
+    if (
+        isinstance(ckpt_meta, Mapping)
+        and ckpt_meta.get("policy_version") is not None
+    ):
+      self.policy_version = int(ckpt_meta["policy_version"])
+    if self.dispatch_window.restore_checkpoint_metadata(ckpt_meta):
+      logging.info(
+          "Resuming from off-policy checkpoint: step=%d policy_version=%d"
+          " (committed=%d, skipped=%d).",
+          restored_step,
+          self.policy_version,
+          len(self.dispatch_window.committed_prompt_ids),
+          len(self.dispatch_window.skipped_prompt_ids),
+      )
+      return
     logging.info(
         "Resuming from checkpoint: step=%d policy_version=%d (skipping %d"
         " already-trained dataset items).",
         restored_step,
         self.policy_version,
-        self._step * self.full_batch_size,
+        self.dispatch_window.next_batch * self.full_batch_size,
     )
 
   async def rollout_dispatch_stage(self) -> None:
@@ -477,21 +512,29 @@ class StandardRLProgram(RLProgram):
     Ensures that all dataset items carry unique, collision-free `prompt_id`s
     (e.g., `f"prompt_{prompt_idx}"`) before dispatching to the engine layer,
     satisfying the engine's strict `prompt_id` contract.
+
+    Also stamps each prompt's dataset coordinates (`prompt_idx`, `batch_idx`,
+    `intra_batch_idx`) into its metadata, where they ride along untouched to the
+    queue managers. Consumers that order or account per prompt batch read them;
+    nothing upstream of the dispatcher knows dataset position.
     """
     assert self.engine is not None
     if self.dataset is None:
       raise ValueError(
           "StandardRLProgram requires a dataset either at init or in run()."
       )
-    already_consumed = self._step * self.full_batch_size
 
     try:
       async for prompt_idx, prompt_item in dataset_utils.iter_dataset_async(
           self.dataset,
-          skip_count=already_consumed,
+          skip_count=self.dispatch_window.dataset_skip_count,
           prefetch_size=max(1, self.full_batch_size),
       ):
-        await self._wait_for_dispatch_window()
+        if not await self.dispatch_window.admit(prompt_idx, prompt_item):
+          continue
+        coordinates = tagging.prompt_coordinates(
+            prompt_idx, self.full_batch_size
+        )
         if isinstance(prompt_item, dict):
           prompt_item = dict(prompt_item)
           prompt_item.setdefault("prompt_id", f"prompt_{prompt_idx}")
@@ -507,6 +550,22 @@ class StandardRLProgram(RLProgram):
           if self.max_response_length is not None:
             prompt_item["max_response_length"] = self.max_response_length
 
+        prompt_item = tagging.tag_prompt(prompt_item, coordinates)
+        prompt_id = (
+            prompt_item["prompt_id"]
+            if isinstance(prompt_item, dict)
+            else prompt_item.prompt_id
+        )
+        logging.info(
+            "[pipeline] DISPATCH prompt_id=%s prompt_idx=%d batch_idx=%d"
+            " intra_batch_idx=%d policy_version=%d next_batch=%d",
+            prompt_id,
+            coordinates["prompt_idx"],
+            coordinates["batch_idx"],
+            coordinates["intra_batch_idx"],
+            self.policy_version,
+            self.dispatch_window.next_batch,
+        )
         self._in_flight_rollouts += self.num_generations
         dispatch_kwargs: dict[str, Any] = {
             "num_generations": self.num_generations,
@@ -621,10 +680,15 @@ class StandardRLProgram(RLProgram):
             src_traj.pop("routed_experts", None)
           if isinstance(src_metadata, dict):
             src_metadata.pop("routed_experts", None)
+          src_policy_version = getattr(src_item, "policy_version", None)
+          if src_policy_version is None:
+            src_policy_version = metadata.get("policy_version", 0)
+          src_policy_version = int(src_policy_version or 0)
           traj_dict["trajectory_reward"] = reward_val
           traj_dict["status"] = status
           traj_dict["steps"] = steps
           traj_dict["conversation_masks"] = payload.completion_mask
+          traj_dict["policy_version"] = src_policy_version
           item = datatypes.TrajectoryItem(
               prompt_id=getattr(src_item, "prompt_id", ""),
               group_index=getattr(src_item, "group_index", 0),
@@ -635,7 +699,7 @@ class StandardRLProgram(RLProgram):
               completion_tokens=getattr(src_item, "completion_tokens", None),
               action_mask=getattr(src_item, "action_mask", None),
               routed_experts=None,
-              policy_version=getattr(src_item, "policy_version", 0),
+              policy_version=src_policy_version,
               metadata=metadata,
               # TODO: b/552087289 - Stream RLTrainerPayload directly instead of
               # re-wrapping in TrajectoryItem.
@@ -644,6 +708,20 @@ class StandardRLProgram(RLProgram):
           del payload, src_item, src_traj, src_metadata, traj_dict, metadata
           await self.scored_q.put(item)
           del item
+        if group:
+          first_meta = getattr(group[0], "metadata", None) or {}
+          first_policy_version = getattr(group[0], "policy_version", None)
+          if first_policy_version is None:
+            first_policy_version = first_meta.get("policy_version", 0)
+          logging.info(
+              "[pipeline] ARRIVED prompt_id=%s prompt_idx=%s batch_idx=%s"
+              " intra_batch_idx=%s policy_version=%d",
+              getattr(group[0], "prompt_id", ""),
+              first_meta.get("prompt_idx"),
+              first_meta.get("batch_idx"),
+              first_meta.get("intra_batch_idx"),
+              int(first_policy_version or 0),
+          )
         del group, rewards, trainer_payloads
     finally:
       await self.scored_q.close()
@@ -1247,12 +1325,15 @@ class StandardRLProgram(RLProgram):
                   "policy_version": self.policy_version + 1,
                   "num_rollouts": num_rollouts,
                   "num_microbatches": num_microbatches,
+                  **self.dispatch_window.checkpoint_metadata(
+                      uncommitted_groups
+                  ),
               },
           )
           checkpoint_saved = True
 
         while groups_consumed < self.full_batch_size:
-          scored_items = await self.scored_q.get_batch(num_groups=1)
+          scored_items = await self.scored_q.get_batch(self.num_generations)
           if not scored_items:
             batch_iter = iter(self.assembler.flush())
           else:
@@ -1266,7 +1347,11 @@ class StandardRLProgram(RLProgram):
             for item in scored_items:
               step_rewards.append(_extract_reward(item))
               payload = getattr(item, "payload", None)
-              if payload is not None and payload.advantages is not None:
+              if (
+                  payload is not None
+                  and payload.advantages is not None
+                  and payload.advantages.size > 0
+              ):
                 step_advantages.append(float(np.mean(payload.advantages)))
 
             payloads = []
@@ -1374,7 +1459,7 @@ class StandardRLProgram(RLProgram):
                 await _maybe_save_checkpoint()
           del batch_iter
 
-          if not scored_items:
+          if not scored_items or groups_consumed >= self.full_batch_size:
             if not checkpoint_saved and final_minibatch_completed:
               await _maybe_save_checkpoint()
             break
@@ -1399,13 +1484,28 @@ class StandardRLProgram(RLProgram):
 
         # Before `commit()`, which will eventually take ownership of the groups.
         generation_metrics = _generation_metrics(uncommitted_groups)
+        logging.info(
+            "[pipeline] COMMIT step=%d batch_idx=%s consumed_version=%d"
+            " rollout_versions=%s groups=%s",
+            current_step,
+            self.dispatch_window.next_batch,
+            consumed_policy_version,
+            [
+                getattr(g[0], "policy_version", 0)
+                for g in uncommitted_groups
+                if g
+            ],
+            [
+                (
+                    getattr(g[0], "prompt_id", ""),
+                    (getattr(g[0], "metadata", None) or {}).get("batch_idx"),
+                )
+                for g in uncommitted_groups
+                if g
+            ],
+        )
+        self.dispatch_window.record_committed_groups(uncommitted_groups)
         self.scored_q.commit(current_step, groups=uncommitted_groups)
-
-        assert (
-            self._dispatch_capacity is not None
-        ), "run_async must initialize capacity."
-        for _ in range(groups_consumed):
-          self._dispatch_capacity.release()
 
         step_time_sec = time.monotonic() - step_start_time
 
@@ -1464,6 +1564,10 @@ class StandardRLProgram(RLProgram):
         if self.on_step_end:
           self.on_step_end(current_step, step_result)
         self._step += 1
+        # Strictly after the increment: the dispatcher re-reads `next_batch` on
+        # waking, and waking it on the old value would park it again with no one
+        # left to set the event.
+        self.dispatch_window.release()
     finally:
       if pending_train is not None:
         pending_train.cancel()
@@ -1496,9 +1600,6 @@ class StandardRLProgram(RLProgram):
           sync_weights=True,
           policy_version=self.policy_version,
       )
-
-    max_groups_ahead = self.full_batch_size * (self.max_staleness + 1)
-    self._dispatch_capacity = asyncio.Semaphore(max_groups_ahead)
 
     train_task = asyncio.create_task(self.train_stage())
     tasks = [

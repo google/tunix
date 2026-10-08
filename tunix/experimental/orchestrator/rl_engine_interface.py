@@ -27,6 +27,11 @@ from tunix.experimental.worker import remote_execution
 class AbstractRLEngine(Protocol):
   """Stateless compute primitives for distributed worker meshes."""
 
+  @property
+  def restored_checkpoint_metadata(self) -> dict[str, Any] | None:
+    """Metadata mapping from the most recent checkpoint restoration, if any."""
+    ...
+
   async def dispatch_rollout_requests(
       self,
       requests: Sequence[datatypes.RolloutRequest],

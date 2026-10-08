@@ -172,7 +172,7 @@ class FrozenLakeBenchmarkTest(unittest.TestCase):
         ("SAMPLER_IS", grpo["sampler_is"]),
         ("SAMPLER_IS_THRESHOLD", grpo["sampler_is_threshold"]),
         ("ROLLOUT_MAX_CONCURRENCY", grpo["max_concurrency"]),
-        ("OFF_POLICY_STEPS", grpo["off_policy_steps"]),
+        ("MAX_STALENESS", grpo["off_policy_steps"]),
         ("EPISODE_TIMEOUT_SECS", grpo["episode_timeout"]),
         ("MAX_TURNS", config["env_kwargs"]["max_steps"]),
         ("IS_SLIPPERY", config["env_kwargs"]["is_slippery"]),

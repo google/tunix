@@ -23,6 +23,7 @@ from examples.frozenlake import agent as frozenlake_agent
 from examples.frozenlake import data as frozenlake_data
 from examples.frozenlake import env as frozenlake_env
 import numpy as np
+from tunix.experimental.orchestrator import dataset_utils
 from tunix.experimental.rl.agentic import registry
 
 FROZENLAKE_ENV_NAME = "frozenlake_env"
@@ -131,6 +132,7 @@ def build_prompt_item(
   }
 
 
+# TODO(tunix-dev): inline this to make the internal knob setting more explicit
 def iter_prompt_items(
     *,
     dataset: list[dict[str, Any]],
@@ -144,11 +146,15 @@ def iter_prompt_items(
     top_k: int,
     is_slippery: bool,
     use_multistep_prompt: bool,
+    max_staleness: int = 0,
 ) -> Iterator[dict[str, Any]]:
-  """Yields exactly one full-batch worth of prompt groups per RL step."""
+  """Yields one full-batch worth of prompt groups per RL step plus off-policy lookahead."""
   if not dataset:
     raise ValueError("FrozenLake dataset is empty.")
-  for prompt_idx in range(max_steps * batch_size):
+  total_prompts = dataset_utils.total_prompt_groups(
+      max_steps, batch_size, max_staleness
+  )
+  for prompt_idx in range(total_prompts):
     yield build_prompt_item(
         entry=dataset[prompt_idx % len(dataset)],
         prompt_idx=prompt_idx,
