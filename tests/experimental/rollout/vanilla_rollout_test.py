@@ -197,6 +197,11 @@ class VanillaRolloutTest(parameterized.TestCase):
         'rollout/batch_prefill_throughput_tok_per_s',
     ):
       self.assertIn(name, perf_metrics)
+    # The step is flushed after its requests finish and free their pages, but
+    # the KV cache usage logged still shows what they used.
+    self.assertNotEqual(perf_metrics['rollout/max_kv_cache_usage_pct'][0], 0.0)
+    self.assertNotEqual(perf_metrics['rollout/avg_kv_cache_usage_pct'][0], 0.0)
+    self.assertNotIn('rollout/kv_cache_usage_pct', perf_metrics)
 
   @parameterized.parameters(False, True)
   def test_batch_metrics_cover_the_requests_between_start_and_completion(

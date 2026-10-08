@@ -360,6 +360,8 @@ class MetricsCollectorTest(absltest.TestCase):
     self.assertEqual(
         perf_metrics['rollout/max_kv_cache_usage_pct'], (75.0, np.max)
     )
+    # Read at the flush, after the rollouts are done, it would always be 0.
+    self.assertNotIn('rollout/kv_cache_usage_pct', perf_metrics)
 
   def test_perf_metrics_omit_request_and_batch_averages_without_any(self):
     perf_metrics = (

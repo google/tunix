@@ -86,7 +86,8 @@ class EngineMetricsSnapshot:
   avg_request_prompt_tokens: float
   avg_request_generation_tokens: float
 
-  # 6. Live vLLM-style system gauges.
+  # 6. Live vLLM-style system gauges. The request counts and KV cache usage are
+  # read when the snapshot is taken.
   num_running_reqs: int
   num_waiting_reqs: int
   kv_cache_usage_pct: float
@@ -103,7 +104,10 @@ class EngineMetricsSnapshot:
 
     Totals and engine step averages are always included. Averages over requests
     or batches are only included when the snapshot has some, so that a window
-    without any does not log a misleading 0.
+    without any does not log a misleading 0. The live KV cache usage is left
+    out: a training step's metrics are flushed once its rollouts finish, when
+    the KV cache is about empty again. Its average and peak over the engine
+    steps stand in for it.
 
     Returns:
       The metrics, by name, with the op that aggregates repeated values.
@@ -127,10 +131,6 @@ class EngineMetricsSnapshot:
         ),
         "rollout/avg_engine_step_duration_ms": (
             self.avg_engine_step_duration_ms,
-            np.mean,
-        ),
-        "rollout/kv_cache_usage_pct": (
-            self.kv_cache_usage_pct,
             np.mean,
         ),
         "rollout/prefix_cache_hit_rate_pct": (
