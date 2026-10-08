@@ -190,7 +190,6 @@ class VanillaRolloutTest(parameterized.TestCase):
         'rollout/avg_request_queue_time_s',
         'rollout/avg_request_e2e_latency_s',
         'rollout/max_request_e2e_latency_s',
-        'rollout/avg_request_generation_tokens',
         'rollout/last_batch_completion_time_s',
         'rollout/avg_batch_completion_time_s',
         'rollout/batch_generation_throughput_tok_per_s',
@@ -221,9 +220,9 @@ class VanillaRolloutTest(parameterized.TestCase):
     num_generated = sum(len(output.tokens[0]) for output in outputs)
     self.assertEqual(perf_metrics['rollout/completed_batches'][0], 1)
     self.assertEqual(perf_metrics['rollout/avg_batch_requests'][0], 2)
-    self.assertEqual(perf_metrics['rollout/avg_batch_prefill_tokens'][0], 5)
+    # The 5 prompt tokens over the batch's 2 s.
     self.assertEqual(
-        perf_metrics['rollout/avg_batch_generation_tokens'][0], num_generated
+        perf_metrics['rollout/batch_prefill_throughput_tok_per_s'][0], 2.5
     )
     self.assertEqual(
         perf_metrics['rollout/batch_generation_throughput_tok_per_s'][0],

@@ -179,7 +179,7 @@ class MetricsCollectorTest(absltest.TestCase):
     self.assertEqual(cum_snap.completed_batches, 2)
     self.assertAlmostEqual(cum_snap.avg_batch_completion_time_s, 1.5)
 
-  def test_request_token_counts_and_time_per_output_token(self):
+  def test_request_time_per_output_token_and_max_e2e_latency(self):
     collector = metrics_lib.MetricsCollector(log_stats_interval_s=0.0)
     # Decodes 4 tokens after its first in 0.4 s: 100 ms per output token.
     fast = _make_finished_request_state(
@@ -207,8 +207,6 @@ class MetricsCollectorTest(absltest.TestCase):
     snap = collector.snapshot()
 
     self.assertEqual(snap.completed_requests, 2)
-    self.assertAlmostEqual(snap.avg_request_prompt_tokens, 6.0)
-    self.assertAlmostEqual(snap.avg_request_generation_tokens, 3.0)
     self.assertAlmostEqual(snap.avg_request_time_per_output_token_ms, 100.0)
     self.assertAlmostEqual(snap.avg_request_e2e_latency_s, 1.05)
     self.assertAlmostEqual(snap.max_request_e2e_latency_s, 1.5)
@@ -241,8 +239,6 @@ class MetricsCollectorTest(absltest.TestCase):
     self.assertEqual(snap.completed_batches, 1)
     self.assertEqual(snap.num_timed_batches, 1)
     self.assertAlmostEqual(snap.avg_batch_requests, 2.0)
-    self.assertAlmostEqual(snap.avg_batch_prefill_tokens, 100.0)
-    self.assertAlmostEqual(snap.avg_batch_generation_tokens, 40.0)
     # Over the batch's 2 s of wall-clock time, not its 0.2 s of engine steps.
     self.assertAlmostEqual(snap.batch_prefill_throughput_tok_per_s, 50.0)
     self.assertAlmostEqual(snap.batch_generation_throughput_tok_per_s, 20.0)
@@ -277,9 +273,8 @@ class MetricsCollectorTest(absltest.TestCase):
 
     snap = collector.snapshot()
     self.assertEqual(snap.num_timed_batches, 2)
-    # Batch 0 counts 30 prefill and 40 generated tokens, batch 1 20 and 90.
-    self.assertAlmostEqual(snap.avg_batch_prefill_tokens, 25.0)
-    self.assertAlmostEqual(snap.avg_batch_generation_tokens, 65.0)
+    # Batch 0 counts 30 prefill and 40 generated tokens over 1 s, batch 1 20
+    # and 90 over 3 s.
     self.assertAlmostEqual(snap.batch_prefill_throughput_tok_per_s, 12.5)
     self.assertAlmostEqual(snap.batch_generation_throughput_tok_per_s, 32.5)
 
@@ -314,7 +309,7 @@ class MetricsCollectorTest(absltest.TestCase):
     self.assertEqual(snap.completed_batches, 2)
     self.assertEqual(snap.num_timed_batches, 1)
 
-  def test_batch_completion_logs_the_batch_work_and_throughputs(self):
+  def test_batch_completion_logs_the_batch_throughputs(self):
     collector = metrics_lib.MetricsCollector(log_stats_interval_s=0.0)
     collector.record_batch_start(7)
     collector.record_step(
@@ -331,8 +326,8 @@ class MetricsCollectorTest(absltest.TestCase):
     logged_msg = mock_info.call_args[0][0] % mock_info.call_args[0][1:]
     self.assertEqual(
         logged_msg,
-        'Engine 000: Rollout batch 7 finished in 2.00 s: 1 requests, 30'
-        ' prefill tokens (15.0 tokens/s), 10 generated tokens (5.0 tokens/s).',
+        'Engine 000: Rollout batch 7 finished in 2.00 s: 1 requests, Prefill'
+        ' throughput: 15.0 tokens/s, Generation throughput: 5.0 tokens/s.',
     )
 
   def test_step_gauges_are_averaged_over_engine_steps(self):
@@ -370,7 +365,9 @@ class MetricsCollectorTest(absltest.TestCase):
 
     self.assertEqual(perf_metrics['rollout/completed_requests'][0], 0.0)
     self.assertEqual(perf_metrics['rollout/completed_batches'][0], 0.0)
-    self.assertEqual(perf_metrics['rollout/generation_tokens'][0], 0.0)
+    self.assertEqual(
+        perf_metrics['rollout/avg_generation_throughput_tok_per_s'][0], 0.0
+    )
     for name in (
         'rollout/avg_request_e2e_latency_s',
         'rollout/avg_batch_completion_time_s',
@@ -454,8 +451,6 @@ class EngineAndSamplerMetricsIntegrationTest(absltest.TestCase):
     self.assertGreaterEqual(
         snap.max_request_e2e_latency_s, snap.avg_request_e2e_latency_s
     )
-    self.assertAlmostEqual(snap.avg_request_prompt_tokens, 4.0)
-    self.assertAlmostEqual(snap.avg_request_generation_tokens, 2.5)
     self.assertGreater(snap.avg_request_time_per_output_token_ms, 0.0)
     self.assertGreater(snap.avg_num_running_reqs, 0.0)
     self.assertGreater(snap.max_kv_cache_usage_pct, 0.0)
@@ -489,10 +484,17 @@ class EngineAndSamplerMetricsIntegrationTest(absltest.TestCase):
           self.assertGreater(snap.avg_batch_completion_time_s, 0.0)
           self.assertEqual(snap.num_timed_batches, 1)
           self.assertAlmostEqual(snap.avg_batch_requests, 2.0)
-          self.assertAlmostEqual(snap.avg_batch_prefill_tokens, 5.0)
-          self.assertAlmostEqual(snap.avg_batch_generation_tokens, 4.0)
-          self.assertGreater(snap.batch_prefill_throughput_tok_per_s, 0.0)
-          self.assertGreater(snap.batch_generation_throughput_tok_per_s, 0.0)
+          # 5 prefill and 4 generated tokens over the batch's wall-clock time.
+          self.assertAlmostEqual(
+              snap.batch_prefill_throughput_tok_per_s
+              * snap.last_batch_completion_time_s,
+              5.0,
+          )
+          self.assertAlmostEqual(
+              snap.batch_generation_throughput_tok_per_s
+              * snap.last_batch_completion_time_s,
+              4.0,
+          )
         finally:
           sampler.stop()
 

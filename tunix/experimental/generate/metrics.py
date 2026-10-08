@@ -58,8 +58,6 @@ class EngineMetricsSnapshot:
   # batches or eval rollouts in flight at the same time.
   num_timed_batches: int
   avg_batch_requests: float
-  avg_batch_prefill_tokens: float
-  avg_batch_generation_tokens: float
   batch_prefill_throughput_tok_per_s: float
   batch_generation_throughput_tok_per_s: float
 
@@ -83,8 +81,6 @@ class EngineMetricsSnapshot:
   # Decode time per output token after the first, over the requests that
   # generated more than one.
   avg_request_time_per_output_token_ms: float
-  avg_request_prompt_tokens: float
-  avg_request_generation_tokens: float
 
   # 6. Live vLLM-style system gauges. The request counts and KV cache usage are
   # read when the snapshot is taken.
@@ -141,14 +137,6 @@ class EngineMetricsSnapshot:
             float(self.num_preemptions),
             np.sum,
         ),
-        "rollout/prefill_tokens": (
-            float(self.prompt_tokens),
-            np.sum,
-        ),
-        "rollout/generation_tokens": (
-            float(self.generation_tokens),
-            np.sum,
-        ),
         "rollout/completed_requests": (
             float(self.completed_requests),
             np.sum,
@@ -200,14 +188,6 @@ class EngineMetricsSnapshot:
               self.avg_request_time_per_output_token_ms,
               np.mean,
           ),
-          "rollout/avg_request_prompt_tokens": (
-              self.avg_request_prompt_tokens,
-              np.mean,
-          ),
-          "rollout/avg_request_generation_tokens": (
-              self.avg_request_generation_tokens,
-              np.mean,
-          ),
       })
     if self.completed_batches > 0:
       metrics.update({
@@ -228,14 +208,6 @@ class EngineMetricsSnapshot:
           ),
           "rollout/batch_prefill_throughput_tok_per_s": (
               self.batch_prefill_throughput_tok_per_s,
-              np.mean,
-          ),
-          "rollout/avg_batch_generation_tokens": (
-              self.avg_batch_generation_tokens,
-              np.mean,
-          ),
-          "rollout/avg_batch_prefill_tokens": (
-              self.avg_batch_prefill_tokens,
               np.mean,
           ),
           "rollout/avg_batch_requests": (
@@ -273,8 +245,6 @@ class _MetricsWindow:
   request_decode_time_s: float = 0.0
   request_e2e_latency_s: float = 0.0
   max_request_e2e_latency_s: float = 0.0
-  request_prompt_tokens: int = 0
-  request_generation_tokens: int = 0
   num_tpot_requests: int = 0
   request_tpot_s: float = 0.0
 
@@ -299,12 +269,10 @@ class _MetricsWindow:
       setattr(self, field.name, field.default)
 
   def add_finished_request(self, req: request_lib.RequestState) -> None:
-    """Adds a finished request's lifecycle latencies and token counts."""
+    """Adds a finished request's lifecycle latencies."""
     num_generated = len(req.token_ids) - req.prompt_length
     self.completed_requests += 1
     self.request_queue_time_s += req.queue_time_s
-    self.request_prompt_tokens += req.prompt_length
-    self.request_generation_tokens += num_generated
     if req.finished_time is None:
       return
 
@@ -488,15 +456,13 @@ class MetricsCollector:
       return
     logging.info(
         "Engine %03d: Rollout batch%s finished in %.2f s: %d requests, "
-        "%d prefill tokens (%.1f tokens/s), "
-        "%d generated tokens (%.1f tokens/s).",
+        "Prefill throughput: %.1f tokens/s, "
+        "Generation throughput: %.1f tokens/s.",
         self._engine_index,
         batch_str,
         duration_s,
         work.completed_requests,
-        work.prompt_tokens,
         work.prompt_tokens / duration_s if duration_s > 0.0 else 0.0,
-        work.generation_tokens,
         work.generation_tokens / duration_s if duration_s > 0.0 else 0.0,
     )
 
@@ -543,8 +509,6 @@ class MetricsCollector:
     avg_prefill_s = window.request_prefill_time_s / n_req if n_req > 0 else 0.0
     avg_decode_s = window.request_decode_time_s / n_req if n_req > 0 else 0.0
     avg_e2e_s = window.request_e2e_latency_s / n_req if n_req > 0 else 0.0
-    avg_req_prompt = window.request_prompt_tokens / n_req if n_req > 0 else 0.0
-    avg_req_gen = window.request_generation_tokens / n_req if n_req > 0 else 0.0
     avg_tpot_ms = (
         (window.request_tpot_s / window.num_tpot_requests) * 1000.0
         if window.num_tpot_requests > 0
@@ -584,12 +548,6 @@ class MetricsCollector:
         avg_batch_requests=(
             window.batch_requests / n_timed if n_timed > 0 else 0.0
         ),
-        avg_batch_prefill_tokens=(
-            window.batch_prompt_tokens / n_timed if n_timed > 0 else 0.0
-        ),
-        avg_batch_generation_tokens=(
-            window.batch_generation_tokens / n_timed if n_timed > 0 else 0.0
-        ),
         batch_prefill_throughput_tok_per_s=(
             window.batch_prompt_tokens / timed_s if timed_s > 0.0 else 0.0
         ),
@@ -609,8 +567,6 @@ class MetricsCollector:
         avg_request_e2e_latency_s=avg_e2e_s,
         max_request_e2e_latency_s=window.max_request_e2e_latency_s,
         avg_request_time_per_output_token_ms=avg_tpot_ms,
-        avg_request_prompt_tokens=avg_req_prompt,
-        avg_request_generation_tokens=avg_req_gen,
         num_running_reqs=num_running_reqs,
         num_waiting_reqs=num_waiting_reqs,
         kv_cache_usage_pct=kv_cache_usage_fraction * 100.0,
