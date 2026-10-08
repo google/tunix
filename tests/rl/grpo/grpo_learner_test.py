@@ -918,12 +918,31 @@ class GRPOLearnerTest(parameterized.TestCase):
         rl_engine_unpacked.actor_trainer.train_steps,
     )
 
-  def test_sequence_packing_chains_updates_and_keeps_eval_unpacked(self):
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='one_iteration',
+          num_iterations=1,
+          eval_every_n_steps=2,
+          expected_eval_steps=[0, 2, 4, 6],
+      ),
+      # Steps 3 and 9 are the second optimizer step of a mini-batch. Steps 1
+      # and 7 get eval because eval data stays set for the rest of the
+      # mini-batch, as on main.
+      dict(
+          testcase_name='two_iterations',
+          num_iterations=2,
+          eval_every_n_steps=3,
+          expected_eval_steps=[0, 1, 3, 6, 7, 9],
+      ),
+  )
+  def test_sequence_packing_chains_updates_and_keeps_eval_unpacked(
+      self, num_iterations, eval_every_n_steps, expected_eval_steps
+  ):
     # beta=0 keeps packed train batches in numpy; eval batches are never packed
     # and must keep their padded device arrays. One sequence per packed row
-    # gives 4 chunks per mini-batch (2 prompts x 2 generations).
+    # gives 4 chunks per optimizer step (2 prompts x 2 generations).
     rl_engine, _, _ = setup({
-        'eval_every_n_steps': 2,
+        'eval_every_n_steps': eval_every_n_steps,
         'max_seq_token_per_tpu': 532,
         'max_segments_per_packed_row': 1,
         'return_logprobs': True,
@@ -932,7 +951,7 @@ class GRPOLearnerTest(parameterized.TestCase):
         rl_engine=rl_engine,
         reward_fns=reward_1,
         algo_config=grpo_lib.GRPOConfig(
-            num_generations=2, num_iterations=1, beta=0.0
+            num_generations=2, num_iterations=num_iterations, beta=0.0
         ),
     )
     trainer = rl_engine.actor_trainer
@@ -948,10 +967,12 @@ class GRPOLearnerTest(parameterized.TestCase):
     rl_engine.update_actor = counting_update_actor
 
     eval_datasets = []
+    eval_steps = []
     run_eval = trainer._run_eval
 
     def recording_run_eval(eval_ds, eval_step_fn):
       eval_datasets.append(eval_ds)
+      eval_steps.append(trainer.train_steps)
       return run_eval(eval_ds, eval_step_fn)
 
     trainer._run_eval = recording_run_eval
@@ -963,12 +984,11 @@ class GRPOLearnerTest(parameterized.TestCase):
 
     train_steps = trainer.train_steps
     self.assertGreater(train_steps, 0)
-    # One update_actor call per mini-batch, and it trains all 4 chunks.
+    # One update_actor call per optimizer step, and it trains all 4 chunks.
     self.assertEqual(steps_per_update_actor_call, [4] * train_steps)
-    # A mini-batch that starts at an eval point (train_steps % 2 == 0) gets
-    # eval data, and the trainer runs eval once at the start of the call. With
-    # one call per chunk it ran once per chunk, on unchanged weights.
-    self.assertLen(eval_datasets, len(range(0, train_steps, 2)))
+    # Every eval point runs, once per step. With one call per chunk eval ran
+    # once per chunk, on unchanged weights.
+    self.assertEqual(eval_steps, expected_eval_steps)
     # Eval data is unchanged: the first eval micro-batch, padded, on device.
     for eval_ds in eval_datasets:
       [eval_example] = eval_ds

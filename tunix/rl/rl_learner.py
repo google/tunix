@@ -51,6 +51,30 @@ MetricFn = Callable[..., rl_engine_lib.MetricsT]
 TConfig = TypeVar("TConfig", bound=algo_config_lib.AlgorithmConfig)
 
 
+def _through_update_step(
+    first: list[common.TrainExample],
+    batches: Iterator[list[common.TrainExample]],
+) -> Iterator[common.TrainExample]:
+  """Yields packed chunks through the last chunk of the current optimizer step.
+
+  Args:
+    first: The first item of the step (a list of packed chunks).
+    batches: The remaining items. The ones after the step stay in `batches`.
+
+  Yields:
+    The packed chunks of one optimizer step.
+  """
+  batch = first
+  while True:
+    yield from batch
+    # On a mesh the chunks are numpy, so this does not wait for the device.
+    if any(np.asarray(chunk.is_update_step).any() for chunk in batch):
+      return
+    batch = next(batches, None)
+    if batch is None:
+      return
+
+
 class RLLearner(abc.ABC, Generic[TConfig]):
   """Base class that should be extended by specific RL algorithms."""
 
@@ -837,7 +861,8 @@ class RLLearner(abc.ABC, Generic[TConfig]):
 
         yield curr_train_ds
 
-    # With packing, the remaining packed chunks go to one `update_actor` call.
+    # With packing, the packed chunks of each optimizer step go to one
+    # `update_actor` call, so the eval check below still runs before each step.
     # The trainer then dispatches each train step while the previous one still
     # runs, instead of waiting for the device at the end of a call per chunk.
     # PPO is excluded: its critic update needs the same chunks again. The
@@ -870,9 +895,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
           )
           curr_eval_ds = eval_data_queue.get(block=True)
         if chain_updates:
-          curr_train_ds = itertools.chain(
-              curr_train_ds, itertools.chain.from_iterable(batches)
-          )
+          curr_train_ds = _through_update_step(curr_train_ds, batches)
         self.rl_engine.update_actor(
             curr_train_ds,
             curr_eval_ds,
