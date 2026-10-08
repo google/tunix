@@ -3,7 +3,6 @@
 import collections
 from collections.abc import Callable, Mapping, Sequence
 import datetime
-import threading
 from typing import Any, ClassVar, Final, TypeVar
 
 from absl import logging
@@ -27,15 +26,6 @@ MetadataT = TypeVar("MetadataT", bound=trajectory_lib.TrajectoryMetadata)
 # `run_gsm8k_dist_grpo.py`), one rollout step runs 128 * 8 = 1,024 trajectories;
 # 4,096 provides 4x headroom across overlapping steps (~4.5 MB RAM).
 _MAX_CACHED_TRAJECTORIES: Final[int] = 4_096
-
-# Process-local lock serializing concurrent schema initialization across threads
-# within a single process (e.g. shared SQLite StaticPool engines).
-_SCHEMA_INIT_LOCK: Final[threading.Lock] = threading.Lock()
-
-# Deterministic 64-bit signed integer key for PostgreSQL `pg_advisory_xact_lock`
-# during cold-start schema DDL initialization (derived from SHA-256 of
-# `"TRAJECTORY_STORE"`).
-_POSTGRES_SCHEMA_INIT_LOCK_ID: Final[int] = 0x568C418D_F1971EA0
 
 
 def _to_utc_timestamp(dt: datetime.datetime | None) -> datetime.datetime:
@@ -408,7 +398,8 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
 
   Architectural Separation of Responsibilities:
     `SqlTrajectoryStore` acts as a lightweight frontend responsible for:
-    1. Schema initialization (`_initialize_schema`) and run scoping.
+    1. Delegating schema initialization to `db_engine.initialize_schema` and
+       scoping queries by `run_id`.
     2. Synchronous frontend input validation on the calling thread.
     3. Forwarding step write tasks, metadata updates, and flush barriers to
        `_AsyncSqlWriter`.
@@ -445,7 +436,7 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
         (e.g. from a secret manager) before passing it. A PostgreSQL URL may
         omit the password; libpq then reads `PGPASSWORD` or `~/.pgpass`.
       auto_init: If True, automatically creates database tables and indexes on
-        startup via `_initialize_schema`.
+        startup via `db_engine.initialize_schema`.
       metadata_cls: The TrajectoryMetadata subclass to read stored metadata back
         as; the type checker infers `MetadataT` from it. See
         `store.TrajectoryStore`.
@@ -475,7 +466,7 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
       raise
     if auto_init:
       try:
-        self._initialize_schema()
+        db_engine.initialize_schema(self._engine)
       except Exception:
         # Also closes the writer, so it is not left in the interpreter-exit
         # drain with a disposed engine.
@@ -528,52 +519,6 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
     config = self.to_config()
     config["db_url"] = db_engine.redact_url(self._db_url)
     return config
-
-  def _has_all_schema_tables(self, conn: sa.Connection) -> bool:
-    """Returns True if all Trajectory Store tables exist in the database."""
-    existing_tables = set(sa.inspect(conn).get_table_names())
-    return schema.METADATA.tables.keys() <= existing_tables
-
-  def _acquire_schema_init_lock(self, conn: sa.Connection) -> None:
-    """Acquires a dialect-specific transaction lock before running schema DDL."""
-    dialect_name = self._engine.dialect.name
-    if dialect_name == db_engine.Dialect.POSTGRESQL:
-      conn.execute(
-          sa.select(
-              sa.func.pg_advisory_xact_lock(_POSTGRES_SCHEMA_INIT_LOCK_ID)
-          )
-      )
-    elif dialect_name == db_engine.Dialect.SQLITE:
-      conn.exec_driver_sql("BEGIN IMMEDIATE")
-
-  def _initialize_schema(self) -> None:
-    """Creates database tables and indexes safely under multi-worker concurrency.
-
-    Implements a two-phase initialization protocol to prevent concurrent DDL
-    race conditions when multiple distributed rollout workers start
-    simultaneously:
-
-    1. Read-Only Fast Path: Checks whether all required tables (`runs`,
-       `trajectories`, `steps`) already exist. On warm databases, returns
-       immediately without acquiring write locks or opening a write transaction.
-    2. Serialized Transactional DDL: On cold databases, acquires a dialect-level
-       transaction lock (`pg_advisory_xact_lock` on PostgreSQL or
-       `BEGIN IMMEDIATE` on SQLite) inside `engine.begin()`, re-checks table
-       existence in case another worker initialized the schema while waiting on
-       the lock, and delegates table creation to
-       `schema.METADATA.create_all(conn, checkfirst=True)` before releasing the
-       lock on commit.
-    """
-    with _SCHEMA_INIT_LOCK:
-      with self._engine.connect() as conn:
-        if self._has_all_schema_tables(conn):
-          return
-
-      with self._engine.begin() as conn:
-        self._acquire_schema_init_lock(conn)
-        if self._has_all_schema_tables(conn):
-          return
-        schema.METADATA.create_all(conn, checkfirst=True)
 
   @property
   def engine(self) -> sa.Engine:
