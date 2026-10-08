@@ -354,6 +354,32 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " mesh_tp)."
       ),
   )
+  parser.add_argument(
+      "--run_id",
+      type=str,
+      default=os.getenv("RUN_ID", ""),
+      help="Run identifier shared between orchestrator and rollout workers.",
+  )
+  parser.add_argument(
+      "--enable_trajectory_store",
+      type=_str2bool,
+      default=False,
+      nargs="?",
+      const=True,
+      help="Whether to enable TrajectoryStore.",
+  )
+  parser.add_argument(
+      "--trajectory_store_backend",
+      type=str,
+      default="file",
+      help="TrajectoryStore backend name (e.g. 'file').",
+  )
+  parser.add_argument(
+      "--trajectory_store_dir",
+      type=str,
+      default="",
+      help="Root directory for the file-backed TrajectoryStore.",
+  )
   args = parser.parse_args(argv)
   _get_tensor_parallel_size(args)
   return args
@@ -377,6 +403,25 @@ def _agent_config(args: argparse.Namespace) -> dict[str, Any]:
     raise ValueError("--agent_config_json must be a valid JSON object.") from exc
   if not isinstance(config, dict):
     raise ValueError("--agent_config_json must decode to a JSON object.")
+  return config
+
+
+def _trajectory_store_config(
+    args: argparse.Namespace,
+) -> dict[str, Any] | None:
+  """Builds TrajectoryStore config dict from parsed CLI flags."""
+  if not getattr(args, "enable_trajectory_store", False):
+    return None
+  config: dict[str, Any] = {
+      "enabled": True,
+      "backend": getattr(args, "trajectory_store_backend", "file") or "file",
+  }
+  root_dir = getattr(args, "trajectory_store_dir", "")
+  if root_dir:
+    config["root_dir"] = root_dir
+  run_id = getattr(args, "run_id", "")
+  if run_id:
+    config["run_id"] = run_id
   return config
 
 
@@ -436,6 +481,7 @@ def _rollout_config_kwargs(
       "partial_rollout": bool(
           getattr(args, "in_flight_weight_updates", False)
       ),
+      "trajectory_store_config": _trajectory_store_config(args),
   }
 
 
@@ -845,6 +891,11 @@ def main(argv: list[str], context: Any = None) -> None:
             "service_type": "rollout",
             "service_port": args.port,
             "worker_id": args.worker_id,
+            "trajectory_store_config": (
+                worker_service.trajectory_store.to_config()
+                if worker_service.trajectory_store is not None
+                else None
+            ),
         })
     )
     logging.info("Rollout worker is registered.")

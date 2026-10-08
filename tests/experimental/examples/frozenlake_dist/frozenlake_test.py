@@ -271,6 +271,11 @@ class FrozenLakeDistTest(absltest.TestCase):
     self.assertIn('--rollout_mesh_tp="$ROLLOUT_TP"', launcher)
     self.assertIn("GRID_SIZE_RANGE=${GRID_SIZE_RANGE:-2 9}", launcher)
     self.assertIn("--grid_size_range $GRID_SIZE_RANGE", launcher)
+    self.assertIn("RUN_ID=", launcher)
+    self.assertIn("--enable_trajectory_store=", launcher)
+    self.assertIn("--trajectory_store_backend=", launcher)
+    self.assertIn("--trajectory_store_dir=", launcher)
+    self.assertIn("--run_id=", launcher)
 
   def test_gemma4_launcher_matches_reference_runtime_limits(self):
     launcher = (

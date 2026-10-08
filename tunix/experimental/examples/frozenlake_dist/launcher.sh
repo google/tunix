@@ -97,6 +97,10 @@ LOG_DIR=${LOG_DIR:-}
 TRAJECTORY_LOG_DIR=${TRAJECTORY_LOG_DIR:-}
 MODEL_DTYPE=${MODEL_DTYPE:-float32}
 MODEL_LOAD_DTYPE=${MODEL_LOAD_DTYPE:-$MODEL_DTYPE}
+RUN_ID=${RUN_ID:-run_$(date -u +%Y%m%d_%H%M%S)_$$}
+TRAJECTORY_STORE_ENABLED=${TRAJECTORY_STORE_ENABLED:-false}
+TRAJECTORY_STORE_BACKEND=${TRAJECTORY_STORE_BACKEND:-file}
+TRAJECTORY_STORE_DIR=${TRAJECTORY_STORE_DIR:-"${LOG_DIR:-${LOG_ROOT}}/trajectory_store"}
 DEBUG=${DEBUG:-0}
 GRID_SIZE_RANGE=${GRID_SIZE_RANGE:-2 9}
 
@@ -316,6 +320,12 @@ TRAINER_PID=$!
     cmd+=(--vllm_init_with_random_weights)
   fi
   is_true "$DEBUG" && cmd+=(--debug)
+  cmd+=(
+    --enable_trajectory_store="$TRAJECTORY_STORE_ENABLED"
+    --trajectory_store_backend="$TRAJECTORY_STORE_BACKEND"
+    --trajectory_store_dir="$TRAJECTORY_STORE_DIR"
+    --run_id="$RUN_ID"
+  )
   export JAX_PLATFORMS=tpu,cpu
   export SKIP_JAX_PRECOMPILE=1
   export TPU_VISIBLE_DEVICES="$ROLLOUT_TPU_CHIPS"
@@ -370,6 +380,10 @@ cmd=(
   --trainer_fsdp="$TRAINER_FSDP"
   --grid_size_range $GRID_SIZE_RANGE
   --stop_workers_on_exit
+  --enable_trajectory_store="$TRAJECTORY_STORE_ENABLED"
+  --trajectory_store_backend="$TRAJECTORY_STORE_BACKEND"
+  --trajectory_store_dir="$TRAJECTORY_STORE_DIR"
+  --run_id="$RUN_ID"
 )
 if [[ -n "$MAX_SEQ_TOKEN_PER_TPU" && "$MAX_SEQ_TOKEN_PER_TPU" != "0" ]]; then
   cmd+=(--max_seq_token_per_tpu="$MAX_SEQ_TOKEN_PER_TPU")

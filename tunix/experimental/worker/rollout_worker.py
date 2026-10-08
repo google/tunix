@@ -156,6 +156,11 @@ class RolloutWorker(abstract_worker.Worker):
         resources={
             "sampler": type(self.sampler).__name__,
             "policy_version": self._policy_version,
+            "trajectory_store_config": (
+                self._trajectory_store.to_config()
+                if self._trajectory_store is not None
+                else None
+            ),
         },
     )
 
@@ -175,12 +180,21 @@ class RolloutWorker(abstract_worker.Worker):
 
   def initialize(self) -> datatypes.Response:
     with self._init_lock:
+      trajectory_store_config = (
+          self._trajectory_store.to_config()
+          if self._trajectory_store is not None
+          else None
+      )
       if self.state == WorkerState.READY:
-        return self._response(initialized=True, ready=True)
+        return self._response(
+            initialized=True,
+            ready=True,
+            trajectory_store_config=trajectory_store_config,
+        )
       self.state = WorkerState.INITIALIZING
       try:
         self.sampler.initialize()
-        return self._response()
+        return self._response(trajectory_store_config=trajectory_store_config)
       except Exception:
         self.state = WorkerState.ERROR
         raise
