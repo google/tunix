@@ -482,6 +482,7 @@ start_orchestrator() {
         ${LOG_DIR:+--log_dir=\"${LOG_DIR}\"} \
         ${TRAJECTORY_LOG_DIR:+--trajectory_log_dir=\"${TRAJECTORY_LOG_DIR}\"} \
         ${TRAJECTORY_STORE_ROOT_DIR:+--trajectory_store_root_dir=\"${TRAJECTORY_STORE_ROOT_DIR}\"} \
+        ${TRAJECTORY_STORE_DB_URL:+--trajectory_store_db_url=\"${TRAJECTORY_STORE_DB_URL}\"} \
         --flush_every_n_steps=${FLUSH_EVERY_N_STEPS} \
         --wandb_project=\"${WANDB_PROJECT}\" \
         --wandb_run_name=\"${WANDB_RUN_NAME}\" \

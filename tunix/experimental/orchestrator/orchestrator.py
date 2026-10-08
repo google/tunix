@@ -126,7 +126,7 @@ class ClusterOrchestrator:
       self.trajectory_store_config = dict(trajectory_store_config)
       if (
           self.trajectory_store_config.get("enabled", False)
-          and self.trajectory_store_config.get("backend") == "file"
+          and self.trajectory_store_config.get("backend") in ("file", "sql")
           and not self.trajectory_store_config.get("run_id")
       ):
         self.trajectory_store_config["run_id"] = self.run_id
@@ -139,7 +139,7 @@ class ClusterOrchestrator:
       # grep away.
       logging.info(
           "[trajectory-store] orchestrator built %s",
-          self.trajectory_store_config,
+          self.trajectory_store.to_redacted_config(),
       )
 
   def __enter__(self) -> "ClusterOrchestrator":
