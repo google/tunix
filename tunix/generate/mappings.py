@@ -65,6 +65,10 @@ class BackendMappingMixin:
   def preprocess_src_state(cls, backend: str | None = None):
     return cls.mapping_for(backend).get('preprocess_src_state')
 
+  @classmethod
+  def require_complete_mapping(cls, backend: str | None = None):
+    return cls.mapping_for(backend).get('require_complete_mapping', False)
+
 
 @dataclass
 class MappingConfig:
@@ -82,6 +86,7 @@ class MappingConfig:
   to_hf_transpose_keys: Optional[Dict[str, Tuple[int, ...]]] = None
   lora_to_hf_transpose_keys: Optional[Dict[str, Tuple[int, ...]]] = None
   preprocess_src_state: Optional[Callable[..., Any]] = None
+  require_complete_mapping: bool = False
 
   @classmethod
   def build(
@@ -108,6 +113,7 @@ class MappingConfig:
         'to_hf_transpose_keys',
         'lora_to_hf_transpose_keys',
         'preprocess_src_state',
+        'require_complete_mapping',
     )
 
     values: Dict[str, Any] = {}
@@ -136,6 +142,9 @@ class MappingConfig:
         to_hf_transpose_keys=resolved.get('to_hf_transpose_keys'),
         lora_to_hf_transpose_keys=resolved.get('lora_to_hf_transpose_keys'),
         preprocess_src_state=resolved.get('preprocess_src_state'),
+        require_complete_mapping=bool(
+            resolved.get('require_complete_mapping', False)
+        ),
     )
 
   @classmethod
@@ -165,6 +174,7 @@ class MappingConfig:
         to_hf_transpose_keys=maybe_call('to_hf_transpose_keys'),
         lora_to_hf_transpose_keys=maybe_call('lora_to_hf_transpose_keys'),
         preprocess_src_state=maybe_call('preprocess_src_state'),
+        require_complete_mapping=bool(maybe_call('require_complete_mapping')),
     )
 
     for key, value in overrides.items():
