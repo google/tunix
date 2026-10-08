@@ -15,13 +15,15 @@
 """Trajectory Collector Engine wrapping TrajectoryCollectEngine with pause/resume/cancel control."""
 
 import asyncio
-from typing import Any, Callable, Collection, List, Mapping, Sequence
+from typing import Any, Callable, Collection, List, Mapping, Optional, Sequence
 import zlib
 from absl import logging
 import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.experimental.rollout import sampler as sampler_lib
 from tunix.experimental.rollout import vanilla_sampler_adapter
+from tunix.experimental.trajectory import converter as converter_lib
+from tunix.experimental.trajectory import store
 from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.trajectory import trajectory_collect_engine as rl_collect_engine
 from tunix.rl.rollout import base_rollout
@@ -111,6 +113,7 @@ class TrajectoryCollectorEngine:
       eos_ids: Collection[int] | None = None,
       partial_rollout: bool = False,
       policy_version_fn: Callable[[], int] | None = None,
+      trajectory_store: Optional[store.TrajectoryWriter] = None,
   ):
     if (
         sampler is None
@@ -130,6 +133,7 @@ class TrajectoryCollectorEngine:
     self.agent = agent
     self.tokenizer = tokenizer
     self.chat_parser = chat_parser
+    self.trajectory_store = trajectory_store
     self.is_paused: bool = False
     self.is_cancelled: bool = False
     self.is_done: bool = False
@@ -139,6 +143,9 @@ class TrajectoryCollectorEngine:
     self._unpaused.set()
     self._episode_cache_salt: str | None = None
     self._turn_policy_versions: list[int] = []
+    self._inner_engine: Optional[rl_collect_engine.TrajectoryCollectEngine] = (
+        None
+    )
     self.max_response_length = request.max_response_length
     self.exact_token_continuity = request.exact_token_continuity
     # The stop set the sampler was configured with, which is what decides
@@ -163,6 +170,21 @@ class TrajectoryCollectorEngine:
           "overlong_filter must be a boolean, got"
           f" {type(overlong_filter).__name__}: {overlong_filter!r}."
       )
+    self.metadata = None
+    if self.trajectory_store is not None:
+      try:
+        self.metadata = converter_lib.create_trajectory_metadata(
+            self.traj_id,
+            self.request,
+            self.agent,
+            target_policy_versions=[self.request.target_policy_version],
+        )
+      except Exception:  # pylint: disable=broad-exception-caught
+        logging.warning(
+            "Failed to create trajectory metadata for %s.",
+            self.traj_id,
+            exc_info=True,
+        )
 
   async def run_episode(self) -> agent_types.TrajectoryItem:
     """Executes multi-turn agentic rollout episode and returns TrajectoryItem."""
@@ -228,6 +250,11 @@ class TrajectoryCollectorEngine:
           else req_policy_version
       )
       self._turn_policy_versions.append(turn_policy_version)
+      if (
+          self._inner_engine is not None
+          and turn_policy_version != req_policy_version
+      ):
+        self._inner_engine.policy_version = turn_policy_version
 
       cache_salt = generation_kwargs.pop("cache_salt", None)
       if self.partial_rollout:
@@ -304,7 +331,11 @@ class TrajectoryCollectorEngine:
         timeout=self.episode_timeout,
         overlong_filter=self.overlong_filter,
         exact_token_continuity=self.exact_token_continuity,
+        policy_version=self.request.target_policy_version,
+        trajectory_store=self.trajectory_store,
+        metadata=self.metadata,
     )
+    self._inner_engine = inner_engine
     rl_traj = await inner_engine.collect(mode="Token")
     if isinstance(rl_traj, dict) and self._turn_policy_versions:
       rl_traj["policy_version"] = int(self._turn_policy_versions[0])
@@ -460,8 +491,17 @@ class TrajectoryCollectorEngine:
     self._unpaused.set()
 
   def cancel(self) -> None:
+    """Marks the episode as cancelled and persists CANCELLED metadata to the store."""
+    if self.is_done:
+      return
     self.is_cancelled = True
     self.is_done = True
+    if self.agent is not None:
+      self.agent.trajectory.status = agent_types.TrajectoryStatus.CANCELLED
+    if self._inner_engine is not None:
+      self._inner_engine.record_metadata()
+      self._inner_engine.trajectory_store = None
+    self.trajectory_store = None
 
   def get_accumulated_token_ids(self) -> List[int]:
     """Returns token IDs of historical turns for Raiden KV-cache transfer."""

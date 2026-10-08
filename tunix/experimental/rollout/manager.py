@@ -23,6 +23,7 @@ from tunix.experimental.rl.agentic import registry
 from tunix.experimental.rollout import collector as collector_lib
 from tunix.experimental.rollout import sampler as sampler_lib
 from tunix.experimental.rollout import vanilla_sampler_adapter
+from tunix.experimental.trajectory import store
 from tunix.experimental.trajectory import trajectory as trajectory_lib
 from tunix.experimental.weight_sync import weight_sync
 from tunix.experimental.worker import traffic_controller as traffic_controller_lib
@@ -51,6 +52,7 @@ class RolloutManager:
       tokenizer: Any = None,
       chat_parser: Any = None,
       drain_timeout_s: float = 300.0,
+      trajectory_store: Optional[store.TrajectoryWriter] = None,
   ):
     """Initializes the RolloutManager.
 
@@ -64,6 +66,8 @@ class RolloutManager:
       chat_parser: Chat parser for conversation templating.
       drain_timeout_s: How long pre_weight_sync waits for in-flight trajectories
         before pausing the stragglers, roughly one worst-case trajectory.
+      trajectory_store: Optional TrajectoryWriter for persisting rollout steps
+        and episode metadata.
     """
     self.config = config
     self._partial_rollout: bool = (
@@ -151,6 +155,7 @@ class RolloutManager:
     self.max_concurrency = max_concurrency
     self.tokenizer = tokenizer
     self.chat_parser = chat_parser
+    self.trajectory_store = trajectory_store
     if self.tokenizer is None or self.chat_parser is None:
       raise ValueError(
           "RolloutManager requires valid tokenizer and chat_parser arguments"
@@ -235,6 +240,9 @@ class RolloutManager:
     else:
       agent = None
 
+    collector_kwargs = {}
+    if self.trajectory_store is not None:
+      collector_kwargs["trajectory_store"] = self.trajectory_store
     collector = collector_lib.TrajectoryCollectorEngine(
         traj_id=traj_id,
         request=request,
@@ -246,11 +254,17 @@ class RolloutManager:
         eos_ids=self.eos_ids,
         partial_rollout=self._partial_rollout,
         policy_version_fn=lambda: self._policy_version,
+        **collector_kwargs,
     )
 
     self._active_collectors[traj_id] = collector
     task = asyncio.create_task(
         self._run_and_enqueue(collector, request, _resolve)
+    )
+    task.add_done_callback(
+        lambda t: future.cancel()
+        if t.cancelled() and not future.done()
+        else None
     )
     self._active_tasks[traj_id] = task
     self._traffic.track(task)
