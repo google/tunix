@@ -883,9 +883,10 @@ class PrefixMatchingTest(parameterized.TestCase):
   @parameterized.parameters(
       (None, 0),
       (4, 2),
-      (5, 3),
+      (5, 2),
       (6, 3),
       (8, 3),
+      (1, 1),
   )
   def test_num_pages_in_window(
       self, window_size: int | None, expected_num_pages: int

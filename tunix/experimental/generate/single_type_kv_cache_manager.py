@@ -156,7 +156,7 @@ class SingleTypeKVCacheManager:
     if self._window_size is None:
       return 0
     # Add 1 to account for the window sliding and leaking into the next page.
-    return utils.cdiv(self._window_size, self._page_size) + 1
+    return utils.cdiv(self._window_size - 1, self._page_size) + 1
 
   def _touch_page(self, page: Page | None) -> None:
     """Increments a page's reference count."""

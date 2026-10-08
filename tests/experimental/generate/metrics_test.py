@@ -62,7 +62,7 @@ def _make_finished_request_state(
 
 class MetricsCollectorTest(absltest.TestCase):
 
-  def test_throughputs_exclude_idle_time_and_decode_only_steps_for_prefill(self):
+  def test_step_schedule_preemption_and_prefix_cache_stats(self):
     collector = metrics_lib.MetricsCollector(log_stats_interval_s=0.0)
 
     # Step 1: Prefill 100 prompt tokens, generate 2 tokens in 0.2s (50ms sched).
@@ -76,7 +76,6 @@ class MetricsCollectorTest(absltest.TestCase):
         prefix_cache_hits=3,
     )
 
-    # Simulate a 5-second weight sync / idle pause outside record_step.
     # Step 2: Decode-only step (0 prompt tokens), generate 18 tokens in 0.3s.
     collector.record_schedule(0.01, num_preemptions=0)
     collector.record_step(
@@ -96,12 +95,8 @@ class MetricsCollectorTest(absltest.TestCase):
 
     self.assertEqual(snap.num_active_steps, 2)
     self.assertEqual(snap.num_prefill_steps, 1)
-    # 100 prompt tokens / 0.50s active time = 200 tok/s
-    self.assertAlmostEqual(snap.avg_prompt_throughput_tok_per_s, 200.0)
-    # 100 prompt tokens / 0.20s prefill-only step time = 500 tok/s
-    self.assertAlmostEqual(snap.avg_prefill_throughput_tok_per_s, 500.0)
-    # 20 generation tokens / 0.50s active time = 40 tok/s
-    self.assertAlmostEqual(snap.avg_generation_throughput_tok_per_s, 40.0)
+    self.assertEqual(snap.prompt_tokens, 100)
+    self.assertEqual(snap.generation_tokens, 20)
     # Schedule durations: (50ms + 10ms) / 2 = 30ms
     self.assertAlmostEqual(snap.avg_schedule_duration_ms, 30.0)
     # Engine step durations: (200ms + 300ms) / 2 = 250ms
@@ -165,9 +160,6 @@ class MetricsCollectorTest(absltest.TestCase):
     self.assertEqual(
         perf_metrics['rollout/avg_batch_completion_time_s'][0], 1.5
     )
-    self.assertEqual(
-        perf_metrics['rollout/avg_generation_throughput_tok_per_s'][0], 80.0
-    )
 
     # Flushing again with no new batches resets the step window while keeping
     # cumulative totals intact.
@@ -211,7 +203,7 @@ class MetricsCollectorTest(absltest.TestCase):
     self.assertAlmostEqual(snap.avg_request_e2e_latency_s, 1.05)
     self.assertAlmostEqual(snap.max_request_e2e_latency_s, 1.5)
 
-  def test_batch_throughputs_are_over_wall_clock_time_since_batch_start(self):
+  def test_throughputs_are_over_wall_clock_time_since_batch_start(self):
     collector = metrics_lib.MetricsCollector(log_stats_interval_s=0.0)
     # Work the engine did before the batch started is not the batch's.
     collector.record_step(
@@ -240,15 +232,15 @@ class MetricsCollectorTest(absltest.TestCase):
     self.assertEqual(snap.num_timed_batches, 1)
     self.assertAlmostEqual(snap.avg_batch_requests, 2.0)
     # Over the batch's 2 s of wall-clock time, not its 0.2 s of engine steps.
-    self.assertAlmostEqual(snap.batch_prefill_throughput_tok_per_s, 50.0)
-    self.assertAlmostEqual(snap.batch_generation_throughput_tok_per_s, 20.0)
+    self.assertAlmostEqual(snap.avg_prefill_throughput_tok_per_s, 50.0)
+    self.assertAlmostEqual(snap.avg_generation_throughput_tok_per_s, 20.0)
 
     perf_metrics = snap.to_perf_metrics()
     self.assertEqual(
-        perf_metrics['rollout/batch_prefill_throughput_tok_per_s'][0], 50.0
+        perf_metrics['rollout/avg_prefill_throughput_tok_per_s'][0], 50.0
     )
     self.assertEqual(
-        perf_metrics['rollout/batch_generation_throughput_tok_per_s'][0], 20.0
+        perf_metrics['rollout/avg_generation_throughput_tok_per_s'][0], 20.0
     )
     self.assertEqual(perf_metrics['rollout/avg_batch_requests'][0], 2.0)
 
@@ -275,8 +267,8 @@ class MetricsCollectorTest(absltest.TestCase):
     self.assertEqual(snap.num_timed_batches, 2)
     # Batch 0 counts 30 prefill and 40 generated tokens over 1 s, batch 1 20
     # and 90 over 3 s.
-    self.assertAlmostEqual(snap.batch_prefill_throughput_tok_per_s, 12.5)
-    self.assertAlmostEqual(snap.batch_generation_throughput_tok_per_s, 32.5)
+    self.assertAlmostEqual(snap.avg_prefill_throughput_tok_per_s, 12.5)
+    self.assertAlmostEqual(snap.avg_generation_throughput_tok_per_s, 32.5)
 
   def test_batch_completion_without_a_start_only_records_its_duration(self):
     collector = metrics_lib.MetricsCollector(log_stats_interval_s=0.0)
@@ -293,9 +285,7 @@ class MetricsCollectorTest(absltest.TestCase):
     self.assertEqual(snap.num_timed_batches, 0)
     perf_metrics = snap.to_perf_metrics()
     self.assertEqual(perf_metrics['rollout/avg_batch_completion_time_s'][0], 1.5)
-    self.assertNotIn(
-        'rollout/batch_generation_throughput_tok_per_s', perf_metrics
-    )
+    self.assertNotIn('rollout/avg_generation_throughput_tok_per_s', perf_metrics)
 
   def test_drops_the_oldest_batch_start_beyond_the_pending_limit(self):
     collector = metrics_lib.MetricsCollector(log_stats_interval_s=0.0)
@@ -365,13 +355,11 @@ class MetricsCollectorTest(absltest.TestCase):
 
     self.assertEqual(perf_metrics['rollout/completed_requests'][0], 0.0)
     self.assertEqual(perf_metrics['rollout/completed_batches'][0], 0.0)
-    self.assertEqual(
-        perf_metrics['rollout/avg_generation_throughput_tok_per_s'][0], 0.0
-    )
     for name in (
         'rollout/avg_request_e2e_latency_s',
         'rollout/avg_batch_completion_time_s',
-        'rollout/batch_generation_throughput_tok_per_s',
+        'rollout/avg_generation_throughput_tok_per_s',
+        'rollout/avg_prefill_throughput_tok_per_s',
     ):
       self.assertNotIn(name, perf_metrics)
 
@@ -380,12 +368,14 @@ class MetricsCollectorTest(absltest.TestCase):
       collector = metrics_lib.MetricsCollector(log_stats_interval_s=10.0)
 
     collector.record_schedule(0.005)
-    collector.record_step(
-        step_duration_s=0.10,
-        num_prompt_tokens=50,
-        num_generation_tokens=10,
-        finished_requests=(),
-    )
+    # Ends at t=101, so started at t=100.5.
+    with mock.patch.object(metrics_lib.time, 'perf_counter', return_value=101.0):
+      collector.record_step(
+          step_duration_s=0.5,
+          num_prompt_tokens=50,
+          num_generation_tokens=10,
+          finished_requests=(),
+      )
     collector.record_batch_completion(0.45)
 
     with mock.patch.object(metrics_lib.logging, 'info') as mock_info:
@@ -415,9 +405,10 @@ class MetricsCollectorTest(absltest.TestCase):
         )
       mock_info.assert_called_once()
       logged_msg = mock_info.call_args[0][0] % mock_info.call_args[0][1:]
-      self.assertIn('Avg prompt throughput: 500.0 tokens/s', logged_msg)
-      self.assertIn('Avg prefill throughput: 500.0 tokens/s', logged_msg)
-      self.assertIn('Avg generation throughput: 100.0 tokens/s', logged_msg)
+      # Over the 10 s since the step started: not just the step's 0.5 s, nor
+      # the idle time before it.
+      self.assertIn('Avg prefill throughput: 5.0 tokens/s', logged_msg)
+      self.assertIn('Avg generation throughput: 1.0 tokens/s', logged_msg)
       self.assertIn('Running: 2 reqs', logged_msg)
       self.assertIn('Waiting: 1 reqs', logged_msg)
       self.assertIn('KV cache usage: 50.0%', logged_msg)
@@ -486,12 +477,12 @@ class EngineAndSamplerMetricsIntegrationTest(absltest.TestCase):
           self.assertAlmostEqual(snap.avg_batch_requests, 2.0)
           # 5 prefill and 4 generated tokens over the batch's wall-clock time.
           self.assertAlmostEqual(
-              snap.batch_prefill_throughput_tok_per_s
+              snap.avg_prefill_throughput_tok_per_s
               * snap.last_batch_completion_time_s,
               5.0,
           )
           self.assertAlmostEqual(
-              snap.batch_generation_throughput_tok_per_s
+              snap.avg_generation_throughput_tok_per_s
               * snap.last_batch_completion_time_s,
               4.0,
           )

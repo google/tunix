@@ -53,24 +53,21 @@ class EngineMetricsSnapshot:
   avg_batch_completion_time_s: float
 
   # 2. Rollout batch work over wall-clock time, from each batch's start to its
-  # completion. Only batches whose start was recorded count. A batch counts all
-  # the engine's work while it is in flight, including the work of any other
-  # batches or eval rollouts in flight at the same time.
+  # completion. The throughputs divide the prefill and generated tokens by that
+  # time, both summed over the batches. Only batches whose start was recorded
+  # count. A batch counts all the engine's work while it is in flight,
+  # including the work of any other batches or eval rollouts in flight at the
+  # same time.
   num_timed_batches: int
   avg_batch_requests: float
-  batch_prefill_throughput_tok_per_s: float
-  batch_generation_throughput_tok_per_s: float
-
-  # 3. Token throughputs (excluding paused / idle time).
-  avg_prompt_throughput_tok_per_s: float
   avg_prefill_throughput_tok_per_s: float
   avg_generation_throughput_tok_per_s: float
 
-  # 4. Engine step and scheduler durations.
+  # 3. Engine step and scheduler durations.
   avg_schedule_duration_ms: float
   avg_engine_step_duration_ms: float
 
-  # 5. Request-specific lifecycle latencies (over completed requests).
+  # 4. Request-specific lifecycle latencies (over completed requests).
   completed_requests: int
   avg_request_queue_time_s: float
   avg_request_ttft_s: float
@@ -82,7 +79,7 @@ class EngineMetricsSnapshot:
   # generated more than one.
   avg_request_time_per_output_token_ms: float
 
-  # 6. Live vLLM-style system gauges. The request counts and KV cache usage are
+  # 5. Live vLLM-style system gauges. The request counts and KV cache usage are
   # read when the snapshot is taken.
   num_running_reqs: int
   num_waiting_reqs: int
@@ -90,7 +87,7 @@ class EngineMetricsSnapshot:
   prefix_cache_hit_rate_pct: float
   num_preemptions: int
 
-  # 7. Gauges sampled at the end of every engine step, over the window.
+  # 6. Gauges sampled at the end of every engine step, over the window.
   avg_num_running_reqs: float
   avg_kv_cache_usage_pct: float
   max_kv_cache_usage_pct: float
@@ -99,28 +96,16 @@ class EngineMetricsSnapshot:
     """Converts the snapshot into a metric dict for `RLCluster.buffer_metrics`.
 
     Totals and engine step averages are always included. Averages over requests
-    or batches are only included when the snapshot has some, so that a window
-    without any does not log a misleading 0. The live KV cache usage is left
-    out: a training step's metrics are flushed once its rollouts finish, when
-    the KV cache is about empty again. Its average and peak over the engine
-    steps stand in for it.
+    or batches, including the token throughputs, are only included when the
+    snapshot has some, so that a window without any does not log a misleading
+    0. The live KV cache usage is left out: a training step's metrics are
+    flushed once its rollouts finish, when the KV cache is about empty again.
+    Its average and peak over the engine steps stand in for it.
 
     Returns:
       The metrics, by name, with the op that aggregates repeated values.
     """
     metrics: dict[str, PerfMetricValueT] = {
-        "rollout/avg_generation_throughput_tok_per_s": (
-            self.avg_generation_throughput_tok_per_s,
-            np.mean,
-        ),
-        "rollout/avg_prefill_throughput_tok_per_s": (
-            self.avg_prefill_throughput_tok_per_s,
-            np.mean,
-        ),
-        "rollout/avg_prompt_throughput_tok_per_s": (
-            self.avg_prompt_throughput_tok_per_s,
-            np.mean,
-        ),
         "rollout/avg_schedule_duration_ms": (
             self.avg_schedule_duration_ms,
             np.mean,
@@ -202,12 +187,12 @@ class EngineMetricsSnapshot:
       })
     if self.num_timed_batches > 0:
       metrics.update({
-          "rollout/batch_generation_throughput_tok_per_s": (
-              self.batch_generation_throughput_tok_per_s,
+          "rollout/avg_generation_throughput_tok_per_s": (
+              self.avg_generation_throughput_tok_per_s,
               np.mean,
           ),
-          "rollout/batch_prefill_throughput_tok_per_s": (
-              self.batch_prefill_throughput_tok_per_s,
+          "rollout/avg_prefill_throughput_tok_per_s": (
+              self.avg_prefill_throughput_tok_per_s,
               np.mean,
           ),
           "rollout/avg_batch_requests": (
@@ -225,9 +210,10 @@ class _MetricsWindow:
   num_active_steps: int = 0
   num_prefill_steps: int = 0
   active_step_time_s: float = 0.0
-  prefill_step_time_s: float = 0.0
   schedule_time_s: float = 0.0
   num_schedules: int = 0
+  # When the first active step started, by `time.perf_counter()`.
+  first_step_start_s: float | None = None
 
   prompt_tokens: int = 0
   generation_tokens: int = 0
@@ -384,8 +370,11 @@ class MetricsCollector:
       kv_cache_usage_fraction: The fraction of the KV cache in use after the
         step.
     """
+    step_start_s = time.perf_counter() - step_duration_s
     with self._lock:
       for window in self._windows:
+        if window.first_step_start_s is None:
+          window.first_step_start_s = step_start_s
         window.num_active_steps += 1
         window.active_step_time_s += step_duration_s
         window.prompt_tokens += num_prompt_tokens
@@ -399,7 +388,6 @@ class MetricsCollector:
         )
         if num_prompt_tokens > 0:
           window.num_prefill_steps += 1
-          window.prefill_step_time_s += step_duration_s
 
         for req in finished_requests:
           window.add_finished_request(req)
@@ -474,21 +462,6 @@ class MetricsCollector:
       num_waiting_reqs: int,
       kv_cache_usage_fraction: float,
   ) -> EngineMetricsSnapshot:
-    avg_prompt_tput = (
-        window.prompt_tokens / window.active_step_time_s
-        if window.active_step_time_s > 0.0
-        else 0.0
-    )
-    avg_prefill_tput = (
-        window.prompt_tokens / window.prefill_step_time_s
-        if window.prefill_step_time_s > 0.0
-        else 0.0
-    )
-    avg_gen_tput = (
-        window.generation_tokens / window.active_step_time_s
-        if window.active_step_time_s > 0.0
-        else 0.0
-    )
     avg_sched_ms = (
         (window.schedule_time_s / window.num_schedules) * 1000.0
         if window.num_schedules > 0
@@ -548,15 +521,12 @@ class MetricsCollector:
         avg_batch_requests=(
             window.batch_requests / n_timed if n_timed > 0 else 0.0
         ),
-        batch_prefill_throughput_tok_per_s=(
+        avg_prefill_throughput_tok_per_s=(
             window.batch_prompt_tokens / timed_s if timed_s > 0.0 else 0.0
         ),
-        batch_generation_throughput_tok_per_s=(
+        avg_generation_throughput_tok_per_s=(
             window.batch_generation_tokens / timed_s if timed_s > 0.0 else 0.0
         ),
-        avg_prompt_throughput_tok_per_s=avg_prompt_tput,
-        avg_prefill_throughput_tok_per_s=avg_prefill_tput,
-        avg_generation_throughput_tok_per_s=avg_gen_tput,
         avg_schedule_duration_ms=avg_sched_ms,
         avg_engine_step_duration_ms=avg_step_ms,
         completed_requests=n_req,
@@ -619,7 +589,11 @@ class MetricsCollector:
       kv_cache_usage_fraction: float,
       force: bool = False,
   ) -> bool:
-    """Logs a vLLM-style periodic status line if `log_stats_interval_s` elapsed."""
+    """Logs a vLLM-style periodic status line if `log_stats_interval_s` elapsed.
+
+    The line's throughputs are over the wall-clock time since the first engine
+    step after the previous line started.
+    """
     if self._log_stats_interval_s <= 0.0 and not force:
       return False
     now = time.perf_counter()
@@ -635,6 +609,10 @@ class MetricsCollector:
           num_waiting_reqs=num_waiting_reqs,
           kv_cache_usage_fraction=kv_cache_usage_fraction,
       )
+      start_s = self._log_window.first_step_start_s
+      wall_s = now - start_s if start_s is not None else 0.0
+      prefill_tput = snap.prompt_tokens / wall_s if wall_s > 0.0 else 0.0
+      gen_tput = snap.generation_tokens / wall_s if wall_s > 0.0 else 0.0
       self._log_window.reset()
       self._last_log_time = now
 
@@ -646,17 +624,15 @@ class MetricsCollector:
           f" (n={snap.completed_batches})"
       )
     logging.info(
-        "Engine %03d: Avg prompt throughput: %.1f tokens/s, "
-        "Avg prefill throughput: %.1f tokens/s, "
+        "Engine %03d: Avg prefill throughput: %.1f tokens/s, "
         "Avg generation throughput: %.1f tokens/s, "
         "Running: %d reqs, Waiting: %d reqs, "
         "KV cache usage: %.1f%%, Prefix cache hit rate: %.1f%%, "
         "Avg step: %.2f ms, Avg sched: %.2f ms, "
         "Avg req wait: %.3f s, Avg req e2e: %.3f s%s",
         self._engine_index,
-        snap.avg_prompt_throughput_tok_per_s,
-        snap.avg_prefill_throughput_tok_per_s,
-        snap.avg_generation_throughput_tok_per_s,
+        prefill_tput,
+        gen_tput,
         snap.num_running_reqs,
         snap.num_waiting_reqs,
         snap.kv_cache_usage_pct,

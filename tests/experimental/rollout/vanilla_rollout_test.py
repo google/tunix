@@ -192,8 +192,6 @@ class VanillaRolloutTest(parameterized.TestCase):
         'rollout/max_request_e2e_latency_s',
         'rollout/last_batch_completion_time_s',
         'rollout/avg_batch_completion_time_s',
-        'rollout/batch_generation_throughput_tok_per_s',
-        'rollout/batch_prefill_throughput_tok_per_s',
     ):
       self.assertIn(name, perf_metrics)
     # The step is flushed after its requests finish and free their pages, but
@@ -222,10 +220,10 @@ class VanillaRolloutTest(parameterized.TestCase):
     self.assertEqual(perf_metrics['rollout/avg_batch_requests'][0], 2)
     # The 5 prompt tokens over the batch's 2 s.
     self.assertEqual(
-        perf_metrics['rollout/batch_prefill_throughput_tok_per_s'][0], 2.5
+        perf_metrics['rollout/avg_prefill_throughput_tok_per_s'][0], 2.5
     )
     self.assertEqual(
-        perf_metrics['rollout/batch_generation_throughput_tok_per_s'][0],
+        perf_metrics['rollout/avg_generation_throughput_tok_per_s'][0],
         num_generated / 2.0,
     )
 
