@@ -803,20 +803,83 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
         step_id=1,
         source=trajectory.Source.AGENT,
         message="Thinking",
-        assistant_tokens=np.array([10, 20]),
-        logprobs=np.array([-0.5, -0.3]),
+        assistant_tokens=np.array([10, 20], dtype=np.int32),
+        logprobs=np.array([-0.5, -0.3], dtype=np.float32),
+        assistant_routed_experts=np.zeros((2, 3, 4), dtype=np.int16),
         mc_return=2.0,
     )
     json_str = step.model_dump_json(exclude_none=True)
     loaded_dict = json.loads(json_str)
-    self.assertEqual(loaded_dict["assistant_tokens"], [10, 20])
-    self.assertEqual(loaded_dict["logprobs"], [-0.5, -0.3])
+    self.assertIn(trajectory.NDARRAY_KEY, loaded_dict["assistant_tokens"])
     self.assertEqual(loaded_dict["mc_return"], 2.0)
+
+    reloaded_step = trajectory.TunixAgentStep.model_validate_json(json_str)
+    for name in ("assistant_tokens", "logprobs", "assistant_routed_experts"):
+      original = getattr(step, name)
+      reloaded = getattr(reloaded_step, name)
+      self.assertEqual(reloaded.dtype, original.dtype, name)
+      self.assertEqual(reloaded.shape, original.shape, name)
+      np.testing.assert_array_equal(reloaded, original, err_msg=name)
+    self.assertEqual(reloaded_step.mc_return, 2.0)
+
+  def test_step_json_round_trip_keeps_lists_as_lists(self):
+    step = trajectory.TunixAgentStep(
+        step_id=1,
+        source=trajectory.Source.AGENT,
+        message="Thinking",
+        assistant_tokens=[10, 20],
+        logprobs=[-0.5, -0.3],
+    )
+    json_str = step.model_dump_json(exclude_none=True)
+    self.assertEqual(json.loads(json_str)["assistant_tokens"], [10, 20])
 
     reloaded_step = trajectory.TunixAgentStep.model_validate_json(json_str)
     self.assertEqual(reloaded_step.assistant_tokens, [10, 20])
     self.assertEqual(reloaded_step.logprobs, [-0.5, -0.3])
-    self.assertEqual(reloaded_step.mc_return, 2.0)
+
+  def test_empty_multi_dim_array_keeps_shape(self):
+    step = trajectory.TunixEnvStep(
+        step_id=0,
+        source=trajectory.Source.USER,
+        message="",
+        env_routed_experts=np.zeros((0, 3, 4), dtype=np.int16),
+    )
+    reloaded = trajectory.TunixEnvStep.model_validate_json(
+        step.model_dump_json()
+    )
+    self.assertEqual(reloaded.env_routed_experts.shape, (0, 3, 4))
+    self.assertEqual(reloaded.env_routed_experts.dtype, np.int16)
+
+  def test_object_arrays_are_rejected(self):
+    step = trajectory.TunixAgentStep(
+        step_id=1,
+        source=trajectory.Source.AGENT,
+        message="",
+        assistant_tokens=np.array([object()], dtype=object),
+    )
+    with self.assertRaisesRegex(Exception, "Cannot encode a NumPy array"):
+      step.model_dump_json()
+
+  def test_metadata_task_round_trips_nested_arrays(self):
+    metadata = trajectory.TunixTrajectoryMetadata(
+        trajectory_id="t",
+        agent=trajectory.Agent(name="a", version="1"),
+        task={
+            "prompts": ["p"],
+            "nested": {"ids": np.array([1, 2], dtype=np.int8)},
+            "scalar": np.int64(4),
+        },
+    )
+    reloaded = trajectory.TunixTrajectoryMetadata.from_atif_metadata(
+        trajectory.TrajectoryMetadata.model_validate_json(
+            metadata.to_atif_metadata().model_dump_json(exclude_none=True)
+        )
+    )
+    self.assertEqual(reloaded.task["prompts"], ["p"])
+    self.assertEqual(reloaded.task["scalar"], 4)
+    ids = reloaded.task["nested"]["ids"]
+    self.assertEqual(ids.dtype, np.int8)
+    np.testing.assert_array_equal(ids, [1, 2])
 
   def test_step_equality(self):
     step1 = trajectory.TunixAgentStep(
@@ -1256,6 +1319,23 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
     )
 
 
+_TUNIX_METADATA_1_EXTENSIONS = {
+    "prompt_id": "p_1",
+    "group_index": 2,
+    "target_policy_versions": [2, 3],
+    "status": "SUCCEEDED",
+    "total_reward": 3.5,
+    "hyperparams": {"temperature": 0.7},
+    "env_time": {"step_0": 0.05},
+    "reward_time": {"step_1": 0.02},
+    "prompt_tokens": [7, 8, 9],
+    "prompt_length": 3,
+    "policy_version": 3,
+    "task": {"prompts": ["User prompt"], "answer": "42"},
+    "chat_completions": [{"role": "user", "content": "User prompt"}],
+}
+
+
 class AtifProjectionTest(trajectory_testing.TrajectoryTestCase):
   """Covers the `to_atif_*()` projection of Tunix models into base ATIF."""
 
@@ -1280,10 +1360,15 @@ class AtifProjectionTest(trajectory_testing.TrajectoryTestCase):
             "user_key": "val",
             trajectory.TUNIX_EXTENSIONS_KEY: {
                 "mc_return": 2.5,
-                "assistant_tokens": [10, 20],
-                "assistant_masks": [1, 1],
-                "logprobs": [-0.5, -0.2],
+                "assistant_tokens": trajectory.encode_ndarray(
+                    np.array([10, 20])
+                ),
+                "assistant_masks": trajectory.encode_ndarray(np.array([1, 1])),
+                "logprobs": trajectory.encode_ndarray(np.array([-0.5, -0.2])),
                 "policy_version": 3,
+                "assistant_routed_experts": trajectory.encode_ndarray(
+                    np.array([[[1], [2]], [[3], [4]]], np.int16)
+                ),
             },
         },
     )
@@ -1304,8 +1389,11 @@ class AtifProjectionTest(trajectory_testing.TrajectoryTestCase):
             trajectory.TUNIX_EXTENSIONS_KEY: {
                 "reward": 1.0,
                 "done": False,
-                "env_tokens": [1, 2],
-                "env_masks": [1, 1],
+                "env_tokens": trajectory.encode_ndarray(np.array([1, 2])),
+                "env_masks": trajectory.encode_ndarray(np.array([1, 1])),
+                "env_routed_experts": trajectory.encode_ndarray(
+                    np.array([[[5], [6]], [[7], [8]]], np.int16)
+                ),
             },
         },
     )
@@ -1340,7 +1428,9 @@ class AtifProjectionTest(trajectory_testing.TrajectoryTestCase):
         trajectory.TunixTrajectoryMetadata.model_fields
     ) - set(trajectory.TrajectoryMetadata.model_fields)
 
-    atif_metadata = trajectory_testing.TUNIX_METADATA_1.to_atif_metadata()
+    atif_metadata = trajectory_testing.TUNIX_METADATA_1.model_copy(
+        update={"prompt_routed_experts": np.zeros((3, 2, 1), np.int16)}
+    ).to_atif_metadata()
 
     self.assertContainsSubset(
         tunix_only_field_names,
@@ -1360,16 +1450,7 @@ class AtifProjectionTest(trajectory_testing.TrajectoryTestCase):
         atif_metadata.extra,
         {
             "user_meta": "val",
-            trajectory.TUNIX_EXTENSIONS_KEY: {
-                "prompt_id": "p_1",
-                "group_index": 2,
-                "target_policy_versions": [2, 3],
-                "status": "SUCCEEDED",
-                "total_reward": 3.5,
-                "hyperparams": {"temperature": 0.7},
-                "env_time": {"step_0": 0.05},
-                "reward_time": {"step_1": 0.02},
-            },
+            trajectory.TUNIX_EXTENSIONS_KEY: _TUNIX_METADATA_1_EXTENSIONS,
         },
     )
 
@@ -1380,6 +1461,7 @@ class AtifProjectionTest(trajectory_testing.TrajectoryTestCase):
             "assistant_tokens": None,
             "assistant_masks": None,
             "logprobs": None,
+            "assistant_routed_experts": None,
             "extra": None,
         }
     )
@@ -1421,16 +1503,7 @@ class AtifProjectionTest(trajectory_testing.TrajectoryTestCase):
         atif_metadata.extra,
         {
             "user_meta": "val",
-            trajectory.TUNIX_EXTENSIONS_KEY: {
-                "prompt_id": "p_1",
-                "group_index": 2,
-                "target_policy_versions": [2, 3],
-                "status": "SUCCEEDED",
-                "total_reward": 3.5,
-                "hyperparams": {"temperature": 0.7},
-                "env_time": {"step_0": 0.05},
-                "reward_time": {"step_1": 0.02},
-            },
+            trajectory.TUNIX_EXTENSIONS_KEY: _TUNIX_METADATA_1_EXTENSIONS,
         },
     )
 
@@ -1444,17 +1517,7 @@ class AtifProjectionTest(trajectory_testing.TrajectoryTestCase):
     atif_metadata = trajectory_testing.TUNIX_METADATA_1.to_atif_metadata()
 
     self.assertEqual(
-        atif_metadata.get_extensions(),
-        {
-            "prompt_id": "p_1",
-            "group_index": 2,
-            "target_policy_versions": [2, 3],
-            "status": "SUCCEEDED",
-            "total_reward": 3.5,
-            "hyperparams": {"temperature": 0.7},
-            "env_time": {"step_0": 0.05},
-            "reward_time": {"step_1": 0.02},
-        },
+        atif_metadata.get_extensions(), _TUNIX_METADATA_1_EXTENSIONS
     )
 
   @parameterized.named_parameters(

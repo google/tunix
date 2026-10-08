@@ -6,6 +6,7 @@ https://github.com/harbor-framework/harbor/blob/main/rfcs/0001-trajectory-format
 
 from __future__ import annotations
 
+import base64
 import dataclasses
 import datetime
 import enum
@@ -28,13 +29,112 @@ class Source(enum.StrEnum):
   AGENT = enum.auto()
 
 
-def _serialize_array(value: list[Any] | np.ndarray | None) -> list[Any] | None:
-  """Serializes a NumPy array or list into a plain Python list."""
+# Key marking a dict as an encoded NumPy array. Arrays are stored as raw bytes
+# plus dtype and shape so that a store round trip returns the exact array that
+# was written; `tolist()` would silently widen int16/int32/float32 to Python
+# int/float and lose the shape of empty multi-dimensional arrays.
+NDARRAY_KEY: Final[str] = "__ndarray_b64__"
+_NDARRAY_DTYPE_KEY: Final[str] = "dtype"
+_NDARRAY_SHAPE_KEY: Final[str] = "shape"
+
+
+def encode_ndarray(arr: np.ndarray) -> dict[str, str | list[int]]:
+  """Encodes `arr` as a JSON-safe dict that decodes to an identical array.
+
+  Args:
+    arr: The array to encode.
+
+  Returns:
+    A dict holding the base64 array bytes, the dtype string and the shape.
+
+  Raises:
+    TypeError: If `arr` has an object or structured dtype, whose bytes do not
+      describe its values.
+  """
+  if arr.dtype.hasobject or arr.dtype.kind == "V":
+    raise TypeError(f"Cannot encode a NumPy array of dtype {arr.dtype}.")
+  return {
+      NDARRAY_KEY: base64.b64encode(np.ascontiguousarray(arr).tobytes()).decode(
+          "ascii"
+      ),
+      _NDARRAY_DTYPE_KEY: arr.dtype.str,
+      _NDARRAY_SHAPE_KEY: list(arr.shape),
+  }
+
+
+def _is_encoded_ndarray(value: Any) -> bool:
+  """Returns True if `value` was produced by `encode_ndarray`."""
+  return isinstance(value, dict) and NDARRAY_KEY in value
+
+
+def decode_ndarray(value: dict[str, Any]) -> np.ndarray:
+  """Decodes a dict produced by `encode_ndarray` back into a NumPy array."""
+  data = base64.b64decode(value[NDARRAY_KEY])
+  dtype = np.dtype(value[_NDARRAY_DTYPE_KEY])
+  shape = tuple(value[_NDARRAY_SHAPE_KEY])
+  return np.frombuffer(data, dtype=dtype).reshape(shape).copy()
+
+
+def _serialize_array(
+    value: list[Any] | np.ndarray | None,
+) -> list[Any] | dict[str, str | list[int]] | None:
+  """Serializes an array field.
+
+  NumPy arrays are encoded with `encode_ndarray` so dtype and shape survive a
+  round trip. Python lists stay plain lists.
+
+  Args:
+    value: The field value.
+
+  Returns:
+    None, a plain list, or an encoded-array dict.
+  """
   if value is None:
     return None
   if isinstance(value, np.ndarray):
-    return value.tolist()
+    return encode_ndarray(value)
   return list(value)
+
+
+def _decode_array(value: Any) -> Any:
+  """Decodes an encoded-array dict; other values are left to field validation."""
+  if _is_encoded_ndarray(value):
+    return decode_ndarray(value)
+  return value
+
+
+def _encode_nested(value: Any) -> Any:
+  """Recursively encodes NumPy arrays in `value` with `encode_ndarray`.
+
+  NumPy scalars become the equivalent Python scalar and tuples become lists;
+  every other leaf is returned unchanged.
+
+  Args:
+    value: A value nested in dicts, lists and tuples.
+
+  Returns:
+    The encoded value.
+  """
+  if isinstance(value, np.ndarray):
+    return encode_ndarray(value)
+  if isinstance(value, np.generic):
+    return value.item()
+  if isinstance(value, dict):
+    return {k: _encode_nested(v) for k, v in value.items()}
+  if isinstance(value, (list, tuple)):
+    return [_encode_nested(v) for v in value]
+  return value
+
+
+def _decode_nested(value: Any) -> Any:
+  """Reverses `_encode_nested`, rebuilding NumPy arrays."""
+  if _is_encoded_ndarray(value):
+    return decode_ndarray(value)
+  if isinstance(value, dict):
+    return {k: _decode_nested(v) for k, v in value.items()}
+  if isinstance(value, list):
+    return [_decode_nested(v) for v in value]
+  return value
 
 
 # Sequences whose elements all have one of these exact types are copied without
@@ -177,15 +277,33 @@ def _unpack_step_from_atif(
 
 IntArray = Annotated[
     list[int] | np.ndarray | None,
+    pydantic.BeforeValidator(_decode_array),
     pydantic.PlainSerializer(
-        _serialize_array, return_type=list[int] | None, when_used="always"
+        _serialize_array,
+        return_type=list[int] | dict[str, Any] | None,
+        when_used="always",
     ),
 ]
 
 FloatArray = Annotated[
     list[float] | np.ndarray | None,
+    pydantic.BeforeValidator(_decode_array),
     pydantic.PlainSerializer(
-        _serialize_array, return_type=list[float] | None, when_used="always"
+        _serialize_array,
+        return_type=list[float] | dict[str, Any] | None,
+        when_used="always",
+    ),
+]
+
+# A NumPy array of any rank (e.g. per-token routed experts
+# [length, num_layers, top_k]) that round-trips with its dtype and shape.
+NDArray = Annotated[
+    np.ndarray | None,
+    pydantic.BeforeValidator(_decode_array),
+    pydantic.PlainSerializer(
+        _serialize_array,
+        return_type=dict[str, Any] | None,
+        when_used="always",
     ),
 ]
 
@@ -193,6 +311,16 @@ MetadataDict = Annotated[
     dict[str, Any] | None,
     pydantic.PlainSerializer(
         _serialize_dict, return_type=dict[str, Any] | None, when_used="always"
+    ),
+]
+
+# Like `MetadataDict`, but NumPy arrays nested anywhere in the dict round-trip
+# with their dtype and shape instead of degrading to lists.
+ArrayDict = Annotated[
+    dict[str, Any] | None,
+    pydantic.BeforeValidator(_decode_nested),
+    pydantic.PlainSerializer(
+        _encode_nested, return_type=dict[str, Any] | None, when_used="always"
     ),
 ]
 
@@ -805,6 +933,13 @@ class TunixAgentStep(Step):
       default=None,
       description="Policy/weight version used to generate this step.",
   )
+  assistant_routed_experts: NDArray = pydantic.Field(
+      default=None,
+      description=(
+          "Per-token routed expert IDs for assistant tokens"
+          " [length, num_layers, top_k]."
+      ),
+  )
 
   @pydantic.model_validator(mode="after")
   def validate_agent_source(self) -> TunixAgentStep:
@@ -851,6 +986,13 @@ class TunixEnvStep(Step):
   env_masks: IntArray = pydantic.Field(
       default=None,
       description="Masks for environment tokens.",
+  )
+  env_routed_experts: NDArray = pydantic.Field(
+      default=None,
+      description=(
+          "Per-token routed expert IDs for environment tokens"
+          " [length, num_layers, top_k]."
+      ),
   )
 
   @pydantic.model_validator(mode="after")
@@ -901,6 +1043,11 @@ class TunixTrajectoryMetadata(TrajectoryMetadata):
 
   METADATA_TYPE: ClassVar[str] = "tunix"
 
+  model_config = pydantic.ConfigDict(
+      arbitrary_types_allowed=True,
+      extra="forbid",
+  )
+
   prompt_id: str | None = pydantic.Field(
       default=None,
       description="Identifier for the initial prompt/task.",
@@ -935,6 +1082,36 @@ class TunixTrajectoryMetadata(TrajectoryMetadata):
   reward_time: MetadataDict = pydantic.Field(
       default=None,
       description="Timing information for reward operations.",
+  )
+  prompt_tokens: IntArray = pydantic.Field(
+      default=None,
+      description="Token IDs of the initial prompt.",
+  )
+  prompt_length: int | None = pydantic.Field(
+      default=None,
+      description=(
+          "Unpadded length of `prompt_tokens`, when the prompt was recorded"
+          " left-padded (exact token continuity)."
+      ),
+  )
+  prompt_routed_experts: NDArray = pydantic.Field(
+      default=None,
+      description=(
+          "Per-token routed expert IDs for the prompt tokens"
+          " [length, num_layers, top_k]."
+      ),
+  )
+  policy_version: int | None = pydantic.Field(
+      default=None,
+      description="Policy/weight version the trajectory was sampled with.",
+  )
+  task: ArrayDict = pydantic.Field(
+      default=None,
+      description="The original task/input the trajectory was collected for.",
+  )
+  chat_completions: list[dict[str, Any]] | None = pydantic.Field(
+      default=None,
+      description="Full chat message history (OpenAI Chat API format).",
   )
 
   def create_trajectory(
@@ -1001,6 +1178,8 @@ class TunixTrajectory(
       env_masks: list[int] | np.ndarray | None = None,
       logprobs: list[float] | np.ndarray | None = None,
       policy_version: int | None = None,
+      assistant_routed_experts: np.ndarray | None = None,
+      env_routed_experts: np.ndarray | None = None,
       extra: dict[str, Any] | None = None,
   ) -> TunixAgentStep | TunixEnvStep:
     """Helper to create and append a step, automatically assigning step_id."""
@@ -1025,6 +1204,7 @@ class TunixTrajectory(
           assistant_masks=assistant_masks,
           logprobs=logprobs,
           policy_version=policy_version,
+          assistant_routed_experts=assistant_routed_experts,
           extra=extra,
       )
     else:
@@ -1038,6 +1218,7 @@ class TunixTrajectory(
           done=done,
           env_tokens=env_tokens,
           env_masks=env_masks,
+          env_routed_experts=env_routed_experts,
           extra=extra,
       )
     self.steps.append(new_step)

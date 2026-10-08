@@ -163,6 +163,7 @@ def create_agent_step(
       assistant_masks=step.assistant_masks,
       logprobs=step.logprobs,
       policy_version=effective_policy_version,
+      assistant_routed_experts=step.assistant_routed_experts,
       mc_return=(
           float(step.mc_return) if step.mc_return is not None else None
       ),
@@ -202,6 +203,7 @@ def create_env_step(
       done=step.done,
       env_tokens=step.env_tokens,
       env_masks=step.env_masks,
+      env_routed_experts=step.env_routed_experts,
       extra=step.info or None,
   )
 
@@ -248,6 +250,7 @@ def to_tunix_step(
   assistant_tokens = None
   assistant_masks = None
   logprobs = None
+  assistant_routed_experts = None
   mc_return = 0.0
 
   if agent_step is not None:
@@ -273,6 +276,7 @@ def to_tunix_step(
     assistant_tokens = getattr(agent_step, "assistant_tokens", None)
     assistant_masks = getattr(agent_step, "assistant_masks", None)
     logprobs = getattr(agent_step, "logprobs", None)
+    assistant_routed_experts = agent_step.assistant_routed_experts
     mc_return_val = getattr(agent_step, "mc_return", None)
     if mc_return_val is not None:
       mc_return = float(mc_return_val)
@@ -296,6 +300,7 @@ def to_tunix_step(
   done = False
   env_tokens = None
   env_masks = None
+  env_routed_experts = None
 
   if env_step is not None:
     if env_step.observation is not None and env_step.observation.results:
@@ -316,6 +321,7 @@ def to_tunix_step(
       done = bool(done_val)
     env_tokens = getattr(env_step, "env_tokens", None)
     env_masks = getattr(env_step, "env_masks", None)
+    env_routed_experts = env_step.env_routed_experts
     info.update(_filter_extra_info(env_step.extra))
 
   return agent_types.Step(
@@ -331,6 +337,8 @@ def to_tunix_step(
       env_tokens=_to_numpy_or_none(env_tokens),
       env_masks=_to_numpy_or_none(env_masks),
       logprobs=_to_numpy_or_none(logprobs),
+      assistant_routed_experts=assistant_routed_experts,
+      env_routed_experts=env_routed_experts,
       info=info,
   )
 
@@ -434,6 +442,8 @@ def to_tunix_trajectory(
 
   env_time = metadata_obj.env_time or {}
   reward_time = metadata_obj.reward_time or {}
+  if metadata_obj.task is not None:
+    task_val = metadata_obj.task
 
   return agent_types.Trajectory(
       task=task_val,
@@ -442,6 +452,13 @@ def to_tunix_trajectory(
       status=status_enum,
       env_time=env_time,
       reward_time=reward_time,
+      prompt_tokens=(
+          metadata_obj.prompt_tokens
+          if metadata_obj.prompt_tokens is not None
+          else []
+      ),
+      prompt_length=metadata_obj.prompt_length,
+      prompt_routed_experts=metadata_obj.prompt_routed_experts,
   )
 
 
