@@ -746,7 +746,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
 
   async def _await_pending_weight_sync(self) -> None:
     """Waits if a mid-step `sync_pending_weights` round is currently in flight."""
-    if self._pending_sync_lock.locked():
+    while self._pending_sync_lock.locked():
       async with self._pending_sync_lock:
         pass
 

@@ -2361,7 +2361,7 @@ class DistributedRLEngineTest(absltest.TestCase):
       logps_task = asyncio.create_task(
           engine.per_token_logps(datatypes.Role.ACTOR, items=[1, 2])
       )
-      await asyncio.sleep(0.01)
+      await asyncio.sleep(0)
       self.assertEqual(events, ["pending_sync_start"])
 
       release_sync.set()

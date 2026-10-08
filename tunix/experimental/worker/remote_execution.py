@@ -2360,7 +2360,7 @@ class PoolExecutionSession:
           # their individual task_timeout_s budget, only fail/re-queue the
           # expired task(s) unless the poll RPC itself hung past poll_wait_s.
           if (
-              isinstance(exc, TimeoutError)
+              isinstance(exc, (TimeoutError, asyncio.TimeoutError))
               and self._task_timeout_s is not None
               and len(dispatched_set) > 1
           ):
