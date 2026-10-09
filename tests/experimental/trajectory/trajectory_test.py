@@ -1365,15 +1365,14 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
       generation_kwargs = {"temperature": 0.7, "top_p": 0.9}
       metadata = {"req_key": "req_val"}
 
-    class MockAgentTrajectory:
-      reward = 4.5
-      env_time = {"init": 0.1, "step": 0.6}
-      reward_time = {"eval": 0.25}
-
     class MockAgent:
       name = "multi_turn_agent"
       version = "2.0"
-      trajectory = MockAgentTrajectory()
+      trajectory = agent_types.Trajectory(
+          reward=4.5,
+          env_time={"init": 0.1, "step": 0.6},
+          reward_time={"eval": 0.25},
+      )
 
     meta = converter.create_trajectory_metadata(
         traj_id="traj_multi_turn_test",
@@ -1683,6 +1682,7 @@ class AtifProjectionTest(trajectory_testing.TrajectoryTestCase):
                 "target_policy_versions": [2, 3],
                 "status": "SUCCEEDED",
                 "total_reward": 3.5,
+                "masked_out": False,
                 "hyperparams": {"temperature": 0.7},
                 "env_time": {"step_0": 0.05},
                 "reward_time": {"step_1": 0.02},
@@ -1780,6 +1780,7 @@ class AtifProjectionTest(trajectory_testing.TrajectoryTestCase):
                 "target_policy_versions": [2, 3],
                 "status": "SUCCEEDED",
                 "total_reward": 3.5,
+                "masked_out": False,
                 "hyperparams": {"temperature": 0.7},
                 "env_time": {"step_0": 0.05},
                 "reward_time": {"step_1": 0.02},
@@ -1804,6 +1805,7 @@ class AtifProjectionTest(trajectory_testing.TrajectoryTestCase):
             "target_policy_versions": [2, 3],
             "status": "SUCCEEDED",
             "total_reward": 3.5,
+            "masked_out": False,
             "hyperparams": {"temperature": 0.7},
             "env_time": {"step_0": 0.05},
             "reward_time": {"step_1": 0.02},
@@ -2052,6 +2054,7 @@ class AtifRehydrationTest(trajectory_testing.TrajectoryTestCase):
             "target_policy_versions",
             "status",
             "total_reward",
+            "masked_out",
             "hyperparams",
             "env_time",
             "reward_time",

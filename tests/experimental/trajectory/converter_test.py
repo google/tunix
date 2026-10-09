@@ -1129,6 +1129,34 @@ class ToTunixTrajectoryTest(trajectory_testing.TrajectoryTestCase):
     self.assertEqual(tunix_traj.status, agent_types.TrajectoryStatus.SUCCEEDED)
     self.assertEqual(tunix_traj.env_time, {"env_step": 0.05})
     self.assertEqual(tunix_traj.reward_time, {"reward_eval": 0.01})
+    # Step 0 without env_tokens leaves prompt_tokens and prompt_length at their
+    # defaults.
+    self.assertEmpty(tunix_traj.prompt_tokens)
+    self.assertIsNone(tunix_traj.prompt_length)
+    self.assertIsNone(tunix_traj.masked_out)
+
+  def test_to_tunix_trajectory_rehydrates_prompt_tokens_and_masked_out(self):
+    traj = trajectory_lib.TunixTrajectory(
+        trajectory_id="t_prompt_ids",
+        agent=trajectory_lib.Agent(name="test_agent", version="1.0"),
+        masked_out=True,
+        steps=[
+            trajectory_lib.TunixEnvStep(
+                step_id=0,
+                source=trajectory_lib.Source.USER,
+                message="Calculate 3+4",
+                env_tokens=np.array([5, 100, 101]),
+            ),
+        ],
+    )
+    # Round-trip through JSON to cover the store's serialized form.
+    tunix_traj = converter.to_tunix_trajectory(traj.to_json_dict())
+    np.testing.assert_array_equal(tunix_traj.prompt_tokens, [5, 100, 101])
+    self.assertEqual(tunix_traj.prompt_length, 3)
+    self.assertTrue(tunix_traj.masked_out)
+    traj_dict = tunix_traj.to_dict()
+    np.testing.assert_array_equal(traj_dict["prompt_tokens"], [5, 100, 101])
+    self.assertEqual(traj_dict["prompt_length"], 3)
 
   def test_to_tunix_trajectory_from_dict(self):
     traj_dict = {
@@ -1516,15 +1544,15 @@ class CreateTrajectoryMetadataTest(parameterized.TestCase):
       generation_kwargs = {"temperature": 0.8, "top_k": 40}
       metadata = {"experiment": "exp_v1"}
 
-    class MockAgentTrajectory:
-      reward = 8.5
-      env_time = {"env": 0.2}
-      reward_time = {"rew": 0.05}
-
     class MockAgent:
       name = "custom_agent"
       version = "2.1"
-      trajectory = MockAgentTrajectory()
+      trajectory = agent_types.Trajectory(
+          reward=8.5,
+          masked_out=False,
+          env_time={"env": 0.2},
+          reward_time={"rew": 0.05},
+      )
 
     meta = converter.create_trajectory_metadata(
         traj_id="traj_200",
@@ -1543,6 +1571,7 @@ class CreateTrajectoryMetadataTest(parameterized.TestCase):
     self.assertEqual(meta.target_policy_versions, [1, 2, 3])
     self.assertEqual(meta.status, "SUCCEEDED")
     self.assertEqual(meta.total_reward, 8.5)
+    self.assertFalse(meta.masked_out)
     self.assertEqual(meta.hyperparams, {"temperature": 0.8, "top_k": 40})
     self.assertEqual(meta.env_time, {"env": 0.2})
     self.assertEqual(meta.reward_time, {"rew": 0.05})
@@ -1554,14 +1583,14 @@ class CreateTrajectoryMetadataTest(parameterized.TestCase):
 class UpdateTrajectoryMetadataTest(parameterized.TestCase):
 
   def test_update_trajectory_metadata_from_agent(self):
-    class MockAgentTrajectory:
-      status = agent_types.TrajectoryStatus.SUCCEEDED
-      reward = 10.0
-      env_time = {"step_latency": [0.1, 0.2]}
-      reward_time = {"eval_latency": 0.05}
-
     class MockAgent:
-      trajectory = MockAgentTrajectory()
+      trajectory = agent_types.Trajectory(
+          status=agent_types.TrajectoryStatus.SUCCEEDED,
+          reward=10.0,
+          masked_out=False,
+          env_time={"step_latency": [0.1, 0.2]},  # pyrefly: ignore[bad-argument-type]
+          reward_time={"eval_latency": 0.05},
+      )
 
     meta = trajectory_lib.TunixTrajectoryMetadata(
         trajectory_id="traj_1",
@@ -1577,6 +1606,7 @@ class UpdateTrajectoryMetadataTest(parameterized.TestCase):
 
     self.assertEqual(updated_meta.status, "SUCCEEDED")
     self.assertEqual(updated_meta.total_reward, 10.0)
+    self.assertFalse(updated_meta.masked_out)
     self.assertEqual(updated_meta.env_time, {"step_latency": [0.1, 0.2]})
     self.assertEqual(updated_meta.reward_time, {"eval_latency": 0.05})
     self.assertEqual(updated_meta.extra, {"checkpoint": "step_100"})
@@ -1627,6 +1657,21 @@ class UpdateTrajectoryMetadataTest(parameterized.TestCase):
         metadata=meta, target_policy_versions=[3, 4, 5]
     )
     self.assertEqual(meta.target_policy_versions, [3, 4, 5])
+
+  def test_update_trajectory_metadata_masked_out(self):
+    class MockAgent:
+      trajectory = agent_types.Trajectory(masked_out=True)
+
+    meta = trajectory_lib.TunixTrajectoryMetadata(
+        trajectory_id="traj_masked",
+        agent=trajectory_lib.Agent(name="agent", version="1.0"),
+    )
+    self.assertIsNone(meta.masked_out)
+    converter.update_trajectory_metadata(metadata=meta, agent=MockAgent())
+    self.assertTrue(meta.masked_out)
+    # Later syncs without masked_out set leave the recorded value in place.
+    converter.update_trajectory_metadata(metadata=meta, policy_version=1)
+    self.assertTrue(meta.masked_out)
 
 
 if __name__ == "__main__":

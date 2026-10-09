@@ -298,8 +298,26 @@ class TrajectoryCollectEngine:
           exc_info=True,
       )
 
+  def _prompt_token_ids(self) -> Optional[np.ndarray]:
+    """Returns the unpadded first-turn prompt token ids, or None if unknown."""
+    prompt_tokens = self.agent.trajectory.prompt_tokens
+    if prompt_tokens is None or len(prompt_tokens) == 0:
+      return None
+    prompt_length = self.agent.trajectory.prompt_length
+    if prompt_length is None:
+      return np.asarray(prompt_tokens)
+    # Exact mode stores the first-turn prompt left-padded alongside its length.
+    return generate_utils.unpad_prompt(prompt_tokens, prompt_length)
+
   def _record_task_step(self) -> None:
-    """Writes the initial task step (step 0) live to trajectory_store."""
+    """Writes the initial task step (step 0) live to trajectory_store.
+
+    The step carries the unpadded first-turn prompt token ids in `env_tokens`
+    once they are known, so Token-mode data can be rebuilt from the store
+    without re-tokenizing. In exact token continuity mode, the ids are only
+    known after the first `model_call`, so the step is re-recorded (upserted on
+    `step_id=0`) at that point.
+    """
     if self.trajectory_store is None or self.metadata is None:
       return
     try:
@@ -319,6 +337,9 @@ class TrajectoryCollectEngine:
             source=trajectory_lib.Source.USER,
             message=user_msg,
         )
+      prompt_token_ids = self._prompt_token_ids()
+      if prompt_token_ids is not None:
+        task_step.env_tokens = prompt_token_ids
       self.trajectory_store.add_step(task_step, self.metadata)
     except Exception:  # pylint: disable=broad-exception-caught
       logging.warning(
@@ -700,6 +721,8 @@ class TrajectoryCollectEngine:
     self.agent.reset()
     self.agent.trajectory.step_idx = -1
     self.agent.trajectory.masked_out = None
+    self.agent.trajectory.prompt_tokens = []
+    self.agent.trajectory.prompt_length = None
     self._response_token_count = 0
     self._cumulative_prompt_tokens = 0
     self._current_step_initial_routed_experts = None
@@ -934,6 +957,8 @@ class TrajectoryCollectEngine:
         self.agent.trajectory.prompt_length = int(
             rollout_output.prompt_lengths[0]
         )
+        # Prompt ids are only known now; upsert step 0 to include them.
+        self._record_task_step()
       else:
         echoed = generate_utils.unpad_prompt(
             rollout_output.left_padded_prompt_tokens[0],

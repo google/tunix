@@ -411,7 +411,8 @@ def to_tunix_trajectory(
   """Converts a Trajectory into a Tunix agent_types.Trajectory.
 
   Reconstructs Tunix RL interaction steps from sequential converted steps:
-  - Step 0 (source USER or SYSTEM) -> Tunix task prompt dictionary.
+  - Step 0 (source USER or SYSTEM) -> Tunix task prompt dictionary, and its
+    `env_tokens` (if set) -> `prompt_tokens` and `prompt_length`.
   - Subsequent steps (Agent step at 2i+1, Env step at 2i+2) -> Paired into
     Tunix `agent_types.Step` instances for turn i.
   - Agent steps' raw `prefill_routed_experts` -> Split into the trajectory's
@@ -455,12 +456,16 @@ def to_tunix_trajectory(
   num_converted_steps = len(traj_obj.steps)
 
   task_val = None
+  prompt_tokens = None
   # If step 0 is the initial prompt (source USER or SYSTEM), extract it.
   if num_converted_steps > 0 and traj_obj.steps[0].source in (
       trajectory_lib.Source.USER,
       trajectory_lib.Source.SYSTEM,
   ):
     task_val = {"prompts": [traj_obj.steps[0].message]}
+    # Unpadded first-turn prompt ids, if the collector recorded them.
+    task_step = trajectory_lib.TunixEnvStep.from_atif_step(traj_obj.steps[0])
+    prompt_tokens = _to_numpy_or_none(task_step.env_tokens)
     converted_step_idx = 1
 
   # Iterate through steps and pair AGENT + ENV steps into Tunix turns.
@@ -517,8 +522,11 @@ def to_tunix_trajectory(
       steps=dto_steps,
       reward=reward,
       status=status_enum,
+      masked_out=metadata_obj.masked_out,
       env_time=env_time,
       reward_time=reward_time,
+      prompt_tokens=prompt_tokens if prompt_tokens is not None else [],
+      prompt_length=len(prompt_tokens) if prompt_tokens is not None else None,
       prompt_routed_experts=prompt_routed_experts,
   )
 
@@ -661,6 +669,7 @@ def create_trajectory_metadata(
       target_policy_versions=target_policy_versions,
       status=status_str,
       total_reward=getattr(traj_obj, "reward", None),
+      masked_out=traj_obj.masked_out if traj_obj is not None else None,
       hyperparams=getattr(request, "generation_kwargs", None),
       env_time=getattr(traj_obj, "env_time", None),
       reward_time=getattr(traj_obj, "reward_time", None),
@@ -733,6 +742,11 @@ def update_trajectory_metadata(
   if traj_obj is not None:
     if hasattr(metadata, "total_reward"):
       setattr(metadata, "total_reward", getattr(traj_obj, "reward", None))
+    if (
+        isinstance(metadata, trajectory_lib.TunixTrajectoryMetadata)
+        and traj_obj.masked_out is not None
+    ):
+      metadata.masked_out = bool(traj_obj.masked_out)
     effective_env_time = (
         env_time
         if env_time is not None

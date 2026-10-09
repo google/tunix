@@ -1580,6 +1580,16 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     self.assertLen(stored_traj.steps, 5)
     self.assertEqual(stored_traj.steps[0].step_id, 0)
     self.assertEqual(stored_traj.steps[0].message, 'Solve math')
+    # Step 0 carries the unpadded prompt token ids.
+    np.testing.assert_array_equal(stored_traj.steps[0].env_tokens, [101])
+    self.assertIsNone(stored_traj.steps[0].env_masks)
+    rehydrated_traj = converter_lib.to_tunix_trajectory(stored_traj)
+    np.testing.assert_array_equal(
+        rehydrated_traj.prompt_tokens,
+        traj.prompt_tokens,
+    )
+    self.assertEqual(rehydrated_traj.prompt_length, 1)
+    self.assertFalse(rehydrated_traj.masked_out)
     # Turn 0 agent step (step_id=1) and env step (step_id=2)
     self.assertIsNotNone(stored_traj.steps[1].assistant_tokens)
     self.assertIsNotNone(stored_traj.steps[1].assistant_masks)
@@ -1594,13 +1604,11 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     self.assertEqual(metas[0].trajectory_id, 'traj_test_123')
     self.assertEqual(metas[0].status, 'SUCCEEDED')
     self.assertEqual(metas[0].total_reward, 3.5)
+    self.assertFalse(metas[0].masked_out)
     self.assertEqual(metas[0].target_policy_versions, [42])
     self.assertEqual([step.reward for step in traj.steps], [1.0, 2.5])
     self.assertEqual(
-        [
-            step.reward
-            for step in converter_lib.to_tunix_trajectory(stored_traj).steps
-        ],
+        [step.reward for step in rehydrated_traj.steps],
         [step.reward for step in traj.steps],
     )
 
@@ -1633,6 +1641,9 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     (meta,) = store.get_trajectories_metadata(['traj_masked_out'])
     self.assertEqual(meta.status, 'MAX_STEPS_REACHED')
     self.assertEqual(meta.total_reward, 1.0)
+    self.assertTrue(meta.masked_out)
+    (stored_masked,) = store.get_trajectories(['traj_masked_out'])
+    self.assertTrue(converter_lib.to_tunix_trajectory(stored_masked).masked_out)
 
   @mock.patch.object(utils, 'tokenize_and_generate_masks')
   def test_trajectory_store_writes_fallback_step_zero(self, mock_convert):
@@ -2015,6 +2026,34 @@ class ExactTokenContinuityCollectTest(absltest.TestCase):
       )
       env.close.assert_called_once()
       self._assert_training_consumer(result)
+
+  def test_trajectory_store_records_unpadded_prompt_ids(self):
+    agent, env = self._frozenlake()
+    engine, _, _ = self._collector(agent, env)
+    store = in_memory_store.InMemoryTrajectoryStore()
+    engine.trajectory_store = store
+    engine.metadata = converter_lib.create_trajectory_metadata(
+        traj_id='traj_exact_prompt'
+    )
+    with mock.patch.object(
+        store, 'add_step', wraps=store.add_step
+    ) as mock_add_step:
+      result = asyncio.run(engine.collect(mode='Token'))
+    step_zero_writes = [
+        c.args[0]
+        for c in mock_add_step.call_args_list
+        if c.args[0].step_id == 0
+    ]
+    # Written once at reset (ids unknown), then upserted after the first call.
+    self.assertLen(step_zero_writes, 2)
+    self.assertIsNone(step_zero_writes[0].env_tokens)
+    (stored,) = store.get_trajectories(['traj_exact_prompt'])
+    expected = result['prompt_tokens'][-result['prompt_length'] :]
+    np.testing.assert_array_equal(stored.steps[0].env_tokens, expected)
+    self.assertIsNone(stored.steps[0].env_masks)
+    rehydrated = converter_lib.to_tunix_trajectory(stored)
+    np.testing.assert_array_equal(rehydrated.prompt_tokens, expected)
+    self.assertEqual(rehydrated.prompt_length, result['prompt_length'])
 
   def test_first_turn_terminal_keeps_suffix_without_env_encoding(self):
     agent, env = self._frozenlake()

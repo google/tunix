@@ -210,6 +210,7 @@ TUNIX_METADATA_1: Final[trajectory_lib.TunixTrajectoryMetadata] = (
         target_policy_versions=[2, 3],
         status="SUCCEEDED",
         total_reward=3.5,
+        masked_out=False,
         hyperparams={"temperature": 0.7},
         env_time={"step_0": 0.05},
         reward_time={"step_1": 0.02},
