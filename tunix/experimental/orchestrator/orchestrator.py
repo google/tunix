@@ -402,18 +402,20 @@ class ClusterOrchestrator:
               incarnation,
               target_state.value,
           )
+      try:
         self.registry.set_state(
             worker_id,
             target_state,
             expected_incarnation=incarnation,
         )
+      except KeyError:
+        return
     except Exception as err:  # pylint: disable=broad-exception-caught
       logging.error(
           "Failed to bring up dynamic remote worker %s: %r", worker_id, err
       )
-      with self._lock:
-        if incarnation is not None and worker_id in self.registry:
-          self.registry.evict(worker_id, expected_incarnation=incarnation)
+      if incarnation is not None:
+        self.registry.evict(worker_id, expected_incarnation=incarnation)
 
   def wait_for_pending_bring_ups(self, timeout: float | None = None) -> None:
     """Waits for all in-flight dynamic worker bring-up tasks to complete."""
