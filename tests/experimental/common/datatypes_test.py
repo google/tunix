@@ -338,5 +338,47 @@ class GenerationArgsTest(absltest.TestCase):
     self.assertEqual(args.as_kwargs(), expected)
 
 
+class RolloutFaultToleranceConfigTest(absltest.TestCase):
+
+  def test_defaults_enable_evict_and_retry(self):
+    cfg = datatypes.RolloutFaultToleranceConfig()
+    self.assertTrue(cfg.enabled)
+    self.assertTrue(cfg.evict_on_failure)
+    self.assertTrue(cfg.retry_on_worker_failure)
+    self.assertEqual(cfg.max_task_retries, 3)
+    self.assertIsNone(cfg.max_in_flight_per_worker)
+    self.assertIsNone(cfg.task_timeout_s)
+    self.assertEqual(cfg.max_zero_worker_wait_s, 600.0)
+    self.assertTrue(cfg.retry_weight_sync_on_eviction)
+    self.assertFalse(cfg.recover_unknown_transfer_state)
+
+  def test_with_overrides_without_arguments_returns_same_config(self):
+    cfg = datatypes.RolloutFaultToleranceConfig(max_in_flight_per_worker=4)
+    self.assertIs(cfg.with_overrides(), cfg)
+
+  def test_with_overrides_replaces_only_given_fields(self):
+    cfg = datatypes.RolloutFaultToleranceConfig(
+        max_in_flight_per_worker=4,
+        task_timeout_s=30.0,
+        max_zero_worker_wait_s=10.0,
+        max_task_retries=2,
+    )
+    merged = cfg.with_overrides(max_in_flight_per_worker=8, task_timeout_s=45.0)
+    self.assertEqual(merged.max_in_flight_per_worker, 8)
+    self.assertEqual(merged.task_timeout_s, 45.0)
+    self.assertEqual(merged.max_zero_worker_wait_s, 10.0)
+    self.assertEqual(merged.max_task_retries, 2)
+    # The original config is left untouched.
+    self.assertEqual(cfg.max_in_flight_per_worker, 4)
+    self.assertEqual(cfg.task_timeout_s, 30.0)
+
+  def test_with_overrides_validates_merged_config(self):
+    cfg = datatypes.RolloutFaultToleranceConfig()
+    with self.assertRaisesRegex(ValueError, "must be positive"):
+      cfg.with_overrides(max_in_flight_per_worker=0)
+    with self.assertRaisesRegex(ValueError, "must be positive"):
+      cfg.with_overrides(task_timeout_s=-1.0)
+
+
 if __name__ == "__main__":
   absltest.main()

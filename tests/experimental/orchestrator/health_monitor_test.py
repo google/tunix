@@ -151,6 +151,30 @@ class HealthMonitorTest(absltest.TestCase):
         monitor._executor.submit(lambda: "clean").result(), "clean"
     )
 
+  def test_initializing_worker_tracked_against_compiling_deadline(self):
+    worker = mock_worker.MockWorker("w0", roles={"rollout"})
+    registry = worker_registry.WorkerRegistry()
+    registry.register(
+        worker, state=worker_registry.MembershipState.INITIALIZING
+    )
+    clock = _FakeClock()
+    monitor = health_monitor.HealthMonitor(
+        registry,
+        state_deadlines_s={WorkerState.COMPILING: 100.0},
+        clock=clock,
+    )
+    with mock.patch.object(worker, "heartbeat") as mock_hb:
+      reports = monitor.poll()
+      self.assertEmpty(reports)
+      mock_hb.assert_not_called()
+    self.assertEmpty(monitor.overdue())
+
+    clock.t = 100.5
+    overdue = monitor.overdue()
+    self.assertLen(overdue, 1)
+    self.assertEqual(overdue[0].worker_id, "w0")
+    self.assertEqual(overdue[0].state, WorkerState.COMPILING)
+
 
 if __name__ == "__main__":
   absltest.main()

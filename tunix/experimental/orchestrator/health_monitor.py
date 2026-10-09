@@ -114,18 +114,27 @@ class HealthMonitor:
     live_ids = set(worker_ids)
     abort_event = threading.Event()
 
-    def _poll_worker(wid: str) -> tuple[str, datatypes.HealthReport | None]:
+    def _poll_worker(
+        wid: str,
+    ) -> tuple[str, datatypes.HealthReport | None, WorkerState | None]:
       if abort_event.is_set():
-        return wid, None
+        return wid, None, None
       try:
         worker = self._registry.get(wid)
+        member_state = self._registry.state(wid)
       except KeyError:
         logging.warning(
             "Worker %r unregistered concurrently, skipping poll.", wid
         )
-        return wid, None
+        return wid, None, None
+      if member_state == worker_registry.MembershipState.EVICTED:
+        live_ids.discard(wid)
+        return wid, None, None
+      if member_state == worker_registry.MembershipState.INITIALIZING:
+        return wid, None, WorkerState.COMPILING
       try:
-        return wid, worker.heartbeat()
+        report = worker.heartbeat()
+        return wid, report, report.state
       except BaseException:
         abort_event.set()
         raise
@@ -135,13 +144,14 @@ class HealthMonitor:
     ]
     try:
       for future in concurrent.futures.as_completed(futures):
-        wid, report = future.result()
-        if report is None:
+        wid, report, tracked_state = future.result()
+        if tracked_state is None:
           continue
-        reports[wid] = report
+        if report is not None:
+          reports[wid] = report
         previous = self._state_since.get(wid)
-        if previous is None or previous[0] != report.state:
-          self._state_since[wid] = (report.state, self._clock())
+        if previous is None or previous[0] != tracked_state:
+          self._state_since[wid] = (tracked_state, self._clock())
     finally:
       abort_event.set()
       for future in futures:

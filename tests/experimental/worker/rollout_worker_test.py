@@ -330,6 +330,17 @@ class RolloutWorkerTrajectoryStoreTest(absltest.TestCase):
     self.assertIs(worker.manager.trajectory_store, worker.trajectory_store)
     worker.stop()
 
+  def test_info_includes_max_concurrency(self):
+    worker = rollout_worker.RolloutWorker(
+        worker_id="w_conc",
+        sampler=mocks.MockBaseSamplerImpl(sampler_name="mock_sampler"),
+        tokenizer="mock",
+        chat_parser="mock",
+        max_concurrency=16,
+    )
+    self.assertEqual(worker.info().resources.get("max_concurrency"), 16)
+    worker.stop()
+
 
 if __name__ == "__main__":
   absltest.main()
