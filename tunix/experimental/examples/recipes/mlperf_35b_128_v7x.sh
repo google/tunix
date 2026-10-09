@@ -21,7 +21,8 @@ export TPU_RESERVATION="${TPU_RESERVATION:-ghostfish-pogoag4tylwed}"
 export PATHWAYS_PROXY_MEMORY_LIMIT="100G"
 export USER_CONTAINER_MEMORY="48G"
 export USER_CONTAINER_MEMORY_LIMIT="${USER_CONTAINER_MEMORY_LIMIT:-70G}"
-export TPU_RAIDEN_DATA_NICS="eth0"
+export ENABLE_MULTI_NUMA="${ENABLE_MULTI_NUMA:-0}"
+export TPU_RAIDEN_DATA_NICS="${TPU_RAIDEN_DATA_NICS:-eth0}"
 
 # Model configuration
 export MODEL_NAME="Qwen3.5-35B-A3B"
@@ -53,10 +54,11 @@ export LIBTPU_INIT_ARGS="${LIBTPU_INIT_ARGS:- --xla_tpu_use_minor_sharding_for_m
 
 # Trainer TPU v7x / Pathways XLA & libtpu flags (scoped VMEM capped at 65472 KiB on v7x)
 export TRAINER_LIBTPU_INIT_ARGS="${TRAINER_LIBTPU_INIT_ARGS:---DANGEROUS_tpu_runtime_abi_verification_disabled=true --xla_tpu_use_tc_device_shape_on_sc=true --xla_sc_disable_megacore_partitioning=true --xla_tpu_enable_offloading_gather_to_sparsecore=true --xla_tpu_enable_sparse_core_collective_offload_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true --xla_tpu_enable_sparse_core_reduce_scatter_v2=true --xla_tpu_use_single_sparse_core_for_all_gather_offload=false --xla_tpu_enable_concurrent_sparse_core_offloading=true --xla_tpu_aggressive_opt_barrier_removal=true --xla_tpu_scoped_vmem_limit_kib=65472 --xla_tpu_enable_sublane_major_scaling_bitcast_fusion=false --xla_tpu_dvfs_p_state=7}"
-export TRAINER_EXTRA_ENV="${TRAINER_EXTRA_ENV:-TPU_RAIDEN_DATA_NICS=eth0 LIBTPU_INIT_ARGS='${TRAINER_LIBTPU_INIT_ARGS}'}"
+export TRAINER_EXTRA_ENV="${TRAINER_EXTRA_ENV:-ENABLE_MULTI_NUMA=${ENABLE_MULTI_NUMA} TPU_RAIDEN_DATA_NICS=${TPU_RAIDEN_DATA_NICS} LIBTPU_INIT_ARGS='${TRAINER_LIBTPU_INIT_ARGS}'}"
 export PATHWAYS_WORKER_EXTRA_ENV="${PATHWAYS_WORKER_EXTRA_ENV:-LIBTPU_INIT_ARGS=${TRAINER_LIBTPU_INIT_ARGS} --megascale_port=-1 --xprof_compress_jftrace=true
 SKIP_MEGASCALE_PJRT_CLIENT=true
-TPU_RAIDEN_DATA_NICS=eth0}"
+ENABLE_MULTI_NUMA=${ENABLE_MULTI_NUMA}
+TPU_RAIDEN_DATA_NICS=${TPU_RAIDEN_DATA_NICS}}"
 
 _trainer_xla_flags=""
 for _f in ${TRAINER_LIBTPU_INIT_ARGS}; do [[ "${_f}" == --xla_* ]] && _trainer_xla_flags+="${_f} "; done
