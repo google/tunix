@@ -128,7 +128,6 @@ class HealthMonitor:
         )
         return wid, None, None
       if member_state == worker_registry.MembershipState.EVICTED:
-        live_ids.discard(wid)
         return wid, None, None
       if member_state == worker_registry.MembershipState.INITIALIZING:
         return wid, None, WorkerState.COMPILING
@@ -146,6 +145,7 @@ class HealthMonitor:
       for future in concurrent.futures.as_completed(futures):
         wid, report, tracked_state = future.result()
         if tracked_state is None:
+          live_ids.discard(wid)
           continue
         if report is not None:
           reports[wid] = report

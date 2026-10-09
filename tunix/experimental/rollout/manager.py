@@ -393,10 +393,9 @@ class RolloutManager:
     try:
       async with self._get_concurrency_semaphore():
         trajectory: TrajectoryOrError = await collector.run_episode()
-      if hasattr(trajectory, "metadata") and isinstance(
-          trajectory.metadata, dict
-      ):
-        trajectory.metadata.setdefault("request_id", request.request_id)
+      if isinstance(trajectory, datatypes.TrajectoryItem):
+        if "request_id" not in trajectory.metadata:
+          trajectory.metadata["request_id"] = request.request_id
     except Exception as e:  # pylint: disable=broad-exception-caught
       error_metadata = dict(request.metadata or {})
       error_metadata["request_id"] = request.request_id

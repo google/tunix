@@ -588,11 +588,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         if isinstance(it, dict):
           it = datatypes.RolloutResponse(**it)
         traj_item = _response_to_trajectory_item(it)
-        traj_status = (
-            traj_item.traj.get("status")
-            if isinstance(traj_item.traj, Mapping)
-            else None
-        )
+        traj_status = traj_item.traj.get("status")
         if traj_status in (
             datatypes.TrajectoryStatus.FAILED,
             "FAILED",
