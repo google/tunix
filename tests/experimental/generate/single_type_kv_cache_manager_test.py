@@ -19,6 +19,7 @@ from collections.abc import Sequence
 from absl.testing import absltest
 from absl.testing import parameterized
 import jax.numpy as jnp
+import numpy as np
 from tunix.experimental.generate import single_type_kv_cache_manager
 from tunix.experimental.generate import tiered_page_pool
 
@@ -837,7 +838,7 @@ class PrefixMatchingTest(parameterized.TestCase):
     self.assertEqual(matched, [p0, p1])
 
   def test_find_longest_cache_hit_local_attention_suffix(self):
-    manager = _create_manager(page_size=4, window_size=4)
+    manager = _create_manager(page_size=4, window_size=8)
     p2 = Page(page_id=2, prefix_hash=30)
     p3 = Page(page_id=3, prefix_hash=40)
     manager._prefix_hash_to_page[30] = p2
@@ -855,9 +856,9 @@ class PrefixMatchingTest(parameterized.TestCase):
     self.assertEmpty(matched)
 
   def test_find_longest_cache_hit_local_attention_falls_back_past_miss(self):
-    # window_size=4 spans 2 pages. The miss at hash 40 breaks the rightmost
+    # window_size=8 spans 2 pages. The miss at hash 40 breaks the rightmost
     # window, so the lookup falls back to the next full window to the left.
-    manager = _create_manager(page_size=4, window_size=4)
+    manager = _create_manager(page_size=4, window_size=8)
     pages = {
         h: Page(page_id=i, prefix_hash=h)
         for i, h in enumerate([10, 20, 30, 50])
@@ -868,30 +869,772 @@ class PrefixMatchingTest(parameterized.TestCase):
     self.assertEqual(matched, [None, pages[20], pages[30]])
 
   def test_find_longest_cache_hit_local_attention_unaligned_window(self):
-    # window_size=6 spans 3 pages, not 2, since the window can straddle pages.
+    # window_size=6 spans 2 pages, not 1, since cdiv(6, 4) == 2.
     manager = _create_manager(page_size=4, window_size=6)
     pages = {
         h: Page(page_id=i, prefix_hash=h)
-        for i, h in enumerate([20, 30, 40])
+        for i, h in enumerate([30, 40])
     }
     manager._prefix_hash_to_page.update(pages)
 
     matched = manager.find_longest_cache_hit([10, 20, 30, 40])
-    self.assertEqual(matched, [None, pages[20], pages[30], pages[40]])
+    self.assertEqual(matched, [None, None, pages[30], pages[40]])
+
+
+class CalculatePageRequirementsTest(parameterized.TestCase):
+
+  def test_calculate_page_requirements_no_computed_pages(self):
+    manager = _create_manager(page_size=4)
+    reqs = manager._calculate_page_requirements(
+        request_id="req_1", num_tokens=7, num_completed_tokens=0
+    )
+    self.assertEqual(reqs, (2, 0))
+
+  def test_calculate_page_requirements_computed_device_not_counted(self):
+    manager = _create_manager(page_size=4)
+    pid0, pid1 = manager._page_manager.allocate_device_pages(2)
+    p0 = Page(page_id=pid0)
+    p1 = Page(page_id=pid1)
+
+    reqs = manager._calculate_page_requirements(
+        request_id="req_1",
+        num_tokens=4,
+        num_completed_tokens=0,
+        computed_pages=[p0, p1],
+    )
+    self.assertEqual(reqs, (1, 2))
+
+  def test_calculate_page_requirements_computed_host_counted(self):
+    manager = _create_manager(page_size=4, num_host_pages=2)
+    pid0, pid1 = manager._page_manager.allocate_device_pages(2)
+    manager._page_manager.offload([pid0])
+    p0 = Page(page_id=pid0)
+    p1 = Page(page_id=pid1)
+
+    reqs = manager._calculate_page_requirements(
+        request_id="req_1",
+        num_tokens=4,
+        num_completed_tokens=0,
+        computed_pages=[p0, p1],
+    )
+    self.assertEqual(reqs, (2, 1))
 
   @parameterized.parameters(
-      (None, 0),
-      (4, 2),
-      (5, 2),
-      (6, 3),
-      (8, 3),
-      (1, 1),
+      (None,),
+      (4,),
+      (16,),
   )
-  def test_num_pages_in_window(
-      self, window_size: int | None, expected_num_pages: int
+  def test_calculate_page_requirements_window_size_agnostic(
+      self, window_size: int | None
   ):
     manager = _create_manager(page_size=4, window_size=window_size)
-    self.assertEqual(manager._num_pages_in_window, expected_num_pages)
+    reqs = manager._calculate_page_requirements(
+        request_id="req_1", num_tokens=10, num_completed_tokens=0
+    )
+    self.assertEqual(reqs, (3, 0))
+
+  @parameterized.parameters(
+      (1, 7, 7),
+      (2, 7, 4),
+      (5, 7, 2),
+      (4, 8, 2),
+      (4, 9, 3),
+  )
+  def test_calculate_page_requirements_various_page_sizes(
+      self, page_size: int, num_tokens: int, expected_pages: int
+  ):
+    manager = _create_manager(page_size=page_size)
+    self.assertEqual(
+        manager._calculate_page_requirements(
+            request_id="req_1", num_tokens=num_tokens, num_completed_tokens=0
+        ),
+        (expected_pages, 0),
+    )
+
+  def test_calculate_page_requirements_with_none_computed_pages(self):
+    manager = _create_manager(page_size=4)
+    pid2, pid3 = manager._page_manager.allocate_device_pages(2)
+    p2 = Page(page_id=pid2)
+    p3 = Page(page_id=pid3)
+    reqs = manager._calculate_page_requirements(
+        request_id="req_1",
+        num_tokens=4,
+        num_completed_tokens=0,
+        computed_pages=[None, None, p2, p3],
+    )
+    self.assertEqual(reqs, (1, 2))
+
+  @parameterized.parameters(
+      (7, 1, 0),
+      (5, 3, 0),
+      (8, 1, 1),
+      (7, 4, 1),
+  )
+  def test_calculate_page_requirements_running_request(
+      self,
+      num_completed_tokens: int,
+      num_tokens: int,
+      expected_new_pages: int,
+  ):
+    manager = _create_manager(page_size=4)
+    _assign_request_pages(manager, "req_1", num_pages=2)
+
+    reqs = manager._calculate_page_requirements(
+        request_id="req_1",
+        num_tokens=num_tokens,
+        num_completed_tokens=num_completed_tokens,
+    )
+    self.assertEqual(reqs, (expected_new_pages, 0))
+
+  def test_calculate_page_requirements_counts_released_pages(self):
+    manager = _create_manager(page_size=4, window_size=8)
+    pages = _assign_request_pages(manager, "req_1", num_pages=2)
+    # Page 0 was released for being outside the window.
+    manager._request_to_pages["req_1"] = [None, *pages]
+
+    reqs = manager._calculate_page_requirements(
+        request_id="req_1", num_tokens=1, num_completed_tokens=12
+    )
+    self.assertEqual(reqs, (1, 0))
+
+
+class HasSufficientSpaceTest(absltest.TestCase):
+
+  def test_has_sufficient_space_true_when_enough_free_device(self):
+    manager = _create_manager(page_size=4, num_device_pages=10)
+    self.assertTrue(
+        manager.has_sufficient_space(
+            request_id="req_1", num_tokens=7, num_completed_tokens=0
+        )
+    )
+
+  def test_has_sufficient_space_false_when_not_enough_free_device(self):
+    manager = _create_manager(page_size=4, num_device_pages=2)
+    self.assertFalse(
+        manager.has_sufficient_space(
+            request_id="req_1", num_tokens=12, num_completed_tokens=0
+        )
+    )
+
+  def test_has_sufficient_space_true_with_evictable_pages(self):
+    manager = _create_manager(page_size=4, num_device_pages=5)
+    _create_unreferenced_device_pages(manager, num_pages=4)
+
+    self.assertTrue(
+        manager.has_sufficient_space(
+            request_id="req_1", num_tokens=12, num_completed_tokens=0
+        )
+    )
+
+  def test_has_sufficient_space_false_when_computed_unreferenced_not_evictable(
+      self,
+  ):
+    manager = _create_manager(page_size=4, num_device_pages=5)
+    pages = _create_unreferenced_device_pages(manager, num_pages=4)
+
+    self.assertFalse(
+        manager.has_sufficient_space(
+            request_id="req_1",
+            num_tokens=12,
+            num_completed_tokens=0,
+            computed_pages=pages[:3],
+        )
+    )
+
+  def test_has_sufficient_space_with_computed_host_pages(self):
+    manager = _create_manager(page_size=4, num_device_pages=2)
+    pids = manager._page_manager.allocate_device_pages(2)
+    manager._page_manager.offload([pids[0]])
+    p_host = Page(page_id=pids[0], ref_count=0)
+
+    self.assertFalse(
+        manager.has_sufficient_space(
+            request_id="req_1",
+            num_tokens=4,
+            num_completed_tokens=0,
+            computed_pages=[p_host],
+        )
+    )
+
+  def test_has_sufficient_space_with_computed_pages(self):
+    manager = _create_manager(page_size=4, num_device_pages=10)
+    p0 = Page(page_id=0, ref_count=1)
+
+    self.assertTrue(
+        manager.has_sufficient_space(
+            request_id="req_1",
+            num_tokens=4,
+            num_completed_tokens=0,
+            computed_pages=[p0],
+        )
+    )
+
+  def test_has_sufficient_space_running_request_uses_existing_pages(self):
+    manager = _create_manager(page_size=4, num_device_pages=2)
+    _assign_request_pages(manager, "req_1", num_pages=2)
+    self.assertEqual(manager._page_manager.num_free_device_pages, 0)
+
+    self.assertTrue(
+        manager.has_sufficient_space(
+            "req_1", num_tokens=1, num_completed_tokens=7
+        )
+    )
+    self.assertFalse(
+        manager.has_sufficient_space(
+            "req_1", num_tokens=1, num_completed_tokens=8
+        )
+    )
+
+
+class SwapInBindAndAllocateTest(absltest.TestCase):
+
+  def test_swap_in_pages_ignores_device_and_none_pages(self):
+    manager = _create_manager(num_device_pages=5)
+    pids = manager._page_manager.allocate_device_pages(1)
+    device_page = Page(page_id=pids[0], ref_count=0)
+
+    manager._swap_in_pages([None, device_page])
+
+    self.assertEqual(manager._page_manager.page_location(pids[0]), PageLocation.DEVICE)
+    self.assertEqual(manager._page_manager.num_free_device_pages, 4)
+
+  def test_swap_in_pages_unreferenced_host_page_raises(self):
+    manager = _create_manager(num_device_pages=5, num_host_pages=5)
+    host_page = _create_unreferenced_host_pages(
+        manager, num_pages=1, prefix_hashes=[1]
+    )[0]
+
+    with self.assertRaisesRegex(
+        ValueError, r"Cannot swap in page with no references\."
+    ):
+      manager._swap_in_pages([host_page])
+
+  def test_swap_in_pages_loads_referenced_host_pages(self):
+    manager = _create_manager(num_device_pages=5, num_host_pages=5)
+    host_page = _create_unreferenced_host_pages(
+        manager, num_pages=1, prefix_hashes=[1]
+    )[0]
+    manager._touch_page(host_page)
+
+    manager._swap_in_pages([host_page])
+
+    self.assertEqual(
+        manager._page_manager.page_location(host_page.page_id), PageLocation.DEVICE
+    )
+    self.assertEqual(manager._page_manager.num_free_host_pages, 5)
+
+  def test_swap_in_pages_evicts_unreferenced_device_pages_on_shortfall(self):
+    manager = _create_manager(num_device_pages=2, num_host_pages=2)
+    host_page = _create_unreferenced_host_pages(
+        manager, num_pages=1, prefix_hashes=[1]
+    )[0]
+    u0, u1 = _create_unreferenced_device_pages(
+        manager, num_pages=2, prefix_hashes=[2, 3]
+    )
+    manager._touch_page(host_page)
+    self.assertEqual(manager._page_manager.num_free_device_pages, 0)
+
+    manager._swap_in_pages([host_page])
+
+    pm = manager._page_manager
+    self.assertEqual(pm.page_location(host_page.page_id), PageLocation.DEVICE)
+    # The LRU unreferenced device page is offloaded to make room.
+    self.assertEqual(pm.page_location(u0.page_id), PageLocation.HOST)
+    self.assertIn(u0, manager._unreferenced_host_pages)
+    self.assertEqual(pm.page_location(u1.page_id), PageLocation.DEVICE)
+    self.assertIn(u1, manager._unreferenced_device_pages)
+
+  def test_bind_pages_touches_and_extends_request_pages(self):
+    manager = _create_manager(num_device_pages=5)
+    p0, p1 = _create_unreferenced_device_pages(
+        manager, num_pages=2, prefix_hashes=[1, 2]
+    )
+
+    manager._bind_pages([None, p0], "req_1")
+    manager._bind_pages([p1], "req_1")
+
+    self.assertEqual(manager._request_to_pages["req_1"], [None, p0, p1])
+    self.assertEqual(p0.ref_count, 1)
+    self.assertEqual(p1.ref_count, 1)
+    self.assertEmpty(manager._unreferenced_device_pages)
+
+  def test_allocate_device_pages_zero_is_no_op(self):
+    manager = _create_manager(num_device_pages=5)
+    manager._allocate_device_pages(0, "req_1")
+
+    self.assertNotIn("req_1", manager._request_to_pages)
+    self.assertEqual(manager._page_manager.num_free_device_pages, 5)
+
+  def test_allocate_device_pages_evicts_unreferenced_pages_on_shortfall(self):
+    manager = _create_manager(num_device_pages=3, num_host_pages=0)
+    u0, u1 = _create_unreferenced_device_pages(
+        manager, num_pages=2, prefix_hashes=[1, 2]
+    )
+
+    manager._allocate_device_pages(2, "req_1")
+
+    req_pages = manager._request_to_pages["req_1"]
+    self.assertLen(req_pages, 2)
+    for p in req_pages:
+      assert p is not None
+      self.assertEqual(p.ref_count, 1)
+      self.assertEqual(manager._page_manager.page_location(p.page_id), PageLocation.DEVICE)
+    self.assertTrue(u0.is_freed)
+    self.assertIsNone(manager._page_manager.page_location(u0.page_id))
+    self.assertIn(u1, manager._unreferenced_device_pages)
+
+
+class AllocateSlotsTest(parameterized.TestCase):
+
+  def test_allocate_slots_insufficient_device_pages_raises(self):
+    manager = _create_manager(page_size=4, num_device_pages=2)
+    with self.assertRaisesRegex(
+        ValueError,
+        r"Cannot allocate 10 slots for request req_1\. Insufficient space\.",
+    ):
+      manager.allocate_slots(
+          request_id="req_1", num_tokens=10, num_completed_tokens=0
+      )
+
+  def test_allocate_slots_device_shortfall_handled_correctly(self):
+    manager = _create_manager(page_size=4, num_device_pages=5)
+    _create_unreferenced_device_pages(
+        manager, num_pages=2, prefix_hashes=[1, 2]
+    )
+
+    manager.allocate_slots(
+        request_id="req_1", num_tokens=16, num_completed_tokens=0
+    )
+
+    req_pages = manager._request_to_pages["req_1"]
+    self.assertLen(req_pages, 4)
+    for page in req_pages:
+      self.assertIsNotNone(page)
+      assert page is not None
+      self.assertEqual(page.ref_count, 1)
+      self.assertEqual(
+          manager._page_manager.page_location(page.page_id), PageLocation.DEVICE
+      )
+
+  def test_allocate_slots_loads_computed_host_pages(self):
+    manager = _create_manager(
+        page_size=4, num_device_pages=5, num_host_pages=5
+    )
+    host_page = _create_unreferenced_host_pages(
+        manager, num_pages=1, prefix_hashes=[100]
+    )[0]
+
+    manager.allocate_slots(
+        request_id="req_1",
+        num_tokens=4,
+        num_completed_tokens=0,
+        computed_pages=[host_page],
+    )
+
+    pid = host_page.page_id
+    self.assertEqual(manager._page_manager.page_location(pid), PageLocation.DEVICE)
+    self.assertNotIn(host_page, manager._unreferenced_host_pages)
+
+  def test_allocate_slots_marks_scheduled_pages_referenced(self):
+    manager = _create_manager(page_size=4, num_device_pages=5)
+    manager.allocate_slots(
+        request_id="req_1", num_tokens=8, num_completed_tokens=0
+    )
+
+    req_pages = manager._request_to_pages["req_1"]
+    self.assertLen(req_pages, 2)
+    for p in req_pages:
+      self.assertIsNotNone(p)
+      assert p is not None
+      self.assertEqual(p.ref_count, 1)
+      self.assertNotIn(p, manager._unreferenced_device_pages)
+      self.assertNotIn(p, manager._unreferenced_host_pages)
+
+  def test_allocate_slots_protects_computed_unreferenced_pages(self):
+    manager = _create_manager(page_size=4, num_device_pages=2)
+    matched_p = _create_unreferenced_device_pages(
+        manager, num_pages=1, prefix_hashes=[1]
+    )[0]
+
+    manager.allocate_slots(
+        request_id="req_1",
+        num_tokens=4,
+        num_completed_tokens=0,
+        computed_pages=[matched_p],
+    )
+
+    self.assertEqual(matched_p.ref_count, 1)
+    self.assertNotIn(matched_p, manager._unreferenced_device_pages)
+
+  def test_allocate_slots_all_used_pages_touched(self):
+    manager = _create_manager(page_size=4, num_device_pages=5)
+    p0 = _create_unreferenced_device_pages(
+        manager, num_pages=1, prefix_hashes=[10]
+    )[0]
+
+    manager.allocate_slots(
+        request_id="req_1",
+        num_tokens=8,
+        num_completed_tokens=0,
+        computed_pages=[p0],
+    )
+
+    req_pages = manager._request_to_pages["req_1"]
+    self.assertLen(req_pages, 3)
+    for p in req_pages:
+      self.assertIsNotNone(p)
+      assert p is not None
+      self.assertGreater(p.ref_count, 0)
+      self.assertNotIn(p, manager._unreferenced_device_pages)
+
+  @parameterized.parameters(
+      (None,),
+      (12,),
+      (16,),
+  )
+  def test_allocate_slots_parameterized_window_sizes(
+      self, window_size: int | None
+  ):
+    manager = _create_manager(
+        page_size=4, num_device_pages=10, window_size=window_size
+    )
+    manager.allocate_slots(
+        request_id="req_1", num_tokens=12, num_completed_tokens=0
+    )
+    req_pages = manager._request_to_pages["req_1"]
+    self.assertLen(req_pages, 3)
+
+  def test_allocate_slots_stress_cases(self):
+    manager = _create_manager(
+        page_size=4, num_device_pages=20, num_host_pages=20, window_size=20
+    )
+    matched_page = _create_unreferenced_device_pages(
+        manager, num_pages=1, prefix_hashes=[42]
+    )[0]
+
+    manager.allocate_slots(
+        request_id="req_1",
+        num_tokens=20,
+        num_completed_tokens=0,
+        computed_pages=[matched_page],
+    )
+    req_pages = manager._request_to_pages["req_1"]
+    self.assertLen(req_pages, 6)
+    self.assertEqual(req_pages[0], matched_page)
+
+  def test_allocate_slots_with_out_of_window_none_pages(self):
+    manager = _create_manager(
+        page_size=4, num_device_pages=10, window_size=8
+    )
+    pages = _create_unreferenced_device_pages(
+        manager, num_pages=2, prefix_hashes=[200, 300]
+    )
+    p2, p3 = pages[0], pages[1]
+
+    manager.allocate_slots(
+        request_id="req_1",
+        num_tokens=4,
+        num_completed_tokens=0,
+        computed_pages=[None, None, p2, p3],
+    )
+
+    req_pages = manager._request_to_pages["req_1"]
+    # 4 computed pages are bound, plus 1 new page for the 4 scheduled tokens.
+    self.assertLen(req_pages, 5)
+    self.assertIsNone(req_pages[0])
+    self.assertIsNone(req_pages[1])
+    self.assertEqual(req_pages[2], p2)
+    self.assertEqual(req_pages[3], p3)
+    self.assertEqual(p2.ref_count, 1)
+    self.assertEqual(p3.ref_count, 1)
+
+  def test_allocate_slots_running_request_appends_pages(self):
+    manager = _create_manager(page_size=4, num_device_pages=5)
+    manager.allocate_slots("req_1", num_tokens=8, num_completed_tokens=0)
+    existing_pages = list(manager._request_to_pages["req_1"])
+
+    # The next token fits in the last page.
+    manager.allocate_slots("req_1", num_tokens=1, num_completed_tokens=7)
+    self.assertEqual(manager._request_to_pages["req_1"], existing_pages)
+
+    # The next token crosses a page boundary.
+    manager.allocate_slots("req_1", num_tokens=1, num_completed_tokens=8)
+    req_pages = manager._request_to_pages["req_1"]
+    self.assertLen(req_pages, 3)
+    self.assertEqual(req_pages[:2], existing_pages)
+    self.assertEqual(manager._page_manager.num_free_device_pages, 2)
+
+  def test_allocate_slots_computed_host_page_under_device_pressure(self):
+    manager = _create_manager(page_size=4, num_device_pages=2, num_host_pages=2)
+    host_page = _create_unreferenced_host_pages(
+        manager, num_pages=1, prefix_hashes=[100]
+    )[0]
+    _create_unreferenced_device_pages(
+        manager, num_pages=2, prefix_hashes=[1, 2]
+    )
+
+    manager.allocate_slots(
+        "req_1",
+        num_tokens=1,
+        num_completed_tokens=0,
+        computed_pages=[host_page],
+    )
+
+    # 1 computed page, plus 1 new page for the scheduled token.
+    req_pages = manager._request_to_pages["req_1"]
+    self.assertLen(req_pages, 2)
+    self.assertEqual(req_pages[0], host_page)
+    pm = manager._page_manager
+    self.assertEqual(pm.page_location(host_page.page_id), PageLocation.DEVICE)
+    self.assertEqual(pm.num_free_device_pages, 0)
+
+
+class PrefixCacheLifecycleTest(absltest.TestCase):
+
+  def test_cached_pages_are_reused_by_next_request(self):
+    manager = _create_manager(page_size=4, num_device_pages=5)
+    manager.allocate_slots("req_1", num_tokens=8, num_completed_tokens=0)
+    req1_pages = list(manager._request_to_pages["req_1"])
+    manager.sync_request_state(
+        "req_1", page_hashes=[10, 20], num_completed_tokens=8
+    )
+    manager.release_request("req_1")
+    # Cached pages are kept after release.
+    self.assertEqual(manager._page_manager.num_free_device_pages, 3)
+
+    hits = manager.find_longest_cache_hit([10, 20, 30])
+    self.assertEqual(hits, req1_pages)
+    manager.allocate_slots(
+        "req_2", num_tokens=4, num_completed_tokens=0, computed_pages=hits
+    )
+
+    req2_pages = manager._request_to_pages["req_2"]
+    self.assertLen(req2_pages, 3)
+    self.assertEqual(req2_pages[:2], req1_pages)
+    for p in req2_pages:
+      assert p is not None
+      self.assertEqual(p.ref_count, 1)
+    self.assertEmpty(manager._unreferenced_device_pages)
+    self.assertEqual(manager._page_manager.num_free_device_pages, 2)
+
+  def test_local_attention_releases_pages_for_reuse(self):
+    manager = _create_manager(page_size=4, num_device_pages=10, window_size=4)
+    for step in range(3):
+      num_completed_tokens = 4 * step
+      manager.allocate_slots(
+          "req_1", num_tokens=4, num_completed_tokens=num_completed_tokens
+      )
+      manager.sync_request_state(
+          "req_1",
+          page_hashes=[10, 20, 30][: step + 1],
+          num_completed_tokens=num_completed_tokens + 4,
+      )
+
+    req_pages = manager._request_to_pages["req_1"]
+    self.assertIsNone(req_pages[0])
+    self.assertIsNone(req_pages[1])
+    p2 = req_pages[2]
+    assert p2 is not None
+    p0 = manager._prefix_hash_to_page[10]
+    p1 = manager._prefix_hash_to_page[20]
+    # Out-of-window pages are released lowest index first.
+    self.assertEqual(list(manager._unreferenced_device_pages), [p0, p1])
+    self.assertEqual(manager._page_manager.num_free_device_pages, 7)
+
+    # A new request can match the last window of released and live pages.
+    self.assertEqual(manager.find_longest_cache_hit([10, 20]), [None, p1])
+    self.assertEqual(
+        manager.find_longest_cache_hit([10, 20, 30]), [None, None, p2]
+    )
+
+
+class RequestReleaseAndIndicesTest(absltest.TestCase):
+
+  def test_release_request_calls_release_for_all_pages(self):
+    manager = _create_manager(page_size=4, num_device_pages=5)
+    req_id = "req_1"
+    manager.allocate_slots(
+        req_id, num_tokens=8, num_completed_tokens=0
+    )
+    pages = list(manager._request_to_pages[req_id])
+
+    self.assertEqual(manager._page_manager.num_free_device_pages, 3)
+    manager.release_request(req_id)
+
+    self.assertNotIn(req_id, manager._request_to_pages)
+    for p in pages:
+      self.assertIsNotNone(p)
+      assert p is not None
+      self.assertEqual(p.ref_count, 0)
+    self.assertEqual(manager._page_manager.num_free_device_pages, 5)
+
+  def test_release_request_unscheduled_no_op(self):
+    manager = _create_manager()
+    manager.release_request(request_id="req_999")
+
+  def test_release_request_evicts_rightmost_pages_first(self):
+    manager = _create_manager(page_size=4, num_device_pages=5)
+    pages = _assign_request_pages(manager, "req_1", num_pages=3)
+    for i, p in enumerate(pages):
+      p.prefix_hash = i
+
+    manager.release_request("req_1")
+
+    # The leftmost pages are evicted last, so they stay available for prefix
+    # matching the longest.
+    self.assertEqual(
+        list(manager._unreferenced_device_pages), [pages[2], pages[1], pages[0]]
+    )
+
+  def test_get_page_idxs_unscheduled_returns_empty(self):
+    manager = _create_manager()
+    self.assertEmpty(manager.get_page_idxs(request_id="req_999"))
+
+  def test_get_page_idxs_returns_correct_indices(self):
+    manager = _create_manager(page_size=4, num_device_pages=5)
+    req_id = "req_1"
+    manager.allocate_slots(
+        req_id, num_tokens=8, num_completed_tokens=0
+    )
+
+    req_pages = manager._request_to_pages[req_id]
+    expected_indices = []
+    for p in req_pages:
+      self.assertIsNotNone(p)
+      assert p is not None
+      expected_indices.append(manager._page_manager.page_idx(p.page_id))
+    indices = manager.get_page_idxs(req_id)
+    self.assertEqual(indices, expected_indices)
+
+  def test_get_page_idxs_returns_placeholder_when_active_page_is_none(self):
+    manager = _create_manager(page_size=4, num_device_pages=5)
+    req_id = "req_1"
+    manager.allocate_slots(
+        req_id, num_tokens=8, num_completed_tokens=0
+    )
+    req_pages = manager._request_to_pages[req_id]
+    req_pages[0] = None
+
+    indices = manager.get_page_idxs(req_id)
+
+    # Released pages keep their slot, reported as -1, so that the indices stay
+    # aligned with the request's page positions.
+    p1 = req_pages[1]
+    self.assertIsNotNone(p1)
+    assert p1 is not None
+    expected_indices = [-1, manager._page_manager.page_idx(p1.page_id)]
+    self.assertEqual(
+        indices,
+        expected_indices
+    )
+
+  def test_get_page_idxs_after_out_of_window_pages_released(self):
+    manager = _create_manager(
+        page_size=4, num_device_pages=10, window_size=4
+    )
+    req_id = "req_1"
+    _assign_request_pages(manager, req_id, num_pages=4)
+
+    manager._release_out_of_window(req_id, num_completed_tokens=12)
+    req_pages = manager._request_to_pages[req_id]
+    self.assertIsNone(req_pages[0])
+    self.assertIsNone(req_pages[1])
+
+    remaining_indices = manager.get_page_idxs(req_id)
+    self.assertLen(remaining_indices, 4)
+    p2 = req_pages[2]
+    p3 = req_pages[3]
+    self.assertIsNotNone(p2)
+    self.assertIsNotNone(p3)
+    assert p2 is not None and p3 is not None
+    # The released pages are reported as -1 rather than dropped, so that the
+    # indices stay aligned with the request's page positions.
+    self.assertEqual(
+        remaining_indices,
+        [
+            -1,
+            -1,
+            manager._page_manager.page_idx(p2.page_id),
+            manager._page_manager.page_idx(p3.page_id),
+        ],
+    )
+
+  def test_get_page_idxs_unknown_page_raises(self):
+    manager = _create_manager()
+    manager._request_to_pages["req_1"] = [Page(page_id=999, ref_count=1)]
+
+    with self.assertRaisesRegex(
+        ValueError, r"Page 999 not found in page manager\."
+    ):
+      manager.get_page_idxs("req_1")
+
+
+class UpdateDevicePoolAndPropertiesTest(absltest.TestCase):
+
+  def test_update_device_pool_calls_page_manager(self):
+    manager = _create_manager(partition_keys=("cache_0",))
+    new_arr = jnp.ones((10, 4), dtype=jnp.float32)
+    manager.update_device_pool({"cache_0": new_arr})
+    np.testing.assert_array_equal(
+        manager._page_manager.physical_device_pages["cache_0"], new_arr
+    )
+
+  def test_properties_and_physical_pages(self):
+    manager = _create_manager(
+        page_size=4,
+        window_size=8,
+        partition_keys=("cache_0", "cache_1"),
+    )
+    self.assertEqual(manager.cache_names, ("cache_0", "cache_1"))
+    self.assertEqual(manager.window_size, 8)
+    pages = manager.get_physical_pages()
+    self.assertIn("cache_0", pages)
+    self.assertIn("cache_1", pages)
+
+  def test_reset_kv_caches_frees_all_pages(self):
+    manager = _create_manager(page_size=4, num_device_pages=5, num_host_pages=5)
+    manager.allocate_slots("req_1", num_tokens=8, num_completed_tokens=0)
+    manager.sync_request_state(
+        "req_1", page_hashes=[10], num_completed_tokens=8
+    )
+    _create_unreferenced_device_pages(manager, num_pages=1, prefix_hashes=[20])
+    _create_unreferenced_host_pages(manager, num_pages=1, prefix_hashes=[30])
+
+    manager.reset_kv_caches()
+
+    pm = manager._page_manager
+    self.assertEqual(pm.num_free_device_pages, 5)
+    self.assertEqual(pm.num_free_host_pages, 5)
+    self.assertEmpty(manager._request_to_pages)
+    self.assertEmpty(manager._prefix_hash_to_page)
+    self.assertEmpty(manager._unreferenced_device_pages)
+    self.assertEmpty(manager._unreferenced_host_pages)
+
+  def test_reset_kv_caches_restores_full_capacity_and_purges_prefix_cache(
+      self,
+  ):
+    manager = _create_manager(page_size=4, num_device_pages=5, num_host_pages=5)
+    # A finished request leaves its full pages in the prefix cache.
+    manager.allocate_slots("req_1", num_tokens=8, num_completed_tokens=0)
+    manager.sync_request_state(
+        "req_1", page_hashes=[10, 20], num_completed_tokens=8
+    )
+    manager.release_request("req_1")
+    # A running request still holds its pages.
+    manager.allocate_slots("req_2", num_tokens=8, num_completed_tokens=0)
+    self.assertLen(manager.find_longest_cache_hit([10, 20]), 2)
+
+    manager.reset_kv_caches()
+
+    self.assertEmpty(manager.find_longest_cache_hit([10, 20]))
+    self.assertEqual(manager._page_manager.num_free_device_pages, 5)
+    self.assertTrue(
+        manager.has_sufficient_space(
+            "req_3", num_tokens=20, num_completed_tokens=0
+        )
+    )
+    manager.allocate_slots("req_3", num_tokens=20, num_completed_tokens=0)
+    self.assertLen(manager.get_page_idxs("req_3"), 5)
 
 
 if __name__ == "__main__":
