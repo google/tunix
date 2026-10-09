@@ -222,32 +222,63 @@ class SWEEnv(BaseTaskEnv):
         ws_kwargs["router_auth_token"] = os.getenv("ROUTER_AUTH_TOKEN")
       ws_kwargs["working_dir"] = os.getenv("OPENHANDS_WORKING_DIR", "/testbed")
       self.workspace = make_handle_workspace(self.handle, **ws_kwargs)
+    is_openhands = self.scaffold in template_mod.OPENHANDS_SCAFFOLDS
     cmd_files = None
-    if self.scaffold not in template_mod.OPENHANDS_SCAFFOLDS:
+    if not is_openhands:
       try:
         cmd_files = r2egym_command_files()
       except Exception:  # pylint: disable=broad-exception-caught
         cmd_files = None
-    self.env = make_fleet_repo_env(
-        self.handle,
-        command_files=cmd_files,
-        step_timeout=self.step_timeout,
-        reward_timeout=self.reward_timeout,
-        verbose=self.verbose,
-    )
-    if self.scaffold in template_mod.OPENHANDS_SCAFFOLDS:
+    if is_openhands and self.handle is not None:
+      self.handle._target_container = sandbox_utils.EVAL_CONTAINER_NAME
+      self.handle._defer_setup_env = True
+    try:
+      self.env = make_fleet_repo_env(
+          self.handle,
+          command_files=cmd_files,
+          step_timeout=self.step_timeout,
+          reward_timeout=self.reward_timeout,
+          verbose=self.verbose,
+      )
+    finally:
+      if is_openhands and self.handle is not None:
+        self.handle._target_container = sandbox_utils.RUNTIME_CONTAINER_NAME
+        self.handle._defer_setup_env = False
+    if is_openhands:
+      sandbox_utils.set_runtime_container(
+          self.env, sandbox_utils.EVAL_CONTAINER_NAME
+      )
       openhands_utils.setup_openhands_workspace(self.workspace, self.entry)
     elif self.env is not None:
-      openhands_utils.hide_r2e_tests_for_rollout(self.env)
+      openhands_utils.hide_r2e_tests_for_rollout(self.env, self.entry)
 
     if self.env is not None and hasattr(self.env, "compute_reward"):
       orig_compute_reward = self.env.compute_reward
 
-      def _compute_reward_with_restore(*args, **kwargs):
-        openhands_utils.restore_r2e_tests_for_reward(self.workspace or self.env)
-        return orig_compute_reward(*args, **kwargs)
+      def _compute_reward_in_fresh_container(*args, **kwargs):
+        rollout_target = self.workspace or self.env
+        if self.workspace is None and self.env is not None:
+          sandbox_utils.set_runtime_container(
+              self.env, sandbox_utils.RUNTIME_CONTAINER_NAME
+          )
+        base_commit = openhands_utils.resolve_base_commit(self.entry)
+        workspace_path = os.getenv("OPENHANDS_WORKING_DIR", "/testbed")
+        patch = openhands_utils.extract_agent_patch(
+            rollout_target,
+            base_commit=base_commit,
+            workspace_path=workspace_path,
+            timeout=float(self.reward_timeout),
+        )
+        openhands_utils.cleanup_rollout_container_processes(rollout_target)
+        return openhands_utils.evaluate_patch_in_fresh_container(
+            self.env,
+            patch,
+            orig_compute_reward,
+            *args,
+            **kwargs,
+        )
 
-      self.env.compute_reward = _compute_reward_with_restore
+      self.env.compute_reward = _compute_reward_in_fresh_container
 
   def _init_local_repo_env(self) -> None:
     # Initialize standard local Docker RepoEnv

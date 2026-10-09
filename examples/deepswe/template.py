@@ -1207,6 +1207,10 @@ DEFAULT_OPENHANDS_KEEPALIVE_CMD = [
 ]
 
 
+RUNTIME_CONTAINER_NAME = "agent-runtime"
+EVAL_CONTAINER_NAME = "eval"
+
+
 def get_openhands_pod_template(
     node_selector: Optional[dict[str, str]] = None,
 ) -> Any:
@@ -1240,6 +1244,8 @@ def get_openhands_pod_template(
   )
 
   extra_pod_spec = {
+      "automountServiceAccountToken": False,
+      "shareProcessNamespace": False,
       "initContainers": [{
           "name": "oh-server",
           "image": server_image,

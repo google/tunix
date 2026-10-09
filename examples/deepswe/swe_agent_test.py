@@ -18,6 +18,7 @@ import os
 from unittest import mock
 from absl.testing import absltest
 from examples.deepswe import openhands_utils
+from examples.deepswe import sandbox_utils
 from examples.deepswe import swe_agent
 from examples.deepswe import swe_env
 from examples.deepswe import template
@@ -521,9 +522,8 @@ class SweAgentTest(absltest.TestCase):
         "</parameter>\n</function>\n</tool_call>"
     )
     calls = [
-        "<function=think>\n<parameter=thought>a</parameter>\n</function>",
-        "<function=execute_bash>\n<parameter=command>ls</parameter>\n"
-        "</function>",
+        str(SWEAction("think", {"thought": "a"})),
+        str(SWEAction("execute_bash", {"command": "ls"})),
     ]
     for value, expected in (("", calls[0]), ("false", calls[0])):
       with self.subTest(flag=value), mock.patch.dict(
@@ -1318,6 +1318,421 @@ class SweAgentTest(absltest.TestCase):
           check=True,
       )
       self.assertEqual(proc.stdout.strip(), os.path.realpath(fake_testbed))
+
+  def test_remove_binary_diffs_and_extract_agent_patch_real_git_repo(self):
+    import subprocess  # pylint: disable=g-import-not-at-top
+    import tempfile  # pylint: disable=g-import-not-at-top
+
+    raw_patch = (
+        "diff --git a/foo.py b/foo.py\n"
+        "index 1111111..2222222 100644\n"
+        "--- a/foo.py\n"
+        "+++ b/foo.py\n"
+        "@@ -1 +1 @@\n"
+        "-x = 1\n"
+        "+x = 2\n"
+        "diff --git a/bin.dat b/bin.dat\n"
+        "new file mode 100644\n"
+        "Binary files /dev/null and b/bin.dat differ\n"
+        "diff --git a/bar.py b/bar.py\n"
+        "index 3333333..4444444 100644\n"
+        "--- a/bar.py\n"
+        "+++ b/bar.py\n"
+        "@@ -1 +1 @@\n"
+        "-y = 1\n"
+        "+y = 2\n"
+    )
+    cleaned = openhands_utils.remove_binary_diffs(raw_patch)
+    self.assertIn("diff --git a/foo.py b/foo.py", cleaned)
+    self.assertIn("diff --git a/bar.py b/bar.py", cleaned)
+    self.assertNotIn("bin.dat", cleaned)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+      repo = os.path.join(tmpdir, "testbed")
+      os.makedirs(repo)
+      subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+      subprocess.run(
+          ["git", "config", "user.email", "test@example.com"],
+          cwd=repo,
+          check=True,
+      )
+      subprocess.run(
+          ["git", "config", "user.name", "Test User"],
+          cwd=repo,
+          check=True,
+      )
+      src_file = os.path.join(repo, "app.py")
+      with open(src_file, "w", encoding="utf-8") as f:
+        f.write("def solve():\n    return 0\n")
+      subprocess.run(["git", "add", "app.py"], cwd=repo, check=True)
+      subprocess.run(
+          ["git", "commit", "-m", "initial"],
+          cwd=repo,
+          check=True,
+          capture_output=True,
+      )
+      base_commit = subprocess.run(
+          ["git", "rev-parse", "HEAD"],
+          cwd=repo,
+          check=True,
+          capture_output=True,
+          text=True,
+      ).stdout.strip()
+
+      # Modify tracked source file, add nested .git dir (including spaces), and add binary file (with spaces).
+      with open(src_file, "w", encoding="utf-8") as f:
+        f.write("def solve():\n    return 42\n")
+      nested_git = os.path.join(repo, "sub repo", ".git")
+      os.makedirs(nested_git)
+      with open(os.path.join(nested_git, "HEAD"), "w", encoding="utf-8") as f:
+        f.write("ref: refs/heads/main\n")
+      with open(
+          os.path.join(repo, "sub repo", "helper.py"), "w", encoding="utf-8"
+      ) as f:
+        f.write("HELPER = True\n")
+      bin_file = os.path.join(repo, "compiled binary.out")
+      with open(bin_file, "wb") as f:
+        f.write(b"\x7fELF\x02\x01\x01\x00" + b"\x00" * 64)
+      os.chmod(bin_file, 0o755)
+
+      class _LocalWorkspace:
+
+        def execute_command(self, cmd, timeout=60.0):
+          del timeout
+          p = subprocess.run(
+              ["bash", "-c", cmd], capture_output=True, text=True
+          )
+          res = mock.MagicMock()
+          res.stdout = p.stdout
+          res.stderr = p.stderr
+          res.exit_code = p.returncode
+          return res
+
+      patch = openhands_utils.extract_agent_patch(
+          _LocalWorkspace(),
+          base_commit=base_commit,
+          workspace_path=repo,
+      )
+      self.assertFalse(os.path.exists(nested_git))
+      self.assertIn("diff --git a/app.py b/app.py", patch)
+      self.assertIn("+    return 42", patch)
+      self.assertIn("sub repo/helper.py", patch)
+      self.assertNotIn("compiled binary.out", patch)
+      self.assertTrue(patch.endswith("\n"))
+
+  def test_cleanup_rollout_container_processes(self):
+    mock_ws = mock.MagicMock()
+    openhands_utils.cleanup_rollout_container_processes(mock_ws)
+    mock_ws.execute_command.assert_called_once()
+    cmd = mock_ws.execute_command.call_args[0][0]
+    self.assertIn("kill -TERM", cmd)
+    self.assertIn("kill -KILL", cmd)
+    self.assertIn("openhands-agent-server", cmd)
+    self.assertIn("/dev/shm", cmd)
+
+  def test_evaluate_patch_in_fresh_container_empty_and_failed_apply_and_success(
+      self,
+  ):
+    mock_eval_env = mock.MagicMock()
+    mock_runtime = mock.MagicMock()
+    mock_runtime.repo_path = "/testbed"
+    mock_eval_env.runtime = mock_runtime
+    orig_reward = mock.MagicMock(return_value=1.0)
+
+    # 1. Empty patch -> 0.0 without running git apply or orig_reward
+    self.assertEqual(
+        openhands_utils.evaluate_patch_in_fresh_container(
+            mock_eval_env, "   \n", orig_reward
+        ),
+        0.0,
+    )
+    mock_runtime.run.assert_not_called()
+    orig_reward.assert_not_called()
+
+    # 2. Failed git apply -> 0.0 without running setup_env or orig_reward
+    mock_runtime.run.side_effect = [
+        ("run_tests.sh\nexpected_test_output.json\n", "0"),
+        ("error: patch failed", "Error: Exit code 1"),
+    ]
+    self.assertEqual(
+        openhands_utils.evaluate_patch_in_fresh_container(
+            mock_eval_env,
+            "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n",
+            orig_reward,
+        ),
+        0.0,
+    )
+    mock_runtime.setup_env.assert_not_called()
+    orig_reward.assert_not_called()
+
+    # 3. Successful apply -> runs setup_env() and orig_reward() in eval container
+    mock_runtime.reset_mock()
+    mock_runtime.run.side_effect = [
+        ("run_tests.sh\nexpected_test_output.json\nuntracked file.txt\n", "0"),
+        ("", "0"),
+    ]
+    observed_container = []
+    orig_reward.side_effect = lambda *a, **k: (
+        observed_container.append(mock_runtime._target_container) or 1.0
+    )
+    mock_runtime._target_container = sandbox_utils.RUNTIME_CONTAINER_NAME
+    reward = openhands_utils.evaluate_patch_in_fresh_container(
+        mock_eval_env,
+        "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n",
+        orig_reward,
+    )
+    self.assertEqual(reward, 1.0)
+    self.assertEqual(
+        observed_container,
+        [sandbox_utils.EVAL_CONTAINER_NAME],
+    )
+    self.assertEqual(
+        mock_runtime._target_container,
+        sandbox_utils.RUNTIME_CONTAINER_NAME,
+    )
+    self.assertEqual(mock_runtime.run.call_count, 2)
+    ls_cmd = mock_runtime.run.call_args_list[0][0][0]
+    apply_cmd = mock_runtime.run.call_args_list[1][0][0]
+    self.assertEqual(ls_cmd, "git ls-files --others --exclude-standard")
+    self.assertIn("git apply --whitespace=fix", apply_cmd)
+    self.assertIn("--exclude=run_tests.sh", apply_cmd)
+    self.assertIn("--exclude=expected_test_output.json", apply_cmd)
+    self.assertIn("--exclude=untracked file.txt", apply_cmd)
+    mock_runtime.setup_env.assert_called_once()
+    orig_reward.assert_called_once()
+
+    # 4. Real git repo with DockerRuntime._run_kubernetes `cd <workdir> && timeout <sec> <code>` semantics
+    import subprocess  # pylint: disable=g-import-not-at-top
+    import tempfile  # pylint: disable=g-import-not-at-top
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+      repo = os.path.join(tmpdir, "testbed")
+      os.makedirs(repo)
+      subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+      subprocess.run(
+          ["git", "config", "user.email", "test@example.com"],
+          cwd=repo,
+          check=True,
+      )
+      subprocess.run(
+          ["git", "config", "user.name", "Test User"],
+          cwd=repo,
+          check=True,
+      )
+      target_file = os.path.join(repo, "calc.py")
+      with open(target_file, "w", encoding="utf-8") as f:
+        f.write("val = 1\n")
+      subprocess.run(["git", "add", "calc.py"], cwd=repo, check=True)
+      subprocess.run(
+          ["git", "commit", "-m", "init"],
+          cwd=repo,
+          check=True,
+          capture_output=True,
+      )
+      with open(os.path.join(repo, "run_tests.sh"), "w", encoding="utf-8") as f:
+        f.write("#!/bin/sh\nexit 0\n")
+
+      def _k8s_like_run(code, timeout=30):
+        full_cmd = f"cd {repo} && timeout {timeout} {code}"
+        p = subprocess.run(
+            ["/bin/sh", "-c", full_cmd], capture_output=True, text=True
+        )
+        out = (p.stdout or "") + (p.stderr or "")
+        return (out, "0" if p.returncode == 0 else f"Error: Exit code {p.returncode}")
+
+      real_eval_env = mock.MagicMock()
+      real_runtime = mock.MagicMock()
+      real_runtime.repo_path = repo
+      real_runtime.run.side_effect = _k8s_like_run
+      real_eval_env.runtime = real_runtime
+      patch_str = (
+          "diff --git a/calc.py b/calc.py\n"
+          "--- a/calc.py\n"
+          "+++ b/calc.py\n"
+          "@@ -1 +1 @@\n"
+          "-val = 1\n"
+          "+val = 99\n"
+      )
+      res_reward = openhands_utils.evaluate_patch_in_fresh_container(
+          real_eval_env,
+          patch_str,
+          lambda: 1.0,
+      )
+      self.assertEqual(res_reward, 1.0)
+      self.assertFalse(os.path.exists("/tmp/model.patch"))
+      with open(target_file, "r", encoding="utf-8") as f:
+        self.assertEqual(f.read(), "val = 99\n")
+
+      # 5. Large patch (>64KB base64) chunked write path + extract_agent_patch
+      # ignoring bash_events/, conversations/, and install.sh
+      subprocess.run(["git", "reset", "--hard"], cwd=repo, check=True)
+      os.makedirs(os.path.join(repo, "bash_events"), exist_ok=True)
+      with open(
+          os.path.join(repo, "bash_events", "evt1"), "w", encoding="utf-8"
+      ) as f:
+        f.write("big event log " * 5000)
+      os.makedirs(os.path.join(repo, "conversations"), exist_ok=True)
+      with open(
+          os.path.join(repo, "conversations", "conv1"), "w", encoding="utf-8"
+      ) as f:
+        f.write("conversation state")
+      with open(os.path.join(repo, "install.sh"), "w", encoding="utf-8") as f:
+        f.write("uv pip install -e .\n")
+
+      class _LocalWs:
+
+        def execute_command(self, cmd, timeout=60.0):
+          del timeout
+          p = subprocess.run(
+              ["/bin/sh", "-c", cmd], capture_output=True, text=True
+          )
+          return mock.MagicMock(
+              exit_code=p.returncode, stdout=p.stdout, stderr=p.stderr
+          )
+
+      empty_patch = openhands_utils.extract_agent_patch(
+          _LocalWs(), base_commit="HEAD", workspace_path=repo
+      )
+      self.assertEqual(empty_patch, "")
+
+      large_content = "\n".join(f"line_{i} = {i}" for i in range(6000)) + "\n"
+      with open(target_file, "w", encoding="utf-8") as f:
+        f.write(large_content)
+      extracted_large = openhands_utils.extract_agent_patch(
+          _LocalWs(), base_commit="HEAD", workspace_path=repo
+      )
+      self.assertIn("diff --git a/calc.py b/calc.py", extracted_large)
+      self.assertNotIn("bash_events", extracted_large)
+      self.assertNotIn("conversations", extracted_large)
+      self.assertNotIn("install.sh", extracted_large)
+      self.assertGreater(len(extracted_large), 50000)
+
+      subprocess.run(["git", "reset", "--hard"], cwd=repo, check=True)
+      res_large_reward = openhands_utils.evaluate_patch_in_fresh_container(
+          real_eval_env,
+          extracted_large,
+          lambda: 1.0,
+      )
+      self.assertEqual(res_large_reward, 1.0)
+      self.assertFalse(os.path.exists("/tmp/model.patch"))
+      self.assertFalse(os.path.exists("/tmp/model.patch.b64"))
+      with open(target_file, "r", encoding="utf-8") as f:
+        self.assertEqual(f.read(), large_content)
+
+      # 6. If repository tracked install.sh or run_tests.sh at base_commit,
+      # extract_agent_patch must reset their index state to base_commit rather
+      # than emitting a deletion diff.
+      subprocess.run(["git", "reset", "--hard"], cwd=repo, check=True)
+      tracked_install = os.path.join(repo, "install.sh")
+      with open(tracked_install, "w", encoding="utf-8") as f:
+        f.write("#!/bin/sh\necho repo tracked install\n")
+      subprocess.run(["git", "add", "install.sh"], cwd=repo, check=True)
+      subprocess.run(
+          ["git", "commit", "-m", "track install.sh"],
+          cwd=repo,
+          check=True,
+          capture_output=True,
+      )
+      tracked_base = subprocess.check_output(
+          ["git", "rev-parse", "HEAD"], cwd=repo, text=True
+      ).strip()
+      os.remove(tracked_install)
+      with open(target_file, "w", encoding="utf-8") as f:
+        f.write("val = 123\n")
+      patch_with_tracked_install = openhands_utils.extract_agent_patch(
+          _LocalWs(), base_commit=tracked_base, workspace_path=repo
+      )
+      self.assertIn("diff --git a/calc.py b/calc.py", patch_with_tracked_install)
+      self.assertNotIn("install.sh", patch_with_tracked_install)
+
+  def test_swe_env_agent_sandbox_grades_in_fresh_eval_container(self):
+    mock_asrl = mock.MagicMock()
+    mock_r2egym_adapter = mock.MagicMock()
+    mock_oh_adapter = mock.MagicMock()
+
+    mock_handle = mock.MagicMock()
+    mock_fleet = mock.MagicMock()
+    mock_fleet.acquire.return_value = mock_handle
+
+    mock_ws = mock.MagicMock()
+    setup_res = mock.MagicMock(exit_code=0, stdout="deadbeef1234567\n")
+    diff_res = mock.MagicMock(
+        exit_code=0,
+        stdout=(
+            "diff --git a/fix.py b/fix.py\n"
+            "--- a/fix.py\n"
+            "+++ b/fix.py\n"
+            "@@ -1 +1 @@\n"
+            "-a = 1\n"
+            "+a = 2\n"
+        ),
+    )
+    cleanup_res = mock.MagicMock(exit_code=0, stdout="")
+    mock_ws.execute_command.side_effect = [setup_res, diff_res, cleanup_res]
+    mock_oh_adapter.make_handle_workspace.return_value = mock_ws
+
+    mock_repo_env = mock.MagicMock()
+    mock_runtime = mock.MagicMock()
+    mock_runtime.repo_path = "/testbed"
+    mock_runtime.run.side_effect = [
+        ("run_tests.sh\n", "0"),
+        ("", "0"),
+    ]
+    mock_repo_env.runtime = mock_runtime
+    mock_repo_env.compute_reward = mock.MagicMock(return_value=1.0)
+
+    captured_handle_state = {}
+
+    def _fake_make_fleet_repo_env(handle, **kwargs):
+      del kwargs
+      captured_handle_state["target_container"] = getattr(
+          handle, "_target_container", None
+      )
+      captured_handle_state["defer_setup_env"] = getattr(
+          handle, "_defer_setup_env", None
+      )
+      return mock_repo_env
+
+    mock_r2egym_adapter.make_fleet_repo_env.side_effect = (
+        _fake_make_fleet_repo_env
+    )
+
+    with mock.patch.dict(
+        "sys.modules",
+        {
+            "agent_sandbox_rl": mock_asrl,
+            "agent_sandbox_rl.adapters": mock.MagicMock(),
+            "agent_sandbox_rl.adapters.r2egym": mock_r2egym_adapter,
+            "agent_sandbox_rl.adapters.openhands": mock_oh_adapter,
+        },
+    ):
+      env = swe_env.SWEEnv(
+          entry={
+              "instance_id": "inst_1",
+              "docker_image": "img:v1",
+              "problem_statement": "Fix bug",
+          },
+          scaffold="openhands",
+          use_agent_sandbox=True,
+          fleet=mock_fleet,
+      )
+      obs, info = env.reset()
+      self.assertEqual(obs, "Fix bug")
+      self.assertEqual(info.get("base_commit"), "deadbeef1234567")
+      self.assertEqual(
+          captured_handle_state["target_container"],
+          sandbox_utils.EVAL_CONTAINER_NAME,
+      )
+      self.assertTrue(captured_handle_state["defer_setup_env"])
+
+      reward = env.final_reward_fn()
+      self.assertEqual(reward, 1.0)
+      self.assertEqual(mock_ws.execute_command.call_count, 3)
+      extract_cmd = mock_ws.execute_command.call_args_list[1][0][0]
+      self.assertIn("git diff --no-color --cached deadbeef1234567", extract_cmd)
+      cleanup_cmd = mock_ws.execute_command.call_args_list[2][0][0]
+      self.assertIn("kill -TERM", cleanup_cmd)
+      mock_runtime.setup_env.assert_called_once()
 
 
 if __name__ == "__main__":
