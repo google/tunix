@@ -39,7 +39,7 @@ if REPO_ROOT not in sys.path:
 # pylint: disable=g-import-not-at-top
 from tunix.experimental.common import datatypes
 from tunix.experimental.distributed.runtime import context as runtime_context
-from tunix.experimental.examples.deepswe_dist import orch_k8s_cleanup
+from tunix.experimental.examples.common import orch_k8s_cleanup
 from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import orchestrator

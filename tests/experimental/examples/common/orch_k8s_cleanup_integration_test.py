@@ -37,7 +37,7 @@ from absl.testing import absltest
 
 try:
   from tunix.experimental.common import datatypes
-  from tunix.experimental.examples.deepswe_dist import orch_k8s_cleanup
+  from tunix.experimental.examples.common import orch_k8s_cleanup
   from tunix.experimental.orchestrator import orchestrator as orchestrator_lib
   from tunix.experimental.worker import remote_execution
 

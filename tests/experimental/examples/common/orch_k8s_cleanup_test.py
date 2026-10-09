@@ -29,14 +29,14 @@ from absl.testing import absltest
 from absl.testing import parameterized
 
 try:
-  from tunix.experimental.examples.deepswe_dist import orch_k8s_cleanup
+  from tunix.experimental.examples.common import orch_k8s_cleanup
 except (ImportError, ModuleNotFoundError):
   _module_path = (
       Path(__file__).resolve().parents[4]
       / "tunix"
       / "experimental"
       / "examples"
-      / "deepswe_dist"
+      / "common"
       / "orch_k8s_cleanup.py"
   )
   _spec = importlib.util.spec_from_file_location(
