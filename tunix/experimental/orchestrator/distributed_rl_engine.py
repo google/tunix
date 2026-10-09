@@ -636,7 +636,11 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     raw_completed = await self._rollout_session.poll_completed(
         timeout_s=timeout_s
     )
-    if not raw_completed and self._has_pending_rollout_workers():
+    if (
+        not raw_completed
+        and self._rollout_session.has_pending_or_completed_work()
+        and self._has_pending_rollout_workers()
+    ):
       synced_version = await self.sync_pending_weights()
       if synced_version is not None and self._rollout_session.pending_count > 0:
         raw_completed = await self._rollout_session.poll_completed(
