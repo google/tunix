@@ -294,7 +294,19 @@ export DRY_RUN=${DRY_RUN:-false}
 # become ready does NOT end the run: the orchestrator logs it and continues,
 # and a rollout whose claim still cannot be served after the retries fails
 # only that trajectory.
+export ROLLOUT_FAULT_TOLERANCE=${ROLLOUT_FAULT_TOLERANCE:-true}
+export MAX_CONCURRENT_ROLLOUTS_PER_WORKER=${MAX_CONCURRENT_ROLLOUTS_PER_WORKER:-}
+export ROLLOUT_TASK_TIMEOUT_S=${ROLLOUT_TASK_TIMEOUT_S:-}
+export MAX_ZERO_WORKER_WAIT_S=${MAX_ZERO_WORKER_WAIT_S:-}
+export ROLLOUT_MAX_TASK_RETRIES=${ROLLOUT_MAX_TASK_RETRIES:-}
+export RECOVER_UNKNOWN_TRANSFER_STATE=${RECOVER_UNKNOWN_TRANSFER_STATE:-false}
+
 export FAIL_FAST=${FAIL_FAST:-false}
+if [[ "${ROLLOUT_FAULT_TOLERANCE}" == "false" || "${ROLLOUT_FAULT_TOLERANCE}" == "False" || "${ROLLOUT_FAULT_TOLERANCE}" == "0" ]]; then
+  export ROLLOUT_FAIL_FAST=${ROLLOUT_FAIL_FAST:-${FAIL_FAST}}
+else
+  export ROLLOUT_FAIL_FAST=${ROLLOUT_FAIL_FAST:-false}
+fi
 export FT_STARTUP_RETRIES=${FT_STARTUP_RETRIES:-3}
 export FT_SANDBOX_READY_TIMEOUT_S=${FT_SANDBOX_READY_TIMEOUT_S:-600}
 export FT_SANDBOX_ACQUIRE_RETRIES=${FT_SANDBOX_ACQUIRE_RETRIES:-2}
@@ -309,6 +321,18 @@ case "${FAIL_FAST}" in
     ;;
   *)
     echo "Invalid FAIL_FAST='${FAIL_FAST}' (expected true|false)" >&2
+    exit 1
+    ;;
+esac
+case "${ROLLOUT_FAIL_FAST}" in
+  false)
+    ROLLOUT_FAIL_FAST_GENERATOR_FLAGS=()
+    ;;
+  true)
+    ROLLOUT_FAIL_FAST_GENERATOR_FLAGS=(--fail_fast "--startup_retries=${FT_STARTUP_RETRIES}")
+    ;;
+  *)
+    echo "Invalid ROLLOUT_FAIL_FAST='${ROLLOUT_FAIL_FAST}' (expected true|false)" >&2
     exit 1
     ;;
 esac
@@ -494,6 +518,12 @@ start_orchestrator() {
         --stop_workers_on_exit \
         ${MAX_WARMPOOL_REPLICAS:+--max_warmpool_replicas=${MAX_WARMPOOL_REPLICAS}} \
         ${MAX_CONCURRENCY:+--max_concurrency=${MAX_CONCURRENCY}} \
+        $([[ "${ROLLOUT_FAULT_TOLERANCE}" == "false" || "${ROLLOUT_FAULT_TOLERANCE}" == "False" || "${ROLLOUT_FAULT_TOLERANCE}" == "0" ]] && echo --no-rollout_fault_tolerance || echo --rollout_fault_tolerance) \
+        ${MAX_CONCURRENT_ROLLOUTS_PER_WORKER:+--max_concurrent_rollouts_per_worker=${MAX_CONCURRENT_ROLLOUTS_PER_WORKER}} \
+        ${ROLLOUT_TASK_TIMEOUT_S:+--rollout_task_timeout_s=${ROLLOUT_TASK_TIMEOUT_S}} \
+        ${MAX_ZERO_WORKER_WAIT_S:+--max_zero_worker_wait_s=${MAX_ZERO_WORKER_WAIT_S}} \
+        ${ROLLOUT_MAX_TASK_RETRIES:+--rollout_max_task_retries=${ROLLOUT_MAX_TASK_RETRIES}} \
+        $([[ "${RECOVER_UNKNOWN_TRANSFER_STATE}" == "true" || "${RECOVER_UNKNOWN_TRANSFER_STATE}" == "True" || "${RECOVER_UNKNOWN_TRANSFER_STATE}" == "1" ]] && echo --recover_unknown_transfer_state || echo --no-recover_unknown_transfer_state) \
         ${MAX_STALENESS:+--max_staleness=${MAX_STALENESS}} \
         $([[ "${CHECKPOINT_OPTIMIZER_INTERVAL_STEPS}" =~ ^[0-9]+$ ]] && echo "--checkpoint_optimizer_interval_steps=${CHECKPOINT_OPTIMIZER_INTERVAL_STEPS}") \
         ${TRAJECTORY_GROUP_ORDER:+--trajectory_group_order=${TRAJECTORY_GROUP_ORDER}} \
@@ -797,7 +827,7 @@ if cfg:
       "${YAML_DIR}/${ROLLOUT_JOBSET_YAML}" \
       --jobset_name="${placeholder}" \
       --namespace="${K8S_NAMESPACE}" \
-      "${FAIL_FAST_GENERATOR_FLAGS[@]}" \
+      "${ROLLOUT_FAIL_FAST_GENERATOR_FLAGS[@]}" \
       ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
       ${GANG_ID:+--gang_id="${GANG_ID}"} \
       --tpu_slice=${ROLLOUT_TPU_SLICE} \

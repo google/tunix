@@ -89,6 +89,16 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
+      "--rollout_fault_tolerance",
+      action=argparse.BooleanOptionalAction,
+      default=os.getenv("ROLLOUT_FAULT_TOLERANCE", "true").strip().lower()
+      not in ("0", "false", "no"),
+      help=(
+          "Enable rollout worker fault tolerance (eviction, retry, and dynamic "
+          "rejoin)."
+      ),
+  )
+  parser.add_argument(
       "--max_concurrent_rollouts_per_worker",
       type=int,
       default=(
@@ -117,6 +127,27 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help=(
           "Maximum duration in seconds to wait when zero active rollout "
           "workers remain before raising NoHealthyRolloutWorkersError."
+      ),
+  )
+  parser.add_argument(
+      "--rollout_max_task_retries",
+      type=int,
+      default=int(os.getenv("ROLLOUT_MAX_TASK_RETRIES", "3")),
+      help=(
+          "Maximum number of retry attempts per rollout request_id before "
+          "synthesizing a terminal FAILED placeholder trajectory."
+      ),
+  )
+  parser.add_argument(
+      "--recover_unknown_transfer_state",
+      action=argparse.BooleanOptionalAction,
+      default=os.getenv("RECOVER_UNKNOWN_TRANSFER_STATE", "false")
+      .strip()
+      .lower()
+      in ("1", "true", "yes"),
+      help=(
+          "Attempt recovery from RoundState.UNKNOWN_TRANSFER_STATE during "
+          "weight sync by evicting uncommitted workers and retrying once."
       ),
   )
   parser.add_argument("--max_steps", type=int, default=1)
@@ -767,9 +798,12 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           "rollout_jax_cache_gcs_dir": os.getenv("ROLLOUT_JAX_CACHE_GCS_DIR"),
       },
       fault_tolerance_config=datatypes.RolloutFaultToleranceConfig(
+          enabled=args.rollout_fault_tolerance,
+          max_task_retries=args.rollout_max_task_retries,
           max_in_flight_per_worker=args.max_concurrent_rollouts_per_worker,
           task_timeout_s=args.rollout_task_timeout_s,
           max_zero_worker_wait_s=args.max_zero_worker_wait_s,
+          recover_unknown_transfer_state=args.recover_unknown_transfer_state,
       ),
   )
   context.ipc.discovery.on_register(

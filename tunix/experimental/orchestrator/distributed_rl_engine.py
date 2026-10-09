@@ -24,6 +24,7 @@ import asyncio
 import collections
 from collections.abc import Callable, Mapping, Sequence
 import concurrent.futures
+import contextlib
 import inspect
 import time
 from typing import Any
@@ -777,6 +778,18 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       async with self._pending_sync_lock:
         pass
 
+  @contextlib.asynccontextmanager
+  async def _actor_busy_guard(self, active: bool = True):
+    """Tracks active actor trainer operations and serializes against pending sync."""
+    if active:
+      await self._await_pending_weight_sync()
+      self._actor_busy_count += 1
+    try:
+      yield
+    finally:
+      if active:
+        self._actor_busy_count -= 1
+
   async def per_token_logps(
       self,
       role: datatypes.Role,
@@ -801,16 +814,10 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         and role not in self._inference_workers
         and role in self._trainer_workers
     )
-    if is_actor_trainer:
-      await self._await_pending_weight_sync()
-      self._actor_busy_count += 1
-    try:
+    async with self._actor_busy_guard(is_actor_trainer):
       return await self._invoke_worker(
           worker, "per_token_logps", items=items, **kwargs
       )
-    finally:
-      if is_actor_trainer:
-        self._actor_busy_count -= 1
 
   async def train_step(
       self,
@@ -840,10 +847,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         metadata=metadata,
     )
     is_actor = role == datatypes.Role.ACTOR
-    if is_actor:
-      await self._await_pending_weight_sync()
-      self._actor_busy_count += 1
-    try:
+    async with self._actor_busy_guard(is_actor):
       fwd_bwd_result = await self._invoke_worker(
           worker,
           "fwd_bwd",
@@ -862,9 +866,6 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           "train_step": train_step,
           "accumulated": accumulate_gradients,
       }
-    finally:
-      if is_actor:
-        self._actor_busy_count -= 1
 
   async def get_metrics(
       self,
@@ -1013,27 +1014,24 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           "sync_weights needs a coordinator; construct the engine with"
           " weight_sync_coordinator."
       )
-    await self._await_pending_weight_sync()
-    next_policy_version = (
-        self._policy_version + 1 if policy_version is None else policy_version
-    )
-    logging.info(
-        "Synchronizing weights (target policy_version=%d)...",
-        next_policy_version,
-    )
-    sync_kwargs = {}
-    if source_staged is not None:
-      sync_kwargs["source_staged"] = source_staged
-    self._actor_busy_count += 1
-    try:
-      result = await self._weight_sync_coordinator.sync(
-          policy_version=next_policy_version, **sync_kwargs
+    async with self._actor_busy_guard(True):
+      next_policy_version = (
+          self._policy_version + 1 if policy_version is None else policy_version
       )
-    except Exception:
-      self._weights_consistent = False
-      raise
-    finally:
-      self._actor_busy_count -= 1
+      logging.info(
+          "Synchronizing weights (target policy_version=%d)...",
+          next_policy_version,
+      )
+      sync_kwargs = {}
+      if source_staged is not None:
+        sync_kwargs["source_staged"] = source_staged
+      try:
+        result = await self._weight_sync_coordinator.sync(
+            policy_version=next_policy_version, **sync_kwargs
+        )
+      except Exception:
+        self._weights_consistent = False
+        raise
     self._actor_weights_dirty = False
     self._weights_consistent = True
     self._last_deferred_pending_sync_state = None
@@ -1166,16 +1164,10 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         role_name,
     )
     is_actor = role == datatypes.Role.ACTOR
-    if is_actor:
-      await self._await_pending_weight_sync()
-      self._actor_busy_count += 1
-    try:
+    async with self._actor_busy_guard(is_actor):
       return await self._invoke_worker(
           worker, "save_checkpoint", metadata=metadata, **kwargs
       )
-    finally:
-      if is_actor:
-        self._actor_busy_count -= 1
 
   async def _restore_checkpoint(
       self,
