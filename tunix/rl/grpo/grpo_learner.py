@@ -23,7 +23,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from tunix.generate import utils
 from tunix.perf.experimental import constants as perf_constants
 from tunix.rl import algo_core  # pylint: disable=unused-import
 from tunix.rl import algorithm_config as algo_config_lib
@@ -192,16 +191,43 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         ),
         trace_tags=perf_tags,
     )
-    padded_completion_ids = np.array([
-        utils.pad_to_length(
-            completion_ids,
-            target_length=rollout_config.max_tokens_to_generate,
-            pad_value=pad_value,
-            left=False,
+    max_gen_len = rollout_config.max_tokens_to_generate
+    num_seqs = len(rollout_output.tokens)
+    token_dtype = (
+        rollout_output.tokens[0].dtype
+        if num_seqs > 0 and hasattr(rollout_output.tokens[0], "dtype")
+        else np.int32
+    )
+    # Fill one preallocated array instead of padding each row and stacking.
+    padded_completion_ids = np.full(
+        (num_seqs, max_gen_len), pad_value, dtype=token_dtype
+    )
+    for idx, completion_ids in enumerate(rollout_output.tokens):
+      seq_len = min(len(completion_ids), max_gen_len)
+      if seq_len > 0:
+        padded_completion_ids[idx, :seq_len] = completion_ids[:seq_len]
+    needs_trainer_logps = not self.algo_config.use_rollout_logps or (
+        rollout_output.logprobs is not None
+        and (
+            self.algo_config.sampler_is is not None
+            or self.algo_config.sampler_rs is not None
+            or self.algo_config.seq_logprob_error_threshold is not None
         )
-        for completion_ids in rollout_output.tokens
-    ])
-    prompt_ids = jnp.array(rollout_output.left_padded_prompt_tokens)
+    )
+    # With sequence packing, `pack_sequences` unpads every train batch on the
+    # host and rebuilds it into packed chunks. If no reference or trainer logps
+    # are computed here, nothing needs this batch on the device before that, so
+    # keep it in numpy. This skips the copy to the device here and the copy back
+    # in `unpad_train_example`. Eval batches are not packed and stay on the
+    # device path.
+    keep_on_host = (
+        mode == rl_engine_lib.Mode.TRAIN
+        and self._packing_enabled
+        and self.algo_config.beta == 0.0
+        and not needs_trainer_logps
+    )
+    xp = np if keep_on_host else jnp
+    prompt_ids = xp.asarray(rollout_output.left_padded_prompt_tokens)
     # Router replay: lay the rollout's routing out over the same
     # `[prompt | completion]` padding the token ids just got, so a replayed
     # expert stays attached to the token it was captured for.
@@ -216,9 +242,9 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
     prompt_mask = prompt_ids != pad_value
     completion_mask = np.not_equal(padded_completion_ids, pad_value)
 
-    # Convert completion_ids and completion_mask to jax arrays
-    jax_completion_ids = jnp.array(padded_completion_ids)
-    jax_completion_mask = jnp.array(completion_mask)
+    # Convert completion_ids and completion_mask to jax arrays unless on host.
+    jax_completion_ids = xp.asarray(padded_completion_ids)
+    jax_completion_mask = xp.asarray(completion_mask)
     compute_logps_micro_batch_size = (
         self._compute_logps_micro_batch_size * self.algo_config.num_generations
         if self._compute_logps_micro_batch_size
@@ -252,24 +278,21 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         self.algo_config.use_rollout_logps
         and rollout_output.logprobs is not None
     ):
-      rollout_per_token_logps = jnp.asarray([
-          utils.pad_to_length(
-              np.asarray(logprobs),
-              target_length=rollout_config.max_tokens_to_generate,
-              pad_value=0,
-              left=False,
-          )[: rollout_config.max_tokens_to_generate]
-          for logprobs in rollout_output.logprobs
-      ])
+      logp_dtype = (
+          rollout_output.logprobs[0].dtype
+          if len(rollout_output.logprobs) > 0
+          and hasattr(rollout_output.logprobs[0], "dtype")
+          else np.float32
+      )
+      padded_logps = np.zeros(
+          (len(rollout_output.logprobs), max_gen_len), dtype=logp_dtype
+      )
+      for idx, logprobs in enumerate(rollout_output.logprobs):
+        seq_len = min(len(logprobs), max_gen_len)
+        if seq_len > 0:
+          padded_logps[idx, :seq_len] = logprobs[:seq_len]
+      rollout_per_token_logps = xp.asarray(padded_logps)
       old_per_token_logps = rollout_per_token_logps
-    needs_trainer_logps = not self.algo_config.use_rollout_logps or (
-        rollout_per_token_logps is not None
-        and (
-            self.algo_config.sampler_is is not None
-            or self.algo_config.sampler_rs is not None
-            or self.algo_config.seq_logprob_error_threshold is not None
-        )
-    )
     if needs_trainer_logps:
       devices = self.rl_engine.r2m[rl_engine_lib.Role.ACTOR].devices
       with self.rl_engine.perf.span(
@@ -386,7 +409,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         completion_ids=jax_completion_ids,
         completion_mask=jax_completion_mask,
         ref_per_token_logps=ref_per_token_logps,
-        advantages=jax.device_put(advantages),
+        advantages=advantages if keep_on_host else jax.device_put(advantages),
         old_per_token_logps=old_per_token_logps,
         sampler_is_weights=sampler_is_weights,
         routed_experts=(

@@ -315,6 +315,38 @@ class UtilsTest(absltest.TestCase):
     np.testing.assert_array_equal(item['completion_ids'], [10, 0, 20, 21])
     np.testing.assert_array_equal(item['completion_mask'], [1, 1, 0, 0])
 
+  def test_unpad_train_example_uses_each_row_length(self):
+    example = common.TrainExample(
+        prompt_ids=np.array(
+            [[0, 0, 1, 2], [0, 3, 4, 5], [6, 7, 8, 9]], dtype=np.int32
+        ),
+        prompt_mask=np.array(
+            [[0, 0, 1, 1], [0, 1, 1, 1], [1, 1, 1, 1]], dtype=np.int32
+        ),
+        completion_ids=np.array(
+            [[10, 0, 0], [11, 12, 0], [13, 14, 15]], dtype=np.int32
+        ),
+        completion_mask=np.array(
+            [[1, 0, 0], [1, 1, 0], [1, 1, 1]], dtype=np.int32
+        ),
+        advantages=np.array([0.5, -0.5, 1.0], dtype=np.float32),
+        ref_per_token_logps=None,
+        old_per_token_logps=np.array(
+            [[-1, 0, 0], [-2, -3, 0], [-4, -5, -6]], dtype=np.float32
+        ),
+    )
+    items = utils.unpad_train_example(example)
+    self.assertLen(items, 3)
+    expected = [
+        ([1, 2], [10], [-1]),
+        ([3, 4, 5], [11, 12], [-2, -3]),
+        ([6, 7, 8, 9], [13, 14, 15], [-4, -5, -6]),
+    ]
+    for item, (prompt, completion, old_logps) in zip(items, expected):
+      np.testing.assert_array_equal(item['prompt_ids'], prompt)
+      np.testing.assert_array_equal(item['completion_ids'], completion)
+      np.testing.assert_array_equal(item['old_per_token_logps'], old_logps)
+
   def test_pack_sequences_token_only_produces_none_logps(self):
     # pack-first groundwork: packing TrainExamples that carry no logps must
     # still pack tokens/segment_ids and leave the packed logps as None, so logp
@@ -480,6 +512,48 @@ class UtilsTest(absltest.TestCase):
           jnp.array([[0, 0, 1, 1, 1, 0, 0, 0, 0, 0]], dtype=jnp.int32),
       )
       self.assertTrue(bool(np.asarray(pack2.is_update_step)[0]))
+
+  def test_pack_sequences_host_arrays_match_device_arrays(self):
+    # `return_host_arrays=True` builds the same chunks as the default, only in
+    # numpy, for a consumer that copies them to its devices itself.
+    examples = [
+        self._create_mock_train_example(
+            2, 3, old_per_token_logps=jnp.full((1, 3), -0.5)
+        ),
+        self._create_mock_train_example(
+            1, 2, old_per_token_logps=jnp.full((1, 2), -1.0)
+        ),
+        self._create_mock_train_example(
+            3, 4, old_per_token_logps=jnp.full((1, 4), -2.0)
+        ),
+    ]
+
+    def pack(return_host_arrays):
+      return [
+          chunk
+          for [chunk] in utils.pack_sequences(
+              iter([examples]),
+              max_token_budget=10,
+              sequences_per_update=3,
+              return_host_arrays=return_host_arrays,
+          )
+      ]
+
+    device_chunks = pack(return_host_arrays=False)
+    host_chunks = pack(return_host_arrays=True)
+    self.assertLen(device_chunks, 2)
+    self.assertLen(host_chunks, 2)
+    for host_chunk, device_chunk in zip(host_chunks, device_chunks):
+      self.assertEqual(host_chunk.num_segments, device_chunk.num_segments)
+      self.assertIsNotNone(host_chunk.old_per_token_logps)
+      host_leaves = jax.tree.leaves(host_chunk)
+      device_leaves = jax.tree.leaves(device_chunk)
+      self.assertLen(host_leaves, len(device_leaves))
+      for host_leaf, device_leaf in zip(host_leaves, device_leaves):
+        self.assertIsInstance(host_leaf, np.ndarray)
+        self.assertIsInstance(device_leaf, jax.Array)
+        self.assertEqual(host_leaf.dtype, device_leaf.dtype)
+        np.testing.assert_array_equal(host_leaf, np.asarray(device_leaf))
 
   def test_pack_sequences_sets_num_segments_to_budget_plus_one(self):
     # num_segments is the static (pytree_node=False) segment-bucket upper bound.
