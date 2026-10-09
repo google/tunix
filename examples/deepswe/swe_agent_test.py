@@ -1607,6 +1607,32 @@ class SweAgentTest(absltest.TestCase):
       with open(target_file, "r", encoding="utf-8") as f:
         self.assertEqual(f.read(), large_content)
 
+      # 6. If repository tracked install.sh or run_tests.sh at base_commit,
+      # extract_agent_patch must reset their index state to base_commit rather
+      # than emitting a deletion diff.
+      subprocess.run(["git", "reset", "--hard"], cwd=repo, check=True)
+      tracked_install = os.path.join(repo, "install.sh")
+      with open(tracked_install, "w", encoding="utf-8") as f:
+        f.write("#!/bin/sh\necho repo tracked install\n")
+      subprocess.run(["git", "add", "install.sh"], cwd=repo, check=True)
+      subprocess.run(
+          ["git", "commit", "-m", "track install.sh"],
+          cwd=repo,
+          check=True,
+          capture_output=True,
+      )
+      tracked_base = subprocess.check_output(
+          ["git", "rev-parse", "HEAD"], cwd=repo, text=True
+      ).strip()
+      os.remove(tracked_install)
+      with open(target_file, "w", encoding="utf-8") as f:
+        f.write("val = 123\n")
+      patch_with_tracked_install = openhands_utils.extract_agent_patch(
+          _LocalWs(), base_commit=tracked_base, workspace_path=repo
+      )
+      self.assertIn("diff --git a/calc.py b/calc.py", patch_with_tracked_install)
+      self.assertNotIn("install.sh", patch_with_tracked_install)
+
   def test_swe_env_agent_sandbox_grades_in_fresh_eval_container(self):
     mock_asrl = mock.MagicMock()
     mock_r2egym_adapter = mock.MagicMock()

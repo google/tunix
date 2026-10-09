@@ -883,16 +883,17 @@ def extract_agent_patch(
     entry = getattr(target, "entry", None)
     base_commit = resolve_base_commit(entry)
   commit_ref = base_commit.strip() if base_commit else "HEAD"
+  quoted_commit_ref = shlex.quote(commit_ref)
   extract_cmd = (
       f"cd {shlex.quote(workspace_path)} && "
       "{ "
       'git config --global core.pager ""; '
       'find . -type d -name .git -not -path "./.git" -exec rm -rf {} + 2>/dev/null; '
       "git add -A; "
-      "git rm -rf --cached --ignore-unmatch bash_events conversations install.sh run_tests.sh r2e_tests 2>/dev/null || true; "
+      f"git reset {quoted_commit_ref} -- bash_events conversations install.sh run_tests.sh r2e_tests 2>/dev/null || true; "
       f"{REMOVE_BINARY_FILES_CMD}; "
       "} >/dev/null 2>&1 && "
-      f"git diff --no-color --cached {shlex.quote(commit_ref)} 2>/dev/null"
+      f"git diff --no-color --cached {quoted_commit_ref} 2>/dev/null"
   )
   try:
     res = _exec_in_sandbox(target, extract_cmd, timeout=timeout)
