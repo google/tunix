@@ -36,7 +36,6 @@ dependencies = [
   "omegaconf", # CLI config
   "orbax-checkpoint>=0.12.0",
   "pillow",  # Image processing
-  "pydantic",  # data modeling and serialization for agent trajectories
   "pylatexenc",  # Eval result parsing
   "python-dotenv",  # Huggingface API key
   "perfetto",  # Perfetto trace writer for metrics export
@@ -94,6 +93,7 @@ experimental = [
   "etils[epath]",  # path abstraction for local and GCS trajectory stores
   "grpcio",  # transport for cross-process worker execution
   "grpcio-tools",
+  "pydantic",  # data modeling and serialization for agent trajectories
   "simple_parsing",  # Argument parsing for CLI
   "termcolor",  # terminal formatting for CLI subcommands
 ]
