@@ -411,7 +411,8 @@ def to_tunix_trajectory(
   """Converts a Trajectory into a Tunix agent_types.Trajectory.
 
   Reconstructs Tunix RL interaction steps from sequential converted steps:
-  - Step 0 (source USER or SYSTEM) -> Tunix task prompt dictionary.
+  - Step 0 (source USER or SYSTEM) -> Tunix task prompt dictionary, and its
+    `env_tokens` (if set) -> `prompt_tokens`.
   - Subsequent steps (Agent step at 2i+1, Env step at 2i+2) -> Paired into
     Tunix `agent_types.Step` instances for turn i.
   - Agent steps' raw `prefill_routed_experts` -> Split into the trajectory's
@@ -455,12 +456,17 @@ def to_tunix_trajectory(
   num_converted_steps = len(traj_obj.steps)
 
   task_val = None
+  prompt_tokens = None
   # If step 0 is the initial prompt (source USER or SYSTEM), extract it.
   if num_converted_steps > 0 and traj_obj.steps[0].source in (
       trajectory_lib.Source.USER,
       trajectory_lib.Source.SYSTEM,
   ):
     task_val = {"prompts": [traj_obj.steps[0].message]}
+    # Unpadded first-turn prompt ids, if the collector recorded them.
+    prompt_tokens = _to_numpy_or_none(
+        getattr(traj_obj.steps[0], "env_tokens", None)
+    )
     converted_step_idx = 1
 
   # Iterate through steps and pair AGENT + ENV steps into Tunix turns.
@@ -520,6 +526,7 @@ def to_tunix_trajectory(
       env_time=env_time,
       reward_time=reward_time,
       prompt_routed_experts=prompt_routed_experts,
+      prompt_tokens=prompt_tokens if prompt_tokens is not None else [],
   )
 
 
@@ -680,6 +687,7 @@ def update_trajectory_metadata(
     env_time: dict[str, Any] | None = None,
     reward_time: dict[str, Any] | None = None,
     extra: dict[str, Any] | None = None,
+    masked_out: bool | None = None,
 ) -> trajectory_lib.TrajectoryMetadata:
   """Updates an existing TrajectoryMetadata with latest agent/trajectory state.
 
@@ -692,6 +700,8 @@ def update_trajectory_metadata(
     env_time: Optional explicit environment timing dictionary.
     reward_time: Optional explicit reward timing dictionary.
     extra: Optional dictionary of extra metadata fields to merge.
+    masked_out: Optional flag for whether the overlong filter zeroed the
+      trajectory's training masks. None leaves the stored value unchanged.
 
   Returns:
     The updated TrajectoryMetadata instance.
@@ -752,6 +762,9 @@ def update_trajectory_metadata(
       setattr(metadata, "env_time", env_time)
     if hasattr(metadata, "reward_time") and reward_time is not None:
       setattr(metadata, "reward_time", reward_time)
+
+  if masked_out is not None and hasattr(metadata, "masked_out"):
+    setattr(metadata, "masked_out", bool(masked_out))
 
   if extra:
     if metadata.extra is None:

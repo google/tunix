@@ -1129,6 +1129,26 @@ class ToTunixTrajectoryTest(trajectory_testing.TrajectoryTestCase):
     self.assertEqual(tunix_traj.status, agent_types.TrajectoryStatus.SUCCEEDED)
     self.assertEqual(tunix_traj.env_time, {"env_step": 0.05})
     self.assertEqual(tunix_traj.reward_time, {"reward_eval": 0.01})
+    # Step 0 without env_tokens leaves prompt_tokens at its default.
+    self.assertEmpty(tunix_traj.prompt_tokens)
+
+  def test_to_tunix_trajectory_rehydrates_prompt_tokens_from_step_zero(self):
+    traj = trajectory_lib.TunixTrajectory(
+        trajectory_id="t_prompt_ids",
+        agent=trajectory_lib.Agent(name="test_agent", version="1.0"),
+        steps=[
+            trajectory_lib.TunixEnvStep(
+                step_id=0,
+                source=trajectory_lib.Source.USER,
+                message="Calculate 3+4",
+                env_tokens=np.array([5, 100, 101]),
+                env_masks=np.array([0, 0, 0]),
+            ),
+        ],
+    )
+    # Round-trip through JSON to cover the store's serialized form.
+    tunix_traj = converter.to_tunix_trajectory(traj.to_json_dict())
+    np.testing.assert_array_equal(tunix_traj.prompt_tokens, [5, 100, 101])
 
   def test_to_tunix_trajectory_from_dict(self):
     traj_dict = {
@@ -1594,6 +1614,18 @@ class UpdateTrajectoryMetadataTest(parameterized.TestCase):
     )
 
     self.assertEqual(updated_meta.status, "TIMEOUT")
+
+  def test_update_trajectory_metadata_masked_out(self):
+    meta = trajectory_lib.TunixTrajectoryMetadata(
+        trajectory_id="traj_masked",
+        agent=trajectory_lib.Agent(name="agent", version="1.0"),
+    )
+    self.assertIsNone(meta.masked_out)
+    converter.update_trajectory_metadata(metadata=meta, masked_out=True)
+    self.assertTrue(meta.masked_out)
+    # Later syncs without the flag leave the recorded value in place.
+    converter.update_trajectory_metadata(metadata=meta, policy_version=1)
+    self.assertTrue(meta.masked_out)
 
   def test_update_trajectory_metadata_policy_version_appends_and_deduplicates(
       self,
