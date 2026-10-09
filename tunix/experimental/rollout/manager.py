@@ -22,7 +22,6 @@ from tunix.experimental.common import datatypes
 from tunix.experimental.rl.agentic import registry
 from tunix.experimental.rollout import collector as collector_lib
 from tunix.experimental.rollout import sampler as sampler_lib
-from tunix.experimental.rollout import vanilla_sampler_adapter
 from tunix.experimental.trajectory import base_store as store
 from tunix.experimental.trajectory import trajectory as trajectory_lib
 from tunix.experimental.weight_sync import weight_sync
@@ -81,6 +80,9 @@ class RolloutManager:
         else False
     )
     self._policy_version: int = 0
+    # TODO(tunix-dev): Require all callers to pass a non-None, pre-constructed
+    # sampler with RaidenWeightSyncDelegate already applied, and remove this
+    # lazy sampler construction fallback from RolloutManager.
     if sampler is None:
       sampler_type = getattr(config, "sampler_type", "vanilla")
       weight_sync_mode = getattr(
@@ -130,21 +132,9 @@ class RolloutManager:
             **adapter_kwargs
         )
       elif "vanilla" in sampler_type:
-        raiden_delegate = None
-        if weight_sync_mode == weight_sync.WeightSyncMode.RAIDEN:
-          from tunix.experimental.weight_sync import raiden_weight_sync_delegate  # pylint: disable=g-import-not-at-top
-
-          raiden_delegate = (
-              raiden_weight_sync_delegate.RaidenWeightSyncDelegate(
-                  server_id="vanilla_sampler"
-              )
-          )
-
-        sampler = vanilla_sampler_adapter.VanillaSamplerAdapter(
-            server_id="vanilla_sampler",
-            tokenizer=tokenizer,
-            config=config,
-            raiden_sync_delegate=raiden_delegate,
+        raise ValueError(
+            "VanillaSampler requires an explicit pre-constructed sampler"
+            " instance with an initialized transformer model."
         )
       else:
         raise ValueError(f"Unknown sampler_type: {sampler_type}")

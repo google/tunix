@@ -509,7 +509,7 @@ def _create_rollout_mesh(args) -> Any:
 def _create_vanilla_worker(args, tokenizer):
   """Creates a vanilla sampler rollout worker instance."""
   from tunix.experimental.rollout import (  # pylint: disable=g-import-not-at-top
-      vanilla_sampler_adapter,
+      vanilla_sampler,
   )
   from tunix.experimental.worker import (  # pylint: disable=g-import-not-at-top
       rollout_worker,
@@ -530,13 +530,13 @@ def _create_vanilla_worker(args, tokenizer):
     )
   config = rollout_worker.RolloutConfig(
       sampler_type="vanilla",
+      kv_cache_size=args.max_prompt_length + args.max_response_length,
       **_rollout_config_kwargs(args, tokenizer),
   )
-  sampler_adapter = vanilla_sampler_adapter.VanillaSamplerAdapter(
+  sampler = vanilla_sampler.VanillaSampler(
       server_id=args.worker_id,
       transformer=model,
       tokenizer=tokenizer,
-      cache_config=args.max_prompt_length + args.max_response_length,
       config=config,
   )
 
@@ -550,7 +550,7 @@ def _create_vanilla_worker(args, tokenizer):
   return rollout_worker.RolloutWorker(
       worker_id=args.worker_id,
       config=config,
-      sampler=sampler_adapter,
+      sampler=sampler,
       tokenizer=rollout_tokenizer,
       chat_parser=chat_parser,
       max_concurrency=args.max_concurrency,
