@@ -306,17 +306,19 @@ spec:
         - -c
         - |
           echo "=== DeepSWE Sandbox E2E Job Started at \$(date) ==="
-          pip install -q --no-cache-dir gym docker 'swebench==3.0.2' 'k8s-agent-sandbox>=0.5.1' httpx
-          rm -rf /tmp/agent-sandbox
-          git clone --depth 1 https://github.com/kubernetes-sigs/agent-sandbox.git /tmp/agent-sandbox
-          pip install -q --no-cache-dir /tmp/agent-sandbox/examples/agent-sandbox-rl
-          SETUPTOOLS_SCM_PRETEND_VERSION=0.1.0 pip install -q --no-cache-dir /tmp/agent-sandbox/clients/integrations/openhands 2>/dev/null || true
-          SITE_PKG=\$(python3 -c "import site; print(site.getsitepackages()[0])" 2>/dev/null || echo "/opt/venv/lib/python3.12/site-packages")
-          mkdir -p "\${SITE_PKG}"
-          cp -r /tmp/agent-sandbox/clients/integrations/openhands/openhands_k8s_agent_sandbox "\${SITE_PKG}/" 2>/dev/null || true
-          pip install -q --no-deps 'git+https://github.com/r2e-gym/r2e-gym.git@0d94c4eb9431cd195c55a7ea3abd54006c9a1735'
-          find / -name utils.py -path "*/r2egym/agenthub/utils/*" -exec sed -i 's/create_repo, upload_folder, HfFolder/create_repo, upload_folder/' {} + 2>/dev/null || true
-          find / -name docker.py -path "*/r2egym/agenthub/runtime/*" -exec sed -i 's/self.commit = ParsedCommit(\*\*json.loads(self.commit_json))/self.commit = ParsedCommit(\*\*(json.loads(self.commit_json) if isinstance(self.commit_json, str) else self.commit_json))/' {} + 2>/dev/null || true
+          if ! python3 -c "import agent_sandbox_rl, r2egym, openhands_k8s_agent_sandbox" 2>/dev/null; then
+            pip install -q --no-cache-dir gym docker 'swebench==3.0.2' 'k8s-agent-sandbox>=0.5.1' httpx
+            rm -rf /tmp/agent-sandbox
+            git clone --depth 1 https://github.com/kubernetes-sigs/agent-sandbox.git /tmp/agent-sandbox
+            pip install -q --no-cache-dir /tmp/agent-sandbox/examples/agent-sandbox-rl
+            SETUPTOOLS_SCM_PRETEND_VERSION=0.1.0 pip install -q --no-cache-dir /tmp/agent-sandbox/clients/integrations/openhands 2>/dev/null || true
+            SITE_PKG=\$(python3 -c "import site; print(site.getsitepackages()[0])" 2>/dev/null || echo "/opt/venv/lib/python3.12/site-packages")
+            mkdir -p "\${SITE_PKG}"
+            cp -r /tmp/agent-sandbox/clients/integrations/openhands/openhands_k8s_agent_sandbox "\${SITE_PKG}/" 2>/dev/null || true
+            pip install -q --no-deps 'git+https://github.com/r2e-gym/r2e-gym.git@0d94c4eb9431cd195c55a7ea3abd54006c9a1735'
+            find / -name utils.py -path "*/r2egym/agenthub/utils/*" -exec sed -i 's/create_repo, upload_folder, HfFolder/create_repo, upload_folder/' {} + 2>/dev/null || true
+            find / -name docker.py -path "*/r2egym/agenthub/runtime/*" -exec sed -i 's/self.commit = ParsedCommit(\*\*json.loads(self.commit_json))/self.commit = ParsedCommit(\*\*(json.loads(self.commit_json) if isinstance(self.commit_json, str) else self.commit_json))/' {} + 2>/dev/null || true
+          fi
 
           mkdir -p /app/examples/deepswe
           mkdir -p /app/tunix/oss/examples/deepswe
@@ -381,7 +383,21 @@ until kubectl logs --namespace="${NAMESPACE}" -f "job/${JOB_NAME}" 2>/dev/null; 
 done
 
 echo "Waiting for Job completion..."
-if kubectl wait --namespace="${NAMESPACE}" --for=condition=complete --timeout=15m "job/${JOB_NAME}"; then
+JOB_SUCCEEDED=0
+for _ in $(seq 1 60); do
+  SUCCEEDED=$(kubectl get job "${JOB_NAME}" --namespace="${NAMESPACE}" -o jsonpath='{.status.succeeded}' 2>/dev/null || echo "")
+  FAILED=$(kubectl get job "${JOB_NAME}" --namespace="${NAMESPACE}" -o jsonpath='{.status.failed}' 2>/dev/null || echo "")
+  if [[ "${SUCCEEDED}" == "1" ]]; then
+    JOB_SUCCEEDED=1
+    break
+  fi
+  if [[ -n "${FAILED}" && "${FAILED}" != "0" ]]; then
+    break
+  fi
+  sleep 2
+done
+
+if [[ "${JOB_SUCCEEDED}" == "1" ]]; then
   echo "🎉 Job ${JOB_NAME} completed successfully!"
   kubectl delete job "${JOB_NAME}" --namespace="${NAMESPACE}" || true
   kubectl delete configmap "${CONFIGMAP_NAME}" --namespace="${NAMESPACE}" || true

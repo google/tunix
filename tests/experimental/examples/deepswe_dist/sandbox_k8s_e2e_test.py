@@ -345,26 +345,215 @@ def _verify_openhands_harness_in_sandbox(env: Any) -> None:
   )
   assert finish_done is True, f"finish tool did not mark done=True: {finish_res!r}"
 
-  # 5. Verify R2E test restoration and reward computation
-  if getattr(env, "final_reward_fn", None) is not None and env.entry.get("parsed_commit_content"):
-    reward = env.final_reward_fn()
-    assert reward in (0.0, 1.0), f"Unexpected reward value: {reward!r}"
-  else:
-    from examples.deepswe import openhands_utils as oh_utils
-    oh_utils.restore_r2e_tests_for_reward(getattr(env, "workspace", None) or env.env)
+  # 5. Verify fresh-container reward computation, pod security, and rollout/eval container isolation
+  try:
+    from examples.deepswe import openhands_utils
+  except ImportError:
+    import openhands_utils
 
-  restore_obs = _obs(
+  # 5a. Inspect live K8s Pod spec if handle exposes pod_name
+  pod_name = getattr(getattr(env, "handle", None), "pod_name", None)
+  if pod_name:
+    try:
+      from kubernetes import client, config
+
+      try:
+        config.load_incluster_config()
+      except Exception:
+        config.load_kube_config()
+      ns = os.environ.get("NAMESPACE", "trellis")
+      pod = client.CoreV1Api().read_namespaced_pod(pod_name, ns)
+      assert pod.spec.automount_service_account_token is False, (
+          f"Expected automountServiceAccountToken=False on {pod_name}, got"
+          f" {pod.spec.automount_service_account_token!r}"
+      )
+      assert pod.spec.share_process_namespace is False, (
+          f"Expected shareProcessNamespace=False on {pod_name}, got"
+          f" {pod.spec.share_process_namespace!r}"
+      )
+      container_names = [c.name for c in pod.spec.containers]
+      assert container_names == ["agent-runtime", "eval"], (
+          f"Expected containers ['agent-runtime', 'eval'] on {pod_name}, got"
+          f" {container_names!r}"
+      )
+      eval_c = pod.spec.containers[1]
+      assert list(eval_c.command or []) == ["sleep", "infinity"], (
+          f"Expected eval container command ['sleep', 'infinity'], got"
+          f" {eval_c.command!r}"
+      )
+      assert not eval_c.volume_mounts, (
+          f"Expected eval container to have no volumeMounts, got"
+          f" {eval_c.volume_mounts!r}"
+      )
+      logging.info(
+          "      [OK] Pod %s spec verified: containers=%s,"
+          " automountServiceAccountToken=False, shareProcessNamespace=False",
+          pod_name,
+          container_names,
+      )
+    except ImportError:
+      pass
+
+  # 5b. Verify R2E tests, grading stash, and K8s SA token are absent in rollout container
+  rollout_check_obs = _obs(
       env.step(
           "<function=execute_bash>\n"
-          '<parameter=command>if [ -e /r2e_tests ] && [ -e /root/run_tests.sh ]; then echo "r2e_restored"; else echo "r2e_missing"; fi</parameter>\n'
+          "<parameter=command>\n"
+          "for p in /r2e_tests /root/r2e_tests /testbed/r2e_tests"
+          " /root/run_tests.sh /testbed/run_tests.sh"
+          " /testbed/expected_test_output.json /root/expected_test_output.json"
+          " /var/tmp/.r2e_grading_stash"
+          " /var/run/secrets/kubernetes.io/serviceaccount; do\n"
+          '  if [ -e "$p" ] || [ -L "$p" ]; then echo "leaked:$p"; fi\n'
+          "done\n"
+          'echo "isolation_check_done"\n'
+          "</parameter>\n"
           "</function>"
       )
   )
-  assert "r2e_restored" in restore_obs, (
-      f"R2E grading tests were not restored for reward computation: {restore_obs!r}"
+  assert "leaked:" not in rollout_check_obs, (
+      f"Sensitive path leaked into rollout container: {rollout_check_obs!r}"
+  )
+  assert "isolation_check_done" in rollout_check_obs
+
+  # 5c. Verify unmodified workspace extracts empty patch "" (ignoring bash_events) and scores 0.0
+  base_commit = openhands_utils.resolve_base_commit(env.entry)
+  empty_patch = openhands_utils.extract_agent_patch(
+      env.workspace or env.env,
+      base_commit=base_commit,
+      workspace_path="/testbed",
+  )
+  assert empty_patch == "", (
+      f"Expected empty patch on unmodified repo, got:\n{empty_patch[:500]!r}"
+  )
+  if getattr(env, "final_reward_fn", None) is not None:
+    reward_empty = env.final_reward_fn()
+    assert reward_empty == 0.0, (
+        f"Expected 0.0 reward on empty patch, got {reward_empty!r}"
+    )
+    if getattr(env, "env", None) is not None and getattr(env.env, "runtime", None) is not None:
+      assert getattr(env.env.runtime, "_needs_deferred_setup_env", None) is True, (
+          "Expected eval container setup_env() to remain deferred after empty patch"
+      )
+    logging.info("      [OK] Unmodified workspace extracted empty patch and scored 0.0")
+
+  # 5d. Mutate rollout container (.venv, gitignored .so, binary file, nested .git, background process)
+  # and apply gold patch (if available) to verify clean extraction and fresh eval container grading
+  gold_patch = ""
+  commit_obj = getattr(getattr(getattr(env, "env", None), "runtime", None), "commit", None)
+  if commit_obj is not None and hasattr(commit_obj, "get_patch"):
+    try:
+      gold_patch = commit_obj.get_patch(test_file=False, non_test_file=True) or ""
+    except Exception as e:
+      logging.warning("Could not extract gold_patch from commit: %s", e)
+
+  import base64
+
+  gold_patch_b64 = base64.b64encode(gold_patch.encode("utf-8")).decode("ascii")
+  mutate_obs = _obs(
+      env.step(
+          "<function=execute_bash>\n"
+          "<parameter=command>\n"
+          "mkdir -p /testbed/.venv && echo 'POISON = 1' > /testbed/.venv/_mutated_venv_marker.py\n"
+          "echo '*.so' >> /testbed/.git/info/exclude\n"
+          "echo 'fake_shared_object' > /testbed/_gitignored_ext.so\n"
+          "python -c \"open('/testbed/_untracked_binary.bin', 'wb').write(b'\\x00\\x01\\x02\\x03binary')\"\n"
+          "mkdir -p /testbed/_nested_git/.git && echo 'ref: refs/heads/main' > /testbed/_nested_git/.git/HEAD\n"
+          "echo 'NESTED_OK = True' > /testbed/_nested_git/nested_code.py\n"
+          "nohup sleep 31337 >/dev/null 2>&1 &\n"
+          "echo $! > /tmp/_bg_sleep.pid\n"
+          "sleep 0.2\n"
+          '_bg_state=$(awk \'/^State:/ {print $2}\' "/proc/$(cat /tmp/_bg_sleep.pid)/status" 2>/dev/null || echo "gone")\n'
+          'if [ "$_bg_state" != "gone" ] && [ "$_bg_state" != "Z" ]; then echo "bg_proc_running:$_bg_state"; fi\n'
+          f"if [ -n '{gold_patch_b64}' ]; then\n"
+          f"  echo '{gold_patch_b64}' | base64 -d > /tmp/_gold.patch\n"
+          "  git -C /testbed apply /tmp/_gold.patch && echo 'gold_applied_ok'\n"
+          "  rm -f /tmp/_gold.patch\n"
+          "fi\n"
+          "</parameter>\n"
+          "</function>"
+      )
+  )
+  assert "bg_proc_running" in mutate_obs, (
+      f"Background process did not start in rollout container: {mutate_obs!r}"
+  )
+  if gold_patch.strip():
+    assert "gold_applied_ok" in mutate_obs, (
+        f"Failed to apply gold patch in rollout container: {mutate_obs!r}"
+    )
+
+  extracted_patch = openhands_utils.extract_agent_patch(
+      env.workspace or env.env,
+      base_commit=base_commit,
+      workspace_path="/testbed",
+  )
+  assert "_mutated_venv_marker.py" not in extracted_patch, (
+      "Mutated .venv leaked into extracted patch!"
+  )
+  assert "_gitignored_ext.so" not in extracted_patch, (
+      "Gitignored .so file leaked into extracted patch!"
+  )
+  assert "_untracked_binary.bin" not in extracted_patch, (
+      "Binary file leaked into extracted patch!"
+  )
+  assert "_nested_git/.git" not in extracted_patch, (
+      "Nested .git directory leaked into extracted patch!"
+  )
+  assert "bash_events" not in extracted_patch, (
+      "OpenHands bash_events leaked into extracted patch!"
+  )
+  assert "_nested_git/nested_code.py" in extracted_patch, (
+      "Expected tracked/untracked text file inside _nested_git (after nested .git removal) in patch!"
   )
 
-  logging.info("      [OK] OpenHands full tool suite verified on %s", img)
+  if getattr(env, "final_reward_fn", None) is not None and env.entry.get("parsed_commit_content"):
+    reward = env.final_reward_fn()
+    if gold_patch.strip():
+      assert reward == 1.0, (
+          f"Expected reward=1.0 for gold patch in fresh eval container on {img}, got {reward!r}"
+      )
+      logging.info("      [OK] Gold patch evaluated in fresh eval container scored 1.0 on %s", img)
+    else:
+      assert reward in (0.0, 1.0), f"Unexpected reward value: {reward!r}"
+
+  # Verify background process was killed in rollout container while agent-server stayed alive
+  # Note: When openhands-agent-server runs as PID 1 without tini, a killed orphan transitions to State=Z (zombie)
+  # where kill -0 still returns 0 even though the process has terminated.
+  bg_after_obs = _obs(
+      env.step(
+          "<function=execute_bash>\n"
+          '<parameter=command>_bg_state=$(awk \'/^State:/ {print $2}\' "/proc/$(cat /tmp/_bg_sleep.pid)/status" 2>/dev/null || echo "gone"); '
+          'if [ "$_bg_state" = "gone" ] || [ "$_bg_state" = "Z" ]; then echo "bg_killed:$_bg_state"; else echo "bg_still_alive:$_bg_state"; fi</parameter>\n'
+          "</function>"
+      )
+  )
+  assert "bg_killed" in bg_after_obs, (
+      f"Background process was not killed in rollout container: {bg_after_obs!r}"
+  )
+
+  # Verify eval container has R2E tests, ran deferred setup_env(), and has none of rollout's unextracted mutations
+  if getattr(env, "env", None) is not None and getattr(env.env, "runtime", None) is not None:
+    assert getattr(env.env.runtime, "_needs_deferred_setup_env", None) is False, (
+        "Expected eval container _needs_deferred_setup_env=False after non-empty patch evaluation"
+    )
+    eval_res = openhands_utils._exec_in_sandbox(
+        env.env,
+        "if [ -e /r2e_tests ] || [ -e /root/r2e_tests ] || [ -e /testbed/r2e_tests ]; then echo 'eval_tests_present'; else echo 'eval_tests_missing'; fi; "
+        "if [ -e /testbed/.venv/_mutated_venv_marker.py ] || [ -e /testbed/_gitignored_ext.so ] || [ -e /testbed/_untracked_binary.bin ]; then echo 'eval_polluted'; else echo 'eval_clean'; fi; "
+        "if [ -e /testbed/_nested_git/nested_code.py ]; then echo 'patch_applied_in_eval'; fi",
+    )
+    eval_out, _ = openhands_utils._unpack_exec_output(eval_res)
+    assert "eval_tests_present" in str(eval_out), (
+        f"R2E grading tests missing in eval container: {eval_out!r}"
+    )
+    assert "eval_clean" in str(eval_out), (
+        f"Rollout container mutations polluted eval container: {eval_out!r}"
+    )
+    assert "patch_applied_in_eval" in str(eval_out), (
+        f"Extracted patch was not applied in eval container: {eval_out!r}"
+    )
+
+  logging.info("      [OK] OpenHands full tool suite & fresh-container sandboxing verified on %s", img)
 
 
 def run_pipeline_e2e(

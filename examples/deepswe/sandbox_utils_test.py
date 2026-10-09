@@ -764,7 +764,7 @@ class SandboxUtilsTest(absltest.TestCase):
     iterator.close()
     self.assertEqual(fleet.active_pools, {})
 
-  def test_patch_agent_sandbox_rl_templates_sets_unmanaged_network_policy(self):
+  def test_patch_agent_sandbox_rl_templates_sets_unmanaged_network_policy_and_eval_container(self):
     class _FakeResources:
 
       def _template_manifest(self, image, template_name, template):
@@ -798,6 +798,79 @@ class SandboxUtilsTest(absltest.TestCase):
       self.assertEqual(
           manifest["spec"]["networkPolicyManagement"], "Unmanaged"
       )
+      pod_spec = manifest["spec"]["podTemplate"]["spec"]
+      self.assertFalse(pod_spec["automountServiceAccountToken"])
+      self.assertFalse(pod_spec["shareProcessNamespace"])
+      self.assertLen(pod_spec["containers"], 2)
+      self.assertEqual(
+          pod_spec["containers"][0]["name"],
+          sandbox_utils.RUNTIME_CONTAINER_NAME,
+      )
+      eval_ctr = pod_spec["containers"][1]
+      self.assertEqual(eval_ctr["name"], sandbox_utils.EVAL_CONTAINER_NAME)
+      self.assertEqual(eval_ctr["image"], "img:v1")
+      self.assertEqual(eval_ctr["command"], ["sleep", "infinity"])
+      self.assertNotIn("volumeMounts", eval_ctr)
+
+  def test_patch_r2egym_for_agent_sandbox_routes_container_and_defers_setup_env(self):
+    class _FakeCoreV1Api:
+
+      def connect_get_namespaced_pod_exec(self, *args, **kwargs):
+        return args, kwargs
+
+    class _FakeDockerRuntime:
+
+      def __init__(self, *args, **kwargs):
+        self.init_args = (args, kwargs)
+
+      def start_container(self, docker_image, command, ctr_name, **kwargs):
+        return ("orig", docker_image, command, ctr_name, kwargs)
+
+      def _start_kubernetes_sandbox(self):
+        self.client = _FakeCoreV1Api()
+        return "k8s-sandbox"
+
+      def setup_env(self):
+        return "setup-ran"
+
+    fake_k8s_client = mock.MagicMock()
+    fake_k8s_client.CoreV1Api = _FakeCoreV1Api
+    fake_k8s = mock.MagicMock()
+    fake_k8s.client = fake_k8s_client
+    fake_docker_mod = mock.MagicMock()
+    fake_docker_mod.DockerRuntime = _FakeDockerRuntime
+    fake_runtime_pkg = mock.MagicMock()
+    fake_runtime_pkg.docker = fake_docker_mod
+
+    with mock.patch.dict(
+        "sys.modules",
+        {
+            "kubernetes": fake_k8s,
+            "kubernetes.client": fake_k8s_client,
+            "r2egym": mock.MagicMock(),
+            "r2egym.agenthub": mock.MagicMock(),
+            "r2egym.agenthub.runtime": fake_runtime_pkg,
+            "r2egym.agenthub.runtime.docker": fake_docker_mod,
+        },
+    ):
+      sandbox_utils.patch_r2egym_for_agent_sandbox()
+      api = _FakeCoreV1Api()
+      _, kw = api.connect_get_namespaced_pod_exec("pod-1", "default")
+      self.assertEqual(kw["container"], sandbox_utils.RUNTIME_CONTAINER_NAME)
+
+      rt = _FakeDockerRuntime(backend="kubernetes-sandbox")
+      handle = mock.MagicMock()
+      handle._target_container = sandbox_utils.EVAL_CONTAINER_NAME
+      handle._defer_setup_env = True
+      rt._handle = handle
+      rt.start_container("img:v1", ["/bin/bash"], "pod-1")
+      self.assertEqual(rt._target_container, sandbox_utils.EVAL_CONTAINER_NAME)
+      _, kw_eval = rt.client.connect_get_namespaced_pod_exec("pod-1", "default")
+      self.assertEqual(kw_eval["container"], sandbox_utils.EVAL_CONTAINER_NAME)
+      self.assertIsNone(rt.setup_env())
+
+      handle._defer_setup_env = False
+      self.assertEqual(rt.setup_env(), "setup-ran")
 
 
 _FAIL_FAST_ENV = {
