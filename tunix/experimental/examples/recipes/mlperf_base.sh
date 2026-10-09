@@ -337,6 +337,10 @@ export DATASET_PATH="${DATASET_PATH:-gs://mlperf_dataset/benchmark-r2e-gym-easy}
 export SHUFFLE="${SHUFFLE:-false}"
 export USE_AGENT_SANDBOX=1
 export SCAFFOLD="openhands"
+# The reference OpenHands runs every tool call of a model turn, in order, each
+# counting as one of MAX_TURNS; tunix runs only the first unless this is true
+# (training_rules.adoc R:685 "behaviorally equivalent" parser).
+export OPENHANDS_MULTI_TOOL_CALLS="${OPENHANDS_MULTI_TOOL_CALLS:-false}"
 export SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-${K8S_NAMESPACE:-trellis}}"
 export POOL_NAME_FORMAT="${POOL_NAME_FORMAT:-}"
 export TEMPLATE_NAME_PREFIX="${TEMPLATE_NAME_PREFIX:-}"

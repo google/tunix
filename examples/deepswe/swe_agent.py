@@ -1,6 +1,7 @@
 """DeepSWE Agent."""
 
 import json
+import os
 import re
 from typing import Any
 from typing import Optional, Union  # Added Union for pytype compatibility
@@ -81,6 +82,16 @@ except ImportError:
 
 
 TOKEN_WARNING_THRESHOLD = 28000
+
+
+def multi_tool_calls_enabled() -> bool:
+  """Whether CodeActAgent runs every tool call of a turn, like OpenHands.
+
+  Off by default; set OPENHANDS_MULTI_TOOL_CALLS=true to enable. When off,
+  only the first tool call of a turn runs.
+  """
+  value = os.getenv("OPENHANDS_MULTI_TOOL_CALLS", "false")
+  return value.strip().lower() in ("1", "true", "yes")
 
 
 def parse_oai_response(response: Any):
@@ -247,6 +258,74 @@ def parse_codeact_response(response_text: str) -> tuple[str, Any]:
   thought = response_text.strip()
   action = SWEAction(function_name="", parameters={})
   return thought, action
+
+
+def parse_codeact_response_all(response_text: str) -> tuple[str, list[Any]]:
+  """Parses every tool call of a CodeAct / OpenHands response, in order.
+
+  The reference parser (vLLM qwen3_xml) can return several calls for one
+  response, and OpenHands runs all of them. This splits the response into
+  calls the way qwen3_xml does (checked against vLLM 0.20.0):
+  - each <tool_call> opens a call, which ends at </tool_call> or at the next
+    <tool_call>; the call is its first <function=> block, if any (qwen3_xml
+    merges a second <function=> into the same call);
+  - a bare <function=> outside <tool_call> opens a call if it is the first
+    opener or follows a <tool_call>; one that follows another bare
+    <function=> is dropped.
+  The reference reasoning parser hands qwen3_xml only the text after the
+  first "</think>", or all of it when there is none (enable_thinking: false).
+  For well-formed responses the first call is `parse_codeact_response`'s.
+
+  Returns:
+    (thought, actions): `parse_codeact_response`'s thought, and a non-empty
+    list of SWEActions (`parse_codeact_response`'s action alone when no
+    call is found).
+  """
+  thought, first = parse_codeact_response(response_text)
+  _, think_sep, after_think = response_text.partition("</think>")
+  content = after_think if think_sep else response_text
+  function_pattern = re.compile(
+      r"(?s)<function\s*=\s*[^>]+>.*?(?:</function>|$)"
+  )
+  opener_pattern = re.compile(r"<tool_call>|<function\s*=")
+  calls = []
+  pos = 0
+  previous = None
+  while (opener := opener_pattern.search(content, pos)) is not None:
+    if opener.group(0) == "<tool_call>":
+      start = opener.end()
+      ends = [
+          i
+          for i in (
+              content.find("</tool_call>", start),
+              content.find("<tool_call>", start),
+          )
+          if i != -1
+      ]
+      end = min(ends) if ends else len(content)
+      function = function_pattern.search(content[start:end])
+      if function:
+        calls.append(function.group(0))
+      previous = "tool_call"
+      pos = end + (
+          len("</tool_call>") if content.startswith("</tool_call>", end) else 0
+      )
+    else:
+      function = function_pattern.match(content, opener.start())
+      if function is None:  # A "<function=" cut off before its ">".
+        pos = opener.end()
+        continue
+      if previous != "bare":
+        calls.append(function.group(0))
+      previous = "bare"
+      pos = function.end()
+  actions = []
+  for xml_str in calls:
+    xml_str = xml_str.strip()
+    if not xml_str.endswith("</function>"):
+      xml_str += "\n</function>"
+    actions.append(parse_openhands_xml_action(xml_str))
+  return thought, actions or [first]
 
 
 _LOGGED_AGENT_CONFIGS: set[tuple[str, str, str, bool]] = set()
@@ -434,6 +513,37 @@ class CodeActAgent(SWEAgent):
         format_model_response=format_model_response,
         scaffold=scaffold,
     )
+    self.multi_tool_calls = multi_tool_calls_enabled()
+
+  def update_from_model(self, response: str, **kwargs):
+    """Like SWEAgent.update_from_model, plus every later tool call of the turn.
+
+    The reference OpenHands queues all tool calls of one model response and
+    runs them in order before calling the model again. With
+    OPENHANDS_MULTI_TOOL_CALLS on, the calls come from
+    `parse_codeact_response_all`, and a turn with two or more returns them all
+    as a list of XML strings for the env to run in order.
+
+    Args:
+      response: The model response.
+      **kwargs: Passed to SWEAgent.update_from_model.
+
+    Returns:
+      The action: an XML string, or a list of them for a multi-call turn.
+    """
+    result = super().update_from_model(response, **kwargs)
+    if not self.multi_tool_calls or self.use_fn_calling:
+      return result
+    _, actions = parse_codeact_response_all(response)
+    calls = [
+        a.to_xml_string() for a in actions if getattr(a, "function_name", "")
+    ]
+    if not calls or calls == [result.action]:
+      return result
+    if len(calls) > 1:
+      logging.info("CodeActAgent: turn has %d tool calls.", len(calls))
+    self._trajectory.steps[-1].action = "\n".join(calls)
+    return Action(action=calls if len(calls) > 1 else calls[0])
 
   def update_from_env(
       self,
@@ -443,6 +553,14 @@ class CodeActAgent(SWEAgent):
       info: Optional[dict[str, Any]] = None,
       **kwargs,
   ) -> None:
+    if isinstance(observation, list):
+      # A multi-call turn: one tool result per call that ran.
+      observation = [str(o) for o in observation]
+      ConversationAgentBase.update_from_env(
+          self, observation, reward, done, info
+      )
+      self.cur_step = Step(observation=observation)
+      return
     observation = str(observation)
     if info is None:
       info = {}
@@ -470,6 +588,10 @@ class CodeActAgent(SWEAgent):
     if len(self._trajectory.steps) == 0:
       self._messages.append({"role": "user", "content": str(observation)})
       return
+    if isinstance(observation, list):
+      for result in observation:
+        self._messages.append({"role": "tool", "content": str(result)})
+      return
     last_step = self._trajectory.steps[-1]
     if (info and info.get("is_fake_user_response")) or not last_step.action:
       self._messages.append({"role": "user", "content": str(observation)})
@@ -487,7 +609,9 @@ class CodeActAgent(SWEAgent):
 __all__ = [
     "CodeActAgent",
     "SWEAgent",
+    "multi_tool_calls_enabled",
     "parse_codeact_response",
+    "parse_codeact_response_all",
     "parse_oai_response",
     "parse_openhands_xml_action",
     "parse_xml_response",
