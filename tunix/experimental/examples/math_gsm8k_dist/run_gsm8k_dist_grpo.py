@@ -544,82 +544,79 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       )
   )
 
-  program = None
+  logging.info("Waiting for workers to register via discovery service...")
+  cluster.wait_for_workers(
+      min_workers={
+          datatypes.Role.ACTOR: 1,
+          datatypes.Role.ROLLOUT: args.rollout_replicas,
+          datatypes.Role.REFERENCE: 1 if args.beta != 0.0 else 0,
+      },
+      timeout=args.init_timeout_s,
+      poll_interval_s=1.0,
+  )
+  logging.info("Registered Orchestrator V2 workers: %s", cluster.worker_infos())
+
+  algo = _build_algo(args)
+
+  metrics_logging_options = metrics_logger_lib.MetricsLoggerOptions(
+      log_dir=args.log_dir,
+      project_name=args.wandb_project,
+      run_name=args.wandb_run_name,
+      flush_every_n_steps=args.flush_metrics_every_n_steps,
+      backend_kwargs={
+          "wandb": {
+              "config": vars(args),
+          }
+      },
+  )
+
+  reward_fns = (
+      [gsm8k.make_gsm8k_reward_fn(debug=args.debug)]
+      if args.reward_mode == "exact"
+      else []
+  )
+  generation_args = datatypes.GenerationArgs(
+      temperature=args.temperature,
+      top_p=args.top_p,
+      top_k=None if args.top_k < 0 else args.top_k,
+      return_logprobs=True,
+  )
+  program = rl_program.StandardRLProgram(
+      algo=algo,
+      dataset=_iter_prompt_items(args),
+      max_steps=args.max_steps,
+      reward_fns=reward_fns,
+      generation_args=generation_args,
+      batch_size=args.batch_size,
+      batch_config=batch_assembly.BatchConfig(
+          pad_id=pad_id,
+          max_prompt_length=args.max_prompt_length,
+          max_response_length=args.max_response_length,
+          max_seq_token_per_tpu=args.max_seq_token_per_tpu,
+          max_segments_per_packed_row=args.max_segments_per_packed_row,
+          trainer_fsdp=args.trainer_fsdp,
+          trainer_dp=args.trainer_dp,
+          trainer_expert=args.trainer_expert,
+      ),
+      metrics_logging_options=metrics_logging_options,
+      trajectory_log_dir=args.trajectory_log_dir,
+      trajectory_store=cluster.trajectory_store,
+      max_staleness=args.max_staleness,
+      group_order=args.trajectory_group_order,
+      sync_weights=(args.weight_sync_mode != "none"),
+      on_step_begin=lambda step: logging.info(
+          ">>> Step %d starting | Policy Version: %d",
+          step,
+          step,
+      ),
+      on_step_end=lambda step, result: logging.info(
+          "<<< Step %d finished | Advanced to Policy Version: %d",
+          step,
+          step + 1,
+      ),
+  )
+
   try:
-    logging.info("Waiting for workers to register via discovery service...")
-    cluster.wait_for_workers(
-        min_workers={
-            datatypes.Role.ACTOR: 1,
-            datatypes.Role.ROLLOUT: args.rollout_replicas,
-            datatypes.Role.REFERENCE: 1 if args.beta != 0.0 else 0,
-        },
-        timeout=args.init_timeout_s,
-        poll_interval_s=1.0,
-    )
-    logging.info(
-        "Registered Orchestrator V2 workers: %s", cluster.worker_infos()
-    )
-
-    algo = _build_algo(args)
-
-    metrics_logging_options = metrics_logger_lib.MetricsLoggerOptions(
-        log_dir=args.log_dir,
-        project_name=args.wandb_project,
-        run_name=args.wandb_run_name,
-        flush_every_n_steps=args.flush_metrics_every_n_steps,
-        backend_kwargs={
-            "wandb": {
-                "config": vars(args),
-            }
-        },
-    )
-
-    reward_fns = (
-        [gsm8k.make_gsm8k_reward_fn(debug=args.debug)]
-        if args.reward_mode == "exact"
-        else []
-    )
-    generation_args = datatypes.GenerationArgs(
-        temperature=args.temperature,
-        top_p=args.top_p,
-        top_k=None if args.top_k < 0 else args.top_k,
-        return_logprobs=True,
-    )
-    program = rl_program.StandardRLProgram(
-        algo=algo,
-        dataset=_iter_prompt_items(args),
-        max_steps=args.max_steps,
-        reward_fns=reward_fns,
-        generation_args=generation_args,
-        batch_size=args.batch_size,
-        batch_config=batch_assembly.BatchConfig(
-            pad_id=pad_id,
-            max_prompt_length=args.max_prompt_length,
-            max_response_length=args.max_response_length,
-            max_seq_token_per_tpu=args.max_seq_token_per_tpu,
-            max_segments_per_packed_row=args.max_segments_per_packed_row,
-            trainer_fsdp=args.trainer_fsdp,
-            trainer_dp=args.trainer_dp,
-            trainer_expert=args.trainer_expert,
-        ),
-        metrics_logging_options=metrics_logging_options,
-        trajectory_log_dir=args.trajectory_log_dir,
-        trajectory_store=cluster.trajectory_store,
-        max_staleness=args.max_staleness,
-        group_order=args.trajectory_group_order,
-        sync_weights=(args.weight_sync_mode != "none"),
-        on_step_begin=lambda step: logging.info(
-            ">>> Step %d starting | Policy Version: %d",
-            step,
-            step,
-        ),
-        on_step_end=lambda step, result: logging.info(
-            "<<< Step %d finished | Advanced to Policy Version: %d",
-            step,
-            step + 1,
-        ),
-    )
-
     logging.info("Bringing up remote workers through ClusterOrchestrator...")
     cluster.bring_up_workers(dummy_data=None)
     logging.info(
@@ -635,8 +632,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
     logging.exception("FATAL: StandardRLProgram execution failed: %s", exc)
     raise
   finally:
-    if program is not None:
-      program.close()
+    program.close()
     if args.stop_workers_on_exit:
       # Graceful gRPC stop, then wait until the workers report STOPPED, then
       # delete their JobSets: workers are long-lived servers that never exit
