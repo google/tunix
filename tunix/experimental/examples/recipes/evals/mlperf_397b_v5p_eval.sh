@@ -12,12 +12,16 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-export TUNIX_IMAGE="${TUNIX_IMAGE:-gcr.io/cloud-tpu-multipod-dev/sanbao/tunix_stack:eval}"
+export TUNIX_IMAGE="${TUNIX_IMAGE:-gcr.io/cloud-tpu-multipod-dev/atwigg/trellis-experimental:1005}"
 
 # Cluster & GCS paths
+export PROJECT="${PROJECT:-cloud-tpu-shared-capacity}"
 export REGION="${REGION:-europe-west4}"
 export CLUSTER="${CLUSTER:-bodaborg-v5p-nap}"
 export K8S_NAMESPACE="${K8S_NAMESPACE:-trellis}"
+export SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-${K8S_NAMESPACE}}"
+export KUEUE_QUEUE="${KUEUE_QUEUE:-multislice-queue}"
+export PREEMPTIBLE="${PREEMPTIBLE:-false}"
 export BUCKET="${BUCKET:-gs://atwigg-trellis-europe-west4-dev}"
 
 # v5p Rollout Topology (16 chips = 16 devices = 4 hosts per replica, DP=1, EP=16, TP=1)
@@ -25,8 +29,12 @@ export ROLLOUT_TPU_SLICE="${ROLLOUT_TPU_SLICE:-tpuv5p:2x2x4}"
 export VLLM_DATA_PARALLEL_SIZE="${VLLM_DATA_PARALLEL_SIZE:-1}"
 _rollout_dims="${ROLLOUT_TPU_SLICE#*:}"
 export ROLLOUT_MESH_EXPERT="${ROLLOUT_MESH_EXPERT:-$(( ${_rollout_dims//x/*} / ${VLLM_DATA_PARALLEL_SIZE:-1} ))}"
+export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-16}"
+export BATCH_SIZE="${BATCH_SIZE:-$(( 4 * ROLLOUT_REPLICAS ))}"
 
 # v5p Sandbox
+export MAX_WARMPOOL_REPLICAS="${MAX_WARMPOOL_REPLICAS:-16}"
+export MAX_CONCURRENCY="${MAX_CONCURRENCY:-$(( 16 * ROLLOUT_REPLICAS ))}"
 export SANDBOX_NODE_SELECTOR_VAL="${SANDBOX_NODE_SELECTOR_VAL:-sandbox-cpu-pool}"
 export IMAGE_REWRITE_PREFIX="${IMAGE_REWRITE_PREFIX:-europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/}"
 
