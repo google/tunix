@@ -25,6 +25,7 @@ export CLUSTER="${CLUSTER:-bodaborg-v5p-nap}"
 export K8S_NAMESPACE="${K8S_NAMESPACE:-trellis}"
 export CPU_NODEPOOL="${CPU_NODEPOOL:-cpu-np}"
 export CPU_MEMORY="${CPU_MEMORY:-240G}"
+export ENABLE_MULTI_NUMA="${ENABLE_MULTI_NUMA:-0}"
 
 # v5p has 1 device/chip and 4 chips (4 devices) per host.
 export RAIDEN_DEVICES_PER_HOST="${RAIDEN_DEVICES_PER_HOST:-4}"
