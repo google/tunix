@@ -2124,6 +2124,7 @@ class PoolExecutionSession:
     call_kwargs.pop("route_key", None)
     dispatched_set = self._dispatched_tasks.setdefault(actor, set())
     dispatched_set.add(request_id)
+    self._task_dispatch_times[request_id] = time.monotonic()
     self._ensure_worker_polling(actor)
 
     try:
@@ -2135,7 +2136,7 @@ class PoolExecutionSession:
       else:
         await dispatch_coro
       if request_id in dispatched_set:
-        self._task_dispatch_times[request_id] = time.monotonic()
+        self._task_dispatch_times.setdefault(request_id, time.monotonic())
       # Re-ensure worker polling is active in case the previous polling loop
       # exited or died while dispatch_task was awaiting.
       self._ensure_worker_polling(actor)
@@ -2392,7 +2393,7 @@ class PoolExecutionSession:
                 rid
                 for rid in list(dispatched_set)
                 if now - self._task_dispatch_times.get(rid, now)
-                >= self._task_timeout_s
+                >= self._task_timeout_s - 0.05
             }
             if expired_rids and len(expired_rids) < len(dispatched_set):
               timeout_exc = TimeoutError(
@@ -2461,7 +2462,7 @@ class PoolExecutionSession:
         if remaining <= 0:
           return []
         step_wait = (
-            min(remaining, 1.2)
+            min(remaining, 0.2)
             if self._has_pending_workers_fn is not None
             else remaining
         )

@@ -1028,6 +1028,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     self._weights_consistent = True
     self._last_deferred_pending_sync_state = None
     self._policy_version = result.policy_version
+    self._rollout_session._schedule_drain_pending()
     logging.info(
         "Weight synchronization complete (policy_version=%d).",
         self._policy_version,
@@ -1133,6 +1134,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
             exc,
         )
         return None
+      self._rollout_session._schedule_drain_pending()
       return result.policy_version
 
   async def save_checkpoint(
