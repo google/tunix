@@ -536,8 +536,21 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       "--trajectory_store_root",
       dest="trajectory_store_root_dir",
       type=str,
-      default="",
+      default=os.getenv(
+          "TRAJECTORY_STORE_ROOT_DIR",
+          os.getenv("TRAJECTORY_STORE_ROOT", ""),
+      ),
       help="Root directory for the file-backed TrajectoryStore.",
+  )
+  parser.add_argument(
+      "--trajectory_store_db_url",
+      type=str,
+      default=os.getenv("TRAJECTORY_STORE_DB_URL", ""),
+      help=(
+          "SQLAlchemy database URL for the SQL-backed TrajectoryStore (e.g."
+          " 'sqlite:////path/to/store.db' or"
+          " 'postgresql+psycopg2://user:pass@host:5432/dbname')."
+      ),
   )
   return parser.parse_args(argv)
 
@@ -546,14 +559,21 @@ def _build_trajectory_store_config(
     args: argparse.Namespace,
 ) -> dict[str, Any] | None:
   """Builds the TrajectoryStore configuration dict from orchestrator CLI flags."""
+  db_url = (args.trajectory_store_db_url or "").strip()
+  if db_url:
+    return {
+        "enabled": True,
+        "backend": "sql",
+        "db_url": db_url,
+    }
   root_dir = (args.trajectory_store_root_dir or "").strip()
-  if not root_dir:
-    return None
-  return {
-      "enabled": True,
-      "backend": "file",
-      "root_dir": root_dir,
-  }
+  if root_dir:
+    return {
+        "enabled": True,
+        "backend": "file",
+        "root_dir": root_dir,
+    }
+  return None
 
 
 def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:

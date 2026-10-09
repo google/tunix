@@ -152,6 +152,20 @@ class RLVllmSampler:
         self.engine_args.scheduling_policy,
     )
 
+    if os.environ.get("WEIGHT_SYNC_PARALLEL_H2H", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "y",
+        "t",
+        "on",
+    ):
+      extra_vars = os.environ.get("VLLM_RAY_EXTRA_ENV_VARS_TO_COPY", "")
+      existing = [v.strip() for v in extra_vars.split(",") if v.strip()]
+      if "WEIGHT_SYNC_PARALLEL_H2H" not in existing:
+        existing.append("WEIGHT_SYNC_PARALLEL_H2H")
+        os.environ["VLLM_RAY_EXTRA_ENV_VARS_TO_COPY"] = ",".join(existing)
+
     self._engine = AsyncLLMEngine.from_engine_args(self.engine_args)
     self._is_running = True
     self._log_stats_task = asyncio.create_task(self._log_stats_loop())
@@ -684,7 +698,8 @@ class RLVllmSampler:
       worker_index: int = 0,
       parallelism: int = 4,
       job_name: str = "rollout",
-  ) -> None:
+      auto_h2d: bool | None = None,
+  ) -> list[dict]:
     """Binds Raiden to each TPU worker's live weights, in-process.
 
     `get_weights_state()` cannot back a rollout-side weight sync: the
@@ -696,7 +711,25 @@ class RLVllmSampler:
     happen in the worker subprocess instead -- see
     `tpu_worker.TPUWorker.bind_raiden_sync`.
     """
-    await self._call_worker_method(
+    from tunix.experimental.weight_sync import raiden_synchronizer  # pylint: disable=g-import-not-at-top
+
+    if auto_h2d is not None or raiden_synchronizer.is_parallel_h2h_enabled():
+      raiden_synchronizer.patch_raiden_worker_sync()
+    if auto_h2d is not None:
+      try:
+        return await self._call_worker_method(
+            "bind_raiden_sync",
+            worker_index,
+            parallelism,
+            job_name,
+            auto_h2d=bool(auto_h2d),
+        )
+      except TypeError:
+        logger.warning(
+            "Worker bind_raiden_sync does not accept auto_h2d kwarg;"
+            " falling back to 3-arg call."
+        )
+    return await self._call_worker_method(
         "bind_raiden_sync", worker_index, parallelism, job_name
     )
 

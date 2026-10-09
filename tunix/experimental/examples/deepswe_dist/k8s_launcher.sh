@@ -81,6 +81,7 @@ export PIPELINE_TRAIN_MICROBATCHES=${PIPELINE_TRAIN_MICROBATCHES:-false}
 export SAMPLER=${SAMPLER:-inprocess_vllm}
 export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
 export WEIGHT_SYNC_DISABLE_TIMEOUTS=${WEIGHT_SYNC_DISABLE_TIMEOUTS:-${DISABLE_WEIGHT_SYNC_TIMEOUTS:-0}}
+export WEIGHT_SYNC_PARALLEL_H2H=${WEIGHT_SYNC_PARALLEL_H2H:-}
 export CHECKPOINT_SAVE_INTERVAL_STEPS=${CHECKPOINT_SAVE_INTERVAL_STEPS:-5}
 export CHECKPOINT_MAX_TO_KEEP=${CHECKPOINT_MAX_TO_KEEP:-2}
 export CHECKPOINT_ROOT_DIRECTORY=${CHECKPOINT_ROOT_DIRECTORY:-checkpoints}
@@ -421,6 +422,7 @@ start_orchestrator() {
       ORCHESTRATOR_ID=\"${ORCHESTRATOR_ID}\" \
       ${sandbox_env} \
       ${SCAFFOLD:+SCAFFOLD=\"${SCAFFOLD}\"} \
+      ${OPENHANDS_MULTI_TOOL_CALLS:+OPENHANDS_MULTI_TOOL_CALLS=\"${OPENHANDS_MULTI_TOOL_CALLS}\"} \
       ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} \
       ${WANDB_API_KEY:+WANDB_API_KEY=\"${WANDB_API_KEY}\"} \
       ${WANDB_ENTITY:+WANDB_ENTITY=\"${WANDB_ENTITY}\"} \
@@ -429,6 +431,7 @@ start_orchestrator() {
       ROLLOUT_WORKERS=\"${ROLLOUT_WORKERS:-${ROLLOUT_REPLICAS:-1}}\" \
       EPISODE_TIMEOUT_SECS=\"${EPISODE_TIMEOUT_SECS:-5400}\" \
       WEIGHT_SYNC_DISABLE_TIMEOUTS=\"${WEIGHT_SYNC_DISABLE_TIMEOUTS}\" \
+      ${WEIGHT_SYNC_PARALLEL_H2H:+WEIGHT_SYNC_PARALLEL_H2H=\"${WEIGHT_SYNC_PARALLEL_H2H}\"} \
       ${ROLLOUT_FP8:+ROLLOUT_FP8=\"${ROLLOUT_FP8}\"} \
       ${TRAINER_FP8:+TRAINER_FP8=\"${TRAINER_FP8}\"} \
       ${ROLLOUT_QUANTIZATION:+ROLLOUT_QUANTIZATION=\"${ROLLOUT_QUANTIZATION}\"} \
@@ -482,6 +485,7 @@ start_orchestrator() {
         ${LOG_DIR:+--log_dir=\"${LOG_DIR}\"} \
         ${TRAJECTORY_LOG_DIR:+--trajectory_log_dir=\"${TRAJECTORY_LOG_DIR}\"} \
         ${TRAJECTORY_STORE_ROOT_DIR:+--trajectory_store_root_dir=\"${TRAJECTORY_STORE_ROOT_DIR}\"} \
+        ${TRAJECTORY_STORE_DB_URL:+--trajectory_store_db_url=\"${TRAJECTORY_STORE_DB_URL}\"} \
         --flush_every_n_steps=${FLUSH_EVERY_N_STEPS} \
         --wandb_project=\"${WANDB_PROJECT}\" \
         --wandb_run_name=\"${WANDB_RUN_NAME}\" \
@@ -805,7 +809,9 @@ if cfg:
         ${TUNIX_DEBUG_INFERENCE_LOGS:+TUNIX_DEBUG_INFERENCE_LOGS=\"${TUNIX_DEBUG_INFERENCE_LOGS}\"} \
         EPISODE_TIMEOUT_SECS="${EPISODE_TIMEOUT_SECS:-5400}" \
         WEIGHT_SYNC_DISABLE_TIMEOUTS=\"${WEIGHT_SYNC_DISABLE_TIMEOUTS}\" \
+        ${WEIGHT_SYNC_PARALLEL_H2H:+WEIGHT_SYNC_PARALLEL_H2H=\"${WEIGHT_SYNC_PARALLEL_H2H}\"} \
         ${SCAFFOLD:+SCAFFOLD=\"${SCAFFOLD}\"} \
+        ${OPENHANDS_MULTI_TOOL_CALLS:+OPENHANDS_MULTI_TOOL_CALLS=\"${OPENHANDS_MULTI_TOOL_CALLS}\"} \
         ${BOOTSTRAP_CMD} \
         USE_RAIDEN_FFI=false RAIDEN_USE_FFI=0 \
         RAIDEN_DEVICES_PER_HOST=${RAIDEN_DEVICES_PER_HOST} \
@@ -1136,6 +1142,7 @@ start_eval() {
         VLLM_TPU_USING_PATHWAYS=1 \
         ${sandbox_env} \
         ${SCAFFOLD:+SCAFFOLD=\"${SCAFFOLD}\"} \
+        ${OPENHANDS_MULTI_TOOL_CALLS:+OPENHANDS_MULTI_TOOL_CALLS=\"${OPENHANDS_MULTI_TOOL_CALLS}\"} \
         ${BOOTSTRAP_CMD} \
         ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} \
         ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE} \
@@ -1234,6 +1241,18 @@ stop_eval() {
   local eval_name="${EVAL_JOBSET_NAME:-${JOB_PREFIX}-eval}"
   local eval_ns="${EVAL_NAMESPACE:-${K8S_NAMESPACE:-trellis}}"
   local replicas=${ROLLOUT_REPLICAS:-1}
+  local selector_list=""
+  if [[ -n "${JOB_PREFIX}" ]]; then
+    selector_list="${JOB_PREFIX}"
+  fi
+  if [[ -n "${eval_name}" ]]; then
+    if [[ -n "${selector_list}" ]]; then
+      selector_list="${selector_list},${eval_name},${eval_name}-0"
+    else
+      selector_list="${eval_name},${eval_name}-0"
+    fi
+  fi
+  local sandbox_selector="app.kubernetes.io/created-by in (${selector_list})"
   if [[ "$DRY_RUN" == "true" ]]; then
     echo "[DRY RUN] Would delete jobset ${eval_name} in namespace ${eval_ns}"
     if [[ ${replicas} -gt 1 ]]; then
@@ -1243,10 +1262,10 @@ stop_eval() {
       echo "kubectl delete workload -l \"jobset.sigs.k8s.io/jobset-name in (${selector_list})\" -n ${eval_ns} --ignore-not-found=true --wait=false"
     fi
     if [[ "${USE_AGENT_SANDBOX}" == "1" || "${USE_AGENT_SANDBOX}" == "true" || "${USE_AGENT_SANDBOX}" == "True" ]]; then
-      echo "kubectl delete sandboxwarmpools -n ${SANDBOX_NAMESPACE} -l app.kubernetes.io/created-by=${JOB_PREFIX} --ignore-not-found=true"
-      echo "kubectl delete sandboxtemplates -n ${SANDBOX_NAMESPACE} -l app.kubernetes.io/created-by=${JOB_PREFIX} --ignore-not-found=true"
-      echo "kubectl delete sandboxclaims -n ${SANDBOX_NAMESPACE} -l app.kubernetes.io/created-by=${JOB_PREFIX} --ignore-not-found=true"
-      echo "kubectl delete pods -n ${SANDBOX_NAMESPACE} -l app.kubernetes.io/created-by=${JOB_PREFIX} --force --grace-period=0 --ignore-not-found=true"
+      echo "kubectl delete sandboxwarmpools -n ${SANDBOX_NAMESPACE} -l \"${sandbox_selector}\" --ignore-not-found=true"
+      echo "kubectl delete sandboxtemplates -n ${SANDBOX_NAMESPACE} -l \"${sandbox_selector}\" --ignore-not-found=true"
+      echo "kubectl delete sandboxclaims -n ${SANDBOX_NAMESPACE} -l \"${sandbox_selector}\" --ignore-not-found=true"
+      echo "kubectl delete pods -n ${SANDBOX_NAMESPACE} -l \"${sandbox_selector}\" --force --grace-period=0 --ignore-not-found=true"
     fi
   else
     kubectl delete jobset "${eval_name}" -n "${eval_ns}" --ignore-not-found=true || true
@@ -1258,11 +1277,11 @@ stop_eval() {
       kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name in (${selector_list})" -n "${eval_ns}" --ignore-not-found=true --wait=false 2>/dev/null || true
     fi
     if [[ "${USE_AGENT_SANDBOX}" == "1" || "${USE_AGENT_SANDBOX}" == "true" || "${USE_AGENT_SANDBOX}" == "True" ]]; then
-      echo "Cleaning up sandboxes and warmpools for ${JOB_PREFIX} in ${SANDBOX_NAMESPACE}..."
-      kubectl delete sandboxwarmpools -n "${SANDBOX_NAMESPACE}" -l "app.kubernetes.io/created-by=${JOB_PREFIX}" --ignore-not-found=true 2>/dev/null || true
-      kubectl delete sandboxtemplates -n "${SANDBOX_NAMESPACE}" -l "app.kubernetes.io/created-by=${JOB_PREFIX}" --ignore-not-found=true 2>/dev/null || true
-      kubectl delete sandboxclaims -n "${SANDBOX_NAMESPACE}" -l "app.kubernetes.io/created-by=${JOB_PREFIX}" --ignore-not-found=true 2>/dev/null || true
-      kubectl delete pods -n "${SANDBOX_NAMESPACE}" -l "app.kubernetes.io/created-by=${JOB_PREFIX}" --force --grace-period=0 --ignore-not-found=true 2>/dev/null || true
+      echo "Cleaning up sandboxes and warmpools for ${JOB_PREFIX} (${eval_name}) in ${SANDBOX_NAMESPACE}..."
+      kubectl delete sandboxwarmpools -n "${SANDBOX_NAMESPACE}" -l "${sandbox_selector}" --ignore-not-found=true 2>/dev/null || true
+      kubectl delete sandboxtemplates -n "${SANDBOX_NAMESPACE}" -l "${sandbox_selector}" --ignore-not-found=true 2>/dev/null || true
+      kubectl delete sandboxclaims -n "${SANDBOX_NAMESPACE}" -l "${sandbox_selector}" --ignore-not-found=true 2>/dev/null || true
+      kubectl delete pods -n "${SANDBOX_NAMESPACE}" -l "${sandbox_selector}" --force --grace-period=0 --ignore-not-found=true 2>/dev/null || true
     fi
   fi
 }

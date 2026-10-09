@@ -169,6 +169,7 @@ class FakeDestination:
       raise_after_complete_once: Optional[str] = None,
       status_unreachable: bool = False,
       transport_mode: Optional[str] = None,
+      auto_h2d: Optional[bool] = None,
   ):
     self._info = datatypes.WorkerInfo(
         worker_id=worker_id, roles=frozenset({datatypes.Role.ROLLOUT.value})
@@ -178,6 +179,7 @@ class FakeDestination:
     self._global_shape = global_shape
     self._item_size = item_size
     self._transport_mode = transport_mode
+    self._auto_h2d = auto_h2d
     self._fail_on = fail_on
     self._fail_persistently = fail_persistently
     self._failed_once: set[str] = set()
@@ -260,6 +262,7 @@ class FakeDestination:
               control_plane_rpc_address=f"10.0.0.2:{self.port + 500}",
               variables=self._variables,
               transport_mode=self._transport_mode,
+              auto_h2d=self._auto_h2d,
           )
       ]
     return [
@@ -272,6 +275,7 @@ class FakeDestination:
             layout=(0,),
             item_size=self._item_size,
             transport_mode=self._transport_mode,
+            auto_h2d=self._auto_h2d,
         )
     ]
 
@@ -412,6 +416,7 @@ class CoordinatorTestBase(absltest.TestCase):
       *destinations: FakeDestination,
       sources=None,
       timeouts=None,
+      parallel_h2h=None,
   ):
     self.log: list[str] = []
     self.wire = Wire()
@@ -435,6 +440,7 @@ class CoordinatorTestBase(absltest.TestCase):
         handler=self.handler,
         controller_id="test-controller",
         timeouts=timeouts or FAST_TIMEOUTS,
+        parallel_h2h=parallel_h2h,
     )
     return self.coordinator
 
@@ -2009,6 +2015,101 @@ class PhaseTimingsAndDisabledTimeoutsRoundTest(CoordinatorTestBase):
     result = self.sync(policy_version=1)
     self.assertTrue(result.success)
     self.assertTrue(math.isinf(self.coordinator._timeouts.h2d))
+
+
+class ParallelH2hCoordinatorTest(CoordinatorTestBase):
+
+  def test_parallel_h2h_runs_transfer_before_pre_when_auto_h2d_false(self):
+    dest = FakeDestination("sampler", [], auto_h2d=False)
+    self.make(dest, parallel_h2h=True)
+
+    admitting_during_transfer = []
+    orig_transfer = self.handler.transfer
+
+    def spy_transfer(*args, **kwargs):
+      admitting_during_transfer.append(dest.admitting)
+      return orig_transfer(*args, **kwargs)
+
+    self.handler.transfer = spy_transfer
+    result = self.sync(policy_version=1)
+
+    self.assertTrue(result.success)
+    self.assertEqual(admitting_during_transfer, [True])
+    self.assertLess(self.log.index("transfer"), self.log.index("sampler:pre"))
+    self.assertLess(
+        self.log.index("sampler:pre"), self.log.index("sampler:sync")
+    )
+    self.assertEqual(dest.serving, expected_pattern(1))
+
+  def test_parallel_h2h_transfer_failure_before_pre_aborts_without_downtime(
+      self,
+  ):
+    dest = FakeDestination("sampler", [], auto_h2d=False)
+    self.make(dest, parallel_h2h=True)
+    self.handler.result_success = False
+    self.handler.result_message = "network glitch during parallel h2h"
+
+    with self.assertRaises(WeightSyncError) as ctx:
+      self.sync(policy_version=1)
+
+    self.assertIs(ctx.exception.result.state, RoundState.ABORTED)
+    self.assertNotIn("pre", self.phases("sampler"))
+    self.assertNotIn("abort", self.phases("sampler"))
+    self.assertTrue(dest.admitting)
+    self.assertTrue(dest.kv_cache)
+    self.assertEqual(self.sources[0].release_calls, 1)
+    self.assertIsNone(self.coordinator.poisoned)
+
+  def test_parallel_h2h_transfer_timeout_before_pre_poisons_and_holds_staging(
+      self,
+  ):
+    dest = FakeDestination("sampler", [], auto_h2d=False)
+    self.make(
+        dest,
+        parallel_h2h=True,
+        timeouts=dataclasses.replace(FAST_TIMEOUTS, transfer=0.05),
+    )
+    self.handler.transfer_delay = 0.3
+
+    with self.assertRaises(WeightSyncError) as ctx:
+      self.sync(policy_version=1)
+
+    self.assertIs(ctx.exception.result.state, RoundState.UNKNOWN_TRANSFER_STATE)
+    self.assertNotIn("pre", self.phases("sampler"))
+    self.assertNotIn("abort", self.phases("sampler"))
+    self.assertEqual(self.sources[0].release_calls, 0)
+    self.assertIsNotNone(self.coordinator.poisoned)
+
+  def test_parallel_h2h_pre_failure_after_transfer_rolls_back_destinations(
+      self,
+  ):
+    dest = FakeDestination(
+        "sampler", [], auto_h2d=False, fail_on="pre", fail_persistently=True
+    )
+    self.make(dest, parallel_h2h=True)
+
+    with self.assertRaises(WeightSyncError) as ctx:
+      self.sync(policy_version=1)
+
+    self.assertIs(ctx.exception.result.state, RoundState.ABORTED)
+    self.assertLess(self.log.index("transfer"), self.log.index("sampler:pre"))
+    self.assertIn("abort", self.phases("sampler"))
+    self.assertTrue(dest.admitting)
+    self.assertEqual(self.sources[0].release_calls, 1)
+    self.assertIsNone(self.coordinator.poisoned)
+
+  def test_parallel_h2h_falls_back_to_sequential_when_dest_auto_h2d_not_false(
+      self,
+  ):
+    for dest_auto_h2d in (True, None):
+      dest = FakeDestination("sampler", [], auto_h2d=dest_auto_h2d)
+      self.make(dest, parallel_h2h=True)
+
+      result = self.sync(policy_version=1)
+
+      self.assertTrue(result.success)
+      self.assertLess(self.log.index("sampler:pre"), self.log.index("transfer"))
+      self.assertEqual(dest.serving, expected_pattern(1))
 
 
 if __name__ == "__main__":

@@ -113,7 +113,7 @@ class RolloutWorker(abstract_worker.Worker):
       logging.info(
           "[trajectory-store] worker %s built %s",
           worker_id,
-          self._trajectory_store.to_config(),
+          self._trajectory_store.to_redacted_config(),
       )
     self.manager = manager_lib.RolloutManager(
         config=config,
@@ -146,7 +146,7 @@ class RolloutWorker(abstract_worker.Worker):
       logging.info(
           "[trajectory-store] worker %s built %s",
           self.worker_id,
-          self._trajectory_store.to_config(),
+          self._trajectory_store.to_redacted_config(),
       )
     return datatypes.Response(
         metadata={

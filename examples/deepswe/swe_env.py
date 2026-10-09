@@ -304,10 +304,51 @@ class SWEEnv(BaseTaskEnv):
       info["workspace_path"] = os.getenv("OPENHANDS_WORKING_DIR", "/testbed")
     return obs, info
 
+  def _step_openhands_calls(self, calls: list[Any]) -> EnvStepResult:
+    """Runs the tool calls of one multi-call turn in order, like OpenHands.
+
+    OpenHands queues every tool call of a model response and runs one per
+    controller iteration without calling the model again; each uses one of
+    `max_steps` iterations, and finish ends the episode, dropping the calls
+    after it. `step()` already counted this turn's first call in `step_count`
+    and ends the episode once `step_count` reaches `max_steps`.
+
+    Args:
+      calls: The turn's tool calls, as XML strings or parsed actions.
+
+    Returns:
+      The last call's result, with one observation per call that ran (a list
+      when more than one ran).
+    """
+    budget = max(1, self.max_steps - self.step_count + 1)
+    observations = []
+    result = None
+    for i, call in enumerate(calls[:budget]):
+      if i > 0:
+        self.step_count += 1
+      result = self._step_impl(call)
+      observations.append(result.observation)
+      if result.done:
+        break
+    info = dict(result.info or {})
+    info["num_tool_calls"] = len(observations)
+    return EnvStepResult(
+        observation=observations if len(observations) > 1 else observations[0],
+        reward=result.reward,
+        done=result.done,
+        info=info,
+    )
+
   def _step_impl(self, action: Any) -> EnvStepResult:
     global Action
     if Action is None:
       from r2egym.agenthub.action import Action  # pytype: disable=import-error
+    if (
+        isinstance(action, (list, tuple))
+        and action
+        and self.scaffold in template_mod.OPENHANDS_SCAFFOLDS
+    ):
+      return self._step_openhands_calls(list(action))
     if isinstance(action, str):
       if self.scaffold in template_mod.OPENHANDS_SCAFFOLDS:
         action_obj = openhands_utils.parse_openhands_action_str(action)
