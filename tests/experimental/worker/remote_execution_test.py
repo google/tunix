@@ -2833,9 +2833,16 @@ class RemoteExecutionTest(absltest.TestCase):
       )
       self.assertTrue(wedged.dispatched.wait(timeout=2.0))
 
+      remove_results = []
+
       def _bg_thread_mutation():
         session.add_actor(healthy, max_in_flight=2)
-        session.remove_actor(wedged, RuntimeError("cross_thread_evict"))
+        remove_results.append(
+            session.remove_actor(wedged, RuntimeError("cross_thread_evict"))
+        )
+        remove_results.append(
+            session.remove_actor(wedged, RuntimeError("cross_thread_evict_dup"))
+        )
 
       t = threading.Thread(target=_bg_thread_mutation)
       t.start()
@@ -2843,6 +2850,8 @@ class RemoteExecutionTest(absltest.TestCase):
       batch = await session.poll_completed(timeout_s=2.0)
       t.join(timeout=2.0)
 
+      self.assertEqual(remove_results, [True, False])
+      self.assertEqual(session.evictions_total, 1)
       self.assertLen(batch, 1)
       self.assertEqual(
           batch[0][0],

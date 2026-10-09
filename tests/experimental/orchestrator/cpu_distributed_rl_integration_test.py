@@ -24,13 +24,13 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 import asyncio
 import contextlib
 import functools
-import logging
 import signal
 import socket
 import time
 from types import SimpleNamespace
 from typing import Any, Iterator, Sequence, Tuple
 
+from absl import logging
 from absl.testing import absltest
 from absl.testing import parameterized
 from flax import nnx
@@ -290,8 +290,8 @@ def create_rollout_sharded_model(
 
 def _wait_for_port(host: str, port: int, timeout: float = 10.0) -> bool:
   """Polls a TCP socket until it is open and accepting connections."""
-  deadline = time.time() + timeout
-  while time.time() < deadline:
+  deadline = time.monotonic() + timeout
+  while time.monotonic() < deadline:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
       s.settimeout(0.2)
       if s.connect_ex((host, port)) == 0:

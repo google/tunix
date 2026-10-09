@@ -187,8 +187,9 @@ class RolloutManager:
     self._active_tasks: Dict[str, asyncio.Task[Any]] = {}
     self._completed_queue: asyncio.Queue[TrajectoryOrError] = asyncio.Queue()
     self._traffic_inst = None
-    self._concurrency_sem: Optional[asyncio.Semaphore] = None
-    self._concurrency_sem_loop: Optional[asyncio.AbstractEventLoop] = None
+    self._concurrency_sems: Dict[
+        asyncio.AbstractEventLoop, asyncio.Semaphore
+    ] = {}
     self._episode_timeout_s = _env_float(
         "EPISODE_TIMEOUT_SECS",
         collector_lib.DEFAULT_EPISODE_TIMEOUT_SECS,
@@ -231,17 +232,16 @@ class RolloutManager:
     """Returns the concurrency semaphore bound to the running event loop.
 
     The semaphore is created lazily because `__init__` runs before the serving
-    loop exists, and rebuilt whenever the running loop changes (e.g. per-call
-    `asyncio.run` in the in-process actor path) since asyncio primitives bind
-    to the loop they are first awaited on.
+    loop exists, and cached per running loop (e.g. per-call `asyncio.run` in
+    the in-process actor path) since asyncio primitives bind to the loop they
+    are first awaited on.
     """
     if self._max_concurrency is None or self._max_concurrency <= 0:
       return contextlib.nullcontext()
     loop = asyncio.get_running_loop()
-    if self._concurrency_sem is None or self._concurrency_sem_loop is not loop:
-      self._concurrency_sem = asyncio.Semaphore(self._max_concurrency)
-      self._concurrency_sem_loop = loop
-    return self._concurrency_sem
+    if loop not in self._concurrency_sems:
+      self._concurrency_sems[loop] = asyncio.Semaphore(self._max_concurrency)
+    return self._concurrency_sems[loop]
 
   @property
   def _traffic(self) -> traffic_controller_lib.TrafficController:

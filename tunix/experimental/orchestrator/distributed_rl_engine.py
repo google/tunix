@@ -1122,7 +1122,10 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
             policy_version=target_policy_version,
             only_pending=True,
         )
-      except (weight_sync_coordinator_lib.WeightSyncError, ValueError) as exc:
+      except (
+          weight_sync_coordinator_lib.WeightSyncError,
+          datatypes.NoHealthyRolloutWorkersError,
+      ) as exc:
         if (
             isinstance(exc, weight_sync_coordinator_lib.WeightSyncError)
             and exc.result is not None

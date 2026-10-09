@@ -1646,6 +1646,7 @@ class PoolExecutionSession:
     # Actors currently considered pool members by this session. Eviction
     # removes an actor from this set so `on_worker_evicted` fires at most once
     # per membership, without retaining dead handles after they leave.
+    self._membership_lock = threading.Lock()
     self._known_actors: set[ActorHandle] = set(pool.actors)
     self._dispatched_tasks: Dict[ActorHandle, set[str]] = {}
     self._task_dispatch_times: Dict[str, float] = {}
@@ -1886,17 +1887,19 @@ class PoolExecutionSession:
     if max_in_flight is not None and max_in_flight <= 0:
       raise ValueError("max_in_flight must be positive")
     cap = int(max_in_flight) if max_in_flight is not None else None
-    was_in_pool = actor in self._pool.actors
-    self._pool.add_actor(actor)
+    with self._membership_lock:
+      was_in_pool = actor in self._pool.actors
+      self._pool.add_actor(actor)
+      self._known_actors.add(actor)
+      active_count = len(self._pool.actors)
     if not was_in_pool:
       logging.info(
           "[rollout-ft] action=join worker=%s active_workers=%d",
           getattr(actor, "worker_id", None) or actor,
-          len(self._pool.actors),
+          active_count,
       )
 
     def _apply() -> None:
-      self._known_actors.add(actor)
       if cap is not None:
         self._worker_max_in_flight[actor] = cap
       self._schedule_drain_pending()
@@ -1981,15 +1984,19 @@ class PoolExecutionSession:
       count_retry: bool = False,
   ) -> bool:
     """Removes `actor` from the pool, cancels polling, and re-queues tasks (thread-safe)."""
-    removed_from_pool = self._pool.remove_actor(actor)
-    was_tracked = removed_from_pool or (actor in self._known_actors)
+    with self._membership_lock:
+      removed_from_pool = self._pool.remove_actor(actor)
+      was_known = actor in self._known_actors
+      self._known_actors.discard(actor)
+      active_count = len(self._pool.actors)
+    was_tracked = removed_from_pool or was_known
     if not was_tracked:
       return False
     if removed_from_pool:
       logging.info(
           "[rollout-ft] action=leave worker=%s active_workers=%d reason=%r",
           getattr(actor, "worker_id", None) or actor,
-          len(self._pool.actors),
+          active_count,
           exc,
       )
 
@@ -2001,9 +2008,6 @@ class PoolExecutionSession:
 
     def _apply() -> None:
       self._worker_max_in_flight.pop(actor, None)
-      if actor not in self._known_actors and not removed_from_pool:
-        return
-      self._known_actors.discard(actor)
       self._evictions_total += 1
       logging.info(
           "[rollout-ft] action=evict worker=%s reason=%r",
