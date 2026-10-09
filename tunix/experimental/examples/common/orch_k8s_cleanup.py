@@ -272,7 +272,7 @@ def delete_sibling_jobsets(
         err,
     )
     return []
-  names = [item["metadata"]["name"] for item in listing.get("items", []) or []]
+  names = [item["metadata"]["name"] for item in listing["items"]]
   targets = sibling_jobset_names(prefix, names)
   if not targets:
     logging.info("No worker JobSets of run %r left in %s.", prefix, namespace)
