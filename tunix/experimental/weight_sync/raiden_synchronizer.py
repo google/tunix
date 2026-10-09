@@ -1351,12 +1351,26 @@ def patch_raiden_worker_sync() -> None:
               peak_rss_gb,
           )
 
+    orig_h2d_accepts_uuid = False
+    if orig_h2d is not None:
+      try:
+        orig_h2d_accepts_uuid = (
+            "uuid" in inspect.signature(orig_h2d).parameters
+        )
+      except (TypeError, ValueError):
+        orig_h2d_accepts_uuid = False
+
     def _patched_h2d(self, uuid: Optional[int] = None) -> None:
       effective_auto_h2d = getattr(
           self, "_effective_auto_h2d", getattr(self, "_auto_h2d", True)
       )
       if effective_auto_h2d and orig_h2d is not None:
-        return orig_h2d(self, uuid=uuid)
+        if orig_h2d_accepts_uuid:
+          return orig_h2d(self, uuid=uuid)
+        try:
+          return orig_h2d(self, uuid=uuid)
+        except TypeError:
+          return orig_h2d(self)
       sync = self._require_sync("h2d()")
       job_name = getattr(self, "job_name", "rollout")
       if uuid is not None and int(uuid) <= 0:
@@ -1365,6 +1379,12 @@ def patch_raiden_worker_sync() -> None:
         )
       t_start = time.monotonic()
       rss_before_gb, _ = _get_host_rss_gb()
+      # Note: `wait_for_transfer_completion` is only present on asynchronous
+      # Raiden synchronizer variants. In standard `tpu_sync_jax`, `sync` does
+      # not have `wait_for_transfer_completion` because `controller.transfer()`
+      # is a synchronous barrier across all units that completes host-staging
+      # H2H writes (`_pending_h2d = True`) before returning, so `sync.h2d()`
+      # must be called directly below.
       if hasattr(sync, "wait_for_transfer_completion"):
         if not effective_auto_h2d and uuid is None:
           raise ValueError(
