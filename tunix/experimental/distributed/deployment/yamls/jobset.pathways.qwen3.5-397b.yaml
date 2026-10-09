@@ -41,6 +41,7 @@ ${QUEUE_LABEL}spec:
             annotations:
               cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
           spec:
+            serviceAccountName: ${SERVICE_ACCOUNT}
             dnsPolicy: ClusterFirstWithHostNet
             hostNetwork: true
             restartPolicy: Never${PRIORITY_CLASS_LINE}
@@ -93,6 +94,10 @@ ${QUEUE_LABEL}spec:
               - --instance_count=${REPLICAS}
               - --instance_type=${PW_INSTANCE_TYPE}:${TPU_TOPOLOGY}
               env:
+              - name: RAIDEN_BROADCAST_K
+                value: "64"
+              - name: TPU_RAIDEN_DATA_NICS
+                value: "eth0"
               - name: REPLICATED_JOB_NAME
                 valueFrom:
                   fieldRef:
@@ -128,6 +133,10 @@ ${QUEUE_LABEL}spec:
               - --gcs_scratch_location=${GCS_SCRATCH_LOCATION}
               - --temporary_flags_for_debugging=temporary_flag_for_debugging_test_only_hold_death_ref=false${PATHWAYS_PROXY_EXTRA_ARGS}${COLOCATED_PYTHON_PROXY_ARGS}
               env:
+              - name: RAIDEN_BROADCAST_K
+                value: "64"
+              - name: TPU_RAIDEN_DATA_NICS
+                value: "eth0"
               - name: PATHWAYS_HEAD
                 valueFrom:
                   fieldRef:
@@ -181,6 +190,10 @@ ${FAIL_FAST_WRAPPER_POST}                  echo "Program End: $$(date)"
                   echo "EXIT_CODE=$$EXIT_CODE"
                   exit $$EXIT_CODE
               env:
+              - name: RAIDEN_BROADCAST_K
+                value: "64"
+              - name: TPU_RAIDEN_DATA_NICS
+                value: "eth0"
               # Injects the JobSet Name
               - name: JOBSET_NAME
                 valueFrom:
@@ -228,6 +241,7 @@ ${FAIL_FAST_WRAPPER_POST}                  echo "Program End: $$(date)"
               # kueue.x-k8s.io/podset-slice-required-topology: cloud.google.com/gke-tpu-slice-${PODSET_SLICE_TOPOLOGY}-id
               # kueue.x-k8s.io/podset-slice-size: "${PODSET_SLICE_SIZE}"
           spec:
+            serviceAccountName: ${SERVICE_ACCOUNT}
             dnsPolicy: ClusterFirstWithHostNet
             hostNetwork: true
             restartPolicy: OnFailure${PRIORITY_CLASS_LINE}
@@ -268,6 +282,10 @@ ${FAIL_FAST_WRAPPER_POST}                  echo "Program End: $$(date)"
               - --resource_manager_address=$$(PATHWAYS_HEAD):29001
               - --gcs_scratch_location=${GCS_SCRATCH_LOCATION}${COLOCATED_PYTHON_WORKER_ARGS}
               env:
+              - name: RAIDEN_BROADCAST_K
+                value: "64"
+              - name: TPU_RAIDEN_DATA_NICS
+                value: "eth0"
               - name: TPU_MIN_LOG_LEVEL
                 value: "0"
               - name: TF_CPP_MIN_LOG_LEVEL
