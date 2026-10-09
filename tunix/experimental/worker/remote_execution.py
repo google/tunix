@@ -1885,7 +1885,14 @@ class PoolExecutionSession:
     if max_in_flight is not None and max_in_flight <= 0:
       raise ValueError("max_in_flight must be positive")
     cap = int(max_in_flight) if max_in_flight is not None else None
+    was_in_pool = actor in self._pool.actors
     self._pool.add_actor(actor)
+    if not was_in_pool:
+      logging.info(
+          "[rollout-ft] action=join worker=%s active_workers=%d",
+          getattr(actor, "worker_id", None) or actor,
+          len(self._pool.actors),
+      )
 
     def _apply() -> None:
       self._known_actors.add(actor)
@@ -1977,6 +1984,13 @@ class PoolExecutionSession:
     was_tracked = removed_from_pool or (actor in self._known_actors)
     if not was_tracked:
       return False
+    if removed_from_pool:
+      logging.info(
+          "[rollout-ft] action=leave worker=%s active_workers=%d reason=%r",
+          getattr(actor, "worker_id", None) or actor,
+          len(self._pool.actors),
+          exc,
+      )
 
     failure_exc = (
         exc

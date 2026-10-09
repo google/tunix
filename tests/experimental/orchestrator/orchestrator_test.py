@@ -959,24 +959,43 @@ class ClusterOrchestratorTest(absltest.TestCase):
         weight_sync_mode="fallback",
         rollout_task_timeout_s=45.0,
     )
-    orch.register_worker_handle("actor-0", [datatypes.Role.ACTOR], h_actor)
-    orch.register_worker_handle("rollout-0", [datatypes.Role.ROLLOUT], h_r0)
-    orch.register_worker_handle("rollout-1", [datatypes.Role.ROLLOUT], h_r1)
-    orch.register_worker_handle("rollout-2", [datatypes.Role.ROLLOUT], h_r2)
-    orch.bring_up_workers()
+    with self.assertLogs(level="INFO") as cm:
+      orch.register_worker_handle("actor-0", [datatypes.Role.ACTOR], h_actor)
+      orch.register_worker_handle("rollout-0", [datatypes.Role.ROLLOUT], h_r0)
+      orch.register_worker_handle("rollout-1", [datatypes.Role.ROLLOUT], h_r1)
+      orch.register_worker_handle("rollout-2", [datatypes.Role.ROLLOUT], h_r2)
+      orch.bring_up_workers()
 
-    assert orch.engine is not None
-    self.assertEqual(orch.engine.rollout_task_timeout_s, 45.0)
-    self.assertEqual(orch.engine._rollout_session.task_timeout_s, 45.0)
+      assert orch.engine is not None
+      self.assertEqual(orch.engine.rollout_task_timeout_s, 45.0)
+      self.assertEqual(orch.engine._rollout_session.task_timeout_s, 45.0)
 
-    # 1. Evicting rollout-0 via WorkerRegistry removes h_r0 from live session
-    orch.registry.evict("rollout-0")
-    self.assertEqual(orch.engine._rollout_workers, [h_r1, h_r2])
+      # 1. Evicting rollout-0 via WorkerRegistry removes h_r0 from live session
+      orch.registry.evict("rollout-0")
+      self.assertEqual(orch.engine._rollout_workers, [h_r1, h_r2])
 
-    # 2. Unregistering rollout-1 removes h_r1 from live session and registry
-    orch.unregister_worker("rollout-1")
-    self.assertEqual(orch.engine._rollout_workers, [h_r2])
-    self.assertNotIn("rollout-1", orch.registry)
+      # 2. Unregistering rollout-1 removes h_r1 from live session and registry
+      orch.unregister_worker("rollout-1")
+      self.assertEqual(orch.engine._rollout_workers, [h_r2])
+      self.assertNotIn("rollout-1", orch.registry)
+
+    joined_logs = "\n".join(cm.output)
+    self.assertIn(
+        "[rollout-ft] action=join worker_id=rollout-0 incarnation=1",
+        joined_logs,
+    )
+    self.assertIn(
+        "[rollout-ft] action=evict worker_id=rollout-0 incarnation=1",
+        joined_logs,
+    )
+    self.assertIn(
+        "[rollout-ft] action=leave worker_id=rollout-1 incarnation=1",
+        joined_logs,
+    )
+    self.assertIn(
+        "[rollout-ft] action=leave worker=rollout-1 active_workers=1",
+        joined_logs,
+    )
     orch.shutdown()
 
   def test_late_rollout_worker_at_step_zero_is_staged_as_pending_weight_sync(

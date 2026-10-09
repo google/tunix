@@ -306,14 +306,22 @@ class ClusterOrchestrator:
           override=override,
           state=initial_state,
       )
+      incarnation = self.registry.incarnation(worker_id)
       logging.info(
           "Registered remote worker %r with roles %s.",
           worker_id,
           sorted(role_names),
       )
+      if datatypes.Role.ROLLOUT.value in role_names:
+        logging.info(
+            "[rollout-ft] action=%s worker_id=%s incarnation=%d state=%s",
+            "rejoin" if incarnation > 1 else "join",
+            worker_id,
+            incarnation,
+            initial_state.value,
+        )
 
       if self._brought_up:
-        incarnation = self.registry.incarnation(worker_id)
         fut = self._bring_up_executor.submit(
             self._bring_up_single_remote_worker,
             worker_id,
@@ -373,7 +381,8 @@ class ClusterOrchestrator:
           if require_sync:
             target_state = worker_registry.MembershipState.PENDING_WEIGHT_SYNC
           logging.info(
-              "[rollout-ft] action=rejoin worker_id=%s incarnation=%s state=%s",
+              "[rollout-ft] action=%s worker_id=%s incarnation=%s state=%s",
+              "rejoin" if (incarnation or 0) > 1 else "join",
               worker_id,
               incarnation,
               target_state.value,
@@ -407,13 +416,20 @@ class ClusterOrchestrator:
   def unregister_worker(self, worker_id: str) -> None:
     """Unregisters a worker by its id."""
     with self._lock:
-      if self.engine is not None and worker_id in self.registry:
+      if worker_id in self.registry:
         member = self.registry.get(worker_id)
+        incarnation = self.registry.incarnation(worker_id)
         if (
             isinstance(member, weight_sync_coordinator.RemoteWorkerShim)
             and datatypes.Role.ROLLOUT.value in member.info().roles
         ):
-          self.engine.remove_rollout_worker(member.handle)
+          logging.info(
+              "[rollout-ft] action=leave worker_id=%s incarnation=%d",
+              worker_id,
+              incarnation,
+          )
+          if self.engine is not None:
+            self.engine.remove_rollout_worker(member.handle)
       self.registry.unregister(worker_id)
 
   def wait_for_workers(
