@@ -16,7 +16,7 @@
 
 from typing import Protocol
 import numpy as np
-import tunix.models.gemma4.model as gemma4_model_lib
+from tunix.models.gemma4 import config as gemma4_config_lib
 
 
 class _Gemma4AudioTokenizerLike(Protocol):
@@ -32,7 +32,7 @@ def process_gemma4_inputs(
     audio_encoder: _Gemma4AudioTokenizerLike,
     max_audio_length: int | None = None,
     max_audio_clips: int | None = None,
-) -> tuple[gemma4_model_lib.PreprocessedAudioInput | None, list[np.ndarray]]:
+) -> tuple[gemma4_config_lib.PreprocessedAudioInput | None, list[np.ndarray]]:
   """Process audio and tokens for Gemma4-E2B/E4B models.
 
   Args:
@@ -132,7 +132,7 @@ def process_gemma4_inputs(
 
   # Expand <|audio|> tokens with appropriate amount of soft token placeholders.
   # pylint: disable=invalid-name
-  SOFT_TOKEN_PLACEHOLDER = gemma4_model_lib.AUDIO_SOFT_TOKEN_PLACEHOLDER
+  SOFT_TOKEN_PLACEHOLDER = gemma4_config_lib.AUDIO_SOFT_TOKEN_PLACEHOLDER
   # Constants from upstream gemma4's tokenizer (gemma/text/_tokenizer.py).
   AUDIO_PLACEHOLDER = 258881  # <|audio|>
   START_OF_AUDIO = 256000  # <|audio> (BOA)
@@ -186,7 +186,7 @@ def process_gemma4_inputs(
           padded_audios[b, i, : len(clip)] = clip
           padded_audio_lengths[b, i] = len(clip)
 
-    processed_audios = gemma4_model_lib.PreprocessedAudioInput(
+    processed_audios = gemma4_config_lib.PreprocessedAudioInput(
         audios=padded_audios,  # pyrefly: ignore[bad-argument-type]
         sequence_lengths=padded_audio_lengths,  # pyrefly: ignore[bad-argument-type]
     )

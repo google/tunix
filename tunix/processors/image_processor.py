@@ -17,7 +17,7 @@
 from typing import Any
 import numpy as np
 from PIL import Image
-from tunix.models.gemma4.model import PreprocessedVisionInput
+from tunix.models.gemma4 import config as gemma4_config_lib
 
 
 class ImageProcessor:
@@ -553,7 +553,7 @@ def process_gemma4_inputs(
         dtype=jnp.int32,
     )
 
-  processed_images = PreprocessedVisionInput(
+  processed_images = gemma4_config_lib.PreprocessedVisionInput(
       patches=patches,
       positions_xy=positions_xy,
       soft_token_counts=tuple(all_soft_token_counts),
