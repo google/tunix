@@ -18,7 +18,7 @@ from __future__ import annotations
 import abc
 import time
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 import contextlib
 import copy
 import dataclasses
@@ -234,6 +234,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     self._background_tasks: Set[asyncio.Task] = set()
     self._full_batch_size = 0
     self._process_in_consumer: bool = False
+    # Set by `train()` so that `_stop_producer()` can unblock the producer.
+    self._prompt_queue: queue.Queue[TrainingInputT | None] | None = None
+    self._producer_future: Future[None] | None = None
 
     loop_queue = queue.Queue()
 
@@ -742,6 +745,32 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       skip_jit: bool = False,
   ) -> None:
     """Main training loop for the AgenticRLLearner."""
+    self._prompt_queue = None
+    self._producer_future = None
+    try:
+      self._train_impl(train_dataset, eval_dataset, skip_jit)
+    except BaseException:
+      # Training failed (e.g. OOM in the train step, an eval or checkpoint
+      # error, Ctrl-C). Stop the producer before re-raising: otherwise its
+      # executor thread stays blocked in `prompt_queue.get()` and the process
+      # hangs at exit, when `concurrent.futures` joins its worker threads.
+      self._stop_producer()
+      raise
+
+  def _stop_producer(self) -> None:
+    """Unblocks and cancels the rollout producer started by `train()`."""
+    if self._prompt_queue is not None:
+      self._prompt_queue.put(None)
+    if self._producer_future is not None:
+      self._producer_future.cancel()
+
+  def _train_impl(
+      self,
+      train_dataset: Iterable[TrainingInputT],
+      eval_dataset: Iterable[TrainingInputT] | None,
+      skip_jit: bool,
+  ) -> None:
+    """Body of `train()`; see `train()` for error handling."""
     full_batch_iterator = iter(train_dataset)
 
     if self.rl_engine.global_steps > 0:
@@ -835,6 +864,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     orchestrator = self._build_orchestrator()
 
     prompt_queue = queue.Queue()
+    self._prompt_queue = prompt_queue
     initial_buffer_size = self.algo_config.off_policy_steps + 1
     logging.info(
         "Prefilling prompt queue with %d batches.", initial_buffer_size
@@ -850,6 +880,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         self._producer(orchestrator, prompt_queue, train_data_queue),
         self.loop,
     )
+    self._producer_future = producer_future
 
     # 2. Consume training examples and train.
     train_data_gen = self._data_consumer_batch_generator(
