@@ -515,6 +515,97 @@ class UtilsTest(parameterized.TestCase):
         "Regular parameter with transpose mismatch",
     )
 
+  def test_gemma4_sglang_jax_mapping(self):
+    from tunix.models.gemma4.mapping_sglang_jax import SGLANG_JAX_MAPPING
+
+    source, expected = {}, {}
+    for layer, head_dim in ((0, 2), (1, 4)):
+      src, dst = f"layers.{layer}", f"model.layers.{layer}"
+      q = jnp.arange(2 * 4 * head_dim).reshape(2, 4, head_dim)
+      k = jnp.arange(4 * head_dim).reshape(1, 4, head_dim) + 10
+      source[f"{src}.attn.q_einsum.w"] = MockParam(q)
+      expected[f"{dst}.self_attn.q_proj.weight"] = q.transpose(1, 0, 2).reshape(
+          4, -1
+      )
+      expected[f"{dst}.self_attn.k_proj.weight"] = k.transpose(1, 0, 2).reshape(
+          4, -1
+      )
+      if layer == 0:
+        source[f"{src}.attn.kv_einsum.w"] = MockParam(jnp.stack((k, k + 20)))
+        expected[f"{dst}.self_attn.v_proj.weight"] = (
+            (k + 20).transpose(1, 0, 2).reshape(4, -1)
+        )
+      else:
+        source[f"{src}.attn.k_einsum.w"] = MockParam(k)
+      for name, target in (
+          ("pre_attention_norm.scale", "input_layernorm.weight"),
+          ("post_attention_norm.scale", "post_attention_layernorm.weight"),
+          ("pre_ffw_norm.scale", "pre_feedforward_layernorm.weight"),
+          ("post_ffw_norm.scale", "post_feedforward_layernorm.weight"),
+          ("attn._query_norm.scale", "self_attn.q_norm.weight"),
+          ("attn._key_norm.scale", "self_attn.k_norm.weight"),
+          ("skip_scale", "layer_scalar"),
+      ):
+        value = jnp.full(
+            (1 if name == "skip_scale" else head_dim,), layer + 2.0
+        )
+        source[f"{src}.{name}"] = MockParam(value)
+        expected[f"{dst}.{target}"] = value
+    source["final_norm.scale"] = MockParam(jnp.arange(4, dtype=jnp.float32))
+    expected["model.norm.weight"] = source["final_norm.scale"].value
+    original = source["layers.0.attn.kv_einsum.w"].value.copy()
+    prepared = SGLANG_JAX_MAPPING["preprocess_src_state"](
+        MockState(source), tp_size=1
+    )
+    self.assertNotIn("layers.0.attn.kv_einsum.w", prepared.params)
+    self.assertNotIn("layers.1.attn.v_einsum.w", prepared.params)
+    actual = utils.transfer_state_with_mappings(
+        prepared,
+        MockState(
+            {k: MockParam(jnp.zeros_like(v)) for k, v in expected.items()}
+        ),
+        SGLANG_JAX_MAPPING["to_hf_mappings"],
+        transpose_keys=SGLANG_JAX_MAPPING["to_hf_transpose_keys"],
+        rollout_engine="sglang_jax",
+    )
+    for key, value in expected.items():
+      np.testing.assert_array_equal(
+          getattr(actual.params[key], "value", actual.params[key]), value
+      )
+    np.testing.assert_array_equal(
+        source["layers.0.attn.kv_einsum.w"].value, original
+    )
+
+  @parameterized.parameters(
+      "embedder.per_layer_input_embedding",
+      "layers.0.post_per_layer_input_norm.scale",
+      "layers.0.moe.router_logits",
+      "vision_encoder.entry.pos_emb",
+      "audio_encoder.layer.weight",
+      "embedder.mm_input_projection.w",
+      "layers.0.attn.q_einsum.w_lora_a",
+  )
+  def test_gemma4_sglang_jax_rejects_unsupported_weights(self, key):
+    from tunix.models.gemma4.mapping_sglang_jax import preprocess_src_state
+
+    with self.assertRaisesRegex(NotImplementedError, "dense text weights only"):
+      preprocess_src_state(MockState({key: MockParam(jnp.ones(1))}))
+
+  @parameterized.parameters(False, True)
+  def test_gemma4_sglang_jax_kv_wrapper(self, wrapped):
+    from tunix.models.gemma4.mapping_sglang_jax import preprocess_src_state
+
+    value = jnp.arange(16).reshape(2, 1, 4, 2)
+    state = MockState(
+        {"layers.0.attn.kv_einsum.w": MockParam(value) if wrapped else value}
+    )
+    state.from_flat_path = dict
+    result = preprocess_src_state(state)
+    for name, expected in zip(("k_einsum", "v_einsum"), value):
+      actual = result[("layers", "0", "attn", name, "w")]
+      self.assertEqual(isinstance(actual, nnx.Param), wrapped)
+      np.testing.assert_array_equal(getattr(actual, "value", actual), expected)
+
   def test_transfer_state_with_mappings_gemma4(self):
     """Test transfer_state_with_mappings for Gemma4.
 

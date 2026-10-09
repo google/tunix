@@ -19,11 +19,12 @@ rollout model. Other variants and multimodal weights are not covered.
 """
 
 from flax import nnx
+from tunix.utils.env_utils import SGLANG_JAX_TP_AXIS_NAME
 
 TO_HF_MAPPINGS = {
     'embedder.input_embedding': (
         'model.embed_tokens.embedding',
-        ('tensor', None),
+        (SGLANG_JAX_TP_AXIS_NAME, None),
     ),
     'final_norm.scale': ('model.norm.weight', (None,)),
 }
@@ -38,17 +39,41 @@ for src, dst in (
 ):
   TO_HF_MAPPINGS[f'layers.*.{src}'] = (f'model.layers.*.{dst}', (None,))
 for src, dst, axes in (
-    ('attn.q_einsum.w', 'self_attn.q_proj.weight', (None, 'tensor', None)),
-    ('attn.k_einsum.w', 'self_attn.k_proj.weight', (None, 'tensor', None)),
-    ('attn.v_einsum.w', 'self_attn.v_proj.weight', (None, 'tensor', None)),
+    (
+        'attn.q_einsum.w',
+        'self_attn.q_proj.weight',
+        (None, SGLANG_JAX_TP_AXIS_NAME, None),
+    ),
+    (
+        'attn.k_einsum.w',
+        'self_attn.k_proj.weight',
+        (None, SGLANG_JAX_TP_AXIS_NAME, None),
+    ),
+    (
+        'attn.v_einsum.w',
+        'self_attn.v_proj.weight',
+        (None, SGLANG_JAX_TP_AXIS_NAME, None),
+    ),
     (
         'attn.attn_vec_einsum.w',
         'self_attn.o_proj.weight',
-        ('tensor', None, None),
+        (SGLANG_JAX_TP_AXIS_NAME, None, None),
     ),
-    ('mlp.gate_proj.kernel', 'mlp.gate_proj.weight', (None, 'tensor')),
-    ('mlp.up_proj.kernel', 'mlp.up_proj.weight', (None, 'tensor')),
-    ('mlp.down_proj.kernel', 'mlp.down_proj.weight', ('tensor', None)),
+    (
+        'mlp.gate_proj.kernel',
+        'mlp.gate_proj.weight',
+        (None, SGLANG_JAX_TP_AXIS_NAME),
+    ),
+    (
+        'mlp.up_proj.kernel',
+        'mlp.up_proj.weight',
+        (None, SGLANG_JAX_TP_AXIS_NAME),
+    ),
+    (
+        'mlp.down_proj.kernel',
+        'mlp.down_proj.weight',
+        (SGLANG_JAX_TP_AXIS_NAME, None),
+    ),
 ):
   TO_HF_MAPPINGS[f'layers.*.{src}'] = (f'model.layers.*.{dst}', axes)
 
@@ -60,12 +85,23 @@ def preprocess_src_state(src_state, tp_size=1):
     raise TypeError('Gemma4 SGL-JAX sync requires an NNX state.')
   flat = []
   for keys, param in src_state.flat_state():
+    if any(
+        str(key).startswith(('per_layer_', 'post_per_layer_', 'moe', 'mm_'))
+        or str(key) in ('vision_encoder', 'audio_encoder')
+        or 'lora' in str(key).lower()
+        for key in keys
+    ):
+      raise NotImplementedError(
+          'Gemma4 SGL-JAX supports dense text weights only; unsupported:'
+          f' {keys}'
+      )
     if keys[-2:] == ('kv_einsum', 'w'):
       value = param.value if hasattr(param, 'value') else param
       if value.ndim != 4 or value.shape[0] != 2:
         raise ValueError(f'Invalid Gemma4 KV shape at {keys}: {value.shape}')
       for name, part in zip(('k_einsum', 'v_einsum'), (value[0], value[1])):
-        flat.append((keys[:-2] + (name, 'w'), nnx.Param(part)))
+        part = nnx.Param(part) if hasattr(param, 'value') else part
+        flat.append((keys[:-2] + (name, 'w'), part))
     else:
       flat.append((keys, param))
   return src_state.from_flat_path(flat)
@@ -79,3 +115,5 @@ SGLANG_JAX_MAPPING = {
     },
     'preprocess_src_state': preprocess_src_state,
 }
+
+__all__ = ['SGLANG_JAX_MAPPING']

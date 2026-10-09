@@ -16,7 +16,6 @@
 
 import asyncio
 import concurrent
-import contextlib
 import dataclasses
 import math
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
@@ -33,7 +32,6 @@ from tunix.generate import mappings
 from tunix.generate import utils
 import tunix.generate.tokenizer_adapter as tok_adapter
 from tunix.rl import reshard
-from tunix.rl import utils as rl_utils
 
 
 def update_hf_key_mappings_with_lora(
@@ -147,40 +145,31 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
       filter_types: Optional[Tuple[Any, ...]] = None,
   ):
     del filter_types
-    # Keep trainer arrays in their source mesh until the final reshard.
-    source_mesh = (
-        rl_utils.get_pytree_mesh_info(updated_weights)
-        if self.preprocess_src_state is not None
-        else None
-    )
-    context = (
-        jax.set_mesh(source_mesh)
-        if source_mesh is not None
-        else contextlib.nullcontext()
-    )
-    with context:
-      if self.preprocess_src_state is not None:
+    if self.preprocess_src_state is not None:
+      try:
         updated_weights = self.preprocess_src_state(
             updated_weights, tp_size=self.args["tp_size"]
         )
-      new_state = utils.transfer_state_with_mappings(
-          src_state=updated_weights,
-          dst_state=self.transformer_state,
-          key_mappings=self.to_hf_key_mappings,
-          transpose_keys=self.to_hf_transpose_keys,
-          reshard_fn=reshard.reshard_pytree,
-          rollout_engine="sglang_jax",
-          num_kv_heads=(
-              None
-              if not self._model_runner
-              else self._model_runner.model_config.get_total_num_kv_heads()
-          ),
-          head_dim=(
-              None
-              if not self._model_runner
-              else self._model_runner.model_config.head_dim
-          ),
-      )
+      except TypeError:
+        updated_weights = self.preprocess_src_state(updated_weights)
+    new_state = utils.transfer_state_with_mappings(
+        src_state=updated_weights,
+        dst_state=self.transformer_state,
+        key_mappings=self.to_hf_key_mappings,
+        transpose_keys=self.to_hf_transpose_keys,
+        reshard_fn=reshard.reshard_pytree,
+        rollout_engine="sglang_jax",
+        num_kv_heads=(
+            None
+            if not self._model_runner
+            else self._model_runner.model_config.get_total_num_kv_heads()
+        ),
+        head_dim=(
+            None
+            if not self._model_runner
+            else self._model_runner.model_config.head_dim
+        ),
+    )
     new_model_state_leaves, _ = jax.tree_util.tree_flatten(new_state)
     self._model_runner.model_state_leaves = new_model_state_leaves
 
