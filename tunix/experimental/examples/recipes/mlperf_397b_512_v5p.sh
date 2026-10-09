@@ -22,8 +22,6 @@ export TRAJECTORY_STORE_ROOT_DIR="${TRAJECTORY_STORE_ROOT_DIR:-${TRAJECTORY_STOR
 export REGION="europe-west4"
 export CLUSTER="bodaborg-v5p-nap"
 export K8S_NAMESPACE="trellis"
-export CPU_NODEPOOL="${CPU_NODEPOOL:-cpu-np}"
-export CPU_MEMORY="${CPU_MEMORY:-240G}"
 
 # Model configuration
 export MODEL_NAME="Qwen3.5-397B-A17B"
