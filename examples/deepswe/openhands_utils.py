@@ -988,7 +988,8 @@ def evaluate_patch_in_fresh_container(
       inner_apply = (
           f"printf '%s' {shlex.quote(b64_patch)} | base64 -d > {patch_path} && "
           f"cd {shlex.quote(repo_path)} && "
-          f"git apply --whitespace=fix {exclude_str} {patch_path}".strip()
+          f"git apply --whitespace=fix {exclude_str} {patch_path}; "
+          f"_rc=$?; rm -f {patch_path}; exit $_rc"
       )
       apply_cmd = f"/bin/sh -c {shlex.quote(inner_apply)}"
     else:
@@ -1007,12 +1008,14 @@ def evaluate_patch_in_fresh_container(
               "[SWEEnv] Failed to write patch chunk in eval container: %s",
               chunk_out,
           )
+          runtime.run(f"rm -f {shlex.quote(b64_tmp_path)}", timeout=15)
           return 0.0
       inner_apply = (
           f"base64 -d {b64_tmp_path} > {patch_path} && "
           f"rm -f {b64_tmp_path} && "
           f"cd {shlex.quote(repo_path)} && "
-          f"git apply --whitespace=fix {exclude_str} {patch_path}".strip()
+          f"git apply --whitespace=fix {exclude_str} {patch_path}; "
+          f"_rc=$?; rm -f {b64_tmp_path} {patch_path}; exit $_rc"
       )
       apply_cmd = f"/bin/sh -c {shlex.quote(inner_apply)}"
 

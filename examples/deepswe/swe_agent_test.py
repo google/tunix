@@ -1550,6 +1550,7 @@ class SweAgentTest(absltest.TestCase):
           lambda: 1.0,
       )
       self.assertEqual(res_reward, 1.0)
+      self.assertFalse(os.path.exists("/tmp/model.patch"))
       with open(target_file, "r", encoding="utf-8") as f:
         self.assertEqual(f.read(), "val = 99\n")
 
@@ -1604,6 +1605,8 @@ class SweAgentTest(absltest.TestCase):
           lambda: 1.0,
       )
       self.assertEqual(res_large_reward, 1.0)
+      self.assertFalse(os.path.exists("/tmp/model.patch"))
+      self.assertFalse(os.path.exists("/tmp/model.patch.b64"))
       with open(target_file, "r", encoding="utf-8") as f:
         self.assertEqual(f.read(), large_content)
 
