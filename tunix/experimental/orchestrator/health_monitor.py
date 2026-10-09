@@ -71,9 +71,11 @@ class HealthMonitor:
       clock: Callable[[], float] = time.monotonic,
       max_workers: int = 32,
       executor: concurrent.futures.ThreadPoolExecutor | None = None,
+      isolate_errors: bool = True,
   ):
     self._registry = registry
     self._max_workers = max_workers
+    self._isolate_errors = isolate_errors
     self._deadlines = (
         dict(DEFAULT_STATE_DEADLINES_S)
         if state_deadlines_s is None
@@ -103,12 +105,24 @@ class HealthMonitor:
     self.close()
     return False
 
-  def poll(self) -> dict[str, datatypes.HealthReport]:
+  def poll(
+      self, *, isolate_errors: bool | None = None
+  ) -> dict[str, datatypes.HealthReport]:
     """Polls every worker once, updating state-entry timestamps.
+
+    Args:
+      isolate_errors: If True (or if omitted and the monitor was constructed
+        with `isolate_errors=True`), exceptions raised by `worker.heartbeat()`
+        are caught and converted into `HealthReport(state=ERROR, last_error=...)`
+        so a single dead worker does not abort the entire poll cycle. If False,
+        the exception propagates immediately and cancels remaining polls.
 
     Returns:
       A mapping of worker_id -> the HealthReport captured this poll.
     """
+    isolate = (
+        self._isolate_errors if isolate_errors is None else isolate_errors
+    )
     reports: dict[str, datatypes.HealthReport] = {}
     worker_ids = self._registry.worker_ids()
     live_ids = set(worker_ids)
@@ -126,6 +140,16 @@ class HealthMonitor:
         return wid, None
       try:
         return wid, worker.heartbeat()
+      except Exception as exc:  # pylint: disable=broad-exception-caught
+        if isolate:
+          logging.warning(
+              "Health poll failed for worker %r: %s", wid, exc
+          )
+          return wid, datatypes.HealthReport(
+              state=WorkerState.ERROR, last_error=str(exc)
+          )
+        abort_event.set()
+        raise
       except BaseException:
         abort_event.set()
         raise
