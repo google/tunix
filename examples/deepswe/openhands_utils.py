@@ -952,17 +952,24 @@ def evaluate_patch_in_fresh_container(
 
   from examples.deepswe import sandbox_utils  # pylint: disable=g-import-not-at-top
 
+  original_container = sandbox_utils.RUNTIME_CONTAINER_NAME
+  runtime_obj = getattr(eval_env, "runtime", None) or eval_env
+  if runtime_obj is not None:
+    original_container = getattr(
+        runtime_obj, "_target_container", sandbox_utils.RUNTIME_CONTAINER_NAME
+    )
+
   sandbox_utils.set_runtime_container(
       eval_env, sandbox_utils.EVAL_CONTAINER_NAME
   )
-  runtime = getattr(eval_env, "runtime", None)
-  if runtime is None or not hasattr(runtime, "run"):
-    if orig_compute_reward is not None:
-      return float(orig_compute_reward(*args, **kwargs))
-    return 0.0
-
-  repo_path = getattr(runtime, "repo_path", "/testbed") or "/testbed"
   try:
+    runtime = getattr(eval_env, "runtime", None)
+    if runtime is None or not hasattr(runtime, "run"):
+      if orig_compute_reward is not None:
+        return float(orig_compute_reward(*args, **kwargs))
+      return 0.0
+
+    repo_path = getattr(runtime, "repo_path", "/testbed") or "/testbed"
     git_ls_res = runtime.run(
         "git ls-files --others --exclude-standard",
         timeout=30,
@@ -1052,6 +1059,8 @@ def evaluate_patch_in_fresh_container(
         "[SWEEnv] Exception during fresh container evaluation: %s", e
     )
     return 0.0
+  finally:
+    sandbox_utils.set_runtime_container(eval_env, original_container)
 
 
 def _command_timed_out(result: Any, timeout: float, elapsed: float) -> bool:

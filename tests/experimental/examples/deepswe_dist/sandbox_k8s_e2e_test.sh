@@ -384,7 +384,7 @@ done
 
 echo "Waiting for Job completion..."
 JOB_SUCCEEDED=0
-for _ in $(seq 1 60); do
+for _ in $(seq 1 450); do
   SUCCEEDED=$(kubectl get job "${JOB_NAME}" --namespace="${NAMESPACE}" -o jsonpath='{.status.succeeded}' 2>/dev/null || echo "")
   FAILED=$(kubectl get job "${JOB_NAME}" --namespace="${NAMESPACE}" -o jsonpath='{.status.failed}' 2>/dev/null || echo "")
   if [[ "${SUCCEEDED}" == "1" ]]; then

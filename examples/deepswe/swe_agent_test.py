@@ -1471,6 +1471,11 @@ class SweAgentTest(absltest.TestCase):
         ("run_tests.sh\nexpected_test_output.json\nuntracked file.txt\n", "0"),
         ("", "0"),
     ]
+    observed_container = []
+    orig_reward.side_effect = lambda *a, **k: (
+        observed_container.append(mock_runtime._target_container) or 1.0
+    )
+    mock_runtime._target_container = sandbox_utils.RUNTIME_CONTAINER_NAME
     reward = openhands_utils.evaluate_patch_in_fresh_container(
         mock_eval_env,
         "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n",
@@ -1478,8 +1483,12 @@ class SweAgentTest(absltest.TestCase):
     )
     self.assertEqual(reward, 1.0)
     self.assertEqual(
+        observed_container,
+        [sandbox_utils.EVAL_CONTAINER_NAME],
+    )
+    self.assertEqual(
         mock_runtime._target_container,
-        sandbox_utils.EVAL_CONTAINER_NAME,
+        sandbox_utils.RUNTIME_CONTAINER_NAME,
     )
     self.assertEqual(mock_runtime.run.call_count, 2)
     ls_cmd = mock_runtime.run.call_args_list[0][0][0]
