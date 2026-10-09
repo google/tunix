@@ -201,6 +201,11 @@ class RLVllmSampler:
         kwargs.get("stop_token_ids") or kwargs.get("eos_tokens"),
     )
     cache_salt = _get_val(sparams, "cache_salt", kwargs.get("cache_salt"))
+    routed_experts_prompt_start = _get_val(
+        sparams,
+        "routed_experts_prompt_start",
+        _get_val(kwargs, "routed_experts_prompt_start"),
+    )
     # `kwargs` goes through `_get_val` too: callers pass unset fields as
     # explicit `None`, so `.get(key, default)` returns `None` rather than
     # the default, defeating it before `_get_val` can coalesce.
@@ -243,9 +248,23 @@ class RLVllmSampler:
         VllmSamplingParams, "__struct_fields__", ()
     ):
       vllm_kwargs["cache_salt"] = str(cache_salt)
+    if (
+        routed_experts_prompt_start is not None
+        and "routed_experts_prompt_start"
+        in getattr(VllmSamplingParams, "__struct_fields__", ())
+    ):
+      vllm_kwargs["routed_experts_prompt_start"] = int(
+          routed_experts_prompt_start
+      )
     params = VllmSamplingParams(**vllm_kwargs)
     if cache_salt is not None:
       setattr(params, "cache_salt", str(cache_salt))
+    if routed_experts_prompt_start is not None:
+      setattr(
+          params,
+          "routed_experts_prompt_start",
+          int(routed_experts_prompt_start),
+      )
     return params
 
   async def _process_request_output(

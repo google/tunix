@@ -367,6 +367,20 @@ class TestRLVllmSamplerWeightSync(unittest.TestCase):
         req = SimpleNamespace(sampling_params=req_params)
         vllm_params = sampler._build_vllm_params(req, {})
         self.assertEqual(getattr(vllm_params, "cache_salt", None), "policy_v4")
+
+    def test_build_vllm_params_forwards_routed_experts_prompt_start(self):
+        args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B")
+        sampler = RLVllmSampler(engine_args=args)
+        req_params = SimpleNamespace(
+            max_tokens=32,
+            temperature=0.6,
+            routed_experts_prompt_start=48,
+        )
+        req = SimpleNamespace(sampling_params=req_params)
+        vllm_params = sampler._build_vllm_params(req, {})
+        self.assertEqual(
+            getattr(vllm_params, "routed_experts_prompt_start", 0), 48
+        )
     # pylint: enable=bad-indentation
 
 
