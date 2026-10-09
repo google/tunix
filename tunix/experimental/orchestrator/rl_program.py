@@ -1061,6 +1061,7 @@ class StandardRLProgram(RLProgram):
       policy_training_time: float = 0.0,
       exposed_generation_time: float = 0.0,
       weight_sync_time: float = 0.0,
+      metrics_fetch_time: float = 0.0,
       filtered_groups: Sequence[Sequence[datatypes.TrajectoryItem]] = (),
   ) -> dict[str, Any]:
     """Logs rollout, reward, trainer, and orchestrator metrics.
@@ -1350,6 +1351,7 @@ class StandardRLProgram(RLProgram):
         "policy_training_time": float(policy_training_time),
         "exposed_generation_time": float(exposed_generation_time),
         "weight_sync_time": float(weight_sync_time),
+        "metrics_fetch_time": float(metrics_fetch_time),
     }
     for tag, val in orchestrator_stats.items():
       self.metrics_logger.log(
@@ -1813,9 +1815,13 @@ class StandardRLProgram(RLProgram):
       groups_consumed = 0
       checkpoint_saved = False
       final_minibatch_completed = False
+      pending_metrics_fetch = False
       policy_training_time = 0.0
       exposed_generation_time = 0.0
       weight_sync_time = 0.0
+      # The end-of-step get_metrics() deferred past the weight sync and commit,
+      # kept out of policy_training_time because it no longer runs in training.
+      metrics_fetch_time = 0.0
 
       current_batch_idx: int | None = None
 
@@ -2030,25 +2036,35 @@ class StandardRLProgram(RLProgram):
           step_result, elapsed = await train_step
           policy_training_time += elapsed
           if is_final_batch:
-            _t_metrics = time.monotonic()
-            trainer_metrics = await self.engine.get_metrics(
-                role=datatypes.Role.ACTOR
+            # Save only at a resumable full-batch boundary. An optimizer step
+            # can occur earlier when a full batch contains multiple mini
+            # batches, but the dataset resume cursor advances in full batches.
+            full_batch_complete = (
+                groups_consumed >= self.full_batch_size or not scored_items
             )
-            policy_training_time += time.monotonic() - _t_metrics
+            # The checkpoint is stamped as the weight-update time and saved
+            # next, so the update must have landed on device first. Unless the
+            # trainer has said it did (`update_ready`), fetching the metrics is
+            # what waits for it, so the fetch stays ahead of the save, counted
+            # as training time, as with a separate update RPC.
+            pending_metrics_fetch = full_batch_complete and bool(
+                isinstance(step_result, dict)
+                and step_result.get("update_ready")
+            )
+            if not pending_metrics_fetch:
+              _t_metrics = time.monotonic()
+              trainer_metrics = await self.engine.get_metrics(
+                  role=datatypes.Role.ACTOR
+              )
+              policy_training_time += time.monotonic() - _t_metrics
             final_minibatch_completed = True
             if self.sync_weights and self.async_weight_sync:
               self._round_due = True
             # TODO(tunix-dev): Configurable checkpointing frequency. Today we
             # checkpoint at the same frequency as the weight update.
-            # Save only at a resumable full-batch boundary. An optimizer step
-            # can occur earlier when a full batch contains multiple mini
-            # batches, but the dataset resume cursor advances in full batches.
             # TODO(tunix-dev): For now any failures in save_checkpoint will
             # abort the entire program. Make it configurable on whether to fail
             # or continue.
-            full_batch_complete = (
-                groups_consumed >= self.full_batch_size or not scored_items
-            )
             if full_batch_complete:
               await _maybe_save_checkpoint()
 
@@ -2108,6 +2124,13 @@ class StandardRLProgram(RLProgram):
       # after this step's bookkeeping and the next step's first packing.
       await asyncio.sleep(0)
 
+      if pending_metrics_fetch:
+        _t_metrics = time.monotonic()
+        trainer_metrics = await self.engine.get_metrics(
+            role=datatypes.Role.ACTOR
+        )
+        metrics_fetch_time += time.monotonic() - _t_metrics
+
       step_time_sec = time.monotonic() - step_start_time
 
       filtered_groups = await self._drain_filtered_groups()
@@ -2130,6 +2153,7 @@ class StandardRLProgram(RLProgram):
           policy_training_time=policy_training_time,
           exposed_generation_time=exposed_generation_time,
           weight_sync_time=weight_sync_time,
+          metrics_fetch_time=metrics_fetch_time,
           filtered_groups=filtered_groups,
       )
       self._log_consumed_trajectories(
