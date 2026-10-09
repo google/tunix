@@ -16,9 +16,17 @@ Dialect-Specific Notes:
     `onupdate=sa.func.now()`. This is a client-side SQLAlchemy Core construct
     evaluated during SQLAlchemy-generated `update()` statements. Direct updates
     outside SQLAlchemy on PostgreSQL require a database trigger.
+  - Table Partitioning: `steps` specifies
+    `postgresql_partition_by="HASH (run_id)"` with `STEPS_HASH_PARTITIONS` (16)
+    fixed modulus child partitions (`steps_p00` .. `steps_p15`) registered via
+    PostgreSQL `after_create` DDL hooks on `STEPS_TABLE`. On PostgreSQL, this
+    bounds per-partition B-tree index size and enables single-partition pruning
+    on `WHERE run_id = ...` queries without unbounded partition growth; on
+    SQLite, partitioning is skipped and `steps` is created as a standard table.
 """
 
 import enum
+from typing import Final
 
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
@@ -126,6 +134,12 @@ TRAJECTORIES_TABLE = sa.Table(
     sa.Index("idx_trajectories_created_at", "run_id", "created_at"),
 )
 
+# 16 (2^4) fixed hash buckets reduce per-partition row count and B-tree index
+# size by 16x and allow parallel autovacuum across buckets while keeping
+# unpruned operations (`drop_all`, `pg_dump`) at 2 * 16 + 1 = 33 relation locks,
+# safely below PostgreSQL's default `max_locks_per_transaction = 64`.
+STEPS_HASH_PARTITIONS: Final[int] = 16
+
 STEPS_TABLE = sa.Table(
     "steps",
     METADATA,
@@ -148,4 +162,23 @@ STEPS_TABLE = sa.Table(
         name="fk_steps_trajectories",
         ondelete="CASCADE",
     ),
+    postgresql_partition_by="HASH (run_id)",
 )
+
+
+def _register_steps_hash_partitions() -> None:
+  """Registers PostgreSQL `after_create` DDL hooks for `steps` hash buckets."""
+  for bucket_idx in range(STEPS_HASH_PARTITIONS):
+    sa.event.listen(
+        STEPS_TABLE,
+        "after_create",
+        sa.DDL(
+            f"CREATE TABLE IF NOT EXISTS steps_p{bucket_idx:02d} "
+            "PARTITION OF steps "
+            f"FOR VALUES WITH (MODULUS {STEPS_HASH_PARTITIONS}, "
+            f"REMAINDER {bucket_idx})"
+        ).execute_if(dialect="postgresql"),
+    )
+
+
+_register_steps_hash_partitions()

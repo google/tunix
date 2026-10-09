@@ -96,6 +96,10 @@ class SchemaCompilationTest(parameterized.TestCase):
         " REFERENCES trajectories (run_id, trajectory_id) ON DELETE CASCADE",
         steps_ddl,
     )
+    if spec.dialect.name == "postgresql":
+      self.assertIn("PARTITION BY HASH (run_id)", steps_ddl)
+    else:
+      self.assertNotIn("PARTITION BY", steps_ddl)
 
   @parameterized.named_parameters(*_DIALECT_SPECS)
   def test_secondary_indexes_compilation(self, spec: _DialectSpec) -> None:
@@ -131,6 +135,17 @@ class SchemaCompilationTest(parameterized.TestCase):
     self.assertIn(
         "CREATE INDEX idx_trajectories_updated_at", full_create_script
     )
+    if spec.dialect.name == "postgresql":
+      for bucket_idx in range(schema.STEPS_HASH_PARTITIONS):
+        self.assertIn(
+            f"CREATE TABLE IF NOT EXISTS steps_p{bucket_idx:02d} "
+            "PARTITION OF steps "
+            f"FOR VALUES WITH (MODULUS {schema.STEPS_HASH_PARTITIONS}, "
+            f"REMAINDER {bucket_idx})",
+            full_create_script,
+        )
+    else:
+      self.assertNotIn("PARTITION OF steps", full_create_script)
 
     ddl_statements.clear()
     schema.METADATA.drop_all(mock_engine, checkfirst=False)
