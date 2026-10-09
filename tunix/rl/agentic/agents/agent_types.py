@@ -158,6 +158,8 @@ class Trajectory:
       failed episodes cannot leak step indices across trajectories.
     reward: Total episode reward (cumulative or final environment score).
     status: Status of the trajectory (e.g., "success", "truncated").
+    masked_out: True if the overlong filter zeroed this trajectory's training
+      masks; None until the episode is post-processed.
     env_time: Dictionary of environment latency metrics (reset_latency: float,
       step_latency: list[float] ordered by step index, close_latency: float).
     prompt_routed_experts: Optional MoE routed expert IDs for the prompt tokens,
@@ -171,6 +173,7 @@ class Trajectory:
   step_idx: int = -1
   reward: float = 0.0
   status: TrajectoryStatus = TrajectoryStatus.RUNNING
+  masked_out: bool | None = None
   env_time: dict[str, float] = dataclasses.field(default_factory=dict)
   reward_time: dict[str, float] = dataclasses.field(default_factory=dict)
   prompt_tokens: list[int] | np.ndarray = dataclasses.field(
@@ -196,6 +199,8 @@ class Trajectory:
         "env_time": self.env_time,
         "reward_time": self.reward_time,
     }
+    if self.masked_out is not None:
+      result["masked_out"] = self.masked_out
     if self.prompt_length is not None:
       result["prompt_tokens"] = np.array(self.prompt_tokens, copy=True)
       result["prompt_length"] = self.prompt_length

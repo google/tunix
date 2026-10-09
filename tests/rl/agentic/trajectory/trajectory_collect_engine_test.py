@@ -779,8 +779,9 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         agent_types.TrajectoryStatus.MAX_STEPS_REACHED.name,
     )
 
-    # Verify final reward was NOT called
+    # Verify final reward was NOT called and trajectory is marked masked_out
     self.mock_final_reward_fn.assert_not_called()
+    self.assertTrue(self.mock_agent.trajectory.masked_out)
 
     # Verify masks are zeroed out
     # Assistant tokens (201, 202) and Env tokens (301) should have masks
@@ -813,8 +814,9 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
 
     token_data = asyncio.run(self._run_collect(engine, mode='Token'))
 
-    # Verify final reward WAS called
+    # Verify final reward WAS called and trajectory is not masked out
     self.mock_final_reward_fn.assert_called_once()
+    self.assertFalse(self.mock_agent.trajectory.masked_out)
 
     # Verify masks are NOT zeroed out
     expected_masks = np.array([1, 1, 1])
@@ -845,10 +847,11 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
 
     token_data = asyncio.run(self._run_collect(engine, mode='Token'))
 
-    # Verify status is SUCCEEDED
+    # Verify status is SUCCEEDED and trajectory is not masked out
     self.assertEqual(
         token_data['status'], agent_types.TrajectoryStatus.SUCCEEDED.name
     )
+    self.assertFalse(self.mock_agent.trajectory.masked_out)
 
     # Verify masks are NOT zeroed out.
     # Note: Terminal-step env tokens are not appended to the mask.
@@ -1625,6 +1628,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     self.assertEqual(
         traj.status, agent_types.TrajectoryStatus.MAX_STEPS_REACHED
     )
+    self.assertTrue(traj.masked_out)
     self.mock_final_reward_fn.assert_not_called()
     (meta,) = store.get_trajectories_metadata(['traj_masked_out'])
     self.assertEqual(meta.status, 'MAX_STEPS_REACHED')

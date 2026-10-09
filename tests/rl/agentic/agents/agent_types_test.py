@@ -232,5 +232,19 @@ class AssistantTextTest(absltest.TestCase):
     )
 
 
+class TrajectoryTest(absltest.TestCase):
+
+  def test_masked_out_default_and_to_dict(self):
+    traj = agent_types.Trajectory(task="solve")
+    self.assertIsNone(traj.masked_out)
+    self.assertNotIn("masked_out", traj.to_dict())
+
+    traj.masked_out = False
+    self.assertFalse(traj.to_dict()["masked_out"])
+
+    traj.masked_out = True
+    self.assertTrue(traj.to_dict()["masked_out"])
+
+
 if __name__ == "__main__":
   absltest.main()

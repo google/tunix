@@ -426,7 +426,7 @@ class TrajectoryCollectEngine:
             )
           break
 
-      masked_out = await self._post_process_episode()
+      await self._post_process_episode()
     except asyncio.TimeoutError:
       self.agent.trajectory.status = agent_types.TrajectoryStatus.TIMEOUT
       raise
@@ -561,7 +561,7 @@ class TrajectoryCollectEngine:
       )
       final_masks = (
           np.zeros_like(conversation_masks)
-          if masked_out
+          if self.agent.trajectory.masked_out
           else conversation_masks
       )
 
@@ -699,6 +699,7 @@ class TrajectoryCollectEngine:
     """
     self.agent.reset()
     self.agent.trajectory.step_idx = -1
+    self.agent.trajectory.masked_out = None
     self._response_token_count = 0
     self._cumulative_prompt_tokens = 0
     self._current_step_initial_routed_experts = None
@@ -1198,26 +1199,23 @@ class TrajectoryCollectEngine:
 
     return done
 
-  async def _post_process_episode(self) -> bool:
+  async def _post_process_episode(self) -> None:
     """Computes episode-level results once the interaction loop ends.
 
     The final reward is folded into the last step and upserted in the trajectory
     store so stored step rewards match training rewards.
-
-    Returns:
-      True if the trajectory is masked out by the overlong filter.
     """
     self._finalize_terminal_step_routing()
 
-    masked_out = (
+    masked_out = bool(
         self.overlong_filter
         and self.agent.trajectory.status in self.filter_statuses
     )
+    self.agent.trajectory.masked_out = masked_out
     if not masked_out:
       await self._append_final_reward()
     self.compute_mc_reward()
     self.compute_trajectory_reward()
-    return masked_out
 
   async def _append_final_reward(self):
     """Compute and add final reward to the last step of the episode.
