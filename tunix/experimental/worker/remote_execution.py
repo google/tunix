@@ -38,6 +38,7 @@ import asyncio
 import collections
 import concurrent.futures
 import contextlib
+import dataclasses
 import hashlib
 import inspect
 import pickle
@@ -52,6 +53,7 @@ from typing import (
     Iterable,
     Iterator,
     List,
+    Mapping,
     Optional,
     Sequence,
     Tuple,
@@ -120,6 +122,7 @@ def _grpc_options(
       ("grpc.http2.max_ping_strikes", 0),
       ("grpc.http2.min_ping_interval_without_data_ms", 5000),
       ("grpc.http2.min_recv_ping_interval_without_data_ms", 5000),
+      ("grpc.use_local_subchannel_pool", 1),
   ]
 
 
@@ -866,6 +869,8 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
 class ActorHandle(abc.ABC):
   """Stateful 1-to-1 routing handle targeting a specific remote worker instance."""
 
+  worker_id: Optional[str] = None
+
   @classmethod
   def from_address(
       cls,
@@ -1241,7 +1246,7 @@ class ActorPool(abc.ABC):
   """Stateless load-balanced routing across worker farms with out-of-order task streaming."""
 
   @abc.abstractmethod
-  def add_actor(self, actor: Union[str, ActorHandle]) -> None:
+  def add_actor(self, actor: Union[str, ActorHandle]) -> ActorHandle:
     """Adds a worker actor handle or string URI target address to the pool."""
     pass
 
@@ -1260,19 +1265,17 @@ class ActorPool(abc.ABC):
   @abc.abstractmethod
   def as_completed_stream(
       self,
-      tasks: Sequence[
-          Tuple[str, str, Sequence[Any], Dict[str, Any]]
-      ],
+      tasks: Sequence[Tuple[str, str, Sequence[Any], Dict[str, Any]]],
   ) -> AsyncIterator[Any]:
     """Dispatches a batch of tasks across pool and yields results strictly out-of-order.
 
     Args:
       tasks: Sequence of task specifications formatted as 4-tuples:
-        `(request_id, method_name, args, kwargs)`, where:
-          - request_id: Unique request identifier string.
-          - method_name: Target remote method name to execute on the worker instance.
-          - args: Positional arguments sequence passed to the remote method.
-          - kwargs: Keyword arguments dictionary passed to the remote method.
+        `(request_id, method_name, args, kwargs)`, where: - request_id: Unique
+        request identifier string. - method_name: Target remote method name to
+        execute on the worker instance. - args: Positional arguments sequence
+        passed to the remote method. - kwargs: Keyword arguments dictionary
+        passed to the remote method.
     """
     raise NotImplementedError
 
@@ -1281,8 +1284,8 @@ def stable_route_hash(route_key: Any) -> int:
   """Maps a sticky routing key to a process-stable non-negative integer.
 
   Args:
-    route_key: The sticky routing key. Non-negative integers are returned
-      as-is; any other value is hashed via its `str()` representation.
+    route_key: The sticky routing key. Non-negative integers are returned as-is;
+      any other value is hashed via its `str()` representation.
 
   Returns:
     A non-negative integer suitable for `% num_actors` bucketing.
@@ -1324,13 +1327,38 @@ class RoutingActorPool(ActorPool):
     self._idx = 0
     self.router = router
 
-  def add_actor(self, actor: Union[str, ActorHandle]) -> None:
+  @property
+  def actors(self) -> List[ActorHandle]:
+    return list(self._actors)
+
+  def add_actor(
+      self,
+      actor: Union[str, ActorHandle],
+  ) -> ActorHandle:
     if isinstance(actor, str):
-      self._actors.append(ActorHandle.from_address(actor))
+      handle = ActorHandle.from_address(actor)
     elif isinstance(actor, ActorHandle):
-      self._actors.append(actor)
+      handle = actor
     else:
       raise TypeError(f"Expected str or ActorHandle, got {type(actor)}")
+    if handle not in self._actors:
+      self._actors.append(handle)
+    return handle
+
+  def remove_actor(self, actor: ActorHandle) -> bool:
+    if actor in self._actors:
+      self._actors.remove(actor)
+      return True
+    return False
+
+  def select_actor(
+      self,
+      method_name: Optional[str] = None,
+      args: Sequence[Any] = (),
+      kwargs: Optional[Dict[str, Any]] = None,
+  ) -> ActorHandle:
+    """Selects target actor via custom router, route_key affinity, or round-robin."""
+    return self._get_next_actor(method_name, args, kwargs)
 
   def _get_next_actor(
       self,
@@ -1407,9 +1435,7 @@ class RoutingActorPool(ActorPool):
 
   async def as_completed_stream(
       self,
-      tasks: Sequence[
-          Tuple[str, str, Sequence[Any], Dict[str, Any]]
-      ],
+      tasks: Sequence[Tuple[str, str, Sequence[Any], Dict[str, Any]]],
   ) -> AsyncIterator[Any]:
     """Dispatches a static batch of tasks across pool workers and yields results as they complete.
 
@@ -1426,11 +1452,11 @@ class RoutingActorPool(ActorPool):
 
     Args:
       tasks: Sequence of task specifications formatted as 4-tuples:
-        `(request_id, method_name, args, kwargs)`, where:
-          - request_id: Unique request identifier string.
-          - method_name: Target remote method name to execute on the worker instance.
-          - args: Positional arguments sequence passed to the remote method.
-          - kwargs: Keyword arguments dictionary passed to the remote method.
+        `(request_id, method_name, args, kwargs)`, where: - request_id: Unique
+        request identifier string. - method_name: Target remote method name to
+        execute on the worker instance. - args: Positional arguments sequence
+        passed to the remote method. - kwargs: Keyword arguments dictionary
+        passed to the remote method.
     """
     if not self._actors:
       raise RuntimeError(
@@ -1451,6 +1477,8 @@ class RoutingActorPool(ActorPool):
           Sequence[Tuple[str, str, Sequence[Any], Dict[str, Any]]]
       ] = None,
       least_loaded: bool = False,
+      *,
+      config: Optional["PoolSessionConfig"] = None,
   ) -> AsyncIterator["PoolExecutionSession"]:
     """Creates a dynamic, fault-isolated execution session over the worker pool.
 
@@ -1467,14 +1495,19 @@ class RoutingActorPool(ActorPool):
            upon session exit.
 
     Args:
-      initial_tasks: Optional sequence of initial task specifications to dispatch
-        upon entering the session, formatted as 4-tuples `(request_id, method_name, args, kwargs)`, where:
-          - request_id: Unique request identifier string.
-          - method_name: Target remote method name to execute on the worker instance.
-          - args: Positional arguments sequence passed to the remote method.
-          - kwargs: Keyword arguments dictionary passed to the remote method.
+      initial_tasks: Optional sequence of initial task specifications to
+        dispatch upon entering the session, formatted as 4-tuples `(request_id,
+        method_name, args, kwargs)`, where: - request_id: Unique request
+        identifier string. - method_name: Target remote method name to execute
+        on the worker instance. - args: Positional arguments sequence passed to
+        the remote method. - kwargs: Keyword arguments dictionary passed to the
+        remote method.
+      config: Optional `PoolSessionConfig` governing eviction, retry,
+        concurrency caps, and pending-worker hold policies.
     """
-    session = PoolExecutionSession(self, least_loaded=least_loaded)
+    session = PoolExecutionSession(
+        self, least_loaded=least_loaded, config=config
+    )
     try:
       if initial_tasks:
         for request_id, method_name, args, kwargs in initial_tasks:
@@ -1488,6 +1521,53 @@ class RoutingActorPool(ActorPool):
 _MAX_ROUTE_PLACEMENTS = 65536
 
 
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class PoolSessionConfig:
+  """Policy and capacity configuration for `PoolExecutionSession`.
+
+  Attributes:
+    evict_on_failure: Whether to automatically remove a failing worker from the
+      pool when a transport or execution failure occurs.
+    retry_on_worker_failure: Whether to re-dispatch tasks that were in-flight on
+      a failed worker.
+    max_task_retries: Maximum number of retries per `request_id` on worker
+      failure.
+    on_worker_evicted: Optional callback `(actor, exc)` invoked at most once per
+      membership when a worker is evicted.
+    max_in_flight_per_worker: Optional default cap on concurrent in-flight tasks
+      per worker.
+    worker_max_in_flight: Optional per-worker override mapping `ActorHandle` to
+      max in-flight tasks.
+    has_pending_workers_fn: Optional predicate returning True when replacement
+      workers are warming up (e.g. in `PENDING_WEIGHT_SYNC`), allowing tasks to
+      be held in `_pending_queue` instead of failing immediately when active
+      workers temporarily drop to zero.
+  """
+
+  evict_on_failure: bool = False
+  retry_on_worker_failure: bool = False
+  max_task_retries: int = 3
+  on_worker_evicted: Optional[
+      Callable[[ActorHandle, Optional[BaseException]], None]
+  ] = None
+  max_in_flight_per_worker: Optional[int] = None
+  worker_max_in_flight: Optional[Mapping[ActorHandle, int]] = None
+  has_pending_workers_fn: Optional[Callable[[], bool]] = None
+
+  def __post_init__(self) -> None:
+    if self.max_task_retries < 0:
+      raise ValueError("max_task_retries must be non-negative")
+    if (
+        self.max_in_flight_per_worker is not None
+        and self.max_in_flight_per_worker <= 0
+    ):
+      raise ValueError("max_in_flight_per_worker must be positive")
+    if self.worker_max_in_flight:
+      for limit in self.worker_max_in_flight.values():
+        if limit <= 0:
+          raise ValueError("worker_max_in_flight values must be positive")
+
+
 class PoolExecutionSession:
   """Dynamic, fault-isolated execution session for a RoutingActorPool.
 
@@ -1499,24 +1579,414 @@ class PoolExecutionSession:
     failures.
   """
 
-  def __init__(self, pool: RoutingActorPool, *, least_loaded: bool = False):
+  def __init__(
+      self,
+      pool: RoutingActorPool,
+      *,
+      least_loaded: bool = False,
+      config: Optional[PoolSessionConfig] = None,
+  ):
+    cfg = config or PoolSessionConfig()
+    self._worker_max_in_flight: Dict[ActorHandle, int] = (
+        {actor: int(limit) for actor, limit in cfg.worker_max_in_flight.items()}
+        if cfg.worker_max_in_flight
+        else {}
+    )
+
     self._pool = pool
     self._least_loaded = least_loaded
     # route_key -> actor it was last placed on, for least_loaded affinity.
     self._placements: collections.OrderedDict[Any, ActorHandle] = (
         collections.OrderedDict()
     )
+    self._evict_on_failure = cfg.evict_on_failure
+    self._retry_on_worker_failure = cfg.retry_on_worker_failure
+    self._max_task_retries = cfg.max_task_retries
+    self._on_worker_evicted = cfg.on_worker_evicted
+    self._has_pending_workers_fn = cfg.has_pending_workers_fn
+    self._max_in_flight_per_worker = (
+        int(cfg.max_in_flight_per_worker)
+        if cfg.max_in_flight_per_worker is not None
+        else None
+    )
     self._response_queue: asyncio.Queue[Any] = asyncio.Queue()
     self._active_workers: set[ActorHandle] = set()
+    # Actors currently considered pool members by this session. Eviction
+    # removes an actor from this set so `on_worker_evicted` fires at most once
+    # per membership, without retaining dead handles after they leave.
+    self._known_actors: set[ActorHandle] = set(pool.actors)
     self._dispatched_tasks: Dict[ActorHandle, set[str]] = {}
+    self._pending_queue: collections.deque[str] = collections.deque()
+    self._task_payloads: Dict[
+        str, Tuple[Optional[str], Tuple[Any, ...], Dict[str, Any]]
+    ] = {}
+    self._task_retries: Dict[str, int] = {}
+    self._failed_tasks: collections.deque[
+        Tuple[
+            str,
+            Tuple[Optional[str], Tuple[Any, ...], Dict[str, Any]],
+            Exception,
+        ]
+    ] = collections.deque()
     self._poll_tasks: set[asyncio.Task[Any]] = set()
+    self._loop: Optional[asyncio.AbstractEventLoop] = None
     self._in_flight = 0
     self._closed = False
+    self._draining_pending = False
     self._sentinel = object()
+
+  def _can_retry_or_hold(self) -> bool:
+    return len(self._pool.actors) > 0 or (
+        self._has_pending_workers_fn is not None
+        and self._has_pending_workers_fn()
+    )
+
+  @property
+  def max_in_flight_per_worker(self) -> Optional[int]:
+    return self._max_in_flight_per_worker
+
+  @property
+  def pending_count(self) -> int:
+    """Number of submitted tasks waiting for worker capacity."""
+    return len(self._pending_queue)
+
+  @property
+  def in_flight_count(self) -> int:
+    """Total number of incomplete tasks in the session (dispatched + pending)."""
+    return self._in_flight
+
+  def has_pending_or_completed_work(self) -> bool:
+    """Returns True if tasks are in-flight, queued for completion, or failed."""
+    return (
+        self._in_flight > 0
+        or not self._response_queue.empty()
+        or bool(self._failed_tasks)
+    )
+
+  def _get_worker_limit(self, actor: ActorHandle) -> Optional[int]:
+    return self._worker_max_in_flight.get(actor, self._max_in_flight_per_worker)
+
+  def _worker_load(self, actor: ActorHandle) -> int:
+    return len(self._dispatched_tasks.get(actor, ()))
+
+  def _worker_has_capacity(self, actor: ActorHandle) -> bool:
+    limit = self._get_worker_limit(actor)
+    return limit is None or self._worker_load(actor) < limit
+
+  def _select_actor_for_task(
+      self,
+      method_name: Optional[str],
+      args: Tuple[Any, ...],
+      kwargs: Dict[str, Any],
+  ) -> Optional[ActorHandle]:
+    """Selects an available actor with capacity for the given task."""
+    pool_actors = self._pool.actors
+    if not pool_actors:
+      raise RuntimeError(
+          "RoutingActorPool contains no registered ActorHandles."
+      )
+    available = [a for a in pool_actors if self._worker_has_capacity(a)]
+    if not available:
+      return None
+
+    if self._least_loaded and self._pool.router is None:
+      return self._least_loaded_actor(
+          kwargs.get("route_key"), available=available
+      )
+    preferred = self._pool.select_actor(method_name, args, dict(kwargs))
+    if (
+        self._max_in_flight_per_worker is None
+        and not self._worker_max_in_flight
+    ):
+      return preferred
+
+    if kwargs.get("route_key") is not None and preferred in available:
+      return preferred
+
+    min_load = min(self._worker_load(a) for a in available)
+    if preferred in available and self._worker_load(preferred) == min_load:
+      return preferred
+    return min(available, key=self._worker_load)
+
+  def _bind_loop(self, running_loop: asyncio.AbstractEventLoop) -> None:
+    """Rebinds session queues and pollers when switching to a new event loop."""
+    prev_loop = self._loop
+    self._loop = running_loop
+    if prev_loop is not None and prev_loop is not running_loop:
+      new_queue: asyncio.Queue[Any] = asyncio.Queue()
+      while not self._response_queue.empty():
+        try:
+          item = self._response_queue.get_nowait()
+        except asyncio.QueueEmpty:
+          break
+        if item is not self._sentinel:
+          new_queue.put_nowait(item)
+      self._response_queue = new_queue
+      self._poll_tasks.clear()
+      self._active_workers.clear()
+      self._draining_pending = False
+      for actor, dispatched_set in list(self._dispatched_tasks.items()):
+        if dispatched_set and actor in self._pool.actors:
+          self._ensure_worker_polling(actor)
+
+  def _schedule_drain_pending(self) -> None:
+    """Schedules an asynchronous drain of the pending task queue."""
+    if not self._pending_queue or self._closed or self._draining_pending:
+      return
+    try:
+      running_loop = asyncio.get_running_loop()
+    except RuntimeError:
+      running_loop = None
+
+    if running_loop is not None:
+      self._bind_loop(running_loop)
+      task = running_loop.create_task(self._drain_pending_queue())
+      self._poll_tasks.add(task)
+      task.add_done_callback(self._poll_tasks.discard)
+    elif self._loop is not None and self._loop.is_running():
+
+      def _spawn() -> None:
+        if (
+            not self._closed
+            and self._pending_queue
+            and not self._draining_pending
+        ):
+          t = self._loop.create_task(self._drain_pending_queue())  # type: ignore[union-attr]
+          self._poll_tasks.add(t)
+          t.add_done_callback(self._poll_tasks.discard)
+
+      self._loop.call_soon_threadsafe(_spawn)
+
+  def pop_failed_tasks(
+      self,
+  ) -> List[
+      Tuple[
+          str,
+          Tuple[Optional[str], Tuple[Any, ...], Dict[str, Any]],
+          Exception,
+      ]
+  ]:
+    """Drains and returns tasks that failed terminally during the session."""
+    failed = list(self._failed_tasks)
+    self._failed_tasks.clear()
+    return failed
+
+  def add_actor(
+      self, actor: ActorHandle, *, max_in_flight: Optional[int] = None
+  ) -> None:
+    """Dynamically adds a worker actor handle to the session and underlying pool."""
+    if max_in_flight is not None and max_in_flight <= 0:
+      raise ValueError("max_in_flight must be positive")
+    handle = self._pool.add_actor(actor)
+    self._known_actors.add(handle)
+    if max_in_flight is not None:
+      self._worker_max_in_flight[handle] = int(max_in_flight)
+    self._schedule_drain_pending()
+
+  def _fail_task(
+      self, req_id: str, exc: Exception, *, enqueue_response: bool = True
+  ) -> None:
+    """Marks `req_id` as terminally failed and cleans up its tracking state."""
+    payload = self._task_payloads.pop(req_id, None)
+    self._task_retries.pop(req_id, None)
+    if payload is not None:
+      self._failed_tasks.append((req_id, payload, exc))
+    if enqueue_response:
+      self._response_queue.put_nowait((None, exc))
+    self._in_flight = max(0, self._in_flight - 1)
+
+  def _requeue_or_fail_tasks_sync(
+      self,
+      dispatched_set: set[str],
+      exc: Exception,
+      *,
+      count_retry: bool = True,
+  ) -> None:
+    """Synchronously re-queues or fails tasks from an evicted/failed worker."""
+    pending_req_ids = list(dispatched_set)
+    dispatched_set.clear()
+    can_retry = self._can_retry_or_hold()
+    for req_id in pending_req_ids:
+      retries = self._task_retries.get(req_id, 0)
+      if (
+          self._retry_on_worker_failure
+          and (not count_retry or retries < self._max_task_retries)
+          and req_id in self._task_payloads
+          and can_retry
+      ):
+        if count_retry:
+          self._task_retries[req_id] = retries + 1
+        self._pending_queue.appendleft(req_id)
+      else:
+        self._fail_task(req_id, exc)
+    if (
+        not self._pool.actors
+        and self._pending_queue
+        and self._in_flight == len(self._pending_queue)
+    ):
+      if not can_retry:
+        self._fail_pending_queue(exc)
+      else:
+        self._response_queue.put_nowait(self._sentinel)
+    self._notify_if_zero_flight()
+
+  def _remove_actor(
+      self,
+      actor: ActorHandle,
+      exc: Optional[BaseException] = None,
+      *,
+      count_retry: bool = False,
+  ) -> bool:
+    """Removes `actor` from the pool, re-queues tasks, and fires eviction callback."""
+    removed = self._pool.remove_actor(actor)
+    self._worker_max_in_flight.pop(actor, None)
+    if actor not in self._known_actors and not removed:
+      return False
+    self._known_actors.discard(actor)
+    dispatched_set = self._dispatched_tasks.pop(actor, None)
+    if dispatched_set or (
+        not self._pool.actors
+        and self._pending_queue
+        and self._in_flight == len(self._pending_queue)
+    ):
+      err = (
+          exc
+          if isinstance(exc, Exception)
+          else RuntimeError(str(exc) if exc else "Worker evicted")
+      )
+      self._requeue_or_fail_tasks_sync(
+          dispatched_set if dispatched_set is not None else set(),
+          err,
+          count_retry=count_retry,
+      )
+      if self._pending_queue and self._pool.actors:
+        self._schedule_drain_pending()
+    if self._on_worker_evicted is not None:
+      try:
+        self._on_worker_evicted(actor, exc)
+      except Exception:  # pylint: disable=broad-exception-caught
+        logging.exception("Error in on_worker_evicted callback for %s", actor)
+    return True
+
+  def remove_actor(
+      self, actor: ActorHandle, exc: Optional[BaseException] = None
+  ) -> bool:
+    """Synchronously removes `actor` from the session and re-queues in-flight tasks.
+
+    Returns:
+      True if `actor` was a pool member and has been removed, False otherwise.
+    """
+    return self._remove_actor(actor, exc=exc, count_retry=False)
+
+  def _fail_pending_queue(self, exc: Exception) -> None:
+    """Fails all queued tasks when no workers remain in the pool."""
+    while self._pending_queue:
+      req_id = self._pending_queue.popleft()
+      self._fail_task(req_id, exc)
+    self._notify_if_zero_flight()
+
+  async def _drain_pending_queue(self) -> None:
+    """Dispatches pending tasks to workers as capacity becomes available."""
+    if self._draining_pending:
+      return
+    self._draining_pending = True
+    try:
+      while self._pending_queue and not self._closed:
+        if not self._pool.actors:
+          if self._can_retry_or_hold():
+            return
+          self._fail_pending_queue(
+              RuntimeError(
+                  "RoutingActorPool contains no registered ActorHandles."
+              )
+          )
+          return
+        req_id = self._pending_queue[0]
+        payload = self._task_payloads.get(req_id)
+        if payload is None:
+          self._pending_queue.popleft()
+          continue
+        method_name, args, orig_kwargs = payload
+        actor = self._select_actor_for_task(method_name, args, orig_kwargs)
+        if actor is None:
+          return
+        self._pending_queue.popleft()
+        await self._dispatch_to_actor(
+            actor,
+            req_id,
+            method_name,
+            args,
+            orig_kwargs,
+            from_pending=True,
+        )
+    finally:
+      self._draining_pending = False
+
+  async def _handle_worker_failure_tasks(
+      self, dispatched_set: set[str], exc: Exception
+  ) -> None:
+    """Re-queues or fails tasks that were in-flight on a failed worker."""
+    self._requeue_or_fail_tasks_sync(dispatched_set, exc)
+    if self._pending_queue and self._pool.actors:
+      await self._drain_pending_queue()
+    self._notify_if_zero_flight()
 
   def _notify_if_zero_flight(self) -> None:
     if self._in_flight == 0:
       self._response_queue.put_nowait(self._sentinel)
+
+  async def _dispatch_to_actor(
+      self,
+      actor: ActorHandle,
+      request_id: str,
+      method_name: Optional[str],
+      args: Tuple[Any, ...],
+      orig_kwargs: Dict[str, Any],
+      *,
+      from_pending: bool = False,
+  ) -> None:
+    """Dispatches a task to `actor`, handling eviction and retries on failure."""
+    call_kwargs = dict(orig_kwargs)
+    call_kwargs.pop("route_key", None)
+    dispatched_set = self._dispatched_tasks.setdefault(actor, set())
+    dispatched_set.add(request_id)
+    self._ensure_worker_polling(actor)
+
+    try:
+      await actor.dispatch_task(request_id, method_name, *args, **call_kwargs)
+      # Re-ensure worker polling is active in case the previous polling loop
+      # exited or died while dispatch_task was awaiting.
+      self._ensure_worker_polling(actor)
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+      # Only decrement _in_flight if _poll_worker_loop hasn't already failed
+      # and cleared it.
+      was_in_dispatched = request_id in dispatched_set
+      if was_in_dispatched:
+        dispatched_set.remove(request_id)
+      if self._evict_on_failure:
+        self._remove_actor(actor, exc=exc, count_retry=True)
+      if (
+          was_in_dispatched
+          and self._retry_on_worker_failure
+          and self._task_retries.get(request_id, 0) < self._max_task_retries
+          and self._can_retry_or_hold()
+      ):
+        self._task_retries[request_id] = (
+            self._task_retries.get(request_id, 0) + 1
+        )
+        self._pending_queue.appendleft(request_id)
+        await self._drain_pending_queue()
+        return
+      if was_in_dispatched:
+        self._fail_task(request_id, exc, enqueue_response=from_pending)
+        if not self._pool.actors and self._pending_queue:
+          if not self._can_retry_or_hold():
+            self._fail_pending_queue(exc)
+          else:
+            self._response_queue.put_nowait(self._sentinel)
+        self._notify_if_zero_flight()
+      if not from_pending:
+        raise
 
   async def submit(
       self,
@@ -1528,39 +1998,48 @@ class PoolExecutionSession:
     """Dispatches a task to a worker in the pool and tracks its completion."""
     if self._closed:
       raise RuntimeError("PoolExecutionSession is closed.")
-    if self._least_loaded and self._pool.router is None:
-      actor = self._least_loaded_actor(kwargs.get("route_key"))
-    else:
-      actor = self._pool._get_next_actor(method_name, args, kwargs)
-    kwargs.pop("route_key", None)  # remove route_key from worker method args
-
-    # Increment in_flight and register request_id BEFORE awaiting dispatch_task
-    # so a fast worker completing before dispatch_task's coroutine resumes
-    # always finds request_id in _dispatched_tasks[actor].
-    self._in_flight += 1
-    dispatched_set = self._dispatched_tasks.setdefault(actor, set())
-    dispatched_set.add(request_id)
-    self._ensure_worker_polling(actor)
-
-    try:
-      await actor.dispatch_task(
-          request_id, method_name, *args, **kwargs
+    if not self._pool.actors and not self._can_retry_or_hold():
+      raise RuntimeError(
+          "RoutingActorPool contains no registered ActorHandles."
       )
-      # Re-ensure worker polling is active in case the previous polling loop
-      # exited or died while dispatch_task was awaiting.
-      self._ensure_worker_polling(actor)
-      return request_id
-    except Exception:
-      # Only decrement _in_flight if _poll_worker_loop hasn't already failed and cleared it.
-      if request_id in dispatched_set:
-        dispatched_set.remove(request_id)
-        self._in_flight = max(0, self._in_flight - 1)
-        self._notify_if_zero_flight()
-      raise
+    self._bind_loop(asyncio.get_running_loop())
+    orig_kwargs = dict(kwargs)
+    args_tuple = tuple(args)
+    self._task_payloads[request_id] = (method_name, args_tuple, orig_kwargs)
+    self._in_flight += 1
 
-  def _least_loaded_actor(self, route_key: Any = None) -> ActorHandle:
+    if not self._pending_queue and self._pool.actors:
+      try:
+        actor = self._select_actor_for_task(
+            method_name, args_tuple, orig_kwargs
+        )
+      except Exception:
+        self._in_flight = max(0, self._in_flight - 1)
+        self._task_payloads.pop(request_id, None)
+        raise
+      if actor is not None:
+        await self._dispatch_to_actor(
+            actor,
+            request_id,
+            method_name,
+            args_tuple,
+            orig_kwargs,
+            from_pending=False,
+        )
+        return request_id
+
+    self._pending_queue.append(request_id)
+    await self._drain_pending_queue()
+    return request_id
+
+  def _least_loaded_actor(
+      self,
+      route_key: Any = None,
+      *,
+      available: Optional[Sequence[ActorHandle]] = None,
+  ) -> ActorHandle:
     """Returns the pool actor with the fewest of this session's tasks in flight."""
-    actors = self._pool._actors
+    actors = list(available) if available is not None else self._pool._actors
     if not actors:
       raise RuntimeError(
           "RoutingActorPool contains no registered ActorHandles."
@@ -1590,46 +2069,69 @@ class PoolExecutionSession:
     task.add_done_callback(self._poll_tasks.discard)
 
   async def _poll_worker_loop(self, actor: ActorHandle) -> None:
+    discarded = False
     try:
       while not self._closed:
         dispatched_set = self._dispatched_tasks.setdefault(actor, set())
         if not dispatched_set:
-          break
+          if self._pending_queue:
+            await self._drain_pending_queue()
+          if not dispatched_set:
+            break
         try:
           response = await actor.poll_responses(timeout_s=LONG_POLL_TIMEOUT_S)
           if isinstance(response, ExecutionResponse):
+            req_id: Optional[str] = None
+            if response.request_id and response.request_id in dispatched_set:
+              req_id = response.request_id
+              dispatched_set.remove(req_id)
+              self._in_flight = max(0, self._in_flight - 1)
+            elif dispatched_set:
+              req_id = dispatched_set.pop()
+              self._in_flight = max(0, self._in_flight - 1)
+            payload = (
+                self._task_payloads.pop(req_id, None)
+                if req_id is not None
+                else None
+            )
+            if req_id is not None:
+              self._task_retries.pop(req_id, None)
             try:
               res = response.unwrap()
               self._response_queue.put_nowait((res, None))
             except Exception as exc:  # pylint: disable=broad-exception-caught
+              if req_id is not None and payload is not None:
+                self._failed_tasks.append((req_id, payload, exc))
               self._response_queue.put_nowait((None, exc))
-            if response.request_id and response.request_id in dispatched_set:
-              dispatched_set.remove(response.request_id)
-              self._in_flight = max(0, self._in_flight - 1)
-            elif dispatched_set:
-              dispatched_set.pop()
-              self._in_flight = max(0, self._in_flight - 1)
+            if self._pending_queue:
+              await self._drain_pending_queue()
             self._notify_if_zero_flight()
         except asyncio.CancelledError:
           break
         except Exception as exc:  # pylint: disable=broad-exception-caught
-          # Transport or polling failure on this worker; fail all dispatched tasks on this worker.
-          failed_count = len(dispatched_set)
-          dispatched_set.clear()
-          if failed_count > 0:
-            for _ in range(failed_count):
-              self._response_queue.put_nowait((None, exc))
-            self._in_flight = max(0, self._in_flight - failed_count)
-            self._notify_if_zero_flight()
+          # Transport or polling failure on this worker; evict and/or retry
+          # in-flight tasks.
+          self._active_workers.discard(actor)
+          discarded = True
+          if self._evict_on_failure:
+            self._remove_actor(actor, exc=exc, count_retry=True)
+          else:
+            await self._handle_worker_failure_tasks(dispatched_set, exc)
           break
     finally:
-      self._active_workers.discard(actor)
+      if not discarded:
+        self._active_workers.discard(actor)
 
   async def poll_completed(
       self, timeout_s: float = LONG_POLL_TIMEOUT_S
   ) -> List[Tuple[Any, Optional[Exception]]]:
     """Waits up to `timeout_s` for the first completion, then drains ready items."""
     if self._closed:
+      return []
+    self._bind_loop(asyncio.get_running_loop())
+    if self._pending_queue:
+      await self._drain_pending_queue()
+    if not self._pool.actors and self._response_queue.empty():
       return []
 
     batch: List[Tuple[Any, Optional[Exception]]] = []
@@ -1647,9 +2149,12 @@ class PoolExecutionSession:
             self._response_queue.get(), timeout=wait_s
         )
         if item is self._sentinel:
-          # Sentinel marks _in_flight reaching 0 or session close; return early if drained,
-          # otherwise skip stale sentinels when new tasks are in flight or queued behind it.
-          if self._in_flight == 0 and self._response_queue.empty():
+          # Sentinel marks _in_flight reaching 0, active pool emptying, or
+          # session close; return early if drained, otherwise skip stale
+          # sentinels when new tasks are in flight.
+          if (
+              self._in_flight == 0 or not self._pool.actors
+          ) and self._response_queue.empty():
             return []
           continue
         batch.append(item)
@@ -1667,6 +2172,9 @@ class PoolExecutionSession:
       self,
   ) -> AsyncIterator[Tuple[Any, Optional[Exception]]]:
     """Yields (result, exception) tuples as tasks complete out-of-order."""
+    self._bind_loop(asyncio.get_running_loop())
+    if self._pending_queue:
+      await self._drain_pending_queue()
     while not self._closed:
       item = await self._response_queue.get()
       if item is self._sentinel:

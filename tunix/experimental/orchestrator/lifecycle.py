@@ -27,6 +27,7 @@ import logging
 from typing import Any
 
 from tunix.experimental.orchestrator import worker_registry
+from tunix.experimental.worker import abstract_worker
 
 
 class LifecycleError(RuntimeError):
@@ -58,7 +59,13 @@ class LifecycleDriver:
     Args:
       dummy_data: Dummy data each worker uses to synthesize warmup dummies.
     """
-    workers = self._registry.workers()
+    workers = [
+        w
+        for w in self._registry.workers()
+        if isinstance(w, abstract_worker.Worker)
+    ]
+    if not workers:
+      return
     with concurrent.futures.ThreadPoolExecutor(
         max_workers=self._max_workers
     ) as pool:
@@ -82,6 +89,8 @@ class LifecycleDriver:
             "Worker %r unregistered concurrently, nothing to stop.", wid
         )
         return  # Worker unregistered concurrently, nothing to stop.
+      if not isinstance(worker, abstract_worker.Worker):
+        return
       worker.stop()
 
     with concurrent.futures.ThreadPoolExecutor(
