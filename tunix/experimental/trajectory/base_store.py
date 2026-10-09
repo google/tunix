@@ -63,7 +63,8 @@ class TrajectoryReader(Protocol[MetadataT]):
         for all trajectories in the run is returned.
 
     Returns:
-      A list of TrajectoryMetadata objects for the requested trajectories.
+      A list of TrajectoryMetadata objects for the requested trajectories, in
+      the order of `trajectory_ids` if specified.
 
     Raises:
       TrajectoryMetadataNotFoundError: If any requested trajectory ID does not
@@ -80,7 +81,8 @@ class TrajectoryReader(Protocol[MetadataT]):
       trajectory_ids: List of unique trajectory identifiers to load.
 
     Returns:
-      A list of full Trajectory objects corresponding to the requested IDs.
+      A list of full Trajectory objects corresponding to the requested IDs, in
+      the order of `trajectory_ids`.
 
     Raises:
       TrajectoryNotFoundError: If any requested trajectory ID does not exist.

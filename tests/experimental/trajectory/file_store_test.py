@@ -1,23 +1,39 @@
 """Unit tests for FileTrajectoryStore file layout and on-disk write behavior."""
 
+from collections.abc import Callable
 import tempfile
 import threading
-from typing import Any
+import time
+from typing import Any, Final, TypeAlias, cast
 from unittest import mock
 
 from absl import logging
 from absl.testing import absltest
 from absl.testing import parameterized
 from etils import epath
+import pydantic
 from tunix.experimental.trajectory import file_store
 from tunix.experimental.trajectory import store
 from tunix.experimental.trajectory import store_testing
 from tunix.experimental.trajectory import trajectory as trajectory_lib
 from tunix.experimental.trajectory import trajectory_testing
 
+# How long a file read in the parallel read tests waits for the reads that
+# should run at the same time as it.
+_CONCURRENT_READ_TIMEOUT_SECONDS: Final[float] = 10.0
+
+# A read method of `FileTrajectoryStore`, called with the store and the IDs of
+# the trajectories to read.
+_ReadMethod: TypeAlias = Callable[
+    [file_store.FileTrajectoryStore[Any], list[str]], list[Any]
+]
+
 
 class FileTrajectoryReaderTest(store_testing.TrajectoryReaderTestCase):
   """Contract tests for FileTrajectoryStore's TrajectoryReader implementation."""
+
+  # More trajectories than read threads, so that reads finish out of order.
+  NUM_MANY_TRAJECTORIES = 3 * file_store._MAX_READ_WORKERS
 
   def _create_reader(
       self,
@@ -141,6 +157,403 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
 
     with self.assertRaises(store.TrajectoryMetadataNotFoundError):
       self.file_s.get_trajectories_metadata()
+
+  def test_get_trajectories_metadata_reads_files_in_parallel(self) -> None:
+    """Verifies the metadata files of several trajectories are read at once."""
+    self.file_s.update_metadata(trajectory_testing.METADATA_1)
+    self.file_s.update_metadata(trajectory_testing.METADATA_2)
+    self.file_s.flush()
+    # Each read waits for the other one to start, so reading the files one at a
+    # time breaks the barrier.
+    both_reads_started = threading.Event()
+    barrier = threading.Barrier(
+        2,
+        action=both_reads_started.set,
+        timeout=_CONCURRENT_READ_TIMEOUT_SECONDS,
+    )
+    path_cls = type(self.tmp_dir)
+    orig_read_text = path_cls.read_text
+
+    def read_text_once_both_reads_start(
+        path_self: epath.Path, *args: Any, **kwargs: Any
+    ) -> str:
+      barrier.wait()
+      return orig_read_text(path_self, *args, **kwargs)
+
+    with mock.patch.object(
+        path_cls,
+        "read_text",
+        autospec=True,
+        side_effect=read_text_once_both_reads_start,
+    ):
+      metas = self.file_s.get_trajectories_metadata()
+
+    self.assertTrue(both_reads_started.is_set())
+    self.assertCountEqual(
+        metas, [trajectory_testing.METADATA_1, trajectory_testing.METADATA_2]
+    )
+
+  def test_get_trajectories_reads_trajectories_in_parallel(self) -> None:
+    """Verifies different trajectories are read at the same time."""
+    self.file_s.add_step(
+        trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1
+    )
+    for step in trajectory_testing.TRAJECTORY_2.steps:
+      self.file_s.add_step(step, trajectory_testing.METADATA_2)
+    self.file_s.flush()
+    meta_paths = {
+        self.file_s.get_trajectory_metadata_path(
+            trajectory_testing.TRAJECTORY_ID_1
+        ),
+        self.file_s.get_trajectory_metadata_path(
+            trajectory_testing.TRAJECTORY_ID_2
+        ),
+    }
+    # Each metadata read waits for the other one to start, so reading the
+    # trajectories one at a time breaks the barrier.
+    both_metadata_reads_started = threading.Event()
+    barrier = threading.Barrier(
+        2,
+        action=both_metadata_reads_started.set,
+        timeout=_CONCURRENT_READ_TIMEOUT_SECONDS,
+    )
+    path_cls = type(self.tmp_dir)
+    orig_read_text = path_cls.read_text
+
+    def read_text_once_both_metadata_reads_start(
+        path_self: epath.Path, *args: Any, **kwargs: Any
+    ) -> str:
+      if path_self in meta_paths:
+        barrier.wait()
+      return orig_read_text(path_self, *args, **kwargs)
+
+    with mock.patch.object(
+        path_cls,
+        "read_text",
+        autospec=True,
+        side_effect=read_text_once_both_metadata_reads_start,
+    ):
+      trajs = self.file_s.get_trajectories([
+          trajectory_testing.TRAJECTORY_ID_1,
+          trajectory_testing.TRAJECTORY_ID_2,
+      ])
+
+    self.assertTrue(both_metadata_reads_started.is_set())
+    self.assertEqual(
+        trajs,
+        [trajectory_testing.TRAJECTORY_1, trajectory_testing.TRAJECTORY_2],
+    )
+
+  def test_get_trajectories_reads_step_files_in_parallel(self) -> None:
+    """Verifies the step files of a trajectory are read at the same time."""
+    for step in trajectory_testing.TRAJECTORY_2.steps:
+      self.file_s.add_step(step, trajectory_testing.METADATA_2)
+    self.file_s.flush()
+    meta_path = self.file_s.get_trajectory_metadata_path(
+        trajectory_testing.TRAJECTORY_ID_2
+    )
+    # Each step read waits for all of them to start, so reading the steps one at
+    # a time breaks the barrier. Passing it needs a read thread for each step.
+    all_step_reads_started = threading.Event()
+    barrier = threading.Barrier(
+        len(trajectory_testing.TRAJECTORY_2.steps),
+        action=all_step_reads_started.set,
+        timeout=_CONCURRENT_READ_TIMEOUT_SECONDS,
+    )
+    path_cls = type(self.tmp_dir)
+    orig_read_text = path_cls.read_text
+
+    def read_text_once_all_step_reads_start(
+        path_self: epath.Path, *args: Any, **kwargs: Any
+    ) -> str:
+      if path_self != meta_path:
+        barrier.wait()
+      return orig_read_text(path_self, *args, **kwargs)
+
+    with mock.patch.object(
+        path_cls,
+        "read_text",
+        autospec=True,
+        side_effect=read_text_once_all_step_reads_start,
+    ):
+      trajs = self.file_s.get_trajectories([trajectory_testing.TRAJECTORY_ID_2])
+
+    self.assertTrue(all_step_reads_started.is_set())
+    self.assertEqual(trajs, [trajectory_testing.TRAJECTORY_2])
+
+  def test_get_trajectories_reads_every_id_of_an_iterator(self) -> None:
+    """Verifies all trajectories are read for IDs given as an iterator."""
+    self.file_s.add_step(
+        trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1
+    )
+    for step in trajectory_testing.TRAJECTORY_2.steps:
+      self.file_s.add_step(step, trajectory_testing.METADATA_2)
+    self.file_s.flush()
+    # Iterators, which can be iterated over only once, work as well as the
+    # lists that the signature asks for.
+    trajectory_ids = cast(
+        list[str],
+        iter([
+            trajectory_testing.TRAJECTORY_ID_1,
+            trajectory_testing.TRAJECTORY_ID_2,
+        ]),
+    )
+
+    trajs = self.file_s.get_trajectories(trajectory_ids)
+
+    self.assertEqual(
+        trajs,
+        [trajectory_testing.TRAJECTORY_1, trajectory_testing.TRAJECTORY_2],
+    )
+
+  def test_get_trajectories_metadata_reads_every_id_of_an_iterator(
+      self,
+  ) -> None:
+    """Verifies metadata of all trajectories is read for IDs in an iterator."""
+    self.file_s.update_metadata(trajectory_testing.METADATA_1)
+    self.file_s.update_metadata(trajectory_testing.METADATA_2)
+    self.file_s.flush()
+    # Iterators, which can be iterated over only once, work as well as the
+    # lists that the signature asks for.
+    trajectory_ids = cast(
+        list[str],
+        iter([
+            trajectory_testing.TRAJECTORY_ID_1,
+            trajectory_testing.TRAJECTORY_ID_2,
+        ]),
+    )
+
+    metas = self.file_s.get_trajectories_metadata(trajectory_ids)
+
+    self.assertEqual(
+        metas, [trajectory_testing.METADATA_1, trajectory_testing.METADATA_2]
+    )
+
+  @parameterized.named_parameters(
+      (
+          "get_trajectories",
+          file_store.FileTrajectoryStore.get_trajectories,
+          store.TrajectoryNotFoundError,
+      ),
+      (
+          "get_trajectories_metadata",
+          file_store.FileTrajectoryStore.get_trajectories_metadata,
+          store.TrajectoryMetadataNotFoundError,
+      ),
+  )
+  def test_missing_ids_raise_error_for_first_missing_id(
+      self, read_method: _ReadMethod, expected_error: type[KeyError]
+  ) -> None:
+    """Verifies the error names the first missing ID, even if found last."""
+    self.file_s.add_step(
+        trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1
+    )
+    self.file_s.flush()
+    first_missing_meta_path = self.file_s.get_trajectory_metadata_path(
+        "missing_1"
+    )
+    second_missing_meta_path = self.file_s.get_trajectory_metadata_path(
+        "missing_2"
+    )
+    second_missing_checked = threading.Event()
+    path_cls = type(self.tmp_dir)
+    orig_exists = path_cls.exists
+
+    def exists_checking_first_missing_last(
+        path_self: epath.Path, *args: Any, **kwargs: Any
+    ) -> bool:
+      # Reporting whichever ID is found missing first would report missing_2.
+      if path_self == first_missing_meta_path:
+        second_missing_checked.wait(timeout=_CONCURRENT_READ_TIMEOUT_SECONDS)
+      exists = orig_exists(path_self, *args, **kwargs)
+      if path_self == second_missing_meta_path:
+        second_missing_checked.set()
+      return exists
+
+    with mock.patch.object(
+        path_cls,
+        "exists",
+        autospec=True,
+        side_effect=exists_checking_first_missing_last,
+    ):
+      with self.assertRaisesRegex(expected_error, "'missing_1'"):
+        read_method(
+            self.file_s,
+            [trajectory_testing.TRAJECTORY_ID_1, "missing_1", "missing_2"],
+        )
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="unparsable_step_first",
+          trajectory_ids=[trajectory_testing.TRAJECTORY_ID_2, "missing"],
+          expected_error=pydantic.ValidationError,
+      ),
+      dict(
+          testcase_name="missing_first",
+          trajectory_ids=["missing", trajectory_testing.TRAJECTORY_ID_2],
+          expected_error=store.TrajectoryNotFoundError,
+      ),
+  )
+  def test_get_trajectories_raises_error_of_first_failing_trajectory(
+      self, trajectory_ids: list[str], expected_error: type[Exception]
+  ) -> None:
+    """Verifies the error raised is that of the first failing trajectory."""
+    for step in trajectory_testing.TRAJECTORY_2.steps:
+      self.file_s.add_step(step, trajectory_testing.METADATA_2)
+    self.file_s.flush()
+    self.file_s.get_step_path(trajectory_testing.TRAJECTORY_ID_2, 3).write_text(
+        "{"
+    )
+
+    with self.assertRaises(expected_error):
+      self.file_s.get_trajectories(trajectory_ids)
+
+  def test_get_trajectories_reports_missing_metadata_before_unparsable_step(
+      self,
+  ) -> None:
+    """Verifies missing metadata is reported rather than an unparsable step."""
+    for step in trajectory_testing.TRAJECTORY_2.steps:
+      self.file_s.add_step(step, trajectory_testing.METADATA_2)
+    self.file_s.flush()
+    self.file_s.get_step_path(trajectory_testing.TRAJECTORY_ID_2, 3).write_text(
+        "{"
+    )
+    self.file_s.get_trajectory_metadata_path(
+        trajectory_testing.TRAJECTORY_ID_2
+    ).unlink()
+
+    with self.assertRaises(store.TrajectoryNotFoundError):
+      self.file_s.get_trajectories([trajectory_testing.TRAJECTORY_ID_2])
+
+  def test_get_trajectories_with_unparsable_step_file_raises_error(
+      self,
+  ) -> None:
+    """Verifies a step file that fails to parse fails the read."""
+    for step in trajectory_testing.TRAJECTORY_2.steps:
+      self.file_s.add_step(step, trajectory_testing.METADATA_2)
+    self.file_s.flush()
+    self.file_s.get_step_path(trajectory_testing.TRAJECTORY_ID_2, 3).write_text(
+        "{"
+    )
+
+    with self.assertRaises(pydantic.ValidationError):
+      self.file_s.get_trajectories([trajectory_testing.TRAJECTORY_ID_2])
+
+  def test_get_trajectories_metadata_with_unparsable_file_raises_error(
+      self,
+  ) -> None:
+    """Verifies a metadata file that fails to parse fails the read."""
+    self.file_s.update_metadata(trajectory_testing.METADATA_1)
+    self.file_s.update_metadata(trajectory_testing.METADATA_2)
+    self.file_s.flush()
+    self.file_s.get_trajectory_metadata_path(
+        trajectory_testing.TRAJECTORY_ID_2
+    ).write_text("{")
+
+    with self.assertRaises(pydantic.ValidationError):
+      self.file_s.get_trajectories_metadata()
+
+  def test_get_trajectories_with_step_read_error_raises_it(self) -> None:
+    """Verifies an error reading a step file fails the read with that error."""
+    for step in trajectory_testing.TRAJECTORY_2.steps:
+      self.file_s.add_step(step, trajectory_testing.METADATA_2)
+    self.file_s.flush()
+    failing_path = self.file_s.get_step_path(
+        trajectory_testing.TRAJECTORY_ID_2, 3
+    )
+    path_cls = type(self.tmp_dir)
+    orig_read_text = path_cls.read_text
+
+    def read_text_failing_for_one_step(
+        path_self: epath.Path, *args: Any, **kwargs: Any
+    ) -> str:
+      if path_self == failing_path:
+        raise OSError("disk error")
+      return orig_read_text(path_self, *args, **kwargs)
+
+    with mock.patch.object(
+        path_cls,
+        "read_text",
+        autospec=True,
+        side_effect=read_text_failing_for_one_step,
+    ):
+      with self.assertRaisesRegex(OSError, "disk error"):
+        self.file_s.get_trajectories([trajectory_testing.TRAJECTORY_ID_2])
+
+  def test_get_trajectories_metadata_with_read_error_raises_it(self) -> None:
+    """Verifies an error reading a metadata file fails the read with it."""
+    self.file_s.update_metadata(trajectory_testing.METADATA_1)
+    self.file_s.update_metadata(trajectory_testing.METADATA_2)
+    self.file_s.flush()
+    failing_path = self.file_s.get_trajectory_metadata_path(
+        trajectory_testing.TRAJECTORY_ID_2
+    )
+    path_cls = type(self.tmp_dir)
+    orig_read_text = path_cls.read_text
+
+    def read_text_failing_for_one_file(
+        path_self: epath.Path, *args: Any, **kwargs: Any
+    ) -> str:
+      if path_self == failing_path:
+        raise OSError("disk error")
+      return orig_read_text(path_self, *args, **kwargs)
+
+    with mock.patch.object(
+        path_cls,
+        "read_text",
+        autospec=True,
+        side_effect=read_text_failing_for_one_file,
+    ):
+      with self.assertRaisesRegex(OSError, "disk error"):
+        self.file_s.get_trajectories_metadata()
+
+  def test_failed_read_waits_for_running_reads(self) -> None:
+    """Verifies no read thread is left running once a read call has failed."""
+    self.file_s.update_metadata(trajectory_testing.METADATA_1)
+    self.file_s.flush()
+    missing_meta_path = self.file_s.get_trajectory_metadata_path("missing")
+    metadata_read_started = threading.Event()
+    path_cls = type(self.tmp_dir)
+    orig_exists = path_cls.exists
+    orig_read_text = path_cls.read_text
+
+    def exists_once_metadata_read_started(
+        path_self: epath.Path, *args: Any, **kwargs: Any
+    ) -> bool:
+      # Reports the missing ID while the other metadata file is being read.
+      if path_self == missing_meta_path:
+        metadata_read_started.wait(timeout=_CONCURRENT_READ_TIMEOUT_SECONDS)
+      return orig_exists(path_self, *args, **kwargs)
+
+    def read_text_slowly(
+        path_self: epath.Path, *args: Any, **kwargs: Any
+    ) -> str:
+      metadata_read_started.set()
+      time.sleep(0.1)
+      return orig_read_text(path_self, *args, **kwargs)
+
+    with (
+        mock.patch.object(
+            path_cls,
+            "exists",
+            autospec=True,
+            side_effect=exists_once_metadata_read_started,
+        ),
+        mock.patch.object(
+            path_cls, "read_text", autospec=True, side_effect=read_text_slowly
+        ),
+    ):
+      with self.assertRaises(store.TrajectoryMetadataNotFoundError):
+        self.file_s.get_trajectories_metadata(
+            ["missing", trajectory_testing.TRAJECTORY_ID_1]
+        )
+
+    self.assertTrue(metadata_read_started.is_set())
+    self.assertEmpty([
+        thread.name
+        for thread in threading.enumerate()
+        if thread.name.startswith(file_store._READ_THREAD_NAME_PREFIX)
+    ])
 
   @parameterized.named_parameters(
       ("with_slash", "traj/1001"),

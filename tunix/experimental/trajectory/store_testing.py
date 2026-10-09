@@ -2,7 +2,8 @@
 
 import abc
 from collections.abc import Sequence
-from typing import Any, cast
+import random
+from typing import Any, ClassVar, cast
 
 from absl.testing import parameterized
 from tunix.experimental.trajectory import store
@@ -113,6 +114,11 @@ class TrajectoryReaderTestCase(
   Subclasses must implement `_create_reader` to populate backend storage
   with initial test data and return a configured TrajectoryReader instance.
   """
+
+  # Number of trajectories read by the tests that many trajectories come back
+  # in request order. Backends that read trajectories concurrently can raise it
+  # above their concurrency, so that results finish out of request order.
+  NUM_MANY_TRAJECTORIES: ClassVar[int] = 32
 
   @abc.abstractmethod
   def _create_reader(
@@ -287,6 +293,74 @@ class TrajectoryReaderTestCase(
         "Trajectory with ID 'non_existent_id' not found.",
     ):
       self.reader.get_trajectories(trajectory_ids)
+
+  def _create_reader_with_many_trajectories(
+      self,
+  ) -> tuple[
+      store.TrajectoryReader,
+      list[str],
+      dict[
+          str,
+          tuple[trajectory_lib.TrajectoryMetadata, list[trajectory_lib.Step]],
+      ],
+  ]:
+    """Creates a reader of `NUM_MANY_TRAJECTORIES` two-step trajectories.
+
+    Returns:
+      The reader; the trajectory IDs in a shuffled order that differs from the
+      order the trajectories were written in; and the metadata and steps of
+      each trajectory by ID.
+    """
+    data_by_id: dict[
+        str, tuple[trajectory_lib.TrajectoryMetadata, list[trajectory_lib.Step]]
+    ] = {}
+    for i in range(self.NUM_MANY_TRAJECTORIES):
+      trajectory_id = f"many_{i:03d}"
+      data_by_id[trajectory_id] = (
+          trajectory_testing.make_metadata(trajectory_id=trajectory_id),
+          [
+              trajectory_testing.make_step(
+                  step_id=1, message=f"{trajectory_id}:1"
+              ),
+              trajectory_testing.make_step(
+                  step_id=2, message=f"{trajectory_id}:2"
+              ),
+          ],
+      )
+    reader = self._create_reader(initial_data=list(data_by_id.values()))
+    requested_ids = random.Random(0).sample(list(data_by_id), len(data_by_id))
+    return reader, requested_ids, data_by_id
+
+  def test_get_trajectories_of_many_trajectories_keeps_request_order(
+      self,
+  ) -> None:
+    """Tests that many trajectories are returned in requested ID order."""
+    reader, requested_ids, data_by_id = (
+        self._create_reader_with_many_trajectories()
+    )
+
+    trajs = reader.get_trajectories(requested_ids)
+
+    expected_trajs = []
+    for trajectory_id in requested_ids:
+      metadata, steps = data_by_id[trajectory_id]
+      expected_trajs.append(metadata.create_trajectory(steps=steps))
+    self.assertEqual(trajs, expected_trajs)
+
+  def test_get_trajectories_metadata_of_many_trajectories_keeps_request_order(
+      self,
+  ) -> None:
+    """Tests that metadata of many trajectories is in requested ID order."""
+    reader, requested_ids, data_by_id = (
+        self._create_reader_with_many_trajectories()
+    )
+
+    metas = reader.get_trajectories_metadata(requested_ids)
+
+    self.assertEqual(
+        metas,
+        [data_by_id[trajectory_id][0] for trajectory_id in requested_ids],
+    )
 
 
 class TrajectoryWriterTestCase(
