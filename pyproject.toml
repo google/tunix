@@ -75,7 +75,6 @@ test = [
   "chex",
   "opentelemetry-sdk>=1.25.0",
   "wandb",  # Offline end-to-end test for the OpenTelemetry W&B exporter
-  "mlperf-logging",
 ]
 cli = [
   "tensorflow",
