@@ -6,12 +6,16 @@ https://github.com/harbor-framework/harbor/blob/main/rfcs/0001-trajectory-format
 
 from __future__ import annotations
 
+import base64
+import binascii
+from collections.abc import Callable, Mapping
 import copy
 import dataclasses
 import datetime
 import enum
 import functools
-from typing import Annotated, Any, ClassVar, Final, Generic, Literal, Self, Sequence, TypeVar, get_args
+import math
+from typing import Annotated, Any, ClassVar, Final, Generic, Literal, Self, Sequence, TypeVar, TypedDict, get_args
 
 import numpy as np
 import pydantic
@@ -169,6 +173,19 @@ def _get_field_names(model_cls: type[pydantic.BaseModel]) -> set[str]:
   return set(model_cls.model_fields)
 
 
+@functools.lru_cache(maxsize=None)
+def _get_field_serializers(
+    model_cls: type[pydantic.BaseModel],
+) -> Mapping[str, Callable[..., Any]]:
+  """Returns cached custom PlainSerializer functions keyed by field name."""
+  serializers: dict[str, Callable[..., Any]] = {}
+  for name, field_info in model_cls.model_fields.items():
+    for meta in field_info.metadata:
+      if isinstance(meta, pydantic.PlainSerializer):
+        serializers[name] = meta.func
+  return serializers
+
+
 def _get_non_none_fields(
     model: pydantic.BaseModel,
     field_names: set[str],
@@ -200,13 +217,19 @@ def _pack_subclass_values_into_extra(
       source_model, target_field_names - {_EXTRA_FIELD}
   )
 
-  # Serialize only subclass extension fields.
-  subclass_values_by_field = {}
-  if subclass_field_names:
-    subclass_values_by_field = source_model.model_dump(
-        include=subclass_field_names,
-        exclude_none=True,
-    )
+  # Convert subclass extension fields directly without invoking `model_dump`,
+  # which would re-traverse serialized array lists to validate `return_type`.
+  field_serializers = _get_field_serializers(type(source_model))
+  subclass_values_by_field = {
+      field: (
+          field_serializers[field](value)
+          if field in field_serializers
+          else _to_json_compatible(value)
+      )
+      for field, value in _get_non_none_fields(
+          source_model, subclass_field_names
+      ).items()
+  }
 
   extra = dict(source_model.extra or {})
   if subclass_values_by_field:
@@ -274,6 +297,132 @@ IntArray = Annotated[
     np.ndarray | list[int] | None,
     pydantic.PlainSerializer(
         _serialize_array, return_type=list[int] | None, when_used="always"
+    ),
+]
+
+_INT3D_DTYPE: Final[np.dtype[np.int16]] = np.dtype("<i2")
+_INT3D_DTYPE_NAME: Final[Literal["int16"]] = "int16"
+_INT3D_BLOB_KEYS: Final[frozenset[str]] = frozenset({"shape", "dtype", "data"})
+
+
+class SerializedInt3DArray(TypedDict):
+  """Compact JSON-serializable base64 binary representation of a 3D int16 array."""
+
+  shape: list[int]
+  dtype: Literal["int16"]
+  data: str
+
+
+def _validate_int_3d_array(
+    value: np.ndarray | list[list[list[int]]] | Mapping[str, Any] | None,
+) -> np.ndarray | None:
+  """Validates and normalizes a 3D int16 array or decodes its base64 blob."""
+  if value is None:
+    return None
+  if isinstance(value, Mapping):
+    if set(value.keys()) != _INT3D_BLOB_KEYS:
+      raise ValueError(
+          f"Invalid serialized Int3DArray keys {sorted(value.keys())};"
+          f" expected {sorted(_INT3D_BLOB_KEYS)}."
+      )
+    dtype = value["dtype"]
+    if dtype != _INT3D_DTYPE_NAME:
+      raise ValueError(
+          f"Unsupported Int3DArray dtype {dtype!r}; expected"
+          f" {_INT3D_DTYPE_NAME!r}."
+      )
+    raw_shape = value["shape"]
+    if (
+        not isinstance(raw_shape, (list, tuple))
+        or len(raw_shape) != 3
+        or not all(
+            isinstance(dim, int) and not isinstance(dim, bool) and dim >= 0
+            for dim in raw_shape
+        )
+    ):
+      raise ValueError(
+          f"Invalid Int3DArray shape {raw_shape!r}; expected 3 non-negative"
+          " integers."
+      )
+    shape = (raw_shape[0], raw_shape[1], raw_shape[2])
+    encoded = value["data"]
+    if not isinstance(encoded, str):
+      raise ValueError(
+          "Expected base64 string for Int3DArray data, got"
+          f" {type(encoded).__name__}."
+      )
+    try:
+      raw_bytes = base64.b64decode(encoded.encode("ascii"), validate=True)
+    except (UnicodeEncodeError, binascii.Error) as exc:
+      raise ValueError(f"Failed to decode Int3DArray blob: {exc}") from exc
+    expected_bytes = math.prod(shape) * _INT3D_DTYPE.itemsize
+    if len(raw_bytes) != expected_bytes:
+      raise ValueError(
+          f"Decoded Int3DArray byte length {len(raw_bytes)} does not match"
+          f" shape {shape} * {_INT3D_DTYPE.itemsize} ({expected_bytes} bytes)."
+      )
+    return (
+        np.frombuffer(raw_bytes, dtype=_INT3D_DTYPE)
+        .reshape(shape)
+        .astype(np.int16, copy=True)
+    )
+  if isinstance(value, (np.ndarray, list)):
+    arr = np.asarray(value)
+    if arr.ndim != 3:
+      raise ValueError(
+          f"Expected a 3D array for Int3DArray, got shape {arr.shape}."
+      )
+    if arr.size == 0:
+      return np.zeros(arr.shape, dtype=np.int16)
+    if not np.issubdtype(arr.dtype, np.integer) or np.issubdtype(
+        arr.dtype, np.bool_
+    ):
+      raise ValueError(
+          f"Expected an integer array for Int3DArray, got dtype {arr.dtype}."
+      )
+    if arr.dtype != np.int16:
+      info = np.iinfo(np.int16)
+      min_val, max_val = int(arr.min()), int(arr.max())
+      if min_val < info.min or max_val > info.max:
+        raise ValueError(
+            f"Int3DArray values [{min_val}, {max_val}] exceed int16 range"
+            f" [{info.min}, {info.max}]."
+        )
+    return np.ascontiguousarray(arr, dtype=np.int16)
+  raise ValueError(f"Unsupported type for Int3DArray: {type(value).__name__}.")
+
+
+def _serialize_int_3d_array(
+    value: np.ndarray | list[list[list[int]]] | Mapping[str, Any] | None,
+) -> SerializedInt3DArray | None:
+  """Serializes a 3D int16 array into a base64 binary blob dict."""
+  if value is None:
+    return None
+  if (
+      isinstance(value, np.ndarray)
+      and value.ndim == 3
+      and value.dtype == _INT3D_DTYPE
+      and value.flags.c_contiguous
+  ):
+    arr = value
+  else:
+    validated = _validate_int_3d_array(value)
+    assert validated is not None
+    arr = np.ascontiguousarray(validated, dtype=_INT3D_DTYPE)
+  return {
+      "shape": list(arr.shape),
+      "dtype": _INT3D_DTYPE_NAME,
+      "data": base64.b64encode(arr.tobytes()).decode("ascii"),
+  }
+
+
+Int3DArray = Annotated[
+    np.ndarray | list[list[list[int]]] | None,
+    pydantic.BeforeValidator(_validate_int_3d_array),
+    pydantic.PlainSerializer(
+        _serialize_int_3d_array,
+        return_type=SerializedInt3DArray | None,
+        when_used="always",
     ),
 ]
 
@@ -900,15 +1049,70 @@ class TunixAgentStep(Step):
       default=None,
       description="Policy/weight version used to generate this step.",
   )
+  prefill_routed_experts: Int3DArray = pydantic.Field(
+      default=None,
+      description=(
+          "MoE routed expert IDs returned by this step's model call, shape"
+          " (T, L, K), covering sequence positions [prefill_start,"
+          " prefill_start + T). The last sampled token of a turn (plus any"
+          " chat-parser suffix tokens appended to assistant_tokens) is only"
+          " routed by the next turn's prefill, so rows are: turn 0 = prompt +"
+          " this turn's routed assistant prefix; turn t > 0 = previous turn's"
+          " unrouted assistant tail + previous env tokens + this turn's routed"
+          " assistant prefix. Written once and never rewritten."
+      ),
+  )
+  prefill_start: int | None = pydantic.Field(
+      default=None,
+      description=(
+          "Position of the first `prefill_routed_experts` row in the unpadded"
+          " prompt + conversation token sequence."
+      ),
+  )
+  prefill_num_context: int | None = pydantic.Field(
+      default=None,
+      description=(
+          "Number of leading `prefill_routed_experts` rows that cover tokens"
+          " before this step's generation (turn 0: the prompt; turn t > 0:"
+          " the previous assistant tail + previous env tokens)."
+      ),
+  )
 
   @pydantic.model_validator(mode="after")
   def validate_agent_source(self) -> TunixAgentStep:
-    """Validate that source is 'agent' for TunixAgentStep."""
+    """Validate source and prefill routing invariants for TunixAgentStep."""
     if self.source != Source.AGENT:
       raise ValueError(
           "TunixAgentStep is only applicable when source is 'agent', but source"
           f" is '{self.source}'"
       )
+    prefill_fields = (
+        self.prefill_routed_experts,
+        self.prefill_start,
+        self.prefill_num_context,
+    )
+    if any(x is not None for x in prefill_fields) and not all(
+        x is not None for x in prefill_fields
+    ):
+      raise ValueError(
+          "prefill_routed_experts, prefill_start, and prefill_num_context must"
+          " be either all None or all set"
+      )
+    if self.prefill_routed_experts is not None:
+      assert self.prefill_start is not None
+      assert self.prefill_num_context is not None
+      if self.prefill_start < 0:
+        raise ValueError(
+            f"prefill_start must be >= 0, got {self.prefill_start}"
+        )
+      if not (
+          0 <= self.prefill_num_context <= len(self.prefill_routed_experts)
+      ):
+        raise ValueError(
+            "prefill_num_context must be in"
+            f" [0, {len(self.prefill_routed_experts)}], got"
+            f" {self.prefill_num_context}"
+        )
     return self
 
   def to_atif_step(self, step_id_offset: int = 1) -> Step:
@@ -1096,6 +1300,9 @@ class TunixTrajectory(
       env_masks: list[int] | np.ndarray | None = None,
       logprobs: list[float] | np.ndarray | None = None,
       policy_version: int | None = None,
+      prefill_routed_experts: list[list[list[int]]] | np.ndarray | None = None,
+      prefill_start: int | None = None,
+      prefill_num_context: int | None = None,
       extra: dict[str, Any] | None = None,
   ) -> TunixAgentStep | TunixEnvStep:
     """Helper to create and append a step, automatically assigning step_id."""
@@ -1120,9 +1327,21 @@ class TunixTrajectory(
           assistant_masks=assistant_masks,
           logprobs=logprobs,
           policy_version=policy_version,
+          prefill_routed_experts=prefill_routed_experts,
+          prefill_start=prefill_start,
+          prefill_num_context=prefill_num_context,
           extra=extra,
       )
     else:
+      if (
+          prefill_routed_experts is not None
+          or prefill_start is not None
+          or prefill_num_context is not None
+      ):
+        raise ValueError(
+            "prefill_routed_experts, prefill_start, and prefill_num_context"
+            f" are only valid when source is 'agent', got '{source}'"
+        )
       new_step = TunixEnvStep(
           step_id=step_id,
           timestamp=ts,

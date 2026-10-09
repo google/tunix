@@ -1223,6 +1223,201 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     # Step 2 terminal token padded with UNSET_ROUTED_EXPERT
     np.testing.assert_array_equal(routed[8], agent_types.UNSET_ROUTED_EXPERT)
 
+  def _two_turn_routed_outputs(self, second_routed=True):
+    """Model outputs for a 2-turn routed episode (prompt 2, env 3 tokens)."""
+    shape = (4, 2)
+    turn0 = np.concatenate([np.full((2,) + shape, 3), np.full((1,) + shape, 5)])
+    turn1 = np.concatenate([
+        np.full((1,) + shape, 5),
+        np.full((3,) + shape, 6),
+        np.full((1,) + shape, 7),
+    ])
+    prompt = np.array([[101, 102]], dtype=np.int32)
+    outputs = []
+    turns = (
+        ([201, 202], turn0),
+        ([203, 204], turn1 if second_routed else None),
+    )
+    for tokens, routed in turns:
+      outputs.append(
+          RolloutOutput(
+              text=['resp'],
+              logits=None,
+              tokens=[np.array(tokens, dtype=np.int32)],
+              left_padded_prompt_tokens=prompt,
+              logprobs=[np.ones(2, dtype=np.float32)],
+              routed_experts=None if routed is None else [routed],
+          )
+      )
+    return outputs, turn0, turn1
+
+  @mock.patch.object(utils, 'tokenize_and_generate_masks')
+  def test_trajectory_store_skips_prefill_routed_experts_by_default(
+      self, mock_convert
+  ):
+    with self.assertRaisesRegex(
+        ValueError, 'store_routed_experts must be a bool'
+    ):
+      trajectory_collect_engine.TrajectoryCollectEngine(
+          agent=self.mock_agent,
+          env=self.mock_env,
+          model_call=self.mock_model_call,
+          store_routed_experts='yes',  # pyrefly: ignore[bad-argument-type]
+      )
+    mock_convert.side_effect = [
+        ([101, 102], [1, 1]),  # prompt tokens (len 2)
+        ([301, 302, 303], [1, 1, 1]),  # env tokens (len 3)
+    ]
+    outputs, _, _ = self._two_turn_routed_outputs()
+    self.mock_model_call.side_effect = outputs
+    store = in_memory_store.InMemoryTrajectoryStore(
+        metadata_cls=trajectory_lib.TunixTrajectoryMetadata
+    )
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+        tokenizer=self.mock_tokenizer,
+        chat_parser=self.mock_chat_parser,
+        trajectory_store=store,
+        metadata=converter_lib.create_trajectory_metadata(
+            traj_id='traj_default_no_routed'
+        ),
+    )
+    traj = asyncio.run(self._run_collect(engine, mode='Trajectory'))
+    # In-memory trajectory still carries routed_experts for training replay.
+    self.assertIsNotNone(traj.prompt_routed_experts)
+    self.assertIsNotNone(traj.steps[0].assistant_routed_experts)
+    self.assertIsNotNone(traj.steps[0].env_routed_experts)
+
+    # Store omits prefill_routed_experts when store_routed_experts is False.
+    (stored,) = store.get_trajectories(['traj_default_no_routed'])
+    agent_0, agent_1 = stored.steps[1], stored.steps[3]
+    self.assertIsNone(agent_0.prefill_routed_experts)
+    self.assertIsNone(agent_0.prefill_start)
+    self.assertIsNone(agent_0.prefill_num_context)
+    self.assertIsNone(agent_1.prefill_routed_experts)
+
+  @mock.patch.object(utils, 'tokenize_and_generate_masks')
+  def test_trajectory_store_persists_raw_prefill_routed_experts(
+      self, mock_convert
+  ):
+    mock_convert.side_effect = [
+        ([101, 102], [1, 1]),  # prompt tokens (len 2)
+        ([301, 302, 303], [1, 1, 1]),  # env tokens (len 3)
+    ]
+    outputs, turn0, turn1 = self._two_turn_routed_outputs()
+    self.mock_model_call.side_effect = outputs
+    store = in_memory_store.InMemoryTrajectoryStore(
+        metadata_cls=trajectory_lib.TunixTrajectoryMetadata
+    )
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+        tokenizer=self.mock_tokenizer,
+        chat_parser=self.mock_chat_parser,
+        trajectory_store=store,
+        metadata=converter_lib.create_trajectory_metadata(
+            traj_id='traj_routed'
+        ),
+        store_routed_experts=True,
+    )
+    with mock.patch.object(
+        store, 'add_step', wraps=store.add_step
+    ) as mock_add_step:
+      traj = asyncio.run(self._run_collect(engine, mode='Trajectory'))
+    # Append-only: each agent step (odd step_id) is written exactly once.
+    agent_step_ids = [
+        c.args[0].step_id
+        for c in mock_add_step.call_args_list
+        if c.args[0].step_id % 2 == 1
+    ]
+    self.assertEqual(agent_step_ids, [1, 3])
+
+    (stored,) = store.get_trajectories(['traj_routed'])
+    agent_0, agent_1 = stored.steps[1], stored.steps[3]
+    np.testing.assert_array_equal(agent_0.prefill_routed_experts, turn0)
+    self.assertEqual(
+        (agent_0.prefill_start, agent_0.prefill_num_context), (0, 2)
+    )
+    np.testing.assert_array_equal(agent_1.prefill_routed_experts, turn1)
+    # Turn 1 context: 1 delayed assistant token + 3 env tokens.
+    self.assertEqual(
+        (agent_1.prefill_start, agent_1.prefill_num_context), (3, 4)
+    )
+
+    restored = converter_lib.to_tunix_trajectory(stored)
+    np.testing.assert_array_equal(
+        traj.to_dict()['prompt_routed_experts'], traj.prompt_routed_experts
+    )
+    np.testing.assert_array_equal(
+        restored.prompt_routed_experts, traj.prompt_routed_experts
+    )
+    np.testing.assert_array_equal(
+        restored.steps[0].assistant_routed_experts,
+        traj.steps[0].assistant_routed_experts,
+    )
+    np.testing.assert_array_equal(
+        restored.steps[0].env_routed_experts,
+        traj.steps[0].env_routed_experts,
+    )
+    # In memory, the terminal token is padded; the store leaves it unrouted.
+    np.testing.assert_array_equal(
+        restored.steps[1].assistant_routed_experts,
+        traj.steps[1].assistant_routed_experts[:-1],
+    )
+
+  @mock.patch.object(utils, 'tokenize_and_generate_masks')
+  def test_token_mode_max_steps_reached_pads_terminal_env_routed_experts(
+      self, mock_convert
+  ):
+    self.mock_env.max_steps = 1
+    self.mock_env.step.side_effect = [('obs1', 1.0, False, {})]
+    mock_convert.side_effect = [
+        ([101, 102], [1, 1]),  # prompt tokens (len 2)
+        ([301, 302], [0, 0]),  # env tokens (len 2)
+    ]
+    outputs, turn0, _ = self._two_turn_routed_outputs()
+    self.mock_model_call.side_effect = [outputs[0]]
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+        tokenizer=self.mock_tokenizer,
+        chat_parser=self.mock_chat_parser,
+    )
+    token_data = asyncio.run(self._run_collect(engine, mode='Token'))
+    self.assertEqual(
+        token_data['status'],
+        agent_types.TrajectoryStatus.MAX_STEPS_REACHED.name,
+    )
+    # 2 prompt + 2 assistant (1 routed + 1 padded) + 2 env (padded) = 6 rows.
+    self.assertEqual(token_data['routed_experts'].shape, (6, 4, 2))
+    np.testing.assert_array_equal(token_data['routed_experts'][:3], turn0)
+    np.testing.assert_array_equal(
+        token_data['routed_experts'][3:],
+        np.full((3, 4, 2), agent_types.UNSET_ROUTED_EXPERT, dtype=np.int16),
+    )
+
+  @mock.patch.object(utils, 'tokenize_and_generate_masks')
+  def test_missing_routed_experts_after_routed_turn_raises(self, mock_convert):
+    mock_convert.side_effect = [
+        ([101, 102], [1, 1]),
+        ([301, 302, 303], [1, 1, 1]),
+    ]
+    outputs, _, _ = self._two_turn_routed_outputs(second_routed=False)
+    self.mock_model_call.side_effect = outputs
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+        tokenizer=self.mock_tokenizer,
+        chat_parser=self.mock_chat_parser,
+    )
+    with self.assertRaisesRegex(ValueError, 'no routed_experts at turn 1'):
+      asyncio.run(self._run_collect(engine, mode='Trajectory'))
+
   @mock.patch.object(utils, 'tokenize_and_generate_masks')
   def test_token_mode_with_zero_generated_tokens_and_routed_experts(
       self, mock_convert

@@ -77,6 +77,7 @@ class TrajectoryCollectEngine:
       policy_version: Optional[int] = None,
       trajectory_store: Optional[store_lib.TrajectoryWriter] = None,
       metadata: Optional[trajectory_lib.TrajectoryMetadata] = None,
+      store_routed_experts: bool = False,
   ):
     """Initialize the trajectory collection engine.
 
@@ -110,13 +111,21 @@ class TrajectoryCollectEngine:
         trajectory_store: Optional TrajectoryWriter to write trajectory steps
           to.
         metadata: Optional TrajectoryMetadata for the current episode.
+        store_routed_experts: Whether to persist captured prefill MoE
+          routed_experts to `trajectory_store` on each agent step.
     """
+    if not isinstance(store_routed_experts, bool):
+      raise ValueError(
+          "store_routed_experts must be a bool, got"
+          f" {store_routed_experts!r}"
+      )
     self.agent = agent
     self.env = env
     self.model_call = model_call
     self.policy_version = policy_version
     self.trajectory_store = trajectory_store
     self.metadata = metadata
+    self.store_routed_experts = store_routed_experts
     self.final_reward_fn = None
     self.model_call_kwargs = model_call_kwargs or {}
     if exact_token_continuity and (tokenizer is None or chat_parser is None):
@@ -151,6 +160,11 @@ class TrajectoryCollectEngine:
     self.perf_v2 = perf_v2 or perf_tracer_v2.NoopTracer()
     self._cumulative_prompt_tokens: int = 0
     self._current_step_initial_routed_experts: Optional[np.ndarray] = None
+    # Whether any turn so far returned routed experts.
+    self._has_routed_experts: bool = False
+    # This turn's raw prefill routing as (rows, prefill_start,
+    # prefill_num_context), persisted as-is on the turn's agent step.
+    self._current_prefill: Optional[Tuple[np.ndarray, int, int]] = None
     self.env_time = {
         "reset_latency": 0.0,  # Wall-clock time (Total real-world time elapsed)
         "step_latency": [],  # List of per-step wall-clock times, ordered by step index
@@ -209,34 +223,46 @@ class TrajectoryCollectEngine:
     logging.warning("%s trajectory clipped: %s", self._debug_prefix, reason)
 
   def _finalize_terminal_step_routing(self) -> None:
-    """Pad the terminal step's unrouted last token with UNSET_ROUTED_EXPERT.
+    """Pad the terminal step's unrouted trailing tokens with UNSET_ROUTED_EXPERT.
 
     In autoregressive sampling, vLLM routes P + G - 1 tokens; the G-th token
-    is sampled at the end of decode and only passes through an MoE layer if a
-    subsequent turn prefills it. On episode termination, the final step's last
-    token was never forwarded through a subsequent prefill. In causal loss,
-    targets are rolled by -1 and targets_segmentation is 0 at the final token,
-    so padding with UNSET_ROUTED_EXPERT has zero effect on training loss.
+    (plus any chat-parser suffix tokens and any terminal env tokens when
+    MAX_STEPS_REACHED terminates a turn with done=False) is only routed if a
+    subsequent turn prefills it. On episode termination, those trailing tokens
+    were never forwarded through a subsequent prefill. In causal loss, targets
+    are rolled by -1 and targets_segmentation is 0 at all suffix, env, and
+    past-end positions, so padding with UNSET_ROUTED_EXPERT has zero effect on
+    training loss.
     """
     if not self.agent.trajectory.steps:
       return
     final_step = self.agent.trajectory.steps[-1]
-    if (
-        final_step.assistant_routed_experts is not None
-        and final_step.assistant_tokens is not None
-        and len(final_step.assistant_routed_experts)
-        < len(final_step.assistant_tokens)
-    ):
+    if final_step.assistant_routed_experts is None:
+      return
+    expert_shape = final_step.assistant_routed_experts.shape[1:]
+    if final_step.assistant_tokens is not None and len(
+        final_step.assistant_routed_experts
+    ) < len(final_step.assistant_tokens):
       missing = len(final_step.assistant_tokens) - len(
           final_step.assistant_routed_experts
       )
       pad = np.full(
-          (missing,) + final_step.assistant_routed_experts.shape[1:],
+          (missing,) + expert_shape,
           agent_types.UNSET_ROUTED_EXPERT,
           dtype=np.int16,
       )
       final_step.assistant_routed_experts = np.concatenate(
           [final_step.assistant_routed_experts, pad], axis=0
+      )
+    if (
+        final_step.env_tokens is not None
+        and len(final_step.env_tokens) > 0
+        and final_step.env_routed_experts is None
+    ):
+      final_step.env_routed_experts = np.full(
+          (len(final_step.env_tokens),) + expert_shape,
+          agent_types.UNSET_ROUTED_EXPERT,
+          dtype=np.int16,
       )
 
   def _sync_trajectory_metadata(self) -> None:
@@ -313,13 +339,17 @@ class TrajectoryCollectEngine:
       # rather than `len(trajectory.steps)` because `update_from_model()` has
       # already appended `step` to `trajectory.steps` mid-turn (making
       # `len(trajectory.steps)` equal to `step_idx + 1`).
-      # TODO(sizhi): Support persisting MoE routed_experts
-      # (prompt_routed_experts, assistant_routed_experts, and
-      # env_routed_experts) in TrajectoryStore in a follow-up CL.
+      if self._current_prefill is not None and self.store_routed_experts:
+        prefill_rows, prefill_start, prefill_num_context = self._current_prefill
+      else:
+        prefill_rows, prefill_start, prefill_num_context = None, None, None
       agent_step = converter_lib.create_agent_step(
           step,
           tunix_step_id=self.agent.trajectory.step_idx,
           policy_version=self.policy_version,
+          prefill_routed_experts=prefill_rows,
+          prefill_start=prefill_start,
+          prefill_num_context=prefill_num_context,
       )
       if agent_step is not None:
         self._sync_trajectory_metadata()
@@ -672,6 +702,8 @@ class TrajectoryCollectEngine:
     self._response_token_count = 0
     self._cumulative_prompt_tokens = 0
     self._current_step_initial_routed_experts = None
+    self._has_routed_experts = False
+    self._current_prefill = None
     self.env_time = {
         "reset_latency": 0.0,
         "step_latency": [],
@@ -910,12 +942,29 @@ class TrajectoryCollectEngine:
           raise ValueError("later-turn prompt differs from recorded history")
 
     self._current_step_initial_routed_experts = None
-    if (
-        not self.agent.trajectory.steps
-        and rollout_output.routed_experts
-        and rollout_output.routed_experts[0] is not None
-    ):
-      init_routed = np.asarray(rollout_output.routed_experts[0], dtype=np.int16)
+    self._current_prefill = None
+    routed = (
+        rollout_output.routed_experts[0]
+        if rollout_output.routed_experts
+        else None
+    )
+    # Mirror `collect(mode="Token")`: once any turn is routed, every turn must
+    # be. Fail at the offending turn rather than when building the batch.
+    if routed is None:
+      if self._has_routed_experts:
+        raise ValueError(
+            "model_call returned no routed_experts at turn"
+            f" {self.agent.trajectory.step_idx} after earlier turns did."
+        )
+    elif self.agent.trajectory.steps and not self._has_routed_experts:
+      raise ValueError(
+          "model_call first returned routed_experts at turn"
+          f" {self.agent.trajectory.step_idx}; earlier turns and the prompt"
+          " have no routing."
+      )
+
+    if routed is not None and not self.agent.trajectory.steps:
+      init_routed = np.asarray(routed, dtype=np.int16)
       prompt_len = (
           (self.agent.trajectory.prompt_length or 0)
           if self.exact_token_continuity
@@ -929,18 +978,12 @@ class TrajectoryCollectEngine:
       self.agent.trajectory.prompt_routed_experts = (  # pyrefly: ignore[missing-attribute]
           init_routed[:prompt_len]
       )
+      self._has_routed_experts = True
+      self._current_prefill = (init_routed, 0, prompt_len)
       self._cumulative_prompt_tokens = init_routed.shape[0]
       self._current_step_initial_routed_experts = init_routed[prompt_len:]
-    elif (
-        self.agent.trajectory.steps
-        and rollout_output.routed_experts
-        and rollout_output.routed_experts[0] is not None
-    ):
-      delta_routed = np.asarray(
-          rollout_output.routed_experts[0], dtype=np.int16
-      )
-      # TODO(sizhi): Re-record `prev_step` in TrajectoryStore once MoE
-      # routed_experts persistence is supported.
+    elif routed is not None:
+      delta_routed = np.asarray(routed, dtype=np.int16)
       prev_step = self.agent.trajectory.steps[-1]
       needed_asst = 0
       if (
@@ -976,6 +1019,13 @@ class TrajectoryCollectEngine:
               f"{len(prev_step.env_routed_experts)} and env_tokens length "
               f"{num_env} at step {len(self.agent.trajectory.steps) - 1}."
           )
+      # The store keeps the raw delta on this turn's step (append-only); the
+      # in-memory split above only updates `prev_step` for Token/Steps modes.
+      self._current_prefill = (
+          delta_routed,
+          self._cumulative_prompt_tokens,
+          needed_asst + num_env,
+      )
       self._current_step_initial_routed_experts = delta_routed[
           needed_asst + num_env :
       ]
@@ -1157,9 +1207,6 @@ class TrajectoryCollectEngine:
     Returns:
       True if the trajectory is masked out by the overlong filter.
     """
-    # TODO(sizhi): Support persisting MoE routed_experts (including terminal
-    # step padding and multi-turn stitching) in TrajectoryStore in a
-    # follow-up CL.
     self._finalize_terminal_step_routing()
 
     masked_out = (

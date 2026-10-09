@@ -166,6 +166,10 @@ def create_agent_step(
     step: agent_types.Step | None,
     tunix_step_id: int,
     policy_version: int | None = None,
+    *,
+    prefill_routed_experts: np.ndarray | None = None,
+    prefill_start: int | None = None,
+    prefill_num_context: int | None = None,
 ) -> trajectory_lib.TunixAgentStep | None:
   """Converts a Tunix agent_types.Step into an agent turn Step.
 
@@ -177,6 +181,12 @@ def create_agent_step(
     step: The Tunix RL step to convert, or None.
     tunix_step_id: 0-based turn index of the step in the Tunix trajectory.
     policy_version: Optional policy version override for the agent step.
+    prefill_routed_experts: Raw MoE routed expert IDs returned by this turn's
+      model call, shape (T, L, K). Stored as-is; see
+      `TunixAgentStep.prefill_routed_experts` for the row layout.
+    prefill_start: Sequence position of the first `prefill_routed_experts` row.
+    prefill_num_context: Number of leading `prefill_routed_experts` rows that
+      cover tokens before this turn's generation.
 
   Returns:
     The converted TunixAgentStep (with step_id = 2 * tunix_step_id + 1), or None
@@ -211,18 +221,17 @@ def create_agent_step(
       step_id=converted_step_id,
       source=trajectory_lib.Source.AGENT,
       message=step.model_response,
-      reasoning_content=(
-          step.thought if step.thought is not None else None
-      ),
+      reasoning_content=(step.thought if step.thought is not None else None),
       tool_calls=action_converter.extract_tool_calls(step.action),
       metrics=_extract_metrics(step.assistant_tokens, step.logprobs),
       assistant_tokens=step.assistant_tokens,
       assistant_masks=step.assistant_masks,
       logprobs=step.logprobs,
       policy_version=effective_policy_version,
-      mc_return=(
-          float(step.mc_return) if step.mc_return is not None else None
-      ),
+      prefill_routed_experts=prefill_routed_experts,
+      prefill_start=prefill_start,
+      prefill_num_context=prefill_num_context,
+      mc_return=(float(step.mc_return) if step.mc_return is not None else None),
       extra=extra or None,
   )
 
@@ -405,6 +414,8 @@ def to_tunix_trajectory(
   - Step 0 (source USER or SYSTEM) -> Tunix task prompt dictionary.
   - Subsequent steps (Agent step at 2i+1, Env step at 2i+2) -> Paired into
     Tunix `agent_types.Step` instances for turn i.
+  - Agent steps' raw `prefill_routed_experts` -> Split into the trajectory's
+    `prompt_routed_experts` and each step's assistant/env routed experts.
 
   Args:
     traj: Trajectory or dictionary representation.
@@ -453,6 +464,10 @@ def to_tunix_trajectory(
     converted_step_idx = 1
 
   # Iterate through steps and pair AGENT + ENV steps into Tunix turns.
+  # `routed_turns` keeps each turn's source agent step for routing splits.
+  routed_turns: list[tuple[agent_types.Step, trajectory_lib.TunixAgentStep]] = (
+      []
+  )
   while converted_step_idx < num_converted_steps:
     curr_step = traj_obj.steps[converted_step_idx]
     if curr_step.source == trajectory_lib.Source.AGENT:
@@ -463,13 +478,18 @@ def to_tunix_trajectory(
           != trajectory_lib.Source.AGENT
       ):
         next_step = traj_obj.steps[converted_step_idx + 1]
-      dto_step = to_tunix_step(agent_step=curr_step, env_step=next_step)
+      # No-op if `curr_step` is already a TunixAgentStep.
+      agent_step = trajectory_lib.TunixAgentStep.from_atif_step(curr_step)
+      dto_step = to_tunix_step(agent_step=agent_step, env_step=next_step)
       dto_steps.append(dto_step)
+      routed_turns.append((dto_step, agent_step))
       converted_step_idx += 2 if next_step is not None else 1
     else:
       dto_step = to_tunix_step(agent_step=None, env_step=curr_step)
       dto_steps.append(dto_step)
       converted_step_idx += 1
+
+  prompt_routed_experts = _split_prefill_routed_experts(routed_turns)
 
   reward = (
       float(metadata_obj.total_reward)
@@ -499,7 +519,102 @@ def to_tunix_trajectory(
       status=status_enum,
       env_time=env_time,
       reward_time=reward_time,
+      prompt_routed_experts=prompt_routed_experts,
   )
+
+
+def _split_prefill_routed_experts(
+    routed_turns: list[tuple[agent_types.Step, trajectory_lib.TunixAgentStep]],
+) -> np.ndarray | None:
+  """Splits each turn's raw prefill routing back into per-step routing.
+
+  Turn i's `prefill_routed_experts` starts with `prefill_num_context` rows for
+  earlier tokens (turn 0: the prompt; turn i > 0: turn i-1's unrouted assistant
+  tail followed by turn i-1's env tokens); the remaining rows are turn i's own
+  routed assistant prefix (excluding its last sampled token and any chat-parser
+  suffix tokens). The final turn's trailing assistant tokens were never
+  prefilled, so they stay unrouted here; consumers pad them with
+  `agent_types.UNSET_ROUTED_EXPERT`.
+
+  Sets `assistant_routed_experts` and `env_routed_experts` on the Tunix steps in
+  place.
+
+  Args:
+    routed_turns: (Tunix step, source agent step) pairs in turn order.
+
+  Returns:
+    Routed expert IDs for the prompt, or None if no turn carries routing.
+
+  Raises:
+    ValueError: If only some turns carry routing, turns are not contiguous, or
+      split lengths do not match the recorded tokens.
+  """
+  if all(src.prefill_routed_experts is None for _, src in routed_turns):
+    return None
+
+  prompt_routed_experts = None
+  prev_step: agent_types.Step | None = None
+  prev_own = np.zeros((0,))
+  expected_start = 0
+  for turn, (step, src) in enumerate(routed_turns):
+    prefill = _to_numpy_or_none(src.prefill_routed_experts)
+    num_context = src.prefill_num_context
+    if prefill is None:
+      raise ValueError(
+          f"Turn {turn} is missing prefill routing while other turns have it."
+      )
+    if src.prefill_start is None or num_context is None:
+      raise ValueError(
+          f"Turn {turn} has prefill_routed_experts without prefill_start or"
+          " prefill_num_context."
+      )
+    if src.prefill_start != expected_start:
+      raise ValueError(
+          f"Turn {turn} prefill_start={src.prefill_start} is not contiguous"
+          f" with the previous turns (expected {expected_start})."
+      )
+    if not 0 <= num_context <= len(prefill):
+      raise ValueError(
+          f"Turn {turn} prefill_num_context={num_context} is out of range for"
+          f" {len(prefill)} prefill rows."
+      )
+    context, own = prefill[:num_context], prefill[num_context:]
+
+    if prev_step is None:
+      prompt_routed_experts = context
+    else:
+      num_env = (
+          len(prev_step.env_tokens) if prev_step.env_tokens is not None else 0
+      )
+      num_tail = num_context - num_env
+      if num_tail < 0:
+        raise ValueError(
+            f"Turn {turn} prefill_num_context={num_context} is smaller than"
+            f" turn {turn - 1}'s {num_env} env tokens."
+        )
+      prev_asst = np.concatenate([prev_own, context[:num_tail]], axis=0)
+      if prev_step.assistant_tokens is not None and len(prev_asst) != len(
+          prev_step.assistant_tokens
+      ):
+        raise ValueError(
+            f"Turn {turn - 1} has {len(prev_step.assistant_tokens)} assistant"
+            f" tokens but {len(prev_asst)} routed rows."
+        )
+      prev_step.assistant_routed_experts = prev_asst
+      if num_env > 0:
+        prev_step.env_routed_experts = context[num_tail:]
+
+    if step.assistant_tokens is not None and len(own) > len(
+        step.assistant_tokens
+    ):
+      raise ValueError(
+          f"Turn {turn} has {len(step.assistant_tokens)} assistant tokens"
+          f" but {len(own)} routed prefix rows."
+      )
+    step.assistant_routed_experts = own
+    expected_start += len(prefill)
+    prev_step, prev_own = step, own
+  return prompt_routed_experts
 
 
 def create_trajectory_metadata(

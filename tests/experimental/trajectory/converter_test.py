@@ -326,6 +326,153 @@ class CreateAgentStepTest(trajectory_testing.TrajectoryTestCase):
     restored_step = converter.to_tunix_step(agent_step=agent_step)
     self.assertEqual(restored_step.info.get("policy_version"), policy_version)
 
+  def _routed_trajectory(
+      self,
+      *,
+      turn_1_start: int = 3,
+      turn_1_num_context: int = 4,
+  ) -> tuple[trajectory_lib.TunixTrajectory, np.ndarray, np.ndarray]:
+    """Builds a 2-turn MoE trajectory the way the collector records it.
+
+    Prompt: 2 tokens. Turn 0: 3 assistant tokens (1 routed in turn 0, a 2-token
+    tail routed in turn 1) + 2 env tokens. Turn 1: 2 assistant tokens (1 routed,
+    the last one never prefilled).
+
+    Args:
+      turn_1_start: `prefill_start` recorded for turn 1.
+      turn_1_num_context: `prefill_num_context` recorded for turn 1.
+
+    Returns:
+      The trajectory and the raw prefill arrays of turns 0 and 1.
+    """
+    rows = lambda start, n: np.arange(start, start + n * 4).reshape(n, 2, 2)
+    prefill_0 = rows(0, 3)  # prompt (2) + turn 0 assistant (1)
+    prefill_1 = rows(100, 5)  # turn 0 tail (2) + env (2) + turn 1 asst (1)
+    step_0 = agent_types.Step(
+        model_response="turn 0",
+        observation="obs 0",
+        assistant_tokens=np.array([10, 11, 12]),
+        assistant_masks=np.array([1, 1, 1]),
+        env_tokens=np.array([20, 21]),
+        env_masks=np.array([0, 0]),
+    )
+    step_1 = agent_types.Step(
+        model_response="turn 1",
+        observation="obs 1",
+        done=True,
+        assistant_tokens=np.array([30, 31]),
+        assistant_masks=np.array([1, 1]),
+    )
+    agent_step_0 = converter.create_agent_step(
+        step_0,
+        tunix_step_id=0,
+        prefill_routed_experts=prefill_0,
+        prefill_start=0,
+        prefill_num_context=2,
+    )
+    agent_step_1 = converter.create_agent_step(
+        step_1,
+        tunix_step_id=1,
+        prefill_routed_experts=prefill_1,
+        prefill_start=turn_1_start,
+        prefill_num_context=turn_1_num_context,
+    )
+    traj = trajectory_lib.TunixTrajectory(
+        trajectory_id="traj_moe",
+        agent=trajectory_lib.Agent(name="agent", version="1.0"),
+        status="SUCCEEDED",
+        steps=[
+            converter.create_task_step({"prompts": ["Solve MoE"]}),
+            agent_step_0,
+            converter.create_env_step(step_0, tunix_step_id=0),
+            agent_step_1,
+            converter.create_env_step(step_1, tunix_step_id=1),
+        ],
+    )
+    return traj, prefill_0, prefill_1
+
+  def test_create_agent_step_stores_raw_prefill_routed_experts(self):
+    traj, prefill_0, prefill_1 = self._routed_trajectory()
+    agent_step_0, agent_step_1 = traj.steps[1], traj.steps[3]
+    np.testing.assert_array_equal(
+        agent_step_0.prefill_routed_experts, prefill_0
+    )
+    self.assertEqual(agent_step_0.prefill_start, 0)
+    self.assertEqual(agent_step_0.prefill_num_context, 2)
+    np.testing.assert_array_equal(
+        agent_step_1.prefill_routed_experts, prefill_1
+    )
+    self.assertEqual(agent_step_1.prefill_start, 3)
+    self.assertEqual(agent_step_1.prefill_num_context, 4)
+
+  def test_to_tunix_trajectory_splits_prefill_routed_experts(self):
+    traj, prefill_0, prefill_1 = self._routed_trajectory()
+    restored = converter.to_tunix_trajectory(traj.to_json_dict())
+    np.testing.assert_array_equal(restored.prompt_routed_experts, prefill_0[:2])
+    self.assertLen(restored.steps, 2)
+    np.testing.assert_array_equal(
+        restored.steps[0].assistant_routed_experts,
+        np.concatenate([prefill_0[2:], prefill_1[:2]]),
+    )
+    np.testing.assert_array_equal(
+        restored.steps[0].env_routed_experts, prefill_1[2:4]
+    )
+    # The last sampled token of the final turn was never prefilled.
+    np.testing.assert_array_equal(
+        restored.steps[1].assistant_routed_experts, prefill_1[4:]
+    )
+    self.assertIsNone(restored.steps[1].env_routed_experts)
+
+  def test_to_tunix_trajectory_truncated_to_previous_turn_splits_prefix_cleanly(
+      self,
+  ):
+    traj, prefill_0, _ = self._routed_trajectory()
+    traj.steps = traj.steps[:3]
+    restored = converter.to_tunix_trajectory(traj.to_json_dict())
+    np.testing.assert_array_equal(restored.prompt_routed_experts, prefill_0[:2])
+    self.assertLen(restored.steps, 1)
+    np.testing.assert_array_equal(
+        restored.steps[0].assistant_routed_experts, prefill_0[2:]
+    )
+    self.assertIsNone(restored.steps[0].env_routed_experts)
+
+  def test_to_tunix_trajectory_without_routing_leaves_fields_unset(self):
+    traj, _, _ = self._routed_trajectory()
+    for step in (traj.steps[1], traj.steps[3]):
+      step.prefill_routed_experts = None
+      step.prefill_start = None
+      step.prefill_num_context = None
+    restored = converter.to_tunix_trajectory(traj)
+    self.assertIsNone(restored.prompt_routed_experts)
+    for step in restored.steps:
+      self.assertIsNone(step.assistant_routed_experts)
+      self.assertIsNone(step.env_routed_experts)
+
+  def test_to_tunix_trajectory_rejects_inconsistent_prefill_routing(self):
+    for kwargs, error in (
+        (dict(turn_1_start=4), "not contiguous"),
+        (dict(turn_1_num_context=1), "smaller than"),
+        (dict(turn_1_num_context=3), "routed rows"),
+    ):
+      with self.subTest(error=error):
+        traj, _, _ = self._routed_trajectory(**kwargs)
+        with self.assertRaisesRegex(ValueError, error):
+          converter.to_tunix_trajectory(traj)
+
+    with self.subTest(error="missing prefill routing"):
+      traj, _, _ = self._routed_trajectory()
+      traj.steps[3].prefill_routed_experts = None
+      traj.steps[3].prefill_start = None
+      traj.steps[3].prefill_num_context = None
+      with self.assertRaisesRegex(ValueError, "missing prefill routing"):
+        converter.to_tunix_trajectory(traj)
+
+    with self.subTest(error="routed prefix rows"):
+      traj, _, _ = self._routed_trajectory()
+      traj.steps[3].assistant_tokens = np.array([], dtype=np.int32)
+      with self.assertRaisesRegex(ValueError, "routed prefix rows"):
+        converter.to_tunix_trajectory(traj)
+
 
 class CreateEnvStepTest(trajectory_testing.TrajectoryTestCase):
 

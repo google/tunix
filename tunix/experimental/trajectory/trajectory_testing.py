@@ -170,6 +170,9 @@ TUNIX_AGENT_STEP_1: Final[trajectory_lib.TunixAgentStep] = (
         assistant_masks=np.array([1, 1]),
         logprobs=np.array([-0.5, -0.2]),
         policy_version=3,
+        prefill_routed_experts=np.array([[[1, 2]], [[3, 4]], [[5, 6]]]),
+        prefill_start=0,
+        prefill_num_context=1,
     )
 )
 

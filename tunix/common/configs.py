@@ -125,6 +125,11 @@ class RolloutConfig:
   # a backend that supports capture only; a no-op otherwise.
   return_routed_experts: bool = False
 
+  # Whether to persist captured prefill MoE routed_experts into the trajectory
+  # store alongside each agent step. Defaults to False to avoid multi-megabyte
+  # tensor writes unless explicitly opted in.
+  store_routed_experts: bool = False
+
   # vLLM specific rollout configs.
 
   # Whether to run rollout in vLLM server mode or batch inference mode.

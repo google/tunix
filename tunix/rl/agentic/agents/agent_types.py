@@ -160,6 +160,8 @@ class Trajectory:
     status: Status of the trajectory (e.g., "success", "truncated").
     env_time: Dictionary of environment latency metrics (reset_latency: float,
       step_latency: list[float] ordered by step index, close_latency: float).
+    prompt_routed_experts: Optional MoE routed expert IDs for the prompt tokens,
+      shape (prompt_len, num_layers, top_k).
   """
 
   task: Any = None
@@ -175,6 +177,7 @@ class Trajectory:
       default_factory=list
   )
   prompt_length: int | None = None
+  prompt_routed_experts: np.ndarray | None = None
 
   def to_dict(self) -> dict[str, Any]:
     """Convert trajectory to dictionary format for serialization.
@@ -196,6 +199,10 @@ class Trajectory:
     if self.prompt_length is not None:
       result["prompt_tokens"] = np.array(self.prompt_tokens, copy=True)
       result["prompt_length"] = self.prompt_length
+    if self.prompt_routed_experts is not None:
+      result["prompt_routed_experts"] = np.array(
+          self.prompt_routed_experts, copy=True
+      )
     return result
 
 

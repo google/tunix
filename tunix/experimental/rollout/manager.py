@@ -75,6 +75,11 @@ class RolloutManager:
         if config is not None
         else False
     )
+    self._store_routed_experts: bool = (
+        bool(getattr(config, "store_routed_experts", False))
+        if config is not None
+        else False
+    )
     self._policy_version: int = 0
     if sampler is None:
       sampler_type = getattr(config, "sampler_type", "vanilla")
@@ -243,6 +248,8 @@ class RolloutManager:
     collector_kwargs = {}
     if self.trajectory_store is not None:
       collector_kwargs["trajectory_store"] = self.trajectory_store
+    if self._store_routed_experts:
+      collector_kwargs["store_routed_experts"] = True
     collector = collector_lib.TrajectoryCollectorEngine(
         traj_id=traj_id,
         request=request,

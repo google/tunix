@@ -114,6 +114,7 @@ class TrajectoryCollectorEngine:
       partial_rollout: bool = False,
       policy_version_fn: Callable[[], int] | None = None,
       trajectory_store: Optional[store.TrajectoryWriter] = None,
+      store_routed_experts: bool = False,
   ):
     if (
         sampler is None
@@ -134,6 +135,7 @@ class TrajectoryCollectorEngine:
     self.tokenizer = tokenizer
     self.chat_parser = chat_parser
     self.trajectory_store = trajectory_store
+    self.store_routed_experts: bool = bool(store_routed_experts)
     self.is_paused: bool = False
     self.is_cancelled: bool = False
     self.is_done: bool = False
@@ -334,6 +336,7 @@ class TrajectoryCollectorEngine:
         policy_version=self.request.target_policy_version,
         trajectory_store=self.trajectory_store,
         metadata=self.metadata,
+        store_routed_experts=self.store_routed_experts,
     )
     self._inner_engine = inner_engine
     rl_traj = await inner_engine.collect(mode="Token")

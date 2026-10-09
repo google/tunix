@@ -1649,6 +1649,11 @@ class AtifProjectionTest(trajectory_testing.TrajectoryTestCase):
                 "assistant_masks": [1, 1],
                 "logprobs": [-0.5, -0.2],
                 "policy_version": 3,
+                "prefill_routed_experts": trajectory._serialize_int_3d_array(
+                    [[[1, 2]], [[3, 4]], [[5, 6]]]
+                ),
+                "prefill_start": 0,
+                "prefill_num_context": 1,
             },
         },
     )
@@ -1745,6 +1750,9 @@ class AtifProjectionTest(trajectory_testing.TrajectoryTestCase):
             "assistant_tokens": None,
             "assistant_masks": None,
             "logprobs": None,
+            "prefill_routed_experts": None,
+            "prefill_start": None,
+            "prefill_num_context": None,
             "extra": None,
         }
     )
@@ -1866,7 +1874,12 @@ class AtifRehydrationTest(trajectory_testing.TrajectoryTestCase):
           testcase_name="agent_step",
           step_cls=trajectory.TunixAgentStep,
           tunix_step=trajectory_testing.TUNIX_AGENT_STEP_1,
-          array_field_names=("assistant_tokens", "assistant_masks", "logprobs"),
+          array_field_names=(
+              "assistant_tokens",
+              "assistant_masks",
+              "logprobs",
+              "prefill_routed_experts",
+          ),
       ),
       dict(
           testcase_name="env_step",
@@ -1897,6 +1910,9 @@ class AtifRehydrationTest(trajectory_testing.TrajectoryTestCase):
             "assistant_tokens": None,
             "assistant_masks": None,
             "logprobs": None,
+            "prefill_routed_experts": None,
+            "prefill_start": None,
+            "prefill_num_context": None,
             "extra": None,
         }
     )
@@ -2218,6 +2234,162 @@ class AtifRehydrationTest(trajectory_testing.TrajectoryTestCase):
 
     with self.assertRaisesRegex(ValueError, expected_error):
       step_cls.from_atif_step(atif_step)
+
+
+class Int3DArraySerializationTest(parameterized.TestCase):
+  """Tests compact base64 binary serialization and validation for Int3DArray."""
+
+  def test_int_3d_array_serializes_to_base64_blob_and_round_trips(self):
+    arr = np.arange(24, dtype=np.int16).reshape(3, 4, 2)
+    step = trajectory.TunixAgentStep(
+        step_id=0,
+        source=trajectory.Source.AGENT,
+        message="routed",
+        prefill_routed_experts=arr,
+        prefill_start=0,
+        prefill_num_context=1,
+    )
+
+    dumped = step.model_dump(mode="json")
+    blob = dumped["prefill_routed_experts"]
+    self.assertEqual(blob["shape"], [3, 4, 2])
+    self.assertEqual(blob["dtype"], "int16")
+    self.assertIsInstance(blob["data"], str)
+
+    restored = trajectory.TunixAgentStep.model_validate(dumped)
+    self.assertIsInstance(restored.prefill_routed_experts, np.ndarray)
+    self.assertEqual(restored.prefill_routed_experts.dtype, np.int16)
+    np.testing.assert_array_equal(restored.prefill_routed_experts, arr)
+
+  def test_int_3d_array_empty_shape_round_trips(self):
+    arr = np.zeros((0, 4, 2), dtype=np.int16)
+    step = trajectory.TunixAgentStep(
+        step_id=0,
+        source=trajectory.Source.AGENT,
+        message="empty_routed",
+        prefill_routed_experts=arr,
+        prefill_start=0,
+        prefill_num_context=0,
+    )
+    dumped = step.model_dump(mode="json")
+    self.assertEqual(
+        dumped["prefill_routed_experts"],
+        {"shape": [0, 4, 2], "dtype": "int16", "data": ""},
+    )
+    restored = trajectory.TunixAgentStep.model_validate(dumped)
+    np.testing.assert_array_equal(restored.prefill_routed_experts, arr)
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="wrong_ndim",
+          bad_value=np.zeros((3, 4), dtype=np.int16),
+          expected_error="Expected a 3D array",
+      ),
+      dict(
+          testcase_name="float_array",
+          bad_value=np.zeros((1, 2, 2), dtype=np.float32),
+          expected_error="Expected an integer array",
+      ),
+      dict(
+          testcase_name="out_of_int16_range",
+          bad_value=[[[40000, 1]]],
+          expected_error="exceed int16 range",
+      ),
+      dict(
+          testcase_name="bad_blob_keys",
+          bad_value={"shape": [1, 1, 1], "dtype": "int16"},
+          expected_error="Invalid serialized Int3DArray keys",
+      ),
+      dict(
+          testcase_name="bad_blob_dtype",
+          bad_value={"shape": [1, 1, 1], "dtype": "int32", "data": "AAAA"},
+          expected_error="Unsupported Int3DArray dtype",
+      ),
+      dict(
+          testcase_name="bad_blob_shape",
+          bad_value={"shape": [1, -1, 1], "dtype": "int16", "data": ""},
+          expected_error="Invalid Int3DArray shape",
+      ),
+      dict(
+          testcase_name="bad_base64",
+          bad_value={"shape": [1, 1, 1], "dtype": "int16", "data": "%%%"},
+          expected_error="Failed to decode Int3DArray blob",
+      ),
+      dict(
+          testcase_name="byte_length_mismatch",
+          bad_value={"shape": [2, 1, 1], "dtype": "int16", "data": "AA=="},
+          expected_error="does not match shape",
+      ),
+  )
+  def test_int_3d_array_rejects_invalid_inputs(self, bad_value, expected_error):
+    with self.assertRaisesRegex(ValueError, expected_error):
+      trajectory.TunixAgentStep(
+          step_id=0,
+          source=trajectory.Source.AGENT,
+          message="invalid",
+          prefill_routed_experts=bad_value,
+          prefill_start=0,
+          prefill_num_context=0,
+      )
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="missing_start_and_num_context",
+          kwargs=dict(
+              prefill_routed_experts=np.zeros((2, 2, 1), dtype=np.int16)
+          ),
+          expected_error="either all None or all set",
+      ),
+      dict(
+          testcase_name="missing_routed_experts",
+          kwargs=dict(prefill_start=0, prefill_num_context=1),
+          expected_error="either all None or all set",
+      ),
+      dict(
+          testcase_name="negative_prefill_start",
+          kwargs=dict(
+              prefill_routed_experts=np.zeros((2, 2, 1), dtype=np.int16),
+              prefill_start=-1,
+              prefill_num_context=1,
+          ),
+          expected_error="prefill_start must be >= 0",
+      ),
+      dict(
+          testcase_name="num_context_exceeds_rows",
+          kwargs=dict(
+              prefill_routed_experts=np.zeros((2, 2, 1), dtype=np.int16),
+              prefill_start=0,
+              prefill_num_context=3,
+          ),
+          expected_error="prefill_num_context must be in",
+      ),
+  )
+  def test_agent_step_rejects_invalid_prefill_metadata(
+      self, kwargs, expected_error
+  ):
+    with self.assertRaisesRegex(ValueError, expected_error):
+      trajectory.TunixAgentStep(
+          step_id=0,
+          source=trajectory.Source.AGENT,
+          message="bad_prefill",
+          **kwargs,
+      )
+
+  def test_add_step_rejects_prefill_fields_for_non_agent_source(self):
+    traj = trajectory.TunixTrajectory(
+        session_id="s1",
+        agent=trajectory.Agent(name="a", version="1"),
+    )
+    with self.assertRaisesRegex(
+        ValueError, "only valid when source is 'agent'"
+    ):
+      traj.add_step(
+          trajectory.Source.USER,
+          "env",
+          prefill_routed_experts=np.zeros((1, 2, 1), dtype=np.int16),
+          prefill_start=0,
+          prefill_num_context=0,
+      )
 
 
 if __name__ == "__main__":
