@@ -19,6 +19,9 @@ from unittest import mock
 from absl.testing import absltest
 import jax.numpy as jnp
 import numpy as np
+from tunix.experimental.trajectory import converter as converter_lib
+from tunix.experimental.trajectory import in_memory_store
+from tunix.experimental.trajectory import trajectory as trajectory_lib
 from tunix.perf.experimental import constants as perf_constants
 from tunix.perf.experimental import tracer as perf_tracer_v2
 from tunix.rl.agentic import utils
@@ -1339,6 +1342,239 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         )
     # The check fires before the offending turn reaches `env.step`.
     self.mock_env.step.assert_not_called()
+
+  @mock.patch.object(utils, 'tokenize_and_generate_masks')
+  def test_trajectory_store_writes(self, mock_convert):
+    mock_convert.side_effect = [
+        ([101], [1]),  # prompt tokens
+        ([301, 302], [1, 1]),  # env tokens 1
+        ([303, 304], [1, 1]),  # env tokens 2
+    ]
+    self.mock_env.final_reward_fn = lambda: 0.5
+    store = in_memory_store.InMemoryTrajectoryStore(
+        metadata_cls=trajectory_lib.TunixTrajectoryMetadata
+    )
+    metadata = converter_lib.create_trajectory_metadata(
+        traj_id='traj_test_123',
+    )
+    self.mock_agent.trajectory.task = {'prompts': ['Solve math']}
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+        tokenizer=self.mock_tokenizer,
+        chat_parser=self.mock_chat_parser,
+        trajectory_store=store,
+        metadata=metadata,
+        policy_version=42,
+    )
+    with (
+        mock.patch.object(
+            store, 'add_step', wraps=store.add_step
+        ) as mock_add_step,
+        mock.patch.object(store, 'flush', wraps=store.flush) as mock_flush,
+        mock.patch.object(store, 'close', wraps=store.close) as mock_close,
+    ):
+      traj = asyncio.run(self._run_collect(engine, mode='Trajectory'))
+      # Task step plus one agent and one env step per turn, plus one upsert of
+      # the terminal env step when _append_final_reward folds in final_reward.
+      self.assertEqual(mock_add_step.call_count, 6)
+      mock_flush.assert_not_called()
+      mock_close.assert_not_called()
+
+    # Verify trajectory store contains the written steps via public API
+    trajs = store.get_trajectories(['traj_test_123'])
+    self.assertLen(trajs, 1)
+    stored_traj = trajs[0]
+    self.assertLen(stored_traj.steps, 5)
+    self.assertEqual(stored_traj.steps[0].step_id, 0)
+    self.assertEqual(stored_traj.steps[0].message, 'Solve math')
+    # Turn 0 agent step (step_id=1) and env step (step_id=2)
+    self.assertIsNotNone(stored_traj.steps[1].assistant_tokens)
+    self.assertIsNotNone(stored_traj.steps[1].assistant_masks)
+    self.assertEqual(stored_traj.steps[2].reward, 1.0)
+    self.assertIsNotNone(stored_traj.steps[2].env_tokens)
+    self.assertIsNotNone(stored_traj.steps[2].env_masks)
+    # Turn 1 agent step (step_id=3) and env step (step_id=4, with final_reward)
+    self.assertEqual(stored_traj.steps[4].reward, 2.5)
+    self.assertTrue(stored_traj.steps[4].done)
+    metas = store.get_trajectories_metadata()
+    self.assertLen(metas, 1)
+    self.assertEqual(metas[0].trajectory_id, 'traj_test_123')
+    self.assertEqual(metas[0].status, 'SUCCEEDED')
+    self.assertEqual(metas[0].total_reward, 3.5)
+    self.assertEqual(metas[0].target_policy_versions, [42])
+    self.assertEqual([step.reward for step in traj.steps], [1.0, 2.5])
+    self.assertEqual(
+        [
+            step.reward
+            for step in converter_lib.to_tunix_trajectory(stored_traj).steps
+        ],
+        [step.reward for step in traj.steps],
+    )
+
+  @mock.patch.object(utils, 'tokenize_and_generate_masks')
+  def test_trajectory_store_masked_out_skips_final_reward(self, mock_convert):
+    mock_convert.return_value = ([101], [1])
+    self.mock_env.max_steps = 1
+    store = in_memory_store.InMemoryTrajectoryStore(
+        metadata_cls=trajectory_lib.TunixTrajectoryMetadata
+    )
+    metadata = converter_lib.create_trajectory_metadata(
+        traj_id='traj_masked_out',
+    )
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+        tokenizer=self.mock_tokenizer,
+        chat_parser=self.mock_chat_parser,
+        trajectory_store=store,
+        metadata=metadata,
+        overlong_filter=True,
+    )
+
+    traj = asyncio.run(self._run_collect(engine, mode='Trajectory'))
+
+    self.assertEqual(
+        traj.status, agent_types.TrajectoryStatus.MAX_STEPS_REACHED
+    )
+    self.mock_final_reward_fn.assert_not_called()
+    (meta,) = store.get_trajectories_metadata(['traj_masked_out'])
+    self.assertEqual(meta.status, 'MAX_STEPS_REACHED')
+    self.assertEqual(meta.total_reward, 1.0)
+
+  @mock.patch.object(utils, 'tokenize_and_generate_masks')
+  def test_trajectory_store_writes_fallback_step_zero(self, mock_convert):
+    mock_convert.side_effect = [
+        ([101], [1]),
+        ([301, 302], [1, 1]),
+        ([303, 304], [1, 1]),
+    ]
+    store = in_memory_store.InMemoryTrajectoryStore(
+        metadata_cls=trajectory_lib.TunixTrajectoryMetadata
+    )
+    metadata = converter_lib.create_trajectory_metadata(
+        traj_id='traj_fallback_0',
+    )
+    # Task dict without 'prompts' or 'question' keys still writes step_id=0
+    self.mock_env.task = {'some': 'task'}
+    self.mock_agent.trajectory.task = {'some': 'task'}
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+        tokenizer=self.mock_tokenizer,
+        chat_parser=self.mock_chat_parser,
+        trajectory_store=store,
+        metadata=metadata,
+    )
+    asyncio.run(self._run_collect(engine, mode='Trajectory'))
+    trajs = store.get_trajectories(['traj_fallback_0'])
+    self.assertLen(trajs, 1)
+    self.assertEqual(trajs[0].steps[0].step_id, 0)
+    self.assertLen(trajs[0].steps, 5)
+
+  @mock.patch.object(utils, 'tokenize_and_generate_masks')
+  def test_close_called_when_one_step_raises_exception(self, mock_convert):
+    mock_convert.return_value = ([101], [1])
+    store = in_memory_store.InMemoryTrajectoryStore(
+        metadata_cls=trajectory_lib.TunixTrajectoryMetadata
+    )
+    metadata = converter_lib.create_trajectory_metadata(
+        traj_id='traj_err_close',
+    )
+    self.mock_env.step.side_effect = RuntimeError('env boom')
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+        tokenizer=self.mock_tokenizer,
+        chat_parser=self.mock_chat_parser,
+        trajectory_store=store,
+        metadata=metadata,
+    )
+    with self.assertRaisesRegex(RuntimeError, 'env boom'):
+      asyncio.run(self._run_collect(engine, mode='Trajectory'))
+
+    self.mock_env.close.assert_called_once()
+    metas = store.get_trajectories_metadata(['traj_err_close'])
+    self.assertEqual(metas[0].status, 'FAILED')
+    trajs = store.get_trajectories(['traj_err_close'])
+    self.assertLen(trajs[0].steps, 3)
+    self.assertTrue(trajs[0].steps[2].done)
+
+  @mock.patch.object(utils, 'tokenize_and_generate_masks')
+  def test_close_called_when_collect_cancelled_sets_cancelled_status(
+      self, mock_convert
+  ):
+    mock_convert.return_value = ([101], [1])
+    store = in_memory_store.InMemoryTrajectoryStore(
+        metadata_cls=trajectory_lib.TunixTrajectoryMetadata
+    )
+    metadata = converter_lib.create_trajectory_metadata(
+        traj_id='traj_cancel_close',
+    )
+
+    async def _slow_model_call(*args, **kwargs):
+      del args, kwargs
+      await asyncio.sleep(10.0)
+
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=_slow_model_call,
+        tokenizer=self.mock_tokenizer,
+        chat_parser=self.mock_chat_parser,
+        trajectory_store=store,
+        metadata=metadata,
+    )
+
+    async def _cancel_collect():
+      task = asyncio.create_task(engine.collect(mode='Trajectory'))
+      await asyncio.sleep(0.05)
+      task.cancel()
+      with self.assertRaises(asyncio.CancelledError):
+        await task
+
+    asyncio.run(_cancel_collect())
+
+    self.mock_env.close.assert_called_once()
+    metas = store.get_trajectories_metadata(['traj_cancel_close'])
+    self.assertEqual(metas[0].status, 'CANCELLED')
+
+  @mock.patch.object(utils, 'tokenize_and_generate_masks')
+  def test_trajectory_store_errors_do_not_terminate_collect(self, mock_convert):
+    mock_convert.side_effect = [
+        ([101], [1]),
+        ([301, 302], [1, 1]),
+        ([303, 304], [1, 1]),
+    ]
+    store = in_memory_store.InMemoryTrajectoryStore(
+        metadata_cls=trajectory_lib.TunixTrajectoryMetadata
+    )
+    metadata = converter_lib.create_trajectory_metadata(
+        traj_id='traj_store_err',
+    )
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+        tokenizer=self.mock_tokenizer,
+        chat_parser=self.mock_chat_parser,
+        trajectory_store=store,
+        metadata=metadata,
+    )
+    with mock.patch.object(
+        converter_lib,
+        'create_agent_step',
+        side_effect=ValueError('conversion error'),
+    ):
+      traj = asyncio.run(self._run_collect(engine, mode='Trajectory'))
+    self.assertEqual(
+        traj.status,
+        agent_types.TrajectoryStatus.SUCCEEDED,
+    )
 
 
 class _FreshTextTokenizer:

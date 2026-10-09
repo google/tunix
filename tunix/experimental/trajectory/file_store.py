@@ -10,7 +10,7 @@ from absl import logging
 from etils import epath
 import pydantic
 from tunix.experimental.trajectory import async_writer
-from tunix.experimental.trajectory import store
+from tunix.experimental.trajectory import base_store as store
 from tunix.experimental.trajectory import trajectory as trajectory_lib
 
 MetadataT = TypeVar("MetadataT", bound=trajectory_lib.TrajectoryMetadata)

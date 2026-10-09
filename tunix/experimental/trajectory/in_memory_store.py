@@ -3,7 +3,7 @@
 import collections
 from typing import Any, ClassVar, Mapping, TypeVar
 
-from tunix.experimental.trajectory import store
+from tunix.experimental.trajectory import base_store as store
 from tunix.experimental.trajectory import trajectory as trajectory_lib
 
 MetadataT = TypeVar("MetadataT", bound=trajectory_lib.TrajectoryMetadata)

@@ -11,9 +11,9 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.dialects import sqlite
 from tunix.experimental.trajectory import async_writer
+from tunix.experimental.trajectory import base_store as store
 from tunix.experimental.trajectory import db_engine
 from tunix.experimental.trajectory import schema
-from tunix.experimental.trajectory import store
 from tunix.experimental.trajectory import trajectory as trajectory_lib
 
 MetadataT = TypeVar("MetadataT", bound=trajectory_lib.TrajectoryMetadata)
