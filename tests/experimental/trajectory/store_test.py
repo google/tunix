@@ -15,6 +15,7 @@
 """Tests for TrajectoryStore.from_config dispatch."""
 
 import tempfile
+from typing import Generic, TypeVar
 
 from absl.testing import absltest
 from etils import epath
@@ -22,7 +23,6 @@ from tunix.experimental.trajectory import file_store
 from tunix.experimental.trajectory import in_memory_store
 from tunix.experimental.trajectory import sql_store
 from tunix.experimental.trajectory import store as store_lib
-from tunix.experimental.trajectory import store_testing
 from tunix.experimental.trajectory import trajectory as trajectory_lib
 
 
@@ -62,31 +62,6 @@ class BackendRegistrationTest(absltest.TestCase):
     finally:
       store_lib.TrajectoryStore._REGISTRY.pop("file_registration_test", None)
 
-  def test_store_rejects_non_metadata_cls_at_construction(self):
-    with self.assertRaisesRegex(TypeError, "TrajectoryMetadata subclass"):
-      in_memory_store.InMemoryTrajectoryStore(
-          metadata_cls=int  # pyrefly: ignore[bad-argument-type]
-      )
-
-  def test_store_rejects_unregistered_metadata_cls_at_construction(self):
-    with self.assertRaisesRegex(ValueError, "METADATA_TYPE"):
-      in_memory_store.InMemoryTrajectoryStore(
-          metadata_cls=store_testing.UnregisteredMetadata
-      )
-
-    class LocalMetadata(trajectory_lib.TrajectoryMetadata):
-      pass
-
-    with self.assertRaisesRegex(ValueError, "METADATA_TYPE"):
-      in_memory_store.InMemoryTrajectoryStore(metadata_cls=LocalMetadata)
-
-    class DynamicMeta(trajectory_lib.TrajectoryMetadata):
-      pass
-
-    DynamicMeta.METADATA_TYPE = "dynamic_type"
-    with self.assertRaisesRegex(ValueError, "METADATA_TYPE"):
-      in_memory_store.InMemoryTrajectoryStore(metadata_cls=DynamicMeta)
-
 
 class FromConfigTest(absltest.TestCase):
 
@@ -100,7 +75,6 @@ class FromConfigTest(absltest.TestCase):
         "backend": "file",
         "root_dir": str(self.tmp_dir),
         "run_id": "run_1",
-        "metadata_type": "base",
     }
     config.update(overrides)
     return config
@@ -111,7 +85,6 @@ class FromConfigTest(absltest.TestCase):
         "backend": "sql",
         "db_url": f"sqlite:///{self.tmp_dir / 'test.db'}",
         "run_id": "run_1",
-        "metadata_type": "base",
     }
     config.update(overrides)
     return config
@@ -137,9 +110,9 @@ class FromConfigTest(absltest.TestCase):
     self.assertEqual(store.root_dir, self.tmp_dir / "run_1")
     store.close()
 
-  def test_memory_backend_needs_only_metadata_type(self):
+  def test_memory_backend_needs_no_other_keys(self):
     store = store_lib.TrajectoryStore.from_config(
-        {"enabled": True, "backend": "memory", "metadata_type": "base"}
+        {"enabled": True, "backend": "memory"}
     )
     self.assertIsInstance(store, in_memory_store.InMemoryTrajectoryStore)
 
@@ -148,14 +121,6 @@ class FromConfigTest(absltest.TestCase):
     self.assertIsInstance(store, sql_store.SqlTrajectoryStore)
     self.assertEqual(store.run_id, "run_1")
     store.close()
-
-  def test_missing_metadata_type_raises(self):
-    # Required for the same reason `metadata_cls` is: a store must never
-    # silently read a metadata type other than the one its run was meant for.
-    config = self._file_config()
-    del config["metadata_type"]
-    with self.assertRaisesRegex(ValueError, "'metadata_type'"):
-      store_lib.TrajectoryStore.from_config(config)
 
   def test_unknown_backend_raises(self):
     with self.assertRaisesRegex(ValueError, "Unknown Trajectory Store"):
@@ -207,14 +172,13 @@ class FromConfigTest(absltest.TestCase):
       BACKEND = "custom_test_backend"
 
       @classmethod
-      def _from_config(cls, config, *, metadata_cls):
-        return cls(metadata_cls=metadata_cls)
+      def _from_config(cls, config):
+        return cls()
 
       def to_config(self):
         return {
             "enabled": True,
             "backend": self.BACKEND,
-            "metadata_type": self._metadata_type,
         }
 
       def get_trajectories_metadata(self, trajectory_ids=None):
@@ -239,91 +203,30 @@ class FromConfigTest(absltest.TestCase):
       store = store_lib.TrajectoryStore.from_config({
           "enabled": True,
           "backend": "custom_test_backend",
-          "metadata_type": "base",
       })
       self.assertIsInstance(store, CustomStore)
     finally:
       store_lib.TrajectoryStore._REGISTRY.pop("custom_test_backend", None)
 
-  def test_unknown_metadata_type_raises(self):
+  def test_tunix_trajectory_store_from_config_binds_tunix_metadata(self):
+    store = store_lib.TunixTrajectoryStore.from_config(self._file_config())
+    self.assertIsInstance(store, file_store.FileTrajectoryStore)
+    self.assertIs(
+        store._metadata_cls,  # pylint: disable=protected-access
+        trajectory_lib.TunixTrajectoryMetadata,
+    )
     with self.assertRaisesRegex(
-        ValueError, "Unknown Trajectory Store metadata_type"
+        TypeError,
+        "FileTrajectoryStore is bound to metadata type"
+        " TunixTrajectoryMetadata, got TrajectoryMetadata",
     ):
-      store_lib.TrajectoryStore.from_config(
-          self._file_config(metadata_type="nonexistent_type")
-      )
-
-  def test_custom_metadata_auto_registration_via_metadata_type(self):
-    class AutoCustomMetadata(trajectory_lib.TrajectoryMetadata):
-      METADATA_TYPE = "auto_custom"
-
-    try:
-      self.assertIs(
-          trajectory_lib.TrajectoryMetadata._REGISTRY.get("base"),
-          trajectory_lib.TrajectoryMetadata,
-      )
-      self.assertIs(
-          trajectory_lib.TrajectoryMetadata._REGISTRY.get("auto_custom"),
-          AutoCustomMetadata,
-      )
-      self.assertIs(
-          store_lib.TrajectoryStore._resolve_metadata_type_name("base"),  # pylint: disable=protected-access
-          trajectory_lib.TrajectoryMetadata,
-      )
-      self.assertIs(
-          store_lib.TrajectoryStore._resolve_metadata_type_name("auto_custom"),  # pylint: disable=protected-access
-          AutoCustomMetadata,
-      )
-      self.assertEqual(
-          store_lib.TrajectoryStore._get_metadata_type_name(
-              trajectory_lib.TrajectoryMetadata
-          ),  # pylint: disable=protected-access
-          "base",
-      )
-      self.assertEqual(
-          store_lib.TrajectoryStore._get_metadata_type_name(AutoCustomMetadata),  # pylint: disable=protected-access
-          "auto_custom",
-      )
-    finally:
-      trajectory_lib.TrajectoryMetadata._REGISTRY.pop("auto_custom", None)
-
-  def test_resolve_metadata_type_rejects_dotted_class_paths(self):
-    with self.assertRaisesRegex(
-        ValueError, "Unknown Trajectory Store metadata_type"
-    ):
-      store_lib.TrajectoryStore._resolve_metadata_type_name(
-          "tunix.experimental.trajectory.trajectory.TunixTrajectoryMetadata"
-      )
-
-    with self.assertRaisesRegex(
-        ValueError, "Unknown Trajectory Store metadata_type"
-    ):
-      store_lib.TrajectoryStore.from_config(
-          self._file_config(
-              metadata_type=(
-                  "tunix.experimental.trajectory.trajectory.TunixTrajectoryMetadata"
-              )
+      store.update_metadata(
+          trajectory_lib.TrajectoryMetadata(
+              trajectory_id="t_1",
+              agent=trajectory_lib.Agent(name="a", version="1.0"),
           )
       )
-
-  def test_get_metadata_type_name_rejects_unregistered_metadata_classes(self):
-    with self.assertRaisesRegex(ValueError, "METADATA_TYPE"):
-      store_lib.TrajectoryStore._get_metadata_type_name(
-          store_testing.UnregisteredMetadata
-      )
-
-    class DynamicMeta(trajectory_lib.TrajectoryMetadata):
-      pass
-
-    DynamicMeta.METADATA_TYPE = "dynamic_type"
-    with self.assertRaisesRegex(ValueError, "METADATA_TYPE"):
-      store_lib.TrajectoryStore._get_metadata_type_name(DynamicMeta)
-
-    class LocalMetadata(trajectory_lib.TrajectoryMetadata):
-      pass
-
-    with self.assertRaisesRegex(ValueError, "METADATA_TYPE"):
-      store_lib.TrajectoryStore._get_metadata_type_name(LocalMetadata)
+    store.close()
 
 
 class GenericTypeParametersTest(absltest.TestCase):
@@ -374,17 +277,13 @@ class GenericTypeParametersTest(absltest.TestCase):
 
   def test_instances_satisfy_protocols_and_abc(self) -> None:
     """Verifies protocol and ABC conformance on instantiated instances."""
-    mem = in_memory_store.InMemoryTrajectoryStore(
-        metadata_cls=trajectory_lib.TrajectoryMetadata
-    )
+    mem = in_memory_store.InMemoryTrajectoryStore()
     self.assertIsInstance(mem, store_lib.TrajectoryStore)
     self.assertIsInstance(mem, store_lib.TrajectoryReader)
     self.assertIsInstance(mem, store_lib.TrajectoryWriter)
 
     tmp_dir = self.create_tempdir().full_path
-    f_store = file_store.FileTrajectoryStore(
-        root_dir=tmp_dir, metadata_cls=trajectory_lib.TrajectoryMetadata
-    )
+    f_store = file_store.FileTrajectoryStore(root_dir=tmp_dir)
     self.assertIsInstance(f_store, store_lib.TrajectoryStore)
     self.assertIsInstance(f_store, store_lib.TrajectoryReader)
     self.assertIsInstance(f_store, store_lib.TrajectoryWriter)
@@ -393,7 +292,6 @@ class GenericTypeParametersTest(absltest.TestCase):
     sql_s = sql_store.SqlTrajectoryStore(
         run_id="run_1",
         db_url=f"sqlite:///{tmp_dir}/store.db",
-        metadata_cls=trajectory_lib.TrajectoryMetadata,
     )
     self.assertIsInstance(sql_s, store_lib.TrajectoryStore)
     self.assertIsInstance(sql_s, store_lib.TrajectoryReader)
@@ -410,11 +308,263 @@ class GenericTypeParametersTest(absltest.TestCase):
 
     self.assertEmpty(ConcreteFileStore.__parameters__)
     tmp_dir = self.create_tempdir().full_path
-    c_store = ConcreteFileStore(
-        root_dir=tmp_dir, metadata_cls=trajectory_lib.TunixTrajectoryMetadata
-    )
+    c_store = ConcreteFileStore(root_dir=tmp_dir)
     self.assertIsInstance(c_store, store_lib.TrajectoryStore)
+    with self.assertRaisesRegex(
+        TypeError,
+        "ConcreteFileStore is bound to metadata type TunixTrajectoryMetadata,"
+        " got TrajectoryMetadata",
+    ):
+      c_store.update_metadata(
+          trajectory_lib.TrajectoryMetadata(
+              trajectory_id="t_1",
+              agent=trajectory_lib.Agent(name="a", version="1.0"),
+          )
+      )
     c_store.close()
+
+  def test_subscripted_store_binds_metadata_type_on_first_write(self) -> None:
+    """Verifies that Store[MetadataT]() rejects mismatched metadata on first write."""
+    mem = in_memory_store.InMemoryTrajectoryStore[
+        trajectory_lib.TunixTrajectoryMetadata
+    ]()
+    with self.assertRaisesRegex(
+        TypeError,
+        "InMemoryTrajectoryStore is bound to metadata type"
+        " TunixTrajectoryMetadata, got TrajectoryMetadata",
+    ):
+      mem.update_metadata(
+          trajectory_lib.TrajectoryMetadata(
+              trajectory_id="t_1",
+              agent=trajectory_lib.Agent(name="a", version="1.0"),
+          )
+      )
+
+  def test_subscripted_store_binds_metadata_type_on_read(self) -> None:
+    """Verifies that Store[MetadataT]() rejects mismatched metadata on read."""
+    tmp_dir = self.create_tempdir().full_path
+    writer = file_store.FileTrajectoryStore(root_dir=tmp_dir)
+    writer.add_step(
+        trajectory_lib.Step(
+            step_id=1, source=trajectory_lib.Source.AGENT, message="step"
+        ),
+        trajectory_lib.TrajectoryMetadata(
+            trajectory_id="t_1",
+            agent=trajectory_lib.Agent(name="a", version="1.0"),
+        ),
+    )
+    writer.close()
+
+    reader = file_store.FileTrajectoryStore[
+        trajectory_lib.TunixTrajectoryMetadata
+    ](root_dir=tmp_dir)
+    try:
+      with self.assertRaisesRegex(
+          TypeError,
+          "FileTrajectoryStore is bound to metadata type"
+          " TunixTrajectoryMetadata, got TrajectoryMetadata",
+      ):
+        reader.get_trajectories_metadata(["t_1"])
+      with self.assertRaisesRegex(
+          TypeError,
+          "FileTrajectoryStore is bound to metadata type"
+          " TunixTrajectoryMetadata, got TrajectoryMetadata",
+      ):
+        reader.get_trajectories(["t_1"])
+    finally:
+      reader.close()
+
+  def test_multi_level_store_subclass_inherits_bound_metadata_cls(self) -> None:
+    """Verifies that a subclass of a bound store subclass inherits _metadata_cls."""
+
+    class BaseTunixStore(
+        in_memory_store.InMemoryTrajectoryStore[
+            trajectory_lib.TunixTrajectoryMetadata
+        ]
+    ):
+      pass
+
+    class DerivedTunixStore(BaseTunixStore):
+      pass
+
+    derived = DerivedTunixStore()
+    derived.update_metadata(
+        trajectory_lib.TunixTrajectoryMetadata(
+            trajectory_id="t_1",
+            agent=trajectory_lib.Agent(name="a", version="1.0"),
+        )
+    )
+    with self.assertRaisesRegex(
+        TypeError,
+        "DerivedTunixStore is bound to metadata type TunixTrajectoryMetadata,"
+        " got TrajectoryMetadata",
+    ):
+      derived.update_metadata(
+          trajectory_lib.TrajectoryMetadata(
+              trajectory_id="t_2",
+              agent=trajectory_lib.Agent(name="a", version="1.0"),
+          )
+      )
+
+  def test_multiple_inheritance_with_unrelated_generic_base(self) -> None:
+    """Verifies unrelated generic bases do not shadow the store's MetadataT."""
+    other_t = TypeVar("other_t")
+
+    class UnrelatedGenericMixin(Generic[other_t]):
+      pass
+
+    class MixedStore(
+        UnrelatedGenericMixin[trajectory_lib.TrajectoryMetadata],
+        in_memory_store.InMemoryTrajectoryStore[
+            trajectory_lib.TunixTrajectoryMetadata
+        ],
+    ):
+      pass
+
+    self.assertIs(
+        MixedStore._metadata_cls,
+        trajectory_lib.TunixTrajectoryMetadata,
+    )
+    store = MixedStore()
+    with self.assertRaisesRegex(
+        TypeError,
+        "MixedStore is bound to metadata type TunixTrajectoryMetadata,"
+        " got TrajectoryMetadata",
+    ):
+      store.update_metadata(
+          trajectory_lib.TrajectoryMetadata(
+              trajectory_id="t_1",
+              agent=trajectory_lib.Agent(name="a", version="1.0"),
+          )
+      )
+
+  def test_multiple_inheritance_with_multi_parameter_generic_store(
+      self,
+  ) -> None:
+    """Verifies _extract_metadata_cls resolves MetadataT across multiple type params."""
+    aux_t = TypeVar("aux_t")
+    meta_t = TypeVar("meta_t", bound=trajectory_lib.TrajectoryMetadata)
+
+    class MultiParamStore(
+        Generic[aux_t, meta_t],
+        in_memory_store.InMemoryTrajectoryStore[meta_t],
+    ):
+      pass
+
+    class ConcreteMultiParamStore(
+        MultiParamStore[int, trajectory_lib.TunixTrajectoryMetadata]
+    ):
+      pass
+
+    self.assertIs(
+        ConcreteMultiParamStore._metadata_cls,
+        trajectory_lib.TunixTrajectoryMetadata,
+    )
+
+    alias_instance = MultiParamStore[
+        str, trajectory_lib.TunixTrajectoryMetadata
+    ]()
+    with self.assertRaisesRegex(
+        TypeError,
+        "MultiParamStore is bound to metadata type TunixTrajectoryMetadata,"
+        " got TrajectoryMetadata",
+    ):
+      alias_instance.update_metadata(
+          trajectory_lib.TrajectoryMetadata(
+              trajectory_id="t_1",
+              agent=trajectory_lib.Agent(name="a", version="1.0"),
+          )
+      )
+
+  def test_multiple_inheritance_combining_backend_and_tunix_store(self) -> None:
+    """Verifies multiple inheritance with a non-alias bound store base."""
+
+    class TunixInMemoryStore(
+        in_memory_store.InMemoryTrajectoryStore,
+        store_lib.TunixTrajectoryStore,
+    ):
+      pass
+
+    self.assertIs(
+        TunixInMemoryStore._metadata_cls,
+        trajectory_lib.TunixTrajectoryMetadata,
+    )
+
+  def test_multiple_inheritance_conflicting_metadata_types_raises(self) -> None:
+    """Verifies conflicting TrajectoryMetadata bases raise TypeError."""
+    with self.assertRaisesRegex(
+        TypeError,
+        "Conflicting TrajectoryMetadata types in ConflictingStore:"
+        " TrajectoryMetadata, TunixTrajectoryMetadata",
+    ):
+
+      class ConflictingStore(  # pylint: disable=unused-variable
+          in_memory_store.InMemoryTrajectoryStore[
+              trajectory_lib.TrajectoryMetadata
+          ],
+          store_lib.TunixTrajectoryStore,
+      ):
+        pass
+
+  def test_separate_unparameterized_store_instances_bind_independently(
+      self,
+  ) -> None:
+    """Verifies instance-level metadata binding does not mutate class defaults."""
+    store_a = in_memory_store.InMemoryTrajectoryStore()
+    store_b = in_memory_store.InMemoryTrajectoryStore()
+
+    store_a.update_metadata(
+        trajectory_lib.TunixTrajectoryMetadata(
+            trajectory_id="t_1",
+            agent=trajectory_lib.Agent(name="a", version="1.0"),
+        )
+    )
+    store_b.update_metadata(
+        trajectory_lib.TrajectoryMetadata(
+            trajectory_id="t_2",
+            agent=trajectory_lib.Agent(name="a", version="1.0"),
+        )
+    )
+    self.assertIsNone(in_memory_store.InMemoryTrajectoryStore._metadata_cls)
+    self.assertLen(store_a.get_trajectories_metadata(), 1)
+    self.assertLen(store_b.get_trajectories_metadata(), 1)
+
+  def test_bound_store_rehydrates_its_bound_metadata_type_on_field_tie(
+      self,
+  ) -> None:
+    """Verifies a bound store resolves its own MetadataT when two subclasses share field names."""
+
+    class DuplicateMetaA(trajectory_lib.TrajectoryMetadata):
+      EXTENSIONS_KEY = "_dup_extensions"
+      shared_metric: int = 1
+
+    class DuplicateMetaB(trajectory_lib.TrajectoryMetadata):
+      EXTENSIONS_KEY = "_dup_extensions"
+      shared_metric: int = 2
+
+    self.assertIn(
+        DuplicateMetaA,
+        trajectory_lib.TrajectoryMetadata._SUBCLASS_FIELDS,  # pylint: disable=protected-access
+    )
+    tmp_dir = self.create_tempdir().full_path
+    writer = file_store.FileTrajectoryStore[DuplicateMetaB](root_dir=tmp_dir)
+    writer.update_metadata(
+        DuplicateMetaB(
+            trajectory_id="t_tie",
+            agent=trajectory_lib.Agent(name="a", version="1.0"),
+            shared_metric=7,
+        )
+    )
+    writer.close()
+
+    reader = file_store.FileTrajectoryStore[DuplicateMetaB](root_dir=tmp_dir)
+    try:
+      metas = reader.get_trajectories_metadata(["t_tie"])
+      self.assertLen(metas, 1)
+      self.assertIs(type(metas[0]), DuplicateMetaB)
+      self.assertEqual(metas[0].shared_metric, 7)
+    finally:
+      reader.close()
 
 
 class ExceptionsTest(absltest.TestCase):

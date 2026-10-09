@@ -335,9 +335,9 @@ class RolloutWorkerTrajectoryStoreTest(absltest.TestCase):
     self.assertIsInstance(
         worker.trajectory_store, file_store.FileTrajectoryStore
     )
-    self.assertEqual(
-        worker.trajectory_store.to_config()["metadata_type"],
-        trajectory_lib.TunixTrajectoryMetadata.METADATA_TYPE,
+    self.assertIs(
+        worker.trajectory_store._metadata_cls,  # pylint: disable=protected-access
+        trajectory_lib.TunixTrajectoryMetadata,
     )
     worker.stop()
 
@@ -415,7 +415,6 @@ class RolloutWorkerTrajectoryStoreTest(absltest.TestCase):
         "root_dir": str(tmp_dir),
         "run_id": "handshake_run",
     }
-    expected_cfg = {**input_cfg, "metadata_type": "tunix"}
     worker_enabled = _worker(
         config=rollout_worker.RolloutConfig(
             trajectory_store_config=input_cfg
@@ -423,11 +422,11 @@ class RolloutWorkerTrajectoryStoreTest(absltest.TestCase):
     )
     self.assertEqual(
         worker_enabled.info().resources["trajectory_store_config"],
-        expected_cfg,
+        input_cfg,
     )
     self.assertEqual(
         worker_enabled.initialize().metadata["trajectory_store_config"],
-        expected_cfg,
+        input_cfg,
     )
     worker_enabled.stop()
 

@@ -1040,6 +1040,8 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
     class _NoNewFields(trajectory.TrajectoryMetadata):
       """Adds behavior but no fields, and forgets to override."""
 
+      EXTENSIONS_KEY = "_test_extensions"
+
       def is_interesting(self) -> bool:
         return self.notes is not None
 
@@ -1055,76 +1057,21 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
     """A subclass adding fields reports the pairing, not the rejected field."""
 
     class _NewField(trajectory.TrajectoryMetadata):
+      EXTENSIONS_KEY = "_test_extensions"
       custom_tag: str = ""
 
-    meta = _NewField(
-        agent=trajectory.Agent(name="a", version="1.0"),
-        custom_tag="experiment_42",
-    )
-
-    with self.assertRaisesRegex(
-        TypeError, "Expected trajectory_cls to be a subclass of _NewField"
-    ):
-      meta.create_trajectory()
-
-  def test_metadata_registry_contains_base_and_tunix(self):
-    self.assertIs(
-        trajectory.TrajectoryMetadata._REGISTRY.get("base"),
-        trajectory.TrajectoryMetadata,
-    )
-    self.assertIs(
-        trajectory.TrajectoryMetadata._REGISTRY.get("tunix"),
-        trajectory.TunixTrajectoryMetadata,
-    )
-
-  def test_custom_metadata_registers_via_init_subclass(self):
-    class _CustomMetadata(trajectory.TrajectoryMetadata):
-      METADATA_TYPE = "custom_test_meta"
-
     try:
-      self.assertIs(
-          trajectory.TrajectoryMetadata._REGISTRY.get("custom_test_meta"),
-          _CustomMetadata,
+      meta = _NewField(
+          agent=trajectory.Agent(name="a", version="1.0"),
+          custom_tag="experiment_42",
       )
+
+      with self.assertRaisesRegex(
+          TypeError, "Expected trajectory_cls to be a subclass of _NewField"
+      ):
+        meta.create_trajectory()
     finally:
-      trajectory.TrajectoryMetadata._REGISTRY.pop("custom_test_meta", None)
-
-  def test_duplicate_metadata_type_raises(self):
-    with self.assertRaisesRegex(
-        ValueError,
-        "METADATA_TYPE tunix is already registered to TunixTrajectoryMetadata",
-    ):
-
-      class _DuplicateMetadata(trajectory.TrajectoryMetadata):  # pylint: disable=unused-variable
-        METADATA_TYPE = "tunix"
-
-    self.assertIs(
-        trajectory.TrajectoryMetadata._REGISTRY["tunix"],
-        trajectory.TunixTrajectoryMetadata,
-    )
-
-  def test_duplicate_metadata_type_on_trajectory_subclass_raises(self):
-    with self.assertRaisesRegex(
-        ValueError,
-        "METADATA_TYPE base is already registered to TrajectoryMetadata",
-    ):
-
-      class _DuplicateTrajectory(trajectory.Trajectory):  # pylint: disable=unused-variable
-        METADATA_TYPE = "base"
-
-    self.assertIs(
-        trajectory.TrajectoryMetadata._REGISTRY["base"],
-        trajectory.TrajectoryMetadata,
-    )
-
-  def test_subclass_inheriting_metadata_type_does_not_reregister(self):
-    # `TunixTrajectory` inherits METADATA_TYPE "tunix" without declaring it,
-    # so it neither raises nor takes over the registry entry.
-    self.assertEqual(trajectory.TunixTrajectory.METADATA_TYPE, "tunix")
-    self.assertIs(
-        trajectory.TrajectoryMetadata._REGISTRY["tunix"],
-        trajectory.TunixTrajectoryMetadata,
-    )
+      trajectory.TrajectoryMetadata._SUBCLASS_FIELDS.pop(_NewField, None)
 
   def test_step_initialization_with_rl_fields(self):
     step = trajectory.TunixAgentStep(
@@ -1743,7 +1690,7 @@ class AtifProjectionTest(trajectory_testing.TrajectoryTestCase):
         },
     )
 
-  def test_to_atif_step_omits_unset_tunix_fields_from_extra(self):
+  def test_to_atif_step_retains_none_valued_subclass_fields_in_extra(self):
     sparse_agent_step = trajectory_testing.TUNIX_AGENT_STEP_1.model_copy(
         update={
             "mc_return": None,
@@ -1761,7 +1708,40 @@ class AtifProjectionTest(trajectory_testing.TrajectoryTestCase):
 
     self.assertEqual(
         atif_step.extra,
-        {trajectory.TUNIX_EXTENSIONS_KEY: {"policy_version": 3}},
+        {
+            trajectory.TUNIX_EXTENSIONS_KEY: {
+                "mc_return": None,
+                "assistant_tokens": None,
+                "assistant_masks": None,
+                "logprobs": None,
+                "policy_version": 3,
+                "prefill_routed_experts": None,
+                "prefill_start": None,
+                "prefill_num_context": None,
+            }
+        },
+    )
+
+  def test_to_atif_metadata_retains_none_valued_subclass_fields_in_extra(self):
+    sparse_tunix_meta = trajectory.TunixTrajectoryMetadata(
+        trajectory_id="t_sparse",
+        agent=trajectory.Agent(name="agent", version="1.0"),
+    )
+
+    atif_metadata = sparse_tunix_meta.to_atif_metadata()
+    reloaded = trajectory.TrajectoryMetadata.model_validate_json(
+        atif_metadata.model_dump_json(exclude_none=True)
+    )
+
+    expected_keys = set(trajectory.TunixTrajectoryMetadata.model_fields) - set(
+        trajectory.TrajectoryMetadata.model_fields
+    )
+    self.assertEqual(set(atif_metadata.get_extensions().keys()), expected_keys)
+    self.assertEqual(set(reloaded.get_extensions().keys()), expected_keys)
+    self.assertIsNone(reloaded.get_extensions()["prompt_id"])
+    self.assertIs(
+        trajectory.TrajectoryMetadata.resolve_subclass(reloaded),
+        trajectory.TunixTrajectoryMetadata,
     )
 
   @parameterized.named_parameters(
@@ -2047,11 +2027,568 @@ class AtifRehydrationTest(trajectory_testing.TrajectoryTestCase):
     )
 
     class CustomMetadata(trajectory.TrajectoryMetadata):
+      EXTENSIONS_KEY = "_test_extensions"
       tag: str = "default_tag"
 
-    rehydrated_subclass = CustomMetadata.from_atif_metadata(base_meta)
-    self.assertIsInstance(rehydrated_subclass, CustomMetadata)
-    self.assertEqual(rehydrated_subclass.tag, "default_tag")
+    try:
+      rehydrated_subclass = CustomMetadata.from_atif_metadata(base_meta)
+      self.assertIsInstance(rehydrated_subclass, CustomMetadata)
+      self.assertEqual(rehydrated_subclass.tag, "default_tag")
+    finally:
+      trajectory.TrajectoryMetadata._SUBCLASS_FIELDS.pop(CustomMetadata, None)
+
+  def test_pydantic_init_subclass_registers_metadata_subclasses_only(self):
+    self.assertIn(
+        trajectory.TunixTrajectoryMetadata,
+        trajectory.TrajectoryMetadata._SUBCLASS_FIELDS,
+    )
+    self.assertEqual(
+        trajectory.TrajectoryMetadata._SUBCLASS_FIELDS[
+            trajectory.TunixTrajectoryMetadata
+        ],
+        frozenset({
+            "prompt_id",
+            "group_index",
+            "target_policy_versions",
+            "status",
+            "total_reward",
+            "hyperparams",
+            "env_time",
+            "reward_time",
+        }),
+    )
+    self.assertNotIn(
+        trajectory.TrajectoryMetadata,
+        trajectory.TrajectoryMetadata._SUBCLASS_FIELDS,
+    )
+    self.assertNotIn(
+        trajectory.Trajectory,
+        trajectory.TrajectoryMetadata._SUBCLASS_FIELDS,
+    )
+    self.assertNotIn(
+        trajectory.TunixTrajectory,
+        trajectory.TrajectoryMetadata._SUBCLASS_FIELDS,
+    )
+
+    class _EmptyMetadataSubclass(trajectory.TrajectoryMetadata):
+      EXTENSIONS_KEY = "_test_extensions"
+
+    class _CustomTrajectorySubclass(trajectory.Trajectory):
+      custom_traj_field: str = "ignored"
+
+    self.assertNotIn(
+        _EmptyMetadataSubclass,
+        trajectory.TrajectoryMetadata._SUBCLASS_FIELDS,
+    )
+    self.assertNotIn(
+        _CustomTrajectorySubclass,
+        trajectory.TrajectoryMetadata._SUBCLASS_FIELDS,
+    )
+
+  def test_resolve_subclass_with_overlapping_fields(self):
+    base_meta = trajectory_testing.METADATA_1
+    self.assertIs(
+        trajectory.TrajectoryMetadata.resolve_subclass(base_meta),
+        trajectory.TrajectoryMetadata,
+    )
+    tunix_atif_meta = trajectory_testing.TUNIX_METADATA_1.to_atif_metadata()
+    self.assertIs(
+        trajectory.TrajectoryMetadata.resolve_subclass(tunix_atif_meta),
+        trajectory.TunixTrajectoryMetadata,
+    )
+
+    class SubclassA(trajectory.TrajectoryMetadata):
+      EXTENSIONS_KEY = "_test_extensions"
+      shared_tag: str = "a"
+      only_a: int = 1
+
+    class SubclassB(trajectory.TrajectoryMetadata):
+      EXTENSIONS_KEY = "_test_extensions"
+      shared_tag: str = "b"
+      only_b: int = 2
+
+    try:
+      meta_a = SubclassA(
+          trajectory_id="a",
+          agent=trajectory.Agent(name="agent", version="1.0"),
+      ).to_atif_metadata()
+      meta_b = SubclassB(
+          trajectory_id="b",
+          agent=trajectory.Agent(name="agent", version="1.0"),
+      ).to_atif_metadata()
+      self.assertIs(
+          trajectory.TrajectoryMetadata.resolve_subclass(meta_a),
+          SubclassA,
+      )
+      self.assertIs(
+          trajectory.TrajectoryMetadata.resolve_subclass(meta_b),
+          SubclassB,
+      )
+    finally:
+      trajectory.TrajectoryMetadata._SUBCLASS_FIELDS.pop(SubclassA, None)
+      trajectory.TrajectoryMetadata._SUBCLASS_FIELDS.pop(SubclassB, None)
+
+  def test_resolve_subclass_hierarchical_inheritance_and_definition_order(self):
+    # Define a wider subclass BEFORE a narrower subclass, and a parent/child
+    # subclass hierarchy, to verify that `resolve_subclass` always picks the
+    # most specific matching subclass regardless of definition order.
+    class WideMetadata(trajectory.TrajectoryMetadata):
+      EXTENSIONS_KEY = "_test_extensions"
+      hier_field_1: str = "w1"
+      hier_field_2: int | None = None
+      hier_field_3: bool = True
+
+    class ParentMetadata(trajectory.TrajectoryMetadata):
+      EXTENSIONS_KEY = "_test_extensions"
+      hier_field_1: str = "p1"
+
+    class ChildMetadata(ParentMetadata):
+      hier_field_2: int = 42
+
+    try:
+      parent_orig = ParentMetadata(
+          trajectory_id="parent",
+          agent=trajectory.Agent(name="agent", version="1.0"),
+          hier_field_1="parent_val",
+      )
+      child_orig = ChildMetadata(
+          trajectory_id="child",
+          agent=trajectory.Agent(name="agent", version="1.0"),
+          hier_field_1="child_val",
+          hier_field_2=99,
+      )
+      wide_orig = WideMetadata(
+          trajectory_id="wide",
+          agent=trajectory.Agent(name="agent", version="1.0"),
+          hier_field_1="wide_val",
+          hier_field_2=7,
+          hier_field_3=False,
+      )
+
+      parent_atif = parent_orig.to_atif_metadata()
+      child_atif = child_orig.to_atif_metadata()
+      wide_atif = wide_orig.to_atif_metadata()
+
+      self.assertIs(
+          trajectory.TrajectoryMetadata.resolve_subclass(parent_atif),
+          ParentMetadata,
+      )
+      self.assertEqual(
+          ParentMetadata.from_atif_metadata(parent_atif), parent_orig
+      )
+
+      self.assertIs(
+          trajectory.TrajectoryMetadata.resolve_subclass(child_atif),
+          ChildMetadata,
+      )
+      self.assertEqual(ChildMetadata.from_atif_metadata(child_atif), child_orig)
+
+      self.assertIs(
+          trajectory.TrajectoryMetadata.resolve_subclass(wide_atif),
+          WideMetadata,
+      )
+      self.assertEqual(WideMetadata.from_atif_metadata(wide_atif), wide_orig)
+    finally:
+      trajectory.TrajectoryMetadata._SUBCLASS_FIELDS.pop(WideMetadata, None)
+      trajectory.TrajectoryMetadata._SUBCLASS_FIELDS.pop(ParentMetadata, None)
+      trajectory.TrajectoryMetadata._SUBCLASS_FIELDS.pop(ChildMetadata, None)
+
+  def test_resolve_subclass_on_already_typed_instances_and_trajectories(self):
+    class BehaviorOnlyMetadata(trajectory.TrajectoryMetadata):
+      EXTENSIONS_KEY = "_test_extensions"
+
+    behav_meta = BehaviorOnlyMetadata(
+        trajectory_id="b1",
+        agent=trajectory.Agent(name="agent", version="1.0"),
+    )
+    self.assertIs(
+        trajectory.TrajectoryMetadata.resolve_subclass(behav_meta),
+        BehaviorOnlyMetadata,
+    )
+    self.assertIs(
+        trajectory.TrajectoryMetadata.resolve_subclass(
+            trajectory_testing.TUNIX_METADATA_1
+        ),
+        trajectory.TunixTrajectoryMetadata,
+    )
+    self.assertIs(
+        trajectory.TrajectoryMetadata.resolve_subclass(
+            trajectory_testing.TUNIX_TRAJECTORY_1
+        ),
+        trajectory.TunixTrajectoryMetadata,
+    )
+    self.assertIs(
+        trajectory.TrajectoryMetadata.resolve_subclass(
+            trajectory_testing.TRAJECTORY_1
+        ),
+        trajectory.TrajectoryMetadata,
+    )
+    unknown_ext_meta = trajectory_testing.METADATA_1.model_copy(
+        update={
+            "extra": {
+                trajectory.TUNIX_EXTENSIONS_KEY: {
+                    "unregistered_ext_key": "value"
+                }
+            }
+        }
+    )
+    self.assertIs(
+        trajectory.TrajectoryMetadata.resolve_subclass(unknown_ext_meta),
+        trajectory.TrajectoryMetadata,
+    )
+
+  def test_resolve_subclass_with_optional_only_and_overlapping_none_fields(
+      self,
+  ):
+    class OptionalOnlyMetadata(trajectory.TrajectoryMetadata):
+      EXTENSIONS_KEY = "_test_extensions"
+      opt_field: str | None = None
+
+    class SiblingA(trajectory.TrajectoryMetadata):
+      EXTENSIONS_KEY = "_test_extensions"
+      shared_tag: str = "shared"
+      opt_a: str | None = None
+
+    class SiblingB(trajectory.TrajectoryMetadata):
+      EXTENSIONS_KEY = "_test_extensions"
+      shared_tag: str = "shared"
+      opt_b: str | None = None
+
+    class ParentOptMetadata(trajectory.TrajectoryMetadata):
+      EXTENSIONS_KEY = "_test_extensions"
+      parent_tag: str = "p"
+
+    class ChildOptMetadata(ParentOptMetadata):
+      child_opt: int | None = None
+
+    try:
+      # 1. Optional-only subclass logged when all extension fields are None.
+      opt_orig = OptionalOnlyMetadata(
+          trajectory_id="opt_1",
+          agent=trajectory.Agent(name="agent", version="1.0"),
+      )
+      opt_atif = trajectory.TrajectoryMetadata.model_validate_json(
+          opt_orig.to_atif_metadata().model_dump_json(exclude_none=True)
+      )
+      self.assertIs(
+          trajectory.TrajectoryMetadata.resolve_subclass(opt_atif),
+          OptionalOnlyMetadata,
+      )
+      self.assertEqual(
+          OptionalOnlyMetadata.from_atif_metadata(opt_atif), opt_orig
+      )
+
+      # 2. Sibling subclasses with overlapping `shared_tag` and unset optional
+      # distinguishing fields (`opt_a=None` vs `opt_b=None`).
+      sib_a_orig = SiblingA(
+          trajectory_id="sib_a",
+          agent=trajectory.Agent(name="agent", version="1.0"),
+          shared_tag="same",
+      )
+      sib_b_orig = SiblingB(
+          trajectory_id="sib_b",
+          agent=trajectory.Agent(name="agent", version="1.0"),
+          shared_tag="same",
+      )
+      sib_a_atif = trajectory.TrajectoryMetadata.model_validate_json(
+          sib_a_orig.to_atif_metadata().model_dump_json(exclude_none=True)
+      )
+      sib_b_atif = trajectory.TrajectoryMetadata.model_validate_json(
+          sib_b_orig.to_atif_metadata().model_dump_json(exclude_none=True)
+      )
+      self.assertIs(
+          trajectory.TrajectoryMetadata.resolve_subclass(sib_a_atif), SiblingA
+      )
+      self.assertIs(
+          trajectory.TrajectoryMetadata.resolve_subclass(sib_b_atif), SiblingB
+      )
+
+      # 3. Child subclass whose added optional field is None does not downgrade
+      # to parent subclass.
+      child_orig = ChildOptMetadata(
+          trajectory_id="child_none",
+          agent=trajectory.Agent(name="agent", version="1.0"),
+          parent_tag="p_val",
+          child_opt=None,
+      )
+      child_atif = trajectory.TrajectoryMetadata.model_validate_json(
+          child_orig.to_atif_metadata().model_dump_json(exclude_none=True)
+      )
+      self.assertIs(
+          trajectory.TrajectoryMetadata.resolve_subclass(child_atif),
+          ChildOptMetadata,
+      )
+      self.assertEqual(
+          ChildOptMetadata.from_atif_metadata(child_atif), child_orig
+      )
+    finally:
+      for cls_to_remove in (
+          OptionalOnlyMetadata,
+          SiblingA,
+          SiblingB,
+          ParentOptMetadata,
+          ChildOptMetadata,
+      ):
+        trajectory.TrajectoryMetadata._SUBCLASS_FIELDS.pop(cls_to_remove, None)
+
+  def test_resolve_subclass_and_from_atif_metadata_schema_evolution(self):
+    ext_key = "_evolved_extensions"
+
+    class EvolvedV2Metadata(trajectory.TrajectoryMetadata):
+      EXTENSIONS_KEY = ext_key
+      evolved_field_1: str = "v1"
+      evolved_field_2: int = 0
+      newly_added_v2_field: str | None = "v2_default"
+
+    try:
+      # 1. Forward schema evolution (field added in v2): persisted v1 payload
+      # only contains {evolved_field_1, evolved_field_2}.
+      v1_persisted_missing_new_field = trajectory.TrajectoryMetadata(
+          trajectory_id="schema_add",
+          agent=trajectory.Agent(name="agent", version="1.0"),
+          extra={
+              ext_key: {
+                  "evolved_field_1": "from_v1",
+                  "evolved_field_2": 7,
+              }
+          },
+      )
+      resolved_cls = trajectory.TrajectoryMetadata.resolve_subclass(
+          v1_persisted_missing_new_field
+      )
+      self.assertIs(resolved_cls, EvolvedV2Metadata)
+      rehydrated_added = resolved_cls.from_atif_metadata(
+          v1_persisted_missing_new_field
+      )
+      self.assertIsInstance(rehydrated_added, EvolvedV2Metadata)
+      self.assertEqual(rehydrated_added.evolved_field_1, "from_v1")
+      self.assertEqual(rehydrated_added.evolved_field_2, 7)
+      self.assertEqual(rehydrated_added.newly_added_v2_field, "v2_default")
+      self.assertIsNone(rehydrated_added.extra)
+
+      # 2. Backward schema evolution (field removed in v2): persisted v1 payload
+      # contains all v2 fields plus a removed `deprecated_v1_field`.
+      v1_persisted_with_removed_field = trajectory.TrajectoryMetadata(
+          trajectory_id="schema_remove",
+          agent=trajectory.Agent(name="agent", version="1.0"),
+          extra={
+              ext_key: {
+                  "evolved_field_1": "from_v1",
+                  "evolved_field_2": 9,
+                  "newly_added_v2_field": "explicit_v2",
+                  "deprecated_v1_field": "legacy_val",
+              }
+          },
+      )
+      resolved_removed_cls = trajectory.TrajectoryMetadata.resolve_subclass(
+          v1_persisted_with_removed_field
+      )
+      self.assertIs(resolved_removed_cls, EvolvedV2Metadata)
+      rehydrated_removed = resolved_removed_cls.from_atif_metadata(
+          v1_persisted_with_removed_field
+      )
+      self.assertIsInstance(rehydrated_removed, EvolvedV2Metadata)
+      self.assertEqual(rehydrated_removed.evolved_field_1, "from_v1")
+      self.assertEqual(rehydrated_removed.evolved_field_2, 9)
+      self.assertEqual(rehydrated_removed.newly_added_v2_field, "explicit_v2")
+      self.assertEqual(
+          rehydrated_removed.extra,
+          {ext_key: {"deprecated_v1_field": "legacy_val"}},
+      )
+    finally:
+      trajectory.TrajectoryMetadata._SUBCLASS_FIELDS.pop(
+          EvolvedV2Metadata, None
+      )
+
+  def test_resolve_subclass_and_round_trip_with_custom_client_extensions_key(
+      self,
+  ):
+    class ClientAMetadata(trajectory.TrajectoryMetadata):
+      EXTENSIONS_KEY = "_client_a_extensions"
+      shared_field: str = "a"
+      status: str | None = None
+
+    class ClientBMetadata(trajectory.TrajectoryMetadata):
+      EXTENSIONS_KEY = "_client_b_extensions"
+      shared_field: str = "b"
+      status: str | None = None
+
+    try:
+      orig_a = ClientAMetadata(
+          trajectory_id="client_a_1",
+          agent=trajectory.Agent(name="agent", version="1.0"),
+          shared_field="val_a",
+          status="RUNNING",
+          extra={"user_meta": "keep_me"},
+      )
+      orig_b = ClientBMetadata(
+          trajectory_id="client_b_1",
+          agent=trajectory.Agent(name="agent", version="1.0"),
+          shared_field="val_b",
+          status="SUCCEEDED",
+      )
+
+      atif_a = orig_a.to_atif_metadata()
+      atif_b = orig_b.to_atif_metadata()
+
+      self.assertEqual(
+          atif_a.extra,
+          {
+              "user_meta": "keep_me",
+              "_client_a_extensions": {
+                  "shared_field": "val_a",
+                  "status": "RUNNING",
+              },
+          },
+      )
+      self.assertEqual(
+          atif_a.get_extensions(),
+          {"shared_field": "val_a", "status": "RUNNING"},
+      )
+      self.assertEqual(
+          atif_b.get_extensions(),
+          {"shared_field": "val_b", "status": "SUCCEEDED"},
+      )
+      self.assertIs(
+          trajectory.TrajectoryMetadata.resolve_subclass(atif_a),
+          ClientAMetadata,
+      )
+      self.assertIs(
+          trajectory.TrajectoryMetadata.resolve_subclass(atif_b),
+          ClientBMetadata,
+      )
+      self.assertEqual(ClientAMetadata.from_atif_metadata(atif_a), orig_a)
+      self.assertEqual(ClientBMetadata.from_atif_metadata(atif_b), orig_b)
+    finally:
+      trajectory.TrajectoryMetadata._SUBCLASS_FIELDS.pop(ClientAMetadata, None)
+      trajectory.TrajectoryMetadata._SUBCLASS_FIELDS.pop(ClientBMetadata, None)
+
+  def test_subclasses_must_define_extensions_key(self):
+    self.assertIsNone(getattr(trajectory.Step, "EXTENSIONS_KEY", None))
+    self.assertIsNone(
+        getattr(trajectory.TrajectoryMetadata, "EXTENSIONS_KEY", None)
+    )
+    self.assertIsNone(getattr(trajectory.Trajectory, "EXTENSIONS_KEY", None))
+    self.assertEqual(
+        trajectory.TunixAgentStep.EXTENSIONS_KEY,
+        trajectory.TUNIX_EXTENSIONS_KEY,
+    )
+    self.assertEqual(
+        trajectory.TunixEnvStep.EXTENSIONS_KEY,
+        trajectory.TUNIX_EXTENSIONS_KEY,
+    )
+    self.assertEqual(
+        trajectory.TunixTrajectoryMetadata.EXTENSIONS_KEY,
+        trajectory.TUNIX_EXTENSIONS_KEY,
+    )
+    self.assertEqual(
+        trajectory.TunixTrajectory.EXTENSIONS_KEY,
+        trajectory.TUNIX_EXTENSIONS_KEY,
+    )
+
+    with self.assertRaisesRegex(
+        TypeError,
+        "MissingKeyMetadata must define a non-empty string 'EXTENSIONS_KEY'",
+    ):
+
+      class MissingKeyMetadata(trajectory.TrajectoryMetadata):  # pylint: disable=unused-variable
+        custom_field: str = "x"
+
+    with self.assertRaisesRegex(
+        TypeError,
+        "EmptyKeyMetadata must define a non-empty string 'EXTENSIONS_KEY'",
+    ):
+
+      class EmptyKeyMetadata(trajectory.TrajectoryMetadata):  # pylint: disable=unused-variable
+        EXTENSIONS_KEY = ""
+        custom_field: str = "x"
+
+    with self.assertRaisesRegex(
+        TypeError,
+        "MissingKeyStep must define a non-empty string 'EXTENSIONS_KEY'",
+    ):
+
+      class MissingKeyStep(trajectory.Step):  # pylint: disable=unused-variable
+        custom_step_field: int = 1
+
+  def test_metadata_subclass_can_define_steps_field(self):
+    class StepCountMetadata(trajectory.TrajectoryMetadata):
+      EXTENSIONS_KEY = "_test_extensions"
+      steps: int = 0
+
+    try:
+      self.assertIn(
+          StepCountMetadata, trajectory.TrajectoryMetadata._SUBCLASS_FIELDS
+      )
+      orig = StepCountMetadata(
+          trajectory_id="step_count_1",
+          agent=trajectory.Agent(name="agent", version="1.0"),
+          steps=42,
+      )
+      atif = orig.to_atif_metadata()
+      self.assertIs(
+          trajectory.TrajectoryMetadata.resolve_subclass(atif),
+          StepCountMetadata,
+      )
+      self.assertEqual(StepCountMetadata.from_atif_metadata(atif), orig)
+    finally:
+      trajectory.TrajectoryMetadata._SUBCLASS_FIELDS.pop(
+          StepCountMetadata, None
+      )
+
+  def test_create_paired_trajectory_preserves_explicit_none_over_non_none_default(
+      self,
+  ):
+    class DefaultedTagMetadata(trajectory.TrajectoryMetadata):
+      EXTENSIONS_KEY = "_test_extensions"
+      tag: str | None = "default_tag"
+
+      def create_trajectory(
+          self,
+          steps: list[trajectory.Step] | None = None,
+          subagent_trajectories: list["DefaultedTagTrajectory"] | None = None,
+      ) -> "DefaultedTagTrajectory":
+        return self._create_paired_trajectory(
+            DefaultedTagTrajectory, steps, subagent_trajectories
+        )
+
+    class DefaultedTagTrajectory(trajectory.Trajectory, DefaultedTagMetadata):
+      pass
+
+    try:
+      meta = DefaultedTagMetadata(
+          trajectory_id="explicit_none_tag",
+          agent=trajectory.Agent(name="agent", version="1.0"),
+          tag=None,
+      )
+      traj = meta.create_trajectory([trajectory_testing.STEP_1_1])
+      self.assertIsInstance(traj, DefaultedTagTrajectory)
+      self.assertIsNone(traj.tag)
+    finally:
+      trajectory.TrajectoryMetadata._SUBCLASS_FIELDS.pop(
+          DefaultedTagMetadata, None
+      )
+
+  def test_resolve_subclass_breaks_ties_in_favor_of_target_cls(self):
+    class DuplicateFieldsA(trajectory.TrajectoryMetadata):
+      EXTENSIONS_KEY = "_test_extensions"
+      shared_metric: int = 1
+
+    class DuplicateFieldsB(trajectory.TrajectoryMetadata):
+      EXTENSIONS_KEY = "_test_extensions"
+      shared_metric: int = 2
+
+    try:
+      atif = DuplicateFieldsB(
+          trajectory_id="tie_break_1",
+          agent=trajectory.Agent(name="agent", version="1.0"),
+          shared_metric=99,
+      ).to_atif_metadata()
+      self.assertIs(DuplicateFieldsA.resolve_subclass(atif), DuplicateFieldsA)
+      self.assertIs(DuplicateFieldsB.resolve_subclass(atif), DuplicateFieldsB)
+    finally:
+      trajectory.TrajectoryMetadata._SUBCLASS_FIELDS.pop(DuplicateFieldsA, None)
+      trajectory.TrajectoryMetadata._SUBCLASS_FIELDS.pop(DuplicateFieldsB, None)
 
   @parameterized.named_parameters(
       dict(
@@ -2195,11 +2732,14 @@ class AtifRehydrationTest(trajectory_testing.TrajectoryTestCase):
             }
         }
     )
+    atif_metadata = tunix_metadata.to_atif_metadata()
 
+    self.assertIs(
+        trajectory.TrajectoryMetadata.resolve_subclass(atif_metadata),
+        trajectory.TunixTrajectoryMetadata,
+    )
     round_tripped_metadata = (
-        trajectory.TunixTrajectoryMetadata.from_atif_metadata(
-            tunix_metadata.to_atif_metadata()
-        )
+        trajectory.TunixTrajectoryMetadata.from_atif_metadata(atif_metadata)
     )
 
     self.assertEqual(

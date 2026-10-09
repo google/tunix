@@ -595,12 +595,12 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
     self.db_url = f"sqlite:///{db_path}"
 
   def _create_store(
-      self, run_id: str = "default_run"
+      self,
+      run_id: str = "default_run",
   ) -> sql_store.SqlTrajectoryStore:
     store_inst = sql_store.SqlTrajectoryStore(
         db_url=self.db_url,
         run_id=run_id,
-        metadata_cls=trajectory_lib.TrajectoryMetadata,
     )
     self.addCleanup(store_inst.close)
     return store_inst
@@ -643,7 +643,6 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
       sql_store.SqlTrajectoryStore(
           db_url=self.db_url,
           run_id=invalid_run_id,
-          metadata_cls=trajectory_lib.TrajectoryMetadata,
       )
 
   @parameterized.named_parameters(
@@ -660,14 +659,12 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
       sql_store.SqlTrajectoryStore(
           run_id="test_run",
           db_url=invalid_db_url,
-          metadata_cls=trajectory_lib.TrajectoryMetadata,
       )
 
   def test_init_sets_engine_and_run_id(self) -> None:
     store_inst = sql_store.SqlTrajectoryStore(
         db_url=self.db_url,
         run_id="  my_run  ",
-        metadata_cls=trajectory_lib.TrajectoryMetadata,
     )
     self.addCleanup(store_inst.close)
 
@@ -679,7 +676,6 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
         db_url=self.db_url,
         run_id="no_init_run",
         auto_init=False,
-        metadata_cls=trajectory_lib.TrajectoryMetadata,
     )
     self.addCleanup(store_inst.close)
 
@@ -703,7 +699,6 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
       sql_store.SqlTrajectoryStore(
           db_url=self.db_url,
           run_id="failing_run",
-          metadata_cls=trajectory_lib.TrajectoryMetadata,
       )
 
     self.assertEqual(set(async_writer._LIVE_WRITERS), live_writers_before)
@@ -728,7 +723,6 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
           db_url=_POSTGRES_URL,
           run_id="test_run",
           auto_init=True,
-          metadata_cls=trajectory_lib.TrajectoryMetadata,
       ).close()
 
     self.assertEqual(
@@ -769,7 +763,6 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
           db_url=_POSTGRES_URL,
           run_id="test_run",
           auto_init=True,
-          metadata_cls=trajectory_lib.TrajectoryMetadata,
       ).close()
 
     mock_write_conn.execute.assert_called_once()
@@ -793,7 +786,6 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
           db_url=_POSTGRES_URL,
           run_id="test_run",
           auto_init=True,
-          metadata_cls=trajectory_lib.TrajectoryMetadata,
       ).close()
 
     mock_engine.begin.assert_not_called()
@@ -812,7 +804,6 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
           db_url=f"sqlite:///{db_path}",
           run_id=f"concurrent_run_{worker_idx}",
           auto_init=True,
-          metadata_cls=trajectory_lib.TrajectoryMetadata,
       )
       try:
         worker_store.add_step(
@@ -880,7 +871,6 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
     writer_store = sql_store.SqlTrajectoryStore(
         db_url=self.db_url,
         run_id="drain_run",
-        metadata_cls=trajectory_lib.TrajectoryMetadata,
     )
     writer_store.add_step(
         trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1
@@ -905,7 +895,6 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
     store_inst = sql_store.SqlTrajectoryStore(
         db_url="sqlite:///:memory:",
         run_id="url_owned_run",
-        metadata_cls=trajectory_lib.TrajectoryMetadata,
     )
     store_inst.add_step(
         trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1
@@ -930,7 +919,6 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
     store_inst = sql_store.SqlTrajectoryStore(
         db_url="sqlite:///:memory:",
         run_id="double_close_run",
-        metadata_cls=trajectory_lib.TrajectoryMetadata,
     )
 
     store_inst.close()
@@ -958,7 +946,6 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
       sql_store.SqlTrajectoryStore(
           db_url="sqlite:///:memory:",
           run_id="failed_init_run",
-          metadata_cls=trajectory_lib.TrajectoryMetadata,
       )
 
     mock_dispose.assert_called_once()
@@ -972,7 +959,6 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
         db_url=db_url,
         run_id="redact_run",
         auto_init=False,
-        metadata_cls=trajectory_lib.TrajectoryMetadata,
     )
     self.addCleanup(store_inst.close)
 
@@ -985,7 +971,6 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
             "backend": "sql",
             "db_url": "postgresql+psycopg2://user:***@host/db",
             "run_id": "redact_run",
-            "metadata_type": trajectory_lib.TrajectoryMetadata.METADATA_TYPE,
         },
     )
     self.assertEqual(store_inst.to_config()["db_url"], db_url)
@@ -994,7 +979,6 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
     first_store = sql_store.SqlTrajectoryStore(
         run_id="persisted_run",
         db_url=self.db_url,
-        metadata_cls=trajectory_lib.TrajectoryMetadata,
     )
     first_store.add_step(
         trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1
@@ -1010,22 +994,21 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
       self,
   ) -> None:
     store_inst = self._create_store(run_id="meta_reader_run")
-    store_inst.update_metadata(trajectory_testing.METADATA_1)
+    tunix_meta_2 = trajectory_testing.TUNIX_METADATA_1.model_copy(
+        update={"trajectory_id": "t_atif_2"}
+    )
     store_inst.update_metadata(trajectory_testing.TUNIX_METADATA_1)
+    store_inst.update_metadata(tunix_meta_2)
     store_inst.flush()
 
     metas = store_inst.get_trajectories_metadata()
     self.assertEqual(
         metas,
         [
-            trajectory_testing.METADATA_1,
-            trajectory_testing.TUNIX_METADATA_1.to_atif_metadata(),
+            trajectory_testing.TUNIX_METADATA_1,
+            tunix_meta_2,
         ],
     )
-    rehydrated_meta = trajectory_lib.TunixTrajectoryMetadata.from_atif_metadata(
-        metas[1]
-    )
-    self.assertEqual(rehydrated_meta, trajectory_testing.TUNIX_METADATA_1)
 
   def test_get_trajectories_orders_steps_by_step_id_and_rehydrates_tunix_steps(
       self,
@@ -1040,13 +1023,7 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
 
     (trajectory,) = store_inst.get_trajectories([tunix_meta.trajectory_id])
     self.assertTrajectoryEqual(
-        trajectory, trajectory_testing.PAIRED_ATIF_TRAJECTORY
-    )
-    rehydrated_tunix_traj = trajectory_lib.TunixTrajectory.from_atif_trajectory(
-        trajectory
-    )
-    self.assertTrajectoryEqual(
-        rehydrated_tunix_traj, trajectory_testing.PAIRED_TUNIX_TRAJECTORY
+        trajectory, trajectory_testing.PAIRED_TUNIX_TRAJECTORY
     )
 
   def test_reader_methods_isolate_trajectories_across_runs(self) -> None:
@@ -1105,7 +1082,6 @@ class SqlTrajectoryReaderContractTest(store_testing.TrajectoryReaderTestCase):
     sql_s = sql_store.SqlTrajectoryStore(
         db_url=f"sqlite:///{db_path}",
         run_id="test_contract_reader_run",
-        metadata_cls=trajectory_lib.TrajectoryMetadata,
     )
     self.addCleanup(sql_s.close)
     if initial_data:
@@ -1128,7 +1104,6 @@ class SqlTrajectoryWriterContractTest(store_testing.TrajectoryWriterTestCase):
     sql_s = sql_store.SqlTrajectoryStore(
         db_url=f"sqlite:///{db_path}",
         run_id="test_contract_writer_run",
-        metadata_cls=trajectory_lib.TrajectoryMetadata,
     )
     self.addCleanup(sql_s.close)
     return sql_s, sql_s
@@ -1144,13 +1119,10 @@ class SqlTrajectoryStoreMetadataClsTest(
     db_path = os.path.join(self.create_tempdir().full_path, "store.db")
     self._db_url = f"sqlite:///{db_path}"
 
-  def _create_store(
-      self, metadata_cls: type[store.MetadataT]
-  ) -> store.TrajectoryStore[store.MetadataT]:
+  def _create_store(self) -> store.TrajectoryStore[Any]:
     sql_s = sql_store.SqlTrajectoryStore(
         db_url=self._db_url,
         run_id="metadata_cls_run",
-        metadata_cls=metadata_cls,
     )
     self.addCleanup(sql_s.close)
     return sql_s
@@ -1166,7 +1138,6 @@ class SqlTrajectoryStoreConfigTest(store_testing.TrajectoryStoreConfigTestCase):
         "backend": "sql",
         "db_url": f"sqlite:///{db_path}",
         "run_id": "run_1",
-        "metadata_type": trajectory_lib.TrajectoryMetadata.METADATA_TYPE,
     }
 
   def test_from_config_round_trip_reads_the_same_data(self) -> None:

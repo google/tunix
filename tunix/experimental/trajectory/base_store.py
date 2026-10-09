@@ -15,15 +15,12 @@
 """Base protocols and abstract class defining Trajectory Store interfaces."""
 
 import abc
-from typing import Any, ClassVar, Mapping, Protocol, TypeVar, runtime_checkable
+from collections.abc import Mapping
+from typing import Any, ClassVar, Protocol, Self, TypeVar, cast, get_args, get_origin, runtime_checkable
 
 from tunix.experimental.trajectory import trajectory as trajectory_lib
 
 MetadataT = TypeVar("MetadataT", bound=trajectory_lib.TrajectoryMetadata)
-
-# Config key naming the registered `METADATA_TYPE` of the TrajectoryMetadata
-# subclass a store reads back. Required by `TrajectoryStore.from_config`.
-METADATA_TYPE_KEY = "metadata_type"
 
 # ==============================================================================
 # Custom Exceptions
@@ -169,108 +166,154 @@ class TrajectoryStore(
   make up a run, and doubles as the on/off gate: a config of None, or one whose
   "enabled" is false, yields None, leaving every store-guarded call site a
   no-op.
-
-  Every store is constructed with a required `metadata_cls`, the
-  TrajectoryMetadata subclass it reads metadata back as. The argument is typed
-  `type[MetadataT]`, so the type checker infers `MetadataT` from it and the
-  metadata type is stated exactly once:
-
-      store = FileTrajectoryStore(
-          root_dir=root, run_id=run_id, metadata_cls=TunixTrajectoryMetadata)
-      # Inferred: FileTrajectoryStore[TunixTrajectoryMetadata].
-
-  Because it is required, a store annotated with one metadata type but built
-  with another, or with none, is a static type error rather than a store that
-  silently reads a different type. A store that reads base metadata says so
-  with `metadata_cls=TrajectoryMetadata`.
   """
 
   # The value of the config's "backend" key that selects this class.
   BACKEND: ClassVar[str]
   _REGISTRY: ClassVar[dict[str, type["TrajectoryStore[Any]"]]] = {}
 
+  # Bound metadata class for this store. Starts as `None` on unparameterized
+  # stores, is set on the class when a subclass specifies a concrete metadata
+  # type (e.g. `class MyStore(InMemoryStore[TunixMetadata])`), and is set on the
+  # instance (`self._metadata_cls`) either from `self.__orig_class__` (e.g.
+  # `InMemoryStore[TunixMetadata]()`) or on the first read/write operation.
+  _metadata_cls: type[MetadataT] | None = None
+
   def __init_subclass__(cls, **kwargs: Any) -> None:
     super().__init_subclass__(**kwargs)
+    # Check `cls.__dict__` (not `getattr`) so a subclass that inherits `BACKEND`
+    # without declaring its own does not overwrite its parent in `_REGISTRY`.
     backend = cls.__dict__.get("BACKEND")
     if backend:
       cls._REGISTRY[backend] = cls
 
-  def __init__(self, *, metadata_cls: type[MetadataT]) -> None:
-    """Records the metadata class this store reads back.
+    # When a class inherits from a parameterized generic such as
+    # `TrajectoryStore[TunixTrajectoryMetadata]`, Python erases the `[...]` type
+    # argument from `cls.__bases__` and preserves the parameterized alias object
+    # in `cls.__orig_bases__` (PEP 560).
+    bases = cls.__dict__.get("__orig_bases__") or cls.__bases__
+    metadata_classes = {
+        meta_cls
+        for base in bases
+        if (meta_cls := cls._extract_metadata_cls(base)) is not None
+    }
+    if len(metadata_classes) > 1:
+      names = ", ".join(sorted(m.__name__ for m in metadata_classes))
+      raise TypeError(
+          f"Conflicting TrajectoryMetadata types in {cls.__name__}: {names}."
+      )
+    cls._metadata_cls = next(iter(metadata_classes), None)
+
+  @classmethod
+  def _extract_metadata_cls(cls, base_or_alias: Any) -> type[MetadataT] | None:
+    """Returns the concrete TrajectoryMetadata class bound to `base_or_alias`.
 
     Args:
-      metadata_cls: The TrajectoryMetadata subclass to read stored metadata back
-        as. The type checker infers `MetadataT` from it. Must declare a
-        `METADATA_TYPE` registered in `TrajectoryMetadata._REGISTRY`.
+      base_or_alias: Either a `TrajectoryStore` class (e.g.
+        `TunixTrajectoryStore`) or a parameterized generic alias (e.g.
+        `InMemoryTrajectoryStore[TunixTrajectoryMetadata]`).
+    """
+    # For a parameterized alias like `Store[Meta]`, `get_origin` returns `Store`
+    # and `get_args` returns `(Meta,)`. For a plain class, `get_origin` returns
+    # `None` and `get_args` returns `()`.
+    origin = get_origin(base_or_alias) or base_or_alias
+    if not (isinstance(origin, type) and issubclass(origin, TrajectoryStore)):
+      return None
+    for type_arg in get_args(base_or_alias):
+      if (
+          isinstance(type_arg, type)
+          and issubclass(type_arg, trajectory_lib.TrajectoryMetadata)
+          and not issubclass(type_arg, trajectory_lib.Trajectory)
+      ):
+        return cast(type[MetadataT], type_arg)
+    # If `base_or_alias` was not directly parameterized (or was parameterized
+    # with an unbound TypeVar), inherit any metadata class already bound on
+    # `origin` (e.g. when subclassing `TunixTrajectoryStore`).
+    return getattr(origin, "_metadata_cls", None)
+
+  def _get_bound_metadata_cls(self) -> type[MetadataT] | None:
+    """Returns the metadata class bound to this store instance, if any."""
+    if self._metadata_cls is None:
+      # CPython's `typing._GenericAlias.__call__` sets `self.__orig_class__` on
+      # the instance *after* `__init__` returns, so subscripted instantiations
+      # like `InMemoryTrajectoryStore[TunixTrajectoryMetadata]()` are resolved
+      # lazily here on first read or write.
+      orig_class = getattr(self, "__orig_class__", None)
+      if orig_class is not None:
+        self._metadata_cls = self._extract_metadata_cls(orig_class)
+    return self._metadata_cls
+
+  def _validate_and_bind_metadata(self, metadata: MetadataT) -> None:
+    """Validates and binds the store instance's single TrajectoryMetadata type.
+
+    Args:
+      metadata: The metadata instance being written to the store.
 
     Raises:
-      TypeError: If `metadata_cls` is not a TrajectoryMetadata subclass.
-      ValueError: If `metadata_cls` is not registered in
-        `TrajectoryMetadata._REGISTRY`.
+      TypeError: If `metadata` is not a `TrajectoryMetadata` instance (or is a
+        `Trajectory`), or if its type does not match the metadata type already
+        bound to this store instance.
     """
-    if (
-        not isinstance(metadata_cls, type)
-        or not issubclass(metadata_cls, trajectory_lib.TrajectoryMetadata)
-        or issubclass(metadata_cls, trajectory_lib.Trajectory)
+    meta_cls = type(metadata)
+    if self._metadata_cls is not None and meta_cls is self._metadata_cls:
+      return
+    if not isinstance(metadata, trajectory_lib.TrajectoryMetadata) or (
+        isinstance(metadata, trajectory_lib.Trajectory)
     ):
       raise TypeError(
-          f"{type(self).__name__} requires metadata_cls to be a"
-          f" TrajectoryMetadata subclass; got {metadata_cls}."
+          "Expected a TrajectoryMetadata instance (not Trajectory), got"
+          f" {meta_cls.__name__}."
       )
-    self._metadata_type: str = self._get_metadata_type_name(metadata_cls)
-    self._metadata_cls: type[MetadataT] = metadata_cls
-
-  @classmethod
-  def _resolve_metadata_type_name(
-      cls, name: str
-  ) -> type[trajectory_lib.TrajectoryMetadata]:
-    """Resolves a registered metadata_type name to its TrajectoryMetadata class."""
-    registry = (
-        trajectory_lib.TrajectoryMetadata._REGISTRY  # pylint: disable=protected-access
-    )
-    if name in registry:
-      return registry[name]
-
-    valid = sorted(registry)
-    raise ValueError(
-        f"Unknown Trajectory Store metadata_type {name}; expected one of"
-        f" {valid}."
-    )
-
-  @classmethod
-  def _get_metadata_type_name(
-      cls, metadata_cls: type[trajectory_lib.TrajectoryMetadata]
-  ) -> str:
-    """Returns the registered METADATA_TYPE name for `metadata_cls`."""
-    meta_type = metadata_cls.__dict__.get("METADATA_TYPE")
-    registry = (
-        trajectory_lib.TrajectoryMetadata._REGISTRY  # pylint: disable=protected-access
-    )
-    if (
-        not isinstance(meta_type, str)
-        or not meta_type
-        or registry.get(meta_type) is not metadata_cls
-    ):
-      raise ValueError(
-          f"{metadata_cls.__name__} must declare a registered"
-          " METADATA_TYPE in TrajectoryMetadata._REGISTRY."
+    bound_cls = self._get_bound_metadata_cls()
+    if bound_cls is None:
+      self._metadata_cls = meta_cls
+    elif meta_cls is not bound_cls:
+      raise TypeError(
+          f"{type(self).__name__} is bound to metadata type"
+          f" {bound_cls.__name__}, got {meta_cls.__name__}."
       )
-    return meta_type
+
+  def _rehydrate_metadata(
+      self, atif_metadata: trajectory_lib.TrajectoryMetadata
+  ) -> MetadataT:
+    """Rehydrates base ATIF metadata and enforces the store's metadata type.
+
+    Args:
+      atif_metadata: The deserialized base ATIF `TrajectoryMetadata` instance.
+
+    Returns:
+      The rehydrated metadata instance matching the store's bound metadata type.
+
+    Raises:
+      TypeError: If the resolved metadata class does not match the metadata type
+        already bound to this store instance.
+    """
+    bound_cls = self._get_bound_metadata_cls()
+    resolved_cls = cast(
+        type[MetadataT],
+        (bound_cls or trajectory_lib.TrajectoryMetadata).resolve_subclass(
+            atif_metadata
+        ),
+    )
+    if bound_cls is None:
+      self._metadata_cls = resolved_cls
+    elif resolved_cls is not bound_cls:
+      raise TypeError(
+          f"{type(self).__name__} is bound to metadata type"
+          f" {bound_cls.__name__}, got {resolved_cls.__name__}."
+      )
+    return resolved_cls.from_atif_metadata(atif_metadata)
 
   @classmethod
   @abc.abstractmethod
   def _from_config(
-      cls,
-      config: Mapping[str, Any],
-      *,
-      metadata_cls: type[trajectory_lib.TrajectoryMetadata],
-  ) -> "TrajectoryStore[Any]":
+      cls, config: Mapping[str, Any]
+  ) -> "TrajectoryStore[MetadataT]":
     """Builds an instance of this backend from `config`.
 
     Implementations read the keys they care about and raise ValueError for a
     config this backend cannot honour. Called only by `from_config`, which has
-    already established that `config` selects this backend and resolved its
-    "metadata_type" into `metadata_cls`.
+    already established that `config` selects this backend.
     """
 
   @abc.abstractmethod
@@ -297,9 +340,7 @@ class TrajectoryStore(
     return self.to_config()
 
   @classmethod
-  def from_config(
-      cls, config: Mapping[str, Any] | None
-  ) -> "TrajectoryStore[Any] | None":
+  def from_config(cls, config: Mapping[str, Any] | None) -> Self | None:
     """Builds the store described by `config`, or None when it is disabled.
 
     Call once per process and hold onto the result: the process that built a
@@ -317,9 +358,8 @@ class TrajectoryStore(
       A store instance, or None if `config` is None or not enabled.
 
     Raises:
-      ValueError: If "backend" names no known implementation, "metadata_type"
-        is missing or names an unknown metadata type, or the selected backend
-        rejects the rest of the config.
+      ValueError: If "backend" names no known implementation, or the selected
+        backend rejects the rest of the config.
     """
     if config is None or not config.get("enabled", False):
       return None
@@ -330,12 +370,25 @@ class TrajectoryStore(
           f"Unknown Trajectory Store backend {backend!r}; expected one of"
           f" {sorted(cls._REGISTRY)}."
       )
-    if not config.get(METADATA_TYPE_KEY):
-      raise ValueError(
-          f"Trajectory Store config requires a non-empty '{METADATA_TYPE_KEY}';"
-          " use 'base' for plain TrajectoryMetadata."
-      )
-    metadata_cls = cls._resolve_metadata_type_name(config[METADATA_TYPE_KEY])
-    return cls._REGISTRY[backend]._from_config(  # pylint: disable=protected-access
-        config, metadata_cls=metadata_cls
-    )
+    store = cls._REGISTRY[backend]._from_config(config)  # pylint: disable=protected-access
+    metadata_cls = getattr(cls, "_metadata_cls", None)
+    if metadata_cls is not None:
+      store._metadata_cls = metadata_cls  # pylint: disable=protected-access
+    return cast(Self, store)
+
+
+# TODO(tunix-dev): Consider overriding __instancecheck__ (via a metaclass) so
+# `isinstance(store, TunixTrajectoryStore)` returns True for stores bound to
+# `TunixTrajectoryMetadata`.
+class TunixTrajectoryStore(
+    TrajectoryStore[trajectory_lib.TunixTrajectoryMetadata],
+    abc.ABC,
+):
+  """TrajectoryStore bound to TunixTrajectoryMetadata.
+
+  `TunixTrajectoryStore.from_config(config)` instantiates the configured backend
+  (`FileTrajectoryStore`, `SqlTrajectoryStore`, or `InMemoryTrajectoryStore`)
+  and binds it to `TunixTrajectoryMetadata`. Note that the returned instance is
+  a subclass of `TrajectoryStore` (and of the selected backend), not a runtime
+  subclass of `TunixTrajectoryStore`.
+  """

@@ -5,7 +5,6 @@ from absl.testing import parameterized
 from tunix.experimental.trajectory import file_store
 from tunix.experimental.trajectory import in_memory_store
 from tunix.experimental.trajectory import store as store_lib
-from tunix.experimental.trajectory import trajectory as trajectory_lib
 from tunix.experimental.trajectory.benchmarks import benchmark_lib
 from tunix.experimental.trajectory.benchmarks import data_generator
 
@@ -63,9 +62,7 @@ class BenchmarkLibTest(parameterized.TestCase):
   def test_run_recovery_benchmark_in_memory(
       self, workload: data_generator.WorkloadConfig
   ) -> None:
-    store_instance = in_memory_store.InMemoryTrajectoryStore(
-        metadata_cls=trajectory_lib.TrajectoryMetadata
-    )
+    store_instance = in_memory_store.InMemoryTrajectoryStore()
     self._verify_recovery_benchmark(
         reader=store_instance,
         writer=store_instance,
@@ -81,9 +78,7 @@ class BenchmarkLibTest(parameterized.TestCase):
       self, workload: data_generator.WorkloadConfig
   ) -> None:
     with tempfile.TemporaryDirectory() as tmp_dir:
-      store_instance = file_store.FileTrajectoryStore(
-          root_dir=tmp_dir, metadata_cls=trajectory_lib.TrajectoryMetadata
-      )
+      store_instance = file_store.FileTrajectoryStore(root_dir=tmp_dir)
       self._verify_recovery_benchmark(
           reader=store_instance,
           writer=store_instance,

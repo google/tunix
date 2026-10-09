@@ -23,7 +23,6 @@ from absl import flags
 from etils import epath
 import simple_parsing
 from tunix.experimental.trajectory import store
-from tunix.experimental.trajectory import trajectory as trajectory_lib
 from tunix.experimental.trajectory.explorer import commands
 from tunix.experimental.trajectory.explorer.commands import base
 from tunix.experimental.trajectory.explorer.commands import ping
@@ -65,7 +64,6 @@ class FileTrajectoryStoreConfig:
         "backend": "file",
         "root_dir": self.root_dir,
         "run_id": self.run_id,
-        "metadata_type": trajectory_lib.TrajectoryMetadata.METADATA_TYPE,
     }
 
 
@@ -78,7 +76,6 @@ class InMemoryTrajectoryStoreConfig:
     return {
         "enabled": True,
         "backend": "memory",
-        "metadata_type": trajectory_lib.TrajectoryMetadata.METADATA_TYPE,
     }
 
 

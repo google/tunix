@@ -21,9 +21,7 @@ class InMemoryTrajectoryReaderTest(store_testing.TrajectoryReaderTestCase):
           | None
       ) = None,
   ) -> store.TrajectoryReader:
-    mem_store = in_memory_store.InMemoryTrajectoryStore(
-        metadata_cls=trajectory_lib.TrajectoryMetadata
-    )
+    mem_store = in_memory_store.InMemoryTrajectoryStore()
     if initial_data:
       for meta, steps in initial_data:
         for step in steps:
@@ -38,16 +36,12 @@ class InMemoryTrajectoryWriterTest(store_testing.TrajectoryWriterTestCase):
   def _create_reader_and_writer(
       self,
   ) -> tuple[store.TrajectoryReader, store.TrajectoryWriter]:
-    mem_store = in_memory_store.InMemoryTrajectoryStore(
-        metadata_cls=trajectory_lib.TrajectoryMetadata
-    )
+    mem_store = in_memory_store.InMemoryTrajectoryStore()
     return mem_store, mem_store
 
   def test_update_metadata(self) -> None:
     """Verifies that updating metadata in-memory updates the stored metadata."""
-    mem_store = in_memory_store.InMemoryTrajectoryStore(
-        metadata_cls=trajectory_lib.TrajectoryMetadata
-    )
+    mem_store = in_memory_store.InMemoryTrajectoryStore()
     meta = trajectory_lib.TrajectoryMetadata(
         trajectory_id="t1",
         agent=trajectory_lib.Agent(name="a1", version="1.0"),
@@ -64,9 +58,7 @@ class InMemoryTrajectoryWriterTest(store_testing.TrajectoryWriterTestCase):
 
   def test_metadata_mutation_isolation(self) -> None:
     """Verifies that mutating returned metadata does not alter internal store state."""
-    mem_store = in_memory_store.InMemoryTrajectoryStore(
-        metadata_cls=trajectory_lib.TrajectoryMetadata
-    )
+    mem_store = in_memory_store.InMemoryTrajectoryStore()
     meta = trajectory_lib.TrajectoryMetadata(
         trajectory_id="iso_1",
         agent=trajectory_lib.Agent(name="a1", version="1.0"),
@@ -92,12 +84,10 @@ class InMemoryTrajectoryWriterTest(store_testing.TrajectoryWriterTestCase):
 class InMemoryTrajectoryStoreMetadataClsTest(
     store_testing.TrajectoryStoreMetadataClsTestCase
 ):
-  """metadata_cls contract tests for InMemoryTrajectoryStore."""
+  """Contract tests for InMemoryTrajectoryStore metadata_cls handling."""
 
-  def _create_store(
-      self, metadata_cls: type[store.MetadataT]
-  ) -> store.TrajectoryStore[store.MetadataT]:
-    return in_memory_store.InMemoryTrajectoryStore(metadata_cls=metadata_cls)
+  def _create_store(self) -> store.TrajectoryStore[Any]:
+    return in_memory_store.InMemoryTrajectoryStore()
 
 
 class InMemoryTrajectoryStoreConfigTest(
@@ -109,7 +99,6 @@ class InMemoryTrajectoryStoreConfigTest(
     return {
         "enabled": True,
         "backend": "memory",
-        "metadata_type": trajectory_lib.TrajectoryMetadata.METADATA_TYPE,
     }
 
 

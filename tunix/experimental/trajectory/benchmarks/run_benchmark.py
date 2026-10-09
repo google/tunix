@@ -10,7 +10,6 @@ import simple_parsing
 import termcolor
 from tunix.experimental.trajectory import file_store
 from tunix.experimental.trajectory import in_memory_store
-from tunix.experimental.trajectory import trajectory as trajectory_lib
 from tunix.experimental.trajectory.benchmarks import benchmark_lib
 from tunix.experimental.trajectory.benchmarks import data_generator
 
@@ -126,14 +125,11 @@ def main(config: BenchmarkConfig) -> None:
       store = file_store.FileTrajectoryStore(
           root_dir=target_root,
           run_id=run_id,
-          metadata_cls=trajectory_lib.TrajectoryMetadata,
       )
       reader = store
       writer = store
     case InMemoryTrajectoryStoreConfig():
-      store = in_memory_store.InMemoryTrajectoryStore(
-          metadata_cls=trajectory_lib.TrajectoryMetadata
-      )
+      store = in_memory_store.InMemoryTrajectoryStore()
       reader = store
       writer = store
     case _:

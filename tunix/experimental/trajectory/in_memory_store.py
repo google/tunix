@@ -36,18 +36,9 @@ class InMemoryTrajectoryStore(store.TrajectoryStore[MetadataT]):
 
   BACKEND: ClassVar[str] = "memory"
 
-  def __init__(self, *, metadata_cls: type[MetadataT]) -> None:
-    """Initializes the InMemoryTrajectoryStore.
-
-    Args:
-      metadata_cls: The TrajectoryMetadata subclass this store holds.
-
-    Raises:
-      TypeError: If metadata_cls is not a TrajectoryMetadata subclass.
-      ValueError: If metadata_cls is not registered in
-        TrajectoryMetadata._REGISTRY.
-    """
-    super().__init__(metadata_cls=metadata_cls)
+  def __init__(self) -> None:
+    """Initializes the InMemoryTrajectoryStore."""
+    super().__init__()
     self._metadata_by_trajectory_id: dict[str, MetadataT] = {}
     self._steps_by_trajectory_id: dict[str, list[trajectory_lib.Step]] = (
         collections.defaultdict(list)
@@ -55,21 +46,17 @@ class InMemoryTrajectoryStore(store.TrajectoryStore[MetadataT]):
 
   @classmethod
   def _from_config(
-      cls,
-      config: Mapping[str, Any],
-      *,
-      metadata_cls: type[trajectory_lib.TrajectoryMetadata],
-  ) -> "InMemoryTrajectoryStore[Any]":
+      cls, config: Mapping[str, Any]
+  ) -> "InMemoryTrajectoryStore[MetadataT]":
     """Builds an in-memory store; this backend takes no other configuration."""
     del config
-    return cls(metadata_cls=metadata_cls)
+    return cls()
 
   def to_config(self) -> dict[str, Any]:
     """Returns the config dict that rebuilds an equivalent store."""
     return {
         "enabled": True,
         "backend": self.BACKEND,
-        "metadata_type": self._metadata_type,
     }
 
   def get_trajectories_metadata(
@@ -143,10 +130,12 @@ class InMemoryTrajectoryStore(store.TrajectoryStore[MetadataT]):
       metadata: TrajectoryMetadata containing trajectory_id and run metadata.
 
     Raises:
+      TypeError: If metadata is not a TrajectoryMetadata instance or its type
+        conflicts with the store's bound metadata type.
       ValueError: If metadata.trajectory_id is empty or None.
     """
-    traj_id = _validate_trajectory_id(metadata.trajectory_id)
     self.update_metadata(metadata)
+    traj_id = _validate_trajectory_id(metadata.trajectory_id)
     step_copy = trajectory_lib.deep_copy(step)
     steps = self._steps_by_trajectory_id[traj_id]
     for idx, s in enumerate(steps):
@@ -169,8 +158,11 @@ class InMemoryTrajectoryStore(store.TrajectoryStore[MetadataT]):
       metadata: TrajectoryMetadata containing trajectory_id and run metadata.
 
     Raises:
+      TypeError: If metadata is not a TrajectoryMetadata instance or its type
+        conflicts with the store's bound metadata type.
       ValueError: If metadata.trajectory_id is empty or None.
     """
+    self._validate_and_bind_metadata(metadata)
     traj_id = _validate_trajectory_id(metadata.trajectory_id)
     self._metadata_by_trajectory_id[traj_id] = trajectory_lib.deep_copy(
         metadata

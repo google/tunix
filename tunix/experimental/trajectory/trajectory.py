@@ -8,14 +8,15 @@ from __future__ import annotations
 
 import base64
 import binascii
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, MutableMapping, Sequence
 import copy
 import dataclasses
 import datetime
 import enum
 import functools
 import math
-from typing import Annotated, Any, ClassVar, Final, Generic, Literal, Self, Sequence, TypeVar, TypedDict, get_args
+from typing import Annotated, Any, ClassVar, Final, Generic, Literal, Self, TypeVar, TypedDict, get_args
+import weakref
 
 import numpy as np
 import pydantic
@@ -163,7 +164,6 @@ def deep_copy(model: _ModelT) -> _ModelT:
   return _deep_copy_into_memo(model, memo={})
 
 
-TUNIX_EXTENSIONS_KEY: Final[str] = "_tunix_extensions"
 _EXTRA_FIELD: Final[str] = "extra"
 
 
@@ -200,71 +200,100 @@ def _get_non_none_fields(
 
 
 def _pack_subclass_values_into_extra(
-    source_model: Step | TrajectoryMetadata,
-    target_cls: type[pydantic.BaseModel],
+    subclass_model: Step | TrajectoryMetadata,
+    base_atif_cls: type[pydantic.BaseModel],
     exclude_field_names: set[str] | frozenset[str] = frozenset(),
 ) -> dict[str, Any] | None:
-  """Packs subclass-specific fields into the `extra['tunix_extensions']` dict."""
-  source_field_names = _get_field_names(type(source_model))
-  target_field_names = _get_field_names(target_cls)
-  if source_field_names == target_field_names:
+  """Packs subclass-specific fields into `extra[subclass_model.EXTENSIONS_KEY]`.
+
+  Args:
+    subclass_model: The `Step` or `TrajectoryMetadata` instance being projected
+      down to its base ATIF model.
+    base_atif_cls: The target base ATIF model class (`Step` or
+      `TrajectoryMetadata`).
+    exclude_field_names: Subclass fields to omit rather than pack into `extra`
+      (e.g. `steps` and `subagent_trajectories` when projecting a `Trajectory`
+      to `TrajectoryMetadata`).
+
+  Returns:
+    A field-value dict ready for `base_atif_cls.model_validate(...)`, or `None`
+    if `subclass_model` defines no fields beyond `base_atif_cls`.
+  """
+  source_field_names = _get_field_names(type(subclass_model))
+  base_field_names = _get_field_names(base_atif_cls)
+  if source_field_names == base_field_names:
     return None
 
   subclass_field_names = (
-      source_field_names - target_field_names - exclude_field_names
+      source_field_names - base_field_names - exclude_field_names
   )
-  target_values_by_field = _get_non_none_fields(
-      source_model, target_field_names - {_EXTRA_FIELD}
+  base_values_by_field = _get_non_none_fields(
+      subclass_model, base_field_names - {_EXTRA_FIELD}
   )
 
   # Convert subclass extension fields directly without invoking `model_dump`,
   # which would re-traverse serialized array lists to validate `return_type`.
-  field_serializers = _get_field_serializers(type(source_model))
+  field_serializers = _get_field_serializers(type(subclass_model))
+  subclass_fields = {
+      field: getattr(subclass_model, field) for field in subclass_field_names
+  }
   subclass_values_by_field = {
       field: (
           field_serializers[field](value)
           if field in field_serializers
           else _to_json_compatible(value)
       )
-      for field, value in _get_non_none_fields(
-          source_model, subclass_field_names
-      ).items()
+      for field, value in subclass_fields.items()
   }
 
-  extra = dict(source_model.extra or {})
+  extra = dict(subclass_model.extra or {})
   if subclass_values_by_field:
-    tunix_ext = extra.get(TUNIX_EXTENSIONS_KEY) or {}
-    extra[TUNIX_EXTENSIONS_KEY] = tunix_ext | subclass_values_by_field
+    extensions_key = subclass_model.EXTENSIONS_KEY
+    existing_extensions = extra.get(extensions_key) or {}
+    extra[extensions_key] = existing_extensions | subclass_values_by_field
   if extra:
-    target_values_by_field[_EXTRA_FIELD] = extra
-  return target_values_by_field
+    base_values_by_field[_EXTRA_FIELD] = extra
+  return base_values_by_field
 
 
 def _unpack_subclass_values_from_extra(
-    source_model: Step | TrajectoryMetadata,
-    target_cls: type[pydantic.BaseModel],
+    atif_model: Step | TrajectoryMetadata,
+    subclass_cls: type[Step | TrajectoryMetadata],
 ) -> dict[str, Any]:
-  """Extracts `source_model.extra[TUNIX_EXTENSIONS_KEY]` into top-level values."""
-  extra = dict(source_model.extra or {})
-  tunix_ext = dict(extra.pop(TUNIX_EXTENSIONS_KEY, None) or {})
+  """Extracts `atif_model.extra[subclass_cls.EXTENSIONS_KEY]` into top-level fields.
 
-  target_field_names = _get_field_names(target_cls)
-  source_field_names = _get_field_names(type(source_model))
-  subclass_field_names = target_field_names - source_field_names
+  Args:
+    atif_model: The base ATIF `Step` or `TrajectoryMetadata` instance holding
+      packed extension fields in `extra`.
+    subclass_cls: The concrete `Step` or `TrajectoryMetadata` subclass to
+      rehydrate into.
 
-  target_values_by_field = _get_non_none_fields(
-      source_model, (source_field_names & target_field_names) - {_EXTRA_FIELD}
+  Returns:
+    A field-value dict ready for `subclass_cls.model_validate(...)`.
+  """
+  extensions_key = getattr(subclass_cls, "EXTENSIONS_KEY", None)
+  extra = dict(atif_model.extra or {})
+  packed_extensions = (
+      dict(extra.pop(extensions_key, None) or {}) if extensions_key else {}
   )
 
-  # Promote only target subclass fields from `extra[TUNIX_EXTENSIONS_KEY]`,
-  # leaving any non-subclass keys in place so `extra="forbid"` is not tripped.
-  for field in tunix_ext.keys() & subclass_field_names:
-    target_values_by_field[field] = tunix_ext.pop(field)
-  if tunix_ext:
-    extra[TUNIX_EXTENSIONS_KEY] = tunix_ext
+  subclass_all_fields = _get_field_names(subclass_cls)
+  base_field_names = _get_field_names(type(atif_model))
+  extension_field_names = subclass_all_fields - base_field_names
+
+  values_by_field = _get_non_none_fields(
+      atif_model, (base_field_names & subclass_all_fields) - {_EXTRA_FIELD}
+  )
+
+  # Promote only fields declared on `subclass_cls` from `extra[extensions_key]`,
+  # leaving any unrecognized keys in place so `extra="forbid"` is not tripped.
+  for field in packed_extensions.keys() & extension_field_names:
+    values_by_field[field] = packed_extensions.pop(field)
+  if packed_extensions and extensions_key:
+    extra[extensions_key] = packed_extensions
   if extra:
-    target_values_by_field[_EXTRA_FIELD] = extra
-  return target_values_by_field
+    values_by_field[_EXTRA_FIELD] = extra
+  return values_by_field
 
 
 _StepT = TypeVar("_StepT", "TunixAgentStep", "TunixEnvStep")
@@ -613,10 +642,30 @@ _LlmOnlyField = Literal[
 _LLM_ONLY_FIELDS: Final[tuple[_LlmOnlyField, ...]] = get_args(_LlmOnlyField)
 
 
+def _validate_subclass_extensions_key(cls: type[pydantic.BaseModel]) -> None:
+  """Raises TypeError if `cls` does not define a non-empty EXTENSIONS_KEY."""
+  extensions_key = getattr(cls, "EXTENSIONS_KEY", None)
+  if not isinstance(extensions_key, str) or not extensions_key:
+    raise TypeError(
+        f"{cls.__name__} must define a non-empty string 'EXTENSIONS_KEY'"
+        " ClassVar."
+    )
+
+
 class Step(pydantic.BaseModel):
   """A single turn/interaction step."""
 
   model_config = pydantic.ConfigDict(extra="forbid")
+
+  # Key in `extra` under which subclass-specific fields are packed when
+  # projecting to base ATIF. Subclasses must define this ClassVar.
+  EXTENSIONS_KEY: ClassVar[str]
+
+  @classmethod
+  def __pydantic_init_subclass__(cls, **kwargs: Any) -> None:
+    """Validates that Step subclasses define a non-empty EXTENSIONS_KEY."""
+    super().__pydantic_init_subclass__(**kwargs)
+    _validate_subclass_extensions_key(cls)
 
   step_id: int = pydantic.Field(
       description="Ordinal index of the turn (starting from 1).",
@@ -695,6 +744,9 @@ class Step(pydantic.BaseModel):
         )
     return self
 
+  # TODO(tunix-dev): Add automatic Step subclass registration and resolution
+  # (mirroring TrajectoryMetadata._SUBCLASS_FIELDS and resolve_subclass) so
+  # persistent stores rehydrate custom Step subclasses automatically.
   def to_atif_step(self, step_id_offset: int = 0) -> Step:
     """Converts this step to a base ATIF Step, storing subclass fields in extra."""
     target_values_by_field = _pack_subclass_values_into_extra(self, Step)
@@ -730,22 +782,46 @@ class Agent(pydantic.BaseModel):
 class TrajectoryMetadata(pydantic.BaseModel):
   """Metadata for a trajectory (excluding steps and subagents)."""
 
-  METADATA_TYPE: ClassVar[str] = "base"
-  _REGISTRY: ClassVar[dict[str, type[TrajectoryMetadata]]] = {}
-
-  def __init_subclass__(cls, **kwargs: Any) -> None:
-    super().__init_subclass__(**kwargs)
-    meta_type = cls.__dict__.get("METADATA_TYPE")
-    if meta_type:
-      if meta_type in cls._REGISTRY:
-        raise ValueError(
-            f"METADATA_TYPE {meta_type} is already registered to"
-            f" {cls._REGISTRY[meta_type].__qualname__}; cannot register"
-            f" {cls.__qualname__}."
-        )
-      cls._REGISTRY[meta_type] = cls
-
   model_config = pydantic.ConfigDict(extra="forbid")
+
+  # Key in `extra` under which subclass-specific fields are packed when
+  # projecting to base ATIF. Subclasses must define this ClassVar.
+  EXTENSIONS_KEY: ClassVar[str]
+
+  # Maps each registered TrajectoryMetadata subclass to the set of extension
+  # field names it defines beyond the base ATIF TrajectoryMetadata schema.
+  # WeakKeyDictionary avoids keeping dynamically defined/test classes alive.
+  _SUBCLASS_FIELDS: ClassVar[
+      MutableMapping[type[TrajectoryMetadata], frozenset[str]]
+  ] = weakref.WeakKeyDictionary()
+
+  @classmethod
+  def __pydantic_init_subclass__(cls, **kwargs: Any) -> None:
+    """Validates `EXTENSIONS_KEY` and registers extension fields for subclasses.
+
+    Unlike Python's standard `__init_subclass__` (which runs before Pydantic's
+    metaclass builds `cls.model_fields`), `__pydantic_init_subclass__` is
+    invoked by Pydantic after `cls.model_fields` is populated. We verify that
+    `cls` defines a non-empty `EXTENSIONS_KEY` and record the set of fields that
+    `cls` adds on top of base `TrajectoryMetadata` so `resolve_subclass` can
+    match packed `extra[cls.EXTENSIONS_KEY]` keys back to the subclass that
+    defined them.
+    """
+    super().__pydantic_init_subclass__(**kwargs)
+    # `Trajectory` (defined later in this file) and its subclasses inherit from
+    # `TrajectoryMetadata` to share root-level ATIF fields, but represent full
+    # trajectories rather than standalone metadata classes.
+    trajectory_base = globals().get("Trajectory")
+    if cls.__name__ == "Trajectory" or (
+        trajectory_base is not None and issubclass(cls, trajectory_base)
+    ):
+      return
+    _validate_subclass_extensions_key(cls)
+    extension_fields = frozenset(
+        cls.model_fields.keys() - TrajectoryMetadata.model_fields.keys()
+    )
+    if extension_fields:
+      cls._SUBCLASS_FIELDS[cls] = extension_fields
 
   schema_version: str = pydantic.Field(
       default="ATIF-v1.7",
@@ -781,10 +857,15 @@ class TrajectoryMetadata(pydantic.BaseModel):
 
   def to_atif_metadata(self) -> TrajectoryMetadata:
     """Converts this metadata to base ATIF TrajectoryMetadata, storing subclass fields in extra."""
+    exclude_field_names = (
+        {"steps", "subagent_trajectories"}
+        if isinstance(self, Trajectory)
+        else frozenset()
+    )
     target_values_by_field = _pack_subclass_values_into_extra(
         self,
         TrajectoryMetadata,
-        exclude_field_names={"steps", "subagent_trajectories"},
+        exclude_field_names=exclude_field_names,
     )
     if target_values_by_field is None:
       return self
@@ -794,7 +875,90 @@ class TrajectoryMetadata(pydantic.BaseModel):
     """Returns the packed subclass extensions dictionary from `extra`."""
     if not self.extra:
       return {}
-    return self.extra.get(TUNIX_EXTENSIONS_KEY) or {}
+    extensions_key = getattr(
+        self.resolve_subclass(self), "EXTENSIONS_KEY", None
+    )
+    if not extensions_key:
+      return {}
+    packed_extensions = self.extra.get(extensions_key)
+    return packed_extensions if isinstance(packed_extensions, dict) else {}
+
+  @classmethod
+  def resolve_subclass(
+      cls, metadata: TrajectoryMetadata
+  ) -> type[TrajectoryMetadata]:
+    """Resolves the concrete TrajectoryMetadata class for `metadata`.
+
+    When `metadata` is deserialized from storage as a base `TrajectoryMetadata`,
+    subclass-specific fields for a registered subclass `subclass` are stored in
+    `extra[subclass.EXTENSIONS_KEY]`. This method resolves the registered
+    subclass in two tiers:
+      1. Exact or subset match (`extension_keys <= subclass_fields`): covers
+         normal persistence (`extension_keys == subclass_fields`) and forward
+         schema evolution where new optional fields were added to the subclass.
+         Picks the narrowest covering subclass, breaking ties in favor of `cls`
+         when `resolve_subclass` is called on a specific subclass.
+      2. Superset match (`subclass_fields <= extension_keys`): covers backward
+         schema evolution where a deprecated field was removed from the subclass
+         (or a caller placed custom keys in `extra[subclass.EXTENSIONS_KEY]`).
+         Picks the widest subclass whose full field set is present, breaking
+         ties in favor of `cls`; remaining unrecognized keys stay preserved in
+         `extra[subclass.EXTENSIONS_KEY]`.
+    Falls back to base `TrajectoryMetadata` when no extension keys are present
+    or no registered subclass matches.
+
+    Args:
+      metadata: A `TrajectoryMetadata` instance (either already a concrete
+        subclass or a base `TrajectoryMetadata` unpacked from ATIF).
+
+    Returns:
+      The resolved `TrajectoryMetadata` class.
+    """
+    metadata_cls = type(metadata)
+    if not isinstance(metadata, Trajectory):
+      if metadata_cls is not TrajectoryMetadata:
+        return metadata_cls
+    else:
+      # `Trajectory` subclasses multiply inherit from `Trajectory` and their
+      # paired `TrajectoryMetadata` subclass (e.g. `TunixTrajectory` inherits
+      # from `Trajectory` and `TunixTrajectoryMetadata`). Walk the Method
+      # Resolution Order (`__mro__`) to find the paired metadata subclass.
+      for base in metadata_cls.__mro__:
+        if base in cls._SUBCLASS_FIELDS:
+          return base
+    if not metadata.extra:
+      return TrajectoryMetadata
+    subset_matches: list[type[TrajectoryMetadata]] = []
+    superset_matches: list[type[TrajectoryMetadata]] = []
+    for subclass, subclass_fields in cls._SUBCLASS_FIELDS.items():
+      packed_extensions = metadata.extra.get(subclass.EXTENSIONS_KEY)
+      if not isinstance(packed_extensions, Mapping) or not packed_extensions:
+        continue
+      extension_keys = packed_extensions.keys()
+      if extension_keys <= subclass_fields:
+        subset_matches.append(subclass)
+      elif subclass_fields <= extension_keys:
+        superset_matches.append(subclass)
+    # In Python, `False < True` (0 < 1). To break equal-length ties in favor of
+    # `cls`, `min()` uses `candidate is not cls` (False=0 for `cls`) and `max()`
+    # uses `candidate is cls` (True=1 for `cls`).
+    if subset_matches:
+      return min(
+          subset_matches,
+          key=lambda candidate: (
+              len(cls._SUBCLASS_FIELDS[candidate]),
+              candidate is not cls,
+          ),
+      )
+    if superset_matches:
+      return max(
+          superset_matches,
+          key=lambda candidate: (
+              len(cls._SUBCLASS_FIELDS[candidate]),
+              candidate is cls,
+          ),
+      )
+    return TrajectoryMetadata
 
   @classmethod
   def from_atif_metadata(cls: type[Self], metadata: TrajectoryMetadata) -> Self:
@@ -839,13 +1003,17 @@ class TrajectoryMetadata(pydantic.BaseModel):
         "steps",
         "subagent_trajectories",
     }
-    data = _get_non_none_fields(self, metadata_fields)
+    data = {field: getattr(self, field) for field in metadata_fields}
     if steps is not None:
       data["steps"] = list(steps)
     if subagent_trajectories is not None:
       data["subagent_trajectories"] = list(subagent_trajectories)
     return trajectory_cls(**data)
 
+  # TODO(tunix-dev): Auto-pair or synthesize a Trajectory subclass when a
+  # TrajectoryMetadata subclass does not require custom step upcasting, removing
+  # the need to manually define a Trajectory subclass and override
+  # create_trajectory.
   def create_trajectory(
       self,
       steps: Sequence[Any] | None = None,
@@ -854,7 +1022,11 @@ class TrajectoryMetadata(pydantic.BaseModel):
     """Creates a full Trajectory from this metadata, steps, and subagents.
 
     Subclasses must override this method to construct their corresponding
-    `Trajectory` subclass via `_create_paired_trajectory`.
+    `Trajectory` subclass via `_create_paired_trajectory`. Persistent stores
+    (`FileTrajectoryStore`, `SqlTrajectoryStore`) pass deserialized base ATIF
+    `Step` instances into `steps`; subclasses that also define custom `Step`
+    subclasses should rehydrate them here (see
+    `TunixTrajectoryMetadata.create_trajectory`).
 
     Args:
       steps: Sequence of step instances, or None.
@@ -866,12 +1038,6 @@ class TrajectoryMetadata(pydantic.BaseModel):
     return self._create_paired_trajectory(
         Trajectory, steps, subagent_trajectories
     )
-
-
-# TrajectoryMetadata is the base class, so __init_subclass__ does not run on it.
-TrajectoryMetadata._REGISTRY[TrajectoryMetadata.METADATA_TYPE] = (  # pylint: disable=protected-access
-    TrajectoryMetadata
-)
 
 
 StepT = TypeVar("StepT", bound=Step)
@@ -1020,6 +1186,8 @@ class TrajectoryError:
 # --- Tunix RL Extensions ---
 # ==============================================================================
 
+TUNIX_EXTENSIONS_KEY: Final[str] = "_tunix_extensions"
+
 
 class TunixAgentStep(Step):
   """A single turn/interaction agent step with Tunix RL extensions."""
@@ -1028,6 +1196,8 @@ class TunixAgentStep(Step):
       arbitrary_types_allowed=True,
       extra="forbid",
   )
+
+  EXTENSIONS_KEY: ClassVar[str] = TUNIX_EXTENSIONS_KEY
 
   mc_return: float | None = pydantic.Field(
       default=None,
@@ -1135,6 +1305,8 @@ class TunixEnvStep(Step):
       extra="forbid",
   )
 
+  EXTENSIONS_KEY: ClassVar[str] = TUNIX_EXTENSIONS_KEY
+
   reward: float | None = pydantic.Field(
       default=None,
       description="Immediate reward signal from the environment.",
@@ -1198,7 +1370,7 @@ def _upcast_atif_step(step: Step) -> TunixAgentStep | TunixEnvStep:
 class TunixTrajectoryMetadata(TrajectoryMetadata):
   """Tunix-specific trajectory metadata extending base ATIF TrajectoryMetadata."""
 
-  METADATA_TYPE: ClassVar[str] = "tunix"
+  EXTENSIONS_KEY: ClassVar[str] = TUNIX_EXTENSIONS_KEY
 
   prompt_id: str | None = pydantic.Field(
       default=None,

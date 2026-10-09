@@ -29,9 +29,9 @@ _BUILTIN_BACKENDS = (
 )
 
 MetadataT = base_store.MetadataT
-METADATA_TYPE_KEY = base_store.METADATA_TYPE_KEY
 TrajectoryNotFoundError = base_store.TrajectoryNotFoundError
 TrajectoryMetadataNotFoundError = base_store.TrajectoryMetadataNotFoundError
 TrajectoryReader = base_store.TrajectoryReader
 TrajectoryWriter = base_store.TrajectoryWriter
 TrajectoryStore = base_store.TrajectoryStore
+TunixTrajectoryStore = base_store.TunixTrajectoryStore

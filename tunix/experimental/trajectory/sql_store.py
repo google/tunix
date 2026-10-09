@@ -432,7 +432,6 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
       run_id: str,
       db_url: str,
       auto_init: bool = True,
-      metadata_cls: type[MetadataT],
   ) -> None:
     """Initializes SqlTrajectoryStore.
 
@@ -446,17 +445,12 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
         omit the password; libpq then reads `PGPASSWORD` or `~/.pgpass`.
       auto_init: If True, automatically creates database tables and indexes on
         startup via `_initialize_schema`.
-      metadata_cls: The TrajectoryMetadata subclass to read stored metadata back
-        as; the type checker infers `MetadataT` from it. See
-        `store.TrajectoryStore`.
 
     Raises:
-      TypeError: If metadata_cls is not a TrajectoryMetadata subclass.
-      ValueError: If metadata_cls is not registered in
-        TrajectoryMetadata._REGISTRY, if `run_id` or `db_url` is empty, None,
-        or whitespace, or if `db_url` uses an unsupported database dialect.
+      ValueError: If `run_id` or `db_url` is empty, None, or whitespace, or if
+        `db_url` uses an unsupported database dialect.
     """
-    super().__init__(metadata_cls=metadata_cls)
+    super().__init__()
     if not run_id or not run_id.strip():
       raise ValueError("SqlTrajectoryStore requires a non-empty run_id.")
     if not db_url or not db_url.strip():
@@ -486,15 +480,11 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
   def _from_config(
       cls,
       config: Mapping[str, Any],
-      *,
-      metadata_cls: type[trajectory_lib.TrajectoryMetadata],
-  ) -> "SqlTrajectoryStore[Any]":
+  ) -> "SqlTrajectoryStore[MetadataT]":
     """Builds a SQL-backed store from `config`.
 
     Args:
       config: Requires "db_url" and "run_id".
-      metadata_cls: The TrajectoryMetadata subclass resolved from the config's
-        "metadata_type".
 
     Returns:
       A new SqlTrajectoryStore.
@@ -505,7 +495,6 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
     return cls(
         run_id=config.get("run_id", ""),
         db_url=config.get("db_url", ""),
-        metadata_cls=metadata_cls,
     )
 
   def to_config(self) -> dict[str, Any]:
@@ -520,7 +509,6 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
         "backend": self.BACKEND,
         "db_url": self._db_url,
         "run_id": self._run_id,
-        "metadata_type": self._metadata_type,
     }
 
   def to_redacted_config(self) -> dict[str, Any]:
@@ -601,9 +589,12 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
       metadata: TrajectoryMetadata containing trajectory_id and run metadata.
 
     Raises:
+      TypeError: If metadata is not a TrajectoryMetadata instance or its type
+        conflicts with the store's bound metadata type.
       ValueError: If metadata.trajectory_id is empty, None, or whitespace.
       RuntimeError: If the store has already been closed.
     """
+    self._validate_and_bind_metadata(metadata)
     self._writer.enqueue_write(
         run_id=self._run_id, metadata=metadata, step=step
     )
@@ -622,9 +613,12 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
       metadata: TrajectoryMetadata containing trajectory_id and run metadata.
 
     Raises:
+      TypeError: If metadata is not a TrajectoryMetadata instance or its type
+        conflicts with the store's bound metadata type.
       ValueError: If metadata.trajectory_id is empty, None, or whitespace.
       RuntimeError: If the store has already been closed.
     """
+    self._validate_and_bind_metadata(metadata)
     self._writer.enqueue_write(
         run_id=self._run_id, metadata=metadata, step=None
     )
@@ -780,6 +774,6 @@ class SqlTrajectoryStore(store.TrajectoryStore[MetadataT]):
     return trajectories
 
   def _load_metadata(self, payload: dict[str, Any]) -> MetadataT:
-    """Rehydrates a stored base-ATIF metadata payload as `metadata_cls`."""
+    """Rehydrates a stored base-ATIF metadata payload."""
     base_meta = trajectory_lib.TrajectoryMetadata.model_validate(payload)
-    return self._metadata_cls.from_atif_metadata(base_meta)
+    return self._rehydrate_metadata(base_meta)

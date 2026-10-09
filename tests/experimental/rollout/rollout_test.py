@@ -447,8 +447,8 @@ class RolloutWorkerTest(parameterized.TestCase):
       with self.assertRaises(asyncio.CancelledError):
         await gen_task
 
-      reader_store = trajectory_store_lib.TrajectoryStore.from_config(
-          {**file_store_cfg, "metadata_type": "tunix"}
+      reader_store = trajectory_store_lib.TunixTrajectoryStore.from_config(
+          file_store_cfg
       )
       assert reader_store is not None
       (cancel_meta,) = reader_store.get_trajectories_metadata(  # pyrefly: ignore[missing-attribute]

@@ -34,8 +34,8 @@ class FileTrajectoryReaderTest(store_testing.TrajectoryReaderTestCase):
     file_s = file_store.FileTrajectoryStore(
         root_dir=tmp_dir,
         run_id="test_reader_run",
-        metadata_cls=trajectory_lib.TrajectoryMetadata,
     )
+    self.addCleanup(file_s.close)
     if initial_data:
       for meta, steps in initial_data:
         for step in steps:
@@ -54,8 +54,8 @@ class FileTrajectoryWriterTest(store_testing.TrajectoryWriterTestCase):
     file_s = file_store.FileTrajectoryStore(
         root_dir=tmp_dir,
         run_id="test_writer_run",
-        metadata_cls=trajectory_lib.TrajectoryMetadata,
     )
+    self.addCleanup(file_s.close)
     return file_s, file_s
 
 
@@ -65,9 +65,8 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
   def setUp(self) -> None:
     super().setUp()
     self.tmp_dir = epath.Path(self.enter_context(tempfile.TemporaryDirectory()))
-    self.file_s = file_store.FileTrajectoryStore(
-        root_dir=self.tmp_dir, metadata_cls=trajectory_lib.TrajectoryMetadata
-    )
+    self.file_s = file_store.FileTrajectoryStore(root_dir=self.tmp_dir)
+    self.addCleanup(self.file_s.close)
 
   def test_root_dir_without_run_id(self) -> None:
     """Verifies root_dir directly returns base directory when run_id is omitted."""
@@ -78,7 +77,6 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
     file_s_with_run = file_store.FileTrajectoryStore(
         root_dir=self.tmp_dir,
         run_id="my_run_123",
-        metadata_cls=trajectory_lib.TrajectoryMetadata,
     )
     self.assertEqual(file_s_with_run.root_dir, self.tmp_dir / "my_run_123")
 
@@ -665,7 +663,6 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
     store_instance_1 = file_store.FileTrajectoryStore(
         root_dir=self.tmp_dir,
         run_id=run_id,
-        metadata_cls=trajectory_lib.TrajectoryMetadata,
     )
 
     meta = trajectory_testing.METADATA_2
@@ -676,7 +673,6 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
     store_instance_2 = file_store.FileTrajectoryStore(
         root_dir=self.tmp_dir,
         run_id=run_id,
-        metadata_cls=trajectory_lib.TrajectoryMetadata,
     )
 
     metas_2 = store_instance_2.get_trajectories_metadata()
@@ -692,7 +688,6 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
     store_instance_3 = file_store.FileTrajectoryStore(
         root_dir=self.tmp_dir,
         run_id=run_id,
-        metadata_cls=trajectory_lib.TrajectoryMetadata,
     )
     (recovered_traj,) = store_instance_3.get_trajectories(
         [trajectory_testing.TRAJECTORY_ID_2]
@@ -717,9 +712,7 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
 
   def test_context_manager_closes_store_on_exit(self) -> None:
     """Verifies the store persists pending writes when used as a context manager."""
-    with file_store.FileTrajectoryStore(
-        root_dir=self.tmp_dir, metadata_cls=trajectory_lib.TrajectoryMetadata
-    ) as file_s:
+    with file_store.FileTrajectoryStore(root_dir=self.tmp_dir) as file_s:
       file_s.add_step(
           trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1
       )
@@ -737,35 +730,25 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
     nonexistent_root = self.tmp_dir / "does_not_exist"
     store_instance = file_store.FileTrajectoryStore(
         root_dir=nonexistent_root,
-        metadata_cls=trajectory_lib.TrajectoryMetadata,
     )
     self.assertEmpty(store_instance.get_trajectories_metadata())
-
-  def test_non_metadata_cls_raises_at_construction(self) -> None:
-    """Verifies a metadata_cls that is not a TrajectoryMetadata is rejected."""
-    with self.assertRaisesRegex(TypeError, "TrajectoryMetadata subclass"):
-      file_store.FileTrajectoryStore(
-          root_dir=self.tmp_dir,
-          metadata_cls=trajectory_lib.Step,  # pyrefly: ignore[bad-argument-type]
-      )
 
 
 class FileTrajectoryStoreMetadataClsTest(
     store_testing.PersistentTrajectoryStoreMetadataClsTestCase
 ):
-  """metadata_cls contract tests for FileTrajectoryStore."""
+  """Contract tests for FileTrajectoryStore metadata_cls handling."""
 
   def setUp(self) -> None:
     super().setUp()
-    self._root_dir = epath.Path(self.create_tempdir().full_path)
+    self._root_dir = epath.Path(
+        self.enter_context(tempfile.TemporaryDirectory())
+    )
 
-  def _create_store(
-      self, metadata_cls: type[store.MetadataT]
-  ) -> store.TrajectoryStore[store.MetadataT]:
+  def _create_store(self) -> store.TrajectoryStore[Any]:
     file_s = file_store.FileTrajectoryStore(
         root_dir=self._root_dir,
         run_id="metadata_cls_run",
-        metadata_cls=metadata_cls,
     )
     self.addCleanup(file_s.close)
     return file_s
@@ -782,7 +765,6 @@ class FileTrajectoryStoreConfigTest(
         "backend": "file",
         "root_dir": self.create_tempdir().full_path,
         "run_id": "run_1",
-        "metadata_type": trajectory_lib.TrajectoryMetadata.METADATA_TYPE,
     }
 
   def test_from_config_round_trip_reads_the_same_data(self) -> None:
@@ -802,7 +784,6 @@ class FileTrajectoryStoreConfigTest(
   def test_to_config_without_run_id_raises_value_error(self) -> None:
     file_s = file_store.FileTrajectoryStore(
         root_dir=self.create_tempdir().full_path,
-        metadata_cls=trajectory_lib.TrajectoryMetadata,
     )
     self.addCleanup(file_s.close)
 

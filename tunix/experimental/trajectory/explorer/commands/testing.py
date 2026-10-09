@@ -40,9 +40,7 @@ def create_store(
   Returns:
     An initialized InMemoryTrajectoryStore instance.
   """
-  mem_store = in_memory_store.InMemoryTrajectoryStore(
-      metadata_cls=trajectory_lib.TrajectoryMetadata
-  )
+  mem_store = in_memory_store.InMemoryTrajectoryStore()
   items = trajectories
   if items is None and prefill:
     items = (

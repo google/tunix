@@ -33,7 +33,6 @@ from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import distributed_rl_engine
 from tunix.experimental.orchestrator import rl_program
 from tunix.experimental.trajectory import in_memory_store
-from tunix.experimental.trajectory import trajectory as trajectory_lib
 from tunix.experimental.worker import inference_worker as exp_inference_worker
 from tunix.experimental.worker import remote_execution
 from tunix.rl import algorithm_config
@@ -5426,9 +5425,7 @@ class StandardRLProgramTrajectoryStoreTest(absltest.TestCase):
     program.close()
 
   def test_holds_the_instance_it_was_given(self):
-    store = in_memory_store.InMemoryTrajectoryStore(
-        metadata_cls=trajectory_lib.TunixTrajectoryMetadata
-    )
+    store = in_memory_store.InMemoryTrajectoryStore()
     program = self._create_program(trajectory_store=store)
     self.assertIs(program.trajectory_store, store)
     program.close()

@@ -552,9 +552,9 @@ class ClusterOrchestratorTrajectoryStoreTest(absltest.TestCase):
         }
     )
     self.assertIsInstance(orch.trajectory_store, file_store.FileTrajectoryStore)
-    self.assertEqual(
-        orch.trajectory_store.to_config()["metadata_type"],
-        trajectory_lib.TunixTrajectoryMetadata.METADATA_TYPE,
+    self.assertIs(
+        orch.trajectory_store._metadata_cls,  # pylint: disable=protected-access
+        trajectory_lib.TunixTrajectoryMetadata,
     )
     orch.shutdown()
 
@@ -607,11 +607,7 @@ class ClusterOrchestratorTrajectoryStoreTest(absltest.TestCase):
     )
     mock_rollout = mock.MagicMock(spec=remote_execution.ActorHandle)
     mock_rollout.submit.side_effect = [
-        datatypes.Response(
-            metadata={
-                "trajectory_store_config": {**cfg, "metadata_type": "tunix"}
-            }
-        ),
+        datatypes.Response(metadata={"trajectory_store_config": cfg}),
         datatypes.Response(),
         datatypes.Response(),
     ]

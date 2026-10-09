@@ -21,7 +21,6 @@ import jax.numpy as jnp
 import numpy as np
 from tunix.experimental.trajectory import converter as converter_lib
 from tunix.experimental.trajectory import in_memory_store
-from tunix.experimental.trajectory import trajectory as trajectory_lib
 from tunix.perf.experimental import constants as perf_constants
 from tunix.perf.experimental import tracer as perf_tracer_v2
 from tunix.rl.agentic import utils
@@ -1270,9 +1269,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     ]
     outputs, _, _ = self._two_turn_routed_outputs()
     self.mock_model_call.side_effect = outputs
-    store = in_memory_store.InMemoryTrajectoryStore(
-        metadata_cls=trajectory_lib.TunixTrajectoryMetadata
-    )
+    store = in_memory_store.InMemoryTrajectoryStore()
     engine = trajectory_collect_engine.TrajectoryCollectEngine(
         agent=self.mock_agent,
         env=self.mock_env,
@@ -1308,9 +1305,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     ]
     outputs, turn0, turn1 = self._two_turn_routed_outputs()
     self.mock_model_call.side_effect = outputs
-    store = in_memory_store.InMemoryTrajectoryStore(
-        metadata_cls=trajectory_lib.TunixTrajectoryMetadata
-    )
+    store = in_memory_store.InMemoryTrajectoryStore()
     engine = trajectory_collect_engine.TrajectoryCollectEngine(
         agent=self.mock_agent,
         env=self.mock_env,
@@ -1546,9 +1541,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         ([303, 304], [1, 1]),  # env tokens 2
     ]
     self.mock_env.final_reward_fn = lambda: 0.5
-    store = in_memory_store.InMemoryTrajectoryStore(
-        metadata_cls=trajectory_lib.TunixTrajectoryMetadata
-    )
+    store = in_memory_store.InMemoryTrajectoryStore()
     metadata = converter_lib.create_trajectory_metadata(
         traj_id='traj_test_123',
     )
@@ -1612,9 +1605,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
   def test_trajectory_store_masked_out_skips_final_reward(self, mock_convert):
     mock_convert.return_value = ([101], [1])
     self.mock_env.max_steps = 1
-    store = in_memory_store.InMemoryTrajectoryStore(
-        metadata_cls=trajectory_lib.TunixTrajectoryMetadata
-    )
+    store = in_memory_store.InMemoryTrajectoryStore()
     metadata = converter_lib.create_trajectory_metadata(
         traj_id='traj_masked_out',
     )
@@ -1646,9 +1637,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         ([301, 302], [1, 1]),
         ([303, 304], [1, 1]),
     ]
-    store = in_memory_store.InMemoryTrajectoryStore(
-        metadata_cls=trajectory_lib.TunixTrajectoryMetadata
-    )
+    store = in_memory_store.InMemoryTrajectoryStore()
     metadata = converter_lib.create_trajectory_metadata(
         traj_id='traj_fallback_0',
     )
@@ -1673,9 +1662,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
   @mock.patch.object(utils, 'tokenize_and_generate_masks')
   def test_close_called_when_one_step_raises_exception(self, mock_convert):
     mock_convert.return_value = ([101], [1])
-    store = in_memory_store.InMemoryTrajectoryStore(
-        metadata_cls=trajectory_lib.TunixTrajectoryMetadata
-    )
+    store = in_memory_store.InMemoryTrajectoryStore()
     metadata = converter_lib.create_trajectory_metadata(
         traj_id='traj_err_close',
     )
@@ -1704,9 +1691,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
       self, mock_convert
   ):
     mock_convert.return_value = ([101], [1])
-    store = in_memory_store.InMemoryTrajectoryStore(
-        metadata_cls=trajectory_lib.TunixTrajectoryMetadata
-    )
+    store = in_memory_store.InMemoryTrajectoryStore()
     metadata = converter_lib.create_trajectory_metadata(
         traj_id='traj_cancel_close',
     )
@@ -1745,9 +1730,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         ([301, 302], [1, 1]),
         ([303, 304], [1, 1]),
     ]
-    store = in_memory_store.InMemoryTrajectoryStore(
-        metadata_cls=trajectory_lib.TunixTrajectoryMetadata
-    )
+    store = in_memory_store.InMemoryTrajectoryStore()
     metadata = converter_lib.create_trajectory_metadata(
         traj_id='traj_store_err',
     )

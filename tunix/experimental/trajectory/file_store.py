@@ -1,10 +1,11 @@
 """File-based implementation for Trajectory Store."""
 
+from collections.abc import Mapping
 import dataclasses
 import functools
 import re
 import types
-from typing import Any, ClassVar, Final, Mapping, TypeVar
+from typing import Any, ClassVar, Final, TypeVar
 
 from absl import logging
 from etils import epath
@@ -246,8 +247,6 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
       self,
       root_dir: epath.PathLike,
       run_id: str | None = None,
-      *,
-      metadata_cls: type[MetadataT],
   ) -> None:
     """Initializes FileTrajectoryStore.
 
@@ -258,17 +257,12 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
         scoped under root_dir / run_id. This ID MUST stay the same when
         recovering from failures or process restarts as long as the same RL
         process is being continued.
-      metadata_cls: The TrajectoryMetadata subclass to read stored metadata back
-        as; the type checker infers `MetadataT` from it. See
-        `store.TrajectoryStore`.
 
     Raises:
-      TypeError: If metadata_cls is not a TrajectoryMetadata subclass.
-      ValueError: If metadata_cls is not registered in
-        TrajectoryMetadata._REGISTRY, root_dir is empty, or run_id is given but
-        cannot be used as a directory name.
+      ValueError: If root_dir is empty, or run_id is given but cannot be used as
+        a directory name.
     """
-    super().__init__(metadata_cls=metadata_cls)
+    super().__init__()
     if not root_dir or not str(root_dir).strip():
       raise ValueError("FileTrajectoryStore requires a non-empty root_dir.")
     if run_id is not None and not _TRAJECTORY_ID_REGEX.match(run_id):
@@ -289,9 +283,7 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
   def _from_config(
       cls,
       config: Mapping[str, Any],
-      *,
-      metadata_cls: type[trajectory_lib.TrajectoryMetadata],
-  ) -> "FileTrajectoryStore[Any]":
+  ) -> "FileTrajectoryStore[MetadataT]":
     """Builds a file-backed store from `config`.
 
     Requires "root_dir" and "run_id".
@@ -322,7 +314,6 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
     return cls(
         root_dir=config["root_dir"],
         run_id=config["run_id"],
-        metadata_cls=metadata_cls,
     )
 
   def to_config(self) -> dict[str, Any]:
@@ -341,7 +332,6 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
         "backend": self.BACKEND,
         "root_dir": str(self._raw_root_dir),
         "run_id": self._run_id,
-        "metadata_type": self._metadata_type,
     }
 
   @functools.cached_property
@@ -409,8 +399,7 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
       base_meta = trajectory_lib.TrajectoryMetadata.model_validate_json(
           meta_path.read_text()
       )
-      meta = self._metadata_cls.from_atif_metadata(base_meta)
-      metas.append(meta)
+      metas.append(self._rehydrate_metadata(base_meta))
 
     return metas
 
@@ -440,7 +429,7 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
       base_meta = trajectory_lib.TrajectoryMetadata.model_validate_json(
           meta_path.read_text()
       )
-      meta = self._metadata_cls.from_atif_metadata(base_meta)
+      meta = self._rehydrate_metadata(base_meta)
       steps: list[trajectory_lib.Step] = []
 
       for file_entry in traj_dir.iterdir():
@@ -470,6 +459,8 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
       metadata: TrajectoryMetadata containing trajectory_id and run metadata.
 
     Raises:
+      TypeError: If metadata is not a TrajectoryMetadata instance or its type
+        conflicts with the store's bound metadata type.
       ValueError: If metadata.trajectory_id is empty, None, or contains
         characters that cannot be encoded in a trajectory directory name.
     """
@@ -492,9 +483,12 @@ class FileTrajectoryStore(store.TrajectoryStore[MetadataT]):
       step: Optional Step object to write alongside metadata.
 
     Raises:
+      TypeError: If metadata is not a TrajectoryMetadata instance or its type
+        conflicts with the store's bound metadata type.
       ValueError: If metadata.trajectory_id is empty, None, or contains
         characters that cannot be encoded in a trajectory directory name.
     """
+    self._validate_and_bind_metadata(metadata)
     traj_id = _validate_trajectory_id(metadata.trajectory_id)
     traj_dir = self.get_trajectory_dir(traj_id)
     meta_path = self.get_trajectory_metadata_path(traj_id)

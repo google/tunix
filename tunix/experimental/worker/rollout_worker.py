@@ -104,18 +104,10 @@ class RolloutWorker(abstract_worker.Worker):
     # Built at most once per process: this __init__ runs exactly once per
     # RolloutWorker instance, so there is no separate guard against
     # constructing the store twice. See store.TrajectoryStore.from_config.
-    store_config = (
-        {
-            trajectory_store_lib.METADATA_TYPE_KEY: (
-                trajectory_lib.TunixTrajectoryMetadata.METADATA_TYPE
-            ),
-            **config.trajectory_store_config,
-        }
-        if config is not None and config.trajectory_store_config is not None
-        else None
-    )
-    self._trajectory_store = trajectory_store_lib.TrajectoryStore.from_config(
-        store_config
+    self._trajectory_store = (
+        trajectory_store_lib.TunixTrajectoryStore.from_config(
+            config.trajectory_store_config if config is not None else None
+        )
     )
     if self._trajectory_store is not None:
       # Several workers can share one log stream, and absl log lines carry no
@@ -138,7 +130,9 @@ class RolloutWorker(abstract_worker.Worker):
     )
 
   @property
-  def trajectory_store(self) -> trajectory_store_lib.TrajectoryStore | None:
+  def trajectory_store(
+      self,
+  ) -> trajectory_store_lib.TunixTrajectoryStore | None:
     return self._trajectory_store
 
   @property
