@@ -34,8 +34,9 @@ class _TestAsyncWriter(async_writer.AsyncWriter[_TestWriteTask]):
       self,
       thread_name: str | None = None,
       fail_on_step_id: int | None = None,
+      max_queue_size: int = async_writer.DEFAULT_MAX_QUEUE_SIZE,
   ):
-    super().__init__(thread_name=thread_name)
+    super().__init__(thread_name=thread_name, max_queue_size=max_queue_size)
     self.processed_tasks: list[_TestWriteTask] = []
     self.processing_thread_ids: list[int] = []
     self.fail_on_step_id = fail_on_step_id
@@ -45,10 +46,15 @@ class _TestAsyncWriter(async_writer.AsyncWriter[_TestWriteTask]):
       trajectory_id: str = trajectory_testing.TRAJECTORY_ID_1,
       step_id: int | None = None,
       run_id: str | None = None,
+      metadata: trajectory_lib.TrajectoryMetadata | None = None,
   ) -> _TestWriteTask:
     """Builds a task and submits it through the engine's `_enqueue` entry."""
     task = _TestWriteTask(
-        metadata=trajectory_testing.make_metadata(trajectory_id=trajectory_id),
+        metadata=(
+            metadata
+            if metadata is not None
+            else trajectory_testing.make_metadata(trajectory_id=trajectory_id)
+        ),
         step=(
             trajectory_testing.make_step(step_id=step_id)
             if step_id is not None
@@ -77,10 +83,13 @@ class AsyncWriterTest(trajectory_testing.TrajectoryTestCase):
       self,
       thread_name: str | None = None,
       fail_on_step_id: int | None = None,
+      max_queue_size: int = async_writer.DEFAULT_MAX_QUEUE_SIZE,
   ) -> _TestAsyncWriter:
     """Creates a test writer with guaranteed cleanup on test completion."""
     writer = _TestAsyncWriter(
-        thread_name=thread_name, fail_on_step_id=fail_on_step_id
+        thread_name=thread_name,
+        fail_on_step_id=fail_on_step_id,
+        max_queue_size=max_queue_size,
     )
     self.addCleanup(writer.close)
     return writer
@@ -537,6 +546,133 @@ class AsyncWriterTest(trajectory_testing.TrajectoryTestCase):
 
     self.assertFalse(worker_thread.is_alive())
     self.assertLen(fresh_writer.processed_tasks, 1)
+
+  # ============================================================================
+  # 7. Bounded Queue Capacity & Metadata Reserve
+  # ============================================================================
+
+  def test_writer_without_max_queue_size_uses_default_queue_limits(
+      self,
+  ) -> None:
+    writer = self._create_writer()
+
+    self.assertEqual(writer.max_queue_size, async_writer.DEFAULT_MAX_QUEUE_SIZE)
+    self.assertEqual(writer.step_queue_limit, 9_000)
+
+  @parameterized.parameters((10, 9), (1, 1))
+  def test_writer_with_custom_max_queue_size_sets_queue_limits(
+      self, max_queue_size: int, expected_step_limit: int
+  ) -> None:
+    writer = self._create_writer(max_queue_size=max_queue_size)
+
+    self.assertEqual(writer.max_queue_size, max_queue_size)
+    self.assertEqual(writer.step_queue_limit, expected_step_limit)
+
+  @parameterized.parameters(0, -1, -100)
+  def test_writer_with_non_positive_max_queue_size_raises_value_error(
+      self, invalid_max_queue_size: int
+  ) -> None:
+    with self.assertRaisesRegex(ValueError, r"max_queue_size must be positive"):
+      _TestAsyncWriter(max_queue_size=invalid_max_queue_size)
+
+  def test_enqueue_when_step_queue_is_full_drops_step_and_admits_metadata(
+      self,
+  ) -> None:
+    # With max_queue_size=4, step_queue_limit is int(4 * 0.9) = 3, leaving 1
+    # reserved slot for metadata-only tasks (step=None).
+    writer = self._create_writer(max_queue_size=4)
+    worker_started = threading.Event()
+    unblock_worker = threading.Event()
+    self.addCleanup(unblock_worker.set)
+    original_process_task = writer._process_task
+
+    def stalled_process_task(task: _TestWriteTask) -> None:
+      if not worker_started.is_set():
+        worker_started.set()
+        unblock_worker.wait(timeout=_WORKER_BLOCK_TIMEOUT_S)
+      original_process_task(task)
+
+    with mock.patch.object(
+        writer, "_process_task", side_effect=stalled_process_task
+    ):
+      # Task 1 is dequeued immediately and stalls the worker; tasks 2-4 fill
+      # the 3 step slots in the queue.
+      writer.enqueue(step_id=1)
+      self.assertTrue(worker_started.wait(timeout=_WORKER_START_TIMEOUT_S))
+      writer.enqueue(step_id=2)
+      writer.enqueue(step_id=3)
+      writer.enqueue(step_id=4)
+
+      with mock.patch.object(logging, "warning") as mock_log_warning:
+        writer.enqueue(step_id=5)
+
+      # A metadata-only update (step_id=None) is still admitted into the
+      # reserved 4th slot.
+      completed_meta = trajectory_testing.make_metadata(
+          trajectory_id=trajectory_testing.TRAJECTORY_ID_1,
+          session_id="completed_session",
+      )
+      writer.enqueue(metadata=completed_meta)
+      unblock_worker.set()
+      writer.flush()
+
+    mock_log_warning.assert_called_once_with(
+        "%s step queue reached capacity (%d/%d); dropped step_id=%s"
+        " for trajectory_id=%s.",
+        "_TestAsyncWriterWorker",
+        3,
+        3,
+        5,
+        trajectory_testing.TRAJECTORY_ID_1,
+    )
+    processed_step_ids = [
+        t.step.step_id for t in writer.processed_tasks if t.step is not None
+    ]
+    self.assertEqual(processed_step_ids, [1, 2, 3, 4])
+    self.assertIsNone(writer.processed_tasks[-1].step)
+    self.assertEqual(
+        writer.processed_tasks[-1].metadata.session_id, "completed_session"
+    )
+
+  def test_enqueue_when_queue_is_full_drops_metadata_task(self) -> None:
+    writer = self._create_writer(max_queue_size=2)
+    worker_started = threading.Event()
+    unblock_worker = threading.Event()
+    self.addCleanup(unblock_worker.set)
+    original_process_task = writer._process_task
+
+    def stalled_process_task(task: _TestWriteTask) -> None:
+      if not worker_started.is_set():
+        worker_started.set()
+        unblock_worker.wait(timeout=_WORKER_BLOCK_TIMEOUT_S)
+      original_process_task(task)
+
+    with mock.patch.object(
+        writer, "_process_task", side_effect=stalled_process_task
+    ):
+      writer.enqueue(step_id=1)
+      self.assertTrue(worker_started.wait(timeout=_WORKER_START_TIMEOUT_S))
+      # Fill queue to max_queue_size=2 (1 step slot + 1 metadata reserve slot).
+      writer.enqueue(step_id=2)
+      writer.enqueue(trajectory_id=trajectory_testing.TRAJECTORY_ID_1)
+
+      with mock.patch.object(logging, "warning") as mock_log_warning:
+        writer.enqueue(trajectory_id=trajectory_testing.TRAJECTORY_ID_2)
+
+      unblock_worker.set()
+      writer.flush()
+
+    mock_log_warning.assert_called_once_with(
+        "%s queue is full (%d/%d); dropped metadata task for trajectory_id=%s.",
+        "_TestAsyncWriterWorker",
+        2,
+        2,
+        trajectory_testing.TRAJECTORY_ID_2,
+    )
+    self.assertEqual(
+        [t.trajectory_id for t in writer.processed_tasks],
+        [trajectory_testing.TRAJECTORY_ID_1] * 3,
+    )
 
 
 class AsyncWriterShutdownHookTest(parameterized.TestCase):

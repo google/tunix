@@ -5,11 +5,28 @@ import atexit
 import dataclasses
 import queue
 import threading
-from typing import Any, Generic, TypeVar
+from typing import Any, Final, Generic, TypeVar
 import weakref
 
 from absl import logging
 from tunix.experimental.trajectory import trajectory as trajectory_lib
+
+# Default maximum number of pending WriteTasks buffered in AsyncWriter's queue.
+# Each WriteTask holds a deep copy of TrajectoryMetadata and Step (~24 KB/task
+# on average across 600k production steps, or ~11.5-36 KB across 8k-32k token
+# context windows). Bounding the queue at 10,000 tasks (~240 MB, <= 0.5% of a
+# 70 GB container limit) prevents unbounded heap growth, pymalloc arena
+# fragmentation, and Gen-2 GC pauses during storage stalls while providing ~10x
+# headroom over peak per-worker queue depths (~730-1,010 tasks across 8-16
+# workers) observed in 9,856-trajectory load testing.
+DEFAULT_MAX_QUEUE_SIZE: Final[int] = 10_000
+
+# Fraction of `max_queue_size` available for `Step` writes (90%, or 9,000 slots
+# at the default 10,000 limit). The remaining 10% (1,000 slots, < 1 MB RAM) is
+# reserved for metadata-only updates (`task.step is None`) so trajectory
+# records and final episode statuses are preserved when step writes fill the
+# queue.
+_STEP_QUEUE_CAPACITY_RATIO: Final[float] = 0.9
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
@@ -94,44 +111,78 @@ class AsyncWriter(abc.ABC, Generic[_TaskT]):
   Architectural Decisions & Invariants:
     1. Single Dedicated Background Worker Thread:
        A single background daemon thread processes write tasks sequentially
-       from an unbounded FIFO queue (`queue.Queue`). Using a single sequential
+       from a bounded FIFO queue (`queue.Queue`). Using a single sequential
        worker ensures chronological order per entity without requiring complex
        per-record locking, while keeping memory and thread overhead minimal in
        distributed training environments.
 
-    2. Lazy Worker Thread Initialization:
+    2. Bounded Queue Capacity with Metadata Reserve:
+       To prevent unbounded memory growth or caller-thread blocking during
+       storage latency spikes, the queue enforces a hard capacity of
+       `max_queue_size`:
+         - Step tasks (`task.step is not None`) are admitted below
+           `step_queue_limit` (90% of `max_queue_size`) and dropped
+           non-blockingly with a warning once `step_queue_limit` is reached.
+         - Metadata-only tasks (`task.step is None`) may use the remaining 10%
+           reserve up to `max_queue_size` so parent trajectory records and
+           final episode statuses are preserved when step writes fill the
+           queue. At `max_queue_size`, all incoming tasks are dropped
+           non-blockingly with a warning.
+
+    3. Lazy Worker Thread Initialization:
        The worker thread is not spawned during `__init__`. Instead, it is
        lazily initialized under a thread lock on the first enqueue operation.
        This prevents unnecessary OS thread allocation in read-only processes.
 
-    3. Best-Effort Fault Tolerance:
+    4. Best-Effort Fault Tolerance:
        Persistence errors (e.g. disk full, transient network database errors)
        must never crash distributed training loops. The worker loop catches all
        task processing exceptions, logs them with full tracebacks via
        `_log_task_error`, and continues draining subsequent tasks. Errors are
        suppressed and never propagated back to callers or `flush()`.
 
-    4. Strict Barrier Synchronization:
+    5. Strict Barrier Synchronization:
        `flush()` blocks on `_queue.join()`. When `flush()` returns, all tasks
        enqueued prior to the call are guaranteed to have completed execution.
 
-    5. Safe Lifecycle & Shutdown Hook:
+    6. Safe Lifecycle & Shutdown Hook:
        `close()` enqueues a sentinel None task, joins the worker thread with a
        configurable timeout, and deregisters from `_LIVE_WRITERS`. The `atexit`
        hook drains all live instances when the interpreter exits.
   """
 
-  def __init__(self, thread_name: str | None = None):
+  def __init__(
+      self,
+      thread_name: str | None = None,
+      max_queue_size: int = DEFAULT_MAX_QUEUE_SIZE,
+  ):
     """Initializes AsyncWriter without starting the background worker.
 
     Args:
       thread_name: Descriptive name for the background worker thread. Defaults
         to '<ClassName>Worker'.
+      max_queue_size: Maximum number of pending tasks buffered in the queue
+        before dropping incoming writes. Defaults to `DEFAULT_MAX_QUEUE_SIZE`
+        (10,000).
+
+    Raises:
+      ValueError: If `max_queue_size` is not positive.
     """
+    if max_queue_size <= 0:
+      raise ValueError(
+          f"max_queue_size must be positive, got {max_queue_size}."
+      )
     self._thread_name = thread_name or f"{type(self).__name__}Worker"
-    # Unbounded FIFO queue for passing write tasks to the worker thread.
+    self._max_queue_size = max_queue_size
+    self._step_queue_limit = max(
+        1, int(max_queue_size * _STEP_QUEUE_CAPACITY_RATIO)
+    )
+    # FIFO queue for passing write tasks to the worker thread. Capacity limits
+    # (`_step_queue_limit` and `_max_queue_size`) are enforced under
+    # `self._lock` in `_enqueue` so that `close()` can always append the `None`
+    # shutdown sentinel without blocking when the queue is full.
     self._queue: queue.Queue[_TaskT | None] = queue.Queue()
-    # Lock protecting lazy thread spawning and closed state transitions.
+    # Lock protecting lazy thread spawning, queue admission, and closed state.
     self._lock = threading.Lock()
     # Users are not expected to explicitly call close() on the writer, as its
     # lifecycle is managed automatically.
@@ -146,6 +197,16 @@ class AsyncWriter(abc.ABC, Generic[_TaskT]):
     return self._thread_name
 
   @property
+  def max_queue_size(self) -> int:
+    """Returns the hard maximum capacity of the write queue."""
+    return self._max_queue_size
+
+  @property
+  def step_queue_limit(self) -> int:
+    """Returns the queue limit above which step tasks are dropped."""
+    return self._step_queue_limit
+
+  @property
   def is_closed(self) -> bool:
     """Returns True if the writer has been closed."""
     with self._lock:
@@ -155,7 +216,8 @@ class AsyncWriter(abc.ABC, Generic[_TaskT]):
     """Enqueues a task for asynchronous processing by the worker thread.
 
     Lazily spawns the background worker thread under lock if not already
-    running.
+    running, and drops incoming tasks non-blockingly when queue capacity is
+    reached.
 
     Args:
       task: Container holding task payload.
@@ -163,11 +225,36 @@ class AsyncWriter(abc.ABC, Generic[_TaskT]):
     Raises:
       RuntimeError: If the writer has already been closed.
     """
+    traj_id = task.trajectory_id
     with self._lock:
       if self._closed:
         raise RuntimeError(
             f"Cannot write to a closed writer ({self._thread_name})."
         )
+
+      qsize = self._queue.qsize()
+      if task.step is not None and qsize >= self._step_queue_limit:
+        logging.warning(
+            "%s step queue reached capacity (%d/%d); dropped step_id=%s"
+            " for trajectory_id=%s.",
+            self._thread_name,
+            qsize,
+            self._step_queue_limit,
+            task.step.step_id,
+            traj_id,
+        )
+        return
+
+      if qsize >= self._max_queue_size:
+        logging.warning(
+            "%s queue is full (%d/%d); dropped metadata task for"
+            " trajectory_id=%s.",
+            self._thread_name,
+            qsize,
+            self._max_queue_size,
+            traj_id,
+        )
+        return
 
       if self._worker_thread is None:
         self._worker_thread = threading.Thread(
@@ -176,7 +263,7 @@ class AsyncWriter(abc.ABC, Generic[_TaskT]):
             daemon=True,
         )
         self._worker_thread.start()
-      self._queue.put(task)
+      self._queue.put_nowait(task)
 
   def _worker_loop(self) -> None:
     """Worker loop processing tasks sequentially from the queue.
