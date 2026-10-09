@@ -32,6 +32,9 @@ export ROLLOUT_MESH_EXPERT="${ROLLOUT_MESH_EXPERT:-$(( ${_rollout_dims//x/*} / $
 export ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-16}"
 export BATCH_SIZE="${BATCH_SIZE:-$(( 4 * ROLLOUT_REPLICAS ))}"
 
+# v5p rollout libtpu flags; set before sourcing so the v7x default (with --xla_tpu_dvfs_p_state=7) isn't inherited
+export LIBTPU_INIT_ARGS="${LIBTPU_INIT_ARGS:- --xla_tpu_use_minor_sharding_for_major_trivial_input=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=false --xla_tpu_ars_combiner_threshold_in_bytes=0 --xla_tpu_enable_async_collective_merger=false --xla_tpu_check_legacy_constraints_in_reduce_scatter_legalizer=false}"
+
 # v5p Sandbox
 export MAX_WARMPOOL_REPLICAS="${MAX_WARMPOOL_REPLICAS:-16}"
 export MAX_CONCURRENCY="${MAX_CONCURRENCY:-$(( 16 * ROLLOUT_REPLICAS ))}"
