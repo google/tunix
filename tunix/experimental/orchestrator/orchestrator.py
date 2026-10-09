@@ -315,6 +315,12 @@ class ClusterOrchestrator:
     """Returns handles for all workers (remote and local) registered under the given role."""
     return self._get_actor_handles(role)
 
+  def remote_worker_handles(
+      self,
+  ) -> dict[str, remote_execution.ActorHandle]:
+    """Returns a copy of ``worker_id -> handle`` for the remote workers."""
+    return dict(self._remote_worker_handles_by_id)
+
   def sync_jax_cache(self) -> None:
     """Synchronizes JAX compilation cache across all workers to GCS."""
     if not self._save_jax_cache:
