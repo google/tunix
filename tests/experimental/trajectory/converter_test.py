@@ -91,6 +91,167 @@ class CreateAgentStepTest(trajectory_testing.TrajectoryTestCase):
     with self.assertRaises(ValueError):
       converter.create_agent_step(mock_rl_step, tunix_step_id=0)
 
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="int32_array",
+          assistant_tokens=np.array([101, -102], dtype=np.int32),
+          expected_token_ids=[101, -102],
+      ),
+      dict(
+          testcase_name="uint64_array",
+          assistant_tokens=np.array([101, 2**64 - 1], dtype=np.uint64),
+          expected_token_ids=[101, 2**64 - 1],
+      ),
+      dict(
+          testcase_name="int8_array",
+          assistant_tokens=np.array([-128, 127], dtype=np.int8),
+          expected_token_ids=[-128, 127],
+      ),
+      dict(
+          testcase_name="uint8_array",
+          assistant_tokens=np.array([0, 255], dtype=np.uint8),
+          expected_token_ids=[0, 255],
+      ),
+      dict(
+          testcase_name="big_endian_int32_array",
+          assistant_tokens=np.array([101, -102], dtype=">i4"),
+          expected_token_ids=[101, -102],
+      ),
+      dict(
+          testcase_name="strided_int32_array",
+          assistant_tokens=np.arange(6, dtype=np.int32)[::2],
+          expected_token_ids=[0, 2, 4],
+      ),
+      dict(
+          testcase_name="empty_int32_array",
+          assistant_tokens=np.array([], dtype=np.int32),
+          expected_token_ids=[],
+      ),
+      dict(
+          testcase_name="bool_array",
+          assistant_tokens=np.array([True, False]),
+          expected_token_ids=[1, 0],
+      ),
+      dict(
+          testcase_name="float_array",
+          assistant_tokens=np.array([101.7, -102.7]),
+          expected_token_ids=[101, -102],
+      ),
+      dict(
+          testcase_name="list",
+          assistant_tokens=[101, 102],
+          expected_token_ids=[101, 102],
+      ),
+      dict(
+          testcase_name="tuple_of_numpy_ints",
+          assistant_tokens=(np.int64(101), np.int64(102)),
+          expected_token_ids=[101, 102],
+      ),
+  )
+  def test_create_agent_step_converts_token_ids_to_python_ints(
+      self, assistant_tokens: Any, expected_token_ids: list[int]
+  ) -> None:
+    """Verifies token IDs are converted to a list of Python ints."""
+    rl_step = agent_types.Step(
+        model_response="resp", assistant_tokens=assistant_tokens
+    )
+
+    agent_step = converter.create_agent_step(rl_step, tunix_step_id=0)
+
+    token_ids = agent_step.metrics.completion_token_ids
+    self.assertEqual(token_ids, expected_token_ids)
+    self.assertEqual([type(t) for t in token_ids], [int] * len(token_ids))
+    self.assertEqual(agent_step.metrics.completion_tokens, len(token_ids))
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="float16_array",
+          logprobs=np.array([-0.1, -np.inf, np.nan], dtype=np.float16),
+          expected_logprobs=[float(np.float16(-0.1)), -np.inf, np.nan],
+      ),
+      dict(
+          testcase_name="float32_array",
+          logprobs=np.array([-0.1, -np.inf, np.nan], dtype=np.float32),
+          expected_logprobs=[float(np.float32(-0.1)), -np.inf, np.nan],
+      ),
+      dict(
+          testcase_name="float64_array",
+          logprobs=np.array([-0.1, -np.inf, np.nan]),
+          expected_logprobs=[-0.1, -np.inf, np.nan],
+      ),
+      dict(
+          testcase_name="big_endian_float32_array",
+          logprobs=np.array([-0.1, -np.inf], dtype=">f4"),
+          expected_logprobs=[float(np.float32(-0.1)), -np.inf],
+      ),
+      dict(
+          testcase_name="strided_float64_array",
+          logprobs=np.array([-0.5, 9.0, -1.5, 9.0])[::2],
+          expected_logprobs=[-0.5, -1.5],
+      ),
+      dict(
+          testcase_name="empty_float32_array",
+          logprobs=np.array([], dtype=np.float32),
+          expected_logprobs=[],
+      ),
+      dict(
+          testcase_name="longdouble_array",
+          logprobs=np.array([-0.5, -1.5], dtype=np.longdouble),
+          expected_logprobs=[-0.5, -1.5],
+      ),
+      dict(
+          testcase_name="int_array",
+          logprobs=np.array([-1, 0]),
+          expected_logprobs=[-1.0, 0.0],
+      ),
+      dict(
+          testcase_name="list",
+          logprobs=[-0.5, -1],
+          expected_logprobs=[-0.5, -1.0],
+      ),
+  )
+  def test_create_agent_step_converts_logprobs_to_python_floats(
+      self, logprobs: Any, expected_logprobs: list[float]
+  ) -> None:
+    """Verifies logprobs are converted to a list of Python floats."""
+    rl_step = agent_types.Step(model_response="resp", logprobs=logprobs)
+
+    agent_step = converter.create_agent_step(rl_step, tunix_step_id=0)
+
+    converted_logprobs = agent_step.metrics.logprobs
+    np.testing.assert_array_equal(converted_logprobs, expected_logprobs)
+    self.assertEqual(
+        [type(lp) for lp in converted_logprobs],
+        [float] * len(converted_logprobs),
+    )
+
+  def test_create_agent_step_metrics_match_validated_metrics(self) -> None:
+    """Verifies the unvalidated Metrics equals one built with validation."""
+    rl_step = agent_types.Step(
+        model_response="resp",
+        assistant_tokens=np.array([101, 102], dtype=np.int32),
+        logprobs=np.array([-0.5, -1.5], dtype=np.float32),
+    )
+
+    metrics = converter.create_agent_step(rl_step, tunix_step_id=0).metrics
+
+    validated = trajectory_lib.Metrics.model_validate(metrics.model_dump())
+    self.assertEqual(metrics, validated)
+    self.assertEqual(
+        metrics.model_fields_set,
+        {"completion_tokens", "completion_token_ids", "logprobs"},
+    )
+
+  def test_create_agent_step_with_masked_token_raises_mask_error(self) -> None:
+    """Verifies token IDs in a masked array with a masked entry are rejected."""
+    rl_step = agent_types.Step(
+        model_response="resp",
+        assistant_tokens=np.ma.masked_array([101, 102], mask=[False, True]),
+    )
+
+    with self.assertRaises(np.ma.MaskError):
+      converter.create_agent_step(rl_step, tunix_step_id=0)
+
   def test_create_agent_step_multiple_tool_calls(self):
     mock_agent_step = agent_types.Step(
         model_response="Calling multiple tools",

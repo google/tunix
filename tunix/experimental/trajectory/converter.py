@@ -14,12 +14,69 @@
 
 """Converter for translating between Tunix RL Step and Trajectory Step representations."""
 
-from typing import Any
+from typing import Any, TypeGuard
 
 import numpy as np
 from tunix.experimental.trajectory import action_converter
 from tunix.experimental.trajectory import trajectory as trajectory_lib
 from tunix.rl.agentic.agents import agent_types
+
+
+def _is_plain_1d_array(values: Any) -> TypeGuard[np.ndarray]:
+  """Returns whether `values` is a 1-D array of the exact type `np.ndarray`.
+
+  Subclasses are excluded because they can override `tolist()`: for example,
+  `np.ma.MaskedArray.tolist()` returns None for masked elements.
+
+  Args:
+    values: The object to check.
+  """
+  values_type = type(values)
+  return values_type is np.ndarray and values.ndim == 1
+
+
+def _to_int_list(values: list[Any] | tuple[Any, ...] | np.ndarray) -> list[int]:
+  """Converts each element of `values` with `int()`.
+
+  For a 1-D array of a NumPy integer type, one `ndarray.tolist()` call returns
+  the same Python ints in a single C-level pass, which is much faster than
+  converting the elements one by one.
+
+  Args:
+    values: The sequence of values to convert.
+
+  Returns:
+    The converted values.
+  """
+  if _is_plain_1d_array(values) and values.dtype.kind in "iu":
+    return values.tolist()
+  return [int(v) for v in values]
+
+
+def _to_float_list(
+    values: list[Any] | tuple[Any, ...] | np.ndarray,
+) -> list[float]:
+  """Converts each element of `values` with `float()`.
+
+  For a 1-D array of `np.float16`, `np.float32`, or `np.float64`, one
+  `ndarray.tolist()` call returns the same Python floats in a single C-level
+  pass, which is much faster than converting the elements one by one. Other
+  float types are converted one by one: `tolist()` would keep `np.longdouble`
+  elements as NumPy scalars, even where `np.longdouble` is 64-bit.
+
+  Args:
+    values: The sequence of values to convert.
+
+  Returns:
+    The converted values.
+  """
+  if _is_plain_1d_array(values) and values.dtype.type in (
+      np.float16,
+      np.float32,
+      np.float64,
+  ):
+    return values.tolist()
+  return [float(v) for v in values]
 
 
 def _extract_metrics(
@@ -35,10 +92,10 @@ def _extract_metrics(
       assistant_tokens, (list, tuple, np.ndarray)
   ):
     completion_tokens = len(assistant_tokens)
-    completion_token_ids = [int(t) for t in assistant_tokens]
+    completion_token_ids = _to_int_list(assistant_tokens)
 
   if logprobs is not None and isinstance(logprobs, (list, tuple, np.ndarray)):
-    logprobs_list = [float(lp) for lp in logprobs]
+    logprobs_list = _to_float_list(logprobs)
 
   if (
       completion_token_ids is not None
@@ -53,7 +110,7 @@ def _extract_metrics(
   if completion_tokens is None and logprobs_list is None:
     return None
 
-  return trajectory_lib.Metrics(
+  return trajectory_lib.Metrics.model_construct(
       completion_tokens=completion_tokens,
       completion_token_ids=completion_token_ids,
       logprobs=logprobs_list,

@@ -1,6 +1,9 @@
+import collections
+from collections.abc import Iterator
 import copy
 import json
 import os
+from typing import Any
 from unittest import mock
 
 from absl.testing import absltest
@@ -180,6 +183,368 @@ class MetadataDictSerializationTest(parameterized.TestCase):
     self.assertEqual(dumped_extra, {"tokens": tokens})
     # One call for the `extra` dict and one for the list, none per element.
     self.assertEqual(mock_to_json_compatible.call_count, 2)
+
+
+class _IterationCountingArray(np.ndarray):
+  """A NumPy array that counts the calls to its `__iter__`."""
+
+  iteration_count: int
+
+  def __array_finalize__(self, obj: np.ndarray | None) -> None:
+    """Starts the iteration count of each new array at zero."""
+    del obj  # Unused.
+    self.iteration_count = 0
+
+  def __iter__(self) -> Iterator[Any]:
+    """Counts the call, then iterates over the array's elements."""
+    self.iteration_count += 1
+    return super().__iter__()
+
+
+class ArrayFieldValidationTest(parameterized.TestCase):
+  """Tests validation of the NumPy array fields of Tunix steps."""
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="assistant_tokens",
+          step_cls=trajectory.TunixAgentStep,
+          source=trajectory.Source.AGENT,
+          field_name="assistant_tokens",
+          dtype=np.int32,
+      ),
+      dict(
+          testcase_name="assistant_masks",
+          step_cls=trajectory.TunixAgentStep,
+          source=trajectory.Source.AGENT,
+          field_name="assistant_masks",
+          dtype=np.int32,
+      ),
+      dict(
+          testcase_name="logprobs",
+          step_cls=trajectory.TunixAgentStep,
+          source=trajectory.Source.AGENT,
+          field_name="logprobs",
+          dtype=np.float32,
+      ),
+      dict(
+          testcase_name="env_tokens",
+          step_cls=trajectory.TunixEnvStep,
+          source=trajectory.Source.USER,
+          field_name="env_tokens",
+          dtype=np.int32,
+      ),
+      dict(
+          testcase_name="env_masks",
+          step_cls=trajectory.TunixEnvStep,
+          source=trajectory.Source.USER,
+          field_name="env_masks",
+          dtype=np.int32,
+      ),
+  )
+  def test_array_is_stored_without_iterating_its_elements(
+      self,
+      step_cls: type[trajectory.TunixAgentStep | trajectory.TunixEnvStep],
+      source: trajectory.Source,
+      field_name: str,
+      dtype: type[np.generic],
+  ) -> None:
+    """Verifies arrays are kept as they are, without iterating over them."""
+    array = np.arange(1000, dtype=dtype).view(_IterationCountingArray)
+
+    step = step_cls(
+        step_id=0, source=source, message="msg", **{field_name: array}
+    )
+
+    self.assertIs(getattr(step, field_name), array)
+    # Guards the speed of validating arrays, which relies on `np.ndarray`
+    # preceding `list[...]` in the field's union: see `trajectory.IntArray`.
+    self.assertEqual(array.iteration_count, 0)
+
+  @parameterized.named_parameters(
+      dict(testcase_name="list", tokens=[1, 2, 3]),
+      dict(testcase_name="tuple", tokens=(1, 2, 3)),
+  )
+  def test_sequence_is_validated_into_int_list(
+      self, tokens: list[int] | tuple[int, ...]
+  ) -> None:
+    """Verifies lists and tuples of ints are validated into lists of ints."""
+    step = trajectory.TunixAgentStep(
+        step_id=0,
+        source=trajectory.Source.AGENT,
+        message="msg",
+        assistant_tokens=tokens,
+    )
+
+    self.assertIsInstance(step.assistant_tokens, list)
+    self.assertEqual(step.assistant_tokens, [1, 2, 3])
+
+  @parameterized.named_parameters(
+      dict(testcase_name="string", tokens="abc"),
+      dict(testcase_name="non_int_element", tokens=[1, "x"]),
+      dict(testcase_name="numpy_scalar", tokens=np.int32(1)),
+  )
+  def test_invalid_tokens_raise_validation_error(self, tokens: Any) -> None:
+    """Verifies tokens other than arrays and sequences of ints are rejected."""
+    with self.assertRaises(pydantic.ValidationError):
+      trajectory.TunixAgentStep(
+          step_id=0,
+          source=trajectory.Source.AGENT,
+          message="msg",
+          assistant_tokens=tokens,
+      )
+
+
+class _TokenList(list[int]):
+  """A list subclass, which `copy.deepcopy` preserves."""
+
+
+class DeepCopyTest(trajectory_testing.TrajectoryTestCase):
+  """Tests `trajectory.deep_copy`."""
+
+  def _assert_identical(self, actual: Any, expected: Any) -> None:
+    """Asserts that `actual` and `expected` have equal types and values.
+
+    Unlike `assertEqual`, this also compares the types of nested values, such as
+    `bool`, `int`, and `float`, or `list` and `tuple`, and the order of dict
+    keys. Models are compared by their set fields and `__dict__`, and NumPy
+    arrays by their dtypes and elements.
+
+    Args:
+      actual: The value to check.
+      expected: The value that `actual` must match.
+    """
+    self.assertIs(type(actual), type(expected))
+    if isinstance(expected, pydantic.BaseModel):
+      self.assertEqual(actual.model_fields_set, expected.model_fields_set)
+      self._assert_identical(actual.__dict__, expected.__dict__)
+    elif isinstance(expected, dict):
+      self.assertEqual(list(actual), list(expected))
+      for key, value in expected.items():
+        self._assert_identical(actual[key], value)
+    elif isinstance(expected, (list, tuple)):
+      self.assertLen(actual, len(expected))
+      for actual_element, expected_element in zip(actual, expected):
+        self._assert_identical(actual_element, expected_element)
+    elif isinstance(expected, np.ndarray):
+      self.assertEqual(actual.dtype, expected.dtype)
+      np.testing.assert_array_equal(actual, expected)
+    else:
+      self.assertEqual(actual, expected)
+
+  @parameterized.named_parameters(
+      dict(testcase_name="step", model=trajectory_testing.STEP_1_1),
+      dict(
+          testcase_name="tunix_env_step",
+          model=trajectory_testing.TUNIX_ENV_STEP_0,
+      ),
+      dict(
+          testcase_name="tunix_agent_step",
+          model=trajectory_testing.TUNIX_AGENT_STEP_1,
+      ),
+      dict(
+          testcase_name="tunix_metadata",
+          model=trajectory_testing.TUNIX_METADATA_1,
+      ),
+      dict(
+          testcase_name="tunix_trajectory",
+          model=trajectory_testing.TUNIX_TRAJECTORY_1,
+      ),
+      dict(
+          testcase_name="atif_trajectory",
+          model=trajectory_testing.PAIRED_ATIF_TRAJECTORY,
+      ),
+      dict(
+          testcase_name="mixed_extra",
+          model=trajectory.TunixAgentStep(
+              step_id=0,
+              source=trajectory.Source.AGENT,
+              message="msg",
+              assistant_tokens=np.array([10, 20], dtype=np.int32),
+              logprobs=[-0.5, -1.0],
+              extra={
+                  "scalars": [1, True, 2.0, None, "s"],
+                  "rows": [[1, 2], (3, [4.0]), {"ids": [5]}],
+                  "empty": {"list": [], "dict": {}, "tuple": ()},
+                  "array": np.arange(3, dtype=np.float32),
+                  "source": trajectory.Source.USER,
+              },
+          ),
+      ),
+  )
+  def test_deep_copy_matches_model_copy_deep(
+      self, model: pydantic.BaseModel
+  ) -> None:
+    """Verifies the copy has the types and values of `model_copy(deep=True)`."""
+    copied = trajectory.deep_copy(model)
+
+    self.assertIsNot(copied, model)
+    self._assert_identical(copied, model.model_copy(deep=True))
+
+  def test_deep_copy_shares_no_mutable_state(self) -> None:
+    """Verifies changes to the copy leave the original unchanged."""
+    step = trajectory.TunixAgentStep(
+        step_id=0,
+        source=trajectory.Source.AGENT,
+        message="msg",
+        assistant_tokens=np.array([10, 20]),
+        metrics=trajectory.Metrics(
+            prompt_token_ids=[1, 2], logprobs=[-0.1, -0.2]
+        ),
+        extra={"ids": [3, 4], "rows": [[5], {"ids": [6]}]},
+    )
+
+    copied = trajectory.deep_copy(step)
+    copied.assistant_tokens[0] = 0
+    copied.metrics.prompt_token_ids.append(3)
+    copied.metrics.logprobs[0] = 0.0
+    copied.extra["ids"].append(5)
+    copied.extra["rows"][0].append(7)
+    copied.extra["rows"][1]["ids"].append(8)
+
+    np.testing.assert_array_equal(step.assistant_tokens, [10, 20])
+    self.assertEqual(step.metrics.prompt_token_ids, [1, 2])
+    self.assertEqual(step.metrics.logprobs, [-0.1, -0.2])
+    self.assertEqual(step.extra, {"ids": [3, 4], "rows": [[5], {"ids": [6]}]})
+
+  def test_deep_copy_preserves_shared_references(self) -> None:
+    """Verifies a list referred to several times is copied once."""
+    shared_ids = [1, 2, 3]
+    step = trajectory.Step(
+        step_id=1,
+        source=trajectory.Source.AGENT,
+        message="msg",
+        extra={"a": shared_ids, "b": shared_ids, "rows": [shared_ids]},
+    )
+
+    copied = trajectory.deep_copy(step)
+
+    self.assertIsNot(copied.extra["a"], shared_ids)
+    self.assertIs(copied.extra["b"], copied.extra["a"])
+    self.assertIs(copied.extra["rows"][0], copied.extra["a"])
+
+  @parameterized.named_parameters(
+      dict(testcase_name="tuple_first", keys=("pair", "ids")),
+      dict(testcase_name="list_first", keys=("ids", "pair")),
+  )
+  def test_deep_copy_shares_list_reached_through_tuple(
+      self, keys: tuple[str, str]
+  ) -> None:
+    """Verifies a list reached directly and through a tuple is copied once."""
+    shared_ids = [1, 2, 3]
+    values = {"pair": (shared_ids, "x"), "ids": shared_ids}
+    step = trajectory.Step(
+        step_id=1,
+        source=trajectory.Source.AGENT,
+        message="msg",
+        extra={key: values[key] for key in keys},
+    )
+
+    copied = trajectory.deep_copy(step)
+
+    self.assertIsNot(copied.extra["ids"], shared_ids)
+    self.assertEqual(copied.extra["ids"], [1, 2, 3])
+    self.assertIs(copied.extra["pair"][0], copied.extra["ids"])
+    self.assertEqual(copied.extra["pair"][1], "x")
+
+  def test_deep_copy_copies_cyclic_list(self) -> None:
+    """Verifies a list that contains itself is copied with the cycle kept."""
+    cyclic = [1]
+    cyclic.append(cyclic)
+    step = trajectory.Step(
+        step_id=1,
+        source=trajectory.Source.AGENT,
+        message="msg",
+        extra={"cyclic": cyclic},
+    )
+
+    copied = trajectory.deep_copy(step)
+
+    copied_cyclic = copied.extra["cyclic"]
+    self.assertIsNot(copied_cyclic, cyclic)
+    self.assertEqual(copied_cyclic[0], 1)
+    self.assertIs(copied_cyclic[1], copied_cyclic)
+
+  def test_deep_copy_preserves_shared_models(self) -> None:
+    """Verifies a model referred to twice is copied once."""
+    shared_metrics = trajectory.Metrics(prompt_token_ids=[1, 2])
+    step = trajectory.Step(
+        step_id=1,
+        source=trajectory.Source.AGENT,
+        message="msg",
+        metrics=shared_metrics,
+        extra={"metrics": shared_metrics},
+    )
+
+    copied = trajectory.deep_copy(step)
+
+    self.assertIsNot(copied.metrics, shared_metrics)
+    self.assertIs(copied.extra["metrics"], copied.metrics)
+
+  def test_deep_copy_copies_model_its_fields_refer_back_to_like_model_copy(
+      self,
+  ) -> None:
+    """Verifies a model in a reference cycle is copied as `model_copy` does."""
+    step = trajectory.Step(
+        step_id=1, source=trajectory.Source.AGENT, message="msg", extra={}
+    )
+    step.extra["step"] = step
+
+    copied = trajectory.deep_copy(step)
+
+    # Matches `model_copy(deep=True)`: the back reference becomes a second
+    # model object that shares the outer copy's `__dict__`.
+    self.assertIsNot(copied, step)
+    self.assertIsNot(copied.extra["step"], copied)
+    self.assertIs(copied.extra["step"].__dict__, copied.__dict__)
+
+  def test_deep_copy_preserves_list_subclass(self) -> None:
+    """Verifies a list subclass keeps its type in the copy."""
+    step = trajectory.Step(
+        step_id=1,
+        source=trajectory.Source.AGENT,
+        message="msg",
+        extra={"ids": _TokenList([1, 2])},
+    )
+
+    copied = trajectory.deep_copy(step)
+
+    self.assertIs(type(copied.extra["ids"]), _TokenList)
+    self.assertEqual(copied.extra["ids"], [1, 2])
+    self.assertIsNot(copied.extra["ids"], step.extra["ids"])
+
+  def test_deep_copy_preserves_nested_dict_subclass(self) -> None:
+    """Verifies a nested `defaultdict` keeps its type and default factory."""
+    ids_by_name = collections.defaultdict(list, {"a": [1, 2]})
+    step = trajectory.Step(
+        step_id=1,
+        source=trajectory.Source.AGENT,
+        message="msg",
+        extra={"ids_by_name": ids_by_name},
+    )
+
+    copied = trajectory.deep_copy(step)
+
+    copied_ids_by_name = copied.extra["ids_by_name"]
+    self.assertIs(type(copied_ids_by_name), collections.defaultdict)
+    self.assertIs(copied_ids_by_name.default_factory, list)
+    self.assertEqual(copied_ids_by_name, {"a": [1, 2]})
+    self.assertIsNot(copied_ids_by_name["a"], ids_by_name["a"])
+
+  def test_deep_copy_copies_dict_with_tuple_keys(self) -> None:
+    """Verifies a dict with tuple keys is copied with its keys and values."""
+    ids_by_pair = {(1, 2): [3], (4, 5): [6]}
+    step = trajectory.Step(
+        step_id=1,
+        source=trajectory.Source.AGENT,
+        message="msg",
+        extra={"ids_by_pair": ids_by_pair},
+    )
+
+    copied = trajectory.deep_copy(step)
+
+    copied_ids_by_pair = copied.extra["ids_by_pair"]
+    self.assertEqual(copied_ids_by_pair, {(1, 2): [3], (4, 5): [6]})
+    self.assertIsNot(copied_ids_by_pair[(1, 2)], ids_by_pair[(1, 2)])
 
 
 class TrajectoryTest(trajectory_testing.TrajectoryTestCase):

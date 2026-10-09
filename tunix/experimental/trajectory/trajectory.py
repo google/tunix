@@ -6,6 +6,7 @@ https://github.com/harbor-framework/harbor/blob/main/rfcs/0001-trajectory-format
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import datetime
 import enum
@@ -66,6 +67,96 @@ def _serialize_dict(value: dict[str, Any] | None) -> dict[str, Any] | None:
   if value is None:
     return None
   return _to_json_compatible(value)
+
+
+# Marks a key missing from a `dict.get` lookup.
+_MISSING: Final[object] = object()
+
+
+def _deep_copy_into_memo(value: Any, memo: dict[int, Any]) -> Any:
+  """Returns a deep copy of `value`, sharing `memo` with `copy.deepcopy`.
+
+  `copy.deepcopy` makes a Python call per element of a list or dict, which
+  dominates the cost of copying long token ID and logprob lists and nested
+  JSON-like dicts such as tool definitions. This function copies exact `list`s
+  and `dict`s itself: it reuses elements of `_JSON_SCALAR_TYPES`, which are
+  immutable, without a call, and copies a list holding only such elements with
+  one C-level `list.copy()`. Like `copy.deepcopy`, it records each copy in
+  `memo` before copying the values nested in it, so shared and cyclic
+  references are copied once. Any other value goes to `copy.deepcopy` with the
+  same `memo`. For a pydantic model, it copies `__dict__` this way and then
+  calls the model's `__deepcopy__`, which finds that copy in `memo`.
+
+  Args:
+    value: The value to copy.
+    memo: The `copy.deepcopy` memo, mapping the `id()` of each copied original
+      to its copy.
+
+  Returns:
+    A deep copy of `value`.
+  """
+  value_type = type(value)
+  if value_type in _JSON_SCALAR_TYPES:
+    return value
+  memoized_copy = memo.get(id(value), _MISSING)
+  if memoized_copy is not _MISSING:
+    return memoized_copy
+  # Subclasses of `list` and `dict` are left to `copy.deepcopy`, which
+  # preserves their type.
+  if value_type is list:
+    if _JSON_SCALAR_TYPES.issuperset(map(type, value)):
+      scalar_list_copy = value.copy()
+      memo[id(value)] = scalar_list_copy
+      return scalar_list_copy
+    list_copy: list[Any] = []
+    memo[id(value)] = list_copy
+    for element in value:
+      if type(element) not in _JSON_SCALAR_TYPES:
+        element = _deep_copy_into_memo(element, memo)
+      list_copy.append(element)
+    return list_copy
+  if value_type is dict:
+    dict_copy: dict[Any, Any] = {}
+    memo[id(value)] = dict_copy
+    for key, element in value.items():
+      # Copies the value before the key, in the order `copy.deepcopy` does.
+      if type(element) not in _JSON_SCALAR_TYPES:
+        element = _deep_copy_into_memo(element, memo)
+      if type(key) not in _JSON_SCALAR_TYPES:
+        key = _deep_copy_into_memo(key, memo)
+      dict_copy[key] = element
+    return dict_copy
+  if isinstance(value, pydantic.BaseModel):
+    # Copied here first, so that `__deepcopy__` finds this copy in `memo`.
+    _deep_copy_into_memo(value.__dict__, memo)
+    # Calls `__deepcopy__` itself, as `copy.deepcopy(value, memo)` does on a
+    # memo miss. If a field refers back to `value`, copying `__dict__` has
+    # already put an inner copy of `value` in `memo`, which `copy.deepcopy`
+    # would return instead of making the outer copy.
+    copied_model = value.__deepcopy__(memo)
+    memo[id(value)] = copied_model
+    return copied_model
+  return copy.deepcopy(value, memo)
+
+
+_ModelT = TypeVar("_ModelT", bound=pydantic.BaseModel)
+
+
+def deep_copy(model: _ModelT) -> _ModelT:
+  """Returns a deep copy of `model`, copying plain lists and dicts faster.
+
+  The copy matches `copy.deepcopy(model)` in types, values, and the sharing of
+  nested objects, so for models without extra or private attributes, such as
+  all models in this module, it also matches `model.model_copy(deep=True)`.
+  See `_deep_copy_into_memo` for how the copy is made faster.
+
+  Args:
+    model: The model to copy.
+
+  Returns:
+    A copy of `model` that shares no mutable state with it.
+  """
+  return _deep_copy_into_memo(model, memo={})
 
 
 TUNIX_EXTENSIONS_KEY: Final[str] = "_tunix_extensions"
@@ -175,15 +266,19 @@ def _unpack_step_from_atif(
   return target_cls.model_validate(target_values_by_field)
 
 
+# `np.ndarray` comes first in these unions: smart-mode union validation returns
+# the first exact match, so an array input passes one `isinstance` check. With
+# `list[...]` first, the lax list validator would iterate and convert every
+# array element before the array matched exactly and the result was discarded.
 IntArray = Annotated[
-    list[int] | np.ndarray | None,
+    np.ndarray | list[int] | None,
     pydantic.PlainSerializer(
         _serialize_array, return_type=list[int] | None, when_used="always"
     ),
 ]
 
 FloatArray = Annotated[
-    list[float] | np.ndarray | None,
+    np.ndarray | list[float] | None,
     pydantic.PlainSerializer(
         _serialize_array, return_type=list[float] | None, when_used="always"
     ),

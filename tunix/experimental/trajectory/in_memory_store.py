@@ -95,7 +95,7 @@ class InMemoryTrajectoryStore(store.TrajectoryStore[MetadataT]):
     for traj_id in trajectory_ids:
       if traj_id not in self._metadata_by_trajectory_id:
         raise store.TrajectoryMetadataNotFoundError(traj_id)
-      meta = self._metadata_by_trajectory_id[traj_id].model_copy(deep=True)
+      meta = trajectory_lib.deep_copy(self._metadata_by_trajectory_id[traj_id])
       metas.append(meta)
     return metas
 
@@ -120,7 +120,7 @@ class InMemoryTrajectoryStore(store.TrajectoryStore[MetadataT]):
         raise store.TrajectoryNotFoundError(traj_id)
       meta = self._metadata_by_trajectory_id[traj_id]
       steps = [
-          s.model_copy(deep=True)
+          trajectory_lib.deep_copy(s)
           for s in self._steps_by_trajectory_id.get(traj_id, [])
       ]
       result.append(meta.create_trajectory(steps=steps))
@@ -147,7 +147,7 @@ class InMemoryTrajectoryStore(store.TrajectoryStore[MetadataT]):
     """
     traj_id = _validate_trajectory_id(metadata.trajectory_id)
     self.update_metadata(metadata)
-    step_copy = step.model_copy(deep=True)
+    step_copy = trajectory_lib.deep_copy(step)
     steps = self._steps_by_trajectory_id[traj_id]
     for idx, s in enumerate(steps):
       if s.step_id == step_copy.step_id:
@@ -172,7 +172,9 @@ class InMemoryTrajectoryStore(store.TrajectoryStore[MetadataT]):
       ValueError: If metadata.trajectory_id is empty or None.
     """
     traj_id = _validate_trajectory_id(metadata.trajectory_id)
-    self._metadata_by_trajectory_id[traj_id] = metadata.model_copy(deep=True)
+    self._metadata_by_trajectory_id[traj_id] = trajectory_lib.deep_copy(
+        metadata
+    )
 
   def flush(self) -> None:
     """Flushes any pending or asynchronous writes to persistent storage."""
