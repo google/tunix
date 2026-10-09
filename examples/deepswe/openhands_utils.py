@@ -586,19 +586,22 @@ def parse_openhands_action_str(action_str: str) -> Any:
 
 def resolve_base_commit(entry: Optional[dict[str, Any]]) -> str:
   """Resolves base_commit from dataset entry metadata if available."""
-  if not isinstance(entry, dict):
+  if entry is None:
     return ""
-  base_commit = entry.get("base_commit")
-  if base_commit:
-    return str(base_commit).strip()
-  parsed_commit = entry.get("parsed_commit_content")
-  if parsed_commit:
+  if "base_commit" in entry and entry["base_commit"]:
+    return str(entry["base_commit"]).strip()
+  if "parsed_commit_content" in entry and entry["parsed_commit_content"]:
+    parsed_commit = entry["parsed_commit_content"]
     if isinstance(parsed_commit, str):
       try:
         parsed_commit = json.loads(parsed_commit)
-      except Exception:
+      except json.JSONDecodeError:
         parsed_commit = None
-    if isinstance(parsed_commit, dict) and parsed_commit.get("old_commit_hash"):
+    if (
+        parsed_commit is not None
+        and "old_commit_hash" in parsed_commit
+        and parsed_commit["old_commit_hash"]
+    ):
       return str(parsed_commit["old_commit_hash"]).strip()
   return ""
 
@@ -638,7 +641,8 @@ _RESTORE_R2E_TESTS_CMD = (
 )
 
 REMOVE_BINARY_FILES_CMD = """
-for file in $(git status --porcelain | grep -E "^(M| M|\\?\\?|A| A)" | cut -c4-); do
+git status --porcelain | grep -E "^(M| M|\\?\\?|A| A)" | cut -c4- | while IFS= read -r file; do
+    file=$(echo "$file" | sed -e 's/^"//' -e 's/"$//')
     if [ -f "$file" ] && (file -b "$file" 2>/dev/null | grep -v -i "text" | grep -q "executable" || git check-attr binary "$file" 2>/dev/null | grep -q "binary: set"); then
         git rm -f "$file" 2>/dev/null || rm -f "$file"
         echo "Removed: $file"
@@ -761,7 +765,7 @@ def hide_r2e_tests_for_rollout(
         "(git -C /testbed rev-parse HEAD 2>/dev/null || true)"
     )
     res = _exec_in_sandbox(target, cmd, timeout=60.0)
-    if isinstance(entry, dict) and not entry.get("base_commit"):
+    if entry is not None and ("base_commit" not in entry or not entry["base_commit"]):
       stdout, exit_code = _unpack_exec_output(res)
       if exit_code == 0 and stdout:
         lines = [ln.strip() for ln in stdout.strip().splitlines() if ln.strip()]
@@ -773,7 +777,7 @@ def hide_r2e_tests_for_rollout(
 
 def setup_openhands_workspace(
     workspace: Any,
-    entry: Optional[Any] = None,
+    entry: Optional[dict[str, Any]] = None,
 ) -> None:
   """Configure repository environment in the OpenHands workspace.
 
@@ -838,7 +842,7 @@ def setup_openhands_workspace(
       )
     else:
       logging.info("[SWEEnv] Successfully configured OpenHands workspace")
-      if isinstance(entry, dict) and not entry.get("base_commit"):
+      if entry is not None and ("base_commit" not in entry or not entry["base_commit"]):
         stdout = getattr(res, "stdout", None)
         if isinstance(stdout, str):
           lines = [ln.strip() for ln in stdout.strip().splitlines() if ln.strip()]
@@ -883,9 +887,7 @@ def extract_agent_patch(
       f"cd {shlex.quote(workspace_path)} && "
       "{ "
       'git config --global core.pager ""; '
-      'for git_dir in $(find . -type d -name .git -not -path "./.git" 2>/dev/null); do '
-      'rm -rf "$git_dir"; '
-      "done; "
+      'find . -type d -name .git -not -path "./.git" -exec rm -rf {} + 2>/dev/null; '
       "git add -A; "
       "git rm -rf --cached --ignore-unmatch bash_events conversations install.sh run_tests.sh r2e_tests 2>/dev/null || true; "
       f"{REMOVE_BINARY_FILES_CMD}; "
@@ -973,7 +975,7 @@ def evaluate_patch_in_fresh_container(
       return 0.0
 
     untracked_files = [
-        f.strip() for f in git_ls_output.split() if f.strip()
+        f.strip() for f in git_ls_output.splitlines() if f.strip()
     ]
     exclude_str = " ".join(
         shlex.quote(f"--exclude={f}") for f in untracked_files

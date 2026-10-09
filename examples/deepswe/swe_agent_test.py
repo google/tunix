@@ -522,9 +522,8 @@ class SweAgentTest(absltest.TestCase):
         "</parameter>\n</function>\n</tool_call>"
     )
     calls = [
-        "<function=think>\n<parameter=thought>a</parameter>\n</function>",
-        "<function=execute_bash>\n<parameter=command>ls</parameter>\n"
-        "</function>",
+        str(SWEAction("think", {"thought": "a"})),
+        str(SWEAction("execute_bash", {"command": "ls"})),
     ]
     for value, expected in (("", calls[0]), ("false", calls[0])):
       with self.subTest(flag=value), mock.patch.dict(
@@ -1380,18 +1379,18 @@ class SweAgentTest(absltest.TestCase):
           text=True,
       ).stdout.strip()
 
-      # Modify tracked source file, add nested .git dir, and add binary file.
+      # Modify tracked source file, add nested .git dir (including spaces), and add binary file (with spaces).
       with open(src_file, "w", encoding="utf-8") as f:
         f.write("def solve():\n    return 42\n")
-      nested_git = os.path.join(repo, "subrepo", ".git")
+      nested_git = os.path.join(repo, "sub repo", ".git")
       os.makedirs(nested_git)
       with open(os.path.join(nested_git, "HEAD"), "w", encoding="utf-8") as f:
         f.write("ref: refs/heads/main\n")
       with open(
-          os.path.join(repo, "subrepo", "helper.py"), "w", encoding="utf-8"
+          os.path.join(repo, "sub repo", "helper.py"), "w", encoding="utf-8"
       ) as f:
         f.write("HELPER = True\n")
-      bin_file = os.path.join(repo, "compiled.out")
+      bin_file = os.path.join(repo, "compiled binary.out")
       with open(bin_file, "wb") as f:
         f.write(b"\x7fELF\x02\x01\x01\x00" + b"\x00" * 64)
       os.chmod(bin_file, 0o755)
@@ -1417,8 +1416,8 @@ class SweAgentTest(absltest.TestCase):
       self.assertFalse(os.path.exists(nested_git))
       self.assertIn("diff --git a/app.py b/app.py", patch)
       self.assertIn("+    return 42", patch)
-      self.assertIn("diff --git a/subrepo/helper.py b/subrepo/helper.py", patch)
-      self.assertNotIn("compiled.out", patch)
+      self.assertIn("sub repo/helper.py", patch)
+      self.assertNotIn("compiled binary.out", patch)
       self.assertTrue(patch.endswith("\n"))
 
   def test_cleanup_rollout_container_processes(self):
@@ -1469,7 +1468,7 @@ class SweAgentTest(absltest.TestCase):
     # 3. Successful apply -> runs setup_env() and orig_reward() in eval container
     mock_runtime.reset_mock()
     mock_runtime.run.side_effect = [
-        ("run_tests.sh\nexpected_test_output.json\n", "0"),
+        ("run_tests.sh\nexpected_test_output.json\nuntracked file.txt\n", "0"),
         ("", "0"),
     ]
     reward = openhands_utils.evaluate_patch_in_fresh_container(
@@ -1489,6 +1488,7 @@ class SweAgentTest(absltest.TestCase):
     self.assertIn("git apply --whitespace=fix", apply_cmd)
     self.assertIn("--exclude=run_tests.sh", apply_cmd)
     self.assertIn("--exclude=expected_test_output.json", apply_cmd)
+    self.assertIn("--exclude=untracked file.txt", apply_cmd)
     mock_runtime.setup_env.assert_called_once()
     orig_reward.assert_called_once()
 

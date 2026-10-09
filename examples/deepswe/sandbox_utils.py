@@ -211,51 +211,41 @@ def patch_agent_sandbox_rl_templates() -> None:
 
       def _patched_template_manifest(self, image, template_name, template):
         manifest = self._orig_template_manifest(image, template_name, template)
-        if isinstance(manifest, dict):
-          spec = manifest.setdefault("spec", {})
-          if isinstance(spec, dict):
-            spec.setdefault("networkPolicyManagement", "Unmanaged")
-            pod_template = spec.get("podTemplate")
-            if isinstance(pod_template, dict):
-              pod_spec = pod_template.get("spec")
-              if isinstance(pod_spec, dict):
-                pod_spec.setdefault("automountServiceAccountToken", False)
-                pod_spec.setdefault("shareProcessNamespace", False)
-                containers = pod_spec.get("containers")
-                if isinstance(containers, list):
-                  if containers and isinstance(containers[0], dict):
-                    containers[0].setdefault("name", RUNTIME_CONTAINER_NAME)
-                  if not any(
-                      isinstance(c, dict)
-                      and c.get("name") == EVAL_CONTAINER_NAME
-                      for c in containers
-                  ):
-                    pull_policy = (
-                        getattr(template, "image_pull_policy", None)
-                        or "IfNotPresent"
-                    )
-                    containers.append({
-                        "name": EVAL_CONTAINER_NAME,
-                        "image": image,
-                        "imagePullPolicy": pull_policy,
-                        "command": ["sleep", "infinity"],
-                        "stdin": True,
-                        "tty": True,
-                        "resources": {
-                            "requests": {
-                                "cpu": os.getenv("SANDBOX_EVAL_CPU", "50m"),
-                                "memory": os.getenv(
-                                    "SANDBOX_EVAL_MEM", "128Mi"
-                                ),
-                            },
-                            "limits": {
-                                "cpu": os.getenv("SANDBOX_CPU_LIMIT", "2"),
-                                "memory": os.getenv(
-                                    "SANDBOX_MEM_LIMIT", "4Gi"
-                                ),
-                            },
-                        },
-                    })
+        spec = manifest["spec"]
+        spec["networkPolicyManagement"] = "Unmanaged"
+        pod_spec = spec["podTemplate"]["spec"]
+        pod_spec["automountServiceAccountToken"] = False
+        pod_spec["shareProcessNamespace"] = False
+        containers = pod_spec["containers"]
+        if containers:
+          containers[0]["name"] = RUNTIME_CONTAINER_NAME
+        if not any(
+            "name" in c and c["name"] == EVAL_CONTAINER_NAME
+            for c in containers
+        ):
+          pull_policy = (
+              template.image_pull_policy
+              if template is not None and template.image_pull_policy
+              else "IfNotPresent"
+          )
+          containers.append({
+              "name": EVAL_CONTAINER_NAME,
+              "image": image,
+              "imagePullPolicy": pull_policy,
+              "command": ["sleep", "infinity"],
+              "stdin": True,
+              "tty": True,
+              "resources": {
+                  "requests": {
+                      "cpu": os.getenv("SANDBOX_EVAL_CPU", "50m"),
+                      "memory": os.getenv("SANDBOX_EVAL_MEM", "128Mi"),
+                  },
+                  "limits": {
+                      "cpu": os.getenv("SANDBOX_CPU_LIMIT", "2"),
+                      "memory": os.getenv("SANDBOX_MEM_LIMIT", "4Gi"),
+                  },
+              },
+          })
         return manifest
 
       asrl_resources.Resources._template_manifest = _patched_template_manifest
