@@ -267,6 +267,9 @@ export K8S_NAMESPACE=${K8S_NAMESPACE:-default}
 export KUEUE_QUEUE_NAME=${KUEUE_QUEUE_NAME:-${KUEUE_QUEUE:-${QUEUE_NAME:-}}}
 export PREEMPTIBLE=${PREEMPTIBLE:-${preemptible:-false}}
 export PRIORITY_CLASS=${PRIORITY_CLASS:-medium}
+# Pod terminationGracePeriodSeconds (consumed by yaml_generator.py) and the budget
+# stop_trainer waits for old pods to disappear before a new trainer is scheduled.
+export TERMINATION_GRACE_SECONDS=${TERMINATION_GRACE_SECONDS:-120}
 
 export TRAINER_EXTRA_ENV=${TRAINER_EXTRA_ENV:-}
 # Extra KEY=VALUE env for the orchestrator and rollout processes (the recipes set
@@ -532,14 +535,22 @@ start_orchestrator() {
 }
 
 stop_trainer() {
+  # Pods take up to terminationGracePeriodSeconds to go away; kubectl's default
+  # 30s wait timeout is shorter than that, so size it from the grace period.
+  local wait_timeout="$(( TERMINATION_GRACE_SECONDS + 60 ))s"
   if [[ "$DRY_RUN" == "true" ]]; then
     echo "kubectl delete jobset ${TRAINER_ID} -n ${K8S_NAMESPACE}"
     echo "kubectl delete workload -l jobset.sigs.k8s.io/jobset-name=${TRAINER_ID} -n ${K8S_NAMESPACE}"
-    echo "kubectl wait --for=delete pod -l jobset.sigs.k8s.io/jobset-name=${TRAINER_ID} -n ${K8S_NAMESPACE}"
+    echo "kubectl wait --for=delete pod -l jobset.sigs.k8s.io/jobset-name=${TRAINER_ID} -n ${K8S_NAMESPACE} --timeout=${wait_timeout}"
   else
     kubectl delete jobset "${TRAINER_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found=true
     kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name=${TRAINER_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
-    kubectl wait --for=delete pod -l "jobset.sigs.k8s.io/jobset-name=${TRAINER_ID}" -n "${K8S_NAMESPACE}" 2>/dev/null || true
+    # A replacement trainer scheduled while the old pods still hold the nodes
+    # (TPU devices, hostNetwork ports) fails to start, so do not proceed silently.
+    kubectl wait --for=delete pod -l "jobset.sigs.k8s.io/jobset-name=${TRAINER_ID}" -n "${K8S_NAMESPACE}" --timeout="${wait_timeout}" || {
+      echo "ERROR: pods of jobset ${TRAINER_ID} still exist after ${wait_timeout}; refusing to start a replacement trainer." >&2
+      exit 1
+    }
   fi
 }
 

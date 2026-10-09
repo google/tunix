@@ -289,11 +289,14 @@ def main() -> None:
       default=None,
       help="Kubernetes nodepool for Pathways head pod (e.g. cpu-np).",
   )
+  # The pathways-worker drains its peers in ~60-90s after SIGTERM; native sidecars
+  # get only the remainder of the budget, so anything that ignores SIGTERM costs the
+  # whole period. Keep it short.
   parser.add_argument(
       "--termination_grace_seconds",
-      default=int(os.environ.get("TERMINATION_GRACE_SECONDS") or 360),
+      default=int(os.environ.get("TERMINATION_GRACE_SECONDS") or 120),
       type=int,
-      help="Termination grace period in seconds for pods (default: 360).",
+      help="Termination grace period in seconds for pods (default: 120).",
   )
 
   parser.add_argument(
@@ -663,10 +666,19 @@ def main() -> None:
                   cpu: "4"
                   memory: {sidecar_memory}
               restartPolicy: Always
-              lifecycle:
-                preStop:
-                  exec:
-                    command: ["sh", "-c", "kill -KILL 1"]
+              # The image ENTRYPOINT is `sh -c 'while true; do python /app/main.py ...; done'`.
+              # As PID 1 that shell has no TERM handler, so the kubelet's SIGTERM is dropped
+              # (pid_namespaces(7)) and the sidecar is only SIGKILLed when the pod's grace
+              # period expires, holding 0.0.0.0:50051 (hostNetwork) the whole time. Run the
+              # server as a child of a shell that forwards TERM instead; `restartPolicy:
+              # Always` already restarts the container if the server exits.
+              command: ["/bin/sh", "-c"]
+              args:
+              - |
+                python /app/main.py --port=50051 --logtostderr --stderrthreshold=0 --v=1 &
+                child=$!
+                trap 'kill -TERM "$child"; wait "$child"' TERM INT
+                wait "$child"
               volumeMounts:
               {sidecar_volume_mount}"""
       if sidecar_image

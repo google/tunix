@@ -406,10 +406,16 @@ class YamlGeneratorTest(parameterized.TestCase):
         for c in with_sidecar[0]["initContainers"]
         if c["name"] == "colocated-python-sidecar"
     )
-    self.assertEqual(
-        sidecar_c.get("lifecycle"),
-        {"preStop": {"exec": {"command": ["sh", "-c", "kill -KILL 1"]}}},
+    # PID 1 must forward SIGTERM to the server; the image's own ENTRYPOINT (a
+    # `while true` shell loop) ignores it and the pod hangs for the full grace period.
+    self.assertEqual(sidecar_c["command"], ["/bin/sh", "-c"])
+    self.assertLen(sidecar_c["args"], 1)
+    sidecar_script = sidecar_c["args"][0]
+    self.assertIn("python /app/main.py --port=50051", sidecar_script)
+    self.assertIn(
+        'trap \'kill -TERM "$child"; wait "$child"\' TERM INT', sidecar_script
     )
+    self.assertNotIn("lifecycle", sidecar_c)
     return {m["name"]: m["mountPath"] for m in sidecar_c["volumeMounts"]}
 
   def test_397b_sidecar_shm_disabled_renders_step2_form(self):
@@ -545,16 +551,18 @@ class YamlGeneratorTest(parameterized.TestCase):
               yaml_generator.main()
               rendered_default = mock_stdout.getvalue()
         self.assertEqual(
-            rendered_default.count("terminationGracePeriodSeconds: 360"), 2
+            rendered_default.count("terminationGracePeriodSeconds: 120"), 2
         )
         self.assertNotIn("terminationGracePeriodSeconds: 10", rendered_default)
 
-        with mock.patch.object(sys, "argv", argv + ["--termination_grace_seconds=120"]):
+        with mock.patch.object(
+            sys, "argv", argv + ["--termination_grace_seconds=300"]
+        ):
           with mock.patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
             yaml_generator.main()
             rendered_override = mock_stdout.getvalue()
         self.assertEqual(
-            rendered_override.count("terminationGracePeriodSeconds: 120"), 2
+            rendered_override.count("terminationGracePeriodSeconds: 300"), 2
         )
 
   @parameterized.named_parameters(
@@ -658,7 +666,8 @@ class YamlGeneratorTest(parameterized.TestCase):
     )
     self.assertIn(
         "kubectl wait --for=delete pod -l"
-        " jobset.sigs.k8s.io/jobset-name=atwigg-256-prof-train -n default",
+        " jobset.sigs.k8s.io/jobset-name=atwigg-256-prof-train -n default"
+        " --timeout=180s",
         result.stdout,
     )
     docs = [
