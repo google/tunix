@@ -17,6 +17,7 @@
 import atexit
 from collections.abc import Callable
 from concurrent import futures
+import csv
 import dataclasses
 import json
 import os
@@ -24,7 +25,6 @@ import pathlib
 import queue
 import shutil
 import signal
-import sys
 import tempfile
 import threading
 import time
@@ -36,12 +36,13 @@ from etils import epath
 from google.protobuf import json_format
 from google.protobuf import message
 import numpy as np
-import pandas as pd
 
 try:
   from tunix.utils import _trajectory_logger_ext  # pylint: disable=g-import-not-at-top
 except ImportError:
   _trajectory_logger_ext = None
+
+csv.field_size_limit(2**31 - 1)
 
 
 class _PySerializedArray(str):
@@ -103,18 +104,53 @@ def _run_with_timeout(
   return result_box[0]
 
 
+def _collect_csv_fieldnames(
+    rows: list[dict[str, Any]],
+    existing_fieldnames: list[str] | None = None,
+) -> list[str]:
+  """Returns ordered CSV column names preserving existing and first-seen order."""
+  fieldnames: list[str] = list(existing_fieldnames or [])
+  seen = set(fieldnames)
+  for row in rows:
+    for key in row:
+      if key not in seen:
+        seen.add(key)
+        fieldnames.append(key)
+  return fieldnames
+
+
+def _read_csv_rows(f: Any) -> tuple[list[str], list[dict[str, Any]]]:
+  """Reads column headers and row dicts from an open CSV text stream."""
+  reader = csv.DictReader(f)
+  fieldnames = list(reader.fieldnames or [])
+  rows: list[dict[str, Any]] = list(reader)
+  return fieldnames, rows
+
+
+def _write_csv_rows(
+    f: Any,
+    fieldnames: list[str],
+    rows: list[dict[str, Any]],
+    *,
+    write_header: bool = True,
+) -> None:
+  """Writes row dicts to an open CSV text stream."""
+  writer = csv.DictWriter(
+      f, fieldnames=fieldnames, lineterminator='\n', extrasaction='ignore'
+  )
+  if write_header:
+    writer.writeheader()
+  writer.writerows(rows)
+
+
 def _read_gcs_csv(
     file_path: Any, gcs_timeout_sec: float | None
-) -> pd.DataFrame | None:
+) -> tuple[list[str], list[dict[str, Any]]] | None:
   """Reads an existing CSV from GCS with a timeout."""
 
-  def _do_read() -> pd.DataFrame:
-    with file_path.open('r') as f:
-      try:
-        return pd.read_csv(f)
-      except pd.errors.ParserError:
-        f.seek(0)
-        return pd.read_csv(f, engine='python')
+  def _do_read() -> tuple[list[str], list[dict[str, Any]]]:
+    with file_path.open('r', encoding='utf-8') as f:
+      return _read_csv_rows(f)
 
   try:
     return _run_with_timeout(
@@ -575,13 +611,13 @@ def log_item(
     )
     return
 
-  serialized_items = _serialize_items(
+  serialized_items: list[dict[str, Any]] = _serialize_items(
       items_list,
       _make_csv_serializable,
       num_workers=num_workers,
       executor=executor,
   )
-  df = pd.DataFrame(serialized_items)
+  fieldnames = _collect_csv_fieldnames(serialized_items)
   if _is_gcs_path(file_path):
     tmp_file_path = (
         file_path.parent / f'{file_path.name}.{time.time_ns()}.tmp'
@@ -607,9 +643,10 @@ def log_item(
               'Could not check existing GCS file %s: %s', file_path, e
           )
           remote_exists = False
+        rows_to_write = serialized_items
         if remote_exists:
           try:
-            old_df = _read_gcs_csv(file_path, gcs_timeout_sec)
+            old_csv = _read_gcs_csv(file_path, gcs_timeout_sec)
           except TimeoutError as e:
             logging.warning(
                 'Timed out reading existing GCS file %s; skipping flush to'
@@ -618,33 +655,40 @@ def log_item(
                 e,
             )
             return
-          if old_df is not None:
-            df = pd.concat([old_df, df], ignore_index=True)
+          if old_csv is not None:
+            old_cols, old_rows = old_csv
+            fieldnames = _collect_csv_fieldnames(serialized_items, old_cols)
+            rows_to_write = old_rows + serialized_items
         with staging_file.open('w', encoding='utf-8', newline='') as f:
-          df.to_csv(f, header=True, index=False)
+          _write_csv_rows(f, fieldnames, rows_to_write, write_header=True)
       else:
-        existing_cols = pd.read_csv(
-            staging_file, nrows=0, encoding='utf-8'
-        ).columns.tolist()
-        if list(df.columns) == existing_cols:
+        with staging_file.open('r', encoding='utf-8', newline='') as f:
+          existing_cols = list(next(csv.reader(f), []))
+        if set(fieldnames).issubset(set(existing_cols)):
           with staging_file.open('a', encoding='utf-8', newline='') as f:
-            df.to_csv(f, header=False, index=False)
-        elif set(df.columns).issubset(set(existing_cols)):
-          df = df.reindex(columns=existing_cols)
-          with staging_file.open('a', encoding='utf-8', newline='') as f:
-            df.to_csv(f, header=False, index=False)
+            _write_csv_rows(
+                f, existing_cols, serialized_items, write_header=False
+            )
         else:
-          staged_df = pd.read_csv(staging_file, encoding='utf-8')
-          combined_df = pd.concat([staged_df, df], ignore_index=True)
+          with staging_file.open('r', encoding='utf-8', newline='') as f:
+            staged_cols, staged_rows = _read_csv_rows(f)
+          combined_cols = _collect_csv_fieldnames(
+              serialized_items, staged_cols
+          )
           with staging_file.open('w', encoding='utf-8', newline='') as f:
-            combined_df.to_csv(f, header=True, index=False)
+            _write_csv_rows(
+                f,
+                combined_cols,
+                staged_rows + serialized_items,
+                write_header=True,
+            )
 
       aborted = threading.Event()
 
       def _upload_staged_to_gcs():
         with (
             staging_file.open('r', encoding='utf-8') as src,
-            tmp_file_path.open('w') as dst,
+            tmp_file_path.open('w', encoding='utf-8') as dst,
         ):
           shutil.copyfileobj(src, dst)
         if aborted.is_set():
@@ -687,9 +731,10 @@ def log_item(
         )
         remote_exists = False
 
+      rows_to_write = serialized_items
       if remote_exists:
         try:
-          old_df = _read_gcs_csv(file_path, gcs_timeout_sec)
+          old_csv = _read_gcs_csv(file_path, gcs_timeout_sec)
         except TimeoutError as e:
           logging.warning(
               'Timed out reading existing GCS file %s; skipping flush to avoid'
@@ -698,14 +743,16 @@ def log_item(
               e,
           )
           return
-        if old_df is not None:
-          df = pd.concat([old_df, df], ignore_index=True)
+        if old_csv is not None:
+          old_cols, old_rows = old_csv
+          fieldnames = _collect_csv_fieldnames(serialized_items, old_cols)
+          rows_to_write = old_rows + serialized_items
 
       aborted = threading.Event()
 
       def _write_and_replace():
-        with tmp_file_path.open('w') as f:
-          df.to_csv(f, header=True, index=False)
+        with tmp_file_path.open('w', encoding='utf-8') as f:
+          _write_csv_rows(f, fieldnames, rows_to_write, write_header=True)
         if aborted.is_set():
           return
         # epath.Path.replace() handles the GCS 'rename' (copy + delete)
@@ -730,8 +777,10 @@ def log_item(
         _cleanup_tmp_gcs_file(tmp_file_path, gcs_timeout_sec)
   else:
     write_header = not file_path.exists()
-    with file_path.open('a') as f:
-      df.to_csv(f, header=write_header, index=False)
+    with file_path.open('a', encoding='utf-8') as f:
+      _write_csv_rows(
+          f, fieldnames, serialized_items, write_header=write_header
+      )
 
 
 class AsyncTrajectoryLogger:

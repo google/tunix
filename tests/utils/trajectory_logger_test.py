@@ -256,7 +256,7 @@ class TrajectoryLoggerTest(absltest.TestCase):
     def _stalled_read_csv(*args, **kwargs):
       del args, kwargs
       time.sleep(10.0)
-      return pd.DataFrame()
+      return [], []
 
     with mock.patch.object(
         trajectory_logger.epath,
@@ -268,10 +268,12 @@ class TrajectoryLoggerTest(absltest.TestCase):
           gcs_dir, {'global_step': 0, 'reward': 0.0}, file_format='csv'
       )
 
-      # Next call with stalled read_csv must time out in ~0.2s and not clobber
+      # Next call with stalled CSV read must time out in ~0.2s and not clobber
       # step 0 on remote GCS.
       start = time.monotonic()
-      with mock.patch.object(pd, 'read_csv', side_effect=_stalled_read_csv):
+      with mock.patch.object(
+          trajectory_logger, '_read_csv_rows', side_effect=_stalled_read_csv
+      ):
         trajectory_logger.log_item(
             gcs_dir,
             {'global_step': 1, 'reward': 1.0},
