@@ -298,8 +298,8 @@ class QwenChatTemplateParser(BaseChatTemplateParser):
     i = 0
     while i < len(messages):
       j = i
-      if messages[i].get("role") == "tool":
-        while j + 1 < len(messages) and messages[j + 1].get("role") == "tool":
+      if messages[i]["role"] == "tool":
+        while j + 1 < len(messages) and messages[j + 1]["role"] == "tool":
           j += 1
         if j > i:
           runs.append((i, j))
