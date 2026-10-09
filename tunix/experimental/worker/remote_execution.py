@@ -2313,6 +2313,15 @@ class PoolExecutionSession:
                 # out while younger tasks remain in flight: re-queue or fail
                 # just the expired request_ids without evicting the worker and
                 # discarding its healthy in-flight tasks.
+                logging.warning(
+                    "[rollout-ft] action=partial_timeout worker=%s"
+                    " expired_requests=%s remaining_in_flight=%d"
+                    " task_timeout_s=%s",
+                    getattr(actor, "worker_id", None) or actor,
+                    sorted(expired_rids),
+                    len(dispatched_set) - len(expired_rids),
+                    timeout_s,
+                )
                 dispatched_set.difference_update(expired_rids)
                 for rid in expired_rids:
                   self._task_last_failed_actor[rid] = actor
@@ -2390,6 +2399,15 @@ class PoolExecutionSession:
                   f"Task(s) {sorted(expired_rids)} on worker {actor}"
                   f" exceeded task_timeout_s={self._task_timeout_s}s."
               )
+              logging.warning(
+                  "[rollout-ft] action=partial_timeout worker=%s"
+                  " expired_requests=%s remaining_in_flight=%d"
+                  " task_timeout_s=%s",
+                  getattr(actor, "worker_id", None) or actor,
+                  sorted(expired_rids),
+                  len(dispatched_set) - len(expired_rids),
+                  self._task_timeout_s,
+              )
               dispatched_set.difference_update(expired_rids)
               for rid in expired_rids:
                 self._task_last_failed_actor[rid] = actor
@@ -2435,12 +2453,29 @@ class PoolExecutionSession:
         if (self._in_flight == 0 and self._response_queue.empty())
         else timeout_s
     )
+    deadline = time.monotonic() + wait_s
     try:
       # Block until the first real (result, exc) completion arrives.
       while not batch:
-        item = await asyncio.wait_for(
-            self._response_queue.get(), timeout=wait_s
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+          return []
+        step_wait = (
+            min(remaining, 1.2)
+            if self._has_pending_workers_fn is not None
+            else remaining
         )
+        try:
+          item = await asyncio.wait_for(
+              self._response_queue.get(), timeout=step_wait
+          )
+        except asyncio.TimeoutError:
+          if (
+              self._has_pending_workers_fn is not None
+              and self._has_pending_workers_fn()
+          ):
+            return []
+          continue
         if item is self._sentinel:
           # Sentinel marks _in_flight reaching 0, active pool emptying, or
           # session close; return early if drained, otherwise skip stale

@@ -119,6 +119,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     self._pending_sync_lock: asyncio.Lock = asyncio.Lock()
     self._actor_busy_count: int = 0
     self._actor_weights_dirty: bool = False
+    self._last_deferred_pending_sync_state: tuple[int, bool, bool] | None = None
 
     self._trainer_workers = dict(trainer_workers)
     self._inference_workers = dict(inference_workers or {})
@@ -357,6 +358,20 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     self._assert_weights_consistent()
     await self._wait_for_healthy_rollout_worker()
     requests = self._build_rollout_requests(requests)
+    if (
+        self._weight_sync_coordinator is not None
+        and self._weight_sync_coordinator.in_flight
+    ):
+      logging.info(
+          "[rollout-ft] action=concurrent_dispatch_during_sync requests=%d"
+          " policy_version=%d actor_busy_count=%d actor_weights_dirty=%s"
+          " weights_consistent=%s",
+          len(requests),
+          self._policy_version,
+          self._actor_busy_count,
+          self._actor_weights_dirty,
+          self._weights_consistent,
+      )
     logging.info(
         "Dispatching %d rollout request(s) across %d worker(s).",
         len(requests),
@@ -621,15 +636,12 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     raw_completed = await self._rollout_session.poll_completed(
         timeout_s=timeout_s
     )
-    if (
-        not raw_completed
-        and self._rollout_session.pending_count > 0
-        and self._has_pending_rollout_workers()
-    ):
-      await self.sync_pending_weights()
-      raw_completed = await self._rollout_session.poll_completed(
-          timeout_s=timeout_s
-      )
+    if not raw_completed and self._has_pending_rollout_workers():
+      synced_version = await self.sync_pending_weights()
+      if synced_version is not None and self._rollout_session.pending_count > 0:
+        raw_completed = await self._rollout_session.poll_completed(
+            timeout_s=timeout_s
+        )
     completed = self._drain_completed_and_failed(raw_completed)
 
     if (
@@ -747,6 +759,11 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
   async def _await_pending_weight_sync(self) -> None:
     """Waits if a mid-step `sync_pending_weights` round is currently in flight."""
     while self._pending_sync_lock.locked():
+      logging.info(
+          "[rollout-ft] action=wait_pending_sync"
+          " reason=pending_weight_sync_in_flight policy_version=%d",
+          self._policy_version,
+      )
       async with self._pending_sync_lock:
         pass
 
@@ -1009,6 +1026,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       self._actor_busy_count -= 1
     self._actor_weights_dirty = False
     self._weights_consistent = True
+    self._last_deferred_pending_sync_state = None
     self._policy_version = result.policy_version
     logging.info(
         "Weight synchronization complete (policy_version=%d).",
@@ -1037,6 +1055,29 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       rollout workers were waiting in `PENDING_WEIGHT_SYNC` or the trainer was
       busy.
     """
+    target_policy_version = (
+        self._policy_version if policy_version is None else policy_version
+    )
+    if (
+        self._weight_sync_coordinator is not None
+        and self._weight_sync_coordinator.has_pending_destinations()
+        and (self._actor_busy_count > 0 or self._actor_weights_dirty)
+    ):
+      defer_state = (
+          target_policy_version,
+          self._actor_busy_count > 0,
+          self._actor_weights_dirty,
+      )
+      if self._last_deferred_pending_sync_state != defer_state:
+        self._last_deferred_pending_sync_state = defer_state
+        logging.info(
+            "[rollout-ft] action=defer_pending_sync policy_version=%d"
+            " actor_busy_count=%d actor_weights_dirty=%s",
+            target_policy_version,
+            self._actor_busy_count,
+            self._actor_weights_dirty,
+        )
+      return None
     if (
         not self._weights_consistent
         or self._actor_busy_count > 0
@@ -1059,9 +1100,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           or self._weight_sync_coordinator.poisoned is not None
       ):
         return None
-      target_policy_version = (
-          self._policy_version if policy_version is None else policy_version
-      )
+      self._last_deferred_pending_sync_state = None
       logging.info(
           "Proactively synchronizing weights to pending rollout worker(s)"
           " (policy_version=%d)...",
