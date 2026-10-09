@@ -744,70 +744,72 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       )
   )
 
-  logging.info(
-      "Waiting for workers to register (before MLPerf init_start)..."
-  )
-  cluster.wait_for_workers(
-      min_workers={
-          datatypes.Role.ACTOR: 1,
-          datatypes.Role.ROLLOUT: args.rollout_replicas,
-          datatypes.Role.REFERENCE: 1 if args.beta != 0.0 else 0,
-      },
-      timeout=args.init_timeout_s,
-      poll_interval_s=1.0,
-  )
-  logging.info("Registered workers: %s", cluster.worker_infos())
-
-  if args.rcp_logging:
-    mllog_utils.init_start(args)
-
-  tokenizer_path = (
-      args.tokenizer_path or os.getenv("MODEL_DIR") or args.model_id
-  )
-  tokenizer = AutoTokenizer.from_pretrained(
-      tokenizer_path, trust_remote_code=True
-  )
-  if tokenizer.pad_token_id is None and tokenizer.eos_token is not None:
-    tokenizer.pad_token = tokenizer.eos_token
-  pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
-  eos_id = (
-      tokenizer.eos_token_id if tokenizer.eos_token_id is not None else pad_id
-  )
-  logging.info(
-      "Loaded tokenizer from %s (vocab_size=%d, pad_id=%d, eos_id=%d).",
-      tokenizer_path,
-      len(tokenizer),
-      pad_id,
-      eos_id,
-  )
-
-  from examples.deepswe import sandbox_utils  # pylint: disable=g-import-not-at-top
-  from examples.deepswe import swe_env  # pylint: disable=g-import-not-at-top
-  from tunix.experimental.examples.deepswe_dist import deepswe  # pylint: disable=g-import-not-at-top
-
-  algo = _build_algo(args)
-  trainer_handles = cluster.worker_handles(datatypes.Role.ACTOR)
-  if len(trainer_handles) != 1:
-    raise ValueError(f"Expected 1 trainer worker, got {len(trainer_handles)}.")
-  _configure_trainer_loss(
-      trainer_handles[0],
-      algo=algo,
-      pad_id=pad_id,
-      eos_id=eos_id,
-  )
-
-  metrics_logging_options = metrics_logger_lib.MetricsLoggerOptions(
-      log_dir=args.log_dir,
-      project_name=args.wandb_project,
-      run_name=args.wandb_run_name,
-      flush_every_n_steps=args.flush_every_n_steps,
-      backend_kwargs={"wandb": {"config": vars(args)}},
-  )
-
   fleet = None
   prompt_stream = None
   program = None
   try:
+    logging.info(
+        "Waiting for workers to register (before MLPerf init_start)..."
+    )
+    cluster.wait_for_workers(
+        min_workers={
+            datatypes.Role.ACTOR: 1,
+            datatypes.Role.ROLLOUT: args.rollout_replicas,
+            datatypes.Role.REFERENCE: 1 if args.beta != 0.0 else 0,
+        },
+        timeout=args.init_timeout_s,
+        poll_interval_s=1.0,
+    )
+    logging.info("Registered workers: %s", cluster.worker_infos())
+
+    if args.rcp_logging:
+      mllog_utils.init_start(args)
+
+    tokenizer_path = (
+        args.tokenizer_path or os.getenv("MODEL_DIR") or args.model_id
+    )
+    tokenizer = AutoTokenizer.from_pretrained(
+        tokenizer_path, trust_remote_code=True
+    )
+    if tokenizer.pad_token_id is None and tokenizer.eos_token is not None:
+      tokenizer.pad_token = tokenizer.eos_token
+    pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
+    eos_id = (
+        tokenizer.eos_token_id if tokenizer.eos_token_id is not None else pad_id
+    )
+    logging.info(
+        "Loaded tokenizer from %s (vocab_size=%d, pad_id=%d, eos_id=%d).",
+        tokenizer_path,
+        len(tokenizer),
+        pad_id,
+        eos_id,
+    )
+
+    from examples.deepswe import sandbox_utils  # pylint: disable=g-import-not-at-top
+    from examples.deepswe import swe_env  # pylint: disable=g-import-not-at-top
+    from tunix.experimental.examples.deepswe_dist import deepswe  # pylint: disable=g-import-not-at-top
+
+    algo = _build_algo(args)
+    trainer_handles = cluster.worker_handles(datatypes.Role.ACTOR)
+    if len(trainer_handles) != 1:
+      raise ValueError(
+          f"Expected 1 trainer worker, got {len(trainer_handles)}."
+      )
+    _configure_trainer_loss(
+        trainer_handles[0],
+        algo=algo,
+        pad_id=pad_id,
+        eos_id=eos_id,
+    )
+
+    metrics_logging_options = metrics_logger_lib.MetricsLoggerOptions(
+        log_dir=args.log_dir,
+        project_name=args.wandb_project,
+        run_name=args.wandb_run_name,
+        flush_every_n_steps=args.flush_every_n_steps,
+        backend_kwargs={"wandb": {"config": vars(args)}},
+    )
+
     global_batch_size = int(args.batch_size) * int(args.num_generations)
     val_start_step = (
         mllog_utils.compute_val_start_step(global_batch_size, args.val_start_at)
