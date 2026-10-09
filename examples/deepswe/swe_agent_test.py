@@ -406,6 +406,206 @@ class SweAgentTest(absltest.TestCase):
         template.OPENHANDS_FAKE_USER_RESPONSE,
     )
 
+  def test_parse_codeact_all_returns_one_call_per_tool_call_block(self):
+    response = (
+        "<think>\nLook first.\n</think>\n\nChecking.\n"
+        "<tool_call>\n<function=execute_bash>\n"
+        "<parameter=command>\nls\n</parameter>\n"
+        "</function>\n</tool_call>\n"
+        "<tool_call>\n</tool_call>\n"
+        '<tool_call>\n{"name": "think", "arguments": {}}\n</tool_call>\n'
+        "<tool_call>\n<function=str_replace_editor>\n"
+        "<parameter=command>\nview\n</parameter>\n"
+        "<parameter=path>\n/testbed\n</parameter>\n"
+        "</function>\n</tool_call>"
+    )
+    thought, actions = swe_agent.parse_codeact_response_all(response)
+    first_thought, first = swe_agent.parse_codeact_response(response)
+    self.assertEqual(thought, first_thought)
+    self.assertEqual(actions[0].to_xml_string(), first.to_xml_string())
+    self.assertEqual(
+        [(a.function_name, a.parameters) for a in actions],
+        [
+            ("execute_bash", {"command": "ls"}),
+            ("str_replace_editor", {"command": "view", "path": "/testbed"}),
+        ],
+    )
+
+  def test_parse_codeact_all_matches_qwen3_xml_call_boundaries(self):
+    # Expected call lists are vLLM 0.20.0 Qwen3XMLToolParser.extract_tool_calls
+    # output for the same text (after "</think>").
+    def fn(value):
+      return (
+          f"<function=think>\n<parameter=thought>\n{value}\n</parameter>\n"
+          "</function>"
+      )
+
+    def tc(body):
+      return f"<tool_call>\n{body}\n</tool_call>"
+
+    cases = {
+        # A second <function=> inside one <tool_call> stays in that one call.
+        # (qwen3_xml renames the call to the second function and concatenates
+        # both argument JSONs, which OpenHands then rejects as invalid.)
+        "tc(a + b)": (tc(fn("a") + "\n" + fn("b")), ["a"]),
+        "tc a, text, tc b": (tc(fn("a")) + "\nmid\n" + tc(fn("b")), ["a", "b"]),
+        "tc a, tc empty, tc b": (
+            tc(fn("a")) + "\n<tool_call>\n</tool_call>\n" + tc(fn("b")),
+            ["a", "b"],
+        ),
+        # A bare <function=> after a closed <tool_call> is a new call...
+        "tc a, bare b": (tc(fn("a")) + "\n" + fn("b"), ["a", "b"]),
+        "tc a, tc empty, bare b": (
+            tc(fn("a")) + "\n<tool_call>\n</tool_call>\n" + fn("b"),
+            ["a", "b"],
+        ),
+        # ...but one after another bare <function=> is dropped.
+        "tc a, bare b, bare c": (
+            tc(fn("a")) + "\n" + fn("b") + "\n" + fn("c"),
+            ["a", "b"],
+        ),
+        "bare a, bare b": (fn("a") + "\n" + fn("b"), ["a"]),
+        "bare a, tc b, bare c": (
+            fn("a") + "\n" + tc(fn("b")) + "\n" + fn("c"),
+            ["a", "b", "c"],
+        ),
+        "three tc": (tc(fn("a")) + tc(fn("b")) + tc(fn("c")), ["a", "b", "c"]),
+        # An unclosed <tool_call> ends at the next <tool_call>.
+        "tc a unclosed, tc b": (
+            "<tool_call>\n" + fn("a") + "\n" + tc(fn("b")),
+            ["a", "b"],
+        ),
+        "tc a, truncated opener": (tc(fn("a")) + "\n<function=thi", ["a"]),
+    }
+    for name, (text, expected) in cases.items():
+      with self.subTest(name):
+        _, actions = swe_agent.parse_codeact_response_all(
+            "<think>\nx\n</think>\n" + text
+        )
+        self.assertEqual([a.parameters["thought"] for a in actions], expected)
+
+  def test_parse_codeact_all_after_think(self):
+    two_calls = (
+        "<tool_call>\n<function=think>\n<parameter=thought>\na\n"
+        "</parameter>\n</function>\n</tool_call>\n"
+        "<tool_call>\n<function=think>\n<parameter=thought>\nb\n"
+        "</parameter>\n</function>\n</tool_call>"
+    )
+    for response, expected in (
+        # Thinking disabled: no </think>, all text is content.
+        (two_calls, ["a", "b"]),
+        ("<think>\nplan\n</think>\n" + two_calls, ["a", "b"]),
+        # Calls inside the reasoning are not parsed by the reference.
+        ("<think>\n" + two_calls + "\n</think>\nDone.", ["a"]),
+    ):
+      with self.subTest(response=response):
+        _, actions = swe_agent.parse_codeact_response_all(response)
+        self.assertEqual([a.parameters["thought"] for a in actions], expected)
+
+  def test_parse_codeact_all_without_tool_call(self):
+    for response, name in (
+        ("<think>\nhmm\n</think>\nJust text.", ""),
+        ("Done. COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT", "submit"),
+    ):
+      with self.subTest(response=response):
+        _, actions = swe_agent.parse_codeact_response_all(response)
+        self.assertLen(actions, 1)
+        self.assertEqual(actions[0].function_name, name)
+
+  def test_codeact_agent_multi_tool_calls_flag(self):
+    response = (
+        "<think>\nplan\n</think>\n"
+        "<tool_call>\n<function=think>\n<parameter=thought>\na\n"
+        "</parameter>\n</function>\n</tool_call>\n"
+        "<tool_call>\n<function=execute_bash>\n<parameter=command>\nls\n"
+        "</parameter>\n</function>\n</tool_call>"
+    )
+    calls = [
+        "<function=think>\n<parameter=thought>a</parameter>\n</function>",
+        "<function=execute_bash>\n<parameter=command>ls</parameter>\n"
+        "</function>",
+    ]
+    for value, expected in (("", calls[0]), ("false", calls[0])):
+      with self.subTest(flag=value), mock.patch.dict(
+          os.environ, {"OPENHANDS_MULTI_TOOL_CALLS": value}
+      ):
+        agent = swe_agent.CodeActAgent()
+        agent.update_from_env("Fix issue", 0.0, False, {})
+        self.assertEqual(agent.update_from_model(response).action, expected)
+        self.assertEqual(agent.trajectory.steps[-1].action, expected)
+
+    with mock.patch.dict(os.environ, {"OPENHANDS_MULTI_TOOL_CALLS": "true"}):
+      agent = swe_agent.CodeActAgent()
+    agent.update_from_env("Fix issue", 0.0, False, {})
+    self.assertEqual(agent.update_from_model(response).action, calls)
+    self.assertEqual(agent.trajectory.steps[-1].action, "\n".join(calls))
+    self.assertEqual(agent.chat_completions[-1]["content"], response)
+    # Turns with one call keep returning a string.
+    agent.update_from_env("ok", 0.0, False, {})
+    single = response.split("\n<tool_call>\n<function=execute_bash>")[0]
+    self.assertEqual(agent.update_from_model(single).action, calls[0])
+
+  def test_codeact_agent_list_observation_becomes_tool_messages(self):
+    with mock.patch.dict(os.environ, {"OPENHANDS_MULTI_TOOL_CALLS": "true"}):
+      agent = swe_agent.CodeActAgent()
+    agent.update_from_env("Fix issue", 0.0, False, {})
+    agent.update_from_model(
+        "<think>\nplan\n</think>\n"
+        "<tool_call>\n<function=think>\n<parameter=thought>\na\n"
+        "</parameter>\n</function>\n</tool_call>\n"
+        "<tool_call>\n<function=think>\n<parameter=thought>\nb\n"
+        "</parameter>\n</function>\n</tool_call>"
+    )
+    n = len(agent.chat_completions)
+    agent.update_from_env(["logged a", "logged b"], 0.0, False, {})
+    self.assertEqual(
+        agent.chat_completions[n:],
+        [
+            {"role": "tool", "content": "logged a"},
+            {"role": "tool", "content": "logged b"},
+        ],
+    )
+    self.assertEqual(agent.trajectory.steps[-1].observation, ["logged a", "logged b"])
+
+  # r2egym is not installed in tests; SWEEnv imports its Action lazily.
+  @mock.patch.object(swe_env, "Action", SWEAction)
+  def test_swe_env_runs_multi_call_turn_in_order_and_counts_turns(self):
+    think = "<function=think>\n<parameter=thought>{}</parameter>\n</function>"
+    finish = "<function=finish>\n<parameter=message>done</parameter>\n</function>"
+
+    env = swe_env.SWEEnv(entry={"instance_id": "t1"}, scaffold="openhands", max_steps=30)
+    obs, _, done, info = env.step([think.format("a"), think.format("b")])
+    self.assertEqual(obs, ["Your thought has been logged."] * 2)
+    self.assertFalse(done)
+    self.assertEqual(info["num_tool_calls"], 2)
+    self.assertEqual(env.step_count, 2)  # Each call is one of max_steps.
+
+    # finish ends the episode; calls after it never run.
+    env = swe_env.SWEEnv(entry={"instance_id": "t1"}, scaffold="openhands", max_steps=30)
+    obs, _, done, info = env.step([finish, think.format("late")])
+    self.assertEqual(obs, "done")
+    self.assertTrue(done)
+    self.assertEqual(info["num_tool_calls"], 1)
+
+    # At turn 29 of 30, a two-call turn runs both and ends the episode; at
+    # turn 30, only the first call runs.
+    for prior, expected_obs in ((28, ["Your thought has been logged."] * 2),
+                                (29, "Your thought has been logged.")):
+      with self.subTest(prior=prior):
+        env = swe_env.SWEEnv(entry={"instance_id": "t1"}, scaffold="openhands", max_steps=30)
+        env.step_count = prior
+        obs, _, done, _ = env.step([think.format("a"), think.format("b")])
+        self.assertEqual(obs, expected_obs)
+        self.assertTrue(done)
+        self.assertEqual(env.step_count, 30)
+
+    # A single call (string) is unchanged.
+    env = swe_env.SWEEnv(entry={"instance_id": "t1"}, scaffold="openhands", max_steps=30)
+    obs, _, done, info = env.step(think.format("a"))
+    self.assertEqual(obs, "Your thought has been logged.")
+    self.assertNotIn("num_tool_calls", info)
+    self.assertEqual(env.step_count, 1)
+
   def test_step_openhands_think_task_tracker_and_finish(self):
     mock_env = mock.MagicMock()
     mock_env.max_steps = 10

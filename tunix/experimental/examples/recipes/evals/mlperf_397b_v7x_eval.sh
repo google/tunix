@@ -60,7 +60,7 @@ export CHECKPOINT_STORAGE_USE_ZARR3="${CHECKPOINT_STORAGE_USE_ZARR3:-false}"
 
 # Backend & Rollout Topology (16 chips = 32 devices = 4 hosts per replica, DP=2, EP=16, TP=1; no Trainer)
 export WEIGHT_SYNC_MODE="none"
-export ROLLOUT_JOBSET_YAML="jobset.mcjax.ray.yaml"
+export ROLLOUT_JOBSET_YAML="${ROLLOUT_JOBSET_YAML:-jobset.pathways.yaml}"
 export ROLLOUT_TPU_SLICE="${ROLLOUT_TPU_SLICE:-tpu7x:2x2x4}"
 export VLLM_DATA_PARALLEL_SIZE="${VLLM_DATA_PARALLEL_SIZE:-2}"
 _rollout_dims="${ROLLOUT_TPU_SLICE#*:}"
@@ -96,7 +96,7 @@ export PATHWAYS_PROXY_EXTRA_ARGS="${PATHWAYS_PROXY_EXTRA_ARGS:-${_rollout_xla_fl
 # Evaluation & DeepSWE Pipeline Configuration
 # ==============================================================================
 export NUM_GENERATIONS="${NUM_GENERATIONS:-4}"
-export BATCH_SIZE="${BATCH_SIZE:-64}"
+export BATCH_SIZE="${BATCH_SIZE:-256}"
 export DATASET_SPLIT="${DATASET_SPLIT:-validation}"
 export TASKS_LIMIT="${TASKS_LIMIT:-0}"
 
@@ -108,11 +108,11 @@ export DEBUG=${DEBUG:-0}
 
 # DeepSWE Environment & Agent Sandbox
 export DATASET_PATH="${DATASET_PATH:-gs://mlperf_dataset/benchmark-r2e-gym-easy}"
-export MAX_WARMPOOL_REPLICAS="${MAX_WARMPOOL_REPLICAS:-16}"
-export MAX_CONCURRENCY="${MAX_CONCURRENCY:-256}"
+export MAX_WARMPOOL_REPLICAS="${MAX_WARMPOOL_REPLICAS:-64}"
+export MAX_CONCURRENCY="${MAX_CONCURRENCY:-$(( 32 * ROLLOUT_REPLICAS ))}"
 export SANDBOX_NODE_SELECTOR_VAL="${SANDBOX_NODE_SELECTOR_VAL:-sandbox-c3d-np}"
 export SANDBOX_TOLERATIONS='[{"key":"workload","operator":"Equal","value":"sandbox","effect":"NoSchedule"}]'
-export IMAGE_REWRITE_PREFIX="${IMAGE_REWRITE_PREFIX:-us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/}"
+export IMAGE_REWRITE_PREFIX="${IMAGE_REWRITE_PREFIX:-${REGION}-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/}"
 export ENABLE_THINKING="${ENABLE_THINKING:-false}"
 export STEP_TIMEOUT_SECS=60
 export REWARD_TIMEOUT_SECS=60

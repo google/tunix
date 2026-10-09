@@ -509,8 +509,43 @@ class RoundUuidTest(absltest.TestCase):
     self.assertEqual(adapter._policy_version, 3)
     self.assertEqual(mock_sampler._policy_version, 3)
 
+  def _import_vllm_sampler_v2(self):
+    import sys
+    import types
+
+    if "vllm" not in sys.modules:
+      try:
+        import vllm  # pylint: disable=unused-import,g-import-not-at-top
+      except ImportError:
+        fake_vllm = types.ModuleType("vllm")
+        fake_vllm.envs = types.SimpleNamespace(
+            VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=[]
+        )
+        fake_engine = types.ModuleType("vllm.engine")
+        fake_arg_utils = types.ModuleType("vllm.engine.arg_utils")
+        fake_arg_utils.AsyncEngineArgs = object
+        fake_async_engine = types.ModuleType("vllm.engine.async_llm_engine")
+        fake_async_engine.AsyncLLMEngine = object
+        fake_sp = types.ModuleType("vllm.sampling_params")
+
+        class _FakeVllmSamplingParams:
+
+          def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+        fake_sp.SamplingParams = _FakeVllmSamplingParams
+        sys.modules["vllm"] = fake_vllm
+        sys.modules["vllm.envs"] = fake_vllm.envs
+        sys.modules["vllm.engine"] = fake_engine
+        sys.modules["vllm.engine.arg_utils"] = fake_arg_utils
+        sys.modules["vllm.engine.async_llm_engine"] = fake_async_engine
+        sys.modules["vllm.sampling_params"] = fake_sp
+    from tunix.experimental.rollout import vllm_sampler_v2  # pylint: disable=g-import-not-at-top
+
+    return vllm_sampler_v2
+
   def test_rl_vllm_sampler_partial_rollout_preserves_trajectory_cache_salt(self):
-    from tunix.experimental.rollout import vllm_sampler_v2
+    vllm_sampler_v2 = self._import_vllm_sampler_v2()
 
     sampler = vllm_sampler_v2.RLVllmSampler(
         engine_args=SimpleNamespace(enable_prefix_caching=True),
@@ -598,7 +633,7 @@ class RoundUuidTest(absltest.TestCase):
     )
 
   def test_in_flight_weight_updates_env_var_enables_partial_rollout(self):
-    from tunix.experimental.rollout import vllm_sampler_v2
+    vllm_sampler_v2 = self._import_vllm_sampler_v2()
 
     with mock.patch.dict("os.environ", {"IN_FLIGHT_WEIGHT_UPDATES": "true"}):
       sampler = vllm_sampler_v2.RLVllmSampler(
@@ -610,6 +645,75 @@ class RoundUuidTest(absltest.TestCase):
           engine_args=SimpleNamespace(enable_prefix_caching=True),
       )
       self.assertFalse(sampler._partial_rollout)
+
+  def test_adapter_propagates_auto_h2d_on_bind_and_metadata(self):
+    mock_sampler = mock.AsyncMock()
+    raw_metadata = [
+        {
+            "unit": {"job_name": "replica_rollout_w0", "job_replica_id": "0"},
+            "shards": ["10.0.0.1:5000"],
+            "control_plane_rpc_address": "10.0.0.1:6000",
+            "mesh_shape": [1],
+            "variables": [
+                {
+                    "name": "['model']['decoder']['layers_0']['w']",
+                    "shape": [2, 2],
+                    "mesh_shape": [1, 1],
+                    "layout": [1, 0],
+                    "item_size": 4,
+                }
+            ],
+            "auto_h2d": False,
+        }
+    ]
+    mock_sampler.bind_raiden_sync.return_value = raw_metadata
+    mock_sampler.get_raiden_metadata.return_value = raw_metadata
+    with mock.patch.dict("os.environ", {"WEIGHT_SYNC_PARALLEL_H2H": "1"}):
+      adapter = vllm_sampler_adapter.VllmSamplerAdapter(
+          server_id="rollout_w0",
+          sampler_instance=mock_sampler,
+      )
+      asyncio.run(adapter.bind_weight_sync())
+      mock_sampler.bind_raiden_sync.assert_awaited_once_with(
+          worker_index=0,
+          parallelism=4,
+          job_name="replica_rollout_w0",
+          auto_h2d=False,
+      )
+      metadata = asyncio.run(adapter.get_weight_sync_metadata())
+      self.assertLen(metadata, 1)
+      self.assertIs(metadata[0].auto_h2d, False)
+
+  def test_rl_vllm_sampler_bind_raiden_sync_passes_auto_h2d_with_fallback(self):
+    vllm_sampler_v2 = self._import_vllm_sampler_v2()
+
+    sampler = vllm_sampler_v2.RLVllmSampler(
+        engine_args=SimpleNamespace(enable_prefix_caching=True),
+    )
+    rpc_calls = []
+
+    class _FakeEngine:
+
+      async def collective_rpc(self, method, args=(), kwargs=None):
+        rpc_calls.append((method, args, dict(kwargs or {})))
+        if kwargs:
+          raise TypeError("bind_raiden_sync() got an unexpected keyword arg")
+        return [{"unit": {"job_name": args[2]}}]
+
+    sampler._engine = _FakeEngine()
+    res = asyncio.run(
+        sampler.bind_raiden_sync(
+            worker_index=1, parallelism=4, job_name="rollout_w1", auto_h2d=False
+        )
+    )
+    self.assertEqual(res, [{"unit": {"job_name": "rollout_w1"}}])
+    self.assertEqual(
+        rpc_calls,
+        [
+            ("bind_raiden_sync", (1, 4, "rollout_w1"), {"auto_h2d": False}),
+            ("bind_raiden_sync", (1, 4, "rollout_w1"), {}),
+        ],
+    )
 
 
 if __name__ == "__main__":

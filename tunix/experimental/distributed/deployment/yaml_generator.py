@@ -682,9 +682,14 @@ def main() -> None:
       else ""
   )
 
-  # RAIDEN_BROADCAST_K and TPU_RAIDEN_DATA_NICS are set in every container env of
-  # the jobset templates; rendering them again here would duplicate the entry.
-  template_env = ("RAIDEN_BROADCAST_K", "TPU_RAIDEN_DATA_NICS")
+  # RAIDEN_BROADCAST_K, TPU_RAIDEN_DATA_NICS, and ENABLE_MULTI_NUMA are set in
+  # every container env of the jobset templates; rendering them again here would
+  # duplicate the entry.
+  template_env = (
+      "RAIDEN_BROADCAST_K",
+      "TPU_RAIDEN_DATA_NICS",
+      "ENABLE_MULTI_NUMA",
+  )
   worker_env = {}
 
   # Under Pathways the TPU program runs in the worker, not the user container, so
@@ -717,6 +722,9 @@ def main() -> None:
       f"\n              - {json.dumps(flag)}"
       for flag in os.environ.get("PATHWAYS_PROXY_EXTRA_ARGS", "").split()
   )
+
+  enable_multi_numa = os.environ.get("ENABLE_MULTI_NUMA", "0")
+  tpu_raiden_data_nics = os.environ.get("TPU_RAIDEN_DATA_NICS", "eth0")
 
   with open(args.template_file, "r") as f:
     template_text = f.read()
@@ -795,6 +803,8 @@ def main() -> None:
         STARTUP_COMMAND=args.worker_startup_command,
         PATHWAYS_WORKER_EXTRA_ENV=pathways_worker_extra_env,
         PATHWAYS_PROXY_EXTRA_ARGS=pathways_proxy_extra_args,
+        ENABLE_MULTI_NUMA=enable_multi_numa,
+        TPU_RAIDEN_DATA_NICS=tpu_raiden_data_nics,
         **dataclasses.asdict(fail_fast),
     )
     print(content)

@@ -115,6 +115,7 @@ export VERIFY_WEIGHTS="true"
 export TRAINER_PADDED_MOE_MLP_DIM=""
 export WEIGHT_SYNC_MODE="${WEIGHT_SYNC_MODE:-raiden}"
 export WEIGHT_SYNC_DISABLE_TIMEOUTS="${WEIGHT_SYNC_DISABLE_TIMEOUTS:-${DISABLE_WEIGHT_SYNC_TIMEOUTS:-0}}"
+export WEIGHT_SYNC_PARALLEL_H2H="${WEIGHT_SYNC_PARALLEL_H2H:-0}"
 
 export TPU_RAIDEN_DATA_NICS="${TPU_RAIDEN_DATA_NICS:-eth0}"
 export RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFER="${RAIDEN_FFI_USE_DIRECT_DEVICE_BUFFER:-0}"
@@ -274,6 +275,7 @@ fi
 # Pack the next microbatch while the trainer runs the current one.
 export PIPELINE_TRAIN_MICROBATCHES=${PIPELINE_TRAIN_MICROBATCHES:-false}
 export TRAJECTORY_GROUP_ORDER=${TRAJECTORY_GROUP_ORDER:-prompt_batch}
+export TRAJECTORY_STORE_DB_URL="${TRAJECTORY_STORE_DB_URL:-}"
 
 # Sequence packing
 export MAX_SEQ_TOKEN_PER_TPU=${MAX_SEQ_TOKEN_PER_TPU:-65536}
@@ -337,6 +339,10 @@ export DATASET_PATH="${DATASET_PATH:-gs://mlperf_dataset/benchmark-r2e-gym-easy}
 export SHUFFLE="${SHUFFLE:-false}"
 export USE_AGENT_SANDBOX=1
 export SCAFFOLD="openhands"
+# The reference OpenHands runs every tool call of a model turn, in order, each
+# counting as one of MAX_TURNS; tunix runs only the first unless this is true
+# (training_rules.adoc R:685 "behaviorally equivalent" parser).
+export OPENHANDS_MULTI_TOOL_CALLS="${OPENHANDS_MULTI_TOOL_CALLS:-false}"
 export SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-${K8S_NAMESPACE:-trellis}}"
 export POOL_NAME_FORMAT="${POOL_NAME_FORMAT:-}"
 export TEMPLATE_NAME_PREFIX="${TEMPLATE_NAME_PREFIX:-}"

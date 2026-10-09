@@ -53,17 +53,20 @@ class RaidenWeightSyncDelegate:
       *args,
       worker_index: int = 0,
       server_id: str = "rollout",
+      auto_h2d: bool | None = None,
       **kwargs,
   ):
     del args, kwargs
     # TODO(tunix-dev): add a lock when enabling multiple samplers in one worker.
     self._sampler = None
+    if auto_h2d is None:
+      auto_h2d = not raiden_synchronizer.is_parallel_h2h_enabled()
 
     self._synchronizers: List[Any] = [
         raiden_synchronizer.RaidenSynchronizer(
             job_name=server_id,
             worker_index=worker_index,
-            auto_h2d=True,
+            auto_h2d=bool(auto_h2d),
         )
     ]
     self._version = 0
@@ -133,8 +136,8 @@ class RaidenWeightSyncDelegate:
     for sync in self._synchronizers:
       if not sync.bound:
         raise RuntimeError("bind_weight_sync must run before weight_sync")
-      # auto_h2d installs chunks as they arrive; this call is the round's
-      # awaited install, so completion is guaranteed before checksums/post.
+      # With auto_h2d=False, weights were staged in host DRAM during H2H;
+      # this call initiates and awaits the local H2D copy to device HBM.
       sync.h2d()
       if os.environ.get("VERIFY_WEIGHTS", "").lower() == "true":
         logging.info("destination checksums: %s", sync.checksums())
