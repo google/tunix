@@ -278,6 +278,23 @@ class YamlGeneratorTest(parameterized.TestCase):
         self.assertIn("memory: 160G", rendered)
         self.assertIn("memory: 120G", rendered)
 
+  def test_generate_ray_yaml_with_pre_init_commands(self):
+    template_file = _get_template_path("leaderworkerset.mcjax.ray.yaml")
+    argv = [
+        "yaml_generator.py",
+        template_file,
+        "--jobset_name=test-ray-job",
+        "--tpu_slice=tpuv5e:2x4",
+        "--ray_head_pre_init_command=echo head_pre_init",
+        "--ray_worker_pre_init_command=echo worker_pre_init",
+    ]
+    with mock.patch.object(sys, "argv", argv):
+      with mock.patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+        yaml_generator.main()
+        rendered = mock_stdout.getvalue()
+        self.assertIn("echo head_pre_init", rendered)
+        self.assertIn("echo worker_pre_init", rendered)
+
 
 if __name__ == "__main__":
   absltest.main()

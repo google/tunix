@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
 import importlib
 import json
 import logging
@@ -27,6 +28,7 @@ import signal
 import sys
 from typing import Any
 
+from tunix.experimental.common import gcs_cache
 from tunix.experimental.weight_sync import raiden_preload
 from tunix.experimental.weight_sync import weight_sync as weight_sync_lib
 from tunix.models import automodel
@@ -824,6 +826,32 @@ def _create_vllm_sampler(args, tokenizer):
   return sampler_adapter, config
 
 
+def _build_rollout_cache_params(
+    args: argparse.Namespace,
+) -> gcs_cache.RolloutCacheKeyParams:
+  """Constructs `RolloutCacheKeyParams` from parsed CLI args and environment."""
+  env_params = gcs_cache.RolloutCacheKeyParams.from_env()
+  return dataclasses.replace(
+      env_params,
+      model_name=args.maxtext_model_name or args.model_name or args.model_id,
+      sampler=args.sampler,
+      max_prompt_length=args.max_prompt_length,
+      max_response_length=args.max_response_length,
+      vllm_max_model_len=args.vllm_max_model_len,
+      mesh_tp=_get_tensor_parallel_size(args),
+      mesh_fsdp=args.mesh_fsdp,
+      use_lora=bool(args.use_lora),
+      lora_rank=args.lora_rank,
+      enable_prefix_caching=bool(args.enable_prefix_caching),
+      vllm_server_mode=(
+          args.vllm_server_mode
+          if args.vllm_server_mode is not None
+          else env_params.vllm_server_mode
+      ),
+      vllm_async_scheduling=bool(args.vllm_async_scheduling),
+  )
+
+
 def main(argv: list[str], context: Any = None) -> None:
   if context and context.ipc and context.ipc.discovery:
     pass
@@ -850,6 +878,8 @@ def main(argv: list[str], context: Any = None) -> None:
 
   logging.info("Importing rollout registry module: %s", args.registry_module)
   importlib.import_module(args.registry_module)
+
+  gcs_cache.restore_jax_cache(params=_build_rollout_cache_params(args))
 
   if context and args.sampler == "vanilla":
     context.jax.initialize()

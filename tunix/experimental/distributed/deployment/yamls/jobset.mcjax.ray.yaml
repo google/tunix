@@ -111,12 +111,14 @@ ${QUEUE_LABEL}spec:
 
                   (
                     if [ "$${POD_INDEX}" = "0" ]; then
+                      ${RAY_HEAD_PRE_INIT_COMMAND}
                       echo "Starting Ray head..."
                       ray start --head --port=6379
                       sleep 5; until ray status; do sleep 5; done
 
                       ${STARTUP_COMMAND}
                     else
+                      ${RAY_WORKER_PRE_INIT_COMMAND}
                       # The head may not be up yet; JobSet gives no ordering.
                       until ray start --address=$${RAY_HEAD}:6379 --block; do
                         echo "Ray head $${RAY_HEAD} not ready, retrying in 5s..."

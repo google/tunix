@@ -21,6 +21,7 @@ from typing import Any, AsyncIterator, Callable, List, Mapping, Optional, Sequen
 from absl import logging
 import numpy as np
 from tunix.experimental.common import datatypes
+from tunix.experimental.common import gcs_cache
 from tunix.experimental.rollout import manager as manager_lib
 from tunix.experimental.rollout import sampler as sampler_lib
 from tunix.experimental.trajectory import store as trajectory_store_lib
@@ -88,6 +89,7 @@ class RolloutWorker(abstract_worker.Worker):
       max_concurrency: int = 64,
       tokenizer: Any = None,
       chat_parser: Any = None,
+      jax_cache_config: Optional[gcs_cache.JaxCacheConfig] = None,
   ):
     super().__init__()
     self.worker_id = worker_id
@@ -96,6 +98,9 @@ class RolloutWorker(abstract_worker.Worker):
     self._state = datatypes.WorkerState.PENDING
     self._init_lock = threading.Lock()
     self._sync_round = {"req_id": None, "uuid": 0, "phase": "idle"}
+    self._jax_cache_syncer = gcs_cache.JaxCacheSyncer(
+        worker_id, jax_cache_config
+    )
     if tokenizer is None or chat_parser is None:
       raise ValueError(
           "RolloutWorker requires valid tokenizer and chat_parser arguments"
@@ -209,6 +214,7 @@ class RolloutWorker(abstract_worker.Worker):
     try:
       await self.sampler.start()
       await self.manager.bind_weight_sync()
+      self._jax_cache_syncer.sync(wait=False)
       return self._response(started=True)
     except Exception:
       self.state = WorkerState.ERROR
@@ -219,10 +225,13 @@ class RolloutWorker(abstract_worker.Worker):
     try:
       self.manager.cancel_all()
     finally:
-      # Runs even when cancel_all raises, so a failed stop releases the
-      # store's background writer thread instead of leaking it.
-      if self._trajectory_store is not None:
-        self._trajectory_store.close()
+      try:
+        # Runs even when cancel_all raises, so a failed stop releases the
+        # store's background writer thread instead of leaking it.
+        if self._trajectory_store is not None:
+          self._trajectory_store.close()
+      finally:
+        self._jax_cache_syncer.wait()
     return datatypes.Response()
 
   def pause(self) -> datatypes.Response:
@@ -330,20 +339,29 @@ class RolloutWorker(abstract_worker.Worker):
       cb = lambda item: on_complete(self._to_rollout_response(item))
     res = await self.manager.generate(requests, on_complete=cb)
     if isinstance(res, (list, tuple)):
-      return [self._to_rollout_response(r) for r in res]
-    return self._to_rollout_response(res)
+      responses = [self._to_rollout_response(r) for r in res]
+      for resp in responses:
+        self._jax_cache_syncer.sync_after_first_completed(resp.status)
+      return responses
+    resp = self._to_rollout_response(res)
+    self._jax_cache_syncer.sync_after_first_completed(resp.status)
+    return resp
 
   async def pop_next_completed(self) -> datatypes.RolloutResponse | Any:
     """Pull-based stream: yields whichever trajectory finishes first out-of-order."""
     res = await self.manager.pop_next_completed()
-    return self._to_rollout_response(res)
+    resp = self._to_rollout_response(res)
+    self._jax_cache_syncer.sync_after_first_completed(resp.status)
+    return resp
 
   async def as_completed_stream(
       self,
   ) -> AsyncIterator[datatypes.RolloutResponse | Any]:
     """Async stream yielding completed trajectories or errors strictly out-of-order."""
     async for res in self.manager.as_completed_stream():
-      yield self._to_rollout_response(res)
+      resp = self._to_rollout_response(res)
+      self._jax_cache_syncer.sync_after_first_completed(resp.status)
+      yield resp
 
   async def pre_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
     """Quiesces the worker; it stays SYNCING until post or abort."""

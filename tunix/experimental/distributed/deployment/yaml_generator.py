@@ -129,6 +129,16 @@ def main() -> None:
       default="sleep infinity",
       help="Command to run on startup",
   )
+  parser.add_argument(
+      "--ray_head_pre_init_command",
+      default="",
+      help="Command to run on the Ray head pod before starting Ray.",
+  )
+  parser.add_argument(
+      "--ray_worker_pre_init_command",
+      default="",
+      help="Command to run on Ray worker pods before joining the Ray cluster.",
+  )
 
   args = parser.parse_args()
 
@@ -218,6 +228,8 @@ def main() -> None:
         USER_CONTAINER_IMAGE=args.worker_container_image,
         USER_CONTAINER_PORT=args.worker_container_port,
         STARTUP_COMMAND=args.worker_startup_command,
+        RAY_HEAD_PRE_INIT_COMMAND=args.ray_head_pre_init_command,
+        RAY_WORKER_PRE_INIT_COMMAND=args.ray_worker_pre_init_command,
     )
     print(content)
 

@@ -54,12 +54,14 @@ spec:
 
                 (
                   if [ "$$LWS_WORKER_INDEX" = "0" ]; then
+                    ${RAY_HEAD_PRE_INIT_COMMAND}
                     echo "Starting Ray Head..."
                     ray start --head --port=6379
                     sleep 5; until ray status; do sleep 5; done
 
                     ${STARTUP_COMMAND}
                   else
+                    ${RAY_WORKER_PRE_INIT_COMMAND}
                     ray start --address=$${LWS_LEADER_ADDRESS}:6379 --block
                   fi
                 ) & PID=$$!

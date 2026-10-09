@@ -17,6 +17,7 @@
 from unittest import mock
 
 from absl.testing import absltest
+from tunix.experimental.common import gcs_cache
 from tunix.experimental.examples.common import run_rollout_node
 from tunix.rl.agentic.parser.chat_template_parser import parser
 from tunix.utils import maxtext_utils
@@ -109,7 +110,33 @@ class RunRolloutNodeTest(absltest.TestCase):
     kwargs_enabled = run_rollout_node._rollout_config_kwargs(args_enabled)
     self.assertTrue(kwargs_enabled["partial_rollout"])
 
+  def test_main_restores_jax_cache_before_jax_init(self):
+    events: list[str] = []
+    context = mock.Mock()
+
+    def _fake_jax_init() -> None:
+      events.append("jax_init")
+      raise RuntimeError("stop at jax init")
+
+    context.jax.initialize.side_effect = _fake_jax_init
+
+    with (
+        mock.patch.object(run_rollout_node.importlib, "import_module"),
+        mock.patch.object(
+            gcs_cache,
+            "restore_jax_cache",
+            side_effect=lambda params=None: (
+                events.append(f"restore:{params.sampler}") or True
+            ),
+        ) as mock_restore,
+    ):
+      with self.assertRaisesRegex(RuntimeError, "stop at jax init"):
+        run_rollout_node.main(["--sampler=vanilla"], context=context)
+
+    mock_restore.assert_called_once()
+    self.assertEqual(mock_restore.call_args.kwargs["params"].sampler, "vanilla")
+    self.assertEqual(events, ["restore:vanilla", "jax_init"])
+
 
 if __name__ == "__main__":
   absltest.main()
-
