@@ -281,6 +281,7 @@ def create_learning_rate(
 
 _OPT_CHAIN_TYPE_KEY = "opt_chain_type"
 _CHAIN_KWARGS_KEY = "chain_kwargs"
+_MAX_GRAD_NORM_KEY = "max_grad_norm"
 
 
 def create_optimizer(
@@ -297,16 +298,20 @@ def create_optimizer(
       `opt_chain_type` names a further `optax` factory (e.g.
       `clip_by_global_norm`) built from `chain_kwargs` (e.g.
       `{"max_norm": 0.1}`) and chained ahead of the optimizer; it defaults to
-      `None`, which leaves the optimizer unchained.
+      `None`, which leaves the optimizer unchained. The optional
+      `max_grad_norm` is shorthand for `opt_chain_type: clip_by_global_norm`
+      with `chain_kwargs: {"max_norm": max_grad_norm}`; when `opt_chain_type`
+      is also set, `opt_chain_type` wins and `max_grad_norm` is ignored.
     config_path_info: The path to the config file, used for error reporting.
 
   Returns:
-    An optimizer instance, preceded by `opt_chain_type` when it is set.
+    An optimizer instance, preceded by `opt_chain_type` (or by global-norm
+    clipping for `max_grad_norm`) when it is set.
 
   Raises:
     ValueError: If the config is not a dictionary, `opt_type` is missing or
-      unsupported, or the optimizer requires a learning rate that the config
-      does not provide.
+      unsupported, the optimizer requires a learning rate that the config
+      does not provide, or `max_grad_norm` is set but not a positive number.
     TypeError: If the extracted kwargs do not match the optimizer signature.
   """
   if not isinstance(optimizer_config, omegaconf.dictconfig.DictConfig | dict):
@@ -369,9 +374,37 @@ def create_optimizer(
   # reaches the optimizer this way rather than as an optimizer keyword, which
   # `optax` optimizers do not declare.
   opt_chain_type = optimizer_config.get(_OPT_CHAIN_TYPE_KEY)
+  chain_kwargs = optimizer_config.get(_CHAIN_KWARGS_KEY) or {}
+  # `max_grad_norm` is shorthand for chaining `clip_by_global_norm`. No `optax`
+  # optimizer declares it, so `_extract_kwargs` above never forwards it.
+  max_grad_norm = optimizer_config.get(_MAX_GRAD_NORM_KEY)
+  if max_grad_norm is not None:
+    if (
+        isinstance(max_grad_norm, bool)
+        or not isinstance(max_grad_norm, (int, float))
+        or max_grad_norm <= 0
+    ):
+      raise ValueError(
+          f"`{_MAX_GRAD_NORM_KEY}` must be a positive number or null, got"
+          f" {max_grad_norm!r} in {config_path_info}."
+      )
+    if opt_chain_type:
+      logging.warning(
+          "Config %s sets both `%s` and `%s`; `%s=%s` is ignored and only"
+          " `%s=%s` is chained ahead of the optimizer.",
+          config_path_info,
+          _MAX_GRAD_NORM_KEY,
+          _OPT_CHAIN_TYPE_KEY,
+          _MAX_GRAD_NORM_KEY,
+          max_grad_norm,
+          _OPT_CHAIN_TYPE_KEY,
+          opt_chain_type,
+      )
+    else:
+      opt_chain_type = "clip_by_global_norm"
+      chain_kwargs = {"max_norm": max_grad_norm}
   if not opt_chain_type:
     return optimizer
-  chain_kwargs = optimizer_config.get(_CHAIN_KWARGS_KEY) or {}
   chained = create_optimizer(
       {"opt_type": opt_chain_type, **chain_kwargs}, config_path_info
   )
