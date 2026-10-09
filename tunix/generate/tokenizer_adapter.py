@@ -240,7 +240,7 @@ class Tokenizer(TokenizerAdapter):
 
     self.tokenizer_type = tokenizer_type
     if tokenizer_type == 'huggingface':
-      import transformers  # pylint: disable=g-import-not-at-top
+      import transformers  # pylint: disable=g-import-not-at-top  # pyrefly: ignore[missing-import]
 
       tokenizer = transformers.AutoTokenizer.from_pretrained(
           pretrained_model_name_or_path=tokenizer_path,
