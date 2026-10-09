@@ -389,7 +389,7 @@ def create_optimizer(
           f" {max_grad_norm!r} in {config_path_info}."
       )
     if opt_chain_type:
-      logging.info(
+      logging.warning(
           "Config %s sets both `%s` and `%s`; `%s=%s` is ignored and only"
           " `%s=%s` is chained ahead of the optimizer.",
           config_path_info,
