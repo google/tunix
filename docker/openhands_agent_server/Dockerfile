@@ -43,7 +43,10 @@ RUN mkdir -p /opt/oh/glibc236 && \
     (cp /lib/x86_64-linux-gnu/librt.so.1 /opt/oh/glibc236/ 2>/dev/null || true) && \
     patchelf --set-interpreter /oh/glibc236/ld-linux-x86-64.so.2 /opt/oh/openhands-agent-server && \
     patchelf --set-rpath /oh/glibc236 /opt/oh/openhands-agent-server && \
-    chmod +x /opt/oh/openhands-agent-server
+    chmod +x /opt/oh/openhands-agent-server && \
+    mkdir -p /opt/oh/wheels /opt/oh/pkgs && \
+    pip download --no-deps -d /opt/oh/wheels 'chardet==5.2.0' && \
+    pip install --no-cache-dir --target /opt/oh/pkgs 'chardet==5.2.0'
 
 FROM debian:bookworm-slim
 COPY --from=builder /opt/oh /opt/oh

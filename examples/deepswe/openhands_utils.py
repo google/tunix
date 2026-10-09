@@ -820,6 +820,14 @@ def setup_openhands_workspace(
           "([ -d /workspace ] && [ ! -e /testbed ] && ln -s /workspace /testbed"
           " 2>/dev/null || true)"
       ),
+      (
+          "if [ -d /oh/pkgs ]; then for sp in"
+          " /testbed/.venv/lib/python*/site-packages"
+          " /root/.venv/lib/python*/site-packages"
+          " /usr/local/lib/python*/site-packages; do if [ -d \"$sp\" ] && [ ! -d"
+          " \"$sp/chardet\" ]; then cp -a /oh/pkgs/chardet* \"$sp/\""
+          " 2>/dev/null || true; fi; done; fi"
+      ),
       "git -C /testbed reset --hard 2>/dev/null || true",
       (
           "(for r in $(git -C /testbed remote 2>/dev/null); do"
