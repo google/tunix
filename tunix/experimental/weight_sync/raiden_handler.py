@@ -113,7 +113,6 @@ class _RaidenTransport:
       port: int = 0,
       advertised_address: Optional[str] = None,
       loopback_address: Optional[str] = None,
-      name_resolver: Optional[raiden_controller.NameResolver] = None,
       transfer_parallelism: Optional[int] = None,
       transfer_uuid: int = 1,
       transfer_options: Optional[RaidenTransferOptions] = None,
@@ -126,7 +125,6 @@ class _RaidenTransport:
       loopback_address: This controller's same-host spelling, used to reject a
         self-addressed peer. Defaults to IPv6 loopback because a listener may
         be IPv6-only.
-      name_resolver: Resolver for outbound worker control-plane calls.
       transfer_parallelism: Convenience default for transport parallelism.
       transfer_uuid: Default transfer generation.
       transfer_options: Raiden planner configuration. Mutually exclusive with
@@ -141,14 +139,7 @@ class _RaidenTransport:
           "set transfer parallelism either through transfer_options or"
           " transfer_parallelism, not both"
       )
-    worker_rpc_client = None
-    if name_resolver is not None:
-      worker_rpc_client = raiden_controller.WeightSyncWorkerRpcClient(
-          name_resolver=name_resolver
-      )
-    self._controller = raiden_controller.RaidenController(
-        port=port, worker_rpc_client=worker_rpc_client
-    )
+    self._controller = raiden_controller.RaidenController(port=port)
     self._server = raiden_controller.RaidenControllerServer(self._controller)
     self._port = self._server.start()
     self._loopback_address = (
@@ -455,7 +446,6 @@ class RaidenHandler(weight_sync.WeightSyncHandler):
       port: int = 0,
       advertised_address: Optional[str] = None,
       loopback_address: Optional[str] = None,
-      name_resolver: Optional[raiden_controller.NameResolver] = None,
       transfer_parallelism: Optional[int] = None,
       transfer_uuid: int = 1,
       transfer_options: Optional[RaidenTransferOptions] = None,
@@ -468,7 +458,6 @@ class RaidenHandler(weight_sync.WeightSyncHandler):
       loopback_address: This controller's same-host spelling, used to reject a
         self-addressed peer. Defaults to IPv6 loopback because a listener may
         be IPv6-only.
-      name_resolver: Resolver for outbound worker control-plane calls.
       transfer_parallelism: Convenience default for transport parallelism.
       transfer_uuid: Default transfer generation.
       transfer_options: Raiden planner configuration. Mutually exclusive with
@@ -478,7 +467,6 @@ class RaidenHandler(weight_sync.WeightSyncHandler):
         port=port,
         advertised_address=advertised_address,
         loopback_address=loopback_address,
-        name_resolver=name_resolver,
         transfer_parallelism=transfer_parallelism,
         transfer_uuid=transfer_uuid,
         transfer_options=transfer_options,
