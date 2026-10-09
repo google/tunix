@@ -1,12 +1,23 @@
-"""Database engine management for SQL Trajectory Store."""
+"""Database engine and schema initialization for SQL Trajectory Store."""
 
 from collections.abc import Callable
 import dataclasses
 import enum
 import sqlite3
 import threading
+from typing import Final
 
 import sqlalchemy as sa
+from tunix.experimental.trajectory import schema
+
+# Process-local lock serializing concurrent schema initialization across threads
+# within a single process (e.g. shared SQLite StaticPool engines).
+_SCHEMA_INIT_LOCK: Final[threading.Lock] = threading.Lock()
+
+# Deterministic 64-bit signed integer key for PostgreSQL `pg_advisory_xact_lock`
+# during cold-start schema DDL initialization (derived from SHA-256 of
+# `"TRAJECTORY_STORE"`).
+_POSTGRES_SCHEMA_INIT_LOCK_ID: Final[int] = 0x568C418D_F1971EA0
 
 
 class Dialect(enum.StrEnum):
@@ -18,6 +29,54 @@ class Dialect(enum.StrEnum):
 
   POSTGRESQL = enum.auto()
   SQLITE = enum.auto()
+
+
+def _has_all_schema_tables(conn: sa.Connection) -> bool:
+  """Returns True if all tables in `schema.METADATA` exist in `conn`."""
+  existing_tables = set(sa.inspect(conn).get_table_names())
+  return schema.METADATA.tables.keys() <= existing_tables
+
+
+def _acquire_schema_init_lock(conn: sa.Connection, dialect_name: str) -> None:
+  """Acquires a dialect-specific transaction lock before running schema DDL."""
+  if dialect_name == Dialect.POSTGRESQL:
+    conn.execute(
+        sa.select(sa.func.pg_advisory_xact_lock(_POSTGRES_SCHEMA_INIT_LOCK_ID))
+    )
+  elif dialect_name == Dialect.SQLITE:
+    conn.exec_driver_sql("BEGIN IMMEDIATE")
+
+
+def initialize_schema(engine: sa.Engine) -> None:
+  """Creates database tables and indexes safely under concurrent startups.
+
+  Implements a two-phase initialization protocol to prevent concurrent DDL race
+  conditions when multiple distributed rollout workers start simultaneously:
+
+  1. Read-Only Fast Path: Checks whether all `schema.METADATA` tables (`runs`,
+     `trajectories`, `steps`) already exist. On warm databases, returns
+     immediately without acquiring write locks or opening a write transaction.
+  2. Serialized Transactional DDL: When any table is missing, acquires a
+     dialect-level transaction lock (`pg_advisory_xact_lock` on PostgreSQL or
+     `BEGIN IMMEDIATE` on SQLite) inside `engine.begin()`, re-checks table
+     existence in case another worker initialized the schema while waiting on
+     the lock, and executes `schema.METADATA.create_all(conn, checkfirst=True)`
+     before releasing the lock on commit.
+
+  Args:
+    engine: Configured SQLAlchemy engine.
+  """
+  dialect_name = engine.dialect.name
+  with _SCHEMA_INIT_LOCK:
+    with engine.connect() as conn:
+      if _has_all_schema_tables(conn):
+        return
+
+    with engine.begin() as conn:
+      _acquire_schema_init_lock(conn, dialect_name)
+      if _has_all_schema_tables(conn):
+        return
+      schema.METADATA.create_all(conn, checkfirst=True)
 
 
 def _set_sqlite_pragmas(

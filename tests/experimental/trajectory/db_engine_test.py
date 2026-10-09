@@ -8,6 +8,7 @@ from absl.testing import absltest
 from absl.testing import parameterized
 import sqlalchemy as sa
 from tunix.experimental.trajectory import db_engine
+from tunix.experimental.trajectory import schema
 
 
 def _query_pragma(engine: sa.Engine, pragma: str) -> Any:
@@ -227,6 +228,104 @@ class DbEngineTest(parameterized.TestCase):
       self, url: str, expected: str
   ) -> None:
     self.assertEqual(db_engine.redact_url(url), expected)
+
+  def _create_postgres_mock_engine(
+      self,
+  ) -> tuple[mock.MagicMock, mock.MagicMock, mock.MagicMock]:
+    """Returns a mock Postgres engine and its read and write connections."""
+    mock_engine = mock.MagicMock()
+    mock_engine.dialect.name = db_engine.Dialect.POSTGRESQL
+    mock_read_conn = mock.MagicMock()
+    mock_write_conn = mock.MagicMock()
+    mock_engine.connect.return_value.__enter__.return_value = mock_read_conn
+    mock_engine.begin.return_value.__enter__.return_value = mock_write_conn
+    return mock_engine, mock_read_conn, mock_write_conn
+
+  def test_initialize_schema_on_postgresql_acquires_advisory_lock_when_cold(
+      self,
+  ) -> None:
+    mock_engine, mock_read_conn, mock_write_conn = (
+        self._create_postgres_mock_engine()
+    )
+    mock_inspector = mock.MagicMock()
+    mock_inspector.get_table_names.return_value = []
+
+    with (
+        mock.patch.object(
+            sa, "inspect", return_value=mock_inspector
+        ) as mock_inspect,
+        mock.patch.object(schema.METADATA, "create_all") as mock_create_all,
+    ):
+      db_engine.initialize_schema(mock_engine)
+
+    self.assertEqual(
+        mock_inspect.call_args_list,
+        [mock.call(mock_read_conn), mock.call(mock_write_conn)],
+    )
+    mock_write_conn.execute.assert_called_once()
+    lock_stmt = str(
+        mock_write_conn.execute.call_args.args[0].compile(
+            compile_kwargs={"literal_binds": True}
+        )
+    )
+    self.assertIn(
+        f"pg_advisory_xact_lock({db_engine._POSTGRES_SCHEMA_INIT_LOCK_ID})",
+        lock_stmt,
+    )
+    mock_create_all.assert_called_once_with(mock_write_conn, checkfirst=True)
+
+  def test_initialize_schema_skips_ddl_when_created_by_peer_while_waiting(
+      self,
+  ) -> None:
+    mock_engine, _, mock_write_conn = self._create_postgres_mock_engine()
+    cold_inspector = mock.MagicMock()
+    cold_inspector.get_table_names.return_value = []
+    warm_inspector = mock.MagicMock()
+    warm_inspector.get_table_names.return_value = list(
+        schema.METADATA.tables.keys()
+    )
+
+    with (
+        mock.patch.object(
+            sa, "inspect", side_effect=[cold_inspector, warm_inspector]
+        ),
+        mock.patch.object(schema.METADATA, "create_all") as mock_create_all,
+    ):
+      db_engine.initialize_schema(mock_engine)
+
+    mock_write_conn.execute.assert_called_once()
+    mock_create_all.assert_not_called()
+
+  def test_initialize_schema_when_all_tables_exist_skips_lock_and_ddl(
+      self,
+  ) -> None:
+    mock_engine, _, _ = self._create_postgres_mock_engine()
+    mock_inspector = mock.MagicMock()
+    mock_inspector.get_table_names.return_value = list(
+        schema.METADATA.tables.keys()
+    )
+
+    with (
+        mock.patch.object(sa, "inspect", return_value=mock_inspector),
+        mock.patch.object(schema.METADATA, "create_all") as mock_create_all,
+    ):
+      db_engine.initialize_schema(mock_engine)
+
+    mock_engine.begin.assert_not_called()
+    mock_create_all.assert_not_called()
+
+  def test_initialize_schema_on_sqlite_creates_base_tables(self) -> None:
+    engine = db_engine.create_trajectory_engine(
+        db_engine.EngineConfig(url="sqlite:///:memory:")
+    )
+    self.addCleanup(engine.dispose)
+
+    db_engine.initialize_schema(engine)
+
+    self.assertCountEqual(
+        sa.inspect(engine).get_table_names(),
+        schema.METADATA.tables.keys(),
+    )
 
 
 if __name__ == "__main__":

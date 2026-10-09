@@ -19,8 +19,6 @@ from tunix.experimental.trajectory import store_testing
 from tunix.experimental.trajectory import trajectory as trajectory_lib
 from tunix.experimental.trajectory import trajectory_testing
 
-_POSTGRES_URL = "postgresql+psycopg2://user@host/db"
-
 
 class SqlStoreWriterTest(parameterized.TestCase):
   """Tests for the SQL behavior of _AsyncSqlWriter."""
@@ -605,18 +603,6 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
     self.addCleanup(store_inst.close)
     return store_inst
 
-  def _create_postgres_mock_engine(
-      self,
-  ) -> tuple[mock.MagicMock, mock.MagicMock, mock.MagicMock]:
-    """Returns a mock Postgres engine and its read and write connections."""
-    mock_engine = mock.MagicMock()
-    mock_engine.dialect.name = db_engine.Dialect.POSTGRESQL
-    mock_read_conn = mock.MagicMock()
-    mock_write_conn = mock.MagicMock()
-    mock_engine.connect.return_value.__enter__.return_value = mock_read_conn
-    mock_engine.begin.return_value.__enter__.return_value = mock_write_conn
-    return mock_engine, mock_read_conn, mock_write_conn
-
   def _patch_create_engine(self, engine: Any) -> mock.MagicMock:
     """Patches the engine factory so the store is built on `engine`."""
     patcher = mock.patch.object(
@@ -674,6 +660,22 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
     self.assertEqual(store_inst.run_id, "my_run")
     self.assertEqual(str(store_inst.engine.url), self.db_url)
 
+  def test_init_with_auto_init_true_delegates_to_db_engine_initialize_schema(
+      self,
+  ) -> None:
+    with mock.patch.object(
+        db_engine, "initialize_schema", autospec=True
+    ) as mock_init_schema:
+      store_inst = sql_store.SqlTrajectoryStore(
+          db_url=self.db_url,
+          run_id="  my_run  ",
+          auto_init=True,
+          metadata_cls=trajectory_lib.TrajectoryMetadata,
+      )
+      self.addCleanup(store_inst.close)
+
+    mock_init_schema.assert_called_once_with(store_inst.engine)
+
   def test_init_with_auto_init_false_does_not_create_tables(self) -> None:
     store_inst = sql_store.SqlTrajectoryStore(
         db_url=self.db_url,
@@ -692,8 +694,8 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
     live_writers_before = set(async_writer._LIVE_WRITERS)
     self.enter_context(
         mock.patch.object(
-            sql_store.SqlTrajectoryStore,
-            "_initialize_schema",
+            db_engine,
+            "initialize_schema",
             autospec=True,
             side_effect=RuntimeError("schema init failed"),
         )
@@ -707,97 +709,6 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
       )
 
     self.assertEqual(set(async_writer._LIVE_WRITERS), live_writers_before)
-
-  def test_init_on_postgresql_acquires_advisory_lock_when_cold(
-      self,
-  ) -> None:
-    mock_engine, mock_read_conn, mock_write_conn = (
-        self._create_postgres_mock_engine()
-    )
-    self._patch_create_engine(mock_engine)
-    mock_inspector = mock.MagicMock()
-    mock_inspector.get_table_names.return_value = []
-
-    with (
-        mock.patch.object(
-            sa, "inspect", return_value=mock_inspector
-        ) as mock_inspect,
-        mock.patch.object(schema.METADATA, "create_all") as mock_create_all,
-    ):
-      sql_store.SqlTrajectoryStore(
-          db_url=_POSTGRES_URL,
-          run_id="test_run",
-          auto_init=True,
-          metadata_cls=trajectory_lib.TrajectoryMetadata,
-      ).close()
-
-    self.assertEqual(
-        mock_inspect.call_args_list,
-        [mock.call(mock_read_conn), mock.call(mock_write_conn)],
-    )
-    mock_write_conn.execute.assert_called_once()
-    executed_stmt = str(
-        mock_write_conn.execute.call_args.args[0].compile(
-            compile_kwargs={"literal_binds": True}
-        )
-    )
-    self.assertIn(
-        f"pg_advisory_xact_lock({sql_store._POSTGRES_SCHEMA_INIT_LOCK_ID})",
-        executed_stmt,
-    )
-    mock_create_all.assert_called_once_with(mock_write_conn, checkfirst=True)
-
-  def test_init_skips_ddl_when_tables_created_by_peer_while_waiting_for_lock(
-      self,
-  ) -> None:
-    mock_engine, _, mock_write_conn = self._create_postgres_mock_engine()
-    self._patch_create_engine(mock_engine)
-    cold_inspector = mock.MagicMock()
-    cold_inspector.get_table_names.return_value = []
-    warm_inspector = mock.MagicMock()
-    warm_inspector.get_table_names.return_value = list(
-        schema.METADATA.tables.keys()
-    )
-
-    with (
-        mock.patch.object(
-            sa, "inspect", side_effect=[cold_inspector, warm_inspector]
-        ),
-        mock.patch.object(schema.METADATA, "create_all") as mock_create_all,
-    ):
-      sql_store.SqlTrajectoryStore(
-          db_url=_POSTGRES_URL,
-          run_id="test_run",
-          auto_init=True,
-          metadata_cls=trajectory_lib.TrajectoryMetadata,
-      ).close()
-
-    mock_write_conn.execute.assert_called_once()
-    mock_create_all.assert_not_called()
-
-  def test_init_when_tables_exist_skips_advisory_lock_and_ddl(
-      self,
-  ) -> None:
-    mock_engine, _, _ = self._create_postgres_mock_engine()
-    self._patch_create_engine(mock_engine)
-    mock_inspector = mock.MagicMock()
-    mock_inspector.get_table_names.return_value = list(
-        schema.METADATA.tables.keys()
-    )
-
-    with (
-        mock.patch.object(sa, "inspect", return_value=mock_inspector),
-        mock.patch.object(schema.METADATA, "create_all") as mock_create_all,
-    ):
-      sql_store.SqlTrajectoryStore(
-          db_url=_POSTGRES_URL,
-          run_id="test_run",
-          auto_init=True,
-          metadata_cls=trajectory_lib.TrajectoryMetadata,
-      ).close()
-
-    mock_engine.begin.assert_not_called()
-    mock_create_all.assert_not_called()
 
   def test_init_concurrent_workers_with_auto_init_true_succeeds(self) -> None:
     num_workers = 32
@@ -948,8 +859,9 @@ class SqlTrajectoryStoreTest(trajectory_testing.TrajectoryTestCase):
     )
     self.enter_context(
         mock.patch.object(
-            sql_store.SqlTrajectoryStore,
-            "_initialize_schema",
+            db_engine,
+            "initialize_schema",
+            autospec=True,
             side_effect=RuntimeError("DDL failure"),
         )
     )

@@ -65,7 +65,7 @@ class SchemaTestCase(parameterized.TestCase, metaclass=ParameterizedABCMeta):
   def setUp(self) -> None:
     super().setUp()
     self.engine = self.create_engine()
-    schema.METADATA.create_all(self.engine)
+    db_engine.initialize_schema(self.engine)
 
   def tearDown(self) -> None:
     schema.METADATA.drop_all(self.engine)
