@@ -16,6 +16,9 @@
 3. **Decoupled Testing Architecture**
    CLI flag parsing and store initialization are tested once in `run_explorer_test.py`. Individual subcommand tests (`commands/*_test.py`) do **not** touch the filesystem or CLI parser; instead, they test command logic directly against prefilled in-memory stores using the test harness in `commands/testing.py`.
 
+4. **Diagnostics Library Separate from CLI Plumbing (`diagnostics/`)**
+   Trajectory and run statistics are computed in `diagnostics/` (the `:diagnostics` target), which has no CLI or terminal dependencies and reports absent data as `None`. Programmatic callers such as Colab notebooks and evaluation scripts import it directly. `commands/` holds only subcommand definitions and their terminal rendering (`commands/formatting.py`, which renders absent data as `-`).
+
 ---
 
 ## Usage
