@@ -24,6 +24,10 @@ ROLE=""
 WORKER_ID="all"
 # Docker image URI used for worker containers on Kubernetes.
 TUNIX_IMAGE="us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/yangmu/tunix/tunix_base_image:latest"
+# set by --otel_endpoint
+OTEL_ENDPOINT='http://$(NODE_IP):4317'
+# python binary resolution (macOS uses python3)
+PYTHON_BIN="$(which python 2>/dev/null || which python3 2>/dev/null || echo "python3")"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -53,6 +57,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --image=*)
       TUNIX_IMAGE="${1#*=}"
+      shift
+      ;;
+    --otel_endpoint)
+      OTEL_ENDPOINT="$2"
+      shift 2
+      ;;
+    --otel_endpoint=*)
+      OTEL_ENDPOINT="${1#*=}"
       shift
       ;;
     *)
@@ -98,12 +110,16 @@ launch_orchestrator() {
   else
     cd "$REPO_ROOT"
     kubectl delete jobset orchestrator
-    python tunix/experimental/distributed/deployment/yaml_generator.py \
+  else
+    cd "$REPO_ROOT"
+    kubectl delete jobset orchestrator
+    $PYTHON_BIN tunix/experimental/distributed/deployment/yaml_generator.py \
       tunix/experimental/distributed/deployment/yamls/jobset.cpu.yaml \
       --jobset_name=orchestrator \
       --cpu_machine=n2-standard-64 \
       --worker_container_image="$TUNIX_IMAGE" \
       --worker_container_port=12345 \
+      --otel_exporter_otlp_endpoint="$OTEL_ENDPOINT" \
       --worker_startup_command="python -m tunix.experimental.distributed.runtime.main \
         --discovery_id=orchestrator \
         --discovery_port=12345 \
@@ -118,7 +134,7 @@ launch_orchestrator() {
 launch_rollout() {
   if [[ "$LOCAL_MODE" == "true" ]]; then
     cd "$REPO_ROOT"
-    python -m tunix.experimental.distributed.runtime.main \
+    $PYTHON_BIN -m tunix.experimental.distributed.runtime.main \
       --discovery_addrs=orchestrator:12345 \
       --process_main=tunix.experimental.distributed.examples.vllm_rollout.rollout.main \
       --worker_id=rollout-0 \
@@ -128,7 +144,7 @@ launch_rollout() {
     if [[ "$WORKER_ID" == "all" ]]; then
       for ((i=0; i<=3; i++)); do
         kubectl delete jobset rollout-$i
-        python tunix/experimental/distributed/deployment/yaml_generator.py \
+        $PYTHON_BIN tunix/experimental/distributed/deployment/yaml_generator.py \
           tunix/experimental/distributed/deployment/yamls/jobset.pathways.yaml \
           --jobset_name=rollout-$i \
           --tpu_slice=tpuv5e:4x4 \
@@ -136,6 +152,7 @@ launch_rollout() {
           --pathways_proxy_server_image=us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/yangmu/tunix/unsanitized_proxy_server:latest \
           --worker_container_image="$TUNIX_IMAGE" \
           --worker_container_port=$((10000+i)) \
+          --otel_exporter_otlp_endpoint="$OTEL_ENDPOINT" \
           --worker_startup_command="python -m tunix.experimental.distributed.runtime.main \
             --discovery_addrs=orchestrator:12345 \
             --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
@@ -146,7 +163,7 @@ launch_rollout() {
       done
     else
       kubectl delete jobset "rollout-${WORKER_ID}"
-      python tunix/experimental/distributed/deployment/yaml_generator.py \
+      $PYTHON_BIN tunix/experimental/distributed/deployment/yaml_generator.py \
         tunix/experimental/distributed/deployment/yamls/jobset.pathways.yaml \
         --jobset_name="rollout-${WORKER_ID}" \
         --tpu_slice=tpuv5e:4x4 \
@@ -154,6 +171,7 @@ launch_rollout() {
         --pathways_proxy_server_image=us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/yangmu/tunix/unsanitized_proxy_server:latest \
         --worker_container_image="$TUNIX_IMAGE" \
         --worker_container_port=11111 \
+        --otel_exporter_otlp_endpoint="$OTEL_ENDPOINT" \
         --worker_startup_command="python -m tunix.experimental.distributed.runtime.main \
           --discovery_addrs=orchestrator:12345 \
           --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
