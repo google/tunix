@@ -62,10 +62,9 @@ class GetWeightSyncMetadataTest(unittest.IsolatedAsyncioTestCase):
     await manager.get_weight_sync_metadata(timeout_s=5)
     self.assertEqual(sampler.calls, [{"timeout_s": 5}])
 
-  async def test_default_sampler_raises_not_implemented(self):
-    manager = manager_lib.RolloutManager(tokenizer="mock", chat_parser="mock")
-    with self.assertRaises(NotImplementedError):
-      await manager.get_weight_sync_metadata()
+  async def test_default_vanilla_sampler_without_instance_raises(self):
+    with self.assertRaises(ValueError):
+      manager_lib.RolloutManager(tokenizer="mock", chat_parser="mock")
 
 
 class _FakeSyncSampler(_FakeSampler):
@@ -458,32 +457,15 @@ class AgentConfigTest(unittest.IsolatedAsyncioTestCase):
 
 class WeightSyncModeTest(absltest.TestCase):
 
-  @mock.patch(
-      "tunix.experimental.weight_sync.raiden_weight_sync_delegate.RaidenWeightSyncDelegate"
-  )
-  def test_config_weight_sync_mode_raiden(self, mock_delegate_cls):
+  def test_config_vanilla_without_sampler_raises(self):
     config = types.SimpleNamespace(
         sampler_type="vanilla",
         weight_sync_mode=weight_sync.WeightSyncMode.RAIDEN,
     )
-    manager = manager_lib.RolloutManager(
-        config=config, tokenizer="mock", chat_parser="mock"
-    )
-    self.assertTrue(getattr(manager.sampler, "enable_raiden", False))
-    delegate = getattr(manager.sampler, "raiden_sync_delegate", None)
-    self.assertIsNotNone(delegate)
-    mock_delegate_cls.assert_called_once_with(server_id="vanilla_sampler")
-
-  def test_config_weight_sync_mode_fallback(self):
-    config = types.SimpleNamespace(
-        sampler_type="vanilla",
-        weight_sync_mode=weight_sync.WeightSyncMode.FALLBACK,
-    )
-    manager = manager_lib.RolloutManager(
-        config=config, tokenizer="mock", chat_parser="mock"
-    )
-    self.assertFalse(getattr(manager.sampler, "enable_raiden", False))
-    self.assertIsNone(getattr(manager.sampler, "raiden_sync_delegate", None))
+    with self.assertRaises(ValueError):
+      manager_lib.RolloutManager(
+          config=config, tokenizer="mock", chat_parser="mock"
+      )
 
   @mock.patch(
       "tunix.experimental.weight_sync.raiden_weight_sync_delegate.RaidenWeightSyncDelegate"

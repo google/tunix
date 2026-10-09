@@ -31,7 +31,7 @@ from tunix.experimental.common import datatypes
 from tunix.experimental.orchestrator import worker_registry
 from tunix.experimental.rollout import inprocess_vllm_sampler_adapter
 from tunix.experimental.rollout import sampler as base_sampler_lib
-from tunix.experimental.rollout import vanilla_sampler_adapter
+from tunix.experimental.rollout import vanilla_sampler
 from tunix.experimental.train import peft_trainer_v2
 from tunix.experimental.weight_sync import raiden_handler
 from tunix.experimental.weight_sync import raiden_synchronizer
@@ -41,7 +41,6 @@ from tunix.experimental.weight_sync import weight_sync_coordinator
 from tunix.experimental.worker import rollout_worker
 from tunix.experimental.worker import trainer_worker
 from tunix.generate import base_sampler
-from tunix.generate import sampler as vanilla_sampler_lib
 from tunix.generate import utils as gen_utils
 from tunix.rl import reshard
 from tunix.tests import test_common
@@ -279,27 +278,19 @@ def _rollout_process_fn(
   model_config = test_common.ModelConfig(**model_config_kwargs)
   sampler_type = adapter_config_kwargs.get("sampler_type", "inprocess_vllm")
   delegate = raiden_weight_sync_delegate.RaidenWeightSyncDelegate()
-  adapter_config = RolloutConfig(**adapter_config_kwargs)
+  adapter_config = RolloutConfig(kv_cache_size=64, **adapter_config_kwargs)
 
   if sampler_type == "vanilla":
     vanilla_model = test_common.ToyTransformer(model_config, rngs=nnx.Rngs(1))
     vanilla_model(
         jnp.zeros((1, 4), dtype=jnp.int32), jnp.zeros((1, 4), dtype=jnp.int32)
     )
-    adapter = vanilla_sampler_adapter.VanillaSamplerAdapter(
+    adapter = vanilla_sampler.VanillaSampler(
         server_id="vanilla_sampler_coord_0",
-        config=adapter_config,
-        raiden_sync_delegate=delegate,
-    )
-    adapter.sampler = vanilla_sampler_lib.Sampler(
         transformer=vanilla_model,
         tokenizer=test_common.MockVocab(),
-        cache_config=vanilla_sampler_lib.CacheConfig(
-            cache_size=64,
-            num_layers=model_config.num_layers,
-            num_kv_heads=model_config.num_kv_heads,
-            head_dim=model_config.head_dim,
-        ),
+        config=adapter_config,
+        raiden_sync_delegate=delegate,
     )
   else:
     mock_vllm_sampler = MockVllmSampler(model_config, rngs=nnx.Rngs(1))
@@ -473,27 +464,20 @@ class WeightSyncE2ETest(absltest.TestCase):
     )
 
   def test_fallback_mode_weight_sync_with_vanilla_adapter(self):
-    """Verifies Fallback mode weight transfer from PeftTrainer to VanillaSamplerAdapter."""
+    """Verifies Fallback mode weight transfer from PeftTrainer to VanillaSampler."""
     adapter_config = RolloutConfig(
         sampler_type="vanilla",
+        kv_cache_size=64,
         weight_sync_mode=WeightSyncMode.FALLBACK,
     )
     vanilla_model = test_common.ToyTransformer(
         self.model_config, rngs=nnx.Rngs(2)
     )
-    adapter = vanilla_sampler_adapter.VanillaSamplerAdapter(
+    adapter = vanilla_sampler.VanillaSampler(
         server_id="vanilla_sampler_fallback_0",
         config=adapter_config,
-    )
-    adapter.sampler = vanilla_sampler_lib.Sampler(
         transformer=vanilla_model,
         tokenizer=test_common.MockVocab(),
-        cache_config=vanilla_sampler_lib.CacheConfig(
-            cache_size=64,
-            num_layers=self.model_config.num_layers,
-            num_kv_heads=self.model_config.num_kv_heads,
-            head_dim=self.model_config.head_dim,
-        ),
     )
 
     trainer_config = TrainingConfig(
@@ -518,8 +502,8 @@ class WeightSyncE2ETest(absltest.TestCase):
     result = asyncio.run(adapter.weight_sync(sync_request))
     self.assertTrue(result)
 
-    # Verify adapter sampler received the updated weights directly
-    tgt_flat = _to_flat_dict(adapter.sampler.transformer_state)
+    # Verify sampler received the updated weights directly
+    tgt_flat = _to_flat_dict(adapter.transformer_state)
     np.testing.assert_allclose(
         np.array(tgt_flat["emb.embedding"].value),
         np.array(new_embedding),

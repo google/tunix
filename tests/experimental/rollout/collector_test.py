@@ -25,7 +25,7 @@ from tunix.experimental.common import datatypes
 from tunix.experimental.common import test_utils as mocks
 from tunix.experimental.rollout import collector
 from tunix.experimental.rollout import sampler as sampler_lib
-from tunix.experimental.rollout import vanilla_sampler_adapter
+from tunix.experimental.rollout import vanilla_sampler
 from tunix.rl.agentic.agents import model_agent
 from tunix.rl.agentic.environments import base_environment
 
@@ -107,7 +107,7 @@ class _MockSampler(sampler_lib.Sampler):
     )
 
 
-class _MockVanillaSampler(vanilla_sampler_adapter.VanillaSamplerAdapter):
+class _MockVanillaSampler(vanilla_sampler.VanillaSampler):
 
   def __init__(self):
     self.calls = []
@@ -1532,4 +1532,3 @@ class ResponseBudgetAnnotationTest(absltest.TestCase):
 
 if __name__ == "__main__":
   absltest.main()
-

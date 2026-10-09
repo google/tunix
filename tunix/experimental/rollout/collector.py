@@ -21,7 +21,7 @@ from absl import logging
 import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.experimental.rollout import sampler as sampler_lib
-from tunix.experimental.rollout import vanilla_sampler_adapter
+from tunix.experimental.rollout import vanilla_sampler
 from tunix.experimental.trajectory import base_store as store
 from tunix.experimental.trajectory import converter as converter_lib
 from tunix.rl.agentic.agents import agent_types
@@ -231,9 +231,7 @@ class TrajectoryCollectorEngine:
       generation_kwargs["max_tokens"] = effective_max_tokens
 
       seed = generation_kwargs.get("seed", None)
-      if isinstance(
-          self.sampler, vanilla_sampler_adapter.VanillaSamplerAdapter
-      ):
+      if isinstance(self.sampler, vanilla_sampler.VanillaSampler):
         # TODO(tunix-dev): make vanilla sampler stateful with internal RNG key
         if seed is None and self.request.prompt_id is not None:
           seed = generate_vanilla_rollout_seed(
