@@ -170,6 +170,7 @@ class RolloutWorker(abstract_worker.Worker):
         resources={
             "sampler": type(self.sampler).__name__,
             "policy_version": self._policy_version,
+            "max_concurrency": self.manager.max_concurrency,
         },
     )
 
@@ -416,6 +417,7 @@ class RolloutWorker(abstract_worker.Worker):
       metadata["group_index"] = group_index
       return datatypes.RolloutResponse(
           request_id=request_id
+          or metadata.get("request_id", "")
           or getattr(item, "trajectory_id", "")
           or prompt_id,
           status="ERROR",
@@ -429,7 +431,11 @@ class RolloutWorker(abstract_worker.Worker):
     if isinstance(item, datatypes.RolloutResponse):
       return item
     if isinstance(item, datatypes.TrajectoryItem):
-      req_id = request_id or getattr(item, "traj_id", "")
+      req_id = (
+          request_id
+          or item.metadata.get("request_id", "")
+          or item.traj_id
+      )
       if prompt_tokens is not None and getattr(item, "prompt_tokens", None) is None:
         item.metadata["prompt_tokens"] = prompt_tokens
       item.metadata.setdefault("worker_id", self.worker_id)

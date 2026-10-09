@@ -852,10 +852,16 @@ class StandardRLProgram(RLProgram):
         }
         if self.generation_args is not None:
           dispatch_kwargs["generation_args"] = self.generation_args
-        await self.engine.dispatch_rollouts(
-            [prompt_item],
-            **dispatch_kwargs,
-        )
+        try:
+          await self.engine.dispatch_rollouts(
+              [prompt_item],
+              **dispatch_kwargs,
+          )
+        except Exception:
+          self._in_flight_rollouts = max(
+              0, self._in_flight_rollouts - self.num_generations
+          )
+          raise
       if last_coordinates is not None and isinstance(
           self.scored_q, trajectory_queue_manager.BatchOrderedQueueManager
       ):
@@ -881,6 +887,8 @@ class StandardRLProgram(RLProgram):
             self._in_flight_rollouts -= len(completed)
             for item in completed:
               await self.raw_q.put(item)
+        except datatypes.NoHealthyRolloutWorkersError:
+          raise
         except Exception as exc:  # pylint: disable=broad-exception-caught
           logging.warning("Error in polling_stage: %s", exc)
           await asyncio.sleep(0.01)
@@ -993,12 +1001,13 @@ class StandardRLProgram(RLProgram):
           first_meta = getattr(group[0], "metadata", None) or {}
           logging.info(
               "[pipeline] ARRIVE prompt_id=%s prompt_idx=%s batch_idx=%s"
-              " intra_batch_idx=%s policy_version=%d",
+              " intra_batch_idx=%s policy_version=%d worker_id=%s",
               getattr(group[0], "prompt_id", ""),
               first_meta.get("prompt_idx"),
               first_meta.get("batch_idx"),
               first_meta.get("intra_batch_idx"),
               getattr(group[0], "policy_version", 0),
+              first_meta.get("worker_id"),
           )
         group = None
         trainer_payloads = None
