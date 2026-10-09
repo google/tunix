@@ -90,13 +90,6 @@ class SingleTypeKVCacheManager:
         collections.OrderedDict()
     )
 
-  @property
-  def _num_pages_in_window(self) -> int:
-    if self._window_size is None:
-      return 0
-    # Add 1 to account for the window sliding and leaking into the next page.
-    return utils.cdiv(self._window_size - 1, self._page_size) + 1
-
   def _touch_page(self, page: Page | None) -> None:
     """Increments a page's reference count."""
     if page is None:
@@ -363,10 +356,12 @@ class SingleTypeKVCacheManager:
           return i
       return -1
 
+    assert self._window_size is not None
+    num_pages_in_window = utils.cdiv(self._window_size, self._page_size)
     w_end = len(cache_hits) - 1
     w_start = 0
     while w_end >= 0:
-      w_start = max(0, w_end - self._num_pages_in_window + 1)
+      w_start = max(0, w_end - num_pages_in_window + 1)
 
       miss_idx = find_miss(w_start, w_end)
       if miss_idx >= 0:
@@ -384,7 +379,7 @@ class SingleTypeKVCacheManager:
       self,
       page_hashes: Sequence[int]
   ) -> list[Page | None]:
-    """Queries the prefix cache for pages matching page_hashes."""
+    """Queries the KV cache for a prefix match of the given page hashes."""
     if self._window_size is None:
       return self._longest_cache_hit_full_attention(
           page_hashes
@@ -393,3 +388,225 @@ class SingleTypeKVCacheManager:
     return self._longest_cache_hit_local_attention(
         page_hashes
     )
+
+  def _calculate_page_requirements(
+      self,
+      request_id: str,
+      num_tokens: int,
+      num_completed_tokens: int,
+      computed_pages: Sequence[Page | None] = (),
+  ) -> tuple[int, int]:
+    """Calculates the number of device pages needed to schedule num_tokens.
+
+    Args:
+      request_id: The request to calculate page requirements for.
+      num_tokens: The number of tokens to be computed in the next step.
+      num_completed_tokens: The number of completed tokens for the request.
+      computed_pages: The list of already computed (prefix matched) pages for
+        the request. Entries should be `None` for pages outside the active
+        window.
+
+    Returns:
+      A tuple of
+        - The number of new device pages that need to be allocated.
+        - The number of unreferenced device pages that need to be reclaimed.
+    """
+    pm = self._page_manager
+    matched_host = [
+        p
+        for p in computed_pages
+        if p is not None
+        and pm.page_location(p.page_id) == page_pool_lib.PageLocation.HOST
+    ]
+
+    def is_device_unreferenced(p: Page | None) -> bool:
+      return (
+          p is not None
+          and pm.page_location(p.page_id) == page_pool_lib.PageLocation.DEVICE
+          and p.ref_count == 0
+      )
+
+    n_matched_unreferenced_device = sum(
+        1
+        for p in computed_pages
+        if is_device_unreferenced(p)
+    )
+
+    current_pages = self._request_to_pages.get(request_id, [])
+
+    total_tokens = (
+        num_completed_tokens
+        + (len(computed_pages) * self._page_size)
+        + num_tokens
+    )
+    target_total_pages = utils.cdiv(total_tokens, self._page_size)
+    n_needed = max(
+        0, target_total_pages - len(current_pages) - len(computed_pages)
+    )
+
+    return n_needed + len(matched_host), n_matched_unreferenced_device
+
+  def has_sufficient_space(
+      self,
+      request_id: str,
+      num_tokens: int,
+      num_completed_tokens: int,
+      computed_pages: Sequence[Page | None] = (),
+  ) -> bool:
+    """Checks whether `num_tokens` token slots can be allocated for a request.
+
+    Args:
+      request_id: The ID of the request to check space for.
+      num_tokens: The number of token slots to allocate.
+      num_completed_tokens: The number of completed tokens for the request.
+      computed_pages: The list of already computed pages for the request.
+        Entries should be `None` for pages outside the active window.
+
+    Returns:
+      True if there is sufficient space to allocate `num_tokens` token slots,
+      False otherwise.
+    """
+    device_needed, n_computed_unref_device = self._calculate_page_requirements(
+        request_id, num_tokens, num_completed_tokens, computed_pages
+    )
+
+    # Unreferenced computed device pages will need to be reclaimed. They cannot
+    # be counted towards `freeable_device`.
+    freeable_device = (
+        len(self._unreferenced_device_pages) - n_computed_unref_device
+    )
+    total_device_available = (
+        self._page_manager.num_free_device_pages + freeable_device
+    )
+
+    return total_device_available >= device_needed
+
+  def _swap_in_pages(
+      self,
+      pages: Sequence[Page | None],
+  ) -> None:
+    """Swap in host pages to the device.
+
+    Args:
+      pages: The list of pages to swap in. Each page to swap in must be
+        referenced.
+    """
+    pm = self._page_manager
+
+    # Only pages on the host need to be swapped in.
+    pages_to_swap_in = [
+        p
+        for p in pages
+        if p is not None
+        and pm.page_location(p.page_id) == page_pool_lib.PageLocation.HOST
+    ]
+
+    if not pages_to_swap_in:
+      return
+
+    # If a page has no references, it may be freed when unreferenced space is
+    # reclaimed. Thus, the caller must ensure all pages to be swapped in
+    # have at least one reference.
+    if not all(p.ref_count > 0 for p in pages_to_swap_in):
+      raise ValueError(
+          "Cannot swap in page with no references."
+      )
+
+    shortfall = len(pages_to_swap_in) - pm.num_free_device_pages
+    if shortfall > 0:
+      self._free_unreferenced_device_pages(shortfall)
+
+    pm.load([p.page_id for p in pages_to_swap_in])
+
+  def _bind_pages(
+      self,
+      pages: Sequence[Page | None],
+      request_id: str,
+  ) -> None:
+    """Binds pages to the request state."""
+    for page in pages:
+      self._touch_page(page)
+
+    if request_id not in self._request_to_pages:
+      self._request_to_pages[request_id] = []
+
+    self._request_to_pages[request_id].extend(pages)
+
+  def _allocate_device_pages(
+      self,
+      n_pages: int,
+      request_id: str,
+  ) -> None:
+    """Allocates `n_pages` device pages and binds them to the request.
+
+    Args:
+      n_pages: The number of device pages to allocate.
+      request_id: The ID of the request to bind the pages to.
+    """
+    if n_pages <= 0:
+      return
+
+    shortfall = n_pages - self._page_manager.num_free_device_pages
+    if shortfall > 0:
+      self._free_unreferenced_device_pages(shortfall)
+
+    allocated_pids = self._page_manager.allocate_device_pages(n_pages)
+    allocated_pages = [Page(page_id=pid) for pid in allocated_pids]
+    self._bind_pages(allocated_pages, request_id)
+
+  def allocate_slots(
+      self,
+      request_id: str,
+      num_tokens: int,
+      num_completed_tokens: int,
+      computed_pages: Sequence[Page | None] = (),
+  ) -> None:
+    """Allocates pages so the request has at least `num_tokens` free slots.
+
+    Computed pages are bound to the request, and any on the host are loaded onto
+    the device.
+
+    Args:
+      request_id: The ID of the request to allocate pages for.
+      num_tokens: The number of tokens to be computed in the next step.
+      num_completed_tokens: The number of completed tokens for the request.
+      computed_pages: The list of computed (prefix matched) pages for the
+        request. Entries should be `None` for pages outside the active window.
+    """
+
+    if not self.has_sufficient_space(
+        request_id, num_tokens, num_completed_tokens, computed_pages
+    ):
+      raise ValueError(
+          f"Cannot allocate {num_tokens} slots for request {request_id}. "
+          "Insufficient space."
+      )
+
+    # Pages must be referenced before they are swapped in from host to device.
+    # So, bind the computed pages to the request state first.
+    self._bind_pages(computed_pages, request_id)
+
+    self._swap_in_pages(computed_pages)
+
+    # Must be computed after binding and swapping in, so that pages aren't
+    # double counted. The computed pages are now part of the request's pages.
+    new_n_completed_tokens = num_completed_tokens + len(
+        computed_pages
+    ) * self._page_size
+    n_new_device_pages, _ = self._calculate_page_requirements(
+        request_id, num_tokens, new_n_completed_tokens
+    )
+
+    self._allocate_device_pages(n_new_device_pages, request_id)
+
+  def release_request(self, request_id: str) -> None:
+    """Releases all pages for the given request."""
+    pages = self._request_to_pages.pop(request_id, None)
+    if not pages:
+      return
+
+    # Unreferenced pages are freed lazily in LRU order when space is needed.
+    # Pages are released in reverse order so that right most pages are freed
+    # first. This allows the left most pages to be reclaimed for a prefix match.
+    for page in reversed(pages):
+      self._release_page(page)
