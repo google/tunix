@@ -32,8 +32,11 @@ export DATASET_SPLIT="${DATASET_SPLIT:-validation}"
 export NUM_GENERATIONS="${NUM_GENERATIONS:-4}"
 export BATCH_SIZE="${BATCH_SIZE:-256}"
 export TASKS_LIMIT="${TASKS_LIMIT:-0}"
-export TEMPERATURE="${TEMPERATURE:-0.1}"
-export TOP_P="${TOP_P:-0.95}"
+# Fixed for MLPerf eval; don't inherit these from a training shell.
+export TEMPERATURE="0.1"
+export TOP_P="0.95"
+export STEP_TIMEOUT_SECS=60
+export REWARD_TIMEOUT_SECS=60
 export MAX_WARMPOOL_REPLICAS="${MAX_WARMPOOL_REPLICAS:-64}"
 export MAX_CONCURRENCY="${MAX_CONCURRENCY:-$(( 32 * ROLLOUT_REPLICAS ))}"
 export IMAGE_REWRITE_PREFIX="${IMAGE_REWRITE_PREFIX:-${REGION:-us-east1}-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/}"
