@@ -900,8 +900,9 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
 
     if getattr(self, "_jitted_fwd_bwd_step_fn", None) is None:
       self._shard_optimizer(pxla.thread_resources.env.physical_mesh)
-      if self._is_single_microstep():
-        # No grad_accumulator is created in this case.
+      if not self.grad_accumulator.persistent:
+        # No grad_accumulator buffer is allocated on the fused single-microstep
+        # path.
         donate_argnames = ("model",)
       else:
         donate_argnames = ("model", "grad_accumulator")
@@ -1142,20 +1143,53 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self._write_train_metrics()
     return self._train_steps
 
+  def _ensure_persistent_grad_accumulator(self) -> None:
+    """Allocates a persistent gradient buffer when split fwd_bwd/update is used.
+
+    Non-persistent mode (`allocate_grads=False`) leaves `grad_accumulator.grads`
+    as `{}` so the fused `train_step()` executable can keep gradients as an
+    internal XLA temporary. Split `fwd_bwd()` + `update()` executables, however,
+    must hand accumulated gradients across a JIT boundary; under
+    `nnx.cached_partial` (`cache_nnx_graph=True`) the bound accumulator's
+    pytree structure is frozen, and dynamic sequence packing may also invoke
+    `fwd_bwd()` multiple times before `update()` even when
+    `gradient_accumulation_steps == 1`. Promoting the accumulator on first
+    `fwd_bwd()` preserves the zero-allocation fused path for `train()` /
+    `train_step()` while ensuring split `fwd_bwd()` + `update()` always works.
+    """
+    if self.grad_accumulator.persistent:
+      return
+    wrt_target = nnx.LoRAParam if self._lora_enabled else nnx.Param
+    self.grad_accumulator = GradientAccumulator(
+        self.model, wrt_target, allocate_grads=True
+    )
+    self.clear_jit_cache()
+
   @override
   def fwd_bwd(self, payload: datatypes.TrainerPayload | Any, **kwargs) -> None:
     """Executes forward and backward passes."""
     cache_nnx_graph = kwargs.pop("cache_nnx_graph", True)
     skip_jit = kwargs.pop("skip_jit", False)
+    if not skip_jit and cache_nnx_graph:
+      self._ensure_persistent_grad_accumulator()
     fwd_bwd_step, _, _ = self.jit_fwd_bwd_update_and_eval_step(
         skip_jit, cache_nnx_graph
     )
-    self._record_fwd_bwd(
-        *fwd_bwd_step(
-            grad_accumulator=self.grad_accumulator,
-            inputs=self._prepare_payload(payload),
-        )
+    t_start = time.monotonic()
+    loss_and_aux = fwd_bwd_step(
+        grad_accumulator=self.grad_accumulator,
+        inputs=self._prepare_payload(payload),
     )
+    if not skip_jit and cache_nnx_graph:
+      logging.log_first_n(
+          logging.INFO,
+          "First PeftTrainer.fwd_bwd executed in %.2fs (fwd_bwd"
+          " cache_size=%d).",
+          1,
+          time.monotonic() - t_start,
+          fwd_bwd_step.func.jitted_fn._cache_size(),  # pytype: disable=attribute-error
+      )
+    self._record_fwd_bwd(*loss_and_aux)
 
   @override
   def update(self, **kwargs) -> int:
@@ -1165,7 +1199,17 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     _, update_step, _ = self.jit_fwd_bwd_update_and_eval_step(
         skip_jit, cache_nnx_graph
     )
-    return self._record_update(update_step())
+    t_start = time.monotonic()
+    grad_norm = update_step()
+    if not skip_jit and cache_nnx_graph:
+      logging.log_first_n(
+          logging.INFO,
+          "First PeftTrainer.update executed in %.2fs (update cache_size=%d).",
+          1,
+          time.monotonic() - t_start,
+          update_step.func.jitted_fn._cache_size(),  # pytype: disable=attribute-error
+      )
+    return self._record_update(grad_norm)
 
   def train_step(
       self, payload: datatypes.TrainerPayload | Any, **kwargs
@@ -1194,8 +1238,52 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     return self._record_update(grad_norm)
 
   @override
-  def compile(self, dummy_data: Any) -> None:
-    pass
+  def compile(self, dummy_data: datatypes.TrainerPayload | Any = None) -> None:
+    """Pre-compiles jitted trainer step executables ahead of time."""
+    if dummy_data is None:
+      return
+    self._ensure_persistent_grad_accumulator()
+    fwd_bwd_step, update_step, eval_step = (
+        self.jit_fwd_bwd_update_and_eval_step(
+            skip_jit=False, cache_nnx_graph=True
+        )
+    )
+    t_update = time.monotonic()
+    update_step.func.__wrapped__.lower(
+        self.model,
+        self.optimizer,
+        self.grad_accumulator,
+    ).compile()
+    logging.info(
+        "PeftTrainer.compile: precompiled update_step in %.2fs"
+        " (cache_size=%d).",
+        time.monotonic() - t_update,
+        update_step.func.jitted_fn._cache_size(),  # pytype: disable=attribute-error
+    )
+    prepared_inputs = self._prepare_payload(dummy_data)
+    t_fwd_bwd = time.monotonic()
+    fwd_bwd_step.func.__wrapped__.lower(
+        self.model,
+        grad_accumulator=self.grad_accumulator,
+        inputs=prepared_inputs,
+    ).compile()
+    logging.info(
+        "PeftTrainer.compile: precompiled fwd_bwd_step in %.2fs"
+        " (cache_size=%d).",
+        time.monotonic() - t_fwd_bwd,
+        fwd_bwd_step.func.jitted_fn._cache_size(),  # pytype: disable=attribute-error
+    )
+    t_eval = time.monotonic()
+    eval_step.func.__wrapped__.lower(
+        self.model,
+        prepared_inputs,
+    ).compile()
+    logging.info(
+        "PeftTrainer.compile: precompiled eval_step in %.2fs"
+        " (cache_size=%d).",
+        time.monotonic() - t_eval,
+        eval_step.func.jitted_fn._cache_size(),  # pytype: disable=attribute-error
+    )
 
   @override
   def eval_step(

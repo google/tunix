@@ -1462,6 +1462,131 @@ class V1ParityTest(parameterized.TestCase):
       trainer.train(dummy_datasets(batch_size=4))
     self.assertGreater(fused.call_count, 0)
     split.assert_not_called()
+    self.assertFalse(trainer.grad_accumulator.persistent)
+
+  def test_split_fwd_bwd_and_update_at_depth1_with_cached_nnx_graph(self):
+    """Split fwd_bwd() + update() works at depth 1 with cache_nnx_graph=True."""
+    model_fused, model_split = self._two_identical_models()
+    trainer_fused = self._make_trainer_v2(model_fused, max_steps=2)
+    trainer_split = self._make_trainer_v2(model_split, max_steps=2)
+    batches = dummy_datasets(batch_size=4)[:2]
+
+    self.assertFalse(trainer_split.grad_accumulator.persistent)
+    for batch in batches:
+      trainer_fused.train_step(batch)
+      trainer_split.fwd_bwd(batch)
+      trainer_split.update()
+
+    self.assertTrue(trainer_split.grad_accumulator.persistent)
+    self.assertEqual(trainer_fused.train_steps, 2)
+    self.assertEqual(trainer_split.train_steps, 2)
+    self.assertEqual(float(trainer_split.grad_accumulator.denom[...]), 0.0)
+    self._assert_fp32_weights_close(
+        nnx.state(model_fused, nnx.Param),
+        nnx.state(model_split, nnx.Param),
+    )
+
+  def test_split_fwd_bwd_dynamic_microsteps_at_depth1_with_cached_nnx_graph(
+      self,
+  ):
+    """Dynamic sequence-packing microsteps work when grad_accum_steps == 1."""
+    model_accum, model_dynamic = self._two_identical_models()
+    trainer_accum = self._make_trainer_v2(
+        model_accum, accum_steps=2, max_steps=1
+    )
+    trainer_dynamic = self._make_trainer_v2(
+        model_dynamic, accum_steps=1, max_steps=1
+    )
+    batches = dummy_datasets(batch_size=4)[:2]
+
+    for batch in batches:
+      trainer_accum.fwd_bwd(batch)
+      trainer_dynamic.fwd_bwd(batch)
+    trainer_accum.update()
+    trainer_dynamic.update()
+
+    self.assertTrue(trainer_dynamic.grad_accumulator.persistent)
+    self.assertEqual(trainer_dynamic.train_steps, 1)
+    self.assertEqual(float(trainer_dynamic.grad_accumulator.denom[...]), 0.0)
+    self._assert_fp32_weights_close(
+        nnx.state(model_accum, nnx.Param),
+        nnx.state(model_dynamic, nnx.Param),
+    )
+
+  def test_compile_with_none_dummy_data_is_noop(self):
+    model, _ = self._two_identical_models()
+    initial_weights = jax.tree.map(jnp.copy, nnx.state(model, nnx.Param))
+    trainer = self._make_trainer_v2(model, accum_steps=1)
+
+    trainer.compile(None)
+
+    self.assertIsNone(trainer._jitted_fwd_bwd_step_fn)
+    self.assertIsNone(trainer._jitted_update_step_fn)
+    self.assertIsNone(trainer._jitted_eval_step_fn)
+    self.assertEqual(trainer.train_steps, 0)
+    self._assert_fp32_weights_close(
+        initial_weights, nnx.state(model, nnx.Param)
+    )
+
+  def test_compile_with_dummy_batch_compiles_all_steps_without_mutating_state(
+      self,
+  ):
+    for accum_steps in (1, 2):
+      with self.subTest(accum_steps=accum_steps):
+        model, _ = self._two_identical_models()
+        initial_weights = jax.tree.map(jnp.copy, nnx.state(model, nnx.Param))
+        trainer = self._make_trainer_v2(model, accum_steps=accum_steps)
+        batch = dummy_datasets(batch_size=4)[0]
+
+        fwd_bwd_traces = 0
+        update_traces = 0
+
+        def traced_fwd_bwd(*args, _orig=trainer._fwd_bwd_step, **kwargs):
+          nonlocal fwd_bwd_traces
+          fwd_bwd_traces += 1
+          return _orig(*args, **kwargs)
+
+        def traced_update(*args, _orig=trainer._update_step, **kwargs):
+          nonlocal update_traces
+          update_traces += 1
+          return _orig(*args, **kwargs)
+
+        with (
+            mock.patch.object(
+                trainer, 'create_fwd_bwd_step_fn', return_value=traced_fwd_bwd
+            ),
+            mock.patch.object(
+                trainer, 'create_update_step_fn', return_value=traced_update
+            ),
+        ):
+          trainer.compile(batch)
+          self.assertEqual(fwd_bwd_traces, 1)
+          self.assertEqual(update_traces, 1)
+
+          self.assertIsNotNone(trainer._jitted_fwd_bwd_step_fn)
+          self.assertIsNotNone(trainer._jitted_update_step_fn)
+          self.assertIsNotNone(trainer._jitted_eval_step_fn)
+          self.assertTrue(trainer.grad_accumulator.persistent)
+          self.assertTrue(
+              jax.tree_util.tree_leaves(trainer.grad_accumulator.grads)
+          )
+          self.assertEqual(trainer.train_steps, 0)
+          self.assertEqual(trainer.iter_steps, 0)
+          self._assert_fp32_weights_close(
+              initial_weights, nnx.state(model, nnx.Param)
+          )
+
+          # Verify split fwd_bwd + update executes cleanly after AOT compile
+          # without re-tracing either step function.
+          for _ in range(accum_steps):
+            trainer.fwd_bwd(batch)
+          trainer.update()
+          self.assertEqual(fwd_bwd_traces, 1)
+          self.assertEqual(update_traces, 1)
+        self.assertEqual(trainer.train_steps, 1)
+        self._assert_weights_changed(
+            initial_weights, nnx.state(model, nnx.Param)
+        )
 
   def test_nan_gradient_skipped_and_params_preserved(self):
     model, _ = self._two_identical_models()
