@@ -206,6 +206,57 @@ class WorkerInfo:
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
+class RolloutFaultToleranceConfig:
+  """Configuration for rollout worker fault tolerance (V1).
+
+  Attributes:
+    enabled: Whether rollout worker fault tolerance (eviction, retry, and
+      dynamic rejoin) is enabled.
+    evict_on_failure: Whether failed rollout workers are evicted from the active
+      pool upon transport/execution errors. Defaults to True.
+    retry_on_worker_failure: Whether in-flight rollout requests on an evicted
+      worker are automatically re-queued for retry. Defaults to True.
+    max_task_retries: Maximum number of retry attempts per rollout request_id
+      before synthesizing a terminal FAILED placeholder trajectory.
+    max_in_flight_per_worker: Optional default cap on concurrent in-flight
+      rollouts dispatched to any single rollout worker.
+  """
+
+  enabled: bool = True
+  evict_on_failure: bool = True
+  retry_on_worker_failure: bool = True
+  max_task_retries: int = 3
+  max_in_flight_per_worker: int | None = None
+
+  def __post_init__(self):
+    if self.max_task_retries < 0:
+      raise ValueError("max_task_retries must be non-negative")
+    if (
+        self.max_in_flight_per_worker is not None
+        and self.max_in_flight_per_worker <= 0
+    ):
+      raise ValueError("max_in_flight_per_worker must be positive")
+
+  def with_overrides(
+      self,
+      *,
+      max_in_flight_per_worker: int | None = None,
+  ) -> "RolloutFaultToleranceConfig":
+    """Returns a copy where each non-None argument replaces the stored value.
+
+    Legacy scalar constructor arguments (e.g. the engine/orchestrator
+    `max_concurrent_rollouts_per_worker`) take precedence over this consolidated
+    config; this is the single place that precedence is applied. The copy is
+    validated by `__post_init__` exactly like a directly constructed config.
+    """
+    overrides = {
+        "max_in_flight_per_worker": max_in_flight_per_worker,
+    }
+    overrides = {k: v for k, v in overrides.items() if v is not None}
+    return dataclasses.replace(self, **overrides) if overrides else self
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
 class GenerationArgs:
   """Typed per-turn generation arguments used by the orchestrator generate API.
 
