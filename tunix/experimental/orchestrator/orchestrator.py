@@ -347,19 +347,34 @@ class ClusterOrchestrator:
   ) -> None:
     """Brings up a single dynamically registered remote worker."""
     try:
-      if (
-          self.trajectory_store_config is not None
-          and datatypes.Role.ROLLOUT.value in info.roles
-      ):
-        logging.info(
-            "Configuring TrajectoryStore on dynamic remote rollout worker %s.",
-            worker_id,
-        )
-        handle.submit(
-            "with_trajectory_store_config", self.trajectory_store_config
-        )
-      logging.info("Initializing dynamic remote worker %s.", worker_id)
-      handle.submit("initialize")
+      for attempt in range(3):
+        try:
+          if (
+              self.trajectory_store_config is not None
+              and datatypes.Role.ROLLOUT.value in info.roles
+          ):
+            logging.info(
+                "Configuring TrajectoryStore on dynamic remote rollout worker"
+                " %s.",
+                worker_id,
+            )
+            handle.submit(
+                "with_trajectory_store_config", self.trajectory_store_config
+            )
+          logging.info("Initializing dynamic remote worker %s.", worker_id)
+          handle.submit("initialize")
+          break
+        except Exception as init_err:  # pylint: disable=broad-exception-caught
+          if attempt == 2:
+            raise
+          logging.warning(
+              "Transient error initializing dynamic remote worker %s"
+              " (attempt %d/3): %r; retrying in 1.0s...",
+              worker_id,
+              attempt + 1,
+              init_err,
+          )
+          time.sleep(1.0)
       logging.info("Compiling dynamic remote worker %s.", worker_id)
       handle.submit("compile", self._warmup_data)
       logging.info("Starting dynamic remote worker %s.", worker_id)

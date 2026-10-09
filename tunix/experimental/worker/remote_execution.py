@@ -123,6 +123,7 @@ def _grpc_options(
       ("grpc.http2.max_ping_strikes", 0),
       ("grpc.http2.min_ping_interval_without_data_ms", 5000),
       ("grpc.http2.min_recv_ping_interval_without_data_ms", 5000),
+      ("grpc.use_local_subchannel_pool", 1),
   ]
 
 

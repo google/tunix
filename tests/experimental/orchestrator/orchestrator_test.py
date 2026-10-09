@@ -1188,6 +1188,43 @@ class ClusterOrchestratorTrajectoryStoreTest(absltest.TestCase):
     )
     orch.shutdown()
 
+  @mock.patch.object(orchestrator.time, "sleep")
+  def test_dynamic_worker_bring_up_retries_transient_init_error(
+      self, mock_sleep
+  ):
+    registry = worker_registry.WorkerRegistry()
+    orch = orchestrator.ClusterOrchestrator(
+        registry=registry,
+        lifecycle_driver=mock.MagicMock(),
+        monitor=mock.MagicMock(),
+    )
+    orch.bring_up_workers()
+
+    flaky_handle = mock.MagicMock(spec=remote_execution.ActorHandle)
+    init_calls = 0
+
+    def _side_effect(method_name, *args, **kwargs):
+      nonlocal init_calls
+      del args, kwargs
+      if method_name == "initialize":
+        init_calls += 1
+        if init_calls == 1:
+          raise ConnectionError("transient subchannel reset")
+      return None
+
+    flaky_handle.submit.side_effect = _side_effect
+    orch.register_worker_handle(
+        "rollout-rejoin-0", [datatypes.Role.ROLLOUT], flaky_handle
+    )
+    orch.wait_for_pending_bring_ups(timeout=5.0)
+    self.assertEqual(init_calls, 2)
+    mock_sleep.assert_called_once_with(1.0)
+    self.assertEqual(
+        orch.registry.state("rollout-rejoin-0"),
+        worker_registry.MembershipState.ACTIVE,
+    )
+    orch.shutdown()
+
 
 if __name__ == "__main__":
   absltest.main()

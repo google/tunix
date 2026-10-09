@@ -3193,6 +3193,10 @@ class RemoteExecutionTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_grpc_options_isolates_subchannel_pool(self):
+    options = dict(remote_lib._grpc_options())  # pylint: disable=protected-access
+    self.assertEqual(options.get("grpc.use_local_subchannel_pool"), 1)
+
 
 if __name__ == "__main__":
   absltest.main()
