@@ -2414,6 +2414,50 @@ class DistributedRLEngineTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_zero_worker_seconds_tracks_membership_transitions_across_concurrent_waiters(
+      self,
+  ):
+    async def _run():
+      engine = distributed_rl_engine.DistributedRLEngine(
+          rollout_workers=[],
+          trainer_workers={datatypes.Role.ACTOR: self.mock_actor},
+          max_zero_worker_wait_s=5.0,
+      )
+      self.assertIsNotNone(engine._zero_worker_since)
+
+      waiter1 = asyncio.create_task(engine._wait_for_healthy_rollout_worker())
+      waiter2 = asyncio.create_task(engine._wait_for_healthy_rollout_worker())
+      await asyncio.sleep(0.03)
+      waiter1.cancel()
+      with self.assertRaises(asyncio.CancelledError):
+        await waiter1
+
+      # Cancelling one concurrent waiter must not prematurely close the
+      # zero-worker window while zero workers remain registered.
+      self.assertIsNotNone(engine._zero_worker_since)
+
+      engine.add_rollout_worker(self.mock_rollout_1)
+      await waiter2
+      self.assertIsNone(engine._zero_worker_since)
+      accumulated_after_join = engine.fault_tolerance_metrics[
+          "zero_worker_seconds"
+      ]
+      self.assertGreaterEqual(accumulated_after_join, 0.02)
+
+      # Removing the last worker re-opens the zero-worker timer.
+      self.assertTrue(engine.remove_rollout_worker(self.mock_rollout_1))
+      self.assertIsNotNone(engine._zero_worker_since)
+      await asyncio.sleep(0.02)
+      engine.add_rollout_worker(self.mock_rollout_2)
+      self.assertIsNone(engine._zero_worker_since)
+      self.assertGreater(
+          engine.fault_tolerance_metrics["zero_worker_seconds"],
+          accumulated_after_join,
+      )
+      await engine.close()
+
+    asyncio.run(_run())
+
 
 if __name__ == "__main__":
   absltest.main()

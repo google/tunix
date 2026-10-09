@@ -50,6 +50,11 @@ def _response_to_trajectory_item(resp: Any) -> datatypes.TrajectoryItem:
     raise TypeError(f"Unsupported response type: {type(resp)}")
 
   if resp.payload is not None:
+    if resp.metadata and isinstance(resp.payload, datatypes.TrajectoryItem):
+      merged_meta = dict(resp.metadata)
+      if resp.payload.metadata:
+        merged_meta.update(resp.payload.metadata)
+      resp.payload.metadata = merged_meta
     return resp.payload
 
   if resp.error is not None:
@@ -112,7 +117,9 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     )
     self._fault_tolerance_config = ft_cfg
     self._max_zero_worker_wait_s = ft_cfg.max_zero_worker_wait_s
-    self._zero_worker_since: float | None = None
+    self._zero_worker_since: float | None = (
+        time.monotonic() if not rollout_workers else None
+    )
     self._zero_worker_seconds_total: float = 0.0
     self._terminal_failed_trajectories_total: int = 0
     self._weights_consistent: bool = True
@@ -120,6 +127,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     self._actor_busy_count: int = 0
     self._actor_weights_dirty: bool = False
     self._last_deferred_pending_sync_state: tuple[int, bool, bool] | None = None
+    self._user_on_worker_evicted = on_worker_evicted
 
     self._trainer_workers = dict(trainer_workers)
     self._inference_workers = dict(inference_workers or {})
@@ -140,7 +148,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
                 ft_cfg.enabled and ft_cfg.retry_on_worker_failure
             ),
             max_task_retries=ft_cfg.max_task_retries,
-            on_worker_evicted=on_worker_evicted,
+            on_worker_evicted=self._on_session_worker_evicted,
             max_in_flight_per_worker=ft_cfg.max_in_flight_per_worker,
             worker_max_in_flight=rollout_worker_capacities,
             has_pending_workers_fn=self._has_pending_rollout_workers,
@@ -209,6 +217,16 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         "zero_worker_seconds": self._current_zero_worker_seconds(),
     }
 
+  def _on_session_worker_evicted(
+      self,
+      handle: remote_execution.ActorHandle,
+      exc: BaseException | None,
+  ) -> None:
+    if not self._rollout_workers and self._zero_worker_since is None:
+      self._zero_worker_since = time.monotonic()
+    if self._user_on_worker_evicted is not None:
+      self._user_on_worker_evicted(handle, exc)
+
   def add_rollout_worker(
       self,
       handle: remote_execution.ActorHandle,
@@ -217,6 +235,11 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
   ) -> None:
     """Adds a rollout worker handle to the active pool and execution session."""
     self._rollout_session.add_actor(handle, max_in_flight=max_in_flight)
+    if self._rollout_workers and self._zero_worker_since is not None:
+      self._zero_worker_seconds_total += max(
+          0.0, time.monotonic() - self._zero_worker_since
+      )
+      self._zero_worker_since = None
 
   def remove_rollout_worker(
       self,
@@ -229,7 +252,10 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       True if `handle` was still a member of the rollout pool, False if it had
       already been evicted (the call is then a no-op).
     """
-    return self._rollout_session.remove_actor(handle, exc=exc)
+    removed = self._rollout_session.remove_actor(handle, exc=exc)
+    if removed and not self._rollout_workers and self._zero_worker_since is None:
+      self._zero_worker_since = time.monotonic()
+    return removed
 
   @property
   def restored_next_batch_idx(self) -> int:
@@ -275,11 +301,6 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     self._assert_weights_consistent()
     await self.sync_pending_weights()
     if self._rollout_workers:
-      if self._zero_worker_since is not None:
-        self._zero_worker_seconds_total += max(
-            0.0, time.monotonic() - self._zero_worker_since
-        )
-        self._zero_worker_since = None
       return
 
     if not self._fault_tolerance_config.enabled:
@@ -288,36 +309,27 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       )
 
     wait_start = time.monotonic()
-    if self._zero_worker_since is None:
-      self._zero_worker_since = wait_start
-      logging.warning(
-          "[rollout-ft] action=zero_workers_wait max_zero_worker_wait_s=%.2f",
-          self._max_zero_worker_wait_s,
-      )
+    logging.warning(
+        "[rollout-ft] action=zero_workers_wait max_zero_worker_wait_s=%.2f",
+        self._max_zero_worker_wait_s,
+    )
 
-    try:
-      while not self._rollout_workers:
-        self._assert_weights_consistent()
-        await self.sync_pending_weights()
-        if self._rollout_workers:
-          break
-        elapsed = time.monotonic() - wait_start
-        if elapsed >= self._max_zero_worker_wait_s:
-          raise datatypes.NoHealthyRolloutWorkersError(
-              "No healthy rollout workers available after waiting"
-              f" {elapsed:.2f}s"
-              f" (max_zero_worker_wait_s={self._max_zero_worker_wait_s}s)."
-          )
-        sleep_s = min(
-            poll_interval_s, max(0.001, self._max_zero_worker_wait_s - elapsed)
+    while not self._rollout_workers:
+      self._assert_weights_consistent()
+      await self.sync_pending_weights()
+      if self._rollout_workers:
+        break
+      elapsed = time.monotonic() - wait_start
+      if elapsed >= self._max_zero_worker_wait_s:
+        raise datatypes.NoHealthyRolloutWorkersError(
+            "No healthy rollout workers available after waiting"
+            f" {elapsed:.2f}s"
+            f" (max_zero_worker_wait_s={self._max_zero_worker_wait_s}s)."
         )
-        await asyncio.sleep(sleep_s)
-    finally:
-      if self._zero_worker_since is not None:
-        self._zero_worker_seconds_total += max(
-            0.0, time.monotonic() - self._zero_worker_since
-        )
-        self._zero_worker_since = None
+      sleep_s = min(
+          poll_interval_s, max(0.001, self._max_zero_worker_wait_s - elapsed)
+      )
+      await asyncio.sleep(sleep_s)
 
   async def _maybe_configure_trainer_target_state(
       self,
@@ -658,12 +670,6 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           timeout_s=timeout_s
       )
       completed = self._drain_completed_and_failed(raw_completed)
-
-    if self._rollout_workers and self._zero_worker_since is not None:
-      self._zero_worker_seconds_total += max(
-          0.0, time.monotonic() - self._zero_worker_since
-      )
-      self._zero_worker_since = None
 
     return completed
 
