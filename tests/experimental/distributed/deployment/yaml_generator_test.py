@@ -406,15 +406,10 @@ class YamlGeneratorTest(parameterized.TestCase):
         for c in with_sidecar[0]["initContainers"]
         if c["name"] == "colocated-python-sidecar"
     )
-    # PID 1 must forward SIGTERM to the server; the image's own ENTRYPOINT (a
-    # `while true` shell loop) ignores it and the pod hangs for the full grace period.
-    self.assertEqual(sidecar_c["command"], ["/bin/sh", "-c"])
-    self.assertLen(sidecar_c["args"], 1)
-    sidecar_script = sidecar_c["args"][0]
-    self.assertIn("python /app/main.py --port=50051", sidecar_script)
-    self.assertIn(
-        'trap \'kill -TERM "$child"; wait "$child"\' TERM INT', sidecar_script
-    )
+    # SIGTERM handling is the image's contract (its ENTRYPOINT forwards TERM);
+    # the generator must not paper over it with a command override or a hook.
+    self.assertNotIn("command", sidecar_c)
+    self.assertNotIn("args", sidecar_c)
     self.assertNotIn("lifecycle", sidecar_c)
     return {m["name"]: m["mountPath"] for m in sidecar_c["volumeMounts"]}
 

@@ -627,6 +627,12 @@ def main() -> None:
   #
   # The image MUST match the head image's jax/jaxlib exactly and must contain orbax, since
   # Orbax ships its serialization callables here by reference via cloudpickle.
+  #
+  # The image's PID 1 MUST forward SIGTERM to the server (see
+  # maxtext/src/dependencies/colocated_sidecar/Dockerfile). The upstream Pathways sidecar
+  # base runs the server under a `while true` shell loop with no TERM handler, which per
+  # pid_namespaces(7) drops the kubelet's SIGTERM; the container then holds 0.0.0.0:50051
+  # (hostNetwork) until it is SIGKILLed at the end of the pod grace period.
   sidecar_image = os.environ.get("COLOCATED_PYTHON_SIDECAR_IMAGE", "").strip()
   sidecar_shm = os.environ.get("COLOCATED_PYTHON_SIDECAR_SHM", "1").strip().lower() not in (
       "0",
@@ -666,19 +672,6 @@ def main() -> None:
                   cpu: "4"
                   memory: {sidecar_memory}
               restartPolicy: Always
-              # The image ENTRYPOINT is `sh -c 'while true; do python /app/main.py ...; done'`.
-              # As PID 1 that shell has no TERM handler, so the kubelet's SIGTERM is dropped
-              # (pid_namespaces(7)) and the sidecar is only SIGKILLed when the pod's grace
-              # period expires, holding 0.0.0.0:50051 (hostNetwork) the whole time. Run the
-              # server as a child of a shell that forwards TERM instead; `restartPolicy:
-              # Always` already restarts the container if the server exits.
-              command: ["/bin/sh", "-c"]
-              args:
-              - |
-                python /app/main.py --port=50051 --logtostderr --stderrthreshold=0 --v=1 &
-                child=$!
-                trap 'kill -TERM "$child"; wait "$child"' TERM INT
-                wait "$child"
               volumeMounts:
               {sidecar_volume_mount}"""
       if sidecar_image
