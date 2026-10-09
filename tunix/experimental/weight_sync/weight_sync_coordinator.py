@@ -1528,6 +1528,8 @@ class WeightSyncCoordinator:
             if first_bind_err is None:
               first_bind_err = res
         if first_bind_err is not None:
+          # Caught by the enclosing pre-quiesce `except Exception` block (line
+          # 1604) and wrapped into WeightSyncError via `fail(...)`.
           raise first_bind_err
 
         t_phase = time.monotonic()
@@ -1567,6 +1569,8 @@ class WeightSyncCoordinator:
             if first_meta_err is None:
               first_meta_err = res
         if first_meta_err is not None:
+          # Caught by the enclosing pre-quiesce `except Exception` block and
+          # wrapped into WeightSyncError via `fail(...)`.
           raise first_meta_err
         dst_meta_lists = [
             res

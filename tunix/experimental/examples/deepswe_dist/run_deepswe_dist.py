@@ -80,8 +80,16 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument(
       "--rollout_replicas",
       type=int,
-      default=int(
-          os.getenv("ROLLOUT_REPLICAS", os.getenv("ROLLOUT_WORKERS", "1"))
+      default=(
+          int(val)
+          if (
+              val := (
+                  os.getenv("ROLLOUT_REPLICAS")
+                  or os.getenv("ROLLOUT_WORKERS")
+                  or ""
+              ).strip()
+          )
+          else 1
       ),
       help=(
           "Minimum number of rollout worker replicas to wait for before"
@@ -102,8 +110,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       "--max_concurrent_rollouts_per_worker",
       type=int,
       default=(
-          int(os.getenv("MAX_CONCURRENT_ROLLOUTS_PER_WORKER", "0")) or None
-      ),
+          int(val)
+          if (val := os.getenv("MAX_CONCURRENT_ROLLOUTS_PER_WORKER", "").strip())
+          else None
+      )
+      or None,
       help=(
           "Optional cap on concurrent in-flight rollouts dispatched to any "
           "single rollout worker."
@@ -113,8 +124,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       "--rollout_task_timeout_s",
       type=float,
       default=(
-          float(os.getenv("ROLLOUT_TASK_TIMEOUT_S", "0")) or None
-      ),
+          float(val)
+          if (val := os.getenv("ROLLOUT_TASK_TIMEOUT_S", "").strip())
+          else None
+      )
+      or None,
       help=(
           "Optional per-task execution timeout in seconds once a rollout "
           "request is dispatched to a worker."
@@ -123,7 +137,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument(
       "--max_zero_worker_wait_s",
       type=float,
-      default=float(os.getenv("MAX_ZERO_WORKER_WAIT_S", "600.0")),
+      default=(
+          float(val)
+          if (val := os.getenv("MAX_ZERO_WORKER_WAIT_S", "").strip())
+          else 600.0
+      ),
       help=(
           "Maximum duration in seconds to wait when zero active rollout "
           "workers remain before raising NoHealthyRolloutWorkersError."
@@ -132,7 +150,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument(
       "--rollout_max_task_retries",
       type=int,
-      default=int(os.getenv("ROLLOUT_MAX_TASK_RETRIES", "3")),
+      default=(
+          int(val)
+          if (val := os.getenv("ROLLOUT_MAX_TASK_RETRIES", "").strip())
+          else 3
+      ),
       help=(
           "Maximum number of retry attempts per rollout request_id before "
           "synthesizing a terminal FAILED placeholder trajectory."

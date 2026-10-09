@@ -614,10 +614,16 @@ class ClusterOrchestrator:
   def shutdown(self) -> None:
     """Shuts down all workers and closes health monitoring resources."""
     logging.info("Shutting down all workers...")
+    with self._lock:
+      pending_futs = list(self._pending_bring_up_futures)
+    for fut in pending_futs:
+      fut.cancel()
     with contextlib.ExitStack() as stack:
       # Registered in reverse order of execution (LIFO) so that every stage
       # runs even if a preceding stage raises an exception.
-      stack.callback(self._bring_up_executor.shutdown, wait=False)
+      stack.callback(
+          self._bring_up_executor.shutdown, wait=False, cancel_futures=True
+      )
       if self.trajectory_store is not None:
         stack.callback(self.trajectory_store.close)
       stack.callback(self.lifecycle_driver.shutdown)

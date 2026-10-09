@@ -25,6 +25,7 @@ import collections
 from collections.abc import Callable, Mapping, Sequence
 import concurrent.futures
 import contextlib
+import dataclasses
 import inspect
 import time
 from typing import Any
@@ -55,7 +56,7 @@ def _response_to_trajectory_item(resp: Any) -> datatypes.TrajectoryItem:
       merged_meta = dict(resp.metadata)
       if resp.payload.metadata:
         merged_meta.update(resp.payload.metadata)
-      resp.payload.metadata = merged_meta
+      return dataclasses.replace(resp.payload, metadata=merged_meta)
     return resp.payload
 
   if resp.error is not None:

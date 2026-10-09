@@ -179,8 +179,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       "--max_concurrent_rollouts_per_worker",
       type=int,
       default=(
-          int(os.getenv("MAX_CONCURRENT_ROLLOUTS_PER_WORKER", "0")) or None
-      ),
+          int(val)
+          if (val := os.getenv("MAX_CONCURRENT_ROLLOUTS_PER_WORKER", "").strip())
+          else None
+      )
+      or None,
       help=(
           "Optional cap on concurrent in-flight rollouts dispatched to any "
           "single rollout worker."

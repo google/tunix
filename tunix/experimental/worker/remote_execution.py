@@ -594,11 +594,10 @@ class RemoteExecutionServer(abc.ABC):
     ):
       new_q: asyncio.Queue[ExecutionResponse] = asyncio.Queue()
       if self._response_queue is not None:
-        while not self._response_queue.empty():
-          try:
-            new_q.put_nowait(self._response_queue.get_nowait())
-          except asyncio.QueueEmpty:
-            break
+        while self._response_queue._queue:  # pylint: disable=protected-access
+          new_q.put_nowait(
+              self._response_queue._queue.popleft()  # pylint: disable=protected-access
+          )
       self._response_queue = new_q
       self._response_queue_loop = loop
     return self._response_queue

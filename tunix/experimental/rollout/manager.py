@@ -20,6 +20,7 @@ import math
 import os
 import time
 from typing import Any, AsyncIterator, Callable, Dict, Optional, Sequence, Union
+import weakref
 from absl import logging
 from tunix.experimental.common import datatypes
 from tunix.experimental.rl.agentic import registry
@@ -187,9 +188,9 @@ class RolloutManager:
     self._active_tasks: Dict[str, asyncio.Task[Any]] = {}
     self._completed_queue: asyncio.Queue[TrajectoryOrError] = asyncio.Queue()
     self._traffic_inst = None
-    self._concurrency_sems: Dict[
+    self._concurrency_sems: weakref.WeakKeyDictionary[
         asyncio.AbstractEventLoop, asyncio.Semaphore
-    ] = {}
+    ] = weakref.WeakKeyDictionary()
     self._episode_timeout_s = _env_float(
         "EPISODE_TIMEOUT_SECS",
         collector_lib.DEFAULT_EPISODE_TIMEOUT_SECS,
