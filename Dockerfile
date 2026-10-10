@@ -27,7 +27,7 @@ RUN pip install git+https://github.com/ayaka14732/jax-smi.git
 # If you encounter a checkpoint issue, try using following old version of pathways-utils.
 # RUN pip install git+https://github.com/AI-Hypercomputer/pathways-utils.git@b72729bb152b7b3426299405950b3af300d765a9#egg=pathwaysutils
 RUN pip install gcsfs
-RUN pip install wandb
+RUN pip install wandb psycopg2-binary
 
 # Set the working directory
 WORKDIR /app

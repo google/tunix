@@ -935,21 +935,30 @@ def _extract_kv_from_metrics_buffer(metrics_buffer: Any) -> dict[str, Any]:
   if raw_metrics is None and hasattr(metrics_buffer, "metrics_logger"):
     raw_metrics = getattr(metrics_buffer.metrics_logger, "_metrics", None)
   if isinstance(raw_metrics, dict):
-    for prefix_dict in raw_metrics.values():
+    for prefix_key, prefix_dict in raw_metrics.items():
       if not isinstance(prefix_dict, dict):
         continue
       for mode_key, mode_dict in prefix_dict.items():
         if str(mode_key) != "train" or not isinstance(mode_dict, dict):
           continue
         for k, vals in mode_dict.items():
-          if vals and k not in kv_stats:
-            val = _clean_metric_val(vals[-1])
-            if val is not None:
+          if not vals:
+            continue
+          val = _clean_metric_val(vals[-1])
+          if val is None:
+            continue
+          if prefix_key:
+            prefixed_k = f"{prefix_key}/{k}"
+            if prefixed_k not in kv_stats:
+              kv_stats[prefixed_k] = val
+            if prefix_key in ("trainer", "actor") and k not in kv_stats:
               kv_stats[k] = val
-              if k.startswith("trainer/"):
-                short_k = k[len("trainer/") :]
-                if short_k not in kv_stats:
-                  kv_stats[short_k] = val
+          if k not in kv_stats:
+            kv_stats[k] = val
+          if k.startswith(("trainer/", "actor/")):
+            short_k = k.split("/", 1)[1]
+            if short_k not in kv_stats:
+              kv_stats[short_k] = val
 
   return kv_stats
 
@@ -991,7 +1000,7 @@ def log_rcp_step_stats(
   if valid_toks is None and valid_seqs is not None:
     mean_toks = stats.get(
         "rollout/total_tokens_mean",
-        stats.get("rollout/completion_length_mean", stats.get("generation/completions/mean_raw_length")),
+        stats.get("rollout/completions/mean_length", stats.get("rollout/completion_length_mean", stats.get("rollout/completions/mean_raw_length", stats.get("generation/completions/mean_raw_length")))),
     )
     if mean_toks is not None:
       valid_toks = float(mean_toks) * float(valid_seqs)

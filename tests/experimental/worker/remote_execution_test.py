@@ -303,7 +303,7 @@ class RemoteExecutionTest(absltest.TestCase):
       self.assertGreater(
           len(buckets),
           1,
-          f"adjacent route keys all collapsed to one bucket for"
+          "adjacent route keys all collapsed to one bucket for"
           f" num_actors={num_actors}",
       )
 
@@ -860,9 +860,7 @@ class RemoteExecutionTest(absltest.TestCase):
 
     server = remote_lib.InProcessRemoteExecutionServer(ThrowingWorker())
     resp4 = server.execute_sync_request(
-        remote_lib.ExecutionRequest(
-            request_id="req_err_5", method_name="fail"
-        )
+        remote_lib.ExecutionRequest(request_id="req_err_5", method_name="fail")
     )
     self.assertEqual(resp4.error_type, "ValueError")
     self.assertEqual(resp4.error_message, "Intentional failure")
@@ -1023,7 +1021,12 @@ class RemoteExecutionTest(absltest.TestCase):
       # 1. Client calls execution_session for an initial bulk of tasks
       initial_tasks = [
           ("req_1", "process", (5,), {}),
-          ("req_2", "process", (-10,), {}),  # This task will throw an exception!
+          (
+              "req_2",
+              "process",
+              (-10,),
+              {},
+          ),  # This task will throw an exception!
           ("req_3", "process", (15,), {}),
       ]
       async with pool.execution_session(initial_tasks) as session:
@@ -1212,12 +1215,8 @@ class RemoteExecutionTest(absltest.TestCase):
       def __init__(self):
         self.poll_event = asyncio.Event()
         self.responses = [
-            remote_lib.ExecutionResponse(
-                request_id="req_2", result="res_2"
-            ),
-            remote_lib.ExecutionResponse(
-                request_id="req_1", result="res_1"
-            ),
+            remote_lib.ExecutionResponse(request_id="req_2", result="res_2"),
+            remote_lib.ExecutionResponse(request_id="req_1", result="res_1"),
         ]
 
       def submit(
@@ -1464,9 +1463,7 @@ class RemoteExecutionTest(absltest.TestCase):
         restored_payload["strided_logps"], strided_view
     )
     np.testing.assert_array_equal(restored_payload["advantages"], advantages)
-    self.assertEqual(
-        restored_payload["metadata"], {"step": 7, "packed": True}
-    )
+    self.assertEqual(restored_payload["metadata"], {"step": 7, "packed": True})
     # Reconstructed arrays backed by released bytearrays must be writable.
     restored_payload["completion_ids"][0, 0] = 999
     self.assertEqual(restored_payload["completion_ids"][0, 0], 999)
@@ -1521,9 +1518,7 @@ class RemoteExecutionTest(absltest.TestCase):
         )
 
         # 2. Verify client-streaming dispatch + server-streaming poll
-        ack_id = await handle.dispatch_task(
-            "req_stream_1", "echo_batch", batch
-        )
+        ack_id = await handle.dispatch_task("req_stream_1", "echo_batch", batch)
         self.assertEqual(ack_id, "req_stream_1")
         polled = await handle.poll_responses(timeout_s=5.0)
         self.assertIsNotNone(polled)
@@ -1834,6 +1829,1382 @@ class RemoteExecutionTest(absltest.TestCase):
       await session.close()
 
     asyncio.run(_run())
+
+  def test_routing_actor_pool_membership_operations(self):
+    h1 = create_in_process_handle(StubWorkerEngine("w1"))
+    h2 = create_in_process_handle(StubWorkerEngine("w2"))
+    h3 = create_in_process_handle(StubWorkerEngine("w3"))
+
+    pool = remote_lib.RoutingActorPool([h1, h2])
+    self.assertEqual(pool.actors, [h1, h2])
+
+    # Duplicate add_actor is a no-op and returns the handle
+    self.assertIs(pool.add_actor(h1), h1)
+    self.assertEqual(pool.actors, [h1, h2])
+
+    # add_actor appends new handle
+    self.assertIs(pool.add_actor(h3), h3)
+    self.assertEqual(pool.actors, [h1, h2, h3])
+
+    # remove_actor returns True when present, False when absent
+    self.assertTrue(pool.remove_actor(h1))
+    self.assertTrue(pool.remove_actor(h2))
+    self.assertFalse(pool.remove_actor(h2))
+    self.assertEqual(pool.actors, [h3])
+
+  def test_pool_execution_session_poll_failure_evicts_and_retries_in_flight(
+      self,
+  ):
+    class CrashingPollHandle(remote_lib.ActorHandle):
+
+      def __init__(self):
+        self.crash_event = asyncio.Event()
+
+      def submit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def asubmit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def dispatch_task(
+          self, request_id=None, method_name=None, *args, **kwargs
+      ) -> str:
+        del method_name, args, kwargs
+        return request_id or ""
+
+      async def poll_responses(self, timeout_s=50.0):
+        del timeout_s
+        await self.crash_event.wait()
+        raise ConnectionError("worker_dead_mid_poll")
+
+    async def _run():
+      dead_handle = CrashingPollHandle()
+      healthy_handle = create_in_process_handle(
+          StubWorkerEngine("healthy_worker", latency=0.01)
+      )
+      pool = remote_lib.RoutingActorPool([dead_handle, healthy_handle])
+
+      evicted = []
+      reentrant_returns = []
+
+      def _on_evicted(actor, exc):
+        evicted.append((actor, exc))
+        reentrant_returns.append(session.remove_actor(actor))
+
+      session = remote_lib.PoolExecutionSession(
+          pool,
+          config=remote_lib.PoolSessionConfig(
+              evict_on_failure=True,
+              retry_on_worker_failure=True,
+              max_task_retries=3,
+              on_worker_evicted=_on_evicted,
+          ),
+      )
+
+      # Round-robin sends req_1 to dead_handle and req_2 to healthy_handle
+      await session.submit(
+          "req_1", "compute_trajectory", "prompt_1", turns=2, route_key=None
+      )
+      await session.submit(
+          "req_2", "compute_trajectory", "prompt_2", turns=2, route_key=None
+      )
+
+      # Trigger crash on dead_handle during poll_responses
+      dead_handle.crash_event.set()
+
+      results = []
+      async for res, exc in session.as_completed():
+        self.assertIsNone(exc)
+        results.append(res)
+
+      await session.close()
+
+      self.assertEqual(pool.actors, [healthy_handle])
+      self.assertLen(evicted, 1)
+      self.assertEqual(reentrant_returns, [False])
+      self.assertIs(evicted[0][0], dead_handle)
+      self.assertIsInstance(evicted[0][1], ConnectionError)
+      self.assertEqual(session._in_flight, 0)
+      self.assertEmpty(session.pop_failed_tasks())
+      self.assertCountEqual(
+          results,
+          [
+              "[healthy_worker] Trajectory for prompt prompt_1 (2 turns)",
+              "[healthy_worker] Trajectory for prompt prompt_2 (2 turns)",
+          ],
+      )
+
+    asyncio.run(_run())
+
+  def test_pool_execution_session_dispatch_failure_evicts_and_retries(self):
+    class CrashingDispatchHandle(remote_lib.ActorHandle):
+
+      def submit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def asubmit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def dispatch_task(
+          self, request_id=None, method_name=None, *args, **kwargs
+      ) -> str:
+        del request_id, method_name, args, kwargs
+        raise ConnectionError("dispatch_failed")
+
+      async def poll_responses(self, timeout_s=50.0):
+        await asyncio.sleep(timeout_s)
+        return None
+
+    async def _run():
+      dead_handle = CrashingDispatchHandle()
+      healthy_handle = create_in_process_handle(
+          StubWorkerEngine("healthy_worker", latency=0.01)
+      )
+      pool = remote_lib.RoutingActorPool([dead_handle, healthy_handle])
+
+      evicted = []
+      session = remote_lib.PoolExecutionSession(
+          pool,
+          config=remote_lib.PoolSessionConfig(
+              evict_on_failure=True,
+              retry_on_worker_failure=True,
+              on_worker_evicted=lambda actor, exc: evicted.append((actor, exc)),
+          ),
+      )
+
+      # First submit hits dead_handle, evicts it, and retries on healthy_handle
+      req_id = await session.submit(
+          "req_dispatch_retry", "compute_trajectory", "p_retry", turns=1
+      )
+      self.assertEqual(req_id, "req_dispatch_retry")
+      self.assertEqual(pool.actors, [healthy_handle])
+      self.assertLen(evicted, 1)
+      self.assertIs(evicted[0][0], dead_handle)
+
+      results = []
+      async for res, exc in session.as_completed():
+        self.assertIsNone(exc)
+        results.append(res)
+
+      await session.close()
+      self.assertEqual(
+          results,
+          ["[healthy_worker] Trajectory for prompt p_retry (1 turns)"],
+      )
+      self.assertEqual(session._in_flight, 0)
+
+    asyncio.run(_run())
+
+  def test_pool_execution_session_exhausted_retries_populates_failed_tasks(
+      self,
+  ):
+    class AlwaysCrashingPollHandle(remote_lib.ActorHandle):
+
+      def submit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def asubmit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def dispatch_task(
+          self, request_id=None, method_name=None, *args, **kwargs
+      ) -> str:
+        del method_name, args, kwargs
+        return request_id or ""
+
+      async def poll_responses(self, timeout_s=50.0):
+        del timeout_s
+        await asyncio.sleep(0.005)
+        raise ConnectionError("poll_crash")
+
+    async def _run():
+      h1 = AlwaysCrashingPollHandle()
+      h2 = AlwaysCrashingPollHandle()
+      pool = remote_lib.RoutingActorPool([h1, h2])
+      session = remote_lib.PoolExecutionSession(
+          pool,
+          config=remote_lib.PoolSessionConfig(
+              evict_on_failure=True,
+              retry_on_worker_failure=True,
+              max_task_retries=3,
+          ),
+      )
+
+      await session.submit(
+          "req_doomed", "compute_trajectory", "p_doom", turns=4, route_key="k1"
+      )
+
+      outcomes = []
+      async for res, exc in session.as_completed():
+        outcomes.append((res, exc))
+
+      await session.close()
+      self.assertLen(outcomes, 1)
+      self.assertIsNone(outcomes[0][0])
+      self.assertIsInstance(outcomes[0][1], ConnectionError)
+      self.assertEmpty(pool.actors)
+      self.assertEqual(session._in_flight, 0)
+
+      failed = session.pop_failed_tasks()
+      self.assertLen(failed, 1)
+      req_id, payload, exc = failed[0]
+      self.assertEqual(req_id, "req_doomed")
+      self.assertEqual(
+          payload,
+          ("compute_trajectory", ("p_doom",), {"turns": 4, "route_key": "k1"}),
+      )
+      self.assertIsInstance(exc, ConnectionError)
+      self.assertEmpty(session.pop_failed_tasks())
+
+    asyncio.run(_run())
+
+  def test_pool_execution_session_dynamic_add_and_remove_actor(self):
+    class SlowHangingHandle(remote_lib.ActorHandle):
+
+      def submit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def asubmit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def dispatch_task(
+          self, request_id=None, method_name=None, *args, **kwargs
+      ) -> str:
+        del method_name, args, kwargs
+        return request_id or ""
+
+      async def poll_responses(self, timeout_s=50.0):
+        await asyncio.sleep(timeout_s)
+        return None
+
+    async def _run():
+      slow_handle = SlowHangingHandle()
+      pool = remote_lib.RoutingActorPool([slow_handle])
+      evicted = []
+      session = remote_lib.PoolExecutionSession(
+          pool,
+          config=remote_lib.PoolSessionConfig(
+              evict_on_failure=True,
+              retry_on_worker_failure=True,
+              on_worker_evicted=lambda actor, exc: evicted.append((actor, exc)),
+          ),
+      )
+
+      await session.submit("req_1", "compute_trajectory", "p1", turns=1)
+      self.assertEqual(session._dispatched_tasks[slow_handle], {"req_1"})
+
+      # Dynamically add a healthy worker and explicitly remove slow_handle
+      new_handle = create_in_process_handle(
+          StubWorkerEngine("new_worker", latency=0.01)
+      )
+      session.add_actor(new_handle)
+      self.assertTrue(
+          session.remove_actor(slow_handle, RuntimeError("manual_eviction"))
+      )
+
+      # Re-removing the same handle, or an unknown one, is a no-op: no second
+      # on_worker_evicted callback fires and the dead handle is not retained.
+      self.assertFalse(session.remove_actor(slow_handle))
+      self.assertFalse(session.remove_actor(SlowHangingHandle()))
+      self.assertLen(evicted, 1)
+      self.assertNotIn(slow_handle, session._known_actors)
+      self.assertEqual(session._known_actors, {new_handle})
+
+      # Submit another task which must route to new_handle
+      await session.submit("req_2", "compute_trajectory", "p2", turns=1)
+
+      results = []
+      async for res, exc in session.as_completed():
+        self.assertIsNone(exc)
+        results.append(res)
+
+      await session.close()
+      self.assertEqual(pool.actors, [new_handle])
+      self.assertLen(evicted, 1)
+      self.assertIs(evicted[0][0], slow_handle)
+      self.assertCountEqual(
+          results,
+          [
+              "[new_worker] Trajectory for prompt p1 (1 turns)",
+              "[new_worker] Trajectory for prompt p2 (1 turns)",
+          ],
+      )
+      self.assertEqual(session._in_flight, 0)
+
+    asyncio.run(_run())
+
+  def test_pool_execution_session_max_in_flight_per_worker_limits_concurrency_and_queues(
+      self,
+  ):
+    class GatedHandle(remote_lib.ActorHandle):
+
+      def __init__(self, name: str):
+        self.name = name
+        self.current_in_flight = 0
+        self.peak_in_flight = 0
+        self.release_gate = asyncio.Event()
+        self._tasks: set[asyncio.Task[None]] = set()
+        self._completed: asyncio.Queue[remote_lib.ExecutionResponse] = (
+            asyncio.Queue()
+        )
+
+      def submit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def asubmit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def dispatch_task(
+          self, request_id=None, method_name=None, *args, **kwargs
+      ) -> str:
+        del method_name, kwargs
+        self.current_in_flight += 1
+        self.peak_in_flight = max(self.peak_in_flight, self.current_in_flight)
+        prompt = args[0] if args else ""
+
+        async def _finish():
+          await self.release_gate.wait()
+          await asyncio.sleep(0.005)
+          self.current_in_flight -= 1
+          await self._completed.put(
+              remote_lib.ExecutionResponse(
+                  request_id=request_id or "",
+                  result=f"[{self.name}] {prompt}",
+              )
+          )
+
+        t = asyncio.create_task(_finish())
+        self._tasks.add(t)
+        t.add_done_callback(self._tasks.discard)
+        return request_id or ""
+
+      async def poll_responses(self, timeout_s=50.0):
+        return await asyncio.wait_for(self._completed.get(), timeout=timeout_s)
+
+    async def _run():
+      h1 = GatedHandle("w1")
+      h2 = GatedHandle("w2")
+      pool = remote_lib.RoutingActorPool([h1, h2])
+      session = remote_lib.PoolExecutionSession(
+          pool,
+          config=remote_lib.PoolSessionConfig(max_in_flight_per_worker=2),
+      )
+
+      for i in range(6):
+        await session.submit(
+            f"req_{i}", "compute_trajectory", f"p_{i}", route_key=None
+        )
+
+      # Only 2 tasks per worker should be dispatched initially; 2 remain queued.
+      self.assertEqual(session._worker_load(h1), 2)
+      self.assertEqual(session._worker_load(h2), 2)
+      self.assertEqual(session.pending_count, 2)
+      self.assertEqual(session.in_flight_count, 6)
+
+      # Release the gate so tasks finish and pending tasks drain.
+      h1.release_gate.set()
+      h2.release_gate.set()
+
+      results = []
+      async for res, exc in session.as_completed():
+        self.assertIsNone(exc)
+        results.append(res)
+
+      await session.close()
+      self.assertLen(results, 6)
+      self.assertLessEqual(h1.peak_in_flight, 2)
+      self.assertLessEqual(h2.peak_in_flight, 2)
+      self.assertEqual(session.pending_count, 0)
+      self.assertEqual(session.in_flight_count, 0)
+
+    asyncio.run(_run())
+
+  def test_pool_execution_session_route_key_overflows_to_least_loaded_worker(
+      self,
+  ):
+    async def _run():
+      h1 = create_in_process_handle(StubWorkerEngine("w1", latency=0.05))
+      h2 = create_in_process_handle(StubWorkerEngine("w2", latency=0.05))
+      pool = remote_lib.RoutingActorPool([h1, h2])
+      session = remote_lib.PoolExecutionSession(
+          pool,
+          config=remote_lib.PoolSessionConfig(max_in_flight_per_worker=1),
+      )
+
+      # Submit two requests with the exact same route_key while
+      # max_in_flight_per_worker=1.
+      await session.submit(
+          "req_a", "compute_trajectory", "p_a", turns=1, route_key="sticky_key"
+      )
+      await session.submit(
+          "req_b", "compute_trajectory", "p_b", turns=1, route_key="sticky_key"
+      )
+
+      # Because the preferred worker is at capacity (1/1), the second request
+      # must spill over to the other idle worker rather than queueing.
+      self.assertEqual(session._worker_load(h1), 1)
+      self.assertEqual(session._worker_load(h2), 1)
+      self.assertEqual(session.pending_count, 0)
+
+      results = []
+      async for res, exc in session.as_completed():
+        self.assertIsNone(exc)
+        results.append(res)
+
+      await session.close()
+      self.assertLen(results, 2)
+
+    asyncio.run(_run())
+
+  def test_pool_execution_session_worker_failure_respects_survivor_max_in_flight(
+      self,
+  ):
+    class ControlledHandle(remote_lib.ActorHandle):
+
+      def __init__(self, name: str, should_crash: bool = False):
+        self.name = name
+        self.should_crash = should_crash
+        self.current_in_flight = 0
+        self.peak_in_flight = 0
+        self.trigger = asyncio.Event()
+        self._tasks: set[asyncio.Task[None]] = set()
+        self._queue: asyncio.Queue[Any] = asyncio.Queue()
+
+      def submit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def asubmit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def dispatch_task(
+          self, request_id=None, method_name=None, *args, **kwargs
+      ) -> str:
+        del method_name, kwargs
+        self.current_in_flight += 1
+        self.peak_in_flight = max(self.peak_in_flight, self.current_in_flight)
+        prompt = args[0] if args else ""
+
+        async def _work():
+          await self.trigger.wait()
+          await asyncio.sleep(0.005)
+          self.current_in_flight -= 1
+          if self.should_crash:
+            await self._queue.put(ConnectionError("worker_died"))
+          else:
+            await self._queue.put(
+                remote_lib.ExecutionResponse(
+                    request_id=request_id or "",
+                    result=f"[{self.name}] {prompt}",
+                )
+            )
+
+        t = asyncio.create_task(_work())
+        self._tasks.add(t)
+        t.add_done_callback(self._tasks.discard)
+        return request_id or ""
+
+      async def poll_responses(self, timeout_s=50.0):
+        item = await asyncio.wait_for(self._queue.get(), timeout=timeout_s)
+        if isinstance(item, Exception):
+          raise item
+        return item
+
+    async def _run():
+      dead = ControlledHandle("dead", should_crash=True)
+      survivor = ControlledHandle("survivor", should_crash=False)
+      pool = remote_lib.RoutingActorPool([dead, survivor])
+      session = remote_lib.PoolExecutionSession(
+          pool,
+          config=remote_lib.PoolSessionConfig(
+              evict_on_failure=True,
+              retry_on_worker_failure=True,
+              max_in_flight_per_worker=1,
+          ),
+      )
+
+      await session.submit("req_1", "compute_trajectory", "p1", route_key=None)
+      await session.submit("req_2", "compute_trajectory", "p2", route_key=None)
+      self.assertEqual(session._worker_load(dead), 1)
+      self.assertEqual(session._worker_load(survivor), 1)
+
+      # Trigger dead worker crash while survivor is still busy at 1/1 capacity.
+      dead.trigger.set()
+      await asyncio.sleep(0.02)
+
+      # req_1 must be queued in _pending_queue rather than overloading survivor
+      # to 2/1.
+      self.assertEqual(session._worker_load(survivor), 1)
+      self.assertEqual(session.pending_count, 1)
+
+      # Allow survivor to finish req_2, which drains req_1 onto survivor.
+      survivor.trigger.set()
+
+      results = []
+      async for res, exc in session.as_completed():
+        self.assertIsNone(exc)
+        results.append(res)
+
+      await session.close()
+      self.assertCountEqual(results, ["[survivor] p1", "[survivor] p2"])
+      self.assertEqual(survivor.peak_in_flight, 1)
+
+    asyncio.run(_run())
+
+  def test_pool_execution_session_dynamic_add_actor_drains_pending_queue(self):
+    class SlowHandle(remote_lib.ActorHandle):
+
+      def __init__(self):
+        self.gate = asyncio.Event()
+        self._tasks: set[asyncio.Task[None]] = set()
+        self._q: asyncio.Queue[Any] = asyncio.Queue()
+
+      def submit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def asubmit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def dispatch_task(
+          self, request_id=None, method_name=None, *args, **kwargs
+      ) -> str:
+        del method_name, kwargs
+        prompt = args[0] if args else ""
+
+        async def _work():
+          await self.gate.wait()
+          await self._q.put(
+              remote_lib.ExecutionResponse(
+                  request_id=request_id or "",
+                  result=f"[slow] {prompt}",
+              )
+          )
+
+        t = asyncio.create_task(_work())
+        self._tasks.add(t)
+        t.add_done_callback(self._tasks.discard)
+        return request_id or ""
+
+      async def poll_responses(self, timeout_s=50.0):
+        return await asyncio.wait_for(self._q.get(), timeout=timeout_s)
+
+    async def _run():
+      slow = SlowHandle()
+      pool = remote_lib.RoutingActorPool([slow])
+      session = remote_lib.PoolExecutionSession(
+          pool,
+          config=remote_lib.PoolSessionConfig(max_in_flight_per_worker=1),
+      )
+
+      await session.submit("req_1", "compute_trajectory", "p1", route_key=None)
+      await session.submit("req_2", "compute_trajectory", "p2", route_key=None)
+      self.assertEqual(session._worker_load(slow), 1)
+      self.assertEqual(session.pending_count, 1)
+
+      # Add a fast worker while slow is still occupied with req_1.
+      fast = create_in_process_handle(StubWorkerEngine("fast", latency=0.01))
+      session.add_actor(fast, max_in_flight=1)
+
+      # Wait briefly for the scheduled drain task to dispatch req_2 to fast.
+      batch = await session.poll_completed(timeout_s=1.0)
+      self.assertLen(batch, 1)
+      self.assertEqual(batch[0][0], "[fast] Trajectory for prompt p2 (3 turns)")
+      self.assertEqual(session.pending_count, 0)
+
+      slow.gate.set()
+      batch2 = await session.poll_completed(timeout_s=1.0)
+      self.assertLen(batch2, 1)
+      self.assertEqual(batch2[0][0], "[slow] p1")
+      await session.close()
+
+    asyncio.run(_run())
+
+  def test_pool_and_session_unified_actor_add_remove_and_pending_workers_hold(
+      self,
+  ):
+    class CrashingPollHandle(remote_lib.ActorHandle):
+
+      def __init__(self):
+        self.crash_gate = asyncio.Event()
+
+      def submit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def asubmit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def dispatch_task(
+          self, request_id=None, method_name=None, *args, **kwargs
+      ) -> str:
+        del method_name, args, kwargs
+        return request_id or ""
+
+      async def poll_responses(self, timeout_s=50.0):
+        del timeout_s
+        await self.crash_gate.wait()
+        raise ConnectionError("last_worker_crashed")
+
+    async def _run():
+      h_dead = CrashingPollHandle()
+      pool = remote_lib.RoutingActorPool([h_dead])
+      has_pending = True
+      session = remote_lib.PoolExecutionSession(
+          pool,
+          config=remote_lib.PoolSessionConfig(
+              evict_on_failure=True,
+              retry_on_worker_failure=True,
+              has_pending_workers_fn=lambda: has_pending,
+          ),
+      )
+
+      await session.submit("req_hold", "compute_trajectory", "p_hold", turns=1)
+      self.assertEqual(session._worker_load(h_dead), 1)
+
+      # Trigger crash of the ONLY active worker while has_pending_workers_fn()
+      # is True.
+      h_dead.crash_gate.set()
+      batch = await session.poll_completed(timeout_s=0.1)
+      self.assertEmpty(batch)
+      self.assertEmpty(pool.actors)
+      # Task must be held in _pending_queue instead of failing the session
+      self.assertEqual(session.pending_count, 1)
+      self.assertEqual(session.in_flight_count, 1)
+
+      # Now add replacement worker via `session.add_actor`.
+      h_new = create_in_process_handle(
+          StubWorkerEngine("recovered_worker", latency=0.01)
+      )
+      session.add_actor(h_new, max_in_flight=3)
+      self.assertEqual(session._get_worker_limit(h_new), 3)
+
+      batch2 = await session.poll_completed(timeout_s=1.0)
+      self.assertLen(batch2, 1)
+      self.assertIsNone(batch2[0][1])
+      self.assertEqual(
+          batch2[0][0],
+          "[recovered_worker] Trajectory for prompt p_hold (1 turns)",
+      )
+      await session.close()
+
+    asyncio.run(_run())
+
+  def test_application_level_task_error_does_not_evict_worker(self):
+    class AppErrorHandle(remote_lib.ActorHandle):
+
+      def __init__(self):
+        self._q: asyncio.Queue[Any] = asyncio.Queue()
+
+      def submit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def asubmit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def dispatch_task(
+          self, request_id=None, method_name=None, *args, **kwargs
+      ) -> str:
+        del method_name, kwargs
+        prompt = args[0] if args else ""
+        req_id = request_id or ""
+        if prompt == "bad_prompt":
+          await self._q.put(
+              remote_lib.ExecutionResponse(
+                  request_id=req_id,
+                  error_message="application_level_error",
+                  error_type="ValueError",
+              )
+          )
+        else:
+          await self._q.put(
+              remote_lib.ExecutionResponse(
+                  request_id=req_id,
+                  result=f"[ok] {prompt}",
+              )
+          )
+        return req_id
+
+      async def poll_responses(self, timeout_s=50.0):
+        return await asyncio.wait_for(self._q.get(), timeout=timeout_s)
+
+    async def _run():
+      handle = AppErrorHandle()
+      pool = remote_lib.RoutingActorPool([handle])
+      evicted = []
+      session = remote_lib.PoolExecutionSession(
+          pool,
+          config=remote_lib.PoolSessionConfig(
+              evict_on_failure=True,
+              retry_on_worker_failure=True,
+              on_worker_evicted=lambda h, exc: evicted.append((h, exc)),
+          ),
+      )
+
+      await session.submit(
+          "req_app_err", "compute_trajectory", "bad_prompt", turns=1
+      )
+      batch = await session.poll_completed(timeout_s=1.0)
+      self.assertLen(batch, 1)
+      self.assertIsNone(batch[0][0])
+      self.assertIsInstance(batch[0][1], RuntimeError)
+      self.assertIn("application_level_error", str(batch[0][1]))
+
+      failed = session.pop_failed_tasks()
+      self.assertLen(failed, 1)
+      self.assertEqual(failed[0][0], "req_app_err")
+      self.assertEqual(failed[0][1][0], "compute_trajectory")
+      self.assertEqual(failed[0][1][1], ("bad_prompt",))
+      self.assertIsInstance(failed[0][2], RuntimeError)
+
+      # Worker must remain active and not be evicted on application-level error.
+      self.assertEqual(pool.actors, [handle])
+      self.assertEmpty(evicted)
+
+      # Subsequent valid task on the same worker succeeds.
+      await session.submit(
+          "req_app_ok", "compute_trajectory", "good_prompt", turns=1
+      )
+      batch2 = await session.poll_completed(timeout_s=1.0)
+      self.assertLen(batch2, 1)
+      self.assertEqual(batch2[0][0], "[ok] good_prompt")
+      self.assertIsNone(batch2[0][1])
+      await session.close()
+
+    asyncio.run(_run())
+
+  def test_zero_worker_submit_and_fail_pending_queue_cleanup(self):
+    async def _run():
+      pool = remote_lib.RoutingActorPool([])
+      has_pending = True
+      session = remote_lib.PoolExecutionSession(
+          pool,
+          config=remote_lib.PoolSessionConfig(
+              evict_on_failure=True,
+              retry_on_worker_failure=True,
+              has_pending_workers_fn=lambda: has_pending,
+          ),
+      )
+
+      # Submitting with empty pool.actors while has_pending_workers_fn is True
+      # queues tasks in _pending_queue instead of raising RuntimeError.
+      await session.submit("req_q1", "compute_trajectory", "p1", turns=1)
+      await session.submit("req_q2", "compute_trajectory", "p2", turns=1)
+      self.assertEqual(session.pending_count, 2)
+      self.assertEqual(session.in_flight_count, 2)
+
+      # Flip has_pending to False and trigger drain via poll_completed;
+      # _fail_pending_queue must drain all queued tasks into pop_failed_tasks()
+      # and decrement in_flight_count to 0.
+      has_pending = False
+      batch = await session.poll_completed(timeout_s=0.5)
+      self.assertLen(batch, 2)
+      self.assertTrue(
+          all(
+              res is None and isinstance(exc, RuntimeError)
+              for res, exc in batch
+          )
+      )
+      self.assertEqual(session.pending_count, 0)
+      self.assertEqual(session.in_flight_count, 0)
+
+      failed = session.pop_failed_tasks()
+      self.assertEqual([req_id for req_id, _, _ in failed], ["req_q1", "req_q2"])
+      await session.close()
+
+    asyncio.run(_run())
+
+  def test_has_pending_or_completed_work(self):
+    class GatedHandle(remote_lib.ActorHandle):
+
+      def __init__(self):
+        self.gate = asyncio.Event()
+        self._q: asyncio.Queue[Any] = asyncio.Queue()
+
+      def submit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def asubmit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def dispatch_task(
+          self, request_id=None, method_name=None, *args, **kwargs
+      ) -> str:
+        del method_name, kwargs
+        prompt = args[0] if args else ""
+
+        async def _work():
+          await self.gate.wait()
+          await self._q.put(
+              remote_lib.ExecutionResponse(
+                  request_id=request_id or "",
+                  result=f"[gated] {prompt}",
+              )
+          )
+
+        asyncio.create_task(_work())
+        return request_id or ""
+
+      async def poll_responses(self, timeout_s=50.0):
+        return await asyncio.wait_for(self._q.get(), timeout=timeout_s)
+
+    async def _run():
+      handle = GatedHandle()
+      pool = remote_lib.RoutingActorPool([handle])
+      session = remote_lib.PoolExecutionSession(
+          pool,
+          config=remote_lib.PoolSessionConfig(max_in_flight_per_worker=1),
+      )
+      self.assertFalse(session.has_pending_or_completed_work())
+
+      await session.submit("req_1", "compute_trajectory", "p1", route_key=None)
+      await session.submit("req_2", "compute_trajectory", "p2", route_key=None)
+      self.assertTrue(session.has_pending_or_completed_work())
+      self.assertEqual(session._worker_load(handle), 1)
+      self.assertEqual(session.pending_count, 1)
+
+      handle.gate.set()
+      results = []
+      while len(results) < 2:
+        batch = await session.poll_completed(timeout_s=1.0)
+        results.extend(r for r, _ in batch)
+      self.assertCountEqual(results, ["[gated] p1", "[gated] p2"])
+      self.assertFalse(session.has_pending_or_completed_work())
+      await session.close()
+
+    asyncio.run(_run())
+
+  def test_pool_execution_session_remove_actor_cancels_active_poll_and_requeues(
+      self,
+  ):
+    class TrackingSlowHandle(remote_lib.ActorHandle):
+
+      def __init__(self):
+        self.poll_started = asyncio.Event()
+        self.poll_cancelled = False
+
+      def submit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def asubmit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def dispatch_task(
+          self, request_id=None, method_name=None, *args, **kwargs
+      ) -> str:
+        del method_name, args, kwargs
+        return request_id or ""
+
+      async def poll_responses(self, timeout_s=50.0):
+        self.poll_started.set()
+        try:
+          await asyncio.sleep(timeout_s)
+        except asyncio.CancelledError:
+          self.poll_cancelled = True
+          raise
+        return None
+
+    async def _run():
+      slow = TrackingSlowHandle()
+      fast = create_in_process_handle(StubWorkerEngine("fast", latency=0.01))
+      pool = remote_lib.RoutingActorPool([slow])
+      evicted = []
+      session = remote_lib.PoolExecutionSession(
+          pool,
+          config=remote_lib.PoolSessionConfig(
+              evict_on_failure=True,
+              retry_on_worker_failure=True,
+              on_worker_evicted=lambda actor, exc: evicted.append((actor, exc)),
+          ),
+      )
+
+      await session.submit("req_1", "compute_trajectory", "p1", turns=1)
+      await asyncio.wait_for(slow.poll_started.wait(), timeout=2.0)
+      self.assertIn(slow, session._worker_poll_tasks)
+
+      # Add healthy worker and call synchronous remove_actor(slow)
+      session.add_actor(fast)
+      session.remove_actor(slow, RuntimeError("evicted_by_registry"))
+
+      batch = await session.poll_completed(timeout_s=2.0)
+      self.assertLen(batch, 1)
+      self.assertEqual(batch[0][0], "[fast] Trajectory for prompt p1 (1 turns)")
+      self.assertTrue(slow.poll_cancelled)
+      self.assertNotIn(slow, session._worker_poll_tasks)
+      self.assertLen(evicted, 1)
+      self.assertIs(evicted[0][0], slow)
+      await session.close()
+
+    asyncio.run(_run())
+
+  def test_pool_execution_session_ignores_straggler_response_without_popping_dispatched(
+      self,
+  ):
+    class StragglerFirstHandle(remote_lib.ActorHandle):
+
+      def __init__(self):
+        self._queue: asyncio.Queue[remote_lib.ExecutionResponse] = (
+            asyncio.Queue()
+        )
+
+      def submit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def asubmit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def dispatch_task(
+          self, request_id=None, method_name=None, *args, **kwargs
+      ) -> str:
+        del method_name, kwargs
+        prompt = args[0] if args else ""
+        # Enqueue an unrecognized straggler response first, followed by the real
+        # response.
+        await self._queue.put(
+            remote_lib.ExecutionResponse(
+                request_id="stale_req_999",
+                result="[stale] should_be_ignored",
+            )
+        )
+        await self._queue.put(
+            remote_lib.ExecutionResponse(
+                request_id=request_id or "",
+                result=f"[valid] {prompt}",
+            )
+        )
+        return request_id or ""
+
+      async def poll_responses(self, timeout_s=50.0):
+        return await asyncio.wait_for(self._queue.get(), timeout=timeout_s)
+
+    async def _run():
+      handle = StragglerFirstHandle()
+      pool = remote_lib.RoutingActorPool([handle])
+      session = remote_lib.PoolExecutionSession(pool)
+
+      await session.submit("active_req_1", "compute_trajectory", "p_real")
+      batch = await session.poll_completed(timeout_s=2.0)
+
+      self.assertLen(batch, 1)
+      self.assertEqual(batch[0][0], "[valid] p_real")
+      self.assertIsNone(batch[0][1])
+      self.assertEqual(session.in_flight_count, 0)
+      self.assertEqual(session._worker_load(handle), 0)
+      await session.close()
+
+    asyncio.run(_run())
+
+  def test_pool_execution_session_cross_thread_add_and_remove_actor(self):
+    class HangingHandle(remote_lib.ActorHandle):
+
+      def __init__(self):
+        self.dispatched = threading.Event()
+
+      def submit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def asubmit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def dispatch_task(
+          self, request_id=None, method_name=None, *args, **kwargs
+      ) -> str:
+        del method_name, args, kwargs
+        self.dispatched.set()
+        return request_id or ""
+
+      async def poll_responses(self, timeout_s=50.0):
+        await asyncio.sleep(timeout_s)
+        return None
+
+    async def _run():
+      wedged = HangingHandle()
+      healthy = create_in_process_handle(
+          StubWorkerEngine("bg_thread_worker", latency=0.01)
+      )
+      pool = remote_lib.RoutingActorPool([wedged])
+      session = remote_lib.PoolExecutionSession(
+          pool,
+          config=remote_lib.PoolSessionConfig(
+              evict_on_failure=True,
+              retry_on_worker_failure=True,
+          ),
+      )
+
+      await session.submit(
+          "req_cross", "compute_trajectory", "p_cross", turns=1
+      )
+      self.assertTrue(wedged.dispatched.wait(timeout=2.0))
+
+      remove_results = []
+
+      def _bg_thread_mutation():
+        session.add_actor(healthy, max_in_flight=2)
+        remove_results.append(
+            session.remove_actor(wedged, RuntimeError("cross_thread_evict"))
+        )
+        remove_results.append(
+            session.remove_actor(wedged, RuntimeError("cross_thread_evict_dup"))
+        )
+
+      t = threading.Thread(target=_bg_thread_mutation)
+      t.start()
+
+      batch = await session.poll_completed(timeout_s=2.0)
+      t.join(timeout=2.0)
+
+      self.assertEqual(remove_results, [True, False])
+      self.assertEqual(session.evictions_total, 1)
+      self.assertLen(batch, 1)
+      self.assertEqual(
+          batch[0][0],
+          "[bg_thread_worker] Trajectory for prompt p_cross (1 turns)",
+      )
+      self.assertEqual(pool.actors, [healthy])
+      await session.close()
+
+    asyncio.run(_run())
+
+  def test_pool_execution_session_task_timeout_evicts_wedged_worker_and_retries(
+      self,
+  ):
+    class HungPollHandle(remote_lib.ActorHandle):
+
+      def submit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def asubmit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def dispatch_task(
+          self, request_id=None, method_name=None, *args, **kwargs
+      ) -> str:
+        del method_name, args, kwargs
+        return request_id or ""
+
+      async def poll_responses(self, timeout_s=50.0):
+        del timeout_s
+        # Simulate a SIGSTOP / wedged worker whose RPC never returns on its own.
+        await asyncio.sleep(3600.0)
+        return None
+
+    async def _run():
+      wedged = HungPollHandle()
+      healthy = create_in_process_handle(
+          StubWorkerEngine("healthy_survivor", latency=0.02)
+      )
+      pool = remote_lib.RoutingActorPool([wedged, healthy])
+      pool.router = lambda actors, *a, **kw: actors[0]
+      evicted = []
+      async with pool.execution_session(
+          config=remote_lib.PoolSessionConfig(
+              evict_on_failure=True,
+              retry_on_worker_failure=True,
+              on_worker_evicted=lambda actor, exc: evicted.append((actor, exc)),
+              task_timeout_s=0.15,
+          ),
+      ) as session:
+        self.assertEqual(session.task_timeout_s, 0.15)
+
+        await session.submit(
+            "req_to", "compute_trajectory", "p_timeout", turns=1
+        )
+        batch = await session.poll_completed(timeout_s=2.0)
+
+        self.assertLen(batch, 1)
+        self.assertEqual(
+            batch[0][0],
+            "[healthy_survivor] Trajectory for prompt p_timeout (1 turns)",
+        )
+        self.assertIsNone(batch[0][1])
+        self.assertEqual(pool.actors, [healthy])
+        self.assertLen(evicted, 1)
+        self.assertIs(evicted[0][0], wedged)
+        self.assertIsInstance(evicted[0][1], TimeoutError)
+
+    asyncio.run(_run())
+
+  def test_pool_execution_session_queued_time_does_not_count_toward_task_timeout(
+      self,
+  ):
+    async def _run():
+      # Single worker with max_in_flight_per_worker=1 and latency=0.12s.
+      # Two tasks take ~0.24s total wall time, but each task spends only ~0.12s
+      # in-flight after dispatch (< task_timeout_s=0.20s).
+      worker = create_in_process_handle(
+          StubWorkerEngine("serial_worker", latency=0.12)
+      )
+      pool = remote_lib.RoutingActorPool([worker])
+      async with pool.execution_session(
+          config=remote_lib.PoolSessionConfig(
+              evict_on_failure=True,
+              retry_on_worker_failure=True,
+              max_in_flight_per_worker=1,
+              task_timeout_s=0.20,
+          ),
+      ) as session:
+        await session.submit("req_1", "compute_trajectory", "p1", turns=1)
+        await session.submit("req_2", "compute_trajectory", "p2", turns=1)
+        self.assertEqual(session._worker_load(worker), 1)
+        self.assertEqual(session.pending_count, 1)
+
+        results = []
+        async for res, exc in session.as_completed():
+          self.assertIsNone(exc)
+          results.append(res)
+
+        self.assertLen(results, 2)
+        self.assertEqual(pool.actors, [worker])
+
+    asyncio.run(_run())
+
+  def test_pool_execution_session_rebinds_across_event_loops(self):
+    worker = create_in_process_handle(
+        StubWorkerEngine("multi_loop_worker", latency=0.01)
+    )
+    pool = remote_lib.RoutingActorPool([worker])
+    session = remote_lib.PoolExecutionSession(pool)
+
+    async def _step(req_id: str, prompt: str):
+      await session.submit(req_id, "compute_trajectory", prompt, turns=1)
+      batch = await session.poll_completed(timeout_s=1.0)
+      self.assertLen(batch, 1)
+      self.assertIsNone(batch[0][1])
+      return batch[0][0]
+
+    res1 = asyncio.run(_step("req_loop_1", "p_loop_1"))
+    res2 = asyncio.run(_step("req_loop_2", "p_loop_2"))
+    asyncio.run(session.close())
+
+    self.assertIn("p_loop_1", res1)
+    self.assertIn("p_loop_2", res2)
+
+  def test_pool_execution_session_retain_pending_on_zero_workers_and_counters(
+      self,
+  ):
+    class CrashingPollHandle(remote_lib.ActorHandle):
+
+      def submit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def asubmit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def dispatch_task(
+          self, request_id=None, method_name=None, *args, **kwargs
+      ) -> str:
+        del method_name, args, kwargs
+        return request_id or ""
+
+      async def poll_responses(self, timeout_s=50.0):
+        del timeout_s
+        await asyncio.sleep(0.01)
+        raise ConnectionError("last_worker_crashed")
+
+    async def _run():
+      crashing = CrashingPollHandle()
+      pool = remote_lib.RoutingActorPool([crashing])
+      session = remote_lib.PoolExecutionSession(
+          pool,
+          config=remote_lib.PoolSessionConfig(
+              evict_on_failure=True,
+              retry_on_worker_failure=True,
+              max_task_retries=3,
+              retain_pending_on_zero_workers=True,
+          ),
+      )
+
+      await session.submit(
+          "req_zero_1", "compute_trajectory", "p_zero", turns=1
+      )
+      # Poll briefly so crashing worker fails and is evicted.
+      batch = await session.poll_completed(timeout_s=0.05)
+      self.assertEmpty(batch)
+      self.assertEmpty(pool.actors)
+      self.assertEqual(session.pending_count, 1)
+      self.assertEqual(session.in_flight_count, 1)
+      self.assertEqual(session.evictions_total, 1)
+      self.assertEqual(session.retries_total, 1)
+      self.assertEmpty(session.pop_failed_tasks())
+
+      # Dynamically add a replacement worker; the retained pending task drains
+      # onto the replacement and completes cleanly.
+      replacement = create_in_process_handle(
+          StubWorkerEngine("replacement_worker", latency=0.01)
+      )
+      session.add_actor(replacement)
+      batch2 = await session.poll_completed(timeout_s=2.0)
+      self.assertLen(batch2, 1)
+      self.assertEqual(
+          batch2[0][0],
+          "[replacement_worker] Trajectory for prompt p_zero (1 turns)",
+      )
+      self.assertIsNone(batch2[0][1])
+      self.assertEqual(session.in_flight_count, 0)
+      self.assertEqual(session.pending_count, 0)
+      await session.close()
+
+    asyncio.run(_run())
+
+  def test_pool_session_config_validates_arguments(self):
+    dummy_handle = create_in_process_handle(StubWorkerEngine("w", latency=0.01))
+    with self.assertRaisesRegex(ValueError, "max_task_retries"):
+      remote_lib.PoolSessionConfig(max_task_retries=-1)
+    with self.assertRaisesRegex(ValueError, "max_in_flight_per_worker"):
+      remote_lib.PoolSessionConfig(max_in_flight_per_worker=0)
+    with self.assertRaisesRegex(ValueError, "worker_max_in_flight"):
+      remote_lib.PoolSessionConfig(worker_max_in_flight={dummy_handle: 0})
+    with self.assertRaisesRegex(ValueError, "task_timeout_s"):
+      remote_lib.PoolSessionConfig(task_timeout_s=0.0)
+
+  def test_pool_execution_session_initial_dispatch_failure_with_zero_retries_queues_failed_task_without_raising(
+      self,
+  ):
+    class FailingDispatchHandle(remote_lib.ActorHandle):
+
+      def submit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def asubmit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def dispatch_task(
+          self, request_id=None, method_name=None, *args, **kwargs
+      ) -> str:
+        del request_id, method_name, args, kwargs
+        raise ConnectionError("initial_dispatch_boom")
+
+      async def poll_responses(self, timeout_s=50.0):
+        await asyncio.sleep(timeout_s)
+        return None
+
+    async def _run():
+      bad = FailingDispatchHandle()
+      good = create_in_process_handle(
+          StubWorkerEngine("good_worker", latency=0.01)
+      )
+      pool = remote_lib.RoutingActorPool([bad, good])
+      session = remote_lib.PoolExecutionSession(
+          pool,
+          config=remote_lib.PoolSessionConfig(
+              evict_on_failure=True,
+              retry_on_worker_failure=True,
+              max_task_retries=0,
+          ),
+      )
+
+      # Even with max_task_retries=0, submit() must not raise out of
+      # asyncio.gather when fault tolerance is enabled; instead the failed task
+      # is recorded for poll_completed() / pop_failed_tasks() and the sibling
+      # submission on the healthy worker succeeds.
+      await asyncio.gather(
+          session.submit("req_bad", "compute_trajectory", "p_bad", turns=1),
+          session.submit("req_good", "compute_trajectory", "p_good", turns=1),
+      )
+      results = []
+      while len(results) < 2:
+        batch = await session.poll_completed(timeout_s=1.0)
+        results.extend(batch)
+
+      failed = session.pop_failed_tasks()
+      self.assertLen(failed, 1)
+      self.assertEqual(failed[0][0], "req_bad")
+      self.assertIsInstance(failed[0][2], ConnectionError)
+      oks = [res for res, exc in results if exc is None]
+      self.assertEqual(
+          oks, ["[good_worker] Trajectory for prompt p_good (1 turns)"]
+      )
+      await session.close()
+
+    asyncio.run(_run())
+
+  def test_pool_execution_session_partial_task_timeout_requeues_expired_task_without_evicting_worker(
+      self,
+  ):
+    class SelectiveSlowHandle(remote_lib.ActorHandle):
+
+      def __init__(self):
+        self._queue: asyncio.Queue[remote_lib.ExecutionResponse] = (
+            asyncio.Queue()
+        )
+
+      def submit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def asubmit(self, method_name=None, *args, **kwargs):
+        raise NotImplementedError()
+
+      async def dispatch_task(
+          self, request_id=None, method_name=None, *args, **kwargs
+      ) -> str:
+        del method_name, kwargs
+        prompt = args[0] if args else ""
+        if prompt != "p_stuck":
+
+          async def _finish():
+            await asyncio.sleep(0.12)
+            await self._queue.put(
+                remote_lib.ExecutionResponse(
+                    request_id=request_id or "",
+                    result=f"[selective] {prompt}",
+                )
+            )
+
+          asyncio.create_task(_finish())
+        return request_id or ""
+
+      async def poll_responses(self, timeout_s=50.0):
+        try:
+          return await asyncio.wait_for(self._queue.get(), timeout=timeout_s)
+        except asyncio.TimeoutError:
+          return None
+
+    async def _run():
+      selective = SelectiveSlowHandle()
+      backup = create_in_process_handle(
+          StubWorkerEngine("backup_worker", latency=0.01)
+      )
+      pool = remote_lib.RoutingActorPool([selective])
+      evicted = []
+      session = remote_lib.PoolExecutionSession(
+          pool,
+          config=remote_lib.PoolSessionConfig(
+              evict_on_failure=True,
+              retry_on_worker_failure=True,
+              on_worker_evicted=lambda actor, exc: evicted.append((actor, exc)),
+              task_timeout_s=0.15,
+          ),
+      )
+
+      # Dispatch stuck task at t=0, then healthy task at t=0.08 on the same
+      # worker, and add backup worker so the timed-out task can be re-queued.
+      await session.submit("req_stuck", "compute_trajectory", "p_stuck", turns=1)
+      await asyncio.sleep(0.08)
+      await session.submit(
+          "req_healthy", "compute_trajectory", "p_healthy", turns=1
+      )
+      session.add_actor(backup)
+
+      collected = []
+      while len(collected) < 2:
+        batch = await session.poll_completed(timeout_s=1.0)
+        collected.extend(res for res, exc in batch if exc is None)
+
+      # Both tasks succeed: req_stuck is retried on backup_worker while
+      # req_healthy completes on selective without evicting selective!
+      self.assertCountEqual(
+          collected,
+          [
+              "[backup_worker] Trajectory for prompt p_stuck (1 turns)",
+              "[selective] p_healthy",
+          ],
+      )
+      self.assertIn(selective, pool.actors)
+      self.assertEmpty(evicted)
+      await session.close()
+
+    asyncio.run(_run())
+
+  def test_grpc_options_isolates_subchannel_pool(self):
+    options = dict(remote_lib._grpc_options())  # pylint: disable=protected-access
+    self.assertEqual(options.get("grpc.use_local_subchannel_pool"), 1)
 
 
 if __name__ == "__main__":

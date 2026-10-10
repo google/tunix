@@ -434,6 +434,7 @@ echo "Launching DeepSWE rollout node..."
     --env_name=deepswe_env
     --agent_name=deepswe_agent
     --max_concurrency="$ROLLOUT_MAX_CONCURRENCY"
+    --seed="$SEED"
   )
   
   # shellcheck disable=SC2206

@@ -78,6 +78,7 @@ export TRAJECTORY_GROUP_ORDER=${TRAJECTORY_GROUP_ORDER:-arrival}
 export DEBUG=${DEBUG:-0}
 export SAMPLER=${SAMPLER:-inprocess_vllm}
 export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
+export WEIGHT_SYNC_PARALLEL_H2H=${WEIGHT_SYNC_PARALLEL_H2H:-}
 
 # JAX compilation cache configuration
 source "${LAUNCHER_DIR}/../common/jax_cache_config.sh"
@@ -268,12 +269,14 @@ start_orchestrator() {
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ORCHESTRATOR_PORT}" \
     --worker_startup_command=" \
+      ORCHESTRATOR_ID=\"${ORCHESTRATOR_ID}\" \
       ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} \
       ${WANDB_API_KEY:+WANDB_API_KEY=\"${WANDB_API_KEY}\"} \
       ${WANDB_ENTITY:+WANDB_ENTITY=\"${WANDB_ENTITY}\"} \
       ${LOG_DIR:+LOG_DIR=\"${LOG_DIR}\"} \
       ${TRAJECTORY_LOG_DIR:+TRAJECTORY_LOG_DIR=\"${TRAJECTORY_LOG_DIR}\"} \
       ${TUNIX_DEBUG_INFERENCE_LOGS:+TUNIX_DEBUG_INFERENCE_LOGS=\"${TUNIX_DEBUG_INFERENCE_LOGS}\"} \
+      ${WEIGHT_SYNC_PARALLEL_H2H:+WEIGHT_SYNC_PARALLEL_H2H=\"${WEIGHT_SYNC_PARALLEL_H2H}\"} \
       WANDB_PROJECT=\"${WANDB_PROJECT}\" \
       WANDB_RUN_NAME=\"${WANDB_RUN_NAME}\" \
       ${ORCHESTRATOR_EXTRA_ENV:+${ORCHESTRATOR_EXTRA_ENV} }${jax_cache_env} python -m tunix.experimental.distributed.runtime.main \
@@ -598,6 +601,7 @@ if cfg:
     --worker_container_port="${ROLLOUT_PORT}" \
     --worker_startup_command=" \
       ${TUNIX_DEBUG_INFERENCE_LOGS:+TUNIX_DEBUG_INFERENCE_LOGS=\"${TUNIX_DEBUG_INFERENCE_LOGS}\"} \
+      ${WEIGHT_SYNC_PARALLEL_H2H:+WEIGHT_SYNC_PARALLEL_H2H=\"${WEIGHT_SYNC_PARALLEL_H2H}\"} \
       ${HF_TOKEN:+HF_TOKEN=\"${HF_TOKEN}\"} SKIP_JAX_PRECOMPILE=${ROLLOUT_SKIP_JAX_PRECOMPILE} VERIFY_WEIGHTS=${VERIFY_WEIGHTS}${raiden_env}${ROLLOUT_EXTRA_ENV:+ ${ROLLOUT_EXTRA_ENV}} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} ${PHASED_PROFILING_DIR:+PHASED_PROFILING_DIR=\"${PHASED_PROFILING_DIR}\"} ${PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR:+PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR=${PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR}} ${PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP:+PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP=${PHASED_PROFILER_NUM_DECODE_STEPS_TO_SKIP}}${jax_cache_env} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
@@ -620,6 +624,7 @@ if cfg:
         --chat_parser=${CHAT_PARSER} \
         --prefuse_moe_weights=${PREFUSE_MOE_WEIGHTS} \
         --enable_prefix_caching=${ENABLE_PREFIX_CACHING} \
+        ${SEED:+--seed=${SEED}} \
         ${extra_flags} \
         ${maxtext_args} \
         ${vllm_args} \

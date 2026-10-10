@@ -211,6 +211,7 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
       weight_sync_mode: weight_sync.WeightSyncMode | str | None = None,
       free_kv_cache_during_weight_sync: bool | None = None,
       partial_rollout: bool | None = None,
+      auto_h2d: bool | None = None,
       **kwargs,
   ):
     self.server_id = server_id
@@ -225,6 +226,7 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
     # host index *within* one replica.
     self.raiden_job_name = f"replica_{self.server_id}"
     self._parallelism = parallelism
+    self._auto_h2d = auto_h2d
 
     # Defaults to RAIDEN when unspecified: RLVllmSampler drives weight sync
     # through its own native Raiden hooks, so callers that construct the
@@ -470,11 +472,31 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
           job_name=self.raiden_job_name,
       )
     else:
-      res = await sampler.bind_raiden_sync(
-          worker_index=self.worker_index,
-          parallelism=self._parallelism,
-          job_name=self.raiden_job_name,
-      )
+      from tunix.experimental.weight_sync import raiden_synchronizer  # pylint: disable=g-import-not-at-top
+
+      auto_h2d = self._auto_h2d
+      if auto_h2d is None and raiden_synchronizer.is_parallel_h2h_enabled():
+        auto_h2d = False
+      if auto_h2d is not None:
+        try:
+          res = await sampler.bind_raiden_sync(
+              worker_index=self.worker_index,
+              parallelism=self._parallelism,
+              job_name=self.raiden_job_name,
+              auto_h2d=bool(auto_h2d),
+          )
+        except TypeError:
+          res = await sampler.bind_raiden_sync(
+              worker_index=self.worker_index,
+              parallelism=self._parallelism,
+              job_name=self.raiden_job_name,
+          )
+      else:
+        res = await sampler.bind_raiden_sync(
+            worker_index=self.worker_index,
+            parallelism=self._parallelism,
+            job_name=self.raiden_job_name,
+        )
     self._weight_sync_bound = True
     logger.info(
         "VllmSamplerAdapter.bind_weight_sync finished in %.3fs (server_id=%s)",
@@ -508,6 +530,13 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
         weight_sync.WorkUnitMetadata.from_dict(_canonicalize_variable_names(m))
         for m in meta or []
     ]
+    if len({m.auto_h2d for m in parsed}) > 1:
+      logger.warning(
+          "VllmSamplerAdapter [%s] multi-host workers reported inconsistent"
+          " auto_h2d values: %s",
+          self.server_id,
+          [m.auto_h2d for m in parsed],
+      )
     if parsed:
       self._cached_weight_sync_metadata = parsed
     logger.info(

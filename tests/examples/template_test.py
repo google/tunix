@@ -118,6 +118,8 @@ def test_get_openhands_pod_template_default():
     assert "agent-server" in init_c["image"]
     assert "cp" in init_c["command"][2]
     assert init_c["volumeMounts"] == [{"name": "oh", "mountPath": "/oh"}]
+    assert pod_template.extra_pod_spec["automountServiceAccountToken"] is False
+    assert pod_template.extra_pod_spec["shareProcessNamespace"] is False
     assert pod_template.extra_pod_spec["volumes"] == [
         {"name": "oh", "emptyDir": {}}
     ]

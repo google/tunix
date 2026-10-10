@@ -71,7 +71,7 @@ def _deepswe_k8s_rollout_cmd() -> str:
     text = f.read()
   anchor = text.index("run_rollout_node.main")
   start = text.rindex("python -m ", 0, anchor)
-  return text[start : text.index('\n      " \\\n', anchor)]
+  return text[start : text.index('\n      "\n', anchor)]
 
 
 def _recipe_config(**overrides) -> algorithm_config.GRPOConfig:
@@ -537,8 +537,10 @@ class DeepSWEExampleCommandLineTest(absltest.TestCase):
       with open(os.path.join(root, *rel)) as f:
         defined += f.read()
     cmd = _deepswe_k8s_rollout_cmd()
+    self.assertIn("--seed=${SEED}", cmd)
     flags = set(re.findall(r"(?<![\w-])--(?:no-)?([a-z][a-z0-9_]*)", cmd))
     self.assertIn("return_routed_experts", flags)
+    self.assertIn("seed", flags)
     missing = [flag for flag in sorted(flags) if f'"--{flag}"' not in defined]
     self.assertEqual(
         missing,
@@ -628,6 +630,44 @@ class DeepSWEExampleCommandLineTest(absltest.TestCase):
         'ROLLOUT_SKIP_JAX_PRECOMPILE="${ROLLOUT_SKIP_JAX_PRECOMPILE:-0}"',
         mlperf_base,
     )
+
+  def test_k8s_launcher_wires_rollout_fault_tolerance_flags(self):
+    block = _deepswe_k8s_orchestrator_block()
+    for flag in (
+        "--rollout_fault_tolerance",
+        "--no-rollout_fault_tolerance",
+        "--max_concurrent_rollouts_per_worker=",
+        "--rollout_task_timeout_s=",
+        "--max_zero_worker_wait_s=",
+        "--rollout_max_task_retries=",
+        "--recover_unknown_transfer_state",
+        "--no-recover_unknown_transfer_state",
+    ):
+      self.assertIn(flag, block, f"deepswe k8s_launcher does not pass {flag}")
+
+    parse = run_deepswe_dist._parse_args  # pylint: disable=protected-access
+    defaults = parse([])
+    self.assertTrue(defaults.rollout_fault_tolerance)
+    self.assertIsNone(defaults.max_concurrent_rollouts_per_worker)
+    self.assertIsNone(defaults.rollout_task_timeout_s)
+    self.assertEqual(defaults.max_zero_worker_wait_s, 600.0)
+    self.assertEqual(defaults.rollout_max_task_retries, 3)
+    self.assertFalse(defaults.recover_unknown_transfer_state)
+
+    parsed = parse([
+        "--no-rollout_fault_tolerance",
+        "--max_concurrent_rollouts_per_worker=64",
+        "--rollout_task_timeout_s=2400",
+        "--max_zero_worker_wait_s=1800",
+        "--rollout_max_task_retries=5",
+        "--recover_unknown_transfer_state",
+    ])
+    self.assertFalse(parsed.rollout_fault_tolerance)
+    self.assertEqual(parsed.max_concurrent_rollouts_per_worker, 64)
+    self.assertEqual(parsed.rollout_task_timeout_s, 2400.0)
+    self.assertEqual(parsed.max_zero_worker_wait_s, 1800.0)
+    self.assertEqual(parsed.rollout_max_task_retries, 5)
+    self.assertTrue(parsed.recover_unknown_transfer_state)
 
 
 class AuxMetricForwardingTest(absltest.TestCase):

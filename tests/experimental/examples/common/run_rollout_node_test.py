@@ -215,6 +215,47 @@ class RunRolloutNodeTest(unittest.TestCase):
           {"scheduling_policy": "priority"},
       )
 
+  def test_replica_seed_derives_distinct_32bit_seed_from_worker_id(self):
+    self.assertIsNone(
+        run_rollout_node._replica_seed(
+            run_rollout_node._parse_args(["--worker_id", "roll-0"])
+        )
+    )
+    self.assertEqual(
+        run_rollout_node._replica_seed(
+            run_rollout_node._parse_args(
+                ["--worker_id", "job-roll-0", "--seed", "42"]
+            )
+        ),
+        42,
+    )
+    self.assertEqual(
+        run_rollout_node._replica_seed(
+            run_rollout_node._parse_args(
+                ["--worker_id", "job-roll-127", "--seed", "42"]
+            )
+        ),
+        169,
+    )
+    # Single-replica worker_id with no numeric suffix uses replica_idx=0.
+    self.assertEqual(
+        run_rollout_node._replica_seed(
+            run_rollout_node._parse_args(
+                ["--worker_id", "job-roll", "--seed", "42"]
+            )
+        ),
+        42,
+    )
+    # Modulo 2**32 keeps the seed within numpy's valid 32-bit range.
+    self.assertEqual(
+        run_rollout_node._replica_seed(
+            run_rollout_node._parse_args(
+                ["--worker_id", "job-roll-5", "--seed", str(2**32 - 2)]
+            )
+        ),
+        3,
+    )
+
   def test_inprocess_vllm_sampler_with_vllm_config_json(self):
     mock_vllm_sampler = mock.MagicMock()
     mock_vllm_config = mock.MagicMock()
@@ -608,6 +649,55 @@ class RunRolloutNodeTest(unittest.TestCase):
     _, kwargs = mock_async_engine_args.call_args
     self.assertEqual(kwargs["gpu_memory_utilization"], 0.77)
     self.assertNotIn("hbm_utilization", kwargs)
+
+  def test_vllm_sampler_sets_per_replica_seed(self):
+    mock_async_engine_args = mock.MagicMock()
+    mock_vllm_adapter = mock.MagicMock()
+    mock_rollout_worker = mock.MagicMock()
+
+    mock_tokenizer = mock.MagicMock()
+    mock_tokenizer.encode.return_value = [101]
+
+    vllm_mocks = {
+        "vllm": types.ModuleType("vllm"),
+        "vllm.engine": types.ModuleType("vllm.engine"),
+        "vllm.engine.arg_utils": types.ModuleType("vllm.engine.arg_utils"),
+        "tunix.experimental.rollout": types.ModuleType(
+            "tunix.experimental.rollout"
+        ),
+        "tunix.experimental.rollout.vllm_sampler_adapter": types.ModuleType(
+            "tunix.experimental.rollout.vllm_sampler_adapter"
+        ),
+        "tunix.experimental.worker": types.ModuleType(
+            "tunix.experimental.worker"
+        ),
+        "tunix.experimental.worker.rollout_worker": mock_rollout_worker,
+    }
+    vllm_mocks["vllm.engine.arg_utils"].AsyncEngineArgs = mock_async_engine_args
+    vllm_mocks[
+        "tunix.experimental.rollout.vllm_sampler_adapter"
+    ].VllmSamplerAdapter = mock_vllm_adapter
+
+    args = run_rollout_node._parse_args(
+        ["--sampler=vllm", "--worker_id=job-roll-7", "--seed=42"]
+    )
+    with mock.patch.dict(sys.modules, vllm_mocks):
+      run_rollout_node._create_vllm_sampler(args, mock_tokenizer)
+
+    mock_async_engine_args.assert_called_once()
+    _, kwargs = mock_async_engine_args.call_args
+    self.assertEqual(kwargs["seed"], 49)
+
+    mock_async_engine_args.reset_mock()
+    args_no_seed = run_rollout_node._parse_args(
+        ["--sampler=vllm", "--worker_id=job-roll-7"]
+    )
+    with mock.patch.dict(sys.modules, vllm_mocks):
+      run_rollout_node._create_vllm_sampler(args_no_seed, mock_tokenizer)
+
+    mock_async_engine_args.assert_called_once()
+    _, kwargs_no_seed = mock_async_engine_args.call_args
+    self.assertNotIn("seed", kwargs_no_seed)
 
 
 if __name__ == "__main__":

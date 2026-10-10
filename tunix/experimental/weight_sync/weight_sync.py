@@ -212,6 +212,9 @@ class WorkUnitMetadata:
       otherwise compare strings. None when unreported.
     host_subgrid: Optional local host subgrid shape (e.g. from
       `mesh.local_mesh.devices.shape`) for decomposing physical mesh slices.
+    auto_h2d: Whether the destination work unit's native synchronizer streams
+      received chunks directly into device HBM during transfer (`True`) or
+      stages them into host DRAM first (`False`). `None` when unreported.
   """
 
   unit: WorkUnitId
@@ -228,6 +231,7 @@ class WorkUnitMetadata:
   host_subgrid: Optional[tuple[int, ...]] = None
   artifact_uri: Optional[str] = None
   checksums: Optional[dict[str, float]] = None
+  auto_h2d: Optional[bool] = None
 
   @classmethod
   def from_dict(cls, d: Any) -> WorkUnitMetadata:
@@ -313,6 +317,9 @@ class WorkUnitMetadata:
             {str(k): float(v) for k, v in d["checksums"].items()}
             if isinstance(d.get("checksums"), Mapping)
             else None
+        ),
+        auto_h2d=(
+            bool(d["auto_h2d"]) if d.get("auto_h2d") is not None else None
         ),
     )
 

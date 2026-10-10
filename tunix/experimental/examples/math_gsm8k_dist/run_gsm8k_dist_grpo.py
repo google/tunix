@@ -48,6 +48,7 @@ if REPO_ROOT not in sys.path:
 
 from tunix.experimental.common import datatypes  # pylint: disable=g-import-not-at-top
 from tunix.experimental.distributed.runtime import context as runtime_context  # pylint: disable=g-import-not-at-top
+from tunix.experimental.examples.common import orch_k8s_cleanup  # pylint: disable=g-import-not-at-top
 from tunix.experimental.examples.math_gsm8k_dist import gsm8k  # pylint: disable=g-import-not-at-top
 from tunix.experimental.orchestrator import algorithm_adapter  # pylint: disable=g-import-not-at-top
 from tunix.experimental.orchestrator import batch_assembly  # pylint: disable=g-import-not-at-top
@@ -176,6 +177,20 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="Number of rollout worker replicas to wait for.",
   )
   parser.add_argument(
+      "--max_concurrent_rollouts_per_worker",
+      type=int,
+      default=(
+          int(val)
+          if (val := os.getenv("MAX_CONCURRENT_ROLLOUTS_PER_WORKER", "").strip())
+          else None
+      )
+      or None,
+      help=(
+          "Optional cap on concurrent in-flight rollouts dispatched to any "
+          "single rollout worker."
+      ),
+  )
+  parser.add_argument(
       "--weight_sync_mode",
       type=weight_sync.WeightSyncMode,
       default=weight_sync.WeightSyncMode(os.getenv("WEIGHT_SYNC_MODE", "none")),
@@ -253,7 +268,27 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   )
   parser.add_argument("--init_timeout_s", type=float, default=None)
   parser.add_argument("--inference_addr", type=str, default="")
-  parser.add_argument("--stop_workers_on_exit", action="store_true")
+  parser.add_argument(
+      "--stop_workers_on_exit",
+      action="store_true",
+      help=(
+          "Send a graceful gRPC stop to every remote worker when the"
+          " orchestrator exits."
+      ),
+  )
+  parser.add_argument(
+      "--delete_worker_jobsets_on_exit",
+      action=argparse.BooleanOptionalAction,
+      default=True,
+      help=(
+          "After --stop_workers_on_exit has drained the workers, delete the"
+          " run's <prefix>-train / <prefix>-roll* JobSets through the"
+          " in-cluster Kubernetes API so they do not outlive the orchestrator"
+          " (workers are long-lived servers and never exit on their own)."
+          " No-op unless ORCHESTRATOR_ID is a <prefix>-orch id. Only takes"
+          " effect together with --stop_workers_on_exit."
+      ),
+  )
   parser.add_argument(
       "--use_rollout_logps",
       action=argparse.BooleanOptionalAction,
@@ -324,8 +359,21 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       "--trajectory_store_root",
       dest="trajectory_store_root_dir",
       type=str,
-      default="",
+      default=os.getenv(
+          "TRAJECTORY_STORE_ROOT_DIR",
+          os.getenv("TRAJECTORY_STORE_ROOT", ""),
+      ),
       help="Root directory for the file-backed TrajectoryStore.",
+  )
+  parser.add_argument(
+      "--trajectory_store_db_url",
+      type=str,
+      default=os.getenv("TRAJECTORY_STORE_DB_URL", ""),
+      help=(
+          "SQLAlchemy database URL for the SQL-backed TrajectoryStore (e.g."
+          " 'sqlite:////path/to/store.db' or"
+          " 'postgresql+psycopg2://user:pass@host:5432/dbname')."
+      ),
   )
   return parser.parse_args(argv)
 
@@ -334,14 +382,21 @@ def _build_trajectory_store_config(
     args: argparse.Namespace,
 ) -> dict[str, Any] | None:
   """Builds the TrajectoryStore configuration dict from orchestrator CLI flags."""
+  db_url = (args.trajectory_store_db_url or "").strip()
+  if db_url:
+    return {
+        "enabled": True,
+        "backend": "sql",
+        "db_url": db_url,
+    }
   root_dir = (args.trajectory_store_root_dir or "").strip()
-  if not root_dir:
-    return None
-  return {
-      "enabled": True,
-      "backend": "file",
-      "root_dir": root_dir,
-  }
+  if root_dir:
+    return {
+        "enabled": True,
+        "backend": "file",
+        "root_dir": root_dir,
+    }
+  return None
 
 
 def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
@@ -515,6 +570,9 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           "jax_cache_gcs_dir": os.getenv("JAX_CACHE_GCS_DIR"),
           "rollout_jax_cache_gcs_dir": os.getenv("ROLLOUT_JAX_CACHE_GCS_DIR"),
       },
+      max_concurrent_rollouts_per_worker=(
+          args.max_concurrent_rollouts_per_worker
+      ),
   )
   context.ipc.discovery.on_register(
       functools.partial(
@@ -613,8 +671,15 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   finally:
     program.close()
     if args.stop_workers_on_exit:
-      logging.info("Shutting down cluster workers...")
-      cluster.shutdown()
+      # Graceful gRPC stop, then wait until the workers report STOPPED, then
+      # delete their JobSets: workers are long-lived servers that never exit
+      # on their own, so without the deletion the -train / -roll* JobSets
+      # outlive the orchestrator and hold their TPUs.
+      orch_k8s_cleanup.shutdown_cluster_and_workers(
+          cluster,
+          orchestrator_id=os.environ.get("ORCHESTRATOR_ID"),
+          delete_jobsets=args.delete_worker_jobsets_on_exit,
+      )
     else:
       cluster.monitor.close()
 

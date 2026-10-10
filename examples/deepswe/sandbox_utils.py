@@ -30,38 +30,81 @@ import threading
 from typing import Any, Callable
 import numpy as np
 
+RUNTIME_CONTAINER_NAME = "agent-runtime"
+EVAL_CONTAINER_NAME = "eval"
+
 _GLOBAL_FLEET = None
 _FLEET_LOCK = threading.RLock()
 _PATCH_LOCK = threading.Lock()
 _R2EGYM_PATCHED = False
 
 
+def set_runtime_container(target: Any, container_name: str) -> None:
+  """Configures an R2E-Gym runtime (or RepoEnv) to exec in `container_name`."""
+  if target is None:
+    return
+  runtime = getattr(target, "runtime", None) or target
+  try:
+    runtime._target_container = container_name
+    client = getattr(runtime, "client", None)
+    if client is not None:
+      client._default_container = container_name
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    logging.debug("[SandboxFleet] set_runtime_container note: %s", e)
+
+
 def patch_r2egym_for_agent_sandbox() -> None:
   """In-memory compatibility patch for r2egym to route 'kubernetes-sandbox' backend."""
   global _R2EGYM_PATCHED
   with _PATCH_LOCK:
-    if _R2EGYM_PATCHED:
-      return
+    already_patched = _R2EGYM_PATCHED
     _R2EGYM_PATCHED = True
+  if not already_patched:
+    try:
+      import huggingface_hub  # pyrefly: ignore[missing-import]
+
+      if not hasattr(huggingface_hub, "HfFolder"):
+        try:
+          from huggingface_hub._login import HfFolder  # pyrefly: ignore[missing-import]
+
+          huggingface_hub.HfFolder = HfFolder
+        except Exception:  # pylint: disable=broad-exception-caught
+
+          class DummyHfFolder:
+
+            @staticmethod
+            def get_token():
+              return None
+
+          huggingface_hub.HfFolder = DummyHfFolder  # pyrefly: ignore[bad-assignment]
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      logging.debug("[SandboxFleet] HfFolder patch note: %s", e)
+
   try:
-    import huggingface_hub  # pyrefly: ignore[missing-import]
+    from kubernetes import client as k8s_client  # pyrefly: ignore[missing-import]
 
-    if not hasattr(huggingface_hub, "HfFolder"):
-      try:
-        from huggingface_hub._login import HfFolder  # pyrefly: ignore[missing-import]
+    orig_exec = getattr(
+        k8s_client.CoreV1Api, "_orig_connect_get_namespaced_pod_exec", None
+    )
+    if orig_exec is None and hasattr(
+        k8s_client.CoreV1Api, "connect_get_namespaced_pod_exec"
+    ):
+      k8s_client.CoreV1Api._orig_connect_get_namespaced_pod_exec = (
+          k8s_client.CoreV1Api.connect_get_namespaced_pod_exec
+      )
 
-        huggingface_hub.HfFolder = HfFolder
-      except Exception:  # pylint: disable=broad-exception-caught
+      def _patched_connect_get_namespaced_pod_exec(self, *args, **kwargs):
+        if not kwargs.get("container"):
+          kwargs["container"] = getattr(
+              self, "_default_container", RUNTIME_CONTAINER_NAME
+          )
+        return self._orig_connect_get_namespaced_pod_exec(*args, **kwargs)
 
-        class DummyHfFolder:
-
-          @staticmethod
-          def get_token():
-            return None
-
-        huggingface_hub.HfFolder = DummyHfFolder  # pyrefly: ignore[bad-assignment]
+      k8s_client.CoreV1Api.connect_get_namespaced_pod_exec = (
+          _patched_connect_get_namespaced_pod_exec
+      )
   except Exception as e:  # pylint: disable=broad-exception-caught
-    logging.debug("[SandboxFleet] HfFolder patch note: %s", e)
+    logging.debug("[SandboxFleet] CoreV1Api exec patch note: %s", e)
 
   try:
     from r2egym.agenthub.runtime import docker as docker_mod  # pyrefly: ignore[missing-import]
@@ -93,12 +136,51 @@ def patch_r2egym_for_agent_sandbox() -> None:
             getattr(self, "_actual_backend", None) == "kubernetes-sandbox"
             or getattr(self, "backend", None) == "kubernetes-sandbox"
         ):
-          return self._start_kubernetes_sandbox()
+          res = self._start_kubernetes_sandbox()
+          target_ctr = (
+              getattr(self, "_target_container", None)
+              or getattr(
+                  getattr(self, "_handle", None),
+                  "_target_container",
+                  None,
+              )
+              or RUNTIME_CONTAINER_NAME
+          )
+          self._target_container = target_ctr
+          if getattr(self, "client", None) is not None:
+            self.client._default_container = target_ctr
+          return res
         return self._orig_start_container(
             docker_image, command, ctr_name, **kwargs
         )
 
       docker_mod.DockerRuntime.start_container = _patched_start_container
+
+    orig_setup_env = getattr(
+        docker_mod.DockerRuntime, "_orig_setup_env", None
+    )
+    if orig_setup_env is None and hasattr(
+        docker_mod.DockerRuntime, "setup_env"
+    ):
+      docker_mod.DockerRuntime._orig_setup_env = (
+          docker_mod.DockerRuntime.setup_env
+      )
+
+      def _patched_setup_env(self, *args, **kwargs):
+        if getattr(self, "_defer_setup_env", False) or getattr(
+            getattr(self, "_handle", None), "_defer_setup_env", False
+        ):
+          self._needs_deferred_setup_env = True
+          logging.debug(
+              "[SandboxFleet] Deferring setup_env on container '%s' until"
+              " evaluation",
+              getattr(self, "_target_container", EVAL_CONTAINER_NAME),
+          )
+          return None
+        self._needs_deferred_setup_env = False
+        return self._orig_setup_env(*args, **kwargs)
+
+      docker_mod.DockerRuntime.setup_env = _patched_setup_env
   except Exception as e:  # pylint: disable=broad-exception-caught
     logging.debug("[SandboxFleet] r2egym in-memory patch note: %s", e)
 
@@ -106,14 +188,13 @@ def patch_r2egym_for_agent_sandbox() -> None:
 
 
 def patch_agent_sandbox_rl_templates() -> None:
-  """Sets spec.networkPolicyManagement='Unmanaged' on generated SandboxTemplates.
+  """Patches generated SandboxTemplates for network policy and fresh eval sidecar.
 
-  By default, SandboxTemplate defaults networkPolicyManagement to 'Managed',
-  causing agent-sandbox-controller to create/delete a dedicated NetworkPolicy
-  per template (matching `sandbox: <template_name>`). On large GKE Dataplane V2
-  clusters, per-template NetworkPolicy churn triggers policy-watcher
-  reconciliations across all anetd pods and prevents safely excluding the
-  high-cardinality `sandbox` pod label from Cilium identity calculation.
+  1. Sets spec.networkPolicyManagement='Unmanaged' to avoid per-template
+     NetworkPolicy reconciliation churn on large GKE Dataplane V2 clusters.
+  2. Enforces pod-level isolation (automountServiceAccountToken=False,
+     shareProcessNamespace=False) and appends a fresh 'eval' container running
+     the same task image so grading executes in an unmutated container.
   """
   try:
     from agent_sandbox_rl import resources as asrl_resources  # pyrefly: ignore[missing-import]
@@ -130,10 +211,41 @@ def patch_agent_sandbox_rl_templates() -> None:
 
       def _patched_template_manifest(self, image, template_name, template):
         manifest = self._orig_template_manifest(image, template_name, template)
-        if isinstance(manifest, dict):
-          spec = manifest.setdefault("spec", {})
-          if isinstance(spec, dict):
-            spec.setdefault("networkPolicyManagement", "Unmanaged")
+        spec = manifest["spec"]
+        spec["networkPolicyManagement"] = "Unmanaged"
+        pod_spec = spec["podTemplate"]["spec"]
+        pod_spec["automountServiceAccountToken"] = False
+        pod_spec["shareProcessNamespace"] = False
+        containers = pod_spec["containers"]
+        if containers:
+          containers[0]["name"] = RUNTIME_CONTAINER_NAME
+        if not any(
+            "name" in c and c["name"] == EVAL_CONTAINER_NAME
+            for c in containers
+        ):
+          pull_policy = (
+              template.image_pull_policy
+              if template is not None and template.image_pull_policy
+              else "IfNotPresent"
+          )
+          containers.append({
+              "name": EVAL_CONTAINER_NAME,
+              "image": image,
+              "imagePullPolicy": pull_policy,
+              "command": ["sleep", "infinity"],
+              "stdin": True,
+              "tty": True,
+              "resources": {
+                  "requests": {
+                      "cpu": os.getenv("SANDBOX_EVAL_CPU", "50m"),
+                      "memory": os.getenv("SANDBOX_EVAL_MEM", "128Mi"),
+                  },
+                  "limits": {
+                      "cpu": os.getenv("SANDBOX_CPU_LIMIT", "2"),
+                      "memory": os.getenv("SANDBOX_MEM_LIMIT", "4Gi"),
+                  },
+              },
+          })
         return manifest
 
       asrl_resources.Resources._template_manifest = _patched_template_manifest

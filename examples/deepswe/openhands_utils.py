@@ -20,7 +20,9 @@ import json
 import logging
 import os
 import re
+import shlex
 import subprocess
+import tempfile
 import time
 import uuid
 from typing import Any, Optional
@@ -584,19 +586,22 @@ def parse_openhands_action_str(action_str: str) -> Any:
 
 def resolve_base_commit(entry: Optional[dict[str, Any]]) -> str:
   """Resolves base_commit from dataset entry metadata if available."""
-  if not isinstance(entry, dict):
+  if entry is None:
     return ""
-  base_commit = entry.get("base_commit")
-  if base_commit:
-    return str(base_commit).strip()
-  parsed_commit = entry.get("parsed_commit_content")
-  if parsed_commit:
+  if "base_commit" in entry and entry["base_commit"]:
+    return str(entry["base_commit"]).strip()
+  if "parsed_commit_content" in entry and entry["parsed_commit_content"]:
+    parsed_commit = entry["parsed_commit_content"]
     if isinstance(parsed_commit, str):
       try:
         parsed_commit = json.loads(parsed_commit)
-      except Exception:
+      except json.JSONDecodeError:
         parsed_commit = None
-    if isinstance(parsed_commit, dict) and parsed_commit.get("old_commit_hash"):
+    if (
+        parsed_commit is not None
+        and "old_commit_hash" in parsed_commit
+        and parsed_commit["old_commit_hash"]
+    ):
       return str(parsed_commit["old_commit_hash"]).strip()
   return ""
 
@@ -615,17 +620,10 @@ _get_image_rewrite_fn = get_image_rewrite_fn
 
 
 _HIDE_R2E_TESTS_CMD = (
-    "mkdir -p /var/tmp/.r2e_grading_stash && ("
-    "for p in /root/run_tests.sh /testbed/run_tests.sh /run_tests.sh; do "
-    '[ -f "$p" ] && [ ! -L "$p" ] && cp -a "$p"'
-    " /var/tmp/.r2e_grading_stash/run_tests.sh && break; done; "
-    "for d in /root/r2e_tests /r2e_tests /testbed/r2e_tests; do "
-    '[ -d "$d" ] && [ ! -L "$d" ] && rm -rf'
-    ' /var/tmp/.r2e_grading_stash/r2e_tests && cp -a "$d"'
-    " /var/tmp/.r2e_grading_stash/r2e_tests && break; done; "
     "rm -rf /r2e_tests /root/r2e_tests /testbed/r2e_tests "
-    "/run_tests.sh /root/run_tests.sh /testbed/run_tests.sh"
-    ") 2>/dev/null || true"
+    "/run_tests.sh /root/run_tests.sh /testbed/run_tests.sh "
+    "/testbed/expected_test_output.json /root/expected_test_output.json "
+    "/var/tmp/.r2e_grading_stash 2>/dev/null || true"
 )
 
 _RESTORE_R2E_TESTS_CMD = (
@@ -641,6 +639,72 @@ _RESTORE_R2E_TESTS_CMD = (
     "ln -s /root/r2e_tests /r2e_tests || true; "
     "fi; fi"
 )
+
+REMOVE_BINARY_FILES_CMD = """
+git status --porcelain | grep -E "^(M| M|\\?\\?|A| A)" | cut -c4- | while IFS= read -r file; do
+    file=$(echo "$file" | sed -e 's/^"//' -e 's/"$//')
+    if [ -f "$file" ] && (file -b "$file" 2>/dev/null | grep -v -i "text" | grep -q "executable" || git check-attr binary "$file" 2>/dev/null | grep -q "binary: set"); then
+        git rm -f "$file" 2>/dev/null || rm -f "$file"
+        echo "Removed: $file"
+    fi
+done
+""".strip()
+
+_CLEANUP_CONTAINER0_PROCESSES_CMD = (
+    "_self=$$; _ppid=$PPID; "
+    "for _p in /proc/[0-9]*; do "
+    '  _pid="${_p#/proc/}"; '
+    '  [ "$_pid" = "1" ] || [ "$_pid" = "$_self" ] || [ "$_pid" = "$_ppid" ] && continue; '
+    '  _cmd=$(tr "\\0" " " < "$_p/cmdline" 2>/dev/null || true); '
+    "  case \"$_cmd\" in "
+    "    *openhands-agent-server*|*agent-server*|*tini*) continue ;; "
+    "  esac; "
+    '  kill -TERM "$_pid" 2>/dev/null || true; '
+    "done; "
+    "sleep 0.2; "
+    "for _p in /proc/[0-9]*; do "
+    '  _pid="${_p#/proc/}"; '
+    '  [ "$_pid" = "1" ] || [ "$_pid" = "$_self" ] || [ "$_pid" = "$_ppid" ] && continue; '
+    '  _cmd=$(tr "\\0" " " < "$_p/cmdline" 2>/dev/null || true); '
+    "  case \"$_cmd\" in "
+    "    *openhands-agent-server*|*agent-server*|*tini*) continue ;; "
+    "  esac; "
+    '  kill -KILL "$_pid" 2>/dev/null || true; '
+    "done; "
+    "rm -rf /dev/shm/* /dev/shm/.[!.]* /dev/shm/..?* 2>/dev/null || true"
+)
+
+
+def remove_binary_files_from_git() -> str:
+  """Returns bash snippet to remove staged/untracked binary or executable files."""
+  return REMOVE_BINARY_FILES_CMD
+
+
+def remove_binary_diffs(patch_text: str) -> str:
+  """Removes binary file diffs from a git patch (matches nv-OpenHands binary_patch_utils.py)."""
+  if not patch_text:
+    return ""
+  lines = patch_text.splitlines()
+  cleaned_lines: list[str] = []
+  block: list[str] = []
+  is_binary_block = False
+
+  for line in lines:
+    if line.startswith("diff --git "):
+      if block and not is_binary_block:
+        cleaned_lines.extend(block)
+      block = [line]
+      is_binary_block = False
+    elif "Binary files" in line or line.startswith("GIT binary patch"):
+      is_binary_block = True
+      block.append(line)
+    else:
+      block.append(line)
+
+  if block and not is_binary_block:
+    cleaned_lines.extend(block)
+
+  return "\n".join(cleaned_lines)
 
 
 def _exec_in_sandbox(target: Any, cmd: str, timeout: float = 60.0) -> Any:
@@ -658,27 +722,69 @@ def _exec_in_sandbox(target: Any, cmd: str, timeout: float = 60.0) -> Any:
   if runtime is None and getattr(target, "env", None) is not None:
     runtime = getattr(target.env, "runtime", None)
   if runtime is not None and hasattr(runtime, "run"):
-    return runtime.run(cmd, timeout=int(timeout))
+    return runtime.run(f"/bin/sh -c {shlex.quote(cmd)}", timeout=int(timeout))
   return None
 
 
-def hide_r2e_tests_for_rollout(target: Any) -> None:
-  """Stash and remove /r2e_tests and /run_tests.sh during agent rollout."""
+def _unpack_exec_output(res: Any) -> tuple[str, int]:
+  """Normalizes output and exit code from workspace.execute_command or runtime.run."""
+  if res is None:
+    return "", -1
+  if isinstance(res, tuple) and len(res) == 2:
+    out, code = res
+    code_str = str(code).strip()
+    return str(out or ""), (0 if code_str == "0" else -1)
+  exit_code = getattr(res, "exit_code", 0)
   try:
-    _exec_in_sandbox(target, _HIDE_R2E_TESTS_CMD, timeout=60.0)
+    exit_code_int = int(exit_code)
+  except (TypeError, ValueError):
+    exit_code_int = 0 if str(exit_code).strip() == "0" else -1
+  stdout = getattr(res, "stdout", None)
+  if stdout is None:
+    stdout = ""
+  return str(stdout), exit_code_int
+
+
+_GIT_EXCLUDE_R2E_AND_OH_CMD = (
+    "(if [ -d /testbed/.git/info ]; then "
+    "printf '\\n/bash_events\\n/bash_events/\\n/conversations\\n/conversations/\\n"
+    "/install.sh\\n/run_tests.sh\\n/r2e_tests\\n/r2e_tests/\\n' "
+    ">> /testbed/.git/info/exclude; fi) 2>/dev/null || true"
+)
+
+
+def hide_r2e_tests_for_rollout(
+    target: Any, entry: Optional[dict[str, Any]] = None
+) -> None:
+  """Removes /r2e_tests and /run_tests.sh from the rollout container."""
+  try:
+    cmd = (
+        f"{_HIDE_R2E_TESTS_CMD} && "
+        "(git -C /testbed reset --hard 2>/dev/null || true) && "
+        f"{_GIT_EXCLUDE_R2E_AND_OH_CMD} && "
+        "(git -C /testbed rev-parse HEAD 2>/dev/null || true)"
+    )
+    res = _exec_in_sandbox(target, cmd, timeout=60.0)
+    if entry is not None and ("base_commit" not in entry or not entry["base_commit"]):
+      stdout, exit_code = _unpack_exec_output(res)
+      if exit_code == 0 and stdout:
+        lines = [ln.strip() for ln in stdout.strip().splitlines() if ln.strip()]
+        if lines and re.fullmatch(r"[0-9a-fA-F]{7,40}", lines[-1]):
+          entry["base_commit"] = lines[-1]
   except Exception as e:
     logging.warning("[SWEEnv] Failed to hide R2E tests for rollout: %s", e)
 
 
 def setup_openhands_workspace(
     workspace: Any,
-    entry: Optional[Any] = None,
+    entry: Optional[dict[str, Any]] = None,
 ) -> None:
   """Configure repository environment in the OpenHands workspace.
 
   Task containers already ship the repository pre-cloned at the target commit
   under /testbed, so this only ensures the idempotent git ``safe.directory``
-  configuration and the /workspace <-> /testbed symlink.
+  configuration, resets any dirty build artifacts, removes hidden test files
+  from the rollout container, and sets up the /workspace <-> /testbed symlink.
 
   Args:
     workspace: The OpenHands workspace instance (or an environment object with
@@ -702,6 +808,8 @@ def setup_openhands_workspace(
       "rm -f /var/tmp/.oh_cwd /var/tmp/.oh_editor_history.json 2>/dev/null || true",
       "git config --global user.email 'openhands@agent.sandbox'",
       "git config --global user.name 'OpenHands Agent'",
+      'git config --global core.pager ""',
+      "git config --global diff.binary false",
       "git config --global --add safe.directory /testbed 2>/dev/null || true",
       "git config --global --add safe.directory /workspace 2>/dev/null || true",
       (
@@ -712,7 +820,13 @@ def setup_openhands_workspace(
           "([ -d /workspace ] && [ ! -e /testbed ] && ln -s /workspace /testbed"
           " 2>/dev/null || true)"
       ),
+      "git -C /testbed reset --hard 2>/dev/null || true",
+      (
+          "(for r in $(git -C /testbed remote 2>/dev/null); do"
+          ' git -C /testbed remote remove "$r" 2>/dev/null || true; done)'
+      ),
       _HIDE_R2E_TESTS_CMD,
+      _GIT_EXCLUDE_R2E_AND_OH_CMD,
       "git -C /testbed rev-parse HEAD 2>/dev/null || true",
   ]
 
@@ -728,7 +842,7 @@ def setup_openhands_workspace(
       )
     else:
       logging.info("[SWEEnv] Successfully configured OpenHands workspace")
-      if isinstance(entry, dict) and not entry.get("base_commit"):
+      if entry is not None and ("base_commit" not in entry or not entry["base_commit"]):
         stdout = getattr(res, "stdout", None)
         if isinstance(stdout, str):
           lines = [ln.strip() for ln in stdout.strip().splitlines() if ln.strip()]
@@ -744,6 +858,209 @@ def restore_r2e_tests_for_reward(target: Any) -> None:
     _exec_in_sandbox(target, _RESTORE_R2E_TESTS_CMD, timeout=60.0)
   except Exception as e:
     logging.warning("[SWEEnv] Failed to restore R2E tests for reward: %s", e)
+
+
+def extract_agent_patch(
+    target: Any,
+    base_commit: str = "",
+    workspace_path: str = "/testbed",
+    timeout: float = 300.0,
+) -> str:
+  """Extracts the git diff patch from the rollout container matching nv-OpenHands.
+
+  Follows nv-OpenHands evaluation/benchmarks/swe_bench/run_infer.py:691-797:
+  1. cd to workspace_path (/testbed) and disable git pager.
+  2. Find and remove any nested .git directories in subdirectories.
+  3. Stage all files with ``git add -A``.
+  4. Unstage OpenHands server logs / R2E harness scripts and remove binary and
+     executable files from git staging.
+  5. Run ``git diff --no-color --cached <base_commit>``.
+  6. Strip any remaining binary diff blocks via ``remove_binary_diffs``.
+  """
+  if target is None:
+    return ""
+  if not base_commit:
+    entry = getattr(target, "entry", None)
+    base_commit = resolve_base_commit(entry)
+  commit_ref = base_commit.strip() if base_commit else "HEAD"
+  quoted_commit_ref = shlex.quote(commit_ref)
+  extract_cmd = (
+      f"cd {shlex.quote(workspace_path)} && "
+      "{ "
+      'git config --global core.pager ""; '
+      'find . -type d -name .git -not -path "./.git" -exec rm -rf {} + 2>/dev/null; '
+      "git add -A; "
+      f"git reset {quoted_commit_ref} -- bash_events conversations install.sh run_tests.sh r2e_tests 2>/dev/null || true; "
+      f"{REMOVE_BINARY_FILES_CMD}; "
+      "} >/dev/null 2>&1 && "
+      f"git diff --no-color --cached {quoted_commit_ref} 2>/dev/null"
+  )
+  try:
+    res = _exec_in_sandbox(target, extract_cmd, timeout=timeout)
+    raw_patch, exit_code = _unpack_exec_output(res)
+    if exit_code != 0:
+      logging.warning(
+          "[SWEEnv] Failed to extract git patch from rollout container (exit=%s)",
+          exit_code,
+      )
+      return ""
+    cleaned = remove_binary_diffs(raw_patch)
+    if not cleaned or not cleaned.strip():
+      return ""
+    if not cleaned.endswith("\n"):
+      cleaned += "\n"
+    return cleaned
+  except Exception as e:
+    logging.warning("[SWEEnv] Exception extracting agent patch: %s", e)
+    return ""
+
+
+def cleanup_rollout_container_processes(
+    target: Any, timeout: float = 15.0
+) -> None:
+  """Kills background processes spawned in container 0 and clears /dev/shm."""
+  if target is None:
+    return
+  try:
+    _exec_in_sandbox(target, _CLEANUP_CONTAINER0_PROCESSES_CMD, timeout=timeout)
+  except Exception as e:
+    logging.debug("[SWEEnv] Rollout container process cleanup note: %s", e)
+
+
+def evaluate_patch_in_fresh_container(
+    eval_env: Any,
+    patch: str,
+    orig_compute_reward: Optional[Any] = None,
+    *args: Any,
+    **kwargs: Any,
+) -> float:
+  """Applies `patch` in the fresh `eval` container and runs R2E-Gym grading.
+
+  Follows nv-R2E-Gym src/r2egym/agenthub/run/run_local_evaluation.py:36-71:
+  1. An empty patch immediately scores 0.0.
+  2. Lists untracked files in /testbed (`git ls-files --others --exclude-standard`)
+     and excludes them from `git apply`.
+  3. Applies patch with `git apply --whitespace=fix`; failed apply scores 0.0.
+  4. Runs `runtime.setup_env()` and `_calculate_reward()` in the fresh container.
+  """
+  if not patch or not patch.strip():
+    logging.info("[SWEEnv] Empty git patch extracted; returning reward 0.0.")
+    return 0.0
+
+  if eval_env is None:
+    return 0.0
+
+  from examples.deepswe import sandbox_utils  # pylint: disable=g-import-not-at-top
+
+  original_container = sandbox_utils.RUNTIME_CONTAINER_NAME
+  runtime_obj = getattr(eval_env, "runtime", None) or eval_env
+  if runtime_obj is not None:
+    original_container = getattr(
+        runtime_obj, "_target_container", sandbox_utils.RUNTIME_CONTAINER_NAME
+    )
+
+  sandbox_utils.set_runtime_container(
+      eval_env, sandbox_utils.EVAL_CONTAINER_NAME
+  )
+  try:
+    runtime = getattr(eval_env, "runtime", None)
+    if runtime is None or not hasattr(runtime, "run"):
+      if orig_compute_reward is not None:
+        return float(orig_compute_reward(*args, **kwargs))
+      return 0.0
+
+    repo_path = getattr(runtime, "repo_path", "/testbed") or "/testbed"
+    git_ls_res = runtime.run(
+        "git ls-files --others --exclude-standard",
+        timeout=30,
+    )
+    git_ls_output, git_ls_exit = _unpack_exec_output(git_ls_res)
+    if git_ls_exit != 0:
+      logging.warning(
+          "[SWEEnv] Failed to list untracked files in eval container: %s",
+          git_ls_output,
+      )
+      return 0.0
+
+    untracked_files = [
+        f.strip() for f in git_ls_output.splitlines() if f.strip()
+    ]
+    exclude_str = " ".join(
+        shlex.quote(f"--exclude={f}") for f in untracked_files
+    )
+
+    patch_path = "/tmp/model.patch"
+    b64_patch = base64.b64encode(patch.encode("utf-8")).decode("ascii")
+    if len(b64_patch) <= 65536:
+      inner_apply = (
+          f"printf '%s' {shlex.quote(b64_patch)} | base64 -d > {patch_path} && "
+          f"cd {shlex.quote(repo_path)} && "
+          f"git apply --whitespace=fix {exclude_str} {patch_path}; "
+          f"_rc=$?; rm -f {patch_path}; exit $_rc"
+      )
+      apply_cmd = f"/bin/sh -c {shlex.quote(inner_apply)}"
+    else:
+      b64_tmp_path = f"{patch_path}.b64"
+      chunk_size = 49152
+      for idx in range(0, len(b64_patch), chunk_size):
+        chunk = b64_patch[idx : idx + chunk_size]
+        redir = ">" if idx == 0 else ">>"
+        inner_chunk = f"printf '%s' {shlex.quote(chunk)} {redir} {b64_tmp_path}"
+        chunk_res = runtime.run(
+            f"/bin/sh -c {shlex.quote(inner_chunk)}", timeout=30
+        )
+        chunk_out, chunk_exit = _unpack_exec_output(chunk_res)
+        if chunk_exit != 0:
+          logging.warning(
+              "[SWEEnv] Failed to write patch chunk in eval container: %s",
+              chunk_out,
+          )
+          runtime.run(f"rm -f {shlex.quote(b64_tmp_path)}", timeout=15)
+          return 0.0
+      inner_apply = (
+          f"base64 -d {b64_tmp_path} > {patch_path} && "
+          f"rm -f {b64_tmp_path} && "
+          f"cd {shlex.quote(repo_path)} && "
+          f"git apply --whitespace=fix {exclude_str} {patch_path}; "
+          f"_rc=$?; rm -f {b64_tmp_path} {patch_path}; exit $_rc"
+      )
+      apply_cmd = f"/bin/sh -c {shlex.quote(inner_apply)}"
+
+    apply_res = runtime.run(apply_cmd, timeout=60)
+    apply_output, apply_exit = _unpack_exec_output(apply_res)
+    if apply_exit != 0:
+      logging.warning(
+          "[SWEEnv] Failed to apply patch in eval container: %s",
+          apply_output,
+      )
+      return 0.0
+
+    runtime._defer_setup_env = False
+    if getattr(runtime, "_handle", None) is not None:
+      runtime._handle._defer_setup_env = False
+    if hasattr(runtime, "setup_env"):
+      runtime.setup_env()
+
+    if orig_compute_reward is not None:
+      reward = float(orig_compute_reward(*args, **kwargs))
+    elif hasattr(runtime, "_calculate_reward"):
+      reward = float(runtime._calculate_reward(*args, **kwargs))
+    else:
+      reward = 0.0
+    logging.info(
+        "[SWEEnv] Evaluated agent patch in fresh eval container: reward=%.1f"
+        " (patch_bytes=%d)",
+        reward,
+        len(patch),
+    )
+    return reward
+  except Exception as e:
+    logging.warning(
+        "[SWEEnv] Exception during fresh container evaluation: %s", e
+    )
+    return 0.0
+  finally:
+    sandbox_utils.set_runtime_container(eval_env, original_container)
 
 
 def _command_timed_out(result: Any, timeout: float, elapsed: float) -> bool:
