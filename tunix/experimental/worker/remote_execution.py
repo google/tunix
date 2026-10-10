@@ -35,12 +35,13 @@ Security Notes / Trust Boundaries:
 
 import abc
 import asyncio
-import concurrent.futures
 import contextlib
 import hashlib
 import inspect
 import pickle
+import struct
 import threading
+import time
 import traceback as traceback_lib
 from typing import (
     Any,
@@ -51,15 +52,17 @@ from typing import (
     Iterable,
     Iterator,
     List,
+    NoReturn,
     Optional,
     Sequence,
+    Set,
     Tuple,
     Union,
 )
 
 from absl import logging
 import cloudpickle
-import numpy as np
+from tunix.experimental.worker import network
 
 try:
   import grpc as _grpc_lib
@@ -72,385 +75,10 @@ except ImportError:
   _GRPC_AVAILABLE = False
 
 
-# Default per-call deadline (seconds) applied to remote invocations so a dead or
-# wedged worker surfaces an error instead of hanging the caller indefinitely.
-RPC_TIMEOUT_S = 60.0
+RPC_TIMEOUT_S = network.RPC_TIMEOUT_S
+LONG_POLL_TIMEOUT_S = network.LONG_POLL_TIMEOUT_S
 
-# Server side timeout for handling a poll_responses() call.
-# It should be shorter than the RPC_TIMEOUT_S to allow time for a response to
-# be sent before the connection is torn down.
-LONG_POLL_TIMEOUT_S = RPC_TIMEOUT_S - 10.0
-
-# Cap for a single gRPC message frame. Payloads exceeding this (including >4 GiB
-# packed training batches) are streamed in _STREAM_CHUNK_BYTES frames using
-# Pickle Protocol 5 out-of-band buffers.
-_MAX_MESSAGE_BYTES = 128 * 1024 * 1024
-
-# Default slice size (16 MiB) per frame on streaming gRPC calls. Must remain
-# strictly smaller than _MAX_MESSAGE_BYTES.
-_STREAM_CHUNK_BYTES = 16 * 1024 * 1024
-
-# Buffers smaller than this threshold are coalesced via a single b"".join()
-# pass; buffers at or above this threshold are emitted directly as standalone
-# frames (or chunk_size slices) to avoid intermediate coalescing copies.
-_COALESCE_THRESHOLD_BYTES = 256 * 1024
-
-# Payloads at or above this byte threshold offload chunk reassembly and
-# unpickling to _SERDE_EXECUTOR so multi-megabyte buffer operations do not
-# block the asyncio event loop.
-_ASYNC_OFFLOAD_THRESHOLD_BYTES = 512 * 1024
-
-_SERDE_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
-    max_workers=8, thread_name_prefix="tunix-rpc-serde"
-)
-
-
-def _grpc_options(
-    max_message_bytes: int = _MAX_MESSAGE_BYTES,
-) -> List[Tuple[str, int]]:
-  """Channel/server options lifting the message-size cap and enabling keepalive."""
-  return [
-      ("grpc.max_send_message_length", max_message_bytes),
-      ("grpc.max_receive_message_length", max_message_bytes),
-      ("grpc.keepalive_time_ms", 20000),
-      ("grpc.keepalive_timeout_ms", 10000),
-      ("grpc.keepalive_permit_without_calls", 1),
-      ("grpc.http2.max_pings_without_data", 0),
-      ("grpc.http2.max_ping_strikes", 0),
-      ("grpc.http2.min_ping_interval_without_data_ms", 5000),
-      ("grpc.http2.min_recv_ping_interval_without_data_ms", 5000),
-  ]
-
-
-def _validate_stream_config(
-    stream_chunk_bytes: int, max_message_bytes: int
-) -> None:
-  """Validates streaming chunk size and gRPC max message size bounds."""
-  if stream_chunk_bytes <= 0:
-    raise ValueError(
-        f"stream_chunk_bytes must be positive, got {stream_chunk_bytes}."
-    )
-  if max_message_bytes <= 0:
-    raise ValueError(
-        f"max_message_bytes must be positive, got {max_message_bytes}."
-    )
-  if stream_chunk_bytes > max_message_bytes:
-    raise ValueError(
-        f"stream_chunk_bytes ({stream_chunk_bytes}) must not exceed "
-        f"max_message_bytes ({max_message_bytes})."
-    )
-
-
-def _flush_pending_views(pending_views: List[memoryview]) -> bytes:
-  """Materializes coalesced small views in a single allocation and copy."""
-  if len(pending_views) == 1:
-    data = pending_views[0].tobytes()
-  else:
-    data = b"".join(pending_views)
-  pending_views.clear()
-  return data
-
-
-def _iter_serialized_chunks_with_size(
-    obj: Any,
-    chunk_size: int = _STREAM_CHUNK_BYTES,
-) -> Tuple[int, Iterator[bytes]]:
-  """Serializes `obj` with Pickle Protocol 5 and returns `(total_bytes, chunk_iter)`.
-
-  Uses `cloudpickle.dumps(..., protocol=5)` for `obj` so dynamic functions,
-  closures, and `__main__` classes/functions are always pickled by value, while
-  using `pickle.dumps` for the fixed `(header_len, buffer_lengths)` integer
-  manifest tuple and returning `total_bytes` so callers can bypass
-  `_SERDE_EXECUTOR` thread-pool hops on small payloads.
-
-  Pickling and out-of-band buffer extraction (`buffer_callback`) run eagerly
-  when this function is called so any serialization error (`TypeError`,
-  `pickle.PicklingError`) is raised immediately in the caller before opening a
-  gRPC stream.
-
-  Args:
-    obj: Arbitrary Python object to serialize with cloudpickle.
-    chunk_size: Maximum byte length of each yielded data chunk.
-
-  Returns:
-    A 2-tuple `(total_bytes, chunk_iter)` where `total_bytes` is the total
-    byte size across the pickle header and all out-of-band buffers, and
-    `chunk_iter` yields Frame 0 (pickled `(header_len, buffer_lengths)`
-    manifest) followed by `chunk_size` slices of the header and buffers.
-  """
-  if chunk_size <= 0:
-    raise ValueError(f"chunk_size must be positive, got {chunk_size}.")
-  raw_buffers: List[pickle.PickleBuffer] = []
-  header_bytes = cloudpickle.dumps(
-      obj, protocol=5, buffer_callback=raw_buffers.append
-  )
-  views: List[memoryview] = [memoryview(header_bytes)]  # pylint: disable=g-bare-generic
-  try:
-    for pb in raw_buffers:
-      try:
-        views.append(pb.raw())
-      except BufferError:
-        with memoryview(pb) as view:
-          views.append(memoryview(view.tobytes()))
-    buffer_lengths = tuple(len(v) for v in views[1:])
-    total_bytes = len(views[0]) + sum(buffer_lengths)
-    manifest = pickle.dumps((len(views[0]), buffer_lengths), protocol=5)
-  except Exception:
-    for mv in views:
-      mv.release()
-    for pb in raw_buffers:
-      pb.release()
-    raise
-
-  def _gen() -> Iterator[bytes]:
-    try:
-      yield manifest
-      coalesce_limit = min(chunk_size, _COALESCE_THRESHOLD_BYTES)
-      pending_views: List[memoryview] = []
-      pending_bytes = 0
-      for mv in views:
-        mv_len = len(mv)
-        if mv_len == 0:
-          continue
-        if mv_len >= coalesce_limit:
-          if pending_views:
-            yield _flush_pending_views(pending_views)
-            pending_bytes = 0
-          if mv_len <= chunk_size:
-            yield mv.tobytes()
-          else:
-            for offset in range(0, mv_len, chunk_size):
-              yield mv[offset : offset + chunk_size].tobytes()
-        else:
-          if pending_bytes + mv_len > chunk_size and pending_views:
-            yield _flush_pending_views(pending_views)
-            pending_bytes = 0
-          pending_views.append(mv)
-          pending_bytes += mv_len
-      if pending_views:
-        yield _flush_pending_views(pending_views)
-    finally:
-      for mv in views:
-        mv.release()
-      for pb in raw_buffers:
-        pb.release()
-
-  return total_bytes, _gen()
-
-
-def _iter_serialized_chunks(
-    obj: Any,
-    chunk_size: int = _STREAM_CHUNK_BYTES,
-) -> Iterator[bytes]:
-  """Serializes `obj` with Pickle Protocol 5 and returns a chunk iterator."""
-  _, chunk_iter = _iter_serialized_chunks_with_size(obj, chunk_size=chunk_size)
-  return chunk_iter
-
-
-def _next_chunk_or_end(it: Iterator[bytes]) -> Optional[bytes]:
-  return next(it, None)
-
-
-async def _iter_async_from_sync_chunks(
-    sync_iter: Iterator[bytes],
-    *,
-    offload: bool = True,
-) -> AsyncIterator[bytes]:
-  """Adapts a synchronous chunk iterator into an async iterator.
-
-  When `offload=False` (used for payloads smaller than
-  `_ASYNC_OFFLOAD_THRESHOLD_BYTES`), yields chunks directly on the active
-  coroutine without incurring `_SERDE_EXECUTOR` thread-pool context-switch
-  overhead.
-
-  Args:
-    sync_iter: Synchronous iterator yielding serialized byte chunks.
-    offload: Whether to offload chunk iteration onto `_SERDE_EXECUTOR`.
-
-  Yields:
-    Serialized byte chunks.
-  """
-  if not offload:
-    try:
-      for chunk in sync_iter:
-        yield chunk
-    finally:
-      if hasattr(sync_iter, "close"):
-        sync_iter.close()
-    return
-
-  loop = asyncio.get_running_loop()
-  first = next(sync_iter, None)
-  if first is None:
-    return
-  next_fut: Optional[asyncio.Future[Optional[bytes]]] = loop.run_in_executor(
-      _SERDE_EXECUTOR, _next_chunk_or_end, sync_iter
-  )
-  try:
-    yield first
-    while next_fut is not None:
-      chunk = await next_fut
-      if chunk is None:
-        next_fut = None
-        break
-      next_fut = loop.run_in_executor(
-          _SERDE_EXECUTOR, _next_chunk_or_end, sync_iter
-      )
-      yield chunk
-  finally:
-    if next_fut is not None:
-      try:
-        await next_fut
-      except Exception:  # pylint: disable=broad-exception-caught
-        pass
-    if hasattr(sync_iter, "close"):
-      sync_iter.close()
-
-
-class _ChunkReassembler:
-  """Incremental zero-copy reassembler for Pickle Protocol 5 chunk streams."""
-
-  def __init__(self, manifest_bytes: bytes):
-    try:
-      header_len, buffer_lengths = cloudpickle.loads(  # pylint: disable=g-unsafe-pickle-load
-          manifest_bytes
-      )
-    except Exception as exc:
-      raise ValueError("Invalid chunk stream manifest.") from exc
-
-    if not isinstance(header_len, int) or header_len <= 0:
-      raise ValueError(
-          f"Invalid header_len in chunk stream manifest: {header_len!r}."
-      )
-    if not isinstance(buffer_lengths, (tuple, list)) or any(
-        not isinstance(length, int) or length < 0 for length in buffer_lengths
-    ):
-      raise ValueError(
-          "Invalid buffer_lengths in chunk stream manifest:"
-          f" {buffer_lengths!r}."
-      )
-
-    self._target_lengths: List[int] = [header_len, *buffer_lengths]
-    self.total_bytes: int = sum(self._target_lengths)
-    # Lazily allocate uninitialized uint8 NumPy arrays on first write to avoid
-    # upfront memset(0) across multi-gigabyte buffers and release the GIL
-    # during memcpy.
-    self._targets: List[Optional[np.ndarray]] = [
-        np.empty(0, dtype=np.uint8) if length == 0 else None
-        for length in self._target_lengths
-    ]
-    self._target_idx = 0
-    self._target_offset = 0
-    self._advance_empty_targets()
-
-  def _advance_empty_targets(self) -> None:
-    while (
-        self._target_idx < len(self._target_lengths)
-        and self._target_lengths[self._target_idx] == 0
-    ):
-      self._target_idx += 1
-
-  def feed(self, chunk: bytes) -> None:
-    """Writes a chunk into lazily allocated uninitialized target buffers."""
-    if not chunk:
-      return
-    chunk_len = len(chunk)
-    chunk_pos = 0
-    while chunk_pos < chunk_len:
-      if self._target_idx >= len(self._target_lengths):
-        raise ValueError(
-            "Received more chunk bytes than declared in stream manifest."
-        )
-      target_len = self._target_lengths[self._target_idx]
-      remaining = target_len - self._target_offset
-      take = min(chunk_len - chunk_pos, remaining)
-      target_buf = self._targets[self._target_idx]
-      if target_buf is None:
-        target_buf = np.empty(target_len, dtype=np.uint8)
-        self._targets[self._target_idx] = target_buf
-      # NumPy slice assignment releases the GIL (NPY_BEGIN_ALLOW_THREADS).
-      target_buf[self._target_offset : self._target_offset + take] = (
-          np.frombuffer(chunk, dtype=np.uint8, count=take, offset=chunk_pos)
-      )
-      self._target_offset += take
-      chunk_pos += take
-      if self._target_offset == target_len:
-        self._target_idx += 1
-        self._target_offset = 0
-        self._advance_empty_targets()
-
-  def finish(self) -> Any:
-    """Validates completion and unpickles the object from reassembled buffers."""
-    if self._target_idx < len(self._target_lengths):
-      raise ValueError(
-          "Stream ended before all declared buffer bytes were received."
-      )
-    completed_buffers: List[np.ndarray] = []
-    for buf in self._targets:
-      assert buf is not None
-      completed_buffers.append(buf)
-    return cloudpickle.loads(  # pylint: disable=g-unsafe-pickle-load
-        completed_buffers[0], buffers=completed_buffers[1:]
-    )
-
-
-def _deserialize_from_chunks(chunks: Iterable[bytes]) -> Any:
-  """Deserializes an object from a synchronous iterable of chunks."""
-  reassembler: Optional[_ChunkReassembler] = None
-  for chunk in chunks:
-    if reassembler is None:
-      reassembler = _ChunkReassembler(chunk)
-    else:
-      reassembler.feed(chunk)
-  if reassembler is None:
-    raise ValueError("Cannot deserialize from an empty chunk stream.")
-  return reassembler.finish()
-
-
-async def _deserialize_from_async_chunks(
-    chunks: AsyncIterable[bytes],
-    *,
-    allow_empty: bool = False,
-) -> Any:
-  """Deserializes an object from an async iterable of chunks."""
-  reassembler: Optional[_ChunkReassembler] = None
-  offload = False
-  loop: Optional[asyncio.AbstractEventLoop] = None
-  pending_feed: Optional[asyncio.Future[None]] = None
-  try:
-    async for chunk in chunks:
-      if reassembler is None:
-        if not chunk and allow_empty:
-          return None
-        reassembler = _ChunkReassembler(chunk)
-        if reassembler.total_bytes >= _ASYNC_OFFLOAD_THRESHOLD_BYTES:
-          offload = True
-          loop = asyncio.get_running_loop()
-      else:
-        if offload and loop is not None:
-          if pending_feed is not None:
-            await pending_feed
-          pending_feed = loop.run_in_executor(
-              _SERDE_EXECUTOR, reassembler.feed, chunk
-          )
-        else:
-          reassembler.feed(chunk)
-    if pending_feed is not None:
-      await pending_feed
-      pending_feed = None
-  finally:
-    if pending_feed is not None:
-      try:
-        await pending_feed
-      except Exception:  # pylint: disable=broad-exception-caught
-        pass
-  if reassembler is None:
-    if allow_empty:
-      return None
-    raise ValueError("Cannot deserialize from an empty chunk stream.")
-  if offload and loop is not None:
-    return await loop.run_in_executor(_SERDE_EXECUTOR, reassembler.finish)
-  return reassembler.finish()
+_BULK_CAPABILITY_METADATA = (("x-tunix-bulk", "1"),)
 
 
 def _running_loop() -> Optional["asyncio.AbstractEventLoop"]:
@@ -459,6 +87,19 @@ def _running_loop() -> Optional["asyncio.AbstractEventLoop"]:
     return asyncio.get_running_loop()
   except RuntimeError:
     return None
+
+
+def _client_supports_bulk(context: Any) -> bool:
+  """Returns True if the gRPC caller advertised bulk transport support."""
+  if context is None:
+    return False
+  inv_meta = context.invocation_metadata()
+  if not inv_meta:
+    return False
+  for key, val in inv_meta:
+    if key == "x-tunix-bulk" and val == "1":
+      return True
+  return False
 
 
 class ExecutionRequest:
@@ -481,27 +122,37 @@ class ExecutionRequest:
           "and cannot be passed in method kwargs."
       )
 
+  def _as_tuple(self) -> Tuple[Any, ...]:
+    return (self.request_id, self.method_name, self.args, self.kwargs)
+
   def serialize_chunks(
-      self, chunk_size: int = _STREAM_CHUNK_BYTES
+      self,
+      chunk_size: int = network._STREAM_CHUNK_BYTES,  # pylint: disable=protected-access
   ) -> Iterator[bytes]:
     """Serializes request into Pickle Protocol 5 out-of-band buffer chunks."""
-    return _iter_serialized_chunks(
-        (self.request_id, self.method_name, self.args, self.kwargs),
-        chunk_size=chunk_size,
+    return network._iter_serialized_chunks(  # pylint: disable=protected-access
+        self._as_tuple(), chunk_size=chunk_size
     )
 
   def serialize_async_chunks(
-      self, chunk_size: int = _STREAM_CHUNK_BYTES
+      self,
+      chunk_size: int = network._STREAM_CHUNK_BYTES,  # pylint: disable=protected-access
   ) -> AsyncIterator[bytes]:
     """Serializes request into an async stream of Pickle Protocol 5 chunks."""
-    total_bytes, sync_iter = _iter_serialized_chunks_with_size(
-        (self.request_id, self.method_name, self.args, self.kwargs),
-        chunk_size=chunk_size,
+    # pylint: disable=protected-access
+    total_bytes, manifest, views, raw_buffers, spec_iter = (
+        network._prepare_serialized_chunk_specs(
+            self._as_tuple(), chunk_size=chunk_size
+        )
     )
-    return _iter_async_from_sync_chunks(
-        sync_iter,
-        offload=total_bytes >= _ASYNC_OFFLOAD_THRESHOLD_BYTES,
+    return network._iter_async_from_chunk_specs(
+        manifest,
+        views,
+        raw_buffers,
+        spec_iter,
+        offload=total_bytes >= network._ASYNC_OFFLOAD_THRESHOLD_BYTES,
     )
+    # pylint: enable=protected-access
 
   @classmethod
   def deserialize_chunks(cls, chunks: Iterable[bytes]) -> "ExecutionRequest":
@@ -512,14 +163,27 @@ class ExecutionRequest:
     # calling deserialize_chunks(). Where dynamic function shipping is not
     # needed, use `pickle.Unpickler` (`find_class`) to whitelist only trusted
     # domain data types (`int`, `str`, `dict`, `list`, `data_types.*`).
-    return cls(*_deserialize_from_chunks(chunks))
+    return cls(*network._deserialize_from_chunks(chunks))  # pylint: disable=protected-access
 
   @classmethod
   async def deserialize_async_chunks(
-      cls, chunks: AsyncIterable[bytes]
+      cls,
+      chunks: AsyncIterable[bytes],
+      *,
+      bulk_server: Optional[network._BulkTransferServer] = None,  # pylint: disable=protected-access
   ) -> "ExecutionRequest":
-    """Deserializes an ExecutionRequest from an async stream of chunks."""
-    return cls(*(await _deserialize_from_async_chunks(chunks)))
+    """Deserializes an ExecutionRequest from an async stream of chunks.
+
+    Note: When out-of-band bulk TCP transport is used, small out-of-band arrays
+    (`< _BULK_PACK_MAX_BYTES = 4 MiB`) are returned as 64-byte-aligned zero-copy
+    views sharing a single underlying packed buffer. Callers retaining only a
+    small subset of arrays long-term should call `np.copy()` on them to allow
+    the shared buffer to be garbage-collected early.
+    """
+    unpacked = await network._deserialize_from_async_chunks(  # pylint: disable=protected-access
+        chunks, bulk_server=bulk_server
+    )
+    return cls(*unpacked)
 
 
 class ExecutionResponse:
@@ -561,37 +225,73 @@ class ExecutionResponse:
     self.traceback = traceback_lib.format_exc()
     self.retryable = False
 
-  def _serialize_chunks_with_size(
-      self, chunk_size: int = _STREAM_CHUNK_BYTES
-  ) -> Tuple[int, Iterator[bytes]]:
+  def _prepare_chunk_specs(
+      self,
+      chunk_size: int = network._STREAM_CHUNK_BYTES,  # pylint: disable=protected-access
+  ) -> Tuple[
+      int,
+      bytes,
+      List[memoryview],  # pylint: disable=g-bare-generic
+      List[pickle.PickleBuffer],
+      Iterator[network._ChunkSpec],  # pylint: disable=protected-access
+  ]:
+    """Prepares serialized views and chunk specs, recording errors on failure."""
+    # pylint: disable=protected-access
     try:
-      return _iter_serialized_chunks_with_size(
+      return network._prepare_serialized_chunk_specs(
           self._as_tuple(), chunk_size=chunk_size
       )
     except Exception as e:  # pylint: disable=broad-exception-caught
       self._record_serialization_error(e)
-      return _iter_serialized_chunks_with_size(
+      return network._prepare_serialized_chunk_specs(
           self._as_tuple(), chunk_size=chunk_size
       )
+    # pylint: enable=protected-access
 
   def serialize_chunks(
-      self, chunk_size: int = _STREAM_CHUNK_BYTES
+      self,
+      chunk_size: int = network._STREAM_CHUNK_BYTES,  # pylint: disable=protected-access
   ) -> Iterator[bytes]:
     """Serializes response into Pickle Protocol 5 out-of-band buffer chunks."""
-    _, chunk_iter = self._serialize_chunks_with_size(chunk_size=chunk_size)
-    return chunk_iter
+    # pylint: disable=protected-access
+    try:
+      _, chunk_iter = network._iter_serialized_chunks_with_size(
+          self._as_tuple(), chunk_size=chunk_size
+      )
+      return chunk_iter
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      self._record_serialization_error(e)
+      _, chunk_iter = network._iter_serialized_chunks_with_size(
+          self._as_tuple(), chunk_size=chunk_size
+      )
+      return chunk_iter
+    # pylint: enable=protected-access
 
   def serialize_async_chunks(
-      self, chunk_size: int = _STREAM_CHUNK_BYTES
+      self,
+      chunk_size: int = network._STREAM_CHUNK_BYTES,  # pylint: disable=protected-access
+      *,
+      bulk_server: Optional[network._BulkTransferServer] = None,  # pylint: disable=protected-access
   ) -> AsyncIterator[bytes]:
     """Serializes response into an async stream of Pickle Protocol 5 chunks."""
-    total_bytes, sync_iter = self._serialize_chunks_with_size(
-        chunk_size=chunk_size
+    # pylint: disable=protected-access
+    total_bytes, manifest, views, raw_buffers, spec_iter = (
+        self._prepare_chunk_specs(chunk_size=chunk_size)
     )
-    return _iter_async_from_sync_chunks(
-        sync_iter,
-        offload=total_bytes >= _ASYNC_OFFLOAD_THRESHOLD_BYTES,
+    if (
+        bulk_server is not None
+        and bulk_server.port > 0
+        and network._can_use_bulk_transfer(total_bytes, views)
+    ):
+      return network._stream_bulk_pull_chunks(views, raw_buffers, bulk_server)
+    return network._iter_async_from_chunk_specs(
+        manifest,
+        views,
+        raw_buffers,
+        spec_iter,
+        offload=total_bytes >= network._ASYNC_OFFLOAD_THRESHOLD_BYTES,
     )
+    # pylint: enable=protected-access
 
   @classmethod
   def deserialize_chunks(cls, chunks: Iterable[bytes]) -> "ExecutionResponse":
@@ -600,7 +300,7 @@ class ExecutionResponse:
     # unpickling. Ensure payload authenticity over trusted channels before
     # deserialization, or use custom `pickle.Unpickler` (`find_class`) to
     # whitelist only trusted domain data types.
-    return cls(*_deserialize_from_chunks(chunks))
+    return cls(*network._deserialize_from_chunks(chunks))  # pylint: disable=protected-access
 
   @classmethod
   async def deserialize_async_chunks(
@@ -608,10 +308,22 @@ class ExecutionResponse:
       chunks: AsyncIterable[bytes],
       *,
       allow_empty: bool = False,
+      bulk_host: str = "localhost",
+      seen_bulk_ports: Optional[Set[int]] = None,
   ) -> Optional["ExecutionResponse"]:
-    """Deserializes an ExecutionResponse from an async stream of chunks."""
-    unpacked = await _deserialize_from_async_chunks(
-        chunks, allow_empty=allow_empty
+    """Deserializes an ExecutionResponse from an async stream of chunks.
+
+    Note: When out-of-band bulk TCP transport is used, small out-of-band arrays
+    (`< _BULK_PACK_MAX_BYTES = 4 MiB`) are returned as 64-byte-aligned zero-copy
+    views sharing a single underlying packed buffer. Callers retaining only a
+    small subset of arrays long-term should call `np.copy()` on them to allow
+    the shared buffer to be garbage-collected early.
+    """
+    unpacked = await network._deserialize_from_async_chunks(  # pylint: disable=protected-access
+        chunks,
+        allow_empty=allow_empty,
+        bulk_host=bulk_host,
+        seen_bulk_ports=seen_bulk_ports,
     )
     return None if unpacked is None else cls(*unpacked)
 
@@ -788,42 +500,76 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
       self,
       instance: Optional[Any] = None,
       *,
-      stream_chunk_bytes: int = _STREAM_CHUNK_BYTES,
-      max_message_bytes: int = _MAX_MESSAGE_BYTES,
+      stream_chunk_bytes: int = network._STREAM_CHUNK_BYTES,  # pylint: disable=protected-access
+      max_message_bytes: int = network._MAX_MESSAGE_BYTES,  # pylint: disable=protected-access
+      enable_bulk_transport: bool = True,
+      bulk_port: int = 0,
   ):
-    _validate_stream_config(stream_chunk_bytes, max_message_bytes)
+    network._validate_stream_config(stream_chunk_bytes, max_message_bytes)  # pylint: disable=protected-access
     super().__init__(instance)
     self._server: Optional[Any] = None
     self._serve_loop: Optional[Any] = None
+    self._bulk_server: Optional[network._BulkTransferServer] = None  # pylint: disable=protected-access
     self._stream_chunk_bytes = stream_chunk_bytes
     self._max_message_bytes = max_message_bytes
+    self._enable_bulk_transport = enable_bulk_transport
+    self._configured_bulk_port = bulk_port
+
+  async def _handle_get_bulk_port(
+      self, request_bytes: bytes, context: Any
+  ) -> bytes:
+    """Returns the TCP port of the out-of-band bulk transfer server."""
+    del request_bytes, context
+    bulk_port = (
+        self._bulk_server.port
+        if (self._enable_bulk_transport and self._bulk_server is not None)
+        else 0
+    )
+    return struct.pack("<Q", bulk_port)
+
+  async def _abort_failed_precondition(
+      self, context: Any, exc: Exception
+  ) -> NoReturn:
+    if context is not None and _grpc_lib is not None:
+      await context.abort(_grpc_lib.StatusCode.FAILED_PRECONDITION, str(exc))
+    raise exc
 
   async def _handle_execute(
       self, request_iterator: AsyncIterator[bytes], context: Any
   ) -> AsyncIterator[bytes]:
     """Handles bidirectional chunked streaming execution requests."""
-    del context
     try:
       request = await ExecutionRequest.deserialize_async_chunks(
-          request_iterator
+          request_iterator, bulk_server=self._bulk_server
       )
       response = await self.execute_request(request)
+      del request
+    except network._BulkTransportError as exc:  # pylint: disable=protected-access
+      await self._abort_failed_precondition(context, exc)
     except Exception as e:  # pylint: disable=broad-exception-caught
       response = ExecutionResponse(
           error_message=str(e),
           error_type=type(e).__name__,
           traceback=traceback_lib.format_exc(),
       )
+    use_bulk = self._enable_bulk_transport and _client_supports_bulk(context)
     async for chunk in response.serialize_async_chunks(
-        chunk_size=self._stream_chunk_bytes
+        chunk_size=self._stream_chunk_bytes,
+        bulk_server=self._bulk_server if use_bulk else None,
     ):
       yield chunk
+    del response
 
   async def _handle_dispatch_task(
       self, request_iterator: AsyncIterator[bytes], context: Any
   ) -> bytes:
-    del context
-    request = await ExecutionRequest.deserialize_async_chunks(request_iterator)
+    """Handles client-streaming task dispatch and returns the task ACK ID."""
+    try:
+      request = await ExecutionRequest.deserialize_async_chunks(
+          request_iterator, bulk_server=self._bulk_server
+      )
+    except network._BulkTransportError as exc:  # pylint: disable=protected-access
+      await self._abort_failed_precondition(context, exc)
     request_id = await self.dispatch_task(request)
     return cloudpickle.dumps(request_id)
 
@@ -831,7 +577,6 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
       self, request_bytes: bytes, context: Any
   ) -> AsyncIterator[bytes]:
     """Handles server-streaming long-polling for completed task responses."""
-    del context
     timeout_s = (
         cloudpickle.loads(request_bytes)  # pylint: disable=g-unsafe-pickle-load
         if request_bytes
@@ -841,24 +586,35 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
     if response is None:
       return
     completed = False
+    # pylint: disable=protected-access
+    poll_chunk_bytes = min(
+        self._stream_chunk_bytes, network._CONCURRENT_STREAM_CHUNK_BYTES
+    )
+    use_bulk = self._enable_bulk_transport and _client_supports_bulk(context)
+    network._inc_active_poll_rpcs()
     try:
       async for chunk in response.serialize_async_chunks(
-          chunk_size=self._stream_chunk_bytes
+          chunk_size=poll_chunk_bytes,
+          bulk_server=self._bulk_server if use_bulk else None,
       ):
         yield chunk
       completed = True
     finally:
+      network._dec_active_poll_rpcs()
       if not completed:
         self._get_response_queue().put_nowait(response)
+    # pylint: enable=protected-access
 
   async def start_serving_async(self, port: int = 50051) -> Any:
     """Starts an asynchronous gRPC server listening on [::]:port."""
     if not _GRPC_AVAILABLE or _grpc_lib is None or _grpc_aio_lib is None:
       raise RuntimeError("grpc is not installed or available.")
 
+    # pylint: disable=protected-access
     self._server = _grpc_aio_lib.server(
-        options=_grpc_options(self._max_message_bytes)
+        options=network._grpc_options(self._max_message_bytes)
     )
+    # pylint: enable=protected-access
     handler = _grpc_lib.method_handlers_generic_handler(
         "tunix.ExecutionService",
         {
@@ -877,13 +633,35 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
                 request_deserializer=lambda b: b,
                 response_serializer=lambda b: b,
             ),
+            "GetBulkPort": _grpc_lib.unary_unary_rpc_method_handler(
+                self._handle_get_bulk_port,
+                request_deserializer=lambda b: b,
+                response_serializer=lambda b: b,
+            ),
         },
     )
     self._server.add_generic_rpc_handlers((handler,))
     # NOTE: add_insecure_port is for local loopback / isolated pod testing (experimental v0).
     # For production across trust boundaries, use secure_server_credentials (ALTS/mTLS).
-    self._server.add_insecure_port(f"[::]:{port}")
-    await self._server.start()
+    try:
+      self._server.add_insecure_port(f"[::]:{port}")
+      # pylint: disable=protected-access
+      if self._enable_bulk_transport and self._bulk_server is None:
+        self._bulk_server = network._BulkTransferServer()
+        self._bulk_server.start(port=self._configured_bulk_port)
+      # pylint: enable=protected-access
+      await self._server.start()
+    except BaseException:
+      if self._bulk_server is not None:
+        bulk_srv = self._bulk_server
+        self._bulk_server = None
+        await asyncio.get_running_loop().run_in_executor(None, bulk_srv.stop)
+      if self._server is not None:
+        grpc_srv = self._server
+        self._server = None
+        with contextlib.suppress(Exception):
+          await grpc_srv.stop(0)
+      raise
     return self._server
 
   @property
@@ -911,14 +689,20 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
         loop.run_until_complete(self._server.wait_for_termination())
         loop.run_until_complete(asyncio.sleep(0.1))
     finally:
+      if self._bulk_server is not None:
+        self._bulk_server.stop()
+        self._bulk_server = None
       self._serve_loop = None
       asyncio.set_event_loop(None)
       loop.close()
 
   async def stop_serving(self, grace: float = 0.5) -> None:
-
     if self._server:
       await self._server.stop(grace)
+    if self._bulk_server is not None:
+      bulk_srv = self._bulk_server
+      self._bulk_server = None
+      await asyncio.get_running_loop().run_in_executor(None, bulk_srv.stop)
 
 
 class ActorHandle(abc.ABC):
@@ -930,8 +714,9 @@ class ActorHandle(abc.ABC):
       target_address: str,
       *,
       rpc_timeout_s: Optional[float] = RPC_TIMEOUT_S,
-      stream_chunk_bytes: int = _STREAM_CHUNK_BYTES,
-      max_message_bytes: int = _MAX_MESSAGE_BYTES,
+      stream_chunk_bytes: int = network._STREAM_CHUNK_BYTES,  # pylint: disable=protected-access
+      max_message_bytes: int = network._MAX_MESSAGE_BYTES,  # pylint: disable=protected-access
+      enable_bulk_transport: bool = True,
   ) -> "ActorHandle":
     """Instantiates a remote actor handle targeting the specified string URI."""
     if target_address.startswith("grpc://") and _GRPC_AVAILABLE:
@@ -940,6 +725,7 @@ class ActorHandle(abc.ABC):
           rpc_timeout_s=rpc_timeout_s,
           stream_chunk_bytes=stream_chunk_bytes,
           max_message_bytes=max_message_bytes,
+          enable_bulk_transport=enable_bulk_transport,
       )
     return RemoteActorHandle(target_address=target_address)
 
@@ -1023,19 +809,41 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
       target_address: str,
       *,
       rpc_timeout_s: Optional[float] = RPC_TIMEOUT_S,
-      stream_chunk_bytes: int = _STREAM_CHUNK_BYTES,
-      max_message_bytes: int = _MAX_MESSAGE_BYTES,
+      stream_chunk_bytes: int = network._STREAM_CHUNK_BYTES,  # pylint: disable=protected-access
+      max_message_bytes: int = network._MAX_MESSAGE_BYTES,  # pylint: disable=protected-access
+      enable_bulk_transport: bool = True,
   ):
     if not _GRPC_AVAILABLE or _grpc_aio_lib is None:
       raise RuntimeError("grpc is not installed or available.")
-    _validate_stream_config(stream_chunk_bytes, max_message_bytes)
+    # pylint: disable=protected-access
+    network._validate_stream_config(stream_chunk_bytes, max_message_bytes)
     self.target_address = target_address
-    self._host_port = target_address.replace("grpc://", "")
+    self._host_port = target_address.removeprefix("grpc://")
+    self._enable_bulk_transport = enable_bulk_transport
+    if enable_bulk_transport:
+      try:
+        self._bulk_host, _ = network._extract_host_and_port(target_address)
+      except ValueError as exc:
+        raise ValueError(
+            "Bulk TCP transport requires a direct host[:port] target address "
+            f"(got {target_address!r}); pass enable_bulk_transport=False to "
+            "use non-host[:port] gRPC target schemes."
+        ) from exc
+    else:
+      self._bulk_host = ""
+    # pylint: enable=protected-access
+    self._bulk_port: Optional[int] = None
+    self._bulk_probe_failed_until: float = 0.0
+    self._bulk_fallback_logged: bool = False
+    self._resolve_task: Optional[asyncio.Task[int]] = None
+    self._bulk_port_gen: int = 0
+    self._seen_bulk_ports: Set[int] = set()
     self._channel: Optional[Any] = None
     self._channel_loop: Optional[asyncio.AbstractEventLoop] = None
     self._rpc: Optional[Any] = None
     self._dispatch_rpc: Optional[Any] = None
     self._poll_rpc: Optional[Any] = None
+    self._get_bulk_port_rpc: Optional[Any] = None
     self._rpc_timeout_s = rpc_timeout_s
     self._stream_chunk_bytes = stream_chunk_bytes
     self._max_message_bytes = max_message_bytes
@@ -1047,6 +855,7 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     self._sync_thread: Optional[threading.Thread] = None
     self._sync_channel: Optional[Any] = None
     self._sync_rpc: Optional[Any] = None
+    self._sync_get_bulk_port_rpc: Optional[Any] = None
     self._sync_lock = threading.Lock()
 
   def _make_rpc(self, channel: Any) -> Any:
@@ -1055,6 +864,241 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
         request_serializer=lambda b: b,
         response_deserializer=lambda b: b,
     )
+
+  def _make_get_bulk_port_rpc(self, channel: Any) -> Any:
+    return channel.unary_unary(
+        "/tunix.ExecutionService/GetBulkPort",
+        request_serializer=lambda b: b,
+        response_deserializer=lambda b: b,
+    )
+
+  def _get_active_resolve_task(
+      self, loop: asyncio.AbstractEventLoop
+  ) -> Optional[asyncio.Task[int]]:
+    task = self._resolve_task
+    if task is None or task.done():
+      return None
+    if task.get_loop() is loop:
+      return task
+    return None
+
+  def _record_bulk_fallback(self, msg: str, *args: Any) -> None:
+    """Negative-caches a failed bulk port probe with cooldown and logs once."""
+    self._bulk_port = 0
+    self._bulk_probe_failed_until = (
+        time.monotonic() + network._BULK_PROBE_RETRY_COOLDOWN_S  # pylint: disable=protected-access
+    )
+    if not self._bulk_fallback_logged:
+      self._bulk_fallback_logged = True
+      logging.warning(msg, *args)
+    else:
+      logging.debug(msg, *args)
+
+  def _invalidate_bulk_port(self) -> None:
+    """Evicts cached bulk port and closes any pooled sockets to it."""
+    self._bulk_port_gen += 1
+    self._resolve_task = None
+    ports = set(self._seen_bulk_ports)
+    if self._bulk_port is not None and self._bulk_port > 0:
+      ports.add(self._bulk_port)
+    self._bulk_port = None
+    self._bulk_probe_failed_until = 0.0
+    for port in ports:
+      network._DEFAULT_BULK_SOCKET_POOL.close_target(self._bulk_host, port)  # pylint: disable=protected-access
+
+  async def _probe_and_cache_bulk_port(self, port: int, gen: int) -> int:
+    """Probes TCP connectivity asynchronously without occupying executor threads."""
+    if port <= 0:
+      if self._bulk_port_gen == gen:
+        self._bulk_port = 0
+        self._bulk_probe_failed_until = float("inf")
+      return 0
+    # pylint: disable=protected-access
+    try:
+      await network._DEFAULT_BULK_SOCKET_POOL.probe_async(self._bulk_host, port)
+    except OSError as exc:
+      if self._bulk_port_gen == gen:
+        self._record_bulk_fallback(
+            "Bulk TCP probe to %s:%d failed (%s); falling back to gRPC"
+            " chunks.",
+            self._bulk_host,
+            port,
+            exc,
+        )
+      return 0
+    # pylint: enable=protected-access
+    if self._bulk_port_gen != gen:
+      return 0
+    self._bulk_port = port
+    self._bulk_probe_failed_until = 0.0
+    self._seen_bulk_ports.add(port)
+    return port
+
+  async def _query_and_probe_bulk_port(
+      self,
+      get_bulk_port_rpc: Any,
+      gen: int,
+  ) -> int:
+    """Calls `GetBulkPort` and probes the returned TCP port."""
+    try:
+      probe_rpc_timeout = (
+          min(float(self._rpc_timeout_s), network._BULK_PROBE_TIMEOUT_S)  # pylint: disable=protected-access
+          if self._rpc_timeout_s is not None
+          else network._BULK_PROBE_TIMEOUT_S  # pylint: disable=protected-access
+      )
+      resp_bytes = await get_bulk_port_rpc(b"", timeout=probe_rpc_timeout)
+      if len(resp_bytes) >= 8:
+        (port,) = struct.unpack("<Q", resp_bytes[:8])
+        return await self._probe_and_cache_bulk_port(int(port), gen)
+      if self._bulk_port_gen == gen:
+        self._record_bulk_fallback(
+            "Invalid GetBulkPort response from %s (%d bytes); falling back to"
+            " gRPC chunks.",
+            self._host_port,
+            len(resp_bytes),
+        )
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+      if self._bulk_port_gen == gen:
+        if (
+            _grpc_lib is not None
+            and _grpc_aio_lib is not None
+            and isinstance(exc, _grpc_aio_lib.AioRpcError)
+            and exc.code() == _grpc_lib.StatusCode.UNIMPLEMENTED
+        ):
+          self._bulk_port = 0
+          self._bulk_probe_failed_until = float("inf")
+        else:
+          self._record_bulk_fallback(
+              "GetBulkPort RPC to %s failed (%s); falling back to gRPC"
+              " chunks.",
+              self._host_port,
+              exc,
+          )
+    return 0
+
+  async def _ensure_bulk_port(self, get_bulk_port_rpc: Any) -> int:
+    """Resolves and probes the target server's out-of-band bulk TCP port."""
+    if not self._enable_bulk_transport or get_bulk_port_rpc is None:
+      return 0
+    loop = asyncio.get_running_loop()
+    if self._bulk_port is not None:
+      if self._bulk_port > 0:
+        return self._bulk_port
+      now = time.monotonic()
+      if now < self._bulk_probe_failed_until:
+        return 0
+      # Cooldown expired: schedule a non-blocking background re-probe on the
+      # active loop so in-flight RPCs never stall for 2s when the bulk port is
+      # firewalled.
+      if self._get_active_resolve_task(loop) is None:
+        self._bulk_probe_failed_until = (
+            now + network._BULK_PROBE_RETRY_COOLDOWN_S  # pylint: disable=protected-access
+        )
+        self._resolve_task = loop.create_task(
+            self._query_and_probe_bulk_port(
+                get_bulk_port_rpc, self._bulk_port_gen
+            )
+        )
+      return 0
+    task = self._get_active_resolve_task(loop)
+    if task is None:
+      task = loop.create_task(
+          self._query_and_probe_bulk_port(
+              get_bulk_port_rpc, self._bulk_port_gen
+          )
+      )
+      self._resolve_task = task
+    try:
+      return await asyncio.shield(task)
+    except asyncio.CancelledError:
+      curr_task = asyncio.current_task(loop)
+      if curr_task is not None and curr_task.cancelling() > 0:
+        raise
+      return 0
+
+  async def _prepare_request_chunks(
+      self,
+      request: ExecutionRequest,
+      get_bulk_port_rpc: Any,
+      *,
+      push_tracker: Optional[network._BulkPushTracker] = None,  # pylint: disable=protected-access
+      need_port_for_response: bool = True,
+  ) -> Tuple[int, AsyncIterator[bytes]]:
+    """Prepares serialized request chunks and resolves bulk port when required."""
+    # pylint: disable=protected-access
+    total_bytes, manifest, views, raw_buffers, spec_iter = (
+        network._prepare_serialized_chunk_specs(
+            request._as_tuple(), chunk_size=self._stream_chunk_bytes
+        )
+    )
+    can_bulk_push = (
+        self._enable_bulk_transport
+        and network._can_use_bulk_transfer(total_bytes, views)
+    )
+    bulk_port = 0
+    if can_bulk_push or need_port_for_response:
+      try:
+        bulk_port = await self._ensure_bulk_port(get_bulk_port_rpc)
+      except BaseException:
+        network._release_views_and_buffers(views, raw_buffers)
+        raise
+    if can_bulk_push and bulk_port > 0:
+      return (
+          bulk_port,
+          network._stream_bulk_push_chunks(
+              views,
+              raw_buffers,
+              self._bulk_host,
+              bulk_port,
+              push_tracker=push_tracker,
+          ),
+      )
+    return (
+        bulk_port,
+        network._iter_async_from_chunk_specs(
+            manifest,
+            views,
+            raw_buffers,
+            spec_iter,
+            offload=total_bytes >= network._ASYNC_OFFLOAD_THRESHOLD_BYTES,
+        ),
+    )
+    # pylint: enable=protected-access
+
+  def _check_post_rpc_push_tracker(
+      self, push_tracker: network._BulkPushTracker  # pylint: disable=protected-access
+  ) -> None:
+    if push_tracker.error is not None:
+      logging.debug(
+          "Bulk push post-ACK error after RPC succeeded: %s",
+          push_tracker.error,
+      )
+      self._invalidate_bulk_port()
+
+  def _handle_rpc_exception(
+      self,
+      exc: BaseException,
+      push_tracker: network._BulkPushTracker,  # pylint: disable=protected-access
+  ) -> NoReturn:
+    """Invalidates cached bulk port only on transport errors and re-raises."""
+    if isinstance(exc, asyncio.CancelledError):
+      curr_task = asyncio.current_task()
+      if curr_task is not None and curr_task.cancelling() > 0:
+        raise exc
+    if push_tracker.error is not None:
+      self._invalidate_bulk_port()
+      raise push_tracker.error from exc
+    if (
+        _grpc_lib is not None
+        and _grpc_aio_lib is not None
+        and isinstance(exc, _grpc_aio_lib.AioRpcError)
+        and exc.code() == _grpc_lib.StatusCode.FAILED_PRECONDITION
+    ):
+      self._invalidate_bulk_port()
+      raise ConnectionError(str(exc.details())) from exc
+    if isinstance(exc, network._BulkTransportError):  # pylint: disable=protected-access
+      self._invalidate_bulk_port()
+    raise exc
 
   async def _ensure_async_channel(self) -> Any:
     """Ensures the async gRPC channel and stubs are bound to the active loop."""
@@ -1067,10 +1111,12 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     ):
       old_channel = self._channel
       self._channel = _grpc_aio_lib.insecure_channel(
-          self._host_port, options=_grpc_options(self._max_message_bytes)
+          self._host_port,
+          options=network._grpc_options(self._max_message_bytes),  # pylint: disable=protected-access
       )
       self._channel_loop = current_loop
       self._rpc = self._make_rpc(self._channel)
+      self._get_bulk_port_rpc = self._make_get_bulk_port_rpc(self._channel)
       self._dispatch_rpc = self._channel.stream_unary(
           "/tunix.ExecutionService/DispatchTask",
           request_serializer=lambda b: b,
@@ -1091,6 +1137,7 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
   async def _execute_rpc(
       self,
       rpc: Any,
+      get_bulk_port_rpc: Any,
       method_name: Optional[str],
       args: Sequence[Any],
       kwargs: Dict[str, Any],
@@ -1099,9 +1146,26 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     request = ExecutionRequest(
         method_name=method_name, args=args, kwargs=kwargs
     )
-    chunks = request.serialize_async_chunks(chunk_size=self._stream_chunk_bytes)
-    call = rpc(chunks, timeout=self._rpc_timeout_s)
-    response = await ExecutionResponse.deserialize_async_chunks(call)
+    push_tracker = network._BulkPushTracker()  # pylint: disable=protected-access
+    bulk_port, chunks = await self._prepare_request_chunks(
+        request,
+        get_bulk_port_rpc,
+        push_tracker=push_tracker,
+        need_port_for_response=True,
+    )
+    call_kwargs: Dict[str, Any] = {"timeout": self._rpc_timeout_s}
+    if bulk_port > 0:
+      call_kwargs["metadata"] = _BULK_CAPABILITY_METADATA
+    call = rpc(chunks, **call_kwargs)
+    try:
+      response = await ExecutionResponse.deserialize_async_chunks(
+          call,
+          bulk_host=self._bulk_host,
+          seen_bulk_ports=self._seen_bulk_ports,
+      )
+    except BaseException as exc:  # pylint: disable=broad-exception-caught
+      self._handle_rpc_exception(exc, push_tracker)
+    self._check_post_rpc_push_tracker(push_tracker)
     assert response is not None
     return response.unwrap()
 
@@ -1145,17 +1209,25 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     assert _grpc_aio_lib is not None
     if self._sync_rpc is None:
       self._sync_channel = _grpc_aio_lib.insecure_channel(
-          self._host_port, options=_grpc_options(self._max_message_bytes)
+          self._host_port,
+          options=network._grpc_options(self._max_message_bytes),  # pylint: disable=protected-access
       )
       self._sync_rpc = self._make_rpc(self._sync_channel)
-    return await self._execute_rpc(self._sync_rpc, method_name, args, kwargs)
+      self._sync_get_bulk_port_rpc = self._make_get_bulk_port_rpc(
+          self._sync_channel
+      )
+    return await self._execute_rpc(
+        self._sync_rpc, self._sync_get_bulk_port_rpc, method_name, args, kwargs
+    )
 
   async def asubmit(
       self, method_name: Optional[str] = None, *args, **kwargs
   ) -> Any:
     """Asynchronously invokes remote method over gRPC."""
     await self._ensure_async_channel()
-    return await self._execute_rpc(self._rpc, method_name, args, kwargs)
+    return await self._execute_rpc(
+        self._rpc, self._get_bulk_port_rpc, method_name, args, kwargs
+    )
 
   async def dispatch_task(
       self,
@@ -1170,8 +1242,19 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     request = ExecutionRequest(
         request_id=request_id, method_name=method_name, args=args, kwargs=kwargs
     )
-    chunks = request.serialize_async_chunks(chunk_size=self._stream_chunk_bytes)
-    return await self._dispatch_rpc(chunks, timeout=self._rpc_timeout_s)
+    push_tracker = network._BulkPushTracker()  # pylint: disable=protected-access
+    _, chunks = await self._prepare_request_chunks(
+        request,
+        self._get_bulk_port_rpc,
+        push_tracker=push_tracker,
+        need_port_for_response=False,
+    )
+    try:
+      result = await self._dispatch_rpc(chunks, timeout=self._rpc_timeout_s)
+    except BaseException as exc:  # pylint: disable=broad-exception-caught
+      self._handle_rpc_exception(exc, push_tracker)
+    self._check_post_rpc_push_tracker(push_tracker)
+    return result
 
   async def poll_responses(
       self, timeout_s: float = LONG_POLL_TIMEOUT_S
@@ -1179,17 +1262,36 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     """Long-polls remote server response queue for completed task results."""
     await self._ensure_async_channel()
     assert self._poll_rpc is not None
-    call = self._poll_rpc(timeout_s, timeout=self._rpc_timeout_s)
-    return await ExecutionResponse.deserialize_async_chunks(
-        call, allow_empty=True
-    )
+    bulk_port = await self._ensure_bulk_port(self._get_bulk_port_rpc)
+    call_kwargs: Dict[str, Any] = {"timeout": self._rpc_timeout_s}
+    if bulk_port > 0:
+      call_kwargs["metadata"] = _BULK_CAPABILITY_METADATA
+    call = self._poll_rpc(timeout_s, **call_kwargs)
+    try:
+      return await ExecutionResponse.deserialize_async_chunks(
+          call,
+          allow_empty=True,
+          bulk_host=self._bulk_host,
+          seen_bulk_ports=self._seen_bulk_ports,
+      )
+    except network._BulkTransportError:  # pylint: disable=protected-access
+      self._invalidate_bulk_port()
+      raise
 
   async def close(self) -> None:
+    loop = _running_loop()
+    if loop is not None:
+      active_task = self._get_active_resolve_task(loop)
+      if active_task is not None:
+        active_task.cancel()
+    self._invalidate_bulk_port()
+    self._seen_bulk_ports.clear()
     if self._channel is not None:
       await self._channel.close()
       self._channel = None
       self._channel_loop = None
       self._rpc = None
+      self._get_bulk_port_rpc = None
       self._dispatch_rpc = None
       self._poll_rpc = None
     sync_loop = self._sync_loop
@@ -1220,6 +1322,7 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
       self._sync_thread = None
       self._sync_channel = None
       self._sync_rpc = None
+      self._sync_get_bulk_port_rpc = None
 
 
 class InProcessActorHandle(ActorHandle):
@@ -1318,7 +1421,7 @@ class ActorPool(abc.ABC):
       tasks: Sequence of task specifications formatted as 4-tuples:
         `(request_id, method_name, args, kwargs)`, where:
           - request_id: Unique request identifier string.
-          - method_name: Target remote method name to execute on the worker instance.
+          - method_name: Target remote method name to execute on the worker.
           - args: Positional arguments sequence passed to the remote method.
           - kwargs: Keyword arguments dictionary passed to the remote method.
     """
@@ -1476,7 +1579,7 @@ class RoutingActorPool(ActorPool):
       tasks: Sequence of task specifications formatted as 4-tuples:
         `(request_id, method_name, args, kwargs)`, where:
           - request_id: Unique request identifier string.
-          - method_name: Target remote method name to execute on the worker instance.
+          - method_name: Target remote method name to execute on the worker.
           - args: Positional arguments sequence passed to the remote method.
           - kwargs: Keyword arguments dictionary passed to the remote method.
     """
@@ -1514,10 +1617,11 @@ class RoutingActorPool(ActorPool):
            upon session exit.
 
     Args:
-      initial_tasks: Optional sequence of initial task specifications to dispatch
-        upon entering the session, formatted as 4-tuples `(request_id, method_name, args, kwargs)`, where:
+      initial_tasks: Optional sequence of initial task specifications to
+        dispatch upon entering the session, formatted as 4-tuples
+        `(request_id, method_name, args, kwargs)`, where:
           - request_id: Unique request identifier string.
-          - method_name: Target remote method name to execute on the worker instance.
+          - method_name: Target remote method name to execute on the worker.
           - args: Positional arguments sequence passed to the remote method.
           - kwargs: Keyword arguments dictionary passed to the remote method.
     """
@@ -1585,8 +1689,9 @@ class PoolExecutionSession:
       # exited or died while dispatch_task was awaiting.
       self._ensure_worker_polling(actor)
       return request_id
-    except Exception:
-      # Only decrement _in_flight if _poll_worker_loop hasn't already failed and cleared it.
+    except BaseException:
+      # Roll back _in_flight on any exception or cancellation if
+      # _poll_worker_loop hasn't already failed and cleared it.
       if request_id in dispatched_set:
         dispatched_set.remove(request_id)
         self._in_flight = max(0, self._in_flight - 1)
@@ -1730,6 +1835,7 @@ def remote(
 
     @remote
     def standalone_task(x: int) -> int: ...
+    handle = standalone_task.remote
 
     # 2. Positional string argument: `cls_or_func` receives the URI directly.
     # Dispatches to address="grpc://worker-pod:50051" and transport="grpc".
