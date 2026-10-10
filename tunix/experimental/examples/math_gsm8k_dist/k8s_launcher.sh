@@ -219,8 +219,8 @@ stop_orchestrator() {
     echo "kubectl delete workload -l jobset.sigs.k8s.io/jobset-name=${ORCHESTRATOR_ID} -n ${K8S_NAMESPACE}"
     echo "kubectl delete pods -l jobset.sigs.k8s.io/jobset-name=${ORCHESTRATOR_ID} -n ${K8S_NAMESPACE} --force --grace-period=0 --ignore-not-found=true"
   else
-    kubectl delete jobset "${ORCHESTRATOR_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found --wait=true
-    kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name=${ORCHESTRATOR_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
+    kubectl delete jobset "${ORCHESTRATOR_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found --wait=false
+    kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name=${ORCHESTRATOR_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found=true --wait=false 2>/dev/null || true
     kubectl delete pods -l "jobset.sigs.k8s.io/jobset-name=${ORCHESTRATOR_ID}" -n "${K8S_NAMESPACE}" --force --grace-period=0 --ignore-not-found=true 2>/dev/null || true
     while kubectl get jobset "${ORCHESTRATOR_ID}" -n "${K8S_NAMESPACE}" &>/dev/null; do
       sleep 2
@@ -342,8 +342,8 @@ stop_trainer() {
     echo "kubectl delete workload -l jobset.sigs.k8s.io/jobset-name=${TRAINER_ID} -n ${K8S_NAMESPACE}"
     echo "kubectl delete pods -l jobset.sigs.k8s.io/jobset-name=${TRAINER_ID} -n ${K8S_NAMESPACE} --force --grace-period=0 --ignore-not-found=true"
   else
-    kubectl delete jobset "${TRAINER_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found --wait=true
-    kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name=${TRAINER_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
+    kubectl delete jobset "${TRAINER_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found --wait=false
+    kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name=${TRAINER_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found=true --wait=false 2>/dev/null || true
     kubectl delete pods -l "jobset.sigs.k8s.io/jobset-name=${TRAINER_ID}" -n "${K8S_NAMESPACE}" --force --grace-period=0 --ignore-not-found=true 2>/dev/null || true
     while kubectl get jobset "${TRAINER_ID}" -n "${K8S_NAMESPACE}" &>/dev/null; do
       sleep 2
@@ -468,7 +468,7 @@ stop_rollout() {
       echo "kubectl delete leaderworkerset ${target_ids[*]} -n ${K8S_NAMESPACE}"
       echo "kubectl delete pods -l \"leaderworkerset.sigs.k8s.io/name in (${selector_list})\" -n ${K8S_NAMESPACE} --force --grace-period=0 --ignore-not-found=true"
     else
-      kubectl delete leaderworkerset "${target_ids[@]}" -n "${K8S_NAMESPACE}" --ignore-not-found --wait=true
+      kubectl delete leaderworkerset "${target_ids[@]}" -n "${K8S_NAMESPACE}" --ignore-not-found --wait=false
       kubectl delete pods -l "leaderworkerset.sigs.k8s.io/name in (${selector_list})" -n "${K8S_NAMESPACE}" --force --grace-period=0 --ignore-not-found=true 2>/dev/null || true
     fi
   else
@@ -477,7 +477,7 @@ stop_rollout() {
       echo "kubectl delete workload -l \"jobset.sigs.k8s.io/jobset-name in (${selector_list})\" -n ${K8S_NAMESPACE} --ignore-not-found=true --wait=false"
       echo "kubectl delete pods -l \"jobset.sigs.k8s.io/jobset-name in (${selector_list})\" -n ${K8S_NAMESPACE} --force --grace-period=0 --ignore-not-found=true"
     else
-      kubectl delete jobset "${target_ids[@]}" -n "${K8S_NAMESPACE}" --ignore-not-found --wait=true
+      kubectl delete jobset "${target_ids[@]}" -n "${K8S_NAMESPACE}" --ignore-not-found --wait=false
       kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name in (${selector_list})" -n "${K8S_NAMESPACE}" --ignore-not-found=true --wait=false 2>/dev/null || true
       kubectl delete pods -l "jobset.sigs.k8s.io/jobset-name in (${selector_list})" -n "${K8S_NAMESPACE}" --force --grace-period=0 --ignore-not-found=true 2>/dev/null || true
     fi

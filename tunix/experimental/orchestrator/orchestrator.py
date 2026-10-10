@@ -689,7 +689,12 @@ class ClusterOrchestrator:
     if not worker_ids:
       return
     evicted_rollout_ids: set[str] = set()
-    last_rollout_err: BaseException | None = None
+    last_rollout_err: Exception | None = None
+    initial_rollout_ids = [
+        wid
+        for wid in worker_ids
+        if datatypes.Role.ROLLOUT.value in shims[wid].info().roles
+    ]
     try:
       with futures.ThreadPoolExecutor(max_workers=len(worker_ids)) as pool:
 
@@ -721,6 +726,12 @@ class ClusterOrchestrator:
                 self.registry.evict(wid)
               else:
                 raise
+          if (
+              initial_rollout_ids
+              and len(evicted_rollout_ids) >= len(initial_rollout_ids)
+              and last_rollout_err is not None
+          ):
+            raise last_rollout_err
 
         if self.trajectory_store_config is not None:
           def _cfg_store(wid: str) -> None:
@@ -752,18 +763,6 @@ class ClusterOrchestrator:
           shims[wid].handle.submit("start")
 
         _run_stage("start", _start_worker)
-
-        initial_rollout_ids = [
-            wid
-            for wid in worker_ids
-            if datatypes.Role.ROLLOUT.value in shims[wid].info().roles
-        ]
-        if (
-            initial_rollout_ids
-            and len(evicted_rollout_ids) >= len(initial_rollout_ids)
-            and last_rollout_err is not None
-        ):
-          raise last_rollout_err
     except BaseException:
       with self._lock:
         self._brought_up = False
