@@ -122,6 +122,9 @@ _ubench_main() {
       ;;
   esac
 
+  if [[ -z "${PROJECT:-}" || -z "${REGION:-}" || -z "${CLUSTER:-}" ]]; then
+    _ubench_log "Warning: PROJECT, REGION, or CLUSTER is not set. uBench might not be able to find the cluster or report metrics."
+  fi
   local trainer_topology="${TRAINER_TPU_SLICE#tpu7x:}"
   local rollout_topology="${ROLLOUT_TPU_SLICE#tpu7x:}"
   local trainer_chips rollout_chips
