@@ -81,12 +81,96 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument(
       "--rollout_replicas",
       type=int,
-      default=int(
-          os.getenv("ROLLOUT_REPLICAS", os.getenv("ROLLOUT_WORKERS", "1"))
+      default=(
+          int(val)
+          if (
+              val := (
+                  os.getenv("ROLLOUT_REPLICAS")
+                  or os.getenv("ROLLOUT_WORKERS")
+                  or ""
+              ).strip()
+          )
+          else 1
       ),
       help=(
           "Minimum number of rollout worker replicas to wait for before"
           " starting training."
+      ),
+  )
+  parser.add_argument(
+      "--rollout_fault_tolerance",
+      action=argparse.BooleanOptionalAction,
+      default=os.getenv("ROLLOUT_FAULT_TOLERANCE", "true").strip().lower()
+      not in ("0", "false", "no"),
+      help=(
+          "Enable rollout worker fault tolerance (eviction, retry, and dynamic "
+          "rejoin)."
+      ),
+  )
+  parser.add_argument(
+      "--max_concurrent_rollouts_per_worker",
+      type=int,
+      default=(
+          int(val)
+          if (val := os.getenv("MAX_CONCURRENT_ROLLOUTS_PER_WORKER", "").strip())
+          else None
+      )
+      or None,
+      help=(
+          "Optional cap on concurrent in-flight rollouts dispatched to any "
+          "single rollout worker."
+      ),
+  )
+  parser.add_argument(
+      "--rollout_task_timeout_s",
+      type=float,
+      default=(
+          float(val)
+          if (val := os.getenv("ROLLOUT_TASK_TIMEOUT_S", "").strip())
+          else None
+      )
+      or None,
+      help=(
+          "Optional per-task execution timeout in seconds once a rollout "
+          "request is dispatched to a worker."
+      ),
+  )
+  parser.add_argument(
+      "--max_zero_worker_wait_s",
+      type=float,
+      default=(
+          float(val)
+          if (val := os.getenv("MAX_ZERO_WORKER_WAIT_S", "").strip())
+          else 600.0
+      ),
+      help=(
+          "Maximum duration in seconds to wait when zero active rollout "
+          "workers remain before raising NoHealthyRolloutWorkersError."
+      ),
+  )
+  parser.add_argument(
+      "--rollout_max_task_retries",
+      type=int,
+      default=(
+          int(val)
+          if (val := os.getenv("ROLLOUT_MAX_TASK_RETRIES", "").strip())
+          else 3
+      ),
+      help=(
+          "Maximum number of retry attempts per rollout request_id before "
+          "synthesizing a terminal FAILED placeholder trajectory."
+      ),
+  )
+  parser.add_argument(
+      "--recover_unknown_transfer_state",
+      action=argparse.BooleanOptionalAction,
+      default=os.getenv("RECOVER_UNKNOWN_TRANSFER_STATE", "false")
+      .strip()
+      .lower()
+      in ("1", "true", "yes"),
+      help=(
+          "Attempt recovery from RoundState.UNKNOWN_TRANSFER_STATE during "
+          "weight sync by evicting uncommitted workers and retrying once."
       ),
   )
   parser.add_argument("--max_steps", type=int, default=1)
@@ -756,6 +840,14 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           "jax_cache_gcs_dir": os.getenv("JAX_CACHE_GCS_DIR"),
           "rollout_jax_cache_gcs_dir": os.getenv("ROLLOUT_JAX_CACHE_GCS_DIR"),
       },
+      fault_tolerance_config=datatypes.RolloutFaultToleranceConfig(
+          enabled=args.rollout_fault_tolerance,
+          max_task_retries=args.rollout_max_task_retries,
+          max_in_flight_per_worker=args.max_concurrent_rollouts_per_worker,
+          task_timeout_s=args.rollout_task_timeout_s,
+          max_zero_worker_wait_s=args.max_zero_worker_wait_s,
+          recover_unknown_transfer_state=args.recover_unknown_transfer_state,
+      ),
   )
   context.ipc.discovery.on_register(
       functools.partial(

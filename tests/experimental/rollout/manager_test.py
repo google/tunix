@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import asyncio
+import contextlib
 import math
 import os
 import types
@@ -715,6 +716,89 @@ class WeightSyncModeTest(absltest.TestCase):
     mock_delegate_cls.assert_called_once_with(
         server_id="inprocess_vllm_sampler"
     )
+
+
+class MaxConcurrencyTest(unittest.IsolatedAsyncioTestCase):
+
+  async def test_max_concurrency_limits_concurrent_episodes(self):
+    active = 0
+    peak = 0
+    gate = asyncio.Event()
+
+    class _TrackingCollector(_NoopCollector):
+
+      async def run_episode(self):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await gate.wait()
+        await asyncio.sleep(0.005)
+        active -= 1
+        return datatypes.TrajectoryItem(
+            prompt_id=self.traj_id,
+            group_index=0,
+            traj={},
+        )
+
+    manager = manager_lib.RolloutManager(
+        sampler=_FakeSyncSampler([]),
+        tokenizer="mock",
+        chat_parser="mock",
+        max_concurrency=2,
+    )
+    reqs = [
+        datatypes.RolloutRequest(
+            request_id=f"req_{i}",
+            prompt=f"prompt {i}",
+            prompt_id=f"p_{i}",
+            group_index=0,
+        )
+        for i in range(5)
+    ]
+
+    with mock.patch.object(
+        manager_lib.collector_lib,
+        "TrajectoryCollectorEngine",
+        _TrackingCollector,
+    ):
+      gen_task = asyncio.create_task(manager.generate(reqs))
+      await asyncio.sleep(0.02)
+      self.assertEqual(active, 2)
+      self.assertEqual(peak, 2)
+      gate.set()
+      results = await gen_task
+
+    self.assertEqual(len(results), 5)
+    self.assertEqual(peak, 2)
+
+  async def test_uncapped_max_concurrency_runs_without_semaphore(self):
+    for limit in (None, 0):
+      manager = manager_lib.RolloutManager(
+          sampler=_FakeSyncSampler([]),
+          tokenizer="mock",
+          chat_parser="mock",
+          max_concurrency=limit,
+      )
+      self.assertEqual(manager.max_concurrency, 0 if limit is None else limit)
+      self.assertIsInstance(
+          manager._get_concurrency_semaphore(), contextlib.nullcontext
+      )
+      reqs = [
+          datatypes.RolloutRequest(
+              request_id=f"req_{i}",
+              prompt=f"prompt {i}",
+              prompt_id=f"p_{i}",
+              group_index=0,
+          )
+          for i in range(3)
+      ]
+      with mock.patch.object(
+          manager_lib.collector_lib,
+          "TrajectoryCollectorEngine",
+          _NoopCollector,
+      ):
+        results = await manager.generate(reqs)
+      self.assertEqual(len(results), 3)
 
 
 if __name__ == "__main__":

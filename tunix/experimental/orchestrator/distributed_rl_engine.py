@@ -22,9 +22,12 @@ AbstractRLEngine.
 
 import asyncio
 import collections
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 import concurrent.futures
+import contextlib
+import dataclasses
 import inspect
+import time
 from typing import Any
 import uuid
 
@@ -37,6 +40,7 @@ from tunix.experimental.metrics import metrics as exp_metrics
 from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import rl_engine_interface
+from tunix.experimental.weight_sync import weight_sync_coordinator as weight_sync_coordinator_lib
 from tunix.experimental.worker import remote_execution
 
 _summarize_list = logging_utils.summarize_list
@@ -48,16 +52,23 @@ def _response_to_trajectory_item(resp: Any) -> datatypes.TrajectoryItem:
     raise TypeError(f"Unsupported response type: {type(resp)}")
 
   if resp.payload is not None:
+    if resp.metadata and isinstance(resp.payload, datatypes.TrajectoryItem):
+      merged_meta = dict(resp.metadata)
+      if resp.payload.metadata:
+        merged_meta.update(resp.payload.metadata)
+      return dataclasses.replace(resp.payload, metadata=merged_meta)
     return resp.payload
 
   if resp.error is not None:
     metadata = dict(resp.metadata) if resp.metadata else {}
     prompt_id = metadata.get("prompt_id", "")
     group_index = metadata.get("group_index", 0)
+    policy_version = int(metadata.get("policy_version", 0) or 0)
     metadata["error"] = str(resp.error)
     return datatypes.TrajectoryItem(
         prompt_id=prompt_id,
         group_index=group_index,
+        policy_version=policy_version,
         traj={
             "status": datatypes.TrajectoryStatus.FAILED,
             "trajectory_reward": 0.0,
@@ -83,27 +94,244 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           Mapping[datatypes.Role, remote_execution.ActorHandle] | None
       ) = None,
       weight_sync_coordinator: Any = None,
+      on_worker_evicted: (
+          Callable[[remote_execution.ActorHandle, BaseException | None], None]
+          | None
+      ) = None,
+      max_concurrent_rollouts_per_worker: int | None = None,
+      rollout_worker_capacities: (
+          Mapping[remote_execution.ActorHandle, int] | None
+      ) = None,
+      rollout_task_timeout_s: float | None = None,
+      fault_tolerance_config: datatypes.RolloutFaultToleranceConfig | None = (
+          None
+      ),
+      max_zero_worker_wait_s: float | None = None,
   ):
-    self._rollout_workers = list(rollout_workers)
-    self._rollout_pool = remote_execution.RoutingActorPool(
-        self._rollout_workers
+    # Legacy scalar arguments take precedence over the consolidated config;
+    # `with_overrides` validates the merged result.
+    ft_cfg = (
+        fault_tolerance_config or datatypes.RolloutFaultToleranceConfig()
+    ).with_overrides(
+        max_in_flight_per_worker=max_concurrent_rollouts_per_worker,
+        task_timeout_s=rollout_task_timeout_s,
+        max_zero_worker_wait_s=max_zero_worker_wait_s,
     )
-    # Least-loaded, not hash-by-traj_id: each rollout request is one whole
-    # episode, and episode lengths vary by 10x, so hashing left some workers
-    # with twice the episodes of others and stretched the batch tail.
-    self._rollout_session = remote_execution.PoolExecutionSession(
-        self._rollout_pool, least_loaded=True
+    self._fault_tolerance_config = ft_cfg
+    self._max_zero_worker_wait_s = ft_cfg.max_zero_worker_wait_s
+    self._zero_worker_since: float | None = (
+        time.monotonic() if not rollout_workers else None
     )
+    self._zero_worker_seconds_total: float = 0.0
+    self._terminal_failed_trajectories_total: int = 0
+    self._weights_consistent: bool = True
+    self._pending_sync_lock: asyncio.Lock = asyncio.Lock()
+    self._actor_busy_count: int = 0
+    self._actor_weights_dirty: bool = False
+    self._last_deferred_pending_sync_state: tuple[int, bool, bool] | None = None
+    self._user_on_worker_evicted = on_worker_evicted
+
     self._trainer_workers = dict(trainer_workers)
     self._inference_workers = dict(inference_workers or {})
     self._policy_version = 0
     self._restored_next_batch_idx = 0
     self._weight_sync_coordinator = weight_sync_coordinator
+    self._rollout_pool = remote_execution.RoutingActorPool(
+        list(rollout_workers)
+    )
+    # Least-loaded, not hash-by-traj_id: each rollout request is one whole
+    # episode, and episode lengths vary by 10x, so hashing left some workers
+    # with twice the episodes of others and stretched the batch tail.
+    self._rollout_session = remote_execution.PoolExecutionSession(
+        self._rollout_pool,
+        config=remote_execution.PoolSessionConfig(
+            evict_on_failure=ft_cfg.enabled and ft_cfg.evict_on_failure,
+            retry_on_worker_failure=(
+                ft_cfg.enabled and ft_cfg.retry_on_worker_failure
+            ),
+            max_task_retries=ft_cfg.max_task_retries,
+            on_worker_evicted=self._on_session_worker_evicted,
+            max_in_flight_per_worker=ft_cfg.max_in_flight_per_worker,
+            worker_max_in_flight=rollout_worker_capacities,
+            has_pending_workers_fn=self._has_pending_rollout_workers,
+            task_timeout_s=ft_cfg.task_timeout_s,
+            retain_pending_on_zero_workers=(
+                ft_cfg.enabled and ft_cfg.max_zero_worker_wait_s > 0
+            ),
+        ),
+        least_loaded=True,
+    )
+
+  def _has_pending_rollout_workers(self) -> bool:
+    if self._weight_sync_coordinator is None:
+      return False
+    return bool(self._weight_sync_coordinator.has_pending_destinations())
+
+  @property
+  def _rollout_workers(self) -> list[remote_execution.ActorHandle]:
+    return self._rollout_pool.actors
+
+  @property
+  def policy_version(self) -> int:
+    return self._policy_version
+
+  @property
+  def weight_sync_coordinator(self) -> Any:
+    return self._weight_sync_coordinator
+
+  @property
+  def fault_tolerance_config(self) -> datatypes.RolloutFaultToleranceConfig:
+    return self._fault_tolerance_config
+
+  @property
+  def weights_consistent(self) -> bool:
+    return self._weights_consistent
+
+  @property
+  def max_zero_worker_wait_s(self) -> float:
+    return self._max_zero_worker_wait_s
+
+  def set_max_zero_worker_wait_s(self, wait_s: float) -> None:
+    """Updates the bounded wait timeout when zero rollout workers are active."""
+    if wait_s < 0:
+      raise ValueError("max_zero_worker_wait_s must be non-negative")
+    self._max_zero_worker_wait_s = float(wait_s)
+    self._rollout_session.set_retain_pending_on_zero_workers(
+        self._fault_tolerance_config.enabled
+        and self._max_zero_worker_wait_s > 0
+    )
+
+  def _current_zero_worker_seconds(self) -> float:
+    total = self._zero_worker_seconds_total
+    if self._zero_worker_since is not None:
+      total += max(0.0, time.monotonic() - self._zero_worker_since)
+    return total
+
+  @property
+  def fault_tolerance_metrics(self) -> dict[str, int | float]:
+    """Returns minimal fault-tolerance observability counters and gauges."""
+    return {
+        "rollout_worker_evictions_total": self._rollout_session.evictions_total,
+        "rollout_retries_total": self._rollout_session.retries_total,
+        "terminal_failed_trajectories_total": (
+            self._terminal_failed_trajectories_total
+        ),
+        "zero_worker_seconds": self._current_zero_worker_seconds(),
+    }
+
+  def _on_session_worker_evicted(
+      self,
+      handle: remote_execution.ActorHandle,
+      exc: BaseException | None,
+  ) -> None:
+    if not self._rollout_workers and self._zero_worker_since is None:
+      self._zero_worker_since = time.monotonic()
+    if self._user_on_worker_evicted is not None:
+      self._user_on_worker_evicted(handle, exc)
+
+  def add_rollout_worker(
+      self,
+      handle: remote_execution.ActorHandle,
+      *,
+      max_in_flight: int | None = None,
+  ) -> None:
+    """Adds a rollout worker handle to the active pool and execution session."""
+    self._rollout_session.add_actor(handle, max_in_flight=max_in_flight)
+    if self._rollout_workers and self._zero_worker_since is not None:
+      self._zero_worker_seconds_total += max(
+          0.0, time.monotonic() - self._zero_worker_since
+      )
+      self._zero_worker_since = None
+
+  def remove_rollout_worker(
+      self,
+      handle: remote_execution.ActorHandle,
+      exc: BaseException | None = None,
+  ) -> bool:
+    """Evicts a rollout worker handle and re-queues any in-flight tasks.
+
+    Returns:
+      True if `handle` was still a member of the rollout pool, False if it had
+      already been evicted (the call is then a no-op).
+    """
+    removed = self._rollout_session.remove_actor(handle, exc=exc)
+    if removed and not self._rollout_workers and self._zero_worker_since is None:
+      self._zero_worker_since = time.monotonic()
+    return removed
 
   @property
   def restored_next_batch_idx(self) -> int:
     """First untrained prompt-batch index from the last restored checkpoint."""
     return self._restored_next_batch_idx
+
+  @property
+  def max_concurrent_rollouts_per_worker(self) -> int | None:
+    return self._rollout_session.max_in_flight_per_worker
+
+  @property
+  def rollout_task_timeout_s(self) -> float | None:
+    return self._rollout_session.task_timeout_s
+
+  def set_rollout_task_timeout_s(
+      self, rollout_task_timeout_s: float | None
+  ) -> None:
+    """Updates the per-task execution timeout for in-flight rollout requests."""
+    self._rollout_session.set_task_timeout_s(rollout_task_timeout_s)
+
+  def _assert_weights_consistent(self) -> None:
+    """Raises RuntimeError if rollout weights are inconsistent or coordinator is poisoned."""
+    if not self._weights_consistent:
+      raise RuntimeError(
+          "Cannot dispatch rollout requests while rollout policy weights are"
+          " inconsistent after an uncommitted weight sync round."
+      )
+    poisoned = (
+        self._weight_sync_coordinator.poisoned
+        if self._weight_sync_coordinator is not None
+        else None
+    )
+    if isinstance(poisoned, str) and poisoned:
+      raise RuntimeError(
+          "Cannot dispatch rollout requests while WeightSyncCoordinator is"
+          " poisoned."
+      )
+
+  async def _wait_for_healthy_rollout_worker(
+      self, poll_interval_s: float = 0.02
+  ) -> None:
+    """Waits up to `max_zero_worker_wait_s` for at least one healthy rollout worker."""
+    self._assert_weights_consistent()
+    await self.sync_pending_weights()
+    if self._rollout_workers:
+      return
+
+    if not self._fault_tolerance_config.enabled:
+      raise datatypes.NoHealthyRolloutWorkersError(
+          "No active rollout workers registered on DistributedRLEngine."
+      )
+
+    wait_start = time.monotonic()
+    logging.warning(
+        "[rollout-ft] action=zero_workers_wait max_zero_worker_wait_s=%.2f",
+        self._max_zero_worker_wait_s,
+    )
+
+    while not self._rollout_workers:
+      self._assert_weights_consistent()
+      await self.sync_pending_weights()
+      if self._rollout_workers:
+        break
+      elapsed = time.monotonic() - wait_start
+      if elapsed >= self._max_zero_worker_wait_s:
+        raise datatypes.NoHealthyRolloutWorkersError(
+            "No healthy rollout workers available after waiting"
+            f" {elapsed:.2f}s"
+            f" (max_zero_worker_wait_s={self._max_zero_worker_wait_s}s)."
+        )
+      sleep_s = min(
+          poll_interval_s, max(0.001, self._max_zero_worker_wait_s - elapsed)
+      )
+      await asyncio.sleep(sleep_s)
 
   async def _maybe_configure_trainer_target_state(
       self,
@@ -141,7 +369,23 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       requests: Sequence[datatypes.RolloutRequest],
   ) -> list[str]:
     """Dispatches pre-formed RolloutRequests across rollout workers."""
+    self._assert_weights_consistent()
+    await self._wait_for_healthy_rollout_worker()
     requests = self._build_rollout_requests(requests)
+    if (
+        self._weight_sync_coordinator is not None
+        and self._weight_sync_coordinator.in_flight
+    ):
+      logging.info(
+          "[rollout-ft] action=concurrent_dispatch_during_sync requests=%d"
+          " policy_version=%d actor_busy_count=%d actor_weights_dirty=%s"
+          " weights_consistent=%s",
+          len(requests),
+          self._policy_version,
+          self._actor_busy_count,
+          self._actor_weights_dirty,
+          self._weights_consistent,
+      )
     logging.info(
         "Dispatching %d rollout request(s) across %d worker(s).",
         len(requests),
@@ -151,21 +395,19 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       logging.debug(
           "Dispatched rollout request (prompt_id=%s, group_index=%d,"
           " request_id=%s).",
-          getattr(req, "prompt_id", ""),
-          getattr(req, "group_index", 0),
+          req.prompt_id,
+          req.group_index,
           req.request_id,
       )
-    await asyncio.gather(
-        *(
-            self._rollout_session.submit(
-                req.request_id,
-                "generate",
-                requests=[req],
-                route_key=req.traj_id,
-            )
-            for req in requests
+    await asyncio.gather(*(
+        self._rollout_session.submit(
+            req.request_id,
+            "generate",
+            requests=[req],
+            route_key=req.traj_id,
         )
-    )
+        for req in requests
+    ))
 
     return [r.request_id for r in requests]
 
@@ -330,17 +572,12 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     )
     return await self.dispatch_rollout_requests(rollout_reqs)
 
-  async def poll_rollouts(
-      self, timeout_s: float = remote_execution.LONG_POLL_TIMEOUT_S
+  def _drain_completed_and_failed(
+      self, raw_completed: Sequence[tuple[Any, Exception | None]]
   ) -> list[datatypes.TrajectoryItem]:
-    """Concurrently long-polls completed rollout responses across all workers."""
-    if not self._rollout_workers:
-      return []
-
+    """Converts raw session completions and terminal failures into TrajectoryItems."""
     completed: list[datatypes.TrajectoryItem] = []
-    for res, exc in await self._rollout_session.poll_completed(
-        timeout_s=timeout_s
-    ):
+    for res, exc in raw_completed:
       if exc is not None:
         logging.error("Failed polling rollout worker: %s", exc)
         continue
@@ -351,12 +588,87 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         if isinstance(it, dict):
           it = datatypes.RolloutResponse(**it)
         traj_item = _response_to_trajectory_item(it)
+        traj_status = traj_item.traj.get("status")
+        if traj_status in (
+            datatypes.TrajectoryStatus.FAILED,
+            "FAILED",
+        ):
+          self._terminal_failed_trajectories_total += 1
         logging.debug(
             "Received rollout response (prompt_id=%s, group_index=%d).",
             traj_item.prompt_id,
             traj_item.group_index,
         )
         completed.append(traj_item)
+
+    for _, payload, task_exc in self._rollout_session.pop_failed_tasks():
+      # Rollout tasks are always submitted as generate(requests=[req]).
+      _, _, orig_kwargs = payload
+      for req in orig_kwargs["requests"]:
+        self._terminal_failed_trajectories_total += 1
+        logging.warning(
+            "[rollout-ft] action=terminal_fail request_id=%s prompt_id=%s"
+            " group_index=%d policy_version=%d reason=%r",
+            req.request_id,
+            req.prompt_id,
+            req.group_index,
+            req.target_policy_version,
+            task_exc,
+        )
+        err_resp = datatypes.RolloutResponse(
+            request_id=req.request_id,
+            status="FAILED",
+            error=datatypes.ErrorInfo(
+                error_type=type(task_exc).__name__,
+                message=str(task_exc),
+            ),
+            metadata={
+                **(dict(req.metadata) if req.metadata is not None else {}),
+                "prompt_id": req.prompt_id,
+                "group_index": req.group_index,
+                "policy_version": req.target_policy_version,
+            },
+        )
+        completed.append(_response_to_trajectory_item(err_resp))
+    return completed
+
+  async def poll_rollouts(
+      self, timeout_s: float = remote_execution.LONG_POLL_TIMEOUT_S
+  ) -> list[datatypes.TrajectoryItem]:
+    """Concurrently long-polls completed rollout responses across all workers."""
+    await self.sync_pending_weights()
+    if (
+        not self._rollout_workers
+        and not self._rollout_session.has_pending_or_completed_work()
+    ):
+      return []
+
+    raw_completed = await self._rollout_session.poll_completed(
+        timeout_s=timeout_s
+    )
+    if (
+        not raw_completed
+        and self._rollout_session.has_pending_or_completed_work()
+        and self._has_pending_rollout_workers()
+    ):
+      synced_version = await self.sync_pending_weights()
+      if synced_version is not None and self._rollout_session.pending_count > 0:
+        raw_completed = await self._rollout_session.poll_completed(
+            timeout_s=timeout_s
+        )
+    completed = self._drain_completed_and_failed(raw_completed)
+
+    if (
+        not completed
+        and not self._rollout_workers
+        and self._rollout_session.in_flight_count > 0
+    ):
+      await self._wait_for_healthy_rollout_worker()
+      raw_completed = await self._rollout_session.poll_completed(
+          timeout_s=timeout_s
+      )
+      completed = self._drain_completed_and_failed(raw_completed)
+
     return completed
 
   async def generate(
@@ -367,8 +679,12 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       **kwargs: Any,
   ) -> list[datatypes.TrajectoryItem]:
     """Blocking rollout generation: load-balances prompts across workers and awaits completion."""
+    self._assert_weights_consistent()
+    await self.sync_pending_weights()
     if not self._rollout_workers:
-      raise ValueError("DistributedRLEngine has no registered rollout workers.")
+      raise datatypes.NoHealthyRolloutWorkersError(
+          "DistributedRLEngine has no registered rollout workers."
+      )
 
     if kwargs:
       raise TypeError(
@@ -448,6 +764,29 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     )
     return await self._invoke_worker(worker, "score", items=items, **kwargs)
 
+  async def _await_pending_weight_sync(self) -> None:
+    """Waits if a mid-step `sync_pending_weights` round is currently in flight."""
+    while self._pending_sync_lock.locked():
+      logging.info(
+          "[rollout-ft] action=wait_pending_sync"
+          " reason=pending_weight_sync_in_flight policy_version=%d",
+          self._policy_version,
+      )
+      async with self._pending_sync_lock:
+        pass
+
+  @contextlib.asynccontextmanager
+  async def _actor_busy_guard(self, active: bool = True):
+    """Tracks active actor trainer operations and serializes against pending sync."""
+    if active:
+      await self._await_pending_weight_sync()
+      self._actor_busy_count += 1
+    try:
+      yield
+    finally:
+      if active:
+        self._actor_busy_count -= 1
+
   async def per_token_logps(
       self,
       role: datatypes.Role,
@@ -467,9 +806,15 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         "Evaluating per-token log probabilities on %s worker...",
         role_name,
     )
-    return await self._invoke_worker(
-        worker, "per_token_logps", items=items, **kwargs
+    is_actor_trainer = (
+        role == datatypes.Role.ACTOR
+        and role not in self._inference_workers
+        and role in self._trainer_workers
     )
+    async with self._actor_busy_guard(is_actor_trainer):
+      return await self._invoke_worker(
+          worker, "per_token_logps", items=items, **kwargs
+      )
 
   async def train_step(
       self,
@@ -498,22 +843,26 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         payload=payload,
         metadata=metadata,
     )
-    fwd_bwd_result = await self._invoke_worker(
-        worker,
-        "fwd_bwd",
-        request=request,
-        skip_jit=skip_jit,
-        **kwargs,
-    )
-    if not apply_optimizer:
-      return fwd_bwd_result
-    train_step = await self._invoke_worker(worker, "update")
-    return {
-        "fwd_bwd": fwd_bwd_result,
-        "updated": True,
-        "train_step": train_step,
-        "accumulated": accumulate_gradients,
-    }
+    is_actor = role == datatypes.Role.ACTOR
+    async with self._actor_busy_guard(is_actor):
+      fwd_bwd_result = await self._invoke_worker(
+          worker,
+          "fwd_bwd",
+          request=request,
+          skip_jit=skip_jit,
+          **kwargs,
+      )
+      if is_actor:
+        self._actor_weights_dirty = True
+      if not apply_optimizer:
+        return fwd_bwd_result
+      train_step = await self._invoke_worker(worker, "update")
+      return {
+          "fwd_bwd": fwd_bwd_result,
+          "updated": True,
+          "train_step": train_step,
+          "accumulated": accumulate_gradients,
+      }
 
   async def get_metrics(
       self,
@@ -528,7 +877,9 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     """Retrieves step metrics from the worker(s) registered for the specified role."""
     if role == datatypes.Role.ROLLOUT:
       if not self._rollout_workers:
-        raise ValueError(f"No rollout workers registered for role {role}")
+        raise datatypes.NoHealthyRolloutWorkersError(
+            f"No rollout workers registered for role {role}"
+        )
       tasks = [
           self._invoke_worker(w, "get_metrics", **kwargs)
           for w in self._rollout_workers
@@ -597,7 +948,9 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
 
       case datatypes.Role.ROLLOUT:
         if not self._rollout_workers:
-          raise ValueError("No rollout workers registered on engine.")
+          raise datatypes.NoHealthyRolloutWorkersError(
+              "No rollout workers registered on engine."
+          )
         logging.info("Configuring rollout workers...")
 
       case datatypes.Role.REFERENCE:
@@ -658,25 +1011,139 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           "sync_weights needs a coordinator; construct the engine with"
           " weight_sync_coordinator."
       )
-    next_policy_version = (
-        self._policy_version + 1 if policy_version is None else policy_version
-    )
-    logging.info(
-        "Synchronizing weights (target policy_version=%d)...",
-        next_policy_version,
-    )
-    sync_kwargs = {}
-    if source_staged is not None:
-      sync_kwargs["source_staged"] = source_staged
-    result = await self._weight_sync_coordinator.sync(
-        policy_version=next_policy_version, **sync_kwargs
-    )
+    async with self._actor_busy_guard(True):
+      next_policy_version = (
+          self._policy_version + 1 if policy_version is None else policy_version
+      )
+      logging.info(
+          "Synchronizing weights (target policy_version=%d)...",
+          next_policy_version,
+      )
+      sync_kwargs = {}
+      if source_staged is not None:
+        sync_kwargs["source_staged"] = source_staged
+      try:
+        result = await self._weight_sync_coordinator.sync(
+            policy_version=next_policy_version, **sync_kwargs
+        )
+      except Exception:
+        self._weights_consistent = False
+        raise
+    self._actor_weights_dirty = False
+    self._weights_consistent = True
+    self._last_deferred_pending_sync_state = None
     self._policy_version = result.policy_version
+    self._rollout_session._schedule_drain_pending()
     logging.info(
         "Weight synchronization complete (policy_version=%d).",
         self._policy_version,
     )
     return result.policy_version
+
+  async def sync_pending_weights(
+      self,
+      policy_version: int | None = None,
+  ) -> int | None:
+    """Proactively syncs weights to any `PENDING_WEIGHT_SYNC` rollout workers.
+
+    Targets only `PENDING_WEIGHT_SYNC` rollout workers so `ACTIVE` rollout
+    workers currently generating trajectories are not quiesced or interrupted.
+    If the actor trainer worker is currently executing an operation or holds
+    uncommitted mid-step weight updates, the catch-up sync is deferred to the
+    next step boundary.
+
+    Args:
+      policy_version: Optional policy version to push. Defaults to the current
+        `self.policy_version`.
+
+    Returns:
+      The synced policy version if pending workers were synced, or None if no
+      rollout workers were waiting in `PENDING_WEIGHT_SYNC` or the trainer was
+      busy.
+    """
+    target_policy_version = (
+        self._policy_version if policy_version is None else policy_version
+    )
+    if (
+        self._weight_sync_coordinator is not None
+        and self._weight_sync_coordinator.has_pending_destinations()
+        and (self._actor_busy_count > 0 or self._actor_weights_dirty)
+    ):
+      defer_state = (
+          target_policy_version,
+          self._actor_busy_count > 0,
+          self._actor_weights_dirty,
+      )
+      if self._last_deferred_pending_sync_state != defer_state:
+        self._last_deferred_pending_sync_state = defer_state
+        logging.info(
+            "[rollout-ft] action=defer_pending_sync policy_version=%d"
+            " actor_busy_count=%d actor_weights_dirty=%s",
+            target_policy_version,
+            self._actor_busy_count,
+            self._actor_weights_dirty,
+        )
+      return None
+    if (
+        not self._weights_consistent
+        or self._actor_busy_count > 0
+        or self._actor_weights_dirty
+        or self._pending_sync_lock.locked()
+        or self._weight_sync_coordinator is None
+        or not self._weight_sync_coordinator.has_pending_destinations()
+        or self._weight_sync_coordinator.in_flight
+        or self._weight_sync_coordinator.poisoned is not None
+    ):
+      return None
+    async with self._pending_sync_lock:
+      if (
+          not self._weights_consistent
+          or self._actor_busy_count > 0
+          or self._actor_weights_dirty
+          or self._weight_sync_coordinator is None
+          or not self._weight_sync_coordinator.has_pending_destinations()
+          or self._weight_sync_coordinator.in_flight
+          or self._weight_sync_coordinator.poisoned is not None
+      ):
+        return None
+      self._last_deferred_pending_sync_state = None
+      logging.info(
+          "Proactively synchronizing weights to pending rollout worker(s)"
+          " (policy_version=%d)...",
+          target_policy_version,
+      )
+      try:
+        result = await self._weight_sync_coordinator.sync(
+            policy_version=target_policy_version,
+            only_pending=True,
+        )
+      except (
+          weight_sync_coordinator_lib.WeightSyncError,
+          datatypes.NoHealthyRolloutWorkersError,
+      ) as exc:
+        if (
+            isinstance(exc, weight_sync_coordinator_lib.WeightSyncError)
+            and exc.result is not None
+            and exc.result.state
+            == weight_sync_coordinator_lib.RoundState.UNKNOWN_TRANSFER_STATE
+            and self._weight_sync_coordinator.poisoned is not None
+        ):
+          raise
+        if self._weight_sync_coordinator.poisoned is not None:
+          self._weight_sync_coordinator.reset_after_recovery()
+        # A failed catch-up round (e.g. the pending worker died mid-sync and
+        # was evicted) must not interrupt the step: the next end-of-step
+        # sync_weights() targets ACTIVE and PENDING_WEIGHT_SYNC workers alike
+        # and brings any survivor up to date.
+        logging.warning(
+            "[rollout-ft] action=pending_sync_deferred policy_version=%d"
+            " error=%r; falling back to the next end-of-step sync_weights().",
+            target_policy_version,
+            exc,
+        )
+        return None
+      self._rollout_session._schedule_drain_pending()
+      return result.policy_version
 
   async def save_checkpoint(
       self,
@@ -693,9 +1160,11 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         "Saving checkpoint on %s worker...",
         role_name,
     )
-    return await self._invoke_worker(
-        worker, "save_checkpoint", metadata=metadata, **kwargs
-    )
+    is_actor = role == datatypes.Role.ACTOR
+    async with self._actor_busy_guard(is_actor):
+      return await self._invoke_worker(
+          worker, "save_checkpoint", metadata=metadata, **kwargs
+      )
 
   async def _restore_checkpoint(
       self,
