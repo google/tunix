@@ -1037,6 +1037,85 @@ class ClusterOrchestratorTest(absltest.TestCase):
     self.assertEqual(orch.engine._rollout_workers, [h_r0])
     orch.shutdown()
 
+  def test_remote_worker_handles_returns_copy_including_evicted_and_excludes_local(
+      self,
+  ):
+    h_actor = mock.MagicMock(spec=remote_execution.ActorHandle)
+    h_r0 = mock.MagicMock(spec=remote_execution.ActorHandle)
+
+    class LocalRolloutWorker(abstract_worker.Worker):
+
+      def __init__(self):
+        self.stopped = 0
+
+      def info(self):
+        return datatypes.WorkerInfo(
+            worker_id="local-rollout",
+            roles=frozenset({datatypes.Role.ROLLOUT.value}),
+        )
+
+      def initialize(self):
+        return datatypes.Response()
+
+      def compile(self, dummy_data=None):
+        del dummy_data
+        return datatypes.Response()
+
+      def start(self):
+        return datatypes.Response()
+
+      def stop(self):
+        self.stopped += 1
+        return datatypes.Response()
+
+      def heartbeat(self):
+        return datatypes.HealthReport(state=datatypes.WorkerState.READY)
+
+    local_worker = LocalRolloutWorker()
+
+    orch = orchestrator.ClusterOrchestrator(
+        lifecycle_driver=mock.MagicMock(),
+        monitor=mock.MagicMock(),
+        weight_sync_mode="fallback",
+    )
+    orch.register_worker(local_worker)
+    orch.register_worker_handle("actor-0", [datatypes.Role.ACTOR], h_actor)
+    orch.register_worker_handle("rollout-0", [datatypes.Role.ROLLOUT], h_r0)
+    self.assertLen(orch.worker_handles(datatypes.Role.ROLLOUT), 2)
+    orch.bring_up_workers()
+    self.assertLen(orch.worker_handles(datatypes.Role.ROLLOUT), 2)
+    # Also verify a shim with resources=None does not raise AttributeError.
+    orch.registry.register(
+        orchestrator.weight_sync_coordinator.RemoteWorkerShim(
+            mock.MagicMock(spec=remote_execution.ActorHandle),
+            datatypes.WorkerInfo(
+                worker_id="local-none-resources",
+                roles=frozenset({datatypes.Role.ROLLOUT.value}),
+                resources=None,  # pytype: disable=wrong-arg-types
+            ),
+        ),
+        override=True,
+    )
+
+    handles = orch.remote_worker_handles()
+    self.assertEqual(handles, {"actor-0": h_actor, "rollout-0": h_r0})
+    self.assertLen(orch.worker_handles(datatypes.Role.ROLLOUT), 2)
+
+    # Evicted remote workers are still returned so shutdown/drain can stop them.
+    orch.registry.evict("rollout-0")
+    self.assertEqual(
+        orch.remote_worker_handles(),
+        {"actor-0": h_actor, "rollout-0": h_r0},
+    )
+
+    # Unregistering removes the worker from remote_worker_handles, while the
+    # earlier snapshot remains unchanged.
+    orch.unregister_worker("rollout-0")
+    self.assertEqual(handles, {"actor-0": h_actor, "rollout-0": h_r0})
+    self.assertEqual(orch.remote_worker_handles(), {"actor-0": h_actor})
+    orch.shutdown()
+    self.assertEqual(local_worker.stopped, 0)
+
 
 def _trajectory_store_orchestrator(
     **kwargs,
