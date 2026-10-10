@@ -1116,6 +1116,44 @@ class ClusterOrchestratorTest(absltest.TestCase):
     orch.shutdown()
     self.assertEqual(local_worker.stopped, 0)
 
+  def test_bring_up_remote_workers_evicts_failed_rollout_worker_when_ft_enabled(
+      self,
+  ):
+    h_actor = mock.MagicMock(spec=remote_execution.ActorHandle)
+    h_r0 = mock.MagicMock(spec=remote_execution.ActorHandle)
+    h_r1 = mock.MagicMock(spec=remote_execution.ActorHandle)
+
+    def _fail_on_start(method, *args, **kwargs):
+      del args, kwargs
+      if method == "start":
+        raise RuntimeError("Engine core initialization failed")
+      return datatypes.Response()
+
+    h_r1.submit.side_effect = _fail_on_start
+
+    ft_cfg = datatypes.RolloutFaultToleranceConfig(enabled=True)
+    orch = orchestrator.ClusterOrchestrator(
+        lifecycle_driver=mock.MagicMock(),
+        monitor=mock.MagicMock(),
+        weight_sync_mode="fallback",
+        fault_tolerance_config=ft_cfg,
+    )
+    orch.register_worker_handle("actor-0", [datatypes.Role.ACTOR], h_actor)
+    orch.register_worker_handle("rollout-0", [datatypes.Role.ROLLOUT], h_r0)
+    orch.register_worker_handle("rollout-1", [datatypes.Role.ROLLOUT], h_r1)
+
+    orch.bring_up_workers()
+    self.assertEqual(
+        orch.registry.state("rollout-0"),
+        worker_registry.MembershipState.ACTIVE,
+    )
+    self.assertEqual(
+        orch.registry.state("rollout-1"),
+        worker_registry.MembershipState.EVICTED,
+    )
+    self.assertEqual(orch.engine._rollout_workers, [h_r0])
+    orch.shutdown()
+
 
 def _trajectory_store_orchestrator(
     **kwargs,
