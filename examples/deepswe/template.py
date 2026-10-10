@@ -1194,7 +1194,7 @@ DEFAULT_OPENHANDS_KEEPALIVE_CMD = [
         " /testbed/.venv/lib/python*/site-packages"
         " /root/.venv/lib/python*/site-packages"
         " /usr/local/lib/python*/site-packages; do if [ -d \"$sp\" ] && [ ! -d"
-        " \"$sp/chardet\" ]; then cp -a /oh/pkgs/chardet* \"$sp/\""
+        " \"$sp/chardet\" ]; then cp -a /oh/pkgs/. \"$sp/\""
         " 2>/dev/null || true; fi; done; fi; ([ -d /testbed ] && [ ! -e"
         " /workspace ] && ln -s /testbed /workspace 2>/dev/null || true); (["
         " -d /workspace ] && [ ! -e /testbed ] && ln -s /workspace /testbed"
