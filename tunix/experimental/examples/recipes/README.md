@@ -100,7 +100,7 @@ uBench can add the run to its dashboard after the run finishes. uBench doesn't l
 1. Launch with a new `JOB_PREFIX` for each run, `UBENCH_REPORTING=true`, and MLPerf logging on. A short name with the date and time works well. Set `JOB_PREFIX` with `export`, so that `stop` later uses the same value:
    ```bash
    # <user>-<model>-<MMDDHHMM>, for example alice-35b-09281430
-   export JOB_PREFIX="${USER}-35b-$(date +%m%d%H%M)"
+   export JOB_PREFIX="$(echo "${USER}" | tr '[:upper:]' '[:lower:]' | tr '_' '-')-35b-$(date +%m%d%H%M)"
    UBENCH_REPORTING=true RCP_LOGGING=true bash tunix/experimental/examples/recipes/mlperf_35b_128_v7x.sh start
    ```
    Keep `JOB_PREFIX` short: Kubernetes builds longer names from it, such as `<JOB_PREFIX>-train-pw-node-0-0`, and they must fit in 63 characters. Don't reuse a `JOB_PREFIX`: the new run overwrites the earlier run's MLPerf log if `SEED` is the same.
