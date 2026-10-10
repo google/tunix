@@ -420,6 +420,8 @@ class Attention(nnx.Module):
           jaxtyping.Array,
           jaxtyping.Array | None,
           jaxtyping.Array | None,
+          jaxtyping.Array | None,
+          jaxtyping.Array | None,
       ],
   ]:
     x = x.astype(self.config.dtype)
@@ -442,6 +444,8 @@ class Attention(nnx.Module):
     )
 
     prior_end_index = None
+    split_prefix_k = None
+    split_prefix_v = None
     if cache is not None:
       assert kv_shared_cache is None
       if seq_len > 1:  # prefill
@@ -459,11 +463,16 @@ class Attention(nnx.Module):
                     and self.attn_type == AttentionType.LOCAL_SLIDING
                 ),
                 is_ring_buffer_write=self.config.use_sliding_window_kv_cache,
+                use_split_attention=getattr(
+                    self.config, 'use_split_attention', False
+                ),
             )
         )
         key_proj = prefix_res.key
         value_proj = prefix_res.value
         kv_valid_mask = prefix_res.valid_mask
+        split_prefix_k = prefix_res.split_prefix_k
+        split_prefix_v = prefix_res.split_prefix_v
       else:  # decode
         key_proj, value_proj = cache_utils.write_cache_decode(
             cache,
@@ -480,11 +489,16 @@ class Attention(nnx.Module):
             'k': key_proj,
             'end_index': cache['end_index'] + seq_len,
         }
+        split_prefix_k = None
+        split_prefix_v = None
     else:
       new_cache = {
           'v': value_proj,
           'k': key_proj,
       }
+      if kv_shared_cache is not None:
+        split_prefix_k = kv_shared_cache.get('split_prefix_k', None)
+        split_prefix_v = kv_shared_cache.get('split_prefix_v', None)
 
     b, _, qh, _ = query_proj.shape
     _, _, kh, _ = key_proj.shape
@@ -492,6 +506,10 @@ class Attention(nnx.Module):
     # Determine if we can use flash attention for this call.
     q_len = query_proj.shape[1]
     kv_len = key_proj.shape[1]
+    # When split attention bypasses the concat, key_proj is suffix-only.
+    # Compute total kv_len from prefix + suffix for mask/guard calculations.
+    if split_prefix_k is not None:
+      kv_len = split_prefix_k.shape[1] + key_proj.shape[1]
     is_rectangular = kv_len > q_len
     use_flash = (
         self.config.use_flash_attention
@@ -523,6 +541,8 @@ class Attention(nnx.Module):
           unsharded_seq_kv,
       ) = self._make_sharding_specs(b, kh, mesh)
 
+      block_sizes = self._make_block_sizes(is_rectangular, q_len=q_len)
+
       if self.config.splash_attention_impl == SplashAttentionImpl.TOKAMAX:
         splash_attn_kernel, kernel_spec = self._make_tokamax_splash_kernel(
             q_len,
@@ -537,8 +557,6 @@ class Attention(nnx.Module):
 
         multi_head_mask = mask_lib.MultiHeadMask([mask for _ in range(qh)])
 
-        block_sizes = self._make_block_sizes(is_rectangular, q_len=q_len)
-
         splash_attn_kernel, kernel_spec = self._make_splash_kernel(
             multi_head_mask,
             block_sizes,
@@ -549,21 +567,71 @@ class Attention(nnx.Module):
             shd_t,
         )
 
-      encoded, key_proj, value_proj = self._flash_attention_single(
-          query_proj,
-          key_proj,
-          value_proj,
-          segment_ids,
-          splash_attn_kernel,
-          kernel_spec,
-          shd_spec,
-          unsharded_seq_kv,
-          mesh,
-          shd_b,
-          shd_t,
+      # Split attention with LSE merge for chunked prefill: attend to prefix
+      # and suffix KV separately and merge via log-sum-exp, eliminating the
+      # jnp.concatenate data movement cost. Guards: block sizes must divide the
+      # prefix and suffix lengths; segment_ids are not supported (already
+      # excluded by use_flash).
+      prefix_kv_len = kv_len - q_len
+      can_split = (
+          getattr(self.config, 'use_split_attention', False)
+          and self.config.splash_attention_impl == SplashAttentionImpl.JAX
+          and is_rectangular
+          and segment_ids is None
+          and split_prefix_k is not None
+          and split_prefix_v is not None
+          and prefix_kv_len % block_sizes.block_kv == 0
+          and q_len % block_sizes.block_q == 0
+          and q_len % block_sizes.block_kv == 0
       )
+      if can_split:
+        encoded, key_proj, value_proj = self._flash_attention_split(
+            query_proj,
+            key_proj,
+            value_proj,
+            split_prefix_k,
+            split_prefix_v,
+            q_len,
+            prefix_kv_len,
+            qh,
+            block_sizes,
+            head_shards,
+            q_seq_shards,
+            mesh,
+            shd_b,
+            shd_n,
+            shd_t,
+            shd_h,
+            shd_n_kv,
+            shd_spec,
+        )
+
+      else:
+        encoded, key_proj, value_proj = self._flash_attention_single(
+            query_proj,
+            key_proj,
+            value_proj,
+            split_prefix_k,
+            split_prefix_v,
+            segment_ids,
+            splash_attn_kernel,
+            kernel_spec,
+            shd_spec,
+            unsharded_seq_kv,
+            mesh,
+            shd_b,
+            shd_t,
+        )
+        split_prefix_k = None
+        split_prefix_v = None
 
     else:
+      if split_prefix_k is not None:
+        assert split_prefix_v is not None
+        key_proj = jnp.concatenate([split_prefix_k, key_proj], axis=1)
+        value_proj = jnp.concatenate([split_prefix_v, value_proj], axis=1)
+        split_prefix_k = None
+        split_prefix_v = None
       encoded = self._eager_attention(
           query_proj,
           key_proj,
@@ -581,11 +649,160 @@ class Attention(nnx.Module):
 
     attn_output = self.attn_vec_einsum(encoded)
     attn_output = shard(attn_output, self.config.shd_config.act_btd)
+    if split_prefix_k is not None:
+      assert split_prefix_v is not None
+      assert split_prefix_k.ndim == 4 and key_proj.ndim == 4
+      assert split_prefix_k.shape[0] == key_proj.shape[0]
+      assert split_prefix_k.shape[2:] == key_proj.shape[2:]
     return (
         new_cache,
         attn_output,
-        (key_proj, value_proj, kv_valid_mask, prior_end_index),
+        (
+            key_proj,
+            value_proj,
+            kv_valid_mask,
+            prior_end_index,
+            split_prefix_k,
+            split_prefix_v,
+        ),
     )
+
+  def _flash_attention_split(
+      self,
+      query_proj: jaxtyping.Array,
+      key_proj: jaxtyping.Array,
+      value_proj: jaxtyping.Array,
+      split_prefix_k: jaxtyping.Array | None,
+      split_prefix_v: jaxtyping.Array | None,
+      q_len: int,
+      prefix_kv_len: int,
+      qh: int,
+      block_sizes: splash.BlockSizes,
+      head_shards: int,
+      q_seq_shards: int,
+      mesh: MeshType | None,
+      shd_b: AxisSpec,
+      shd_n: AxisSpec,
+      shd_t: AxisSpec,
+      shd_h: AxisSpec,
+      shd_n_kv: AxisSpec,
+      shd_spec: P,
+  ) -> tuple[jaxtyping.Array, jaxtyping.Array, jaxtyping.Array]:
+    """Split-KV flash attention with LSE merge for chunked prefill."""
+    # Use separately-returned prefix KV from _read_prefix_kv. No
+    # concatenation occurred — prefix comes from cache (B, S, N, H),
+    # suffix is the fresh projection already transposed (B, N, S, H).
+    assert split_prefix_k is not None
+    assert split_prefix_v is not None
+    prefix_k = split_prefix_k.transpose(0, 2, 1, 3)
+    prefix_v = split_prefix_v.transpose(0, 2, 1, 3)
+    suffix_k = key_proj  # already transposed above
+    suffix_v = value_proj
+
+    # Build masks for prefix and suffix
+    if self.attn_type == AttentionType.LOCAL_SLIDING:
+      window_size = self.config.sliding_window_size
+      assert window_size is not None
+      sw = window_size
+      q_ids = np.arange(q_len) + prefix_kv_len
+      # Prefix mask: which prefix positions are in sliding window
+      prefix_kv_ids = np.arange(prefix_kv_len)
+      prefix_mask_2d = (prefix_kv_ids[None, :] > (q_ids[:, None] - sw)) & (
+          prefix_kv_ids[None, :] <= q_ids[:, None]
+      )
+      prefix_mask = mask_lib.NumpyMask(prefix_mask_2d.astype(np.bool_))
+    else:
+      # GLOBAL: prefix is fully attended
+      prefix_mask = mask_lib.FullMask((q_len, prefix_kv_len))
+
+    # Suffix mask: local sliding within chunk for LOCAL, causal for GLOBAL
+    suffix_mask = self._build_flash_mask(q_len, q_len, offset=0)
+
+    prefix_multi_mask = mask_lib.MultiHeadMask([prefix_mask for _ in range(qh)])
+    suffix_multi_mask = mask_lib.MultiHeadMask([suffix_mask for _ in range(qh)])
+
+    # Build kernels with save_residuals=True for LSE merge.
+    prefix_attn_kernel, prefix_kernel_spec = self._make_splash_kernel(
+        prefix_multi_mask,
+        block_sizes,
+        head_shards,
+        q_seq_shards,
+        mesh,
+        shd_n,
+        shd_t,
+        save_residuals=True,
+    )
+    suffix_attn_kernel, suffix_kernel_spec = self._make_splash_kernel(
+        suffix_multi_mask,
+        block_sizes,
+        head_shards,
+        q_seq_shards,
+        mesh,
+        shd_n,
+        shd_t,
+        save_residuals=True,
+    )
+
+    # Sharding specs for split KV and logsumexp
+    prefix_kv_spec = P(shd_b, shd_n_kv, None, shd_h)
+    suffix_kv_spec = P(shd_b, shd_n_kv, None, shd_h)
+    lse_spec = P(shd_b, shd_n, shd_t)
+
+    @partial(
+        shard_map,
+        mesh=mesh,
+        in_specs=(
+            prefix_kernel_spec,
+            shd_spec,
+            prefix_kv_spec,
+            prefix_kv_spec,
+        ),
+        out_specs=(shd_spec, (lse_spec,)),
+        check_rep=False,
+    )
+    def sharded_prefix_attn(kernel, q_block, k_block, v_block):
+      return jax.vmap(kernel)(q_block, k_block, v_block)
+
+    @partial(
+        shard_map,
+        mesh=mesh,
+        in_specs=(
+            suffix_kernel_spec,
+            shd_spec,
+            suffix_kv_spec,
+            suffix_kv_spec,
+        ),
+        out_specs=(shd_spec, (lse_spec,)),
+        check_rep=False,
+    )
+    def sharded_suffix_attn(kernel, q_block, k_block, v_block):
+      return jax.vmap(kernel)(q_block, k_block, v_block)
+
+    out_prefix, (lse_prefix,) = sharded_prefix_attn(
+        prefix_attn_kernel,
+        query_proj,
+        prefix_k,
+        prefix_v,
+    )
+    out_suffix, (lse_suffix,) = sharded_suffix_attn(
+        suffix_attn_kernel,
+        query_proj,
+        suffix_k,
+        suffix_v,
+    )
+
+    # Max-stabilized LSE merge (numerically stable softmax reweighting).
+    # NaN-safe: fully-masked prefix partitions arrive as out=NaN/lse=-inf and
+    # are gated to a zero contribution. See cache_utils.merge_split_attention.
+    encoded = cache_utils.merge_split_attention(
+        out_prefix, lse_prefix, out_suffix, lse_suffix, key_proj.dtype
+    )
+    # (B, N, T, H) -> (B, T, N, H)
+    encoded = encoded.transpose(0, 2, 1, 3)
+    # Transpose KV back for KV-sharing layers
+    key_proj = key_proj.transpose(0, 2, 1, 3)
+    value_proj = value_proj.transpose(0, 2, 1, 3)
+    return encoded, key_proj, value_proj
 
   def _make_tokamax_splash_kernel(
       self,
@@ -635,6 +852,8 @@ class Attention(nnx.Module):
       query_proj: jaxtyping.Array,
       key_proj: jaxtyping.Array,
       value_proj: jaxtyping.Array,
+      split_prefix_k: jaxtyping.Array | None,
+      split_prefix_v: jaxtyping.Array | None,
       segment_ids: jaxtyping.Array | None,
       splash_attn_kernel: 'SplashKernel',
       kernel_spec: 'SplashKernel | None',
@@ -645,6 +864,16 @@ class Attention(nnx.Module):
       shd_t: AxisSpec,
   ) -> tuple[jaxtyping.Array, jaxtyping.Array, jaxtyping.Array]:
     """Single-kernel flash attention over concatenated (or plain) KV."""
+    # Fallback: if split attention was prepared but guards failed,
+    # reconstruct the concatenated KV for single-kernel path.
+    if split_prefix_k is not None:
+      assert split_prefix_v is not None
+      key_proj = jnp.concatenate(
+          [split_prefix_k.transpose(0, 2, 1, 3), key_proj], axis=2
+      )
+      value_proj = jnp.concatenate(
+          [split_prefix_v.transpose(0, 2, 1, 3), value_proj], axis=2
+      )
     # Original single-kernel attention path.
     if segment_ids is not None:
       seg_spec = P(shd_b, shd_t)
@@ -844,6 +1073,8 @@ class Attention(nnx.Module):
       tuple[
           jaxtyping.Array,
           jaxtyping.Array,
+          jaxtyping.Array | None,
+          jaxtyping.Array | None,
           jaxtyping.Array | None,
           jaxtyping.Array | None,
       ],
