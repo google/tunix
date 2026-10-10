@@ -2437,7 +2437,234 @@ class CreateBatchAssemblerTest(absltest.TestCase):
     self.assertEqual(stack_routed_shapes, [])
 
 
+class BuildDummyPayloadTest(absltest.TestCase):
+  """`build_dummy_payload` must be a JIT-cache-exact stand-in for `feed()`."""
+
+  _FLAG_COMBOS = (
+      (False, False, False, False, False),
+      (True, False, False, False, False),
+      (False, True, False, False, False),
+      (True, True, False, False, False),
+      (True, True, True, False, False),
+      (True, True, True, True, True),
+  )
+
+  def _real_microbatch(
+      self,
+      assembler,
+      *,
+      prompt_len: int,
+      completion_len: int,
+      with_old_per_token_logps: bool,
+      with_ref_per_token_logps: bool,
+      with_sampler_is_weights: bool = False,
+      with_rollout_per_token_logps: bool = False,
+      with_overlong: bool = False,
+  ) -> datatypes.RLTrainerPayload:
+    """Runs real rollouts through `feed()` the way `RLProgram` does."""
+    old_logps = (
+        np.full(completion_len, -0.5, dtype=np.float32)
+        if with_old_per_token_logps
+        else None
+    )
+    rollout_logps = (
+        np.full(completion_len, -0.5, dtype=np.float32)
+        if with_rollout_per_token_logps
+        else None
+    )
+    overlong = np.asarray(0.0, dtype=np.float32) if with_overlong else None
+    payloads = [
+        _make_payload(prompt_len, completion_len, old_logps=old_logps).replace(
+            rollout_per_token_logps=rollout_logps,
+            overlong=overlong,
+        )
+        for _ in range(assembler.rollouts_per_optimizer_update)
+    ]
+    batches = list(assembler.feed(payloads))
+    self.assertNotEmpty(batches)
+    payload = batches[0].payload
+    if with_ref_per_token_logps:
+      payload = batch_assembly.with_ref_per_token_logps(
+          payload,
+          np.zeros(np.asarray(payload.completion_ids).shape, dtype=np.float32),
+      )
+    if with_sampler_is_weights:
+      payload = dataclasses.replace(
+          payload,
+          sampler_is_weights=np.zeros(
+              np.asarray(payload.completion_ids).shape, dtype=np.float32
+          ),
+      )
+    return payload
+
+  def _assert_same_jit_signature(self, dummy, real):
+    dummy = dataclasses.replace(dummy, metadata={})
+    real = dataclasses.replace(real, metadata={})
+    self.assertEqual(jax.tree.structure(dummy), jax.tree.structure(real))
+    dummy_leaves = jax.tree.leaves(dummy)
+    real_leaves = jax.tree.leaves(real)
+    for d, r in zip(dummy_leaves, real_leaves, strict=True):
+      d, r = np.asarray(d), np.asarray(r)
+      self.assertEqual(d.shape, r.shape)
+      self.assertEqual(d.dtype, r.dtype)
+
+  def test_padded_matches_feed_output(self):
+    for (
+        with_old,
+        with_ref,
+        with_is_weights,
+        with_rollout_logps,
+        with_overlong,
+    ) in self._FLAG_COMBOS:
+      with self.subTest(
+          with_old=with_old,
+          with_ref=with_ref,
+          with_is_weights=with_is_weights,
+          with_rollout_logps=with_rollout_logps,
+          with_overlong=with_overlong,
+      ):
+        kwargs = dict(
+            batch_size=3,
+            max_prompt_length=8,
+            max_response_length=6,
+            pad_id=7,
+            num_generations=3,
+            mini_batch_size=1,
+        )
+        dummy = batch_assembly.PaddedBatchAssembler(
+            **kwargs
+        ).build_dummy_payload(
+            with_old_per_token_logps=with_old,
+            with_ref_per_token_logps=with_ref,
+            with_sampler_is_weights=with_is_weights,
+            with_rollout_per_token_logps=with_rollout_logps,
+            with_overlong=with_overlong,
+        )
+        real = self._real_microbatch(
+            batch_assembly.PaddedBatchAssembler(**kwargs),
+            prompt_len=5,
+            completion_len=4,
+            with_old_per_token_logps=with_old,
+            with_ref_per_token_logps=with_ref,
+            with_sampler_is_weights=with_is_weights,
+            with_rollout_per_token_logps=with_rollout_logps,
+            with_overlong=with_overlong,
+        )
+        self._assert_same_jit_signature(dummy, real)
+        self.assertEqual(dummy.prompt_ids.shape, (3, 8))
+        self.assertEqual(dummy.completion_ids.shape, (3, 6))
+        self.assertEqual(dummy.old_per_token_logps is not None, with_old)
+        self.assertEqual(dummy.ref_per_token_logps is not None, with_ref)
+        self.assertEqual(dummy.sampler_is_weights is not None, with_is_weights)
+        self.assertEqual(
+            dummy.rollout_per_token_logps is not None, with_rollout_logps
+        )
+        self.assertEqual(dummy.overlong is not None, with_overlong)
+        if with_overlong:
+          self.assertEqual(dummy.overlong.shape, (3,))
+
+  def test_packed_matches_feed_output(self):
+    for (
+        with_old,
+        with_ref,
+        with_is_weights,
+        with_rollout_logps,
+        with_overlong,
+    ) in self._FLAG_COMBOS:
+      with self.subTest(
+          with_old=with_old,
+          with_ref=with_ref,
+          with_is_weights=with_is_weights,
+          with_rollout_logps=with_rollout_logps,
+          with_overlong=with_overlong,
+      ):
+        kwargs = dict(
+            batch_size=2,
+            num_generations=4,
+            mini_batch_size=1,
+            max_packed_len=16,
+            pad_id=7,
+            max_segments_per_packed_row=3,
+            segment_align_multiple=4,
+        )
+        dummy = batch_assembly.SequencePackedBatchAssembler(
+            **kwargs
+        ).build_dummy_payload(
+            with_old_per_token_logps=with_old,
+            with_ref_per_token_logps=with_ref,
+            with_sampler_is_weights=with_is_weights,
+            with_rollout_per_token_logps=with_rollout_logps,
+            with_overlong=with_overlong,
+        )
+        real = self._real_microbatch(
+            batch_assembly.SequencePackedBatchAssembler(**kwargs),
+            prompt_len=3,
+            completion_len=2,
+            with_old_per_token_logps=with_old,
+            with_ref_per_token_logps=with_ref,
+            with_sampler_is_weights=with_is_weights,
+            with_rollout_per_token_logps=with_rollout_logps,
+            with_overlong=with_overlong,
+        )
+        self._assert_same_jit_signature(dummy, real)
+        self.assertEqual(dummy.completion_ids.shape, (2, 16))
+        self.assertEqual(dummy.prompt_ids.shape, (2, 0))
+        self.assertEqual(dummy.num_segments, 4)
+        self.assertEqual(dummy.old_per_token_logps is not None, with_old)
+        self.assertEqual(dummy.ref_per_token_logps is not None, with_ref)
+        self.assertEqual(dummy.sampler_is_weights is not None, with_is_weights)
+        self.assertEqual(
+            dummy.rollout_per_token_logps is not None, with_rollout_logps
+        )
+        self.assertEqual(dummy.overlong is not None, with_overlong)
+        if with_overlong:
+          self.assertEqual(dummy.overlong.shape, (2, 16))
+
+  def test_padded_leaves_assembler_state_untouched(self):
+    asm = batch_assembly.PaddedBatchAssembler(
+        batch_size=2,
+        max_prompt_length=4,
+        max_response_length=4,
+        pad_id=0,
+        num_generations=2,
+        mini_batch_size=1,
+        start_batch_index=5,
+    )
+    asm.feed([_make_payload(2, 2)])  # One buffered, not yet emitted.
+    asm.build_dummy_payload(
+        with_old_per_token_logps=True, with_ref_per_token_logps=True
+    )
+    self.assertEqual(asm._batch_counter, 5)
+    self.assertLen(asm._buffer, 1)
+    self.assertEqual(asm._rollouts_since_update, 1)
+    (batch,) = list(asm.feed([_make_payload(2, 2)]))
+    self.assertEqual(batch.payload.metadata["trajectory_ids"], ("", ""))
+    self.assertEqual(asm._batch_counter, 6)
+
+  def test_packed_leaves_assembler_state_untouched(self):
+    asm = batch_assembly.SequencePackedBatchAssembler(
+        batch_size=1,
+        num_generations=2,
+        mini_batch_size=1,
+        max_packed_len=16,
+        pad_id=0,
+        segment_align_multiple=4,
+        start_batch_index=5,
+    )
+    asm.feed([_make_payload(2, 2)])  # One buffered, not yet emitted.
+    asm.build_dummy_payload(
+        with_old_per_token_logps=True, with_ref_per_token_logps=True
+    )
+    self.assertEqual(asm._batch_counter, 5)
+    self.assertLen(asm._buffer, 1)
+    self.assertEqual(asm._rollouts_since_update, 1)
+    batches = list(asm.feed([_make_payload(2, 2)]))
+    self.assertLen(batches, 1)
+    self.assertEqual(asm._batch_counter, 6)
+
+
 if __name__ == "__main__":
   absltest.main()
+
 
 

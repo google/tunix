@@ -904,7 +904,13 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       assembler: batch_assembly.BatchAssembler[Any],
       **kwargs: Any,
   ) -> None:
-    """Configures worker(s) under the specified role with algorithm or runtime settings."""
+    """Configures worker(s) under the specified role with algorithm or runtime settings.
+
+    For trainer roles this registers the loss and model-input functions, then
+    precompiles the trainer step executables against a dummy microbatch built
+    by `assembler.build_dummy_payload(...)`, so the first real train step does
+    not stall on XLA compilation.
+    """
     role_name = role.value if isinstance(role, datatypes.Role) else str(role)
     if algo is None:
       raise ValueError(
@@ -929,11 +935,48 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
             pad_id=pad_id,  # pyrefly: ignore[bad-argument-type]
             eos_id=eos_id,  # pyrefly: ignore[bad-argument-type]
         )
+        can_fuse_agreement_in_loss = bool(
+            kwargs["can_fuse_agreement_in_loss"]
+            if "can_fuse_agreement_in_loss" in kwargs
+            else False
+        )
+        use_rollout_logps = bool(algo.algo_config.use_rollout_logps)
+        with_sampler_is_weights = (
+            use_rollout_logps
+            and not can_fuse_agreement_in_loss
+            and getattr(algo.algo_config, "sampler_is", None) == "token"
+        )
+        is_grpo = isinstance(algo, algorithm_adapter.GRPOAdapter)
+        has_rollout_logps = (
+            use_rollout_logps
+            or getattr(
+                algo.algo_config, "truncated_importance_sampling_type", None
+            )
+            is not None
+            or getattr(algo.algo_config, "seq_logprob_error_threshold", None)
+            is not None
+            or getattr(algo.algo_config, "sampler_is_length_buckets", None)
+            is not None
+        )
+        dummy_payload = assembler.build_dummy_payload(
+            with_old_per_token_logps=use_rollout_logps,
+            with_ref_per_token_logps=algo.requires_reference_kl,
+            with_sampler_is_weights=with_sampler_is_weights,
+            with_rollout_per_token_logps=is_grpo and has_rollout_logps,
+            with_overlong=is_grpo,
+        )
 
         def _configure():
           assert worker is not None
+          # Both setters clear the trainer's JIT cache, so the ahead-of-time
+          # compile must run strictly after them.
           worker.submit("with_loss_fn", algo.loss_fn(), has_aux=True)
           worker.submit("with_gen_model_input_fn", gen_fn)
+          logging.info(
+              "Precompiling trainer step executables on %s worker...",
+              role_name,
+          )
+          worker.submit("compile", dummy_payload)
 
         try:
           loop = asyncio.get_running_loop()

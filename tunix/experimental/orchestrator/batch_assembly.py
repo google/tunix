@@ -245,6 +245,40 @@ class BatchAssembler(Generic[T], Protocol):
     """Drains remaining buffered items, padding to the required static tensor shape."""
     ...
 
+  def build_dummy_payload(
+      self,
+      *,
+      with_old_per_token_logps: bool,
+      with_ref_per_token_logps: bool,
+      with_sampler_is_weights: bool = False,
+      with_rollout_per_token_logps: bool = False,
+      with_overlong: bool = False,
+  ) -> datatypes.RLTrainerPayload:
+    """Builds a synthetic microbatch with the exact static layout `feed()` emits.
+
+    The trainer compiles one executable per payload pytree structure (field
+    presence, shapes, dtypes), so a payload built here lets the trainer compile
+    ahead of time and serve the first real microbatch from its JIT cache. Must
+    not touch buffered rollouts or lineage counters.
+
+    Args:
+      with_old_per_token_logps: Whether real payloads carry behavior-policy
+        logps (`old_per_token_logps`), i.e. the algorithm uses rollout logps.
+      with_ref_per_token_logps: Whether real payloads carry reference-model
+        logps (`ref_per_token_logps`), i.e. the algorithm needs a KL term.
+      with_sampler_is_weights: Whether real payloads carry pre-computed
+        importance-sampling weights (`sampler_is_weights`) from the
+        sampler-trainer agreement path.
+      with_rollout_per_token_logps: Whether real payloads carry rollout
+        per-token logps (`rollout_per_token_logps`).
+      with_overlong: Whether real payloads carry the `overlong` indicator.
+
+    Returns:
+      A batched payload whose `jax.tree.structure`, shapes and dtypes match
+      what `feed()` / `flush()` yield under the same configuration.
+    """
+    ...
+
   # TODO (tunix-dev): we should not allow `start_batch_index` to be None once failure recovery logic is implemented.
   def reset(self, *, start_batch_index: int | None = None) -> None:
     """Resets internal state and discards optimizer-update progress.
@@ -798,6 +832,56 @@ class SequencePackedBatchAssembler:
     self._rollouts_since_update = 0
     return self._drain_buffer(drain_all=True)
 
+  def build_dummy_payload(
+      self,
+      *,
+      with_old_per_token_logps: bool,
+      with_ref_per_token_logps: bool,
+      with_sampler_is_weights: bool = False,
+      with_rollout_per_token_logps: bool = False,
+      with_overlong: bool = False,
+  ) -> datatypes.RLTrainerPayload:
+    """Builds a zero-filled `[batch_size, max_packed_len]` dummy payload."""
+    shape = (self.batch_size, self.max_packed_len)
+    max_segments = packing.effective_max_segments(
+        self.max_packed_len, self.max_segments_per_packed_row
+    )
+    return datatypes.RLTrainerPayload(
+        prompt_ids=np.zeros((self.batch_size, 0), dtype=np.int32),
+        prompt_mask=np.zeros((self.batch_size, 0), dtype=np.float32),
+        completion_ids=np.zeros(shape, dtype=np.int32),
+        completion_mask=np.zeros(shape, dtype=np.float32),
+        advantages=np.zeros(shape, dtype=np.float32),
+        segment_ids=np.zeros(shape, dtype=np.int32),
+        segment_positions=np.zeros(shape, dtype=np.int32),
+        num_segments=max_segments + 1,
+        old_per_token_logps=(
+            np.zeros(shape, dtype=np.float32)
+            if with_old_per_token_logps
+            else None
+        ),
+        ref_per_token_logps=(
+            np.zeros(shape, dtype=np.float32)
+            if with_ref_per_token_logps
+            else None
+        ),
+        sampler_is_weights=(
+            np.zeros(shape, dtype=np.float32)
+            if with_sampler_is_weights
+            else None
+        ),
+        rollout_per_token_logps=(
+            np.zeros(shape, dtype=np.float32)
+            if with_rollout_per_token_logps
+            else None
+        ),
+        overlong=(
+            np.zeros(shape, dtype=np.float32)
+            if with_overlong
+            else None
+        ),
+    )
+
   def reset(self, *, start_batch_index: int | None = None) -> None:
     """Resets the internal buffer and optimizer-update rollout counter.
 
@@ -943,6 +1027,51 @@ class PaddedBatchAssembler:
     self._buffer.clear()
     self._rollouts_since_update = 0
     return [self._assemble(remainder, is_final_batch=True)]
+
+  def build_dummy_payload(
+      self,
+      *,
+      with_old_per_token_logps: bool,
+      with_ref_per_token_logps: bool,
+      with_sampler_is_weights: bool = False,
+      with_rollout_per_token_logps: bool = False,
+      with_overlong: bool = False,
+  ) -> datatypes.RLTrainerPayload:
+    """Builds a zero-filled `[batch_size, P]` / `[batch_size, C]` dummy payload."""
+    prompt_shape = (self.batch_size, self.max_prompt_length)
+    completion_shape = (self.batch_size, self.max_response_length)
+    return datatypes.RLTrainerPayload(
+        prompt_ids=np.zeros(prompt_shape, dtype=np.int32),
+        prompt_mask=np.zeros(prompt_shape, dtype=np.float32),
+        completion_ids=np.zeros(completion_shape, dtype=np.int32),
+        completion_mask=np.zeros(completion_shape, dtype=np.float32),
+        advantages=np.zeros(completion_shape, dtype=np.float32),
+        old_per_token_logps=(
+            np.zeros(completion_shape, dtype=np.float32)
+            if with_old_per_token_logps
+            else None
+        ),
+        ref_per_token_logps=(
+            np.zeros(completion_shape, dtype=np.float32)
+            if with_ref_per_token_logps
+            else None
+        ),
+        sampler_is_weights=(
+            np.zeros(completion_shape, dtype=np.float32)
+            if with_sampler_is_weights
+            else None
+        ),
+        rollout_per_token_logps=(
+            np.zeros(completion_shape, dtype=np.float32)
+            if with_rollout_per_token_logps
+            else None
+        ),
+        overlong=(
+            np.zeros((self.batch_size,), dtype=np.float32)
+            if with_overlong
+            else None
+        ),
+    )
 
   def reset(self, *, start_batch_index: int | None = None) -> None:
     """Resets internal buffering state, discarding all pending rollouts.

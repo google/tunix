@@ -81,6 +81,7 @@ class MockActorHandle(mock.MagicMock):
     self.set_target_state = mock.AsyncMock()
     self.with_loss_fn = mock.MagicMock()
     self.with_gen_model_input_fn = mock.MagicMock()
+    self.compile = mock.MagicMock()
 
   def submit(self, method_name: str, *args, **kwargs):
     method = getattr(self, method_name)
@@ -1564,6 +1565,10 @@ class DistributedRLEngineTest(absltest.TestCase):
     mock_algo.build_gen_model_input_fn.assert_called_once_with(
         pad_id=10, eos_id=20
     )
+    mock_assembler.build_dummy_payload.assert_called_once()
+    self.mock_actor.compile.assert_called_once_with(
+        mock_assembler.build_dummy_payload.return_value
+    )
 
   def test_configure_worker_actor_raises_when_algo_none(self):
     with self.assertRaisesRegex(ValueError, "algo is required"):
@@ -1607,6 +1612,10 @@ class DistributedRLEngineTest(absltest.TestCase):
     mock_algo.build_gen_model_input_fn.assert_called_once_with(
         pad_id=5, eos_id=6
     )
+    mock_assembler.build_dummy_payload.assert_called_once()
+    mock_critic.compile.assert_called_once_with(
+        mock_assembler.build_dummy_payload.return_value
+    )
 
   def test_configure_worker_fallback_pad_and_eos_kwargs(self):
     mock_algo = mock.MagicMock()
@@ -1618,7 +1627,7 @@ class DistributedRLEngineTest(absltest.TestCase):
     self.engine.configure_worker(
         role=datatypes.Role.ACTOR,
         algo=mock_algo,
-        assembler=mock.MagicMock(spec=[]),
+        assembler=mock.MagicMock(spec=["build_dummy_payload"]),
         pad_id=42,
         eos_id=43,
     )
@@ -1700,6 +1709,10 @@ class DistributedRLEngineTest(absltest.TestCase):
     mock_algo.build_gen_model_input_fn.assert_called_once_with(
         pad_id=1, eos_id=2
     )
+    mock_assembler.build_dummy_payload.assert_called_once()
+    self.mock_actor.compile.assert_called_once_with(
+        mock_assembler.build_dummy_payload.return_value
+    )
 
   def test_configure_worker_actor_raises_when_no_actor_worker(self):
     engine = distributed_rl_engine.DistributedRLEngine(
@@ -1726,12 +1739,14 @@ class DistributedRLEngineTest(absltest.TestCase):
     self.engine.configure_worker(
         role=datatypes.Role.ACTOR,
         algo=mock_algo,
-        assembler=mock.MagicMock(spec=[]),
+        assembler=mock.MagicMock(spec=["build_dummy_payload"]),
     )
     mock_algo.build_gen_model_input_fn.assert_called_with(pad_id=0, eos_id=0)
 
     # 2. eos_id defaults to pad_id when only pad_id is set on assembler
-    mock_assembler_pad_only = mock.MagicMock(spec=["pad_id"])
+    mock_assembler_pad_only = mock.MagicMock(
+        spec=["pad_id", "build_dummy_payload"]
+    )
     mock_assembler_pad_only.pad_id = 7
     self.engine.configure_worker(
         role=datatypes.Role.ACTOR,

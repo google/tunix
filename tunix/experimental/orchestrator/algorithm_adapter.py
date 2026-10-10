@@ -21,6 +21,7 @@ computations directly to `tunix.rl.algo_core`.
 
 import abc
 from collections.abc import Callable, Sequence
+import dataclasses
 import functools
 import types
 from typing import Any
@@ -43,6 +44,11 @@ def _algo_model_input(
     eos_id: int,
 ) -> dict[str, Any]:
   """Maps an RLTrainerPayload microbatch to algorithm loss kwargs."""
+  if (
+      isinstance(train_example, datatypes.RLTrainerPayload)
+      and train_example.metadata
+  ):
+    train_example = dataclasses.replace(train_example, metadata={})
   return {
       "train_example": train_example,
       "algo_config": algo_config,
