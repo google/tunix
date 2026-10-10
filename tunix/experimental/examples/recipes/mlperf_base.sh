@@ -203,7 +203,18 @@ export NEW_MODEL_DESIGN=1
 export ATTN_BUCKETIZED_NUM_REQS=true
 export ATTN_CUSTOM_NUM_REQS_BUCKETS=4
 export ONEHOT_MOE_PERMUTE_THRESHOLD="${ONEHOT_MOE_PERMUTE_THRESHOLD:-2048}"
+# MoE SparseCore combine kernel in tpu-inference (v2 | v3; v3 = destination-major
+# ragged_gather_reduce_v3, needs tpu-inference #3773 + MaxText #5620). Set only
+# here: k8s_launcher.sh forwards the value to the rollout/eval processes, and the
+# append below hands it to vLLM's Ray workers on multi-host rollout slices.
+# Recipes build VLLM_RAY_EXTRA_ENV_VARS_TO_COPY before sourcing this file, so
+# the list is extended here rather than in every recipe.
+#   RAGGED_GATHER_REDUCE_VERSION=v2 bash mlperf_397b_256_v7x.sh start
 export RAGGED_GATHER_REDUCE_VERSION="${RAGGED_GATHER_REDUCE_VERSION:-v3}"
+case ",${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY:-}," in
+  *,RAGGED_GATHER_REDUCE_VERSION,*) ;;
+  *) export VLLM_RAY_EXTRA_ENV_VARS_TO_COPY="${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY:+${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY},}RAGGED_GATHER_REDUCE_VERSION" ;;
+esac
 export VLLM_MOE_CHUNK_SIZE=256
 export SLICE_ROPE_CACHE=1
 export DP_SCHED_BATCH_PREFILL=false
