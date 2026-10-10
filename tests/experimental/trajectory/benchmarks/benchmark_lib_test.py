@@ -1,9 +1,8 @@
-import tempfile
-
 from absl.testing import absltest
 from absl.testing import parameterized
 from tunix.experimental.trajectory import file_store
 from tunix.experimental.trajectory import in_memory_store
+from tunix.experimental.trajectory import sql_store
 from tunix.experimental.trajectory import store as store_lib
 from tunix.experimental.trajectory.benchmarks import benchmark_lib
 from tunix.experimental.trajectory.benchmarks import data_generator
@@ -31,7 +30,7 @@ class BenchmarkLibTest(parameterized.TestCase):
       expected_type_name: str,
       workload: data_generator.WorkloadConfig,
   ) -> None:
-    """Helper function to execute recovery benchmark validation for a given store."""
+    """Helper function to execute recovery benchmark validation."""
     report = benchmark_lib.run_recovery_benchmark(
         reader=reader,
         writer=writer,
@@ -77,14 +76,35 @@ class BenchmarkLibTest(parameterized.TestCase):
   def test_run_recovery_benchmark_file_store(
       self, workload: data_generator.WorkloadConfig
   ) -> None:
-    with tempfile.TemporaryDirectory() as tmp_dir:
-      store_instance = file_store.FileTrajectoryStore(root_dir=tmp_dir)
-      self._verify_recovery_benchmark(
-          reader=store_instance,
-          writer=store_instance,
-          expected_type_name="FileTrajectoryStore",
-          workload=workload,
-      )
+    tmp_dir = self.create_tempdir().full_path
+    store_instance = file_store.FileTrajectoryStore(root_dir=tmp_dir)
+    self.addCleanup(store_instance.close)
+
+    self._verify_recovery_benchmark(
+        reader=store_instance,
+        writer=store_instance,
+        expected_type_name="FileTrajectoryStore",
+        workload=workload,
+    )
+
+  @parameterized.named_parameters(
+      ("two_checkpoints", _TWO_CHECKPOINTS_WORKLOAD),
+      ("three_checkpoints", _THREE_CHECKPOINTS_WORKLOAD),
+  )
+  def test_run_recovery_benchmark_sql_store(
+      self, workload: data_generator.WorkloadConfig
+  ) -> None:
+    store_instance = sql_store.SqlTrajectoryStore(
+        run_id="bench_run", db_url="sqlite:///:memory:"
+    )
+    self.addCleanup(store_instance.close)
+
+    self._verify_recovery_benchmark(
+        reader=store_instance,
+        writer=store_instance,
+        expected_type_name="SqlTrajectoryStore",
+        workload=workload,
+    )
 
 
 if __name__ == "__main__":

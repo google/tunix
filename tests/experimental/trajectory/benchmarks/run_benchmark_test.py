@@ -1,5 +1,8 @@
 from absl.testing import absltest
 from etils import epath
+from tunix.experimental.trajectory import sql_store
+from tunix.experimental.trajectory import store as store_lib
+from tunix.experimental.trajectory import trajectory_testing
 from tunix.experimental.trajectory.benchmarks import run_benchmark
 
 
@@ -20,6 +23,14 @@ def _parse_cmd(cmd: str = "") -> run_benchmark.BenchmarkConfig:
   if cmd:
     argv.extend(cmd.split(" "))
   return run_benchmark.parse_flags(argv)
+
+
+def _sqlite_db_path(store_instance: store_lib.TrajectoryStore) -> epath.Path:
+  """Returns the SQLite file backing `store_instance`."""
+  assert isinstance(store_instance, sql_store.SqlTrajectoryStore)
+  database = store_instance.engine.url.database
+  assert database is not None
+  return epath.Path(database)
 
 
 class RunBenchmarkCLITest(absltest.TestCase):
@@ -49,6 +60,75 @@ class RunBenchmarkCLITest(absltest.TestCase):
     self.assertIsInstance(
         config.store, run_benchmark.InMemoryTrajectoryStoreConfig
     )
+
+  def test_parse_flags_sql_store_default(self) -> None:
+    config = _parse_cmd("--store sql")
+    self.assertIsInstance(config.store, run_benchmark.SqlTrajectoryStoreConfig)
+    self.assertIsNone(config.store.db_url)
+    self.assertTrue(config.store.cleanup_after)
+
+  def test_parse_flags_sql_store_custom(self) -> None:
+    config = _parse_cmd(
+        "--store sql --db_url sqlite:////tmp/custom.db --cleanup_after False"
+    )
+    self.assertIsInstance(config.store, run_benchmark.SqlTrajectoryStoreConfig)
+    self.assertEqual(config.store.db_url, "sqlite:////tmp/custom.db")
+    self.assertFalse(config.store.cleanup_after)
+
+
+class ManagedStoreTest(absltest.TestCase):
+
+  def test_managed_store_sql_without_url_deletes_temp_database(self) -> None:
+    config = run_benchmark.SqlTrajectoryStoreConfig()
+
+    with run_benchmark._managed_store(config) as store_instance:
+      db_path = _sqlite_db_path(store_instance)
+      self.assertTrue(db_path.exists())
+
+    self.assertFalse(db_path.parent.exists())
+
+  def test_managed_store_sql_with_user_url_preserves_database(self) -> None:
+    db_path = epath.Path(self.create_tempdir().full_path) / "user.db"
+    config = run_benchmark.SqlTrajectoryStoreConfig(
+        db_url=f"sqlite:///{db_path}", cleanup_after=True
+    )
+
+    with run_benchmark._managed_store(config):
+      pass
+
+    self.assertTrue(db_path.exists())
+
+  def test_managed_store_file_with_cleanup_after_removes_run_dir(self) -> None:
+    root_dir = epath.Path(self.create_tempdir().full_path)
+    config = run_benchmark.FileTrajectoryStoreConfig(
+        root_dir=root_dir, cleanup_after=True
+    )
+
+    with run_benchmark._managed_store(config) as store_instance:
+      run_dir = root_dir / store_instance.to_config()["run_id"]
+      self.assertTrue(run_dir.exists())
+
+    self.assertFalse(run_dir.exists())
+
+  def test_managed_store_in_memory_yields_memory_backend(self) -> None:
+    config = run_benchmark.InMemoryTrajectoryStoreConfig()
+
+    with run_benchmark._managed_store(config) as store_instance:
+      backend = store_instance.to_config()["backend"]
+
+    self.assertEqual(backend, "memory")
+
+  def test_managed_store_body_raises_still_closes_and_cleans_up(self) -> None:
+    config = run_benchmark.SqlTrajectoryStoreConfig()
+
+    with self.assertRaisesRegex(RuntimeError, "benchmark failed"):
+      with run_benchmark._managed_store(config) as store_instance:
+        db_path = _sqlite_db_path(store_instance)
+        raise RuntimeError("benchmark failed")
+
+    self.assertFalse(db_path.parent.exists())
+    with self.assertRaisesRegex(RuntimeError, r"Cannot write to a closed"):
+      store_instance.update_metadata(trajectory_testing.METADATA_1)
 
 
 if __name__ == "__main__":
