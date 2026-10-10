@@ -310,6 +310,9 @@ export MAX_STALENESS=${MAX_STALENESS:-1}
 # prompt batch first (vLLM priority scheduling, priority = batch index) instead
 # of in arrival order (FCFS, the default).
 export ROLLOUT_PRIORITY_SCHEDULING=${ROLLOUT_PRIORITY_SCHEDULING:-false}
+# Seconds between the start-up prompt batches (batch k held until k * this
+# after batch 0 dispatches). Default 0 = no stagger.
+export INITIAL_DISPATCH_STAGGER_S=${INITIAL_DISPATCH_STAGGER_S:-0}
 # Overlap each step's weight sync with the next step's training. Safe only
 # while the trainer transfers from host staging, since the next step rewrites
 # the device buffers mid-transfer.

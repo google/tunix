@@ -400,11 +400,14 @@ class StandardRLProgram(RLProgram):
       checkpoint_optimizer_interval_steps: int = 1,
       pipeline_train_microbatches: bool = False,
       rollout_priority_scheduling: bool = False,
+      initial_dispatch_stagger_s: float = 0.0,
   ):
     super().__init__()
     self.engine: rl_engine_interface.AbstractRLEngine | None = None
     if max_staleness < 0:
       raise ValueError("max_staleness must be non-negative.")
+    if initial_dispatch_stagger_s < 0:
+      raise ValueError("initial_dispatch_stagger_s must be non-negative.")
     if checkpoint_optimizer_interval_steps < 0:
       raise ValueError(
           "checkpoint_optimizer_interval_steps must be non-negative."
@@ -541,6 +544,12 @@ class StandardRLProgram(RLProgram):
     # under `max_staleness > 0`. Off, every request gets priority 0 and the
     # rollouts serve requests in arrival order.
     self.rollout_priority_scheduling = rollout_priority_scheduling
+    # Spread the start-up prompt batches out in time: batch k is held until
+    # `k * initial_dispatch_stagger_s` after batch 0 first dispatches. Applies
+    # only before the trainer consumes its first batch; 0 disables it.
+    self.initial_dispatch_stagger_s = float(initial_dispatch_stagger_s)
+    self._initial_dispatch_t0: float | None = None
+    self._initial_stagger_logged: set[int] = set()
     self._sync_error: BaseException | None = None
     self.metrics_logger: MetricsLogger = MetricsLogger(metrics_logging_options)
     # Trajectory logging is disabled on mlperf to prevent GCS write timeouts
@@ -657,6 +666,7 @@ class StandardRLProgram(RLProgram):
     # skip the loop and keep dispatching after a sync round failed.
     if self._sync_error is not None:
       raise self._sync_error
+    await self._hold_initial_stagger(batch_idx)
     if self.partial_rollout:
       await self._wait_for_partial_dispatch_window(batch_idx)
       return
@@ -676,6 +686,46 @@ class StandardRLProgram(RLProgram):
       # between the test above and the clear, and nothing would set it again.
       await self._window_release.wait()
       self._window_release.clear()
+
+  async def _hold_initial_stagger(self, batch_idx: int) -> None:
+    """Holds start-up batch `batch_idx` until its staggered dispatch time.
+
+    With `initial_dispatch_stagger_s > 0`, batch k (k > 0) is held until
+    `k * initial_dispatch_stagger_s` after batch 0 first dispatched. No-op once
+    the trainer has consumed a batch (`_next_batch > 0`).
+
+    Args:
+      batch_idx: The prompt batch the dispatcher is about to emit into.
+    """
+    stagger = self.initial_dispatch_stagger_s
+    if stagger <= 0 or self._next_batch > 0:
+      return
+    if batch_idx == 0:
+      if self._initial_dispatch_t0 is None:
+        self._initial_dispatch_t0 = time.monotonic()
+      return
+    t0 = self._initial_dispatch_t0
+    if t0 is None:
+      return
+    due = t0 + batch_idx * stagger
+    now = time.monotonic()
+    if now >= due:
+      return
+    logged = getattr(self, "_initial_stagger_logged", None)
+    if logged is None:
+      logged = self._initial_stagger_logged = set()
+    if batch_idx not in logged:
+      logged.add(batch_idx)
+      logging.info(
+          "[pipeline] STAGGER batch_idx=%d held %.1f s"
+          " (initial_dispatch_stagger_s=%.1f)",
+          batch_idx,
+          due - now,
+          stagger,
+      )
+    await asyncio.sleep(due - now)
+    if self._sync_error is not None:
+      raise self._sync_error
 
   async def _wait_for_partial_dispatch_window(self, batch_idx: int) -> None:
     """Per-batch dispatch gate for partial rollout.

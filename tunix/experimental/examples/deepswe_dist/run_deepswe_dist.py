@@ -301,6 +301,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " --priority_scheduling; off, requests are served in arrival order."
       ),
   )
+  parser.add_argument(
+      "--initial_dispatch_stagger_s",
+      type=float,
+      default=0.0,
+      help=(
+          "Stagger the start-up prompt batches: batch k is held until"
+          " k * this many seconds after batch 0 first dispatches. Applies only"
+          " before the trainer consumes its first batch. 0 (default) dispatches"
+          " the start-up batches as soon as the staleness window allows."
+      ),
+  )
   # ---- Optional GRPO algorithm options -------------------------------------
   # All default to off, so omitting them reproduces the previous behaviour.
   parser.add_argument(
@@ -1089,6 +1100,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         pipeline_train_microbatches=args.pipeline_train_microbatches,
         partial_rollout=args.in_flight_weight_updates,
         rollout_priority_scheduling=args.rollout_priority_scheduling,
+        initial_dispatch_stagger_s=args.initial_dispatch_stagger_s,
         on_train_start=_on_train_start,
         on_step_begin=lambda step: logging.info(
             ">>> DeepSWE step %d starting | policy_version=%d",
