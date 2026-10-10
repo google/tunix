@@ -695,6 +695,41 @@ class YamlGeneratorTest(parameterized.TestCase):
       with self.assertRaisesRegex(ValueError, "Invalid gang_id"):
         yaml_generator.main()
 
+  @parameterized.named_parameters(
+      ("lowercase", "sandbox-np"),
+      ("mixed_case", "Sandbox-NP"),
+  )
+  def test_dynamic_slicing_sandbox_head_nodepool_tolerations(
+      self, head_nodepool: str
+  ) -> None:
+    template_file = _get_template_path("jobset.pathways.yaml")
+    argv = [
+        "yaml_generator.py",
+        template_file,
+        "--jobset_name=test-sandbox-head",
+        "--tpu_slice=tpu7x:2x2x4",
+        f"--head_nodepool={head_nodepool}",
+    ]
+    with mock.patch.object(sys, "argv", argv):
+      with mock.patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+        yaml_generator.main()
+        rendered = mock_stdout.getvalue()
+
+    proc_pod = _proc_job_spec(rendered)["template"]["spec"]
+    self.assertEqual(
+        proc_pod["nodeSelector"],
+        {"cloud.google.com/gke-nodepool": head_nodepool},
+    )
+    self.assertIn(
+        {
+            "key": "workload",
+            "operator": "Equal",
+            "value": "sandbox",
+            "effect": "NoSchedule",
+        },
+        proc_pod["tolerations"],
+    )
+
 
 _FAIL_FAST_TEMPLATES = (
     ("tpu", "jobset.tpu.yaml", "tpuv5:2x2x1"),

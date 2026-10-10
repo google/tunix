@@ -519,6 +519,13 @@ def main() -> None:
         + (f"              value: \"{head_nodepool}\"\n" if head_nodepool else "")
         + "              effect: \"NoSchedule\""
     )
+    if head_nodepool and "sandbox" in head_nodepool.lower():
+      head_tolerations += (
+          "\n            - key: \"workload\"\n"
+          "              operator: \"Equal\"\n"
+          "              value: \"sandbox\"\n"
+          "              effect: \"NoSchedule\""
+      )
     tpu_topology_selector = ""
   else:
     head_node_selector = (
