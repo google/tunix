@@ -186,14 +186,18 @@ class ClusterOrchestrator:
   def _remote_shims(
       self, *, include_evicted: bool = False
   ) -> dict[str, weight_sync_coordinator.RemoteWorkerShim]:
-    """Returns registered RemoteWorkerShims keyed by worker_id."""
+    """Returns registered remote RemoteWorkerShims keyed by worker_id."""
     shims: dict[str, weight_sync_coordinator.RemoteWorkerShim] = {}
     for worker_id in self.registry.worker_ids(include_evicted=include_evicted):
       try:
         member = self.registry.get(worker_id)
       except KeyError:
         continue  # Unregistered concurrently.
-      if isinstance(member, weight_sync_coordinator.RemoteWorkerShim):
+      if (
+          isinstance(member, weight_sync_coordinator.RemoteWorkerShim)
+          and member.info().resources
+          and member.info().resources.get("remote")
+      ):
         shims[worker_id] = member
     return shims
 
@@ -509,7 +513,11 @@ class ClusterOrchestrator:
       self,
   ) -> dict[str, remote_execution.ActorHandle]:
     """Returns a copy of ``worker_id -> handle`` for the remote workers."""
-    return dict(self._remote_worker_handles_by_id)
+    return {
+        wid: shim.handle
+        for wid, shim in self._remote_shims(include_evicted=True).items()
+        if shim.info().resources and shim.info().resources.get("remote")
+    }
 
   def sync_jax_cache(self) -> None:
     """Synchronizes JAX compilation cache across all workers to GCS."""
@@ -662,7 +670,8 @@ class ClusterOrchestrator:
     local_handles: list[remote_execution.ActorHandle] = []
     for member in self._get_role_members(role):
       if isinstance(member, weight_sync_coordinator.RemoteWorkerShim):
-        remote_handles.append(member.handle)
+        if member.info().resources and member.info().resources.get("remote"):
+          remote_handles.append(member.handle)
       else:
         local_handles.append(
             remote_execution.InProcessActorHandle(
@@ -848,7 +857,8 @@ class ClusterOrchestrator:
               and self._fault_tolerance_config.retry_weight_sync_on_eviction
           ),
           recover_unknown_transfer_state=(
-              self._fault_tolerance_config.recover_unknown_transfer_state
+              self._fault_tolerance_config.enabled
+              and self._fault_tolerance_config.recover_unknown_transfer_state
           ),
       )
 

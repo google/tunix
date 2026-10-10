@@ -877,6 +877,9 @@ class StandardRLProgram(RLProgram):
     assert self.engine is not None
     try:
       while not self._dispatch_done.is_set() or self._in_flight_rollouts > 0:
+        if self._in_flight_rollouts <= 0:
+          await asyncio.sleep(0.001)
+          continue
 
         try:
           completed = await self.engine.poll_rollouts()
