@@ -133,6 +133,9 @@ esac
 # Seconds between the start-up prompt batches (batch k held until k * this
 # after batch 0 dispatches). Default 0 = no stagger.
 export INITIAL_DISPATCH_STAGGER_S=${INITIAL_DISPATCH_STAGGER_S:-0}
+# `true` compiles the trainer at bring-up against one synthetic micro-batch
+# (before run_start) instead of on the first real micro-batch. Default false.
+export TRAINER_WARMUP_COMPILE=${TRAINER_WARMUP_COMPILE:-false}
 
 # JAX compilation cache configuration
 export LOCAL_JAX_CACHE_DIR=${LOCAL_JAX_CACHE_DIR:-${JAX_CACHE_DIR:-/tmp/jax_cache}}
