@@ -153,6 +153,13 @@ context_parallel_attention_load_balance=true \
 num_vocab_tiling=16 use_iota_embed=false mu_dtype=float32 grad_dtype=float32 \
 checkpoint_storage_concurrent_gb=96 \
 packing=True optimizer_memory_host_offload=true}"
+# Opt-in: RETRY_WHEN_TOKENS_DROPPED=true reruns a micro-batch whose MoE ragged buffer overflows
+# with a dropless program (RETRY_NUM_MOE_TOKEN_CHUNKS scanned token chunks, ~63 GiB/device)
+# instead of dropping its tokens. Needs RAGGED_BUFFER_FACTOR > 0 and a MaxText with the
+# training-engine dropless replay (AI-Hypercomputer/maxtext#5570).
+if [[ "${RETRY_WHEN_TOKENS_DROPPED:-false}" == "true" ]]; then
+  export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} retry_when_tokens_dropped=true retry_num_moe_token_chunks=${RETRY_NUM_MOE_TOKEN_CHUNKS:-8}"
+fi
 export DEBUG=${DEBUG:-0}
 
 # DeepSWE Environment & Agent Sandbox
