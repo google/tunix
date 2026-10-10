@@ -56,7 +56,8 @@ def _response_to_trajectory_item(resp: Any) -> datatypes.TrajectoryItem:
       merged_meta = dict(resp.metadata)
       if resp.payload.metadata:
         merged_meta.update(resp.payload.metadata)
-      return dataclasses.replace(resp.payload, metadata=merged_meta)
+      if merged_meta != resp.payload.metadata:
+        return dataclasses.replace(resp.payload, metadata=merged_meta)
     return resp.payload
 
   if resp.error is not None:
