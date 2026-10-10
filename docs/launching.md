@@ -233,10 +233,12 @@ The following steps explain the environment setup process performed by the scrip
     ```
 
     *   **Option A: TPU Only**
-        If you only require TPU, install with `[prod]` extra:
+        If you only require TPU, install Tunix directly: the core
+        dependencies already include the TPU build of JAX. (The `[prod]`
+        extra is empty and installs nothing.)
 
         ```shell
-        pip install -e .[prod]
+        pip install -e .
         ```
 
     *   **Option B: Other Accelerators (e.g., GPU)**
@@ -246,12 +248,15 @@ The following steps explain the environment setup process performed by the scrip
         pip install -e .
         ```
 
-        Then, install your accelerator-specific dependency separately, for example:
+        Then, install your accelerator-specific JAX build separately, for example:
 
         ```shell
         # Example for GPU
         pip install jax[gpu]
         ```
+
+        This replaces the TPU build of JAX (jaxlib and libtpu) that the core
+        install pulled in.
 
 </section>
 
