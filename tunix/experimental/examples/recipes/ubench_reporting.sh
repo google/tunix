@@ -135,6 +135,10 @@ _ubench_main() {
     _ubench_log "Dry run. Not writing files to ${run_dir}."
     return 0
   fi
+  if ! command -v gcloud &> /dev/null; then
+    _ubench_log "gcloud CLI is not installed or not in PATH."
+    return 1
+  fi
   if gcloud storage ls "${run_dir}/logs/resolved_config.yaml" > /dev/null 2>&1; then
     _ubench_log "${run_dir} already has uBench files from an earlier run." \
       "Use a new JOB_PREFIX."
