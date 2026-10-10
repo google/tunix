@@ -29,7 +29,6 @@ from tunix.experimental.orchestrator import rl_program
 from tunix.experimental.orchestrator import worker_registry
 from tunix.experimental.trajectory import file_store
 from tunix.experimental.trajectory import trajectory_testing
-from tunix.experimental.weight_sync import weight_sync_coordinator
 from tunix.experimental.worker import abstract_worker
 from tunix.experimental.worker import remote_execution
 
@@ -1043,7 +1042,36 @@ class ClusterOrchestratorTest(absltest.TestCase):
   ):
     h_actor = mock.MagicMock(spec=remote_execution.ActorHandle)
     h_r0 = mock.MagicMock(spec=remote_execution.ActorHandle)
-    local_worker = _DummyWorker("local-rollout", [datatypes.Role.ROLLOUT])
+
+    class LocalRolloutWorker(abstract_worker.Worker):
+
+      def __init__(self):
+        self.stopped = 0
+
+      def info(self):
+        return datatypes.WorkerInfo(
+            worker_id="local-rollout",
+            roles=frozenset({datatypes.Role.ROLLOUT.value}),
+        )
+
+      def initialize(self):
+        return datatypes.Response()
+
+      def compile(self, dummy_data=None):
+        del dummy_data
+        return datatypes.Response()
+
+      def start(self):
+        return datatypes.Response()
+
+      def stop(self):
+        self.stopped += 1
+        return datatypes.Response()
+
+      def heartbeat(self):
+        return datatypes.HealthReport(state=datatypes.WorkerState.READY)
+
+    local_worker = LocalRolloutWorker()
 
     orch = orchestrator.ClusterOrchestrator(
         lifecycle_driver=mock.MagicMock(),
@@ -1053,10 +1081,12 @@ class ClusterOrchestratorTest(absltest.TestCase):
     orch.register_worker(local_worker)
     orch.register_worker_handle("actor-0", [datatypes.Role.ACTOR], h_actor)
     orch.register_worker_handle("rollout-0", [datatypes.Role.ROLLOUT], h_r0)
+    self.assertLen(orch.worker_handles(datatypes.Role.ROLLOUT), 2)
     orch.bring_up_workers()
+    self.assertLen(orch.worker_handles(datatypes.Role.ROLLOUT), 2)
     # Also verify a shim with resources=None does not raise AttributeError.
     orch.registry.register(
-        weight_sync_coordinator.RemoteWorkerShim(
+        orchestrator.weight_sync_coordinator.RemoteWorkerShim(
             mock.MagicMock(spec=remote_execution.ActorHandle),
             datatypes.WorkerInfo(
                 worker_id="local-none-resources",
@@ -1069,6 +1099,7 @@ class ClusterOrchestratorTest(absltest.TestCase):
 
     handles = orch.remote_worker_handles()
     self.assertEqual(handles, {"actor-0": h_actor, "rollout-0": h_r0})
+    self.assertLen(orch.worker_handles(datatypes.Role.ROLLOUT), 2)
 
     # Evicted remote workers are still returned so shutdown/drain can stop them.
     orch.registry.evict("rollout-0")
@@ -1083,6 +1114,7 @@ class ClusterOrchestratorTest(absltest.TestCase):
     self.assertEqual(handles, {"actor-0": h_actor, "rollout-0": h_r0})
     self.assertEqual(orch.remote_worker_handles(), {"actor-0": h_actor})
     orch.shutdown()
+    self.assertEqual(local_worker.stopped, 0)
 
 
 def _trajectory_store_orchestrator(
