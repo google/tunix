@@ -27,14 +27,14 @@ RUN pip install git+https://github.com/ayaka14732/jax-smi.git
 # If you encounter a checkpoint issue, try using following old version of pathways-utils.
 # RUN pip install git+https://github.com/AI-Hypercomputer/pathways-utils.git@b72729bb152b7b3426299405950b3af300d765a9#egg=pathwaysutils
 RUN pip install gcsfs
-RUN pip install wandb
+RUN pip install wandb psycopg2-binary
 
 # Set the working directory
 WORKDIR /app
 
 # Copy scripts and requirements first to leverage Docker cache
 COPY scripts/install_tunix_vllm_requirement.sh scripts/
-COPY requirements/ requirements/
+COPY requirements/requirements.txt requirements/special_requirements.txt requirements/
 
 RUN bash scripts/install_tunix_vllm_requirement.sh
 
@@ -43,10 +43,11 @@ COPY pyproject.toml README.md CMakeLists.txt /app/
 RUN mkdir /app/tunix && touch /app/tunix/__init__.py
 RUN uv pip install .
 
-# Install SFT/MaxText dependencies (unconditional)
-RUN uv pip install --upgrade flax && \
-    uv pip install torchax aqtp tokamax math_verify drjax && \
-    uv pip install --no-deps git+https://github.com/google/maxtext.git
+# Install SFT/MaxText dependencies (unconditional). jax/flax are pinned to the
+# versions the MLPerf 35B recipe is validated with; MaxText itself is pinned in
+# requirements/maxtext_requirements.txt (installed below).
+RUN uv pip install 'jax==0.11.0' 'flax==0.12.7' && \
+    uv pip install torchax aqtp tokamax math_verify drjax
 
 # Build argument to conditionally install Kubernetes tools
 ARG INSTALL_K8S_TOOLS=false
@@ -65,23 +66,29 @@ RUN if [ "$INSTALL_K8S_TOOLS" = "true" ]; then \
 # Build argument to conditionally install DeepSWE evaluation dependencies
 ARG INSTALL_DEEPSWE_DEPS=false
 
-# Install DeepSWE specific dependencies and apply runtime patches conditionally
+# Install DeepSWE specific dependencies and apply runtime patches conditionally.
+# Matches atwigg/mlperf minus the OpenHands scaffold packages (r2egym only).
 RUN if [ "$INSTALL_DEEPSWE_DEPS" = "true" ]; then \
-      uv pip install kubernetes gym swebench==3.0.2 && \
+      uv pip install kubernetes gym swebench==3.0.2 'k8s-agent-sandbox>=0.5.1' httpx && \
       uv pip install --no-deps git+https://github.com/kubernetes-sigs/agent-sandbox.git#subdirectory=clients/python/agentic-sandbox-client && \
       uv pip install --no-deps git+https://github.com/kubernetes-sigs/agent-sandbox.git#subdirectory=examples/agent-sandbox-rl && \
       uv pip install --no-deps git+https://github.com/r2e-gym/r2e-gym.git@0d94c4eb9431cd195c55a7ea3abd54006c9a1735 && \
       sed -i 's/create_repo, upload_folder, HfFolder/create_repo, upload_folder/' /opt/venv/lib/python3.12/site-packages/r2egym/agenthub/utils/utils.py && \
-      sed -i 's/self.commit = ParsedCommit(\*\*json.loads(self.commit_json))/self.commit = ParsedCommit(\*\*(json.loads(self.commit_json) if isinstance(self.commit_json, str) else self.commit_json))/' /opt/venv/lib/python3.12/site-packages/r2egym/agenthub/runtime/docker.py; \
+      sed -i 's/self.commit = ParsedCommit(\*\*json.loads(self.commit_json))/self.commit = ParsedCommit(\*\*(json.loads(self.commit_json) if isinstance(self.commit_json, str) else self.commit_json))/' /opt/venv/lib/python3.12/site-packages/r2egym/agenthub/runtime/docker.py && \
+      sed -i 's/sel = c.resources.managed_selector()/sel = self.run_selector()/' /opt/venv/lib/python3.12/site-packages/agent_sandbox_rl/fleet.py; \
     fi
 
 # Build argument to conditionally install MaxText dependencies
 ARG INSTALL_MAXTEXT=false
 
-# Install MaxText specific dependencies conditionally
+# Install MaxText (and optional MaxText-specific dependencies) from
+# requirements/maxtext_requirements.txt.
+COPY requirements/maxtext_requirements.txt requirements/
 RUN if [ "$INSTALL_MAXTEXT" = "true" ]; then \
       uv pip install -r /app/requirements/maxtext_requirements.txt --torch-backend=cpu; \
-fi
+    else \
+      grep '^maxtext @' /app/requirements/maxtext_requirements.txt | uv pip install --no-deps -r /dev/stdin; \
+    fi
 
 # Build argument to conditionally install Raiden weight sync dependencies
 ARG INSTALL_RAIDEN=false
@@ -97,8 +104,31 @@ RUN if [ "$INSTALL_RAIDEN" = "true" ]; then \
       RAIDEN_WHEEL_DIR="$RAIDEN_WHEEL_DIR" bash /app/scripts/install_raiden.sh; \
     fi
 
-# Force install numpy version to avoid version conflicts.
-RUN uv pip install numpy==2.3.5
+# Force install numpy, jax, and flax versions to avoid version conflicts and API
+# breakage from the installs above.
+RUN uv pip install numpy==2.3.5 'jax==0.11.0' 'flax==0.12.7'
+
+# Pre-cache HuggingFace tokenizers and model configs (excluding weight shards)
+# so distributed workers don't hit HuggingFace rate limits. Unlike atwigg/mlperf
+# this does not force HF_HUB_OFFLINE: main's DeepSWE data loader may still
+# download datasets from the Hub. Set HF_HUB_OFFLINE=1 per role if needed.
+ENV HF_HOME=/opt/hf_cache
+RUN --mount=type=secret,id=HF_TOKEN \
+    mkdir -p /opt/hf_models && \
+    HF_TOKEN=$(cat /run/secrets/HF_TOKEN 2>/dev/null || echo "") python3 -c "\
+for repo_id, model_name in [ \
+    ('Qwen/Qwen3.5-397B-A17B', 'Qwen3.5-397B-A17B'), \
+    ('Qwen/Qwen3.5-35B-A3B', 'Qwen3.5-35B-A3B'), \
+]: \
+    import os; \
+    from huggingface_hub import snapshot_download; \
+    path = snapshot_download( \
+        repo_id=repo_id, \
+        ignore_patterns=['*.safetensors', '*.bin', '*.pt', '*.pth'], \
+        token=os.environ.get('HF_TOKEN') or None, \
+    ); \
+    os.symlink(path, f'/opt/hf_models/{model_name}'); \
+" && chmod -R a+rX /opt/hf_cache /opt/hf_models
 
 # Copy the rest of the project files
 COPY . .
