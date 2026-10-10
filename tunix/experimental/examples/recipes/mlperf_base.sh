@@ -256,6 +256,21 @@ export DP_SCHED_BATCH_PREFILL=false
 export LIBTPU_INIT_ARGS="${LIBTPU_INIT_ARGS:- --xla_tpu_use_minor_sharding_for_major_trivial_input=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=false --xla_tpu_ars_combiner_threshold_in_bytes=0 --xla_tpu_enable_async_collective_merger=false --xla_tpu_check_legacy_constraints_in_reduce_scatter_legalizer=false}"
 export VLLM_ENABLE_V1_MULTIPROCESSING=0
 
+# MoE and collective optimization switches (defaults disabled to preserve baseline)
+export TPU_SMALL_ALL_REDUCE="${TPU_SMALL_ALL_REDUCE:-0}"
+export TPU_MOE_SINGLE_SORT="${TPU_MOE_SINGLE_SORT:-0}"
+export TPU_MOE_ROUTER_TOPK="${TPU_MOE_ROUTER_TOPK:-sort}"
+export TPU_MOE_LOWTOK="${TPU_MOE_LOWTOK:-0}"
+
+# Propagate optimization flags to vLLM's Ray workers
+for _opt_var in TPU_SMALL_ALL_REDUCE TPU_MOE_SINGLE_SORT TPU_MOE_ROUTER_TOPK TPU_MOE_LOWTOK; do
+  if [[ -n "${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY:-}" ]]; then
+    export VLLM_RAY_EXTRA_ENV_VARS_TO_COPY="${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY},${_opt_var}"
+  else
+    export VLLM_RAY_EXTRA_ENV_VARS_TO_COPY="${_opt_var}"
+  fi
+done
+
 # Phased inference profiling (vLLM / tpu-inference)
 # Disabled by default (PHASED_PROFILING_DIR="" in tpu-inference). Only active when PROFILE_SAMPLER=true.
 export PROFILE_SAMPLER="${PROFILE_SAMPLER:-false}"
