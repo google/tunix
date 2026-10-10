@@ -235,7 +235,7 @@ class RLVllmSampler:
             _get_val(
                 sparams,
                 "detokenize",
-                _get_val(kwargs, "detokenize", False),
+                _get_val(kwargs, "detokenize", True),
             )
         ),
         logprobs=1

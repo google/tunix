@@ -171,6 +171,71 @@ def _str2bool(v: str | bool) -> bool:
   raise argparse.ArgumentTypeError(f"Boolean value expected, got {v}")
 
 
+def _load_json_config(value: str | dict | None) -> dict[str, Any]:
+  """Parses a dictionary from JSON string, JSON/YAML file path, or dict."""
+  if value is None:
+    return {}
+  if isinstance(value, dict):
+    return value
+  if not isinstance(value, str):
+    raise ValueError(f"Expected string or dict, got {type(value)}")
+  value = value.strip()
+  if not value:
+    return {}
+  if os.path.exists(value) and os.path.isfile(value):
+    with open(value, "r", encoding="utf-8") as f:
+      content = f.read().strip()
+    if not content:
+      return {}
+    try:
+      res = json.loads(content)
+      if isinstance(res, dict):
+        return res
+    except json.JSONDecodeError:
+      pass
+    try:
+      import yaml  # pylint: disable=g-import-not-at-top
+
+      res = yaml.safe_load(content)
+      if isinstance(res, dict):
+        return res
+    except Exception:
+      pass
+    raise ValueError(f"Unable to parse configuration file: {value}")
+  try:
+    res = json.loads(value)
+    if isinstance(res, dict):
+      return res
+  except json.JSONDecodeError:
+    pass
+  try:
+    import yaml  # pylint: disable=g-import-not-at-top
+
+    res = yaml.safe_load(value)
+    if isinstance(res, dict):
+      return res
+  except Exception:
+    pass
+  raise ValueError(f"Unable to parse JSON configuration: {value}")
+
+
+def _deep_merge_dicts(
+    base: dict[str, Any], update: dict[str, Any]
+) -> dict[str, Any]:
+  """Recursively merges two dictionaries without mutating the inputs."""
+  result = dict(base)
+  for key, value in update.items():
+    if (
+        key in result
+        and isinstance(result[key], dict)
+        and isinstance(value, dict)
+    ):
+      result[key] = _deep_merge_dicts(result[key], value)
+    else:
+      result[key] = value
+  return result
+
+
 def _parse_args(argv: list[str]) -> argparse.Namespace:
   """Parses command line arguments for the rollout worker process."""
   parser = argparse.ArgumentParser(description="Distributed rollout worker")
@@ -382,6 +447,50 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       default="",
       help="Root directory for the file-backed TrajectoryStore.",
   )
+  parser.add_argument(
+      "--return_routed_experts",
+      type=_str2bool,
+      default=_str2bool(os.getenv("RETURN_ROUTED_EXPERTS", "false")),
+      nargs="?",
+      const=True,
+      help="Return MoE routed expert IDs from vLLM sampler for router replay.",
+  )
+  parser.add_argument(
+      "--store_routed_experts",
+      type=_str2bool,
+      default=_str2bool(os.getenv("STORE_ROUTED_EXPERTS", "false")),
+      nargs="?",
+      const=True,
+      help="Persist routed_experts in TrajectoryStore.",
+  )
+  parser.add_argument(
+      "--free_kv_cache_during_weight_sync",
+      type=_str2bool,
+      default=_str2bool(os.getenv("ROLLOUT_FREE_KV_CACHE", "false")),
+      nargs="?",
+      const=True,
+      help="Free the KV cache during weight sync.",
+  )
+  parser.add_argument(
+      "--priority_scheduling",
+      type=_str2bool,
+      default=_str2bool(os.getenv("ROLLOUT_PRIORITY_SCHEDULING", "false")),
+      nargs="?",
+      const=True,
+      help="Run vLLM with scheduling_policy='priority'.",
+  )
+  parser.add_argument(
+      "--vllm_config_json",
+      type=str,
+      default=os.getenv("ROLLOUT_VLLM_CONFIG_JSON", "{}"),
+      help="vLLM engine and sharding configurations as a JSON string or file path.",
+  )
+  parser.add_argument(
+      "--seed",
+      type=int,
+      default=None,
+      help="Base random seed for the rollout sampler engine.",
+  )
   args = parser.parse_args(argv)
   _get_tensor_parallel_size(args)
   return args
@@ -480,6 +589,8 @@ def _rollout_config_kwargs(
       "env_name": args.env_name,
       "agent_name": args.agent_name,
       "agent_config": _agent_config(args),
+      "return_routed_experts": args.return_routed_experts,
+      "store_routed_experts": args.store_routed_experts,
       "partial_rollout": bool(
           getattr(args, "in_flight_weight_updates", False)
       ),
@@ -752,8 +863,20 @@ def _create_vllm_sampler(args, tokenizer):
   max_model_len = args.vllm_max_model_len or (
       args.max_prompt_length + args.max_response_length
   )
-  tp_size = _get_tensor_parallel_size(args)
-  dp_size = max(1, int(getattr(args, "mesh_fsdp", 1) or 1))
+  vllm_overrides = _load_json_config(getattr(args, "vllm_config_json", None))
+  if "max_model_len" in vllm_overrides and args.vllm_max_model_len is None:
+    max_model_len = int(vllm_overrides.pop("max_model_len"))
+  else:
+    vllm_overrides.pop("max_model_len", None)
+  tp_size = vllm_overrides.pop("tensor_parallel_size", None) or _get_tensor_parallel_size(args)
+  dp_size = vllm_overrides.pop("data_parallel_size", None) or max(
+      1, int(getattr(args, "mesh_fsdp", 1) or 1)
+  )
+  gpu_mem_util = (
+      vllm_overrides.pop("gpu_memory_utilization", None)
+      or vllm_overrides.pop("hbm_utilization", None)
+      or getattr(args, "vllm_hbm_utilization", None)
+  )
   logging.info(
       "Creating vLLM RLVllmSampler config for model=%s tensor_parallel_size=%d "
       "data_parallel_size=%d (%d chips) max_model_len=%d...",
@@ -770,8 +893,16 @@ def _create_vllm_sampler(args, tokenizer):
         " LoRA."
     )
   partial_rollout = bool(getattr(args, "in_flight_weight_updates", False))
-  enable_prefix_caching = bool(
-      args.enable_prefix_caching or partial_rollout
+  if args.enable_prefix_caching or partial_rollout:
+    enable_prefix_caching = True
+    vllm_overrides.pop("enable_prefix_caching", None)
+  else:
+    enable_prefix_caching = bool(
+        vllm_overrides.pop("enable_prefix_caching", False)
+    )
+  scheduling_policy = vllm_overrides.pop(
+      "scheduling_policy",
+      "priority" if getattr(args, "priority_scheduling", False) else "fcfs",
   )
   engine_kwargs = dict(
       model=vllm_model,
@@ -786,9 +917,18 @@ def _create_vllm_sampler(args, tokenizer):
       max_loras=1 if args.use_lora else None,
       enable_prefix_caching=enable_prefix_caching,
       async_scheduling=args.vllm_async_scheduling,
+      enable_return_routed_experts=args.return_routed_experts,
+      scheduling_policy=scheduling_policy,
       max_logprobs=1,
       logprobs_mode="processed_logprobs",
   )
+  if args.seed is not None:
+    worker_id = str(getattr(args, "worker_id", "") or "")
+    suffix = worker_id.rsplit("-", 1)[-1]
+    replica_idx = int(suffix) if (suffix.isascii() and suffix.isdigit()) else 0
+    engine_kwargs["seed"] = (int(args.seed) + replica_idx) % (2**32)
+  if gpu_mem_util is not None:
+    engine_kwargs["gpu_memory_utilization"] = gpu_mem_util
   hf_overrides = _vllm_hf_overrides(args)
   if hf_overrides:
     engine_kwargs["hf_overrides"] = hf_overrides
@@ -796,26 +936,40 @@ def _create_vllm_sampler(args, tokenizer):
     engine_kwargs["max_num_seqs"] = args.vllm_max_num_seqs
   if args.vllm_max_num_batched_tokens is not None:
     engine_kwargs["max_num_batched_tokens"] = args.vllm_max_num_batched_tokens
+  prefuse_moe = vllm_overrides.pop(
+      "prefuse_moe_weights", args.prefuse_moe_weights
+  )
+  maxtext_additional_config = {}
   if args.maxtext_model_name:
-    # The architectures override is applied by `_vllm_hf_overrides`.
     logging.info(
         "Loading MaxText model %r natively via maxtext_vllm_adapter's"
         " MaxTextForCausalLM (architectures override).",
         args.maxtext_model_name,
     )
-    engine_kwargs["additional_config"] = (
+    maxtext_additional_config = (
         maxtext_utils.build_vllm_maxtext_additional_config(
             args.maxtext_model_name,
             attention=args.maxtext_attention,
-            prefuse_moe_weights=args.prefuse_moe_weights,
+            prefuse_moe_weights=prefuse_moe,
+            return_routed_experts=args.return_routed_experts,
         )
     )
+  vllm_additional_config = vllm_overrides.pop("additional_config", None)
+  merged_additional_config = dict(maxtext_additional_config)
+  if vllm_additional_config:
+    merged_additional_config = _deep_merge_dicts(
+        merged_additional_config, _load_json_config(vllm_additional_config)
+    )
+  if merged_additional_config:
+    engine_kwargs["additional_config"] = merged_additional_config
+  engine_kwargs.update(vllm_overrides)
   engine_args = AsyncEngineArgs(**engine_kwargs)  # type: ignore[arg-type]
   sampler_adapter = vllm_sampler_adapter.VllmSamplerAdapter(  # type: ignore[abstract]
       server_id=args.worker_id,
       engine_args=engine_args,
       model_name=vllm_model,
       weight_sync_mode=args.weight_sync_mode,
+      free_kv_cache=args.free_kv_cache_during_weight_sync,
       partial_rollout=partial_rollout,
   )
   config = rollout_worker.RolloutConfig(

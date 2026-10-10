@@ -63,39 +63,53 @@ def get_tokenizer_pad_id(
 VLLM_MAXTEXT_HF_OVERRIDES = {"architectures": ["MaxTextForCausalLM"]}
 
 
+def _resolve_bool_config(
+    value: bool | None, env_var: str, default: bool | None = None
+) -> bool | None:
+  """Resolves an optional boolean parameter from an explicit arg or env var."""
+  if value is not None:
+    return bool(value)
+  raw = os.environ.get(env_var, "").strip().lower()
+  if raw in ("1", "true", "yes"):
+    return True
+  if raw in ("0", "false", "no"):
+    return False
+  return default
+
+
 def build_vllm_maxtext_additional_config(
     model_name: str,
     *,
     attention: str = "",
     prefuse_moe_weights: bool | None = None,
+    return_routed_experts: bool | None = None,
+    float32_gate_logits: bool | None = None,
+    float32_logits: bool | None = None,
 ) -> dict[str, Any]:
-  """Builds the vLLM `additional_config` a MaxText rollout model reads.
-
-  `MaxTextForCausalLM` builds its own MaxText config from
-  `additional_config["maxtext_config"]`; these are the inference-side overrides
-  that make it match the trainer's model. Kept here so the in-process and
-  server-mode samplers cannot drift apart.
-
-  Args:
-    model_name: MaxText model name, e.g. `qwen3-1.7b`.
-    attention: MaxText attention kernel override; MaxText's default is used when
-      empty.
-    prefuse_moe_weights: Whether the rollout expects w0/w1 pre-fused into the
-      TPU GMM layout. None leaves MaxText's default in place.
-
-  Returns:
-    The `additional_config` mapping to hand to the vLLM engine.
-  """
+  """Builds the vLLM `additional_config` a MaxText rollout model reads."""
+  effective_float32_gate_logits = _resolve_bool_config(
+      float32_gate_logits, "FLOAT32_GATE_LOGITS", default=True
+  )
+  effective_float32_logits = _resolve_bool_config(
+      float32_logits, "FLOAT32_LOGITS", default=None
+  )
   overrides: dict[str, Any] = {
       "model_name": model_name,
       "model_call_mode": "inference",
+      "scan_layers": False,
       "enable_dp_attention": False,
       "allow_split_physical_axes": True,
       "log_config": False,
       "weight_dtype": "bfloat16",
   }
+  if effective_float32_gate_logits is not None:
+    overrides["float32_gate_logits"] = effective_float32_gate_logits
+  if effective_float32_logits is not None:
+    overrides["float32_logits"] = effective_float32_logits
   if prefuse_moe_weights is not None:
     overrides["prefuse_moe_weights"] = prefuse_moe_weights
+  if return_routed_experts is not None:
+    overrides["return_routed_experts"] = return_routed_experts
   if attention:
     overrides["attention"] = attention
   return {"maxtext_config": overrides}
@@ -108,6 +122,7 @@ def build_maxtext_config(
     mesh_fsdp: int = 1,
     mesh_tp: int = 1,
     mesh_expert: int = 1,
+    mesh_context: int = 1,
     num_devices: int = 1,
     max_prompt_length: int = 512,
     max_response_length: int = 128,
@@ -127,6 +142,21 @@ def build_maxtext_config(
     prefuse_moe_weights: bool = False,
     use_weight_converter: bool = True,
     max_seq_token_per_tpu: int | None = 0,
+    trainable_parameters_mask: list[str] | str | None = None,
+    attention: str | None = None,
+    remat_policy: str = "",
+    learning_rate_final_fraction: float | None = None,
+    adam_b1: float | None = None,
+    adam_b2: float | None = None,
+    adam_eps: float | None = None,
+    adam_weight_decay: float | None = None,
+    gradient_clipping_threshold: float | None = None,
+    skip_step_on_spikes: bool = False,
+    skip_step_on_nan: bool = True,
+    skip_step_interval: int = 128,
+    skip_step_scaling_factor: float = 6.0,
+    float32_gate_logits: bool | None = None,
+    float32_logits: bool | None = None,
 ) -> Any:
   """Builds the MaxText HyperParameters the training engine runs on."""
   pyconfig, _, _ = maxtext_modules()
@@ -352,14 +382,32 @@ def build_maxtext_config(
         f"profile_periodically_period={profiling_options.profiler_period}",
     ])
 
+  effective_attention = (
+      attention
+      or os.environ.get("TRAINER_MAXTEXT_ATTENTION", "").strip()
+      or "dot_product"
+  )
+  effective_float32_gate_logits = _resolve_bool_config(
+      float32_gate_logits, "FLOAT32_GATE_LOGITS", default=True
+  )
+  effective_float32_logits = _resolve_bool_config(
+      float32_logits, "FLOAT32_LOGITS", default=None
+  )
   argv.extend([
       "scan_layers=True",
       "convert_checkpoint_if_possible=False",
       "skip_jax_distributed_system=True",
+      "allow_split_physical_axes=True",
       f"per_device_batch_size={per_device_batch_size}",
       f"gradient_accumulation_steps={gradient_accumulation_steps}",
       f"max_target_length={max_target_length}",
-      "attention=dot_product",
+      f"attention={effective_attention}",
+      *([f"remat_policy={remat_policy}"] if remat_policy else []),
+      *(
+          [f"learning_rate_final_fraction={learning_rate_final_fraction}"]
+          if learning_rate_final_fraction is not None
+          else []
+      ),
       "use_tokamax_gmm=true",
       "use_gmm_v2=true",
       f"ici_fsdp_parallelism={mesh_fsdp}",
@@ -368,23 +416,44 @@ def build_maxtext_config(
           if effective_padded_moe_mlp_dim
           else []
       ),
-      # The vLLM rollout replicates KV heads up to kv_tp_size (tp*ep) when the
-      # model has fewer -- see maxtext_vllm_adapter. Weight sync pairs by name,
-      # so the trainer must build the same shape. Prefer attention DP on the
-      # rollout instead, which avoids the replication entirely; this is the
-      # fallback when that is not available.
       *(
-          [f"base_num_kv_heads={effective_kv_heads}"]
+          [
+              f"base_num_kv_heads={effective_kv_heads}",
+              "override_model_config=true",
+          ]
           if effective_kv_heads
           else []
       ),
       f"ici_tensor_parallelism={mesh_tp}",
       f"ici_expert_parallelism={mesh_expert}",
+      f"ici_context_parallelism={mesh_context}",
+      *(["context_parallel_load_balance=False"] if mesh_context > 1 else []),
       f"learning_rate={learning_rate}",
       f"warmup_steps_fraction={warmup_steps_fraction}",
+      *(
+          f"{key}={value}"
+          for key, value in (
+              ("adam_b1", adam_b1),
+              ("adam_b2", adam_b2),
+              ("adam_eps", adam_eps),
+              ("adam_weight_decay", adam_weight_decay),
+              ("gradient_clipping_threshold", gradient_clipping_threshold),
+          )
+          if value is not None
+      ),
       "dtype=bfloat16",
       "weight_dtype=float32",
       "grad_dtype=float32",
+      *(
+          [f"float32_gate_logits={effective_float32_gate_logits}"]
+          if effective_float32_gate_logits is not None
+          else []
+      ),
+      *(
+          [f"float32_logits={effective_float32_logits}"]
+          if effective_float32_logits is not None
+          else []
+      ),
       "enable_tensorboard=False",
       "record_internal_nn_metrics=False",
       "init_weights_seed=42",
@@ -395,6 +464,21 @@ def build_maxtext_config(
               f"rollout_tensor_parallelism={rollout_mesh_tp or kv_tp_size or moe_mlp_tp_size}"
           ]
           if (rollout_mesh_tp or kv_tp_size or moe_mlp_tp_size) > 0
+          else []
+      ),
+      *(
+          [f"trainable_parameters_mask={trainable_parameters_mask}"]
+          if trainable_parameters_mask
+          else []
+      ),
+      *(["skip_step_on_spikes=True"] if skip_step_on_spikes else []),
+      *(["skip_step_on_nan=True"] if skip_step_on_nan else ["skip_step_on_nan=False"]),
+      *(
+          [
+              f"skip_step_interval={skip_step_interval}",
+              f"skip_step_scaling_factor={skip_step_scaling_factor}",
+          ]
+          if skip_step_on_spikes
           else []
       ),
   ])
@@ -419,6 +503,21 @@ def build_maxtext_config(
         _d2h_gb,
     )
     argv.append(f"checkpoint_storage_device_host_concurrent_gb={_d2h_gb}")
+
+  if os.environ.get("OVERRIDE_MODEL_CONFIG", "").lower() in ("1", "true") and "override_model_config=true" not in argv:
+    argv.append("override_model_config=true")
+
+  _extra = os.environ.get("MAXTEXT_EXTRA_FLAGS", "").strip()
+  if _extra:
+    _pairs = [tok for tok in _extra.split() if tok]
+    _bad = [tok for tok in _pairs if "=" not in tok]
+    if _bad:
+      raise ValueError(
+          "MAXTEXT_EXTRA_FLAGS entries must be key=value, got: "
+          f"{' '.join(_bad)}"
+      )
+    logging.info("MAXTEXT_EXTRA_FLAGS adding %d flag(s): %s", len(_pairs), _pairs)
+    argv.extend(_pairs)
 
   logging.info("MaxText config argv: %s", argv)
   return pyconfig.initialize(argv)
@@ -470,6 +569,69 @@ def create_maxtext_engine(
         wrap_with_tunix_adapter=wrap_with_tunix_adapter,
         tokenizer_pad_id=tokenizer_pad_id,
     )
+
+  # cl/995291149 sets trainer weight_dtype=float32 so master weights and AdamW
+  # moments stay in FP32, while the vLLM rollout model uses weight_dtype=bfloat16
+  # (with float32_gate_logits keeping norm/gate/router/GDN/logits_dense modules
+  # in FP32). Ensure target-free weight conversion exports exact rollout dtypes.
+  direct_converter = getattr(
+      getattr(engine, "_weight_converter", None), "_direct", None
+  )
+  if direct_converter is not None:
+    import jax  # pylint: disable=g-import-not-at-top
+    from jax import numpy as jnp  # pylint: disable=g-import-not-at-top
+
+    direct_converter.target_dtype = "bfloat16"
+    orig_exec_target_free = getattr(
+        direct_converter, "_execute_group_target_free", None
+    )
+    if callable(orig_exec_target_free):
+      fp32_gate_logits = bool(
+          getattr(maxtext_config, "float32_gate_logits", False)
+      )
+      fp32_modules = frozenset({
+          "norm",
+          "gate",
+          "router",
+          "shared_expert_gate",
+          "A_log",
+          "dt_bias",
+          "conv1d",
+          "logits_dense",
+      })
+
+      def _exec_target_free_rollout_dtypes(group: Any, src_flat: Any) -> Any:
+        keep_fp32 = fp32_gate_logits and bool(
+            fp32_modules.intersection(
+                str(part) for part in group.source_keys[0]
+            )
+        )
+        desired_dtype = jnp.float32 if keep_fp32 else jnp.bfloat16
+        prev_target_dtype = direct_converter.target_dtype
+        direct_converter.target_dtype = "float32" if keep_fp32 else "bfloat16"
+        try:
+          outs = orig_exec_target_free(group, src_flat)
+        finally:
+          direct_converter.target_dtype = prev_target_dtype
+        if getattr(group, "quantize_to_fp8", False):
+          return outs
+        fixed = []
+        for tgt_key, val in outs:
+          if hasattr(val, "dtype") and val.dtype != desired_dtype:
+            if isinstance(val, jax.ShapeDtypeStruct):
+              val = jax.ShapeDtypeStruct(
+                  val.shape,
+                  desired_dtype,
+                  sharding=getattr(val, "sharding", None),
+              )
+            else:
+              val = val.astype(desired_dtype)
+          fixed.append((tgt_key, val))
+        return fixed
+
+      direct_converter._execute_group_target_free = (
+          _exec_target_free_rollout_dtypes
+      )
 
   model_type = type(engine.model).__name__
   logging.info(
