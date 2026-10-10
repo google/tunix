@@ -578,7 +578,7 @@ def _timeout_env_float(name: str, default: float) -> float:
 async def _wait_for(aw: Any, timeout: Optional[float]) -> Any:
   if timeout is None or math.isinf(timeout) or timeout <= 0:
     return await aw
-  return await _wait_for(aw, timeout)
+  return await asyncio.wait_for(aw, timeout)
 
 
 @dataclasses.dataclass(frozen=True)
