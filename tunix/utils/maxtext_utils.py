@@ -591,6 +591,8 @@ def create_maxtext_engine(
       )
       fp32_modules = frozenset({
           "norm",
+          "input_layernorm",
+          "post_attention_layernorm",
           "gate",
           "router",
           "shared_expert_gate",
