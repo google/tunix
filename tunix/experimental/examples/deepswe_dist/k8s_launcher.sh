@@ -130,6 +130,10 @@ case "${ROLLOUT_PRIORITY_SCHEDULING}" in
     exit 1
     ;;
 esac
+# `false` skips the start-up warm-pool readiness barrier: the orchestrator
+# dispatches immediately and each trajectory waits for its own sandbox in
+# fleet.acquire. Default `true` keeps the barrier.
+export SANDBOX_WAIT_INITIAL=${SANDBOX_WAIT_INITIAL:-true}
 
 # JAX compilation cache configuration
 export LOCAL_JAX_CACHE_DIR=${LOCAL_JAX_CACHE_DIR:-${JAX_CACHE_DIR:-/tmp/jax_cache}}
@@ -533,6 +537,7 @@ start_orchestrator() {
         $([[ "${PIPELINE_TRAIN_MICROBATCHES}" == "true" || "${PIPELINE_TRAIN_MICROBATCHES}" == "True" || "${PIPELINE_TRAIN_MICROBATCHES}" == "1" ]] && echo --pipeline_train_microbatches || echo --no-pipeline_train_microbatches) \
         $([[ "${IN_FLIGHT_WEIGHT_UPDATES}" == "true" || "${IN_FLIGHT_WEIGHT_UPDATES}" == "True" || "${IN_FLIGHT_WEIGHT_UPDATES}" == "1" ]] && echo --in_flight_weight_updates || echo --no-in_flight_weight_updates) \
         $([[ "${ROLLOUT_PRIORITY_SCHEDULING}" == "true" ]] && echo --rollout_priority_scheduling || echo --no-rollout_priority_scheduling) \
+        $([[ "${SANDBOX_WAIT_INITIAL}" == "false" || "${SANDBOX_WAIT_INITIAL}" == "False" || "${SANDBOX_WAIT_INITIAL}" == "0" ]] && echo --no-sandbox_wait_initial || echo --sandbox_wait_initial) \
         ${dataset_args} \
         ${shuffle_arg} \
         ${sandbox_arg} \
