@@ -1398,12 +1398,13 @@ class StandardRLProgram(RLProgram):
               "trainer/loss", scalar_metrics.pop("actor/loss", None)
           ),
       )
-      if raw_loss is None and "loss" in weighted_metrics:
-        raw_loss = weighted_metrics.pop("loss")
-      elif raw_loss is None and "trainer/loss" in weighted_metrics:
-        raw_loss = weighted_metrics.pop("trainer/loss")
-      elif raw_loss is None and "actor/loss" in weighted_metrics:
-        raw_loss = weighted_metrics.pop("actor/loss")
+      if raw_loss is None:
+        if "loss" in weighted_metrics:
+          raw_loss = weighted_metrics.pop("loss")
+        elif "trainer/loss" in weighted_metrics:
+          raw_loss = weighted_metrics.pop("trainer/loss")
+        elif "actor/loss" in weighted_metrics:
+          raw_loss = weighted_metrics.pop("actor/loss")
 
       loss_val = _extract_scalar(raw_loss)
       if loss_val is not None:
