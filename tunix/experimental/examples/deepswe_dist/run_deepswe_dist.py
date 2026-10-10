@@ -40,6 +40,7 @@ if REPO_ROOT not in sys.path:
 from tunix.experimental.common import datatypes
 from tunix.experimental.distributed.runtime import context as runtime_context
 from tunix.experimental.examples.common import orch_k8s_cleanup
+from tunix.experimental.examples.deepswe_dist import trainer_warmup
 from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import orchestrator
@@ -322,6 +323,16 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " k * this many seconds after batch 0 first dispatches. Applies only"
           " before the trainer consumes its first batch. 0 (default) dispatches"
           " the start-up batches as soon as the staleness window allows."
+      ),
+  )
+  parser.add_argument(
+      "--trainer_warmup_compile",
+      action=argparse.BooleanOptionalAction,
+      default=False,
+      help=(
+          "Compile the trainer during worker bring-up against one synthetic"
+          " micro-batch built through the live batch assembler, instead of"
+          " lazily on the first real micro-batch inside the timed run."
       ),
   )
   # ---- Optional GRPO algorithm options -------------------------------------
@@ -1134,7 +1145,21 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       )
 
     logging.info("Bringing up remote workers through ClusterOrchestrator...")
-    cluster.bring_up_workers(dummy_data=None)
+    warmup_payload = None
+    if args.trainer_warmup_compile:
+      warmup_payload = trainer_warmup.build_warmup_payload(
+          algo=algo,
+          batch_config=program.batch_config,
+          num_generations=program.num_generations,
+          mini_batch_size=program.mini_batch_size,
+          train_micro_batch_size=algo.train_micro_batch_size,
+      )
+      logging.info(
+          "TRAINER_WARMUP_COMPILE: compiling the trainer at bring-up against a"
+          " synthetic micro-batch: %s",
+          trainer_warmup.describe_payload(warmup_payload),
+      )
+    cluster.bring_up_workers(dummy_data=warmup_payload)
     logging.info("Starting DeepSWE StandardRLProgram execution...")
     cluster.run(
         program=program,

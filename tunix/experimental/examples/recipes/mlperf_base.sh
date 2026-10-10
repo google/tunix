@@ -316,6 +316,9 @@ export SANDBOX_WAIT_INITIAL=${SANDBOX_WAIT_INITIAL:-true}
 # Seconds between the start-up prompt batches (batch k held until k * this
 # after batch 0 dispatches). Default 0 = no stagger.
 export INITIAL_DISPATCH_STAGGER_S=${INITIAL_DISPATCH_STAGGER_S:-0}
+# `true` compiles the trainer at bring-up against one synthetic micro-batch
+# (before run_start) instead of on the first real micro-batch. Default false.
+export TRAINER_WARMUP_COMPILE=${TRAINER_WARMUP_COMPILE:-false}
 # Overlap each step's weight sync with the next step's training. Safe only
 # while the trainer transfers from host staging, since the next step rewrites
 # the device buffers mid-transfer.
