@@ -512,7 +512,7 @@ class ClusterOrchestrator:
     return {
         wid: shim.handle
         for wid, shim in self._remote_shims(include_evicted=True).items()
-        if shim.info().resources.get("remote")
+        if shim.info().resources and shim.info().resources.get("remote")
     }
 
   def sync_jax_cache(self) -> None:

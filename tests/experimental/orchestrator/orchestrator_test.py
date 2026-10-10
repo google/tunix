@@ -29,6 +29,7 @@ from tunix.experimental.orchestrator import rl_program
 from tunix.experimental.orchestrator import worker_registry
 from tunix.experimental.trajectory import file_store
 from tunix.experimental.trajectory import trajectory_testing
+from tunix.experimental.weight_sync import weight_sync_coordinator
 from tunix.experimental.worker import abstract_worker
 from tunix.experimental.worker import remote_execution
 
@@ -1053,6 +1054,18 @@ class ClusterOrchestratorTest(absltest.TestCase):
     orch.register_worker_handle("actor-0", [datatypes.Role.ACTOR], h_actor)
     orch.register_worker_handle("rollout-0", [datatypes.Role.ROLLOUT], h_r0)
     orch.bring_up_workers()
+    # Also verify a shim with resources=None does not raise AttributeError.
+    orch.registry.register(
+        weight_sync_coordinator.RemoteWorkerShim(
+            mock.MagicMock(spec=remote_execution.ActorHandle),
+            datatypes.WorkerInfo(
+                worker_id="local-none-resources",
+                roles=frozenset({datatypes.Role.ROLLOUT.value}),
+                resources=None,  # pytype: disable=wrong-arg-types
+            ),
+        ),
+        override=True,
+    )
 
     handles = orch.remote_worker_handles()
     self.assertEqual(handles, {"actor-0": h_actor, "rollout-0": h_r0})
