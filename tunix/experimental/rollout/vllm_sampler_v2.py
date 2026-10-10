@@ -166,7 +166,24 @@ class RLVllmSampler:
         existing.append("WEIGHT_SYNC_PARALLEL_H2H")
         os.environ["VLLM_RAY_EXTRA_ENV_VARS_TO_COPY"] = ",".join(existing)
 
-    self._engine = AsyncLLMEngine.from_engine_args(self.engine_args)
+    # EngineCore start occasionally segfaults ("Engine core initialization
+    # failed") on a few percent of hosts per launch: the forked EngineCore
+    # inherits live gRPC state from this process. A fresh attempt on the same
+    # host succeeds, so retry rather than fail the whole run.
+    attempts = max(1, int(os.environ.get("ROLLOUT_ENGINE_START_RETRIES", "3")))
+    for attempt in range(1, attempts + 1):
+      try:
+        self._engine = AsyncLLMEngine.from_engine_args(self.engine_args)
+        break
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        logger.error(
+            "vLLM engine start attempt %d/%d failed: %s", attempt, attempts, e
+        )
+        if attempt == attempts:
+          raise
+        await asyncio.sleep(
+            float(os.environ.get("ROLLOUT_ENGINE_START_RETRY_DELAY_S", "20"))
+        )
     self._is_running = True
     self._log_stats_task = asyncio.create_task(self._log_stats_loop())
 
