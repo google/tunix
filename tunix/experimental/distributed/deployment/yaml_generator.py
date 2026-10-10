@@ -289,11 +289,14 @@ def main() -> None:
       default=None,
       help="Kubernetes nodepool for Pathways head pod (e.g. cpu-np).",
   )
+  # The pathways-worker drains its peers in ~60-90s after SIGTERM; native sidecars
+  # get only the remainder of the budget, so anything that ignores SIGTERM costs the
+  # whole period. Keep it short.
   parser.add_argument(
       "--termination_grace_seconds",
-      default=int(os.environ.get("TERMINATION_GRACE_SECONDS") or 360),
+      default=int(os.environ.get("TERMINATION_GRACE_SECONDS") or 120),
       type=int,
-      help="Termination grace period in seconds for pods (default: 360).",
+      help="Termination grace period in seconds for pods (default: 120).",
   )
 
   parser.add_argument(
@@ -624,6 +627,12 @@ def main() -> None:
   #
   # The image MUST match the head image's jax/jaxlib exactly and must contain orbax, since
   # Orbax ships its serialization callables here by reference via cloudpickle.
+  #
+  # The image's PID 1 MUST forward SIGTERM to the server (see
+  # maxtext/src/dependencies/colocated_sidecar/Dockerfile). The upstream Pathways sidecar
+  # base runs the server under a `while true` shell loop with no TERM handler, which per
+  # pid_namespaces(7) drops the kubelet's SIGTERM; the container then holds 0.0.0.0:50051
+  # (hostNetwork) until it is SIGKILLed at the end of the pod grace period.
   sidecar_image = os.environ.get("COLOCATED_PYTHON_SIDECAR_IMAGE", "").strip()
   sidecar_shm = os.environ.get("COLOCATED_PYTHON_SIDECAR_SHM", "1").strip().lower() not in (
       "0",

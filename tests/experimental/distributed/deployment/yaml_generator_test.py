@@ -406,6 +406,11 @@ class YamlGeneratorTest(parameterized.TestCase):
         for c in with_sidecar[0]["initContainers"]
         if c["name"] == "colocated-python-sidecar"
     )
+    # SIGTERM handling is the image's contract (its ENTRYPOINT forwards TERM);
+    # the generator must not paper over it with a command override or a hook.
+    self.assertNotIn("command", sidecar_c)
+    self.assertNotIn("args", sidecar_c)
+    self.assertNotIn("lifecycle", sidecar_c)
     return {m["name"]: m["mountPath"] for m in sidecar_c["volumeMounts"]}
 
   def test_397b_sidecar_shm_disabled_renders_step2_form(self):
@@ -541,16 +546,18 @@ class YamlGeneratorTest(parameterized.TestCase):
               yaml_generator.main()
               rendered_default = mock_stdout.getvalue()
         self.assertEqual(
-            rendered_default.count("terminationGracePeriodSeconds: 360"), 2
+            rendered_default.count("terminationGracePeriodSeconds: 120"), 2
         )
         self.assertNotIn("terminationGracePeriodSeconds: 10", rendered_default)
 
-        with mock.patch.object(sys, "argv", argv + ["--termination_grace_seconds=120"]):
+        with mock.patch.object(
+            sys, "argv", argv + ["--termination_grace_seconds=300"]
+        ):
           with mock.patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
             yaml_generator.main()
             rendered_override = mock_stdout.getvalue()
         self.assertEqual(
-            rendered_override.count("terminationGracePeriodSeconds: 120"), 2
+            rendered_override.count("terminationGracePeriodSeconds: 300"), 2
         )
 
   @parameterized.named_parameters(
@@ -651,6 +658,12 @@ class YamlGeneratorTest(parameterized.TestCase):
         text=True,
         timeout=60,
         check=True,
+    )
+    self.assertIn(
+        "kubectl wait --for=delete pod -l"
+        " jobset.sigs.k8s.io/jobset-name=atwigg-256-prof-train -n default"
+        " --timeout=180s",
+        result.stdout,
     )
     docs = [
         d
