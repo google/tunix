@@ -1245,7 +1245,7 @@ def get_openhands_pod_template(
       os.getenv("OPENHANDS_SERVER_IMAGE")
       or os.getenv("SANDBOX_RUNTIME_CONTAINER_IMAGE")
       or os.getenv("AGENT_SERVER_IMAGE")
-      or "gcr.io/cloud-tpu-multipod-dev/tunix/openhands-agent-server:0.62"
+      or "gcr.io/cloud-tpu-multipod-dev/tunix/openhands-agent-server:0.62-chardet"
   )
 
   extra_pod_spec = {
