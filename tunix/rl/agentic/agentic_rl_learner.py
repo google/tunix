@@ -745,8 +745,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       skip_jit: bool = False,
   ) -> None:
     """Main training loop for the AgenticRLLearner."""
-    self._prompt_queue = None
-    self._producer_future = None
     try:
       self._train_impl(train_dataset, eval_dataset, skip_jit)
     except BaseException:
@@ -756,6 +754,10 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       # hangs at exit, when `concurrent.futures` joins its worker threads.
       self._stop_producer()
       raise
+    finally:
+      # Drop the references so that queued batches can be garbage collected.
+      self._prompt_queue = None
+      self._producer_future = None
 
   def _stop_producer(self) -> None:
     """Unblocks and cancels the rollout producer started by `train()`."""
