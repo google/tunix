@@ -383,7 +383,7 @@ def build_maxtext_config(
       f"learning_rate={learning_rate}",
       f"warmup_steps_fraction={warmup_steps_fraction}",
       "dtype=bfloat16",
-      "weight_dtype=bfloat16",
+      "weight_dtype=float32",
       "grad_dtype=float32",
       "enable_tensorboard=False",
       "record_internal_nn_metrics=False",
