@@ -24,16 +24,17 @@ without importing or depending on Tunix.
 """
 
 import asyncio
+import inspect
 import logging
 import os
 import time
-
-os.environ["VLLM_USE_V1"] = "0"
 from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
+from vllm import envs
 from tunix.generate import utils as generate_utils
+from tunix.utils import env_utils
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.sampling_params import SamplingParams as VllmSamplingParams
@@ -59,6 +60,29 @@ def _get_val(obj: Any, key: str, default: Any = None) -> Any:
   return default if val is None else val
 
 
+def _scheduling_priority(req: Any) -> int:
+  """Returns the vLLM scheduling priority of `req`; lower is served first.
+
+  Every request must carry `priority` (`sampler.SamplingRequest.priority`, or
+  the field set by request builders such as `sample()`'s raw-prompt dicts and
+  `serve_vllm_sampler`). A missing priority is a caller bug, so it raises
+  instead of silently defaulting. Takes effect only when the engine runs with
+  `scheduling_policy="priority"`; under `"fcfs"` vLLM ignores it.
+
+  Args:
+    req: A sampling request object or a raw-prompt request dict.
+
+  Raises:
+    ValueError: If `req` has no `priority`.
+  """
+  priority = _get_val(req, "priority")
+  if priority is None:
+    raise ValueError(
+        f"Sampling request {_get_val(req, 'request_id')!r} has no `priority`."
+    )
+  return int(priority)
+
+
 class RLVllmSampler:
   """Asynchronous vLLM sampler for RL inside `tpu-inference`.
 
@@ -74,19 +98,31 @@ class RLVllmSampler:
     `weight_sync`, `post_weight_sync`).
   """
 
+  supports_token_input: bool = True
+
   def __init__(
-      self, engine_args: AsyncEngineArgs, partial_rollout: bool = False
+      self,
+      engine_args: AsyncEngineArgs,
+      partial_rollout: bool | None = None,
   ):
     self.engine_args = engine_args
-    self.partial_rollout: bool = bool(partial_rollout)
+    if partial_rollout is None:
+      partial_rollout = (
+          os.environ.get("IN_FLIGHT_WEIGHT_UPDATES", "false").lower()
+          in ("true", "1")
+      )
+    self._partial_rollout = bool(partial_rollout)
+    self._paused_with_generation = False
     self._engine: Any | None = None
     self._is_running = False
     self._is_paused = False
-    self._paused_generation = False
     self._cache_valid = True
     self._mesh: Any | None = None
     self._transfer_statuses: dict[str, str] = {}
     self._policy_version = 0
+    self._unpaused_event: asyncio.Event = asyncio.Event()
+    self._unpaused_event.set()
+    self._log_stats_task: asyncio.Task | None = None
 
   def _get_tpu_workers(self) -> list[Any]:
     """Retrieves active TPUWorker instances from underlying model executor."""
@@ -111,13 +147,52 @@ class RLVllmSampler:
       return
 
     logger.info(
-        "Initializing RLVllmSampler with model: %s", self.engine_args.model
+        "Initializing RLVllmSampler with model: %s (scheduling_policy=%s)",
+        self.engine_args.model,
+        self.engine_args.scheduling_policy,
     )
+
+    if os.environ.get("WEIGHT_SYNC_PARALLEL_H2H", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "y",
+        "t",
+        "on",
+    ):
+      extra_vars = os.environ.get("VLLM_RAY_EXTRA_ENV_VARS_TO_COPY", "")
+      existing = [v.strip() for v in extra_vars.split(",") if v.strip()]
+      if "WEIGHT_SYNC_PARALLEL_H2H" not in existing:
+        existing.append("WEIGHT_SYNC_PARALLEL_H2H")
+        os.environ["VLLM_RAY_EXTRA_ENV_VARS_TO_COPY"] = ",".join(existing)
 
     self._engine = AsyncLLMEngine.from_engine_args(self.engine_args)
     self._is_running = True
+    self._log_stats_task = asyncio.create_task(self._log_stats_loop())
 
     logger.info("RLVllmSampler started successfully.")
+
+  async def _log_stats_loop(self) -> None:
+    """Periodically flushes vLLM's engine stats to the log.
+
+    `AsyncLLM` records stats but never emits them on its own: `do_log_stats()`
+    has no internal caller, and vLLM drives it from the API server's lifespan
+    task (`vllm/entrypoints/launchers/utils/server_utils.py`). Binding the
+    engine directly skips that server, so without this loop the throughput /
+    running-requests / KV-cache-usage line never prints.
+    """
+    interval = envs.VLLM_LOG_STATS_INTERVAL
+    while True:
+      await asyncio.sleep(interval)
+      engine = self._engine
+      if engine is None:
+        continue
+      try:
+        await engine.do_log_stats()
+      except asyncio.CancelledError:
+        raise
+      except Exception:  # pylint: disable=broad-exception-caught
+        logger.exception("do_log_stats failed")
 
   async def stop(self, **kwargs: Any) -> None:
     """Stops the sampler and releases resources."""
@@ -125,60 +200,80 @@ class RLVllmSampler:
       return
     logger.info("Stopping RLVllmSampler...")
     self._is_paused = True
-    self._paused_generation = False
+    if self._log_stats_task is not None:
+      self._log_stats_task.cancel()
+      try:
+        await self._log_stats_task
+      except asyncio.CancelledError:
+        pass
+      self._log_stats_task = None
     self._engine = None
     self._is_running = False
     logger.info("RLVllmSampler stopped.")
 
   async def pause(
-      self, partial_rollout: bool | None = None, **kwargs: Any
+      self,
+      mode: str | None = None,
+      clear_cache: bool = False,
+      **kwargs: Any,
   ) -> None:
-    """Pauses request intake and drains or freezes active batch iterations during weight updates."""
+    """Pauses vLLM generation during weight updates."""
     del kwargs
     if self._is_paused:
       return
     self._is_paused = True
-    use_partial = (
-        self.partial_rollout
-        if partial_rollout is None
-        else bool(partial_rollout)
-    )
-    if (
-        use_partial
-        and self._engine
-        and hasattr(self._engine, "pause_generation")
-    ):
-      logger.info(
-          "Pausing RLVllmSampler generation in-place (mode='keep',"
-          " clear_cache=False)..."
-      )
-      await self._engine.pause_generation(mode="keep", clear_cache=False)
-      self._paused_generation = True
-    elif self._engine and hasattr(self._engine, "pause_background_loop"):
-      # Note: vLLM's pause_background_loop stops the scheduler from taking new
-      # requests from the queue. Ongoing requests in the batch will be
-      # completed or drained depending on internal vLLM state.
-      logger.info("Pausing RLVllmSampler inference intake for weight sync...")
-      await self._engine.pause_background_loop()
-      self._paused_generation = False
+    if mode is not None or self._partial_rollout:
+      self._unpaused_event.clear()
+      if self._engine:
+        pause_gen = getattr(self._engine, "pause_generation", None)
+        if inspect.iscoroutinefunction(pause_gen):
+          effective_mode = mode or "keep"
+          logger.info(
+              "Pausing RLVllmSampler generation (mode=%s, clear_cache=%s)...",
+              effective_mode,
+              clear_cache,
+          )
+          self._paused_with_generation = True
+          await pause_gen(mode=effective_mode, clear_cache=clear_cache)
+        elif hasattr(self._engine, "pause_background_loop"):
+          logger.info(
+              "Pausing RLVllmSampler inference intake for weight sync..."
+          )
+          self._paused_with_generation = False
+          await self._engine.pause_background_loop()
+    else:
+      # Note: vLLM's pause_background_loop stops the scheduler from taking new requests from the queue.
+      # Ongoing requests in the batch will be completed or drained depending on internal vLLM state.
+      if self._engine and hasattr(self._engine, "pause_background_loop"):
+        logger.info("Pausing RLVllmSampler inference intake for weight sync...")
+        await self._engine.pause_background_loop()
     await asyncio.sleep(0.01)
 
   async def resume(self, **kwargs: Any) -> None:
     """Resumes inference processing after weight sync completion."""
-    if not self._is_paused:
-      return
-    if (
-        self._paused_generation
-        and self._engine
-        and hasattr(self._engine, "resume_generation")
-    ):
-      logger.info("Resuming RLVllmSampler generation...")
-      await self._engine.resume_generation()
-      self._paused_generation = False
-    elif self._engine and hasattr(self._engine, "resume_background_loop"):
-      logger.info("Resuming RLVllmSampler inference serving...")
-      await self._engine.resume_background_loop()
-    self._is_paused = False
+    del kwargs
+    if self._paused_with_generation or self._partial_rollout:
+      if not self._is_paused:
+        self._unpaused_event.set()
+        return
+      self._paused_with_generation = False
+      if self._engine:
+        resume_gen = getattr(self._engine, "resume_generation", None)
+        if inspect.iscoroutinefunction(resume_gen):
+          logger.info("Resuming RLVllmSampler generation...")
+          await resume_gen()
+        elif hasattr(self._engine, "resume_background_loop"):
+          logger.info("Resuming RLVllmSampler inference serving...")
+          await self._engine.resume_background_loop()
+      self._is_paused = False
+      self._unpaused_event.set()
+    else:
+      if not self._is_paused:
+        return
+      if self._engine and hasattr(self._engine, "resume_background_loop"):
+        logger.info("Resuming RLVllmSampler inference serving...")
+        await self._engine.resume_background_loop()
+      self._is_paused = False
 
   async def get_mesh(self, **kwargs: Any) -> Any | None:
     """Returns the JAX device mesh."""
@@ -200,16 +295,10 @@ class RLVllmSampler:
         "stop_token_ids",
         kwargs.get("stop_token_ids") or kwargs.get("eos_tokens"),
     )
-    cache_salt = _get_val(sparams, "cache_salt", kwargs.get("cache_salt"))
-    routed_experts_prompt_start = _get_val(
-        sparams,
-        "routed_experts_prompt_start",
-        _get_val(kwargs, "routed_experts_prompt_start"),
-    )
     # `kwargs` goes through `_get_val` too: callers pass unset fields as
     # explicit `None`, so `.get(key, default)` returns `None` rather than
     # the default, defeating it before `_get_val` can coalesce.
-    vllm_kwargs: dict[str, Any] = dict(
+    return VllmSamplingParams(
         temperature=_get_val(
             sparams, "temperature", _get_val(kwargs, "temperature", 0.7)
         ),
@@ -231,6 +320,12 @@ class RLVllmSampler:
                 _get_val(kwargs, "include_stop_str_in_output", True),
             )
         ),
+        # Detokenize unless the caller opts out. The agentic path reads the
+        # action from `text` (trajectory_collect_engine passes it to
+        # `agent.update_from_model`), and neither tunix `SamplingParams` nor
+        # `RolloutWorker` sets this field, so a False default hands every
+        # agent an empty string. vLLM also needs detokenization to match stop
+        # strings.
         detokenize=bool(
             _get_val(
                 sparams,
@@ -243,35 +338,23 @@ class RLVllmSampler:
             sparams, "return_logprobs", kwargs.get("return_logprobs", False)
         )
         else None,
+        # Multi-turn router replay: trajectory_collect_engine sets this to the
+        # number of routing rows earlier turns already returned. Dropping it
+        # makes vLLM return routing from token 0 on every later turn.
+        # `or` rather than a nested default: tunix `SamplingParams` defaults
+        # the field to 0, which would otherwise mask a value in `kwargs`.
+        routed_experts_prompt_start=int(
+            _get_val(sparams, "routed_experts_prompt_start")
+            or _get_val(kwargs, "routed_experts_prompt_start", 0)
+        ),
     )
-    if cache_salt is not None and "cache_salt" in getattr(
-        VllmSamplingParams, "__struct_fields__", ()
-    ):
-      vllm_kwargs["cache_salt"] = str(cache_salt)
-    if (
-        routed_experts_prompt_start is not None
-        and "routed_experts_prompt_start"
-        in getattr(VllmSamplingParams, "__struct_fields__", ())
-    ):
-      vllm_kwargs["routed_experts_prompt_start"] = int(
-          routed_experts_prompt_start
-      )
-    params = VllmSamplingParams(**vllm_kwargs)
-    if cache_salt is not None:
-      setattr(params, "cache_salt", str(cache_salt))
-    if routed_experts_prompt_start is not None:
-      setattr(
-          params,
-          "routed_experts_prompt_start",
-          int(routed_experts_prompt_start),
-      )
-    return params
 
   async def _process_request_output(
       self,
       req_id: str,
       task: Any,
       expected_prompt_token_ids: list[int] | None = None,
+      policy_version: int | None = None,
   ) -> SimpleNamespace:
     """Consumes an AsyncLLMEngine output stream and formats output result."""
     try:
@@ -319,6 +402,12 @@ class RLVllmSampler:
         ):
           routed_experts = np.array(routed_experts)
 
+        num_preemptions = (
+            getattr(final_output.metrics, 'num_preemptions', 0)
+            if getattr(final_output, 'metrics', None) is not None
+            else 0
+        )
+
         return SimpleNamespace(
             request_id=req_id,
             text=text,
@@ -329,6 +418,8 @@ class RLVllmSampler:
             routed_experts=routed_experts,
             finish_reason=getattr(output_choice, "finish_reason", "stop")
             or "stop",
+            policy_version=policy_version,
+            num_preemptions=num_preemptions,
             error=None,
         )
 
@@ -346,6 +437,8 @@ class RLVllmSampler:
           cumulative_logprob=0.0,
           routed_experts=None,
           finish_reason="stop",
+          policy_version=policy_version,
+          num_preemptions=0,
           error=err_obj,
       )
     except Exception as e:
@@ -364,6 +457,8 @@ class RLVllmSampler:
           cumulative_logprob=0.0,
           routed_experts=None,
           finish_reason="stop",
+          policy_version=policy_version,
+          num_preemptions=0,
           error=err_obj,
       )
 
@@ -388,6 +483,7 @@ class RLVllmSampler:
       await self.start()
 
     raw_input_mode = False
+    sample_start_time = time.perf_counter()
     if isinstance(sampling_requests, (str, list)) and (
         isinstance(sampling_requests, str)
         or not sampling_requests
@@ -407,6 +503,7 @@ class RLVllmSampler:
           {
               "prompt": item,
               "request_id": f"req_{idx}_{time.time_ns()}",
+              "priority": 0,
           }
           for idx, item in enumerate(items)
       ]
@@ -415,40 +512,127 @@ class RLVllmSampler:
     else:
       req_list = list(sampling_requests)
 
-    pending_tasks = []
-    for idx, req in enumerate(req_list):
-      vllm_params = self._build_vllm_params(req, kwargs)
-      req_id = _get_val(req, "request_id") or f"req_{time.time_ns()}_{idx}"
-      prompt_val = _get_val(req, "prompt")
-      if generate_utils.is_token_id_sequence(prompt_val):
-        expected_prompt_ids = (
-            np.asarray(prompt_val, dtype=np.int32).reshape(-1).tolist()
-        )
-        engine_prompt: Any = {"prompt_token_ids": expected_prompt_ids}
-        param_cache_salt = getattr(vllm_params, "cache_salt", None)
-        if param_cache_salt is not None:
-          engine_prompt["cache_salt"] = param_cache_salt
-      else:
-        expected_prompt_ids = None
-        engine_prompt = (
-            prompt_val if isinstance(prompt_val, str) else str(prompt_val)
-        )
-
-      task_gen = self._engine.generate(
-          engine_prompt, vllm_params, request_id=req_id
+    if self._partial_rollout:
+      turn_start_version = int(self._policy_version)
+      enable_prefix_caching = bool(self.engine_args.enable_prefix_caching)
+      default_cache_salt = (
+          f"policy_v{turn_start_version}" if enable_prefix_caching else None
       )
-      pending_tasks.append((req_id, task_gen, expected_prompt_ids))
-
-    results = await asyncio.gather(*[
-        self._process_request_output(
-            req_id, task_gen, expected_prompt_token_ids=expected_ids
+      pending_tasks = []
+      for idx, req in enumerate(req_list):
+        vllm_params = self._build_vllm_params(req, kwargs)
+        req_id = _get_val(req, "request_id") or f"req_{time.time_ns()}_{idx}"
+        prompt_val = _get_val(req, "prompt")
+        req_cache_salt = (
+            _get_val(req, "cache_salt", kwargs.get("cache_salt"))
+            if enable_prefix_caching
+            else None
         )
-        for req_id, task_gen, expected_ids in pending_tasks
-    ])
+        cache_salt = (
+            str(req_cache_salt)
+            if req_cache_salt is not None
+            else default_cache_salt
+        )
+        if generate_utils.is_token_id_sequence(prompt_val):
+          expected_prompt_ids = (
+              np.asarray(prompt_val, dtype=np.int32).reshape(-1).tolist()
+          )
+          engine_prompt: Any = {"prompt_token_ids": expected_prompt_ids}
+          if cache_salt is not None:
+            engine_prompt["cache_salt"] = cache_salt
+        else:
+          expected_prompt_ids = None
+          prompt_str = (
+              prompt_val if isinstance(prompt_val, str) else str(prompt_val)
+          )
+          if cache_salt is not None:
+            engine_prompt = {"prompt": prompt_str, "cache_salt": cache_salt}
+          else:
+            engine_prompt = prompt_str
+
+        task_gen = self._engine.generate(
+            engine_prompt,
+            vllm_params,
+            request_id=req_id,
+            priority=_scheduling_priority(req),
+        )
+        pending_tasks.append(
+            (req_id, task_gen, expected_prompt_ids, turn_start_version)
+        )
+
+      results = await asyncio.gather(*[
+          self._process_request_output(
+              req_id,
+              task_gen,
+              expected_prompt_token_ids=expected_ids,
+              policy_version=ver,
+          )
+          for req_id, task_gen, expected_ids, ver in pending_tasks
+      ])
+    else:
+      pending_tasks = []
+      for idx, req in enumerate(req_list):
+        vllm_params = self._build_vllm_params(req, kwargs)
+        req_id = _get_val(req, "request_id") or f"req_{time.time_ns()}_{idx}"
+        prompt_val = _get_val(req, "prompt")
+        if generate_utils.is_token_id_sequence(prompt_val):
+          expected_prompt_ids = (
+              np.asarray(prompt_val, dtype=np.int32).reshape(-1).tolist()
+          )
+          engine_prompt: Any = {"prompt_token_ids": expected_prompt_ids}
+        else:
+          expected_prompt_ids = None
+          engine_prompt = (
+              prompt_val if isinstance(prompt_val, str) else str(prompt_val)
+          )
+
+        task_gen = self._engine.generate(
+            engine_prompt,
+            vllm_params,
+            request_id=req_id,
+            priority=_scheduling_priority(req),
+        )
+        pending_tasks.append((req_id, task_gen, expected_prompt_ids))
+
+      results = await asyncio.gather(*[
+          self._process_request_output(
+              req_id, task_gen, expected_prompt_token_ids=expected_ids
+          )
+          for req_id, task_gen, expected_ids in pending_tasks
+      ])
+
+    sample_duration = time.perf_counter() - sample_start_time
+    if env_utils.is_debug_inference_logs_enabled():
+      tot_prompt_toks = 0
+      tot_comp_toks = 0
+      tot_preempts = 0
+      for r in results:
+        tot_prompt_toks += len(r.prompt_token_ids)
+        tot_comp_toks += len(r.token_ids)
+        tot_preempts += r.num_preemptions
+      s_tps = tot_comp_toks / sample_duration if sample_duration > 0 else 0.0
+      s_tpot_ms = (
+          (sample_duration / tot_comp_toks) * 1000.0
+          if tot_comp_toks > 0
+          else 0.0
+      )
+      logger.info(
+          '[DEBUG_INFERENCE][Sampler] requests=%d, duration=%.3fs, '
+          'prompt_tokens=%d, completion_tokens=%d, preemptions=%d, '
+          'tps=%.2f, tpot=%.2fms',
+          len(results),
+          sample_duration,
+          tot_prompt_toks,
+          tot_comp_toks,
+          tot_preempts,
+          s_tps,
+          s_tpot_ms,
+      )
 
     if raw_input_mode:
       return [r.text for r in results]
     return list(results)
+
 
   # ----------------------------------------------------------------------------
   # Cache Management
@@ -514,7 +698,8 @@ class RLVllmSampler:
       worker_index: int = 0,
       parallelism: int = 4,
       job_name: str = "rollout",
-  ) -> None:
+      auto_h2d: bool | None = None,
+  ) -> list[dict]:
     """Binds Raiden to each TPU worker's live weights, in-process.
 
     `get_weights_state()` cannot back a rollout-side weight sync: the
@@ -526,8 +711,38 @@ class RLVllmSampler:
     happen in the worker subprocess instead -- see
     `tpu_worker.TPUWorker.bind_raiden_sync`.
     """
-    await self._call_worker_method(
+    from tunix.experimental.weight_sync import raiden_synchronizer  # pylint: disable=g-import-not-at-top
+
+    if auto_h2d is not None or raiden_synchronizer.is_parallel_h2h_enabled():
+      raiden_synchronizer.patch_raiden_worker_sync()
+    if auto_h2d is not None:
+      try:
+        return await self._call_worker_method(
+            "bind_raiden_sync",
+            worker_index,
+            parallelism,
+            job_name,
+            auto_h2d=bool(auto_h2d),
+        )
+      except TypeError:
+        logger.warning(
+            "Worker bind_raiden_sync does not accept auto_h2d kwarg;"
+            " falling back to 3-arg call."
+        )
+    return await self._call_worker_method(
         "bind_raiden_sync", worker_index, parallelism, job_name
+    )
+
+  async def bind_gcs_sync(self,
+                          worker_index: int = 0,
+                          job_name: str = "rollout",
+                          staging_dir: str | None = None) -> list[dict]:
+    """Binds GCSWeightSync to each TPU worker's live weights, in-process."""
+    return await self._call_worker_method(
+        "bind_gcs_sync",
+        worker_index,
+        job_name,
+        staging_dir,
     )
 
   async def refresh_model_state_leaves(self) -> None:
@@ -537,6 +752,10 @@ class RLVllmSampler:
   async def get_raiden_metadata(self) -> list[dict]:
     """Wire-safe registration metadata for each worker's current Raiden binding."""
     return await self._call_worker_method("get_raiden_metadata")
+
+  async def get_gcs_metadata(self) -> list[dict]:
+    """Wire-safe registration metadata for each worker's current GCSWeightSync binding."""
+    return await self._call_worker_method("get_gcs_metadata")
 
   async def raiden_h2d(self, uuid: int | None = None) -> list[dict]:
     """Blocks each worker until its just-landed transfer is visible on-device.
@@ -548,14 +767,29 @@ class RLVllmSampler:
     """
     return await self._call_worker_method("raiden_h2d", uuid=uuid)
 
+  async def gcs_h2d(
+      self,
+      checkpoint_path: str,
+      source_checksums: dict[str, Any] | None = None,
+  ) -> list[dict]:
+    """Restores sharded Orbax weights into each TPUWorker and returns checksums."""
+    return await self._call_worker_method(
+        "gcs_h2d",
+        checkpoint_path,
+        source_checksums,
+    )
+
   async def raiden_metrics(self) -> list[dict]:
     return await self._call_worker_method("raiden_metrics")
+
+  async def gcs_metrics(self) -> list[dict]:
+    return await self._call_worker_method("gcs_metrics")
 
   async def pre_weight_sync(
       self,
       sync_request: Any = None,
       free_kv_cache: bool = False,
-      partial_rollout: bool | None = None,
+      preserve_active_kv_cache: bool = False,
       **kwargs: Any,
   ) -> None:
     """Phase 1: Pauses intake, invalidates prefix cache, and optionally drops KV cache.
@@ -567,21 +801,17 @@ class RLVllmSampler:
     serving stale KV activations computed under old weights while avoiding the
     per-step latency overhead of deallocating (`delete_kv_cache`) and
     reallocating (`reinitialize_kv_cache`) the HBM KV buffer pool.
+    When `preserve_active_kv_cache=True` and `free_kv_cache=False`, active
+    in-flight requests are paused in-place via `pause(mode="keep",
+    clear_cache=False)` without resetting the prefix cache.
     """
-    use_partial = (
-        self.partial_rollout
-        if partial_rollout is None
-        else bool(partial_rollout)
-    )
     self._policy_version = _get_val(
         sync_request, "policy_version", self._policy_version
     )
     logger.info(
-        "Executing pre_weight_sync (policy_version=%d, free_kv_cache=%s,"
-        " partial_rollout=%s)",
+        "Executing pre_weight_sync (policy_version=%d, free_kv_cache=%s)",
         self._policy_version,
         free_kv_cache,
-        use_partial,
     )
 
     if sync_request is not None:
@@ -589,19 +819,20 @@ class RLVllmSampler:
       if rid:
         self._transfer_statuses[str(rid)] = "IN_PROGRESS"
 
-    if use_partial:
-      await self.pause(partial_rollout=True)
+    if (preserve_active_kv_cache or self._partial_rollout) and not free_kv_cache:
+      await self.pause(mode="keep", clear_cache=False)
     else:
       await self.pause()
-    if not (use_partial and not free_kv_cache):
       await self._clear_prefix_cache()
 
-    # `AsyncLLMEngine.start_weight_update()` takes no arguments, so it
-    # can't forward `free_kv_cache` to the worker -- go through
-    # collective_rpc directly instead of the engine-level wrapper.
-    await self._call_worker_method(
-        "start_weight_update", free_kv_cache=free_kv_cache
-    )
+    # Ensure any stale weight update session from an aborted round is closed
+    # before opening a new weight update session.
+    try:
+      await self._call_worker_method("finish_weight_update")
+    except Exception:
+      pass
+    await self._call_worker_method("start_weight_update",
+                                       free_kv_cache=free_kv_cache)
 
   async def weight_sync(
       self,
@@ -615,11 +846,11 @@ class RLVllmSampler:
     await asyncio.sleep(0.01)
 
   async def post_weight_sync(
-      self,
-      sync_request: Any = None,
-      **kwargs: Any,
-  ) -> None:
-    """Phase 3: Closes weight update session (and restores KV cache if freed) and resumes serving."""
+        self,
+        sync_request: Any = None,
+        **kwargs: Any,
+    ) -> None:
+    """Phase 3: Restores KV cache via reinitialize_kv_cache() and resumes serving."""
     rid = None
     if sync_request is not None:
       rid = _get_val(sync_request, "req_id")

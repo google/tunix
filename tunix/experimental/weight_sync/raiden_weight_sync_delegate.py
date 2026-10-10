@@ -35,13 +35,6 @@ def _free_kv_cache_during_weight_sync(sampler: Any) -> bool:
   return bool(getattr(config, "free_kv_cache_during_weight_sync", True))
 
 
-def _partial_rollout_enabled(sampler: Any, default: bool = False) -> bool:
-  """Whether `sampler` has partial-rollout (in-flight weight updates) enabled."""
-  config = getattr(sampler, "config", None)
-  flag = getattr(config, "partial_rollout", False)
-  return bool(default or (isinstance(flag, bool) and flag))
-
-
 class RaidenWeightSyncDelegate:
   """Manages weight synchronization over Raiden for sampler adapters.
 
@@ -60,19 +53,20 @@ class RaidenWeightSyncDelegate:
       *args,
       worker_index: int = 0,
       server_id: str = "rollout",
-      partial_rollout: bool = False,
+      auto_h2d: bool | None = None,
       **kwargs,
   ):
     del args, kwargs
     # TODO(tunix-dev): add a lock when enabling multiple samplers in one worker.
     self._sampler = None
-    self.partial_rollout: bool = bool(partial_rollout)
+    if auto_h2d is None:
+      auto_h2d = not raiden_synchronizer.is_parallel_h2h_enabled()
 
     self._synchronizers: List[Any] = [
         raiden_synchronizer.RaidenSynchronizer(
             job_name=server_id,
             worker_index=worker_index,
-            auto_h2d=True,
+            auto_h2d=bool(auto_h2d),
         )
     ]
     self._version = 0
@@ -114,10 +108,7 @@ class RaidenWeightSyncDelegate:
 
   async def pre_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
     """Pre-sync phase hook executed before weight transfer begins."""
-    use_partial = _partial_rollout_enabled(
-        self._sampler,
-        default=bool(kwargs.get("partial_rollout", self.partial_rollout)),
-    )
+    del kwargs
     if self._has_round(sync_request):
       if not self._tracker.admit(sync_request, "prepared"):
         return True
@@ -126,9 +117,7 @@ class RaidenWeightSyncDelegate:
     if self._sampler is None:
       raise RuntimeError("Sampler is not available for weight sync")
 
-    if use_partial:
-      pass
-    elif _free_kv_cache_during_weight_sync(self._sampler):
+    if _free_kv_cache_during_weight_sync(self._sampler):
       self._sampler.delete_cache()
     else:
       # The KV pool stays allocated; only its stale prefix entries go.
@@ -147,15 +136,13 @@ class RaidenWeightSyncDelegate:
     for sync in self._synchronizers:
       if not sync.bound:
         raise RuntimeError("bind_weight_sync must run before weight_sync")
-      # auto_h2d installs chunks as they arrive; this call is the round's
-      # awaited install, so completion is guaranteed before checksums/post.
+      # With auto_h2d=False, weights were staged in host DRAM during H2H;
+      # this call initiates and awaits the local H2D copy to device HBM.
       sync.h2d()
       if os.environ.get("VERIFY_WEIGHTS", "").lower() == "true":
         logging.info("destination checksums: %s", sync.checksums())
-    version = getattr(sync_request, "policy_version", None)
-    self._version = (
-        int(version) if version is not None else self._version + 1
-    )
+    version = getattr(sync_request, "policy_version", 0)
+    self._version = version if version else self._version + 1
 
     if self._has_round(sync_request):
       self._tracker.complete(sync_request, "h2d_done")
@@ -164,10 +151,7 @@ class RaidenWeightSyncDelegate:
 
   async def post_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
     """Post-sync phase hook executed after weight installation completes."""
-    use_partial = _partial_rollout_enabled(
-        self._sampler,
-        default=bool(kwargs.get("partial_rollout", self.partial_rollout)),
-    )
+    del kwargs
     if self._has_round(sync_request):
       if not self._tracker.admit(sync_request, "committed"):
         return True
@@ -179,10 +163,7 @@ class RaidenWeightSyncDelegate:
     if self._sampler is None:
       raise RuntimeError("Sampler is not available for weight sync")
 
-    if (
-        _free_kv_cache_during_weight_sync(self._sampler)
-        and not use_partial
-    ):
+    if _free_kv_cache_during_weight_sync(self._sampler):
       self._sampler.reinitialize_cache()
     else:
       self._sampler.refresh_state_leaves()
