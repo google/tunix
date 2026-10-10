@@ -576,6 +576,7 @@ echo "Launching rollout node with sampler=$SAMPLER on TPU chips $ROLLOUT_TPU_CHI
     --weight_sync_mode="$WEIGHT_SYNC_MODE"
     --in_flight_weight_updates="$IN_FLIGHT_WEIGHT_UPDATES"
     --chat_parser="$CHAT_PARSER"
+    --seed="$SEED"
   )
 
   # shellcheck disable=SC2206

@@ -71,7 +71,7 @@ def _deepswe_k8s_rollout_cmd() -> str:
     text = f.read()
   anchor = text.index("run_rollout_node.main")
   start = text.rindex("python -m ", 0, anchor)
-  return text[start : text.index('\n      " \\\n', anchor)]
+  return text[start : text.index('\n      "\n', anchor)]
 
 
 def _recipe_config(**overrides) -> algorithm_config.GRPOConfig:
@@ -537,8 +537,10 @@ class DeepSWEExampleCommandLineTest(absltest.TestCase):
       with open(os.path.join(root, *rel)) as f:
         defined += f.read()
     cmd = _deepswe_k8s_rollout_cmd()
+    self.assertIn("--seed=${SEED}", cmd)
     flags = set(re.findall(r"(?<![\w-])--(?:no-)?([a-z][a-z0-9_]*)", cmd))
     self.assertIn("return_routed_experts", flags)
+    self.assertIn("seed", flags)
     missing = [flag for flag in sorted(flags) if f'"--{flag}"' not in defined]
     self.assertEqual(
         missing,

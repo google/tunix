@@ -904,6 +904,7 @@ if cfg:
           --env_name=deepswe_env \
           --agent_name=${ROLLOUT_AGENT_NAME} \
           --max_concurrency=${ROLLOUT_MAX_CONCURRENCY} \
+          --seed=${SEED} \
           ${lora_args} \
           ${maxtext_args} \
           ${vllm_args} \
