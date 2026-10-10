@@ -14,6 +14,13 @@
 
 """Tests for RaidenSynchronizer."""
 
+import os
+
+# Four host devices make real multi-device shardings expressible; this must
+# precede the first jax import.
+os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=4"
+
+# pylint: disable=g-import-not-at-top
 from unittest import mock
 
 import numpy as np
@@ -24,6 +31,8 @@ import jax.numpy as jnp
 
 from tunix.experimental.weight_sync import raiden_synchronizer
 
+P = jax.sharding.PartitionSpec
+
 
 class _FakeWeightSynchronizer:
   """Records ctor kwargs and calls in place of the native wheel object."""
@@ -33,7 +42,8 @@ class _FakeWeightSynchronizer:
     self.kwargs = dict(kwargs)
     self.local_port = 12345
     self.listener_port = 23456
-    self.num_shards = 2
+    # Like the native wrapper: one shard per locally addressable device shard.
+    self.num_shards = len(self.arrays[0].addressable_shards)
     self.bound_with = None
 
   def d2h(self):
@@ -134,9 +144,7 @@ class LocalIpTest(absltest.TestCase):
       made.append(sock)
       return sock
 
-    patcher = mock.patch.object(
-        raiden_synchronizer.socket, "socket", factory
-    )
+    patcher = mock.patch.object(raiden_synchronizer.socket, "socket", factory)
     patcher.start()
     self.addCleanup(patcher.stop)
     return made
@@ -245,14 +253,17 @@ class RaidenSynchronizerTest(absltest.TestCase):
     )
     md = sync.work_unit_metadata()
     self.assertEqual(md.unit.job_name, "rollout")
-    self.assertEqual(md.shards, ("1.2.3.4:12345",) * 2)
+    # Single-device arrays: one local shard, so one data address.
+    self.assertEqual(md.shards, ("1.2.3.4:12345",))
     self.assertEqual(md.control_plane_rpc_address, "1.2.3.4:23456")
     self.assertLen(md.variables, 2)
     self.assertEqual([v.layer_idx for v in md.variables], [0, 1])
     for v in md.variables:
-      # Single-device arrays: every dim replicated, single-axis specs only.
+      # Single-device arrays: every dim replicated, single-axis specs only,
+      # and the only shard holds the only slice.
       self.assertTrue(all(m == 1 for m in v.mesh_shape))
       self.assertTrue(all("," not in s for s in v.sharding_spec))
+      self.assertEqual(v.global_shard_indices, (0,))
 
   def test_tensor_metadata_clamps_overlong_spec(self):
     class _WideSpecSharding:
@@ -264,15 +275,145 @@ class RaidenSynchronizerTest(absltest.TestCase):
       dtype = np.dtype(np.float32)
       sharding = _WideSpecSharding()
 
-    md = raiden_synchronizer._tensor_metadata("w", _Arr(), 0)
+    md = raiden_synchronizer._tensor_metadata(
+        "w", _Arr(), 0, [jax.devices()[0]]
+    )
     self.assertEqual(md.sharding_spec, ("tp",))
     self.assertLen(md.mesh_shape, 1)
+    # No real sharding to derive a slice grid from: indices stay unknown.
+    self.assertEqual(md.global_shard_indices, ())
+
+  def test_global_shard_index_1d(self):
+    index = raiden_synchronizer._global_shard_index
+    self.assertEqual(index("w", (slice(0, 2),), (8,), (4,)), 0)
+    self.assertEqual(index("w", (slice(6, 8),), (8,), (4,)), 3)
+
+  def test_global_shard_index_2d_is_row_major(self):
+    self.assertEqual(
+        raiden_synchronizer._global_shard_index(
+            "w", (slice(4, 8), slice(2, 4)), (8, 8), (2, 4)
+        ),
+        1 * 4 + 1,
+    )
+
+  def test_global_shard_index_replicated_dimension_is_coordinate_zero(self):
+    index = raiden_synchronizer._global_shard_index
+    self.assertEqual(index("w", (slice(None), slice(4, 8)), (8, 8), (1, 2)), 1)
+    self.assertEqual(index("w", (slice(4, 8), slice(None)), (8, 8), (2, 1)), 1)
+
+  def test_global_shard_index_rejects_misaligned_start(self):
+    with self.assertRaisesRegex(ValueError, "'w'.*multiple of tile 2"):
+      raiden_synchronizer._global_shard_index("w", (slice(1, 3),), (8,), (4,))
+
+  def test_global_shard_index_rejects_start_beyond_the_grid(self):
+    with self.assertRaisesRegex(ValueError, "'w'.*below 2 tiles"):
+      raiden_synchronizer._global_shard_index("w", (slice(8, 12),), (8,), (2,))
+
+  def test_global_shard_index_rejects_rank_mismatch(self):
+    with self.assertRaisesRegex(ValueError, "same rank"):
+      raiden_synchronizer._global_shard_index(
+          "w", (slice(0, 4),), (8, 8), (2, 1)
+      )
+
+  def _mesh_2x2(self):
+    return jax.sharding.Mesh(
+        np.array(jax.devices()[:4]).reshape(2, 2), ("x", "y")
+    )
+
+  def test_tensor_metadata_indices_follow_mesh_flat_order(self):
+    mesh = self._mesh_2x2()
+    shard_devices = list(mesh.devices.flat)
+    cases = {
+        P("x", "y"): [0, 1, 2, 3],
+        # mesh.devices.flat is x-major: (0,0), (0,1), (1,0), (1,1).
+        P("y", None): [0, 1, 0, 1],
+        P(None, "x"): [0, 0, 1, 1],
+        P(): [0, 0, 0, 0],
+    }
+    for spec, expected in cases.items():
+      with self.subTest(spec=str(spec)):
+        arr = jax.device_put(
+            jnp.arange(64, dtype=jnp.float32).reshape(8, 8),
+            jax.sharding.NamedSharding(mesh, spec),
+        )
+        md = raiden_synchronizer._tensor_metadata("w", arr, 0, shard_devices)
+        self.assertEqual(list(md.global_shard_indices), expected)
+
+  def test_tensor_metadata_indices_describe_the_given_device_order(self):
+    # The index list follows the caller's device order, not the mesh's.
+    mesh = self._mesh_2x2()
+    arr = jax.device_put(
+        jnp.zeros((8, 8), jnp.float32),
+        jax.sharding.NamedSharding(mesh, P("x", "y")),
+    )
+    reversed_devices = list(mesh.devices.flat)[::-1]
+    md = raiden_synchronizer._tensor_metadata("w", arr, 0, reversed_devices)
+    self.assertEqual(md.global_shard_indices, (3, 2, 1, 0))
+
+  def test_work_unit_metadata_tcp_publishes_one_index_per_shard(self):
+    mesh = self._mesh_2x2()
+    state = {
+        "w_xy": jax.device_put(
+            jnp.zeros((8, 8), jnp.float32),
+            jax.sharding.NamedSharding(mesh, P("x", "y")),
+        ),
+        "w_y": jax.device_put(
+            jnp.zeros((8, 8), jnp.float32),
+            jax.sharding.NamedSharding(mesh, P("y", None)),
+        ),
+        "w_rep": jax.device_put(
+            jnp.zeros((8,), jnp.float32),
+            jax.sharding.NamedSharding(mesh, P()),
+        ),
+    }
+    sync = raiden_synchronizer.RaidenSynchronizer(
+        "trainer", state, bind_ip="1.2.3.4"
+    )
+    md = sync.work_unit_metadata()
+    self.assertEqual(md.shards, ("1.2.3.4:12345",) * 4)
+    self.assertEqual(md.mesh_axes, ("x", "y"))
+    self.assertEqual(md.mesh_shape, (2, 2))
+    by_name = {v.name: v for v in md.variables}
+    self.assertEqual(set(by_name), {"w_xy", "w_y", "w_rep"})
+    for v in md.variables:
+      self.assertLen(v.global_shard_indices, len(md.shards))
+    # Every local shard must hold a slice of every variable; a single-process
+    # run addresses the whole mesh, so each variable covers its full grid.
+    self.assertEqual(set(by_name["w_xy"].global_shard_indices), {0, 1, 2, 3})
+    self.assertEqual(set(by_name["w_y"].global_shard_indices), {0, 1})
+    self.assertEqual(set(by_name["w_rep"].global_shard_indices), {0})
+    # Shard j of every variable is the same device, so the indices must agree
+    # with the per-array slice map in the shards' device order.
+    shard_devices = [s.device for s in state["w_xy"].addressable_shards]
+    for name, arr in state.items():
+      indices_map = arr.sharding.devices_indices_map(arr.shape)
+      expected = tuple(
+          raiden_synchronizer._global_shard_index(
+              name, indices_map[d], arr.shape, by_name[name].mesh_shape
+          )
+          for d in shard_devices
+      )
+      self.assertEqual(by_name[name].global_shard_indices, expected)
+
+  def test_work_unit_metadata_tcp_rejects_a_num_shards_mismatch(self):
+    sync = raiden_synchronizer.RaidenSynchronizer("trainer", self._state())
+    self.ws_lib.instances[0].num_shards = 2
+    with self.assertRaisesRegex(
+        RuntimeError, "1 addressable shard.*num_shards=2"
+    ):
+      sync.work_unit_metadata()
+
+  def test_work_unit_metadata_rejects_an_index_count_mismatch(self):
+    sync = raiden_synchronizer.RaidenSynchronizer("trainer", self._state())
+    with mock.patch.object(sync, "_shard_devices", return_value=[]):
+      with self.assertRaisesRegex(
+          RuntimeError, "'w1' publishes 0 global_shard_indices for 1 shards"
+      ):
+        sync.work_unit_metadata()
 
   def test_work_unit_metadata_reports_the_array_mesh(self):
     mesh = jax.sharding.Mesh(np.array(jax.devices()[:1]), ("data",))
-    sharding = jax.sharding.NamedSharding(
-        mesh, jax.sharding.PartitionSpec()
-    )
+    sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
     arr = jax.device_put(jnp.ones((2, 4), jnp.float32), sharding)
     sync = raiden_synchronizer.RaidenSynchronizer("trainer", {"w": arr})
     md = sync.work_unit_metadata()
@@ -393,6 +534,7 @@ class RaidenSynchronizerTest(absltest.TestCase):
 
   def test_ffi_compute_on_compat_accepts_out_memory_spaces(self):
     from jax.experimental import compute_on  # pytype: disable=import-error  pylint: disable=g-import-not-at-top,unused-import
+
     compute_on_mod = getattr(raiden_synchronizer.jax, "_src").compute_on
     original = compute_on_mod.compute_on
     self.addCleanup(setattr, compute_on_mod, "compute_on", original)
