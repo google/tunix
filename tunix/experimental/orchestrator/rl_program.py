@@ -164,7 +164,7 @@ def _tag_prompt(prompt_item: Any, coordinates: Mapping[str, int]) -> Any:
 def _generation_metrics(
     groups: Sequence[Sequence[Any]],
 ) -> dict[str, float]:
-  """Computes the step's `generation/completions/*` metrics, grouped by prompt.
+  """Computes the step's `rollout/completions/*` metrics, grouped by prompt.
 
   Matches `agentic_grpo_learner.GRPOLearner._process_results`: the two means are
   per group, not per rollout, so a short group still weighs the same as a full
@@ -216,12 +216,12 @@ def _generation_metrics(
   if not all_lengths:
     return {}
   return {
-      "generation/completions/clip_ratio": float(np.mean(clip_ratios)),
-      "generation/completions/mean_raw_length": float(
+      "rollout/completions/clip_ratio": float(np.mean(clip_ratios)),
+      "rollout/completions/mean_raw_length": float(
           np.mean(group_mean_lengths)
       ),
-      "generation/completions/max_raw_length": float(np.max(all_lengths)),
-      "generation/completions/min_raw_length": float(np.min(all_lengths)),
+      "rollout/completions/max_raw_length": float(np.max(all_lengths)),
+      "rollout/completions/min_raw_length": float(np.min(all_lengths)),
   }
 
 
@@ -1017,6 +1017,16 @@ class StandardRLProgram(RLProgram):
     finally:
       await self.scored_q.close()
 
+  _SAMPLER_IS_ATTR_PREFIXES = (
+      "sampler_is/hist_frac/",
+      "sampler_is/hist_mass/",
+      "sampler_is/pos_signed/",
+      "sampler_is/pos_absmean/",
+      "sampler_is/conf_signed/",
+      "sampler_is/conf_frac/",
+      "sampler_is/lenscale/",
+  )
+
   def _log_metric(
       self,
       metric_name: str,
@@ -1176,66 +1186,70 @@ class StandardRLProgram(RLProgram):
         )
 
     if prompt_lengths:
-      self.metrics_logger.log(
-          self.metrics_prefix,
-          "rollout/prompt_length_mean",
+      self._log_metric(
+          "rollout/prompts/mean_length",
           float(np.mean(prompt_lengths)),
-          self.mode,
+          log_step,
+      )
+      self._log_metric(
+          "rollout/prompts/max_length",
+          float(np.max(prompt_lengths)),
+          log_step,
+      )
+      self._log_metric(
+          "rollout/prompts/min_length",
+          float(np.min(prompt_lengths)),
           log_step,
       )
     if completion_lengths:
-      self.metrics_logger.log(
-          self.metrics_prefix,
-          "rollout/completion_length_mean",
+      self._log_metric(
+          "rollout/completions/mean_length",
           float(np.mean(completion_lengths)),
-          self.mode,
+          log_step,
+      )
+      self._log_metric(
+          "rollout/completions/max_length",
+          float(np.max(completion_lengths)),
+          log_step,
+      )
+      self._log_metric(
+          "rollout/completions/min_length",
+          float(np.min(completion_lengths)),
           log_step,
       )
     if total_lengths:
-      self.metrics_logger.log(
-          self.metrics_prefix,
+      self._log_metric(
           "rollout/total_tokens_mean",
           float(np.mean(total_lengths)),
-          self.mode,
           log_step,
       )
-      self.metrics_logger.log(
-          self.metrics_prefix,
+      self._log_metric(
           "rollout/global_valid_toks",
           float(np.sum(total_lengths)),
-          self.mode,
           log_step,
       )
     elif completion_lengths:
-      self.metrics_logger.log(
-          self.metrics_prefix,
+      self._log_metric(
           "rollout/global_valid_toks",
           float(np.sum(completion_lengths)),
-          self.mode,
           log_step,
       )
     if all_step_items:
-      self.metrics_logger.log(
-          self.metrics_prefix,
+      self._log_metric(
           "rollout/global_valid_seqs",
           float(len(all_step_items)),
-          self.mode,
           log_step,
       )
     if turns_list:
-      self.metrics_logger.log(
-          self.metrics_prefix,
+      self._log_metric(
           "rollout/num_turns_mean",
           float(np.mean(turns_list)),
-          self.mode,
           log_step,
       )
     if successes:
-      self.metrics_logger.log(
-          self.metrics_prefix,
+      self._log_metric(
           "rollout/success_rate",
           float(np.mean(successes)),
-          self.mode,
           log_step,
       )
     if staleness_list:
@@ -1245,42 +1259,31 @@ class StandardRLProgram(RLProgram):
           "staleness_min": float(np.min(staleness_list)),
       }
       for tag, val in staleness_stats.items():
-        self.metrics_logger.log(
-            self.metrics_prefix, f"rollout/{tag}", val, self.mode, log_step
-        )
+        self._log_metric(f"rollout/{tag}", val, log_step)
     if partial_rollouts:
-      self.metrics_logger.log(
-          self.metrics_prefix,
+      self._log_metric(
           "rollout/partial_rollout_fraction",
           float(np.mean(partial_rollouts)),
-          self.mode,
           log_step,
       )
 
-    # Generation metrics, already named to match the agentic GRPO learner so
-    # the same dashboards work for both.
+    # Generation/rollout metrics grouped under rollout/*.
     if generation_metrics:
       for tag, val in generation_metrics.items():
-        self.metrics_logger.log(
-            self.metrics_prefix,
-            tag,
-            val,
-            self.mode,
-            log_step,
-        )
+        if tag.startswith("generation/"):
+          tag = "rollout/" + tag.removeprefix("generation/")
+        self._log_metric(tag, val, log_step)
 
-    self.metrics_logger.log(
-        self.metrics_prefix,
+    filtered_groups_count = len(filtered_groups)
+    filtered_trajectories_count = sum(len(g) for g in filtered_groups)
+    self._log_metric(
         "rollout/filtered_groups_count",
-        len(filtered_groups),
-        self.mode,
+        float(filtered_groups_count),
         log_step,
     )
-    self.metrics_logger.log(
-        self.metrics_prefix,
+    self._log_metric(
         "rollout/filtered_trajectories_count",
-        sum(len(g) for g in filtered_groups),
-        self.mode,
+        float(filtered_trajectories_count),
         log_step,
     )
 
@@ -1288,11 +1291,9 @@ class StandardRLProgram(RLProgram):
     rewards_to_log = step_rewards
     if all_step_items:
       valid_flags = [item.is_valid for item in all_step_items]
-      self.metrics_logger.log(
-          self.metrics_prefix,
+      self._log_metric(
           "rollout/invalid_trajectory_frac",
           1.0 - float(np.mean(valid_flags)),
-          self.mode,
           log_step,
       )
       rewards_to_log = [
@@ -1315,9 +1316,7 @@ class StandardRLProgram(RLProgram):
           "sum": reward_sum,
       }
       for tag, val in reward_stats.items():
-        self.metrics_logger.log(
-            self.metrics_prefix, f"rewards/{tag}", val, self.mode, log_step
-        )
+        self._log_metric(f"rewards/{tag}", val, log_step)
 
     # --- Advantage Metrics ---
     advantage_mean = float(np.mean(step_advantages)) if step_advantages else 0.0
@@ -1342,15 +1341,10 @@ class StandardRLProgram(RLProgram):
           "nonzero_frac": advantage_nonzero_frac,
       }
       for tag, val in advantage_stats.items():
-        self.metrics_logger.log(
-            self.metrics_prefix,
-            f"rewards/advantage/{tag}",
-            val,
-            self.mode,
-            log_step,
-        )
+        self._log_metric(f"rewards/advantage/{tag}", val, log_step)
 
-    # --- 3. Orchestrator Metrics ---
+    # --- 3. Perf & Orchestrator Metrics ---
+    self._log_metric("perf/global_step_time", float(step_time_sec), log_step)
     orchestrator_stats = {
         "policy_version": float(self.policy_version),
         "num_rollouts": float(num_rollouts),
@@ -1361,9 +1355,7 @@ class StandardRLProgram(RLProgram):
         "weight_sync_time": float(weight_sync_time),
     }
     for tag, val in orchestrator_stats.items():
-      self.metrics_logger.log(
-          self.metrics_prefix, f"orchestrator/{tag}", val, self.mode, log_step
-      )
+      self._log_metric(f"orchestrator/{tag}", val, log_step)
     if padding_stats:
       for tag, val in batch_assembly.summarize_padding_stats(
           padding_stats
@@ -1376,7 +1368,7 @@ class StandardRLProgram(RLProgram):
       for tag, val in packing_stats.items():
         self._log_metric(f"efficiency/packing/{tag}", val, log_step)
 
-    # --- 4. Trainer Metrics ---
+    # --- 4. Actor Trainer Metrics ---
     loss_val = None
     perplexity_val = None
     grad_norm_val = None
@@ -1410,84 +1402,94 @@ class StandardRLProgram(RLProgram):
 
       # Loss & Perplexity
       raw_loss = scalar_metrics.pop(
-          "loss", scalar_metrics.pop("trainer/loss", None)
+          "loss",
+          scalar_metrics.pop(
+              "trainer/loss", scalar_metrics.pop("actor/loss", None)
+          ),
       )
-      if raw_loss is None and "loss" in weighted_metrics:
-        raw_loss = weighted_metrics.pop("loss")
-      elif raw_loss is None and "trainer/loss" in weighted_metrics:
-        raw_loss = weighted_metrics.pop("trainer/loss")
+      if raw_loss is None:
+        if "loss" in weighted_metrics:
+          raw_loss = weighted_metrics.pop("loss")
+        elif "trainer/loss" in weighted_metrics:
+          raw_loss = weighted_metrics.pop("trainer/loss")
+        elif "actor/loss" in weighted_metrics:
+          raw_loss = weighted_metrics.pop("actor/loss")
 
       loss_val = _extract_scalar(raw_loss)
       if loss_val is not None:
-        self.metrics_logger.log(
-            self.metrics_prefix, "trainer/loss", loss_val, self.mode, log_step
-        )
+        self._log_metric("loss", loss_val, log_step, prefix="actor")
         perplexity_val = float(np.exp(loss_val))
-        self.metrics_logger.log(
-            self.metrics_prefix,
-            "trainer/perplexity",
-            perplexity_val,
-            self.mode,
-            log_step,
+        self._log_metric(
+            "perplexity", perplexity_val, log_step, prefix="actor"
         )
 
       # Learning Rate
       raw_lr = scalar_metrics.pop(
-          "learning_rate", scalar_metrics.pop("trainer/learning_rate", None)
+          "learning_rate",
+          scalar_metrics.pop(
+              "trainer/learning_rate",
+              scalar_metrics.pop("actor/learning_rate", None),
+          ),
       )
       lr_val = _extract_scalar(raw_lr)
       if lr_val is not None:
-        self.metrics_logger.log(
-            self.metrics_prefix,
-            "trainer/learning_rate",
-            lr_val,
-            self.mode,
-            log_step,
-        )
+        self._log_metric("learning_rate", lr_val, log_step, prefix="actor")
 
       # Grad Norm
       # ``gradient_norm`` is the MaxText training engine's name for it
       # (``MaxTextTrainingEngine.update`` records it under that key). Read the
-      # MaxText key via ``.get`` rather than ``.pop`` so ``trainer/gradient_norm``
+      # MaxText key via ``.get`` rather than ``.pop`` so ``gradient_norm``
       # continues to be published by the auxiliary scalar loop below while also
-      # populating ``trainer/grad_norm`` and the console step summary.
+      # populating ``actor/grad_norm`` and the console step summary.
       raw_gn = scalar_metrics.pop("grad_norm", None)
       if raw_gn is None:
         raw_gn = scalar_metrics.pop("trainer/grad_norm", None)
       if raw_gn is None:
+        raw_gn = scalar_metrics.pop("actor/grad_norm", None)
+      if raw_gn is None:
         raw_gn = scalar_metrics.get("gradient_norm")
       if raw_gn is None:
         raw_gn = scalar_metrics.get("trainer/gradient_norm")
+      if raw_gn is None:
+        raw_gn = scalar_metrics.get("actor/gradient_norm")
       gn_val = _extract_scalar(raw_gn)
       grad_norm_val = gn_val
       if gn_val is not None:
-        self.metrics_logger.log(
-            self.metrics_prefix,
-            "trainer/grad_norm",
-            gn_val,
-            self.mode,
-            log_step,
-        )
+        self._log_metric("grad_norm", gn_val, log_step, prefix="actor")
 
       # Auxiliary weighted metrics
       for k, v in weighted_metrics.items():
         val = _extract_scalar(v, k)
         if val is not None:
-          metric_key = k if k.startswith("trainer/") else f"trainer/{k}"
-          self.metrics_logger.log(
-              self.metrics_prefix, metric_key, val, self.mode, log_step
+          clean_key = (
+              k.removeprefix("trainer/").removeprefix("actor/")
           )
+          self._log_metric(clean_key, val, log_step, prefix="actor")
 
       # Auxiliary scalar metrics
       for k, v in scalar_metrics.items():
-        if k in ("perplexity", "trainer/perplexity"):
+        if k in ("perplexity", "trainer/perplexity", "actor/perplexity"):
           continue
         val = _extract_scalar(v, k)
         if val is not None:
-          metric_key = k if k.startswith("trainer/") else f"trainer/{k}"
-          self.metrics_logger.log(
-              self.metrics_prefix, metric_key, val, self.mode, log_step
+          clean_key = (
+              k.removeprefix("trainer/").removeprefix("actor/")
           )
+          if clean_key.startswith(self._SAMPLER_IS_ATTR_PREFIXES):
+            self._log_metric(
+                clean_key.removeprefix("sampler_is/"),
+                val,
+                log_step,
+                prefix="sampler_is_attr",
+            )
+          elif clean_key.startswith((
+              "sampler_trainer/",
+              "sampler_is/",
+              "sampler_rs/",
+          )):
+            self._log_metric(clean_key, val, log_step)
+          else:
+            self._log_metric(clean_key, val, log_step, prefix="actor")
 
       # Every trainer-side metric for the step on one line, the sequence gate's
       # included (``sample_mask/kept_frac``, ``sample_mask/mult_prob_error_*``,
@@ -1512,20 +1514,22 @@ class StandardRLProgram(RLProgram):
       )
 
     # --- 5. Sampler/Trainer Agreement Metrics ---
-    # Names are already namespaced (``sampler_trainer/*``, ``sampler_is/*``) by
-    # the shared helper; reduce each metric's per-microbatch values with the
-    # aggregation fn the helper paired with it.
+    # Names are already namespaced (``sampler_trainer/*``, ``sampler_is/*``,
+    # ``sampler_rs/*``) by the shared helper; reduce each metric's
+    # per-microbatch values with the aggregation fn the helper paired with it.
     if sampler_agreement:
       for name, (agg_fn, values) in sampler_agreement.items():
         if not values:
           continue
-        self.metrics_logger.log(
-            self.metrics_prefix,
-            name,
-            float(agg_fn(values)),
-            self.mode,
-            log_step,
-        )
+        if name.startswith(self._SAMPLER_IS_ATTR_PREFIXES):
+          self._log_metric(
+              name.removeprefix("sampler_is/"),
+              float(agg_fn(values)),
+              log_step,
+              prefix="sampler_is_attr",
+          )
+        else:
+          self._log_metric(name, float(agg_fn(values)), log_step)
 
     return {
         "reward_mean": reward_mean,
