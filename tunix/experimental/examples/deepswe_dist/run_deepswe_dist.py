@@ -17,9 +17,11 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 import functools
 import logging
 import os
+import signal
 import sys
 from typing import Any
 
@@ -42,7 +44,9 @@ from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import orchestrator
 from tunix.experimental.orchestrator import rl_program
+from tunix.experimental.examples.common import orch_k8s_cleanup
 from tunix.experimental.weight_sync import weight_sync
+from tunix.experimental.weight_sync import weight_sync_coordinator
 from tunix.experimental.worker import remote_execution
 from tunix.rl import algorithm_config
 from tunix.sft import metrics_logger as metrics_logger_lib
@@ -51,6 +55,29 @@ from tunix.sft import metrics_logger as metrics_logger_lib
 
 
 ProcessContext = runtime_context.ProcessContext
+
+
+def _optional_float(val: str | float | None) -> float | None:
+  if val is None:
+    return None
+  if isinstance(val, (int, float)):
+    return float(val)
+  s = str(val).strip()
+  if not s or s.lower() == "none":
+    return None
+  return float(s)
+
+
+def _normalize_group_order(val: str) -> str:
+  v = str(val).strip().lower()
+  if v in ("arrival", "trajectory_completion"):
+    return "trajectory_completion"
+  if v in ("prompt_batch", "prompt_arrival"):
+    return "prompt_arrival"
+  raise argparse.ArgumentTypeError(
+      f"Unsupported trajectory_group_order {val!r}; expected one of "
+      "('trajectory_completion', 'prompt_arrival', 'arrival', 'prompt_batch')."
+  )
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -117,6 +144,22 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " computation."
       ),
   )
+  parser.add_argument(
+      "--trainer_expert",
+      type=int,
+      default=None,
+      help=(
+          "Trainer expert-parallel mesh dimension. Included in the sequence"
+          " packing row count because MaxText's MoE shards the batch axis over"
+          " ('fsdp', 'expert') jointly."
+      ),
+  )
+  parser.add_argument(
+      "--rollout_replicas",
+      type=int,
+      default=int(os.getenv("ROLLOUT_REPLICAS", "1")),
+      help="Number of rollout worker replicas to wait for at startup.",
+  )
   parser.add_argument("--model_id", type=str, default="Qwen/Qwen3-1.7B")
   parser.add_argument("--tokenizer_path", type=str, default="")
   parser.add_argument("--temperature", type=float, default=1.0)
@@ -143,9 +186,108 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       default=int(os.getenv("MAX_STALENESS", "0")),
   )
   parser.add_argument(
+      "--exact_token_continuity",
+      action=argparse.BooleanOptionalAction,
+      default=True,
+      help=(
+          "Preserve exact token IDs across multi-turn rollout steps without"
+          " detokenizing and re-tokenizing intermediate turns (TITO)."
+      ),
+  )
+  parser.add_argument(
+      "--epsilon_high",
+      type=_optional_float,
+      default=None,
+      help="Upper PPO clip bound, for DAPO-style asymmetric clipping.",
+  )
+  parser.add_argument(
+      "--loss_agg_mode",
+      type=str,
+      default="sequence-mean-token-mean",
+      help="Loss aggregation mode, e.g. token-mean or sequence-mean-token-mean.",
+  )
+  parser.add_argument(
+      "--advantage_estimator",
+      type=str,
+      default="grpo",
+      help="Advantage estimator, e.g. grpo or grpo-loo (leave-one-out).",
+  )
+  parser.add_argument(
+      "--overlong_loss_masking",
+      action=argparse.BooleanOptionalAction,
+      default=False,
+      help=(
+          "Zero completion_mask on overlong trajectories after computing group"
+          " advantages so they contribute to the baseline without contributing"
+          " to the policy loss numerator or denominator."
+      ),
+  )
+  parser.add_argument(
+      "--sampler_is",
+      type=str,
+      default=None,
+      choices=(None, "token"),
+      help="Importance-sampling reweighting mode between sampler and trainer.",
+  )
+  parser.add_argument(
+      "--sampler_is_threshold",
+      type=_optional_float,
+      default=2.0,
+      help="Upper bound on per-token IS weights (or None/'none' for unclipped).",
+  )
+  parser.add_argument(
+      "--sampler_rs",
+      type=str,
+      default=None,
+      choices=(None, "geometric", "token"),
+      help="Rejection-sampling gate mode between sampler and trainer.",
+  )
+  parser.add_argument(
+      "--sampler_rs_min",
+      type=_optional_float,
+      default=None,
+      help="Lower edge of the rejection-sampling keep-band.",
+  )
+  parser.add_argument(
+      "--sampler_rs_max",
+      type=_optional_float,
+      default=None,
+      help="Upper edge of the rejection-sampling keep-band.",
+  )
+  parser.add_argument(
+      "--seq_logprob_error_threshold",
+      type=_optional_float,
+      default=None,
+      help=(
+          "Drop sequences whose mean exp|log p_trainer - log q_sampler|"
+          " exceeds this. Requires rollout log-probabilities."
+      ),
+  )
+  parser.add_argument(
+      "--truncated_importance_sampling_type",
+      type=str,
+      default=None,
+      choices=(None, "seq-mask-tis"),
+      help="Set to seq-mask-tis to enable sequence-masked TIS (sampler_is='token' + sampler_rs='geometric').",
+  )
+  parser.add_argument(
+      "--truncated_importance_sampling_ratio_min",
+      type=_optional_float,
+      default=None,
+      help="Lower edge of the TIS keep band.",
+  )
+  parser.add_argument(
+      "--truncated_importance_sampling_ratio",
+      type=_optional_float,
+      default=None,
+      help="Upper edge of the TIS keep band.",
+  )
+  parser.add_argument(
       "--trajectory_group_order",
-      choices=("trajectory_completion", "prompt_arrival"),
-      default=os.getenv("TRAJECTORY_GROUP_ORDER", "trajectory_completion"),
+      type=_normalize_group_order,
+      default=_normalize_group_order(
+          os.getenv("TRAJECTORY_GROUP_ORDER", "trajectory_completion")
+      ),
       help="Trajectory group order.",
   )
   parser.add_argument(
@@ -153,6 +295,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       type=weight_sync.WeightSyncMode,
       default=weight_sync.WeightSyncMode(os.getenv("WEIGHT_SYNC_MODE", "none")),
       choices=list(weight_sync.WeightSyncMode),
+  )
+  parser.add_argument(
+      "--disable_weight_sync_timeouts",
+      action=argparse.BooleanOptionalAction,
+      default=weight_sync_coordinator.is_weight_sync_timeouts_disabled(),
+      help="Disable weight-sync phase and RPC timeouts.",
   )
   parser.add_argument("--dataset_path", type=str, default="")
   parser.add_argument(
@@ -168,14 +316,50 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument(
       "--shuffle", action=argparse.BooleanOptionalAction, default=True
   )
-  parser.add_argument("--max_turns", type=int, default=50)
-  parser.add_argument("--step_timeout_secs", type=int, default=30 * 60)
-  parser.add_argument("--reward_timeout_secs", type=int, default=30 * 60)
+  parser.add_argument(
+      "--max_turns", type=int, default=int(os.getenv("MAX_TURNS", "50"))
+  )
+  parser.add_argument(
+      "--step_timeout_secs",
+      type=int,
+      default=int(os.getenv("STEP_TIMEOUT_SECS", str(30 * 60))),
+  )
+  parser.add_argument(
+      "--reward_timeout_secs",
+      type=int,
+      default=int(os.getenv("REWARD_TIMEOUT_SECS", str(30 * 60))),
+  )
+  parser.add_argument(
+      "--episode_timeout_secs",
+      type=int,
+      default=int(os.getenv("EPISODE_TIMEOUT_SECS", "1800")),
+      help="Maximum episode duration in seconds before timeout termination.",
+  )
   parser.add_argument("--env_backend", type=str, default="kubernetes")
   parser.add_argument(
-      "--scaffold", choices=("r2egym", "sweagent"), default="r2egym"
+      "--scaffold",
+      choices=("r2egym", "sweagent", "openhands"),
+      default="r2egym",
   )
   parser.add_argument("--use_agent_sandbox", action="store_true")
+  parser.add_argument(
+      "--max_warmpool_replicas",
+      type=int,
+      default=None,
+      help="Maximum replicas per SandboxWarmPool (defaults to num_generations).",
+  )
+  parser.add_argument(
+      "--max_concurrency",
+      type=int,
+      default=128,
+      help="Maximum concurrency for SandboxFleet.",
+  )
+  parser.add_argument(
+      "--image_rewrite_prefix",
+      type=str,
+      default=os.getenv("IMAGE_REWRITE_PREFIX", ""),
+      help="Container registry prefix to rewrite problem docker images.",
+  )
   parser.add_argument("--env_verbose", action="store_true")
   parser.add_argument(
       "--flush_every_n_steps",
@@ -223,6 +407,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--rpc_timeout_s", type=float, default=1800.0)
   parser.add_argument("--init_timeout_s", type=float, default=None)
   parser.add_argument("--stop_workers_on_exit", action="store_true")
+  parser.add_argument(
+      "--delete_worker_jobsets_on_exit",
+      action=argparse.BooleanOptionalAction,
+      default=True,
+      help="Delete sibling worker JobSets on exit when --stop_workers_on_exit is set.",
+  )
   parser.add_argument("--debug", action="store_true")
   parser.add_argument(
       "--run_id",
@@ -284,11 +474,52 @@ def _trajectory_store_config(
 
 
 def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
+  sampler_is = args.sampler_is
+  sampler_is_threshold = args.sampler_is_threshold
+  sampler_rs = args.sampler_rs
+  sampler_rs_min = args.sampler_rs_min
+  sampler_rs_max = args.sampler_rs_max
+
+  if args.truncated_importance_sampling_type == "seq-mask-tis":
+    sampler_is = "token"
+    sampler_is_threshold = None
+    sampler_rs = "geometric"
+    if sampler_rs_min is None:
+      sampler_rs_min = args.truncated_importance_sampling_ratio_min
+    if sampler_rs_max is None:
+      sampler_rs_max = args.truncated_importance_sampling_ratio
+
+  if (
+      sampler_is is not None
+      or sampler_rs is not None
+      or args.seq_logprob_error_threshold is not None
+  ) and not args.use_rollout_logps:
+    logging.info(
+        "Auto-enabling use_rollout_logps=True because sampler IS/RS or "
+        "seq_logprob_error_threshold is configured (sampler_is=%s, "
+        "sampler_rs=%s, seq_logprob_error_threshold=%s).",
+        sampler_is,
+        sampler_rs,
+        args.seq_logprob_error_threshold,
+    )
+    args.use_rollout_logps = True
+
   algo_config = algorithm_config.GRPOConfig(
       num_generations=args.num_generations,
       epsilon=args.epsilon,
+      epsilon_high=args.epsilon_high,
       beta=args.beta,
+      loss_agg_mode=args.loss_agg_mode,
+      advantage_estimator=args.advantage_estimator,
       use_rollout_logps=args.use_rollout_logps,
+      exact_token_continuity=args.exact_token_continuity,
+      overlong_loss_masking=args.overlong_loss_masking,
+      sampler_is=sampler_is,
+      sampler_is_threshold=sampler_is_threshold,
+      sampler_rs=sampler_rs,
+      sampler_rs_min=sampler_rs_min,
+      sampler_rs_max=sampler_rs_max,
+      seq_logprob_error_threshold=args.seq_logprob_error_threshold,
   )
   return algorithm_adapter.GRPOAdapter(
       algo_config=algo_config,
@@ -412,16 +643,24 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       )
   )
 
+  if args.image_rewrite_prefix:
+    os.environ["IMAGE_REWRITE_PREFIX"] = args.image_rewrite_prefix
+  if args.disable_weight_sync_timeouts:
+    os.environ["WEIGHT_SYNC_DISABLE_TIMEOUTS"] = "1"
+
   cluster.wait_for_workers(
       min_workers={
           datatypes.Role.ACTOR: 1,
-          datatypes.Role.ROLLOUT: 1,
+          datatypes.Role.ROLLOUT: max(1, int(args.rollout_replicas)),
           datatypes.Role.REFERENCE: 1 if args.beta != 0.0 else 0,
       },
       timeout=args.init_timeout_s,
       poll_interval_s=1.0,
   )
   logging.info("Registered workers: %s", cluster.worker_infos())
+
+  from examples.deepswe import sandbox_utils  # pylint: disable=g-import-not-at-top
+  from examples.deepswe import swe_env  # pylint: disable=g-import-not-at-top
 
   algo = _build_algo(args)
   trainer_handles = cluster.worker_handles(datatypes.Role.ACTOR)
@@ -436,72 +675,105 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       backend_kwargs={"wandb": {"config": vars(args)}},
   )
 
-  program = rl_program.StandardRLProgram(
-      algo=algo,
-      dataset=deepswe.iter_prompt_items(
-          dataset=dataset,
-          max_steps=args.max_steps,
-          batch_size=args.batch_size,
-          max_turns=args.max_turns,
-          max_response_length=args.max_response_length,
-          temperature=args.temperature,
-          top_p=args.top_p,
-          top_k=0 if args.top_k < 0 else args.top_k,
-          step_timeout_secs=args.step_timeout_secs,
-          reward_timeout_secs=args.reward_timeout_secs,
-          env_backend=args.env_backend,
-          use_agent_sandbox=args.use_agent_sandbox,
-          scaffold=args.scaffold,
-          env_verbose=args.env_verbose,
-          overlong_filter=args.overlong_filter,
-          max_staleness=args.max_staleness,
-      ),
-      max_steps=args.max_steps,
-      reward_fns=[],
-      generation_args=datatypes.GenerationArgs(
-          temperature=args.temperature,
-          top_p=args.top_p,
-          top_k=0 if args.top_k < 0 else args.top_k,
-          return_logprobs=args.use_rollout_logps,
-      ),
-      batch_size=args.batch_size,
-      batch_config=batch_assembly.BatchConfig(
-          pad_id=pad_id,
-          max_prompt_length=args.max_prompt_length,
-          max_response_length=args.max_response_length,
-          max_seq_token_per_tpu=args.max_seq_token_per_tpu,
-          max_segments_per_packed_row=args.max_segments_per_packed_row,
-          segment_alignment_boundary=args.segment_alignment_boundary,
-          trainer_fsdp=args.trainer_fsdp,
-          trainer_dp=args.trainer_dp,
-      ),
-      metrics_logging_options=metrics_logging_options,
-      trajectory_log_dir=args.trajectory_log_dir,
-      trajectory_store=cluster.trajectory_store,
-      max_staleness=args.max_staleness,
-      group_order=args.trajectory_group_order,
-      sync_weights=(args.weight_sync_mode != weight_sync.WeightSyncMode.NONE),
-      on_step_begin=lambda step: logging.info(
-          ">>> DeepSWE step %d starting | policy_version=%d",
-          step,
-          step,
-      ),
-      on_step_end=lambda step, result: logging.info(
-          "<<< DeepSWE step %d finished | train_result=%s",
-          step,
-          result,
-      ),
-  )
-  _configure_trainer_loss(
-      trainer_handles[0],
-      algo=algo,
-      pad_id=pad_id,
-      eos_id=eos_id,
-  )
-
+  fleet = None
+  prompt_stream = None
+  program = None
   try:
     logging.info("Bringing up remote workers through ClusterOrchestrator...")
     cluster.bring_up_workers(dummy_data=None)
+
+    if args.use_agent_sandbox:
+      fleet = sandbox_utils.init_global_fleet(
+          tasks=dataset,
+          max_concurrency=args.max_concurrency,
+          num_generations=args.num_generations,
+          batch_size=args.batch_size,
+          max_warmpool_replicas=args.max_warmpool_replicas,
+          scaffold=args.scaffold,
+      )
+
+    raw_prompt_stream = deepswe.iter_prompt_items(
+        dataset=dataset,
+        max_steps=args.max_steps,
+        batch_size=args.batch_size,
+        max_turns=args.max_turns,
+        max_response_length=args.max_response_length,
+        temperature=args.temperature,
+        top_p=args.top_p,
+        top_k=0 if args.top_k < 0 else args.top_k,
+        step_timeout_secs=args.step_timeout_secs,
+        reward_timeout_secs=args.reward_timeout_secs,
+        env_backend=args.env_backend,
+        use_agent_sandbox=args.use_agent_sandbox,
+        scaffold=args.scaffold,
+        env_verbose=args.env_verbose,
+        episode_timeout_secs=args.episode_timeout_secs,
+        overlong_filter=args.overlong_filter,
+        exact_token_continuity=args.exact_token_continuity,
+        max_staleness=args.max_staleness,
+    )
+    if args.use_agent_sandbox:
+      prompt_stream = swe_env.PrewarmDatasetIterator(
+          raw_prompt_stream,
+          fleet=fleet,
+          num_generations=args.num_generations,
+          batch_size=args.batch_size,
+          max_warmpool_replicas=args.max_warmpool_replicas,
+          unwarm_on_exhaustion=True,
+          scaffold=args.scaffold,
+          wait_initial=True,
+          max_staleness=args.max_staleness,
+      )
+    else:
+      prompt_stream = raw_prompt_stream
+
+    program = rl_program.StandardRLProgram(
+        algo=algo,
+        dataset=prompt_stream,
+        max_steps=args.max_steps,
+        reward_fns=[],
+        generation_args=datatypes.GenerationArgs(
+            temperature=args.temperature,
+            top_p=args.top_p,
+            top_k=0 if args.top_k < 0 else args.top_k,
+            return_logprobs=args.use_rollout_logps,
+        ),
+        batch_size=args.batch_size,
+        batch_config=batch_assembly.BatchConfig(
+            pad_id=pad_id,
+            max_prompt_length=args.max_prompt_length,
+            max_response_length=args.max_response_length,
+            max_seq_token_per_tpu=args.max_seq_token_per_tpu,
+            max_segments_per_packed_row=args.max_segments_per_packed_row,
+            segment_alignment_boundary=args.segment_alignment_boundary,
+            trainer_fsdp=args.trainer_fsdp,
+            trainer_dp=args.trainer_dp,
+            trainer_expert=args.trainer_expert,
+        ),
+        metrics_logging_options=metrics_logging_options,
+        trajectory_log_dir=args.trajectory_log_dir,
+        trajectory_store=cluster.trajectory_store,
+        max_staleness=args.max_staleness,
+        group_order=args.trajectory_group_order,
+        sync_weights=(args.weight_sync_mode != weight_sync.WeightSyncMode.NONE),
+        on_step_begin=lambda step: logging.info(
+            ">>> DeepSWE step %d starting | policy_version=%d",
+            step,
+            step,
+        ),
+        on_step_end=lambda step, result: logging.info(
+            "<<< DeepSWE step %d finished | train_result=%s",
+            step,
+            result,
+        ),
+    )
+    _configure_trainer_loss(
+        trainer_handles[0],
+        algo=algo,
+        pad_id=pad_id,
+        eos_id=eos_id,
+    )
+
     logging.info("Starting DeepSWE StandardRLProgram execution...")
     cluster.run(
         program=program,
@@ -509,10 +781,54 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         bring_up=False,
     )
   finally:
-    program.close()
+    if program is not None:
+      program.close()
+    if prompt_stream is not None and hasattr(prompt_stream, "close"):
+      logging.info("Closing prompt_stream (unwarming active warmpools)...")
+      try:
+        prompt_stream.close()
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        logging.warning("Prompt stream close note: %s", e)
+    if fleet is not None:
+      logging.info("Tearing down SandboxFleet on orchestrator...")
+      try:
+        fleet.teardown()
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        logging.warning("Fleet teardown note: %s", e)
+      try:
+        from agent_sandbox_rl import reap  # pylint: disable=g-import-not-at-top
+
+        run_id = getattr(fleet, "run_id", None)
+        if run_id:
+          for c in getattr(fleet, "registry", []):
+            c_ns = (
+                getattr(c, "namespace", None)
+                or os.getenv("SANDBOX_NAMESPACE")
+                or os.getenv("NAMESPACE", "priority-dev")
+            )
+            logging.info(
+                "Reaping agent_sandbox_rl resources for run_id=%s in namespace=%s...",
+                run_id,
+                c_ns,
+            )
+            reap(
+                run_id=run_id,
+                in_cluster=getattr(c, "in_cluster", True),
+                namespace=c_ns,
+                delete_pods=False,
+            )
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        logging.warning("Reaper note: %s", e)
+    try:
+      sandbox_utils.teardown_global_fleet()
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      logging.warning("Global fleet teardown note: %s", e)
     if args.stop_workers_on_exit:
-      logging.info("Shutting down cluster workers...")
-      cluster.shutdown()
+      orch_k8s_cleanup.shutdown_cluster_and_workers(
+          cluster,
+          orchestrator_id=os.environ.get("ORCHESTRATOR_ID"),
+          delete_jobsets=args.delete_worker_jobsets_on_exit,
+      )
     else:
       cluster.monitor.close()
       if cluster.trajectory_store is not None:

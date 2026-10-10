@@ -104,6 +104,23 @@ def _routed_experts_for(
   return routed_arr[:seq_len]
 
 
+_OVERLONG_TRAJECTORY_STATUS_NAMES = frozenset({
+    "MAX_CONTEXT_LIMIT_REACHED",
+    "MAX_STEPS_REACHED",
+})
+
+
+def _is_overlong_trajectory(item: datatypes.TrajectoryItem) -> bool:
+  """Returns True when a trajectory hit the response-token or turn budget."""
+  if not isinstance(item.traj, dict):
+    return False
+  status = item.traj.get("status")
+  if status is None:
+    return False
+  name = getattr(status, "name", None) or str(status)
+  return name.upper() in _OVERLONG_TRAJECTORY_STATUS_NAMES
+
+
 def _extract_old_logps(
     item: datatypes.TrajectoryItem, completion_len: int
 ) -> np.ndarray | None:
@@ -292,13 +309,17 @@ class GRPOAdapter(AlgorithmAdapter):
           ref_logps[i] if ref_logps is not None and i < len(ref_logps) else None
       )
 
-      if not valid_mask[i]:
+      if not valid_mask[i] or (
+          getattr(self.algo_config, "overlong_loss_masking", False)
+          and _is_overlong_trajectory(item)
+      ):
         # While collector-filtered rollouts (`overlong_filter=True`) already
         # arrive with zeroed `conversation_masks`, a degenerate group (`< 2`
         # valid peers) also clears `valid_mask` for its lone healthy survivor.
-        # Zeroing `act_arr` here keeps the static `[G]` batch dimension for
-        # `BatchAssembler` while preventing that survivor's tokens from
-        # inflating the `token-mean` loss denominator or contributing KL loss.
+        # With `overlong_loss_masking=True`, overlong trajectories remain valid
+        # for advantage computation above (`valid_mask[i]=True`, `reward=0.0`),
+        # and have `act_arr` zeroed here so they do not contribute to the policy
+        # loss numerator or the `token-mean` loss denominator.
         act_arr = np.zeros_like(act_arr)
 
       seq_len = len(p_arr) + len(c_arr)

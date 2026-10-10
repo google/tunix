@@ -202,6 +202,8 @@ class BatchConfig:
   segment_alignment_boundary: int = packing.DEFAULT_SEGMENT_ALIGNMENT_BOUNDARY
   trainer_fsdp: int | None = None
   trainer_dp: int | None = None
+  trainer_expert: int | None = None
+  trainer_fsdp_transpose: int | None = None
 
 
 def _extract_trajectory_id(item: Any) -> str:
@@ -1347,16 +1349,24 @@ def create_batch_assembler(
     A BatchAssembler instance.
   """
   if batch_config.max_seq_token_per_tpu is not None:
-    if batch_config.trainer_fsdp is None and batch_config.trainer_dp is None:
+    if (
+        batch_config.trainer_fsdp is None
+        and batch_config.trainer_dp is None
+        and batch_config.trainer_expert is None
+        and batch_config.trainer_fsdp_transpose is None
+    ):
       logging.warning(
-          "trainer_fsdp and trainer_dp are not set, defaulting pack_size to "
+          "no trainer mesh dimensions are set, defaulting pack_size to "
           "train_micro_batch_size=%d.",
           train_micro_batch_size,
       )
       pack_size = train_micro_batch_size
     else:
-      pack_size = (batch_config.trainer_fsdp or 1) * (
-          batch_config.trainer_dp or 1
+      pack_size = (
+          (batch_config.trainer_fsdp or 1)
+          * (batch_config.trainer_dp or 1)
+          * (batch_config.trainer_fsdp_transpose or 1)
+          * (batch_config.trainer_expert or 1)
       )
 
     if (

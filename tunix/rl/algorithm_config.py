@@ -69,6 +69,11 @@ class AlgorithmConfig:
   # Whether to preserve exact token IDs across multi-turn rollout steps
   # without detokenizing and re-tokenizing intermediate turns (TITO).
   exact_token_continuity: bool = True
+  # Whether to zero out completion_mask on overlong trajectories
+  # (MAX_CONTEXT_LIMIT_REACHED or MAX_STEPS_REACHED) after computing group
+  # advantages so they contribute to the advantage baseline (reward=0.0)
+  # without contributing to the policy loss numerator or denominator.
+  overlong_loss_masking: bool = False
   # Optional importance-sampling and rejection-sampling controls between the
   # rollout sampler and trainer actor.
   sampler_is: str | None = None

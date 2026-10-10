@@ -115,7 +115,6 @@ class TrajectoryStatus(Enum):
 
 INVALID_TRAJECTORY_STATUSES: frozenset[TrajectoryStatus] = frozenset({
     TrajectoryStatus.FAILED,
-    TrajectoryStatus.TIMEOUT,
     TrajectoryStatus.ENV_TIMEOUT,
     TrajectoryStatus.CANCELLED,
 })

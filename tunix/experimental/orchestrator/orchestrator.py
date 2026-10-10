@@ -283,6 +283,12 @@ class ClusterOrchestrator:
     """Returns handles for all workers (remote and local) registered under the given role."""
     return self._get_actor_handles(role)
 
+  def remote_worker_handles(
+      self,
+  ) -> dict[str, remote_execution.ActorHandle]:
+    """Returns a copy of worker_id -> ActorHandle for all registered remote workers."""
+    return dict(self._remote_worker_handles_by_id)
+
   def bring_up_workers(self, dummy_data: Any = None) -> None:
     """Brings up all registered workers through lifecycle initialization."""
     logging.info(
