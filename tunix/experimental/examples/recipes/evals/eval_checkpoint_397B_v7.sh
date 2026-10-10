@@ -133,6 +133,7 @@ fi
 if [[ "${POD:-pod2}" == "pod2" || "${POD:-}" == "2" || "${POD:-}" == "elm" || "${REGION:-}" == us-east1* ]]; then
   export IMAGE_REWRITE_PREFIX="${IMAGE_REWRITE_PREFIX:-us-east1-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/}"
 fi
+export OPENHANDS_SERVER_IMAGE="${OPENHANDS_SERVER_IMAGE:-${IMAGE_REWRITE_PREFIX:-us-east1-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/}openhands-agent-server:0.62-chardet}"
 
 # ==============================================================================
 # 512 TPU v7x Chip Defaults (32 replicas x 16 chips tpu7x:2x2x4 = 512 chips)

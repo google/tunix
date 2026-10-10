@@ -156,5 +156,6 @@ export DEBUG=${DEBUG:-0}
 export SANDBOX_NODE_SELECTOR_VAL="${SANDBOX_NODE_SELECTOR_VAL:-sandbox-c3d-np}"
 export SANDBOX_TOLERATIONS='[{"key":"workload","operator":"Equal","value":"sandbox","effect":"NoSchedule"}]'
 export IMAGE_REWRITE_PREFIX="${IMAGE_REWRITE_PREFIX:-us-east1-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/}"
+export OPENHANDS_SERVER_IMAGE="${OPENHANDS_SERVER_IMAGE:-us-east1-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/openhands-agent-server:0.62-chardet}"
 
 source "${DIR}/mlperf_base.sh" "$@"

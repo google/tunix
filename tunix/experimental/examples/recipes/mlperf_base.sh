@@ -343,6 +343,7 @@ export SCAFFOLD="openhands"
 # counting as one of MAX_TURNS; tunix runs only the first unless this is true
 # (training_rules.adoc R:685 "behaviorally equivalent" parser).
 export OPENHANDS_MULTI_TOOL_CALLS="${OPENHANDS_MULTI_TOOL_CALLS:-false}"
+export OPENHANDS_SERVER_IMAGE="${OPENHANDS_SERVER_IMAGE:-${IMAGE_REWRITE_PREFIX:-gcr.io/cloud-tpu-multipod-dev/tunix/}openhands-agent-server:0.62-chardet}"
 export SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-${K8S_NAMESPACE:-trellis}}"
 export POOL_NAME_FORMAT="${POOL_NAME_FORMAT:-}"
 export TEMPLATE_NAME_PREFIX="${TEMPLATE_NAME_PREFIX:-}"

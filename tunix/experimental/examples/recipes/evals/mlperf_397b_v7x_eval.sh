@@ -40,6 +40,7 @@ export REWARD_TIMEOUT_SECS=60
 export MAX_WARMPOOL_REPLICAS="${MAX_WARMPOOL_REPLICAS:-64}"
 export MAX_CONCURRENCY="${MAX_CONCURRENCY:-$(( 32 * ROLLOUT_REPLICAS ))}"
 export IMAGE_REWRITE_PREFIX="${IMAGE_REWRITE_PREFIX:-${REGION:-us-east1}-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/}"
+export OPENHANDS_SERVER_IMAGE="${OPENHANDS_SERVER_IMAGE:-${REGION:-us-east1}-docker.pkg.dev/cloud-tpu-multipod-dev/tunix/openhands-agent-server:0.62-chardet}"
 export ENABLE_THINKING="${ENABLE_THINKING:-false}"
 
 _eval_no_launch="${MLPERF_NO_LAUNCH:-0}"

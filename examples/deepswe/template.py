@@ -1190,19 +1190,24 @@ DEFAULT_OPENHANDS_KEEPALIVE_CMD = [
     (
         "chmod +x /oh/openhands-agent-server 2>/dev/null || true; if [ -d"
         ' /testbed/.venv/bin ]; then export PATH="/testbed/.venv/bin:${PATH}";'
-        " fi; ([ -d /testbed ] && [ ! -e /workspace ] && ln -s /testbed"
-        " /workspace 2>/dev/null || true); ([ -d /workspace ] && [ ! -e"
-        " /testbed ] && ln -s /workspace /testbed 2>/dev/null || true); git"
-        " config --global --add safe.directory '*' 2>/dev/null || true; cd /;"
-        " if [ -x /oh/openhands-agent-server ]; then exec"
-        " /oh/openhands-agent-server --host 0.0.0.0 --port 8000; elif [ -x"
-        " /usr/local/bin/openhands-agent-server ]; then [ -d /testbed ] && cd"
-        " /testbed; exec tini --"
-        " /usr/local/bin/openhands-agent-server --host 0.0.0.0 --port 8000;"
-        " elif [ -x /openhands/poetry/openhands-ai-5O4_aCHf-py3.12/bin/agent-server ]; then"
-        " [ -d /testbed ] && cd /testbed; exec"
-        " /openhands/poetry/openhands-ai-5O4_aCHf-py3.12/bin/agent-server --host 0.0.0.0 --port 8000;"
-        " fi"
+        " fi; if [ -d /oh/pkgs ]; then for sp in"
+        " /testbed/.venv/lib/python*/site-packages"
+        " /root/.venv/lib/python*/site-packages"
+        " /usr/local/lib/python*/site-packages; do if [ -d \"$sp\" ] && [ ! -d"
+        " \"$sp/chardet\" ]; then cp -a /oh/pkgs/. \"$sp/\""
+        " 2>/dev/null || true; fi; done; fi; ([ -d /testbed ] && [ ! -e"
+        " /workspace ] && ln -s /testbed /workspace 2>/dev/null || true); (["
+        " -d /workspace ] && [ ! -e /testbed ] && ln -s /workspace /testbed"
+        " 2>/dev/null || true); git config --global --add safe.directory '*'"
+        " 2>/dev/null || true; cd /; if [ -x /oh/openhands-agent-server ];"
+        " then exec /oh/openhands-agent-server --host 0.0.0.0 --port 8000; elif"
+        " [ -x /usr/local/bin/openhands-agent-server ]; then [ -d /testbed ] &&"
+        " cd /testbed; exec tini -- /usr/local/bin/openhands-agent-server --host"
+        " 0.0.0.0 --port 8000; elif [ -x"
+        " /openhands/poetry/openhands-ai-5O4_aCHf-py3.12/bin/agent-server ];"
+        " then [ -d /testbed ] && cd /testbed; exec"
+        " /openhands/poetry/openhands-ai-5O4_aCHf-py3.12/bin/agent-server --host"
+        " 0.0.0.0 --port 8000; fi"
     ),
 ]
 
@@ -1240,7 +1245,7 @@ def get_openhands_pod_template(
       os.getenv("OPENHANDS_SERVER_IMAGE")
       or os.getenv("SANDBOX_RUNTIME_CONTAINER_IMAGE")
       or os.getenv("AGENT_SERVER_IMAGE")
-      or "gcr.io/cloud-tpu-multipod-dev/tunix/openhands-agent-server:0.62"
+      or "gcr.io/cloud-tpu-multipod-dev/tunix/openhands-agent-server:0.62-chardet"
   )
 
   extra_pod_spec = {
