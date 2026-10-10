@@ -263,6 +263,9 @@ export MAX_STALENESS=${MAX_STALENESS:-1}
 # prompt batch first (vLLM priority scheduling, priority = batch index) instead
 # of in arrival order (FCFS, the default).
 export ROLLOUT_PRIORITY_SCHEDULING=${ROLLOUT_PRIORITY_SCHEDULING:-false}
+# `false` skips the start-up warm-pool readiness barrier; rollouts wait per
+# trajectory in fleet.acquire instead (default true = current behaviour).
+export SANDBOX_WAIT_INITIAL=${SANDBOX_WAIT_INITIAL:-true}
 # Overlap each step's weight sync with the next step's training. Safe only
 # while the trainer transfers from host staging, since the next step rewrites
 # the device buffers mid-transfer.

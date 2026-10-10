@@ -301,6 +301,18 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " --priority_scheduling; off, requests are served in arrival order."
       ),
   )
+  parser.add_argument(
+      "--sandbox_wait_initial",
+      action=argparse.BooleanOptionalAction,
+      default=True,
+      help=(
+          "Block the first dispatch until the warm pools of start-up batches"
+          " 0..max_staleness report Ready (PrewarmDatasetIterator readiness"
+          " barrier). --no-sandbox_wait_initial creates the pools and dispatches"
+          " immediately; each trajectory then waits for its own sandbox inside"
+          " fleet.acquire (FT_SANDBOX_READY_TIMEOUT_S x FT_SANDBOX_ACQUIRE_RETRIES)."
+      ),
+  )
   # ---- Optional GRPO algorithm options -------------------------------------
   # All default to off, so omitting them reproduces the previous behaviour.
   parser.add_argument(
@@ -1036,7 +1048,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
             max_warmpool_replicas=args.max_warmpool_replicas,
             unwarm_on_exhaustion=True,
             scaffold=args.scaffold,
-            wait_initial=True,
+            wait_initial=args.sandbox_wait_initial,
             max_staleness=args.max_staleness,
         )
       else:
