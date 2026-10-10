@@ -1013,7 +1013,7 @@ class RemoteExecutionPerfTest(absltest.TestCase):
           )
           self.assertIsNotNone(trainer_handle._bulk_port)
           self.assertGreater(trainer_handle._bulk_port, 0)
-          self.assertNotEmpty(trainer_handle._seen_bulk_ports)
+          self.assertNotEmpty(trainer_handle._seen_bulk_targets)
           self.assertEqual(warm_summary["total_nbytes"], expected_single_nbytes)
           self.assertEqual(warm_summary["meta_nbytes"], expected_meta_nbytes)
           self.assertEqual(warm_summary["meta_sum"], expected_meta_sum)
@@ -1150,7 +1150,7 @@ class RemoteExecutionPerfTest(absltest.TestCase):
               *[_dispatch_and_poll(i, h) for i, h in enumerate(rollout_handles)]
           )
           for i, h in enumerate(rollout_handles):
-            self.assertNotEmpty(h._seen_bulk_ports)
+            self.assertNotEmpty(h._seen_bulk_targets)
             arr_w = warm_b[i]["payload"]["routed_experts"]
             self.assertEqual(int(arr_w.nbytes), expected_worker_nbytes)
             self.assertEqual(
@@ -1444,4 +1444,3 @@ def _run_isolated_worker_server(port: int, payload_bytes: int) -> None:
 
 if __name__ == "__main__":
   absltest.main()
-

@@ -39,7 +39,6 @@ import contextlib
 import hashlib
 import inspect
 import pickle
-import struct
 import threading
 import time
 import traceback as traceback_lib
@@ -308,8 +307,8 @@ class ExecutionResponse:
       chunks: AsyncIterable[bytes],
       *,
       allow_empty: bool = False,
-      bulk_host: str = "localhost",
-      seen_bulk_ports: Optional[Set[int]] = None,
+      bulk_hosts: Sequence[str] = ("localhost",),
+      seen_bulk_targets: Optional[Set[Tuple[str, int]]] = None,
   ) -> Optional["ExecutionResponse"]:
     """Deserializes an ExecutionResponse from an async stream of chunks.
 
@@ -322,8 +321,8 @@ class ExecutionResponse:
     unpacked = await network._deserialize_from_async_chunks(  # pylint: disable=protected-access
         chunks,
         allow_empty=allow_empty,
-        bulk_host=bulk_host,
-        seen_bulk_ports=seen_bulk_ports,
+        bulk_hosts=bulk_hosts,
+        seen_bulk_targets=seen_bulk_targets,
     )
     return None if unpacked is None else cls(*unpacked)
 
@@ -504,8 +503,33 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
       max_message_bytes: int = network._MAX_MESSAGE_BYTES,  # pylint: disable=protected-access
       enable_bulk_transport: bool = True,
       bulk_port: int = 0,
+      bulk_hosts: Optional[Sequence[str]] = None,
   ):
-    network._validate_stream_config(stream_chunk_bytes, max_message_bytes)  # pylint: disable=protected-access
+    """Initializes the gRPC remote execution server.
+
+    Args:
+      instance: Optional bound worker object exposing methods to execute.
+      stream_chunk_bytes: Slice size per frame on fallback gRPC streaming calls.
+      max_message_bytes: Maximum allowed size of a single gRPC message frame.
+      enable_bulk_transport: Whether to start an out-of-band zero-copy bulk TCP
+        server for payloads >= 512 KiB.
+      bulk_port: TCP port for the bulk transfer server (`0` selects an OS
+        ephemeral port).
+      bulk_hosts: Optional sequence of bare hostnames or IPv4/IPv6 literals on
+        this machine to advertise via `GetBulkPort` for multi-NIC TCP striping.
+        All entries must route to this server instance. Cannot be specified when
+        `enable_bulk_transport=False`.
+    """
+    if not enable_bulk_transport and bulk_hosts is not None:
+      raise ValueError(
+          "bulk_hosts cannot be specified when enable_bulk_transport=False."
+      )
+    # pylint: disable=protected-access
+    network._validate_stream_config(stream_chunk_bytes, max_message_bytes)
+    self._bulk_hosts: Tuple[str, ...] = network._validate_bulk_hosts(
+        bulk_hosts, allow_empty=bulk_hosts is None
+    )
+    # pylint: enable=protected-access
     super().__init__(instance)
     self._server: Optional[Any] = None
     self._serve_loop: Optional[Any] = None
@@ -518,14 +542,14 @@ class GrpcRemoteExecutionServer(RemoteExecutionServer):
   async def _handle_get_bulk_port(
       self, request_bytes: bytes, context: Any
   ) -> bytes:
-    """Returns the TCP port of the out-of-band bulk transfer server."""
+    """Returns the TCP port and optional `bulk_hosts` of the bulk server."""
     del request_bytes, context
     bulk_port = (
         self._bulk_server.port
         if (self._enable_bulk_transport and self._bulk_server is not None)
         else 0
     )
-    return struct.pack("<Q", bulk_port)
+    return network._encode_bulk_port_response(bulk_port, self._bulk_hosts)  # pylint: disable=protected-access
 
   async def _abort_failed_precondition(
       self, context: Any, exc: Exception
@@ -717,8 +741,28 @@ class ActorHandle(abc.ABC):
       stream_chunk_bytes: int = network._STREAM_CHUNK_BYTES,  # pylint: disable=protected-access
       max_message_bytes: int = network._MAX_MESSAGE_BYTES,  # pylint: disable=protected-access
       enable_bulk_transport: bool = True,
+      bulk_hosts: Optional[Sequence[str]] = None,
   ) -> "ActorHandle":
-    """Instantiates a remote actor handle targeting the specified string URI."""
+    """Instantiates a remote actor handle targeting the specified string URI.
+
+    Args:
+      target_address: Target worker URI (e.g. `grpc://10.0.0.1:50051`).
+      rpc_timeout_s: Per-RPC deadline in seconds, or `None` for no timeout.
+      stream_chunk_bytes: Slice size per frame on fallback gRPC streaming calls.
+      max_message_bytes: Maximum allowed size of a single gRPC message frame.
+      enable_bulk_transport: Whether to use out-of-band zero-copy bulk TCP
+        sockets for payloads >= 512 KiB.
+      bulk_hosts: Optional sequence of bare hostnames or IPv4/IPv6 literals on
+        the target worker for multi-NIC bulk TCP striping. When provided, takes
+        precedence over server-advertised `bulk_hosts` and the host extracted
+        from `target_address`. All entries must route to the same remote server
+        instance. Reachable hosts discovered during the initial TCP probe are
+        cached until the bulk port is invalidated. Cannot be specified when
+        `enable_bulk_transport=False`.
+
+    Returns:
+      An `ActorHandle` instance targeting `target_address`.
+    """
     if target_address.startswith("grpc://") and _GRPC_AVAILABLE:
       return GrpcRemoteActorHandle(
           target_address=target_address,
@@ -726,6 +770,7 @@ class ActorHandle(abc.ABC):
           stream_chunk_bytes=stream_chunk_bytes,
           max_message_bytes=max_message_bytes,
           enable_bulk_transport=enable_bulk_transport,
+          bulk_hosts=bulk_hosts,
       )
     return RemoteActorHandle(target_address=target_address)
 
@@ -812,11 +857,38 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
       stream_chunk_bytes: int = network._STREAM_CHUNK_BYTES,  # pylint: disable=protected-access
       max_message_bytes: int = network._MAX_MESSAGE_BYTES,  # pylint: disable=protected-access
       enable_bulk_transport: bool = True,
+      bulk_hosts: Optional[Sequence[str]] = None,
   ):
+    """Initializes a gRPC actor handle targeting `target_address`.
+
+    Args:
+      target_address: Target worker URI (e.g. `grpc://10.0.0.1:50051`).
+      rpc_timeout_s: Per-RPC deadline in seconds, or `None` for no timeout.
+      stream_chunk_bytes: Slice size per frame on fallback gRPC streaming calls.
+      max_message_bytes: Maximum allowed size of a single gRPC message frame.
+      enable_bulk_transport: Whether to use out-of-band zero-copy bulk TCP
+        sockets for payloads >= 512 KiB.
+      bulk_hosts: Optional sequence of bare hostnames or IPv4/IPv6 literals on
+        the target worker for multi-NIC bulk TCP striping. Overrides
+        server-advertised `bulk_hosts` and the host extracted from
+        `target_address`. All entries must route to the same remote server
+        instance. Cannot be specified when `enable_bulk_transport=False`.
+
+    Raises:
+      RuntimeError: If `grpc` is not installed or available.
+      ValueError: If streaming or `bulk_hosts` configuration is invalid.
+    """
     if not _GRPC_AVAILABLE or _grpc_aio_lib is None:
       raise RuntimeError("grpc is not installed or available.")
+    if not enable_bulk_transport and bulk_hosts is not None:
+      raise ValueError(
+          "bulk_hosts cannot be specified when enable_bulk_transport=False."
+      )
     # pylint: disable=protected-access
     network._validate_stream_config(stream_chunk_bytes, max_message_bytes)
+    self._configured_bulk_hosts: Tuple[str, ...] = network._validate_bulk_hosts(
+        bulk_hosts, allow_empty=bulk_hosts is None
+    )
     self.target_address = target_address
     self._host_port = target_address.removeprefix("grpc://")
     self._enable_bulk_transport = enable_bulk_transport
@@ -824,20 +896,26 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
       try:
         self._bulk_host, _ = network._extract_host_and_port(target_address)
       except ValueError as exc:
-        raise ValueError(
-            "Bulk TCP transport requires a direct host[:port] target address "
-            f"(got {target_address!r}); pass enable_bulk_transport=False to "
-            "use non-host[:port] gRPC target schemes."
-        ) from exc
+        if not self._configured_bulk_hosts:
+          raise ValueError(
+              "Bulk TCP transport requires a direct host[:port] target address "
+              f"(got {target_address!r}); pass enable_bulk_transport=False to "
+              "use non-host[:port] gRPC target schemes."
+          ) from exc
+        self._bulk_host = self._configured_bulk_hosts[0]
+      self._active_bulk_hosts: Tuple[str, ...] = (
+          self._configured_bulk_hosts or (self._bulk_host,)
+      )
     else:
       self._bulk_host = ""
+      self._active_bulk_hosts = ()
     # pylint: enable=protected-access
     self._bulk_port: Optional[int] = None
     self._bulk_probe_failed_until: float = 0.0
     self._bulk_fallback_logged: bool = False
     self._resolve_task: Optional[asyncio.Task[int]] = None
     self._bulk_port_gen: int = 0
-    self._seen_bulk_ports: Set[int] = set()
+    self._seen_bulk_targets: Set[Tuple[str, int]] = set()
     self._channel: Optional[Any] = None
     self._channel_loop: Optional[asyncio.AbstractEventLoop] = None
     self._rpc: Optional[Any] = None
@@ -895,43 +973,92 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
       logging.debug(msg, *args)
 
   def _invalidate_bulk_port(self) -> None:
-    """Evicts cached bulk port and closes any pooled sockets to it."""
+    """Evicts cached bulk port and closes pooled sockets to bulk targets."""
     self._bulk_port_gen += 1
     self._resolve_task = None
-    ports = set(self._seen_bulk_ports)
+    targets = set(self._seen_bulk_targets)
     if self._bulk_port is not None and self._bulk_port > 0:
-      ports.add(self._bulk_port)
+      for host in self._active_bulk_hosts:
+        targets.add((host, self._bulk_port))
     self._bulk_port = None
     self._bulk_probe_failed_until = 0.0
-    for port in ports:
-      network._DEFAULT_BULK_SOCKET_POOL.close_target(self._bulk_host, port)  # pylint: disable=protected-access
+    self._active_bulk_hosts = (
+        (self._configured_bulk_hosts or (self._bulk_host,))
+        if self._enable_bulk_transport
+        else ()
+    )
+    for host, port in targets:
+      network._DEFAULT_BULK_SOCKET_POOL.close_target(host, port)  # pylint: disable=protected-access
 
-  async def _probe_and_cache_bulk_port(self, port: int, gen: int) -> int:
-    """Probes TCP connectivity asynchronously without occupying executor threads."""
+  async def _probe_and_cache_bulk_port(
+      self,
+      port: int,
+      gen: int,
+      advertised_hosts: Sequence[str] = (),
+  ) -> int:
+    """Probes TCP connectivity across candidate NIC hosts concurrently."""
     if port <= 0:
       if self._bulk_port_gen == gen:
         self._bulk_port = 0
         self._bulk_probe_failed_until = float("inf")
       return 0
+    candidate_hosts: Tuple[str, ...] = (
+        self._configured_bulk_hosts
+        or tuple(advertised_hosts)
+        or (self._bulk_host,)
+    )
     # pylint: disable=protected-access
-    try:
-      await network._DEFAULT_BULK_SOCKET_POOL.probe_async(self._bulk_host, port)
-    except OSError as exc:
+    results = await asyncio.gather(
+        *(
+            network._DEFAULT_BULK_SOCKET_POOL.probe_async(host, port)
+            for host in candidate_hosts
+        ),
+        return_exceptions=True,
+    )
+    # pylint: enable=protected-access
+    for res in results:
+      if isinstance(res, BaseException) and not isinstance(res, Exception):
+        raise res
+    reachable_hosts: List[str] = []
+    failed_hosts: List[Tuple[str, BaseException]] = []
+    for host, res in zip(candidate_hosts, results):
+      if isinstance(res, BaseException):
+        failed_hosts.append((host, res))
+      else:
+        reachable_hosts.append(host)
+    if not reachable_hosts:
       if self._bulk_port_gen == gen:
+        failures_str = ", ".join(
+            f"{f'[{host}]:{port}' if ':' in host else f'{host}:{port}'} ({exc})"
+            for host, exc in failed_hosts
+        )
         self._record_bulk_fallback(
-            "Bulk TCP probe to %s:%d failed (%s); falling back to gRPC"
-            " chunks.",
-            self._bulk_host,
-            port,
-            exc,
+            "Bulk TCP probe failed across all candidate NICs [%s]; falling"
+            " back to gRPC chunks.",
+            failures_str,
         )
       return 0
-    # pylint: enable=protected-access
     if self._bulk_port_gen != gen:
       return 0
+    if failed_hosts:
+      for failed_host, failed_exc in failed_hosts:
+        target_str = (
+            f"[{failed_host}]:{port}"
+            if ":" in failed_host
+            else f"{failed_host}:{port}"
+        )
+        logging.warning(
+            "Bulk TCP probe to NIC host %s failed (%s); continuing with"
+            " reachable bulk_hosts=%s.",
+            target_str,
+            failed_exc,
+            tuple(reachable_hosts),
+        )
     self._bulk_port = port
+    self._active_bulk_hosts = tuple(reachable_hosts)
     self._bulk_probe_failed_until = 0.0
-    self._seen_bulk_ports.add(port)
+    for host in reachable_hosts:
+      self._seen_bulk_targets.add((host, port))
     return port
 
   async def _query_and_probe_bulk_port(
@@ -939,7 +1066,7 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
       get_bulk_port_rpc: Any,
       gen: int,
   ) -> int:
-    """Calls `GetBulkPort` and probes the returned TCP port."""
+    """Calls `GetBulkPort` and probes the returned TCP port across NIC hosts."""
     try:
       probe_rpc_timeout = (
           min(float(self._rpc_timeout_s), network._BULK_PROBE_TIMEOUT_S)  # pylint: disable=protected-access
@@ -947,16 +1074,22 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
           else network._BULK_PROBE_TIMEOUT_S  # pylint: disable=protected-access
       )
       resp_bytes = await get_bulk_port_rpc(b"", timeout=probe_rpc_timeout)
-      if len(resp_bytes) >= 8:
-        (port,) = struct.unpack("<Q", resp_bytes[:8])
-        return await self._probe_and_cache_bulk_port(int(port), gen)
-      if self._bulk_port_gen == gen:
-        self._record_bulk_fallback(
-            "Invalid GetBulkPort response from %s (%d bytes); falling back to"
-            " gRPC chunks.",
-            self._host_port,
-            len(resp_bytes),
+      try:
+        port, advertised_hosts = network._decode_bulk_port_response(  # pylint: disable=protected-access
+            resp_bytes
         )
+      except ValueError as exc:
+        if self._bulk_port_gen == gen:
+          self._record_bulk_fallback(
+              "Invalid GetBulkPort response from %s (%s); falling back to gRPC"
+              " chunks.",
+              self._host_port,
+              exc,
+          )
+        return 0
+      return await self._probe_and_cache_bulk_port(
+          port, gen, advertised_hosts=advertised_hosts
+      )
     except Exception as exc:  # pylint: disable=broad-exception-caught
       if self._bulk_port_gen == gen:
         if (
@@ -1048,9 +1181,10 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
           network._stream_bulk_push_chunks(
               views,
               raw_buffers,
-              self._bulk_host,
+              self._active_bulk_hosts,
               bulk_port,
               push_tracker=push_tracker,
+              seen_bulk_targets=self._seen_bulk_targets,
           ),
       )
     return (
@@ -1160,8 +1294,8 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
     try:
       response = await ExecutionResponse.deserialize_async_chunks(
           call,
-          bulk_host=self._bulk_host,
-          seen_bulk_ports=self._seen_bulk_ports,
+          bulk_hosts=self._active_bulk_hosts,
+          seen_bulk_targets=self._seen_bulk_targets,
       )
     except BaseException as exc:  # pylint: disable=broad-exception-caught
       self._handle_rpc_exception(exc, push_tracker)
@@ -1271,8 +1405,8 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
       return await ExecutionResponse.deserialize_async_chunks(
           call,
           allow_empty=True,
-          bulk_host=self._bulk_host,
-          seen_bulk_ports=self._seen_bulk_ports,
+          bulk_hosts=self._active_bulk_hosts,
+          seen_bulk_targets=self._seen_bulk_targets,
       )
     except network._BulkTransportError:  # pylint: disable=protected-access
       self._invalidate_bulk_port()
@@ -1285,7 +1419,7 @@ class GrpcRemoteActorHandle(RemoteActorHandle):
       if active_task is not None:
         active_task.cancel()
     self._invalidate_bulk_port()
-    self._seen_bulk_ports.clear()
+    self._seen_bulk_targets.clear()
     if self._channel is not None:
       await self._channel.close()
       self._channel = None

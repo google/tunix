@@ -17,6 +17,7 @@
 import asyncio
 import contextlib
 import socket
+import struct
 import threading
 import time
 from typing import Any, Optional
@@ -1861,7 +1862,7 @@ class RemoteExecutionTest(parameterized.TestCase):
         return [
             c
             async for c in network_lib._stream_bulk_push_chunks(
-                views, raw_buffers, host, port
+                views, raw_buffers, (host,), port
             )
         ]
 
@@ -1910,7 +1911,7 @@ class RemoteExecutionTest(parameterized.TestCase):
 
         restored_resp = (
             await remote_lib.ExecutionResponse.deserialize_async_chunks(
-                _pull_gen(), bulk_host="localhost"
+                _pull_gen(), bulk_hosts=("localhost",)
             )
         )
         assert restored_resp is not None
@@ -1950,7 +1951,7 @@ class RemoteExecutionTest(parameterized.TestCase):
           push_chunks = [
               c
               async for c in network_lib._stream_bulk_push_chunks(
-                  views, raw_buffers, "127.0.0.2", bulk_server.port
+                  views, raw_buffers, ("127.0.0.2",), bulk_server.port
               )
           ]
 
@@ -1971,7 +1972,7 @@ class RemoteExecutionTest(parameterized.TestCase):
 
           restored_resp = (
               await remote_lib.ExecutionResponse.deserialize_async_chunks(
-                  _pull_gen(), bulk_host="127.0.0.2"
+                  _pull_gen(), bulk_hosts=("127.0.0.2",)
               )
           )
           assert restored_resp is not None
@@ -2012,7 +2013,7 @@ class RemoteExecutionTest(parameterized.TestCase):
           push_chunks = [
               c
               async for c in network_lib._stream_bulk_push_chunks(
-                  views, raw_buffers, "localhost", bulk_server.port
+                  views, raw_buffers, ("localhost",), bulk_server.port
               )
           ]
 
@@ -2033,7 +2034,7 @@ class RemoteExecutionTest(parameterized.TestCase):
 
           restored_resp = (
               await remote_lib.ExecutionResponse.deserialize_async_chunks(
-                  _pull_gen(), bulk_host="localhost"
+                  _pull_gen(), bulk_hosts=("localhost",)
               )
           )
           assert restored_resp is not None
@@ -2126,7 +2127,7 @@ class RemoteExecutionTest(parameterized.TestCase):
           arr = np.arange(256 * 1024, dtype=np.int32)  # 1 MiB
           # 1. SubmitTask with stale _bulk_port
           handle._bulk_port = aux_port
-          handle._seen_bulk_ports.add(aux_port)
+          handle._seen_bulk_targets.add(("127.0.0.2", aux_port))
           with self.assertRaisesRegex(
               ConnectionError, "Bulk push manifest port mismatch"
           ):
@@ -2140,7 +2141,7 @@ class RemoteExecutionTest(parameterized.TestCase):
 
           # 2. DispatchTask with stale _bulk_port
           handle._bulk_port = aux_port
-          handle._seen_bulk_ports.add(aux_port)
+          handle._seen_bulk_targets.add(("127.0.0.2", aux_port))
           with self.assertRaisesRegex(
               ConnectionError, "Bulk push manifest port mismatch"
           ):
@@ -2205,9 +2206,9 @@ class RemoteExecutionTest(parameterized.TestCase):
           await slow_task
         release.set()
 
-        # _bulk_port, _seen_bulk_ports, and pooled sockets must remain intact.
+        # _bulk_port, _seen_bulk_targets, and pooled sockets must remain intact.
         self.assertEqual(handle._bulk_port, expected_bulk_port)
-        self.assertIn(expected_bulk_port, handle._seen_bulk_ports)
+        self.assertIn(pool_key, handle._seen_bulk_targets)
         self.assertNotEmpty(
             network_lib._DEFAULT_BULK_SOCKET_POOL._pools.get(pool_key, ())
         )
@@ -2420,7 +2421,9 @@ class RemoteExecutionTest(parameterized.TestCase):
             np.testing.assert_array_equal(m, small_meta[idx])
           assert srv._bulk_server is not None
           self.assertEqual(handle._bulk_port, srv._bulk_server.port)
-          self.assertIn(srv._bulk_server.port, handle._seen_bulk_ports)
+          self.assertIn(
+              ("127.0.0.2", srv._bulk_server.port), handle._seen_bulk_targets
+          )
           # Verify multiple sockets were pooled from parallel stripes.
           pool_key = ("127.0.0.2", srv._bulk_server.port)
           pooled_socks = network_lib._DEFAULT_BULK_SOCKET_POOL._pools.get(
@@ -2485,7 +2488,7 @@ class RemoteExecutionTest(parameterized.TestCase):
         if mode == "short":
           return b"\x01\x02"
         if mode == "dead":
-          return remote_lib.struct.pack("<Q", dead_bulk_port)
+          return network_lib._encode_bulk_port_response(dead_bulk_port)
         if mode == "real_hold":
           await reprobe_hold.wait()
         return await real_get_bulk_port(request_bytes, context)
@@ -2525,7 +2528,7 @@ class RemoteExecutionTest(parameterized.TestCase):
           np.testing.assert_array_equal(res["tensor"], arr + i)
         self.assertEqual(handle._bulk_port, 0)
         self.assertEqual(get_port_calls, 3)
-        self.assertEmpty(handle._seen_bulk_ports)
+        self.assertEmpty(handle._seen_bulk_targets)
 
         # 4. W1 + N1 + T2(c): Hold the background re-probe task on
         # `reprobe_hold` so `big_first` deterministically completes via gRPC
@@ -2809,6 +2812,25 @@ class RemoteExecutionTest(parameterized.TestCase):
   def test_enable_bulk_transport_false_negotiation_client_and_server(self):
     arr = np.arange(256 * 1024, dtype=np.int32)  # 1 MiB
 
+    with self.assertRaisesRegex(
+        ValueError,
+        "bulk_hosts cannot be specified when enable_bulk_transport=False",
+    ):
+      remote_lib.GrpcRemoteExecutionServer(
+          StubWorkerEngine("srv_invalid_bulk_hosts"),
+          enable_bulk_transport=False,
+          bulk_hosts=("127.0.0.2",),
+      )
+    with self.assertRaisesRegex(
+        ValueError,
+        "bulk_hosts cannot be specified when enable_bulk_transport=False",
+    ):
+      remote_lib.GrpcRemoteActorHandle(
+          target_address="grpc://127.0.0.2:50051",
+          enable_bulk_transport=False,
+          bulk_hosts=("127.0.0.2",),
+      )
+
     # Case 1: Client disables bulk transport while server has it enabled.
     port1 = portpicker.pick_unused_port()
     with background_server(StubWorkerEngine("srv_bulk_on"), port1):
@@ -2832,7 +2854,10 @@ class RemoteExecutionTest(parameterized.TestCase):
 
         asyncio.run(_client_off_async())
         self.assertIsNone(hdl_client_off._bulk_port)
-        self.assertEmpty(hdl_client_off._seen_bulk_ports)
+        self.assertEmpty(hdl_client_off._seen_bulk_targets)
+        self.assertEqual(hdl_client_off._active_bulk_hosts, ())
+        hdl_client_off._invalidate_bulk_port()
+        self.assertEqual(hdl_client_off._active_bulk_hosts, ())
       finally:
         asyncio.run(hdl_client_off.close())
 
@@ -2859,7 +2884,7 @@ class RemoteExecutionTest(parameterized.TestCase):
         self.assertIsNotNone(polled)
         np.testing.assert_array_equal(polled.unwrap()["tensor"], arr + 4)
         self.assertEqual(hdl_client_on._bulk_port, 0)
-        self.assertEmpty(hdl_client_on._seen_bulk_ports)
+        self.assertEmpty(hdl_client_on._seen_bulk_targets)
       finally:
         await hdl_client_on.close()
         await srv_off.stop_serving(grace=0.0)
@@ -2948,7 +2973,7 @@ class RemoteExecutionTest(parameterized.TestCase):
           push_chunks = [
               c
               async for c in network_lib._stream_bulk_push_chunks(
-                  req_views, req_raw_buffers, "127.0.0.1", bulk_server.port
+                  req_views, req_raw_buffers, ("127.0.0.1",), bulk_server.port
               )
           ]
           # Bulk transfer must NOT fall back to multi-chunk gRPC even when the
@@ -3000,7 +3025,7 @@ class RemoteExecutionTest(parameterized.TestCase):
 
           restored_resp = (
               await remote_lib.ExecutionResponse.deserialize_async_chunks(
-                  _pull_gen(), bulk_host="127.0.0.1"
+                  _pull_gen(), bulk_hosts=("127.0.0.1",)
               )
           )
           assert restored_resp is not None
@@ -3363,14 +3388,19 @@ class RemoteExecutionTest(parameterized.TestCase):
     stall_listener.listen(8)
     stall_port = int(stall_listener.getsockname()[1])
     accepted_conns: list[socket.socket] = []
-    accepted_event = threading.Event()
+    pull_accepted_event = threading.Event()
+    push_accepted_event = threading.Event()
 
     def _accept_loop() -> None:
       while True:
         try:
           conn, _ = stall_listener.accept()
           accepted_conns.append(conn)
-          accepted_event.set()
+          op_byte = conn.recv(1)
+          if op_byte == bytes([network_lib._OP_PULL]):
+            pull_accepted_event.set()
+          elif op_byte == bytes([network_lib._OP_PUSH]):
+            push_accepted_event.set()
         except OSError:
           break
 
@@ -3421,16 +3451,17 @@ class RemoteExecutionTest(parameterized.TestCase):
               if pull_remaining == 0:
                 pull_stripe_exited.set()
 
-        accepted_event.clear()
         with mock.patch.object(
             network_lib, "_pull_stripe_sync", side_effect=_wrapped_pull_stripe
         ):
           pull_task = asyncio.create_task(
               remote_lib.ExecutionResponse.deserialize_async_chunks(
-                  _chunk_gen(), bulk_host="127.0.0.1"
+                  _chunk_gen(), bulk_hosts=("127.0.0.1",)
               )
           )
-          await asyncio.to_thread(accepted_event.wait, 5.0)
+          self.assertTrue(
+              await asyncio.to_thread(pull_accepted_event.wait, 5.0)
+          )
           t0 = time.monotonic()
           pull_task.cancel()
           with self.assertRaises(asyncio.CancelledError):
@@ -3445,7 +3476,6 @@ class RemoteExecutionTest(parameterized.TestCase):
 
         # 2. Cancel _OP_PUSH blocked waiting for the 1-byte server ACK; use a
         # real threading.Event set in the finally block of _push_stripe_sync.
-        accepted_event.clear()
         arr = np.ones(256 * 1024, dtype=np.int32)
         req = remote_lib.ExecutionRequest(
             request_id="req_cancel_push",
@@ -3470,7 +3500,7 @@ class RemoteExecutionTest(parameterized.TestCase):
           async for _ in network_lib._stream_bulk_push_chunks(
               views,
               raw_buffers,
-              "127.0.0.1",
+              ("127.0.0.1",),
               stall_port,
               push_tracker=push_tracker,
           ):
@@ -3480,7 +3510,9 @@ class RemoteExecutionTest(parameterized.TestCase):
             network_lib, "_push_stripe_sync", side_effect=_wrapped_push_stripe
         ):
           push_task = asyncio.create_task(_drain_push())
-          await asyncio.to_thread(accepted_event.wait, 5.0)
+          self.assertTrue(
+              await asyncio.to_thread(push_accepted_event.wait, 5.0)
+          )
           t1 = time.monotonic()
           push_task.cancel()
           with self.assertRaises(asyncio.CancelledError):
@@ -3673,6 +3705,353 @@ class RemoteExecutionTest(parameterized.TestCase):
     self.assertEqual(hdl._host_port, "dns:///worker.ns.svc:50051")
     self.assertEqual(hdl._bulk_host, "")
     self.assertFalse(hdl._enable_bulk_transport)
+
+    # Non-host:port gRPC target is also accepted with enable_bulk_transport=True
+    # when explicit bulk_hosts are provided.
+    hdl_with_bulk_hosts = remote_lib.GrpcRemoteActorHandle(
+        "grpc://dns:///worker.ns.svc:50051",
+        enable_bulk_transport=True,
+        bulk_hosts=("127.0.0.2", "127.0.0.3"),
+    )
+    self.assertEqual(hdl_with_bulk_hosts._bulk_host, "127.0.0.2")
+    self.assertEqual(
+        hdl_with_bulk_hosts._configured_bulk_hosts, ("127.0.0.2", "127.0.0.3")
+    )
+    self.assertEqual(
+        hdl_with_bulk_hosts._active_bulk_hosts, ("127.0.0.2", "127.0.0.3")
+    )
+
+  def test_validate_bulk_hosts_and_bulk_port_wire_codec(self):
+    self.assertEqual(network_lib._validate_bulk_hosts(None), ())
+    self.assertEqual(network_lib._validate_bulk_hosts(()), ())
+    self.assertEqual(
+        network_lib._validate_bulk_hosts([
+            "10.0.0.1",
+            "10.0.0.2",
+            "10.0.0.1",
+            "[2001:DB8::1]",
+            "2001:db8::1",
+            "::1",
+            "::1%lo",
+            "[FE80::1%eth0]",
+            "fe80::1%eth0",
+            "worker-nic0.internal.",
+        ]),
+        (
+            "10.0.0.1",
+            "10.0.0.2",
+            "2001:db8::1",
+            "::1",
+            "::1%lo",
+            "fe80::1%eth0",
+            "worker-nic0.internal.",
+        ),
+    )
+
+    for bad_hosts in (
+        "10.0.0.1",
+        b"10.0.0.1",
+        [""],
+        ["10.0.0.1:50051"],
+        ["[::1]:50051"],
+        ["[10.0.0.1]"],
+        ["999.999.999.999"],
+        ["10.0.0.1]"],
+        ["host\x00"],
+        ["-leading-hyphen"],
+        ["trailing-hyphen-"],
+        ["[::1%]"],
+        ["[::1%lo%eth0]"],
+        ["http://10.0.0.1"],
+        ["grpc://10.0.0.1"],
+        ["10.0.0.1/path"],
+        ["10.0.0.1\n10.0.0.2"],
+        ["10.0.0.1 "],
+        ["2001:db8::zzz"],
+    ):
+      with self.subTest(bad_hosts=bad_hosts):
+        with self.assertRaises(ValueError):
+          network_lib._validate_bulk_hosts(bad_hosts)  # type: ignore[arg-type]
+
+    with self.assertRaisesRegex(ValueError, "bulk_hosts must not be empty"):
+      network_lib._validate_bulk_hosts(None, allow_empty=False)
+    with self.assertRaisesRegex(ValueError, "bulk_hosts must not be empty"):
+      network_lib._validate_bulk_hosts((), allow_empty=False)
+    with self.assertRaisesRegex(ValueError, "bulk_hosts must not be empty"):
+      remote_lib.GrpcRemoteExecutionServer(
+          StubWorkerEngine("bad_srv"), bulk_hosts=()
+      )
+    with self.assertRaisesRegex(ValueError, "bulk_hosts must not be empty"):
+      remote_lib.GrpcRemoteActorHandle("grpc://127.0.0.1:50051", bulk_hosts=())
+
+    # Wire codec roundtrip: legacy 8-byte port only, port=0, and multi-NIC
+    raw_legacy = network_lib._encode_bulk_port_response(51234)
+    self.assertLen(raw_legacy, 8)
+    self.assertEqual(
+        network_lib._decode_bulk_port_response(raw_legacy), (51234, ())
+    )
+    raw_zero = network_lib._encode_bulk_port_response(
+        0, ("10.0.0.1", "10.0.0.2")
+    )
+    self.assertLen(raw_zero, 8)
+    self.assertEqual(network_lib._decode_bulk_port_response(raw_zero), (0, ()))
+
+    raw_multi = network_lib._encode_bulk_port_response(
+        51234,
+        network_lib._validate_bulk_hosts(
+            ("10.0.0.1", "[2001:DB8::2]", "10.0.0.1")
+        ),
+    )
+    self.assertGreater(len(raw_multi), 8)
+    self.assertEqual(
+        network_lib._decode_bulk_port_response(raw_multi),
+        (51234, ("10.0.0.1", "2001:db8::2")),
+    )
+
+    for bad_port in (-1, 70000, True):
+      with self.subTest(bad_port=bad_port):
+        with self.assertRaises(ValueError):
+          network_lib._encode_bulk_port_response(bad_port)  # type: ignore[arg-type]
+
+    for bad_wire in (
+        b"\x01\x02\x03",
+        struct.pack("<Q", 70000),
+        raw_legacy + b"\xff\xfe",
+        raw_legacy + b"\n\n",
+        raw_legacy + b"10.0.0.1:5000",
+    ):
+      with self.subTest(bad_wire=bad_wire):
+        with self.assertRaises(ValueError):
+          network_lib._decode_bulk_port_response(bad_wire)
+
+  def test_plan_bulk_stripes_scales_with_num_hosts(self):
+    buf_len = 512 * 1024 * 1024  # 512 MiB
+    stripes_1 = network_lib._plan_bulk_stripes([buf_len], num_hosts=1)
+    stripes_2 = network_lib._plan_bulk_stripes([buf_len], num_hosts=2)
+    stripes_4 = network_lib._plan_bulk_stripes([buf_len], num_hosts=4)
+    stripes_8 = network_lib._plan_bulk_stripes([buf_len], num_hosts=8)
+    self.assertLen(stripes_1, 4)
+    self.assertLen(stripes_2, 8)
+    self.assertLen(stripes_4, 16)
+    self.assertLen(stripes_8, 16)  # Capped at _MAX_TOTAL_BULK_STRIPES = 16
+    for bad_num in (0, -1, True):
+      with self.subTest(bad_num=bad_num):
+        with self.assertRaises(ValueError):
+          network_lib._plan_bulk_stripes([buf_len], num_hosts=bad_num)  # type: ignore[arg-type]
+
+    # R1.3: Verify multi-buffer payloads (e.g. 5 x 40 MiB = 200 MiB across 2
+    # hosts) balance cumulative bytes across NICs via _assign_stripe_hosts
+    # instead of skewing 4:1 on stripe index modulo.
+    multi_buf_lens = [40 * 1024 * 1024] * 5
+    multi_stripes = network_lib._plan_bulk_stripes(multi_buf_lens, num_hosts=2)
+    hosts = ("10.0.0.1", "10.0.0.2")
+    assigned_hosts = network_lib._assign_stripe_hosts(multi_stripes, hosts)
+    self.assertLen(assigned_hosts, len(multi_stripes))
+    bytes_by_host = {"10.0.0.1": 0, "10.0.0.2": 0}
+    for (_, _, _, take), h in zip(multi_stripes, assigned_hosts):
+      bytes_by_host[h] += take
+    self.assertEqual(
+        bytes_by_host["10.0.0.1"] + bytes_by_host["10.0.0.2"],
+        sum(multi_buf_lens),
+    )
+    # Least-loaded byte assignment keeps per-NIC volume within 1 stripe (24 MiB)
+    # of an exact 100 MiB / 100 MiB split (112 MiB vs 88 MiB).
+    self.assertLessEqual(
+        abs(bytes_by_host["10.0.0.1"] - bytes_by_host["10.0.0.2"]),
+        24 * 1024 * 1024,
+    )
+
+  def test_dual_nic_bulk_striping_e2e_server_advertised_and_client_configured(
+      self,
+  ):
+    port = portpicker.pick_unused_port()
+    engine = StubWorkerEngine("dual_nic_worker")
+    dual_hosts = ("127.0.0.2", "127.0.0.3")
+
+    async def _run():
+      server = remote_lib.GrpcRemoteExecutionServer(
+          engine, bulk_hosts=dual_hosts
+      )
+      await server.start_serving_async(port=port)
+      assert server._bulk_server is not None
+      bulk_port = server._bulk_server.port
+
+      # 1. Client connects via 127.0.0.1 without explicit bulk_hosts and
+      # auto-discovers ("127.0.0.2", "127.0.0.3") from GetBulkPort.
+      handle_auto = remote_lib.ActorHandle.from_address(
+          f"grpc://127.0.0.1:{port}"
+      )
+      assert isinstance(handle_auto, remote_lib.GrpcRemoteActorHandle)
+      # 2. Client explicitly configures bulk_hosts=("127.0.0.3", "127.0.0.2"),
+      # taking precedence over server-advertised order.
+      handle_explicit = remote_lib.ActorHandle.from_address(
+          f"grpc://127.0.0.1:{port}",
+          bulk_hosts=("127.0.0.3", "127.0.0.2"),
+      )
+      assert isinstance(handle_explicit, remote_lib.GrpcRemoteActorHandle)
+
+      try:
+        with mock.patch.object(
+            network_lib, "_MIN_BULK_STRIPE_BYTES", 256 * 1024
+        ):
+          # 2 MiB array -> 8 stripes across 2 NICs (256 KiB per stripe).
+          arr = np.arange(512 * 1024, dtype=np.int32)
+          push_stripes_seen: list[tuple[str, int, int]] = []
+          pull_stripes_seen: list[tuple[str, int, int]] = []
+          real_push = network_lib._push_stripe_sync
+          real_pull = network_lib._pull_stripe_sync
+
+          def _spy_push(host: str, *args: Any, **kwargs: Any) -> None:
+            # args: (port, tid, total_bytes, buf_idx, buf_total_len, view,
+            # offset, length, active_socks)
+            push_stripes_seen.append((host, int(args[3]), int(args[6])))
+            real_push(host, *args, **kwargs)
+
+          def _spy_pull(host: str, *args: Any, **kwargs: Any) -> None:
+            # args: (port, tid, buf_idx, buf_total_len, inc_state, offset,
+            # length, active_socks)
+            pull_stripes_seen.append((host, int(args[2]), int(args[5])))
+            real_pull(host, *args, **kwargs)
+
+          with (
+              mock.patch.object(
+                  network_lib, "_push_stripe_sync", side_effect=_spy_push
+              ),
+              mock.patch.object(
+                  network_lib, "_pull_stripe_sync", side_effect=_spy_pull
+              ),
+          ):
+            out = await handle_auto.asubmit("echo", {"tensor": arr})
+            np.testing.assert_array_equal(out["tensor"], arr)
+
+            auto_push_hosts = [h for h, _, _ in push_stripes_seen]
+            auto_pull_hosts = [h for h, _, _ in pull_stripes_seen]
+            self.assertEqual(handle_auto._active_bulk_hosts, dual_hosts)
+            self.assertIn("127.0.0.2", auto_push_hosts)
+            self.assertIn("127.0.0.3", auto_push_hosts)
+            self.assertIn("127.0.0.2", auto_pull_hosts)
+            self.assertIn("127.0.0.3", auto_pull_hosts)
+            # First stripe (lowest (buf_idx, offset)) routes to primary host
+            # 127.0.0.2 when server-advertised order is ("127.0.0.2",
+            # "127.0.0.3").
+            auto_push_map = {(b, o): h for h, b, o in push_stripes_seen}
+            auto_pull_map = {(b, o): h for h, b, o in pull_stripes_seen}
+            self.assertEqual(auto_push_map[min(auto_push_map)], "127.0.0.2")
+            self.assertEqual(auto_pull_map[min(auto_pull_map)], "127.0.0.2")
+            # 8 stripes for the 2 MiB tensor + header tail
+            self.assertGreaterEqual(len(push_stripes_seen), 8)
+            self.assertGreaterEqual(len(pull_stripes_seen), 8)
+            for host in dual_hosts:
+              self.assertIn((host, bulk_port), handle_auto._seen_bulk_targets)
+              self.assertNotEmpty(
+                  network_lib._DEFAULT_BULK_SOCKET_POOL._pools.get(
+                      (host, bulk_port), ()
+                  )
+              )
+
+            # Verify dispatch_task + poll_responses with client bulk_hosts
+            # ("127.0.0.3", "127.0.0.2") routes the first stripe (offset=0) to
+            # 127.0.0.3 first on both push and pull.
+            push_stripes_seen.clear()
+            pull_stripes_seen.clear()
+            ack = await handle_explicit.dispatch_task(
+                "req_dual_explicit", "echo", {"tensor": arr + 5}
+            )
+            self.assertEqual(ack, "req_dual_explicit")
+            polled = await handle_explicit.poll_responses(timeout_s=5.0)
+            self.assertIsNotNone(polled)
+            np.testing.assert_array_equal(polled.unwrap()["tensor"], arr + 5)
+            self.assertEqual(
+                handle_explicit._active_bulk_hosts, ("127.0.0.3", "127.0.0.2")
+            )
+            exp_push_hosts = [h for h, _, _ in push_stripes_seen]
+            exp_pull_hosts = [h for h, _, _ in pull_stripes_seen]
+            self.assertIn("127.0.0.3", exp_push_hosts)
+            self.assertIn("127.0.0.2", exp_push_hosts)
+            self.assertIn("127.0.0.3", exp_pull_hosts)
+            self.assertIn("127.0.0.2", exp_pull_hosts)
+            self.assertGreaterEqual(len(push_stripes_seen), 8)
+            self.assertGreaterEqual(len(pull_stripes_seen), 8)
+            exp_push_map = {(b, o): h for h, b, o in push_stripes_seen}
+            exp_pull_map = {(b, o): h for h, b, o in pull_stripes_seen}
+            self.assertEqual(exp_push_map[min(exp_push_map)], "127.0.0.3")
+            self.assertEqual(exp_pull_map[min(exp_pull_map)], "127.0.0.3")
+
+          # Invalidating bulk port must close pooled sockets for BOTH NIC IPs.
+          handle_auto._invalidate_bulk_port()
+          for host in dual_hosts:
+            self.assertEmpty(
+                network_lib._DEFAULT_BULK_SOCKET_POOL._pools.get(
+                    (host, bulk_port), ()
+                )
+            )
+      finally:
+        await handle_auto.close()
+        await handle_explicit.close()
+        await server.stop_serving(grace=0.0)
+
+    asyncio.run(_run())
+
+  def test_partial_nic_probe_failure_continues_on_healthy_nic_and_falls_back(
+      self,
+  ):
+    port = portpicker.pick_unused_port()
+    engine = StubWorkerEngine("partial_nic_worker")
+
+    async def _run():
+      server = remote_lib.GrpcRemoteExecutionServer(
+          engine, bulk_hosts=("127.0.0.2", "127.0.0.3")
+      )
+      await server.start_serving_async(port=port)
+      assert server._bulk_server is not None
+      bulk_port = server._bulk_server.port
+      real_probe = network_lib._DEFAULT_BULK_SOCKET_POOL.probe_async
+      fail_hosts: set[str] = {"127.0.0.3"}
+
+      async def _selective_probe(host: str, p: int) -> None:
+        if host in fail_hosts:
+          raise ConnectionRefusedError(f"Simulated NIC down on {host}:{p}")
+        await real_probe(host, p)
+
+      handle = remote_lib.GrpcRemoteActorHandle(
+          target_address=f"grpc://127.0.0.1:{port}"
+      )
+      try:
+        arr = np.arange(256 * 1024, dtype=np.int32)  # 1 MiB
+        with mock.patch.object(
+            network_lib._DEFAULT_BULK_SOCKET_POOL,
+            "probe_async",
+            side_effect=_selective_probe,
+        ):
+          # 1. Partial NIC failure (127.0.0.3 down, 127.0.0.2 up): logs warning
+          # naming the failed NIC and continues using bulk TCP transport on
+          # ("127.0.0.2",).
+          with self.assertLogs(level="WARNING") as cm_partial:
+            out = await handle.asubmit("echo", {"tensor": arr})
+          partial_logs = "\n".join(cm_partial.output)
+          self.assertIn("127.0.0.3", partial_logs)
+          np.testing.assert_array_equal(out["tensor"], arr)
+          self.assertEqual(handle._bulk_port, bulk_port)
+          self.assertEqual(handle._active_bulk_hosts, ("127.0.0.2",))
+          self.assertIn(("127.0.0.2", bulk_port), handle._seen_bulk_targets)
+          self.assertNotIn(("127.0.0.3", bulk_port), handle._seen_bulk_targets)
+
+          # 2. All NICs down: logs warning naming all failed NICs,
+          # negative-caches _bulk_port = 0, and falls back to gRPC chunks.
+          handle._invalidate_bulk_port()
+          fail_hosts.add("127.0.0.2")
+          with self.assertLogs(level="WARNING") as cm_all:
+            out_fallback = await handle.asubmit("echo", {"tensor": arr + 11})
+          all_logs = "\n".join(cm_all.output)
+          self.assertIn("127.0.0.2", all_logs)
+          self.assertIn("127.0.0.3", all_logs)
+          np.testing.assert_array_equal(out_fallback["tensor"], arr + 11)
+          self.assertEqual(handle._bulk_port, 0)
+      finally:
+        await handle.close()
+        await server.stop_serving(grace=0.0)
+
+    asyncio.run(_run())
 
 
 if __name__ == "__main__":

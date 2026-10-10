@@ -18,8 +18,9 @@ Provides two complementary transport paths for Pickle Protocol 5 payloads:
 1. **Out-of-Band Zero-Copy Bulk TCP Data Plane (`_BulkTransferServer` /
    `_BulkSocketPool`)**: For payloads >= 512 KiB with out-of-band
    `PickleBuffer`s, sends a lightweight length manifest over gRPC while
-   streaming large buffers via `sendall(memoryview)` and coalesced headers/small
-   buffers via vectored `sendmsg` into pooled TCP sockets with the GIL released.
+   striping large buffers via `sendall(memoryview)` and coalesced headers/small
+   buffers via vectored `sendmsg` across one or more NIC endpoints
+   (`bulk_hosts`) into pooled TCP sockets with the GIL released.
 2. **GIL-Free Chunked gRPC Streaming (`_iter_async_from_chunk_specs` /
    `_ChunkReassembler`)**: For inline or fallback payloads, slices and
    reassembles chunks on a background thread pool using GIL-free
@@ -33,8 +34,10 @@ import concurrent.futures
 import contextlib
 import ctypes
 import errno
+import ipaddress
 import os
 import pickle
+import re
 import secrets
 import socket
 import struct
@@ -624,6 +627,9 @@ _BULK_CMD_STRUCT = struct.Struct("<B16sQQQQQ")
 _MIN_BULK_STRIPE_BYTES = 32 * 1024 * 1024
 _MAX_BULK_STRIPE_BYTES = 1024 * 1024 * 1024
 _MAX_BULK_STRIPES = 4
+# Caps per-transfer stripe target calculation at the _BULK_IO_EXECUTOR worker
+# count (16); multi-buffer or concurrent transfers may still queue.
+_MAX_TOTAL_BULK_STRIPES = 16
 _MAX_BULK_TRANSFER_BYTES = 64 * 1024 * 1024 * 1024
 _MAX_BULK_BUFFERS = 65536
 _BULK_SOCKET_TIMEOUT_S = 30.0
@@ -884,6 +890,133 @@ def _extract_host_and_port(target_address: str) -> Tuple[str, Optional[int]]:
         f"Port out of range (1..65535) in target address: {target_address!r}"
     )
   return (host, port)
+
+
+_HOSTNAME_LABEL_RE = re.compile(
+    r"^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\Z"
+)
+
+
+def _validate_bulk_hosts(
+    bulk_hosts: Optional[Sequence[str]],
+    *,
+    allow_empty: bool = True,
+) -> Tuple[str, ...]:
+  """Validates, normalizes, and deduplicates bare hostnames or IP literals.
+
+  Brackets around IPv6 literals are stripped and IPv6 hex digits/hostnames are
+  normalized to canonical lowercase form (preserving IPv6 `%scope` zone ID case)
+  before deduplicating in insertion order.
+
+  Args:
+    bulk_hosts: Sequence of bare hostnames, IPv4 literals, or bracketed/bare
+      IPv6 literals without ports, schemes, or paths.
+    allow_empty: If False, raises `ValueError` when `bulk_hosts` is `None` or
+      empty.
+
+  Returns:
+    A tuple of canonical, deduplicated host strings.
+  """
+  if bulk_hosts is None:
+    if not allow_empty:
+      raise ValueError("bulk_hosts must not be empty.")
+    return ()
+  if isinstance(bulk_hosts, (str, bytes)):
+    raise ValueError(
+        "bulk_hosts must be a sequence of host strings, not a single string."
+    )
+  deduped: List[str] = []
+  seen: Set[str] = set()
+  for raw_host in bulk_hosts:
+    if not isinstance(raw_host, str) or not raw_host:
+      raise ValueError(f"Invalid bulk host entry: {raw_host!r}")
+    if (
+        "://" in raw_host
+        or "/" in raw_host
+        or any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in raw_host)
+    ):
+      raise ValueError(
+          f"Bulk host must be a bare host or IP literal: {raw_host!r}"
+      )
+    if raw_host.startswith("["):
+      if not raw_host.endswith("]"):
+        if "]:" in raw_host:
+          raise ValueError(f"Bulk host must not include a port: {raw_host!r}")
+        raise ValueError(f"Invalid bracketed IPv6 bulk host: {raw_host!r}")
+      host_body = raw_host[1:-1]
+      if not host_body or ":" not in host_body:
+        raise ValueError(f"Invalid bracketed IPv6 bulk host: {raw_host!r}")
+    else:
+      if "[" in raw_host or "]" in raw_host:
+        raise ValueError(f"Invalid brackets in bulk host: {raw_host!r}")
+      if raw_host.count(":") == 1:
+        raise ValueError(f"Bulk host must not include a port: {raw_host!r}")
+      host_body = raw_host
+
+    if ":" in host_body:
+      try:
+        canonical = str(ipaddress.IPv6Address(host_body))
+      except ValueError as exc:
+        raise ValueError(
+            f"Invalid IPv6 bulk host literal: {raw_host!r}"
+        ) from exc
+    else:
+      try:
+        canonical = str(ipaddress.IPv4Address(host_body))
+      except ValueError:
+        trimmed = host_body[:-1] if host_body.endswith(".") else host_body
+        labels = trimmed.split(".")
+        if (
+            not trimmed
+            or len(trimmed) > 253
+            or any(not _HOSTNAME_LABEL_RE.fullmatch(lbl) for lbl in labels)
+            or labels[-1].isdigit()
+        ):
+          raise ValueError(
+              f"Invalid bulk hostname or IPv4 literal: {raw_host!r}"
+          ) from None
+        canonical = host_body.lower()
+
+    if canonical not in seen:
+      seen.add(canonical)
+      deduped.append(canonical)
+  if not deduped and not allow_empty:
+    raise ValueError("bulk_hosts must not be empty.")
+  return tuple(deduped)
+
+
+def _encode_bulk_port_response(
+    port: int, bulk_hosts: Sequence[str] = ()
+) -> bytes:
+  """Encodes `GetBulkPort` wire bytes (8B LE port + optional newline hosts)."""
+  if not _is_exact_int(port) or port < 0 or port > 65535:
+    raise ValueError(f"Invalid bulk port: {port!r}")
+  header = struct.pack("<Q", port)
+  if port == 0 or not bulk_hosts:
+    return header
+  return header + "\n".join(bulk_hosts).encode("utf-8")
+
+
+def _decode_bulk_port_response(
+    data: bytes,
+) -> Tuple[int, Tuple[str, ...]]:
+  """Decodes `GetBulkPort` wire bytes into `(port, bulk_hosts)`."""
+  if len(data) < 8:
+    raise ValueError(
+        f"GetBulkPort response too short: {len(data)} bytes (< 8)."
+    )
+  (raw_port,) = struct.unpack("<Q", data[:8])
+  port = int(raw_port)
+  if port < 0 or port > 65535:
+    raise ValueError(f"GetBulkPort port out of range: {port}.")
+  if port == 0 or len(data) == 8:
+    return (port, ())
+  try:
+    hosts_text = data[8:].decode("utf-8")
+  except UnicodeDecodeError as exc:
+    raise ValueError("Invalid UTF-8 in GetBulkPort bulk_hosts.") from exc
+  raw_lines = [line for line in hosts_text.split("\n") if line]
+  return (port, _validate_bulk_hosts(raw_lines, allow_empty=False))
 
 
 class _BulkSocketPool:
@@ -1572,14 +1705,21 @@ class _BulkTransferServer:
 
 def _plan_bulk_stripes(
     buffer_lengths: Sequence[int],
+    *,
+    num_hosts: int = 1,
 ) -> List[Tuple[int, int, int, int]]:
   """Plans `(buf_idx, buf_total_len, offset, take)` stripes with size bounds."""
+  if not _is_exact_int(num_hosts) or num_hosts <= 0:
+    raise ValueError(
+        f"num_hosts must be a positive integer, got {num_hosts!r}."
+    )
+  max_stripes = min(_MAX_BULK_STRIPES * num_hosts, _MAX_TOTAL_BULK_STRIPES)
   total_bytes = sum(buffer_lengths)
   stripe_target = min(
       _MAX_BULK_STRIPE_BYTES,
       max(
           _MIN_BULK_STRIPE_BYTES,
-          (total_bytes + _MAX_BULK_STRIPES - 1) // _MAX_BULK_STRIPES,
+          (total_bytes + max_stripes - 1) // max_stripes,
       ),
   )
   stripes: List[Tuple[int, int, int, int]] = []
@@ -1590,6 +1730,26 @@ def _plan_bulk_stripes(
       take = min(stripe_target, length - offset)
       stripes.append((buf_idx, length, offset, take))
   return stripes
+
+
+def _assign_stripe_hosts(
+    stripes: Sequence[Tuple[int, int, int, int]],
+    hosts: Sequence[str],
+) -> List[str]:
+  """Assigns each stripe to the host with the fewest cumulative bytes."""
+  if not hosts:
+    raise ValueError("bulk_hosts must not be empty.")
+  num_hosts = len(hosts)
+  if num_hosts == 1:
+    host = hosts[0]
+    return [host] * len(stripes)
+  loads = [0] * num_hosts
+  assigned: List[str] = []
+  for _, _, _, take in stripes:
+    best_idx = min(range(num_hosts), key=loads.__getitem__)
+    assigned.append(hosts[best_idx])
+    loads[best_idx] += take
+  return assigned
 
 
 class _BulkLayout(NamedTuple):
@@ -1885,10 +2045,11 @@ async def _stream_bulk_pull_chunks(
 async def _stream_bulk_push_chunks(
     views: List[memoryview],  # pylint: disable=g-bare-generic
     raw_buffers: List[pickle.PickleBuffer],
-    bulk_host: str,
+    bulk_hosts: Sequence[str],
     bulk_port: int,
     *,
     push_tracker: Optional[_BulkPushTracker] = None,
+    seen_bulk_targets: Optional[Set[Tuple[str, int]]] = None,
 ) -> AsyncIterator[bytes]:
   """Pushes buffers via `_OP_PUSH` sockets and yields a lightweight manifest."""
   raw_futs: List[concurrent.futures.Future[None]] = []
@@ -1896,17 +2057,24 @@ async def _stream_bulk_push_chunks(
   active_socks = _ActiveStripeSockets()
   completed_all = False
   try:
+    if not bulk_hosts:
+      raise ValueError("bulk_hosts must not be empty.")
     header_len, buffer_lengths, layout, bulk_views = _partition_bulk_views(
         views
     )
     total_bulk_bytes = layout.total_bulk_bytes
     tid = _allocate_transfer_id()
     loop = asyncio.get_running_loop()
-    stripes = _plan_bulk_stripes(layout.bulk_lengths)
-    for buf_idx, buf_total_len, offset, take in stripes:
+    stripes = _plan_bulk_stripes(layout.bulk_lengths, num_hosts=len(bulk_hosts))
+    stripe_hosts = _assign_stripe_hosts(stripes, bulk_hosts)
+    for target_host, (buf_idx, buf_total_len, offset, take) in zip(
+        stripe_hosts, stripes
+    ):
+      if seen_bulk_targets is not None:
+        seen_bulk_targets.add((target_host, bulk_port))
       raw_fut = _BULK_IO_EXECUTOR.submit(
           _push_stripe_sync,
-          bulk_host,
+          target_host,
           bulk_port,
           tid,
           total_bulk_bytes,
@@ -2020,9 +2188,9 @@ async def _deserialize_from_async_chunks(
     chunks: AsyncIterable[bytes],
     *,
     allow_empty: bool = False,
-    bulk_host: str = "localhost",
+    bulk_hosts: Sequence[str] = ("localhost",),
     bulk_server: Optional[_BulkTransferServer] = None,
-    seen_bulk_ports: Optional[Set[int]] = None,
+    seen_bulk_targets: Optional[Set[Tuple[str, int]]] = None,
 ) -> Any:
   """Deserializes an object from an async iterable of chunks or zero-copy bulk sockets."""
   reassembler: Optional[_ChunkReassembler] = None
@@ -2052,8 +2220,8 @@ async def _deserialize_from_async_chunks(
       layout = _validate_bulk_manifest(first_meta)
       loop = asyncio.get_running_loop()
       if first_meta.op == _OP_PULL:
-        if seen_bulk_ports is not None:
-          seen_bulk_ports.add(first_meta.port)
+        if not bulk_hosts:
+          raise ValueError("bulk_hosts must not be empty.")
         inc_state = _IncomingBulkTransfer(first_meta.total_bulk_bytes)
         raw_futs: List[concurrent.futures.Future[None]] = []
         pull_futs: List[asyncio.Future[None]] = []
@@ -2061,11 +2229,21 @@ async def _deserialize_from_async_chunks(
         completed_pull = False
         raw_bulk_buffers: Dict[int, np.ndarray] = {}
         try:
-          stripes = _plan_bulk_stripes(layout.bulk_lengths)
-          for buf_idx, buf_total_len, offset, take in stripes:
+          stripes = _plan_bulk_stripes(
+              layout.bulk_lengths, num_hosts=len(bulk_hosts)
+          )
+          stripe_hosts = _assign_stripe_hosts(stripes, bulk_hosts)
+          for target_host, (
+              buf_idx,
+              buf_total_len,
+              offset,
+              take,
+          ) in zip(stripe_hosts, stripes):
+            if seen_bulk_targets is not None:
+              seen_bulk_targets.add((target_host, first_meta.port))
             raw_fut = _BULK_IO_EXECUTOR.submit(
                 _pull_stripe_sync,
-                bulk_host,
+                target_host,
                 first_meta.port,
                 first_meta.tid,
                 buf_idx,
@@ -2143,4 +2321,3 @@ async def _deserialize_from_async_chunks(
   if offload and loop is not None:
     return await loop.run_in_executor(_SERDE_EXECUTOR, reassembler.finish)
   return reassembler.finish()
-
