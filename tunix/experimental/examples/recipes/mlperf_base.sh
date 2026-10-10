@@ -242,7 +242,7 @@ export MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-61440}"
 # uBench Reporting (see ubench_reporting.sh)
 # ==============================================================================
 # Off by default. Set UBENCH_REPORTING=true (or 1) to enable.
-if [[ "${UBENCH_REPORTING:-false}" =~ ^(1|true|True)$ ]]; then
+if [[ "${UBENCH_REPORTING:-false}" =~ ^(1|true|True|TRUE)$ ]]; then
   # A subshell, so that ubench_reporting.sh can't stop the launch or change
   # variables here.
   ( source "${DIR}/ubench_reporting.sh" "$@" ) ||
