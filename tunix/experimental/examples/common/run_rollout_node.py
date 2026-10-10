@@ -44,7 +44,6 @@ REPO_ROOT = os.path.abspath(
 # rollout process can start with non-vLLM samplers in environments where vLLM is
 # not installed.
 os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
-os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 if os.environ.get("WEIGHT_SYNC_PARALLEL_H2H", ""):
   _ray_extra_vars = os.environ.get("VLLM_RAY_EXTRA_ENV_VARS_TO_COPY", "")
   _ray_parts = [p.strip() for p in _ray_extra_vars.split(",") if p.strip()]
@@ -991,7 +990,6 @@ def main(argv: list[str], context: Any = None) -> None:
   os.environ.setdefault("VLLM_TPU_RPA_VERSION", "2")
   os.environ.setdefault("DISABLE_MOSAIC_ATTN", "1")
   os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
-  os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
   if args.maxtext_model_name:
     os.environ.setdefault("NEW_MODEL_DESIGN", "1")
 

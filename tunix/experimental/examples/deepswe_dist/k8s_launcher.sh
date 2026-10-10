@@ -359,20 +359,24 @@ stop_orchestrator() {
   if [[ "$DRY_RUN" == "true" ]]; then
     echo "kubectl delete jobset ${ORCHESTRATOR_ID} -n ${K8S_NAMESPACE}"
     echo "kubectl delete workload -l jobset.sigs.k8s.io/jobset-name=${ORCHESTRATOR_ID} -n ${K8S_NAMESPACE}"
+    echo "kubectl delete pods -l jobset.sigs.k8s.io/jobset-name=${ORCHESTRATOR_ID} -n ${K8S_NAMESPACE} --force --grace-period=0 --ignore-not-found=true"
     if [[ "${USE_AGENT_SANDBOX}" == "1" || "${USE_AGENT_SANDBOX}" == "true" || "${USE_AGENT_SANDBOX}" == "True" ]]; then
-      echo "kubectl delete sandboxwarmpools -n ${SANDBOX_NAMESPACE} -l app.kubernetes.io/created-by=${ORCHESTRATOR_ID} --ignore-not-found=true"
-      echo "kubectl delete sandboxtemplates -n ${SANDBOX_NAMESPACE} -l app.kubernetes.io/created-by=${ORCHESTRATOR_ID} --ignore-not-found=true"
-      echo "kubectl delete sandboxclaims -n ${SANDBOX_NAMESPACE} -l app.kubernetes.io/created-by=${ORCHESTRATOR_ID} --ignore-not-found=true"
+      echo "kubectl delete sandboxwarmpools -n ${SANDBOX_NAMESPACE} -l app.kubernetes.io/created-by=${ORCHESTRATOR_ID} --wait=false --ignore-not-found=true"
+      echo "kubectl delete sandboxtemplates -n ${SANDBOX_NAMESPACE} -l app.kubernetes.io/created-by=${ORCHESTRATOR_ID} --wait=false --ignore-not-found=true"
+      echo "kubectl delete sandboxclaims -n ${SANDBOX_NAMESPACE} -l app.kubernetes.io/created-by=${ORCHESTRATOR_ID} --wait=false --ignore-not-found=true"
+      echo "kubectl delete sandboxes -n ${SANDBOX_NAMESPACE} -l app.kubernetes.io/created-by=${ORCHESTRATOR_ID} --wait=false --ignore-not-found=true"
       echo "kubectl delete pods -n ${SANDBOX_NAMESPACE} -l app.kubernetes.io/created-by=${ORCHESTRATOR_ID} --force --grace-period=0 --ignore-not-found=true"
     fi
   else
-    kubectl delete jobset "${ORCHESTRATOR_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found=true
-    kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name=${ORCHESTRATOR_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
+    kubectl delete jobset "${ORCHESTRATOR_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found=true --wait=false
+    kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name=${ORCHESTRATOR_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found=true --wait=false 2>/dev/null || true
+    kubectl delete pods -l "jobset.sigs.k8s.io/jobset-name=${ORCHESTRATOR_ID}" -n "${K8S_NAMESPACE}" --force --grace-period=0 --ignore-not-found=true 2>/dev/null || true
     if [[ "${USE_AGENT_SANDBOX}" == "1" || "${USE_AGENT_SANDBOX}" == "true" || "${USE_AGENT_SANDBOX}" == "True" ]]; then
       echo "Cleaning up sandboxes and warmpools for ${ORCHESTRATOR_ID} in ${SANDBOX_NAMESPACE}..."
-      kubectl delete sandboxwarmpools -n "${SANDBOX_NAMESPACE}" -l "app.kubernetes.io/created-by=${ORCHESTRATOR_ID}" --ignore-not-found=true 2>/dev/null || true
-      kubectl delete sandboxtemplates -n "${SANDBOX_NAMESPACE}" -l "app.kubernetes.io/created-by=${ORCHESTRATOR_ID}" --ignore-not-found=true 2>/dev/null || true
-      kubectl delete sandboxclaims -n "${SANDBOX_NAMESPACE}" -l "app.kubernetes.io/created-by=${ORCHESTRATOR_ID}" --ignore-not-found=true 2>/dev/null || true
+      kubectl delete sandboxwarmpools -n "${SANDBOX_NAMESPACE}" -l "app.kubernetes.io/created-by=${ORCHESTRATOR_ID}" --wait=false --ignore-not-found=true 2>/dev/null || true
+      kubectl delete sandboxtemplates -n "${SANDBOX_NAMESPACE}" -l "app.kubernetes.io/created-by=${ORCHESTRATOR_ID}" --wait=false --ignore-not-found=true 2>/dev/null || true
+      kubectl delete sandboxclaims -n "${SANDBOX_NAMESPACE}" -l "app.kubernetes.io/created-by=${ORCHESTRATOR_ID}" --wait=false --ignore-not-found=true 2>/dev/null || true
+      kubectl delete sandboxes -n "${SANDBOX_NAMESPACE}" -l "app.kubernetes.io/created-by=${ORCHESTRATOR_ID}" --wait=false --ignore-not-found=true 2>/dev/null || true
       kubectl delete pods -n "${SANDBOX_NAMESPACE}" -l "app.kubernetes.io/created-by=${ORCHESTRATOR_ID}" --force --grace-period=0 --ignore-not-found=true 2>/dev/null || true
     fi
   fi
@@ -569,9 +573,11 @@ stop_trainer() {
   if [[ "$DRY_RUN" == "true" ]]; then
     echo "kubectl delete jobset ${TRAINER_ID} -n ${K8S_NAMESPACE}"
     echo "kubectl delete workload -l jobset.sigs.k8s.io/jobset-name=${TRAINER_ID} -n ${K8S_NAMESPACE}"
+    echo "kubectl delete pods -l jobset.sigs.k8s.io/jobset-name=${TRAINER_ID} -n ${K8S_NAMESPACE} --force --grace-period=0 --ignore-not-found=true"
   else
-    kubectl delete jobset "${TRAINER_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found=true
-    kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name=${TRAINER_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
+    kubectl delete jobset "${TRAINER_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found=true --wait=false
+    kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name=${TRAINER_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found=true --wait=false 2>/dev/null || true
+    kubectl delete pods -l "jobset.sigs.k8s.io/jobset-name=${TRAINER_ID}" -n "${K8S_NAMESPACE}" --force --grace-period=0 --ignore-not-found=true 2>/dev/null || true
   fi
 }
 
@@ -700,16 +706,24 @@ stop_rollout() {
   if [[ "$DRY_RUN" == "true" ]]; then
     echo "kubectl delete jobset ${ROLLOUT_ID} -n ${K8S_NAMESPACE}"
     kubectl get workload -n "${K8S_NAMESPACE}" -o name 2>/dev/null | grep -E "jobset-${ROLLOUT_ID}-[a-f0-9]+" | xargs -r echo kubectl delete -n "${K8S_NAMESPACE}"
+    echo "kubectl delete pods -l jobset.sigs.k8s.io/jobset-name=${ROLLOUT_ID} -n ${K8S_NAMESPACE} --force --grace-period=0 --ignore-not-found=true"
     if [[ ${replicas} -gt 1 ]]; then
+      local selector_list
+      selector_list=$(seq -s, -f "${ROLLOUT_ID}-%g" 0 $((replicas - 1)))
       echo "kubectl delete jobset $(seq -f "${ROLLOUT_ID}-%g" 0 $((replicas - 1))) -n ${K8S_NAMESPACE}"
       kubectl get workload -n "${K8S_NAMESPACE}" -o name 2>/dev/null | grep -E "jobset-${ROLLOUT_ID}-[0-9]+-[a-f0-9]+" | xargs -r echo kubectl delete -n "${K8S_NAMESPACE}"
+      echo "kubectl delete pods -l \"jobset.sigs.k8s.io/jobset-name in (${selector_list})\" -n ${K8S_NAMESPACE} --force --grace-period=0 --ignore-not-found=true"
     fi
   else
-    kubectl delete jobset "${ROLLOUT_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found=true
+    kubectl delete jobset "${ROLLOUT_ID}" -n "${K8S_NAMESPACE}" --ignore-not-found=true --wait=false
     kubectl get workload -n "${K8S_NAMESPACE}" -o name 2>/dev/null | grep -E "jobset-${ROLLOUT_ID}-[a-f0-9]+" | xargs -r kubectl delete -n "${K8S_NAMESPACE}" --ignore-not-found=true --wait=false 2>/dev/null || true
+    kubectl delete pods -l "jobset.sigs.k8s.io/jobset-name=${ROLLOUT_ID}" -n "${K8S_NAMESPACE}" --force --grace-period=0 --ignore-not-found=true 2>/dev/null || true
     if [[ ${replicas} -gt 1 ]]; then
-      kubectl delete jobset $(seq -f "${ROLLOUT_ID}-%g" 0 $((replicas - 1))) -n "${K8S_NAMESPACE}" --ignore-not-found=true 2>/dev/null || true
+      local selector_list
+      selector_list=$(seq -s, -f "${ROLLOUT_ID}-%g" 0 $((replicas - 1)))
+      kubectl delete jobset $(seq -f "${ROLLOUT_ID}-%g" 0 $((replicas - 1))) -n "${K8S_NAMESPACE}" --ignore-not-found=true --wait=false 2>/dev/null || true
       kubectl get workload -n "${K8S_NAMESPACE}" -o name 2>/dev/null | grep -E "jobset-${ROLLOUT_ID}-[0-9]+-[a-f0-9]+" | xargs -r kubectl delete -n "${K8S_NAMESPACE}" --ignore-not-found=true --wait=false 2>/dev/null || true
+      kubectl delete pods -l "jobset.sigs.k8s.io/jobset-name in (${selector_list})" -n "${K8S_NAMESPACE}" --force --grace-period=0 --ignore-not-found=true 2>/dev/null || true
     fi
   fi
 }
@@ -1286,32 +1300,38 @@ stop_eval() {
   local sandbox_selector="app.kubernetes.io/created-by in (${selector_list})"
   if [[ "$DRY_RUN" == "true" ]]; then
     echo "[DRY RUN] Would delete jobset ${eval_name} in namespace ${eval_ns}"
+    echo "kubectl delete pods -l jobset.sigs.k8s.io/jobset-name=${eval_name} -n ${eval_ns} --force --grace-period=0 --ignore-not-found=true"
     if [[ ${replicas} -gt 1 ]]; then
       local selector_list
       selector_list=$(seq -s, -f "${eval_name}-%g" 0 $((replicas - 1)))
       echo "kubectl delete jobset $(seq -f "${eval_name}-%g" 0 $((replicas - 1))) -n ${eval_ns}"
       echo "kubectl delete workload -l \"jobset.sigs.k8s.io/jobset-name in (${selector_list})\" -n ${eval_ns} --ignore-not-found=true --wait=false"
+      echo "kubectl delete pods -l \"jobset.sigs.k8s.io/jobset-name in (${selector_list})\" -n ${eval_ns} --force --grace-period=0 --ignore-not-found=true"
     fi
     if [[ "${USE_AGENT_SANDBOX}" == "1" || "${USE_AGENT_SANDBOX}" == "true" || "${USE_AGENT_SANDBOX}" == "True" ]]; then
-      echo "kubectl delete sandboxwarmpools -n ${SANDBOX_NAMESPACE} -l \"${sandbox_selector}\" --ignore-not-found=true"
-      echo "kubectl delete sandboxtemplates -n ${SANDBOX_NAMESPACE} -l \"${sandbox_selector}\" --ignore-not-found=true"
-      echo "kubectl delete sandboxclaims -n ${SANDBOX_NAMESPACE} -l \"${sandbox_selector}\" --ignore-not-found=true"
+      echo "kubectl delete sandboxwarmpools -n ${SANDBOX_NAMESPACE} -l \"${sandbox_selector}\" --wait=false --ignore-not-found=true"
+      echo "kubectl delete sandboxtemplates -n ${SANDBOX_NAMESPACE} -l \"${sandbox_selector}\" --wait=false --ignore-not-found=true"
+      echo "kubectl delete sandboxclaims -n ${SANDBOX_NAMESPACE} -l \"${sandbox_selector}\" --wait=false --ignore-not-found=true"
+      echo "kubectl delete sandboxes -n ${SANDBOX_NAMESPACE} -l \"${sandbox_selector}\" --wait=false --ignore-not-found=true"
       echo "kubectl delete pods -n ${SANDBOX_NAMESPACE} -l \"${sandbox_selector}\" --force --grace-period=0 --ignore-not-found=true"
     fi
   else
-    kubectl delete jobset "${eval_name}" -n "${eval_ns}" --ignore-not-found=true || true
-    kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name=${eval_name}" -n "${eval_ns}" --ignore-not-found=true 2>/dev/null || true
+    kubectl delete jobset "${eval_name}" -n "${eval_ns}" --ignore-not-found=true --wait=false || true
+    kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name=${eval_name}" -n "${eval_ns}" --ignore-not-found=true --wait=false 2>/dev/null || true
+    kubectl delete pods -l "jobset.sigs.k8s.io/jobset-name=${eval_name}" -n "${eval_ns}" --force --grace-period=0 --ignore-not-found=true 2>/dev/null || true
     if [[ ${replicas} -gt 1 ]]; then
       local selector_list
       selector_list=$(seq -s, -f "${eval_name}-%g" 0 $((replicas - 1)))
-      kubectl delete jobset $(seq -f "${eval_name}-%g" 0 $((replicas - 1))) -n "${eval_ns}" --ignore-not-found=true 2>/dev/null || true
+      kubectl delete jobset $(seq -f "${eval_name}-%g" 0 $((replicas - 1))) -n "${eval_ns}" --ignore-not-found=true --wait=false 2>/dev/null || true
       kubectl delete workload -l "jobset.sigs.k8s.io/jobset-name in (${selector_list})" -n "${eval_ns}" --ignore-not-found=true --wait=false 2>/dev/null || true
+      kubectl delete pods -l "jobset.sigs.k8s.io/jobset-name in (${selector_list})" -n "${eval_ns}" --force --grace-period=0 --ignore-not-found=true 2>/dev/null || true
     fi
     if [[ "${USE_AGENT_SANDBOX}" == "1" || "${USE_AGENT_SANDBOX}" == "true" || "${USE_AGENT_SANDBOX}" == "True" ]]; then
       echo "Cleaning up sandboxes and warmpools for ${JOB_PREFIX} (${eval_name}) in ${SANDBOX_NAMESPACE}..."
-      kubectl delete sandboxwarmpools -n "${SANDBOX_NAMESPACE}" -l "${sandbox_selector}" --ignore-not-found=true 2>/dev/null || true
-      kubectl delete sandboxtemplates -n "${SANDBOX_NAMESPACE}" -l "${sandbox_selector}" --ignore-not-found=true 2>/dev/null || true
-      kubectl delete sandboxclaims -n "${SANDBOX_NAMESPACE}" -l "${sandbox_selector}" --ignore-not-found=true 2>/dev/null || true
+      kubectl delete sandboxwarmpools -n "${SANDBOX_NAMESPACE}" -l "${sandbox_selector}" --wait=false --ignore-not-found=true 2>/dev/null || true
+      kubectl delete sandboxtemplates -n "${SANDBOX_NAMESPACE}" -l "${sandbox_selector}" --wait=false --ignore-not-found=true 2>/dev/null || true
+      kubectl delete sandboxclaims -n "${SANDBOX_NAMESPACE}" -l "${sandbox_selector}" --wait=false --ignore-not-found=true 2>/dev/null || true
+      kubectl delete sandboxes -n "${SANDBOX_NAMESPACE}" -l "${sandbox_selector}" --wait=false --ignore-not-found=true 2>/dev/null || true
       kubectl delete pods -n "${SANDBOX_NAMESPACE}" -l "${sandbox_selector}" --force --grace-period=0 --ignore-not-found=true 2>/dev/null || true
     fi
   fi
