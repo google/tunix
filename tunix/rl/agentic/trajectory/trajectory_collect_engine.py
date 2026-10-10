@@ -727,6 +727,9 @@ class TrajectoryCollectEngine:
         else None
     )
     self.agent.reset()
+    # The episode budget (self.timeout) covers the agent run, not sandbox
+    # provisioning: env.reset is bounded separately by timeout=self.timeout in
+    # _run_with_timing above, so its wall time is not charged here.
     self._start_ts = time.perf_counter()
     self._response_token_count = 0
     self._cumulative_prompt_tokens = 0

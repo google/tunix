@@ -301,6 +301,18 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " --priority_scheduling; off, requests are served in arrival order."
       ),
   )
+  parser.add_argument(
+      "--sandbox_wait_initial",
+      action=argparse.BooleanOptionalAction,
+      default=True,
+      help=(
+          "Block the first dispatch until the warm pools of start-up batches"
+          " 0..max_staleness report Ready (PrewarmDatasetIterator readiness"
+          " barrier). --no-sandbox_wait_initial creates the pools and dispatches"
+          " immediately; each trajectory then waits for its own sandbox inside"
+          " fleet.acquire (FT_SANDBOX_READY_TIMEOUT_S x FT_SANDBOX_ACQUIRE_RETRIES)."
+      ),
+  )
   # ---- Optional GRPO algorithm options -------------------------------------
   # All default to off, so omitting them reproduces the previous behaviour.
   parser.add_argument(
@@ -458,16 +470,6 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       default=None,
       help=(
           "Maximum replicas per SandboxWarmPool (defaults to num_generations)."
-      ),
-  )
-  parser.add_argument(
-      "--sandbox_wait_initial",
-      action=argparse.BooleanOptionalAction,
-      default=os.getenv("SANDBOX_WAIT_INITIAL", "true").lower()
-      in ("1", "true", "yes"),
-      help=(
-          "Whether PrewarmDatasetIterator waits synchronously for the initial"
-          " warmpool batch before yielding the first prompt."
       ),
   )
   parser.add_argument(

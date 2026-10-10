@@ -310,6 +310,9 @@ export MAX_STALENESS=${MAX_STALENESS:-1}
 # prompt batch first (vLLM priority scheduling, priority = batch index) instead
 # of in arrival order (FCFS, the default).
 export ROLLOUT_PRIORITY_SCHEDULING=${ROLLOUT_PRIORITY_SCHEDULING:-false}
+# `false` skips the start-up warm-pool readiness barrier; rollouts wait per
+# trajectory in fleet.acquire instead (default true = current behaviour).
+export SANDBOX_WAIT_INITIAL=${SANDBOX_WAIT_INITIAL:-true}
 # Overlap each step's weight sync with the next step's training. Safe only
 # while the trainer transfers from host staging, since the next step rewrites
 # the device buffers mid-transfer.
@@ -396,7 +399,6 @@ export TEMPLATE_NAME_PREFIX="${TEMPLATE_NAME_PREFIX:-}"
 export SANDBOX_NODE_SELECTOR_KEY="${SANDBOX_NODE_SELECTOR_KEY:-cloud.google.com/gke-nodepool}"
 export SANDBOX_NODE_SELECTOR_VAL="${SANDBOX_NODE_SELECTOR_VAL:-sandbox-c3d-np}"
 export MAX_WARMPOOL_REPLICAS="${MAX_WARMPOOL_REPLICAS:-2}"
-export SANDBOX_WAIT_INITIAL="${SANDBOX_WAIT_INITIAL:-false}"
 export ROLLOUT_MAX_CONCURRENCY="${ROLLOUT_MAX_CONCURRENCY:-256}"
 export MAX_CONCURRENCY="${MAX_CONCURRENCY:-256}"
 export STEP_TIMEOUT_SECS="${STEP_TIMEOUT_SECS:-60}"
