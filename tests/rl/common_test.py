@@ -88,6 +88,58 @@ class CommonTest(parameterized.TestCase):
         kl_divergence, expected_value, atol=1e-5, rtol=1e-2
     )
 
+  def test_low_var_kl_nonnegative_near_equal_logps(self):
+    """K3 stays nonnegative when the two log-prob distributions nearly match.
+
+    `exp(d) - d - 1` cancels in float32 for `d = ref_logp - policy_logp` near
+    0. The reported case `d = 1e-6` used to return about `-5.96e-8`.
+    """
+    # diff = ref - policy. Includes the reported 1e-6 case and a smaller
+    # gap where exp(d) rounds to 1 and the direct formula goes negative.
+    policy_logps = jnp.asarray(
+        [-1e-6, 0.0, 1e-6, -3e-8, 3e-8, -2.5], dtype=jnp.float32
+    )
+    ref_logps = jnp.asarray(
+        [0.0, 0.0, 0.0, 0.0, 0.0, -2.5 + 1e-6], dtype=jnp.float32
+    )
+    kl = common.compute_kl_divergence(
+        policy_logps, ref_logps, method="low_var_kl"
+    )
+    self.assertEqual(kl.dtype, jnp.float32)
+    self.assertTrue(bool(jnp.all(kl >= 0.0)))
+
+    # Reported input. The real value is about 5e-13; float32 keeps a
+    # positive approximation of that, not the old negative result.
+    reported = float(kl[0])
+    self.assertGreater(reported, 0.0)
+    expected = float(np.expm1(np.float64(1e-6)) - np.float64(1e-6))
+    self.assertAlmostEqual(reported, expected, delta=1e-13)
+
+    jitted = jax.jit(
+        lambda p, r: common.compute_kl_divergence(p, r, method="low_var_kl")
+    )(policy_logps, ref_logps)
+    np.testing.assert_array_equal(jitted, kl)
+
+    # The outlier clamp is a separate bound. It does not repair this case,
+    # and a wide clamp must leave the near-zero result unchanged.
+    clamped = common.compute_kl_divergence(
+        policy_logps,
+        ref_logps,
+        method="low_var_kl",
+        clamp_value=10000.0,
+    )
+    np.testing.assert_array_equal(clamped, kl)
+
+    # Away from zero, K3 still matches the direct expression.
+    moderate = common.compute_kl_divergence(
+        jnp.asarray([0.2], dtype=jnp.float32),
+        jnp.asarray([0.5], dtype=jnp.float32),
+        method="low_var_kl",
+    )
+    diff = np.float64(0.3)
+    direct = np.float32(np.exp(diff) - diff - 1.0)
+    np.testing.assert_allclose(moderate, direct, rtol=1e-6, atol=1e-6)
+
   def test_selective_log_softmax(self):
     rng = jax.random.PRNGKey(0)
     logits = jax.random.uniform(rng, shape=(2, 4, 8))
