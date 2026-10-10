@@ -28,7 +28,6 @@ export MAXTEXT_CKPT="${MAXTEXT_CKPT:-gs://mlperf-6-1-submission/ckpt/qwen35_397b
 export MAXTEXT_OUTPUT_DIR="${MAXTEXT_OUTPUT_DIR:-${BUCKET}/maxtext/${JOB_PREFIX}}"
 export TRAJECTORY_LOG_DIR="${TRAJECTORY_LOG_DIR:-${BUCKET}/trajectories/${JOB_PREFIX}/logger}"
 export TRAJECTORY_STORE_ROOT_DIR="${TRAJECTORY_STORE_ROOT_DIR:-${TRAJECTORY_STORE_ROOT:-${BUCKET}/trajectories/${JOB_PREFIX}/store}}"
-export DATASET_PATH="${DATASET_PATH:-${BUCKET}/benchmark-r2e-gym-easy}"
 
 export K8S_NAMESPACE="${K8S_NAMESPACE:-priority-dev}"
 export USE_DYNAMIC_SLICING="true"
