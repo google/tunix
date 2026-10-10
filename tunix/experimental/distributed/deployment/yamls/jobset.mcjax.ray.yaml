@@ -19,7 +19,7 @@ metadata:
   namespace: ${NAMESPACE}
 ${QUEUE_LABEL}spec:
   failurePolicy:
-    restartStrategy: Recreate
+    restartStrategy: Recreate${FAIL_FAST_JOBSET_FAILURE_POLICY}
   network:
     enableDNSHostnames: true
     publishNotReadyAddresses: true
@@ -27,52 +27,26 @@ ${QUEUE_LABEL}spec:
   - name: proc
     template:
       spec:
-        backoffLimit: 2048000
+        backoffLimit: ${FAIL_FAST_WORKER_BACKOFF_LIMIT}${FAIL_FAST_POD_FAILURE_POLICY}
         completionMode: Indexed
         completions: ${COMPLETIONS}
         parallelism: ${PARALLELISM}
         template:
           metadata:
             annotations:
-              cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
-              # # place on nodes in the same block
-              # kueue.k8s.io/podset-required-topology: cloud.google.com/gce-topology-block
-              # # place on nodes in the same slice
-              # kueue.x-k8s.io/podset-slice-required-topology: cloud.google.com/gke-tpu-slice-${PODSET_SLICE_TOPOLOGY}-id
-              # kueue.x-k8s.io/podset-slice-size: "${PODSET_SLICE_SIZE}"
+              cluster-autoscaler.kubernetes.io/safe-to-evict: "false"${TPU_ANNOTATIONS}
           spec:
             serviceAccountName: ${SERVICE_ACCOUNT}
             dnsPolicy: ClusterFirstWithHostNet
             hostNetwork: true
-            restartPolicy: OnFailure${PRIORITY_CLASS_LINE}
+            restartPolicy: ${FAIL_FAST_WORKER_RESTART_POLICY}${PRIORITY_CLASS_LINE}
             terminationGracePeriodSeconds: 10
             nodeSelector:
-              cloud.google.com/gke-tpu-accelerator: ${TPU_TYPE}
-              cloud.google.com/gke-tpu-topology: ${TPU_TOPOLOGY}${RESERVATION_SELECTOR}
-            affinity:
-              # place on nodes in the same nodepool
-              podAffinity:
-                requiredDuringSchedulingIgnoredDuringExecution:
-                - topologyKey: cloud.google.com/gke-nodepool
-                  labelSelector:
-                    matchExpressions:
-                    - key: jobset.sigs.k8s.io/jobset-name
-                      operator: In
-                      values:
-                      - ${JOBSET_NAME}
-              # ensure exclusive access to the nodepool (among all jobsets created with this yaml)
-              podAntiAffinity:
-                requiredDuringSchedulingIgnoredDuringExecution:
-                - topologyKey: cloud.google.com/gke-nodepool
-                  labelSelector:
-                    matchExpressions:
-                    - key: jobset.sigs.k8s.io/jobset-name
-                      operator: Exists
-                    - key: jobset.sigs.k8s.io/jobset-name
-                      operator: NotIn
-                      values:
-                      - ${JOBSET_NAME}
-            # tolerations:
+              # tpu7x dynamic slicing: no gke-tpu-topology selector and no
+              # nodepool affinity (a carved slice can span pools); the generator
+              # fills in the slice annotations and partition-state affinity.
+              cloud.google.com/gke-tpu-accelerator: ${TPU_TYPE}${TPU_TOPOLOGY_SELECTOR}${RESERVATION_SELECTOR}
+${PW_NODE_AFFINITY}            # tolerations:
             # - key: "google.com/tpu"
             #   operator: "Equal"
             #   value: "present"
@@ -109,16 +83,14 @@ ${QUEUE_LABEL}spec:
                   RAY_HEAD="$${JOBSET_NAME}-$${REPLICATED_JOB_NAME}-$${JOB_INDEX}-0.$${JOBSET_NAME}"
                   echo "Ray head: $${RAY_HEAD}, this pod index: $${POD_INDEX}"
 
-                  (
+${FAIL_FAST_WRAPPER_PRE}                  (
                     if [ "$${POD_INDEX}" = "0" ]; then
-                      ${RAY_HEAD_PRE_INIT_COMMAND}
                       echo "Starting Ray head..."
                       ray start --head --port=6379
-                      sleep 5; until ray status; do sleep 5; done
+                      sleep 5; until ray status 2>/dev/null | grep -E -q "8(\.0)? TPU"; do sleep 2; done
 
                       ${STARTUP_COMMAND}
                     else
-                      ${RAY_WORKER_PRE_INIT_COMMAND}
                       # The head may not be up yet; JobSet gives no ordering.
                       until ray start --address=$${RAY_HEAD}:6379 --block; do
                         echo "Ray head $${RAY_HEAD} not ready, retrying in 5s..."
@@ -133,10 +105,16 @@ ${QUEUE_LABEL}spec:
                   wait $$PID
                   EXIT_CODE=$$?
 
-                  echo "Program End: $$(date)"
+${FAIL_FAST_WRAPPER_POST_POD0}                  echo "Program End: $$(date)"
                   echo "EXIT_CODE=$$EXIT_CODE"
                   exit $$EXIT_CODE
               env:
+              - name: RAIDEN_BROADCAST_K
+                value: "64"
+              - name: ENABLE_MULTI_NUMA
+                value: "${ENABLE_MULTI_NUMA}"
+              - name: TPU_RAIDEN_DATA_NICS
+                value: "${TPU_RAIDEN_DATA_NICS}"
               # Injects the JobSet Name
               - name: JOBSET_NAME
                 valueFrom:

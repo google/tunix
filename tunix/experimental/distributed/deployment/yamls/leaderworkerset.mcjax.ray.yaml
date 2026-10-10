@@ -16,10 +16,10 @@ apiVersion: leaderworkerset.x-k8s.io/v1
 kind: LeaderWorkerSet
 metadata:
   name: ${JOBSET_NAME}
-  namespace: default
+  namespace: ${NAMESPACE}
   annotations:
     leaderworkerset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool
-spec:
+${QUEUE_LABEL}spec:
   replicas: ${REPLICAS}
   leaderWorkerTemplate:
     size: ${PARALLELISM}
@@ -54,14 +54,12 @@ spec:
 
                 (
                   if [ "$$LWS_WORKER_INDEX" = "0" ]; then
-                    ${RAY_HEAD_PRE_INIT_COMMAND}
                     echo "Starting Ray Head..."
                     ray start --head --port=6379
                     sleep 5; until ray status; do sleep 5; done
 
                     ${STARTUP_COMMAND}
                   else
-                    ${RAY_WORKER_PRE_INIT_COMMAND}
                     ray start --address=$${LWS_LEADER_ADDRESS}:6379 --block
                   fi
                 ) & PID=$$!

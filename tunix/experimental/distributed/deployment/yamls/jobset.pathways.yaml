@@ -21,8 +21,8 @@ ${QUEUE_LABEL}spec:
   coordinator:
     replicatedJob: proc
   failurePolicy:
-    maxRestarts: 3
-    restartStrategy: Recreate
+${FAIL_FAST_LINE_DISABLE}    maxRestarts: 3
+    restartStrategy: Recreate${FAIL_FAST_JOBSET_FAILURE_POLICY}
   network:
     enableDNSHostnames: true
     publishNotReadyAddresses: true
@@ -33,35 +33,25 @@ ${QUEUE_LABEL}spec:
       metadata:
         annotations: {}
       spec:
-        backoffLimit: 0
+        backoffLimit: 0${FAIL_FAST_POD_FAILURE_POLICY}
         completionMode: Indexed
         completions: 1
         parallelism: 1
         template:
+          metadata:
+            annotations:
+              cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
           spec:
+            priorityClassName: ${PRIORITY_CLASS}
+            serviceAccountName: ${SERVICE_ACCOUNT}
             dnsPolicy: ClusterFirstWithHostNet
             hostNetwork: true
             restartPolicy: Never
-            terminationGracePeriodSeconds: 10
+            terminationGracePeriodSeconds: ${TERMINATION_GRACE_SECONDS}
             nodeSelector:
-              cloud.google.com/gke-tpu-accelerator: ${TPU_TYPE}
-              cloud.google.com/gke-tpu-topology: ${TPU_TOPOLOGY}
-            affinity:
-              podAffinity:
-                requiredDuringSchedulingIgnoredDuringExecution:
-                # place on one of the pathways-worker nodes
-                - topologyKey: kubernetes.io/hostname
-                  labelSelector:
-                    matchExpressions:
-                    - key: jobset.sigs.k8s.io/jobset-name
-                      operator: In
-                      values:
-                      - ${JOBSET_NAME}
-                    - key: jobset.sigs.k8s.io/replicatedjob-name
-                      operator: In
-                      values:
-                      - pw-node
-            containers:
+${HEAD_NODE_SELECTOR}
+${HEAD_AFFINITY}${HEAD_TOLERATIONS}
+            ${FAIL_FAST_PROC_SIDECARS_KEY}:
             - name: pathways-rm
               image: ${SERVER_IMAGE}
               imagePullPolicy: IfNotPresent
@@ -84,6 +74,12 @@ ${QUEUE_LABEL}spec:
               - --instance_count=${REPLICAS}
               - --instance_type=${PW_INSTANCE_TYPE}:${TPU_TOPOLOGY}
               env:
+              - name: RAIDEN_BROADCAST_K
+                value: "64"
+              - name: ENABLE_MULTI_NUMA
+                value: "${ENABLE_MULTI_NUMA}"
+              - name: TPU_RAIDEN_DATA_NICS
+                value: "${TPU_RAIDEN_DATA_NICS}"
               - name: REPLICATED_JOB_NAME
                 valueFrom:
                   fieldRef:
@@ -118,8 +114,14 @@ ${QUEUE_LABEL}spec:
               - --server_port=29000
               - --resource_manager_address=$$(PATHWAYS_HEAD):29001
               - --gcs_scratch_location=${GCS_SCRATCH_LOCATION}
-              - --temporary_flags_for_debugging=temporary_flag_for_debugging_test_only_hold_death_ref=false
+              - --temporary_flags_for_debugging=temporary_flag_for_debugging_test_only_hold_death_ref=false${PATHWAYS_PROXY_EXTRA_ARGS}${COLOCATED_PYTHON_PROXY_ARGS}
               env:
+              - name: RAIDEN_BROADCAST_K
+                value: "64"
+              - name: ENABLE_MULTI_NUMA
+                value: "${ENABLE_MULTI_NUMA}"
+              - name: TPU_RAIDEN_DATA_NICS
+                value: "${TPU_RAIDEN_DATA_NICS}"
               - name: PATHWAYS_HEAD
                 valueFrom:
                   fieldRef:
@@ -127,7 +129,7 @@ ${QUEUE_LABEL}spec:
               ports:
               - containerPort: 29000
                 protocol: TCP
-            - name: ${USER_CONTAINER}
+${FAIL_FAST_PROC_MAIN_CONTAINERS}            - name: ${USER_CONTAINER}
               image: ${USER_CONTAINER_IMAGE}
               imagePullPolicy: Always
               securityContext:
@@ -149,7 +151,7 @@ ${QUEUE_LABEL}spec:
                   _sigterm() (kill -SIGTERM $$! 2>/dev/null)
                   trap _sigterm SIGTERM
 
-                  (
+${FAIL_FAST_WRAPPER_PRE}                  (
                     ${STARTUP_COMMAND}
                   ) & PID=$$!
 
@@ -159,10 +161,16 @@ ${QUEUE_LABEL}spec:
                   wait $$PID
                   EXIT_CODE=$$?
 
-                  echo "Program End: $$(date)"
+${FAIL_FAST_WRAPPER_POST}                  echo "Program End: $$(date)"
                   echo "EXIT_CODE=$$EXIT_CODE"
                   exit $$EXIT_CODE
               env:
+              - name: RAIDEN_BROADCAST_K
+                value: "64"
+              - name: ENABLE_MULTI_NUMA
+                value: "${ENABLE_MULTI_NUMA}"
+              - name: TPU_RAIDEN_DATA_NICS
+                value: "${TPU_RAIDEN_DATA_NICS}"
               # Injects the JobSet Name
               - name: JOBSET_NAME
                 valueFrom:
@@ -203,42 +211,17 @@ ${QUEUE_LABEL}spec:
         template:
           metadata:
             annotations:
-              # # place on nodes in the same block
-              # kueue.k8s.io/podset-required-topology: cloud.google.com/gce-topology-block
-              # # place on nodes in the same slice
-              # kueue.x-k8s.io/podset-slice-required-topology: cloud.google.com/gke-tpu-slice-${PODSET_SLICE_TOPOLOGY}-id
-              # kueue.x-k8s.io/podset-slice-size: "${PODSET_SLICE_SIZE}"
+              cluster-autoscaler.kubernetes.io/safe-to-evict: "false"${TPU_ANNOTATIONS}
           spec:
+            priorityClassName: ${PRIORITY_CLASS}
+            serviceAccountName: ${SERVICE_ACCOUNT}
             dnsPolicy: ClusterFirstWithHostNet
             hostNetwork: true
             restartPolicy: OnFailure
-            terminationGracePeriodSeconds: 10
+            terminationGracePeriodSeconds: ${TERMINATION_GRACE_SECONDS}
             nodeSelector:
-              cloud.google.com/gke-tpu-accelerator: ${TPU_TYPE}
-              cloud.google.com/gke-tpu-topology: ${TPU_TOPOLOGY}
-            affinity:
-              # place on nodes in the same nodepool
-              podAffinity:
-                requiredDuringSchedulingIgnoredDuringExecution:
-                - topologyKey: cloud.google.com/gke-nodepool
-                  labelSelector:
-                    matchExpressions:
-                    - key: jobset.sigs.k8s.io/jobset-name
-                      operator: In
-                      values:
-                      - ${JOBSET_NAME}
-              # ensure exclusive access to the nodepool (among all jobsets created with this yaml)
-              podAntiAffinity:
-                requiredDuringSchedulingIgnoredDuringExecution:
-                - topologyKey: cloud.google.com/gke-nodepool
-                  labelSelector:
-                    matchExpressions:
-                    - key: jobset.sigs.k8s.io/jobset-name
-                      operator: Exists
-                    - key: jobset.sigs.k8s.io/jobset-name
-                      operator: NotIn
-                      values:
-                      - ${JOBSET_NAME}
+              cloud.google.com/gke-tpu-accelerator: ${TPU_TYPE}${TPU_TOPOLOGY_SELECTOR}${RESERVATION_SELECTOR}
+${PW_NODE_AFFINITY}
             # tolerations:
             # - key: "google.com/tpu"
             #   operator: "Equal"
@@ -257,8 +240,14 @@ ${QUEUE_LABEL}spec:
               args:
               - --server_port=29005
               - --resource_manager_address=$$(PATHWAYS_HEAD):29001
-              - --gcs_scratch_location=${GCS_SCRATCH_LOCATION}
+              - --gcs_scratch_location=${GCS_SCRATCH_LOCATION}${COLOCATED_PYTHON_WORKER_ARGS}
               env:
+              - name: RAIDEN_BROADCAST_K
+                value: "64"
+              - name: ENABLE_MULTI_NUMA
+                value: "${ENABLE_MULTI_NUMA}"
+              - name: TPU_RAIDEN_DATA_NICS
+                value: "${TPU_RAIDEN_DATA_NICS}"
               - name: TPU_MIN_LOG_LEVEL
                 value: "0"
               - name: TF_CPP_MIN_LOG_LEVEL
@@ -266,7 +255,7 @@ ${QUEUE_LABEL}spec:
               - name: XCLOUD_ENVIRONMENT
                 value: GCP
               - name: MEGASCALE_GRPC_ENABLE_XOR_TRACER
-                value: "false"
+                value: "false"${PATHWAYS_WORKER_EXTRA_ENV}
               - name: MEGASCALE_NUM_SLICES
                 valueFrom:
                   fieldRef:
@@ -308,27 +297,12 @@ ${QUEUE_LABEL}spec:
                   memory: ${PATHWAYS_WORKER_MEMORY}
               volumeMounts:
               - mountPath: /tmp
-                name: shared-tmp
-            # initContainers:
-            # - name: colocated-python-sidecar
-            #   image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways-colocated-python/sidecar:2026_03_16-python_3.12-jax_0.9.1
-            #   imagePullPolicy: Always
-            #   env:
-            #   - name: GRPC_SERVER_ADDRESS
-            #     value: "'0.0.0.0:50051'"
-            #   ports:
-            #   - containerPort: 50051
-            #     protocol: TCP
-            #   resources: {}
-            #   restartPolicy: Always
-            #   volumeMounts:
-            #   - mountPath: /tmp
-            #     name: shared-tmp
+                name: shared-tmp${COLOCATED_PYTHON_SIDECAR_BLOCK}
             volumes:
             - name: shared-tmp
               hostPath:
                 path: /tmp
-                type: DirectoryOrCreate
+                type: DirectoryOrCreate${COLOCATED_PYTHON_SIDECAR_VOLUME}
   startupPolicy:
     startupPolicyOrder: AnyOrder
   successPolicy:

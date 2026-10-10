@@ -274,12 +274,13 @@ if [[ "${ASYNC_WEIGHT_SYNC}" == "true" && "${WEIGHT_SYNC_MODE}" == "raiden" \
 fi
 # Pack the next microbatch while the trainer runs the current one.
 export PIPELINE_TRAIN_MICROBATCHES=${PIPELINE_TRAIN_MICROBATCHES:-false}
-export TRAJECTORY_GROUP_ORDER=${TRAJECTORY_GROUP_ORDER:-prompt_batch}
+export TRAJECTORY_GROUP_ORDER=${TRAJECTORY_GROUP_ORDER:-prompt_arrival}
 export TRAJECTORY_STORE_DB_URL="${TRAJECTORY_STORE_DB_URL:-}"
 
 # Sequence packing
 export MAX_SEQ_TOKEN_PER_TPU=${MAX_SEQ_TOKEN_PER_TPU:-65536}
 export MAX_SEGMENTS_PER_PACKED_ROW=${MAX_SEGMENTS_PER_PACKED_ROW:-16}
+export SEGMENT_ALIGNMENT_BOUNDARY=${SEGMENT_ALIGNMENT_BOUNDARY:-64}
 
 # Sampling Parameters (explicitly disable top-k, set top-p 1.0 and temperature 1.0)
 export TEMPERATURE="${TEMPERATURE:-1.0}"
@@ -290,7 +291,7 @@ export TOP_K="-1"
 export BETA=0.0
 export EPSILON=0.2
 export EPSILON_HIGH=0.28
-export USE_ROLLOUT_LOGPS="false"
+export USE_ROLLOUT_LOGPS="${USE_ROLLOUT_LOGPS:-true}"
 export EXACT_TOKEN_CONTINUITY="${EXACT_TOKEN_CONTINUITY:-true}"
 # Per the MLPerf Qwen3.5 DeepSWE NeMo-RL reference (`overlong_filtering: true`),
 # truncated/overlong trajectories have their token loss masked out

@@ -16,12 +16,12 @@ apiVersion: jobset.x-k8s.io/v1alpha2
 kind: JobSet
 metadata:
   name: ${JOBSET_NAME}
-  namespace: default
-spec:
+  namespace: ${NAMESPACE}
+${QUEUE_LABEL}spec:
   coordinator:
     replicatedJob: proc
   failurePolicy:
-    restartStrategy: Recreate
+    restartStrategy: Recreate${FAIL_FAST_JOBSET_FAILURE_POLICY}
   network:
     enableDNSHostnames: true
     publishNotReadyAddresses: true
@@ -32,19 +32,22 @@ spec:
       metadata:
         annotations: {}
       spec:
-        backoffLimit: 0
+        backoffLimit: 0${FAIL_FAST_POD_FAILURE_POLICY}
         completionMode: Indexed
         completions: 1
         parallelism: 1
         template:
+          metadata:
+            annotations:
+              cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
           spec:
             dnsPolicy: ClusterFirstWithHostNet
             hostNetwork: true
-            restartPolicy: Never
-            terminationGracePeriodSeconds: 10
+            restartPolicy: Never${PRIORITY_CLASS_LINE}
+            terminationGracePeriodSeconds: ${TERMINATION_GRACE_SECONDS}
             nodeSelector:
               cloud.google.com/gke-tpu-accelerator: ${TPU_TYPE}
-              cloud.google.com/gke-tpu-topology: ${TPU_TOPOLOGY}
+              cloud.google.com/gke-tpu-topology: ${TPU_TOPOLOGY}${RESERVATION_SELECTOR}
             affinity:
               podAffinity:
                 requiredDuringSchedulingIgnoredDuringExecution:
@@ -72,12 +75,14 @@ spec:
                     resources:
                       requests:
                         storage: 400Gi
-            containers:
+            ${FAIL_FAST_PROC_SIDECARS_KEY}:
             - name: pathways-rm
               image: ${SERVER_IMAGE}
               imagePullPolicy: IfNotPresent
               restartPolicy: Always
               resources:
+                requests:
+                  memory: 4G
                 limits:
                   cpu: "24"
                   memory: 32G
@@ -112,6 +117,8 @@ spec:
               imagePullPolicy: IfNotPresent
               restartPolicy: Always
               resources:
+                requests:
+                  memory: 16G
                 limits:
                   cpu: "16"
                   memory: ${PATHWAYS_PROXY_MEMORY_LIMIT}
@@ -119,7 +126,7 @@ spec:
               - --server_port=29000
               - --resource_manager_address=$$(PATHWAYS_HEAD):29001
               - --gcs_scratch_location=${GCS_SCRATCH_LOCATION}
-              - --temporary_flags_for_debugging=temporary_flag_for_debugging_test_only_hold_death_ref=false
+              - --temporary_flags_for_debugging=temporary_flag_for_debugging_test_only_hold_death_ref=false${PATHWAYS_PROXY_EXTRA_ARGS}${COLOCATED_PYTHON_PROXY_ARGS}
               env:
               - name: PATHWAYS_HEAD
                 valueFrom:
@@ -128,13 +135,15 @@ spec:
               ports:
               - containerPort: 29000
                 protocol: TCP
-            - name: ${USER_CONTAINER}
+${FAIL_FAST_PROC_MAIN_CONTAINERS}            - name: ${USER_CONTAINER}
               image: ${USER_CONTAINER_IMAGE}
               imagePullPolicy: Always
               securityContext:
                 privileged: true
               # Explicit memory allocation prevents premature kubelet OOM-kills
               # during Raiden D2H host-staging of large MoE weights (~80GB+).
+              # Intentionally fixed at 200G/420G (overrides v5e 48G/70G defaults)
+              # so Node 0 requests total 200G (user) + 16G (proxy) + 4G (rm) = 220G < 425.2G.
               resources:
                 requests:
                   memory: 200G
@@ -158,7 +167,7 @@ spec:
                   # Disable core dumps to prevent large crash dumps from filling disk.
                   ulimit -c 0
 
-                  (
+${FAIL_FAST_WRAPPER_PRE}                  (
                     ${STARTUP_COMMAND}
                   ) & PID=$$!
 
@@ -168,7 +177,7 @@ spec:
                   wait $$PID
                   EXIT_CODE=$$?
 
-                  echo "Program End: $$(date)"
+${FAIL_FAST_WRAPPER_POST}                  echo "Program End: $$(date)"
                   echo "EXIT_CODE=$$EXIT_CODE"
                   exit $$EXIT_CODE
               env:
@@ -212,6 +221,7 @@ spec:
         template:
           metadata:
             annotations:
+              cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
               # # place on nodes in the same block
               # kueue.k8s.io/podset-required-topology: cloud.google.com/gce-topology-block
               # # place on nodes in the same slice
@@ -220,11 +230,11 @@ spec:
           spec:
             dnsPolicy: ClusterFirstWithHostNet
             hostNetwork: true
-            restartPolicy: OnFailure
-            terminationGracePeriodSeconds: 10
+            restartPolicy: OnFailure${PRIORITY_CLASS_LINE}
+            terminationGracePeriodSeconds: ${TERMINATION_GRACE_SECONDS}
             nodeSelector:
               cloud.google.com/gke-tpu-accelerator: ${TPU_TYPE}
-              cloud.google.com/gke-tpu-topology: ${TPU_TOPOLOGY}
+              cloud.google.com/gke-tpu-topology: ${TPU_TOPOLOGY}${RESERVATION_SELECTOR}
             affinity:
               # place on nodes in the same nodepool
               podAffinity:
@@ -256,7 +266,7 @@ spec:
               args:
               - --server_port=29005
               - --resource_manager_address=$$(PATHWAYS_HEAD):29001
-              - --gcs_scratch_location=${GCS_SCRATCH_LOCATION}
+              - --gcs_scratch_location=${GCS_SCRATCH_LOCATION}${COLOCATED_PYTHON_WORKER_ARGS}
               env:
               - name: TPU_MIN_LOG_LEVEL
                 value: "0"
@@ -265,7 +275,7 @@ spec:
               - name: XCLOUD_ENVIRONMENT
                 value: GCP
               - name: MEGASCALE_GRPC_ENABLE_XOR_TRACER
-                value: "false"
+                value: "false"${PATHWAYS_WORKER_EXTRA_ENV}
               - name: MEGASCALE_NUM_SLICES
                 valueFrom:
                   fieldRef:
@@ -306,12 +316,12 @@ spec:
                   google.com/tpu: "4"
               volumeMounts:
               - mountPath: /tmp
-                name: shared-tmp
+                name: shared-tmp${COLOCATED_PYTHON_SIDECAR_BLOCK}
             volumes:
             - name: shared-tmp
               hostPath:
                 path: /tmp
-                type: DirectoryOrCreate
+                type: DirectoryOrCreate${COLOCATED_PYTHON_SIDECAR_VOLUME}
   startupPolicy:
     startupPolicyOrder: AnyOrder
   successPolicy:
