@@ -876,6 +876,7 @@ if cfg:
           --env_name=deepswe_env \
           --agent_name=${ROLLOUT_AGENT_NAME} \
           --max_concurrency=${ROLLOUT_MAX_CONCURRENCY} \
+          ${TRAJECTORY_STORE_ROOT_DIR:+--enable_trajectory_store --trajectory_store_dir=\"${TRAJECTORY_STORE_ROOT_DIR}\" --run_id=\"${JOB_PREFIX}\"} \
           --seed=${SEED} \
           ${lora_args} \
           ${maxtext_args} \

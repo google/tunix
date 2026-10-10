@@ -467,9 +467,14 @@ def _trajectory_store_config(
   root_dir = getattr(args, "trajectory_store_dir", "")
   if root_dir:
     config["root_dir"] = root_dir
-  run_id = getattr(args, "run_id", "")
-  if run_id:
-    config["run_id"] = run_id
+  run_id = (
+      getattr(args, "run_id", "")
+      or os.getenv("RUN_ID", "")
+      or os.getenv("JOB_PREFIX", "")
+      or getattr(args, "wandb_run_name", "")
+      or "default"
+  )
+  config["run_id"] = run_id
   return config
 
 
@@ -648,25 +653,10 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   if args.disable_weight_sync_timeouts:
     os.environ["WEIGHT_SYNC_DISABLE_TIMEOUTS"] = "1"
 
-  cluster.wait_for_workers(
-      min_workers={
-          datatypes.Role.ACTOR: 1,
-          datatypes.Role.ROLLOUT: max(1, int(args.rollout_replicas)),
-          datatypes.Role.REFERENCE: 1 if args.beta != 0.0 else 0,
-      },
-      timeout=args.init_timeout_s,
-      poll_interval_s=1.0,
-  )
-  logging.info("Registered workers: %s", cluster.worker_infos())
-
   from examples.deepswe import sandbox_utils  # pylint: disable=g-import-not-at-top
   from examples.deepswe import swe_env  # pylint: disable=g-import-not-at-top
 
   algo = _build_algo(args)
-  trainer_handles = cluster.worker_handles(datatypes.Role.ACTOR)
-  if len(trainer_handles) != 1:
-    raise ValueError(f"Expected 1 trainer worker, got {len(trainer_handles)}.")
-
   metrics_logging_options = metrics_logger_lib.MetricsLoggerOptions(
       log_dir=args.log_dir,
       project_name=args.wandb_project,
@@ -679,6 +669,68 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   prompt_stream = None
   program = None
   try:
+    program = rl_program.StandardRLProgram(
+        algo=algo,
+        dataset=None,
+        max_steps=args.max_steps,
+        reward_fns=[],
+        generation_args=datatypes.GenerationArgs(
+            temperature=args.temperature,
+            top_p=args.top_p,
+            top_k=0 if args.top_k < 0 else args.top_k,
+            return_logprobs=args.use_rollout_logps,
+        ),
+        batch_size=args.batch_size,
+        batch_config=batch_assembly.BatchConfig(
+            pad_id=pad_id,
+            max_prompt_length=args.max_prompt_length,
+            max_response_length=args.max_response_length,
+            max_seq_token_per_tpu=args.max_seq_token_per_tpu,
+            max_segments_per_packed_row=args.max_segments_per_packed_row,
+            segment_alignment_boundary=args.segment_alignment_boundary,
+            trainer_fsdp=args.trainer_fsdp,
+            trainer_dp=args.trainer_dp,
+            trainer_expert=args.trainer_expert,
+        ),
+        metrics_logging_options=metrics_logging_options,
+        trajectory_log_dir=args.trajectory_log_dir,
+        trajectory_store=cluster.trajectory_store,
+        max_staleness=args.max_staleness,
+        group_order=args.trajectory_group_order,
+        sync_weights=(args.weight_sync_mode != weight_sync.WeightSyncMode.NONE),
+        on_step_begin=lambda step: logging.info(
+            ">>> DeepSWE step %d starting | policy_version=%d",
+            step,
+            step,
+        ),
+        on_step_end=lambda step, result: logging.info(
+            "<<< DeepSWE step %d finished | train_result=%s",
+            step,
+            result,
+        ),
+    )
+
+    cluster.wait_for_workers(
+        min_workers={
+            datatypes.Role.ACTOR: 1,
+            datatypes.Role.ROLLOUT: max(1, int(args.rollout_replicas)),
+            datatypes.Role.REFERENCE: 1 if args.beta != 0.0 else 0,
+        },
+        timeout=args.init_timeout_s,
+        poll_interval_s=1.0,
+    )
+    logging.info("Registered workers: %s", cluster.worker_infos())
+
+    trainer_handles = cluster.worker_handles(datatypes.Role.ACTOR)
+    if len(trainer_handles) != 1:
+      raise ValueError(f"Expected 1 trainer worker, got {len(trainer_handles)}.")
+    _configure_trainer_loss(
+        trainer_handles[0],
+        algo=algo,
+        pad_id=pad_id,
+        eos_id=eos_id,
+    )
+
     logging.info("Bringing up remote workers through ClusterOrchestrator...")
     cluster.bring_up_workers(dummy_data=None)
 
@@ -726,53 +778,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       )
     else:
       prompt_stream = raw_prompt_stream
-
-    program = rl_program.StandardRLProgram(
-        algo=algo,
-        dataset=prompt_stream,
-        max_steps=args.max_steps,
-        reward_fns=[],
-        generation_args=datatypes.GenerationArgs(
-            temperature=args.temperature,
-            top_p=args.top_p,
-            top_k=0 if args.top_k < 0 else args.top_k,
-            return_logprobs=args.use_rollout_logps,
-        ),
-        batch_size=args.batch_size,
-        batch_config=batch_assembly.BatchConfig(
-            pad_id=pad_id,
-            max_prompt_length=args.max_prompt_length,
-            max_response_length=args.max_response_length,
-            max_seq_token_per_tpu=args.max_seq_token_per_tpu,
-            max_segments_per_packed_row=args.max_segments_per_packed_row,
-            segment_alignment_boundary=args.segment_alignment_boundary,
-            trainer_fsdp=args.trainer_fsdp,
-            trainer_dp=args.trainer_dp,
-            trainer_expert=args.trainer_expert,
-        ),
-        metrics_logging_options=metrics_logging_options,
-        trajectory_log_dir=args.trajectory_log_dir,
-        trajectory_store=cluster.trajectory_store,
-        max_staleness=args.max_staleness,
-        group_order=args.trajectory_group_order,
-        sync_weights=(args.weight_sync_mode != weight_sync.WeightSyncMode.NONE),
-        on_step_begin=lambda step: logging.info(
-            ">>> DeepSWE step %d starting | policy_version=%d",
-            step,
-            step,
-        ),
-        on_step_end=lambda step, result: logging.info(
-            "<<< DeepSWE step %d finished | train_result=%s",
-            step,
-            result,
-        ),
-    )
-    _configure_trainer_loss(
-        trainer_handles[0],
-        algo=algo,
-        pad_id=pad_id,
-        eos_id=eos_id,
-    )
+    program.dataset = prompt_stream
 
     logging.info("Starting DeepSWE StandardRLProgram execution...")
     cluster.run(

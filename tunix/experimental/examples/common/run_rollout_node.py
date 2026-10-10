@@ -530,9 +530,13 @@ def _trajectory_store_config(
   root_dir = getattr(args, "trajectory_store_dir", "")
   if root_dir:
     config["root_dir"] = root_dir
-  run_id = getattr(args, "run_id", "")
-  if run_id:
-    config["run_id"] = run_id
+  run_id = (
+      getattr(args, "run_id", "")
+      or os.getenv("RUN_ID", "")
+      or os.getenv("JOB_PREFIX", "")
+      or "default"
+  )
+  config["run_id"] = run_id
   return config
 
 
