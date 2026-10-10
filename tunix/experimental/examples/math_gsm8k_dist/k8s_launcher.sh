@@ -624,6 +624,7 @@ if cfg:
         --chat_parser=${CHAT_PARSER} \
         --prefuse_moe_weights=${PREFUSE_MOE_WEIGHTS} \
         --enable_prefix_caching=${ENABLE_PREFIX_CACHING} \
+        ${SEED:+--seed=${SEED}} \
         ${extra_flags} \
         ${maxtext_args} \
         ${vllm_args} \

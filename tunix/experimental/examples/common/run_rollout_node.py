@@ -369,6 +369,15 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " path."
       ),
   )
+  parser.add_argument(
+      "--seed",
+      type=int,
+      default=None,
+      help=(
+          "Base random seed for the rollout sampler engine; offset by the"
+          " numeric replica suffix of --worker_id modulo 2**32."
+      ),
+  )
 
   args = parser.parse_args(argv)
   if args.priority_scheduling and args.sampler != "vllm":
@@ -378,6 +387,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     )
   _get_tensor_parallel_size(args)
   return args
+
+
+def _replica_seed(args: argparse.Namespace) -> int | None:
+  """Derives the per-replica 32-bit vLLM engine seed from --seed and --worker_id."""
+  seed = getattr(args, "seed", None)
+  if seed is None:
+    return None
+  worker_id = str(getattr(args, "worker_id", "") or "")
+  suffix = worker_id.rsplit("-", 1)[-1]
+  replica_idx = int(suffix) if (suffix.isascii() and suffix.isdigit()) else 0
+  return (int(seed) + replica_idx) % (2**32)
 
 
 def _get_tensor_parallel_size(args: argparse.Namespace) -> int:
@@ -651,6 +671,9 @@ def _create_inprocess_vllm_sampler(args, tokenizer):
       "max_model_len": max_model_len,
       "enable_prefix_caching": enable_prefix_caching,
   }
+  replica_seed = _replica_seed(args)
+  if replica_seed is not None:
+    engine_kwargs["seed"] = replica_seed
 
   prefuse_moe = getattr(args, "prefuse_moe_weights", True)
   if "prefuse_moe_weights" in vllm_overrides:
@@ -857,6 +880,9 @@ def _create_vllm_sampler(args, tokenizer):
       # FCFS.
       scheduling_policy=_vllm_scheduling_policy(args, vllm_overrides),
   )
+  replica_seed = _replica_seed(args)
+  if replica_seed is not None:
+    engine_kwargs["seed"] = replica_seed
   if gpu_mem_util is not None:
     engine_kwargs["gpu_memory_utilization"] = gpu_mem_util
 
