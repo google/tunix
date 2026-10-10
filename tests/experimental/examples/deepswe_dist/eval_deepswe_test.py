@@ -193,6 +193,28 @@ class EvalTest(unittest.TestCase):
     self.assertNotIn("seed", first["generation_kwargs"])
     self.assertNotIn("seed", second["generation_kwargs"])
     self.assertEqual(eval_lib.model_profile(a)["seed"], 0)
+    self.assertEqual(eval_lib.replica_seed(a), 0)
+    self.assertEqual(
+        eval_lib.replica_seed(
+            self.args("--worker_id", "job-eval-0", "--seed", "42")
+        ),
+        42,
+    )
+    rep15 = self.args("--worker_id", "job-eval-15", "--seed", "42")
+    self.assertEqual(eval_lib.replica_seed(rep15), 57)
+    self.assertEqual(eval_lib.model_profile(rep15)["seed"], 42)
+    self.assertEqual(
+        eval_lib.replica_seed(
+            self.args("--worker_id", "job-eval", "--seed", "42")
+        ),
+        42,
+    )
+    self.assertEqual(
+        eval_lib.replica_seed(
+            self.args("--worker_id", "job-eval-5", "--seed", str(2**32 - 2))
+        ),
+        3,
+    )
     self.assertNotEqual(first["request_id"], second["request_id"])
     self.assertIsNone(first["max_response_length"])
     self.assertEqual(first["generation_kwargs"]["max_generation_steps"], 12288)
@@ -208,6 +230,16 @@ class EvalTest(unittest.TestCase):
     self.assertEqual(req["max_response_length"], 61440)
     self.assertIsNone(req["generation_kwargs"]["top_k"])
     self.assertEqual(with_limits.batch_size, 16)
+
+    launcher_text = (RECIPE / "k8s_launcher.sh").read_text()
+    eval_start = launcher_text.index("python3 -u ${eval_cmd}")
+    eval_cmd = launcher_text[
+        eval_start : launcher_text.index('\n      "\n', eval_start)
+    ]
+    self.assertIn("--worker_id=${replica_id}", eval_cmd)
+    self.assertIn("--seed=${SEED}", eval_cmd)
+    worker_text = (RECIPE / "eval_worker.py").read_text()
+    self.assertIn('"seed": eval_deepswe.replica_seed(a)', worker_text)
 
   def test_limited_remote_dataset_streams_and_uses_image_identity(self):
     entry = self.entry()
