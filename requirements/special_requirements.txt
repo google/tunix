@@ -2,4 +2,4 @@
 # --find-links https://storage.googleapis.com/jax-releases/libtpu_releases.html
 # --pre
 
-tpu-inference @ git+https://github.com/vllm-project/tpu-inference.git@cd2e8931d1a69bc24ea6cae2d4f7bd481a8bcb65
+tpu-inference @ git+https://github.com/vllm-project/tpu-inference.git@16ca2b630e636155bf207b4bb11e0dd6c4f3fa60
