@@ -1,6 +1,7 @@
 """DeepSWE Agent."""
 
 import json
+import os
 import re
 from typing import Any
 from typing import Optional, Union  # Added Union for pytype compatibility
@@ -10,8 +11,13 @@ from absl import logging
 try:
   from examples.deepswe import template
 except ImportError:
-  import template  # pyrefly: ignore[missing-import]
+  import template  # pytype: disable=import-error
 
+OPENHANDS_SCAFFOLDS = template.OPENHANDS_SCAFFOLDS
+OPENHANDS_SYSTEM_PROMPT = template.OPENHANDS_SYSTEM_PROMPT
+OPENHANDS_USER_PROMPT = template.OPENHANDS_USER_PROMPT
+OPENHANDS_FAKE_USER_RESPONSE = template.OPENHANDS_FAKE_USER_RESPONSE
+OPENHANDS_TOOLS = template.OPENHANDS_TOOLS
 SWE_SYSTEM_PROMPT = template.SWE_SYSTEM_PROMPT
 SWE_SYSTEM_PROMPT_FN_CALL = template.SWE_SYSTEM_PROMPT_FN_CALL
 SWE_USER_PROMPT = template.SWE_USER_PROMPT
@@ -20,6 +26,8 @@ SWEAGENT_SYSTEM_PROMPT = template.SWEAGENT_SYSTEM_PROMPT
 SWEAGENT_USER_PROMPT = template.SWEAGENT_USER_PROMPT
 get_system_prompt = template.get_system_prompt
 get_user_prompt_template = template.get_user_prompt_template
+format_openhands_user_prompt = template.format_openhands_user_prompt
+
 
 
 from tunix.rl.agentic.agents.agent_types import Action
@@ -29,14 +37,61 @@ from tunix.rl.agentic.agents.base_agent import ConversationAgentBase
 
 
 try:
-  from r2egym.agenthub.action import Action as SWEAction  # pyrefly: ignore[missing-import]
+  from r2egym.agenthub.action import Action as SWEAction  # pytype: disable=import-error
 except ImportError:
-  logging.error(
-      "Failed to load SWEAction. Please ensure 'r2egym' is installed properly."
-  )
-  raise  # This halts execution and preserves the original traceback
+
+  class SWEAction:  # type: ignore[no-redef]
+    """Fallback Action representation when r2egym is not installed."""
+
+    def __init__(
+        self,
+        function_name: str = "",
+        parameters: Optional[dict[str, Any]] = None,
+    ):
+      self.function_name = function_name
+      self.parameters = parameters if parameters is not None else {}
+
+    @classmethod
+    def from_string(cls, action_str: str) -> "SWEAction":
+      if not action_str or not action_str.strip():
+        return cls("", {})
+      fn_match = re.search(r"<function\s*=\s*([^>]+)>", action_str)
+      if not fn_match:
+        return cls("", {})
+      fn_name = fn_match.group(1).strip()
+      params = {}
+      for k, v in re.findall(
+          r"<parameter\s*=\s*([^>]+)>(.*?)</parameter>",
+          action_str,
+          flags=re.DOTALL,
+      ):
+        params[k.strip()] = v.strip()
+      return cls(fn_name, params)
+
+    def to_xml_string(self) -> str:
+      if not self.function_name:
+        return ""
+      parts = [f"<function={self.function_name}>"]
+      for k, v in self.parameters.items():
+        parts.append(f"<parameter={k}>{v}</parameter>")
+      parts.append("</function>")
+      return "\n".join(parts)
+
+    def __str__(self) -> str:
+      return self.to_xml_string()
+
 
 TOKEN_WARNING_THRESHOLD = 28000
+
+
+def multi_tool_calls_enabled() -> bool:
+  """Whether CodeActAgent runs every tool call of a turn, like OpenHands.
+
+  Off by default; set OPENHANDS_MULTI_TOOL_CALLS=true to enable. When off,
+  only the first tool call of a turn runs.
+  """
+  value = os.getenv("OPENHANDS_MULTI_TOOL_CALLS", "false")
+  return value.strip().lower() in ("1", "true", "yes")
 
 
 def parse_oai_response(response: Any):
@@ -83,7 +138,202 @@ def parse_xml_response(response_text: str) -> tuple[str, Any]:
   return thought, action
 
 
+def parse_openhands_xml_action(action_str: str) -> SWEAction:
+  """Parses an XML function call while preserving multiline code indentation.
+
+  Matches Qwen3XMLToolParser behavior by stripping only a single leading and
+  single trailing newline from parameter values rather than calling .strip(),
+  which would strip leading indentation from str_replace_editor's old_str /
+  new_str parameters.
+  """
+  fn_match = re.search(r"<function\s*=\s*([^>]+)>", action_str)
+  function_name = fn_match.group(1).strip() if fn_match else ""
+
+  pattern = r"<parameter\s*=\s*([^>]+)>(.*?)</parameter>"
+  param_matches = re.findall(pattern, action_str, flags=re.DOTALL)
+
+  params: dict[str, str] = {}
+  for param_key, param_value in param_matches:
+    param_key = param_key.strip()
+    if param_value.startswith("\r\n"):
+      param_value = param_value[2:]
+    elif param_value.startswith("\n"):
+      param_value = param_value[1:]
+    if param_value.endswith("\r\n"):
+      param_value = param_value[:-2]
+    elif param_value.endswith("\n"):
+      param_value = param_value[:-1]
+    params[param_key] = param_value
+
+  return SWEAction(function_name, params)
+
+
+def parse_codeact_response(response_text: str) -> tuple[str, Any]:
+  """Parses a model response in CodeAct / OpenHands format.
+
+  Supports:
+  1. Qwen3/Qwen3.5 XML tool calls: <tool_call><function=...>...</function></tool_call>
+  2. Bare XML function blocks: <function=...></function>
+  3. Task completion indicators: COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+
+  Like the reference parser (vLLM qwen3_xml), only <function=> XML is a tool
+  call: markdown code fences (```bash, ```python, ```json) and JSON bodies in
+  <tool_call> blocks are not, so such a turn gets no action.
+
+  Returns:
+    (thought, action): Tuple of reasoning string and SWEAction instance.
+  """
+  xml_pattern = re.compile(
+      r"(?s)(<function\s*=\s*([^>]+)>.*?(?:</function>|$))"
+  )
+  tc_pattern = re.compile(
+      r"(?s)<tool_call>\s*(.*?)\s*(?:</tool_call>|$)"
+  )
+
+  def _first_tool_call(text_slice: str) -> Optional[re.Match]:
+    # Like qwen3_xml, skip <tool_call> blocks without a <function=> (empty,
+    # JSON or other text) and use the first one that has one.
+    for m in tc_pattern.finditer(text_slice):
+      if xml_pattern.search(m.group(1)):
+        return m
+    return None
+
+  def _collect_candidates(text_slice: str, offset: int):
+    found = []
+    tc_match = _first_tool_call(text_slice)
+    if tc_match:
+      found.append((0, offset + tc_match.start(), "tool_call", tc_match))
+
+    xml_match = xml_pattern.search(text_slice)
+    if xml_match:
+      # Only add bare xml candidate if it is not already inside tc_match.
+      if not tc_match or not (
+          tc_match.start() <= xml_match.start() <= tc_match.end()
+      ):
+        found.append((0, offset + xml_match.start(), "xml", xml_match))
+    return found
+
+  # Prefer tool calls emitted after </think> so illustrative code fences or
+  # snippets inside reasoning blocks do not shadow the actual tool invocation.
+  think_end = response_text.rfind("</think>")
+  if think_end != -1:
+    post_think_offset = think_end + len("</think>")
+    candidates = _collect_candidates(
+        response_text[post_think_offset:], post_think_offset
+    )
+    if not candidates:
+      candidates = _collect_candidates(response_text, 0)
+  else:
+    candidates = _collect_candidates(response_text, 0)
+
+  if candidates:
+    # Earliest structured tool invocation in the response.
+    candidates.sort(key=lambda x: (x[0], x[1]))
+    _, match_start, match_type, payload = candidates[0]
+
+    if match_type == "xml":
+      thought = response_text[:match_start].strip()
+      xml_str = payload.group(1).strip()
+      if not xml_str.endswith("</function>"):
+        xml_str += "\n</function>"
+      action = parse_openhands_xml_action(xml_str)
+      return thought, action
+
+    elif match_type == "tool_call":
+      thought = response_text[:match_start].strip()
+      xml_str = xml_pattern.search(payload.group(1).strip()).group(1).strip()
+      if not xml_str.endswith("</function>"):
+        xml_str += "\n</function>"
+      action = parse_openhands_xml_action(xml_str)
+      return thought, action
+
+  # Fallback: check for completion trigger in plain text
+  if "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" in response_text:
+    thought = response_text.replace(
+        "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT", ""
+    ).strip()
+    action = SWEAction("submit", {})
+    return thought, action
+
+  thought = response_text.strip()
+  action = SWEAction(function_name="", parameters={})
+  return thought, action
+
+
+def parse_codeact_response_all(response_text: str) -> tuple[str, list[Any]]:
+  """Parses every tool call of a CodeAct / OpenHands response, in order.
+
+  The reference parser (vLLM qwen3_xml) can return several calls for one
+  response, and OpenHands runs all of them. This splits the response into
+  calls the way qwen3_xml does (checked against vLLM 0.20.0):
+  - each <tool_call> opens a call, which ends at </tool_call> or at the next
+    <tool_call>; the call is its first <function=> block, if any (qwen3_xml
+    merges a second <function=> into the same call);
+  - a bare <function=> outside <tool_call> opens a call if it is the first
+    opener or follows a <tool_call>; one that follows another bare
+    <function=> is dropped.
+  The reference reasoning parser hands qwen3_xml only the text after the
+  first "</think>", or all of it when there is none (enable_thinking: false).
+  For well-formed responses the first call is `parse_codeact_response`'s.
+
+  Returns:
+    (thought, actions): `parse_codeact_response`'s thought, and a non-empty
+    list of SWEActions (`parse_codeact_response`'s action alone when no
+    call is found).
+  """
+  thought, first = parse_codeact_response(response_text)
+  _, think_sep, after_think = response_text.partition("</think>")
+  content = after_think if think_sep else response_text
+  function_pattern = re.compile(
+      r"(?s)<function\s*=\s*[^>]+>.*?(?:</function>|$)"
+  )
+  opener_pattern = re.compile(r"<tool_call>|<function\s*=")
+  calls = []
+  pos = 0
+  previous = None
+  while (opener := opener_pattern.search(content, pos)) is not None:
+    if opener.group(0) == "<tool_call>":
+      start = opener.end()
+      ends = [
+          i
+          for i in (
+              content.find("</tool_call>", start),
+              content.find("<tool_call>", start),
+          )
+          if i != -1
+      ]
+      end = min(ends) if ends else len(content)
+      function = function_pattern.search(content[start:end])
+      if function:
+        calls.append(function.group(0))
+      previous = "tool_call"
+      pos = end + (
+          len("</tool_call>") if content.startswith("</tool_call>", end) else 0
+      )
+    else:
+      function = function_pattern.match(content, opener.start())
+      if function is None:  # A "<function=" cut off before its ">".
+        pos = opener.end()
+        continue
+      if previous != "bare":
+        calls.append(function.group(0))
+      previous = "bare"
+      pos = function.end()
+  actions = []
+  for xml_str in calls:
+    xml_str = xml_str.strip()
+    if not xml_str.endswith("</function>"):
+      xml_str += "\n</function>"
+    actions.append(parse_openhands_xml_action(xml_str))
+  return thought, actions or [first]
+
+
+_LOGGED_AGENT_CONFIGS: set[tuple[str, str, str, bool]] = set()
+
+
 class SWEAgent(ConversationAgentBase):
+
+  name = "swe_agent"
 
   def __init__(
       self,
@@ -97,7 +347,12 @@ class SWEAgent(ConversationAgentBase):
     assert scaffold in [
         "r2egym",
         "sweagent",
-    ], f"Invalid scaffold: {scaffold}, must be one of ['r2egym', 'sweagent']"
+        "openhands",
+    ], (
+        f"Invalid scaffold: {scaffold}, must be one of ['r2egym', 'sweagent',"
+        " 'openhands']"
+    )
+    self.scaffold = scaffold
     if system_prompt is None:
       system_prompt = get_system_prompt(
           scaffold=scaffold, use_fn_calling=use_fn_calling
@@ -107,6 +362,19 @@ class SWEAgent(ConversationAgentBase):
     )
 
     super().__init__(system_prompt)
+    agent_key = (
+        self.__class__.__name__,
+        self.name,
+        scaffold,
+        use_fn_calling,
+    )
+    if agent_key not in _LOGGED_AGENT_CONFIGS:
+      _LOGGED_AGENT_CONFIGS.add(agent_key)
+      logging.info(
+          "Initialized DeepSWE agent: class=%s, name=%s, scaffold=%s,"
+          " use_fn_calling=%s",
+          *agent_key,
+      )
 
   def update_from_env(
       self,
@@ -137,21 +405,36 @@ class SWEAgent(ConversationAgentBase):
         )
     cur_tokens = info.get("cur_tokens", None)
     if cur_tokens is not None and cur_tokens >= TOKEN_WARNING_THRESHOLD:
-      observation += (
-          "\nYou are running out of tokens. Stop exploring now. Do not call"
-          " file_editor, str_replace_editor, search, execute_bash, or any"
-          " view command again. You must immediately submit using the final"
-          " tool. Output exactly this XML and nothing else:\n"
-          "<function=finish>\n"
-          "<parameter=command>submit</parameter>\n"
-          "<parameter=result>FINAL_RESULT</parameter>\n"
-          "</function>\n"
-          "Do not include reasoning text. Do not include a result parameter."
-          " Do not summarize the fix. If the submit tool is available instead"
-          " of finish, output exactly this XML and nothing else:\n"
-          "<function=submit>\n"
-          "</function>\n"
-      )
+      if self.scaffold in OPENHANDS_SCAFFOLDS:
+        observation += (
+            "\nYou are running out of tokens. Stop exploring now. Do not call"
+            " file_editor, str_replace_editor, or execute_bash again. You must"
+            " immediately submit using the finish tool. Output exactly this XML"
+            " and nothing else:\n"
+            "<tool_call>\n"
+            "<function=finish>\n"
+            "<parameter=message>\n"
+            "Task completed.\n"
+            "</parameter>\n"
+            "</function>\n"
+            "</tool_call>\n"
+        )
+      else:
+        observation += (
+            "\nYou are running out of tokens. Stop exploring now. Do not call"
+            " file_editor, str_replace_editor, search, execute_bash, or any"
+            " view command again. You must immediately submit using the final"
+            " tool. Output exactly this XML and nothing else:\n"
+            "<function=finish>\n"
+            "<parameter=command>submit</parameter>\n"
+            "<parameter=result>FINAL_RESULT</parameter>\n"
+            "</function>\n"
+            "Do not include reasoning text. Do not include a result parameter."
+            " Do not summarize the fix. If the submit tool is available instead"
+            " of finish, output exactly this XML and nothing else:\n"
+            "<function=submit>\n"
+            "</function>\n"
+        )
 
     super().update_from_env(observation, reward, done, info)
     self.cur_step = Step(observation=observation)
@@ -162,25 +445,32 @@ class SWEAgent(ConversationAgentBase):
 
     self._messages.append({"role": "user", "content": str(observation)})
 
+  def _parse_model_response(
+      self, response: str | Any
+  ) -> tuple[str, SWEAction]:
+    if self.use_fn_calling:
+      return parse_oai_response(response)
+    if self.scaffold in OPENHANDS_SCAFFOLDS:
+      return parse_codeact_response(response)
+    return parse_xml_response(response)
+
   def update_from_model(self, response: str, **kwargs):
     """Updates the agent's internal state after an environment step.
 
     This function is called during environment interaction to incorporate the
-    latest action's
-    outcome into the agent's learning process.
+    latest action's outcome into the agent's learning process.
 
     Args:
         response (str): The response from the model.
 
     Returns:
-        None
+        Action: The action produced by the agent.
     """
     self._trajectory.steps.append(self.cur_step)
-    if self.use_fn_calling:
-      thought, action = parse_oai_response(response)
-    else:
-      thought, action = parse_xml_response(response)
-    action_str = action.to_xml_string()
+    thought, action = self._parse_model_response(response)
+    action_str = (
+        action.to_xml_string() if getattr(action, "function_name", True) else ""
+    )
 
     # Update Trajectory
     cur_step = self._trajectory.steps[-1]
@@ -197,3 +487,133 @@ class SWEAgent(ConversationAgentBase):
       self._messages.append({"role": "assistant", "content": response})
     self.step += 1
     return Action(action=cur_step.action)
+
+
+class CodeActAgent(SWEAgent):
+  """CodeActAgent for OpenHands matching nv-OpenHands@0d766ad0.
+
+  Uses the OpenHands 5-tool action space (`execute_bash`, `think`, `finish`,
+  `task_tracker`, `str_replace_editor`), Qwen3/Qwen3.5 XML native tool-calling
+  format, `swe_default.j2` user prompt, and `role="tool"` (`<tool_response>`)
+  observations.
+  """
+
+  name = "codeact_agent"
+
+  def __init__(
+      self,
+      system_prompt: Optional[str] = None,
+      use_fn_calling: bool = False,
+      format_model_response: bool = False,
+      scaffold: str = "openhands",
+  ):
+    super().__init__(
+        system_prompt=system_prompt,
+        use_fn_calling=use_fn_calling,
+        format_model_response=format_model_response,
+        scaffold=scaffold,
+    )
+    self.multi_tool_calls = multi_tool_calls_enabled()
+
+  def update_from_model(self, response: str, **kwargs):
+    """Like SWEAgent.update_from_model, plus every later tool call of the turn.
+
+    The reference OpenHands queues all tool calls of one model response and
+    runs them in order before calling the model again. With
+    OPENHANDS_MULTI_TOOL_CALLS on, the calls come from
+    `parse_codeact_response_all`, and a turn with two or more returns them all
+    as a list of XML strings for the env to run in order.
+
+    Args:
+      response: The model response.
+      **kwargs: Passed to SWEAgent.update_from_model.
+
+    Returns:
+      The action: an XML string, or a list of them for a multi-call turn.
+    """
+    result = super().update_from_model(response, **kwargs)
+    if not self.multi_tool_calls or self.use_fn_calling:
+      return result
+    _, actions = parse_codeact_response_all(response)
+    calls = [
+        a.to_xml_string() for a in actions if getattr(a, "function_name", "")
+    ]
+    if not calls or calls == [result.action]:
+      return result
+    if len(calls) > 1:
+      logging.info("CodeActAgent: turn has %d tool calls.", len(calls))
+    self._trajectory.steps[-1].action = "\n".join(calls)
+    return Action(action=calls if len(calls) > 1 else calls[0])
+
+  def update_from_env(
+      self,
+      observation: Any,
+      reward: float,
+      done: bool,
+      info: Optional[dict[str, Any]] = None,
+      **kwargs,
+  ) -> None:
+    if isinstance(observation, list):
+      # A multi-call turn: one tool result per call that ran.
+      observation = [str(o) for o in observation]
+      ConversationAgentBase.update_from_env(
+          self, observation, reward, done, info
+      )
+      self.cur_step = Step(observation=observation)
+      return
+    observation = str(observation)
+    if info is None:
+      info = {}
+    if len(self._trajectory.steps) == 0:
+      if self.user_prompt_template == OPENHANDS_USER_PROMPT:
+        observation = format_openhands_user_prompt(
+            problem_statement=observation,
+            workspace_path=str(info.get("workspace_path") or "/testbed"),
+            repo_language=str(info.get("repo_language") or "python"),
+            base_commit=str(info.get("base_commit") or ""),
+        )
+      else:
+        observation = self.user_prompt_template.format(
+            problem_statement=observation
+        )
+    elif not observation and not self._trajectory.steps[-1].action:
+      observation = OPENHANDS_FAKE_USER_RESPONSE
+
+    ConversationAgentBase.update_from_env(self, observation, reward, done, info)
+    self.cur_step = Step(observation=observation)
+
+  def _observation_to_messages(
+      self, observation: Any, reward: float, done: bool, info: dict[str, Any]
+  ) -> None:
+    if len(self._trajectory.steps) == 0:
+      self._messages.append({"role": "user", "content": str(observation)})
+      return
+    if isinstance(observation, list):
+      for result in observation:
+        self._messages.append({"role": "tool", "content": str(result)})
+      return
+    last_step = self._trajectory.steps[-1]
+    if (info and info.get("is_fake_user_response")) or not last_step.action:
+      self._messages.append({"role": "user", "content": str(observation)})
+    else:
+      self._messages.append({"role": "tool", "content": str(observation)})
+
+  def _parse_model_response(
+      self, response: str | Any
+  ) -> tuple[str, SWEAction]:
+    if self.use_fn_calling:
+      return parse_oai_response(response)
+    return parse_codeact_response(response)
+
+
+__all__ = [
+    "CodeActAgent",
+    "SWEAgent",
+    "multi_tool_calls_enabled",
+    "parse_codeact_response",
+    "parse_codeact_response_all",
+    "parse_oai_response",
+    "parse_openhands_xml_action",
+    "parse_xml_response",
+]
+

@@ -23,7 +23,14 @@ import time
 from typing import Any, Optional, cast
 
 import numpy as np
-from examples.deepswe import sandbox_utils
+try:
+  from examples.deepswe import openhands_utils
+  from examples.deepswe import sandbox_utils
+  from examples.deepswe import template as template_mod
+except ImportError:
+  from examples.deepswe import openhands_utils  # pytype: disable=import-error
+  from examples.deepswe import sandbox_utils  # pytype: disable=import-error
+  from examples.deepswe import template as template_mod  # pytype: disable=import-error
 from tunix.rl.agentic.environments.base_environment import BaseTaskEnv
 from tunix.rl.agentic.environments.base_environment import EnvStepResult
 
@@ -34,16 +41,16 @@ _get_global_fleet = sandbox_utils.get_global_fleet
 _teardown_global_fleet = sandbox_utils.teardown_global_fleet
 _patch_r2egym_for_agent_sandbox = sandbox_utils.patch_r2egym_for_agent_sandbox
 _normalize_tasks_for_fleet = sandbox_utils.normalize_tasks_for_fleet
-_get_image_rewrite_fn = sandbox_utils.get_image_rewrite_fn
+_get_image_rewrite_fn = openhands_utils.get_image_rewrite_fn
 _MAX_IN_FLIGHT_BATCHES = 2
 _GLOBAL_FLEET = None
 
 
 # pylint: disable=g-import-not-at-top,g-blanket-type-suppression,g-multiple-import
 try:
-  import r2egym
-  from r2egym.agenthub.action import Action
-  from r2egym.agenthub.environment.env import EnvArgs, RepoEnv
+  import r2egym  # pytype: disable=import-error
+  from r2egym.agenthub.action import Action  # pytype: disable=import-error
+  from r2egym.agenthub.environment.env import EnvArgs, RepoEnv  # pytype: disable=import-error
 except ImportError:
   r2egym = cast(Any, None)
   EnvArgs = cast(Any, None)
@@ -116,7 +123,7 @@ class SWEEnv(BaseTaskEnv):
         backend: Backend to use for the environment.
         delete_image: Whether to delete the Docker image after closing.
         verbose: Verbose output toggle.
-        scaffold: Scaffold tool set ('r2egym' or 'sweagent').
+        scaffold: Scaffold tool set ('r2egym', 'sweagent', or 'openhands').
         max_steps: Maximum interaction steps.
         use_agent_sandbox: If True, strictly forces SandboxFleet and
           AgentSandboxRuntime.
@@ -129,6 +136,7 @@ class SWEEnv(BaseTaskEnv):
     self.delete_image = delete_image
     self.backend = backend
     self.env: Any = None
+    self.workspace: Any = None
     self.handle: Any = None
     self.verbose = verbose
     self.scaffold = scaffold
@@ -138,7 +146,11 @@ class SWEEnv(BaseTaskEnv):
     assert scaffold in [
         "r2egym",
         "sweagent",
-    ], f"Invalid scaffold: {scaffold}, must be one of ['r2egym', 'sweagent']"
+        "openhands",
+    ], (
+        f"Invalid scaffold: {scaffold}, must be one of ['r2egym', 'sweagent',"
+        " 'openhands']"
+    )
     super().__init__(max_steps=max_steps)
 
     if not hasattr(self, "extra_kwargs"):
@@ -149,8 +161,8 @@ class SWEEnv(BaseTaskEnv):
 
   def _init_agent_sandbox_env(self) -> None:
     sandbox_utils.patch_r2egym_for_agent_sandbox()
-    from agent_sandbox_rl import Task  # pyrefly: ignore[missing-import]
-    from agent_sandbox_rl.adapters.r2egym import (  # pyrefly: ignore[missing-import]
+    from agent_sandbox_rl import Task  # pytype: disable=import-error
+    from agent_sandbox_rl.adapters.r2egym import (  # pytype: disable=import-error
         make_fleet_repo_env,
         r2egym_command_files,
     )
@@ -175,7 +187,12 @@ class SWEEnv(BaseTaskEnv):
         image=task_img_str,
         metadata={"ds": self.entry},
     )
-    max_acquire_retries = 5
+    sandbox_utils.ensure_tasks_in_fleet_plan(
+        fleet, [task], scaffold=self.scaffold
+    )
+    max_acquire_retries = (
+        sandbox_utils.SandboxFailFastConfig.from_env().acquire_retries
+    )
     for attempt in range(max_acquire_retries):
       try:
         self.handle = fleet.acquire(task)
@@ -193,24 +210,82 @@ class SWEEnv(BaseTaskEnv):
           time.sleep(5 * (attempt + 1))
         else:
           raise
+    if self.scaffold in template_mod.OPENHANDS_SCAFFOLDS:
+      from agent_sandbox_rl.adapters.openhands import make_handle_workspace  # pytype: disable=import-error
+
+      ws_kwargs = {}
+      if os.getenv("SANDBOX_SESSION_KEY"):
+        ws_kwargs["api_key"] = os.getenv("SANDBOX_SESSION_KEY")
+      if os.getenv("ROUTER_URL"):
+        ws_kwargs["router_url"] = os.getenv("ROUTER_URL")
+      if os.getenv("ROUTER_AUTH_TOKEN"):
+        ws_kwargs["router_auth_token"] = os.getenv("ROUTER_AUTH_TOKEN")
+      ws_kwargs["working_dir"] = os.getenv("OPENHANDS_WORKING_DIR", "/testbed")
+      self.workspace = make_handle_workspace(self.handle, **ws_kwargs)
+    is_openhands = self.scaffold in template_mod.OPENHANDS_SCAFFOLDS
+    cmd_files = None
+    if not is_openhands:
+      try:
+        cmd_files = r2egym_command_files()
+      except Exception:  # pylint: disable=broad-exception-caught
+        cmd_files = None
+    if is_openhands and self.handle is not None:
+      self.handle._target_container = sandbox_utils.EVAL_CONTAINER_NAME
+      self.handle._defer_setup_env = True
     try:
-      cmd_files = r2egym_command_files()
-    except Exception:  # pylint: disable=broad-exception-caught
-      cmd_files = None
-    self.env = make_fleet_repo_env(
-        self.handle,
-        command_files=cmd_files,
-        step_timeout=self.step_timeout,
-        reward_timeout=self.reward_timeout,
-        verbose=self.verbose,
-    )
+      self.env = make_fleet_repo_env(
+          self.handle,
+          command_files=cmd_files,
+          step_timeout=self.step_timeout,
+          reward_timeout=self.reward_timeout,
+          verbose=self.verbose,
+      )
+    finally:
+      if is_openhands and self.handle is not None:
+        self.handle._target_container = sandbox_utils.RUNTIME_CONTAINER_NAME
+        self.handle._defer_setup_env = False
+    if is_openhands:
+      sandbox_utils.set_runtime_container(
+          self.env, sandbox_utils.EVAL_CONTAINER_NAME
+      )
+      openhands_utils.setup_openhands_workspace(self.workspace, self.entry)
+    elif self.env is not None:
+      openhands_utils.hide_r2e_tests_for_rollout(self.env, self.entry)
+
+    if self.env is not None and hasattr(self.env, "compute_reward"):
+      orig_compute_reward = self.env.compute_reward
+
+      def _compute_reward_in_fresh_container(*args, **kwargs):
+        rollout_target = self.workspace or self.env
+        if self.workspace is None and self.env is not None:
+          sandbox_utils.set_runtime_container(
+              self.env, sandbox_utils.RUNTIME_CONTAINER_NAME
+          )
+        base_commit = openhands_utils.resolve_base_commit(self.entry)
+        workspace_path = os.getenv("OPENHANDS_WORKING_DIR", "/testbed")
+        patch = openhands_utils.extract_agent_patch(
+            rollout_target,
+            base_commit=base_commit,
+            workspace_path=workspace_path,
+            timeout=float(self.reward_timeout),
+        )
+        openhands_utils.cleanup_rollout_container_processes(rollout_target)
+        return openhands_utils.evaluate_patch_in_fresh_container(
+            self.env,
+            patch,
+            orig_compute_reward,
+            *args,
+            **kwargs,
+        )
+
+      self.env.compute_reward = _compute_reward_in_fresh_container
 
   def _init_local_repo_env(self) -> None:
     # Initialize standard local Docker RepoEnv
     global EnvArgs, RepoEnv, Action
     if EnvArgs is None:
-      from r2egym.agenthub.action import Action
-      from r2egym.agenthub.environment.env import EnvArgs, RepoEnv
+      from r2egym.agenthub.action import Action  # pytype: disable=import-error
+      from r2egym.agenthub.environment.env import EnvArgs, RepoEnv  # pytype: disable=import-error
     env_args = EnvArgs(ds=self.entry)
     self.env = RepoEnv(
         env_args,
@@ -219,42 +294,120 @@ class SWEEnv(BaseTaskEnv):
         reward_timeout=self.reward_timeout,
         verbose=self.verbose,
     )
-    if self.scaffold == "r2egym":
+    if (
+        self.scaffold == "r2egym"
+        or self.scaffold in template_mod.OPENHANDS_SCAFFOLDS
+    ):
       self.env.add_commands(R2EGYM_COMMAND_FILES)
     elif self.scaffold == "sweagent":
       self.env.add_commands(SWEAGENT_COMMAND_FILES)
 
   def _initial_observation(self) -> Any:
-    if not self.env:
+    if not self.env and not self.workspace:
       if self.use_agent_sandbox:
         self._init_agent_sandbox_env()
       else:
         self._init_local_repo_env()
-    else:
+    elif self.env is not None:
       self.env.reset()
 
-    self.final_reward_fn = self.env.compute_reward  # pyrefly: ignore[missing-attribute]
+    self.final_reward_fn = self.env.compute_reward  # pytype: disable=attribute-error
     self.total_steps = 0
 
+    if self.workspace is not None:
+      return str(
+          self.entry.get("problem_statement")
+          or self.entry.get("instruction")
+          or ""
+      )
+
     # Polls docker runtime to get task instruction.
-    return self.env.get_task_instruction()  # pyrefly: ignore[missing-attribute]
+    return self.env.get_task_instruction()  # pytype: disable=attribute-error
+
+  def reset(self) -> tuple[Any, dict[str, Any]]:
+    obs, info = super().reset()
+    if self.scaffold in template_mod.OPENHANDS_SCAFFOLDS:
+      base_commit = openhands_utils.resolve_base_commit(self.entry)
+      if base_commit:
+        info["base_commit"] = base_commit
+      if self.entry.get("repo_language"):
+        info["repo_language"] = str(self.entry["repo_language"])
+      info["workspace_path"] = os.getenv("OPENHANDS_WORKING_DIR", "/testbed")
+    return obs, info
+
+  def _step_openhands_calls(self, calls: list[Any]) -> EnvStepResult:
+    """Runs the tool calls of one multi-call turn in order, like OpenHands.
+
+    OpenHands queues every tool call of a model response and runs one per
+    controller iteration without calling the model again; each uses one of
+    `max_steps` iterations, and finish ends the episode, dropping the calls
+    after it. `step()` already counted this turn's first call in `step_count`
+    and ends the episode once `step_count` reaches `max_steps`.
+
+    Args:
+      calls: The turn's tool calls, as XML strings or parsed actions.
+
+    Returns:
+      The last call's result, with one observation per call that ran (a list
+      when more than one ran).
+    """
+    budget = max(1, self.max_steps - self.step_count + 1)
+    observations = []
+    result = None
+    for i, call in enumerate(calls[:budget]):
+      if i > 0:
+        self.step_count += 1
+      result = self._step_impl(call)
+      observations.append(result.observation)
+      if result.done:
+        break
+    info = dict(result.info or {})
+    info["num_tool_calls"] = len(observations)
+    return EnvStepResult(
+        observation=observations if len(observations) > 1 else observations[0],
+        reward=result.reward,
+        done=result.done,
+        info=info,
+    )
 
   def _step_impl(self, action: Any) -> EnvStepResult:
     global Action
     if Action is None:
-      from r2egym.agenthub.action import Action
+      from r2egym.agenthub.action import Action  # pytype: disable=import-error
+    if (
+        isinstance(action, (list, tuple))
+        and action
+        and self.scaffold in template_mod.OPENHANDS_SCAFFOLDS
+    ):
+      return self._step_openhands_calls(list(action))
     if isinstance(action, str):
-      action_obj = Action.from_string(action)
+      if self.scaffold in template_mod.OPENHANDS_SCAFFOLDS:
+        action_obj = openhands_utils.parse_openhands_action_str(action)
+      else:
+        action_obj = Action.from_string(action)
     else:
       action_obj = action
 
     if not action_obj.function_name:
+      if self.scaffold in template_mod.OPENHANDS_SCAFFOLDS:
+        return EnvStepResult(
+            observation=template_mod.OPENHANDS_FAKE_USER_RESPONSE,
+            reward=0,
+            done=False,
+            info={
+                "max_steps": self.max_steps,
+                "is_fake_user_response": True,
+            },
+        )
       return EnvStepResult(
           observation="",
           reward=0,
           done=False,
           info={"max_steps": self.max_steps},
       )
+
+    if self.scaffold in template_mod.OPENHANDS_SCAFFOLDS:
+      return openhands_utils.step_openhands(self, action_obj)
 
     # RepoEnv always returns 0 reward, must be evaluated by DockerRuntime.
     if not self.env:
@@ -269,6 +422,19 @@ class SWEEnv(BaseTaskEnv):
 
   def close(self) -> None:
     """Close the environment and clean up resources."""
+    if self.workspace is not None:
+      if hasattr(self.workspace, "close"):
+        try:
+          self.workspace.close()
+        except Exception as e:
+          logging.warning("[SWEEnv] Workspace close note: %s", e)
+      if hasattr(self.workspace, "cleanup"):
+        try:
+          self.workspace.cleanup()  # pytype: disable=attribute-error
+        except Exception as e:
+          logging.warning("[SWEEnv] Workspace cleanup note: %s", e)
+      self.workspace = None
+
     if self.env is not None:
       self.env.close()
 

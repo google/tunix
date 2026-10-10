@@ -19,20 +19,25 @@ from __future__ import annotations
 from collections.abc import Iterator
 import json
 import logging
+import os
+import re
 from typing import Any
 
 import numpy as np
-from tunix.experimental.orchestrator import dataset_utils
 from tunix.experimental.rl.agentic import registry
 from examples.deepswe import deepswe_data
 from examples.deepswe import sandbox_utils
 from examples.deepswe import swe_agent
 from examples.deepswe import swe_env
+from examples.deepswe import template
 
 
 DEEPSWE_ENV_NAME = "deepswe_env"
-DEEPSWE_AGENT_NAME = "deepswe_agent"
+DEEPSWE_AGENT_NAME = template.DEEPSWE_AGENT_NAME
+CODEACT_AGENT_NAME = template.CODEACT_AGENT_NAME
 DEFAULT_DATASET_NAME = "R2E-Gym/R2E-Gym-Subset"
+
+get_agent_name = template.get_agent_name
 
 
 def normalize_example_value(value: Any) -> Any:
@@ -134,11 +139,21 @@ def build_prompt_item(
     use_agent_sandbox: bool,
     scaffold: str,
     env_verbose: bool,
+    episode_timeout_secs: int | None = None,
     overlong_filter: bool = False,
+    exact_token_continuity: bool = True,
 ) -> dict[str, Any]:
   """Builds one StandardRLProgram prompt item for a DeepSWE task."""
+  if episode_timeout_secs is None:
+    try:
+      episode_timeout_secs = int(os.getenv("EPISODE_TIMEOUT_SECS", "5400"))
+    except (ValueError, TypeError):
+      episode_timeout_secs = 5400
   problem = _problem_statement(entry)
-  prompt_id = as_text(entry.get("instance_id") or f"deepswe_{prompt_idx}")
+  raw_prompt_id = as_text(entry.get("instance_id") or f"deepswe_{prompt_idx}")
+  prompt_id = (
+      re.sub(r"[^a-zA-Z0-9_\-]", "_", raw_prompt_id) or f"deepswe_{prompt_idx}"
+  )
   env_config = {
       "entry": entry,
       "prompt_id": prompt_id,
@@ -166,11 +181,14 @@ def build_prompt_item(
       "metadata": {
           "instance_id": prompt_id,
           "problem_statement": problem,
+          "docker_image": entry.get("docker_image"),
+          "prefix_hash": prompt_id,
           "env_config": env_config,
+          "agent_name": get_agent_name(scaffold),
           "agent_config": agent_config,
-          # Read by TrajectoryCollectorEngine to decide which terminal statuses
-          # get their policy loss mask zeroed out.
+          "episode_timeout": episode_timeout_secs,
           "overlong_filter": overlong_filter,
+          "exact_token_continuity": exact_token_continuity,
       },
   }
 
@@ -191,17 +209,20 @@ def iter_prompt_items(
     use_agent_sandbox: bool,
     scaffold: str,
     env_verbose: bool,
+    episode_timeout_secs: int | None = None,
     overlong_filter: bool = False,
+    exact_token_continuity: bool = True,
     max_staleness: int = 0,
 ) -> Iterator[dict[str, Any]]:
-  """Yields one full-batch worth of prompt groups per RL step plus off-policy lookahead."""
+  """Yields prompt groups needed for training, including max_staleness lookahead."""
   dataset_size = len(dataset)
   if dataset_size <= 0:
     raise ValueError("DeepSWE dataset is empty.")
 
-  total_prompts = dataset_utils.total_prompt_groups(
-      max_steps, batch_size, max_staleness
-  )
+  # To avoid artificial tapering of generation workload near max_steps (MLPerf
+  # training_rules.adoc:678), generate prompts for (max_steps + max_staleness)
+  # steps so rollout workers continue at full capacity through the final step.
+  total_prompts = (max_steps + max(0, max_staleness)) * batch_size
   for prompt_idx in range(total_prompts):
     yield build_prompt_item(
         entry=_entry_at(dataset, prompt_idx % dataset_size),
@@ -217,7 +238,9 @@ def iter_prompt_items(
         use_agent_sandbox=use_agent_sandbox,
         scaffold=scaffold,
         env_verbose=env_verbose,
+        episode_timeout_secs=episode_timeout_secs,
         overlong_filter=overlong_filter,
+        exact_token_continuity=exact_token_continuity,
     )
 
 
@@ -238,7 +261,7 @@ class DeepSWEEnv(swe_env.SWEEnv):
       **kwargs: Any,
   ):
     entry = dict(entry or kwargs.pop("task", {}) or {})
-    if prompt_id and "instance_id" not in entry:
+    if prompt_id and not entry.get("instance_id"):
       entry["instance_id"] = prompt_id
     if group_id is None:
       group_id = prompt_id or None
@@ -258,6 +281,7 @@ class DeepSWEEnv(swe_env.SWEEnv):
           max_concurrency=num_generations,
           num_generations=num_generations,
           max_warmpool_replicas=max_warmpool_replicas,
+          scaffold=str(kwargs.get("scaffold") or os.getenv("SCAFFOLD", "r2egym")),
       )
 
     super().__init__(
@@ -277,6 +301,28 @@ class DeepSWEEnv(swe_env.SWEEnv):
 
 @registry.register_agent(DEEPSWE_AGENT_NAME)
 class DeepSWEAgent(swe_agent.SWEAgent):
-  """Registry adapter for the legacy DeepSWE XML-tool agent."""
+  """Registry adapter for the DeepSWE agent."""
 
   name = DEEPSWE_AGENT_NAME
+
+  def __new__(
+      cls,
+      system_prompt: str | None = None,
+      use_fn_calling: bool = False,
+      format_model_response: bool = False,
+      scaffold: str | None = None,
+  ):
+    # Mirrors SWEAgent.__init__ so scaffold is honored positionally or by name.
+    del system_prompt, use_fn_calling, format_model_response  # Used by __init__.
+    if cls is DeepSWEAgent:
+      resolved = scaffold or os.getenv("SCAFFOLD", "r2egym")
+      if str(resolved) in swe_agent.OPENHANDS_SCAFFOLDS:
+        return super().__new__(DeepSWECodeActAgent)
+    return super().__new__(cls)
+
+
+@registry.register_agent(CODEACT_AGENT_NAME)
+class DeepSWECodeActAgent(swe_agent.CodeActAgent, DeepSWEAgent):
+  """Registry adapter for the OpenHands CodeActAgent."""
+
+  name = CODEACT_AGENT_NAME
