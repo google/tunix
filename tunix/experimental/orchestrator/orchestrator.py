@@ -18,7 +18,7 @@ Supervises WorkerRegistry, LifecycleDriver, HealthMonitor, and StartupValidator.
 Provides supervised RL program execution (`run`).
 """
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from concurrent import futures
 import contextlib
 import os
@@ -688,8 +688,40 @@ class ClusterOrchestrator:
     worker_ids = sorted(shims)
     if not worker_ids:
       return
+    evicted_rollout_ids: set[str] = set()
+    last_rollout_err: BaseException | None = None
     try:
       with futures.ThreadPoolExecutor(max_workers=len(worker_ids)) as pool:
+
+        def _run_stage(stage_name: str, fn: Callable[[str], None]) -> None:
+          nonlocal last_rollout_err
+          active_ids = [
+              wid for wid in worker_ids if wid not in evicted_rollout_ids
+          ]
+          if not active_ids:
+            return
+          futs = {wid: pool.submit(fn, wid) for wid in active_ids}
+          for wid, fut in futs.items():
+            try:
+              fut.result()
+            except Exception as err:  # pylint: disable=broad-exception-caught
+              is_rollout = (
+                  datatypes.Role.ROLLOUT.value in shims[wid].info().roles
+              )
+              if self._fault_tolerance_config.enabled and is_rollout:
+                logging.error(
+                    "[rollout-ft] action=evict worker_id=%s stage=%s"
+                    " reason=bring_up_failed err=%r",
+                    wid,
+                    stage_name,
+                    err,
+                )
+                evicted_rollout_ids.add(wid)
+                last_rollout_err = err
+                self.registry.evict(wid)
+              else:
+                raise
+
         if self.trajectory_store_config is not None:
           def _cfg_store(wid: str) -> None:
             if datatypes.Role.ROLLOUT.value in shims[wid].info().roles:
@@ -701,25 +733,37 @@ class ClusterOrchestrator:
                   "with_trajectory_store_config", self.trajectory_store_config
               )
 
-          list(pool.map(_cfg_store, worker_ids))
+          _run_stage("configure_trajectory_store", _cfg_store)
 
         def _init_worker(wid: str) -> None:
           logging.info("Initializing remote worker %s.", wid)
           shims[wid].handle.submit("initialize")
 
-        list(pool.map(_init_worker, worker_ids))
+        _run_stage("initialize", _init_worker)
 
         def _compile_worker(wid: str) -> None:
           logging.info("Compiling remote worker %s.", wid)
           shims[wid].handle.submit("compile", dummy_data)
 
-        list(pool.map(_compile_worker, worker_ids))
+        _run_stage("compile", _compile_worker)
 
         def _start_worker(wid: str) -> None:
           logging.info("Starting remote worker %s.", wid)
           shims[wid].handle.submit("start")
 
-        list(pool.map(_start_worker, worker_ids))
+        _run_stage("start", _start_worker)
+
+        initial_rollout_ids = [
+            wid
+            for wid in worker_ids
+            if datatypes.Role.ROLLOUT.value in shims[wid].info().roles
+        ]
+        if (
+            initial_rollout_ids
+            and len(evicted_rollout_ids) >= len(initial_rollout_ids)
+            and last_rollout_err is not None
+        ):
+          raise last_rollout_err
     except BaseException:
       with self._lock:
         self._brought_up = False
