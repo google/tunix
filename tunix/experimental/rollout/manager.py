@@ -16,6 +16,8 @@
 
 import asyncio
 import logging
+import math
+import os
 import time
 from typing import Any, AsyncIterator, Callable, Dict, Optional, Sequence, Union
 from tunix.experimental.common import datatypes
@@ -26,6 +28,7 @@ from tunix.experimental.rollout import vanilla_sampler_adapter
 from tunix.experimental.trajectory import base_store as store
 from tunix.experimental.trajectory import trajectory as trajectory_lib
 from tunix.experimental.weight_sync import weight_sync
+from tunix.experimental.weight_sync import weight_sync_coordinator
 from tunix.experimental.worker import traffic_controller as traffic_controller_lib
 from tunix.rl.rollout import base_rollout
 
@@ -51,7 +54,7 @@ class RolloutManager:
       max_concurrency: int = 64,
       tokenizer: Any = None,
       chat_parser: Any = None,
-      drain_timeout_s: float = 300.0,
+      drain_timeout_s: Optional[float] = None,
       trajectory_store: Optional[store.TrajectoryWriter] = None,
   ):
     """Initializes the RolloutManager.
@@ -177,7 +180,16 @@ class RolloutManager:
     self._active_tasks: Dict[str, asyncio.Task[Any]] = {}
     self._completed_queue: asyncio.Queue[TrajectoryOrError] = asyncio.Queue()
     self._traffic_inst = None
-    self._drain_timeout_s = drain_timeout_s
+    episode_timeout_s = weight_sync_coordinator._env_float(
+        "EPISODE_TIMEOUT_SECS",
+        collector_lib.DEFAULT_EPISODE_TIMEOUT_SECS,
+    )
+    if drain_timeout_s is None:
+      if weight_sync_coordinator.is_weight_sync_timeouts_disabled():
+        drain_timeout_s = float("inf")
+      else:
+        drain_timeout_s = episode_timeout_s + 60.0
+    self._drain_timeout_s = float(drain_timeout_s)
 
   @property
   def _traffic(self) -> traffic_controller_lib.TrafficController:

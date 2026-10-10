@@ -131,6 +131,8 @@ import time
 from typing import Any, Optional, Sequence
 
 from absl import logging
+import math
+import os
 from tunix.experimental.common import datatypes
 from tunix.experimental.orchestrator import worker_registry
 from tunix.experimental.weight_sync import weight_sync
@@ -526,6 +528,59 @@ _POISONING_STATES = frozenset({
 })
 
 
+_TRUTHY_ENV_VALUES = ("1", "true", "yes", "on")
+_INFINITE_ENV_VALUES = (
+    "inf",
+    "+inf",
+    "infinity",
+    "+infinity",
+    "none",
+    "off",
+    "disable",
+    "disabled",
+)
+
+
+def is_weight_sync_timeouts_disabled() -> bool:
+  """Returns True if weight-sync phase timeouts are disabled via env."""
+  for name in ("WEIGHT_SYNC_DISABLE_TIMEOUTS", "DISABLE_WEIGHT_SYNC_TIMEOUTS"):
+    val = os.getenv(name)
+    if val is not None and val.strip().lower() in _TRUTHY_ENV_VALUES:
+      return True
+  return False
+
+
+def _env_float(name: str, default: float) -> float:
+  val = os.getenv(name)
+  if val is None or not val.strip():
+    return default
+  stripped = val.strip().lower()
+  if stripped in _INFINITE_ENV_VALUES:
+    return float("inf")
+  try:
+    return float(val)
+  except ValueError:
+    logging.warning(
+        "Invalid float for %s=%r; using default %f", name, val, default
+    )
+    return default
+
+
+def _timeout_env_float(name: str, default: float) -> float:
+  if is_weight_sync_timeouts_disabled():
+    return float("inf")
+  parsed = _env_float(name, default)
+  if parsed <= 0:
+    return float("inf")
+  return parsed
+
+
+async def _wait_for(aw: Any, timeout: Optional[float]) -> Any:
+  if timeout is None or math.isinf(timeout) or timeout <= 0:
+    return await aw
+  return await _wait_for(aw, timeout)
+
+
 @dataclasses.dataclass(frozen=True)
 class PhaseTimeouts:
   """Per-phase deadlines, in seconds.
@@ -537,16 +592,57 @@ class PhaseTimeouts:
   at least this large.
   """
 
-  bind: float = 60.0
-  metadata: float = 60.0
-  source_prepare: float = 900.0
-  pre: float = 180.0
-  transfer: float = 1800.0
-  h2d: float = 1800.0
-  post: float = 300.0
-  abort: float = 180.0
-  status: float = 30.0
-  release: float = 120.0
+  bind: float = dataclasses.field(
+      default_factory=lambda: _timeout_env_float(
+          "WEIGHT_SYNC_BIND_TIMEOUT_S", 300.0
+      )
+  )
+  metadata: float = dataclasses.field(
+      default_factory=lambda: _timeout_env_float(
+          "WEIGHT_SYNC_METADATA_TIMEOUT_S", 300.0
+      )
+  )
+  source_prepare: float = dataclasses.field(
+      default_factory=lambda: _timeout_env_float(
+          "WEIGHT_SYNC_SOURCE_PREPARE_TIMEOUT_S", 900.0
+      )
+  )
+  pre: float = dataclasses.field(
+      default_factory=lambda: _timeout_env_float(
+          "WEIGHT_SYNC_PRE_TIMEOUT_S",
+          _env_float("EPISODE_TIMEOUT_SECS", 600.0) + 300.0,
+      )
+  )
+  transfer: float = dataclasses.field(
+      default_factory=lambda: _timeout_env_float(
+          "WEIGHT_SYNC_TRANSFER_TIMEOUT_S", 1800.0
+      )
+  )
+  h2d: float = dataclasses.field(
+      default_factory=lambda: _timeout_env_float(
+          "WEIGHT_SYNC_H2D_TIMEOUT_S", 1800.0
+      )
+  )
+  post: float = dataclasses.field(
+      default_factory=lambda: _timeout_env_float(
+          "WEIGHT_SYNC_POST_TIMEOUT_S", 300.0
+      )
+  )
+  abort: float = dataclasses.field(
+      default_factory=lambda: _timeout_env_float(
+          "WEIGHT_SYNC_ABORT_TIMEOUT_S", 180.0
+      )
+  )
+  status: float = dataclasses.field(
+      default_factory=lambda: _timeout_env_float(
+          "WEIGHT_SYNC_STATUS_TIMEOUT_S", 30.0
+      )
+  )
+  release: float = dataclasses.field(
+      default_factory=lambda: _timeout_env_float(
+          "WEIGHT_SYNC_RELEASE_TIMEOUT_S", 120.0
+      )
+  )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -742,7 +838,7 @@ class WeightSyncCoordinator:
   ) -> Optional[str]:
     """The worker's self-reported phase for THIS round, or None if unknown."""
     try:
-      report = await asyncio.wait_for(
+      report = await _wait_for(
           destination.get_weight_sync_status(), self._timeouts.status
       )
     except Exception:  # pylint: disable=broad-except
@@ -770,7 +866,7 @@ class WeightSyncCoordinator:
     method = getattr(destination, method_name)
     accepts = _PHASE_ACCEPTS.get(method_name)
     try:
-      await asyncio.wait_for(method(request), timeout)
+      await _wait_for(method(request), timeout)
       return None
     except asyncio.CancelledError:
       raise
@@ -964,11 +1060,11 @@ class WeightSyncCoordinator:
       # registration cost no downtime. Failures here need no rollback either.
       try:
         await asyncio.gather(*[
-            asyncio.wait_for(d.bind_weight_sync(), self._timeouts.bind)
+            _wait_for(d.bind_weight_sync(), self._timeouts.bind)
             for d in destinations
         ])
         dst_meta_lists = await asyncio.gather(*[
-            asyncio.wait_for(
+            _wait_for(
                 d.get_weight_sync_metadata(), self._timeouts.metadata
             )
             for d in destinations
@@ -977,7 +1073,7 @@ class WeightSyncCoordinator:
         # registration and the request. Collecting twice would hand the
         # controller endpoints from a different rebind than the one staged.
         src_meta_lists = await asyncio.gather(*[
-            asyncio.wait_for(
+            _wait_for(
                 s.prepare_weight_sync(request), self._timeouts.source_prepare
             )
             for s in sources
@@ -1166,7 +1262,7 @@ class WeightSyncCoordinator:
       state = RoundState.TRANSFERRING
       transfer_in_flight = True
       try:
-        transfer = await asyncio.wait_for(
+        transfer = await _wait_for(
             loop.run_in_executor(
                 None,
                 functools.partial(
@@ -1436,7 +1532,7 @@ class WeightSyncCoordinator:
         # next round's prepare, or a close() that frees what it is reading.
         release_gather = asyncio.gather(
             *[
-                asyncio.wait_for(
+                _wait_for(
                     s.release_weight_sync(release_request),
                     self._timeouts.release,
                 )
