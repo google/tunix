@@ -1037,6 +1037,40 @@ class ClusterOrchestratorTest(absltest.TestCase):
     self.assertEqual(orch.engine._rollout_workers, [h_r0])
     orch.shutdown()
 
+  def test_remote_worker_handles_returns_copy_including_evicted_and_excludes_local(
+      self,
+  ):
+    h_actor = mock.MagicMock(spec=remote_execution.ActorHandle)
+    h_r0 = mock.MagicMock(spec=remote_execution.ActorHandle)
+    local_worker = _DummyWorker("local-rollout", [datatypes.Role.ROLLOUT])
+
+    orch = orchestrator.ClusterOrchestrator(
+        lifecycle_driver=mock.MagicMock(),
+        monitor=mock.MagicMock(),
+        weight_sync_mode="fallback",
+    )
+    orch.register_worker(local_worker)
+    orch.register_worker_handle("actor-0", [datatypes.Role.ACTOR], h_actor)
+    orch.register_worker_handle("rollout-0", [datatypes.Role.ROLLOUT], h_r0)
+    orch.bring_up_workers()
+
+    handles = orch.remote_worker_handles()
+    self.assertEqual(handles, {"actor-0": h_actor, "rollout-0": h_r0})
+
+    # Evicted remote workers are still returned so shutdown/drain can stop them.
+    orch.registry.evict("rollout-0")
+    self.assertEqual(
+        orch.remote_worker_handles(),
+        {"actor-0": h_actor, "rollout-0": h_r0},
+    )
+
+    # Unregistering removes the worker from remote_worker_handles, while the
+    # earlier snapshot remains unchanged.
+    orch.unregister_worker("rollout-0")
+    self.assertEqual(handles, {"actor-0": h_actor, "rollout-0": h_r0})
+    self.assertEqual(orch.remote_worker_handles(), {"actor-0": h_actor})
+    orch.shutdown()
+
 
 def _trajectory_store_orchestrator(
     **kwargs,

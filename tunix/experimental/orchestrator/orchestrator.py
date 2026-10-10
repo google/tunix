@@ -509,7 +509,11 @@ class ClusterOrchestrator:
       self,
   ) -> dict[str, remote_execution.ActorHandle]:
     """Returns a copy of ``worker_id -> handle`` for the remote workers."""
-    return dict(self._remote_worker_handles_by_id)
+    return {
+        wid: shim.handle
+        for wid, shim in self._remote_shims(include_evicted=True).items()
+        if shim.info().resources.get("remote")
+    }
 
   def sync_jax_cache(self) -> None:
     """Synchronizes JAX compilation cache across all workers to GCS."""
@@ -848,7 +852,8 @@ class ClusterOrchestrator:
               and self._fault_tolerance_config.retry_weight_sync_on_eviction
           ),
           recover_unknown_transfer_state=(
-              self._fault_tolerance_config.recover_unknown_transfer_state
+              self._fault_tolerance_config.enabled
+              and self._fault_tolerance_config.recover_unknown_transfer_state
           ),
       )
 
