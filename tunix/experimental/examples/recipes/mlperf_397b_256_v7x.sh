@@ -81,7 +81,7 @@ export MAX_CONCURRENCY="${MAX_CONCURRENCY:-1024}"
 export VLLM_ADDITIONAL_CONFIG='{"sharding":{"sharding_strategy":{"expert_parallelism":'"${ROLLOUT_MESH_EXPERT}"',"tensor_parallelism":1,"enable_dp_attention":true}},"custom_mamba_cache_multiplier":16,"maxtext_config":{"scan_layers":false,"attention":"vllm_rpa","allow_split_physical_axes":true,"use_multimodal":false,"prefuse_moe_weights":true,"per_device_batch_size":0.0}}'
 
 # Rollout Worker Flags & Raiden tuning
-export ONEHOT_MOE_PERMUTE_THRESHOLD="${ONEHOT_MOE_PERMUTE_THRESHOLD:-32768}"
+export ONEHOT_MOE_PERMUTE_THRESHOLD="${ONEHOT_MOE_PERMUTE_THRESHOLD:-2048}"
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800
 export VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY="RAIDEN_,TPU_,WEIGHT_SYNC_"
 export TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS="${TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS:-120000}"
