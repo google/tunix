@@ -72,6 +72,10 @@ class TrainingInput:
   images: jax.Array | np.ndarray | None = None
 
 
+_MetricValue = ArrayLike | utils.WeightedMetric | Any
+_MetricReducer = Callable[[Any], Any]
+
+
 @dataclasses.dataclass(slots=True, kw_only=True)
 class MetricsBuffer:
   """Metrics collected for a specific step.
@@ -86,14 +90,19 @@ class MetricsBuffer:
   """
 
   step: int
-  losses: List[ArrayLike]
-  additional_metrics: Dict[
-      str, Tuple[List[ArrayLike], Callable[[ArrayLike], ArrayLike]]
-  ] = dataclasses.field(default_factory=dict)
+  losses: List[_MetricValue]
+  additional_metrics: Dict[str, Tuple[List[_MetricValue], _MetricReducer]] = (
+      dataclasses.field(default_factory=dict)
+  )
 
   @property
   def loss(self):
     """Returns the mean of the recorded losses for the step."""
+    weighted = [utils.is_weighted_metric(value) for value in self.losses]
+    if any(weighted):
+      if not all(weighted):
+        raise TypeError("loss values must not mix weighted and scalar metrics")
+      return utils.weighted_metric_mean(self.losses)
     return np.mean(np.array([np.array(x) for x in self.losses]))
 
 
@@ -431,6 +440,8 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self._mode: sft_metrics_logger.Mode = sft_metrics_logger.Mode.TRAIN
     self._has_aux = False
     self._pbar = None
+    self._last_fwd_bwd_loss: ArrayLike | None = None
+    self._last_eval_loss: ArrayLike = 0.0
     self._last_update_grad_norm: ArrayLike | None = None
     self._restored_custom_metadata: Mapping[str, Any] = {}
     if self.config.get_with_default("resume_from_checkpoint_on_init", True):
@@ -594,15 +605,13 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       # mean (Sum grads / Sum denom) across micro-batches rather than a
       # mean-of-means.
       grad_accumulator.add(grads, denom=aux.primary_loss.denominator)
-    else:
-      grad_accumulator.add(grads, denom=jnp.asarray(1.0, dtype=jnp.float32))
-
-    if isinstance(aux, utils.LossOutput):
-      return loss_val, aux.aux_metrics
-    elif self._has_aux:
       return loss_val, aux
     else:
-      return loss_val, None
+      grad_accumulator.add(grads, denom=jnp.asarray(1.0, dtype=jnp.float32))
+      if self._has_aux:
+        return loss_val, aux
+      else:
+        return loss_val, None
 
   def _update_step(
       self,
@@ -661,7 +670,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     inputs = self.gen_model_input_fn(inputs)
     out = self.eval_loss_fn(model, **inputs)
     if isinstance(out, utils.LossOutput):
-      return out.primary_loss.compute(), out.aux_metrics
+      return out.primary_loss.compute(), out
     elif self._has_aux:
       loss, aux = out  # pyrefly: ignore[not-iterable]
       return loss, aux
@@ -914,10 +923,10 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
   def _buffer_metrics(
       self,
       metrics_buffer: MetricsBuffer | None,
-      loss: ArrayLike,
+      loss: _MetricValue,
       step: int,
       additional_metrics: (
-          dict[str, Tuple[ArrayLike, Callable[[ArrayLike], ArrayLike]]] | None
+          Mapping[str, Tuple[_MetricValue, _MetricReducer]] | None
       ) = None,
   ) -> MetricsBuffer:
     """Buffers metrics for the current step."""
@@ -928,13 +937,23 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       )
     else:
       assert metrics_buffer.step == step
+      if utils.is_weighted_metric(
+          metrics_buffer.losses[0]
+      ) != utils.is_weighted_metric(loss):
+        raise TypeError("loss values must not mix weighted and scalar metrics")
       metrics_buffer.losses.append(loss)
     if additional_metrics is not None:
       for k, (v, op) in additional_metrics.items():
         if k not in metrics_buffer.additional_metrics:
           metrics_buffer.additional_metrics[k] = ([v], op)
         else:
-          metrics_buffer.additional_metrics[k][0].append(v)
+          values = metrics_buffer.additional_metrics[k][0]
+          if utils.is_weighted_metric(values[0]) != utils.is_weighted_metric(v):
+            raise TypeError(
+                f"additional metric {k!r} must not mix weighted and scalar"
+                " values"
+            )
+          values.append(v)
     return metrics_buffer
 
   def _write_train_metrics(self):
@@ -964,9 +983,16 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
         return [_to_np_array(x) for x in v]
       return v
 
+    def _apply_op(v, op):
+      if isinstance(v, list) and v:
+        weighted = [utils.is_weighted_metric(x) for x in v]
+        if any(weighted) and not all(weighted):
+          raise TypeError("metrics must not mix weighted and scalar values")
+      return op(_to_np_array(v))
+
     loss = metrics_buffer.loss
     additional_metrics = {
-        k: op(_to_np_array(v))
+        k: _apply_op(v, op)
         for k, (v, op) in metrics_buffer.additional_metrics.items()
     }
     self._log_metrics(
@@ -1024,12 +1050,19 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
 
   def _record_fwd_bwd(self, train_loss: ArrayLike, aux: Any) -> None:
     """Bookkeeping for one forward/backward pass, independent of how it ran."""
+    self._last_fwd_bwd_loss = train_loss
+    buffered_loss = (
+        aux.primary_loss if isinstance(aux, utils.LossOutput) else train_loss
+    )
+    post_process_aux = (
+        aux.aux_metrics if isinstance(aux, utils.LossOutput) else aux
+    )
     self._buffered_train_metrics = self._buffer_metrics(
         self._buffered_train_metrics,
-        loss=train_loss,
+        loss=buffered_loss,
         step=self._train_steps,
     )
-    self._post_process_train_step(aux)
+    self._post_process_train_step(post_process_aux)
 
   def _record_update(self, grad_norm: ArrayLike) -> int:
     """Bookkeeping for one optimizer update, independent of how it ran."""
@@ -1140,12 +1173,19 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     )
     loss, aux = eval_step_fn(self._prepare_payload(payload))
     loss = jax.lax.stop_gradient(loss)
+    self._last_eval_loss = loss
+    buffered_loss = (
+        aux.primary_loss if isinstance(aux, utils.LossOutput) else loss
+    )
+    post_process_aux = (
+        aux.aux_metrics if isinstance(aux, utils.LossOutput) else aux
+    )
     self._buffered_eval_metrics = self._buffer_metrics(
         self._buffered_eval_metrics,
-        loss=loss,
+        loss=buffered_loss,
         step=self._train_steps,
     )
-    self._post_process_eval_step(aux)
+    self._post_process_eval_step(post_process_aux)
 
   @contextlib.contextmanager
   def eval_context(self):
@@ -1475,14 +1515,10 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
                 skip_jit=skip_jit,
                 cache_nnx_graph=cache_nnx_graph,
             )
-            assert self._buffered_train_metrics is not None
-            train_loss = self._buffered_train_metrics.losses[-1]
-            computation_to_track = train_loss
+            computation_to_track = self._last_fwd_bwd_loss
             if is_update_step_val:
               self.update(skip_jit=skip_jit, cache_nnx_graph=cache_nnx_graph)
-              computation_to_track = getattr(
-                  self, "_last_update_grad_norm", train_loss
-              )
+              computation_to_track = self._last_update_grad_norm
 
           span.device_end([computation_to_track])
           span_v2.async_end([computation_to_track])
@@ -1569,8 +1605,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
         if self.training_hooks:
           self.training_hooks.on_eval_step_start(self)
         self.eval_step(eval_example)
-        assert self._buffered_eval_metrics is not None
-        eval_loss += self._buffered_eval_metrics.losses[-1]
+        eval_loss += self._last_eval_loss
         eval_steps += 1
 
       if eval_steps == 0:
@@ -1581,10 +1616,16 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
         self._buffered_eval_metrics = None
         return
 
+      assert self._buffered_eval_metrics is not None
+      uses_weighted_loss = utils.is_weighted_metric(
+          self._buffered_eval_metrics.losses[-1]
+      )
+      if uses_weighted_loss:
+        eval_loss = self._buffered_eval_metrics.loss
       logging.info(
           "Train step %d eval loss: %f",
           self._train_steps,
-          eval_loss / eval_steps,
+          eval_loss if uses_weighted_loss else eval_loss / eval_steps,
       )
       if self.training_hooks:
         self.training_hooks.on_eval_step_end(self, eval_loss)

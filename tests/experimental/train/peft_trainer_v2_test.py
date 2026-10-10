@@ -970,6 +970,141 @@ class PeftTrainerTest(parameterized.TestCase):
         metrics.weighted_metrics['foo'], sft_utils.WeightedMetric
     )
 
+  def test_weighted_metric_loss_reduction_across_unequal_microbatches(self):
+    def custom_loss_fn(
+        model: nnx.Module,
+        input_tokens: jax.Array,
+        input_mask: jax.Array,
+        positions: jax.Array,
+        attention_mask: jax.Array,
+    ) -> sft_utils.LossOutput:
+      del model, positions, attention_mask
+      denom = jnp.sum(input_mask).astype(jnp.float32)
+      # Make microbatches with different valid token counts have distinct means:
+      # sum = denom * denom -> microbatch mean = denom, global weighted mean =
+      # (d1^2 + d2^2) / (d1 + d2).
+      unreduced_sum = denom * denom + 0.0 * jnp.sum(
+          input_tokens.astype(jnp.float32)
+      )
+      return sft_utils.LossOutput(
+          primary_loss=sft_utils.WeightedMetric(unreduced_sum, denom),
+          aux_metrics={
+              'unreduced_pg_loss': sft_utils.WeightedMetric(
+                  unreduced_sum, denom
+              ),
+          },
+      )
+
+    config = peft_trainer_v2.TrainingConfig(
+        eval_every_n_steps=100,
+        max_steps=2,
+        gradient_accumulation_steps=1,
+    )
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(
+        dummy_gen_model_input_fn
+    ).with_loss_fn(custom_loss_fn)
+
+    mb_small = peft_trainer_v2.TrainingInput(
+        input_tokens=jnp.ones((2, 4), dtype=jnp.int32),
+        input_mask=jnp.array(
+            [[1, 0, 0, 0], [1, 0, 0, 0]], dtype=jnp.int32
+        ),  # denom = 2
+    )
+    mb_large = peft_trainer_v2.TrainingInput(
+        input_tokens=jnp.ones((2, 4), dtype=jnp.int32),
+        input_mask=jnp.ones((2, 4), dtype=jnp.int32),  # denom = 8
+    )
+    expected_weighted_loss = (2.0**2 + 8.0**2) / (2.0 + 8.0)  # 68 / 10 = 6.8
+
+    # Step 1 (two dynamic microbatches with unequal denominators: 2 and 8).
+    trainer.fwd_bwd(mb_small)
+    trainer.fwd_bwd(mb_large)
+    trainer.update()
+    # Step 2 flushes Step 1's buffered train metrics.
+    trainer.fwd_bwd(mb_small)
+    trainer.update()
+    train_metrics = trainer.get_metrics()
+    np.testing.assert_allclose(
+        train_metrics.scalar_metrics['loss'],
+        expected_weighted_loss,
+        rtol=1e-5,
+    )
+    np.testing.assert_allclose(
+        train_metrics.scalar_metrics['loss'],
+        train_metrics.scalar_metrics['unreduced_pg_loss'],
+        rtol=1e-5,
+    )
+
+    with trainer.eval_context():
+      trainer.eval_step(mb_small)
+      trainer.eval_step(mb_large)
+    eval_metrics = trainer.get_metrics()
+    np.testing.assert_allclose(
+        eval_metrics.scalar_metrics['loss'],
+        expected_weighted_loss,
+        rtol=1e-5,
+    )
+    np.testing.assert_allclose(
+        eval_metrics.scalar_metrics['loss'],
+        eval_metrics.scalar_metrics['unreduced_pg_loss'],
+        rtol=1e-5,
+    )
+
+  def test_metrics_buffer_rejects_mixed_metric_kinds(self):
+    weighted = sft_utils.WeightedMetric(jnp.array(1.0), jnp.array(1.0))
+    buffer = peft_trainer_v2.MetricsBuffer(
+        step=0,
+        losses=[jnp.array(1.0), weighted],
+    )
+    with self.assertRaisesRegex(TypeError, 'must not mix'):
+      _ = buffer.loss
+
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer_v2.PeftTrainer(
+        model,
+        optax.sgd(1e-3),
+        peft_trainer_v2.TrainingConfig(eval_every_n_steps=100, max_steps=100),
+    )
+    weighted_buffer = trainer._buffer_metrics(
+        None,
+        loss=weighted,
+        step=0,
+    )
+    with self.assertRaisesRegex(TypeError, 'loss values must not mix'):
+      trainer._buffer_metrics(
+          weighted_buffer,
+          loss=jnp.array(1.0),
+          step=0,
+      )
+
+    buffer = trainer._buffer_metrics(
+        None,
+        loss=jnp.array(1.0),
+        step=0,
+        additional_metrics={'metric': (jnp.array(1.0), np.mean)},
+    )
+    with self.assertRaisesRegex(TypeError, "additional metric 'metric'"):
+      trainer._buffer_metrics(
+          buffer,
+          loss=jnp.array(1.0),
+          step=0,
+          additional_metrics={
+              'metric': (weighted, sft_utils.weighted_metric_mean),
+          },
+      )
+
+    mixed_buffer = peft_trainer_v2.MetricsBuffer(
+        step=0,
+        losses=[jnp.array(1.0)],
+        additional_metrics={
+            'metric': ([weighted, jnp.array(1.0)], np.mean),
+        },
+    )
+    with self.assertRaisesRegex(TypeError, 'metrics must not mix'):
+      trainer._write_metrics(mixed_buffer)
+
   def test_empty_eval_dataset(self):
     config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=2, max_steps=100)
     model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
