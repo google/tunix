@@ -126,11 +126,6 @@ export RPC_TIMEOUT_S="${RPC_TIMEOUT_S:-10800}"
 # (mlperf_base.sh defaults REMAT_POLICY to full).
 export REMAT_POLICY="${REMAT_POLICY:-custom}"
 export RAGGED_BUFFER_FACTOR="${RAGGED_BUFFER_FACTOR:-2.0}"
-# A micro-batch whose MoE ragged buffer overflows is rerun with a dropless program
-# (RETRY_NUM_MOE_TOKEN_CHUNKS scanned token chunks, ~63 GiB/device) instead of dropping
-# tokens. Needs RAGGED_BUFFER_FACTOR > 0; set RETRY_WHEN_TOKENS_DROPPED=false with -1.
-export RETRY_WHEN_TOKENS_DROPPED="${RETRY_WHEN_TOKENS_DROPPED:-true}"
-export RETRY_NUM_MOE_TOKEN_CHUNKS="${RETRY_NUM_MOE_TOKEN_CHUNKS:-8}"
 export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS:-custom_mesh_and_rule=cp-as-ep \
 use_gdn_kernel=true gdn_cp_mode=head gdn_chunk_size=64 \
 decoder_layer_input=offload context=remat gdn=remat gdn_conv=remat gdn_states=remat \
@@ -146,7 +141,6 @@ use_ring_of_experts=true num_moe_token_chunks=2 moe_chunk_barrier=false \
 ring_of_experts_local_routing=true moe_expert_weight_prefetch=forward \
 moe_chunk_pipeline=true ring_of_experts_row_major_reduce_scatter=true \
 use_ragged_sort=true use_custom_sort_vjp=false ragged_buffer_factor=${RAGGED_BUFFER_FACTOR} \
-retry_when_tokens_dropped=${RETRY_WHEN_TOKENS_DROPPED} retry_num_moe_token_chunks=${RETRY_NUM_MOE_TOKEN_CHUNKS} \
 use_tokamax_splash=true use_splash_scheduler=true \
 sa_block_q=1024 sa_block_kv=4096 sa_block_kv_compute=512 \
 sa_block_q_dkv=2048 sa_block_kv_dkv=2048 sa_block_kv_dkv_compute=512 \
@@ -156,6 +150,13 @@ context_parallel_attention_load_balance=true \
 num_vocab_tiling=16 use_iota_embed=false mu_dtype=float32 grad_dtype=float32 \
 checkpoint_storage_concurrent_gb=96 \
 packing=True optimizer_memory_host_offload=true}"
+# Opt-in: RETRY_WHEN_TOKENS_DROPPED=true reruns a micro-batch whose MoE ragged buffer overflows
+# with a dropless program (RETRY_NUM_MOE_TOKEN_CHUNKS scanned token chunks, ~63 GiB/device)
+# instead of dropping its tokens. Needs RAGGED_BUFFER_FACTOR > 0 and a MaxText with the
+# training-engine dropless replay (AI-Hypercomputer/maxtext#5570).
+if [[ "${RETRY_WHEN_TOKENS_DROPPED:-false}" == "true" ]]; then
+  export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS} retry_when_tokens_dropped=true retry_num_moe_token_chunks=${RETRY_NUM_MOE_TOKEN_CHUNKS:-8}"
+fi
 export DEBUG=${DEBUG:-0}
 
 # DeepSWE Environment & Agent Sandbox
