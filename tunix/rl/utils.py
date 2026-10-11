@@ -537,66 +537,37 @@ def train_example_to_pack_items(
 
 
 def pack_rows_to_train_examples(
-    rows: packing.PackedChunk | Sequence[packing.PackedRow],
+    chunk: packing.PackedChunk,
     example_cls: type[Any],
     *,
     mask_dtype: Any,
     num_segments: int,
     is_update_step: bool,
 ) -> Any:
-  """Converts a PackedChunk or sequence of PackedRows to a TrainExample."""
-  n = len(rows)
-  if isinstance(rows, packing.PackedChunk):
-    kwargs: dict[str, Any] = dict(
-        prompt_ids=jnp.zeros((n, 0), dtype=np.int32),
-        prompt_mask=jnp.zeros((n, 0), dtype=mask_dtype),
-        completion_ids=jnp.asarray(rows.ids),
-        completion_mask=jnp.asarray(rows.completion_mask, dtype=mask_dtype),
-        advantages=jnp.asarray(rows.advantages),
-        segment_ids=jnp.asarray(rows.segment_ids),
-        segment_positions=jnp.asarray(rows.segment_positions),
-        ref_per_token_logps=None,
-        old_per_token_logps=None,
+  """Converts a PackedChunk to a TrainExample."""
+  n = len(chunk)
+  kwargs: dict[str, Any] = dict(
+      prompt_ids=jnp.zeros((n, 0), dtype=np.int32),
+      prompt_mask=jnp.zeros((n, 0), dtype=mask_dtype),
+      completion_ids=jnp.asarray(chunk.ids),
+      completion_mask=jnp.asarray(chunk.completion_mask, dtype=mask_dtype),
+      advantages=jnp.asarray(chunk.advantages),
+      segment_ids=jnp.asarray(chunk.segment_ids),
+      segment_positions=jnp.asarray(chunk.segment_positions),
+      ref_per_token_logps=None,
+      old_per_token_logps=None,
+  )
+  for name, val in chunk.per_token.items():
+    kwargs[name] = jnp.asarray(val)
+  if (
+      chunk.routed_experts is not None
+      and hasattr(example_cls, "__dataclass_fields__")
+      and "routed_experts" in example_cls.__dataclass_fields__
+  ):
+    kwargs["routed_experts"] = jnp.asarray(
+        chunk.routed_experts, dtype=jnp.int16
     )
-    for name, val in rows.per_token.items():
-      kwargs[name] = jnp.asarray(val)
-    if (
-        rows.routed_experts is not None
-        and hasattr(example_cls, "__dataclass_fields__")
-        and "routed_experts" in example_cls.__dataclass_fields__
-    ):
-      kwargs["routed_experts"] = jnp.asarray(
-          rows.routed_experts, dtype=jnp.int16
-      )
-    versions = rows.policy_versions
-  else:
-    stack = lambda attr: jnp.asarray(np.stack([getattr(r, attr) for r in rows]))
-    kwargs = dict(
-        prompt_ids=jnp.zeros((n, 0), dtype=np.int32),
-        prompt_mask=jnp.zeros((n, 0), dtype=mask_dtype),
-        completion_ids=stack("ids"),
-        completion_mask=jnp.asarray(
-            np.stack([r.completion_mask for r in rows]).astype(mask_dtype),
-            copy=False,
-        ),
-        advantages=stack("advantages"),
-        segment_ids=stack("segment_ids"),
-        segment_positions=stack("segment_positions"),
-        ref_per_token_logps=None,
-        old_per_token_logps=None,
-    )
-    for name in rows[0].per_token:
-      kwargs[name] = jnp.asarray(np.stack([r.per_token[name] for r in rows]))
-    if (
-        rows
-        and rows[0].routed_experts is not None
-        and hasattr(example_cls, "__dataclass_fields__")
-        and "routed_experts" in example_cls.__dataclass_fields__
-    ):
-      kwargs["routed_experts"] = jnp.asarray(
-          np.stack([r.routed_experts for r in rows]), dtype=jnp.int16
-      )
-    versions = [r.policy_version for r in rows]
+  versions = chunk.policy_versions
   if any(v is not None for v in versions):
     fallback = next(v for v in versions if v is not None)
     kwargs["policy_version"] = jnp.concatenate([

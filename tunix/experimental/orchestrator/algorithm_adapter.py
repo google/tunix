@@ -77,10 +77,11 @@ def _routed_experts_for(
     seq_len: Length of the prompt+completion sequence in the payload.
 
   Returns:
-    `[seq_len, num_layers, top_k]`, or None when nothing was captured. Rows
-    beyond what the rollout reported are left `UNSET_ROUTED_EXPERT` so the
-    model falls back to its own gate there rather than replaying a wrong
-    expert.
+    `[seq_len - 1 or seq_len, num_layers, top_k]` prefix view, or None when
+    nothing was captured. Downstream assemblers (`pack_chunk` and
+    `_routed_experts_aligned`) pre-fill their destination buffers with
+    `UNSET_ROUTED_EXPERT` so an unrouted final token (`seq_len - 1`) falls back
+    to the trainer's own gate without allocating a padded copy here.
   """
   routed = getattr(item, "routed_experts", None)
   if routed is None and isinstance(item.traj, dict):
@@ -95,15 +96,13 @@ def _routed_experts_for(
         "routed_experts must be [length, num_layers, top_k]; got shape"
         f" {routed_arr.shape}"
     )
-  if routed_arr.shape[0] >= seq_len:
-    return routed_arr[:seq_len]
-  out = np.full(
-      (seq_len,) + routed_arr.shape[1:],
-      datatypes.UNSET_ROUTED_EXPERT,
-      dtype=np.int16,
-  )
-  out[: routed_arr.shape[0]] = routed_arr
-  return out
+  min_len = max(seq_len - 1, 0)
+  if routed_arr.shape[0] < min_len:
+    raise ValueError(
+        f"routed_experts length must be >= {min_len} (seq_len - 1 for"
+        f" seq_len={seq_len}); got shape {routed_arr.shape}"
+    )
+  return routed_arr[:seq_len]
 
 
 def _extract_overlong(item: datatypes.TrajectoryItem) -> np.ndarray | None:
@@ -488,7 +487,11 @@ class PPOAdapter(AlgorithmAdapter):
       if old_lp is None and self.use_rollout_logps:
         old_lp = _extract_old_logps(item, len(c_arr))
 
-      seq_len = len(p_arr) + len(c_arr)
+      seq_tokens = (
+          np.concatenate([p_arr, c_arr])
+          if (len(p_arr) > 0 or len(c_arr) > 0)
+          else np.zeros(0, dtype=np.int32)
+      )
       seq_adv = np.full(len(c_arr), adv_val, dtype=np.float32)
 
       payload = datatypes.RLTrainerPayload(
@@ -503,7 +506,7 @@ class PPOAdapter(AlgorithmAdapter):
           ref_per_token_logps=np.asarray(ref_lp, dtype=np.float32)
           if ref_lp is not None
           else None,
-          returns=np.full(seq_len, vt_val, dtype=np.float32),
+          returns=np.full(len(seq_tokens), vt_val, dtype=np.float32),
       )
       payloads.append(payload)
     return payloads

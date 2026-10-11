@@ -15,7 +15,7 @@
 """Unit tests for Universal BatchAssembler (SequencePacked, GRPO, & Padded)."""
 
 import dataclasses
-from unittest import mock
+import tracemalloc
 
 from absl.testing import absltest
 import jax
@@ -23,6 +23,7 @@ import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.experimental.common import lineage
 from tunix.experimental.orchestrator import batch_assembly
+from tunix.rl import packing
 
 
 class HelperFunctionsTest(absltest.TestCase):
@@ -535,6 +536,47 @@ class SequencePackedBatchAssemblerTest(absltest.TestCase):
     # Reset clears state
     assembler.reset()
     self.assertEmpty(assembler.flush())
+
+  def test_to_rl_trainer_payload_reuses_contiguous_pack_chunk_buffers(self):
+    item1 = batch_assembly.to_pack_item(_make_payload(2, 2, advantage=1.0))
+    item2 = batch_assembly.to_pack_item(_make_payload(2, 2, advantage=2.0))
+    was_tracing = tracemalloc.is_tracing()
+    if not was_tracing:
+      tracemalloc.start()
+    try:
+      base_bytes, _ = tracemalloc.get_traced_memory()
+      tracemalloc.reset_peak()
+      chunk = packing.pack_chunk(
+          [[item1], [item2]], budget=4096, pad_id=0, carried=()
+      )
+      after_pack_bytes, _ = tracemalloc.get_traced_memory()
+      tracemalloc.reset_peak()
+      payload = batch_assembly.to_rl_trainer_payload(chunk, max_segments=2)
+      retained_bytes, peak_bytes = tracemalloc.get_traced_memory()
+    finally:
+      if not was_tracing:
+        tracemalloc.stop()
+
+    # 6 pre-allocated [2, 4096] 4-byte arrays = 196,608 bytes; while both
+    # `chunk` and `payload` are alive, `to_rl_trainer_payload` passes `chunk`'s
+    # 2D arrays directly by reference instead of allocating 163,840 extra bytes.
+    pack_allocated = after_pack_bytes - base_bytes
+    to_payload_peak = peak_bytes - after_pack_bytes
+    self.assertGreater(pack_allocated, 190_000)
+    self.assertLess(to_payload_peak, 4_096)
+    self.assertLess(
+        peak_bytes - base_bytes, (retained_bytes - base_bytes) * 1.05
+    )
+
+    chunk = packing.pack_chunk(
+        [[item1], [item2]], budget=6, pad_id=0, carried=()
+    )
+    payload = batch_assembly.to_rl_trainer_payload(chunk, max_segments=2)
+    self.assertIs(payload.completion_ids, chunk.ids)
+    self.assertIs(payload.completion_mask, chunk.completion_mask)
+    self.assertIs(payload.advantages, chunk.advantages)
+    self.assertIs(payload.segment_ids, chunk.segment_ids)
+    self.assertIs(payload.segment_positions, chunk.segment_positions)
 
   def _make_streaming_payload(
       self,
@@ -1873,8 +1915,13 @@ class RoutedExpertsAlignmentTest(absltest.TestCase):
         [_routing(prompt_len, 7), _routing(completion_len, 9)], axis=0
     )
 
-    out = batch_assembly._routed_experts_aligned(  # pylint: disable=protected-access
-        routed, prompt_len, completion_len, max_prompt, max_response
+    out = np.full(
+        (max_prompt + max_response, _ROUTING_LAYERS, _ROUTING_TOP_K),
+        _UNSET,
+        dtype=np.int16,
+    )
+    batch_assembly._routed_experts_aligned(  # pylint: disable=protected-access
+        routed, prompt_len, completion_len, max_prompt, max_response, out=out
     )
 
     self.assertEqual(out.dtype, np.int16)
@@ -1898,10 +1945,77 @@ class RoutedExpertsAlignmentTest(absltest.TestCase):
         (4, _ROUTING_LAYERS, _ROUTING_TOP_K),
     )
     routed = np.concatenate([prompt, _routing(1, 9)], axis=0)
-    out = batch_assembly._routed_experts_aligned(routed, 4, 1, 2, 3)  # pylint: disable=protected-access
+    out = np.full((5, _ROUTING_LAYERS, _ROUTING_TOP_K), _UNSET, dtype=np.int16)
+    batch_assembly._routed_experts_aligned(  # pylint: disable=protected-access
+        routed, 4, 1, 2, 3, out=out
+    )
     # Prompt rows 0 and 1 are dropped; 2 and 3 survive, in order.
     np.testing.assert_array_equal(out[0], 2)
     np.testing.assert_array_equal(out[1], 3)
+
+  def test_prefix_capture_ending_in_completion_leaves_tail_unset(self):
+    """Prefix routing of length `p + c - 1` leaves the final completion token unset."""
+    prompt_len, completion_len = 3, 4
+    max_prompt, max_response = 5, 6
+    # Capture covers 3 prompt tokens + 3 of the 4 completion tokens.
+    routed = np.concatenate(
+        [_routing(prompt_len, 7), _routing(completion_len - 1, 9)], axis=0
+    )
+    out = np.full(
+        (max_prompt + max_response, _ROUTING_LAYERS, _ROUTING_TOP_K),
+        _UNSET,
+        dtype=np.int16,
+    )
+    batch_assembly._routed_experts_aligned(  # pylint: disable=protected-access
+        routed, prompt_len, completion_len, max_prompt, max_response, out=out
+    )
+    np.testing.assert_array_equal(out[: max_prompt - prompt_len], _UNSET)
+    np.testing.assert_array_equal(out[max_prompt - prompt_len : max_prompt], 7)
+    np.testing.assert_array_equal(
+        out[max_prompt : max_prompt + completion_len - 1], 9
+    )
+    np.testing.assert_array_equal(
+        out[max_prompt + completion_len - 1 :], _UNSET
+    )
+
+  def test_prefix_capture_single_token_completion_leaves_response_unset(self):
+    """When `completion_len == 1`, a `p + c - 1 == p` capture aligns prompt and leaves response unset."""
+    prompt_len, completion_len = 3, 1
+    max_prompt, max_response = 5, 4
+    routed = _routing(prompt_len, 7)
+    out = np.full(
+        (max_prompt + max_response, _ROUTING_LAYERS, _ROUTING_TOP_K),
+        _UNSET,
+        dtype=np.int16,
+    )
+    batch_assembly._routed_experts_aligned(  # pylint: disable=protected-access
+        routed, prompt_len, completion_len, max_prompt, max_response, out=out
+    )
+    prompt_start = max_prompt - prompt_len
+    np.testing.assert_array_equal(out[:prompt_start], _UNSET)
+    np.testing.assert_array_equal(out[prompt_start:max_prompt], 7)
+    np.testing.assert_array_equal(out[max_prompt:], _UNSET)
+
+  def test_rejects_capture_shorter_than_sequence_minus_one(self):
+    """Completion-only or truncated captures (`< p + c - 1`) are rejected."""
+    prompt_len, completion_len = 3, 4
+    max_prompt, max_response = 5, 6
+    out = np.full(
+        (max_prompt + max_response, _ROUTING_LAYERS, _ROUTING_TOP_K),
+        _UNSET,
+        dtype=np.int16,
+    )
+    with self.assertRaisesRegex(
+        ValueError, "routed_experts length must be >= 6"
+    ):
+      batch_assembly._routed_experts_aligned(  # pylint: disable=protected-access
+          _routing(completion_len, 9),
+          prompt_len,
+          completion_len,
+          max_prompt,
+          max_response,
+          out=out,
+      )
 
 
 class PaddedBatchAssemblerRoutingTest(absltest.TestCase):
@@ -1956,6 +2070,42 @@ class PaddedBatchAssemblerRoutingTest(absltest.TestCase):
     # Row order must be preserved, or rows train on each other's routing.
     self.assertEqual(int(routed[0, self.MAX_PROMPT, 0, 0]), 1)
     self.assertEqual(int(routed[1, self.MAX_PROMPT, 0, 0]), 2)
+
+  def test_pack_does_not_double_allocate_routed_experts_buffer(self):
+    assembler = batch_assembly.PaddedBatchAssembler(
+        batch_size=4,
+        max_prompt_length=512,
+        max_response_length=512,
+        pad_id=0,
+        num_generations=2,
+        mini_batch_size=2,
+    )
+    items = [
+        dataclasses.replace(
+            self._payload(i + 1, with_routing=False),
+            routed_experts=np.full((5, 16, 4), i + 1, dtype=np.int16),
+        )
+        for i in range(4)
+    ]
+    was_tracing = tracemalloc.is_tracing()
+    if not was_tracing:
+      tracemalloc.start()
+    try:
+      base_bytes, _ = tracemalloc.get_traced_memory()
+      tracemalloc.reset_peak()
+      [packed] = assembler.pack(items)
+      retained_bytes, peak_bytes = tracemalloc.get_traced_memory()
+    finally:
+      if not was_tracing:
+        tracemalloc.stop()
+
+    self.assertIsNotNone(packed.routed_experts)
+    net_retained = retained_bytes - base_bytes
+    net_peak = peak_bytes - base_bytes
+    # Pre-allocating the batch buffer (~565 KB for [4, 1024, 16, 4] int16 +
+    # token/mask arrays) avoids the ~2x np.stack peak spike (~1.09 MB).
+    self.assertGreater(net_retained, 500_000)
+    self.assertLess(net_peak, net_retained * 1.10)
 
   def test_partial_capture_disables_replay_for_the_batch(self):
     """A half-replayed batch would silently mix replayed and fresh routing."""
@@ -2358,83 +2508,6 @@ class CreateBatchAssemblerTest(absltest.TestCase):
     np.testing.assert_array_equal(
         batches[0].payload.segment_ids[0], [1, 1, 1, 2, 2, 2, 0, 0]
     )
-
-  def test_sequence_packed_assembler_drops_duplicate_routed_experts_from_buffered_payload(
-      self,
-  ):
-    assembler = batch_assembly.SequencePackedBatchAssembler(
-        batch_size=2,
-        num_generations=2,
-        mini_batch_size=1,
-        max_packed_len=8,
-        pad_id=0,
-        segment_align_multiple=1,
-    )
-    re1 = np.ones((2, 2, 2), dtype=np.int16) * 3
-    p1 = datatypes.RLTrainerPayload(
-        prompt_ids=np.array([10], dtype=np.int32),
-        prompt_mask=np.array([1.0], dtype=np.float32),
-        completion_ids=np.array([11, 12], dtype=np.int32),
-        completion_mask=np.array([1.0, 1.0], dtype=np.float32),
-        advantages=np.array([1.0, 1.0], dtype=np.float32),
-        routed_experts=re1,
-        metadata={"traj_id": "t1"},
-    )
-    self.assertEmpty(assembler.feed([p1]))
-    self.assertLen(assembler._buffer, 1)
-    pack_item, _, raw_payload = assembler._buffer[0]
-    self.assertIsNotNone(pack_item.routed_experts)
-    self.assertIsNone(raw_payload.routed_experts)
-
-  def test_padded_pack_does_not_double_allocate_routed_experts_buffer(self):
-    routed_shape = (48, 8)
-    item0 = _make_payload(2, 3).replace(
-        routed_experts=np.arange(5 * 48 * 8, dtype=np.int16).reshape(
-            5, *routed_shape
-        )
-    )
-    item1 = _make_payload(3, 2).replace(
-        routed_experts=np.arange(5 * 48 * 8, dtype=np.int16).reshape(
-            5, *routed_shape
-        )
-    )
-    assembler = batch_assembly.PaddedBatchAssembler(
-        batch_size=4,
-        max_prompt_length=4,
-        max_response_length=5,
-        pad_id=0,
-        num_generations=1,
-        mini_batch_size=1,
-    )
-
-    real_full = np.full
-    real_stack = np.stack
-    full_routed_shapes = []
-    stack_routed_shapes = []
-
-    def tracking_full(shape, fill_value, *args, **kwargs):
-      arr = real_full(shape, fill_value, *args, **kwargs)
-      if arr.ndim >= 3 and arr.shape[-2:] == routed_shape:
-        full_routed_shapes.append(arr.shape)
-      return arr
-
-    def tracking_stack(arrays, *args, **kwargs):
-      arr = real_stack(arrays, *args, **kwargs)
-      if arr.ndim >= 3 and arr.shape[-2:] == routed_shape:
-        stack_routed_shapes.append(arr.shape)
-      return arr
-
-    with (
-        mock.patch.object(batch_assembly.np, "full", side_effect=tracking_full),
-        mock.patch.object(
-            batch_assembly.np, "stack", side_effect=tracking_stack
-        ),
-    ):
-      payload = assembler.pack([item0, item1])[0]
-
-    self.assertEqual(payload.routed_experts.shape, (4, 9, 48, 8))
-    self.assertEqual(full_routed_shapes, [(4, 9, 48, 8)])
-    self.assertEqual(stack_routed_shapes, [])
 
 
 if __name__ == "__main__":

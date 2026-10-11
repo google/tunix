@@ -643,7 +643,7 @@ def _routing(length, fill):
 
 
 class RoutedExpertsForItemTest(absltest.TestCase):
-  """`_routed_experts_for` must match the payload's sequence length exactly."""
+  """`_routed_experts_for` returns a prefix view capped at `seq_len`."""
 
   def _align(self, routed, seq_len=8):
     item = datatypes.TrajectoryItem(routed_experts=routed, traj={})
@@ -652,13 +652,28 @@ class RoutedExpertsForItemTest(absltest.TestCase):
   def test_returns_none_without_capture(self):
     self.assertIsNone(self._align(None))
 
-  def test_short_capture_is_padded_as_unset(self):
-    """Missing tail rows must fall back to the gate, not replay expert 0."""
-    out = self._align(_routing(5, 3))
+  def test_prefix_capture_missing_final_token_returns_zero_copy_view(self):
+    """`seq_len - 1` captures return a zero-copy view without padding."""
+    src = _routing(7, 3).astype(np.int16)
+    out = self._align(src, seq_len=8)
+    self.assertEqual(out.dtype, np.int16)
+    self.assertEqual(out.shape, (7, _ROUTING_LAYERS, _ROUTING_TOP_K))
+    np.testing.assert_array_equal(out, 3)
+    self.assertTrue(np.shares_memory(out, src))
+
+  def test_rejects_capture_shorter_than_seq_len_minus_one(self):
+    with self.assertRaisesRegex(
+        ValueError, "routed_experts length must be >= 7"
+    ):
+      self._align(_routing(5, 3), seq_len=8)
+
+  def test_overlong_capture_truncates_to_seq_len_as_zero_copy_view(self):
+    src = _routing(10, 4).astype(np.int16)
+    out = self._align(src, seq_len=8)
     self.assertEqual(out.dtype, np.int16)
     self.assertEqual(out.shape, (8, _ROUTING_LAYERS, _ROUTING_TOP_K))
-    np.testing.assert_array_equal(out[:5], 3)
-    np.testing.assert_array_equal(out[5:], datatypes.UNSET_ROUTED_EXPERT)
+    np.testing.assert_array_equal(out, 4)
+    self.assertTrue(np.shares_memory(out, src))
 
   def test_wrong_rank_is_rejected(self):
     with self.assertRaisesRegex(ValueError, "length, num_layers, top_k"):
