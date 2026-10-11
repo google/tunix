@@ -209,6 +209,10 @@ export WANDB_API_KEY=${WANDB_API_KEY:-}
 export WANDB_ENTITY=${WANDB_ENTITY:-}
 export LOG_DIR=${LOG_DIR:-}
 export TRAJECTORY_LOG_DIR=${TRAJECTORY_LOG_DIR:-}
+# Per-trajectory AsyncTrajectoryLogger output (to TRAJECTORY_LOG_DIR, else
+# LOG_DIR/trajectories). Off by default like atwigg/mlperf, which disables it to
+# avoid GCS write timeouts and queue stalls; the TrajectoryStore keeps rollouts.
+export TRAJECTORY_LOGGING=${TRAJECTORY_LOGGING:-false}
 export RCP_LOGGING=${RCP_LOGGING:-false}
 export VAL_START_AT=${VAL_START_AT:-}
 export CHECKPOINT_STEP=${CHECKPOINT_STEP:-0}
@@ -417,6 +421,10 @@ start_orchestrator() {
   if [[ "${WEIGHT_SYNC_DISABLE_TIMEOUTS}" == "1" || "${WEIGHT_SYNC_DISABLE_TIMEOUTS}" == "true" || "${WEIGHT_SYNC_DISABLE_TIMEOUTS}" == "True" ]]; then
     disable_ws_timeouts_arg="--disable_weight_sync_timeouts"
   fi
+  local trajectory_logging_arg="--no-trajectory_logging"
+  if [[ "${TRAJECTORY_LOGGING}" == "1" || "${TRAJECTORY_LOGGING}" == "true" || "${TRAJECTORY_LOGGING}" == "True" ]]; then
+    trajectory_logging_arg="--trajectory_logging"
+  fi
 
   local jax_cache_env=""
   if [[ "${DISABLE_JAX_CACHE:-0}" != "1" && "${DISABLE_JAX_CACHE:-false}" != "true" ]]; then
@@ -512,6 +520,7 @@ start_orchestrator() {
         ${EPISODE_TIMEOUT_SECS:+--episode_timeout_secs=${EPISODE_TIMEOUT_SECS}} \
         ${LOG_DIR:+--log_dir=\"${LOG_DIR}\"} \
         ${TRAJECTORY_LOG_DIR:+--trajectory_log_dir=\"${TRAJECTORY_LOG_DIR}\"} \
+        ${trajectory_logging_arg} \
         ${TRAJECTORY_STORE_ROOT_DIR:+--enable_trajectory_store --trajectory_store_dir=\"${TRAJECTORY_STORE_ROOT_DIR}\"} \
         --flush_every_n_steps=${FLUSH_EVERY_N_STEPS} \
         --wandb_project=\"${WANDB_PROJECT}\" \

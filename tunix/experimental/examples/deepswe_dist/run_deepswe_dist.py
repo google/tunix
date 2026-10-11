@@ -383,6 +383,18 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
+      "--trajectory_logging",
+      action=argparse.BooleanOptionalAction,
+      default=os.getenv("TRAJECTORY_LOGGING", "false").strip().lower()
+      in ("1", "true", "yes"),
+      help=(
+          "Write per-trajectory logs (AsyncTrajectoryLogger) to"
+          " --trajectory_log_dir. Off by default, as on atwigg/mlperf, which"
+          " disables it to avoid GCS write timeouts and queue stalls; the"
+          " TrajectoryStore keeps the rollouts."
+      ),
+  )
+  parser.add_argument(
       "--wandb_project",
       type=str,
       default=os.getenv("WANDB_PROJECT", "trellis-deepswe"),
@@ -693,7 +705,11 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
             trainer_expert=args.trainer_expert,
         ),
         metrics_logging_options=metrics_logging_options,
-        trajectory_log_dir=args.trajectory_log_dir,
+        # "" (not None) disables the logger: StandardRLProgram only falls back
+        # to <log_dir>/trajectories when trajectory_log_dir is None.
+        trajectory_log_dir=(
+            args.trajectory_log_dir if args.trajectory_logging else ""
+        ),
         trajectory_store=cluster.trajectory_store,
         max_staleness=args.max_staleness,
         group_order=args.trajectory_group_order,
