@@ -156,7 +156,49 @@ export TARGET_ACCURACY="${TARGET_ACCURACY:-0.69}"
 export VLLM_LOGGING_LEVEL="INFO"
 export VLLM_MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-65536}"
 export VLLM_MAX_NUM_BATCHED_TOKENS=2048
-export VLLM_MAX_NUM_SEQS=16
+
+# Rollout attention data parallelism. `true` (default) keeps the recipe's
+# sharding_strategy (enable_dp_attention) and 16 sequences per engine.
+# `false` sets enable_dp_attention=false and tensor_parallelism=1, keeps
+# expert_parallelism, and defaults max_num_seqs to 64 (VLLM_MAX_NUM_SEQS still
+# overrides it). Without attention DP the engine (maxtext_vllm_adapter) pads the
+# KV heads up to expert_parallelism x tensor_parallelism (2 -> 8 on EP8), so the
+# trainer's weight converter has to replicate K/V heads to the same count:
+# kv_tp_size=<ep x tp> is appended to MAXTEXT_EXTRA_FLAGS. Without it, weight
+# sync fails at round 0 on a manifest shape mismatch ((4096, 2, 256) vs
+# (4096, 8, 256)). The launcher prefers an additional_config (or max_num_seqs)
+# key in VLLM_CONFIG_JSON over these settings; this knob does not edit it, so
+# keep the two consistent when combining them.
+export ROLLOUT_ATTENTION_DP="${ROLLOUT_ATTENTION_DP:-true}"
+case "${ROLLOUT_ATTENTION_DP}" in
+  true)
+    export VLLM_MAX_NUM_SEQS=16
+    ;;
+  false)
+    export VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-64}"
+    VLLM_ADDITIONAL_CONFIG="$(python3 -c '
+import json, os
+cfg = json.loads(os.environ.get("VLLM_ADDITIONAL_CONFIG") or "{}")
+strategy = cfg.setdefault("sharding", {}).setdefault("sharding_strategy", {})
+strategy["enable_dp_attention"] = False
+strategy["tensor_parallelism"] = 1
+print(json.dumps(cfg, separators=(",", ":")))
+')"
+    export VLLM_ADDITIONAL_CONFIG
+    _rollout_kv_tp="$(python3 -c '
+import json, os
+s = json.loads(os.environ["VLLM_ADDITIONAL_CONFIG"])["sharding"]["sharding_strategy"]
+print(int(s.get("expert_parallelism", 1)) * int(s["tensor_parallelism"]))
+')"
+    export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS:+$MAXTEXT_EXTRA_FLAGS }kv_tp_size=${_rollout_kv_tp}"
+    unset _rollout_kv_tp
+    ;;
+  *)
+    echo "ERROR: ROLLOUT_ATTENTION_DP must be true or false, got '${ROLLOUT_ATTENTION_DP}'" >&2
+    exit 1
+    ;;
+esac
+
 export VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-0.9}"
 
 # Sharding Configs
@@ -202,7 +244,7 @@ export NUM_PRECOMPILE_WORKERS=8
 export NEW_MODEL_DESIGN=1
 export ATTN_BUCKETIZED_NUM_REQS=true
 export ATTN_CUSTOM_NUM_REQS_BUCKETS=4
-export ONEHOT_MOE_PERMUTE_THRESHOLD="${ONEHOT_MOE_PERMUTE_THRESHOLD:-32768}"
+export ONEHOT_MOE_PERMUTE_THRESHOLD="${ONEHOT_MOE_PERMUTE_THRESHOLD:-2048}"
 export VLLM_MOE_CHUNK_SIZE=256
 export SLICE_ROPE_CACHE=1
 export DP_SCHED_BATCH_PREFILL=false
@@ -347,7 +389,7 @@ export OPENHANDS_MULTI_TOOL_CALLS="${OPENHANDS_MULTI_TOOL_CALLS:-false}"
 export SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-${K8S_NAMESPACE:-trellis}}"
 export POOL_NAME_FORMAT="${POOL_NAME_FORMAT:-}"
 export TEMPLATE_NAME_PREFIX="${TEMPLATE_NAME_PREFIX:-}"
-export SANDBOX_NODE_SELECTOR_KEY="cloud.google.com/gke-nodepool"
+export SANDBOX_NODE_SELECTOR_KEY="${SANDBOX_NODE_SELECTOR_KEY:-cloud.google.com/gke-nodepool}"
 export SANDBOX_NODE_SELECTOR_VAL="${SANDBOX_NODE_SELECTOR_VAL:-sandbox-c3d-np}"
 export MAX_WARMPOOL_REPLICAS="${MAX_WARMPOOL_REPLICAS:-2}"
 export ROLLOUT_MAX_CONCURRENCY="${ROLLOUT_MAX_CONCURRENCY:-256}"
