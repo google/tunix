@@ -20,6 +20,7 @@ import os
 import signal
 
 from tunix.experimental.examples.deepswe_dist import eval_deepswe
+from tunix.utils import math_utils
 from tunix.utils import maxtext_utils
 
 
@@ -193,7 +194,7 @@ def create_worker(a):
       "disable_log_stats": False,
       # Use the explicit sampling settings, not repository generation_config.
       "generation_config": "vllm",
-      "seed": eval_deepswe.replica_seed(a),
+      "seed": math_utils.replica_seed(a),
   }
   if os.environ.get("VLLM_LANGUAGE_MODEL_ONLY", "0").lower() in ("1", "true"):
     engine_kwargs["language_model_only"] = True

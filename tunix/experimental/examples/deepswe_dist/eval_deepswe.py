@@ -260,14 +260,6 @@ def parse_args(argv=None):
   return a
 
 
-def replica_seed(a) -> int:
-  """Derives the per-replica 32-bit vLLM engine seed from --seed and --worker_id."""
-  worker_id = str(getattr(a, "worker_id", "") or "")
-  suffix = worker_id.rsplit("-", 1)[-1]
-  replica_idx = int(suffix) if (suffix.isascii() and suffix.isdigit()) else 0
-  return (int(a.seed) + replica_idx) % (2**32)
-
-
 def model_profile(a):
   """Settings the controller verifies against each ready worker."""
   names = (
