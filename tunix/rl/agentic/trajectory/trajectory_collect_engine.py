@@ -44,6 +44,11 @@ from tunix.rl.rollout import base_rollout
 BaseTaskEnv = base_environment.BaseTaskEnv
 ConversationAgentBase = base_agent.ConversationAgentBase
 
+# `final_reward_fn` deadline: the env's `reward_timeout` (or this default) plus
+# slack, after which the episode scores 0.0 instead of hanging on the grader.
+_DEFAULT_REWARD_TIMEOUT_SECS = 120.0
+_REWARD_TIMEOUT_SLACK_SECS = 60.0
+
 
 class TrajectoryCollectEngine:
   """Asynchronous trajectory collection engine for agent-env interactions.
@@ -738,7 +743,11 @@ class TrajectoryCollectEngine:
     }
 
     logging.debug("%s env.reset starting", self._debug_prefix)
-    (obs, info), wall_time = await self._run_with_timing(self.env.reset)
+    # A hung reset (e.g. a sandbox that never becomes ready) must not stall the
+    # episode forever; it gets the whole episode budget at most.
+    (obs, info), wall_time = await self._run_with_timing(
+        self.env.reset, timeout=self.timeout
+    )
     logging.debug(
         "%s env.reset done in %.1fs",
         self._debug_prefix,
@@ -751,7 +760,8 @@ class TrajectoryCollectEngine:
         if hasattr(self.env, "final_reward_fn")
         else None
     )
-    self._start_ts = time.perf_counter()
+    # The episode wall-clock budget (`timeout`) includes `env.reset`.
+    self._start_ts = time.perf_counter() - wall_time
     self.agent.update_from_env(
         observation=obs,
         reward=0.0,
@@ -877,17 +887,44 @@ class TrajectoryCollectEngine:
     # `step_idx` is bound to `_one_step()` (starts at -1 on reset; first turn is 0)
     # rather than `len(steps)` so it is available before `update_from_model()`.
     self.agent.trajectory.step_idx += 1
-    action, cur_step = await self._on_model_interact()
+    model_result = await self._on_model_interact()
+    if model_result is None:
+      # `model_call` ran out of episode budget: `_on_model_interact()` already
+      # set `TIMEOUT` and closed the previous turn. No step was appended, so
+      # keep `step_idx == len(steps) - 1`.
+      self.agent.trajectory.step_idx -= 1
+      return True
+    action, cur_step = model_result
     self._record_agent_step(cur_step)
     try:
       return await self._on_env_interact(action, cur_step)
     finally:
       self._record_env_step(cur_step)
 
+  def _mark_model_call_timeout(self, elapsed: float) -> None:
+    """Ends the episode with `TIMEOUT` when `model_call` exhausts the budget."""
+    self.agent.trajectory.status = agent_types.TrajectoryStatus.TIMEOUT
+    logging.warning(
+        "%s Episode timed out in model_call after %.1f seconds (episode"
+        " timeout=%ds).",
+        self._debug_prefix,
+        elapsed,
+        self.timeout,
+    )
+    self._log_trajectory_clip("TIMEOUT")
+    prev_step = self.agent.get_current_step()
+    if prev_step is not None:
+      prev_step.done = True
+
   async def _on_model_interact(
       self,
-  ) -> Tuple[Any, agent_types.Step]:
-    """Executes model call, updates agent, and populates model-side step fields."""
+  ) -> Optional[Tuple[Any, agent_types.Step]]:
+    """Executes model call, updates agent, and populates model-side step fields.
+
+    Returns:
+      `(action, cur_step)`, or `None` when the episode budget ran out before or
+      during `model_call` (the trajectory status is then `TIMEOUT`).
+    """
     max_generation_steps = (
         self.max_response_length
         - self._response_token_count
@@ -917,35 +954,55 @@ class TrajectoryCollectEngine:
           self._cumulative_prompt_tokens
       )
 
-    if is_async:
-      try:
-        rollout_output = await model_call_fn(  # pyrefly: ignore[not-async]
-            chat_input,
-            self.env,
-            max_generation_steps=max_generation_steps,
-            **call_kwargs,
-        )
-      except Exception as e:
-        logging.exception("Caught exception inside async model_call: %s", e)
-        raise
-    else:
+    # Generation is bounded by what is left of the episode budget, like
+    # `env.step`; otherwise one slow turn can overrun `timeout` arbitrarily.
+    model_start = time.perf_counter()
+    remaining_time = self.timeout - (model_start - self._start_ts)
+    if remaining_time <= 0:
+      self._mark_model_call_timeout(model_start - self._start_ts)
+      return None
 
-      def _safe_model_call():
+    try:
+      if is_async:
         try:
-          return model_call_fn(
-              chat_input,
-              self.env,
-              max_generation_steps=max_generation_steps,
-              **call_kwargs,
+          rollout_output = await asyncio.wait_for(
+              model_call_fn(  # pyrefly: ignore[not-async]
+                  chat_input,
+                  self.env,
+                  max_generation_steps=max_generation_steps,
+                  **call_kwargs,
+              ),
+              timeout=remaining_time,
           )
-        except Exception as e:
-          logging.exception("Caught exception inside model_call: %s", e)
+        except asyncio.TimeoutError:
           raise
+        except Exception as e:
+          logging.exception("Caught exception inside async model_call: %s", e)
+          raise
+      else:
 
-      rollout_output = await asyncio.get_running_loop().run_in_executor(
-          None,
-          _safe_model_call,
-      )
+        def _safe_model_call():
+          try:
+            return model_call_fn(
+                chat_input,
+                self.env,
+                max_generation_steps=max_generation_steps,
+                **call_kwargs,
+            )
+          except Exception as e:
+            logging.exception("Caught exception inside model_call: %s", e)
+            raise
+
+        rollout_output = await asyncio.wait_for(
+            asyncio.get_running_loop().run_in_executor(
+                None,
+                _safe_model_call,
+            ),
+            timeout=remaining_time,
+        )
+    except asyncio.TimeoutError:
+      self._mark_model_call_timeout(time.perf_counter() - self._start_ts)
+      return None
     logging.debug("%s model_call done", self._debug_prefix)
 
     if self.exact_token_continuity:
@@ -1232,22 +1289,39 @@ class TrajectoryCollectEngine:
     """
     self._finalize_terminal_step_routing()
 
-    masked_out = bool(
-        self.overlong_filter
-        and self.agent.trajectory.status in self.filter_statuses
-    )
+    status = self.agent.trajectory.status
+    masked_out = bool(self.overlong_filter and status in self.filter_statuses)
     self.agent.trajectory.masked_out = masked_out
-    if not masked_out:
+    # An episode that exhausted its wall-clock budget scores 0 by definition;
+    # grading its unfinished state would waste sandbox time and could reward an
+    # incomplete trajectory. Invalid trajectories (e.g. ENV_TIMEOUT after a hung
+    # env.step) are dropped from training, so their grade would be discarded
+    # and the env may be unresponsive.
+    skip_final_reward = masked_out or status in (
+        agent_types.INVALID_TRAJECTORY_STATUSES
+        | {agent_types.TrajectoryStatus.TIMEOUT}
+    )
+    if not skip_final_reward:
       await self._append_final_reward()
     self.compute_mc_reward()
     self.compute_trajectory_reward()
+
+  def _final_reward_timeout(self) -> float:
+    """Deadline for `final_reward_fn`: the env's `reward_timeout` plus slack."""
+    raw = getattr(self.env, "reward_timeout", None)
+    try:
+      base = float(raw) if raw else _DEFAULT_REWARD_TIMEOUT_SECS
+    except (TypeError, ValueError):
+      base = _DEFAULT_REWARD_TIMEOUT_SECS
+    return base + _REWARD_TIMEOUT_SLACK_SECS
 
   async def _append_final_reward(self):
     """Compute and add final reward to the last step of the episode.
 
     Applies the final reward function (if provided) to the episode's
     final response and adds it to the last step's reward. This enables
-    additional reward signals based on overall episode performance.
+    additional reward signals based on overall episode performance. A grader
+    that does not finish within `_final_reward_timeout()` scores 0.0.
     """
     last_step = self.agent.get_current_step()
     if (
@@ -1259,7 +1333,19 @@ class TrajectoryCollectEngine:
       # is provided or no step is taken.
       logging.debug("%s Final reward function is skipped", self._debug_prefix)
       return
-    final_reward, wall_time = await self._run_with_timing(self.final_reward_fn)
+    reward_timeout = self._final_reward_timeout()
+    try:
+      final_reward, wall_time = await self._run_with_timing(
+          self.final_reward_fn, timeout=reward_timeout
+      )
+    except asyncio.TimeoutError:
+      logging.error(
+          "%s final_reward_fn timed out after %.1fs; defaulting final_reward"
+          " to 0.0.",
+          self._debug_prefix,
+          reward_timeout,
+      )
+      final_reward, wall_time = 0.0, reward_timeout
 
     self.reward_time["reward_latency"] += wall_time
     last_step.reward += final_reward
