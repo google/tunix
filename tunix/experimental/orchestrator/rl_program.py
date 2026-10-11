@@ -401,6 +401,7 @@ class StandardRLProgram(RLProgram):
       pipeline_train_microbatches: bool = False,
       rollout_priority_scheduling: bool = False,
       initial_dispatch_stagger_s: float = 0.0,
+      trainer_warmup_payload: Any = None,
   ):
     super().__init__()
     self.engine: rl_engine_interface.AbstractRLEngine | None = None
@@ -548,6 +549,11 @@ class StandardRLProgram(RLProgram):
     # `k * initial_dispatch_stagger_s` after batch 0 first dispatches. Applies
     # only before the trainer consumes its first batch; 0 disables it.
     self.initial_dispatch_stagger_s = float(initial_dispatch_stagger_s)
+    # One synthetic micro-batch to compile the trainer against before
+    # `on_train_start`, after `configure_worker` (which discards any compile
+    # done at bring-up). None keeps the lazy compile on the first micro-batch.
+    self.trainer_warmup_payload = trainer_warmup_payload
+    self._first_train_payload_logged = False
     self._initial_dispatch_t0: float | None = None
     self._initial_stagger_logged: set[int] = set()
     self._sync_error: BaseException | None = None
@@ -2085,6 +2091,12 @@ class StandardRLProgram(RLProgram):
                 logging_utils.summarize_list(list(mb.trajectory_ids)),
             )
           mb = None
+          if not self._first_train_payload_logged:
+            self._first_train_payload_logged = True
+            logging.info(
+                "First trainer micro-batch: %s",
+                batch_assembly.describe_payload(batch),
+            )
           await _await_pending_train()
           train_step = self._timed_train_step(
               batch, apply_optimizer=is_final_batch
@@ -2270,6 +2282,25 @@ class StandardRLProgram(RLProgram):
           role=datatypes.Role.ACTOR,
           sync_weights=True,
           policy_version=self.policy_version,
+      )
+
+    if self.trainer_warmup_payload is not None:
+      warmup_payload, self.trainer_warmup_payload = (
+          self.trainer_warmup_payload,
+          None,
+      )
+      logging.info(
+          "Trainer warm-up compile against synthetic micro-batch: %s",
+          batch_assembly.describe_payload(warmup_payload),
+      )
+      _t_compile = time.monotonic()
+      await engine.compile_trainer(  # pytype: disable=attribute-error
+          warmup_payload, role=datatypes.Role.ACTOR
+      )
+      del warmup_payload
+      logging.info(
+          "Trainer warm-up compile finished in %.1fs.",
+          time.monotonic() - _t_compile,
       )
 
     if self.on_train_start is not None:

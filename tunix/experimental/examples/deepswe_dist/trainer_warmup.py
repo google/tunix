@@ -12,13 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Synthetic trainer micro-batch for compiling the trainer at bring-up.
+"""Synthetic trainer micro-batch for compiling the trainer before run_start.
 
-The orchestrator hands every worker's `compile` hook a `dummy_data` payload.
-With `None` the training engine defers compilation to the first real
-micro-batch, which then pays the whole XLA compile inside the timed run. This
-module builds one micro-batch with the same pytree structure, shapes and dtypes
-as the live ones, so the engine can compile against it during bring-up.
+Without a compile payload the training engine compiles lazily on the first
+real micro-batch, which then pays the whole XLA compile inside the timed run.
+This module builds one micro-batch with the same pytree structure, shapes and
+dtypes as the live ones; `RLProgram` compiles the trainer against it after
+`configure_worker` (which re-sends the loss and input fn and so discards any
+compile done at worker bring-up) and before `on_train_start`.
 
 The payload is produced by the live code path rather than written by hand:
 synthetic `TrajectoryItem`s carrying the fields the trajectory collector emits
@@ -33,7 +34,6 @@ import logging
 import dataclasses
 from typing import Any
 
-import jax
 import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.experimental.orchestrator import batch_assembly
@@ -201,15 +201,3 @@ def build_warmup_payload(
     )
   return payload
 
-
-def describe_payload(payload: datatypes.RLTrainerPayload) -> str:
-  """One-line summary of a payload's leaves (name, shape, dtype) and statics."""
-  leaves = jax.tree_util.tree_flatten_with_path(payload)[0]
-  parts = [
-      f"{jax.tree_util.keystr(path)}={tuple(np.shape(leaf))}:"
-      f"{np.asarray(leaf).dtype}"
-      for path, leaf in leaves
-  ]
-  return (
-      f"num_segments={payload.num_segments} leaves=[" + ", ".join(parts) + "]"
-  )
