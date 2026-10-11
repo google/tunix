@@ -336,6 +336,18 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " micro-batch inside the timed run."
       ),
   )
+  parser.add_argument(
+      "--trainer_warmup_routed_experts",
+      action=argparse.BooleanOptionalAction,
+      default=False,
+      help=(
+          "The rollouts return routed experts (router replay), so the warm-up"
+          " micro-batch carries routed_experts too. Its [num_layers, top_k] is"
+          " read from the model config, else from the two flags below."
+      ),
+  )
+  parser.add_argument("--trainer_warmup_routed_layers", type=int, default=None)
+  parser.add_argument("--trainer_warmup_routed_top_k", type=int, default=None)
   # ---- Optional GRPO algorithm options -------------------------------------
   # All default to off, so omitting them reproduces the previous behaviour.
   parser.add_argument(
@@ -1150,12 +1162,45 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       # Compiled by the program after `configure_worker` and before
       # `on_train_start` (run_start): `configure_worker` re-sends the loss and
       # input fn, which discards any compile done at bring-up.
+      routed_shape = None
+      if args.trainer_warmup_routed_experts:
+        routed_shape = trainer_warmup.routed_experts_shape_from_config(
+            tokenizer_path
+        )
+        if routed_shape is not None:
+          logging.info(
+              "TRAINER_WARMUP_COMPILE: routed_experts [num_layers, top_k]=%s"
+              " from the model config at %s.",
+              routed_shape,
+              tokenizer_path,
+          )
+        elif (
+            args.trainer_warmup_routed_layers
+            and args.trainer_warmup_routed_top_k
+        ):
+          routed_shape = (
+              args.trainer_warmup_routed_layers,
+              args.trainer_warmup_routed_top_k,
+          )
+          logging.warning(
+              "TRAINER_WARMUP_COMPILE: model config unavailable; routed_experts"
+              " [num_layers, top_k]=%s from --trainer_warmup_routed_layers /"
+              " --trainer_warmup_routed_top_k.",
+              routed_shape,
+          )
+        else:
+          logging.warning(
+              "TRAINER_WARMUP_COMPILE: router replay is on but [num_layers,"
+              " top_k] is unknown; the warm-up omits routed_experts and the"
+              " first real micro-batch will recompile."
+          )
       program.trainer_warmup_payload = trainer_warmup.build_warmup_payload(
           algo=algo,
           batch_config=program.batch_config,
           num_generations=program.num_generations,
           mini_batch_size=program.mini_batch_size,
           train_micro_batch_size=algo.train_micro_batch_size,
+          routed_experts_shape=routed_shape,
       )
       logging.info(
           "TRAINER_WARMUP_COMPILE: built synthetic micro-batch: %s",
