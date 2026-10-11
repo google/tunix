@@ -471,6 +471,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
+      "--prepull_sandbox_images",
+      action=argparse.BooleanOptionalAction,
+      default=os.getenv("PREPULL_SANDBOX_IMAGES", "false").lower()
+      in ("1", "true", "yes"),
+      help=(
+          "Pre-pull all static dataset task images onto sandbox nodes with"
+          " imagePullPolicy=IfNotPresent and run sync && sysctl"
+          " vm.drop_caches=3 before init_start / run_start."
+      ),
+  )
+  parser.add_argument(
       "--max_concurrency",
       type=int,
       default=128,
@@ -866,19 +877,55 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       )
   )
 
-  logging.info(
-      "Waiting for workers to register (before MLPerf init_start)..."
-  )
-  cluster.wait_for_workers(
-      min_workers={
-          datatypes.Role.ACTOR: 1,
-          datatypes.Role.ROLLOUT: args.rollout_replicas,
-          datatypes.Role.REFERENCE: 1 if args.beta != 0.0 else 0,
-      },
-      timeout=args.init_timeout_s,
-      poll_interval_s=1.0,
-  )
-  logging.info("Registered workers: %s", cluster.worker_infos())
+  prepull_future = None
+  prepull_executor = None
+  if args.use_agent_sandbox and args.prepull_sandbox_images:
+    from concurrent import futures  # pylint: disable=g-import-not-at-top
+    from tunix.experimental.examples.deepswe_dist import prepull_sandbox_images  # pylint: disable=g-import-not-at-top
+
+    logging.info(
+        "Starting sandbox container image pre-pulling (before MLPerf"
+        " init_start)..."
+    )
+    prepull_executor = futures.ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix="sandbox-prepull"
+    )
+    prepull_future = prepull_executor.submit(
+        prepull_sandbox_images.prepull_from_dataset,
+        dataset_name=args.dataset_name,
+        dataset_split=args.dataset_split,
+        dataset_path=args.dataset_path,
+        cache_dir=args.dataset_cache_dir or None,
+        scaffold=args.scaffold,
+    )
+  try:
+    logging.info(
+        "Waiting for workers to register (before MLPerf init_start)..."
+    )
+    cluster.wait_for_workers(
+        min_workers={
+            datatypes.Role.ACTOR: 1,
+            datatypes.Role.ROLLOUT: args.rollout_replicas,
+            datatypes.Role.REFERENCE: 1 if args.beta != 0.0 else 0,
+        },
+        timeout=args.init_timeout_s,
+        poll_interval_s=1.0,
+    )
+    logging.info("Registered workers: %s", cluster.worker_infos())
+    if prepull_future is not None:
+      logging.info(
+          "Waiting for sandbox container image pre-pulling to finish before"
+          " MLPerf init_start..."
+      )
+      num_staged = prepull_future.result()
+      logging.info(
+          "Finished pre-pulling %d static sandbox images (and dropped OS"
+          " caches) before MLPerf init_start.",
+          num_staged,
+      )
+  finally:
+    if prepull_executor is not None:
+      prepull_executor.shutdown(wait=False)
 
   if args.rcp_logging:
     mllog_utils.init_start(args)
