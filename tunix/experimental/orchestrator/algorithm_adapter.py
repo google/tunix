@@ -104,14 +104,18 @@ def _routed_experts_for(
   return routed_arr[:seq_len]
 
 
+# Only truncation by the response-token budget counts as overlong, matching
+# atwigg/mlperf: such a sequence was cut off mid-answer, so
+# `overlong_loss_masking` drops it from the loss. A trajectory that used up its
+# turn budget (`MAX_STEPS_REACHED`) consists of complete turns and keeps its
+# gradient.
 _OVERLONG_TRAJECTORY_STATUS_NAMES = frozenset({
     "MAX_CONTEXT_LIMIT_REACHED",
-    "MAX_STEPS_REACHED",
 })
 
 
 def _is_overlong_trajectory(item: datatypes.TrajectoryItem) -> bool:
-  """Returns True when a trajectory hit the response-token or turn budget."""
+  """Returns True when a trajectory was truncated by the response budget."""
   if not isinstance(item.traj, dict):
     return False
   status = item.traj.get("status")

@@ -766,6 +766,48 @@ class ExcludeMaskedFromAdvantageTest(absltest.TestCase):
     )
     np.testing.assert_array_equal(payloads[3].completion_mask, [1.0, 1.0])
 
+  def test_overlong_loss_masking_drops_only_context_truncated_items(self):
+    adapter = algorithm_adapter.GRPOAdapter(
+        algo_config=algorithm_config.GRPOConfig(
+            num_generations=4, overlong_loss_masking=True
+        )
+    )
+
+    def status_item(group_index, status):
+      return datatypes.TrajectoryItem(
+          prompt_id="g1",
+          group_index=group_index,
+          start_step=0,
+          traj={
+              "status": status,
+              "prompt_tokens": np.array([1, 2], dtype=np.int32),
+              "conversation_tokens": np.array([3, 4], dtype=np.int32),
+              "conversation_masks": np.ones(2, dtype=np.float32),
+          },
+      )
+
+    group = [
+        self._item(0),
+        self._item(1),
+        status_item(2, datatypes.TrajectoryStatus.MAX_STEPS_REACHED),
+        status_item(3, datatypes.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED),
+    ]
+    rewards = [1.0, 2.0, 3.0, 0.0]
+
+    payloads = adapter.create_trainer_payloads(group, rewards=rewards)
+
+    # Both stay in the advantage baseline...
+    np.testing.assert_allclose(
+        [float(p.advantages[0]) for p in payloads],
+        algo_core.compute_advantages(
+            np.array(rewards, dtype=np.float32), num_generations=4
+        ),
+        rtol=1e-5,
+    )
+    # ...but only the response-budget truncation loses its gradient.
+    np.testing.assert_array_equal(payloads[2].completion_mask, [1.0, 1.0])
+    np.testing.assert_array_equal(payloads[3].completion_mask, [0.0, 0.0])
+
   def test_failed_item_is_excluded_without_raising(self):
     adapter = self._adapter()
     group = [self._item(i) for i in range(3)] + [self._item(3, failed=True)]
@@ -859,7 +901,6 @@ class IsValidTrajectoryTest(absltest.TestCase):
   def test_invalid_status_is_invalid(self):
     for status in (
         datatypes.TrajectoryStatus.FAILED,
-        datatypes.TrajectoryStatus.TIMEOUT,
         datatypes.TrajectoryStatus.ENV_TIMEOUT,
         "FAILED",
         "failed",
@@ -870,6 +911,17 @@ class IsValidTrajectoryTest(absltest.TestCase):
             "conversation_masks": np.ones(3, dtype=np.float32),
         })
         self.assertFalse(item.is_valid)
+
+  def test_episode_timeout_is_valid(self):
+    # An episode that exhausts its wall-clock budget is a normal reward-0
+    # sample, not a runtime failure.
+    for status in (datatypes.TrajectoryStatus.TIMEOUT, "TIMEOUT"):
+      with self.subTest(status=status):
+        item = self._item({
+            "status": status,
+            "conversation_masks": np.ones(3, dtype=np.float32),
+        })
+        self.assertTrue(item.is_valid)
 
   def test_overlong_statuses_follow_conversation_masks(self):
     for status in (
