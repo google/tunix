@@ -56,11 +56,20 @@ class BaseChatTemplateParser(ABC):
     self.generation_prompt = self._init_generation_prompt()
     # message_separator is a per-turn formatting hint (e.g. "\n"), not a
     # control token; including it would strip every newline from message
-    # content.
+    # content. Similarly, tool_start_token and tool_end_token (e.g.
+    # "\n<tool_call>\n" and "\n</tool_call>") legitimately appear inside
+    # tool-use system prompts and assistant tool-call turns.
     self._tokens_to_sanitize = {
         v
         for k, v in dataclasses.asdict(self.tokens).items()
-        if k != "message_separator" and isinstance(v, str) and v
+        if k
+        not in (
+            "message_separator",
+            "tool_start_token",
+            "tool_end_token",
+        )
+        and isinstance(v, str)
+        and v
     }
 
   @abstractmethod
@@ -266,6 +275,77 @@ class QwenChatTemplateParser(BaseChatTemplateParser):
           "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
       )
     return ""
+
+  def preprocess_messages(
+      self, messages: List[Dict[str, str]]
+  ) -> List[Dict[str, str]]:
+    """Marks runs of consecutive tool messages, as the Qwen chat template sees them.
+
+    The template renders back-to-back tool messages as one user turn with one
+    <tool_response> block per message. Each message in a run of two or more
+    gets a `tool_group` of "first", "middle" or "last", so it renders correctly
+    on its own (`tokenize_and_generate_masks` renders one message at a time).
+    Marked messages are copies; the input list is returned unchanged when it
+    has no such run.
+
+    Args:
+      messages: The messages to render.
+
+    Returns:
+      The messages, with runs of tool messages marked.
+    """
+    runs = []
+    i = 0
+    while i < len(messages):
+      j = i
+      if messages[i]["role"] == "tool":
+        while j + 1 < len(messages) and messages[j + 1]["role"] == "tool":
+          j += 1
+        if j > i:
+          runs.append((i, j))
+      i = j + 1
+    if not runs:
+      return messages
+    marked = list(messages)
+    for start, end in runs:
+      for k in range(start, end + 1):
+        group = "first" if k == start else "last" if k == end else "middle"
+        marked[k] = {**messages[k], "tool_group": group}
+    return marked
+
+  def parse(
+      self,
+      messages: List[Dict[str, str]],
+      add_generation_prompt: bool = False,
+      is_first_msg: bool = False,
+  ) -> str:
+    return super().parse(
+        self.preprocess_messages(messages),
+        add_generation_prompt=add_generation_prompt,
+        is_first_msg=is_first_msg,
+    )
+
+  def _parse_message(self, message: Dict[str, str]) -> str:
+    group = message.get("tool_group")
+    if message["role"] != "tool" or not group:
+      return super()._parse_message(message)
+    content = token_sanitization.sanitize_control_tokens(
+        message["content"],
+        extra_tokens=self._tokens_to_sanitize,
+        include_default=not self._tokens_to_sanitize,
+    )
+    block = (
+        self.tokens.tool_response_start_token
+        + content
+        + self.tokens.tool_response_end_token
+    )
+    # parse() joins messages with message_separator ("\n"), which is the
+    # template's newline between </tool_response> and the next <tool_response>.
+    if group == "first":
+      return self.tokens.user_token + block
+    if group == "last":
+      return block + self.tokens.eot_token
+    return block
 
 
 class LlamaChatTemplateParser(BaseChatTemplateParser):
