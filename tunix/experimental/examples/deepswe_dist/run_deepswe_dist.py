@@ -1068,6 +1068,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         batch_size=args.batch_size,
         batch_config=batch_assembly.BatchConfig(
             pad_id=pad_id,
+            eos_id=eos_id,
             max_prompt_length=args.max_prompt_length,
             max_response_length=args.max_response_length,
             max_seq_token_per_tpu=args.max_seq_token_per_tpu,
@@ -1119,8 +1120,17 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           train_dataset=None,
       )
 
+    return_routed_experts = os.getenv(
+        "RETURN_ROUTED_EXPERTS", ""
+    ).strip().lower() in ("1", "true", "yes")
+    dummy_data = batch_assembly.build_dummy_payload_for_algo(
+        algo,
+        program.assembler,
+        include_overlong=True,
+        return_routed_experts=return_routed_experts,
+    )
     logging.info("Bringing up remote workers through ClusterOrchestrator...")
-    cluster.bring_up_workers(dummy_data=None)
+    cluster.bring_up_workers(dummy_data=dummy_data)
     logging.info("Starting DeepSWE StandardRLProgram execution...")
     cluster.run(
         program=program,

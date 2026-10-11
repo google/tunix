@@ -2436,6 +2436,82 @@ class CreateBatchAssemblerTest(absltest.TestCase):
     self.assertEqual(full_routed_shapes, [(4, 9, 48, 8)])
     self.assertEqual(stack_routed_shapes, [])
 
+  def test_build_dummy_payload_matches_sequence_packed_batch_pytree(self):
+    from tunix.experimental.orchestrator import algorithm_adapter
+    from tunix.rl import algorithm_config
+
+    assembler = batch_assembly.SequencePackedBatchAssembler(
+        batch_size=2,
+        num_generations=2,
+        mini_batch_size=1,
+        max_packed_len=16,
+        pad_id=0,
+        eos_id=2,
+        segment_align_multiple=1,
+    )
+    algo = algorithm_adapter.GRPOAdapter(
+        algo_config=algorithm_config.GRPOConfig(
+            num_generations=2,
+            beta=0.0,
+            temperature=1.0,
+            use_rollout_logps=False,
+            overlong_loss_masking=True,
+            seq_logprob_error_threshold=2.0,
+            truncated_importance_sampling_type="seq-mask-tis",
+            truncated_importance_sampling_ratio_min=0.999,
+            truncated_importance_sampling_ratio=1.002,
+        ),
+        mini_batch_size=1,
+        train_micro_batch_size=2,
+        max_packed_len=16,
+    )
+    dummy = batch_assembly.build_dummy_payload_for_algo(
+        algo,
+        assembler,
+        routed_experts_shape=(4, 2),
+    )
+    self.assertIsNone(dummy.old_per_token_logps)
+    self.assertIsNotNone(dummy.rollout_per_token_logps)
+    self.assertIsNone(dummy.sampler_is_weights)
+    self.assertIsNotNone(dummy.overlong)
+    self.assertIsNotNone(dummy.routed_experts)
+    self.assertEqual(dummy.routed_experts.shape, (2, 16, 4, 2))
+    self.assertEqual(dummy.routed_experts.dtype, np.int16)
+
+    traj_item = lambda idx: datatypes.TrajectoryItem(
+        prompt_id="p_0",
+        group_index=idx,
+        traj={
+            "prompt_tokens": np.array([10, 11], dtype=np.int32),
+            "conversation_tokens": np.array([12, 13], dtype=np.int32),
+            "conversation_masks": np.ones(2, dtype=np.float32),
+            "old_logprobs": np.zeros(2, dtype=np.float32),
+            "status": "SUCCEEDED",
+            "routed_experts": np.zeros((4, 4, 2), dtype=np.int16),
+        },
+        metadata={"traj_id": f"t_{idx}"},
+    )
+    payloads = algo.create_trainer_payloads(
+        [traj_item(0), traj_item(1)], rewards=[1.0, 0.0]
+    )
+    batches = assembler.feed(payloads)
+    self.assertLen(batches, 1)
+    real_payload = batches[0].payload
+
+    gen_fn = algo.build_gen_model_input_fn(pad_id=0, eos_id=2)
+    dummy_in = gen_fn(dummy)["train_example"]
+    real_in = gen_fn(real_payload)["train_example"]
+
+    self.assertEqual(
+        jax.tree_util.tree_structure(dummy_in),
+        jax.tree_util.tree_structure(real_in),
+    )
+    dummy_shapes = jax.tree_util.tree_map(
+        lambda x: (x.shape, x.dtype), dummy_in
+    )
+    real_shapes = jax.tree_util.tree_map(lambda x: (x.shape, x.dtype), real_in)
+    self.assertEqual(dummy_shapes, real_shapes)
+
 
 if __name__ == "__main__":
   absltest.main()

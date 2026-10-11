@@ -1195,7 +1195,37 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
 
   @override
   def compile(self, dummy_data: Any) -> None:
-    pass
+    if dummy_data is None:
+      return
+    fwd_bwd_step, update_step, _ = self.jit_fwd_bwd_update_and_eval_step(
+        skip_jit=False, cache_nnx_graph=True
+    )
+    prepared = self._prepare_payload(dummy_data)
+    if self._jitted_train_step_fn is not None:
+      jitted_fn = getattr(
+          getattr(self._jitted_train_step_fn, "func", None), "jitted_fn", None
+      )
+      if jitted_fn is not None and hasattr(jitted_fn, "lower"):
+        jitted_fn.lower(
+            self._cached_nnx_state,
+            prepared,
+            self._cached_optimizer_state,
+        ).compile()
+      return
+    fwd_jitted = getattr(getattr(fwd_bwd_step, "func", None), "jitted_fn", None)
+    if fwd_jitted is not None and hasattr(fwd_jitted, "lower"):
+      fwd_jitted.lower(
+          self._cached_nnx_state,
+          self.grad_accumulator,
+          prepared,
+      ).compile()
+    upd_jitted = getattr(getattr(update_step, "func", None), "jitted_fn", None)
+    if upd_jitted is not None and hasattr(upd_jitted, "lower"):
+      upd_jitted.lower(
+          self._cached_nnx_state,
+          self._cached_optimizer_state,
+          self.grad_accumulator,
+      ).compile()
 
   @override
   def eval_step(

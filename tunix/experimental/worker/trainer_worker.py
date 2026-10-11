@@ -16,10 +16,14 @@
 
 from collections.abc import Mapping
 import contextlib
+import dataclasses
+import functools
+import os
 from typing import Any, Callable, ContextManager, cast
 
 from absl import logging
 from flax import nnx
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -30,6 +34,36 @@ from tunix.experimental.worker import abstract_worker
 from tunix.rl import common as rl_common
 
 WorkerState = datatypes.WorkerState
+
+
+def _same_callable(a: Any, b: Any) -> bool:
+  if a is b:
+    return True
+  if isinstance(a, functools.partial) and isinstance(b, functools.partial):
+    return (
+        _same_callable(a.func, b.func)
+        and a.args == b.args
+        and a.keywords == b.keywords
+    )
+  try:
+    return bool(a == b)
+  except Exception:  # pylint: disable=broad-exception-caught
+    return False
+
+
+def _payload_signature(data: Any) -> Any:
+  if data is None:
+    return None
+  if dataclasses.is_dataclass(data) and hasattr(data, "metadata"):
+    data = dataclasses.replace(data, metadata={})
+  leaves, treedef = jax.tree_util.tree_flatten(data)
+  leaf_sigs = tuple(
+      (np.asarray(x).shape, np.asarray(x).dtype)
+      if hasattr(x, "shape") and hasattr(x, "dtype")
+      else type(x)
+      for x in leaves
+  )
+  return (treedef, leaf_sigs)
 
 
 class TrainerWorker(abstract_worker.Worker):
@@ -68,6 +102,12 @@ class TrainerWorker(abstract_worker.Worker):
     self._pending_gen_model_input_fn: (
         Callable[[Any], dict[str, Any]] | None
     ) = None
+    self._configured_loss_fn: tuple[Callable[..., Any], bool] | None = None
+    self._raw_gen_model_input_fn: Callable[[Any], dict[str, Any]] | None = None
+    self._configured_gen_model_input_fn: (
+        Callable[[Any], dict[str, Any]] | None
+    ) = None
+    self._compiled_dummy_signature: Any = None
     self._logps_chunk_size = logps_chunk_size
     self._logps_micro_batch_size = logps_micro_batch_size
     self._is_running = False
@@ -108,23 +148,128 @@ class TrainerWorker(abstract_worker.Worker):
         if self._pending_loss_fn is not None:
           loss_fn, has_aux = self._pending_loss_fn
           self._trainer.with_loss_fn(loss_fn, has_aux)
+          self._configured_loss_fn = (loss_fn, has_aux)
           self._pending_loss_fn = None
         if self._pending_gen_model_input_fn is not None:
           self._trainer.with_gen_model_input_fn(
               self._pending_gen_model_input_fn
           )
+          self._configured_gen_model_input_fn = self._pending_gen_model_input_fn
           self._pending_gen_model_input_fn = None
       return self._response(initialized=True)
     finally:
       self.state = WorkerState.READY
 
+  def _warmup_per_token_logps(self, dummy_data: Any) -> None:
+    """Pre-compiles `per_token_logps` when the dummy batch carries old_logps."""
+    if not isinstance(dummy_data, datatypes.RLTrainerPayload):
+      return
+    if dummy_data.old_per_token_logps is None:
+      return
+    if self._configured_gen_model_input_fn is None:
+      return
+    if not hasattr(self._trainer, "model_scope"):
+      return
+    try:
+      model_inputs = self._configured_gen_model_input_fn(dummy_data)
+    except Exception:  # pylint: disable=broad-exception-caught
+      return
+    pad_id = model_inputs.get("pad_id")
+    eos_id = model_inputs.get("eos_id")
+    if pad_id is None or eos_id is None:
+      return
+    algo_config = model_inputs.get("algo_config")
+    temperature = float(getattr(algo_config, "temperature", 1.0) or 1.0)
+    logps_request = datatypes.LogprobsRequest(
+        prompt_tokens=np.asarray(dummy_data.prompt_ids, dtype=np.int32),
+        completion_tokens=np.asarray(dummy_data.completion_ids, dtype=np.int32),
+        pad_id=int(pad_id),
+        eos_id=int(eos_id),
+        temperature=temperature,
+        segment_ids=(
+            None
+            if dummy_data.segment_ids is None
+            else np.asarray(dummy_data.segment_ids, dtype=np.int32)
+        ),
+        segment_positions=(
+            None
+            if dummy_data.segment_positions is None
+            else np.asarray(dummy_data.segment_positions, dtype=np.int32)
+        ),
+        routed_experts=(
+            None
+            if getattr(dummy_data, "routed_experts", None) is None
+            else np.asarray(dummy_data.routed_experts, dtype=np.int16)
+        ),
+    )
+    self.per_token_logps(items=logps_request)
+
+  def _resolve_dummy_payload(self, dummy_data: Any) -> Any:
+    """Normalizes dummy_data and populates routed_experts from trainer config if needed."""
+    if not isinstance(dummy_data, datatypes.RLTrainerPayload):
+      return dummy_data
+    meta = getattr(dummy_data, "metadata", None) or {}
+    want_routed_experts = bool(meta.get("return_routed_experts")) or (
+        os.environ.get("RETURN_ROUTED_EXPERTS", "").strip().lower()
+        in ("1", "true", "yes")
+    )
+    routed_experts = getattr(dummy_data, "routed_experts", None)
+    has_routed_experts = (
+        routed_experts is not None and np.asarray(routed_experts).size > 0
+    )
+    if (
+        want_routed_experts
+        and not has_routed_experts
+        and self._trainer is not None
+    ):
+      cfg = getattr(self._trainer, "config", None)
+      num_layers = getattr(cfg, "num_decoder_layers", None) or getattr(
+          cfg, "base_num_decoder_layers", None
+      )
+      top_k = getattr(cfg, "num_experts_per_tok", None)
+      if (
+          isinstance(num_layers, int)
+          and num_layers > 0
+          and isinstance(top_k, int)
+          and top_k > 0
+      ):
+        prompt_arr = np.asarray(dummy_data.prompt_ids)
+        comp_arr = np.asarray(dummy_data.completion_ids)
+        batch_size = int(comp_arr.shape[0])
+        seq_len = int(prompt_arr.shape[1]) + int(comp_arr.shape[1])
+        routed_experts = np.full(
+            (batch_size, seq_len, num_layers, top_k),
+            datatypes.UNSET_ROUTED_EXPERT,
+            dtype=np.int16,
+        )
+    if routed_experts is not getattr(dummy_data, "routed_experts", None) or meta:
+      dummy_data = dataclasses.replace(
+          dummy_data,
+          routed_experts=routed_experts,
+          metadata={},
+      )
+    return dummy_data
+
   def compile(self, dummy_data: Any = None) -> datatypes.Response:
     """Triggers JIT compilation using the provided dummy_data."""
     if self.state == WorkerState.PENDING:
       self.initialize()
+    dummy_data = self._resolve_dummy_payload(dummy_data)
+    if dummy_data is not None and self._compiled_dummy_signature is not None:
+      sig = _payload_signature(dummy_data)
+      if sig == self._compiled_dummy_signature and getattr(
+          self._trainer, "_compiled", True
+      ):
+        return self._response(compiled=True)
     self.state = WorkerState.COMPILING
     try:
-      self._trainer.compile(dummy_data)
+      with self.execution_context():
+        self._trainer.compile(dummy_data)
+      if dummy_data is not None:
+        self.state = WorkerState.READY
+        with self.execution_context():
+          self._warmup_per_token_logps(dummy_data)
+        self._compiled_dummy_signature = _payload_signature(dummy_data)
       return self._response(compiled=True)
     except Exception as exc:
       self._last_error = str(exc)
@@ -181,7 +326,15 @@ class TrainerWorker(abstract_worker.Worker):
   ) -> datatypes.Response:
     """Sets the loss function used by `fwd_bwd` (and evaluation)."""
     if self._trainer is not None:
+      if (
+          self._configured_loss_fn is not None
+          and _same_callable(self._configured_loss_fn[0], loss_fn)
+          and self._configured_loss_fn[1] == has_aux
+      ):
+        return self._response(loss_fn_configured=True)
       self._trainer.with_loss_fn(loss_fn, has_aux)
+      self._configured_loss_fn = (loss_fn, has_aux)
+      self._compiled_dummy_signature = None
     else:
       self._pending_loss_fn = (loss_fn, has_aux)
     return self._response(loss_fn_configured=True)
@@ -190,6 +343,14 @@ class TrainerWorker(abstract_worker.Worker):
       self, gen_model_input_fn: Callable[[Any], dict[str, Any]]
   ) -> datatypes.Response:
     """Sets the last-mile adapter mapping a payload to the loss fn's kwargs."""
+    raw_fn = gen_model_input_fn
+    if (
+        self._trainer is not None
+        and self._raw_gen_model_input_fn is not None
+        and _same_callable(self._raw_gen_model_input_fn, raw_fn)
+    ):
+      return self._response(gen_model_input_fn_configured=True)
+    self._raw_gen_model_input_fn = raw_fn
     chunk_size = self._logps_chunk_size
     if chunk_size > 0:
       orig_fn = gen_model_input_fn
@@ -202,6 +363,8 @@ class TrainerWorker(abstract_worker.Worker):
       gen_model_input_fn = _wrapped_gen_model_input_fn
     if self._trainer is not None:
       self._trainer.with_gen_model_input_fn(gen_model_input_fn)
+      self._configured_gen_model_input_fn = gen_model_input_fn
+      self._compiled_dummy_signature = None
     else:
       self._pending_gen_model_input_fn = gen_model_input_fn
     return self._response(gen_model_input_fn_configured=True)
