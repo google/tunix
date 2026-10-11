@@ -461,6 +461,16 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
+      "--sandbox_wait_initial",
+      action=argparse.BooleanOptionalAction,
+      default=os.getenv("SANDBOX_WAIT_INITIAL", "true").lower()
+      in ("1", "true", "yes"),
+      help=(
+          "Whether PrewarmDatasetIterator waits synchronously for the initial"
+          " warmpool batch before yielding the first prompt."
+      ),
+  )
+  parser.add_argument(
       "--max_concurrency",
       type=int,
       default=128,
@@ -1036,7 +1046,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
             max_warmpool_replicas=args.max_warmpool_replicas,
             unwarm_on_exhaustion=True,
             scaffold=args.scaffold,
-            wait_initial=True,
+            wait_initial=args.sandbox_wait_initial,
             max_staleness=args.max_staleness,
         )
       else:

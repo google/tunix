@@ -166,6 +166,7 @@ export ROLLOUT_MAX_CONCURRENCY=${ROLLOUT_MAX_CONCURRENCY:-64}
 export MAX_CONCURRENCY=${MAX_CONCURRENCY:-${ROLLOUT_MAX_CONCURRENCY}}
 export FLUSH_EVERY_N_STEPS=${FLUSH_EVERY_N_STEPS:-1}
 export MAX_WARMPOOL_REPLICAS=${MAX_WARMPOOL_REPLICAS:-4}
+export SANDBOX_WAIT_INITIAL=${SANDBOX_WAIT_INITIAL:-true}
 export ENABLE_PATHWAYS_PERSISTENCE=${ENABLE_PATHWAYS_PERSISTENCE:-0}
 export CHECKPOINT_ASYNC=${CHECKPOINT_ASYNC:-true}
 # Orbax Pathways impl: "persistence" (default) or "colocated_python". Selecting
@@ -521,6 +522,7 @@ start_orchestrator() {
         ${disable_ws_timeouts_arg} \
         --stop_workers_on_exit \
         ${MAX_WARMPOOL_REPLICAS:+--max_warmpool_replicas=${MAX_WARMPOOL_REPLICAS}} \
+        $([[ "${SANDBOX_WAIT_INITIAL}" == "false" || "${SANDBOX_WAIT_INITIAL}" == "False" || "${SANDBOX_WAIT_INITIAL}" == "0" ]] && echo --no-sandbox_wait_initial || echo --sandbox_wait_initial) \
         ${MAX_CONCURRENCY:+--max_concurrency=${MAX_CONCURRENCY}} \
         $([[ "${ROLLOUT_FAULT_TOLERANCE}" == "false" || "${ROLLOUT_FAULT_TOLERANCE}" == "False" || "${ROLLOUT_FAULT_TOLERANCE}" == "0" ]] && echo --no-rollout_fault_tolerance || echo --rollout_fault_tolerance) \
         ${MAX_CONCURRENT_ROLLOUTS_PER_WORKER:+--max_concurrent_rollouts_per_worker=${MAX_CONCURRENT_ROLLOUTS_PER_WORKER}} \

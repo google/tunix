@@ -727,7 +727,7 @@ class TrajectoryCollectEngine:
         else None
     )
     self.agent.reset()
-    self._start_ts = time.perf_counter() - wall_time
+    self._start_ts = time.perf_counter()
     self._response_token_count = 0
     self._cumulative_prompt_tokens = 0
     self._current_step_initial_routed_experts = None
