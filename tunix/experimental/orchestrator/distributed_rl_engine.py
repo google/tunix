@@ -819,7 +819,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
 
   async def compile_trainer(
       self,
-      dummy_data: Any,
+      dummy_data: datatypes.RLTrainerPayload | None,
       role: datatypes.Role = datatypes.Role.ACTOR,
   ) -> Any:
     """Compiles the trainer's step kernels against `dummy_data` now.

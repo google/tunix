@@ -556,7 +556,7 @@ def to_rl_trainer_payload(
   )
 
 
-def describe_payload(payload: Any) -> str:
+def describe_payload(payload: datatypes.RLTrainerPayload) -> str:
   """One-line summary of a trainer payload's pytree for log comparison.
 
   Lists every field: array leaves as `name=shape:dtype`, unset fields as
@@ -576,7 +576,7 @@ def describe_payload(payload: Any) -> str:
   for field in dataclasses.fields(payload):
     value = getattr(payload, field.name)
     if field.name == "metadata":
-      keys = sorted(value) if isinstance(value, Mapping) else type(value)
+      keys = sorted(value) if value is not None else []
       parts.append(f"metadata_keys={keys}")
     elif value is None:
       parts.append(f"{field.name}=None")

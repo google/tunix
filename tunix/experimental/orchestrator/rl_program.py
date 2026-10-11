@@ -401,7 +401,7 @@ class StandardRLProgram(RLProgram):
       pipeline_train_microbatches: bool = False,
       rollout_priority_scheduling: bool = False,
       initial_dispatch_stagger_s: float = 0.0,
-      trainer_warmup_payload: Any = None,
+      trainer_warmup_payload: datatypes.RLTrainerPayload | None = None,
   ):
     super().__init__()
     self.engine: rl_engine_interface.AbstractRLEngine | None = None
@@ -717,11 +717,8 @@ class StandardRLProgram(RLProgram):
     now = time.monotonic()
     if now >= due:
       return
-    logged = getattr(self, "_initial_stagger_logged", None)
-    if logged is None:
-      logged = self._initial_stagger_logged = set()
-    if batch_idx not in logged:
-      logged.add(batch_idx)
+    if batch_idx not in self._initial_stagger_logged:
+      self._initial_stagger_logged.add(batch_idx)
       logging.info(
           "[pipeline] STAGGER batch_idx=%d held %.1f s"
           " (initial_dispatch_stagger_s=%.1f)",

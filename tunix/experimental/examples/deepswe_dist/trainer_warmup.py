@@ -36,6 +36,7 @@ from typing import Any
 
 import numpy as np
 from tunix.experimental.common import datatypes
+from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
 from tunix.rl import packing
 
@@ -141,7 +142,7 @@ def _synthetic_group(
 
 def build_warmup_payload(
     *,
-    algo: Any,
+    algo: algorithm_adapter.AlgorithmAdapter,
     batch_config: batch_assembly.BatchConfig,
     num_generations: int,
     mini_batch_size: int,
@@ -240,16 +241,17 @@ def build_warmup_payload(
   payload = dataclasses.replace(emitted[0].payload, metadata={})
 
   # Fields RLProgram attaches per micro-batch before `train_step`.
-  if getattr(algo, "requires_reference_kl", False):
+  if algo.requires_reference_kl:
     payload = batch_assembly.with_ref_per_token_logps(
         payload,
         np.zeros(np.asarray(payload.completion_ids).shape, dtype=np.float32),
     )
-  algo_config = getattr(algo, "algo_config", None)
+  algo_config = algo.algo_config
   if (
       payload.old_per_token_logps is not None
-      and getattr(algo_config, "use_rollout_logps", False)
-      and getattr(algo_config, "sampler_is", None) is not None
+      and algo_config is not None
+      and algo_config.use_rollout_logps
+      and algo_config.sampler_is is not None
   ):
     logging.warning(
         "Warm-up payload omits the sampler_is_weights that the sampler/trainer"
