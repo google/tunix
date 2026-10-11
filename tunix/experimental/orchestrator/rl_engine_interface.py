@@ -126,6 +126,21 @@ class AbstractRLEngine(Protocol):
     """Executes forward/backward gradient update on trainer workers."""
     ...
 
+  async def warm_compile(
+      self,
+      payload: datatypes.RLTrainerPayload,
+      role: datatypes.Role = datatypes.Role.ACTOR,
+  ) -> None:
+    """Compiles the trainer's kernels against `payload` before the first batch.
+
+    The trainer otherwise compiles inside its first `train_step`, which runs
+    after the first rollouts have been generated, so the compile is serialized
+    behind generation rather than overlapping it. `payload` must have the same
+    structure as the microbatches the trainer will be fed, or the first real
+    batch recompiles and the work is wasted.
+    """
+    ...
+
   # TODO: b/552087289 - Generalize get_metrics to support querying metrics
   # across all worker roles (trainer, rollout, critique) or worker pools.
   async def get_metrics(

@@ -515,6 +515,22 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         "accumulated": accumulate_gradients,
     }
 
+  async def warm_compile(
+      self,
+      payload: datatypes.RLTrainerPayload,
+      role: datatypes.Role = datatypes.Role.ACTOR,
+  ) -> None:
+    """Compiles the trainer's kernels against `payload` before the first batch."""
+    worker = self._trainer_workers.get(role)
+    if worker is None:
+      raise ValueError(f"No trainer worker registered for role {role}")
+    role_name = role.value if isinstance(role, datatypes.Role) else str(role)
+    logging.info(
+        "Warm-compiling the %s trainer against a synthetic microbatch...",
+        role_name,
+    )
+    await self._invoke_worker(worker, "compile", dummy_data=payload)
+
   async def get_metrics(
       self,
       role: datatypes.Role = datatypes.Role.ACTOR,
