@@ -146,6 +146,7 @@ class TrajectoryCollectorEngine:
     self._unpaused.set()
     self._episode_cache_salt: str | None = None
     self._turn_policy_versions: list[int] = []
+    self._turn_sampled_lengths: list[int] = []
     self._inner_engine: Optional[rl_collect_engine.TrajectoryCollectEngine] = (
         None
     )
@@ -193,6 +194,7 @@ class TrajectoryCollectorEngine:
     """Executes multi-turn agentic rollout episode and returns TrajectoryItem."""
     self._episode_cache_salt = None
     self._turn_policy_versions = []
+    self._turn_sampled_lengths = []
 
     # Note: model_call is an async coroutine callback invoked directly by
     # TrajectoryCollectEngine on the asyncio event loop without blocking
@@ -294,6 +296,7 @@ class TrajectoryCollectorEngine:
       res = await self.sampler.sample(sampling_req, **generation_kwargs)
       text = res if isinstance(res, str) else getattr(res, "text", str(res))
       tokens = getattr(res, "token_ids", np.array([], dtype=np.int32))
+      self._turn_sampled_lengths.append(len(tokens))
       logprobs = getattr(res, "logprobs", None)
       routed_experts = getattr(res, "routed_experts", None)
       raw_prompt_tokens = getattr(res, "prompt_token_ids", None)
@@ -344,6 +347,10 @@ class TrajectoryCollectorEngine:
     if isinstance(rl_traj, dict) and self._turn_policy_versions:
       rl_traj["policy_version"] = int(self._turn_policy_versions[0])
       rl_traj["policy_versions"] = list(self._turn_policy_versions)
+    if isinstance(rl_traj, dict):
+      # Kept apart from `conversation_masks`, which the overlong filter zeroes,
+      # so consumers still see how long a masked-out rollout's turns ran.
+      rl_traj["assistant_turn_lengths"] = list(self._turn_sampled_lengths)
     self.is_done = True
     return self._convert_to_trajectory(rl_traj)
 

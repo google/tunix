@@ -27,6 +27,7 @@ from flax import nnx
 import metrax.logging as metrax_logging
 import numpy as np
 from tunix.experimental.common import datatypes
+from tunix.experimental.common import lineage
 from tunix.experimental.metrics import metrics as exp_metrics
 from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
@@ -193,6 +194,36 @@ def _set_mock_poll_batches(
     return []
 
   mock_engine.poll_rollouts.side_effect = _mock_poll
+
+
+def _rollout_lineage(
+    dispatch_s: float, finish_s: float, worker_id: str = "rollout-0"
+) -> lineage.LineageContext:
+  """Lineage as a rollout carries it back: dispatched, then finished."""
+  return lineage.LineageContext(
+      tracking_id="traj",
+      events=[
+          lineage.LineageEvent(
+              component="engine.dispatch",
+              operation="rollout",
+              timestamp_s=dispatch_s,
+          ),
+          lineage.LineageEvent(
+              component="worker.rollout",
+              operation="generate",
+              timestamp_s=finish_s,
+              attributes={"worker_id": worker_id},
+          ),
+      ],
+  )
+
+
+def _scored_traj(reward: float = 1.0) -> dict[str, Any]:
+  """A trajectory dict as `critique_stage` hands it to the train stage."""
+  return {
+      "trajectory_reward": reward,
+      "status": datatypes.TrajectoryStatus.SUCCEEDED,
+  }
 
 
 class RLProgramTest(absltest.TestCase):
@@ -964,7 +995,7 @@ class RLProgramTest(absltest.TestCase):
         group_index=0,
         prompt_id=f"prompt_{group_idx}",
         start_step=0,
-        traj={"trajectory_reward": 1.0},
+        traj=_scored_traj(),
     )
     item.payload = datatypes.RLTrainerPayload(
         prompt_ids=np.array([1, 2], dtype=np.int32),
@@ -1087,7 +1118,7 @@ class RLProgramTest(absltest.TestCase):
             group_index=group_index,
             prompt_id="prompt_0",
             start_step=0,
-            traj={"trajectory_reward": 1.0},
+            traj=_scored_traj(),
         )
         item.payload = self.mock_algo.create_trainer_payloads.return_value[
             group_index
@@ -1217,7 +1248,7 @@ class RLProgramTest(absltest.TestCase):
             group_index=group_index,
             prompt_id="prompt_0",
             start_step=0,
-            traj={"trajectory_reward": 1.0},
+            traj=_scored_traj(),
         )
         item.payload = self.mock_algo.create_trainer_payloads.return_value[
             group_index
@@ -1339,7 +1370,7 @@ class RLProgramTest(absltest.TestCase):
               prompt_id=f"prompt_{prompt_idx}",
               start_step=0,
               traj={
-                  "trajectory_reward": 1.0,
+                  **_scored_traj(),
                   "logprobs": np.array([-0.1, -0.2], dtype=np.float32),
               },
               prompt_tokens=np.array([1, 2], dtype=np.int32),
@@ -1433,7 +1464,7 @@ class RLProgramTest(absltest.TestCase):
             group_index=group_index,
             prompt_id="prompt_0",
             start_step=0,
-            traj={"trajectory_reward": 1.0},
+            traj=_scored_traj(),
         )
         item.payload = self.mock_algo.create_trainer_payloads.return_value[
             group_index
@@ -1479,7 +1510,7 @@ class RLProgramTest(absltest.TestCase):
             group_index=item_idx,
             prompt_id=f"prompt_{group_idx}",
             start_step=0,
-            traj={"trajectory_reward": 1.0},
+            traj=_scored_traj(),
         )
         item.payload = payload
         return item
@@ -1546,7 +1577,7 @@ class RLProgramTest(absltest.TestCase):
               group_index=item_idx,
               prompt_id=f"prompt_{group_idx}",
               start_step=0,
-              traj={"trajectory_reward": 1.0},
+              traj=_scored_traj(),
           )
           item.payload = payload
           await program.scored_q.put(item)
@@ -1616,7 +1647,7 @@ class RLProgramTest(absltest.TestCase):
             group_index=0,
             prompt_id=f"prompt_{group_idx}",
             start_step=0,
-            traj={"trajectory_reward": 1.0},
+            traj=_scored_traj(),
         )
         item.payload = payload
         return item
@@ -1683,7 +1714,7 @@ class RLProgramTest(absltest.TestCase):
             group_index=0,
             prompt_id=f"prompt_{group_idx}",
             start_step=0,
-            traj={"trajectory_reward": 1.0},
+            traj=_scored_traj(),
         )
         item.payload = payload
         return item
@@ -1732,7 +1763,7 @@ class RLProgramTest(absltest.TestCase):
           group_index=0,
           prompt_id="prompt_0",
           start_step=0,
-          traj={"trajectory_reward": 1.0},
+          traj=_scored_traj(),
       )
       item.payload = payload
       await program.scored_q.put(item)
@@ -1783,7 +1814,7 @@ class RLProgramTest(absltest.TestCase):
             group_index=item_idx,
             prompt_id="prompt_0",
             start_step=0,
-            traj={"trajectory_reward": 1.0},
+            traj=_scored_traj(),
         )
         item.payload = payload
         return item
@@ -1843,7 +1874,7 @@ class RLProgramTest(absltest.TestCase):
             group_index=item_idx,
             prompt_id=f"prompt_{group_idx}",
             start_step=0,
-            traj={"trajectory_reward": 1.0},
+            traj=_scored_traj(),
         )
         item.payload = payload
         return item
@@ -1903,7 +1934,7 @@ class RLProgramTest(absltest.TestCase):
             group_index=idx,
             prompt_id=prompt_id,
             start_step=0,
-            traj={"trajectory_reward": 1.0},
+            traj=_scored_traj(),
         )
         item.payload = payload
         return item
@@ -1972,7 +2003,7 @@ class RLProgramTest(absltest.TestCase):
             group_index=idx,
             prompt_id="prompt_0",
             start_step=0,
-            traj={"trajectory_reward": 1.0},
+            traj=_scored_traj(),
         )
         item.payload = payload
         return item
@@ -2056,7 +2087,7 @@ class RLProgramTest(absltest.TestCase):
             group_index=group_index,
             prompt_id="prompt_0",
             start_step=0,
-            traj={"trajectory_reward": 1.0},
+            traj=_scored_traj(),
         )
         item.payload = self.mock_algo.create_trainer_payloads.return_value[
             group_index
@@ -2115,7 +2146,7 @@ class RLProgramTest(absltest.TestCase):
             group_index=item_idx,
             prompt_id=f"prompt_{group_idx}",
             start_step=0,
-            traj={"trajectory_reward": 1.0},
+            traj=_scored_traj(),
         )
         item.payload = payload
         return item
@@ -3392,40 +3423,312 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
-  def test_rollouts_with_steps_logs_turns_mean(self):
+  def test_rollouts_log_assistant_turns_from_conversation(self):
     async def _run():
-      mock_step = datatypes.Step()
-      traj_item_0 = datatypes.TrajectoryItem(
-          group_index=0,
-          prompt_id="prompt_0",
-          start_step=0,
-          prompt_tokens=np.array([1, 2], dtype=np.int32),
-          completion_tokens=np.array([3, 4], dtype=np.int32),
-          traj={"trajectory_reward": 1.0, "steps": [mock_step, mock_step]},
-      )
-      traj_item_1 = datatypes.TrajectoryItem(
-          group_index=1,
-          prompt_id="prompt_0",
-          start_step=0,
-          prompt_tokens=np.array([1, 2], dtype=np.int32),
-          completion_tokens=np.array([3, 4], dtype=np.int32),
-          traj={
-              "trajectory_reward": 1.0,
-              "steps": [mock_step, mock_step, mock_step, mock_step],
-          },
-      )
-      _set_mock_poll_batches(self.mock_engine, [traj_item_0, traj_item_1], [])
+      # Token-mode rollouts carry their turns in `conversation_text`; their
+      # `steps` is always empty, so turns cannot be counted from it.
+      def _conversation(num_turns):
+        return [{"role": "user", "content": "task"}] + [
+            {"role": "assistant", "content": "act"},
+            {"role": "user", "content": "observation"},
+        ] * num_turns
+
+      traj_items = [
+          datatypes.TrajectoryItem(
+              group_index=group_index,
+              prompt_id="prompt_0",
+              start_step=0,
+              prompt_tokens=np.array([1, 2], dtype=np.int32),
+              completion_tokens=np.array([3, 4], dtype=np.int32),
+              traj={
+                  "trajectory_reward": 1.0,
+                  "steps": [],
+                  "conversation_text": _conversation(num_turns),
+              },
+          )
+          for group_index, num_turns in enumerate([2, 4])
+      ]
+      _set_mock_poll_batches(self.mock_engine, traj_items, [])
       program = self._create_program(dataset=["prompt_0"], reward_fns=[])
 
       await program.run_async(self.mock_engine)
 
       logger = program.metrics_logger
-      self.assertTrue(
-          logger.metric_exists("rollout", "num_turns_mean", "train")
-      )
       # (2 + 4) / 2 = 3.0
       self.assertAlmostEqual(
           logger.get_metric("rollout", "num_turns_mean", "train"), 3.0
+      )
+      self.assertAlmostEqual(
+          logger.get_metric("rollout", "num_turns_max", "train"), 4.0
+      )
+
+    asyncio.run(_run())
+
+  def test_train_stage_logs_step_time_breakdown(self):
+    async def _run():
+      async def _train_step(*args, **kwargs):
+        del args, kwargs
+        await asyncio.sleep(0.05)
+        return "step_done"
+
+      async def _save_checkpoint(*args, **kwargs):
+        del args, kwargs
+        await asyncio.sleep(0.05)
+        return {"checkpoint_saved": True}
+
+      async def _sync_weights(*args, **kwargs):
+        del args, kwargs
+        await asyncio.sleep(0.05)
+        return 1
+
+      self.mock_engine.train_step = mock.AsyncMock(side_effect=_train_step)
+      self.mock_engine.save_checkpoint = mock.AsyncMock(
+          side_effect=_save_checkpoint
+      )
+      self.mock_engine.sync_weights = mock.AsyncMock(side_effect=_sync_weights)
+      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group(), [])
+      program = self._create_program(dataset=["prompt_0"], reward_fns=[])
+
+      await program.run_async(self.mock_engine)
+
+      logger = program.metrics_logger
+      for name in (
+          "policy_training_time",
+          "checkpoint_time",
+          "weight_sync_time",
+      ):
+        self.assertGreaterEqual(
+            logger.get_metric("orchestrator", name, "train"), 0.04, msg=name
+        )
+      self.assertTrue(
+          logger.metric_exists(
+              "orchestrator", "exposed_generation_time", "train"
+          )
+      )
+      # No reference model is configured, and the sampler/trainer agreement is
+      # fused into the loss here, so neither standalone pass runs.
+      for name in ("reference_logps_time", "sampler_agreement_time"):
+        self.assertEqual(
+            logger.get_metric("orchestrator", name, "train"), 0.0, msg=name
+        )
+
+    asyncio.run(_run())
+
+  def test_train_stage_times_microbatches_and_logprob_passes(self):
+    def _payload(mb_idx):
+      return datatypes.RLTrainerPayload(
+          prompt_ids=np.array([[mb_idx, mb_idx]], dtype=np.int32),
+          prompt_mask=np.ones((1, 2), dtype=np.float32),
+          completion_ids=np.array([[3, 4]], dtype=np.int32),
+          completion_mask=np.ones((1, 2), dtype=np.float32),
+          advantages=np.ones((1, 2), dtype=np.float32),
+          old_per_token_logps=np.array([[-0.5, -0.2]], dtype=np.float32),
+      )
+
+    class TwoMicrobatchAssembler:
+      num_generations: int = 2
+      mini_batch_size: int = 2
+      groups_per_assembly_batch: int = 1
+      _calls: int = 0
+
+      @property
+      def assembly_batch_size(self) -> int:
+        return self.groups_per_assembly_batch * self.num_generations
+
+      def feed(self, items):
+        del items
+        mb_idx = self._calls
+        self._calls += 1
+        yield batch_assembly.AssembledBatch(
+            payload=_payload(mb_idx),
+            is_final_batch=self._calls == 2,
+            padding_stats=_padding_stats(),
+        )
+
+      def flush(self):
+        return iter(())
+
+      def reset(self):
+        pass
+
+    async def _run():
+      # Each of the two microbatches gets a reference pass, a standalone
+      # sampler/trainer agreement pass (not fused: num_iterations > 1) and a
+      # train step, each taking 0.05 s.
+      self.mock_algo.mini_batch_size = 2
+      self.mock_algo.requires_reference_kl = True
+      self.mock_algo.algo_config.num_iterations = 2
+      program = rl_program.StandardRLProgram(
+          dataset=[],
+          max_steps=1,
+          algo=self.mock_algo,
+          reward_fns=[lambda *_: 1.0],
+          assembler=TwoMicrobatchAssembler(),
+          sync_weights=False,
+      )
+
+      async def _train_step(*args, **kwargs):
+        del args, kwargs
+        await asyncio.sleep(0.05)
+        return {"updated": True}
+
+      async def _per_token_logps(role, *, items, **kwargs):
+        del kwargs
+        await asyncio.sleep(0.05)
+        if role == datatypes.Role.REFERENCE:
+          return np.full((1, 2), -0.1, dtype=np.float32)
+        return datatypes.LogprobsResponse(
+            per_token_logps=np.full_like(
+                items.completion_tokens, -0.5, dtype=np.float32
+            ),
+            model_version=1,
+        )
+
+      self.mock_engine.train_step = mock.AsyncMock(side_effect=_train_step)
+      self.mock_engine.per_token_logps = mock.AsyncMock(
+          side_effect=_per_token_logps
+      )
+      program.engine = self.mock_engine
+      for prompt_idx in range(2):
+        for group_index in range(2):
+          item = datatypes.TrajectoryItem(
+              group_index=group_index,
+              prompt_id=f"prompt_{prompt_idx}",
+              start_step=0,
+              traj=_scored_traj(),
+          )
+          item.payload = self.mock_algo.create_trainer_payloads.return_value[
+              group_index
+          ]
+          await program.scored_q.put(item)
+      await program.scored_q.close()
+
+      await program.train_stage()
+
+      logger = program.metrics_logger
+      self.assertEqual(
+          logger.get_metric("orchestrator", "num_microbatches", "train"), 2.0
+      )
+      # Times accumulate over both microbatches: 2 x 0.05 s per phase.
+      for name in (
+          "policy_training_time",
+          "reference_logps_time",
+          "sampler_agreement_time",
+      ):
+        self.assertGreaterEqual(
+            logger.get_metric("orchestrator", name, "train"), 0.09, msg=name
+        )
+
+    asyncio.run(_run())
+
+  def test_collect_and_log_step_metrics_logs_step_times(self):
+    program = self._create_program()
+
+    program._collect_and_log_step_metrics(
+        all_step_items=[],
+        step_rewards=[],
+        num_rollouts=0,
+        num_microbatches=0,
+        padding_stats=[],
+        packing_time_sec=0.0,
+        step_time_sec=10.0,
+        consumed_policy_version=0,
+        log_step=0,
+        step_times=rl_program._StepTimes(
+            exposed_generation_time=6.0,
+            policy_training_time=2.0,
+            reference_logps_time=0.75,
+            sampler_agreement_time=0.5,
+            checkpoint_time=0.25,
+            weight_sync_time=1.0,
+        ),
+    )
+
+    logger = program.metrics_logger
+    expected = {
+        "exposed_generation_time": 6.0,
+        "policy_training_time": 2.0,
+        "reference_logps_time": 0.75,
+        "sampler_agreement_time": 0.5,
+        "checkpoint_time": 0.25,
+        "weight_sync_time": 1.0,
+    }
+    for name, value in expected.items():
+      self.assertEqual(
+          logger.get_metric("orchestrator", name, "train"), value, msg=name
+      )
+    program.close()
+
+  def test_run_logs_rollout_health_and_slowest_rollouts(self):
+    async def _run():
+      conversation = [
+          {"role": "user", "content": "task"},
+          {"role": "assistant", "content": "ls"},
+          {"role": "user", "content": "a.py"},
+          {"role": "assistant", "content": "done"},
+      ]
+      traj_items = [
+          datatypes.TrajectoryItem(
+              group_index=group_index,
+              prompt_id="prompt_0",
+              start_step=0,
+              traj={
+                  "trajectory_reward": 1.0,
+                  # The collector reports the status by name.
+                  "status": status_name,
+                  "conversation_text": conversation,
+                  "conversation_masks": np.array(
+                      [1, 1, 0, 1, 1, 1], dtype=np.float32
+                  ),
+                  "assistant_turn_lengths": [2, 3],
+              },
+              metadata={
+                  "lineage": _rollout_lineage(
+                      100.0, finish_s, worker_id=f"rollout-{group_index}"
+                  )
+              },
+          )
+          for group_index, (status_name, finish_s) in enumerate(
+              [("SUCCEEDED", 130.0), ("MAX_CONTEXT_LIMIT_REACHED", 400.0)]
+          )
+      ]
+      _set_mock_poll_batches(self.mock_engine, traj_items, [])
+      program = self._create_program(dataset=["prompt_0"], reward_fns=[])
+
+      with self.assertLogs(level="INFO") as logs:
+        await program.run_async(self.mock_engine)
+
+      logger = program.metrics_logger
+      self.assertEqual(
+          logger.get_metric("rollout", "status/succeeded_frac", "train"), 0.5
+      )
+      self.assertEqual(
+          logger.get_metric(
+              "rollout", "status/max_context_limit_reached_frac", "train"
+          ),
+          0.5,
+      )
+      self.assertEqual(
+          logger.get_metric("rollout", "num_turns_mean", "train"), 2.0
+      )
+      self.assertEqual(
+          logger.get_metric("rollout", "turn_length/max", "train"), 3.0
+      )
+      self.assertEqual(
+          logger.get_metric("rollout", "duration_sec/max", "train"), 300.0
+      )
+      self.assertEqual(
+          logger.get_metric("rollout", "batch_wall_sec", "train"), 300.0
+      )
+      self.assertTrue(
+          any(
+              "[rollout] step=0 slowest 2 of 2: traj_prompt_0_g1 dur=300.0s"
+              " status=MAX_CONTEXT_LIMIT_REACHED turns=2 max_turn_length=3"
+              " worker=rollout-1 | traj_prompt_0_g0 dur=30.0s"
+              in line
+              for line in logs.output
+          ),
+          msg=logs.output,
       )
 
     asyncio.run(_run())
@@ -5320,6 +5623,164 @@ class GenerationMetricsLoggingTest(absltest.TestCase):
     )
 
 
+def _health_item(
+    group_index=0,
+    *,
+    status=datatypes.TrajectoryStatus.SUCCEEDED,
+    num_turns=None,
+    turn_lengths=None,
+    window=None,
+    worker_id="rollout-0",
+):
+  """A scored rollout carrying what the rollout health metrics read."""
+  traj = {"trajectory_reward": 1.0, "status": status}
+  if num_turns is not None:
+    traj["conversation_text"] = [{"role": "user", "content": "task"}] + [
+        {"role": "assistant", "content": "act"},
+        {"role": "user", "content": "observation"},
+    ] * num_turns
+  if turn_lengths is not None:
+    traj["assistant_turn_lengths"] = list(turn_lengths)
+  metadata = {}
+  if window is not None:
+    metadata["lineage"] = _rollout_lineage(*window, worker_id=worker_id)
+  return datatypes.TrajectoryItem(
+      prompt_id="p0", group_index=group_index, traj=traj, metadata=metadata
+  )
+
+
+class RolloutHealthMetricsTest(absltest.TestCase):
+  """Covers `_rollout_health_metrics`, the per-step rollout health view."""
+
+  def test_reports_every_status_every_step(self):
+    items = [_health_item(i) for i in range(3)]
+    items.append(
+        _health_item(
+            3, status=datatypes.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED
+        )
+    )
+
+    metrics = rl_program._rollout_health_metrics(items)
+
+    self.assertEqual(metrics["rollout/status/succeeded_frac"], 0.75)
+    self.assertEqual(
+        metrics["rollout/status/max_context_limit_reached_frac"], 0.25
+    )
+    # Statuses that did not occur still report 0, so series stay continuous.
+    self.assertEqual(metrics["rollout/status/timeout_frac"], 0.0)
+    self.assertLen(
+        [k for k in metrics if k.startswith("rollout/status/")],
+        len(datatypes.TrajectoryStatus),
+    )
+
+  def test_rollout_without_status_raises(self):
+    # `critique_stage` stamps every scored rollout's status, so a missing one
+    # is a broken contract rather than an unknown.
+    no_status = _health_item(0)
+    del no_status.traj["status"]
+
+    with self.assertRaises(KeyError):
+      rl_program._rollout_health_metrics([no_status])
+
+  def test_counts_assistant_turns_from_the_conversation(self):
+    metrics = rl_program._rollout_health_metrics([
+        _health_item(0, num_turns=2),
+        _health_item(1, num_turns=5),
+        # No conversation: its turn count is unknown, not zero.
+        _health_item(2),
+    ])
+
+    self.assertEqual(metrics["rollout/num_turns_mean"], 3.5)
+    self.assertEqual(metrics["rollout/num_turns_max"], 5.0)
+
+  def test_pools_turn_lengths_across_rollouts(self):
+    metrics = rl_program._rollout_health_metrics([
+        _health_item(0, turn_lengths=[10, 30]),
+        _health_item(1, turn_lengths=[20]),
+        _health_item(2, turn_lengths=[]),
+    ])
+
+    self.assertEqual(metrics["rollout/turn_length/mean"], 20.0)
+    self.assertEqual(metrics["rollout/turn_length/p50"], 20.0)
+    self.assertAlmostEqual(metrics["rollout/turn_length/p99"], 29.8)
+    self.assertEqual(metrics["rollout/turn_length/max"], 30.0)
+
+  def test_durations_come_from_lineage(self):
+    # Durations are 10, 20, 30 and 40 s; the batch runs from the first
+    # dispatch (t=100) to the last finish (t=150).
+    metrics = rl_program._rollout_health_metrics([
+        _health_item(0, window=(100.0, 110.0)),
+        _health_item(1, window=(100.0, 120.0)),
+        _health_item(2, window=(105.0, 135.0)),
+        _health_item(3, window=(110.0, 150.0)),
+        # No lineage: left out rather than counted as instant.
+        _health_item(4),
+    ])
+
+    self.assertEqual(metrics["rollout/duration_sec/p50"], 25.0)
+    self.assertAlmostEqual(metrics["rollout/duration_sec/p90"], 37.0)
+    self.assertAlmostEqual(metrics["rollout/duration_sec/p99"], 39.7)
+    self.assertEqual(metrics["rollout/duration_sec/max"], 40.0)
+    self.assertEqual(metrics["rollout/tail_sec"], 15.0)
+    self.assertEqual(metrics["rollout/batch_wall_sec"], 50.0)
+
+  def test_lineage_without_a_finish_event_is_skipped(self):
+    item = _health_item(0, window=(100.0, 110.0))
+    item.metadata["lineage"].events.pop()
+
+    metrics = rl_program._rollout_health_metrics([item])
+
+    self.assertNotIn("rollout/duration_sec/max", metrics)
+
+  def test_omits_families_without_inputs(self):
+    metrics = rl_program._rollout_health_metrics([_health_item(0)])
+
+    self.assertIn("rollout/status/succeeded_frac", metrics)
+    self.assertNotIn("rollout/num_turns_mean", metrics)
+    self.assertNotIn("rollout/turn_length/max", metrics)
+    self.assertNotIn("rollout/duration_sec/max", metrics)
+    self.assertNotIn("rollout/batch_wall_sec", metrics)
+    self.assertEmpty(rl_program._rollout_health_metrics([]))
+
+
+class SlowestRolloutsSummaryTest(absltest.TestCase):
+  """Covers `_slowest_rollouts_summary`, the per-step slowest-rollouts log."""
+
+  def test_lists_the_slowest_rollouts_first(self):
+    items = [
+        _health_item(
+            0,
+            window=(0.0, 10.0),
+            num_turns=3,
+            turn_lengths=[5, 6, 7],
+            worker_id="w0",
+        ),
+        _health_item(
+            1,
+            status=datatypes.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED,
+            window=(0.0, 300.0),
+            num_turns=1,
+            turn_lengths=[57344],
+            worker_id="w1",
+        ),
+        _health_item(2, window=(0.0, 50.0), worker_id="w2"),
+    ]
+
+    summary = rl_program._slowest_rollouts_summary(items, k=2)
+
+    self.assertEqual(
+        summary,
+        "slowest 2 of 3: traj_p0_g1 dur=300.0s"
+        " status=MAX_CONTEXT_LIMIT_REACHED turns=1 max_turn_length=57344"
+        " worker=w1 | traj_p0_g2 dur=50.0s status=SUCCEEDED worker=w2",
+    )
+
+  def test_returns_none_without_lineage(self):
+    self.assertIsNone(
+        rl_program._slowest_rollouts_summary([_health_item(0)], k=3)
+    )
+
+
 class EfficiencyMetricsLoggingTest(absltest.TestCase):
   """Covers `efficiency/padding/*` and `efficiency/packing/*` step metrics."""
 
@@ -5692,7 +6153,7 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
         group_index=0,
         start_step=0,
         policy_version=policy_version,
-        traj={"trajectory_reward": reward},
+        traj=_scored_traj(reward),
         metadata={"batch_idx": batch_idx},
     )
     item.payload = payload  # pyrefly: ignore[missing-attribute]
