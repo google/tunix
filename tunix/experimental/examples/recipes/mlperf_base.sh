@@ -17,7 +17,7 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ==============================================================================
 # Container Image, User Identity & WandB
 # ==============================================================================
-export TUNIX_IMAGE="${TUNIX_IMAGE:-gcr.io/cloud-tpu-multipod-dev/tsbao_google_com/trellis-35b@sha256:f85f487684d4e1086028e9277e4ff813df33106598a7cf20113c2a559234a10d}"
+export TUNIX_IMAGE="${TUNIX_IMAGE:-gcr.io/cloud-tpu-multipod-dev/tsbao_google_com/trellis-35b@sha256:f39994aa832c3fce23a56de9b9860fee46771e89ffe574e5ccb9c0723c9f932d}"
 export JOB_PREFIX="${JOB_PREFIX:-${USER}}"
 export WANDB_API_KEY="${WANDB_API_KEY:-}"
 export ORCHESTRATOR_PORT="${ORCHESTRATOR_PORT:-20000}"
