@@ -27,7 +27,7 @@ potentially move to a common library.
 import collections
 from collections.abc import Mapping, Sequence
 import dataclasses
-from typing import Any, Generic, NamedTuple, Protocol, TypeVar
+from typing import Any, Generic, NamedTuple, Protocol, TypeVar, runtime_checkable
 from absl import logging
 import numpy as np
 from tunix.experimental.common import datatypes
@@ -199,6 +199,7 @@ class BatchConfig:
   """
 
   pad_id: int = 0
+  eos_id: int | None = None
   max_prompt_length: int | None = None
   max_response_length: int | None = None
   max_seq_token_per_tpu: int | None = None
@@ -216,6 +217,7 @@ def _extract_trajectory_id(item: Any) -> str:
   return str(metadata.get("traj_id", ""))
 
 
+@runtime_checkable
 class BatchAssembler(Generic[T], Protocol):
   """Universal batch assembly protocol for microbatch packing.
 
@@ -226,6 +228,8 @@ class BatchAssembler(Generic[T], Protocol):
 
   num_generations: int
   mini_batch_size: int
+  pad_id: int
+  eos_id: int
 
   @property
   def rollouts_per_optimizer_update(self) -> int:
@@ -243,6 +247,21 @@ class BatchAssembler(Generic[T], Protocol):
       self,
   ) -> list[AssembledBatch]:
     """Drains remaining buffered items, padding to the required static tensor shape."""
+    ...
+
+  def build_dummy_payload(
+      self,
+      *,
+      include_old_logps: bool = False,
+      include_ref_logps: bool = False,
+      include_returns: bool = False,
+      include_old_values: bool = False,
+      include_sampler_is_weights: bool = False,
+      include_rollout_logps: bool = False,
+      include_overlong: bool = False,
+      routed_experts_shape: tuple[int, int] | None = None,
+  ) -> datatypes.RLTrainerPayload:
+    """Builds a synthetic microbatch payload with the assembler's static shapes."""
     ...
 
   # TODO (tunix-dev): we should not allow `start_batch_index` to be None once failure recovery logic is implemented.
@@ -605,6 +624,7 @@ class SequencePackedBatchAssembler:
       mini_batch_size: int,
       max_packed_len: int = 8192,
       pad_id: int = 0,
+      eos_id: int | None = None,
       max_segments_per_packed_row: int | None = None,
       segment_align_multiple: int = packing.DEFAULT_SEGMENT_ALIGN_MULTIPLE,
       start_batch_index: int = 0,
@@ -617,6 +637,7 @@ class SequencePackedBatchAssembler:
       mini_batch_size: Number of prompt groups per model update.
       max_packed_len: Maximum packed sequence length per row.
       pad_id: Token ID used for padding.
+      eos_id: Token ID used for EOS. Defaults to `pad_id`.
       max_segments_per_packed_row: Upper bound on the number of real segments
         that may be packed into a single row.
       segment_align_multiple: Token boundary alignment multiple for the start of
@@ -649,6 +670,7 @@ class SequencePackedBatchAssembler:
     self.batch_size = batch_size
     self.max_packed_len = max_packed_len
     self.pad_id = pad_id
+    self.eos_id = pad_id if eos_id is None else eos_id
     self.num_generations = num_generations
     self.mini_batch_size = mini_batch_size
     self.max_segments_per_packed_row = max_segments_per_packed_row
@@ -666,6 +688,54 @@ class SequencePackedBatchAssembler:
   def rollouts_per_optimizer_update(self) -> int:
     """Total number of rollouts expected per optimizer update."""
     return self.mini_batch_size * self.num_generations
+
+  def build_dummy_payload(
+      self,
+      *,
+      include_old_logps: bool = False,
+      include_ref_logps: bool = False,
+      include_returns: bool = False,
+      include_old_values: bool = False,
+      include_sampler_is_weights: bool = False,
+      include_rollout_logps: bool = False,
+      include_overlong: bool = False,
+      routed_experts_shape: tuple[int, int] | None = None,
+  ) -> datatypes.RLTrainerPayload:
+    """Builds a synthetic microbatch payload with the exact packed static shapes."""
+    max_segments = packing.effective_max_segments(
+        self.max_packed_len, self.max_segments_per_packed_row
+    )
+    shape = (self.batch_size, self.max_packed_len)
+    zeros_f32 = lambda: np.zeros(shape, dtype=np.float32)
+    routed_experts = None
+    if routed_experts_shape is not None:
+      num_layers, top_k = routed_experts_shape
+      routed_experts = np.full(
+          (self.batch_size, self.max_packed_len, num_layers, top_k),
+          datatypes.UNSET_ROUTED_EXPERT,
+          dtype=np.int16,
+      )
+    return datatypes.RLTrainerPayload(
+        prompt_ids=np.zeros((self.batch_size, 0), dtype=np.int32),
+        prompt_mask=np.zeros((self.batch_size, 0), dtype=np.float32),
+        completion_ids=np.full(shape, self.pad_id, dtype=np.int32),
+        completion_mask=zeros_f32(),
+        advantages=zeros_f32(),
+        segment_ids=np.zeros(shape, dtype=np.int32),
+        segment_positions=np.zeros(shape, dtype=np.int32),
+        num_segments=max_segments + 1,
+        old_per_token_logps=zeros_f32() if include_old_logps else None,
+        ref_per_token_logps=zeros_f32() if include_ref_logps else None,
+        returns=zeros_f32() if include_returns else None,
+        old_values=zeros_f32() if include_old_values else None,
+        sampler_is_weights=zeros_f32() if include_sampler_is_weights else None,
+        rollout_per_token_logps=(
+            zeros_f32() if include_rollout_logps else None
+        ),
+        overlong=zeros_f32() if include_overlong else None,
+        routed_experts=routed_experts,
+        metadata={},
+    )
 
   def _emit_one_chunk(
       self, *, max_segments: int, drain_all: bool
@@ -833,6 +903,7 @@ class PaddedBatchAssembler:
       max_prompt_length: int,
       max_response_length: int,
       pad_id: int,
+      eos_id: int | None = None,
       num_generations: int,
       mini_batch_size: int,
       start_batch_index: int = 0,
@@ -845,6 +916,7 @@ class PaddedBatchAssembler:
       max_prompt_length: Maximum padded prompt sequence length.
       max_response_length: Maximum padded response sequence length.
       pad_id: Token ID used for padding prompts and completions.
+      eos_id: Token ID used for EOS. Defaults to `pad_id`.
       num_generations: Number of rollout generations per prompt group (G).
       mini_batch_size: Number of prompt groups per optimizer update.
       start_batch_index: Initial microbatch index offset for tracking IDs.
@@ -869,6 +941,7 @@ class PaddedBatchAssembler:
     self.max_prompt_length = max_prompt_length
     self.max_response_length = max_response_length
     self.pad_id = pad_id
+    self.eos_id = pad_id if eos_id is None else eos_id
     self.num_generations = num_generations
     self.mini_batch_size = mini_batch_size
     self._batch_counter = start_batch_index
@@ -886,6 +959,56 @@ class PaddedBatchAssembler:
   @property
   def max_seq_len(self) -> int:
     return self.max_prompt_length + self.max_response_length
+
+  def build_dummy_payload(
+      self,
+      *,
+      include_old_logps: bool = False,
+      include_ref_logps: bool = False,
+      include_returns: bool = False,
+      include_old_values: bool = False,
+      include_sampler_is_weights: bool = False,
+      include_rollout_logps: bool = False,
+      include_overlong: bool = False,
+      routed_experts_shape: tuple[int, int] | None = None,
+  ) -> datatypes.RLTrainerPayload:
+    """Builds a synthetic microbatch payload with the exact padded static shapes."""
+    p_shape = (self.batch_size, self.max_prompt_length)
+    c_shape = (self.batch_size, self.max_response_length)
+    zeros_c = lambda: np.zeros(c_shape, dtype=np.float32)
+    routed_experts = None
+    if routed_experts_shape is not None:
+      num_layers, top_k = routed_experts_shape
+      routed_experts = np.full(
+          (
+              self.batch_size,
+              self.max_prompt_length + self.max_response_length,
+              num_layers,
+              top_k,
+          ),
+          datatypes.UNSET_ROUTED_EXPERT,
+          dtype=np.int16,
+      )
+    return datatypes.RLTrainerPayload(
+        prompt_ids=np.full(p_shape, self.pad_id, dtype=np.int32),
+        prompt_mask=np.zeros(p_shape, dtype=np.float32),
+        completion_ids=np.full(c_shape, self.pad_id, dtype=np.int32),
+        completion_mask=zeros_c(),
+        advantages=zeros_c(),
+        old_per_token_logps=zeros_c() if include_old_logps else None,
+        ref_per_token_logps=zeros_c() if include_ref_logps else None,
+        returns=zeros_c() if include_returns else None,
+        old_values=zeros_c() if include_old_values else None,
+        sampler_is_weights=zeros_c() if include_sampler_is_weights else None,
+        rollout_per_token_logps=zeros_c() if include_rollout_logps else None,
+        overlong=(
+            np.zeros(self.batch_size, dtype=np.float32)
+            if include_overlong
+            else None
+        ),
+        routed_experts=routed_experts,
+        metadata={},
+    )
 
   def _assemble(
       self,
@@ -1315,6 +1438,7 @@ def create_batch_assembler(
         mini_batch_size=mini_batch_size,
         max_packed_len=batch_config.max_seq_token_per_tpu,
         pad_id=batch_config.pad_id,
+        eos_id=batch_config.eos_id,
         max_segments_per_packed_row=batch_config.max_segments_per_packed_row,
         segment_align_multiple=batch_config.segment_align_multiple,
     )
@@ -1330,6 +1454,7 @@ def create_batch_assembler(
         max_prompt_length=batch_config.max_prompt_length,
         max_response_length=batch_config.max_response_length,
         pad_id=batch_config.pad_id,
+        eos_id=batch_config.eos_id,
         num_generations=num_generations,
         mini_batch_size=mini_batch_size,
     )
@@ -1339,6 +1464,73 @@ def create_batch_assembler(
       num_generations=num_generations,
       mini_batch_size=mini_batch_size,
       pad_id=batch_config.pad_id,
+      eos_id=batch_config.eos_id,
       max_segments_per_packed_row=batch_config.max_segments_per_packed_row,
       segment_align_multiple=batch_config.segment_align_multiple,
   )
+
+
+def build_dummy_payload_for_algo(
+    algo: Any,
+    assembler: BatchAssembler[Any] | None,
+    *,
+    include_rollout_logps: bool | None = None,
+    include_overlong: bool | None = None,
+    routed_experts_shape: tuple[int, int] | None = None,
+    return_routed_experts: bool = False,
+) -> datatypes.RLTrainerPayload | None:
+  """Builds a representative dummy microbatch payload for `algo` and `assembler`."""
+  if not isinstance(assembler, BatchAssembler):
+    return None
+  algo_config = getattr(algo, "algo_config", None)
+  use_rollout_logps = bool(
+      getattr(
+          algo,
+          "use_rollout_logps",
+          getattr(algo_config, "use_rollout_logps", False),
+      )
+  )
+  include_old_logps = bool(
+      getattr(algo, "requires_old_logprobs", False) or use_rollout_logps
+  )
+  include_ref_logps = bool(getattr(algo, "requires_reference_kl", False))
+  has_critic = bool(getattr(algo, "has_critic", False))
+  include_sampler_is_weights = bool(
+      include_old_logps
+      and use_rollout_logps
+      and getattr(algo_config, "sampler_is", None) is not None
+  )
+  if include_rollout_logps is None:
+    include_rollout_logps = not has_critic and bool(
+        use_rollout_logps
+        or getattr(algo_config, "truncated_importance_sampling_type", None)
+        is not None
+        or getattr(algo_config, "seq_logprob_error_threshold", None)
+        is not None
+        or getattr(algo_config, "sampler_is_length_buckets", None) is not None
+    )
+  if include_overlong is None:
+    include_overlong = not has_critic or bool(
+        getattr(algo_config, "overlong_loss_masking", False)
+    )
+  payload = assembler.build_dummy_payload(
+      include_old_logps=include_old_logps,
+      include_ref_logps=include_ref_logps,
+      include_returns=has_critic,
+      include_old_values=has_critic,
+      include_sampler_is_weights=include_sampler_is_weights,
+      include_rollout_logps=bool(include_rollout_logps),
+      include_overlong=bool(include_overlong),
+      routed_experts_shape=routed_experts_shape,
+  )
+  if (
+      return_routed_experts
+      and payload is not None
+      and payload.routed_experts is None
+  ):
+    payload = dataclasses.replace(
+        payload,
+        metadata={**payload.metadata, "return_routed_experts": True},
+    )
+  return payload
+

@@ -21,6 +21,7 @@ per-token log-prob scorer run through AbstractTrainer.model_scope.
 
 import contextlib
 from typing import Any
+from unittest import mock
 
 from absl.testing import absltest
 from flax import nnx
@@ -471,6 +472,68 @@ class TrainerWorkerExecutionContextTest(absltest.TestCase):
       self.worker.save_checkpoint(metadata={"step": 1})
 
     self.assertEqual(self.events, ["enter_ctx", "save_failed", "exit_ctx"])
+
+  def test_compile_warms_up_trainer_and_logps_and_is_idempotent(self):
+    self.worker.initialize()
+    compile_calls = []
+
+    def _compile(dummy_data):
+      compile_calls.append(dummy_data)
+
+    self.fake_trainer.compile = _compile
+    self.fake_trainer.config = mock.MagicMock(
+        num_decoder_layers=4,
+        num_experts_per_tok=2,
+    )
+
+    loss_fn = lambda model, train_example: (0.0, {})
+    gen_fn = lambda x: {"train_example": x, "pad_id": 0, "eos_id": 2}
+    self.worker.with_loss_fn(loss_fn, has_aux=True)
+    self.worker.with_gen_model_input_fn(gen_fn)
+
+    dummy_payload = datatypes.RLTrainerPayload(
+        prompt_ids=np.zeros((2, 0), dtype=np.int32),
+        prompt_mask=np.zeros((2, 0), dtype=np.float32),
+        completion_ids=np.ones((2, 8), dtype=np.int32),
+        completion_mask=np.ones((2, 8), dtype=np.float32),
+        advantages=np.zeros((2, 8), dtype=np.float32),
+        old_per_token_logps=np.zeros((2, 8), dtype=np.float32),
+        segment_ids=np.ones((2, 8), dtype=np.int32),
+        segment_positions=np.zeros((2, 8), dtype=np.int32),
+        routed_experts=np.zeros((0,), dtype=np.int16),
+        metadata={"trajectory_ids": ("t1",)},
+    )
+
+    with (
+        mock.patch.dict(
+            "os.environ", {"RETURN_ROUTED_EXPERTS": "true"}, clear=False
+        ),
+        mock.patch.object(
+            rl_common,
+            "compute_per_token_logps",
+            return_value=jnp.zeros((2, 8), dtype=jnp.float32),
+        ) as mock_logps,
+    ):
+      self.events.clear()
+      self.worker.compile(dummy_data=dummy_payload)
+      self.assertLen(compile_calls, 1)
+      compiled_payload = compile_calls[0]
+      self.assertEqual(compiled_payload.metadata, {})
+      self.assertIsNotNone(compiled_payload.routed_experts)
+      self.assertEqual(compiled_payload.routed_experts.shape, (2, 8, 4, 2))
+      self.assertEqual(compiled_payload.routed_experts.dtype, np.int16)
+      mock_logps.assert_called_once()
+      self.assertEqual(
+          mock_logps.call_args.kwargs["routed_experts"].shape, (2, 8, 4, 2)
+      )
+
+      # Re-registering identical loss_fn / gen_model_input_fn and re-calling
+      # compile with the same signature is a no-op.
+      self.worker.with_loss_fn(loss_fn, has_aux=True)
+      self.worker.with_gen_model_input_fn(gen_fn)
+      self.worker.compile(dummy_data=dummy_payload)
+      self.assertLen(compile_calls, 1)
+      mock_logps.assert_called_once()
 
 
 if __name__ == "__main__":
