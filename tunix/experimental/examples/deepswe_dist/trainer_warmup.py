@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import logging
 import dataclasses
-from typing import Any
 
 import numpy as np
 from tunix.experimental.common import datatypes
