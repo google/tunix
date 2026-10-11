@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from unittest import mock
 
 try:
@@ -497,6 +498,271 @@ class MaxTextUtilsTest(absltest.TestCase):
     )
     self.assertIn("per_device_batch_size=0.25", argv)
     self.assertIn("max_target_length=4096", argv)
+
+  def test_pathways_persistence_requires_gs_output_dir_when_saving_enabled(self):
+    with mock.patch.dict("os.environ", {"ENABLE_PATHWAYS_PERSISTENCE": "1"}):
+      with self.assertRaisesRegex(
+          ValueError, "requires a gs:// base_output_directory"
+      ):
+        self._build_config_argv(
+            base_output_directory="artifacts/math_gsm8k_dist/maxtext",
+            checkpointing_options=mock.MagicMock(
+                save_interval_steps=1, max_to_keep=2
+            ),
+        )
+
+  def test_pathways_persistence_with_gs_output_dir_sets_ocdbt_and_zarr3_false(
+      self,
+  ):
+    with mock.patch.dict("os.environ", {"ENABLE_PATHWAYS_PERSISTENCE": "1"}):
+      argv = self._build_config_argv(
+          base_output_directory="gs://bucket/trellis/0921",
+          checkpointing_options=mock.MagicMock(
+              save_interval_steps=1, max_to_keep=2
+          ),
+      )
+    self.assertIn("base_output_directory=gs://bucket/trellis/0921", argv)
+    self.assertIn("checkpoint_storage_use_ocdbt=false", argv)
+    self.assertIn("checkpoint_storage_use_zarr3=false", argv)
+
+  def test_pathways_persistence_allows_local_output_dir_when_save_interval_zero(
+      self,
+  ):
+    with mock.patch.dict(
+        "os.environ",
+        {"ENABLE_PATHWAYS_PERSISTENCE": "1", "CHECKPOINT_ASYNC": "false"},
+    ):
+      argv = self._build_config_argv(
+          base_output_directory="artifacts/math_gsm8k_dist/maxtext",
+          load_parameters_path="gs://bucket/ckpt",
+          checkpointing_options=None,
+      )
+    self.assertIn("checkpoint_storage_use_ocdbt=false", argv)
+    self.assertIn("checkpoint_storage_use_zarr3=false", argv)
+    self.assertIn("async_checkpointing=false", argv)
+
+  def test_checkpoint_abandon_failed_saves_reaches_maxtext(self):
+    with mock.patch.dict(
+        "os.environ", {"CHECKPOINT_ABANDON_FAILED_SAVES": "true"}, clear=False
+    ):
+      argv = self._build_config_argv(base_output_directory="gs://bucket/out")
+    self.assertIn("abandon_failed_checkpoint_saves=true", argv)
+
+  def test_checkpoint_abandon_failed_saves_unset_pins_pre_5494_behaviour(self):
+    # Skipping the variable must keep aborting the run on a failed save even if
+    # MaxText later flips its own default, so the flag is emitted either way.
+    with mock.patch.dict("os.environ", {}, clear=False):
+      os.environ.pop("CHECKPOINT_ABANDON_FAILED_SAVES", None)
+      argv = self._build_config_argv(base_output_directory="gs://bucket/out")
+    self.assertIn("abandon_failed_checkpoint_saves=false", argv)
+
+  def test_pathways_checkpointing_impl_defaults_to_persistence(self):
+    with mock.patch.dict(
+        "os.environ", {"ENABLE_PATHWAYS_PERSISTENCE": "1"}, clear=False
+    ):
+      os.environ.pop("PATHWAYS_CHECKPOINTING_IMPL", None)
+      argv = self._build_config_argv(
+          base_output_directory="gs://bucket/out",
+          checkpointing_options=mock.MagicMock(
+              save_interval_steps=1, max_to_keep=2
+          ),
+      )
+    self.assertIn("pathways_checkpointing_impl=persistence", argv)
+
+  def test_colocated_python_requires_sidecar_image(self):
+    """Requesting colocated with no sidecar is exactly the silent NO_DISPATCHER OOM."""
+    with mock.patch.dict(
+        "os.environ",
+        {
+            "ENABLE_PATHWAYS_PERSISTENCE": "1",
+            "PATHWAYS_CHECKPOINTING_IMPL": "colocated_python",
+        },
+        clear=False,
+    ):
+      os.environ.pop("COLOCATED_PYTHON_SIDECAR_IMAGE", None)
+      with self.assertRaisesRegex(
+          ValueError, r"requires COLOCATED_PYTHON_SIDECAR_IMAGE"
+      ):
+        self._build_config_argv(
+            base_output_directory="gs://bucket/out",
+            checkpointing_options=mock.MagicMock(
+                save_interval_steps=1, max_to_keep=2
+            ),
+        )
+
+  def test_colocated_python_emits_impl_and_keeps_layout_identical(self):
+    with mock.patch.dict(
+        "os.environ",
+        {
+            "ENABLE_PATHWAYS_PERSISTENCE": "1",
+            "PATHWAYS_CHECKPOINTING_IMPL": "colocated_python",
+            "COLOCATED_PYTHON_SIDECAR_IMAGE": (
+                "us-docker.pkg.dev/proj/repo/sidecar:tag"
+            ),
+        },
+        clear=False,
+    ):
+      os.environ.pop("CKPT_USE_OCDBT", None)
+      argv = self._build_config_argv(
+          base_output_directory="gs://bucket/out",
+          checkpointing_options=mock.MagicMock(
+              save_interval_steps=1, max_to_keep=2
+          ),
+      )
+    self.assertIn("pathways_checkpointing_impl=colocated_python", argv)
+    # With CKPT_USE_OCDBT unset, both modes default to plain Zarr v2 so
+    # cross-mode restore stays safe.
+    self.assertIn("checkpoint_storage_use_ocdbt=false", argv)
+    self.assertIn("checkpoint_storage_use_zarr3=false", argv)
+
+  def test_unknown_pathways_checkpointing_impl_raises(self):
+    with mock.patch.dict(
+        "os.environ",
+        {
+            "ENABLE_PATHWAYS_PERSISTENCE": "1",
+            "PATHWAYS_CHECKPOINTING_IMPL": "remote_python",
+        },
+        clear=False,
+    ):
+      with self.assertRaisesRegex(
+          ValueError, r"PATHWAYS_CHECKPOINTING_IMPL='remote_python'"
+      ):
+        self._build_config_argv(
+            base_output_directory="gs://bucket/out",
+            checkpointing_options=mock.MagicMock(
+                save_interval_steps=1, max_to_keep=2
+            ),
+        )
+
+  def test_impl_not_emitted_without_pathways_persistence(self):
+    """The selector is meaningless unless Pathways checkpointing is on."""
+    with mock.patch.dict(
+        "os.environ",
+        {"PATHWAYS_CHECKPOINTING_IMPL": "colocated_python"},
+        clear=False,
+    ):
+      os.environ.pop("ENABLE_PATHWAYS_PERSISTENCE", None)
+      argv = self._build_config_argv(
+          base_output_directory="gs://bucket/out",
+          checkpointing_options=mock.MagicMock(
+              save_interval_steps=1, max_to_keep=2
+          ),
+      )
+    self.assertFalse(
+        any(a.startswith("pathways_checkpointing_impl=") for a in argv)
+    )
+
+  def test_pathways_ocdbt_selection(self):
+    """CKPT_USE_OCDBT only enables OCDBT under colocated_python."""
+    ckpt_opts = mock.MagicMock(save_interval_steps=1, max_to_keep=2)
+    colocated_env = {
+        "ENABLE_PATHWAYS_PERSISTENCE": "1",
+        "PATHWAYS_CHECKPOINTING_IMPL": "colocated_python",
+        "COLOCATED_PYTHON_SIDECAR_IMAGE": "sidecar:tag",
+    }
+
+    # colocated_python + CKPT_USE_OCDBT=1 -> OCDBT on, zarr3 off.
+    with mock.patch.dict(
+        "os.environ", {**colocated_env, "CKPT_USE_OCDBT": "1"}, clear=False
+    ):
+      argv = self._build_config_argv(
+          base_output_directory="gs://bucket/out", checkpointing_options=ckpt_opts
+      )
+    self.assertIn("checkpoint_storage_use_ocdbt=true", argv)
+    self.assertIn("checkpoint_storage_use_zarr3=false", argv)
+    self.assertNotIn("checkpoint_storage_use_ocdbt=false", argv)
+
+    # persistence + CKPT_USE_OCDBT=1 -> ignored (persistence rejects OCDBT).
+    with mock.patch.dict(
+        "os.environ",
+        {
+            "ENABLE_PATHWAYS_PERSISTENCE": "1",
+            "PATHWAYS_CHECKPOINTING_IMPL": "persistence",
+            "CKPT_USE_OCDBT": "1",
+        },
+        clear=False,
+    ):
+      argv = self._build_config_argv(
+          base_output_directory="gs://bucket/out", checkpointing_options=ckpt_opts
+      )
+    self.assertIn("checkpoint_storage_use_ocdbt=false", argv)
+    self.assertNotIn("checkpoint_storage_use_ocdbt=true", argv)
+
+    # MAXTEXT_EXTRA_FLAGS is appended last, so it wins over the derived value
+    # (pyconfig parses argv last-wins).
+    with mock.patch.dict(
+        "os.environ",
+        {
+            **colocated_env,
+            "MAXTEXT_EXTRA_FLAGS": "checkpoint_storage_use_ocdbt=false",
+            "CKPT_USE_OCDBT": "1",
+        },
+        clear=False,
+    ):
+      argv = self._build_config_argv(
+          base_output_directory="gs://bucket/out", checkpointing_options=ckpt_opts
+      )
+    ocdbt_entries = [
+        a for a in argv if a.startswith("checkpoint_storage_use_ocdbt=")
+    ]
+    self.assertEqual(
+        ocdbt_entries,
+        [
+            "checkpoint_storage_use_ocdbt=true",
+            "checkpoint_storage_use_ocdbt=false",
+        ],
+    )
+
+  def test_old_maxtext_without_impl_key(self):
+    ckpt_opts = mock.MagicMock(save_interval_steps=1, max_to_keep=2)
+    mock_pyconfig = mock.MagicMock()
+    mock_pyconfig.__file__ = "/fake/maxtext/configs/pyconfig.py"
+
+    def build(env):
+      with (
+          mock.patch.dict("os.environ", env, clear=False),
+          mock.patch.object(
+              maxtext_utils,
+              "maxtext_modules",
+              return_value=(mock_pyconfig, mock.MagicMock(), mock.MagicMock()),
+          ),
+          mock.patch("os.path.exists", return_value=True),
+      ):
+        for key in ("PATHWAYS_CHECKPOINTING_IMPL", "CKPT_USE_OCDBT"):
+          if key not in env:
+            os.environ.pop(key, None)
+        return maxtext_utils.build_maxtext_config(
+            model_name="gemma2-9b",
+            base_output_directory="gs://bucket/out",
+            checkpointing_options=ckpt_opts,
+        )
+
+    # persistence: retried without the unknown key.
+    mock_pyconfig.initialize.side_effect = [
+        ValueError("Unknown parameter pathways_checkpointing_impl"),
+        mock.sentinel.config,
+    ]
+    self.assertIs(
+        build({"ENABLE_PATHWAYS_PERSISTENCE": "1"}), mock.sentinel.config
+    )
+    retry_argv = mock_pyconfig.initialize.call_args[0][0]
+    self.assertFalse(
+        any(a.startswith("pathways_checkpointing_impl=") for a in retry_argv)
+    )
+
+    # colocated_python: fails loudly instead of silently falling back.
+    mock_pyconfig.initialize.side_effect = ValueError(
+        "Unknown parameter pathways_checkpointing_impl"
+    )
+    with self.assertRaisesRegex(
+        ValueError,
+        "PATHWAYS_CHECKPOINTING_IMPL='colocated_python' was requested",
+    ):
+      build({
+          "ENABLE_PATHWAYS_PERSISTENCE": "1",
+          "PATHWAYS_CHECKPOINTING_IMPL": "colocated_python",
+          "COLOCATED_PYTHON_SIDECAR_IMAGE": "sidecar:tag",
+      })
 
 
 if __name__ == "__main__":

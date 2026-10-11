@@ -21,6 +21,12 @@ import logging
 import os
 from typing import Any
 
+# Mirrors maxtext `pathways_checkpointing_impl`. Duplicated as literals rather than
+# imported: this module must stay importable without maxtext installed.
+_PERSISTENCE_IMPL = "persistence"
+_COLOCATED_PYTHON_IMPL = "colocated_python"
+_PATHWAYS_CHECKPOINTING_IMPLS = (_PERSISTENCE_IMPL, _COLOCATED_PYTHON_IMPL)
+
 
 @dataclasses.dataclass(frozen=True)
 class ProfilerOptions:
@@ -486,14 +492,79 @@ def build_maxtext_config(
   # The persistence handler rejects the OCDBT/zarr3 layout MaxText writes by
   # default (see maxtext/common/checkpoint_context.py), so both must be off
   if os.environ.get("ENABLE_PATHWAYS_PERSISTENCE", "") == "1":
+    if save_interval_steps > 0 and not output_dir.startswith("gs://"):
+      raise ValueError(
+          "ENABLE_PATHWAYS_PERSISTENCE=1 with save_interval_steps > 0 "
+          "requires a gs:// base_output_directory so all pathways-worker pods "
+          f"write to shared GCS storage; got {output_dir!r}. "
+          "Set MAXTEXT_OUTPUT_DIR=gs://..."
+      )
+
+    impl = (
+        os.environ.get("PATHWAYS_CHECKPOINTING_IMPL", "").strip()
+        or _PERSISTENCE_IMPL
+    )
+    if impl not in _PATHWAYS_CHECKPOINTING_IMPLS:
+      raise ValueError(
+          f"PATHWAYS_CHECKPOINTING_IMPL={impl!r} is not recognised; "
+          f"expected one of {_PATHWAYS_CHECKPOINTING_IMPLS}."
+      )
+    if (
+        impl == _COLOCATED_PYTHON_IMPL
+        and not os.environ.get("COLOCATED_PYTHON_SIDECAR_IMAGE", "").strip()
+    ):
+      raise ValueError(
+          "PATHWAYS_CHECKPOINTING_IMPL=colocated_python requires "
+          "COLOCATED_PYTHON_SIDECAR_IMAGE to be set so the sidecar container is"
+          " added to the pathways-worker pods. Without it Orbax silently falls"
+          " back to controller-side host staging, which OOMs the proxy pod at"
+          " 397B scale."
+      )
+    argv.append(f"pathways_checkpointing_impl={impl}")
+
+    # OCDBT packfile layout: colocated_python can write OCDBT (fewer GCS objects,
+    # no metadata-QPS bursts at scale); persistence rejects it. Default off
+    # (plain Zarr v2) because OCDBT checkpoints are NOT restorable by Pathways
+    # persistence.
+    use_ocdbt = os.environ.get("CKPT_USE_OCDBT", "0").strip().lower() in (
+        "1",
+        "true",
+    )
+    ocdbt_on = impl == _COLOCATED_PYTHON_IMPL and use_ocdbt
+    if use_ocdbt and not ocdbt_on:
+      logging.warning(
+          "CKPT_USE_OCDBT=1 ignored: Pathways persistence (impl=%s) rejects"
+          " OCDBT/zarr3; forcing both off.",
+          impl,
+      )
     logging.info(
-        "ENABLE_PATHWAYS_PERSISTENCE=1; disabling OCDBT/zarr3 so the Pathways "
-        "persistence handler can save directly from the TPU workers."
+        "ENABLE_PATHWAYS_PERSISTENCE=1 (impl=%s, CKPT_USE_OCDBT=%d); %s OCDBT"
+        " packfile layout (zarr3 off).",
+        impl,
+        int(use_ocdbt),
+        "enabling" if ocdbt_on else "disabling",
     )
     argv.extend([
-        "checkpoint_storage_use_ocdbt=false",
+        f"checkpoint_storage_use_ocdbt={str(ocdbt_on).lower()}",
         "checkpoint_storage_use_zarr3=false",
     ])
+
+  _ckpt_async = os.environ.get("CHECKPOINT_ASYNC", "").strip()
+  if _ckpt_async:
+    argv.append(f"async_checkpointing={_ckpt_async}")
+
+  # An async save whose background half outlives async_checkpointing_timeout_secs
+  # (1200 s) raises from the next checkpoint call, which takes the trainer worker
+  # and the run down. `true` logs and drops that save instead; the training state
+  # in memory is intact and the next save proceeds.
+  #
+  # Emitted even when unset, pinned to the pre-AI-Hypercomputer/maxtext#5494
+  # behaviour, so a run that does not ask for abandonment keeps aborting on a
+  # failed save whatever MaxText's own default becomes.
+  _abandon_failed_saves = (
+      os.environ.get("CHECKPOINT_ABANDON_FAILED_SAVES", "").strip() or "false"
+  )
+  argv.append(f"abandon_failed_checkpoint_saves={_abandon_failed_saves}")
 
   _d2h_gb = os.environ.get("CKPT_D2H_CONCURRENT_GB", "").strip()
   if _d2h_gb:
@@ -520,7 +591,26 @@ def build_maxtext_config(
     argv.extend(_pairs)
 
   logging.info("MaxText config argv: %s", argv)
-  return pyconfig.initialize(argv)
+  try:
+    return pyconfig.initialize(argv)
+  except ValueError as e:
+    if "pathways_checkpointing_impl" not in str(e):
+      raise
+    if f"pathways_checkpointing_impl={_COLOCATED_PYTHON_IMPL}" in argv:
+      raise ValueError(
+          "PATHWAYS_CHECKPOINTING_IMPL='colocated_python' was requested, but "
+          "the installed MaxText does not recognize 'pathways_checkpointing_impl'."
+      ) from e
+    argv = [
+        arg
+        for arg in argv
+        if not arg.startswith("pathways_checkpointing_impl=")
+    ]
+    logging.warning(
+        "Installed MaxText does not recognize 'pathways_checkpointing_impl'. "
+        "Retrying initialization without it."
+    )
+    return pyconfig.initialize(argv)
 
 
 def create_maxtext_mesh(maxtext_config: Any) -> Any:
