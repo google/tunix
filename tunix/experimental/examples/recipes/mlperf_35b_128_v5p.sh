@@ -69,7 +69,11 @@ export MAX_CONCURRENCY="${MAX_CONCURRENCY:-1024}"
 # record it in ${METRIC_LOGGER_DIR}/eval_checkpoints.jsonl for
 # mlperf_35b_eval.sh. Keep all of them (max_steps - VAL_START_AT + 1 <= 35).
 export RCP_LOGGING="${RCP_LOGGING:-true}"
-export CHECKPOINT_SAVE_INTERVAL_STEPS="${CHECKPOINT_SAVE_INTERVAL_STEPS:-1}"
+# TEMP(35b-on-main): checkpoint saving is off by default until params-only
+# saves (CHECKPOINT_OPTIMIZER_INTERVAL_STEPS) are ported; without them every
+# step writes fp32 params + optimizer state (~387 GiB). Set
+# CHECKPOINT_SAVE_INTERVAL_STEPS=1 to re-enable per-step saves.
+export CHECKPOINT_SAVE_INTERVAL_STEPS="${CHECKPOINT_SAVE_INTERVAL_STEPS:-0}"
 export CHECKPOINT_MAX_TO_KEEP="${CHECKPOINT_MAX_TO_KEEP:-35}"
 
 # vLLM Rollout Configuration (from paste.googleplex.com/5903655694368768)
