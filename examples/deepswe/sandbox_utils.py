@@ -707,7 +707,7 @@ def teardown_global_fleet() -> None:
           c_ns = (
               getattr(c, "namespace", None)
               or os.getenv("SANDBOX_NAMESPACE")
-              or os.getenv("NAMESPACE", "rl-tunix-swebench")
+              or os.getenv("NAMESPACE", "priority-dev")
           )
           logging.info(
               "[SandboxFleet] Reaping resources for run_id=%s in namespace=%s",
