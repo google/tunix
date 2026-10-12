@@ -3733,6 +3733,128 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_dispatch_and_polling_track_outstanding_prompts(self):
+    async def _run():
+      program = self._create_program(dataset=["p0"])
+      program.engine = self.mock_engine
+      tracked_at_dispatch = []
+
+      def _record_tracked(*args, **kwargs):
+        del args, kwargs
+        tracked_at_dispatch.append(program._outstanding_prompts.oldest())
+
+      self.mock_engine.dispatch_rollouts.side_effect = _record_tracked
+      await program.rollout_dispatch_stage()
+
+      # Tracked before the RPC, so a dispatch that hangs still shows up.
+      self.assertLen(tracked_at_dispatch, 1)
+      self.assertEqual(tracked_at_dispatch[0].prompt_id, "prompt_0")
+      self.assertEqual(tracked_at_dispatch[0].rollouts_left, 2)
+
+      _set_mock_poll_batches(
+          self.mock_engine, _make_trajectory_group(prompt_id="prompt_0")
+      )
+      await program.polling_stage()
+
+      self.assertIsNone(program._outstanding_prompts.oldest())
+      self.assertEqual(program._outstanding_prompts.untracked_returns, 0)
+      program.close()
+
+    asyncio.run(_run())
+
+  def test_waiting_for_a_scored_group_logs_progress(self):
+    async def _run():
+      program = self._create_program()
+      program._outstanding_prompts.dispatched("prompt_0", 2)
+      program._outstanding_prompts.returned("stale_prompt")
+      program._in_flight_rollouts = 2
+
+      async def _deliver_later():
+        await asyncio.sleep(0.1)
+        await program.scored_q.put(self._scored_item(0))
+        await program.scored_q.put(self._scored_item(0))
+
+      deliver = asyncio.create_task(_deliver_later())
+      with mock.patch.object(rl_program, "_PROGRESS_LOG_INTERVAL_SEC", 0.02):
+        with self.assertLogs(level="INFO") as logs:
+          group = await program._wait_for_scored_group(
+              step=3, groups_consumed=0
+          )
+      await deliver
+
+      self.assertLen(group, 2)
+      progress = [line for line in logs.output if "[progress]" in line]
+      self.assertNotEmpty(progress)
+      for field in (
+          "step=3",
+          "groups=0/1",
+          "in_flight=2",
+          "prompts_in_flight=1",
+          "untracked_returns=1",
+          "oldest=prompt_0(age=",
+          ",left=2)",
+      ):
+        self.assertIn(field, progress[0])
+      program.close()
+
+    asyncio.run(_run())
+
+  def test_cancelled_wait_leaves_no_pending_getter(self):
+    async def _run():
+      program = self._create_program()
+      tasks_before = asyncio.all_tasks()
+      wait = asyncio.create_task(
+          program._wait_for_scored_group(step=0, groups_consumed=0)
+      )
+      await asyncio.sleep(0.05)
+      wait.cancel()
+      with self.assertRaises(asyncio.CancelledError):
+        await wait
+      # Let the cancelled getter finish unwinding.
+      await asyncio.sleep(0)
+      self.assertEqual(asyncio.all_tasks(), tasks_before)
+
+      await program.scored_q.put(self._scored_item(0))
+      await program.scored_q.put(self._scored_item(0))
+      # Give an orphaned getter from the cancelled wait the first chance to
+      # take this group.
+      for _ in range(3):
+        await asyncio.sleep(0)
+      group = await asyncio.wait_for(
+          program.scored_q.get_batch(2), timeout=1.0
+      )
+      self.assertLen(group, 2)
+      program.close()
+
+    asyncio.run(_run())
+
+  def test_train_stage_logs_a_summary_line_per_step(self):
+    async def _run():
+      _set_mock_poll_batches(
+          self.mock_engine,
+          _make_trajectory_group(prompt_id="prompt_0"),
+          _make_trajectory_group(prompt_id="prompt_1"),
+          [],
+      )
+      program = self._create_program(
+          dataset=["p0", "p1"],
+          max_steps=2,
+          reward_fns=[],
+          sync_weights=False,
+      )
+
+      with self.assertLogs(level="INFO") as logs:
+        await program.run_async(self.mock_engine)
+
+      summaries = [line for line in logs.output if "[step] step=" in line]
+      self.assertLen(summaries, 2)
+      self.assertIn("rollouts=2 succeeded=2", summaries[0])
+      self.assertIn("steps_left=1", summaries[0])
+      # Nothing is left after the last step, so it carries no ETA.
+      self.assertNotIn("eta=", summaries[1])
+
+    asyncio.run(_run())
+
   def test_extract_scalar_compute_failure_returns_none(self):
     class FailingMetric:
 
@@ -5779,6 +5901,131 @@ class SlowestRolloutsSummaryTest(absltest.TestCase):
     self.assertIsNone(
         rl_program._slowest_rollouts_summary([_health_item(0)], k=3)
     )
+
+
+class OutstandingPromptsTest(absltest.TestCase):
+  """Covers `_OutstandingPrompts`, the in-flight view behind progress logs."""
+
+  def test_oldest_is_the_earliest_prompt_with_rollouts_left(self):
+    prompts = rl_program._OutstandingPrompts()
+    prompts.dispatched("p0", 2)
+    prompts.dispatched("p1", 2)
+
+    prompts.returned("p0")
+    oldest = prompts.oldest()
+    self.assertEqual(oldest.prompt_id, "p0")
+    self.assertEqual(oldest.rollouts_left, 1)
+    self.assertGreaterEqual(oldest.age_s, 0.0)
+
+    prompts.returned("p0")
+    self.assertEqual(prompts.oldest().prompt_id, "p1")
+    self.assertLen(prompts, 1)
+
+  def test_nothing_out_has_no_oldest(self):
+    prompts = rl_program._OutstandingPrompts()
+
+    self.assertIsNone(prompts.oldest())
+    self.assertEmpty(prompts)
+
+  def test_returns_for_unknown_prompts_are_counted_and_warned_about(self):
+    # A late return after a re-dispatch, or a response that lost its prompt id,
+    # must not raise: that would drop the rest of the polled batch.
+    prompts = rl_program._OutstandingPrompts()
+    prompts.dispatched("p0", 1)
+
+    with mock.patch.object(rl_program.logging, "log_first_n") as log_first_n:
+      prompts.returned("")
+
+    self.assertEqual(prompts.untracked_returns, 1)
+    self.assertEqual(prompts.oldest().rollouts_left, 1)
+    log_first_n.assert_called_once()
+    self.assertEqual(log_first_n.call_args.args[0], rl_program.logging.WARNING)
+
+  def test_redispatch_restarts_the_prompt_at_the_back(self):
+    prompts = rl_program._OutstandingPrompts()
+    prompts.dispatched("p0", 1)
+    prompts.dispatched("p1", 1)
+
+    with mock.patch.object(rl_program.logging, "log_first_n") as log_first_n:
+      prompts.dispatched("p0", 2)
+
+    log_first_n.assert_called_once()
+    self.assertEqual(log_first_n.call_args.args[0], rl_program.logging.WARNING)
+    self.assertEqual(prompts.oldest().prompt_id, "p1")
+    prompts.returned("p1")
+    self.assertEqual(prompts.oldest().prompt_id, "p0")
+    self.assertEqual(prompts.oldest().rollouts_left, 2)
+
+
+class StepSummaryTest(absltest.TestCase):
+  """Covers `_step_summary`, the one-line per-step log."""
+
+  def test_summarizes_timing_rollouts_and_eta(self):
+    summary = rl_program._step_summary(
+        step=36,
+        step_time_sec=963.0,
+        step_times=rl_program._StepTimes(
+            exposed_generation_time=900.1,
+            policy_training_time=40.2,
+            checkpoint_time=5.0,
+            weight_sync_time=15.3,
+        ),
+        num_rollouts=256,
+        rollout_health={
+            "rollout/status/succeeded_frac": 0.25,
+            "rollout/status/max_context_limit_reached_frac": 0.5,
+            "rollout/status/timeout_frac": 0.25,
+            "rollout/status/failed_frac": 0.0,
+            "rollout/duration_sec/p50": 199.0,
+            "rollout/duration_sec/max": 963.0,
+            "rollout/num_turns_mean": 27.6,
+            "rollout/num_turns_max": 50.0,
+            "rollout/turn_length/p99": 8000.0,
+            "rollout/turn_length/max": 57344.0,
+        },
+        steps_left=12,
+        mean_step_sec=1000.0,
+    )
+
+    # Statuses are counted, most common first; ties keep enum order.
+    self.assertEqual(
+        summary,
+        "step=36 time=963.0s (wait=900.1s train=40.2s ref=0.0s"
+        " agreement=0.0s ckpt=5.0s sync=15.3s) | rollouts=256"
+        " max_context_limit_reached=128 succeeded=64 timeout=64"
+        " | dur_p50=199.0s dur_max=963.0s | turns_mean=27.6 turns_max=50"
+        " | turn_len_p99=8000 turn_len_max=57344 | eta=3.3h steps_left=12",
+    )
+
+  def test_durations_switch_units_where_rounding_would_print_60(self):
+    for seconds, expected in (
+        (59.4, "59s"),
+        (59.5, "1m"),
+        (3569.0, "59m"),
+        (3570.0, "1.0h"),
+        (12000.0, "3.3h"),
+    ):
+      with self.subTest(seconds=seconds):
+        self.assertEqual(rl_program._format_duration(seconds), expected)
+
+  def test_omits_missing_families_and_eta_without_steps_left(self):
+    for steps_left in (None, 0):
+      with self.subTest(steps_left=steps_left):
+        summary = rl_program._step_summary(
+            step=0,
+            step_time_sec=1.0,
+            step_times=rl_program._StepTimes(),
+            num_rollouts=2,
+            rollout_health={},
+            steps_left=steps_left,
+            mean_step_sec=1.0,
+        )
+
+        self.assertEqual(
+            summary,
+            "step=0 time=1.0s (wait=0.0s train=0.0s ref=0.0s agreement=0.0s"
+            " ckpt=0.0s sync=0.0s) | rollouts=2",
+        )
 
 
 class EfficiencyMetricsLoggingTest(absltest.TestCase):

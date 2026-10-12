@@ -329,6 +329,96 @@ def _slowest_rollouts_summary(
   return f"slowest {len(described)} of {len(timed)}: " + " | ".join(described)
 
 
+# How often the train stage logs progress while it waits for rollouts.
+_PROGRESS_LOG_INTERVAL_SEC = 60.0
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class _OldestOutstanding:
+  """The dispatched prompt that has waited longest for its rollouts."""
+
+  prompt_id: str
+  age_s: float
+  rollouts_left: int
+
+
+class _OutstandingPrompts:
+  """Dispatched prompts whose rollouts have not all come back.
+
+  Entries stay in dispatch order, so the first one is the oldest.
+  """
+
+  def __init__(self) -> None:
+    # Prompt id -> (monotonic dispatch time, rollouts still out).
+    self._entries: dict[str, tuple[float, int]] = {}
+    self._untracked_returns = 0
+
+  def __len__(self) -> int:
+    return len(self._entries)
+
+  @property
+  def untracked_returns(self) -> int:
+    """Returned rollouts whose prompt was not outstanding."""
+    return self._untracked_returns
+
+  def dispatched(self, prompt_id: str, num_rollouts: int) -> None:
+    """Records `num_rollouts` rollouts of `prompt_id` going out now."""
+    if prompt_id in self._entries:
+      # Late returns from the earlier dispatch will count against this one.
+      logging.log_first_n(
+          logging.WARNING,
+          "Prompt %s was dispatched again with %d rollouts of the previous"
+          " dispatch still out.",
+          5,
+          prompt_id,
+          self._entries[prompt_id][1],
+      )
+      # Restart the clock and move the prompt to the back.
+      del self._entries[prompt_id]
+    self._entries[prompt_id] = (time.monotonic(), num_rollouts)
+
+  def returned(self, prompt_id: str) -> None:
+    """Records one rollout of `prompt_id` coming back.
+
+    A rollout of a prompt that is not outstanding (a late return after a
+    re-dispatch, or a response that lost its prompt id) is counted and warned
+    about but never raised on: polling must not drop the rest of its batch over
+    progress bookkeeping.
+
+    Args:
+      prompt_id: The returned rollout's prompt id.
+    """
+    if prompt_id not in self._entries:
+      self._untracked_returns += 1
+      logging.log_first_n(
+          logging.WARNING,
+          "A rollout of prompt %r came back without an outstanding dispatch"
+          " (%d so far); in-flight progress may be off.",
+          5,
+          prompt_id,
+          self._untracked_returns,
+      )
+      return
+    dispatched_at, rollouts_left = self._entries[prompt_id]
+    if rollouts_left <= 1:
+      del self._entries[prompt_id]
+    else:
+      self._entries[prompt_id] = (dispatched_at, rollouts_left - 1)
+
+  def oldest(self) -> _OldestOutstanding | None:
+    """Returns the longest-waiting prompt, or None when nothing is out."""
+    if not self._entries:
+      return None
+    prompt_id, (dispatched_at, rollouts_left) = next(
+        iter(self._entries.items())
+    )
+    return _OldestOutstanding(
+        prompt_id=prompt_id,
+        age_s=time.monotonic() - dispatched_at,
+        rollouts_left=rollouts_left,
+    )
+
+
 def _extract_reward(item: Any) -> float:
   """Extracts the scalar trajectory reward from a TrajectoryItem.
 
@@ -449,6 +539,92 @@ class _StepTimes:
   sampler_agreement_time: float = 0.0
   checkpoint_time: float = 0.0
   weight_sync_time: float = 0.0
+
+
+def _format_duration(seconds: float) -> str:
+  """Formats seconds as a short duration such as `45s`, `12m` or `3.3h`."""
+  # Each unit starts where rounding the smaller one would print 60.
+  if seconds >= 59.5 * 60:
+    return f"{seconds / 3600:.1f}h"
+  if seconds >= 59.5:
+    return f"{seconds / 60:.0f}m"
+  return f"{seconds:.0f}s"
+
+
+def _step_summary(
+    *,
+    step: int,
+    step_time_sec: float,
+    step_times: _StepTimes,
+    num_rollouts: int,
+    rollout_health: Mapping[str, float],
+    steps_left: int | None,
+    mean_step_sec: float,
+) -> str:
+  """Renders the one-line summary logged after each train step.
+
+  Args:
+    step: The step that finished.
+    step_time_sec: Its wall-clock duration.
+    step_times: Its per-phase times.
+    num_rollouts: Rollouts it consumed, the denominator of the
+      `rollout/status/*` fractions.
+    rollout_health: Its `_rollout_health_metrics`.
+    steps_left: Steps still to run, or None without `max_steps`.
+    mean_step_sec: Mean step duration so far in this run, for the ETA. It
+      includes the slower first steps, so early ETAs run high.
+
+  Returns:
+    `|`-separated groups of key=value fields, with rollouts counted per
+    status, most common first. Rollout families without metrics, and the ETA
+    once no steps are left, are omitted.
+  """
+  parts = [
+      f"step={step} time={step_time_sec:.1f}s"
+      f" (wait={step_times.exposed_generation_time:.1f}s"
+      f" train={step_times.policy_training_time:.1f}s"
+      f" ref={step_times.reference_logps_time:.1f}s"
+      f" agreement={step_times.sampler_agreement_time:.1f}s"
+      f" ckpt={step_times.checkpoint_time:.1f}s"
+      f" sync={step_times.weight_sync_time:.1f}s)"
+  ]
+  status_counts: list[tuple[int, str]] = []
+  for status in datatypes.TrajectoryStatus:
+    name = status.name.lower()
+    key = f"rollout/status/{name}_frac"
+    if key in rollout_health:
+      count = round(rollout_health[key] * num_rollouts)
+      if count:
+        status_counts.append((count, name))
+  # Most common first; `list.sort` is stable, so ties keep enum order.
+  status_counts.sort(key=lambda pair: -pair[0])
+  parts.append(
+      " ".join(
+          [f"rollouts={num_rollouts}"]
+          + [f"{name}={count}" for count, name in status_counts]
+      )
+  )
+  if "rollout/duration_sec/max" in rollout_health:
+    parts.append(
+        f"dur_p50={rollout_health['rollout/duration_sec/p50']:.1f}s"
+        f" dur_max={rollout_health['rollout/duration_sec/max']:.1f}s"
+    )
+  if "rollout/num_turns_max" in rollout_health:
+    parts.append(
+        f"turns_mean={rollout_health['rollout/num_turns_mean']:.1f}"
+        f" turns_max={rollout_health['rollout/num_turns_max']:.0f}"
+    )
+  if "rollout/turn_length/max" in rollout_health:
+    parts.append(
+        f"turn_len_p99={rollout_health['rollout/turn_length/p99']:.0f}"
+        f" turn_len_max={rollout_health['rollout/turn_length/max']:.0f}"
+    )
+  if steps_left:
+    parts.append(
+        f"eta={_format_duration(steps_left * mean_step_sec)}"
+        f" steps_left={steps_left}"
+    )
+  return " | ".join(parts)
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -642,6 +818,7 @@ class StandardRLProgram(RLProgram):
     self.on_step_begin = on_step_begin
     self.on_step_end = on_step_end
     self._in_flight_rollouts = 0
+    self._outstanding_prompts = _OutstandingPrompts()
     self._dispatch_done = asyncio.Event()
     self._assembler_lock = threading.Lock()
     self.scored_q: TrajectoryQueueManager | BatchOrderedQueueManager
@@ -798,6 +975,9 @@ class StandardRLProgram(RLProgram):
             self.dispatch_window.next_batch,
         )
         self._in_flight_rollouts += self.num_generations
+        self._outstanding_prompts.dispatched(
+            str(prompt_id), self.num_generations
+        )
         dispatch_kwargs: dict[str, Any] = {
             "num_generations": self.num_generations,
             "policy_version": self.policy_version,
@@ -828,6 +1008,7 @@ class StandardRLProgram(RLProgram):
             # `_in_flight_rollouts` to never reach 0, hanging the EOF cascade.
             self._in_flight_rollouts -= len(completed)
             for item in completed:
+              self._outstanding_prompts.returned(str(item.prompt_id))
               await self.raw_q.put(item)
         except Exception as exc:  # pylint: disable=broad-exception-caught
           logging.warning("Error in polling_stage: %s", exc)
@@ -1149,7 +1330,8 @@ class StandardRLProgram(RLProgram):
       for tag, val in staleness_stats.items():
         self._log_metric(f"rollout/{tag}", val, log_step)
 
-    for tag, val in _rollout_health_metrics(all_step_items).items():
+    rollout_health = _rollout_health_metrics(all_step_items)
+    for tag, val in rollout_health.items():
       self._log_metric(tag, val, log_step)
     slowest = _slowest_rollouts_summary(
         all_step_items, k=_NUM_SLOWEST_ROLLOUTS_LOGGED
@@ -1380,6 +1562,7 @@ class StandardRLProgram(RLProgram):
         "perplexity_val": perplexity_val,
         "filtered_groups_count": filtered_groups_count,
         "filtered_trajectories_count": filtered_trajectories_count,
+        "rollout_health": rollout_health,
     }
 
   async def _apply_sampler_trainer_agreement(
@@ -1505,6 +1688,69 @@ class StandardRLProgram(RLProgram):
       }
       self.trajectory_logger.log_item_async(row)
 
+  async def _wait_for_scored_group(
+      self, step: int, groups_consumed: int
+  ) -> list[datatypes.TrajectoryItem]:
+    """Awaits the next scored group, logging progress while it waits.
+
+    A step held up by slow rollouts would otherwise log nothing for minutes.
+
+    Args:
+      step: The train step being assembled.
+      groups_consumed: Groups the step already holds.
+
+    Returns:
+      The next scored group, or an empty list once the queue is closed.
+    """
+    get_group = asyncio.create_task(
+        self.scored_q.get_batch(self.num_generations)
+    )
+    wait_start = time.monotonic()
+    try:
+      while True:
+        done, _ = await asyncio.wait(
+            {get_group}, timeout=_PROGRESS_LOG_INTERVAL_SEC
+        )
+        if done:
+          return get_group.result()
+        self._log_wait_progress(
+            step, groups_consumed, time.monotonic() - wait_start
+        )
+    finally:
+      # A no-op once the group arrived. If this wait was cancelled, it keeps
+      # the getter from outliving it and taking a later group. A group the
+      # getter took just before the cancel is dropped with it, which only
+      # happens while `run_async` tears the train stage down.
+      get_group.cancel()
+
+  def _log_wait_progress(
+      self, step: int, groups_consumed: int, waited_s: float
+  ) -> None:
+    """Logs what the train stage has been waiting on, and for how long."""
+    oldest = self._outstanding_prompts.oldest()
+    if oldest is None:
+      oldest_desc = "none"
+    else:
+      oldest_desc = (
+          f"{oldest.prompt_id}(age={oldest.age_s:.0f}s,"
+          f"left={oldest.rollouts_left})"
+      )
+    logging.info(
+        "[progress] step=%d waited=%.0fs groups=%d/%d in_flight=%d"
+        " prompts_in_flight=%d untracked_returns=%d raw_ready_groups=%d"
+        " raw_partial_groups=%d oldest=%s",
+        step,
+        waited_s,
+        groups_consumed,
+        self.full_batch_size,
+        self._in_flight_rollouts,
+        len(self._outstanding_prompts),
+        self._outstanding_prompts.untracked_returns,
+        self.raw_q.ready_groups_count,
+        self.raw_q.incomplete_buckets_count,
+        oldest_desc,
+    )
+
   async def _timed_train_step(
       self, batch: datatypes.RLTrainerPayload, *, apply_optimizer: bool
   ) -> tuple[Any, float]:
@@ -1534,6 +1780,9 @@ class StandardRLProgram(RLProgram):
         step_result, train_sec = await task
         step_times.policy_training_time += train_sec
 
+    # For the ETA in each step's summary line.
+    run_start = time.monotonic()
+    steps_run = 0
     try:
       while self.max_steps is None or self._step < self.max_steps:
         current_step = self._step
@@ -1584,7 +1833,9 @@ class StandardRLProgram(RLProgram):
 
         while groups_consumed < self.full_batch_size:
           wait_start = time.monotonic()
-          scored_items = await self.scored_q.get_batch(self.num_generations)
+          scored_items = await self._wait_for_scored_group(
+              current_step, groups_consumed
+          )
           step_times.exposed_generation_time += time.monotonic() - wait_start
           if not scored_items:
             batch_iter = iter(self.assembler.flush())
@@ -1825,6 +2076,23 @@ class StandardRLProgram(RLProgram):
               f"{perplexity_val:.4f}" if perplexity_val is not None else "N/A",
               step_time_sec,
           )
+        steps_run += 1
+        logging.info(
+            "[step] %s",
+            _step_summary(
+                step=current_step,
+                step_time_sec=step_time_sec,
+                step_times=step_times,
+                num_rollouts=num_rollouts,
+                rollout_health=metrics_summary["rollout_health"],
+                steps_left=(
+                    None
+                    if self.max_steps is None
+                    else self.max_steps - current_step - 1
+                ),
+                mean_step_sec=(time.monotonic() - run_start) / steps_run,
+            ),
+        )
 
         if self.on_step_end:
           self.on_step_end(current_step, step_result)
