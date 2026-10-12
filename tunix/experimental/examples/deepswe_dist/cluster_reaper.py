@@ -188,7 +188,7 @@ def reap_run_sandboxes(custom_api, prefix: str) -> int:
     logger.info("Reaping sandboxes of run '%s' (sandbox run id %s)...", prefix, run_id)
     try:
       sandbox_reap(
-          run_id=run_id, namespace=NAMESPACE, in_cluster=True, delete_pods=False
+          run_id=run_id, namespace=NAMESPACE, in_cluster=True, delete_pods=True
       )
     except Exception as e:
       logger.warning("Failed to reap sandbox run id %s: %s", run_id, e)

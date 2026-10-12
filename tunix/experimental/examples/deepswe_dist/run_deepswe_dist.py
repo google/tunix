@@ -1298,7 +1298,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
                 run_id=run_id,
                 in_cluster=getattr(c, "in_cluster", True),
                 namespace=c_ns,
-                delete_pods=False,
+                delete_pods=True,
             )
       except Exception as e:  # pylint: disable=broad-exception-caught
         logging.warning("Reaper note: %s", e)
