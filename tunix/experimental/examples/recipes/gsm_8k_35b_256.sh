@@ -115,6 +115,48 @@ else
   fi
 fi
 
+# Rollout attention data parallelism. `true` (default) keeps the recipe's
+# sharding_strategy (enable_dp_attention) and 16 sequences per engine.
+# `false` sets enable_dp_attention=false and tensor_parallelism=1, keeps
+# expert_parallelism, and defaults max_num_seqs to 64 (VLLM_MAX_NUM_SEQS still
+# overrides it). Without attention DP the engine (maxtext_vllm_adapter) pads the
+# KV heads up to expert_parallelism x tensor_parallelism (2 -> 4 on EP4), so the
+# trainer's weight converter has to replicate K/V heads to the same count:
+# kv_tp_size=<ep x tp> is appended to MAXTEXT_EXTRA_FLAGS. Without it, weight
+# sync fails at round 0 on a manifest shape mismatch ((4096, 2, 256) vs
+# (4096, 4, 256)). The launcher prefers an additional_config (or max_num_seqs)
+# key in VLLM_CONFIG_JSON over these settings; this knob does not edit it, so
+# keep the two consistent when combining them.
+export ROLLOUT_ATTENTION_DP="${ROLLOUT_ATTENTION_DP:-true}"
+case "${ROLLOUT_ATTENTION_DP}" in
+  true)
+    export VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-16}"
+    ;;
+  false)
+    export VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-64}"
+    VLLM_ADDITIONAL_CONFIG="$(python3 -c '
+import json, os
+cfg = json.loads(os.environ.get("VLLM_ADDITIONAL_CONFIG") or "{}")
+strategy = cfg.setdefault("sharding", {}).setdefault("sharding_strategy", {})
+strategy["enable_dp_attention"] = False
+strategy["tensor_parallelism"] = 1
+print(json.dumps(cfg, separators=(",", ":")))
+')"
+    export VLLM_ADDITIONAL_CONFIG
+    _rollout_kv_tp="$(python3 -c '
+import json, os
+s = json.loads(os.environ["VLLM_ADDITIONAL_CONFIG"])["sharding"]["sharding_strategy"]
+print(int(s.get("expert_parallelism", 1)) * int(s["tensor_parallelism"]))
+')"
+    export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS:+$MAXTEXT_EXTRA_FLAGS }kv_tp_size=${_rollout_kv_tp}"
+    unset _rollout_kv_tp
+    ;;
+  *)
+    echo "ERROR: ROLLOUT_ATTENTION_DP must be true or false, got '${ROLLOUT_ATTENTION_DP}'" >&2
+    exit 1
+    ;;
+esac
+
 # FP8 MoE rollout/trainer (ROLLOUT_FP8, TRAINER_FP8); see fp8_moe.sh.
 source "${DIR}/fp8_moe.sh"
 
@@ -190,6 +232,21 @@ export SLICE_ROPE_CACHE="${SLICE_ROPE_CACHE:-1}"
 export DP_SCHED_BATCH_PREFILL="${DP_SCHED_BATCH_PREFILL:-false}"
 export LIBTPU_INIT_ARGS="${LIBTPU_INIT_ARGS:- --xla_tpu_use_minor_sharding_for_major_trivial_input=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=false --xla_tpu_ars_combiner_threshold_in_bytes=0 --xla_tpu_enable_async_collective_merger=false --xla_tpu_check_legacy_constraints_in_reduce_scatter_legalizer=false}"
 export VLLM_ENABLE_V1_MULTIPROCESSING="${VLLM_ENABLE_V1_MULTIPROCESSING:-0}"
+
+# MoE and collective optimization switches (defaults disabled to preserve baseline)
+export TPU_SMALL_ALL_REDUCE="${TPU_SMALL_ALL_REDUCE:-0}"
+export TPU_MOE_SINGLE_SORT="${TPU_MOE_SINGLE_SORT:-0}"
+export TPU_MOE_ROUTER_TOPK="${TPU_MOE_ROUTER_TOPK:-sort}"
+export TPU_MOE_LOWTOK="${TPU_MOE_LOWTOK:-0}"
+
+# Propagate optimization flags to vLLM's Ray workers
+for _opt_var in TPU_SMALL_ALL_REDUCE TPU_MOE_SINGLE_SORT TPU_MOE_ROUTER_TOPK TPU_MOE_LOWTOK; do
+  if [[ -n "${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY:-}" ]]; then
+    export VLLM_RAY_EXTRA_ENV_VARS_TO_COPY="${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY},${_opt_var}"
+  else
+    export VLLM_RAY_EXTRA_ENV_VARS_TO_COPY="${_opt_var}"
+  fi
+done
 
 # Phased inference profiling (vLLM / tpu-inference)
 # Disabled by default (PHASED_PROFILING_DIR="" in tpu-inference). Only active when PROFILE_SAMPLER=true.
@@ -291,7 +348,7 @@ ROLLOUT_RAIDEN_ENV=""
 if [[ "${WEIGHT_SYNC_MODE}" == "raiden" ]]; then
   ROLLOUT_RAIDEN_ENV="USE_RAIDEN_FFI=false RAIDEN_USE_FFI=0"
 fi
-export ROLLOUT_EXTRA_ENV="${ROLLOUT_EXTRA_ENV:-} PYTHONUNBUFFERED=1 TUNIX_IS_INTERNAL_ENV=false USE_BATCHED_RPA_LONG_CTX_KERNEL=${USE_BATCHED_RPA_LONG_CTX_KERNEL} RAGGED_GATHER_REDUCE_VERSION=${RAGGED_GATHER_REDUCE_VERSION} RAIDEN_DEVICES_PER_HOST=${RAIDEN_DEVICES_PER_HOST} PREFUSE_MOE_WEIGHTS=${ROLLOUT_PREFUSE_MOE_WEIGHTS} ROLLOUT_PREFUSE_MOE_WEIGHTS=${ROLLOUT_PREFUSE_MOE_WEIGHTS} ROLLOUT_MESH_TP=${ROLLOUT_MESH_TP} ROLLOUT_TENSOR_PARALLEL_SIZE=${ROLLOUT_MESH_TP} ENABLE_PREFIX_CACHING=${ENABLE_PREFIX_CACHING} VLLM_MAX_NUM_SEQS=${VLLM_MAX_NUM_SEQS} VLLM_GPU_MEMORY_UTILIZATION=${VLLM_GPU_MEMORY_UTILIZATION} NUM_PRECOMPILE_WORKERS=${NUM_PRECOMPILE_WORKERS} NEW_MODEL_DESIGN=${NEW_MODEL_DESIGN} ATTN_BUCKETIZED_NUM_REQS=${ATTN_BUCKETIZED_NUM_REQS} ATTN_CUSTOM_NUM_REQS_BUCKETS=${ATTN_CUSTOM_NUM_REQS_BUCKETS} ONEHOT_MOE_PERMUTE_THRESHOLD=${ONEHOT_MOE_PERMUTE_THRESHOLD} VLLM_MOE_CHUNK_SIZE=${VLLM_MOE_CHUNK_SIZE} SLICE_ROPE_CACHE=${SLICE_ROPE_CACHE} DP_SCHED_BATCH_PREFILL=${DP_SCHED_BATCH_PREFILL} VLLM_ENABLE_V1_MULTIPROCESSING=${VLLM_ENABLE_V1_MULTIPROCESSING} VLLM_LOGGING_LEVEL=${VLLM_LOGGING_LEVEL} LIBTPU_INIT_ARGS=\"${LIBTPU_INIT_ARGS}\" ${ROLLOUT_RAIDEN_ENV}"
+export ROLLOUT_EXTRA_ENV="${ROLLOUT_EXTRA_ENV:-} PYTHONUNBUFFERED=1 TUNIX_IS_INTERNAL_ENV=false USE_BATCHED_RPA_LONG_CTX_KERNEL=${USE_BATCHED_RPA_LONG_CTX_KERNEL} RAGGED_GATHER_REDUCE_VERSION=${RAGGED_GATHER_REDUCE_VERSION} RAIDEN_DEVICES_PER_HOST=${RAIDEN_DEVICES_PER_HOST} PREFUSE_MOE_WEIGHTS=${ROLLOUT_PREFUSE_MOE_WEIGHTS} ROLLOUT_PREFUSE_MOE_WEIGHTS=${ROLLOUT_PREFUSE_MOE_WEIGHTS} ROLLOUT_MESH_TP=${ROLLOUT_MESH_TP} ROLLOUT_TENSOR_PARALLEL_SIZE=${ROLLOUT_MESH_TP} ENABLE_PREFIX_CACHING=${ENABLE_PREFIX_CACHING} VLLM_MAX_NUM_SEQS=${VLLM_MAX_NUM_SEQS} VLLM_GPU_MEMORY_UTILIZATION=${VLLM_GPU_MEMORY_UTILIZATION} NUM_PRECOMPILE_WORKERS=${NUM_PRECOMPILE_WORKERS} NEW_MODEL_DESIGN=${NEW_MODEL_DESIGN} ATTN_BUCKETIZED_NUM_REQS=${ATTN_BUCKETIZED_NUM_REQS} ATTN_CUSTOM_NUM_REQS_BUCKETS=${ATTN_CUSTOM_NUM_REQS_BUCKETS} ONEHOT_MOE_PERMUTE_THRESHOLD=${ONEHOT_MOE_PERMUTE_THRESHOLD} VLLM_MOE_CHUNK_SIZE=${VLLM_MOE_CHUNK_SIZE} SLICE_ROPE_CACHE=${SLICE_ROPE_CACHE} DP_SCHED_BATCH_PREFILL=${DP_SCHED_BATCH_PREFILL} VLLM_ENABLE_V1_MULTIPROCESSING=${VLLM_ENABLE_V1_MULTIPROCESSING} VLLM_LOGGING_LEVEL=${VLLM_LOGGING_LEVEL} LIBTPU_INIT_ARGS=\"${LIBTPU_INIT_ARGS}\"${TPU_SMALL_ALL_REDUCE:+ TPU_SMALL_ALL_REDUCE=${TPU_SMALL_ALL_REDUCE}}${TPU_MOE_SINGLE_SORT:+ TPU_MOE_SINGLE_SORT=${TPU_MOE_SINGLE_SORT}}${TPU_MOE_ROUTER_TOPK:+ TPU_MOE_ROUTER_TOPK=${TPU_MOE_ROUTER_TOPK}}${TPU_MOE_LOWTOK:+ TPU_MOE_LOWTOK=${TPU_MOE_LOWTOK}}${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY:+ VLLM_RAY_EXTRA_ENV_VARS_TO_COPY=\"${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY}\"} ${ROLLOUT_RAIDEN_ENV}"
 export ROLLOUT_EXTRA_ARGS="${ROLLOUT_EXTRA_ARGS:-} --prefuse_moe_weights=${ROLLOUT_PREFUSE_MOE_WEIGHTS} --tensor_parallel_size=${ROLLOUT_MESH_TP} --return_routed_experts=${RETURN_ROUTED_EXPERTS} --free_kv_cache_during_weight_sync=${ROLLOUT_FREE_KV_CACHE} --max_concurrency=${ROLLOUT_MAX_CONCURRENCY}"
 
 # ==============================================================================
