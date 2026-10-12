@@ -669,6 +669,26 @@ class DeepSWEExampleCommandLineTest(absltest.TestCase):
     self.assertEqual(parsed.rollout_max_task_retries, 5)
     self.assertTrue(parsed.recover_unknown_transfer_state)
 
+  def test_k8s_launcher_wires_trainer_warmup_compile_flags(self):
+    block = _deepswe_k8s_orchestrator_block()
+    for flag in (
+        "--initial_dispatch_stagger_s=",
+        "--trainer_warmup_compile",
+        "--trainer_warmup_routed_experts",
+    ):
+      self.assertIn(flag, block, f"deepswe k8s_launcher does not pass {flag}")
+
+    parse = run_deepswe_dist._parse_args  # pylint: disable=protected-access
+    defaults = parse([])
+    self.assertFalse(defaults.trainer_warmup_compile)
+    self.assertFalse(defaults.trainer_warmup_routed_experts)
+    parsed = parse([
+        "--trainer_warmup_compile",
+        "--trainer_warmup_routed_experts",
+    ])
+    self.assertTrue(parsed.trainer_warmup_compile)
+    self.assertTrue(parsed.trainer_warmup_routed_experts)
+
 
 class AuxMetricForwardingTest(absltest.TestCase):
   """Tests for converting a loss function's aux metrics for the buffer."""
