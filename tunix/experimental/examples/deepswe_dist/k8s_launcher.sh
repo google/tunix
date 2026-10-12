@@ -409,7 +409,7 @@ start_orchestrator() {
   local sandbox_env=""
   local sandbox_arg=""
   if [[ "${USE_AGENT_SANDBOX}" == "1" || "${USE_AGENT_SANDBOX}" == "true" || "${USE_AGENT_SANDBOX}" == "True" ]]; then
-    sandbox_env="NAMESPACE=\"${SANDBOX_NAMESPACE}\" ${SANDBOX_NODE_SELECTOR_KEY:+NODE_SELECTOR_KEY=\"${SANDBOX_NODE_SELECTOR_KEY}\"} ${SANDBOX_NODE_SELECTOR_VAL:+NODE_SELECTOR_VAL=\"${SANDBOX_NODE_SELECTOR_VAL}\"} ${IMAGE_REWRITE_PREFIX:+IMAGE_REWRITE_PREFIX=\"${IMAGE_REWRITE_PREFIX}\"} ${OPENHANDS_SERVER_IMAGE:+OPENHANDS_SERVER_IMAGE=\"${OPENHANDS_SERVER_IMAGE}\"} ${SANDBOX_IMAGE_PULL_POLICY:+SANDBOX_IMAGE_PULL_POLICY=\"${SANDBOX_IMAGE_PULL_POLICY}\"} ${PREPULL_IMAGES_PER_POD:+PREPULL_IMAGES_PER_POD=\"${PREPULL_IMAGES_PER_POD}\"} ${PREPULL_MAX_PARALLEL_DAEMONSETS:+PREPULL_MAX_PARALLEL_DAEMONSETS=\"${PREPULL_MAX_PARALLEL_DAEMONSETS}\"} ${PREPULL_MAX_IMAGES:+PREPULL_MAX_IMAGES=\"${PREPULL_MAX_IMAGES}\"} ${PREPULL_TIMEOUT_S:+PREPULL_TIMEOUT_S=\"${PREPULL_TIMEOUT_S}\"} ${JOB_PREFIX:+JOB_PREFIX=\"${JOB_PREFIX}\"} ${POOL_NAME_FORMAT:+POOL_NAME_FORMAT=\"${POOL_NAME_FORMAT}\"} ${TEMPLATE_NAME_PREFIX:+TEMPLATE_NAME_PREFIX=\"${TEMPLATE_NAME_PREFIX}\"} ${SANDBOX_TOLERATIONS:+SANDBOX_TOLERATIONS='${SANDBOX_TOLERATIONS}'} ${FAIL_FAST_SANDBOX_ENV}"
+    sandbox_env="NAMESPACE=\"${SANDBOX_NAMESPACE}\" ${SANDBOX_NODE_SELECTOR_KEY:+NODE_SELECTOR_KEY=\"${SANDBOX_NODE_SELECTOR_KEY}\"} ${SANDBOX_NODE_SELECTOR_VAL:+NODE_SELECTOR_VAL=\"${SANDBOX_NODE_SELECTOR_VAL}\"} ${IMAGE_REWRITE_PREFIX:+IMAGE_REWRITE_PREFIX=\"${IMAGE_REWRITE_PREFIX}\"} ${OPENHANDS_SERVER_IMAGE:+OPENHANDS_SERVER_IMAGE=\"${OPENHANDS_SERVER_IMAGE}\"} ${SANDBOX_IMAGE_PULL_POLICY:+SANDBOX_IMAGE_PULL_POLICY=\"${SANDBOX_IMAGE_PULL_POLICY}\"} ${PREPULL_IMAGES_PER_POD:+PREPULL_IMAGES_PER_POD=\"${PREPULL_IMAGES_PER_POD}\"} ${PREPULL_MAX_PARALLEL_DAEMONSETS:+PREPULL_MAX_PARALLEL_DAEMONSETS=\"${PREPULL_MAX_PARALLEL_DAEMONSETS}\"} ${PREPULL_MAX_IMAGES:+PREPULL_MAX_IMAGES=\"${PREPULL_MAX_IMAGES}\"} ${PREPULL_TIMEOUT_S:+PREPULL_TIMEOUT_S=\"${PREPULL_TIMEOUT_S}\"} ${PREPULL_IMAGES_FILE:+PREPULL_IMAGES_FILE=\"${PREPULL_IMAGES_FILE}\"} ${JOB_PREFIX:+JOB_PREFIX=\"${JOB_PREFIX}\"} ${POOL_NAME_FORMAT:+POOL_NAME_FORMAT=\"${POOL_NAME_FORMAT}\"} ${TEMPLATE_NAME_PREFIX:+TEMPLATE_NAME_PREFIX=\"${TEMPLATE_NAME_PREFIX}\"} ${SANDBOX_TOLERATIONS:+SANDBOX_TOLERATIONS='${SANDBOX_TOLERATIONS}'} ${FAIL_FAST_SANDBOX_ENV}"
     sandbox_arg="--use_agent_sandbox"
   elif [[ -n "${IMAGE_REWRITE_PREFIX}" ]]; then
     sandbox_env="IMAGE_REWRITE_PREFIX=\"${IMAGE_REWRITE_PREFIX}\""
@@ -538,6 +538,7 @@ start_orchestrator() {
         ${MAX_WARMPOOL_REPLICAS:+--max_warmpool_replicas=${MAX_WARMPOOL_REPLICAS}} \
         $([[ "${SANDBOX_WAIT_INITIAL}" == "false" || "${SANDBOX_WAIT_INITIAL}" == "False" || "${SANDBOX_WAIT_INITIAL}" == "0" ]] && echo --no-sandbox_wait_initial || echo --sandbox_wait_initial) \
         $([[ "${PREPULL_SANDBOX_IMAGES}" == "true" || "${PREPULL_SANDBOX_IMAGES}" == "True" || "${PREPULL_SANDBOX_IMAGES}" == "1" ]] && echo --prepull_sandbox_images || echo --no-prepull_sandbox_images) \
+        ${PREPULL_IMAGES_FILE:+--prepull_images_file=\"${PREPULL_IMAGES_FILE}\"} \
         ${MAX_CONCURRENCY:+--max_concurrency=${MAX_CONCURRENCY}} \
         $([[ "${ROLLOUT_FAULT_TOLERANCE}" == "false" || "${ROLLOUT_FAULT_TOLERANCE}" == "False" || "${ROLLOUT_FAULT_TOLERANCE}" == "0" ]] && echo --no-rollout_fault_tolerance || echo --rollout_fault_tolerance) \
         ${MAX_CONCURRENT_ROLLOUTS_PER_WORKER:+--max_concurrent_rollouts_per_worker=${MAX_CONCURRENT_ROLLOUTS_PER_WORKER}} \
@@ -1113,7 +1114,7 @@ while [[ $# -gt 0 ]]; do
       echo "  --image_rewrite_prefix   Registry prefix for sandbox images"
       exit 0
       ;;
-    start|stop|orchestrator|trainer|rollout|test_orchestrator|mock_trainer|mock_rollout|start_rollout_only|eval|stop_eval)
+    start|stop|orchestrator|trainer|rollout|test_orchestrator|mock_trainer|mock_rollout|start_rollout_only|prepull_sandbox|eval|stop_eval)
       COMMAND="$1"
       shift
       ;;
@@ -1431,6 +1432,7 @@ elif [[ "$COMMAND" == "start_rollout_only" ]]; then
   start_rollout
 elif [[ "$COMMAND" == "prepull_sandbox" ]]; then
   "$PYTHON_BIN" "${DIR}/prepull_sandbox_images.py" \
+    ${PREPULL_IMAGES_FILE:+--images_file="${PREPULL_IMAGES_FILE}"} \
     --dataset_name="${DATASET_NAME}" \
     --dataset_split="${DATASET_SPLIT}" \
     ${DATASET_PATH:+--dataset_path="${DATASET_PATH}"} \

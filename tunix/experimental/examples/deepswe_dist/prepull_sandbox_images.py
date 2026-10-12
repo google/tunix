@@ -128,6 +128,62 @@ def collect_static_sandbox_images(
   return sorted(images)
 
 
+def load_images_from_manifest(
+    manifest_path: str,
+    *,
+    scaffold: str = "r2egym",
+    openhands_server_image: str | None = None,
+) -> list[str]:
+  """Loads raw image URIs from a manifest file and applies image rewriting.
+
+  Args:
+    manifest_path: Local file path or gs:// URI to a manifest file containing
+      one image URI per line.
+    scaffold: Agent scaffold name ("r2egym" or "openhands").
+    openhands_server_image: Optional override for OPENHANDS_SERVER_IMAGE.
+
+  Returns:
+    Sorted list of unique container image URIs to stage on sandbox nodes.
+  """
+  rewrite_fn = sandbox_utils.get_image_rewrite_fn()
+  images: set[str] = set()
+
+  if not manifest_path or not manifest_path.strip():
+    raise ValueError("manifest_path must be a non-empty string.")
+  cleaned_path = manifest_path.strip()
+  if cleaned_path.startswith("gs://"):
+    try:
+      from etils import epath  # pylint: disable=g-import-not-at-top
+      text = epath.Path(cleaned_path).read_text()
+    except ImportError:
+      import subprocess  # pylint: disable=g-import-not-at-top
+      text = subprocess.check_output(
+          ["gcloud", "storage", "cat", cleaned_path], text=True
+      )
+  else:
+    with open(cleaned_path, "r", encoding="utf-8") as f:
+      text = f.read()
+
+  for raw_line in text.splitlines():
+    line = raw_line.strip()
+    if not line or line.startswith("#"):
+      continue
+    images.add(rewrite_fn(line) if rewrite_fn is not None else line)
+
+  if scaffold.strip().lower() == "openhands":
+    oh_image = (
+        openhands_server_image
+        or os.environ.get("OPENHANDS_SERVER_IMAGE")
+        or os.environ.get("SANDBOX_RUNTIME_CONTAINER_IMAGE")
+        or os.environ.get("AGENT_SERVER_IMAGE")
+        or template.DEFAULT_OPENHANDS_SERVER_IMAGE
+    ).strip()
+    if oh_image:
+      images.add(oh_image)
+
+  return sorted(images)
+
+
 def _resolve_node_selector(
     node_selector_key: str | None = None,
     node_selector_val: str | None = None,
@@ -784,12 +840,76 @@ def prepull_from_dataset(
   )
 
 
+def prepull_from_manifest(
+    manifest_path: str,
+    *,
+    scaffold: str = "r2egym",
+    namespace: str | None = None,
+    images_per_pod: int | None = None,
+    max_parallel_daemonsets: int | None = None,
+    max_images: int | None = None,
+    drop_caches: bool = True,
+    timeout_s: float | None = None,
+) -> int:
+  """Loads task images from a static manifest file and stages them on sandbox nodes."""
+  resolved_images_per_pod = (
+      images_per_pod
+      if images_per_pod is not None
+      else int(
+          os.environ.get("PREPULL_IMAGES_PER_POD", str(DEFAULT_IMAGES_PER_POD))
+      )
+  )
+  resolved_max_parallel = (
+      max_parallel_daemonsets
+      if max_parallel_daemonsets is not None
+      else int(
+          os.environ.get(
+              "PREPULL_MAX_PARALLEL_DAEMONSETS",
+              str(DEFAULT_MAX_PARALLEL_DAEMONSETS),
+          )
+      )
+  )
+  resolved_max_images = (
+      max_images
+      if max_images is not None
+      else int(os.environ.get("PREPULL_MAX_IMAGES", "0"))
+  )
+  resolved_timeout_s = (
+      timeout_s
+      if timeout_s is not None
+      else float(
+          os.environ.get("PREPULL_TIMEOUT_S", str(DEFAULT_TIMEOUT_S))
+      )
+  )
+  logging.info("[Prepull] Loading sandbox images from manifest: %s", manifest_path)
+  images = load_images_from_manifest(manifest_path, scaffold=scaffold)
+  if resolved_max_images > 0:
+    images = images[:resolved_max_images]
+  return prepull_sandbox_images(
+      images,
+      namespace=namespace,
+      images_per_pod=resolved_images_per_pod,
+      max_parallel_daemonsets=resolved_max_parallel,
+      drop_caches=drop_caches,
+      timeout_s=resolved_timeout_s,
+  )
+
+
 def _parse_cli_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
   parser = argparse.ArgumentParser(
       description=(
           "Pre-pull all static R2E-Gym task container images onto sandbox"
           " nodes and drop OS page caches before run_start."
       )
+  )
+  parser.add_argument(
+      "--images_file",
+      type=str,
+      default=os.environ.get("PREPULL_IMAGES_FILE", ""),
+      help=(
+          "Path (local or gs://) to a manifest file listing container image"
+          " URIs to pre-pull instead of loading from the dataset."
+      ),
   )
   parser.add_argument(
       "--dataset_name",
@@ -867,19 +987,31 @@ def main(argv: Sequence[str] | None = None) -> None:
       force=True,
   )
   args = _parse_cli_args(argv)
-  prepull_from_dataset(
-      dataset_name=args.dataset_name,
-      dataset_split=args.dataset_split,
-      dataset_path=args.dataset_path,
-      cache_dir=args.dataset_cache_dir,
-      scaffold=args.scaffold,
-      namespace=args.namespace,
-      images_per_pod=args.images_per_pod,
-      max_parallel_daemonsets=args.max_parallel_daemonsets,
-      max_images=args.max_images,
-      drop_caches=args.drop_caches,
-      timeout_s=args.timeout_s,
-  )
+  if args.images_file:
+    prepull_from_manifest(
+        manifest_path=args.images_file,
+        scaffold=args.scaffold,
+        namespace=args.namespace,
+        images_per_pod=args.images_per_pod,
+        max_parallel_daemonsets=args.max_parallel_daemonsets,
+        max_images=args.max_images,
+        drop_caches=args.drop_caches,
+        timeout_s=args.timeout_s,
+    )
+  else:
+    prepull_from_dataset(
+        dataset_name=args.dataset_name,
+        dataset_split=args.dataset_split,
+        dataset_path=args.dataset_path,
+        cache_dir=args.dataset_cache_dir,
+        scaffold=args.scaffold,
+        namespace=args.namespace,
+        images_per_pod=args.images_per_pod,
+        max_parallel_daemonsets=args.max_parallel_daemonsets,
+        max_images=args.max_images,
+        drop_caches=args.drop_caches,
+        timeout_s=args.timeout_s,
+    )
 
 
 if __name__ == "__main__":
