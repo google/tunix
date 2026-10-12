@@ -14,6 +14,7 @@
 
 """Math utils for evaluating on Math Dataset like Math500 and AIME2024."""
 
+import argparse
 from decimal import Decimal, ROUND_HALF_UP
 import re
 from absl import logging
@@ -694,3 +695,14 @@ def extract_answer(passage: str):
   if "\\boxed" in passage:
     return extract_boxed_answer(passage)
   return None
+
+
+def replica_seed(args: argparse.Namespace) -> int | None:
+  """Derives the per-replica 32-bit vLLM engine seed from --seed and --worker_id."""
+  seed = getattr(args, "seed", None)
+  if seed is None:
+    return None
+  worker_id = str(getattr(args, "worker_id", "") or "")
+  suffix = worker_id.rsplit("-", 1)[-1]
+  replica_idx = int(suffix) if (suffix.isascii() and suffix.isdigit()) else 0
+  return (int(seed) + replica_idx) % (2**32)
