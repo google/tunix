@@ -1103,7 +1103,7 @@ class FailFastRenderTest(parameterized.TestCase):
       ("deepswe_dist", "deepswe_dist"),
       ("math_gsm8k_dist", "math_gsm8k_dist"),
   )
-  def test_k8s_launcher_orchestrator_teardown_on_exit_and_opt_out(
+  def test_k8s_launcher_orchestrator_teardown_on_exit(
       self, example_dir: str
   ):
     repo_root = pathlib.Path(__file__).resolve().parents[4]
@@ -1127,7 +1127,6 @@ class FailFastRenderTest(parameterized.TestCase):
         PYTHON=sys.executable,
     )
     base_env.pop("GANG_ID", None)
-    base_env.pop("TEARDOWN_WORKERS_ON_EXIT", None)
 
     res_default = subprocess.run(
         ["bash", str(launcher), "start", "--dry-run"],
@@ -1165,25 +1164,6 @@ class FailFastRenderTest(parameterized.TestCase):
           "kubectl delete jobsets.jobset.x-k8s.io",
           yaml.safe_dump(doc),
       )
-
-    res_opt_out = subprocess.run(
-        [
-            "bash",
-            str(launcher),
-            "start",
-            "--dry-run",
-            "--no-teardown-workers-on-exit",
-        ],
-        cwd=str(repo_root),
-        env=base_env,
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=True,
-    )
-    self.assertNotIn(
-        "kubectl delete jobsets.jobset.x-k8s.io", res_opt_out.stdout
-    )
 
 
 if __name__ == "__main__":

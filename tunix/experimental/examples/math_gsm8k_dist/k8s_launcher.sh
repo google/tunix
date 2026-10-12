@@ -138,7 +138,6 @@ export FLUSH_METRICS_EVERY_N_STEPS=${FLUSH_METRICS_EVERY_N_STEPS:-1}
 
 export JOB_PREFIX=${JOB_PREFIX:-$USER}
 export GANG_ID=${GANG_ID:-$JOB_PREFIX}
-export TEARDOWN_WORKERS_ON_EXIT=${TEARDOWN_WORKERS_ON_EXIT:-true}
 export ORCHESTRATOR_ID=${ORCHESTRATOR_ID:-$JOB_PREFIX-orch}
 export ORCHESTRATOR_PORT=${ORCHESTRATOR_PORT:-20000}
 
@@ -262,18 +261,13 @@ start_orchestrator() {
     fi
   fi
 
-  local teardown_gang_arg=""
-  if [[ -n "${GANG_ID}" && ( "${TEARDOWN_WORKERS_ON_EXIT}" == "1" || "${TEARDOWN_WORKERS_ON_EXIT}" == "true" || "${TEARDOWN_WORKERS_ON_EXIT}" == "True" ) ]]; then
-    teardown_gang_arg="--teardown_gang_on_exit"
-  fi
-
   "$PYTHON" "$YAML_GEN" \
     "$YAML_DIR/jobset.cpu.yaml" \
     --jobset_name="${ORCHESTRATOR_ID}" \
     --namespace="${K8S_NAMESPACE}" \
     ${KUEUE_QUEUE_NAME:+--queue_name="${KUEUE_QUEUE_NAME}"} \
     ${GANG_ID:+--gang_id="${GANG_ID}"} \
-    ${teardown_gang_arg} \
+    ${GANG_ID:+--teardown_gang_on_exit} \
     --cpu_machine=${CPU_MACHINE} \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ORCHESTRATOR_PORT}" \
@@ -727,18 +721,6 @@ while [[ $# -gt 0 ]]; do
       ;;
     --gang-id=*|--gang_id=*)
       export GANG_ID="${1#*=}"
-      shift
-      ;;
-    --teardown-workers-on-exit|--teardown_workers_on_exit)
-      export TEARDOWN_WORKERS_ON_EXIT=true
-      shift
-      ;;
-    --no-teardown-workers-on-exit|--no-teardown_workers_on_exit)
-      export TEARDOWN_WORKERS_ON_EXIT=false
-      shift
-      ;;
-    --teardown-workers-on-exit=*|--teardown_workers_on_exit=*)
-      export TEARDOWN_WORKERS_ON_EXIT="${1#*=}"
       shift
       ;;
     --dry-run|--render)
