@@ -39,6 +39,11 @@ TrajectoryStatus = agent_types.TrajectoryStatus
 TrajectoryItem = agent_types.TrajectoryItem
 format_traj_id = agent_types.format_traj_id
 Role = common_datatypes.Role
+ROUTED_EXPERTS_ENCODE_MODES = common_datatypes.ROUTED_EXPERTS_ENCODE_MODES
+RoutedExpertsEncodeMode = common_datatypes.RoutedExpertsEncodeMode
+validate_routed_experts_encode_config = (
+    common_datatypes.validate_routed_experts_encode_config
+)
 
 # Marks a router-replay slot the trainer must not replay, so the model falls
 # back to its own gate there. Matches what MaxText's replay path expects.
@@ -287,10 +292,13 @@ class TokenSegment:
     loss_mask: Array of ints, 1 where the token is model-emitted (trainable).
     logps: Array of per-token log-probabilities under the sampling distribution,
       or None for spans the model did not emit (e.g. env tokens).
-    routed_experts: `[len(tokens), num_layers, top_k]` MoE expert ids this span
-      was routed through, so training can replay the routing the rollout
-      actually used. None for dense models, spans the model did not emit, or
-      when the sampler was not asked to capture routing.
+    routed_experts: `[len(tokens), num_layers, top_k]` raw `int16`/`int32` MoE
+      expert ids this span was routed through (`UNSET_ROUTED_EXPERT == -1` where
+      unset), so training can replay the routing the rollout actually used.
+      After episode completion, `TrajectoryCollectorEngine` may compact-encode
+      the concatenated episode routing on `TrajectoryItem.routed_experts` via
+      `packing.encode_routed_experts`. None for dense models, spans the model
+      did not emit, or when the sampler was not asked to capture routing.
   """
 
   source: str
@@ -464,11 +472,19 @@ class RLTrainerPayload(TrainerPayload):
     ref_per_token_logps: Optional [B, C] reference model log-probabilities.
     old_per_token_logps: Optional [B, C] behavior policy log-probabilities.
     sampler_is_weights: Optional [B, C] importance sampling weights.
-    routed_experts: Optional `[B, T, num_layers, top_k]` MoE expert ids captured
-      during rollout. When set, a training engine that supports router replay
-      forces these experts instead of re-running its own gate, so the training
-      forward pass matches the routing the rollout actually used. `-1` marks a
-      padded or unused slot.
+    routed_experts: Optional MoE expert ids captured during rollout. May be
+      encoded in one of three wire representations: (1) raw `int16` of shape
+      `[T, num_layers, top_k]` (unbatched) or `[B, T, num_layers, top_k]`
+      (batched) where `UNSET_ROUTED_EXPERT == -1` marks a padded/unused slot;
+      (2) `+1`-shifted `uint8` of shape `[T, num_layers, top_k]` or `[B, T,
+      num_layers, top_k]` where `0` marks an unset slot and `1..255` represent
+      expert ids `0..254`; or (3) `+1`-shifted `uint10` packed 4 experts per 5
+      `uint8` bytes of shape `[T, num_layers, top_k // 4, 5]` (unbatched) or
+      `[B, T, num_layers, top_k // 4, 5]` (batched) where `0` marks an unset
+      slot and `1..1023` represent expert ids `0..1022`. Readers must decode via
+      `tunix.rl.packing.decode_routed_experts` (on CPU) or
+      `tunix.rl.common.decode_routed_experts_jax` (on device/XLA) rather than
+      indexing raw bytes directly.
     returns: Optional [B, C] value baseline returns (for PPO / Critic).
     old_values: Optional [B, C] critic value estimates (for PPO / Critic).
     num_segments: Optional static upper bound on number of segments in packed
@@ -530,9 +546,13 @@ class LogprobsRequest(Request):
       only.
     segment_positions: Optional packing local position indices (sequence
       packing); trainer path only.
-    routed_experts: Optional `[B, P + C, num_layers, top_k]` MoE expert ids
-      captured during rollout (`UNSET_ROUTED_EXPERT` where unset), laid out
-      like `RLTrainerPayload.routed_experts`. When set, the scorer replays this
+    routed_experts: Optional MoE expert ids captured during rollout, laid out
+      like `RLTrainerPayload.routed_experts` (`4D` `int16` `[B, P + C,
+      num_layers, top_k]` with `-1` unset, `4D` `+1`-shifted `uint8` `[B, P + C,
+      num_layers, top_k]` with `0` unset, or `5D` `+1`-shifted `uint10` `[B, P +
+      C, num_layers, top_k // 4, 5]` with `0` unset; decoded via
+      `packing.decode_routed_experts(..., batched=True)` or
+      `common.decode_routed_experts_jax`). When set, the scorer replays this
       routing so its log-probs match the training forward pass; trainer path
       only.
   """

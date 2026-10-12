@@ -1726,6 +1726,150 @@ class ProcessIdsTokenMaskTest(absltest.TestCase):
         self.assertTrue(bool(jnp.all(jnp.isfinite(grad))))
         self.assertTrue(bool(jnp.all(grad == 0.0)))
 
+  def test_decode_routed_experts_jax_matches_host_decoder(self):
+    from tunix.rl import packing  # pylint: disable=g-import-not-at-top
+
+    rng = np.random.default_rng(42)
+    # 1. Mode 1: uint8 [B, T, L, K]
+    raw_u8 = rng.integers(-1, 255, size=(2, 8, 4, 6), dtype=np.int16)
+    raw_u8[:, -2:] = -1
+    enc_u8 = packing.encode_routed_experts(raw_u8)
+    self.assertEqual(enc_u8.dtype, np.uint8)
+    self.assertEqual(enc_u8.ndim, 4)
+    jax_u8 = jax.jit(common.decode_routed_experts_jax)(jnp.asarray(enc_u8))
+    self.assertEqual(jax_u8.dtype, jnp.int32)
+    np.testing.assert_array_equal(np.asarray(jax_u8), raw_u8.astype(np.int32))
+
+    # 2. Mode 2: uint10 [B, T, L, K//4, 5]
+    raw_u10 = rng.integers(-1, 1023, size=(2, 8, 4, 8), dtype=np.int16)
+    raw_u10[0, 0, 0, 0] = 777
+    raw_u10[:, -2:] = -1
+    enc_u10 = packing.encode_routed_experts(raw_u10)
+    self.assertEqual(enc_u10.dtype, np.uint8)
+    self.assertEqual(enc_u10.ndim, 5)
+    jax_u10 = jax.jit(common.decode_routed_experts_jax)(jnp.asarray(enc_u10))
+    self.assertEqual(jax_u10.dtype, jnp.int32)
+    np.testing.assert_array_equal(np.asarray(jax_u10), raw_u10.astype(np.int32))
+
+    # 3. Raw int16 [B, T, L, K]
+    raw_i16 = rng.integers(-1, 2048, size=(2, 8, 4, 8), dtype=np.int16)
+    jax_i16 = jax.jit(common.decode_routed_experts_jax)(jnp.asarray(raw_i16))
+    self.assertEqual(jax_i16.dtype, jnp.int32)
+    np.testing.assert_array_equal(np.asarray(jax_i16), raw_i16.astype(np.int32))
+
+    # 4. Batched uint8 with K == 5 [B, T, L, 5] must decode as 4D uint8 (and
+    # never collide with unbatched 4D uint10 [T, L, K // 4, 5]).
+    raw_k5 = rng.integers(-1, 255, size=(2, 8, 4, 5), dtype=np.int16)
+    raw_k5[:, -2:] = -1
+    enc_k5 = packing.encode_routed_experts(raw_k5, batched=True)
+    self.assertEqual(enc_k5.dtype, np.uint8)
+    self.assertEqual(enc_k5.shape, (2, 8, 4, 5))
+    jax_k5 = jax.jit(common.decode_routed_experts_jax)(jnp.asarray(enc_k5))
+    self.assertEqual(jax_k5.dtype, jnp.int32)
+    self.assertEqual(jax_k5.shape, (2, 8, 4, 5))
+    np.testing.assert_array_equal(np.asarray(jax_k5), raw_k5.astype(np.int32))
+
+    # 5. Non-batched ranks fail loud with ValueError.
+    with self.assertRaisesRegex(ValueError, "expects a batched"):
+      common.decode_routed_experts_jax(jnp.zeros((8, 4, 5), dtype=jnp.uint8))
+    with self.assertRaisesRegex(ValueError, "expects a batched"):
+      common.decode_routed_experts_jax(jnp.zeros((8, 4, 5), dtype=jnp.int16))
+
+  def test_compute_per_token_logps_decodes_compact_routed_experts(self):
+    from tunix.rl import packing  # pylint: disable=g-import-not-at-top
+
+    captured_forced: list[np.ndarray] = []
+
+    class _RoutedCapturingModel(nnx.Module):
+
+      def __call__(
+          self,
+          x,
+          positions=None,
+          cache=None,
+          attention_mask=None,
+          forced_routed_experts=None,
+      ):
+        del positions, attention_mask
+        if forced_routed_experts is None:
+          raise ValueError("forced_routed_experts must be provided.")
+        if forced_routed_experts.dtype != jnp.int32:
+          raise ValueError(
+              f"Expected int32 forced_routed_experts, got"
+              f" {forced_routed_experts.dtype}."
+          )
+        jax.debug.callback(
+            lambda arr: captured_forced.append(np.asarray(arr)),
+            forced_routed_experts,
+        )
+        # Modulate logits deterministically from forced_routed_experts so
+        # per_token_logps depends on exact decoded routing IDs.
+        routing_bias = jnp.sum(
+            forced_routed_experts.astype(jnp.float32), axis=(-2, -1)
+        )[..., None]
+        vocab_ramp = jnp.arange(16, dtype=jnp.float32)[None, None, :]
+        logits = (x[..., None].astype(jnp.float32) + routing_bias * 0.01) * (
+            vocab_ramp * 0.1
+        )
+        return logits, cache
+
+    model = _RoutedCapturingModel()
+    graphdef, state = nnx.split(model)
+    prompt_tokens = jnp.array([[1, 2], [3, 4]], dtype=jnp.int32)
+    completion_tokens = jnp.array([[5, 6, 7], [8, 9, 10]], dtype=jnp.int32)
+
+    rng = np.random.default_rng(99)
+    for top_k, max_expert, mode in (
+        (4, 128, "uint8"),
+        (5, 200, "uint8"),
+        (8, 512, "uint10"),
+    ):
+      with self.subTest(top_k=top_k, mode=mode):
+        raw_i16 = rng.integers(
+            -1, max_expert, size=(2, 5, 3, top_k), dtype=np.int16
+        )
+        raw_i16[:, -1] = -1
+        if mode == "uint10":
+          raw_i16[0, 0, 0, 0] = 383
+        compact = packing.encode_routed_experts(
+            raw_i16, mode=mode, batched=True
+        )
+        self.assertEqual(compact.dtype, np.uint8)
+
+        captured_forced.clear()
+        logps_i16 = common.compute_per_token_logps(
+            graphdef,
+            state,
+            prompt_tokens,
+            completion_tokens,
+            pad_id=0,
+            eos_id=-1,
+            routed_experts=jnp.asarray(raw_i16),
+        )
+        jax.block_until_ready(logps_i16)
+        self.assertLen(captured_forced, 1)
+        expected_forced = captured_forced[0]
+        np.testing.assert_array_equal(
+            expected_forced, raw_i16.astype(np.int32)
+        )
+
+        captured_forced.clear()
+        logps_compact = common.compute_per_token_logps(
+            graphdef,
+            state,
+            prompt_tokens,
+            completion_tokens,
+            pad_id=0,
+            eos_id=-1,
+            routed_experts=jnp.asarray(compact),
+        )
+        jax.block_until_ready(logps_compact)
+        self.assertLen(captured_forced, 1)
+        np.testing.assert_array_equal(captured_forced[0], expected_forced)
+        np.testing.assert_array_equal(
+            np.asarray(logps_compact), np.asarray(logps_i16)
+        )
+
 
 if __name__ == "__main__":
   absltest.main()

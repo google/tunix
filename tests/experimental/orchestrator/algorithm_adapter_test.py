@@ -950,6 +950,130 @@ class IsValidTrajectoryTest(absltest.TestCase):
     item = datatypes.TrajectoryItem(prompt_id="p", group_index=0, traj=None)
     self.assertFalse(item.is_valid)
 
+  def test_extract_routed_experts_encodes_compact_uint8_and_uint10(self):
+    adapter = algorithm_adapter.GRPOAdapter(
+        algo_config=algorithm_config.GRPOConfig(num_generations=2)
+    )
+    routed_u8 = np.array(
+        [[[0, 1, 2, 3]], [[4, 5, 6, 7]], [[8, 9, 10, 11]]], dtype=np.int32
+    )
+    routed_u10 = np.array(
+        [[[0, 300, 511, 1022]], [[4, 5, 6, 7]], [[8, 9, 10, 11]]],
+        dtype=np.int32,
+    )
+    item1 = datatypes.TrajectoryItem(
+        group_index=0,
+        prompt_id="g1",
+        start_step=0,
+        traj={
+            "prompt_tokens": np.array([1, 2], dtype=np.int32),
+            "conversation_tokens": np.array([3, 4], dtype=np.int32),
+            "conversation_masks": np.array([1.0, 1.0], dtype=np.float32),
+            "routed_experts": routed_u8,
+        },
+    )
+    item2 = datatypes.TrajectoryItem(
+        group_index=1,
+        prompt_id="g1",
+        start_step=0,
+        traj={
+            "prompt_tokens": np.array([1, 2], dtype=np.int32),
+            "conversation_tokens": np.array([5, 6], dtype=np.int32),
+            "conversation_masks": np.array([1.0, 1.0], dtype=np.float32),
+            "routed_experts": routed_u10,
+        },
+    )
+    # 1. create_trainer_payloads automatically encodes raw int32 routed_experts
+    # into compact 3D uint8 (when max <= 254) and 4D uint10 (when 255 <= max <=
+    # 1022 and K % 4 == 0).
+    payloads = adapter.create_trainer_payloads(
+        [item1, item2], rewards=[1.0, 2.0]
+    )
+    self.assertEqual(payloads[0].routed_experts.dtype, np.uint8)
+    self.assertEqual(payloads[0].routed_experts.shape, (3, 1, 4))
+    np.testing.assert_array_equal(
+        algorithm_adapter.packing.decode_routed_experts(
+            payloads[0].routed_experts, batched=False
+        ),
+        routed_u8.astype(np.int16),
+    )
+    self.assertEqual(payloads[1].routed_experts.dtype, np.uint8)
+    self.assertEqual(payloads[1].routed_experts.shape, (3, 1, 1, 5))
+    np.testing.assert_array_equal(
+        algorithm_adapter.packing.decode_routed_experts(
+            payloads[1].routed_experts, batched=False
+        ),
+        routed_u10.astype(np.int16),
+    )
+
+    # 2. Pre-encoded compact uint8/uint10 on TrajectoryItem are also preserved
+    # directly by create_trainer_payloads as zero-copy views without re-encoding
+    # or widening.
+    item1.traj["routed_experts"] = payloads[0].routed_experts
+    item2.traj["routed_experts"] = payloads[1].routed_experts
+    payloads_pre = adapter.create_trainer_payloads(
+        [item1, item2], rewards=[1.0, 2.0]
+    )
+    self.assertTrue(
+        np.shares_memory(
+            payloads_pre[0].routed_experts, payloads[0].routed_experts
+        )
+    )
+    self.assertTrue(
+        np.shares_memory(
+            payloads_pre[1].routed_experts, payloads[1].routed_experts
+        )
+    )
+    np.testing.assert_array_equal(
+        payloads_pre[0].routed_experts, payloads[0].routed_experts
+    )
+    np.testing.assert_array_equal(
+        payloads_pre[1].routed_experts, payloads[1].routed_experts
+    )
+
+    # 3. Deterministic tier via routed_experts_num_experts=256 on GRPOConfig
+    # selects uint10 even when max_val <= 254.
+    adapter_u10 = algorithm_adapter.GRPOAdapter(
+        algo_config=algorithm_config.GRPOConfig(
+            num_generations=2,
+            routed_experts_encode_mode="auto",
+            routed_experts_num_experts=256,
+        )
+    )
+    item1_raw = datatypes.TrajectoryItem(
+        group_index=0,
+        prompt_id="g1",
+        start_step=0,
+        traj={
+            "prompt_tokens": np.array([1, 2], dtype=np.int32),
+            "conversation_tokens": np.array([3, 4], dtype=np.int32),
+            "conversation_masks": np.array([1.0, 1.0], dtype=np.float32),
+            "routed_experts": routed_u8,
+        },
+    )
+    item2_raw = datatypes.TrajectoryItem(
+        group_index=1,
+        prompt_id="g1",
+        start_step=0,
+        traj={
+            "prompt_tokens": np.array([1, 2], dtype=np.int32),
+            "conversation_tokens": np.array([5, 6], dtype=np.int32),
+            "conversation_masks": np.array([1.0, 1.0], dtype=np.float32),
+            "routed_experts": routed_u8,
+        },
+    )
+    payloads_det = adapter_u10.create_trainer_payloads(
+        [item1_raw, item2_raw], rewards=[1.0, 2.0]
+    )
+    self.assertEqual(payloads_det[0].routed_experts.shape, (3, 1, 1, 5))
+    self.assertEqual(payloads_det[1].routed_experts.shape, (3, 1, 1, 5))
+    np.testing.assert_array_equal(
+        algorithm_adapter.packing.decode_routed_experts(
+            payloads_det[0].routed_experts, batched=False
+        ),
+        routed_u8.astype(np.int16),
+    )
+
 
 if __name__ == "__main__":
   absltest.main()

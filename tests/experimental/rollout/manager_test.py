@@ -24,6 +24,7 @@ from tunix.experimental.rl.agentic import registry
 from tunix.experimental.rollout import manager as manager_lib
 from tunix.experimental.rollout import sampler as sampler_lib
 from tunix.experimental.weight_sync import weight_sync
+from tunix.experimental.worker import rollout_worker
 
 
 class _FakeSampler(sampler_lib.Sampler):
@@ -104,6 +105,8 @@ class _NoopCollector:
       eos_ids=None,
       partial_rollout=False,
       policy_version_fn=None,
+      routed_experts_encode_mode="auto",
+      routed_experts_num_experts=None,
   ):
     del (
         request,
@@ -114,6 +117,8 @@ class _NoopCollector:
         eos_ids,
         partial_rollout,
         policy_version_fn,
+        routed_experts_encode_mode,
+        routed_experts_num_experts,
     )
     self.traj_id = traj_id
     self.env = env_client
@@ -131,7 +136,7 @@ class RegisteredEnvMetadataTest(unittest.IsolatedAsyncioTestCase):
   async def test_generate_forwards_request_metadata_to_registered_env(self):
     _CaptureEnv.last_init_kwargs = None
     manager = manager_lib.RolloutManager(
-        config=types.SimpleNamespace(env_name="manager_capture_env"),
+        config=rollout_worker.RolloutConfig(env_name="manager_capture_env"),
         sampler=_FakeSyncSampler([]),
         agent_factory=lambda: object(),
         tokenizer="mock",
@@ -270,7 +275,7 @@ class AgentConfigTest(unittest.IsolatedAsyncioTestCase):
       def __init__(self, **kwargs):
         del kwargs
 
-    config = types.SimpleNamespace(
+    config = rollout_worker.RolloutConfig(
         agent_name="fake_agent_for_manager_test",
         agent_config={"source": "worker"},
         env_name="fake_env_for_manager_test",
@@ -326,7 +331,7 @@ class AgentConfigTest(unittest.IsolatedAsyncioTestCase):
       def __init__(self, **kwargs):
         del kwargs
 
-    config = types.SimpleNamespace(
+    config = rollout_worker.RolloutConfig(
         agent_name="fake_agent_for_manager_test",
         agent_config={"source": "worker"},
         env_name="fake_env_for_manager_test",
@@ -365,7 +370,7 @@ class AgentConfigTest(unittest.IsolatedAsyncioTestCase):
     # The collector scores truncation against this set. If it stops arriving,
     # the collector silently falls back to the tokenizer's own EOS and
     # clip_ratio starts counting normal terminations as truncations.
-    config = types.SimpleNamespace(eos_tokens=[151643, 151645])
+    config = rollout_worker.RolloutConfig(eos_tokens=[151643, 151645])
     manager = manager_lib.RolloutManager(
         config=config,
         sampler=_FakeSyncSampler([]),
@@ -390,7 +395,7 @@ class AgentConfigTest(unittest.IsolatedAsyncioTestCase):
 
   async def test_unset_eos_tokens_leave_the_collector_on_its_default(self):
     manager = manager_lib.RolloutManager(
-        config=types.SimpleNamespace(),
+        config=rollout_worker.RolloutConfig(),
         sampler=_FakeSyncSampler([]),
         tokenizer="mock",
         chat_parser="mock",
@@ -411,7 +416,7 @@ class AgentConfigTest(unittest.IsolatedAsyncioTestCase):
 
   async def test_generate_stamps_request_metadata_on_trajectory_error(self):
     manager = manager_lib.RolloutManager(
-        config=types.SimpleNamespace(),
+        config=rollout_worker.RolloutConfig(),
         sampler=_FakeSyncSampler([]),
         tokenizer="mock",
         chat_parser="mock",
@@ -462,7 +467,7 @@ class WeightSyncModeTest(absltest.TestCase):
       "tunix.experimental.weight_sync.raiden_weight_sync_delegate.RaidenWeightSyncDelegate"
   )
   def test_config_weight_sync_mode_raiden(self, mock_delegate_cls):
-    config = types.SimpleNamespace(
+    config = rollout_worker.RolloutConfig(
         sampler_type="vanilla",
         weight_sync_mode=weight_sync.WeightSyncMode.RAIDEN,
     )
@@ -475,7 +480,7 @@ class WeightSyncModeTest(absltest.TestCase):
     mock_delegate_cls.assert_called_once_with(server_id="vanilla_sampler")
 
   def test_config_weight_sync_mode_fallback(self):
-    config = types.SimpleNamespace(
+    config = rollout_worker.RolloutConfig(
         sampler_type="vanilla",
         weight_sync_mode=weight_sync.WeightSyncMode.FALLBACK,
     )
@@ -497,7 +502,7 @@ class WeightSyncModeTest(absltest.TestCase):
     mock_lib = mock.MagicMock()
     mock_lib.VllmSampler.return_value = mock.MagicMock()
     mock_get_vllm.return_value = mock_lib
-    config = types.SimpleNamespace(
+    config = rollout_worker.RolloutConfig(
         sampler_type="inprocess_vllm",
         weight_sync_mode=weight_sync.WeightSyncMode.RAIDEN,
     )
@@ -519,7 +524,7 @@ class PartialRolloutTest(unittest.IsolatedAsyncioTestCase):
     sampler.pre_weight_sync.return_value = "ok"
     sampler.weight_sync.return_value = 3
     sampler.post_weight_sync.return_value = 3
-    config = types.SimpleNamespace(partial_rollout=True)
+    config = rollout_worker.RolloutConfig(partial_rollout=True)
     manager = manager_lib.RolloutManager(
         config=config,
         sampler=sampler,
@@ -610,7 +615,7 @@ class PartialRolloutWeightSyncCasesTest(unittest.IsolatedAsyncioTestCase):
   async def test_queued_admission_during_syncing_does_not_raise(self):
     sampler = _PauseTrackingSampler()
     manager = manager_lib.RolloutManager(
-        config=types.SimpleNamespace(partial_rollout=True),
+        config=rollout_worker.RolloutConfig(partial_rollout=True),
         sampler=sampler,
         tokenizer="mock",
         chat_parser="mock",
@@ -669,7 +674,7 @@ class PartialRolloutWeightSyncCasesTest(unittest.IsolatedAsyncioTestCase):
   ):
     sampler = _PauseTrackingSampler()
     manager = manager_lib.RolloutManager(
-        config=types.SimpleNamespace(partial_rollout=False),
+        config=rollout_worker.RolloutConfig(partial_rollout=False),
         sampler=sampler,
         tokenizer="mock",
         chat_parser="mock",
@@ -724,7 +729,7 @@ class PartialRolloutWeightSyncCasesTest(unittest.IsolatedAsyncioTestCase):
   ):
     sampler = _PauseTrackingSampler()
     manager = manager_lib.RolloutManager(
-        config=types.SimpleNamespace(partial_rollout=True),
+        config=rollout_worker.RolloutConfig(partial_rollout=True),
         sampler=sampler,
         tokenizer="mock",
         chat_parser="mock",
@@ -787,7 +792,7 @@ class PartialRolloutWeightSyncCasesTest(unittest.IsolatedAsyncioTestCase):
   async def test_case3_multi_turn_partial_rollout_off_drains_full_episode(self):
     sampler = _PauseTrackingSampler()
     manager = manager_lib.RolloutManager(
-        config=types.SimpleNamespace(partial_rollout=False),
+        config=rollout_worker.RolloutConfig(partial_rollout=False),
         sampler=sampler,
         tokenizer="mock",
         chat_parser="mock",
@@ -875,7 +880,7 @@ class PartialRolloutWeightSyncCasesTest(unittest.IsolatedAsyncioTestCase):
         return {"conversation_tokens": [1, 2, 3, 4], "status": "DONE"}
 
     manager = manager_lib.RolloutManager(
-        config=types.SimpleNamespace(partial_rollout=True),
+        config=rollout_worker.RolloutConfig(partial_rollout=True),
         sampler=sampler,
         env_pool=types.SimpleNamespace(acquire_env=lambda _: object()),
         agent_factory=object,
@@ -929,7 +934,7 @@ class PartialRolloutWeightSyncCasesTest(unittest.IsolatedAsyncioTestCase):
     async def _run_scenario(partial_rollout: bool) -> tuple[float, list[int]]:
       sampler = _PauseTrackingSampler()
       manager = manager_lib.RolloutManager(
-          config=types.SimpleNamespace(partial_rollout=partial_rollout),
+          config=rollout_worker.RolloutConfig(partial_rollout=partial_rollout),
           sampler=sampler,
           tokenizer="mock",
           chat_parser="mock",
@@ -1013,7 +1018,48 @@ class PartialRolloutWeightSyncCasesTest(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(wait_versions, [0] * 8)
     self.assertEqual(keep_versions, [0] * 8)
 
+  async def test_routed_experts_encode_config_plumbed_to_collector(self):
+    with self.assertRaisesRegex(
+        ValueError, "routed_experts_encode_mode must be one of"
+    ):
+      rollout_worker.RolloutConfig(routed_experts_encode_mode="bad")
+
+    for bad_num in (0, -3, True, False):
+      with self.assertRaisesRegex(
+          ValueError, "routed_experts_num_experts must be a positive int"
+      ):
+        rollout_worker.RolloutConfig(routed_experts_num_experts=bad_num)
+
+    cfg = rollout_worker.RolloutConfig(
+        routed_experts_encode_mode="uint10",
+        routed_experts_num_experts=384,
+    )
+    manager = manager_lib.RolloutManager(
+        config=cfg,
+        sampler=_PauseTrackingSampler(),
+        tokenizer="mock",
+        chat_parser="mock",
+    )
+    captured_kwargs = {}
+
+    class _CapturingCollector(_NoopCollector):
+
+      def __init__(self, traj_id, request, *args, **kwargs):
+        super().__init__(traj_id, request, *args, **kwargs)
+        captured_kwargs.update(kwargs)
+
+    with mock.patch.object(
+        manager_lib.collector_lib,
+        "TrajectoryCollectorEngine",
+        _CapturingCollector,
+    ):
+      await manager.generate(
+          datatypes.RolloutRequest(prompt="p", prompt_id="p0", group_index=0)
+      )
+
+    self.assertEqual(captured_kwargs["routed_experts_encode_mode"], "uint10")
+    self.assertEqual(captured_kwargs["routed_experts_num_experts"], 384)
+
 
 if __name__ == "__main__":
   absltest.main()
-

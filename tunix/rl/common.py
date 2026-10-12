@@ -412,6 +412,52 @@ def model_call_contains(model, target_arg: str) -> bool:
   return _call_contains_by_type(type(target_obj), target_arg)
 
 
+def decode_routed_experts_jax(routed_experts: jax.Array) -> jax.Array:
+  """Decodes batched `+1`-shifted `uint8`/`uint10` `routed_experts` to `int32`.
+
+  Only batched layouts are accepted:
+  - Mode 2 (`uint10` packed as 4 values per 5 bytes, 5D `(B, T, L, K // 4, 5)`
+    `uint8`): branchless bitwise shift/mask unpack followed by `- 1` offset.
+  - Mode 1 (`+1`-shifted `uint8`, 4D `(B, T, L, K)` `uint8`, including
+    `K == 5`): `routed_experts.astype(jnp.int32) - 1`.
+  - Raw `int16` / `int32` (4D `(B, T, L, K)`):
+    `jnp.asarray(routed_experts, dtype=jnp.int32)`.
+
+  Args:
+    routed_experts: Batched `routed_experts` array (`uint8`, `int16`, or
+      `int32`).
+
+  Returns:
+    4D `(B, T, L, K)` `jnp.int32` array with `-1` for unset positions.
+  """
+  arr = jnp.asarray(routed_experts)
+  if arr.dtype == jnp.uint8:
+    if arr.ndim == 5 and arr.shape[4] == 5:
+      b0 = arr[..., 0].astype(jnp.int32)
+      b1 = arr[..., 1].astype(jnp.int32)
+      b2 = arr[..., 2].astype(jnp.int32)
+      b3 = arr[..., 3].astype(jnp.int32)
+      b4 = arr[..., 4].astype(jnp.int32)
+      v0 = (b0 | ((b1 & 0x03) << 8)) - 1
+      v1 = ((b1 >> 2) | ((b2 & 0x0F) << 6)) - 1
+      v2 = ((b2 >> 4) | ((b3 & 0x3F) << 4)) - 1
+      v3 = ((b3 >> 6) | (b4 << 2)) - 1
+      stacked = jnp.stack([v0, v1, v2, v3], axis=-1)
+      return stacked.reshape(*arr.shape[:-2], arr.shape[-2] * 4)
+    if arr.ndim == 4:
+      return arr.astype(jnp.int32) - jnp.int32(1)
+    raise ValueError(
+        "decode_routed_experts_jax expects a batched 4D (B, T, L, K) uint8 or"
+        f" 5D (B, T, L, K // 4, 5) uint10 array, got shape={arr.shape}."
+    )
+  if arr.ndim != 4:
+    raise ValueError(
+        "decode_routed_experts_jax expects a batched 4D (B, T, L, K)"
+        f" int16/int32 array, got dtype={arr.dtype} and shape={arr.shape}."
+    )
+  return arr.astype(jnp.int32)
+
+
 @functools.partial(
     jax.jit,
     static_argnames=(
@@ -463,9 +509,11 @@ def compute_per_token_logps(
     chunk_size: If not 0, computes the log probabilities in sequence chunks of
       this size.
     routed_experts: Optional `[B, T, num_layers, top_k]` MoE experts captured
-      during rollout. Forwarded to the model as `forced_routed_experts` -- the
-      name MaxText's adapter uses -- so it replays this routing instead of
-      re-running its router. Ignored by models that do not accept the kwarg.
+      during rollout (either `int16`/`int32`, `+1`-shifted `uint8`, or 5D `[B,
+      T, num_layers, top_k // 4, 5]` `+1`-shifted `uint10`). Decoded on device
+      and forwarded to the model as `forced_routed_experts` -- the name
+      MaxText's adapter uses -- so it replays this routing instead of re-running
+      its router. Ignored by models that do not accept the kwarg.
     token_mask: Optional explicit valid positions for prompt plus completion.
 
   Returns:
@@ -533,8 +581,8 @@ def compute_per_token_logps(
   if routed_experts is not None and model_call_contains(
       model, "forced_routed_experts"
   ):
-    model_kwargs["forced_routed_experts"] = jnp.asarray(
-        routed_experts, dtype=jnp.int32
+    model_kwargs["forced_routed_experts"] = decode_routed_experts_jax(
+        routed_experts
     )
 
   outputs, _ = model(input_tokens, **model_kwargs)

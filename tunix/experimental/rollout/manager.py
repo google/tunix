@@ -83,6 +83,12 @@ class RolloutManager:
         if config is not None
         else False
     )
+    self._routed_experts_encode_mode: datatypes.RoutedExpertsEncodeMode = (
+        config.routed_experts_encode_mode if config is not None else "auto"
+    )
+    self._routed_experts_num_experts: int | None = (
+        config.routed_experts_num_experts if config is not None else None
+    )
     self._policy_version: int = 0
     if sampler is None:
       sampler_type = getattr(config, "sampler_type", "vanilla")
@@ -257,7 +263,10 @@ class RolloutManager:
     else:
       agent = None
 
-    collector_kwargs = {}
+    collector_kwargs: dict[str, Any] = {
+        "routed_experts_encode_mode": self._routed_experts_encode_mode,
+        "routed_experts_num_experts": self._routed_experts_num_experts,
+    }
     if self.trajectory_store is not None:
       collector_kwargs["trajectory_store"] = self.trajectory_store
     if self._store_routed_experts:

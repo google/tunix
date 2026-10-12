@@ -489,6 +489,21 @@ class TrainerWorkerTest(absltest.TestCase):
         atol=1e-4,
     )
 
+    # Also verify compact uint8 (4D) and uint10 (5D) routed_experts are kept
+    # in compact uint8 form without widening to int16.
+    for shape in ((batch, seq_len, 2, 4), (batch, seq_len, 2, 1, 5)):
+      self.fake_trainer.fwd_only_calls.clear()
+      compact_routed = np.ones(shape, dtype=np.uint8)
+      compact_req = dataclasses.replace(request, routed_experts=compact_routed)
+      worker.per_token_logps(items=compact_req)
+      self.assertLen(self.fake_trainer.fwd_only_calls, 2)
+      _, kw0 = self.fake_trainer.fwd_only_calls[0]
+      _, kw1 = self.fake_trainer.fwd_only_calls[1]
+      self.assertEqual(kw0["routed_experts"].dtype, np.uint8)
+      self.assertEqual(kw0["routed_experts"].shape, (2,) + shape[1:])
+      self.assertEqual(kw1["routed_experts"].dtype, np.uint8)
+      self.assertEqual(kw1["routed_experts"].shape, (1,) + shape[1:])
+
 
 class TrainerWorkerExecutionContextTest(absltest.TestCase):
 

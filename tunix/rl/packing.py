@@ -17,15 +17,23 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import Iterable, Mapping, Sequence, overload
+from typing import Iterable, Literal, Mapping, Sequence, overload
 
 import numpy as np
+from tunix.common import datatypes as common_datatypes
 from tunix.rl.agentic.agents import agent_types
 
 try:
   from tunix.rl import _packing_ext  # pylint: disable=g-import-not-at-top
 except ImportError:
   _packing_ext = None
+
+ROUTED_EXPERTS_ENCODE_MODES = common_datatypes.ROUTED_EXPERTS_ENCODE_MODES
+RoutedExpertsEncodeMode = common_datatypes.RoutedExpertsEncodeMode
+RoutedExpertsWireEncoding = Literal["int16", "uint8", "uint10"]
+validate_routed_experts_encode_config = (
+    common_datatypes.validate_routed_experts_encode_config
+)
 
 # Optional per-token fields tracked in a PackItem.
 PER_TOKEN_FIELDS: tuple[str, ...] = (
@@ -57,6 +65,316 @@ def align_offset(offset: int, segment_alignment_boundary: int) -> int:
   return -(-offset // segment_alignment_boundary) * segment_alignment_boundary
 
 
+def routed_experts_encoding(
+    routed: np.ndarray,
+    *,
+    batched: bool = False,
+) -> RoutedExpertsWireEncoding:
+  """Returns the wire encoding (`'int16'`, `'uint8'`, or `'uint10'`) of `routed`.
+
+  Args:
+    routed: `routed_experts` numpy array.
+    batched: If `True`, expects a batched microbatch layout (`4D` `(B, T, L, K)`
+      for `int16`/`uint8` or `5D` `(B, T, L, K // 4, 5)` for `uint10`). If
+      `False`, expects an unbatched trajectory layout (`3D` `(T, L, K)` for
+      `int16`/`uint8` or `4D` `(T, L, K // 4, 5)` for `uint10`).
+  """
+  if not isinstance(routed, np.ndarray):
+    raise ValueError(
+        f"routed_experts must be a numpy array, got {type(routed).__name__}."
+    )
+  if routed.dtype == np.uint8:
+    if batched:
+      if routed.ndim == 5 and routed.shape[4] == 5:
+        return "uint10"
+      if routed.ndim == 4:
+        return "uint8"
+      raise ValueError(
+          "batched uint8 routed_experts must have 4D (B, T, L, K) or 5D"
+          f" (B, T, L, K // 4, 5) shape, got shape {routed.shape}."
+      )
+    if routed.ndim == 4 and routed.shape[3] == 5:
+      return "uint10"
+    if routed.ndim == 3:
+      return "uint8"
+    raise ValueError(
+        "unbatched uint8 routed_experts must have 3D (T, L, K) or 4D"
+        f" (T, L, K // 4, 5) shape, got shape {routed.shape}."
+    )
+  expected_ndim = 4 if batched else 3
+  if routed.ndim == expected_ndim:
+    return "int16"
+  shape_desc = (
+      "[batch, length, num_layers, top_k]"
+      if batched
+      else "[length, num_layers, top_k]"
+  )
+  raise ValueError(
+      f"routed_experts with batched={batched} must be a {expected_ndim}D"
+      f" {shape_desc} array, got dtype={routed.dtype} and shape={routed.shape}."
+  )
+
+
+def routed_experts_logical_shape(
+    routed: np.ndarray,
+    *,
+    batched: bool = False,
+) -> tuple[int, ...]:
+  """Returns the logical `(..., L, K)` shape of a `routed_experts` array.
+
+  Supports:
+  - Raw `int16`: 3D `(T, L, K)` when `batched=False`, or 4D `(B, T, L, K)` when
+    `batched=True`.
+  - Mode 1 (`+1`-shifted `uint8`): 3D `(T, L, K)` when `batched=False`, or 4D
+    `(B, T, L, K)` when `batched=True` (including `K == 5`).
+  - Mode 2 (`+1`-shifted `uint10` packed as 4 values per 5 bytes):
+    4D `(T, L, K // 4, 5)` when `batched=False`, or 5D `(B, T, L, K // 4, 5)`
+    when `batched=True`.
+
+  Args:
+    routed: Encoded or raw `routed_experts` array.
+    batched: Whether `routed` has a leading batch dimension `B`.
+
+  Returns:
+    Logical shape tuple `(T, L, K)` or `(B, T, L, K)`.
+  """
+  enc = routed_experts_encoding(routed, batched=batched)
+  if enc == "uint10":
+    return (
+        *(int(d) for d in routed.shape[:-2]),
+        int(routed.shape[-2]) * 4,
+    )
+  return tuple(int(d) for d in routed.shape)
+
+
+@overload
+def encode_routed_experts(
+    routed: np.ndarray,
+    *,
+    mode: str = "auto",
+    num_experts: int | None = None,
+    batched: bool = False,
+) -> np.ndarray:
+  ...
+
+
+@overload
+def encode_routed_experts(
+    routed: None,
+    *,
+    mode: str = "auto",
+    num_experts: int | None = None,
+    batched: bool = False,
+) -> None:
+  ...
+
+
+def encode_routed_experts(
+    routed: np.ndarray | None,
+    *,
+    mode: str = "auto",
+    num_experts: int | None = None,
+    batched: bool = False,
+) -> np.ndarray | None:
+  """Encodes `routed_experts` into compact `+1`-shifted `uint8` or `uint10`.
+
+  - Mode `"uint8"` (E <= 255, max expert ID <= 254):
+    v = (e + 1) as `uint8` (`0` = unset `-1`, `1..255` = `0..254`), preserving
+    3D `(T, L, K)` or 4D `(B, T, L, K)` shape (1.0 B/expert).
+  - Mode `"uint10"` (256 <= E <= 1023, max expert ID <= 1022, K % 4 == 0):
+    4 consecutive 10-bit values (v = e + 1 in [0, 1023]) bit-packed into 5
+    `uint8` bytes, producing 4D `(T, L, K // 4, 5)` or 5D
+    `(B, T, L, K // 4, 5)` shape (1.25 B/expert).
+  - Mode `"int16"`: C-contiguous `int16` array (2.0 B/expert).
+  - Mode `"auto"`: automatically selects `"uint8"`, `"uint10"`, or `"int16"`
+    based on `num_experts` (if provided) and the observed range of expert IDs.
+
+  Args:
+    routed: Raw or already-encoded `routed_experts` array, or `None`.
+    mode: Target encoding mode (`"auto"`, `"uint8"`, `"uint10"`, or `"int16"`).
+    num_experts: Optional total number of MoE experts (`E`) for validation and
+      `"auto"` mode selection.
+    batched: If `True`, `routed` is a batched microbatch array (`4D` `(B, T, L,
+      K)` `uint8`/`int16` or `5D` `(B, T, L, K // 4, 5)` `uint10`).
+
+  Returns:
+    Compactly encoded `np.ndarray`, or `None` if `routed` is `None`.
+  """
+  if routed is None:
+    return None
+  if _packing_ext is not None:
+    return _packing_ext.encode_routed_experts_fast(
+        routed, mode, num_experts, batched
+    )
+
+  if num_experts is not None:
+    if isinstance(num_experts, bool) or not isinstance(
+        num_experts, (int, np.integer)
+    ):
+      raise ValueError(
+          f"num_experts must be a positive int or None, got {num_experts!r}."
+      )
+    if int(num_experts) <= 0:
+      raise ValueError(
+          f"num_experts must be a positive int or None, got {num_experts}."
+      )
+
+  arr = np.asarray(routed)
+  if arr.dtype == np.uint8:
+    src_enc = routed_experts_encoding(arr, batched=batched)
+    if src_enc == "uint8":
+      if mode == "uint8" or (
+          mode == "auto" and (num_experts is None or int(num_experts) <= 255)
+      ):
+        if num_experts is not None and arr.size > 0:
+          max_val = int(arr.max()) - 1
+          if max_val >= int(num_experts):
+            raise ValueError(
+                f"routed_experts contains expert ID {max_val} >= num_experts"
+                f" ({int(num_experts)})."
+            )
+        return np.ascontiguousarray(arr)
+      arr = decode_routed_experts(arr, batched=batched)
+    elif src_enc == "uint10":
+      if mode == "uint10" or (
+          mode == "auto"
+          and (num_experts is None or 256 <= int(num_experts) <= 1023)
+      ):
+        if (
+            num_experts is not None
+            and int(num_experts) <= 1022
+            and arr.size > 0
+        ):
+          dec = decode_routed_experts(arr, batched=batched)
+          max_val = int(dec.max())
+          if max_val >= int(num_experts):
+            raise ValueError(
+                f"routed_experts contains expert ID {max_val} >= num_experts"
+                f" ({int(num_experts)})."
+            )
+        return np.ascontiguousarray(arr)
+      arr = decode_routed_experts(arr, batched=batched)
+  arr = np.ascontiguousarray(arr, dtype=np.int16)
+  if (batched and arr.ndim != 4) or (not batched and arr.ndim not in (3, 4)):
+    raise ValueError(
+        "encode_routed_experts expects a 3D (T, L, K) or 4D (B, T, L, K)"
+        f" array, got shape={arr.shape}."
+    )
+  top_k = int(arr.shape[-1])
+  min_val = int(arr.min()) if arr.size > 0 else 0
+  max_val = int(arr.max()) if arr.size > 0 else -1
+  if min_val < -1:
+    raise ValueError(
+        f"routed_experts contains invalid expert ID < -1: {min_val}"
+    )
+  if num_experts is not None and max_val >= int(num_experts):
+    raise ValueError(
+        f"routed_experts contains expert ID {max_val} >= num_experts"
+        f" ({int(num_experts)})."
+    )
+  effective_max = (
+      max(max_val, int(num_experts) - 1) if num_experts is not None else max_val
+  )
+  if mode == "auto":
+    if effective_max <= 254:
+      target = "uint8"
+    elif effective_max <= 1022 and top_k % 4 == 0:
+      target = "uint10"
+    else:
+      target = "int16"
+  elif mode in ("uint8", "uint10", "int16"):
+    target = mode
+  else:
+    raise ValueError(f"Unsupported routed_experts encoding mode: {mode!r}")
+
+  if target == "int16":
+    return arr
+  if target == "uint8":
+    if max_val > 254:
+      raise ValueError(
+          f"uint8 encoding requires expert IDs <= 254, got max={max_val}"
+      )
+    return (arr + np.int16(1)).astype(np.uint8)
+  if top_k % 4 != 0:
+    raise ValueError(
+        f"uint10 encoding requires top_k divisible by 4, got top_k={top_k}"
+    )
+  if max_val > 1022:
+    raise ValueError(
+        f"uint10 encoding requires expert IDs <= 1022, got max={max_val}"
+    )
+  v = (arr.astype(np.uint16) + np.uint16(1)).reshape(
+      *arr.shape[:-1], top_k // 4, 4
+  )
+  v0, v1, v2, v3 = v[..., 0], v[..., 1], v[..., 2], v[..., 3]
+  out = np.empty((*arr.shape[:-1], top_k // 4, 5), dtype=np.uint8)
+  out[..., 0] = (v0 & 0xFF).astype(np.uint8)
+  out[..., 1] = (((v0 >> 8) & 0x03) | ((v1 & 0x3F) << 2)).astype(np.uint8)
+  out[..., 2] = (((v1 >> 6) & 0x0F) | ((v2 & 0x0F) << 4)).astype(np.uint8)
+  out[..., 3] = (((v2 >> 4) & 0x3F) | ((v3 & 0x03) << 6)).astype(np.uint8)
+  out[..., 4] = ((v3 >> 2) & 0xFF).astype(np.uint8)
+  return out
+
+
+@overload
+def decode_routed_experts(
+    encoded: np.ndarray,
+    *,
+    batched: bool = False,
+) -> np.ndarray:
+  ...
+
+
+@overload
+def decode_routed_experts(
+    encoded: None,
+    *,
+    batched: bool = False,
+) -> None:
+  ...
+
+
+def decode_routed_experts(
+    encoded: np.ndarray | None,
+    *,
+    batched: bool = False,
+) -> np.ndarray | None:
+  """Decodes compact `uint8` / `uint10` `routed_experts` back to `int16`.
+
+  Args:
+    encoded: Encoded `routed_experts` array (`uint8` or `int16`), or `None`.
+    batched: If `True`, `encoded` is a batched microbatch array (`4D` `(B, T, L,
+      K)` `uint8`/`int16` or `5D` `(B, T, L, K // 4, 5)` `uint10`). If `False`
+      (default), `encoded` is an unbatched trajectory array (`3D` `(T, L, K)`
+      `uint8`/`int16` or `4D` `(T, L, K // 4, 5)` `uint10`).
+
+  Returns:
+    Decoded `int16` `np.ndarray`, or `None` if `encoded` is `None`.
+  """
+  if encoded is None:
+    return None
+  if _packing_ext is not None:
+    return _packing_ext.decode_routed_experts_fast(encoded, batched=batched)
+
+  arr = np.ascontiguousarray(encoded)
+  enc = routed_experts_encoding(arr, batched=batched)
+  if enc == "int16":
+    return arr if arr.dtype == np.int16 else arr.astype(np.int16)
+  if enc == "uint10":
+    b0 = arr[..., 0].astype(np.int16)
+    b1 = arr[..., 1].astype(np.int16)
+    b2 = arr[..., 2].astype(np.int16)
+    b3 = arr[..., 3].astype(np.int16)
+    b4 = arr[..., 4].astype(np.int16)
+    v0 = (b0 | ((b1 & 0x03) << 8)) - 1
+    v1 = ((b1 >> 2) | ((b2 & 0x0F) << 6)) - 1
+    v2 = ((b2 >> 4) | ((b3 & 0x3F) << 4)) - 1
+    v3 = ((b3 >> 6) | (b4 << 2)) - 1
+    stacked = np.stack([v0, v1, v2, v3], axis=-1)
+    return stacked.reshape(*arr.shape[:-2], arr.shape[-2] * 4)
+  return arr.astype(np.int16) - np.int16(1)
+
+
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class PackItem:
   """A single unpadded item to be packed into a PackedRow."""
@@ -67,10 +385,12 @@ class PackItem:
   advantages: np.ndarray
   per_token: Mapping[str, np.ndarray] = dataclasses.field(default_factory=dict)
   policy_version: np.ndarray | None = None
-  # Router replay: `[p + c - 1 or p + c, num_layers, top_k]` expert ids,
-  # sequence-aligned (prompt then completion), not completion-aligned like the
-  # `per_token` fields. Autoregressive rollouts may omit the final sampled token
-  # (`p + c - 1`), which remains `UNSET_ROUTED_EXPERT` in the packed output.
+  # Router replay: `[p + c - 1 or p + c, num_layers, top_k]` expert ids (int16
+  # or `+1`-shifted uint8, or `[p + c - 1 or p + c, num_layers, top_k // 4, 5]`
+  # `+1`-shifted uint10), sequence-aligned (prompt then completion), not
+  # completion-aligned like the `per_token` fields. Autoregressive rollouts may
+  # omit the final sampled token (`p + c - 1`), which remains
+  # `UNSET_ROUTED_EXPERT` in the packed output.
   routed_experts: np.ndarray | None = None
 
   def __post_init__(self):
@@ -122,19 +442,30 @@ class PackItem:
       n = self.prompt_ids.shape[0] + c
       min_len = max(n - 1, 0)
       routed = self.routed_experts
-      if (
-          not isinstance(routed, np.ndarray)
-          or routed.ndim != 3
-          or routed.shape[0] < min_len
-          or routed.shape[0] > n
-      ):
+      try:
+        enc = routed_experts_encoding(routed, batched=False)
+      except ValueError as exc:
+        raise ValueError(
+            "PackItem.routed_experts must be a numpy array of shape"
+            " (p + c - 1 or p + c, num_layers, top_k) with length in"
+            f" [{min_len}, {n}], got {type(routed).__name__} with shape"
+            f" {getattr(routed, 'shape', None)}."
+        ) from exc
+      if routed.shape[0] < min_len or routed.shape[0] > n:
         raise ValueError(
             "PackItem.routed_experts must be a numpy array of shape"
             " (p + c - 1 or p + c, num_layers, top_k) with length in"
             f" [{min_len}, {n}], got {type(routed).__name__} with shape"
             f" {getattr(routed, 'shape', None)}."
         )
-      if routed.dtype != np.int16 or not routed.flags.c_contiguous:
+      if enc in ("uint8", "uint10"):
+        if not routed.flags.c_contiguous:
+          object.__setattr__(
+              self,
+              "routed_experts",
+              np.ascontiguousarray(routed, dtype=np.uint8),
+          )
+      elif routed.dtype != np.int16 or not routed.flags.c_contiguous:
         object.__setattr__(
             self,
             "routed_experts",
@@ -159,8 +490,9 @@ class PackedRow:
   per_token: Mapping[str, np.ndarray] = dataclasses.field(default_factory=dict)
   policy_version: np.ndarray | None = None
   num_real_segments: int = 0
-  # `[budget, num_layers, top_k]` int16, `UNSET_ROUTED_EXPERT` wherever no
-  # routing was captured (padding, alignment gaps, and routing-less items).
+  # `[budget, num_layers, top_k]` int16 or uint8 (or `[budget, num_layers,
+  # top_k // 4, 5]` uint8 in uint10 mode), unset wherever no routing was
+  # captured (padding, alignment gaps, and routing-less items).
   routed_experts: np.ndarray | None = None
 
 
@@ -177,7 +509,8 @@ class PackedChunk(Sequence[PackedRow]):
   per_token: Mapping[str, np.ndarray] = dataclasses.field(default_factory=dict)
   policy_versions: tuple[np.ndarray | None, ...] = ()
   num_real_segments: tuple[int, ...] = ()
-  # `[n_bins, budget, num_layers, top_k]` int16; see `PackedRow.routed_experts`.
+  # `[n_bins, budget, num_layers, top_k]` int16 or uint8 (or 5D uint10); see
+  # `PackedRow.routed_experts`.
   routed_experts: np.ndarray | None = None
 
   def __len__(self) -> int:
@@ -261,7 +594,7 @@ def routed_experts_shape(
     ValueError: If the items that carry routing disagree on the trailing shape.
   """
   shapes = {
-      item.routed_experts.shape[1:]
+      routed_experts_logical_shape(item.routed_experts, batched=False)[1:]
       for item in items
       if item.routed_experts is not None
   }
@@ -432,15 +765,32 @@ def pack_chunk(
   per_token = {
       name: np.zeros((n_bins, budget), dtype=np.float32) for name in carried
   }
-  routed = (
-      None
-      if routed_shape is None
-      else np.full(
+  all_routed: list[np.ndarray] = []
+  for bin_items in bins:
+    for item in bin_items:
+      if item.routed_experts is not None:
+        all_routed.append(item.routed_experts)
+  if routed_shape is None or not all_routed:
+    routed = None
+    routed_mode = "none"
+  else:
+    encs = {routed_experts_encoding(r, batched=False) for r in all_routed}
+    if "int16" in encs:
+      routed_mode = "int16"
+      routed = np.full(
           (n_bins, budget, *routed_shape),
           agent_types.UNSET_ROUTED_EXPERT,
           dtype=np.int16,
       )
-  )
+    elif "uint10" in encs:
+      routed_mode = "uint10"
+      routed = np.zeros(
+          (n_bins, budget, routed_shape[0], routed_shape[1] // 4, 5),
+          dtype=np.uint8,
+      )
+    else:
+      routed_mode = "uint8"
+      routed = np.zeros((n_bins, budget, *routed_shape), dtype=np.uint8)
   policy_versions: list[np.ndarray | None] = []
   num_real_segments: list[int] = []
   for b, bin_items in enumerate(bins):
@@ -472,8 +822,18 @@ def pack_chunk(
         # Prefix-aligned to `seq`: a token's captured experts land on the
         # position the token itself does, and any uncaptured trailing tokens in
         # the segment remain `UNSET_ROUTED_EXPERT`.
-        m = item.routed_experts.shape[0]
-        routed[b, cursor : cursor + m] = item.routed_experts
+        r_item = item.routed_experts
+        m = r_item.shape[0]
+        item_enc = routed_experts_encoding(r_item, batched=False)
+        if routed_mode == "int16" and item_enc != "int16":
+          r_item = decode_routed_experts(r_item, batched=False)
+        elif routed_mode == "uint10" and item_enc == "uint8":
+          r_item = encode_routed_experts(
+              decode_routed_experts(r_item, batched=False),
+              mode="uint10",
+              batched=False,
+          )
+        routed[b, cursor : cursor + m] = r_item
       cursor += n
 
     policy_versions.append(bin_items[0].policy_version if bin_items else None)

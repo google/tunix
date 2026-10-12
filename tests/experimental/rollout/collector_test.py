@@ -15,6 +15,7 @@
 """Tests for the trajectory collector."""
 
 import asyncio
+import dataclasses
 import types
 import unittest
 from unittest import mock
@@ -23,9 +24,14 @@ from absl.testing import absltest
 import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.experimental.common import test_utils as mocks
+from tunix.experimental.orchestrator import algorithm_adapter
+from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.rollout import collector
 from tunix.experimental.rollout import sampler as sampler_lib
 from tunix.experimental.rollout import vanilla_sampler_adapter
+from tunix.experimental.trajectory import in_memory_store
+from tunix.rl import algorithm_config
+from tunix.rl import packing
 from tunix.rl.agentic.agents import model_agent
 from tunix.rl.agentic.environments import base_environment
 
@@ -1558,6 +1564,317 @@ class ResponseBudgetAnnotationTest(absltest.TestCase):
     asyncio.run(_run())
 
 
+class RolloutCompactRoutedExpertsEncodingTest(absltest.TestCase):
+  """Tests rollout-stage compact uint8/uint10 encoding of routed_experts."""
+
+  def _make_single_turn_env(self):
+    class _SingleTurnEnv(base_environment.BaseTaskEnv):
+
+      def _initial_observation(self):
+        return {"observation": "start"}
+
+      def _step_impl(self, action):
+        del action
+        return base_environment.EnvStepResult(
+            observation={"observation": "done"},
+            reward=1.0,
+            done=True,
+            info={},
+        )
+
+    return _SingleTurnEnv(task={"question": "q0", "answer": "a0"}, max_steps=1)
+
+  def test_collector_init_validates_routed_experts_encode_config(self):
+    req = datatypes.RolloutRequest(prompt_id="p0", prompt="hi")
+    with self.assertRaisesRegex(
+        ValueError, "routed_experts_encode_mode must be one of"
+    ):
+      collector.TrajectoryCollectorEngine(
+          traj_id="t0",
+          request=req,
+          sampler=_MockSampler(),
+          env_client=mock.MagicMock(),
+          agent=mock.MagicMock(),
+          tokenizer=_MockTokenizer(),
+          chat_parser=_RecordingParser(),
+          routed_experts_encode_mode="bad_mode",
+      )
+    for bad_num in (0, -2, True, False):
+      with self.assertRaisesRegex(
+          ValueError, "routed_experts_num_experts must be a positive int"
+      ):
+        collector.TrajectoryCollectorEngine(
+            traj_id="t0",
+            request=req,
+            sampler=_MockSampler(),
+            env_client=mock.MagicMock(),
+            agent=mock.MagicMock(),
+            tokenizer=_MockTokenizer(),
+            chat_parser=_RecordingParser(),
+            routed_experts_num_experts=bad_num,
+        )
+
+  def test_run_episode_encodes_routed_experts_in_rollout_and_preserves_store(
+      self,
+  ):
+    # Prompt has 2 tokens ([1, 2]), response has 3 tokens ([0, 1, 2]), so
+    # total_len = 5 and sampler returns 4 R3 steps [4, 2, 4] (2 prefill + 2
+    # decode tokens; final generated token is padded with -1 by collect()).
+    raw_routed_steps = np.array(
+        [
+            [[0, 1, 2, 3], [4, 5, 6, 7]],
+            [[8, 9, 10, 11], [12, 13, 14, 15]],
+            [[16, 17, 18, 19], [20, 21, 22, 23]],
+            [[24, 25, 26, 27], [28, 29, 30, 31]],
+        ],
+        dtype=np.int16,
+    )
+    expected_full_routed = np.concatenate(
+        [raw_routed_steps, np.full((1, 2, 4), -1, dtype=np.int16)], axis=0
+    )
+    req = datatypes.RolloutRequest(
+        prompt_id="p_routed",
+        prompt="What is 2+2?",
+        group_index=0,
+        max_response_length=16,
+        generation_kwargs={"return_routed_experts": True},
+    )
+
+    # 1. Default mode="auto" with max_val=31 <= 254 produces compact 3D uint8
+    # via asyncio.to_thread, while InMemoryTrajectoryStore still persists
+    # decoded int16 prefill_routed_experts from agent.trajectory.steps.
+    store = in_memory_store.InMemoryTrajectoryStore()
+    engine_u8 = collector.TrajectoryCollectorEngine(
+        traj_id="traj_u8",
+        request=req,
+        sampler=_MockSampler(
+            token_lengths=[3], routed_experts=raw_routed_steps
+        ),
+        env_client=self._make_single_turn_env(),
+        agent=model_agent.ModelAgent("sys"),
+        tokenizer=_MockTokenizer(),
+        chat_parser=_RecordingParser(),
+        trajectory_store=store,
+        store_routed_experts=True,
+    )
+    with mock.patch.object(
+        collector.asyncio, "to_thread", wraps=asyncio.to_thread
+    ) as spy_to_thread:
+      item_u8 = asyncio.run(engine_u8.run_episode())
+    spy_to_thread.assert_called_once()
+    self.assertEqual(item_u8.routed_experts.dtype, np.uint8)
+    self.assertEqual(item_u8.routed_experts.shape, (5, 2, 4))
+    np.testing.assert_array_equal(
+        packing.decode_routed_experts(item_u8.routed_experts, batched=False),
+        expected_full_routed,
+    )
+    stored_trajs = store.get_trajectories(["traj_u8"])
+    self.assertLen(stored_trajs, 1)
+    # Step 1 is the TunixAgentStep containing prefill_routed_experts (2 prompt
+    # tokens).
+    agent_steps = [
+        s for s in stored_trajs[0].steps if s.source.value == "agent"
+    ]
+    self.assertLen(agent_steps, 1)
+    self.assertEqual(agent_steps[0].prefill_routed_experts.dtype, np.int16)
+    np.testing.assert_array_equal(
+        agent_steps[0].prefill_routed_experts,
+        raw_routed_steps,
+    )
+
+    # 2. Deterministic tier via routed_experts_num_experts=256 encodes into 4D
+    # uint10 [T, L, K//4, 5] even though max_val=31 <= 254.
+    engine_u10 = collector.TrajectoryCollectorEngine(
+        traj_id="traj_u10",
+        request=req,
+        sampler=_MockSampler(
+            token_lengths=[3], routed_experts=raw_routed_steps
+        ),
+        env_client=self._make_single_turn_env(),
+        agent=model_agent.ModelAgent("sys"),
+        tokenizer=_MockTokenizer(),
+        chat_parser=_RecordingParser(),
+        routed_experts_encode_mode="auto",
+        routed_experts_num_experts=256,
+    )
+    item_u10 = asyncio.run(engine_u10.run_episode())
+    self.assertEqual(item_u10.routed_experts.dtype, np.uint8)
+    self.assertEqual(item_u10.routed_experts.shape, (5, 2, 1, 5))
+    np.testing.assert_array_equal(
+        packing.decode_routed_experts(item_u10.routed_experts, batched=False),
+        expected_full_routed,
+    )
+
+    # 3. Explicit mode="int16" preserves 3D int16.
+    engine_i16 = collector.TrajectoryCollectorEngine(
+        traj_id="traj_i16",
+        request=req,
+        sampler=_MockSampler(
+            token_lengths=[3], routed_experts=raw_routed_steps
+        ),
+        env_client=self._make_single_turn_env(),
+        agent=model_agent.ModelAgent("sys"),
+        tokenizer=_MockTokenizer(),
+        chat_parser=_RecordingParser(),
+        routed_experts_encode_mode="int16",
+    )
+    item_i16 = asyncio.run(engine_i16.run_episode())
+    self.assertEqual(item_i16.routed_experts.dtype, np.int16)
+    self.assertEqual(item_i16.routed_experts.shape, (5, 2, 4))
+    np.testing.assert_array_equal(item_i16.routed_experts, expected_full_routed)
+
+  def test_end_to_end_rollout_encoded_to_adapter_and_assemblers(self):
+    raw_g0 = np.array(
+        [
+            [[0, 1, 2, 3], [4, 5, 6, 7]],
+            [[8, 9, 10, 11], [12, 13, 14, 15]],
+            [[16, 17, 18, 19], [20, 21, 22, 23]],
+            [[24, 25, 26, 27], [28, 29, 30, 31]],
+        ],
+        dtype=np.int16,
+    )
+    raw_g1 = np.array(
+        [
+            [[100, 101, 102, 103], [104, 105, 106, 107]],
+            [[108, 109, 110, 111], [112, 113, 114, 115]],
+            [[116, 117, 118, 119], [120, 121, 122, 123]],
+            [[124, 125, 126, 127], [250, 251, 252, 254]],
+        ],
+        dtype=np.int16,
+    )
+    last_payloads = []
+    for num_experts, expected_unbatched_shape, expected_batched_tail in (
+        (255, (5, 2, 4), (2, 4)),
+        (256, (5, 2, 1, 5), (2, 1, 5)),
+    ):
+      with self.subTest(num_experts=num_experts):
+        items = []
+        for g_idx, raw_routed in enumerate((raw_g0, raw_g1)):
+          req = datatypes.RolloutRequest(
+              prompt_id="p_e2e",
+              prompt="What is 2+2?",
+              group_index=g_idx,
+              max_response_length=16,
+              generation_kwargs={"return_routed_experts": True},
+          )
+          engine = collector.TrajectoryCollectorEngine(
+              traj_id=f"traj_g{g_idx}",
+              request=req,
+              sampler=_MockSampler(
+                  token_lengths=[3], routed_experts=raw_routed
+              ),
+              env_client=self._make_single_turn_env(),
+              agent=model_agent.ModelAgent("sys"),
+              tokenizer=_MockTokenizer(),
+              chat_parser=_RecordingParser(),
+              routed_experts_encode_mode="auto",
+              routed_experts_num_experts=num_experts,
+          )
+          items.append(asyncio.run(engine.run_episode()))
+          self.assertEqual(
+              items[-1].routed_experts.shape, expected_unbatched_shape
+          )
+
+        adapter = algorithm_adapter.GRPOAdapter(
+            algo_config=algorithm_config.GRPOConfig(
+                num_generations=2,
+                routed_experts_encode_mode="auto",
+                routed_experts_num_experts=num_experts,
+            )
+        )
+        payloads = adapter.create_trainer_payloads(items, rewards=[0.0, 1.0])
+        self.assertTrue(
+            np.shares_memory(
+                payloads[0].routed_experts, items[0].routed_experts
+            )
+        )
+        self.assertTrue(
+            np.shares_memory(
+                payloads[1].routed_experts, items[1].routed_experts
+            )
+        )
+        last_payloads = payloads
+
+        # PaddedBatchAssembler
+        padded_asm = batch_assembly.PaddedBatchAssembler(
+            batch_size=2,
+            num_generations=2,
+            mini_batch_size=1,
+            max_prompt_length=4,
+            max_response_length=4,
+            pad_id=0,
+        )
+        padded_batches = list(padded_asm.feed(payloads))
+        self.assertLen(padded_batches, 1)
+        pb = padded_batches[0].payload
+        self.assertEqual(pb.routed_experts.dtype, np.uint8)
+        self.assertEqual(
+            pb.routed_experts.shape, (2, 8) + expected_batched_tail
+        )
+        decoded_pb = packing.decode_routed_experts(
+            pb.routed_experts, batched=True
+        )
+        # Left-padded prompt (pad=2, prompt=2) + right-padded completion
+        # (3, pad=1): valid R3 steps sit at indices 2..5 (4 steps), index 6 is
+        # final token (-1).
+        np.testing.assert_array_equal(decoded_pb[0, 2:6], raw_g0)
+        np.testing.assert_array_equal(decoded_pb[1, 2:6], raw_g1)
+        np.testing.assert_array_equal(decoded_pb[:, :2], -1)
+        np.testing.assert_array_equal(decoded_pb[:, 6:], -1)
+
+        # SequencePackedBatchAssembler
+        packed_asm = batch_assembly.SequencePackedBatchAssembler(
+            batch_size=1,
+            num_generations=2,
+            mini_batch_size=1,
+            max_packed_len=16,
+            pad_id=0,
+            segment_alignment_boundary=1,
+        )
+        packed_batches = list(packed_asm.feed(payloads))
+        self.assertLen(packed_batches, 1)
+        sb = packed_batches[0].payload
+        self.assertEqual(sb.routed_experts.dtype, np.uint8)
+        self.assertEqual(
+            sb.routed_experts.shape, (1, 16) + expected_batched_tail
+        )
+        decoded_sb = packing.decode_routed_experts(
+            sb.routed_experts, batched=True
+        )
+        # Sequence 0 occupies [0..4] (5 tokens; first 4 have R3 routing, token 4
+        # is final token with -1). Sequence 1 occupies [5..9] (first 4 at 5..8).
+        np.testing.assert_array_equal(decoded_sb[0, 0:4], raw_g0)
+        np.testing.assert_array_equal(decoded_sb[0, 4], -1)
+        np.testing.assert_array_equal(decoded_sb[0, 5:9], raw_g1)
+        np.testing.assert_array_equal(decoded_sb[0, 9:], -1)
+
+    # Mixed fleet: one int16 item + one uint8 item widens losslessly to int16.
+    full_g0 = np.concatenate(
+        [raw_g0, np.full((1, 2, 4), -1, dtype=np.int16)], axis=0
+    )
+    full_g1 = np.concatenate(
+        [raw_g1, np.full((1, 2, 4), -1, dtype=np.int16)], axis=0
+    )
+    payloads_mixed = [
+        dataclasses.replace(last_payloads[0], routed_experts=full_g0),
+        dataclasses.replace(
+            last_payloads[1],
+            routed_experts=packing.encode_routed_experts(full_g1),
+        ),
+    ]
+    packed_mixed_asm = batch_assembly.SequencePackedBatchAssembler(
+        batch_size=1,
+        num_generations=2,
+        mini_batch_size=1,
+        max_packed_len=16,
+        pad_id=0,
+        segment_alignment_boundary=1,
+    )
+    mixed_batch = list(packed_mixed_asm.feed(payloads_mixed))[0].payload
+    self.assertEqual(mixed_batch.routed_experts.dtype, np.int16)
+    np.testing.assert_array_equal(mixed_batch.routed_experts[0, 0:4], raw_g0)
+    np.testing.assert_array_equal(mixed_batch.routed_experts[0, 5:9], raw_g1)
+
+
 if __name__ == "__main__":
   absltest.main()
-

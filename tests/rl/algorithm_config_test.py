@@ -251,6 +251,29 @@ class AlgorithmConfigTest(parameterized.TestCase):
     self.assertEqual(config.policy_loss_fn, "chicken_loss_custom_123")
     self.assertEqual(config.advantage_estimator, "chicken_adv_custom_456")
 
+  def test_routed_experts_encode_config_validation(self):
+    cfg = algorithm_config.GRPOConfig()
+    self.assertEqual(cfg.routed_experts_encode_mode, "auto")
+    self.assertIsNone(cfg.routed_experts_num_experts)
+
+    cfg_det = algorithm_config.GRPOConfig(
+        routed_experts_encode_mode="uint10",
+        routed_experts_num_experts=256,
+    )
+    self.assertEqual(cfg_det.routed_experts_encode_mode, "uint10")
+    self.assertEqual(cfg_det.routed_experts_num_experts, 256)
+
+    with self.assertRaisesRegex(
+        ValueError, "routed_experts_encode_mode must be one of"
+    ):
+      algorithm_config.GRPOConfig(routed_experts_encode_mode="bad")
+
+    for bad_num in (0, -4, True, False):
+      with self.assertRaisesRegex(
+          ValueError, "routed_experts_num_experts must be a positive int"
+      ):
+        algorithm_config.GRPOConfig(routed_experts_num_experts=bad_num)
+
 
 if __name__ == "__main__":
   absltest.main()

@@ -226,7 +226,13 @@ class TrajectoryItem:
   `conversation_masks`,
   `routed_experts`, or `policy_version`) fall back dynamically via `__getattr__`
   to
-  `traj` (when it is a dictionary) and then to `metadata`.
+  `traj` (when it is a dictionary) and then to `metadata`. When
+  `routed_experts` is present on `traj` or `metadata`, it may be stored as raw
+  `int16` `[T, num_layers, top_k]` (`UNSET_ROUTED_EXPERT == -1` where unset),
+  `+1`-shifted `uint8` `[T, num_layers, top_k]` (`0` where unset), or
+  `+1`-shifted `uint10` `[T, num_layers, top_k // 4, 5]` (`0` where unset); use
+  `tunix.rl.packing.decode_routed_experts(routed, batched=False)` to decode to
+  `int16`.
 
   Attributes:
     prompt_id: Unique identifier for the prompt/task. Standardized across

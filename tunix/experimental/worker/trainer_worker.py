@@ -26,6 +26,7 @@ from tunix.experimental.common import datatypes
 from tunix.experimental.train import abstract_trainer
 from tunix.experimental.worker import abstract_worker
 from tunix.rl import common as rl_common
+from tunix.rl import packing
 
 WorkerState = datatypes.WorkerState
 
@@ -373,11 +374,16 @@ class TrainerWorker(abstract_worker.Worker):
           if items.segment_positions is None
           else np.asarray(items.segment_positions, dtype=np.int32)
       )
-      routed = (
-          None
-          if items.routed_experts is None
-          else np.asarray(items.routed_experts, dtype=np.int16)
-      )
+      if items.routed_experts is None:
+        routed = None
+      else:
+        routed_raw = np.asarray(items.routed_experts)
+        routed_enc = packing.routed_experts_encoding(routed_raw, batched=True)
+        routed = (
+            routed_raw
+            if routed_enc in ("uint8", "uint10")
+            else np.asarray(routed_raw, dtype=np.int16)
+        )
       micro_batch_size = self._logps_micro_batch_size or batch_size
       outs = []
       for start in range(0, batch_size, micro_batch_size):

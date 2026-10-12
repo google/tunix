@@ -24,6 +24,7 @@ from tunix.experimental.rollout import sampler as sampler_lib
 from tunix.experimental.rollout import vanilla_sampler_adapter
 from tunix.experimental.trajectory import base_store as store
 from tunix.experimental.trajectory import converter as converter_lib
+from tunix.rl import packing
 from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.trajectory import trajectory_collect_engine as rl_collect_engine
 from tunix.rl.rollout import base_rollout
@@ -116,6 +117,8 @@ class TrajectoryCollectorEngine:
       policy_version_fn: Callable[[], int] | None = None,
       trajectory_store: Optional[store.TrajectoryWriter] = None,
       store_routed_experts: bool = False,
+      routed_experts_encode_mode: datatypes.RoutedExpertsEncodeMode = "auto",
+      routed_experts_num_experts: int | None = None,
   ):
     if (
         sampler is None
@@ -128,6 +131,10 @@ class TrajectoryCollectorEngine:
           "TrajectoryCollectorEngine requires valid sampler, env_client, agent,"
           " tokenizer, and chat_parser arguments (none can be None)."
       )
+    datatypes.validate_routed_experts_encode_config(
+        routed_experts_encode_mode,
+        routed_experts_num_experts,
+    )
     self.traj_id = traj_id
     self.request = request
     self.sampler = sampler
@@ -137,6 +144,25 @@ class TrajectoryCollectorEngine:
     self.chat_parser = chat_parser
     self.trajectory_store = trajectory_store
     self.store_routed_experts: bool = bool(store_routed_experts)
+    self.routed_experts_encode_mode: datatypes.RoutedExpertsEncodeMode = (
+        routed_experts_encode_mode
+    )
+    self.routed_experts_num_experts: int | None = routed_experts_num_experts
+    if (
+        self.store_routed_experts
+        and self.routed_experts_encode_mode == "auto"
+        and self.routed_experts_num_experts is None
+    ):
+      logging.log_first_n(
+          logging.WARNING,
+          "store_routed_experts is enabled with"
+          " routed_experts_encode_mode='auto' and"
+          " routed_experts_num_experts=None. For MoE models with >255 experts,"
+          " set routed_experts_num_experts (or"
+          " routed_experts_encode_mode='uint10') to avoid per-step tier"
+          " switching between 4D uint8 and 5D uint10.",
+          1,
+      )
     self.is_paused: bool = False
     self.is_cancelled: bool = False
     self.is_done: bool = False
@@ -344,13 +370,35 @@ class TrajectoryCollectorEngine:
     )
     self._inner_engine = inner_engine
     rl_traj = await inner_engine.collect(mode="Token")
-    if isinstance(rl_traj, dict) and self._turn_policy_versions:
-      rl_traj["policy_version"] = int(self._turn_policy_versions[0])
-      rl_traj["policy_versions"] = list(self._turn_policy_versions)
     if isinstance(rl_traj, dict):
+      if self._turn_policy_versions:
+        rl_traj["policy_version"] = int(self._turn_policy_versions[0])
+        rl_traj["policy_versions"] = list(self._turn_policy_versions)
       # Kept apart from `conversation_masks`, which the overlong filter zeroes,
       # so consumers still see how long a masked-out rollout's turns ran.
       rl_traj["assistant_turn_lengths"] = list(self._turn_sampled_lengths)
+      routed_experts = rl_traj.get("routed_experts")
+      if routed_experts is not None:
+        if (
+            self.routed_experts_encode_mode == "auto"
+            and self.routed_experts_num_experts is None
+        ):
+          logging.log_first_n(
+              logging.WARNING,
+              "Encoding routed_experts with routed_experts_encode_mode='auto'"
+              " and routed_experts_num_experts=None. For MoE models with >255"
+              " experts, set routed_experts_num_experts (or"
+              " routed_experts_encode_mode='uint10') to avoid per-step tier"
+              " switching between 4D uint8 and 5D uint10.",
+              1,
+          )
+        rl_traj["routed_experts"] = await asyncio.to_thread(
+            packing.encode_routed_experts,
+            routed_experts,
+            mode=self.routed_experts_encode_mode,
+            num_experts=self.routed_experts_num_experts,
+            batched=False,
+        )
     self.is_done = True
     return self._convert_to_trajectory(rl_traj)
 

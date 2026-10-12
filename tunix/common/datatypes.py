@@ -15,6 +15,36 @@
 """Common enums and datatypes for Tunix."""
 
 import enum
+from typing import Literal
+
+ROUTED_EXPERTS_ENCODE_MODES: tuple[str, ...] = (
+    "auto",
+    "uint8",
+    "uint10",
+    "int16",
+)
+RoutedExpertsEncodeMode = Literal["auto", "uint8", "uint10", "int16"]
+
+
+def validate_routed_experts_encode_config(
+    encode_mode: str,
+    num_experts: int | None,
+) -> None:
+  """Validates `routed_experts_encode_mode` and `routed_experts_num_experts`."""
+  if encode_mode not in ROUTED_EXPERTS_ENCODE_MODES:
+    raise ValueError(
+        "routed_experts_encode_mode must be one of"
+        f" {ROUTED_EXPERTS_ENCODE_MODES}. Received: {encode_mode!r}"
+    )
+  if num_experts is not None and (
+      isinstance(num_experts, bool)
+      or not isinstance(num_experts, int)
+      or int(num_experts) <= 0
+  ):
+    raise ValueError(
+        "routed_experts_num_experts must be a positive int or None."
+        f" Received: {num_experts!r}"
+    )
 
 
 class Mode(enum.Enum):

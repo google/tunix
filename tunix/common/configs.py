@@ -130,6 +130,19 @@ class RolloutConfig:
   # tensor writes unless explicitly opted in.
   store_routed_experts: bool = False
 
+  # Compact encoding mode for captured MoE routed_experts ("auto", "uint8",
+  # "uint10", or "int16").
+  routed_experts_encode_mode: datatypes.RoutedExpertsEncodeMode = "auto"
+
+  # Optional total number of MoE experts per layer (`E > 0`). When set with
+  # `routed_experts_encode_mode="auto"`, selects a deterministic compact tier
+  # (`uint8` for E <= 255, `uint10` for 256 <= E <= 1023, `int16` for E >= 1024)
+  # across all trajectories and validates that captured expert IDs are < E.
+  # Leaving this None when 256 <= E <= 1023 infers the tier per-trajectory from
+  # the observed max expert ID, which can flip batches between 4D uint8 and 5D
+  # uint10 across steps and trigger extra XLA compilations.
+  routed_experts_num_experts: int | None = None
+
   # vLLM specific rollout configs.
 
   # Whether to run rollout in vLLM server mode or batch inference mode.
@@ -277,6 +290,11 @@ class RolloutConfig:
   rollout_sglang_jax_kwargs: dict[str, Any] = dataclasses.field(
       default_factory=dict
   )
+
+  def __post_init__(self):
+    datatypes.validate_routed_experts_encode_config(
+        self.routed_experts_encode_mode, self.routed_experts_num_experts
+    )
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
