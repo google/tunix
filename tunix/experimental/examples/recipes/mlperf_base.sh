@@ -342,7 +342,7 @@ fi
 export PIPELINE_TRAIN_MICROBATCHES=${PIPELINE_TRAIN_MICROBATCHES:-false}
 export TRAJECTORY_GROUP_ORDER=${TRAJECTORY_GROUP_ORDER:-prompt_batch}
 export USE_DEFAULT_SQL_STORE="${USE_DEFAULT_SQL_STORE:-false}"
-if [[ -z "${TRAJECTORY_STORE_DB_URL:-}" ]] && [[ "${USE_DEFAULT_SQL_STORE}" == "1" || "${USE_DEFAULT_SQL_STORE}" == "true" || "${USE_DEFAULT_SQL_STORE}" == "True" ]]; then
+if [[ -z "${TRAJECTORY_STORE_DB_URL:-}" ]] && [[ "${USE_DEFAULT_SQL_STORE}" =~ ^(1|true|True|TRUE)$ ]]; then
   if [[ "${CLUSTER:-}" == "trellis-demo-0810" ]]; then
     export TRAJECTORY_STORE_DB_URL="postgresql+psycopg2://postgres@10.0.0.5:5432/tunix_trajectories"
   else
@@ -352,8 +352,12 @@ else
   export TRAJECTORY_STORE_DB_URL="${TRAJECTORY_STORE_DB_URL:-}"
 fi
 if [[ -n "${TRAJECTORY_STORE_DB_URL}" && -z "${PGPASSWORD:-}" ]]; then
-  PGPASSWORD="$(gcloud secrets versions access latest --secret=tunix-pg-password --project=cloud-tpu-multipod-dev 2>/dev/null || true)"
-  export PGPASSWORD
+  fetched_password="$(gcloud secrets versions access latest --secret=tunix-pg-password --project=cloud-tpu-multipod-dev 2>/dev/null || true)"
+  if [[ -n "${fetched_password}" ]]; then
+    export PGPASSWORD="${fetched_password}"
+  else
+    echo "WARNING: TRAJECTORY_STORE_DB_URL is set but PGPASSWORD is empty and could not be retrieved from GCP Secret Manager." >&2
+  fi
 fi
 
 # Sequence packing
