@@ -3425,8 +3425,8 @@ class RLProgramTest(absltest.TestCase):
 
   def test_rollouts_log_assistant_turns_from_conversation(self):
     async def _run():
-      # Token-mode rollouts carry their turns in `conversation_text`; their
-      # `steps` is always empty, so turns cannot be counted from it.
+      # Token-mode rollouts carry no `steps`; their turns live in
+      # `conversation_text`.
       def _conversation(num_turns):
         return [{"role": "user", "content": "task"}] + [
             {"role": "assistant", "content": "act"},
@@ -3442,7 +3442,6 @@ class RLProgramTest(absltest.TestCase):
               completion_tokens=np.array([3, 4], dtype=np.int32),
               traj={
                   "trajectory_reward": 1.0,
-                  "steps": [],
                   "conversation_text": _conversation(num_turns),
               },
           )
@@ -4938,6 +4937,25 @@ class RLProgramTest(absltest.TestCase):
           "rewards"
       ]
       self.assertEqual(rewards, [1.0, 0.0])
+      program.close()
+
+    asyncio.run(_run())
+
+  def test_critique_stage_adds_no_steps_to_token_mode_trajectories(self):
+    async def _run():
+      program = self._create_program(reward_fns=[])
+      program.engine = self.mock_engine
+      await program.raw_q.put(self._scoring_item(0))
+      await program.raw_q.put(self._scoring_item(1))
+      await program.raw_q.close()
+
+      await program.critique_stage()
+      scored_group = await program.scored_q.get_group()
+
+      # Token-mode turns live in `conversation_text`; an empty `steps` list
+      # would read as a rollout with no turns.
+      for item in scored_group:
+        self.assertNotIn("steps", item.traj)
       program.close()
 
     asyncio.run(_run())

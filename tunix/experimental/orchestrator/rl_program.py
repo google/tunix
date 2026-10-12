@@ -513,15 +513,26 @@ def _format_rollout_completion(conversation: Any) -> str:
 
 @dataclasses.dataclass(kw_only=True)
 class _StepTimes:
-  """Seconds a train step spent in each phase, logged as `orchestrator/*`.
+  """Seconds the train stage waited on each phase, logged as `orchestrator/*`.
 
   `exposed_generation_time`, `policy_training_time` and `weight_sync_time`
-  match the MLPerf branch so dashboards compare across branches. The phases
-  need not add up to `step_time_sec`: a microbatch's `train_step` keeps running
-  in the background while the next microbatch is packed, reference-scored or
-  awaited, and packing (`efficiency/packing/*`), committing and metric logging
-  belong to no phase. Times are wall clock on the event loop, so they also
-  absorb any stall from other stages sharing it.
+  match the MLPerf branch so dashboards compare across branches. Each is how
+  long the orchestrator awaited that phase, not how long its work ran. The
+  trainer answers `train_step` once its programs are dispatched (JAX runs them
+  asynchronously), so device time lands in whichever later call first blocks
+  on the trainer's results: with `PeftTrainerV2`, the `get_metrics` after each
+  optimizer update (it reads the step's losses and gradient norm), counted in
+  `policy_training_time`, or the actor logprob pass of a standalone sampler
+  agreement check. Training that runs while the stage waits for scored groups
+  or packs is hidden behind that waiting and packing, and `save_checkpoint`
+  and `sync_weights` absorb training only when nothing before them blocked.
+  So the phase split shows where the orchestrator waited, not where the
+  device spent its time. The phases need not add up to `step_time_sec`: a
+  microbatch's `train_step` keeps running in the background while the next
+  microbatch is packed, reference-scored or awaited, and packing
+  (`efficiency/packing/*`), committing and metric logging belong to no phase.
+  Times are wall clock on the event loop, so they also absorb any stall from
+  other stages sharing it.
 
   Attributes:
     exposed_generation_time: Waiting for scored rollout groups.
@@ -529,7 +540,10 @@ class _StepTimes:
     reference_logps_time: Reference-model logprob passes for the KL penalty.
     sampler_agreement_time: Standalone trainer logprob passes comparing the
       sampler against the trainer (`_apply_sampler_trainer_agreement`).
-    checkpoint_time: Saving the actor checkpoint.
+    checkpoint_time: The `save_checkpoint` call. With async checkpointing that
+      is only its blocking part (waiting out a previous save, copying the
+      state off device); the write itself runs in the background, uncounted.
+      About 0 on steps the save policy skips.
     weight_sync_time: Syncing the new policy to the rollout workers.
   """
 
@@ -1057,19 +1071,16 @@ class StandardRLProgram(RLProgram):
             raw_status = src_traj.get("status") or getattr(
                 src_item, "status", None
             )
-            raw_steps = src_traj.get("steps")
             traj_dict = dict(src_traj)
           elif src_traj is not None:
             raw_status = getattr(src_traj, "status", None) or getattr(
                 src_item, "status", None
             )
-            raw_steps = getattr(src_traj, "steps", None)
             traj_dict = (
                 src_traj.to_dict() if hasattr(src_traj, "to_dict") else {}
             )
           else:
             raw_status = getattr(src_item, "status", None)
-            raw_steps = []
             traj_dict = {}
           if isinstance(raw_status, datatypes.TrajectoryStatus):
             status = raw_status
@@ -1083,7 +1094,6 @@ class StandardRLProgram(RLProgram):
             )
           else:
             status = datatypes.TrajectoryStatus.RUNNING
-          steps = raw_steps if isinstance(raw_steps, list) else []
           src_metadata = getattr(src_item, "metadata", None)
           metadata = dict(src_metadata) if src_metadata else {}
           metadata.pop("routed_experts", None)
@@ -1098,7 +1108,6 @@ class StandardRLProgram(RLProgram):
           src_policy_version = int(src_policy_version or 0)
           traj_dict["trajectory_reward"] = reward_val
           traj_dict["status"] = status
-          traj_dict["steps"] = steps
           traj_dict["conversation_masks"] = payload.completion_mask
           traj_dict["policy_version"] = src_policy_version
           item = datatypes.TrajectoryItem(
