@@ -23,10 +23,14 @@
 export ROLLOUT_FP8="${ROLLOUT_FP8:-false}"
 export TRAINER_FP8="${TRAINER_FP8:-false}"
 for _var in ROLLOUT_FP8 TRAINER_FP8; do
-  if [[ "${!_var}" != "true" && "${!_var}" != "false" ]]; then
-    echo "ERROR: ${_var} must be true or false, got '${!_var}'" >&2
-    exit 1
-  fi
+  case "${!_var}" in
+    true|True|TRUE|1) printf -v "${_var}" '%s' "true" ;;
+    false|False|FALSE|0) printf -v "${_var}" '%s' "false" ;;
+    *)
+      echo "ERROR: ${_var} must be true or false (or 1/0), got '${!_var}'" >&2
+      exit 1
+      ;;
+  esac
 done
 if [[ "${TRAINER_FP8}" == "true" && "${ROLLOUT_FP8}" != "true" ]]; then
   echo "ERROR: TRAINER_FP8=true matches the trainer to an FP8 rollout; set ROLLOUT_FP8=true too" >&2
@@ -41,8 +45,12 @@ cfg.setdefault("maxtext_config", {})["fp8_moe"] = True
 print(json.dumps(cfg, separators=(",", ":")))
 ')"
   export VLLM_ADDITIONAL_CONFIG
-  export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS:-} rollout_fp8_moe=true"
+  if [[ " ${MAXTEXT_EXTRA_FLAGS:-} " != *" rollout_fp8_moe="* ]]; then
+    export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS:+${MAXTEXT_EXTRA_FLAGS} }rollout_fp8_moe=true"
+  fi
 fi
 if [[ "${TRAINER_FP8}" == "true" ]]; then
-  export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS:-} fp8_moe_fake_quant=true"
+  if [[ " ${MAXTEXT_EXTRA_FLAGS:-} " != *" fp8_moe_fake_quant="* ]]; then
+    export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS:+${MAXTEXT_EXTRA_FLAGS} }fp8_moe_fake_quant=true"
+  fi
 fi

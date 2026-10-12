@@ -21,14 +21,16 @@
 
 export USE_BATCHED_RPA_LONG_CTX_KERNEL="${USE_BATCHED_RPA_LONG_CTX_KERNEL:-true}"
 case "${USE_BATCHED_RPA_LONG_CTX_KERNEL}" in
-  true)
+  true|True|TRUE|1)
+    export USE_BATCHED_RPA_LONG_CTX_KERNEL="true"
     export ROLLOUT_MAXTEXT_ATTENTION="${ROLLOUT_MAXTEXT_ATTENTION:-vllm_batched_rpa_long_ctx}"
     ;;
-  false)
+  false|False|FALSE|0)
+    export USE_BATCHED_RPA_LONG_CTX_KERNEL="false"
     export ROLLOUT_MAXTEXT_ATTENTION="${ROLLOUT_MAXTEXT_ATTENTION:-vllm_rpa}"
     ;;
   *)
-    echo "ERROR: USE_BATCHED_RPA_LONG_CTX_KERNEL must be true or false, got '${USE_BATCHED_RPA_LONG_CTX_KERNEL}'" >&2
+    echo "ERROR: USE_BATCHED_RPA_LONG_CTX_KERNEL must be true or false (or 1/0), got '${USE_BATCHED_RPA_LONG_CTX_KERNEL}'" >&2
     exit 1
     ;;
 esac
