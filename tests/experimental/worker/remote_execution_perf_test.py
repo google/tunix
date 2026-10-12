@@ -45,6 +45,7 @@ import numpy as np
 import portpicker
 from tunix.experimental.worker import network
 from tunix.experimental.worker import remote_execution
+from tunix.rl import packing
 
 _FULL_SCALE = flags.DEFINE_bool(
     "full_scale",
@@ -491,6 +492,13 @@ def _format_results_table(results: list[PerfResult]) -> str:
           f"retention={res.extra['orch_compute_retention_pct']:.1f}%, "
           f"net_retention={res.extra['net_goodput_retention_pct']:.1f}%, "
           f"steps={int(res.extra['orch_compute_steps'])})"
+      )
+    if "wire_mib" in res.extra:
+      lines.append(
+          f"  --> Wire Footprint: {res.extra['wire_mib']:.2f} MiB "
+          f"(in-memory={res.extra['in_mem_mib']:.2f} MiB, "
+          f"raw_int16={res.payload_mib:.2f} MiB, "
+          f"wire_reduction={res.extra['wire_reduction_x']:.2f}x)"
       )
   lines.append("=" * 112)
   return "\n".join(lines)
@@ -1404,6 +1412,150 @@ class RemoteExecutionPerfTest(absltest.TestCase):
         if proc.stderr is not None:
           with contextlib.suppress(Exception):
             proc.stderr.close()
+
+  def test_w7_moe_router_replay_compression_ablation(self) -> None:
+    """Benchmarks Phase A (uint8/uint10) + Phase B (C++ LZ4 bulk TCP) vs raw int16."""
+    rng = np.random.default_rng(2026)
+    # Build a realistic MoE routed_experts batch: (B=32, T=2048, L=32, K=8) ->
+    # 32 MiB raw int16 in fast CI mode (~45% unset -1 padding + Zipfian top-8
+    # expert IDs).
+    batch_b = 32
+    seq_t = 2048
+    layers_l = 32
+    top_k = 8
+    active_t = int(seq_t * 0.55)
+    raw_i16 = np.full((batch_b, seq_t, layers_l, top_k), -1, dtype=np.int16)
+    expert_tuples = np.array(
+        [
+            [0, 1, 2, 3, 4, 5, 6, 7],
+            [0, 1, 2, 3, 11, 13, 17, 19],
+            [1, 2, 3, 5, 8, 13, 21, 34],
+            [0, 2, 4, 6, 8, 12, 16, 24],
+            [2, 3, 5, 7, 11, 13, 17, 23],
+            [0, 1, 4, 9, 16, 25, 36, 49],
+            [3, 6, 9, 12, 15, 18, 21, 24],
+            [1, 3, 7, 15, 19, 23, 29, 37],
+        ],
+        dtype=np.int16,
+    )
+    tuple_idx = rng.integers(
+        0, len(expert_tuples), size=(batch_b, active_t, layers_l)
+    )
+    raw_i16[:, :active_t, :, :] = expert_tuples[tuple_idx]
+    raw_i16.flat[0] = 17
+    raw_i16.flat[raw_i16.size // 2] = 55
+    raw_i16.flat[-1] = -1
+
+    packed_u8 = packing.encode_routed_experts(raw_i16, num_experts=128)
+    packed_u10 = packing.encode_routed_experts(raw_i16, num_experts=384)
+    raw_mib = raw_i16.nbytes / (1024**2)
+    raw_gib = raw_i16.nbytes / (1024**3)
+    small_meta = [
+        np.full((1024,), idx + 1.0, dtype=np.float32) for idx in range(16)
+    ]
+
+    async def _measure_variant(
+        name: str,
+        routed_arr: np.ndarray,
+        enable_lz4: bool,
+        handle: remote_execution.GrpcRemoteActorHandle,
+    ) -> PerfResult:
+      payload = {
+          "routed_experts": routed_arr,
+          "trajectory_shards": (),
+          "small_meta": small_meta,
+          "step": 7,
+      }
+      prev_lz4 = network.is_bulk_lz4_enabled()
+      network.set_bulk_lz4_enabled(enable_lz4)
+      try:
+        # Measure wire manifest size once.
+        req_probe = remote_execution.ExecutionRequest(
+            request_id="probe",
+            method_name="echo_summary",
+            args=(payload,),
+            kwargs={},
+        )
+        _, _, views, raw_bufs, _ = network._prepare_serialized_chunk_specs(
+            req_probe._as_tuple()
+        )
+        try:
+          comp_lens, comp_views = network._try_compress_views_nogil(views[1:])
+          try:
+            has_comp = any(c > 0 for c in comp_lens)
+            _, _, layout, _ = network._partition_bulk_views(
+                views,
+                compressed_lengths=comp_lens if has_comp else None,
+                compressed_views=comp_views if has_comp else None,
+            )
+            wire_bytes = layout.total_bulk_bytes
+          finally:
+            network._release_compressed_views(comp_views)
+        finally:
+          network._release_views_and_buffers(views, raw_bufs)
+
+        _ = await handle.asubmit("echo_summary", payload)
+        monitor = EventLoopLagMonitor()
+        monitor.start()
+        iters = 3
+        walls_ms: list[float] = []
+        for _ in range(iters):
+          t0 = time.perf_counter()
+          summary = await handle.asubmit("echo_summary", payload)
+          walls_ms.append((time.perf_counter() - t0) * 1000.0)
+          self.assertEqual(summary["nbytes"], routed_arr.nbytes)
+        lag = await monitor.stop()
+      finally:
+        network.set_bulk_lz4_enabled(prev_lz4)
+      med_ms = float(np.median(np.asarray(walls_ms, dtype=np.float64)))
+      wire_mib = wire_bytes / (1024**2)
+      in_mem_mib = routed_arr.nbytes / (1024**2)
+      return PerfResult(
+          workload=name,
+          payload_mib=raw_mib,
+          wall_ms=med_ms,
+          throughput_gib_s=raw_gib / (med_ms / 1000.0),
+          chunk_count=1,
+          loop_lag=lag,
+          extra={
+              "in_mem_mib": in_mem_mib,
+              "wire_mib": wire_mib,
+              "wire_reduction_x": raw_mib / max(1e-6, wire_mib),
+          },
+      )
+
+    async def _main() -> list[PerfResult]:
+      worker = _EchoPayloadWorker(response_payload={})
+      port = portpicker.pick_unused_port()
+      server = remote_execution.GrpcRemoteExecutionServer(worker)
+      await server.start_serving_async(port)
+      handle = remote_execution.GrpcRemoteActorHandle(
+          f"localhost:{port}", rpc_timeout_s=300.0
+      )
+      try:
+        await handle.asubmit("ping", 1)
+        r_base = await _measure_variant(
+            "W7A_MoE_Raw_Int16_NoLZ4", raw_i16, False, handle
+        )
+        r_u8 = await _measure_variant(
+            "W7B_MoE_PhaseA_Uint8_NoLZ4", packed_u8, False, handle
+        )
+        r_u8_lz4 = await _measure_variant(
+            "W7C_MoE_PhaseA_Uint8_PhaseB_LZ4", packed_u8, True, handle
+        )
+        r_u10_lz4 = await _measure_variant(
+            "W7D_MoE_PhaseA_Uint10_PhaseB_LZ4", packed_u10, True, handle
+        )
+        return [r_base, r_u8, r_u8_lz4, r_u10_lz4]
+      finally:
+        await handle.close()
+        await server.stop_serving(grace=0.0)
+
+    results = asyncio.run(_main())
+    self.__class__._results.extend(results)
+    # Phase A + Phase B must achieve > 4x wire byte reduction over raw int16.
+    self.assertGreater(results[2].extra["wire_reduction_x"], 4.0)
+    self.assertGreater(results[3].extra["wire_reduction_x"], 3.5)
 
 
 def _run_isolated_worker_server(port: int, payload_bytes: int) -> None:
