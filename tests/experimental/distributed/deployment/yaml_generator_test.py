@@ -983,6 +983,208 @@ class FailFastRenderTest(parameterized.TestCase):
       )
       self.assertNotIn("kueue.x-k8s.io/podset-required-topology", annos)
 
+  def test_cpu_teardown_gang_on_exit_disabled_by_default(self):
+    template_file = _get_template_path("jobset.cpu.yaml")
+    argv = [
+        "yaml_generator.py",
+        template_file,
+        "--jobset_name=foo-orch",
+        "--namespace=priority-dev",
+        "--gang_id=foo",
+    ]
+    with mock.patch.object(sys, "argv", argv):
+      with mock.patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+        yaml_generator.main()
+        rendered = mock_stdout.getvalue()
+    self.assertIn("terminationGracePeriodSeconds: 300", rendered)
+    self.assertNotIn("kubectl delete jobsets.jobset.x-k8s.io", rendered)
+
+  def test_cpu_teardown_gang_on_exit_renders_and_preserves_exit_code(self):
+    template_file = _get_template_path("jobset.cpu.yaml")
+    argv = [
+        "yaml_generator.py",
+        template_file,
+        "--jobset_name=foo-orch",
+        "--namespace=priority-dev",
+        "--gang_id=foo",
+        "--teardown_gang_on_exit",
+        '--worker_startup_command=eval "$TEST_WORKLOAD_CMD"',
+    ]
+    with mock.patch.object(sys, "argv", argv):
+      with mock.patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+        yaml_generator.main()
+        rendered = mock_stdout.getvalue()
+
+    job = _proc_job_spec(rendered)
+    (container,) = job["template"]["spec"]["containers"]
+    script = container["command"][2]
+    expected_kubectl = (
+        'kubectl delete jobsets.jobset.x-k8s.io -n "priority-dev"'
+        ' -l "scheduling.x-k8s.io/gang-id=foo"'
+        ' --field-selector="metadata.name!=foo-orch"'
+        " --ignore-not-found=true --wait=false"
+    )
+    self.assertIn(expected_kubectl, script)
+    self.assertLess(
+        script.index("EXIT_CODE=$?"),
+        script.index(expected_kubectl),
+    )
+    self.assertLess(
+        script.index(expected_kubectl),
+        script.index("exit $EXIT_CODE"),
+    )
+
+    tempdir = self.create_tempdir().full_path
+    kubectl_log = os.path.join(tempdir, "kubectl_calls.log")
+    kubectl_bin = os.path.join(tempdir, "kubectl")
+    with open(kubectl_bin, "w") as f:
+      f.write(
+          "#!/bin/bash\n"
+          f'echo "$*" >> "{kubectl_log}"\n'
+          'exit "${FAKE_KUBECTL_EXIT:-0}"\n'
+      )
+    os.chmod(kubectl_bin, stat.S_IRWXU)
+
+    for workload_exit, kubectl_exit in ((0, 0), (7, 0), (7, 1)):
+      with self.subTest(workload_exit=workload_exit, kubectl_exit=kubectl_exit):
+        if os.path.exists(kubectl_log):
+          os.remove(kubectl_log)
+        env = dict(
+            os.environ,
+            PATH=f"{tempdir}:{os.environ.get('PATH', '')}",
+            TEST_WORKLOAD_CMD=f"exit {workload_exit}",
+            FAKE_KUBECTL_EXIT=str(kubectl_exit),
+        )
+        result = subprocess.run(
+            ["bash", "-c", script],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        self.assertEqual(result.returncode, workload_exit, result.stdout)
+        with open(kubectl_log) as f:
+          calls = [line.strip() for line in f if line.strip()]
+        self.assertEqual(
+            calls,
+            [
+                "delete jobsets.jobset.x-k8s.io -n priority-dev"
+                " -l scheduling.x-k8s.io/gang-id=foo"
+                " --field-selector=metadata.name!=foo-orch"
+                " --ignore-not-found=true --wait=false"
+            ],
+        )
+
+  def test_teardown_gang_on_exit_without_gang_id_raises(self):
+    template_file = _get_template_path("jobset.cpu.yaml")
+    argv = [
+        "yaml_generator.py",
+        template_file,
+        "--jobset_name=foo-orch",
+        "--gang_id=",
+        "--teardown_gang_on_exit",
+    ]
+    with mock.patch.dict(os.environ, {"GANG_ID": ""}, clear=False):
+      with mock.patch.object(sys, "argv", argv):
+        with self.assertRaisesRegex(ValueError, "requires --gang_id"):
+          yaml_generator.main()
+
+  def test_teardown_gang_on_exit_on_unsupported_template_raises(self):
+    with self.assertRaisesRegex(ValueError, "not supported by template"):
+      _render(
+          "jobset.pathways.yaml",
+          "tpuv5:4x4x4",
+          "--gang_id=foo",
+          "--teardown_gang_on_exit",
+      )
+
+  @parameterized.named_parameters(
+      ("deepswe_dist", "deepswe_dist"),
+      ("math_gsm8k_dist", "math_gsm8k_dist"),
+  )
+  def test_k8s_launcher_orchestrator_teardown_on_exit_and_opt_out(
+      self, example_dir: str
+  ):
+    repo_root = pathlib.Path(__file__).resolve().parents[4]
+    launcher = (
+        repo_root
+        / "tunix"
+        / "experimental"
+        / "examples"
+        / example_dir
+        / "k8s_launcher.sh"
+    )
+    base_env = dict(
+        os.environ,
+        JOB_PREFIX="testrun",
+        K8S_NAMESPACE="priority-dev",
+        ROLLOUT_REPLICAS="1",
+        USE_AGENT_SANDBOX="0",
+        TUNIX_IMAGE="test-image:latest",
+        MAXTEXT_CKPT="gs://dummy-bucket/ckpt",
+        PYTHON_BIN=sys.executable,
+        PYTHON=sys.executable,
+    )
+    base_env.pop("GANG_ID", None)
+    base_env.pop("TEARDOWN_WORKERS_ON_EXIT", None)
+
+    res_default = subprocess.run(
+        ["bash", str(launcher), "start", "--dry-run"],
+        cwd=str(repo_root),
+        env=base_env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=True,
+    )
+    docs = [
+        d
+        for d in yaml.safe_load_all(res_default.stdout)
+        if isinstance(d, dict) and d.get("kind") == "JobSet"
+    ]
+    by_name = {d["metadata"]["name"]: d for d in docs}
+    self.assertIn("testrun-orch", by_name)
+    self.assertIn("testrun-train", by_name)
+    orch_script = (
+        by_name["testrun-orch"]["spec"]["replicatedJobs"][0]["template"][
+            "spec"
+        ]["template"]["spec"]["containers"][0]["command"][2]
+    )
+    self.assertIn(
+        'kubectl delete jobsets.jobset.x-k8s.io -n "priority-dev"'
+        ' -l "scheduling.x-k8s.io/gang-id=testrun"'
+        ' --field-selector="metadata.name!=testrun-orch"'
+        " --ignore-not-found=true --wait=false",
+        orch_script,
+    )
+    for name, doc in by_name.items():
+      if name == "testrun-orch":
+        continue
+      self.assertNotIn(
+          "kubectl delete jobsets.jobset.x-k8s.io",
+          yaml.safe_dump(doc),
+      )
+
+    res_opt_out = subprocess.run(
+        [
+            "bash",
+            str(launcher),
+            "start",
+            "--dry-run",
+            "--no-teardown-workers-on-exit",
+        ],
+        cwd=str(repo_root),
+        env=base_env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=True,
+    )
+    self.assertNotIn(
+        "kubectl delete jobsets.jobset.x-k8s.io", res_opt_out.stdout
+    )
+
 
 if __name__ == "__main__":
   absltest.main()

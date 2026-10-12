@@ -207,6 +207,36 @@ def render_fail_fast(
   )
 
 
+def render_teardown_on_exit(
+    *, enabled: bool, namespace: str, gang_id: str, jobset_name: str
+) -> str:
+  """Renders the PID-1 wrapper block that deletes sibling gang JobSets on exit."""
+  if not enabled:
+    return ""
+  if not gang_id:
+    raise ValueError(
+        "--teardown_gang_on_exit requires --gang_id (or GANG_ID) to be set."
+    )
+  return _indent_lines(
+      [
+          (
+              'echo "Tearing down sibling JobSets for gang'
+              f" '{gang_id}' in namespace '{namespace}'...\""
+          ),
+          (
+              "kubectl delete jobsets.jobset.x-k8s.io"
+              f' -n "{namespace}"'
+              f' -l "scheduling.x-k8s.io/gang-id={gang_id}"'
+              f' --field-selector="metadata.name!={jobset_name}"'
+              " --ignore-not-found=true --wait=false"
+              ' || echo "WARNING: sibling JobSet teardown failed (exit $?)"'
+          ),
+          "",
+      ],
+      _WRAPPER_INDENT,
+  )
+
+
 def main() -> None:
   """Parses command-line arguments and renders a deployment YAML from a template."""
   parser = argparse.ArgumentParser(
@@ -391,6 +421,16 @@ def main() -> None:
           " before the worker registered with the orchestrator."
       ),
   )
+  parser.add_argument(
+      "--teardown_gang_on_exit",
+      action="store_true",
+      default=False,
+      help=(
+          "Render the CPU PID-1 wrapper so that after the main command exits,"
+          " it deletes all sibling JobSets sharing scheduling.x-k8s.io/gang-id"
+          " (excluding this JobSet)."
+      ),
+  )
 
   args = parser.parse_args()
   if args.startup_retries < 0:
@@ -472,6 +512,12 @@ def main() -> None:
       )
     labels.append(f'    scheduling.x-k8s.io/gang-id: "{args.gang_id}"\n')
   queue_label = "  labels:\n" + "".join(labels) if labels else ""
+  teardown_on_exit = render_teardown_on_exit(
+      enabled=args.teardown_gang_on_exit,
+      namespace=args.namespace,
+      gang_id=args.gang_id,
+      jobset_name=jobset_name,
+  )
 
   # Optional reservation pin. NAP will not create a large TPU slice without being
   # told which reservation to draw from -- it fails the scale-up with
@@ -732,6 +778,14 @@ def main() -> None:
       raise ValueError(
           f"--fail_fast is not supported by template {args.template_file}"
       )
+    if (
+        args.teardown_gang_on_exit
+        and "${TEARDOWN_ON_EXIT}" not in template_text
+    ):
+      raise ValueError(
+          "--teardown_gang_on_exit is not supported by template"
+          f" {args.template_file}"
+      )
 
     # Guard: only Pathways templates run the colocated sidecar; non-Pathways
     # templates (e.g. CPU orchestrator, Ray/MCJAX rollout) share the launcher
@@ -805,6 +859,7 @@ def main() -> None:
         PATHWAYS_PROXY_EXTRA_ARGS=pathways_proxy_extra_args,
         ENABLE_MULTI_NUMA=enable_multi_numa,
         TPU_RAIDEN_DATA_NICS=tpu_raiden_data_nics,
+        TEARDOWN_ON_EXIT=teardown_on_exit,
         **dataclasses.asdict(fail_fast),
     )
     print(content)
