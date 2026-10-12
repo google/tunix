@@ -341,7 +341,20 @@ fi
 # Pack the next microbatch while the trainer runs the current one.
 export PIPELINE_TRAIN_MICROBATCHES=${PIPELINE_TRAIN_MICROBATCHES:-false}
 export TRAJECTORY_GROUP_ORDER=${TRAJECTORY_GROUP_ORDER:-prompt_batch}
-export TRAJECTORY_STORE_DB_URL="${TRAJECTORY_STORE_DB_URL:-}"
+export USE_DEFAULT_SQL_STORE="${USE_DEFAULT_SQL_STORE:-false}"
+if [[ -z "${TRAJECTORY_STORE_DB_URL:-}" ]] && [[ "${USE_DEFAULT_SQL_STORE}" == "1" || "${USE_DEFAULT_SQL_STORE}" == "true" || "${USE_DEFAULT_SQL_STORE}" == "True" ]]; then
+  if [[ "${CLUSTER:-}" == "trellis-demo-0810" ]]; then
+    export TRAJECTORY_STORE_DB_URL="postgresql+psycopg2://postgres@10.0.0.5:5432/tunix_trajectories"
+  else
+    export TRAJECTORY_STORE_DB_URL="postgresql+psycopg2://postgres@10.128.0.92:5432/tunix_trajectories"
+  fi
+else
+  export TRAJECTORY_STORE_DB_URL="${TRAJECTORY_STORE_DB_URL:-}"
+fi
+if [[ -n "${TRAJECTORY_STORE_DB_URL}" && -z "${PGPASSWORD:-}" ]]; then
+  PGPASSWORD="$(gcloud secrets versions access latest --secret=tunix-pg-password --project=cloud-tpu-multipod-dev 2>/dev/null || true)"
+  export PGPASSWORD
+fi
 
 # Sequence packing
 export MAX_SEQ_TOKEN_PER_TPU=${MAX_SEQ_TOKEN_PER_TPU:-65536}
