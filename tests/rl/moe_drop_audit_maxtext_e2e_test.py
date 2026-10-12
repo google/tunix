@@ -47,10 +47,21 @@ try:
 except ImportError:  # pragma: no cover
   MAXTEXT_AVAILABLE = False
 
+# The audit needs MaxText's log_moe_drops (the MaxText drop-audit change); older MaxText has no such flag.
+MAXTEXT_HAS_DROP_AUDIT = False
+if MAXTEXT_AVAILABLE:
+  try:
+    from maxtext.configs import types as _maxtext_types  # pylint: disable=g-import-not-at-top
+
+    MAXTEXT_HAS_DROP_AUDIT = "log_moe_drops" in _maxtext_types.MoEGeneral.model_fields
+  except (ImportError, AttributeError):  # pragma: no cover
+    MAXTEXT_HAS_DROP_AUDIT = False
+
 
 class MoeDropAuditE2ETest(absltest.TestCase):
 
   @absltest.skipUnless(MAXTEXT_AVAILABLE, "requires MaxText")
+  @absltest.skipUnless(MAXTEXT_HAS_DROP_AUDIT, "requires MaxText with log_moe_drops")
   def test_grpo_loss_through_trainer_worker(self):
     env = os.environ.copy()
     env["XLA_FLAGS"] = env.get("XLA_FLAGS", "") + f" --xla_force_host_platform_device_count={_NUM_DEVICES}"
