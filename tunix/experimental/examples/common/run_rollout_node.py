@@ -464,6 +464,22 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="Persist routed_experts in TrajectoryStore.",
   )
   parser.add_argument(
+      "--routed_experts_encode_mode",
+      type=str,
+      default=os.getenv("ROUTED_EXPERTS_ENCODE_MODE", "auto"),
+      help="Compact encoding mode for MoE routed_experts (auto, uint8, uint10, int16).",
+  )
+  parser.add_argument(
+      "--routed_experts_num_experts",
+      type=lambda v: None if v is None or str(v).strip() == "" or str(v).strip().lower() == "none" else int(v),
+      default=(
+          int(os.getenv("ROUTED_EXPERTS_NUM_EXPERTS"))
+          if os.getenv("ROUTED_EXPERTS_NUM_EXPERTS", "").strip()
+          else None
+      ),
+      help="Total number of MoE experts per layer for routed_experts_encode_mode=auto.",
+  )
+  parser.add_argument(
       "--free_kv_cache_during_weight_sync",
       type=_str2bool,
       default=_str2bool(os.getenv("ROLLOUT_FREE_KV_CACHE", "false")),
@@ -595,6 +611,8 @@ def _rollout_config_kwargs(
       "agent_config": _agent_config(args),
       "return_routed_experts": args.return_routed_experts,
       "store_routed_experts": args.store_routed_experts,
+      "routed_experts_encode_mode": args.routed_experts_encode_mode,
+      "routed_experts_num_experts": args.routed_experts_num_experts,
       "partial_rollout": bool(
           getattr(args, "in_flight_weight_updates", False)
       ),

@@ -261,6 +261,8 @@ export TRAINER_PREFUSE_MOE_WEIGHTS=${TRAINER_PREFUSE_MOE_WEIGHTS:-false}
 export ROLLOUT_PREFUSE_MOE_WEIGHTS=${ROLLOUT_PREFUSE_MOE_WEIGHTS:-true}
 export ENABLE_PREFIX_CACHING=${ENABLE_PREFIX_CACHING:-false}
 export RETURN_ROUTED_EXPERTS=${RETURN_ROUTED_EXPERTS:-false}
+export ROUTED_EXPERTS_ENCODE_MODE=${ROUTED_EXPERTS_ENCODE_MODE:-auto}
+export ROUTED_EXPERTS_NUM_EXPERTS=${ROUTED_EXPERTS_NUM_EXPERTS:-}
 
 export TRAINER_JOBSET_YAML=${TRAINER_JOBSET_YAML:-jobset.pathways.yaml}
 export TRAINER_TPU_SLICE=${TRAINER_TPU_SLICE:-tpuv5:2x2x2}
@@ -504,6 +506,8 @@ start_orchestrator() {
         ${TIS_TYPE:+--truncated_importance_sampling_type=${TIS_TYPE}} \
         ${TIS_RATIO_MIN:+--truncated_importance_sampling_ratio_min=${TIS_RATIO_MIN}} \
         ${TIS_RATIO:+--truncated_importance_sampling_ratio=${TIS_RATIO}} \
+        --routed_experts_encode_mode=${ROUTED_EXPERTS_ENCODE_MODE} \
+        ${ROUTED_EXPERTS_NUM_EXPERTS:+--routed_experts_num_experts=${ROUTED_EXPERTS_NUM_EXPERTS}} \
         ${SAMPLER_IS:+--sampler_is=${SAMPLER_IS}} \
         ${SAMPLER_IS_THRESHOLD:+--sampler_is_threshold=${SAMPLER_IS_THRESHOLD}} \
         ${SAMPLER_RS:+--sampler_rs=${SAMPLER_RS}} \
@@ -881,6 +885,8 @@ if cfg:
           --enable_prefix_caching=${ENABLE_PREFIX_CACHING} \
           --free_kv_cache_during_weight_sync=${ROLLOUT_FREE_KV_CACHE} \
           --return_routed_experts=${RETURN_ROUTED_EXPERTS} \
+          --routed_experts_encode_mode=${ROUTED_EXPERTS_ENCODE_MODE} \
+          ${ROUTED_EXPERTS_NUM_EXPERTS:+--routed_experts_num_experts=${ROUTED_EXPERTS_NUM_EXPERTS}} \
           --registry_module=tunix.experimental.examples.deepswe_dist.deepswe \
           --env_name=deepswe_env \
           --agent_name=${ROLLOUT_AGENT_NAME} \
