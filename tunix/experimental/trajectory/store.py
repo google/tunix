@@ -15,6 +15,7 @@
 """Protocols and factory registry for Trajectory Store implementations."""
 
 from tunix.experimental.trajectory import base_store
+from tunix.experimental.trajectory import composite_store
 from tunix.experimental.trajectory import file_store
 from tunix.experimental.trajectory import in_memory_store
 from tunix.experimental.trajectory import sql_store
@@ -23,6 +24,7 @@ from tunix.experimental.trajectory import sql_store
 # register them in TrajectoryStore._REGISTRY before TrajectoryStore.from_config
 # lookup.
 _BUILTIN_BACKENDS = (
+    composite_store.CompositeTrajectoryStore,
     file_store.FileTrajectoryStore,
     in_memory_store.InMemoryTrajectoryStore,
     sql_store.SqlTrajectoryStore,
@@ -35,3 +37,4 @@ TrajectoryReader = base_store.TrajectoryReader
 TrajectoryWriter = base_store.TrajectoryWriter
 TrajectoryStore = base_store.TrajectoryStore
 TunixTrajectoryStore = base_store.TunixTrajectoryStore
+CompositeTrajectoryStore = composite_store.CompositeTrajectoryStore
