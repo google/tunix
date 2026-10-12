@@ -429,8 +429,15 @@ def pop_moe_overflow(model: nnx.Module) -> jax.Array:
 
 
 def wants_moe_audit(model: Any) -> bool:
-  """True for a MaxText model configured with log_moe_drops=true (MoE drop audit)."""
-  return bool(getattr(getattr(model, "config", None), "log_moe_drops", False))
+  """True for a MaxText model configured with log_moe_drops=true (MoE drop audit).
+
+  The trainer hands the loss a `TunixMaxTextAdapter`, which has no `config` of
+  its own: the MaxText model, and its config, is `.base`. Both are checked.
+  """
+  for m in (model, getattr(model, "base", None)):
+    if bool(getattr(getattr(m, "config", None), "log_moe_drops", False)):
+      return True
+  return False
 
 
 def _natural_key(path_str: str) -> list[Any]:
