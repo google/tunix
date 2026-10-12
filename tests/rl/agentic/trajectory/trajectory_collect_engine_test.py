@@ -750,6 +750,116 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     self.assertTrue(result_traj.steps[-1].done)
     self.assertEqual(result_traj.status, agent_types.TrajectoryStatus.TIMEOUT)
 
+  def test_model_call_is_bounded_by_episode_timeout(self):
+    def sync_call(*args, **kwargs):
+      if self.trajectory.steps:  # The second turn hangs.
+        time.sleep(1.5)
+      return self.mock_model_call(*args, **kwargs)
+
+    async def async_call(*args, **kwargs):
+      if self.trajectory.steps:
+        await asyncio.sleep(10)
+      return self.mock_model_call(*args, **kwargs)
+
+    for model_call in (sync_call, async_call):
+      with self.subTest(model_call.__name__):
+        self.mock_env.step.side_effect = [('obs1', 1.0, False, {})]
+        engine = trajectory_collect_engine.TrajectoryCollectEngine(
+            agent=self.mock_agent,
+            env=self.mock_env,
+            model_call=model_call,
+            timeout=0.5,
+        )
+        result_traj = asyncio.run(self._run_collect(engine))
+
+        self.assertEqual(
+            result_traj.status, agent_types.TrajectoryStatus.TIMEOUT
+        )
+        self.assertLen(result_traj.steps, 1)
+        self.assertEqual(result_traj.step_idx, 0)
+        # Ended by the model-call deadline, not the post-step check (which
+        # would mark the step done).
+        self.assertFalse(result_traj.steps[-1].done)
+
+  def test_model_call_timeout_error_is_not_an_episode_timeout(self):
+    async def model_call(*args, **kwargs):
+      if self.trajectory.steps:
+        raise TimeoutError('sampler RPC timed out')
+      return self.mock_model_call(*args, **kwargs)
+
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=model_call,
+        timeout=60.0,
+    )
+    with self.assertRaisesRegex(TimeoutError, 'sampler RPC timed out'):
+      asyncio.run(self._run_collect(engine))
+
+  def test_first_model_call_is_not_cut_by_episode_timeout(self):
+    async def slow_first_call(*args, **kwargs):
+      if not self.trajectory.steps:
+        await asyncio.sleep(0.3)
+      return self.mock_model_call(*args, **kwargs)
+
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=slow_first_call,
+        timeout=0.1,
+    )
+    result_traj = asyncio.run(self._run_collect(engine))
+
+    # The over-budget first turn still lands, so the trajectory is never empty,
+    # but leaves no time for env.step: TIMEOUT, not ENV_TIMEOUT.
+    self.assertLen(result_traj.steps, 1)
+    self.assertEqual(result_traj.status, agent_types.TrajectoryStatus.TIMEOUT)
+    self.assertTrue(result_traj.steps[-1].done)
+    self.mock_env.step.assert_not_called()
+
+  def test_env_step_outlasting_budget_is_env_timeout(self):
+    self.mock_env.step.side_effect = lambda action: time.sleep(0.6)
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+        timeout=0.3,
+    )
+    result_traj = asyncio.run(self._run_collect(engine))
+
+    # env.step started with budget left, so running out is an env hang.
+    self.assertEqual(
+        result_traj.status, agent_types.TrajectoryStatus.ENV_TIMEOUT
+    )
+    self.assertTrue(result_traj.steps[-1].done)
+
+  def test_spent_budget_skips_next_model_call(self):
+    async def instant_call(*args, **kwargs):  # Never yields to the loop.
+      return self.mock_model_call(*args, **kwargs)
+
+    self.mock_env.step.side_effect = [('obs1', 1.0, False, {})]
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=instant_call,
+        timeout=60.0,
+    )
+    record_env_step = engine._record_env_step
+
+    def record_then_spend_budget(step):
+      record_env_step(step)
+      engine._start_ts -= engine.timeout  # After the turn's own budget check.
+
+    with mock.patch.object(
+        engine, '_record_env_step', side_effect=record_then_spend_budget
+    ):
+      result_traj = asyncio.run(self._run_collect(engine))
+
+    self.assertEqual(result_traj.status, agent_types.TrajectoryStatus.TIMEOUT)
+    self.mock_model_call.assert_called_once()
+    self.assertLen(result_traj.steps, 1)
+    self.assertFalse(result_traj.steps[-1].done)
+
   @mock.patch.object(utils, 'tokenize_and_generate_masks')
   def test_overlong_filter_masks_out_and_skips_reward(self, mock_convert):
     # Setup for MAX_STEPS_REACHED
@@ -1391,6 +1501,43 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         agent_types.TrajectoryStatus.MAX_STEPS_REACHED.name,
     )
     # 2 prompt + 2 assistant (1 routed + 1 padded) + 2 env (padded) = 6 rows.
+    self.assertEqual(token_data['routed_experts'].shape, (6, 4, 2))
+    np.testing.assert_array_equal(token_data['routed_experts'][:3], turn0)
+    np.testing.assert_array_equal(
+        token_data['routed_experts'][3:],
+        np.full((3, 4, 2), agent_types.UNSET_ROUTED_EXPERT, dtype=np.int16),
+    )
+
+  @mock.patch.object(utils, 'tokenize_and_generate_masks')
+  def test_token_mode_model_call_timeout_pads_terminal_routed_experts(
+      self, mock_convert
+  ):
+    self.mock_env.step.side_effect = [('obs1', 1.0, False, {})]
+    mock_convert.side_effect = [
+        ([101, 102], [1, 1]),  # prompt tokens (len 2)
+        ([301, 302], [0, 0]),  # env tokens (len 2)
+    ]
+    outputs, turn0, _ = self._two_turn_routed_outputs()
+
+    async def model_call(*args, **kwargs):
+      del args, kwargs
+      if self.trajectory.steps:  # The second turn outlasts the budget.
+        await asyncio.sleep(10)
+      return outputs[0]
+
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=model_call,
+        tokenizer=self.mock_tokenizer,
+        chat_parser=self.mock_chat_parser,
+        timeout=0.5,
+    )
+    token_data = asyncio.run(self._run_collect(engine, mode='Token'))
+    self.assertEqual(
+        token_data['status'], agent_types.TrajectoryStatus.TIMEOUT.name
+    )
+    # Same layout as an episode cut by max_steps after the first turn.
     self.assertEqual(token_data['routed_experts'].shape, (6, 4, 2))
     np.testing.assert_array_equal(token_data['routed_experts'][:3], turn0)
     np.testing.assert_array_equal(

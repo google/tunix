@@ -95,7 +95,8 @@ class TrajectoryCollectEngine:
         max_response_length (Optional[int]): Maximum number of context tokens to
           use before forced termination.
         timeout (float): Maximum episode duration in seconds before timeout
-          termination
+          termination. Model calls after the first turn are cut off, and no
+          model call or env.step starts, once it is spent.
         tokenizer: Optional tokenizer for converting messages to token IDs. This
           is required if we want to track down token counts.
         chat_parser: Optional chat parser for formatting messages
@@ -861,6 +862,18 @@ class TrajectoryCollectEngine:
       return True
     return False
 
+  def _remaining_time(self) -> float:
+    """Returns the seconds left of the episode's `timeout` budget."""
+    return self.timeout - (time.perf_counter() - self._start_ts)
+
+  def _mark_timeout(self) -> None:
+    """Marks the trajectory `TIMEOUT` once the `timeout` budget is spent."""
+    self.agent.trajectory.status = agent_types.TrajectoryStatus.TIMEOUT
+    logging.warning(
+        "%s Episode timed out after %.1fs.", self._debug_prefix, self.timeout
+    )
+    self._log_trajectory_clip("TIMEOUT")
+
   async def _one_step(self) -> bool:
     """Executes a single step and returns the Step object and Done status.
 
@@ -874,10 +887,30 @@ class TrajectoryCollectEngine:
     """
     if self._check_and_set_context_limit_reached():
       return True
+    # Like env.step, a turn only gets what is left of the budget (the first turn
+    # is exempt so a timed-out episode is never empty) and is skipped once it is
+    # spent.
+    remaining = self._remaining_time() if self.agent.trajectory.steps else None
+    if remaining is not None and remaining <= 0:
+      self._mark_timeout()
+      return True
     # `step_idx` is bound to `_one_step()` (starts at -1 on reset; first turn is 0)
     # rather than `len(steps)` so it is available before `update_from_model()`.
     self.agent.trajectory.step_idx += 1
-    action, cur_step = await self._on_model_interact()
+    # `_on_model_interact` does not await after the model call, so only
+    # generation is interrupted.
+    deadline = asyncio.timeout(remaining)
+    try:
+      async with deadline:
+        action, cur_step = await self._on_model_interact()
+    except asyncio.TimeoutError:
+      if not deadline.expired():
+        raise  # Raised by model_call itself, not by the episode budget.
+      # No step was recorded; as with MAX_STEPS_REACHED, the last recorded step
+      # keeps done=False (its env tokens are already in the completion).
+      self.agent.trajectory.step_idx -= 1
+      self._mark_timeout()
+      return True
     self._record_agent_step(cur_step)
     try:
       return await self._on_env_interact(action, cur_step)
@@ -1123,9 +1156,12 @@ class TrajectoryCollectEngine:
       self, action: Any, cur_step: agent_types.Step
   ) -> bool:
     """Executes environment step and populates environment-side step fields."""
-    remaining_time = self.timeout - (time.perf_counter() - self._start_ts)
+    remaining_time = self._remaining_time()
     tags = self._get_perf_tags()
-    if not self._check_and_set_context_limit_reached():
+    # If the budget is already spent (e.g. by the unbounded first model call),
+    # skip env.step and end as TIMEOUT below rather than as a hung env.
+    budget_spent = remaining_time <= 0
+    if not budget_spent and not self._check_and_set_context_limit_reached():
       try:
         with self.perf_v2.span(
             perf_constants.ENVIRONMENT,
@@ -1178,7 +1214,7 @@ class TrajectoryCollectEngine:
     else:
       done = True
 
-    step_timed_out = time.perf_counter() - self._start_ts > self.timeout
+    step_timed_out = budget_spent or self._remaining_time() < 0
     if self.tokenizer and self.chat_parser:
       env_messages = utils.get_recent_env_messages(self.agent.chat_completions)
       # Terminal-step environment messages are not appended to the response
@@ -1216,9 +1252,7 @@ class TrajectoryCollectEngine:
       self._record_exact_turn(cur_step, terminal=done or step_timed_out)
 
     if step_timed_out:
-      self.agent.trajectory.status = agent_types.TrajectoryStatus.TIMEOUT
-      logging.warning("Episode timed out after %d seconds.", self.timeout)
-      self._log_trajectory_clip("TIMEOUT")
+      self._mark_timeout()
       cur_step.done = True
       return True
 
