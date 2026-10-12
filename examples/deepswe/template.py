@@ -1209,6 +1209,14 @@ DEFAULT_OPENHANDS_KEEPALIVE_CMD = [
 
 RUNTIME_CONTAINER_NAME = "agent-runtime"
 EVAL_CONTAINER_NAME = "eval"
+DEFAULT_OPENHANDS_SERVER_IMAGE = (
+    "gcr.io/cloud-tpu-multipod-dev/tunix/openhands-agent-server:0.62"
+)
+
+
+def get_image_pull_policy() -> str:
+  """Returns the container imagePullPolicy for sandbox pods."""
+  return os.getenv("SANDBOX_IMAGE_PULL_POLICY", "IfNotPresent")
 
 
 def get_openhands_pod_template(
@@ -1240,8 +1248,10 @@ def get_openhands_pod_template(
       os.getenv("OPENHANDS_SERVER_IMAGE")
       or os.getenv("SANDBOX_RUNTIME_CONTAINER_IMAGE")
       or os.getenv("AGENT_SERVER_IMAGE")
-      or "gcr.io/cloud-tpu-multipod-dev/tunix/openhands-agent-server:0.62"
+      or DEFAULT_OPENHANDS_SERVER_IMAGE
   )
+
+  pull_policy = get_image_pull_policy()
 
   extra_pod_spec = {
       "automountServiceAccountToken": False,
@@ -1249,6 +1259,7 @@ def get_openhands_pod_template(
       "initContainers": [{
           "name": "oh-server",
           "image": server_image,
+          "imagePullPolicy": pull_policy,
           "command": [
               "sh",
               "-c",
@@ -1262,6 +1273,7 @@ def get_openhands_pod_template(
       }],
       "volumes": [{"name": "oh", "emptyDir": {}}],
       "containers": [{
+          "imagePullPolicy": pull_policy,
           "ports": [{"containerPort": 8000}],
           "volumeMounts": [{"name": "oh", "mountPath": "/oh"}],
           "readinessProbe": {
@@ -1303,6 +1315,7 @@ def get_openhands_pod_template(
     }]
 
   return TemplateSpec(
+      image_pull_policy=pull_policy,
       keepalive_command=keepalive_cmd,
       resources=ResourceSpec(
           cpu=os.getenv("SANDBOX_CPU", "500m"),
