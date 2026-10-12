@@ -8,6 +8,7 @@ from tunix.experimental.trajectory.benchmarks import run_benchmark
 
 def _parse_cmd(cmd: str = "") -> run_benchmark.BenchmarkConfig:
   """Parses a CLI argument string into a `BenchmarkConfig`."""
+  # pyrefly: ignore[bad-return]
   return run_benchmark.parse_flags(["test", *cmd.split()])
 
 
@@ -30,13 +31,16 @@ class RunBenchmarkCLITest(absltest.TestCase):
             ),
         ),
     )
+    self.assertEqual(config.workload.num_workers, 1)
+    self.assertFalse(config.workload.writer_per_worker)
 
   def test_parse_flags_file_store_custom_overrides_store_and_workload(
       self,
   ) -> None:
     config = _parse_cmd(
         "--store file --root_dir /tmp/custom_path --cleanup_after True"
-        " --steps_per_trajectory 10 --step_payload_chars 500"
+        " --steps_per_trajectory 10 --step_payload_chars 500 --num_workers 4"
+        " --writer_per_worker True"
     )
 
     self.assertEqual(
@@ -48,6 +52,8 @@ class RunBenchmarkCLITest(absltest.TestCase):
     )
     self.assertEqual(config.workload.steps_per_trajectory, 10)
     self.assertEqual(config.workload.step_payload_chars, 500)
+    self.assertEqual(config.workload.num_workers, 4)
+    self.assertTrue(config.workload.writer_per_worker)
 
   def test_parse_flags_in_memory_store_selects_in_memory_config(self) -> None:
     config = _parse_cmd("--store in_memory")
@@ -142,6 +148,66 @@ class ManagedStoreTest(parameterized.TestCase):
     self.assertFalse(run_dir.exists())
     with self.assertRaisesRegex(RuntimeError, r"Cannot write to a closed"):
       store_instance.update_metadata(trajectory_testing.METADATA_1)
+
+  def test_managed_stores_creates_and_closes_extra_sql_writers(self) -> None:
+    db_path = epath.Path(self.create_tempdir().full_path) / "bench.db"
+    config = run_benchmark.SqlTrajectoryStoreConfig(
+        db_url=f"sqlite:///{db_path}"
+    )
+
+    with run_benchmark._managed_stores(config, num_writers=3) as (
+        reader,
+        writers,
+    ):
+      self.assertLen(writers, 3)
+      self.assertIs(writers[0], reader)
+      self.assertIsNot(writers[1], reader)
+      self.assertEqual(writers[1].to_config(), reader.to_config())
+      extra_writer = writers[1]
+
+    with self.assertRaisesRegex(RuntimeError, r"Cannot write to a closed"):
+      extra_writer.update_metadata(trajectory_testing.METADATA_1)
+
+  def test_managed_stores_creates_and_closes_extra_file_writers(self) -> None:
+    root_dir = epath.Path(self.create_tempdir().full_path)
+    config = run_benchmark.FileTrajectoryStoreConfig(
+        root_dir=root_dir, cleanup_after=True
+    )
+
+    with run_benchmark._managed_stores(config, num_writers=3) as (
+        reader,
+        writers,
+    ):
+      self.assertLen(writers, 3)
+      self.assertIs(writers[0], reader)
+      self.assertIsNot(writers[1], reader)
+      self.assertEqual(writers[1].to_config(), reader.to_config())
+      extra_writer = writers[1]
+
+    with self.assertRaisesRegex(RuntimeError, r"Cannot write to a closed"):
+      extra_writer.update_metadata(trajectory_testing.METADATA_1)
+
+  def test_managed_stores_in_memory_multiple_writers_raises_value_error(
+      self,
+  ) -> None:
+    config = run_benchmark.InMemoryTrajectoryStoreConfig()
+
+    with self.assertRaisesRegex(
+        ValueError, "--writer_per_worker is not supported"
+    ):
+      with run_benchmark._managed_stores(config, num_writers=2):
+        pass
+
+  def test_managed_stores_in_memory_sqlite_multiple_writers_raises_value_error(
+      self,
+  ) -> None:
+    config = run_benchmark.SqlTrajectoryStoreConfig()
+
+    with self.assertRaisesRegex(
+        ValueError, "--writer_per_worker is not supported"
+    ):
+      with run_benchmark._managed_stores(config, num_writers=2):
+        pass
 
 
 if __name__ == "__main__":

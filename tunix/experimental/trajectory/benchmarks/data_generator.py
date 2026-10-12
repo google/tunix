@@ -28,6 +28,26 @@ class WorkloadConfig:
       default=20000,
       metadata={"help": "Character length of step message payload (~20KB)."},
   )
+  num_workers: int = dataclasses.field(
+      default=1,
+      metadata={
+          "help": (
+              "Number of concurrent worker threads writing trajectories in"
+              " parallel."
+          )
+      },
+  )
+  writer_per_worker: bool = dataclasses.field(
+      default=False,
+      metadata={
+          "help": (
+              "If True, each worker thread gets its own TrajectoryWriter"
+              " instance built via TrajectoryStore.from_config (simulating"
+              " separate rollout worker processes). If False, all worker"
+              " threads share a single TrajectoryWriter."
+          )
+      },
+  )
 
   def __post_init__(self) -> None:
     if not self.cumulative_trajectory_checkpoints:
@@ -49,6 +69,8 @@ class WorkloadConfig:
       raise ValueError("steps_per_trajectory must be > 0.")
     if self.step_payload_chars <= 0:
       raise ValueError("step_payload_chars must be > 0.")
+    if self.num_workers <= 0:
+      raise ValueError("num_workers must be > 0.")
 
 
 def generate_trajectories(
