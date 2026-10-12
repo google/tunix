@@ -21,7 +21,10 @@ Tunix NNX implementation.
 """
 
 from collections.abc import Mapping
+import concurrent.futures
+import gc
 import itertools
+import os
 import re
 from typing import Any
 
@@ -31,6 +34,7 @@ import flax
 from flax import nnx
 import jax
 from jax import numpy as jnp
+import numpy as np
 from orbax import checkpoint as ocp
 from tunix.models.gemma4 import model as model_lib
 
@@ -76,21 +80,56 @@ def create_model_from_checkpoint(
   )
   raw_params = ocp.StandardCheckpointer().restore(checkpoint_path)
   mapped_params = map_from_upstream_checkpoint(raw_params)
+  del raw_params
+  gc.collect()
+
   model_state = nnx.state(abs_model)
 
   # Prune multimodal params (e.g., audio_input_projection) not in the
   # text-only model. Must precede validation to avoid false mismatches.
   pruned_params = _prune_to_model_keys(mapped_params, model_state)
   _validate_param_shapes(pruned_params, model_state)
+  del mapped_params
+  gc.collect()
 
   # TODO: b/343224716 - Add per-component dtype handling (like Gemma 3's
   # _get_param_dtype) when multimodal Gemma 4 loading is needed.
   if mesh is not None:
-    typed_params = jax.tree_util.tree_map_with_path(
-        lambda p, x, s: jnp.asarray(x, device=s, dtype=dtype),
-        pruned_params,
-        nnx.to_pure_dict(nnx.get_named_sharding(model_state, mesh)),
-    )
+    sharding_dict = nnx.to_pure_dict(nnx.get_named_sharding(model_state, mesh))
+    flat_pruned = flax.traverse_util.flatten_dict(pruned_params)
+    flat_sharding = flax.traverse_util.flatten_dict(sharding_dict)
+    missing_sharding_keys = set(flat_pruned.keys()) - set(flat_sharding.keys())
+    if missing_sharding_keys:
+      raise KeyError(
+          'Missing sharding specifications for checkpoint keys: '
+          f'{sorted(str(k) for k in missing_sharding_keys)}'
+      )
+    flat_typed = {}
+
+    def _put_shard(
+        key: tuple[Any, ...],
+        val: Any,
+        shard: jax.sharding.NamedSharding,
+    ) -> tuple[tuple[Any, ...], jax.Array]:
+      val_arr = np.asarray(val)
+      target_dtype = (
+          dtype if np.issubdtype(val_arr.dtype, np.floating) else val_arr.dtype
+      )
+      arr = np.ascontiguousarray(val_arr, dtype=target_dtype)
+      return key, jax.device_put(arr, shard)
+
+    max_workers = min(32, os.cpu_count() or 4)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+      futures = [
+          executor.submit(_put_shard, k, flat_pruned[k], flat_sharding[k])
+          for k in flat_pruned
+      ]
+      for future in concurrent.futures.as_completed(futures):
+        k, res = future.result()
+        flat_typed[k] = res
+
+    del flat_pruned
+    typed_params = flax.traverse_util.unflatten_dict(flat_typed)
   else:
     typed_params = jax.tree_util.tree_map_with_path(
         lambda p, x: jnp.asarray(x, dtype=dtype),
