@@ -1,6 +1,9 @@
 """CLI binary to execute progressive load benchmarks on Trajectory Store."""
 
+from collections.abc import Iterator
+import contextlib
 import dataclasses
+from typing import Any
 import uuid
 
 from absl import app
@@ -8,8 +11,8 @@ from etils import eapp
 from etils import epath
 import simple_parsing
 import termcolor
-from tunix.experimental.trajectory import file_store
-from tunix.experimental.trajectory import in_memory_store
+from tunix.experimental.trajectory import db_engine
+from tunix.experimental.trajectory import store as store_lib
 from tunix.experimental.trajectory.benchmarks import benchmark_lib
 from tunix.experimental.trajectory.benchmarks import data_generator
 
@@ -34,10 +37,106 @@ class FileTrajectoryStoreConfig:
       },
   )
 
+  def build_store_config(self, run_id: str) -> dict[str, Any]:
+    """Creates the run directory and returns the `from_config` dict.
+
+    Args:
+      run_id: Run identifier that scopes the benchmark's data.
+
+    Returns:
+      A `TrajectoryStore.from_config` dict for the file backend.
+    """
+    run_dir = self.root_dir / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    print(termcolor.colored(f"Created run directory: {run_dir}", "green"))
+    return {
+        "backend": "file",
+        "root_dir": str(self.root_dir),
+        "run_id": run_id,
+    }
+
+  def cleanup(self, run_id: str) -> None:
+    """Deletes the run directory when `cleanup_after` is enabled."""
+    if self.cleanup_after:
+      run_dir = self.root_dir / run_id
+      print(
+          termcolor.colored(
+              f"Cleaning up temporary directory: {run_dir}", "yellow"
+          )
+      )
+      run_dir.rmtree(missing_ok=True)
+
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class InMemoryTrajectoryStoreConfig:
   """Configuration for InMemoryTrajectoryStore backend."""
+
+  def build_store_config(self, run_id: str) -> dict[str, Any]:
+    """Returns the `from_config` dict for the in-memory backend.
+
+    Args:
+      run_id: Unused; the in-memory backend is not scoped by run.
+
+    Returns:
+      A `TrajectoryStore.from_config` dict for the in-memory backend.
+    """
+    del run_id  # Unused.
+    return {"backend": "memory"}
+
+  def cleanup(self, run_id: str) -> None:
+    """No-op; the in-memory backend creates no artifacts."""
+    del run_id  # Unused.
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class SqlTrajectoryStoreConfig:
+  """Configuration for SqlTrajectoryStore backend."""
+
+  db_url: str = dataclasses.field(
+      default="sqlite:///:memory:",
+      metadata={
+          "help": (
+              "Database connection URL (e.g. 'sqlite:///:memory:',"
+              " 'sqlite:////tmp/db.sqlite', or"
+              " 'postgresql+psycopg2://postgres@127.0.0.1:5432/postgres')."
+              " Supply Postgres passwords through the PGPASSWORD environment"
+              " variable, not the URL."
+          )
+      },
+  )
+
+  def build_store_config(self, run_id: str) -> dict[str, Any]:
+    """Returns the `from_config` dict for the SQL backend.
+
+    Args:
+      run_id: Run identifier that scopes the benchmark's data.
+
+    Returns:
+      A `TrajectoryStore.from_config` dict for the SQL backend.
+    """
+    print(
+        termcolor.colored(
+            "Initializing SqlTrajectoryStore at"
+            f" {db_engine.redact_url(self.db_url)} (run_id: {run_id})",
+            "green",
+        )
+    )
+    return {
+        "backend": "sql",
+        "db_url": self.db_url,
+        "run_id": run_id,
+    }
+
+  def cleanup(self, run_id: str) -> None:
+    """No-op; SQL databases are not deleted by the benchmark."""
+    del run_id  # Unused.
+
+
+StoreConfig = (
+    FileTrajectoryStoreConfig
+    | InMemoryTrajectoryStoreConfig
+    | SqlTrajectoryStoreConfig
+)
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
@@ -47,14 +146,13 @@ class BenchmarkConfig:
   workload: data_generator.WorkloadConfig = dataclasses.field(
       default_factory=data_generator.WorkloadConfig
   )
-  store: FileTrajectoryStoreConfig | InMemoryTrajectoryStoreConfig = (
-      simple_parsing.subgroups(
-          {
-              "file": FileTrajectoryStoreConfig,
-              "in_memory": InMemoryTrajectoryStoreConfig,
-          },
-          default="file",
-      )
+  store: StoreConfig = simple_parsing.subgroups(
+      {
+          "file": FileTrajectoryStoreConfig,
+          "in_memory": InMemoryTrajectoryStoreConfig,
+          "sql": SqlTrajectoryStoreConfig,
+      },
+      default="file",
   )
 
 
@@ -108,56 +206,55 @@ def _print_report_table(report: benchmark_lib.BenchmarkReport) -> None:
   print("=" * 90 + "\n")
 
 
-def main(config: BenchmarkConfig) -> None:
-  run_dir = None
-  match config.store:
-    case FileTrajectoryStoreConfig(root_dir=target_root):
-      target_root.mkdir(parents=True, exist_ok=True)
-      run_id = f"run_{uuid.uuid4().hex[:8]}"
-      run_dir = target_root / run_id
-      run_dir.mkdir(parents=True, exist_ok=True)
-      print(
-          termcolor.colored(
-              f"Created temporary FileTrajectoryStore run directory: {run_dir}",
-              "green",
-          )
-      )
-      store = file_store.FileTrajectoryStore(
-          root_dir=target_root,
-          run_id=run_id,
-      )
-      reader = store
-      writer = store
-    case InMemoryTrajectoryStoreConfig():
-      store = in_memory_store.InMemoryTrajectoryStore()
-      reader = store
-      writer = store
-    case _:
-      raise ValueError(f"Unknown store config type: {type(config.store)!r}")
+@contextlib.contextmanager
+def _managed_store(
+    store_config: StoreConfig,
+) -> Iterator[store_lib.TrajectoryStore]:
+  """Builds a store via `TrajectoryStore.from_config`, then tears it down.
 
+  Building through `from_config` exercises the same construction path the
+  orchestrator and rollout workers use. On teardown, the store is closed
+  (draining pending writes) before `store_config.cleanup(run_id)` deletes any
+  run artifacts, and an error raised while closing propagates rather than
+  leaving a report built on partially persisted data looking healthy.
+
+  Args:
+    store_config: Parsed CLI configuration selecting the backend.
+
+  Yields:
+    The constructed store, open for reads and writes.
+  """
+  run_id = f"run_{uuid.uuid4().hex[:8]}"
+  backend_config = store_config.build_store_config(run_id)
   try:
+    store = store_lib.TrajectoryStore.from_config(
+        {"enabled": True, **backend_config}
+    )
+    if store is None:
+      raise ValueError(
+          f"Store config for backend {backend_config['backend']!r} built no"
+          " store."
+      )
+    try:
+      yield store
+    finally:
+      store.close()
+  finally:
+    store_config.cleanup(run_id)
+
+
+def main(config: BenchmarkConfig) -> None:
+  """Executes progressive load recovery benchmarks for trajectory stores."""
+  with _managed_store(config.store) as store_instance:
     report = benchmark_lib.run_recovery_benchmark(
-        reader=reader,
-        writer=writer,
+        reader=store_instance,
+        writer=store_instance,
         workload=config.workload,
     )
     _print_report_table(report)
-  finally:
-    if (
-        isinstance(config.store, FileTrajectoryStoreConfig)
-        and config.store.cleanup_after
-        and run_dir
-        and run_dir.exists()
-    ):
-      print(
-          termcolor.colored(
-              f"Cleaning up temporary run directory: {run_dir}",
-              "yellow",
-          )
-      )
-      run_dir.rmtree(missing_ok=True)
 
 
 if __name__ == "__main__":
   eapp.better_logging()
-  app.run(main, flags_parser=parse_flags)  # pyrefly: ignore[no-matching-overload]
+  # pyrefly: ignore[no-matching-overload]
+  app.run(main, flags_parser=parse_flags)
