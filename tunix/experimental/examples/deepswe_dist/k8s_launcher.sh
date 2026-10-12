@@ -1114,7 +1114,7 @@ while [[ $# -gt 0 ]]; do
       echo "  --image_rewrite_prefix   Registry prefix for sandbox images"
       exit 0
       ;;
-    start|stop|orchestrator|trainer|rollout|test_orchestrator|mock_trainer|mock_rollout|start_rollout_only|eval|stop_eval)
+    start|stop|orchestrator|trainer|rollout|test_orchestrator|mock_trainer|mock_rollout|start_rollout_only|prepull_sandbox|eval|stop_eval)
       COMMAND="$1"
       shift
       ;;
