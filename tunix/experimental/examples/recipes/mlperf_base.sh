@@ -341,6 +341,13 @@ fi
 # Pack the next microbatch while the trainer runs the current one.
 export PIPELINE_TRAIN_MICROBATCHES=${PIPELINE_TRAIN_MICROBATCHES:-false}
 export TRAJECTORY_GROUP_ORDER=${TRAJECTORY_GROUP_ORDER:-prompt_batch}
+export USE_DEFAULT_SQL_STORE="${USE_DEFAULT_SQL_STORE:-false}"
+if [[ -z "${TRAJECTORY_STORE_DB_URL:-}" ]] && [[ "${USE_DEFAULT_SQL_STORE}" =~ ^(1|true|True|TRUE)$ ]]; then
+  TRAJECTORY_STORE_DB_URL="$(gcloud secrets versions access latest --secret=tunix-sql-store-uri --project=cloud-tpu-multipod-dev 2>/dev/null || true)"
+  if [[ -z "${TRAJECTORY_STORE_DB_URL}" ]]; then
+    echo "WARNING: USE_DEFAULT_SQL_STORE is enabled but TRAJECTORY_STORE_DB_URL could not be retrieved from GCP Secret Manager." >&2
+  fi
+fi
 export TRAJECTORY_STORE_DB_URL="${TRAJECTORY_STORE_DB_URL:-}"
 
 # Sequence packing
