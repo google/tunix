@@ -171,10 +171,12 @@ export VLLM_MAX_NUM_BATCHED_TOKENS=2048
 # keep the two consistent when combining them.
 export ROLLOUT_ATTENTION_DP="${ROLLOUT_ATTENTION_DP:-true}"
 case "${ROLLOUT_ATTENTION_DP}" in
-  true)
-    export VLLM_MAX_NUM_SEQS=16
+  true|True|TRUE|1)
+    export ROLLOUT_ATTENTION_DP="true"
+    export VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-16}"
     ;;
-  false)
+  false|False|FALSE|0)
+    export ROLLOUT_ATTENTION_DP="false"
     export VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-64}"
     VLLM_ADDITIONAL_CONFIG="$(python3 -c '
 import json, os
@@ -190,11 +192,13 @@ import json, os
 s = json.loads(os.environ["VLLM_ADDITIONAL_CONFIG"])["sharding"]["sharding_strategy"]
 print(int(s.get("expert_parallelism", 1)) * int(s["tensor_parallelism"]))
 ')"
-    export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS:+$MAXTEXT_EXTRA_FLAGS }kv_tp_size=${_rollout_kv_tp}"
+    if [[ " ${MAXTEXT_EXTRA_FLAGS:-} " != *" kv_tp_size="* ]]; then
+      export MAXTEXT_EXTRA_FLAGS="${MAXTEXT_EXTRA_FLAGS:+$MAXTEXT_EXTRA_FLAGS }kv_tp_size=${_rollout_kv_tp}"
+    fi
     unset _rollout_kv_tp
     ;;
   *)
-    echo "ERROR: ROLLOUT_ATTENTION_DP must be true or false, got '${ROLLOUT_ATTENTION_DP}'" >&2
+    echo "ERROR: ROLLOUT_ATTENTION_DP must be true or false (or 1/0), got '${ROLLOUT_ATTENTION_DP}'" >&2
     exit 1
     ;;
 esac
