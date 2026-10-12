@@ -33,6 +33,7 @@ from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import distributed_rl_engine
 from tunix.experimental.orchestrator import rl_program
+from tunix.experimental.orchestrator import step_telemetry
 from tunix.experimental.trajectory import in_memory_store
 from tunix.experimental.worker import inference_worker as exp_inference_worker
 from tunix.experimental.worker import remote_execution
@@ -3633,7 +3634,7 @@ class RLProgramTest(absltest.TestCase):
         step_time_sec=10.0,
         consumed_policy_version=0,
         log_step=0,
-        step_times=rl_program._StepTimes(
+        step_times=step_telemetry.StepTimes(
             exposed_generation_time=6.0,
             policy_training_time=2.0,
             reference_logps_time=0.75,
@@ -3767,6 +3768,8 @@ class RLProgramTest(absltest.TestCase):
       program._outstanding_prompts.dispatched("prompt_0", 2)
       program._outstanding_prompts.returned("stale_prompt")
       program._in_flight_rollouts = 2
+      # One of prompt_1's two rollouts is already scored.
+      await program.scored_q.put(self._scored_item(1))
 
       async def _deliver_later():
         await asyncio.sleep(0.1)
@@ -3790,6 +3793,7 @@ class RLProgramTest(absltest.TestCase):
           "in_flight=2",
           "prompts_in_flight=1",
           "untracked_returns=1",
+          "scored_ready_groups=0 scored_partial_groups=1",
           "oldest=prompt_0(age=",
           ",left=2)",
       ):
@@ -5763,289 +5767,6 @@ class GenerationMetricsLoggingTest(absltest.TestCase):
     )
 
 
-def _health_item(
-    group_index=0,
-    *,
-    status=datatypes.TrajectoryStatus.SUCCEEDED,
-    num_turns=None,
-    turn_lengths=None,
-    window=None,
-    worker_id="rollout-0",
-):
-  """A scored rollout carrying what the rollout health metrics read."""
-  traj = {"trajectory_reward": 1.0, "status": status}
-  if num_turns is not None:
-    traj["conversation_text"] = [{"role": "user", "content": "task"}] + [
-        {"role": "assistant", "content": "act"},
-        {"role": "user", "content": "observation"},
-    ] * num_turns
-  if turn_lengths is not None:
-    traj["assistant_turn_lengths"] = list(turn_lengths)
-  metadata = {}
-  if window is not None:
-    metadata["lineage"] = _rollout_lineage(*window, worker_id=worker_id)
-  return datatypes.TrajectoryItem(
-      prompt_id="p0", group_index=group_index, traj=traj, metadata=metadata
-  )
-
-
-class RolloutHealthMetricsTest(absltest.TestCase):
-  """Covers `_rollout_health_metrics`, the per-step rollout health view."""
-
-  def test_reports_every_status_every_step(self):
-    items = [_health_item(i) for i in range(3)]
-    items.append(
-        _health_item(
-            3, status=datatypes.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED
-        )
-    )
-
-    metrics = rl_program._rollout_health_metrics(items)
-
-    self.assertEqual(metrics["rollout/status/succeeded_frac"], 0.75)
-    self.assertEqual(
-        metrics["rollout/status/max_context_limit_reached_frac"], 0.25
-    )
-    # Statuses that did not occur still report 0, so series stay continuous.
-    self.assertEqual(metrics["rollout/status/timeout_frac"], 0.0)
-    self.assertLen(
-        [k for k in metrics if k.startswith("rollout/status/")],
-        len(datatypes.TrajectoryStatus),
-    )
-
-  def test_rollout_without_status_raises(self):
-    # `critique_stage` stamps every scored rollout's status, so a missing one
-    # is a broken contract rather than an unknown.
-    no_status = _health_item(0)
-    del no_status.traj["status"]
-
-    with self.assertRaises(KeyError):
-      rl_program._rollout_health_metrics([no_status])
-
-  def test_counts_assistant_turns_from_the_conversation(self):
-    metrics = rl_program._rollout_health_metrics([
-        _health_item(0, num_turns=2),
-        _health_item(1, num_turns=5),
-        # No conversation: its turn count is unknown, not zero.
-        _health_item(2),
-    ])
-
-    self.assertEqual(metrics["rollout/num_turns_mean"], 3.5)
-    self.assertEqual(metrics["rollout/num_turns_max"], 5.0)
-
-  def test_pools_turn_lengths_across_rollouts(self):
-    metrics = rl_program._rollout_health_metrics([
-        _health_item(0, turn_lengths=[10, 30]),
-        _health_item(1, turn_lengths=[20]),
-        _health_item(2, turn_lengths=[]),
-    ])
-
-    self.assertEqual(metrics["rollout/turn_length/mean"], 20.0)
-    self.assertEqual(metrics["rollout/turn_length/p50"], 20.0)
-    self.assertAlmostEqual(metrics["rollout/turn_length/p99"], 29.8)
-    self.assertEqual(metrics["rollout/turn_length/max"], 30.0)
-
-  def test_durations_come_from_lineage(self):
-    # Durations are 10, 20, 30 and 40 s; the batch runs from the first
-    # dispatch (t=100) to the last finish (t=150).
-    metrics = rl_program._rollout_health_metrics([
-        _health_item(0, window=(100.0, 110.0)),
-        _health_item(1, window=(100.0, 120.0)),
-        _health_item(2, window=(105.0, 135.0)),
-        _health_item(3, window=(110.0, 150.0)),
-        # No lineage: left out rather than counted as instant.
-        _health_item(4),
-    ])
-
-    self.assertEqual(metrics["rollout/duration_sec/p50"], 25.0)
-    self.assertAlmostEqual(metrics["rollout/duration_sec/p90"], 37.0)
-    self.assertAlmostEqual(metrics["rollout/duration_sec/p99"], 39.7)
-    self.assertEqual(metrics["rollout/duration_sec/max"], 40.0)
-    self.assertEqual(metrics["rollout/tail_sec"], 15.0)
-    self.assertEqual(metrics["rollout/batch_wall_sec"], 50.0)
-
-  def test_lineage_without_a_finish_event_is_skipped(self):
-    item = _health_item(0, window=(100.0, 110.0))
-    item.metadata["lineage"].events.pop()
-
-    metrics = rl_program._rollout_health_metrics([item])
-
-    self.assertNotIn("rollout/duration_sec/max", metrics)
-
-  def test_omits_families_without_inputs(self):
-    metrics = rl_program._rollout_health_metrics([_health_item(0)])
-
-    self.assertIn("rollout/status/succeeded_frac", metrics)
-    self.assertNotIn("rollout/num_turns_mean", metrics)
-    self.assertNotIn("rollout/turn_length/max", metrics)
-    self.assertNotIn("rollout/duration_sec/max", metrics)
-    self.assertNotIn("rollout/batch_wall_sec", metrics)
-    self.assertEmpty(rl_program._rollout_health_metrics([]))
-
-
-class SlowestRolloutsSummaryTest(absltest.TestCase):
-  """Covers `_slowest_rollouts_summary`, the per-step slowest-rollouts log."""
-
-  def test_lists_the_slowest_rollouts_first(self):
-    items = [
-        _health_item(
-            0,
-            window=(0.0, 10.0),
-            num_turns=3,
-            turn_lengths=[5, 6, 7],
-            worker_id="w0",
-        ),
-        _health_item(
-            1,
-            status=datatypes.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED,
-            window=(0.0, 300.0),
-            num_turns=1,
-            turn_lengths=[57344],
-            worker_id="w1",
-        ),
-        _health_item(2, window=(0.0, 50.0), worker_id="w2"),
-    ]
-
-    summary = rl_program._slowest_rollouts_summary(items, k=2)
-
-    self.assertEqual(
-        summary,
-        "slowest 2 of 3: traj_p0_g1 dur=300.0s"
-        " status=MAX_CONTEXT_LIMIT_REACHED turns=1 max_turn_length=57344"
-        " worker=w1 | traj_p0_g2 dur=50.0s status=SUCCEEDED worker=w2",
-    )
-
-  def test_returns_none_without_lineage(self):
-    self.assertIsNone(
-        rl_program._slowest_rollouts_summary([_health_item(0)], k=3)
-    )
-
-
-class OutstandingPromptsTest(absltest.TestCase):
-  """Covers `_OutstandingPrompts`, the in-flight view behind progress logs."""
-
-  def test_oldest_is_the_earliest_prompt_with_rollouts_left(self):
-    prompts = rl_program._OutstandingPrompts()
-    prompts.dispatched("p0", 2)
-    prompts.dispatched("p1", 2)
-
-    prompts.returned("p0")
-    oldest = prompts.oldest()
-    self.assertEqual(oldest.prompt_id, "p0")
-    self.assertEqual(oldest.rollouts_left, 1)
-    self.assertGreaterEqual(oldest.age_s, 0.0)
-
-    prompts.returned("p0")
-    self.assertEqual(prompts.oldest().prompt_id, "p1")
-    self.assertLen(prompts, 1)
-
-  def test_nothing_out_has_no_oldest(self):
-    prompts = rl_program._OutstandingPrompts()
-
-    self.assertIsNone(prompts.oldest())
-    self.assertEmpty(prompts)
-
-  def test_returns_for_unknown_prompts_are_counted_and_warned_about(self):
-    # A late return after a re-dispatch, or a response that lost its prompt id,
-    # must not raise: that would drop the rest of the polled batch.
-    prompts = rl_program._OutstandingPrompts()
-    prompts.dispatched("p0", 1)
-
-    with mock.patch.object(rl_program.logging, "log_first_n") as log_first_n:
-      prompts.returned("")
-
-    self.assertEqual(prompts.untracked_returns, 1)
-    self.assertEqual(prompts.oldest().rollouts_left, 1)
-    log_first_n.assert_called_once()
-    self.assertEqual(log_first_n.call_args.args[0], rl_program.logging.WARNING)
-
-  def test_redispatch_restarts_the_prompt_at_the_back(self):
-    prompts = rl_program._OutstandingPrompts()
-    prompts.dispatched("p0", 1)
-    prompts.dispatched("p1", 1)
-
-    with mock.patch.object(rl_program.logging, "log_first_n") as log_first_n:
-      prompts.dispatched("p0", 2)
-
-    log_first_n.assert_called_once()
-    self.assertEqual(log_first_n.call_args.args[0], rl_program.logging.WARNING)
-    self.assertEqual(prompts.oldest().prompt_id, "p1")
-    prompts.returned("p1")
-    self.assertEqual(prompts.oldest().prompt_id, "p0")
-    self.assertEqual(prompts.oldest().rollouts_left, 2)
-
-
-class StepSummaryTest(absltest.TestCase):
-  """Covers `_step_summary`, the one-line per-step log."""
-
-  def test_summarizes_timing_rollouts_and_eta(self):
-    summary = rl_program._step_summary(
-        step=36,
-        step_time_sec=963.0,
-        step_times=rl_program._StepTimes(
-            exposed_generation_time=900.1,
-            policy_training_time=40.2,
-            checkpoint_time=5.0,
-            weight_sync_time=15.3,
-        ),
-        num_rollouts=256,
-        rollout_health={
-            "rollout/status/succeeded_frac": 0.25,
-            "rollout/status/max_context_limit_reached_frac": 0.5,
-            "rollout/status/timeout_frac": 0.25,
-            "rollout/status/failed_frac": 0.0,
-            "rollout/duration_sec/p50": 199.0,
-            "rollout/duration_sec/max": 963.0,
-            "rollout/num_turns_mean": 27.6,
-            "rollout/num_turns_max": 50.0,
-            "rollout/turn_length/p99": 8000.0,
-            "rollout/turn_length/max": 57344.0,
-        },
-        steps_left=12,
-        mean_step_sec=1000.0,
-    )
-
-    # Statuses are counted, most common first; ties keep enum order.
-    self.assertEqual(
-        summary,
-        "step=36 time=963.0s (wait=900.1s train=40.2s ref=0.0s"
-        " agreement=0.0s ckpt=5.0s sync=15.3s) | rollouts=256"
-        " max_context_limit_reached=128 succeeded=64 timeout=64"
-        " | dur_p50=199.0s dur_max=963.0s | turns_mean=27.6 turns_max=50"
-        " | turn_len_p99=8000 turn_len_max=57344 | eta=3.3h steps_left=12",
-    )
-
-  def test_durations_switch_units_where_rounding_would_print_60(self):
-    for seconds, expected in (
-        (59.4, "59s"),
-        (59.5, "1m"),
-        (3569.0, "59m"),
-        (3570.0, "1.0h"),
-        (12000.0, "3.3h"),
-    ):
-      with self.subTest(seconds=seconds):
-        self.assertEqual(rl_program._format_duration(seconds), expected)
-
-  def test_omits_missing_families_and_eta_without_steps_left(self):
-    for steps_left in (None, 0):
-      with self.subTest(steps_left=steps_left):
-        summary = rl_program._step_summary(
-            step=0,
-            step_time_sec=1.0,
-            step_times=rl_program._StepTimes(),
-            num_rollouts=2,
-            rollout_health={},
-            steps_left=steps_left,
-            mean_step_sec=1.0,
-        )
-
-        self.assertEqual(
-            summary,
-            "step=0 time=1.0s (wait=0.0s train=0.0s ref=0.0s agreement=0.0s"
-            " ckpt=0.0s sync=0.0s) | rollouts=2",
-        )
-
-
 class EfficiencyMetricsLoggingTest(absltest.TestCase):
   """Covers `efficiency/padding/*` and `efficiency/packing/*` step metrics."""
 
@@ -6423,6 +6144,39 @@ class StandardRLProgramPromptBatchOrderTest(absltest.TestCase):
     )
     item.payload = payload  # pyrefly: ignore[missing-attribute]
     return item
+
+  def test_waiting_logs_groups_staged_for_later_batches(self):
+    async def _run():
+      program = rl_program.StandardRLProgram(
+          algo=self.mock_algo,
+          dataset=["p0", "p1"],
+          group_order="prompt_arrival",
+      )
+      # The next batch's group is scored while batch 0's is still out.
+      await program.scored_q.put(self._make_scored_item("p1", batch_idx=1))
+
+      async def _deliver_later():
+        await asyncio.sleep(0.1)
+        await program.scored_q.put(self._make_scored_item("p0", batch_idx=0))
+
+      deliver = asyncio.create_task(_deliver_later())
+      with mock.patch.object(rl_program, "_PROGRESS_LOG_INTERVAL_SEC", 0.02):
+        with self.assertLogs(level="INFO") as logs:
+          group = await program._wait_for_scored_group(
+              step=0, groups_consumed=0
+          )
+      await deliver
+
+      self.assertEqual([item.prompt_id for item in group], ["p0"])
+      progress = [line for line in logs.output if "[progress]" in line]
+      self.assertNotEmpty(progress)
+      self.assertIn(
+          "scored_staged_groups=1 scored_batch=0 scored_partial_groups=0",
+          progress[0],
+      )
+      program.close()
+
+    asyncio.run(_run())
 
   def test_defaults_to_trajectory_completion_and_prompt_arrival_builds_ordered_queue(
       self,

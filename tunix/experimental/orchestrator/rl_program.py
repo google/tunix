@@ -33,13 +33,13 @@ from absl import logging
 import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.experimental.common import dispatch_window
-from tunix.experimental.common import lineage
 from tunix.experimental.common import logging_utils
 from tunix.experimental.common import tagging
 from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import dataset_utils
 from tunix.experimental.orchestrator import rl_engine_interface
+from tunix.experimental.orchestrator import step_telemetry
 from tunix.experimental.queue_manager import trajectory_queue_manager
 from tunix.experimental.trajectory import store as trajectory_store_lib
 from tunix.rl import common as rl_common
@@ -133,290 +133,8 @@ def _generation_metrics(
 _NUM_SLOWEST_ROLLOUTS_LOGGED = 3
 
 
-@dataclasses.dataclass(frozen=True, kw_only=True)
-class _RolloutWindow:
-  """When a rollout was dispatched and finished, and which worker ran it."""
-
-  dispatch_time_s: float
-  finish_time_s: float
-  worker_id: str
-
-  @property
-  def duration_s(self) -> float:
-    return self.finish_time_s - self.dispatch_time_s
-
-
-def _rollout_window(item: datatypes.TrajectoryItem) -> _RolloutWindow | None:
-  """Reads a rollout's dispatch and finish times from its lineage.
-
-  `DistributedRLEngine` records `engine.dispatch` when it builds the request,
-  and the rollout worker records `worker.rollout` when it hands the finished
-  trajectory back. The two timestamps come from different hosts' clocks, so a
-  duration includes their skew.
-
-  Args:
-    item: A scored rollout.
-
-  Returns:
-    The rollout's window, or None when it carries no lineage or either event
-    is missing.
-  """
-  lineage_ctx: lineage.LineageContext | None = item.metadata.get("lineage")
-  if lineage_ctx is None:
-    return None
-  dispatched = [
-      event
-      for event in lineage_ctx.events
-      if event.component == "engine.dispatch"
-  ]
-  finished = [
-      event
-      for event in lineage_ctx.events
-      if event.component == "worker.rollout"
-  ]
-  if not dispatched or not finished:
-    return None
-  return _RolloutWindow(
-      dispatch_time_s=dispatched[0].timestamp_s,
-      finish_time_s=finished[-1].timestamp_s,
-      worker_id=str(finished[-1].attributes["worker_id"]),
-  )
-
-
-def _num_turns(traj: Mapping[str, Any]) -> int | None:
-  """Counts the assistant turns in a Token-mode rollout's message list.
-
-  Args:
-    traj: A scored rollout's trajectory dict.
-
-  Returns:
-    The number of assistant messages in `conversation_text`, or None when the
-    rollout carries no message list.
-  """
-  conversation = traj.get("conversation_text")
-  if conversation is None:
-    return None
-  return sum(1 for message in conversation if message["role"] == "assistant")
-
-
-def _rollout_health_metrics(
-    items: Sequence[datatypes.TrajectoryItem],
-) -> dict[str, float]:
-  """Computes the step's rollout status, turn and latency metrics.
-
-  Covers the rollouts the step consumed; filtered groups are not included.
-
-    * `rollout/status/<status>_frac`: share of rollouts that ended in each
-      `TrajectoryStatus`, all reported every step so dashboard series stay
-      continuous. `critique_stage` maps a missing or unrecognized producer
-      status to RUNNING, so a nonzero `running_frac` points at the producer.
-      Unlike `rollout/success_rate`, these keep such rollouts in the
-      denominator.
-    * `rollout/num_turns_{mean,max}`: assistant turns per rollout, counted in
-      `conversation_text`.
-    * `rollout/turn_length/{mean,p50,p99,max}`: tokens sampled per assistant
-      turn, pooled over the step, from the `assistant_turn_lengths` the rollout
-      collector records. They do not depend on the training mask, so rollouts
-      that were masked out still count.
-    * `rollout/duration_sec/{p50,p90,p99,max}`: seconds from the engine
-      building a rollout's request to its worker handing the trajectory back,
-      as the orchestrator sees it: queueing before the worker starts, pauses
-      for weight sync and clock skew between hosts are all included.
-      `rollout/tail_sec` is max - p50, and `rollout/batch_wall_sec` runs from
-      the step's first dispatch to its last finish, which can span several
-      train steps when `max_staleness > 0`.
-
-  The turn and duration families skip rollouts that lack their inputs (engine
-  error placeholders carry no conversation, and lineage is optional telemetry)
-  and are omitted when no rollout has them, so a missing input is never counted
-  as zero.
-
-  Args:
-    items: The step's scored rollouts, as `critique_stage` emits them.
-
-  Returns:
-    Fully-qualified metric name to step value.
-
-  Raises:
-    KeyError: If a rollout has no `status`, which `critique_stage` always sets.
-  """
-  status_counts: collections.Counter[str] = collections.Counter()
-  turns: list[int] = []
-  turn_lengths: list[int] = []
-  windows: list[_RolloutWindow] = []
-  for item in items:
-    traj = item.traj
-    status_counts[traj["status"].name] += 1
-    num_turns = _num_turns(traj)
-    if num_turns is not None:
-      turns.append(num_turns)
-    lengths = traj.get("assistant_turn_lengths")
-    if lengths is not None:
-      turn_lengths.extend(lengths)
-    window = _rollout_window(item)
-    if window is not None:
-      windows.append(window)
-
-  metrics: dict[str, float] = {}
-  if items:
-    for status in datatypes.TrajectoryStatus:
-      metrics[f"rollout/status/{status.name.lower()}_frac"] = (
-          status_counts[status.name] / len(items)
-      )
-  if turns:
-    metrics["rollout/num_turns_mean"] = float(np.mean(turns))
-    metrics["rollout/num_turns_max"] = float(np.max(turns))
-  if turn_lengths:
-    p50, p99 = np.percentile(turn_lengths, [50, 99])
-    metrics["rollout/turn_length/mean"] = float(np.mean(turn_lengths))
-    metrics["rollout/turn_length/p50"] = float(p50)
-    metrics["rollout/turn_length/p99"] = float(p99)
-    metrics["rollout/turn_length/max"] = float(np.max(turn_lengths))
-  if windows:
-    durations = np.array([window.duration_s for window in windows])
-    p50, p90, p99 = np.percentile(durations, [50, 90, 99])
-    metrics["rollout/duration_sec/p50"] = float(p50)
-    metrics["rollout/duration_sec/p90"] = float(p90)
-    metrics["rollout/duration_sec/p99"] = float(p99)
-    metrics["rollout/duration_sec/max"] = float(np.max(durations))
-    metrics["rollout/tail_sec"] = float(np.max(durations) - p50)
-    metrics["rollout/batch_wall_sec"] = float(
-        max(window.finish_time_s for window in windows)
-        - min(window.dispatch_time_s for window in windows)
-    )
-  return metrics
-
-
-def _slowest_rollouts_summary(
-    items: Sequence[datatypes.TrajectoryItem], k: int
-) -> str | None:
-  """Describes the `k` rollouts that took longest from dispatch to finish.
-
-  Args:
-    items: The step's scored rollouts, as `critique_stage` emits them.
-    k: How many rollouts to describe.
-
-  Returns:
-    A one-line summary, or None when no rollout carries lineage.
-
-  Raises:
-    KeyError: If a listed rollout has no `status`.
-  """
-  timed: list[tuple[_RolloutWindow, datatypes.TrajectoryItem]] = []
-  for item in items:
-    window = _rollout_window(item)
-    if window is not None:
-      timed.append((window, item))
-  if not timed:
-    return None
-  timed.sort(key=lambda pair: pair[0].duration_s, reverse=True)
-  described = []
-  for window, item in timed[:k]:
-    traj = item.traj
-    fields = [
-        item.traj_id,
-        f"dur={window.duration_s:.1f}s",
-        f"status={traj['status'].name}",
-    ]
-    num_turns = _num_turns(traj)
-    if num_turns is not None:
-      fields.append(f"turns={num_turns}")
-    lengths = traj.get("assistant_turn_lengths")
-    if lengths:
-      fields.append(f"max_turn_length={max(lengths)}")
-    fields.append(f"worker={window.worker_id}")
-    described.append(" ".join(fields))
-  return f"slowest {len(described)} of {len(timed)}: " + " | ".join(described)
-
-
 # How often the train stage logs progress while it waits for rollouts.
 _PROGRESS_LOG_INTERVAL_SEC = 60.0
-
-
-@dataclasses.dataclass(frozen=True, kw_only=True)
-class _OldestOutstanding:
-  """The dispatched prompt that has waited longest for its rollouts."""
-
-  prompt_id: str
-  age_s: float
-  rollouts_left: int
-
-
-class _OutstandingPrompts:
-  """Dispatched prompts whose rollouts have not all come back.
-
-  Entries stay in dispatch order, so the first one is the oldest.
-  """
-
-  def __init__(self) -> None:
-    # Prompt id -> (monotonic dispatch time, rollouts still out).
-    self._entries: dict[str, tuple[float, int]] = {}
-    self._untracked_returns = 0
-
-  def __len__(self) -> int:
-    return len(self._entries)
-
-  @property
-  def untracked_returns(self) -> int:
-    """Returned rollouts whose prompt was not outstanding."""
-    return self._untracked_returns
-
-  def dispatched(self, prompt_id: str, num_rollouts: int) -> None:
-    """Records `num_rollouts` rollouts of `prompt_id` going out now."""
-    if prompt_id in self._entries:
-      # Late returns from the earlier dispatch will count against this one.
-      logging.log_first_n(
-          logging.WARNING,
-          "Prompt %s was dispatched again with %d rollouts of the previous"
-          " dispatch still out.",
-          5,
-          prompt_id,
-          self._entries[prompt_id][1],
-      )
-      # Restart the clock and move the prompt to the back.
-      del self._entries[prompt_id]
-    self._entries[prompt_id] = (time.monotonic(), num_rollouts)
-
-  def returned(self, prompt_id: str) -> None:
-    """Records one rollout of `prompt_id` coming back.
-
-    A rollout of a prompt that is not outstanding (a late return after a
-    re-dispatch, or a response that lost its prompt id) is counted and warned
-    about but never raised on: polling must not drop the rest of its batch over
-    progress bookkeeping.
-
-    Args:
-      prompt_id: The returned rollout's prompt id.
-    """
-    if prompt_id not in self._entries:
-      self._untracked_returns += 1
-      logging.log_first_n(
-          logging.WARNING,
-          "A rollout of prompt %r came back without an outstanding dispatch"
-          " (%d so far); in-flight progress may be off.",
-          5,
-          prompt_id,
-          self._untracked_returns,
-      )
-      return
-    dispatched_at, rollouts_left = self._entries[prompt_id]
-    if rollouts_left <= 1:
-      del self._entries[prompt_id]
-    else:
-      self._entries[prompt_id] = (dispatched_at, rollouts_left - 1)
-
-  def oldest(self) -> _OldestOutstanding | None:
-    """Returns the longest-waiting prompt, or None when nothing is out."""
-    if not self._entries:
-      return None
-    prompt_id, (dispatched_at, rollouts_left) = next(
-        iter(self._entries.items())
-    )
-    return _OldestOutstanding(
-        prompt_id=prompt_id,
-        age_s=time.monotonic() - dispatched_at,
-        rollouts_left=rollouts_left,
-    )
 
 
 def _extract_reward(item: Any) -> float:
@@ -509,136 +227,6 @@ def _format_rollout_completion(conversation: Any) -> str:
     label = "environment" if role == "user" else role
     lines.append(f"[{label}]: {content}")
   return "\n".join(lines)
-
-
-@dataclasses.dataclass(kw_only=True)
-class _StepTimes:
-  """Seconds the train stage waited on each phase, logged as `orchestrator/*`.
-
-  `exposed_generation_time`, `policy_training_time` and `weight_sync_time`
-  match the MLPerf branch so dashboards compare across branches. Each is how
-  long the orchestrator awaited that phase, not how long its work ran. The
-  trainer answers `train_step` once its programs are dispatched (JAX runs them
-  asynchronously), so device time lands in whichever later call first blocks
-  on the trainer's results: with `PeftTrainerV2`, the `get_metrics` after each
-  optimizer update (it reads the step's losses and gradient norm), counted in
-  `policy_training_time`, or the actor logprob pass of a standalone sampler
-  agreement check. Training that runs while the stage waits for scored groups
-  or packs is hidden behind that waiting and packing, and `save_checkpoint`
-  and `sync_weights` absorb training only when nothing before them blocked.
-  So the phase split shows where the orchestrator waited, not where the
-  device spent its time. The phases need not add up to `step_time_sec`: a
-  microbatch's `train_step` keeps running in the background while the next
-  microbatch is packed, reference-scored or awaited, and packing
-  (`efficiency/packing/*`), committing and metric logging belong to no phase.
-  Times are wall clock on the event loop, so they also absorb any stall from
-  other stages sharing it.
-
-  Attributes:
-    exposed_generation_time: Waiting for scored rollout groups.
-    policy_training_time: Microbatch `train_step` calls plus `get_metrics`.
-    reference_logps_time: Reference-model logprob passes for the KL penalty.
-    sampler_agreement_time: Standalone trainer logprob passes comparing the
-      sampler against the trainer (`_apply_sampler_trainer_agreement`).
-    checkpoint_time: The `save_checkpoint` call. With async checkpointing that
-      is only its blocking part (waiting out a previous save, copying the
-      state off device); the write itself runs in the background, uncounted.
-      About 0 on steps the save policy skips.
-    weight_sync_time: Syncing the new policy to the rollout workers.
-  """
-
-  exposed_generation_time: float = 0.0
-  policy_training_time: float = 0.0
-  reference_logps_time: float = 0.0
-  sampler_agreement_time: float = 0.0
-  checkpoint_time: float = 0.0
-  weight_sync_time: float = 0.0
-
-
-def _format_duration(seconds: float) -> str:
-  """Formats seconds as a short duration such as `45s`, `12m` or `3.3h`."""
-  # Each unit starts where rounding the smaller one would print 60.
-  if seconds >= 59.5 * 60:
-    return f"{seconds / 3600:.1f}h"
-  if seconds >= 59.5:
-    return f"{seconds / 60:.0f}m"
-  return f"{seconds:.0f}s"
-
-
-def _step_summary(
-    *,
-    step: int,
-    step_time_sec: float,
-    step_times: _StepTimes,
-    num_rollouts: int,
-    rollout_health: Mapping[str, float],
-    steps_left: int | None,
-    mean_step_sec: float,
-) -> str:
-  """Renders the one-line summary logged after each train step.
-
-  Args:
-    step: The step that finished.
-    step_time_sec: Its wall-clock duration.
-    step_times: Its per-phase times.
-    num_rollouts: Rollouts it consumed, the denominator of the
-      `rollout/status/*` fractions.
-    rollout_health: Its `_rollout_health_metrics`.
-    steps_left: Steps still to run, or None without `max_steps`.
-    mean_step_sec: Mean step duration so far in this run, for the ETA. It
-      includes the slower first steps, so early ETAs run high.
-
-  Returns:
-    `|`-separated groups of key=value fields, with rollouts counted per
-    status, most common first. Rollout families without metrics, and the ETA
-    once no steps are left, are omitted.
-  """
-  parts = [
-      f"step={step} time={step_time_sec:.1f}s"
-      f" (wait={step_times.exposed_generation_time:.1f}s"
-      f" train={step_times.policy_training_time:.1f}s"
-      f" ref={step_times.reference_logps_time:.1f}s"
-      f" agreement={step_times.sampler_agreement_time:.1f}s"
-      f" ckpt={step_times.checkpoint_time:.1f}s"
-      f" sync={step_times.weight_sync_time:.1f}s)"
-  ]
-  status_counts: list[tuple[int, str]] = []
-  for status in datatypes.TrajectoryStatus:
-    name = status.name.lower()
-    key = f"rollout/status/{name}_frac"
-    if key in rollout_health:
-      count = round(rollout_health[key] * num_rollouts)
-      if count:
-        status_counts.append((count, name))
-  # Most common first; `list.sort` is stable, so ties keep enum order.
-  status_counts.sort(key=lambda pair: -pair[0])
-  parts.append(
-      " ".join(
-          [f"rollouts={num_rollouts}"]
-          + [f"{name}={count}" for count, name in status_counts]
-      )
-  )
-  if "rollout/duration_sec/max" in rollout_health:
-    parts.append(
-        f"dur_p50={rollout_health['rollout/duration_sec/p50']:.1f}s"
-        f" dur_max={rollout_health['rollout/duration_sec/max']:.1f}s"
-    )
-  if "rollout/num_turns_max" in rollout_health:
-    parts.append(
-        f"turns_mean={rollout_health['rollout/num_turns_mean']:.1f}"
-        f" turns_max={rollout_health['rollout/num_turns_max']:.0f}"
-    )
-  if "rollout/turn_length/max" in rollout_health:
-    parts.append(
-        f"turn_len_p99={rollout_health['rollout/turn_length/p99']:.0f}"
-        f" turn_len_max={rollout_health['rollout/turn_length/max']:.0f}"
-    )
-  if steps_left:
-    parts.append(
-        f"eta={_format_duration(steps_left * mean_step_sec)}"
-        f" steps_left={steps_left}"
-    )
-  return " | ".join(parts)
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -832,7 +420,7 @@ class StandardRLProgram(RLProgram):
     self.on_step_begin = on_step_begin
     self.on_step_end = on_step_end
     self._in_flight_rollouts = 0
-    self._outstanding_prompts = _OutstandingPrompts()
+    self._outstanding_prompts = step_telemetry.OutstandingPrompts()
     self._dispatch_done = asyncio.Event()
     self._assembler_lock = threading.Lock()
     self.scored_q: TrajectoryQueueManager | BatchOrderedQueueManager
@@ -1196,7 +784,7 @@ class StandardRLProgram(RLProgram):
       log_step: int,
       sampler_agreement: dict[str, tuple[Any, list[Any]]] | None = None,
       filtered_groups: Sequence[Sequence[datatypes.TrajectoryItem]] = (),
-      step_times: _StepTimes | None = None,
+      step_times: step_telemetry.StepTimes | None = None,
   ) -> dict[str, Any]:
     """Logs rollout, reward, trainer, and orchestrator metrics.
 
@@ -1339,11 +927,14 @@ class StandardRLProgram(RLProgram):
       for tag, val in staleness_stats.items():
         self._log_metric(f"rollout/{tag}", val, log_step)
 
-    rollout_health = _rollout_health_metrics(all_step_items)
-    for tag, val in rollout_health.items():
+    rollout_facts = [
+        step_telemetry.RolloutFacts.of(item) for item in all_step_items
+    ]
+    rollout_health = step_telemetry.rollout_health(rollout_facts)
+    for tag, val in rollout_health.metrics.items():
       self._log_metric(tag, val, log_step)
-    slowest = _slowest_rollouts_summary(
-        all_step_items, k=_NUM_SLOWEST_ROLLOUTS_LOGGED
+    slowest = step_telemetry.slowest_rollouts_summary(
+        rollout_facts, k=_NUM_SLOWEST_ROLLOUTS_LOGGED
     )
     if slowest is not None:
       logging.info("[rollout] step=%d %s", log_step, slowest)
@@ -1744,10 +1335,20 @@ class StandardRLProgram(RLProgram):
           f"{oldest.prompt_id}(age={oldest.age_s:.0f}s,"
           f"left={oldest.rollouts_left})"
       )
+    # The waiting reader takes any group it can use, so the groups counted
+    # here are ones it cannot: prompt_arrival holds later batches' groups
+    # until the cursor reaches them.
+    if isinstance(self.scored_q, BatchOrderedQueueManager):
+      scored_fields = (
+          f"scored_staged_groups={self.scored_q.pending_groups_count}"
+          f" scored_batch={self.scored_q.next_batch_idx}"
+      )
+    else:
+      scored_fields = f"scored_ready_groups={self.scored_q.ready_groups_count}"
     logging.info(
         "[progress] step=%d waited=%.0fs groups=%d/%d in_flight=%d"
         " prompts_in_flight=%d untracked_returns=%d raw_ready_groups=%d"
-        " raw_partial_groups=%d oldest=%s",
+        " raw_partial_groups=%d %s scored_partial_groups=%d oldest=%s",
         step,
         waited_s,
         groups_consumed,
@@ -1757,6 +1358,8 @@ class StandardRLProgram(RLProgram):
         self._outstanding_prompts.untracked_returns,
         self.raw_q.ready_groups_count,
         self.raw_q.incomplete_buckets_count,
+        scored_fields,
+        self.scored_q.incomplete_buckets_count,
         oldest_desc,
     )
 
@@ -1780,7 +1383,7 @@ class StandardRLProgram(RLProgram):
 
     pending_train: asyncio.Task[tuple[Any, float]] | None = None
     step_result: Any = None
-    step_times = _StepTimes()
+    step_times = step_telemetry.StepTimes()
 
     async def _await_pending_train() -> None:
       nonlocal pending_train, step_result
@@ -1796,7 +1399,7 @@ class StandardRLProgram(RLProgram):
       while self.max_steps is None or self._step < self.max_steps:
         current_step = self._step
         step_start_time = time.monotonic()
-        step_times = _StepTimes()
+        step_times = step_telemetry.StepTimes()
         consumed_policy_version = self.policy_version
 
         uncommitted_groups = []
@@ -2088,12 +1691,11 @@ class StandardRLProgram(RLProgram):
         steps_run += 1
         logging.info(
             "[step] %s",
-            _step_summary(
+            step_telemetry.step_summary(
                 step=current_step,
                 step_time_sec=step_time_sec,
                 step_times=step_times,
-                num_rollouts=num_rollouts,
-                rollout_health=metrics_summary["rollout_health"],
+                health=metrics_summary["rollout_health"],
                 steps_left=(
                     None
                     if self.max_steps is None
