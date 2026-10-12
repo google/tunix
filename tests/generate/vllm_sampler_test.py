@@ -1069,6 +1069,55 @@ class VllmSamplerTokenInputTest(absltest.TestCase):
     obj.resume()
     obj._driver.resume.assert_called_once()
 
+  def test_1d_batch_images_routed_per_sequence(self):
+    obj = self._sampler()
+    obj.tokenizer.encode.side_effect = lambda s: [len(s)]
+    img0 = np.zeros((4, 4, 3), dtype=np.uint8)
+    img1 = np.ones((4, 4, 3), dtype=np.uint8) * 255
+    obj(
+        ["<|turn>user\nhi", "<|im_start|>user\nbye"],
+        4,
+        images=[img0, img1],
+    )
+    submitted = obj.llm.generate.call_args.kwargs["prompts"]
+    self.assertLen(submitted, 2)
+    self.assertEqual(submitted[0]["prompt"], "<|turn>user\n<|image|>\nhi")
+    self.assertEqual(submitted[1]["prompt"], "<|im_start|>user\n<|image|>\nbye")
+    self.assertIn("multi_modal_data", submitted[0])
+    self.assertIn("multi_modal_data", submitted[1])
+    self.assertEqual(
+        np.asarray(submitted[0]["multi_modal_data"]["image"])[0, 0, 0], 0
+    )
+    self.assertEqual(
+        np.asarray(submitted[1]["multi_modal_data"]["image"])[0, 0, 0], 255
+    )
+    from vllm.multimodal.parse import MultiModalDataParser  # pylint: disable=g-import-not-at-top
+    parser = MultiModalDataParser()
+    for item in submitted:
+      parsed = parser.parse_mm_data(item["multi_modal_data"])
+      self.assertEqual(parsed["image"].get_image_size(0), (4, 4))
+
+  def test_exact_input_with_images_allows_expanded_prompt_token_ids(self):
+    obj = self._sampler()
+    obj.llm.generate = mock.Mock(
+        return_value=[self._result("0", [1, 99, 99, 2])]
+    )
+    img0 = np.zeros((4, 4, 3), dtype=np.uint8)
+    out = obj(
+        None,
+        4,
+        max_prompt_length=5,
+        prompt_token_ids=[[1, 2]],
+        images=[img0],
+    )
+    np.testing.assert_array_equal(out.prompt_lengths, [4])
+    np.testing.assert_array_equal(out.padded_prompt_tokens, [[0, 1, 99, 99, 2]])
+
+  def test_unsupported_images_type_raises_type_error(self):
+    obj = self._sampler()
+    with self.assertRaises(TypeError):
+      obj(None, 4, prompt_token_ids=[[1, 2]], images=12345)
+
 
 if __name__ == "__main__":
   absltest.main()
