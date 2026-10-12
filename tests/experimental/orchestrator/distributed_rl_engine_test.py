@@ -639,6 +639,26 @@ class DistributedRLEngineTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_train_step_forwards_apply_optimizer_to_fwd_bwd(self):
+    """The trainer learns which micro-batch is the step's last (MaxText's retry_dropless_final_micro_batch)."""
+
+    async def _run():
+      self.mock_actor.fwd_bwd.return_value = {"loss": 0.5}
+      self.mock_actor.update.return_value = 1
+      mock_payload = mock.MagicMock(spec=datatypes.RLTrainerPayload)
+      mock_payload.metadata = {}
+      for apply_optimizer in (False, True):
+        self.mock_actor.fwd_bwd.reset_mock()
+        await self.engine.train_step(
+            mock_payload,
+            role=datatypes.Role.ACTOR,
+            apply_optimizer=apply_optimizer,
+        )
+        call_kwargs = self.mock_actor.fwd_bwd.call_args.kwargs
+        self.assertIs(call_kwargs["apply_optimizer"], apply_optimizer)
+
+    asyncio.run(_run())
+
   def test_per_token_logps_propagates_optional_kwargs(self):
     async def _run():
       self.mock_ref.per_token_logps.return_value = [0.1, 0.2]

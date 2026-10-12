@@ -1674,6 +1674,75 @@ class GrpoLossSequenceMaskingTest(absltest.TestCase):
       # Popped inside the jit: nothing leaks onto the caller's model.
       self.assertEmpty(nnx.state(model, nnx.Intermediate))
 
+  def test_moe_drop_audit_reaches_loss_aux(self):
+    from flax import nnx  # pylint: disable=g-import-not-at-top
+    from tunix.rl import common  # pylint: disable=g-import-not-at-top
+
+    class _Cfg:
+      log_moe_drops = True
+
+    class _AuditToy(nnx.Module):
+      """Sows the drop audit like MaxText's RoutedMoE (log_moe_drops)."""
+
+      def __init__(self, *, rngs):
+        self.config = _Cfg()
+        self.emb = nnx.Embed(16, 8, rngs=rngs)
+        self.head = nnx.Linear(8, 16, rngs=rngs)
+
+      def __call__(self, x, skip_lm_head=False, **kwargs):
+        del kwargs
+        # A stacked entry (as scanned layers sow) and a scalar one.
+        self.emb.sow(nnx.Intermediate, 'moe_has_overflow', jnp.array(True))
+        self.emb.sow(
+            nnx.Intermediate,
+            'moe_dropped_assignments',
+            jnp.array([5, 0, 7], jnp.int32),
+        )
+        self.emb.sow(
+            nnx.Intermediate,
+            'moe_max_load_ratio',
+            jnp.array([2.6, 1.0, 2.7], jnp.float32),
+        )
+        self.head.sow(
+            nnx.Intermediate, 'moe_dropped_assignments', jnp.int32(0)
+        )
+        self.head.sow(nnx.Intermediate, 'moe_max_load_ratio', jnp.float32(1.5))
+        hidden = self.emb(x)
+        return (hidden if skip_lm_head else self.head(hidden)), None
+
+      def compute_final_logits(self, hidden):
+        return self.head(hidden)
+
+    example = self._example()
+    model = _AuditToy(rngs=nnx.Rngs(0))
+    self.assertTrue(common.wants_moe_audit(model))
+    graphdef, state = nnx.split(model)
+    _, flag, audit = common.compute_per_token_logps(
+        graphdef,
+        state,
+        example.prompt_ids,
+        example.completion_ids,
+        pad_id=0,
+        eos_id=-1,
+        return_moe_overflow=True,
+        return_moe_audit=True,
+    )
+    self.assertTrue(bool(flag))
+    self.assertEqual(int(jnp.sum(audit['dropped'])), 12)
+    self.assertEqual(audit['dropped'].shape, (4,))
+    self.assertAlmostEqual(float(jnp.max(audit['max_ratio'])), 2.7, places=5)
+    out = algo_core.grpo_loss_fn(
+        model, example, self._config(), pad_id=0, eos_id=-1
+    )
+    self.assertEqual(int(jnp.sum(out.aux_metrics['_moe_audit']['dropped'])), 12)
+    self.assertEmpty(nnx.state(model, nnx.Intermediate))
+    # Off by default: no audit key.
+    model.config.log_moe_drops = False
+    out = algo_core.grpo_loss_fn(
+        model, example, self._config(), pad_id=0, eos_id=-1
+    )
+    self.assertNotIn('_moe_audit', out.aux_metrics)
+
 
 if __name__ == '__main__':
   absltest.main()

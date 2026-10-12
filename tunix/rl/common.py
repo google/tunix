@@ -14,6 +14,7 @@
 """Common RL helper classes and functions."""
 
 import functools
+import re
 import inspect
 from typing import Any, Iterable, Sequence
 
@@ -427,6 +428,54 @@ def pop_moe_overflow(model: nnx.Module) -> jax.Array:
   return jnp.any(jnp.stack(leaves)) if leaves else jnp.array(False)
 
 
+def wants_moe_audit(model: Any) -> bool:
+  """True for a MaxText model configured with log_moe_drops=true (MoE drop audit)."""
+  return bool(getattr(getattr(model, "config", None), "log_moe_drops", False))
+
+
+def _natural_key(path_str: str) -> list[Any]:
+  return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", path_str)]
+
+
+def pop_moe_audit(model: nnx.Module) -> dict[str, jax.Array] | None:
+  """Pops the MoE drop audit MaxText's RoutedMoE sowed on `model` (log_moe_drops).
+
+  Returns `{"dropped": int32[L], "max_ratio": float32[L]}`, one entry per MoE layer call in natural path
+  order (a scanned stack contributes its stacked values in order), or None if nothing was sown. The last entry
+  of each sow tuple is this forward's. MaxText's training engine reads it from the loss aux under
+  `_moe_audit` and logs it as MOE_DROP_AUDIT.
+  """
+  found = {"moe_dropped_assignments": [], "moe_max_load_ratio": []}
+  for path, var in nnx.state(model, nnx.Intermediate).flat_state():
+    name = str(path[-1]) if path else ""
+    if name in found:
+      sown = var.get_value() if hasattr(var, "get_value") else var
+      latest = jnp.asarray(sown[-1] if isinstance(sown, tuple) else sown)
+      found[name].append(("/".join(str(p) for p in path), latest))
+  nnx.pop(
+      model,
+      nnx.All(
+          nnx.Intermediate,
+          nnx.Any(
+              nnx.PathContains("moe_dropped_assignments"),
+              nnx.PathContains("moe_max_load_ratio"),
+          ),
+      ),
+  )
+  if not found["moe_dropped_assignments"]:
+    return None
+  out = {}
+  for name, key, dtype in (
+      ("moe_dropped_assignments", "dropped", jnp.int32),
+      ("moe_max_load_ratio", "max_ratio", jnp.float32),
+  ):
+    entries = sorted(found[name], key=lambda e: _natural_key(e[0]))
+    out[key] = jnp.concatenate(
+        [jnp.ravel(v).astype(dtype) for _, v in entries]
+    )
+  return out
+
+
 @functools.partial(
     jax.jit,
     static_argnames=(
@@ -437,6 +486,7 @@ def pop_moe_overflow(model: nnx.Module) -> jax.Array:
         "temperature",
         "chunk_size",
         "return_moe_overflow",
+        "return_moe_audit",
     ),
 )
 def compute_per_token_logps(
@@ -456,6 +506,7 @@ def compute_per_token_logps(
     routed_experts: jax.Array | None = None,
     token_mask: jax.Array | None = None,
     return_moe_overflow: bool = False,
+    return_moe_audit: bool = False,
 ) -> jax.Array | tuple[jax.Array, ...]:
   """Computes the per-token log probabilities.
 
@@ -560,10 +611,14 @@ def compute_per_token_logps(
 
   outputs, _ = model(input_tokens, **model_kwargs)
   moe_overflow = pop_moe_overflow(model) if return_moe_overflow else None
+  # log_moe_drops: the drop audit dict (or None), appended after the overflow flag.
+  moe_audit = pop_moe_audit(model) if return_moe_audit else None
 
   def _result(*outs):
     if return_moe_overflow:
       outs += (moe_overflow,)
+    if return_moe_audit:
+      outs += (moe_audit,)
     return outs if len(outs) > 1 else outs[0]
 
   if segment_ids is not None:
