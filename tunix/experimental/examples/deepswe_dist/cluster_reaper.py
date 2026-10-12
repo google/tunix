@@ -60,6 +60,7 @@ logging.basicConfig(
 logger = logging.getLogger("cluster-reaper")
 
 NAMESPACE = os.environ.get("NAMESPACE", "trellis")
+SANDBOX_NAMESPACE = os.environ.get("SANDBOX_NAMESPACE", NAMESPACE)
 LOOP_INTERVAL_SECONDS = int(os.environ.get("INTERVAL_SECONDS", "30"))
 SANDBOX_POD_PREFIXES = ("pool-", "sandbox-claim-")
 # Fail-fast worker pods exit with this code when they failed before
@@ -176,7 +177,7 @@ def reap_run_sandboxes(custom_api, prefix: str) -> int:
     objs = custom_api.list_namespaced_custom_object(
         group=SANDBOX_GROUP,
         version=SANDBOX_VERSION,
-        namespace=NAMESPACE,
+        namespace=SANDBOX_NAMESPACE,
         plural=plural,
         label_selector=selector,
     )
@@ -188,7 +189,7 @@ def reap_run_sandboxes(custom_api, prefix: str) -> int:
     logger.info("Reaping sandboxes of run '%s' (sandbox run id %s)...", prefix, run_id)
     try:
       sandbox_reap(
-          run_id=run_id, namespace=NAMESPACE, in_cluster=True, delete_pods=True
+          run_id=run_id, namespace=SANDBOX_NAMESPACE, in_cluster=True, delete_pods=True
       )
     except Exception as e:
       logger.warning("Failed to reap sandbox run id %s: %s", run_id, e)
