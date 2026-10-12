@@ -264,10 +264,8 @@ export TPU_MOE_LOWTOK="${TPU_MOE_LOWTOK:-0}"
 
 # Propagate optimization flags to vLLM's Ray workers
 for _opt_var in TPU_SMALL_ALL_REDUCE TPU_MOE_SINGLE_SORT TPU_MOE_ROUTER_TOPK TPU_MOE_LOWTOK; do
-  if [[ -n "${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY:-}" ]]; then
-    export VLLM_RAY_EXTRA_ENV_VARS_TO_COPY="${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY},${_opt_var}"
-  else
-    export VLLM_RAY_EXTRA_ENV_VARS_TO_COPY="${_opt_var}"
+  if [[ ",${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY:-}," != *",${_opt_var},"* ]]; then
+    export VLLM_RAY_EXTRA_ENV_VARS_TO_COPY="${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY:+${VLLM_RAY_EXTRA_ENV_VARS_TO_COPY},}${_opt_var}"
   fi
 done
 
