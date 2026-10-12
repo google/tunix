@@ -517,6 +517,16 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
+      "--prepull_images_file",
+      type=str,
+      default=os.getenv("PREPULL_IMAGES_FILE", ""),
+      help=(
+          "Path (local or gs://) to a static manifest file containing container"
+          " image URIs to pre-pull before init_start without touching the"
+          " dataset."
+      ),
+  )
+  parser.add_argument(
       "--max_concurrency",
       type=int,
       default=128,
@@ -925,14 +935,21 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
     prepull_executor = futures.ThreadPoolExecutor(
         max_workers=1, thread_name_prefix="sandbox-prepull"
     )
-    prepull_future = prepull_executor.submit(
-        prepull_sandbox_images.prepull_from_dataset,
-        dataset_name=args.dataset_name,
-        dataset_split=args.dataset_split,
-        dataset_path=args.dataset_path,
-        cache_dir=args.dataset_cache_dir or None,
-        scaffold=args.scaffold,
-    )
+    if args.prepull_images_file:
+      prepull_future = prepull_executor.submit(
+          prepull_sandbox_images.prepull_from_manifest,
+          manifest_path=args.prepull_images_file,
+          scaffold=args.scaffold,
+      )
+    else:
+      prepull_future = prepull_executor.submit(
+          prepull_sandbox_images.prepull_from_dataset,
+          dataset_name=args.dataset_name,
+          dataset_split=args.dataset_split,
+          dataset_path=args.dataset_path,
+          cache_dir=args.dataset_cache_dir or None,
+          scaffold=args.scaffold,
+      )
   try:
     logging.info(
         "Waiting for workers to register (before MLPerf init_start)..."

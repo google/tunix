@@ -175,6 +175,65 @@ class PrepullSandboxImagesTest(absltest.TestCase):
   def test_template_uses_if_not_present_pull_policy_by_default(self):
     self.assertEqual(template.get_image_pull_policy(), "IfNotPresent")
 
+  def test_load_images_from_manifest_filters_and_rewrites(self):
+    manifest_content = (
+        "# Header comment\n"
+        "namanjain12/sympy_final:img2\n"
+        "\n"
+        "namanjain12/sympy_final:img1\n"
+        "namanjain12/sympy_final:img2\n"
+        "  # Inline indented comment\n"
+    )
+    manifest_file = self.create_tempfile("images.txt", content=manifest_content)
+
+    with mock.patch.dict(
+        os.environ,
+        {
+            "IMAGE_REWRITE_PREFIX": "us-central1-docker.pkg.dev/proj/tunix/",
+            "OPENHANDS_SERVER_IMAGE": "us-central1-docker.pkg.dev/proj/oh:v1",
+        },
+        clear=False,
+    ):
+      images = prepull_sandbox_images.load_images_from_manifest(
+          manifest_file.full_path, scaffold="openhands"
+      )
+
+    self.assertEqual(
+        images,
+        [
+            "us-central1-docker.pkg.dev/proj/oh:v1",
+            "us-central1-docker.pkg.dev/proj/tunix/sympy_final:img1",
+            "us-central1-docker.pkg.dev/proj/tunix/sympy_final:img2",
+        ],
+    )
+
+  @mock.patch.object(prepull_sandbox_images, "prepull_sandbox_images")
+  def test_prepull_from_manifest_calls_prepull_sandbox_images(
+      self, mock_prepull
+  ):
+    mock_prepull.return_value = 2
+    manifest_content = "namanjain12/aiohttp_final:v1\nnamanjain12/sympy_final:v2\n"
+    manifest_file = self.create_tempfile("images.txt", content=manifest_content)
+
+    num_staged = prepull_sandbox_images.prepull_from_manifest(
+        manifest_file.full_path,
+        scaffold="r2egym",
+        namespace="test-ns",
+        images_per_pod=10,
+        max_parallel_daemonsets=2,
+    )
+
+    self.assertEqual(num_staged, 2)
+    mock_prepull.assert_called_once()
+    call_args, call_kwargs = mock_prepull.call_args
+    self.assertEqual(
+        call_args[0],
+        ["namanjain12/aiohttp_final:v1", "namanjain12/sympy_final:v2"],
+    )
+    self.assertEqual(call_kwargs["namespace"], "test-ns")
+    self.assertEqual(call_kwargs["images_per_pod"], 10)
+    self.assertEqual(call_kwargs["max_parallel_daemonsets"], 2)
+
 
 if __name__ == "__main__":
   absltest.main()
