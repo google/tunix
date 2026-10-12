@@ -160,7 +160,8 @@ else
   export ROLLOUT_AGENT_NAME=${ROLLOUT_AGENT_NAME:-deepswe_agent}
 fi
 export USE_AGENT_SANDBOX=${USE_AGENT_SANDBOX:-1}
-export SANDBOX_NAMESPACE=${SANDBOX_NAMESPACE:-rl-tunix-swebench}
+INITIAL_SANDBOX_NAMESPACE="${SANDBOX_NAMESPACE:-}"
+export SANDBOX_NAMESPACE="${INITIAL_SANDBOX_NAMESPACE:-$( [[ -n "${K8S_NAMESPACE:-}" && "${K8S_NAMESPACE}" != "default" ]] && echo "${K8S_NAMESPACE}" || echo "trellis" )}"
 export SANDBOX_NODE_SELECTOR_KEY=${SANDBOX_NODE_SELECTOR_KEY:-}
 export SANDBOX_NODE_SELECTOR_VAL=${SANDBOX_NODE_SELECTOR_VAL:-}
 export SANDBOX_TOLERATIONS=${SANDBOX_TOLERATIONS:-}
@@ -1121,6 +1122,8 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+export SANDBOX_NAMESPACE="${INITIAL_SANDBOX_NAMESPACE:-$( [[ -n "${K8S_NAMESPACE:-}" && "${K8S_NAMESPACE}" != "default" ]] && echo "${K8S_NAMESPACE}" || echo "trellis" )}"
 
 start_eval() {
   if [[ -z "${MAXTEXT_CKPT:-}" ]]; then

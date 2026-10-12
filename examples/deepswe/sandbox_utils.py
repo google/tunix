@@ -704,8 +704,10 @@ def teardown_global_fleet() -> None:
       run_id = getattr(fleet, "run_id", None)
       if run_id:
         for c in getattr(fleet, "registry", []):
-          c_ns = getattr(c, "namespace", None) or os.getenv(
-              "NAMESPACE", "rl-tunix-swebench"
+          c_ns = (
+              getattr(c, "namespace", None)
+              or os.getenv("SANDBOX_NAMESPACE")
+              or os.getenv("NAMESPACE", "priority-dev")
           )
           logging.info(
               "[SandboxFleet] Reaping resources for run_id=%s in namespace=%s",
@@ -716,7 +718,7 @@ def teardown_global_fleet() -> None:
               run_id=run_id,
               in_cluster=getattr(c, "in_cluster", True),
               namespace=c_ns,
-              delete_pods=False,
+              delete_pods=True,
           )
     except Exception as e:  # pylint: disable=broad-exception-caught
       logging.warning("[SandboxFleet] Reaper note: %s", e)
