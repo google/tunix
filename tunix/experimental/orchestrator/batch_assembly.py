@@ -556,6 +556,37 @@ def to_rl_trainer_payload(
   )
 
 
+def describe_payload(payload: datatypes.RLTrainerPayload) -> str:
+  """One-line summary of a trainer payload's pytree for log comparison.
+
+  Lists every field: array leaves as `name=shape:dtype`, unset fields as
+  `name=None`, and non-array (static) fields by value, plus the `metadata`
+  keys. Two payloads with the same summary have the same treedef, shapes and
+  dtypes, which is what a compiled trainer step is keyed on.
+
+  Args:
+    payload: A trainer payload dataclass (e.g. `RLTrainerPayload`).
+
+  Returns:
+    The summary string.
+  """
+  if not dataclasses.is_dataclass(payload):
+    return f"{type(payload).__name__}(not a dataclass)"
+  parts = []
+  for field in dataclasses.fields(payload):
+    value = getattr(payload, field.name)
+    if field.name == "metadata":
+      keys = sorted(value) if value is not None else []
+      parts.append(f"metadata_keys={keys}")
+    elif value is None:
+      parts.append(f"{field.name}=None")
+    elif hasattr(value, "shape") and hasattr(value, "dtype"):
+      parts.append(f"{field.name}={tuple(value.shape)}:{value.dtype}")
+    else:
+      parts.append(f"{field.name}={value!r}")
+  return f"{type(payload).__name__}(" + ", ".join(parts) + ")"
+
+
 def _merge_batch_lineage(
     items: Sequence[Any],
     *,

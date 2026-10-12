@@ -817,6 +817,22 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           worker, "per_token_logps", items=items, **kwargs
       )
 
+  async def compile_trainer(
+      self,
+      dummy_data: datatypes.RLTrainerPayload | None,
+      role: datatypes.Role = datatypes.Role.ACTOR,
+  ) -> Any:
+    """Compiles the trainer's step kernels against `dummy_data` now.
+
+    For callers that want the compile out of the first `train_step`. It must
+    run after `configure_worker`, whose loss/input-fn reset discards any
+    earlier compile.
+    """
+    worker = self._trainer_workers.get(role)
+    if worker is None:
+      raise ValueError(f"No trainer worker registered for role {role}")
+    return await self._invoke_worker(worker, "compile", dummy_data=dummy_data)
+
   async def train_step(
       self,
       payload: datatypes.RLTrainerPayload,
@@ -920,12 +936,15 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         worker = self._trainer_workers.get(role)
         if worker is None:
           raise ValueError(f"No trainer worker registered for role {role_name}")
-        logging.info(
-            "Auto-configuring trainer loss and model input fn on %s worker...",
-            role_name,
-        )
         pad_id = getattr(assembler, "pad_id", kwargs.get("pad_id", 0))
         eos_id = getattr(assembler, "eos_id", kwargs.get("eos_id", pad_id))
+        logging.info(
+            "Auto-configuring trainer loss and model input fn on %s worker"
+            " (pad_id=%s, eos_id=%s)...",
+            role_name,
+            pad_id,
+            eos_id,
+        )
         gen_fn = algo.build_gen_model_input_fn(
             pad_id=pad_id,  # pyrefly: ignore[bad-argument-type]
             eos_id=eos_id,  # pyrefly: ignore[bad-argument-type]

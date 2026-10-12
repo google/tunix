@@ -40,6 +40,7 @@ if REPO_ROOT not in sys.path:
 from tunix.experimental.common import datatypes
 from tunix.experimental.distributed.runtime import context as runtime_context
 from tunix.experimental.examples.common import orch_k8s_cleanup
+from tunix.experimental.examples.deepswe_dist import trainer_warmup
 from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import orchestrator
@@ -301,6 +302,40 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " --priority_scheduling; off, requests are served in arrival order."
       ),
   )
+  parser.add_argument(
+      "--initial_dispatch_stagger_s",
+      type=float,
+      default=0.0,
+      help=(
+          "Stagger the start-up prompt batches: batch k is held until"
+          " k * this many seconds after batch 0 first dispatches. Applies only"
+          " before the trainer consumes its first batch. 0 (default) dispatches"
+          " the start-up batches as soon as the staleness window allows."
+      ),
+  )
+  parser.add_argument(
+      "--trainer_warmup_compile",
+      action=argparse.BooleanOptionalAction,
+      default=False,
+      help=(
+          "Compile the trainer before run_start (after the program configures"
+          " the trainer loss) against one synthetic micro-batch built through"
+          " the live batch assembler, instead of lazily on the first real"
+          " micro-batch inside the timed run."
+      ),
+  )
+  parser.add_argument(
+      "--trainer_warmup_routed_experts",
+      action=argparse.BooleanOptionalAction,
+      default=False,
+      help=(
+          "The rollouts return routed experts (router replay), so the warm-up"
+          " micro-batch carries routed_experts too. Its [num_layers, top_k] is"
+          " read from the model config, else from the two flags below."
+      ),
+  )
+  parser.add_argument("--trainer_warmup_routed_layers", type=int, default=None)
+  parser.add_argument("--trainer_warmup_routed_top_k", type=int, default=None)
   # ---- Optional GRPO algorithm options -------------------------------------
   # All default to off, so omitting them reproduces the previous behaviour.
   parser.add_argument(
@@ -1089,6 +1124,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         pipeline_train_microbatches=args.pipeline_train_microbatches,
         partial_rollout=args.in_flight_weight_updates,
         rollout_priority_scheduling=args.rollout_priority_scheduling,
+        initial_dispatch_stagger_s=args.initial_dispatch_stagger_s,
         on_train_start=_on_train_start,
         on_step_begin=lambda step: logging.info(
             ">>> DeepSWE step %d starting | policy_version=%d",
@@ -1120,6 +1156,54 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       )
 
     logging.info("Bringing up remote workers through ClusterOrchestrator...")
+    if args.trainer_warmup_compile:
+      # Compiled by the program after `configure_worker` and before
+      # `on_train_start` (run_start): `configure_worker` re-sends the loss and
+      # input fn, which discards any compile done at bring-up.
+      routed_shape = None
+      if args.trainer_warmup_routed_experts:
+        routed_shape = trainer_warmup.routed_experts_shape_from_config(
+            tokenizer_path
+        )
+        if routed_shape is not None:
+          logging.info(
+              "TRAINER_WARMUP_COMPILE: routed_experts [num_layers, top_k]=%s"
+              " from the model config at %s.",
+              routed_shape,
+              tokenizer_path,
+          )
+        elif (
+            args.trainer_warmup_routed_layers
+            and args.trainer_warmup_routed_top_k
+        ):
+          routed_shape = (
+              args.trainer_warmup_routed_layers,
+              args.trainer_warmup_routed_top_k,
+          )
+          logging.warning(
+              "TRAINER_WARMUP_COMPILE: model config unavailable; routed_experts"
+              " [num_layers, top_k]=%s from --trainer_warmup_routed_layers /"
+              " --trainer_warmup_routed_top_k.",
+              routed_shape,
+          )
+        else:
+          logging.warning(
+              "TRAINER_WARMUP_COMPILE: router replay is on but [num_layers,"
+              " top_k] is unknown; the warm-up omits routed_experts and the"
+              " first real micro-batch will recompile."
+          )
+      program.trainer_warmup_payload = trainer_warmup.build_warmup_payload(
+          algo=algo,
+          batch_config=program.batch_config,
+          num_generations=program.num_generations,
+          mini_batch_size=program.mini_batch_size,
+          train_micro_batch_size=algo.train_micro_batch_size,
+          routed_experts_shape=routed_shape,
+      )
+      logging.info(
+          "TRAINER_WARMUP_COMPILE: built synthetic micro-batch: %s",
+          batch_assembly.describe_payload(program.trainer_warmup_payload),
+      )
     cluster.bring_up_workers(dummy_data=None)
     logging.info("Starting DeepSWE StandardRLProgram execution...")
     cluster.run(
