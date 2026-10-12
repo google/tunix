@@ -148,12 +148,14 @@ def load_images_from_manifest(
   rewrite_fn = sandbox_utils.get_image_rewrite_fn()
   images: set[str] = set()
 
+  if not manifest_path or not manifest_path.strip():
+    raise ValueError("manifest_path must be a non-empty string.")
   cleaned_path = manifest_path.strip()
   if cleaned_path.startswith("gs://"):
     try:
       from etils import epath  # pylint: disable=g-import-not-at-top
       text = epath.Path(cleaned_path).read_text()
-    except Exception:  # pylint: disable=broad-exception-caught
+    except ImportError:
       import subprocess  # pylint: disable=g-import-not-at-top
       text = subprocess.check_output(
           ["gcloud", "storage", "cat", cleaned_path], text=True

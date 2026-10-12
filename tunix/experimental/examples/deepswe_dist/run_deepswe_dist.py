@@ -969,12 +969,19 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           "Waiting for sandbox container image pre-pulling to finish before"
           " MLPerf init_start..."
       )
-      num_staged = prepull_future.result()
-      logging.info(
-          "Finished pre-pulling %d static sandbox images (and dropped OS"
-          " caches) before MLPerf init_start.",
-          num_staged,
-      )
+      try:
+        num_staged = prepull_future.result()
+        logging.info(
+            "Finished pre-pulling %d static sandbox images (and dropped OS"
+            " caches) before MLPerf init_start.",
+            num_staged,
+        )
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        logging.warning(
+            "[Prepull] Sandbox image pre-pulling encountered an error: %s."
+            " Proceeding with training using on-demand GKE Image Streaming.",
+            e,
+        )
   finally:
     if prepull_executor is not None:
       prepull_executor.shutdown(wait=False)

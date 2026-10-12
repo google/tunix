@@ -234,6 +234,16 @@ class PrepullSandboxImagesTest(absltest.TestCase):
     self.assertEqual(call_kwargs["images_per_pod"], 10)
     self.assertEqual(call_kwargs["max_parallel_daemonsets"], 2)
 
+  def test_load_images_from_manifest_empty_path_raises_value_error(self):
+    with self.assertRaisesRegex(
+        ValueError, "manifest_path must be a non-empty string"
+    ):
+      prepull_sandbox_images.load_images_from_manifest("")
+    with self.assertRaisesRegex(
+        ValueError, "manifest_path must be a non-empty string"
+    ):
+      prepull_sandbox_images.load_images_from_manifest("   ")
+
 
 if __name__ == "__main__":
   absltest.main()
