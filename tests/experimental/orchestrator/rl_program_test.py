@@ -5981,13 +5981,13 @@ class RLProgramTest(absltest.TestCase):
 
     prog2 = self._create_program(
         staggered_rollout_pools=True,
-        num_rollout_pools=4,
+        max_staleness=0,
     )
-    self.assertEqual(prog2.num_rollout_pools, 4)
-    self.assertEqual(prog2.pool_policy_versions, [0, 0, 0, 0])
+    self.assertEqual(prog2.num_rollout_pools, 1)
 
-    with self.assertRaisesRegex(ValueError, "num_rollout_pools must be >= 1"):
-      self._create_program(num_rollout_pools=0)
+    prog3 = self._create_program(max_staleness=2)
+    self.assertFalse(prog3.staggered_rollout_pools)
+    self.assertEqual(prog3.num_rollout_pools, 1)
 
   def test_staggered_rollout_pools_dispatch_routes_by_pool_idx(self):
     async def _run():
@@ -6002,7 +6002,7 @@ class RLProgramTest(absltest.TestCase):
       program = self._create_program(
           dataset=["prompt_0", "prompt_1", "prompt_2", "prompt_3"],
           staggered_rollout_pools=True,
-          num_rollout_pools=3,
+          max_staleness=2,
           weight_sync_pool_only=True,
           max_steps=1,
       )
@@ -6048,7 +6048,7 @@ class RLProgramTest(absltest.TestCase):
       program = self._create_program(
           dataset=["prompt_0", "prompt_1", "prompt_2"],
           staggered_rollout_pools=True,
-          num_rollout_pools=3,
+          max_staleness=2,
           weight_sync_pool_only=True,
           max_steps=3,
           sync_weights=True,
@@ -6087,7 +6087,7 @@ class RLProgramTest(absltest.TestCase):
       program = self._create_program(
           dataset=["prompt_0"],
           staggered_rollout_pools=True,
-          num_rollout_pools=3,
+          max_staleness=2,
           weight_sync_pool_only=False,
           max_steps=1,
           sync_weights=True,

@@ -339,7 +339,6 @@ export MAX_STALENESS=${MAX_STALENESS:-1}
 # Eliminates cross-batch interference, scheduler priority starvation, and
 # KV-cache contention.
 export STAGGERED_ROLLOUT_POOLS="${STAGGERED_ROLLOUT_POOLS:-false}"
-export NUM_ROLLOUT_POOLS="${NUM_ROLLOUT_POOLS:-}"
 # When WEIGHT_SYNC_POOL_ONLY is true, weight sync is performed ONLY on the
 # replicas in pool i % K after batch i is trained before sending batch i + K to pool
 # i % K. Other pools generating other batches are untouched. When false, sync

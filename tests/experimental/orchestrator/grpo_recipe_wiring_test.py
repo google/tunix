@@ -617,8 +617,6 @@ class DeepSWEExampleCommandLineTest(absltest.TestCase):
     self.assertFalse(
         parse(["--no-staggered_rollout_pools"]).staggered_rollout_pools
     )
-    self.assertIsNone(parse([]).num_rollout_pools)
-    self.assertEqual(parse(["--num_rollout_pools", "3"]).num_rollout_pools, 3)
 
   def test_weight_sync_pool_only_flag(self):
     parse = run_deepswe_dist._parse_args  # pylint: disable=protected-access

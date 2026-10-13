@@ -303,19 +303,6 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
-      "--num_rollout_pools",
-      type=int,
-      default=(
-          int(os.environ["NUM_ROLLOUT_POOLS"])
-          if os.getenv("NUM_ROLLOUT_POOLS")
-          else None
-      ),
-      help=(
-          "Number of independent rollout worker pools. Defaults to"
-          " (max_staleness + 1) when --staggered_rollout_pools is set."
-      ),
-  )
-  parser.add_argument(
       "--weight_sync_pool_only",
       action=argparse.BooleanOptionalAction,
       default=os.getenv("WEIGHT_SYNC_POOL_ONLY", "false").lower()
@@ -948,9 +935,10 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   )
   logging.info("Control-plane JAX backend: %s", jax.default_backend())
 
-  num_rollout_pools = args.num_rollout_pools
-  if args.staggered_rollout_pools and num_rollout_pools is None:
-    num_rollout_pools = int(args.max_staleness) + 1
+  # One rollout pool per batch the staleness window allows in flight.
+  num_rollout_pools = (
+      int(args.max_staleness) + 1 if args.staggered_rollout_pools else 1
+  )
 
   cluster = orchestrator.ClusterOrchestrator(
       weight_sync_mode=args.weight_sync_mode,
@@ -1302,7 +1290,6 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         pipeline_train_microbatches=args.pipeline_train_microbatches,
         partial_rollout=args.in_flight_weight_updates,
         staggered_rollout_pools=args.staggered_rollout_pools,
-        num_rollout_pools=num_rollout_pools,
         weight_sync_pool_only=args.weight_sync_pool_only,
         rollout_priority_scheduling=args.rollout_priority_scheduling,
         initial_dispatch_stagger_s=args.initial_dispatch_stagger_s,

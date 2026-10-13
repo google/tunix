@@ -407,7 +407,6 @@ class StandardRLProgram(RLProgram):
       initial_dispatch_stagger_s: float = 0.0,
       initial_dispatch_first_stagger_s: float | None = None,
       trainer_warmup_payload: datatypes.RLTrainerPayload | None = None,
-      num_rollout_pools: int | None = None,
       staggered_rollout_pools: bool = False,
       weight_sync_pool_only: bool = False,
   ):
@@ -578,15 +577,13 @@ class StandardRLProgram(RLProgram):
     self._initial_stagger_logged: set[int] = set()
     self._sync_error: BaseException | None = None
 
-    if staggered_rollout_pools and num_rollout_pools is None:
-      num_rollout_pools = max_staleness + 1
-    if num_rollout_pools is not None and num_rollout_pools < 1:
-      raise ValueError("num_rollout_pools must be >= 1.")
+    # One pool per batch the staleness window lets in flight, so a pool never
+    # holds two batches and every pool gets one. Fewer pools would put two
+    # batches on one pool (the contention this removes); more would leave
+    # pools that never receive a batch.
+    self.staggered_rollout_pools = staggered_rollout_pools
     self.num_rollout_pools = (
-        num_rollout_pools if num_rollout_pools is not None else 1
-    )
-    self.staggered_rollout_pools = (
-        staggered_rollout_pools or (self.num_rollout_pools > 1)
+        max_staleness + 1 if staggered_rollout_pools else 1
     )
     # Only read when `weight_sync_pool_only`: each step's round reaches a
     # single pool, so every pool holds its own version. Otherwise every entry

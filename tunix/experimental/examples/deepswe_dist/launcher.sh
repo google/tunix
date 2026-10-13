@@ -557,9 +557,6 @@ echo "Launching CPU orchestrator..."
   if [[ "$STAGGERED_ROLLOUT_POOLS" == "true" || "$STAGGERED_ROLLOUT_POOLS" == "1" ]]; then
     ORCHESTRATOR_CMD+=(--staggered_rollout_pools)
   fi
-  if [[ -n "$NUM_ROLLOUT_POOLS" ]]; then
-    ORCHESTRATOR_CMD+=(--num_rollout_pools="$NUM_ROLLOUT_POOLS")
-  fi
   if [[ "$WEIGHT_SYNC_POOL_ONLY" == "true" || "$WEIGHT_SYNC_POOL_ONLY" == "1" ]]; then
     ORCHESTRATOR_CMD+=(--weight_sync_pool_only)
   fi
