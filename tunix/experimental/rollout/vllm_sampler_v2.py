@@ -34,6 +34,7 @@ from typing import Any
 
 import numpy as np
 from tunix.generate import utils as generate_utils
+from vllm import envs as vllm_envs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.sampling_params import SamplingParams as VllmSamplingParams
@@ -57,6 +58,33 @@ def _get_val(obj: Any, key: str, default: Any = None) -> Any:
   else:
     val = getattr(obj, key, default)
   return default if val is None else val
+
+
+async def _flush_engine_stats_periodically(
+    engine: AsyncLLMEngine, interval_s: float
+) -> None:
+  """Logs vLLM engine stats every `interval_s` seconds until cancelled.
+
+  `AsyncLLM` records engine stats (throughput, running/waiting requests, KV
+  cache usage, prefix cache hit rate) but never logs them by itself:
+  `do_log_stats()` has no internal caller and is normally driven by
+  `lifespan()` in vllm/entrypoints/serve/utils/server_utils.py. `RLVllmSampler`
+  binds the engine directly without that server, so it drives the flush
+  itself. Unlike the server, this runs regardless of `disable_log_stats`: with
+  stats disabled (and no stat-logger plugins installed) the engine has no stat
+  loggers and `do_log_stats()` is a no-op.
+
+  Args:
+    engine: The running vLLM engine.
+    interval_s: Seconds between flushes (`VLLM_LOG_STATS_INTERVAL`).
+  """
+  while True:
+    await asyncio.sleep(interval_s)
+    try:
+      await engine.do_log_stats()
+    except Exception:  # pylint: disable=broad-exception-caught
+      # Stats are observability-only: log the failure and keep flushing.
+      logger.exception("Failed to flush vLLM engine stats.")
 
 
 class RLVllmSampler:
@@ -87,6 +115,7 @@ class RLVllmSampler:
     self._mesh: Any | None = None
     self._transfer_statuses: dict[str, str] = {}
     self._policy_version = 0
+    self._log_stats_task: asyncio.Task[None] | None = None
 
   def _get_tpu_workers(self) -> list[Any]:
     """Retrieves active TPUWorker instances from underlying model executor."""
@@ -114,8 +143,13 @@ class RLVllmSampler:
         "Initializing RLVllmSampler with model: %s", self.engine_args.model
     )
 
-    self._engine = AsyncLLMEngine.from_engine_args(self.engine_args)
+    log_stats_interval_s = vllm_envs.VLLM_LOG_STATS_INTERVAL
+    engine = AsyncLLMEngine.from_engine_args(self.engine_args)
+    self._engine = engine
     self._is_running = True
+    self._log_stats_task = asyncio.create_task(
+        _flush_engine_stats_periodically(engine, log_stats_interval_s)
+    )
 
     logger.info("RLVllmSampler started successfully.")
 
@@ -126,6 +160,9 @@ class RLVllmSampler:
     logger.info("Stopping RLVllmSampler...")
     self._is_paused = True
     self._paused_generation = False
+    self._log_stats_task.cancel()
+    await asyncio.wait([self._log_stats_task])
+    self._log_stats_task = None
     self._engine = None
     self._is_running = False
     logger.info("RLVllmSampler stopped.")

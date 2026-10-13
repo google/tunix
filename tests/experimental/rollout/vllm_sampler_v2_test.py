@@ -18,6 +18,7 @@
 import asyncio
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
@@ -41,6 +42,7 @@ if "openai_harmony" not in sys.modules:
     sys.modules["openai_harmony"] = MagicMock()
 
 from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.engine.async_llm_engine import AsyncLLMEngine  # pylint: disable=g-import-not-at-top
 
 from tunix.experimental.rollout.vllm_sampler_v2 import RLVllmSampler
 
@@ -382,6 +384,91 @@ class TestRLVllmSamplerWeightSync(unittest.TestCase):
             getattr(vllm_params, "routed_experts_prompt_start", 0), 48
         )
     # pylint: enable=bad-indentation
+
+
+# pylint: disable=bad-indentation
+class TestRLVllmSamplerLogStats(unittest.TestCase):
+    """Tests the periodic flush of vLLM engine stats while the sampler runs."""
+
+    def setUp(self):
+        super().setUp()
+        interval_patcher = patch("vllm.envs.VLLM_LOG_STATS_INTERVAL", 0.01)
+        interval_patcher.start()
+        self.addCleanup(interval_patcher.stop)
+        self.mock_engine = mock.create_autospec(AsyncLLMEngine, instance=True)
+        engine_cls_patcher = patch(
+            "tunix.experimental.rollout.vllm_sampler_v2.AsyncLLMEngine"
+        )
+        mock_engine_cls = engine_cls_patcher.start()
+        self.addCleanup(engine_cls_patcher.stop)
+        mock_engine_cls.from_engine_args.return_value = self.mock_engine
+        self.sampler = RLVllmSampler(
+            engine_args=AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B")
+        )
+
+    def test_start_flushes_stats_until_stop(self):
+        """start() flushes engine stats periodically; stop() cancels it."""
+
+        async def run_test():
+            flushed = asyncio.Event()
+            self.mock_engine.do_log_stats.side_effect = flushed.set
+
+            await self.sampler.start()
+            await asyncio.wait_for(flushed.wait(), timeout=5)
+            log_stats_task = self.sampler._log_stats_task
+            await self.sampler.stop()
+
+            self.assertTrue(log_stats_task.cancelled())
+            self.assertIsNone(self.sampler._log_stats_task)
+
+        asyncio.run(run_test())
+
+    def test_failed_flush_is_logged_and_flushing_continues(self):
+        """A failing flush is logged and does not end the periodic flush."""
+
+        async def run_test():
+            recovered = asyncio.Event()
+            num_flushes = 0
+
+            def flaky_flush():
+                nonlocal num_flushes
+                num_flushes += 1
+                if num_flushes == 1:
+                    raise RuntimeError("stats unavailable")
+                recovered.set()
+
+            self.mock_engine.do_log_stats.side_effect = flaky_flush
+
+            with self.assertLogs(
+                RLVllmSampler.__module__, level="ERROR"
+            ) as logs:
+                await self.sampler.start()
+                await asyncio.wait_for(recovered.wait(), timeout=5)
+            await self.sampler.stop()
+
+            self.assertIsInstance(logs.records[0].exc_info[1], RuntimeError)
+
+        asyncio.run(run_test())
+
+    def test_stop_propagates_its_own_cancellation(self):
+        """Cancelling stop() is not swallowed, and a retried stop() finishes."""
+
+        async def run_test():
+            await self.sampler.start()
+            stop_task = asyncio.create_task(self.sampler.stop())
+            # Lets stop() run until it waits for the flush task to finish.
+            await asyncio.sleep(0)
+            self.assertTrue(self.sampler._log_stats_task.cancelling())
+            stop_task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await stop_task
+
+            await self.sampler.stop()
+            self.assertFalse(self.sampler._is_running)
+            self.assertIsNone(self.sampler._log_stats_task)
+
+        asyncio.run(run_test())
+# pylint: enable=bad-indentation
 
 
 if __name__ == "__main__":
