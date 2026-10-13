@@ -75,6 +75,11 @@ class TrainerWorker(abstract_worker.Worker):
     self._worker_id = worker_id
     self._state = WorkerState.PENDING
     self._last_error: str | None = None
+    # One micro-batch received ahead of its fwd_bwd (`stage_fwd_bwd`):
+    # (request_id, input, fwd_bwd kwargs, request metadata).
+    self._staged_fwd_bwd: (
+        tuple[str, Any, dict[str, Any], dict[str, Any]] | None
+    ) = None
 
   def _policy_version(self) -> int:
     if self._trainer is None:
@@ -149,6 +154,7 @@ class TrainerWorker(abstract_worker.Worker):
     if self.state == WorkerState.STOPPED:
       return self._response(stopped=True, already_stopped=True)
     self._is_running = False
+    self._staged_fwd_bwd = None
     if self.state == WorkerState.READY:
       self.state = WorkerState.DRAINING
     if self._trainer is not None:
@@ -167,6 +173,14 @@ class TrainerWorker(abstract_worker.Worker):
                 else "LazyTrainer"
             ),
             "policy_version": self._policy_version(),
+            # This worker can hold a micro-batch ahead of its fwd_bwd
+            # (`stage_fwd_bwd` / `fwd_bwd_staged`) ...
+            "stage_fwd_bwd": True,
+            # ... and say how long a stage then still waited for the device
+            # (`device_wait_s`), which needs the trainer's `wait_for_device`.
+            "reports_device_wait": callable(
+                getattr(self._trainer, "wait_for_device", None)
+            ),
         },
     )
 
@@ -222,9 +236,26 @@ class TrainerWorker(abstract_worker.Worker):
       self,
       request: datatypes.TrainRequest,
       apply_optimizer: bool = False,
+      *,
+      wait_for_update: bool = True,
       **kwargs: Any,
   ) -> datatypes.Response:
-    """Executes one forward/backward pass, optionally applying the optimizer."""
+    """Executes one forward/backward pass, optionally applying the optimizer.
+
+    Args:
+      request: The micro-batch.
+      apply_optimizer: Also apply the accumulated gradients, in this call.
+      wait_for_update: With `apply_optimizer`, return only once the update has
+        landed when the trainer can tell (`update_ready`). False returns at
+        its dispatch, for a caller that sends the next step's first
+        micro-batch ahead (`stage_fwd_bwd`) while the device finishes; that
+        stage then waits for the device and confirms the update instead.
+      **kwargs: Passed to the trainer's `fwd_bwd`.
+
+    Returns:
+      The response, with `updated`, `train_step` and, once confirmed,
+      `update_ready` in its metadata when the optimizer ran.
+    """
     self._ensure_ready()
     req_metadata = dict(request.metadata) if request.metadata else {}
     req_metadata.pop("updated", None)
@@ -248,9 +279,10 @@ class TrainerWorker(abstract_worker.Worker):
           # the update executable, return only once it is ready and say so: the
           # caller stamps the checkpoint as soon as this call returns, and with
           # `update_ready` it no longer needs get_metrics() to wait for the
-          # update before the checkpoint save and weight sync.
+          # update before the checkpoint save and weight sync. Not when the
+          # caller asked to get control back at dispatch (`wait_for_update`).
           update_token = getattr(self._trainer, "last_update_token", None)
-          if update_token is not None:
+          if wait_for_update and update_token is not None:
             jax.block_until_ready(update_token)
             req_metadata["update_ready"] = True
         except Exception as exc:
@@ -272,6 +304,137 @@ class TrainerWorker(abstract_worker.Worker):
       self._last_error = str(exc)
       self.state = WorkerState.ERROR
       raise
+
+  def stage_fwd_bwd(
+      self,
+      request: datatypes.TrainRequest,
+      **kwargs: Any,
+  ) -> datatypes.Response:
+    """Receives a micro-batch ahead of the fwd_bwd that runs it.
+
+    Holds it as is or, when the trainer has `prepare_fwd_bwd_input`, as what
+    that returns (e.g. its inputs already placed on the devices). Nothing in
+    the model, optimizer or gradient state changes, so the trainer's step
+    order is that of the `fwd_bwd` / `fwd_bwd_staged` calls, and this may
+    land while a weight sync holds the worker. One at a time: a second stage
+    before the first ran is refused rather than replacing it.
+
+    Then, when the trainer has `wait_for_device`, waits for the work it had
+    dispatched before this call and reports how long that took
+    (`device_wait_s`): ~0 means the device was already idle, i.e. the
+    transfer did not hide behind its work. The wait is one the next call
+    (`get_metrics`, which needs the update landed) would make anyway.
+
+    A stage follows a step's last train call, sent with
+    `fwd_bwd(apply_optimizer=True, wait_for_update=False)`, so the update that
+    call dispatched is the last one. When the trainer exposes an output of it
+    (`last_update_token`), this also returns only once it is ready and says
+    so (`update_ready`), as a fused `fwd_bwd` would have.
+
+    Args:
+      request: The micro-batch.
+      **kwargs: Passed to the trainer's `fwd_bwd` when it runs.
+
+    Returns:
+      A response naming the staged request, with `device_wait_s` (None when
+      the trainer cannot tell) and, once confirmed, `update_ready` in its
+      metadata.
+    """
+    if self.state == WorkerState.PENDING:
+      self.initialize()
+    if self.state in (
+        WorkerState.ERROR,
+        WorkerState.STOPPED,
+        WorkerState.DRAINING,
+    ):
+      raise RuntimeError(
+          "TrainerWorker cannot stage a micro-batch in state"
+          f" {self.state.value}."
+      )
+    if self._staged_fwd_bwd is not None:
+      raise RuntimeError(
+          "TrainerWorker already holds staged micro-batch"
+          f" {self._staged_fwd_bwd[0]!r}; run it with fwd_bwd_staged() first."
+      )
+    req_metadata = dict(request.metadata) if request.metadata else {}
+    # Only this worker sets these; a caller-supplied copy is not echoed.
+    for key in ("staged", "device_wait_s", "update_ready"):
+      req_metadata.pop(key, None)
+    kwargs.pop("skip_jit", None)
+    update_ready = False
+    try:
+      staged_input = request.payload
+      prepare = getattr(self._trainer, "prepare_fwd_bwd_input", None)
+      if callable(prepare):
+        staged_input = prepare(request.payload)
+      wait_for_device = getattr(self._trainer, "wait_for_device", None)
+      device_wait_s = (
+          float(wait_for_device()) if callable(wait_for_device) else None
+      )
+      # After the device wait, which already covers the update when the
+      # trainer queues it (MaxText's throttler holds its gradient norm).
+      update_token = getattr(self._trainer, "last_update_token", None)
+      if update_token is not None:
+        jax.block_until_ready(update_token)
+        update_ready = True
+    except Exception as exc:
+      self._last_error = str(exc)
+      self.state = WorkerState.ERROR
+      raise
+    self._staged_fwd_bwd = (
+        request.request_id,
+        staged_input,
+        kwargs,
+        req_metadata,
+    )
+    response_metadata = {
+        **req_metadata,
+        "staged": True,
+        "device_wait_s": device_wait_s,
+    }
+    if update_ready:
+      response_metadata["update_ready"] = True
+    resp = self._response(**response_metadata)
+    resp.request_id = request.request_id
+    return resp
+
+  def fwd_bwd_staged(
+      self,
+      staged_request_id: str,
+      **kwargs: Any,
+  ) -> datatypes.Response:
+    """Runs the forward/backward pass of the micro-batch `stage_fwd_bwd` holds.
+
+    It is `fwd_bwd` on the held input, so it takes the same options
+    (`apply_optimizer`, which also runs the update in this call, and
+    `wait_for_update`) and gives the same response.
+
+    Args:
+      staged_request_id: The id `stage_fwd_bwd` was given; any other id is
+        refused, so a staged micro-batch is never trained in another's place.
+      **kwargs: Merged over the kwargs given at staging, then passed to
+        `fwd_bwd`.
+
+    Returns:
+      The response `fwd_bwd` gives for that micro-batch.
+    """
+    self._ensure_ready()
+    staged = self._staged_fwd_bwd
+    if staged is None or staged[0] != staged_request_id:
+      raise RuntimeError(
+          f"TrainerWorker holds no staged micro-batch {staged_request_id!r}"
+          f" (holds {staged[0] if staged else None!r})."
+      )
+    self._staged_fwd_bwd = None
+    request_id, staged_input, stage_kwargs, req_metadata = staged
+    # The held input may be what `prepare_fwd_bwd_input` made of the payload;
+    # the trainer's `fwd_bwd` takes either.
+    request = datatypes.TrainRequest(
+        request_id=request_id,
+        payload=staged_input,
+        metadata=req_metadata,
+    )
+    return self.fwd_bwd(request, **{**stage_kwargs, **kwargs})
 
   def update(self, **kwargs) -> int:
     """Applies the accumulated (mean) gradients as one optimizer update."""

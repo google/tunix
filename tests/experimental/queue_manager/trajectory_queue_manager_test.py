@@ -417,6 +417,58 @@ class BatchOrderedQueueManagerTest(absltest.TestCase):
 
     asyncio.run(_run_test())
 
+  def test_hole_is_passed_once_the_batch_before_it_commits(self):
+    """Tests a hole read past by index before the previous batch commits.
+
+    A short batch 0, then a hole at batch 1. Draining batch 0 moves the
+    serving cursor to 1; reading batch 1 by index before batch 0 commits (the
+    pipelined step boundary does) moves it on to 2. Committing batch 0 must
+    still pass over the hole, or `next_batch_idx` lags a batch until the next
+    commit and the hole's state is never dropped.
+    """
+
+    async def _run_test():
+      cursor_log: list[int] = []
+      manager = _create_batch_manager(full_batch_size=2, cursor_log=cursor_log)
+      manager.expect(0, num_groups=1)
+      manager.expect(1, num_groups=0)
+      only = await _put_group(manager, "p0", batch_idx=0)
+      await _put_group(manager, "p4", batch_idx=2)
+
+      self.assertEqual(await manager.get_ordered_group(), (0, only))
+      self.assertIsNone(await manager.get_ordered_group(batch_idx=0))
+      self.assertEqual(manager.serving_batch_idx, 1)
+      self.assertIsNone(await manager.get_ordered_group(batch_idx=1))
+      self.assertEqual(manager.serving_batch_idx, 2)
+      self.assertEqual(manager.next_batch_idx, 0)
+
+      manager.commit_batch(0)
+      self.assertEqual(manager.next_batch_idx, 2)
+      self.assertEqual(cursor_log, [1, 2])
+      self.assertNotIn(1, manager._sealed)
+
+    asyncio.run(_run_test())
+
+  def test_hole_rule_change_leaves_the_in_order_consumer_alone(self):
+    """Tests the same batches read in order, committing between them."""
+
+    async def _run_test():
+      cursor_log: list[int] = []
+      manager = _create_batch_manager(full_batch_size=2, cursor_log=cursor_log)
+      manager.expect(0, num_groups=1)
+      manager.expect(1, num_groups=0)
+      only = await _put_group(manager, "p0", batch_idx=0)
+      later = await _put_group(manager, "p4", batch_idx=2)
+
+      self.assertEqual(await manager.get_ordered_group(), (0, only))
+      self.assertIsNone(await manager.get_ordered_group(batch_idx=0))
+      manager.commit_batch(0)
+      self.assertEqual(manager.next_batch_idx, 2)
+      self.assertEqual(cursor_log, [1, 2])
+      self.assertEqual(await manager.get_ordered_group(), (2, later))
+
+    asyncio.run(_run_test())
+
   def test_expect_seals_a_short_final_batch(self):
     """Tests expect() letting a batch seal below full_batch_size."""
 

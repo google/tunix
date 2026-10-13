@@ -214,6 +214,27 @@ class SubmissionLauncherTest(absltest.TestCase):
     self.assertIn("--trainer_warmup_routed_experts", orch)
     self.assertIn("--no-sandbox_wait_initial", orch)
 
+  def test_the_pipelined_step_boundary_is_off_by_default(self):
+    orch = _jobset(self.default, "orch")
+    self.assertIn("--no-pipeline_step_boundary", orch)
+    self.assertIn("--no-stage_next_microbatch", orch)
+
+  def test_the_pipelined_step_boundary_flags_reach_the_orchestrator(self):
+    orch = _jobset(
+        _render(PIPELINE_STEP_BOUNDARY="true", STAGE_NEXT_MICROBATCH="1"),
+        "orch",
+    )
+    self.assertIn("--pipeline_step_boundary", orch)
+    self.assertIn("--stage_next_microbatch", orch)
+    self.assertNotIn("--no-pipeline_step_boundary", orch)
+    self.assertNotIn("--no-stage_next_microbatch", orch)
+
+  def test_staging_without_the_pipelined_boundary_is_refused(self):
+    with self.assertRaisesRegex(
+        AssertionError, "STAGE_NEXT_MICROBATCH=true requires"
+    ):
+      _render(STAGE_NEXT_MICROBATCH="true")
+
   def test_start_up_flags_can_be_turned_off(self):
     orch = _jobset(
         _render(

@@ -281,6 +281,28 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
+      "--pipeline_step_boundary",
+      action=argparse.BooleanOptionalAction,
+      default=False,
+      help=(
+          "Pipeline the step boundary: pack the next step's first"
+          " micro-batch while this step's last ones train, send it as soon"
+          " as this step's weight sync has staged, and do this step's"
+          " metrics and logging while it is on its way. The trainer gets"
+          " the same calls in the same order."
+      ),
+  )
+  parser.add_argument(
+      "--stage_next_microbatch",
+      action=argparse.BooleanOptionalAction,
+      default=False,
+      help=(
+          "With --pipeline_step_boundary: send the next step's first"
+          " micro-batch to the trainer host right after this step's update"
+          " is dispatched, so its train call carries no data."
+      ),
+  )
+  parser.add_argument(
       "--in_flight_weight_updates",
       action=argparse.BooleanOptionalAction,
       default=False,
@@ -1258,6 +1280,8 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
         ),
         async_weight_sync=args.async_weight_sync,
         pipeline_train_microbatches=args.pipeline_train_microbatches,
+        pipeline_step_boundary=args.pipeline_step_boundary,
+        stage_next_microbatch=args.stage_next_microbatch,
         partial_rollout=args.in_flight_weight_updates,
         rollout_priority_scheduling=args.rollout_priority_scheduling,
         initial_dispatch_stagger_s=args.initial_dispatch_stagger_s,
