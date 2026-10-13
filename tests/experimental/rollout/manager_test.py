@@ -770,6 +770,12 @@ class MaxConcurrencyTest(unittest.IsolatedAsyncioTestCase):
 
     self.assertEqual(len(results), 5)
     self.assertEqual(peak, 2)
+    queued_flags = [
+        r.metadata["queue_metrics"]["l2_queued"] for r in results
+    ]
+    # First 2 acquired semaphore immediately; remaining 3 found semaphore locked
+    self.assertEqual(sum(1 for f in queued_flags if f), 3)
+    self.assertEqual(sum(1 for f in queued_flags if not f), 2)
 
   async def test_uncapped_max_concurrency_runs_without_semaphore(self):
     for limit in (None, 0):

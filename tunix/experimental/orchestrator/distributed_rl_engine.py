@@ -55,7 +55,13 @@ def _response_to_trajectory_item(resp: Any) -> datatypes.TrajectoryItem:
     if resp.metadata and isinstance(resp.payload, datatypes.TrajectoryItem):
       merged_meta = dict(resp.metadata)
       if resp.payload.metadata:
+        resp_qm = merged_meta.get("queue_metrics")
+        payload_qm = resp.payload.metadata.get("queue_metrics")
         merged_meta.update(resp.payload.metadata)
+        if isinstance(resp_qm, dict) and isinstance(payload_qm, dict):
+          combined_qm = dict(payload_qm)
+          combined_qm.update(resp_qm)
+          merged_meta["queue_metrics"] = combined_qm
       if merged_meta != resp.payload.metadata:
         return dataclasses.replace(resp.payload, metadata=merged_meta)
     return resp.payload
@@ -108,6 +114,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
           None
       ),
       max_zero_worker_wait_s: float | None = None,
+      target_rollout_replicas: int | None = None,
   ):
     # Legacy scalar arguments take precedence over the consolidated config;
     # `with_overrides` validates the merged result.
@@ -139,6 +146,11 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     self._weight_sync_coordinator = weight_sync_coordinator
     self._rollout_pool = remote_execution.RoutingActorPool(
         list(rollout_workers)
+    )
+    self._target_rollout_replicas: int = (
+        int(target_rollout_replicas)
+        if (target_rollout_replicas is not None and target_rollout_replicas > 0)
+        else max(1, len(rollout_workers))
     )
     # Least-loaded, not hash-by-traj_id: each rollout request is one whole
     # episode, and episode lengths vary by 10x, so hashing left some workers
@@ -230,6 +242,15 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     if self._user_on_worker_evicted is not None:
       self._user_on_worker_evicted(handle, exc)
 
+  @property
+  def active_rollout_workers_ratio(self) -> float:
+    """Ratio of currently active rollout workers to target rollout replicas."""
+    active = len(self._rollout_workers)
+    target = max(self._target_rollout_replicas, active)
+    if target <= 0:
+      return 1.0
+    return float(active) / float(target)
+
   def add_rollout_worker(
       self,
       handle: remote_execution.ActorHandle,
@@ -238,6 +259,9 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
   ) -> None:
     """Adds a rollout worker handle to the active pool and execution session."""
     self._rollout_session.add_actor(handle, max_in_flight=max_in_flight)
+    self._target_rollout_replicas = max(
+        self._target_rollout_replicas, len(self._rollout_workers)
+    )
     if self._rollout_workers and self._zero_worker_since is not None:
       self._zero_worker_seconds_total += max(
           0.0, time.monotonic() - self._zero_worker_since

@@ -305,6 +305,81 @@ class VllmDriverAsyncTest(absltest.TestCase):
           auto_start=False,
       )
 
+  def test_driver_attaches_l3_scheduler_queue_stats_on_outputs(self):
+    class _ReqObj:
+
+      def __init__(self, request_id: str, num_preemptions: int = 0):
+        self.request_id = request_id
+        self.num_preemptions = num_preemptions
+
+    class _FakeScheduler:
+
+      def __init__(self):
+        self.waiting = []
+        self.skipped_waiting = []
+        self.running = []
+
+      def get_kv_cache_usage(self) -> float:
+        return 0.75
+
+    class _SchedulerBackedEngine(_FakeLLMEngine):
+
+      def __init__(self):
+        super().__init__(["req-run", "req-wait"])
+        self.scheduler = _FakeScheduler()
+        self._step_idx = 0
+
+      def add_request(self, request_id: str, *_, **__):
+        super().add_request(request_id)
+        self.scheduler.waiting.append(_ReqObj(request_id))
+
+      def step(self):
+        self._step_idx += 1
+        time.sleep(0.01)
+        if self._step_idx == 1:
+          # Step 1: req-run executes and finishes; req-wait stays in waiting
+          self.scheduler.waiting = [_ReqObj("req-wait", num_preemptions=1)]
+          self.scheduler.running = []
+          self._pending.remove("req-run")
+          return [_DummyRequestOutput("req-run")]
+        # Step 2: req-wait executes and finishes
+        self.scheduler.waiting = []
+        self.scheduler.running = []
+        self._pending.remove("req-wait")
+        return [_DummyRequestOutput("req-wait")]
+
+    engine = _SchedulerBackedEngine()
+    driver = VLLMInProcessDriver(
+        llm_engine=engine, poll_interval_s=0.001, auto_start=True
+    )
+    self.addCleanup(driver.shutdown)
+
+    fut_run, fut_wait = driver.submit_requests([
+        {"request_id": "req-run", "prompt": {"prompt_token_ids": [1]}, "params": object()},
+        {"request_id": "req-wait", "prompt": {"prompt_token_ids": [2]}, "params": object()},
+    ])
+    out_run = fut_run.result(timeout=5.0)
+    out_wait = fut_wait.result(timeout=5.0)
+
+    stats_run = getattr(out_run, "_tunix_queue_stats", None)
+    stats_wait = getattr(out_wait, "_tunix_queue_stats", None)
+    self.assertIsInstance(stats_run, dict)
+    self.assertIsInstance(stats_wait, dict)
+
+    # req-run ran on step 1 with 0 scheduler wait steps
+    self.assertEqual(stats_run["sched_wait_steps"], 0)
+    self.assertEqual(stats_run["sched_wait_s"], 0.0)
+    self.assertGreater(stats_run["tpu_exec_s"], 0.0)
+    self.assertAlmostEqual(stats_run["kv_cache_usage_max"], 0.75)
+    self.assertAlmostEqual(stats_run["waiting_req_ratio"], 0.5)
+
+    # req-wait waited in scheduler.waiting on step 1 and ran on step 2
+    self.assertEqual(stats_wait["sched_wait_steps"], 1)
+    self.assertGreater(stats_wait["sched_wait_s"], 0.0)
+    self.assertGreater(stats_wait["tpu_exec_s"], 0.0)
+    self.assertEqual(stats_wait["num_preemptions"], 1)
+    self.assertTrue(stats_wait["l3_queued"])
+
 
 if __name__ == "__main__":
   absltest.main()

@@ -15,6 +15,7 @@
 """Trajectory Collector Engine wrapping TrajectoryCollectEngine with pause/resume/cancel control."""
 
 import asyncio
+import time
 from typing import Any, Collection, List, Mapping, Optional, Sequence
 import zlib
 from absl import logging
@@ -203,6 +204,21 @@ class TrajectoryCollectorEngine:
 
   async def run_episode(self) -> agent_types.TrajectoryItem:
     """Executes multi-turn agentic rollout episode and returns TrajectoryItem."""
+    episode_queue_stats: dict[str, Any] = {
+        "l2_pause_wait_s": 0.0,
+        "l2_paused_turns": 0,
+        "l3_driver_wait_s": 0.0,
+        "l3_sched_wait_s": 0.0,
+        "tpu_exec_s": 0.0,
+        "l3_sched_wait_steps": 0,
+        "l3_num_preemptions": 0,
+        "l3_kv_cache_usage_sum": 0.0,
+        "l3_kv_cache_usage_max": 0.0,
+        "l3_waiting_req_ratio_sum": 0.0,
+        "l3_queued": False,
+        "num_turns": 0,
+        "sampler_call_s": 0.0,
+    }
 
     # Note: model_call is an async coroutine callback invoked directly by
     # TrajectoryCollectEngine on the asyncio event loop without blocking
@@ -281,19 +297,65 @@ class TrajectoryCollectorEngine:
           priority=self.request.priority,
       )
       if self.partial_rollout or self.is_paused:
+        was_paused = bool(self.is_paused or not self._unpaused_event.is_set())
+        t_pause0 = time.monotonic()
         await self._unpaused_event.wait()
+        pause_dt = max(0.0, time.monotonic() - t_pause0)
+        episode_queue_stats["l2_pause_wait_s"] += pause_dt
+        if was_paused or pause_dt > 0.005:
+          episode_queue_stats["l2_paused_turns"] += 1
         if self.is_cancelled:
           raise RuntimeError("Collector was cancelled.")
       if self.partial_rollout and turn_policy_versions:
         generation_kwargs.setdefault(
             "cache_salt", f"policy_v{turn_policy_versions[0]}"
         )
+      t_sample0 = time.monotonic()
       res = await self.sampler.sample(sampling_req, **generation_kwargs)
+      sample_dt = max(0.0, time.monotonic() - t_sample0)
       if isinstance(res, (list, tuple)) and len(res) == 1:
         res = res[0]
       err = getattr(res, "error", None) if not isinstance(res, str) else None
       if err is not None:
         raise RuntimeError(f"Sampler generation failed: {err}")
+
+      episode_queue_stats["sampler_call_s"] += sample_dt
+      episode_queue_stats["num_turns"] += 1
+      res_qm = (
+          getattr(res, "queue_metrics", None)
+          if not isinstance(res, str)
+          else None
+      )
+      if isinstance(res_qm, dict):
+        d_wait = float(res_qm.get("driver_wait_s", 0.0) or 0.0)
+        s_wait = float(res_qm.get("sched_wait_s", 0.0) or 0.0)
+        t_exec = float(res_qm.get("tpu_exec_s", 0.0) or 0.0)
+        if t_exec <= 0.0 and sample_dt > (d_wait + s_wait):
+          t_exec = max(0.0, sample_dt - d_wait - s_wait)
+        s_steps = int(res_qm.get("sched_wait_steps", 0) or 0)
+        preempts = int(res_qm.get("num_preemptions", 0) or 0)
+        kv_mean = float(res_qm.get("kv_cache_usage_mean", 0.0) or 0.0)
+        kv_max = float(res_qm.get("kv_cache_usage_max", 0.0) or 0.0)
+        w_ratio = float(res_qm.get("waiting_req_ratio", 0.0) or 0.0)
+        episode_queue_stats["l3_driver_wait_s"] += d_wait
+        episode_queue_stats["l3_sched_wait_s"] += s_wait
+        episode_queue_stats["tpu_exec_s"] += t_exec
+        episode_queue_stats["l3_sched_wait_steps"] += s_steps
+        episode_queue_stats["l3_num_preemptions"] += preempts
+        episode_queue_stats["l3_kv_cache_usage_sum"] += kv_mean
+        episode_queue_stats["l3_kv_cache_usage_max"] = max(
+            episode_queue_stats["l3_kv_cache_usage_max"], kv_max
+        )
+        episode_queue_stats["l3_waiting_req_ratio_sum"] += w_ratio
+        if (
+            res_qm.get("l3_queued", False)
+            or s_steps > 0
+            or preempts > 0
+            or (d_wait + s_wait) > 0.005
+        ):
+          episode_queue_stats["l3_queued"] = True
+      else:
+        episode_queue_stats["tpu_exec_s"] += sample_dt
       if self.partial_rollout:
         res_policy_version = (
             None if isinstance(res, str) else res.policy_version
@@ -363,6 +425,7 @@ class TrajectoryCollectorEngine:
         metadata=self.metadata,
     )
     self._inner_engine = inner_engine
+    t_ep0 = time.monotonic()
     try:
       rl_traj = await inner_engine.collect(mode="Token")
     except Exception:
@@ -372,6 +435,41 @@ class TrajectoryCollectorEngine:
       # past it, so the environment is closed here or not at all.
       await inner_engine._close()
       raise
+    episode_wall_s = max(0.0, time.monotonic() - t_ep0)
+    num_turns = max(1, int(episode_queue_stats["num_turns"]))
+    l3_wait_s = (
+        episode_queue_stats["l3_driver_wait_s"]
+        + episode_queue_stats["l3_sched_wait_s"]
+    )
+    env_exec_s = max(
+        0.0,
+        episode_wall_s
+        - episode_queue_stats["l2_pause_wait_s"]
+        - episode_queue_stats["sampler_call_s"],
+    )
+    queue_metrics = {
+        "l2_pause_wait_s": float(episode_queue_stats["l2_pause_wait_s"]),
+        "l2_paused_turns": int(episode_queue_stats["l2_paused_turns"]),
+        "l3_driver_wait_s": float(episode_queue_stats["l3_driver_wait_s"]),
+        "l3_sched_wait_s": float(episode_queue_stats["l3_sched_wait_s"]),
+        "l3_wait_s": float(l3_wait_s),
+        "tpu_exec_s": float(episode_queue_stats["tpu_exec_s"]),
+        "env_exec_s": float(env_exec_s),
+        "episode_wall_s": float(episode_wall_s),
+        "l3_sched_wait_steps": int(episode_queue_stats["l3_sched_wait_steps"]),
+        "l3_num_preemptions": int(episode_queue_stats["l3_num_preemptions"]),
+        "l3_kv_cache_usage_mean": float(
+            episode_queue_stats["l3_kv_cache_usage_sum"] / num_turns
+        ),
+        "l3_kv_cache_usage_max": float(
+            episode_queue_stats["l3_kv_cache_usage_max"]
+        ),
+        "l3_waiting_req_ratio": float(
+            episode_queue_stats["l3_waiting_req_ratio_sum"] / num_turns
+        ),
+        "l3_queued": bool(episode_queue_stats["l3_queued"]),
+        "num_turns": int(episode_queue_stats["num_turns"]),
+    }
     if (
         self.partial_rollout
         and isinstance(rl_traj, dict)
@@ -380,7 +478,7 @@ class TrajectoryCollectorEngine:
       rl_traj["turn_policy_versions"] = list(turn_policy_versions)
       rl_traj["policy_version"] = min(turn_policy_versions)
     self.is_done = True
-    return self._convert_to_trajectory(rl_traj)
+    return self._convert_to_trajectory(rl_traj, queue_metrics=queue_metrics)
 
   def _annotate_response_budget(
       self, rl_traj: Mapping[str, Any], metadata: dict[str, Any]
@@ -465,7 +563,9 @@ class TrajectoryCollectorEngine:
     metadata["clipped"] = clipped
 
   def _convert_to_trajectory(
-      self, rl_traj: dict[str, Any]
+      self,
+      rl_traj: dict[str, Any],
+      queue_metrics: dict[str, Any] | None = None,
   ) -> agent_types.TrajectoryItem:
     """Converts internal Token-mode rollout trajectory to agent_types.TrajectoryItem."""
     if not isinstance(rl_traj, dict):
@@ -515,6 +615,14 @@ class TrajectoryCollectorEngine:
       metadata["policy_version"] = int(policy_version or 0)
 
     self._annotate_response_budget(rl_traj, metadata)
+    if queue_metrics is not None:
+      existing_qm = metadata.get("queue_metrics")
+      if isinstance(existing_qm, dict):
+        merged_qm = dict(existing_qm)
+        merged_qm.update(queue_metrics)
+        metadata["queue_metrics"] = merged_qm
+      else:
+        metadata["queue_metrics"] = dict(queue_metrics)
 
     return agent_types.TrajectoryItem(
         prompt_id=self.request.prompt_id,

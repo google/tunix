@@ -50,6 +50,22 @@ RequestFuture = Future[Union[RequestOutput, PoolingRequestOutput]]
 QueuedRequest = dict[str, Any]
 
 
+def _get_vllm_scheduler(llm_engine: Any) -> Any:
+  """Extracts the underlying vLLM V1 Scheduler from an LLMEngine if available."""
+  sched = getattr(llm_engine, "scheduler", None)
+  if sched is not None and not isinstance(sched, list):
+    return sched
+  ec = getattr(llm_engine, "engine_core", None)
+  if ec is not None:
+    sched = getattr(ec, "scheduler", None)
+    if sched is not None:
+      return sched
+    inner_ec = getattr(ec, "engine_core", None)
+    if inner_ec is not None:
+      return getattr(inner_ec, "scheduler", None)
+  return None
+
+
 class VLLMInProcessDriver:
   """Runs a V1 LLMEngine in-process and polls for finished outputs."""
 
@@ -83,6 +99,7 @@ class VLLMInProcessDriver:
     self._log_stats_interval_s: float = log_stats_interval_s
 
     self._pending: Dict[str, RequestFuture] = {}
+    self._req_queue_stats: Dict[str, dict[str, Any]] = {}
     self._submission_queue: list[QueuedRequest] = []
     # Monotonic (``time.perf_counter``) timestamp of the first request in the
     # current submission window; used to flush a partial batch once
@@ -159,6 +176,7 @@ class VLLMInProcessDriver:
       trace_headers: Optional[dict[str, str]] = None,
       priority: int = 0,
   ) -> RequestFuture:
+    enqueue_ts = time.monotonic()
     with self._engine_lock:
       future = self._queue_request_locked(
           request_id=request_id,
@@ -169,6 +187,7 @@ class VLLMInProcessDriver:
           tokenization_kwargs=tokenization_kwargs,
           trace_headers=trace_headers,
           priority=priority,
+          enqueue_ts=enqueue_ts,
       )
       self._work_event.set()
     return future
@@ -178,6 +197,7 @@ class VLLMInProcessDriver:
       requests: Sequence[QueuedRequest],
   ) -> list[RequestFuture]:
     futures: list[RequestFuture] = []
+    enqueue_ts = time.monotonic()
     with self._engine_lock:
       for request in requests:
         futures.append(
@@ -190,6 +210,7 @@ class VLLMInProcessDriver:
                 tokenization_kwargs=request.get("tokenization_kwargs"),
                 trace_headers=request.get("trace_headers"),
                 priority=request.get("priority", 0),
+                enqueue_ts=enqueue_ts,
             )
         )
 
@@ -208,12 +229,25 @@ class VLLMInProcessDriver:
       tokenization_kwargs: Optional[dict[str, Any]] = None,
       trace_headers: Optional[dict[str, str]] = None,
       priority: int = 0,
+      enqueue_ts: Optional[float] = None,
   ) -> RequestFuture:
     if request_id in self._pending:
       raise ValueError(f"Request {request_id} already pending.")
 
     future: RequestFuture = Future()
     self._pending[request_id] = future
+    self._req_queue_stats[request_id] = {
+        "submit_ts": enqueue_ts if enqueue_ts is not None else time.monotonic(),
+        "driver_wait_s": 0.0,
+        "sched_wait_s": 0.0,
+        "tpu_exec_s": 0.0,
+        "sched_wait_steps": 0,
+        "num_preemptions": 0,
+        "kv_cache_usage_sum": 0.0,
+        "kv_cache_usage_max": 0.0,
+        "waiting_req_ratio_sum": 0.0,
+        "step_dt_sum": 0.0,
+    }
     if self._submission_window_start is None:
       # Start the flush-timeout clock from the first request of this window.
       self._submission_window_start = time.perf_counter()
@@ -241,15 +275,17 @@ class VLLMInProcessDriver:
     self._submission_queue = []
     self._submission_window_start = None
     for request in queued_requests:
-      future = self._pending.get(request["request_id"])
+      req_id = request["request_id"]
+      future = self._pending.get(req_id)
       if future is None or future.cancelled():
+        self._req_queue_stats.pop(req_id, None)
         continue
       logging.debug(
           "VLLMInProcessDriver submitting queued request %s to vLLM engine.",
-          request["request_id"],
+          req_id,
       )
       self._llm_engine.add_request(
-          request_id=request["request_id"],
+          request_id=req_id,
           prompt=request["prompt"],
           params=request["params"],
           arrival_time=request.get("arrival_time"),
@@ -258,6 +294,11 @@ class VLLMInProcessDriver:
           trace_headers=request.get("trace_headers"),
           priority=request.get("priority", 0),
       )
+      st = self._req_queue_stats.get(req_id)
+      if st is not None:
+        now = time.monotonic()
+        st["engine_add_ts"] = now
+        st["driver_wait_s"] = max(0.0, now - st["submit_ts"])
 
   def start(self) -> None:
     if self._loop_thread and self._loop_thread.is_alive():
@@ -284,6 +325,7 @@ class VLLMInProcessDriver:
   def cancel(self, request_id: str) -> None:
     with self._engine_lock:
       future = self._pending.pop(request_id, None)
+      self._req_queue_stats.pop(request_id, None)
       if future is not None and not future.done():
         future.cancel()
       self._llm_engine.abort_request([request_id])
@@ -295,6 +337,7 @@ class VLLMInProcessDriver:
     with self._engine_lock:
       pending = list(self._pending.values())
       self._pending.clear()
+      self._req_queue_stats.clear()
     for future in pending:
       if not future.done():
         future.set_exception(RuntimeError("Driver shut down."))
@@ -368,7 +411,150 @@ class VLLMInProcessDriver:
           100,
       )
       if self._llm_engine.has_unfinished_requests():
-        return self._llm_engine.step()
+        scheduler = _get_vllm_scheduler(self._llm_engine)
+        pre_active_ids: set[str] = set()
+        if scheduler is not None:
+          waiting_q = getattr(scheduler, "waiting", None) or ()
+          skipped_q = getattr(scheduler, "skipped_waiting", None) or ()
+          running_q = getattr(scheduler, "running", None) or ()
+          for q in (waiting_q, skipped_q, running_q):
+            for req_obj in q:
+              rid = getattr(req_obj, "request_id", None)
+              if isinstance(rid, str):
+                pre_active_ids.add(rid)
+                st = self._req_queue_stats.get(rid)
+                if st is not None:
+                  st["num_preemptions"] = max(
+                      st["num_preemptions"],
+                      int(getattr(req_obj, "num_preemptions", 0) or 0),
+                  )
+
+        t0 = time.monotonic()
+        outputs = self._llm_engine.step()
+        step_dt = max(0.0, time.monotonic() - t0)
+
+        finished_ids = {
+            getattr(o, "request_id", None)
+            for o in outputs
+            if getattr(o, "finished", False)
+        }
+        finished_ids.discard(None)
+
+        if scheduler is not None:
+          post_waiting_q = getattr(scheduler, "waiting", None) or ()
+          post_skipped_q = getattr(scheduler, "skipped_waiting", None) or ()
+          post_running_q = getattr(scheduler, "running", None) or ()
+          post_waiting_ids: set[str] = set()
+          for q in (post_waiting_q, post_skipped_q):
+            for req_obj in q:
+              rid = getattr(req_obj, "request_id", None)
+              if isinstance(rid, str):
+                post_waiting_ids.add(rid)
+                st = self._req_queue_stats.get(rid)
+                if st is not None:
+                  st["num_preemptions"] = max(
+                      st["num_preemptions"],
+                      int(getattr(req_obj, "num_preemptions", 0) or 0),
+                  )
+          post_running_ids: set[str] = set()
+          for req_obj in post_running_q:
+            rid = getattr(req_obj, "request_id", None)
+            if isinstance(rid, str):
+              post_running_ids.add(rid)
+              st = self._req_queue_stats.get(rid)
+              if st is not None:
+                st["num_preemptions"] = max(
+                    st["num_preemptions"],
+                    int(getattr(req_obj, "num_preemptions", 0) or 0),
+                )
+
+          kv_usage = 0.0
+          get_kv = getattr(scheduler, "get_kv_cache_usage", None)
+          if callable(get_kv):
+            try:
+              raw_kv = get_kv()
+              if isinstance(raw_kv, (int, float)):
+                kv_usage = float(raw_kv)
+            except Exception:  # pylint: disable=broad-exception-caught
+              kv_usage = 0.0
+
+          executed_ids = (post_running_ids | finished_ids) - post_waiting_ids
+          waiting_count = len(post_waiting_ids) + len(self._submission_queue)
+          running_count = len(executed_ids)
+          total_active = waiting_count + running_count
+          waiting_ratio = (
+              float(waiting_count) / float(total_active)
+              if total_active > 0
+              else 0.0
+          )
+
+          for rid in post_waiting_ids & pre_active_ids:
+            st = self._req_queue_stats.get(rid)
+            if st is not None:
+              st["sched_wait_s"] += step_dt
+              st["sched_wait_steps"] += 1
+              st["kv_cache_usage_sum"] += kv_usage * step_dt
+              st["kv_cache_usage_max"] = max(st["kv_cache_usage_max"], kv_usage)
+              st["waiting_req_ratio_sum"] += waiting_ratio * step_dt
+              st["step_dt_sum"] += step_dt
+
+          for rid in executed_ids:
+            st = self._req_queue_stats.get(rid)
+            if st is not None:
+              st["tpu_exec_s"] += step_dt
+              st["kv_cache_usage_sum"] += kv_usage * step_dt
+              st["kv_cache_usage_max"] = max(st["kv_cache_usage_max"], kv_usage)
+              st["waiting_req_ratio_sum"] += waiting_ratio * step_dt
+              st["step_dt_sum"] += step_dt
+        else:
+          queued_in_driver = {r["request_id"] for r in self._submission_queue}
+          for rid, st in self._req_queue_stats.items():
+            if rid not in queued_in_driver:
+              st["tpu_exec_s"] += step_dt
+              st["step_dt_sum"] += step_dt
+
+        for output in outputs:
+          if getattr(output, "finished", False):
+            st = self._req_queue_stats.pop(output.request_id, None)
+            if st is not None:
+              step_dt_sum = st["step_dt_sum"]
+              avg_kv = (
+                  st["kv_cache_usage_sum"] / step_dt_sum
+                  if step_dt_sum > 0
+                  else 0.0
+              )
+              avg_wait_ratio = (
+                  st["waiting_req_ratio_sum"] / step_dt_sum
+                  if step_dt_sum > 0
+                  else 0.0
+              )
+              ro_metrics = getattr(output, "metrics", None)
+              ro_preemptions = (
+                  int(getattr(ro_metrics, "num_preemptions", 0) or 0)
+                  if ro_metrics is not None
+                  else 0
+              )
+              num_preemptions = max(st["num_preemptions"], ro_preemptions)
+              q_stats = {
+                  "driver_wait_s": float(st["driver_wait_s"]),
+                  "sched_wait_s": float(st["sched_wait_s"]),
+                  "tpu_exec_s": float(st["tpu_exec_s"]),
+                  "sched_wait_steps": int(st["sched_wait_steps"]),
+                  "num_preemptions": int(num_preemptions),
+                  "kv_cache_usage_mean": float(avg_kv),
+                  "kv_cache_usage_max": float(st["kv_cache_usage_max"]),
+                  "waiting_req_ratio": float(avg_wait_ratio),
+                  "l3_queued": bool(
+                      st["sched_wait_steps"] > 0
+                      or num_preemptions > 0
+                      or st["driver_wait_s"] > 0.005
+                  ),
+              }
+              try:
+                setattr(output, "_tunix_queue_stats", q_stats)
+              except Exception:  # pylint: disable=broad-exception-caught
+                pass
+        return outputs
       return []
 
   def _handle_output(
@@ -394,6 +580,7 @@ class VLLMInProcessDriver:
     with self._engine_lock:
       pending = list(self._pending.values())
       self._pending.clear()
+      self._req_queue_stats.clear()
     for future in pending:
       if not future.done():
         future.set_exception(exc)

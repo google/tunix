@@ -949,6 +949,20 @@ class ClusterOrchestrator:
         if cap is not None:
           rollout_worker_capacities[shim.handle] = cap
 
+    target_rollout_replicas = None
+    role_groups = getattr(self.config, "role_groups", None)
+    if isinstance(role_groups, Mapping):
+      rollout_group = role_groups.get(datatypes.Role.ROLLOUT) or role_groups.get(
+          datatypes.Role.ROLLOUT.value
+      )
+      replicas = getattr(rollout_group, "replicas", None)
+      if isinstance(replicas, int) and replicas > 0:
+        target_rollout_replicas = replicas
+    if target_rollout_replicas is None:
+      env_replicas = os.getenv("ROLLOUT_REPLICAS", "").strip()
+      if env_replicas.isdigit() and int(env_replicas) > 0:
+        target_rollout_replicas = int(env_replicas)
+
     return distributed_rl_engine.DistributedRLEngine(
         rollout_workers=rollout_workers,
         trainer_workers=trainer_workers,
@@ -957,6 +971,7 @@ class ClusterOrchestrator:
         on_worker_evicted=self._on_engine_worker_evicted,
         rollout_worker_capacities=rollout_worker_capacities or None,
         fault_tolerance_config=self._fault_tolerance_config,
+        target_rollout_replicas=target_rollout_replicas,
     )
 
   def run(

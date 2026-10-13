@@ -58,6 +58,9 @@ class SamplerOutput:
   # Number of preemptions per request.
   num_preemptions: Optional[list[int] | int] = None
 
+  # Per-request TPU driver and scheduler queueing metrics.
+  queue_metrics: Optional[list[dict[str, Any]]] = None
+
 
 class BaseSampler(ABC):
   """Base class for samplers."""

@@ -133,6 +133,7 @@ def _format_sampling_response(
       finish_reason=getattr(r, "finish_reason", "stop"),
       routed_experts=getattr(r, "routed_experts", None),
       policy_version=pol_ver,
+      queue_metrics=getattr(r, "queue_metrics", None),
       error=getattr(r, "error", None),
   )
 

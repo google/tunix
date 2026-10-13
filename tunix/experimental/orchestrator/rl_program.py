@@ -1323,6 +1323,201 @@ class StandardRLProgram(RLProgram):
           log_step,
       )
 
+    # --- 1b. Trajectory Queueing Performance Metrics (L1 + L2 + L3) ---
+    queue_metrics_list: list[dict[str, Any]] = []
+    for item in all_step_items:
+      meta = getattr(item, "metadata", None)
+      if isinstance(meta, dict):
+        qm = meta.get("queue_metrics")
+        if isinstance(qm, dict):
+          queue_metrics_list.append(qm)
+
+    if queue_metrics_list:
+      n_q = len(queue_metrics_list)
+      l1_queued_flags = [
+          1.0
+          if (
+              bool(qm.get("l1_queued", False))
+              or float(qm.get("l1_queue_wait_s", 0.0) or 0.0) > 0.005
+          )
+          else 0.0
+          for qm in queue_metrics_list
+      ]
+      l2_queued_flags = [
+          1.0
+          if (
+              bool(qm.get("l2_queued", False))
+              or float(qm.get("l2_wait_s", 0.0) or 0.0) > 0.005
+          )
+          else 0.0
+          for qm in queue_metrics_list
+      ]
+      l3_queued_flags = [
+          1.0
+          if (
+              bool(qm.get("l3_queued", False))
+              or int(qm.get("l3_sched_wait_steps", 0) or 0) > 0
+              or int(qm.get("l3_num_preemptions", 0) or 0) > 0
+              or float(qm.get("l3_wait_s", 0.0) or 0.0) > 0.005
+          )
+          else 0.0
+          for qm in queue_metrics_list
+      ]
+      any_queued_flags = [
+          1.0 if (q1 > 0.0 or q2 > 0.0 or q3 > 0.0) else 0.0
+          for q1, q2, q3 in zip(
+              l1_queued_flags, l2_queued_flags, l3_queued_flags
+          )
+      ]
+      preempted_flags = [
+          1.0 if int(qm.get("l3_num_preemptions", 0) or 0) > 0 else 0.0
+          for qm in queue_metrics_list
+      ]
+
+      l1_waits = [
+          max(0.0, float(qm.get("l1_queue_wait_s", 0.0) or 0.0))
+          for qm in queue_metrics_list
+      ]
+      l2_waits = [
+          max(
+              0.0,
+              float(
+                  qm.get(
+                      "l2_wait_s",
+                      (
+                          float(qm.get("l2_admission_wait_s", 0.0) or 0.0)
+                          + float(qm.get("l2_semaphore_wait_s", 0.0) or 0.0)
+                          + float(qm.get("l2_pause_wait_s", 0.0) or 0.0)
+                      ),
+                  )
+                  or 0.0
+              ),
+          )
+          for qm in queue_metrics_list
+      ]
+      l3_waits = [
+          max(
+              0.0,
+              float(
+                  qm.get(
+                      "l3_wait_s",
+                      (
+                          float(qm.get("l3_driver_wait_s", 0.0) or 0.0)
+                          + float(qm.get("l3_sched_wait_s", 0.0) or 0.0)
+                      ),
+                  )
+                  or 0.0
+              ),
+          )
+          for qm in queue_metrics_list
+      ]
+      tpu_execs = [
+          max(0.0, float(qm.get("tpu_exec_s", 0.0) or 0.0))
+          for qm in queue_metrics_list
+      ]
+      env_execs = [
+          max(0.0, float(qm.get("env_exec_s", 0.0) or 0.0))
+          for qm in queue_metrics_list
+      ]
+      e2e_totals = [
+          max(
+              float(qm.get("e2e_wall_s", 0.0) or 0.0),
+              w1 + w2 + w3 + t_exec + e_exec,
+          )
+          for qm, w1, w2, w3, t_exec, e_exec in zip(
+              queue_metrics_list,
+              l1_waits,
+              l2_waits,
+              l3_waits,
+              tpu_execs,
+              env_execs,
+          )
+      ]
+
+      sum_l1 = float(np.sum(l1_waits))
+      sum_l2 = float(np.sum(l2_waits))
+      sum_l3 = float(np.sum(l3_waits))
+      sum_queue = sum_l1 + sum_l2 + sum_l3
+      sum_tpu_exec = float(np.sum(tpu_execs))
+      sum_tpu_demand = sum_queue + sum_tpu_exec
+      sum_e2e_total = float(np.sum(e2e_totals))
+
+      tpu_demand_q_frac = (
+          sum_queue / sum_tpu_demand if sum_tpu_demand > 0.0 else 0.0
+      )
+      l1_q_time_frac = (
+          sum_l1 / sum_tpu_demand if sum_tpu_demand > 0.0 else 0.0
+      )
+      l2_q_time_frac = (
+          sum_l2 / sum_tpu_demand if sum_tpu_demand > 0.0 else 0.0
+      )
+      l3_q_time_frac = (
+          sum_l3 / sum_tpu_demand if sum_tpu_demand > 0.0 else 0.0
+      )
+      e2e_q_time_frac = (
+          sum_queue / sum_e2e_total if sum_e2e_total > 0.0 else 0.0
+      )
+
+      kv_means = [
+          max(0.0, float(qm.get("l3_kv_cache_usage_mean", 0.0) or 0.0))
+          for qm in queue_metrics_list
+      ]
+      kv_maxes = [
+          max(0.0, float(qm.get("l3_kv_cache_usage_max", 0.0) or 0.0))
+          for qm in queue_metrics_list
+      ]
+      waiting_ratios = [
+          max(0.0, float(qm.get("l3_waiting_req_ratio", 0.0) or 0.0))
+          for qm in queue_metrics_list
+      ]
+      l3_weights = [w3 + t_ex for w3, t_ex in zip(l3_waits, tpu_execs)]
+      sum_l3_weights = float(np.sum(l3_weights))
+      if sum_l3_weights > 0.0:
+        weighted_waiting_ratio = float(
+            np.sum([r * w for r, w in zip(waiting_ratios, l3_weights)])
+            / sum_l3_weights
+        )
+        weighted_kv_mean = float(
+            np.sum([k * w for k, w in zip(kv_means, l3_weights)])
+            / sum_l3_weights
+        )
+      else:
+        weighted_waiting_ratio = float(np.mean(waiting_ratios))
+        weighted_kv_mean = float(np.mean(kv_means))
+
+      active_workers_ratio = float(
+          getattr(self.engine, "active_rollout_workers_ratio", 1.0)
+          if self.engine is not None
+          else 1.0
+      )
+
+      queue_log_stats = {
+          "queued_traj_frac_total": float(sum(any_queued_flags) / n_q),
+          "tpu_demand_queue_time_frac": float(tpu_demand_q_frac),
+          "e2e_queue_time_frac": float(e2e_q_time_frac),
+          "l1_orchestrator_queued_traj_frac": float(sum(l1_queued_flags) / n_q),
+          "l2_worker_queued_traj_frac": float(sum(l2_queued_flags) / n_q),
+          "l3_tpu_sched_queued_traj_frac": float(sum(l3_queued_flags) / n_q),
+          "l3_tpu_preempted_traj_frac": float(sum(preempted_flags) / n_q),
+          "l1_orchestrator_queue_time_frac": float(l1_q_time_frac),
+          "l2_worker_queue_time_frac": float(l2_q_time_frac),
+          "l3_tpu_sched_queue_time_frac": float(l3_q_time_frac),
+          "l1_wait_sec_mean": float(np.mean(l1_waits)),
+          "l1_wait_sec_max": float(np.max(l1_waits)),
+          "l2_wait_sec_mean": float(np.mean(l2_waits)),
+          "l2_wait_sec_max": float(np.max(l2_waits)),
+          "l3_wait_sec_mean": float(np.mean(l3_waits)),
+          "l3_wait_sec_max": float(np.max(l3_waits)),
+          "tpu_exec_sec_mean": float(np.mean(tpu_execs)),
+          "env_exec_sec_mean": float(np.mean(env_execs)),
+          "l3_tpu_waiting_req_ratio": float(weighted_waiting_ratio),
+          "l3_tpu_kv_cache_usage_mean": float(weighted_kv_mean),
+          "l3_tpu_kv_cache_usage_max": float(np.max(kv_maxes)),
+          "active_rollout_workers_ratio": active_workers_ratio,
+      }
+      for q_tag, q_val in queue_log_stats.items():
+        self._log_metric(f"rollout/queue/{q_tag}", q_val, log_step)
+
     # Generation/rollout metrics grouped under rollout/*.
     if generation_metrics:
       for tag, val in generation_metrics.items():

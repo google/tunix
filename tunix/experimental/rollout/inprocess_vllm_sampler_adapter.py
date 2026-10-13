@@ -18,6 +18,7 @@ import abc
 import asyncio
 from concurrent import futures
 import functools
+import time
 from typing import Any, List, Sequence
 from absl import logging
 from flax import nnx
@@ -335,12 +336,22 @@ class InprocessVllmSamplerAdapter(
     else:
       sampler_call_kwargs["input_strings"] = prompts
 
-    sampler_output = await loop.run_in_executor(
+    submit_ts = time.monotonic()
+
+    def _invoke_sampler():
+      start_ts = time.monotonic()
+      out = self.vllm_sampler(**sampler_call_kwargs)
+      end_ts = time.monotonic()
+      return out, max(0.0, start_ts - submit_ts), max(0.0, end_ts - start_ts)
+
+    sampler_output, executor_wait_s, call_exec_s = await loop.run_in_executor(
         self._executor,
-        functools.partial(self.vllm_sampler, **sampler_call_kwargs),
+        _invoke_sampler,
     )
 
     prompt_lengths = getattr(sampler_output, "prompt_lengths", None)
+    out_queue_metrics = getattr(sampler_output, "queue_metrics", None) or []
+    out_preemptions = getattr(sampler_output, "num_preemptions", None)
     responses = []
     for i, req in enumerate(requests):
       req_id = getattr(req, "request_id", "")
@@ -377,6 +388,31 @@ class InprocessVllmSamplerAdapter(
       )
       log_ps = np.array(lps, dtype=np.float32) if lps is not None else None
 
+      if i < len(out_queue_metrics) and isinstance(out_queue_metrics[i], dict):
+        qm = dict(out_queue_metrics[i])
+        qm["driver_wait_s"] = (
+            float(qm.get("driver_wait_s", 0.0) or 0.0) + executor_wait_s
+        )
+        if qm["driver_wait_s"] > 0.005:
+          qm["l3_queued"] = True
+      else:
+        preempt_i = 0
+        if isinstance(out_preemptions, list) and i < len(out_preemptions):
+          preempt_i = int(out_preemptions[i] or 0)
+        elif isinstance(out_preemptions, int):
+          preempt_i = int(out_preemptions)
+        qm = {
+            "driver_wait_s": float(executor_wait_s),
+            "sched_wait_s": 0.0,
+            "tpu_exec_s": float(call_exec_s),
+            "sched_wait_steps": 0,
+            "num_preemptions": preempt_i,
+            "kv_cache_usage_mean": 0.0,
+            "kv_cache_usage_max": 0.0,
+            "waiting_req_ratio": 0.0,
+            "l3_queued": bool(executor_wait_s > 0.005 or preempt_i > 0),
+        }
+
       responses.append(
           base_sampler_lib.SamplingResponse(
               request_id=req_id,
@@ -386,6 +422,7 @@ class InprocessVllmSamplerAdapter(
               logprobs=log_ps,
               routed_experts=routed,
               finish_reason="stop",
+              queue_metrics=qm,
           )
       )
 
