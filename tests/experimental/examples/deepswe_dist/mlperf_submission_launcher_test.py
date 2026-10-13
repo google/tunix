@@ -245,6 +245,30 @@ class SubmissionLauncherTest(absltest.TestCase):
     self.assertEqual(cfg["max_num_seqs"], 16)
     self.assertNotIn("kv_tp_size", _maxtext_flags(_jobset(render, "train")))
 
+  def test_raiden_trainer_knobs_are_off_by_default(self):
+    trainer = _jobset(self.default, "train")
+    self.assertNotIn("name: RAIDEN_TRANSPORT_COALESCE_WINDOW_BYTES", trainer)
+    self.assertNotIn("name: RAIDEN_WEIGHT_SYNC_PIPELINE_GROUP_SIZE", trainer)
+    self.assertNotIn("RAIDEN_PARALLELISM=", trainer)
+
+  def test_raiden_transport_knobs_reach_the_pathways_worker(self):
+    trainer = _jobset(_render(RAIDEN_TRANSPORT_ENV_IN_WORKER="true"), "train")
+    self.assertRegex(
+        trainer,
+        r'name: RAIDEN_TRANSPORT_COALESCE_WINDOW_BYTES\n\s+value: "67108864"',
+    )
+    self.assertRegex(
+        trainer, r'name: RAIDEN_WEIGHT_SYNC_PIPELINE_GROUP_SIZE\n\s+value: "16"'
+    )
+    # The flag appends to the worker env; the existing entries stay.
+    self.assertIn("name: SKIP_MEGASCALE_PJRT_CLIENT", trainer)
+
+  def test_trainer_raiden_parallelism_reaches_the_trainer_client(self):
+    trainer = _jobset(_render(TRAINER_RAIDEN_PARALLELISM="16"), "train")
+    main = trainer.index("python -m tunix.experimental.distributed.runtime.main")
+    # The value is part of the env prefix of the trainer client command.
+    self.assertIn("RAIDEN_PARALLELISM=16", trainer[:main])
+
 
 if __name__ == "__main__":
   absltest.main()

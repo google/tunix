@@ -112,6 +112,22 @@ RAIDEN_BROADCAST_HOST_RATIO=${RAIDEN_BROADCAST_HOST_RATIO}
 RAIDEN_BROADCAST_PIPELINE_STAGES=${RAIDEN_BROADCAST_PIPELINE_STAGES}${TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS:+
 TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS=${TPU_RAIDEN_TCP_CONNECT_TIMEOUT_MS}}${TPU_RAIDEN_TCP_CONNECT_MAX_ATTEMPTS:+
 TPU_RAIDEN_TCP_CONNECT_MAX_ATTEMPTS=${TPU_RAIDEN_TCP_CONNECT_MAX_ATTEMPTS}}}"
+# RAIDEN_TRANSPORT_ENV_IN_WORKER=true: the trainer's Raiden transfer runs in the
+# pathways-worker, which reads the two transport knobs below but only receives
+# PATHWAYS_WORKER_EXTRA_ENV. In TRAINER_EXTRA_ENV above they reach the Python
+# client only. Off by default so existing renders are unchanged.
+if [[ "${RAIDEN_TRANSPORT_ENV_IN_WORKER:-false}" == "true" ]]; then
+  PATHWAYS_WORKER_EXTRA_ENV+=$'\n'"RAIDEN_TRANSPORT_COALESCE_WINDOW_BYTES=67108864"
+  PATHWAYS_WORKER_EXTRA_ENV+=$'\n'"RAIDEN_WEIGHT_SYNC_PIPELINE_GROUP_SIZE=16"
+  export PATHWAYS_WORKER_EXTRA_ENV
+fi
+# TRAINER_RAIDEN_PARALLELISM=<n>: transfer streams of the trainer-side weight
+# synchronizer. MaxText reads RAIDEN_PARALLELISM in the trainer client and passes
+# it to the worker as an FFI attribute (default 4 when unset). The rollout and
+# orchestrator keep their own RAIDEN_PARALLELISM=16 above.
+if [[ -n "${TRAINER_RAIDEN_PARALLELISM:-}" ]]; then
+  export TRAINER_EXTRA_ENV="${TRAINER_EXTRA_ENV} RAIDEN_PARALLELISM=${TRAINER_RAIDEN_PARALLELISM}"
+fi
 
 # XLA compiler flags must also reach the pathways-proxy: it is what compiles the
 # trainer program, and without them it uses the 32 MiB default scoped VMEM limit
