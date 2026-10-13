@@ -741,6 +741,119 @@ class BatchOrderedQueueManagerTest(absltest.TestCase):
     asyncio.run(_run_test())
 
 
+  def test_get_group_max_batch_idx_filter(self):
+    """Verifies get_group(max_batch_idx_fn=...) skips future-batch groups until unblocked."""
+
+    async def _run():
+      q = trajectory_queue_manager.TrajectoryQueueManager(num_generations=1)
+      item_b1 = _create_item("p1", group_index=0, reward=1.0, batch_idx=1)
+      item_b0 = _create_item("p0", group_index=0, reward=1.0, batch_idx=0)
+      await q.put(item_b1)
+
+      # With max_batch_idx=0, batch 1 group stays buffered and consumer waits.
+      max_batch = 0
+      consumer = asyncio.create_task(
+          q.get_group(max_batch_idx_fn=lambda: max_batch)
+      )
+      await asyncio.sleep(0.02)
+      self.assertFalse(consumer.done())
+
+      # Arriving batch 0 group satisfies max_batch_idx=0 immediately.
+      await q.put(item_b0)
+      got_b0 = await asyncio.wait_for(consumer, timeout=1.0)
+      self.assertEqual([it.metadata["batch_idx"] for it in got_b0], [0])
+
+      # Advancing max_batch to 1 + notify_consumers() unblocks batch 1.
+      consumer_b1 = asyncio.create_task(
+          q.get_group(max_batch_idx_fn=lambda: max_batch)
+      )
+      max_batch = 1
+      q.notify_consumers()
+      got_b1 = await asyncio.wait_for(consumer_b1, timeout=1.0)
+      self.assertEqual([it.metadata["batch_idx"] for it in got_b1], [1])
+
+    asyncio.run(_run())
+
+  def test_batch_ordered_queue_manager_sealed_and_pending_queries(self):
+    """Verifies is_batch_sealed, pending_groups_for_batch, and on_state_change."""
+
+    async def _run():
+      state_changes = []
+      q = trajectory_queue_manager.BatchOrderedQueueManager(
+          full_batch_size=2,
+          num_generations=1,
+          on_state_change=lambda: state_changes.append(1),
+      )
+      self.assertFalse(q.is_batch_sealed(0))
+      self.assertEqual(q.pending_groups_for_batch(0), 0)
+
+      await q.put(_create_item("b0_p0", group_index=0, reward=1.0, batch_idx=0))
+      self.assertFalse(q.is_batch_sealed(0))
+      self.assertEqual(q.pending_groups_for_batch(0), 1)
+      self.assertGreaterEqual(len(state_changes), 1)
+
+      await q.put(_create_item("b0_p1", group_index=0, reward=1.0, batch_idx=0))
+      self.assertTrue(q.is_batch_sealed(0))
+      self.assertEqual(q.pending_groups_for_batch(0), 2)
+
+      b_idx1, group1 = await q.get_ordered_group()
+      self.assertEqual(b_idx1, 0)
+      self.assertLen(group1, 1)
+      self.assertEqual(q.pending_groups_for_batch(0), 1)
+
+      b_idx2, group2 = await q.get_ordered_group()
+      self.assertEqual(b_idx2, 0)
+      self.assertLen(group2, 1)
+      self.assertEqual(q.pending_groups_for_batch(0), 0)
+      q.commit_batch(0)
+      self.assertEqual(q.next_batch_idx, 1)
+
+    asyncio.run(_run())
+
+
+  def test_priority_partial_prompt_ids_and_has_ready_groups(self):
+    """Verifies smallest-x partial group priority ordering and ready group queries."""
+
+    async def _run():
+      q = trajectory_queue_manager.TrajectoryQueueManager(num_generations=4)
+      self.assertFalse(q.has_ready_groups_for_batch(0))
+      self.assertEqual(q.priority_partial_prompt_ids(0), [])
+
+      # p_1 has 1/4 items (x=3 remaining), p_3 has 3/4 items (x=1 remaining),
+      # p_2 has 2/4 items (x=2 remaining), p_future has 3/4 items in batch 1.
+      await q.put(_create_item("p_1", group_index=0, reward=1.0, batch_idx=0))
+      for i in range(3):
+        await q.put(_create_item("p_3", group_index=i, reward=1.0, batch_idx=0))
+      for i in range(2):
+        await q.put(_create_item("p_2", group_index=i, reward=1.0, batch_idx=0))
+      for i in range(3):
+        await q.put(
+            _create_item("p_future", group_index=i, reward=1.0, batch_idx=1)
+        )
+
+      # For max_batch_idx=0, partial groups are sorted by largest len(bucket) (smallest x).
+      self.assertEqual(
+          q.priority_partial_prompt_ids(max_batch_idx=0),
+          ["p_3", "p_2", "p_1"],
+      )
+      self.assertFalse(q.has_ready_groups_for_batch(0))
+
+      # Completing p_future (batch 1) makes batch 1 ready, while batch <= 0 is still False.
+      await q.put(_create_item("p_future", group_index=3, reward=1.0, batch_idx=1))
+      self.assertFalse(q.has_ready_groups_for_batch(0))
+      self.assertTrue(q.has_ready_groups_for_batch(1))
+
+      # Completing p_3 (batch 0) makes batch <= 0 ready and removes p_3 from partial buckets.
+      await q.put(_create_item("p_3", group_index=3, reward=1.0, batch_idx=0))
+      self.assertTrue(q.has_ready_groups_for_batch(0))
+      self.assertEqual(
+          q.priority_partial_prompt_ids(max_batch_idx=0),
+          ["p_2", "p_1"],
+      )
+
+    asyncio.run(_run())
+
+
 if __name__ == "__main__":
   absltest.main()
 

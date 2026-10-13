@@ -62,6 +62,242 @@ def _release_host_memory() -> None:
     pass
 
 
+_CGROUP_UNLIMITED_THRESHOLD = 1 << 60
+
+
+def _read_int_file(path: str) -> int | None:
+  """Reads a positive integer from `path`, returning None on missing/unlimited."""
+  try:
+    with open(path, "r", encoding="utf-8") as f:
+      raw = f.read().strip()
+  except OSError:
+    return None
+  if not raw or raw == "max":
+    return None
+  try:
+    val = int(raw)
+  except ValueError:
+    return None
+  if val <= 0 or val >= _CGROUP_UNLIMITED_THRESHOLD:
+    return None
+  return val
+
+
+def _read_host_mem_total_bytes() -> int:
+  """Reads total physical host memory in bytes from `/proc/meminfo`."""
+  try:
+    with open("/proc/meminfo", "r", encoding="utf-8") as f:
+      for line in f:
+        if line.startswith("MemTotal:"):
+          parts = line.split()
+          if len(parts) >= 2:
+            return int(parts[1]) * 1024
+  except (OSError, ValueError):
+    pass
+  return 0
+
+
+def _read_process_rss_bytes() -> int:
+  """Reads current process resident set size (VmRSS) in bytes from `/proc/self/statm`."""
+  try:
+    with open("/proc/self/statm", "r", encoding="utf-8") as f:
+      fields = f.read().split()
+      if len(fields) >= 2:
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        return int(fields[1]) * int(page_size)
+  except (OSError, ValueError):
+    pass
+  return 0
+
+
+def _detect_cgroup_memory_files() -> tuple[int, str | None]:
+  """Detects the effective memory limit in bytes and optional cgroup usage path.
+
+  Resolves both cgroup v2 (`memory.max` / `memory.current`) and cgroup v1
+  (`memory.limit_in_bytes` / `memory.usage_in_bytes`), checking process-specific
+  subpaths from `/proc/self/cgroup` before root `/sys/fs/cgroup` mounts. Falls
+  back to `/proc/meminfo` (`MemTotal`) and process RSS (`/proc/self/statm`) when
+  running outside a memory-limited container.
+  """
+  host_total = _read_host_mem_total_bytes()
+  def _ancestor_dirs(root: str, rel: str) -> list[str]:
+    dirs: list[str] = []
+    cur = os.path.normpath(os.path.join(root, rel.lstrip("/")))
+    norm_root = os.path.normpath(root)
+    while True:
+      dirs.append(cur)
+      if cur == norm_root or cur == "/":
+        break
+      parent = os.path.dirname(cur)
+      if parent == cur:
+        break
+      cur = parent
+    return dirs
+
+  v2_dirs: list[str] = []
+  v1_dirs: list[str] = []
+  try:
+    with open("/proc/self/cgroup", "r", encoding="utf-8") as f:
+      for line in f:
+        parts = line.strip().split(":", 2)
+        if len(parts) != 3:
+          continue
+        _, controllers, rel_path = parts
+        rel = rel_path.lstrip("/")
+        if controllers == "" and rel:
+          for d in _ancestor_dirs("/sys/fs/cgroup", rel):
+            if d not in v2_dirs:
+              v2_dirs.append(d)
+        elif "memory" in controllers.split(",") and rel:
+          for d in _ancestor_dirs("/sys/fs/cgroup/memory", rel):
+            if d not in v1_dirs:
+              v1_dirs.append(d)
+  except OSError:
+    pass
+  if "/sys/fs/cgroup" not in v2_dirs:
+    v2_dirs.append("/sys/fs/cgroup")
+  if "/sys/fs/cgroup/memory" not in v1_dirs:
+    v1_dirs.append("/sys/fs/cgroup/memory")
+
+  for d in v2_dirs:
+    limit = _read_int_file(os.path.join(d, "memory.max"))
+    usage_path = os.path.join(d, "memory.current")
+    if (
+        limit is not None
+        and (host_total <= 0 or limit <= host_total)
+        and _read_int_file(usage_path) is not None
+    ):
+      return limit, usage_path
+
+  for d in v1_dirs:
+    limit = _read_int_file(os.path.join(d, "memory.limit_in_bytes"))
+    usage_path = os.path.join(d, "memory.usage_in_bytes")
+    if (
+        limit is not None
+        and (host_total <= 0 or limit <= host_total)
+        and _read_int_file(usage_path) is not None
+    ):
+      return limit, usage_path
+
+  return host_total, None
+
+
+class _OrchestratorMemoryController:
+  """Hysteresis controller reading cgroup/process memory to gate rollout stages.
+
+  Derived watermarks from `high_watermark_ratio` (`W_high`):
+  * `high_ratio = W_high` (triggers polling/critique backpressure)
+  * `soft_ratio = 0.875 * W_high` (clamps future-batch dispatch to `_next_batch`)
+  * `low_ratio = 0.75 * W_high` (releases throttling once memory drops below)
+  """
+
+  def __init__(
+      self,
+      high_watermark_ratio: float | None = None,
+      *,
+      memory_reader: Callable[[], tuple[int, int]] | None = None,
+  ):
+    if high_watermark_ratio is not None and not (
+        0.0 < float(high_watermark_ratio) <= 1.0
+    ):
+      raise ValueError(
+          "memory_high_watermark_ratio must be in (0.0, 1.0]; got"
+          f" {high_watermark_ratio!r}."
+      )
+    self.enabled: bool = high_watermark_ratio is not None
+    self.high_ratio: float = (
+        float(high_watermark_ratio) if high_watermark_ratio is not None else 1.0
+    )
+    self.soft_ratio: float = self.high_ratio * 0.875
+    self.low_ratio: float = self.high_ratio * 0.75
+    self._memory_reader = memory_reader
+    self._limit_bytes, self._cgroup_usage_path = (
+        (0, None) if memory_reader is not None else _detect_cgroup_memory_files()
+    )
+    self._dispatch_throttled: bool = False
+    self._poll_throttled: bool = False
+    self._last_trim_ts: float = 0.0
+
+  def sample_memory(self) -> tuple[int, int, float]:
+    """Returns `(used_bytes, limit_bytes, ratio)`."""
+    if not self.enabled:
+      return 0, 0, 0.0
+    if self._memory_reader is not None:
+      used, limit = self._memory_reader()
+    else:
+      limit = self._limit_bytes
+      used = (
+          _read_int_file(self._cgroup_usage_path)
+          if self._cgroup_usage_path is not None
+          else None
+      )
+      if used is None:
+        used = _read_process_rss_bytes()
+    if limit <= 0:
+      return used, 0, 0.0
+    return used, limit, float(used) / float(limit)
+
+  def _update_state(self) -> tuple[int, int, float]:
+    used, limit, ratio = self.sample_memory()
+    if not self.enabled or limit <= 0:
+      self._dispatch_throttled = False
+      self._poll_throttled = False
+      return used, limit, ratio
+
+    if self._dispatch_throttled:
+      if ratio <= self.low_ratio:
+        self._dispatch_throttled = False
+    elif ratio >= self.soft_ratio:
+      self._dispatch_throttled = True
+
+    was_poll_throttled = self._poll_throttled
+    if self._poll_throttled:
+      if ratio <= self.low_ratio:
+        self._poll_throttled = False
+        logging.info(
+            "[pipeline] MEMORY_BACKPRESSURE action=release used_gb=%.2f"
+            " limit_gb=%.2f ratio=%.3f low_ratio=%.3f",
+            used / (1024**3),
+            limit / (1024**3),
+            ratio,
+            self.low_ratio,
+        )
+    elif ratio >= self.high_ratio:
+      self._poll_throttled = True
+      now = time.monotonic()
+      if now - self._last_trim_ts >= 1.0:
+        self._last_trim_ts = now
+        _release_host_memory()
+        used, limit, ratio = self.sample_memory()
+        if ratio <= self.low_ratio:
+          self._poll_throttled = False
+          self._dispatch_throttled = False
+      if self._poll_throttled and not was_poll_throttled:
+        logging.warning(
+            "[pipeline] MEMORY_BACKPRESSURE action=engage used_gb=%.2f"
+            " limit_gb=%.2f ratio=%.3f high_ratio=%.3f",
+            used / (1024**3),
+            limit / (1024**3),
+            ratio,
+            self.high_ratio,
+        )
+    return used, limit, ratio
+
+  def is_dispatch_throttled(self) -> bool:
+    """Returns True when future-batch dispatch (`batch_idx > _next_batch`) should pause."""
+    if not self.enabled:
+      return False
+    self._update_state()
+    return self._dispatch_throttled
+
+  def is_poll_throttled(self) -> bool:
+    """Returns True when memory is above high watermark (with hysteresis)."""
+    if not self.enabled:
+      return False
+    self._update_state()
+    return self._poll_throttled
+
+
 def _next_or_exhausted(iterator: Any) -> Any:
   """`next()` that returns `_EXHAUSTED` instead of raising StopIteration.
 
@@ -403,6 +639,8 @@ class StandardRLProgram(RLProgram):
       initial_dispatch_stagger_s: float = 0.0,
       initial_dispatch_first_stagger_s: float | None = None,
       trainer_warmup_payload: datatypes.RLTrainerPayload | None = None,
+      memory_high_watermark_ratio: float | None = None,
+      memory_reader: Callable[[], tuple[int, int]] | None = None,
   ):
     super().__init__()
     self.engine: rl_engine_interface.AbstractRLEngine | None = None
@@ -606,7 +844,33 @@ class StandardRLProgram(RLProgram):
     self.last_step_timestamp_ms: int | None = None
     self._in_flight_rollouts = 0
     self._window_release = asyncio.Event()
+    self._poll_state_event = asyncio.Event()
     self._dispatch_done = asyncio.Event()
+    self.memory_high_watermark_ratio = memory_high_watermark_ratio
+    self._mem_controller = _OrchestratorMemoryController(
+        memory_high_watermark_ratio,
+        memory_reader=memory_reader,
+    )
+    if self._mem_controller.enabled:
+      used_b, limit_b, init_ratio = self._mem_controller.sample_memory()
+      logging.info(
+          "[pipeline] MEMORY_BACKPRESSURE configured: high_ratio=%.3f"
+          " soft_ratio=%.3f low_ratio=%.3f used_gb=%.2f limit_gb=%.2f"
+          " initial_ratio=%.3f usage_source=%s",
+          self._mem_controller.high_ratio,
+          self._mem_controller.soft_ratio,
+          self._mem_controller.low_ratio,
+          used_b / (1024**3),
+          limit_b / (1024**3),
+          init_ratio,
+          self._mem_controller._cgroup_usage_path or "/proc/self/statm",
+      )
+    self._train_groups_consumed: int = 0
+    self._active_train_batch_idx: int | None = None
+    self._last_max_poll_batch_idx: int | None = None
+    self._last_priority_prompt_ids: tuple[str, ...] = ()
+    self._critique_in_flight: int = 0
+    self._train_ingesting_group: bool = False
 
     self.scored_q: (
         trajectory_queue_manager.TrajectoryQueueManager
@@ -620,6 +884,7 @@ class StandardRLProgram(RLProgram):
           max_staleness=max_staleness,
           current_policy_version=lambda: self.policy_version,
           on_cursor_advance=lambda _: self._release_window(),
+          on_state_change=self._notify_pipeline_state_change,
       )
       self.scored_q = ordered_q
       on_drop = ordered_q.dropped
@@ -628,12 +893,14 @@ class StandardRLProgram(RLProgram):
           num_generations=self.num_generations,
           max_staleness=max_staleness,
           current_policy_version=lambda: self.policy_version,
+          on_ready_change=self._notify_pipeline_state_change,
       )
     self.raw_q = trajectory_queue_manager.TrajectoryQueueManager.create(
         num_generations=self.num_generations,
         max_staleness=max_staleness,
         current_policy_version=lambda: self.policy_version,
         on_drop=on_drop,
+        on_ready_change=self._notify_pipeline_state_change,
     )
 
   @property
@@ -668,15 +935,163 @@ class StandardRLProgram(RLProgram):
       return self.scored_q.next_batch_idx
     return self._step
 
+  def _notify_pipeline_state_change(self) -> None:
+    """Wakes polling and critique stages when batch or memory state changes."""
+    self._poll_state_event.set()
+    raw_q = getattr(self, "raw_q", None)
+    if raw_q is not None:
+      raw_q.notify_consumers()
+
+  def _active_or_next_batch_idx(self) -> int:
+    """Returns the prompt-batch index the trainer is actively consuming or awaiting."""
+    if self._active_train_batch_idx is not None:
+      return self._active_train_batch_idx
+    if isinstance(
+        self.scored_q, trajectory_queue_manager.BatchOrderedQueueManager
+    ):
+      return self.scored_q.serving_batch_idx
+    return self._next_batch
+
+  def _is_current_step_self_sufficient(self) -> bool:
+    """Returns True iff `train_stage` can finish the current step without further polling.
+
+    This is the core deadlock-freedom liveness invariant:
+    * Under `PROMPT_BATCH`, `train_stage` can exit its batch collection loop
+      using only groups already in `scored_q` iff either
+      `groups_consumed + pending_groups_for_batch(B_active) >= full_batch_size`
+      or `B_active` is already sealed (`is_batch_sealed(B_active)`).
+    * Under `ARRIVAL`, `train_stage` can finish the current step iff
+      `groups_consumed + scored_q.ready_groups_count >= full_batch_size`.
+    """
+    if isinstance(
+        self.scored_q, trajectory_queue_manager.BatchOrderedQueueManager
+    ):
+      target_batch = self._active_or_next_batch_idx()
+      return (
+          self._train_groups_consumed
+          + self.scored_q.pending_groups_for_batch(target_batch)
+          >= self.full_batch_size
+          or self.scored_q.is_batch_sealed(target_batch)
+      )
+    return (
+        self._train_groups_consumed + self.scored_q.ready_groups_count
+        >= self.full_batch_size
+    )
+
+  def _has_unconsumed_complete_groups(self) -> bool:
+    """Returns True if any completed group is queued or in flight before assembler."""
+    if self._critique_in_flight > 0 or self._train_ingesting_group:
+      return True
+    if isinstance(
+        self.scored_q, trajectory_queue_manager.BatchOrderedQueueManager
+    ):
+      target_batch = self._active_or_next_batch_idx()
+      return (
+          self.raw_q.has_ready_groups_for_batch(target_batch)
+          or self.scored_q.pending_groups_for_batch(target_batch) > 0
+      )
+    return (
+        self.raw_q.has_ready_groups_for_batch(None)
+        or self.scored_q.ready_groups_count > 0
+    )
+
+  def _set_engine_max_poll_batch(
+      self,
+      max_batch_idx: int | None,
+      priority_prompt_ids: Sequence[str] | None = None,
+  ) -> None:
+    """Updates the engine's worker-level batch and partial-group poll gate."""
+    normalized_pids = (
+        tuple(str(p) for p in priority_prompt_ids if p)
+        if priority_prompt_ids
+        else ()
+    )
+    if (
+        self._last_max_poll_batch_idx == max_batch_idx
+        and self._last_priority_prompt_ids == normalized_pids
+    ):
+      return
+    self._last_max_poll_batch_idx = max_batch_idx
+    self._last_priority_prompt_ids = normalized_pids
+    if self.engine is not None and hasattr(
+        self.engine, "set_max_poll_batch_idx"
+    ):
+      if normalized_pids:
+        try:
+          self.engine.set_max_poll_batch_idx(max_batch_idx, normalized_pids)
+        except TypeError:
+          self.engine.set_max_poll_batch_idx(max_batch_idx)
+      else:
+        self.engine.set_max_poll_batch_idx(max_batch_idx)
+
+  async def _wait_for_poll_permission(self) -> None:
+    """Coordinates memory-pressure backpressure on `polling_stage` without deadlocks.
+
+    * When memory is below `high_watermark`: unthrottled (`max_poll_batch_idx=None`).
+    * When memory is above `high_watermark`, `_is_current_step_self_sufficient()`
+      is False, AND `_has_unconsumed_complete_groups()` is False: enters
+      `CursorPriorityDrain` + `Smallest-x Group Focus`, polling only the single
+      partial group closest to completion (`smallest x`) for the active batch/step.
+    * When memory is above `high_watermark` AND either `_is_current_step_self_sufficient()`
+      is True OR `_has_unconsumed_complete_groups()` is True: enters `FullPollPause`
+      (`max_poll_batch_idx=-1`) until `critique_stage` and `train_stage` drain
+      ready groups into the assembler and reclaim memory.
+    """
+    while self._mem_controller.is_poll_throttled():
+      if self._sync_error is not None:
+        raise self._sync_error
+      if self._dispatch_done.is_set() and self._in_flight_rollouts <= 0:
+        break
+      if (
+          not self._is_current_step_self_sufficient()
+          and not self._has_unconsumed_complete_groups()
+      ):
+        if isinstance(
+            self.scored_q, trajectory_queue_manager.BatchOrderedQueueManager
+        ):
+          target_batch = self._active_or_next_batch_idx()
+          priority_pids = self.raw_q.priority_partial_prompt_ids(target_batch)
+          self._set_engine_max_poll_batch(target_batch, priority_pids)
+        else:
+          priority_pids = self.raw_q.priority_partial_prompt_ids(None)
+          max_batch = (
+              None if priority_pids else self._active_or_next_batch_idx()
+          )
+          self._set_engine_max_poll_batch(max_batch, priority_pids)
+        return
+      self._set_engine_max_poll_batch(-1)
+      try:
+        await asyncio.wait_for(self._poll_state_event.wait(), timeout=0.2)
+      except asyncio.TimeoutError:
+        pass
+      self._poll_state_event.clear()
+    self._set_engine_max_poll_batch(None)
+
+  def _max_critique_batch_idx(self) -> int | None:
+    """Returns the batch-index gate for `critique_stage` under memory pressure."""
+    if not self._mem_controller.is_poll_throttled():
+      return None
+    if self._is_current_step_self_sufficient():
+      return -1
+    if isinstance(
+        self.scored_q, trajectory_queue_manager.BatchOrderedQueueManager
+    ):
+      return self._active_or_next_batch_idx()
+    return None
+
   def _release_window(self) -> None:
-    """Wakes the dispatcher after `_next_batch` advances."""
+    """Wakes the dispatcher and memory-gated stages after `_next_batch` advances."""
     self._window_release.set()
+    self._notify_pipeline_state_change()
 
   async def _wait_for_dispatch_window(self, batch_idx: int) -> None:
-    """Blocks until `batch_idx` is inside the policy-staleness window.
+    """Blocks until `batch_idx` is inside the policy-staleness and memory window.
 
     The dispatcher may run `max_staleness` prompt batches past the batch the
-    trainer is about to consume, and no further (R1).
+    trainer is about to consume, and no further (R1). When memory pressure
+    exceeds the soft watermark, future batches (`batch_idx > _next_batch`) are
+    held until memory drops below the low watermark or `_next_batch` catches up,
+    while the active batch (`batch_idx <= _next_batch`) is never blocked.
 
     Args:
       batch_idx: The prompt batch the dispatcher is about to emit into.
@@ -697,13 +1112,28 @@ class StandardRLProgram(RLProgram):
         self._unsynced_steps
         or self._round_due
         or batch_idx
-        > self._next_batch - self._unsynced_steps + self.max_staleness
+        > self._next_batch
+        - self._unsynced_steps
+        + (
+            0
+            if (
+                batch_idx > self._next_batch
+                and self._mem_controller.is_dispatch_throttled()
+            )
+            else self.max_staleness
+        )
     ):
       if self._sync_error is not None:
         raise self._sync_error
       # Wait first, clear second. The reverse loses a release that lands
       # between the test above and the clear, and nothing would set it again.
-      await self._window_release.wait()
+      if self._mem_controller.enabled:
+        try:
+          await asyncio.wait_for(self._window_release.wait(), timeout=0.2)
+        except asyncio.TimeoutError:
+          pass
+      else:
+        await self._window_release.wait()
       self._window_release.clear()
 
   def _initial_dispatch_offset(self, batch_idx: int) -> float:
@@ -780,13 +1210,28 @@ class StandardRLProgram(RLProgram):
       batch_idx: The prompt batch the dispatcher is about to emit into.
     """
     while (
-        batch_idx > self._next_batch + self.max_staleness
+        batch_idx
+        > self._next_batch
+        + (
+            0
+            if (
+                batch_idx > self._next_batch
+                and self._mem_controller.is_dispatch_throttled()
+            )
+            else self.max_staleness
+        )
         or batch_idx - self.max_staleness
         > self.policy_version - self._unsynced_steps
     ):
       if self._sync_error is not None:
         raise self._sync_error
-      await self._window_release.wait()
+      if self._mem_controller.enabled:
+        try:
+          await asyncio.wait_for(self._window_release.wait(), timeout=0.2)
+        except asyncio.TimeoutError:
+          pass
+      else:
+        await self._window_release.wait()
       self._window_release.clear()
 
   async def _resume_from_checkpoint(self) -> None:
@@ -971,6 +1416,7 @@ class StandardRLProgram(RLProgram):
           continue
 
         try:
+          await self._wait_for_poll_permission()
           completed = await self.engine.poll_rollouts()
           if isinstance(completed, list) and completed:
             # TODO: Fault-tolerance must either decrement `_in_flight_rollouts` for failed
@@ -979,12 +1425,14 @@ class StandardRLProgram(RLProgram):
             self._in_flight_rollouts -= len(completed)
             for item in completed:
               await self.raw_q.put(item)
+            self._notify_pipeline_state_change()
         except datatypes.NoHealthyRolloutWorkersError:
           raise
         except Exception as exc:  # pylint: disable=broad-exception-caught
           logging.warning("Error in polling_stage: %s", exc)
           await asyncio.sleep(0.01)
     finally:
+      self._set_engine_max_poll_batch(None)
       # NB: We currently assume it's safe to silently drop partial groups upon EOF.
       await self.raw_q.close()
 
@@ -994,118 +1442,129 @@ class StandardRLProgram(RLProgram):
     try:
       while True:
         try:
-          group = await self.raw_q.get_group()
+          group = await self.raw_q.get_group(
+              max_batch_idx_fn=(
+                  self._max_critique_batch_idx
+                  if self._mem_controller.enabled
+                  else None
+              )
+          )
           if not group:
             break
         except Exception:
           break
 
-        rewards = []
-        for item in group:
-          # Skip reward evaluation or extraction for failed, env-timed-out, or
-          # masked-out trajectories (`not item.is_valid`): although the payload
-          # still goes through trainer fwd/bwd to keep static batch shapes, its
-          # advantage and completion_mask are zeroed out, so scoring it is
-          # wasted work (and an aborted trajectory may lack trajectory_reward).
-          # Episode-budget timeouts are valid and arrive with reward 0.
-          if not item.is_valid:
-            r = 0.0
-          elif self.reward_fns:
-            r = sum(_invoke_reward_fn(fn, item) for fn in self.reward_fns)
-          else:
-            r = _extract_reward(item)
-          rewards.append(float(r))
+        self._critique_in_flight += 1
+        try:
+          rewards = []
+          for item in group:
+            # Skip reward evaluation or extraction for failed, env-timed-out, or
+            # masked-out trajectories (`not item.is_valid`): although the payload
+            # still goes through trainer fwd/bwd to keep static batch shapes, its
+            # advantage and completion_mask are zeroed out, so scoring it is
+            # wasted work (and an aborted trajectory may lack trajectory_reward).
+            # Episode-budget timeouts are valid and arrive with reward 0.
+            if not item.is_valid:
+              r = 0.0
+            elif self.reward_fns:
+              r = sum(_invoke_reward_fn(fn, item) for fn in self.reward_fns)
+            else:
+              r = _extract_reward(item)
+            rewards.append(float(r))
 
-        trainer_payloads = self.algo.create_trainer_payloads(
-            group, rewards=rewards
-        )
-        for idx, payload in enumerate(trainer_payloads):
-          reward_val = rewards[idx] if idx < len(rewards) else 0.0
-          src_item = group[idx] if idx < len(group) else None
-          src_traj = getattr(src_item, "traj", None)
-          if isinstance(src_traj, dict):
-            raw_status = src_traj.get("status") or getattr(
-                src_item, "status", None
-            )
-            raw_steps = src_traj.get("steps")
-            traj_dict = dict(src_traj)
-          elif src_traj is not None:
-            raw_status = getattr(src_traj, "status", None) or getattr(
-                src_item, "status", None
-            )
-            raw_steps = getattr(src_traj, "steps", None)
-            traj_dict = (
-                src_traj.to_dict() if hasattr(src_traj, "to_dict") else {}
-            )
-          else:
-            raw_status = getattr(src_item, "status", None)
-            raw_steps = []
-            traj_dict = {}
-          if isinstance(raw_status, datatypes.TrajectoryStatus):
-            status = raw_status
-          elif isinstance(raw_status, str):
-            status = getattr(
-                datatypes.TrajectoryStatus,
-                raw_status.upper(),
-                datatypes.TrajectoryStatus.SUCCEEDED
-                if raw_status.upper() in ("COMPLETED", "SUCCESS")
-                else datatypes.TrajectoryStatus.RUNNING,
-            )
-          else:
-            status = datatypes.TrajectoryStatus.RUNNING
-          steps = raw_steps if isinstance(raw_steps, list) else []
-          src_metadata = getattr(src_item, "metadata", None)
-          if isinstance(src_metadata, dict):
-            src_metadata.pop("routed_experts", None)
-          metadata = dict(src_metadata) if src_metadata else {}
-          metadata.pop("routed_experts", None)
-          traj_dict["trajectory_reward"] = reward_val
-          traj_dict["status"] = status
-          traj_dict["steps"] = steps
-          traj_dict["conversation_masks"] = payload.completion_mask
-          # `payload.routed_experts` now holds the sequence-aligned routing
-          # array; drop the raw rollout reference from `traj_dict`, `metadata`,
-          # and the post-critique `TrajectoryItem` so we do not retain two
-          # copies per trajectory across `scored_q` and `all_step_items`.
-          traj_dict.pop("routed_experts", None)
-          if isinstance(src_traj, dict):
-            src_traj.pop("routed_experts", None)
-          if src_item is not None:
-            src_item.routed_experts = None
-          item = datatypes.TrajectoryItem(
-              prompt_id=getattr(src_item, "prompt_id", ""),
-              group_index=getattr(src_item, "group_index", 0),
-              start_step=0,
-              traj=traj_dict,
-              is_valid=getattr(src_item, "is_valid", True),
-              prompt_tokens=getattr(src_item, "prompt_tokens", None),
-              completion_tokens=getattr(src_item, "completion_tokens", None),
-              action_mask=getattr(src_item, "action_mask", None),
-              routed_experts=None,
-              policy_version=getattr(src_item, "policy_version", 0),
-              metadata=metadata,
-              # TODO: b/552087289 - Stream RLTrainerPayload directly instead of
-              # re-wrapping in TrajectoryItem.
+          trainer_payloads = self.algo.create_trainer_payloads(
+              group, rewards=rewards
           )
-          item.payload = payload  # pyrefly: ignore[missing-attribute]
-          await self.scored_q.put(item)
-        if group:
-          first_meta = getattr(group[0], "metadata", None) or {}
-          logging.info(
-              "[pipeline] ARRIVE prompt_id=%s prompt_idx=%s batch_idx=%s"
-              " intra_batch_idx=%s policy_version=%d worker_id=%s",
-              getattr(group[0], "prompt_id", ""),
-              first_meta.get("prompt_idx"),
-              first_meta.get("batch_idx"),
-              first_meta.get("intra_batch_idx"),
-              getattr(group[0], "policy_version", 0),
-              first_meta.get("worker_id"),
-          )
-        group = None
-        trainer_payloads = None
-        src_item = None
-        payload = None
-        item = None
+          for idx, payload in enumerate(trainer_payloads):
+            reward_val = rewards[idx] if idx < len(rewards) else 0.0
+            src_item = group[idx] if idx < len(group) else None
+            src_traj = getattr(src_item, "traj", None)
+            if isinstance(src_traj, dict):
+              raw_status = src_traj.get("status") or getattr(
+                  src_item, "status", None
+              )
+              raw_steps = src_traj.get("steps")
+              traj_dict = dict(src_traj)
+            elif src_traj is not None:
+              raw_status = getattr(src_traj, "status", None) or getattr(
+                  src_item, "status", None
+              )
+              raw_steps = getattr(src_traj, "steps", None)
+              traj_dict = (
+                  src_traj.to_dict() if hasattr(src_traj, "to_dict") else {}
+              )
+            else:
+              raw_status = getattr(src_item, "status", None)
+              raw_steps = []
+              traj_dict = {}
+            if isinstance(raw_status, datatypes.TrajectoryStatus):
+              status = raw_status
+            elif isinstance(raw_status, str):
+              status = getattr(
+                  datatypes.TrajectoryStatus,
+                  raw_status.upper(),
+                  datatypes.TrajectoryStatus.SUCCEEDED
+                  if raw_status.upper() in ("COMPLETED", "SUCCESS")
+                  else datatypes.TrajectoryStatus.RUNNING,
+              )
+            else:
+              status = datatypes.TrajectoryStatus.RUNNING
+            steps = raw_steps if isinstance(raw_steps, list) else []
+            src_metadata = getattr(src_item, "metadata", None)
+            if isinstance(src_metadata, dict):
+              src_metadata.pop("routed_experts", None)
+            metadata = dict(src_metadata) if src_metadata else {}
+            metadata.pop("routed_experts", None)
+            traj_dict["trajectory_reward"] = reward_val
+            traj_dict["status"] = status
+            traj_dict["steps"] = steps
+            traj_dict["conversation_masks"] = payload.completion_mask
+            # `payload.routed_experts` now holds the sequence-aligned routing
+            # array; drop the raw rollout reference from `traj_dict`, `metadata`,
+            # and the post-critique `TrajectoryItem` so we do not retain two
+            # copies per trajectory across `scored_q` and `all_step_items`.
+            traj_dict.pop("routed_experts", None)
+            if isinstance(src_traj, dict):
+              src_traj.pop("routed_experts", None)
+            if src_item is not None:
+              src_item.routed_experts = None
+            item = datatypes.TrajectoryItem(
+                prompt_id=getattr(src_item, "prompt_id", ""),
+                group_index=getattr(src_item, "group_index", 0),
+                start_step=0,
+                traj=traj_dict,
+                is_valid=getattr(src_item, "is_valid", True),
+                prompt_tokens=getattr(src_item, "prompt_tokens", None),
+                completion_tokens=getattr(src_item, "completion_tokens", None),
+                action_mask=getattr(src_item, "action_mask", None),
+                routed_experts=None,
+                policy_version=getattr(src_item, "policy_version", 0),
+                metadata=metadata,
+                # TODO: b/552087289 - Stream RLTrainerPayload directly instead of
+                # re-wrapping in TrajectoryItem.
+            )
+            item.payload = payload  # pyrefly: ignore[missing-attribute]
+            await self.scored_q.put(item)
+          if group:
+            first_meta = getattr(group[0], "metadata", None) or {}
+            logging.info(
+                "[pipeline] ARRIVE prompt_id=%s prompt_idx=%s batch_idx=%s"
+                " intra_batch_idx=%s policy_version=%d worker_id=%s",
+                getattr(group[0], "prompt_id", ""),
+                first_meta.get("prompt_idx"),
+                first_meta.get("batch_idx"),
+                first_meta.get("intra_batch_idx"),
+                getattr(group[0], "policy_version", 0),
+                first_meta.get("worker_id"),
+            )
+          group = None
+          trainer_payloads = None
+          src_item = None
+          payload = None
+          item = None
+        finally:
+          self._critique_in_flight = max(0, self._critique_in_flight - 1)
+          self._notify_pipeline_state_change()
     finally:
       await self.scored_q.close()
 
@@ -1918,6 +2377,8 @@ class StandardRLProgram(RLProgram):
       all_step_items = []
       scored_items = []
       groups_consumed = 0
+      self._train_groups_consumed = 0
+      self._active_train_batch_idx = None
       checkpoint_saved = False
       final_minibatch_completed = False
       pending_metrics_fetch = False
@@ -1936,6 +2397,11 @@ class StandardRLProgram(RLProgram):
         if task is not None:
           step_result, elapsed = await task
           policy_training_time += elapsed
+          if (
+              self._mem_controller.is_dispatch_throttled()
+              or self._mem_controller.is_poll_throttled()
+          ):
+            _release_host_memory()
 
       async def _maybe_save_checkpoint() -> None:
         nonlocal checkpoint_saved
@@ -2019,6 +2485,8 @@ class StandardRLProgram(RLProgram):
         # per-component timing accuracy.
         exposed_generation_time += time.monotonic() - _t_gen
         if not scored_items:
+          self._train_groups_consumed = self.full_batch_size
+          self._notify_pipeline_state_change()
           packing_start_time = time.perf_counter()
           assembled_batches = list(await self._assemble(self.assembler.flush))
           step_packing_time_sec += time.perf_counter() - packing_start_time
@@ -2027,6 +2495,10 @@ class StandardRLProgram(RLProgram):
             self.on_step_begin(current_step)
 
           groups_consumed += 1
+          self._train_groups_consumed = groups_consumed
+          self._active_train_batch_idx = current_batch_idx
+          self._train_ingesting_group = True
+          self._notify_pipeline_state_change()
           uncommitted_groups.append(scored_items)
           all_step_items.extend(scored_items)
           num_rollouts += len(scored_items)
@@ -2082,6 +2554,13 @@ class StandardRLProgram(RLProgram):
               item.payload = dataclasses.replace(
                   item_payload, routed_experts=None
               )
+          if (
+              not assembled_batches
+              and self._mem_controller.is_poll_throttled()
+          ):
+            _release_host_memory()
+          self._train_ingesting_group = False
+          self._notify_pipeline_state_change()
 
         while assembled_batches:
           mb = assembled_batches.pop(0)
@@ -2146,6 +2625,11 @@ class StandardRLProgram(RLProgram):
             continue
           step_result, elapsed = await train_step
           policy_training_time += elapsed
+          if (
+              self._mem_controller.is_dispatch_throttled()
+              or self._mem_controller.is_poll_throttled()
+          ):
+            _release_host_memory()
           if is_final_batch:
             # Save only at a resumable full-batch boundary. An optimizer step
             # can occur earlier when a full batch contains multiple mini
@@ -2307,12 +2791,16 @@ class StandardRLProgram(RLProgram):
 
       if self.on_step_end:
         self.on_step_end(current_step, step_result)
+      self._train_groups_consumed = 0
+      self._active_train_batch_idx = None
       self._step += 1
+      # Reclaim freed step memory and trim glibc arenas before waking the
+      # dispatcher and polling stage for the next step.
+      _release_host_memory()
       # Strictly after the increment: the dispatcher re-reads `_next_batch` on
       # waking, and waking it on the old value would park it again with no one
       # left to set the event.
       self._release_window()
-      _release_host_memory()
 
   async def run_async(
       self,

@@ -633,6 +633,16 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         completed.append(_response_to_trajectory_item(err_resp))
     return completed
 
+  def set_max_poll_batch_idx(
+      self,
+      max_batch_idx: int | None,
+      priority_prompt_ids: Sequence[str] | None = None,
+  ) -> None:
+    """Sets the prompt-batch and partial-group priority gate for background worker polling."""
+    self._rollout_session.set_max_poll_batch_idx(
+        max_batch_idx, priority_prompt_ids
+    )
+
   async def poll_rollouts(
       self, timeout_s: float = remote_execution.LONG_POLL_TIMEOUT_S
   ) -> list[datatypes.TrajectoryItem]:

@@ -6767,6 +6767,313 @@ class ExtractScalarTest(absltest.TestCase):
 
 
 
+class MemoryBackpressureTest(absltest.TestCase):
+  """Tests for Orchestrator memory backpressure and PROMPT_BATCH deadlock prevention."""
+
+  def _make_mock_algo(
+      self, num_generations: int = 1, mini_batch_size: int = 1
+  ) -> mock.MagicMock:
+    mock_algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
+    mock_algo.num_generations = num_generations
+    mock_algo.mini_batch_size = mini_batch_size
+    mock_algo.max_turns = 1
+    mock_algo.max_packed_len = 16
+    mock_algo.max_response_length = 16
+    mock_algo.requires_reference_kl = False
+    mock_algo.algo_config = types.SimpleNamespace(
+        temperature=None,
+        use_rollout_logps=True,
+    )
+    return mock_algo
+
+  def test_memory_controller_hysteresis_and_clamp(self):
+    usage = [500]
+    ctrl = rl_program._OrchestratorMemoryController(
+        0.80,
+        memory_reader=lambda: (usage[0], 1000),
+    )
+    self.assertTrue(ctrl.enabled)
+    self.assertAlmostEqual(ctrl.high_ratio, 0.80)
+    self.assertAlmostEqual(ctrl.soft_ratio, 0.70)
+    self.assertAlmostEqual(ctrl.low_ratio, 0.60)
+    self.assertFalse(ctrl.is_poll_throttled())
+    self.assertFalse(ctrl.is_dispatch_throttled())
+
+    # Cross soft watermark (0.72 >= 0.70), below high watermark (0.80).
+    usage[0] = 720
+    self.assertFalse(ctrl.is_poll_throttled())
+    self.assertTrue(ctrl.is_dispatch_throttled())
+
+    # Cross high watermark (0.82 >= 0.80): enters poll throttling mode.
+    usage[0] = 820
+    self.assertTrue(ctrl.is_poll_throttled())
+    self.assertTrue(ctrl.is_dispatch_throttled())
+
+    # Drop to 0.65 (between low=0.60 and high=0.80): stays throttled (hysteresis).
+    usage[0] = 650
+    self.assertTrue(ctrl.is_poll_throttled())
+    self.assertTrue(ctrl.is_dispatch_throttled())
+
+    # Drop to 0.58 (<= low=0.60): exits throttling mode.
+    usage[0] = 580
+    self.assertFalse(ctrl.is_poll_throttled())
+    self.assertFalse(ctrl.is_dispatch_throttled())
+
+  def test_invalid_memory_watermark_ratio_raises(self):
+    mock_algo = self._make_mock_algo(num_generations=1, mini_batch_size=1)
+    with self.assertRaises(ValueError):
+      rl_program.StandardRLProgram(
+          algo=mock_algo,
+          batch_size=1,
+          memory_high_watermark_ratio=1.5,
+      )
+
+  def test_prompt_batch_deadlock_free_under_high_memory_pressure(self):
+    """Verifies PROMPT_BATCH never deadlocks when Batch 1 arrives before Batch 0 seals."""
+
+    async def _run():
+      mock_engine = mock.MagicMock()
+      max_poll_calls: list[int | None] = []
+      mock_engine.set_max_poll_batch_idx.side_effect = max_poll_calls.append
+      mock_engine.dispatch_rollouts = mock.AsyncMock(return_value=None)
+      mock_engine.sync_weights = mock.AsyncMock(return_value=None)
+      mock_engine.save_checkpoint = mock.AsyncMock(return_value=None)
+
+      def _raw_item(prompt_id: str, batch_idx: int, intra_idx: int):
+        return datatypes.TrajectoryItem(
+            prompt_id=prompt_id,
+            group_index=0,
+            start_step=0,
+            traj={"trajectory_reward": 1.0},
+            prompt_tokens=np.array([1, 2], dtype=np.int32),
+            completion_tokens=np.array([3, 4], dtype=np.int32),
+            metadata={
+                "batch_idx": batch_idx,
+                "intra_batch_idx": intra_idx,
+                "prompt_idx": batch_idx * 2 + intra_idx,
+            },
+        )
+
+      # Batch 1 items arrive FIRST (provoking a 90% memory spike); Batch 0 items
+      # arrive AFTER Batch 1.
+      # Under naive poll pause, pausing poll_rollouts after Batch 1 arrives
+      # would prevent Batch 0 from ever sealing (deadlock). With cursor-priority
+      # drain + StepReady invariant, Batch 1 is held out of critique while
+      # Batch 0 is still polled and sealed so step 0 completes.
+      poll_batches = [
+          [_raw_item("prompt_2", 1, 0), _raw_item("prompt_3", 1, 1)],
+          [_raw_item("prompt_0", 0, 0), _raw_item("prompt_1", 0, 1)],
+      ]
+      poll_idx = [0]
+      usage = [500]
+
+      async def _poll_rollouts():
+        # Wait until both Batch 0 and Batch 1 (4 items) have been dispatched.
+        if program._in_flight_rollouts < 4 and poll_idx[0] == 0:
+          await asyncio.sleep(0.005)
+          return []
+        if poll_idx[0] < len(poll_batches):
+          res = poll_batches[poll_idx[0]]
+          poll_idx[0] += 1
+          # Memory spikes to 90% (> 80% watermark) as Batch 1 lands in host RAM.
+          usage[0] = 900
+          return res
+        await asyncio.sleep(0.01)
+        return []
+
+      mock_engine.poll_rollouts = _poll_rollouts
+      mock_engine.train_step = mock.AsyncMock(return_value={"loss": 0.1})
+      mock_engine.get_metrics = mock.AsyncMock(return_value=None)
+
+      mock_algo = self._make_mock_algo(num_generations=1, mini_batch_size=2)
+      mock_algo.compute_advantages = lambda items, **kw: [1.0] * len(items)
+
+      def _make_payloads(items, **kwargs):
+        del kwargs
+        return [
+            datatypes.RLTrainerPayload(
+                prompt_ids=np.array([1, 2], dtype=np.int32),
+                prompt_mask=np.array([1, 1], dtype=np.float32),
+                completion_ids=np.array([3, 4], dtype=np.int32),
+                completion_mask=np.array([1, 1], dtype=np.float32),
+                advantages=np.array([1.0, 1.0], dtype=np.float32),
+            )
+            for _ in items
+        ]
+
+      mock_algo.create_trainer_payloads.side_effect = _make_payloads
+
+      assembler = batch_assembly.SequencePackedBatchAssembler(
+          batch_size=2,
+          num_generations=1,
+          mini_batch_size=2,
+          max_packed_len=16,
+          segment_align_multiple=1,
+      )
+      program = rl_program.StandardRLProgram(
+          algo=mock_algo,
+          dataset=["p0_0", "p0_1", "p1_0", "p1_1"],
+          batch_size=2,
+          max_staleness=1,
+          sync_weights=False,
+          assembler=assembler,
+          group_order=rl_program.trajectory_queue_manager.GroupOrder.PROMPT_BATCH,
+          memory_high_watermark_ratio=0.80,
+          memory_reader=lambda: (usage[0], 1000),
+      )
+      program.engine = mock_engine
+
+      await asyncio.wait_for(
+          asyncio.gather(
+              program.rollout_dispatch_stage(),
+              program.polling_stage(),
+              program.critique_stage(),
+              program.train_stage(),
+          ),
+          timeout=5.0,
+      )
+      self.assertEqual(program.step, 2)
+      # Under memory pressure before batch 0 is sealed, engine poll restriction
+      # is engaged for cursor batch 0 and lifted on exit.
+      self.assertIn(0, max_poll_calls)
+      program.close()
+
+    asyncio.run(_run())
+
+  def test_arrival_poll_pause_unblocks_when_step_ready(self):
+    """Verifies ARRIVAL FullPollPause blocks polling only when StepReady is True."""
+
+    async def _run():
+      mock_engine = mock.MagicMock()
+      mock_algo = self._make_mock_algo(num_generations=1, mini_batch_size=1)
+
+      usage = [900]
+      program = rl_program.StandardRLProgram(
+          algo=mock_algo,
+          dataset=["p0"],
+          batch_size=1,
+          group_order=rl_program.trajectory_queue_manager.GroupOrder.ARRIVAL,
+          memory_high_watermark_ratio=0.80,
+          memory_reader=lambda: (usage[0], 1000),
+      )
+      program.engine = mock_engine
+      program._in_flight_rollouts = 1
+
+      # Case 1: Step is NOT self-sufficient (0 groups ready in scored_q).
+      # _wait_for_poll_permission MUST return immediately even at 90% memory!
+      self.assertFalse(program._is_current_step_self_sufficient())
+      await asyncio.wait_for(program._wait_for_poll_permission(), timeout=0.5)
+
+      # Case 2: Step IS self-sufficient (1 group ready in scored_q == full_batch_size=1).
+      await program.scored_q.put(
+          datatypes.TrajectoryItem(
+              prompt_id="p0",
+              group_index=0,
+              start_step=0,
+              traj={"trajectory_reward": 1.0},
+              metadata={"batch_idx": 0},
+          )
+      )
+      self.assertTrue(program._is_current_step_self_sufficient())
+
+      # Now _wait_for_poll_permission pauses until memory drops or step advances.
+      waiter = asyncio.create_task(program._wait_for_poll_permission())
+      await asyncio.sleep(0.03)
+      self.assertFalse(waiter.done())
+
+      # Memory drops below low watermark (0.60) -> waiter wakes up.
+      usage[0] = 500
+      program._notify_pipeline_state_change()
+      await asyncio.wait_for(waiter, timeout=1.0)
+      program.close()
+
+    asyncio.run(_run())
+
+
+  def test_consumer_paced_drain_and_smallest_x_focus_under_high_memory(self):
+    """Verifies N-x smallest-x focus and consumer-paced drain pause when throttled."""
+
+    async def _run():
+      mock_engine = mock.MagicMock()
+      poll_gate_calls = []
+      mock_engine.set_max_poll_batch_idx.side_effect = (
+          lambda idx, pids=None: poll_gate_calls.append((idx, pids))
+      )
+      mock_algo = self._make_mock_algo(num_generations=4, mini_batch_size=2)
+
+      usage = [900]
+      program = rl_program.StandardRLProgram(
+          algo=mock_algo,
+          dataset=["p0", "p1"],
+          batch_size=2,
+          group_order=rl_program.trajectory_queue_manager.GroupOrder.PROMPT_BATCH,
+          memory_high_watermark_ratio=0.80,
+          memory_reader=lambda: (usage[0], 1000),
+      )
+      program.engine = mock_engine
+      program._in_flight_rollouts = 8
+
+      # Seed two partial groups in raw_q for batch 0: p0 has 1/4 (x=3), p1 has 3/4 (x=1).
+      await program.raw_q.put(
+          datatypes.TrajectoryItem(
+              prompt_id="p0",
+              group_index=0,
+              start_step=0,
+              traj={"trajectory_reward": 1.0},
+              metadata={"batch_idx": 0},
+          )
+      )
+      for i in range(3):
+        await program.raw_q.put(
+            datatypes.TrajectoryItem(
+                prompt_id="p1",
+                group_index=i,
+                start_step=0,
+                traj={"trajectory_reward": 1.0},
+                metadata={"batch_idx": 0},
+            )
+        )
+
+      # 1. Step is not self-sufficient and no complete group is unconsumed:
+      # _wait_for_poll_permission returns immediately and passes smallest-x priority ("p1", "p0").
+      self.assertFalse(program._has_unconsumed_complete_groups())
+      await asyncio.wait_for(program._wait_for_poll_permission(), timeout=0.5)
+      self.assertEqual(poll_gate_calls[-1], (0, ("p1", "p0")))
+
+      # 2. Now p1 receives its 4th item and becomes a complete group in raw_q._ready_groups.
+      # Even though the step (batch_size=2) is NOT yet self-sufficient (only 1/2 groups ready),
+      # consumer-paced drain pauses polling (max_batch_idx=-1) until train_stage drains p1!
+      await program.raw_q.put(
+          datatypes.TrajectoryItem(
+              prompt_id="p1",
+              group_index=3,
+              start_step=0,
+              traj={"trajectory_reward": 1.0},
+              metadata={"batch_idx": 0},
+          )
+      )
+      self.assertTrue(program._has_unconsumed_complete_groups())
+      self.assertFalse(program._is_current_step_self_sufficient())
+
+      waiter = asyncio.create_task(program._wait_for_poll_permission())
+      await asyncio.sleep(0.03)
+      self.assertFalse(waiter.done())
+      self.assertEqual(poll_gate_calls[-1][0], -1)
+
+      # Simulate critique_stage + train_stage draining p1 into the assembler.
+      _ = await program.raw_q.get_group()
+      program._train_groups_consumed = 1
+      self.assertFalse(program._has_unconsumed_complete_groups())
+      program._notify_pipeline_state_change()
+
+      # Waiter wakes up and focuses on the next partial group ("p0",).
+      await asyncio.wait_for(waiter, timeout=1.0)
+      self.assertEqual(poll_gate_calls[-1], (0, ("p0",)))
+      program.close()
+
+    asyncio.run(_run())
+
+
 if __name__ == "__main__":
   absltest.main()
 

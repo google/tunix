@@ -92,6 +92,14 @@ class AbstractRLEngine(Protocol):
     """Retrieves completed rollout responses from workers via long-polling."""
     ...
 
+  def set_max_poll_batch_idx(
+      self,
+      max_batch_idx: int | None,
+      priority_prompt_ids: Sequence[str] | None = None,
+  ) -> None:
+    """Sets the maximum prompt-batch index eligible for background worker polling."""
+    ...
+
   async def generate(
       self,
       prompts: Sequence[Any],
