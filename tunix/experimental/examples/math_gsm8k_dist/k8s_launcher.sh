@@ -75,6 +75,11 @@ export BETA=${BETA:-0}
 export EPSILON=${EPSILON:-0.2}
 export MAX_STALENESS=${MAX_STALENESS:-0}
 export TRAJECTORY_GROUP_ORDER=${TRAJECTORY_GROUP_ORDER:-arrival}
+# Split the rollout workers into (MAX_STALENESS + 1) independent pools and pin
+# prompt batch b to pool b % (MAX_STALENESS + 1). With WEIGHT_SYNC_POOL_ONLY
+# each step's weights reach only the pool whose batch was just consumed.
+export STAGGERED_ROLLOUT_POOLS=${STAGGERED_ROLLOUT_POOLS:-false}
+export WEIGHT_SYNC_POOL_ONLY=${WEIGHT_SYNC_POOL_ONLY:-false}
 export DEBUG=${DEBUG:-0}
 export SAMPLER=${SAMPLER:-inprocess_vllm}
 export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
@@ -299,6 +304,8 @@ start_orchestrator() {
         --max_response_length=${MAX_RESPONSE_LENGTH} \
         --max_staleness=${MAX_STALENESS} \
         --trajectory_group_order=${TRAJECTORY_GROUP_ORDER} \
+        $([[ "${STAGGERED_ROLLOUT_POOLS}" == "true" || "${STAGGERED_ROLLOUT_POOLS}" == "True" || "${STAGGERED_ROLLOUT_POOLS}" == "1" ]] && echo --staggered_rollout_pools || echo --no-staggered_rollout_pools) \
+        $([[ "${WEIGHT_SYNC_POOL_ONLY}" == "true" || "${WEIGHT_SYNC_POOL_ONLY}" == "True" || "${WEIGHT_SYNC_POOL_ONLY}" == "1" ]] && echo --weight_sync_pool_only || echo --no-weight_sync_pool_only) \
         --train_micro_batch_size=${TRAIN_MICRO_BATCH_SIZE} \
         --rollout_replicas=${ROLLOUT_REPLICAS} \
         ${TEMPERATURE:+--temperature=${TEMPERATURE}} \

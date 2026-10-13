@@ -170,6 +170,26 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
+      "--staggered_rollout_pools",
+      action=argparse.BooleanOptionalAction,
+      default=os.getenv("STAGGERED_ROLLOUT_POOLS", "false").lower()
+      in ("1", "true", "yes"),
+      help=(
+          "Split the rollout workers into (max_staleness + 1) independent"
+          " pools and pin prompt batch b to pool b % (max_staleness + 1)."
+      ),
+  )
+  parser.add_argument(
+      "--weight_sync_pool_only",
+      action=argparse.BooleanOptionalAction,
+      default=os.getenv("WEIGHT_SYNC_POOL_ONLY", "false").lower()
+      in ("1", "true", "yes"),
+      help=(
+          "With --staggered_rollout_pools, sync each step's weights only to"
+          " the pool whose batch was just consumed; otherwise to all pools."
+      ),
+  )
+  parser.add_argument(
       "--rollout_replicas",
       type=int,
       default=1,
@@ -547,10 +567,15 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
     logging.info(
         "Weight-sync timeouts disabled via --disable_weight_sync_timeouts."
     )
+  # One rollout pool per batch the staleness window allows in flight.
+  num_rollout_pools = (
+      int(args.max_staleness) + 1 if args.staggered_rollout_pools else 1
+  )
   cluster = orchestrator.ClusterOrchestrator(
       weight_sync_mode=args.weight_sync_mode,
       trajectory_store_config=_build_trajectory_store_config(args),
       disable_weight_sync_timeouts=args.disable_weight_sync_timeouts,
+      num_rollout_pools=num_rollout_pools,
       jax_cache_config={
           "save_jax_cache": os.getenv("SAVE_JAX_CACHE", "true").lower() in ("1", "true", "yes"),
           "jax_cache_gcs_dir": os.getenv("JAX_CACHE_GCS_DIR"),
@@ -627,6 +652,8 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       max_staleness=args.max_staleness,
       group_order=args.trajectory_group_order,
       sync_weights=(args.weight_sync_mode != "none"),
+      staggered_rollout_pools=args.staggered_rollout_pools,
+      weight_sync_pool_only=args.weight_sync_pool_only,
       on_step_begin=lambda step: logging.info(
           ">>> Step %d starting | Policy Version: %d",
           step,
