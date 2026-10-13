@@ -1374,7 +1374,8 @@ def init_print(
       # Mandatory v6.1 precision and run-config disclosures.
       "lowest_numerical_precision_in_linear": "fp8" if is_fp8 else "bfloat16",
       "lowest_numerical_precision_in_attn": "bfloat16",
-      "lowest_numerical_precision_in_comm": "bfloat16",
+      # An FP8 rollout receives its routed experts as float8_e4m3fn on weight sync.
+      "lowest_numerical_precision_in_comm": "fp8" if is_fp8 else "bfloat16",
       "config_filename": args.model_id or "qwen35_397b_grpo",
       "generation_backend": getattr(args, "rollout_engine", "vllm"),
       "generation_tensor_parallelism": rollout_tp,
