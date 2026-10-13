@@ -2461,6 +2461,26 @@ class ParallelH2hCoordinatorTest(CoordinatorTestBase):
       self.assertLess(self.log.index("sampler:pre"), self.log.index("transfer"))
       self.assertEqual(dest.serving, expected_pattern(1))
 
+  def test_sync_subset_destination_workers(self):
+    dest0 = FakeDestination("sampler0", [])
+    dest1 = FakeDestination("sampler1", [])
+    dest2 = FakeDestination("sampler2", [])
+    self.make(dest0, dest1, dest2)
+
+    # Sync only dest0 (e.g. pool 0)
+    result = self.sync(policy_version=1, destination_workers=[dest0])
+    self.assertTrue(result.success)
+    self.assertEqual(dest0.serving, expected_pattern(1))
+    self.assertEqual(dest1.serving, [0.0] * 4)
+    self.assertEqual(dest2.serving, [0.0] * 4)
+
+    # Next sync dest1 to version 2 (e.g. pool 1) by worker_id string
+    result = self.sync(policy_version=2, destination_workers=["sampler1"])
+    self.assertTrue(result.success)
+    self.assertEqual(dest0.serving, expected_pattern(1))
+    self.assertEqual(dest1.serving, expected_pattern(2))
+    self.assertEqual(dest2.serving, [0.0] * 4)
+
 
 if __name__ == "__main__":
   absltest.main()

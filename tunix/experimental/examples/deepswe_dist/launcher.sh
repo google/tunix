@@ -554,6 +554,12 @@ echo "Launching CPU orchestrator..."
   if [[ "$ROLLOUT_PRIORITY_SCHEDULING" == "true" ]]; then
     ORCHESTRATOR_CMD+=(--rollout_priority_scheduling)
   fi
+  if [[ "$STAGGERED_ROLLOUT_POOLS" == "true" || "$STAGGERED_ROLLOUT_POOLS" == "1" ]]; then
+    ORCHESTRATOR_CMD+=(--staggered_rollout_pools)
+  fi
+  if [[ "$WEIGHT_SYNC_POOL_ONLY" == "true" || "$WEIGHT_SYNC_POOL_ONLY" == "1" ]]; then
+    ORCHESTRATOR_CMD+=(--weight_sync_pool_only)
+  fi
   # Explicit if-blocks rather than `[[ -n x ]] && cmd`: this script runs under
   # `set -Ee`, where a false test at the head of an AND-list aborts the
   # launcher. An option left unset has to be a no-op.

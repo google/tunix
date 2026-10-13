@@ -47,8 +47,16 @@ unset _gbs
 # synthetic micro-batch before run_start. The longer first gap keeps batch 1 off
 # the engines for most of batch 0, which otherwise decodes ~30% slower alongside
 # the next batches.
-export INITIAL_DISPATCH_FIRST_STAGGER_S="${INITIAL_DISPATCH_FIRST_STAGGER_S:-175}"
-export INITIAL_DISPATCH_STAGGER_S="${INITIAL_DISPATCH_STAGGER_S:-75}"
+# When STAGGERED_ROLLOUT_POOLS is enabled, independent pools eliminate
+# cross-batch contention, so initial dispatch stagger is not needed.
+if [[ "${STAGGERED_ROLLOUT_POOLS:-false}" == "true" || "${STAGGERED_ROLLOUT_POOLS:-false}" == "True" || "${STAGGERED_ROLLOUT_POOLS:-false}" == "1" ]]; then
+  export INITIAL_DISPATCH_FIRST_STAGGER_S="${INITIAL_DISPATCH_FIRST_STAGGER_S:-0}"
+  export INITIAL_DISPATCH_STAGGER_S="${INITIAL_DISPATCH_STAGGER_S:-0}"
+  export ROLLOUT_PRIORITY_SCHEDULING="${ROLLOUT_PRIORITY_SCHEDULING:-false}"
+else
+  export INITIAL_DISPATCH_FIRST_STAGGER_S="${INITIAL_DISPATCH_FIRST_STAGGER_S:-175}"
+  export INITIAL_DISPATCH_STAGGER_S="${INITIAL_DISPATCH_STAGGER_S:-75}"
+fi
 export TRAINER_WARMUP_COMPILE="${TRAINER_WARMUP_COMPILE:-true}"
 export SANDBOX_WAIT_INITIAL="${SANDBOX_WAIT_INITIAL:-false}"
 

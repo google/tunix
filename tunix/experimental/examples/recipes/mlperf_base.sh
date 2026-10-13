@@ -330,6 +330,29 @@ export COLOCATED_PYTHON_SIDECAR_SHM="${COLOCATED_PYTHON_SIDECAR_SHM:-1}"
 export CKPT_D2H_CONCURRENT_GB="${CKPT_D2H_CONCURRENT_GB:-32}"
 export CKPT_USE_OCDBT="${CKPT_USE_OCDBT:-1}"
 export MAX_STALENESS=${MAX_STALENESS:-1}
+
+# ==============================================================================
+# Staggered Rollout Pools & Independent Weight Sync
+# ==============================================================================
+# When STAGGERED_ROLLOUT_POOLS is true, the rollout worker pool is split into
+# (MAX_STALENESS + 1) independent pools. Batch i is dispatched to pool i % K.
+# Eliminates cross-batch interference, scheduler priority starvation, and
+# KV-cache contention.
+export STAGGERED_ROLLOUT_POOLS="${STAGGERED_ROLLOUT_POOLS:-false}"
+# When WEIGHT_SYNC_POOL_ONLY is true, weight sync is performed ONLY on the
+# replicas in pool i % K after batch i is trained before sending batch i + K to pool
+# i % K. Other pools generating other batches are untouched. When false, sync
+# weights across all rollout replicas at every step.
+export WEIGHT_SYNC_POOL_ONLY="${WEIGHT_SYNC_POOL_ONLY:-false}"
+
+if [[ "${STAGGERED_ROLLOUT_POOLS}" == "true" || "${STAGGERED_ROLLOUT_POOLS}" == "True" || "${STAGGERED_ROLLOUT_POOLS}" == "1" ]]; then
+  # Independent pools eliminate cross-batch contention, so initial dispatch
+  # stagger and priority scheduling are not needed and default to 0 / false.
+  export INITIAL_DISPATCH_STAGGER_S="${INITIAL_DISPATCH_STAGGER_S:-0}"
+  export INITIAL_DISPATCH_FIRST_STAGGER_S="${INITIAL_DISPATCH_FIRST_STAGGER_S:-0}"
+  export ROLLOUT_PRIORITY_SCHEDULING="${ROLLOUT_PRIORITY_SCHEDULING:-false}"
+fi
+
 # With MAX_STALENESS > 0, `true` has the rollouts serve the oldest in-flight
 # prompt batch first (vLLM priority scheduling, priority = batch index) instead
 # of in arrival order (FCFS, the default).

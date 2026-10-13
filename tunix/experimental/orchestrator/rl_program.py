@@ -407,6 +407,8 @@ class StandardRLProgram(RLProgram):
       initial_dispatch_stagger_s: float = 0.0,
       initial_dispatch_first_stagger_s: float | None = None,
       trainer_warmup_payload: datatypes.RLTrainerPayload | None = None,
+      staggered_rollout_pools: bool = False,
+      weight_sync_pool_only: bool = False,
   ):
     super().__init__()
     self.engine: rl_engine_interface.AbstractRLEngine | None = None
@@ -574,6 +576,25 @@ class StandardRLProgram(RLProgram):
     self._initial_dispatch_t0: float | None = None
     self._initial_stagger_logged: set[int] = set()
     self._sync_error: BaseException | None = None
+
+    # One pool per batch the staleness window lets in flight, so a pool never
+    # holds two batches and every pool gets one. Fewer pools would put two
+    # batches on one pool (the contention this removes); more would leave
+    # pools that never receive a batch.
+    self.staggered_rollout_pools = staggered_rollout_pools
+    self.num_rollout_pools = (
+        max_staleness + 1 if staggered_rollout_pools else 1
+    )
+    # Only read when `weight_sync_pool_only`: each step's round reaches a
+    # single pool, so every pool holds its own version. Otherwise every entry
+    # tracks `policy_version` and the global `_unsynced_steps` applies.
+    self.weight_sync_pool_only = weight_sync_pool_only
+    self.pool_policy_versions = [0] * self.num_rollout_pools
+    # Pools whose round is in flight / due but not yet started. Their next
+    # batch is held until the round commits (`_wait_for_dispatch_window`).
+    self._syncing_pools: set[int] = set()
+    self._round_due_pools: set[int] = set()
+
     self.metrics_logger: MetricsLogger = MetricsLogger(metrics_logging_options)
     # Trajectory logging is disabled on mlperf to prevent GCS write timeouts
     # and queue stalls (b/565475624). Rollout data is handled by TrajectoryStore.
@@ -682,6 +703,39 @@ class StandardRLProgram(RLProgram):
     """Wakes the dispatcher after `_next_batch` advances."""
     self._window_release.set()
 
+  def _consumed_pool_idx(
+      self,
+      current_batch_idx: int | None,
+      current_step: int,
+      groups: Sequence[Sequence[datatypes.TrajectoryItem]],
+  ) -> int:
+    """Index of the rollout pool that generated the batch this step consumed.
+
+    Batch `b` always goes to pool `b % num_rollout_pools`. Under
+    `PROMPT_BATCH` ordering `current_batch_idx` is that batch; under `ARRIVAL`
+    ordering the first consumed group's `batch_idx` stands in for it, and
+    failing that the step index (correct whenever batches arrive in order).
+
+    Args:
+      current_batch_idx: The prompt batch consumed this step, if known.
+      current_step: The training step index.
+      groups: The groups consumed so far this step.
+
+    Returns:
+      The pool index, always 0 with a single pool.
+    """
+    if self.num_rollout_pools <= 1:
+      return 0
+    if current_batch_idx is None:
+      for g in groups:
+        meta = getattr(g[0], "metadata", None) if g else None
+        if isinstance(meta, dict) and meta.get("batch_idx") is not None:
+          current_batch_idx = int(meta["batch_idx"])
+          break
+    if current_batch_idx is None:
+      current_batch_idx = current_step
+    return current_batch_idx % self.num_rollout_pools
+
   async def _wait_for_dispatch_window(self, batch_idx: int) -> None:
     """Blocks until `batch_idx` is inside the policy-staleness window.
 
@@ -699,18 +753,32 @@ class StandardRLProgram(RLProgram):
     if self.partial_rollout:
       await self._wait_for_partial_dispatch_window(batch_idx)
       return
-    # Nothing goes out while a background round is in flight. The rollouts
-    # cannot start a request until the round commits anyway, and one that
-    # lands before they close admission is drained on the old weights,
-    # idling every other worker until it finishes.
-    while (
-        self._unsynced_steps
-        or self._round_due
-        or batch_idx
-        > self._next_batch - self._unsynced_steps + self.max_staleness
-    ):
+    # In single-pool mode or when syncing all pools, nothing goes out while a
+    # background round is in flight because all rollout workers participate in
+    # the sync. In staggered pool mode with weight_sync_pool_only, only the pool
+    # undergoing weight sync is blocked; other pools can continue to be
+    # dispatched to if within the staleness window.
+    while True:
       if self._sync_error is not None:
         raise self._sync_error
+
+      if self.num_rollout_pools > 1 and self.weight_sync_pool_only:
+        target_pool = batch_idx % self.num_rollout_pools
+        pool_syncing = (
+            target_pool in self._syncing_pools
+            or target_pool in self._round_due_pools
+        )
+        if not pool_syncing and batch_idx <= self._next_batch + self.max_staleness:
+          break
+      else:
+        if not (
+            self._unsynced_steps
+            or self._round_due
+            or batch_idx
+            > self._next_batch - self._unsynced_steps + self.max_staleness
+        ):
+          break
+
       # Wait first, clear second. The reverse loses a release that lands
       # between the test above and the clear, and nothing would set it again.
       await self._window_release.wait()
@@ -789,13 +857,24 @@ class StandardRLProgram(RLProgram):
     Args:
       batch_idx: The prompt batch the dispatcher is about to emit into.
     """
-    while (
-        batch_idx > self._next_batch + self.max_staleness
-        or batch_idx - self.max_staleness
-        > self.policy_version - self._unsynced_steps
-    ):
+    while True:
       if self._sync_error is not None:
         raise self._sync_error
+      if self.num_rollout_pools > 1 and self.weight_sync_pool_only:
+        target_pool = batch_idx % self.num_rollout_pools
+        pool_version = self.pool_policy_versions[target_pool]
+        if (
+            batch_idx <= self._next_batch + self.max_staleness
+            and batch_idx - self.max_staleness <= pool_version
+        ):
+          break
+      else:
+        if (
+            batch_idx <= self._next_batch + self.max_staleness
+            and batch_idx - self.max_staleness
+            <= self.policy_version - self._unsynced_steps
+        ):
+          break
       await self._window_release.wait()
       self._window_release.clear()
 
@@ -829,6 +908,7 @@ class StandardRLProgram(RLProgram):
     restored_next_batch_idx = max(restored_step, restored_next_batch_idx)
     self._step = restored_step
     self.policy_version = restored_step
+    self.pool_policy_versions = [self.policy_version] * self.num_rollout_pools
     if isinstance(
         self.scored_q, trajectory_queue_manager.BatchOrderedQueueManager
     ):
@@ -914,12 +994,21 @@ class StandardRLProgram(RLProgram):
             prompt_item["max_response_length"] = self.max_response_length
 
         prompt_item = _tag_prompt(prompt_item, coordinates)
-        # What the rollouts actually hold. While a background sync is in
-        # flight the trainer is already a version ahead of them.
-        rollout_policy_version = self.policy_version - self._unsynced_steps
+        pool_idx = (
+            coordinates["batch_idx"] % self.num_rollout_pools
+            if self.num_rollout_pools > 1
+            else None
+        )
+        # What the rollouts actually hold. In pool-only sync mode, read the pool's
+        # own policy version; otherwise, use the global policy version minus
+        # any in-flight unsynced step.
+        if self.weight_sync_pool_only and pool_idx is not None:
+          rollout_policy_version = self.pool_policy_versions[pool_idx]
+        else:
+          rollout_policy_version = self.policy_version - self._unsynced_steps
         logging.info(
             "[pipeline] DISPATCH prompt_id=%s prompt_idx=%d batch_idx=%d"
-            " intra_batch_idx=%d policy_version=%d next_batch=%d",
+            " intra_batch_idx=%d policy_version=%d next_batch=%d pool_idx=%s",
             prompt_item.get("prompt_id")
             if isinstance(prompt_item, dict)
             else getattr(prompt_item, "prompt_id", ""),
@@ -928,6 +1017,7 @@ class StandardRLProgram(RLProgram):
             coordinates["intra_batch_idx"],
             rollout_policy_version,
             self._next_batch,
+            pool_idx,
         )
         self._in_flight_rollouts += self.num_generations
         dispatch_kwargs: dict[str, Any] = {
@@ -949,6 +1039,8 @@ class StandardRLProgram(RLProgram):
                 self.algo.algo_config, "exact_token_continuity", True
             ),
         }
+        if pool_idx is not None:
+          dispatch_kwargs["pool_idx"] = pool_idx
         if self.generation_args is not None:
           dispatch_kwargs["generation_args"] = self.generation_args
         try:
@@ -1824,7 +1916,10 @@ class StandardRLProgram(RLProgram):
       await task
 
   async def _run_background_sync(
-      self, target_version: int, staged: asyncio.Event
+      self,
+      target_version: int,
+      staged: asyncio.Event,
+      pool_idx: int | None = None,
   ) -> None:
     """Runs one weight sync round and records its outcome.
 
@@ -1834,11 +1929,36 @@ class StandardRLProgram(RLProgram):
     assert self.engine is not None
     start_time = time.monotonic()
     try:
-      new_version = await self.engine.sync_weights(
-          role=datatypes.Role.ACTOR,
-          policy_version=target_version,
-          source_staged=staged,
+      sync_kwargs: dict[str, Any] = {
+          "role": datatypes.Role.ACTOR,
+          "policy_version": target_version,
+          "source_staged": staged,
+      }
+      if self.weight_sync_pool_only and pool_idx is not None:
+        sync_kwargs["pool_idx"] = pool_idx
+      new_version = await self.engine.sync_weights(**sync_kwargs)
+      committed_version = (
+          new_version if new_version is not None else target_version
       )
+      if new_version is not None and new_version != target_version:
+        logging.warning(
+            "Background weight sync committed policy_version=%d, expected %d.",
+            new_version,
+            target_version,
+        )
+        self.policy_version = new_version
+      logging.info(
+          "Background weight sync committed policy_version=%d in %.2fs"
+          " (pool_idx=%s).",
+          target_version,
+          time.monotonic() - start_time,
+          pool_idx,
+      )
+      if self.weight_sync_pool_only and pool_idx is not None:
+        self.pool_policy_versions[pool_idx] = committed_version
+      else:
+        self.pool_policy_versions = [committed_version] * self.num_rollout_pools
+      self._unsynced_steps = 0
     except asyncio.CancelledError:
       raise
     except Exception as exc:
@@ -1849,25 +1969,14 @@ class StandardRLProgram(RLProgram):
           exc,
       )
       self._sync_error = exc
-      # The dispatcher has to wake to see `_sync_error`.
-      self._release_window()
       raise
-    if new_version is not None and new_version != target_version:
-      logging.warning(
-          "Background weight sync committed policy_version=%d, expected %d.",
-          new_version,
-          target_version,
-      )
-      self.policy_version = new_version
-    logging.info(
-        "Background weight sync committed policy_version=%d in %.2fs.",
-        target_version,
-        time.monotonic() - start_time,
-    )
-    self._unsynced_steps = 0
-    self._release_window()
+    finally:
+      if pool_idx is not None:
+        self._syncing_pools.discard(pool_idx)
+      # The dispatcher has to wake to see committed version or `_sync_error`.
+      self._release_window()
 
-  async def _start_background_sync(self) -> None:
+  async def _start_background_sync(self, pool_idx: int | None = None) -> None:
     """Launches this step's weight sync and returns once the source staged.
 
     Any previous round is awaited first, since rounds must not overlap.
@@ -1876,13 +1985,17 @@ class StandardRLProgram(RLProgram):
     target_version = self.policy_version + 1
     staged = asyncio.Event()
     task = asyncio.create_task(
-        self._run_background_sync(target_version, staged)
+        self._run_background_sync(target_version, staged, pool_idx=pool_idx)
     )
     self._pending_sync = task
     # Before commit advances `_next_batch`, so the dispatcher cannot slip a
     # batch through against the old weights.
     self._unsynced_steps = 1
     self._round_due = False
+    if pool_idx is not None:
+      self._round_due_pools.discard(pool_idx)
+      if self.weight_sync_pool_only:
+        self._syncing_pools.add(pool_idx)
     # The trainer's weights are this version from here on; rollouts catch up
     # when the round commits.
     self.policy_version = target_version
@@ -2179,8 +2292,15 @@ class StandardRLProgram(RLProgram):
               )
               policy_training_time += time.monotonic() - _t_metrics
             final_minibatch_completed = True
-            if self.sync_weights and self.async_weight_sync:
-              self._round_due = True
+            if self.sync_weights:
+              if self.async_weight_sync:
+                self._round_due = True
+              if self.weight_sync_pool_only and self.num_rollout_pools > 1:
+                self._round_due_pools.add(
+                    self._consumed_pool_idx(
+                        current_batch_idx, current_step, uncommitted_groups
+                    )
+                )
             # TODO(tunix-dev): Configurable checkpointing frequency. Today we
             # checkpoint at the same frequency as the weight update.
             # TODO(tunix-dev): For now any failures in save_checkpoint will
@@ -2201,19 +2321,38 @@ class StandardRLProgram(RLProgram):
         )
         break
 
+      target_pool_idx = self._consumed_pool_idx(
+          current_batch_idx, current_step, uncommitted_groups
+      )
+
       if self.sync_weights and self.async_weight_sync:
         # Only the time the trainer is actually held: the previous round, if
         # it outlived this step, plus this round's source snapshot.
         _t_sync = time.monotonic()
-        await self._start_background_sync()
+        await self._start_background_sync(
+            pool_idx=target_pool_idx if self.weight_sync_pool_only else None
+        )
         weight_sync_time = time.monotonic() - _t_sync
       elif self.sync_weights:
         _t_sync = time.monotonic()
-        new_version = await self.engine.sync_weights(role=datatypes.Role.ACTOR)
+        sync_kwargs: dict[str, Any] = {"role": datatypes.Role.ACTOR}
+        if self.weight_sync_pool_only and self.num_rollout_pools > 1:
+          sync_kwargs["pool_idx"] = target_pool_idx
+          self._round_due_pools.discard(target_pool_idx)
+          self._syncing_pools.add(target_pool_idx)
+        try:
+          new_version = await self.engine.sync_weights(**sync_kwargs)
+        finally:
+          self._syncing_pools.discard(target_pool_idx)
         weight_sync_time = time.monotonic() - _t_sync
-        self.policy_version = (
+        new_v = (
             new_version if new_version is not None else self.policy_version + 1
         )
+        self.policy_version = new_v
+        if self.weight_sync_pool_only and self.num_rollout_pools > 1:
+          self.pool_policy_versions[target_pool_idx] = new_v
+        else:
+          self.pool_policy_versions = [new_v] * self.num_rollout_pools
 
       # Before `commit()`, which will eventually take ownership of the groups.
       generation_metrics = _generation_metrics(uncommitted_groups)

@@ -5970,6 +5970,219 @@ class RLProgramTest(absltest.TestCase):
         {"gold_answer": "4", "prompt_id": "p_math", "group_index": 3},
     )
 
+  def test_staggered_rollout_pools_initialization(self):
+    prog = self._create_program(
+        staggered_rollout_pools=True,
+        max_staleness=2,
+    )
+    self.assertTrue(prog.staggered_rollout_pools)
+    self.assertEqual(prog.num_rollout_pools, 3)
+    self.assertEqual(prog.pool_policy_versions, [0, 0, 0])
+
+    prog2 = self._create_program(
+        staggered_rollout_pools=True,
+        max_staleness=0,
+    )
+    self.assertEqual(prog2.num_rollout_pools, 1)
+
+    prog3 = self._create_program(max_staleness=2)
+    self.assertFalse(prog3.staggered_rollout_pools)
+    self.assertEqual(prog3.num_rollout_pools, 1)
+
+  def test_staggered_rollout_pools_dispatch_routes_by_pool_idx(self):
+    async def _run():
+      dispatched_calls = []
+
+      async def _mock_dispatch(prompts, **kwargs):
+        dispatched_calls.append((prompts, kwargs))
+        return [f"req_{len(dispatched_calls)}"]
+
+      self.mock_engine.dispatch_rollouts.side_effect = _mock_dispatch
+
+      program = self._create_program(
+          dataset=["prompt_0", "prompt_1", "prompt_2", "prompt_3"],
+          staggered_rollout_pools=True,
+          max_staleness=2,
+          weight_sync_pool_only=True,
+          max_steps=1,
+      )
+      program.pool_policy_versions = [10, 20, 30]
+      program.engine = self.mock_engine
+
+      await program.rollout_dispatch_stage()
+
+      self.assertEqual(len(dispatched_calls), 4)
+      # Prompt 0 (batch 0) -> pool 0, policy_version=10
+      self.assertEqual(dispatched_calls[0][1]["pool_idx"], 0)
+      self.assertEqual(dispatched_calls[0][1]["policy_version"], 10)
+      # Prompt 1 (batch 1) -> pool 1, policy_version=20
+      self.assertEqual(dispatched_calls[1][1]["pool_idx"], 1)
+      self.assertEqual(dispatched_calls[1][1]["policy_version"], 20)
+      # Prompt 2 (batch 2) -> pool 2, policy_version=30
+      self.assertEqual(dispatched_calls[2][1]["pool_idx"], 2)
+      self.assertEqual(dispatched_calls[2][1]["policy_version"], 30)
+      # Prompt 3 (batch 3) -> pool 3 % 3 = 0, policy_version=10
+      self.assertEqual(dispatched_calls[3][1]["pool_idx"], 0)
+      self.assertEqual(dispatched_calls[3][1]["policy_version"], 10)
+
+    asyncio.run(_run())
+
+  def test_staggered_rollout_pools_weight_sync_pool_only(self):
+    async def _run():
+      sync_calls = []
+
+      async def _mock_sync_weights(*args, **kwargs):
+        del args
+        sync_calls.append(dict(kwargs))
+        return len(sync_calls)
+
+      self.mock_engine.sync_weights.side_effect = _mock_sync_weights
+      _set_mock_poll_batches(
+          self.mock_engine,
+          _make_trajectory_group(prompt_id="p0"),
+          _make_trajectory_group(prompt_id="p1"),
+          _make_trajectory_group(prompt_id="p2"),
+          [],
+      )
+
+      program = self._create_program(
+          dataset=["prompt_0", "prompt_1", "prompt_2"],
+          staggered_rollout_pools=True,
+          max_staleness=2,
+          weight_sync_pool_only=True,
+          max_steps=3,
+          sync_weights=True,
+      )
+
+      await program.run_async(self.mock_engine)
+
+      self.assertEqual(len(sync_calls), 3)
+      # Step 0 synced pool 0
+      self.assertEqual(sync_calls[0]["pool_idx"], 0)
+      # Step 1 synced pool 1
+      self.assertEqual(sync_calls[1]["pool_idx"], 1)
+      # Step 2 synced pool 2
+      self.assertEqual(sync_calls[2]["pool_idx"], 2)
+      # All pools were updated to their corresponding synced versions
+      self.assertEqual(program.pool_policy_versions, [1, 2, 3])
+
+    asyncio.run(_run())
+
+  def test_staggered_rollout_pools_weight_sync_all_when_pool_only_false(self):
+    async def _run():
+      sync_calls = []
+
+      async def _mock_sync_weights(*args, **kwargs):
+        del args
+        sync_calls.append(dict(kwargs))
+        return len(sync_calls)
+
+      self.mock_engine.sync_weights.side_effect = _mock_sync_weights
+      _set_mock_poll_batches(
+          self.mock_engine,
+          _make_trajectory_group(prompt_id="p0"),
+          [],
+      )
+
+      program = self._create_program(
+          dataset=["prompt_0"],
+          staggered_rollout_pools=True,
+          max_staleness=2,
+          weight_sync_pool_only=False,
+          max_steps=1,
+          sync_weights=True,
+      )
+
+      await program.run_async(self.mock_engine)
+
+      self.assertEqual(len(sync_calls), 1)
+      # sync_weights called across all pools (no pool_idx)
+      self.assertNotIn("pool_idx", sync_calls[0])
+      # All pools updated to version 1
+      self.assertEqual(program.pool_policy_versions, [1, 1, 1])
+
+    asyncio.run(_run())
+
+  def test_staggered_rollout_pools_dispatch_window_waits_for_target_pool_sync(
+      self,
+  ):
+    async def _run():
+      dispatched = []
+
+      async def _mock_dispatch(prompts, **kwargs):
+        dispatched.append((
+            prompts[0]["metadata"]["batch_idx"],
+            kwargs.get("pool_idx"),
+            kwargs.get("policy_version"),
+        ))
+        return ["rollout"]
+
+      self.mock_engine.dispatch_rollouts.side_effect = _mock_dispatch
+
+      # Construct StandardRLProgram directly so _wait_for_dispatch_window is
+      # NOT mocked out.
+      program = rl_program.StandardRLProgram(
+          dataset=[f"prompt_{i}" for i in range(6)],
+          algo=self.mock_algo,
+          reward_fns=[lambda *_: 1.0],
+          assembler=self.assembler,
+          batch_size=1,
+          max_staleness=2,
+          staggered_rollout_pools=True,
+          weight_sync_pool_only=True,
+          async_weight_sync=True,
+      )
+      program.engine = self.mock_engine
+
+      dispatch_task = asyncio.create_task(program.rollout_dispatch_stage())
+      for _ in range(50):
+        if len(dispatched) >= 3:
+          break
+        await asyncio.sleep(0.01)
+      await asyncio.sleep(0.03)
+
+      # Batches 0, 1, 2 dispatched to pools 0, 1, 2 at policy_version 0;
+      # batch 3 (targeting pool 0) is held by the staleness window.
+      self.assertEqual(
+          dispatched,
+          [(0, 0, 0), (1, 1, 0), (2, 2, 0)],
+      )
+
+      # Step 0 (batch 0 on pool 0) finishes training and starts background
+      # weight sync on pool 0, while commit advances _next_batch to 1.
+      program._syncing_pools.add(0)
+      program._step = 1
+      program._release_window()
+      await asyncio.sleep(0.05)
+
+      # Batch 3 targets pool 0, which is still syncing, so batch 3 must wait.
+      self.assertEqual(
+          dispatched,
+          [(0, 0, 0), (1, 1, 0), (2, 2, 0)],
+      )
+
+      # Pool 0's weight sync commits version 1.
+      program.pool_policy_versions[0] = 1
+      program._syncing_pools.discard(0)
+      program._release_window()
+      for _ in range(50):
+        if len(dispatched) >= 4:
+          break
+        await asyncio.sleep(0.01)
+      await asyncio.sleep(0.03)
+
+      # Batch 3 is now dispatched to pool 0 with policy_version 1, while
+      # batch 4 (targeting pool 1) waits for batch 1 to complete.
+      self.assertEqual(
+          dispatched,
+          [(0, 0, 0), (1, 1, 0), (2, 2, 0), (3, 0, 1)],
+      )
+
+      dispatch_task.cancel()
+      await asyncio.gather(dispatch_task, return_exceptions=True)
+
+    asyncio.run(_run())
+
 
 def _traj_item(tokens, clipped=None, raw_length=None):
   """Builds a TrajectoryItem, optionally with collector annotations."""
