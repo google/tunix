@@ -1973,7 +1973,7 @@ class PoolExecutionSession:
         if isinstance(meta, dict):
           qm = meta.get("queue_metrics")
           if isinstance(qm, dict):
-            qm.update(l1_metrics)
+            meta["queue_metrics"] = {**qm, **l1_metrics}
           else:
             meta["queue_metrics"] = dict(l1_metrics)
 
@@ -2589,6 +2589,10 @@ class PoolExecutionSession:
   async def close(self) -> None:
     """Closes the session and cancels all background polling tasks."""
     self._closed = True
+    self._task_submit_ts.clear()
+    self._task_pending_enter_ts.clear()
+    self._task_l1_wait_s.clear()
+    self._task_l1_queued_count.clear()
     self._response_queue.put_nowait(self._sentinel)
     for t in list(self._poll_tasks):
       if not t.done():

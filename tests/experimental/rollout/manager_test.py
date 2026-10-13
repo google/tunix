@@ -762,6 +762,10 @@ class MaxConcurrencyTest(unittest.IsolatedAsyncioTestCase):
         _TrackingCollector,
     ):
       gen_task = asyncio.create_task(manager.generate(reqs))
+      for _ in range(100):
+        if active >= 2:
+          break
+        await asyncio.sleep(0.01)
       await asyncio.sleep(0.02)
       self.assertEqual(active, 2)
       self.assertEqual(peak, 2)

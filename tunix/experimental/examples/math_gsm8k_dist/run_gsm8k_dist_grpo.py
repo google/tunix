@@ -596,6 +596,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
       max_concurrent_rollouts_per_worker=(
           args.max_concurrent_rollouts_per_worker
       ),
+      target_rollout_replicas=args.rollout_replicas,
   )
   context.ipc.discovery.on_register(
       functools.partial(

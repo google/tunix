@@ -360,7 +360,8 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
   )
 
   cluster = orchestrator.ClusterOrchestrator(
-      weight_sync_mode=args.weight_sync_mode
+      weight_sync_mode=args.weight_sync_mode,
+      target_rollout_replicas=args.rollout_replicas,
   )
   context.ipc.discovery.on_register(
       functools.partial(

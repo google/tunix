@@ -1286,6 +1286,7 @@ class ClusterOrchestratorTest(absltest.TestCase):
             "save_jax_cache": True,
             "rollout_jax_cache_gcs_dir": "gs://test-bucket/cache",
         },
+        target_rollout_replicas=3,
     )
     orch.register_worker_handle("actor-0", [datatypes.Role.ACTOR], h_actor)
     orch.register_worker_handle("rollout-1", [datatypes.Role.ROLLOUT], h_r1)
@@ -1313,6 +1314,7 @@ class ClusterOrchestratorTest(absltest.TestCase):
     )
 
     assert orch.engine is not None
+    self.assertAlmostEqual(orch.engine.active_rollout_workers_ratio, 1.0 / 3.0)
     # Initial weight sync at step 0 promotes rollout-0 as well.
     asyncio.run(orch.engine.sync_weights(policy_version=0))
     self.assertEqual(
@@ -1320,6 +1322,7 @@ class ClusterOrchestratorTest(absltest.TestCase):
         worker_registry.MembershipState.ACTIVE,
     )
     self.assertCountEqual(orch.engine._rollout_workers, [h_r1, h_r0])
+    self.assertAlmostEqual(orch.engine.active_rollout_workers_ratio, 2.0 / 3.0)
 
     # Now rollout-2 joins during training while policy_version=0 is active.
     orch.register_worker_handle("rollout-2", [datatypes.Role.ROLLOUT], h_r2)
@@ -1352,6 +1355,7 @@ class ClusterOrchestratorTest(absltest.TestCase):
         worker_registry.MembershipState.ACTIVE,
     )
     self.assertCountEqual(orch.engine._rollout_workers, [h_r1, h_r0, h_r2])
+    self.assertAlmostEqual(orch.engine.active_rollout_workers_ratio, 1.0)
     self.assertCountEqual(
         [item.traj["worker_id"] for item in items],
         ["r0", "r1", "r2"],

@@ -100,6 +100,7 @@ class ClusterOrchestrator:
       fault_tolerance_config: datatypes.RolloutFaultToleranceConfig | None = (
           None
       ),
+      target_rollout_replicas: int | None = None,
   ):
     """Initializes ClusterOrchestrator.
 
@@ -126,8 +127,11 @@ class ClusterOrchestrator:
         evicted and its in-flight tasks are re-queued.
       fault_tolerance_config: Optional consolidated rollout fault-tolerance
         configuration.
+      target_rollout_replicas: Optional total number of rollout worker replicas
+        configured for the job.
     """
     self.config = config
+    self._target_rollout_replicas = target_rollout_replicas
     # Legacy scalar arguments take precedence over the consolidated config;
     # `with_overrides` validates the merged result (positive caps/timeouts).
     self._fault_tolerance_config = (
@@ -949,9 +953,16 @@ class ClusterOrchestrator:
         if cap is not None:
           rollout_worker_capacities[shim.handle] = cap
 
-    target_rollout_replicas = None
+    target_rollout_replicas = (
+        self._target_rollout_replicas
+        if (
+            isinstance(self._target_rollout_replicas, int)
+            and self._target_rollout_replicas > 0
+        )
+        else None
+    )
     role_groups = getattr(self.config, "role_groups", None)
-    if isinstance(role_groups, Mapping):
+    if target_rollout_replicas is None and isinstance(role_groups, Mapping):
       rollout_group = role_groups.get(datatypes.Role.ROLLOUT) or role_groups.get(
           datatypes.Role.ROLLOUT.value
       )
@@ -959,7 +970,9 @@ class ClusterOrchestrator:
       if isinstance(replicas, int) and replicas > 0:
         target_rollout_replicas = replicas
     if target_rollout_replicas is None:
-      env_replicas = os.getenv("ROLLOUT_REPLICAS", "").strip()
+      env_replicas = (
+          os.getenv("ROLLOUT_REPLICAS") or os.getenv("ROLLOUT_WORKERS") or ""
+      ).strip()
       if env_replicas.isdigit() and int(env_replicas) > 0:
         target_rollout_replicas = int(env_replicas)
 

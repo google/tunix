@@ -1485,10 +1485,13 @@ class StandardRLProgram(RLProgram):
         weighted_waiting_ratio = float(np.mean(waiting_ratios))
         weighted_kv_mean = float(np.mean(kv_means))
 
-      active_workers_ratio = float(
-          getattr(self.engine, "active_rollout_workers_ratio", 1.0)
+      raw_ratio = (
+          getattr(self.engine, "active_rollout_workers_ratio", None)
           if self.engine is not None
-          else 1.0
+          else None
+      )
+      active_workers_ratio = (
+          float(raw_ratio) if isinstance(raw_ratio, (int, float)) else 1.0
       )
 
       queue_log_stats = {

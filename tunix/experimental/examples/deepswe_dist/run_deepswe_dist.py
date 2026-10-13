@@ -934,6 +934,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           max_zero_worker_wait_s=args.max_zero_worker_wait_s,
           recover_unknown_transfer_state=args.recover_unknown_transfer_state,
       ),
+      target_rollout_replicas=args.rollout_replicas,
   )
   context.ipc.discovery.on_register(
       functools.partial(

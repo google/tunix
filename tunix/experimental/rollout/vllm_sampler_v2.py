@@ -451,6 +451,8 @@ class RLVllmSampler:
               num_preemptions,
           )
           num_preemptions = queue_metrics["num_preemptions"]
+          if queue_metrics["driver_wait_s"] > 0.005 or num_preemptions > 0:
+            queue_metrics["l3_queued"] = True
         else:
           queued_ts = (
               float(getattr(ro_metrics, "queued_ts", 0.0) or 0.0)
@@ -1027,7 +1029,9 @@ class RLVllmSampler:
             schedulers if isinstance(schedulers, list) else [schedulers]
         )
         for sched in sched_list:
-          num_waiting += len(getattr(sched, "waiting", []))
+          num_waiting += len(getattr(sched, "waiting", [])) + len(
+              getattr(sched, "skipped_waiting", [])
+          )
           num_running += len(getattr(sched, "running", []))
 
           block_manager = getattr(sched, "block_manager", None)
@@ -1042,6 +1046,17 @@ class RLVllmSampler:
                 kv_cache_usage_perc = max(
                     kv_cache_usage_perc, used_ratio * 100.0
                 )
+          else:
+            get_kv = getattr(sched, "get_kv_cache_usage", None)
+            if callable(get_kv):
+              try:
+                kv_usage = float(get_kv() or 0.0)
+                kv_perc = (
+                    (kv_usage * 100.0) if kv_usage <= 1.0 else float(kv_usage)
+                )
+                kv_cache_usage_perc = max(kv_cache_usage_perc, kv_perc)
+              except Exception:  # pylint: disable=broad-exception-caught
+                pass
 
     return SimpleNamespace(
         num_requests_waiting=num_waiting,
