@@ -3272,5 +3272,63 @@ class RemoteExecutionTest(absltest.TestCase):
     asyncio.run(_run())
 
 
+  def test_set_max_poll_batch_idx_focuses_single_smallest_x_partial_group(self):
+    """Verifies priority_prompt_ids focuses polling on one partial group at a time."""
+
+    class GroupStubWorker:
+
+      def __init__(self, name: str, latency: float = 0.01):
+        self.name = name
+        self.latency = latency
+
+      async def generate_trajectories(self, requests=None):
+        await asyncio.sleep(self.latency)
+        req = requests[0]
+        return f"[{self.name}] {req.prompt_id}"
+
+    class FakeReq:
+
+      def __init__(self, prompt_id: str, batch_idx: int):
+        self.prompt_id = prompt_id
+        self.metadata = {"batch_idx": batch_idx}
+
+    async def _run():
+      actor_a = create_in_process_handle(GroupStubWorker("worker_a"))
+      actor_b = create_in_process_handle(GroupStubWorker("worker_b"))
+      pool = remote_lib.RoutingActorPool([actor_a, actor_b])
+      session = remote_lib.PoolExecutionSession(
+          pool,
+          config=remote_lib.PoolSessionConfig(task_timeout_s=0.20),
+      )
+
+      await session.submit(
+          "req_a",
+          "generate_trajectories",
+          requests=[FakeReq("p_a", batch_idx=0)],
+      )
+      await session.submit(
+          "req_b",
+          "generate_trajectories",
+          requests=[FakeReq("p_b", batch_idx=0)],
+      )
+
+      # Focus polling on p_b first (smallest missing x), pausing p_a even in batch 0.
+      session.set_max_poll_batch_idx(0, priority_prompt_ids=["p_b", "p_a"])
+      self.assertEqual(session._focused_prompt_id, "p_b")
+
+      first_batch = await session.poll_completed(timeout_s=0.5)
+      first_results = [res for res, exc in first_batch if exc is None]
+      self.assertEqual(first_results, ["[worker_b] p_b"])
+
+      # Once p_b finishes its dispatched tasks, focus automatically advances to p_a.
+      self.assertEqual(session._focused_prompt_id, "p_a")
+      second_batch = await session.poll_completed(timeout_s=0.5)
+      second_results = [res for res, exc in second_batch if exc is None]
+      self.assertEqual(second_results, ["[worker_a] p_a"])
+      await session.close()
+
+    asyncio.run(_run())
+
+
 if __name__ == "__main__":
   absltest.main()

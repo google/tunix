@@ -811,6 +811,49 @@ class BatchOrderedQueueManagerTest(absltest.TestCase):
     asyncio.run(_run())
 
 
+  def test_priority_partial_prompt_ids_and_has_ready_groups(self):
+    """Verifies smallest-x partial group priority ordering and ready group queries."""
+
+    async def _run():
+      q = trajectory_queue_manager.TrajectoryQueueManager(num_generations=4)
+      self.assertFalse(q.has_ready_groups_for_batch(0))
+      self.assertEqual(q.priority_partial_prompt_ids(0), [])
+
+      # p_1 has 1/4 items (x=3 remaining), p_3 has 3/4 items (x=1 remaining),
+      # p_2 has 2/4 items (x=2 remaining), p_future has 3/4 items in batch 1.
+      await q.put(_create_item("p_1", group_index=0, reward=1.0, batch_idx=0))
+      for i in range(3):
+        await q.put(_create_item("p_3", group_index=i, reward=1.0, batch_idx=0))
+      for i in range(2):
+        await q.put(_create_item("p_2", group_index=i, reward=1.0, batch_idx=0))
+      for i in range(3):
+        await q.put(
+            _create_item("p_future", group_index=i, reward=1.0, batch_idx=1)
+        )
+
+      # For max_batch_idx=0, partial groups are sorted by largest len(bucket) (smallest x).
+      self.assertEqual(
+          q.priority_partial_prompt_ids(max_batch_idx=0),
+          ["p_3", "p_2", "p_1"],
+      )
+      self.assertFalse(q.has_ready_groups_for_batch(0))
+
+      # Completing p_future (batch 1) makes batch 1 ready, while batch <= 0 is still False.
+      await q.put(_create_item("p_future", group_index=3, reward=1.0, batch_idx=1))
+      self.assertFalse(q.has_ready_groups_for_batch(0))
+      self.assertTrue(q.has_ready_groups_for_batch(1))
+
+      # Completing p_3 (batch 0) makes batch <= 0 ready and removes p_3 from partial buckets.
+      await q.put(_create_item("p_3", group_index=3, reward=1.0, batch_idx=0))
+      self.assertTrue(q.has_ready_groups_for_batch(0))
+      self.assertEqual(
+          q.priority_partial_prompt_ids(max_batch_idx=0),
+          ["p_2", "p_1"],
+      )
+
+    asyncio.run(_run())
+
+
 if __name__ == "__main__":
   absltest.main()
 

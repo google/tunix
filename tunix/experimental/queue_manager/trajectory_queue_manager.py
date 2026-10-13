@@ -230,6 +230,54 @@ class TrajectoryQueueManager(group_queue_manager.GroupQueueManager):
     """Wakes waiting consumers when external admission gates change."""
     self._have_ready.set()
 
+  def has_ready_groups_for_batch(
+      self, max_batch_idx: int | None = None
+  ) -> bool:
+    """Returns True if at least one ready group satisfies `max_batch_idx`."""
+    if not self._ready_groups:
+      return False
+    if max_batch_idx is None:
+      return True
+    if max_batch_idx < 0:
+      return False
+    for group in self._ready_groups:
+      if not group:
+        return True
+      metadata = group[0].metadata
+      batch_idx = (
+          int(metadata["batch_idx"])
+          if metadata is not None and "batch_idx" in metadata
+          else 0
+      )
+      if batch_idx <= max_batch_idx:
+        return True
+    return False
+
+  def priority_partial_prompt_ids(
+      self, max_batch_idx: int | None = None
+  ) -> list[str]:
+    """Returns incomplete group prompt IDs ordered by smallest missing count `x`."""
+    if max_batch_idx is not None and max_batch_idx < 0:
+      return []
+    candidates: list[tuple[int, int, int, str]] = []
+    for key, bucket in list(self._buckets.items()):
+      if not bucket:
+        continue
+      metadata = bucket[0].metadata
+      batch_idx = (
+          int(metadata["batch_idx"])
+          if metadata is not None and "batch_idx" in metadata
+          else 0
+      )
+      if max_batch_idx is not None and batch_idx > max_batch_idx:
+        continue
+      is_target = (
+          0 if (max_batch_idx is None or batch_idx == max_batch_idx) else 1
+      )
+      candidates.append((is_target, -len(bucket), batch_idx, str(key)))
+    candidates.sort()
+    return [key_str for _, _, _, key_str in candidates]
+
   async def get_group(
       self,
       *,

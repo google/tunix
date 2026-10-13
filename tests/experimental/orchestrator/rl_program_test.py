@@ -6472,6 +6472,90 @@ class MemoryBackpressureTest(absltest.TestCase):
     asyncio.run(_run())
 
 
+  def test_consumer_paced_drain_and_smallest_x_focus_under_high_memory(self):
+    """Verifies N-x smallest-x focus and consumer-paced drain pause when throttled."""
+
+    async def _run():
+      mock_engine = mock.MagicMock()
+      poll_gate_calls = []
+      mock_engine.set_max_poll_batch_idx.side_effect = (
+          lambda idx, pids=None: poll_gate_calls.append((idx, pids))
+      )
+      mock_algo = self._make_mock_algo(num_generations=4, mini_batch_size=2)
+
+      usage = [900]
+      program = rl_program.StandardRLProgram(
+          algo=mock_algo,
+          dataset=["p0", "p1"],
+          batch_size=2,
+          group_order=rl_program.trajectory_queue_manager.GroupOrder.PROMPT_BATCH,
+          memory_high_watermark_ratio=0.80,
+          memory_reader=lambda: (usage[0], 1000),
+      )
+      program.engine = mock_engine
+      program._in_flight_rollouts = 8
+
+      # Seed two partial groups in raw_q for batch 0: p0 has 1/4 (x=3), p1 has 3/4 (x=1).
+      await program.raw_q.put(
+          datatypes.TrajectoryItem(
+              prompt_id="p0",
+              group_index=0,
+              start_step=0,
+              traj={"trajectory_reward": 1.0},
+              metadata={"batch_idx": 0},
+          )
+      )
+      for i in range(3):
+        await program.raw_q.put(
+            datatypes.TrajectoryItem(
+                prompt_id="p1",
+                group_index=i,
+                start_step=0,
+                traj={"trajectory_reward": 1.0},
+                metadata={"batch_idx": 0},
+            )
+        )
+
+      # 1. Step is not self-sufficient and no complete group is unconsumed:
+      # _wait_for_poll_permission returns immediately and passes smallest-x priority ("p1", "p0").
+      self.assertFalse(program._has_unconsumed_complete_groups())
+      await asyncio.wait_for(program._wait_for_poll_permission(), timeout=0.5)
+      self.assertEqual(poll_gate_calls[-1], (0, ("p1", "p0")))
+
+      # 2. Now p1 receives its 4th item and becomes a complete group in raw_q._ready_groups.
+      # Even though the step (batch_size=2) is NOT yet self-sufficient (only 1/2 groups ready),
+      # consumer-paced drain pauses polling (max_batch_idx=-1) until train_stage drains p1!
+      await program.raw_q.put(
+          datatypes.TrajectoryItem(
+              prompt_id="p1",
+              group_index=3,
+              start_step=0,
+              traj={"trajectory_reward": 1.0},
+              metadata={"batch_idx": 0},
+          )
+      )
+      self.assertTrue(program._has_unconsumed_complete_groups())
+      self.assertFalse(program._is_current_step_self_sufficient())
+
+      waiter = asyncio.create_task(program._wait_for_poll_permission())
+      await asyncio.sleep(0.03)
+      self.assertFalse(waiter.done())
+      self.assertEqual(poll_gate_calls[-1][0], -1)
+
+      # Simulate critique_stage + train_stage draining p1 into the assembler.
+      _ = await program.raw_q.get_group()
+      program._train_groups_consumed = 1
+      self.assertFalse(program._has_unconsumed_complete_groups())
+      program._notify_pipeline_state_change()
+
+      # Waiter wakes up and focuses on the next partial group ("p0",).
+      await asyncio.wait_for(waiter, timeout=1.0)
+      self.assertEqual(poll_gate_calls[-1], (0, ("p0",)))
+      program.close()
+
+    asyncio.run(_run())
+
+
 if __name__ == "__main__":
   absltest.main()
 

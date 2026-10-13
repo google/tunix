@@ -868,6 +868,9 @@ class StandardRLProgram(RLProgram):
     self._train_groups_consumed: int = 0
     self._active_train_batch_idx: int | None = None
     self._last_max_poll_batch_idx: int | None = None
+    self._last_priority_prompt_ids: tuple[str, ...] = ()
+    self._critique_in_flight: int = 0
+    self._train_ingesting_group: bool = False
 
     self.scored_q: (
         trajectory_queue_manager.TrajectoryQueueManager
@@ -975,35 +978,86 @@ class StandardRLProgram(RLProgram):
         >= self.full_batch_size
     )
 
-  def _set_engine_max_poll_batch(self, max_batch_idx: int | None) -> None:
-    """Updates the engine's worker-level batch poll gate when changed."""
-    if self._last_max_poll_batch_idx == max_batch_idx:
+  def _has_unconsumed_complete_groups(self) -> bool:
+    """Returns True if any completed group is queued or in flight before assembler."""
+    if self._critique_in_flight > 0 or self._train_ingesting_group:
+      return True
+    if isinstance(
+        self.scored_q, trajectory_queue_manager.BatchOrderedQueueManager
+    ):
+      target_batch = self._active_or_next_batch_idx()
+      return (
+          self.raw_q.has_ready_groups_for_batch(target_batch)
+          or self.scored_q.pending_groups_for_batch(target_batch) > 0
+      )
+    return (
+        self.raw_q.has_ready_groups_for_batch(None)
+        or self.scored_q.ready_groups_count > 0
+    )
+
+  def _set_engine_max_poll_batch(
+      self,
+      max_batch_idx: int | None,
+      priority_prompt_ids: Sequence[str] | None = None,
+  ) -> None:
+    """Updates the engine's worker-level batch and partial-group poll gate."""
+    normalized_pids = (
+        tuple(str(p) for p in priority_prompt_ids if p)
+        if priority_prompt_ids
+        else ()
+    )
+    if (
+        self._last_max_poll_batch_idx == max_batch_idx
+        and self._last_priority_prompt_ids == normalized_pids
+    ):
       return
     self._last_max_poll_batch_idx = max_batch_idx
+    self._last_priority_prompt_ids = normalized_pids
     if self.engine is not None and hasattr(
         self.engine, "set_max_poll_batch_idx"
     ):
-      self.engine.set_max_poll_batch_idx(max_batch_idx)
+      if normalized_pids:
+        try:
+          self.engine.set_max_poll_batch_idx(max_batch_idx, normalized_pids)
+        except TypeError:
+          self.engine.set_max_poll_batch_idx(max_batch_idx)
+      else:
+        self.engine.set_max_poll_batch_idx(max_batch_idx)
 
   async def _wait_for_poll_permission(self) -> None:
     """Coordinates memory-pressure backpressure on `polling_stage` without deadlocks.
 
     * When memory is below `high_watermark`: unthrottled (`max_poll_batch_idx=None`).
-    * When memory is above `high_watermark` AND `_is_current_step_self_sufficient()`
-      is False: enters `CursorPriorityDrain` (`max_poll_batch_idx=B_active`),
-      continuing to poll workers that hold tasks for `B_active` while pausing
-      workers that only hold future batches (`b > B_active`).
-    * When memory is above `high_watermark` AND `_is_current_step_self_sufficient()`
-      is True: enters `FullPollPause` (`max_poll_batch_idx=-1`), pausing all
-      polling until `train_stage` finishes the step and frees memory.
+    * When memory is above `high_watermark`, `_is_current_step_self_sufficient()`
+      is False, AND `_has_unconsumed_complete_groups()` is False: enters
+      `CursorPriorityDrain` + `Smallest-x Group Focus`, polling only the single
+      partial group closest to completion (`smallest x`) for the active batch/step.
+    * When memory is above `high_watermark` AND either `_is_current_step_self_sufficient()`
+      is True OR `_has_unconsumed_complete_groups()` is True: enters `FullPollPause`
+      (`max_poll_batch_idx=-1`) until `critique_stage` and `train_stage` drain
+      ready groups into the assembler and reclaim memory.
     """
     while self._mem_controller.is_poll_throttled():
       if self._sync_error is not None:
         raise self._sync_error
       if self._dispatch_done.is_set() and self._in_flight_rollouts <= 0:
         break
-      if not self._is_current_step_self_sufficient():
-        self._set_engine_max_poll_batch(self._active_or_next_batch_idx())
+      if (
+          not self._is_current_step_self_sufficient()
+          and not self._has_unconsumed_complete_groups()
+      ):
+        if isinstance(
+            self.scored_q, trajectory_queue_manager.BatchOrderedQueueManager
+        ):
+          target_batch = self._active_or_next_batch_idx()
+          priority_pids = self.raw_q.priority_partial_prompt_ids(target_batch)
+          self._set_engine_max_poll_batch(target_batch, priority_pids)
+        else:
+          priority_pids = self.raw_q.priority_partial_prompt_ids(None)
+          max_batch = (
+              None if priority_pids else self._active_or_next_batch_idx()
+          )
+          self._set_engine_max_poll_batch(max_batch, priority_pids)
         return
       self._set_engine_max_poll_batch(-1)
       try:
@@ -1019,7 +1073,11 @@ class StandardRLProgram(RLProgram):
       return None
     if self._is_current_step_self_sufficient():
       return -1
-    return self._active_or_next_batch_idx()
+    if isinstance(
+        self.scored_q, trajectory_queue_manager.BatchOrderedQueueManager
+    ):
+      return self._active_or_next_batch_idx()
+    return None
 
   def _release_window(self) -> None:
     """Wakes the dispatcher and memory-gated stages after `_next_batch` advances."""
@@ -1396,112 +1454,117 @@ class StandardRLProgram(RLProgram):
         except Exception:
           break
 
-        rewards = []
-        for item in group:
-          # Skip reward evaluation or extraction for failed, env-timed-out, or
-          # masked-out trajectories (`not item.is_valid`): although the payload
-          # still goes through trainer fwd/bwd to keep static batch shapes, its
-          # advantage and completion_mask are zeroed out, so scoring it is
-          # wasted work (and an aborted trajectory may lack trajectory_reward).
-          # Episode-budget timeouts are valid and arrive with reward 0.
-          if not item.is_valid:
-            r = 0.0
-          elif self.reward_fns:
-            r = sum(_invoke_reward_fn(fn, item) for fn in self.reward_fns)
-          else:
-            r = _extract_reward(item)
-          rewards.append(float(r))
+        self._critique_in_flight += 1
+        try:
+          rewards = []
+          for item in group:
+            # Skip reward evaluation or extraction for failed, env-timed-out, or
+            # masked-out trajectories (`not item.is_valid`): although the payload
+            # still goes through trainer fwd/bwd to keep static batch shapes, its
+            # advantage and completion_mask are zeroed out, so scoring it is
+            # wasted work (and an aborted trajectory may lack trajectory_reward).
+            # Episode-budget timeouts are valid and arrive with reward 0.
+            if not item.is_valid:
+              r = 0.0
+            elif self.reward_fns:
+              r = sum(_invoke_reward_fn(fn, item) for fn in self.reward_fns)
+            else:
+              r = _extract_reward(item)
+            rewards.append(float(r))
 
-        trainer_payloads = self.algo.create_trainer_payloads(
-            group, rewards=rewards
-        )
-        for idx, payload in enumerate(trainer_payloads):
-          reward_val = rewards[idx] if idx < len(rewards) else 0.0
-          src_item = group[idx] if idx < len(group) else None
-          src_traj = getattr(src_item, "traj", None)
-          if isinstance(src_traj, dict):
-            raw_status = src_traj.get("status") or getattr(
-                src_item, "status", None
-            )
-            raw_steps = src_traj.get("steps")
-            traj_dict = dict(src_traj)
-          elif src_traj is not None:
-            raw_status = getattr(src_traj, "status", None) or getattr(
-                src_item, "status", None
-            )
-            raw_steps = getattr(src_traj, "steps", None)
-            traj_dict = (
-                src_traj.to_dict() if hasattr(src_traj, "to_dict") else {}
-            )
-          else:
-            raw_status = getattr(src_item, "status", None)
-            raw_steps = []
-            traj_dict = {}
-          if isinstance(raw_status, datatypes.TrajectoryStatus):
-            status = raw_status
-          elif isinstance(raw_status, str):
-            status = getattr(
-                datatypes.TrajectoryStatus,
-                raw_status.upper(),
-                datatypes.TrajectoryStatus.SUCCEEDED
-                if raw_status.upper() in ("COMPLETED", "SUCCESS")
-                else datatypes.TrajectoryStatus.RUNNING,
-            )
-          else:
-            status = datatypes.TrajectoryStatus.RUNNING
-          steps = raw_steps if isinstance(raw_steps, list) else []
-          src_metadata = getattr(src_item, "metadata", None)
-          if isinstance(src_metadata, dict):
-            src_metadata.pop("routed_experts", None)
-          metadata = dict(src_metadata) if src_metadata else {}
-          metadata.pop("routed_experts", None)
-          traj_dict["trajectory_reward"] = reward_val
-          traj_dict["status"] = status
-          traj_dict["steps"] = steps
-          traj_dict["conversation_masks"] = payload.completion_mask
-          # `payload.routed_experts` now holds the sequence-aligned routing
-          # array; drop the raw rollout reference from `traj_dict`, `metadata`,
-          # and the post-critique `TrajectoryItem` so we do not retain two
-          # copies per trajectory across `scored_q` and `all_step_items`.
-          traj_dict.pop("routed_experts", None)
-          if isinstance(src_traj, dict):
-            src_traj.pop("routed_experts", None)
-          if src_item is not None:
-            src_item.routed_experts = None
-          item = datatypes.TrajectoryItem(
-              prompt_id=getattr(src_item, "prompt_id", ""),
-              group_index=getattr(src_item, "group_index", 0),
-              start_step=0,
-              traj=traj_dict,
-              is_valid=getattr(src_item, "is_valid", True),
-              prompt_tokens=getattr(src_item, "prompt_tokens", None),
-              completion_tokens=getattr(src_item, "completion_tokens", None),
-              action_mask=getattr(src_item, "action_mask", None),
-              routed_experts=None,
-              policy_version=getattr(src_item, "policy_version", 0),
-              metadata=metadata,
-              # TODO: b/552087289 - Stream RLTrainerPayload directly instead of
-              # re-wrapping in TrajectoryItem.
+          trainer_payloads = self.algo.create_trainer_payloads(
+              group, rewards=rewards
           )
-          item.payload = payload  # pyrefly: ignore[missing-attribute]
-          await self.scored_q.put(item)
-        if group:
-          first_meta = getattr(group[0], "metadata", None) or {}
-          logging.info(
-              "[pipeline] ARRIVE prompt_id=%s prompt_idx=%s batch_idx=%s"
-              " intra_batch_idx=%s policy_version=%d worker_id=%s",
-              getattr(group[0], "prompt_id", ""),
-              first_meta.get("prompt_idx"),
-              first_meta.get("batch_idx"),
-              first_meta.get("intra_batch_idx"),
-              getattr(group[0], "policy_version", 0),
-              first_meta.get("worker_id"),
-          )
-        group = None
-        trainer_payloads = None
-        src_item = None
-        payload = None
-        item = None
+          for idx, payload in enumerate(trainer_payloads):
+            reward_val = rewards[idx] if idx < len(rewards) else 0.0
+            src_item = group[idx] if idx < len(group) else None
+            src_traj = getattr(src_item, "traj", None)
+            if isinstance(src_traj, dict):
+              raw_status = src_traj.get("status") or getattr(
+                  src_item, "status", None
+              )
+              raw_steps = src_traj.get("steps")
+              traj_dict = dict(src_traj)
+            elif src_traj is not None:
+              raw_status = getattr(src_traj, "status", None) or getattr(
+                  src_item, "status", None
+              )
+              raw_steps = getattr(src_traj, "steps", None)
+              traj_dict = (
+                  src_traj.to_dict() if hasattr(src_traj, "to_dict") else {}
+              )
+            else:
+              raw_status = getattr(src_item, "status", None)
+              raw_steps = []
+              traj_dict = {}
+            if isinstance(raw_status, datatypes.TrajectoryStatus):
+              status = raw_status
+            elif isinstance(raw_status, str):
+              status = getattr(
+                  datatypes.TrajectoryStatus,
+                  raw_status.upper(),
+                  datatypes.TrajectoryStatus.SUCCEEDED
+                  if raw_status.upper() in ("COMPLETED", "SUCCESS")
+                  else datatypes.TrajectoryStatus.RUNNING,
+              )
+            else:
+              status = datatypes.TrajectoryStatus.RUNNING
+            steps = raw_steps if isinstance(raw_steps, list) else []
+            src_metadata = getattr(src_item, "metadata", None)
+            if isinstance(src_metadata, dict):
+              src_metadata.pop("routed_experts", None)
+            metadata = dict(src_metadata) if src_metadata else {}
+            metadata.pop("routed_experts", None)
+            traj_dict["trajectory_reward"] = reward_val
+            traj_dict["status"] = status
+            traj_dict["steps"] = steps
+            traj_dict["conversation_masks"] = payload.completion_mask
+            # `payload.routed_experts` now holds the sequence-aligned routing
+            # array; drop the raw rollout reference from `traj_dict`, `metadata`,
+            # and the post-critique `TrajectoryItem` so we do not retain two
+            # copies per trajectory across `scored_q` and `all_step_items`.
+            traj_dict.pop("routed_experts", None)
+            if isinstance(src_traj, dict):
+              src_traj.pop("routed_experts", None)
+            if src_item is not None:
+              src_item.routed_experts = None
+            item = datatypes.TrajectoryItem(
+                prompt_id=getattr(src_item, "prompt_id", ""),
+                group_index=getattr(src_item, "group_index", 0),
+                start_step=0,
+                traj=traj_dict,
+                is_valid=getattr(src_item, "is_valid", True),
+                prompt_tokens=getattr(src_item, "prompt_tokens", None),
+                completion_tokens=getattr(src_item, "completion_tokens", None),
+                action_mask=getattr(src_item, "action_mask", None),
+                routed_experts=None,
+                policy_version=getattr(src_item, "policy_version", 0),
+                metadata=metadata,
+                # TODO: b/552087289 - Stream RLTrainerPayload directly instead of
+                # re-wrapping in TrajectoryItem.
+            )
+            item.payload = payload  # pyrefly: ignore[missing-attribute]
+            await self.scored_q.put(item)
+          if group:
+            first_meta = getattr(group[0], "metadata", None) or {}
+            logging.info(
+                "[pipeline] ARRIVE prompt_id=%s prompt_idx=%s batch_idx=%s"
+                " intra_batch_idx=%s policy_version=%d worker_id=%s",
+                getattr(group[0], "prompt_id", ""),
+                first_meta.get("prompt_idx"),
+                first_meta.get("batch_idx"),
+                first_meta.get("intra_batch_idx"),
+                getattr(group[0], "policy_version", 0),
+                first_meta.get("worker_id"),
+            )
+          group = None
+          trainer_payloads = None
+          src_item = None
+          payload = None
+          item = None
+        finally:
+          self._critique_in_flight = max(0, self._critique_in_flight - 1)
+          self._notify_pipeline_state_change()
     finally:
       await self.scored_q.close()
 
@@ -2328,6 +2391,11 @@ class StandardRLProgram(RLProgram):
         if task is not None:
           step_result, elapsed = await task
           policy_training_time += elapsed
+          if (
+              self._mem_controller.is_dispatch_throttled()
+              or self._mem_controller.is_poll_throttled()
+          ):
+            _release_host_memory()
 
       async def _maybe_save_checkpoint() -> None:
         nonlocal checkpoint_saved
@@ -2423,6 +2491,7 @@ class StandardRLProgram(RLProgram):
           groups_consumed += 1
           self._train_groups_consumed = groups_consumed
           self._active_train_batch_idx = current_batch_idx
+          self._train_ingesting_group = True
           self._notify_pipeline_state_change()
           uncommitted_groups.append(scored_items)
           all_step_items.extend(scored_items)
@@ -2479,6 +2548,13 @@ class StandardRLProgram(RLProgram):
               item.payload = dataclasses.replace(
                   item_payload, routed_experts=None
               )
+          if (
+              not assembled_batches
+              and self._mem_controller.is_poll_throttled()
+          ):
+            _release_host_memory()
+          self._train_ingesting_group = False
+          self._notify_pipeline_state_change()
 
         while assembled_batches:
           mb = assembled_batches.pop(0)
@@ -2543,6 +2619,11 @@ class StandardRLProgram(RLProgram):
             continue
           step_result, elapsed = await train_step
           policy_training_time += elapsed
+          if (
+              self._mem_controller.is_dispatch_throttled()
+              or self._mem_controller.is_poll_throttled()
+          ):
+            _release_host_memory()
           if is_final_batch:
             _t_metrics = time.monotonic()
             trainer_metrics = await self.engine.get_metrics(

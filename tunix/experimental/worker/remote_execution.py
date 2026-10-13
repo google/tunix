@@ -1658,8 +1658,11 @@ class PoolExecutionSession:
         str, Tuple[Optional[str], Tuple[Any, ...], Dict[str, Any]]
     ] = {}
     self._task_batch_idx: Dict[str, int] = {}
+    self._task_prompt_id: Dict[str, str] = {}
     self._task_retries: Dict[str, int] = {}
     self._max_poll_batch_idx: Optional[int] = None
+    self._priority_prompt_ids: Tuple[str, ...] = ()
+    self._focused_prompt_id: Optional[str] = None
     self._poll_gate_event: Optional[asyncio.Event] = None
     self._failed_tasks: collections.deque[
         Tuple[
@@ -1707,36 +1710,105 @@ class PoolExecutionSession:
     """Maximum prompt-batch index eligible for worker polling."""
     return self._max_poll_batch_idx
 
+  @property
+  def focused_poll_prompt_id(self) -> Optional[str]:
+    """Prompt ID currently prioritized for single-group polling under backpressure."""
+    return self._focused_prompt_id
+
   def _notify_poll_gate(self) -> None:
     """Wakes any worker polling loops parked on the batch-index poll gate."""
     if self._poll_gate_event is not None:
       self._poll_gate_event.set()
       self._poll_gate_event = asyncio.Event()
 
-  def set_max_poll_batch_idx(self, max_batch_idx: Optional[int]) -> None:
-    """Sets the maximum prompt-batch index eligible for background worker polling.
+  def _select_focused_prompt_id(self) -> Optional[str]:
+    """Picks the highest-priority partial group whose remaining tasks are dispatched."""
+    max_batch = self._max_poll_batch_idx
+    if (
+        (max_batch is not None and max_batch < 0)
+        or not self._priority_prompt_ids
+    ):
+      return None
+    pending_pids = {
+        self._task_prompt_id.get(rid, "") for rid in self._pending_queue
+    }
+    dispatched_pids = {
+        self._task_prompt_id.get(rid, "")
+        for dset in self._dispatched_tasks.values()
+        for rid in dset
+        if max_batch is None or self._task_batch_idx.get(rid, 0) <= max_batch
+    }
+    for pid in self._priority_prompt_ids:
+      if pid and pid in dispatched_pids and pid not in pending_pids:
+        return pid
+    return None
 
-    * `None`: Unrestricted polling across all workers.
-    * `< 0` (e.g. `-1`): Pauses background polling across all workers.
-    * `>= 0`: Only polls workers that have at least one in-flight task with
-      `batch_idx <= max_batch_idx`; workers only running future batches pause
-      so their completed responses remain buffered on the remote workers.
+  def _maybe_refresh_focused_prompt_id(self) -> None:
+    """Advances focused prompt ID if the current one has no active tasks and no queued response."""
+    if self._focused_prompt_id is None or not self._response_queue.empty():
+      return
+    new_focus = self._select_focused_prompt_id()
+    if new_focus != self._focused_prompt_id:
+      self._focused_prompt_id = new_focus
+      self._notify_poll_gate()
+
+  def _apply_poll_gate_update(self) -> None:
+    self._focused_prompt_id = self._select_focused_prompt_id()
+    self._notify_poll_gate()
+
+  def set_max_poll_batch_idx(
+      self,
+      max_batch_idx: Optional[int],
+      priority_prompt_ids: Optional[Sequence[str]] = None,
+  ) -> None:
+    """Sets the prompt-batch and partial-group priority gate for worker polling.
+
+    * `max_batch_idx is None` and empty `priority_prompt_ids`: Unrestricted polling.
+    * `max_batch_idx < 0` (e.g. `-1`): Pauses background polling across all workers.
+    * `priority_prompt_ids` provided: Focuses polling on the single partial group
+      closest to completion (`smallest x`) whose remaining tasks are already
+      dispatched on workers, preventing `K` partial `N-x` groups from advancing
+      to `N-1` simultaneously under memory pressure.
     """
     normalized = int(max_batch_idx) if max_batch_idx is not None else None
-    if self._max_poll_batch_idx == normalized:
-      return
+    normalized_pids = (
+        tuple(str(p) for p in priority_prompt_ids if p)
+        if priority_prompt_ids
+        else ()
+    )
+    prev_batch = self._max_poll_batch_idx
+    prev_pids = self._priority_prompt_ids
+    prev_focus = self._focused_prompt_id
     self._max_poll_batch_idx = normalized
-    self._run_on_session_loop(self._notify_poll_gate)
+    self._priority_prompt_ids = normalized_pids
+    new_focus = self._select_focused_prompt_id()
+    self._focused_prompt_id = new_focus
+    if (
+        prev_batch == normalized
+        and prev_pids == normalized_pids
+        and prev_focus == new_focus
+    ):
+      return
+    self._run_on_session_loop(self._apply_poll_gate_update)
 
   def _can_poll_actor(self, actor: ActorHandle) -> bool:
-    """Returns True if polling `actor` is permitted by the current batch gate."""
+    """Returns True if polling `actor` is permitted by the current batch/group gate."""
     max_batch = self._max_poll_batch_idx
-    if max_batch is None:
-      return True
-    if max_batch < 0:
+    if max_batch is not None and max_batch < 0:
       return False
     dispatched_set = self._dispatched_tasks.get(actor)
     if not dispatched_set:
+      return True
+    if self._focused_prompt_id is not None:
+      return any(
+          self._task_prompt_id.get(rid) == self._focused_prompt_id
+          and (
+              max_batch is None
+              or self._task_batch_idx.get(rid, 0) <= max_batch
+          )
+          for rid in dispatched_set
+      )
+    if max_batch is None:
       return True
     return any(
         self._task_batch_idx.get(rid, 0) <= max_batch for rid in dispatched_set
@@ -1754,6 +1826,20 @@ class PoolExecutionSession:
         if batch_idx is not None:
           return int(batch_idx)
     return 0
+
+  @staticmethod
+  def _extract_task_prompt_id(orig_kwargs: Dict[str, Any]) -> str:
+    """Extracts `prompt_id` from `requests=[RolloutRequest(...)]` if present."""
+    reqs = orig_kwargs.get("requests")
+    if isinstance(reqs, Sequence) and reqs:
+      first = reqs[0]
+      prompt_id = getattr(first, "prompt_id", None)
+      if prompt_id is not None and prompt_id != "":
+        return str(prompt_id)
+      metadata = getattr(first, "metadata", None)
+      if isinstance(metadata, Mapping) and metadata.get("prompt_id"):
+        return str(metadata["prompt_id"])
+    return ""
 
   @property
   def retain_pending_on_zero_workers(self) -> bool:
@@ -1983,6 +2069,7 @@ class PoolExecutionSession:
     """Marks `req_id` as terminally failed and cleans up its tracking state."""
     payload = self._task_payloads.pop(req_id, None)
     self._task_batch_idx.pop(req_id, None)
+    self._task_prompt_id.pop(req_id, None)
     self._task_retries.pop(req_id, None)
     self._task_dispatch_times.pop(req_id, None)
     self._task_last_failed_actor.pop(req_id, None)
@@ -2034,6 +2121,7 @@ class PoolExecutionSession:
         self._fail_pending_queue(exc)
       else:
         self._response_queue.put_nowait(self._sentinel)
+    self._maybe_refresh_focused_prompt_id()
     self._notify_if_zero_flight()
 
   def _remove_actor(
@@ -2191,8 +2279,13 @@ class PoolExecutionSession:
     dispatched_set.add(request_id)
     self._task_dispatch_times[request_id] = time.monotonic()
     self._ensure_worker_polling(actor)
-    if self._max_poll_batch_idx is not None and self._can_poll_actor(actor):
-      self._notify_poll_gate()
+    if (
+        self._max_poll_batch_idx is not None or self._priority_prompt_ids
+    ):
+      if self._focused_prompt_id is None and self._priority_prompt_ids:
+        self._focused_prompt_id = self._select_focused_prompt_id()
+      if self._can_poll_actor(actor):
+        self._notify_poll_gate()
 
     try:
       dispatch_coro = actor.dispatch_task(
@@ -2280,6 +2373,7 @@ class PoolExecutionSession:
     args_tuple = tuple(args)
     self._task_payloads[request_id] = (method_name, args_tuple, orig_kwargs)
     self._task_batch_idx[request_id] = self._extract_task_batch_idx(orig_kwargs)
+    self._task_prompt_id[request_id] = self._extract_task_prompt_id(orig_kwargs)
     self._in_flight += 1
 
     if not self._pending_queue and self._pool.actors:
@@ -2291,6 +2385,7 @@ class PoolExecutionSession:
         self._in_flight = max(0, self._in_flight - 1)
         self._task_payloads.pop(request_id, None)
         self._task_batch_idx.pop(request_id, None)
+        self._task_prompt_id.pop(request_id, None)
         raise
       if actor is not None:
         await self._dispatch_to_actor(
@@ -2449,6 +2544,7 @@ class PoolExecutionSession:
             self._in_flight = max(0, self._in_flight - 1)
             payload = self._task_payloads.pop(req_id, None)
             self._task_batch_idx.pop(req_id, None)
+            self._task_prompt_id.pop(req_id, None)
             self._task_retries.pop(req_id, None)
             try:
               res = response.unwrap()
@@ -2459,6 +2555,7 @@ class PoolExecutionSession:
               self._response_queue.put_nowait((None, exc))
             if self._pending_queue:
               await self._drain_pending_queue()
+            self._maybe_refresh_focused_prompt_id()
             self._notify_if_zero_flight()
         except asyncio.CancelledError:
           break
@@ -2578,6 +2675,7 @@ class PoolExecutionSession:
       item = self._response_queue.get_nowait()
       if item is not self._sentinel:
         batch.append(item)
+    self._maybe_refresh_focused_prompt_id()
     return batch
 
   async def as_completed(
