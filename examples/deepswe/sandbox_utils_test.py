@@ -15,6 +15,7 @@
 """Unit tests for tunix.oss.examples.deepswe.sandbox_utils."""
 
 import os
+import tempfile
 import threading
 from unittest import mock
 from absl.testing import absltest
@@ -871,6 +872,81 @@ class SandboxUtilsTest(absltest.TestCase):
 
       handle._defer_setup_env = False
       self.assertEqual(rt.setup_env(), "setup-ran")
+
+  def test_load_images_from_manifest(self):
+    with tempfile.NamedTemporaryFile("w", delete=False) as f:
+      f.write(
+          "# Header comment\n\nimage_1:latest\n  image_2:v2  \n# Inline"
+          " comment\nimage_1:latest\n"
+      )
+      f.flush()
+      tmp_path = f.name
+    try:
+      images = sandbox_utils.load_images_from_manifest(tmp_path)
+      self.assertEqual(images, ["image_1:latest", "image_2:v2"])
+    finally:
+      os.unlink(tmp_path)
+
+  def test_load_images_from_manifest_empty_path_raises(self):
+    with self.assertRaises(ValueError):
+      sandbox_utils.load_images_from_manifest("")
+
+  def test_prewarm_from_images_file_ignores_dataset_docker_image(self):
+    with tempfile.NamedTemporaryFile("w", delete=False) as f:
+      f.write("static_img_a\nstatic_img_b\n")
+      f.flush()
+      tmp_path = f.name
+    try:
+      fleet = FakeFleet()
+      # Dataset items do not contain any docker_image field.
+      dataset = [{"prompt": f"prompt_{i}"} for i in range(5)]
+      iterator = sandbox_utils.PrewarmDatasetIterator(
+          dataset,
+          fleet=fleet,
+          images_file=tmp_path,
+          batch_size=2,
+          num_generations=4,
+          wait_initial=True,
+      )
+      # Both static images must be warmed with target_reps=4 and wait=False then wait=True
+      self.assertIn(("static_img_a", 4, False), fleet.warm_calls)
+      self.assertIn(("static_img_b", 4, False), fleet.warm_calls)
+      self.assertIn(("static_img_a", 4, True), fleet.warm_calls)
+      self.assertIn(("static_img_b", 4, True), fleet.warm_calls)
+      self.assertEqual(fleet.active_pools, {"static_img_a": 4, "static_img_b": 4})
+
+      # Pull all items
+      items = list(iterator)
+      self.assertEqual(len(items), 5)
+      self.assertEqual(items[0], {"prompt": "prompt_0"})
+
+      # Advancing through batches should NOT unwarm the manifest pools
+      self.assertEqual(fleet.unwarm_calls, [])
+      self.assertEqual(fleet.active_pools, {"static_img_a": 4, "static_img_b": 4})
+
+      iterator.close()
+      self.assertEqual(set(fleet.unwarm_calls), {"static_img_a", "static_img_b"})
+      self.assertEqual(fleet.active_pools, {})
+    finally:
+      os.unlink(tmp_path)
+
+  def test_prewarm_from_static_images_sequence(self):
+    fleet = FakeFleet()
+    dataset = [{"prompt": "p0"}, {"prompt": "p1"}]
+    iterator = sandbox_utils.PrewarmDatasetIterator(
+        dataset,
+        fleet=fleet,
+        static_images=["img_one", "img_two"],
+        batch_size=1,
+        num_generations=2,
+        wait_initial=False,
+    )
+    self.assertIn(("img_one", 2, False), fleet.warm_calls)
+    self.assertIn(("img_two", 2, False), fleet.warm_calls)
+    self.assertNotIn(("img_one", 2, True), fleet.warm_calls)
+    self.assertEqual(next(iterator), {"prompt": "p0"})
+    iterator.close()
+    self.assertEqual(set(fleet.unwarm_calls), {"img_one", "img_two"})
 
 
 _FAIL_FAST_ENV = {

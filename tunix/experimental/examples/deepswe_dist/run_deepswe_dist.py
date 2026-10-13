@@ -538,6 +538,16 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       ),
   )
   parser.add_argument(
+      "--prewarm_images_file",
+      type=str,
+      default=os.getenv("PREWARM_IMAGES_FILE", ""),
+      help=(
+          "Path (local or gs://) to a static manifest file (e.g. sandboxes.txt)"
+          " containing container image URIs to pre-warm on Kubernetes directly"
+          " instead of dynamically discovering images by inspecting the dataset."
+      ),
+  )
+  parser.add_argument(
       "--max_concurrency",
       type=int,
       default=128,
@@ -1142,6 +1152,11 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
           max_staleness=args.max_staleness,
       )
       if args.use_agent_sandbox:
+        prewarm_manifest = (
+            args.prewarm_images_file
+            or os.getenv("PREWARM_IMAGES_FILE")
+            or ""
+        )
         prompt_stream = swe_env.PrewarmDatasetIterator(
             raw_prompt_stream,
             fleet=fleet,
@@ -1152,6 +1167,7 @@ def main(argv: list[str], context: ProcessContext | None = None) -> None:
             scaffold=args.scaffold,
             wait_initial=args.sandbox_wait_initial,
             max_staleness=args.max_staleness,
+            images_file=prewarm_manifest or None,
         )
       else:
         prompt_stream = raw_prompt_stream
