@@ -21,6 +21,7 @@ per-token log-prob scorer run through AbstractTrainer.model_scope.
 
 import contextlib
 import json
+import threading
 import time
 from typing import Any
 from unittest import mock
@@ -344,7 +345,10 @@ class TrainerWorkerTest(absltest.TestCase):
     real_block_until_ready = trainer_worker.jax.block_until_ready
 
     def _recording_block_until_ready(x):
-      events.append(("block_until_ready", x))
+      # Only the serving thread's waits: the step timer (TRAINER_STEP_TIMING)
+      # also blocks on the same token, from its own daemon thread.
+      if threading.current_thread() is threading.main_thread():
+        events.append(("block_until_ready", x))
       return real_block_until_ready(x)
 
     with mock.patch.object(
