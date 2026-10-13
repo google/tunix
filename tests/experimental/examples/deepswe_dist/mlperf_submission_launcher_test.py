@@ -192,11 +192,11 @@ class SubmissionLauncherTest(absltest.TestCase):
   def test_batch_size_72_derives_learning_rate_and_clip(self):
     render = _render(BATCH_SIZE="72")
     orch = _jobset(render, "orch")
-    self.assertIn("--learning_rate=2.1213e-06 ", orch)
-    self.assertIn("--max_grad_norm=0.0589256 ", orch)
+    self.assertIn("--learning_rate=2.121320343559642e-06 ", orch)
+    self.assertIn("--max_grad_norm=0.05892556509887896 ", orch)
     trainer = _jobset(render, "train")
-    self.assertIn("--optimizer_learning_rate=2.1213e-06 ", trainer)
-    self.assertIn("{'max_norm': 0.0589256}", trainer)
+    self.assertIn("--optimizer_learning_rate=2.121320343559642e-06 ", trainer)
+    self.assertIn("{'max_norm': 0.05892556509887896}", trainer)
 
   def test_explicit_learning_rate_and_clip_win(self):
     orch = _jobset(
