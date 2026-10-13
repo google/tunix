@@ -162,6 +162,8 @@ def _build_rollout_payloads(
     with_moe_routing: bool = False,
     num_layers: int = 16,
     top_k: int = 4,
+    num_experts: int = 128,
+    compact_routed_experts: bool = False,
     seed: int = 42,
 ) -> tuple[list[datatypes.RLTrainerPayload], int]:
   """Builds realistic variable-length unbatched RLTrainerPayload items."""
@@ -184,11 +186,21 @@ def _build_rollout_payloads(
 
     routed_experts: np.ndarray | None = None
     if with_moe_routing:
-      # Sequence-aligned [p + c - 1, num_layers, top_k] int16 routing tensor.
-      routed_experts = np.broadcast_to(
-          np.arange(top_k, dtype=np.int16),
+      # Sequence-aligned [p + c - 1, num_layers, top_k] routing tensor.
+      base_experts = np.arange(top_k, dtype=np.int16)
+      if num_experts > 255:
+        base_experts = (base_experts * 64 + (num_experts - 1)) % num_experts
+        base_experts = base_experts.astype(np.int16)
+        base_experts[0] = np.int16(num_experts - 1)
+      raw_routed = np.broadcast_to(
+          base_experts,
           (seq_len - 1, num_layers, top_k),
       ).copy()
+      routed_experts = (
+          packing.encode_routed_experts(raw_routed)
+          if compact_routed_experts
+          else raw_routed
+      )
 
     payloads.append(
         datatypes.RLTrainerPayload(
@@ -456,34 +468,42 @@ class BatchAssemblyPerfTest(absltest.TestCase):
       self.assertGreater(res.million_tokens_per_sec, 0.0)
 
   def test_w3_sequence_packed_moe_router_replay(self) -> None:
-    """Benchmarks sequence packing with 3D MoE routed_experts replay tensors."""
+    """Benchmarks sequence packing with MoE routed_experts (int16 vs uint8 vs uint10)."""
     num_items = 256 if _full_scale() else 128
     num_layers = 32 if _full_scale() else 16
-    payloads, total_tokens = _build_rollout_payloads(
-        num_items,
-        with_moe_routing=True,
-        num_layers=num_layers,
-        top_k=4,
-    )
-    for backend, use_cpp in (("Python", False), ("C++ nogil", True)):
-      assembler = batch_assembly.SequencePackedBatchAssembler(
-          batch_size=8,
-          num_generations=8,
-          mini_batch_size=num_items // 8,
-          max_packed_len=8192,
-          pad_id=0,
-          segment_alignment_boundary=64,
+    top_k = 8
+    for mode_label, num_experts, compact in (
+        (f"W3a_MoE_Int16_L{num_layers}_K{top_k}", 128, False),
+        (f"W3b_MoE_Uint8_L{num_layers}_K{top_k}", 128, True),
+        (f"W3c_MoE_Uint10_L{num_layers}_K{top_k}", 512, True),
+    ):
+      payloads, total_tokens = _build_rollout_payloads(
+          num_items,
+          with_moe_routing=True,
+          num_layers=num_layers,
+          top_k=top_k,
+          num_experts=num_experts,
+          compact_routed_experts=compact,
       )
-      res = self._run_assembler_workload(
-          f"W3_SeqPacked_MoE_L{num_layers}_K4",
-          backend,
-          assembler,
-          payloads,
-          total_tokens,
-          use_cpp_ext=use_cpp,
-      )
-      self.assertGreater(res.num_batches, 0)
-      self.assertGreater(res.million_tokens_per_sec, 0.0)
+      for backend, use_cpp in (("Python", False), ("C++ nogil", True)):
+        assembler = batch_assembly.SequencePackedBatchAssembler(
+            batch_size=8,
+            num_generations=8,
+            mini_batch_size=num_items // 8,
+            max_packed_len=8192,
+            pad_id=0,
+            segment_alignment_boundary=64,
+        )
+        res = self._run_assembler_workload(
+            mode_label,
+            backend,
+            assembler,
+            payloads,
+            total_tokens,
+            use_cpp_ext=use_cpp,
+        )
+        self.assertGreater(res.num_batches, 0)
+        self.assertGreater(res.million_tokens_per_sec, 0.0)
 
   def test_w4_padded_batch_assembler(self) -> None:
     """Benchmarks PaddedBatchAssembler rectangular 2D padding."""

@@ -32,6 +32,7 @@ from tunix.generate import utils as generate_utils
 from tunix.rl import algo_core
 from tunix.rl import algorithm_config
 from tunix.rl import function_registry
+from tunix.rl import packing
 
 
 def _algo_model_input(
@@ -66,18 +67,28 @@ def _extract_tokens_and_masks(
 
 
 def _routed_experts_for(
-    item: datatypes.TrajectoryItem, seq_len: int
+    item: datatypes.TrajectoryItem,
+    seq_len: int,
+    *,
+    encode_mode: str | None = None,
+    num_experts: int | None = None,
 ) -> np.ndarray | None:
   """Aligns a rollout's captured routing to the payload's token sequence.
 
   Args:
     item: Trajectory item, whose `routed_experts` (if any) is `[captured_len,
-      num_layers, top_k]`.
+      num_layers, top_k]` (`int16` or `+1`-shifted `uint8`) or `[captured_len,
+      num_layers, top_k // 4, 5]` (`+1`-shifted `uint10`).
     seq_len: Length of the prompt+completion sequence in the payload.
+    encode_mode: Optional compact encoding mode (`"auto"`, `"uint8"`,
+      `"uint10"`, or `"int16"`). When None, preserves the input's existing
+      compact `uint8`/`uint10` representation or coerces raw integer arrays to
+      `int16`.
+    num_experts: Optional total number of experts for `encode_mode="auto"`.
 
   Returns:
-    `[seq_len - 1 or seq_len, num_layers, top_k]` prefix view, or None when
-    nothing was captured. Downstream assemblers (`pack_chunk` and
+    `[seq_len - 1 or seq_len, num_layers, top_k]` (or 4D `uint10`) prefix view,
+    or None when nothing was captured. Downstream assemblers (`pack_chunk` and
     `_routed_experts_aligned`) pre-fill their destination buffers with
     `UNSET_ROUTED_EXPERT` so an unrouted final token (`seq_len - 1`) falls back
     to the trainer's own gate without allocating a padded copy here.
@@ -89,19 +100,29 @@ def _routed_experts_for(
     routed = item.metadata.get("routed_experts")
   if routed is None:
     return None
-  routed_arr = np.asarray(routed, dtype=np.int16)
-  if routed_arr.ndim != 3:
+  raw = np.asarray(routed)
+  try:
+    enc = packing.routed_experts_encoding(raw, batched=False)
+  except ValueError as exc:
     raise ValueError(
         "routed_experts must be [length, num_layers, top_k]; got shape"
-        f" {routed_arr.shape}"
-    )
+        f" {raw.shape}"
+    ) from exc
+  routed_arr = (
+      raw if enc in ("uint8", "uint10") else np.asarray(raw, dtype=np.int16)
+  )
   min_len = max(seq_len - 1, 0)
   if routed_arr.shape[0] < min_len:
     raise ValueError(
         f"routed_experts length must be >= {min_len} (seq_len - 1 for"
         f" seq_len={seq_len}); got shape {routed_arr.shape}"
     )
-  return routed_arr[:seq_len]
+  sliced = routed_arr[:seq_len]
+  if encode_mode is not None:
+    return packing.encode_routed_experts(
+        sliced, mode=encode_mode, num_experts=num_experts, batched=False
+    )
+  return sliced
 
 
 def _extract_old_logps(
@@ -318,7 +339,12 @@ class GRPOAdapter(AlgorithmAdapter):
           ref_per_token_logps=np.asarray(ref_lp, dtype=np.float32)
           if ref_lp is not None
           else None,
-          routed_experts=_routed_experts_for(item, seq_len),
+          routed_experts=_routed_experts_for(
+              item,
+              seq_len,
+              encode_mode=self.algo_config.routed_experts_encode_mode,
+              num_experts=self.algo_config.routed_experts_num_experts,
+          ),
       )
       payloads.append(payload)
     return payloads

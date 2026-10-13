@@ -14,6 +14,7 @@
 
 """Tests for the type-agnostic packing core logic."""
 
+import dataclasses
 from absl.testing import absltest
 import numpy as np
 from tunix.rl import packing
@@ -598,6 +599,342 @@ class PackSegmentAlignmentTest(absltest.TestCase):
       packing._packing_ext.pack_sequence_chunks_fast(
           [_item([1], [2])], [], 8, 0, 4, 0, 1, 0
       )
+
+  def test_encode_and_decode_routed_experts_uint8_uint10_int16(self):
+    self.assertIsNotNone(packing._packing_ext)
+    rng = np.random.default_rng(123)
+
+    # 1. Mode 1: uint8 (max expert <= 254, any K)
+    raw_u8 = rng.integers(-1, 255, size=(12, 4, 6), dtype=np.int16)
+    raw_u8[2] = agent_types.UNSET_ROUTED_EXPERT
+    enc_u8 = packing.encode_routed_experts(raw_u8)
+    self.assertEqual(enc_u8.dtype, np.uint8)
+    self.assertEqual(enc_u8.shape, (12, 4, 6))
+    np.testing.assert_array_equal(enc_u8[2], 0)
+    dec_u8 = packing.decode_routed_experts(enc_u8)
+    self.assertEqual(dec_u8.dtype, np.int16)
+    np.testing.assert_array_equal(dec_u8, raw_u8)
+
+    # 2. Mode 2: uint10 (255 <= max expert <= 1022, K % 4 == 0)
+    raw_u10 = rng.integers(-1, 1023, size=(10, 4, 8), dtype=np.int16)
+    raw_u10[0, 0, 0] = 511
+    raw_u10[3] = agent_types.UNSET_ROUTED_EXPERT
+    enc_u10 = packing.encode_routed_experts(raw_u10)
+    self.assertEqual(enc_u10.dtype, np.uint8)
+    self.assertEqual(enc_u10.shape, (10, 4, 2, 5))
+    np.testing.assert_array_equal(enc_u10[3], 0)
+    dec_u10 = packing.decode_routed_experts(enc_u10)
+    self.assertEqual(dec_u10.dtype, np.int16)
+    np.testing.assert_array_equal(dec_u10, raw_u10)
+
+    # 3. Fallback: int16 (max expert >= 1023 or K % 4 != 0 when max >= 255)
+    raw_i16 = rng.integers(-1, 2048, size=(6, 4, 8), dtype=np.int32)
+    raw_i16[0, 0, 0] = 1500
+    enc_i16 = packing.encode_routed_experts(raw_i16)
+    self.assertEqual(enc_i16.dtype, np.int16)
+    self.assertEqual(enc_i16.shape, (6, 4, 8))
+    np.testing.assert_array_equal(
+        packing.decode_routed_experts(enc_i16), raw_i16.astype(np.int16)
+    )
+    # 255 <= max <= 1022 with K % 4 != 0 falls back to int16 in "auto" mode and
+    # raises ValueError when mode="uint10" is requested explicitly.
+    for k_non_div4 in (2, 6):
+      raw_k_non_div4 = rng.integers(
+          -1, 512, size=(5, 3, k_non_div4), dtype=np.int16
+      )
+      raw_k_non_div4[0, 0, 0] = 300
+      enc_auto = packing.encode_routed_experts(raw_k_non_div4, mode="auto")
+      self.assertEqual(enc_auto.dtype, np.int16)
+      np.testing.assert_array_equal(enc_auto, raw_k_non_div4)
+      with self.assertRaisesRegex(ValueError, "top_k divisible by 4"):
+        packing.encode_routed_experts(raw_k_non_div4, mode="uint10")
+
+    # 4. K == 5 disambiguation between unbatched (T, L, 5) and batched
+    # (B, T, L, 5) for both C++ and Python fallback.
+    raw_k5_unbatched = rng.integers(-1, 255, size=(7, 3, 5), dtype=np.int16)
+    raw_k5_batched = rng.integers(-1, 255, size=(2, 7, 3, 5), dtype=np.int16)
+    enc_k5_unbatched = packing.encode_routed_experts(raw_k5_unbatched)
+    enc_k5_batched = packing.encode_routed_experts(raw_k5_batched)
+    self.assertEqual(enc_k5_unbatched.shape, (7, 3, 5))
+    self.assertEqual(enc_k5_batched.shape, (2, 7, 3, 5))
+    self.assertEqual(
+        packing.routed_experts_logical_shape(enc_k5_unbatched, batched=False),
+        (7, 3, 5),
+    )
+    self.assertEqual(
+        packing.routed_experts_logical_shape(enc_k5_batched, batched=True),
+        (2, 7, 3, 5),
+    )
+    np.testing.assert_array_equal(
+        packing.decode_routed_experts(enc_k5_unbatched, batched=False),
+        raw_k5_unbatched,
+    )
+    np.testing.assert_array_equal(
+        packing.decode_routed_experts(enc_k5_batched, batched=True),
+        raw_k5_batched,
+    )
+
+    # Verify Python fallback parity with C++ extension.
+    orig_ext = packing._packing_ext
+    try:
+      packing._packing_ext = None
+      py_u8 = packing.encode_routed_experts(raw_u8)
+      py_u10 = packing.encode_routed_experts(raw_u10)
+      np.testing.assert_array_equal(py_u8, enc_u8)
+      np.testing.assert_array_equal(py_u10, enc_u10)
+      np.testing.assert_array_equal(
+          packing.decode_routed_experts(py_u8, batched=False), raw_u8
+      )
+      np.testing.assert_array_equal(
+          packing.decode_routed_experts(py_u10, batched=False), raw_u10
+      )
+      np.testing.assert_array_equal(
+          packing.decode_routed_experts(enc_k5_unbatched, batched=False),
+          raw_k5_unbatched,
+      )
+      np.testing.assert_array_equal(
+          packing.decode_routed_experts(enc_k5_batched, batched=True),
+          raw_k5_batched,
+      )
+      for k_non_div4 in (2, 6):
+        raw_k_non_div4 = rng.integers(
+            -1, 512, size=(5, 3, k_non_div4), dtype=np.int16
+        )
+        raw_k_non_div4[0, 0, 0] = 300
+        py_auto = packing.encode_routed_experts(raw_k_non_div4, mode="auto")
+        self.assertEqual(py_auto.dtype, np.int16)
+        np.testing.assert_array_equal(py_auto, raw_k_non_div4)
+        with self.assertRaisesRegex(ValueError, "top_k divisible by 4"):
+          packing.encode_routed_experts(raw_k_non_div4, mode="uint10")
+    finally:
+      packing._packing_ext = orig_ext
+
+  def test_pack_chunk_preserves_uint8_uint10_and_widens_mixed_encodings(self):
+    raw1_u8 = np.array(
+        [[[0, 5, 10, 15]], [[20, 25, 30, 35]], [[-1, -1, -1, -1]]],
+        dtype=np.int16,
+    )
+    raw2_u8 = np.array(
+        [[[1, 2, 3, 4]], [[200, 201, 202, 254]]],
+        dtype=np.int16,
+    )
+    item1_u8 = dataclasses.replace(
+        _item([1, 2], [3]),
+        routed_experts=packing.encode_routed_experts(raw1_u8),
+    )
+    item2_u8 = dataclasses.replace(
+        _item([4], [5]), routed_experts=packing.encode_routed_experts(raw2_u8)
+    )
+    chunk_u8 = packing.pack_chunk(
+        [[item1_u8, item2_u8]], budget=8, pad_id=0, carried=()
+    )
+    self.assertEqual(chunk_u8.routed_experts.dtype, np.uint8)
+    self.assertEqual(chunk_u8.routed_experts.shape, (1, 8, 1, 4))
+    # Unset trailing padding is 0x00 in uint8 mode.
+    np.testing.assert_array_equal(chunk_u8.routed_experts[0, 5:], 0)
+    decoded_u8 = packing.decode_routed_experts(
+        chunk_u8.routed_experts, batched=True
+    )
+    np.testing.assert_array_equal(decoded_u8[0, :3], raw1_u8)
+    np.testing.assert_array_equal(decoded_u8[0, 3:5], raw2_u8)
+    np.testing.assert_array_equal(
+        decoded_u8[0, 5:], agent_types.UNSET_ROUTED_EXPERT
+    )
+
+    # Pure uint10 chunk preserves 5D uint8 [B, T, L, K//4, 5].
+    raw1_u10 = np.array(
+        [[[0, 300, 511, 1022]], [[10, 20, 30, 40]], [[-1, -1, -1, -1]]],
+        dtype=np.int16,
+    )
+    item1_u10 = dataclasses.replace(
+        _item([1, 2], [3]),
+        routed_experts=packing.encode_routed_experts(raw1_u10),
+    )
+    chunk_u10 = packing.pack_chunk(
+        [[item1_u10]], budget=6, pad_id=0, carried=()
+    )
+    self.assertEqual(chunk_u10.routed_experts.dtype, np.uint8)
+    self.assertEqual(chunk_u10.routed_experts.shape, (1, 6, 1, 1, 5))
+    np.testing.assert_array_equal(chunk_u10.routed_experts[0, 2:], 0)
+    decoded_u10 = packing.decode_routed_experts(
+        chunk_u10.routed_experts, batched=True
+    )
+    np.testing.assert_array_equal(decoded_u10[0, :3], raw1_u10)
+    np.testing.assert_array_equal(
+        decoded_u10[0, 3:], agent_types.UNSET_ROUTED_EXPERT
+    )
+
+    # Mixed uint8 + uint10 in the same chunk widens losslessly to uint10.
+    chunk_mixed = packing.pack_chunk(
+        [[item1_u8, item1_u10]], budget=8, pad_id=0, carried=()
+    )
+    self.assertEqual(chunk_mixed.routed_experts.dtype, np.uint8)
+    self.assertEqual(chunk_mixed.routed_experts.shape, (1, 8, 1, 1, 5))
+    decoded_mixed = packing.decode_routed_experts(
+        chunk_mixed.routed_experts, batched=True
+    )
+    np.testing.assert_array_equal(decoded_mixed[0, :3], raw1_u8)
+    np.testing.assert_array_equal(decoded_mixed[0, 3:6], raw1_u10)
+    np.testing.assert_array_equal(
+        decoded_mixed[0, 6:], agent_types.UNSET_ROUTED_EXPERT
+    )
+
+  def test_encode_routed_experts_num_experts_validation_and_transcoding(self):
+    raw_u8_vals = np.array(
+        [[[0, 5, 10, 15]], [[20, 25, 30, 35]], [[-1, -1, -1, -1]]],
+        dtype=np.int16,
+    )
+    orig_ext = packing._packing_ext
+    for use_cpp in (True, False):
+      with self.subTest(use_cpp=use_cpp):
+        if use_cpp and orig_ext is None:
+          continue
+        try:
+          packing._packing_ext = orig_ext if use_cpp else None
+          # 1. Invalid num_experts values raise ValueError.
+          for bad_num in (0, -1, True, False):
+            with self.assertRaisesRegex(
+                ValueError, "num_experts must be a positive int"
+            ):
+              packing.encode_routed_experts(
+                  raw_u8_vals, mode="auto", num_experts=bad_num
+              )
+
+          # 2. max_val >= num_experts raises ValueError loudly.
+          with self.assertRaisesRegex(
+              ValueError, "routed_experts contains expert ID .* >= num_experts"
+          ):
+            packing.encode_routed_experts(
+                raw_u8_vals, mode="auto", num_experts=35
+            )
+
+          # 3. Deterministic tier selection via num_experts=256 (0..255 > 254)
+          # forces uint10 even when max_val == 35 <= 254.
+          enc_u10 = packing.encode_routed_experts(
+              raw_u8_vals, mode="auto", num_experts=256
+          )
+          self.assertEqual(enc_u10.dtype, np.uint8)
+          self.assertEqual(enc_u10.shape, (3, 1, 1, 5))
+          np.testing.assert_array_equal(
+              packing.decode_routed_experts(enc_u10, batched=False),
+              raw_u8_vals,
+          )
+
+          # 4. Pre-encoded pass-through vs transcoding when mode / num_experts
+          # requests a different tier.
+          enc_u8 = packing.encode_routed_experts(
+              raw_u8_vals, mode="auto", num_experts=128
+          )
+          self.assertEqual(enc_u8.dtype, np.uint8)
+          self.assertEqual(enc_u8.shape, (3, 1, 4))
+          # Compatible call returns same buffer (zero-copy).
+          passthru = packing.encode_routed_experts(
+              enc_u8, mode="auto", num_experts=128
+          )
+          self.assertIs(passthru, enc_u8)
+          # Requesting uint10 or num_experts=256 transcodes pre-encoded uint8 to
+          # uint10.
+          transcoded_u10 = packing.encode_routed_experts(
+              enc_u8, mode="auto", num_experts=256
+          )
+          self.assertEqual(transcoded_u10.shape, (3, 1, 1, 5))
+          np.testing.assert_array_equal(
+              packing.decode_routed_experts(transcoded_u10, batched=False),
+              raw_u8_vals,
+          )
+          # Requesting mode="int16" transcodes pre-encoded uint10 back to int16.
+          transcoded_i16 = packing.encode_routed_experts(enc_u10, mode="int16")
+          self.assertEqual(transcoded_i16.dtype, np.int16)
+          np.testing.assert_array_equal(transcoded_i16, raw_u8_vals)
+          # Pre-encoded input still validates max_val < num_experts.
+          with self.assertRaisesRegex(
+              ValueError, "routed_experts contains expert ID .* >= num_experts"
+          ):
+            packing.encode_routed_experts(enc_u8, mode="auto", num_experts=30)
+        finally:
+          packing._packing_ext = orig_ext
+
+  def test_encode_routed_experts_batched_k5_and_routed_experts_encoding(self):
+    rng = np.random.default_rng(2026)
+    # Batched 4D array with K == 5: shape (B=2, T=7, L=3, K=5).
+    raw_batched_k5 = rng.integers(-1, 200, size=(2, 7, 3, 5), dtype=np.int16)
+    raw_batched_k5[:, -1] = -1
+    # Unbatched 3D array with K == 8: shape (T=7, L=3, K=8).
+    raw_unbatched_k8 = rng.integers(-1, 600, size=(7, 3, 8), dtype=np.int16)
+    raw_unbatched_k8[0, 0, 0] = 511
+    # Batched 4D array with K == 8: shape (B=2, T=7, L=3, K=8).
+    raw_batched_k8 = rng.integers(-1, 600, size=(2, 7, 3, 8), dtype=np.int16)
+    raw_batched_k8[0, 0, 0, 0] = 511
+
+    orig_ext = packing._packing_ext
+    for use_cpp in (True, False):
+      with self.subTest(use_cpp=use_cpp):
+        if use_cpp and orig_ext is None:
+          continue
+        try:
+          packing._packing_ext = orig_ext if use_cpp else None
+          enc_batched_k5 = packing.encode_routed_experts(
+              raw_batched_k5, mode="auto", batched=True
+          )
+          self.assertEqual(enc_batched_k5.dtype, np.uint8)
+          self.assertEqual(enc_batched_k5.shape, (2, 7, 3, 5))
+          self.assertEqual(
+              packing.routed_experts_encoding(enc_batched_k5, batched=True),
+              "uint8",
+          )
+          # Re-encoding batched 4D uint8 (B, T, L, 5) with batched=True must NOT
+          # misclassify it as unbatched 4D uint10 [T, L, K//4, 5].
+          for mode in ("auto", "uint8"):
+            re_u8 = packing.encode_routed_experts(
+                enc_batched_k5, mode=mode, batched=True
+            )
+            self.assertEqual(re_u8.dtype, np.uint8)
+            self.assertEqual(re_u8.shape, (2, 7, 3, 5))
+            np.testing.assert_array_equal(
+                packing.decode_routed_experts(re_u8, batched=True),
+                raw_batched_k5,
+            )
+          re_i16 = packing.encode_routed_experts(
+              enc_batched_k5, mode="int16", batched=True
+          )
+          self.assertEqual(re_i16.dtype, np.int16)
+          self.assertEqual(re_i16.shape, (2, 7, 3, 5))
+          np.testing.assert_array_equal(re_i16, raw_batched_k5)
+          with self.assertRaisesRegex(ValueError, "top_k divisible by 4"):
+            packing.encode_routed_experts(
+                enc_batched_k5, mode="uint10", batched=True
+            )
+
+          # Verify routed_experts_encoding on unbatched vs batched uint10/int16.
+          enc_unbatched_u10 = packing.encode_routed_experts(
+              raw_unbatched_k8, mode="uint10", batched=False
+          )
+          self.assertEqual(
+              packing.routed_experts_encoding(enc_unbatched_u10, batched=False),
+              "uint10",
+          )
+          self.assertEqual(
+              packing.routed_experts_encoding(raw_unbatched_k8, batched=False),
+              "int16",
+          )
+          enc_batched_u10 = packing.encode_routed_experts(
+              raw_batched_k8, mode="uint10", batched=True
+          )
+          self.assertEqual(enc_batched_u10.shape, (2, 7, 3, 2, 5))
+          self.assertEqual(
+              packing.routed_experts_encoding(enc_batched_u10, batched=True),
+              "uint10",
+          )
+          self.assertEqual(
+              packing.routed_experts_encoding(raw_batched_k8, batched=True),
+              "int16",
+          )
+          re_batched_i16 = packing.encode_routed_experts(
+              enc_batched_u10, mode="int16", batched=True
+          )
+          np.testing.assert_array_equal(re_batched_i16, raw_batched_k8)
+        finally:
+          packing._packing_ext = orig_ext
 
 
 if __name__ == "__main__":

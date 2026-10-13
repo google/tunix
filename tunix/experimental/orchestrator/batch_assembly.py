@@ -295,20 +295,25 @@ def _routed_experts_aligned(
 
   Args:
     routed: `[prompt_len + completion_len - 1 or prompt_len + completion_len,
-      num_layers, top_k]` routing for one generation. Only axis 0 (the per-token
-      axis) is ever sliced below; the trailing `[num_layers, top_k]` axes are
-      carried through untouched.
+      num_layers, top_k]` routing for one generation (`int16` or `uint8`, or 4D
+      `uint10`). Only axis 0 (the per-token axis) is ever sliced below; the
+      trailing axes are carried through untouched.
     prompt_len: Unpadded prompt length, i.e. where the completion starts.
     completion_len: Unpadded completion length.
     max_prompt_length: Padded prompt width.
     max_response_length: Padded completion width.
-    out: Pre-initialized `[max_prompt_length + max_response_length, num_layers,
-      top_k]` buffer (filled with `UNSET_ROUTED_EXPERT`) to populate in-place.
+    out: Pre-initialized `[max_prompt_length + max_response_length, ...]` buffer
+      (filled with `UNSET_ROUTED_EXPERT` for `int16` or `0` for
+      `uint8`/`uint10`) to populate in-place.
 
   Returns:
-    `[max_prompt_length + max_response_length, num_layers, top_k]`.
+    `[max_prompt_length + max_response_length, ...]`.
   """
-  routed = np.asarray(routed, dtype=np.int16)
+  raw = np.asarray(routed)
+  enc = packing.routed_experts_encoding(raw, batched=False)
+  routed = (
+      raw if enc in ("uint8", "uint10") else np.asarray(raw, dtype=np.int16)
+  )
   min_len = max(prompt_len + completion_len - 1, 0)
   if routed.shape[0] < min_len:
     raise ValueError(
@@ -481,7 +486,14 @@ def to_pack_item(item: datatypes.RLTrainerPayload) -> packing.PackItem:
     # The adapter aligns routing to the `[prompt | completion]` sequence
     # (see `algorithm_adapter._routed_experts_for`); `PackItem` re-validates
     # the `(p + c - 1 or p + c, num_layers, top_k)` shape.
-    routed = np.asarray(item.routed_experts, dtype=np.int16)
+    raw_routed = np.asarray(item.routed_experts)
+    if raw_routed.dtype == np.uint8 and (
+        raw_routed.ndim == 3
+        or (raw_routed.ndim == 4 and raw_routed.shape[3] == 5)
+    ):
+      routed = raw_routed
+    else:
+      routed = np.asarray(raw_routed, dtype=np.int16)
 
   return packing.PackItem(
       prompt_ids=prompt,
@@ -539,21 +551,36 @@ def _log_router_replay_coverage(
     num_segments: Number of trajectories packed into the payload.
   """
   ext = packing._packing_ext  # pylint: disable=protected-access
-  routed_arr = np.asarray(payload.routed_experts, dtype=np.int16)
-  seg_arr = np.asarray(payload.segment_ids, dtype=np.int32)
+  routed_raw = np.asarray(payload.routed_experts)
+  if routed_raw.dtype == np.uint8 and (
+      routed_raw.ndim == 4
+      or (routed_raw.ndim == 5 and routed_raw.shape[4] == 5)
+  ):
+    routed_arr = np.ascontiguousarray(routed_raw, dtype=np.uint8)
+  else:
+    routed_arr = np.ascontiguousarray(routed_raw, dtype=np.int16)
+  seg_arr = np.ascontiguousarray(payload.segment_ids, dtype=np.int32)
   if (
       ext is not None
-      and routed_arr.ndim == 4
+      and (
+          (routed_arr.dtype == np.int16 and routed_arr.ndim == 4)
+          or (routed_arr.dtype == np.uint8 and routed_arr.ndim in (4, 5))
+      )
       and seg_arr.ndim == 2
-      and routed_arr.flags.c_contiguous
-      and seg_arr.flags.c_contiguous
   ):
     num_forced, num_real = ext.count_router_replay_forced_tokens(
         routed_arr, seg_arr
     )
   else:
+    layer0_encoded = (
+        routed_arr[..., 0:1, :, :]
+        if (routed_arr.dtype == np.uint8 and routed_arr.ndim == 5)
+        else routed_arr[..., 0:1, :]
+    )
+    decoded_layer0 = packing.decode_routed_experts(layer0_encoded, batched=True)
+    assert decoded_layer0 is not None
     real = seg_arr > 0
-    layer0 = np.sort(routed_arr[..., 0, :], axis=-1)
+    layer0 = np.sort(decoded_layer0[..., 0, :], axis=-1)
     forced = np.all(layer0 >= 0, axis=-1) & ~np.any(
         layer0[..., 1:] == layer0[..., :-1], axis=-1
     )
@@ -1150,6 +1177,62 @@ class PaddedBatchAssembler:
           for name in present_fields
       }
       batched_routed_experts: np.ndarray | None = None
+      routed_mode = "int16"
+      if replay_routing:
+        routed_shape: tuple[int, int] | None = None
+        encs: set[str] = set()
+        for item in chunk:
+          if item.routed_experts is None:
+            continue
+          r = np.asarray(item.routed_experts)
+          r_logical = packing.routed_experts_logical_shape(r, batched=False)
+          r_shape = (r_logical[1], r_logical[2])
+          if routed_shape is None:
+            routed_shape = r_shape
+          elif r_shape != routed_shape:
+            raise ValueError(
+                "All trajectories in a PaddedBatchAssembler chunk must agree on"
+                f" routed_experts (num_layers, top_k); got {r_shape} vs"
+                f" {routed_shape}."
+            )
+          encs.add(packing.routed_experts_encoding(r, batched=False))
+        if routed_shape is not None:
+          total_seq_len = self.max_prompt_length + self.max_response_length
+          if "int16" not in encs and "uint10" in encs:
+            routed_mode = "uint10"
+            batched_routed_experts = np.zeros(
+                (
+                    self.batch_size,
+                    total_seq_len,
+                    routed_shape[0],
+                    routed_shape[1] // 4,
+                    5,
+                ),
+                dtype=np.uint8,
+            )
+          elif encs == {"uint8"}:
+            routed_mode = "uint8"
+            batched_routed_experts = np.zeros(
+                (
+                    self.batch_size,
+                    total_seq_len,
+                    routed_shape[0],
+                    routed_shape[1],
+                ),
+                dtype=np.uint8,
+            )
+          else:
+            routed_mode = "int16"
+            batched_routed_experts = np.full(
+                (
+                    self.batch_size,
+                    total_seq_len,
+                    routed_shape[0],
+                    routed_shape[1],
+                ),
+                datatypes.UNSET_ROUTED_EXPERT,
+                dtype=np.int16,
+            )
       truncated_prompts = truncated_completions = 0
       row_valid_tokens = np.zeros(self.batch_size, dtype=np.int64)
       row_num_sequences = np.zeros(self.batch_size, dtype=np.int64)
@@ -1223,18 +1306,30 @@ class PaddedBatchAssembler:
         # `replay_routing` already guarantees this is set; binding it locally
         # also narrows the optional field for the type checker.
         routed = item.routed_experts
-        if replay_routing and routed is not None:
-          routed_arr = np.asarray(routed, dtype=np.int16)
-          if batched_routed_experts is None:
-            batched_routed_experts = np.full(
-                (
-                    self.batch_size,
-                    self.max_prompt_length + self.max_response_length,
-                )
-                + routed_arr.shape[1:],
-                datatypes.UNSET_ROUTED_EXPERT,
-                dtype=np.int16,
-            )
+        if (
+            replay_routing
+            and routed is not None
+            and batched_routed_experts is not None
+        ):
+          raw_routed = np.asarray(routed)
+          raw_enc = packing.routed_experts_encoding(raw_routed, batched=False)
+          if routed_mode == "uint8":
+            routed_arr = raw_routed
+          elif routed_mode == "uint10":
+            if raw_enc == "uint10":
+              routed_arr = raw_routed
+            else:
+              dec_i16 = packing.decode_routed_experts(raw_routed, batched=False)
+              assert dec_i16 is not None
+              enc_u10 = packing.encode_routed_experts(
+                  dec_i16, mode="uint10", batched=False
+              )
+              assert enc_u10 is not None
+              routed_arr = enc_u10
+          else:
+            dec_i16 = packing.decode_routed_experts(raw_routed, batched=False)
+            assert dec_i16 is not None
+            routed_arr = dec_i16
           _routed_experts_aligned(
               routed_arr,
               p_full.size,

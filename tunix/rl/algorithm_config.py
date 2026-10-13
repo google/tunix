@@ -15,6 +15,7 @@
 from collections.abc import Sequence
 import dataclasses
 from absl import logging
+from tunix.common import datatypes as common_datatypes
 from tunix.rl import function_registry
 
 
@@ -77,6 +78,16 @@ class AlgorithmConfig:
   sampler_rs_min: float | None = None
   sampler_rs_max: float | None = None
   seq_logprob_error_threshold: float | None = None
+  # Compact encoding mode for captured MoE routed_experts ("auto", "uint8",
+  # "uint10", or "int16").
+  routed_experts_encode_mode: common_datatypes.RoutedExpertsEncodeMode = "auto"
+  # Optional total number of MoE experts per layer (`E > 0`) for deterministic
+  # tier selection when `routed_experts_encode_mode == "auto"`. Strongly
+  # recommended when `256 <= E <= 1023` (or else set
+  # `routed_experts_encode_mode="uint10"`) so batches where all sampled expert
+  # IDs happen to be `< 255` do not flip between 4D `uint8` and 5D `uint10`
+  # across steps and trigger an extra XLA compilation.
+  routed_experts_num_experts: int | None = None
 
   def __post_init__(self):
     self.temperature = None
@@ -122,6 +133,10 @@ class AlgorithmConfig:
           "reward_worker_timeout_seconds must be > 0."
           f" Received: {self.reward_worker_timeout_seconds}"
       )
+    common_datatypes.validate_routed_experts_encode_config(
+        self.routed_experts_encode_mode,
+        self.routed_experts_num_experts,
+    )
     self._validate_sampler_is_and_rs_options()
 
     # Automatically prints configuration upon initialization.

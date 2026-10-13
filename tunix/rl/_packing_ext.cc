@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <memory>
 #include <numeric>
 #include <stdexcept>
@@ -35,6 +36,14 @@ namespace nb = nanobind;
 namespace tunix::rl {
 namespace {
 
+enum class RoutedEncoding : uint8_t {
+  kNone = 0,
+  kUint8 = 1,  // uint8_t: unbatched [T, L, K], batched [B, T, L, K]
+  kUint10 =
+      2,       // uint8_t: unbatched [T, L, K//4, 5], batched [B, T, L, K//4, 5]
+  kInt16 = 3,  // int16_t: unbatched [T, L, K], batched [B, T, L, K]
+};
+
 struct SegmentView {
   const int32_t* prompt_ptr = nullptr;
   int64_t p_len = 0;
@@ -43,16 +52,224 @@ struct SegmentView {
   const float* mask_ptr = nullptr;
   const float* adv_ptr = nullptr;
   std::vector<const float*> per_token_ptrs;
-  const int16_t* routed_ptr = nullptr;
+  const void* routed_ptr = nullptr;
   int64_t routed_tokens = 0;
   int64_t routed_layers = 0;
   int64_t routed_k = 0;
+  RoutedEncoding routed_encoding = RoutedEncoding::kNone;
 };
 
 struct RawArrayView {
   const void* ptr = nullptr;
   int64_t size = 0;
 };
+
+inline size_t RoutedTokenBytes(RoutedEncoding enc, int64_t layers,
+                               int64_t k) noexcept {
+  if (layers <= 0 || k <= 0) {
+    return 0;
+  }
+  const size_t lk = static_cast<size_t>(layers * k);
+  switch (enc) {
+    case RoutedEncoding::kUint8:
+      return lk;
+    case RoutedEncoding::kUint10:
+      return static_cast<size_t>(layers * (k / 4) * 5);
+    case RoutedEncoding::kInt16:
+      return lk * sizeof(int16_t);
+    case RoutedEncoding::kNone:
+      return 0;
+  }
+  return 0;
+}
+
+inline void PackFourToUint10(uint16_t v0, uint16_t v1, uint16_t v2, uint16_t v3,
+                             uint8_t* dst) noexcept {
+  dst[0] = static_cast<uint8_t>(v0 & 0xFF);
+  dst[1] = static_cast<uint8_t>(((v0 >> 8) & 0x03) | ((v1 & 0x3F) << 2));
+  dst[2] = static_cast<uint8_t>(((v1 >> 6) & 0x0F) | ((v2 & 0x0F) << 4));
+  dst[3] = static_cast<uint8_t>(((v2 >> 4) & 0x3F) | ((v3 & 0x03) << 6));
+  dst[4] = static_cast<uint8_t>((v3 >> 2) & 0xFF);
+}
+
+inline void UnpackUint10ToFour(const uint8_t* src, uint16_t* v0, uint16_t* v1,
+                               uint16_t* v2, uint16_t* v3) noexcept {
+  const uint16_t b0 = src[0];
+  const uint16_t b1 = src[1];
+  const uint16_t b2 = src[2];
+  const uint16_t b3 = src[3];
+  const uint16_t b4 = src[4];
+  *v0 = b0 | ((b1 & 0x03) << 8);
+  *v1 = (b1 >> 2) | ((b2 & 0x0F) << 6);
+  *v2 = (b2 >> 4) | ((b3 & 0x3F) << 4);
+  *v3 = (b3 >> 6) | (b4 << 2);
+}
+
+inline void UnpackUint10ToFour(const uint8_t* src, uint16_t* dst) noexcept {
+  UnpackUint10ToFour(src, &dst[0], &dst[1], &dst[2], &dst[3]);
+}
+
+inline void PadUnsetRoutedBytes(uint8_t* dst_base, RoutedEncoding enc,
+                                int64_t start_tok, int64_t num_tokens,
+                                int64_t layers, int64_t k) noexcept {
+  const size_t tok_bytes = RoutedTokenBytes(enc, layers, k);
+  if (tok_bytes == 0 || num_tokens <= 0) {
+    return;
+  }
+  uint8_t* ptr = dst_base + static_cast<size_t>(start_tok) * tok_bytes;
+  const size_t nbytes = static_cast<size_t>(num_tokens) * tok_bytes;
+  // For kUint8 and kUint10, UNSET_ROUTED_EXPERT (-1 + 1 = 0) is 0x00 in every
+  // byte. For two's-complement kInt16, -1 is 0xFFFF (0xFF in every byte).
+  const int fill_byte = (enc == RoutedEncoding::kInt16) ? 0xFF : 0x00;
+  std::memset(ptr, fill_byte, nbytes);
+}
+
+inline RoutedEncoding ClassifyUint8RoutedEncoding(
+    const nb::ndarray<nb::numpy, const uint8_t, nb::c_contig>& u8_arr,
+    bool batched) {
+  const size_t ndim = u8_arr.ndim();
+  if (batched) {
+    if (ndim == 5 && u8_arr.shape(4) == 5) {
+      return RoutedEncoding::kUint10;
+    }
+    if (ndim == 4) {
+      return RoutedEncoding::kUint8;
+    }
+    throw std::invalid_argument(
+        "batched uint8 routed_experts must have 4D (B, T, L, K) or 5D "
+        "(B, T, L, K // 4, 5) shape, got ndim=" +
+        std::to_string(ndim) + ".");
+  }
+  if (ndim == 4 && u8_arr.shape(3) == 5) {
+    return RoutedEncoding::kUint10;
+  }
+  if (ndim == 3) {
+    return RoutedEncoding::kUint8;
+  }
+  throw std::invalid_argument(
+      "unbatched uint8 routed_experts must have 3D (T, L, K) or 4D "
+      "(T, L, K // 4, 5) shape, got ndim=" +
+      std::to_string(ndim) + ".");
+}
+
+inline void CopyOrTranscodeRoutedTokens(const void* src_base,
+                                        RoutedEncoding src_enc,
+                                        int64_t src_tok_offset,
+                                        uint8_t* dst_base,
+                                        RoutedEncoding dst_enc,
+                                        int64_t dst_tok_offset,
+                                        int64_t num_tokens, int64_t layers,
+                                        int64_t k) {
+  if (num_tokens <= 0 || layers <= 0 || k <= 0) {
+    return;
+  }
+  const size_t src_tok_bytes = RoutedTokenBytes(src_enc, layers, k);
+  const size_t dst_tok_bytes = RoutedTokenBytes(dst_enc, layers, k);
+  const uint8_t* src_ptr = static_cast<const uint8_t*>(src_base) +
+                           static_cast<size_t>(src_tok_offset) * src_tok_bytes;
+  uint8_t* dst_ptr =
+      dst_base + static_cast<size_t>(dst_tok_offset) * dst_tok_bytes;
+
+  if (src_enc == dst_enc) {
+    std::memcpy(dst_ptr, src_ptr,
+                static_cast<size_t>(num_tokens) * dst_tok_bytes);
+    return;
+  }
+  if (src_enc == RoutedEncoding::kUint8 && dst_enc == RoutedEncoding::kUint10) {
+    if (k % 4 != 0) {
+      throw std::invalid_argument(
+          "CopyOrTranscodeRoutedTokens: uint10 target requires k % 4 == 0.");
+    }
+    const size_t num_groups =
+        static_cast<size_t>(num_tokens * layers * (k / 4));
+    for (size_t g = 0; g < num_groups; ++g) {
+      const uint8_t* s = src_ptr + g * 4;
+      PackFourToUint10(s[0], s[1], s[2], s[3], dst_ptr + g * 5);
+    }
+    return;
+  }
+  if (src_enc == RoutedEncoding::kUint8 && dst_enc == RoutedEncoding::kInt16) {
+    const size_t total = static_cast<size_t>(num_tokens * layers * k);
+    int16_t* d16 = reinterpret_cast<int16_t*>(dst_ptr);
+    for (size_t i = 0; i < total; ++i) {
+      d16[i] = static_cast<int16_t>(src_ptr[i]) - 1;
+    }
+    return;
+  }
+  if (src_enc == RoutedEncoding::kUint10 && dst_enc == RoutedEncoding::kInt16) {
+    if (k % 4 != 0) {
+      throw std::invalid_argument(
+          "CopyOrTranscodeRoutedTokens: uint10 source requires k % 4 == 0.");
+    }
+    const size_t num_groups =
+        static_cast<size_t>(num_tokens * layers * (k / 4));
+    int16_t* d16 = reinterpret_cast<int16_t*>(dst_ptr);
+    for (size_t g = 0; g < num_groups; ++g) {
+      uint16_t v0, v1, v2, v3;
+      UnpackUint10ToFour(src_ptr + g * 5, &v0, &v1, &v2, &v3);
+      d16[g * 4 + 0] = static_cast<int16_t>(v0) - 1;
+      d16[g * 4 + 1] = static_cast<int16_t>(v1) - 1;
+      d16[g * 4 + 2] = static_cast<int16_t>(v2) - 1;
+      d16[g * 4 + 3] = static_cast<int16_t>(v3) - 1;
+    }
+    return;
+  }
+  throw std::invalid_argument(
+      "Unsupported routed_experts transcoding pair in "
+      "CopyOrTranscodeRoutedTokens.");
+}
+
+inline RoutedEncoding ResolveChunkRoutedEncoding(bool has_u8, bool has_u10,
+                                                 bool has_i16, int64_t layers,
+                                                 int64_t k) noexcept {
+  if (layers <= 0 || k <= 0) {
+    return RoutedEncoding::kNone;
+  }
+  if (has_i16) {
+    return RoutedEncoding::kInt16;
+  }
+  if (has_u10) {
+    return (k % 4 == 0) ? RoutedEncoding::kUint10 : RoutedEncoding::kInt16;
+  }
+  if (has_u8) {
+    return RoutedEncoding::kUint8;
+  }
+  return RoutedEncoding::kInt16;
+}
+
+inline RoutedEncoding ResolveChunkRoutedEncoding(
+    const std::vector<std::vector<const SegmentView*>>& bins_views,
+    int64_t* out_layers, int64_t* out_k) {
+  bool has_u8 = false;
+  bool has_u10 = false;
+  bool has_i16 = false;
+  int64_t layers = *out_layers;
+  int64_t k = *out_k;
+  for (const auto& bin : bins_views) {
+    for (const SegmentView* v : bin) {
+      if (v->routed_ptr != nullptr &&
+          v->routed_encoding != RoutedEncoding::kNone) {
+        if (layers == 0 && k == 0) {
+          layers = v->routed_layers;
+          k = v->routed_k;
+        } else if (layers != v->routed_layers || k != v->routed_k) {
+          throw std::invalid_argument(
+              "Items disagree on routed_experts trailing shape.");
+        }
+        if (v->routed_encoding == RoutedEncoding::kUint8) {
+          has_u8 = true;
+        } else if (v->routed_encoding == RoutedEncoding::kUint10) {
+          has_u10 = true;
+        } else if (v->routed_encoding == RoutedEncoding::kInt16) {
+          has_i16 = true;
+        }
+      }
+    }
+  }
+  *out_layers = layers;
+  *out_k = k;
+  return ResolveChunkRoutedEncoding(has_u8, has_u10, has_i16, layers, k);
+}
 
 // Holds active `Py_buffer` exports across `nb::gil_scoped_release` blocks and
 // releases them when destroyed (with the GIL held).
@@ -68,21 +285,17 @@ class ScopedPyBufferList {
   }
 
   const Py_buffer& Acquire(PyObject* obj, int flags) {
-    Py_buffer view{};
+    views_.emplace_back();
+    Py_buffer& view = views_.back();
     if (PyObject_GetBuffer(obj, &view, flags) != 0) {
+      views_.pop_back();
       throw nb::python_error();
     }
-    try {
-      views_.push_back(view);
-    } catch (...) {
-      PyBuffer_Release(&view);
-      throw;
-    }
-    return views_.back();
+    return view;
   }
 
  private:
-  std::vector<Py_buffer> views_;
+  std::deque<Py_buffer> views_;
 };
 
 inline RawArrayView Extract1DArrayPtr(PyObject* obj, size_t elem_size,
@@ -93,18 +306,56 @@ inline RawArrayView Extract1DArrayPtr(PyObject* obj, size_t elem_size,
   return RawArrayView{view.buf, num_elems};
 }
 
+inline bool IsUint8BufferFormat(const Py_buffer& view) noexcept {
+  return view.itemsize == 1 && view.format != nullptr &&
+         (view.format[0] == 'B' ||
+          (view.format[0] == '@' && view.format[1] == 'B') ||
+          (view.format[0] == '=' && view.format[1] == 'B'));
+}
+
+inline bool IsInt16BufferFormat(const Py_buffer& view) noexcept {
+  return view.itemsize == 2 && view.format != nullptr &&
+         (view.format[0] == 'h' ||
+          (view.format[0] == '@' && view.format[1] == 'h') ||
+          (view.format[0] == '=' && view.format[1] == 'h') ||
+          (view.format[0] == '<' && view.format[1] == 'h'));
+}
+
 inline void ExtractRoutedView(PyObject* obj, SegmentView* out,
                               ScopedPyBufferList* buffers) {
-  const Py_buffer& view = buffers->Acquire(obj, PyBUF_ND);
+  const Py_buffer& view =
+      buffers->Acquire(obj, PyBUF_C_CONTIGUOUS | PyBUF_FORMAT);
   if (view.ndim < 3 || view.shape == nullptr) {
     throw std::invalid_argument(
-        "routed_experts array must have at least 3 dimensions "
-        "[tokens, layers, k].");
+        "routed_experts array must have at least 3 dimensions.");
   }
-  out->routed_ptr = static_cast<const int16_t*>(view.buf);
-  out->routed_tokens = static_cast<int64_t>(view.shape[0]);
-  out->routed_layers = static_cast<int64_t>(view.shape[1]);
-  out->routed_k = static_cast<int64_t>(view.shape[2]);
+  if (view.ndim == 3 && IsUint8BufferFormat(view)) {
+    out->routed_ptr = view.buf;
+    out->routed_tokens = static_cast<int64_t>(view.shape[0]);
+    out->routed_layers = static_cast<int64_t>(view.shape[1]);
+    out->routed_k = static_cast<int64_t>(view.shape[2]);
+    out->routed_encoding = RoutedEncoding::kUint8;
+    return;
+  }
+  if (view.ndim == 4 && IsUint8BufferFormat(view) && view.shape[3] == 5) {
+    out->routed_ptr = view.buf;
+    out->routed_tokens = static_cast<int64_t>(view.shape[0]);
+    out->routed_layers = static_cast<int64_t>(view.shape[1]);
+    out->routed_k = static_cast<int64_t>(view.shape[2]) * 4;
+    out->routed_encoding = RoutedEncoding::kUint10;
+    return;
+  }
+  if (view.ndim == 3 && IsInt16BufferFormat(view)) {
+    out->routed_ptr = view.buf;
+    out->routed_tokens = static_cast<int64_t>(view.shape[0]);
+    out->routed_layers = static_cast<int64_t>(view.shape[1]);
+    out->routed_k = static_cast<int64_t>(view.shape[2]);
+    out->routed_encoding = RoutedEncoding::kInt16;
+    return;
+  }
+  throw std::invalid_argument(
+      "routed_experts array must be C-contiguous int16/uint8 [tokens, layers, "
+      "k] or uint8 [tokens, layers, k // 4, 5].");
 }
 
 inline int64_t AlignOffset(int64_t offset, int64_t boundary) {
@@ -165,6 +416,14 @@ nb::object Wrap2DArray(RawBufferPtr<T> buf, size_t d0, size_t d1) {
 }
 
 template <typename T>
+nb::object Wrap3DArray(RawBufferPtr<T> buf, size_t d0, size_t d1, size_t d2) {
+  T* raw = buf.release();
+  nb::capsule deleter(raw, [](void* p) noexcept { RawFreeBytes(p); });
+  size_t shape[3] = {d0, d1, d2};
+  return nb::ndarray<nb::numpy, T, nb::ndim<3>>(raw, 3, shape, deleter).cast();
+}
+
+template <typename T>
 nb::object Wrap4DArray(RawBufferPtr<T> buf, size_t d0, size_t d1, size_t d2,
                        size_t d3) {
   T* raw = buf.release();
@@ -173,11 +432,39 @@ nb::object Wrap4DArray(RawBufferPtr<T> buf, size_t d0, size_t d1, size_t d2,
   return nb::ndarray<nb::numpy, T, nb::ndim<4>>(raw, 4, shape, deleter).cast();
 }
 
+template <typename T>
+nb::object Wrap5DArray(RawBufferPtr<T> buf, size_t d0, size_t d1, size_t d2,
+                       size_t d3, size_t d4) {
+  T* raw = buf.release();
+  nb::capsule deleter(raw, [](void* p) noexcept { RawFreeBytes(p); });
+  size_t shape[5] = {d0, d1, d2, d3, d4};
+  return nb::ndarray<nb::numpy, T, nb::ndim<5>>(raw, 5, shape, deleter).cast();
+}
+
+inline nb::object WrapBatchedRoutedBuffer(RawBufferPtr<uint8_t> buf,
+                                          RoutedEncoding enc, size_t b_sz,
+                                          size_t seq_sz, size_t layers,
+                                          size_t k) {
+  if (buf == nullptr || enc == RoutedEncoding::kNone) {
+    return nb::none();
+  }
+  if (enc == RoutedEncoding::kUint8) {
+    return Wrap4DArray<uint8_t>(std::move(buf), b_sz, seq_sz, layers, k);
+  }
+  if (enc == RoutedEncoding::kUint10) {
+    return Wrap5DArray<uint8_t>(std::move(buf), b_sz, seq_sz, layers, k / 4, 5);
+  }
+  int16_t* raw16 = reinterpret_cast<int16_t*>(buf.release());
+  RawBufferPtr<int16_t> buf16(raw16);
+  return Wrap4DArray<int16_t>(std::move(buf16), b_sz, seq_sz, layers, k);
+}
+
 struct RawChunkBuffers {
   size_t n_bins = 0;
   size_t budget = 0;
   int64_t routed_layers = 0;
   int64_t routed_k = 0;
+  RoutedEncoding routed_encoding = RoutedEncoding::kNone;
   RawBufferPtr<int32_t> ids;
   RawBufferPtr<float> prompt_mask;
   RawBufferPtr<float> completion_mask;
@@ -185,7 +472,7 @@ struct RawChunkBuffers {
   RawBufferPtr<int32_t> segment_ids;
   RawBufferPtr<int32_t> segment_positions;
   std::vector<RawBufferPtr<float>> per_token;
-  RawBufferPtr<int16_t> routed_experts;
+  RawBufferPtr<uint8_t> routed_experts_bytes;
   std::vector<std::vector<int64_t>> bin_indices;
 };
 
@@ -195,8 +482,8 @@ struct RawChunkBuffers {
 RawChunkBuffers AllocateAndPopulateChunkNogil(
     const std::vector<std::vector<const SegmentView*>>& bins_views,
     size_t n_carried, int64_t budget, int32_t pad_id,
-    int64_t segment_alignment_boundary, int64_t routed_layers,
-    int64_t routed_k) {
+    int64_t segment_alignment_boundary, int64_t routed_layers, int64_t routed_k,
+    RoutedEncoding routed_encoding) {
   const size_t n_bins = bins_views.size();
   const size_t total_elems = n_bins * static_cast<size_t>(budget);
 
@@ -205,6 +492,7 @@ RawChunkBuffers AllocateAndPopulateChunkNogil(
   out.budget = static_cast<size_t>(budget);
   out.routed_layers = routed_layers;
   out.routed_k = routed_k;
+  out.routed_encoding = routed_encoding;
 
   out.ids = AllocRawBuffer<int32_t>(total_elems);
   out.prompt_mask = AllocRawBuffer<float>(total_elems);
@@ -217,10 +505,11 @@ RawChunkBuffers AllocateAndPopulateChunkNogil(
     out.per_token[k] = AllocRawBuffer<float>(total_elems);
   }
 
-  const int64_t routed_stride = routed_layers * routed_k;
-  if (routed_stride > 0) {
-    out.routed_experts = AllocRawBuffer<int16_t>(
-        total_elems * static_cast<size_t>(routed_stride));
+  const size_t routed_tok_bytes =
+      RoutedTokenBytes(routed_encoding, routed_layers, routed_k);
+  if (routed_tok_bytes > 0) {
+    out.routed_experts_bytes =
+        AllocRawBuffer<uint8_t>(total_elems * routed_tok_bytes);
   }
 
   int32_t* ids_base = out.ids.get();
@@ -229,7 +518,7 @@ RawChunkBuffers AllocateAndPopulateChunkNogil(
   float* advantages_base = out.advantages.get();
   int32_t* segment_ids_base = out.segment_ids.get();
   int32_t* segment_positions_base = out.segment_positions.get();
-  int16_t* routed_base = out.routed_experts.get();
+  uint8_t* routed_base = out.routed_experts_bytes.get();
 
   for (size_t b = 0; b < n_bins; ++b) {
     const auto& seg_views = bins_views[b];
@@ -240,9 +529,10 @@ RawChunkBuffers AllocateAndPopulateChunkNogil(
     float* adv_row = advantages_base + row_offset;
     int32_t* seg_ids_row = segment_ids_base + row_offset;
     int32_t* seg_pos_row = segment_positions_base + row_offset;
-    int16_t* routed_row =
-        (routed_base != nullptr) ? (routed_base + row_offset * routed_stride)
-                                 : nullptr;
+    uint8_t* routed_row =
+        (routed_base != nullptr)
+            ? (routed_base + static_cast<size_t>(row_offset) * routed_tok_bytes)
+            : nullptr;
 
     // Shared helper to pad either an alignment gap or the trailing row tail.
     auto zero_pad_span = [&](int64_t start, int64_t len) {
@@ -258,8 +548,8 @@ RawChunkBuffers AllocateAndPopulateChunkNogil(
                     len_sz * sizeof(float));
       }
       if (routed_row != nullptr) {
-        std::fill_n(routed_row + start * routed_stride, len * routed_stride,
-                    static_cast<int16_t>(-1));
+        PadUnsetRoutedBytes(routed_row, routed_encoding, start, len,
+                            routed_layers, routed_k);
       }
     };
 
@@ -316,13 +606,14 @@ RawChunkBuffers AllocateAndPopulateChunkNogil(
       if (routed_row != nullptr) {
         const int64_t m = (v.routed_ptr != nullptr) ? v.routed_tokens : 0;
         if (m > 0) {
-          const size_t num_elems = static_cast<size_t>(m * routed_stride);
-          std::memcpy(routed_row + cursor * routed_stride, v.routed_ptr,
-                      num_elems * sizeof(int16_t));
+          CopyOrTranscodeRoutedTokens(
+              v.routed_ptr, v.routed_encoding,
+              /*src_tok_offset=*/0, routed_row, routed_encoding,
+              /*dst_tok_offset=*/cursor, m, routed_layers, routed_k);
         }
         if (m < n) {
-          std::fill_n(routed_row + (cursor + m) * routed_stride,
-                      (n - m) * routed_stride, static_cast<int16_t>(-1));
+          PadUnsetRoutedBytes(routed_row, routed_encoding, cursor + m, n - m,
+                              routed_layers, routed_k);
         }
       }
       cursor = end;
@@ -359,12 +650,10 @@ nb::tuple WrapRawChunkBuffers(RawChunkBuffers&& raw,
         Wrap2DArray(std::move(raw.per_token[k]), n_bins, budget);
   }
 
-  nb::object routed_obj = nb::none();
-  if (raw.routed_experts != nullptr) {
-    routed_obj = Wrap4DArray(std::move(raw.routed_experts), n_bins, budget,
-                             static_cast<size_t>(raw.routed_layers),
-                             static_cast<size_t>(raw.routed_k));
-  }
+  nb::object routed_obj = WrapBatchedRoutedBuffer(
+      std::move(raw.routed_experts_bytes), raw.routed_encoding, n_bins, budget,
+      static_cast<size_t>(raw.routed_layers),
+      static_cast<size_t>(raw.routed_k));
 
   if (include_bin_indices) {
     return nb::make_tuple(ids_obj, pmask_obj, cmask_obj, adv_obj, seg_ids_obj,
@@ -650,9 +939,19 @@ nb::tuple PackChunkFast(nb::sequence bins_seq,
   RawChunkBuffers raw;
   {
     nb::gil_scoped_release release;
+    RoutedEncoding routed_encoding = RoutedEncoding::kNone;
+    if (routed_layers * routed_k > 0) {
+      int64_t resolved_layers = routed_layers;
+      int64_t resolved_k = routed_k;
+      routed_encoding =
+          ResolveChunkRoutedEncoding(bins_views, &resolved_layers, &resolved_k);
+      if (routed_encoding == RoutedEncoding::kNone) {
+        routed_encoding = RoutedEncoding::kInt16;
+      }
+    }
     raw = AllocateAndPopulateChunkNogil(
         bins_views, n_carried, budget, pad_id, segment_alignment_boundary,
-        routed_layers, routed_k);
+        routed_layers, routed_k, routed_encoding);
   }
   return WrapRawChunkBuffers(std::move(raw), carried_py_keys,
                              /*include_bin_indices=*/false);
@@ -733,30 +1032,23 @@ nb::tuple PackSequenceChunksFast(nb::sequence items_seq,
       total_remaining_tokens -= tokens_placed;
 
       std::vector<std::vector<const SegmentView*>> bins_views(n_bins);
-      int64_t chunk_routed_layers = 0;
-      int64_t chunk_routed_k = 0;
       for (size_t b = 0; b < n_bins; ++b) {
         const auto& b_idxs = bin_indices[b];
         bins_views[b].reserve(b_idxs.size());
         for (int64_t idx : b_idxs) {
           const SegmentView& v = item_views[static_cast<size_t>(idx)];
           bins_views[b].push_back(&v);
-          if (v.routed_ptr != nullptr) {
-            if (chunk_routed_layers == 0 && chunk_routed_k == 0) {
-              chunk_routed_layers = v.routed_layers;
-              chunk_routed_k = v.routed_k;
-            } else if (chunk_routed_layers != v.routed_layers ||
-                       chunk_routed_k != v.routed_k) {
-              throw std::invalid_argument(
-                  "Items disagree on routed_experts trailing shape.");
-            }
-          }
         }
       }
 
+      int64_t chunk_routed_layers = 0;
+      int64_t chunk_routed_k = 0;
+      const RoutedEncoding chunk_routed_encoding = ResolveChunkRoutedEncoding(
+          bins_views, &chunk_routed_layers, &chunk_routed_k);
+
       RawChunkBuffers raw = AllocateAndPopulateChunkNogil(
           bins_views, n_carried, budget, pad_id, segment_alignment_boundary,
-          chunk_routed_layers, chunk_routed_k);
+          chunk_routed_layers, chunk_routed_k, chunk_routed_encoding);
       raw.bin_indices = std::move(bin_indices);
       raw_chunks.push_back(std::move(raw));
 
@@ -797,7 +1089,8 @@ struct PaddedItemView {
   PaddedFieldSource comp_mask;
   PaddedFieldSource advantages;
   std::vector<PaddedFieldSource> optional_fields;
-  const int16_t* routed_ptr = nullptr;
+  const uint8_t* routed_ptr = nullptr;
+  RoutedEncoding routed_encoding = RoutedEncoding::kNone;
   int64_t routed_tokens = 0;
   int64_t routed_layers = 0;
   int64_t routed_k = 0;
@@ -895,6 +1188,43 @@ inline RawArrayView ExtractInt321DView(PyObject* obj,
   return {c_arr.data(), static_cast<int64_t>(c_arr.size())};
 }
 
+inline void ExtractPaddedRoutedView(nb::object r_obj, PaddedItemView* v,
+                                    std::vector<nb::object>* keep) {
+  nb::ndarray<nb::numpy, const uint8_t, nb::ndim<3>, nb::c_contig> u8_3d;
+  if (nb::try_cast(r_obj, u8_3d, /*convert=*/false)) {
+    v->routed_ptr = u8_3d.data();
+    v->routed_encoding = RoutedEncoding::kUint8;
+    v->routed_tokens = static_cast<int64_t>(u8_3d.shape(0));
+    v->routed_layers = static_cast<int64_t>(u8_3d.shape(1));
+    v->routed_k = static_cast<int64_t>(u8_3d.shape(2));
+    keep->push_back(std::move(r_obj));
+    return;
+  }
+  nb::ndarray<nb::numpy, const uint8_t, nb::ndim<4>, nb::c_contig> u8_4d;
+  if (nb::try_cast(r_obj, u8_4d, /*convert=*/false) && u8_4d.shape(3) == 5) {
+    v->routed_ptr = u8_4d.data();
+    v->routed_encoding = RoutedEncoding::kUint10;
+    v->routed_tokens = static_cast<int64_t>(u8_4d.shape(0));
+    v->routed_layers = static_cast<int64_t>(u8_4d.shape(1));
+    v->routed_k = static_cast<int64_t>(u8_4d.shape(2)) * 4;
+    keep->push_back(std::move(r_obj));
+    return;
+  }
+  nb::ndarray<nb::numpy, const int16_t, nb::ndim<3>, nb::c_contig> i16_3d;
+  if (!nb::try_cast(r_obj, i16_3d, /*convert=*/false)) {
+    r_obj = CoerceToContiguousNumpy(r_obj.ptr(), "int16");
+    i16_3d = nb::cast<
+        nb::ndarray<nb::numpy, const int16_t, nb::ndim<3>, nb::c_contig>>(
+        r_obj);
+  }
+  v->routed_ptr = reinterpret_cast<const uint8_t*>(i16_3d.data());
+  v->routed_encoding = RoutedEncoding::kInt16;
+  v->routed_tokens = static_cast<int64_t>(i16_3d.shape(0));
+  v->routed_layers = static_cast<int64_t>(i16_3d.shape(1));
+  v->routed_k = static_cast<int64_t>(i16_3d.shape(2));
+  keep->push_back(std::move(r_obj));
+}
+
 // Single-pass `nogil` 2D rectangular padding for `PaddedBatchAssembler`.
 nb::tuple AssemblePaddedChunkFast(nb::sequence chunk_seq,
                                   const std::vector<std::string>& present_names,
@@ -910,6 +1240,7 @@ nb::tuple AssemblePaddedChunkFast(nb::sequence chunk_seq,
   std::vector<PaddedItemView> views(n_items);
   int64_t routed_layers = 0;
   int64_t routed_k = 0;
+  RoutedEncoding chunk_routed_encoding = RoutedEncoding::kNone;
 
   for (size_t i = 0; i < n_items; ++i) {
     PyObject* it = chunk_seq[i].ptr();
@@ -966,18 +1297,7 @@ nb::tuple AssemblePaddedChunkFast(nb::sequence chunk_seq,
     if (replay_routing) {
       nb::object r_obj = GetAttrChecked(it, a.routed_experts);
       if (!r_obj.is_none()) {
-        nb::ndarray<nb::numpy, const int16_t, nb::ndim<3>, nb::c_contig> r_arr;
-        if (!nb::try_cast(r_obj, r_arr, /*convert=*/false)) {
-          r_obj = CoerceToContiguousNumpy(r_obj.ptr(), "int16");
-          r_arr = nb::cast<
-              nb::ndarray<nb::numpy, const int16_t, nb::ndim<3>, nb::c_contig>>(
-              r_obj);
-        }
-        v.routed_ptr = r_arr.data();
-        v.routed_tokens = static_cast<int64_t>(r_arr.shape(0));
-        v.routed_layers = static_cast<int64_t>(r_arr.shape(1));
-        v.routed_k = static_cast<int64_t>(r_arr.shape(2));
-        temp_keepalive.push_back(std::move(r_obj));
+        ExtractPaddedRoutedView(std::move(r_obj), &v, &temp_keepalive);
         const int64_t c_trunc = std::min(v.c_len, max_response_len);
         const int64_t min_len = std::max<int64_t>(v.p_len + c_trunc - 1, 0);
         if (v.routed_tokens < min_len) {
@@ -993,6 +1313,13 @@ nb::tuple AssemblePaddedChunkFast(nb::sequence chunk_seq,
         if (routed_layers == 0 && routed_k == 0) {
           routed_layers = v.routed_layers;
           routed_k = v.routed_k;
+        } else if (routed_layers != v.routed_layers || routed_k != v.routed_k) {
+          throw std::invalid_argument(
+              "Items disagree on routed_experts trailing shape.");
+        }
+        if (static_cast<int>(v.routed_encoding) >
+            static_cast<int>(chunk_routed_encoding)) {
+          chunk_routed_encoding = v.routed_encoding;
         }
       }
     }
@@ -1009,7 +1336,7 @@ nb::tuple AssemblePaddedChunkFast(nb::sequence chunk_seq,
   RawBufferPtr<float> comp_mask;
   RawBufferPtr<float> advantages;
   std::vector<RawBufferPtr<float>> opt_bufs(n_opt);
-  RawBufferPtr<int16_t> routed_buf;
+  RawBufferPtr<uint8_t> routed_buf;
   RawBufferPtr<int64_t> row_valid_tokens;
   RawBufferPtr<int64_t> row_num_sequences;
   int64_t truncated_prompts = 0;
@@ -1025,13 +1352,14 @@ nb::tuple AssemblePaddedChunkFast(nb::sequence chunk_seq,
     for (size_t k = 0; k < n_opt; ++k) {
       opt_bufs[k] = AllocRawBuffer<float>(b_sz * c_sz);
     }
-    const int64_t routed_stride = routed_layers * routed_k;
-    if (replay_routing && routed_stride > 0) {
-      routed_buf = AllocRawBuffer<int16_t>(
-          b_sz * seq_sz * static_cast<size_t>(routed_stride));
-      std::fill_n(routed_buf.get(),
-                  b_sz * seq_sz * static_cast<size_t>(routed_stride),
-                  static_cast<int16_t>(-1));
+    const int64_t routed_tok_bytes =
+        RoutedTokenBytes(chunk_routed_encoding, routed_layers, routed_k);
+    if (replay_routing && routed_tok_bytes > 0) {
+      routed_buf = AllocRawBuffer<uint8_t>(
+          b_sz * seq_sz * static_cast<size_t>(routed_tok_bytes));
+      PadUnsetRoutedBytes(routed_buf.get(), chunk_routed_encoding, 0,
+                          static_cast<int64_t>(b_sz * seq_sz), routed_layers,
+                          routed_k);
     }
     row_valid_tokens = AllocRawBuffer<int64_t>(b_sz);
     row_num_sequences = AllocRawBuffer<int64_t>(b_sz);
@@ -1123,9 +1451,8 @@ nb::tuple AssemblePaddedChunkFast(nb::sequence chunk_seq,
 
       // Routed experts alignment.
       if (routed_buf != nullptr && v.routed_ptr != nullptr) {
-        int16_t* r_row =
-            routed_buf.get() +
-            static_cast<int64_t>(r * seq_sz) * routed_stride;
+        uint8_t* r_row = routed_buf.get() +
+                         static_cast<int64_t>(r * seq_sz) * routed_tok_bytes;
         const int64_t kept_p_start =
             std::max<int64_t>(v.p_len - max_prompt_len, 0);
         const int64_t kept_p_end = std::min(v.p_len, v.routed_tokens);
@@ -1133,19 +1460,19 @@ nb::tuple AssemblePaddedChunkFast(nb::sequence chunk_seq,
             std::max<int64_t>(kept_p_end - kept_p_start, 0);
         const int64_t p_out_start = max_prompt_len - (v.p_len - kept_p_start);
         if (p_part_len > 0) {
-          const size_t p_bytes =
-              static_cast<size_t>(p_part_len * routed_stride) * sizeof(int16_t);
-          std::memcpy(r_row + p_out_start * routed_stride,
-                      v.routed_ptr + kept_p_start * routed_stride, p_bytes);
+          CopyOrTranscodeRoutedTokens(v.routed_ptr, v.routed_encoding,
+                                      kept_p_start, r_row,
+                                      chunk_routed_encoding, p_out_start,
+                                      p_part_len, routed_layers, routed_k);
         }
         const int64_t kept_c_end =
             std::min(v.p_len + c_keep, v.routed_tokens);
         const int64_t c_part_len = std::max<int64_t>(kept_c_end - v.p_len, 0);
         if (c_part_len > 0) {
-          const size_t c_bytes =
-              static_cast<size_t>(c_part_len * routed_stride) * sizeof(int16_t);
-          std::memcpy(r_row + max_prompt_len * routed_stride,
-                      v.routed_ptr + v.p_len * routed_stride, c_bytes);
+          CopyOrTranscodeRoutedTokens(v.routed_ptr, v.routed_encoding, v.p_len,
+                                      r_row, chunk_routed_encoding,
+                                      max_prompt_len, c_part_len, routed_layers,
+                                      routed_k);
         }
       }
     }
@@ -1155,12 +1482,9 @@ nb::tuple AssemblePaddedChunkFast(nb::sequence chunk_seq,
   for (size_t k = 0; k < n_opt; ++k) {
     opt_dict[opt_py_keys[k]] = Wrap2DArray(std::move(opt_bufs[k]), b_sz, c_sz);
   }
-  nb::object routed_obj = nb::none();
-  if (routed_buf != nullptr) {
-    routed_obj = Wrap4DArray(std::move(routed_buf), b_sz, seq_sz,
-                             static_cast<size_t>(routed_layers),
-                             static_cast<size_t>(routed_k));
-  }
+  nb::object routed_obj = WrapBatchedRoutedBuffer(
+      std::move(routed_buf), chunk_routed_encoding, b_sz, seq_sz,
+      static_cast<size_t>(routed_layers), static_cast<size_t>(routed_k));
   return nb::make_tuple(
       Wrap2DArray(std::move(prompt_ids), b_sz, p_sz),
       Wrap2DArray(std::move(prompt_mask), b_sz, p_sz),
@@ -1172,15 +1496,136 @@ nb::tuple AssemblePaddedChunkFast(nb::sequence chunk_seq,
       truncated_completions);
 }
 
-// Counts forced router replay tokens on layer 0 (`[B, T, L, K]`) without the
-// GIL, returning `(num_forced, num_real)`.
+// Counts forced router replay tokens on layer 0 (`[B, T, L, K]` for `int16` or
+// `uint8`, or `[B, T, L, K//4, 5]` for `uint10`) without the GIL, returning
+// `(num_forced, num_real)`.
 std::pair<int64_t, int64_t> CountRouterReplayForcedTokens(
-    nb::ndarray<const int16_t, nb::ndim<4>, nb::c_contig, nb::device::cpu>
-        routed_experts,
+    nb::object routed_experts_obj,
     nb::ndarray<const int32_t, nb::ndim<2>, nb::c_contig, nb::device::cpu>
         segment_ids) {
-  if (routed_experts.shape(0) != segment_ids.shape(0) ||
-      routed_experts.shape(1) != segment_ids.shape(1)) {
+  const int32_t* seg_ptr = segment_ids.data();
+  const int64_t b_dim = static_cast<int64_t>(segment_ids.shape(0));
+  const int64_t t_dim = static_cast<int64_t>(segment_ids.shape(1));
+  const int64_t num_tokens = b_dim * t_dim;
+
+  nb::ndarray<const uint8_t, nb::ndim<4>, nb::c_contig, nb::device::cpu> u8_4d;
+  if (nb::try_cast(routed_experts_obj, u8_4d, /*convert=*/false)) {
+    if (static_cast<int64_t>(u8_4d.shape(0)) != b_dim ||
+        static_cast<int64_t>(u8_4d.shape(1)) != t_dim) {
+      throw std::invalid_argument(
+          "routed_experts leading [B, T] shape must match segment_ids shape.");
+    }
+    const int64_t num_layers = static_cast<int64_t>(u8_4d.shape(2));
+    if (num_layers <= 0) {
+      throw std::invalid_argument(
+          "routed_experts must have at least 1 layer (shape[2] > 0).");
+    }
+    const int64_t top_k = static_cast<int64_t>(u8_4d.shape(3));
+    const int64_t token_stride = num_layers * top_k;
+    const uint8_t* routed_ptr = u8_4d.data();
+
+    int64_t num_real = 0;
+    int64_t num_forced = 0;
+    {
+      nb::gil_scoped_release release;
+      for (int64_t t = 0; t < num_tokens; ++t) {
+        if (seg_ptr[t] <= 0) {
+          continue;
+        }
+        ++num_real;
+        const uint8_t* l0 = routed_ptr + t * token_stride;
+        bool valid = true;
+        for (int64_t k = 0; k < top_k; ++k) {
+          const uint8_t v = l0[k];
+          if (v == 0) {
+            valid = false;
+            break;
+          }
+          for (int64_t j = 0; j < k; ++j) {
+            if (l0[j] == v) {
+              valid = false;
+              break;
+            }
+          }
+          if (!valid) {
+            break;
+          }
+        }
+        if (valid) {
+          ++num_forced;
+        }
+      }
+    }
+    return {num_forced, num_real};
+  }
+
+  nb::ndarray<const uint8_t, nb::ndim<5>, nb::c_contig, nb::device::cpu> u8_5d;
+  if (nb::try_cast(routed_experts_obj, u8_5d, /*convert=*/false) &&
+      u8_5d.shape(4) == 5) {
+    if (static_cast<int64_t>(u8_5d.shape(0)) != b_dim ||
+        static_cast<int64_t>(u8_5d.shape(1)) != t_dim) {
+      throw std::invalid_argument(
+          "routed_experts leading [B, T] shape must match segment_ids shape.");
+    }
+    const int64_t num_layers = static_cast<int64_t>(u8_5d.shape(2));
+    if (num_layers <= 0) {
+      throw std::invalid_argument(
+          "routed_experts must have at least 1 layer (shape[2] > 0).");
+    }
+    const int64_t groups_per_layer = static_cast<int64_t>(u8_5d.shape(3));
+    const int64_t top_k = groups_per_layer * 4;
+    const int64_t layer_bytes = groups_per_layer * 5;
+    const int64_t token_stride = num_layers * layer_bytes;
+    const uint8_t* routed_ptr = u8_5d.data();
+
+    int64_t num_real = 0;
+    int64_t num_forced = 0;
+    {
+      nb::gil_scoped_release release;
+      std::vector<uint16_t> l0_vals(static_cast<size_t>(top_k));
+      for (int64_t t = 0; t < num_tokens; ++t) {
+        if (seg_ptr[t] <= 0) {
+          continue;
+        }
+        ++num_real;
+        const uint8_t* l0_bytes = routed_ptr + t * token_stride;
+        for (int64_t g = 0; g < groups_per_layer; ++g) {
+          UnpackUint10ToFour(l0_bytes + g * 5, &l0_vals[g * 4]);
+        }
+        bool valid = true;
+        for (int64_t k = 0; k < top_k; ++k) {
+          const uint16_t v = l0_vals[k];
+          if (v == 0) {
+            valid = false;
+            break;
+          }
+          for (int64_t j = 0; j < k; ++j) {
+            if (l0_vals[j] == v) {
+              valid = false;
+              break;
+            }
+          }
+          if (!valid) {
+            break;
+          }
+        }
+        if (valid) {
+          ++num_forced;
+        }
+      }
+    }
+    return {num_forced, num_real};
+  }
+
+  nb::ndarray<const int16_t, nb::ndim<4>, nb::c_contig, nb::device::cpu>
+      routed_experts;
+  if (!nb::try_cast(routed_experts_obj, routed_experts, /*convert=*/false)) {
+    throw std::invalid_argument(
+        "count_router_replay_forced_tokens expects C-contiguous CPU int16 4D, "
+        "uint8 4D, or uint8 5D (shape[4]==5) routed_experts.");
+  }
+  if (static_cast<int64_t>(routed_experts.shape(0)) != b_dim ||
+      static_cast<int64_t>(routed_experts.shape(1)) != t_dim) {
     throw std::invalid_argument(
         "routed_experts leading [B, T] shape must match segment_ids shape.");
   }
@@ -1190,9 +1635,6 @@ std::pair<int64_t, int64_t> CountRouterReplayForcedTokens(
         "routed_experts must have at least 1 layer (shape[2] > 0).");
   }
   const int16_t* routed_ptr = routed_experts.data();
-  const int32_t* seg_ptr = segment_ids.data();
-  const int64_t num_tokens =
-      static_cast<int64_t>(segment_ids.shape(0) * segment_ids.shape(1));
   const int64_t top_k = static_cast<int64_t>(routed_experts.shape(3));
   const int64_t token_stride = num_layers * top_k;
 
@@ -1380,26 +1822,46 @@ nb::object ConvertPayloadToPackItem(PyObject* it, nb::handle pack_item_cls,
   nb::object routed_out = nb::none();
   nb::object r_obj = GetAttrChecked(it, a.routed_experts);
   if (!r_obj.is_none()) {
+    int64_t r_tokens = -1;
+    int64_t r_layers = -1;
+    int64_t r_k = -1;
+    nb::ndarray<nb::numpy, const uint8_t, nb::ndim<3>, nb::c_contig> u8_3d;
+    nb::ndarray<nb::numpy, const uint8_t, nb::ndim<4>, nb::c_contig> u8_4d;
     nb::ndarray<nb::numpy, const int16_t, nb::ndim<3>, nb::c_contig> r_arr;
-    if (!nb::try_cast(r_obj, r_arr, /*convert=*/false)) {
+    if (nb::try_cast(r_obj, u8_3d, /*convert=*/false)) {
+      r_tokens = static_cast<int64_t>(u8_3d.shape(0));
+      r_layers = static_cast<int64_t>(u8_3d.shape(1));
+      r_k = static_cast<int64_t>(u8_3d.shape(2));
+    } else if (nb::try_cast(r_obj, u8_4d, /*convert=*/false) &&
+               u8_4d.shape(3) == 5) {
+      r_tokens = static_cast<int64_t>(u8_4d.shape(0));
+      r_layers = static_cast<int64_t>(u8_4d.shape(1));
+      r_k = static_cast<int64_t>(u8_4d.shape(2)) * 4;
+    } else if (nb::try_cast(r_obj, r_arr, /*convert=*/false)) {
+      r_tokens = static_cast<int64_t>(r_arr.shape(0));
+      r_layers = static_cast<int64_t>(r_arr.shape(1));
+      r_k = static_cast<int64_t>(r_arr.shape(2));
+    } else {
       r_obj = CoerceToContiguousNumpy(r_obj.ptr(), "int16");
       if (!nb::try_cast(r_obj, r_arr, /*convert=*/false)) {
         throw std::invalid_argument(
             "PackItem.routed_experts must be a 3D numpy array of shape "
-            "(p + c - 1 or p + c, num_layers, top_k).");
+            "(p + c - 1 or p + c, num_layers, top_k) or 4D uint10 array of "
+            "shape (p + c - 1 or p + c, num_layers, top_k // 4, 5).");
       }
+      r_tokens = static_cast<int64_t>(r_arr.shape(0));
+      r_layers = static_cast<int64_t>(r_arr.shape(1));
+      r_k = static_cast<int64_t>(r_arr.shape(2));
     }
     const int64_t n = p_len + c_len;
     const int64_t min_len = std::max<int64_t>(n - 1, 0);
-    const int64_t r_tokens = static_cast<int64_t>(r_arr.shape(0));
     if (r_tokens < min_len || r_tokens > n) {
       throw std::invalid_argument(
           "PackItem.routed_experts must be a numpy array of shape "
           "(p + c - 1 or p + c, num_layers, top_k) with length in [" +
           std::to_string(min_len) + ", " + std::to_string(n) +
           "], got shape (" + std::to_string(r_tokens) + ", " +
-          std::to_string(r_arr.shape(1)) + ", " +
-          std::to_string(r_arr.shape(2)) + ").");
+          std::to_string(r_layers) + ", " + std::to_string(r_k) + ").");
     }
     routed_out = std::move(r_obj);
   }
@@ -1493,6 +1955,345 @@ void IngestPayloadsFast(nb::sequence items, int64_t max_packed_len,
   }
 }
 
+nb::object DecodeRoutedExpertsFast(nb::object encoded_obj,
+                                   bool batched = false);
+
+// Fast C++ `nogil` encoder for `routed_experts` (`int16` 3D `(T, L, K)` or 4D
+// `(B, T, L, K)` -> compact `uint8` / `uint10` / `int16`).
+nb::object EncodeRoutedExpertsFast(nb::object routed_obj,
+                                   const std::string& mode,
+                                   nb::object num_experts_obj,
+                                   bool batched = false) {
+  if (routed_obj.is_none()) {
+    return nb::none();
+  }
+  const bool has_num_experts = !num_experts_obj.is_none();
+  if (has_num_experts && PyBool_Check(num_experts_obj.ptr())) {
+    throw std::invalid_argument(
+        "num_experts must be a positive int or None, got bool.");
+  }
+  const int64_t num_experts =
+      has_num_experts ? nb::cast<int64_t>(num_experts_obj) : -1;
+  if (has_num_experts && num_experts <= 0) {
+    throw std::invalid_argument(
+        "num_experts must be a positive int or None, got " +
+        std::to_string(num_experts) + ".");
+  }
+
+  // If already encoded as C-contiguous uint8 3D/4D/5D, classify using
+  // `batched` so batched `uint8` with `K == 5` (`(B, T, L, 5)`) never collides
+  // with unbatched `uint10` (`(T, L, K // 4, 5)`).
+  nb::ndarray<nb::numpy, const uint8_t, nb::c_contig> u8_any;
+  if (nb::try_cast(routed_obj, u8_any, /*convert=*/false)) {
+    const RoutedEncoding src_enc =
+        ClassifyUint8RoutedEncoding(u8_any, batched);
+    if (src_enc == RoutedEncoding::kUint8) {
+      if (mode == "uint8" ||
+          (mode == "auto" && (!has_num_experts || num_experts <= 255))) {
+        if (has_num_experts && num_experts <= 255) {
+          const uint8_t* p = u8_any.data();
+          const size_t n = u8_any.size();
+          uint8_t max_u8 = 0;
+          for (size_t i = 0; i < n; ++i) {
+            if (p[i] > max_u8) max_u8 = p[i];
+          }
+          const int64_t max_val = static_cast<int64_t>(max_u8) - 1;
+          if (max_val >= num_experts) {
+            throw std::invalid_argument(
+                "routed_experts contains expert ID " + std::to_string(max_val) +
+                " >= num_experts (" + std::to_string(num_experts) + ").");
+          }
+        }
+        return routed_obj;
+      }
+      routed_obj = DecodeRoutedExpertsFast(routed_obj, /*batched=*/batched);
+    } else if (src_enc == RoutedEncoding::kUint10) {
+      if (mode == "uint10" ||
+          (mode == "auto" &&
+           (!has_num_experts || (num_experts >= 256 && num_experts <= 1023)))) {
+        if (has_num_experts && num_experts <= 1022) {
+          const uint8_t* p = u8_any.data();
+          const size_t n_groups = u8_any.size() / 5;
+          uint16_t max_u10 = 0;
+          for (size_t g = 0; g < n_groups; ++g) {
+            uint16_t v[4];
+            UnpackUint10ToFour(p + g * 5, v);
+            for (int k = 0; k < 4; ++k) {
+              if (v[k] > max_u10) max_u10 = v[k];
+            }
+          }
+          const int64_t max_val = static_cast<int64_t>(max_u10) - 1;
+          if (max_val >= num_experts) {
+            throw std::invalid_argument(
+                "routed_experts contains expert ID " + std::to_string(max_val) +
+                " >= num_experts (" + std::to_string(num_experts) + ").");
+          }
+        }
+        return routed_obj;
+      }
+      routed_obj = DecodeRoutedExpertsFast(routed_obj, /*batched=*/batched);
+    }
+  }
+
+  nb::ndarray<nb::numpy, const int16_t, nb::c_contig> arr;
+  nb::object keepalive;
+  if (!nb::try_cast(routed_obj, arr, /*convert=*/false)) {
+    static nb::object* const kNpAsArray =
+        new nb::object(nb::module_::import_("numpy").attr("asarray"));
+    nb::object raw_np = (*kNpAsArray)(routed_obj);
+    nb::ndarray<nb::numpy, const uint8_t> u8_noncontig;
+    if (nb::try_cast(raw_np, u8_noncontig, /*convert=*/false)) {
+      static nb::object* const kNpAsContig = new nb::object(
+          nb::module_::import_("numpy").attr("ascontiguousarray"));
+      return EncodeRoutedExpertsFast((*kNpAsContig)(raw_np), mode,
+                                     num_experts_obj, batched);
+    }
+    keepalive = CoerceToContiguousNumpy(routed_obj.ptr(), "int16");
+    arr = nb::cast<nb::ndarray<nb::numpy, const int16_t, nb::c_contig>>(
+        keepalive);
+  }
+  const size_t ndim = arr.ndim();
+  if ((batched && ndim != 4) || (!batched && ndim != 3 && ndim != 4)) {
+    throw std::invalid_argument(
+        "encode_routed_experts expects a 3D (T, L, K) or 4D (B, T, L, K) "
+        "routed_experts array, got ndim=" +
+        std::to_string(ndim) + ".");
+  }
+
+  const size_t top_k = arr.shape(ndim - 1);
+  const size_t num_layers = arr.shape(ndim - 2);
+  const size_t total_elems = arr.size();
+  const int16_t* src = arr.data();
+
+  RoutedEncoding target_enc = RoutedEncoding::kInt16;
+  if (mode == "int16") {
+    target_enc = RoutedEncoding::kInt16;
+  } else if (mode == "uint8") {
+    target_enc = RoutedEncoding::kUint8;
+  } else if (mode == "uint10") {
+    if (top_k % 4 != 0) {
+      throw std::invalid_argument(
+          "uint10 encoding requires top_k divisible by 4, got top_k=" +
+          std::to_string(top_k) + ".");
+    }
+    target_enc = RoutedEncoding::kUint10;
+  } else if (mode != "auto") {
+    throw std::invalid_argument("Unsupported routed_experts encoding mode: " +
+                                mode);
+  }
+
+  RawBufferPtr<uint8_t> out_buf;
+  {
+    nb::gil_scoped_release release;
+    int16_t min_val = 0;
+    int16_t max_val = -1;
+    for (size_t i = 0; i < total_elems; ++i) {
+      const int16_t v = src[i];
+      if (v < min_val) min_val = v;
+      if (v > max_val) max_val = v;
+    }
+    if (min_val < -1) {
+      throw std::invalid_argument(
+          "routed_experts contains invalid expert ID < -1: " +
+          std::to_string(min_val));
+    }
+    if (has_num_experts && max_val >= num_experts) {
+      throw std::invalid_argument(
+          "routed_experts contains expert ID " + std::to_string(max_val) +
+          " >= num_experts (" + std::to_string(num_experts) + ").");
+    }
+    const int64_t effective_max =
+        has_num_experts ? std::max<int64_t>(max_val, num_experts - 1)
+                        : static_cast<int64_t>(max_val);
+
+    if (mode == "auto") {
+      if (effective_max <= 254) {
+        target_enc = RoutedEncoding::kUint8;
+      } else if (effective_max <= 1022 && (top_k % 4 == 0)) {
+        target_enc = RoutedEncoding::kUint10;
+      } else {
+        target_enc = RoutedEncoding::kInt16;
+      }
+    } else if (target_enc == RoutedEncoding::kUint8 && max_val > 254) {
+      throw std::invalid_argument(
+          "uint8 encoding requires expert IDs <= 254, got max=" +
+          std::to_string(max_val));
+    } else if (target_enc == RoutedEncoding::kUint10 && max_val > 1022) {
+      throw std::invalid_argument(
+          "uint10 encoding requires expert IDs <= 1022, got max=" +
+          std::to_string(max_val));
+    }
+
+    if (target_enc == RoutedEncoding::kUint8) {
+      out_buf = AllocRawBuffer<uint8_t>(total_elems);
+      uint8_t* dst = out_buf.get();
+      for (size_t i = 0; i < total_elems; ++i) {
+        dst[i] = static_cast<uint8_t>(src[i] + 1);
+      }
+    } else if (target_enc == RoutedEncoding::kUint10) {
+      const size_t num_groups = total_elems / 4;
+      out_buf = AllocRawBuffer<uint8_t>(num_groups * 5);
+      uint8_t* dst = out_buf.get();
+      for (size_t g = 0; g < num_groups; ++g) {
+        const int16_t* s = src + g * 4;
+        PackFourToUint10(static_cast<uint16_t>(s[0] + 1),
+                         static_cast<uint16_t>(s[1] + 1),
+                         static_cast<uint16_t>(s[2] + 1),
+                         static_cast<uint16_t>(s[3] + 1), dst + g * 5);
+      }
+    }
+  }
+
+  if (target_enc == RoutedEncoding::kInt16) {
+    return keepalive.is_valid() ? std::move(keepalive) : std::move(routed_obj);
+  }
+  if (ndim == 3) {
+    const size_t t_dim = arr.shape(0);
+    if (target_enc == RoutedEncoding::kUint8) {
+      return Wrap3DArray(std::move(out_buf), t_dim, num_layers, top_k);
+    }
+    return Wrap4DArray(std::move(out_buf), t_dim, num_layers, top_k / 4, 5);
+  }
+  const size_t b_dim = arr.shape(0);
+  const size_t t_dim = arr.shape(1);
+  return WrapBatchedRoutedBuffer(std::move(out_buf), target_enc, b_dim, t_dim,
+                                 num_layers, top_k);
+}
+
+// Fast C++ `nogil` decoder for `routed_experts` (`uint8` / `uint10` / `int16`
+// -> `int16` 3D `(T, L, K)` when `batched=false` or 4D `(B, T, L, K)` when
+// `batched=true`).
+//
+// Contract: `batched` explicitly selects between unbatched per-trajectory
+// layouts (`3D` `uint8`/`int16` `(T, L, K)` or `4D` `uint10` `(T, L, K//4, 5)`)
+// and batched microbatch layouts (`4D` `uint8`/`int16` `(B, T, L, K)` or `5D`
+// `uint10` `(B, T, L, K//4, 5)`), so batched `uint8` with `K == 5` never
+// collides with unbatched `uint10`.
+nb::object DecodeRoutedExpertsFast(nb::object encoded_obj, bool batched) {
+  if (encoded_obj.is_none()) {
+    return nb::none();
+  }
+  const size_t expected_raw_ndim = batched ? 4 : 3;
+  const auto check_raw_ndim = [batched, expected_raw_ndim](size_t actual_ndim) {
+    if (actual_ndim != expected_raw_ndim) {
+      throw std::invalid_argument(
+          "decode_routed_experts with batched=" +
+          std::string(batched ? "True" : "False") + " expects a " +
+          std::to_string(expected_raw_ndim) +
+          "D int16 array, got ndim=" + std::to_string(actual_ndim) + ".");
+    }
+  };
+  nb::ndarray<nb::numpy, const int16_t, nb::c_contig> i16_arr;
+  if (nb::try_cast(encoded_obj, i16_arr, /*convert=*/false)) {
+    check_raw_ndim(i16_arr.ndim());
+    return encoded_obj;
+  }
+
+  nb::ndarray<nb::numpy, const uint8_t, nb::c_contig> u8_arr;
+  nb::object keepalive;
+  if (!nb::try_cast(encoded_obj, u8_arr, /*convert=*/false)) {
+    static nb::object* const kNpAsContig =
+        new nb::object(nb::module_::import_("numpy").attr("ascontiguousarray"));
+    keepalive = (*kNpAsContig)(encoded_obj);
+    if (nb::try_cast(keepalive, i16_arr, /*convert=*/false)) {
+      check_raw_ndim(i16_arr.ndim());
+      return keepalive;
+    }
+    if (!nb::try_cast(keepalive, u8_arr, /*convert=*/false)) {
+      nb::object i16_coerced =
+          CoerceToContiguousNumpy(encoded_obj.ptr(), "int16");
+      i16_arr = nb::cast<nb::ndarray<nb::numpy, const int16_t, nb::c_contig>>(
+          i16_coerced);
+      check_raw_ndim(i16_arr.ndim());
+      return i16_coerced;
+    }
+  }
+
+  const RoutedEncoding src_enc = ClassifyUint8RoutedEncoding(u8_arr, batched);
+  const uint8_t* src = u8_arr.data();
+  if (batched) {
+    if (src_enc == RoutedEncoding::kUint10) {
+      // Batched uint10: (B, T, L, K//4, 5)
+      const size_t b_dim = u8_arr.shape(0);
+      const size_t t_dim = u8_arr.shape(1);
+      const size_t l_dim = u8_arr.shape(2);
+      const size_t g_dim = u8_arr.shape(3);
+      const size_t k_dim = g_dim * 4;
+      const size_t num_groups = b_dim * t_dim * l_dim * g_dim;
+      RawBufferPtr<int16_t> out;
+      {
+        nb::gil_scoped_release release;
+        out = AllocRawBuffer<int16_t>(num_groups * 4);
+        int16_t* dst = out.get();
+        for (size_t g = 0; g < num_groups; ++g) {
+          uint16_t v[4];
+          UnpackUint10ToFour(src + g * 5, v);
+          dst[g * 4 + 0] = static_cast<int16_t>(v[0]) - 1;
+          dst[g * 4 + 1] = static_cast<int16_t>(v[1]) - 1;
+          dst[g * 4 + 2] = static_cast<int16_t>(v[2]) - 1;
+          dst[g * 4 + 3] = static_cast<int16_t>(v[3]) - 1;
+        }
+      }
+      return Wrap4DArray(std::move(out), b_dim, t_dim, l_dim, k_dim);
+    }
+    // Batched uint8: (B, T, L, K) (including when K == 5)
+    const size_t b_dim = u8_arr.shape(0);
+    const size_t t_dim = u8_arr.shape(1);
+    const size_t l_dim = u8_arr.shape(2);
+    const size_t k_dim = u8_arr.shape(3);
+    const size_t total = b_dim * t_dim * l_dim * k_dim;
+    RawBufferPtr<int16_t> out;
+    {
+      nb::gil_scoped_release release;
+      out = AllocRawBuffer<int16_t>(total);
+      int16_t* dst = out.get();
+      for (size_t i = 0; i < total; ++i) {
+        dst[i] = static_cast<int16_t>(src[i]) - 1;
+      }
+    }
+    return Wrap4DArray(std::move(out), b_dim, t_dim, l_dim, k_dim);
+  }
+
+  if (src_enc == RoutedEncoding::kUint10) {
+    // Unbatched uint10: (T, L, K//4, 5)
+    const size_t t_dim = u8_arr.shape(0);
+    const size_t l_dim = u8_arr.shape(1);
+    const size_t g_dim = u8_arr.shape(2);
+    const size_t k_dim = g_dim * 4;
+    const size_t num_groups = t_dim * l_dim * g_dim;
+    RawBufferPtr<int16_t> out;
+    {
+      nb::gil_scoped_release release;
+      out = AllocRawBuffer<int16_t>(num_groups * 4);
+      int16_t* dst = out.get();
+      for (size_t g = 0; g < num_groups; ++g) {
+        uint16_t v[4];
+        UnpackUint10ToFour(src + g * 5, v);
+        dst[g * 4 + 0] = static_cast<int16_t>(v[0]) - 1;
+        dst[g * 4 + 1] = static_cast<int16_t>(v[1]) - 1;
+        dst[g * 4 + 2] = static_cast<int16_t>(v[2]) - 1;
+        dst[g * 4 + 3] = static_cast<int16_t>(v[3]) - 1;
+      }
+    }
+    return Wrap3DArray(std::move(out), t_dim, l_dim, k_dim);
+  }
+  // Unbatched uint8: (T, L, K) (including when K == 5)
+  const size_t t_dim = u8_arr.shape(0);
+  const size_t l_dim = u8_arr.shape(1);
+  const size_t k_dim = u8_arr.shape(2);
+  const size_t total = t_dim * l_dim * k_dim;
+  RawBufferPtr<int16_t> out;
+  {
+    nb::gil_scoped_release release;
+    out = AllocRawBuffer<int16_t>(total);
+    int16_t* dst = out.get();
+    for (size_t i = 0; i < total; ++i) {
+      dst[i] = static_cast<int16_t>(src[i]) - 1;
+    }
+  }
+  return Wrap3DArray(std::move(out), t_dim, l_dim, k_dim);
+}
+
 }  // namespace
 
 NB_MODULE(_packing_ext, m) {
@@ -1520,6 +2321,11 @@ NB_MODULE(_packing_ext, m) {
         nb::arg("buffer_out"));
   m.def("count_router_replay_forced_tokens", &CountRouterReplayForcedTokens,
         nb::arg("routed_experts"), nb::arg("segment_ids"));
+  m.def("encode_routed_experts_fast", &EncodeRoutedExpertsFast,
+        nb::arg("routed").none(), nb::arg("mode") = "auto",
+        nb::arg("num_experts") = nb::none(), nb::arg("batched") = false);
+  m.def("decode_routed_experts_fast", &DecodeRoutedExpertsFast,
+        nb::arg("encoded").none(), nb::arg("batched") = false);
 }
 
 }  // namespace tunix::rl

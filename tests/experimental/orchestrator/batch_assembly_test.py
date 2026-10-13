@@ -2886,6 +2886,241 @@ class SequencePackedRoutingTest(absltest.TestCase):
       packing._packing_ext = orig_ext
     self._assert_batches_identical(cpp_padded, py_padded)
 
+  def test_compact_uint8_and_uint10_routed_experts_in_assemblers(self):
+    rng = np.random.default_rng(99)
+    # Build two trajectories: one with uint8-encoded experts, one with uint10.
+    raw1 = rng.integers(0, 128, size=(5, 2, 8), dtype=np.int16)
+    raw2 = rng.integers(0, 512, size=(5, 2, 8), dtype=np.int16)
+    raw2[0, 0, 0] = 300  # Forces uint10 encoding.
+
+    p1_u8 = dataclasses.replace(
+        _make_payload(2, 4, advantage=1.0),
+        routed_experts=packing.encode_routed_experts(raw1),
+    )
+    p2_u8 = dataclasses.replace(
+        _make_payload(2, 4, advantage=-1.0),
+        routed_experts=packing.encode_routed_experts(raw1),
+    )
+    p2_u10 = dataclasses.replace(
+        _make_payload(2, 4, advantage=-1.0),
+        routed_experts=packing.encode_routed_experts(raw2),
+    )
+    self.assertEqual(p1_u8.routed_experts.dtype, np.uint8)
+    self.assertEqual(p1_u8.routed_experts.ndim, 3)
+    self.assertEqual(p2_u10.routed_experts.dtype, np.uint8)
+    self.assertEqual(p2_u10.routed_experts.ndim, 4)
+
+    # 1. Pure uint8 trajectories stay 4D uint8 [B, T, L, K] after assembly.
+    seq_u8 = batch_assembly.SequencePackedBatchAssembler(
+        batch_size=1, num_generations=2, mini_batch_size=1, max_packed_len=16
+    )
+    [b_u8] = list(seq_u8.feed([p1_u8, p2_u8]))
+    self.assertEqual(b_u8.payload.routed_experts.dtype, np.uint8)
+    self.assertEqual(b_u8.payload.routed_experts.shape, (1, 16, 2, 8))
+    dec_seq_u8 = packing.decode_routed_experts(
+        b_u8.payload.routed_experts, batched=True
+    )
+    np.testing.assert_array_equal(dec_seq_u8[0, :5], raw1)
+    np.testing.assert_array_equal(dec_seq_u8[0, 5], _UNSET)
+    np.testing.assert_array_equal(dec_seq_u8[0, 6:11], raw1)
+    np.testing.assert_array_equal(dec_seq_u8[0, 11:], _UNSET)
+
+    # 2. Mixed uint8 + uint10 trajectories widen to 5D uint10
+    # [B, T, L, K//4, 5].
+    seq_mix = batch_assembly.SequencePackedBatchAssembler(
+        batch_size=1, num_generations=2, mini_batch_size=1, max_packed_len=16
+    )
+    [b_mix] = list(seq_mix.feed([p1_u8, p2_u10]))
+    self.assertEqual(b_mix.payload.routed_experts.dtype, np.uint8)
+    self.assertEqual(b_mix.payload.routed_experts.shape, (1, 16, 2, 2, 5))
+    dec_seq_mix = packing.decode_routed_experts(
+        b_mix.payload.routed_experts, batched=True
+    )
+    np.testing.assert_array_equal(dec_seq_mix[0, :5], raw1)
+    np.testing.assert_array_equal(dec_seq_mix[0, 5], _UNSET)
+    np.testing.assert_array_equal(dec_seq_mix[0, 6:11], raw2)
+    np.testing.assert_array_equal(dec_seq_mix[0, 11:], _UNSET)
+
+    # 3. PaddedBatchAssembler preserves uint8 and widens mixed uint8+uint10.
+    pad_u8 = batch_assembly.PaddedBatchAssembler(
+        batch_size=2,
+        max_prompt_length=4,
+        max_response_length=6,
+        pad_id=0,
+        num_generations=2,
+        mini_batch_size=1,
+    )
+    [pb_u8] = list(pad_u8.feed([p1_u8, p2_u8]))
+    self.assertEqual(pb_u8.payload.routed_experts.dtype, np.uint8)
+    self.assertEqual(pb_u8.payload.routed_experts.shape, (2, 10, 2, 8))
+
+    pad_mix = batch_assembly.PaddedBatchAssembler(
+        batch_size=2,
+        max_prompt_length=4,
+        max_response_length=6,
+        pad_id=0,
+        num_generations=2,
+        mini_batch_size=1,
+    )
+    [pb_mix] = list(pad_mix.feed([p1_u8, p2_u10]))
+    self.assertEqual(pb_mix.payload.routed_experts.dtype, np.uint8)
+    self.assertEqual(pb_mix.payload.routed_experts.shape, (2, 10, 2, 2, 5))
+    dec_pad_mix = packing.decode_routed_experts(
+        pb_mix.payload.routed_experts, batched=True
+    )
+    # Prompt left-padded by 2 (4 - 2 = 2), so tokens [2:7] hold the 5 routed
+    # positions.
+    np.testing.assert_array_equal(dec_pad_mix[0, :2], _UNSET)
+    np.testing.assert_array_equal(dec_pad_mix[0, 2:7], raw1)
+    np.testing.assert_array_equal(dec_pad_mix[0, 7:], _UNSET)
+    np.testing.assert_array_equal(dec_pad_mix[1, 2:7], raw2)
+
+    # 4. Verify exact C++ vs Python fallback parity across pure uint8, mixed
+    # uint8+uint10, and mixed uint8+int16 in both assemblers.
+    p2_i16 = dataclasses.replace(
+        _make_payload(2, 4, advantage=-1.0),
+        routed_experts=raw2,
+    )
+    pad_mix_i16_cpp = batch_assembly.PaddedBatchAssembler(
+        batch_size=2,
+        max_prompt_length=4,
+        max_response_length=6,
+        pad_id=0,
+        num_generations=2,
+        mini_batch_size=1,
+    )
+    [pb_mix_i16_cpp] = list(pad_mix_i16_cpp.feed([p1_u8, p2_i16]))
+
+    orig_ext = packing._packing_ext
+    try:
+      packing._packing_ext = None
+      seq_mix_py = batch_assembly.SequencePackedBatchAssembler(
+          batch_size=1, num_generations=2, mini_batch_size=1, max_packed_len=16
+      )
+      [b_mix_py] = list(seq_mix_py.feed([p1_u8, p2_u10]))
+      pad_u8_py = batch_assembly.PaddedBatchAssembler(
+          batch_size=2,
+          max_prompt_length=4,
+          max_response_length=6,
+          pad_id=0,
+          num_generations=2,
+          mini_batch_size=1,
+      )
+      [pb_u8_py] = list(pad_u8_py.feed([p1_u8, p2_u8]))
+      pad_mix_py = batch_assembly.PaddedBatchAssembler(
+          batch_size=2,
+          max_prompt_length=4,
+          max_response_length=6,
+          pad_id=0,
+          num_generations=2,
+          mini_batch_size=1,
+      )
+      [pb_mix_py] = list(pad_mix_py.feed([p1_u8, p2_u10]))
+      pad_mix_i16_py = batch_assembly.PaddedBatchAssembler(
+          batch_size=2,
+          max_prompt_length=4,
+          max_response_length=6,
+          pad_id=0,
+          num_generations=2,
+          mini_batch_size=1,
+      )
+      [pb_mix_i16_py] = list(pad_mix_i16_py.feed([p1_u8, p2_i16]))
+    finally:
+      packing._packing_ext = orig_ext
+
+    self._assert_batches_identical([b_mix], [b_mix_py])
+    self._assert_batches_identical([pb_u8], [pb_u8_py])
+    self._assert_batches_identical([pb_mix], [pb_mix_py])
+    self._assert_batches_identical([pb_mix_i16_cpp], [pb_mix_i16_py])
+
+  def test_k5_uint8_routed_experts_round_trip_and_coverage_logging(self):
+    # Regression test for K=5 (E <= 255) where batched uint8 has shape
+    # (B, T, L, 5) and must never be misclassified as 4D unbatched uint10.
+    raw_k5_a = np.array(
+        [
+            [[0, 1, 2, 3, 4], [10, 11, 12, 13, 14]],
+            [[5, 6, 7, 8, 9], [15, 16, 17, 18, 19]],
+            [[20, 21, 22, 23, 24], [25, 26, 27, 28, 29]],
+            [[30, 31, 32, 33, 34], [35, 36, 37, 38, 39]],
+            [[40, 41, 42, 43, 44], [45, 46, 47, 48, 49]],
+        ],
+        dtype=np.int16,
+    )
+    raw_k5_b = (raw_k5_a + 50).astype(np.int16)
+    p1_k5 = dataclasses.replace(
+        _make_payload(2, 4, advantage=1.0),
+        routed_experts=packing.encode_routed_experts(raw_k5_a),
+    )
+    p2_k5 = dataclasses.replace(
+        _make_payload(2, 4, advantage=-1.0),
+        routed_experts=packing.encode_routed_experts(raw_k5_b),
+    )
+    self.assertEqual(p1_k5.routed_experts.dtype, np.uint8)
+    self.assertEqual(p1_k5.routed_experts.shape, (5, 2, 5))
+
+    seq_k5 = batch_assembly.SequencePackedBatchAssembler(
+        batch_size=1, num_generations=2, mini_batch_size=1, max_packed_len=16
+    )
+    [b_k5] = list(seq_k5.feed([p1_k5, p2_k5]))
+    self.assertEqual(b_k5.payload.routed_experts.dtype, np.uint8)
+    self.assertEqual(b_k5.payload.routed_experts.shape, (1, 16, 2, 5))
+    dec_seq_k5 = packing.decode_routed_experts(
+        b_k5.payload.routed_experts, batched=True
+    )
+    np.testing.assert_array_equal(dec_seq_k5[0, :5], raw_k5_a)
+    np.testing.assert_array_equal(dec_seq_k5[0, 5], _UNSET)
+    np.testing.assert_array_equal(dec_seq_k5[0, 6:11], raw_k5_b)
+    np.testing.assert_array_equal(dec_seq_k5[0, 11:], _UNSET)
+
+    pad_k5 = batch_assembly.PaddedBatchAssembler(
+        batch_size=2,
+        max_prompt_length=4,
+        max_response_length=6,
+        pad_id=0,
+        num_generations=2,
+        mini_batch_size=1,
+    )
+    [pb_k5] = list(pad_k5.feed([p1_k5, p2_k5]))
+    self.assertEqual(pb_k5.payload.routed_experts.dtype, np.uint8)
+    self.assertEqual(pb_k5.payload.routed_experts.shape, (2, 10, 2, 5))
+    dec_pad_k5 = packing.decode_routed_experts(
+        pb_k5.payload.routed_experts, batched=True
+    )
+    np.testing.assert_array_equal(dec_pad_k5[0, :2], _UNSET)
+    np.testing.assert_array_equal(dec_pad_k5[0, 2:7], raw_k5_a)
+    np.testing.assert_array_equal(dec_pad_k5[0, 7:], _UNSET)
+    np.testing.assert_array_equal(dec_pad_k5[1, 2:7], raw_k5_b)
+
+    orig_ext = packing._packing_ext
+    try:
+      packing._packing_ext = None
+      with self.assertLogs(level="INFO") as logs:
+        batch_assembly._log_router_replay_coverage(
+            b_k5.payload, batch_id="k5_py_fallback", num_segments=2
+        )
+      self.assertTrue(
+          any("10/12 real tokens forced" in msg for msg in logs.output),
+          f"Unexpected coverage log: {logs.output}",
+      )
+      seq_k5_py = batch_assembly.SequencePackedBatchAssembler(
+          batch_size=1, num_generations=2, mini_batch_size=1, max_packed_len=16
+      )
+      [b_k5_py] = list(seq_k5_py.feed([p1_k5, p2_k5]))
+      pad_k5_py = batch_assembly.PaddedBatchAssembler(
+          batch_size=2,
+          max_prompt_length=4,
+          max_response_length=6,
+          pad_id=0,
+          num_generations=2,
+          mini_batch_size=1,
+      )
+      [pb_k5_py] = list(pad_k5_py.feed([p1_k5, p2_k5]))
+    finally:
+      packing._packing_ext = orig_ext
+
+    self._assert_batches_identical([b_k5], [b_k5_py])
+    self._assert_batches_identical([pb_k5], [pb_k5_py])
+
 
 if __name__ == "__main__":
   absltest.main()
